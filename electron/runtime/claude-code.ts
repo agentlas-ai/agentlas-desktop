@@ -2,7 +2,6 @@
 // 사용자의 Claude Pro/Max 구독으로 돌아간다 (PRD §3.1 6-A).
 //
 // 호출 형식: claude -p "<user prompt>" --append-system-prompt-file <system>
-// Agent App 첫 턴은 --system-prompt-file로 Claude의 호스트 동적 프롬프트를 완전 대체한다.
 // 첫 턴은 full-context로 시작하고, 이후 턴은 Claude Code session_id로 resume한다.
 import path from "node:path";
 import os from "node:os";
@@ -20,8 +19,46 @@ import {
   getRuntimeSession,
   saveRuntimeSession,
 } from "../store/runtime-sessions";
+import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
+import { isAuthenticSystemTimeMcpLaunch } from "../mcp-tools/system-time-server";
 
 const KIND = "claude-code";
+const AGENT_APP_MCP_SECRET_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;
+
+function isCanonicalAgentAppInlineMcpConfig(value: string | undefined): boolean {
+  if (!value || !value.startsWith('{"mcpServers":') || /[\r\n\0]/.test(value) ||
+      Buffer.byteLength(value, "utf8") > 4_096) return false;
+  try {
+    const parsed = JSON.parse(value) as { mcpServers?: Record<string, unknown> };
+    if (JSON.stringify(parsed) !== value || !parsed || typeof parsed !== "object" || Array.isArray(parsed) ||
+        JSON.stringify(Object.keys(parsed)) !== JSON.stringify(["mcpServers"]) ||
+        !parsed.mcpServers || typeof parsed.mcpServers !== "object" || Array.isArray(parsed.mcpServers) ||
+        JSON.stringify(Object.keys(parsed.mcpServers)) !== JSON.stringify(["agentlas-time"])) return false;
+    const entry = parsed.mcpServers["agentlas-time"] as {
+      command?: unknown;
+      args?: unknown;
+      env?: unknown;
+    };
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) ||
+        JSON.stringify(Object.keys(entry).sort()) !== JSON.stringify(["args", "command", "env"]) ||
+        typeof entry.command !== "string" || !Array.isArray(entry.args) ||
+        entry.args.some((arg) => typeof arg !== "string") ||
+        !entry.env || typeof entry.env !== "object" || Array.isArray(entry.env)) return false;
+    const env = entry.env as Record<string, unknown>;
+    return isAuthenticSystemTimeMcpLaunch(entry.command, entry.args as string[]) &&
+      JSON.stringify(Object.keys(env)) === JSON.stringify(["ELECTRON_RUN_AS_NODE"]) &&
+      env.ELECTRON_RUN_AS_NODE === "1";
+  } catch {
+    return false;
+  }
+}
+
+function stripAgentAppMcpSecretAliases(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv | undefined {
+  if (!env) return env;
+  return Object.fromEntries(
+    Object.entries(env).filter(([key]) => !AGENT_APP_MCP_SECRET_ALIAS_RE.test(key)),
+  );
+}
 
 // 구형 claude CLI가 --include-partial-messages를 거부하면 false로 전환해(프로세스 수명 동안
 // 1회 학습) 이후 실행은 플래그 없이 — 메시지 덩어리 스트리밍으로 — 동작한다.
@@ -179,10 +216,15 @@ function systemFingerprint(req: RunnerRequest): string {
     .digest("hex");
 }
 
-const runClaudeCodeInternal: Runner = async (
+export const runClaudeCode: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  if (req.restrictedReadBoundary) {
+    throw new Error(
+      "Claude Code is not enabled for restricted read-only execution because its host filesystem boundary is not release-verified.",
+    );
+  }
   const bin = await getBin();
   if (!bin) {
     throw new Error(tStatus(req.locale, "errCliMissingClaude"));
@@ -191,14 +233,33 @@ const runClaudeCodeInternal: Runner = async (
   const stagedImages = await stageCliImageAttachments(req);
   const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
 
+  // Establish the exact one-run MCP authority before writing the system
+  // prompt. A malformed config must not leave the model believing a tool is
+  // available after the argv gate has already removed it.
+  const hasExactUntrustedMcpGrant = Boolean(
+    runReq.untrustedNoTools &&
+    isCanonicalAgentAppInlineMcpConfig(runReq.mcpConfigPath) &&
+    runReq.mcpAllowedTools?.length &&
+    runReq.untrustedAllowedMcpTools?.length &&
+    validSiteAgentAppMcpGrantTools(runReq.mcpAllowedTools) &&
+    validSiteAgentAppMcpGrantTools(runReq.untrustedAllowedMcpTools) &&
+    JSON.stringify(runReq.mcpAllowedTools) === JSON.stringify(runReq.untrustedAllowedMcpTools),
+  );
+  if (runReq.untrustedNoTools && runReq.mcpConfigPath && !hasExactUntrustedMcpGrant) {
+    try { runReq.onAgentAppMcpRuntimeUnavailable?.(); } catch { /* receipt reconciliation is best effort */ }
+  }
+
   const systemPrompt = wrapSystemPrompt(
     runReq.systemPrompt,
     runReq.locale,
     runReq.permission,
     runReq.userPrompt,
     runReq.forceSurface,
+    runReq.restrictedReadBoundary,
     runReq.untrustedNoTools,
-    runReq.untrustedAllowedMcpTools,
+    runReq.untrustedNoTools
+      ? (hasExactUntrustedMcpGrant ? runReq.untrustedAllowedMcpTools : undefined)
+      : runReq.untrustedAllowedMcpTools,
   );
   const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq) : null;
   const savedSession = !runReq.untrustedNoTools && runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
@@ -230,8 +291,9 @@ const runClaudeCodeInternal: Runner = async (
   }
 
   // 권한 칩 → claude 권한 모드. read=기본(헤드리스에서 위험 툴 자동 거부), write=편집 허용, full=전체.
-  const permArgs =
-    req.permission === "full"
+  const permArgs = runReq.untrustedNoTools
+    ? []
+    : req.permission === "full"
       ? ["--permission-mode", "bypassPermissions"]
       : req.permission === "write"
         ? ["--permission-mode", "acceptEdits"]
@@ -244,34 +306,25 @@ const runClaudeCodeInternal: Runner = async (
 
   // MCP 서버 구성 주입 — mcp/client.ts가 설치·활성 서버를 .mcp.json으로 직렬화해 경로를 넘긴다.
   // 이게 있어야 에이전트가 브라우저(Playwright) 등 실제 MCP 툴을 호출한다. (사용자 config와 병합)
-  const untrustedMcpTools = runReq.untrustedNoTools
-    ? (req.untrustedAllowedMcpTools ?? []).filter((tool) =>
-        /^mcp__[a-z0-9_-]+__(?:brave_web_search|brave_local_search)$/.test(tool))
-    : [];
-  const hasExactUntrustedMcpGrant = Boolean(
-    runReq.untrustedNoTools &&
-    req.mcpConfigPath &&
-    untrustedMcpTools.length > 0 &&
-    req.mcpAllowedTools?.length === untrustedMcpTools.length &&
-    req.mcpAllowedTools.every((tool) => untrustedMcpTools.includes(tool)),
-  );
-  const mcpArgs = req.mcpConfigPath && (!runReq.untrustedNoTools || hasExactUntrustedMcpGrant)
-    ? ["--mcp-config", req.mcpConfigPath]
+  const mcpArgs = runReq.mcpConfigPath && (!runReq.untrustedNoTools || hasExactUntrustedMcpGrant)
+    ? ["--mcp-config", runReq.mcpConfigPath]
     : [];
   // write/full 권한이면 헤드리스에서 권한 프롬프트로 막히지 않도록 MCP 툴을 미리 허용.
   const allowedToolArgs =
-    req.mcpConfigPath &&
-    ((hasExactUntrustedMcpGrant) || (
-      !runReq.untrustedNoTools &&
-      req.mcpAllowedTools &&
-      req.mcpAllowedTools.length > 0 &&
-      (req.permission === "write" || req.permission === "full")
-    ))
-      ? ["--allowedTools", (hasExactUntrustedMcpGrant ? untrustedMcpTools : req.mcpAllowedTools!).join(",")]
+    runReq.mcpConfigPath &&
+    runReq.mcpAllowedTools &&
+    runReq.mcpAllowedTools.length > 0 &&
+    ((!runReq.untrustedNoTools && (req.permission === "write" || req.permission === "full")) ||
+      hasExactUntrustedMcpGrant)
+      ? ["--allowedTools", runReq.mcpAllowedTools.join(",")]
       : [];
   const noToolsArgs = runReq.untrustedNoTools
     ? [
-        "--safe-mode",
+        // Claude's safe-mode disables even an explicit --mcp-config. Keep it
+        // for the absolute no-tool path, but omit it for the exact System Time
+        // grant; --tools "" still removes every built-in and --allowedTools
+        // admits only the two audited read-only MCP tools.
+        ...(hasExactUntrustedMcpGrant ? ["--setting-sources", ""] : ["--safe-mode"]),
         "--disable-slash-commands",
         "--no-chrome",
         "--no-session-persistence",
@@ -280,13 +333,6 @@ const runClaudeCodeInternal: Runner = async (
         "",
       ]
     : [];
-  // Claude's default first-turn prompt contains dynamic machine context such
-  // as cwd, environment metadata, memory locations, and git state. Appending
-  // cannot remove it, so browser-originated runs replace it outright. Trusted
-  // Desktop runs retain the existing append behavior.
-  const systemPromptFileFlag = runReq.untrustedNoTools
-    ? "--system-prompt-file"
-    : "--append-system-prompt-file";
 
   // 시스템 프롬프트(Agentlas 헤더+스킬+프로토콜만 ~24KB)는 argv가 아니라 파일로 전달한다.
   // Windows에서 claude는 `.cmd` 심 → cmd.exe로 실행되고 커맨드라인은 ~8191자 한계라,
@@ -294,7 +340,7 @@ const runClaudeCodeInternal: Runner = async (
   // 경로만 넘기므로 안전. 사용자 프롬프트(+히스토리)는 stdin으로 보낸다(`-p`는 stdin을 읽음).
   const sysPromptFile = path.join(
     os.tmpdir(),
-    `agentlas-claude-sys-${process.pid}-${Date.now()}.txt`,
+    `agentlas-claude-sys-${process.pid}-${crypto.randomUUID()}.txt`,
   );
   await fs.writeFile(sysPromptFile, systemPrompt, "utf8");
   const cleanupSysFile = () => {
@@ -302,11 +348,23 @@ const runClaudeCodeInternal: Runner = async (
   };
 
   return new Promise<RunnerResult>((resolve, reject) => {
+    const rejectRuntime = (error: unknown) => {
+      reject(
+        runReq.untrustedNoTools
+          ? createUntrustedRuntimeFailure()
+          : error instanceof Error
+            ? error
+            : new Error(String(error)),
+      );
+    };
     // stream-json + verbose: tool_use / 텍스트 / 토큰(usage) 이벤트를 NDJSON으로 받아
     // Claude Code식 tool-use 블록 + 토큰 표시를 가능하게 한다.
     // --include-partial-messages: 텍스트를 메시지 블록 덩어리가 아니라 토큰 델타로 받아
     // 타자기 스트리밍을 가능하게 한다(미지원 구형 CLI는 close 핸들러에서 자동 폴백).
     const partialFlagArgs = includePartialMessagesSupported ? ["--include-partial-messages"] : [];
+    const systemPromptFileFlag = runReq.untrustedNoTools
+      ? "--system-prompt-file"
+      : "--append-system-prompt-file";
     const args = resumeSessionId
       ? [
           "--resume",
@@ -339,15 +397,22 @@ const runClaudeCodeInternal: Runner = async (
           ...mcpArgs,
           ...allowedToolArgs,
         ];
-    const child = spawnCli(bin, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: req.env ?? process.env,
-      // 사용자가 워킹 폴더(프로젝트)를 지정했으면 거기서 실행 — 빌드/파일 생성이 프로젝트에 일어난다.
-      // 미지정이면 쓰기 가능한 전용 폴더(packaged 앱은 cwd가 비쓰기/루트라 claude가 exit 1).
-      cwd: req.cwd ?? agentRunCwd(),
-      // POSIX 그룹킬 대상 — 취소/앱종료 시 CLI가 띄운 MCP 서버·빌드 손자까지 정리.
-      ...detachedSpawnOpts(),
-    });
+    let child: ReturnType<typeof spawnCli>;
+    try {
+      child = spawnCli(bin, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: req.env ?? process.env,
+        // 사용자가 워킹 폴더(프로젝트)를 지정했으면 거기서 실행 — 빌드/파일 생성이 프로젝트에 일어난다.
+        // 미지정이면 쓰기 가능한 전용 폴더(packaged 앱은 cwd가 비쓰기/루트라 claude가 exit 1).
+        cwd: req.cwd ?? agentRunCwd(),
+        // POSIX 그룹킬 대상 — 취소/앱종료 시 CLI가 띄운 MCP 서버·빌드 손자까지 정리.
+        ...detachedSpawnOpts(),
+      });
+    } catch (error) {
+      cleanupSysFile();
+      rejectRuntime(error);
+      return;
+    }
     trackRunChild(child);
     writeStdin(child, flatUser);
 
@@ -422,6 +487,14 @@ const runClaudeCodeInternal: Runner = async (
     };
 
     const toolNameById = new Map<string, string>();
+    let agentAppMcpInitFailed = false;
+    let agentAppMcpInitConnected = false;
+    let agentAppMcpUnavailableNotified = false;
+    const markAgentAppMcpUnavailable = () => {
+      if (agentAppMcpUnavailableNotified) return;
+      agentAppMcpUnavailableNotified = true;
+      try { runReq.onAgentAppMcpRuntimeUnavailable?.(); } catch { /* receipt reconciliation is best effort */ }
+    };
 
     const truncateUi = (s: string, max = 12000): string =>
       s.length > max ? `${s.slice(0, max)}…` : s;
@@ -450,7 +523,10 @@ const runClaudeCodeInternal: Runner = async (
 
     function handleEvent(ev: {
       type?: string;
+      subtype?: string;
       session_id?: string;
+      mcp_servers?: Array<{ name?: string; status?: string }>;
+      tools?: string[];
       message?: {
         content?: Array<{
           type?: string;
@@ -473,8 +549,48 @@ const runClaudeCodeInternal: Runner = async (
         usage?: { output_tokens?: number };
       };
     }): void {
+      if (agentAppMcpInitFailed) return;
+      const isAgentAppMcpInit = ev.type === "system" && ev.subtype === "init";
+      if (
+        hasExactUntrustedMcpGrant &&
+        !runReq.agentAppMcpFallbackAttempted &&
+        !agentAppMcpInitConnected &&
+        !isAgentAppMcpInit
+      ) {
+        // No model/tool/result event is trusted before Claude proves the exact
+        // MCP inventory in system/init. Otherwise an init-less success could
+        // leak a first answer before the no-tool replay starts.
+        agentAppMcpInitFailed = true;
+        markAgentAppMcpUnavailable();
+        killCliTree(child, 250);
+        return;
+      }
       if (typeof ev.session_id === "string" && ev.session_id) {
         sessionId = ev.session_id;
+      }
+      if (isAgentAppMcpInit && hasExactUntrustedMcpGrant &&
+          !runReq.agentAppMcpFallbackAttempted) {
+        const expectedTools = [...(runReq.mcpAllowedTools ?? [])].sort();
+        const reportedTools = Array.isArray(ev.tools) && ev.tools.every((tool) => typeof tool === "string")
+          ? [...ev.tools].sort()
+          : [];
+        agentAppMcpInitConnected = Boolean(
+          Array.isArray(ev.mcp_servers) &&
+          ev.mcp_servers.length === 1 &&
+          ev.mcp_servers[0]?.name === "agentlas-time" &&
+          ev.mcp_servers[0]?.status === "connected" &&
+          new Set(reportedTools).size === reportedTools.length &&
+          JSON.stringify(reportedTools) === JSON.stringify(expectedTools)
+        );
+        if (!agentAppMcpInitConnected) {
+          // Claude can omit, duplicate, or report a failed MCP bootstrap in
+          // system/init and still exit 0. Stop before it answers under stale
+          // tool authority, then replay once with the no-tool boundary.
+          agentAppMcpInitFailed = true;
+          markAgentAppMcpUnavailable();
+          killCliTree(child, 250);
+          return;
+        }
       }
       // --include-partial-messages: 토큰 델타를 즉시 이어붙여 글자 단위 스트리밍을 만든다.
       // 본문은 text_delta만. thinking 블록은 본문에 싣지 않되 시작/종료 신호와 문자 수(토큰
@@ -595,7 +711,7 @@ const runClaudeCodeInternal: Runner = async (
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       cleanupSysFile();
-      reject(err);
+      rejectRuntime(err);
     });
     child.on("close", (code) => {
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
@@ -609,7 +725,23 @@ const runClaudeCodeInternal: Runner = async (
         if (req.chatId && fingerprint && sessionId) {
           saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint);
         }
-        reject(new Error(tStatus(req.locale, "aborted")));
+        rejectRuntime(new Error(tStatus(req.locale, "aborted")));
+        return;
+      }
+      if (
+        hasExactUntrustedMcpGrant &&
+        !runReq.agentAppMcpFallbackAttempted &&
+        !agentAppMcpInitConnected
+      ) {
+        markAgentAppMcpUnavailable();
+        void runClaudeCode({
+          ...runReq,
+          mcpConfigPath: undefined,
+          mcpAllowedTools: undefined,
+          untrustedAllowedMcpTools: undefined,
+          env: stripAgentAppMcpSecretAliases(runReq.env),
+          agentAppMcpFallbackAttempted: true,
+        }, events).then(resolve, reject);
         return;
       }
       if (code === 0) {
@@ -625,11 +757,18 @@ const runClaudeCodeInternal: Runner = async (
         }
         resolve({ text: display.trim(), sessionId, tokens });
       } else {
+        if (runReq.untrustedNoTools) {
+          // Pre-init failures already replay once through the exact init gate.
+          // After a connected receipt, never issue a second model request: it
+          // could duplicate output/cost after a later provider/runtime error.
+          rejectRuntime(new Error("Agent App runtime process exited unsuccessfully."));
+          return;
+        }
         // 구형 CLI가 --include-partial-messages를 모르면 그 플래그만 빼고 즉시 재시도 —
         // 델타 스트리밍만 포기하고 채팅 자체는 살린다(전역 1회 학습).
         if (includePartialMessagesSupported && /include-partial-messages/i.test(stderr)) {
           includePartialMessagesSupported = false;
-          void runClaudeCodeInternal(req, events).then(resolve, reject);
+          void runClaudeCode(req, events).then(resolve, reject);
           return;
         }
         // Build continuation recovery is Main-owned and can change the exact
@@ -647,22 +786,11 @@ const runClaudeCodeInternal: Runner = async (
         if (resumeSessionId) {
           // 저장된 CLI 세션이 만료/손상되면 같은 턴을 full-context로 즉시 복구한다.
           // Build는 req.history를 갖고 있고, Chat은 DB history를 갖고 있으므로 문맥은 유지된다.
-          void runClaudeCodeInternal({ ...req, runtimeSessionId: undefined }, events).then(resolve, reject);
+          void runClaudeCode({ ...req, runtimeSessionId: undefined }, events).then(resolve, reject);
           return;
         }
         reject(new Error(`claude CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));
       }
     });
   });
-};
-
-export const runClaudeCode: Runner = async (req, events) => {
-  try {
-    return await runClaudeCodeInternal(req, events);
-  } catch (error) {
-    if (!req.untrustedNoTools) throw error;
-    // Never propagate the raw CLI error. It may contain stderr plus the
-    // temporary system-prompt/MCP config path, cwd, or secret-bearing env data.
-    throw createUntrustedRuntimeFailure();
-  }
 };

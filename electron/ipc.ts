@@ -8,11 +8,11 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
   SiteActivityEvent,
+  SiteAgentAppMcpRecommendation,
   SiteAgentAppNativePublishApproval,
   SiteAgentAppPublishBackendRequest,
   SiteAgentAppTargetRef,
   SiteRemoteDeploymentRetention,
-  SiteLlmProvider,
   SitePublishProvider,
   SitePublishProviderPage,
   SiteSurface,
@@ -232,7 +232,8 @@ import {
   tryRecordFailureEvent,
   tryRecordRunEvent,
 } from "./store/run-events";
-import { getUsageSnapshot, invalidateUsage } from "./usage";
+import { getUsageSnapshot, invalidateUsage, retryUsageProvider } from "./usage";
+import { isUsageRetryProviderId } from "./usage/retry-policy";
 import { listPendingConfirmations } from "./confirm";
 import { addProjectOntologySource, getProjectOntologyStatus } from "./ontology/project-runtime";
 import { getAgentOntologyHubProjection } from "./ontology/agent-hub-projection";
@@ -413,6 +414,7 @@ import type {
   AgentRuntimeOverrideScope,
   AgentRuntimeOverrideSetInput,
   Automation,
+  AutomationCreateInput,
   CloudAgentHubPublishRequest,
   CloudAgentPrivateSaveRequest,
   CloudAgentPublishRequest,
@@ -676,6 +678,128 @@ export function assertTrustedSitePublishIpcSender(event: IpcMainInvokeEvent): Br
   return win;
 }
 
+async function confirmNativeSiteAgentAppMcp(
+  win: BrowserWindow,
+  recommendation: SiteAgentAppMcpRecommendation,
+): Promise<"approved" | "declined"> {
+  const ko = currentUiLocale().toLowerCase().startsWith("ko");
+  const lines = recommendation.rows.map((row) => {
+    const credential = row.credentialMode === "keyless"
+      ? (ko ? "키 불필요" : "no key required")
+      : row.keyState === "present"
+        ? (ko ? "API 키 확인됨" : "API key present")
+        : row.keyState === "missing"
+          ? (ko ? "API 키 없음" : "API key missing")
+          : (ko ? "API 키 상태 확인 불가" : "API key state unavailable");
+    const readiness = row.readiness === "ready"
+      ? (ko ? "실행 전 연결 검증 예정" : "will verify before each run")
+      : row.readiness === "not-installed"
+        ? (ko ? "미설치 · 연결하지 않음" : "not installed · will not attach")
+        : row.readiness === "missing-key"
+          ? (ko ? "키 없음 · 연결하지 않음" : "missing key · will not attach")
+          : (ko ? "설정 미완료 · 연결하지 않음" : "not configured · will not attach");
+    return `• ${row.name} (${row.catalogId}) · ${credential} · ${readiness}`;
+  });
+  const blockedLines = recommendation.blocked.map((issue) =>
+    `• ${issue.id} · ${ko ? "Agent App 안전 정책에서 차단" : "blocked by Agent App safety policy"}`,
+  );
+  const detail = ko
+    ? [
+        ...lines,
+        ...blockedLines,
+        "",
+        "연결 후보는 Desktop 시스템 전역 MCP에서 확인했습니다.",
+        "차단 항목은 에이전트 번들의 앱 선언에서 안전 정책에 따라 제외했습니다.",
+        "허용해도 설치·키 생성·로그인은 자동으로 하지 않습니다.",
+        "키가 없거나 준비되지 않은 MCP는 붙이지 않고, 이번 앱 생성과 실행은 MCP 없이 계속합니다.",
+        "실행 직전에 설치/키/연결/런타임을 다시 확인하고, 하나라도 실패하면 해당 MCP만 빼고 에이전트는 stateless/no-tool로 계속 실행합니다.",
+        "비밀값, 키 이름, 로컬 경로, 서버 오류 원문은 앱 화면으로 전달하지 않습니다.",
+      ].join("\n")
+    : [
+        ...lines,
+        ...blockedLines,
+        "",
+        "Connection candidates were resolved from Desktop's system-wide MCP registry.",
+        "Blocked items came from the agent bundle's app declaration and were excluded by safety policy.",
+        "Allowing this does not install a server, create a key, or sign in automatically.",
+        "A missing key or unready MCP is left unattached; this app still builds and runs without MCP.",
+        "Agentlas rechecks installation, key, connection, and runtime eligibility before every run. Any failure removes only that MCP and continues stateless/no-tool.",
+        "Secret values, key names, local paths, and raw server errors never reach the app UI.",
+      ].join("\n");
+  const result = await dialog.showMessageBox(win, {
+    type: "question",
+    buttons: recommendation.rows.length > 0
+      ? ko ? ["MCP 없이 계속", "준비된 MCP 연결"] : ["Continue without MCP", "Attach ready MCP"]
+      : [ko ? "확인" : "OK"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    title: ko ? "Agent App MCP 연결 검토" : "Review Agent App MCP access",
+    message: ko
+      ? recommendation.rows.length > 0
+        ? `${recommendation.targetName} 앱을 만들기 전에 시스템 전역 MCP를 연결할까요?`
+        : `${recommendation.targetName} 앱에서 차단된 MCP 선언을 확인하세요.`
+      : recommendation.rows.length > 0
+        ? `Attach system-wide MCPs before building ${recommendation.targetName}?`
+        : `Review the MCP declarations blocked for ${recommendation.targetName}.`,
+    detail,
+  });
+  return recommendation.rows.length > 0 && result.response === 1 ? "approved" : "declined";
+}
+
+/**
+ * Main-owned review loop. The post-click recorder compares the exact digest
+ * displayed above with a fresh registry/Keychain snapshot. One mismatch opens
+ * the updated review once more; repeated churn fails closed to no-tool without
+ * starving Agent App creation or launch.
+ */
+const siteAgentAppMcpReviewLocks = new Map<string, Promise<SiteAgentAppMcpRecommendation>>();
+
+async function reviewNativeSiteAgentAppMcpUnlocked(
+  win: BrowserWindow,
+  projectId: string,
+  mode: "launch" | "prebuild" | "force",
+): Promise<SiteAgentAppMcpRecommendation> {
+  const {
+    getSiteAgentAppMcpRecommendation,
+    recordSiteAgentAppMcpDecision,
+  } = await import("./site/agent-app-mcp-plan");
+  let recommendation = await getSiteAgentAppMcpRecommendation(projectId);
+  if (mode === "launch" && recommendation.status !== "review-required") return recommendation;
+  if (mode === "prebuild" && (recommendation.status === "approved" || recommendation.status === "declined")) {
+    return recommendation;
+  }
+  if (recommendation.status === "not-required" && recommendation.blocked.length === 0) return recommendation;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const decision = await confirmNativeSiteAgentAppMcp(win, recommendation);
+    if (recommendation.rows.length === 0) return recommendation;
+    const decided = await recordSiteAgentAppMcpDecision(
+      projectId,
+      decision,
+      recommendation.readinessDigest,
+    );
+    if (decision === "declined" || decided.status !== "review-required") return decided;
+    recommendation = decided;
+  }
+  return recommendation;
+}
+
+function reviewNativeSiteAgentAppMcp(
+  win: BrowserWindow,
+  projectId: string,
+  mode: "launch" | "prebuild" | "force",
+): Promise<SiteAgentAppMcpRecommendation> {
+  const existing = siteAgentAppMcpReviewLocks.get(projectId);
+  const pending = (existing ?? Promise.resolve(null))
+    .catch(() => null)
+    .then(() => reviewNativeSiteAgentAppMcpUnlocked(win, projectId, mode));
+  siteAgentAppMcpReviewLocks.set(projectId, pending);
+  void pending.finally(() => {
+    if (siteAgentAppMcpReviewLocks.get(projectId) === pending) siteAgentAppMcpReviewLocks.delete(projectId);
+  }).catch(() => {});
+  return pending;
+}
+
 async function confirmNativeSitePublish(
   win: BrowserWindow,
   approval: SiteAgentAppNativePublishApproval,
@@ -704,7 +828,7 @@ async function confirmNativeSitePublish(
           `Artifact SHA-256: ${approval.artifactDigest}`,
           `배포 intent SHA-256: ${approval.intentDigest}`,
           "",
-          `호스팅: Render`,
+          "호스팅: Render",
           `검증된 계정: ${approval.providerAccountLabel}`,
           `Owner ID: ${intent.ownerId}`,
           `Provider API key: ${approval.providerApiKeyIdentity}`,
@@ -727,7 +851,7 @@ async function confirmNativeSitePublish(
           `Artifact SHA-256: ${approval.artifactDigest}`,
           `Deployment intent SHA-256: ${approval.intentDigest}`,
           "",
-          `Hosting: Render`,
+          "Hosting: Render",
           `Verified account: ${approval.providerAccountLabel}`,
           `Owner ID: ${intent.ownerId}`,
           `Provider API key: ${approval.providerApiKeyIdentity}`,
@@ -778,7 +902,7 @@ async function confirmNativeSitePublish(
         "",
         `LLM: ${approval.llmProvider}`,
         `LLM Keychain 항목:\n${keyIdentity}`,
-        `앱 access passcode fingerprint: sha256:${approval.appAccessKeyFingerprint ?? "확인 불가"}`,
+        `앱 access passcode fingerprint: sha256:${approval.appAccessKeyFingerprint}`,
         `배포 intent SHA-256: ${approval.intentDigest}`,
         "",
         approval.planWarning,
@@ -798,7 +922,7 @@ async function confirmNativeSitePublish(
         "",
         `LLM: ${approval.llmProvider}`,
         `LLM Keychain item:\n${keyIdentity}`,
-        `App access passcode fingerprint: sha256:${approval.appAccessKeyFingerprint ?? "unavailable"}`,
+        `App access passcode fingerprint: sha256:${approval.appAccessKeyFingerprint}`,
         `Deployment intent SHA-256: ${approval.intentDigest}`,
         "",
         approval.planWarning,
@@ -919,8 +1043,8 @@ export function registerIpcHandlers(): void {
   // Agent App 실행/게시만 별도 main-owned Astryx artifact와 capability/consent
   // 검증을 통과하며, preview HTML이나 renderer 지정 경로를 실행하지 않는다.
   ipcMain.handle("site:listProjects", async () => {
-    const { listSiteProjects } = await import("./site/store");
-    return listSiteProjects();
+    const { listSiteProjectsForRenderer } = await import("./site/store");
+    return listSiteProjectsForRenderer();
   });
   ipcMain.handle("site:operationStatus", async (_e, payload: { projectId?: string }) => {
     const { activeSiteProjectOperation } = await import("./site/operation-lock");
@@ -935,23 +1059,23 @@ export function registerIpcHandlers(): void {
     surface?: SiteSurface;
     agentAppTarget?: SiteAgentAppTargetRef;
   }) => {
-    const { createSiteProject } = await import("./site/store");
+    const { createSiteProject, siteProjectForRenderer } = await import("./site/store");
     const surface: SiteSurface =
       payload?.surface === "mobile" || payload?.surface === "agent-app" ? payload.surface : "web";
     if (surface === "agent-app") {
       if (!payload?.agentAppTarget) throw new Error("Agent App에는 에이전트 또는 멀티에이전트 선택이 필요합니다.");
       const { resolveSiteAgentAppContext } = await import("./site/agent-app");
       const context = resolveSiteAgentAppContext(payload.agentAppTarget);
-      return createSiteProject({
+      return siteProjectForRenderer(createSiteProject({
         name: String(payload?.name ?? ""),
         surface,
         agentAppTarget: context.target,
         astryxTemplate: context.template,
         agentAppContract: context.contract,
         agentAppVisual: context.visual,
-      });
+      }));
     }
-    return createSiteProject({ name: String(payload?.name ?? ""), surface });
+    return siteProjectForRenderer(createSiteProject({ name: String(payload?.name ?? ""), surface }));
   });
   ipcMain.handle("site:deleteProject", async (event, payload: { projectId?: string }) => {
     const win = assertTrustedSitePublishIpcSender(event);
@@ -970,10 +1094,18 @@ export function registerIpcHandlers(): void {
       release();
     }
   });
-  ipcMain.handle("site:launchAgentApp", async (_e, payload: { projectId?: string }) => {
+  ipcMain.handle("site:launchAgentApp", async (event, payload: { projectId?: string }) => {
+    const win = assertTrustedSitePublishIpcSender(event);
     const projectId = String(payload?.projectId ?? "");
     const { assertSiteProjectIdle } = await import("./site/operation-lock");
     assertSiteProjectIdle(projectId);
+    try {
+      await reviewNativeSiteAgentAppMcp(win, projectId, "launch");
+    } catch {
+      // Recommendation/Keychain/registry/dialog failures cannot starve the app.
+      // Without a valid main-owned receipt the runtime deterministically uses
+      // the stateless/no-tool path.
+    }
     const { launchSiteAgentApp } = await import("./site/agent-app-runtime");
     return launchSiteAgentApp(projectId);
   });
@@ -984,6 +1116,19 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("site:agentAppRuntimeStatus", async (_e, payload: { projectId?: string }) => {
     const { siteAgentAppRuntimeStatus } = await import("./site/agent-app-runtime");
     return siteAgentAppRuntimeStatus(String(payload?.projectId ?? ""));
+  });
+  ipcMain.handle("site:agentAppMcpRecommendation", async (_e, payload: { projectId?: string }) => {
+    const { getSiteAgentAppMcpRecommendation } = await import("./site/agent-app-mcp-plan");
+    return getSiteAgentAppMcpRecommendation(String(payload?.projectId ?? ""));
+  });
+  ipcMain.handle("site:reviewAgentAppMcp", async (event, payload: { projectId?: string }) => {
+    const win = assertTrustedSitePublishIpcSender(event);
+    const projectId = String(payload?.projectId ?? "");
+    return reviewNativeSiteAgentAppMcp(win, projectId, "force");
+  });
+  ipcMain.handle("site:prebuildReviewAgentAppMcp", async (event, payload: { projectId?: string }) => {
+    const win = assertTrustedSitePublishIpcSender(event);
+    return reviewNativeSiteAgentAppMcp(win, String(payload?.projectId ?? ""), "prebuild");
   });
   ipcMain.handle("site:agentAppThumbnail", async (_e, payload: { projectId?: string }) => {
     const { readSiteAgentAppThumbnail } = await import("./site/agent-app-thumbnail");
@@ -1150,10 +1295,18 @@ export function registerIpcHandlers(): void {
             const { scaffoldSiteAgentApp } = await import("./site/agent-app-scaffold");
             agentApp = await scaffoldSiteAgentApp(projectId, screens[0].id);
           } catch (error) {
-            agentAppReason = error instanceof Error ? error.message : String(error);
+            console.error("[site] Agent App scaffold failed:", error);
+            agentAppReason = "agent-app-build-failed";
           }
         }
-        return { ok: true, screens, engine: okRuns[0].engine, feedback, agentApp, agentAppReason };
+        return {
+          ok: true,
+          screens,
+          engine: okRuns[0].engine,
+          feedback,
+          agentApp: agentApp ? { appName: agentApp.appName } : undefined,
+          agentAppReason,
+        };
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         try {
@@ -1266,10 +1419,19 @@ export function registerIpcHandlers(): void {
             const { scaffoldSiteAgentApp } = await import("./site/agent-app-scaffold");
             agentApp = await scaffoldSiteAgentApp(projectId, screen.id);
           } catch (error) {
-            agentAppReason = error instanceof Error ? error.message : String(error);
+            console.error("[site] Agent App rebuild failed:", error);
+            agentAppReason = "agent-app-build-failed";
           }
         }
-        return { ok: true, screen, engine: result.engine, mode: result.mode, feedback, agentApp, agentAppReason };
+        return {
+          ok: true,
+          screen,
+          engine: result.engine,
+          mode: result.mode,
+          feedback,
+          agentApp: agentApp ? { appName: agentApp.appName } : undefined,
+          agentAppReason,
+        };
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         try {
@@ -1616,11 +1778,17 @@ export function registerIpcHandlers(): void {
   });
 
   // ── usage (LLM 엔진 사용량 — 프로바이더 OAuth usage) ─────
-  ipcMain.handle("usage:snapshot", (_e, opts?: { force?: boolean }) => getUsageSnapshot(opts));
-  // 재로그인/재시도 시 렌더러가 명시 무효화 — 낡은 lastResult·429 백오프가 새 토큰 조회를 가리지 않게.
-  ipcMain.handle("usage:invalidate", (_e, providerId?: string) => {
-    invalidateUsage(typeof providerId === "string" && providerId ? providerId : undefined);
-    clearDetectCache();
+  ipcMain.handle("usage:snapshot", (_e, opts?: unknown) => {
+    const force = !!opts && typeof opts === "object" && !Array.isArray(opts)
+      && (opts as { force?: unknown }).force === true;
+    return getUsageSnapshot(force ? { force: true } : undefined);
+  });
+  // Renderer는 임의 invalidate를 할 수 없다. allowlist+main cooldown 아래 대상 Provider만 원자적으로 재시도한다.
+  ipcMain.handle("usage:retry", async (_e, providerId?: unknown) => {
+    if (!isUsageRetryProviderId(providerId)) throw new Error("invalid usage retry provider");
+    const result = await retryUsageProvider(providerId);
+    if (result.attempted) clearDetectCache();
+    return result;
   });
 
   // ── billing (Agentlas Hub 크레딧 — 구독/렌트수익 2계좌 + 일방 전송) ─────
@@ -1764,23 +1932,13 @@ export function registerIpcHandlers(): void {
   );
 
   // ── secrets (macOS Keychain) ────────────────────────────
-  ipcMain.handle("secrets:saveApiKey", async (_e, backend: RuntimeBackend, key: string) => {
-    const { isSitePublishLlmCredentialLocked } = await import("./site/agent-app-publish");
-    if (
-      (backend === "openai" || backend === "anthropic" || backend === "google") &&
-      isSitePublishLlmCredentialLocked(backend as SiteLlmProvider)
-    ) throw new Error("이 LLM credential은 native 게시 승인 또는 배포 중에는 변경할 수 없습니다.");
-    return saveApiKey(backend, key);
-  });
+  ipcMain.handle("secrets:saveApiKey", (_e, backend: RuntimeBackend, key: string) =>
+    saveApiKey(backend, key),
+  );
   ipcMain.handle("secrets:hasApiKey", (_e, backend: RuntimeBackend) => hasApiKey(backend));
-  ipcMain.handle("secrets:deleteApiKey", async (_e, backend: RuntimeBackend) => {
-    const { isSitePublishLlmCredentialLocked } = await import("./site/agent-app-publish");
-    if (
-      (backend === "openai" || backend === "anthropic" || backend === "google") &&
-      isSitePublishLlmCredentialLocked(backend as SiteLlmProvider)
-    ) throw new Error("이 LLM credential은 native 게시 승인 또는 배포 중에는 변경할 수 없습니다.");
-    return deleteApiKey(backend);
-  });
+  ipcMain.handle("secrets:deleteApiKey", (_e, backend: RuntimeBackend) =>
+    deleteApiKey(backend),
+  );
   
   // ── custom backend config ───────────────────────────────
   ipcMain.handle("config:getCustomBaseUrl", () => {
@@ -2265,7 +2423,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("automations:list", () => listAutomations());
   ipcMain.handle(
     "automations:create",
-    async (_e, input: Omit<Automation, "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy">) => {
+    async (_e, input: AutomationCreateInput) => {
       const created = createAutomation(input);
       await resyncTriggers();
       return created;

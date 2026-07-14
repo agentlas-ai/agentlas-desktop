@@ -12,6 +12,7 @@ import path from "node:path";
 import { app, session } from "electron";
 import type { ChildProcess } from "node:child_process";
 import { withCliPath } from "../runtime/exec";
+import { withPythonCacheBoundary } from "../runtime/python-cache";
 import { resolveHephaestusPython } from "./engine";
 import { currentUiLocale } from "../ui-locale";
 
@@ -390,14 +391,14 @@ async function startStudioInner(): Promise<StudioStartResult> {
   activeRequestToken = requestToken;
   // 데스크탑 임베드는 사용자 본인 머신에서 본인 엔진으로 돈다 → 크레딧 게이트 없이 무료 동작
   // (런처 계약: STUDIO_CREDITS=off 또는 owner 는 free). STUDIO_CREDITS 가 이미 설정돼 있으면 존중.
-  const env = withCliPath({
+  const env = withPythonCacheBoundary(withCliPath({
     PYTHONUTF8: "1",
     PYTHONIOENCODING: "utf-8",
     STUDIO_CREDITS: "off",
     ...process.env,
     HEPHAESTUS_PYTHON: py.python,
     STUDIO_REQUEST_TOKEN: requestToken,
-  });
+  }));
   const args = py.python === "py" ? ["-3", path.join("scripts", "open-studio-gui.py"), "--no-open", "--port", String(port)] : [path.join("scripts", "open-studio-gui.py"), "--no-open", "--port", String(port)];
   // 혹시 살아있는 이전 proc 가 남아있으면(경합으로 인한 잔존) 먼저 정리해 고아를 만들지 않는다.
   if (proc) stopStudio();

@@ -23,17 +23,18 @@ import {
   getChatWorkingFolder,
   listChatMessages,
 } from "../store/chats";
-import { recordFolderVisit } from "../architecture/activation";
+import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
-import { curateReply } from "../memory/curator";
+import { curateReply, stripReplyMemoryEventsReadOnly } from "../memory/curator";
 import { parseMemoryEvents } from "../memory/events";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { parseAutomations } from "../automation-emitter";
 import { parseSurfaces } from "../surface-emitter";
 import { stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
 import { buildDelegateProtocol, parseDelegations, type Delegation } from "./delegate";
-import { selectRuntimeForTargets } from "../runtime/selection";
+import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
+import { pickRunner, selectRuntimeForTargets } from "../runtime/selection";
 import { getAgentConcurrency } from "../store/concurrency";
 import { tryRecordRunEvent } from "../store/run-events";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
@@ -46,12 +47,44 @@ import {
 import { SURFACE_INTENT_MARKER } from "../runtime/runner";
 import {
   defaultWorkloadAllocation,
-  resolveWorkloadAllocation,
+  reconcileWorkloadRunnerResult,
+  resolveWorkloadAllocationAcrossRuntimes,
   workloadAllocationReceipt,
   type WorkloadAllocation,
 } from "../runtime/workload-routing";
+import {
+  isMobileReadRuntimeAllowed,
+  MobileReadRuntimeBoundaryError,
+  revalidateInvocationWorkspaceBinding,
+  type InvocationWorkspaceBinding,
+} from "../invocation/workspace-binding";
 
 type EventSink = (ev: McpInvocationEvent) => void;
+
+function sameRuntime(left: RuntimeStatus, right: RuntimeStatus): boolean {
+  return left.kind === right.kind && left.backend === right.backend && left.source === right.source;
+}
+
+function firmCandidateRuntimes(
+  p: FirmRunParams,
+  baseActive: RuntimeStatus,
+  manuallyPinned: boolean,
+): RuntimeStatus[] {
+  const supplied = p.req.agentAppMode || manuallyPinned ? [baseActive] : [...p.runtimes];
+  if (!supplied.some((runtime) => sameRuntime(runtime, baseActive))) supplied.unshift(baseActive);
+  const runnable = supplied.filter((runtime, index, list) => (
+    list.findIndex((candidate) => sameRuntime(candidate, runtime)) === index && Boolean(pickRunner(runtime))
+  ));
+  const candidates = p.restrictedReadBoundary
+    ? runnable.filter((runtime) => isMobileReadRuntimeAllowed(runtime.kind))
+    : runnable;
+  if (p.restrictedReadBoundary && candidates.length === 0) {
+    throw new MobileReadRuntimeBoundaryError(
+      "This firm has no verified restricted read-only runtime. Select BYOK or Ollama on Desktop.",
+    );
+  }
+  return candidates.length > 0 ? candidates : [baseActive];
+}
 
 function firmFailure(
   agentAppMode: boolean | undefined,
@@ -85,15 +118,38 @@ export interface FirmRunParams {
   runtimes: RuntimeStatus[];
   picked: { runner: Runner; label: string };
   workingFolder?: string | null;
+  workspaceBinding?: InvocationWorkspaceBinding;
+  restrictedReadBoundary?: true;
   mcpConfigPath?: string;
   mcpAllowedTools?: string[];
   mcpCodexConfigArgs?: string[];
   /** Main-minted opaque MCP aliases for a one-run Agent App grant. */
   agentAppMcpRuntimeEnv?: NodeJS.ProcessEnv;
+  /** Marks the main-owned one-run grant unavailable after a runtime MCP fatal. */
+  onAgentAppMcpRuntimeUnavailable?: () => void;
   runnerEnv?: NodeJS.ProcessEnv;
   locale: RuntimeLocale;
   sink: EventSink;
   signal?: AbortSignal;
+}
+
+function restrictedFirmText(
+  p: FirmRunParams,
+  text: string,
+  nodeId: string,
+  agentId: string | null,
+  chatId: string | null | undefined,
+): string {
+  if (!p.restrictedReadBoundary) return text;
+  return stripReplyMemoryEventsReadOnly(text, {
+    projectPath: p.workingFolder ?? null,
+    projectId: p.chat.projectId ?? null,
+    agentId,
+    chatId: chatId ?? p.chat.id,
+    runId: p.req.runId,
+    nodeId,
+    cwdAtRequest: p.workingFolder ?? null,
+  }).cleanedText;
 }
 
 /** 간단한 동시성 풀 — items를 cap개씩 병렬 실행. */
@@ -152,6 +208,7 @@ async function runNodeTurnSafe(
     return { ...r, ok: true };
   } catch (err) {
     if (p.signal?.aborted) throw err; // 사용자 취소는 전파
+    if (err instanceof MobileReadRuntimeBoundaryError) throw err;
     // 실패/타임아웃 노드도 per-node 완료 신호 → UI에서 ▶ 가 멈추고 정리된다(스턱 방지).
     p.sink({
       kind: "tool-use",
@@ -260,16 +317,36 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   const emit = (ev: McpInvocationEvent) => p.sink(tag(ev));
 
   // 워킹 폴더(활성 시 프로젝트 메모리)
-  const workingFolder = p.req.agentAppMode ? null : (p.workingFolder ?? getChatWorkingFolder(p.chat.id));
+  const workingFolder = p.req.agentAppMode
+    ? null
+    : p.workspaceBinding
+      ? revalidateInvocationWorkspaceBinding(p.workspaceBinding)
+      : p.workingFolder ?? getChatWorkingFolder(p.chat.id);
   let activePath: string | null = null;
   if (!p.req.agentAppMode && workingFolder) {
-    try {
-      const v = recordFolderVisit(workingFolder);
-      if (v.activated) activePath = workingFolder;
-    } catch {
-      // ignore
+    if (p.req.permissions === "write" || p.req.permissions === "full") {
+      try {
+        const v = await recordFolderVisit(workingFolder, undefined, {
+          permission: p.req.permissions,
+          restrictedReadBoundary: p.restrictedReadBoundary,
+          agentAppMode: p.req.agentAppMode,
+        });
+        if (v.activated) activePath = workingFolder;
+      } catch {
+        // ignore
+      }
     }
   }
+  const memoryReadPath = workingFolder && (
+    activePath === workingFolder ||
+    canReadActivatedFolderMemory(workingFolder, {
+      permission: p.req.permissions,
+      restrictedReadBoundary: p.restrictedReadBoundary,
+      agentAppMode: p.req.agentAppMode,
+    })
+  )
+    ? workingFolder
+    : null;
 
   // 시스템 프롬프트 = 노드 프롬프트 + canonical owner memory + (리더면 위임) + 메모리 emitter
   const firmRolePrompt = node.prompt?.trim() || `You are ${node.name}, the ${node.role} of this firm.`;
@@ -281,48 +358,55 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   }
   if (!p.req.agentAppMode) {
     try {
-      const mem = buildMemoryContext(activePath, memoryOwnerId);
+      const mem = buildMemoryContext(memoryReadPath, memoryOwnerId, {
+        materializeCodeMap: Boolean(activePath),
+      });
       if (mem) systemPrompt += `\n\n${mem}`;
     } catch {
       // ignore memory failures
     }
   }
-  if (turn.reports && turn.reports.length > 0) {
-    systemPrompt += `\n\n${buildDelegateProtocol(turn.reports.map((r) => ({ role: r.role, name: r.name })))}`;
-  }
-  if (!p.req.agentAppMode) systemPrompt += `\n\n${memoryEmitterPromptFor(turn.userPrompt)}`;
-
   const runtimeChoice = p.req.agentAppMode ? null : selectRuntimeForTargets(p.runtimes, [
     { scope: "agent", targetId: node.agentId },
     { scope: "division", targetId: turn.divisionId && p.chat.firmId ? `${p.chat.firmId}:${turn.divisionId}` : null },
     { scope: "firm", targetId: p.chat.firmId },
   ]);
   const baseActive = runtimeChoice?.picked ? runtimeChoice.active : p.active;
-  const picked = runtimeChoice?.picked ?? p.picked;
+  const basePicked = runtimeChoice?.picked ?? p.picked;
+  const candidateRuntimes = firmCandidateRuntimes(p, baseActive, Boolean(runtimeChoice?.override));
+  if (turn.reports && turn.reports.length > 0) {
+    systemPrompt += `\n\n${buildDelegateProtocol(
+      turn.reports.map((r) => ({ role: r.role, name: r.name })),
+      candidateRuntimes,
+    )}`;
+  }
+  if (!p.req.agentAppMode && !p.restrictedReadBoundary) {
+    systemPrompt += `\n\n${memoryEmitterPromptFor(turn.userPrompt)}`;
+  }
+
   const workloadResolution = turn.allocation
-    ? resolveWorkloadAllocation({
+    ? resolveWorkloadAllocationAcrossRuntimes({
         allocation: turn.allocation,
-        runtime: baseActive,
+        runtimes: candidateRuntimes,
+        fallbackRuntime: baseActive,
         phase: turn.allocation.phase,
         manualOverride: runtimeChoice?.override ?? null,
       })
     : null;
   const active = workloadResolution?.runtime ?? baseActive;
+  const picked = sameRuntime(active, baseActive) ? basePicked : pickRunner(active) ?? basePicked;
+  if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
+    throw new MobileReadRuntimeBoundaryError(
+      "This firm node runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
+    );
+  }
   if (workloadResolution) {
-    tryRecordRunEvent({
-      runId: p.req.runId ?? `firm:${p.chat.id}`,
-      kind: "workload_allocation",
-      chatId: p.chat.id,
-      nodeId: node.id,
-      agentId: memoryOwnerId,
-      payload: workloadAllocationReceipt(workloadResolution),
-    });
-    if (workloadResolution.resolutionCodes.includes("tier-unavailable-active-preserved")) {
+    if (workloadResolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
       emit({
         kind: "tool-use",
         status: p.locale === "ko"
-          ? `${workloadResolution.allocation.tier} 등급 모델이 현재 런타임에 없어 활성 모델을 유지합니다.`
-          : `${workloadResolution.allocation.tier} tier is unavailable in this runtime; preserving the active model.`,
+          ? "상위 AI가 고른 런타임/모델이 실행 재고에 없어 활성 모델을 유지합니다."
+          : "The parent-selected runtime/model pair is not in live execution inventory; preserving the active model.",
       });
     }
   }
@@ -358,8 +442,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     });
   }
 
+  if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
   const agentAppAllowedTools = p.req.agentAppMode && p.mcpConfigPath && p.mcpAllowedTools?.length &&
-    p.mcpAllowedTools.every((tool) => /^mcp__brave-search__(?:brave_web_search|brave_local_search)$/.test(tool))
+    validSiteAgentAppMcpGrantTools(p.mcpAllowedTools)
     ? p.mcpAllowedTools
     : undefined;
   const result = await picked.runner(
@@ -374,6 +459,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       effort: active.effort ?? undefined,
       signal: turn.signal ?? p.signal,
       permission: p.req.agentAppMode ? "read" : p.req.permissions,
+      restrictedReadBoundary: p.restrictedReadBoundary,
       cwd: p.req.agentAppMode ? undefined : workingFolder ?? undefined,
       chatId: p.req.agentAppMode
         ? `site-agent-app:${p.req.runId ?? "run"}:${node.id}:${phase}:${randomUUID()}`
@@ -386,6 +472,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         : p.runnerEnv,
       untrustedNoTools: p.req.agentAppMode === true,
       untrustedAllowedMcpTools: agentAppAllowedTools,
+      onAgentAppMcpRuntimeUnavailable: p.req.agentAppMode
+        ? p.onAgentAppMcpRuntimeUnavailable
+        : undefined,
       locale: p.locale,
     },
     {
@@ -394,8 +483,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         if (turn.toMainBubble) p.sink({ kind: "tool-use", status });
       },
       onPartial: (text) => {
-        emit({ kind: "partial", text });
-        if (turn.toMainBubble) p.sink({ kind: "partial", text });
+        if (!p.req.agentAppMode && !p.restrictedReadBoundary) {
+          emit({ kind: "partial", text });
+          if (turn.toMainBubble) p.sink({ kind: "partial", text });
+        }
       },
       onTool: (name, args, result, id, isError) => {
         const tool = { name, args, result, id, isError };
@@ -404,11 +495,29 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       },
     },
   );
+  if (workloadResolution) {
+    const executedResolution = reconcileWorkloadRunnerResult(workloadResolution, result);
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `firm:${p.chat.id}`,
+      kind: "workload_allocation",
+      chatId: p.chat.id,
+      nodeId: node.id,
+      agentId: memoryOwnerId,
+      payload: workloadAllocationReceipt(executedResolution),
+    });
+  }
 
   // delegation 블록 분리 → 메모리 큐레이션(노드 agentId로) → 정리된 텍스트
-  const { delegations, synthesisAllocation, cleanedText } = parseDelegations(result.text);
+  const safeResultText = restrictedFirmText(
+    p,
+    result.text,
+    node.id,
+    memoryOwnerId,
+    turn.chatId,
+  );
+  const { delegations, synthesisAllocation, cleanedText } = parseDelegations(safeResultText);
   let display = p.req.agentAppMode ? cleanAgentAppControlBlocks(cleanedText) : cleanedText;
-  if (!p.req.agentAppMode) {
+  if (!p.req.agentAppMode && !p.restrictedReadBoundary) {
     try {
       const { cleanedText: c2 } = curateReply(display, {
         projectPath: activePath,

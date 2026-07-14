@@ -15,6 +15,7 @@ import path from "node:path";
 import { app } from "electron";
 import type { ChildProcess } from "node:child_process";
 import { detachedSpawnOpts, killCliTree, trackRunChild, withCliPath } from "../runtime/exec";
+import { withPythonCacheBoundary } from "../runtime/python-cache";
 import { currentUiLocale } from "../ui-locale";
 import { hephaestusRoot, resetHephaestusRootCache } from "./root";
 
@@ -152,7 +153,7 @@ function probePython(candidate: string, env: NodeJS.ProcessEnv): Promise<string 
 export async function resolveHephaestusPython(): Promise<{ python: string; version: string } | null> {
   if (cachedPython !== undefined) return cachedPython;
   const root = hephaestusRoot();
-  const env = withCliPath({ ...process.env });
+  const env = withPythonCacheBoundary(withCliPath({ ...process.env }));
   for (const candidate of pythonCandidates(root)) {
     // 절대경로인데 파일이 없으면 프로브 자체를 건너뛴다(타임아웃 낭비 제거).
     if (path.isAbsolute(candidate)) {
@@ -272,14 +273,14 @@ export async function runHephaestus<T = unknown>(
     };
   }
 
-  const env = withCliPath({
+  const env = withPythonCacheBoundary(withCliPath({
     ...process.env,
     ...opts.env,
     HEPHAESTUS_RUNTIME_ROOT: root,
     PYTHONPATH: root + (process.env.PYTHONPATH ? path.delimiter + process.env.PYTHONPATH : ""),
     PYTHONUTF8: "1",
     PYTHONIOENCODING: "utf-8",
-  });
+  }));
 
   const fullArgs = py.python === "py" ? ["-3", "-c", PY_BOOTSTRAP, module, ...args] : ["-c", PY_BOOTSTRAP, module, ...args];
 

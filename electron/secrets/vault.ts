@@ -104,11 +104,7 @@ export async function readApiKey(backend: RuntimeBackend): Promise<string | null
   return getPassword(byokAccount(backend));
 }
 
-/**
- * Value-free identity for native approval UI. This reads only metadata written
- * when the key was saved; legacy entries intentionally return null rather than
- * reading the secret before approval.
- */
+/** Value-free key identity for native approval UI. Never returns the secret. */
 export async function describeApiKey(backend: RuntimeBackend): Promise<ApiKeyDescriptor | null> {
   const raw = await getPassword(byokMetaAccount(backend));
   if (!raw) return null;
@@ -134,7 +130,7 @@ export async function describeApiKey(backend: RuntimeBackend): Promise<ApiKeyDes
   }
 }
 
-/** Backfill value-free metadata only after native approval has allowed reading the key. */
+/** Backfill value-free metadata only after native approval allowed reading the key. */
 export async function ensureApiKeyDescriptor(
   backend: RuntimeBackend,
   key: string,

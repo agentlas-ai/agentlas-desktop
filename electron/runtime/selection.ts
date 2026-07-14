@@ -177,10 +177,9 @@ function agentAppStatelessSafe(runtime: RuntimeStatus): boolean {
 }
 
 /**
- * Codex/Gemini/Grok/Cursor cannot currently prove the Agent App zero-builtins
- * contract. Keep the app usable by selecting a detected stateless-safe runner,
- * while preserving capability eligibility from the target's original runtime
- * choice so a Codex target never gains Brave merely because Claude is fallback.
+ * Runtimes that cannot prove the Agent App zero-builtins contract are replaced
+ * by a detected stateless-safe runner. Capability eligibility remains tied to
+ * the target's original runtime so fallback never widens MCP authority.
  */
 export function selectAgentAppRuntimeForTargets(
   runtimes: RuntimeStatus[],

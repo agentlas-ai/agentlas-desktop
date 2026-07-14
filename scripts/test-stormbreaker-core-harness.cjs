@@ -6,14 +6,18 @@ const os = require("node:os");
 const path = require("node:path");
 const { app } = require("electron");
 
+const installedMode = process.argv.includes("--installed");
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-stormbreaker-core-"));
-const runtimeRoot = path.join(temp, "runtime");
+const runtimeRoot = installedMode
+  ? process.env.HEPHAESTUS_RUNTIME_ROOT
+  : path.join(temp, "runtime");
+assert.ok(runtimeRoot, "--installed requires HEPHAESTUS_RUNTIME_ROOT");
 const moduleDir = path.join(runtimeRoot, "agentlas_cloud");
-fs.mkdirSync(moduleDir, { recursive: true });
+if (!installedMode) fs.mkdirSync(moduleDir, { recursive: true });
 process.env.HEPHAESTUS_RUNTIME_ROOT = runtimeRoot;
 app.setPath("userData", path.join(temp, "user-data"));
 
-const prompt = [
+const fixturePrompt = [
   "You are executing inside the Agentlas-owned STORMBREAKER GOAL + ULTRACODE HARNESS.",
   "GOAL MODE: fixture goal contract.",
   "ULTRACODE MODE: fixture implementation contract.",
@@ -43,24 +47,59 @@ function writeHarness(systemPrompt, digest) {
   );
 }
 
+function assertNoLocalHarnessCopy() {
+  const files = [
+    "electron/hephaestus/commands.ts",
+    "electron/hephaestus/loop-engineering.ts",
+    "electron/mcp/client.ts",
+  ];
+  for (const relative of files) {
+    const text = fs.readFileSync(path.join(__dirname, "..", relative), "utf8");
+    assert.doesNotMatch(text, /["'`]GOAL MODE:\s+[^"'`]+/, `${relative} must not copy Core Goal mode`);
+    assert.doesNotMatch(text, /["'`]ULTRACODE MODE:\s+[^"'`]+/, `${relative} must not copy Core UltraCode mode`);
+  }
+}
+
 async function main() {
   await app.whenReady();
   const { stormbreakerHarness } = require("../dist/electron/hephaestus/commands.js");
 
-  const digest = createHash("sha256").update(prompt).digest("hex");
-  writeHarness(prompt, digest);
+  if (!installedMode) {
+    const digest = createHash("sha256").update(fixturePrompt).digest("hex");
+    writeHarness(fixturePrompt, digest);
+  }
   const valid = await stormbreakerHarness({ cwd: temp });
-  assert.equal(valid.system_prompt, prompt);
-  assert.equal(valid.prompt_sha256, digest);
+  assert.equal(valid.system_prompt.split("GOAL MODE:").length - 1, 1);
+  assert.equal(valid.system_prompt.split("ULTRACODE MODE:").length - 1, 1);
+  assert.equal(createHash("sha256").update(valid.system_prompt).digest("hex"), valid.prompt_sha256);
+  assertNoLocalHarnessCopy();
 
-  writeHarness(`${prompt}\nTAMPERED`, digest);
-  await assert.rejects(
-    () => stormbreakerHarness({ cwd: temp }),
-    /SHA-256 integrity check/,
-    "Desktop must fail closed when Core prompt bytes do not match the signed digest",
-  );
+  const proof = {
+    schema: "agentlas.desktop.cross-platform-harness-proof.v1",
+    platform: process.platform,
+    architecture: process.arch,
+    electron: process.versions.electron,
+    harness_id: valid.harness_id,
+    mode: valid.mode,
+    prompt_sha256: valid.prompt_sha256,
+    system_prompt_utf8_base64: Buffer.from(valid.system_prompt, "utf8").toString("base64"),
+  };
+  if (process.env.AGENTLAS_HARNESS_PROOF_PATH) {
+    const proofPath = path.resolve(process.env.AGENTLAS_HARNESS_PROOF_PATH);
+    fs.mkdirSync(path.dirname(proofPath), { recursive: true });
+    fs.writeFileSync(proofPath, `${JSON.stringify(proof, null, 2)}\n`, "utf8");
+  }
 
-  console.log("stormbreaker core harness contract ok");
+  if (!installedMode) {
+    writeHarness(`${fixturePrompt}\nTAMPERED`, valid.prompt_sha256);
+    await assert.rejects(
+      () => stormbreakerHarness({ cwd: temp }),
+      /SHA-256 integrity check/,
+      "Desktop must fail closed when Core prompt bytes do not match the digest",
+    );
+  }
+
+  console.log(JSON.stringify(proof));
   app.quit();
 }
 

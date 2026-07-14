@@ -5,6 +5,7 @@
 // 현재 범위: 연결 테스트 + 툴 목록 조회(관리 화면용). 채팅 중 실제 tool-call 실행은
 // 다음 단계(런너의 function-calling 루프 + CLI mcp.json 주입)로 분리.
 import os from "node:os";
+import path from "node:path";
 import { app } from "electron";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -21,6 +22,7 @@ import {
   vaultUrlKey,
 } from "../opencrab/constants";
 import type { InstalledMcpServer, McpServerStatus } from "../../shared/types";
+import { isCanonicalSystemTimeMcpServer } from "./system-time-server";
 
 /** npx 첫 다운로드까지 고려한 넉넉한 연결 타임아웃. */
 const CONNECT_TIMEOUT_MS = 45_000;
@@ -145,12 +147,20 @@ function redactResolvedSecrets(message: string, resolved: Record<string, string>
  * Streamable HTTP 전용 서버 연결이 깨졌다).
  */
 function createTransport(server: InstalledMcpServer, resolved: Record<string, string>): unknown {
+  if (server.catalogId === "agentlas-time" && !isCanonicalSystemTimeMcpServer(server)) {
+    throw new Error("Agentlas System Time MCP launch contract is invalid");
+  }
   if (server.transport === "stdio") {
     if (!server.command) throw new Error("stdio server has no command");
     const baseEnv = withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" });
     const stdioEnv = Object.fromEntries(
       Object.entries(baseEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
     );
+    if (
+      isCanonicalSystemTimeMcpServer(server)
+    ) {
+      stdioEnv.ELECTRON_RUN_AS_NODE = "1";
+    }
     return new StdioClientTransport({
       command: expandHome(server.command),
       args: (server.args ?? []).map(expandHome),

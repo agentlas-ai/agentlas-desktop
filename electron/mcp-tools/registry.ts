@@ -28,6 +28,8 @@ interface ServerRow {
 }
 
 function toServer(row: ServerRow): InstalledMcpServer {
+  const args = safeJsonArray(row.args_json);
+  const envKeys = safeJsonArray(row.env_keys_json);
   return {
     id: row.id,
     catalogId: row.catalog_id,
@@ -35,20 +37,23 @@ function toServer(row: ServerRow): InstalledMcpServer {
     nameEn: row.name_en || row.name,
     transport: row.transport,
     command: row.command,
-    args: safeJsonArray(row.args_json),
+    args: args.values,
     url: row.url,
-    envKeys: safeJsonArray(row.env_keys_json),
+    envKeys: envKeys.values,
+    configurationValid: args.valid && envKeys.valid,
     enabled: row.enabled === 1,
     installedAt: row.installed_at,
   };
 }
 
-function safeJsonArray(json: string): string[] {
+function safeJsonArray(json: string): { values: string[]; valid: boolean } {
   try {
     const v = JSON.parse(json);
-    return Array.isArray(v) ? (v as string[]) : [];
+    return Array.isArray(v) && v.every((item) => typeof item === "string")
+      ? { values: v, valid: true }
+      : { values: [], valid: false };
   } catch {
-    return [];
+    return { values: [], valid: false };
   }
 }
 
@@ -97,6 +102,50 @@ export function installFromCatalog(catalogId: string): InstalledMcpServer {
     now,
   );
   return getServer(id)!;
+}
+
+/**
+ * Reconcile an already installed catalog row with the trusted catalog bundled
+ * in this Desktop build. The stable global id, enabled choice, install time,
+ * and any agent references stay intact. Used for built-ins whose audited launch
+ * payload changes across Desktop updates.
+ */
+export function refreshInstalledCatalogServer(catalogId: string): InstalledMcpServer | null {
+  const entry = getCatalogEntry(catalogId);
+  if (!entry) throw new Error(`Unknown MCP catalog id: ${catalogId}`);
+  const db = getDb();
+  const existing = db
+    .prepare("SELECT * FROM mcp_servers WHERE catalog_id = ?")
+    .get(catalogId) as ServerRow | undefined;
+  if (!existing) return null;
+  const command = entry.command ?? null;
+  const argsJson = JSON.stringify(entry.args ?? []);
+  const url = entry.url ?? null;
+  const envKeysJson = JSON.stringify(entry.envRequirements.map((requirement) => requirement.key));
+  if (
+    existing.name === entry.name &&
+    existing.name_en === entry.nameEn &&
+    existing.transport === entry.transport &&
+    existing.command === command &&
+    existing.args_json === argsJson &&
+    existing.url === url &&
+    existing.env_keys_json === envKeysJson
+  ) return toServer(existing);
+  db.prepare(
+    `UPDATE mcp_servers
+     SET name = ?, name_en = ?, transport = ?, command = ?, args_json = ?, url = ?, env_keys_json = ?
+     WHERE id = ?`,
+  ).run(
+    entry.name,
+    entry.nameEn,
+    entry.transport,
+    command,
+    argsJson,
+    url,
+    envKeysJson,
+    existing.id,
+  );
+  return getServer(existing.id);
 }
 
 export function installCustomServer(def: {

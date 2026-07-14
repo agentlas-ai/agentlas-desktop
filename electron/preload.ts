@@ -6,6 +6,7 @@ import type {
   BrowserApprovalRequestEvent,
   BugReportInput,
   Automation,
+  AutomationCreateInput,
   FsPathGrant,
   FsReadScope,
   McpInvocationEvent,
@@ -14,6 +15,7 @@ import type {
   Project,
   RuntimeBackend,
   RuntimeSelection,
+  UsageRetryProviderId,
   UpdaterState,
   WorkflowGraph,
   AutomationUpdatePatch,
@@ -57,6 +59,9 @@ const api: AgentlasIpc = {
     launchAgentApp: (payload: { projectId: string }) => ipcRenderer.invoke("site:launchAgentApp", payload),
     stopAgentApp: (payload: { projectId: string }) => ipcRenderer.invoke("site:stopAgentApp", payload),
     agentAppRuntimeStatus: (payload: { projectId: string }) => ipcRenderer.invoke("site:agentAppRuntimeStatus", payload),
+    agentAppMcpRecommendation: (payload: { projectId: string }) => ipcRenderer.invoke("site:agentAppMcpRecommendation", payload),
+    reviewAgentAppMcp: (payload: { projectId: string }) => ipcRenderer.invoke("site:reviewAgentAppMcp", payload),
+    prebuildReviewAgentAppMcp: (payload: { projectId: string }) => ipcRenderer.invoke("site:prebuildReviewAgentAppMcp", payload),
     agentAppThumbnail: (payload: { projectId: string }) => ipcRenderer.invoke("site:agentAppThumbnail", payload),
     listPublishProviderStatuses: () => ipcRenderer.invoke("site:listPublishProviderStatuses"),
     savePublishProviderToken: (payload: { provider: SitePublishProvider; token: string }) =>
@@ -133,7 +138,7 @@ const api: AgentlasIpc = {
   },
   usage: {
     snapshot: (opts?: { force?: boolean }) => ipcRenderer.invoke("usage:snapshot", opts),
-    invalidate: (providerId?: string) => ipcRenderer.invoke("usage:invalidate", providerId),
+    retry: (providerId: UsageRetryProviderId) => ipcRenderer.invoke("usage:retry", providerId),
   },
   billing: {
     getCredits: () => ipcRenderer.invoke("billing:getCredits"),
@@ -447,7 +452,7 @@ const api: AgentlasIpc = {
   automations: {
     list: () => ipcRenderer.invoke("automations:list"),
     get: (id: string) => ipcRenderer.invoke("automations:get", id),
-    create: (input: Omit<Automation, "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy">) =>
+    create: (input: AutomationCreateInput) =>
       ipcRenderer.invoke("automations:create", input),
     toggle: (id: string, enabled: boolean) =>
       ipcRenderer.invoke("automations:toggle", id, enabled),

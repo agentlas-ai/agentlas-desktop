@@ -1,0 +1,181 @@
+name: Cross-platform Core harness
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "electron/hephaestus/commands.ts"
+      - "electron/hephaestus/engine.ts"
+      - "electron/hephaestus/loop-engineering.ts"
+      - "electron/architecture/project-bootstrap.ts"
+      - "electron/architecture/activation.ts"
+      - "electron/memory/context.ts"
+      - "electron/mcp/client.ts"
+      - "electron/mcp-tools/**"
+      - "electron/site/agent-app-*.ts"
+      - "electron/site/store.ts"
+      - "electron/runtime/codex-models.ts"
+      - "electron/runtime/codex.ts"
+      - "electron/runtime/claude-code.ts"
+      - "electron/runtime/detect.ts"
+      - "electron/runtime/runner.ts"
+      - "electron/runtime/workload-routing.ts"
+      - "scripts/test-project-bootstrap-desktop.cjs"
+      - "scripts/test-project-bootstrap-core.cjs"
+      - "scripts/test-project-memory-read-boundary.cjs"
+      - "scripts/test-codex-model-discovery.cjs"
+      - "scripts/test-workload-routing.cjs"
+      - "scripts/test-build-workload-routing.cjs"
+      - "scripts/test-stormbreaker-core-harness.cjs"
+      - "scripts/test-owned-agent-runtime-prompts.cjs"
+      - "scripts/test-site-agent-app-*.cjs"
+      - "scripts/test-packaged-agent-app-mcp.cjs"
+      - "shared/site-studio.ts"
+      - "shared/types.ts"
+      - "electron-builder.yml"
+      - "electron-builder.mac-stable.yml"
+      - "package.json"
+      - ".github/workflows/cross-platform-harness.yml"
+  push:
+    branches: [main]
+    paths:
+      - "electron/hephaestus/commands.ts"
+      - "electron/hephaestus/engine.ts"
+      - "electron/hephaestus/loop-engineering.ts"
+      - "electron/architecture/project-bootstrap.ts"
+      - "electron/architecture/activation.ts"
+      - "electron/memory/context.ts"
+      - "electron/mcp/client.ts"
+      - "electron/mcp-tools/**"
+      - "electron/site/agent-app-*.ts"
+      - "electron/site/store.ts"
+      - "electron/runtime/codex-models.ts"
+      - "electron/runtime/codex.ts"
+      - "electron/runtime/claude-code.ts"
+      - "electron/runtime/detect.ts"
+      - "electron/runtime/runner.ts"
+      - "electron/runtime/workload-routing.ts"
+      - "scripts/test-project-bootstrap-desktop.cjs"
+      - "scripts/test-project-bootstrap-core.cjs"
+      - "scripts/test-project-memory-read-boundary.cjs"
+      - "scripts/test-codex-model-discovery.cjs"
+      - "scripts/test-workload-routing.cjs"
+      - "scripts/test-build-workload-routing.cjs"
+      - "scripts/test-stormbreaker-core-harness.cjs"
+      - "scripts/test-owned-agent-runtime-prompts.cjs"
+      - "scripts/test-site-agent-app-*.cjs"
+      - "scripts/test-packaged-agent-app-mcp.cjs"
+      - "shared/site-studio.ts"
+      - "shared/types.ts"
+      - "electron-builder.yml"
+      - "electron-builder.mac-stable.yml"
+      - "package.json"
+      - ".github/workflows/cross-platform-harness.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-harness:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: agentlas-desktop
+      - uses: actions/checkout@v4
+        with:
+          repository: agentlas-ai/Agentlas-OS
+          ref: d741da796289678c38fac1059f0473f271d0f7e9
+          path: agentlas-desktop/Hephaestus
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: agentlas-desktop/package-lock.json
+      - name: Verify Core source pin
+        working-directory: agentlas-desktop/Hephaestus
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "d741da796289678c38fac1059f0473f271d0f7e9"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Linux keychain runtime
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-0
+      - name: Install Desktop dependencies
+        working-directory: agentlas-desktop
+        run: npm ci
+      - name: Compile Desktop main process
+        working-directory: agentlas-desktop
+        run: npm run build:electron
+      - name: Verify installed Core on Linux
+        if: runner.os == 'Linux'
+        working-directory: agentlas-desktop
+        env:
+          HEPHAESTUS_RUNTIME_ROOT: ${{ github.workspace }}/agentlas-desktop/Hephaestus
+          HEPHAESTUS_PYTHON: python
+          AGENTLAS_HARNESS_PROOF_PATH: ${{ runner.temp }}/desktop-harness-proof.json
+        run: |
+          xvfb-run -a npx electron --no-sandbox scripts/test-stormbreaker-core-harness.cjs --installed
+          xvfb-run -a npx electron --no-sandbox scripts/test-owned-agent-runtime-prompts.cjs
+          xvfb-run -a npx electron --no-sandbox scripts/test-project-bootstrap-desktop.cjs
+          xvfb-run -a npx electron --no-sandbox scripts/test-project-bootstrap-core.cjs
+          xvfb-run -a npx electron --no-sandbox scripts/test-project-memory-read-boundary.cjs
+          node scripts/test-codex-model-discovery.cjs
+          xvfb-run -a npx electron --no-sandbox scripts/test-workload-routing.cjs
+          xvfb-run -a npx electron --no-sandbox scripts/test-build-workload-routing.cjs
+      - name: Verify installed Core on macOS and Windows
+        if: runner.os != 'Linux'
+        working-directory: agentlas-desktop
+        env:
+          HEPHAESTUS_RUNTIME_ROOT: ${{ github.workspace }}/agentlas-desktop/Hephaestus
+          HEPHAESTUS_PYTHON: python
+          AGENTLAS_HARNESS_PROOF_PATH: ${{ runner.temp }}/desktop-harness-proof.json
+        run: |
+          npx electron scripts/test-stormbreaker-core-harness.cjs --installed
+          npx electron scripts/test-owned-agent-runtime-prompts.cjs
+          npx electron scripts/test-project-bootstrap-desktop.cjs
+          npx electron scripts/test-project-bootstrap-core.cjs
+          npx electron scripts/test-project-memory-read-boundary.cjs
+          node scripts/test-codex-model-discovery.cjs
+          npx electron scripts/test-workload-routing.cjs
+          npx electron scripts/test-build-workload-routing.cjs
+      - name: Verify Agent App MCP boundary on Linux
+        if: runner.os == 'Linux'
+        working-directory: agentlas-desktop
+        run: xvfb-run -a npm run test:agent-app-runtime:prepared
+      - name: Verify Agent App MCP boundary on macOS and Windows
+        if: runner.os != 'Linux'
+        working-directory: agentlas-desktop
+        run: npm run test:agent-app-runtime:prepared
+      - name: Build and verify packaged Agent App MCP boundary
+        working-directory: agentlas-desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          npm run build
+          npx electron-builder --dir --publish never --config.directories.output="${{ runner.temp }}/agentlas-package-smoke" -c.mac.identity=null -c.mac.notarize=false
+          npm run test:packaged-agent-app-mcp -- "${{ runner.temp }}/agentlas-package-smoke"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-harness-proof-${{ runner.os }}
+          path: ${{ runner.temp }}/desktop-harness-proof.json
+          if-no-files-found: error
+
+  compare-desktop-proofs:
+    name: Compare Desktop prompt bytes
+    needs: desktop-harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-harness-proof-*
+          path: proofs
+      - run: node scripts/compare-stormbreaker-platform-proofs.cjs proofs

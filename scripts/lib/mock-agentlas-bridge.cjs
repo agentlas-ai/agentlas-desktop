@@ -452,6 +452,11 @@ function setupMockAgentlasBridge(options) {
     },
     usage: {
       snapshot: async () => ({ providers: [{ label: "Codex", status: "ok", windows: [{ usedPercent: 10 }] }] }),
+      retry: async () => ({
+        snapshot: { providers: [{ label: "Codex", status: "ok", windows: [{ usedPercent: 10 }] }] },
+        attempted: true,
+        retryAfterMs: 10_000,
+      }),
     },
     confirm: {
       listPending: async () => pendingConfirmations,

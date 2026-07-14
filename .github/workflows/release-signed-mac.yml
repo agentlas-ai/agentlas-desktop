@@ -1,23 +1,20 @@
 name: Release Signed macOS
 
 # Two ways to trigger:
-#   1. Push a tag matching v*.*.*  -> automatic signed macOS release
+#   1. Push a stable tag matching v*.*.*  -> automatic signed macOS release
 #   2. Manual via GitHub UI / `gh workflow run` with explicit version/tag
 on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-*"
   workflow_dispatch:
     inputs:
       version:
         description: "Desktop package version to release"
         required: true
-        default: "0.2.19"
       tag:
         description: "GitHub release tag"
         required: true
-        default: "v0.2.19"
       draft:
         description: "Create or keep the GitHub release as draft"
         required: true
@@ -42,12 +39,14 @@ permissions:
 jobs:
   build-notarize-publish:
     runs-on: macos-15
-    timeout-minutes: 60
+    # Includes a bounded wait for the parallel Windows/Linux staging workflow.
+    timeout-minutes: 75
     env:
-      # Publish to the SEPARATE public releases repo (source repo is private).
+      # Publish installers to the SEPARATE public releases repository.
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
-      HEPHAESTUS_REF: v1.1.19
+      HEPHAESTUS_REF: v1.1.28
+      HEPHAESTUS_COMMIT: d741da796289678c38fac1059f0473f271d0f7e9
 
     steps:
       - uses: actions/checkout@v4
@@ -77,9 +76,9 @@ jobs:
             echo "::error::version/tag could not be resolved (tag=$tag, version=$version)"
             exit 1
           fi
-          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           if [[ ! "$tag" =~ $semver_tag_re ]]; then
-            echo "::error::Release tag must be strict SemVer with a leading v (received: $tag)."
+            echo "::error::Release tag must be stable SemVer with a leading v and no prerelease suffix (received: $tag)."
             exit 1
           fi
           if [ "$version" != "${tag#v}" ]; then
@@ -107,12 +106,17 @@ jobs:
           lockver=$(node -p "require('./package-lock.json').version")
           lockrootver=$(node -p "require('./package-lock.json').packages[''].version")
           runtimever=$(node -p "require('./package.json').agentlasUpdateCompatibility.bundledRuntimeVersion")
+          runtimecommit=$(node -p "require('./package.json').agentlasBundledRuntimeSource.commit")
           if [ "$pkgver" != "$version" ] || [ "$lockver" != "$version" ] || [ "$lockrootver" != "$version" ]; then
             echo "::error::Tag $tag requires package.json/package-lock root version=$version (got package=$pkgver lock=$lockver root=$lockrootver)."
             exit 1
           fi
           if [ "${HEPHAESTUS_REF#v}" != "$runtimever" ]; then
             echo "::error::HEPHAESTUS_REF=$HEPHAESTUS_REF does not match bundledRuntimeVersion=$runtimever."
+            exit 1
+          fi
+          if [ "$HEPHAESTUS_COMMIT" != "$runtimecommit" ]; then
+            echo "::error::HEPHAESTUS_COMMIT does not match package immutable runtime pin."
             exit 1
           fi
           {
@@ -170,6 +174,15 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Verify embedded Stormbreaker harness
+        run: npm run test:stormbreaker-core:embedded
+
+      - name: Verify signed-resource Python cache boundary
+        run: npm run test:python-cache-boundary
+
+      - name: Verify Project Foundation write and privacy boundary
+        run: npm run test:release-agent-foundation-gate
+
       # 실제 장애가 난 Browser 소유권/스크롤, 자동화 파이프/watchdog와
       # typecheck만으로 못 잡았던 Hub·Runtime Readiness UI 회귀를 함께 막는다.
       - name: Runtime, browser, and renderer UI regression gates
@@ -180,6 +193,7 @@ jobs:
           npm run test:automation-scheduler-guards
           npm run test:automation-trigger-safety
           npm run test:v52-automation-run-recovery
+          npm run test:v64-automation-permission-migration
           npm run test:v53-hub-bookmark-sync
           npm run test:updater-production
           npm run test:automations-store
@@ -189,6 +203,11 @@ jobs:
           npm run test:marketplace-cache
           npm run test:after-pack-runtime-contract
           npm run test:mobile-bridge-contract
+          npm run test:mobile-read-boundary
+          npm run test:mobile-execution-boundary
+          npm run test:runtime-resume-contract
+          npm run test:cli-image-attachments
+          npm run test:owned-agent-runtime-prompts
           npm run test:borrowed-task-force
           npm run test:mcp-auto-select
           npm run test:mcp-secret-isolation
@@ -210,12 +229,14 @@ jobs:
           npm run test:browser-password-boundary
           npm run test:browser-ui
           npm run smoke:renderer-ui
+          node scripts/qa-provider-health-dashboard.cjs
           node scripts/test-desktop-feature-surfaces.cjs --build-roster-sync-only
           npm run test:hub-bookmark-ux
           node scripts/test-hub-bookmark-ui.cjs
           node scripts/test-runtime-readiness-ui.cjs
           npm run test:independent-terminal-boundary
           npm run test:grok-runtime-contract
+          npm run test:provider-health
           npm run test:grok-auth-source
           npm run test:oberon-provider-routing
           npm run test:telegram-connect-atomicity
@@ -273,12 +294,15 @@ jobs:
           CSC_KEY_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
         run: npm run package:mac
 
-      # Publish notarized .dmg/.zip + latest-mac.yml to the public releases repo
-      # (AGENTLAS_DESKTOP_GITHUB_REPO) — this is the public download + update feed.
-      - name: Publish verified release (public releases repo)
+      # Upload notarized Mac assets into the prerelease staging record. The
+      # publisher then waits for every required Windows/Linux/Mac artifact and
+      # alone promotes stable/latest. Missing assets always fail closed.
+      - name: Complete staged release and promote verified stable
         env:
           GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+          AGENTLAS_RELEASE_ASSET_WAIT_MS: "900000"
+          AGENTLAS_RELEASE_ASSET_POLL_MS: "10000"
         run: |
           args=(--tag="$RESOLVED_TAG" --version="$RESOLVED_VERSION")
           if [ "$RESOLVED_DRAFT" = "true" ]; then args+=(--draft); fi

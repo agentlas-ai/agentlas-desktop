@@ -7,6 +7,10 @@ import {
 } from "../browser/connect";
 import { onDesktopStoreChange } from "../store/change-bus";
 import { invocationService } from "../invocation/service";
+import {
+  captureInvocationWorkspaceBinding,
+  enforceMobileReadOnlyPermission,
+} from "../invocation/workspace-binding";
 import { claimPendingConfirmationAnswer } from "../confirm";
 import { detectRuntimes, setActiveRuntime } from "../runtime/detect";
 import { listRuntimeCommands } from "../runtime/commands";
@@ -26,6 +30,7 @@ import {
   clearChatContext,
   createChat,
   getChat,
+  getChatWorkingFolder,
   listRecentChats,
   renameChat,
   setChatContinuousMode,
@@ -449,8 +454,9 @@ function invocationParams(
           "expectedQuestionMessageId",
         ],
   );
+  const chatId = requiredIdentifier(params, "chatId");
   const invocation: McpInvocationRequest = {
-    chatId: requiredIdentifier(params, "chatId"),
+    chatId,
     userPrompt: requiredText(params, "userPrompt", 200_000),
   };
   const runId = optionalIdentifier(params, "runId", 160);
@@ -474,9 +480,18 @@ function invocationParams(
     ? requiredIdentifier(params, "expectedRunId", RUN_ID_RE)
     : undefined;
   return {
-    invocation,
+    invocation: enforceMobileInvocationPermissionBoundary(invocation),
     ...(expectedRunId !== undefined ? { expectedRunId } : {}),
     ...(expectedQuestionMessageId !== undefined ? { expectedQuestionMessageId } : {}),
+  };
+}
+
+export function enforceMobileInvocationPermissionBoundary(
+  invocation: McpInvocationRequest,
+): McpInvocationRequest {
+  return {
+    ...invocation,
+    permissions: enforceMobileReadOnlyPermission(invocation.permissions),
   };
 }
 
@@ -755,7 +770,20 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         );
       }
       case "chats.create": {
-        const chat = createChat(createChatParams(request));
+        const input = createChatParams(request);
+        let canonicalProjectFolder: string | null = null;
+        if (input.projectId) {
+          // A Mobile caller may select only a host-owned project id. Resolve and
+          // bind its folder before the chat row exists so a missing/replaced
+          // project folder cannot silently become a global Mobile chat.
+          const project = getProject(input.projectId);
+          if (!project) throw new Error("The selected Desktop project is unavailable");
+          if (!project.folderPath) throw new Error("The selected project has no working folder");
+          canonicalProjectFolder = captureInvocationWorkspaceBinding(project.folderPath).canonicalPath;
+          if (!canonicalProjectFolder) throw new Error("The selected project has no working folder");
+        }
+        const chat = createChat(input);
+        if (canonicalProjectFolder) setChatWorkingFolder(chat.id, canonicalProjectFolder);
         this.scheduleSnapshotUpdated();
         return asJsonValue(projectMobileBridgeChat(chat, false), request.method);
       }
@@ -930,12 +958,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "invoke.start": {
         const { invocation, expectedQuestionMessageId } = invocationParams(request, false);
+        const workspaceBinding = captureInvocationWorkspaceBinding(
+          getChatWorkingFolder(invocation.chatId),
+        );
         const rollbackQuestionClaim = expectedQuestionMessageId
           ? claimPendingConfirmationAnswer(invocation.chatId, expectedQuestionMessageId)
           : null;
         let result;
         try {
-          result = invocationService.start(invocation);
+          result = invocationService.start(invocation, workspaceBinding);
         } catch (error) {
           rollbackQuestionClaim?.();
           throw error;
@@ -945,12 +976,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "invoke.steer": {
         const { invocation, expectedRunId, expectedQuestionMessageId } = invocationParams(request, true);
+        const workspaceBinding = captureInvocationWorkspaceBinding(
+          getChatWorkingFolder(invocation.chatId),
+        );
         const rollbackQuestionClaim = expectedQuestionMessageId
           ? claimPendingConfirmationAnswer(invocation.chatId, expectedQuestionMessageId)
           : null;
         let result;
         try {
-          result = invocationService.steer(invocation, expectedRunId);
+          result = invocationService.steer(invocation, expectedRunId, workspaceBinding);
         } catch (error) {
           rollbackQuestionClaim?.();
           throw error;

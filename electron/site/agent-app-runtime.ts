@@ -24,6 +24,7 @@ import {
   prepareSiteAgentAppCapabilities,
   type SiteAgentAppCapabilityDisclosure,
 } from "./agent-app-capabilities";
+import { validSiteAgentAppMcpConsentDecision } from "./agent-app-mcp-consent";
 import { getSiteProject, siteAgentAppsRoot } from "./store";
 
 const BODY_LIMIT = 64 * 1024;
@@ -198,12 +199,18 @@ function assertTargetBinding(project: SiteProjectMeta): { chatId: string } {
 async function agentAppCapabilityRuntimeEligible(chatId: string): Promise<boolean> {
   const chat = getChat(chatId);
   if (!chat) return false;
-  const runtimes = await detectRuntimes();
-  const choice = selectAgentAppRuntimeForTargets(runtimes, [
-    { scope: "agent", targetId: chat.agentId },
-    { scope: "firm", targetId: chat.firmId },
-  ]);
-  return choice?.capabilityRuntimeEligible === true;
+  try {
+    const runtimes = await detectRuntimes();
+    const choice = selectAgentAppRuntimeForTargets(runtimes, [
+      { scope: "agent", targetId: chat.agentId },
+      { scope: "firm", targetId: chat.firmId },
+    ]);
+    return choice?.capabilityRuntimeEligible === true;
+  } catch {
+    // Runtime discovery must never starve the whole Agent App. The invocation
+    // still proceeds through the stateless/no-tool path.
+    return false;
+  }
 }
 
 function buildPrompt(
@@ -275,13 +282,22 @@ async function handleRun(request: IncomingMessage, response: ServerResponse, run
     const { chatId } = assertTargetBinding(project);
     try {
       const declaredCapabilityIds = project.agentAppContract?.capabilities.readonlyMcpCatalogIds ?? [];
-      const runtimeEligible = declaredCapabilityIds.length === 0
+      const consentApproved = validSiteAgentAppMcpConsentDecision(
+        project.agentAppContract?.capabilities,
+        project.id,
+        project.agentAppMcpConsent,
+      ) === "approved";
+      const runtimeEligible = declaredCapabilityIds.length === 0 || !consentApproved
         ? true
         : await agentAppCapabilityRuntimeEligible(chatId);
       const prepared = await prepareSiteAgentAppCapabilities(
         project.agentAppContract?.capabilities,
         runId,
-        { runtimeEligible },
+        {
+          runtimeEligible,
+          projectId: project.id,
+          consentReceipt: project.agentAppMcpConsent,
+        },
       );
       try {
         const prompt = buildPrompt(project, inputs, prepared.disclosure);

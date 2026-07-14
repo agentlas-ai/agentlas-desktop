@@ -7,14 +7,14 @@ import type {
   SiteAgentAppPublishConsent,
   SiteAgentAppPublishProviderStatus,
   SiteLlmProvider,
-  SiteProjectMeta,
+  SiteProjectPublicMeta,
   SitePublishProvider,
   SitePublishProviderPage,
 } from "@shared/site-studio";
 import styles from "./SitePublishDialog.module.css";
 
 type Props = {
-  project: SiteProjectMeta;
+  project: SiteProjectPublicMeta;
   locale: "ko" | "en";
   onClose: () => void;
   onPublished: (result: SiteAgentAppPublishBackendResult) => void | Promise<void>;

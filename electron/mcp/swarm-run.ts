@@ -12,6 +12,7 @@ import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import {
   defaultWorkloadAllocation,
   normalizeWorkloadAllocation,
+  reconcileWorkloadRunnerResult,
   resolveWorkloadAllocationAcrossRuntimes,
   workloadAllocationPromptExample,
   workloadAllocationReceipt,
@@ -20,6 +21,12 @@ import {
 } from "../runtime/workload-routing";
 import { pickRunner } from "../runtime/selection";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
+import {
+  isMobileReadRuntimeAllowed,
+  MobileReadRuntimeBoundaryError,
+  revalidateInvocationWorkspaceBinding,
+} from "../invocation/workspace-binding";
+import { stripReplyMemoryEventsReadOnly } from "../memory/curator";
 import { STORMBREAKER_LOOP_PROTOCOL } from "../hephaestus/loop-engineering";
 import type { CoreStormbreakerHarness } from "../hephaestus/commands";
 
@@ -27,6 +34,23 @@ import type { CoreStormbreakerHarness } from "../hephaestus/commands";
 // 각 작업 = 실 LLM 호출이라 비용이 나가므로 보수적으로. (동시 실행 수는 별개로 슬라이더가 제어)
 const SWARM_MAX_TASKS = 24;
 const SWARM_MAX_ROUNDS = 100_000;
+
+function restrictedSwarmText(
+  p: BorrowedTaskForceParams,
+  text: string,
+  nodeId: string,
+): string {
+  if (!p.restrictedReadBoundary) return text;
+  return stripReplyMemoryEventsReadOnly(text, {
+    projectPath: p.workingFolder ?? null,
+    projectId: p.chat.projectId ?? null,
+    agentId: p.chat.agentId,
+    chatId: p.chat.id,
+    runId: p.req.runId,
+    nodeId,
+    cwdAtRequest: p.workingFolder ?? null,
+  }).cleanedText;
+}
 
 /** 스웜 워커에게 주는 규약 — 자기 작업을 하고, 새 하위작업/핸드오프가 필요하면 `## Spawn`으로. */
 function swarmProtocol(
@@ -164,14 +188,40 @@ export function parseSwarmOutput(text: string): {
 
 /** 스웜 실행 엔트리 — runMcpInvocation이 호출. 최종 텍스트를 반환하고 채팅에 저장한다. */
 export async function runSwarmInvocation(
-  p: BorrowedTaskForceParams & { stormbreakerHarness?: CoreStormbreakerHarness },
+  p: BorrowedTaskForceParams & {
+    runtimes?: BorrowedTaskForceParams["active"][];
+    stormbreakerMode?: boolean;
+    stormbreakerHarness?: CoreStormbreakerHarness;
+  },
 ): Promise<{ finalText: string }> {
   const goal = p.req.userPrompt;
   if (p.stormbreakerMode && !p.stormbreakerHarness) {
     throw new Error("Stormbreaker requires the canonical Goal + UltraCode harness from Agentlas Core.");
   }
   const coreHarnessPrompt = p.stormbreakerMode ? p.stormbreakerHarness?.system_prompt : undefined;
-  const runtimeInventory = workloadRuntimeInventory(p.runtimes ?? [p.active]);
+  if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(p.active.kind)) {
+    throw new MobileReadRuntimeBoundaryError(
+      "This swarm runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
+    );
+  }
+  const sameRuntime = (left: typeof p.active, right: typeof p.active) => (
+    left.kind === right.kind && left.backend === right.backend && left.source === right.source
+  );
+  const availableRuntimes = [...(p.runtimes ?? [p.active])];
+  if (!availableRuntimes.some((runtime) => sameRuntime(runtime, p.active))) availableRuntimes.unshift(p.active);
+  const runnableRuntimes = availableRuntimes.filter((runtime, index, list) => (
+    list.findIndex((candidate) => sameRuntime(candidate, runtime)) === index && Boolean(pickRunner(runtime))
+  ));
+  const candidateRuntimes = p.restrictedReadBoundary
+    ? runnableRuntimes.filter((runtime) => isMobileReadRuntimeAllowed(runtime.kind))
+    : runnableRuntimes;
+  if (p.restrictedReadBoundary && candidateRuntimes.length === 0) {
+    throw new MobileReadRuntimeBoundaryError(
+      "This swarm has no verified restricted read-only runtime. Select BYOK or Ollama on Desktop.",
+    );
+  }
+  if (candidateRuntimes.length === 0) candidateRuntimes.push(p.active);
+  const runtimeInventory = workloadRuntimeInventory(candidateRuntimes);
   const runId = p.req.runId ?? `swarm-${Date.now()}`;
   const stormStatus = (
     status: string,
@@ -316,22 +366,17 @@ export async function runSwarmInvocation(
     const resolution = task.allocation
       ? resolveWorkloadAllocationAcrossRuntimes({
           allocation: task.allocation,
-          runtimes: p.runtimes ?? [p.active],
+          runtimes: candidateRuntimes,
           fallbackRuntime: p.active,
           phase: "delegate",
           manualOverride: p.runtimeOverride,
         })
       : null;
     const active = resolution?.runtime ?? p.active;
-    const taskRunner = pickRunner(active) ?? p.picked;
+    const taskRunner = sameRuntime(active, p.active) ? p.picked : pickRunner(active) ?? p.picked;
     if (resolution) {
-      const runtimeIndex = (p.runtimes ?? [p.active]).findIndex((candidate) =>
-        candidate.kind === active.kind &&
-        candidate.backend === active.backend &&
-        candidate.source === active.source,
-      );
       task.resolvedAllocation = {
-        runtimeId: resolution.allocation.runtimeId ?? (runtimeIndex >= 0 ? `runtime-${runtimeIndex + 1}` : null),
+        runtimeId: resolution.resolvedRuntimeId,
         runtimeKind: active.kind ?? active.backend ?? null,
         model: active.model ?? null,
         effort: active.effort ?? null,
@@ -345,20 +390,12 @@ export async function runSwarmInvocation(
           : `Stormbreaker · assigned ${taskLabel(task)} to ${runtimeLabel(active.kind)} · ${active.model ?? active.kind} · effort ${effort}.`,
         "delegate",
       );
-      tryRecordRunEvent({
-        runId,
-        kind: "workload_allocation",
-        chatId: p.chat.id,
-        nodeId: task.id,
-        agentId: task.id,
-        payload: workloadAllocationReceipt(resolution),
-      });
-      if (resolution.resolutionCodes.includes("tier-unavailable-active-preserved")) {
+      if (resolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
         emit(task, {
           kind: "tool-use",
           status: p.locale === "ko"
-            ? `${task.allocation?.tier} 등급 모델이 없어 활성 모델을 유지합니다.`
-            : `${task.allocation?.tier} tier unavailable; preserving the active model.`,
+            ? "상위 AI가 고른 런타임/모델이 실행 재고에 없어 활성 모델을 유지합니다."
+            : "The parent-selected runtime/model pair is not in live inventory; preserving the active model.",
         });
       }
     }
@@ -384,6 +421,12 @@ export async function runSwarmInvocation(
       task: task.brief || task.title,
       includeOperational: false,
     });
+    if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
+      throw new MobileReadRuntimeBoundaryError(
+        "This swarm worker runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
+      );
+    }
+    if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
     const result = await taskRunner.runner(
       {
         // The canonical package prompt is authoritative, but the per-task
@@ -407,6 +450,7 @@ export async function runSwarmInvocation(
         effort: active.effort ?? undefined,
         signal: signal ?? p.signal,
         permission: p.req.permissions,
+        restrictedReadBoundary: p.restrictedReadBoundary,
         cwd: p.workingFolder ?? undefined,
         mcpConfigPath: p.mcpConfigPath,
         mcpAllowedTools: p.mcpAllowedTools,
@@ -416,12 +460,33 @@ export async function runSwarmInvocation(
       },
       {
         onStatus: (status) => emit(task, { kind: "tool-use", status }),
-        onPartial: (text) => emit(task, { kind: "partial", text }),
+        onPartial: (text) => {
+          if (!p.restrictedReadBoundary) emit(task, { kind: "partial", text });
+        },
         onTool: (name, args, r, id, isError) => emit(task, { kind: "tool-use", tool: { name, args, result: r, id, isError } }),
       },
     );
+    if (resolution) {
+      const executedResolution = reconcileWorkloadRunnerResult(resolution, result);
+      task.resolvedAllocation = {
+        runtimeId: executedResolution.resolvedRuntimeId,
+        runtimeKind: executedResolution.runtime.kind ?? executedResolution.runtime.backend ?? null,
+        model: executedResolution.runtime.model ?? null,
+        effort: executedResolution.runtime.effort ?? null,
+        source: executedResolution.source,
+        resolutionCodes: [...executedResolution.resolutionCodes],
+      };
+      tryRecordRunEvent({
+        runId,
+        kind: "workload_allocation",
+        chatId: p.chat.id,
+        nodeId: task.id,
+        agentId: task.id,
+        payload: workloadAllocationReceipt(executedResolution),
+      });
+    }
     emit(task, { kind: "tool-use", done: true, status: p.locale === "ko" ? `${task.title} 완료` : `${task.title} done` });
-    const parsed = parseSwarmOutput(result.text);
+    const parsed = parseSwarmOutput(restrictedSwarmText(p, result.text, task.id));
     return {
       result: parsed.result,
       spawn: parsed.spawn,
@@ -436,27 +501,19 @@ export async function runSwarmInvocation(
     const done = board.tasks.filter((t) => t.status === "done" && t.result);
     const resolution = resolveWorkloadAllocationAcrossRuntimes({
       allocation: board.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
-      runtimes: p.runtimes ?? [p.active],
+      runtimes: candidateRuntimes,
       fallbackRuntime: p.active,
       phase: "synthesize",
       manualOverride: p.runtimeOverride,
     });
     const active = resolution.runtime;
-    const synthesisRunner = pickRunner(active) ?? p.picked;
-    tryRecordRunEvent({
-      runId,
-      kind: "workload_allocation",
-      chatId: p.chat.id,
-      nodeId: "swarm-synthesizer",
-      agentId: p.orchestratorAgent.id,
-      payload: workloadAllocationReceipt(resolution),
-    });
-    if (resolution.resolutionCodes.includes("tier-unavailable-active-preserved")) {
+    const synthesisRunner = sameRuntime(active, p.active) ? p.picked : pickRunner(active) ?? p.picked;
+    if (resolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
       synthEmit({
         kind: "tool-use",
         status: p.locale === "ko"
-          ? `${resolution.allocation.tier} 종합 등급을 사용할 수 없어 활성 모델로 종합합니다.`
-          : `${resolution.allocation.tier} synthesis tier unavailable; preserving the active model.`,
+          ? "상위 AI의 종합 런타임/모델이 실행 재고에 없어 활성 모델로 종합합니다."
+          : "The parent-selected synthesis runtime/model is not in live inventory; preserving the active model.",
       });
     }
     synthEmit({
@@ -478,6 +535,12 @@ export async function runSwarmInvocation(
       task: goal,
       includeOperational: false,
     });
+    if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
+      throw new MobileReadRuntimeBoundaryError(
+        "This swarm synthesis runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
+      );
+    }
+    if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
     const result = await synthesisRunner.runner(
       {
         systemPrompt: [
@@ -501,16 +564,28 @@ export async function runSwarmInvocation(
         effort: active.effort ?? undefined,
         signal: signal ?? p.signal,
         permission: p.req.permissions,
+        restrictedReadBoundary: p.restrictedReadBoundary,
         cwd: p.workingFolder ?? undefined,
         env: p.runnerEnv,
         locale: p.locale,
       },
       {
         onStatus: (status) => synthEmit({ kind: "tool-use", status }),
-        onPartial: (text) => synthEmit({ kind: "partial", text }),
+        onPartial: (text) => {
+          if (!p.restrictedReadBoundary) synthEmit({ kind: "partial", text });
+        },
         onTool: (name, args, r, id, isError) => synthEmit({ kind: "tool-use", tool: { name, args, result: r, id, isError } }),
       },
     );
+    const executedResolution = reconcileWorkloadRunnerResult(resolution, result);
+    tryRecordRunEvent({
+      runId,
+      kind: "workload_allocation",
+      chatId: p.chat.id,
+      nodeId: "swarm-synthesizer",
+      agentId: p.orchestratorAgent.id,
+      payload: workloadAllocationReceipt(executedResolution),
+    });
     stormStatus(
       p.locale === "ko"
         ? "Stormbreaker · 최종 게이트 판정과 결과 종합을 마쳤습니다."
@@ -518,7 +593,7 @@ export async function runSwarmInvocation(
       "synthesize",
       true,
     );
-    return result.text.trim();
+    return restrictedSwarmText(p, result.text, "swarm-synthesizer").trim();
   };
 
   let idCounter = 0;
@@ -553,11 +628,12 @@ export async function runSwarmInvocation(
   }
   const { board, final, aborted, doneCount } = swarmResult;
 
-  const finalText = aborted
+  const rawFinalText = aborted
     ? p.locale === "ko"
       ? `스웜을 멈췄어요. (완료 ${doneCount}개)`
       : `Swarm stopped. (${doneCount} tasks done)`
     : final || (p.locale === "ko" ? "스웜이 완료할 작업을 찾지 못했습니다." : "The swarm found no work to complete.");
+  const finalText = restrictedSwarmText(p, rawFinalText, "swarm-final");
   tryRecordRunEvent({
     runId,
     kind: "swarm_finished",

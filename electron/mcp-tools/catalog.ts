@@ -11,6 +11,7 @@ import {
   OPENCRAB_MCP_URL_KEY,
   OPENCRAB_MCP_URL_SENTINEL,
 } from "../opencrab/constants";
+import { systemTimeMcpLaunchArgs } from "./system-time-server";
 
 export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
   // ── 선택형 지식 그래프 ─────────────────────────────────────
@@ -381,6 +382,24 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     setupUrl: "https://ui.shadcn.com/",
     brandColor: "#000000",
     mark: "sh",
+    envRequirements: [],
+  },
+  {
+    id: "agentlas-time",
+    name: "시스템 시간",
+    nameEn: "System Time",
+    description: "현재 시각과 IANA 타임존 변환만 제공하는 Agentlas 내장 읽기 전용 MCP.",
+    descriptionEn: "Agentlas built-in read-only MCP for current time and IANA timezone conversion only.",
+    category: "data",
+    transport: "stdio",
+    // The exact audited server is compressed into argv; no mutable executable
+    // file is opened after validation. Agent Apps reject any other command,
+    // payload, URL, environment, or tool list.
+    command: process.execPath,
+    args: systemTimeMcpLaunchArgs(),
+    trust: "official",
+    brandColor: "#2563EB",
+    mark: "T",
     envRequirements: [],
   },
 ];

@@ -52,6 +52,7 @@ function prepareContext(
       req.permission,
       req.userPrompt,
       req.forceSurface,
+      req.restrictedReadBoundary,
       req.untrustedNoTools,
     ),
   };

@@ -13,6 +13,7 @@ import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
+import { readCodexModelInventory, resolveCodexModelEffort } from "./codex-models";
 import {
   clearRuntimeSession,
   getRuntimeSession,
@@ -85,6 +86,7 @@ function buildPrompt(req: RunnerRequest): string {
     req.permission,
     req.userPrompt,
     req.forceSurface,
+    req.restrictedReadBoundary,
     req.untrustedNoTools,
   );
   const user = tStatus(req.locale, "speakerUser");
@@ -103,15 +105,25 @@ function buildPrompt(req: RunnerRequest): string {
 }
 
 function permissionArgs(permission?: RunnerRequest["permission"]): string[] {
-  if (permission === "write" || permission === "full") {
-    // Agentlas runs Codex as a local, user-owned automation runtime. For browser
-    // setup flows, confirmation prompts break the "do it for me" contract.
+  if (permission === "full") {
     return ["--dangerously-bypass-approvals-and-sandbox"];
   }
+  if (permission === "write") return ["--sandbox", "workspace-write"];
   // `codex exec`는 비대화형이라 approval loop가 없다 — 승인 플래그를 받지 않는다.
   // (`--ask-for-approval`은 대화형 `codex` 전용. exec에 넘기면 0.133+에서
   //  `unexpected argument` 로 exit 2.) read 권한은 read-only 샌드박스로 충분.
   return ["--sandbox", "read-only"];
+}
+
+function resumePermissionArgs(permission?: RunnerRequest["permission"]): string[] {
+  if (permission === "full") {
+    return ["--dangerously-bypass-approvals-and-sandbox"];
+  }
+  // `codex exec resume` has no `--sandbox` flag, but accepts the same validated
+  // config override. Reassert the boundary instead of inheriting a broader
+  // user default when a provider session is resumed.
+  const sandboxMode = permission === "write" ? "workspace-write" : "read-only";
+  return ["-c", `sandbox_mode="${sandboxMode}"`];
 }
 
 /**
@@ -343,6 +355,11 @@ export const runCodex: Runner = async (
         : "Codex CLI cannot fully remove read tools, so it cannot be used for Agent App's tool-less isolation. Select Claude Code, Ollama, or an API runtime.",
     );
   }
+  if (req.restrictedReadBoundary) {
+    throw new Error(
+      "Codex is not enabled for remote or unattended read-only execution because its host filesystem boundary is not release-verified.",
+    );
+  }
   const bin = await getBin();
   if (!bin) {
     throw new Error(tStatus(req.locale, "errCliMissingCodex"));
@@ -373,16 +390,18 @@ export const runCodex: Runner = async (
   // 앱이 모델을 갖고 있으면 그 모델이 반드시 이긴다. 없으면 기기 설정을 따른다(BYOM 존중).
   // `--model`/`-c`는 `exec`와 `exec resume` 둘 다 지원 확인됨(0.133+).
   const modelArgs: string[] = [];
+  let appliedEffort: string | null = null;
   if (runReq.model) modelArgs.push("--model", runReq.model);
-  // codex는 none/minimal/low/medium/high/xhigh만 안다 — "max"(Claude/Opus 전용 tier)를
-  // 그대로 넘기면 codex가 models cache 파싱에서 `unknown variant max`로 exit 1 하며
-  // 자동화가 전멸한다(2026-07-12 사고: per-agent override에 남은 claude의 max가 codex
-  // 런에 새어들었다). codex 상한 xhigh로 clamp하고, 그 외 미지값은 아예 안 넘겨
-  // 기기의 ~/.codex 설정을 따른다(BYOM 존중).
+  // 모델 캐시의 exact profile을 실행 시점에도 다시 검증한다. 최신 Codex 모델은 max를
+  // 지원하지만, 프로필이 없거나 손상된 경우에는 2026-07-12 사고 방지용 max->xhigh
+  // legacy guard를 유지한다. 그 외 미지값은 넘기지 않아 기기 설정을 따른다.
   if (runReq.effort) {
-    const CODEX_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
-    const effort = runReq.effort === "max" ? "xhigh" : runReq.effort;
-    if (CODEX_EFFORTS.has(effort)) modelArgs.push("-c", `model_reasoning_effort=${effort}`);
+    const inventory = await readCodexModelInventory();
+    const effort = resolveCodexModelEffort(inventory, runReq.model, runReq.effort);
+    if (effort) {
+      appliedEffort = effort;
+      modelArgs.push("-c", `model_reasoning_effort=${effort}`);
+    }
   }
 
   // 세션 resume 가능 여부 — chatId 저장 세션 또는 Build 같은 호출자가 직접 넘긴 세션 id.
@@ -396,12 +415,9 @@ export const runCodex: Runner = async (
   const canResume = !!resumeSessionId;
 
   // RESUME: 새 user 턴만 stdin으로 — 시스템 프롬프트/히스토리는 세션이 이미 갖고 있다.
-  // (`--sandbox`는 resume 서브명령에 없으므로 생략. write/full만 bypass 플래그.)
+  // Resume reasserts the same permission boundary as the first turn.
   if (canResume) {
-    const resumePerm =
-      runReq.permission === "write" || runReq.permission === "full"
-        ? ["--dangerously-bypass-approvals-and-sandbox"]
-        : [];
+    const resumePerm = resumePermissionArgs(runReq.permission);
     const args = [
       "exec",
       "resume",
@@ -423,7 +439,7 @@ export const runCodex: Runner = async (
       if (runReq.chatId && fingerprint && r.threadId) {
         saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint);
       }
-      return { text: r.text.trim(), sessionId: r.threadId ?? resumeSessionId, tokens: r.tokens };
+      return { text: r.text.trim(), sessionId: r.threadId ?? resumeSessionId, tokens: r.tokens, appliedEffort };
     }
     // Build continuation recovery is owned by Main, which can remove exactly
     // one attributed server and preserve approved peers. Replaying here with
@@ -458,7 +474,7 @@ export const runCodex: Runner = async (
     if (runReq.chatId && fingerprint && created.threadId) {
       saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint);
     }
-    return { text: created.text.trim(), sessionId: created.threadId ?? undefined, tokens: created.tokens };
+    return { text: created.text.trim(), sessionId: created.threadId ?? undefined, tokens: created.tokens, appliedEffort };
   }
   throw new Error(
     `codex CLI exit ${created.code}${created.stderr ? `\n${created.stderr.slice(0, 500)}` : ""}`,

@@ -352,7 +352,7 @@ async function main() {
     storeModule.initStore();
     let db = storeModule.getDb();
 
-    assert.equal(db.pragma("user_version", { simple: true }), 63);
+    assert.equal(db.pragma("user_version", { simple: true }), 64);
     const columns = db.prepare("PRAGMA table_info(hub_agent_bookmarks)").all();
     assert.deepEqual(
       columns.filter((column) => column.pk > 0).sort((a, b) => a.pk - b.pk).map((column) => column.name),
@@ -369,7 +369,7 @@ async function main() {
     storeModule = require(dbModulePath);
     storeModule.initStore();
     db = storeModule.getDb();
-    assert.equal(db.pragma("user_version", { simple: true }), 63, "idempotent reopen must restore the current v63 marker");
+    assert.equal(db.pragma("user_version", { simple: true }), 64, "idempotent reopen must restore the current v64 marker");
     assert.deepEqual(
       db.prepare("SELECT * FROM hub_agent_bookmarks ORDER BY workspace_id, entity_kind, slug").all(),
       firstPassRows,

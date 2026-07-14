@@ -111,6 +111,7 @@ export const runOllama: Runner = async (
       req.permission,
       req.userPrompt,
       req.forceSurface,
+      req.restrictedReadBoundary,
       req.untrustedNoTools,
     ),
   }];

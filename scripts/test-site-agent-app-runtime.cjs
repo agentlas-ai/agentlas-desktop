@@ -49,6 +49,12 @@ const CONTRACT = {
     defaultValue: null,
   }],
   outputs: [{ name: "brief", label: "Cited brief", type: "markdown", description: "Findings and sources" }],
+  capabilities: {
+    schemaVersion: 1,
+    source: "declared-package",
+    readonlyMcpCatalogIds: ["agentlas-time"],
+    unavailable: [],
+  },
 };
 
 let exitCode = 0;
@@ -196,12 +202,16 @@ app.whenReady().then(async () => {
     const payload = await valid.json();
     assert.equal(payload.ok, true);
     assert.equal(payload.outputs.brief, "Bridge result");
-    assert.deepEqual(payload.capabilities, { available: [], unavailable: [] });
+    assert.deepEqual(payload.capabilities, {
+      available: [],
+      unavailable: [{ id: "agentlas-time", reason: "consent-required" }],
+    }, "missing consent must keep the app successful while disclosing stateless/no-tool mode");
     assert.equal(capturedRequest.chatId, chat.id);
     assert.equal(capturedRequest.permissions, "read");
     assert.equal(capturedRequest.hubMode, "local-only");
     assert.equal(capturedRequest.agentAppMode, true);
     assert.equal(capturedRequest.agentAppRuntimeToolGrant, undefined);
+    assert.match(capturedRequest.userPrompt, /agentlas-time \(consent-required\)/);
     assert.deepEqual(capturedRequest.borrowAgents, []);
     assert.equal(capturedRequest.planMode, false);
     assert.equal(capturedRequest.goalMode, false);

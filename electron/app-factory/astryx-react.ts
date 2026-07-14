@@ -535,7 +535,9 @@ type FieldSpec = {
 type OutputSpec = { name: string; label: string; type: string; description: string };
 type FieldValue = string | number | boolean | null;
 type RuntimePhase = "idle" | "running" | "success" | "error";
-type RuntimeResult = { outputs: Record<string, unknown>; structured: boolean; runId?: string };
+type CapabilityIssue = { id: string; reason: string };
+type CapabilityDisclosure = { available: string[]; unavailable: CapabilityIssue[] };
+type RuntimeResult = { outputs: Record<string, unknown>; structured: boolean; runId?: string; capabilities?: CapabilityDisclosure };
 type ContractFieldsProps = {
   fields: FieldSpec[];
   values: Record<string, FieldValue>;
@@ -682,6 +684,31 @@ function objectValue(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+const SAFE_CAPABILITY_REASONS = new Set([
+  "not-allowlisted",
+  "blocked-by-agent-app-policy",
+  "consent-required",
+  "not-installed",
+  "key-missing",
+  "not-configured",
+  "runtime-unavailable",
+]);
+
+function safeCapabilityDisclosure(value: unknown): CapabilityDisclosure | undefined {
+  if (!objectValue(value)) return undefined;
+  const available = Array.isArray(value.available)
+    ? [...new Set(value.available.filter((id): id is string => typeof id === "string" && /^[a-z0-9][a-z0-9_-]{0,79}$/.test(id)))].slice(0, 12)
+    : [];
+  const unavailable = Array.isArray(value.unavailable)
+    ? value.unavailable.flatMap((item): CapabilityIssue[] => {
+        if (!objectValue(item) || typeof item.id !== "string" || !/^[a-z0-9][a-z0-9_-]{0,79}$/.test(item.id)) return [];
+        if (typeof item.reason !== "string" || !SAFE_CAPABILITY_REASONS.has(item.reason)) return [];
+        return [{ id: item.id, reason: item.reason }];
+      }).slice(0, 24)
+    : [];
+  return { available, unavailable };
+}
+
 function useAgentAppState() {
   const [localCapability] = useState<string | null>(() => readRuntimeCapability());
   const [accessKey, setAccessKey] = useState("");
@@ -749,6 +776,7 @@ function useAgentAppState() {
         outputs: payload.outputs,
         structured: payload.structured === true,
         runId: typeof payload.runId === "string" ? payload.runId : undefined,
+        capabilities: safeCapabilityDisclosure(payload.capabilities),
       });
       setPhase("success");
     } catch (runtimeError) {
@@ -999,6 +1027,18 @@ function OutputCards({ phase, result }: { phase: RuntimePhase; result: RuntimeRe
           {TEMPLATE}{REQUESTED_TEMPLATE !== TEMPLATE ? " · " + REQUESTED_TEMPLATE + " profile" : ""} · Astryx 0.1.4
         </Text>
       </HStack>
+      {result?.capabilities && (result.capabilities.available.length > 0 || result.capabilities.unavailable.length > 0) && (
+        <HStack gap={2} vAlign="center" wrap="wrap">
+          <StatusDot
+            variant="accent"
+            label={result.capabilities.available.length > 0 ? "MCP attached for this run" : "Stateless · no MCP attached"}
+          />
+          {result.capabilities.available.map((id) => <Token key={\`available-\${id}\`} label={\`\${id} · ready\`} />)}
+          {result.capabilities.unavailable.map((item) => (
+            <Token key={\`unavailable-\${item.id}-\${item.reason}\`} label={\`\${item.id} · \${item.reason}\`} />
+          ))}
+        </HStack>
+      )}
       {OUTPUTS.map((output) => (
         <Card key={output.name} padding={6}>
           <VStack gap={2}>

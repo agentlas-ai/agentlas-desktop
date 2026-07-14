@@ -1,5 +1,43 @@
 // 엔진 사용량 커넥터 공용 헬퍼.
 // 프로바이더 usage 응답의 퍼센트/리셋 시각 정규화 + 타임아웃 JSON GET.
+import type { UsageProviderErrorCode } from "../../shared/types";
+
+export interface NormalizedUsageError {
+  code: UsageProviderErrorCode;
+  retryAfterSeconds?: number;
+}
+
+const SAFE_ERROR_CODES = new Set<UsageProviderErrorCode>([
+  "auth_expired",
+  "credentials_corrupt",
+  "keychain_blocked",
+  "quota_exhausted",
+  "unsupported_client",
+  "rate_limited",
+  "network_error",
+  "provider_error",
+  "local_estimate",
+]);
+
+/** Provider/OS 원문 오류를 Renderer-safe enum으로 축약한다. 원문·URL·로컬 경로는 반환하지 않는다. */
+export function normalizeUsageError(value: unknown): NormalizedUsageError {
+  const message = value instanceof Error ? value.message : String(value ?? "");
+  if (SAFE_ERROR_CODES.has(message as UsageProviderErrorCode)) {
+    return { code: message as UsageProviderErrorCode };
+  }
+  if (/HTTP 40[13]/i.test(message)) return { code: "auth_expired" };
+  if (/HTTP 429/i.test(message)) {
+    const parsed = Number(/retry-after=(\d+)/i.exec(message)?.[1]);
+    return {
+      code: "rate_limited",
+      ...(Number.isFinite(parsed) && parsed > 0 ? { retryAfterSeconds: parsed } : {}),
+    };
+  }
+  if (/HTTP (408|425|5\d\d)|fetch failed|timed? ?out|abort|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network/i.test(message)) {
+    return { code: "network_error" };
+  }
+  return { code: "provider_error" };
+}
 
 // 0–100 퍼센트로 정규화. 프로바이더 usage 엔드포인트는 이미 0–100 스케일을 주므로
 // 분수(×100) 변환을 하지 않는다(그러면 1% → 100% 식으로 오스케일됨). 숫자/"NN%" 문자열 허용, 클램프.

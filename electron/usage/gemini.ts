@@ -4,11 +4,14 @@
 // gemini-cli 자신이 하는 갱신을 대신 해 주는 것뿐이라 어느 머신에서든 재로그인 없이 회복된다.
 // 흐름: loadCodeAssist(project 확보) → retrieveUserQuota({project}) → buckets[{modelId,remainingFraction,resetTime}].
 // (방식 출처: oss agentcat-connectors gemini_live_limits + google-gemini/gemini-cli oauth2)
-import { readFile, rename, writeFile } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import type { ProviderUsage, UsageWindow } from "../../shared/types";
-import { postForm, postJson, toResetMs } from "./util";
+import {
+  repairGeminiCredentialFile,
+  writeGeminiCredentialsAtomic,
+  type GeminiCredentialFile,
+} from "./gemini-credentials";
+import { clearProviderHealth, readProviderHealth, recordProviderHealth } from "./provider-health";
+import { normalizeUsageError, postForm, postJson, toResetMs } from "./util";
 
 const CODE_ASSIST = "https://cloudcode-pa.googleapis.com/v1internal";
 // gemini-cli가 배포하는 공개 installed-app OAuth 클라이언트 상수.
@@ -26,38 +29,9 @@ const GEMINI_OAUTH_CLIENT_ID = joinParts(
 const GEMINI_OAUTH_CLIENT_SECRET = joinParts("GOCSPX", "-4uHgMPm", "-1o7Sk", "-geV6Cu5clXFsxl");
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 
-interface GeminiCreds {
-  file: Record<string, unknown>;
-  filePath: string;
-  token: string | null;
-  refreshToken: string | null;
-  expiryDate: number | null;
-}
-
-async function readGeminiCreds(): Promise<GeminiCreds | null> {
-  const filePath = path.join(os.homedir(), ".gemini", "oauth_creds.json");
-  try {
-    const raw = await readFile(filePath, "utf8");
-    const file = JSON.parse(raw) as Record<string, unknown>;
-    const token = typeof file?.access_token === "string" && file.access_token ? file.access_token : null;
-    const refreshToken =
-      typeof file?.refresh_token === "string" && file.refresh_token ? file.refresh_token : null;
-    const exp = Number(file?.expiry_date);
-    return {
-      file,
-      filePath,
-      token,
-      refreshToken,
-      expiryDate: Number.isFinite(exp) && exp > 0 ? exp : null,
-    };
-  } catch {
-    return null;
-  }
-}
-
 /** refresh_token으로 access_token 갱신 + oauth_creds.json에 반영(gemini-cli도 같이 회복).
  *  실패하면 null — 그때만 재로그인 안내로 떨어진다. */
-async function refreshGeminiToken(creds: GeminiCreds): Promise<string | null> {
+async function refreshGeminiToken(creds: GeminiCredentialFile): Promise<string | null> {
   if (!creds.refreshToken) return null;
   try {
     const res = (await postForm(GOOGLE_TOKEN_URL, {
@@ -78,9 +52,7 @@ async function refreshGeminiToken(creds: GeminiCreds): Promise<string | null> {
       ...(typeof res?.id_token === "string" && res.id_token ? { id_token: res.id_token } : {}),
     };
     try {
-      const tmp = `${creds.filePath}.tmp-${process.pid}`;
-      await writeFile(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
-      await rename(tmp, creds.filePath);
+      await writeGeminiCredentialsAtomic(creds.filePath, next);
     } catch {
       // 기록 실패해도 이번 조회는 새 토큰으로 진행(다음 조회 때 다시 갱신하면 됨)
     }
@@ -111,15 +83,24 @@ function prettyModel(model: string): string {
 }
 
 export async function getGeminiUsage(): Promise<ProviderUsage | null> {
-  const cred = await readGeminiCreds();
-  if (!cred || (!cred.token && !cred.refreshToken)) return null; // 미연결
-
   const base = {
     provider: "gemini",
     backend: "google" as const,
     label: "Gemini",
     fetchedAt: Date.now(),
   };
+  // 실제 채팅 런타임이 공식 CLI의 UNSUPPORTED_CLIENT를 확인했다면 네트워크 quota
+  // 추측보다 그 실행 영수증이 우선이다. Antigravity는 별도 quota API를 노출하지 않는다.
+  if (readProviderHealth("gemini")?.code === "gemini_unsupported_client") {
+    return { ...base, status: "error", windows: [], error: "unsupported_client" };
+  }
+  const credentialResult = await repairGeminiCredentialFile();
+  if (credentialResult.status === "missing") return null;
+  if (credentialResult.status === "corrupt") {
+    return { ...base, status: "error", windows: [], error: "credentials_corrupt" };
+  }
+  const cred = credentialResult.credentials;
+  if (!cred.token && !cred.refreshToken) return null; // 미연결
   // 만료(또는 토큰 부재) → refresh_token으로 자동 갱신. 갱신까지 실패할 때만 재로그인 안내.
   let token: string | null = cred.token;
   const expired = !token || (cred.expiryDate != null && cred.expiryDate <= Date.now() + 30_000);
@@ -138,16 +119,24 @@ export async function getGeminiUsage(): Promise<ProviderUsage | null> {
         try {
           return await fetchQuota(retryToken, base);
         } catch (err2) {
-          const msg2 = err2 instanceof Error ? err2.message : String(err2);
-          return { ...base, status: "error", windows: [], error: /HTTP 40[13]/.test(msg2) ? "auth_expired" : msg2 };
+          const normalized = normalizeUsageError(err2);
+          return {
+            ...base,
+            status: "error",
+            windows: [],
+            error: normalized.code,
+            ...(normalized.retryAfterSeconds ? { retryAfterSeconds: normalized.retryAfterSeconds } : {}),
+          };
         }
       }
     }
+    const normalized = normalizeUsageError(msg);
     return {
       ...base,
       status: "error",
       windows: [],
-      error: /HTTP 40[13]/.test(msg) ? "auth_expired" : msg,
+      error: normalized.code,
+      ...(normalized.retryAfterSeconds ? { retryAfterSeconds: normalized.retryAfterSeconds } : {}),
     };
   }
 }
@@ -170,8 +159,14 @@ async function fetchQuota(
     { cloudaicompanionProject: projectEnv || null, metadata },
     token,
   );
+  if (hasUnsupportedClientReason(tier)) {
+    recordProviderHealth("gemini", "gemini_unsupported_client");
+    return { ...base, status: "error", windows: [], error: "unsupported_client" };
+  }
   const projectId = String(tier?.cloudaicompanionProject ?? projectEnv ?? "");
   if (!projectId) return { ...base, status: "no_quota", windows: [] };
+
+  clearProviderHealth("gemini");
 
   const quota = await post("retrieveUserQuota", { project: projectId }, token);
   const buckets = Array.isArray(quota?.buckets) ? quota.buckets : [];
@@ -198,4 +193,15 @@ async function fetchQuota(
       (b.model?.toLowerCase().includes("pro") ? 0 : 1),
   );
   return { ...base, status: windows.length ? "ok" : "no_quota", windows: windows.slice(0, 4) };
+}
+
+/** loadCodeAssist 응답은 CLI 버전에 따라 tier 중첩 모양이 달라 재귀적으로 reasonCode를 찾는다. */
+export function hasUnsupportedClientReason(value: unknown, depth = 0): boolean {
+  if (depth > 8 || value == null) return false;
+  if (typeof value === "string") return value === "UNSUPPORTED_CLIENT";
+  if (Array.isArray(value)) return value.some((item) => hasUnsupportedClientReason(item, depth + 1));
+  if (typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  if (record.reasonCode === "UNSUPPORTED_CLIENT") return true;
+  return Object.values(record).some((item) => hasUnsupportedClientReason(item, depth + 1));
 }

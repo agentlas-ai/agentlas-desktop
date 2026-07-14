@@ -52,6 +52,12 @@ function validateCoreStormbreakerHarness(value: unknown): CoreStormbreakerHarnes
   if (digest !== harness.prompt_sha256) {
     throw new Error("Installed Agentlas Core Stormbreaker harness failed its SHA-256 integrity check.");
   }
+  if (
+    harness.system_prompt.split("GOAL MODE:").length - 1 !== 1 ||
+    harness.system_prompt.split("ULTRACODE MODE:").length - 1 !== 1
+  ) {
+    throw new Error("Installed Agentlas Core harness must contain exactly one Goal mode and one UltraCode mode.");
+  }
   return harness as unknown as CoreStormbreakerHarness;
 }
 

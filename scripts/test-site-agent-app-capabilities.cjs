@@ -2,6 +2,7 @@
 // Canonical contract + one-run read-only capability behavior. The verifier is
 // deterministic and no MCP/model/network/browser process is started.
 const assert = require("node:assert/strict");
+const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -38,128 +39,225 @@ async function main() {
   fs.writeFileSync(path.join(packageRoot, ".agentlas", "routing-card.json"), JSON.stringify({
     schemaVersion: "routing-card/2.0",
     type: "agent",
-    name: "Verified Research Agent",
-    summary: "Researches a topic using its explicitly declared read-only search capability.",
-    required_inputs: [{ name: "topic", type: "text", description: "Question to research" }],
+    name: "Verified Time Agent",
+    summary: "Uses one content-pinned, system-global read-only time capability.",
+    required_inputs: [{ name: "topic", type: "text", description: "Question" }],
     optional_inputs: ["source constraints"],
-    produces: [{ kind: "cited_brief", description: "Evidence-backed brief" }],
-    required_plugins: ["brave-search", "filesystem", "hephaestus-network"],
+    produces: [{ kind: "brief", description: "Brief" }],
+    required_plugins: ["agentlas-time", "brave-search", "filesystem"],
     approval_requirements: ["network_access", "file_write"],
     memory_behavior: { reads: "project", writes: "project" },
   }, null, 2));
 
   const { readResolvedSiteAgentAppContract } = require("../dist/electron/site/agent-app-contract.js");
   const declared = readResolvedSiteAgentAppContract(packageRoot);
-  assert.ok(declared, "routing-card/2.0 must resolve as a canonical Agent App contract");
-  assert.equal(declared.contract.source, "declared-routing-card");
-  assert.deepEqual(declared.contract.inputs.map((field) => field.name), ["topic", "source-constraints"]);
-  assert.deepEqual(declared.contract.outputs.map((field) => field.name), ["cited_brief"]);
-  assert.deepEqual(declared.contract.capabilities.readonlyMcpCatalogIds, ["brave-search"]);
+  assert.ok(declared);
+  assert.deepEqual(declared.contract.capabilities.readonlyMcpCatalogIds, ["agentlas-time"]);
   assert.ok(declared.contract.capabilities.unavailable.some((issue) =>
-    issue.id === "filesystem" && issue.reason === "not-allowlisted"));
-  assert.ok(declared.contract.capabilities.unavailable.some((issue) =>
-    issue.id === "hephaestus-network" && issue.reason === "not-allowlisted"));
-  assert.ok(declared.contract.capabilities.unavailable.some((issue) =>
-    issue.id === "file_write" && issue.reason === "blocked-by-agent-app-policy"));
-  assert.ok(declared.contract.capabilities.unavailable.some((issue) =>
-    issue.id === "persistence" && issue.reason === "blocked-by-agent-app-policy"));
+    issue.id === "brave-search" && issue.reason === "not-allowlisted"),
+  "an unpinned Brave catalog row must remain declared/visible but never executable");
+  assert.ok(declared.contract.capabilities.unavailable.some((issue) => issue.id === "filesystem"));
 
+  const {
+    systemTimeMcpLaunchArgs,
+    isAuthenticSystemTimeMcpLaunch,
+  } = require("../dist/electron/mcp-tools/system-time-server.js");
+  const timeServerArgs = systemTimeMcpLaunchArgs();
+  assert.equal(isAuthenticSystemTimeMcpLaunch(process.execPath, timeServerArgs), true);
   const now = new Date().toISOString();
   db.prepare(
     `INSERT INTO mcp_servers
        (id, catalog_id, name, name_en, transport, command, args_json, url, env_keys_json, enabled, installed_at)
-     VALUES (?, ?, ?, ?, 'stdio', ?, ?, NULL, '[]', 1, ?)`,
-  ).run(
-    "site-capability-brave",
-    "brave-search",
-    "Brave Search",
-    "Brave Search",
-    process.execPath,
-    JSON.stringify([__filename]),
-    now,
-  );
+     VALUES (?, 'agentlas-time', 'System Time', 'System Time', 'stdio', ?, ?, NULL, '[]', 1, ?)`,
+  ).run("site-capability-time", process.execPath, JSON.stringify(timeServerArgs), now);
 
-  const { prepareSiteAgentAppCapabilities } = require("../dist/electron/site/agent-app-capabilities.js");
-  let incompatibleVerificationCalls = 0;
-  const incompatibleRuntime = await prepareSiteAgentAppCapabilities(
-    declared.contract.capabilities,
-    "codex-fixture",
-    {
-      runtimeEligible: false,
-      verifyServer: async () => {
-        incompatibleVerificationCalls += 1;
-        throw new Error("must not verify for an ineligible runtime");
-      },
-    },
-  );
-  assert.equal(incompatibleVerificationCalls, 0, "a non-Claude runtime must downgrade before MCP verification");
-  assert.equal(incompatibleRuntime.grant, null, "an ineligible runtime must never receive the grant");
-  assert.deepEqual(incompatibleRuntime.disclosure.available, []);
-  assert.ok(incompatibleRuntime.disclosure.unavailable.some((issue) =>
-    issue.id === "brave-search" && issue.reason === "runtime-unavailable"));
+  const projectId = randomUUID();
+  const { createSiteAgentAppMcpConsentReceipt } = require("../dist/electron/site/agent-app-mcp-consent.js");
+  const consentReceipt = createSiteAgentAppMcpConsentReceipt({
+    projectId,
+    profile: declared.contract.capabilities,
+    decision: "approved",
+    approvedCatalogIds: ["agentlas-time"],
+    readinessDigest: "a".repeat(64),
+  });
+  const { prepareSiteAgentAppCapabilities, declaredSiteAgentAppCapabilities } =
+    require("../dist/electron/site/agent-app-capabilities.js");
 
-  let verificationCalls = 0;
-  const prepared = await prepareSiteAgentAppCapabilities(
-    declared.contract.capabilities,
-    "safe-fixture",
-    {
-      verifyServer: async (server) => {
-        verificationCalls += 1;
-        assert.equal(server.id, "site-capability-brave");
-        return {
-          id: server.id,
-          connected: true,
-          tools: [{ name: "brave_web_search" }, { name: "brave_local_search" }],
-          error: null,
-          missingEnv: [],
-          checkedAt: new Date().toISOString(),
-        };
-      },
-    },
-  );
-  assert.equal(verificationCalls, 1, "the installed server must be verified immediately before grant creation");
-  assert.ok(prepared.grant, "a pinned, enabled, currently verified server must receive a one-run grant");
-  assert.equal(prepared.grant.runtimeStatus, "prepared");
-  assert.deepEqual(prepared.grant.availableCatalogIds, ["brave-search"]);
+  let absentCalls = 0;
+  const absent = await prepareSiteAgentAppCapabilities(declared.contract.capabilities, "absent", {
+    projectId,
+    verifyServer: async () => { absentCalls += 1; throw new Error("must not run"); },
+  });
+  assert.equal(absentCalls, 0);
+  assert.equal(absent.grant, null);
+  assert.ok(absent.disclosure.unavailable.some((issue) => issue.id === "agentlas-time" && issue.reason === "consent-required"));
+
+  let ineligibleCalls = 0;
+  const ineligible = await prepareSiteAgentAppCapabilities(declared.contract.capabilities, "ineligible", {
+    projectId,
+    consentReceipt,
+    runtimeEligible: false,
+    verifyServer: async () => { ineligibleCalls += 1; throw new Error("must not run"); },
+  });
+  assert.equal(ineligibleCalls, 0);
+  assert.equal(ineligible.grant, null);
+
+  const verifyTime = async (server) => ({
+    id: server.id,
+    connected: true,
+    tools: [{ name: "get_current_time" }, { name: "convert_time" }],
+    error: null,
+    missingEnv: [],
+    checkedAt: new Date().toISOString(),
+  });
+  const prepared = await prepareSiteAgentAppCapabilities(declared.contract.capabilities, "safe", {
+    projectId,
+    consentReceipt,
+    verifyServer: verifyTime,
+  });
+  assert.ok(prepared.grant);
+  assert.deepEqual(prepared.grant.availableCatalogIds, ["agentlas-time"]);
   assert.deepEqual(prepared.grant.mcpAllowedTools, [
-    "mcp__brave-search__brave_web_search",
-    "mcp__brave-search__brave_local_search",
+    "mcp__agentlas-time__get_current_time",
+    "mcp__agentlas-time__convert_time",
   ]);
-  const configText = fs.readFileSync(prepared.grant.mcpConfigPath, "utf8");
-  const config = JSON.parse(configText);
-  assert.deepEqual(Object.keys(config.mcpServers), ["brave-search"]);
-  assert.equal(/\bnpx\b|(?:^|\s)-y(?:\s|$)|@modelcontextprotocol\/server-brave-search/.test(configText), false,
-    "Agent App must not serialize a package-manager download command");
-  assert.equal(configText.includes("filesystem"), false);
-  assert.equal(configText.includes("hephaestus"), false);
-  prepared.grant.runtimeStatus = "runtime-unavailable";
-  assert.deepEqual(prepared.finalDisclosure().available, [], "a post-preflight runtime change must downgrade disclosure");
-  assert.ok(prepared.finalDisclosure().unavailable.some((issue) =>
-    issue.id === "brave-search" && issue.reason === "runtime-unavailable"));
+  assert.deepEqual(prepared.grant.mcpServerBindings, [{
+    serverId: "site-capability-time",
+    catalogId: "agentlas-time",
+    configKey: "agentlas-time",
+  }]);
+  assert.deepEqual(prepared.grant.mcpRuntimeEnv, {}, "keyless grant must forward zero secret aliases");
+  const configBytes = fs.readFileSync(prepared.grant.mcpConfigPath);
+  assert.equal(prepared.grant.mcpConfigSha256, createHash("sha256").update(configBytes).digest("hex"));
+  assert.equal(configBytes.includes(Buffer.from("UNRELATED_SECRET_CANARY")), false);
+  const inlineConfig = JSON.parse(configBytes.toString("utf8"));
+  assert.deepEqual(inlineConfig.mcpServers["agentlas-time"], {
+    command: process.execPath,
+    args: timeServerArgs,
+    env: { ELECTRON_RUN_AS_NODE: "1" },
+  }, "the keyless built-in must bypass the mutable child wrapper");
+  assert.equal(fs.existsSync(path.join(path.dirname(prepared.grant.mcpConfigPath), "mcp-child-env-wrapper.cjs")), false);
+  assert.ok(configBytes.length <= 4_096, "the inline Agent App config must stay inside the cross-platform argv budget");
+  assert.ok(configBytes.length * 2 + 1_024 < 8_191,
+    "a conservative Windows .cmd escaping budget must leave room for Claude's fixed arguments");
+  const { resolveSiteAgentAppInlineMcpConfigForDispatch } =
+    require("../dist/electron/site/agent-app-mcp-config-policy.js");
+  const { listInstalledServers } = require("../dist/electron/mcp-tools/registry.js");
+  const expectedInlineConfig = JSON.stringify(inlineConfig);
+  assert.equal(
+    resolveSiteAgentAppInlineMcpConfigForDispatch(prepared.grant, listInstalledServers()),
+    expectedInlineConfig,
+    "Main's final dispatch gate must convert the stable preflight file to canonical inline JSON",
+  );
   const configPath = prepared.grant.mcpConfigPath;
+  fs.writeFileSync(configPath, '{"mcpServers":{}}');
+  assert.equal(resolveSiteAgentAppInlineMcpConfigForDispatch(prepared.grant, listInstalledServers()), null,
+    "a config changed after preflight must downgrade before dispatch");
+  fs.writeFileSync(configPath, configBytes);
+  db.prepare("UPDATE mcp_servers SET args_json = ? WHERE id = ?")
+    .run(JSON.stringify([...timeServerArgs, "--tampered-after-preflight"]), "site-capability-time");
+  assert.equal(resolveSiteAgentAppInlineMcpConfigForDispatch(prepared.grant, listInstalledServers()), null,
+    "a registry row changed after preflight must downgrade before dispatch");
+  db.prepare("UPDATE mcp_servers SET args_json = ? WHERE id = ?")
+    .run(JSON.stringify(timeServerArgs), "site-capability-time");
+  fs.rmSync(configPath);
+  assert.equal(resolveSiteAgentAppInlineMcpConfigForDispatch(prepared.grant, listInstalledServers()), null,
+    "a deleted preflight config must downgrade before dispatch");
+  fs.writeFileSync(configPath, configBytes);
+  prepared.grant.runtimeStatus = "runtime-unavailable";
+  assert.deepEqual(prepared.finalDisclosure().available, []);
   prepared.cleanup();
-  assert.equal(fs.existsSync(configPath), false, "the one-run MCP config must be removed after invocation");
+  assert.equal(fs.existsSync(configPath), false);
 
-  // A catalog row alone is not an installation. In particular, never run the
-  // catalog's unpinned `npx -y` command to discover whether it works.
-  db.prepare("UPDATE mcp_servers SET command = ?, args_json = ? WHERE id = ?").run(
-    "npx",
-    JSON.stringify(["-y", "@modelcontextprotocol/server-brave-search"]),
-    "site-capability-brave",
-  );
-  let unsafeVerificationCalls = 0;
-  const rejected = await prepareSiteAgentAppCapabilities(
-    declared.contract.capabilities,
-    "unpinned-fixture",
-    { verifyServer: async () => {
-      unsafeVerificationCalls += 1;
-      throw new Error("must not execute");
-    } },
-  );
-  assert.equal(unsafeVerificationCalls, 0, "unpinned npx rows must be rejected before connection testing");
-  assert.equal(rejected.grant, null);
-  assert.ok(rejected.disclosure.unavailable.some((issue) =>
-    issue.id === "brave-search" && issue.reason === "not-configured"));
+  db.prepare("UPDATE mcp_servers SET env_keys_json = ? WHERE id = ?")
+    .run(JSON.stringify(["UNRELATED_SECRET_CANARY"]), "site-capability-time");
+  let canaryReads = 0;
+  let canaryVerifications = 0;
+  const canary = await prepareSiteAgentAppCapabilities(declared.contract.capabilities, "canary", {
+    projectId,
+    consentReceipt,
+    hasCredential: async () => { canaryReads += 1; return true; },
+    verifyServer: async () => { canaryVerifications += 1; return verifyTime({ id: "bad" }); },
+  });
+  assert.equal(canary.grant, null);
+  assert.equal(canaryReads, 0, "unexpected env names must be rejected before any vault read");
+  assert.equal(canaryVerifications, 0, "unexpected env names must be rejected before process execution");
+  db.prepare("UPDATE mcp_servers SET env_keys_json = '[]' WHERE id = ?").run("site-capability-time");
+
+  for (const malformedArgs of ["[1]", JSON.stringify([...timeServerArgs, {}])]) {
+    db.prepare("UPDATE mcp_servers SET args_json = ? WHERE id = ?").run(malformedArgs, "site-capability-time");
+    let malformedVerifications = 0;
+    const malformed = await prepareSiteAgentAppCapabilities(declared.contract.capabilities, "malformed-args", {
+      projectId,
+      consentReceipt,
+      verifyServer: async () => { malformedVerifications += 1; return verifyTime({ id: "bad" }); },
+    });
+    assert.equal(malformed.grant, null, "malformed args JSON must degrade to no-tool instead of throwing");
+    assert.equal(malformedVerifications, 0);
+  }
+  db.prepare("UPDATE mcp_servers SET args_json = ? WHERE id = ?")
+    .run(JSON.stringify(timeServerArgs), "site-capability-time");
+  db.prepare("UPDATE mcp_servers SET env_keys_json = '[1]' WHERE id = ?").run("site-capability-time");
+  let malformedEnvVerifications = 0;
+  const malformedEnv = await prepareSiteAgentAppCapabilities(declared.contract.capabilities, "malformed-env", {
+    projectId,
+    consentReceipt,
+    verifyServer: async () => { malformedEnvVerifications += 1; return verifyTime({ id: "bad" }); },
+  });
+  assert.equal(malformedEnv.grant, null, "malformed env JSON must degrade to no-tool instead of throwing");
+  assert.equal(malformedEnvVerifications, 0);
+  db.prepare("UPDATE mcp_servers SET env_keys_json = '[]' WHERE id = ?").run("site-capability-time");
+
+  const verificationFailure = await prepareSiteAgentAppCapabilities(declared.contract.capabilities, "verify-fail", {
+    projectId,
+    consentReceipt,
+    verifyServer: async () => { throw new Error("SENTINEL_PRIVATE_VERIFICATION_ERROR"); },
+  });
+  assert.equal(verificationFailure.grant, null);
+  assert.equal(JSON.stringify(verificationFailure).includes("SENTINEL_PRIVATE"), false);
+
+  const configFailure = await prepareSiteAgentAppCapabilities(declared.contract.capabilities, "config-fail", {
+    projectId,
+    consentReceipt,
+    verifyServer: verifyTime,
+    buildConfig: async () => { throw new Error("SENTINEL_PRIVATE_CONFIG_ERROR"); },
+  });
+  assert.equal(configFailure.grant, null);
+  assert.equal(JSON.stringify(configFailure).includes("SENTINEL_PRIVATE"), false);
+
+  const unsafeTools = await prepareSiteAgentAppCapabilities(declared.contract.capabilities, "unsafe-tools", {
+    projectId,
+    consentReceipt,
+    verifyServer: async (server) => ({ ...(await verifyTime(server)), tools: [
+      { name: "get_current_time" }, { name: "convert_time" }, { name: "write_file" },
+    ] }),
+  });
+  assert.equal(unsafeTools.grant, null);
+
+  let arbitraryCalls = 0;
+  const arbitrary = await prepareSiteAgentAppCapabilities(declared.contract.capabilities, "arbitrary", {
+    projectId,
+    consentReceipt,
+    listInstalled: () => [{
+      id: "arbitrary-time", catalogId: "agentlas-time", name: "Time", nameEn: "Time",
+      transport: "stdio", command: process.platform === "win32" ? "C:\\Windows\\System32\\cmd.exe" : "/bin/echo",
+      args: [], url: null, envKeys: [], enabled: true, installedAt: now,
+    }],
+    verifyServer: async () => { arbitraryCalls += 1; throw new Error("must not run"); },
+  });
+  assert.equal(arbitraryCalls, 0);
+  assert.equal(arbitrary.grant, null);
+
+  const braveProfile = declaredSiteAgentAppCapabilities(["brave-search"], "declared-package");
+  assert.deepEqual(braveProfile.readonlyMcpCatalogIds, []);
+  assert.ok(braveProfile.unavailable.some((issue) => issue.id === "brave-search" && issue.reason === "not-allowlisted"));
+  let braveCalls = 0;
+  const brave = await prepareSiteAgentAppCapabilities(braveProfile, "brave-blocked", {
+    projectId,
+    verifyServer: async () => { braveCalls += 1; throw new Error("must not run"); },
+  });
+  assert.equal(braveCalls, 0, "unprovenance Brave rows must never reach verification or receive the key");
+  assert.equal(brave.grant, null);
 
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log("site agent app declared capability behavior ok");

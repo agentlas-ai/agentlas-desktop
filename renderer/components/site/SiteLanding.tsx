@@ -6,8 +6,9 @@ import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
 import type { AgentGroupResolved, InstalledAgent, InstalledFirm } from "@shared/types";
 import type {
+  SiteAgentAppMcpRecommendation,
   SiteAgentAppTargetRef,
-  SiteProjectMeta,
+  SiteProjectPublicMeta,
   SiteSurface,
 } from "@shared/site-studio";
 import styles from "./SiteLanding.module.css";
@@ -27,23 +28,36 @@ export type SiteAgentAppThumbnailResult =
   | { ok: true; dataUrl: string }
   | { ok: false; reason: string };
 
+/**
+ * Card truth is deliberately separate from the persisted consent receipt.
+ * `offline` includes an absent bridge, a failed lookup, and an unverified
+ * initial render; none of those states may inherit an old approval checkmark.
+ */
+export type SiteAgentAppMcpLiveState =
+  | { kind: "resolved"; recommendation: SiteAgentAppMcpRecommendation }
+  | { kind: "offline" };
+
 type SiteLandingProps = {
-  projects: SiteProjectMeta[];
+  projects: SiteProjectPublicMeta[];
   locale: "ko" | "en";
   busy: boolean;
   noEngine: boolean;
   generating: boolean;
+  /** Fresh main-owned readiness. Missing entries fail closed as offline. */
+  agentAppMcpLiveStates?: Record<string, SiteAgentAppMcpLiveState>;
   onCreate: (input: {
     brief: string;
     surface: SiteSurface;
     agentAppTarget?: SiteAgentAppTargetRef;
   }) => void;
-  onOpenProject: (project: SiteProjectMeta) => void;
+  onOpenProject: (project: SiteProjectPublicMeta) => void;
   onDeleteProject: (projectId: string) => void;
   /** Main owns thumbnail validation and reading. Only visible cards request image data. */
   onLoadAgentAppThumbnail?: (projectId: string) => Promise<SiteAgentAppThumbnailResult>;
   /** Publishing is always explicit: the user must select a card before this fires. */
-  onPublishProject?: (project: SiteProjectMeta) => void;
+  onPublishProject?: (project: SiteProjectPublicMeta) => void;
+  /** Opens Electron main's native MCP recommendation/consent review. */
+  onReviewAgentAppMcp?: (project: SiteProjectPublicMeta) => void;
 };
 
 const AGENT_APPS_PER_PAGE = 9;
@@ -74,6 +88,10 @@ function PublishIcon() {
 
 function ExternalIcon() {
   return <Icon size={14}><path d="M14 5h5v5M19 5l-8 8M17 13v4a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></Icon>;
+}
+
+function McpIcon() {
+  return <Icon size={13}><circle cx="7" cy="12" r="2.2" stroke="currentColor" strokeWidth="1.5" /><circle cx="17" cy="7" r="2.2" stroke="currentColor" strokeWidth="1.5" /><circle cx="17" cy="17" r="2.2" stroke="currentColor" strokeWidth="1.5" /><path d="m9 11 5.8-3M9 13l5.8 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></Icon>;
 }
 
 function TemplateIllustration({ surface }: { surface: SiteSurface }) {
@@ -121,7 +139,7 @@ function formatDate(value: string, locale: "ko" | "en"): string {
   }).format(date);
 }
 
-function targetKindLabel(project: SiteProjectMeta, ko: boolean): string {
+function targetKindLabel(project: SiteProjectPublicMeta, ko: boolean): string {
   const kind = project.agentAppTarget?.kind;
   if (kind === "team") return ko ? "에이전트 팀" : "Agent team";
   if (kind === "firm") return ko ? "에이전트 회사" : "Agent firm";
@@ -129,12 +147,61 @@ function targetKindLabel(project: SiteProjectMeta, ko: boolean): string {
   return ko ? "내 에이전트" : "My agent";
 }
 
+function mcpCardPresentation(
+  liveState: SiteAgentAppMcpLiveState | undefined,
+  ko: boolean,
+): { status: "ready" | "review" | "offline" | "off" | "blocked"; label: string; title: string } {
+  if (!liveState || liveState.kind === "offline") {
+    return {
+      status: "offline",
+      label: "MCP offline",
+      title: ko ? "MCP 상태를 확인할 수 없습니다. 다시 검토하세요." : "MCP status could not be verified. Review it again.",
+    };
+  }
+  const { recommendation } = liveState;
+  if (recommendation.rows.length === 0 && recommendation.blocked.length > 0) {
+    return {
+      status: "blocked",
+      label: ko ? "MCP 차단" : "MCP blocked",
+      title: ko
+        ? "앱이 선언한 MCP가 Agent App 안전 정책에서 제외됐습니다. 눌러서 차단 항목을 확인하세요."
+        : "The app-declared MCP was excluded by Agent App safety policy. Open to review the blocked declaration.",
+    };
+  }
+  if (recommendation.status === "declined" || recommendation.status === "not-required") {
+    return {
+      status: "off",
+      label: ko ? "MCP 끔" : "MCP off",
+      title: ko ? "이 Agent App은 MCP 없이 실행됩니다." : "This Agent App runs without MCP.",
+    };
+  }
+  const total = recommendation.rows.length;
+  const ready = recommendation.rows.filter((row) => row.readiness === "ready").length;
+  const liveApprovalReady = recommendation.status === "approved" && total > 0 && ready === total;
+  if (liveApprovalReady) {
+    return {
+      status: "ready",
+      label: ko ? `MCP ${ready}/${total} 설정됨` : `MCP ${ready}/${total} configured`,
+      title: ko
+        ? "승인과 설치·키 설정이 확인됐습니다. 실제 연결은 실행 직전에 다시 검증합니다."
+        : "Consent, installation, and key setup are confirmed. Connection is verified again immediately before each run.",
+    };
+  }
+  return {
+    status: "review",
+    label: ko ? "MCP 검토" : "MCP review",
+    title: ko
+      ? "승인 또는 현재 연결 상태가 달라졌습니다. 다시 검토하세요."
+      : "Consent or live readiness changed. Review it again.",
+  };
+}
+
 function ThumbnailPlaceholder({
   project,
   thumbnail,
   ko,
 }: {
-  project: SiteProjectMeta;
+  project: SiteProjectPublicMeta;
   thumbnail?: SiteAgentAppThumbnailState;
   ko: boolean;
 }) {
@@ -167,11 +234,13 @@ export function SiteLanding({
   busy,
   noEngine,
   generating,
+  agentAppMcpLiveStates,
   onCreate,
   onOpenProject,
   onDeleteProject,
   onLoadAgentAppThumbnail,
   onPublishProject,
+  onReviewAgentAppMcp,
 }: SiteLandingProps) {
   const ko = locale === "ko";
   const [brief, setBrief] = useState("");
@@ -493,6 +562,10 @@ export function SiteLanding({
               const selected = selectedAgentAppId === project.id;
               const title = project.agentAppTarget?.name || project.name;
               const publish = project.agentAppArtifact?.publish;
+              const capabilities = project.agentAppContract?.capabilities;
+              const mcpCount = (capabilities?.readonlyMcpCatalogIds?.length ?? 0) +
+                (capabilities?.unavailable?.length ?? 0);
+              const mcpPresentation = mcpCardPresentation(agentAppMcpLiveStates?.[project.id], ko);
               return (
                 <article className={styles.agentAppCard} data-selected={selected ? "true" : "false"} key={project.id}>
                   <button
@@ -512,9 +585,24 @@ export function SiteLanding({
                       <h3>{title}</h3>
                       <p>{targetKindLabel(project, ko)} · Astryx</p>
                     </div>
-                    <button type="button" className={styles.openButton} disabled={busy || project.agentAppArtifact?.status !== "ready"} onClick={() => onOpenProject(project)}>
-                      {ko ? "실행" : "Launch"}<ExternalIcon />
-                    </button>
+                    <div className={styles.cardActions}>
+                      {mcpCount > 0 && onReviewAgentAppMcp && (
+                        <button
+                          type="button"
+                          className={styles.mcpButton}
+                          data-status={mcpPresentation.status}
+                          disabled={busy}
+                          onClick={() => onReviewAgentAppMcp(project)}
+                          title={mcpPresentation.title}
+                        >
+                          <McpIcon />
+                          {mcpPresentation.label}
+                        </button>
+                      )}
+                      <button type="button" className={styles.openButton} disabled={busy || project.agentAppArtifact?.status !== "ready"} onClick={() => onOpenProject(project)}>
+                        {ko ? "실행" : "Launch"}<ExternalIcon />
+                      </button>
+                    </div>
                   </div>
                   <div className={styles.cardFooter}>
                     <time dateTime={project.updatedAt}>{formatDate(project.updatedAt, locale)}</time>

@@ -101,14 +101,20 @@ async function main() {
     NODE_OPTIONS: "--require /tmp/untrusted-preload.js",
     AGENTLAS_STORE_PATH: "/tmp/untrusted.sqlite",
   };
-  const safeConfigPath = path.join(tmp, "agentlas-mcp-site-agent-app-safe.json");
-  fs.writeFileSync(safeConfigPath, JSON.stringify({
-    mcpServers: { "brave-search": { command: "/fixture/pinned/brave-search", args: [] } },
-  }));
+  const { systemTimeMcpLaunchArgs } = require("../dist/electron/mcp-tools/system-time-server.js");
+  const safeInlineConfig = JSON.stringify({
+    mcpServers: {
+      "agentlas-time": {
+        command: process.execPath,
+        args: systemTimeMcpLaunchArgs(),
+        env: { ELECTRON_RUN_AS_NODE: "1" },
+      },
+    },
+  });
   const opaqueAlias = "AGENTLAS_MCP_SECRET_0123456789ABCDEF0123456789ABCDEF";
   const exactReadOnlyTools = [
-    "mcp__brave-search__brave_web_search",
-    "mcp__brave-search__brave_local_search",
+    "mcp__agentlas-time__get_current_time",
+    "mcp__agentlas-time__convert_time",
   ];
   const finals = [];
   for (const run of [1, 2]) {
@@ -134,7 +140,7 @@ async function main() {
       runtimes: [active],
       picked,
       workingFolder: path.join(tmp, "must-not-become-cwd"),
-      mcpConfigPath: safeConfigPath,
+      mcpConfigPath: safeInlineConfig,
       mcpAllowedTools: exactReadOnlyTools,
       mcpCodexConfigArgs: ["-c", "mcp_servers.untrusted.enabled=true"],
       agentAppMcpRuntimeEnv: { [opaqueAlias]: "TEST_BRAVE_SECRET_VISIBLE_ONLY_AS_OPAQUE_ALIAS" },
@@ -154,8 +160,8 @@ async function main() {
     assert.equal(request.untrustedNoTools, true, "firm runner must receive the zero-builtins authority bit");
     assert.equal(request.cwd, undefined, "firm runner must not receive a host working folder");
     assert.equal(request.images, undefined, "firm runner must not receive browser-provided images");
-    assert.equal(request.mcpConfigPath, safeConfigPath, "firm runner must receive only the main-verified one-run MCP config");
-    assert.deepEqual(request.mcpAllowedTools, exactReadOnlyTools, "firm runner must receive only exact Brave read-only tools");
+    assert.equal(request.mcpConfigPath, safeInlineConfig, "firm runner must receive only Main's canonical inline MCP config");
+    assert.deepEqual(request.mcpAllowedTools, exactReadOnlyTools, "firm runner must preserve exact system-time read-only tools");
     assert.equal(request.mcpCodexConfigArgs, undefined, "firm runner must not receive Codex MCP args");
     assert.deepEqual(request.untrustedAllowedMcpTools, exactReadOnlyTools);
     assert.deepEqual(request.env, {
@@ -163,6 +169,8 @@ async function main() {
       HOME: "/fixture/home",
       [opaqueAlias]: "TEST_BRAVE_SECRET_VISIBLE_ONLY_AS_OPAQUE_ALIAS",
       AGENTLAS_UNTRUSTED_NO_TOOLS: "1",
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+      ENABLE_CLAUDEAI_MCP_SERVERS: "false",
       NO_COLOR: "1",
     });
     assert.equal(request.env.OPENAI_API_KEY, undefined, "unrelated provider secrets must not reach the runner");
@@ -179,7 +187,7 @@ async function main() {
   const failureSentinels = [
     "SENTINEL_FIRM_STDERR_DO_NOT_EXPOSE",
     path.join(tmp, "must-not-become-cwd"),
-    safeConfigPath,
+    safeInlineConfig,
     "sk-firm-sentinel_12345678901234567890",
   ];
   runnerFailure = `${failureSentinels.join(" | ")} | stderr=permission denied`;
@@ -204,7 +212,7 @@ async function main() {
     runtimes: [active],
     picked,
     workingFolder: path.join(tmp, "must-not-become-cwd"),
-    mcpConfigPath: safeConfigPath,
+    mcpConfigPath: safeInlineConfig,
     mcpAllowedTools: exactReadOnlyTools,
     mcpCodexConfigArgs: ["-c", "mcp_servers.untrusted.enabled=true"],
     agentAppMcpRuntimeEnv: { [opaqueAlias]: "TEST_BRAVE_SECRET_VISIBLE_ONLY_AS_OPAQUE_ALIAS" },

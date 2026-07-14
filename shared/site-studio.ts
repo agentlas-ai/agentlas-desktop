@@ -360,7 +360,14 @@ export type SiteAgentAppContractOutput = {
 export type SiteAgentAppCapabilityIssue = {
   /** Value-free catalog/policy identifier. Never a path, key name, or provider response. */
   id: string;
-  reason: "not-allowlisted" | "blocked-by-agent-app-policy" | "not-installed" | "not-configured" | "runtime-unavailable";
+  reason:
+    | "not-allowlisted"
+    | "blocked-by-agent-app-policy"
+    | "consent-required"
+    | "not-installed"
+    | "key-missing"
+    | "not-configured"
+    | "runtime-unavailable";
 };
 
 /**
@@ -374,6 +381,56 @@ export type SiteAgentAppCapabilityProfile = {
   readonlyMcpCatalogIds: string[];
   /** Unsafe or unsupported declared capabilities, using value-free reasons. */
   unavailable: SiteAgentAppCapabilityIssue[];
+};
+
+/**
+ * Main-owned decision for one frozen Agent App capability declaration. The
+ * renderer can request a review, but cannot mint or submit this receipt.
+ * Values, key names, commands, URLs, and filesystem paths never enter it.
+ */
+export type SiteAgentAppMcpConsentReceipt = {
+  schemaVersion: 1;
+  receiptId: string;
+  projectId: string;
+  /** SHA-256 of the policy version plus the sorted catalog-id declaration. */
+  recommendationDigest: string;
+  /** SHA-256 of the exact value-free readiness rows displayed for approval. */
+  readinessDigest: string;
+  decision: "approved" | "declined";
+  /** Empty for a decline; otherwise only ids that were ready at approval time. */
+  approvedCatalogIds: string[];
+  decidedAt: string;
+};
+
+export type SiteAgentAppMcpCredentialMode = "key-required" | "keyless";
+export type SiteAgentAppMcpKeyState = "present" | "missing" | "not-required" | "unknown";
+export type SiteAgentAppMcpReadiness = "ready" | "not-installed" | "missing-key" | "not-configured";
+
+/** Renderer-safe row. It deliberately excludes env/key names and executable configuration. */
+export type SiteAgentAppMcpRecommendationRow = {
+  catalogId: string;
+  name: string;
+  mark: string;
+  credentialMode: SiteAgentAppMcpCredentialMode;
+  installed: boolean;
+  enabled: boolean;
+  keyState: SiteAgentAppMcpKeyState;
+  readiness: SiteAgentAppMcpReadiness;
+};
+
+/** Fresh main-process recommendation plus the durable consent state. */
+export type SiteAgentAppMcpRecommendation = {
+  schemaVersion: 1;
+  projectId: string;
+  targetName: string;
+  status: "not-required" | "review-required" | "approved" | "declined";
+  rows: SiteAgentAppMcpRecommendationRow[];
+  /** Unsupported declaration ids stay visible but can never become grants. */
+  blocked: SiteAgentAppCapabilityIssue[];
+  /** Stable digest over the exact displayed rows, including ready/key/install state. */
+  readinessDigest: string;
+  receiptId: string | null;
+  decidedAt: string | null;
 };
 
 export type SiteAgentAppContractSnapshot = {
@@ -434,6 +491,8 @@ export type SiteProjectMeta = {
   astryxTemplate: SiteAstryxTemplate | null;
   /** Frozen at selection time so later profile-copy or heuristic changes cannot drift this app. */
   agentAppContract: SiteAgentAppContractSnapshot | null;
+  /** Main-owned MCP recommendation decision. Never accepted from renderer input. */
+  agentAppMcpConsent: SiteAgentAppMcpConsentReceipt | null;
   /** Last accepted preview's allowlisted visual decisions, applied to the runnable Astryx app. */
   agentAppVisual: SiteAgentAppVisualSnapshot | null;
   /** Runnable artifact, real thumbnail, and public deployment receipt for Agent App projects. */
@@ -443,6 +502,23 @@ export type SiteProjectMeta = {
   createdAt: string;
   updatedAt: string;
   screens: SiteScreenMeta[];
+};
+
+/**
+ * Renderer-facing Site DTO. Main-owned artifact and thumbnail paths are
+ * intentionally absent; every operation crosses IPC again using project ids.
+ */
+export type SiteAgentAppArtifactPublic = Omit<SiteAgentAppArtifact, "rootPath" | "thumbnail"> & {
+  thumbnail: Omit<NonNullable<SiteAgentAppArtifact["thumbnail"]>, "path"> | null;
+};
+
+export type SiteProjectPublicMeta = Omit<SiteProjectMeta, "agentAppArtifact"> & {
+  agentAppArtifact: SiteAgentAppArtifactPublic | null;
+};
+
+/** Site generation returns only the label the renderer actually displays. */
+export type SiteAgentAppScaffoldSummary = {
+  appName: string;
 };
 
 export type SiteProjectOperation = "generate" | "edit" | "handoff" | "publish" | "delete";

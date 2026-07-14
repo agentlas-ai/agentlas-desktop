@@ -4,9 +4,11 @@
 
 import {
   normalizeWorkloadAllocation,
+  workloadAllocationInventoryPrompt,
   workloadAllocationPromptExample,
   type WorkloadAllocation,
 } from "../runtime/workload-routing";
+import type { RuntimeStatus } from "../../shared/types";
 
 export const DELEGATE_HEADING = "## Delegate";
 
@@ -28,7 +30,10 @@ export interface ParsedDelegation {
 
 /** 리더 노드(직속 보고자가 있는 노드)의 시스템 프롬프트에 주입할 위임 가이드.
  *  reports는 동적이므로 함수로 생성한다. */
-export function buildDelegateProtocol(reports: Array<{ role: string; name?: string }>): string {
+export function buildDelegateProtocol(
+  reports: Array<{ role: string; name?: string }>,
+  runtimes: RuntimeStatus[],
+): string {
   const list = reports
     .map((r) => `  - ${r.role}${r.name && r.name !== r.role ? ` (${r.name})` : ""}`)
     .join("\n");
@@ -43,7 +48,8 @@ export function buildDelegateProtocol(reports: Array<{ role: string; name?: stri
     list,
     "",
     "Judge each child task's complexity, risk, context size, and synthesis burden yourself.",
-    "Assign provider-neutral capacity; never copy one flagship model to every child.",
+    "Assign provider-neutral capacity plus one exact live runtime/model pair; never copy one flagship model to every child.",
+    workloadAllocationInventoryPrompt(runtimes),
     "To delegate, end your reply with exactly this block (omit entirely if delegating to none):",
     "",
     DELEGATE_HEADING,

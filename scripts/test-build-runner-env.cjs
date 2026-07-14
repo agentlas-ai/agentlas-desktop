@@ -15,6 +15,9 @@ const host = {
   TMPDIR: "/tmp/tester",
   LANG: "en_US.UTF-8",
   CODEX_HOME: "/Users/tester/.codex",
+  CURSOR_AGENT_HOME: "/Users/tester/.cursor/agent",
+  CURSOR_CONFIG_DIR: "/Users/tester/.cursor/config",
+  CURSOR_API_KEY: "secret-canary-cursor-api-key",
   OPENAI_API_KEY: "runtime-only-openai",
   ANTHROPIC_API_KEY: "wrong-runtime-anthropic",
   GITHUB_TOKEN: "secret-canary-github",
@@ -69,9 +72,15 @@ assert.equal(claudeEnv.OPENAI_API_KEY, undefined);
 const byokEnv = buildIsolatedBuildRunnerEnv("byok", {}, host);
 assert.equal(byokEnv.OPENAI_API_KEY, undefined);
 assert.equal(byokEnv.ANTHROPIC_API_KEY, undefined);
+const cursorEnv = buildIsolatedBuildRunnerEnv("cursor", {}, host);
+assert.equal(cursorEnv.CURSOR_AGENT_HOME, host.CURSOR_AGENT_HOME);
+assert.equal(cursorEnv.CURSOR_CONFIG_DIR, host.CURSOR_CONFIG_DIR);
+assert.equal(cursorEnv.CURSOR_API_KEY, undefined, "Cursor account state may pass, but its raw API key must not");
+assert.equal(cursorEnv.OPENAI_API_KEY, undefined);
+assert.equal(cursorEnv.ANTHROPIC_API_KEY, undefined);
 
 const builderSource = fs.readFileSync(path.join(__dirname, "../electron/hephaestus/builder.ts"), "utf8");
 assert.match(builderSource, /buildIsolatedBuildRunnerEnv\(/);
 assert.doesNotMatch(builderSource, /env:\s*req\.mcpAttachment\?\.config\s*\?\s*\{\s*\.\.\.process\.env/);
 
-console.log(JSON.stringify({ ok: true, checks: 29 }, null, 2));
+console.log(JSON.stringify({ ok: true, checks: 34 }, null, 2));

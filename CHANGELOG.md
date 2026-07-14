@@ -1,25 +1,356 @@
 # Changelog
 
+## 0.8.25 — 2026-07-14 (local integration candidate; not released)
+
+### Added
+
+- **Agentlas Site can turn an owned agent, team, firm, or saved group into an
+  isolated Agent App.** Astryx scaffolding, local preview, verified publishing,
+  thumbnails, and local-project deletion now share one Main-owned contract.
+  Deleting the local project never implies that a remote deployment was
+  deleted; Desktop shows the retained deployment and requires acknowledgement.
+- **Agent App creation now reviews system-wide MCPs before scaffolding.** The
+  native review makes keyless/key-required state, readiness, and blocked
+  declarations visible. Consent belongs to the exact app project and readiness
+  snapshot; it is never inferred from an agent package or a stale card.
+- **A minimal keyless System Time MCP proves the safe attachment path.** It is a
+  Desktop-global MCP, not agent-owned state, and exposes only current-time and
+  timezone-conversion tools. Its command, source digest, environment, tool set,
+  generated config, and one-run binding are revalidated before dispatch.
+
+### Fixed
+
+- **One broken MCP can no longer starve an Agent App.** Decline, missing keys,
+  malformed legacy registry rows, connection/config/runtime failure, or
+  readiness races remove the affected MCP and continue the app in stateless
+  no-tool mode. Unpinned Brave Search remains visible as blocked and cannot
+  receive a key or execute until installer provenance is cryptographically
+  bound.
+- **The built-in System Time MCP no longer executes a mutable file from the
+  user profile.** Desktop launches a bounded gzip payload from exact audited
+  argv, verifies its source digest before evaluation, and passes Agent Apps a
+  compact canonical in-memory config. Legacy global rows migrate in place while
+  preserving their id, enabled choice, install time, and bindings. Tampered
+  command, payload, transport, URL, environment, wrapper, or config rows fail
+  closed to the same no-tool path instead of opening a fallback transport.
+- **Packaged Electron code now uses an explicit fuse contract.** Run-as-Node
+  remains globally enabled for required workers, whose internal call sites
+  exact-gate command and argv; the fuse itself is not path-scoped. Node option
+  and inspector injection are disabled. The app entry is restricted to ASAR on all targets;
+  Electron's embedded ASAR integrity validation additionally covers supported
+  macOS and Windows packages. This does not change the existing signing boundary:
+  macOS is signed and notarized; Windows and Linux artifacts remain unsigned.
+  Moving every worker to a dedicated bundled Node or utility process is still
+  required before Run-as-Node can be disabled completely.
+- **MCP cards now reflect fresh Main-process state.** A check mark requires both
+  durable consent and current readiness; blocked, changed, revoked, and offline
+  states remain distinct. Launch respects an existing approval or decline and
+  prompts again only after a relevant state change or explicit user review.
+- **Active Desktop agents can read existing project memory without mutating it.**
+  Canonical root and `.agentlas` identities are bound at activation, and stable
+  descriptor reads reject symlinks, non-regular files, oversize inputs, and
+  mid-read replacement. A project-identity failure drops only project memory;
+  the agent's own global memory remains available. Site, Agent App, and Mobile
+  restricted runs still receive no project memory.
+- **Model allocation uses exact host evidence instead of guessed capacity.**
+  Codex inventory parsing now binds per-model effective context, tool/image
+  support, and supported reasoning levels; unsupported `max` requests clamp to
+  the highest real level. Builder, task-force, firm, and swarm receipts are
+  reconciled with the effort actually sent by Codex and contain no prompt,
+  hidden rationale, path, account, or secret data.
+- **Project Foundation promotion is fail-closed.** Agentlas OS v1.1.28
+  first-contact must return the complete merge-only/privacy receipt before
+  Desktop marks a folder active. This does not introduce a vendor model alias or
+  deterministic model table. The fallback is limited to a genuinely
+  absent Core/Python runtime; lock contention, partial receipts, and unsafe
+  `.gitignore` state are not treated as success.
+
+### Boundaries and edge cases
+
+- Existing activated folders without the new filesystem identity stay safe but
+  omit project-local memory until the next authorized writable contact or an
+  explicit activation refreshes the binding.
+- Agent App MCP execution is intentionally limited to the audited System Time
+  server in this candidate. Other declarations remain visible but blocked.
+- Internal plans, QA receipts, and private screenshots are now ignored; the
+  public documentation allowlist remains tracked.
+
+## 0.8.24 — 2026-07-14
+
+### Fixed
+
+- **Desktop now embeds the same Agentlas OS v1.1.28 first-contact contract as
+  Terminal and every plugin surface.** Codex, Claude Code, MCP, Network, owner
+  Cloud, and Storm contacts synchronously install the Core-owned project soul,
+  memory map, code map, ontology, Career Graph, and complete `.agentlas/`
+  privacy block before agent work starts.
+- **Existing project contracts remain merge-only.** Desktop never rewrites Git
+  index state or removes intentionally tracked public `.agentlas` contracts;
+  it reports those paths while keeping newly generated local memory ignored.
+- **Workload allocation remains host-driven and non-deterministic.** No vendor
+  model alias or tier-to-model mapping was added; the parent AI selects an exact
+  live-advertised model ID and Desktop only validates the choice.
+
+## 0.8.23 — 2026-07-14
+
+### Fixed
+
+- **The canonical first contact path now completes on Windows through
+  Agentlas OS v1.1.27.** Windows ACLs no longer surface as false POSIX permission
+  failures, so Desktop keeps the same Core-owned project soul, memory, code
+  map, ontology, Career Graph, and privacy-first `.gitignore` contract on all
+  three desktop operating systems.
+- **The live-verified workload boundary still contains no vendor model aliases
+  or tier-to-model mappings.** The parent AI supplies an exact advertised ID;
+  Desktop validates inventory, capability, context, cost, and explicit pins.
+
+## 0.8.22 — 2026-07-14
+
+### Fixed
+
+- **The release gate now verifies the new first contact contract instead of the
+  retired visit threshold.** The first writable Desktop contact must create the
+  canonical Agentlas OS v1.1.25 project architecture and privacy block
+  immediately; later read-only turns must neither create a project nor record
+  another writable visit.
+- **The live-verified workload boundary remains enforced.** Parent AIs select
+  exact model IDs from runtime inventory without vendor model aliases or
+  tier-to-model mappings, while Desktop validates capabilities, context, cost,
+  and explicit pins.
+
+## 0.8.21 — 2026-07-14
+
+### Added
+
+- **Every writable folder gets the canonical Agentlas project architecture on
+  first contact.** Desktop calls Agentlas OS v1.1.25 instead of maintaining a
+  second initializer, so the project soul, memory map, code map, ontology,
+  Career Graph, and privacy-first `.gitignore` are identical to Terminal,
+  Claude Code, Codex, Network, Cloud, and Storm. Existing files remain
+  merge-only and are never overwritten.
+
+### Fixed
+
+- **Workload allocation no longer embeds vendor model aliases or tier-to-model
+  mappings.** The parent AI receives only live-verified model IDs and must pick
+  an exact advertised ID. Desktop validates that choice and explicit pins,
+  then preserves the active model when the choice is missing or stale.
+- **Static picker catalogs are no longer treated as executable allocation
+  inventory.** Claude Code and BYOK advertise only the active verified model;
+  Codex, Grok, and Ollama expose models returned by their live discovery paths.
+
+## 0.8.20 — 2026-07-14
+
+### Fixed
+
+- **Running the embedded Agentlas OS can no longer invalidate the signed app.**
+  Every production Python launch now forces bytecode writes off after caller
+  environment merging and points the defensive cache prefix at Agentlas
+  `userData`, outside the signed `Resources` tree. The release gate executes a
+  synthetic Agentlas OS package from a bundle-shaped fixture and fails if any
+  `__pycache__` or `.pyc` appears below `Resources`. The signed macOS pipeline
+  also imports the packaged bridge, runs the real embedded Stormbreaker harness,
+  and repeats `codesign --verify --deep --strict` on that exact `.app` before
+  notarized artifacts can publish.
+- **The embedded Agentlas OS pin is current again.** Desktop compatibility,
+  macOS signing, Windows/Linux packaging, and the embedded-runtime gates now
+  agree on Agentlas OS v1.1.23. This includes the v1.1.22/v1.1.23 Windows
+  Stormbreaker and native harness corrections instead of continuing to package
+  v1.1.21. The mutable tag is also bound to exact commit `d121a703`, so a moved
+  tag or a second-fetch mismatch fails before packaging. Ignored `.env`, key,
+  signing, credential, local-memory, and ontology-runtime files can no longer
+  bypass that Git pin: the source guard rejects them, both builder configs deny
+  them, and `afterPack` fails closed if any reaches the public app Resources.
+
+## 0.8.19 — 2026-07-14
+
+### Included
+
+- **The complete 0.8.18 Memory-boundary repair ships in this replacement
+  release.** The 0.8.18 Linux candidate passed and staged correctly, but the
+  Windows release runner remained alive after its new Mobile security tests.
+  The prerelease was never promoted to stable/latest.
+
+### Fixed
+
+- **Windows Mobile security gates terminate deterministically.** Both new
+  Electron fixtures close their native SQLite handle before deleting the temp
+  store, retry Windows filesystem cleanup, and always call `app.exit` even when
+  cleanup reports an error. This prevents a passing test from waiting until the
+  release job timeout because Windows still owns `agentlas.sqlite`.
+- **A future Windows gate hang now fails fast.** The runtime/Mobile contract
+  step has a 15-minute ceiling inside the existing 45-minute package job, so a
+  single leaked fixture cannot consume the entire release window or leave the
+  signed macOS publisher waiting indefinitely for a missing Windows asset.
+
+## 0.8.18 — 2026-07-14 (withdrawn Windows CI candidate; never stable)
+
+### Included
+
+- **The complete 0.8.17 security and provider-health changes ship in this
+  replacement release.** The 0.8.17 source tag failed its Experience Ontology
+  release gate before signing, notarization, packaging, or public publication,
+  so the public stable channel remained on 0.8.15.
+
+### Fixed
+
+- **Interactive Desktop firm chats learn again in `read` mode.** The Mobile
+  security work accidentally treated every firm `read` as an unattended
+  restricted run and skipped the agent's private Memory/Experience curation.
+  Desktop read chats now retain attributable agent experience in the private
+  database, while project-local `.agentlas` files still require `write` or
+  `full` permission.
+- **Restricted and borrowed runs retain the intended privacy boundary.** Mobile
+  and unattended read runs strip model-emitted Memory controls and write only
+  content-free audit counts. Borrowed synthesis uses its effective runtime
+  permission; read-only synthesis cannot create project memory files or claim
+  a participant's experience, while write-capable project work keeps its
+  existing scoped curation behavior.
+- **The release gate now tests both sides of the boundary.** It requires normal
+  Desktop firm reads to create attributable durable learning and restricted
+  firm reads to remain ephemeral with Memory control blocks removed from UI
+  output.
+
+## 0.8.17 — 2026-07-14 (failed release candidate; never published)
+
+### Security
+
+- **Mobile remote execution is read-only in this replacement release.** A phone
+  can start and steer chats, but `write` and `full` are rejected before a run is
+  created. Write-capable work must be approved and started on Desktop.
+- **The working folder is a main-process capability, not a Mobile parameter.**
+  Desktop captures the existing chat folder's canonical path and filesystem
+  identity, carries that immutable binding through start and queued steering,
+  and revalidates it before every runner. Folder clearing, replacement, prompt
+  path injection, and mutable chat/project races fail closed.
+- **Mobile read runs use only runtimes with a proven non-mutating boundary.**
+  BYOK and Ollama receive text/images over their model protocols and remain
+  available. Codex, Claude Code, Gemini/Antigravity, and Grok fail closed for
+  Mobile and unattended reads on every platform until a release-gated host-file
+  denial proof exists for those local CLI runtimes.
+- **Restricted read-mode is explicit about its current limit.** BYOK/Ollama can
+  answer from the text, curated context, and images Agentlas sends, but cannot
+  open arbitrary local project files. The system prompt forbids invented file
+  inspection and asks for the needed content to be pasted or attached.
+- **Restricted reads do not inherit local power.** User/project dotenv values,
+  unrelated vault secrets, local CLI config, rules, skills, plugins, MCPs,
+  CLI-owned memory, and browser/computer-use features are not injected into the
+  runner or model context. A selected BYOK provider key is used only by Main as
+  the HTTP transport credential and is never prompt content. Agentlas may supply
+  its curated read context, but model-emitted memory blocks are stripped and no
+  Memory, Experience, or Ontology mutation occurs; only content-free audit
+  counts remain.
+- **Automation authority is durable.** Schema 64 stores each Automation as
+  `read` or `write`; the scheduler, workflow graph, and failure optimizer retain
+  that exact permission. Legacy and normal Desktop-created Automations remain
+  explicit `write`, while malformed or forbidden `full` values fail closed to
+  `read`.
+
+### Fixed
+
+- **A complete usage-snapshot IPC failure is visible and recoverable.** The
+  Dashboard shows a concise load error with an accessible retry action instead
+  of silently leaving the LLM usage panel looking empty. Provider-specific
+  contracts remain honest: Antigravity exposes no counter, and Grok exposes
+  only a confirmed 402 exhaustion state rather than an invented percentage.
+- **Gemini and Grok provider state no longer goes stale or races.** Gemini's
+  retired official client switches once to the installed Antigravity CLI;
+  Grok's real 402 balance exhaustion remains a provider error, not a fake usage
+  window. Provider retry is allowlisted, single-flight, cooldown-bound, and
+  guarded against out-of-order snapshots. A stale receipt cannot hide a newly
+  installed CLI, and raw provider errors never cross into the renderer.
+- **Creating a Mobile chat binds its selected project before the first run.**
+  Desktop resolves and verifies the host-owned project folder immediately;
+  unavailable or replaced folders fail before a chat row is created, while an
+  explicitly global chat stays unbound.
+- **Interactive agent-group chats keep the user's selected runtime.** The
+  stronger restricted-read profile is derived only for Mobile and unattended
+  read Automations, not from the chat's `division` shape alone.
+- **Codex write mode now stays inside its workspace sandbox.** New and resumed
+  Codex runs map `write` to `workspace-write` and reassert the sandbox on resume.
+  Only an explicitly approved Desktop `full` run may bypass the sandbox.
+- **A partial cross-platform upload can no longer become `latest`.** Windows and
+  Linux assets stage as a prerelease; stable/latest promotion occurs only after
+  the signed and notarized macOS publisher verifies the complete required asset
+  set. Missing assets or timeout leave the release non-stable.
+
+## 0.8.16 — 2026-07-13 (withdrawn security candidate; never stable)
+
+- Windows and Linux candidate assets are retained only as audit evidence. The
+  signed macOS workflow was cancelled before certificate restore, signing,
+  notarization, packaging, or publication; no 0.8.16 Mac asset exists.
+- The candidate was withdrawn after review found that a read chat could emit an
+  Automation block which was persisted as an enabled write-capable scheduled
+  run. 0.8.17 replaces the candidate with a read-only Mobile boundary and a
+  durable per-Automation execution permission.
+
+## 0.8.15 — 2026-07-13
+
+### Included
+
+- **The Mobile composer parity work from the unpublished 0.8.14 release
+  candidate ships here.** The public 0.8.15 artifacts include its authenticated
+  Desktop composer bridge, while keeping secrets and absolute paths inside the
+  Desktop main-process boundary.
+
+### Fixed
+
+- **Packaged Stormbreaker now uses the same Agentlas OS contract as source and CI.**
+  Desktop bundles Agentlas OS v1.1.21, derives the local engine default from the
+  package compatibility contract, and executes the real embedded Goal + UltraCode
+  harness before any release can package or publish.
+
+- **Gemini chat recovers instead of dying on a retired client or a damaged OAuth file.**
+  Agentlas safely backs up and repairs recoverable trailing bytes in Gemini credentials,
+  recognizes Google's `UNSUPPORTED_CLIENT` response, and switches once to an installed
+  Antigravity runtime using its real headless prompt contract. The Dashboard states
+  plainly that Antigravity works while subscription usage is not exposed.
+- **Grok balance exhaustion is no longer mislabeled as a healthy connection.** Actual
+  HTTP 402 inference failures become a concise chat error and a red 100% exhausted
+  Dashboard window with a link to Grok Settings. Agentlas does not invent a reset time
+  or scrape private account pages when the CLI provides neither.
+
+## 0.8.14 — 2026-07-13 (release candidate only; not published)
+
+### Added
+
+- **Agentlas Mobile can remotely use the complete Desktop chat composer.**
+  Authenticated phones can select runtimes, models and effort, set run
+  permissions, use Plan, Goal and Apps, attach images, switch agents, bind Hub
+  agents, enable continuous or Swarm execution, preview automatic routing, and
+  manage conversation context through the same main-process authority as the
+  Desktop UI.
+- **Existing chats can switch working location from Mobile.** A phone may bind
+  a chat to an existing Desktop project folder or return it to global chat;
+  only the folder basename crosses the bridge and absolute paths remain local.
+
+### Security
+
+- Mobile composer actions remain on the strict RPC allowlist with replay
+  protection, bounded images, callable-Hub validation, active-run guards, and
+  secret-free projections.
+
 ## 0.8.13 — 2026-07-13
+
+### Added
+
+- **Experience and Taste are agent-scoped assets instead of hidden chat
+  history.** My Agents shows curated memory, candidate collection, privacy
+  blocks, exact Experience/Taste releases, loadout state, and a 3D relation map
+  for each installed agent.
+- **Ontology Chips keep an independent ownership and attachment lifecycle.** A
+  base agent and a chip retain separate release IDs and entitlements; purchase
+  never auto-attaches, and an exact compatible release requires an explicit
+  next-session decision.
+- **Desktop, Terminal, Web/Hub, and Mobile share privacy-safe contracts.** Raw
+  prompts, transcripts, credentials, local paths, private media, and base-agent
+  package bytes are excluded from portable chip assets and Mobile projections.
 
 ### Changed
 
-- **Stormbreaker is now a real parent-directed parallel execution contract.**
-  The parent LLM receives a privacy-safe live inventory of executable local
-  runtimes and their models, then selects the exact `runtimeId`, `modelId`, and
-  reasoning effort for every decomposed worker and synthesis task. With both
-  Claude Code and Codex connected, workers can execute across both runtimes;
-  a plugin host exposes only its own connected runtime inventory.
-- **Model renames no longer require a fixed routing table to keep working.**
-  The host validates exact choices against the current inventory, preserves
-  explicit user pins and policy ceilings, emits a visible fallback receipt when
-  a selection disappears, and no longer silently derives a replacement model
-  from a task tier. Cursor Agent model discovery uses the current `agent models`
-  command when available.
-- **Stormbreaker’s execution core is documented and enforced as:** goal →
-  parent-led decomposition → parallel agents → runtime/model/effort selection
-  → token-aware execution → non-breaking journal/recovery. This applies to the
-  desktop swarm path and `/hep-storm`, not just to a prompt-level loop.
+- Existing local memory and historical chat-linked activity are surfaced
+  without retroactively claiming they were verified Experience or final-agent
+  execution evidence.
 
 ## 0.8.5 — 2026-07-12
 

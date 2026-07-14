@@ -77,6 +77,17 @@ export interface RunnerEnvResolution {
   injectedKeys: string[];
 }
 
+export interface RunnerEnvOptions {
+  /** Main-authored Mobile/unattended read boundary. Never hydrate dotenv/vault secrets. */
+  restrictedReadBoundary?: boolean;
+}
+
+// Restricted runs are BYOK/Ollama protocol calls, not local CLI processes.
+// Their runner implementations ignore `env`, so inherit nothing at all.
+export function restrictedRunnerEnv(): NodeJS.ProcessEnv {
+  return {};
+}
+
 // Browser-originated Agent App input is untrusted. Its model process receives
 // only the host coordinates required to locate the installed CLI and its
 // subscription login. Project/agent dotenv files, Agentlas credential files,
@@ -126,12 +137,17 @@ export function buildAgentAppRunnerEnv(
     const value = source[key];
     if (typeof value === "string" && value) env[key] = value;
   }
-  // Only the MCP config builder can mint these opaque names. Never copy a raw
-  // key name/value from process.env or a renderer-shaped request.
+  // Only the main-owned MCP config builder can mint these opaque aliases.
+  // Never copy a raw key name/value from process.env or renderer-shaped input.
   for (const [key, value] of Object.entries(mainOwnedCapabilityEnv ?? {})) {
     if (AGENT_APP_MCP_SECRET_ALIAS_RE.test(key) && typeof value === "string" && value) env[key] = value;
   }
   env.AGENTLAS_UNTRUSTED_NO_TOOLS = "1";
+  // Empty Claude setting sources exclude user/project/local instructions,
+  // skills, plugins, and hooks. These two host-level sources sit outside that
+  // switch, so disable them explicitly for browser-originated Agent Apps.
+  env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
+  env.ENABLE_CLAUDEAI_MCP_SERVERS = "false";
   env.NO_COLOR = "1";
   return env;
 }
@@ -139,7 +155,11 @@ export function buildAgentAppRunnerEnv(
 export async function buildRunnerEnv(
   agent: InstalledAgent | null,
   cwd?: string | null,
+  options: RunnerEnvOptions = {},
 ): Promise<RunnerEnvResolution> {
+  if (options.restrictedReadBoundary) {
+    return { env: restrictedRunnerEnv(), injectedKeys: [] };
+  }
   const env: NodeJS.ProcessEnv = { ...process.env };
   const injected = new Set<string>();
   const apply = (values: Record<string, string>, overwrite: boolean) => {

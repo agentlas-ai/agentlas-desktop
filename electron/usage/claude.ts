@@ -10,7 +10,7 @@ import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { ProviderUsage, UsageWindow } from "../../shared/types";
-import { getJson, toPercent, toResetMs } from "./util";
+import { getJson, normalizeUsageError, toPercent, toResetMs } from "./util";
 
 const execFileP = promisify(execFile);
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -113,11 +113,13 @@ export async function getClaudeUsage(): Promise<ProviderUsage | null> {
       if (!/HTTP 40[13]/.test(lastErr)) break;
     }
   }
+  const normalized = normalizeUsageError(lastErr);
   return {
     ...base,
     status: "error",
     windows: [],
-    error: /HTTP 40[13]/.test(lastErr) ? "auth_expired" : lastErr,
+    error: normalized.code,
+    ...(normalized.retryAfterSeconds ? { retryAfterSeconds: normalized.retryAfterSeconds } : {}),
   };
 }
 

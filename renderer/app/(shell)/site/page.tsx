@@ -8,7 +8,7 @@ import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { getSnapshot as getBuildSnapshot, prepareBuildHandoff } from "@/lib/build-session";
 import { navigate } from "@/lib/navigation";
-import { SiteLanding } from "@/components/site/SiteLanding";
+import { SiteLanding, type SiteAgentAppMcpLiveState } from "@/components/site/SiteLanding";
 import { SitePublishDialog } from "@/components/site/SitePublishDialog";
 import { SITE_MESSAGE_KEY } from "@shared/site-studio";
 import type {
@@ -18,7 +18,7 @@ import type {
   SiteConversationEntry,
   SiteHostMessage,
   SiteProjectOperation,
-  SiteProjectMeta,
+  SiteProjectPublicMeta,
   SiteScreenMeta,
   SiteSelectionPayload,
   SiteSurface,
@@ -43,7 +43,8 @@ export default function SiteStudioPage() {
   const ko = locale !== "en";
 
   // ── 데이터 상태 ─────────────────────────────────────────
-  const [projects, setProjects] = useState<SiteProjectMeta[]>([]);
+  const [projects, setProjects] = useState<SiteProjectPublicMeta[]>([]);
+  const [agentAppMcpLiveStates, setAgentAppMcpLiveStates] = useState<Record<string, SiteAgentAppMcpLiveState>>({});
   const [projectId, setProjectId] = useState<string | null>(null);
   const [activeScreenId, setActiveScreenId] = useState<string | null>(null);
   const [avail, setAvail] = useState<{ ready: boolean; agent: string } | null>(null);
@@ -87,6 +88,7 @@ export default function SiteStudioPage() {
   // 생성·수정·Build handoff는 같은 프로젝트 snapshot을 읽고 쓴다. React state가
   // 반영되기 전의 더블클릭까지 막기 위해 동기 ref를 단일 작업 mutex로 사용한다.
   const operationRef = useRef<"generate" | "edit" | "handoff" | null>(null);
+  const projectRefreshGenerationRef = useRef(0);
 
   const project = useMemo(() => projects.find((p) => p.id === projectId) ?? null, [projects, projectId]);
   const publishProject = useMemo(
@@ -103,9 +105,41 @@ export default function SiteStudioPage() {
     toastTimer.current = setTimeout(() => setToast(null), 3500);
   }, []);
 
-  const refreshProjects = useCallback(async (): Promise<SiteProjectMeta[]> => {
-    const list = (await ipc()?.site?.listProjects?.()) ?? [];
+  const refreshProjects = useCallback(async (): Promise<SiteProjectPublicMeta[]> => {
+    const generation = ++projectRefreshGenerationRef.current;
+    // A prior approval is not a live-health cache. Clear it before the async
+    // refresh so key removal or registry damage can never flash a stale ✓.
+    setAgentAppMcpLiveStates({});
+    const api = ipc();
+    const list = (await api?.site?.listProjects?.()) ?? [];
     setProjects(list);
+    const candidates = list.filter((candidate) =>
+      candidate.surface === "agent-app" &&
+      ((candidate.agentAppContract?.capabilities?.readonlyMcpCatalogIds.length ?? 0) +
+        (candidate.agentAppContract?.capabilities?.unavailable.length ?? 0)) > 0,
+    );
+    const recommendAgentAppMcp = api?.site?.agentAppMcpRecommendation;
+    const offlineStates = Object.fromEntries(
+      candidates.map((candidate) => [candidate.id, { kind: "offline" } as const]),
+    );
+    if (generation === projectRefreshGenerationRef.current) setAgentAppMcpLiveStates(offlineStates);
+    if (!recommendAgentAppMcp || candidates.length === 0) {
+      return list;
+    }
+    void Promise.all(candidates.map(async (candidate) => {
+      try {
+        const recommendation = await recommendAgentAppMcp({ projectId: candidate.id });
+        if (recommendation.projectId !== candidate.id || !Array.isArray(recommendation.rows)) {
+          throw new Error("MCP recommendation identity mismatch");
+        }
+        return [candidate.id, { kind: "resolved", recommendation } as const] as const;
+      } catch {
+        return [candidate.id, { kind: "offline" } as const] as const;
+      }
+    })).then((entries) => {
+      if (generation !== projectRefreshGenerationRef.current) return;
+      setAgentAppMcpLiveStates(Object.fromEntries(entries));
+    });
     return list;
   }, []);
 
@@ -300,9 +334,10 @@ export default function SiteStudioPage() {
       operationRef.current = "generate";
       setGenerating(true);
       try {
+        const siteApi = ipc()?.site;
         let pid = opts.pid;
         if (!pid) {
-          const created = await ipc()?.site?.createProject?.({
+          const created = await siteApi?.createProject?.({
             name: text.slice(0, 30),
             surface: opts.surface,
             agentAppTarget: opts.agentAppTarget,
@@ -313,8 +348,25 @@ export default function SiteStudioPage() {
           }
           pid = created.id;
           setDevice(created.surface === "mobile" ? DEVICES[0] : DEVICES[2]);
+          if (created.surface === "agent-app") {
+            // This main-owned prompt must complete before design generation or
+            // Astryx scaffolding starts. Cancel, missing key, bridge failure,
+            // and readiness churn all continue safely in no-tool mode.
+            try {
+              const review = await siteApi?.prebuildReviewAgentAppMcp?.({ projectId: created.id });
+              if (review?.status === "review-required") {
+                showToast(ko
+                  ? "MCP 상태가 검토 중 바뀌어 이번 앱은 MCP 없이 계속 만듭니다."
+                  : "MCP state changed during review. This app will keep building without MCP.");
+              }
+            } catch {
+              showToast(ko
+                ? "MCP 추천을 확인하지 못해 이번 앱은 MCP 없이 계속 만듭니다."
+                : "MCP recommendations were unavailable. This app will keep building without MCP.");
+            }
+          }
         }
-        const res = await ipc()?.site?.generateScreen?.({
+        const res = await siteApi?.generateScreen?.({
           projectId: pid,
           brief: text,
           variants: opts.variantCount,
@@ -560,6 +612,7 @@ export default function SiteStudioPage() {
       <div style={shell}>
         <SiteLanding
           projects={projects}
+          agentAppMcpLiveStates={agentAppMcpLiveStates}
           locale={ko ? "ko" : "en"}
           busy={siteBusy}
           noEngine={noEngine}
@@ -595,6 +648,21 @@ export default function SiteStudioPage() {
             return result?.ok && result.dataUrl
               ? { ok: true, dataUrl: result.dataUrl }
               : { ok: false, reason: result?.reason || (ko ? "썸네일을 읽지 못했습니다." : "Could not read the thumbnail.") };
+          }}
+          onReviewAgentAppMcp={(nextProject) => {
+            void ipc()?.site?.reviewAgentAppMcp?.({ projectId: nextProject.id }).then(async (result) => {
+              await refreshProjects();
+              if (result.status === "approved") {
+                const ready = result.rows.filter((row) => row.readiness === "ready").length;
+                showToast(ko
+                  ? `MCP 사용을 허용했습니다 · 현재 연결 가능 ${ready}/${result.rows.length}`
+                  : `MCP access allowed · ${ready}/${result.rows.length} currently ready`);
+              } else if (result.status === "declined") {
+                showToast(ko ? "이 Agent App은 MCP 없이 실행됩니다." : "This Agent App will run without MCP.");
+              }
+            }).catch((error) => {
+              showToast((ko ? "MCP 검토 실패: " : "MCP review failed: ") + (error instanceof Error ? error.message : String(error)));
+            });
           }}
           onPublishProject={(nextProject) => setPublishProjectId(nextProject.id)}
         />

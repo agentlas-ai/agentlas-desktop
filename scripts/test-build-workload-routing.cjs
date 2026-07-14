@@ -14,24 +14,35 @@ async function main() {
     active: true,
     model: "gpt-5.6-sol",
     availableModels: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+    allocationModels: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+    allocationModelProfiles: {
+      "gpt-5.6-luna": { costTier: "economy", contextWindow: 200000, capabilities: ["tools"], supportsTools: true },
+      "gpt-5.6-terra": { costTier: "balanced", contextWindow: 200000, capabilities: ["tools"], supportsTools: true },
+      "gpt-5.6-sol": { costTier: "frontier", contextWindow: 200000, capabilities: ["tools"], supportsTools: true },
+    },
     effort: "xhigh",
   };
   let selectorCalls = 0;
   const picked = {
     active,
+    runtimes: [active],
     label: "Codex",
     runner: async (request) => {
       selectorCalls += 1;
       assert.equal(request.permission, "read");
-      assert.equal(request.model, "gpt-5.6-luna", "bounded selector must bootstrap on the economy model");
+      assert.equal(request.model, "gpt-5.6-sol", "selector bootstrap must preserve the active live model");
       assert.equal(request.effort, "low");
       assert.equal(request.mcpConfigPath, undefined);
       assert.doesNotMatch(request.userPrompt, /\b(Opus|Sol|xhigh effort)\b/i, "untrusted model steering must be removed before the parent selector");
+      assert.match(request.systemPrompt, /LIVE_RUNTIME_INVENTORY=/);
       return {
         text: JSON.stringify({
+          runtimeId: "runtime-1",
+          modelId: "gpt-5.6-terra",
           tier: "balanced",
           effort: "high",
           phase: "delegate",
+          requirements: { inputTokens: 8000, expectedOutputTokens: 2000, toolRequired: true, multimodalRequired: false },
           reasonCodes: ["complex-reasoning", "multi-step-tools"],
           rationale: "Coordinated package creation and verification.",
         }),

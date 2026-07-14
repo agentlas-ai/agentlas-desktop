@@ -12,6 +12,21 @@ const distDir = path.join(root, "dist", "renderer");
 const outDir = path.join(root, "output", "playwright", "site-landing");
 const AGENT_APP_NAMES = Array.from({ length: 10 }, (_, index) => `Agent ${String(index + 1).padStart(2, "0")}`);
 
+const landingSource = fs.readFileSync(path.join(root, "renderer/components/site/SiteLanding.tsx"), "utf8");
+const pageSource = fs.readFileSync(path.join(root, "renderer/app/(shell)/site/page.tsx"), "utf8");
+assert.match(pageSource, /recommendAgentAppMcp\(\{ projectId: candidate\.id \}\)/,
+  "Site must refresh main-owned MCP readiness instead of trusting persisted consent alone");
+assert.match(landingSource, /function mcpCardPresentation[\s\S]*liveApprovalReady/,
+  "Agent App cards must combine durable consent with fresh MCP readiness");
+assert.match(pageSource, /setAgentAppMcpLiveStates\(\{\}\)[\s\S]*agentAppMcpRecommendation/,
+  "a readiness refresh must clear old card truth before the async lookup");
+assert.doesNotMatch(landingSource, /agentAppMcpConsent\?\.decision/,
+  "persisted approval alone must never drive an Agent App card checkmark");
+assert.match(landingSource, /recommendation\.rows\.length === 0 && recommendation\.blocked\.length > 0/,
+  "blocked-only declarations must receive an explicit card state");
+assert.match(pageSource, /readonlyMcpCatalogIds\.length[\s\S]{0,160}capabilities\?\.unavailable\.length/,
+  "blocked-only Agent Apps must remain in live MCP refresh and review");
+
 function resolveAsset(rawUrl) {
   let pathname = decodeURIComponent((rawUrl || "/").split("?")[0]);
   const nestedNext = pathname.match(/^\/.+\/(_next\/.+)$/);
@@ -129,6 +144,12 @@ function installSiteFixtures({ thumbnailDataUrl }) {
       defaultValue: null,
     }],
     outputs: [{ name: "result", label: "Result", type: "markdown", description: "Agent response" }],
+    capabilities: {
+      schemaVersion: 1,
+      source: "declared-package",
+      readonlyMcpCatalogIds: ["agentlas-time"],
+      unavailable: [],
+    },
   };
   const visual = {
     schemaVersion: 1,
@@ -186,8 +207,24 @@ function installSiteFixtures({ thumbnailDataUrl }) {
           memberCount: index % 4 === 0 ? 1 : 3,
         },
         astryxTemplate: index % 2 === 0 ? "ai-chat" : "form-two-column",
-        agentAppContract: contract,
+        agentAppContract: index === 4 ? {
+          ...contract,
+          capabilities: {
+            ...contract.capabilities,
+            readonlyMcpCatalogIds: [],
+            unavailable: [{ id: "brave-search", reason: "not-allowlisted" }],
+          },
+        } : contract,
         agentAppVisual: visual,
+        agentAppMcpConsent: index < 4 ? {
+          schemaVersion: 1,
+          receiptId: "00000000-0000-4000-8000-000000000001",
+          projectId,
+          recommendationDigest: "a".repeat(64),
+          decision: "approved",
+          approvedCatalogIds: ["agentlas-time"],
+          decidedAt: now,
+        } : null,
         agentAppArtifact: {
           schemaVersion: 1,
           appRecordId: `app-record-${index + 1}`,
@@ -224,10 +261,41 @@ function installSiteFixtures({ thumbnailDataUrl }) {
     dataUrl: thumbnailDataUrl,
     updatedAt: now,
   });
+  site.agentAppMcpRecommendation = async ({ projectId }) => {
+    if (projectId === "site-agent-app-3") throw new Error("registry lookup unavailable");
+    const degraded = projectId === "site-agent-app-2";
+    const zeroReady = projectId === "site-agent-app-4";
+    const blockedOnly = projectId === "site-agent-app-5";
+    return {
+      schemaVersion: 1,
+      projectId,
+      targetName: projectId,
+      // These degraded fixtures deliberately retain an old approval. The card
+      // must still fail closed from the live rows below.
+      status: blockedOnly ? "not-required" : "approved",
+      rows: blockedOnly ? [] : [{
+        catalogId: "agentlas-time",
+        name: "System Time",
+        mark: "T",
+        credentialMode: "keyless",
+        installed: !zeroReady,
+        enabled: !zeroReady,
+        keyState: "not-required",
+        readiness: degraded || zeroReady ? "not-configured" : "ready",
+      }],
+      blocked: blockedOnly ? [{ id: "brave-search", reason: "not-allowlisted" }] : [],
+      receiptId: "live-receipt",
+      decidedAt: now,
+    };
+  };
   // Publishing QA is read-only. Every mutating bridge method fails if the UI accidentally
   // invokes it; status reads and Keychain-presence reads are the only permitted operations.
   const mutationCalls = [];
-  window.__sitePublishQa = { mutationCalls };
+  window.__sitePublishQa = { mutationCalls, mcpReviewCalls: [] };
+  site.reviewAgentAppMcp = async ({ projectId }) => {
+    window.__sitePublishQa.mcpReviewCalls.push(projectId);
+    return site.agentAppMcpRecommendation({ projectId });
+  };
   const publishStatuses = ["vercel", "railway", "render"].map((provider) => ({
     provider,
     connected: true,
@@ -524,6 +592,35 @@ async function main() {
     assert.deepEqual(templateLabels, ["Web", "Mobile", "Agent App"], "template order must be Web, Mobile, Agent App");
 
     const firstPageLayout = await assertGalleryLayout(page, AGENT_APP_NAMES.slice(0, 9));
+    const agentAppCards = page.locator('section[aria-labelledby="agent-apps-heading"] article');
+    const mcpButtonAt = (index) => agentAppCards.nth(index).locator("button[data-status]");
+    const normalMcp = mcpButtonAt(0);
+    await normalMcp.getByText(/MCP 1\/1 (?:설정됨|configured)/).waitFor();
+    assert.equal(await normalMcp.getAttribute("data-status"), "ready");
+
+    const revokedKeyMcp = mcpButtonAt(1);
+    await revokedKeyMcp.getByText(/MCP (?:검토|review)/).waitFor();
+    assert.equal(await revokedKeyMcp.getAttribute("data-status"), "review",
+      "key removal must downgrade an old approval to review");
+    assert.doesNotMatch(await revokedKeyMcp.innerText(), /✓|1\/1/,
+      "key removal must not retain a checkmark or inferred ready count");
+
+    const registryFailureMcp = mcpButtonAt(2);
+    await registryFailureMcp.getByText("MCP offline", { exact: true }).waitFor();
+    assert.equal(await registryFailureMcp.getAttribute("data-status"), "offline",
+      "a failed live lookup must render offline rather than a persisted approval");
+    assert.doesNotMatch(await registryFailureMcp.innerText(), /✓|1\/1/);
+
+    const zeroReadyMcp = mcpButtonAt(3);
+    await zeroReadyMcp.getByText(/MCP (?:검토|review)/).waitFor();
+    assert.equal(await zeroReadyMcp.getAttribute("data-status"), "review");
+    assert.doesNotMatch(await zeroReadyMcp.innerText(), /✓|1\/1/,
+      "zero live-ready rows must not be presented as ready");
+    const blockedMcp = mcpButtonAt(4);
+    await blockedMcp.getByText(/MCP (?:차단|blocked)/).waitFor();
+    assert.equal(await blockedMcp.getAttribute("data-status"), "blocked");
+    await blockedMcp.click();
+    await page.waitForFunction(() => window.__sitePublishQa?.mcpReviewCalls?.includes("site-agent-app-5"));
     const rowTolerance = 2;
     assert.ok(firstPageLayout.slice(0, 3).every((item) => Math.abs(item.y - firstPageLayout[0].y) <= rowTolerance), "desktop gallery first row must contain three cards");
     assert.ok(firstPageLayout[3].y > firstPageLayout[0].y + 20, "desktop gallery fourth card must begin the second row");

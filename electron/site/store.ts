@@ -14,16 +14,19 @@ import type {
   SiteAgentAppArtifact,
   SiteAgentAppContractSnapshot,
   SiteAgentAppDeploymentRecord,
+  SiteAgentAppMcpConsentReceipt,
   SiteAgentAppPublishRecord,
   SiteAgentAppTarget,
   SiteAgentAppVisualSnapshot,
   SiteAstryxTemplate,
   SiteConversationEntry,
   SiteProjectMeta,
+  SiteProjectPublicMeta,
   SiteScreenMeta,
   SiteSurface,
 } from "../../shared/site-studio";
 import { normalizeSiteAgentAppContract } from "./agent-app-contract";
+import { normalizeSiteAgentAppMcpConsentReceipt } from "./agent-app-mcp-consent";
 import { defaultSiteAgentAppVisual, normalizeSiteAgentAppVisual } from "./agent-app-visual";
 
 function projectsRoot(): string {
@@ -77,6 +80,9 @@ function readProjectMeta(projectId: string): SiteProjectMeta | null {
         ? (parsed.agentAppContract as SiteAgentAppContractSnapshot).source
         : "inferred-fallback",
     );
+    const agentAppMcpConsent = surface === "agent-app"
+      ? normalizeSiteAgentAppMcpConsentReceipt(parsed.agentAppMcpConsent)
+      : null;
     const astryxTemplate: SiteAstryxTemplate | null =
       parsed.astryxTemplate === "ai-chat" ||
       parsed.astryxTemplate === "ai-chat-landing" ||
@@ -129,6 +135,7 @@ function readProjectMeta(projectId: string): SiteProjectMeta | null {
       agentAppTarget: surface === "agent-app" ? agentAppTarget : null,
       astryxTemplate: surface === "agent-app" ? astryxTemplate : null,
       agentAppContract: surface === "agent-app" ? agentAppContract : null,
+      agentAppMcpConsent,
       agentAppVisual: surface === "agent-app" && agentAppTarget
         ? normalizeSiteAgentAppVisual(parsed.agentAppVisual) ?? defaultSiteAgentAppVisual(agentAppTarget)
         : null,
@@ -438,6 +445,34 @@ export function listSiteProjects(): SiteProjectMeta[] {
   return projects;
 }
 
+/** Main-owned filesystem locations never cross the Site renderer IPC. */
+export function siteProjectForRenderer(project: SiteProjectMeta): SiteProjectPublicMeta {
+  const artifact = project.agentAppArtifact;
+  if (!artifact) return { ...project, agentAppArtifact: null };
+  const { rootPath: _rootPath, thumbnail, ...publicArtifact } = artifact;
+  const publicThumbnail = thumbnail
+    ? {
+        width: thumbnail.width,
+        height: thumbnail.height,
+        updatedAt: thumbnail.updatedAt,
+      }
+    : null;
+  return {
+    ...project,
+    agentAppArtifact: {
+      ...publicArtifact,
+      thumbnail: publicThumbnail,
+      // Build tooling may include absolute paths in stderr. The renderer gets
+      // only a stable value-safe state; detailed diagnostics remain in main.
+      failureReason: artifact.failureReason ? "agent-app-build-failed" : null,
+    },
+  };
+}
+
+export function listSiteProjectsForRenderer(): SiteProjectPublicMeta[] {
+  return listSiteProjects().map(siteProjectForRenderer);
+}
+
 export function createSiteProject(
   input: string | {
     name: string;
@@ -481,6 +516,7 @@ export function createSiteProject(
     agentAppTarget,
     astryxTemplate,
     agentAppContract,
+    agentAppMcpConsent: null,
     agentAppVisual: surface === "agent-app" && agentAppTarget && typeof input !== "string"
       ? normalizeSiteAgentAppVisual(input.agentAppVisual) ?? defaultSiteAgentAppVisual(agentAppTarget)
       : null,
@@ -505,6 +541,28 @@ export function updateSiteAgentAppArtifact(
   meta.agentAppArtifact = normalized.publish
     ? normalized
     : { ...normalized, publishBinding: null };
+  meta.updatedAt = new Date().toISOString();
+  writeProjectMeta(meta);
+  return meta;
+}
+
+export function updateSiteAgentAppMcpConsent(
+  projectId: string,
+  receipt: SiteAgentAppMcpConsentReceipt | null,
+): SiteProjectMeta {
+  const meta = getSiteProject(projectId);
+  if (meta.surface !== "agent-app") throw new Error("Agent App 프로젝트만 MCP 동의를 저장할 수 있습니다.");
+  if (receipt === null) {
+    meta.agentAppMcpConsent = null;
+    meta.updatedAt = new Date().toISOString();
+    writeProjectMeta(meta);
+    return meta;
+  }
+  const normalized = normalizeSiteAgentAppMcpConsentReceipt(receipt);
+  if (!normalized || normalized.projectId !== meta.id) {
+    throw new Error("Agent App MCP 동의 영수증이 올바르지 않습니다.");
+  }
+  meta.agentAppMcpConsent = normalized;
   meta.updatedAt = new Date().toISOString();
   writeProjectMeta(meta);
   return meta;

@@ -3252,6 +3252,8 @@ function ExperiencePanel({
                     <span style={{ display: "block", marginTop: 3, color: "var(--muted-deep)" }}>
                       {latestCloud.state === "public-active"
                         ? (ko ? "서버 평가 영수증으로만 도달할 수 있는 상태입니다." : "Only a server evaluator receipt can reach this state.")
+                        : latestCloud.state === "verification-requested" || latestCloud.state === "verification-pending"
+                          ? (ko ? "아직 공개 활성 상태는 아닙니다." : "It is not public-active yet.")
                         : latestCloud.state === "conflict"
                           ? (ko ? "로컬 자료는 그대로입니다. 서버 revision을 다시 읽은 뒤 재시도하세요." : "Local material is intact. Re-read the server revision before retrying.")
                           : latestCloud.errorMessage || `${latestCloud.bundleId.slice(0, 18)} · rev ${latestCloud.remoteRevision?.slice(0, 14) ?? "—"}`}

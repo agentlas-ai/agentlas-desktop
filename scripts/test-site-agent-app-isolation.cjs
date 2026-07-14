@@ -16,12 +16,15 @@ const codex = read("electron/runtime/codex.ts");
 const claude = read("electron/runtime/claude-code.ts");
 const grok = read("electron/runtime/grok.ts");
 const gemini = read("electron/runtime/gemini.ts");
-const cursor = read("electron/runtime/cursor.ts");
 const runner = read("electron/runtime/runner.ts");
 const untrustedError = read("electron/runtime/untrusted-error.ts");
 const groups = read("electron/store/agent-groups.ts");
 const ipc = read("electron/ipc.ts");
 const capabilities = read("electron/site/agent-app-capabilities.ts");
+const mcpConfigPolicy = read("electron/site/agent-app-mcp-config-policy.ts");
+const mcpToolPolicy = read("electron/site/agent-app-tool-policy.ts");
+const mcpConsent = read("electron/site/agent-app-mcp-consent.ts");
+const mcpPlan = read("electron/site/agent-app-mcp-plan.ts");
 const siteRuntime = read("electron/site/agent-app-runtime.ts");
 const selection = read("electron/runtime/selection.ts");
 
@@ -54,9 +57,11 @@ const runnerBody = (source, exportName) => {
 // learning, or continuation loop; each call gets a fresh isolated identity.
 matches(client, /runtimeCanUseMcp\s*&&\s*!req\.agentAppMode/, "Agent App MCP disable");
 matches(client, /const agentAppToolGrant = req\.agentAppMode \? req\.agentAppRuntimeToolGrant : undefined/, "Agent App main grant selection");
-matches(client, /\^mcp__brave-search__\(\?:brave_web_search\|brave_local_search\)\$/, "Agent App exact MCP tool validation");
-matches(client, /agentAppToolGrant && !agentAppCapabilityRuntimeEligible[\s\S]{0,420}agentAppToolGrant\.runtimeStatus = "runtime-unavailable"/, "Agent App incompatible-runtime downgrade");
-assertBefore(client, 'agentAppToolGrant.runtimeStatus = "runtime-unavailable"', "mcpConfigPath = agentAppToolGrant.mcpConfigPath", "Agent App grant runtime gate order");
+matches(client, /validSiteAgentAppMcpGrantTools\(/, "Agent App exact MCP tool validation");
+matches(client, /agentAppToolGrant && !agentAppCapabilityRuntimeEligible[\s\S]{0,420}markAgentAppMcpRuntimeUnavailable\(\)/, "Agent App incompatible-runtime downgrade");
+matches(client, /!exactConfig[\s\S]{0,500}markAgentAppMcpRuntimeUnavailable\(\)/, "Agent App JIT grant invalidation downgrade");
+assert.doesNotMatch(client, /Agent App read-only capability grant failed main-process validation/, "JIT grant invalidation must not fail the whole Agent App");
+assertBefore(client, "markAgentAppMcpRuntimeUnavailable();", "mcpConfigPath = acceptedAgentAppInlineMcpConfig", "Agent App grant runtime gate order");
 matches(client, /selectAgentAppRuntimeForTargets\(runtimes, runtimeTargets\)/, "Agent App stateless-safe runtime selection");
 matches(client, /let routerAgent = req\.agentAppMode \? undefined/, "Agent App router disable");
 matches(client, /const history = req\.agentAppMode \? \[\] : listChatMessages/, "Agent App empty history");
@@ -177,6 +182,8 @@ for (const forbidden of [
 }
 matches(envResolver, /const env: NodeJS\.ProcessEnv = \{\};/, "Agent App empty environment base");
 matches(envResolver, /env\.AGENTLAS_UNTRUSTED_NO_TOOLS = "1"/, "Agent App untrusted environment sentinel");
+matches(envResolver, /env\.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1"/, "Agent App host auto-memory isolation");
+matches(envResolver, /env\.ENABLE_CLAUDEAI_MCP_SERVERS = "false"/, "Agent App subscription connector isolation");
 assert.doesNotMatch(
   between(envResolver, "export function buildAgentAppRunnerEnv", "export async function buildRunnerEnv", "Agent App environment builder"),
   /\.\.\.process\.env|readDotEnv|readEnvVar|credentials\.env|vault/i,
@@ -191,10 +198,17 @@ matches(ipc, /invocationService\.start\(rendererInvocationRequest\(req\)\)/, "Re
 
 // A DB catalog row is insufficient: Agent Apps reject package-manager download
 // commands before verification and expose only exact, currently verified tools.
-matches(capabilities, /function hasPinnedLocalExecutable/, "Pinned local MCP executable gate");
-matches(capabilities, /executableName === "npx"/, "npx rejection");
+matches(mcpConfigPolicy, /function hasPinnedSiteAgentAppExecutable/, "Pinned local MCP executable gate");
+matches(mcpConfigPolicy, /isCanonicalSystemTimeMcpServer\(server\)/, "time-only executable provenance gate");
+matches(capabilities, /validSiteAgentAppMcpConsentDecision/, "Main-owned MCP consent receipt gate");
+matches(capabilities, /reason: "consent-required"/, "Missing consent no-tool disclosure");
+matches(capabilities, /reason: "key-missing"/, "Missing key no-tool disclosure");
+matches(mcpConsent, /recommendationDigest: siteAgentAppMcpRecommendationDigest/, "Consent declaration binding");
+matches(mcpPlan, /siteAgentAppMcpCredentialMode/, "Key-required versus keyless recommendation rows");
 matches(capabilities, /testServerConnection\(server, \{ timeoutMs: 12_000 \}\)/, "JIT MCP status verification");
-matches(capabilities, /new Set\(\["brave_web_search", "brave_local_search"\]\)/, "Brave tool name allowlist");
+matches(capabilities, /validSiteAgentAppExposedToolNames/, "Exact exposed MCP tool validation");
+assert.equal(mcpToolPolicy.includes("brave_web_search"), false, "Unpinned Brave must not be in the Agent App execution policy");
+matches(mcpToolPolicy, /"get_current_time", "convert_time"/, "System Time tool name allowlist");
 matches(capabilities, /mcp__\$\{server\.configKey\}__\$\{tool\}/, "Exact MCP tool grant construction");
 matches(capabilities, /deps\.runtimeEligible === false/, "Capability runtime preflight gate");
 matches(capabilities, /reason: "runtime-unavailable"/, "Capability runtime-unavailable disclosure");
@@ -203,14 +217,13 @@ matches(siteRuntime, /capabilities: prepared\.finalDisclosure\(\)/, "Site runtim
 matches(selection, /function agentAppStatelessSafe[\s\S]{0,220}claude-code[\s\S]{0,220}byok[\s\S]{0,220}ollama/, "Agent App safe runtime set");
 matches(selection, /capabilityRuntimeEligible: false,[\s\S]{0,120}fallbackFromKind: preferred\.active\.kind/, "Unsafe CLI no-tool fallback contract");
 
-// Codex, Grok, Gemini, and Cursor cannot prove a zero-tool/stateless CLI
+// Codex, Grok, and Gemini cannot prove a zero-tool/stateless CLI
 // boundary. They must reject before CLI discovery, auth/key lookup, prompt-file
 // staging, or process spawn. A prompt-only denial is not sufficient.
 const failClosedRunners = [
   { label: "Codex", source: codex, exportName: "runCodex", firstSideEffect: "const bin = await getBin()" },
   { label: "Grok", source: grok, exportName: "runGrok", firstSideEffect: "const bin = await getBin()" },
   { label: "Gemini", source: gemini, exportName: "runGemini", firstSideEffect: "const bin = await getBin()" },
-  { label: "Cursor", source: cursor, exportName: "runCursor", firstSideEffect: "const bin = await resolveCursorBinary()" },
 ];
 for (const runtime of failClosedRunners) {
   const body = runnerBody(runtime.source, runtime.exportName);
@@ -221,14 +234,13 @@ for (const runtime of failClosedRunners) {
 assertBefore(runnerBody(grok, "runGrok"), "if (req.untrustedNoTools)", "readEnvVar(", "Grok key lookup isolation");
 assertBefore(runnerBody(grok, "runGrok"), "if (req.untrustedNoTools)", "fs.writeFile(", "Grok prompt-file isolation");
 assertBefore(runnerBody(gemini, "runGemini"), "if (req.untrustedNoTools)", "stageCliImageAttachments(", "Gemini attachment isolation");
-assertBefore(runnerBody(cursor, "runCursor"), "if (req.untrustedNoTools)", "spawnCli(", "Cursor process isolation");
-
 // Claude Code is the one CLI with a verified zero-builtins + exact-MCP contract.
-for (const flag of ["--safe-mode", "--disable-slash-commands", "--no-chrome", "--no-session-persistence", "--strict-mcp-config"]) {
+for (const flag of ["--safe-mode", "--setting-sources", "--disable-slash-commands", "--no-chrome", "--no-session-persistence", "--strict-mcp-config"]) {
   assert.ok(claude.includes(`"${flag}"`), `Claude must enforce ${flag}`);
 }
 matches(claude, /"--tools",\s*""/, "Claude empty tool set");
-matches(claude, /wrapSystemPrompt\([\s\S]{0,320}?runReq\.untrustedNoTools,\s*runReq\.untrustedAllowedMcpTools,\s*\)/, "Claude isolated capability prompt wrapper");
+matches(claude, /runReq\.untrustedNoTools\s*\? \(hasExactUntrustedMcpGrant \? runReq\.untrustedAllowedMcpTools : undefined\)/, "Claude prompt receives MCP authority only after exact config validation");
+matches(claude, /hasExactUntrustedMcpGrant \? \["--setting-sources", ""\] : \["--safe-mode"\]/, "Claude subscription-safe filesystem settings isolation");
 matches(claude, /const fingerprint = !runReq\.untrustedNoTools &&/, "Claude fingerprint persistence block");
 matches(claude, /const savedSession = !runReq\.untrustedNoTools &&/, "Claude saved-session read block");
 matches(claude, /const resumeSessionId = runReq\.untrustedNoTools \? null/, "Claude resume disable");
@@ -239,13 +251,20 @@ matches(
 );
 assert.doesNotMatch(claude, /exclude-dynamic/i, "Claude must not move dynamic host context into the user message");
 matches(claude, /const hasExactUntrustedMcpGrant = Boolean\(/, "Claude exact untrusted MCP gate");
-matches(claude, /\^mcp__\[a-z0-9_-\]\+__\(\?:brave_web_search\|brave_local_search\)\$/, "Claude exact Brave tool validation");
-matches(claude, /req\.mcpConfigPath && \(!runReq\.untrustedNoTools \|\| hasExactUntrustedMcpGrant\)/, "Claude MCP config fail-closed gate");
+matches(claude, /isCanonicalAgentAppInlineMcpConfig\(runReq\.mcpConfigPath\)/, "Claude compact inline config gate");
+matches(claude, /Object\.keys\(parsed\.mcpServers\)[\s\S]{0,180}agentlas-time/, "Claude single built-in config gate");
+matches(claude, /onAgentAppMcpRuntimeUnavailable/, "Claude invalid inline grant disclosure downgrade");
+matches(claude, /validSiteAgentAppMcpGrantTools\(/, "Claude exact MCP tool validation");
+matches(claude, /runReq\.mcpConfigPath && \(!runReq\.untrustedNoTools \|\| hasExactUntrustedMcpGrant\)/, "Claude MCP config fail-closed gate");
+matches(claude, /hasExactUntrustedMcpGrant[\s\S]{0,260}!agentAppMcpInitConnected[\s\S]{0,700}agentAppMcpFallbackAttempted: true/, "Claude exact MCP pre-init fallback");
+matches(claude, /ev\.mcp_servers\.length === 1[\s\S]{0,320}JSON\.stringify\(reportedTools\) === JSON\.stringify\(expectedTools\)/, "Claude exact MCP init receipt gate");
+matches(claude, /mcpConfigPath: undefined,[\s\S]{0,180}mcpAllowedTools: undefined,[\s\S]{0,180}untrustedAllowedMcpTools: undefined/, "Claude fallback MCP authority removal");
+matches(claude, /stripAgentAppMcpSecretAliases\(runReq\.env\)/, "Claude fallback opaque secret removal");
 
 const untrustedWrapper = between(
   runner,
   "if (untrustedNoTools)",
-  "// Every runtime calls this function internally.",
+  "if (restrictedReadBoundary)",
   "Agent App system wrapper",
 );
 for (const denied of ["file", "shell", "web", "browser", "app", "MCP", "memory", "automation", "delegation", "persistence"]) {

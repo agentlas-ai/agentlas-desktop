@@ -2,7 +2,7 @@
 // PRD 3.1 FRE 6단계 — 사용자가 입력 안 해도 한 번 클릭으로 연결되도록.
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { probeCodex } from "./codex";
-import { readCodexModelIds } from "./codex-models";
+import { readCodexModelInventory } from "./codex-models";
 import { probeGemini } from "./gemini";
 import { probeGrok } from "./grok";
 import { probeCursor } from "./cursor";
@@ -38,6 +38,17 @@ function cloneRuntimeStatuses(list: RuntimeStatus[]): RuntimeStatus[] {
   return list.map((runtime) => ({
     ...runtime,
     availableModels: runtime.availableModels ? [...runtime.availableModels] : runtime.availableModels,
+    allocationModels: runtime.allocationModels ? [...runtime.allocationModels] : runtime.allocationModels,
+    allocationModelProfiles: runtime.allocationModelProfiles
+      ? Object.fromEntries(Object.entries(runtime.allocationModelProfiles).map(([modelId, profile]) => [
+        modelId,
+        {
+          ...profile,
+          capabilities: profile.capabilities ? [...profile.capabilities] : profile.capabilities,
+          efforts: profile.efforts ? [...profile.efforts] : profile.efforts,
+        },
+      ]))
+      : runtime.allocationModelProfiles,
     efforts: runtime.efforts ? runtime.efforts.map((effort) => ({ ...effort })) : runtime.efforts,
   }));
 }
@@ -198,7 +209,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   const [
     cc,
     cx,
-    codexDiscoveredModels,
+    codexModelInventory,
     gm,
     gr,
     cursor,
@@ -215,7 +226,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   ] = await Promise.all([
     probeClaudeCode(),
     probeCodex(),
-    readCodexModelIds(),
+    readCodexModelInventory(),
     probeGemini(),
     probeGrok(),
     probeCursor(),
@@ -232,8 +243,23 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   ]);
 
   const list: RuntimeStatus[] = [];
+  const codexDiscoveredModels = codexModelInventory.map((model) => model.id);
+  const codexModelProfiles: NonNullable<RuntimeStatus["allocationModelProfiles"]> =
+    Object.fromEntries(codexModelInventory.map((model) => [
+      model.id,
+      {
+        ...(model.contextWindow !== null ? { contextWindow: model.contextWindow } : {}),
+        capabilities: [...model.capabilities],
+        ...(model.supportsTools !== null ? { supportsTools: model.supportsTools } : {}),
+        ...(model.supportsMultimodal !== null
+          ? { supportsMultimodal: model.supportsMultimodal }
+          : {}),
+        ...(model.efforts !== null ? { efforts: [...model.efforts] } : {}),
+      },
+    ]));
 
   if (cc) {
+    const selectedClaudeModel = cliModelOf("claude-code", active, undefined, "anthropic");
     list.push({
       kind: "claude-code",
       backend: "anthropic",
@@ -241,8 +267,9 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       version: cc.version,
       active: false,
       // 컨텍스트는 CLI가 자동 관리하지만 모델은 --model로 선택 가능 (opus/sonnet/haiku).
-      model: cliModelOf("claude-code", active, undefined, "anthropic"),
+      model: selectedClaudeModel,
       availableModels: cliModels("claude-code").map((m) => m.id),
+      allocationModels: selectedClaudeModel ? [selectedClaudeModel] : [],
       // 작업량 — 현재 선택값 + 이 CLI가 지원하는 레벨(--help 파싱으로 자동 동기화).
       effort: getStoredEffort(),
       efforts: claudeEfforts,
@@ -262,6 +289,8 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       // Codex도 선택 모델을 저장·복원해야 --model이 다음 대화까지 유지된다.
       model: cliModelOf("codex", active, codexModels, "openai"),
       availableModels: codexModels,
+      allocationModels: codexDiscoveredModels,
+      allocationModelProfiles: codexModelProfiles,
     });
   }
   if (gm) {
@@ -285,6 +314,32 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: storedGrok ?? grokModels[0],
       availableModels: grokModels,
+      allocationModels: gr.models,
+    });
+  }
+  if (cursor) {
+    // Current Cursor CLI exposes `agent models`; retain Auto as a safe fallback
+    // and preserve an operator selection, but never fabricate entitlement from
+    // the display catalog when live discovery returned nothing.
+    const rememberedCursor =
+      (active?.kind === "cursor" && active.backend === "cursor" ? active.model : undefined) ??
+      recallRuntimeSelection("cursor", "cursor")?.model;
+    const cursorModels = [
+      "auto",
+      ...(cursor.models ?? []),
+      ...(rememberedCursor && rememberedCursor !== "auto" ? [rememberedCursor] : []),
+    ].filter((model, index, list) => Boolean(model) && list.indexOf(model) === index);
+    list.push({
+      kind: "cursor",
+      backend: "cursor",
+      source: cursor.path,
+      version: cursor.version,
+      active: false,
+      model: cliModelOf("cursor", active, cursorModels, "cursor") ?? "auto",
+      availableModels: cursorModels,
+      allocationModels: ["auto", ...(cursor.models ?? [])].filter(
+        (model, index, models) => models.indexOf(model) === index,
+      ),
     });
   }
   if (cursor) {
@@ -327,41 +382,48 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: preferred,
       availableModels: ollama.models,
+      allocationModels: ollama.models,
     });
   }
   if (anthropicByok) {
+    const selectedModel = byokModelOf("anthropic", active);
     list.push({
       kind: "byok",
       backend: "anthropic",
       source: "byok:anthropic",
       version: null,
       active: false,
-      model: byokModelOf("anthropic", active),
+      model: selectedModel,
       availableModels: byokModels("anthropic").map((m) => m.id),
+      allocationModels: selectedModel ? [selectedModel] : [],
       longContextEnabled: byokLongOf("anthropic", active),
     });
   }
   if (openaiByok) {
+    const selectedModel = byokModelOf("openai", active);
     list.push({
       kind: "byok",
       backend: "openai",
       source: "byok:openai",
       version: null,
       active: false,
-      model: byokModelOf("openai", active),
+      model: selectedModel,
       availableModels: byokModels("openai").map((m) => m.id),
+      allocationModels: selectedModel ? [selectedModel] : [],
       longContextEnabled: byokLongOf("openai", active),
     });
   }
   if (googleByok) {
+    const selectedModel = byokModelOf("google", active);
     list.push({
       kind: "byok",
       backend: "google",
       source: "byok:google",
       version: null,
       active: false,
-      model: byokModelOf("google", active),
+      model: selectedModel,
       availableModels: byokModels("google").map((m) => m.id),
+      allocationModels: selectedModel ? [selectedModel] : [],
       longContextEnabled: byokLongOf("google", active),
     });
   }
@@ -378,14 +440,16 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   };
   for (const backend of ["glm", "kimi", "deepseek", "upstage", "custom"] as const) {
     if (!compatFlags[backend]) continue;
+    const selectedModel = byokModelOf(backend, active);
     list.push({
       kind: "byok",
       backend,
       source: `byok:${backend}`,
       version: null,
       active: false,
-      model: byokModelOf(backend, active),
+      model: selectedModel,
       availableModels: byokModels(backend).map((m) => m.id),
+      allocationModels: selectedModel ? [selectedModel] : [],
       longContextEnabled: byokLongOf(backend, active),
     });
   }

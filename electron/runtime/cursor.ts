@@ -11,8 +11,8 @@ const CANDIDATES = [
   path.join(os.homedir(), ".cursor", "bin", "cursor-agent"),
   path.join(os.homedir(), ".local", "bin", "cursor-agent"),
   "cursor-agent",
-  // Current Cursor CLI installs the public `agent` command. Verify its help
-  // signature before accepting it so an unrelated `agent` binary is never
+  // Current Cursor CLI also installs the public `agent` command. Verify its
+  // help signature so an unrelated command with the same generic name is not
   // mistaken for Cursor.
   path.join(os.homedir(), ".local", "bin", "agent"),
   "agent",
@@ -28,19 +28,20 @@ async function hasCursorAgentSignature(candidate: string): Promise<boolean> {
     let child: ReturnType<typeof spawnCli>;
     let output = "";
     let settled = false;
+    let timer: NodeJS.Timeout | undefined;
     const finish = (value: boolean) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       resolve(value);
     };
     try {
       child = spawnCli(candidate, ["--help"], { stdio: ["ignore", "pipe", "pipe"], env: process.env });
     } catch {
-      resolve(false);
+      finish(false);
       return;
     }
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       try { child.kill(); } catch { /* best effort */ }
       finish(false);
     }, 2_500);
@@ -63,7 +64,10 @@ async function resolveCursorBinary(): Promise<string | null> {
 
 function cleanModelName(value: unknown): string | null {
   if (typeof value !== "string") return null;
-  const cleaned = value.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").replace(/\s+\((?:default|selected|recommended)\)\s*$/i, "").trim();
+  const cleaned = value
+    .replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "")
+    .replace(/\s+\((?:default|selected|recommended)\)\s*$/i, "")
+    .trim();
   return cleaned && cleaned.length <= 180 ? cleaned : null;
 }
 
@@ -109,19 +113,20 @@ async function listCursorModels(bin: string): Promise<string[]> {
     let child: ReturnType<typeof spawnCli>;
     let stdout = "";
     let settled = false;
+    let timer: NodeJS.Timeout | undefined;
     const finish = (models: string[]) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       resolve(models);
     };
     try {
       child = spawnCli(bin, ["models"], { stdio: ["ignore", "pipe", "pipe"], env: process.env });
     } catch {
-      resolve([]);
+      finish([]);
       return;
     }
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       try { child.kill(); } catch { /* best effort */ }
       finish([]);
     }, 5_000);
@@ -151,7 +156,9 @@ function promptFor(req: RunnerRequest): string {
       req.permission,
       req.userPrompt,
       req.forceSurface,
+      req.restrictedReadBoundary,
       req.untrustedNoTools,
+      req.untrustedAllowedMcpTools,
     )}`,
     "",
   ];
@@ -160,32 +167,51 @@ function promptFor(req: RunnerRequest): string {
   return parts.join("\n");
 }
 
+function contentText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value
+    .map((item) => {
+      if (typeof item === "string") return item;
+      if (!item || typeof item !== "object") return "";
+      const text = (item as Record<string, unknown>).text;
+      return typeof text === "string" ? text : "";
+    })
+    .join("");
+}
+
 function eventText(value: unknown): string {
   if (!value || typeof value !== "object") return "";
   const event = value as Record<string, unknown>;
   for (const key of ["delta", "text", "content", "result", "output"]) {
-    if (typeof event[key] === "string") return event[key] as string;
+    const text = contentText(event[key]);
+    if (text) return text;
   }
   const message = event.message;
   if (message && typeof message === "object") {
-    const content = (message as Record<string, unknown>).content;
-    if (typeof content === "string") return content;
+    return contentText((message as Record<string, unknown>).content);
   }
   return "";
 }
 
 export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
-  if (req.untrustedNoTools) {
+  // Cursor print mode exposes built-in file/shell tools and currently has no
+  // verified zero-tool switch. Browser-originated and restricted invocations
+  // must therefore fail before probing or spawning the CLI.
+  if (req.untrustedNoTools || req.restrictedReadBoundary) {
     throw new Error(
       req.locale === "ko"
-        ? "Cursor Agent CLI는 현재 Agent App의 검증된 무도구 격리 모드를 지원하지 않습니다. Claude Code, Ollama 또는 API 런타임을 선택하세요."
-        : "Cursor Agent CLI does not currently support Agent App's verified tool-less isolation. Select Claude Code, Ollama, or an API runtime.",
+        ? "Cursor Agent CLI는 현재 검증된 무도구 격리 모드를 지원하지 않습니다. Claude Code, Ollama 또는 API 런타임을 선택하세요."
+        : "Cursor Agent CLI does not currently support verified tool-less isolation. Select Claude Code, Ollama, or an API runtime.",
     );
   }
   const bin = await resolveCursorBinary();
   if (!bin) throw new Error(req.locale === "ko" ? "Cursor Agent CLI를 찾지 못했습니다." : "Cursor Agent CLI is not installed.");
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
-  const args = ["--print", "--output-format", "stream-json", "--force"];
+  const args = ["--print", "--output-format", "stream-json"];
+  // Cursor requires --force to apply writes in headless mode. Never add it for
+  // read-only invocations; normal Agentlas write/full tasks remain automated.
+  if (req.permission === "write" || req.permission === "full") args.push("--force");
   // Cursor's Auto is its own live model selector. Omitting it keeps the account default.
   if (req.model && req.model !== "auto") args.push("--model", req.model);
   args.push(promptFor(req));
@@ -194,7 +220,12 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
   return new Promise<RunnerResult>((resolve, reject) => {
     let child: ReturnType<typeof spawnCli>;
     try {
-      child = spawnCli(bin, args, { stdio: ["ignore", "pipe", "pipe"], cwd, env: req.env ?? process.env, ...detachedSpawnOpts() });
+      child = spawnCli(bin, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        cwd,
+        env: req.env ?? process.env,
+        ...detachedSpawnOpts(),
+      });
     } catch (error) {
       reject(error);
       return;
@@ -205,6 +236,13 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
     let buffer = "";
     let text = "";
     let stderr = "";
+    let settled = false;
+    const finishReject = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      req.signal?.removeEventListener("abort", onAbort);
+      reject(error);
+    };
     const consume = (line: string) => {
       try {
         const event = JSON.parse(line);
@@ -213,7 +251,7 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
         if (typeof (event as Record<string, unknown>).delta === "string") text += chunk;
         else if (chunk.length >= text.length || !text.includes(chunk)) text = chunk;
         events.onPartial(text);
-      } catch { /* malformed diagnostics stay on stderr */ }
+      } catch { /* malformed diagnostics stay ignored; stderr is reported on failure */ }
     };
     child.stdout?.on("data", (chunk: Buffer) => {
       buffer += chunk.toString("utf8");
@@ -222,8 +260,10 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
       lines.forEach(consume);
     });
     child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString("utf8")).slice(-4_000); });
-    child.on("error", reject);
+    child.on("error", (error) => finishReject(error));
     child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
       req.signal?.removeEventListener("abort", onAbort);
       if (buffer.trim()) consume(buffer);
       if (req.signal?.aborted) return reject(new Error(tStatus(req.locale, "aborted")));

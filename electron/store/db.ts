@@ -12,7 +12,7 @@ import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 63;
+const SCHEMA_VERSION = 64;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -2375,6 +2375,32 @@ export function initStore(): void {
     const columns = _db.prepare("PRAGMA table_info(taste_chip_workflows)").all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === "preview_provenance_json")) {
       _db.exec("ALTER TABLE taste_chip_workflows ADD COLUMN preview_provenance_json TEXT");
+    }
+  }
+
+  // v64: durable least-privilege authority for scheduled automation runs.
+  // Existing rows and UI clients that omit the new field deliberately retain
+  // their historical write behavior. The CHECK prevents any scheduler row
+  // from persisting interactive-only `full` authority.
+  if (userVersion < 64) {
+    if (tableExists(_db, "automations")) {
+      const columns = _db.prepare("PRAGMA table_info(automations)").all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === "execution_permission")) {
+        _db.exec(
+          "ALTER TABLE automations ADD COLUMN execution_permission TEXT NOT NULL DEFAULT 'write' " +
+          "CHECK(execution_permission IN ('read','write'))",
+        );
+      }
+      // Rerunnable after a hard exit between ALTER and user_version. A partial
+      // pre-release column without the final constraint is normalized as well.
+      _db.exec(`
+        UPDATE automations
+        SET execution_permission = 'write'
+        WHERE execution_permission IS NULL;
+        UPDATE automations
+        SET execution_permission = 'read'
+        WHERE execution_permission NOT IN ('read', 'write');
+      `);
     }
   }
 

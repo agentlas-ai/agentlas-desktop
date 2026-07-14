@@ -28,6 +28,7 @@ const {
   touchGraphRun,
   finishGraphRun,
   toggleAutomation,
+  updateAutomation,
 } = automationStore;
 const { parseAutomations } = require("../dist/electron/automation-emitter.js");
 const mcpClient = require("../dist/electron/mcp/client.js");
@@ -219,6 +220,12 @@ function assertLocalTime(iso, expected) {
     assert.equal(created.targetType, "agent");
     assert.equal(created.targetId, "agent-1");
     assert.equal(created.promptTemplate, "Summarize the inbox");
+    assert.equal(created.executionPermission, "write", "UI/legacy create must keep the explicit write default");
+    assert.equal(
+      getDb().prepare("SELECT execution_permission FROM automations WHERE id = ?").get(created.id).execution_permission,
+      "write",
+      "the backward-compatible default must be durable, not scheduler-only",
+    );
     assert.equal(created.toolMode, "auto", "non-web automations should keep auto mode");
     assert.ok(created.nextRunAt, "nextRunAt should be set on create");
     assert.equal(listAutomations().length, 1);
@@ -603,6 +610,71 @@ function assertLocalTime(iso, expected) {
       const dueAfterRun = getAutomation(dueRun.id);
       assert.ok(dueAfterRun.lastRunAt, "scheduler should mark lastRunAt");
       assert.ok(new Date(dueAfterRun.nextRunAt).getTime() > new Date(dueAfterRun.lastRunAt).getTime());
+
+      schedulerCalls.length = 0;
+      const readOnlyRun = createAutomation({
+        name: "Read-only Scheduler",
+        scheduleHuman: "daily-09:00",
+        targetType: "agent",
+        targetId: "agent-1",
+        promptTemplate: "Inspect without changing anything",
+        executionPermission: "read",
+      });
+      assert.equal(readOnlyRun.executionPermission, "read");
+      assert.equal(
+        getDb().prepare("SELECT execution_permission FROM automations WHERE id = ?").get(readOnlyRun.id)
+          .execution_permission,
+        "read",
+      );
+      assert.equal(
+        updateAutomation(readOnlyRun.id, { name: "Read-only Scheduler renamed" }).executionPermission,
+        "read",
+        "an unrelated update must not promote a stored read automation",
+      );
+      await runAutomationNow(readOnlyRun.id);
+      assert.equal(schedulerCalls.length, 1);
+      assert.equal(schedulerCalls[0].permissions, "read", "legacy scheduler path must use the stored read authority");
+      assert.equal(updateAutomation(readOnlyRun.id, { executionPermission: "write" }).executionPermission, "write");
+      assert.equal(updateAutomation(readOnlyRun.id, { executionPermission: "read" }).executionPermission, "read");
+
+      schedulerCalls.length = 0;
+      const readOnlyGraph = createAutomation({
+        name: "Read-only Graph Scheduler",
+        scheduleHuman: "daily-09:00",
+        targetType: "agent",
+        targetId: "agent-1",
+        promptTemplate: "Read graph fallback",
+        executionPermission: "read",
+        graphJson: {
+          version: 1,
+          nodes: [
+            {
+              id: "reader",
+              type: "agent",
+              position: { x: 0, y: 0 },
+              config: { prompt: "Inspect the project" },
+            },
+          ],
+          edges: [],
+        },
+      });
+      await runAutomationNow(readOnlyGraph.id);
+      assert.equal(schedulerCalls.length, 1);
+      assert.equal(schedulerCalls[0].permissions, "read", "graph scheduler path must not re-escalate to write");
+
+      const malformedPermission = createAutomation({
+        name: "Malformed Scheduler Permission",
+        scheduleHuman: "daily-09:00",
+        targetType: "agent",
+        targetId: "agent-1",
+        promptTemplate: "Do not accept full",
+        executionPermission: "full",
+      });
+      assert.equal(
+        malformedPermission.executionPermission,
+        "read",
+        "a present invalid/full scheduler permission must fail closed instead of using the legacy write default",
+      );
 
       schedulerCalls.length = 0;
       let resolveLongRun;

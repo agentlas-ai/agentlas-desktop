@@ -7,6 +7,7 @@ const path = require("node:path");
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-grok-runtime-"));
 const fakeBin = path.join(temp, "grok-fake.cjs");
 const capture = path.join(temp, "capture.json");
+const healthFile = path.join(temp, "provider-health.json");
 
 fs.writeFileSync(
   fakeBin,
@@ -14,6 +15,10 @@ fs.writeFileSync(
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 if (args.includes("--version")) { console.log("grok 0.2.93"); process.exit(0); }
+if (process.env.GROK_FAKE_MODE === "quota") {
+  console.log(JSON.stringify({ type: "error", message: "HTTP 402: Grok Build usage balance exhausted" }));
+  process.exit(1);
+}
 const promptAt = args.indexOf("--prompt-file");
 const promptFile = promptAt >= 0 ? args[promptAt + 1] : "";
 const prompt = promptFile ? fs.readFileSync(promptFile, "utf8") : "";
@@ -21,6 +26,7 @@ fs.writeFileSync(process.env.GROK_CAPTURE, JSON.stringify({ args, promptFile, pr
 console.log(JSON.stringify({ type: "thought", data: "PRIVATE_REASONING_MUST_NOT_SURFACE" }));
 console.log(JSON.stringify({ type: "text", data: "hello " }));
 console.log(JSON.stringify({ type: "text", data: "world" }));
+console.log(JSON.stringify({ type: "text", data: " — quoted phrase: Grok Build usage balance exhausted" }));
 console.log(JSON.stringify({ type: "end", stopReason: "EndTurn", sessionId: "qa" }));
 `,
   { mode: 0o755 },
@@ -28,6 +34,7 @@ console.log(JSON.stringify({ type: "end", stopReason: "EndTurn", sessionId: "qa"
 
 process.env.AGENTLAS_GROK_BIN = fakeBin;
 process.env.GROK_CAPTURE = capture;
+process.env.AGENTLAS_PROVIDER_HEALTH_FILE = healthFile;
 
 (async () => {
   try {
@@ -52,7 +59,8 @@ process.env.GROK_CAPTURE = capture;
       },
     );
 
-    assert.equal(result.text, "hello world");
+    assert.equal(result.text, "hello world — quoted phrase: Grok Build usage balance exhausted");
+    assert.equal(fs.existsSync(healthFile), false, "successful model text must not be mistaken for a 402 receipt");
     assert.equal(statuses.join("\n").includes("PRIVATE_REASONING_MUST_NOT_SURFACE"), false);
     assert.equal(partials.join("\n").includes("PRIVATE_REASONING_MUST_NOT_SURFACE"), false);
 
@@ -69,6 +77,25 @@ process.env.GROK_CAPTURE = capture;
     assert.match(recorded.prompt, /USER REQUEST THAT MUST NOT APPEAR IN ARGV/);
 
     await waitFor(() => !fs.existsSync(recorded.promptFile), 2_000);
+
+    process.env.GROK_FAKE_MODE = "quota";
+    await assert.rejects(
+      () => runGrok(
+        {
+          systemPrompt: "SYSTEM CONTRACT",
+          userPrompt: "TRIGGER QUOTA FIXTURE",
+          history: [],
+          locale: "en",
+          permission: "read",
+          backendLabel: "Grok CLI",
+          cwd: temp,
+        },
+        { onStatus: () => {}, onPartial: () => {} },
+      ),
+      /Grok Build usage balance is exhausted \(HTTP 402\).*Grok Settings > Usage/,
+    );
+    const providerHealth = JSON.parse(fs.readFileSync(healthFile, "utf8"));
+    assert.equal(providerHealth.grok?.code, "grok_quota_exhausted");
     console.log("Official xAI Grok runtime headless contract passed");
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });

@@ -31,11 +31,25 @@ asarUnpack:
   - "**/node_modules/better-sqlite3/**/*"
   - "**/node_modules/keytar/**/*"
 
+# Required workers still need the globally enabled ELECTRON_RUN_AS_NODE fuse;
+# their internal call sites exact-gate command/argv. The fuse itself is not
+# path-scoped. Generic Node option/inspector injection remains disabled. App
+# code must come from app.asar; Electron validates its embedded integrity on
+# supported macOS and Windows packages. Linux remains unsigned and ASAR-only.
+electronFuses:
+  resetAdHocDarwinSignature: true
+  runAsNode: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+
 # ── Embedded Hephaestus engine ───────────────────────────────────────────────
 # Hephaestus is a separate open-source repo (git-ignored here). It is copied into
 # the packaged app from the on-disk folder — independent of git tracking — so the
-# private desktop repo never holds engine source while the shipped .app still
-# embeds it. Lands at <app>/Contents/Resources/Hephaestus (process.resourcesPath),
+# Desktop source does not vendor engine source in its Git history while the
+# shipped app still embeds the exact pinned checkout. Lands at
+# <app>/Contents/Resources/Hephaestus (process.resourcesPath),
 # OUTSIDE the asar so bin/hephaestus + the Python tree stay executable.
 # Heavy, non-runtime dirs (render output, tests, vendored caches, git) excluded.
 extraResources:
@@ -55,6 +69,36 @@ extraResources:
       - "!**/*.pyc"
       - "!**/*.pyo"
       - "!**/.DS_Store"
+      # Ignored local credentials/memory are outside the immutable Core commit.
+      # Exclude them here as defense in depth; afterPack independently rejects
+      # any matching path that reaches the packaged Resources tree.
+      - "!**/.env"
+      - "!**/.env.*"
+      - "!**/*.pem"
+      - "!**/*.key"
+      - "!**/*.p12"
+      - "!**/*.p8"
+      - "!**/*.mobileprovision"
+      - "!**/*.jks"
+      - "!**/*.keystore"
+      - "!**/signing/**"
+      - "!**/credentials/**"
+      - "!**/.memory.local/**"
+      # Preserve tracked .agentlas routing/ontology assets. Only Core's
+      # git-ignored mutable runtime state is forbidden.
+      - "!.agentlas/ontology-runtime.sqlite*"
+      - "!.agentlas/career-graph.sqlite*"
+      - "!.agentlas/experience-relations.jsonl*"
+      - "!.agentlas/.experience-relations.jsonl.*"
+      - "!.agentlas/field-test/**"
+      - "!.agentlas/field-test-report.*"
+      - "!.agentlas/agent-ontology/**"
+      - "!**/.ontology-runtime/**"
+      - "!**/.codex/**"
+      - "!**/.claude/settings.local.json"
+      - "!**/.claude/settings.*.local.json"
+      - "!**/*.log"
+      - "!**/._*"
   # 선택적 standalone Python 런타임. 기본은 빈 디렉터리(.gitkeep만) → 시스템 python 폴백.
   # `npm run fetch:python` 으로 현재 플랫폼용 python-build-standalone 을 채우면, 그대로 동봉되어
   # Python 미설치 머신에서도 엔진이 동작한다. 엔진 폴더가 아니라 데스크탑 리소스에 둔다(엔진 청결 유지).
@@ -167,4 +211,6 @@ publish:
     owner: agentlas-ai
     repo: agentlas-desktop-releases
     private: false
-    releaseType: release
+    # Windows/Linux are staging artifacts. The signed macOS publisher verifies
+    # every required platform asset before it alone promotes stable/latest.
+    releaseType: prerelease

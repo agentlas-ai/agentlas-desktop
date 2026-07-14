@@ -85,13 +85,33 @@ assert.equal(protectedBase.API_TOKEN, "new");
 // Official Gemini keeps default global extension/skills/MCP discovery. Agy retains its
 // compatibility path: no unsupported session flags, but model + headless prompt remain.
 const geminiRuntime = require("../dist/electron/runtime/gemini.js");
-const officialGeminiArgs = geminiRuntime.buildGeminiSpawnArgs(false, "session-1", undefined, "gemini-2.5-pro");
-assert.deepEqual(officialGeminiArgs, ["--resume", "session-1", "--model", "gemini-2.5-pro", "--prompt", ""]);
+const officialPrompt = "OFFICIAL_PROMPT_STAYS_ON_STDIN";
+const officialGeminiArgs = geminiRuntime.buildGeminiSpawnArgs(
+  false,
+  "session-1",
+  undefined,
+  "gemini-2.5-pro",
+  officialPrompt,
+);
+assert.deepEqual(officialGeminiArgs, ["--resume", "session-1", "--model", "gemini-2.5-pro", "--skip-trust", "--prompt", ""]);
+assert.equal(officialGeminiArgs.includes(officialPrompt), false);
 assert.equal(officialGeminiArgs.includes("--extensions"), false);
-const agyArgs = geminiRuntime.buildGeminiSpawnArgs(true, "ignored-session", "ignored-new-session", "gemini-2.5-pro");
-assert.deepEqual(agyArgs, ["--model", "gemini-2.5-pro", "--prompt", ""]);
+const agyPrompt = "ANTIGRAVITY_REQUIRES_A_REAL_PROMPT_ARG";
+const agyPromptFile = "/private/tmp/agentlas-gemini-prompt-fixture.txt";
+const agyBootstrap = geminiRuntime.buildAgyPromptBootstrap(agyPromptFile);
+const agyArgs = geminiRuntime.buildGeminiSpawnArgs(
+  true,
+  "ignored-session",
+  "ignored-new-session",
+  "gemini-2.5-pro",
+  agyBootstrap,
+  ["/private/tmp"],
+);
+assert.deepEqual(agyArgs, ["--model", "gemini-2.5-pro", "--add-dir", "/private/tmp", "--prompt", agyBootstrap]);
+assert.equal(agyArgs.includes(agyPrompt), false);
 assert.equal(agyArgs.includes("--resume"), false);
 assert.equal(agyArgs.includes("--session-id"), false);
+assert.equal(agyArgs.includes("--skip-trust"), false);
 
 // Update routing: agy and Gemini are distinct. Gemini follows its verified original npm/Homebrew
 // owner so global extension/config roots survive an in-place CLI update.

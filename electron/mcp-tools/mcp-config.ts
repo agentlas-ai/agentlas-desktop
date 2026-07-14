@@ -23,6 +23,7 @@ import {
   vaultUrlKey,
 } from "../opencrab/constants";
 import type { InstalledMcpServer } from "../../shared/types";
+import { isAuthenticSystemTimeMcpLaunch, isCanonicalSystemTimeMcpServer } from "./system-time-server";
 
 function expandHome(arg: string): string {
   if (arg === "~") return os.homedir();
@@ -119,7 +120,7 @@ function validateEnvKey(value: string): string {
   return key;
 }
 
-function secretAlias(serverKey: string, envKey: string): string {
+export function mcpRuntimeSecretAlias(serverKey: string, envKey: string): string {
   const digest = createHash("sha256").update(serverKey).update("\0").update(envKey).digest("hex");
   return `${SECRET_ALIAS_PREFIX}${digest.slice(0, 32).toUpperCase()}`;
 }
@@ -192,6 +193,9 @@ for (const key of PROXY_KEYS) {
     if (/^https?:$/.test(parsed.protocol) && !parsed.username && !parsed.password) env[key] = parsed.toString();
   } catch {}
 }
+// A built-in MCP may use the signed Electron binary as its bundled Node
+// runtime. Do not forward this switch to unrelated external executables.
+if (command === process.execPath) env.ELECTRON_RUN_AS_NODE = "1";
 for (const [targetKey, alias] of Object.entries(mapping)) {
   if (!ENV_KEY_RE.test(targetKey) || typeof alias !== "string" || !MCP_ALIAS_RE.test(alias)) {
     process.stderr.write("Agentlas MCP secret wrapper rejected an invalid environment mapping.\\n");
@@ -217,6 +221,11 @@ child.once("error", (error) => {
 });
 child.once("exit", (code) => process.exit(typeof code === "number" ? code : 1));
 `;
+
+/** Value-free integrity pin used by the Agent App execution boundary. */
+export const MCP_CHILD_ENV_WRAPPER_SHA256 = createHash("sha256")
+  .update(MCP_CHILD_ENV_WRAPPER)
+  .digest("hex");
 
 function ensurePrivateDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -360,6 +369,10 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   let mcpChildWrapper: string | null = null;
 
   for (const s of servers) {
+    if (s.catalogId === "agentlas-time" && !isCanonicalSystemTimeMcpServer(s)) {
+      // Official built-ins never fall through to generic stdio/remote paths.
+      continue;
+    }
     // Re-check every required value immediately before serialization. A key can
     // be revoked after consent; that server is omitted instead of poisoning the
     // whole CLI bootstrap.
@@ -384,42 +397,53 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         const envKey = validateEnvKey(rawKey);
         const value = resolvedEnv.get(envKey);
         if (!value) continue;
-        const alias = secretAlias(key, envKey);
+        const alias = mcpRuntimeSecretAlias(key, envKey);
         secretAliases[envKey] = alias;
         runtimeEnv[alias] = value;
       }
       const args = argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
-      mcpChildWrapper ??= ensureMcpChildEnvWrapper(dir);
       const aliases = Object.values(secretAliases);
-      const wrapperArgs = [
-        mcpChildWrapper,
-        require.resolve("cross-spawn"),
-        JSON.stringify(secretAliases),
-        command,
-        ...args,
-      ];
-      const wrapperEnv = {
-        ELECTRON_RUN_AS_NODE: "1",
-        ...Object.fromEntries(aliases.map((alias) => [alias, envReference(alias)])),
-      };
-      mcpServers[key] = {
-        command: process.execPath,
-        args: wrapperArgs,
-        env: wrapperEnv,
-      };
-      // Both Claude and Codex launch stdio MCPs through the same least-privilege
-      // wrapper. The original MCP gets OS necessities and only its own mapped
-      // credentials, never LLM auth or another MCP's opaque alias.
-      pushCodexConfig(codexConfigArgs, key, "command", tomlString(process.execPath));
-      pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(wrapperArgs));
-      pushCodexConfig(
-        codexConfigArgs,
-        key,
-        "env",
-        tomlInlineStringTable({ ELECTRON_RUN_AS_NODE: "1" }),
-      );
-      if (aliases.length > 0) {
-        pushCodexConfig(codexConfigArgs, key, "env_vars", tomlStringArray(aliases));
+      if (aliases.length === 0 && isAuthenticSystemTimeMcpLaunch(command, args)) {
+        // The keyless built-in already has an exact, compressed in-memory
+        // launch contract. Bypass the mutable per-run wrapper so no pathname is
+        // re-opened between Agent App validation and runtime spawn.
+        const inlineEnv = { ELECTRON_RUN_AS_NODE: "1" };
+        mcpServers[key] = { command: process.execPath, args, env: inlineEnv };
+        pushCodexConfig(codexConfigArgs, key, "command", tomlString(process.execPath));
+        pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(args));
+        pushCodexConfig(codexConfigArgs, key, "env", tomlInlineStringTable(inlineEnv));
+      } else {
+        mcpChildWrapper ??= ensureMcpChildEnvWrapper(dir);
+        const wrapperArgs = [
+          mcpChildWrapper,
+          require.resolve("cross-spawn"),
+          JSON.stringify(secretAliases),
+          command,
+          ...args,
+        ];
+        const wrapperEnv = {
+          ELECTRON_RUN_AS_NODE: "1",
+          ...Object.fromEntries(aliases.map((alias) => [alias, envReference(alias)])),
+        };
+        mcpServers[key] = {
+          command: process.execPath,
+          args: wrapperArgs,
+          env: wrapperEnv,
+        };
+        // External stdio MCPs launch through the least-privilege wrapper. The
+        // child gets OS necessities and only its own mapped credentials, never
+        // LLM auth or another MCP's opaque alias.
+        pushCodexConfig(codexConfigArgs, key, "command", tomlString(process.execPath));
+        pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(wrapperArgs));
+        pushCodexConfig(
+          codexConfigArgs,
+          key,
+          "env",
+          tomlInlineStringTable({ ELECTRON_RUN_AS_NODE: "1" }),
+        );
+        if (aliases.length > 0) {
+          pushCodexConfig(codexConfigArgs, key, "env_vars", tomlStringArray(aliases));
+        }
       }
     } else if (s.url) {
       // Claude Code는 HTTP/SSE, 현재 Codex CLI는 Streamable HTTP URL을
@@ -435,7 +459,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         const rawUrl = resolvedEnv.get(vaultKey)?.trim();
         const resolvedUrl = rawUrl ? resolveVaultRemoteUrl(s, rawUrl) : null;
         if (!resolvedUrl) continue; // vault 값이 없거나 검증 실패면 서버를 싣지 않는다
-        const alias = secretAlias(key, vaultKey);
+        const alias = mcpRuntimeSecretAlias(key, vaultKey);
         runtimeEnv[alias] = resolvedUrl;
         serializedUrl = envReference(alias);
       }
@@ -451,7 +475,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           codexRemoteSupported = false;
           continue;
         }
-        const alias = secretAlias(key, header);
+        const alias = mcpRuntimeSecretAlias(key, header);
         const bearer = header.toLowerCase() === "authorization"
           ? value.match(/^Bearer\s+(.+)$/i)
           : null;

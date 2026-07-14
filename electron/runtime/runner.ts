@@ -6,6 +6,7 @@ import { GLOBAL_CONNECTION_SKILL } from "./global-skill";
 import { SURFACE_PROTOCOL } from "../surface-emitter";
 import { selectModules } from "../system-agents";
 import { SURFACE_MODULE } from "../system-agents/desktop-chat/modules";
+import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 
 export interface RunnerRequest {
   systemPrompt: string;
@@ -26,12 +27,19 @@ export interface RunnerRequest {
   /** 도구 사용 권한 — read(읽기) / write(편집) / full(셸·외부). 런타임 권한 모드로 매핑. */
   permission?: "read" | "write" | "full";
   /**
+   * Main이 Mobile 또는 무인 read 자동화에만 부여하는 격리 표식.
+   * renderer/wire 입력에서 받지 않는다. 이 표식이 있으면 로컬 CLI·MCP·파일 도구를
+   * 사용하지 않고, 명시적으로 전달된 컨텍스트와 이미지로만 답해야 한다.
+   */
+  restrictedReadBoundary?: true;
+  /**
    * 에이전트가 실제로 실행될 작업 디렉터리(= 사용자가 지정한 프로젝트/워킹 폴더).
    * 미설정이면 러너가 안전한 기본 폴더(agentRunCwd)를 쓴다. 파일 생성·빌드는 이 폴더에서 일어난다.
    */
   cwd?: string;
   /**
-   * MCP 서버 구성 파일 경로(.mcp.json). 설정되면 Claude Code 러너가 `--mcp-config`로 전달한다.
+   * MCP config path, or a Main-validated inline JSON object for restricted
+   * Agent Apps. Claude Code accepts both forms through `--mcp-config`.
    */
   mcpConfigPath?: string;
   /** 위 구성의 MCP 툴 이름 prefix 목록(예: "mcp__playwright"). write/full 권한에서 자동 승인용. */
@@ -42,13 +50,16 @@ export interface RunnerRequest {
   env?: NodeJS.ProcessEnv;
   /**
    * Main-authored boundary for browser-originated Agent App requests. CLI
-   * runners must disable every built-in/custom tool, ignore local rules and
-   * memory, avoid session persistence, and fail closed if they cannot prove
-   * the boundary. Only exact main-verified read-only MCP names may be added.
+   * runners must disable every built-in/custom/MCP tool, ignore local rules and
+   * memory, avoid session persistence, and fail closed if they cannot prove it.
    */
   untrustedNoTools?: boolean;
-  /** Exact main-minted read-only MCP tool names allowed despite zero built-ins. */
+  /** Exact main-minted read-only MCP tools allowed despite the zero-builtins boundary. */
   untrustedAllowedMcpTools?: string[];
+  /** Internal one-shot marker preventing recursive Agent App MCP fallback. */
+  agentAppMcpFallbackAttempted?: true;
+  /** Main-only callback used to reconcile the browser-safe capability receipt. */
+  onAgentAppMcpRuntimeUnavailable?: () => void;
   /**
    * 현재 chat 식별자 — 세션 resume를 지원하는 러너가 (chatId, kind)별 CLI 세션을
    * 재사용해 시스템 프롬프트/히스토리를 매 턴 재전송하지 않도록 한다. 미설정이면 매번 full-context.
@@ -84,6 +95,8 @@ export interface RunnerResult {
   sessionId?: string;
   /** 생성 토큰 수 (가능한 런타임만) */
   tokens?: number;
+  /** Exact effort explicitly applied by the runner; null means no explicit effort was sent. */
+  appliedEffort?: string | null;
 }
 
 export type Runner = (
@@ -186,14 +199,16 @@ export function wrapSystemPrompt(
   userPrompt?: string,
   /** 2차 패스: 모델이 surface-intent 마커를 emit해서 dispatch가 풀 프로토콜을 강제 로드할 때 true. */
   forceSurface?: boolean,
-  /** Browser-originated stateless completion with zero built-ins and a strict MCP boundary. */
+  /** Main-authored Mobile/unattended boundary. Never derive this from model or renderer input. */
+  restrictedReadBoundary?: true,
+  /** Browser-originated stateless completion with runner-enforced zero tools. */
   untrustedNoTools?: boolean,
   /** Exact read-only MCP tools verified by Electron main for this one run. */
   untrustedAllowedMcpTools?: string[],
 ): string {
   if (untrustedNoTools) {
-    const allowed = (untrustedAllowedMcpTools ?? []).filter((tool) =>
-      /^mcp__[a-z0-9_-]+__(?:brave_web_search|brave_local_search)$/.test(tool));
+    const requested = untrustedAllowedMcpTools ?? [];
+    const allowed = validSiteAgentAppMcpGrantTools(requested) ? requested : [];
     return [
       tStatus(locale, "sysHeader"),
       responseLanguageGuide(locale, userPrompt),
@@ -206,6 +221,25 @@ export function wrapSystemPrompt(
       "",
       tStatus(locale, "sysAgentDef"),
       agentSystemPrompt,
+    ].join("\n");
+  }
+  if (restrictedReadBoundary) {
+    const restrictedAgentPrompt = agentSystemPrompt.startsWith(BUILD_PROMPT_SENTINEL)
+      ? "The Build-only agent definition was excluded because this invocation has restricted read authority."
+      : agentSystemPrompt;
+    return [
+      tStatus(locale, "sysHeader"),
+      responseLanguageGuide(locale, userPrompt),
+      "Restricted read-mode: you have no filesystem, shell, web, browser, MCP, plugin, or local tool access. Use only text/context and images explicitly included in this request. Never claim that you opened, searched, or inspected a local file. If the answer depends on file contents that were not included, ask the user to attach or paste them.",
+      "Do not emit memory, automation, app, workbench, or surface control blocks.",
+      "",
+      ASK_PROTOCOL,
+      "",
+      tStatus(locale, "sysAgentDef"),
+      restrictedAgentPrompt,
+      "",
+      "Host-enforced boundary (final authority): no filesystem, shell, web, browser, MCP, plugin, or local tool access. Use only text/context and images explicitly included in this request. Never claim that you opened, searched, or inspected a local file. If required contents are missing, ask the user to attach or paste them.",
+      "Never emit memory, automation, app, workbench, or surface control blocks.",
     ].join("\n");
   }
   // Every runtime calls this function internally. A Main-authored Build prompt

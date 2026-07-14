@@ -1,11 +1,10 @@
 import type { AgentRuntimeOverride, RuntimeStatus } from "../../shared/types";
-import { modelOptionsFor } from "../../shared/models";
 import { createHash } from "node:crypto";
 
 /**
  * A parent LLM assigns provider-neutral capacity. Deterministic host code only
- * validates that decision and translates it to a model that actually exists in
- * the selected runtime. It never infers difficulty from task words.
+ * validates an exact runtime/model pair against the host's execution inventory.
+ * It never infers difficulty from task words or manufactures provider model IDs.
  */
 export type WorkloadModelTier = "economy" | "balanced" | "frontier";
 export type WorkloadEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -24,6 +23,20 @@ export type WorkloadModelClass =
   | "sol"
   | "grok";
 
+export interface WorkloadRequirements {
+  inputTokens: number;
+  expectedOutputTokens: number;
+  toolRequired: boolean;
+  multimodalRequired: boolean;
+}
+
+export interface WorkloadHostPolicy {
+  pinnedModelId?: string;
+  maxTier?: WorkloadModelTier;
+  maxEffort?: WorkloadEffort;
+  requiredCapabilities?: string[];
+}
+
 export interface WorkloadAllocation {
   schema: "agentlas.workload-allocation.v1";
   /** Opaque ID copied by the parent model from the live runtime inventory. */
@@ -35,6 +48,9 @@ export interface WorkloadAllocation {
   modelClass?: WorkloadModelClass;
   effort: WorkloadEffort;
   phase: WorkloadPhase;
+  requirements: WorkloadRequirements;
+  /** True only when the parent supplied every typed requirement field. */
+  requirementsVerified: boolean;
   reasonCodes: string[];
   /** Short observable justification, never hidden reasoning or the task prompt. */
   rationale: string;
@@ -43,9 +59,12 @@ export interface WorkloadAllocation {
 export interface WorkloadResolution {
   allocation: WorkloadAllocation;
   runtime: RuntimeStatus;
+  /** Actual inventory identity after host fallback/validation, never copied from rejected parent data. */
+  resolvedRuntimeId: string | null;
+  /** Actual host-authored cost tier when known. */
+  resolvedTier: WorkloadModelTier | null;
   source: "ai-assigned" | "manual-override" | "safe-fallback";
   resolutionCodes: string[];
-  requestedAliases: string[];
 }
 
 export interface WorkloadRuntimeInventoryEntry {
@@ -54,6 +73,14 @@ export interface WorkloadRuntimeInventoryEntry {
   backend: RuntimeStatus["backend"];
   models: string[];
   efforts: WorkloadEffort[];
+  modelProfiles: Record<string, {
+    costTier: WorkloadModelTier | null;
+    contextWindow: number | null;
+    capabilities: string[];
+    supportsTools: boolean | null;
+    supportsMultimodal: boolean | null;
+    efforts: WorkloadEffort[] | null;
+  }>;
 }
 
 const TIER_ALIASES: Record<WorkloadModelTier, string[]> = {
@@ -74,14 +101,6 @@ function asObject(value: unknown): Record<string, unknown> {
 function cleanText(value: unknown, max: number): string {
   if (typeof value !== "string") return "";
   return value.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, max);
-}
-
-function receiptSafeRationale(value: string): string {
-  return value
-    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[redacted-email]")
-    .replace(/(?:\/[A-Za-z0-9._~ -]+){2,}/g, "[redacted-path]")
-    .replace(/\b(?:sk|rk|pk|xox[baprs]|gh[pousr])-[A-Za-z0-9_=-]{12,}\b/g, "[redacted-secret]")
-    .slice(0, 240);
 }
 
 export function normalizeWorkloadTier(value: unknown): WorkloadModelTier | null {
@@ -130,15 +149,92 @@ function normalizeReasonCodes(value: unknown): string[] {
   return out;
 }
 
+function boundedNonNegativeInt(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(10_000_000, Math.floor(value)))
+    : 0;
+}
+
+function normalizeRequirements(value: unknown): { requirements: WorkloadRequirements; valid: boolean } {
+  const obj = asObject(value);
+  const inputTokens = obj.inputTokens ?? obj.input_tokens;
+  const expectedOutputTokens = obj.expectedOutputTokens ?? obj.expected_output_tokens;
+  const toolRequired = obj.toolRequired ?? obj.tool_required;
+  const multimodalRequired = obj.multimodalRequired ?? obj.multimodal_required;
+  const valid =
+    typeof inputTokens === "number" && Number.isInteger(inputTokens) && inputTokens >= 0 && inputTokens <= 10_000_000 &&
+    typeof expectedOutputTokens === "number" && Number.isInteger(expectedOutputTokens) && expectedOutputTokens >= 0 && expectedOutputTokens <= 10_000_000 &&
+    typeof toolRequired === "boolean" && typeof multimodalRequired === "boolean";
+  return {
+    requirements: {
+      inputTokens: boundedNonNegativeInt(inputTokens),
+      expectedOutputTokens: boundedNonNegativeInt(expectedOutputTokens),
+      toolRequired: toolRequired === true,
+      multimodalRequired: multimodalRequired === true,
+    },
+    valid,
+  };
+}
+
+function normalizeCapabilityList(value: unknown): string[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 32) return null;
+  const capabilities = value
+    .map((entry) => cleanText(entry, 48).toLowerCase())
+    .filter((entry) => /^[a-z0-9][a-z0-9._-]{0,47}$/.test(entry));
+  if (capabilities.length !== value.length) return null;
+  return [...new Set(capabilities)].slice(0, 32);
+}
+
+function normalizeHostPolicy(value: unknown): { policy: WorkloadHostPolicy; valid: boolean } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { policy: {}, valid: false };
+  const obj = asObject(value);
+  const allowedKeys = new Set(["pinnedModelId", "maxTier", "maxEffort", "requiredCapabilities"]);
+  const unknownKey = Object.keys(obj).some((key) => !allowedKeys.has(key));
+  const pinnedModelId = obj.pinnedModelId === undefined ? undefined : normalizeModelId(obj.pinnedModelId);
+  const maxTier = obj.maxTier === undefined ? undefined : normalizeWorkloadTier(obj.maxTier);
+  const maxEffort = obj.maxEffort === undefined ? undefined : normalizeEffort(obj.maxEffort);
+  const requiredCapabilities = normalizeCapabilityList(obj.requiredCapabilities);
+  const valid =
+    !unknownKey &&
+    (obj.pinnedModelId === undefined || Boolean(pinnedModelId)) &&
+    (obj.maxTier === undefined || Boolean(maxTier)) &&
+    (obj.maxEffort === undefined || Boolean(maxEffort)) &&
+    requiredCapabilities !== null;
+  return {
+    policy: {
+      ...(pinnedModelId ? { pinnedModelId } : {}),
+      ...(maxTier ? { maxTier } : {}),
+      ...(maxEffort ? { maxEffort } : {}),
+      ...(requiredCapabilities?.length ? { requiredCapabilities } : {}),
+    },
+    valid,
+  };
+}
+
+function effectiveHostPolicy(explicit?: WorkloadHostPolicy): { policy: WorkloadHostPolicy; valid: boolean } {
+  if (explicit) return normalizeHostPolicy(explicit);
+  const raw = process.env.AGENTLAS_MODEL_ALLOCATION_POLICY_JSON?.trim();
+  if (!raw) return { policy: {}, valid: true };
+  try {
+    return normalizeHostPolicy(JSON.parse(raw));
+  } catch {
+    return { policy: {}, valid: false };
+  }
+}
+
 export function defaultWorkloadAllocation(
   phase: WorkloadPhase,
   reasonCode = "missing-ai-allocation",
 ): WorkloadAllocation {
+  const emptyRequirements = normalizeRequirements(null);
   return {
     schema: "agentlas.workload-allocation.v1",
     tier: "balanced",
     effort: phase === "synthesize" ? "high" : "medium",
     phase,
+    requirements: emptyRequirements.requirements,
+    requirementsVerified: false,
     reasonCodes: [reasonCode],
     rationale: "Safe non-frontier fallback because no valid parent allocation was available.",
   };
@@ -159,6 +255,7 @@ export function normalizeWorkloadAllocation(
   if (!tier || !effort || !phase || phase !== expectedPhase) {
     return defaultWorkloadAllocation(expectedPhase, "invalid-ai-allocation");
   }
+  const requirementResult = normalizeRequirements(obj.requirements ?? obj.features);
   const reasonCodes = normalizeReasonCodes(obj.reasonCodes ?? obj.reason_codes);
   return {
     schema: "agentlas.workload-allocation.v1",
@@ -168,42 +265,62 @@ export function normalizeWorkloadAllocation(
     ...(modelClass && (modelClass === "auto" || TIER_ALIASES[tier].includes(modelClass)) ? { modelClass } : {}),
     effort,
     phase: expectedPhase,
-    reasonCodes: reasonCodes.length > 0 ? reasonCodes : ["ai-assigned"],
+    requirements: requirementResult.requirements,
+    requirementsVerified: requirementResult.valid,
+    reasonCodes: [
+      ...(reasonCodes.length > 0 ? reasonCodes : ["ai-assigned"]),
+      ...(requirementResult.valid ? [] : ["invalid-requirements"]),
+    ].slice(0, MAX_REASON_CODES),
     rationale: cleanText(obj.rationale, 240) || "Parent AI assigned capacity for this phase.",
   };
 }
 
-function modelTier(model: string): WorkloadModelTier | null {
-  const tokens = model.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-  for (const [tier, aliases] of Object.entries(TIER_ALIASES) as Array<[WorkloadModelTier, string[]]>) {
-    if (aliases.some((alias) => tokens.includes(alias))) return tier;
-  }
-  return null;
-}
-
-function modelHasClass(model: string, modelClass: WorkloadModelClass | undefined): boolean {
-  if (!modelClass) return true;
-  if (modelClass === "auto") return model.trim().toLowerCase() === "auto";
-  return model.toLowerCase().split(/[^a-z0-9]+/).includes(modelClass);
-}
-
 function liveModelInventory(runtime: RuntimeStatus): string[] {
-  const detected = (runtime.availableModels ?? []).map((model) => model.trim()).filter(Boolean);
-  const catalog = detected.length > 0
-    ? detected
-    : modelOptionsFor(runtime.kind, runtime.backend, runtime.availableModels).map((model) => model.id);
-  return [...new Set(catalog)];
+  const safe = (runtime.allocationModels ?? [])
+    .map((model) => cleanText(model, 180))
+    .filter((model) => /^[A-Za-z0-9][A-Za-z0-9._:+/() -]{0,179}$/.test(model));
+  return [...new Set(safe)];
+}
+
+function safeModelProfile(runtime: RuntimeStatus, modelId: string) {
+  const raw = runtime.allocationModelProfiles?.[modelId];
+  if (!raw) return null;
+  const costTier = normalizeWorkloadTier(raw.costTier);
+  const capabilities = normalizeCapabilityList(raw.capabilities) ?? [];
+  const efforts = raw.efforts === undefined
+    ? null
+    : Array.isArray(raw.efforts) && raw.efforts.length <= EFFORTS.length
+      ? EFFORTS.filter((effort) => raw.efforts?.some((entry) => normalizeEffort(entry) === effort))
+      : null;
+  const contextWindow = typeof raw.contextWindow === "number" && Number.isFinite(raw.contextWindow)
+    ? Math.max(0, Math.floor(raw.contextWindow))
+    : null;
+  return {
+    costTier,
+    contextWindow,
+    capabilities,
+    supportsTools: typeof raw.supportsTools === "boolean" ? raw.supportsTools : null,
+    supportsMultimodal: typeof raw.supportsMultimodal === "boolean" ? raw.supportsMultimodal : null,
+    efforts,
+  };
 }
 
 /** Value-safe inventory shown to the parent LLM. It intentionally has no paths, account IDs, prompts or secrets. */
 export function workloadRuntimeInventory(runtimes: RuntimeStatus[]): WorkloadRuntimeInventoryEntry[] {
-  return runtimes.map((runtime, index) => ({
-    runtimeId: `runtime-${index + 1}`,
-    kind: runtime.kind,
-    backend: runtime.backend,
-    models: liveModelInventory(runtime),
-    efforts: supportedEfforts(runtime),
-  }));
+  return runtimes.map((runtime, index) => {
+    const models = liveModelInventory(runtime);
+    return {
+      runtimeId: `runtime-${index + 1}`,
+      kind: runtime.kind,
+      backend: runtime.backend,
+      models,
+      efforts: supportedEfforts(runtime),
+      modelProfiles: Object.fromEntries(models.flatMap((modelId) => {
+        const profile = safeModelProfile(runtime, modelId);
+        return profile ? [[modelId, profile]] : [];
+      })),
+    };
+  });
 }
 
 function runtimeForInventoryId(
@@ -216,61 +333,52 @@ function runtimeForInventoryId(
   return runtimes[Number(match[1]) - 1] ?? null;
 }
 
-function preferredAliasOrder(runtime: RuntimeStatus, tier: WorkloadModelTier): string[] {
-  if (runtime.backend === "anthropic" || runtime.kind === "claude-code") {
-    return tier === "economy" ? ["haiku", "luna"] : tier === "balanced" ? ["sonnet", "terra", "tera"] : ["opus", "sol"];
+function inventoryIdForRuntime(runtimes: RuntimeStatus[], runtime: RuntimeStatus): string | null {
+  let index = runtimes.indexOf(runtime);
+  if (index < 0) {
+    index = runtimes.findIndex((candidate) =>
+      candidate.kind === runtime.kind && candidate.backend === runtime.backend && candidate.source === runtime.source,
+    );
   }
-  if (runtime.backend === "openai" || runtime.kind === "codex") {
-    return tier === "economy" ? ["luna", "haiku"] : tier === "balanced" ? ["terra", "tera", "sonnet"] : ["sol", "opus"];
-  }
-  return TIER_ALIASES[tier];
+  return index >= 0 ? `runtime-${index + 1}` : null;
 }
 
-function chooseSameTierModel(runtime: RuntimeStatus, tier: WorkloadModelTier): string | null {
-  const inventory = liveModelInventory(runtime);
-  if (runtime.model && inventory.includes(runtime.model) && modelTier(runtime.model) === tier) return runtime.model;
-  const candidates = inventory.filter((model) => modelTier(model) === tier);
-  const aliases = preferredAliasOrder(runtime, tier);
-  candidates.sort((a, b) => {
-    const at = a.toLowerCase().split(/[^a-z0-9]+/);
-    const bt = b.toLowerCase().split(/[^a-z0-9]+/);
-    const ai = aliases.findIndex((alias) => at.includes(alias));
-    const bi = aliases.findIndex((alias) => bt.includes(alias));
-    return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
-  });
-  return candidates[0] ?? null;
+function resolvedTierForRuntime(runtime: RuntimeStatus): WorkloadModelTier | null {
+  return runtime.model ? safeModelProfile(runtime, runtime.model)?.costTier ?? null : null;
 }
 
-function chooseTierModel(
-  runtime: RuntimeStatus,
-  allocation: WorkloadAllocation,
-): string | null {
-  const inventory = liveModelInventory(runtime);
-  if (allocation.modelId && inventory.includes(allocation.modelId)) return allocation.modelId;
-  const requested = allocation.modelClass;
-  const classCandidates = requested
-    ? inventory.filter((model) => modelHasClass(model, requested))
-    : [];
-  if (classCandidates.length > 0) {
-    if (runtime.model && classCandidates.includes(runtime.model)) return runtime.model;
-    return classCandidates.sort()[0] ?? null;
+function supportedEfforts(runtime: RuntimeStatus, modelId?: string): WorkloadEffort[] {
+  if (modelId) {
+    const modelEfforts = safeModelProfile(runtime, modelId)?.efforts;
+    if (modelEfforts !== null && modelEfforts !== undefined) return modelEfforts;
   }
-  return chooseSameTierModel(runtime, allocation.tier);
-}
-
-function supportedEfforts(runtime: RuntimeStatus): WorkloadEffort[] {
   if (runtime.efforts) {
     return runtime.efforts
       .map((entry) => normalizeEffort(entry.id))
       .filter((effort): effort is WorkloadEffort => Boolean(effort));
+  }
+  if (!modelId) {
+    const union = new Set<WorkloadEffort>();
+    let foundHostProfile = false;
+    for (const candidate of liveModelInventory(runtime)) {
+      const modelEfforts = safeModelProfile(runtime, candidate)?.efforts;
+      if (modelEfforts === null || modelEfforts === undefined) continue;
+      foundHostProfile = true;
+      for (const effort of modelEfforts) union.add(effort);
+    }
+    if (foundHostProfile) return EFFORTS.filter((effort) => union.has(effort));
   }
   // Codex exposes this as a stable config capability rather than a discovery API.
   if (runtime.kind === "codex") return ["none", "minimal", "low", "medium", "high", "xhigh"];
   return [];
 }
 
-function resolveEffort(runtime: RuntimeStatus, requested: WorkloadEffort): { effort?: string; code?: string } {
-  const supported = supportedEfforts(runtime);
+function resolveEffort(
+  runtime: RuntimeStatus,
+  requested: WorkloadEffort,
+  modelId?: string,
+): { effort?: string | null; code?: string } {
+  const supported = supportedEfforts(runtime, modelId);
   if (supported.length === 0) {
     return { effort: runtime.effort ?? undefined, code: "effort-capability-unavailable" };
   }
@@ -278,7 +386,105 @@ function resolveEffort(runtime: RuntimeStatus, requested: WorkloadEffort): { eff
   const requestedRank = EFFORTS.indexOf(requested);
   const ranked = supported.slice().sort((a, b) => EFFORTS.indexOf(a) - EFFORTS.indexOf(b));
   const below = ranked.filter((effort) => EFFORTS.indexOf(effort) <= requestedRank).at(-1);
-  return { effort: below ?? ranked[0], code: "effort-clamped-to-capability" };
+  return below
+    ? { effort: below, code: "effort-clamped-to-capability" }
+    : { effort: null, code: "effort-below-capability-unavailable" };
+}
+
+function resolvePolicyBoundedEffort(
+  runtime: RuntimeStatus,
+  requested: WorkloadEffort,
+  policy: WorkloadHostPolicy,
+  modelId?: string,
+): { effort?: string | null; codes: string[] } {
+  let bounded = requested;
+  const codes: string[] = [];
+  if (policy.maxEffort && EFFORTS.indexOf(bounded) > EFFORTS.indexOf(policy.maxEffort)) {
+    bounded = policy.maxEffort;
+    codes.push("effort-clamped-to-host-policy");
+  }
+  const exactEfforts = modelId ? safeModelProfile(runtime, modelId)?.efforts : null;
+  if (exactEfforts && exactEfforts.length === 0) {
+    codes.push("effort-capability-unavailable");
+    return { effort: null, codes };
+  }
+  const supported = resolveEffort(runtime, bounded, modelId);
+  if (supported.code) codes.push(supported.code);
+  const resolved = normalizeEffort(supported.effort);
+  if (
+    policy.maxEffort &&
+    resolved &&
+    EFFORTS.indexOf(resolved) > EFFORTS.indexOf(policy.maxEffort)
+  ) {
+    codes.push("effort-below-capability-unavailable");
+    return { effort: null, codes: [...new Set(codes)] };
+  }
+  return { effort: supported.effort, codes };
+}
+
+function resolvedEffortOrCurrent(
+  effort: string | null | undefined,
+  current: string | null | undefined,
+): string | null | undefined {
+  return effort === undefined ? current : effort;
+}
+
+function exactModelPolicyIssue(input: {
+  allocation: WorkloadAllocation;
+  runtime: RuntimeStatus;
+  modelId: string;
+  policy: WorkloadHostPolicy;
+  policyValid: boolean;
+}): string | null {
+  if (!input.policyValid) return "host-allocation-policy-invalid-active-preserved";
+  if (!input.allocation.requirementsVerified) return "parent-requirements-invalid-active-preserved";
+  if (input.policy.pinnedModelId && input.policy.pinnedModelId !== input.modelId) {
+    return "host-pinned-model-preserved";
+  }
+  const profile = safeModelProfile(input.runtime, input.modelId);
+  if (input.policy.maxTier) {
+    const maxRank = ["economy", "balanced", "frontier"].indexOf(input.policy.maxTier);
+    if (["economy", "balanced", "frontier"].indexOf(input.allocation.tier) > maxRank) {
+      return "parent-tier-exceeds-host-cost-policy-active-preserved";
+    }
+    if (!profile?.costTier) return "requested-exact-model-cost-tier-unknown-active-preserved";
+    if (["economy", "balanced", "frontier"].indexOf(profile.costTier) > maxRank) {
+      return "requested-exact-model-exceeds-host-cost-policy-active-preserved";
+    }
+  }
+  if (profile?.costTier && profile.costTier !== input.allocation.tier) {
+    return "requested-exact-model-tier-mismatch-active-preserved";
+  }
+  const totalTokens = input.allocation.requirements.inputTokens + input.allocation.requirements.expectedOutputTokens;
+  if (totalTokens > 0 && (!profile?.contextWindow || profile.contextWindow < totalTokens)) {
+    return "requested-exact-model-context-incompatible-active-preserved";
+  }
+  if (input.allocation.requirements.toolRequired && profile?.supportsTools !== true && !profile?.capabilities.includes("tools")) {
+    return "requested-exact-model-tools-incompatible-active-preserved";
+  }
+  if (
+    input.allocation.requirements.multimodalRequired &&
+    profile?.supportsMultimodal !== true &&
+    !profile?.capabilities.includes("multimodal")
+  ) {
+    return "requested-exact-model-multimodal-incompatible-active-preserved";
+  }
+  const required = input.policy.requiredCapabilities ?? [];
+  if (required.length > 0 && (!profile || required.some((capability) => !profile.capabilities.includes(capability)))) {
+    return "requested-exact-model-capability-incompatible-active-preserved";
+  }
+  return null;
+}
+
+/** Host-authored control-plane calls may lower effort without accepting parent model data. */
+export function resolveHostControlPlaneRuntime(
+  runtime: RuntimeStatus,
+  requestedEffort: WorkloadEffort,
+): RuntimeStatus {
+  const host = effectiveHostPolicy();
+  if (!host.valid) return { ...runtime };
+  const effort = resolvePolicyBoundedEffort(runtime, requestedEffort, host.policy, runtime.model ?? undefined);
+  return { ...runtime, effort: resolvedEffortOrCurrent(effort.effort, runtime.effort) };
 }
 
 export function resolveWorkloadAllocation(input: {
@@ -287,45 +493,79 @@ export function resolveWorkloadAllocation(input: {
   phase: WorkloadPhase;
   manualOverride?: AgentRuntimeOverride | null;
   explicitPinned?: boolean;
+  /** Host-owned only. Parent model JSON is never allowed to populate this. */
+  hostPolicy?: WorkloadHostPolicy;
 }): WorkloadResolution {
   const allocation = input.allocation ?? defaultWorkloadAllocation(input.phase);
   if (input.manualOverride || input.explicitPinned) {
     return {
       allocation,
       runtime: { ...input.runtime },
+      resolvedRuntimeId: null,
+      resolvedTier: resolvedTierForRuntime(input.runtime),
       source: "manual-override",
       resolutionCodes: ["manual-runtime-override-preserved"],
-      requestedAliases: TIER_ALIASES[allocation.tier],
     };
   }
 
-  const resolutionCodes: string[] = [];
-  const model = chooseTierModel(input.runtime, allocation);
-  if (!model) resolutionCodes.push("tier-unavailable-active-preserved");
-  else if (model !== input.runtime.model) resolutionCodes.push("same-tier-model-selected");
-  else resolutionCodes.push("active-model-already-same-tier");
-
-  const effort = resolveEffort(input.runtime, allocation.effort);
-  if (effort.code) resolutionCodes.push(effort.code);
+  const model = allocation.modelId && liveModelInventory(input.runtime).includes(allocation.modelId)
+    ? allocation.modelId
+    : null;
+  if (!model) {
+    return {
+      allocation,
+      runtime: { ...input.runtime },
+      resolvedRuntimeId: null,
+      resolvedTier: resolvedTierForRuntime(input.runtime),
+      source: "safe-fallback",
+      resolutionCodes: [
+        allocation.modelId
+          ? "parent-model-not-in-live-inventory-active-preserved"
+          : "parent-exact-model-missing-active-preserved",
+      ],
+    };
+  }
+  const host = effectiveHostPolicy(input.hostPolicy);
+  const policyIssue = exactModelPolicyIssue({
+    allocation,
+    runtime: input.runtime,
+    modelId: model,
+    policy: host.policy,
+    policyValid: host.valid,
+  });
+  if (policyIssue) {
+    return {
+      allocation,
+      runtime: { ...input.runtime },
+      resolvedRuntimeId: null,
+      resolvedTier: resolvedTierForRuntime(input.runtime),
+      source: "safe-fallback",
+      resolutionCodes: [policyIssue],
+    };
+  }
+  const effort = resolvePolicyBoundedEffort(input.runtime, allocation.effort, host.policy, model);
+  const resolutionCodes = [
+    model === input.runtime.model ? "active-model-parent-selected" : "parent-live-model-selected",
+    ...effort.codes,
+  ];
   const fallback = allocation.reasonCodes.includes("missing-ai-allocation") || allocation.reasonCodes.includes("invalid-ai-allocation");
   return {
     allocation,
     runtime: {
       ...input.runtime,
       model: model ?? input.runtime.model,
-      effort: effort.effort ?? input.runtime.effort,
+      effort: resolvedEffortOrCurrent(effort.effort, input.runtime.effort),
     },
+    resolvedRuntimeId: null,
+    resolvedTier: safeModelProfile(input.runtime, model)?.costTier ?? null,
     source: fallback ? "safe-fallback" : "ai-assigned",
     resolutionCodes,
-    requestedAliases: TIER_ALIASES[allocation.tier],
   };
 }
 
 /**
- * Resolve the parent AI's provider-neutral decision across all live runtimes.
- * A manual/scoped runtime pin still wins. Cursor contributes Auto only unless
- * the operator explicitly selected a model, so no stale catalog entry can
- * silently consume an unavailable subscription model.
+ * Resolve the parent AI's exact decision across live runtimes. Manual/scoped
+ * pins still win. Missing or invalid pairs preserve the active fallback as-is.
  */
 export function resolveWorkloadAllocationAcrossRuntimes(input: {
   allocation?: WorkloadAllocation | null;
@@ -334,84 +574,121 @@ export function resolveWorkloadAllocationAcrossRuntimes(input: {
   phase: WorkloadPhase;
   manualOverride?: AgentRuntimeOverride | null;
   explicitPinned?: boolean;
+  /** Host-owned only. Parent model JSON is never allowed to populate this. */
+  hostPolicy?: WorkloadHostPolicy;
 }): WorkloadResolution {
   const allocation = input.allocation ?? defaultWorkloadAllocation(input.phase);
-  if (input.manualOverride || input.explicitPinned || input.runtimes.length === 0) {
-    return resolveWorkloadAllocation({
+  if (input.manualOverride || input.explicitPinned) {
+    const resolution = resolveWorkloadAllocation({
       allocation,
       runtime: input.fallbackRuntime,
       phase: input.phase,
       manualOverride: input.manualOverride,
       explicitPinned: input.explicitPinned,
+      hostPolicy: input.hostPolicy,
     });
+    return {
+      ...resolution,
+      resolvedRuntimeId: inventoryIdForRuntime(input.runtimes, input.fallbackRuntime),
+      resolvedTier: resolvedTierForRuntime(input.fallbackRuntime),
+    };
   }
 
-  // The normal Stormbreaker path is exact and non-deterministic: the parent
-  // model copied a runtime/model pair from this invocation's live inventory.
-  // Host code only validates that pair and clamps effort to the chosen CLI.
+  // Parent output is data, never a provider alias. The host only validates the
+  // opaque runtime ID and exact model ID it advertised for this invocation.
   if (allocation.runtimeId && allocation.modelId) {
     const requestedRuntime = runtimeForInventoryId(input.runtimes, allocation.runtimeId);
     if (requestedRuntime && liveModelInventory(requestedRuntime).includes(allocation.modelId)) {
-      const effort = resolveEffort(requestedRuntime, allocation.effort);
+      const host = effectiveHostPolicy(input.hostPolicy);
+      const policyIssue = exactModelPolicyIssue({
+        allocation,
+        runtime: requestedRuntime,
+        modelId: allocation.modelId,
+        policy: host.policy,
+        policyValid: host.valid,
+      });
+      if (policyIssue) {
+        return {
+          allocation,
+          runtime: { ...input.fallbackRuntime },
+          resolvedRuntimeId: inventoryIdForRuntime(input.runtimes, input.fallbackRuntime),
+          resolvedTier: resolvedTierForRuntime(input.fallbackRuntime),
+          source: "safe-fallback",
+          resolutionCodes: [policyIssue],
+        };
+      }
+      const effort = resolvePolicyBoundedEffort(
+        requestedRuntime,
+        allocation.effort,
+        host.policy,
+        allocation.modelId,
+      );
       const fallback = allocation.reasonCodes.includes("missing-ai-allocation") || allocation.reasonCodes.includes("invalid-ai-allocation");
       return {
         allocation,
         runtime: {
           ...requestedRuntime,
           model: allocation.modelId,
-          effort: effort.effort ?? requestedRuntime.effort,
+          effort: resolvedEffortOrCurrent(effort.effort, requestedRuntime.effort),
         },
+        resolvedRuntimeId: allocation.runtimeId,
+        resolvedTier: safeModelProfile(requestedRuntime, allocation.modelId)?.costTier ?? null,
         source: fallback ? "safe-fallback" : "ai-assigned",
-        resolutionCodes: ["parent-selected-live-runtime-model", ...(effort.code ? [effort.code] : [])],
-        requestedAliases: [allocation.modelId],
+        resolutionCodes: ["parent-selected-live-runtime-model", ...effort.codes],
       };
     }
   }
-
-  const candidates = input.runtimes.map((runtime, index) => {
-    const model = chooseTierModel(runtime, allocation);
-    const exactClass = Boolean(model && allocation.modelClass && modelHasClass(model, allocation.modelClass));
-    const sameTier = Boolean(model && (allocation.modelClass === "auto" || modelTier(model) === allocation.tier));
-    const effort = resolveEffort(runtime, allocation.effort);
-    return { runtime, index, model, exactClass, sameTier, effort };
-  }).filter((candidate) => candidate.model);
-
-  if (candidates.length === 0) {
-    const fallback = resolveWorkloadAllocation({ allocation, runtime: input.fallbackRuntime, phase: input.phase });
-    return { ...fallback, resolutionCodes: [...fallback.resolutionCodes, "cross-runtime-tier-unavailable"] };
-  }
-
-  candidates.sort((a, b) => {
-    // Parent-selected model class beats general tier, then current active
-    // runtime for session locality, then the deterministic discovery order.
-    if (Number(b.exactClass) !== Number(a.exactClass)) return Number(b.exactClass) - Number(a.exactClass);
-    if (Number(b.sameTier) !== Number(a.sameTier)) return Number(b.sameTier) - Number(a.sameTier);
-    if (Number(b.runtime.active) !== Number(a.runtime.active)) return Number(b.runtime.active) - Number(a.runtime.active);
-    return a.index - b.index;
-  });
-  const chosen = candidates[0];
-  const fallback = allocation.reasonCodes.includes("missing-ai-allocation") || allocation.reasonCodes.includes("invalid-ai-allocation");
   return {
     allocation,
-    runtime: { ...chosen.runtime, model: chosen.model ?? chosen.runtime.model, effort: chosen.effort.effort ?? chosen.runtime.effort },
-    source: fallback ? "safe-fallback" : "ai-assigned",
+    runtime: { ...input.fallbackRuntime },
+    resolvedRuntimeId: inventoryIdForRuntime(input.runtimes, input.fallbackRuntime),
+    resolvedTier: resolvedTierForRuntime(input.fallbackRuntime),
+    source: "safe-fallback",
     resolutionCodes: [
-      chosen.runtime === input.fallbackRuntime ? "active-runtime-selected" : "cross-runtime-selected",
-      ...(chosen.effort.code ? [chosen.effort.code] : []),
+      !allocation.runtimeId || !allocation.modelId
+        ? "parent-runtime-model-pair-missing-active-preserved"
+        : "parent-runtime-model-pair-invalid-active-preserved",
     ],
-    requestedAliases: allocation.modelClass && allocation.modelClass !== "auto"
-      ? [allocation.modelClass]
-      : TIER_ALIASES[allocation.tier],
+  };
+}
+
+/** Replace the planned effort with the exact value the runner put on its CLI/API request. */
+export function reconcileWorkloadRunnerResult(
+  resolution: WorkloadResolution,
+  result: { appliedEffort?: unknown },
+): WorkloadResolution {
+  if (!Object.prototype.hasOwnProperty.call(result, "appliedEffort")) return resolution;
+  const raw = result.appliedEffort;
+  const appliedEffort = raw === null ? null : normalizeEffort(raw);
+  const invalid = raw !== null && appliedEffort === null;
+  const prior = resolution.runtime.effort ?? null;
+  const changed = prior !== appliedEffort || invalid;
+  return {
+    ...resolution,
+    runtime: { ...resolution.runtime, effort: appliedEffort },
+    resolutionCodes: changed
+      ? [...new Set([
+          ...resolution.resolutionCodes,
+          invalid ? "runner-effort-invalid-omitted" : "runner-effort-revalidated",
+        ])]
+      : resolution.resolutionCodes,
   };
 }
 
 /** Receipt deliberately excludes user prompts, briefs, history, and tool data. */
 export function workloadAllocationReceipt(resolution: WorkloadResolution): Record<string, unknown> {
+  const requestedReasonCodes = normalizeReasonCodes(resolution.allocation.reasonCodes);
+  const resolutionReasonCodes = normalizeReasonCodes(resolution.resolutionCodes);
+  const receiptReasonCodes = [...new Set([...requestedReasonCodes, ...resolutionReasonCodes])];
   const featurePayload = JSON.stringify({
     phase: resolution.allocation.phase,
     tier: resolution.allocation.tier,
+    runtimeId: resolution.allocation.runtimeId ?? null,
+    modelId: resolution.allocation.modelId ?? null,
     effort: resolution.allocation.effort,
-    reasonCodes: resolution.allocation.reasonCodes,
+    requirements: resolution.allocation.requirements,
+    requirementsVerified: resolution.allocation.requirementsVerified,
+    reasonCodes: requestedReasonCodes,
   });
   const featureHash = createHash("sha256").update(featurePayload).digest("hex");
   const fallback = resolution.source === "safe-fallback";
@@ -428,23 +705,19 @@ export function workloadAllocationReceipt(resolution: WorkloadResolution): Recor
       effort: resolution.allocation.effort,
     },
     resolved: {
-      tier: modelTier(resolution.runtime.model ?? "") ?? resolution.allocation.tier,
+      tier: resolution.resolvedTier,
       provider: resolution.runtime.backend ?? resolution.runtime.kind,
       modelId: resolution.runtime.model ?? resolution.runtime.kind,
-      sessionId: resolution.allocation.runtimeId ?? null,
+      sessionId: resolution.resolvedRuntimeId,
       effort: resolution.runtime.effort ?? "none",
     },
-    reasonCodes: [
-      ...resolution.allocation.reasonCodes,
-      ...resolution.resolutionCodes,
-      receiptSafeRationale(resolution.allocation.rationale).slice(0, 120),
-    ],
+    reasonCodes: receiptReasonCodes,
     inputFeatureHash: `sha256:${featureHash}`,
     selectorVersion: "agentlas-desktop.parent-ai.v1",
-    independentVerificationRequired: resolution.allocation.reasonCodes.some((code) =>
+    independentVerificationRequired: requestedReasonCodes.some((code) =>
       code === "high-risk" || code === "critical-risk" || code === "independent-verification",
     ),
-    validationIssues: fallback ? resolution.allocation.reasonCodes : [],
+    validationIssues: fallback ? requestedReasonCodes : [],
     privacy: { rawPromptIncluded: false, rawTranscriptIncluded: false },
   };
 }
@@ -457,7 +730,23 @@ export function workloadAllocationPromptExample(phase: WorkloadPhase): string {
     modelClass: "optional: auto|haiku|luna|flash|mini|sonnet|terra|composer|opus|sol|grok",
     effort: "none|minimal|low|medium|high|xhigh|max",
     phase,
+    requirements: {
+      inputTokens: 12000,
+      expectedOutputTokens: 2000,
+      toolRequired: false,
+      multimodalRequired: false,
+    },
     reasonCodes: ["bounded-scope|parallel-throughput|complex-reasoning|large-context|high-risk|cross-result-synthesis"],
     rationale: "short observable reason; no hidden chain-of-thought",
   });
+}
+
+export function workloadAllocationInventoryPrompt(
+  runtimes: RuntimeStatus | RuntimeStatus[],
+): string {
+  const list = Array.isArray(runtimes) ? runtimes : [runtimes];
+  return [
+    "LIVE_RUNTIME_INVENTORY is authoritative. Copy runtimeId and modelId exactly from the same entry; never infer or invent a provider model ID from tier or modelClass.",
+    `LIVE_RUNTIME_INVENTORY=${JSON.stringify(workloadRuntimeInventory(list))}`,
+  ].join("\n");
 }

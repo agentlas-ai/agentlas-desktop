@@ -1,8 +1,7 @@
 # Cross-platform release — builds Windows / Linux installers and publishes them to
-# the SEPARATE PUBLIC releases repo (agentlas-ai/agentlas-desktop) via the
-# electron-builder GitHub publisher. The desktop SOURCE repo is private, so only the
-# compiled binaries + latest*.yml (the update feed electron-updater polls) are made
-# public — no source is exposed.
+# the SEPARATE PUBLIC releases repo (agentlas-ai/agentlas-desktop-releases) via
+# the electron-builder GitHub publisher. The source repository is also public;
+# the separate repository is the canonical binary download and auto-update channel.
 #
 # The embedded Hephaestus engine is git-ignored, so a fresh checkout has no
 # engine — `npm run ensure:engine` clones the public engine repo before build.
@@ -13,8 +12,8 @@
 # users can get a "newer" DMG that cannot safely auto-update.
 # For the signed + notarized macOS pipeline, see docs/PUBLIC-RELEASE.md.
 #
-# Requires the AGENTLAS_DESKTOP_RELEASE_TOKEN secret (a PAT with `repo` scope that
-# can write to the releases repo) — already present in repo secrets.
+# Requires AGENTLAS_DESKTOP_RELEASE_TOKEN. Prefer a fine-grained PAT limited to
+# Contents write on agentlas-desktop-releases instead of a broad classic token.
 #
 # Trigger:
 #   git tag v0.0.3 && git push origin v0.0.3      # version comes from the tag
@@ -25,15 +24,14 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-*" # pre-releases: v0.0.3-beta.1
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v0.0.3). Must match package.json version."
+        description: "Stable release tag (e.g. v0.8.21). Must match package.json version."
         required: true
-        default: "v0.0.3"
 
-# Distribution is to the CDN, not GitHub Releases — read-only checkout suffices.
+# Distribution writes to the separate GitHub Releases repository with the
+# dedicated PAT; this source workflow itself needs only read access.
 permissions:
   contents: read
 
@@ -43,7 +41,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      HEPHAESTUS_REF: v1.1.19
+      HEPHAESTUS_REF: v1.1.28
+      HEPHAESTUS_COMMIT: d741da796289678c38fac1059f0473f271d0f7e9
 
     steps:
       - uses: actions/checkout@v4
@@ -67,9 +66,9 @@ jobs:
           RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           tag="$RAW_TAG"
-          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           if [[ ! "$tag" =~ $semver_tag_re ]]; then
-            echo "::error::Release tag must be strict SemVer with a leading v (received: $tag)."
+            echo "::error::Release tag must be stable SemVer with a leading v and no prerelease suffix (received: $tag)."
             exit 1
           fi
           tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}")" || {
@@ -86,12 +85,17 @@ jobs:
           lockver=$(node -p "require('./package-lock.json').version")
           lockrootver=$(node -p "require('./package-lock.json').packages[''].version")
           runtimever=$(node -p "require('./package.json').agentlasUpdateCompatibility.bundledRuntimeVersion")
+          runtimecommit=$(node -p "require('./package.json').agentlasBundledRuntimeSource.commit")
           if [ "$pkgver" != "$version" ] || [ "$lockver" != "$version" ] || [ "$lockrootver" != "$version" ]; then
             echo "::error::Tag $tag requires package.json/package-lock root version=$version (got package=$pkgver lock=$lockver root=$lockrootver)."
             exit 1
           fi
           if [ "${HEPHAESTUS_REF#v}" != "$runtimever" ]; then
             echo "::error::HEPHAESTUS_REF=$HEPHAESTUS_REF does not match bundledRuntimeVersion=$runtimever."
+            exit 1
+          fi
+          if [ "$HEPHAESTUS_COMMIT" != "$runtimecommit" ]; then
+            echo "::error::HEPHAESTUS_COMMIT does not match package immutable runtime pin."
             exit 1
           fi
           echo "Preflight source verified: $tag ($head_commit), Agentlas OS $HEPHAESTUS_REF"
@@ -124,6 +128,17 @@ jobs:
           sudo chmod 4755 "$sandbox_path"
           echo "Configured Electron SUID sandbox helper: $sandbox_path"
           xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
+            npm run test:stormbreaker-core:embedded
+            npm run test:python-cache-boundary
+            npm run test:release-agent-foundation-gate
+            npm run test:v64-automation-permission-migration
+            npm run test:automations-store
+            npm run test:automation-scheduler-guards
+            npm run test:mobile-read-boundary
+            npm run test:mobile-execution-boundary
+            npm run test:runtime-resume-contract
+            npm run test:cli-image-attachments
+            npm run test:owned-agent-runtime-prompts
             npm run test:opencrab-core
             npm run test:opencrab-product
             npm run test:opencrab-recovery-scrub
@@ -144,7 +159,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      HEPHAESTUS_REF: v1.1.19
+      HEPHAESTUS_REF: v1.1.28
+      HEPHAESTUS_COMMIT: d741da796289678c38fac1059f0473f271d0f7e9
 
     steps:
       - uses: actions/checkout@v4
@@ -171,9 +187,9 @@ jobs:
           RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           tag="$RAW_TAG"
-          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           if [[ ! "$tag" =~ $semver_tag_re ]]; then
-            echo "::error::Release tag must be strict SemVer with a leading v (received: $tag)."
+            echo "::error::Release tag must be stable SemVer with a leading v and no prerelease suffix (received: $tag)."
             exit 1
           fi
           tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}")" || {
@@ -190,12 +206,17 @@ jobs:
           lockver=$(node -p "require('./package-lock.json').version")
           lockrootver=$(node -p "require('./package-lock.json').packages[''].version")
           runtimever=$(node -p "require('./package.json').agentlasUpdateCompatibility.bundledRuntimeVersion")
+          runtimecommit=$(node -p "require('./package.json').agentlasBundledRuntimeSource.commit")
           if [ "$pkgver" != "$version" ] || [ "$lockver" != "$version" ] || [ "$lockrootver" != "$version" ]; then
             echo "::error::Tag $tag requires package.json/package-lock root version=$version (got package=$pkgver lock=$lockver root=$lockrootver)."
             exit 1
           fi
           if [ "${HEPHAESTUS_REF#v}" != "$runtimever" ]; then
             echo "::error::HEPHAESTUS_REF=$HEPHAESTUS_REF does not match bundledRuntimeVersion=$runtimever."
+            exit 1
+          fi
+          if [ "$HEPHAESTUS_COMMIT" != "$runtimecommit" ]; then
+            echo "::error::HEPHAESTUS_COMMIT does not match package immutable runtime pin."
             exit 1
           fi
           echo "RESOLVED_TAG=$tag" >> "$GITHUB_ENV"
@@ -217,10 +238,19 @@ jobs:
 
       - name: Windows runtime and mobile contracts
         if: runner.os == 'Windows'
+        timeout-minutes: 15
         run: |
           npm run test:cli-version-parser
           npm run test:after-pack-runtime-contract
+          npm run test:stormbreaker-core:embedded
+          npm run test:python-cache-boundary
+          npm run test:release-agent-foundation-gate
+          npm run test:runtime-resume-contract
           npm run test:mobile-bridge-contract
+          npm run test:mobile-read-boundary
+          npm run test:mobile-execution-boundary
+          npm run test:v64-automation-permission-migration
+          npm run test:provider-health
 
       - name: Linux migration and updater continuity gates
         if: runner.os == 'Linux'
@@ -248,15 +278,23 @@ jobs:
           # "Unknown or unsupported transport 'disabled'". One session for all gates.
           xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
             npm run test:v52-automation-run-recovery
+            npm run test:v64-automation-permission-migration
             npm run test:automation-trigger-safety
             npm run test:v53-hub-bookmark-sync
             npm run test:updater-production
             npm run test:automations-store
             npm run test:cli-version-parser
             npm run test:hephaestus-status-version
+            npm run test:python-cache-boundary
+            npm run test:release-agent-foundation-gate
+            npm run test:runtime-resume-contract
             npm run test:marketplace-cache
             npm run test:after-pack-runtime-contract
+            npm run test:stormbreaker-core:embedded
+            npm run test:provider-health
             npm run test:mobile-bridge-contract
+            npm run test:mobile-read-boundary
+            npm run test:mobile-execution-boundary
             npm run test:borrowed-task-force
             npm run test:mcp-auto-select
             npm run test:mcp-secret-isolation
@@ -289,10 +327,15 @@ jobs:
       - name: Build renderer + electron
         run: npm run build
 
-      # --publish always uploads installers + the update feed (latest*.yml) to the
-      # public releases repo (per electron-builder.yml publish config). Retried
-      # because installer creation flakes intermittently on hosted runners.
-      - name: Package and publish
+      # Tests run after the initial clone. Recheck the immutable commit and the
+      # ignored-file boundary immediately before electron-builder sees Core.
+      - name: Reverify embedded engine release boundary
+        run: npm run ensure:engine
+
+      # --publish always uploads installers + the update feed (latest*.yml) to a
+      # prerelease staging record. Only the signed macOS workflow may promote it
+      # to stable/latest after every required platform artifact exists.
+      - name: Package and stage prerelease assets
         shell: bash
         env:
           # Publishing to the separate public releases repo requires a cross-repo

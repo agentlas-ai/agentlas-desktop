@@ -29,6 +29,7 @@ const RUNTIME_LABEL: Record<string, string> = {
   codex: "Codex",
   gemini: "Gemini CLI",
   grok: "Grok CLI",
+  cursor: "Cursor Agent",
 };
 const CLI_RUNTIMES = new Set(["claude-code", "codex", "gemini", "grok", "cursor"]);
 const OBERON_VIDEO_PROVIDERS = new Set(["grok-cli-video", "google-veo", "kling-video", "seedance-video", "runway-video", "luma-video"]);
