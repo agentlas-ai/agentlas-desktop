@@ -3207,28 +3207,40 @@ function ExperiencePanel({
                       : "Start with a draft based on the chip, then review only the benefits buyers receive. Original conversations and files stay private."}
                   </span>
                 </div>
-                <div aria-label={ko ? "구매자용 소개 준비 단계" : "Buyer-copy preparation steps"} style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 7 }}>
+                <div aria-label={ko ? "구매자용 소개 준비 단계" : "Buyer-copy preparation steps"} style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 7 }}>
                   {[
                     { icon: <IconCheck size={13} />, label: ko ? "경험 고르기" : "Choose experience", done: operationalSourceIds.length > 0 },
                     { icon: <IconEdit size={13} />, label: ko ? "효과 적기" : "Describe benefits", done: Boolean(operationalProjection) },
                     { icon: <IconShield size={13} />, label: ko ? "개인정보 확인" : "Privacy check", done: operationalPublicReady },
                     { icon: <IconFileUp size={13} />, label: ko ? "등록 요청" : "Request listing", done: latestCloud?.requestedVisibility === "public" },
                   ].map((step) => (
-                    <div key={step.label} title={step.label} style={{ minHeight: 36, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, border: "1px solid var(--paper-edge)", background: step.done ? "color-mix(in srgb, var(--green-deep) 10%, var(--paper))" : "var(--paper-2)", color: step.done ? "var(--green-deep)" : "var(--muted-deep)", fontSize: 10, fontWeight: 800 }}>
+                    <div key={step.label} title={step.label} style={{ minHeight: 38, padding: "5px 7px", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, border: "1px solid var(--paper-edge)", background: step.done ? "color-mix(in srgb, var(--green-deep) 10%, var(--paper))" : "var(--paper-2)", color: step.done ? "var(--green-deep)" : "var(--muted-deep)", fontSize: 10, fontWeight: 800, textAlign: "center" }}>
                       {step.icon}<span>{step.label}</span>
                     </div>
                   ))}
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "minmax(170px, .8fr) minmax(230px, 1.2fr)", gap: 8, marginTop: 10 }}>
-                  <input aria-label={ko ? "구매자에게 보일 칩 이름" : "Buyer-facing chip name"} value={operationalTitle} onChange={(event) => setOperationalTitle(event.target.value)} placeholder={ko ? "예: 로그인 막힘을 빠르게 해결하는 경험" : "Example: Resolve sign-in blockers faster"} style={tasteInputStyle} />
-                  <textarea aria-label={ko ? "이 칩을 쓰면 좋아지는 점" : "What gets better with this chip"} value={operationalInstructions} onChange={(event) => setOperationalInstructions(event.target.value)} placeholder={ko ? "구매자가 바로 이해할 수 있는 효과를 한 줄에 하나씩 적어주세요\n예: 로그인된 브라우저를 먼저 찾아 같은 작업을 다시 하지 않게 합니다" : "Write one clear buyer benefit per line\nExample: Finds an already signed-in browser first to avoid repeating work"} rows={4} style={{ ...tasteInputStyle, resize: "vertical" }} />
-                  <select aria-label={ko ? "이 칩이 도움 되는 일" : "Work this chip helps with"} value={operationalTask} onChange={(event) => setOperationalTask(event.target.value)} style={tasteInputStyle}>
-                    <option value="">{ko ? "작업 유형 선택" : "Select task"}</option>
-                    {operationalTasks.map((task) => <option key={task} value={task}>{taskLabel(task)}</option>)}
-                  </select>
-                  <div aria-label={ko ? "사용 환경" : "Supported environment"} style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", minHeight: 36, padding: "6px 8px", border: "1px solid var(--paper-edge)", borderRadius: 9, background: "var(--paper-2)", color: "var(--muted-deep)", fontSize: 10.5 }}>
-                    <IconRoute size={13} style={{ color: "var(--accent)" }} />
-                    {ko ? "현재 Mac 환경과 호환" : "Compatible with this Mac"}
+                <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+                  <label style={{ display: "grid", gap: 5, minWidth: 0 }}>
+                    <span style={{ color: "var(--ink-soft)", fontSize: 11, fontWeight: 800 }}>{ko ? "칩 이름" : "Chip name"}</span>
+                    <input aria-label={ko ? "구매자에게 보일 칩 이름" : "Buyer-facing chip name"} value={operationalTitle} onChange={(event) => setOperationalTitle(event.target.value)} placeholder={ko ? "예: 로그인 막힘을 빠르게 해결하는 경험" : "Example: Resolve sign-in blockers faster"} style={{ ...tasteInputStyle, width: "100%", minWidth: 0 }} />
+                  </label>
+                  <label style={{ display: "grid", gap: 5, minWidth: 0 }}>
+                    <span style={{ color: "var(--ink-soft)", fontSize: 11, fontWeight: 800 }}>{ko ? "장착하면 좋아지는 점" : "What improves after attachment"}</span>
+                    <textarea aria-label={ko ? "이 칩을 쓰면 좋아지는 점" : "What gets better with this chip"} value={operationalInstructions} onChange={(event) => setOperationalInstructions(event.target.value)} placeholder={ko ? "한 줄에 하나씩, 결과가 어떻게 좋아지는지 적어주세요\n예: 로그인된 브라우저를 먼저 찾아 같은 작업을 다시 하지 않게 합니다" : "Write one clear result per line\nExample: Finds an already signed-in browser first to avoid repeating work"} rows={5} style={{ ...tasteInputStyle, width: "100%", minWidth: 0, resize: "vertical" }} />
+                  </label>
+                  <label style={{ display: "grid", gap: 5, minWidth: 0 }}>
+                    <span style={{ color: "var(--ink-soft)", fontSize: 11, fontWeight: 800 }}>{ko ? "도움 되는 일" : "Work it helps with"}</span>
+                    <select aria-label={ko ? "이 칩이 도움 되는 일" : "Work this chip helps with"} value={operationalTask} onChange={(event) => setOperationalTask(event.target.value)} style={{ ...tasteInputStyle, width: "100%", minWidth: 0 }}>
+                      <option value="">{ko ? "작업 유형 선택" : "Select task"}</option>
+                      {operationalTasks.map((task) => <option key={task} value={task}>{taskLabel(task)}</option>)}
+                    </select>
+                  </label>
+                  <div style={{ display: "grid", gap: 5 }}>
+                    <span style={{ color: "var(--ink-soft)", fontSize: 11, fontWeight: 800 }}>{ko ? "사용 환경" : "Supported environment"}</span>
+                    <div aria-label={ko ? "사용 환경" : "Supported environment"} style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", minHeight: 36, padding: "7px 9px", border: "1px solid var(--paper-edge)", borderRadius: 9, background: "var(--paper-2)", color: "var(--muted-deep)", fontSize: 10.5 }}>
+                      <IconRoute size={13} style={{ color: "var(--accent)" }} />
+                      {ko ? "현재 Mac 환경과 호환" : "Compatible with this Mac"}
+                    </div>
                   </div>
                 </div>
                 {operationalProjection?.privacyIssueCodes.length ? (
