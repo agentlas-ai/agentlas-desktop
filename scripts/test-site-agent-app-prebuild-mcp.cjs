@@ -16,45 +16,57 @@ process.env.AGENTLAS_E2E = "1";
 process.env.AGENTLAS_STORE_PATH = path.join(tmp, "agentlas.sqlite");
 app.setPath("userData", path.join(tmp, "user-data"));
 
-function runOversizedRequest(serverArgs) {
+function waitForChildClose(child, label, timeoutMs = 20_000) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, serverArgs, {
-      cwd: root,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-      stdio: ["pipe", "ignore", "pipe"],
-    });
-    child.once("error", reject);
-    child.once("close", (code) => resolve(code));
-    child.stdin.end("x".repeat(64 * 1024 + 1));
+    let settled = false;
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* best effort */ }
+      finish(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)));
+    }, timeoutMs);
+    child.once("error", (error) => finish(() => reject(error)));
+    child.once("close", (code, signal) => finish(() => resolve({ code, signal })));
   });
+}
+
+function runOversizedRequest(serverArgs) {
+  const child = spawn(process.execPath, serverArgs, {
+    cwd: root,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    stdio: ["pipe", "ignore", "pipe"],
+  });
+  const done = waitForChildClose(child, "oversized System Time MCP request");
+  child.stdin.end("x".repeat(64 * 1024 + 1));
+  return done.then(({ code }) => code);
 }
 
 function runManySmallRequests(serverArgs) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, serverArgs, {
-      cwd: root,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-      stdio: ["pipe", "ignore", "pipe"],
-    });
-    child.once("error", reject);
-    child.once("close", (code) => resolve(code));
-    const lines = Array.from({ length: 2_000 }, (_, index) =>
-      JSON.stringify({ jsonrpc: "2.0", id: index + 1, method: "ping" })).join("\n");
-    assert.ok(Buffer.byteLength(lines) > 64 * 1024);
-    child.stdin.end(`${lines}\n`);
+  const child = spawn(process.execPath, serverArgs, {
+    cwd: root,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    stdio: ["pipe", "ignore", "pipe"],
   });
+  const done = waitForChildClose(child, "many-small System Time MCP requests");
+  const lines = Array.from({ length: 2_000 }, (_, index) =>
+    JSON.stringify({ jsonrpc: "2.0", id: index + 1, method: "ping" })).join("\n");
+  assert.ok(Buffer.byteLength(lines) > 64 * 1024);
+  child.stdin.end(`${lines}\n`);
+  return done.then(({ code }) => code);
 }
 
 function runInlineServer(serverArgs) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, serverArgs, {
-      cwd: root,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    child.once("error", reject);
-    child.once("close", (code) => resolve(code));
+  const child = spawn(process.execPath, serverArgs, {
+    cwd: root,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    stdio: ["ignore", "ignore", "ignore"],
   });
+  return waitForChildClose(child, "inline System Time MCP source rejection")
+    .then(({ code }) => code);
 }
 
 async function verifyDefaultMcpFailureIsolation(registry) {
@@ -107,27 +119,23 @@ function verifyWindowsCmdInlineConfigRoundTrip(inlineConfig) {
     'require("node:fs").writeFileSync(process.argv[2],JSON.stringify(process.argv.slice(3)));\n');
   const shim = path.join(shimDir, "claude-fixture.cmd");
   fs.writeFileSync(shim, '@echo off\r\nnode "%~dp0capture.cjs" "%~dp0args.json" %*\r\n');
-  return new Promise((resolve, reject) => {
-    const child = crossSpawn(shim, [
+  const child = crossSpawn(shim, [
+    "--setting-sources", "",
+    "--mcp-config", inlineConfig,
+    "--allowedTools", "mcp__agentlas-time__get_current_time",
+  ], {
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  return waitForChildClose(child, "Windows .cmd inline MCP round trip").then(({ code }) => {
+    if (code !== 0) throw new Error(stderr || `cmd shim exited ${code}`);
+    assert.deepEqual(JSON.parse(fs.readFileSync(output, "utf8")), [
       "--setting-sources", "",
       "--mcp-config", inlineConfig,
       "--allowedTools", "mcp__agentlas-time__get_current_time",
-    ], {
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-    child.once("error", reject);
-    child.once("close", (code) => {
-      if (code !== 0) return reject(new Error(stderr || `cmd shim exited ${code}`));
-      assert.deepEqual(JSON.parse(fs.readFileSync(output, "utf8")), [
-        "--setting-sources", "",
-        "--mcp-config", inlineConfig,
-        "--allowedTools", "mcp__agentlas-time__get_current_time",
-      ], "cross-spawn must preserve the empty setting source and compact JSON as exact Windows .cmd arguments");
-      resolve();
-    });
+    ], "cross-spawn must preserve the empty setting source and compact JSON as exact Windows .cmd arguments");
   });
 }
 
@@ -279,9 +287,8 @@ async function main() {
   const swapper = spawn(process.execPath, ["-e", swapScript, raceFile, raceA, raceB, String(replacementIterations)], {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, stdio: "ignore",
   });
-  const swapperDone = new Promise((resolve, reject) => {
-    swapper.once("error", reject);
-    swapper.once("close", (code) => code === 0 ? resolve() : reject(new Error(`swapper exited ${code}`)));
+  const swapperDone = waitForChildClose(swapper, "stable-file replacement race").then(({ code }) => {
+    if (code !== 0) throw new Error(`swapper exited ${code}`);
   });
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
   let stableRaceReads = 0;
