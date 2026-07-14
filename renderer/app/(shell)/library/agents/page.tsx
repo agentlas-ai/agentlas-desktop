@@ -2816,19 +2816,19 @@ function ExperiencePanel({
   };
 
   const cloudStateLabel = (state: ExperienceCloudUploadRecord["state"]): string => ({
-    "local-ready": ko ? "로컬 준비" : "Local ready",
-    "saving-private": ko ? "비공개 저장 중" : "Saving private",
-    "private-saved": ko ? "비공개 Cloud 저장" : "Private Cloud saved",
-    "requesting-verification": ko ? "검증 요청 전송 중" : "Requesting verification",
-    "verification-requested": ko ? "검증 요청됨" : "Verification requested",
-    "verification-pending": ko ? "검증 대기 중" : "Verification pending",
-    "verified-private": ko ? "검증됨 · 비공개" : "Verified · private",
-    "public-active": ko ? "공개 활성 · 서버 검증" : "Public active · server verified",
-    conflict: ko ? "충돌 · 다시 맞추기" : "Conflict · reconcile",
+    "local-ready": ko ? "내 Mac에 저장됨" : "Saved on this Mac",
+    "saving-private": ko ? "내 Hub에 저장 중" : "Saving to my Hub",
+    "private-saved": ko ? "내 Hub에 비공개 보관됨" : "Saved privately to my Hub",
+    "requesting-verification": ko ? "공개 안전 확인 요청 중" : "Requesting public-safety review",
+    "verification-requested": ko ? "공개 안전 확인 요청됨" : "Public-safety review requested",
+    "verification-pending": ko ? "공개 안전 확인 중" : "Public-safety review in progress",
+    "verified-private": ko ? "안전 확인 완료 · 비공개" : "Safety checked · private",
+    "public-active": ko ? "Hub 공개 완료" : "Published on Hub",
+    conflict: ko ? "확인할 사항이 있음" : "Needs attention",
     offline: ko ? "오프라인 · 재개 가능" : "Offline · resumable",
-    error: ko ? "오류 · 다시 맞추기" : "Error · reconcile",
-    withdrawn: ko ? "대여 중단됨" : "Withdrawn",
-    rejected: ko ? "검증 거절됨" : "Rejected",
+    error: ko ? "Hub 상태 확인 필요" : "Hub status needs review",
+    withdrawn: ko ? "공개 중단됨" : "Unpublished",
+    rejected: ko ? "공개 안전 확인 미통과" : "Public-safety review not passed",
   })[state];
 
   const latestCloud = cloudUploads[0] ?? null;
@@ -3199,12 +3199,20 @@ function ExperiencePanel({
               </div>
 
               <div data-testid="operational-public-projection" style={{ marginTop: 14, padding: 12, borderRadius: 14, border: "1px solid var(--paper-edge)", background: "color-mix(in srgb, var(--paper) 88%, transparent)", boxShadow: "inset 0 1px 0 color-mix(in srgb, white 60%, transparent)" }}>
+                <div style={{ marginBottom: 10 }}>
+                  <strong style={{ display: "block", fontSize: 13 }}>{ko ? "판매 페이지에 보일 소개" : "What buyers will see"}</strong>
+                  <span style={{ display: "block", marginTop: 3, color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}>
+                    {ko
+                      ? "칩 내용을 바탕으로 초안을 만든 뒤, 구매자가 얻는 효과만 직접 다듬어 확인하세요. 원본 대화와 파일은 공개되지 않습니다."
+                      : "Start with a draft based on the chip, then review only the benefits buyers receive. Original conversations and files stay private."}
+                  </span>
+                </div>
                 <div aria-label={ko ? "구매자용 소개 준비 단계" : "Buyer-copy preparation steps"} style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 7 }}>
                   {[
-                    { icon: <IconCheck size={13} />, label: ko ? "선택" : "Select", done: operationalSourceIds.length > 0 },
-                    { icon: <IconEdit size={13} />, label: ko ? "소개 작성" : "Write copy", done: Boolean(operationalProjection) },
+                    { icon: <IconCheck size={13} />, label: ko ? "경험 고르기" : "Choose experience", done: operationalSourceIds.length > 0 },
+                    { icon: <IconEdit size={13} />, label: ko ? "효과 적기" : "Describe benefits", done: Boolean(operationalProjection) },
                     { icon: <IconShield size={13} />, label: ko ? "개인정보 확인" : "Privacy check", done: operationalPublicReady },
-                    { icon: <IconFileUp size={13} />, label: ko ? "Hub 등록" : "Hub listing", done: latestCloud?.requestedVisibility === "public" },
+                    { icon: <IconFileUp size={13} />, label: ko ? "등록 요청" : "Request listing", done: latestCloud?.requestedVisibility === "public" },
                   ].map((step) => (
                     <div key={step.label} title={step.label} style={{ minHeight: 36, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, border: "1px solid var(--paper-edge)", background: step.done ? "color-mix(in srgb, var(--green-deep) 10%, var(--paper))" : "var(--paper-2)", color: step.done ? "var(--green-deep)" : "var(--muted-deep)", fontSize: 10, fontWeight: 800 }}>
                       {step.icon}<span>{step.label}</span>
@@ -3213,7 +3221,7 @@ function ExperiencePanel({
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "minmax(170px, .8fr) minmax(230px, 1.2fr)", gap: 8, marginTop: 10 }}>
                   <input aria-label={ko ? "구매자에게 보일 칩 이름" : "Buyer-facing chip name"} value={operationalTitle} onChange={(event) => setOperationalTitle(event.target.value)} placeholder={ko ? "예: 로그인 막힘을 빠르게 해결하는 경험" : "Example: Resolve sign-in blockers faster"} style={tasteInputStyle} />
-                  <textarea aria-label={ko ? "장착하면 좋아지는 점" : "What gets better after attaching"} value={operationalInstructions} onChange={(event) => setOperationalInstructions(event.target.value)} placeholder={ko ? "장착하면 더 잘하게 되는 일을 한 줄에 하나씩 적어주세요\n예: 로그인 세션이 남아 있는 브라우저를 먼저 찾아 재작업을 줄입니다" : "One buyer benefit per line\nExample: Reuses an active browser session to reduce repeated work"} rows={4} style={{ ...tasteInputStyle, resize: "vertical" }} />
+                  <textarea aria-label={ko ? "이 칩을 쓰면 좋아지는 점" : "What gets better with this chip"} value={operationalInstructions} onChange={(event) => setOperationalInstructions(event.target.value)} placeholder={ko ? "구매자가 바로 이해할 수 있는 효과를 한 줄에 하나씩 적어주세요\n예: 로그인된 브라우저를 먼저 찾아 같은 작업을 다시 하지 않게 합니다" : "Write one clear buyer benefit per line\nExample: Finds an already signed-in browser first to avoid repeating work"} rows={4} style={{ ...tasteInputStyle, resize: "vertical" }} />
                   <select aria-label={ko ? "이 칩이 도움 되는 일" : "Work this chip helps with"} value={operationalTask} onChange={(event) => setOperationalTask(event.target.value)} style={tasteInputStyle}>
                     <option value="">{ko ? "작업 유형 선택" : "Select task"}</option>
                     {operationalTasks.map((task) => <option key={task} value={task}>{taskLabel(task)}</option>)}
@@ -3224,14 +3232,16 @@ function ExperiencePanel({
                   </div>
                 </div>
                 {operationalProjection?.privacyIssueCodes.length ? (
-                  <div role="alert" style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 8 }}>
-                    {operationalProjection.privacyIssueCodes.map((code) => <span key={code} style={{ padding: "3px 6px", borderRadius: 999, background: "var(--amber-soft)", color: "var(--amber-deep)", fontSize: 9.5, fontWeight: 700 }}>{code}</span>)}
+                  <div role="alert" style={{ marginTop: 8, padding: "8px 10px", borderRadius: 9, background: "var(--amber-soft)", color: "var(--amber-deep)", fontSize: 11.5, lineHeight: 1.5 }}>
+                    {ko
+                      ? "개인정보로 보이는 내용이 있습니다. 이름, 계정, 로컬 경로가 없는 표현으로 고쳐주세요."
+                      : "Some text may contain personal information. Rewrite it without names, accounts, or local paths."}
                   </div>
                 ) : null}
                 <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center", marginTop: 10 }}>
-                  <button type="button" disabled={busy || operationalSourceIds.length === 0} onClick={fillBuyerCopyDraft} style={runtimeButtonStyle}><IconWand size={13} /> {ko ? "선택한 경험으로 소개 초안 만들기" : "Draft buyer copy from selection"}</button>
-                  <button type="button" disabled={busy || operationalSourceIds.length === 0 || !operationalTitle.trim() || !operationalInstructions.trim() || !operationalTask || !selectedPack.baseAgentReleaseId} onClick={() => void saveOperationalPublicProjection()} style={runtimeButtonStyle}><IconEdit size={13} /> {ko ? "소개 저장" : "Save introduction"}</button>
-                  <button type="button" disabled={busy || !operationalProjection || operationalProjectionDirty || operationalProjection.privacyIssueCodes.length > 0 || operationalPublicReady} onClick={() => void confirmOperationalPublicProjection()} style={runtimeButtonStyle}><IconShield size={13} /> {ko ? "개인정보 확인 완료" : "Privacy check complete"}</button>
+                  <button type="button" disabled={busy || operationalSourceIds.length === 0} onClick={fillBuyerCopyDraft} style={runtimeButtonStyle}><IconWand size={13} /> {ko ? "자동 소개 만들기" : "Create draft automatically"}</button>
+                  <button type="button" disabled={busy || operationalSourceIds.length === 0 || !operationalTitle.trim() || !operationalInstructions.trim() || !operationalTask || !selectedPack.baseAgentReleaseId} onClick={() => void saveOperationalPublicProjection()} style={runtimeButtonStyle}><IconEdit size={13} /> {ko ? "내 소개 저장" : "Save my copy"}</button>
+                  <button type="button" disabled={busy || !operationalProjection || operationalProjectionDirty || operationalProjection.privacyIssueCodes.length > 0 || operationalPublicReady} onClick={() => void confirmOperationalPublicProjection()} style={runtimeButtonStyle}><IconShield size={13} /> {ko ? "공개할 문장 확인" : "Approve public copy"}</button>
                   <span title={ko ? "원본 Memory와 후보는 계속 비공개입니다." : "Original Memory and candidates remain private."} style={{ marginLeft: "auto", width: 9, height: 9, borderRadius: 999, background: operationalPublicReady ? "var(--green-deep)" : "var(--amber-deep)", boxShadow: `0 0 0 4px ${operationalPublicReady ? "var(--green-soft)" : "var(--amber-soft)"}` }} />
                 </div>
                 {!selectedPack.baseAgentReleaseId && <small style={{ display: "block", marginTop: 8, color: "var(--muted-deep)" }}>{ko ? "먼저 에이전트를 비공개로 연결하세요." : "Connect the agent privately first."}</small>}
@@ -3241,7 +3251,7 @@ function ExperiencePanel({
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
                   <div>
                     <strong style={{ display: "block", fontSize: 13 }}>{ko ? "Hub에 올리기" : "Publish to Hub"}</strong>
-                    <span style={{ display: "block", marginTop: 4, color: "var(--muted-deep)", fontSize: 11.5 }}>{ko ? "원본 기억은 보내지 않고, 확인한 공개용 문장만 전송합니다." : "Only the public copy you reviewed is sent; raw memory stays local."}</span>
+                    <span style={{ display: "block", marginTop: 4, color: "var(--muted-deep)", fontSize: 11.5 }}>{ko ? "원본 기억은 보내지 않고, 내가 확인한 칩 이름과 효과만 전송합니다. 공개 등록 후 Hub에서 판매 가격을 정합니다." : "Only the chip name and benefits you approved are sent; raw memory stays local. Set the selling price on Hub after listing."}</span>
                   </div>
                   {!selectedPack.baseAgentReleaseId && <Link href="/cloud" style={{ color: "var(--accent)", fontSize: 11.5, fontWeight: 700 }}>{ko ? "먼저 에이전트 연결하기 →" : "Connect the agent first →"}</Link>}
                 </div>
@@ -3260,7 +3270,7 @@ function ExperiencePanel({
 
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 10 }}>
                   <button type="button" disabled={busy || receipts.length === 0} onClick={() => void savePrivateCloud()} style={{ ...runtimeButtonStyle, background: "var(--paper-2)" }}>
-                    {ko ? "내 Hub에 비공개 저장" : "Save privately to my Hub"}
+                    {ko ? "내 Hub에 비공개 보관" : "Keep privately in my Hub"}
                   </button>
                   <button
                     type="button"
@@ -3283,9 +3293,9 @@ function ExperiencePanel({
                     <strong>{cloudStateLabel(latestCloud.state)}</strong>
                     <span style={{ display: "block", marginTop: 3, color: "var(--muted-deep)" }}>
                       {latestCloud.state === "public-active"
-                        ? (ko ? "서버 평가 영수증으로만 도달할 수 있는 상태입니다." : "Only a server evaluator receipt can reach this state.")
+                        ? (ko ? "구매자에게 공개됐습니다. Hub의 내 보관함에서 판매 가격을 정할 수 있습니다." : "It is public to buyers. Set the selling price from your Hub library.")
                         : latestCloud.state === "verification-requested" || latestCloud.state === "verification-pending"
-                          ? (ko ? "아직 공개 활성 상태는 아닙니다." : "It is not public-active yet.")
+                          ? (ko ? "개인정보와 공개 가능 여부를 확인하고 있습니다. 아직 구매자에게 보이지 않습니다." : "Privacy and listing safety are being checked. Buyers cannot see it yet.")
                         : latestCloud.state === "conflict"
                           ? latestCloud.errorCode === "private_base_visibility_mismatch"
                             ? (ko
@@ -3392,11 +3402,19 @@ function AgentDetailView({
   const [ontologyGraph, setOntologyGraph] = useState<ExperienceOntologyGraphSnapshot | null>(null);
   const [ontologyGraphLoading, setOntologyGraphLoading] = useState(false);
   const [ontologyGraphError, setOntologyGraphError] = useState(false);
+  const [ontologyAdvancedOpen, setOntologyAdvancedOpen] = useState(false);
   const [ontologyRevision, setOntologyRevision] = useState(0);
   const [hubOntology, setHubOntology] = useState<AgentOntologyHubProjection | null>(null);
   const [hubOntologyLoading, setHubOntologyLoading] = useState(false);
   const [hubOntologyError, setHubOntologyError] = useState("");
   const [hubOntologyRefresh, setHubOntologyRefresh] = useState(0);
+
+  useEffect(() => {
+    setOntologyAdvancedOpen(false);
+    setOntologyGraph(null);
+    setOntologyGraphLoading(false);
+    setOntologyGraphError(false);
+  }, [activeTab, agent?.id]);
 
   useEffect(() => {
     const api = ipc();
@@ -3453,7 +3471,7 @@ function AgentDetailView({
   }, [agent?.id, locale, ontologyRevision]);
 
   useEffect(() => {
-    if (activeTab !== "ontology") return;
+    if (activeTab !== "ontology" || !ontologyAdvancedOpen) return;
     const api = ipc();
     if (!api || !agent?.id) {
       setOntologyGraph(null);
@@ -3481,7 +3499,7 @@ function AgentDetailView({
       })
       .finally(() => { if (!cancelled) setOntologyGraphLoading(false); });
     return () => { cancelled = true; };
-  }, [activeTab, agent?.id, ontologyRevision]);
+  }, [activeTab, agent?.id, ontologyAdvancedOpen, ontologyRevision]);
 
   useEffect(() => {
     if (activeTab !== "ontology") return;
@@ -4364,48 +4382,13 @@ function AgentDetailView({
           {/* 목록 우선 온톨로지 요약 + Memory와 분리된 Experience Chips 관리 표면. */}
           {activeTab === "ontology" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 1180 }}>
-              <AgentOntologyGraphView
-                summary={ontologySummary}
-                graphSnapshot={ontologyGraph}
-                hub={hubOntology}
-                agentName={agent ? agentDisplayName(agent, locale) : (locale === "ko" ? "에이전트" : "Agent")}
-                locale={locale}
-                graphLoading={ontologyGraphLoading}
-                graphError={ontologyGraphError}
-              />
-              <AgentHubOntologyProjectionView
-                result={hubOntology}
-                loading={hubOntologyLoading}
-                error={hubOntologyError}
-                locale={locale}
-                onRefresh={() => setHubOntologyRefresh((current) => current + 1)}
-              />
               <section data-testid="agent-local-experience" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                <details data-testid="ontology-local-about" style={{ border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper-2)", overflow: "hidden" }}>
-                  <summary style={{ listStyle: "none", cursor: "pointer", minHeight: 52, padding: "9px 12px", display: "flex", alignItems: "center", gap: 9 }}>
-                    <span aria-hidden="true" style={{ width: 30, height: 30, borderRadius: 10, display: "grid", placeItems: "center", background: "var(--paper)", color: "var(--green-deep)" }}><IconRoute size={14} /></span>
-                    <h3 style={{ margin: 0, fontSize: 13 }}>{locale === "ko" ? "이 Mac에서 쌓인 경험" : "Experience accumulated on this Mac"}</h3>
-                    <span title={locale === "ko" ? "경험 항목" : "Experience items"} style={{ marginLeft: "auto", padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, background: "var(--paper)", color: "var(--muted-deep)", fontSize: 10, fontWeight: 750 }}>{ontologySummary?.candidateCount ?? 0}</span>
-                    <span aria-hidden="true" style={{ width: 7, height: 7, borderRight: "1.5px solid currentColor", borderBottom: "1.5px solid currentColor", transform: "rotate(45deg) translateY(-2px)", color: "var(--muted-deep)" }} />
-                  </summary>
-                  <p style={{ margin: 0, padding: "10px 12px 12px", borderTop: "1px solid var(--paper-edge)", color: "var(--ink-soft)", fontSize: 11.5, lineHeight: 1.55 }}>
-                    {locale === "ko"
-                      ? "로컬 메모리에서 안전하게 선별된 비공개 후보와 검수 영수증입니다. 위 Hub 장착 상태와 별도이며 자동 업로드·구매·장착되지 않습니다."
-                      : "Private candidates and review receipts safely selected from local Memory. This is separate from the Hub loadout above and is never uploaded, purchased, or attached automatically."}
-                  </p>
-                </details>
-                <ExperienceOntologySummaryView
-                  summary={ontologySummary}
-                  loading={ontologySummaryLoading}
-                  error={ontologySummaryError}
-                  locale={locale}
-                />
-                <details data-testid="ontology-chip-management" style={{ border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)", overflow: "hidden" }}>
+                <details open data-testid="ontology-chip-management" style={{ border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)", overflow: "hidden" }}>
                   <summary style={{ listStyle: "none", cursor: "pointer", minHeight: 56, padding: "10px 12px", display: "flex", alignItems: "center", gap: 9 }}>
                     <span aria-hidden="true" style={{ width: 32, height: 32, borderRadius: 11, display: "grid", placeItems: "center", background: "var(--accent-soft)", color: "var(--accent)", boxShadow: "inset 0 1px 0 color-mix(in srgb, white 55%, transparent)" }}><IconLayers size={15} /></span>
                     <strong style={{ fontSize: 13 }}>{locale === "ko" ? "경험칩 관리" : "Manage Experience Chips"}</strong>
-                    <span title={locale === "ko" ? "경험 칩" : "Experience chips"} style={{ padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, color: "var(--green-deep)", background: "var(--green-soft)", fontSize: 10, fontWeight: 750 }}>O {ontologySummary?.packCount ?? 0}</span>
-                    <span title={locale === "ko" ? "취향 후보" : "Taste drafts"} style={{ padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, color: "var(--amber-deep)", background: "var(--amber-soft)", fontSize: 10, fontWeight: 750 }}>T {ontologySummary?.tasteDraftCount ?? 0}</span>
+                    <span title={locale === "ko" ? "저장된 경험칩" : "Saved Experience Chips"} style={{ padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, color: "var(--green-deep)", background: "var(--green-soft)", fontSize: 10, fontWeight: 750 }}>{locale === "ko" ? "경험" : "Experience"} {ontologySummary?.packCount ?? 0}</span>
+                    <span title={locale === "ko" ? "아직 검토할 취향" : "Taste drafts to review"} style={{ padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, color: "var(--amber-deep)", background: "var(--amber-soft)", fontSize: 10, fontWeight: 750 }}>{locale === "ko" ? "취향" : "Taste"} {ontologySummary?.tasteDraftCount ?? 0}</span>
                     <span aria-hidden="true" style={{ marginLeft: "auto", width: 7, height: 7, borderRight: "1.5px solid currentColor", borderBottom: "1.5px solid currentColor", transform: "rotate(45deg) translateY(-2px)", color: "var(--muted-deep)" }} />
                   </summary>
                   <div style={{ padding: "4px 12px 12px", borderTop: "1px solid var(--paper-edge)" }}>
@@ -4418,6 +4401,67 @@ function AgentDetailView({
                       onChanged={() => setOntologyRevision((current) => current + 1)}
                     />
                   </div>
+                </details>
+                <AgentHubOntologyProjectionView
+                  result={hubOntology}
+                  loading={hubOntologyLoading}
+                  error={hubOntologyError}
+                  locale={locale}
+                  onRefresh={() => setHubOntologyRefresh((current) => current + 1)}
+                />
+                <ExperienceOntologySummaryView
+                  summary={ontologySummary}
+                  loading={ontologySummaryLoading}
+                  error={ontologySummaryError}
+                  locale={locale}
+                />
+                <details data-testid="ontology-local-about" style={{ border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper-2)", overflow: "hidden" }}>
+                  <summary style={{ listStyle: "none", cursor: "pointer", minHeight: 52, padding: "9px 12px", display: "flex", alignItems: "center", gap: 9 }}>
+                    <span aria-hidden="true" style={{ width: 30, height: 30, borderRadius: 10, display: "grid", placeItems: "center", background: "var(--paper)", color: "var(--green-deep)" }}><IconRoute size={14} /></span>
+                    <h3 style={{ margin: 0, fontSize: 13 }}>{locale === "ko" ? "이 Mac에서 쌓인 경험이란?" : "What is experience accumulated on this Mac?"}</h3>
+                    <span title={locale === "ko" ? "검토할 경험 항목" : "Experience items to review"} style={{ marginLeft: "auto", padding: "3px 7px", border: "1px solid var(--paper-edge)", borderRadius: 999, background: "var(--paper)", color: "var(--muted-deep)", fontSize: 10, fontWeight: 750 }}>{ontologySummary?.candidateCount ?? 0}</span>
+                    <span aria-hidden="true" style={{ width: 7, height: 7, borderRight: "1.5px solid currentColor", borderBottom: "1.5px solid currentColor", transform: "rotate(45deg) translateY(-2px)", color: "var(--muted-deep)" }} />
+                  </summary>
+                  <p style={{ margin: 0, padding: "10px 12px 12px", borderTop: "1px solid var(--paper-edge)", color: "var(--ink-soft)", fontSize: 11.5, lineHeight: 1.55 }}>
+                    {locale === "ko"
+                      ? "에이전트가 실제 작업에서 배운 해결법을 이 Mac에 비공개로 모아 둔 것입니다. 내가 고른 항목만 개인정보 검사를 거쳐 Hub에 등록할 수 있으며, 자동 업로드·구매·장착되지 않습니다."
+                      : "These are solutions the agent learned from real work and kept privately on this Mac. Only items you select can be privacy-checked and listed on Hub; nothing is uploaded, purchased, or attached automatically."}
+                  </p>
+                </details>
+                <details
+                  data-testid="ontology-advanced-relations"
+                  onToggle={(event) => {
+                    const open = event.currentTarget.open;
+                    setOntologyAdvancedOpen(open);
+                    if (!open) {
+                      setOntologyGraph(null);
+                      setOntologyGraphLoading(false);
+                      setOntologyGraphError(false);
+                    }
+                  }}
+                  style={{ border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper-2)", overflow: "hidden" }}
+                >
+                  <summary style={{ listStyle: "none", cursor: "pointer", minHeight: 52, padding: "9px 12px", display: "flex", alignItems: "center", gap: 9 }}>
+                    <span aria-hidden="true" style={{ width: 30, height: 30, borderRadius: 10, display: "grid", placeItems: "center", background: "var(--paper)", color: "var(--muted-deep)" }}><IconRoute size={14} /></span>
+                    <div>
+                      <h3 style={{ margin: 0, fontSize: 13 }}>{locale === "ko" ? "고급 관계 보기" : "Advanced relationships"}</h3>
+                      <p style={{ margin: "2px 0 0", color: "var(--muted-deep)", fontSize: 10.5 }}>{locale === "ko" ? "개발·문제 진단용이며 평소에는 열 필요가 없습니다." : "For development and troubleshooting; you normally do not need this."}</p>
+                    </div>
+                    <span aria-hidden="true" style={{ marginLeft: "auto", width: 7, height: 7, borderRight: "1.5px solid currentColor", borderBottom: "1.5px solid currentColor", transform: "rotate(45deg) translateY(-2px)", color: "var(--muted-deep)" }} />
+                  </summary>
+                  {ontologyAdvancedOpen && (
+                    <div style={{ padding: "12px", borderTop: "1px solid var(--paper-edge)" }}>
+                      <AgentOntologyGraphView
+                        summary={ontologySummary}
+                        graphSnapshot={ontologyGraph}
+                        hub={hubOntology}
+                        agentName={agent ? agentDisplayName(agent, locale) : (locale === "ko" ? "에이전트" : "Agent")}
+                        locale={locale}
+                        graphLoading={ontologyGraphLoading}
+                        graphError={ontologyGraphError}
+                      />
+                    </div>
+                  )}
                 </details>
               </section>
             </div>

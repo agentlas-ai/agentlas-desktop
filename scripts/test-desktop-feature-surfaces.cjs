@@ -207,6 +207,9 @@ async function runSurface(name, operation, timeoutMs = 45_000) {
 
 async function newPage(browser, options = {}) {
   const context = await browser.newContext({ viewport: { width: options.viewportWidth || 1440, height: options.viewportHeight || 980 } });
+  if (options.locale === "ko" || options.locale === "en") {
+    await context.addInitScript((locale) => window.localStorage.setItem("agentlas.locale", locale), options.locale);
+  }
   await context.addInitScript(setupMockAgentlasBridge, mockBridgeOptions(options));
   const page = await context.newPage();
   const errors = [];
@@ -750,11 +753,14 @@ async function runCompactAgentSurface(browser, baseUrl, evidence) {
   await tabs.waitFor();
   assert.equal(await tabs.evaluate((nav) => getComputedStyle(nav).overflowX === "auto"), true, "compact agent tabs should scroll horizontally instead of clipping");
   await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
+  await page.getByTestId("experience-ontology-summary").waitFor();
+  assert.notEqual(await page.getByTestId("ontology-chip-management").getAttribute("open"), null, "compact ontology management must be visible by default");
+  assert.equal(await page.getByTestId("ontology-advanced-relations").getAttribute("open"), null, "advanced relations must stay collapsed by default");
+  assert.equal(await page.getByTestId("agent-ontology-graph").count(), 0, "the relation graph must not load before the user opens advanced relations");
+  await page.getByTestId("ontology-advanced-relations").locator("summary").click();
   const compactGraph = page.getByTestId("agent-ontology-graph");
   await compactGraph.waitFor();
   await compactGraph.locator('[data-engine-state="ready"], [data-engine-state="fallback"]').waitFor();
-  await page.getByTestId("experience-ontology-summary").waitFor();
-  assert.equal(await page.getByTestId("ontology-chip-management").getAttribute("open"), null, "compact ontology management must stay collapsed by default");
   assert.equal(await compactGraph.evaluate((root) => {
     const shell = root.querySelector('[data-engine-state]')?.getBoundingClientRect();
     const inspector = root.querySelector('[data-testid="ontology-node-inspector"]')?.getBoundingClientRect();
@@ -771,57 +777,47 @@ async function runCompactAgentSurface(browser, baseUrl, evidence) {
 }
 
 async function runExperienceSurface(browser, baseUrl, evidence) {
-  const { context, page, errors } = await newPage(browser, { experienceScenario: true, viewportHeight: 1200 });
+  const { context, page, errors } = await newPage(browser, { experienceScenario: true, locale: "ko", viewportHeight: 1200 });
   page.on("dialog", (dialog) => dialog.accept());
   await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
   await page.getByText(/Builder Agent|빌더 에이전트/).first().click();
   await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
+  const management = page.getByTestId("ontology-chip-management");
+  await management.waitFor();
+  assert.notEqual(await management.getAttribute("open"), null, "Experience management must be visible by default");
+  assert.equal(await page.getByTestId("ontology-advanced-relations").getAttribute("open"), null, "advanced relations must be closed by default");
+  assert.equal(await page.getByTestId("agent-ontology-graph").count(), 0, "the relation graph must not load on the default Experience screen");
   const ontologySummary = page.getByTestId("experience-ontology-summary");
   await ontologySummary.waitFor();
-  await ontologySummary.locator("summary").click();
-  await page.getByText(/경험 항목|Items/).waitFor();
-  await page.getByText(/privacy_sensitive/).waitFor();
-  await page.locator('[data-intake-state="blocked"]').getByText(/2/).waitFor();
-  await page.getByTestId("ontology-chip-management").locator("summary").click();
+  assert.equal(await page.getByText(/privacy_sensitive/).isVisible().catch(() => false), false, "internal privacy codes must stay hidden on the default screen");
+  await page.getByText(/새 경험 묶음 만들기|Create a new experience collection/).click();
   await page.getByText(/^경험 칩$|^Experience Chips$/).first().waitFor();
-  await page.getByText(/로컬 원본 · Agent와 별도 자산|Local source · separate asset from Agent/).waitFor();
-  await page.getByText(/원본 에이전트 패키지와 합치거나 복사하지 않으며|never copies or merges the base agent package/).waitFor();
 
   await page.getByPlaceholder(/경험 칩 묶음 이름|Experience Chips name/).fill("브라우저 운영 경험");
   await page.getByRole("button", { name: /프로젝트 폴더 선택|Choose project folder/ }).click();
   await page.getByRole("button", { name: /경험 칩 만들기|Create Experience Chips/ }).click();
   await page.getByText("브라우저 운영 경험", { exact: true }).first().waitFor();
+  await page.getByText(/판매 페이지에 보일 소개|What buyers will see/).waitFor();
 
   const memorySelect = page.locator('[data-testid="experience-panel"] select').first();
   await memorySelect.selectOption("memory-browser-workflow");
   await page.getByRole("button", { name: /후보 만들기|Create candidate/ }).click();
   await page.getByText("브라우저 게시 전 보이는 계정과 최종 화면을 확인한다.", { exact: true }).waitFor();
-  await page.getByRole("button", { name: /검수 후 승격 \(attested\)|Review & promote \(attested\)/ }).click();
-  await page.getByText("ATTESTED", { exact: true }).waitFor();
-  await page.getByText(/1 candidates · 1 attested · 0 intents/).waitFor();
+  await page.getByRole("button", { name: /내용 확인하기|Review content/ }).click();
+  await page.getByText(/검토 완료|Reviewed/).first().waitFor();
+  await page.getByRole("button", { name: /공개용으로 사용|Use in public copy/ }).click();
+  await page.getByLabel(/구매자에게 보일 칩 이름|Buyer-facing chip name/).fill("게시 완료 상태 확인");
+  await page.getByLabel(/이 칩을 쓰면 좋아지는 점|What gets better with this chip/).fill("렌더링된 결과를 확인한 뒤 전달합니다.\n결과가 없으면 마지막 단계만 다시 시도합니다.");
+  await page.getByLabel(/이 칩이 도움 되는 일|Work this chip helps with/).selectOption("agentlas.task.v1/browser-automation");
+  await page.getByRole("button", { name: /내 소개 저장|Save my copy/ }).click();
+  await page.getByRole("button", { name: /공개할 문장 확인|Approve public copy/ }).click();
 
-  await page.getByRole("button", { name: /비공개 로컬 의도 기록|Record private local intent/ }).click();
-  await page.getByText(/1 candidates · 1 attested · 1 intents/).waitFor();
-  await page.getByText(/로컬 의도는 비공개 호환 영수증입니다|Local intent is a private compatibility receipt/).waitFor();
-  await page.getByText(/1\. 원본 Agent 업로드|1\. Base Agent upload/).waitFor();
-  await page.getByText(/2\. Experience 업로드|2\. Experience upload/).waitFor();
-  await page.getByText(/Agent 제작자와 달라도 됩니다|May differ from the Agent author/).waitFor();
-  await page.getByText(/공개 활성 \(서버만\)|Public active \(server only\)/).waitFor();
-  await page.getByText(/충돌 시 다시 맞춤·재시도|Conflict → reconcile & retry/).waitFor();
-
-  await page.getByRole("button", { name: /Experience만 비공개 저장|Save Experience privately/ }).click();
+  await page.getByRole("button", { name: /내 Hub에 비공개 보관|Keep privately in my Hub/ }).click();
   await page.locator('[data-testid="experience-cloud-status"][data-cloud-state="private-saved"]').waitFor();
-  await page.getByText(/workspace:qa-experience-owner/).waitFor();
-  await page.getByRole("button", { name: /공개 사본 소스|Public-copy source/ }).click();
-  await page.getByLabel(/Operational 공개 제목|Operational public title/).fill("게시 완료 상태 확인");
-  await page.getByLabel(/Operational 공개 절차|Operational public instructions/).fill("렌더링된 목적지를 확인합니다.\n예상 상태가 없으면 마지막 동작만 반복합니다.");
-  await page.getByLabel(/Operational 작업 유형|Operational task signature/).selectOption("agentlas.task.v1/browser-automation");
-  await page.getByRole("button", { name: /공개 사본 저장|Save public copy/ }).click();
-  await page.getByRole("button", { name: /명시적 확인|Explicit confirm/ }).click();
-  await page.getByRole("button", { name: /공개 검증 요청|Request public verification/ }).click();
+  await page.getByRole("button", { name: /공개 등록 요청|Request public listing/ }).click();
   const verificationRequestedStatus = page.locator('[data-testid="experience-cloud-status"][data-cloud-state="verification-requested"]');
   await verificationRequestedStatus.waitFor();
-  await verificationRequestedStatus.getByText(/아직 공개 활성 상태는 아닙니다|not public-active yet/).waitFor();
+  await verificationRequestedStatus.getByText(/아직 구매자에게 보이지 않습니다|Buyers cannot see it yet/).waitFor();
   await page.getByRole("button", { name: /상태 다시 맞추기|Reconcile status/ }).click();
   await page.locator('[data-testid="experience-cloud-status"][data-cloud-state="verification-pending"]').waitFor();
 
@@ -829,7 +825,6 @@ async function runExperienceSurface(browser, baseUrl, evidence) {
   assert.ok(calls.some((call) => call.name === "experience.createPack"));
   assert.ok(calls.some((call) => call.name === "experience.captureFromMemory"));
   assert.ok(calls.some((call) => call.name === "experience.promote" && call.payload.verification.status === "attested"));
-  assert.ok(calls.some((call) => call.name === "experience.createExportIntent" && call.payload.visibility === "private"));
   assert.ok(calls.some((call) => call.name === "experience.cloudSave" && call.payload.requestedVisibility === "private"));
   assert.ok(calls.some((call) => call.name === "experience.saveOperationalPublicProjection"));
   assert.ok(calls.some((call) => call.name === "experience.confirmOperationalPublicProjection"));
@@ -1074,17 +1069,17 @@ async function runExperienceCloudStateSurface(browser, baseUrl, evidence, state)
   await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
   await page.getByText(/Builder Agent|빌더 에이전트/).first().click();
   await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
-  await page.getByTestId("ontology-chip-management").locator("summary").click();
+  await page.getByText(/새 경험 묶음 만들기|Create a new experience collection/).click();
   await page.getByPlaceholder(/경험 칩 묶음 이름|Experience Chips name/).fill(`state-${state}`);
   await page.getByRole("button", { name: /프로젝트 폴더 선택|Choose project folder/ }).click();
   await page.getByRole("button", { name: /경험 칩 만들기|Create Experience Chips/ }).click();
   await page.locator('[data-testid="experience-panel"] select').first().selectOption("memory-browser-workflow");
   await page.getByRole("button", { name: /후보 만들기|Create candidate/ }).click();
-  await page.getByRole("button", { name: /검수 후 승격 \(attested\)|Review & promote \(attested\)/ }).click();
-  await page.getByRole("button", { name: /Experience만 비공개 저장|Save Experience privately/ }).click();
+  await page.getByRole("button", { name: /내용 확인하기|Review content/ }).click();
+  await page.getByRole("button", { name: /내 Hub에 비공개 보관|Keep privately in my Hub/ }).click();
   await page.locator(`[data-testid="experience-cloud-status"][data-cloud-state="${state}"]`).waitFor();
   if (state === "offline") {
-    await page.getByText(/오프라인 · 재개 가능|Offline · resumable/).waitFor();
+    await page.locator('[data-testid="experience-cloud-status"][data-cloud-state="offline"]').getByText(/오프라인 · 재개 가능|Offline · resumable/).waitFor();
   } else {
     await page.getByText(/로컬 자료는 그대로입니다|Local material is intact/).waitFor();
   }
