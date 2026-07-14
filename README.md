@@ -82,10 +82,9 @@ authority for which version is actually public, stable, and downloadable.
   validation on supported macOS and Windows packages. Run-as-Node remains a
   global fuse for required workers (internally exact-gated), not a path-scoped
   sandbox; removing it requires migrating those workers to dedicated runtimes.
-  Active Desktop agents can
-  read bounded project memory
-  through canonical, replacement-safe identities, while Site/Agent App/Mobile
-  restricted surfaces remain project-memory-free. Agentlas OS v1.1.28 still
+  Active Desktop agents can read bounded project memory through canonical,
+  replacement-safe identities, while Site/Agent App/Mobile restricted surfaces
+  remain project-memory-free. Agentlas OS v1.1.28 still
   completes the canonical first-contact privacy contract
   before agent work starts. Codex allocation uses exact live-verified
   context, capability, and reasoning-effort metadata and records the effort

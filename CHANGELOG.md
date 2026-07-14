@@ -36,10 +36,11 @@
 - **Packaged Electron code now uses an explicit fuse contract.** Run-as-Node
   remains globally enabled for required workers, whose internal call sites
   exact-gate command and argv; the fuse itself is not path-scoped. Node option
-  and inspector injection are disabled. The app entry is restricted to ASAR on all targets;
-  Electron's embedded ASAR integrity validation additionally covers supported
-  macOS and Windows packages. This does not change the existing signing boundary:
-  macOS is signed and notarized; Windows and Linux artifacts remain unsigned.
+  and inspector injection are disabled. The app entry is restricted to ASAR on
+  all targets; Electron's embedded ASAR integrity validation additionally
+  covers supported macOS and Windows packages. This does not change the
+  existing signing boundary: macOS is signed and notarized; Windows and Linux
+  artifacts remain unsigned.
   Moving every worker to a dedicated bundled Node or utility process is still
   required before Run-as-Node can be disabled completely.
 - **MCP cards now reflect fresh Main-process state.** A check mark requires both

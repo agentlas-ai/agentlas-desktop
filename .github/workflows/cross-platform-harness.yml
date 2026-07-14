@@ -18,6 +18,7 @@ on:
       - "electron/runtime/codex.ts"
       - "electron/runtime/claude-code.ts"
       - "electron/runtime/detect.ts"
+      - "electron/runtime/env-resolver.ts"
       - "electron/runtime/runner.ts"
       - "electron/runtime/workload-routing.ts"
       - "scripts/test-project-bootstrap-desktop.cjs"
@@ -34,7 +35,9 @@ on:
       - "shared/types.ts"
       - "electron-builder.yml"
       - "electron-builder.mac-stable.yml"
+      - "build-resources/after-pack-clean.cjs"
       - "package.json"
+      - "package-lock.json"
       - ".github/workflows/cross-platform-harness.yml"
   push:
     branches: [main]
@@ -53,6 +56,7 @@ on:
       - "electron/runtime/codex.ts"
       - "electron/runtime/claude-code.ts"
       - "electron/runtime/detect.ts"
+      - "electron/runtime/env-resolver.ts"
       - "electron/runtime/runner.ts"
       - "electron/runtime/workload-routing.ts"
       - "scripts/test-project-bootstrap-desktop.cjs"
@@ -69,7 +73,9 @@ on:
       - "shared/types.ts"
       - "electron-builder.yml"
       - "electron-builder.mac-stable.yml"
+      - "build-resources/after-pack-clean.cjs"
       - "package.json"
+      - "package-lock.json"
       - ".github/workflows/cross-platform-harness.yml"
 
 permissions:
@@ -133,6 +139,7 @@ jobs:
       - name: Verify installed Core on macOS and Windows
         if: runner.os != 'Linux'
         working-directory: agentlas-desktop
+        shell: bash
         env:
           HEPHAESTUS_RUNTIME_ROOT: ${{ github.workspace }}/agentlas-desktop/Hephaestus
           HEPHAESTUS_PYTHON: python
@@ -156,12 +163,22 @@ jobs:
         run: npm run test:agent-app-runtime:prepared
       - name: Build and verify packaged Agent App MCP boundary
         working-directory: agentlas-desktop
+        shell: bash
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: |
           npm run build
-          npx electron-builder --dir --publish never --config.directories.output="${{ runner.temp }}/agentlas-package-smoke" -c.mac.identity=null -c.mac.notarize=false
+          npx --no-install electron-builder --dir --publish never --config.directories.output="${{ runner.temp }}/agentlas-package-smoke" -c.mac.identity=null -c.mac.notarize=false
           npm run test:packaged-agent-app-mcp -- "${{ runner.temp }}/agentlas-package-smoke"
+      - name: Build and verify macOS stable-config Agent App MCP boundary
+        if: runner.os == 'macOS'
+        working-directory: agentlas-desktop
+        shell: bash
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          npx --no-install electron-builder --dir --publish never --config electron-builder.mac-stable.yml --config.directories.output="${{ runner.temp }}/agentlas-stable-package-smoke" -c.mac.identity=null -c.mac.notarize=false
+          npm run test:packaged-agent-app-mcp -- "${{ runner.temp }}/agentlas-stable-package-smoke"
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-harness-proof-${{ runner.os }}

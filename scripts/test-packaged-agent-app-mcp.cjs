@@ -7,6 +7,38 @@ const { getCurrentFuseWire, FuseV1Options } = require("@electron/fuses");
 
 const root = path.resolve(__dirname, "..");
 const packageRoot = path.resolve(process.argv[2] || path.join(root, "release"));
+const SYSTEM_TIME_SOURCE_DIGEST = "11f73b8c137b1e52a806667739c89ae1e330ea7f7e9f9d7201ab42f2a042b712";
+const CHILD_ENV_ALLOWLIST = [
+  "COMSPEC",
+  "ComSpec",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "PATH",
+  "PATHEXT",
+  "SYSTEMROOT",
+  "SystemRoot",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "TZ",
+  "USERPROFILE",
+  "WINDIR",
+];
+
+function packagedChildEnvironment() {
+  const env = { ELECTRON_RUN_AS_NODE: "1" };
+  for (const key of CHILD_ENV_ALLOWLIST) {
+    if (typeof process.env[key] === "string") env[key] = process.env[key];
+  }
+  assert.deepEqual(
+    Object.keys(env).filter((key) => /(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|COOKIE|API_KEY)/i.test(key)),
+    [],
+    "packaged MCP smoke child must not inherit credential-bearing environment variables",
+  );
+  return env;
+}
 
 function packagedBinary() {
   const dirs = fs.readdirSync(packageRoot, { withFileTypes: true })
@@ -35,6 +67,55 @@ function packagedBinary() {
   throw new Error(`packaged Agentlas binary not found under ${packageRoot}`);
 }
 
+function packagedAsar(binary) {
+  const asar = process.platform === "darwin"
+    ? path.resolve(path.dirname(binary), "..", "Resources", "app.asar")
+    : path.join(path.dirname(binary), "resources", "app.asar");
+  assert.equal(fs.existsSync(asar), true, `packaged app.asar not found at ${asar}`);
+  return asar;
+}
+
+function readPackagedSystemTimeContract(binary) {
+  const modulePath = path.join(
+    packagedAsar(binary),
+    "dist",
+    "electron",
+    "mcp-tools",
+    "system-time-server.js",
+  );
+  const probeSource = [
+    `const m = require(${JSON.stringify(modulePath)});`,
+    "process.stdout.write(JSON.stringify({",
+    "  args: m.systemTimeMcpLaunchArgs(),",
+    "  digest: m.systemTimeMcpSourceDigest(),",
+    "}));",
+  ].join("\n");
+  const probe = spawnSync(binary, ["-e", probeSource], {
+    encoding: "utf8",
+    timeout: 15_000,
+    maxBuffer: 1024 * 1024,
+    env: packagedChildEnvironment(),
+    windowsHide: true,
+  });
+  assert.equal(probe.error, undefined, probe.error?.message);
+  assert.equal(probe.status, 0, probe.stderr || `packaged contract probe exited ${probe.status}`);
+  const contract = JSON.parse(probe.stdout.trim());
+  assert.deepEqual(
+    Object.keys(contract).sort(),
+    ["args", "digest"],
+    "packaged System Time contract must expose only launch args and source digest",
+  );
+  assert.equal(
+    contract.digest,
+    SYSTEM_TIME_SOURCE_DIGEST,
+    "packaged System Time source must match the audited source digest",
+  );
+  assert.equal(Array.isArray(contract.args), true, "packaged System Time launch args must be an array");
+  assert.equal(contract.args.length >= 2, true, "packaged System Time launch args are incomplete");
+  assert.equal(contract.args[0], "-e", "packaged System Time must use the embedded Node bootstrap");
+  return contract;
+}
+
 async function main() {
   const binary = packagedBinary();
   const wire = await getCurrentFuseWire(binary);
@@ -50,7 +131,7 @@ async function main() {
   assert.equal(wire[FuseV1Options.OnlyLoadAppFromAsar], enabled,
     "packaged binary must load the app entry only from ASAR");
 
-  const { systemTimeMcpLaunchArgs } = require("../dist/electron/mcp-tools/system-time-server.js");
+  const packagedContract = readPackagedSystemTimeContract(binary);
   const input = [
     {
       jsonrpc: "2.0",
@@ -64,13 +145,32 @@ async function main() {
     },
     { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
     { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+    {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "get_current_time", arguments: { timezone: "UTC" } },
+    },
+    {
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: "convert_time",
+        arguments: {
+          source_timezone: "Asia/Seoul",
+          time: "09:00",
+          target_timezone: "UTC",
+        },
+      },
+    },
   ].map(JSON.stringify).join("\n") + "\n";
-  const child = spawnSync(binary, systemTimeMcpLaunchArgs(), {
+  const child = spawnSync(binary, packagedContract.args, {
     input,
     encoding: "utf8",
     timeout: 15_000,
     maxBuffer: 1024 * 1024,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    env: packagedChildEnvironment(),
     windowsHide: true,
   });
   assert.equal(child.error, undefined, child.error?.message);
@@ -81,10 +181,22 @@ async function main() {
     responses[1]?.result?.tools?.map((tool) => tool.name),
     ["get_current_time", "convert_time"],
   );
+  assert.equal(responses[2]?.result?.isError === true, false, "get_current_time must succeed");
+  const currentTime = JSON.parse(responses[2]?.result?.content?.[0]?.text);
+  assert.equal(currentTime.timezone, "UTC");
+  assert.match(currentTime.datetime, /T\d{2}:\d{2}:\d{2}\+00:00$/);
+  assert.equal(responses[3]?.result?.isError === true, false, "convert_time must succeed");
+  const convertedTime = JSON.parse(responses[3]?.result?.content?.[0]?.text);
+  assert.equal(convertedTime.source.timezone, "Asia/Seoul");
+  assert.match(convertedTime.source.datetime, /T09:00:00\+09:00$/);
+  assert.equal(convertedTime.target.timezone, "UTC");
+  assert.match(convertedTime.target.datetime, /T00:00:00\+00:00$/);
   console.log(JSON.stringify({
     ok: true,
     platform: process.platform,
     binary,
+    sourceDigest: packagedContract.digest,
+    conversion: "Asia/Seoul 09:00 -> UTC 00:00",
     tools: responses[1].result.tools.map((tool) => tool.name),
   }));
 }

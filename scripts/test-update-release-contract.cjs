@@ -143,8 +143,11 @@ const crossPlatformHarness = fs.readFileSync(
 );
 for (const guardedPath of [
   "electron/runtime/claude-code.ts",
+  "electron/runtime/env-resolver.ts",
   "electron-builder.yml",
   "electron-builder.mac-stable.yml",
+  "build-resources/after-pack-clean.cjs",
+  "package-lock.json",
   "scripts/test-packaged-agent-app-mcp.cjs",
 ]) {
   assert.equal(
@@ -155,8 +158,24 @@ for (const guardedPath of [
 }
 assert.match(
   crossPlatformHarness,
-  /npx electron-builder --dir --publish never[\s\S]{0,500}npm run test:packaged-agent-app-mcp/,
+  /npx --no-install electron-builder --dir --publish never[\s\S]{0,500}npm run test:packaged-agent-app-mcp/,
   "the 3OS harness must verify the final packaged fuse wire and System Time child handshake",
+);
+for (const stepName of [
+  "Verify installed Core on macOS and Windows",
+  "Build and verify packaged Agent App MCP boundary",
+]) {
+  const escaped = stepName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(
+    crossPlatformHarness,
+    new RegExp(`name: ${escaped}[\\s\\S]{0,180}shell: bash`),
+    `${stepName} must fail fast under Git Bash on Windows`,
+  );
+}
+assert.match(
+  crossPlatformHarness,
+  /if: runner\.os == 'macOS'[\s\S]{0,500}npx --no-install electron-builder --dir --publish never --config electron-builder\.mac-stable\.yml[\s\S]{0,500}npm run test:packaged-agent-app-mcp/,
+  "the macOS harness must also package and execute the stable builder configuration",
 );
 const crossPlatformWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release.yml"), "utf8");
 const signedMacWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release-signed-mac.yml"), "utf8");
