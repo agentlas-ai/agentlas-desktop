@@ -127,6 +127,7 @@ export type {
   InstalledAgent,
   ExperienceCandidateCaptureInput,
   ExperienceCandidateRecord,
+  ExperienceHubCatalogResult,
   ExperienceEnvironment,
   ExperienceExportIntentInput,
   ExperienceExportIntentRecord,

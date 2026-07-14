@@ -1781,11 +1781,17 @@ async function runHubLiveSurface(browser, baseUrl, evidence) {
   await experienceEntry.getByText(/에이전트에게, 이미 잘된 방법을 더하세요|Give your agent a method that already worked/).waitFor();
   await experienceEntry.getByText(/막혔던 일을 더 빨리 해결|Solve familiar blockers faster/).waitFor();
   await experienceEntry.getByText(/구매해도 바로 바뀌지 않습니다|Buying does not change anything immediately/).waitFor();
+  const catalog = page.getByTestId("experience-hub-catalog");
+  await catalog.getByText("브라우저 자동화 막힘 해결", { exact: true }).waitFor();
+  await catalog.getByText("계속 사용 · 25 크레딧", { exact: true }).waitFor();
+  await catalog.getByText("30일 · 20 크레딧", { exact: true }).waitFor();
   assert.doesNotMatch(await experienceEntry.innerText(), /release[_ -]?id|definition[_ -]?id|다른 세션|검증된 실행/i, "Experience Chip entry must stay human-readable");
+  await catalog.getByRole("button", { name: /좋아지는 점과 가격 보기|See benefits and price/ }).click();
   await experienceEntry.getByRole("button", { name: /경험칩과 가격 보기|Browse chips and prices/ }).click();
   await experienceEntry.getByRole("button", { name: /내 경험칩 소개·가격 정하기|Describe and price my chip/ }).click();
   const openedHubPages = await page.evaluate(() => window.__qa.calls.filter((call) => call.name === "fs.openPath").map((call) => call.payload));
-  assert.deepEqual(openedHubPages.slice(-2), [
+  assert.deepEqual(openedHubPages.slice(-3), [
+    "https://agentlas.cloud/ontology/opx-browser-recovery",
     "https://agentlas.cloud/marketplace?category=ontology",
     "https://agentlas.cloud/experience",
   ]);

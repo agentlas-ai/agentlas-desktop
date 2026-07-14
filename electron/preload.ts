@@ -165,6 +165,7 @@ const api: AgentlasIpc = {
     summary: (agentId: string) => ipcRenderer.invoke("agentLearning:summary", agentId),
   },
   experience: {
+    hubCatalog: () => ipcRenderer.invoke("experience:hubCatalog"),
     createPack: (input) => ipcRenderer.invoke("experience:createPack", input),
     listPacks: (input) => ipcRenderer.invoke("experience:listPacks", input),
     ontologySummary: (agentId: string) => ipcRenderer.invoke("experience:ontologySummary", agentId),

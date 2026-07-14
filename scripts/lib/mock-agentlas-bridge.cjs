@@ -1250,6 +1250,29 @@ function setupMockAgentlasBridge(options) {
       },
     },
     experience: {
+      hubCatalog: async () => {
+        record("experience.hubCatalog");
+        if (options?.experienceCatalogUnavailable) {
+          return { status: "unavailable", chips: [], checkedAt: now, message: "지금은 Hub 경험칩 목록을 불러오지 못했습니다." };
+        }
+        return {
+          status: "ready",
+          checkedAt: now,
+          chips: [{
+            title: options?.hubOperationalChipTitle || "브라우저 자동화 막힘 해결",
+            summary: options?.hubOperationalChipSummary || "막힌 브라우저 자동화를 안전하게 복구합니다.",
+            benefits: [options?.hubOperationalChipSummary || "권한과 실행 경로를 먼저 확인해 불필요한 재시도를 줄입니다."],
+            author: "경험칩 제작자",
+            workLabels: ["브라우저 자동화"],
+            offers: [
+              { mode: "purchase", durationDays: null, credits: 25 },
+              { mode: "lease", durationDays: 30, credits: 20 },
+            ],
+            detailPath: "/ontology/opx-browser-recovery",
+            updatedAt: now,
+          }],
+        };
+      },
       ontologySummary: async (agentId) => {
         record("experience.ontologySummary", agentId);
         const agentPacks = experiencePacks.filter((pack) => pack.agentId === agentId);

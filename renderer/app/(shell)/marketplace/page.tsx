@@ -19,6 +19,7 @@ import {
 } from "@/lib/hub-verification";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import type {
+  ExperienceHubCatalogResult,
   HephaestusCommandResult,
   MarketplaceListing,
   MarketplaceSourceStatus,
@@ -138,6 +139,9 @@ function MarketplacePage() {
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 12;
   const [hubView, setHubView] = useState<HubView>(() => searchParams.get("view") === "experience" ? "experience" : "agents");
+  const [experienceCatalog, setExperienceCatalog] = useState<ExperienceHubCatalogResult | null>(null);
+  const [experienceCatalogLoading, setExperienceCatalogLoading] = useState(false);
+  const [experienceCatalogRevision, setExperienceCatalogRevision] = useState(0);
 
   const [importNotice, setImportNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [listings, setListings] = useState<MarketplaceListing[]>([]);
@@ -200,6 +204,28 @@ function MarketplacePage() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  useEffect(() => {
+    if (hubView !== "experience") return;
+    let cancelled = false;
+    setExperienceCatalogLoading(true);
+    void ipc()?.experience.hubCatalog()
+      .then((result) => {
+        if (!cancelled) setExperienceCatalog(result);
+      })
+      .catch(() => {
+        if (!cancelled) setExperienceCatalog({
+          status: "unavailable",
+          chips: [],
+          checkedAt: new Date().toISOString(),
+          message: ko ? "지금은 Hub 경험칩 목록을 불러오지 못했습니다." : "Experience Chips are temporarily unavailable.",
+        });
+      })
+      .finally(() => {
+        if (!cancelled) setExperienceCatalogLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [hubView, ko, experienceCatalogRevision]);
 
   useEffect(
     () => onHubBookmarkChange((change) => {
@@ -432,6 +458,13 @@ function MarketplacePage() {
           {hubView === "experience" ? (
             <ExperienceChipHubIntro
               ko={ko}
+              catalog={experienceCatalog}
+              catalogLoading={experienceCatalogLoading}
+              onRetry={() => {
+                setExperienceCatalog(null);
+                setExperienceCatalogRevision((current) => current + 1);
+              }}
+              onOpenChip={(detailPath) => void openHubPage(detailPath)}
               onBrowse={() => void openHubPage("/marketplace?category=ontology")}
               onSell={() => void openHubPage("/experience")}
             />
@@ -726,10 +759,18 @@ function MarketplacePage() {
 
 function ExperienceChipHubIntro({
   ko,
+  catalog,
+  catalogLoading,
+  onRetry,
+  onOpenChip,
   onBrowse,
   onSell,
 }: {
   ko: boolean;
+  catalog: ExperienceHubCatalogResult | null;
+  catalogLoading: boolean;
+  onRetry: () => void;
+  onOpenChip: (detailPath: string) => void;
   onBrowse: () => void;
   onSell: () => void;
 }) {
@@ -765,6 +806,58 @@ function ExperienceChipHubIntro({
             <span style={{ color: "var(--rd-ink-3)", fontSize: 12.5, lineHeight: 1.55 }}>{body}</span>
           </article>
         ))}
+      </div>
+
+      <div className="card" data-testid="experience-hub-catalog" style={{ padding: 18, display: "grid", gap: 12 }}>
+        <div>
+          <strong style={{ display: "block", fontSize: 15 }}>{ko ? "Hub에서 판매 중인 경험칩" : "Experience Chips on Hub"}</strong>
+          <span style={{ display: "block", marginTop: 4, color: "var(--rd-ink-3)", fontSize: 12.5 }}>
+            {ko ? "효과와 가격을 먼저 보고, 필요한 칩만 고르세요." : "Compare the benefit and price before choosing a chip."}
+          </span>
+        </div>
+        {catalogLoading || !catalog ? (
+          <div role="status" style={{ padding: 14, borderRadius: 10, background: "var(--rd-surface-2)", color: "var(--rd-ink-3)", fontSize: 12.5 }}>
+            {ko ? "판매 중인 경험칩을 확인하는 중…" : "Checking available Experience Chips…"}
+          </div>
+        ) : catalog.status === "unavailable" ? (
+          <div role="status" style={{ padding: 14, borderRadius: 10, background: "var(--rd-surface-2)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ color: "var(--rd-ink-3)", fontSize: 12.5 }}>{catalog.message || (ko ? "목록을 불러오지 못했습니다." : "The catalog is unavailable.")}</span>
+            <button type="button" className="btn sm" onClick={onRetry}>{ko ? "다시 확인" : "Retry"}</button>
+          </div>
+        ) : catalog.status === "empty" ? (
+          <div role="status" style={{ padding: 14, borderRadius: 10, background: "var(--rd-surface-2)", color: "var(--rd-ink-3)", fontSize: 12.5, lineHeight: 1.55 }}>
+            {ko ? "현재 공개 판매 중인 경험칩이 없습니다. 비공개로 저장 중인 경험은 여기에 나타나지 않습니다." : "No Experience Chips are publicly on sale right now. Private drafts never appear here."}
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))", gap: 10 }}>
+            {catalog.chips.slice(0, 6).map((chip) => (
+              <article key={chip.detailPath} className="card" style={{ padding: 14, display: "grid", gap: 8 }}>
+                <div>
+                  <strong style={{ display: "block", fontSize: 14 }}>{chip.title}</strong>
+                  <span style={{ display: "block", marginTop: 3, color: "var(--rd-ink-3)", fontSize: 11.5 }}>{ko ? `${chip.author}의 경험` : `Experience by ${chip.author}`}</span>
+                </div>
+                <span style={{ color: "var(--rd-ink-2)", fontSize: 12.5, lineHeight: 1.5 }}>{chip.benefits[0] || chip.summary}</span>
+                {chip.workLabels.length > 0 ? (
+                  <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                    {chip.workLabels.map((label) => <RdTag key={label} dashed size="s">{label}</RdTag>)}
+                  </div>
+                ) : null}
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                  {chip.offers.length > 0 ? chip.offers.map((offer) => (
+                    <RdTag key={`${offer.mode}:${offer.durationDays ?? "forever"}:${offer.credits}`} bg={C.green} size="s">
+                      {offer.mode === "purchase"
+                        ? (ko ? `계속 사용 · ${offer.credits.toLocaleString()} 크레딧` : `Keep · ${offer.credits.toLocaleString()} credits`)
+                        : (ko ? `${offer.durationDays}일 · ${offer.credits.toLocaleString()} 크레딧` : `${offer.durationDays} days · ${offer.credits.toLocaleString()} credits`)}
+                    </RdTag>
+                  )) : <RdTag dashed size="s">{ko ? "현재 판매 중 아님" : "Not currently for sale"}</RdTag>}
+                </div>
+                <button type="button" className="btn sm primary" onClick={() => onOpenChip(chip.detailPath)}>
+                  {ko ? "좋아지는 점과 가격 보기" : "See benefits and price"}
+                </button>
+              </article>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="card" style={{ padding: 18, display: "grid", gap: 12 }}>

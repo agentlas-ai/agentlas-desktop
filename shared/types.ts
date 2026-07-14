@@ -3828,6 +3828,31 @@ export interface BugReportResult {
   error?: string;
 }
 
+export type ExperienceHubCatalogOffer = {
+  mode: "purchase" | "lease";
+  durationDays: number | null;
+  credits: number;
+};
+
+export type ExperienceHubCatalogChip = {
+  title: string;
+  summary: string;
+  benefits: string[];
+  author: string;
+  workLabels: string[];
+  offers: ExperienceHubCatalogOffer[];
+  /** Same-origin public Hub detail route; no raw internal ID is rendered. */
+  detailPath: string;
+  updatedAt: string | null;
+};
+
+export type ExperienceHubCatalogResult = {
+  status: "ready" | "empty" | "unavailable";
+  chips: ExperienceHubCatalogChip[];
+  checkedAt: string;
+  message?: string;
+};
+
 export interface AgentlasIpc {
   /** Electron 메인이 알려주는 OS 환경 정보 (Apple/Codex/Claude 데스크톱과 동일 패턴) */
   app: {
@@ -4057,6 +4082,8 @@ export interface AgentlasIpc {
   };
   /** Local Experience ownership and explicit owner-authorized Cloud exchange. */
   experience: {
+    /** Public, buyer-safe Hub catalog. Internal chip/release IDs never cross IPC. */
+    hubCatalog: () => Promise<ExperienceHubCatalogResult>;
     createPack: (input: ExperiencePackCreateIpcInput) => Promise<ExperiencePackRecord>;
     listPacks: (input: ExperiencePackListInput) => Promise<ExperiencePackRecord[]>;
     captureFromMemory: (input: ExperienceCandidateCaptureInput) => Promise<ExperienceCandidateRecord>;

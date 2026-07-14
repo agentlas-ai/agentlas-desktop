@@ -154,6 +154,7 @@ import type {
   HiredAgentCard,
 } from "../shared/types";
 import { resolveExperiencePackCreateIpcInput } from "./experience/access";
+import { getExperienceHubCatalog } from "./experience/hub-catalog";
 import {
   checkSafely as updaterCheck,
   getUpdaterState,
@@ -1819,6 +1820,7 @@ export function registerIpcHandlers(): void {
   // Pack creation still resolves project roots only through FsPathGrant. Cloud
   // calls attach the main-owned session cookie; no credential or raw path is
   // accepted from or returned to the renderer.
+  ipcMain.handle("experience:hubCatalog", () => getExperienceHubCatalog());
   ipcMain.handle("experience:createPack", async (_e, input: ExperiencePackCreateIpcInput) => {
     const runtimes = await detectRuntimes();
     const activeRuntime = runtimes.find((runtime) => runtime.active) ?? runtimes[0];
