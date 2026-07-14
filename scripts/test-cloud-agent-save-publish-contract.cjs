@@ -23,12 +23,15 @@ assert.match(page, /Agent Cloud 비공개 저장/);
 assert.match(page, /Agentlas Hub 공개 발행/);
 
 assert.match(preload, /savePrivate: \(input\) => ipcRenderer\.invoke\("cloudAgents:savePrivate", input\)/);
+assert.match(preload, /saveBuiltPrivate: \(input\) => ipcRenderer\.invoke\("cloudAgents:saveBuiltPrivate", input\)/);
 assert.match(preload, /publishPublic: \(input\) => ipcRenderer\.invoke\("cloudAgents:publishPublic", input\)/);
 assert.match(ipc, /ipcMain\.handle\("cloudAgents:savePrivate"[\s\S]*?visibility: "private-link"/);
+assert.match(ipc, /ipcMain\.handle\("cloudAgents:saveBuiltPrivate"[\s\S]*?resolveFsReadPath\(input\.folder, input\.scope\)[\s\S]*?visibility: "private-link"[\s\S]*?reviewMode: "static-only"/);
 assert.match(ipc, /ipcMain\.handle\("cloudAgents:publishPublic"[\s\S]*?visibility: "marketplace"/);
 assert.match(ipc, /resolveCloudAgentPackageRequest\(input\)/);
 assert.match(types, /rootGrant: FsPathGrant/);
 assert.match(types, /savePrivate: \(input: CloudAgentPrivateSaveRequest\)/);
+assert.match(types, /saveBuiltPrivate: \(input: CloudAgentBuiltPrivateSaveRequest\)/);
 assert.match(types, /publishPublic: \(input: CloudAgentHubPublishRequest\)/);
 
 assert.match(packager, /input\.visibility \?\? "private-link"/);

@@ -57,6 +57,21 @@ export interface BuildAttachment {
   kind: "file" | "dir" | "unknown";
 }
 
+export type BuildCloudSaveChoiceStatus = "pending" | "presented" | "uploading" | "saved" | "local-only";
+
+/**
+ * A post-build delivery choice is tied to one completed Build generation and
+ * its canonical, main-checked package root. Keeping the payload in the Build
+ * session prevents a re-render/reset from publishing a newer workspace with an
+ * older dialog (or vice versa).
+ */
+export interface BuildCloudSaveChoice {
+  id: string;
+  workspace: string;
+  readScope: FsReadScope;
+  status: BuildCloudSaveChoiceStatus;
+}
+
 export interface BuildState {
   request: string;
   /** 지시문 첨부(기존 에이전트 폴더·스킬·이미지·문서 등). 첫 턴에 워크스페이스로 스테이징된다. */
@@ -84,6 +99,8 @@ export interface BuildState {
   mcpPlan: McpBuildPlan | null;
   mcpSelectedCandidateIds: string[];
   mcpReceipt: McpBuildAttachmentReceipt | null;
+  /** Explicit owner-private Agent Cloud vs local-only decision for this Build. */
+  cloudSaveChoice: BuildCloudSaveChoice | null;
 }
 
 // 빌드 파이프라인 단계 수 — 화면의 STAGES 배열과 일치(모드분류·인터뷰/리서치·생성·검증·배포).
@@ -163,6 +180,7 @@ const state: BuildState = {
   mcpPlan: null,
   mcpSelectedCandidateIds: [],
   mcpReceipt: null,
+  cloudSaveChoice: null,
 };
 
 let snapshot: BuildState = { ...state };
@@ -323,6 +341,21 @@ function isCurrentRegistration(generation: number, workspace: string): boolean {
   return isCurrentBuild(generation) && state.result?.workspace === workspace;
 }
 
+function queueBuildCloudSaveChoice(workspace: string, readScope: FsReadScope, generation: number): void {
+  if (
+    !isCurrentRegistration(generation, workspace) ||
+    !state.registered ||
+    buildScanDisposition(state.result?.securityScan) !== "passed" ||
+    state.cloudSaveChoice
+  ) return;
+  state.cloudSaveChoice = {
+    id: `build-cloud-choice-${generation}`,
+    workspace,
+    readScope,
+    status: "pending",
+  };
+}
+
 /** 빌드 완료 시 결과 폴더를 라이브러리(조직도)에 자동 등록 — "조직도에 안 뜬다" 문제 해소. */
 function autoRegister(workspace: string, readScope: FsReadScope, generation: number): Promise<void> {
   const key = `${generation}:${workspace}`;
@@ -353,6 +386,7 @@ async function performAutoRegister(workspace: string, readScope: FsReadScope, ge
     announceAgentRosterChange({ action: "upserted", agent: imported, source: "build" });
     if (!isCurrentRegistration(generation, workspace)) return;
     state.registered = true;
+    queueBuildCloudSaveChoice(workspace, readScope, generation);
     const who = imported?.name || imported?.slug || (ko ? "에이전트" : "agent");
     pushLog("done", ko ? `조직도에 추가됨: ${who}` : `Added to org chart: ${who}`);
   } catch (e) {
@@ -668,6 +702,7 @@ export async function startBuild(activeRuntime?: RuntimeSelection): Promise<void
   state.mcpPlan = null;
   state.mcpSelectedCandidateIds = [];
   state.mcpReceipt = null;
+  state.cloudSaveChoice = null;
   const ko = currentLocale() === "ko";
   const reqLen = state.request.trim().length;
   const mode = state.mode || (ko ? "자동 분류" : "auto-classify");
@@ -761,6 +796,7 @@ export function cancelBuild() {
   state.mcpPlan = null;
   state.mcpSelectedCandidateIds = [];
   state.mcpReceipt = null;
+  state.cloudSaveChoice = null;
   detach();
   commit();
 }
@@ -787,7 +823,55 @@ export function resetBuild() {
   state.mcpPlan = null;
   state.mcpSelectedCandidateIds = [];
   state.mcpReceipt = null;
+  state.cloudSaveChoice = null;
   commit();
+}
+
+/** Mark the one-shot choice as visible. Re-renders cannot create another offer. */
+export function presentBuildCloudSaveChoice(id: string): boolean {
+  const choice = state.cloudSaveChoice;
+  if (!choice || choice.id !== id || choice.status !== "pending") return false;
+  choice.status = "presented";
+  commit();
+  return true;
+}
+
+/**
+ * Atomically claim the exact verified package shown by the dialog. Callers
+ * must use this returned payload rather than the current workspace/result.
+ */
+export function beginBuildCloudSave(id: string): { folder: string; scope: FsReadScope } | null {
+  const choice = state.cloudSaveChoice;
+  if (
+    !choice ||
+    choice.id !== id ||
+    (choice.status !== "presented" && choice.status !== "pending") ||
+    state.phase !== "done" ||
+    !state.registered ||
+    state.result?.workspace !== choice.workspace ||
+    buildScanDisposition(state.result.securityScan) !== "passed"
+  ) return null;
+  choice.status = "uploading";
+  commit();
+  return { folder: choice.workspace, scope: choice.readScope };
+}
+
+/** A failed upload re-opens the same choice; success closes it permanently. */
+export function finishBuildCloudSave(id: string, saved: boolean): boolean {
+  const choice = state.cloudSaveChoice;
+  if (!choice || choice.id !== id || choice.status !== "uploading") return false;
+  choice.status = saved ? "saved" : "presented";
+  commit();
+  return true;
+}
+
+/** Local-only is a durable UI decision and performs no IPC/network action. */
+export function chooseBuildLocalOnly(id: string): boolean {
+  const choice = state.cloudSaveChoice;
+  if (!choice || choice.id !== id || (choice.status !== "presented" && choice.status !== "pending")) return false;
+  choice.status = "local-only";
+  commit();
+  return true;
 }
 
 /** 수동 재스캔 결과를 전역 build session에 반영해 모든 결과/토스트 액션이 같은 게이트를 본다. */

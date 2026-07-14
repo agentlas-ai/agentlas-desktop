@@ -3700,6 +3700,302 @@ button[data-toggle-state="on"] {
   }
 }
 
+/* Build completion — explicit owner-private Agent Cloud vs local-only choice. */
+.build-cloud-choice-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 980;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background:
+    radial-gradient(circle at 50% 30%, color-mix(in oklch, var(--rd-accent) 15%, transparent), transparent 44%),
+    color-mix(in oklch, var(--rd-ink) 34%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(115%);
+  backdrop-filter: blur(18px) saturate(115%);
+}
+
+.build-cloud-choice-dialog {
+  width: min(560px, 100%);
+  overflow: hidden;
+  padding: 28px;
+  border: 1px solid color-mix(in oklch, var(--rd-hair) 76%, white 24%);
+  border-radius: 24px;
+  background:
+    linear-gradient(145deg, color-mix(in oklch, var(--rd-surface) 96%, white 4%), var(--rd-surface)),
+    var(--rd-surface);
+  color: var(--rd-ink);
+  box-shadow:
+    0 32px 90px color-mix(in oklch, var(--rd-ink) 30%, transparent),
+    inset 0 1px 0 color-mix(in oklch, white 60%, transparent);
+}
+
+.build-cloud-choice-visual {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 66px;
+  margin-bottom: 18px;
+}
+
+.build-cloud-choice-device {
+  position: relative;
+  width: 44px;
+  height: 31px;
+  border: 1.5px solid color-mix(in oklch, var(--rd-ink) 52%, var(--rd-hair));
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--rd-surface-2) 84%, transparent);
+  box-shadow: inset 0 0 0 3px var(--rd-surface);
+}
+.build-cloud-choice-device > i {
+  position: absolute;
+  inset: 6px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, color-mix(in oklch, var(--rd-accent) 35%, transparent), color-mix(in oklch, var(--rd-accent-2) 22%, transparent));
+}
+.build-cloud-choice-device::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: -6px;
+  height: 5px;
+  border-top: 1.5px solid color-mix(in oklch, var(--rd-ink) 52%, var(--rd-hair));
+  border-radius: 50%;
+}
+.build-cloud-choice-device-mobile {
+  width: 23px;
+  height: 38px;
+  border-radius: 8px;
+}
+.build-cloud-choice-device-mobile::after {
+  left: 9px;
+  right: 9px;
+  bottom: 3px;
+  height: 2px;
+  border: 0;
+  background: color-mix(in oklch, var(--rd-ink) 45%, transparent);
+}
+.build-cloud-choice-device-mobile > i {
+  inset: 5px 4px 8px;
+}
+
+.build-cloud-choice-cloud {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid color-mix(in oklch, var(--rd-accent) 38%, var(--rd-hair));
+  border-radius: 50%;
+  background: color-mix(in oklch, var(--rd-accent) 10%, var(--rd-surface));
+  color: var(--rd-accent-text, var(--rd-accent));
+  box-shadow: 0 10px 28px color-mix(in oklch, var(--rd-accent) 17%, transparent);
+}
+
+.build-cloud-choice-rail {
+  position: relative;
+  width: 48px;
+  height: 1px;
+  overflow: hidden;
+  margin: 0 8px;
+  background: color-mix(in oklch, var(--rd-accent) 26%, var(--rd-hair));
+}
+.build-cloud-choice-rail > i {
+  position: absolute;
+  top: -1px;
+  left: 0;
+  width: 13px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--rd-accent);
+  animation: build-cloud-choice-flow 1.8s ease-in-out infinite;
+}
+.build-cloud-choice-rail:nth-of-type(4) > i {
+  animation-delay: 0.35s;
+}
+
+.build-cloud-choice-heading {
+  text-align: center;
+}
+.build-cloud-choice-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 8px;
+  color: var(--rd-accent-text, var(--rd-accent));
+  font-size: 11.5px;
+  font-weight: 720;
+  letter-spacing: 0.02em;
+}
+.build-cloud-choice-heading h2 {
+  margin: 0;
+  color: var(--rd-ink);
+  font-size: clamp(21px, 4vw, 27px);
+  line-height: 1.18;
+  letter-spacing: -0.035em;
+}
+.build-cloud-choice-heading p {
+  margin: 9px auto 0;
+  max-width: 430px;
+  color: var(--rd-ink-3);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.build-cloud-choice-package {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin: 20px 0 12px;
+  padding: 9px 11px;
+  border: 1px solid var(--rd-hair);
+  border-radius: 12px;
+  background: color-mix(in oklch, var(--rd-surface-2) 72%, transparent);
+  font-size: 11.5px;
+}
+.build-cloud-choice-package-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--rd-ok, var(--rd-accent));
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--rd-ok, var(--rd-accent)) 12%, transparent);
+}
+.build-cloud-choice-package strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--rd-ink);
+}
+.build-cloud-choice-package > span:last-child {
+  color: var(--rd-ink-4);
+}
+
+.build-cloud-choice-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.rd .build-cloud-choice-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 11px;
+  min-height: 72px;
+  padding: 13px;
+  border: 1px solid var(--rd-hair);
+  border-radius: 15px;
+  background: var(--rd-surface-2);
+  color: var(--rd-ink);
+  text-align: left;
+  cursor: pointer;
+  transition: transform 150ms ease, border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+}
+.rd .build-cloud-choice-option:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: color-mix(in oklch, var(--rd-accent) 45%, var(--rd-hair));
+  box-shadow: 0 8px 20px color-mix(in oklch, var(--rd-ink) 8%, transparent);
+}
+.rd .build-cloud-choice-option:focus-visible {
+  outline: 2px solid var(--rd-accent);
+  outline-offset: 2px;
+}
+.rd .build-cloud-choice-option:disabled {
+  opacity: 0.62;
+  cursor: progress;
+}
+.rd .build-cloud-choice-option-primary {
+  border-color: color-mix(in oklch, var(--rd-accent) 44%, var(--rd-hair));
+  background: color-mix(in oklch, var(--rd-accent) 10%, var(--rd-surface));
+}
+.build-cloud-choice-option-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
+  background: color-mix(in oklch, var(--rd-ink) 5%, transparent);
+  color: var(--rd-ink-2);
+}
+.build-cloud-choice-option-primary .build-cloud-choice-option-icon {
+  background: var(--rd-accent);
+  color: white;
+}
+.build-cloud-choice-option > span:last-child {
+  display: grid;
+  gap: 4px;
+}
+.build-cloud-choice-option strong {
+  font-size: 13px;
+  line-height: 1.2;
+}
+.build-cloud-choice-option small {
+  color: var(--rd-ink-4);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+
+.build-cloud-choice-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in oklch, var(--rd-danger, #d45b5b) 30%, var(--rd-hair));
+  border-radius: 11px;
+  background: color-mix(in oklch, var(--rd-danger, #d45b5b) 7%, var(--rd-surface));
+  color: var(--rd-ink-2);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.build-cloud-choice-error svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--rd-danger, #d45b5b);
+}
+
+.build-cloud-choice-boundary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 6px;
+  margin: 14px auto 0;
+  max-width: 490px;
+  color: var(--rd-ink-4);
+  font-size: 10.5px;
+  line-height: 1.45;
+  text-align: center;
+}
+.build-cloud-choice-boundary svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.build-upload-choice-grid-single {
+  grid-template-columns: minmax(220px, 1fr);
+}
+
+@keyframes build-cloud-choice-flow {
+  0%, 100% { transform: translateX(-14px); opacity: 0; }
+  20% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { transform: translateX(50px); opacity: 0; }
+}
+
+@media (max-width: 580px) {
+  .build-cloud-choice-backdrop { padding: 14px; }
+  .build-cloud-choice-dialog { padding: 22px 18px; border-radius: 20px; }
+  .build-cloud-choice-actions { grid-template-columns: 1fr; }
+  .build-cloud-choice-package { grid-template-columns: auto minmax(0, 1fr); }
+  .build-cloud-choice-package > span:last-child { display: none; }
+  .build-cloud-choice-rail { width: 28px; margin: 0 5px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .build-cloud-choice-rail > i { animation: none; opacity: 1; transform: translateX(18px); }
+  .rd .build-cloud-choice-option { transition: none; }
+}
+
 .build-secondary-button {
   padding: 0 16px;
   border: 1px solid var(--rd-hair);

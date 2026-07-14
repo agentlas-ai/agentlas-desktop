@@ -359,6 +359,7 @@ const api: AgentlasIpc = {
   },
   cloudAgents: {
     savePrivate: (input) => ipcRenderer.invoke("cloudAgents:savePrivate", input),
+    saveBuiltPrivate: (input) => ipcRenderer.invoke("cloudAgents:saveBuiltPrivate", input),
     publishPublic: (input) => ipcRenderer.invoke("cloudAgents:publishPublic", input),
     publish: (input) => ipcRenderer.invoke("cloudAgents:publish", input),
   },

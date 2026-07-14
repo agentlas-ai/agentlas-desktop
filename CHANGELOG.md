@@ -1,9 +1,16 @@
 # Changelog
 
-## 0.8.25 — 2026-07-14 (local integration candidate; not released)
+## 0.8.25 — 2026-07-15
 
 ### Added
 
+- **A completed Build now asks one explicit portability question.** After the
+  package passes security verification and is registered locally, Desktop asks
+  `Cloud에 올리기` or `로컬에만 저장`. Private Cloud storage is never inferred,
+  closing the dialog means local-only, repeated clicks cannot duplicate the
+  upload, and public Hub publication remains a separate action. Another
+  Desktop must restore and install the package before its paired Mobile can
+  invoke it; Agent Cloud storage is not hosted model execution.
 - **Agentlas Site can turn an owned agent, team, firm, or saved group into an
   isolated Agent App.** Astryx scaffolding, local preview, verified publishing,
   thumbnails, and local-project deletion now share one Main-owned contract.
@@ -20,6 +27,17 @@
 
 ### Fixed
 
+- **Paired Mobile reconnects survive an ordinary Desktop restart.** Desktop
+  reuses the last secure local endpoint when possible, falls back to a new port
+  only when the retained port is already occupied, and can advertise the
+  authenticated Cloud relay without weakening local TLS or pairing checks.
+  Retry-safe RPC ordering, revocation, and snapshots remain Main-owned; raw
+  streamed confirmation fences are no longer exposed as assistant text.
+- **Fresh installs now default consistently to English.** Korean remains an
+  explicit locale choice, while fallback labels across Build, Oberon, T-Rex,
+  receipts, projects, and ownership no longer silently switch a Windows or
+  Linux user back to Korean. Platform copy says `this computer` instead of
+  naming the developer's Mac.
 - **One broken MCP can no longer starve an Agent App.** Decline, missing keys,
   malformed legacy registry rows, connection/config/runtime failure, or
   readiness races remove the affected MCP and continue the app in stateless
@@ -75,6 +93,9 @@
   server in this candidate. Other declarations remain visible but blocked.
 - Internal plans, QA receipts, and private screenshots are now ignored; the
   public documentation allowlist remains tracked.
+- A private Cloud save failure never rolls back the verified local package.
+  Login, offline, security, quota, or revision errors remain visible and
+  retryable; Desktop does not fall back to a public Hub upload.
 
 ## 0.8.24 — 2026-07-14
 

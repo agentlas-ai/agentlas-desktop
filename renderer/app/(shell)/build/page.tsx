@@ -20,6 +20,7 @@ import { useT } from "@/lib/i18n";
 import { KeyStatusBanner } from "@/components/KeyStatusBanner";
 import { McpBuildPlanCard } from "@/components/build/McpBuildPlanCard";
 import { McpAttachmentReceiptCard } from "@/components/build/McpAttachmentReceiptCard";
+import { CloudSaveChoiceDialog } from "@/components/build/CloudSaveChoiceDialog";
 import type { DirListing, FsReadScope, HephaestusStatus, RuntimeSelection, RuntimeStatus } from "@/lib/types";
 import {
   subscribe as buildSubscribe,
@@ -37,6 +38,10 @@ import {
   addAttachments,
   removeAttachment,
   updateBuildSecurityScan,
+  presentBuildCloudSaveChoice,
+  beginBuildCloudSave,
+  finishBuildCloudSave,
+  chooseBuildLocalOnly,
   type Mode,
   type BuildAttachment,
 } from "@/lib/build-session";
@@ -128,6 +133,26 @@ function friendlyHephaestusMessage(raw: string, ko: boolean): string {
       ? "크레딧 또는 사용량 한도 때문에 멈췄습니다. 계정/크레딧 상태를 확인하세요."
       : "Upload stopped because of credits or quota. Check account and credit status.";
   }
+  if (lower.includes("unauthorized") || lower.includes("not logged") || lower.includes("sign in") || /\b401\b/.test(lower)) {
+    return ko
+      ? "Agentlas 로그인이 필요합니다. 로그인한 뒤 같은 Cloud 선택으로 다시 시도하세요."
+      : "Sign in to Agentlas, then retry the same Cloud choice.";
+  }
+  if (lower.includes("offline") || lower.includes("network") || lower.includes("enotfound") || lower.includes("fetch failed")) {
+    return ko
+      ? "네트워크에 연결한 뒤 다시 시도하세요. 로컬 패키지는 그대로 유지됩니다."
+      : "Connect to the network and retry. The local package is unchanged.";
+  }
+  if (lower.includes("conflict") || lower.includes("compare-and-swap") || lower.includes("cas_") || /\b409\b/.test(lower)) {
+    return ko
+      ? "Cloud 버전이 다른 기기에서 변경됐습니다. 최신 상태를 확인한 뒤 다시 시도하세요."
+      : "The Cloud version changed on another device. Refresh it before retrying.";
+  }
+  if (lower.includes("security") || lower.includes("secret") || lower.includes("blocked")) {
+    return ko
+      ? "보안 점검이 업로드를 막았습니다. 패키지를 수정하고 다시 검증하세요."
+      : "The security check blocked upload. Fix and verify the package before retrying.";
+  }
   return text.length > 220 ? `${text.slice(0, 220)}...` : text;
 }
 
@@ -141,11 +166,13 @@ export default function BuildPage() {
   const [reply, setReply] = useState("");
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
   const [questionNotes, setQuestionNotes] = useState<Record<string, string>>({});
+  const [cloudChoiceError, setCloudChoiceError] = useState<string | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
+  const cloudUploadInFlightRef = useRef<string | null>(null);
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
-  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, result, registered, pendingQuestions, awaitingReply, turn, attachments, mcpPlan, mcpSelectedCandidateIds, mcpReceipt } = s;
+  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, result, registered, pendingQuestions, awaitingReply, turn, attachments, mcpPlan, mcpSelectedCandidateIds, mcpReceipt, cloudSaveChoice } = s;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // 드롭/파일 인풋 → 실제 디스크 경로(webUtils) → 스토어 첨부. 경로를 못 얻으면(브라우저 등) 스킵.
@@ -221,6 +248,14 @@ export default function BuildPage() {
     setQuestionNotes({});
     setReply("");
   }, [pendingQuestionKey]);
+  useEffect(() => {
+    setCloudChoiceError(null);
+  }, [cloudSaveChoice?.id]);
+  useEffect(() => {
+    if (cloudSaveChoice?.status === "pending") {
+      presentBuildCloudSaveChoice(cloudSaveChoice.id);
+    }
+  }, [cloudSaveChoice?.id, cloudSaveChoice?.status]);
 
   // 단계 상태 배열 도출.
   const stageStates: StageState[] = useMemo(() => {
@@ -274,24 +309,81 @@ export default function BuildPage() {
     }
   };
 
-  const upload = async (visibility: "private-link" | "marketplace") => {
+  const uploadToPublicHub = async () => {
     const target = result?.workspace ?? workspace;
     const scope = result?.readScope ?? workspaceGrant?.scope;
     if (!target || !scope) return;
-    setActionMsg(ko ? `업로드 중 (${visibility === "marketplace" ? "Hub public" : "Cloud private"})…` : "Uploading…");
+    setActionMsg(ko ? "공개 Hub에 제출 중…" : "Submitting to the public Hub…");
     try {
-      const res = await ipc()?.hephaestus.publish({ folder: target, scope, visibility });
+      const res = await ipc()?.hephaestus.publish({ folder: target, scope, visibility: "marketplace" });
       const raw = res?.error ?? res?.stderr ?? "";
       setActionMsg(
         res?.ok
-          ? visibility === "marketplace"
-            ? (ko ? "Hub 공개 제출 완료. Hub에서 실제 공개·호출 상태를 확인하세요." : "Submitted to the public Hub. Verify its live publish and call status in Hub.")
-            : (ko ? "내 Agent Cloud에 비공개 저장했습니다." : "Saved privately to your Agent Cloud.")
+          ? (ko ? "Hub 공개 제출 완료. Hub에서 실제 공개·호출 상태를 확인하세요." : "Submitted to the public Hub. Verify its live publish and call status in Hub.")
           : (ko ? "업로드 실패. 파일은 그대로입니다: " : "Upload failed. Files were not changed: ") + friendlyHephaestusMessage(raw, ko),
       );
     } catch (err) {
       setActionMsg((ko ? "업로드를 시작하지 못했습니다. 파일은 그대로입니다: " : "Upload could not start. Files were not changed: ") + friendlyHephaestusMessage(String(err), ko));
     }
+  };
+
+  const saveBuildChoiceToCloud = async () => {
+    const choice = cloudSaveChoice;
+    if (!choice || choice.status === "uploading" || cloudUploadInFlightRef.current === choice.id) return;
+    const claimed = beginBuildCloudSave(choice.id);
+    if (!claimed) {
+      setCloudChoiceError(
+        ko
+          ? "이 선택은 더 이상 현재 빌드와 일치하지 않습니다. 현재 결과에서 다시 선택하세요."
+          : "This choice no longer matches the current Build. Choose again from the current result.",
+      );
+      return;
+    }
+    cloudUploadInFlightRef.current = choice.id;
+    setCloudChoiceError(null);
+    try {
+      const api = ipc();
+      if (!api) throw new Error("Desktop bridge unavailable");
+      // The renderer consent is frozen to this Build generation. Main resolves
+      // the exact folder against its capability again and pins the operation to
+      // owner-private/static-only without a second native confirmation.
+      const res = await api.cloudAgents.saveBuiltPrivate({
+        folder: claimed.folder,
+        scope: claimed.scope,
+      });
+      if (res.status !== "registered" || !res.registration) {
+        throw new Error(res.summary || res.review?.summary || "Cloud save failed");
+      }
+      if (finishBuildCloudSave(choice.id, true)) {
+        setActionMsg(
+          res.registration.localSyncStored === false
+            ? ko
+              ? "Agent Cloud 저장은 완료됐지만 이 컴퓨터의 동기화 영수증을 저장하지 못했습니다. 수정 전 Cloud 최신본을 복원하세요."
+              : "Saved to Agent Cloud, but this computer could not store the sync receipt. Restore the latest Cloud copy before editing."
+            : ko
+              ? "내 Agent Cloud에 비공개 저장했습니다."
+              : "Saved privately to your Agent Cloud.",
+        );
+      }
+    } catch (error) {
+      if (finishBuildCloudSave(choice.id, false)) {
+        setCloudChoiceError(
+          (ko
+            ? "Cloud에 올리지 못했습니다. 로컬 패키지와 조직도 등록은 그대로 유지됩니다. "
+            : "Could not upload to Cloud. The local package and org-chart registration are unchanged. ")
+            + friendlyHephaestusMessage(error instanceof Error ? error.message : String(error), ko),
+        );
+      }
+    } finally {
+      if (cloudUploadInFlightRef.current === choice.id) cloudUploadInFlightRef.current = null;
+    }
+  };
+
+  const keepBuildLocalOnly = () => {
+    const choice = cloudSaveChoice;
+    if (!choice || !chooseBuildLocalOnly(choice.id)) return;
+    setCloudChoiceError(null);
+    setActionMsg(ko ? "이 컴퓨터에만 저장했습니다. 네트워크 요청은 보내지 않았습니다." : "Kept on this computer only. No network request was sent.");
   };
 
   const engineMissing = status ? !status.available : false;
@@ -515,8 +607,8 @@ export default function BuildPage() {
               )}
               <p className="build-autoadd-hint">
                 {ko
-                  ? "데스크톱 Build 자체는 Agentlas 크레딧 0입니다. 이 Mac의 Claude Code/Codex/Gemini/BYOK/Ollama로 실행되며, Hub Network 호출은 별도 견적/확인 후 크레딧을 씁니다."
-                  : "Desktop Build itself costs 0 Agentlas credits. It runs on this Mac through Claude Code/Codex/Gemini/BYOK/Ollama; Hub Network calls spend credits separately after quote and confirmation."}
+                  ? "데스크톱 Build 자체는 Agentlas 크레딧 0입니다. 이 컴퓨터의 Claude Code/Codex/Gemini/BYOK/Ollama로 실행되며, Hub Network 호출은 별도 견적/확인 후 크레딧을 씁니다."
+                  : "Desktop Build itself costs 0 Agentlas credits. It runs on this computer through Claude Code/Codex/Gemini/BYOK/Ollama; Hub Network calls spend credits separately after quote and confirmation."}
               </p>
             </div>
 
@@ -665,13 +757,9 @@ export default function BuildPage() {
                 <button disabled={resultDeliveryBlocked} onClick={installToLibrary} className="build-primary-button titlebar-nodrag">{ko ? "조직도에서 열기" : "Open in org chart"}</button>
               </div>
               <div className="build-upload-choice">
-                <div className="build-upload-choice-label">{ko ? "어디에 올릴까요?" : "Where to upload?"}</div>
-                <div className="build-upload-choice-grid">
-                  <button disabled={resultDeliveryBlocked} onClick={() => upload("private-link")} className="build-upload-option titlebar-nodrag">
-                    <strong>{ko ? "내 클라우드 (비공개)" : "My Cloud (private)"}</strong>
-                    <span>{ko ? "내 계정에만 저장 · 공개 Hub와 분리" : "Owner-only storage · separate from the public Hub"}</span>
-                  </button>
-                  <button disabled={resultDeliveryBlocked} onClick={() => upload("marketplace")} className="build-upload-option titlebar-nodrag">
+                <div className="build-upload-choice-label">{ko ? "공개 배포는 별도 선택" : "Public distribution is a separate choice"}</div>
+                <div className="build-upload-choice-grid build-upload-choice-grid-single">
+                  <button disabled={resultDeliveryBlocked} onClick={() => void uploadToPublicHub()} className="build-upload-option titlebar-nodrag">
                     <strong>{ko ? "허브 (공개)" : "Hub (public)"}</strong>
                     <span>{ko ? "허브 레지스트리에 공개 후보로 제출" : "Submit to the public Hub registry"}</span>
                   </button>
@@ -707,6 +795,16 @@ export default function BuildPage() {
           )}
         </div>
       </main>
+      <CloudSaveChoiceDialog
+        open={Boolean(cloudSaveChoice && (cloudSaveChoice.status === "pending" || cloudSaveChoice.status === "presented" || cloudSaveChoice.status === "uploading"))}
+        choiceId={cloudSaveChoice?.id ?? ""}
+        packageName={cloudSaveChoice?.workspace.split(/[\\/]/).pop() || (ko ? "에이전트 패키지" : "Agent package")}
+        ko={ko}
+        busy={cloudSaveChoice?.status === "uploading"}
+        error={cloudChoiceError}
+        onCloud={() => void saveBuildChoiceToCloud()}
+        onLocalOnly={keepBuildLocalOnly}
+      />
     </div>
   );
 }

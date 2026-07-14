@@ -2286,6 +2286,16 @@ export type CloudAgentPrivateSaveRequest = Omit<
   "visibility" | "reviewMode"
 >;
 
+/**
+ * A Build-completion save reuses the already-approved Build package root.
+ * Main must resolve `folder` against `scope`; renderer cannot choose visibility,
+ * review mode, notes, slug, or dry-run behavior on this narrow surface.
+ */
+export interface CloudAgentBuiltPrivateSaveRequest {
+  folder: string;
+  scope: FsReadScope;
+}
+
 /** Explicit public Agentlas Hub publish. Public routing and review gates apply. */
 export type CloudAgentHubPublishRequest = Omit<CloudAgentPublishRequest, "visibility">;
 
@@ -4348,6 +4358,7 @@ export interface AgentlasIpc {
   /** Store owned packages privately in Agent Cloud or explicitly publish them to the public Hub. */
   cloudAgents: {
     savePrivate: (input: CloudAgentPrivateSaveRequest) => Promise<CloudAgentPackageResult>;
+    saveBuiltPrivate: (input: CloudAgentBuiltPrivateSaveRequest) => Promise<CloudAgentPackageResult>;
     publishPublic: (input: CloudAgentHubPublishRequest) => Promise<CloudAgentPackageResult>;
     /** Compatibility surface. Omitted visibility now means private-link; marketplace remains an explicit flag. */
     publish: (input: CloudAgentPublishRequest) => Promise<CloudAgentPackageResult>;

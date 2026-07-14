@@ -416,6 +416,7 @@ import type {
   AgentRuntimeOverrideSetInput,
   Automation,
   AutomationCreateInput,
+  CloudAgentBuiltPrivateSaveRequest,
   CloudAgentHubPublishRequest,
   CloudAgentPrivateSaveRequest,
   CloudAgentPublishRequest,
@@ -2239,6 +2240,19 @@ export function registerIpcHandlers(): void {
       reviewMode: "static-only",
     }),
   );
+  // Build already received an explicit renderer choice. Do not open another
+  // native confirmation here. Main still owns the filesystem authority and the
+  // product contract is pinned to owner-private/static-only with no renderer
+  // visibility, slug, notes, review-mode, or dry-run override.
+  ipcMain.handle("cloudAgents:saveBuiltPrivate", async (event, input: CloudAgentBuiltPrivateSaveRequest) => {
+    assertTrustedSitePublishIpcSender(event);
+    const rootPath = resolveFsReadPath(input.folder, input.scope);
+    return packageAndReviewCloudAgent({
+      rootPath,
+      visibility: "private-link",
+      reviewMode: "static-only",
+    });
+  });
   // Public Hub publication is intentionally a separate, explicit action.
   ipcMain.handle("cloudAgents:publishPublic", async (_e, input: CloudAgentHubPublishRequest) =>
     packageAndReviewCloudAgent({

@@ -142,6 +142,7 @@
     "test:oberon-provider-routing": "npm run build:electron && node scripts/test-oberon-provider-routing.cjs",
     "test:multimodal-status": "npm run build:electron && electron scripts/test-multimodal-status-catalog.cjs",
     "test:build-session-resilience": "node scripts/test-build-session-resilience.cjs",
+    "test:build-cloud-save-choice": "node scripts/test-build-cloud-save-choice.cjs",
     "test:build-path-authority": "npm run build:electron && electron scripts/test-build-path-authority.cjs",
     "test:build-scan-gate": "node scripts/test-build-scan-gate.cjs",
     "test:builder-interview-stages": "npm run build:electron && node scripts/test-builder-interview-stages.cjs",

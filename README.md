@@ -69,8 +69,16 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
-- **2026-07-14 · v0.8.25 local candidate — Agent Apps, safe MCP consent, and
-  evidence-based model allocation** — Agentlas Site can scaffold an isolated
+- **2026-07-15 · v0.8.25 — portable Builds, retry-safe Mobile, Agent Apps, and
+  safe MCP consent** — A verified Build is installed locally first, then asks
+  exactly `Cloud에 올리기` or `로컬에만 저장`; closing the choice keeps it local,
+  public Hub publishing remains separate, and a Cloud failure never removes the
+  local package. A second Desktop can restore the private package, after which
+  its paired Mobile can invoke it through that Desktop. Paired Mobile also
+  retains its secure endpoint across ordinary Desktop restarts and hides raw
+  streamed confirmation controls from assistant text. Fresh installs default
+  consistently to English while keeping Korean as an explicit choice.
+  Agentlas Site can scaffold an isolated
   Astryx app around an owned agent, team, firm, or saved group. Before the first
   build, Desktop shows the exact system-wide MCP recommendation and asks for
   consent; missing keys, decline, stale readiness, malformed legacy rows, and
@@ -89,8 +97,7 @@ authority for which version is actually public, stable, and downloadable.
   before agent work starts. Codex allocation uses exact live-verified
   context, capability, and reasoning-effort metadata and records the effort
   actually applied without storing prompts or secrets. This entry is a
-  local integration candidate until cross-platform CI and the release owner
-  promote it; v0.8.24 remains the current source release.
+  released source line once the signed and cross-platform pipelines complete.
 
 - **2026-07-14 · v0.8.24 Unified plugin first contact** — Desktop embeds
   Agentlas OS v1.1.28, so Codex, Claude Code, MCP, Network, owner Cloud, Storm,

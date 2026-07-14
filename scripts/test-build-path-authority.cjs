@@ -140,6 +140,7 @@ async function main() {
 
   const ipcSource = fs.readFileSync(path.join(__dirname, "../electron/ipc.ts"), "utf8");
   assert.match(ipcSource, /team:importLocalFolder[\s\S]{0,220}resolveFsReadPath\(input\.path, input\.scope\)/);
+  assert.match(ipcSource, /cloudAgents:saveBuiltPrivate[\s\S]{0,420}resolveFsReadPath\(input\.folder, input\.scope\)/);
   assert.match(ipcSource, /hephaestus:publish[\s\S]{0,520}resolveFsReadPath\(input\.folder, input\.scope\)/);
   assert.match(ipcSource, /hephaestus:securityScan[\s\S]{0,260}resolveFsReadPath\(input\.folder, input\.scope\)/);
 
