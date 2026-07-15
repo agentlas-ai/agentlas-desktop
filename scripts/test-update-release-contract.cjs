@@ -478,6 +478,16 @@ assert.match(
   /assertOfficialGithubUpdateConfig\(baselineConfig, "extracted public v0\.8\.32 baseline"\)[\s\S]*?writeLoopbackUpdateConfig\(baselineConfig, feedUrl\)[\s\S]*?linuxLauncher\(baselineAppImage[\s\S]*?baselineExtract\)/,
   "Linux must run the extracted public AppImage while APPIMAGE still identifies the pinned original",
 );
+assert.match(
+  packagedUpdaterE2eSource,
+  /const hasExactTargetIdentity = expectedTarget != null[\s\S]*?appImage[\s\S]*?commandLine[\s\S]*?if \(!hasMarker && !hasExactTargetIdentity\) continue/,
+  "Linux relaunch discovery must accept the unique replaced AppImage identity even if the AppImage runtime rewrites the QA marker",
+);
+assert.match(
+  packagedUpdaterE2eSource,
+  /Linux relaunch diagnostic processes:[\s\S]*?targetExists=.*journalExists=/,
+  "Linux updater failures must retain process and journal evidence instead of returning an opaque timeout",
+);
 assert.doesNotMatch(
   packagedUpdaterE2eSource,
   /createImmutableBaseline|baseline native package|\.updater-e2e-builder\.yml/,

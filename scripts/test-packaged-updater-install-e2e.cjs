@@ -1049,20 +1049,28 @@ function logWindowsInstallDiagnostics(initialInstallDir) {
   logError(`Windows diagnostic packaged app.asar files:\n${asars.join("\n") || "<none>"}`);
 }
 
-function linuxMarkedProcesses(marker) {
+function linuxRelevantProcesses(marker, targetAppImage = null) {
   let entries = [];
   try { entries = fs.readdirSync("/proc"); } catch { return []; }
   const processes = [];
+  const expectedTarget = targetAppImage ? path.resolve(targetAppImage) : null;
   for (const entry of entries) {
     if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue;
     try {
       const environment = fs.readFileSync(`/proc/${entry}/environ`, "utf8").split("\0");
-      if (!environment.includes(`AGENTLAS_UPDATER_E2E_RUN_ID=${marker}`)) continue;
+      const hasMarker = environment.includes(`AGENTLAS_UPDATER_E2E_RUN_ID=${marker}`);
       const appImageEntry = environment.find((value) => value.startsWith("APPIMAGE="));
+      const appImage = appImageEntry ? appImageEntry.slice("APPIMAGE=".length) : null;
       const commandLine = fs.readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0").filter(Boolean);
+      const hasExactTargetIdentity = expectedTarget != null && (
+        (appImage && path.resolve(appImage) === expectedTarget) ||
+        commandLine.some((value) => path.resolve(value) === expectedTarget)
+      );
+      if (!hasMarker && !hasExactTargetIdentity) continue;
       processes.push({
-        appImage: appImageEntry ? appImageEntry.slice("APPIMAGE=".length) : null,
+        appImage,
         commandLine,
+        hasMarker,
         pid: Number(entry),
       });
     } catch {
@@ -1075,15 +1083,16 @@ function linuxMarkedProcesses(marker) {
 async function waitForLinuxTargetRelaunch(marker, targetAppImage, timeoutMs) {
   const expected = path.resolve(targetAppImage);
   return waitUntil(
-    () => linuxMarkedProcesses(marker).find((candidate) => (
-      candidate.appImage && path.resolve(candidate.appImage) === expected
+    () => linuxRelevantProcesses(marker, targetAppImage).find((candidate) => (
+      (candidate.appImage && path.resolve(candidate.appImage) === expected) ||
+      candidate.commandLine.some((value) => path.resolve(value) === expected)
     )),
     { intervalMs: 100, label: "updater-spawned target AppImage process", timeoutMs },
   );
 }
 
-async function stopLinuxMarkedProcesses(marker) {
-  const pids = linuxMarkedProcesses(marker).map(({ pid }) => pid);
+async function stopLinuxRelevantProcesses(marker, targetAppImage = null) {
+  const pids = linuxRelevantProcesses(marker, targetAppImage).map(({ pid }) => pid);
   for (const pid of pids) {
     try { process.kill(pid, "SIGTERM"); } catch {}
   }
@@ -1247,11 +1256,14 @@ async function runLinuxE2E({ baselineAppImage, feedUrl, feed, isolation, options
     assertFeedAndPayloadRequested(feed);
     log(`Linux native install passed: ${options.baselineVersion} exited, ${options.targetVersion} replaced the AppImage, target PID ${relaunchedTarget.pid} started, and target relaunch cleared its journal`);
   } catch (error) {
+    const processes = linuxRelevantProcesses(isolation.marker, targetAppImage);
+    logError(`Linux relaunch diagnostic processes:\n${JSON.stringify(processes, null, 2)}`);
+    logError(`Linux relaunch diagnostic: targetExists=${fs.existsSync(targetAppImage)} journalExists=${fs.existsSync(path.join(isolation.userDataDir, "updater", JOURNAL_NAME))}`);
     const output = tail(appLog);
     if (output) logError(`baseline app log tail:\n${output}`);
     throw error;
   } finally {
-    await stopLinuxMarkedProcesses(isolation.marker);
+    await stopLinuxRelevantProcesses(isolation.marker, targetAppImage);
   }
 }
 
@@ -1288,7 +1300,7 @@ async function runE2E(options) {
       await runLinuxE2E({ baselineAppImage: baselineArtifact, feedUrl: feed.url, feed, isolation, options, target, tempRoot });
     }
   } finally {
-    if (isolation && options.platform === "linux") await stopLinuxMarkedProcesses(isolation.marker);
+    if (isolation && options.platform === "linux") await stopLinuxRelevantProcesses(isolation.marker);
     if (feed) await feed.close();
     if (options.keepTemp) {
       log(`kept isolated E2E directory for diagnosis: ${tempRoot}`);
