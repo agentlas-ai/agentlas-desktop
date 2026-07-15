@@ -21,7 +21,7 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 64,
+    "targetSchemaVersion": 65,
     "bundledRuntimeVersion": "1.1.29"
   },
   "agentlasBundledRuntimeSource": {
@@ -110,6 +110,8 @@
     "test:v58-memory-curation-migration": "npm run build:electron && electron scripts/test-v58-memory-curation-migration.cjs",
     "test:v59-ontology-binding-migration": "npm run build:electron && electron scripts/test-v59-ontology-binding-migration.cjs",
     "test:v64-automation-permission-migration": "npm run build:electron && electron scripts/test-v64-automation-permission-migration.cjs",
+    "test:v65-local-memory-embeddings": "npm run build:electron && electron scripts/test-v65-local-memory-embeddings.cjs",
+    "test:memory-hybrid-retrieval": "npm run build:electron && electron scripts/test-memory-hybrid-retrieval.cjs",
     "test:agent-hub-ontology-projection": "npm run build:electron && electron scripts/test-agent-hub-ontology-projection.cjs",
     "test:terminal-ontology-loadout-feed": "npm run build:electron && electron scripts/test-terminal-ontology-loadout-feed.cjs",
     "test:taste-runtime-application": "npm run build:electron && electron scripts/test-taste-runtime-application.cjs",

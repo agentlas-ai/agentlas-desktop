@@ -11,6 +11,11 @@ import type {
 import { EXPERIENCE_RELATION_LEDGER_FILE } from "../architecture/manifest";
 import { getDb } from "../store/db";
 import { isCanonicalTaskId } from "./taxonomy";
+import {
+  autoLocalEmbedding,
+  cosineSimilarity,
+  parseLocalEmbedding,
+} from "../memory/local-embedding";
 
 const LINEAGE_SCHEMA_VERSION = "agentlas.experience-relation-lineage.v1";
 const LINEAGE_KIND = "agentlas-experience-relation-lineage";
@@ -530,12 +535,62 @@ export function experienceRelationSourceFingerprint(): string {
       `SELECT id, release_id, event_type, supersedes_release_id, source_fingerprint
          FROM experience_lineage_events WHERE pack_id = ? ORDER BY created_at ASC, id ASC`,
     ).all(pack.id);
+    const semanticItems = getDb().prepare(
+      `SELECT id, summary, embedding_model, embedding_adapter, embedding_model_sha256,
+              embedding_content_hash, embedding_dimensions, embedding_json
+         FROM experience_candidates WHERE pack_id = ? ORDER BY id ASC`,
+    ).all(pack.id) as Array<{
+      id: string;
+      summary: string;
+      embedding_model: string | null;
+      embedding_adapter: string | null;
+      embedding_model_sha256: string | null;
+      embedding_content_hash: string | null;
+      embedding_dimensions: number | null;
+      embedding_json: string | null;
+    }>;
+    const governanceRelations = getDb().prepare(
+      `SELECT relation_id, from_candidate_id, to_candidate_id, relation_type, reason
+         FROM experience_governance_relations WHERE pack_id = ?
+         ORDER BY created_at ASC, relation_id ASC`,
+    ).all(pack.id) as Array<{
+      relation_id: string;
+      from_candidate_id: string;
+      to_candidate_id: string;
+      relation_type: "supersedes" | "contradicts";
+      reason: string;
+    }>;
     return {
       id: pack.id,
       status: pack.status,
       releaseId: current.releaseId,
       sourceFingerprint: current.sourceFingerprint,
       localTaskBindings: current.localTaskBindings,
+      semanticItems: semanticItems.map((item) => {
+        const embedding = parseLocalEmbedding(
+          item.embedding_model,
+          item.embedding_dimensions,
+          item.embedding_json,
+          {
+            adapter: item.embedding_adapter,
+            modelSha256: item.embedding_model_sha256,
+            contentHash: item.embedding_content_hash,
+            text: item.summary,
+          },
+        ) ?? autoLocalEmbedding(item.summary);
+        return {
+          id: item.id,
+          summaryHash: hashRef("experience-summary-v1", item.summary),
+          embeddingHash: hashRef("experience-embedding-v1", JSON.stringify(embedding.vector)),
+        };
+      }),
+      governanceRelations: governanceRelations.map((relation) => ({
+        id: relation.relation_id,
+        from: relation.from_candidate_id,
+        to: relation.to_candidate_id,
+        type: relation.relation_type,
+        reasonHash: hashRef("experience-governance-reason-v1", relation.reason),
+      })),
       lineage,
     };
   });
@@ -561,7 +616,7 @@ type EdgeInsert = {
   toNode: string;
   edgeType: "has_release" | "exact_base_binding" | "contains" | "applies_to_task" |
     "applies_in_environment" | "requires_mcp" | "supports_mcp" | "alternative_mcp" |
-    "supported_by" | "supersedes" | "similar_by_tag";
+    "supported_by" | "supersedes" | "contradicts" | "similar_to" | "similar_by_tag";
   projectScopeKey: string;
   environmentKey: string;
   basePackageHash: string;
@@ -578,6 +633,48 @@ export function rebuildExperienceRelationIndex(): ExperienceRelationIndexStatus 
   ).all() as PackRow[];
   const nodes = new Map<string, NodeInsert>();
   const edges = new Map<string, EdgeInsert>();
+  const candidateVectors = new Map<string, number[]>();
+  const candidateRows = getDb().prepare(
+    `SELECT id, summary, embedding_model, embedding_adapter, embedding_model_sha256,
+            embedding_content_hash, embedding_dimensions, embedding_json
+       FROM experience_candidates ORDER BY id ASC`,
+  ).all() as Array<{
+    id: string;
+    summary: string;
+    embedding_model: string | null;
+    embedding_adapter: string | null;
+    embedding_model_sha256: string | null;
+    embedding_content_hash: string | null;
+    embedding_dimensions: number | null;
+    embedding_json: string | null;
+  }>;
+  const backfill = getDb().prepare(
+    `UPDATE experience_candidates
+        SET embedding_model = ?, embedding_adapter = ?, embedding_model_sha256 = ?,
+            embedding_content_hash = ?, embedding_dimensions = ?, embedding_json = ?
+      WHERE id = ?`,
+  );
+  for (const row of candidateRows) {
+    let embedding = parseLocalEmbedding(row.embedding_model, row.embedding_dimensions, row.embedding_json, {
+      adapter: row.embedding_adapter,
+      modelSha256: row.embedding_model_sha256,
+      contentHash: row.embedding_content_hash,
+      text: row.summary,
+    });
+    if (!embedding) {
+      embedding = autoLocalEmbedding(row.summary);
+      backfill.run(
+        embedding.model,
+        embedding.adapter,
+        embedding.modelSha256,
+        embedding.contentHash,
+        embedding.dimensions,
+        JSON.stringify(embedding.vector),
+        row.id,
+      );
+    }
+    candidateVectors.set(row.id, embedding.vector);
+  }
 
   const addNode = (node: NodeInsert): string => {
     nodes.set(node.nodeId, node);
@@ -748,26 +845,82 @@ export function rebuildExperienceRelationIndex(): ExperienceRelationIndexStatus 
       }
 
       const itemIds = [...itemNodes.keys()].sort();
-      // `similar_by_tag` is optional. Keep corrupted/imported oversized local
-      // sources linear rather than allowing quadratic rebuild work.
+      // Semantic similarity is a derived, non-authoritative edge. Explicit
+      // supersedes/contradicts are never inferred from vector proximity.
+      // Keep corrupted/imported oversized local sources linear.
       if (!release.current || itemIds.length > MAX_RELATION_ITEMS_PER_PACK) continue;
       for (let index = 0; index < itemIds.length; index += 1) {
         const leftId = itemIds[index];
-        const leftTags = new Set(tagsByItem.get(leftId) ?? []);
-        if (leftTags.size === 0) continue;
+        const leftVector = candidateVectors.get(leftId);
+        if (!leftVector) continue;
         for (const rightId of itemIds.slice(index + 1)) {
-          const sharedTagCount = (tagsByItem.get(rightId) ?? []).filter((tag) => leftTags.has(tag)).length;
-          if (sharedTagCount < 2) continue;
+          const rightVector = candidateVectors.get(rightId);
+          if (!rightVector) continue;
+          const similarity = cosineSimilarity(leftVector, rightVector);
+          if (similarity < 0.5) continue;
           addEdge(
             release,
             itemNodes.get(leftId)!,
             itemNodes.get(rightId)!,
-            "similar_by_tag",
-            { sharedTagCount },
+            "similar_to",
+            {
+              similarity: Number(similarity.toFixed(6)),
+              adapter: candidateRows.find((candidate) => candidate.id === leftId)?.embedding_adapter
+                ?? "local_hashing:degraded",
+            },
           );
         }
       }
     }
+  }
+
+  // Curator-authored governance is a durable source table. Rebuild projects
+  // it after vector derivation without ever guessing these authority edges.
+  const governanceRows = getDb().prepare(
+    `SELECT relation.relation_id, relation.pack_id, relation.from_candidate_id,
+            relation.to_candidate_id, relation.relation_type, relation.reason,
+            pack.project_scope_key, pack.environment_key, pack.base_package_hash
+       FROM experience_governance_relations relation
+       JOIN experience_packs pack ON pack.id = relation.pack_id
+      WHERE pack.status = 'active' AND pack.base_package_hash IS NOT NULL
+      ORDER BY relation.created_at ASC, relation.relation_id ASC`,
+  ).all() as Array<{
+    relation_id: string;
+    pack_id: string;
+    from_candidate_id: string;
+    to_candidate_id: string;
+    relation_type: "supersedes" | "contradicts";
+    reason: string;
+    project_scope_key: string;
+    environment_key: string;
+    base_package_hash: string;
+  }>;
+  for (const relation of governanceRows) {
+    const fromNode = stableId("experience-item-node", relation.pack_id, relation.from_candidate_id);
+    const toNode = stableId("experience-item-node", relation.pack_id, relation.to_candidate_id);
+    if (!nodes.has(fromNode) || !nodes.has(toNode)) continue;
+    const edgeId = stableId(
+      "experience-governance-edge",
+      relation.pack_id,
+      relation.from_candidate_id,
+      relation.to_candidate_id,
+      relation.relation_type,
+    );
+    edges.set(edgeId, {
+      edgeId,
+      packId: relation.pack_id,
+      fromNode,
+      toNode,
+      edgeType: relation.relation_type,
+      projectScopeKey: relation.project_scope_key,
+      environmentKey: relation.environment_key,
+      basePackageHash: relation.base_package_hash,
+      payload: {
+        assertionId: relation.relation_id,
+        reasonHash: hashRef("experience-governance-reason-v1", relation.reason),
+        inferred: false,
+      },
+    });
   }
 
   const transaction = getDb().transaction(() => {
@@ -1229,6 +1382,62 @@ export function refreshExperienceRelationArtifacts(packId: string): ExperienceRe
   return rebuildExperienceRelationIndex();
 }
 
+export function recordExperienceGovernanceRelation(input: {
+  fromCandidateId: string;
+  toCandidateId: string;
+  relationType: "supersedes" | "contradicts";
+  reason: string;
+}): string {
+  const fromCandidateId = requiredValueFreeGraphId(input.fromCandidateId, "fromCandidateId");
+  const toCandidateId = requiredValueFreeGraphId(input.toCandidateId, "toCandidateId");
+  if (fromCandidateId === toCandidateId) throw new Error("Experience governance cannot self-link.");
+  if (input.relationType !== "supersedes" && input.relationType !== "contradicts") {
+    throw new Error("Experience governance requires an explicit supersedes or contradicts relation.");
+  }
+  const reason = String(input.reason ?? "").normalize("NFKC").trim();
+  if (!reason || reason.length > 240) throw new Error("Experience governance requires a concise reason.");
+  const rows = getDb().prepare(
+    `SELECT id, pack_id, agent_id, status FROM experience_candidates WHERE id IN (?, ?)`,
+  ).all(fromCandidateId, toCandidateId) as Array<{
+    id: string;
+    pack_id: string;
+    agent_id: string;
+    status: string;
+  }>;
+  if (rows.length !== 2 || rows.some((row) => row.status !== "promoted")) {
+    throw new Error("Experience governance requires two promoted reviewed candidates.");
+  }
+  if (rows[0].pack_id !== rows[1].pack_id || rows[0].agent_id !== rows[1].agent_id) {
+    throw new Error("Experience governance cannot cross pack or agent boundaries.");
+  }
+  const relationId = stableId(
+    "experience-governance-relation",
+    rows[0].pack_id,
+    fromCandidateId,
+    toCandidateId,
+    input.relationType,
+  );
+  getDb().prepare(
+    `INSERT INTO experience_governance_relations (
+       relation_id, agent_id, pack_id, from_candidate_id, to_candidate_id,
+       relation_type, reason, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(from_candidate_id, to_candidate_id, relation_type)
+     DO UPDATE SET reason = excluded.reason`,
+  ).run(
+    relationId,
+    rows[0].agent_id,
+    rows[0].pack_id,
+    fromCandidateId,
+    toCandidateId,
+    input.relationType,
+    reason,
+    new Date().toISOString(),
+  );
+  refreshExperienceRelationArtifacts(rows[0].pack_id);
+  return relationId;
+}
+
 export function rankExperienceCandidatesByRelations(input: {
   projectScopeKey: string;
   environmentKey: string;
@@ -1272,7 +1481,7 @@ export function rankExperienceCandidatesByRelations(input: {
   }
   const similar = getDb().prepare(
     `SELECT from_node, to_node FROM experience_relation_edges
-      WHERE edge_type = 'similar_by_tag' AND project_scope_key = ?
+      WHERE edge_type IN ('similar_to', 'similar_by_tag') AND project_scope_key = ?
         AND environment_key = ? AND base_package_hash = ?`,
   ).all(input.projectScopeKey, input.environmentKey, input.basePackageHash) as Array<{
     from_node: string;

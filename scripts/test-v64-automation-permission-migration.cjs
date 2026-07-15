@@ -60,7 +60,7 @@ seed.close();
     let store = require("../dist/electron/store/db.js");
     store.initStore();
     let db = store.getDb();
-    assert.equal(db.pragma("user_version", { simple: true }), 64);
+    assert.equal(db.pragma("user_version", { simple: true }), 65);
 
     const permissionColumn = db
       .prepare("PRAGMA table_info(automations)")
@@ -95,7 +95,7 @@ seed.close();
     store = require("../dist/electron/store/db.js");
     store.initStore();
     db = store.getDb();
-    assert.equal(db.pragma("user_version", { simple: true }), 64);
+    assert.equal(db.pragma("user_version", { simple: true }), 65);
     assert.equal(
       db.prepare("PRAGMA table_info(automations)").all()
         .filter((column) => column.name === "execution_permission").length,

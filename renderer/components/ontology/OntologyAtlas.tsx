@@ -158,6 +158,8 @@ function edgeLabel(kind: string, locale: Locale): string {
     supported_by: ["근거", "evidence"],
     supersedes: ["업데이트", "supersedes"],
     similar_by_tag: ["유사", "similar"],
+    similar_to: ["의미 유사", "semantic similarity"],
+    contradicts: ["모순", "contradicts"],
     agent_has_taste_draft: ["취향 관찰", "taste observation"],
     classified_as_taste_axis: ["취향 축", "taste axis"],
     hub_exact_release: ["Hub 릴리스", "Hub release"],

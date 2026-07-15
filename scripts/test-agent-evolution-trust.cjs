@@ -69,7 +69,7 @@ async function main() {
   const canonicalPrompt = files.readAgentPromptSource("agent-alpha");
   assert.equal(canonicalPrompt.relativePath, "system-prompt.md", "main canonical resolver wins over AGENT.md consistently");
   assert.equal(canonicalPrompt.content, original, "canonical prompt keeps exact source bytes");
-  assert.equal(db.pragma("user_version", { simple: true }), 64, "receipt schema must be migrated");
+  assert.equal(db.pragma("user_version", { simple: true }), 65, "receipt schema must be migrated");
 
   const unstableReviewPath = path.join(userData, "agents", "beta", "prompt.md");
   fs.writeFileSync(unstableReviewPath, "small review base\n", "utf8");

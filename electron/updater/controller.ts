@@ -38,6 +38,9 @@ export const CONTINUITY_CORE_TABLES = [
   // Canonical value-free lineage is protected. relation_nodes/edges/state are
   // deliberately omitted because they are disposable rebuildable projections.
   "experience_lineage_events",
+  // Human/curator assertions are authoritative; unlike semantic relation
+  // nodes/edges they must never be regenerated or inferred after an update.
+  "experience_governance_relations",
   // Canonical portable bundles, idempotency keys and Cloud receipts are owned
   // local recovery state; they must survive an application update.
   "experience_cloud_uploads",

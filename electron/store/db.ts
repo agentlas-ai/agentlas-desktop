@@ -12,7 +12,7 @@ import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 64;
+const SCHEMA_VERSION = 65;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -1979,8 +1979,9 @@ export function initStore(): void {
 
   // v55: Experience relation lineage + derived relation index. The lineage
   // table is a value-free, append-only source projection. Nodes/edges/state are
-  // disposable and rebuilt in the shared Desktop SQLite database; there is no
-  // per-agent graph database.
+  // disposable and rebuilt in the shared Desktop SQLite database. The later
+  // per-slug experience.sqlite is only a private cross-project query cache,
+  // never an ownership or entitlement database.
   if (userVersion < 55) {
     const packCols = _db
       .prepare("PRAGMA table_info(experience_packs)")
@@ -2401,6 +2402,123 @@ export function initStore(): void {
         SET execution_permission = 'read'
         WHERE execution_permission NOT IN ('read', 'write');
       `);
+    }
+  }
+
+  // v65: local-only hybrid memory retrieval. Embeddings are additive and
+  // nullable so an existing store opens immediately; read paths lazily
+  // backfill deterministic hash-96 vectors. The relation table keeps the
+  // legacy tag edge readable while new rebuilds write semantic `similar_to`.
+  // supersedes/contradicts remain explicit governance edges only.
+  if (userVersion < 65) {
+    if (tableExists(_db, "memory_entries")) {
+      const columns = new Set(schemaColumns(_db, "memory_entries").map((column) => column.name));
+      if (!columns.has("embedding_model")) {
+        _db.exec("ALTER TABLE memory_entries ADD COLUMN embedding_model TEXT");
+      }
+      if (!columns.has("embedding_adapter")) {
+        _db.exec("ALTER TABLE memory_entries ADD COLUMN embedding_adapter TEXT");
+      }
+      if (!columns.has("embedding_model_sha256")) {
+        _db.exec("ALTER TABLE memory_entries ADD COLUMN embedding_model_sha256 TEXT");
+      }
+      if (!columns.has("embedding_content_hash")) {
+        _db.exec("ALTER TABLE memory_entries ADD COLUMN embedding_content_hash TEXT");
+      }
+      if (!columns.has("embedding_dimensions")) {
+        _db.exec("ALTER TABLE memory_entries ADD COLUMN embedding_dimensions INTEGER");
+      }
+      if (!columns.has("embedding_json")) {
+        _db.exec("ALTER TABLE memory_entries ADD COLUMN embedding_json TEXT");
+      }
+    }
+    if (tableExists(_db, "experience_candidates")) {
+      const columns = new Set(schemaColumns(_db, "experience_candidates").map((column) => column.name));
+      if (!columns.has("embedding_model")) {
+        _db.exec("ALTER TABLE experience_candidates ADD COLUMN embedding_model TEXT");
+      }
+      if (!columns.has("embedding_adapter")) {
+        _db.exec("ALTER TABLE experience_candidates ADD COLUMN embedding_adapter TEXT");
+      }
+      if (!columns.has("embedding_model_sha256")) {
+        _db.exec("ALTER TABLE experience_candidates ADD COLUMN embedding_model_sha256 TEXT");
+      }
+      if (!columns.has("embedding_content_hash")) {
+        _db.exec("ALTER TABLE experience_candidates ADD COLUMN embedding_content_hash TEXT");
+      }
+      if (!columns.has("embedding_dimensions")) {
+        _db.exec("ALTER TABLE experience_candidates ADD COLUMN embedding_dimensions INTEGER");
+      }
+      if (!columns.has("embedding_json")) {
+        _db.exec("ALTER TABLE experience_candidates ADD COLUMN embedding_json TEXT");
+      }
+      _db.exec(`
+        CREATE TABLE IF NOT EXISTS experience_governance_relations (
+          relation_id TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL,
+          pack_id TEXT NOT NULL,
+          from_candidate_id TEXT NOT NULL,
+          to_candidate_id TEXT NOT NULL,
+          relation_type TEXT NOT NULL CHECK(relation_type IN ('supersedes','contradicts')),
+          reason TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(pack_id) REFERENCES experience_packs(id) ON DELETE CASCADE,
+          FOREIGN KEY(from_candidate_id) REFERENCES experience_candidates(id) ON DELETE CASCADE,
+          FOREIGN KEY(to_candidate_id) REFERENCES experience_candidates(id) ON DELETE CASCADE,
+          UNIQUE(from_candidate_id, to_candidate_id, relation_type)
+        );
+        CREATE INDEX IF NOT EXISTS idx_experience_governance_pack
+          ON experience_governance_relations(pack_id, relation_type, created_at ASC);
+      `);
+    }
+    if (tableExists(_db, "experience_relation_edges")) {
+      const definition = (_db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'experience_relation_edges'",
+      ).get() as { sql?: string } | undefined)?.sql ?? "";
+      if (!definition.includes("'similar_to'")) {
+        _db.pragma("foreign_keys = OFF");
+        try {
+          _db.transaction(() => {
+            _db!.exec(`
+              DROP TABLE IF EXISTS experience_relation_edges_v65;
+              CREATE TABLE experience_relation_edges_v65 (
+                edge_id TEXT PRIMARY KEY,
+                pack_id TEXT NOT NULL,
+                from_node TEXT NOT NULL,
+                to_node TEXT NOT NULL,
+                edge_type TEXT NOT NULL
+                  CHECK(edge_type IN (
+                    'has_release','exact_base_binding','contains','applies_to_task',
+                    'applies_in_environment','requires_mcp','supports_mcp',
+                    'alternative_mcp','supported_by','supersedes','contradicts',
+                    'similar_to','similar_by_tag'
+                  )),
+                project_scope_key TEXT NOT NULL,
+                environment_key TEXT NOT NULL,
+                base_package_hash TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                source_fingerprint TEXT NOT NULL,
+                rebuilt_at TEXT NOT NULL,
+                FOREIGN KEY(pack_id) REFERENCES experience_packs(id) ON DELETE CASCADE,
+                FOREIGN KEY(from_node) REFERENCES experience_relation_nodes(node_id) ON DELETE CASCADE,
+                FOREIGN KEY(to_node) REFERENCES experience_relation_nodes(node_id) ON DELETE CASCADE
+              );
+              INSERT INTO experience_relation_edges_v65
+                SELECT * FROM experience_relation_edges;
+              DROP TABLE experience_relation_edges;
+              ALTER TABLE experience_relation_edges_v65 RENAME TO experience_relation_edges;
+              CREATE INDEX idx_experience_relation_edges_scope
+                ON experience_relation_edges(project_scope_key, environment_key, base_package_hash, edge_type);
+              CREATE INDEX idx_experience_relation_edges_from
+                ON experience_relation_edges(pack_id, from_node, edge_type);
+              CREATE INDEX idx_experience_relation_edges_to
+                ON experience_relation_edges(pack_id, to_node, edge_type);
+            `);
+          }).immediate();
+        } finally {
+          _db.pragma("foreign_keys = ON");
+        }
+      }
     }
   }
 

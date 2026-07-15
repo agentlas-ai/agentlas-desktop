@@ -2,6 +2,11 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import type { MemoryKind, MemoryScope } from "../architecture/manifest";
+import {
+  autoLocalEmbedding,
+  parseLocalEmbedding,
+  type LocalMemoryEmbedding,
+} from "./local-embedding";
 
 export interface RequestContext {
   userIntent?: string;
@@ -26,6 +31,7 @@ export interface MemoryEntry {
   sensitivity: "public" | "internal" | "private" | "confidential" | "secret";
   evidence: string[];
   requestContext: RequestContext | null;
+  embedding: LocalMemoryEmbedding;
   supersededAt: string | null;
   createdAt: string;
 }
@@ -43,6 +49,12 @@ interface Row {
   sensitivity: string;
   evidence_json: string;
   context_json?: string;
+  embedding_model?: string | null;
+  embedding_adapter?: string | null;
+  embedding_model_sha256?: string | null;
+  embedding_content_hash?: string | null;
+  embedding_dimensions?: number | null;
+  embedding_json?: string | null;
   superseded_at: string | null;
   created_at: string;
 }
@@ -74,6 +86,35 @@ function toEntry(r: Row): MemoryEntry {
   } catch {
     evidence = [];
   }
+  let embedding = parseLocalEmbedding(r.embedding_model, r.embedding_dimensions, r.embedding_json, {
+    adapter: r.embedding_adapter,
+    modelSha256: r.embedding_model_sha256,
+    contentHash: r.embedding_content_hash,
+    text: r.content,
+  });
+  if (!embedding) {
+    embedding = autoLocalEmbedding(r.content);
+    // Backward-compatible lazy backfill: old stores open without an O(n)
+    // migration pause, then each governed row is upgraded as it is read.
+    try {
+      getDb().prepare(
+        `UPDATE memory_entries
+            SET embedding_model = ?, embedding_adapter = ?, embedding_model_sha256 = ?,
+                embedding_content_hash = ?, embedding_dimensions = ?, embedding_json = ?
+          WHERE id = ?`,
+      ).run(
+        embedding.model,
+        embedding.adapter,
+        embedding.modelSha256,
+        embedding.contentHash,
+        embedding.dimensions,
+        JSON.stringify(embedding.vector),
+        r.id,
+      );
+    } catch {
+      // A read must remain available under a concurrent/legacy SQLite peer.
+    }
+  }
   return {
     id: r.id,
     scope: r.scope as MemoryScope,
@@ -87,6 +128,7 @@ function toEntry(r: Row): MemoryEntry {
     sensitivity: r.sensitivity as MemoryEntry["sensitivity"],
     evidence,
     requestContext: parseRequestContext(r.context_json),
+    embedding,
     supersededAt: r.superseded_at,
     createdAt: r.created_at,
   };
@@ -109,12 +151,16 @@ export interface NewMemoryEntry {
 export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
   const id = randomUUID();
   const now = new Date().toISOString();
+  const embedding = autoLocalEmbedding(e.content);
   getDb()
     .prepare(
       `INSERT INTO memory_entries
        (id, scope, kind, content, project_id, project_path, agent_id, chat_id,
-        confidence, sensitivity, evidence_json, context_json, superseded_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+        confidence, sensitivity, evidence_json, context_json,
+        embedding_model, embedding_adapter, embedding_model_sha256, embedding_content_hash,
+        embedding_dimensions, embedding_json,
+        superseded_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
     )
     .run(
       id,
@@ -129,6 +175,12 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
       e.sensitivity ?? "internal",
       JSON.stringify(e.evidence ?? []),
       JSON.stringify(e.requestContext ?? {}),
+      embedding.model,
+      embedding.adapter,
+      embedding.modelSha256,
+      embedding.contentHash,
+      embedding.dimensions,
+      JSON.stringify(embedding.vector),
       now,
     );
   return {
@@ -144,6 +196,7 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
     sensitivity: e.sensitivity ?? "internal",
     evidence: e.evidence ?? [],
     requestContext: e.requestContext ?? null,
+    embedding,
     supersededAt: null,
     createdAt: now,
   };

@@ -342,6 +342,8 @@ export type ExperienceOntologyGraphEdgeKind =
   | "alternative_mcp"
   | "supported_by"
   | "supersedes"
+  | "contradicts"
+  | "similar_to"
   | "similar_by_tag"
   | "agent_has_taste_draft"
   | "classified_as_taste_axis";

@@ -1,8 +1,8 @@
 // 메모리 큐레이터 → 빌린 에이전트 전역 둥지 배선 계약.
 //
 // 검증하는 것 (기존 아키텍처 ↔ 새 배선의 접점):
-//   1. agent_repo 스코프 배움이 빌린 에이전트의 전역 둥지 soul에 미러링된다
-//      (= Hephaestus 대여 엔진 _default_memory_root와 동일 경로 → 다음 대여 때 읽힘).
+//   1. agent_repo 스코프 배움이 빌린 에이전트의 전역 experience.sqlite에 미러링된다
+//      (= Hephaestus ontology query가 다음 대여 때 벡터 검색하는 canonical schema).
 //   2. 슬러그 정규화가 엔진 _norm_slug와 일치한다 (instagram_uploader → instagram-uploader).
 //   3. 프로젝트 격리: project 스코프 배움은 둥지로 새지 않는다 (프로젝트 폴더에만).
 //   4. borrowedAgentSlugs가 없으면(설치 에이전트 실행) 둥지에 아무것도 안 쓴다.
@@ -15,6 +15,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const Database = require("better-sqlite3");
 const { app } = require("electron");
 
 // 둥지는 os.homedir() 기준이라, 실제 홈을 오염시키지 않도록 HOME을 임시 폴더로 격리.
@@ -22,14 +23,18 @@ const sandboxHome = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-nest-home-")
 process.env.HOME = sandboxHome;
 process.env.USERPROFILE = sandboxHome;
 
-function nestSoulPath(normSlug) {
-  return path.join(sandboxHome, ".agentlas", "networking", "hub-agents", normSlug, "memory", "project-soul-memory.md");
+function nestDbPath(normSlug) {
+  return path.join(sandboxHome, ".agentlas", "networking", "hub-agents", normSlug, "memory", "experience.sqlite");
 }
 function readNest(normSlug) {
+  const target = nestDbPath(normSlug);
+  if (!fs.existsSync(target)) return null;
+  const db = new Database(target, { readonly: true });
   try {
-    return fs.readFileSync(nestSoulPath(normSlug), "utf8");
-  } catch {
-    return null;
+    return db.prepare("SELECT candidate_text FROM memory_candidates ORDER BY created_at, ticket_id")
+      .all().map((row) => row.candidate_text).join("\n");
+  } finally {
+    db.close();
   }
 }
 
@@ -74,6 +79,23 @@ async function main() {
   assert.match(nest, /오버플로 메뉴 아래/, "procedure learning must reach the nest");
   assert.match(nest, /중복 게시/, "risk learning must reach the nest");
   assert.equal(readNest("instagram_uploader"), null, "underscore slug must NOT create a separate nest (engine normalizes to hyphen)");
+  const nestDb = new Database(nestDbPath("instagram-uploader"), { readonly: true });
+  const nestRows = nestDb.prepare(
+    `SELECT ticket_id, idempotency_key, agent_id, source_memory_id,
+            embedding_adapter, embedding_dimensions, embedding_json
+       FROM memory_candidates ORDER BY ticket_id`,
+  ).all();
+  assert.equal(nestRows.length, 2);
+  assert.ok(nestRows.every((row) => row.agent_id === "hub:instagram-uploader"));
+  assert.ok(nestRows.every((row) => row.source_memory_id && row.idempotency_key));
+  assert.ok(nestRows.every((row) => row.embedding_adapter.startsWith("local_hashing:") && row.embedding_dimensions === 96));
+  assert.ok(nestRows.every((row) => JSON.parse(row.embedding_json).length === 96));
+  nestDb.close();
+  assert.equal(
+    fs.existsSync(path.join(path.dirname(nestDbPath("instagram-uploader")), "project-soul-memory.md")),
+    false,
+    "cross-project recall must no longer rely on markdown cat",
+  );
 
   // ── 3: 프로젝트 격리 — project 스코프는 둥지로 새지 않는다 ──────────────────
   curateEvents(

@@ -220,7 +220,7 @@ async function main() {
     store.initStore();
     const db = store.getDb();
 
-    assert.equal(db.pragma("user_version", { simple: true }), 64, "v48 store must migrate through the current canonical schema v64");
+  assert.equal(db.pragma("user_version", { simple: true }), 65, "v48 store must migrate through the current canonical schema v65");
     const ceoFk = db
       .prepare("PRAGMA foreign_key_list(firms)")
       .all()

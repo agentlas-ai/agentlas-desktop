@@ -7,6 +7,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
+import Database from "better-sqlite3";
+import {
+  autoLocalEmbedding,
+  cosineSimilarity,
+} from "./local-embedding";
 import {
   CAREER_GRAPH_CONFIG_FILE,
   CAREER_GRAPH_DB_FILE,
@@ -4535,22 +4541,234 @@ export function appendSoulMemory(
   }
 }
 
+// Legacy human-readable nest helper. Runtime recall now uses experience.sqlite
+// below; this path remains only for old callers that explicitly request a
+// markdown export and is no longer called by the Memory Curator.
 // 빌린(고용한) 허브 에이전트의 전역 기억 둥지:
 //   ~/.agentlas/networking/hub-agents/<slug>/memory/project-soul-memory.md
-// 이건 프로젝트 폴더가 아니라 에이전트 단위·기계 전역이라, 여기 적힌 배움은 다음 대여 때
-// (다른 프로젝트여도) Hephaestus 엔진이 "이 에이전트의 로컬 메모리 참조" 지시로 실어준다.
-// 프로젝트 격리 유지: 오직 agent_repo 스코프(= 에이전트 기술·경험, 프로젝트 고유 정보 아님)
-// 배움만 커레이터가 이리로 미러링한다. 시크릿/경로 redaction은 커레이터가 이미 마쳤다.
+// 프로젝트 격리 유지: 이 레거시 helper도 agent_repo 용도 외에는 호출하면 안 된다.
 function hubAgentNestSoulPath(slug: string): string | null {
-  // Hephaestus 대여 엔진의 _norm_slug와 반드시 동일한 정규화 — 안 그러면 커레이터가 쓴
-  // 둥지와 엔진이 대여 시 읽는 둥지가 다른 폴더가 되어 배움이 유실된다.
+  // Hephaestus 대여 엔진의 _norm_slug와 반드시 동일한 정규화.
   // (engine: re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-"))
   const norm = slug.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   if (!norm) return null;
   return path.join(os.homedir(), ".agentlas", "networking", "hub-agents", norm, "memory", PROJECT_SOUL_FILE);
 }
 
-/** agent_repo 배움을 빌린 에이전트의 전역 둥지 soul에 append. 둥지가 없으면 생성. best-effort. */
+function normalizedHubAgentSlug(slug: string): string | null {
+  const normalized = slug.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return normalized || null;
+}
+
+function stableNestHash(...parts: string[]): string {
+  const digest = createHash("sha256");
+  for (const part of parts) digest.update(part).update("\0");
+  return digest.digest("hex");
+}
+
+export interface AgentNestExperienceItem {
+  id: string;
+  kind: string;
+  content: string;
+  confidence: "high" | "medium" | "low";
+  sensitivity: "public" | "internal" | "private" | "confidential" | "secret";
+  tags?: string[];
+  updatedAt: string;
+}
+
+function confidenceValue(value: AgentNestExperienceItem["confidence"]): number {
+  return value === "high" ? 0.9 : value === "medium" ? 0.7 : 0.45;
+}
+
+/**
+ * Mirror reviewed agent_repo memory into the public-core ontology schema.
+ * This projection is a private rebuildable cache: Desktop Memory remains the
+ * owner, and semantic edges never manufacture supersedes/contradicts.
+ */
+export function appendAgentNestExperienceMemory(
+  slug: string,
+  items: AgentNestExperienceItem[],
+): boolean {
+  if (items.length === 0) return false;
+  const normalizedSlug = normalizedHubAgentSlug(slug);
+  if (!normalizedSlug) return false;
+  const memoryDir = path.join(
+    os.homedir(),
+    ".agentlas",
+    "networking",
+    "hub-agents",
+    normalizedSlug,
+    "memory",
+  );
+  const dbPath = path.join(memoryDir, "experience.sqlite");
+  let db: Database.Database | null = null;
+  try {
+    fs.mkdirSync(memoryDir, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") fs.chmodSync(memoryDir, 0o700);
+    if (fs.existsSync(dbPath)) {
+      const stat = fs.lstatSync(dbPath);
+      if (stat.isSymbolicLink() || !stat.isFile()) return false;
+    }
+    db = new Database(dbPath);
+    db.pragma("journal_mode = WAL");
+    db.pragma("foreign_keys = ON");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS memory_candidates (
+        ticket_id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        query TEXT NOT NULL,
+        candidate_text TEXT NOT NULL,
+        source_refs_json TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        risk TEXT NOT NULL,
+        expiry TEXT,
+        suggested_scope TEXT NOT NULL,
+        status TEXT NOT NULL,
+        durable_write_enabled INTEGER NOT NULL DEFAULT 0 CHECK (durable_write_enabled = 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        agent_id TEXT,
+        memory_kind TEXT,
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        salience REAL NOT NULL DEFAULT 0.5,
+        privacy_scope TEXT,
+        source_memory_id TEXT,
+        source_updated_at TEXT,
+        embedding_adapter TEXT,
+        embedding_dimensions INTEGER,
+        embedding_json TEXT,
+        embedding_content_hash TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_candidates_agent_status
+        ON memory_candidates(agent_id, status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_candidates_source
+        ON memory_candidates(agent_id, source_memory_id);
+      CREATE TABLE IF NOT EXISTS memory_links (
+        link_id TEXT PRIMARY KEY,
+        from_ticket TEXT NOT NULL REFERENCES memory_candidates(ticket_id) ON DELETE CASCADE,
+        to_ticket TEXT NOT NULL REFERENCES memory_candidates(ticket_id) ON DELETE CASCADE,
+        link_type TEXT NOT NULL CHECK(link_type IN ('similar_to','supersedes','contradicts')),
+        score REAL NOT NULL,
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(from_ticket, to_ticket, link_type)
+      );
+    `);
+    const agentId = `hub:${normalizedSlug}`;
+    const selectCreated = db.prepare(
+      "SELECT created_at FROM memory_candidates WHERE ticket_id = ?",
+    );
+    const upsert = db.prepare(`
+      INSERT INTO memory_candidates (
+        ticket_id, idempotency_key, query, candidate_text, source_refs_json,
+        reason, confidence, risk, expiry, suggested_scope, status,
+        durable_write_enabled, created_at, updated_at, agent_id, memory_kind,
+        tags_json, salience, privacy_scope, source_memory_id, source_updated_at,
+        embedding_adapter, embedding_dimensions, embedding_json, embedding_content_hash
+      ) VALUES (?, ?, '', ?, ?, 'desktop-memory-curator', ?, ?, NULL, 'agent_repo',
+        'accepted', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(ticket_id) DO UPDATE SET
+        candidate_text = excluded.candidate_text,
+        source_refs_json = excluded.source_refs_json,
+        confidence = excluded.confidence,
+        risk = excluded.risk,
+        updated_at = excluded.updated_at,
+        memory_kind = excluded.memory_kind,
+        tags_json = excluded.tags_json,
+        salience = excluded.salience,
+        privacy_scope = excluded.privacy_scope,
+        source_updated_at = excluded.source_updated_at,
+        embedding_adapter = excluded.embedding_adapter,
+        embedding_dimensions = excluded.embedding_dimensions,
+        embedding_json = excluded.embedding_json,
+        embedding_content_hash = excluded.embedding_content_hash
+    `);
+    const write = db.transaction((batch: AgentNestExperienceItem[]) => {
+      for (const item of batch) {
+        if (!item.id.trim() || !item.content.trim() || item.sensitivity === "secret") continue;
+        const ticketId = stableNestHash("agent-memory-ticket-v1", normalizedSlug, item.id).slice(0, 24);
+        const idempotencyKey = stableNestHash("agent-memory-idempotency-v1", normalizedSlug, item.id);
+        const embedding = autoLocalEmbedding(item.content);
+        const confidence = confidenceValue(item.confidence);
+        const privacyScope = new Set(["public", "internal", "private", "confidential"])
+          .has(item.sensitivity) ? item.sensitivity : "internal";
+        const createdAt = (selectCreated.get(ticketId) as { created_at?: string } | undefined)?.created_at
+          ?? item.updatedAt;
+        const tags = [...new Set([item.kind, ...(item.tags ?? [])]
+          .map((tag) => String(tag).normalize("NFKC").trim().toLowerCase())
+          .filter(Boolean))].slice(0, 32);
+        upsert.run(
+          ticketId,
+          idempotencyKey,
+          item.content,
+          JSON.stringify([{ kind: "desktop-memory", memory_id: item.id, agent_slug: normalizedSlug }]),
+          confidence,
+          privacyScope === "confidential" ? "medium" : "low",
+          createdAt,
+          item.updatedAt,
+          agentId,
+          item.kind,
+          JSON.stringify(tags),
+          confidence,
+          privacyScope,
+          item.id,
+          item.updatedAt,
+          embedding.adapter,
+          embedding.dimensions,
+          JSON.stringify(embedding.vector),
+          embedding.contentHash,
+        );
+      }
+    });
+    write(items);
+
+    // Rebuild only derived similarity links for this one private agent cache.
+    // Explicit governance edges, if present, remain untouched.
+    db.prepare("DELETE FROM memory_links WHERE link_type = 'similar_to'").run();
+    const rows = db.prepare(
+      `SELECT ticket_id, embedding_json FROM memory_candidates
+        WHERE agent_id = ? AND status IN ('accepted','approved','candidate')
+        ORDER BY created_at ASC, ticket_id ASC LIMIT 512`,
+    ).all(agentId) as Array<{ ticket_id: string; embedding_json: string | null }>;
+    const insertSimilar = db.prepare(`
+      INSERT OR REPLACE INTO memory_links (
+        link_id, from_ticket, to_ticket, link_type, score, reason, created_at
+      ) VALUES (?, ?, ?, 'similar_to', ?, 'local_hashing cosine', ?)
+    `);
+    const now = new Date().toISOString();
+    for (let leftIndex = 0; leftIndex < rows.length; leftIndex += 1) {
+      const left = JSON.parse(rows[leftIndex].embedding_json || "[]") as number[];
+      for (let rightIndex = leftIndex + 1; rightIndex < rows.length; rightIndex += 1) {
+        const right = JSON.parse(rows[rightIndex].embedding_json || "[]") as number[];
+        const similarity = cosineSimilarity(left, right);
+        if (similarity < 0.5) continue;
+        const fromTicket = rows[rightIndex].ticket_id;
+        const toTicket = rows[leftIndex].ticket_id;
+        insertSimilar.run(
+          stableNestHash("memory-link", fromTicket, toTicket, "similar_to").slice(0, 24),
+          fromTicket,
+          toTicket,
+          Number(similarity.toFixed(6)),
+          now,
+        );
+      }
+    }
+    if (process.platform !== "win32") {
+      fs.chmodSync(dbPath, 0o600);
+      for (const suffix of ["-wal", "-shm"]) {
+        if (fs.existsSync(`${dbPath}${suffix}`)) fs.chmodSync(`${dbPath}${suffix}`, 0o600);
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { db?.close(); } catch { /* best-effort projection */ }
+  }
+}
+
+/** @deprecated Runtime recall uses appendAgentNestExperienceMemory. */
 export function appendAgentNestSoulMemory(slug: string, lines: string[]): boolean {
   if (lines.length === 0) return false;
   const soulPath = hubAgentNestSoulPath(slug);

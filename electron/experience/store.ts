@@ -30,6 +30,10 @@ import {
   isRuntimeEligibleExperienceEnvironmentProfile,
   parseCanonicalEnvironmentProfile,
 } from "./taxonomy";
+import {
+  autoLocalEmbedding,
+  parseLocalEmbedding,
+} from "../memory/local-embedding";
 
 const SECRET_VALUE_RE = /(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|(?:api[_-]?key|token|secret|password|authorization|cookie|private[_-]?key)\s*[:=]\s*\S+|BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY|Bearer\s+[A-Za-z0-9._~-]{12,})/i;
 const PRIVATE_LOCATION_RE = /(?:file:\/\/|(?:^|[\s"'`()\[\]{}=:,;])(?:\.\.[/\\]|~[/\\]|\\\\[^\\/\s]+[\\/][^\\/\s]+)|(?<![A-Za-z0-9$])\/(?!\/|\s)(?:[^/\s"'`<>]+\/)*[^/\s"'`<>]+|(?<![A-Za-z0-9])[A-Za-z]:[/\\](?=\S))/i;
@@ -112,6 +116,12 @@ type CandidateRow = {
   created_at: string;
   updated_at: string;
   promoted_at: string | null;
+  embedding_model?: string | null;
+  embedding_adapter?: string | null;
+  embedding_model_sha256?: string | null;
+  embedding_content_hash?: string | null;
+  embedding_dimensions?: number | null;
+  embedding_json?: string | null;
 };
 
 type TasteDraftRow = {
@@ -547,12 +557,15 @@ export function captureExperienceCandidate(input: ExperienceCandidateCaptureInpu
   const id = randomUUID();
   const now = new Date().toISOString();
   const canonicalTasks = taskTerms(memory);
+  const embedding = autoLocalEmbedding(summary);
   getDb().prepare(
     `INSERT INTO experience_candidates (
        id, pack_id, agent_id, project_scope_key, environment_key, source_memory_id,
        summary, task_terms_json, sensitivity, confidence, status, outcome_status,
-       public_safe, auto_managed, created_at, updated_at, promoted_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', 'unverified', 0, 0, ?, ?, NULL)`,
+       public_safe, auto_managed, embedding_model, embedding_adapter,
+       embedding_model_sha256, embedding_content_hash, embedding_dimensions,
+       embedding_json, created_at, updated_at, promoted_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', 'unverified', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
   ).run(
     id,
     pack.id,
@@ -564,6 +577,12 @@ export function captureExperienceCandidate(input: ExperienceCandidateCaptureInpu
     JSON.stringify(canonicalTasks),
     memory.sensitivity,
     confidence,
+    embedding.model,
+    embedding.adapter,
+    embedding.modelSha256,
+    embedding.contentHash,
+    embedding.dimensions,
+    JSON.stringify(embedding.vector),
     now,
     now,
   );
@@ -904,13 +923,17 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
 
   const candidateId = randomUUID();
   const now = new Date().toISOString();
+  const summary = cleanText(input.memory.content, "Auto Experience candidate", 1_200);
+  const embedding = autoLocalEmbedding(summary);
   const transaction = getDb().transaction(() => {
     getDb().prepare(
       `INSERT INTO experience_candidates (
          id, pack_id, agent_id, project_scope_key, environment_key, source_memory_id,
          summary, task_terms_json, sensitivity, confidence, status, outcome_status,
-         public_safe, auto_managed, created_at, updated_at, promoted_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', 'unverified', 0, 1, ?, ?, NULL)`,
+         public_safe, auto_managed, embedding_model, embedding_adapter,
+         embedding_model_sha256, embedding_content_hash, embedding_dimensions,
+         embedding_json, created_at, updated_at, promoted_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', 'unverified', 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
     ).run(
       candidateId,
       pack.id,
@@ -918,10 +941,16 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
       pack.project_scope_key,
       pack.environment_key,
       input.memory.id,
-      cleanText(input.memory.content, "Auto Experience candidate", 1_200),
+      summary,
       JSON.stringify(tasks),
       input.memory.sensitivity,
       input.memory.confidence,
+      embedding.model,
+      embedding.adapter,
+      embedding.modelSha256,
+      embedding.contentHash,
+      embedding.dimensions,
+      JSON.stringify(embedding.vector),
       now,
       now,
     );
@@ -1341,6 +1370,7 @@ export interface PromotedExperienceProjection {
   taskTerms: string[];
   updatedAt: string;
   relationScore: number;
+  embedding: number[];
 }
 
 export function listPromotedExperienceProjection(input: {
@@ -1353,7 +1383,9 @@ export function listPromotedExperienceProjection(input: {
 }): PromotedExperienceProjection[] {
   if (!/^[a-f0-9]{64}$/.test(input.basePackageHash)) return [];
   const rows = getDb().prepare(
-    `SELECT c.id, c.summary, c.confidence, c.task_terms_json, c.updated_at
+    `SELECT c.id, c.summary, c.confidence, c.task_terms_json, c.updated_at,
+            c.embedding_model, c.embedding_adapter, c.embedding_model_sha256,
+            c.embedding_content_hash, c.embedding_dimensions, c.embedding_json
        FROM experience_candidates c
        JOIN experience_packs p ON p.id = c.pack_id AND p.agent_id = c.agent_id
       WHERE c.agent_id = ? AND c.project_scope_key = ? AND c.environment_key = ?
@@ -1373,6 +1405,12 @@ export function listPromotedExperienceProjection(input: {
     confidence: "high" | "medium" | "low";
     task_terms_json: string;
     updated_at: string;
+    embedding_model: string | null;
+    embedding_adapter: string | null;
+    embedding_model_sha256: string | null;
+    embedding_content_hash: string | null;
+    embedding_dimensions: number | null;
+    embedding_json: string | null;
   }>;
   let relationScores = new Map<string, number>();
   try {
@@ -1393,6 +1431,33 @@ export function listPromotedExperienceProjection(input: {
     } catch {
       terms = [];
     }
+    let embedding = parseLocalEmbedding(row.embedding_model, row.embedding_dimensions, row.embedding_json, {
+      adapter: row.embedding_adapter,
+      modelSha256: row.embedding_model_sha256,
+      contentHash: row.embedding_content_hash,
+      text: row.summary,
+    });
+    if (!embedding) {
+      embedding = autoLocalEmbedding(row.summary);
+      try {
+        getDb().prepare(
+          `UPDATE experience_candidates
+              SET embedding_model = ?, embedding_adapter = ?, embedding_model_sha256 = ?,
+                  embedding_content_hash = ?, embedding_dimensions = ?, embedding_json = ?
+            WHERE id = ?`,
+        ).run(
+          embedding.model,
+          embedding.adapter,
+          embedding.modelSha256,
+          embedding.contentHash,
+          embedding.dimensions,
+          JSON.stringify(embedding.vector),
+          row.id,
+        );
+      } catch {
+        // Keep retrieval read-compatible with a concurrent legacy Desktop peer.
+      }
+    }
     return {
       id: row.id,
       summary: row.summary,
@@ -1400,6 +1465,7 @@ export function listPromotedExperienceProjection(input: {
       taskTerms: terms,
       updatedAt: row.updated_at,
       relationScore: relationScores.get(row.id) ?? 0,
+      embedding: embedding.vector,
     };
   }).sort((left, right) => right.relationScore - left.relationScore || right.updatedAt.localeCompare(left.updatedAt));
 }

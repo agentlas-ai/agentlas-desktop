@@ -360,6 +360,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     try {
       const mem = buildMemoryContext(memoryReadPath, memoryOwnerId, {
         materializeCodeMap: Boolean(activePath),
+        taskPrompt: turn.userPrompt,
       });
       if (mem) systemPrompt += `\n\n${mem}`;
     } catch {

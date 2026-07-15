@@ -1500,6 +1500,7 @@ export async function runMcpInvocation(
       // actual executing agent so another agent's agent_repo never leaks in.
       const memoryContext = buildMemoryContext(memoryReadPath, agent.id, {
         materializeCodeMap: Boolean(activePath && canWrite),
+        taskPrompt: effectiveUserPrompt,
       });
       if (memoryContext) systemPrompt = `${systemPrompt}\n\n${memoryContext}`;
     } catch (err) {

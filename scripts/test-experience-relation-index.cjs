@@ -21,7 +21,7 @@ async function main() {
   const db = dbModule.getDb();
 
   try {
-    assert.equal(db.pragma("user_version", { simple: true }), 64);
+    assert.equal(db.pragma("user_version", { simple: true }), 65);
     const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
     for (const table of [
       "experience_lineage_events",
@@ -100,10 +100,17 @@ async function main() {
       "high",
     );
     const second = promote(
-      "Retry the publishing operation only after checking the account badge.",
+      "Use the visible browser account and check its account badge before retrying publishing.",
       [browserTask, socialTask],
       "medium",
     );
+    const contradictionId = relations.recordExperienceGovernanceRelation({
+      fromCandidateId: second.candidate.id,
+      toCandidateId: first.candidate.id,
+      relationType: "contradicts",
+      reason: "Owner review found mutually exclusive retry conditions.",
+    });
+    assert.match(contradictionId, /^experience-governance-relation:/);
 
     let status = relations.getExperienceRelationIndexStatus();
     assert.equal(status.stale, false);
@@ -117,8 +124,13 @@ async function main() {
     for (const type of [
       "has_release", "exact_base_binding", "contains", "applies_to_task",
       "applies_in_environment", "requires_mcp", "alternative_mcp",
-      "supported_by", "supersedes", "similar_by_tag",
+      "supported_by", "supersedes", "contradicts", "similar_to",
     ]) assert.ok(edgeTypes.has(type), `${type} edge must exist`);
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS count FROM experience_governance_relations").get().count,
+      1,
+      "explicit governance must persist outside the rebuildable relation index",
+    );
 
     const scopeKey = db.prepare("SELECT project_scope_key, environment_key FROM experience_packs WHERE id = ?").get(pack.id);
     const relationScores = relations.rankExperienceCandidatesByRelations({
@@ -128,7 +140,7 @@ async function main() {
       taskTerms: [researchTask],
     });
     assert.ok((relationScores.get(first.candidate.id) ?? 0) >= 10, "direct tag relation must rank");
-    assert.equal(relationScores.get(second.candidate.id), 8, "two shared tags may conservatively propagate relevance");
+    assert.equal(relationScores.get(second.candidate.id), 8, "local-vector similarity may conservatively propagate relevance");
     const selected = context.buildExperienceContext({
       agentId: "agent-rel",
       projectPath,
@@ -139,8 +151,8 @@ async function main() {
     assert.ok(selected.selectedCandidateIds.includes(first.candidate.id));
     assert.equal(
       selected.selectedCandidateIds.includes(second.candidate.id),
-      false,
-      "relation similarity may rank but must not activate an Experience without an exact canonical task overlap",
+      true,
+      "hybrid retrieval may activate a semantically relevant reviewed Experience without exact tag overlap",
     );
     assert.ok(selected.selectedCandidateIds.length <= 8);
     assert.ok(selected.approximateTokens <= 800);
@@ -237,7 +249,7 @@ async function main() {
          FROM experience_relation_edges edge
          JOIN experience_relation_nodes src ON src.node_id = edge.from_node
          JOIN experience_relation_nodes dst ON dst.node_id = edge.to_node
-        WHERE edge.edge_type = 'similar_by_tag' AND src.pack_id != dst.pack_id`,
+        WHERE edge.edge_type = 'similar_to' AND src.pack_id != dst.pack_id`,
     ).get().count;
     assert.equal(crossPackSimilar, 0, "similarity edges must never cross Experience Packs");
 
@@ -265,7 +277,7 @@ async function main() {
 
     console.log(JSON.stringify({
       ok: true,
-      schemaVersion: 58,
+      schemaVersion: 65,
       nodes: status.nodeCount,
       edges: status.edgeCount,
       lineageEvents: lineageBeforeArchive,

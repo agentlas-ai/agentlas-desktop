@@ -22,7 +22,7 @@ async function main() {
   const db = dbModule.getDb();
 
   try {
-    assert.equal(db.pragma("user_version", { simple: true }), 64);
+    assert.equal(db.pragma("user_version", { simple: true }), 65);
     for (const table of [
       "experience_packs",
       "experience_candidates",
@@ -155,7 +155,7 @@ async function main() {
       task: "Open the browser, verify login, take a screenshot, then publish",
     });
     assert.ok(context.approximateExperienceTokens(context.EXPERIENCE_CORE) <= context.EXPERIENCE_CORE_MAX_APPROX_TOKENS);
-    assert.ok(selected.selectedCandidateIds.length > 0 && selected.selectedCandidateIds.length <= 8);
+    assert.equal(selected.selectedCandidateIds.length, promotedIds.length, "all relevant reviewed items load when they fit the budget");
     assert.ok(selected.approximateTokens <= 800);
     assert.ok(selected.selectedCandidateIds.every((id) => promotedIds.includes(id)));
     assert.equal(selected.approximateTokens, context.approximateExperienceTokens(selected.prompt));

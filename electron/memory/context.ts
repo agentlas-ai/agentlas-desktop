@@ -26,9 +26,12 @@ import {
   readActivatedProjectMemoryJson,
   readActivatedProjectMemoryText,
 } from "./safe-project-read";
+import { localEmbeddingTokens, rankHybridLocal } from "./local-embedding";
 
 const SOUL_MAX_CHARS = 1800;
 const MAX_ENTRIES = 12;
+const MEMORY_CANDIDATE_LIMIT = 200;
+export const MEMORY_SELECTED_MAX_APPROX_TOKENS = 800;
 const CONTEXT_MAX_CHARS = 180;
 
 // ── Code map (RECALL layer) ────────────────────────────────────────────────
@@ -164,7 +167,6 @@ function summarizeCareerGraph(projectPath: string): string | null {
 
 function entryLines(entries: MemoryEntry[]): string {
   return entries
-    .slice(0, MAX_ENTRIES)
     .map((e) => {
       const ctx = e.requestContext;
       const parts = [
@@ -181,12 +183,52 @@ function entryLines(entries: MemoryEntry[]): string {
     .join("\n");
 }
 
-function globalMemorySections(perAgent: boolean, agentId?: string | null): string[] {
+function approximateMemoryTokens(text: string): number {
+  return Math.ceil(Buffer.byteLength(text, "utf8") / 3);
+}
+
+function confidencePrior(confidence: MemoryEntry["confidence"]): number {
+  return confidence === "high" ? 1 : confidence === "medium" ? 0.6 : 0.2;
+}
+
+/** Scope/agent filtering happens in SQL before this ranking function. */
+function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string): MemoryEntry[] {
+  const query = String(taskPrompt ?? "").trim();
+  if (!query || localEmbeddingTokens(query).length === 0) return entries.slice(0, MAX_ENTRIES);
+  const ranked = rankHybridLocal(query, entries.map((entry) => ({
+    id: entry.id,
+    text: [
+      entry.content,
+      entry.kind,
+      entry.requestContext?.userIntent ?? "",
+      ...(entry.requestContext?.triggerTerms ?? []),
+    ].join(" "),
+    embedding: entry.embedding.vector,
+    prior: confidencePrior(entry.confidence),
+    entry,
+  }))).filter((result) =>
+    result.lexicalScore > 0 || result.vectorScore >= 0.08 || result.item.entry.scope === "user_identity");
+  if (ranked.length === 0) return [];
+  const all = ranked.map((result) => result.item.entry);
+  const allText = entryLines(all);
+  if (approximateMemoryTokens(allText) <= MEMORY_SELECTED_MAX_APPROX_TOKENS) return all;
+  const selected: MemoryEntry[] = [];
+  for (const result of ranked) {
+    if (selected.length >= MAX_ENTRIES) break;
+    const proposed = entryLines([...selected, result.item.entry]);
+    if (approximateMemoryTokens(proposed) > MEMORY_SELECTED_MAX_APPROX_TOKENS) continue;
+    selected.push(result.item.entry);
+  }
+  return selected;
+}
+
+function globalMemorySections(perAgent: boolean, agentId?: string | null, taskPrompt?: string): string[] {
   const entries = perAgent
-    ? listGlobalMemoryForAgent(agentId ?? null, MAX_ENTRIES)
-    : listGlobalMemory(MAX_ENTRIES);
-  return entries.length > 0
-    ? [`### Curated memory (global)\n${entryLines(entries)}`]
+    ? listGlobalMemoryForAgent(agentId ?? null, MEMORY_CANDIDATE_LIMIT)
+    : listGlobalMemory(MEMORY_CANDIDATE_LIMIT);
+  const selected = selectMemoryEntries(entries, taskPrompt);
+  return selected.length > 0
+    ? [`### Curated memory (global)\n${entryLines(selected)}`]
     : [];
 }
 
@@ -205,7 +247,7 @@ function formatMemorySections(sections: string[]): string {
 export function buildMemoryContext(
   projectPath: string | null,
   agentId?: string | null,
-  options: { materializeCodeMap?: boolean } = {},
+  options: { materializeCodeMap?: boolean; taskPrompt?: string } = {},
 ): string {
   const sections: string[] = [];
   // agentId가 주어지면 per-agent 스코프(공유 + 본인 agent_repo만)로 읽어, 각 본부/전문가
@@ -217,7 +259,7 @@ export function buildMemoryContext(
     // the stored folder identity again immediately before touching any project
     // memory, and once more before returning the assembled prompt.
     if (!verifyActivatedFolderIdentity(projectPath)) {
-      return formatMemorySections(globalMemorySections(perAgent, agentId));
+      return formatMemorySections(globalMemorySections(perAgent, agentId, options.taskPrompt));
     }
     const soul = readActivatedProjectMemoryText(projectPath, PROJECT_SOUL_FILE);
     if (soul && soul.trim()) {
@@ -236,17 +278,18 @@ export function buildMemoryContext(
     if (codeMap) sections.push(codeMap);
     const entries = (
       perAgent
-        ? listMemoryByPathForAgent(projectPath, agentId ?? null, MAX_ENTRIES)
-        : listMemoryByPath(projectPath, MAX_ENTRIES)
+        ? listMemoryByPathForAgent(projectPath, agentId ?? null, MEMORY_CANDIDATE_LIMIT)
+        : listMemoryByPath(projectPath, MEMORY_CANDIDATE_LIMIT)
     ).filter((e) => e.scope !== "session");
-    if (entries.length > 0) {
-      sections.push(`### Recent curated memory\n${entryLines(entries)}`);
+    const selectedEntries = selectMemoryEntries(entries, options.taskPrompt);
+    if (selectedEntries.length > 0) {
+      sections.push(`### Relevant curated memory\n${entryLines(selectedEntries)}`);
     }
     if (!verifyActivatedFolderIdentity(projectPath)) {
-      return formatMemorySections(globalMemorySections(perAgent, agentId));
+      return formatMemorySections(globalMemorySections(perAgent, agentId, options.taskPrompt));
     }
   } else {
-    sections.push(...globalMemorySections(perAgent, agentId));
+    sections.push(...globalMemorySections(perAgent, agentId, options.taskPrompt));
   }
 
   return formatMemorySections(sections);
