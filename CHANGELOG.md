@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.8.42 — 2026-07-16
+
+### Added
+
+- **Fresh installs now send ordinary complex first-turn requests through the
+  host-LLM Agent Workforce Ontology path by default.** The top model writes the
+  redacted work order, receives the Hub's hard-eligible immutable release menu,
+  chooses the roster, and executes planner, distinct workers, synthesis, and a
+  structural verifier. Explicit `/hep-network`, `/workforce`, and non-local Hub
+  automations continue to enter the same path regardless of the dashboard toggle.
+- **Selection and execution remain auditable.** Exact package/content hashes,
+  handoffs, selection validation, execution receipts, and benchmark-only
+  `agentlas.workforce.benchmark_selection_artifacts` are preserved end to end.
+
+### Changed
+
+- **Work-order hard constraints no longer erase useful legacy Hub profiles.**
+  `required*` fields are reserved for non-negotiable catalog evidence. A broad
+  required occupational community fixes the job boundary, clearly irrelevant
+  communities such as travel are excluded, and title/task plus
+  `optionalCommunities`/`optionalSkills` carry semantic fit for the host LLM.
+  Controlled role IDs remain no-invention; an imprecise role is left empty.
+- The pinned Core ontology is `awo:2026-07-15.2`, raw JSON SHA-256
+  `d6d30d45fe8d35fb785e165d1e80c6471a72436f0160c3933c21d4a31bf2fb32`.
+  Singular `payment` and general `security` now resolve to their canonical
+  engineering communities.
+
+### Safety and compatibility
+
+- Existing stored `networkAuto:true` and `networkAuto:false` values remain
+  authoritative. Only a new install or a valid older settings file with no
+  Network field receives the ON default; a present corrupt or invalid file fails
+  closed to OFF. Historical settings contain no per-field provenance, so this
+  release does not rewrite ambiguous legacy `false` values.
+- History, popularity, ratings, revenue, silent substitution, stale ontology
+  versions, out-of-menu releases, and BYOM digest drift remain excluded or
+  fail closed. The retired lexical route is explicit compatibility only.
+
+### Verification
+
+- Workforce selection/execution, 79 nested task-force checks, fresh/stored/corrupt
+  settings migration, top-turn auto-routing, Dashboard opt-out UI, Core ontology
+  snapshot, three-OS workflow, TypeScript, production build, and updater/release
+  contracts pass locally.
+- The bundled Core is Agentlas OS v1.1.39 at immutable commit
+  cf71b8be1732f249b4d79d66246f7d3c0cd0790f. This source state does not prove
+  a Git tag, installer, update feed, or GitHub release.
+
 ## 0.8.41 — 2026-07-15
 
 ### Fixed

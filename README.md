@@ -69,6 +69,25 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-16 · v0.8.42 — default-on host-LLM Workforce with tolerant semantic
+  HR matching** — On a fresh install, an ordinary complex first-turn request now
+  goes from the top model to the Hub Workforce ontology automatically: the model
+  writes a redacted work order, sees only hard-eligible exact releases, chooses
+  the roster from candidate content, and runs the real nested task force. Stored
+  Network ON/OFF choices survive updates unchanged, while corrupt settings fail
+  closed to OFF.
+
+  Work orders use `required*` only for non-negotiable catalog evidence. Broad
+  occupational community boundaries and exclusions prevent travel-style
+  cross-domain matches, while title/task, summaries, `optionalCommunities`, and
+  `optionalSkills` let legacy profiles with empty roles/tools compete on semantic
+  fit. The pinned `awo:2026-07-15.2` snapshot adds canonical `payment` and
+  `security` aliases and has raw JSON SHA-256
+  `d6d30d45fe8d35fb785e165d1e80c6471a72436f0160c3933c21d4a31bf2fb32`.
+  Agentlas OS v1.1.39 is pinned at
+  cf71b8be1732f249b4d79d66246f7d3c0cd0790f. This source state does not prove a
+  public installer or update-feed release.
+
 - **2026-07-15 · v0.8.41 — one schema authority and exact browser failure
   contract** — All tests that mean the current Desktop schema now read the
   package contract rather than copying 65; historical v65 fixtures remain
