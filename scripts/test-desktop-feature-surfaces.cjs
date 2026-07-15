@@ -538,6 +538,16 @@ async function runBuildRosterSurface(browser, baseUrl, evidence, options) {
     await page.getByText(/패키지 준비됨 · 조직도에 추가됨|Package ready · added to org chart/).waitFor({ timeout: 5000 });
   }
 
+  // A verified Build must make an explicit portability choice before the user
+  // continues elsewhere. This roster test intentionally keeps the package on
+  // this computer; public Hub publishing and private Cloud upload are separate.
+  const cloudChoice = page.getByRole("dialog", {
+    name: /다른 기기에서도 사용할까요|Use it on your other devices/,
+  });
+  await cloudChoice.waitFor({ timeout: 5000 });
+  await cloudChoice.getByRole("button", { name: /로컬에만 저장|Keep local only/ }).click();
+  await cloudChoice.waitFor({ state: "detached" });
+
   const navigationEntriesBefore = await page.evaluate(() => performance.getEntriesByType("navigation").length);
   await page.locator('a[href="/dashboard"]').first().click();
   await page.waitForURL(/\/dashboard(?:\.html)?$/);
