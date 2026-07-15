@@ -877,37 +877,18 @@ async function waitForDownloaded(cdpPort, targetVersion, timeoutMs) {
   );
 }
 
-function findJournal(root) {
-  const stack = [root];
-  while (stack.length > 0) {
-    const current = stack.pop();
-    let entries;
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const candidate = path.join(current, entry.name);
-      if (entry.isFile() && entry.name === JOURNAL_NAME) return candidate;
-      if (entry.isDirectory() && !entry.isSymbolicLink()) stack.push(candidate);
-    }
-  }
-  return null;
-}
-
 function createJournalObserver(isolation) {
   let observed = null;
+  const expectedFile = path.join(isolation.userDataDir, "updater", JOURNAL_NAME);
   return {
     async waitForJournal(timeoutMs) {
       return waitUntil(
         () => {
           if (observed) return observed;
-          const file = findJournal(isolation.root);
-          if (!file) return null;
+          if (!fs.existsSync(expectedFile)) return null;
           try {
-            const contents = JSON.parse(fs.readFileSync(file, "utf8"));
-            observed = { contents, file };
+            const contents = JSON.parse(fs.readFileSync(expectedFile, "utf8"));
+            observed = { contents, file: expectedFile };
             return observed;
           } catch {
             return null;
@@ -1170,9 +1151,10 @@ async function runWindowsE2E({ baselineInstaller, feedUrl, feed, isolation, opti
     assertFeedAndPayloadRequested(feed);
 
     const observer = createJournalObserver(isolation);
+    const journalPromise = observer.waitForJournal(Math.min(options.timeoutMs, 45_000));
     const installResult = await evaluateInApp(cdpPort, "window.agentlas.updater.install()");
     assert.ok(installResult && installResult.accepted === true, `Updater install was not accepted: ${stringifyState(installResult)}`);
-    const journal = await observer.waitForJournal(Math.min(options.timeoutMs, 45_000));
+    const journal = await journalPromise;
     const expectedJournal = path.join(isolation.userDataDir, "updater", JOURNAL_NAME);
     assert.equal(path.resolve(journal.file), path.resolve(expectedJournal), "baseline journal was not written under the isolated default userData path");
     assert.equal(journal.contents.sourceVersion, options.baselineVersion, "journal source version is wrong");
@@ -1239,9 +1221,10 @@ async function runLinuxE2E({ baselineAppImage, feedUrl, feed, isolation, options
     assertFeedAndPayloadRequested(feed);
 
     const observer = createJournalObserver(isolation);
+    const journalPromise = observer.waitForJournal(Math.min(options.timeoutMs, 45_000));
     const installResult = await evaluateInApp(cdpPort, "window.agentlas.updater.install()");
     assert.ok(installResult && installResult.accepted === true, `Updater install was not accepted: ${stringifyState(installResult)}`);
-    const journal = await observer.waitForJournal(Math.min(options.timeoutMs, 45_000));
+    const journal = await journalPromise;
     const expectedJournal = path.join(isolation.userDataDir, "updater", JOURNAL_NAME);
     assert.equal(path.resolve(journal.file), path.resolve(expectedJournal), "baseline journal was not written under the isolated default userData path");
     assert.equal(journal.contents.sourceVersion, options.baselineVersion, "journal source version is wrong");

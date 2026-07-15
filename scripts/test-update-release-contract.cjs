@@ -448,6 +448,16 @@ assert.match(
 );
 assert.match(
   packagedUpdaterE2eSource,
+  /const expectedFile = path\.join\(isolation\.userDataDir, "updater", JOURNAL_NAME\)/,
+  "the durable journal observer must watch the exact profile shared by baseline and target",
+);
+assert.equal(
+  (packagedUpdaterE2eSource.match(/const journalPromise = observer\.waitForJournal[\s\S]*?window\.agentlas\.updater\.install\(\)/g) || []).length,
+  2,
+  "Windows and Linux must begin journal observation before the native install handoff can create and clear it",
+);
+assert.match(
+  packagedUpdaterE2eSource,
   /assertOfficialGithubUpdateConfig\(configPath, "installed public v0\.8\.32 baseline"\)[\s\S]*?writeLoopbackUpdateConfig\(configPath, feedUrl\)/,
   "only the disposable installed baseline may be redirected to loopback",
 );
