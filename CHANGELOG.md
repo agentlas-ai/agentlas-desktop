@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.8.35 — 2026-07-15
+
+### Fixed
+
+- **The signed release workflow is valid before any package job starts.** Job
+  environment paths now use the workflow-safe workspace context, and the
+  Windows/Linux updater identity shell check no longer contains escaped quotes
+  that break Bash parsing. All three release workflow definitions pass
+  `actionlint` before this source tag is created.
+- **The bundled Core is Agentlas OS v1.1.37 at immutable commit
+  c86aa86ccb3424e67be0b45ec253cc408af99df7.** Background Stormbreaker child
+  runs preserve bounded replans even when a host supplies a reduced argument
+  namespace, and promoted Hub stages retain their exact Agent/Team kind.
+
+### Boundaries and edge cases
+
+- The source commit and Core pin combination does not prove a Git tag,
+  installer, update feed, or GitHub release. Stable promotion still requires
+  every Windows, Linux, signed/notarized macOS, updater-lifecycle, and served
+  asset byte gate to pass.
+- v0.8.34 was source-tagged but its workflow definition failed before creating
+  jobs, so it was never eligible for stable/latest promotion. v0.8.35 replaces
+  that unpublished candidate rather than mutating its immutable tag.
+
 ## 0.8.34 — 2026-07-15
 
 ### Changed

@@ -37,8 +37,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      HEPHAESTUS_REF: v1.1.36
-      HEPHAESTUS_COMMIT: 0cb90fc354d065b9af6894d6570df3de82fb53f6
+      HEPHAESTUS_REF: v1.1.37
+      HEPHAESTUS_COMMIT: c86aa86ccb3424e67be0b45ec253cc408af99df7
 
     steps:
       - uses: actions/checkout@v4
@@ -155,8 +155,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      HEPHAESTUS_REF: v1.1.36
-      HEPHAESTUS_COMMIT: 0cb90fc354d065b9af6894d6570df3de82fb53f6
+      HEPHAESTUS_REF: v1.1.37
+      HEPHAESTUS_COMMIT: c86aa86ccb3424e67be0b45ec253cc408af99df7
 
     steps:
       - uses: actions/checkout@v4
@@ -420,7 +420,7 @@ jobs:
             exit 1
           fi
           version="${tag#v}"
-          pkgver="$(node -p \"require('./package.json').version\")"
+          pkgver="$(node -p "require('./package.json').version")"
           if [ "$pkgver" != "$version" ]; then
             echo "::error::package.json version $pkgver does not match $tag."
             exit 1

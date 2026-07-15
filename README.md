@@ -69,14 +69,14 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
-- **2026-07-15 · v0.8.34 — signed updater trust and atomic all-platform release barrier** —
+- **2026-07-15 · v0.8.35 — executable hierarchy and repaired atomic release pipeline** —
   Normal Desktop turns retain the mandatory local Model2Vec hybrid recall:
   effective tasks use owner-scoped Memory and eligible reviewed Experience,
   then rank with the adaptive all-relevant-or-top-k budget. Borrowed-agent
   context remains isolated in per-agent SQLite nests, so governed relations
   survive projection rebuilds without injecting raw Markdown into another
-  agent's runtime. This release pins Agentlas OS v1.1.36 at
-  0cb90fc354d065b9af6894d6570df3de82fb53f6. Exact Cloud/Hub Agent and Team
+  agent's runtime. This release pins Agentlas OS v1.1.37 at
+  c86aa86ccb3424e67be0b45ec253cc408af99df7. Exact Cloud/Hub Agent and Team
   references retain their source and entity kind, and unsigned or incomplete
   Team graphs fail before execution.
 
@@ -97,6 +97,8 @@ authority for which version is actually public, stable, and downloadable.
 
   The pinned Core source does not prove a published installer or update-feed
   release; the signed release gates and served bytes remain authoritative.
+  v0.8.34 was an unpublished source tag whose invalid workflow produced no
+  jobs; v0.8.35 repairs that definition without rewriting the old tag.
 
   The updater refuses a running macOS app outside the pinned Developer ID,
   designated-requirement, notarization, and Gatekeeper lineage before download
