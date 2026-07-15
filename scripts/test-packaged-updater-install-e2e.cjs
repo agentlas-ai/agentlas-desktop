@@ -286,6 +286,21 @@ function readWindowsInstallLocation() {
   return path.resolve(String(result.stdout || "").trim());
 }
 
+function windowsExecutableVersion(executable) {
+  const script = [
+    "$version = (Get-Item -LiteralPath $env:AGENTLAS_UPDATER_E2E_EXE).VersionInfo.ProductVersion",
+    "if ([string]::IsNullOrWhiteSpace($version)) { exit 3 }",
+    "[Console]::Out.Write($version)",
+  ].join("; ");
+  const result = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
+    encoding: "utf8",
+    env: { ...process.env, AGENTLAS_UPDATER_E2E_EXE: executable },
+    windowsHide: true,
+  });
+  if (result.status !== 0) return null;
+  return String(result.stdout || "").trim().replace(/\.0$/, "");
+}
+
 function assertDefaultWindowsInstallLocation(installDir, tempRoot) {
   const expected = defaultWindowsInstallLocation();
   const actual = path.resolve(installDir);
@@ -667,17 +682,20 @@ function createRuntimeIsolation(platform, tempRoot) {
   delete env.ELECTRON_START_URL;
 
   if (platform === "win32") {
-    const appData = path.join(root, "appdata-roaming");
-    const localAppData = path.join(root, "appdata-local");
-    fs.mkdirSync(appData, { recursive: true, mode: 0o700 });
-    fs.mkdirSync(localAppData, { recursive: true, mode: 0o700 });
-    env.APPDATA = appData;
-    env.LOCALAPPDATA = localAppData;
-    env.USERPROFILE = home;
-    // Agentlas calls app.setName("Agentlas") before reading userData. Passing
-    // this exact default path makes the baseline command-line profile and the
-    // NSIS --force-run relaunch resolve to the same isolated location.
-    return { env, marker, root, userDataDir: path.join(appData, APP_NAME) };
+    if (!process.env.APPDATA || !process.env.LOCALAPPDATA) {
+      throw new Error("APPDATA and LOCALAPPDATA are required for the native Windows updater lifecycle");
+    }
+    // Detached NSIS relaunches resolve Windows known folders independently of
+    // a baseline-only --user-data-dir. Use the disposable hosted runner's real
+    // default profile for both processes, require it to be absent, and scrub it
+    // after the lifecycle instead of manufacturing a split profile.
+    return {
+      env,
+      marker,
+      root,
+      updaterCacheDir: path.join(process.env.LOCALAPPDATA, APP_NAME),
+      userDataDir: path.join(process.env.APPDATA, APP_NAME),
+    };
   }
 
   const config = path.join(root, "xdg-config");
@@ -1111,6 +1129,11 @@ async function runWindowsE2E({ baselineInstaller, feedUrl, feed, isolation, opti
   if (fs.existsSync(defaultWindowsInstallLocation())) {
     throw new Error("Refusing to overwrite an unregistered Agentlas directory at the per-user NSIS default location");
   }
+  for (const [label, directory] of [["userData", isolation.userDataDir], ["updater cache", isolation.updaterCacheDir]]) {
+    if (!directory || fs.existsSync(directory)) {
+      throw new Error(`Refusing to overwrite an existing default Windows ${label} directory: ${directory || "<missing>"}`);
+    }
+  }
   // The updater launches the target installer without /D unless the app itself
   // sets NsisUpdater.installDirectory. Installing the baseline into an ad-hoc
   // /D path therefore does not model a real user update (and assisted NSIS may
@@ -1132,7 +1155,7 @@ async function runWindowsE2E({ baselineInstaller, feedUrl, feed, isolation, opti
   const appLog = path.join(tempRoot, "baseline-app.log");
   const child = startApp(
     installedExecutable,
-    [`--user-data-dir=${isolation.userDataDir}`, "--remote-debugging-address=127.0.0.1", `--remote-debugging-port=${cdpPort}`, "--remote-allow-origins=*"],
+    ["--remote-debugging-address=127.0.0.1", `--remote-debugging-port=${cdpPort}`, "--remote-allow-origins=*"],
     { cwd: installDir, env: isolation.env, label: "installed baseline", logPath: appLog },
   );
 
@@ -1157,13 +1180,7 @@ async function runWindowsE2E({ baselineInstaller, feedUrl, feed, isolation, opti
 
     await waitForChildExit(child, Math.min(options.timeoutMs, 90_000));
     await waitUntil(
-      () => {
-        try {
-          return appAsarVersion(path.join(installDir, "resources", "app.asar")) === options.targetVersion;
-        } catch {
-          return false;
-        }
-      },
+      () => windowsExecutableVersion(installedExecutable) === options.targetVersion,
       { intervalMs: 500, label: "NSIS target replacement", timeoutMs: options.timeoutMs },
     );
     assertOfficialGithubUpdateConfig(path.join(installDir, "resources", "app-update.yml"));
@@ -1181,6 +1198,11 @@ async function runWindowsE2E({ baselineInstaller, feedUrl, feed, isolation, opti
   } finally {
     await stopWindowsInstall(installedExecutable);
     await uninstallWindowsInstall(installDir);
+    for (const directory of [isolation.userDataDir, isolation.updaterCacheDir]) {
+      if (!directory) continue;
+      await fsp.rm(directory, { force: true, maxRetries: 5, recursive: true, retryDelay: 250 })
+        .catch((error) => logError(`cleanup warning for ${directory}: ${error instanceof Error ? error.message : String(error)}`));
+    }
   }
 }
 

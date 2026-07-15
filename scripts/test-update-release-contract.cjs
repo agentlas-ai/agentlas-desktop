@@ -438,6 +438,16 @@ assert.match(
 );
 assert.match(
   packagedUpdaterE2eSource,
+  /updaterCacheDir: path\.join\(process\.env\.LOCALAPPDATA, APP_NAME\)[\s\S]*?userDataDir: path\.join\(process\.env\.APPDATA, APP_NAME\)/,
+  "Windows baseline and NSIS target must share the real disposable runner profile that detached relaunch resolves",
+);
+assert.match(
+  packagedUpdaterE2eSource,
+  /\(\) => windowsExecutableVersion\(installedExecutable\) === options\.targetVersion/,
+  "Windows replacement must be verified from the installed executable metadata while the relaunched app owns app.asar",
+);
+assert.match(
+  packagedUpdaterE2eSource,
   /assertOfficialGithubUpdateConfig\(configPath, "installed public v0\.8\.32 baseline"\)[\s\S]*?writeLoopbackUpdateConfig\(configPath, feedUrl\)/,
   "only the disposable installed baseline may be redirected to loopback",
 );
