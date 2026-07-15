@@ -32,6 +32,7 @@ const {
   invalidateLocalEmbeddingModelCache,
   model2VecTokenIds,
   parseLocalEmbedding,
+  rankHybridLocal,
   verifyLocalModel2VecAsset,
 } = embeddingRuntime;
 
@@ -90,6 +91,25 @@ const koreanRelated = cosineSimilarity(korean, autoLocalEmbedding("계약서 생
 const koreanUnrelated = cosineSimilarity(korean, autoLocalEmbedding("분기별 세금 감가상각 계산").vector);
 assert.ok(Math.abs(koreanRelated - 0.8387192) < 1e-6, "Korean cosine must match Core");
 assert.ok(koreanRelated > koreanUnrelated + 0.25, "Korean semantic paraphrase must outrank an unrelated memory");
+
+const koreanRanking = rankHybridLocal(KOREAN, [
+  {
+    id: "related",
+    text: "계약서 생성 자동화",
+    embedding: autoLocalEmbedding("계약서 생성 자동화").vector,
+  },
+  {
+    id: "unrelated",
+    text: "분기별 세금 감가상각 계산",
+    embedding: autoLocalEmbedding("분기별 세금 감가상각 계산").vector,
+  },
+]);
+assert.equal(koreanRanking.find((entry) => entry.item.id === "related")?.semanticEligible, true);
+assert.equal(
+  koreanRanking.find((entry) => entry.item.id === "unrelated")?.semanticEligible,
+  false,
+  "Model2Vec must not reuse the hash-96 0.08 relevance floor",
+);
 
 const persisted = autoLocalEmbedding(ENGLISH);
 const persistedJson = JSON.stringify(persisted.vector);

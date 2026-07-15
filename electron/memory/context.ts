@@ -207,7 +207,7 @@ function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string): Memor
     prior: confidencePrior(entry.confidence),
     entry,
   }))).filter((result) =>
-    result.lexicalScore > 0 || result.vectorScore >= 0.08 || result.item.entry.scope === "user_identity");
+    result.lexicalScore > 0 || result.semanticEligible || result.item.entry.scope === "user_identity");
   if (ranked.length === 0) return [];
   const all = ranked.map((result) => result.item.entry);
   const allText = entryLines(all);

@@ -71,7 +71,7 @@ export function buildExperienceContext(input: {
     prior: confidencePrior(item),
     experience: item,
   }))).filter((entry) =>
-    entry.lexicalScore > 0 || entry.vectorScore >= 0.08 || entry.item.experience.relationScore > 0);
+    entry.lexicalScore > 0 || entry.semanticEligible || entry.item.experience.relationScore > 0);
 
   const selectedCandidateIds: string[] = [];
   const lines: string[] = [];

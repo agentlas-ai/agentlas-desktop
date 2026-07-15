@@ -84,7 +84,7 @@ async function main() {
   assert.equal(registeredAdapter.status, "available");
   const adapterConfig = JSON.parse(registeredAdapter.config_json);
   assert.equal(adapterConfig.dimensions, 352);
-  assert.equal(adapterConfig.model_sha256, "49b13567b1c99d45bfac202272527ed7e7e8321c53b65f2361efca690d9d8336");
+  assert.equal(adapterConfig.model_sha256, "fe492f69607b750142aa48d47d579b53252b3288547c27d4d0e473d6af485e1e");
   assert.match(adapterConfig.identity, /:hybrid-hash96-v1:352$/);
 
   desktopStore.getDb().close();

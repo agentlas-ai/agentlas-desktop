@@ -27,7 +27,7 @@ export interface LocalMemoryEmbedding {
 export const MODEL2VEC_HYBRID_DIMENSIONS = 352;
 export const MODEL2VEC_HYBRID_NAME = "model2vec_potion_base_8m_int8_hybrid";
 export const MODEL2VEC_ASSET_FORMAT = "agentlas-model2vec-int8-v1";
-export const PINNED_MODEL2VEC_CONTENT_SHA256 = "49b13567b1c99d45bfac202272527ed7e7e8321c53b65f2361efca690d9d8336";
+export const PINNED_MODEL2VEC_CONTENT_SHA256 = "fe492f69607b750142aa48d47d579b53252b3288547c27d4d0e473d6af485e1e";
 export const PINNED_MODEL2VEC_MODEL_ID = "minishlab/potion-base-8M";
 export const PINNED_MODEL2VEC_REVISION = "bf8b056651a2c21b8d2565580b8569da283cab23";
 const PINNED_MODEL2VEC_SOURCE_FILES: Record<string, AssetFileRecord> = {
@@ -37,6 +37,9 @@ const PINNED_MODEL2VEC_SOURCE_FILES: Record<string, AssetFileRecord> = {
   "README.md": { sha256: "de8ec91bf63c5f4c0e20751c227b2d049953e1cab5f8d5d44211c59a44795bdd", size: 5203 },
 };
 const MODEL_DISCOVERY_MISS_TTL_MS = 5_000;
+const HASH_MIN_VECTOR_SCORE = 0.08;
+const MODEL2VEC_MIN_VECTOR_SCORE = 0.45;
+const VECTOR_RELATIVE_FLOOR = 0.72;
 
 type ModelDescriptor = {
   modelPath: string;
@@ -474,6 +477,7 @@ export interface HybridRanked<T extends HybridRankable> {
   score: number;
   lexicalScore: number;
   vectorScore: number;
+  semanticEligible: boolean;
 }
 
 /** Reciprocal-rank fusion: lexical and local-vector ranks remain independently auditable. */
@@ -482,23 +486,33 @@ export function rankHybridLocal<T extends HybridRankable>(
   items: readonly T[],
   rrfK = 60,
 ): HybridRanked<T>[] {
-  const queryVector = autoLocalEmbedding(query).vector;
+  const queryEmbedding = autoLocalEmbedding(query);
+  const queryVector = queryEmbedding.vector;
   const measured = items.map((item) => ({
     item,
     lexicalScore: lexicalOverlap(query, item.text),
     vectorScore: cosineSimilarity(queryVector, item.embedding),
   }));
-  const lexical = [...measured].sort((left, right) =>
+  const bestVectorScore = Math.max(0, ...measured.map((entry) => entry.vectorScore));
+  const minimumVectorScore = queryEmbedding.model === MODEL2VEC_HYBRID_NAME
+    ? MODEL2VEC_MIN_VECTOR_SCORE
+    : HASH_MIN_VECTOR_SCORE;
+  const measuredWithGate = measured.map((entry) => ({
+    ...entry,
+    semanticEligible: entry.vectorScore >= minimumVectorScore
+      && entry.vectorScore >= bestVectorScore * VECTOR_RELATIVE_FLOOR,
+  }));
+  const lexical = [...measuredWithGate].filter((entry) => entry.lexicalScore > 0).sort((left, right) =>
     right.lexicalScore - left.lexicalScore || left.item.id.localeCompare(right.item.id));
-  const vector = [...measured].sort((left, right) =>
+  const vector = [...measuredWithGate].filter((entry) => entry.semanticEligible).sort((left, right) =>
     right.vectorScore - left.vectorScore || left.item.id.localeCompare(right.item.id));
   const lexicalRank = new Map(lexical.map((entry, index) => [entry.item.id, index + 1]));
   const vectorRank = new Map(vector.map((entry, index) => [entry.item.id, index + 1]));
-  return measured.map((entry) => {
+  return measuredWithGate.map((entry) => {
     const lexicalContribution = entry.lexicalScore > 0
       ? 1 / (rrfK + (lexicalRank.get(entry.item.id) ?? items.length + 1))
       : 0;
-    const vectorContribution = entry.vectorScore > 0
+    const vectorContribution = entry.semanticEligible
       ? 1 / (rrfK + (vectorRank.get(entry.item.id) ?? items.length + 1))
       : 0;
     return {
