@@ -46,7 +46,7 @@ jobs:
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
       HEPHAESTUS_REF: v1.1.30
-      HEPHAESTUS_COMMIT: 577a7d134f0a3138fe1420b58193d62687cfeec1
+      HEPHAESTUS_COMMIT: 5cd426d289f976b57fb41e0a710c6eff53d25b8c
 
     steps:
       - uses: actions/checkout@v4

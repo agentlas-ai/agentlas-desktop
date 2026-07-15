@@ -17,7 +17,7 @@
   survive projection rebuilds without falling back to whole-file `cat` memory.
 - **Desktop now embeds Agentlas OS v1.1.30 at one immutable commit.** Package
   metadata, updater contracts, release workflows, and the three-OS harness pin
-  `577a7d134f0a3138fe1420b58193d62687cfeec1`.
+  `5cd426d289f976b57fb41e0a710c6eff53d25b8c`.
 
 ### Boundaries and edge cases
 

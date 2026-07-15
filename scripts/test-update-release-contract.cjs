@@ -69,7 +69,7 @@ assert.equal(
 );
 assert.equal(runtimeSource.ref, `v${compatibility.bundledRuntimeVersion}`, "runtime source ref must match compatibility");
 assert.match(runtimeSource.commit, /^[0-9a-f]{40}$/, "runtime source must pin an immutable full commit");
-assert.equal(runtimeSource.commit, "577a7d134f0a3138fe1420b58193d62687cfeec1", "Agentlas OS v1.1.30 commit drift");
+assert.equal(runtimeSource.commit, "5cd426d289f976b57fb41e0a710c6eff53d25b8c", "Agentlas OS v1.1.30 commit drift");
 assert.equal(compatibility.bundledRuntimeVersion, manifest.version, "feed runtime must match the bundled Hephaestus manifest");
 assert.equal(
   spawnSync("git", ["-C", embeddedRuntimeRoot, "rev-parse", "HEAD^{commit}"], { encoding: "utf8" }).stdout.trim(),

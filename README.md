@@ -75,7 +75,7 @@ authority for which version is actually public, stable, and downloadable.
   adaptive all-relevant-or-top-k token budget. Borrowed-agent memory lives in
   per-agent SQLite nests, where semantic and reviewed governance relations are
   rebuilt safely. The embedded Agentlas OS v1.1.30 source is pinned to
-  `577a7d134f0a3138fe1420b58193d62687cfeec1`; this source note does not claim a
+  `5cd426d289f976b57fb41e0a710c6eff53d25b8c`; this source note does not claim a
   published installer or update-feed release.
 
 - **2026-07-15 · v0.8.30 — Agentlas OS v1.1.29 alignment** — Desktop now
