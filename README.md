@@ -70,12 +70,20 @@ This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
 - **2026-07-15 · v0.8.31 — governed local Model2Vec experience memory** —
-  Desktop now stores and retrieves experience with the verified local
-  `potion-base-8M` int8 + hash hybrid, vector/lexical RRF, salience prior, and an
-  adaptive all-relevant-or-top-k token budget. Borrowed-agent memory lives in
-  per-agent SQLite nests, where semantic and reviewed governance relations are
-  rebuilt safely. The embedded Agentlas OS v1.1.30 source is pinned to
-  `5cd426d289f976b57fb41e0a710c6eff53d25b8c`; this source note does not claim a
+  Every ordinary Desktop invocation now sends the current effective task through
+  automatic, owner-scoped Memory recall and eligible reviewed Experience recall.
+  Desktop stores each new row with the verified local `potion-base-8M` int8 +
+  hash hybrid: 256 semantic dimensions plus 96 deterministic hash dimensions,
+  for one 352-dimensional offline vector. Lexical and cosine ranks are fused with
+  RRF, while confidence/relation evidence on Desktop and salience in Core remain
+  bounded priors. The adaptive all-relevant-or-top-k token budget loads every
+  relevant row when it fits and ranks before truncating when it does not.
+  Borrowed-agent memory lives in per-agent SQLite nests; semantic `similar_to`
+  links and explicitly reviewed `supersedes` / `contradicts` governance edges
+  survive safe rebuilds without whole-file Markdown injection. The packaged model
+  is checksum-gated and runs in-process with no embedding server or paid embedding
+  API. The embedded Agentlas OS v1.1.30 source is pinned to
+  `1bcf5bc6595716b3dd9c45e990b5b96d4d98c616`; this source note does not claim a
   published installer or update-feed release.
 
 - **2026-07-15 · v0.8.30 — Agentlas OS v1.1.29 alignment** — Desktop now
@@ -265,7 +273,7 @@ authority for which version is actually public, stable, and downloadable.
 | **+$0 to your model bill** | Agentlas runs no model and never proxies a call |
 | **100% local** | keys in the OS keychain, chats & agents in local SQLite |
 | **Agent Trust assets** | owner scope · source · version · package hash · private/public boundary · restore receipt |
-| **Experience/Taste chips** | separately owned releases · explicit loadout · privacy-filtered evidence · no automatic attachment |
+| **Experience/Taste chips** | separately owned releases · explicit loadout · privacy-filtered evidence · automatic local task recall only after an eligible loadout |
 | **Agent Cloud, optional** | explicitly save and restore private agent packages; it is not the LLM execution server |
 | **Agent teams, visible** | every firm renders as an org chart, not a black box |
 | **Stormbreaker loop** | big jobs get automatic scope, goals, work packets, plugin selection, continuation, repair, and final-gate evidence |
@@ -360,6 +368,40 @@ A complete tour of what ships today.
   entry points) is built in the background under `<project>/.agentlas/code-map/`
   and its seed is injected each turn, so the model orients instead of grepping
   blindly. Generation is non-blocking and reading is fully guarded.
+
+### Governed local Memory and Experience recall
+
+- **Automatic on normal Desktop turns.** `runMcpInvocation` passes the current
+  effective task into owner-scoped Memory retrieval every turn and, when the
+  exact agent/package/project/environment binding is eligible, automatically
+  appends reviewed Experience items to the same system prompt. Restricted Agent
+  App runs stay memory-free; an exact Operational overlay can replace the local
+  Experience overlay for that conversation.
+- **352-dimensional offline embeddings.** The packaged runtime requires a
+  checksum-verified, MIT-licensed `potion-base-8M` int8 asset. Desktop combines
+  its 256-dimensional semantic vector with the deterministic 96-dimensional hash
+  vector and persists the resulting 352-dimensional hybrid at write time. It
+  runs in-process and offline; Agentlas has no embedding endpoint and pays no
+  per-user embedding bill. Hash-96 alone is a marked degraded fallback if the
+  verified local model becomes unavailable.
+- **Hybrid ranking before budgeting.** Lexical overlap and local cosine ranks
+  stay separate until reciprocal-rank fusion (RRF). Desktop adds bounded
+  confidence and reviewed-relation evidence; the per-agent Core reader retains
+  salience as its prior. Every governance-eligible row is scored before the
+  adaptive selector loads all relevant items that fit or chooses a bounded
+  top-k when they do not.
+- **Relations have different authority.** `similar_to` is a rebuildable semantic
+  edge. `supersedes` and `contradicts` are durable reviewed governance and are
+  never guessed from vector proximity. Secret Memory is blocked by the curator,
+  confidential/secret source material cannot become Experience, and superseded,
+  wrong-agent, wrong-project, wrong-package, and wrong-environment rows are
+  excluded before ranking.
+- **Borrowed agents keep isolated nests.** Approved `agent_repo` learning is
+  projected to
+  `~/.agentlas/networking/hub-agents/<slug>/memory/experience.sqlite`. Agentlas
+  Core queries that database with the exact `hub:<slug>` identity; it does not
+  inject the legacy `project-soul-memory.md` wholesale. Semantic and reviewed
+  governance edges are restored when a rebuildable nest is created again.
 
 ### Stormbreaker Loop
 
@@ -775,6 +817,7 @@ access — it talks to the main process through a typed preload bridge.
 | Document | Covers |
 |----------|--------|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Process model, IPC bridge, runtime adapters, data flow. |
+| [docs/ARCHITECTURE_PLAYBOOK.md](docs/ARCHITECTURE_PLAYBOOK.md) | Built-in architecture, per-turn governed Memory/Experience recall, local Model2Vec hybrid, and safe extension invariants. |
 | [docs/M0-CHECKLIST.md](docs/M0-CHECKLIST.md) | The M0 spike scope and what's verified. |
 | [docs/PUBLIC-RELEASE.md](docs/PUBLIC-RELEASE.md) | Cross-platform CI release + the signed/notarized macOS path. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to set up, what to test, and the public-safety rules. |

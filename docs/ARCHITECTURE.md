@@ -83,9 +83,24 @@ slash command로 Apps 표면을 열 수 있다.
 
 ## 데이터 영구성
 
-- **SQLite** (`userData/agentlas.sqlite`) — 설치 에이전트, 활성 백엔드 선택, 채팅 런(로컬 only).
+- **Desktop SQLite** (`userData/agentlas.sqlite`) — 설치 에이전트, 활성 백엔드
+  선택, 채팅, 큐레이션된 `memory_entries`, 검토된 Experience 후보/관계. Memory와
+  Experience row는 쓰기 시 로컬 352차원 Model2Vec+hash hybrid embedding을 함께
+  저장하며 서버 embedding API를 호출하지 않는다.
+- **Borrowed-agent Core nest**
+  (`~/.agentlas/networking/hub-agents/<slug>/memory/experience.sqlite`) — 승인된
+  `agent_repo` 학습의 agent별 재생성 가능한 projection. Core는 exact
+  `hub:<slug>`와 privacy/status/supersession 조건으로 로컬 vector query하며 Markdown
+  전체 파일을 prompt에 넣지 않는다.
 - **Keychain** — API 키 only. 키 값은 main 프로세스에서만 읽고, MCP 자식 env로 주입.
 - **클라우드 동기화** (PRD §6.3) — M2부터. 팀 구성만 동기화. 채팅 로그는 default off.
+
+일반 Desktop `runMcpInvocation`은 매 turn의 effective task를 Memory와 eligible
+Experience recall에 자동 전달한다. lexical/cosine 순위를 RRF로 결합한 뒤 bounded
+prior를 더하고, relevant set이 token budget에 전부 들어가면 모두 주입하고 넘으면
+top-k만 주입한다. Agent App restricted run은 이 경로를 사용하지 않는다. 세부 계약은
+[`ARCHITECTURE_PLAYBOOK.md`](ARCHITECTURE_PLAYBOOK.md#governed-local-hybrid-recall-v0831)를
+참조한다.
 
 ## 보안 (PRD §6.2)
 
@@ -110,7 +125,14 @@ Public release is intentionally blocked unless `release:mac:verify` passes:
 - `spctl -a -t open --context context:primary-signature` for both DMGs.
 - No AppleDouble `._*` files in `release/`.
 
-Notarization은 `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID` env로 주입. Developer ID signing은 `CSC_LINK` / `CSC_KEY_PASSWORD` 또는 GitHub Actions의 `MAC_DEVELOPER_ID_CERTIFICATE` / `MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD` secret으로 주입. CI release workflow는 repo root의 `.github/workflows/agentlas-desktop-release.yml`.
+Notarization은 `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID` env로
+주입한다. Developer ID signing은 `CSC_LINK` / `CSC_KEY_PASSWORD` 또는 GitHub
+Actions의 `MAC_DEVELOPER_ID_CERTIFICATE` /
+`MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD` secret으로 주입한다. 실제 CI 계약은
+`.github/workflows/release.yml`이 unsigned Windows/Linux를 prerelease로 stage하고,
+`.github/workflows/release-signed-mac.yml`이 signed/notarized Mac과 전체 필수 asset을
+확인한 뒤에만 stable/latest로 승격하는 2-workflow 구조다. 상세 tag/draft/public
+boundary는 [`PUBLIC-RELEASE.md`](PUBLIC-RELEASE.md)를 따른다.
 
 ## 디자인 시스템 미러 (PRD §7)
 

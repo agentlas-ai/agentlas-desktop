@@ -4,25 +4,50 @@
 
 ### Changed
 
+- **Normal Desktop turns now recall governed context without a manual agent
+  command.** `runMcpInvocation` passes the effective user task to owner-scoped
+  Memory retrieval on every ordinary turn and automatically selects an eligible
+  reviewed Experience overlay for the exact agent, package, project, and runtime
+  environment. Restricted Agent App runs remain memory-free, and an exact
+  Operational overlay takes precedence over the local Experience overlay.
 - **Experience recall now uses a mandatory, fully local Model2Vec hybrid.**
-  Desktop persists the verified `potion-base-8M` int8 vectors together with the
-  deterministic hash channel, fuses vector and lexical evidence with RRF, and
+  Desktop persists a 352-dimensional vector made from the verified
+  `potion-base-8M` int8 semantic channel (256 dimensions) and deterministic hash
+  channel (96 dimensions). It fuses vector and lexical evidence with RRF;
+  Desktop uses bounded confidence/relation evidence while the Core nest reader
   keeps salience as a prior. No server embedding or per-user API cost is used.
 - **Governed recall now ranks every eligible row before applying the token
   budget.** If all relevant memories fit they are loaded together; otherwise
-  the vector/RRF top-k is selected. Superseded, private, and cross-owner rows
-  remain filtered before ranking.
+  the vector/RRF top-k is selected. Privacy-unsafe source classes are rejected
+  at curation/Experience capture; superseded, wrong-agent, wrong-project,
+  wrong-package, and wrong-environment rows remain filtered before ranking.
+- **Semantic and governance relations no longer share authority.**
+  `similar_to` is derived from compatible local vectors within one Experience
+  Pack. `supersedes` and `contradicts` require an explicit reviewed relation and
+  are never inferred from similarity; a target with a valid promoted
+  replacement is removed from retrieval before semantic ranking.
 - **Borrowed-agent experience is projected into its per-agent SQLite nest.**
   Semantic `similar_to` links and reviewed `supersedes` / `contradicts` edges
   survive projection rebuilds without falling back to whole-file `cat` memory.
+  Core queries the nest with its exact `hub:<slug>` identity and an adaptive
+  all-relevant-or-top-k budget.
+- **Packaged builds verify the model payload before signing or publication.**
+  Both builder configurations run the same `afterPack` gate, which requires the
+  pinned manifest, tokenizer, MIT license, int8 embeddings, scales, file sizes,
+  and SHA-256 content identity to match the embedded Agentlas OS checkout.
 - **Desktop now embeds Agentlas OS v1.1.30 at one immutable commit.** Package
   metadata, updater contracts, release workflows, and the three-OS harness pin
-  `5cd426d289f976b57fb41e0a710c6eff53d25b8c`.
+  `1bcf5bc6595716b3dd9c45e990b5b96d4d98c616`.
 
 ### Boundaries and edge cases
 
-- Embeddings remain local-only. Hash-96 is an explicit degraded fallback, not
-  the normal quality path.
+- Embeddings remain local-only and in-process. Hash-96 is an explicit degraded
+  fallback if the verified bundled model is absent or invalid, not the normal
+  packaged quality path.
+- A source checkout, local test pass, or package version does not prove that an
+  installer is public. Windows/Linux first stage a prerelease; only the signed
+  macOS publisher can verify the complete cross-platform asset set and promote
+  it to stable/latest.
 - This source version and Core pin do not themselves publish a Git tag,
   installer, update feed, or GitHub release.
 
