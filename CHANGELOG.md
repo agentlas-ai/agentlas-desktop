@@ -1,12 +1,16 @@
 # Changelog
 
-## 0.8.27 — 2026-07-15
+## 0.8.28 — 2026-07-15
 
 ### Fixed
 
 - **Release UI checks now follow the language actually rendered by Desktop.**
   Team search, team selection, and hired-agent assertions cover both English
   and Korean instead of assuming a Korean first-run locale.
+- **Provider-health visual QA now pins its intended locale explicitly.** Korean
+  and English dashboard copy, recovery, provider actions, and retry behavior are
+  each exercised in an isolated browser context after English became the
+  product default.
 - **Mobile relay pairing metadata is covered by the release contract.** The
   authenticated exchange must return the advertised relay endpoint and secret
   without weakening the existing local pairing boundary.

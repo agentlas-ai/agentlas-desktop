@@ -69,7 +69,7 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
-- **2026-07-15 · v0.8.27 — portable Builds, retry-safe Mobile, Agent Apps, and
+- **2026-07-15 · v0.8.28 — portable Builds, retry-safe Mobile, Agent Apps, and
   safe MCP consent** — A verified Build is installed locally first, then asks
   exactly `Cloud에 올리기` or `로컬에만 저장`; closing the choice keeps it local,
   public Hub publishing remains separate, and a Cloud failure never removes the

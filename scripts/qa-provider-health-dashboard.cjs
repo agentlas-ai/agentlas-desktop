@@ -190,6 +190,12 @@ function watchPage(page, errors) {
   });
 }
 
+function forceLocale(context, locale) {
+  return context.addInitScript((value) => {
+    window.localStorage.setItem("agentlas.locale", value);
+  }, locale);
+}
+
 async function inspectViewport(page, viewport, screenshotName) {
   await page.setViewportSize(viewport);
   await page.goto(page.url().replace(/\/dashboard\.html.*$/, "/dashboard.html"), {
@@ -413,6 +419,7 @@ async function main() {
 
   try {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1100 } });
+    await forceLocale(context, "ko");
     await context.addInitScript(setupProviderHealthBridge, {
       setupSource,
       baseOptions: mockBridgeOptions({ teamRoster: true }),
@@ -461,6 +468,7 @@ async function main() {
     });
 
     const enContext = await browser.newContext({ viewport: { width: 960, height: 1100 } });
+    await forceLocale(enContext, "en");
     await enContext.addInitScript(setupProviderHealthBridge, {
       setupSource,
       baseOptions: mockBridgeOptions({ teamRoster: true }),
@@ -479,6 +487,7 @@ async function main() {
     await enContext.close();
 
     const missingRuntimeContext = await browser.newContext({ viewport: { width: 960, height: 1100 } });
+    await forceLocale(missingRuntimeContext, "ko");
     await missingRuntimeContext.addInitScript(setupProviderHealthBridge, {
       setupSource,
       baseOptions: mockBridgeOptions({ teamRoster: true }),
@@ -493,6 +502,7 @@ async function main() {
     await missingRuntimeContext.close();
 
     const retryContext = await browser.newContext({ viewport: { width: 960, height: 1100 } });
+    await forceLocale(retryContext, "ko");
     await retryContext.addInitScript(setupProviderHealthBridge, {
       setupSource,
       baseOptions: mockBridgeOptions({ teamRoster: true }),
