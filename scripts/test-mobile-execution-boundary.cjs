@@ -106,8 +106,8 @@ async function main() {
   const firmSource = fs.readFileSync(path.join(__dirname, "../electron/mcp/firm-orchestrator.ts"), "utf8");
   assert.equal(
     (clientSource.match(/restrictedReadBoundary: true as const/g) || []).length,
-    5,
-    "client must pass the boundary into group, borrowed, swarm, firm, and direct runner paths",
+    6,
+    "client must pass the boundary into exact task-force, group, borrowed, swarm, firm, and direct runner paths",
   );
   assert.match(borrowedSource, /restrictedReadBoundary: p\.restrictedReadBoundary/);
   assert.equal(

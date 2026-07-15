@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.36 — 2026-07-15
+
+### Fixed
+
+- **The Linux release preflight now recognizes all six restricted-read
+  propagation paths.** The new exact temporary-TF path carries the same
+  main-owned mobile read boundary as Group, borrowed, swarm, Firm, and direct
+  execution; the release contract now verifies that sixth path instead of
+  rejecting the secure expansion as an unexpected count.
+- **The bundled Core remains Agentlas OS v1.1.37 at immutable commit
+  c86aa86ccb3424e67be0b45ec253cc408af99df7.** Its verified cross-platform
+  Stormbreaker runtime and exact Agent/Team Hub-kind contract are unchanged.
+
+### Boundaries and edge cases
+
+- The source commit and Core pin combination does not prove a Git tag,
+  installer, update feed, or GitHub release. All native and served-byte gates
+  must pass before stable/latest promotion.
+- v0.8.35 reached real CI jobs but its Linux security preflight rejected a
+  stale five-path assertion before packaging. It was never promoted; v0.8.36
+  supersedes it without mutating the immutable source tag.
+
 ## 0.8.35 — 2026-07-15
 
 ### Fixed

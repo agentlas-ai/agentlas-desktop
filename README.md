@@ -69,7 +69,7 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
-- **2026-07-15 · v0.8.35 — executable hierarchy and repaired atomic release pipeline** —
+- **2026-07-15 · v0.8.36 — executable hierarchy and repaired atomic release pipeline** —
   Normal Desktop turns retain the mandatory local Model2Vec hybrid recall:
   effective tasks use owner-scoped Memory and eligible reviewed Experience,
   then rank with the adaptive all-relevant-or-top-k budget. Borrowed-agent
@@ -98,7 +98,9 @@ authority for which version is actually public, stable, and downloadable.
   The pinned Core source does not prove a published installer or update-feed
   release; the signed release gates and served bytes remain authoritative.
   v0.8.34 was an unpublished source tag whose invalid workflow produced no
-  jobs; v0.8.35 repairs that definition without rewriting the old tag.
+  jobs. v0.8.35 then exposed a stale five-path Linux security assertion after
+  the exact temporary-TF path became the sixth restricted-read propagation
+  path. v0.8.36 repairs both gates without rewriting either old tag.
 
   The updater refuses a running macOS app outside the pinned Developer ID,
   designated-requirement, notarization, and Gatekeeper lineage before download
