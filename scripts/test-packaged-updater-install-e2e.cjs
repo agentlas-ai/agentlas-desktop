@@ -945,11 +945,6 @@ function executableOnPath(name) {
 }
 
 function linuxLauncher(appImage, electronArgs, isolation, logPath, extractedRoot = null) {
-  const xvfb = executableOnPath("xvfb-run");
-  if (!xvfb) {
-    throw new Error("Linux native updater E2E requires xvfb-run on the runner (install xvfb); refusing to substitute a simulated lifecycle");
-  }
-  const dbus = executableOnPath("dbus-run-session");
   const appEnv = { ...isolation.env };
   let launcher = appImage;
   let cwd = path.dirname(appImage);
@@ -970,6 +965,20 @@ function linuxLauncher(appImage, electronArgs, isolation, logPath, extractedRoot
   } else {
     appEnv.APPIMAGE_EXTRACT_AND_RUN = "1";
   }
+
+  // The release workflow owns X11 and D-Bus for the lifetime of this entire
+  // verifier so the updater-spawned target inherits sessions that outlive the
+  // baseline. Never nest xvfb-run here: its child is the baseline app, so it
+  // would tear the inner display down at precisely the native update handoff.
+  if (appEnv.DISPLAY && appEnv.DBUS_SESSION_BUS_ADDRESS) {
+    return startApp(launcher, electronArgs, { cwd, env: appEnv, label: "baseline AppImage", logPath });
+  }
+
+  const xvfb = executableOnPath("xvfb-run");
+  if (!xvfb) {
+    throw new Error("Linux native updater E2E requires xvfb-run on the runner (install xvfb); refusing to substitute a simulated lifecycle");
+  }
+  const dbus = executableOnPath("dbus-run-session");
   const command = xvfb;
   const args = dbus
     ? ["-a", dbus, "--", launcher, ...electronArgs]

@@ -433,6 +433,11 @@ assert.match(
 );
 assert.match(
   packagedUpdaterE2eSource,
+  /if \(appEnv\.DISPLAY && appEnv\.DBUS_SESSION_BUS_ADDRESS\)[\s\S]*?return startApp\(launcher, electronArgs/,
+  "the Linux baseline must reuse the verifier-owned display instead of nesting a display that dies at handoff",
+);
+assert.match(
+  packagedUpdaterE2eSource,
   /assertOfficialGithubUpdateConfig\(configPath, "installed public v0\.8\.32 baseline"\)[\s\S]*?writeLoopbackUpdateConfig\(configPath, feedUrl\)/,
   "only the disposable installed baseline may be redirected to loopback",
 );
