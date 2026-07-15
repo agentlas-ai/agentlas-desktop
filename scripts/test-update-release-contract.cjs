@@ -287,6 +287,7 @@ assert.doesNotMatch(
 const crossPlatformWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release.yml"), "utf8");
 const signedMacWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release-signed-mac.yml"), "utf8");
 const updaterE2eRecheckWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "updater-e2e-recheck.yml"), "utf8");
+const webEnvRecoveryWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "apply-desktop-release-web-env.yml"), "utf8");
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 const changelog = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
 const publishMacSource = fs.readFileSync(path.join(root, "scripts", "publish-mac-release.mjs"), "utf8");
@@ -361,6 +362,7 @@ const workflowEntries = [
   ["release-signed-mac.yml", parsedWorkflow(signedMacWorkflow, "release-signed-mac.yml")],
 ];
 const parsedUpdaterE2eRecheckWorkflow = parsedWorkflow(updaterE2eRecheckWorkflow, "updater-e2e-recheck.yml");
+const parsedWebEnvRecoveryWorkflow = parsedWorkflow(webEnvRecoveryWorkflow, "apply-desktop-release-web-env.yml");
 const unsafeShellExpression = /\$\{\{[^}]*\b(?:inputs\.(?:tag|version|draft|apply_web_env)|github\.(?:ref_name|event\.inputs\.(?:tag|version)))\b[^}]*\}\}/;
 const secretEnvNames = new Set([
   "APPLE_ID",
@@ -683,7 +685,7 @@ assert.match(signedResolveStep.run, /version.*!=.*\$\{tag#v\}/s, "manual version
 
 const signedSteps = workflowSteps(signedWorkflow);
 const stepNamed = (name) => signedSteps.find((step) => step.name === name);
-for (const jobName of ["mac-release-preflight", "build-signed-mac-artifacts"]) {
+for (const jobName of ["mac-release-preflight", "build-signed-mac-artifacts", "publish-all-platforms"]) {
   const steps = signedWorkflow.jobs[jobName].steps;
   const checkout = steps.find((step) => step.name === "Checkout immutable Mac release tooling");
   const install = steps.find((step) => step.name === "Verify and install immutable Mac release tooling");
@@ -763,9 +765,24 @@ assert.deepEqual(
 const downloadBarrierArtifactsStep = stepNamed("Download every barrier-approved OS artifact");
 const localAssetVerificationStep = stepNamed("Verify local required manifest and hashes before first public write");
 const publicWriterStep = stepNamed("Single releases-repository writer and stable promotion");
+const productionWebEnvStep = stepNamed("Apply and verify production desktop release metadata");
 assert.ok(downloadBarrierArtifactsStep, "the sole writer must download all Actions barrier artifacts");
 assert.ok(localAssetVerificationStep, "the sole writer must locally verify the full asset manifest before public mutation");
 assert.ok(publicWriterStep, "the sole writer must be the only credential-bearing public mutation step");
+assert.ok(productionWebEnvStep, "the sole writer must apply production release metadata after stable promotion");
+assert.deepEqual(Object.keys(productionWebEnvStep.env).sort(), ["RAILWAY_PROJECT_ID", "RAILWAY_TOKEN"]);
+assert.match(productionWebEnvStep.run, /release:web-env -- --apply --restart[\s\S]*--verify-url=https:\/\/agentlas\.cloud\/api\/desktop\/latest/);
+assert.ok(
+  signedSteps.indexOf(publicWriterStep) < signedSteps.indexOf(productionWebEnvStep),
+  "production web metadata must never lead the public release writer",
+);
+const recoverySteps = workflowSteps(parsedWebEnvRecoveryWorkflow);
+const recoveryDownloadStep = recoverySteps.find((step) => step.name === "Download published verified release metadata");
+const recoveryApplyStep = recoverySteps.find((step) => step.name === "Apply and verify production desktop release metadata");
+assert.ok(recoveryDownloadStep, "web env recovery must download metadata from the already-published release");
+assert.ok(recoveryApplyStep, "web env recovery must apply and verify production metadata");
+assert.match(recoveryDownloadStep.run, /gh release download[\s\S]*desktop-release\.production\.env/);
+assert.deepEqual(Object.keys(recoveryApplyStep.env).sort(), ["RAILWAY_PROJECT_ID", "RAILWAY_TOKEN"]);
 assert.equal(downloadBarrierArtifactsStep.uses, "actions/download-artifact@v4");
 assert.equal(downloadBarrierArtifactsStep.with.pattern, "agentlas-release-*");
 assert.equal(downloadBarrierArtifactsStep.with["merge-multiple"], true);

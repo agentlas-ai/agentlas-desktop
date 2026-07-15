@@ -1,0 +1,77 @@
+name: Apply Desktop Release Web Env
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Already-published desktop version"
+        required: true
+      tag:
+        description: "Already-published stable release tag"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  apply-production-release-metadata:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Resolve recovery inputs
+        env:
+          RAW_TAG: ${{ inputs.tag }}
+          RAW_VERSION: ${{ inputs.version }}
+        run: |
+          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if [[ ! "$RAW_TAG" =~ $semver_tag_re ]] || [ "$RAW_VERSION" != "${RAW_TAG#v}" ]; then
+            echo "::error::Stable tag/version mismatch."
+            exit 1
+          fi
+          {
+            echo "RESOLVED_TAG=$RAW_TAG"
+            echo "RESOLVED_VERSION=$RAW_VERSION"
+          } >> "$GITHUB_ENV"
+
+      - name: Download published verified release metadata
+        env:
+          GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+        run: |
+          mkdir -p release
+          gh release download "$RESOLVED_TAG" --repo agentlas-ai/agentlas-desktop-releases --pattern desktop-release.production.env --dir release --clobber
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const values = Object.fromEntries(fs.readFileSync('release/desktop-release.production.env', 'utf8')
+            .split(/\r?\n/).filter(Boolean).map((line) => {
+              const index = line.indexOf('=');
+              return [line.slice(0, index), line.slice(index + 1)];
+            }));
+          if (values.AGENTLAS_DESKTOP_VERSION !== process.env.RESOLVED_VERSION ||
+              values.AGENTLAS_DESKTOP_RELEASE_TAG !== process.env.RESOLVED_TAG ||
+              values.AGENTLAS_DESKTOP_RELEASE_VERIFIED !== 'true' ||
+              values.AGENTLAS_DESKTOP_RELEASE_NOTARIZED !== 'true') {
+            throw new Error('Published production metadata does not match the requested verified release.');
+          }
+          NODE
+
+      - name: Install pinned Railway CLI
+        run: npm install -g @railway/cli@5.26.0
+
+      - name: Apply and verify production desktop release metadata
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+        run: |
+          test -n "$RAILWAY_TOKEN"
+          test -n "$RAILWAY_PROJECT_ID"
+          npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web
+          npm run release:web-env -- --apply --restart --environment=production --service=agentlas-web --verify-url=https://agentlas.cloud/api/desktop/latest

@@ -508,6 +508,28 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Checkout immutable Mac release tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tooling
+          sparse-checkout: |
+            scripts/package-mac.sh
+            scripts/verify-mac-update-lineage.mjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Verify and install immutable Mac release tooling
+        run: |
+          tooling_commit="$(git -C .release-tooling rev-parse HEAD)"
+          if [ "$tooling_commit" != "$GITHUB_SHA" ]; then
+            echo "::error::Mac release tooling checkout does not match immutable workflow commit."
+            exit 1
+          fi
+          cp .release-tooling/scripts/package-mac.sh scripts/package-mac.sh
+          cp .release-tooling/scripts/verify-mac-update-lineage.mjs scripts/verify-mac-update-lineage.mjs
+          chmod +x scripts/package-mac.sh scripts/verify-mac-update-lineage.mjs
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -564,6 +586,21 @@ jobs:
           args=(--tag="$RESOLVED_TAG" --version="$RESOLVED_VERSION")
           if [ "$RESOLVED_DRAFT" = "true" ]; then args+=(--draft); fi
           npm run release:mac:publish -- "${args[@]}"
+
+      - name: Install pinned Railway CLI for production release metadata
+        if: env.RESOLVED_APPLY_WEB_ENV == 'true' && env.RESOLVED_DRAFT != 'true'
+        run: npm install -g @railway/cli@5.26.0
+
+      - name: Apply and verify production desktop release metadata
+        if: env.RESOLVED_APPLY_WEB_ENV == 'true' && env.RESOLVED_DRAFT != 'true'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+        run: |
+          test -n "$RAILWAY_TOKEN"
+          test -n "$RAILWAY_PROJECT_ID"
+          npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web
+          npm run release:web-env -- --apply --restart --environment=production --service=agentlas-web --verify-url=https://agentlas.cloud/api/desktop/latest
 
       - name: Upload complete release evidence
         if: always()
