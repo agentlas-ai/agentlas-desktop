@@ -51,9 +51,11 @@ import {
   requireBorrowedAgentSpecs,
   runBorrowedTaskForceInvocation,
   type BorrowedAgentSpec,
+  type WorkforceLeaderRunnerEvidence,
 } from "./borrowed-task-force";
 import {
   emitWorkforceBenchmarkSelectionArtifacts,
+  isWorkforceLeaderRuntimeAllowed,
   parseWorkforceCommand,
   runWorkforceSelection,
 } from "./workforce-orchestrator";
@@ -1219,6 +1221,18 @@ export async function runMcpInvocation(
     });
     return earlyResult();
   }
+  if (explicitWorkforceGoal && !isWorkforceLeaderRuntimeAllowed(active.kind)) {
+    sink({
+      kind: "error",
+      error: {
+        code: "workforce-leader-runtime-unsupported",
+        message: locale === "ko"
+          ? `선택한 ${active.kind} 런타임은 Workforce 리더의 로컬 무권한 경계가 검증되지 않았습니다. 다른 모델로 몰래 대체하지 않고 실행을 중단했습니다.`
+          : `The selected ${active.kind} runtime has no verified local no-authority boundary for the Workforce leader. Execution was stopped without a hidden model fallback.`,
+      },
+    });
+    return earlyResult();
+  }
 
   // Stormbreaker is an executable Goal/UltraCode mode, not only a prompt
   // suffix. Non-trivial explicit/automatic requests enter the bounded swarm
@@ -1314,7 +1328,10 @@ export async function runMcpInvocation(
       mcpRuntimeEnv = { ...agentAppToolGrant.mcpRuntimeEnv };
     }
   }
-  if (runtimeCanUseMcp && !req.agentAppMode && canWrite) {
+  // Workforce capability choice belongs to the same top host LLM that owns the
+  // roster. The ordinary lexical auto-selector may search/install broad tools,
+  // so it is never an authority source for an explicit Workforce execution.
+  if (runtimeCanUseMcp && !req.agentAppMode && canWrite && !explicitWorkforceGoal) {
     try {
       const selectedContext = await autoSelectMcpTools({
         userPrompt: effectiveUserPrompt,
@@ -1428,12 +1445,54 @@ export async function runMcpInvocation(
   // deterministic validation, and exact immutable release preparation.
   if (explicitWorkforceGoal) {
     try {
+      const workforceLeaderRunnerEvidence: WorkforceLeaderRunnerEvidence[] = [];
       const workforce = await runWorkforceSelection({
         goal: explicitWorkforceGoal,
+        inputModalities: req.images?.length ? ["modality:image"] : [],
         active,
         benchmarkMode: workforceBenchmarkMode,
         signal,
         sink,
+        auditSchemaAttempt: (attempt) => tryRecordRunEvent({
+          runId: req.runId ?? `task-force:${chat.id}`,
+          kind: "workforce_schema_attempt",
+          chatId: chat.id,
+          nodeId: "workforce:leader",
+          agentId: agent.id,
+          payload: { ...attempt },
+        }),
+        auditHubToolObservation: (observation) => tryRecordRunEvent({
+          runId: req.runId ?? `task-force:${chat.id}`,
+          kind: "workforce_hub_tool_observation",
+          chatId: chat.id,
+          nodeId: "workforce:leader",
+          agentId: agent.id,
+          payload: { ...observation },
+        }),
+        auditHubToolSupersession: (supersession) => tryRecordRunEvent({
+          runId: req.runId ?? `task-force:${chat.id}`,
+          kind: "workforce_hub_tool_supersession",
+          chatId: chat.id,
+          nodeId: "workforce:leader",
+          agentId: agent.id,
+          payload: { ...supersession },
+        }),
+        auditLeaderDecisionSupersession: (supersession) => tryRecordRunEvent({
+          runId: req.runId ?? `task-force:${chat.id}`,
+          kind: "workforce_leader_decision_supersession",
+          chatId: chat.id,
+          nodeId: "workforce:leader",
+          agentId: agent.id,
+          payload: { ...supersession },
+        }),
+        auditWorkOrderRefinement: (refinement) => tryRecordRunEvent({
+          runId: req.runId ?? `task-force:${chat.id}`,
+          kind: "workforce_work_order_refinement",
+          chatId: chat.id,
+          nodeId: "workforce:leader",
+          agentId: agent.id,
+          payload: { ...refinement },
+        }),
         leader: async (turn) => {
           throwIfInvocationAborted(signal, locale);
           const result = await picked.runner(
@@ -1441,7 +1500,9 @@ export async function runMcpInvocation(
               systemPrompt: turn.systemPrompt,
               history: [],
               userPrompt: turn.userPrompt,
-              images: undefined,
+              // Attachments stay inside the selected local/BYOM leader runtime. Hub receives
+              // only the validated redacted WorkOrder, never image bytes or attachment paths.
+              images: req.images,
               backendLabel: picked.label,
               model: active.model ?? undefined,
               longContext: active.longContextEnabled ?? false,
@@ -1477,6 +1538,11 @@ export async function runMcpInvocation(
               }),
             },
           );
+          workforceLeaderRunnerEvidence.push({
+            invocationId: turn.invocationId,
+            runtime: { ...active },
+            result: { appliedEffort: result.appliedEffort },
+          });
           return result.text;
         },
       });
@@ -1497,13 +1563,20 @@ export async function runMcpInvocation(
           decisionOwner: workforce.receipt.decisionOwner,
           decisionModel: workforce.receipt.decisionModel,
           historyInfluence: workforce.receipt.historyInfluence,
+          executionContext: workforce.receipt.executionContext,
+          executionContextDigest: workforce.receipt.executionContextDigest,
           idealTeam: workforce.receipt.idealTeam,
           executableTeam: workforce.receipt.executableTeam,
           unfilledPosts: workforce.receipt.unfilledPosts,
           substitutions: workforce.receipt.substitutions,
           preparedReleases: workforce.receipt.preparedReleases,
           mcpCalls: workforce.receipt.mcpCalls,
+          hubToolObservations: workforce.receipt.hubToolObservations,
+          hubToolSupersessions: workforce.receipt.hubToolSupersessions,
+          leaderDecisionSupersessions: workforce.receipt.leaderDecisionSupersessions,
           leaderInvocations: workforce.receipt.leaderInvocations,
+          schemaAttempts: workforce.receipt.schemaAttempts,
+          workOrderRefinements: workforce.receipt.workOrderRefinements,
         },
       });
       const execution = await runBorrowedTaskForceInvocation({
@@ -1530,6 +1603,7 @@ export async function runMcpInvocation(
         sink,
         signal,
         workforceSelectionReceipt: workforce.receipt,
+        workforceLeaderRunnerEvidence,
         benchmarkMode: workforceBenchmarkMode,
         requireAllWorkers: true,
       });
@@ -1538,7 +1612,7 @@ export async function runMcpInvocation(
           kind: "error",
           error: {
             code: "workforce-verification-failed",
-            message: execution.receipt?.verifier.issues.join(", ") || "Workforce structural verification failed.",
+            message: execution.verifierIssues?.join(", ") || "Workforce structural verification failed.",
           },
         });
       }

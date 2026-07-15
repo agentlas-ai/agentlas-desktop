@@ -19,6 +19,7 @@ on:
       - "electron/mcp/client.ts"
       - "electron/mcp/borrowed-task-force.ts"
       - "electron/mcp/workforce-orchestrator.ts"
+      - "electron/mcp/workforce-tool-inventory.ts"
       - "electron/mcp/swarm-engine.ts"
       - "electron/mcp/swarm-run.ts"
       - "electron/mcp-tools/**"
@@ -126,6 +127,7 @@ on:
       - "electron/mcp/client.ts"
       - "electron/mcp/borrowed-task-force.ts"
       - "electron/mcp/workforce-orchestrator.ts"
+      - "electron/mcp/workforce-tool-inventory.ts"
       - "electron/mcp/swarm-engine.ts"
       - "electron/mcp/swarm-run.ts"
       - "electron/mcp-tools/**"
@@ -234,7 +236,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: agentlas-ai/Agentlas-OS
-          ref: cf71b8be1732f249b4d79d66246f7d3c0cd0790f
+          ref: 49752a783e944c898ea023705104661b3beb87b2
           path: agentlas-desktop/Hephaestus
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -245,7 +247,7 @@ jobs:
       - name: Verify Core source pin
         working-directory: agentlas-desktop/Hephaestus
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "cf71b8be1732f249b4d79d66246f7d3c0cd0790f"
+        run: test "$(git rev-parse HEAD)" = "49752a783e944c898ea023705104661b3beb87b2"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

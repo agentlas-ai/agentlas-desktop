@@ -8,7 +8,11 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult } from "./runner";
-import { wrapSystemPrompt } from "./runner";
+import {
+  workforceNativeToolEnforcement,
+  workforceZeroToolsEnforcement,
+  wrapSystemPrompt,
+} from "./runner";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
@@ -51,6 +55,58 @@ function isCanonicalAgentAppInlineMcpConfig(value: string | undefined): boolean 
   } catch {
     return false;
   }
+}
+
+async function inspectWorkforceMcpConfig(req: RunnerRequest): Promise<{
+  bytes: string;
+  serverConfigKeys: string[];
+} | null> {
+  const grant = req.workforceRuntimeToolGrant;
+  if (!grant || grant.grantedToolIds.length === 0) return null;
+  if (
+    !req.untrustedNoTools ||
+    !req.mcpConfigPath ||
+    !path.isAbsolute(req.mcpConfigPath) ||
+    req.mcpCodexConfigArgs?.length ||
+    JSON.stringify(req.mcpAllowedTools) !== JSON.stringify(grant.grantedToolIds) ||
+    JSON.stringify(req.untrustedAllowedMcpTools) !== JSON.stringify(grant.grantedToolIds)
+  ) return null;
+  try {
+    const before = await fs.lstat(req.mcpConfigPath);
+    if (!before.isFile() || before.isSymbolicLink()) return null;
+    const bytes = await fs.readFile(req.mcpConfigPath, "utf8");
+    const after = await fs.lstat(req.mcpConfigPath);
+    if (
+      before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+    ) return null;
+    const digest = `sha256:${crypto.createHash("sha256").update(bytes, "utf8").digest("hex")}`;
+    if (digest !== grant.canonicalConfigSha256) return null;
+    const parsed = JSON.parse(bytes) as { mcpServers?: Record<string, unknown> };
+    if (
+      !parsed || typeof parsed !== "object" || Array.isArray(parsed) ||
+      JSON.stringify(Object.keys(parsed)) !== JSON.stringify(["mcpServers"]) ||
+      !parsed.mcpServers || typeof parsed.mcpServers !== "object" || Array.isArray(parsed.mcpServers)
+    ) return null;
+    const serverConfigKeys = Object.keys(parsed.mcpServers).sort();
+    if (JSON.stringify(serverConfigKeys) !== JSON.stringify([...grant.expectedServerConfigKeys].sort())) return null;
+    if (grant.grantedToolIds.some((toolId) => !serverConfigKeys.some((key) => toolId.startsWith(`mcp__${key}__`)))) {
+      return null;
+    }
+    return { bytes, serverConfigKeys };
+  } catch {
+    return null;
+  }
+}
+
+async function materializeWorkforceMcpConfig(bytes: string): Promise<{ arg: string; cleanup: () => void }> {
+  const file = path.join(os.tmpdir(), `agentlas-workforce-mcp-${process.pid}-${crypto.randomUUID()}.json`);
+  await fs.writeFile(file, bytes, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  if (process.platform !== "win32") await fs.chmod(file, 0o600);
+  return {
+    arg: file,
+    cleanup: () => { void fs.unlink(file).catch(() => {}); },
+  };
 }
 
 function stripAgentAppMcpSecretAliases(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv | undefined {
@@ -281,7 +337,7 @@ export const runClaudeCode: Runner = async (
   // Establish the exact one-run MCP authority before writing the system
   // prompt. A malformed config must not leave the model believing a tool is
   // available after the argv gate has already removed it.
-  const hasExactUntrustedMcpGrant = Boolean(
+  const hasExactAgentAppMcpGrant = Boolean(
     runReq.untrustedNoTools &&
     isCanonicalAgentAppInlineMcpConfig(runReq.mcpConfigPath) &&
     runReq.mcpAllowedTools?.length &&
@@ -290,7 +346,24 @@ export const runClaudeCode: Runner = async (
     validSiteAgentAppMcpGrantTools(runReq.untrustedAllowedMcpTools) &&
     JSON.stringify(runReq.mcpAllowedTools) === JSON.stringify(runReq.untrustedAllowedMcpTools),
   );
-  if (runReq.untrustedNoTools && runReq.mcpConfigPath && !hasExactUntrustedMcpGrant) {
+  const workforceMcpConfig = await inspectWorkforceMcpConfig(runReq);
+  const hasExactWorkforceMcpGrant = Boolean(workforceMcpConfig);
+  const workforceGrantHasTools = Boolean(runReq.workforceRuntimeToolGrant?.grantedToolIds.length);
+  if (workforceGrantHasTools && !hasExactWorkforceMcpGrant) {
+    throw new Error("workforce_runtime_tool_grant_config_unverified");
+  }
+  if (
+    runReq.workforceRuntimeToolGrant &&
+    !workforceGrantHasTools &&
+    (runReq.mcpConfigPath || runReq.mcpAllowedTools?.length || runReq.untrustedAllowedMcpTools?.length)
+  ) {
+    throw new Error("workforce_zero_tool_grant_contains_mcp_authority");
+  }
+  const hasExactUntrustedMcpGrant = hasExactAgentAppMcpGrant || hasExactWorkforceMcpGrant;
+  if (
+    runReq.untrustedNoTools && runReq.mcpConfigPath && !hasExactUntrustedMcpGrant &&
+    !runReq.workforceRuntimeToolGrant
+  ) {
     try { runReq.onAgentAppMcpRuntimeUnavailable?.(); } catch { /* receipt reconciliation is best effort */ }
   }
 
@@ -305,6 +378,7 @@ export const runClaudeCode: Runner = async (
     runReq.untrustedNoTools
       ? (hasExactUntrustedMcpGrant ? runReq.untrustedAllowedMcpTools : undefined)
       : runReq.untrustedAllowedMcpTools,
+    runReq.workforceRuntimeToolGrant,
   );
   const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq) : null;
   const savedSession = !runReq.untrustedNoTools && runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
@@ -356,10 +430,13 @@ export const runClaudeCode: Runner = async (
   let cleanupAgentAppMcpConfig = () => {};
   if (hasExactUntrustedMcpGrant && runReq.mcpConfigPath) {
     try {
-      const materialized = await materializeWindowsAgentAppMcpConfig(bin, runReq.mcpConfigPath);
+      const materialized = hasExactWorkforceMcpGrant && workforceMcpConfig
+        ? await materializeWorkforceMcpConfig(workforceMcpConfig.bytes)
+        : await materializeWindowsAgentAppMcpConfig(bin, runReq.mcpConfigPath);
       agentAppMcpConfigArg = materialized.arg;
       cleanupAgentAppMcpConfig = materialized.cleanup;
     } catch (error) {
+      if (runReq.workforceRuntimeToolGrant) throw new Error("workforce_runtime_tool_grant_materialization_failed");
       try { runReq.onAgentAppMcpRuntimeUnavailable?.(); } catch { /* receipt reconciliation is best effort */ }
       throw createUntrustedRuntimeFailure();
     }
@@ -638,14 +715,19 @@ export const runClaudeCode: Runner = async (
         // close the Windows pathname race before any model output is trusted.
         cleanupAgentAppMcpConfig();
         const expectedTools = [...(runReq.mcpAllowedTools ?? [])].sort();
+        const expectedServers = hasExactWorkforceMcpGrant && workforceMcpConfig
+          ? [...workforceMcpConfig.serverConfigKeys].sort()
+          : ["agentlas-time"];
         const reportedTools = Array.isArray(ev.tools) && ev.tools.every((tool) => typeof tool === "string")
           ? [...ev.tools].sort()
           : [];
+        const reportedServers = Array.isArray(ev.mcp_servers) && ev.mcp_servers.every((server) => (
+          typeof server?.name === "string" && server.status === "connected"
+        ))
+          ? ev.mcp_servers.map((server) => server.name as string).sort()
+          : [];
         agentAppMcpInitConnected = Boolean(
-          Array.isArray(ev.mcp_servers) &&
-          ev.mcp_servers.length === 1 &&
-          ev.mcp_servers[0]?.name === "agentlas-time" &&
-          ev.mcp_servers[0]?.status === "connected" &&
+          JSON.stringify(reportedServers) === JSON.stringify(expectedServers) &&
           new Set(reportedTools).size === reportedTools.length &&
           JSON.stringify(reportedTools) === JSON.stringify(expectedTools)
         );
@@ -803,6 +885,10 @@ export const runClaudeCode: Runner = async (
         !agentAppMcpInitConnected
       ) {
         markAgentAppMcpUnavailable();
+        if (runReq.workforceRuntimeToolGrant) {
+          rejectRuntime(new Error("workforce_runtime_tool_inventory_init_unverified"));
+          return;
+        }
         void runClaudeCode({
           ...runReq,
           mcpConfigPath: undefined,
@@ -827,7 +913,22 @@ export const runClaudeCode: Runner = async (
           }
         }
         events.onStatus(`[runtime-session] ${resumeSessionId ? "resumed" : "created"} kind=${KIND}`);
-        resolve({ text: display.trim(), sessionId, tokens });
+        resolve({
+          text: display.trim(),
+          sessionId,
+          tokens,
+          workforcePermissionEnforcement: hasExactWorkforceMcpGrant
+            ? workforceNativeToolEnforcement(
+                runReq,
+                KIND,
+                ["builtins", "slash_commands", "chrome", "session_persistence"],
+              )
+            : workforceZeroToolsEnforcement(
+                runReq,
+                KIND,
+                ["builtins", "mcp", "slash_commands", "chrome", "session_persistence"],
+              ),
+        });
       } else {
         if (runReq.untrustedNoTools) {
           // Pre-init failures already replay once through the exact init gate.

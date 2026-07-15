@@ -348,11 +348,31 @@ export const runCodex: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  if (
+    req.untrustedNoTools &&
+    (Boolean(req.mcpConfigPath) ||
+      Boolean(req.mcpAllowedTools?.length) ||
+      Boolean(req.mcpCodexConfigArgs?.length) ||
+      Boolean(req.untrustedAllowedMcpTools?.length))
+  ) {
+    throw new Error(
+      req.locale === "ko"
+        ? "Codex CLI의 격리 실행은 외부 도구가 전혀 없는 경우에만 검증되었습니다. 이 실행의 MCP 권한은 허용할 수 없습니다."
+        : "Codex CLI isolation is verified only with no external tools. This run's MCP grant cannot be admitted.",
+    );
+  }
+  // Measured on the installed Codex CLI 0.144.4 (2026-07-16): even with
+  // `--disable multi_agent` and every other configurable tool feature disabled,
+  // the runtime still emitted a collaboration tool call. Read-only filesystem
+  // sandboxing does not revoke that delegation authority. Until Codex exposes a
+  // release-verified switch that removes the collaboration surface, borrowed
+  // packages, Agent Apps, and Workforce turns must stop before CLI discovery or
+  // process spawn rather than minting a false no-authority receipt.
   if (req.untrustedNoTools) {
     throw new Error(
       req.locale === "ko"
-        ? "Codex CLI는 읽기 도구를 완전히 제거할 수 없어 Agent App의 무도구 격리 모드에서 사용할 수 없습니다. Claude Code, Ollama 또는 API 런타임을 선택하세요."
-        : "Codex CLI cannot fully remove read tools, so it cannot be used for Agent App's tool-less isolation. Select Claude Code, Ollama, or an API runtime.",
+        ? "Codex CLI 0.144.4에서 서브에이전트 협업 권한이 제거되지 않음이 실측되어 격리된 Agent App/Workforce 실행을 차단했습니다."
+        : "Codex CLI 0.144.4 still exposes collaboration/delegation authority after tool features are disabled. Isolated Agent App and Workforce execution is blocked before process spawn.",
     );
   }
   if (req.restrictedReadBoundary) {
@@ -381,7 +401,7 @@ export const runCodex: Runner = async (
 
   const permArgs = permissionArgs(runReq.permission);
   const mcpArgs =
-    !runReq.untrustedNoTools && runReq.mcpCodexConfigArgs && runReq.mcpCodexConfigArgs.length > 0
+    runReq.mcpCodexConfigArgs && runReq.mcpCodexConfigArgs.length > 0
       ? runReq.mcpCodexConfigArgs
       : [];
   // 모델/effort를 CLI에 명시 전달 — 예전엔 세션 지문에만 쓰고 인자로는 안 넘겨서, 앱이
@@ -405,13 +425,13 @@ export const runCodex: Runner = async (
   }
 
   // 세션 resume 가능 여부 — chatId 저장 세션 또는 Build 같은 호출자가 직접 넘긴 세션 id.
-  const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq) : null;
-  const existing = !runReq.untrustedNoTools && runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
+  const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
+  const existing = runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
   const storedSessionId =
     existing && fingerprint && existing.fingerprint === fingerprint
       ? existing.sessionId
       : null;
-  const resumeSessionId = runReq.untrustedNoTools ? null : (runReq.runtimeSessionId ?? storedSessionId);
+  const resumeSessionId = runReq.runtimeSessionId ?? storedSessionId;
   const canResume = !!resumeSessionId;
   if (existing && fingerprint && existing.fingerprint !== fingerprint) {
     events.onStatus(`[runtime-session] fingerprint_changed kind=${KIND}`);
@@ -445,7 +465,12 @@ export const runCodex: Runner = async (
         }
       }
       events.onStatus(`[runtime-session] resumed kind=${KIND}`);
-      return { text: r.text.trim(), sessionId: r.threadId ?? resumeSessionId, tokens: r.tokens, appliedEffort };
+      return {
+        text: r.text.trim(),
+        sessionId: r.threadId ?? resumeSessionId,
+        tokens: r.tokens,
+        appliedEffort,
+      };
     }
     // Build continuation recovery is owned by Main, which can remove exactly
     // one attributed server and preserve approved peers. Replaying here with
@@ -487,7 +512,12 @@ export const runCodex: Runner = async (
       }
     }
     events.onStatus(`[runtime-session] created kind=${KIND}`);
-    return { text: created.text.trim(), sessionId: created.threadId ?? undefined, tokens: created.tokens, appliedEffort };
+    return {
+      text: created.text.trim(),
+      sessionId: created.threadId ?? undefined,
+      tokens: created.tokens,
+      appliedEffort,
+    };
   }
   throw new Error(
     `codex CLI exit ${created.code}${created.stderr ? `\n${created.stderr.slice(0, 500)}` : ""}`,

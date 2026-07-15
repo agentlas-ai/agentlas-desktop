@@ -10,7 +10,7 @@
 //  - 압축: 모델 컨텍스트 윈도우 초과 시 compactHistory로 과거 대화를 다이제스트로 접음
 import { readApiKey } from "../secrets/vault";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { wrapSystemPrompt } from "./runner";
+import { workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { compactHistory } from "./compact";
 import {
@@ -173,7 +173,14 @@ async function runAnthropicMessages(
       // 빈 줄 또는 ping — 무시
     }
   }
-  return { text: acc.trim() };
+  return {
+    text: acc.trim(),
+    workforcePermissionEnforcement: workforceZeroToolsEnforcement(
+      req,
+      "byok",
+      ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
+    ),
+  };
 }
 
 export const runAnthropicByok: Runner = async (
@@ -296,7 +303,14 @@ export const runOpenAIByok: Runner = async (
       // 무시
     }
   }
-  return { text: acc.trim() };
+  return {
+    text: acc.trim(),
+    workforcePermissionEnforcement: workforceZeroToolsEnforcement(
+      req,
+      "byok",
+      ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
+    ),
+  };
 };
 
 // ── Upstage Solar (OpenAI-compatible; Korean sovereign LLM) ──────
@@ -351,7 +365,14 @@ export const runUpstageByok: Runner = async (
       // ignore
     }
   }
-  return { text: acc.trim() };
+  return {
+    text: acc.trim(),
+    workforcePermissionEnforcement: workforceZeroToolsEnforcement(
+      req,
+      "byok",
+      ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
+    ),
+  };
 };
 
 import { getDb } from "../store/db";
@@ -428,7 +449,14 @@ export const runCustomByok: Runner = async (
       // ignore
     }
   }
-  return { text: acc.trim() };
+  return {
+    text: acc.trim(),
+    workforcePermissionEnforcement: workforceZeroToolsEnforcement(
+      req,
+      "byok",
+      ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
+    ),
+  };
 };
 
 // ── Google Generative (Gemini) ───────────────────────────
@@ -502,5 +530,12 @@ export const runGoogleByok: Runner = async (
       // 무시
     }
   }
-  return { text: acc.trim() };
+  return {
+    text: acc.trim(),
+    workforcePermissionEnforcement: workforceZeroToolsEnforcement(
+      req,
+      "byok",
+      ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
+    ),
+  };
 };

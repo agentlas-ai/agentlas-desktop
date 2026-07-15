@@ -59,7 +59,7 @@ function resolveStdioCommand(s: InstalledMcpServer): string {
 }
 
 /** MCP tool 이름 mcp__<key>__<tool> 의 key — 안전한 슬러그. */
-function mcpKey(s: InstalledMcpServer): string {
+export function mcpConfigKey(s: InstalledMcpServer): string {
   return (s.catalogId || s.name || s.id).toLowerCase().replace(/[^a-z0-9_-]/g, "-");
 }
 
@@ -389,7 +389,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     }
     if (missingRequiredValue) continue;
 
-    const key = mcpKey(s);
+    const key = mcpConfigKey(s);
     if (s.transport === "stdio" && s.command) {
       const command = resolveStdioCommand(s);
       const secretAliases: Record<string, string> = {};

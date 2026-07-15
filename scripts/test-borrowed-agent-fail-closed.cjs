@@ -68,6 +68,21 @@ function preparedTeam(slug, { graph = true } = {}) {
   return { action: "hub_invoke", status: "prepared", slug, entityKind: "team", output };
 }
 
+function exactTeamManagerPlan() {
+  return [
+    "## Workforce Team Manager Plan",
+    "```json",
+    JSON.stringify({
+      plannedWorkerIds: ["worker-one", "worker-two"],
+      delegationBriefs: [
+        { workerId: "worker-one", brief: "Execute the first declared team responsibility." },
+        { workerId: "worker-two", brief: "Execute the second declared team responsibility." },
+      ],
+    }),
+    "```",
+  ].join("\n");
+}
+
 async function main() {
   await app.whenReady();
 
@@ -361,7 +376,7 @@ async function main() {
     }),
     runnerTexts: [
       "outer plan",
-      "team manager plan",
+      exactTeamManagerPlan(),
       "worker one result",
       "worker two result",
       "team manager synthesis",
@@ -870,7 +885,7 @@ async function main() {
     permission: "read",
     runnerTexts: [
       "RAG outer plan",
-      "RAG manager plan",
+      exactTeamManagerPlan(),
       "RAG worker one",
       "RAG worker two",
       "RAG team synthesis",

@@ -1,5 +1,135 @@
 # Changelog
 
+## 0.8.45 — 2026-07-16
+
+### Added
+
+- **Structured Workforce decisions get one bounded same-model repair.** If the
+  leader omits a required WorkOrder or Selection field, or the frozen-roster
+  planner emits an invalid packet/allocation shape, Desktop returns a sanitized
+  validation result, the exact schema, and a bounded/redacted prior answer
+  marked as untrusted transient data to the same pinned model. A second invalid
+  answer fails closed; persistent audit records retain digests and byte counts,
+  never raw model output.
+- **Hard gaps get at most two LLM-authored job-analysis refinements.** If a
+  required slot has fewer eligible candidates than its authored cardinality,
+  the same leader may replace the complete WorkOrder using only the previous
+  validated redacted order and a candidate-free gap summary. One valid
+  `requestExpansionForSlots` decision can use the remaining shared budget and
+  re-search; repeated expansion, exhausted budget, or a final shortage fails
+  closed before selection validation or execution.
+- **Hub attempts and the authoritative chain are receipt-backed.** Exact
+  request/response digests, retry decisions, superseded pre-refinement search,
+  schema attempts, provisional-selection supersession, and the final immutable
+  release chain remain observable through explicit durable transition records.
+- **Prepared execution is cryptographically and operationally bound.** Desktop
+  accepts only `agentlas.workforce-execution-plan.v5`, recomputes the Core v4
+  runtime-bundle digest over the exact selected release, directive bundle,
+  permission policy, and direct-agent or nested-team graph, and blocks a
+  missing marker, legacy plan, unsupported group, or byte change before the
+  planner or workers can start. A row is executable only when its top-level
+  bundle contains a nonblank `systemPrompt`, `instructions`, or `agentMd`.
+  The shared cross-language domain rejects numbers, non-ASCII object keys,
+  recursive `__proto__`/`prototype`/`constructor` keys, lone Unicode surrogates,
+  excessive depth, and excessive node counts instead of hashing ambiguous or
+  prototype-sensitive JSON.
+- **JIT tools are selected semantically and enforced per worker.** Desktop
+  inventories only enabled, configuration-valid MCP servers allowed by the
+  prepared policy, presents a private slot/release/runtime-scoped menu to the
+  top host LLM, and requires exact capability coverage. It never sends that
+  inventory to Hub and never reuses lexical auto-routing, wildcard grants, or
+  execution history. Each runtime must return its own grant-enforcement proof;
+  missing evidence fails closed.
+- **Direct and nested execution share a Core v2 receipt.** Direct agents, team
+  manager planning, declared graph workers, team synthesis, top synthesis, and
+  the structural verifier receive unique invocation identities. Team manager
+  plans get one same-model shape repair with no fallback, and the public receipt
+  includes only the host-authored capability binding plan plus the private
+  inventory digest.
+
+### Changed
+
+- **Leader outputs are direct, closed contracts.** WorkOrder and Selection use
+  exact top-level and nested keys. Legacy leader-call envelopes—including the
+  observed shape with `name` nested under `arguments`—are rejected as
+  `work_order_invalid` or `selection_invalid`; Desktop never moves fields or
+  turns model text into an MCP call.
+- **Job-family constraints preserve recall without inventing an inverse
+  taxonomy.** `requiredRoles` defaults empty, while title/task,
+  `optionalCommunities`, and `optionalSkills` carry desired fit. Global and
+  per-slot community exclusions are only explicit prohibitions or inherent
+  incompatibilities. Exact same-ID positive/negative conflicts are rejected
+  without host mutation or hardcoded ontology lineage.
+- **Only ambiguous candidate search is replayable.** The read-only,
+  deterministic selection-session replace/upsert may repeat the exact request
+  once after a post-dispatch outer transport ambiguity. Pre-request setup
+  failure, an explicit MCP protocol error, a received malformed tool payload,
+  semantic validation failure, `validate_selection`, and `prepare_execution`
+  are never retried.
+- **Content-only input is closed at the Desktop trust boundary.** CandidateSet
+  root, slot, candidate, semantic, operational, and evidence objects must match
+  the pinned Core exact-key schema and ontology version. Candidate text is
+  explicitly marked untrusted evidence rather than instructions, so injected
+  ranking/history fields or agent-authored prompt commands never become valid
+  selection inputs.
+- **Frozen-roster allocations are exact model decisions.** `schema`, live
+  runtime/model IDs, requirements, and at most eight reason codes are required;
+  Desktop rejects rather than inserting defaults, trimming, or truncating the
+  planner's allocation.
+- **Local-model allocation now reflects executable host facts.** Ollama,
+  LM Studio, and MLX advertise their detected model IDs with the runner's
+  conservative 32k context, no unproved tools or image support, and exact
+  `effort=none`. This removes the live Qwen dead end where model detection
+  exposed a model but omitted the profile required by the strict planner. A
+  duplicate Cursor inventory row was removed as part of the same live-runtime
+  audit.
+- **Codex 0.144.4 is fail-closed for untrusted and Workforce execution.** An
+  actual harmless probe emitted a collaboration tool call even after
+  `--disable multi_agent` and every other configurable tool feature was
+  disabled. Desktop therefore blocks Codex Agent App, borrowed-package, and
+  Workforce turns before CLI discovery or process spawn, excludes Codex from
+  the Workforce planner inventory, and never emits the former false
+  no-authority enforcement receipt. Ordinary explicitly trusted Codex use is
+  unchanged.
+- The bundled Core is Agentlas OS v1.1.45 at immutable commit
+  49752a783e944c898ea023705104661b3beb87b2. Desktop now consumes Core's exact
+  finite coverage-gap enum and shared accepted/rejected vectors, so live Hub
+  exclusion classes cross the boundary while unknown or identity-bearing codes
+  fail closed. The Workforce ontology remains
+  `awo:2026-07-15.2`, raw JSON SHA-256
+  `d6d30d45fe8d35fb785e165d1e80c6471a72436f0160c3933c21d4a31bf2fb32`.
+- WorkOrder refinements now host-bind only the five already validated immutable
+  transaction-envelope fields. The active LLM still authors every staffing,
+  handoff, exclusion, and policy decision; envelope echo drift is recorded as
+  `hostMutationApplied` plus the exact field-name list and immutable-envelope
+  digest instead of consuming a semantic repair attempt.
+- Strict Workforce planner prompts now show a parser-valid literal allocation
+  from the live runtime inventory instead of pipe-delimited pseudo-values that
+  the validator must reject. The model still authors every allocation and
+  packet; Desktop never inserts a fallback packet. Benchmark failures retain
+  bounded/redacted planner outputs, digests, partial selection artifacts, and
+  blocked receipts so routing evidence remains scoreable.
+- Independent assurance is encoded by the existing `reviews` relation. The
+  leader is instructed to use it for verification/audit separation, and a
+  selection that assigns the same immutable release to both ends fails repair
+  instead of being deterministically reassigned.
+
+### Verification
+
+- Direct-object and legacy-envelope repair/exhaustion, two hard-gap WorkOrder
+  refinements, selection expansion/repeat/exhaustion, shared Core/Desktop
+  multilingual digest-v4 vectors and rejected-domain corpus, exact-request search replay and mutation
+  no-retry boundaries, strict frozen-roster planning, 79 nested task-force
+  checks, release foundation, fresh/stored/corrupt settings migration, top-turn
+  auto-routing, TypeScript, production build, actionlint, and updater/release
+  contracts pass locally.
+- The opt-in live harness records a fixed reasoning benchmark without local
+  project data. Terra/Codex proves the pre-spawn isolation block with zero Hub
+  calls; Qwen proves same-model WorkOrder generation and authenticated
+  `workforce.search_candidates` transport before any later contract gate.
+- This source state does not prove a Desktop Git tag, installer, update feed, or
+  GitHub release.
+
 ## 0.8.44 — 2026-07-16
 
 ### Fixed

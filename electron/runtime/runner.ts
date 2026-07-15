@@ -63,6 +63,12 @@ export interface RunnerRequest {
   untrustedNoTools?: boolean;
   /** Exact main-minted read-only MCP tools allowed despite the zero-builtins boundary. */
   untrustedAllowedMcpTools?: string[];
+  /**
+   * Main-minted, digest-bound Workforce authority. This is metadata for the
+   * runtime to verify against the exact config/argv it actually admits; the
+   * model and renderer can never author it.
+   */
+  workforceRuntimeToolGrant?: WorkforceRuntimeToolGrant;
   /** Internal one-shot marker preventing recursive Agent App MCP fallback. */
   agentAppMcpFallbackAttempted?: true;
   /** Main-only callback used to reconcile the browser-safe capability receipt. */
@@ -81,6 +87,128 @@ export interface RunnerRequest {
   forceSurface?: boolean;
   /** 상태/오류 메시지 i18n에 사용. renderer가 동봉, fallback "en" */
   locale: RuntimeLocale;
+}
+
+export interface WorkforceRuntimeToolGrant {
+  schemaVersion: "agentlas.desktop-workforce-runtime-tool-grant.v1";
+  permissionPolicyDigest: string;
+  toolInventoryDigest: string;
+  grantedToolIds: string[];
+  expectedServerConfigKeys: string[];
+  canonicalConfigSha256: string | null;
+  runtimeVersion: string | null;
+}
+
+export interface WorkforcePermissionEnforcementReceipt {
+  permissionPolicyDigest: string;
+  enforcementMode: "native-sandbox" | "no-authority-sandbox" | "zero-tools";
+  status: "enforced";
+  approvalReceiptIds: string[];
+  enforcementEvidence: {
+    runtimeKind: string;
+    runtimeVersion: string | null;
+    sandboxMode: "read-only" | "no-filesystem" | "host-native" | "not-applicable";
+    toolInventory: "empty" | "non-authoritative" | "policy-filtered";
+    disabledCapabilities: string[];
+    ephemeral: boolean;
+    ignoredUserConfig: boolean;
+    ignoredRules: boolean;
+    toolInventoryDigest: string;
+    grantedToolIds: string[];
+  };
+}
+
+const WORKFORCE_SHA256_RE = /^sha256:[0-9a-f]{64}$/;
+const WORKFORCE_TOOL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.$:/@+~-]{0,127}$/;
+
+function validatedWorkforceGrant(req: RunnerRequest): WorkforceRuntimeToolGrant | null {
+  const grant = req.workforceRuntimeToolGrant;
+  if (!grant) return null;
+  if (
+    grant.schemaVersion !== "agentlas.desktop-workforce-runtime-tool-grant.v1" ||
+    !WORKFORCE_SHA256_RE.test(grant.permissionPolicyDigest) ||
+    !WORKFORCE_SHA256_RE.test(grant.toolInventoryDigest) ||
+    grant.grantedToolIds.length > 128 ||
+    new Set(grant.grantedToolIds).size !== grant.grantedToolIds.length ||
+    grant.grantedToolIds.some((toolId) => !WORKFORCE_TOOL_ID_RE.test(toolId)) ||
+    grant.expectedServerConfigKeys.length > 64 ||
+    new Set(grant.expectedServerConfigKeys).size !== grant.expectedServerConfigKeys.length ||
+    grant.expectedServerConfigKeys.some((key) => !/^[a-z0-9][a-z0-9_-]{0,79}$/.test(key)) ||
+    (grant.canonicalConfigSha256 !== null && !WORKFORCE_SHA256_RE.test(grant.canonicalConfigSha256))
+  ) {
+    throw new Error("workforce_runtime_tool_grant_invalid");
+  }
+  return grant;
+}
+
+/** Runtime-owned receipt for a verified stateless API/CLI with no tool surface. */
+export function workforceZeroToolsEnforcement(
+  req: RunnerRequest,
+  runtimeKind: string,
+  disabledCapabilities: string[],
+): WorkforcePermissionEnforcementReceipt | undefined {
+  const grant = validatedWorkforceGrant(req);
+  if (!grant) return undefined;
+  if (
+    grant.grantedToolIds.length !== 0 ||
+    grant.expectedServerConfigKeys.length !== 0 ||
+    grant.canonicalConfigSha256 !== null
+  ) {
+    throw new Error("workforce_zero_tools_grant_not_empty");
+  }
+  return {
+    permissionPolicyDigest: grant.permissionPolicyDigest,
+    enforcementMode: "zero-tools",
+    status: "enforced",
+    approvalReceiptIds: [],
+    enforcementEvidence: {
+      runtimeKind,
+      runtimeVersion: grant.runtimeVersion,
+      sandboxMode: "no-filesystem",
+      toolInventory: "empty",
+      disabledCapabilities: [...new Set(disabledCapabilities)],
+      ephemeral: true,
+      ignoredUserConfig: true,
+      ignoredRules: true,
+      toolInventoryDigest: grant.toolInventoryDigest,
+      grantedToolIds: [],
+    },
+  };
+}
+
+/** Runtime-owned receipt after exact config hash + connected-server/tool proof. */
+export function workforceNativeToolEnforcement(
+  req: RunnerRequest,
+  runtimeKind: string,
+  disabledCapabilities: string[],
+): WorkforcePermissionEnforcementReceipt | undefined {
+  const grant = validatedWorkforceGrant(req);
+  if (!grant) return undefined;
+  if (
+    grant.grantedToolIds.length === 0 ||
+    grant.expectedServerConfigKeys.length === 0 ||
+    grant.canonicalConfigSha256 === null
+  ) {
+    throw new Error("workforce_native_tool_grant_empty");
+  }
+  return {
+    permissionPolicyDigest: grant.permissionPolicyDigest,
+    enforcementMode: "native-sandbox",
+    status: "enforced",
+    approvalReceiptIds: [],
+    enforcementEvidence: {
+      runtimeKind,
+      runtimeVersion: grant.runtimeVersion,
+      sandboxMode: "host-native",
+      toolInventory: "policy-filtered",
+      disabledCapabilities: [...new Set(disabledCapabilities)],
+      ephemeral: true,
+      ignoredUserConfig: true,
+      ignoredRules: true,
+      toolInventoryDigest: grant.toolInventoryDigest,
+      grantedToolIds: [...grant.grantedToolIds],
+    },
+  };
 }
 
 export interface RunnerEvents {
@@ -104,6 +232,8 @@ export interface RunnerResult {
   tokens?: number;
   /** Exact effort explicitly applied by the runner; null means no explicit effort was sent. */
   appliedEffort?: string | null;
+  /** Present only when a Workforce runtime has verified and enforced its main-minted grant. */
+  workforcePermissionEnforcement?: WorkforcePermissionEnforcementReceipt;
 }
 
 export type Runner = (
@@ -222,10 +352,18 @@ export function wrapSystemPrompt(
   untrustedNoTools?: boolean,
   /** Exact read-only MCP tools verified by Electron main for this one run. */
   untrustedAllowedMcpTools?: string[],
+  /** Digest-bound Workforce grant, already validated again by the concrete runtime. */
+  workforceRuntimeToolGrant?: WorkforceRuntimeToolGrant,
 ): string {
   if (untrustedNoTools) {
     const requested = untrustedAllowedMcpTools ?? [];
-    const allowed = validSiteAgentAppMcpGrantTools(requested) ? requested : [];
+    const workforceGranted = workforceRuntimeToolGrant?.grantedToolIds ?? [];
+    const allowed = workforceRuntimeToolGrant
+      ? JSON.stringify(requested) === JSON.stringify(workforceGranted) &&
+          requested.every((toolId) => WORKFORCE_TOOL_ID_RE.test(toolId))
+        ? requested
+        : []
+      : validSiteAgentAppMcpGrantTools(requested) ? requested : [];
     return [
       tStatus(locale, "sysHeader"),
       responseLanguageGuide(locale, userPrompt),

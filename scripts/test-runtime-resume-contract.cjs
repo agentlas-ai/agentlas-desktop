@@ -148,6 +148,30 @@ process.stdin.on("end", () => {
     effort: "high",
     userPrompt: "Do not exceed the requested effort",
   }, events);
+  await assert.rejects(
+    runCodex({
+      ...base,
+      permission: "full",
+      chatId: "must-not-persist-untrusted-codex",
+      runtimeSessionId: "must-not-resume-untrusted-codex",
+      untrustedNoTools: true,
+      userPrompt: "Return a result without external authority",
+    }, events),
+    /still exposes collaboration\/delegation authority/,
+    "Codex 0.144.4 untrusted execution must fail before process spawn",
+  );
+  await assert.rejects(
+    runCodex({
+      ...base,
+      chatId: undefined,
+      permission: "read",
+      untrustedNoTools: true,
+      mcpConfigPath: "/tmp/untrusted-codex-mcp.json",
+      mcpAllowedTools: ["mcp__untrusted__read"],
+      userPrompt: "Never admit an unverified mixed MCP boundary",
+    }, events),
+    /MCP grant cannot be admitted/,
+  );
 
   await assert.rejects(
     runCodex({
@@ -177,7 +201,7 @@ process.stdin.on("end", () => {
   }
 
   const invocations = fs.readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.equal(invocations.length, 8, "restricted CLI calls must not spawn a provider process");
+  assert.equal(invocations.length, 8, "restricted, untrusted, and mixed-MCP calls must not spawn a provider process");
   assert.ok(invocations[0].args.includes("gpt-contract-one"), "create must keep the selected model");
   assert.deepEqual(
     invocations[0].args.slice(invocations[0].args.indexOf("--sandbox"), invocations[0].args.indexOf("--sandbox") + 2),
@@ -255,7 +279,7 @@ process.stdin.on("end", () => {
 
   console.log(JSON.stringify({
     ok: true,
-    checks: 39,
+    checks: 49,
     modelPreservedOnResume: true,
     modelChangeInvalidatesSession: true,
     attachmentReachedHostAsFile: true,

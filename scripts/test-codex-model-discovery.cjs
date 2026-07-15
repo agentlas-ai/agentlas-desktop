@@ -161,6 +161,9 @@ async function main() {
     const catalog = require("../dist/shared/models.js").cliModels("codex");
     assert.equal(catalog.some((model) => model.id === "gpt-5.6-codex"), false);
     assert.equal(catalog.some((model) => model.id === "gpt-5.5-codex"), false);
+    assert.equal(catalog.find((model) => model.id === "gpt-5.6-sol")?.workforceTier, "frontier");
+    assert.equal(catalog.find((model) => model.id === "gpt-5.6-terra")?.workforceTier, "balanced");
+    assert.equal(catalog.find((model) => model.id === "gpt-5.6-luna")?.workforceTier, "economy");
 
     const detectSource = fs.readFileSync(
       path.join(__dirname, "..", "electron", "runtime", "detect.ts"),
@@ -168,6 +171,7 @@ async function main() {
     );
     assert.match(detectSource, /readCodexModelInventory\(\)/);
     assert.match(detectSource, /allocationModelProfiles:\s*codexModelProfiles/);
+    assert.match(detectSource, /codexHostCatalog\.get\(model\.id\)\?\.workforceTier/);
     assert.match(detectSource, /capabilities:\s*profile\.capabilities \? \[\.\.\.profile\.capabilities\]/);
     assert.match(detectSource, /efforts:\s*profile\.efforts \? \[\.\.\.profile\.efforts\]/);
     const runnerSource = fs.readFileSync(

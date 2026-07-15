@@ -69,6 +69,48 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-16 · v0.8.45 — direct Workforce contracts and bounded semantic
+  recovery** — The active host LLM now returns direct WorkOrder and Selection
+  objects with exact top-level and nested keys. Legacy `toolCall` envelopes are
+  rejected rather than normalized, including the observed nested-`name` shape.
+  The same pinned model gets at most one bounded schema repair per structured
+  turn and at most two total candidate-free semantic WorkOrder refinements. A
+  first valid selection expansion uses the same budget and re-searches; repeated
+  expansion or a remaining hard gap fails closed.
+
+  `requiredRoles` defaults empty and desired role fit stays in title/task,
+  `optionalCommunities`, and `optionalSkills`. Community exclusions represent
+  only explicit prohibitions or inherent incompatibilities, not every unused job
+  family; exact same-ID positive/negative conflicts fail without host mutation.
+  Only post-dispatch ambiguous outer transport failure from read-only candidate
+  search can replay once. Pre-request setup errors, explicit MCP errors,
+  received malformed tool payloads, selection validation, and execution
+  preparation never retry. CandidateSet keys/version are checked against Core,
+  candidate text is untrusted evidence, and execution-plan v5 bundles must
+  contain executable top-level instructions, an exact permission policy, and a
+  direct-agent or nested-team graph matching the recomputed cross-language
+  bundle-digest v4 before any worker starts. A private JIT MCP tool inventory is
+  scoped to each slot/release/runtime pair; the host LLM chooses semantic
+  capability bindings, while each runtime must prove the exact enforced grant.
+  The public v2 execution receipt records direct and nested calls without
+  leaking the private inventory. Reserved recursive prototype keys are rejected
+  by the shared digest domain. Detected Ollama, LM Studio, and MLX models now
+  expose a conservative executable allocation profile (`effort=none`) instead
+  of appearing in the planner menu without enough facts to run. Codex 0.144.4
+  is deliberately absent from untrusted Workforce allocation: a harmless live
+  probe still observed a collaboration tool call after all configurable tool
+  features, including `multi_agent`, were disabled, so Desktop blocks that path
+  before process spawn rather than claiming a no-authority sandbox. Trusted
+  ordinary Codex conversations remain available.
+  Strict planner examples now contain one fully valid live-runtime allocation
+  rather than enum placeholders, and formal `reviews` edges enforce distinct
+  immutable releases for independent assurance without host roster mutation.
+  Agentlas OS v1.1.45 is pinned at
+  49752a783e944c898ea023705104661b3beb87b2. Its finite public coverage-gap
+  enum now matches the live Hub emitter exactly and rejects free-form or
+  candidate-identifying gap values. This source does not prove a
+  Desktop tag, public installer, or update-feed release.
+
 - **2026-07-16 · v0.8.44 — exact seven-route mobile authority gate** — The Linux
   release gate now proves the restricted-read boundary independently for
   Workforce, temporary task forces, saved groups, Hub borrowed task forces,

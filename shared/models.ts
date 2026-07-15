@@ -285,6 +285,8 @@ export interface CliModelOption {
   /** CLI 모델 플래그에 전달하는 값. claude는 opus/sonnet/haiku 별칭 또는 풀ID(claude-opus-4-7 등) */
   id: string;
   label: string;
+  /** Host-authored Workforce capacity tier. Omitted when the host has no stable classification. */
+  workforceTier?: "economy" | "balanced" | "frontier";
   /** 보조 표기 키(로케일 무관). 표시 라벨은 cliModelTagLabel(tag, locale). */
   tag?: CliModelTag;
 }
@@ -308,20 +310,20 @@ export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
   // Claude Code — `claude --model`. 별칭(opus/sonnet/haiku)은 항상 최신, 레거시는 풀ID.
   "claude-code": [
     { id: "claude-fable-5", label: "Claude Fable 5" },
-    { id: "opus", label: "Opus 4.8" },
-    { id: "sonnet", label: "Sonnet 4.6" },
-    { id: "haiku", label: "Haiku 4.5" },
-    { id: "claude-opus-4-7", label: "Opus 4.7", tag: "legacy" },
-    { id: "claude-opus-4-6", label: "Opus 4.6", tag: "legacy" },
+    { id: "opus", label: "Opus 4.8", workforceTier: "frontier" },
+    { id: "sonnet", label: "Sonnet 4.6", workforceTier: "balanced" },
+    { id: "haiku", label: "Haiku 4.5", workforceTier: "economy" },
+    { id: "claude-opus-4-7", label: "Opus 4.7", tag: "legacy", workforceTier: "frontier" },
+    { id: "claude-opus-4-6", label: "Opus 4.6", tag: "legacy", workforceTier: "frontier" },
   ],
   // Codex — `codex exec -m <model>`. 구독 기본 외 명시 모델.
   codex: [
     // Modern Codex uses the GPT family directly. This is only an offline
     // fallback/label catalog; detect.ts prefers the signed-in account's
     // ~/.codex/models_cache.json and never invents a `gpt-5.6-codex` alias.
-    { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", tag: "preview" },
-    { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", tag: "preview" },
-    { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", tag: "preview" },
+    { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", tag: "preview", workforceTier: "frontier" },
+    { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", tag: "preview", workforceTier: "balanced" },
+    { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", tag: "preview", workforceTier: "economy" },
     { id: "gpt-5.5", label: "GPT-5.5" },
     { id: "gpt-5.4", label: "GPT-5.4" },
     { id: "gpt-5.4-mini", label: "GPT-5.4 Mini" },

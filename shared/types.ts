@@ -244,9 +244,9 @@ export interface RuntimeStatus {
   }>;
   /** BYOK 긴 컨텍스트(1M) 토글 상태. beta-header 모델에서만 의미 있음. */
   longContextEnabled?: boolean;
-  /** 작업량(reasoning effort) 현재 선택값 — claude-code 전용. 미설정이면 기본. */
+  /** 작업량(reasoning effort) 현재 선택값. 명시 조절이 없는 런타임은 `none`. */
   effort?: string | null;
-  /** 이 런타임이 지원하는 작업량 레벨 — `claude --help` 파싱으로 자동 동기화. claude-code만 채움. */
+  /** 이 런타임이 지원하는 작업량 레벨. 명시 조절이 없으면 `none`만 채움. */
   efforts?: Array<{ id: string; label: string }>;
 }
 
@@ -485,7 +485,7 @@ export interface InstalledMcpServer {
 export interface McpServerStatus {
   id: string;
   connected: boolean;
-  tools: Array<{ name: string; description?: string }>;
+  tools: Array<{ name: string; description?: string; inputSchema?: unknown }>;
   error: string | null;
   /** 아직 값이 없는 필수 env 키 — 연결 막힘 원인 */
   missingEnv: string[];

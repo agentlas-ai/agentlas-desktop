@@ -55,6 +55,37 @@ function cloneRuntimeStatuses(list: RuntimeStatus[]): RuntimeStatus[] {
   }));
 }
 
+const LOCAL_RUNTIME_CONTEXT_WINDOW = 32_000;
+
+/**
+ * Local OpenAI-compatible runners expose model IDs but no trustworthy model
+ * capability metadata or reasoning-effort control. Advertise only facts the
+ * host itself enforces so the parent LLM can author an exactly executable
+ * allocation instead of being rejected after planning.
+ */
+export function conservativeLocalRuntimeAllocation(models: string[]): Pick<
+  RuntimeStatus,
+  "allocationModels" | "allocationModelProfiles" | "effort" | "efforts"
+> {
+  const allocationModels = [...new Set(models)];
+  return {
+    allocationModels,
+    allocationModelProfiles: Object.fromEntries(allocationModels.map((modelId) => [
+      modelId,
+      {
+        costTier: "balanced" as const,
+        contextWindow: LOCAL_RUNTIME_CONTEXT_WINDOW,
+        capabilities: [],
+        supportsTools: false,
+        supportsMultimodal: false,
+        efforts: ["none"],
+      },
+    ])),
+    effort: "none",
+    efforts: [{ id: "none", label: "None" }],
+  };
+}
+
 /** 감지 캐시 무효화 — 활성 런타임 변경·CLI 재로그인 직후 등 "연결" 칩이 낡으면 안 되는 시점에 호출. */
 export function clearDetectCache(): void {
   detectCache = null;
@@ -252,10 +283,14 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
 
   const list: RuntimeStatus[] = [];
   const codexDiscoveredModels = codexModelInventory.map((model) => model.id);
+  const codexHostCatalog = new Map(cliModels("codex").map((model) => [model.id, model]));
   const codexModelProfiles: NonNullable<RuntimeStatus["allocationModelProfiles"]> =
     Object.fromEntries(codexModelInventory.map((model) => [
       model.id,
       {
+        ...(codexHostCatalog.get(model.id)?.workforceTier
+          ? { costTier: codexHostCatalog.get(model.id)!.workforceTier }
+          : {}),
         ...(model.contextWindow !== null ? { contextWindow: model.contextWindow } : {}),
         capabilities: [...model.capabilities],
         ...(model.supportsTools !== null ? { supportsTools: model.supportsTools } : {}),
@@ -268,6 +303,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
 
   if (cc) {
     const selectedClaudeModel = cliModelOf("claude-code", active, undefined, "anthropic");
+    const claudeHostCatalog = cliModels("claude-code");
     list.push({
       kind: "claude-code",
       backend: "anthropic",
@@ -278,6 +314,18 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       model: selectedClaudeModel,
       availableModels: cliModels("claude-code").map((m) => m.id),
       allocationModels: selectedClaudeModel ? [selectedClaudeModel] : [],
+      allocationModelProfiles: Object.fromEntries(claudeHostCatalog.flatMap((model) => (
+        model.workforceTier
+          ? [[model.id, {
+              costTier: model.workforceTier,
+              contextWindow: 200_000,
+              capabilities: ["tools", "multimodal"],
+              supportsTools: true,
+              supportsMultimodal: true,
+              efforts: claudeEfforts.map((effort) => effort.id),
+            }]]
+          : []
+      ))),
       // 작업량 — 현재 선택값 + 이 CLI가 지원하는 레벨(--help 파싱으로 자동 동기화).
       effort: getStoredEffort(),
       efforts: claudeEfforts,
@@ -350,28 +398,6 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       ),
     });
   }
-  if (cursor) {
-    // Current Cursor CLI exposes `agent models`; retain Auto as a safe fallback
-    // and preserve an operator selection, but never fabricate entitlement from
-    // the display catalog when live discovery returned nothing.
-    const rememberedCursor =
-      (active?.kind === "cursor" && active.backend === "cursor" ? active.model : undefined) ??
-      recallRuntimeSelection("cursor", "cursor")?.model;
-    const cursorModels = [
-      "auto",
-      ...(cursor.models ?? []),
-      ...(rememberedCursor && rememberedCursor !== "auto" ? [rememberedCursor] : []),
-    ].filter((model, index, list) => Boolean(model) && list.indexOf(model) === index);
-    list.push({
-      kind: "cursor",
-      backend: "cursor",
-      source: cursor.path,
-      version: cursor.version,
-      active: false,
-      model: cliModelOf("cursor", active, cursorModels, "cursor") ?? "auto",
-      availableModels: cursorModels,
-    });
-  }
   if (ollama) {
     // 활성 모델: 이전에 고른 모델이 아직 존재하면 그대로, 아니면 첫 모델로 폴백.
     const rememberedOllama =
@@ -390,7 +416,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: preferred,
       availableModels: ollama.models,
-      allocationModels: ollama.models,
+      ...conservativeLocalRuntimeAllocation(ollama.models),
     });
   }
   // LM Studio / MLX — OpenAI 호환 로컬 서버. Ollama와 동일한 "단일 런타임 + 동적 모델 목록" 모양.
@@ -409,7 +435,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: preferred,
       availableModels: lmstudio.models,
-      allocationModels: lmstudio.models,
+      ...conservativeLocalRuntimeAllocation(lmstudio.models),
     });
   }
   if (mlx && mlx.models.length > 0) {
@@ -425,7 +451,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: preferred,
       availableModels: mlx.models,
-      allocationModels: mlx.models,
+      ...conservativeLocalRuntimeAllocation(mlx.models),
     });
   }
   if (anthropicByok) {

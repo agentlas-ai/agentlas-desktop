@@ -14,4 +14,4 @@ export function probeMLX(timeoutMs?: number) {
   return probeOpenAiLocal(mlxHost(), timeoutMs);
 }
 
-export const runMLX: Runner = makeLocalOpenAiRunner(mlxHost);
+export const runMLX: Runner = makeLocalOpenAiRunner(mlxHost, "mlx");

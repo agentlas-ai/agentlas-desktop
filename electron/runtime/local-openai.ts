@@ -4,7 +4,7 @@
 //   - 채팅 SSE:  POST {host}/v1/chat/completions  (OpenAI Chat Completions 호환)
 // API 키 불필요, 클라우드 미경유 — 완전 로컬. (PRD §3.1 BYOC의 로컬 변형)
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { wrapSystemPrompt } from "./runner";
+import { workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { compactHistory } from "./compact";
 
@@ -70,7 +70,10 @@ type LocalContent =
  * host를 바인딩해 OpenAI 호환 로컬 서버 채팅 Runner를 만든다.
  * hostFn은 호출 시점에 평가한다(env 재정의를 매 실행 반영).
  */
-export function makeLocalOpenAiRunner(hostFn: () => string): Runner {
+export function makeLocalOpenAiRunner(
+  hostFn: () => string,
+  runtimeKind: "lmstudio" | "mlx" = "lmstudio",
+): Runner {
   return async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
     const host = hostFn();
     const model = req.model?.trim();
@@ -165,6 +168,13 @@ export function makeLocalOpenAiRunner(hostFn: () => string): Runner {
         // 빈 줄 / keep-alive — 무시
       }
     }
-    return { text: acc.trim() };
+    return {
+      text: acc.trim(),
+      workforcePermissionEnforcement: workforceZeroToolsEnforcement(
+        req,
+        runtimeKind,
+        ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
+      ),
+    };
   };
 }

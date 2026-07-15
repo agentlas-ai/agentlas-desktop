@@ -58,6 +58,8 @@ export interface WorkloadAllocation {
 
 export interface WorkloadResolution {
   allocation: WorkloadAllocation;
+  /** Host validation result, kept outside the model-authored allocation object. */
+  requirementsVerified: boolean;
   runtime: RuntimeStatus;
   /** Actual inventory identity after host fallback/validation, never copied from rejected parent data. */
   resolvedRuntimeId: string | null;
@@ -431,13 +433,14 @@ function resolvedEffortOrCurrent(
 
 function exactModelPolicyIssue(input: {
   allocation: WorkloadAllocation;
+  requirementsVerified: boolean;
   runtime: RuntimeStatus;
   modelId: string;
   policy: WorkloadHostPolicy;
   policyValid: boolean;
 }): string | null {
   if (!input.policyValid) return "host-allocation-policy-invalid-active-preserved";
-  if (!input.allocation.requirementsVerified) return "parent-requirements-invalid-active-preserved";
+  if (!input.requirementsVerified) return "parent-requirements-invalid-active-preserved";
   if (input.policy.pinnedModelId && input.policy.pinnedModelId !== input.modelId) {
     return "host-pinned-model-preserved";
   }
@@ -495,11 +498,15 @@ export function resolveWorkloadAllocation(input: {
   explicitPinned?: boolean;
   /** Host-owned only. Parent model JSON is never allowed to populate this. */
   hostPolicy?: WorkloadHostPolicy;
+  /** Host-owned result of an exact structured-contract validation. */
+  requirementsVerified?: boolean;
 }): WorkloadResolution {
   const allocation = input.allocation ?? defaultWorkloadAllocation(input.phase);
+  const requirementsVerified = input.requirementsVerified ?? allocation.requirementsVerified === true;
   if (input.manualOverride || input.explicitPinned) {
     return {
       allocation,
+      requirementsVerified,
       runtime: { ...input.runtime },
       resolvedRuntimeId: null,
       resolvedTier: resolvedTierForRuntime(input.runtime),
@@ -514,6 +521,7 @@ export function resolveWorkloadAllocation(input: {
   if (!model) {
     return {
       allocation,
+      requirementsVerified,
       runtime: { ...input.runtime },
       resolvedRuntimeId: null,
       resolvedTier: resolvedTierForRuntime(input.runtime),
@@ -530,12 +538,14 @@ export function resolveWorkloadAllocation(input: {
     allocation,
     runtime: input.runtime,
     modelId: model,
+    requirementsVerified,
     policy: host.policy,
     policyValid: host.valid,
   });
   if (policyIssue) {
     return {
       allocation,
+      requirementsVerified,
       runtime: { ...input.runtime },
       resolvedRuntimeId: null,
       resolvedTier: resolvedTierForRuntime(input.runtime),
@@ -551,6 +561,7 @@ export function resolveWorkloadAllocation(input: {
   const fallback = allocation.reasonCodes.includes("missing-ai-allocation") || allocation.reasonCodes.includes("invalid-ai-allocation");
   return {
     allocation,
+    requirementsVerified,
     runtime: {
       ...input.runtime,
       model: model ?? input.runtime.model,
@@ -576,8 +587,11 @@ export function resolveWorkloadAllocationAcrossRuntimes(input: {
   explicitPinned?: boolean;
   /** Host-owned only. Parent model JSON is never allowed to populate this. */
   hostPolicy?: WorkloadHostPolicy;
+  /** Host-owned result of an exact structured-contract validation. */
+  requirementsVerified?: boolean;
 }): WorkloadResolution {
   const allocation = input.allocation ?? defaultWorkloadAllocation(input.phase);
+  const requirementsVerified = input.requirementsVerified ?? allocation.requirementsVerified === true;
   if (input.manualOverride || input.explicitPinned) {
     const resolution = resolveWorkloadAllocation({
       allocation,
@@ -586,6 +600,7 @@ export function resolveWorkloadAllocationAcrossRuntimes(input: {
       manualOverride: input.manualOverride,
       explicitPinned: input.explicitPinned,
       hostPolicy: input.hostPolicy,
+      requirementsVerified,
     });
     return {
       ...resolution,
@@ -604,12 +619,14 @@ export function resolveWorkloadAllocationAcrossRuntimes(input: {
         allocation,
         runtime: requestedRuntime,
         modelId: allocation.modelId,
+        requirementsVerified,
         policy: host.policy,
         policyValid: host.valid,
       });
       if (policyIssue) {
         return {
           allocation,
+          requirementsVerified,
           runtime: { ...input.fallbackRuntime },
           resolvedRuntimeId: inventoryIdForRuntime(input.runtimes, input.fallbackRuntime),
           resolvedTier: resolvedTierForRuntime(input.fallbackRuntime),
@@ -626,6 +643,7 @@ export function resolveWorkloadAllocationAcrossRuntimes(input: {
       const fallback = allocation.reasonCodes.includes("missing-ai-allocation") || allocation.reasonCodes.includes("invalid-ai-allocation");
       return {
         allocation,
+        requirementsVerified,
         runtime: {
           ...requestedRuntime,
           model: allocation.modelId,
@@ -640,6 +658,7 @@ export function resolveWorkloadAllocationAcrossRuntimes(input: {
   }
   return {
     allocation,
+    requirementsVerified,
     runtime: { ...input.fallbackRuntime },
     resolvedRuntimeId: inventoryIdForRuntime(input.runtimes, input.fallbackRuntime),
     resolvedTier: resolvedTierForRuntime(input.fallbackRuntime),
@@ -687,7 +706,7 @@ export function workloadAllocationReceipt(resolution: WorkloadResolution): Recor
     modelId: resolution.allocation.modelId ?? null,
     effort: resolution.allocation.effort,
     requirements: resolution.allocation.requirements,
-    requirementsVerified: resolution.allocation.requirementsVerified,
+    requirementsVerified: resolution.requirementsVerified,
     reasonCodes: requestedReasonCodes,
   });
   const featureHash = createHash("sha256").update(featurePayload).digest("hex");
@@ -724,10 +743,11 @@ export function workloadAllocationReceipt(resolution: WorkloadResolution): Recor
 
 export function workloadAllocationPromptExample(phase: WorkloadPhase): string {
   return JSON.stringify({
+    schema: "agentlas.workload-allocation.v1",
     runtimeId: "runtime-1 (copy exactly from LIVE_RUNTIME_INVENTORY)",
     modelId: "exact live model ID copied from that runtime",
     tier: "economy|balanced|frontier",
-    modelClass: "optional: auto|haiku|luna|flash|mini|sonnet|terra|composer|opus|sol|grok",
+    modelClass: "optional: auto|haiku|luna|flash|mini|sonnet|terra|tera|composer|opus|sol|grok",
     effort: "none|minimal|low|medium|high|xhigh|max",
     phase,
     requirements: {

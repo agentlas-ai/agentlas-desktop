@@ -14,4 +14,4 @@ export function probeLMStudio(timeoutMs?: number) {
   return probeOpenAiLocal(lmStudioHost(), timeoutMs);
 }
 
-export const runLMStudio: Runner = makeLocalOpenAiRunner(lmStudioHost);
+export const runLMStudio: Runner = makeLocalOpenAiRunner(lmStudioHost, "lmstudio");

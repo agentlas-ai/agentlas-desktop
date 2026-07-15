@@ -6,6 +6,7 @@ const { app } = require("electron");
 async function main() {
 await app.whenReady();
 const routing = require("../dist/electron/runtime/workload-routing.js");
+const runtimeDetection = require("../dist/electron/runtime/detect.js");
 const delegation = require("../dist/electron/mcp/delegate.js");
 const borrowed = require("../dist/electron/mcp/borrowed-task-force.js");
 const swarm = require("../dist/electron/mcp/swarm-run.js");
@@ -84,6 +85,43 @@ function allocation(tier, effort = "medium", phase = "delegate", modelId, runtim
     rationale: "Small isolated child with bounded output.",
   }, phase);
 }
+
+const detectedLocalFacts = runtimeDetection.conservativeLocalRuntimeAllocation([
+  "qwen3:30b-a3b",
+  "qwen3:30b-a3b",
+]);
+assert.deepEqual(detectedLocalFacts.allocationModels, ["qwen3:30b-a3b"]);
+assert.deepEqual(detectedLocalFacts.efforts, [{ id: "none", label: "None" }]);
+assert.deepEqual(detectedLocalFacts.allocationModelProfiles["qwen3:30b-a3b"], {
+  costTier: "balanced",
+  contextWindow: 32000,
+  capabilities: [],
+  supportsTools: false,
+  supportsMultimodal: false,
+  efforts: ["none"],
+});
+const detectedQwen = {
+  kind: "ollama",
+  backend: "ollama",
+  source: "ollama",
+  version: "0.11",
+  active: true,
+  model: "qwen3:30b-a3b",
+  availableModels: ["qwen3:30b-a3b"],
+  ...detectedLocalFacts,
+};
+const detectedQwenResolution = routing.resolveWorkloadAllocationAcrossRuntimes({
+  allocation: allocation("balanced", "none", "delegate", "qwen3:30b-a3b", "runtime-1"),
+  runtimes: [detectedQwen],
+  fallbackRuntime: detectedQwen,
+  phase: "delegate",
+  requirementsVerified: true,
+});
+assert.equal(detectedQwenResolution.source, "ai-assigned");
+assert.equal(detectedQwenResolution.runtime.model, "qwen3:30b-a3b");
+assert.equal(detectedQwenResolution.runtime.effort, "none");
+assert.equal(detectedQwenResolution.resolvedTier, "balanced");
+assert.deepEqual(detectedQwenResolution.resolutionCodes, ["parent-selected-live-runtime-model"]);
 
 assert.equal(routing.normalizeWorkloadTier("haiku"), "economy");
 assert.equal(routing.normalizeWorkloadTier("luna"), "economy");

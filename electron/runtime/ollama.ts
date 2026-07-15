@@ -7,7 +7,7 @@
 //   - 서버 버전: GET  {host}/api/version      → { version }
 //   - 채팅 SSE:  POST {host}/v1/chat/completions  (OpenAI Chat Completions 호환)
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { wrapSystemPrompt } from "./runner";
+import { workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { compactHistory } from "./compact";
 
@@ -173,5 +173,12 @@ export const runOllama: Runner = async (
       // 빈 줄 / keep-alive — 무시
     }
   }
-  return { text: acc.trim() };
+  return {
+    text: acc.trim(),
+    workforcePermissionEnforcement: workforceZeroToolsEnforcement(
+      req,
+      "ollama",
+      ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
+    ),
+  };
 };

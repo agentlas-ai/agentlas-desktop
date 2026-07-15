@@ -8,6 +8,9 @@ import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { McpError } from "@modelcontextprotocol/sdk/types.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -28,6 +31,98 @@ import { isCanonicalSystemTimeMcpServer } from "./system-time-server";
 const CONNECT_TIMEOUT_MS = 45_000;
 const MAX_REMOTE_URL_CHARS = 4_096;
 const DEFAULT_TOOL_TEXT_LIMIT = 256_000;
+const MAX_TOOL_TEXT_LIMIT = 16 * 1024 * 1024;
+
+export class McpToolCallError extends Error {
+  constructor(
+    readonly boundary: "pre-request-error" | "ambiguous-transport" | "received-protocol-error",
+    readonly mcpCode: number | null,
+    message: string,
+    readonly reason: "response-too-large" | null = null,
+  ) {
+    super(message);
+    this.name = "McpToolCallError";
+  }
+}
+
+export class McpToolResponseTooLargeError extends Error {
+  constructor(readonly limit: number) {
+    super(`MCP tool text response exceeded the ${limit}-character limit.`);
+    this.name = "McpToolResponseTooLargeError";
+  }
+}
+
+export function joinMcpToolText(
+  content: Array<{ type?: string; text?: string }>,
+  maxTextChars: number,
+): string {
+  const joined = content
+    .filter((item) => item && item.type === "text" && typeof item.text === "string")
+    .map((item) => item.text as string)
+    .join("\n");
+  if (joined.length > maxTextChars) throw new McpToolResponseTooLargeError(maxTextChars);
+  return joined;
+}
+
+export function resolveMcpToolTextLimit(requested?: number): number {
+  return Math.max(1, Math.min(requested ?? DEFAULT_TOOL_TEXT_LIMIT, MAX_TOOL_TEXT_LIMIT));
+}
+
+export type McpToolCallPhase = "pre-request" | "send-started" | "response-received";
+
+export interface McpToolCallBoundaryState {
+  phase: McpToolCallPhase;
+  requestId: string | number | null;
+}
+
+/**
+ * Error classes and codes alone cannot prove where an MCP error originated:
+ * the SDK uses McpError for local connection closure/timeouts and exposes a
+ * Zod parse error for a malformed received result.  The transport boundary is
+ * authoritative instead: before tools/call send is pre-request, after send but
+ * before a matching response is ambiguous, and any matching response is a
+ * received protocol/payload failure that must never be replayed.
+ */
+export function classifyMcpToolCallBoundary(
+  _error: unknown,
+  phase: McpToolCallPhase,
+): McpToolCallError["boundary"] {
+  if (phase === "pre-request") return "pre-request-error";
+  if (phase === "response-received") return "received-protocol-error";
+  return "ambiguous-transport";
+}
+
+export function instrumentMcpToolCallTransport(
+  transport: Transport,
+  state: McpToolCallBoundaryState,
+): void {
+  const originalSend = transport.send.bind(transport);
+  transport.send = async (message, options) => {
+    if (
+      "method" in message &&
+      message.method === "tools/call" &&
+      "id" in message &&
+      (typeof message.id === "string" || typeof message.id === "number")
+    ) {
+      state.phase = "send-started";
+      state.requestId = message.id;
+    }
+    await originalSend(message, options);
+  };
+  const originalOnMessage = transport.onmessage;
+  transport.onmessage = (message, extra) => {
+    if (
+      state.phase === "send-started" &&
+      state.requestId !== null &&
+      "id" in message &&
+      message.id === state.requestId &&
+      !("method" in message)
+    ) {
+      state.phase = "response-received";
+    }
+    originalOnMessage?.(message as JSONRPCMessage, extra);
+  };
+}
 
 /** OpenCrab's allowlist applies to the exact validated endpoint. Never let a
  *  30x response pivot the main process to localhost or another network host. */
@@ -146,7 +241,7 @@ function redactResolvedSecrets(message: string, resolved: Record<string, string>
  * http는 현대 표준인 Streamable HTTP로, sse만 레거시 SSE로 연결한다(예전엔 둘 다 SSE라
  * Streamable HTTP 전용 서버 연결이 깨졌다).
  */
-function createTransport(server: InstalledMcpServer, resolved: Record<string, string>): unknown {
+function createTransport(server: InstalledMcpServer, resolved: Record<string, string>): Transport {
   if (server.catalogId === "agentlas-time" && !isCanonicalSystemTimeMcpServer(server)) {
     throw new Error("Agentlas System Time MCP launch contract is invalid");
   }
@@ -167,7 +262,7 @@ function createTransport(server: InstalledMcpServer, resolved: Record<string, st
       // getDefaultEnvironment()는 PATH/HOME 등 안전한 기본값 — 거기에 시크릿을 얹는다.
       env: { ...stdioEnv, ...resolved },
       stderr: "ignore",
-    });
+    }) as unknown as Transport;
   }
   const { url, urlVaultKey } = parseRemoteUrl(server, resolved);
   const headers = buildRemoteHeaders(server.envKeys, resolved, urlVaultKey);
@@ -175,9 +270,9 @@ function createTransport(server: InstalledMcpServer, resolved: Record<string, st
     ...(Object.keys(headers).length ? { requestInit: { headers } } : {}),
     ...(server.catalogId === OPENCRAB_CATALOG_ID ? { fetch: openCrabNoRedirectFetch } : {}),
   };
-  return server.transport === "sse"
+  return (server.transport === "sse"
     ? new SSEClientTransport(url, init)
-    : new StreamableHTTPClientTransport(url, init);
+    : new StreamableHTTPClientTransport(url, init)) as unknown as Transport;
 }
 
 async function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
@@ -192,6 +287,24 @@ async function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void):
     return await Promise.race([p, timeout]);
   } finally {
     clearTimeout(timer!);
+  }
+}
+
+async function closeMcpProbeBounded(client: Client, transport: Transport | null): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      client.close().catch(() => {}),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 1_000);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    // Some SDK transports can leave close() pending after a failed initialize.
+    // A second transport-level close is fire-and-forget so JIT inventory never
+    // inherits an unbounded cleanup wait.
+    void transport?.close().catch(() => {});
   }
 }
 
@@ -213,7 +326,7 @@ export async function testServerConnection(
     { capabilities: {} },
   );
 
-  let transport: unknown;
+  let transport: Transport | null = null;
   try {
     transport = createTransport(server, resolved);
 
@@ -226,14 +339,14 @@ export async function testServerConnection(
       })(),
       timeoutMs,
       () => {
-        void client.close().catch(() => {});
+        void transport?.close().catch(() => {});
       },
     );
 
-    await client.close().catch(() => {});
+    await closeMcpProbeBounded(client, transport);
     return { id: server.id, connected: true, tools, error: null, missingEnv: [], checkedAt };
   } catch (err) {
-    await client.close().catch(() => {});
+    await closeMcpProbeBounded(client, transport);
     const rawMessage = err instanceof Error ? err.message : String(err);
     const message = server.catalogId === OPENCRAB_CATALOG_ID
       ? "OpenCrab connection failed"
@@ -262,42 +375,49 @@ export async function callServerTool(
   args: Record<string, unknown>,
   options?: { timeoutMs?: number; maxTextChars?: number },
 ): Promise<string | null> {
-  const { resolved, missing } = await resolveEnv(server.envKeys);
-  if (missing.length > 0) return null; // 자격증명 미충족 — 폴 스킵(needsCredential UI가 안내).
-
-  const client = new Client({ name: "agentlas-desktop", version: app.getVersion() }, { capabilities: {} });
-  let transport: unknown;
+  let resolved: Record<string, string> = {};
+  let client: Client | null = null;
+  const boundaryState: McpToolCallBoundaryState = { phase: "pre-request", requestId: null };
   try {
-    transport = createTransport(server, resolved);
+    const environment = await resolveEnv(server.envKeys);
+    resolved = environment.resolved;
+    if (environment.missing.length > 0) return null; // 자격증명 미충족 — 폴 스킵(needsCredential UI가 안내).
+
+    const activeClient = new Client({ name: "agentlas-desktop", version: app.getVersion() }, { capabilities: {} });
+    client = activeClient;
+    const transport = createTransport(server, resolved);
+    instrumentMcpToolCallTransport(transport, boundaryState);
 
     const timeoutMs = Math.max(250, Math.min(options?.timeoutMs ?? CONNECT_TIMEOUT_MS, CONNECT_TIMEOUT_MS));
-    const maxTextChars = Math.max(1, Math.min(options?.maxTextChars ?? DEFAULT_TOOL_TEXT_LIMIT, DEFAULT_TOOL_TEXT_LIMIT));
+    const maxTextChars = resolveMcpToolTextLimit(options?.maxTextChars);
     const text = await withTimeout(
       (async () => {
-        await client.connect(transport);
-        const res = (await client.callTool({ name: toolName, arguments: args })) as {
+        await activeClient.connect(transport);
+        const res = (await activeClient.callTool({ name: toolName, arguments: args })) as {
           content?: Array<{ type?: string; text?: string }>;
         };
-        const parts = (res.content ?? [])
-          .filter((c) => c && c.type === "text" && typeof c.text === "string")
-          .map((c) => c.text as string);
-        const joined = parts.join("\n");
-        return joined.length > maxTextChars ? joined.slice(0, maxTextChars) : joined;
+        return joinMcpToolText(res.content ?? [], maxTextChars);
       })(),
       timeoutMs,
       () => {
-        void client.close().catch(() => {});
+        void activeClient.close().catch(() => {});
       },
     );
-    await client.close().catch(() => {});
+    await activeClient.close().catch(() => {});
     return text;
   } catch (err) {
-    await client.close().catch(() => {});
+    await client?.close().catch(() => {});
     const rawMessage = err instanceof Error ? err.message : String(err);
-    throw new Error(
+    const mcpCode = err instanceof McpError ? err.code : null;
+    const boundary = classifyMcpToolCallBoundary(err, boundaryState.phase);
+    const reason = err instanceof McpToolResponseTooLargeError ? "response-too-large" : null;
+    throw new McpToolCallError(
+      boundary,
+      mcpCode,
       server.catalogId === OPENCRAB_CATALOG_ID
         ? "OpenCrab query failed"
         : redactResolvedSecrets(rawMessage, resolved),
+      reason,
     );
   }
 }

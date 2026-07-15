@@ -111,7 +111,9 @@ matches(
 );
 matches(taskForce, /p\.req\.agentAppMode\s*\? cleanAgentAppControlBlocks/, "Group control-block stripping");
 matches(taskForce, /if \(!p\.req\.agentAppMode && continuation\.shouldContinue\)/, "Group continuation disable");
-assert.ok((taskForce.match(/images: p\.req\.agentAppMode \? undefined/g) || []).length >= 3, "Every group phase must disable images");
+matches(taskForce, /function workforceImagesForResponsibility[\s\S]{0,260}if \(p\.req\.agentAppMode\) return undefined/, "Group worker image disable");
+matches(taskForce, /images: p\.req\.agentAppMode \? undefined : p\.req\.images/, "Group planner image disable");
+matches(taskForce, /const synthesisImages = p\.req\.agentAppMode\s*\? undefined/, "Group synthesis image disable");
 assert.ok((taskForce.match(/cwd: p\.req\.agentAppMode \? undefined/g) || []).length >= 3, "Every group phase must disable cwd");
 matches(taskForce, /Agent App groups require pre-resolved installed-agent specifications/, "Group pre-resolved roster requirement");
 matches(taskForce, /spec\.source !== "installed" && spec\.source !== "firm-node"/, "Group Hub roster rejection");
@@ -225,9 +227,9 @@ matches(siteRuntime, /capabilities: prepared\.finalDisclosure\(\)/, "Site runtim
 matches(selection, /function agentAppStatelessSafe[\s\S]{0,220}claude-code[\s\S]{0,220}byok[\s\S]{0,220}ollama/, "Agent App safe runtime set");
 matches(selection, /capabilityRuntimeEligible: false,[\s\S]{0,120}fallbackFromKind: preferred\.active\.kind/, "Unsafe CLI no-tool fallback contract");
 
-// Codex, Grok, and Gemini cannot prove a zero-tool/stateless CLI
-// boundary. They must reject before CLI discovery, auth/key lookup, prompt-file
-// staging, or process spawn. A prompt-only denial is not sufficient.
+// Grok and Gemini cannot prove a zero-tool/stateless CLI boundary. They must
+// reject before CLI discovery, auth/key lookup, prompt-file staging, or process
+// spawn. A prompt-only denial is not sufficient.
 const failClosedRunners = [
   { label: "Codex", source: codex, exportName: "runCodex", firstSideEffect: "const bin = await getBin()" },
   { label: "Grok", source: grok, exportName: "runGrok", firstSideEffect: "const bin = await getBin()" },
@@ -242,7 +244,16 @@ for (const runtime of failClosedRunners) {
 assertBefore(runnerBody(grok, "runGrok"), "if (req.untrustedNoTools)", "readEnvVar(", "Grok key lookup isolation");
 assertBefore(runnerBody(grok, "runGrok"), "if (req.untrustedNoTools)", "fs.writeFile(", "Grok prompt-file isolation");
 assertBefore(runnerBody(gemini, "runGemini"), "if (req.untrustedNoTools)", "stageCliImageAttachments(", "Gemini attachment isolation");
-// Claude Code is the one CLI with a verified zero-builtins + exact-MCP contract.
+// Actual 0.144.4 probing exposed a collaboration tool call even with
+// multi_agent and every other configurable tool feature disabled. Fail before
+// CLI discovery/spawn instead of claiming a no-authority sandbox.
+matches(codex, /Codex CLI 0\.144\.4 still exposes collaboration\/delegation authority/, "Codex measured collaboration fail-closed reason");
+matches(codex, /req\.untrustedNoTools &&[\s\S]{0,320}req\.mcpConfigPath[\s\S]{0,500}throw new Error/, "Codex exact MCP fail-closed gate");
+assert.doesNotMatch(codex, /UNTRUSTED_ZERO_AUTHORITY_ARGS|workforceNoAuthorityEnforcement/, "Codex must not retain a false no-authority receipt path");
+matches(taskForce, /p\.workforceSelectionReceipt\s*\? supplied\.filter\(\(runtime\) => runtime\.kind !== "codex"\)/, "Workforce planner inventory excludes blocked Codex");
+matches(taskForce, /p\.workforceSelectionReceipt && p\.active\.kind === "codex"[\s\S]{0,180}workforce_runtime_isolation_unverified:codex-collaboration-authority/, "Workforce active Codex pre-planner block");
+// Claude Code is the one CLI with verified zero-builtins plus exact Agent App
+// and Workforce MCP contracts.
 for (const flag of ["--safe-mode", "--setting-sources", "--disable-slash-commands", "--no-chrome", "--no-session-persistence", "--strict-mcp-config"]) {
   assert.ok(claude.includes(`"${flag}"`), `Claude must enforce ${flag}`);
 }
@@ -258,18 +269,23 @@ matches(
   "Claude untrusted dynamic prompt replacement",
 );
 assert.doesNotMatch(claude, /exclude-dynamic/i, "Claude must not move dynamic host context into the user message");
-matches(claude, /const hasExactUntrustedMcpGrant = Boolean\(/, "Claude exact untrusted MCP gate");
+matches(claude, /const hasExactAgentAppMcpGrant = Boolean\(/, "Claude exact Agent App MCP gate");
+matches(claude, /const workforceMcpConfig = await inspectWorkforceMcpConfig\(runReq\)/, "Claude Workforce config inspection");
+matches(claude, /const hasExactWorkforceMcpGrant = Boolean\(workforceMcpConfig\)/, "Claude exact Workforce MCP gate");
+matches(claude, /const hasExactUntrustedMcpGrant = hasExactAgentAppMcpGrant \|\| hasExactWorkforceMcpGrant/, "Claude combined exact MCP gate");
 matches(claude, /isCanonicalAgentAppInlineMcpConfig\(runReq\.mcpConfigPath\)/, "Claude compact inline config gate");
 matches(claude, /Object\.keys\(parsed\.mcpServers\)[\s\S]{0,180}agentlas-time/, "Claude single built-in config gate");
 matches(claude, /onAgentAppMcpRuntimeUnavailable/, "Claude invalid inline grant disclosure downgrade");
 matches(claude, /validSiteAgentAppMcpGrantTools\(/, "Claude exact MCP tool validation");
 matches(claude, /const mcpArgs = agentAppMcpConfigArg && \(!runReq\.untrustedNoTools \|\| hasExactUntrustedMcpGrant\)/, "Claude MCP config fail-closed gate");
 matches(claude, /materializeWindowsAgentAppMcpConfig\(bin, runReq\.mcpConfigPath\)/, "Claude Windows cmd config snapshot gate");
+matches(claude, /materializeWorkforceMcpConfig\(workforceMcpConfig\.bytes\)/, "Claude Workforce private config snapshot gate");
 matches(claude, /isAgentAppMcpInit[\s\S]{0,600}cleanupAgentAppMcpConfig\(\)/, "Claude Windows config cleanup after init proof");
 matches(claude, /hasExactUntrustedMcpGrant[\s\S]{0,260}!agentAppMcpInitConnected[\s\S]{0,700}agentAppMcpFallbackAttempted: true/, "Claude exact MCP pre-init fallback");
-matches(claude, /ev\.mcp_servers\.length === 1[\s\S]{0,320}JSON\.stringify\(reportedTools\) === JSON\.stringify\(expectedTools\)/, "Claude exact MCP init receipt gate");
+matches(claude, /JSON\.stringify\(reportedServers\) === JSON\.stringify\(expectedServers\)[\s\S]{0,220}JSON\.stringify\(reportedTools\) === JSON\.stringify\(expectedTools\)/, "Claude exact MCP init receipt gate");
 matches(claude, /mcpConfigPath: undefined,[\s\S]{0,180}mcpAllowedTools: undefined,[\s\S]{0,180}untrustedAllowedMcpTools: undefined/, "Claude fallback MCP authority removal");
 matches(claude, /stripAgentAppMcpSecretAliases\(runReq\.env\)/, "Claude fallback opaque secret removal");
+matches(claude, /workforcePermissionEnforcement: hasExactWorkforceMcpGrant[\s\S]{0,320}workforceNativeToolEnforcement[\s\S]{0,320}workforceZeroToolsEnforcement/, "Claude runtime-owned Workforce enforcement receipt");
 
 const untrustedWrapper = between(
   runner,
