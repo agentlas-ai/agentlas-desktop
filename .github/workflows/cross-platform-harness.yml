@@ -44,6 +44,8 @@ on:
       - "scripts/test-build-workload-routing.cjs"
       - "scripts/test-stormbreaker-core-harness.cjs"
       - "scripts/test-stormbreaker-swarm-contract.cjs"
+      - "scripts/test-swarm-engine.cjs"
+      - "scripts/test-automation-result-contract.cjs"
       - "scripts/test-owned-agent-runtime-prompts.cjs"
       - "scripts/test-site-agent-app-*.cjs"
       - "scripts/test-packaged-agent-app-mcp.cjs"
@@ -141,6 +143,8 @@ on:
       - "scripts/test-build-workload-routing.cjs"
       - "scripts/test-stormbreaker-core-harness.cjs"
       - "scripts/test-stormbreaker-swarm-contract.cjs"
+      - "scripts/test-swarm-engine.cjs"
+      - "scripts/test-automation-result-contract.cjs"
       - "scripts/test-owned-agent-runtime-prompts.cjs"
       - "scripts/test-site-agent-app-*.cjs"
       - "scripts/test-packaged-agent-app-mcp.cjs"
@@ -259,6 +263,8 @@ jobs:
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-workload-routing.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-build-workload-routing.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-stormbreaker-swarm-contract.cjs
+          node scripts/test-swarm-engine.cjs
+          node scripts/test-automation-result-contract.cjs
       - name: Verify installed Core on macOS and Windows
         if: runner.os != 'Linux'
         working-directory: agentlas-desktop
@@ -281,6 +287,8 @@ jobs:
           npx --no-install electron scripts/test-workload-routing.cjs
           npx --no-install electron scripts/test-build-workload-routing.cjs
           npx --no-install electron scripts/test-stormbreaker-swarm-contract.cjs
+          node scripts/test-swarm-engine.cjs
+          node scripts/test-automation-result-contract.cjs
       - name: Verify Agent App MCP boundary on Linux
         if: runner.os == 'Linux'
         working-directory: agentlas-desktop

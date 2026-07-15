@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 
 export type UploadVisibility = "private-link" | "marketplace";
 
-type PositionalKind = "query" | "folder" | "shortcut" | "slug" | "agent" | "context" | "directory";
+type PositionalKind = "query" | "folder" | "shortcut" | "slug" | "agent" | "context" | "directory" | "version";
 
 const POSITIONAL_LABEL: Record<PositionalKind, { ko: string; en: string }> = {
   query: { ko: "쿼리", en: "query" },
@@ -19,6 +19,7 @@ const POSITIONAL_LABEL: Record<PositionalKind, { ko: string; en: string }> = {
   agent: { ko: "에이전트", en: "agent" },
   context: { ko: "컨텍스트", en: "context" },
   directory: { ko: "디렉터리", en: "directory" },
+  version: { ko: "버전", en: "version" },
 };
 
 export interface CoreStormbreakerHarness {
@@ -155,11 +156,17 @@ export function hepSearch(
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 120_000, ...opts });
 }
 
-/** hep-call: 명시적으로 지정된 Hub/cloud 에이전트를 준비. */
+/** hep-call: 명시적으로 지정된 Hub/cloud 에이전트를 준비.
+ *
+ *  `version`은 packageHash 핀이다. 미지정이면 엔진 기본값 "latest" — 즉 작성자가 재게시하면
+ *  같은 자동화가 예고 없이 다른 지시문으로 돈다. CLI(`--version`)와 서버는 원래부터 핀을
+ *  지원했는데 이 함수만 인자를 안 넘겨서, 데스크탑 경로 전체가 latest에 묶여 있었다.
+ *  주의: 핀은 exact-match-or-fail이다(서버가 version_mismatch로 거절). 옛 버전을 서빙하는
+ *  게 아니라 "내가 아는 그 버전이 맞나"를 단언하는 것 — 재게시 시 조용한 drift 대신 명시적 실패. */
 export function hepCall(
   agents: string,
   context: string[],
-  opts: { project?: string; runtime?: string } & HephaestusRunOptions = {},
+  opts: { project?: string; runtime?: string; version?: string } & HephaestusRunOptions = {},
 ): Promise<HephaestusResult> {
   const args = [
     "call",
@@ -170,6 +177,7 @@ export function hepCall(
     "--runtime",
     opts.runtime ?? "terminal",
   ];
+  if (opts.version) args.push("--version", assertPositional(opts.version, "version"));
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 180_000, ...opts });
 }
 

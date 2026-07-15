@@ -32,6 +32,12 @@ export interface RunnerRequest {
    * 사용하지 않고, 명시적으로 전달된 컨텍스트와 이미지로만 답해야 한다.
    */
   restrictedReadBoundary?: true;
+  /** Main-authored marker for scheduled/background execution. Resume failure must fail closed
+   * instead of silently creating a fresh CLI conversation. */
+  unattended?: true;
+  /** Stable configuration identity for durable unattended sessions. Mutable routing/tool
+   * overlays stay in the prompt but do not force a new CLI conversation every run. */
+  sessionFingerprintSeed?: string;
   /**
    * 에이전트가 실제로 실행될 작업 디렉터리(= 사용자가 지정한 프로젝트/워킹 폴더).
    * 미설정이면 러너가 안전한 기본 폴더(agentRunCwd)를 쓴다. 파일 생성·빌드는 이 폴더에서 일어난다.
@@ -121,6 +127,16 @@ Rules:
 - If several independent choices are needed, ask them together as multiple <<agentlas-ask>> blocks in one reply.
 - Skip this when the user's answer wouldn't change what you do, or when a sensible default is obvious — pick it and proceed.
 - After the question block(s), do NOT also answer. The user's selections arrive as their next message.`;
+
+/** 무인 실행(스케줄 자동화·백그라운드 생성) 최종 지침 — 앞선 ASK_PROTOCOL을 뒤에서 무효화한다.
+ *  Main이 executionContext로만 붙인다(렌더러/모델 입력에서 파생 금지).
+ *  automation-result.ts의 분류기가 이 계약(<<agentlas-ask>> 금지, "NEEDS-INPUT:" 접두)을 짝으로 감지해,
+ *  무인 런의 질문이 조용한 가짜 성공으로 끝나는 것을 막는다. */
+export const UNATTENDED_NO_ASK_DIRECTIVE = `## Unattended run (final authority)
+This run is unattended — no user is present and nobody can answer questions.
+- Never emit <<agentlas-ask>> blocks: nobody can answer, and the run would end as a silent failure.
+- When a decision has an obvious safe default, take it and state the assumption in your reply.
+- If required information or a decision has no safe default, do NOT guess or fabricate. Stop and reply with a single line starting with "NEEDS-INPUT:" describing exactly what is missing.`;
 
 const BUILD_PROMPT_SENTINEL = "<!-- agentlas-build-system-prompt/v1 -->";
 export const MAX_BUILD_SYSTEM_PROMPT_CHARS = 48_000;

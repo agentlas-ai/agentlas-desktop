@@ -2998,7 +2998,21 @@ function ChatPage() {
                 whiteSpace: "nowrap",
               }}
             >
-              {hiredAgents.map((card) => card.name || card.slug).join(", ")}
+              {hiredAgents
+                .map((card) => {
+                  // 출처를 숨기지 않는다 — 같은 slug가 Hub/로컬/팀에 걸쳐 혼동되는 것 방지.
+                  // source 미기록 카드(구버전)는 라벨 생략(없는 데이터를 지어내지 않음).
+                  const src =
+                    card.source === "hub"
+                      ? "Hub"
+                      : card.source === "installed"
+                        ? locale === "ko" ? "로컬" : "local"
+                        : card.source === "firm-node"
+                          ? locale === "ko" ? "팀" : "team"
+                          : null;
+                  return `${card.name || card.slug}${src ? `(${src})` : ""}`;
+                })
+                .join(", ")}
               {locale === "ko" ? " 함께 일하는 중" : " working with you"}
             </span>
             <button

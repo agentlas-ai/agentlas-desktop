@@ -18,23 +18,12 @@ import {
 import type { MemoryKind, MemoryScope } from "../architecture/manifest";
 import { tryRecordRunEvent } from "../store/run-events";
 
-// Secret/credential patterns — events matching these are dropped, never stored.
-const SECRET_PATTERNS: RegExp[] = [
-  // Current OpenAI/Anthropic keys add a provider segment and use base64url
-  // characters in the payload. Keep this vendor-specific so ordinary dashed
-  // prose is not swept up by the broader legacy-key rule below.
-  /(?:^|[^A-Za-z0-9_-])sk-(?:ant|proj)-[A-Za-z0-9_-]{16,}(?=$|[^A-Za-z0-9_-])/,
-  /\b(?:sk|pk|rk)-[A-Za-z0-9]{16,}/,
-  /AKIA[0-9A-Z]{16}/,
-  /ghp_[A-Za-z0-9]{20,}/,
-  /xox[baprs]-[A-Za-z0-9-]{10,}/,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-  /\b(?:password|passwd|secret|api[_-]?key|access[_-]?token|bearer)\b\s*[:=]\s*\S+/i,
-];
-
-function looksSecret(content: string): boolean {
-  return SECRET_PATTERNS.some((re) => re.test(content));
-}
+// Secret/credential detection — events matching these are dropped, never stored.
+// Shared with every other write boundary; this file used to carry its own shorter list that
+// missed github_pat_/gho_/AIza/glpat/hf_/npm_/JWT/sk_live_ while other boundaries caught them.
+// looksSecret is the single chokepoint before memory writes, including the agent_repo nest
+// mirroring that crosses projects — a miss here reaches the widest surface in the product.
+import { looksSecret } from "../../shared/secret-patterns";
 
 export interface CurationContext {
   projectPath: string | null;
@@ -109,7 +98,38 @@ const USER_IDENTITY_KINDS: ReadonlySet<MemoryKind> = new Set<MemoryKind>([
   "procedure",
 ]);
 
+/** Filesystem paths that identify where this user works, regardless of project. */
+const ABSOLUTE_PATH_RE = /(?:^|\s)(?:\/(?:Users|home|var|opt|private)\/|~\/|[A-Za-z]:\\|file:\/\/)/;
+
+/**
+ * Does this learning name the project it came from?
+ *
+ * `agent_repo` is the one scope that deliberately crosses project boundaries: it mirrors into a
+ * borrowed agent's global nest, so a fact learned in project A is re-injected in project B. The
+ * code claimed "not project-specific, so isolation holds" but enforced nothing — the scope label
+ * comes from the model, and a mislabelled event carries A's specifics to B (and into a
+ * third-party agent's nest on the way).
+ *
+ * Conservative by construction: a hit only narrows the scope (still stored, just not shared), so a
+ * false positive costs reach, while a false negative leaks. Prefer the cheap check.
+ */
+function mentionsProjectSpecifics(content: string, ctx: CurationContext): boolean {
+  if (ABSOLUTE_PATH_RE.test(content)) return true;
+  const folder = ctx.projectPath?.split(/[\\/]/).filter(Boolean).pop();
+  // Short/generic folder names ("app", "web", "src") would match ordinary prose.
+  if (folder && folder.length >= 4) {
+    const escaped = folder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(?:^|[^A-Za-z0-9])${escaped}(?:$|[^A-Za-z0-9])`, "i").test(content)) return true;
+  }
+  return false;
+}
+
 function resolveScope(ev: RawMemoryEvent, ctx: CurationContext): MemoryScope {
+  if (ev.suggested_scope === "agent_repo" && mentionsProjectSpecifics(ev.content, ctx)) {
+    // The model labelled this a portable agent skill, but it names this project or this machine.
+    // Keep it — just not somewhere it can surface in an unrelated project or a borrowed nest.
+    return ctx.projectPath ? "project" : "session";
+  }
   if (ev.suggested_scope === "agent_repo" && ctx.sourceProvenance === "task-force-synthesis") {
     // 합성 응답에는 단일 소유 에이전트가 없다. 프로젝트 경계가 있으면 그 안에만 남기고,
     // 폴더 없는 합성은 session으로 강등해 글로벌 DB/borrowed-agent 둥지 오염을 막는다.

@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const Database = require("better-sqlite3");
 const { app } = require("electron");
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-tf-memory-"));
@@ -24,7 +25,7 @@ function event(content, scope = "agent_repo") {
   };
 }
 
-function nestText(slug) {
+function nestExperienceText(slug) {
   const file = path.join(
     sandboxHome,
     ".agentlas",
@@ -32,12 +33,18 @@ function nestText(slug) {
     "hub-agents",
     slug,
     "memory",
-    "project-soul-memory.md",
+    "experience.sqlite",
   );
+  let db;
   try {
-    return fs.readFileSync(file, "utf8");
+    db = new Database(file, { readonly: true, fileMustExist: true });
+    return db.prepare(
+      "SELECT candidate_text FROM memory_candidates WHERE agent_id = ? AND status = 'active' ORDER BY updated_at",
+    ).all(`hub:${slug}`).map((row) => row.candidate_text).join("\n");
   } catch {
     return "";
+  } finally {
+    try { db?.close(); } catch { /* best-effort test cleanup */ }
   }
 }
 
@@ -84,8 +91,8 @@ async function main() {
     "utf8",
   );
   assert.match(projectSoul, /private release branch/, "project synthesis belongs in the project soul");
-  assert.doesNotMatch(nestText("researcher"), /private release branch/, "researcher nest must stay isolated");
-  assert.doesNotMatch(nestText("builder"), /private release branch/, "builder nest must stay isolated");
+  assert.doesNotMatch(nestExperienceText("researcher"), /private release branch/, "researcher nest must stay isolated");
+  assert.doesNotMatch(nestExperienceText("builder"), /private release branch/, "builder nest must stay isolated");
   const globalCount = db.getDb()
     .prepare("SELECT COUNT(*) AS n FROM memory_entries WHERE content = ? AND project_path IS NULL")
     .get(synthesisContent).n;
@@ -134,13 +141,17 @@ async function main() {
     .prepare("SELECT scope, project_path FROM memory_entries WHERE content = ?")
     .get(directContent);
   assert.deepEqual(directRow, { scope: "agent_repo", project_path: null });
-  assert.match(nestText("researcher"), /expanding Advanced/, "direct owned learning should still reach its nest");
-  assert.doesNotMatch(nestText("builder"), /expanding Advanced/, "direct learning must not reach another identity");
+  assert.match(nestExperienceText("researcher"), /expanding Advanced/, "direct owned learning should still reach its nest");
+  assert.doesNotMatch(nestExperienceText("builder"), /expanding Advanced/, "direct learning must not reach another identity");
 
   const taskForceSource = fs.readFileSync(
     path.join(__dirname, "..", "electron", "mcp", "borrowed-task-force.ts"),
     "utf8",
   );
+  assert.match(taskForceSource, /prepareTaskForceMemoryBoundary/);
+  assert.match(taskForceSource, /buildMemoryContext\(p\.memoryReadPath \?\? null, agentId/);
+  assert.match(taskForceSource, /nodeMemory[\s\S]*ontology\?\.prompt[\s\S]*nodeMemoryEmitter/);
+  assert.match(taskForceSource, /curateOwnedTaskForceResult/);
   const curationStart = taskForceSource.indexOf("const curated = curateReply");
   const curationEnd = taskForceSource.indexOf("displayText =", curationStart);
   const curationBlock = taskForceSource.slice(curationStart, curationEnd);
@@ -150,12 +161,13 @@ async function main() {
   console.log("task-force memory project/identity/provenance boundary ok");
 }
 
+let exitCode = 0;
 main()
   .catch((error) => {
     console.error(error);
-    process.exitCode = 1;
+    exitCode = 1;
   })
   .finally(() => {
     fs.rmSync(tmp, { recursive: true, force: true });
-    app.quit();
+    app.exit(exitCode);
   });

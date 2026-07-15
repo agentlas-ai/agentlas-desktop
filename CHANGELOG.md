@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.8.38 — 2026-07-15
+
+### Fixed
+
+- **Scheduled automations now preserve one durable execution identity.** The first
+  run pins the exact runtime kind, backend, model, source, long-context setting,
+  and effort on the automation row. Later global runtime changes cannot silently
+  move a Codex automation to Claude or create a separate provider session.
+- **CLI session recovery is fail-closed for unattended work.** Codex and Claude
+  emit lifecycle receipts for resume, create, fingerprint change, resume failure,
+  and session-store failure. A failed resume no longer clears the record and
+  quietly starts a fresh CLI conversation during an automation run. Every run
+  also receives a bounded durable capsule containing the prior outcomes.
+- **The other-computer `EPERM` loop is classified correctly and its Korean
+  workspace instruction is honored.** `작업 루트는 /Users/...` now binds the
+  hidden automation chat to that cwd. `EPERM`, `Operation not permitted`, halted
+  execution, missing input, and failed tool results cannot be recorded as a
+  successful run, so the existing three-failure pause can stop a broken loop.
+- **Real-login browser automations cannot drift into a fresh browser profile.**
+  Explicit `Agentlas Browser`, CDP, or port 9222 intent outranks the generic
+  Reddit/social Computer Use heuristic. Browser mode exposes only the Agentlas
+  Browser host and removes the fresh Playwright-profile fallback.
+- **Pinned Hub packages now reach the actual single-agent call.** A stored Hub
+  `packageHash` is passed to `hepCall --version`; mixed pinned targets are
+  resolved independently so one hash is never applied to another package.
+- **Nested orchestration keeps the three-level Agentlas hierarchy executable.**
+  The top host LLM may compose local, Cloud, and Hub units; packaged Teams retain
+  their manager/worker graph; user-created Groups retain their generated
+  middle-manager planner. Failed worker packets and conflicting file claims are
+  surfaced instead of synthesized as a successful final answer.
+- **Release promotion now updates the live Desktop API.** The sole release writer
+  overlays immutable current verification tooling and, after stable promotion,
+  applies the verified production env through Railway. A separate bounded
+  recovery workflow repairs already-published metadata without rebuilding apps.
+
+### Verification
+
+- Automation store, runtime resume, typed result, real-login browser selection,
+  borrowed Team/Agent fail-closed, swarm engine, curator nest, task-force memory,
+  updater/release contract, and TypeScript gates pass locally.
+- The bundled Core remains Agentlas OS v1.1.37 at immutable commit
+  c86aa86ccb3424e67be0b45ec253cc408af99df7. Source verification does not prove
+  a public installer; signed native updater gates and served bytes remain the
+  release authority.
+
 ## 0.8.37 — 2026-07-15
 
 ### Fixed

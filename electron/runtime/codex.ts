@@ -135,7 +135,7 @@ function resumePermissionArgs(permission?: RunnerRequest["permission"]): string[
 function systemFingerprint(req: RunnerRequest): string {
   return crypto
     .createHash("sha256")
-    .update(req.systemPrompt)
+    .update(req.sessionFingerprintSeed ?? req.systemPrompt)
     .update("\0")
     .update(req.locale)
     .update("\0")
@@ -413,6 +413,9 @@ export const runCodex: Runner = async (
       : null;
   const resumeSessionId = runReq.untrustedNoTools ? null : (runReq.runtimeSessionId ?? storedSessionId);
   const canResume = !!resumeSessionId;
+  if (existing && fingerprint && existing.fingerprint !== fingerprint) {
+    events.onStatus(`[runtime-session] fingerprint_changed kind=${KIND}`);
+  }
 
   // RESUME: 새 user 턴만 stdin으로 — 시스템 프롬프트/히스토리는 세션이 이미 갖고 있다.
   // Resume reasserts the same permission boundary as the first turn.
@@ -437,8 +440,11 @@ export const runCodex: Runner = async (
     }
     if (r.code === 0) {
       if (runReq.chatId && fingerprint && r.threadId) {
-        saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint);
+        if (!saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint)) {
+          events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
+        }
       }
+      events.onStatus(`[runtime-session] resumed kind=${KIND}`);
       return { text: r.text.trim(), sessionId: r.threadId ?? resumeSessionId, tokens: r.tokens, appliedEffort };
     }
     // Build continuation recovery is owned by Main, which can remove exactly
@@ -451,7 +457,11 @@ export const runCodex: Runner = async (
     ) {
       throw new Error(`codex CLI exit ${r.code}${r.stderr ? `\n${r.stderr.slice(0, 500)}` : ""}`);
     }
-    // resume 실패(세션 만료/손상 등) → 세션 버리고 아래 CREATE로 폴백.
+    events.onStatus(`[runtime-session] resume_failed kind=${KIND} exit=${r.code}`);
+    if (runReq.unattended) {
+      throw new Error(`Automation runtime session resume failed for ${KIND}; refusing to create a fresh CLI session.`);
+    }
+    // Interactive chat may recover with the full durable history after an explicit receipt.
     if (runReq.chatId) clearRuntimeSession(runReq.chatId, KIND);
   }
 
@@ -472,8 +482,11 @@ export const runCodex: Runner = async (
   }
   if (created.code === 0) {
     if (runReq.chatId && fingerprint && created.threadId) {
-      saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint);
+      if (!saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint)) {
+        events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
+      }
     }
+    events.onStatus(`[runtime-session] created kind=${KIND}`);
     return { text: created.text.trim(), sessionId: created.threadId ?? undefined, tokens: created.tokens, appliedEffort };
   }
   throw new Error(

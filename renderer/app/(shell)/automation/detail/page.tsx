@@ -210,6 +210,40 @@ function AutomationDetailPage() {
           label={locale === "en" ? "Hub usage" : "Hub 사용"}
           value={hubModeLabel(automation.hubMode, locale)}
         />
+        {automation.targetType === "hub" && (
+          // 반복 자동화가 어느 버전으로 도는지는 결과의 재현성을 좌우한다. latest면 작성자가
+          // 재게시하는 순간 같은 자동화가 다른 지시문으로 돈다 — 그 사실을 숨기지 않는다.
+          <Row
+            label={locale === "en" ? "Agent version" : "에이전트 버전"}
+            value={
+              automation.targetVersion ? (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <span
+                    style={{
+                      padding: "2px 7px",
+                      borderRadius: 999,
+                      border: "1px solid var(--paper-edge)",
+                      background: "var(--fill-1)",
+                      fontSize: 11,
+                      fontWeight: 700,
+                    }}
+                  >
+                    {locale === "en" ? "pinned" : "고정됨"}
+                  </span>
+                  <code style={{ fontSize: 11, color: "var(--muted-deep)" }}>
+                    {automation.targetVersion.slice(0, 12)}
+                  </code>
+                </span>
+              ) : (
+                <span style={{ color: "var(--muted-deep)" }}>
+                  {locale === "en"
+                    ? "latest — the author can change this agent's behavior without notice"
+                    : "latest — 작성자가 재게시하면 동작이 예고 없이 바뀝니다"}
+                </span>
+              )
+            }
+          />
+        )}
         <Row label={t("auto.detail.last_run")} value={automation.lastRunAt ?? t("auto.detail.never")} />
         <RunHistoryPanel automation={automation} locale={locale} compact />
         <Row

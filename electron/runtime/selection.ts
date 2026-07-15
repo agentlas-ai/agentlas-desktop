@@ -132,6 +132,27 @@ function runtimeMatchesOverride(runtime: RuntimeStatus, override: AgentRuntimeOv
   return true;
 }
 
+export function selectExactRuntime(
+  runtimes: RuntimeStatus[],
+  selection: import("../../shared/types").RuntimeSelection,
+): RuntimeChoice | null {
+  const matched = runtimes.find((runtime) => {
+    if (runtime.kind !== selection.kind) return false;
+    if (selection.backend && runtime.backend !== selection.backend) return false;
+    if (selection.source && runtime.source !== selection.source) return false;
+    return true;
+  });
+  if (!matched) return null;
+  const active: RuntimeStatus = {
+    ...matched,
+    active: true,
+    model: selection.model ?? matched.model,
+    longContextEnabled: selection.longContext ?? matched.longContextEnabled,
+    effort: selection.effort ?? matched.effort,
+  };
+  return { active, picked: pickRunner(active), override: null, unavailableOverride: null };
+}
+
 export function applyRuntimeOverride(
   runtime: RuntimeStatus,
   override: AgentRuntimeOverride,

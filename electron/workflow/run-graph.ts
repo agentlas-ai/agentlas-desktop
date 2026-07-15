@@ -74,13 +74,28 @@ function waitForRunningNodeOrAbort(
   return Promise.race([nextNode, aborted]).finally(detachAbort);
 }
 
-/** {{var}} 치환 — 변수 백에서 값을 읽어 문자열에 삽입. 미정의는 빈 문자열. */
-function substitute(template: string, vars: Record<string, unknown>): string {
-  return template.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (_m, key: string) => {
+/** {{var}} 치환 결과 — 미해결 키를 호출자가 볼 수 있게 함께 반환한다. */
+interface Substitution {
+  text: string;
+  /** 변수 백에 값이 없던 키들. 앞 단계가 안 돌았거나(skip) 산출을 못 낸 경우. */
+  missing: string[];
+}
+
+/** {{var}} 치환 — 변수 백에서 값을 읽어 문자열에 삽입.
+ *  미정의 키를 빈 문자열로 바꿔치우면 "값이 없다"와 "빈 값이 나왔다"가 구분되지 않는다.
+ *  condition으로 건너뛴 브랜치가 produce하던 변수를 하류 노드가 읽으면, 앞 단계가 실행조차
+ *  안 됐는데 프롬프트만 조용히 뭉개진 채 실행됐다. 치환은 그대로 하되 사실을 보고한다. */
+function substitute(template: string, vars: Record<string, unknown>): Substitution {
+  const missing: string[] = [];
+  const text = template.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (_m, key: string) => {
     const v = vars[key];
-    if (v == null) return "";
+    if (v == null) {
+      if (!missing.includes(key)) missing.push(key);
+      return "";
+    }
     return typeof v === "string" ? v : JSON.stringify(v);
   });
+  return { text, missing };
 }
 
 /** config에서 문자열 필드 안전 추출. */
@@ -170,7 +185,7 @@ function applyTransform(node: WorkflowNode, vars: Record<string, unknown>): void
       break;
     case "format": {
       const tmpl = str(cfg, "template") ?? "{{" + from + "}}";
-      vars[to] = substitute(tmpl, vars);
+      vars[to] = substitute(tmpl, vars).text;
       break;
     }
     case "extract": {
@@ -395,10 +410,22 @@ export async function runGraph(
       case "action":
       case "output": {
         const rawPrompt = str(node.config, "prompt") ?? str(node.config, "text") ?? automation.promptTemplate;
-        const prompt = substitute(rawPrompt, vars);
+        const substituted = substitute(rawPrompt, vars);
+        const prompt = substituted.text;
         if (!prompt.trim()) {
-          emitNodeState(node.id, "done");
-          status.set(node.id, "done");
+          // 예전엔 무조건 "done"이었다. 프롬프트가 통째로 비었는데 성공 모양의 no-op으로 기록돼,
+          // 앞 단계가 산출을 못 낸 사실이 실행 결과 어디에도 남지 않았다. 원인을 구분해 보고한다:
+          // 참조한 변수가 비어 있으면 실패(앞 단계 문제), 템플릿 자체가 비었으면 skip(설정대로).
+          if (substituted.missing.length > 0) {
+            const detail = `Prompt resolved to empty because upstream produced no value for: ${substituted.missing.join(", ")}`;
+            emitNodeState(node.id, "failed");
+            status.set(node.id, "failed");
+            ok = false;
+            error ??= `${node.id}: ${detail}`;
+            return;
+          }
+          emitNodeState(node.id, "skipped");
+          status.set(node.id, "skipped");
           return;
         }
         emitNodeState(node.id, "running");
@@ -431,7 +458,19 @@ export async function runGraph(
           if (!text.trim()) throw new Error(`Node "${node.label || node.id}" finished without an assistant result`);
           outputs[node.id] = text;
           const produces = str(node.config, "produces");
-          if (produces) vars[produces] = text; // 병렬 노드는 서로 독립(deps로 분리)이라 vars 경합 없음
+          if (produces) {
+            // 이전 주석은 "병렬 노드는 deps로 분리돼 vars 경합이 없다"고 단언했지만 코드가 그걸
+            // 보장하지 않는다: ready 필터는 서로 엣지가 없는 노드를 같은 배치로 동시에 띄우므로,
+            // 두 독립 브랜치가 같은 produces 이름을 쓰면 마지막 완료 노드가 이긴다(비결정적).
+            // 막지는 않는다 — 순차 재할당은 정상 패턴이다. 다만 조용히 덮어쓰지는 않는다.
+            if (produces in vars && vars[produces] !== text) {
+              console.warn(
+                `[workflow] variable "${produces}" overwritten by node ${node.id}; ` +
+                  `concurrent producers of the same name are last-writer-wins and non-deterministic`,
+              );
+            }
+            vars[produces] = text;
+          }
           emitNodeState(node.id, "done");
           status.set(node.id, "done");
         } catch (nodeErr) {

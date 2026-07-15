@@ -51,6 +51,13 @@ const SOCIAL_SURFACE_PATTERNS = [
   /레딧|인스타|스레드|트위터|링크드인|페이스북|틱톡/i,
 ];
 
+const EXACT_AGENTLAS_BROWSER_PATTERNS = [
+  /\bAgentlas\s+Browser\b/i,
+  /\b(?:CDP|remote[- ]debugging)\b/i,
+  /(?:127\.0\.0\.1|localhost):9222/i,
+  /로그인된\s*(?:에이전틀라스\s*)?브라우저/i,
+];
+
 function hasAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text));
 }
@@ -70,5 +77,9 @@ export function resolveAutomationToolMode(input: {
 }): AutomationToolMode {
   if (input.toolMode === "browser" || input.toolMode === "computer-use") return input.toolMode;
   const text = [input.name ?? "", input.promptTemplate ?? "", input.targetLabel ?? ""].join("\n");
+  // Exact real-login browser intent outranks the generic social-site heuristic.
+  // Otherwise a Reddit job that explicitly says "Agentlas Browser / 9222" is silently
+  // diverted into Computer Use and loses the authenticated CDP session.
+  if (hasAny(text, EXACT_AGENTLAS_BROWSER_PATTERNS)) return "browser";
   return shouldPreferComputerUseForAutomation(text) ? "computer-use" : "auto";
 }

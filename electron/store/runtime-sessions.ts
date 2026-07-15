@@ -28,7 +28,7 @@ export function saveRuntimeSession(
   kind: string,
   sessionId: string,
   fingerprint: string,
-): void {
+): boolean {
   try {
     getDb()
       .prepare(
@@ -36,8 +36,10 @@ export function saveRuntimeSession(
          VALUES (?, ?, ?, ?, ?)`,
       )
       .run(chatId, kind, sessionId, fingerprint, new Date().toISOString());
+    return true;
   } catch {
-    // DB 오류 시 무시 — 세션 저장 실패해도 다음 턴은 full-context로 동작한다.
+    // Callers can now emit a lifecycle receipt instead of silently losing continuity.
+    return false;
   }
 }
 

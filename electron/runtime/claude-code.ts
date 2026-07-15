@@ -247,7 +247,7 @@ function flattenHistory(req: RunnerRequest): string {
 function systemFingerprint(req: RunnerRequest): string {
   return crypto
     .createHash("sha256")
-    .update(req.systemPrompt)
+    .update(req.sessionFingerprintSeed ?? req.systemPrompt)
     .update("\0")
     .update(req.locale)
     .update("\0")
@@ -313,6 +313,7 @@ export const runClaudeCode: Runner = async (
       ? savedSession.sessionId
       : null;
   if (runReq.chatId && savedSession && fingerprint && savedSession.fingerprint !== fingerprint) {
+    events.onStatus(`[runtime-session] fingerprint_changed kind=${KIND}`);
     clearRuntimeSession(runReq.chatId, KIND);
   }
   const resumeSessionId = runReq.untrustedNoTools ? null : (runReq.runtimeSessionId ?? storedSessionId);
@@ -821,8 +822,11 @@ export const runClaudeCode: Runner = async (
         const display = streamed || finalText;
         if (display) events.onPartial(display);
         if (req.chatId && fingerprint && sessionId) {
-          saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint);
+          if (!saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint)) {
+            events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
+          }
         }
+        events.onStatus(`[runtime-session] ${resumeSessionId ? "resumed" : "created"} kind=${KIND}`);
         resolve({ text: display.trim(), sessionId, tokens });
       } else {
         if (runReq.untrustedNoTools) {
@@ -852,8 +856,12 @@ export const runClaudeCode: Runner = async (
         }
         if (resumeSessionId && req.chatId) clearRuntimeSession(req.chatId, KIND);
         if (resumeSessionId) {
-          // 저장된 CLI 세션이 만료/손상되면 같은 턴을 full-context로 즉시 복구한다.
-          // Build는 req.history를 갖고 있고, Chat은 DB history를 갖고 있으므로 문맥은 유지된다.
+          events.onStatus(`[runtime-session] resume_failed kind=${KIND} exit=${code}`);
+          if (req.unattended) {
+            reject(new Error(`Automation runtime session resume failed for ${KIND}; refusing to create a fresh CLI session.`));
+            return;
+          }
+          // Interactive chat may recover with full durable history after the receipt.
           void runClaudeCode({ ...req, runtimeSessionId: undefined }, events).then(resolve, reject);
           return;
         }

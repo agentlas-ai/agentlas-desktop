@@ -92,12 +92,15 @@ function swarmProtocol(
     "   End with a `## Spawn` JSON block when spawning:",
     "   ## Spawn",
     "   ```json",
-    `   {"tasks":[{"role":"optional","brief":"concrete child task","allocation":${workloadAllocationPromptExample("delegate")}}]${!task.spawnedBy ? `,"synthesis":${workloadAllocationPromptExample("synthesize")}` : ""}}`,
+    `   {"tasks":[{"role":"optional","brief":"concrete child task","files":["relative/path/it/writes.ts"],"allocation":${workloadAllocationPromptExample("delegate")}}]${!task.spawnedBy ? `,"synthesis":${workloadAllocationPromptExample("synthesize")}` : ""}}`,
     "   ```",
     !task.spawnedBy
       ? "   You are the initial seed: always include the synthesis allocation; use tasks:[] if no child is needed."
       : "   Omit the block if no child is needed. Role is optional.",
     "   Never spawn work that another pending, running, or completed peer packet already owns.",
+    // 워커들은 하나의 작업 폴더를 공유한다. 선언이 있어야 호스트가 겹치는 작업을 직렬화해
+    // 서로의 편집(또는 사용자 변경)을 덮어쓰는 것을 막을 수 있다.
+    "   `files`: list every project file the child will CREATE or MODIFY (relative paths). Peers share one working folder, so the host serializes tasks that declare the same file. Omit it only for read-only or research work — an omitted list means the host cannot protect that file from a concurrent writer.",
     "3. Do NOT restate the whole goal. Do NOT invent work that isn't needed — over-spawning wastes the user's money.",
     "4. Everything above the `## Spawn` block is your result and is shared with peers on the blackboard.",
   ]
@@ -108,7 +111,7 @@ function swarmProtocol(
 /** 에이전트 출력에서 `## Spawn` 블록을 분리 → { result(본문), spawn[] }. */
 export function parseSwarmOutput(text: string): {
   result: string;
-  spawn: Array<{ title: string; brief: string; role?: string; allocation: WorkloadAllocation }>;
+  spawn: Array<{ title: string; brief: string; role?: string; files?: string[]; allocation: WorkloadAllocation }>;
   synthesisAllocation: WorkloadAllocation | null;
 } {
   // 앞 개행을 먹지 않도록 수평 공백만([ \t]) 허용 — `\s`는 개행 포함이라 슬라이스가 어긋난다.
@@ -117,7 +120,7 @@ export function parseSwarmOutput(text: string): {
   const result = text.slice(0, m.index).trim();
   const afterHeading = text.slice(m.index + m[0].length);
   const fence = afterHeading.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const spawn: Array<{ title: string; brief: string; role?: string; allocation: WorkloadAllocation }> = [];
+  const spawn: Array<{ title: string; brief: string; role?: string; files?: string[]; allocation: WorkloadAllocation }> = [];
   if (fence) {
     try {
       const parsed = JSON.parse(fence[1].trim());
@@ -135,11 +138,23 @@ export function parseSwarmOutput(text: string): {
         const brief = typeof item.brief === "string" ? item.brief.trim() : "";
         const title = typeof item.title === "string" ? item.title.trim() : brief.slice(0, 80);
         const role = typeof item.role === "string" ? item.role.trim() || undefined : undefined;
+        // 워커가 선언한 쓰기 대상. 스케줄러가 겹치는 작업을 직렬화하는 근거가 된다.
+        const files = Array.isArray(item.files)
+          ? [
+              ...new Set(
+                item.files
+                  .map((file) => (typeof file === "string" ? file.trim() : ""))
+                  .filter((file): file is string => Boolean(file))
+                  .slice(0, 24),
+              ),
+            ]
+          : undefined;
         if (brief) {
           spawn.push({
             title: title || brief.slice(0, 80),
             brief,
             role,
+            ...(files?.length ? { files } : {}),
             allocation: normalizeWorkloadAllocation(item.allocation, "delegate"),
           });
         }

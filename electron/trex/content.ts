@@ -178,6 +178,9 @@ async function generateViaSlideAgent(
           if (ev.kind === "final" && typeof ev.text === "string" && ev.text.trim()) finalText = ev.text.trim();
         },
         controller.signal,
+        undefined,
+        // 무인 백그라운드 생성 — 질문에 답할 사람이 없다(UNATTENDED_NO_ASK_DIRECTIVE 부착 대상).
+        { source: "trex" },
       );
       const text = (result?.finalText || finalText || "").trim();
       return looksLikeDeckJson(text) ? text : null;

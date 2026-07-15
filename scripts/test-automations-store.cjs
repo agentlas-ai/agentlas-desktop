@@ -34,7 +34,7 @@ const { parseAutomations } = require("../dist/electron/automation-emitter.js");
 const mcpClient = require("../dist/electron/mcp/client.js");
 const { runDueAutomationsNow, runAutomationNow } = require("../dist/electron/automation-scheduler.js");
 const { removeAutomationSafely } = require("../dist/electron/automation-removal.js");
-const { getChat } = require("../dist/electron/store/chats.js");
+const { getChat, appendChatMessage } = require("../dist/electron/store/chats.js");
 
 function assertLocalTime(iso, expected) {
   const d = new Date(iso);
@@ -604,12 +604,20 @@ function assertLocalTime(iso, expected) {
       assert.equal(schedulerCalls.length, 1, "due scheduler should invoke once");
       assert.equal(schedulerCalls[0].userPrompt, "Run due automation");
       assert.equal(schedulerCalls[0].permissions, "write");
+      assert.ok(schedulerCalls[0].runtimeSelection?.kind, "first run must pin an exact runtime before invocation");
       const automationChat = getChat(schedulerCalls[0].chatId);
       assert.ok(automationChat, "scheduler should create a hidden automation chat");
       assert.equal(automationChat.kind, "division");
       const dueAfterRun = getAutomation(dueRun.id);
+      assert.deepEqual(dueAfterRun.runtimeSelection, schedulerCalls[0].runtimeSelection, "runtime pin must persist on the automation row");
       assert.ok(dueAfterRun.lastRunAt, "scheduler should mark lastRunAt");
       assert.ok(new Date(dueAfterRun.nextRunAt).getTime() > new Date(dueAfterRun.lastRunAt).getTime());
+      appendChatMessage(automationChat.id, "assistant", "first durable outcome: ledger updated");
+      schedulerCalls.length = 0;
+      await runAutomationNow(dueRun.id);
+      assert.match(schedulerCalls[0].userPrompt, /automation continuity capsule/);
+      assert.match(schedulerCalls[0].userPrompt, /first durable outcome: ledger updated/);
+      assert.deepEqual(schedulerCalls[0].runtimeSelection, dueAfterRun.runtimeSelection, "later runs must ignore global runtime drift");
 
       schedulerCalls.length = 0;
       const readOnlyRun = createAutomation({
@@ -757,6 +765,15 @@ function assertLocalTime(iso, expected) {
       );
 
       let leaseLossAbortObserved = false;
+      const koreanWorkspaceRoot = path.join("/tmp", `agentlas-korean-workspace-${process.pid}`);
+      assert.equal(
+        mcpClient.inferWorkingFolderFromPrompt(`작업 루트는 ${koreanWorkspaceRoot} 이고 이 폴더에서만 실행해.`),
+        koreanWorkspaceRoot,
+        "Korean 작업 루트 authority must bind the automation cwd instead of falling back to agent-cwd",
+      );
+      assert.ok(fs.statSync(koreanWorkspaceRoot).isDirectory());
+      fs.rmSync(koreanWorkspaceRoot, { recursive: true, force: true });
+
       mcpClient.runMcpInvocation = async (_payload, _onEvent, signal) => {
         await new Promise((resolve, reject) => {
           signal.addEventListener("abort", () => {

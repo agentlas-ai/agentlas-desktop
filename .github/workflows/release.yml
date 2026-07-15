@@ -136,6 +136,7 @@ jobs:
             npm run test:release-agent-foundation-gate
             npm run test:v64-automation-permission-migration
             npm run test:automations-store
+            npm run test:automation-result-contract
             npm run test:automation-scheduler-guards
             npm run test:mobile-read-boundary
             npm run test:mobile-execution-boundary
@@ -291,6 +292,7 @@ jobs:
             npm run test:v53-hub-bookmark-sync
             npm run test:updater-production
             npm run test:automations-store
+            npm run test:automation-result-contract
             npm run test:cli-version-parser
             npm run test:hephaestus-status-version
             npm run test:python-cache-boundary

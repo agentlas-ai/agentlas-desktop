@@ -120,6 +120,43 @@ async function main() {
     "cross-project recall must no longer rely on markdown cat",
   );
 
+  // ── agent_repo는 프로젝트 경계를 넘는 유일한 스코프 → 프로젝트 고유 정보는 못 태운다 ──
+  // scope 라벨은 모델이 붙인다. 오라벨된 이벤트는 이 프로젝트의 경로·이름을 다른 프로젝트와
+  // 제3자 에이전트 둥지까지 옮긴다. 강등은 저장을 막지 않고 도달 범위만 좁힌다.
+  {
+    const leakProject = path.join(tmp, "Client_Confidential_Merger");
+    fs.mkdirSync(leakProject, { recursive: true });
+    const leakCtx = {
+      ...baseCtx,
+      projectPath: leakProject,
+      projectId: "project-leak",
+      cwdAtRequest: leakProject,
+      borrowedAgentSlugs: ["leak-probe-agent"],
+    };
+    curateEvents(
+      [
+        ev("procedure", "agent_repo", "Client_Confidential_Merger 배포는 테스트 전에 돌려야 한다."),
+        ev("procedure", "agent_repo", "설정은 /Users/mason/Documents/private-client/secrets.yml 에 있다."),
+      ],
+      leakCtx,
+    );
+    assert.equal(
+      readNest("leak-probe-agent"),
+      null,
+      "project-identifying agent_repo learnings must not reach a borrowed agent's cross-project nest",
+    );
+    // 진짜 이식 가능한 기술은 계속 흘러야 한다 — 가드가 크로스 프로젝트 학습을 죽이면 안 된다.
+    curateEvents(
+      [ev("procedure", "agent_repo", "재시도는 지수 백오프로 하고 5회에서 포기한다.")],
+      leakCtx,
+    );
+    const portableNest = readNest("leak-probe-agent");
+    assert.ok(portableNest, "portable agent_repo skills must still reach the nest");
+    assert.match(portableNest, /지수 백오프/);
+    assert.doesNotMatch(portableNest, /Client_Confidential_Merger/);
+    assert.doesNotMatch(portableNest, /secrets\.yml/);
+  }
+
   // Upgrade the old projection contract in place: Core cannot consume the
   // prior review-state status or Desktop's full adapter identity in the row.
   const legacyDb = new Database(nestDbPath("instagram-uploader"));

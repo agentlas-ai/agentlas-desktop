@@ -311,6 +311,18 @@ export function ChatInput({
   const [showStormWarning, setShowStormWarning] = useState(false);
   // 자동 라우팅(알아서 에이전트 부르기) — 묻지 않고 바로 라우팅한다(codex hep-network 동작과 동일).
   const [autoRouting, setAutoRouting] = useState(false);
+  // 호출 전 비용 고지 — 허브 에이전트 유료 자동 고용 직전에만 잠깐 뜬다.
+  // 크레딧 = 대여(리스) 비용이지 최종 성공 보장이 아니라는 걸 숨기지 않는다.
+  const [costNotice, setCostNotice] = useState<{ credits: number } | null>(null);
+  const costNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function flashCostNotice(credits: number) {
+    if (costNoticeTimerRef.current) clearTimeout(costNoticeTimerRef.current);
+    setCostNotice({ credits });
+    costNoticeTimerRef.current = setTimeout(() => setCostNotice(null), 8_000);
+  }
+  useEffect(() => () => {
+    if (costNoticeTimerRef.current) clearTimeout(costNoticeTimerRef.current);
+  }, []);
   // 게이트 바텀시트 — 유일하게 묻는 두 경우: 크레딧 부족(paywall) / 적합 에이전트 없음(build 제안).
   const [gateSheet, setGateSheet] = useState<AutoRouteGate | null>(null);
   const [appsGenerateMode, setAppsGenerateMode] = useState(false);
@@ -725,6 +737,8 @@ export function ChatInput({
         setGateSheet({ kind: "paywall", text, opts, needed: cost, have, routerAgent: preview.routerAgent });
         return;
       }
+      // 유료 자동 고용이 실제로 나가는 경로 — 차감 전 예상 비용·리스 조건을 사용자에게 고지한다.
+      flashCostNotice(cost);
     }
     execAutoChoice(preview, text, opts, engineToggles);
   }
@@ -1092,6 +1106,31 @@ export function ChatInput({
             }}
           />
           {t("chatinput.autoroute.routing")}
+        </div>
+      )}
+      {/* 호출 전 비용 고지 — 유료 허브 고용이 나갈 때만 잠깐. 대여 비용≠성공 보장을 명시 */}
+      {!autoRouting && costNotice && (
+        <div
+          data-autoroute-cost-notice="true"
+          style={{
+            position: "absolute",
+            left: 16,
+            bottom: "calc(100% + 8px)",
+            zIndex: 40,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "4px 10px",
+            borderRadius: 999,
+            border: "1px solid var(--paper-edge)",
+            background: "var(--paper)",
+            color: "var(--muted-deep)",
+            fontSize: 11.5,
+            fontWeight: 600,
+          }}
+        >
+          <span aria-hidden style={{ flexShrink: 0 }}>🤝</span>
+          {t("chatinput.autoroute.cost_notice", { credits: costNotice.credits })}
         </div>
       )}
       {/* 게이트 시트 — 크레딧 부족(paywall)·적합 에이전트 없음(build 제안)일 때만 */}

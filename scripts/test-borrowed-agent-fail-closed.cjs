@@ -42,7 +42,13 @@ function preparedTeam(slug, { graph = true } = {}) {
   const output = {
     entity_kind: "team",
     entry_excerpt: `AUTHORITATIVE_TEAM_${slug}`,
-    grounding: { directive: "Attach to the current project first." },
+    grounding: {
+      directive: "Attach to the current project first; use exact selective recall commands when relevant.",
+      commands: {
+        experience_query: `ontology --db /tmp/${slug}-experience.sqlite query task --agent hub:${slug}`,
+        ontology_query: `ontology --db /tmp/${slug}-project.sqlite query task`,
+      },
+    },
     next_step: "Execute the team bundle with the user's local model.",
     runtime_bundle: {
       entity_kind: "team",
@@ -113,6 +119,7 @@ async function main() {
   let nextHubResult = result(null);
   const hubCalls = [];
   const commands = require("../dist/electron/hephaestus/commands.js");
+  const realHepCall = commands.hepCall;
   commands.hepCall = async (agents, context, options) => {
     hubCalls.push({ agents, context, options });
     if (nextHubResult instanceof Error) throw nextHubResult;
@@ -161,6 +168,7 @@ async function main() {
 
   async function invoke({
     title,
+    userPrompt = "hello",
     borrowAgents,
     hubResult,
     agentGroupId,
@@ -183,7 +191,7 @@ async function main() {
     const response = await client.runMcpInvocation(
       {
         chatId: chat.id,
-        userPrompt: "hello",
+        userPrompt,
         locale: "en",
         permissions: permission,
         ...(borrowAgents ? { borrowAgents } : {}),
@@ -366,6 +374,15 @@ async function main() {
   assert.match(executableEvidence, /TEAM_MANAGER_DIRECTIVE/);
   assert.match(executableEvidence, /TEAM_WORKER_ONE_DIRECTIVE/);
   assert.match(executableEvidence, /TEAM_WORKER_TWO_DIRECTIVE/);
+  assert.match(executableEvidence, /experience_query:/, "Hub team nodes must retain the exact experience recall command");
+  assert.match(executableEvidence, /ontology_query:/, "Hub team nodes must retain the exact project ontology command");
+  assert.equal(
+    executableRequests.filter((request) => (
+      request.systemPrompt.includes("Only when this turn produced a durable decision")
+    )).length >= 3,
+    true,
+    "Hub team workers, team synthesis, and outer synthesis must receive the Memory Curator emitter contract",
+  );
   assert.equal(executableTeam.events.filter((event) => event.kind === "final").length, 1);
   assert.equal(
     swarmRealRequests.filter((request) => request.systemPrompt.includes("## Agentlas Task-Force Agent Host Policy")).length,
@@ -799,6 +816,129 @@ async function main() {
   );
   assert.equal(hubCalls.length, 19, "every executable explicit path must make exactly one authoritative hep-call attempt");
 
+  const ragProject = path.join(tmp, "task-force-rag-project");
+  const ragMemoryDir = path.join(ragProject, ".agentlas");
+  fs.mkdirSync(path.join(ragMemoryDir, "code-map"), { recursive: true });
+  fs.writeFileSync(
+    path.join(ragMemoryDir, "project-soul-memory.md"),
+    "# Project Soul Memory\n\n- SOUL_SENTINEL_TF_RAG_4D91\n",
+    "utf8",
+  );
+  fs.writeFileSync(
+    path.join(ragMemoryDir, "sitemap.json"),
+    JSON.stringify({ nodes: [{ status: "SITEMAP_SENTINEL_TF_RAG_71C2" }] }),
+    "utf8",
+  );
+  await require("../dist/electron/architecture/activation.js")
+    .activateFolder(ragProject, "Task Force RAG Fixture", { permission: "write" });
+  fs.writeFileSync(
+    path.join(ragMemoryDir, "code-map", "project-map.json"),
+    JSON.stringify({
+      project: "CODEMAP_SENTINEL_TF_RAG_8A63",
+      stats: { codeFiles: 1, symbols: 1 },
+      modules: [{ id: "codemap-sentinel-module", role: "benchmark" }],
+    }),
+    "utf8",
+  );
+  const memoryStore = require("../dist/electron/memory/store.js");
+  memoryStore.insertMemoryEntry({
+    scope: "project",
+    kind: "procedure",
+    content: "For the task-force RAG sentinel procedure, apply CURATED_SENTINEL_TF_RAG_2B57.",
+    projectId: null,
+    projectPath: ragProject,
+    agentId,
+  });
+  const ragTask = "Use the task-force RAG sentinel procedure and verify all grounded sources.";
+  assert.match(
+    require("../dist/electron/memory/context.js").buildMemoryContext(ragProject, agentId, {
+      materializeCodeMap: false,
+      taskPrompt: ragTask,
+    }),
+    /CURATED_SENTINEL_TF_RAG_2B57/,
+    "the seeded curated row must be retrievable before entering the task-force executor",
+  );
+  const ragRun = await invoke({
+    title: "Task-force RAG grounding probe",
+    userPrompt: ragTask,
+    taskForceTargets: [{ source: "hub", entityKind: "team", slug: "rag-team" }],
+    hubResult: result({
+      schema: "hephaestus.call.v1",
+      status: "prepared",
+      agents: [preparedTeam("rag-team")],
+    }),
+    permission: "read",
+    runnerTexts: [
+      "RAG outer plan",
+      "RAG manager plan",
+      "RAG worker one",
+      "RAG worker two",
+      "RAG team synthesis",
+      "RAG outer synthesis",
+    ],
+    beforeRun: async (chat) => chats.setChatWorkingFolder(chat.id, ragProject),
+  });
+  assert.equal(ragRun.runnerDelta, 6);
+  const ragEvidence = runnerRequests
+    .slice(ragRun.runnerStart)
+    .map((request) => request.systemPrompt)
+    .join("\n");
+  assert.match(ragEvidence, /SOUL_SENTINEL_TF_RAG_4D91/);
+  assert.match(ragEvidence, /SITEMAP_SENTINEL_TF_RAG_71C2/);
+  assert.match(ragEvidence, /CODEMAP_SENTINEL_TF_RAG_8A63/);
+  assert.match(ragEvidence, /CURATED_SENTINEL_TF_RAG_2B57/);
+
+  let liveHubTeamProof = null;
+  if (process.env.AGENTLAS_LIVE_HUB_TEAM_PROBE === "1") {
+    const sourceRoot = process.env.AGENTLAS_LIVE_HUB_TEAM_SOURCE_ROOT;
+    const previousRoot = process.env.HEPHAESTUS_RUNTIME_ROOT;
+    if (sourceRoot) {
+      process.env.HEPHAESTUS_RUNTIME_ROOT = sourceRoot;
+      require("../dist/electron/hephaestus/root.js").resetHephaestusRootCache();
+    }
+    const live = await realHepCall(
+      "hub/team/product-development-hq",
+      ["Verify the live team manager-worker execution graph through the Desktop task-force executor."],
+      { project: "/private/tmp/agentlas-core-terra" },
+    );
+    if (sourceRoot) {
+      if (previousRoot === undefined) delete process.env.HEPHAESTUS_RUNTIME_ROOT;
+      else process.env.HEPHAESTUS_RUNTIME_ROOT = previousRoot;
+      require("../dist/electron/hephaestus/root.js").resetHephaestusRootCache();
+    }
+    assert.equal(live.ok, true, live.error || live.stderr || "live Hub team call failed");
+    const liveSpecs = require("../dist/electron/mcp/borrowed-task-force.js")
+      .requireBorrowedAgentSpecs(["product-development-hq"], live.json, {
+        locale: "en",
+        transportOk: live.ok,
+      });
+    assert.equal(liveSpecs[0].entityKind, "team");
+    const liveWorkerCount = liveSpecs[0].executionGraph?.workers?.length ?? 0;
+    assert.equal(liveWorkerCount >= 2, true, "live Hub team must expose at least two reviewed workers");
+    const liveRun = await invoke({
+      title: "Live Hub team execution-graph probe",
+      taskForceTargets: [{ source: "hub", entityKind: "team", slug: "product-development-hq" }],
+      hubResult: live,
+      runnerTexts: Array.from({ length: liveWorkerCount + 4 }, (_, index) => `LIVE_TEAM_STEP_${index + 1}`),
+    });
+    assert.equal(
+      liveRun.runnerDelta,
+      liveWorkerCount + 4,
+      "live Hub Team must run outer plan, manager plan, every worker, manager synthesis, and outer synthesis",
+    );
+    const liveRequests = runnerRequests.slice(liveRun.runnerStart);
+    const liveEvidence = liveRequests.map((request) => `${request.systemPrompt}\n${request.userPrompt}`).join("\n");
+    assert.match(liveEvidence, /Product Development HQ/);
+    assert.match(liveEvidence, /experience_query:/);
+    assert.match(liveEvidence, /ontology_query:/);
+    assert.equal(liveRun.events.filter((event) => event.kind === "final").length, 1);
+    liveHubTeamProof = {
+      receiptId: live.json?.receipt_id ?? null,
+      workerCount: liveWorkerCount,
+      runnerCalls: liveRun.runnerDelta,
+    };
+  }
+
   console.log(JSON.stringify({
     ok: true,
     checks: 79,
@@ -819,6 +959,14 @@ async function main() {
     realBundleStillRuns: true,
     singleBorrowUserPreambleSurvivesPasses: true,
     hiddenContinuationRetargetedToHub: true,
+    ragGroundingProof: {
+      soul: true,
+      sitemap: true,
+      codeMap: true,
+      curatedMemory: true,
+      runnerCalls: ragRun.runnerDelta,
+    },
+    liveHubTeamProof,
     fakeDirectiveLeak: false,
     primaryRunnerCalls: runnerRequests.length,
     hepCalls: hubCalls.length,

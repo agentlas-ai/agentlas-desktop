@@ -12,7 +12,7 @@ import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 65;
+const SCHEMA_VERSION = 67;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -2519,6 +2519,25 @@ export function initStore(): void {
           _db.pragma("foreign_keys = ON");
         }
       }
+    }
+  }
+
+  if (userVersion < 66) {
+    // Hub 자동화는 매 실행 fresh hepCall을 하는데 버전을 못 실어 늘 latest였다. 작성자가
+    // 재게시하면 어젯밤과 다른 지시문으로 조용히 돌아간다. NULL = latest(기존 동작 유지),
+    // packageHash = 그 버전이 맞을 때만 실행(서버가 version_mismatch로 거절 → drift가 보인다).
+    if (tableExists(_db, "automations")) {
+      const columns = new Set(schemaColumns(_db, "automations").map((column) => column.name));
+      if (!columns.has("target_version")) {
+        _db.exec("ALTER TABLE automations ADD COLUMN target_version TEXT");
+      }
+    }
+  }
+
+  if (userVersion < 67 && tableExists(_db, "automations")) {
+    const columns = new Set(schemaColumns(_db, "automations").map((column) => column.name));
+    if (!columns.has("runtime_selection_json")) {
+      _db.exec("ALTER TABLE automations ADD COLUMN runtime_selection_json TEXT");
     }
   }
 

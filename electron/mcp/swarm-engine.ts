@@ -21,6 +21,11 @@ export interface SwarmTask {
   deps: string[];
   /** 선호 전문가 역할(핸드오프 대상). 없으면 아무 워커나. */
   role?: string;
+  /** 이 작업이 쓰려는 프로젝트 상대 파일 경로들(워커가 선언).
+   *  모든 워커가 같은 cwd를 공유하고 write/full이면 동시에 쓴다 — 파일 락도 worktree 격리도 없다.
+   *  선언된 파일이 실행 중인 작업과 겹치면 스케줄러가 이번 라운드에 띄우지 않고 기다린다
+   *  (deps와 같은 기존 대기 메커니즘, 새 상태 없음). 선언이 없으면 예전처럼 그냥 동시 실행. */
+  files?: string[];
   status: SwarmTaskStatus;
   /** 산출물(에이전트 응답 본문). */
   result?: string;
@@ -51,7 +56,7 @@ export interface SwarmBoard {
 /** 워커가 한 작업을 실행하고 돌려주는 결과 — 산출물 + 새로 스폰할 작업들 + 완료/실패 신호. */
 export interface SwarmTurnResult {
   result: string;
-  spawn?: Array<{ title: string; brief: string; deps?: string[]; role?: string; allocation?: WorkloadAllocation }>;
+  spawn?: Array<{ title: string; brief: string; deps?: string[]; role?: string; files?: string[]; allocation?: WorkloadAllocation }>;
   synthesisAllocation?: WorkloadAllocation;
   failed?: boolean;
 }
@@ -92,6 +97,7 @@ export type SwarmEvent =
   | { kind: "task-failed"; task: SwarmTask; reason?: string }
   | { kind: "spawn"; parent: string; tasks: SwarmTask[] }
   | { kind: "round"; round: number; ready: number; running: number; pending: number }
+  | { kind: "file-deferred"; task: SwarmTask; files: string[] }
   | { kind: "synthesize" }
   | { kind: "capped"; reason: "maxTasks" | "maxRounds" | "aborted" };
 
@@ -111,7 +117,21 @@ export interface SwarmSeed {
   brief: string;
   role?: string;
   deps?: string[];
+  /** 이 작업이 쓸 프로젝트 상대 경로들 — 스케줄러의 파일 충돌 직렬화 근거. */
+  files?: string[];
   allocation?: WorkloadAllocation;
+}
+
+/** 선언된 쓰기 대상 경로를 비교 가능한 형태로. 표기 차이로 충돌을 놓치지 않게 한다. */
+function normalizedFiles(task: SwarmTask): string[] {
+  if (!task.files?.length) return [];
+  return [
+    ...new Set(
+      task.files
+        .map((file) => String(file ?? "").trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 /** Evaluate the only completion claim a swarm is allowed to make. */
@@ -179,6 +199,7 @@ export async function runSwarm(
       brief: s.brief,
       deps: s.deps ?? [],
       role: s.role,
+      ...(s.files?.length ? { files: s.files } : {}),
       allocation: s.allocation,
       status: "pending" as const,
     })),
@@ -217,6 +238,7 @@ export async function runSwarm(
                 brief: s.brief,
                 deps: s.deps ?? [],
                 role: s.role,
+                ...(s.files?.length ? { files: s.files } : {}),
                 allocation: s.allocation,
                 status: "pending",
                 spawnedBy: task.id,
@@ -257,8 +279,27 @@ export async function runSwarm(
     hooks.onEvent?.({ kind: "round", round: board.round, ready: ready.length, running: running.size, pending: pendingCount });
 
     // 빈 슬롯만큼만 준비된 작업 실행(슬롯 = 동시성 − 실행중). ready 스냅샷을 슬롯 수로 잘라 명확히.
+    // 파일이 겹치는 작업은 슬롯이 남아도 띄우지 않는다: 워커들은 cwd를 공유하므로 동시에 같은
+    // 파일을 쓰면 서로의 편집(또는 사용자 변경)을 덮어쓴다. 취소가 아니라 직렬화 — 앞 작업이
+    // 끝나면 다음 라운드에 자연히 잡힌다. 선언이 없으면 겹침을 알 수 없으므로 기존과 동일하게 동시 실행.
     const slots = Math.max(0, concurrency - running.size);
-    for (const task of ready.slice(0, slots)) launch(task);
+    const claimedFiles = new Set<string>();
+    for (const task of board.tasks) {
+      if (task.status === "running") for (const file of normalizedFiles(task)) claimedFiles.add(file);
+    }
+    let launched = 0;
+    for (const task of ready) {
+      if (launched >= slots) break;
+      const wanted = normalizedFiles(task);
+      const conflicts = wanted.filter((file) => claimedFiles.has(file));
+      if (conflicts.length > 0) {
+        hooks.onEvent?.({ kind: "file-deferred", task, files: conflicts });
+        continue;
+      }
+      for (const file of wanted) claimedFiles.add(file);
+      launch(task);
+      launched += 1;
+    }
 
     if (running.size === 0) {
       // 실행 중도 없고 새로 띄운 것도 없다 → 수렴했거나 남은 게 전부 막힘.

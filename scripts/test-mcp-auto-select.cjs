@@ -132,9 +132,11 @@ server.listen(0, "127.0.0.1", async () => {
     const browserCfg = await buildMcpConfigFile({ catalogIds: browserCatalogIds });
     assert.ok(browserCfg, "browser mode should produce a scoped config");
     const browserMcpJson = JSON.parse(fs.readFileSync(browserCfg.configPath, "utf8"));
-    assert.ok(browserMcpJson.mcpServers.playwright, "Browser automation should expose Playwright");
+    assert.ok(browserMcpJson.mcpServers["agentlas-browser"], "Browser automation should expose the exact real-login Agentlas Browser host");
+    assert.equal(browserMcpJson.mcpServers.playwright, undefined, "Browser automation must not create a fresh Playwright-profile fallback");
     assert.equal(browserMcpJson.mcpServers["cua-driver"], undefined, "Browser automation should not expose CUA by default");
-    assert.ok(browserCfg.allowedTools.some((tool) => tool.includes("playwright")), "browser allowed tools should include Playwright");
+    assert.ok(browserCfg.allowedTools.some((tool) => tool.includes("agentlas-browser")), "browser allowed tools should include Agentlas Browser only");
+    assert.ok(!browserCfg.allowedTools.some((tool) => tool.includes("playwright")), "browser allowed tools must exclude fresh Playwright fallback");
     assert.ok(!browserCfg.allowedTools.some((tool) => tool.includes("cua-driver")), "browser allowed tools should not include CUA");
 
     const prompt = buildMcpAutoSelectionPrompt(selected, { toolMode: "auto", hubMode: "hub-allowed" });

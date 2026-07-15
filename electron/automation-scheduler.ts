@@ -17,9 +17,10 @@ import {
   finishGraphRun,
   countConsecutiveFailures,
   isAutomationRunParentMissingError,
+  pinAutomationRuntimeIfUnset,
 } from "./store/automations";
 import { checkComputerUsePermissions } from "./mac-permissions";
-import { getOrCreateAutomationSession, appendChatMessage } from "./store/chats";
+import { getOrCreateAutomationSession, appendChatMessage, listChatMessages } from "./store/chats";
 import { runRuntimeDoctor, type DoctorReport } from "./system-agents/runtime-doctor";
 import { buildSystemOptimizerPrompt } from "./system-agents/system-optimizer";
 import { runMcpInvocation } from "./mcp/client";
@@ -44,6 +45,8 @@ import {
   type AutomationWatchdogDecision,
 } from "./automation-watchdog";
 import { recoverStaleAutomationRuns } from "./store/db";
+import { detectRuntimes } from "./runtime/detect";
+import { pickActive } from "./runtime/selection";
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let startupTimer: ReturnType<typeof setTimeout> | null = null;
@@ -111,6 +114,24 @@ function notifyDone(a: Automation, status: AutomationResultStatus, error?: strin
   } catch (err) {
     console.error("[automation] notification failed:", err);
   }
+}
+
+/** Provider resume is an optimization, not the continuity authority. Every run receives a
+ * bounded durable capsule so a backend switch or expired CLI session cannot erase the prior run. */
+function buildAutomationContinuityPrompt(chatId: string, prompt: string): string {
+  const prior = listChatMessages(chatId, 12)
+    .filter((message) => message.role === "assistant" || message.role === "system")
+    .slice(-4)
+    .map((message) => `[${message.role} ${message.createdAt}] ${message.text.replace(/\s+/g, " ").trim().slice(0, 1_200)}`);
+  if (prior.length === 0) return prompt;
+  return [
+    "[Agentlas automation continuity capsule]",
+    "This is the same durable automation session. Continue from these prior outcomes; do not restart setup or create a new CLI/session unless an explicit lifecycle error requires it.",
+    ...prior,
+    "[/Agentlas automation continuity capsule]",
+    "",
+    prompt,
+  ].join("\n");
 }
 
 // ── 실패 처리 정책(2026-07-08) ─────────────────────────────────────────────
@@ -407,6 +428,24 @@ async function runOne(
       }, AUTOMATION_LEASE_HEARTBEAT_MS);
       leaseHeartbeatTimer.unref?.();
     }
+    if (!a.runtimeSelection) {
+      const activeRuntime = pickActive(await detectRuntimes());
+      if (!activeRuntime) throw new Error("No runtime is available to pin for this automation.");
+      a = pinAutomationRuntimeIfUnset(a.id, {
+          kind: activeRuntime.kind,
+          backend: activeRuntime.backend,
+          source: activeRuntime.source,
+          model: activeRuntime.model ?? undefined,
+          longContext: activeRuntime.longContextEnabled,
+          effort: activeRuntime.effort ?? undefined,
+      });
+      tryRecordRunEvent({
+        runId: currentRunId ?? `automation-pin-${a.id}-${Date.now()}`,
+        kind: "automation_runtime_pinned",
+        automationId: a.id,
+        payload: { kind: a.runtimeSelection?.kind, model: a.runtimeSelection?.model ?? null },
+      });
+    }
     // 컴퓨터유즈 자동화 preflight — macOS 접근성 권한이 없으면 실행하지 않고 '대기'로 스킵한다.
     // (예전엔 권한 없이 실행돼 브라우저 자동화가 부분 실행 후 먹통/혼란. 이제 빠르게 감지 →
     //  다음 예약에 자동 재시도, false-fail도 false-success도 아님.)
@@ -541,9 +580,14 @@ async function runOne(
         const req = {
           runId,
           chatId: chat.id,
-          userPrompt: a.promptTemplate,
+          userPrompt: buildAutomationContinuityPrompt(chat.id, a.promptTemplate),
           permissions: schedulerExecutionPermission(a),
           borrowAgents: a.targetType === "hub" ? [a.targetId] : undefined,
+          // 핀이 있으면 그 버전으로만 실행한다. 없으면 기존대로 latest — 즉 작성자가 재게시하면
+          // 이 자동화의 지시문이 예고 없이 바뀐다. 핀은 그 drift를 명시적 실패로 바꾼다.
+          borrowVersions:
+            a.targetType === "hub" && a.targetVersion ? { [a.targetId]: a.targetVersion } : undefined,
+          runtimeSelection: a.runtimeSelection,
           mcpBrowserProfileKey: `automation-${a.id}`,
           toolMode: a.toolMode ?? "auto",
           hubMode: a.targetType === "hub" ? "hub-first" as const : (a.hubMode ?? "hub-allowed"),
@@ -576,6 +620,9 @@ async function runOne(
                 persistLegacyHeartbeat();
                 if (ev.kind === "error") {
                   runnerError = ev.error?.message || "runner failed";
+                }
+                if (ev.kind === "tool-use" && ev.tool?.isError) {
+                  runnerError = ev.tool.result?.trim() || `${ev.tool.name} failed`;
                 }
                 recordMcpInvocationEvent(runId, req, ev);
               },

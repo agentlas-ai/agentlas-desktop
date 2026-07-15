@@ -229,6 +229,7 @@ jobs:
           npm run test:updater-production
           npm run test:updater-ui
           npm run test:automations-store
+          npm run test:automation-result-contract
           npm run test:runtime-stdin-epipe
           npm run test:cli-version-parser
           npm run test:hephaestus-status-version

@@ -86,8 +86,8 @@ import {
   revalidateInvocationWorkspaceBinding,
   type InvocationWorkspaceBinding,
 } from "../invocation/workspace-binding";
-import { type Runner, SURFACE_INTENT_MARKER } from "../runtime/runner";
-import { pickActive, pickRunner, selectAgentAppRuntimeForTargets, selectRuntimeForTargets } from "../runtime/selection";
+import { type Runner, SURFACE_INTENT_MARKER, UNATTENDED_NO_ASK_DIRECTIVE } from "../runtime/runner";
+import { pickActive, pickRunner, selectAgentAppRuntimeForTargets, selectExactRuntime, selectRuntimeForTargets } from "../runtime/selection";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
 import type {
@@ -145,9 +145,9 @@ function cleanPathCandidate(raw: string | undefined): string | null {
   return cleaned;
 }
 
-function inferWorkingFolderFromPrompt(prompt: string): string | null {
+export function inferWorkingFolderFromPrompt(prompt: string): string | null {
   const explicit = prompt.match(
-    /(?:project|working|workspace|target|output)?\s*(?:folder|directory|dir)\s*(?:only)?[^/]*(\/(?:Volumes|Users|tmp|private\/tmp)\/[^\s`"'<>]+)/i,
+    /(?:(?:project|working|workspace|target|output)?\s*(?:folder|directory|dir)|(?:작업|프로젝트|워크스페이스|대상|출력)\s*(?:루트|폴더|디렉터리|경로))\s*(?:only|전용|만)?[^/]*(\/(?:Volumes|Users|tmp|private\/tmp)\/[^\s`"'<>]+)/i,
   );
   const candidate = cleanPathCandidate(explicit?.[1]);
   if (!candidate) return null;
@@ -326,16 +326,37 @@ async function buildBorrowUserPreamble(
   project: string | null,
   locale: "ko" | "en",
   signal?: AbortSignal,
+  versions?: Record<string, string>,
 ): Promise<string> {
   const list = slugs.join(", ");
   let specs: BorrowedAgentSpec[];
   try {
-    const res = await hepCall(slugs.join(","), [prompt], { project: project ?? ".", signal });
-    specs = requireBorrowedAgentSpecs(slugs, res.json ?? null, {
-      locale,
-      transportOk: res.ok,
-      transportError: res.error || (res.exitCode == null ? "hub_call_failed" : `hub_exit_${res.exitCode}`),
-    });
+    const hasPinnedVersion = slugs.some((slug) => Boolean(versions?.[slug]));
+    if (hasPinnedVersion) {
+      // A packageHash pin belongs to one slug. Calling a comma-separated set with one
+      // --version would incorrectly apply that hash to every package, so pinned requests
+      // are resolved independently and then composed in the original order.
+      specs = [];
+      for (const slug of slugs) {
+        const res = await hepCall(slug, [prompt], {
+          project: project ?? ".",
+          signal,
+          version: versions?.[slug],
+        });
+        specs.push(...requireBorrowedAgentSpecs([slug], res.json ?? null, {
+          locale,
+          transportOk: res.ok,
+          transportError: res.error || (res.exitCode == null ? "hub_call_failed" : `hub_exit_${res.exitCode}`),
+        }));
+      }
+    } else {
+      const res = await hepCall(slugs.join(","), [prompt], { project: project ?? ".", signal });
+      specs = requireBorrowedAgentSpecs(slugs, res.json ?? null, {
+        locale,
+        transportOk: res.ok,
+        transportError: res.error || (res.exitCode == null ? "hub_call_failed" : `hub_exit_${res.exitCode}`),
+      });
+    }
   } catch (error) {
     if (signal?.aborted) throw error;
     if (error instanceof BorrowedAgentUnavailableError) throw error;
@@ -785,9 +806,22 @@ export async function pickActiveRunner(): Promise<
   return { runner: picked.runner, label: picked.label, active };
 }
 
-/** Main-process-only invocation provenance. Never deserialize this from IPC/wire input. */
+/** Main-process-only invocation provenance. Never deserialize this from IPC/wire input.
+ *  - automation / site-studio / trex: 무인 실행 — 질문에 답할 사람이 없다(unattended).
+ *  - telegram: 원격 대화형 — 질문이 평문으로 전달되고 사용자가 다음 메시지로 답한다.
+ *  context 미지정(undefined)은 렌더러/모바일 대화형 경로다. 새 헤드리스 통합은 반드시
+ *  여기 source를 추가하고 넘겨라 — 안 넘기면 대화형으로 오인된다(fail-open). */
 export interface InvocationExecutionContext {
-  source: "automation" | "site-studio";
+  source: "automation" | "site-studio" | "telegram" | "trex";
+}
+
+/** 질문에 답할 사람이 없는 실행인가 — UNATTENDED_NO_ASK_DIRECTIVE 부착 기준. */
+function isUnattendedExecution(executionContext?: InvocationExecutionContext): boolean {
+  return (
+    executionContext?.source === "automation" ||
+    executionContext?.source === "site-studio" ||
+    executionContext?.source === "trex"
+  );
 }
 
 /**
@@ -968,6 +1002,7 @@ export async function runMcpInvocation(
             : getChatWorkingFolder(chat.id),
         locale,
         signal,
+        req.borrowVersions,
       );
       // Saved Agent Groups have their own planner/worker system prompts, so pass the
       // already-verified Hub bundle into that orchestration request. Ordinary single
@@ -1169,13 +1204,20 @@ export async function runMcpInvocation(
     { scope: "agent" as const, targetId: agent.id },
     { scope: "firm" as const, targetId: chat.firmId },
   ];
-  const runtimeChoice = req.agentAppMode
+  const runtimeChoice = req.runtimeSelection
+    ? selectExactRuntime(runtimes, req.runtimeSelection)
+    : req.agentAppMode
     ? selectAgentAppRuntimeForTargets(runtimes, runtimeTargets)
     : selectRuntimeForTargets(runtimes, runtimeTargets);
   if (!runtimeChoice) {
     sink({
       kind: "error",
-      error: { code: "no-runtime", message: tStatus(locale, "errNoRuntime") },
+      error: {
+        code: req.runtimeSelection ? "pinned-runtime-unavailable" : "no-runtime",
+        message: req.runtimeSelection
+          ? `Pinned automation runtime is unavailable: ${req.runtimeSelection.kind}${req.runtimeSelection.model ? ` · ${req.runtimeSelection.model}` : ""}`
+          : tStatus(locale, "errNoRuntime"),
+      },
     });
     return earlyResult();
   }
@@ -1371,6 +1413,16 @@ export async function runMcpInvocation(
       const selectedTools = selectedContext.tools;
       const installedTools = selectedTools.filter((tool) => tool.installed);
       const degradedTools = selectedTools.filter((tool) => tool.state !== "ready");
+      if (
+        req.toolMode === "browser" &&
+        !selectedTools.some((tool) => tool.id === "agentlas-browser" && tool.state === "ready")
+      ) {
+        throw new Error(
+          locale === "ko"
+            ? "로그인된 Agentlas Browser 호스트를 확인할 수 없어 자동화를 실행하지 않았습니다. Agentlas Browser를 다시 연결한 뒤 재시도하세요."
+            : "The authenticated Agentlas Browser host is unavailable. The automation was blocked before model execution; reconnect Agentlas Browser and retry.",
+        );
+      }
       if (installedTools.length > 0) {
         sink({
           kind: "tool-use",
@@ -1904,6 +1956,12 @@ export async function runMcpInvocation(
   }
   // 사용자 채팅에서만 자동화 생성 protocol 주입 (백그라운드 automation 실행 세션은 제외 → 재귀 방지)
   if (chat.kind !== "division" && canWrite) systemPrompt = `${systemPrompt}\n\n${AUTOMATION_PROTOCOL}`;
+  // 무인 실행은 질문을 받을 사람이 없다. ASK_PROTOCOL(래퍼가 앞에 주입)보다 뒤에 오는 최종
+  // 지침으로 질문 fence를 금지하고, 안전한 기본값이 없으면 "NEEDS-INPUT:"으로 명시적 실패를
+  // 유도한다. automation-result.ts 분류기가 이 계약을 짝으로 감지한다(조용한 가짜 성공 방지).
+  if (isUnattendedExecution(executionContext)) {
+    systemPrompt = `${systemPrompt}\n\n${UNATTENDED_NO_ASK_DIRECTIVE}`;
+  }
 
   const history = req.agentAppMode ? [] : listChatMessages(chat.id, 80);
 
@@ -1943,6 +2001,24 @@ export async function runMcpInvocation(
       signal,
       permission: req.permissions,
       ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
+      ...(isUnattendedExecution(executionContext) ? { unattended: true as const } : {}),
+      ...(isUnattendedExecution(executionContext)
+        ? {
+            sessionFingerprintSeed: JSON.stringify({
+              agentId: agent.id,
+              agentSystemPrompt: agent.systemPrompt,
+              permission: req.permissions,
+              runtime: req.runtimeSelection ?? {
+                kind: active.kind,
+                backend: active.backend,
+                model: active.model,
+                effort: active.effort,
+              },
+              toolMode: req.toolMode,
+              hubMode: req.hubMode,
+            }),
+          }
+        : {}),
       // 세션 resume 키 — CLI 러너가 (chatId, kind)별 세션을 재사용해
       // 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
       chatId: req.agentAppMode ? `site-agent-app:${req.runId ?? randomUUID()}` : chat.id,

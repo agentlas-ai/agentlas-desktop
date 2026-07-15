@@ -1048,6 +1048,12 @@ export interface Automation {
   toolMode?: AutomationToolMode;
   /** 로컬 도구만 쓸지, Agentlas Hub 후보까지 빌려 쓸지. */
   hubMode?: AutomationHubMode;
+  /** Hub 대상 packageHash 핀. 미설정 = latest(작성자 재게시 시 지시문이 조용히 바뀜).
+   *  설정 시 서버가 정확히 그 버전일 때만 실행하고 아니면 version_mismatch로 거절한다. */
+  targetVersion?: string;
+  /** Runtime pinned for this automation. Global runtime changes must not silently move it
+   * to another provider/model and therefore another CLI session namespace. */
+  runtimeSelection?: RuntimeSelection;
   /** 예약 실행 권한. 스케줄러는 read/write만 허용하며 full로 승격하지 않는다. */
   executionPermission: AutomationExecutionPermission;
   enabled: boolean;
@@ -1089,6 +1095,9 @@ export interface AutomationUpdatePatch {
   promptTemplate?: string;
   toolMode?: AutomationToolMode;
   hubMode?: AutomationHubMode;
+  /** packageHash 핀. 빈 문자열 = 핀 해제(latest). undefined = 미변경. */
+  targetVersion?: string;
+  runtimeSelection?: RuntimeSelection | null;
   executionPermission?: AutomationExecutionPermission;
   scheduleJson?: string | null;
   timezone?: string | null;
@@ -2641,6 +2650,12 @@ export interface McpInvocationRequest {
   /** 추천 시트의 네트워크 모드에서 고른 Hub 에이전트 슬러그 — runMcpInvocation 이 hep-call 로
    *  이들을 빌려와(BYOM) 프롬프트 앞에 borrow 지시를 붙여 데스크탑 런타임으로 실행한다. */
   borrowAgents?: string[];
+  /** 슬러그별 packageHash 핀(선택). borrowAgents와 병렬 맵으로 두는 이유: `string[]`을
+   *  객체 배열로 바꾸면 이 필드를 읽는 15+ 지점과 모바일 브리지 wire 프로토콜이 깨진다.
+   *  미지정 슬러그는 latest. 반복 자동화가 재게시 drift를 겪지 않도록 스케줄러가 채운다. */
+  borrowVersions?: Record<string, string>;
+  /** Main-owned scheduled automation runtime pin. If unavailable, execution fails closed. */
+  runtimeSelection?: RuntimeSelection;
   /** 임시 최상위 TF의 정확한 실행 단위. Main이 실행 직전에 각 대상을 재검증한다. */
   taskForceTargets?: OrchestrationTarget[];
   /** 추천 시트의 pipeline 모드에서 받은 stage 계약 — 런타임이 단계별 입력/출력 handoff로 실행한다. */

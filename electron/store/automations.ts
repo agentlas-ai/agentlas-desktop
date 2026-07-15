@@ -20,6 +20,7 @@ import type {
   AutomationRunRecord,
   AutomationToolMode,
   AutomationUpdatePatch,
+  RuntimeSelection,
   Trigger,
   TriggerKind,
   WorkflowNodeRunState,
@@ -36,6 +37,8 @@ interface AutomationRow {
   execution_permission: string | null;
   tool_mode: string | null;
   hub_mode: string | null;
+  target_version: string | null;
+  runtime_selection_json: string | null;
   enabled: number;
   created_by: "user" | "agent";
   last_run_at: string | null;
@@ -104,6 +107,17 @@ function normalizeExecutionPermission(value: unknown): AutomationExecutionPermis
   return value == null ? "write" : "read";
 }
 
+function parseRuntimeSelection(raw: string | null | undefined): RuntimeSelection | undefined {
+  if (!raw) return undefined;
+  try {
+    const value = JSON.parse(raw) as RuntimeSelection;
+    if (value && typeof value.kind === "string") return value;
+  } catch {
+    /* malformed pins fail closed as absent and are re-pinned by the scheduler */
+  }
+  return undefined;
+}
+
 function toAutomation(row: AutomationRow): Automation {
   const tz = row.timezone || defaultTz();
   const spec = specFromStored(row.schedule_json ?? row.schedule, tz);
@@ -118,6 +132,8 @@ function toAutomation(row: AutomationRow): Automation {
     executionPermission: normalizeExecutionPermission(row.execution_permission),
     toolMode: normalizeToolMode(row.tool_mode),
     hubMode: normalizeHubMode(row.hub_mode),
+    targetVersion: row.target_version ?? undefined,
+    runtimeSelection: parseRuntimeSelection(row.runtime_selection_json),
     enabled: !!row.enabled,
     createdBy: row.created_by,
     createdAt: row.created_at,
@@ -163,6 +179,17 @@ export function getAutomation(id: string): Automation | null {
   return row ? toAutomation(row) : null;
 }
 
+/** First-run runtime pin must not recalculate schedule state or consume a due slot. */
+export function pinAutomationRuntimeIfUnset(id: string, selection: RuntimeSelection): Automation {
+  getDb()
+    .prepare("UPDATE automations SET runtime_selection_json = ? WHERE id = ? AND runtime_selection_json IS NULL")
+    .run(JSON.stringify(selection), id);
+  const automation = getAutomation(id);
+  if (!automation) throw new Error(`Automation not found: ${id}`);
+  emitDesktopStoreChange({ entity: "automation", id });
+  return automation;
+}
+
 export function createAutomation(input: {
   name: string;
   scheduleHuman: string;
@@ -179,6 +206,9 @@ export function createAutomation(input: {
   trigger?: Trigger | null;
   toolMode?: AutomationToolMode;
   hubMode?: AutomationHubMode;
+  /** Hub packageHash 핀(선택). 미지정 = latest. */
+  targetVersion?: string;
+  runtimeSelection?: RuntimeSelection;
   executionPermission?: AutomationExecutionPermission;
 }): Automation {
   const id = randomUUID();
@@ -204,8 +234,8 @@ export function createAutomation(input: {
       `INSERT INTO automations
          (id, name, schedule, target_type, target_id, prompt_template, enabled, created_by,
           last_run_at, next_run_at, created_at, graph_json, schedule_json, timezone, end_at, max_runs, run_count,
-          trigger_type, trigger_json, tool_mode, hub_mode, execution_permission)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+          trigger_type, trigger_json, tool_mode, hub_mode, execution_permission, target_version, runtime_selection_json)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -232,6 +262,8 @@ export function createAutomation(input: {
       }),
       normalizeHubMode(input.hubMode),
       normalizeExecutionPermission(input.executionPermission),
+      input.targetVersion?.trim() || null,
+      input.runtimeSelection ? JSON.stringify(input.runtimeSelection) : null,
     );
   const automation = getAutomation(id) as Automation;
   emitDesktopStoreChange({ entity: "automation", id });
@@ -260,6 +292,13 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
     targetLabel: targetType,
   });
   const hubMode = normalizeHubMode(patch.hubMode ?? row.hub_mode);
+  // undefined = 미변경(기존 핀 유지), 빈 문자열 = 핀 해제(latest로 복귀).
+  const targetVersion =
+    patch.targetVersion !== undefined ? patch.targetVersion.trim() || null : row.target_version;
+  const runtimeSelectionJson =
+    patch.runtimeSelection !== undefined
+      ? patch.runtimeSelection ? JSON.stringify(patch.runtimeSelection) : null
+      : row.runtime_selection_json;
   const executionPermission =
     patch.executionPermission === undefined
       ? normalizeExecutionPermission(row.execution_permission)
@@ -286,7 +325,7 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
   db.prepare(
     `UPDATE automations SET
        name = ?, schedule = ?, target_type = ?, target_id = ?, prompt_template = ?,
-       tool_mode = ?, hub_mode = ?, execution_permission = ?,
+       tool_mode = ?, hub_mode = ?, execution_permission = ?, target_version = ?, runtime_selection_json = ?,
        schedule_json = ?, timezone = ?, end_at = ?, max_runs = ?, trigger_type = ?, trigger_json = ?,
        next_run_at = ?
      WHERE id = ?`,
@@ -299,6 +338,8 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
     toolMode,
     hubMode,
     executionPermission,
+    targetVersion,
+    runtimeSelectionJson,
     scheduleJson,
     tz,
     endAt,

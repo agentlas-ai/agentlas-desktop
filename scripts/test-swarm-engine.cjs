@@ -196,7 +196,84 @@ async function test(name, fn) {
     assert.equal(finalGate.blocked.length, 1);
   });
 
-  console.log(`\n스웜 엔진 유닛테스트 ${passed}/9 통과 ✅`);
+
+  // 10) 파일 소유권: 같은 파일을 선언한 작업은 동시에 돌지 않는다 (워커는 cwd를 공유한다)
+  await test("같은 파일 선언 → 동시 실행 안 함(직렬화)", async () => {
+    let concurrent = 0;
+    let peakConcurrent = 0;
+    const { board } = await runSwarm(
+      "goal",
+      [
+        { title: "a", brief: "edit shared", files: ["src/app.ts"] },
+        { title: "b", brief: "edit shared too", files: ["./src/app.ts"] }, // 표기만 다른 같은 파일
+        { title: "c", brief: "edit other", files: ["src/other.ts"] },
+      ],
+      LIMITS,
+      {
+        nextId: idGen(),
+        runTask: async () => {
+          concurrent += 1;
+          peakConcurrent = Math.max(peakConcurrent, concurrent);
+          await delay(15);
+          concurrent -= 1;
+          return { result: "ok" };
+        },
+        synthesize: async () => "done",
+      },
+    );
+    assert.equal(board.tasks.every((t) => t.status === "done"), true, "직렬화는 취소가 아니다 — 결국 전부 실행돼야 한다");
+    assert.equal(peakConcurrent, 2, `같은 파일 2개는 겹치면 안 되고, 다른 파일은 병렬이어야 한다 (peak=${peakConcurrent})`);
+  });
+
+  // 11) 파일 선언이 없으면 예전처럼 그대로 병렬 — 가드가 기존 처리량을 죽이면 안 된다
+  await test("파일 미선언 → 기존대로 병렬 실행", async () => {
+    let concurrent = 0;
+    let peakConcurrent = 0;
+    await runSwarm(
+      "goal",
+      [
+        { title: "a", brief: "no declaration" },
+        { title: "b", brief: "no declaration" },
+        { title: "c", brief: "no declaration" },
+      ],
+      LIMITS,
+      {
+        nextId: idGen(),
+        runTask: async () => {
+          concurrent += 1;
+          peakConcurrent = Math.max(peakConcurrent, concurrent);
+          await delay(15);
+          concurrent -= 1;
+          return { result: "ok" };
+        },
+        synthesize: async () => "done",
+      },
+    );
+    assert.equal(peakConcurrent, 3, `선언이 없으면 겹침을 알 수 없으므로 예전 동작 유지 (peak=${peakConcurrent})`);
+  });
+
+  // 12) 파일 충돌은 지연이지 실패가 아니다 — 대기 사실은 이벤트로 보인다
+  await test("파일 대기는 이벤트로 관측 가능", async () => {
+    const deferred = [];
+    await runSwarm(
+      "goal",
+      [
+        { title: "a", brief: "x", files: ["shared.md"] },
+        { title: "b", brief: "y", files: ["shared.md"] },
+      ],
+      LIMITS,
+      {
+        nextId: idGen(),
+        runTask: async () => { await delay(10); return { result: "ok" }; },
+        synthesize: async () => "done",
+        onEvent: (ev) => { if (ev.kind === "file-deferred") deferred.push(ev.files.join(",")); },
+      },
+    );
+    assert.equal(deferred.length >= 1, true, "파일 때문에 기다렸다면 그 사실이 이벤트로 나와야 한다");
+    assert.equal(deferred[0], "shared.md");
+  });
+
+  console.log(`\n스웜 엔진 유닛테스트 ${passed}/12 통과 ✅`);
 })().catch((err) => {
   console.error("\n❌ 테스트 실패:", err.message);
   process.exit(1);

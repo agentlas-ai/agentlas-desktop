@@ -559,6 +559,16 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   return { text: display, delegations, synthesisAllocation };
 }
 
+/** 종합 노드(본부·CEO)에게 주는 상충/실패 처리 규칙. borrowed-task-force의 종합 계약과 같은 문장을
+ *  쓴다 — firm은 3-tier로 가장 복잡한데 지금까지 상충 지시가 한 줄도 없었다. status: failed로 표시된
+ *  결과는 오류 문자열이지 산출물이 아니므로, 없는 내용을 지어내 메우지 말고 실패로 보고해야 한다. */
+const CONFLICT_SYNTHESIS_GUIDANCE = [
+  "Rules for this synthesis:",
+  '- A result marked "status: failed" is an error message, not a deliverable. Never treat it as findings, and never invent content to fill its gap.',
+  "- Resolve conflicts between results explicitly instead of averaging or silently picking one.",
+  "- If a failed or missing result means the goal was not met, say so plainly rather than presenting a partial answer as complete.",
+].join("\n");
+
 function phaseStatus(locale: RuntimeLocale, phase: NodeTurn["phase"], name: string): string {
   const ko = locale === "ko";
   if (phase === "plan") return ko ? `${name} · 위임 계획 중` : `${name} · planning`;
@@ -572,7 +582,7 @@ async function runDivision(
   division: ResolvedDivision,
   brief: string,
   allocation: WorkloadAllocation,
-): Promise<{ node: ResolvedNode; result: string }> {
+): Promise<{ node: ResolvedNode; result: string; ok: boolean }> {
   const fkAgentId = division.agentId || p.ceoAgent.id; // FK-safe (실 agent 없으면 CEO id)
   const divChatId = p.req.agentAppMode
     ? `site-agent-app:${p.req.runId ?? "run"}:division:${division.id}`
@@ -594,6 +604,8 @@ async function runDivision(
   });
 
   let result = plan.text;
+  // 위임이 없으면 본부 자기 턴(plan)이 곧 산출물이므로 그 성공 여부가 본부의 성공 여부다.
+  let divisionOk = plan.ok;
   const matched = specialists.length > 0 ? matchTargets(plan.delegations, specialists) : [];
   if (matched.length > 0) {
     p.sink({
@@ -617,11 +629,16 @@ async function runDivision(
         divisionId: division.id,
         allocation: m.allocation,
       });
-      return { name: m.node.name, role: m.node.role, text: r.text };
+      return { name: m.node.name, role: m.node.role, text: r.text, ok: r.ok };
     });
+    // 실패한 전문가의 텍스트는 "(이름 응답 실패: …)" 같은 오류 문자열이다. status 없이 넘기면
+    // 본부가 그걸 정상 산출물로 읽고 종합한다. borrowed-task-force의 기존 패턴과 동일하게 표기.
     const synthPrompt =
       `${brief}\n\n[Results from your specialists — synthesize into one division answer]\n` +
-      specResults.map((s) => `## ${s.name} (${s.role})\n${s.text}`).join("\n\n");
+      `${CONFLICT_SYNTHESIS_GUIDANCE}\n\n` +
+      specResults
+        .map((s) => `## ${s.name} (${s.role})\nstatus: ${s.ok ? "ok" : "failed"}\n${s.text}`)
+        .join("\n\n");
     const synth = await runNodeTurnSafe(p, {
       node: division,
       tier: 2,
@@ -633,10 +650,11 @@ async function runDivision(
       allocation: plan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
     });
     result = synth.text;
+    divisionOk = synth.ok && specResults.every((s) => s.ok);
   }
 
   if (!p.req.agentAppMode) appendChatMessage(divChatId, "assistant", result);
-  return { node: division, result };
+  return { node: division, result, ok: divisionOk };
 }
 
 /** firm 채팅 진입점 — runMcpInvocation에서 firmId+divisions가 있으면 호출. */
@@ -744,7 +762,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
 
   // 2) DELEGATE — 병렬 실행 (본부 2+: 지속 본부 세션 / 본부 1개: 전문가 ephemeral)
   // runNodeTurnSafe가 노드별 타임아웃 + 실패 격리 → 하나 실패해도 나머지는 계속.
-  let teamResults: Array<{ node: ResolvedNode; result: string }>;
+  let teamResults: Array<{ node: ResolvedNode; result: string; ok: boolean }>;
   if (singleDivision) {
     // tier-2 skip: matched는 전문가 — ephemeral 병렬
     teamResults = await parallelCap(matched, getAgentConcurrency(), async (m) => {
@@ -758,7 +776,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
         divisionId: divisions[0]?.id,
         allocation: m.allocation,
       });
-      return { node: m.node, result: r.text };
+      return { node: m.node, result: r.text, ok: r.ok };
     });
   } else {
     // 본부들 — 지속 세션 병렬, 각자 전문가에게 재위임
@@ -771,7 +789,10 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
   mainStatus(ko ? "팀 결과를 종합하는 중…" : "Synthesizing team results…");
   const synthPrompt =
     `${req.userPrompt}\n\n[Results from your team — synthesize into one final answer for the user]\n` +
-    teamResults.map((r) => `## ${r.node.name} (${r.node.role})\n${r.result}`).join("\n\n");
+    `${CONFLICT_SYNTHESIS_GUIDANCE}\n\n` +
+    teamResults
+      .map((r) => `## ${r.node.name} (${r.node.role})\nstatus: ${r.ok ? "ok" : "failed"}\n${r.result}`)
+      .join("\n\n");
   const finalTurn = await runNodeTurnSafe(p, {
     node: org.ceo,
     tier: 1,
@@ -789,5 +810,8 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
 
   if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", finalTurn.text);
   if (p.emitFinal !== false) sink({ kind: "final", text: finalTurn.text });
-  return { ok: true, text: finalTurn.text };
+  // CEO 종합 턴의 성공은 팀의 성공이 아니다. 본부/전문가가 전멸해도 CEO가 문장을 만들어내면
+  // 예전엔 ok:true로 완전 성공 보고됐다(실패 텍스트를 산출물로 오해한 종합문 + 성공 표시).
+  // 자식 결과를 집계해 부분 완료가 성공으로 둔갑하지 않게 한다.
+  return { ok: teamResults.every((r) => r.ok), text: finalTurn.text };
 }

@@ -69,6 +69,26 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-15 · v0.8.38 — durable automation identity and exact nested
+  orchestration** — Scheduled runs pin their runtime/provider/model, retain a
+  bounded previous-outcome capsule, and refuse to create a fresh Codex or Claude
+  CLI conversation after a resume failure. Korean `작업 루트는 /Users/...`
+  instructions now bind the real cwd; filesystem denial, halted execution,
+  missing input, and failed tool events cannot be reported as success.
+
+  Explicit Agentlas Browser/CDP/9222 jobs keep the authenticated Agentlas browser
+  identity and do not fall back to a fresh Playwright profile. Hub packageHash
+  pins reach the actual single-agent `hepCall --version` path. The host LLM,
+  packaged Team manager, and generated Group manager remain distinct executable
+  orchestration levels, including nested Cloud, Hub, and Local units.
+
+  Release finalization now uses the current immutable verifier in the sole
+  writer and applies verified metadata to the live Desktop API after stable
+  promotion. Agentlas OS v1.1.37 remains pinned at
+  c86aa86ccb3424e67be0b45ec253cc408af99df7. This source state does not prove a
+  public installer or update feed; the signed cross-platform release and served
+  byte gates remain authoritative.
+
 - **2026-07-15 · v0.8.37 — executable hierarchy and fail-closed exact routing** —
   Normal Desktop turns retain the mandatory local Model2Vec hybrid recall:
   effective tasks use owner-scoped Memory and eligible reviewed Experience,

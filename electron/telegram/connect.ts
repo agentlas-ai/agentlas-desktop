@@ -1569,7 +1569,11 @@ async function runBindingInvocation(
     } else if (event.kind === "error" && event.error?.message) {
       errorFromEvents = event.error.message;
     }
-  }, controller.signal).finally(() => {
+  }, controller.signal, undefined, {
+    // 원격 대화형 표식 — 질문 fence는 평문화돼 전송되고 사용자가 다음 메시지로 답한다.
+    // (미지정이면 "누락된 헤드리스"와 구분이 안 되는 fail-open 상태가 된다.)
+    source: "telegram",
+  }).finally(() => {
     clearTimeout(timer);
   });
   if (timedOut) {

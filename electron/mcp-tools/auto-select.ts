@@ -453,6 +453,9 @@ export async function autoSelectMcpTools(input: {
   }))
     .filter((item) => {
       if (item.entry.id === "hephaestus-network") return hubAllowed;
+      // Browser mode is an exact real-login Agentlas Browser binding. Never add a
+      // fresh Playwright profile as a quiet fallback; missing host authority must fail closed.
+      if (effectiveToolMode === "browser" && item.entry.id === "playwright") return false;
       return item.score >= 3;
     })
     .sort((a, b) => b.score - a.score)
@@ -580,7 +583,7 @@ export function buildMcpAutoSelectionPrompt(
   const unavailable = selected.tools.filter((tool) => tool.state !== "ready");
   const modeLine =
     opts?.toolMode === "browser"
-      ? "This automation explicitly selected Browser plugin mode; use Playwright/browser tools for web work."
+      ? "This automation is bound to Agentlas Browser (real-login CDP). Use only that browser host for web work; never create a fresh Playwright profile."
       : opts?.toolMode === "computer-use"
         ? "This automation explicitly selected Computer Use mode; use desktop/screen tools for UI work."
         : "";
