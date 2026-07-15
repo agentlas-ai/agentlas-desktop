@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.8.30 — 2026-07-15
+
+### Changed
+
+- **Desktop now embeds Agentlas OS v1.1.29 at one immutable commit.** Package
+  compatibility metadata, the updater contract, the three-OS Core harness, and
+  both release workflows all pin
+  `2d161b267c9516699d18d05afcc7ec05d2ba7f09`.
+- **External host Builds now share the same post-build portability boundary as
+  Desktop.** Claude Code, Codex, Gemini, and Antigravity ask whether to save the
+  verified package owner-private in Agent Cloud or keep it only on this
+  computer. No answer remains local-only, Cloud failure preserves the local
+  result, and public Hub publication is never inferred.
+- **Fresh Core interviews default consistently to English.** Korean remains an
+  explicit locale and the synchronized host adapters use the same interview
+  directive and scoring contract.
+
+### Boundaries and edge cases
+
+- Agent Cloud remains private package storage, not hosted model execution.
+  Mobile can use a Cloud-restored package only through a Desktop that restored
+  and installed it.
+- Desktop v0.8.29 with its immutable Core v1.1.28 bundle remains a valid prior
+  release; this patch updates new/offline packages to the current Core without
+  rewriting existing local agents or ontology loadouts.
+
 ## 0.8.29 — 2026-07-15
 
 ### Fixed

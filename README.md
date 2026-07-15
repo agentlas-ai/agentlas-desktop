@@ -69,6 +69,16 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-15 · v0.8.30 — Agentlas OS v1.1.29 alignment** — Desktop now
+  embeds the exact verified Core release that gives every external `/hep-build`
+  host the same final choice: save the finished package privately in Agent
+  Cloud or keep it only on this computer. Closing or skipping the choice stays
+  local, a Cloud failure preserves the local package, and public Hub publishing
+  remains a separate explicit action. Fresh Core interviews also default to
+  English while retaining Korean as an explicit locale. The embedded commit is
+  pinned identically in package metadata and every macOS, Windows, and Linux
+  release workflow.
+
 - **2026-07-15 · v0.8.29 — portable Builds, retry-safe Mobile, Agent Apps, and
   safe MCP consent** — A verified Build is installed locally first, then asks
   exactly `Cloud에 올리기` or `로컬에만 저장`; closing the choice keeps it local,

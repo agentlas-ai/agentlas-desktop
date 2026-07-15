@@ -64,12 +64,12 @@ assert.equal(compatibility.minimumRuntimeVersion, "1.0.4", "v0.7.0 shipped Hepha
 assert.equal(compatibility.minimumSchemaVersion, 35, "v0.7.0 shipped SQLite schema 35");
 assert.equal(
   compatibility.bundledRuntimeVersion,
-  "1.1.28",
+  "1.1.29",
   "the next Desktop patch must include the canonical first-contact bootstrap and model allocation contract",
 );
 assert.equal(runtimeSource.ref, `v${compatibility.bundledRuntimeVersion}`, "runtime source ref must match compatibility");
 assert.match(runtimeSource.commit, /^[0-9a-f]{40}$/, "runtime source must pin an immutable full commit");
-assert.equal(runtimeSource.commit, "d741da796289678c38fac1059f0473f271d0f7e9", "Agentlas OS v1.1.28 commit drift");
+assert.equal(runtimeSource.commit, "2d161b267c9516699d18d05afcc7ec05d2ba7f09", "Agentlas OS v1.1.29 commit drift");
 assert.equal(compatibility.bundledRuntimeVersion, manifest.version, "feed runtime must match the bundled Hephaestus manifest");
 assert.equal(
   spawnSync("git", ["-C", embeddedRuntimeRoot, "rev-parse", "HEAD^{commit}"], { encoding: "utf8" }).stdout.trim(),
@@ -243,8 +243,16 @@ const changelogReleaseSection = releaseSection(
 );
 assert.match(readme, /macOS 12 Monterey or newer/);
 assert.match(readme, /macOS 11 Big Sur:[\s\S]*?last compatible Agentlas release[\s\S]*?excluded/);
-assert.match(readmeReleaseSection, /Agentlas OS v1\.1\.28[\s\S]*?before agent work starts[\s\S]*?live-verified/, "README current release section must describe the Core bootstrap and allocation boundary");
-assert.match(changelogReleaseSection, /Agentlas OS v1\.1\.28[\s\S]*?first-contact[\s\S]*?vendor[\s\S]*?model alias/, "CHANGELOG current release section must describe the Core bootstrap and allocation boundary");
+assert.match(
+  readmeReleaseSection,
+  /Agentlas OS v1\.1\.29[\s\S]*?Agent\s+Cloud[\s\S]*?keep it only on this computer[\s\S]*?public Hub publishing[\s\S]*?separate explicit action/,
+  "README current release section must describe the Core private-Cloud versus local-only boundary",
+);
+assert.match(
+  changelogReleaseSection,
+  /Agentlas OS v1\.1\.29[\s\S]*?owner-private in Agent\s+Cloud[\s\S]*?No answer remains local-only[\s\S]*?public Hub publication is never inferred/,
+  "CHANGELOG current release section must describe the Core private-Cloud versus local-only boundary",
+);
 assert.match(publishMacSource, /Requires macOS 12 Monterey or newer/);
 assert.match(publishMacSource, /macOS 11 Big Sur stays on the last compatible release/);
 assert.match(packageMacSource, /smoke-signed-mac-python-cache\.cjs/);
