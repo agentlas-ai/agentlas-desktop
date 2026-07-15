@@ -52,6 +52,7 @@ import {
   runBorrowedTaskForceInvocation,
   type BorrowedAgentSpec,
 } from "./borrowed-task-force";
+import { parseWorkforceCommand, runWorkforceSelection } from "./workforce-orchestrator";
 import { runSwarmInvocation } from "./swarm-run";
 import { getAgentGroup, listAgentGroups, resolveAgentGroupForRuntime } from "../store/agent-groups";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
@@ -70,6 +71,7 @@ import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
 import { parseSurfaces } from "../surface-emitter";
 import { createAutomation, listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
+import { tryRecordRunEvent } from "../store/run-events";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import {
   resolveSiteAgentAppInlineMcpConfigForDispatch,
@@ -223,22 +225,6 @@ function buildAppEditUserPrompt(prompt: string, appRecord: AppFactoryAppRecord, 
     locale === "ko"
       ? `완료 후 CTA: [Apps에서 확인하기](${appRoute})`
       : `Finish with CTA: [Open in Apps](${appRoute})`,
-  ].join("\n");
-}
-
-// 라우팅 질의에 이 채팅의 최근 대화를 붙인다. 후속/되물음 메시지가 맥락 없이 단독 해석돼
-// 엉뚱한 에이전트로 위임되던 문제를 막는다 — 판단은 라우터 모델에 맡기되 컨텍스트를 준다.
-function buildContextualRoutingQuery(chatId: string, prompt: string): string {
-  const recent = listChatMessages(chatId, 6)
-    .filter((m) => (m.role === "user" || m.role === "assistant") && (m.text ?? "").trim())
-    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${(m.text ?? "").replace(/\s+/g, " ").trim().slice(0, 240)}`);
-  if (recent.length === 0) return prompt;
-  return [
-    "Recent conversation (for routing continuity):",
-    recent.join("\n"),
-    "",
-    `New request to route: ${prompt}`,
-    "If this is a follow-up to the conversation above (e.g. a question about work already done, or a small refinement), it can be answered in the current context — do NOT route to an unrelated new agent.",
   ].join("\n");
 }
 
@@ -952,25 +938,27 @@ export async function runMcpInvocation(
       : req.planMode
         ? buildPlanUserPrompt(req.userPrompt, locale)
         : req.userPrompt;
-  const explicitNetworkMatch = req.agentAppMode
-    ? null
-    : req.userPrompt.match(/^\s*\/?hep-network\b(?!\s+--stormbreaker)\s*/i);
-  const explicitNetworkGoal = explicitNetworkMatch
-    ? req.userPrompt.slice(explicitNetworkMatch[0].length).trim()
-    : null;
-  if (explicitNetworkMatch) {
-    if (!explicitNetworkGoal) {
+  // `/hep-network` now enters the host-LLM Agent Workforce Ontology path.
+  // The old lexical recommendation path remains available only as the explicit
+  // compatibility command `/hep-network --legacy`.
+  const workforceCommand = parseWorkforceCommand(req.userPrompt, req.agentAppMode === true);
+  const workforceBenchmarkMode = workforceCommand.kind === "workforce" && workforceCommand.benchmarkMode;
+  let explicitWorkforceGoal = workforceCommand.kind === "workforce" ? workforceCommand.goal : null;
+  const explicitNetworkGoal = workforceCommand.kind === "legacy-network" ? workforceCommand.goal : null;
+  if (workforceCommand.kind !== "none") {
+    const routedGoal = workforceCommand.goal;
+    if (!routedGoal) {
       sink({
         kind: "error",
         error: {
           code: "hep-network-goal-required",
-          message: locale === "ko" ? "hep-network에 실행할 요청을 입력하세요." : "Provide a goal for hep-network.",
+          message: locale === "ko" ? "Workforce에 실행할 요청을 입력하세요." : "Provide a goal for Workforce.",
         },
       });
       return earlyResult();
     }
-    req = { ...req, userPrompt: explicitNetworkGoal };
-    effectiveUserPrompt = explicitNetworkGoal;
+    req = { ...req, userPrompt: routedGoal, borrowAgents: undefined, taskForceTargets: undefined };
+    effectiveUserPrompt = routedGoal;
   }
   const borrowedAgentSlugs = [...new Set((req.borrowAgents ?? []).map((slug) => slug.trim()).filter(Boolean))];
   let explicitBorrowUserPreamble: string | null = null;
@@ -1025,8 +1013,25 @@ export async function runMcpInvocation(
   // plain 대화(인사/맞장구)는 라우팅 전체를 건너뛰고 기본 LLM이 즉답 — 전문 에이전트로
   // 잘못 위임되거나 아래 Hephaestus 에스컬레이션 선지연을 무는 엣지케이스를 없앤다.
   const plainConversation = !isTargetAppEdit && isPlainConversationalPrompt(req.userPrompt);
+  const hubWorkforceRequested = Boolean(
+    !req.agentAppMode &&
+    req.hubMode &&
+    req.hubMode !== "local-only" &&
+    borrowedAgentSlugs.length === 0 &&
+    !plainConversation &&
+    !isTargetAppEdit,
+  );
+  const automaticWorkforceEligible = Boolean(
+    !req.agentAppMode &&
+    isNetworkAutoEnabled() &&
+    isGlobalOrchestrator(agent) &&
+    !hasPriorContext &&
+    isEscalationWorthyPrompt(req.userPrompt),
+  );
   const autoRoute = req.agentAppMode
     ? null
+    : explicitWorkforceGoal || explicitNetworkGoal || hubWorkforceRequested || automaticWorkforceEligible
+      ? null
     : isTargetAppEdit
     ? selectAppBuilderForExistingAppEdit(installedAgents, locale)
     : req.appsGenerateMode
@@ -1104,98 +1109,31 @@ export async function runMcpInvocation(
     }
   }
 
-  // 자동화 Hub 정책: 사용자가 "Hub까지 사용"을 켜둔 경우, 로컬 타깃만 고집하지 않고
-  // 실행 전에 Hephaestus Network 라우터로 Hub 후보를 찾아 BYOM bundle 지시를 프롬프트에 붙인다.
+  // 자동화 Hub 정책: Hub 사용이 켜진 비단순 요청은 lexical 후보 프리앰블로
+  // 우회하지 않고 같은 Workforce leader → MCP search/validate/prepare 경로를 탄다.
   // local-only는 명시적으로 이 경로를 막는다.
-  if (
-    !req.agentAppMode &&
-    req.hubMode &&
-    req.hubMode !== "local-only" &&
-    borrowedAgentSlugs.length === 0 &&
-    !plainConversation &&
-    !isTargetAppEdit
-  ) {
-    try {
-      // 라우터가 후속 메시지를 맥락 없이 단독 해석하지 않도록 최근 대화를 함께 싣는다 —
-      // "자동화 건거 맞지?" 같은 되물음은 앞 대화를 보면 새 에이전트 위임이 아니라 현재
-      // 맥락에서 답할 일임을 라우터 모델이 스스로 판단한다(키워드 분류 대신 컨텍스트 제공).
-      const routingQuery = buildContextualRoutingQuery(chat.id, effectiveUserPrompt);
-      const routeRes = await routeOnly(routingQuery, {
-        project: workingFolder ?? undefined,
-        runtime: "desktop-automation",
-        ...(req.hubMode === "hub-first"
-          ? { hubOnly: true, scope: "network" as const }
-          : { allowLocal: true }),
-        timeoutMs: req.hubMode === "hub-first" ? 12_000 : 6_000,
-        signal,
-      });
-      throwIfInvocationAborted(signal, locale);
-      const norm = normalizeRecommendation(routeRes.json, effectiveUserPrompt);
-      const hubSlugs = norm.agents
-        .filter((candidate) => candidate.source === "hub")
-        .map((candidate) => candidate.id.trim())
-        .filter(Boolean)
-        .slice(0, 3);
-      if (hubSlugs.length > 0) {
-        sink({
-          kind: "tool-use",
-          status:
-            locale === "ko"
-              ? `Hub 후보를 자동화에 연결합니다: ${hubSlugs.join(", ")}`
-              : `Connecting Hub candidates to automation: ${hubSlugs.join(", ")}`,
-        });
-        const automaticBorrowPreamble = await buildBorrowUserPreamble(
-          hubSlugs,
-          effectiveUserPrompt,
-          workingFolder,
-          locale,
-          signal,
-        );
-        effectiveUserPrompt = `${automaticBorrowPreamble}\n\nRequest:\n${effectiveUserPrompt}`;
-      }
-    } catch (err) {
-      throwIfInvocationAborted(signal, locale);
-      console.error("[automation] Hub resolver failed:", err);
-      sink({
-        kind: "tool-use",
-        status:
-          locale === "ko"
-            ? "Hub 후보 확인에 실패해 로컬 도구로 계속합니다."
-            : "Hub candidate lookup failed; continuing with local tools.",
-      });
-    }
+  if (!explicitWorkforceGoal && !explicitNetworkGoal && hubWorkforceRequested) {
+    explicitWorkforceGoal = effectiveUserPrompt;
+    sink({
+      kind: "tool-use",
+      status: locale === "ko"
+        ? "Hub 자동화 요청을 Agent Workforce 온톨로지로 구성합니다."
+        : "Building the Hub automation through Agent Workforce Ontology.",
+    });
   }
 
-  // ── Hephaestus Router Agent 에스컬레이션 판단 ──
-  // 이전에는 기본 채팅(글로벌 오케스트레이터)의 모든 메시지가 이 동기 호출을 최대 15초까지
-  // 기다렸다 — 짧은 단일 작업까지 선지연을 물던 주범. 멀티도메인/파이프라인 신호가 있는
-  // 복합 요청에만 에스컬레이션하고 타임아웃도 4초로 줄인다(실패/타임아웃 시 조용히 진행).
+  // ── Network auto escalation ──
+  // 복합 요청의 자동 Network 개입도 lexical routerAgent 선택이 아니라 Workforce 경로를
+  // 사용한다. 명시적으로 공급된 routerAgent는 기존 호환 실행을 위해 그대로 보존한다.
   let routerAgent = req.agentAppMode ? undefined : req.routerAgent;
-  if (
-    !req.agentAppMode &&
-    !routerAgent &&
-    isNetworkAutoEnabled() && // hep-network 자동 개입 — 대시보드 토글(기본 OFF)일 때만 자동 에스컬레이션
-    isGlobalOrchestrator(agent) &&
-    !hasPriorContext &&
-    isEscalationWorthyPrompt(req.userPrompt)
-  ) {
-    try {
-      const routingQuery = buildContextualRoutingQuery(chat.id, effectiveUserPrompt);
-      const routeRes = await routeOnly(routingQuery, {
-        project: workingFolder ?? undefined,
-        allowLocal: true,
-        timeoutMs: 4_000,
-        signal,
-      });
-      throwIfInvocationAborted(signal, locale);
-      const norm = normalizeRecommendation(routeRes.json, effectiveUserPrompt);
-      if (norm.routerAgent) {
-        routerAgent = norm.routerAgent;
-      }
-    } catch (err) {
-      throwIfInvocationAborted(signal, locale);
-      console.error("[routing] Dynamic Hephaestus routing check failed:", err);
-    }
+  if (!explicitWorkforceGoal && !explicitNetworkGoal && !routerAgent && automaticWorkforceEligible) {
+    explicitWorkforceGoal = effectiveUserPrompt;
+    sink({
+      kind: "tool-use",
+      status: locale === "ko"
+        ? "Network 자동 개입을 Agent Workforce 온톨로지로 구성합니다."
+        : "Building the Network auto-route through Agent Workforce Ontology.",
+    });
   }
 
   const runtimes = await detectRuntimes();
@@ -1479,6 +1417,132 @@ export async function runMcpInvocation(
     });
     return coreStormbreakerHarnessPromise;
   };
+
+  // ── Agent Workforce Ontology ────────────────────────────────
+  // The active host model owns both the job-analysis work order and the final
+  // semantic roster decision. Main calls Hub MCP only for content-only search,
+  // deterministic validation, and exact immutable release preparation.
+  if (explicitWorkforceGoal) {
+    try {
+      const workforce = await runWorkforceSelection({
+        goal: explicitWorkforceGoal,
+        active,
+        benchmarkMode: workforceBenchmarkMode,
+        signal,
+        sink,
+        leader: async (turn) => {
+          throwIfInvocationAborted(signal, locale);
+          const result = await picked.runner(
+            {
+              systemPrompt: turn.systemPrompt,
+              history: [],
+              userPrompt: turn.userPrompt,
+              images: undefined,
+              backendLabel: picked.label,
+              model: active.model ?? undefined,
+              longContext: active.longContextEnabled ?? false,
+              effort: active.effort ?? undefined,
+              signal,
+              permission: "read",
+              restrictedReadBoundary: restrictedReadBoundary || undefined,
+              env: runnerEnv.env,
+              untrustedNoTools: true,
+              cwd: undefined,
+              chatId: turn.invocationId,
+              locale,
+            },
+            {
+              onStatus: (status) => sink({
+                kind: "tool-use",
+                status,
+                agentId: "workforce:leader",
+                agentName: "Agentlas Workforce Leader",
+                role: "workforce-leader",
+                tier: 1,
+                phase: "plan",
+              }),
+              onPartial: () => {},
+              onTool: (name, args, resultText, id, isError) => sink({
+                kind: "tool-use",
+                tool: { name, args, result: resultText, id, isError },
+                agentId: "workforce:leader",
+                agentName: "Agentlas Workforce Leader",
+                role: "workforce-leader",
+                tier: 1,
+                phase: "plan",
+              }),
+            },
+          );
+          return result.text;
+        },
+      });
+      tryRecordRunEvent({
+        runId: req.runId ?? `task-force:${chat.id}`,
+        kind: "workforce_selection_receipt",
+        chatId: chat.id,
+        nodeId: "workforce:leader",
+        agentId: agent.id,
+        payload: {
+          receiptId: workforce.receipt.receiptId,
+          workOrderId: workforce.receipt.workOrderId,
+          selectionReceiptId: workforce.receipt.selectionReceiptId,
+          preparationReceiptId: workforce.receipt.preparationReceiptId,
+          candidateSetDigest: workforce.receipt.candidateSetDigest,
+          ontologyVersion: workforce.receipt.ontologyVersion,
+          decisionOwner: workforce.receipt.decisionOwner,
+          decisionModel: workforce.receipt.decisionModel,
+          historyInfluence: workforce.receipt.historyInfluence,
+          idealTeam: workforce.receipt.idealTeam,
+          executableTeam: workforce.receipt.executableTeam,
+          unfilledPosts: workforce.receipt.unfilledPosts,
+          substitutions: workforce.receipt.substitutions,
+          preparedReleases: workforce.receipt.preparedReleases,
+          mcpCalls: workforce.receipt.mcpCalls,
+          leaderInvocations: workforce.receipt.leaderInvocations,
+        },
+      });
+      const execution = await runBorrowedTaskForceInvocation({
+        req: { ...req, userPrompt: explicitWorkforceGoal, borrowAgents: undefined, taskForceTargets: undefined },
+        chat,
+        orchestratorAgent: agent,
+        taskForceName: locale === "ko" ? "Agent Workforce TF" : "Agent Workforce task force",
+        taskForceKind: "task-force",
+        taskForceSpecs: workforce.specs,
+        active,
+        runtimes,
+        picked,
+        runtimeOverride: runtimeChoice.override,
+        workingFolder,
+        ...(workspaceBinding ? { workspaceBinding } : {}),
+        ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
+        mcpConfigPath,
+        mcpAllowedTools,
+        mcpCodexConfigArgs,
+        agentAppMcpRuntimeEnv: mcpRuntimeEnv,
+        onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
+        runnerEnv: runnerEnv.env,
+        locale,
+        sink,
+        signal,
+        workforceSelectionReceipt: workforce.receipt,
+        benchmarkMode: workforceBenchmarkMode,
+        requireAllWorkers: true,
+      });
+      if (!execution.ok) {
+        sink({
+          kind: "error",
+          error: {
+            code: "workforce-verification-failed",
+            message: execution.receipt?.verifier.issues.join(", ") || "Workforce structural verification failed.",
+          },
+        });
+      }
+    } catch (error) {
+      throwIfInvocationAborted(signal, locale);
+      sink({ kind: "error", error: invocationFailure(req, "workforce-execution-failed", error) });
+    }
+    return earlyResult();
+  }
 
   // ── Exact temporary top-level task force ──────────────────
   // A recommendation is an ephemeral roster, not a chat binding mutation.

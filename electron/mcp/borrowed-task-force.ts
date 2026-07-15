@@ -62,6 +62,7 @@ import {
   revalidateInvocationWorkspaceBinding,
   type InvocationWorkspaceBinding,
 } from "../invocation/workspace-binding";
+import type { WorkforceSelectionReceipt } from "./workforce-orchestrator";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -88,6 +89,13 @@ export interface BorrowedAgentSpec {
   /** Package-declared tool authority from the Hub bundle (`toolPermissions`).
    *  ANDed with the host permission mode — it can only narrow, never widen. */
   toolPermissions?: { network?: string; shell?: string; fileRead?: string };
+  /** Immutable workforce identity. Required for ontology-selected Hub execution. */
+  agentDefinitionId?: string;
+  agentReleaseId?: string;
+  packageHash?: string;
+  contentDigest?: string;
+  releaseVersion?: string;
+  bundleDigest?: string;
   executionGraph?: {
     schemaVersion: "1.0";
     manager: { path: string; content: string };
@@ -167,12 +175,93 @@ export interface BorrowedTaskForceParams {
   locale: RuntimeLocale;
   sink: EventSink;
   signal?: AbortSignal;
+  /** Present only for the Hub MCP workforce path. */
+  workforceSelectionReceipt?: WorkforceSelectionReceipt;
+  /** Structural benchmark runs may not continue through planner JSON fallback. */
+  benchmarkMode?: boolean;
+  /** Workforce executions keep the exact accepted roster; failed children are not replaced. */
+  requireAllWorkers?: boolean;
+}
+
+export interface BorrowedTaskForceReceipt {
+  schemaVersion: "agentlas.workforce-execution-receipt.v1";
+  executionId: string;
+  workOrderId: string;
+  selectionReceiptId: string;
+  preparationReceiptId: string;
+  orchestrator: {
+    invocationId: string;
+    modelId: string;
+    provider: string;
+    status: "completed" | "failed" | "blocked";
+  };
+  planner: {
+    invocationId: string;
+    modelId: string;
+    provider: string;
+    status: "completed" | "failed" | "blocked";
+    parseSuccess: boolean;
+    fallbackUsed: boolean;
+  };
+  workers: Array<{
+    slotId: string;
+    agentReleaseId: string;
+    packageHash: string;
+    contentDigest: string;
+    invocationId: string;
+    modelId: string;
+    provider: string;
+    status: "completed" | "failed" | "blocked";
+    handoffArtifactRefs: string[];
+  }>;
+  synthesis: {
+    invocationId: string;
+    modelId: string;
+    provider: string;
+    status: "completed" | "failed" | "blocked";
+  };
+  verifier: {
+    invocationId: string;
+    modelId: string;
+    provider: string;
+    status: "completed" | "failed" | "blocked";
+    verdict: "pass" | "fail";
+    issues: string[];
+  };
+  status: "passed" | "failed" | "blocked";
+  /** Desktop-local projection fields retained for visual debugging. */
+  runId: string;
+  workforceSelection?: WorkforceSelectionReceipt;
+  idealTeam: Record<string, unknown>[];
+  executableTeam: Record<string, unknown>[];
+  unfilledPosts: Record<string, unknown>[];
+  substitutions: Record<string, unknown>[];
+  preparedReleases: WorkforceSelectionReceipt["preparedReleases"];
+  children: Array<{
+    invocationId: string;
+    handoffId: string;
+    slug: string;
+    agentReleaseId: string | null;
+    packageHash: string | null;
+    contentDigest: string | null;
+    model: string;
+    status: "succeeded" | "failed";
+  }>;
+  handoffs: Array<{
+    handoffId: string;
+    from: string;
+    to: string;
+    slot: string | null;
+    inputType: string;
+    expectedOutput: string;
+  }>;
 }
 
 export interface BorrowedTaskForceResult {
   ok: boolean;
   text: string;
   tokens?: number;
+  receipt?: BorrowedTaskForceReceipt;
 }
 
 function sameRuntime(left: RuntimeStatus, right: RuntimeStatus): boolean {
@@ -180,7 +269,10 @@ function sameRuntime(left: RuntimeStatus, right: RuntimeStatus): boolean {
 }
 
 function taskForceCandidateRuntimes(p: BorrowedTaskForceParams): RuntimeStatus[] {
-  const supplied = p.req.agentAppMode ? [p.active] : [...(p.runtimes ?? [p.active])];
+  // Architecture benchmarks compare the same pipeline under one selected
+  // model. Letting workload allocation switch worker providers would confound
+  // model quality with orchestration quality.
+  const supplied = p.req.agentAppMode || p.benchmarkMode ? [p.active] : [...(p.runtimes ?? [p.active])];
   if (!supplied.some((runtime) => sameRuntime(runtime, p.active))) supplied.unshift(p.active);
   const runnable = supplied.filter((runtime, index, list) => (
     list.findIndex((candidate) => sameRuntime(candidate, runtime)) === index && Boolean(pickRunner(runtime))
@@ -238,6 +330,12 @@ function uniqSpecs(specs: BorrowedAgentSpec[] | undefined): BorrowedAgentSpec[] 
       slug,
       name: cleanString(raw.name) || slug,
       directive,
+      agentDefinitionId: cleanString(raw.agentDefinitionId) || undefined,
+      agentReleaseId: cleanString(raw.agentReleaseId) || undefined,
+      packageHash: cleanString(raw.packageHash) || undefined,
+      contentDigest: cleanString(raw.contentDigest) || undefined,
+      releaseVersion: cleanString(raw.releaseVersion) || undefined,
+      bundleDigest: cleanString(raw.bundleDigest) || undefined,
     });
   }
   return out;
@@ -293,6 +391,10 @@ function modelLabel(active: RuntimeStatus): string {
     active.model ||
     (active.kind === "byok" ? active.backend || "api" : active.kind === "claude-code" ? "claude" : active.kind)
   );
+}
+
+function providerLabel(active: RuntimeStatus): string {
+  return active.backend || active.kind || "unknown";
 }
 
 function taskForcePermission(p: BorrowedTaskForceParams): RunnerRequest["permission"] {
@@ -767,23 +869,33 @@ export function buildFallbackPackets(specs: BorrowedAgentSpec[], userPrompt: str
   }));
 }
 
-function normalizePacketsForRoster(
+export function normalizePacketsForRoster(
   packets: BorrowedInputPacket[],
   specs: BorrowedAgentSpec[],
   userPrompt: string,
-): BorrowedInputPacket[] {
+): { packets: BorrowedInputPacket[]; parseSuccess: boolean; fallbackUsed: boolean } {
   const bySlug = new Map(specs.map((spec) => [spec.slug, spec]));
   const used = new Set<string>();
   const normalized: BorrowedInputPacket[] = [];
+  let invalidPacket = false;
   for (const packet of packets) {
-    if (!bySlug.has(packet.agent) || used.has(packet.agent)) continue;
+    if (!bySlug.has(packet.agent) || used.has(packet.agent)) {
+      invalidPacket = true;
+      continue;
+    }
     used.add(packet.agent);
     normalized.push(packet);
   }
-  for (const fallback of buildFallbackPackets(specs.filter((spec) => !used.has(spec.slug)), userPrompt)) {
+  const missing = specs.filter((spec) => !used.has(spec.slug));
+  for (const fallback of buildFallbackPackets(missing, userPrompt)) {
     normalized.push(fallback);
   }
-  return normalized;
+  const fallbackUsed = missing.length > 0 || packets.length === 0;
+  return {
+    packets: normalized,
+    parseSuccess: packets.length > 0 && !invalidPacket && !fallbackUsed,
+    fallbackUsed,
+  };
 }
 
 function packetToPrompt(packet: BorrowedInputPacket, originalRequest: string): string {
@@ -1028,6 +1140,10 @@ interface BorrowedAgentResult {
   text: string;
   ok: boolean;
   tokens?: number;
+  invocationId: string;
+  handoffId: string;
+  model: string;
+  provider: string;
 }
 
 async function runBorrowedAgentTurn(
@@ -1036,6 +1152,8 @@ async function runBorrowedAgentTurn(
   packet: BorrowedInputPacket,
 ): Promise<BorrowedAgentResult> {
   const id = agentNodeId(spec.slug);
+  const invocationId = `task-force-child:${randomUUID()}`;
+  const handoffId = `task-force-handoff:${randomUUID()}`;
   const link = linkAbort(p.signal);
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -1060,6 +1178,7 @@ async function runBorrowedAgentTurn(
     manualOverride: p.runtimeOverride,
   });
   const active = workloadResolution.runtime;
+  const resultMeta = { invocationId, handoffId, model: modelLabel(active), provider: providerLabel(active) };
   if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
     throw new MobileReadRuntimeBoundaryError(
       "This task-force worker runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
@@ -1158,6 +1277,7 @@ async function runBorrowedAgentTurn(
           : p.locale === "ko" ? `${spec.name} 조합 실패` : `${spec.name} group failed`,
       }));
       return {
+        ...resultMeta,
         spec,
         packet,
         text: redactSensitiveText(groupResult.text),
@@ -1233,6 +1353,7 @@ async function runBorrowedAgentTurn(
           : p.locale === "ko" ? `${spec.name} 팀 실패` : `${spec.name} team failed`,
       }));
       return {
+        ...resultMeta,
         spec,
         packet,
         text: redactSensitiveText(teamResult.text),
@@ -1406,6 +1527,7 @@ async function runBorrowedAgentTurn(
         runtimeKind: active.kind,
       });
       return {
+        ...resultMeta,
         spec,
         packet,
         text: teamText,
@@ -1483,6 +1605,7 @@ async function runBorrowedAgentTurn(
       runtimeKind: active.kind,
     });
     return {
+      ...resultMeta,
       spec,
       packet,
       text: workerText,
@@ -1498,6 +1621,7 @@ async function runBorrowedAgentTurn(
         status: p.locale === "ko" ? `${spec.name} 실패` : `${spec.name} failed`,
       }));
       return {
+        ...resultMeta,
         spec,
         packet,
         text: UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
@@ -1517,6 +1641,7 @@ async function runBorrowedAgentTurn(
       status: p.locale === "ko" ? `${spec.name} 실패` : `${spec.name} failed`,
     }));
     return {
+      ...resultMeta,
       spec,
       packet,
       text: redactSensitiveText(`[${spec.slug} ${timedOut ? "timeout" : "error"}] ${message}`),
@@ -1571,6 +1696,9 @@ async function runPlanner(
   text: string;
   packets: BorrowedInputPacket[];
   synthesisAllocation: WorkloadAllocation;
+  parseSuccess: boolean;
+  fallbackUsed: boolean;
+  invocationId: string;
   result?: RunnerResult;
 }> {
   const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
@@ -1586,6 +1714,7 @@ async function runPlanner(
         runtimeKind: p.active.kind,
         task: p.req.userPrompt,
       });
+  const plannerInvocationId = taskForceSessionId(p, "borrow-orchestrator");
   p.sink({
     kind: "thinking",
     status: taskForcePlannerStatus(p),
@@ -1619,7 +1748,7 @@ async function runPlanner(
       signal: p.signal,
       ...taskForceRunnerBase(p),
       cwd: p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
-      chatId: taskForceSessionId(p, "borrow-orchestrator"),
+      chatId: plannerInvocationId,
       locale: p.locale,
     },
     {
@@ -1647,7 +1776,42 @@ async function runPlanner(
   );
   const plannerText = restrictedTaskForceText(p, result.text, orchestratorId, p.orchestratorAgent.id);
   const parsedPlan = parseBorrowedWorkloadPlan(plannerText);
-  const packets = normalizePacketsForRoster(parsedPlan.packets, specs, p.req.userPrompt);
+  const normalized = normalizePacketsForRoster(parsedPlan.packets, specs, p.req.userPrompt);
+  if (p.benchmarkMode && (!normalized.parseSuccess || normalized.fallbackUsed)) {
+    const blockedReceipt = {
+      schemaVersion: "agentlas.workforce-planner-receipt.v1",
+      invocationId: plannerInvocationId,
+      modelId: modelLabel(p.active),
+      parseSuccess: normalized.parseSuccess,
+      fallbackUsed: normalized.fallbackUsed,
+      status: "blocked",
+    };
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `task-force:${p.chat.id}`,
+      kind: "workforce_planner_blocked",
+      chatId: p.chat.id,
+      nodeId: orchestratorId,
+      agentId: p.orchestratorAgent.id,
+      payload: blockedReceipt,
+    });
+    p.sink({
+      kind: "tool-use",
+      done: true,
+      status: "Workforce planner blocked: benchmark mode forbids fallback packets",
+      tool: {
+        name: "agentlas.workforce.planner_receipt",
+        result: JSON.stringify(blockedReceipt),
+        isError: true,
+      },
+      agentId: orchestratorId,
+      agentName: orchestratorName,
+      role: "orchestrator",
+      tier: 1,
+      phase: "plan",
+    });
+    throw new Error("workforce_planner_parse_failed: benchmark mode forbids fallback packets");
+  }
+  const packets = normalized.packets;
   p.sink({
     kind: "tool-use",
     status:
@@ -1665,6 +1829,9 @@ async function runPlanner(
     text: plannerText,
     packets,
     synthesisAllocation: parsedPlan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
+    parseSuccess: normalized.parseSuccess,
+    fallbackUsed: normalized.fallbackUsed,
+    invocationId: plannerInvocationId,
     result,
   };
 }
@@ -1774,6 +1941,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     : "";
 
   if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
+  const synthesisInvocationId = taskForceSessionId(p, "borrow-synthesis");
   const final = await synthesisPicked.runner(
     {
       systemPrompt: [
@@ -1797,7 +1965,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       signal: p.signal,
       ...taskForceRunnerBase(p),
       cwd: p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
-      chatId: taskForceSessionId(p, "borrow-synthesis"),
+      chatId: synthesisInvocationId,
       locale: p.locale,
     },
     {
@@ -1873,6 +2041,147 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       // Curator failures should not block the user's task-force answer.
     }
   }
+  const workforce = p.workforceSelectionReceipt;
+  const verifierIssues: string[] = [];
+  if (!plan.parseSuccess) verifierIssues.push("planner_parse_failed");
+  if (plan.fallbackUsed) verifierIssues.push("planner_fallback_used");
+  for (const result of results) {
+    if (!result.ok) verifierIssues.push(`child_failed:${result.spec.agentReleaseId ?? result.spec.slug}`);
+  }
+  if (!displayText.trim()) verifierIssues.push("empty_synthesis");
+  if (workforce?.unfilledPosts.length) verifierIssues.push("unfilled_posts_present");
+  if (workforce?.substitutions.length) verifierIssues.push("substitutions_present");
+  if (workforce && results.length !== workforce.preparedReleases.length) {
+    verifierIssues.push("prepared_release_execution_count_mismatch");
+  }
+  if (workforce) {
+    for (const result of results) {
+      if (!result.spec.agentReleaseId || !result.spec.packageHash || !result.spec.contentDigest) {
+        verifierIssues.push(`worker_immutable_identity_missing:${result.spec.slug}`);
+      }
+      if (!result.spec.routeLabel?.startsWith("workforce:")) {
+        verifierIssues.push(`worker_slot_missing:${result.spec.slug}`);
+      }
+    }
+    if (workforce.leaderInvocations.length < 2) verifierIssues.push("leader_invocation_receipts_missing");
+  }
+  if (p.benchmarkMode && results.length < 2) verifierIssues.push("benchmark_requires_multiple_workers");
+  const receipt: BorrowedTaskForceReceipt | undefined = workforce ? (() => {
+    const leaderInvocation = workforce.leaderInvocations[workforce.leaderInvocations.length - 1];
+    const passed = verifierIssues.length === 0;
+    return {
+      schemaVersion: "agentlas.workforce-execution-receipt.v1",
+      executionId: `workforce-execution:${randomUUID()}`,
+      workOrderId: workforce.workOrderId,
+      selectionReceiptId: workforce.selectionReceiptId,
+      preparationReceiptId: workforce.preparationReceiptId,
+      orchestrator: {
+        invocationId: leaderInvocation?.invocationId ?? "",
+        modelId: workforce.decisionModel,
+        provider: workforce.decisionRuntime ?? "unknown",
+        status: "completed",
+      },
+      planner: {
+        invocationId: plan.invocationId,
+        modelId: modelLabel(p.active),
+        provider: providerLabel(p.active),
+        status: "completed",
+        parseSuccess: plan.parseSuccess,
+        fallbackUsed: plan.fallbackUsed,
+      },
+      workers: results.map((result) => ({
+        slotId: result.spec.routeLabel?.startsWith("workforce:")
+          ? result.spec.routeLabel.slice("workforce:".length)
+          : "slot:unknown",
+        agentReleaseId: result.spec.agentReleaseId ?? "",
+        packageHash: result.spec.packageHash ?? "",
+        contentDigest: result.spec.contentDigest ?? "",
+        invocationId: result.invocationId,
+        modelId: result.model,
+        provider: result.provider,
+        status: result.ok ? "completed" : "failed",
+        handoffArtifactRefs: [result.handoffId],
+      })),
+      synthesis: {
+        invocationId: synthesisInvocationId,
+        modelId: modelLabel(synthesisActive),
+        provider: providerLabel(synthesisActive),
+        status: displayText.trim() ? "completed" : "failed",
+      },
+      verifier: {
+        invocationId: `structural-verifier:${randomUUID()}`,
+        modelId: "agentlas:structural-verifier-v1",
+        provider: "agentlas-desktop",
+        status: "completed",
+        verdict: passed ? "pass" : "fail",
+        issues: verifierIssues,
+      },
+      status: passed ? "passed" : "failed",
+      runId: p.req.runId ?? `task-force:${p.chat.id}`,
+      workforceSelection: workforce,
+      idealTeam: workforce.idealTeam,
+      executableTeam: workforce.executableTeam,
+      unfilledPosts: workforce.unfilledPosts,
+      substitutions: workforce.substitutions,
+      preparedReleases: workforce.preparedReleases,
+      children: results.map((result) => ({
+        invocationId: result.invocationId,
+        handoffId: result.handoffId,
+        slug: result.spec.slug,
+        agentReleaseId: result.spec.agentReleaseId ?? null,
+        packageHash: result.spec.packageHash ?? null,
+        contentDigest: result.spec.contentDigest ?? null,
+        model: result.model,
+        status: result.ok ? "succeeded" : "failed",
+      })),
+      handoffs: results.map((result) => ({
+        handoffId: result.handoffId,
+        from: orchestratorId,
+        to: result.invocationId,
+        slot: result.spec.routeLabel?.startsWith("workforce:")
+          ? result.spec.routeLabel.slice("workforce:".length)
+          : null,
+        inputType: result.packet.inputType,
+        expectedOutput: result.packet.expectedOutput,
+      })),
+    };
+  })() : undefined;
+  tryRecordRunEvent({
+    runId: p.req.runId ?? `task-force:${p.chat.id}`,
+    kind: "task_force_execution_receipt",
+    chatId: p.chat.id,
+    nodeId: orchestratorId,
+    agentId: p.orchestratorAgent.id,
+    payload: {
+      schemaVersion: receipt?.schemaVersion ?? "agentlas.desktop-task-force-execution-summary.v1",
+      selectionReceiptId: workforce?.selectionReceiptId,
+      preparationReceiptId: workforce?.preparationReceiptId,
+      plannerParseSuccess: plan.parseSuccess,
+      fallbackUsed: plan.fallbackUsed,
+      childInvocationIds: results.map((child) => child.invocationId),
+      childReleaseIds: results.map((child) => child.spec.agentReleaseId ?? child.spec.slug),
+      synthesisStatus: receipt?.synthesis.status ?? (displayText.trim() ? "completed" : "failed"),
+      verifierStatus: receipt?.verifier.verdict ?? (verifierIssues.length ? "fail" : "pass"),
+      verifierIssues,
+    },
+  });
+  if (workforce) {
+    p.sink({
+      kind: "tool-use",
+      done: true,
+      status: p.locale === "ko" ? "Workforce 실행 영수증 기록 완료" : "Workforce execution receipt recorded",
+      tool: {
+        name: "agentlas.workforce.execution_receipt",
+        result: JSON.stringify(receipt),
+        isError: receipt?.verifier.verdict === "fail",
+      },
+      agentId: orchestratorId,
+      agentName: orchestratorName,
+      role: "orchestrator",
+      tier: 1,
+      phase: "synthesize",
+    });
+  }
   if (emitFinal && !p.req.agentAppMode) appendChatMessage(p.chat.id, "assistant", displayText);
   p.sink({
     kind: "tool-use",
@@ -1889,7 +2198,13 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   // 종합 턴이 성공했다고 태스크포스가 성공한 것이 아니다. results[]에 워커별 정확한 ok가
   // 이미 있는데 리터럴 true를 반환하면 전원 실패해도 완전 성공으로 보고된다. 같은 파일의
   // Hub team 경로(workerResults.every)와 동일한 집계로 맞춘다 — 중첩 group/team 전파도 함께 정상화.
-  return { ok: results.every((result) => result.ok), text: displayText, tokens: final.tokens };
+  const verified = receipt?.verifier.verdict === "pass";
+  return {
+    ok: p.requireAllWorkers ? verified : results.every((result) => result.ok),
+    text: displayText,
+    tokens: final.tokens,
+    receipt,
+  };
 }
 
 export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams): Promise<BorrowedTaskForceResult> {

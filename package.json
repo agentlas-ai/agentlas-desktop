@@ -202,6 +202,7 @@
     "test:mobile-ontology-bridge": "npm run build:electron && electron scripts/test-mobile-ontology-bridge.cjs",
     "test:generated-app-chat-routing": "node scripts/test-generated-app-chat-routing.cjs",
     "test:borrowed-task-force": "npm run build:electron && electron scripts/test-borrowed-task-force.cjs && electron scripts/test-borrowed-agent-fail-closed.cjs",
+    "test:workforce-orchestrator": "npm run build:electron && electron scripts/test-workforce-orchestrator.cjs && electron scripts/test-workforce-execution-receipt.cjs",
     "test:owned-agent-runtime-prompts": "npm run build:electron && electron scripts/test-owned-agent-runtime-prompts.cjs",
     "test:studio-start": "npm run build:electron && electron scripts/test-studio-start.cjs",
     "test:telegram-connect-atomicity": "npm run build:electron && electron scripts/test-telegram-connect-atomicity.cjs",
