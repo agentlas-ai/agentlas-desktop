@@ -52,7 +52,19 @@ seed.exec(`
     id TEXT PRIMARY KEY, pack_id TEXT NOT NULL, source_fingerprint TEXT NOT NULL
   );
   CREATE TABLE experience_relation_nodes (node_id TEXT PRIMARY KEY, pack_id TEXT NOT NULL);
-  CREATE TABLE experience_relation_edges (edge_id TEXT PRIMARY KEY, pack_id TEXT NOT NULL);
+  CREATE TABLE experience_relation_edges (
+    edge_id TEXT PRIMARY KEY,
+    pack_id TEXT NOT NULL,
+    from_node TEXT NOT NULL,
+    to_node TEXT NOT NULL,
+    edge_type TEXT NOT NULL,
+    project_scope_key TEXT NOT NULL,
+    environment_key TEXT NOT NULL,
+    base_package_hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    source_fingerprint TEXT NOT NULL,
+    rebuilt_at TEXT NOT NULL
+  );
   CREATE TABLE experience_relation_index_state (scope_key TEXT PRIMARY KEY, source_fingerprint TEXT NOT NULL);
 
   INSERT INTO experience_packs VALUES (
@@ -66,7 +78,11 @@ seed.exec(`
   INSERT INTO experience_export_intents VALUES ('intent-v55', 'pack-v55', '${"d".repeat(64)}');
   INSERT INTO experience_lineage_events VALUES ('lineage-v55', 'pack-v55', '${"e".repeat(64)}');
   INSERT INTO experience_relation_nodes VALUES ('node-v55', 'pack-v55');
-  INSERT INTO experience_relation_edges VALUES ('edge-v55', 'pack-v55');
+  INSERT INTO experience_relation_edges VALUES (
+    'edge-v55', 'pack-v55', 'node-v55', 'node-v55', 'similar_by_tag',
+    'scope-v55', '${"a".repeat(64)}', '${"b".repeat(64)}', '{}',
+    '${"f".repeat(64)}', '2026-07-12T00:00:00.000Z'
+  );
   INSERT INTO experience_relation_index_state VALUES ('shared', '${"f".repeat(64)}');
   PRAGMA user_version = 55;
 `);
