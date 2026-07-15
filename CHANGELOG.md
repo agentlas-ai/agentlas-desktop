@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.44 — 2026-07-16
+
+### Fixed
+
+- **Mobile read authority is now verified across every current execution route.**
+  The release gate checks Workforce, exact temporary task forces, saved agent
+  groups, Hub borrowed task forces, swarms, firms, and the direct runner as
+  distinct source regions instead of relying on one stale occurrence count.
+- v0.8.43 stopped in Linux OpenCrab preflight before packaging or public writes
+  after the new Workforce route correctly added a seventh restricted-read
+  boundary. The corrected contract and every command after that failure pass in
+  the same Ubuntu 24.04 x64, Node 22, Electron/Xvfb environment.
+- The bundled Core is Agentlas OS v1.1.39 at immutable commit
+  cf71b8be1732f249b4d79d66246f7d3c0cd0790f. This source state does not prove a
+  Git tag, installer, update feed, or GitHub release.
+
 ## 0.8.43 — 2026-07-16
 
 ### Fixed

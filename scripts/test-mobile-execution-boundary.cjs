@@ -104,10 +104,30 @@ async function main() {
   const borrowedSource = fs.readFileSync(path.join(__dirname, "../electron/mcp/borrowed-task-force.ts"), "utf8");
   const swarmSource = fs.readFileSync(path.join(__dirname, "../electron/mcp/swarm-run.ts"), "utf8");
   const firmSource = fs.readFileSync(path.join(__dirname, "../electron/mcp/firm-orchestrator.ts"), "utf8");
+
+  function assertClientBoundaryForwarded(startNeedle, endNeedle, label) {
+    const start = clientSource.indexOf(startNeedle);
+    const end = clientSource.indexOf(endNeedle, start + startNeedle.length);
+    assert.notEqual(start, -1, `${label} route must exist`);
+    assert.notEqual(end, -1, `${label} route boundary must remain identifiable`);
+    assert.match(
+      clientSource.slice(start, end),
+      /restrictedReadBoundary: true as const/,
+      `${label} must preserve the restricted read boundary`,
+    );
+  }
+
+  assertClientBoundaryForwarded("if (explicitWorkforceGoal) {", "if (req.taskForceTargets !== undefined) {", "workforce");
+  assertClientBoundaryForwarded("if (req.taskForceTargets !== undefined) {", "if (chat.agentGroupId) {", "task-force");
+  assertClientBoundaryForwarded("if (chat.agentGroupId) {", "if (borrowedAgentSlugs.length > 1", "group");
+  assertClientBoundaryForwarded("if (borrowedAgentSlugs.length > 1", "// ── 스웜 모드", "borrowed task-force");
+  assertClientBoundaryForwarded("// ── 스웜 모드", "// ── 멀티 에이전트 firm", "swarm");
+  assertClientBoundaryForwarded("// ── 멀티 에이전트 firm", "// 프로젝트 컨텍스트 노트", "firm");
+  assertClientBoundaryForwarded("const runnerReq = {", "const runnerEvents = {", "direct runner");
   assert.equal(
     (clientSource.match(/restrictedReadBoundary: true as const/g) || []).length,
-    6,
-    "client must pass the boundary into exact task-force, group, borrowed, swarm, firm, and direct runner paths",
+    7,
+    "client must pass the boundary into workforce, task-force, group, borrowed, swarm, firm, and direct runner paths",
   );
   assert.match(borrowedSource, /restrictedReadBoundary: p\.restrictedReadBoundary/);
   assert.equal(

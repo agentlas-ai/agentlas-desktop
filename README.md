@@ -69,6 +69,16 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-16 · v0.8.44 — exact seven-route mobile authority gate** — The Linux
+  release gate now proves the restricted-read boundary independently for
+  Workforce, temporary task forces, saved groups, Hub borrowed task forces,
+  swarms, firms, and the direct runner. v0.8.43 stopped before packaging or
+  public writes because its test still expected the six pre-Workforce routes;
+  the repaired contract and all later OpenCrab security commands pass in the
+  same Ubuntu 24.04 x64, Node 22, Electron/Xvfb environment. Agentlas OS v1.1.39
+  remains pinned at cf71b8be1732f249b4d79d66246f7d3c0cd0790f. This source does not prove
+  a public installer or update-feed release.
+
 - **2026-07-16 · v0.8.43 — deterministic Linux automation release gate** — The
   automation-store suite now injects an exact test runtime before lazily loading
   the scheduler, and its cached-parent deletion interception reaches the real
