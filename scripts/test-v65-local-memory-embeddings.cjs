@@ -10,6 +10,16 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-v65-memory-"));
 const storePath = path.join(temp, "agentlas.sqlite");
 process.env.AGENTLAS_STORE_PATH = storePath;
 process.env.AGENTLAS_E2E = "1";
+const modelAsset = path.resolve(
+  __dirname,
+  "..",
+  "Hephaestus",
+  "assets",
+  "model2vec",
+  "potion-base-8M-int8",
+);
+assert.ok(fs.existsSync(path.join(modelAsset, "manifest.json")), "v65 backfill requires the bundled Model2Vec asset");
+process.env.AGENTLAS_MODEL2VEC_PATH = modelAsset;
 app.setPath("userData", path.join(temp, "user-data"));
 
 const seed = new Database(storePath);
@@ -93,21 +103,27 @@ seed.close();
     ).get(), "explicit supersedes/contradicts must have a durable non-derived source table");
 
     const memory = require("../dist/electron/memory/store.js");
+    const {
+      MODEL2VEC_HYBRID_DIMENSIONS,
+      MODEL2VEC_HYBRID_NAME,
+      PINNED_MODEL2VEC_CONTENT_SHA256,
+    } = require("../dist/electron/memory/local-embedding.js");
     const [legacy] = memory.listGlobalMemoryForAgent("agent-a", 10);
-    assert.equal(legacy.embedding.model, "local_hashing");
-    assert.equal(legacy.embedding.dimensions, 96);
-    assert.equal(legacy.embedding.vector.length, 96);
+    assert.equal(legacy.embedding.degraded, false);
+    assert.equal(legacy.embedding.model, MODEL2VEC_HYBRID_NAME);
+    assert.equal(legacy.embedding.dimensions, MODEL2VEC_HYBRID_DIMENSIONS);
+    assert.equal(legacy.embedding.vector.length, MODEL2VEC_HYBRID_DIMENSIONS);
     const stored = db.prepare(
       `SELECT embedding_model, embedding_adapter, embedding_model_sha256,
               embedding_content_hash, embedding_dimensions, embedding_json
          FROM memory_entries WHERE id = 'legacy-memory'`,
     ).get();
-    assert.equal(stored.embedding_model, "local_hashing");
-    assert.match(stored.embedding_adapter, /^local_hashing:/);
-    assert.equal(stored.embedding_model_sha256, null);
+    assert.equal(stored.embedding_model, MODEL2VEC_HYBRID_NAME);
+    assert.match(stored.embedding_adapter, /^model2vec:minishlab\/potion-base-8M:/);
+    assert.equal(stored.embedding_model_sha256, PINNED_MODEL2VEC_CONTENT_SHA256);
     assert.match(stored.embedding_content_hash, /^[0-9a-f]{64}$/);
-    assert.equal(stored.embedding_dimensions, 96);
-    assert.equal(JSON.parse(stored.embedding_json).length, 96);
+    assert.equal(stored.embedding_dimensions, MODEL2VEC_HYBRID_DIMENSIONS);
+    assert.equal(JSON.parse(stored.embedding_json).length, MODEL2VEC_HYBRID_DIMENSIONS);
 
     // Replaying an interrupted v65 marker is idempotent: additive columns and
     // the semantic relation constraint are not duplicated or rebuilt again.
@@ -124,7 +140,12 @@ seed.close();
       1,
     );
     reopened.getDb().close();
-    console.log(JSON.stringify({ ok: true, schemaVersion: 65, embeddingDimensions: 96 }, null, 2));
+    console.log(JSON.stringify({
+      ok: true,
+      schemaVersion: 65,
+      embeddingAdapter: MODEL2VEC_HYBRID_NAME,
+      embeddingDimensions: MODEL2VEC_HYBRID_DIMENSIONS,
+    }, null, 2));
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
     app.quit();

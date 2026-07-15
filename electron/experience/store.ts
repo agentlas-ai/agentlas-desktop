@@ -1407,7 +1407,7 @@ export function listPromotedExperienceProjection(input: {
              AND replacement.status = 'promoted'
              AND replacement.outcome_status IN ('attested','verified')
         )
-      ORDER BY c.updated_at DESC LIMIT 200`,
+      ORDER BY c.updated_at DESC`,
   ).all(
     input.agentId,
     experienceProjectScopeKey(input),

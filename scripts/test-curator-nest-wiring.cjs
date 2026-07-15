@@ -45,6 +45,17 @@ async function main() {
   await app.whenReady();
   const db = require("../dist/electron/store/db.js");
   const { curateEvents } = require("../dist/electron/memory/curator.js");
+  const {
+    agentNestExperienceOwnership,
+    findAgentNestExperienceSlugs,
+    reconcileAgentNestExperienceConsolidation,
+  } = require("../dist/electron/memory/project-files.js");
+  const { strictestMemorySensitivity } = require("../dist/electron/memory/dreaming.js");
+  const {
+    autoLocalEmbedding,
+    MODEL2VEC_HYBRID_DIMENSIONS,
+    MODEL2VEC_HYBRID_NAME,
+  } = require("../dist/electron/memory/local-embedding.js");
   db.initStore();
 
   const projectPath = path.join(tmp, "project1");
@@ -63,7 +74,7 @@ async function main() {
     content,
     suggested_scope: scope,
     confidence: "high",
-    sensitivity: "normal",
+    sensitivity: "internal",
   });
 
   // ── 1+2: agent_repo 배움 → 둥지 미러링 + 슬러그 정규화 ────────────────────
@@ -89,13 +100,19 @@ async function main() {
   assert.ok(nestRows.every((row) => row.agent_id === "hub:instagram-uploader"));
   assert.ok(nestRows.every((row) => row.status === "active"), "Core recall only consumes active experience rows");
   assert.ok(nestRows.every((row) => row.source_memory_id && row.idempotency_key));
-  assert.ok(nestRows.every((row) => row.embedding_adapter === "local_hashing" && row.embedding_dimensions === 96));
-  assert.ok(nestRows.every((row) => JSON.parse(row.embedding_json).length === 96));
+  const expectedProjectionEmbedding = autoLocalEmbedding("mandatory local Model2Vec projection");
+  assert.equal(expectedProjectionEmbedding.degraded, false, "borrowed-agent projection requires the verified Model2Vec asset");
+  assert.equal(expectedProjectionEmbedding.model, MODEL2VEC_HYBRID_NAME);
+  assert.equal(expectedProjectionEmbedding.dimensions, MODEL2VEC_HYBRID_DIMENSIONS);
+  assert.ok(nestRows.every((row) =>
+    row.embedding_adapter === MODEL2VEC_HYBRID_NAME
+      && row.embedding_dimensions === MODEL2VEC_HYBRID_DIMENSIONS));
+  assert.ok(nestRows.every((row) => JSON.parse(row.embedding_json).length === MODEL2VEC_HYBRID_DIMENSIONS));
   const adapterRegistration = nestDb.prepare(
     "SELECT name, config_json FROM runtime_adapters WHERE kind = 'vector'",
   ).get();
-  assert.equal(adapterRegistration.name, "local_hashing");
-  assert.match(JSON.parse(adapterRegistration.config_json).identity, /^local_hashing:sha256-bow:v1:96$/);
+  assert.equal(adapterRegistration.name, MODEL2VEC_HYBRID_NAME);
+  assert.equal(JSON.parse(adapterRegistration.config_json).identity, expectedProjectionEmbedding.adapter);
   nestDb.close();
   assert.equal(
     fs.existsSync(path.join(path.dirname(nestDbPath("instagram-uploader")), "project-soul-memory.md")),
@@ -120,7 +137,7 @@ async function main() {
   ).get(nestRows[0].ticket_id);
   upgradedDb.close();
   assert.equal(upgradedLegacy.status, "active");
-  assert.equal(upgradedLegacy.embedding_adapter, "local_hashing");
+  assert.equal(upgradedLegacy.embedding_adapter, MODEL2VEC_HYBRID_NAME);
 
   // ── 3: 프로젝트 격리 — project 스코프는 둥지로 새지 않는다 ──────────────────
   curateEvents(
@@ -202,6 +219,135 @@ async function main() {
   assert.equal(falsePositiveReport.redacted, 0, "bare provider prefixes must not be treated as secrets");
   assert.equal(falsePositiveReport.written, 1, "non-secret documentation must remain curatable");
   assert.match(readNest("instagram-uploader") || "", /sk-proj-/, "non-secret prefix documentation must reach the nest");
+
+  // ── 7: Desktop supersession must retire the old cross-project projection ──
+  const oldProjectionText = "레거시 업로드 절차는 초안 버튼을 두 번 누른다.";
+  const replacementProjectionText = "업로드 절차는 검증 후 게시 버튼을 한 번만 누른다.";
+  curateEvents(
+    [
+      ev("procedure", "agent_repo", oldProjectionText),
+      ev("procedure", "agent_repo", replacementProjectionText),
+    ],
+    { ...baseCtx, borrowedAgentSlugs: ["instagram_uploader"] },
+  );
+  const sourceRows = db.getDb().prepare(
+    "SELECT id, content FROM memory_entries WHERE content IN (?, ?)",
+  ).all(oldProjectionText, replacementProjectionText);
+  const oldSourceId = sourceRows.find((row) => row.content === oldProjectionText)?.id;
+  const replacementSourceId = sourceRows.find((row) => row.content === replacementProjectionText)?.id;
+  assert.ok(oldSourceId && replacementSourceId);
+  assert.deepEqual(
+    findAgentNestExperienceSlugs([oldSourceId]),
+    ["instagram-uploader"],
+    "projection ownership must resolve the borrowed slug, not the primary installed agent id",
+  );
+  assert.deepEqual(
+    reconcileAgentNestExperienceConsolidation([oldSourceId], [{
+      id: replacementSourceId,
+      kind: "procedure",
+      content: replacementProjectionText,
+      confidence: "high",
+      sensitivity: "internal",
+      updatedAt: new Date().toISOString(),
+    }]),
+    ["instagram-uploader"],
+  );
+  const reconciledDb = new Database(nestDbPath("instagram-uploader"), { readonly: true });
+  const reconciledRows = reconciledDb.prepare(
+    `SELECT source_memory_id, status FROM memory_candidates
+      WHERE source_memory_id IN (?, ?) ORDER BY source_memory_id`,
+  ).all(oldSourceId, replacementSourceId);
+  const supersedesEdges = reconciledDb.prepare(
+    `SELECT count(*) AS count FROM memory_links l
+      JOIN memory_candidates successor ON successor.ticket_id = l.from_ticket
+      JOIN memory_candidates target ON target.ticket_id = l.to_ticket
+      WHERE l.link_type = 'supersedes'
+        AND successor.source_memory_id = ? AND target.source_memory_id = ?`,
+  ).get(replacementSourceId, oldSourceId).count;
+  reconciledDb.close();
+  assert.equal(reconciledRows.find((row) => row.source_memory_id === oldSourceId)?.status, "superseded");
+  assert.equal(reconciledRows.find((row) => row.source_memory_id === replacementSourceId)?.status, "active");
+  assert.equal(supersedesEdges, 1, "an unambiguous replacement must persist a typed supersedes edge");
+
+  // A consolidation inherits the strictest source sensitivity. Even if a
+  // caller supplies a cross-scope replacement, the projection may retire the
+  // stale row but must not manufacture a supersedes edge across privacy scope.
+  assert.equal(
+    strictestMemorySensitivity([{ sensitivity: "internal" }, { sensitivity: "confidential" }]),
+    "confidential",
+  );
+  const internalOldText = "내부 전용 레거시 브라우저 절차";
+  const privateReplacementText = "기밀 브라우저 절차를 새 규칙으로 통합";
+  curateEvents(
+    [
+      ev("procedure", "agent_repo", internalOldText),
+      { ...ev("procedure", "agent_repo", privateReplacementText), sensitivity: "confidential" },
+    ],
+    { ...baseCtx, borrowedAgentSlugs: ["instagram_uploader"] },
+  );
+  const mixedRows = db.getDb().prepare(
+    "SELECT id, content FROM memory_entries WHERE content IN (?, ?)",
+  ).all(internalOldText, privateReplacementText);
+  const internalOldId = mixedRows.find((row) => row.content === internalOldText)?.id;
+  const privateReplacementId = mixedRows.find((row) => row.content === privateReplacementText)?.id;
+  assert.ok(internalOldId && privateReplacementId);
+  assert.deepEqual(reconcileAgentNestExperienceConsolidation([internalOldId], [{
+    id: privateReplacementId,
+    kind: "procedure",
+    content: privateReplacementText,
+    confidence: "high",
+    sensitivity: "confidential",
+    updatedAt: new Date().toISOString(),
+  }]), ["instagram-uploader"]);
+  const mixedDb = new Database(nestDbPath("instagram-uploader"), { readonly: true });
+  const mixedOld = mixedDb.prepare(
+    "SELECT status FROM memory_candidates WHERE source_memory_id = ?",
+  ).get(internalOldId);
+  const crossScopeEdges = mixedDb.prepare(
+    `SELECT count(*) AS count FROM memory_links l
+      JOIN memory_candidates successor ON successor.ticket_id = l.from_ticket
+      JOIN memory_candidates target ON target.ticket_id = l.to_ticket
+      WHERE l.link_type = 'supersedes'
+        AND successor.source_memory_id = ? AND target.source_memory_id = ?`,
+  ).get(privateReplacementId, internalOldId).count;
+  mixedDb.close();
+  assert.equal(mixedOld.status, "superseded");
+  assert.equal(crossScopeEdges, 0, "privacy-scope mismatch must block a structural supersedes edge");
+
+  // Different borrowed owners must never be unioned. A primary installed
+  // agent can call both agents, but their private experience projections stay
+  // isolated even if an attempted dreaming batch contains both source ids.
+  const slugAText = "slug A only browser workflow";
+  const slugBText = "slug B only database workflow";
+  curateEvents([ev("procedure", "agent_repo", slugAText)], {
+    ...baseCtx,
+    borrowedAgentSlugs: ["borrowed_slug_a"],
+  });
+  curateEvents([ev("procedure", "agent_repo", slugBText)], {
+    ...baseCtx,
+    borrowedAgentSlugs: ["borrowed_slug_b"],
+  });
+  const isolatedRows = db.getDb().prepare(
+    "SELECT id, content FROM memory_entries WHERE content IN (?, ?)",
+  ).all(slugAText, slugBText);
+  const slugAId = isolatedRows.find((row) => row.content === slugAText)?.id;
+  const slugBId = isolatedRows.find((row) => row.content === slugBText)?.id;
+  assert.ok(slugAId && slugBId);
+  assert.deepEqual(agentNestExperienceOwnership([slugAId, slugBId]), {
+    [slugAId]: ["borrowed-slug-a"],
+    [slugBId]: ["borrowed-slug-b"],
+  });
+  const forbiddenCombined = "FORBIDDEN cross-owner combined rule";
+  assert.deepEqual(reconcileAgentNestExperienceConsolidation([slugAId, slugBId], [{
+    id: "cross-owner-consolidated",
+    kind: "procedure",
+    content: forbiddenCombined,
+    confidence: "high",
+    sensitivity: "internal",
+    updatedAt: new Date().toISOString(),
+  }]), [], "mixed owner sets must be refused before any projection write");
+  assert.doesNotMatch(readNest("borrowed-slug-a") || "", /FORBIDDEN cross-owner/);
+  assert.doesNotMatch(readNest("borrowed-slug-b") || "", /FORBIDDEN cross-owner/);
 
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.rmSync(sandboxHome, { recursive: true, force: true });

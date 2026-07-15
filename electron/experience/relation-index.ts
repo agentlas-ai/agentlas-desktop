@@ -16,6 +16,7 @@ import {
   cosineSimilarity,
   parseLocalEmbedding,
 } from "../memory/local-embedding";
+import { recordAgentNestExperienceGovernanceRelation } from "../memory/project-files";
 
 const LINEAGE_SCHEMA_VERSION = "agentlas.experience-relation-lineage.v1";
 const LINEAGE_KIND = "agentlas-experience-relation-lineage";
@@ -1398,12 +1399,14 @@ export function recordExperienceGovernanceRelation(input: {
   const reason = String(input.reason ?? "").normalize("NFKC").trim();
   if (!reason || reason.length > 240) throw new Error("Experience governance requires a concise reason.");
   const rows = getDb().prepare(
-    `SELECT id, pack_id, agent_id, status FROM experience_candidates WHERE id IN (?, ?)`,
+    `SELECT id, pack_id, agent_id, status, source_memory_id
+       FROM experience_candidates WHERE id IN (?, ?)`,
   ).all(fromCandidateId, toCandidateId) as Array<{
     id: string;
     pack_id: string;
     agent_id: string;
     status: string;
+    source_memory_id: string;
   }>;
   if (rows.length !== 2 || rows.some((row) => row.status !== "promoted")) {
     throw new Error("Experience governance requires two promoted reviewed candidates.");
@@ -1435,6 +1438,17 @@ export function recordExperienceGovernanceRelation(input: {
     reason,
     new Date().toISOString(),
   );
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const from = byId.get(fromCandidateId);
+  const to = byId.get(toCandidateId);
+  if (from && to) {
+    recordAgentNestExperienceGovernanceRelation({
+      fromSourceMemoryId: from.source_memory_id,
+      toSourceMemoryId: to.source_memory_id,
+      relationType: input.relationType,
+      reason,
+    });
+  }
   refreshExperienceRelationArtifacts(rows[0].pack_id);
   return relationId;
 }

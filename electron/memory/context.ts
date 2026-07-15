@@ -30,7 +30,10 @@ import { localEmbeddingTokens, rankHybridLocal } from "./local-embedding";
 
 const SOUL_MAX_CHARS = 1800;
 const MAX_ENTRIES = 12;
-const MEMORY_CANDIDATE_LIMIT = 200;
+// SQLite LIMIT -1 means no pre-ranking recency cap. Governance filters still
+// run in SQL; adaptive load-all/top-k is decided only after every eligible row
+// has received lexical/vector evidence.
+const MEMORY_CANDIDATE_LIMIT = -1;
 export const MEMORY_SELECTED_MAX_APPROX_TOKENS = 800;
 const CONTEXT_MAX_CHARS = 180;
 

@@ -39,7 +39,9 @@ const PINNED_MODEL2VEC_SOURCE_FILES: Record<string, AssetFileRecord> = {
 const MODEL_DISCOVERY_MISS_TTL_MS = 5_000;
 const HASH_MIN_VECTOR_SCORE = 0.08;
 const MODEL2VEC_MIN_VECTOR_SCORE = 0.45;
+const MODEL2VEC_CJK_MIN_VECTOR_SCORE = 0.5;
 const VECTOR_RELATIVE_FLOOR = 0.72;
+const CJK_QUERY_PATTERN = /[぀-ヿ㐀-䶿一-鿿가-힣]+/;
 
 type ModelDescriptor = {
   modelPath: string;
@@ -495,7 +497,7 @@ export function rankHybridLocal<T extends HybridRankable>(
   }));
   const bestVectorScore = Math.max(0, ...measured.map((entry) => entry.vectorScore));
   const minimumVectorScore = queryEmbedding.model === MODEL2VEC_HYBRID_NAME
-    ? MODEL2VEC_MIN_VECTOR_SCORE
+    ? (CJK_QUERY_PATTERN.test(query) ? MODEL2VEC_CJK_MIN_VECTOR_SCORE : MODEL2VEC_MIN_VECTOR_SCORE)
     : HASH_MIN_VECTOR_SCORE;
   const measuredWithGate = measured.map((entry) => ({
     ...entry,

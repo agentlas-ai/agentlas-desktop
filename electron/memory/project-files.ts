@@ -13,6 +13,7 @@ import {
   autoLocalEmbedding,
   cosineSimilarity,
 } from "./local-embedding";
+import { getDb } from "../store/db";
 import {
   CAREER_GRAPH_CONFIG_FILE,
   CAREER_GRAPH_DB_FILE,
@@ -4576,6 +4577,140 @@ export interface AgentNestExperienceItem {
   updatedAt: string;
 }
 
+interface AgentNestGovernanceRelationInput {
+  fromSourceMemoryId: string;
+  toSourceMemoryId: string;
+  relationType: "supersedes" | "contradicts";
+  reason: string;
+}
+
+function normalizeAgentNestGovernanceRelation(
+  input: AgentNestGovernanceRelationInput,
+): AgentNestGovernanceRelationInput | null {
+  const fromSourceMemoryId = input.fromSourceMemoryId.trim();
+  const toSourceMemoryId = input.toSourceMemoryId.trim();
+  if (!fromSourceMemoryId || !toSourceMemoryId || fromSourceMemoryId === toSourceMemoryId) {
+    return null;
+  }
+  if (input.relationType !== "supersedes" && input.relationType !== "contradicts") return null;
+  const reason = input.reason.normalize("NFKC").replace(/\s+/g, " ").trim().slice(0, 240);
+  if (!reason) return null;
+  return {
+    fromSourceMemoryId,
+    toSourceMemoryId,
+    relationType: input.relationType,
+    reason,
+  };
+}
+
+/** Write one reviewed edge only when both active rows share this exact agent and privacy scope. */
+function writeAgentNestExperienceGovernanceRelation(
+  db: Database.Database,
+  agentId: string,
+  input: AgentNestGovernanceRelationInput,
+): boolean {
+  const normalized = normalizeAgentNestGovernanceRelation(input);
+  if (!normalized) return false;
+  const selectTicket = db.prepare(
+    `SELECT ticket_id, status, privacy_scope FROM memory_candidates
+      WHERE agent_id = ? AND source_memory_id = ? AND suggested_scope = 'agent_repo'`,
+  );
+  const from = selectTicket.get(agentId, normalized.fromSourceMemoryId) as {
+    ticket_id: string;
+    status: string;
+    privacy_scope: string | null;
+  } | undefined;
+  const to = selectTicket.get(agentId, normalized.toSourceMemoryId) as {
+    ticket_id: string;
+    status: string;
+    privacy_scope: string | null;
+  } | undefined;
+  if (
+    !from || !to
+    || from.status !== "active" || to.status !== "active"
+    || from.privacy_scope !== to.privacy_scope
+  ) return false;
+  db.prepare(`
+    INSERT OR REPLACE INTO memory_links (
+      link_id, from_ticket, to_ticket, link_type, score, reason, created_at
+    ) VALUES (?, ?, ?, ?, 1.0, ?, ?)
+  `).run(
+    stableNestHash("memory-link", from.ticket_id, to.ticket_id, normalized.relationType).slice(0, 24),
+    from.ticket_id,
+    to.ticket_id,
+    normalized.relationType,
+    normalized.reason,
+    new Date().toISOString(),
+  );
+  return true;
+}
+
+/** Replay Desktop's authoritative ledger when a nest is first built or rebuilt. */
+function replayAgentNestExperienceGovernanceRelations(
+  db: Database.Database,
+  normalizedSlug: string,
+  touchedSourceMemoryIds: string[],
+): number {
+  const sourceIds = [...new Set(touchedSourceMemoryIds.map((id) => id.trim()).filter(Boolean))];
+  if (sourceIds.length === 0) return 0;
+  try {
+    const authoritativeDb = getDb();
+    const relations = new Map<string, AgentNestGovernanceRelationInput>();
+    // Keep bind counts below conservative SQLite host-parameter limits. A
+    // relation found through both endpoints is de-duplicated by relation_id.
+    for (let offset = 0; offset < sourceIds.length; offset += 400) {
+      const batch = sourceIds.slice(offset, offset + 400);
+      const placeholders = batch.map(() => "?").join(",");
+      const rows = authoritativeDb.prepare(`
+        SELECT DISTINCT relation.relation_id,
+               from_candidate.source_memory_id AS from_source_memory_id,
+               to_candidate.source_memory_id AS to_source_memory_id,
+               relation.relation_type, relation.reason
+          FROM experience_governance_relations relation
+          JOIN experience_candidates from_candidate
+            ON from_candidate.id = relation.from_candidate_id
+           AND from_candidate.pack_id = relation.pack_id
+           AND from_candidate.agent_id = relation.agent_id
+          JOIN experience_candidates to_candidate
+            ON to_candidate.id = relation.to_candidate_id
+           AND to_candidate.pack_id = relation.pack_id
+           AND to_candidate.agent_id = relation.agent_id
+         WHERE from_candidate.status = 'promoted'
+           AND to_candidate.status = 'promoted'
+           AND (
+             from_candidate.source_memory_id IN (${placeholders})
+             OR to_candidate.source_memory_id IN (${placeholders})
+           )
+         ORDER BY relation.created_at ASC, relation.relation_id ASC
+      `).all(...batch, ...batch) as Array<{
+        relation_id: string;
+        from_source_memory_id: string;
+        to_source_memory_id: string;
+        relation_type: "supersedes" | "contradicts";
+        reason: string;
+      }>;
+      for (const row of rows) {
+        relations.set(row.relation_id, {
+          fromSourceMemoryId: row.from_source_memory_id,
+          toSourceMemoryId: row.to_source_memory_id,
+          relationType: row.relation_type,
+          reason: row.reason,
+        });
+      }
+    }
+    const agentId = `hub:${normalizedSlug}`;
+    let written = 0;
+    for (const relation of relations.values()) {
+      if (writeAgentNestExperienceGovernanceRelation(db, agentId, relation)) written += 1;
+    }
+    return written;
+  } catch {
+    // Projection also runs in standalone helpers before the Desktop store is
+    // initialized. The durable Desktop ledger can be replayed on a later write.
+    return 0;
+  }
+}
+
 function confidenceValue(value: AgentNestExperienceItem["confidence"]): number {
   return value === "high" ? 0.9 : value === "medium" ? 0.7 : 0.45;
 }
@@ -4741,6 +4876,11 @@ export function appendAgentNestExperienceMemory(
       }
     });
     write(items);
+    replayAgentNestExperienceGovernanceRelations(
+      db,
+      normalizedSlug,
+      items.map((item) => item.id),
+    );
 
     // Re-embed stale rows before rebuilding derived links. Adapter identity,
     // model checksum, and text hash changes invalidate old vectors without a
@@ -4850,6 +4990,222 @@ export function appendAgentNestExperienceMemory(
   } finally {
     try { db?.close(); } catch { /* best-effort projection */ }
   }
+}
+
+/**
+ * Reconcile Desktop-owned supersession into one borrowed agent's rebuildable
+ * experience projection. A typed edge is emitted only when the caller can name
+ * one unambiguous successor; set-level consolidation with multiple successors
+ * retires the old rows without inventing false pairwise authority.
+ */
+export function supersedeAgentNestExperienceMemory(
+  slug: string,
+  sourceMemoryIds: string[],
+  successorSourceMemoryId?: string,
+): boolean {
+  const normalizedSlug = normalizedHubAgentSlug(slug);
+  const sourceIds = [...new Set(sourceMemoryIds.map((id) => id.trim()).filter(Boolean))];
+  if (!normalizedSlug || sourceIds.length === 0) return false;
+  const dbPath = path.join(
+    os.homedir(),
+    ".agentlas",
+    "networking",
+    "hub-agents",
+    normalizedSlug,
+    "memory",
+    "experience.sqlite",
+  );
+  let db: Database.Database | null = null;
+  try {
+    if (!fs.existsSync(dbPath)) return false;
+    const stat = fs.lstatSync(dbPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) return false;
+    db = new Database(dbPath);
+    db.pragma("foreign_keys = ON");
+    const agentId = `hub:${normalizedSlug}`;
+    const now = new Date().toISOString();
+    const selectTicket = db.prepare(
+      `SELECT ticket_id, status, privacy_scope FROM memory_candidates
+        WHERE agent_id = ? AND source_memory_id = ? AND suggested_scope = 'agent_repo'`,
+    );
+    const updateStatus = db.prepare(
+      `UPDATE memory_candidates SET status = 'superseded', updated_at = ?
+        WHERE agent_id = ? AND source_memory_id = ? AND suggested_scope = 'agent_repo'
+          AND status = 'active'`,
+    );
+    const deleteDerivedLinks = db.prepare(
+      `DELETE FROM memory_links
+        WHERE link_type = 'similar_to' AND (from_ticket = ? OR to_ticket = ?)`,
+    );
+    const insertSupersedes = db.prepare(`
+      INSERT OR REPLACE INTO memory_links (
+        link_id, from_ticket, to_ticket, link_type, score, reason, created_at
+      ) VALUES (?, ?, ?, 'supersedes', 1.0, 'desktop memory consolidation', ?)
+    `);
+    const successor = successorSourceMemoryId?.trim()
+      ? selectTicket.get(agentId, successorSourceMemoryId.trim()) as {
+          ticket_id: string;
+          status: string;
+          privacy_scope: string | null;
+        } | undefined
+      : undefined;
+    const reconcile = db.transaction(() => {
+      for (const sourceId of sourceIds) {
+        const target = selectTicket.get(agentId, sourceId) as {
+          ticket_id: string;
+          status: string;
+          privacy_scope: string | null;
+        } | undefined;
+        if (!target || target.ticket_id === successor?.ticket_id) continue;
+        updateStatus.run(now, agentId, sourceId);
+        deleteDerivedLinks.run(target.ticket_id, target.ticket_id);
+        if (
+          successor?.status === "active"
+          && successor.privacy_scope === target.privacy_scope
+        ) {
+          insertSupersedes.run(
+            stableNestHash("memory-link", successor.ticket_id, target.ticket_id, "supersedes").slice(0, 24),
+            successor.ticket_id,
+            target.ticket_id,
+            now,
+          );
+        }
+      }
+    });
+    reconcile();
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { db?.close(); } catch { /* best-effort projection */ }
+  }
+}
+
+/** Resolve exact source-memory -> borrowed-agent projection ownership. */
+export function agentNestExperienceOwnership(
+  sourceMemoryIds: string[],
+): Record<string, string[]> {
+  const sourceIds = [...new Set(sourceMemoryIds.map((id) => id.trim()).filter(Boolean))];
+  const ownership = Object.fromEntries(sourceIds.map((id) => [id, [] as string[]]));
+  if (sourceIds.length === 0) return ownership;
+  const root = path.join(os.homedir(), ".agentlas", "networking", "hub-agents");
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return ownership;
+  }
+  const placeholders = sourceIds.map(() => "?").join(",");
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const slug = normalizedHubAgentSlug(entry.name);
+    if (!slug || slug !== entry.name) continue;
+    const dbPath = path.join(root, entry.name, "memory", "experience.sqlite");
+    let db: Database.Database | null = null;
+    try {
+      const stat = fs.lstatSync(dbPath);
+      if (stat.isSymbolicLink() || !stat.isFile()) continue;
+      db = new Database(dbPath, { readonly: true, fileMustExist: true });
+      const table = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_candidates'",
+      ).get();
+      if (!table) continue;
+      const matches = db.prepare(
+        `SELECT DISTINCT source_memory_id FROM memory_candidates
+          WHERE agent_id = ? AND source_memory_id IN (${placeholders})`,
+      ).all(`hub:${slug}`, ...sourceIds) as Array<{ source_memory_id: string }>;
+      for (const match of matches) ownership[match.source_memory_id]?.push(slug);
+    } catch {
+      // One corrupt/unreadable private cache must not block other agents.
+    } finally {
+      try { db?.close(); } catch { /* best-effort scan */ }
+    }
+  }
+  for (const sourceId of sourceIds) ownership[sourceId].sort();
+  return ownership;
+}
+
+/** Resolve the union of borrowed-agent projections that own source rows. */
+export function findAgentNestExperienceSlugs(sourceMemoryIds: string[]): string[] {
+  const ownership = agentNestExperienceOwnership(sourceMemoryIds);
+  return [...new Set(Object.values(ownership).flat())].sort();
+}
+
+/**
+ * Project a consolidated result back into every exact borrowed-agent nest that
+ * held an absorbed source, then retire those stale rows. Returns the slugs that
+ * were reconciled; a failed replacement write leaves the old projection live.
+ */
+export function reconcileAgentNestExperienceConsolidation(
+  absorbedSourceMemoryIds: string[],
+  consolidatedItems: AgentNestExperienceItem[],
+): string[] {
+  const sourceIds = [...new Set(absorbedSourceMemoryIds.map((id) => id.trim()).filter(Boolean))];
+  if (sourceIds.length === 0 || consolidatedItems.length === 0) return [];
+  const ownership = agentNestExperienceOwnership(sourceIds);
+  const signatures = sourceIds.map((sourceId) => JSON.stringify(ownership[sourceId] ?? []));
+  // Never combine memories owned by different borrowed agents. The caller must
+  // partition consolidation by identical owner set before generating a rule.
+  if (signatures.some((signature) => signature !== signatures[0])) return [];
+  const slugs = ownership[sourceIds[0]] ?? [];
+  const reconciled: string[] = [];
+  for (const slug of slugs) {
+    if (!appendAgentNestExperienceMemory(slug, consolidatedItems)) continue;
+    if (!supersedeAgentNestExperienceMemory(
+      slug,
+      sourceIds,
+      consolidatedItems.length === 1 ? consolidatedItems[0].id : undefined,
+    )) continue;
+    reconciled.push(slug);
+  }
+  return reconciled;
+}
+
+/** Mirror an explicit reviewed Experience governance edge into matching nests. */
+export function recordAgentNestExperienceGovernanceRelation(input: {
+  fromSourceMemoryId: string;
+  toSourceMemoryId: string;
+  relationType: "supersedes" | "contradicts";
+  reason: string;
+}): string[] {
+  const normalized = normalizeAgentNestGovernanceRelation(input);
+  if (!normalized) return [];
+  const ownership = agentNestExperienceOwnership([
+    normalized.fromSourceMemoryId,
+    normalized.toSourceMemoryId,
+  ]);
+  const toOwners = new Set(ownership[normalized.toSourceMemoryId] ?? []);
+  const sharedSlugs = (ownership[normalized.fromSourceMemoryId] ?? [])
+    .filter((slug) => toOwners.has(slug));
+  const written: string[] = [];
+  for (const slug of sharedSlugs) {
+    const dbPath = path.join(
+      os.homedir(),
+      ".agentlas",
+      "networking",
+      "hub-agents",
+      slug,
+      "memory",
+      "experience.sqlite",
+    );
+    let db: Database.Database | null = null;
+    try {
+      const stat = fs.lstatSync(dbPath);
+      if (stat.isSymbolicLink() || !stat.isFile()) continue;
+      db = new Database(dbPath);
+      db.pragma("foreign_keys = ON");
+      const agentId = `hub:${slug}`;
+      if (writeAgentNestExperienceGovernanceRelation(db, agentId, normalized)) {
+        written.push(slug);
+      }
+    } catch {
+      // The Desktop governance ledger remains authoritative; a broken cache is
+      // rebuildable and must not make the reviewed local decision fail.
+    } finally {
+      try { db?.close(); } catch { /* best-effort bridge */ }
+    }
+  }
+  return written;
 }
 
 /** @deprecated Runtime recall uses appendAgentNestExperienceMemory. */

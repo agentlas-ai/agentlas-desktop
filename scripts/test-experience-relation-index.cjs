@@ -3,12 +3,15 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const Database = require("better-sqlite3");
 
 process.env.AGENTLAS_E2E = "1";
 const { app } = require("electron");
 
 async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-experience-relations-"));
+  process.env.HOME = temp;
+  process.env.USERPROFILE = temp;
   app.setPath("userData", temp);
   await app.whenReady();
   const dbModule = require("../dist/electron/store/db.js");
@@ -16,6 +19,8 @@ async function main() {
   const experience = require("../dist/electron/experience/store.js");
   const relations = require("../dist/electron/experience/relation-index.js");
   const context = require("../dist/electron/experience/context.js");
+  const embedding = require("../dist/electron/memory/local-embedding.js");
+  const projectFiles = require("../dist/electron/memory/project-files.js");
   const routes = require("../dist/electron/agents/routes.js");
   dbModule.initStore();
   const db = dbModule.getDb();
@@ -91,7 +96,7 @@ async function main() {
         },
         publicSafe: false,
       });
-      return { candidate, receipt };
+      return { row, candidate, receipt };
     }
 
     const first = promote(
@@ -104,6 +109,32 @@ async function main() {
       [browserTask, socialTask],
       "medium",
     );
+    const nestItems = [
+      {
+        id: first.row.id,
+        kind: first.row.kind,
+        content: first.row.content,
+        confidence: first.row.confidence,
+        sensitivity: first.row.sensitivity,
+        updatedAt: first.row.createdAt,
+      },
+      {
+        id: second.row.id,
+        kind: second.row.kind,
+        content: second.row.content,
+        confidence: second.row.confidence,
+        sensitivity: second.row.sensitivity,
+        updatedAt: second.row.createdAt,
+      },
+    ];
+    assert.equal(projectFiles.appendAgentNestExperienceMemory(
+      "borrowed_relation_agent",
+      nestItems,
+    ), true);
+    const nestDbPath = path.join(
+      temp,
+      ".agentlas/networking/hub-agents/borrowed-relation-agent/memory/experience.sqlite",
+    );
     const contradictionId = relations.recordExperienceGovernanceRelation({
       fromCandidateId: second.candidate.id,
       toCandidateId: first.candidate.id,
@@ -111,6 +142,30 @@ async function main() {
       reason: "Owner review found mutually exclusive retry conditions.",
     });
     assert.match(contradictionId, /^experience-governance-relation:/);
+    let nestDb = new Database(nestDbPath, { readonly: true });
+    assert.equal(nestDb.prepare(
+      "SELECT count(*) AS count FROM memory_links WHERE link_type = 'contradicts'",
+    ).get().count, 1, "reviewed contradiction must bridge into next-borrow Core memory");
+    nestDb.close();
+
+    // Regression: governance is authoritative Desktop state, so a relation
+    // recorded before a particular nest exists must appear when that nest is
+    // projected later instead of depending on the one-time bridge call.
+    const lateNestRoot = path.join(
+      temp,
+      ".agentlas/networking/hub-agents/late-relation-agent",
+    );
+    const lateNestDbPath = path.join(lateNestRoot, "memory/experience.sqlite");
+    assert.equal(fs.existsSync(lateNestDbPath), false);
+    assert.equal(projectFiles.appendAgentNestExperienceMemory(
+      "late_relation_agent",
+      nestItems,
+    ), true);
+    let lateNestDb = new Database(lateNestDbPath, { readonly: true });
+    assert.equal(lateNestDb.prepare(
+      "SELECT count(*) AS count FROM memory_links WHERE link_type = 'contradicts'",
+    ).get().count, 1, "a later nest build must replay the reviewed contradiction");
+    lateNestDb.close();
 
     let status = relations.getExperienceRelationIndexStatus();
     assert.equal(status.stale, false);
@@ -164,6 +219,28 @@ async function main() {
       reason: "Owner review replaced the earlier browser publishing procedure.",
     });
     assert.match(supersedesId, /^experience-governance-relation:/);
+    nestDb = new Database(nestDbPath, { readonly: true });
+    assert.equal(nestDb.prepare(
+      "SELECT count(*) AS count FROM memory_links WHERE link_type = 'supersedes'",
+    ).get().count, 1, "reviewed supersession must bridge into next-borrow Core memory");
+    nestDb.close();
+
+    // Deleting a rebuildable nest must not delete governance. Re-projection
+    // restores every applicable authoritative edge after both endpoints land.
+    fs.rmSync(lateNestRoot, { recursive: true, force: true });
+    assert.equal(fs.existsSync(lateNestDbPath), false);
+    assert.equal(projectFiles.appendAgentNestExperienceMemory(
+      "late_relation_agent",
+      nestItems,
+    ), true);
+    lateNestDb = new Database(lateNestDbPath, { readonly: true });
+    const rebuiltGovernance = Object.fromEntries(lateNestDb.prepare(
+      `SELECT link_type, count(*) AS count FROM memory_links
+        WHERE link_type IN ('contradicts', 'supersedes') GROUP BY link_type`,
+    ).all().map((row) => [row.link_type, row.count]));
+    assert.equal(rebuiltGovernance.contradicts, 1);
+    assert.equal(rebuiltGovernance.supersedes, 1);
+    lateNestDb.close();
     const afterSupersedes = context.buildExperienceContext({
       agentId: "agent-rel",
       projectPath,
@@ -191,6 +268,72 @@ async function main() {
       }).some((item) => item.id === first.candidate.id),
       false,
       "superseded targets must be filtered before semantic ranking",
+    );
+
+    // Regression: vector/RRF ranking must see an older relevant candidate even
+    // after more than 200 newer, irrelevant reviewed rows exist.
+    const olderTargetId = "older-relevant-beyond-200";
+    const insertProjection = db.prepare(`
+      INSERT INTO experience_candidates (
+        id, pack_id, agent_id, project_scope_key, environment_key, source_memory_id,
+        summary, task_terms_json, sensitivity, confidence, status, outcome_status,
+        public_safe, auto_managed, embedding_model, embedding_adapter,
+        embedding_model_sha256, embedding_content_hash, embedding_dimensions,
+        embedding_json, created_at, updated_at, promoted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', 'internal', 'high', 'promoted', 'attested',
+        0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertRankFixture = (id, summary, timestamp) => {
+      const vector = embedding.autoLocalEmbedding(summary);
+      insertProjection.run(
+        id,
+        pack.id,
+        "agent-rel",
+        scopeKey.project_scope_key,
+        scopeKey.environment_key,
+        `memory-${id}`,
+        summary,
+        vector.model,
+        vector.adapter,
+        vector.modelSha256,
+        vector.contentHash,
+        vector.dimensions,
+        JSON.stringify(vector.vector),
+        timestamp,
+        timestamp,
+        timestamp,
+      );
+    };
+    insertRankFixture(olderTargetId, "legacy zebra quantum release sentinel", "2000-01-01T00:00:00.000Z");
+    for (let index = 0; index < 205; index += 1) {
+      insertRankFixture(
+        `newer-irrelevant-${index}`,
+        `cafeteria menu calendar unrelated recent experience ${index}`,
+        `2100-01-01T00:${String(index % 60).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+      );
+    }
+    const beyondWindow = context.buildExperienceContext({
+      agentId: "agent-rel",
+      projectPath,
+      environment,
+      basePackageHash: baseHash,
+      task: "legacy zebra quantum release sentinel",
+    });
+    assert.ok(
+      beyondWindow.selectedCandidateIds.includes(olderTargetId),
+      "newer irrelevant Experience rows must not hide an older exact semantic match before ranking",
+    );
+    const experienceStoreSource = fs.readFileSync(
+      path.join(__dirname, "../electron/experience/store.ts"),
+      "utf8",
+    );
+    const projectionQuerySource = experienceStoreSource.match(
+      /export function listPromotedExperienceProjection[\s\S]*?return rows\.map/,
+    )?.[0] ?? "";
+    assert.doesNotMatch(
+      projectionQuerySource,
+      /ORDER BY c\.updated_at DESC LIMIT\s+\d+/,
+      "Experience retrieval must not apply a recency cap before semantic ranking",
     );
 
     const lineageFile = path.join(projectPath, ".agentlas", "experience-relations.jsonl");

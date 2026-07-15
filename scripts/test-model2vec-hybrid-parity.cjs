@@ -110,6 +110,18 @@ assert.equal(
   false,
   "Model2Vec must not reuse the hash-96 0.08 relevance floor",
 );
+const koreanUnrelatedOnly = rankHybridLocal(KOREAN, [
+  {
+    id: "unrelated-only",
+    text: "분기별 세금 감가상각 계산",
+    embedding: autoLocalEmbedding("분기별 세금 감가상각 계산").vector,
+  },
+]);
+assert.equal(
+  koreanUnrelatedOnly[0]?.semanticEligible,
+  false,
+  "a lone CJK false-positive must not pass merely because it is its own best vector",
+);
 
 const persisted = autoLocalEmbedding(ENGLISH);
 const persistedJson = JSON.stringify(persisted.vector);

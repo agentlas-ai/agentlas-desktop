@@ -10,6 +10,17 @@ async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-memory-hybrid-"));
   process.env.AGENTLAS_STORE_PATH = path.join(temp, "agentlas.sqlite");
   process.env.AGENTLAS_E2E = "1";
+  const modelAsset = path.resolve(
+    __dirname,
+    "..",
+    "..",
+    "Agentlas-OS",
+    "assets",
+    "model2vec",
+    "potion-base-8M-int8",
+  );
+  assert.ok(fs.existsSync(path.join(modelAsset, "manifest.json")), "hybrid retrieval requires the bundled Model2Vec asset");
+  process.env.AGENTLAS_MODEL2VEC_PATH = modelAsset;
   app.setPath("userData", path.join(temp, "user-data"));
   await app.whenReady();
   const store = require("../dist/electron/store/db.js");
@@ -65,12 +76,40 @@ async function main() {
     assert.ok(selectedLines.length > 0 && selectedLines.length <= 12, "over-budget recall must use bounded vector/RRF top-k");
     assert.ok(Buffer.byteLength(selectedLines.join("\n"), "utf8") / 3 <= 800);
 
+    // Regression: ranking must see beyond an arbitrary newest-200 window.
+    // The exact older target is inserted before 205 irrelevant, newer rows.
+    memory.insertMemoryEntry({
+      scope: "agent_repo",
+      kind: "procedure",
+      content: "legacy zebra quantum release sentinel",
+      agentId: "agent-window",
+      confidence: "high",
+    });
+    for (let index = 0; index < 205; index += 1) {
+      memory.insertMemoryEntry({
+        scope: "agent_repo",
+        kind: "procedure",
+        content: `cafeteria menu calendar unrelated recent row ${index}`,
+        agentId: "agent-window",
+        confidence: "high",
+      });
+    }
+    const olderRelevant = context.buildMemoryContext(null, "agent-window", {
+      taskPrompt: "legacy zebra quantum release sentinel",
+    });
+    assert.match(
+      olderRelevant,
+      /legacy zebra quantum release sentinel/,
+      "newer irrelevant rows must not hide an older exact semantic match before ranking",
+    );
+
     const stored = store.getDb().prepare(
       `SELECT COUNT(*) AS count FROM memory_entries
-        WHERE embedding_model = 'local_hashing' AND embedding_dimensions = 96
-          AND json_array_length(embedding_json) = 96`,
+        WHERE embedding_model = 'model2vec_potion_base_8m_int8_hybrid'
+          AND embedding_dimensions = 352
+          AND json_array_length(embedding_json) = 352`,
     ).get().count;
-    assert.equal(stored, 55, "every write must persist its local embedding");
+    assert.equal(stored, 261, "every write must persist its local Model2Vec hybrid embedding");
 
     const clientSource = fs.readFileSync(path.join(__dirname, "../electron/mcp/client.ts"), "utf8");
     assert.match(
@@ -89,6 +128,7 @@ async function main() {
       allFitItems: 14,
       topKItems: selectedLines.length,
       storedEmbeddings: stored,
+      olderRelevantBeyond200: true,
     }, null, 2));
   } finally {
     store.getDb().close();

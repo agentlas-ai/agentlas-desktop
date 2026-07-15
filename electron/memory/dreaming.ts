@@ -18,7 +18,12 @@ import {
   listAgentIdsWithLiveMemory,
   listGlobalMemoryForAgent,
   supersedeMemoryEntries,
+  type MemoryEntry,
 } from "./store";
+import {
+  agentNestExperienceOwnership,
+  reconcileAgentNestExperienceConsolidation,
+} from "./project-files";
 import { getAgentById } from "../mcp/registry";
 
 const ENABLED_KEY = "memory_dreaming_enabled";
@@ -45,6 +50,24 @@ export interface DreamingStatus {
 
 let running = false;
 let timer: NodeJS.Timeout | null = null;
+
+export function strictestMemorySensitivity(
+  entries: Array<Pick<MemoryEntry, "sensitivity">>,
+): MemoryEntry["sensitivity"] {
+  const rank: Record<MemoryEntry["sensitivity"], number> = {
+    public: 0,
+    internal: 1,
+    private: 2,
+    confidential: 3,
+    secret: 4,
+  };
+  return entries.reduce<MemoryEntry["sensitivity"]>(
+    (strictest, entry) => rank[entry.sensitivity] > rank[strictest]
+      ? entry.sensitivity
+      : strictest,
+    "public",
+  );
+}
 
 export function getDreamingStatus(): DreamingStatus {
   return { enabled: getDreamingEnabled(), lastRunAt: getMeta(LAST_AT_KEY) || null, running };
@@ -110,10 +133,26 @@ async function dreamOnce(): Promise<void> {
     if (idleSeconds() < 30) return;
     const agent = getAgentById(target.agentId);
     if (!agent) continue;
-    const entries = listGlobalMemoryForAgent(target.agentId, 60).filter(
+    const allEntries = listGlobalMemoryForAgent(target.agentId, 60).filter(
       (e) => e.scope === "agent_repo" && e.agentId === target.agentId,
     );
-    if (entries.length < 8) continue;
+    if (allEntries.length < 8) continue;
+    // A primary installed agent may have invoked several borrowed Hub agents.
+    // Consolidate only one group whose rows have the identical projection-owner
+    // set; otherwise a rule derived from agent B could leak into agent A's nest.
+    const ownership = agentNestExperienceOwnership(allEntries.map((entry) => entry.id));
+    const ownerGroups = new Map<string, MemoryEntry[]>();
+    for (const entry of allEntries) {
+      const key = JSON.stringify(ownership[entry.id] ?? []);
+      const group = ownerGroups.get(key) ?? [];
+      group.push(entry);
+      ownerGroups.set(key, group);
+    }
+    const entries = [...ownerGroups.entries()]
+      .sort((left, right) => right[1].length - left[1].length || left[0].localeCompare(right[0]))
+      .map(([, group]) => group)
+      .find((group) => group.length >= 8);
+    if (!entries) continue;
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
@@ -154,17 +193,33 @@ async function dreamOnce(): Promise<void> {
         .map((n) => Number(n))
         .filter((n) => Number.isInteger(n) && n >= 1 && n <= entries.length);
       if (rules.length === 0 || absorbed.length === 0) continue;
-      for (const rule of rules.slice(0, 5)) {
+      const absorbedEntries = absorbed.map((n) => entries[n - 1]);
+      const strictestSensitivity = strictestMemorySensitivity(absorbedEntries);
+      const consolidated = rules.slice(0, 5).map((rule) =>
         insertMemoryEntry({
           scope: "agent_repo",
           kind: "procedure",
           content: rule.trim(),
           agentId: target.agentId,
           confidence: "medium",
+          sensitivity: strictestSensitivity,
           evidence: [`dreaming: consolidated ${absorbed.length}/${entries.length} entries`],
-        });
-      }
-      supersedeMemoryEntries(absorbed.map((n) => entries[n - 1].id));
+        }));
+      const absorbedIds = absorbedEntries.map((entry) => entry.id);
+      supersedeMemoryEntries(absorbedIds);
+      // Keep the cross-project projection aligned with Desktop ownership. The
+      // single-rule case has an unambiguous structural successor; multi-rule
+      // consolidation retires stale sources without manufacturing pairwise
+      // supersedes edges the LLM did not provide.
+      reconcileAgentNestExperienceConsolidation(absorbedIds, consolidated.map((entry) => ({
+        id: entry.id,
+        kind: entry.kind,
+        content: entry.content,
+        confidence: entry.confidence,
+        sensitivity: entry.sensitivity,
+        tags: entry.requestContext?.triggerTerms,
+        updatedAt: entry.createdAt,
+      })));
       console.log(`[dreaming] agent ${agent.slug}: ${rules.length} rules from ${absorbed.length} entries`);
     } catch (err) {
       // abort(사용자 복귀/타임아웃) 포함 — 조용히 다음 기회로.
