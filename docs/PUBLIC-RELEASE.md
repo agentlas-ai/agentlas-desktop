@@ -66,7 +66,7 @@ The release scripts automatically read local certificate defaults from
 
 ## 3. Local End-To-End Release
 
-For v0.8.31, verify the local hybrid-memory contract before creating a tag. The
+For v0.8.32, verify the local hybrid-memory contract before creating a tag. The
 three focused tests exercise the bundled Model2Vec asset, Desktop/Core vector
 parity, per-turn adaptive retrieval, per-agent nest projection, and the real
 Core query path:
@@ -132,8 +132,8 @@ commit; never bypass the moved-tag check or package an ambient checkout.
    ```bash
    # after version, runtime pins, focused tests, and release notes agree:
    git push origin main
-   git tag -a v0.8.31 -m "Agentlas Desktop v0.8.31"
-   git push origin v0.8.31
+   git tag -a v0.8.32 -m "Agentlas Desktop v0.8.32"
+   git push origin v0.8.32
    ```
 
    The workflows enforce tag/checkout identity but do not prove that the tagged
@@ -226,8 +226,8 @@ Then set the remaining secrets and run:
 ```bash
 gh workflow run release-signed-mac.yml \
   -R agentlas-ai/agentlas-desktop \
-  -f version=0.8.31 \
-  -f tag=v0.8.31 \
+  -f version=0.8.32 \
+  -f tag=v0.8.32 \
   -f draft=false \
   -f apply_web_env=true
 ```

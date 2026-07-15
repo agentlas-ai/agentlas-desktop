@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.31 — 2026-07-15
+## 0.8.32 — 2026-07-15
 
 ### Changed
 
@@ -40,6 +40,10 @@
   `738b78f40b5efc9b2dd4cc66c94a3805e70c79f5`. The hotfix preserves verified
   Model2Vec bytes on Windows, installs the model during self-update, and repairs
   detected-host memory hooks.
+- **The Linux release migration fixture now mirrors the complete v55
+  relation-edge shape.** The v65 `similar_to` schema rebuild is therefore
+  verified against the real legacy column contract rather than an invalid
+  two-column stand-in.
 
 ### Boundaries and edge cases
 

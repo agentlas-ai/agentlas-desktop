@@ -110,7 +110,7 @@ Each durable memory entry can also carry a compact `request_context` capsule:
 summary for recall, not the raw user prompt. It lets a later request from another
 folder find the relevant memory by the situation that created it.
 
-### Governed local hybrid recall (v0.8.31)
+### Governed local hybrid recall (v0.8.32)
 
 Desktop uses one local embedding implementation for both curated Memory and
 reviewed Experience. Packaged builds require the pinned Agentlas OS
@@ -131,7 +131,7 @@ The asset is MIT-licensed, read in-process, and marked `networkRequired: false`.
 There is no server embedding request, API key, or operator-paid per-user
 embedding call. A missing or invalid verified asset explicitly degrades to the
 96-dimensional hashing adapter so local recall remains available; packaged
-v0.8.31 treats that as a degraded fallback, not the intended quality path.
+v0.8.32 treats that as a degraded fallback, not the intended quality path.
 
 Retrieval keeps evidence channels independently auditable:
 

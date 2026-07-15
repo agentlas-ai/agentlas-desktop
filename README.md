@@ -69,7 +69,7 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
-- **2026-07-15 · v0.8.31 — governed local Model2Vec experience memory** —
+- **2026-07-15 · v0.8.32 — governed local Model2Vec experience memory** —
   Every ordinary Desktop invocation now sends the current effective task through
   automatic, owner-scoped Memory recall and eligible reviewed Experience recall.
   Desktop stores each new row with the verified local `potion-base-8M` int8 +
