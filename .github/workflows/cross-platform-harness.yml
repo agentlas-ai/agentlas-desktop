@@ -32,6 +32,7 @@ on:
       - "scripts/test-model2vec-hybrid-parity.cjs"
       - "scripts/test-memory-hybrid-retrieval.cjs"
       - "scripts/test-curator-nest-core-query.cjs"
+      - "scripts/test-v56-experience-cloud-migration.cjs"
       - "scripts/test-codex-model-discovery.cjs"
       - "scripts/test-workload-routing.cjs"
       - "scripts/test-build-workload-routing.cjs"
@@ -78,6 +79,7 @@ on:
       - "scripts/test-model2vec-hybrid-parity.cjs"
       - "scripts/test-memory-hybrid-retrieval.cjs"
       - "scripts/test-curator-nest-core-query.cjs"
+      - "scripts/test-v56-experience-cloud-migration.cjs"
       - "scripts/test-codex-model-discovery.cjs"
       - "scripts/test-workload-routing.cjs"
       - "scripts/test-build-workload-routing.cjs"
@@ -152,6 +154,7 @@ jobs:
           node scripts/test-model2vec-hybrid-parity.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-memory-hybrid-retrieval.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-curator-nest-core-query.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-v56-experience-cloud-migration.cjs
           node scripts/test-codex-model-discovery.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-workload-routing.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-build-workload-routing.cjs
@@ -172,6 +175,7 @@ jobs:
           node scripts/test-model2vec-hybrid-parity.cjs
           npx --no-install electron scripts/test-memory-hybrid-retrieval.cjs
           npx --no-install electron scripts/test-curator-nest-core-query.cjs
+          npx --no-install electron scripts/test-v56-experience-cloud-migration.cjs
           node scripts/test-codex-model-discovery.cjs
           npx --no-install electron scripts/test-workload-routing.cjs
           npx --no-install electron scripts/test-build-workload-routing.cjs
