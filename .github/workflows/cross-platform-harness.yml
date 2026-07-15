@@ -15,6 +15,8 @@ on:
       - "electron/memory/store.ts"
       - "electron/experience/**"
       - "electron/mcp/client.ts"
+      - "electron/mcp/borrowed-task-force.ts"
+      - "electron/mcp/workforce-orchestrator.ts"
       - "electron/mcp/swarm-engine.ts"
       - "electron/mcp/swarm-run.ts"
       - "electron/mcp-tools/**"
@@ -41,6 +43,8 @@ on:
       - "scripts/test-v56-experience-cloud-migration.cjs"
       - "scripts/test-codex-model-discovery.cjs"
       - "scripts/test-workload-routing.cjs"
+      - "scripts/test-workforce-orchestrator.cjs"
+      - "scripts/test-workforce-execution-receipt.cjs"
       - "scripts/test-build-workload-routing.cjs"
       - "scripts/test-stormbreaker-core-harness.cjs"
       - "scripts/test-stormbreaker-swarm-contract.cjs"
@@ -114,6 +118,8 @@ on:
       - "electron/memory/store.ts"
       - "electron/experience/**"
       - "electron/mcp/client.ts"
+      - "electron/mcp/borrowed-task-force.ts"
+      - "electron/mcp/workforce-orchestrator.ts"
       - "electron/mcp/swarm-engine.ts"
       - "electron/mcp/swarm-run.ts"
       - "electron/mcp-tools/**"
@@ -140,6 +146,8 @@ on:
       - "scripts/test-v56-experience-cloud-migration.cjs"
       - "scripts/test-codex-model-discovery.cjs"
       - "scripts/test-workload-routing.cjs"
+      - "scripts/test-workforce-orchestrator.cjs"
+      - "scripts/test-workforce-execution-receipt.cjs"
       - "scripts/test-build-workload-routing.cjs"
       - "scripts/test-stormbreaker-core-harness.cjs"
       - "scripts/test-stormbreaker-swarm-contract.cjs"
@@ -218,7 +226,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: agentlas-ai/Agentlas-OS
-          ref: c86aa86ccb3424e67be0b45ec253cc408af99df7
+          ref: 3ff22e87c328b3ea505dd966a536f3ab6ccab09a
           path: agentlas-desktop/Hephaestus
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -229,7 +237,7 @@ jobs:
       - name: Verify Core source pin
         working-directory: agentlas-desktop/Hephaestus
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "c86aa86ccb3424e67be0b45ec253cc408af99df7"
+        run: test "$(git rev-parse HEAD)" = "3ff22e87c328b3ea505dd966a536f3ab6ccab09a"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -242,6 +250,15 @@ jobs:
       - name: Compile Desktop main process
         working-directory: agentlas-desktop
         run: npm run build:electron
+      - name: Verify Agent Workforce Ontology on Linux
+        if: runner.os == 'Linux'
+        working-directory: agentlas-desktop
+        run: xvfb-run -a npm run test:workforce-orchestrator
+      - name: Verify Agent Workforce Ontology on macOS and Windows
+        if: runner.os != 'Linux'
+        working-directory: agentlas-desktop
+        shell: bash
+        run: npm run test:workforce-orchestrator
       - name: Verify installed Core on Linux
         if: runner.os == 'Linux'
         working-directory: agentlas-desktop

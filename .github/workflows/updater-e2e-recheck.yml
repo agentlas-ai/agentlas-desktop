@@ -9,7 +9,7 @@ on:
       target_version:
         description: "Stable target version embedded in those artifacts"
         required: true
-        default: "0.8.37"
+        default: "0.8.38"
 
 permissions:
   contents: read

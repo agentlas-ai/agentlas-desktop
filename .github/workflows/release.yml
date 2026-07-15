@@ -44,8 +44,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      HEPHAESTUS_REF: v1.1.37
-      HEPHAESTUS_COMMIT: c86aa86ccb3424e67be0b45ec253cc408af99df7
+      HEPHAESTUS_REF: v1.1.38
+      HEPHAESTUS_COMMIT: 3ff22e87c328b3ea505dd966a536f3ab6ccab09a
 
     steps:
       - uses: actions/checkout@v4
@@ -143,6 +143,7 @@ jobs:
             npm run test:runtime-resume-contract
             npm run test:cli-image-attachments
             npm run test:owned-agent-runtime-prompts
+            npm run test:workforce-orchestrator
             npm run test:opencrab-core
             npm run test:opencrab-product
             npm run test:opencrab-recovery-scrub
@@ -163,8 +164,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      HEPHAESTUS_REF: v1.1.37
-      HEPHAESTUS_COMMIT: c86aa86ccb3424e67be0b45ec253cc408af99df7
+      HEPHAESTUS_REF: v1.1.38
+      HEPHAESTUS_COMMIT: 3ff22e87c328b3ea505dd966a536f3ab6ccab09a
 
     steps:
       - uses: actions/checkout@v4
@@ -307,6 +308,7 @@ jobs:
             npm run test:mobile-read-boundary
             npm run test:mobile-execution-boundary
             npm run test:borrowed-task-force
+            npm run test:workforce-orchestrator
             npm run test:mcp-auto-select
             npm run test:mcp-secret-isolation
             # Experience Ontology: real Memory attribution, legacy recovery,

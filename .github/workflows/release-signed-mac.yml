@@ -52,8 +52,8 @@ jobs:
       AGENTLAS_PUBLIC_RELEASE: "1"
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.37
-      HEPHAESTUS_COMMIT: c86aa86ccb3424e67be0b45ec253cc408af99df7
+      HEPHAESTUS_REF: v1.1.38
+      HEPHAESTUS_COMMIT: 3ff22e87c328b3ea505dd966a536f3ab6ccab09a
 
     steps:
       - uses: actions/checkout@v4
@@ -203,6 +203,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Verify Agent Workforce Ontology orchestration
+        run: npm run test:workforce-orchestrator
+
       - name: Verify embedded Stormbreaker harness
         run: |
           npm run test:stormbreaker-core:embedded
@@ -344,8 +347,8 @@ jobs:
       AGENTLAS_PUBLIC_RELEASE: "1"
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.37
-      HEPHAESTUS_COMMIT: c86aa86ccb3424e67be0b45ec253cc408af99df7
+      HEPHAESTUS_REF: v1.1.38
+      HEPHAESTUS_COMMIT: 3ff22e87c328b3ea505dd966a536f3ab6ccab09a
 
     steps:
       - uses: actions/checkout@v4
@@ -499,8 +502,8 @@ jobs:
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.37
-      HEPHAESTUS_COMMIT: c86aa86ccb3424e67be0b45ec253cc408af99df7
+      HEPHAESTUS_REF: v1.1.38
+      HEPHAESTUS_COMMIT: 3ff22e87c328b3ea505dd966a536f3ab6ccab09a
 
     steps:
       - uses: actions/checkout@v4

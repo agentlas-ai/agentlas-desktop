@@ -53,10 +53,12 @@
   expected an unpinned automation to execute with no detectable runtime. No
   public release, update feed, signed artifact, or production API metadata was
   written. v0.8.39 carries the same product repair with the corrected gate.
+
+### Verification
+
 - Agentlas OS v1.1.37 remains pinned at immutable commit
   c86aa86ccb3424e67be0b45ec253cc408af99df7. This source does not prove a public
-  installer; native updater, signing, and served-byte gates remain
-  authoritative.
+  installer; native updater, signing, and served-byte gates remain authoritative.
 
 ## 0.8.38 — 2026-07-15
 

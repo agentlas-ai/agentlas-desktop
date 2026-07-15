@@ -27,6 +27,7 @@ const workOrder = {
   workOrderId: "work-order:test-backend",
   taskBrief: "Design and verify a payment API without local or customer data.",
   redacted: true,
+  ontologyVersion: "awo:2026-07-15.1",
   roleSlots: [{
     slotId: "slot:backend",
     title: "Backend payment engineer",
@@ -34,11 +35,11 @@ const workOrder = {
     cardinality: 1,
     criticality: "required",
     requiredCommunities: ["community:software-engineering"],
-    optionalCommunities: ["community:payments"],
+    optionalCommunities: ["community:payments-engineering"],
     excludedCommunities: ["community:travel"],
     requiredRoles: ["role:backend-engineer"],
     requiredSkills: ["skill:api-design"],
-    optionalSkills: ["skill:payment-integration"],
+    optionalSkills: ["skill:billing-integration"],
     requiredKnowledge: [],
     requiredToolCapabilities: ["tool:postgresql"],
     consumes: ["artifact:requirements"],
@@ -65,7 +66,7 @@ const candidateSet = {
   schemaVersion: "agentlas.workforce-candidate-set.v1",
   selectionSessionId: "selection:test-backend",
   workOrderId: workOrder.workOrderId,
-  ontologyVersion: "awo:1.0.0",
+  ontologyVersion: "awo:2026-07-15.1",
   candidateSetDigest: hash("a"),
   decisionOwner: "host_llm",
   historyInfluence: "none",
@@ -272,6 +273,10 @@ function fenced(heading, value) {
     "workforce.prepare_execution",
   ]);
   assert.equal(leaderTurns.length, 2, "the active host LLM must author work order and selection");
+  assert.match(leaderTurns[0].systemPrompt, /awo:2026-07-15\.1/);
+  assert.match(leaderTurns[0].systemPrompt, /role:payments-engineer/);
+  assert.match(leaderTurns[0].systemPrompt, /role:quality-engineer/);
+  assert.match(leaderTurns[0].systemPrompt, /community:payments-engineering/);
   assert.match(toolCalls[0].args.workOrder.workOrderId, /^work-order:/);
   assert.equal(searchedCandidateSet.workOrderId, toolCalls[0].args.workOrder.workOrderId);
   assert.equal(toolCalls[2].args.validationReceipt.selectionReceiptId, validation.selectionReceiptId);
@@ -286,6 +291,11 @@ function fenced(heading, value) {
   assert.equal(result.receipt.historyInfluence, "none");
   assert.deepEqual(result.receipt.substitutions, []);
   assert.ok(events.some((event) => event.tool?.name === "workforce.search_candidates"));
+
+  assert.throws(
+    () => validateWorkOrder({ ...workOrder, ontologyVersion: "awo:stale" }),
+    /must use ontology/,
+  );
 
   assert.throws(
     () => validateLeaderSelection({

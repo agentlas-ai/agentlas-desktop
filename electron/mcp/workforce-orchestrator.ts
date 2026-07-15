@@ -20,6 +20,14 @@ const ENTITY_KINDS = new Set(["agent", "team", "group"]);
 const EVIDENCE_LEVELS = new Set(["declared", "checked", "demonstrated", "attested"]);
 const WORK_ORDER_HEADING = "## Workforce Work Order";
 const SELECTION_HEADING = "## Workforce Selection";
+const WORKFORCE_ONTOLOGY_VERSION = "awo:2026-07-15.1";
+const WORKFORCE_ONTOLOGY_MENU = [
+  "Controlled communities: community:software-engineering, community:backend-engineering, community:frontend-engineering, community:database-engineering, community:payments-engineering, community:quality-engineering, community:security-engineering, community:data-engineering, community:ai-engineering, community:devops, community:product-design, community:research, community:marketing, community:finance, community:corporate-development, community:insurance, community:insurance-actuarial, community:insurance-claims, community:insurance-underwriting, community:human-resources, community:information-technology, community:legal, community:travel, community:operations, community:agent-systems.",
+  "Controlled roles: role:software-architect, role:backend-engineer, role:frontend-engineer, role:database-engineer, role:payments-engineer, role:quality-engineer, role:security-engineer, role:ontology-architect, role:agent-runtime-engineer, role:researcher, role:ma-diligence-lead, role:insurance-actuary, role:claims-diligence-specialist, role:underwriting-diligence-specialist, role:travel-planner.",
+  "Canonical skills: skill:software-architecture, skill:api-design, skill:server-implementation, skill:frontend-implementation, skill:data-modeling, skill:database-querying, skill:billing-integration, skill:transaction-integrity, skill:test-design, skill:verification, skill:security-review, skill:ontology-modeling, skill:knowledge-graph-design, skill:multi-agent-orchestration, skill:runtime-integration, skill:evidence-synthesis, skill:deal-diligence, skill:valuation, skill:actuarial-reserving, skill:solvency-analysis, skill:claims-liability-assessment, skill:underwriting-portfolio-analysis, skill:travel-planning.",
+  "Canonical tool capabilities: tool:file-system, tool:file-read, tool:file-write, tool:shell, tool:web-search, tool:browser, tool:mongodb, tool:database, tool:github, tool:payments.",
+  "Use artifact:<kind> for consumes, produces and edge artifactKinds. If no controlled role precisely applies, leave requiredRoles empty and express the job through a controlled community, canonical skills, task text and optional constraints; never invent a near-synonym role ID.",
+].join("\n");
 const FORBIDDEN_FIT_FIELDS = new Set([
   "history",
   "performanceHistory",
@@ -288,6 +296,9 @@ export function validateWorkOrder(value: unknown): JsonObject {
   requireId(order.workOrderId, "workOrderId");
   if (!stringValue(order.taskBrief)) throw new Error("Host LLM work order is missing taskBrief.");
   if (order.redacted !== true) throw new Error("Hub workforce work orders must be explicitly redacted.");
+  if (order.ontologyVersion !== WORKFORCE_ONTOLOGY_VERSION) {
+    throw new Error(`Host LLM work order must use ontology ${WORKFORCE_ONTOLOGY_VERSION}.`);
+  }
   const serialized = JSON.stringify(order);
   if (
     /\/(?:Users|Volumes|private\/tmp|tmp)\//i.test(serialized) ||
@@ -713,14 +724,15 @@ function workOrderSystemPrompt(modelId: string, runtimeId: string, benchmarkMode
     "Decompose the user's goal into a small professional task force before any agent search.",
     "This is a semantic HR/job-analysis decision: express roles, skills, knowledge, tool capabilities, artifacts, authority and handoffs.",
     "Do not name or select agents. Do not use popularity, ratings, invocation history, revenue or prior success as fit evidence.",
-    "Use only ontology-style identifiers such as community:software-engineering, role:backend-engineer, skill:api-design, tool:postgresql, artifact:test-report.",
+    `ontologyVersion must be exactly ${WORKFORCE_ONTOLOGY_VERSION}.`,
+    WORKFORCE_ONTOLOGY_MENU,
     "The Hub receives this object, so taskBrief and role tasks must be redacted of local paths, secrets, account data and private memory.",
     benchmarkMode ? "Benchmark mode: create at least two genuinely distinct required role slots so delegation and synthesis are observable." : "",
     `Decision model identity for later selection: ${modelId}`,
     `Decision runtime identity for later selection: ${runtimeId}`,
     `workOrderId must be exactly ${workOrderId}`,
     "Return JSON only after the required heading. Do not add fields outside the contract.",
-    `${WORK_ORDER_HEADING}\n\`\`\`json\n{"schemaVersion":"${WORK_ORDER_SCHEMA}","workOrderId":"${workOrderId}","taskBrief":"<redacted goal>","redacted":true,"roleSlots":[{"slotId":"slot:<id>","title":"<job title>","task":"<bounded responsibility>","cardinality":1,"criticality":"required","requiredCommunities":[],"optionalCommunities":[],"excludedCommunities":[],"requiredRoles":[],"requiredSkills":[],"optionalSkills":[],"requiredKnowledge":[],"requiredToolCapabilities":[],"consumes":[],"produces":[],"requiredAuthorities":[],"forbiddenAuthorities":[],"runtimes":[],"languages":[],"modalities":[],"allowedEntityKinds":["agent","team"]}],"edges":[],"forbiddenCommunities":[],"selectionPolicy":{"minimumCandidatesPerSlot":5,"maximumCandidatesPerSlot":20,"allowHistoryEvidence":false}}\n\`\`\``,
+    `${WORK_ORDER_HEADING}\n\`\`\`json\n{"schemaVersion":"${WORK_ORDER_SCHEMA}","workOrderId":"${workOrderId}","taskBrief":"<redacted goal>","redacted":true,"ontologyVersion":"${WORKFORCE_ONTOLOGY_VERSION}","roleSlots":[{"slotId":"slot:<id>","title":"<job title>","task":"<bounded responsibility>","cardinality":1,"criticality":"required","requiredCommunities":[],"optionalCommunities":[],"excludedCommunities":[],"requiredRoles":[],"requiredSkills":[],"optionalSkills":[],"requiredKnowledge":[],"requiredToolCapabilities":[],"consumes":[],"produces":[],"requiredAuthorities":[],"forbiddenAuthorities":[],"runtimes":[],"languages":[],"modalities":[],"allowedEntityKinds":["agent","team"]}],"edges":[],"forbiddenCommunities":[],"selectionPolicy":{"minimumCandidatesPerSlot":5,"maximumCandidatesPerSlot":20,"allowHistoryEvidence":false}}\n\`\`\``,
   ].join("\n\n");
 }
 
