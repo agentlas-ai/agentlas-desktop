@@ -169,7 +169,7 @@ async function main() {
         taskHint: "Debug API files",
       },
     };
-    curator.curateEvents([{
+    const privateLocationReport = curator.curateEvents([{
       memory_kind: "risk",
       content: "Debug by reading /Users/mason/private/customer@example.com before retrying.",
       suggested_scope: "agent_repo",
@@ -186,18 +186,18 @@ async function main() {
       evidence_refs: [],
     }], intakeContext);
     ontology = experience.getExperienceOntologySummary("agent-worker");
-    assert.equal(ontology.autoIntake.blocked, 1);
+    assert.equal(privateLocationReport.sessionOnly, 1, "machine-specific memory without a project must not persist");
+    assert.equal(ontology.autoIntake.blocked, 0, "session-only memory must never reach Experience intake");
     assert.equal(ontology.autoIntake.skipped, 1);
     assert.equal(ontology.tasteDraftCount, 1);
     assert.equal(ontology.tasteNeedsEvidenceCount, 1);
     assert.equal(ontology.tasteUnclassifiedCount, 1);
-    assert.ok(ontology.autoIntake.reasons.some((row) => row.code === "local-path-or-url"));
     assert.ok(ontology.autoIntake.reasons.some((row) => row.code === "preference-captured-as-private-taste-draft"));
-    const blockedReceipt = db.prepare(
-      "SELECT source_memory_hash, reason_codes_json FROM experience_auto_intake_receipts WHERE status = 'blocked'",
-    ).get();
-    assert.match(blockedReceipt.source_memory_hash, /^[a-f0-9]{64}$/);
-    assert.doesNotMatch(JSON.stringify(blockedReceipt), /\/Users\/|mason@/);
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS n FROM memory_entries WHERE content LIKE '%/Users/%' OR content LIKE '%@example.com%'").get().n,
+      0,
+      "machine paths and identifiers must not be written before Experience intake",
+    );
 
     firmMode = true;
     const firm = require("../dist/electron/mcp/firm-orchestrator.js");
@@ -224,7 +224,10 @@ async function main() {
       0,
       "firm org-node ids must not own installed-agent Memory",
     );
-    assert.ok(db.prepare("SELECT COUNT(*) AS n FROM memory_entries WHERE agent_id = 'agent-worker'").get().n >= 4);
+    assert.ok(
+      db.prepare("SELECT COUNT(*) AS n FROM memory_entries WHERE agent_id = 'agent-worker'").get().n >= 3,
+      "portable procedure, preference, and firm learning must persist while the machine-specific item remains session-only",
+    );
 
     const memoryAfterInteractiveFirmRead = db.prepare(
       "SELECT COUNT(*) AS n FROM memory_entries WHERE agent_id = 'agent-worker'",
@@ -302,7 +305,7 @@ async function main() {
     assert.equal(summary.legacyChatLinkedLastRunAt, now);
     assert.equal(summary.legacyChatLinkedFailureCount, 1);
     assert.equal(summary.legacyUnattributedCount, 1, "only the no-chat legacy run remains globally unattributed");
-    assert.ok(summary.durableMemoryCount >= 4);
+    assert.ok(summary.durableMemoryCount >= 3);
     assert.equal(summary.curationTurnCount, 4);
     assert.equal(summary.noNewMemoryTurnCount, 2);
     assert.equal(summary.memoryEventCount, 3);

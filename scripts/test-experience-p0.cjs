@@ -22,7 +22,7 @@ async function main() {
   const db = dbModule.getDb();
 
   try {
-    assert.equal(db.pragma("user_version", { simple: true }), 65);
+    assert.equal(db.pragma("user_version", { simple: true }), require("../package.json").agentlasUpdateCompatibility.targetSchemaVersion);
     for (const table of [
       "experience_packs",
       "experience_candidates",

@@ -21,7 +21,7 @@ async function main() {
   const db = store.getDb();
   const experience = require("../dist/electron/experience/store.js");
   const now = "2026-07-13T00:00:00.000Z";
-  assert.equal(db.pragma("user_version", { simple: true }), 65);
+  assert.equal(db.pragma("user_version", { simple: true }), require("../package.json").agentlasUpdateCompatibility.targetSchemaVersion);
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='taste_chip_workflows'").get());
   const sourceMemoryContent = "Acme Bluebird uses visual code NX-47-CORAL; prefer the private design at /Users/mason/secret/client-a.";
   const environmentKey = "env:macos-arm64-codex";

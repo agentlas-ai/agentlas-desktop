@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.8.41 — 2026-07-15
+
+### Fixed
+
+- **Every test that means “current database schema” now reads the single package
+  contract.** Twelve ontology, Experience, Memory, Taste, Firm, evolution, and
+  bookmark tests no longer copy the old value 65. Historical fixture payloads
+  remain 65 where the test intentionally proves upgrade compatibility.
+- **Real-login browser failure isolation now matches the product's no-fallback
+  rule.** A missing or failed Agentlas Browser is asserted as blocked; the test
+  no longer dereferences a Playwright fallback that v0.8.38 deliberately removed.
+- **Memory and local-route release tests now enforce the stronger current
+  contracts.** Machine-specific agent memory without a bound project is proven
+  session-only before Experience intake, and route reconciliation verifies its
+  explicit `missing` count instead of comparing the obsolete result shape.
+- v0.8.40 reached both macOS and Linux preflights but exposed those two stale
+  contracts before packaging. The complete MCP resilience gate, current-schema
+  suite, and both previously failing preflight paths now pass locally. No public
+  package, feed, or production metadata was written for v0.8.40.
+- Agentlas OS v1.1.37 remains pinned at immutable commit
+  c86aa86ccb3424e67be0b45ec253cc408af99df7. This source does not prove a public
+  installer; native updater, signing, and served-byte gates remain authoritative.
+
 ## 0.8.40 — 2026-07-15
 
 ### Fixed

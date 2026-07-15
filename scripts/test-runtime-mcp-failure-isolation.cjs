@@ -45,11 +45,10 @@ async function main() {
   assert.equal(failedInstall.state, "install-failed");
   assert.equal(failedInstall.required, true);
   assert.equal(failedInstall.installed, false);
-  assert.equal(healthyFallback.state, "ready", "one install failure must not starve a healthy MCP");
-  assert.equal(healthyFallback.installed, true);
+  assert.equal(healthyFallback, undefined, "real-login browser mode must not create a fresh Playwright-profile fallback");
   const installPrompt = buildMcpAutoSelectionPrompt(installFailure, { toolMode: "browser", hubMode: "local-only" });
   assert.match(installPrompt, /agentlas-browser=install-failed\(required\)/);
-  assert.match(installPrompt, /degrade only the function/);
+  assert.match(installPrompt, /agentlas-browser=install-failed/);
   assert.doesNotMatch(installPrompt, /private install error/);
 
   const probeState = new Map([
@@ -78,13 +77,12 @@ async function main() {
   const healthyAfterProbe = probeFailure.tools.find((tool) => tool.id === "playwright");
   assert.equal(failedProbe.state, "probe-failed");
   assert.equal(failedProbe.required, true);
-  assert.equal(healthyAfterProbe.state, "ready", "one probe failure must not starve a healthy MCP");
-  assert.equal(healthyAfterProbe.installed, true);
+  assert.equal(healthyAfterProbe, undefined, "failed Agentlas Browser must remain blocked instead of changing browser identity");
   assert.ok(
-    probeFailure.tools.some((tool) => tool.state === "ready"),
-    "runtime selection must preserve at least one healthy capability",
+    !probeFailure.tools.some((tool) => tool.id === "playwright"),
+    "browser identity failure must not silently downgrade to another profile",
   );
-  console.log("runtime MCP install/probe failure isolation and value-free degraded state: PASS");
+  console.log("runtime MCP failure isolation and exact real-login browser fail-closed state: PASS");
 }
 
 main().catch((error) => {

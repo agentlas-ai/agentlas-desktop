@@ -57,7 +57,7 @@ seed.close();
     let store = require("../dist/electron/store/db.js");
     store.initStore();
     let db = store.getDb();
-    assert.equal(db.pragma("user_version", { simple: true }), 65);
+    assert.equal(db.pragma("user_version", { simple: true }), require("../package.json").agentlasUpdateCompatibility.targetSchemaVersion);
     assert.deepEqual(
       db.prepare("SELECT * FROM installed_agent_hub_bindings").all(),
       [{
@@ -147,7 +147,7 @@ seed.close();
     store = require(modulePath);
     store.initStore();
     db = store.getDb();
-    assert.equal(db.pragma("user_version", { simple: true }), 65);
+    assert.equal(db.pragma("user_version", { simple: true }), require("../package.json").agentlasUpdateCompatibility.targetSchemaVersion);
     assert.equal(
       db.prepare("SELECT COUNT(*) AS count FROM taste_chip_workflows WHERE workflow_id = ?")
         .get("taste-workflow-preserved").count,

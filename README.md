@@ -69,6 +69,17 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-15 · v0.8.41 — one schema authority and exact browser failure
+  contract** — All tests that mean the current Desktop schema now read the
+  package contract rather than copying 65; historical v65 fixtures remain
+  unchanged. MCP failure isolation now asserts that Agentlas Browser failure is
+  blocked and cannot become a fresh Playwright profile. Machine-specific agent
+  memory is also proven session-only when no project is bound, and local-route
+  reconciliation checks its explicit missing-folder result. v0.8.40 stopped in
+  preflight before packaging or public writes. Agentlas OS v1.1.37 remains
+  pinned at c86aa86ccb3424e67be0b45ec253cc408af99df7. This source state is not proof of
+  a public installer or update-feed release.
+
 - **2026-07-15 · v0.8.40 — canonical automation schema gate** — The migration
   replay test reads the package's canonical schema target and verifies both Hub
   package and durable runtime pin columns. v0.8.39 passed its Mac scheduler fix

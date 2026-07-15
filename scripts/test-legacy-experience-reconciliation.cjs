@@ -50,7 +50,7 @@ async function main() {
 
     const locationIndependent = definition.computeLocalAgentDefinitionHash(equivalentRoot);
     const firstReconcile = routes.reconcileLocalRouteDefinitionHashes();
-    assert.deepEqual(firstReconcile, { scanned: 1, updated: 1, failed: 0 });
+    assert.deepEqual(firstReconcile, { scanned: 1, updated: 1, failed: 0, missing: 0 });
     const firstHash = registry.getAgentById("legacy-agent").packageHash;
     assert.match(firstHash, /^[a-f0-9]{64}$/);
     assert.equal(firstHash, locationIndependent, "absolute local paths must not affect AgentDefinition identity");

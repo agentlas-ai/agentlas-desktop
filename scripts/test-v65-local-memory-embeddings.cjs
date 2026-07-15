@@ -82,7 +82,7 @@ seed.close();
     const store = require("../dist/electron/store/db.js");
     store.initStore();
     const db = store.getDb();
-    assert.equal(db.pragma("user_version", { simple: true }), 65);
+    assert.equal(db.pragma("user_version", { simple: true }), require("../package.json").agentlasUpdateCompatibility.targetSchemaVersion);
     for (const table of ["memory_entries", "experience_candidates"]) {
       const columns = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
       for (const column of [
@@ -133,7 +133,7 @@ seed.close();
     delete require.cache[require.resolve("../dist/electron/store/db.js")];
     const reopened = require("../dist/electron/store/db.js");
     reopened.initStore();
-    assert.equal(reopened.getDb().pragma("user_version", { simple: true }), 65);
+    assert.equal(reopened.getDb().pragma("user_version", { simple: true }), require("../package.json").agentlasUpdateCompatibility.targetSchemaVersion);
     assert.equal(
       reopened.getDb().prepare("PRAGMA table_info(memory_entries)").all()
         .filter((row) => row.name === "embedding_json").length,
