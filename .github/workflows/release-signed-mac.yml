@@ -41,6 +41,7 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      harness_ref: ${{ github.sha }}
 
   mac-release-preflight:
     runs-on: macos-15

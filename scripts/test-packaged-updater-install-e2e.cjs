@@ -55,6 +55,8 @@ const MAX_TIMEOUT_MS = 240_000;
 const BASELINE_DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const JOURNAL_NAME = "install-journal.v1.json";
 const APP_NAME = "Agentlas";
+const APP_ID = "com.agentlas.desktop";
+const ELECTRON_BUILDER_NS_UUID = "50e065bc-3134-11e6-9bab-38c9862bdaf3";
 const PUBLIC_BASELINE_RELEASE_REPOSITORY = "agentlas-ai/agentlas-desktop-releases";
 const PUBLIC_BASELINE_ARTIFACTS = Object.freeze({
   win32: Object.freeze({
@@ -244,6 +246,56 @@ function logError(message) {
 
 function displayCommand(command, args) {
   return [command, ...args].map((part) => JSON.stringify(String(part))).join(" ");
+}
+
+function uuidV5(name, namespace) {
+  const namespaceHex = String(namespace).replaceAll("-", "");
+  if (!/^[0-9a-f]{32}$/i.test(namespaceHex)) throw new Error(`Invalid UUID namespace ${JSON.stringify(namespace)}`);
+  const digest = crypto.createHash("sha1")
+    .update(Buffer.from(namespaceHex, "hex"))
+    .update(Buffer.from(String(name), "utf8"))
+    .digest()
+    .subarray(0, 16);
+  digest[6] = (digest[6] & 0x0f) | 0x50;
+  digest[8] = (digest[8] & 0x3f) | 0x80;
+  const hex = digest.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function windowsInstallRegistryKey() {
+  return `Software\\${uuidV5(APP_ID, ELECTRON_BUILDER_NS_UUID)}`;
+}
+
+function readWindowsInstallLocation() {
+  const script = [
+    "$key = 'HKCU:\\' + $env:AGENTLAS_UPDATER_E2E_REGISTRY_KEY",
+    "if (-not (Test-Path -LiteralPath $key)) { exit 3 }",
+    "$location = (Get-ItemProperty -LiteralPath $key -Name InstallLocation -ErrorAction Stop).InstallLocation",
+    "if ([string]::IsNullOrWhiteSpace($location)) { exit 4 }",
+    "[Console]::Out.Write($location)",
+  ].join("; ");
+  const result = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
+    encoding: "utf8",
+    env: { ...process.env, AGENTLAS_UPDATER_E2E_REGISTRY_KEY: windowsInstallRegistryKey() },
+    windowsHide: true,
+  });
+  if (result.status === 3) return null;
+  if (result.status !== 0) {
+    throw new Error(`Unable to read the Agentlas per-user NSIS registration (exit ${result.status}): ${String(result.stderr || "").trim()}`);
+  }
+  return path.resolve(String(result.stdout || "").trim());
+}
+
+function assertDefaultWindowsInstallLocation(installDir, tempRoot) {
+  const expected = defaultWindowsInstallLocation();
+  const actual = path.resolve(installDir);
+  assert.equal(actual.toLowerCase(), expected.toLowerCase(), "NSIS registration did not use the real per-user default installation directory");
+  assert.ok(!actual.toLowerCase().startsWith(`${path.resolve(tempRoot).toLowerCase()}${path.sep}`), "NSIS baseline must not use an ad-hoc E2E installation directory");
+}
+
+function defaultWindowsInstallLocation() {
+  if (!process.env.LOCALAPPDATA) throw new Error("LOCALAPPDATA is required to verify the real per-user NSIS default location");
+  return path.resolve(path.join(process.env.LOCALAPPDATA, "Programs", APP_NAME));
 }
 
 function runCommand(command, args, options = {}) {
@@ -907,7 +959,13 @@ function linuxLauncher(appImage, electronArgs, isolation, logPath, extractedRoot
     fs.chmodSync(launcher, 0o755);
     appEnv.APPDIR = extractedRoot;
     appEnv.APPIMAGE = path.resolve(appImage);
-    delete appEnv.APPIMAGE_EXTRACT_AND_RUN;
+    // The public baseline is deliberately launched from its inspected extract,
+    // but AppImageUpdater later execs the downloaded target AppImage itself.
+    // GitHub's Ubuntu runner does not provide the FUSE 2 mount required by that
+    // native entrypoint. Keep the AppImage runtime's documented extraction mode
+    // in the inherited environment so the updater-spawned target really starts;
+    // this does not replace or simulate AppImageUpdater's move/exec lifecycle.
+    appEnv.APPIMAGE_EXTRACT_AND_RUN = "1";
     cwd = extractedRoot;
   } else {
     appEnv.APPIMAGE_EXTRACT_AND_RUN = "1";
@@ -931,19 +989,58 @@ async function stopWindowsInstall(executable) {
   }).catch((error) => logError(`cleanup warning: ${error.message}`));
 }
 
-async function stopLinuxMarkedProcesses(marker) {
+async function uninstallWindowsInstall(installDir) {
+  if (!installDir) return;
+  const uninstaller = path.join(installDir, `Uninstall ${APP_NAME}.exe`);
+  if (!fs.existsSync(uninstaller)) {
+    logError(`cleanup warning: temporary Agentlas uninstaller is missing: ${uninstaller}`);
+    return;
+  }
+  await runCommand(uninstaller, ["/S", "/currentuser"], {
+    label: "uninstall temporary per-user Agentlas installation",
+    stdio: "ignore",
+  }).catch((error) => logError(`cleanup warning: ${error.message}`));
+  await waitUntil(
+    () => readWindowsInstallLocation() == null,
+    { intervalMs: 250, label: "temporary Agentlas NSIS registration cleanup", timeoutMs: 30_000 },
+  ).catch((error) => logError(`cleanup warning: ${error.message}`));
+}
+
+function linuxMarkedProcesses(marker) {
   let entries = [];
-  try { entries = fs.readdirSync("/proc"); } catch { return; }
-  const pids = [];
+  try { entries = fs.readdirSync("/proc"); } catch { return []; }
+  const processes = [];
   for (const entry of entries) {
     if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue;
     try {
-      const environment = fs.readFileSync(`/proc/${entry}/environ`, "utf8");
-      if (environment.split("\0").includes(`AGENTLAS_UPDATER_E2E_RUN_ID=${marker}`)) pids.push(Number(entry));
+      const environment = fs.readFileSync(`/proc/${entry}/environ`, "utf8").split("\0");
+      if (!environment.includes(`AGENTLAS_UPDATER_E2E_RUN_ID=${marker}`)) continue;
+      const appImageEntry = environment.find((value) => value.startsWith("APPIMAGE="));
+      const commandLine = fs.readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0").filter(Boolean);
+      processes.push({
+        appImage: appImageEntry ? appImageEntry.slice("APPIMAGE=".length) : null,
+        commandLine,
+        pid: Number(entry),
+      });
     } catch {
       // A process can exit between readdir and read; that is harmless cleanup.
     }
   }
+  return processes;
+}
+
+async function waitForLinuxTargetRelaunch(marker, targetAppImage, timeoutMs) {
+  const expected = path.resolve(targetAppImage);
+  return waitUntil(
+    () => linuxMarkedProcesses(marker).find((candidate) => (
+      candidate.appImage && path.resolve(candidate.appImage) === expected
+    )),
+    { intervalMs: 100, label: "updater-spawned target AppImage process", timeoutMs },
+  );
+}
+
+async function stopLinuxMarkedProcesses(marker) {
+  const pids = linuxMarkedProcesses(marker).map(({ pid }) => pid);
   for (const pid of pids) {
     try { process.kill(pid, "SIGTERM"); } catch {}
   }
@@ -964,11 +1061,23 @@ function tail(file, bytes = 8_000) {
 
 async function runWindowsE2E({ baselineInstaller, feedUrl, feed, isolation, options, target, tempRoot }) {
   assertFile(baselineInstaller, "pinned public baseline NSIS installer");
-  const installDir = path.join(tempRoot, "installed-baseline");
-  fs.mkdirSync(installDir, { recursive: true, mode: 0o700 });
-  await runCommand(baselineInstaller, ["/S", `/D=${installDir}`], { label: "silent baseline NSIS install" });
+  if (readWindowsInstallLocation() != null) {
+    throw new Error("Refusing to overwrite an existing per-user Agentlas NSIS registration on the native updater runner");
+  }
+  if (fs.existsSync(defaultWindowsInstallLocation())) {
+    throw new Error("Refusing to overwrite an unregistered Agentlas directory at the per-user NSIS default location");
+  }
+  // The updater launches the target installer without /D unless the app itself
+  // sets NsisUpdater.installDirectory. Installing the baseline into an ad-hoc
+  // /D path therefore does not model a real user update (and assisted NSIS may
+  // append APP_FILENAME to such a path on the updated run). Use the registered
+  // current-user default so both installers exercise the production contract.
+  await runCommand(baselineInstaller, ["/S", "/currentuser"], { label: "silent baseline NSIS install at the per-user default" });
 
-  const installedExecutable = path.join(installDir, "Agentlas.exe");
+  const installDir = readWindowsInstallLocation();
+  if (!installDir) throw new Error("Baseline NSIS install did not create its per-user InstallLocation registration");
+  assertDefaultWindowsInstallLocation(installDir, tempRoot);
+  const installedExecutable = path.join(installDir, `${APP_NAME}.exe`);
   assertFile(installedExecutable, "installed baseline Agentlas.exe");
   const configPath = path.join(installDir, "resources", "app-update.yml");
   assertOfficialGithubUpdateConfig(configPath, "installed public v0.8.32 baseline");
@@ -1026,6 +1135,7 @@ async function runWindowsE2E({ baselineInstaller, feedUrl, feed, isolation, opti
     throw error;
   } finally {
     await stopWindowsInstall(installedExecutable);
+    await uninstallWindowsInstall(installDir);
   }
 }
 
@@ -1075,6 +1185,8 @@ async function runLinuxE2E({ baselineAppImage, feedUrl, feed, isolation, options
       () => fs.existsSync(targetAppImage) && !fs.existsSync(baselineAppImage),
       { intervalMs: 250, label: "AppImage target replacement", timeoutMs: options.timeoutMs },
     );
+    const relaunchedTarget = await waitForLinuxTargetRelaunch(isolation.marker, targetAppImage, options.timeoutMs);
+    assert.ok(relaunchedTarget.pid > 0, "AppImageUpdater did not leave a live target process");
     const targetExtract = await extractAppImage(targetAppImage, path.join(tempRoot, "target-image-inspection"), "target");
     assert.equal(appAsarVersion(path.join(targetExtract, "resources", "app.asar")), options.targetVersion, "AppImage target version is wrong");
     assertOfficialGithubUpdateConfig(path.join(targetExtract, "resources", "app-update.yml"));
@@ -1083,7 +1195,7 @@ async function runLinuxE2E({ baselineAppImage, feedUrl, feed, isolation, options
       { intervalMs: 250, label: "target relaunch journal reconciliation", timeoutMs: options.timeoutMs },
     );
     assertFeedAndPayloadRequested(feed);
-    log(`Linux native install passed: ${options.baselineVersion} exited, ${options.targetVersion} replaced the AppImage, and target relaunch cleared its journal`);
+    log(`Linux native install passed: ${options.baselineVersion} exited, ${options.targetVersion} replaced the AppImage, target PID ${relaunchedTarget.pid} started, and target relaunch cleared its journal`);
   } catch (error) {
     const output = tail(appLog);
     if (output) logError(`baseline app log tail:\n${output}`);
@@ -1153,6 +1265,7 @@ async function runSelfTest() {
   assert.equal(targetSpec("win32", "0.8.33").manifestName, "latest.yml");
   assert.equal(targetSpec("linux", "0.8.33").payloadName, "Agentlas-0.8.33-Linux-x64.AppImage");
   assert.ok(compareReleaseVersions("0.8.33", "0.8.32") > 0);
+  assert.equal(windowsInstallRegistryKey(), "Software\\3bb4af84-8cbc-5026-96a0-bcbe1970587f");
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-updater-e2e-selftest-"));
   let feed;

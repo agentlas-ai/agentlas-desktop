@@ -492,17 +492,33 @@ assert.deepEqual(
 );
 const nativeUpdaterE2eSteps = nativeUpdaterE2eJob.steps;
 const nativeUpdaterArtifactStep = nativeUpdaterE2eSteps.find((step) => step.name === "Download exact native release artifact");
+const nativeUpdaterHarnessCheckoutStep = nativeUpdaterE2eSteps.find((step) => step.name === "Checkout immutable release verifier");
+const nativeUpdaterHarnessIdentityStep = nativeUpdaterE2eSteps.find((step) => step.name === "Verify release verifier identity");
 const nativeUpdaterRunStep = nativeUpdaterE2eSteps.find((step) => step.name === "Run v0.8.32 to target native updater lifecycle");
 assert.ok(nativeUpdaterArtifactStep, "native updater E2E must consume the exact build-barrier artifact");
 assert.equal(nativeUpdaterArtifactStep.uses, "actions/download-artifact@v4");
 assert.equal(nativeUpdaterArtifactStep.with.name, "agentlas-release-${{ matrix.artifact_os }}");
+assert.ok(nativeUpdaterHarnessCheckoutStep, "a post-tag verifier correction must come from an explicit immutable workflow ref");
+assert.equal(nativeUpdaterHarnessCheckoutStep.uses, "actions/checkout@v4");
+assert.equal(nativeUpdaterHarnessCheckoutStep.with.ref, "${{ inputs.harness_ref || github.sha }}");
+assert.equal(nativeUpdaterHarnessCheckoutStep.with.path, ".release-harness");
+assert.equal(nativeUpdaterHarnessCheckoutStep.with["sparse-checkout"], "scripts/test-packaged-updater-install-e2e.cjs");
+assert.equal(nativeUpdaterHarnessCheckoutStep.with["persist-credentials"], false);
+assert.ok(nativeUpdaterHarnessIdentityStep, "the updater E2E must fail closed if the verifier checkout drifts");
+assert.match(nativeUpdaterHarnessIdentityStep.run, /git -C \.release-harness rev-parse HEAD/);
+assert.match(nativeUpdaterHarnessIdentityStep.run, /does not match immutable ref/);
 assert.ok(nativeUpdaterRunStep, "native updater E2E must expose a named lifecycle verifier");
 assert.equal(nativeUpdaterRunStep.shell, "bash");
 assert.equal(nativeUpdaterRunStep.env.CI, "true");
 assert.match(
   nativeUpdaterRunStep.run,
-  /test-packaged-updater-install-e2e\.cjs[\s\S]*?--platform="\$\{\{ matrix\.platform \}\}"[\s\S]*?--artifact-dir=release[\s\S]*?--target-version="\$RESOLVED_VERSION"/,
+  /\.release-harness\/scripts\/test-packaged-updater-install-e2e\.cjs[\s\S]*?--platform="\$\{\{ matrix\.platform \}\}"[\s\S]*?--artifact-dir=release[\s\S]*?--target-version="\$RESOLVED_VERSION"/,
   "native updater E2E must run only the matching package, not a simulated updater",
+);
+assert.match(
+  nativeUpdaterRunStep.run,
+  /dbus-run-session -- xvfb-run -a node "\$\{args\[@\]\}"/,
+  "Linux target relaunch must inherit X11 and D-Bus sessions that outlive the baseline app",
 );
 assert.match(
   nativeUpdaterRunStep.run,

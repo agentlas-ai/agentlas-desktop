@@ -22,11 +22,18 @@ on:
         description: "Exact stable source tag to package"
         required: true
         type: string
+      harness_ref:
+        description: "Immutable workflow commit that supplies release-only verification code"
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
         description: "Stable release tag (e.g. v0.8.21). Must match package.json version."
         required: true
+      harness_ref:
+        description: "Optional immutable commit for release-only verification code (defaults to this workflow commit)"
+        required: false
 
 permissions:
   contents: read
@@ -433,6 +440,33 @@ jobs:
           name: agentlas-release-${{ matrix.artifact_os }}
           path: release
 
+      # A failed release gate can require a verifier correction after an
+      # immutable app tag already exists. Keep the app, package metadata, and
+      # artifacts checked out from that exact tag while loading only the
+      # release verifier from the immutable workflow commit that requested the
+      # run. This cannot modify or rebuild the tagged application.
+      - name: Checkout immutable release verifier
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.harness_ref || github.sha }}
+          path: .release-harness
+          sparse-checkout: scripts/test-packaged-updater-install-e2e.cjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Verify release verifier identity
+        shell: bash
+        env:
+          EXPECTED_HARNESS_REF: ${{ inputs.harness_ref || github.sha }}
+        run: |
+          expected="$(git rev-parse --verify "${EXPECTED_HARNESS_REF}^{commit}")"
+          actual="$(git -C .release-harness rev-parse HEAD)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Release verifier checkout $actual does not match immutable ref $expected."
+            exit 1
+          fi
+          test -f .release-harness/scripts/test-packaged-updater-install-e2e.cjs
+
       - name: Run v0.8.32 to target native updater lifecycle
         shell: bash
         env:
@@ -440,8 +474,18 @@ jobs:
           # the disposable native execution boundary for this destructive test.
           CI: "true"
         run: |
-          node scripts/test-packaged-updater-install-e2e.cjs \
-            --platform="${{ matrix.platform }}" \
-            --artifact-dir=release \
-            --target-version="$RESOLVED_VERSION" \
+          args=(
+            .release-harness/scripts/test-packaged-updater-install-e2e.cjs
+            --platform="${{ matrix.platform }}"
+            --artifact-dir=release
+            --target-version="$RESOLVED_VERSION"
             --timeout-ms=180000
+          )
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            # Keep X11 and D-Bus alive for the whole verifier process. The
+            # updater-launched target inherits these sessions and must boot far
+            # enough to reconcile its durable install journal.
+            dbus-run-session -- xvfb-run -a node "${args[@]}"
+          else
+            node "${args[@]}"
+          fi
