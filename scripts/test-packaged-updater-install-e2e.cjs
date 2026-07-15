@@ -1015,6 +1015,41 @@ async function uninstallWindowsInstall(installDir) {
   ).catch((error) => logError(`cleanup warning: ${error.message}`));
 }
 
+function logWindowsInstallDiagnostics(initialInstallDir) {
+  const registered = readWindowsInstallLocation();
+  logError(`Windows diagnostic: initial InstallLocation=${initialInstallDir}; current InstallLocation=${registered || "<missing>"}`);
+  const processScript = [
+    "Get-CimInstance Win32_Process",
+    "Where-Object { $_.Name -match 'Agentlas|Setup|Uninstall' -or $_.CommandLine -match 'Agentlas.*Windows.*Setup' }",
+    "Select-Object ProcessId,Name,ExecutablePath,CommandLine",
+    "Format-List | Out-String -Width 4096",
+  ].join(" | ");
+  const processes = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", processScript], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  logError(`Windows diagnostic processes:\n${String(processes.stdout || "<none>").trim() || "<none>"}`);
+
+  const programsRoot = path.dirname(defaultWindowsInstallLocation());
+  const stack = [{ directory: programsRoot, depth: 0 }];
+  const asars = [];
+  while (stack.length > 0) {
+    const { directory, depth } = stack.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const candidate = path.join(directory, entry.name);
+      if (entry.isDirectory() && depth < 3) stack.push({ directory: candidate, depth: depth + 1 });
+      if (entry.isFile() && entry.name === "app.asar" && path.basename(directory).toLowerCase() === "resources") {
+        let version = "unreadable";
+        try { version = appAsarVersion(candidate); } catch (error) { version = `error:${error instanceof Error ? error.message : String(error)}`; }
+        asars.push(`${candidate} => ${version}`);
+      }
+    }
+  }
+  logError(`Windows diagnostic packaged app.asar files:\n${asars.join("\n") || "<none>"}`);
+}
+
 function linuxMarkedProcesses(marker) {
   let entries = [];
   try { entries = fs.readdirSync("/proc"); } catch { return []; }
@@ -1139,6 +1174,7 @@ async function runWindowsE2E({ baselineInstaller, feedUrl, feed, isolation, opti
     assertFeedAndPayloadRequested(feed);
     log(`Windows native install passed: ${options.baselineVersion} exited, ${options.targetVersion} replaced the install, and target relaunch cleared its journal`);
   } catch (error) {
+    logWindowsInstallDiagnostics(installDir);
     const output = tail(appLog);
     if (output) logError(`baseline app log tail:\n${output}`);
     throw error;
