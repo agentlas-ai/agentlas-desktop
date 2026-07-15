@@ -52,7 +52,11 @@ import {
   runBorrowedTaskForceInvocation,
   type BorrowedAgentSpec,
 } from "./borrowed-task-force";
-import { parseWorkforceCommand, runWorkforceSelection } from "./workforce-orchestrator";
+import {
+  emitWorkforceBenchmarkSelectionArtifacts,
+  parseWorkforceCommand,
+  runWorkforceSelection,
+} from "./workforce-orchestrator";
 import { runSwarmInvocation } from "./swarm-run";
 import { getAgentGroup, listAgentGroups, resolveAgentGroupForRuntime } from "../store/agent-groups";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
@@ -1476,6 +1480,7 @@ export async function runMcpInvocation(
           return result.text;
         },
       });
+      emitWorkforceBenchmarkSelectionArtifacts(sink, workforceBenchmarkMode, workforce);
       tryRecordRunEvent({
         runId: req.runId ?? `task-force:${chat.id}`,
         kind: "workforce_selection_receipt",

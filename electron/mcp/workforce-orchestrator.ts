@@ -124,6 +124,17 @@ export interface WorkforceSelectionResult {
   receipt: WorkforceSelectionReceipt;
 }
 
+export interface WorkforceBenchmarkSelectionArtifacts {
+  schemaVersion: "agentlas.workforce-benchmark-selection-artifacts.v1";
+  benchmarkMode: true;
+  workOrder: JsonObject;
+  candidateSet: JsonObject;
+  selection: JsonObject;
+  validation: JsonObject;
+  preparation: JsonObject;
+  selectionReceipt: WorkforceSelectionReceipt;
+}
+
 export interface RunWorkforceSelectionParams {
   goal: string;
   active: RuntimeStatus;
@@ -757,6 +768,44 @@ function emitMcpStatus(sink: EventSink, tool: WorkforceToolName, invocationId: s
     done,
     status: done ? `${tool} completed` : `${tool} in progress`,
     tool: { name: tool, id: invocationId, result: done ? "ok" : undefined },
+    agentId: "workforce:leader",
+    agentName: "Agentlas Workforce Leader",
+    role: "workforce-leader",
+    tier: 1,
+    phase: "plan",
+  });
+}
+
+/**
+ * Expose the exact, already-validated ontology decision inputs to benchmark
+ * observers. Keep this payload deliberately closed: do not append prompts,
+ * environment variables, working directories, local files, or runtime state.
+ */
+export function emitWorkforceBenchmarkSelectionArtifacts(
+  sink: EventSink,
+  benchmarkMode: boolean,
+  result: WorkforceSelectionResult,
+): void {
+  if (!benchmarkMode) return;
+  const artifacts: WorkforceBenchmarkSelectionArtifacts = {
+    schemaVersion: "agentlas.workforce-benchmark-selection-artifacts.v1",
+    benchmarkMode: true,
+    workOrder: result.workOrder,
+    candidateSet: result.candidateSet,
+    selection: result.selection,
+    validation: result.validation,
+    preparation: result.preparation,
+    selectionReceipt: result.receipt,
+  };
+  sink({
+    kind: "tool-use",
+    done: true,
+    status: "Workforce benchmark selection artifacts captured",
+    tool: {
+      name: "agentlas.workforce.benchmark_selection_artifacts",
+      id: result.receipt.selectionReceiptId,
+      result: JSON.stringify(artifacts),
+    },
     agentId: "workforce:leader",
     agentName: "Agentlas Workforce Leader",
     role: "workforce-leader",

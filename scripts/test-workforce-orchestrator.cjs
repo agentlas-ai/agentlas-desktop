@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const { app } = require("electron");
 
 const {
+  emitWorkforceBenchmarkSelectionArtifacts,
   parseLeaderJson,
   parseWorkforceCommand,
   runWorkforceSelection,
@@ -291,6 +292,39 @@ function fenced(heading, value) {
   assert.equal(result.receipt.historyInfluence, "none");
   assert.deepEqual(result.receipt.substitutions, []);
   assert.ok(events.some((event) => event.tool?.name === "workforce.search_candidates"));
+
+  const ordinaryEvents = [];
+  emitWorkforceBenchmarkSelectionArtifacts((event) => ordinaryEvents.push(event), false, result);
+  assert.deepEqual(ordinaryEvents, [], "ordinary Workforce runs must not emit benchmark artifacts");
+
+  const benchmarkEvents = [];
+  emitWorkforceBenchmarkSelectionArtifacts((event) => benchmarkEvents.push(event), true, result);
+  assert.equal(benchmarkEvents.length, 1);
+  const benchmarkEvent = benchmarkEvents[0];
+  assert.equal(benchmarkEvent.kind, "tool-use");
+  assert.equal(benchmarkEvent.done, true);
+  assert.equal(benchmarkEvent.tool.name, "agentlas.workforce.benchmark_selection_artifacts");
+  assert.equal(benchmarkEvent.tool.id, result.receipt.selectionReceiptId);
+  const benchmarkArtifacts = JSON.parse(benchmarkEvent.tool.result);
+  assert.equal(benchmarkArtifacts.schemaVersion, "agentlas.workforce-benchmark-selection-artifacts.v1");
+  assert.equal(benchmarkArtifacts.benchmarkMode, true);
+  assert.deepEqual(Object.keys(benchmarkArtifacts).sort(), [
+    "benchmarkMode",
+    "candidateSet",
+    "preparation",
+    "schemaVersion",
+    "selection",
+    "selectionReceipt",
+    "validation",
+    "workOrder",
+  ]);
+  assert.deepEqual(benchmarkArtifacts.workOrder, result.workOrder);
+  assert.deepEqual(benchmarkArtifacts.candidateSet, result.candidateSet);
+  assert.deepEqual(benchmarkArtifacts.selection, result.selection);
+  assert.deepEqual(benchmarkArtifacts.validation, result.validation);
+  assert.deepEqual(benchmarkArtifacts.preparation, preparation, "raw preparation must remain complete");
+  assert.deepEqual(benchmarkArtifacts.selectionReceipt, result.receipt);
+  assert.equal(JSON.stringify(benchmarkArtifacts).includes(process.cwd()), false, "do not append the local cwd");
 
   assert.throws(
     () => validateWorkOrder({ ...workOrder, ontologyVersion: "awo:stale" }),
