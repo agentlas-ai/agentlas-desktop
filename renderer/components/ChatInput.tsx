@@ -20,7 +20,7 @@ import type {
 } from "@/lib/types";
 import { useRouter } from "next/navigation";
 import { CONTEXT_MANAGED_BY } from "@shared/models";
-import type { Recommendation, RecExecChoice, RecRouterAgent } from "@shared/types";
+import type { OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent } from "@shared/types";
 import type { AgentlasAppDefinition } from "@/lib/apps";
 import { appDisplayName, appSlashCommands, appTagline } from "@/lib/apps";
 import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
@@ -37,10 +37,18 @@ const CLI_LABEL: Record<string, string> = {
   grok: "Grok",
 };
 
+/** 로컬 OpenAI 호환 런타임 표시명(서버가 모델을 노출). */
+const LOCAL_RUNTIME_LABEL: Record<string, string> = {
+  ollama: "Ollama",
+  lmstudio: "LM Studio",
+  mlx: "MLX",
+};
+
 /** 모델 칩에 보일 라벨 — 현재 모델 라벨(opts에서) 또는 런타임 기본명. */
 function modelChipLabel(s: RuntimeStatus, opts: ModelOption[]): string {
   const label = opts.find((o) => o.id === s.model)?.label ?? (s.model || null);
-  if (s.kind === "ollama") return label ? `Ollama · ${label}` : "Ollama";
+  const localName = LOCAL_RUNTIME_LABEL[s.kind];
+  if (localName) return label ? `${localName} · ${label}` : localName;
   if (s.kind === "byok") return label ?? "API";
   const base = CLI_LABEL[s.kind] ?? s.kind;
   return label ? `${base} · ${label}` : base;
@@ -93,6 +101,7 @@ interface SendOptions {
   goalMode?: boolean;
   permissions?: PermissionLevel;
   appsGenerateMode?: boolean;
+  taskForceTargets?: OrchestrationTarget[];
 }
 
 /** popover에 그릴 한 행 + 평탄화 인덱스용 메타. group은 같은 헤더 아래로 그룹핑되지만 인덱스는 flat. */
@@ -623,21 +632,21 @@ export function ChatInput({
       finishComposerAfterSend();
       return;
     }
-    const localTop = preview.agents.find((a) => a.source === "local");
     const top = preview.agents[0];
     if (!top) {
       onRecommendExecute?.({ kind: "plain", routerAgent }, text, opts);
       finishComposerAfterSend();
       return;
     }
-    const hubSlugs =
-      engine?.networkAuto === true ? preview.agents.filter((a) => a.source !== "local").map((a) => a.id) : [];
-    if (hubSlugs.length > 0) {
-      // 상황에 맞으면 여러 에이전트를 한 번에 고용(네트워크 TF).
-      onRecommendExecute?.({ kind: "network", agents: hubSlugs, routerAgent }, text, opts);
-    } else if (localTop) {
-      expectAgentChangeWithoutReset(localTop.id);
-      onRecommendExecute?.({ kind: "agent", agentId: localTop.id, isFirm: localTop.isFirm, routerAgent }, text, opts);
+    const remoteTargets = engine?.networkAuto === true
+      ? preview.agents.filter((agent) => agent.source !== "local").map((agent) => agent.target)
+      : [];
+    const localTargets = preview.agents.filter((agent) => agent.source === "local").map((agent) => agent.target);
+    const targets = [...localTargets, ...remoteTargets];
+    if (targets.length > 1 || targets.some((target) => target.entityKind !== "agent" || target.source !== "local")) {
+      onRecommendExecute?.({ kind: "network", targets, routerAgent }, text, opts);
+    } else if (targets.length === 1) {
+      onRecommendExecute?.({ kind: "agent", target: targets[0], routerAgent }, text, opts);
     } else {
       // Hub 후보뿐인데 자동 빌림 OFF → 고용 없이 원문 전송(에스컬레이션만 동봉).
       onRecommendExecute?.({ kind: "plain", routerAgent }, text, opts);
@@ -2008,6 +2017,7 @@ function buildAutocompleteOptions(
     // 앱 명령 — 실행(appAction)
     const cmds = [
       { key: "/goal", desc: t("chatinput.cmd.goal"), appAction: false },
+      { key: "/hep-storm", desc: t("chatinput.cmd.hep_storm"), appAction: false },
       { key: "/new", desc: t("chatinput.cmd.new") },
       { key: "/apps", desc: t("chatinput.cmd.apps") },
       { key: "/folder", desc: t("chatinput.cmd.folder") },
@@ -2498,8 +2508,8 @@ function ModelMenu({
   t: TFunction;
 }) {
   const efforts = runtime.efforts ?? [];
-  // CLI(claude-code/codex/gemini)는 "구독 기본" 선택 가능. BYOK/Ollama는 항상 구체 모델.
-  const allowDefaultModel = runtime.kind !== "byok" && runtime.kind !== "ollama";
+  // CLI(claude-code/codex/gemini)는 "구독 기본" 선택 가능. BYOK/로컬(ollama/lmstudio/mlx)은 항상 구체 모델.
+  const allowDefaultModel = runtime.kind !== "byok" && !LOCAL_RUNTIME_LABEL[runtime.kind];
   const managedByRuntime = CONTEXT_MANAGED_BY[runtime.kind] === "runtime";
   const check = <span style={{ color: "var(--accent)", fontWeight: 700 }}>•</span>;
   const modelIcon = <IconSparkles size={13} style={{ color: "var(--accent)" }} />;

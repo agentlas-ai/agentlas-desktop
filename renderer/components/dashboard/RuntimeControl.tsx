@@ -14,6 +14,8 @@ const RUNTIME_LABEL: Record<string, string> = {
   grok: "Grok",
   byok: "BYOK API",
   ollama: "Ollama",
+  lmstudio: "LM Studio",
+  mlx: "MLX",
 };
 
 const BACKEND_LABEL: Record<string, string> = {
@@ -21,9 +23,14 @@ const BACKEND_LABEL: Record<string, string> = {
   openai: "OpenAI",
   google: "Google",
   ollama: "Ollama",
+  lmstudio: "LM Studio",
+  mlx: "MLX",
   upstage: "Upstage",
   custom: "Custom",
 };
+
+/** 로컬 OpenAI 호환 런타임(모델을 서버가 노출) — "구독 기본" 개념이 없다. */
+const LOCAL_MODEL_KINDS = new Set(["ollama", "lmstudio", "mlx"]);
 
 function runtimeLabel(runtime: RuntimeStatus): string {
   if (runtime.kind === "byok") return `${BACKEND_LABEL[runtime.backend] ?? runtime.backend} API`;
@@ -39,7 +46,7 @@ function runtimeSubLabel(runtime: RuntimeStatus, ko: boolean): string {
   const version = runtime.version && runtime.version !== "unknown" ? runtime.version : "";
   return [
     version ? `v${version}` : runtime.source,
-    model || (runtime.kind === "byok" || runtime.kind === "ollama" ? "" : ko ? "구독 기본" : "subscription default"),
+    model || (runtime.kind === "byok" || LOCAL_MODEL_KINDS.has(runtime.kind) ? "" : ko ? "구독 기본" : "subscription default"),
     effort ? `effort ${effort}` : "",
   ].filter(Boolean).join(" · ");
 }
@@ -199,7 +206,7 @@ export function RuntimeControl() {
             <label>
               <span>{ko ? "모델" : "Model"}</span>
               <select value={active.model ?? ""} onChange={(event) => void activateModel(event.target.value)} disabled={busy || models.length === 0}>
-                {active.kind !== "byok" && active.kind !== "ollama" && (
+                {active.kind !== "byok" && !LOCAL_MODEL_KINDS.has(active.kind) && (
                   <option value="">{ko ? "구독 기본" : "Subscription default"}</option>
                 )}
                 {models.map((model) => (

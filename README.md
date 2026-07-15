@@ -69,6 +69,47 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-15 · v0.8.34 — signed updater trust and atomic all-platform release barrier** —
+  Normal Desktop turns retain the mandatory local Model2Vec hybrid recall:
+  effective tasks use owner-scoped Memory and eligible reviewed Experience,
+  then rank with the adaptive all-relevant-or-top-k budget. Borrowed-agent
+  context remains isolated in per-agent SQLite nests, so governed relations
+  survive projection rebuilds without injecting raw Markdown into another
+  agent's runtime. This release pins Agentlas OS v1.1.36 at
+  0cb90fc354d065b9af6894d6570df3de82fb53f6. Exact Cloud/Hub Agent and Team
+  references retain their source and entity kind, and unsigned or incomplete
+  Team graphs fail before execution.
+
+  `/hep-storm` now enters the Desktop swarm executor rather than a display-only
+  route: it binds verified local runtime inventory to per-worker model/effort
+  choices and refuses to call a failed worker packet a completed final gate.
+  The executable contract is required by the Windows, Linux, and signed macOS
+  release gates. This validates the local Desktop host boundary; it does not
+  claim that a Hub call performed a remote model completion.
+
+  The top-level host LLM can now assemble one temporary TF from Cloud, Hub, and
+  Local Agents, packaged Teams, and user-created Groups. Teams retain their
+  manager/worker graph, Groups receive a generated middle-manager planner, and
+  each nested unit returns one synthesized result rather than being flattened.
+  Agent Cloud can also upload a registered local Agent or whole Team directly;
+  My Agents manages the Team as a unit and leaves background eval/judge roles
+  out of the ordinary ownership UI.
+
+  The pinned Core source does not prove a published installer or update-feed
+  release; the signed release gates and served bytes remain authoritative.
+
+  The updater refuses a running macOS app outside the pinned Developer ID,
+  designated-requirement, notarization, and Gatekeeper lineage before download
+  or installation. Local candidates use a separate bundle ID, user-data
+  namespace, Keychain service, and no update feed; they cannot become an
+  official app through a launch environment. A single release writer now
+  verifies the complete Windows/Linux/macOS/feed/evidence set locally and
+  against GitHub's served bytes before stable/latest promotion. Windows/Linux
+  update feeds must bind every declared installer to its computed SHA-512 and
+  byte size, and the production-rendered updater recovery UI is a PR and
+  release gate. This source note does not claim a published installer, tag, or
+  update-feed release.
+
 - **2026-07-15 · v0.8.33 — updater accepts continuity journals across releases** —
   The install journal that guards every auto-update is written by the previous
   app version, so the updater now validates a schemaVersion 2 continuity
@@ -81,8 +122,9 @@ authority for which version is actually public, stable, and downloadable.
   snapshots still protect the complete current table list, schemaVersion 1
   journals keep their frozen historical set, and inconsistent or empty
   protection maps still fail closed. The embedded Agentlas OS v1.1.31 source
-  remains pinned to `738b78f40b5efc9b2dd4cc66c94a3805e70c79f5`; this source note
-  does not claim a published installer or update-feed release.
+  remains pinned to `738b78f40b5efc9b2dd4cc66c94a3805e70c79f5`. v0.8.33 is the
+  published stable/latest release; the Releases page remains authoritative for
+  its installers and update feeds.
 
 - **2026-07-15 · v0.8.32 — governed local Model2Vec experience memory** —
   Every ordinary Desktop invocation now sends the current effective task through
@@ -98,8 +140,8 @@ authority for which version is actually public, stable, and downloadable.
   survive safe rebuilds without whole-file Markdown injection. The packaged model
   is checksum-gated and runs in-process with no embedding server or paid embedding
   API. The embedded Agentlas OS v1.1.31 source is pinned to
-  `738b78f40b5efc9b2dd4cc66c94a3805e70c79f5`; this source note does not claim a
-  published installer or update-feed release.
+  738b78f40b5efc9b2dd4cc66c94a3805e70c79f5. The public Releases page is the
+  authority for v0.8.32's signed installer and update-feed status.
 
 - **2026-07-15 · v0.8.30 — Agentlas OS v1.1.29 alignment** — Desktop now
   embeds the exact verified Core release that gives every external `/hep-build`
@@ -677,18 +719,16 @@ update"** badge (the same idea as Codex's update button). Click it to apply.
 
 ### First-time setup — opening the app the first time
 
-Agentlas Desktop is open source and the public builds aren't paid code-signed on
-every platform, so your OS may ask you to confirm the first launch. This is normal
-for indie/open-source apps and happens only once.
+Agentlas Desktop's public macOS builds are Developer ID signed, notarized, and
+Gatekeeper verified before they enter the stable update channel. Windows may
+still show SmartScreen reputation warnings, and Linux may require executable
+permission for an AppImage.
 
-**macOS** — if you see *"Agentlas can't be opened because Apple cannot check it
-for malicious software"*, right-click the app in Applications → **Open** →
-**Open**. Or, in Terminal:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/Agentlas.app
-open /Applications/Agentlas.app
-```
+**macOS** — download the DMG from the official Releases page and move Agentlas
+to Applications. If Gatekeeper says Apple cannot check the app, do not remove
+quarantine or force-open that copy: delete it and download the current stable
+DMG again. The updater also refuses an app whose signing, notarization, bundle,
+or designated-requirement lineage does not match the official release policy.
 
 **Windows** — if SmartScreen shows *"Windows protected your PC"*, click
 **More info** → **Run anyway**. The portable `.exe` runs without installing.

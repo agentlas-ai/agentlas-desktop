@@ -2,6 +2,7 @@
 // 자격증명: ~/.codex/auth.json → tokens.access_token + account_id
 // 응답 모양은 프로바이더가 바꿀 수 있어 방어적으로 파싱(primary=5h, secondary=주간).
 // (방식 출처: oss agentcat-connectors / 정확한 필드는 라이브 응답으로 보강)
+import { usageAccountFingerprint } from "./account-fingerprint";
 import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -58,11 +59,13 @@ export async function getCodexUsage(): Promise<ProviderUsage | null> {
   const auth = await readCodexAuth();
   if (!auth) return null;
 
+  const accountFingerprint = usageAccountFingerprint("codex", auth.accountId);
   const base = {
     provider: "codex",
     backend: "openai" as const,
     label: "Codex",
     fetchedAt: Date.now(),
+    ...(accountFingerprint ? { accountFingerprint } : {}),
   };
   const headers: Record<string, string> = {
     Authorization: `Bearer ${auth.token}`,

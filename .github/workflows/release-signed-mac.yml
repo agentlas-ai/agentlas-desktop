@@ -37,16 +37,22 @@ permissions:
   actions: read
 
 jobs:
-  build-notarize-publish:
+  cross-platform-release-build:
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+  mac-release-preflight:
     runs-on: macos-15
-    # Includes a bounded wait for the parallel Windows/Linux staging workflow.
-    timeout-minutes: 75
+    timeout-minutes: 90
     env:
       # Publish installers to the SEPARATE public releases repository.
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
-      HEPHAESTUS_REF: v1.1.31
-      HEPHAESTUS_COMMIT: 738b78f40b5efc9b2dd4cc66c94a3805e70c79f5
+      AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
+      AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ runner.temp }}/agentlas-mac-update-history
+      HEPHAESTUS_REF: v1.1.36
+      HEPHAESTUS_COMMIT: 0cb90fc354d065b9af6894d6570df3de82fb53f6
 
     steps:
       - uses: actions/checkout@v4
@@ -175,7 +181,9 @@ jobs:
         run: npm run typecheck
 
       - name: Verify embedded Stormbreaker harness
-        run: npm run test:stormbreaker-core:embedded
+        run: |
+          npm run test:stormbreaker-core:embedded
+          npm run test:stormbreaker-swarm
 
       - name: Verify signed-resource Python cache boundary
         run: npm run test:python-cache-boundary
@@ -196,6 +204,7 @@ jobs:
           npm run test:v64-automation-permission-migration
           npm run test:v53-hub-bookmark-sync
           npm run test:updater-production
+          npm run test:updater-ui
           npm run test:automations-store
           npm run test:runtime-stdin-epipe
           npm run test:cli-version-parser
@@ -281,6 +290,114 @@ jobs:
           node scripts/test-desktop-feature-surfaces.cjs --experience-only
           node scripts/test-ontology-feature-update.cjs
 
+      - name: Record successful macOS release preflight
+        run: echo "macOS release tests completed without publishing any release assets"
+
+  release-artifact-barrier:
+    name: All OS release gate barrier
+    if: ${{ always() }}
+    needs:
+      - cross-platform-release-build
+      - mac-release-preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every OS gate and package job
+        env:
+          CROSS_PLATFORM_RESULT: ${{ needs.cross-platform-release-build.result }}
+          MAC_PREFLIGHT_RESULT: ${{ needs.mac-release-preflight.result }}
+        run: |
+          test "$CROSS_PLATFORM_RESULT" = "success"
+          test "$MAC_PREFLIGHT_RESULT" = "success"
+          echo "All Windows, Linux, and macOS release gates passed; the single release writer is now unlocked."
+
+  build-signed-mac-artifacts:
+    name: Build signed Mac Actions artifacts
+    needs: release-artifact-barrier
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
+      AGENTLAS_PUBLIC_RELEASE: "1"
+      AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
+      AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ runner.temp }}/agentlas-mac-update-history
+      HEPHAESTUS_REF: v1.1.36
+      HEPHAESTUS_COMMIT: 0cb90fc354d065b9af6894d6570df3de82fb53f6
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Resolve release inputs after the all-OS barrier
+        env:
+          RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          RAW_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}
+          RAW_DRAFT: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || 'false' }}
+          RAW_APPLY_WEB_ENV: ${{ github.event_name == 'workflow_dispatch' && inputs.apply_web_env || 'true' }}
+        run: |
+          tag="$RAW_TAG"
+          version="${RAW_VERSION:-${tag#v}}"
+          draft="$RAW_DRAFT"
+          apply_web_env="$RAW_APPLY_WEB_ENV"
+          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if [[ ! "$tag" =~ $semver_tag_re ]] || [ "$version" != "${tag#v}" ]; then
+            echo "::error::Release version/tag is not an exact stable SemVer pair."
+            exit 1
+          fi
+          if [ "$draft" != "true" ] && [ "$draft" != "false" ]; then exit 1; fi
+          if [ "$apply_web_env" != "true" ] && [ "$apply_web_env" != "false" ]; then exit 1; fi
+          tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          pkgver="$(node -p "require('./package.json').version")"
+          lockver="$(node -p "require('./package-lock.json').version")"
+          lockrootver="$(node -p "require('./package-lock.json').packages[''].version")"
+          runtimever="$(node -p "require('./package.json').agentlasUpdateCompatibility.bundledRuntimeVersion")"
+          runtimecommit="$(node -p "require('./package.json').agentlasBundledRuntimeSource.commit")"
+          if [ "$head_commit" != "$tagged_commit" ] || [ "$pkgver" != "$version" ] || [ "$lockver" != "$version" ] || [ "$lockrootver" != "$version" ]; then
+            echo "::error::Release source/tag/package identity mismatch."
+            exit 1
+          fi
+          if [ "${HEPHAESTUS_REF#v}" != "$runtimever" ] || [ "$HEPHAESTUS_COMMIT" != "$runtimecommit" ]; then
+            echo "::error::Bundled runtime source pin mismatch."
+            exit 1
+          fi
+          {
+            echo "RESOLVED_TAG=$tag"
+            echo "RESOLVED_VERSION=$version"
+            echo "RESOLVED_DRAFT=$draft"
+            echo "RESOLVED_APPLY_WEB_ENV=$apply_web_env"
+            echo "AGENTLAS_DESKTOP_RELEASE_TAG=$tag"
+          } >> "$GITHUB_ENV"
+
+      - name: Assert signing and release credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MAC_DEVELOPER_ID_CERTIFICATE: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+        run: |
+          test -n "$APPLE_ID"
+          test -n "$APPLE_APP_SPECIFIC_PASSWORD"
+          test -n "$APPLE_TEAM_ID"
+          test -n "$MAC_DEVELOPER_ID_CERTIFICATE"
+          test -n "$CSC_KEY_PASSWORD"
+          test -n "$GH_TOKEN"
+
+      - name: Ensure embedded engine and dependencies
+        run: |
+          npm run ensure:engine
+          npm ci
+
       - name: Restore mac signing certificate
         env:
           MAC_DEVELOPER_ID_CERTIFICATE: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE }}
@@ -290,7 +407,7 @@ jobs:
           test -s "$cert_path"
           echo "CSC_LINK=$cert_path" >> "$GITHUB_ENV"
 
-      - name: Build, sign, notarize, and verify DMGs
+      - name: Build, sign, notarize, and verify Mac artifacts
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -298,31 +415,113 @@ jobs:
           CSC_KEY_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
         run: npm run package:mac
 
-      # Upload notarized Mac assets into the prerelease staging record. The
-      # publisher then waits for every required Windows/Linux/Mac artifact and
-      # alone promotes stable/latest. Missing assets always fail closed.
-      - name: Complete staged release and promote verified stable
+      - name: Verify local signed-artifact update lineage
+        env:
+          GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+        run: >-
+          npm run release:mac:lineage --
+          --repo="$AGENTLAS_DESKTOP_GITHUB_REPO"
+          --tag="$RESOLVED_TAG"
+          --version="$RESOLVED_VERSION"
+          --history-count=2
+          --skip-remote-candidate
+
+      - name: Upload signed Mac package set for the release barrier
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentlas-release-macOS
+          path: |
+            release/Agentlas-*.dmg
+            release/Agentlas-*.dmg.blockmap
+            release/Agentlas-*.zip
+            release/Agentlas-*.zip.blockmap
+            release/desktop-release-verification.json
+            release/desktop-release.production.env
+            release/latest-mac.yml
+            release/update-lineage-verification.json
+          if-no-files-found: error
+          retention-days: 3
+
+  publish-all-platforms:
+    name: Single atomic public release writer
+    needs:
+      - release-artifact-barrier
+      - build-signed-mac-artifacts
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
+      AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
+      AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ runner.temp }}/agentlas-mac-update-history
+      HEPHAESTUS_REF: v1.1.36
+      HEPHAESTUS_COMMIT: 0cb90fc354d065b9af6894d6570df3de82fb53f6
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Resolve atomic publish inputs
+        env:
+          RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          RAW_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}
+          RAW_DRAFT: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || 'false' }}
+          RAW_APPLY_WEB_ENV: ${{ github.event_name == 'workflow_dispatch' && inputs.apply_web_env || 'true' }}
+        run: |
+          tag="$RAW_TAG"
+          version="${RAW_VERSION:-${tag#v}}"
+          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if [[ ! "$tag" =~ $semver_tag_re ]] || [ "$version" != "${tag#v}" ]; then exit 1; fi
+          if [ "$RAW_DRAFT" != "true" ] && [ "$RAW_DRAFT" != "false" ]; then exit 1; fi
+          if [ "$RAW_APPLY_WEB_ENV" != "true" ] && [ "$RAW_APPLY_WEB_ENV" != "false" ]; then exit 1; fi
+          tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          pkgver="$(node -p "require('./package.json').version")"
+          if [ "$head_commit" != "$tagged_commit" ] || [ "$pkgver" != "$version" ]; then exit 1; fi
+          {
+            echo "RESOLVED_TAG=$tag"
+            echo "RESOLVED_VERSION=$version"
+            echo "RESOLVED_DRAFT=$RAW_DRAFT"
+            echo "RESOLVED_APPLY_WEB_ENV=$RAW_APPLY_WEB_ENV"
+            echo "AGENTLAS_DESKTOP_RELEASE_TAG=$tag"
+          } >> "$GITHUB_ENV"
+
+      - name: Install publisher dependencies
+        run: npm ci
+
+      - name: Download every barrier-approved OS artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: agentlas-release-*
+          path: release
+          merge-multiple: true
+
+      - name: Verify local required manifest and hashes before first public write
+        run: >-
+          npm run release:assets:verify --
+          --release-dir=release
+          --tag="$RESOLVED_TAG"
+          --version="$RESOLVED_VERSION"
+
+      - name: Single releases-repository writer and stable promotion
         env:
           GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
-          AGENTLAS_RELEASE_ASSET_WAIT_MS: "900000"
-          AGENTLAS_RELEASE_ASSET_POLL_MS: "10000"
         run: |
           args=(--tag="$RESOLVED_TAG" --version="$RESOLVED_VERSION")
           if [ "$RESOLVED_DRAFT" = "true" ]; then args+=(--draft); fi
-          for attempt in 1 2 3; do
-            if npm run release:mac:publish -- "${args[@]}"; then
-              exit 0
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "::error::macOS release publish failed after $attempt attempts."
-              exit 1
-            fi
-            echo "Public release may still be settling after cross-platform uploads; retrying in 20 seconds ($attempt/3)."
-            sleep 20
-          done
+          npm run release:mac:publish -- "${args[@]}"
 
-      - name: Upload release evidence
+      - name: Upload complete release evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: agentlas-desktop-release-evidence
@@ -330,15 +529,6 @@ jobs:
             release/desktop-release-verification.json
             release/desktop-release.production.env
             release/latest-mac.yml
-          if-no-files-found: error
-
-      - name: Apply Railway web release env
-        if: env.RESOLVED_APPLY_WEB_ENV == 'true' && env.AGENTLAS_RAILWAY_RELEASE_READY == '1'
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
-        run: |
-          if [ -z "$RAILWAY_TOKEN" ]; then
-            railway link --project "$RAILWAY_PROJECT_ID" --environment production --service agentlas-web
-          fi
-          npm run release:web-env -- --apply --restart --verify-url=https://agentlas.cloud/api/desktop/latest
+            release/update-lineage-verification.json
+            release/release-asset-manifest.json
+          if-no-files-found: warn

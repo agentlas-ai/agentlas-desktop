@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.8.34 — 2026-07-15
+
+### Changed
+
+- **Updater repair now begins with the running app's immutable macOS trust
+  lineage.** Automatic update work refuses an app that does not satisfy the
+  pinned Developer ID, bundle identity, designated requirement, notarization,
+  and Gatekeeper checks. A local candidate has its own bundle ID, user-data
+  namespace, Keychain service, and disabled update feed, so it cannot share an
+  official install identity.
+- **Public release promotion now has one writer and an all-platform byte
+  barrier.** Windows/Linux package jobs emit only Actions artifacts. The signed
+  macOS writer verifies every required artifact and feed locally, uploads the
+  full set itself, downloads every staged public asset again, compares its
+  bytes and source-bound macOS verification evidence, then and only then can
+  set stable/latest. Windows/Linux feeds must also declare the exact generated
+  SHA-512 and byte size for every auto-update artifact; a filename-only feed
+  cannot pass the barrier.
+- **Updater recovery UI is now a CI gate.** The production renderer explicitly
+  tests the untrusted-install recovery action in Korean without changing the
+  product's English default, and the shared preload mock models Mobile Bridge
+  status instead of returning an undefined fallback that can hide UI defects.
+- **The release embeds Agentlas OS v1.1.36 at one immutable commit.**
+  Package metadata, updater contracts, release workflows, and the three-OS
+  harness pin 0cb90fc354d065b9af6894d6570df3de82fb53f6. Exact
+  `cloud|hub/agent|team/<slug>` references preserve both scope and entity kind,
+  and a Team without a signed executable graph fails before model execution.
+- **`/hep-storm` is an executable Desktop swarm boundary.** The chat route
+  preserves the raw command, removes only the routing slug from the worker
+  goal, binds the Desktop runtime inventory to model/effort allocation, and
+  marks a packet failure as blocked rather than presenting synthesized text as
+  a completed final gate. The Core harness and Desktop executor contract both
+  run before Windows, Linux, and signed-macOS release packaging.
+- **The top-level LLM now executes exact Agent, Team, and Group units without
+  flattening them.** A temporary TF can mix Cloud, Hub, and Local targets.
+  Local Groups run a generated group planner, distinct member turns, and group
+  synthesis. Packaged Teams run their signed manager plan, separate worker
+  turns, and manager synthesis before returning exactly one result to the
+  parent TF. `/hep-network` enters this route-to-execution bridge directly.
+- **Registered local Agents and Teams can be uploaded without finding their
+  source folders again.** Agent Cloud resolves the selected local identity to
+  its authoritative source path in the main process. My Agents manages a Team
+  as one owned unit, keeps its orchestrator/member topology intact, and hides
+  background eval/judge roles from the ordinary management surface.
+- **Normal Desktop turns retain the mandatory, fully local Model2Vec hybrid.**
+  No server embedding or per-user API cost is used. Retrieval ranks every
+  eligible row before applying the adaptive all-relevant-or-top-k budget, and
+  borrowed-agent semantic/governance relations survive projection rebuilds in
+  per-agent SQLite nests.
+
+### Boundaries and edge cases
+
+- A local candidate, a source checkout, a package test pass, or a version bump
+  cannot become an official macOS install through identity=null, an Apple
+  Distribution signature, a QA environment variable, or a copied app bundle.
+- The source commit and Core pin combination does not prove a Git tag,
+  installer, update feed, or GitHub release. The official release is complete only after
+  the reviewed `main` commit passes the native Windows/Linux install-update
+  lifecycle, the signed/notarized macOS publication gate, and the served-byte
+  update-feed verification.
+
 ## 0.8.33 — 2026-07-15
 
 ### Fixed
@@ -24,8 +85,9 @@
   that same version, so their updater does not check the feed again on its own.
   Removing `updater/install-journal-corrupt.v1.json` from the app's user-data
   directory and relaunching restores automatic updates without reinstalling.
-- This source version and Core pin do not themselves publish a Git tag,
-  installer, update feed, or GitHub release.
+- v0.8.33 was published as the stable/latest GitHub release after its complete
+  Windows, Linux, and signed/notarized macOS asset set passed the release
+  barrier. Source changes made after that tag are not part of v0.8.33.
 
 ## 0.8.32 — 2026-07-15
 

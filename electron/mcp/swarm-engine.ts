@@ -65,6 +65,27 @@ export interface SwarmLimits {
   maxRounds: number;
 }
 
+/**
+ * Host-visible completion verdict. A synthesis is useful even when some
+ * packets failed, but it is never evidence that the shared goal completed.
+ */
+export interface SwarmFinalGate {
+  canReportSuccess: boolean;
+  status: "success" | "blocked" | "aborted";
+  required: number;
+  passing: string[];
+  blocked: string[];
+  incomplete: string[];
+}
+
+export interface SwarmRunResult {
+  board: SwarmBoard;
+  final: string;
+  aborted: boolean;
+  doneCount: number;
+  finalGate: SwarmFinalGate;
+}
+
 export type SwarmEvent =
   | { kind: "task-start"; task: SwarmTask }
   | { kind: "task-done"; task: SwarmTask }
@@ -91,6 +112,23 @@ export interface SwarmSeed {
   role?: string;
   deps?: string[];
   allocation?: WorkloadAllocation;
+}
+
+/** Evaluate the only completion claim a swarm is allowed to make. */
+export function evaluateSwarmFinalGate(board: SwarmBoard, aborted = false): SwarmFinalGate {
+  const passing = board.tasks.filter((task) => task.status === "done").map((task) => task.id);
+  const blocked = board.tasks.filter((task) => task.status === "failed").map((task) => task.id);
+  const incomplete = board.tasks
+    .filter((task) => task.status === "pending" || task.status === "running")
+    .map((task) => task.id);
+  return {
+    canReportSuccess: !aborted && blocked.length === 0 && incomplete.length === 0 && passing.length === board.tasks.length,
+    status: aborted ? "aborted" : blocked.length > 0 || incomplete.length > 0 ? "blocked" : "success",
+    required: board.tasks.length,
+    passing,
+    blocked,
+    incomplete,
+  };
 }
 
 function depsSatisfied(task: SwarmTask, byId: Map<string, SwarmTask>): boolean {
@@ -130,7 +168,7 @@ export async function runSwarm(
   limits: SwarmLimits,
   hooks: SwarmHooks,
   signal?: AbortSignal,
-): Promise<{ board: SwarmBoard; final: string; aborted: boolean; doneCount: number }> {
+): Promise<SwarmRunResult> {
   const concurrency = Math.max(1, Math.floor(limits.concurrency));
   const board: SwarmBoard = {
     goal,
@@ -247,10 +285,16 @@ export async function runSwarm(
   // 사용자가 중단(abort)했으면 추가 LLM 호출(종합) 없이 지금까지 결과만 반환한다.
   if (signal?.aborted) {
     const doneCount = board.tasks.filter((t) => t.status === "done").length;
-    return { board, final: "", aborted: true, doneCount };
+    return { board, final: "", aborted: true, doneCount, finalGate: evaluateSwarmFinalGate(board, true) };
   }
 
   hooks.onEvent?.({ kind: "synthesize" });
   const final = await hooks.synthesize(board, signal);
-  return { board, final, aborted: false, doneCount: board.tasks.filter((t) => t.status === "done").length };
+  return {
+    board,
+    final,
+    aborted: false,
+    doneCount: board.tasks.filter((t) => t.status === "done").length,
+    finalGate: evaluateSwarmFinalGate(board),
+  };
 }

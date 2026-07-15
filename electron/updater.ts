@@ -22,6 +22,7 @@ import {
   verifyUpdaterContinuity,
   verifyUpdaterRecoveryCopies,
 } from "./updater/continuity";
+import { inspectMacInstalledAppTrust } from "./updater/mac-app-trust";
 
 // electron-updater is CommonJS in the main process bundle.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -195,6 +196,10 @@ export async function initAutoUpdater(): Promise<void> {
     uid: typeof process.getuid === "function" ? process.getuid() : null,
     runtimeVersion: () => readBundledRuntimeVersion(process.resourcesPath, sourceRoot),
     databaseSchemaVersion: () => readDatabaseSchemaVersion(dbPath),
+    inspectInstalledAppTrust: (bundlePath) => inspectMacInstalledAppTrust({
+      bundlePath,
+      policyPath: path.join(process.resourcesPath, "macos-release-signing-policy.json"),
+    }),
     quiesceWriters: async () => {
       // Set both gates immediately, then wait for their current writes to
       // settle before continuity copies/hash counts are captured.

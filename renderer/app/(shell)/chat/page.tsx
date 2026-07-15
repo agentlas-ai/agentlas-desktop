@@ -24,7 +24,7 @@ import type {
   ToolFactoryScaffoldResult,
   ToolFactoryToolRecord,
 } from "@/lib/types";
-import type { HiredAgentCard, InvocationRunReceipt, Recommendation, RecExecChoice, RecRouterAgent, RecStage } from "@shared/types";
+import type { HiredAgentCard, InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
 import { extractQuestions } from "@/lib/ask-question";
@@ -1819,6 +1819,8 @@ function ChatPage() {
         pipelineStages?: RecStage[];
         /** 추천 시트의 네트워크 픽이면 빌려올 Hub 에이전트 슬러그 — 백엔드가 hep-call 로 borrow. */
         borrowAgents?: string[];
+        /** Exact temporary TF roster. Unlike switchAgent this never rebinds the chat. */
+        taskForceTargets?: OrchestrationTarget[];
         /** Router Agent 에스컬레이션 — main 런타임이 시스템 프롬프트 앞에 주입한다. */
         routerAgent?: RecRouterAgent;
       },
@@ -1931,12 +1933,14 @@ function ChatPage() {
       // 고용 바인딩 자동 재주입 — 추천 확정 턴은 opts로 명시되고, 이후 턴은 채팅에
       // 저장된 고용 카드가 이어받는다(증발 버그 수정). 재호출 과금은 허브 24h 리스가 0으로 접는다.
       const effectiveBorrowAgents =
-        (opts?.borrowAgents?.length ?? 0) > 0
+        (opts?.taskForceTargets?.length ?? 0) > 0
+          ? undefined
+          : (opts?.borrowAgents?.length ?? 0) > 0
           ? opts?.borrowAgents
           : hiredAgentsRef.current.length
             ? hiredAgentsRef.current.map((card) => card.slug)
             : undefined;
-      if (agentGroup || (effectiveBorrowAgents?.length ?? 0) > 0 || (opts?.pipelineStages?.length ?? 0) > 1) {
+      if (agentGroup || (effectiveBorrowAgents?.length ?? 0) > 0 || (opts?.taskForceTargets?.length ?? 0) > 0 || (opts?.pipelineStages?.length ?? 0) > 1) {
         setNetworkOpenPersisted(true);
       }
       cancelRequestedRef.current = false;
@@ -1985,6 +1989,7 @@ function ChatPage() {
           targetAppId: generatedAppRoute?.action === "edit" ? generatedAppRoute.app.id : undefined,
           targetAppAction: generatedAppRoute?.action === "edit" ? "edit" : undefined,
           borrowAgents: effectiveBorrowAgents,
+          taskForceTargets: opts?.taskForceTargets,
           pipelineStages: opts?.pipelineStages,
           routerAgent: opts?.routerAgent,
         });
@@ -2688,24 +2693,13 @@ function ChatPage() {
     };
     switch (choice.kind) {
       case "agent":
-        // 팀/회사 추천은 파괴적 rebind(switchAgent=firm_id NULL)를 피해 네트워크 경로로 실행한다.
-        if (choice.isFirm) {
-          void send(`hep-network ${text}`, sendOpts);
-        } else {
-          // 전환 실패(미설치 id 등)해도 메시지는 반드시 나간다 — 자동 라우팅이 조용히 삼키지 않게.
-          void switchAgent(choice.agentId)
-            .catch(() => undefined)
-            .then(() => send(text, sendOpts));
-        }
+        // Auto-routing creates a temporary TF target and never mutates the
+        // chat's persistent agent/firm/group binding.
+        void send(text, { ...sendOpts, taskForceTargets: [choice.target] });
         break;
       case "network":
-        // 고른 Hub 에이전트를 borrow 해서 실행(BYOM). 선택이 없으면(혹시) 네트워크 라우팅 폴백.
-        if (choice.agents && choice.agents.length > 0) {
-          // 고용 바인딩: 이 선택을 채팅에 영속해 다음 턴에도 자동 재주입 —
-          // "다음 메시지에서 조용히 원래 에이전트로 돌아가는" 증발 버그의 수정.
-          // 과금은 허브 24h 리스가 관리하므로(재호출 무과금) 여기선 UX 바인딩만 저장.
-          void hireAgents(choice.agents);
-          void send(text, { ...sendOpts, borrowAgents: choice.agents });
+        if (choice.targets && choice.targets.length > 0) {
+          void send(text, { ...sendOpts, taskForceTargets: choice.targets });
         } else {
           void send(`hep-network ${text}`, sendOpts);
         }

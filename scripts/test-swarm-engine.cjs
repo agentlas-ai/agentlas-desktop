@@ -175,7 +175,28 @@ async function test(name, fn) {
     assert.equal(board.tasks[0].status, "failed");
   });
 
-  console.log(`\n스웜 엔진 유닛테스트 ${passed}/8 통과 ✅`);
+  // 9) 최종 게이트: 부분 종합은 허용해도 실패 패킷이 있으면 성공으로 보고할 수 없다.
+  await test("실패 패킷은 최종 성공 주장 차단", async () => {
+    const { final, finalGate } = await runSwarm(
+      "goal",
+      [{ title: "passing", brief: "" }, { title: "blocked", brief: "" }],
+      LIMITS,
+      {
+        nextId: idGen(),
+        runTask: async (task) => task.title === "blocked"
+          ? { result: "runtime failed", failed: true }
+          : { result: "verified result" },
+        synthesize: async () => "partial synthesis is still useful",
+      },
+    );
+    assert.equal(final, "partial synthesis is still useful", "partial synthesis may be returned for diagnosis");
+    assert.equal(finalGate.canReportSuccess, false, "a failed required packet must block the final success claim");
+    assert.equal(finalGate.status, "blocked");
+    assert.equal(finalGate.passing.length, 1);
+    assert.equal(finalGate.blocked.length, 1);
+  });
+
+  console.log(`\n스웜 엔진 유닛테스트 ${passed}/9 통과 ✅`);
 })().catch((err) => {
   console.error("\n❌ 테스트 실패:", err.message);
   process.exit(1);

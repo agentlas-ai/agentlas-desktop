@@ -168,6 +168,7 @@ function makeController(layout, updater, options = {}) {
     uid: options.uid === undefined ? process.getuid() : options.uid,
     runtimeVersion: () => options.runtimeVersion === undefined ? "1.1.12" : options.runtimeVersion,
     databaseSchemaVersion: () => options.databaseSchemaVersion === undefined ? 51 : options.databaseSchemaVersion,
+    inspectInstalledAppTrust: options.inspectInstalledAppTrust || (async () => ({ ok: true })),
     quiesceWriters: options.quiesceWriters,
     captureContinuity: options.captureContinuity || continuity.capture,
     verifyContinuity: options.verifyContinuity || (async () => ({ ok: true, violations: [] })),
@@ -181,6 +182,8 @@ function makeController(layout, updater, options = {}) {
     recoverySessionRetryAttempts: options.recoverySessionRetryAttempts,
     waitForRecoveryRetry: options.waitForRecoveryRetry,
     refreshSessionForRecovery: options.refreshSessionForRecovery,
+    nativeInstallWatchdogMs: options.nativeInstallWatchdogMs,
+    nativeInstallRetryBaseDelayMs: options.nativeInstallRetryBaseDelayMs,
     logger: { log() {}, warn() {}, error() {} },
   });
   return { controller, states, revealed, opened, continuity };
@@ -198,25 +201,67 @@ function seedStaleMacInstallState(layout) {
   return { updaterCache, shipIt };
 }
 
-async function rootOwnedBundleFailsClosed() {
+async function rootOwnedOfficialBundleUsesNativeAuthorizationBoundary() {
   const layout = makeLayout();
   const updater = new FakeUpdater({ updateInfo: { version: "0.7.29", agentlasCompatibility: compatibility } });
-  const { controller, opened } = makeController(layout, updater, { uid: process.getuid() + 1 });
+  let trustInspections = 0;
+  const { controller } = makeController(layout, updater, {
+    uid: process.getuid() + 1,
+    inspectInstalledAppTrust: async () => {
+      trustInspections += 1;
+      return { ok: true };
+    },
+  });
   await controller.init();
-  const first = await controller.check();
-  assert.equal(first.status, "manual-required");
-  assert.equal(first.code, "install-not-owned");
-  assert.equal(updater.downloadCount, 0, "root/other-owned app must not download an auto-install payload");
-  const second = await controller.check();
-  assert.equal(second.code, "install-not-owned", "repeated checks must retain the real ownership reason");
-  assert.equal(updater.downloadCount, 0, "same blocked target must never enter a download/install loop");
-  assert.equal((await controller.install()).accepted, false);
-  assert.equal(updater.installCount, 0);
+  const state = await controller.check();
+  assert.equal(state.status, "downloaded");
+  assert.equal(updater.downloadCount, 1, "filesystem owner mismatch must not preempt the native updater helper");
+  assert.equal(trustInspections, 1, "official identity remains the pre-download boundary");
   assert.equal(fs.readFileSync(layout.execPath, "utf8"), "previous-app-binary");
-  assert.equal((await controller.openManualDownload()).accepted, true);
-  assert.deepEqual(opened, ["https://agentlas.cloud/desktop"]);
   controller.dispose();
   fs.rmSync(layout.root, { recursive: true, force: true });
+}
+
+async function untrustedMacSourceFailsClosedBeforeDownloadAndNonMacIsUnaffected() {
+  const diagnostic = {
+    category: "source-signature-class",
+    message: "The running app is not signed with the official Developer ID application certificate.",
+  };
+  const macLayout = makeLayout();
+  const macUpdater = new FakeUpdater({ updateInfo: { version: "0.7.29", agentlasCompatibility: compatibility } });
+  const mac = makeController(macLayout, macUpdater, {
+    inspectInstalledAppTrust: async () => ({ ok: false, diagnostic }),
+  });
+  await mac.controller.init();
+  const blocked = await mac.controller.check();
+  assert.equal(blocked.status, "manual-required");
+  assert.equal(blocked.code, "install-source-untrusted");
+  assert.equal(blocked.canRetry, false);
+  assert.equal(blocked.manualDownloadUrl, "https://agentlas.cloud/desktop");
+  assert.deepEqual(blocked.diagnostic, diagnostic);
+  assert.equal(macUpdater.downloadCount, 0, "Apple Distribution/ad-hoc/local source must fail before payload download");
+  assert.doesNotMatch(JSON.stringify(blocked), /\/Applications\/|token|secret/i);
+  mac.controller.dispose();
+  fs.rmSync(macLayout.root, { recursive: true, force: true });
+
+  for (const platform of ["win32", "linux"]) {
+    const layout = makeLayout();
+    const updater = new FakeUpdater({ updateInfo: { version: "0.7.29", agentlasCompatibility: compatibility } });
+    let trustInspections = 0;
+    const target = makeController(layout, updater, {
+      platform,
+      inspectInstalledAppTrust: async () => {
+        trustInspections += 1;
+        return { ok: false, diagnostic };
+      },
+    });
+    await target.controller.init();
+    assert.equal((await target.controller.check()).status, "downloaded");
+    assert.equal(updater.downloadCount, 1);
+    assert.equal(trustInspections, 0, `${platform} must never enter the macOS trust inspector`);
+    target.controller.dispose();
+    fs.rmSync(layout.root, { recursive: true, force: true });
+  }
 }
 
 async function installJournalStopsFailedApplyLoopAndReconcilesSuccess() {
@@ -858,6 +903,152 @@ async function transientFailuresAndConcurrencyPreserveTruth() {
   fs.rmSync(installLayout.root, { recursive: true, force: true });
 }
 
+async function nativeInstallFailuresAreRedactedRetryableAndBackedOff() {
+  const layout = makeLayout();
+  let now = 1_800_000_000_000;
+  let writerResumes = 0;
+  const sensitiveError = Object.assign(
+    new Error("ENOSPC staging /Users/private/account/update.zip token=do-not-leak"),
+    { code: "ENOSPC" },
+  );
+  const updater = new FakeUpdater({
+    updateInfo: { version: "0.7.29", agentlasCompatibility: compatibility },
+    installError: sensitiveError,
+  });
+  const target = makeController(layout, updater, {
+    now: () => now,
+    nativeInstallRetryBaseDelayMs: 10,
+    quiesceWriters: async () => () => { writerResumes += 1; },
+  });
+  await target.controller.init();
+  assert.equal((await target.controller.check()).status, "downloaded");
+
+  const first = await target.controller.install();
+  assert.equal(first.accepted, false);
+  assert.equal(first.state.status, "manual-required");
+  assert.equal(first.state.code, "install-start-failed");
+  assert.equal(first.state.diagnostic.category, "native-install-space");
+  assert.equal(first.state.canRetry, true);
+  assert.equal(first.state.retryAfter, now + 10);
+  assert.equal(writerResumes, 1, "failed native handoff must resume background writers exactly once");
+  assert.doesNotMatch(JSON.stringify(first.state), /Users\/private|do-not-leak|update\.zip/);
+  const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
+  const journal = JSON.parse(fs.readFileSync(journalPath, "utf8"));
+  assert.equal(journal.nativeInstallFailures, 1);
+  assert.equal(journal.retryAfter, now + 10);
+  assert.doesNotMatch(JSON.stringify(journal), /Users\/private|do-not-leak|update\.zip/);
+
+  assert.equal((await target.controller.check()).status, "manual-required", "backoff must prevent a tight fresh-download loop");
+  assert.equal(updater.downloadCount, 1);
+  now += 10;
+  updater.installError = null;
+  const fresh = await target.controller.check();
+  assert.equal(fresh.status, "downloaded");
+  assert.equal(updater.downloadCount, 2, "retry must use a newly downloaded payload");
+  assert.equal(fs.existsSync(journalPath), true, "retry budget and recovery copy remain durable until handoff succeeds");
+  assert.equal((await target.controller.install()).accepted, true);
+  assert.equal(updater.installCount, 2);
+  target.controller.dispose();
+  fs.rmSync(layout.root, { recursive: true, force: true });
+
+  const boundedLayout = makeLayout();
+  let boundedNow = 1_800_000_000_000;
+  const boundedUpdater = new FakeUpdater({
+    updateInfo: { version: "0.7.29", agentlasCompatibility: compatibility },
+    installError: Object.assign(new Error("permission denied /private/path"), { code: "EPERM" }),
+  });
+  const bounded = makeController(boundedLayout, boundedUpdater, {
+    now: () => boundedNow,
+    nativeInstallRetryBaseDelayMs: 1,
+  });
+  await bounded.controller.init();
+  await bounded.controller.check();
+  for (let failure = 1; failure <= 3; failure += 1) {
+    const result = await bounded.controller.install();
+    assert.equal(result.accepted, false);
+    assert.equal(result.state.diagnostic.category, "native-install-permission");
+    assert.equal(result.state.canRetry, true, `transient native failure ${failure} must not permanently strand this target`);
+    assert.equal(result.state.retryAfter, boundedNow + (2 ** (failure - 1)));
+    boundedNow = result.state.retryAfter;
+    assert.equal((await bounded.controller.check()).status, "downloaded");
+  }
+  assert.equal(JSON.parse(fs.readFileSync(path.join(boundedLayout.userDataPath, "updater", "install-journal.v1.json"), "utf8")).nativeInstallFailures, 3);
+  bounded.controller.dispose();
+  fs.rmSync(boundedLayout.root, { recursive: true, force: true });
+
+  const signatureLayout = makeLayout();
+  const signatureUpdater = new FakeUpdater({
+    updateInfo: { version: "0.7.29", agentlasCompatibility: compatibility },
+    installError: new Error("code signature has different Team ID /private/path"),
+  });
+  const signature = makeController(signatureLayout, signatureUpdater);
+  await signature.controller.init();
+  await signature.controller.check();
+  const terminalSignature = await signature.controller.install();
+  assert.equal(terminalSignature.state.diagnostic.category, "native-install-signature");
+  assert.equal(terminalSignature.state.canRetry, false, "same signed bytes cannot repair a target identity mismatch");
+  signature.controller.dispose();
+  fs.rmSync(signatureLayout.root, { recursive: true, force: true });
+}
+
+async function nativeInstallWatchdogRestoresWritersAndSourceIsRecheckedBeforeHandoff() {
+  const changedIdentityLayout = makeLayout();
+  let inspections = 0;
+  let quiesces = 0;
+  const changedUpdater = new FakeUpdater({ updateInfo: { version: "0.7.29", agentlasCompatibility: compatibility } });
+  const changed = makeController(changedIdentityLayout, changedUpdater, {
+    inspectInstalledAppTrust: async () => {
+      inspections += 1;
+      return inspections === 1
+        ? { ok: true }
+        : {
+          ok: false,
+          diagnostic: {
+            category: "source-identity",
+            message: "The running app does not match the pinned Agentlas application identity.",
+          },
+        };
+    },
+    quiesceWriters: async () => {
+      quiesces += 1;
+      return () => {};
+    },
+  });
+  await changed.controller.init();
+  assert.equal((await changed.controller.check()).status, "downloaded");
+  const rejected = await changed.controller.install();
+  assert.equal(rejected.accepted, false);
+  assert.equal(rejected.state.code, "install-source-untrusted");
+  assert.equal(changedUpdater.installCount, 0);
+  assert.equal(quiesces, 0, "identity drift must stop before writers or continuity are touched");
+  changed.controller.dispose();
+  fs.rmSync(changedIdentityLayout.root, { recursive: true, force: true });
+
+  const watchdogLayout = makeLayout();
+  let resumes = 0;
+  const watchdogUpdater = new FakeUpdater({ updateInfo: { version: "0.7.29", agentlasCompatibility: compatibility } });
+  const watchdogTarget = makeController(watchdogLayout, watchdogUpdater, {
+    nativeInstallWatchdogMs: 5,
+    nativeInstallRetryBaseDelayMs: 1,
+    quiesceWriters: async () => () => { resumes += 1; },
+  });
+  await watchdogTarget.controller.init();
+  await watchdogTarget.controller.check();
+  const activeHelperState = path.join(watchdogLayout.homePath, "Library", "Caches", "com.agentlas.desktop.ShipIt", "update.active");
+  fs.mkdirSync(activeHelperState, { recursive: true });
+  fs.writeFileSync(path.join(activeHelperState, "owned-by-helper"), "active");
+  assert.equal((await watchdogTarget.controller.install()).accepted, true);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const timedOut = watchdogTarget.controller.getState();
+  assert.equal(timedOut.status, "manual-required");
+  assert.equal(timedOut.diagnostic.category, "native-install-timeout");
+  assert.equal(timedOut.canRetry, true);
+  assert.equal(resumes, 1, "watchdog must restore writers exactly once when the process stays alive");
+  assert.equal(fs.existsSync(activeHelperState), true, "watchdog must not delete staging state without proving helper exit");
+  watchdogTarget.controller.dispose();
+  fs.rmSync(watchdogLayout.root, { recursive: true, force: true });
+}
+
 async function realSqliteContinuityBackupIsVerifiedAndSecretSafe() {
   const layout = makeLayout();
   const databasePath = path.join(layout.userDataPath, "agentlas.sqlite");
@@ -1401,7 +1592,8 @@ async function v53HubBookmarkKeyMigrationIsNarrowlyApproved() {
 }
 
 (async () => {
-  await rootOwnedBundleFailsClosed();
+  await rootOwnedOfficialBundleUsesNativeAuthorizationBoundary();
+  await untrustedMacSourceFailsClosedBeforeDownloadAndNonMacIsUnaffected();
   await legacyOrphanShipItStateIsClearedBeforeFreshCheck();
   await undeletableLegacyStatePausesAutomaticUpdates();
   await corruptInstallJournalFailsClosedAcrossRelaunch();
@@ -1417,9 +1609,11 @@ async function v53HubBookmarkKeyMigrationIsNarrowlyApproved() {
   await compatibilityBoundariesFailBeforeDownload();
   await continuityBackupFailureRemainsVisibleAndRetryable();
   await transientFailuresAndConcurrencyPreserveTruth();
+  await nativeInstallFailuresAreRedactedRetryableAndBackedOff();
+  await nativeInstallWatchdogRestoresWritersAndSourceIsRecheckedBeforeHandoff();
   await realSqliteContinuityBackupIsVerifiedAndSecretSafe();
   await v53HubBookmarkKeyMigrationIsNarrowlyApproved();
-  console.log("test-updater-production-contract: PASS (legacy-orphan, cleanup-fail-closed, root-owned, corrupt-journal, no-loop, protected-continuity, compatibility, concurrency)");
+  console.log("test-updater-production-contract: PASS (source lineage, native retry/watchdog, nonMac parity, rollback continuity)");
   clearTimeout(watchdog);
   app.exit(0);
 })().catch((error) => {

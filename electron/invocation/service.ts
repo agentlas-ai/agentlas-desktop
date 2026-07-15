@@ -163,6 +163,7 @@ export class InvocationService {
           toolMode: runReq.toolMode,
           hubMode: runReq.hubMode,
           borrowAgents: runReq.borrowAgents,
+          taskForceTargets: runReq.taskForceTargets,
           hasImages: Boolean(runReq.images?.length),
           planMode: runReq.planMode,
           goalMode: runReq.goalMode,

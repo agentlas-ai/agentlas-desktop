@@ -89,6 +89,8 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
 
   const attentionCopy = isRecovery
     ? t("update.recovery_required")
+    : state.code === "install-source-untrusted"
+      ? t("update.repair_required")
     : state.code === "continuity-backup-failed"
       ? t("update.safety_backup_failed")
       : state.code === "legacy-cleanup-failed"
@@ -151,26 +153,30 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
                 onClick={() => void (
                   canRevealRecovery
                     ? revealRecoveryBackup()
-                    : isRecovery || state.manualDownloadUrl
-                      ? openManualDownload()
-                      : retrySafetyAction()
+                    : state.canRetry
+                      ? retrySafetyAction()
+                      : openManualDownload()
                 )}
                 className="sidenav-update-action"
                 title={
                   canRevealRecovery
                     ? t("update.reveal_recovery")
-                    : isRecovery || state.manualDownloadUrl
-                      ? t("update.open_download")
-                      : t("update.retry")
+                    : state.canRetry
+                      ? t("update.retry")
+                      : state.code === "install-source-untrusted"
+                        ? t("update.repair_with_official")
+                        : t("update.open_download")
                 }
               >
                 {collapsed
-                  ? (state.canRetry && !isRecovery && !state.manualDownloadUrl ? "↻" : "↗")
+                  ? (state.canRetry && !isRecovery ? "↻" : "↗")
                   : canRevealRecovery
                     ? t("update.reveal_recovery")
-                    : isRecovery || state.manualDownloadUrl
-                      ? t("update.open_download")
-                      : t("update.retry")}
+                    : state.canRetry
+                      ? t("update.retry")
+                      : state.code === "install-source-untrusted"
+                        ? t("update.repair_with_official")
+                        : t("update.open_download")}
               </button>
             )
           )}

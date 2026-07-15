@@ -5,6 +5,7 @@ import type {
   InvocationRunReceipt,
   McpInvocationEvent,
   McpInvocationRequest,
+  OrchestrationTarget,
   RunEventUi,
 } from "../../shared/types";
 
@@ -347,6 +348,24 @@ function stringArrayPayload(payload: Record<string, unknown>, key: string): stri
   return normalized.length ? normalized : undefined;
 }
 
+function orchestrationTargetsPayload(payload: Record<string, unknown>): OrchestrationTarget[] | undefined {
+  const value = payload.taskForceTargets;
+  if (!Array.isArray(value) || value.length === 0 || value.length > 32) return undefined;
+  const out: OrchestrationTarget[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+    const target = raw as Record<string, unknown>;
+    const source = target.source;
+    const kind = target.entityKind;
+    if (source === "local" && kind === "agent" && typeof target.agentId === "string") out.push({ source, entityKind: kind, agentId: target.agentId });
+    else if (source === "local" && kind === "team" && typeof target.firmId === "string") out.push({ source, entityKind: kind, firmId: target.firmId });
+    else if (source === "local" && kind === "group" && typeof target.groupId === "string") out.push({ source, entityKind: kind, groupId: target.groupId });
+    else if ((source === "cloud" || source === "hub") && (kind === "agent" || kind === "team") && typeof target.slug === "string") out.push({ source, entityKind: kind, slug: target.slug });
+    else return undefined;
+  }
+  return out;
+}
+
 /** True once a renderer-selected run id has crossed the durable start gate. */
 export function hasInvocationRunReceipt(runId: string): boolean {
   if (!runId) return false;
@@ -413,6 +432,9 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
     ...(typeof startPayload.hasImages === "boolean" ? { hasImages: startPayload.hasImages } : {}),
     ...(stringArrayPayload(startPayload, "borrowAgents")
       ? { borrowAgents: stringArrayPayload(startPayload, "borrowAgents") }
+      : {}),
+    ...(orchestrationTargetsPayload(startPayload)
+      ? { taskForceTargets: orchestrationTargetsPayload(startPayload) }
       : {}),
     ...(failure?.error_code ? { errorCode: failure.error_code } : {}),
     ...(failure?.error_message

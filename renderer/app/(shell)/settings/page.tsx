@@ -47,6 +47,8 @@ const BACKEND_LABEL_KO: Record<RuntimeBackend, string> = {
   openai: "OpenAI (ChatGPT)",
   google: "Google (Gemini)",
   ollama: "Ollama (로컬)",
+  lmstudio: "LM Studio (로컬)",
+  mlx: "MLX (로컬)",
   upstage: "Upstage Solar (🇰🇷 한국 소버린)",
   custom: "Custom OpenAI (호환 모델)",
   glm: "GLM (Z.ai)",
@@ -60,6 +62,8 @@ const BACKEND_LABEL_EN: Record<RuntimeBackend, string> = {
   openai: "OpenAI (ChatGPT)",
   google: "Google (Gemini)",
   ollama: "Ollama (local)",
+  lmstudio: "LM Studio (local)",
+  mlx: "MLX (local)",
   upstage: "Upstage Solar (🇰🇷 Korean sovereign)",
   custom: "Custom OpenAI (compatible model)",
   glm: "GLM (Z.ai)",
@@ -1497,6 +1501,7 @@ function UpdatePanel() {
   }
 
   const statusText = (() => {
+    if (state.code === "install-source-untrusted") return t("settings.update.repair_required");
     if (state.code === "continuity-backup-failed") return t("settings.update.safety_backup_failed");
     if (state.code === "legacy-cleanup-failed") return t("settings.update.cleanup_failed");
     if (state.code === "compatibility-metadata-missing") return t("settings.update.metadata_missing");
@@ -1574,22 +1579,6 @@ function UpdatePanel() {
           >
             {t("settings.update.install")}
           </button>
-        ) : (state.status === "manual-required" || state.status === "incompatible") && state.manualDownloadUrl ? (
-          <button
-            onClick={() => void openManualDownload()}
-            style={{
-              padding: "8px 14px",
-              borderRadius: "var(--radius-md)",
-              background: "var(--paper)",
-              color: "var(--ink)",
-              fontWeight: 700,
-              fontSize: 12,
-              border: "1px solid var(--paper-edge)",
-              boxShadow: "var(--neu-raised)",
-            }}
-          >
-            {t("settings.update.open_download")}
-          </button>
         ) : (state.status === "manual-required" || state.status === "incompatible") && state.canRetry ? (
           <button
             onClick={() => void retrySafetyAction()}
@@ -1605,6 +1594,24 @@ function UpdatePanel() {
             }}
           >
             {t("settings.update.retry")}
+          </button>
+        ) : (state.status === "manual-required" || state.status === "incompatible") && state.manualDownloadUrl ? (
+          <button
+            onClick={() => void openManualDownload()}
+            style={{
+              padding: "8px 14px",
+              borderRadius: "var(--radius-md)",
+              background: "var(--paper)",
+              color: "var(--ink)",
+              fontWeight: 700,
+              fontSize: 12,
+              border: "1px solid var(--paper-edge)",
+              boxShadow: "var(--neu-raised)",
+            }}
+          >
+            {state.code === "install-source-untrusted"
+              ? t("settings.update.repair_with_official")
+              : t("settings.update.open_download")}
           </button>
         ) : state.status === "manual-required" || state.status === "incompatible" ? null
         : state.status === "recovery-required" ? (

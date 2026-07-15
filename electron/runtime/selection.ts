@@ -16,6 +16,8 @@ import { isAgyBinaryPath, runGemini } from "./gemini";
 import { runGrok } from "./grok";
 import { runCursor } from "./cursor";
 import { runOllama } from "./ollama";
+import { runLMStudio } from "./lmstudio";
+import { runMLX } from "./mlx";
 import { acquireRunSlot } from "./run-slots";
 import type { Runner } from "./runner";
 
@@ -94,6 +96,10 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
     return { runner: runCursorSlotted, label: `Cursor Agent${active.model && active.model !== "auto" ? ` · ${active.model}` : " · Auto"}` };
   if (active.kind === "ollama")
     return { runner: runOllama, label: `Ollama${active.model ? ` · ${active.model}` : ""}` };
+  if (active.kind === "lmstudio")
+    return { runner: runLMStudio, label: `LM Studio${active.model ? ` · ${active.model}` : ""}` };
+  if (active.kind === "mlx")
+    return { runner: runMLX, label: `MLX${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "byok") {
     if (active.backend === "anthropic")
       return { runner: runAnthropicByok, label: RUNNER_LABEL["byok:anthropic"] };
@@ -173,7 +179,13 @@ export function selectRuntimeForTargets(
 }
 
 function agentAppStatelessSafe(runtime: RuntimeStatus): boolean {
-  return runtime.kind === "claude-code" || runtime.kind === "byok" || runtime.kind === "ollama";
+  return (
+    runtime.kind === "claude-code" ||
+    runtime.kind === "byok" ||
+    runtime.kind === "ollama" ||
+    runtime.kind === "lmstudio" ||
+    runtime.kind === "mlx"
+  );
 }
 
 /**

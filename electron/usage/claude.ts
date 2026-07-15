@@ -4,6 +4,7 @@
 // 응답: { five_hour, seven_day, seven_day_opus, seven_day_sonnet, extra_usage }
 //       각 창 used_percentage·resets_at·is_enabled / extra_usage는 월 크레딧.
 // (방식 출처: oss agentcat-connectors)
+import { claudeUsageAccountFingerprint } from "./account-fingerprint";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile } from "node:fs/promises";
@@ -85,11 +86,13 @@ const LABELS: Record<string, string> = {
 export async function getClaudeUsage(): Promise<ProviderUsage | null> {
   const { candidates, keychainBlocked } = await readClaudeTokens();
 
+  const accountFingerprint = await claudeUsageAccountFingerprint();
   const base = {
     provider: "claude-code",
     backend: "anthropic" as const,
     label: "Claude Code",
     fetchedAt: Date.now(),
+    ...(accountFingerprint ? { accountFingerprint } : {}),
   };
   // 토큰 후보 0 + 키체인 접근 차단 = 미연결이 아니라 "조회 불가" — 정직하게 표면화(재시도/재로그인 액션).
   if (!candidates.length && keychainBlocked) {

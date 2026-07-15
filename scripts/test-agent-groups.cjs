@@ -66,6 +66,22 @@ async function main() {
   });
   const groups = require("../dist/electron/store/agent-groups.js");
   const chats = require("../dist/electron/store/chats.js");
+  const firms = require("../dist/electron/store/firms.js");
+
+  const installedTeam = firms.upsertLocalTeamFirm({
+    slug: "launch-installed-team",
+    name: "Launch Installed Team",
+    tagline: "A complete installed team execution unit",
+    ceoAgentId: "agent-orchestrator-test",
+    orgChart: [
+      {
+        agentSlug: "agentlas-orchestrator",
+        role: "CEO",
+        reportsTo: null,
+        agentId: "agent-orchestrator-test",
+      },
+    ],
+  });
 
   const created = groups.createAgentGroup({
     name: "Launch crew",
@@ -101,6 +117,32 @@ async function main() {
   assert.equal(listed[0].members[0].hubEntityKind, "team");
   const createdRuntime = await groups.resolveAgentGroupForRuntime(created.id);
   assert.equal(createdRuntime.members[0].entityKind, "team", "an unambiguous Hub member must retain its namespace at runtime");
+
+  const installedTeamGroup = groups.createAgentGroup({
+    name: "Installed Team Group",
+    members: [
+      {
+        id: "installed-team-member",
+        source: "firm",
+        firmId: installedTeam.id,
+        firmSlug: installedTeam.slug,
+        addedAt: "2026-06-30T00:00:00.000Z",
+        snapshot: {
+          name: installedTeam.name,
+          nameEn: installedTeam.nameEn,
+          tagline: installedTeam.tagline,
+          taglineEn: installedTeam.taglineEn,
+          routeLabel: "Installed Team",
+          entityKind: "team",
+        },
+      },
+    ],
+  });
+  const installedTeamRuntime = await groups.resolveAgentGroupForRuntime(installedTeamGroup.id);
+  assert.equal(installedTeamRuntime.members[0].source, "firm");
+  assert.equal(installedTeamRuntime.members[0].entityKind, "team");
+  assert.equal(installedTeamRuntime.members[0].firmId, installedTeam.id);
+  assert.equal(installedTeamRuntime.members[0].installedAgentId, "agent-orchestrator-test");
 
   const composite = groups.createAgentGroup({
     name: "Composite Hub identities",
@@ -192,6 +234,7 @@ async function main() {
   groups.removeAgentGroup(created.id);
   groups.removeAgentGroup(composite.id);
   groups.removeAgentGroup(legacy.id);
+  groups.removeAgentGroup(installedTeamGroup.id);
   assert.equal(groups.listAgentGroups().length, 0);
 
   fs.rmSync(tmp, { recursive: true, force: true });

@@ -1,0 +1,39 @@
+# Explicit local/QA macOS packaging boundary.
+#
+# Do not use the official base config with identity=null. This configuration
+# gives the candidate its own macOS bundle, Electron userData namespace,
+# Keychain service, output directory, and deliberately no update publisher.
+extends: ./electron-builder.yml
+
+appId: com.agentlas.desktop.candidate
+productName: Agentlas-Local-Candidate
+
+directories:
+  output: release-local
+
+afterSign: build-resources/after-sign-trust.cjs
+
+extraMetadata:
+  agentlasInstallIdentity:
+    schemaVersion: 1
+    channel: local-candidate
+    appId: com.agentlas.desktop.candidate
+    appName: Agentlas-Local-Candidate
+    userDataNamespace: Agentlas-Local-Candidate
+    keychainService: com.agentlas.desktop.candidate
+    updateFeed: none
+
+mac:
+  # electron-builder extends the base mac config. Null clears only the
+  # platform-scoped official trust policy; global runtime extraResources stay
+  # intact. A local candidate cannot carry an official update identity hint.
+  extraResources: null
+  identity: null
+  notarize: false
+  forceCodeSigning: false
+  target:
+    - dir
+  artifactName: "Agentlas-Local-Candidate-${version}-${arch}.${ext}"
+
+# A local candidate must not emit app-update.yml or publish an artifact.
+publish: null

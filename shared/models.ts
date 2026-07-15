@@ -267,6 +267,8 @@ export const CONTEXT_MANAGED_BY: Record<RuntimeKind, "runtime" | "agentlas"> = {
   cursor: "runtime",
   byok: "agentlas",
   ollama: "agentlas",
+  lmstudio: "agentlas",
+  mlx: "agentlas",
 };
 
 // ── CLI 런타임 모델 선택 ──────────────────────────────────
@@ -384,7 +386,7 @@ export function modelOptionsFor(
   if (kind === "byok") {
     return byokModels(backend ?? "").map((m) => ({ id: m.id, label: m.label }));
   }
-  if (kind === "ollama") {
+  if (kind === "ollama" || kind === "lmstudio" || kind === "mlx") {
     return (availableModels ?? []).map((m) => ({ id: m, label: m }));
   }
   // Cursor's `agent models` (and future CLI discovery adapters) is the

@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { inspectPackagedMacSigningPolicy, verifyMacAppBundle } from "./lib/mac-app-signature.mjs";
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = new Map(
@@ -20,6 +22,7 @@ const repo = String(args.get("--repo") || process.env.AGENTLAS_DESKTOP_GITHUB_RE
 const version = String(args.get("--version") || JSON.parse(readFileSync(join(desktopRoot, "package.json"), "utf8")).version);
 const tag = String(args.get("--tag") || process.env.AGENTLAS_DESKTOP_RELEASE_TAG || `v${version}`);
 const arches = ["arm64", "x64"];
+const signingPolicyPath = join(desktopRoot, "build-resources", "macos-release-signing-policy.json");
 
 function run(command, commandArgs) {
   const result = spawnSync(command, commandArgs, {
@@ -52,6 +55,15 @@ function artifactUrl(arch) {
   return `https://github.com/${repo}/releases/download/${tag}/Agentlas-${version}-${arch}.dmg`;
 }
 
+function exactSourceCommit() {
+  const result = run("git", ["rev-parse", "HEAD"]);
+  const value = result.output.trim();
+  if (!result.ok || !/^[0-9a-f]{40}$/i.test(value)) {
+    throw new Error("Could not resolve the exact Desktop source commit for release provenance.");
+  }
+  return value.toLowerCase();
+}
+
 function cleanupAppleDouble() {
   if (!existsSync(releaseDir)) return;
   run("find", [releaseDir, "-name", "._*", "-delete"]);
@@ -61,6 +73,52 @@ function cleanupAppleDouble() {
     env: process.env,
   }).stdout.trim();
   if (dotClean) run(dotClean, ["-m", releaseDir]);
+}
+
+function inspectInnerApps({ file, arch }) {
+  const root = mkdtempSync(join(tmpdir(), `agentlas-release-${arch}-`));
+  const mountPoint = join(root, "mount");
+  const zipRoot = join(root, "zip");
+  mkdirSync(mountPoint, { recursive: true });
+  mkdirSync(zipRoot, { recursive: true });
+  const zipFile = join(releaseDir, `Agentlas-${version}-${arch}.zip`);
+  const result = {
+    zipFile,
+    zipExists: existsSync(zipFile),
+    attach: null,
+    detach: null,
+    extract: null,
+    dmgApp: null,
+    zipApp: null,
+    dmgSigningPolicy: null,
+    zipSigningPolicy: null,
+    designatedRequirementMatches: false,
+  };
+  try {
+    result.attach = run("hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mountPoint, file]);
+    const dmgAppPath = join(mountPoint, "Agentlas.app");
+    if (result.attach.ok && existsSync(dmgAppPath)) {
+      result.dmgApp = verifyMacAppBundle({ appPath: dmgAppPath, policyPath: signingPolicyPath });
+      result.dmgSigningPolicy = inspectPackagedMacSigningPolicy({ appPath: dmgAppPath, policyPath: signingPolicyPath });
+    }
+    if (result.zipExists) {
+      result.extract = run("ditto", ["-x", "-k", zipFile, zipRoot]);
+      const zipAppPath = join(zipRoot, "Agentlas.app");
+      if (result.extract.ok && existsSync(zipAppPath)) {
+        result.zipApp = verifyMacAppBundle({ appPath: zipAppPath, policyPath: signingPolicyPath });
+        result.zipSigningPolicy = inspectPackagedMacSigningPolicy({ appPath: zipAppPath, policyPath: signingPolicyPath });
+      }
+    }
+    result.designatedRequirementMatches = Boolean(
+      result.dmgApp?.designatedRequirement &&
+      result.zipApp?.designatedRequirement &&
+      result.dmgApp.designatedRequirement === result.zipApp.designatedRequirement,
+    );
+  } finally {
+    if (result.attach?.ok) result.detach = run("hdiutil", ["detach", mountPoint]);
+    if (!result.attach?.ok || result.detach?.ok) rmSync(root, { recursive: true, force: true });
+  }
+  return result;
 }
 
 function writeLatestMacYml(artifacts) {
@@ -108,6 +166,7 @@ const artifacts = arches.map((arch) => {
   const spctl = exists
     ? run("spctl", ["-a", "-t", "open", "--context", "context:primary-signature", "-v", file])
     : null;
+  const inner = exists ? inspectInnerApps({ file, arch }) : null;
   return {
     arch,
     fileName,
@@ -121,6 +180,7 @@ const artifacts = arches.map((arch) => {
     spctl,
     notarized: Boolean(stapler?.ok),
     gatekeeperAccepted: Boolean(spctl?.ok),
+    inner,
   };
 });
 
@@ -130,6 +190,17 @@ for (const artifact of artifacts) {
   if (artifact.hdiutil && !artifact.hdiutil.ok) failures.push(`${artifact.fileName}: hdiutil verify failed`);
   if (artifact.stapler && !artifact.stapler.ok) failures.push(`${artifact.fileName}: notarization ticket missing`);
   if (artifact.spctl && !artifact.spctl.ok) failures.push(`${artifact.fileName}: Gatekeeper rejected`);
+  if (artifact.inner) {
+    if (!artifact.inner.attach?.ok) failures.push(`${artifact.fileName}: could not mount for inner-app verification`);
+    if (!artifact.inner.dmgApp?.ok) failures.push(`${artifact.fileName}: DMG inner app failed pinned Developer ID/notarization/Gatekeeper`);
+    if (!artifact.inner.dmgSigningPolicy?.ok) failures.push(`${artifact.fileName}: DMG inner app is missing or drifted from the updater trust policy resource`);
+    if (!artifact.inner.zipExists) failures.push(`${artifact.fileName}: matching updater ZIP missing`);
+    if (artifact.inner.zipExists && !artifact.inner.extract?.ok) failures.push(`${artifact.fileName}: updater ZIP could not be extracted`);
+    if (!artifact.inner.zipApp?.ok) failures.push(`${artifact.fileName}: updater ZIP app failed pinned Developer ID/notarization/Gatekeeper`);
+    if (!artifact.inner.zipSigningPolicy?.ok) failures.push(`${artifact.fileName}: updater ZIP app is missing or drifted from the updater trust policy resource`);
+    if (!artifact.inner.designatedRequirementMatches) failures.push(`${artifact.fileName}: DMG and updater ZIP designated requirements differ`);
+    if (artifact.inner.detach && !artifact.inner.detach.ok) failures.push(`${artifact.fileName}: verification mount could not be detached`);
+  }
 }
 cleanupAppleDouble();
 const appleDouble = run("find", [releaseDir, "-name", "._*", "-print"]);
@@ -141,6 +212,7 @@ const ready = failures.length === 0;
 const latestMac = writeLatestMacYml(artifacts);
 const summary = {
   generatedAt: new Date().toISOString(),
+  sourceCommit: exactSourceCommit(),
   releaseDir,
   repo,
   tag,
@@ -156,6 +228,36 @@ const summary = {
     sha512: artifact.sha512,
     notarized: artifact.notarized,
     gatekeeperAccepted: artifact.gatekeeperAccepted,
+    innerApp: artifact.inner?.dmgApp ? {
+      gatekeeperAccepted: artifact.inner.dmgApp.gatekeeperAccepted,
+      notarized: artifact.inner.dmgApp.notarized,
+      developerId: artifact.inner.dmgApp.developerId,
+      bundleIdentifier: artifact.inner.dmgApp.bundleIdentifier,
+      teamIdentifier: artifact.inner.dmgApp.teamIdentifier,
+      leafAuthority: artifact.inner.dmgApp.leafAuthority,
+      designatedRequirement: artifact.inner.dmgApp.designatedRequirement,
+      updaterTrustPolicy: artifact.inner.dmgSigningPolicy ? {
+        present: artifact.inner.dmgSigningPolicy.present,
+        matchesSource: artifact.inner.dmgSigningPolicy.matchesSource,
+        sha256: artifact.inner.dmgSigningPolicy.sha256,
+      } : null,
+    } : null,
+    updaterZipApp: artifact.inner?.zipApp ? {
+      fileName: artifact.inner.zipFile.split("/").at(-1),
+      gatekeeperAccepted: artifact.inner.zipApp.gatekeeperAccepted,
+      notarized: artifact.inner.zipApp.notarized,
+      developerId: artifact.inner.zipApp.developerId,
+      bundleIdentifier: artifact.inner.zipApp.bundleIdentifier,
+      teamIdentifier: artifact.inner.zipApp.teamIdentifier,
+      leafAuthority: artifact.inner.zipApp.leafAuthority,
+      designatedRequirement: artifact.inner.zipApp.designatedRequirement,
+      matchesDmgDesignatedRequirement: artifact.inner.designatedRequirementMatches,
+      updaterTrustPolicy: artifact.inner.zipSigningPolicy ? {
+        present: artifact.inner.zipSigningPolicy.present,
+        matchesSource: artifact.inner.zipSigningPolicy.matchesSource,
+        sha256: artifact.inner.zipSigningPolicy.sha256,
+      } : null,
+    } : null,
     url: artifactUrl(artifact.arch),
     checks: {
       hdiutil: artifact.hdiutil ? { ok: artifact.hdiutil.ok, output: artifact.hdiutil.output } : null,

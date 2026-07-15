@@ -23,6 +23,10 @@ assert.match(input, /closest\('\[data-popover-kind="autocomplete"\]'\)/,
   "autocomplete option clicks must remain inside the outside-click boundary");
 assert.match(input, /scrollIntoView\(\{ block: "nearest", inline: "nearest" \}\)/,
   "keyboard-active autocomplete options must remain visible");
+assert.match(input, /key: "\/hep-storm"/,
+  "the executable Stormbreaker slash route must be discoverable from autocomplete");
+assert.equal((i18n.match(/"chatinput\.cmd\.hep_storm"/g) || []).length, 2,
+  "the Stormbreaker slash route must be localized in Korean and English");
 
 assert.match(stream, /setHasNewContent\(true\)/,
   "stream updates while scrolled up must mark new content");

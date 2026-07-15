@@ -44,6 +44,16 @@ Promise.resolve(window.agentlas.trex.imageProviders())
     const balance = await window.agentlas.billing.getCredits();
     assert.equal(typeof balance.remainingCredits, "number", "modeled billing.getCredits must return a balance shape");
 
+    const mobile = await window.agentlas.mobileBridge.status();
+    assert.equal(mobile.running, true, "modeled mobile bridge must return an operational status shape");
+    assert.match(mobile.endpoint, /^wss:\/\/127\.0\.0\.1:\d+\/v1\/mobile$/);
+    assert.deepEqual(mobile.devices, []);
+    assert.deepEqual(
+      window.__qa.missingBridgeCalls,
+      [{ path: "trex.imageProviders", args: [] }],
+      "mobile bridge methods must not fall through the neutral missing-method proxy",
+    );
+
     assert.equal(typeof window.agentlasFiles?.grantForFile, "function", "mock must expose the isolated drop-grant bridge");
     const dropped = await window.agentlasFiles.grantForFile({ name: "agentlas-file.png" });
     assert.equal(dropped.kind, "file");

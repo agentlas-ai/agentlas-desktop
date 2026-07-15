@@ -160,14 +160,16 @@ export type {
   MultimodalSettings,
 } from "./multimodal";
 
-export type RuntimeKind = "claude-code" | "codex" | "gemini" | "grok" | "cursor" | "byok" | "ollama";
+export type RuntimeKind = "claude-code" | "codex" | "gemini" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx";
 
-/** LLM 제공자. "ollama"는 로컬 머신에서 도는 오픈 모델(gemma/deepseek 등). */
+/** LLM 제공자. "ollama"/"lmstudio"/"mlx"는 로컬 머신에서 도는 오픈 모델(gemma/deepseek/qwen 등). */
 export type RuntimeBackend =
   | "anthropic"
   | "openai"
   | "google"
   | "ollama"
+  | "lmstudio"
+  | "mlx"
   | "upstage"
   | "custom"
   // Anthropic Messages API 호환 서드파티(구독/종량제 코딩 플랜)
@@ -533,7 +535,7 @@ export interface InstalledFirm {
   installedAt: string;
 }
 
-export type AgentGroupMemberSource = "installed" | "firm-node" | "hub";
+export type AgentGroupMemberSource = "installed" | "firm" | "firm-node" | "hub";
 export type AgentGroupMemberStatus = "ok" | "moved" | "missing";
 
 export interface AgentGroupMemberSnapshot {
@@ -572,7 +574,7 @@ export interface AgentGroupMember {
 export interface AgentGroupResolvedMember extends AgentGroupMember {
   status: AgentGroupMemberStatus;
   warnings: Array<
-    "agent_missing" | "hub_missing" | "route_missing" | "route_changed" | "unsupported_multi" | "unsupported_plugin"
+    "agent_missing" | "firm_missing" | "hub_missing" | "route_missing" | "route_changed" | "unsupported_multi" | "unsupported_plugin"
   >;
   /** Latest display/routing metadata, re-resolved from installed agents/org chart/Hub. */
   current?: AgentGroupMemberSnapshot;
@@ -2299,6 +2301,28 @@ export interface CloudAgentBuiltPrivateSaveRequest {
 /** Explicit public Agentlas Hub publish. Public routing and review gates apply. */
 export type CloudAgentHubPublishRequest = Omit<CloudAgentPublishRequest, "visibility">;
 
+export type CloudAgentRegisteredTarget =
+  | { entityKind: "agent"; agentId: string }
+  | { entityKind: "team"; firmId: string }
+  | { entityKind: "team"; agentId: string };
+
+export interface CloudAgentRegisteredUploadOption {
+  target: CloudAgentRegisteredTarget;
+  name: string;
+  slug: string;
+  entityKind: "agent" | "team";
+  sourceReady: boolean;
+}
+
+export interface CloudAgentRegisteredSaveRequest {
+  target: CloudAgentRegisteredTarget;
+}
+
+export interface CloudAgentRegisteredPublishRequest extends CloudAgentRegisteredSaveRequest {
+  reviewMode?: CloudAgentReviewMode;
+  notes?: string;
+}
+
 export interface CloudAgentSecurityFinding {
   id: string;
   severity: "blocker" | "high" | "medium" | "low" | "info";
@@ -2609,6 +2633,8 @@ export interface McpInvocationRequest {
   /** 추천 시트의 네트워크 모드에서 고른 Hub 에이전트 슬러그 — runMcpInvocation 이 hep-call 로
    *  이들을 빌려와(BYOM) 프롬프트 앞에 borrow 지시를 붙여 데스크탑 런타임으로 실행한다. */
   borrowAgents?: string[];
+  /** 임시 최상위 TF의 정확한 실행 단위. Main이 실행 직전에 각 대상을 재검증한다. */
+  taskForceTargets?: OrchestrationTarget[];
   /** 추천 시트의 pipeline 모드에서 받은 stage 계약 — 런타임이 단계별 입력/출력 handoff로 실행한다. */
   pipelineStages?: RecStage[];
   /** 저신뢰 라우팅 결정을 호스트 LLM Router Agent로 재판단해야 할 때 전달되는 에스컬레이션. */
@@ -2821,6 +2847,8 @@ export interface ProviderUsage {
   error?: UsageProviderErrorCode;
   /** rate_limited일 때 Provider가 제시한 재시도 대기(초). Renderer는 표시하지 않아도 된다. */
   retryAfterSeconds?: number;
+  /** secret-free 계정 지문(sha256 앞 16 hex). 같은 구독 계정의 멀티 데스크탑 병합 표시 기준. */
+  accountFingerprint?: string;
 }
 
 /** 전체 엔진 사용량 스냅샷 — 대시보드 "엔진 연결·사용량" 모듈이 소비. */
@@ -2865,6 +2893,7 @@ export type UpdaterErrorCode =
   | "check-failed"
   | "download-failed"
   | "install-not-owned"
+  | "install-source-untrusted"
   | "install-not-applied"
   | "install-state-corrupt"
   | "legacy-cleanup-failed"
@@ -2875,6 +2904,26 @@ export type UpdaterErrorCode =
   | "minimum-app-version"
   | "minimum-runtime-version"
   | "minimum-schema-version";
+
+/** Fixed, value-free updater diagnostics safe to persist and expose to renderer. */
+export type UpdaterDiagnosticCategory =
+  | "source-signature-class"
+  | "source-identity"
+  | "source-designated-requirement"
+  | "source-gatekeeper"
+  | "source-verification-unavailable"
+  | "native-install-signature"
+  | "native-install-permission"
+  | "native-install-space"
+  | "native-install-payload"
+  | "native-install-state"
+  | "native-install-timeout"
+  | "native-install-unknown";
+
+export interface UpdaterDiagnostic {
+  category: UpdaterDiagnosticCategory;
+  message: string;
+}
 
 export interface UpdaterCompatibility {
   minimumSourceAppVersion: string;
@@ -2906,6 +2955,8 @@ export interface UpdaterState {
   code?: UpdaterErrorCode;
   /** 사용자에게 보여도 되는 짧은 설명. 내부 경로/토큰/스택은 포함하지 않는다. */
   error?: string;
+  /** 네이티브 원문/경로/토큰을 포함하지 않는 고정 진단. */
+  diagnostic?: UpdaterDiagnostic;
   /** 네트워크 등 일시 실패일 때만 true. 권한/호환성/연속성 실패는 false다. */
   canRetry?: boolean;
   /** 고정된 공식 다운로드 경로. renderer 입력으로 URL을 받지 않는다. */
@@ -2916,6 +2967,8 @@ export interface UpdaterState {
   compatibility?: UpdaterCompatibility;
   /** 마지막으로 서버 확인이 끝난 시각(epoch ms). */
   lastCheckedAt?: number;
+  /** 일시적 설치 인계 실패 뒤 다음 안전 재시도 가능 시각(epoch ms). */
+  retryAfter?: number;
 }
 
 export interface UpdaterActionResult {
@@ -3429,6 +3482,11 @@ export interface HephaestusBuildRequest {
 // 렌더러는 엔진 내부 JSON 을 직접 파싱하지 않고 이 정규형만 소비한다.
 export type RecMode = "single" | "multi" | "network" | "pipeline" | "clarify" | "build" | "none";
 export type RecSource = "local" | "cloud" | "hub";
+export type OrchestrationTarget =
+  | { source: "local"; entityKind: "agent"; agentId: string }
+  | { source: "local"; entityKind: "team"; firmId: string }
+  | { source: "local"; entityKind: "group"; groupId: string }
+  | { source: "cloud" | "hub"; entityKind: "agent" | "team"; slug: string };
 export interface RecAgent {
   id: string;
   name: string;
@@ -3441,6 +3499,8 @@ export interface RecAgent {
   canonicalCommand?: string;
   /** type 이 팀/회사면 firm 바인딩 경로로 실행. */
   isFirm?: boolean;
+  /** Exact executable identity; id/source alone are display compatibility fields. */
+  target: OrchestrationTarget;
 }
 export interface RecStage {
   order: number;
@@ -3490,8 +3550,8 @@ export interface RecRouterAgent {
 
 /** 추천 시트에서 사용자가 고른 실행 경로 — 페이지가 적절한 send/switch 로 디스패치한다. */
 export type RecExecChoice =
-  | { kind: "agent"; agentId: string; isFirm?: boolean; routerAgent?: RecRouterAgent }
-  | { kind: "network"; agents?: string[]; routerAgent?: RecRouterAgent }
+  | { kind: "agent"; target: OrchestrationTarget; routerAgent?: RecRouterAgent }
+  | { kind: "network"; targets?: OrchestrationTarget[]; routerAgent?: RecRouterAgent }
   | { kind: "pipeline"; stages?: RecStage[]; routerAgent?: RecRouterAgent }
   | { kind: "plain"; routerAgent?: RecRouterAgent };
 
@@ -3758,6 +3818,7 @@ export interface InvocationRunReceipt {
   resultFolder?: string;
   hasImages?: boolean;
   borrowAgents?: string[];
+  taskForceTargets?: OrchestrationTarget[];
   errorCode?: string;
   errorMessage?: string;
 }
@@ -4357,6 +4418,9 @@ export interface AgentlasIpc {
   };
   /** Store owned packages privately in Agent Cloud or explicitly publish them to the public Hub. */
   cloudAgents: {
+    listRegisteredUploadOptions: () => Promise<CloudAgentRegisteredUploadOption[]>;
+    saveRegisteredPrivate: (input: CloudAgentRegisteredSaveRequest) => Promise<CloudAgentPackageResult>;
+    publishRegisteredPublic: (input: CloudAgentRegisteredPublishRequest) => Promise<CloudAgentPackageResult>;
     savePrivate: (input: CloudAgentPrivateSaveRequest) => Promise<CloudAgentPackageResult>;
     saveBuiltPrivate: (input: CloudAgentBuiltPrivateSaveRequest) => Promise<CloudAgentPackageResult>;
     publishPublic: (input: CloudAgentHubPublishRequest) => Promise<CloudAgentPackageResult>;

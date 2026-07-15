@@ -9,6 +9,7 @@ const publishMac = fs.readFileSync(path.join(root, "scripts/publish-mac-release.
 const releaseWorkflow = fs.readFileSync(path.join(root, ".github/workflows/release.yml"), "utf8");
 const signedWorkflow = fs.readFileSync(path.join(root, ".github/workflows/release-signed-mac.yml"), "utf8");
 const builder = fs.readFileSync(path.join(root, "electron-builder.yml"), "utf8");
+const releaseAssetVerifier = fs.readFileSync(path.join(root, "scripts/verify-release-assets.mjs"), "utf8");
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 
 assert.match(
@@ -17,9 +18,29 @@ assert.match(
   "mac build must never auto-publish pre-notarization artifacts",
 );
 assert.match(
+  releaseWorkflow,
+  /workflow_call:[\s\S]*?build-cross-platform:[\s\S]*?Package verified Actions artifacts only[\s\S]*?--publish never[\s\S]*?stamp-update-feeds\.mjs[\s\S]*?Upload Windows\/Linux package set for the release barrier/,
+  "Windows/Linux workflow must be reusable, build-only, and emit barrier artifacts rather than publish",
+);
+assert.doesNotMatch(
+  releaseWorkflow,
+  /--publish\s+always/,
+  "Windows/Linux release workers must never publish directly to the public releases repository",
+);
+assert.match(
   signedWorkflow,
-  /Build, sign, notarize, and verify DMGs[\s\S]*?Complete staged release and promote verified stable/,
-  "workflow must keep signing/notarization before the only stable promotion step",
+  /release-artifact-barrier:[\s\S]*?cross-platform-release-build[\s\S]*?mac-release-preflight[\s\S]*?test "\$CROSS_PLATFORM_RESULT" = "success"[\s\S]*?test "\$MAC_PREFLIGHT_RESULT" = "success"/,
+  "the all-OS barrier must block signed artifacts and the public writer until Windows, Linux, and macOS gates pass",
+);
+assert.match(
+  signedWorkflow,
+  /build-signed-mac-artifacts:[\s\S]*?needs: release-artifact-barrier[\s\S]*?Build, sign, notarize, and verify Mac artifacts[\s\S]*?Upload signed Mac package set for the release barrier[\s\S]*?publish-all-platforms:[\s\S]*?needs:[\s\S]*?release-artifact-barrier[\s\S]*?build-signed-mac-artifacts/,
+  "the signed Mac artifacts must be produced after the all-OS barrier and consumed by the sole public writer",
+);
+assert.match(
+  signedWorkflow,
+  /Download every barrier-approved OS artifact[\s\S]*?pattern: agentlas-release-\*[\s\S]*?merge-multiple: true[\s\S]*?Verify local required manifest and hashes before first public write[\s\S]*?release:assets:verify[\s\S]*?Single releases-repository writer and stable promotion/,
+  "the sole writer must download every OS artifact and locally verify the full manifest before it has a release token",
 );
 assert.match(
   builder,
@@ -37,24 +58,34 @@ assert.match(
   "shared preflight must block Windows/Linux publishing on automation authority regressions",
 );
 assert.match(
-  releaseWorkflow,
-  /Package and stage prerelease assets/,
-  "cross-platform workflow must label its output as staging, not stable publishing",
-);
-assert.match(
-  signedWorkflow,
-  /AGENTLAS_RELEASE_ASSET_WAIT_MS:\s*"900000"[\s\S]*?AGENTLAS_RELEASE_ASSET_POLL_MS:\s*"10000"/,
-  "signed publisher must use an explicit bounded asset wait",
-);
-assert.match(
-  publishMac,
-  /release",\s*"upload"[\s\S]*?waitForRequiredReleaseAssets\([\s\S]*?--prerelease=false[\s\S]*?--latest/,
-  "Mac assets must upload before completeness verification and stable/latest promotion",
-);
-assert.match(
   publishMac,
   /readLatestStableTag\(repo\)[\s\S]*?latestTag !== tag/,
   "the final receipt must verify that GitHub latest resolves to the promoted tag",
+);
+assert.match(
+  publishMac,
+  /const files = requiredReleaseAssetNames\(version\)\.map\(\(name\) => requireFile\(join\(releaseDir, name\)\)\);/,
+  "the single writer must upload the exact full barrier contract, not a Mac-only subset",
+);
+assert.match(
+  releaseAssetVerifier,
+  /for \(const expected of manifest\.assets\)[\s\S]*?"release",\s*"download"[\s\S]*?compareRemoteAsset\(\{ expected, actual \}\)/,
+  "remote verification must fetch and byte-compare every manifest asset rather than inspect names only",
+);
+const localVerificationIndex = publishMac.indexOf('"scripts/verify-release-assets.mjs"');
+const uploadIndex = publishMac.indexOf('run("gh", ["release", "upload"');
+const remoteVerificationIndex = publishMac.indexOf('"--verify-remote"');
+const lineageVerificationIndex = publishMac.indexOf('"scripts/verify-mac-update-lineage.mjs"');
+const completenessIndex = publishMac.lastIndexOf("waitForRequiredReleaseAssets({");
+const promotionIndex = publishMac.lastIndexOf('"--prerelease=false"');
+assert.ok(
+  localVerificationIndex >= 0 &&
+    uploadIndex > localVerificationIndex &&
+    remoteVerificationIndex > uploadIndex &&
+    lineageVerificationIndex > remoteVerificationIndex &&
+    completenessIndex > lineageVerificationIndex &&
+    promotionIndex > completenessIndex,
+  "the publisher must locally verify all assets, upload them once, remotely byte-verify them, then verify lineage/completeness before stable/latest promotion",
 );
 assert.doesNotMatch(
   readme,
@@ -89,20 +120,27 @@ assert.doesNotMatch(
   const required = requiredReleaseAssetNames(version);
   assert.equal(required.length, 18, "stable promotion must require the full 18-file platform contract");
   assert.equal(new Set(required).size, required.length, "required release assets must be unique");
-  for (const expected of [
+  const expectedRequiredAssets = [
     `Agentlas-${version}-Windows-x64-Setup.exe`,
+    `Agentlas-${version}-Windows-x64-Setup.exe.blockmap`,
     `Agentlas-${version}-Windows-x64-Portable.exe`,
     `Agentlas-${version}-Linux-x64.AppImage`,
     `Agentlas-${version}-Linux-x64.deb`,
     `Agentlas-${version}-arm64.dmg`,
+    `Agentlas-${version}-arm64.dmg.blockmap`,
+    `Agentlas-${version}-arm64.zip`,
+    `Agentlas-${version}-arm64.zip.blockmap`,
     `Agentlas-${version}-x64.dmg`,
+    `Agentlas-${version}-x64.dmg.blockmap`,
+    `Agentlas-${version}-x64.zip`,
+    `Agentlas-${version}-x64.zip.blockmap`,
     "latest.yml",
     "latest-linux.yml",
     "latest-mac.yml",
     "desktop-release-verification.json",
-  ]) {
-    assert.ok(required.includes(expected), `missing mandatory release asset contract: ${expected}`);
-  }
+    "desktop-release.production.env",
+  ];
+  assert.deepEqual(required, expectedRequiredAssets, "stable promotion must require exactly every Windows/Linux/Mac installer, updater feed, and evidence asset");
 
   const stagedPartial = inspectReleaseState(version, {
     isDraft: false,

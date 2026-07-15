@@ -142,6 +142,10 @@ function LibraryAgentsView() {
 
   // 선택된 에이전트 노드 (null 이면 회사 오버뷰 노출)
   const [selectedNode, setSelectedNode] = useState<ResolvedNode | null>(null);
+  const [selectedFirmId, setSelectedFirmId] = useState<string | null>(null);
+  useEffect(() => {
+    if (selectedNode) setSelectedFirmId(null);
+  }, [selectedNode]);
   const [activeTab, setActiveTab] = useState<"identity" | "memory" | "playbook" | "activity" | "ontology">("identity");
   const targetDetailTab = searchParams.get("tab") === "ontology" ? "ontology" as const : null;
   const targetAgentId = searchParams.get("agentId") ?? "";
@@ -741,8 +745,24 @@ function LibraryAgentsView() {
     }
   }
 
+  async function removeInstalledFirm(firm: InstalledFirm | null) {
+    const api = ipc();
+    if (!api || !firm) return;
+    const name = pickLocalized(firm, locale).name;
+    if (!window.confirm(locale === "ko" ? `'${name}' 팀을 설치 목록에서 제거할까요? 원본 폴더는 삭제하지 않습니다.` : `Remove the '${name}' team? The source folder will not be deleted.`)) return;
+    try {
+      await api.firms.uninstall(firm.id);
+      setSelectedFirmId(null);
+      await refresh();
+      showToast(locale === "ko" ? "팀을 설치 목록에서 제거했습니다." : "Team removed from My Agents.");
+    } catch (err) {
+      showToast((locale === "ko" ? "팀 제거 실패: " : "Failed to remove team: ") + String(err));
+    }
+  }
+
   const roster = useMemo(() => buildAgentRoster(agents, firms), [agents, firms]);
   const agentMap = roster.agentById;
+  const selectedFirm = selectedFirmId ? firms.find((firm) => firm.id === selectedFirmId) ?? null : null;
 
   // 팀 에이전트 펼치기 — 하위 서브에이전트를 백엔드(즉시 결정적 + 백그라운드 LLM)로 해석.
   const toggleTeam = useCallback(
@@ -988,12 +1008,15 @@ function LibraryAgentsView() {
                 <div key={firm.id}>
                   {!sidebarCollapsed && (
                     <div
-                      onClick={() => setFirmCollapsed(prev => ({ ...prev, [firm.id]: !isCollapsed }))}
-                      style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", cursor: "pointer", borderRadius: "var(--radius-sm)", background: "var(--paper-2)", marginBottom: 8, minWidth: 0 }}
+                      style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: "var(--radius-sm)", background: selectedFirmId === firm.id ? "var(--fill-1)" : "var(--paper-2)", marginBottom: 8, minWidth: 0 }}
                     >
-                      <IconChevronDown size={14} style={{ transform: isCollapsed ? "rotate(-90deg)" : "none", transition: "transform 0.2s" }} />
+                      <button type="button" onClick={() => setFirmCollapsed(prev => ({ ...prev, [firm.id]: !isCollapsed }))} aria-label={isCollapsed ? "Expand team" : "Collapse team"} style={{ border: 0, background: "transparent", padding: 0, color: "inherit", cursor: "pointer", display: "inline-flex" }}>
+                        <IconChevronDown size={14} style={{ transform: isCollapsed ? "rotate(-90deg)" : "none", transition: "transform 0.2s" }} />
+                      </button>
                       <IconBuilding size={14} style={{ color: "var(--accent)" }} />
-                      <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--font-head)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{fLoc.name}</span>
+                      <button type="button" onClick={() => { setSelectedFirmId(firm.id); setSelectedNode(null); }} style={{ border: 0, background: "transparent", padding: 0, cursor: "pointer", textAlign: "left", minWidth: 0, flex: 1, color: "inherit" }}>
+                        <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--font-head)", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{fLoc.name}</span>
+                      </button>
                     </div>
                   )}
                   {(!isCollapsed || sidebarCollapsed) && (
@@ -1242,7 +1265,42 @@ function LibraryAgentsView() {
           </div>
         )}
 
-        {selectedNode === null ? (
+        {selectedFirm ? (
+          <div style={{ flex: 1, overflowY: "auto" }} data-tour-id="agents.detail">
+            <header className="titlebar-drag" style={{ padding: "16px 32px", minHeight: 56, borderBottom: "var(--hairline)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 12 }}>
+              <span style={{ width: 36, height: 36, borderRadius: 10, background: "var(--fill-1)", color: "var(--accent)", display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+                <IconBuilding size={18} />
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 18 }}>{pickLocalized(selectedFirm, locale).name}</h1>
+                <p style={{ margin: "3px 0 0", color: "var(--muted-deep)", fontSize: 12 }}>{locale === "ko" ? "에이전트 팀 자체 관리" : "Manage the agent team as one unit"}</p>
+              </div>
+            </header>
+            <section style={{ maxWidth: 760, margin: "24px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 16 }}>
+              <div style={{ padding: 20, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)" }}>
+                <h2 style={{ margin: 0, fontSize: 15 }}>{locale === "ko" ? "팀 실행 단위" : "Team execution unit"}</h2>
+                <p style={{ margin: "7px 0 0", color: "var(--ink-soft)", fontSize: 13, lineHeight: 1.6 }}>
+                  {locale === "ko"
+                    ? "이 팀은 최상위 TF에서 중간관리 오케스트레이터 하나로 선택됩니다. 하위 worker와 eval·judge 같은 내부 역할은 별도 소유 에이전트처럼 관리하지 않습니다."
+                    : "This team is selected as one middle-manager unit inside a top-level task force. Internal workers and control roles such as eval or judge are not managed as separate owned agents."}
+                </p>
+                <dl style={{ margin: "16px 0 0", display: "grid", gridTemplateColumns: "120px 1fr", gap: "8px 12px", fontSize: 12 }}>
+                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "팀 슬러그" : "Team slug"}</dt><dd style={{ margin: 0 }}>{selectedFirm.slug}</dd>
+                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "오케스트레이터" : "Orchestrator"}</dt><dd style={{ margin: 0 }}>{agentMap.get(selectedFirm.ceoAgentId) ? agentDisplayName(agentMap.get(selectedFirm.ceoAgentId)!, locale) : selectedFirm.ceoAgentId}</dd>
+                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "사용자 기능 멤버" : "User-facing members"}</dt><dd style={{ margin: 0 }}>{selectedFirm.orgChart.filter((node) => isVisibleFirmOrgNode(node, agentMap)).length}</dd>
+                </dl>
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button type="button" onClick={() => navigate(`/cloud?team=${encodeURIComponent(selectedFirm.id)}`)} style={{ minHeight: 36, padding: "0 14px", borderRadius: 8, border: "1px solid var(--accent)", background: "var(--accent)", color: "#fff", cursor: "pointer", fontWeight: 750 }}>
+                  {locale === "ko" ? "팀을 Cloud / Hub에 올리기" : "Upload team to Cloud / Hub"}
+                </button>
+                <button type="button" onClick={() => void removeInstalledFirm(selectedFirm)} style={{ minHeight: 36, padding: "0 14px", borderRadius: 8, border: "1px solid var(--red-deep)", background: "transparent", color: "var(--red-deep)", cursor: "pointer", fontWeight: 700 }}>
+                  {locale === "ko" ? "팀 제거" : "Remove team"}
+                </button>
+              </div>
+            </section>
+          </div>
+        ) : selectedNode === null ? (
           /* A. 에이전트 미선택 시: 기존 회사 오버뷰 화면 */
           <div style={{ flex: 1, overflowY: "auto" }} data-tour-id="agents.detail">
             <header

@@ -296,16 +296,33 @@ export async function startAgentlasMobileBridge(
     // A paired phone stores this endpoint. Reusing the last port means closing
     // and reopening Desktop restores the same secure WebSocket automatically.
     const retainedPort = retainedEndpointPort(options);
-    try {
-      return await startBridgeInternal(options, {
-        ...(retainedPort ? { port: retainedPort } : {}),
-      });
-    } catch (error) {
-      // Another process may have claimed the old port while Desktop was off.
-      // Keep Desktop usable with a new port; the user can repair that exceptional
-      // case by pairing again instead of losing the entire mobile bridge.
-      if (!retainedPort || !addressAlreadyInUse(error)) throw error;
-      return startBridgeInternal(options, { port: 0 });
+    const retryDelaysMs = [1_000, 2_000, 3_000, 4_000, 5_000];
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await startBridgeInternal(options, {
+          ...(retainedPort ? { port: retainedPort } : {}),
+        });
+      } catch (error) {
+        if (!retainedPort || !addressAlreadyInUse(error)) throw error;
+        // During an app update/restart the outgoing instance (or its socket in
+        // TIME_WAIT) can still hold the retained port for a few seconds. Losing
+        // the port silently invalidates every paired phone's stored endpoint,
+        // so wait the port out before surrendering it.
+        const delayMs = retryDelaysMs[attempt];
+        if (delayMs === undefined) {
+          // Another process genuinely owns the old port. Keep Desktop usable
+          // with a new port; the user repairs that exceptional case by pairing
+          // again instead of losing the entire mobile bridge.
+          console.warn(
+            `[mobile-bridge] retained port ${retainedPort} stayed busy; falling back to an ephemeral port (paired phones need a new QR)`,
+          );
+          return startBridgeInternal(options, { port: 0 });
+        }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, delayMs);
+          timer.unref?.();
+        });
+      }
     }
   });
 }

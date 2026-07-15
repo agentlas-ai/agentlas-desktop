@@ -15,6 +15,8 @@ on:
       - "electron/memory/store.ts"
       - "electron/experience/**"
       - "electron/mcp/client.ts"
+      - "electron/mcp/swarm-engine.ts"
+      - "electron/mcp/swarm-run.ts"
       - "electron/mcp-tools/**"
       - "electron/site/agent-app-*.ts"
       - "electron/site/store.ts"
@@ -25,6 +27,10 @@ on:
       - "electron/runtime/env-resolver.ts"
       - "electron/runtime/runner.ts"
       - "electron/runtime/workload-routing.ts"
+      - "electron/updater.ts"
+      - "electron/updater/**"
+      - "electron/main.ts"
+      - "electron/secrets/vault.ts"
       - "scripts/test-project-bootstrap-desktop.cjs"
       - "scripts/test-project-bootstrap-core.cjs"
       - "scripts/test-project-memory-read-boundary.cjs"
@@ -37,17 +43,61 @@ on:
       - "scripts/test-workload-routing.cjs"
       - "scripts/test-build-workload-routing.cjs"
       - "scripts/test-stormbreaker-core-harness.cjs"
+      - "scripts/test-stormbreaker-swarm-contract.cjs"
       - "scripts/test-owned-agent-runtime-prompts.cjs"
       - "scripts/test-site-agent-app-*.cjs"
       - "scripts/test-packaged-agent-app-mcp.cjs"
+      - "scripts/atomic-swap-mac.swift"
+      - "scripts/apply-web-release-env.mjs"
+      - "scripts/check-railway-release-access.mjs"
+      - "scripts/create-apple-csr.sh"
+      - "scripts/create-p12-from-apple-cert.sh"
+      - "scripts/ensure-engine.mjs"
+      - "scripts/install-stable-mac.sh"
+      - "scripts/install-main-only-git-guard.sh"
+      - "scripts/mac-install-transaction.mjs"
+      - "scripts/package-mac.sh"
+      - "scripts/publish-mac-release.mjs"
+      - "scripts/release-readiness.mjs"
+      - "scripts/smoke-signed-mac-python-cache.cjs"
+      - "scripts/stamp-update-feeds.mjs"
+      - "scripts/fix-mac-latest-zip.mjs"
+      - "scripts/verify-local-mac-candidate.mjs"
+      - "scripts/verify-mac-app-bundle.mjs"
+      - "scripts/verify-mac-install-boundary.mjs"
+      - "scripts/verify-mac-release.mjs"
+      - "scripts/verify-mac-update-lineage.mjs"
+      - "scripts/verify-release-assets.mjs"
+      - "scripts/lib/mac-app-signature.mjs"
+      - "scripts/test-mac-app-trust.cjs"
+      - "scripts/test-mac-install-transaction.cjs"
+      - "scripts/test-mac-release-publish-boundary.cjs"
+      - "scripts/test-mac-update-lineage.cjs"
+      - "scripts/test-ensure-engine.cjs"
+      - "scripts/test-install-identity.cjs"
+      - "scripts/test-release-asset-manifest.cjs"
+      - "scripts/test-runtime-update-resolution.cjs"
+      - "scripts/test-update-release-contract.cjs"
+      - "scripts/test-updater-production-contract.cjs"
+      - "scripts/test-updater-ui.cjs"
+      - "scripts/test-packaged-updater-install-e2e.cjs"
+      - "scripts/test-mock-bridge-parity.cjs"
+      - "scripts/lib/mock-agentlas-bridge.cjs"
       - "shared/site-studio.ts"
       - "shared/types.ts"
       - "electron-builder.yml"
       - "electron-builder.mac-stable.yml"
+      - "electron-builder.mac-local.yml"
       - "build-resources/after-pack-clean.cjs"
+      - "build-resources/after-sign-trust.cjs"
+      - "build-resources/entitlements.mac.plist"
+      - "build-resources/macos-release-signing-policy.json"
+      - "build-resources/update-compatibility.cjs"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/cross-platform-harness.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-signed-mac.yml"
   push:
     branches: [main]
     paths:
@@ -62,6 +112,8 @@ on:
       - "electron/memory/store.ts"
       - "electron/experience/**"
       - "electron/mcp/client.ts"
+      - "electron/mcp/swarm-engine.ts"
+      - "electron/mcp/swarm-run.ts"
       - "electron/mcp-tools/**"
       - "electron/site/agent-app-*.ts"
       - "electron/site/store.ts"
@@ -72,6 +124,10 @@ on:
       - "electron/runtime/env-resolver.ts"
       - "electron/runtime/runner.ts"
       - "electron/runtime/workload-routing.ts"
+      - "electron/updater.ts"
+      - "electron/updater/**"
+      - "electron/main.ts"
+      - "electron/secrets/vault.ts"
       - "scripts/test-project-bootstrap-desktop.cjs"
       - "scripts/test-project-bootstrap-core.cjs"
       - "scripts/test-project-memory-read-boundary.cjs"
@@ -84,17 +140,61 @@ on:
       - "scripts/test-workload-routing.cjs"
       - "scripts/test-build-workload-routing.cjs"
       - "scripts/test-stormbreaker-core-harness.cjs"
+      - "scripts/test-stormbreaker-swarm-contract.cjs"
       - "scripts/test-owned-agent-runtime-prompts.cjs"
       - "scripts/test-site-agent-app-*.cjs"
       - "scripts/test-packaged-agent-app-mcp.cjs"
+      - "scripts/atomic-swap-mac.swift"
+      - "scripts/apply-web-release-env.mjs"
+      - "scripts/check-railway-release-access.mjs"
+      - "scripts/create-apple-csr.sh"
+      - "scripts/create-p12-from-apple-cert.sh"
+      - "scripts/ensure-engine.mjs"
+      - "scripts/install-stable-mac.sh"
+      - "scripts/install-main-only-git-guard.sh"
+      - "scripts/mac-install-transaction.mjs"
+      - "scripts/package-mac.sh"
+      - "scripts/publish-mac-release.mjs"
+      - "scripts/release-readiness.mjs"
+      - "scripts/smoke-signed-mac-python-cache.cjs"
+      - "scripts/stamp-update-feeds.mjs"
+      - "scripts/fix-mac-latest-zip.mjs"
+      - "scripts/verify-local-mac-candidate.mjs"
+      - "scripts/verify-mac-app-bundle.mjs"
+      - "scripts/verify-mac-install-boundary.mjs"
+      - "scripts/verify-mac-release.mjs"
+      - "scripts/verify-mac-update-lineage.mjs"
+      - "scripts/verify-release-assets.mjs"
+      - "scripts/lib/mac-app-signature.mjs"
+      - "scripts/test-mac-app-trust.cjs"
+      - "scripts/test-mac-install-transaction.cjs"
+      - "scripts/test-mac-release-publish-boundary.cjs"
+      - "scripts/test-mac-update-lineage.cjs"
+      - "scripts/test-ensure-engine.cjs"
+      - "scripts/test-install-identity.cjs"
+      - "scripts/test-release-asset-manifest.cjs"
+      - "scripts/test-runtime-update-resolution.cjs"
+      - "scripts/test-update-release-contract.cjs"
+      - "scripts/test-updater-production-contract.cjs"
+      - "scripts/test-updater-ui.cjs"
+      - "scripts/test-packaged-updater-install-e2e.cjs"
+      - "scripts/test-mock-bridge-parity.cjs"
+      - "scripts/lib/mock-agentlas-bridge.cjs"
       - "shared/site-studio.ts"
       - "shared/types.ts"
       - "electron-builder.yml"
       - "electron-builder.mac-stable.yml"
+      - "electron-builder.mac-local.yml"
       - "build-resources/after-pack-clean.cjs"
+      - "build-resources/after-sign-trust.cjs"
+      - "build-resources/entitlements.mac.plist"
+      - "build-resources/macos-release-signing-policy.json"
+      - "build-resources/update-compatibility.cjs"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/cross-platform-harness.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-signed-mac.yml"
 
 permissions:
   contents: read
@@ -114,7 +214,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: agentlas-ai/Agentlas-OS
-          ref: 738b78f40b5efc9b2dd4cc66c94a3805e70c79f5
+          ref: 0cb90fc354d065b9af6894d6570df3de82fb53f6
           path: agentlas-desktop/Hephaestus
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -125,7 +225,7 @@ jobs:
       - name: Verify Core source pin
         working-directory: agentlas-desktop/Hephaestus
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "738b78f40b5efc9b2dd4cc66c94a3805e70c79f5"
+        run: test "$(git rev-parse HEAD)" = "0cb90fc354d065b9af6894d6570df3de82fb53f6"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -158,6 +258,7 @@ jobs:
           node scripts/test-codex-model-discovery.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-workload-routing.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-build-workload-routing.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-stormbreaker-swarm-contract.cjs
       - name: Verify installed Core on macOS and Windows
         if: runner.os != 'Linux'
         working-directory: agentlas-desktop
@@ -179,6 +280,7 @@ jobs:
           node scripts/test-codex-model-discovery.cjs
           npx --no-install electron scripts/test-workload-routing.cjs
           npx --no-install electron scripts/test-build-workload-routing.cjs
+          npx --no-install electron scripts/test-stormbreaker-swarm-contract.cjs
       - name: Verify Agent App MCP boundary on Linux
         if: runner.os == 'Linux'
         working-directory: agentlas-desktop
@@ -233,6 +335,7 @@ jobs:
         shell: bash
         run: npx --no-install electron scripts/test-site-agent-app-runtime.cjs
       - name: Build and verify packaged Agent App MCP boundary
+        if: runner.os != 'macOS'
         working-directory: agentlas-desktop
         shell: bash
         env:
@@ -241,15 +344,16 @@ jobs:
           npm run build
           npx --no-install electron-builder --dir --publish never --config.directories.output="${{ runner.temp }}/agentlas-package-smoke" -c.mac.identity=null -c.mac.notarize=false
           npm run test:packaged-agent-app-mcp -- "${{ runner.temp }}/agentlas-package-smoke"
-      - name: Build and verify macOS stable-config Agent App MCP boundary
+      - name: Build and verify isolated macOS local-candidate Agent App MCP boundary
         if: runner.os == 'macOS'
         working-directory: agentlas-desktop
         shell: bash
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: |
-          npx --no-install electron-builder --dir --publish never --config electron-builder.mac-stable.yml --config.directories.output="${{ runner.temp }}/agentlas-stable-package-smoke" -c.mac.identity=null -c.mac.notarize=false
-          npm run test:packaged-agent-app-mcp -- "${{ runner.temp }}/agentlas-stable-package-smoke"
+          npx --no-install electron-builder --dir --publish never --config electron-builder.mac-local.yml --config.directories.output="${{ runner.temp }}/agentlas-local-candidate-package-smoke" -c.mac.identity=null -c.mac.notarize=false
+          node scripts/verify-local-mac-candidate.mjs --output="${{ runner.temp }}/agentlas-local-candidate-package-smoke"
+          npm run test:packaged-agent-app-mcp -- "${{ runner.temp }}/agentlas-local-candidate-package-smoke"
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-harness-proof-${{ runner.os }}
@@ -267,3 +371,24 @@ jobs:
           pattern: desktop-harness-proof-*
           path: proofs
       - run: node scripts/compare-stormbreaker-platform-proofs.cjs proofs
+
+  updater-ui:
+    name: Updater renderer UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install renderer test dependencies
+        run: npm ci
+      - name: Verify native updater E2E harness self-test
+        run: |
+          node --check scripts/test-packaged-updater-install-e2e.cjs
+          node scripts/test-packaged-updater-install-e2e.cjs --selftest
+      - name: Verify updater UI in a production renderer build
+        run: |
+          npx --no-install playwright install --with-deps chromium
+          npm run test:updater-ui

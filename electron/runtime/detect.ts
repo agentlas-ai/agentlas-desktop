@@ -7,6 +7,8 @@ import { probeGemini } from "./gemini";
 import { probeGrok } from "./grok";
 import { probeCursor } from "./cursor";
 import { probeOllama } from "./ollama";
+import { probeLMStudio } from "./lmstudio";
+import { probeMLX } from "./mlx";
 import { hasApiKey } from "../secrets/vault";
 import { getDb } from "../store/db";
 import type {
@@ -119,8 +121,10 @@ function setStoredEffort(effort: string | null | undefined): void {
 
 function isActiveRuntime(status: RuntimeStatus, active: ActiveRuntimeRow | null): boolean {
   if (!active) return false;
-  // ollama는 단일 런타임 — kind만 맞으면 활성. 모델은 status.model로 따로 반영.
-  if (status.kind === "ollama") return active.kind === "ollama";
+  // ollama/lmstudio/mlx는 단일 런타임 — kind만 맞으면 활성. 모델은 status.model로 따로 반영.
+  if (status.kind === "ollama" || status.kind === "lmstudio" || status.kind === "mlx") {
+    return active.kind === status.kind;
+  }
   if (active.source) {
     return (
       status.kind === active.kind &&
@@ -214,6 +218,8 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     gr,
     cursor,
     ollama,
+    lmstudio,
+    mlx,
     anthropicByok,
     openaiByok,
     googleByok,
@@ -231,6 +237,8 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     probeGrok(),
     probeCursor(),
     probeOllama(),
+    probeLMStudio(),
+    probeMLX(),
     hasApiKey("anthropic"),
     hasApiKey("openai"),
     hasApiKey("google"),
@@ -383,6 +391,41 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       model: preferred,
       availableModels: ollama.models,
       allocationModels: ollama.models,
+    });
+  }
+  // LM Studio / MLX — OpenAI 호환 로컬 서버. Ollama와 동일한 "단일 런타임 + 동적 모델 목록" 모양.
+  if (lmstudio && lmstudio.models.length > 0) {
+    const remembered =
+      active?.kind === "lmstudio"
+        ? active.model
+        : recallRuntimeSelection("lmstudio", "lmstudio")?.model;
+    const preferred =
+      remembered && lmstudio.models.includes(remembered) ? remembered : lmstudio.models[0] ?? null;
+    list.push({
+      kind: "lmstudio",
+      backend: "lmstudio",
+      source: "lmstudio",
+      version: null,
+      active: false,
+      model: preferred,
+      availableModels: lmstudio.models,
+      allocationModels: lmstudio.models,
+    });
+  }
+  if (mlx && mlx.models.length > 0) {
+    const remembered =
+      active?.kind === "mlx" ? active.model : recallRuntimeSelection("mlx", "mlx")?.model;
+    const preferred =
+      remembered && mlx.models.includes(remembered) ? remembered : mlx.models[0] ?? null;
+    list.push({
+      kind: "mlx",
+      backend: "mlx",
+      source: "mlx",
+      version: null,
+      active: false,
+      model: preferred,
+      availableModels: mlx.models,
+      allocationModels: mlx.models,
     });
   }
   if (anthropicByok) {

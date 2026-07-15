@@ -26,6 +26,10 @@ const CHILD_ENV_ALLOWLIST = [
   "USERPROFILE",
   "WINDIR",
 ];
+const MAC_PACKAGED_APP_EXECUTABLES = Object.freeze({
+  "Agentlas.app": "Agentlas",
+  "Agentlas-Local-Candidate.app": "Agentlas-Local-Candidate",
+});
 
 function packagedChildEnvironment() {
   const env = { ELECTRON_RUN_AS_NODE: "1" };
@@ -40,19 +44,64 @@ function packagedChildEnvironment() {
   return env;
 }
 
+function macAppBundlesBelow(root) {
+  const bundles = [];
+  if (path.basename(root).endsWith(".app")) {
+    bundles.push(root);
+  } else {
+    const entries = fs.readdirSync(root, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const child = path.join(root, entry.name);
+      if (entry.name.endsWith(".app")) {
+        bundles.push(child);
+        continue;
+      }
+      for (const nested of fs.readdirSync(child, { withFileTypes: true })) {
+        if (nested.isDirectory() && nested.name.endsWith(".app")) {
+          bundles.push(path.join(child, nested.name));
+        }
+      }
+    }
+  }
+  return bundles.sort();
+}
+
+function packagedMacBinary(root) {
+  const bundles = macAppBundlesBelow(root);
+  assert.ok(bundles.length > 0, `packaged macOS app bundle not found under ${root}`);
+
+  const identities = new Set();
+  const binaries = bundles.map((app) => {
+    const appName = path.basename(app);
+    const executable = MAC_PACKAGED_APP_EXECUTABLES[appName];
+    assert.equal(
+      typeof executable,
+      "string",
+      `unknown macOS app bundle ${appName}; expected one of ${Object.keys(MAC_PACKAGED_APP_EXECUTABLES).join(", ")}`,
+    );
+    identities.add(appName);
+    const binary = path.join(app, "Contents", "MacOS", executable);
+    assert.equal(fs.existsSync(binary), true, `packaged executable not found at ${binary}`);
+    return binary;
+  });
+
+  assert.equal(
+    identities.size,
+    1,
+    `packaged macOS output must not mix app identities: ${[...identities].join(", ")}`,
+  );
+  return binaries[0];
+}
+
 function packagedBinary() {
+  if (process.platform === "darwin") return packagedMacBinary(packageRoot);
+
   const dirs = fs.readdirSync(packageRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => path.join(packageRoot, entry.name));
   for (const dir of dirs) {
-    if (process.platform === "darwin") {
-      const app = fs.readdirSync(dir, { withFileTypes: true })
-        .find((entry) => entry.isDirectory() && entry.name.endsWith(".app"));
-      if (app) {
-        const binary = path.join(dir, app.name, "Contents", "MacOS", "Agentlas");
-        if (fs.existsSync(binary)) return binary;
-      }
-    } else if (process.platform === "win32") {
+    if (process.platform === "win32") {
       for (const name of ["Agentlas.exe", "agentlas.exe"]) {
         const binary = path.join(dir, name);
         if (fs.existsSync(binary)) return binary;
@@ -201,7 +250,15 @@ async function main() {
   }));
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  MAC_PACKAGED_APP_EXECUTABLES,
+  macAppBundlesBelow,
+  packagedMacBinary,
+};

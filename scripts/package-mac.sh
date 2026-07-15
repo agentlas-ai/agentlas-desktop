@@ -28,6 +28,25 @@ load_local_signing_defaults() {
   fi
 }
 
+prepare_app_notarization_authority() {
+  [[ "${AGENTLAS_PUBLIC_RELEASE:-0}" == "1" ]] || return 0
+
+  # electron-builder must notarize/staple the inner .app before producing both
+  # the DMG and updater ZIP. Outer-DMG notarization alone is not update lineage.
+  if [[ -z "${APPLE_KEYCHAIN_PROFILE:-}" && -z "${APPLE_ID:-}" && -z "${APPLE_API_KEY:-}" ]]; then
+    local profile="${AGENTLAS_NOTARY_PROFILE:-agentlas-notary}"
+    if xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1; then
+      export APPLE_KEYCHAIN_PROFILE="$profile"
+    fi
+  fi
+
+  if [[ -n "${APPLE_KEYCHAIN_PROFILE:-}" ]]; then return 0; fi
+  if [[ -n "${APPLE_ID:-}" && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then return 0; fi
+  if [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER:-}" ]]; then return 0; fi
+  echo "Missing complete inner-app notarization authority." >&2
+  return 1
+}
+
 cleanup_appledouble() {
   for target in "$@"; do
     if [[ -e "$target" ]]; then
@@ -169,6 +188,7 @@ exercise_signed_app_python_boundary() {
 
 cleanup_appledouble "$project_dir/dist" "$project_dir/release"
 load_local_signing_defaults
+prepare_app_notarization_authority
 npm run build
 rm -rf "$project_dir/release" "$local_release"
 mkdir -p "$local_release"
@@ -176,11 +196,17 @@ cleanup_appledouble "$project_dir/dist"
 
 build_mac_arch() {
   local arch="$1"
+  local notarize_args=()
   cleanup_appledouble "$project_dir/dist" "$project_dir/release" "$local_release"
+  # A public updater ZIP must contain the same stapled app as its DMG. Local
+  # candidates stay explicitly unnotarized and can never enter this channel.
+  if [[ "${AGENTLAS_PUBLIC_RELEASE:-0}" != "1" ]]; then
+    notarize_args+=(--config.mac.notarize=false)
+  fi
   COPYFILE_DISABLE=1 electron-builder \
     --mac "--${arch}" \
     --config electron-builder.mac-stable.yml \
-    --config.mac.notarize=false \
+    "${notarize_args[@]}" \
     --publish never \
     --config.directories.output="$local_release"
 }

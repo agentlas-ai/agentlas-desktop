@@ -35,6 +35,11 @@ assert.match(
   /HEPHAESTUS_RUNTIME_ROOT=Hephaestus[\s\S]*test-stormbreaker-core-harness\.cjs --installed/,
   "Stormbreaker release gate must execute against the embedded Agentlas OS checkout",
 );
+assert.match(
+  pkg.scripts["test:stormbreaker-swarm"] ?? "",
+  /^npm run build:electron && electron scripts\/test-stormbreaker-swarm-contract\.cjs$/,
+  "Stormbreaker release gate must execute the Desktop host executor, not only the Core planner",
+);
 assert.equal(
   pkg.scripts["test:packaged-agent-app-mcp"],
   "node scripts/test-packaged-agent-app-mcp.cjs",
@@ -64,12 +69,12 @@ assert.equal(compatibility.minimumRuntimeVersion, "1.0.4", "v0.7.0 shipped Hepha
 assert.equal(compatibility.minimumSchemaVersion, 35, "v0.7.0 shipped SQLite schema 35");
 assert.equal(
   compatibility.bundledRuntimeVersion,
-  "1.1.31",
+  "1.1.36",
   "the next Desktop patch must include the canonical first-contact bootstrap and model allocation contract",
 );
 assert.equal(runtimeSource.ref, `v${compatibility.bundledRuntimeVersion}`, "runtime source ref must match compatibility");
 assert.match(runtimeSource.commit, /^[0-9a-f]{40}$/, "runtime source must pin an immutable full commit");
-assert.equal(runtimeSource.commit, "738b78f40b5efc9b2dd4cc66c94a3805e70c79f5", "Agentlas OS v1.1.31 commit drift");
+assert.equal(runtimeSource.commit, "0cb90fc354d065b9af6894d6570df3de82fb53f6", "Agentlas OS v1.1.36 commit drift");
 assert.equal(compatibility.bundledRuntimeVersion, manifest.version, "feed runtime must match the bundled Hephaestus manifest");
 assert.equal(
   spawnSync("git", ["-C", embeddedRuntimeRoot, "rev-parse", "HEAD^{commit}"], { encoding: "utf8" }).stdout.trim(),
@@ -105,6 +110,14 @@ for (const configName of ["electron-builder.yml", "electron-builder.mac-stable.y
   );
   const embeddedRuntime = config.extraResources.find((resource) => resource.from === "Hephaestus");
   assert.ok(embeddedRuntime, `${configName} must package the embedded Agentlas OS runtime`);
+  assert.deepEqual(
+    config.mac.extraResources,
+    [{
+      from: "build-resources/macos-release-signing-policy.json",
+      to: "macos-release-signing-policy.json",
+    }],
+    `${configName} must package the exact immutable updater trust policy into macOS Resources`,
+  );
   for (const deniedPath of [
     "!**/.env",
     "!**/.env.*",
@@ -149,10 +162,55 @@ assert.doesNotMatch(
 for (const guardedPath of [
   "electron/runtime/claude-code.ts",
   "electron/runtime/env-resolver.ts",
+  "electron/updater.ts",
+  "electron/updater/**",
+  "electron/main.ts",
+  "electron/secrets/vault.ts",
   "electron-builder.yml",
   "electron-builder.mac-stable.yml",
+  "electron-builder.mac-local.yml",
   "build-resources/after-pack-clean.cjs",
+  "build-resources/after-sign-trust.cjs",
+  "build-resources/entitlements.mac.plist",
+  "build-resources/macos-release-signing-policy.json",
+  "build-resources/update-compatibility.cjs",
   "package-lock.json",
+  ".github/workflows/release.yml",
+  ".github/workflows/release-signed-mac.yml",
+  "scripts/apply-web-release-env.mjs",
+  "scripts/atomic-swap-mac.swift",
+  "scripts/check-railway-release-access.mjs",
+  "scripts/create-apple-csr.sh",
+  "scripts/create-p12-from-apple-cert.sh",
+  "scripts/ensure-engine.mjs",
+  "scripts/install-main-only-git-guard.sh",
+  "scripts/install-stable-mac.sh",
+  "scripts/mac-install-transaction.mjs",
+  "scripts/package-mac.sh",
+  "scripts/publish-mac-release.mjs",
+  "scripts/release-readiness.mjs",
+  "scripts/smoke-signed-mac-python-cache.cjs",
+  "scripts/stamp-update-feeds.mjs",
+  "scripts/fix-mac-latest-zip.mjs",
+  "scripts/verify-local-mac-candidate.mjs",
+  "scripts/verify-mac-app-bundle.mjs",
+  "scripts/verify-mac-install-boundary.mjs",
+  "scripts/verify-mac-release.mjs",
+  "scripts/verify-mac-update-lineage.mjs",
+  "scripts/verify-release-assets.mjs",
+  "scripts/lib/mac-app-signature.mjs",
+  "scripts/test-mac-app-trust.cjs",
+  "scripts/test-mac-install-transaction.cjs",
+  "scripts/test-mac-release-publish-boundary.cjs",
+  "scripts/test-mac-update-lineage.cjs",
+  "scripts/test-ensure-engine.cjs",
+  "scripts/test-install-identity.cjs",
+  "scripts/test-release-asset-manifest.cjs",
+  "scripts/test-runtime-update-resolution.cjs",
+  "scripts/test-update-release-contract.cjs",
+  "scripts/test-updater-production-contract.cjs",
+  "scripts/test-updater-ui.cjs",
+  "scripts/test-packaged-updater-install-e2e.cjs",
   "scripts/test-packaged-agent-app-mcp.cjs",
 ]) {
   assert.equal(
@@ -165,6 +223,11 @@ assert.match(
   crossPlatformHarness,
   /npx --no-install electron-builder --dir --publish never[\s\S]{0,500}npm run test:packaged-agent-app-mcp/,
   "the 3OS harness must verify the final packaged fuse wire and System Time child handshake",
+);
+assert.match(
+  crossPlatformHarness,
+  /name: Build and verify packaged Agent App MCP boundary[\s\S]{0,180}if: runner\.os != 'macOS'/,
+  "the unsigned generic package smoke must not invoke the official macOS signing/trust boundary",
 );
 for (const stepName of [
   "Verify installed Core on macOS and Windows",
@@ -213,8 +276,13 @@ assert.doesNotMatch(
 );
 assert.match(
   crossPlatformHarness,
-  /if: runner\.os == 'macOS'[\s\S]{0,500}npx --no-install electron-builder --dir --publish never --config electron-builder\.mac-stable\.yml[\s\S]{0,500}npm run test:packaged-agent-app-mcp/,
-  "the macOS harness must also package and execute the stable builder configuration",
+  /name: Build and verify isolated macOS local-candidate Agent App MCP boundary[\s\S]{0,500}if: runner\.os == 'macOS'[\s\S]{0,500}npx --no-install electron-builder --dir --publish never --config electron-builder\.mac-local\.yml[\s\S]{0,500}agentlas-local-candidate-package-smoke[\s\S]{0,500}npm run test:packaged-agent-app-mcp/,
+  "the unsigned macOS harness must package only the isolated local-candidate configuration",
+);
+assert.doesNotMatch(
+  crossPlatformHarness,
+  /name: Build and verify isolated macOS local-candidate Agent App MCP boundary[\s\S]{0,700}electron-builder\.mac-stable\.yml/,
+  "the unsigned macOS smoke must not invoke the official stable afterSign trust boundary",
 );
 const crossPlatformWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release.yml"), "utf8");
 const signedMacWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release-signed-mac.yml"), "utf8");
@@ -245,13 +313,13 @@ assert.match(readme, /macOS 12 Monterey or newer/);
 assert.match(readme, /macOS 11 Big Sur:[\s\S]*?last compatible Agentlas release[\s\S]*?excluded/);
 assert.match(
   readmeReleaseSection,
-  /install journal[\s\S]*?previous[\s\S]*?app version[\s\S]*?snapshot's own protected-table set[\s\S]*?31 to 32[\s\S]*?Agentlas OS v1\.1\.31[\s\S]*?does not claim a[\s\S]*?published installer/,
-  "README current release section must describe the version-skew-tolerant updater journal contract and the unpublished boundary",
+  new RegExp(`Agentlas OS v${compatibility.bundledRuntimeVersion.replace(/\./g, "\\.")}[\\s\\S]*?${runtimeSource.commit}[\\s\\S]*?(?:does not claim|does not prove|is not proof of)[\\s\\S]*?(?:published installer|public installer|update-feed release)`, "i"),
+  "README current release section must bind the exact embedded runtime and keep source-versus-public-installer truth explicit",
 );
 assert.match(
   changelogReleaseSection,
-  /written by[\s\S]*?previous app version[\s\S]*?self-consistent protected-table set[\s\S]*?31 to 32[\s\S]*?fail closed[\s\S]*?install-journal-corrupt\.v1\.json[\s\S]*?do not themselves publish a Git tag/,
-  "CHANGELOG current release section must describe the journal version-skew fix and the unpublished boundary",
+  new RegExp(`Agentlas OS v${compatibility.bundledRuntimeVersion.replace(/\./g, "\\.")}[\\s\\S]*?${runtimeSource.commit}[\\s\\S]*?(?:do not themselves publish|does not prove|is not proof of)[\\s\\S]*?(?:Git tag|installer|update feed|GitHub release)`, "i"),
+  "CHANGELOG current release section must bind the exact runtime and keep source-versus-public-release truth explicit",
 );
 assert.match(publishMacSource, /Requires macOS 12 Monterey or newer/);
 assert.match(publishMacSource, /macOS 11 Big Sur stays on the last compatible release/);
@@ -298,16 +366,18 @@ for (const [name, workflow] of workflowEntries) {
     workflowSteps(workflow).some((step) => typeof step.run === "string" && step.run.includes("npm run test:python-cache-boundary")),
     `${name} must execute the signed-resource Python cache boundary before packaging`,
   );
-  for (const job of Object.values(workflow.jobs)) {
+  const runtimePinnedJobs = Object.entries(workflow.jobs).filter(([, job]) => job.env?.HEPHAESTUS_REF || job.env?.HEPHAESTUS_COMMIT);
+  assert.ok(runtimePinnedJobs.length > 0, `${name} must expose at least one runtime-pinned packaging job`);
+  for (const [jobName, job] of runtimePinnedJobs) {
     assert.equal(
       job.env?.HEPHAESTUS_REF,
       `v${compatibility.bundledRuntimeVersion}`,
-      `${name} must fetch the runtime version encoded in the update contract`,
+      `${name}/${jobName} must fetch the runtime version encoded in the update contract`,
     );
     assert.equal(
       job.env?.HEPHAESTUS_COMMIT,
       runtimeSource.commit,
-      `${name} must fetch the immutable runtime commit encoded in the package source pin`,
+      `${name}/${jobName} must fetch the immutable runtime commit encoded in the package source pin`,
     );
   }
   for (const job of Object.values(workflow.jobs)) {
@@ -326,9 +396,12 @@ for (const [name, workflow] of workflowEntries) {
   }
 
   const checkout = workflowSteps(workflow).find((step) => step.uses === "actions/checkout@v4");
+  const expectedCheckoutRef = name === "release.yml"
+    ? "${{ inputs.tag || github.ref }}"
+    : "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}";
   assert.equal(
     checkout?.with?.ref,
-    "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}",
+    expectedCheckoutRef,
     `${name} manual releases must check out the requested tag rather than the default branch`,
   );
   assert.equal(checkout?.with?.["fetch-depth"], 0, `${name} must fetch tags for exact commit verification`);
@@ -337,6 +410,47 @@ for (const [name, workflow] of workflowEntries) {
 
 const crossWorkflow = workflowEntries[0][1];
 const signedWorkflow = workflowEntries[1][1];
+const harnessWorkflow = parsedWorkflow(crossPlatformHarness, "cross-platform-harness.yml");
+const updaterUiJob = harnessWorkflow.jobs["updater-ui"];
+assert.ok(updaterUiJob, "PR/main harness must run the updater renderer UI gate");
+assert.equal(updaterUiJob["runs-on"], "ubuntu-latest");
+const updaterUiStep = updaterUiJob.steps.find((step) => step.name === "Verify updater UI in a production renderer build");
+assert.ok(updaterUiStep, "updater UI job must expose a named production-renderer gate");
+assert.match(updaterUiStep.run, /npx --no-install playwright install --with-deps chromium/);
+assert.match(updaterUiStep.run, /npm run test:updater-ui/);
+const updaterE2eSelfTestStep = updaterUiJob.steps.find((step) => step.name === "Verify native updater E2E harness self-test");
+assert.ok(updaterE2eSelfTestStep, "PR/main harness must execute the native updater E2E harness self-test");
+assert.match(updaterE2eSelfTestStep.run, /node --check scripts\/test-packaged-updater-install-e2e\.cjs/);
+assert.match(updaterE2eSelfTestStep.run, /node scripts\/test-packaged-updater-install-e2e\.cjs --selftest/);
+const packagedUpdaterE2eSource = fs.readFileSync(path.join(root, "scripts", "test-packaged-updater-install-e2e.cjs"), "utf8");
+assert.match(packagedUpdaterE2eSource, /PUBLIC_BASELINE_RELEASE_REPOSITORY = "agentlas-ai\/agentlas-desktop-releases"/);
+assert.match(packagedUpdaterE2eSource, /Agentlas-0\.8\.32-Windows-x64-Setup\.exe[\s\S]*?10f17bf1172bbce56f6c54ece3f0edae86d97851d483a809f2d412e2091cb9e7/);
+assert.match(packagedUpdaterE2eSource, /Agentlas-0\.8\.32-Linux-x64\.AppImage[\s\S]*?c4e2cf06f1c60f3ce684d6cd51ba87cc4ee013bfaa87786007da9ff6b7306626/);
+assert.match(
+  packagedUpdaterE2eSource,
+  /downloadPinnedPublicBaseline[\s\S]*?assertPinnedArtifact[\s\S]*?SHA-256/,
+  "native lifecycle must start from digest-pinned public v0.8.32 artifacts, not a rebuilt source checkout",
+);
+assert.match(
+  packagedUpdaterE2eSource,
+  /assertOfficialGithubUpdateConfig\(configPath, "installed public v0\.8\.32 baseline"\)[\s\S]*?writeLoopbackUpdateConfig\(configPath, feedUrl\)/,
+  "only the disposable installed baseline may be redirected to loopback",
+);
+assert.match(
+  packagedUpdaterE2eSource,
+  /assertOfficialGithubUpdateConfig\(baselineConfig, "extracted public v0\.8\.32 baseline"\)[\s\S]*?writeLoopbackUpdateConfig\(baselineConfig, feedUrl\)[\s\S]*?linuxLauncher\(baselineAppImage[\s\S]*?baselineExtract\)/,
+  "Linux must run the extracted public AppImage while APPIMAGE still identifies the pinned original",
+);
+assert.doesNotMatch(
+  packagedUpdaterE2eSource,
+  /createImmutableBaseline|baseline native package|\.updater-e2e-builder\.yml/,
+  "native lifecycle must not replace the public v0.8.32 baseline with a current-CI rebuild",
+);
+assert.match(
+  signedMacWorkflow,
+  /Runtime, browser, and renderer UI regression gates[\s\S]*?npm run test:updater-production[\s\S]*?npm run test:updater-ui/,
+  "the signed macOS preflight must run the updater UI gate after the updater production contract",
+);
 assert.equal(
   crossPlatformWorkflow.includes('default: "v0.0.3"'),
   false,
@@ -349,14 +463,51 @@ for (const [name, source] of [["release.yml", crossPlatformWorkflow], ["release-
     `${name} must not auto-trigger a stable publisher for prerelease tags`,
   );
 }
-const crossReleaseSteps = crossWorkflow.jobs.release.steps;
+const crossReleaseJob = crossWorkflow.jobs["build-cross-platform"];
+assert.ok(crossReleaseJob, "cross-platform workflow must retain the reusable Windows/Linux build matrix");
+const crossReleaseSteps = crossReleaseJob.steps;
 const boundaryRecheckIndex = crossReleaseSteps.findIndex((step) => step.name === "Reverify embedded engine release boundary");
-const packageIndex = crossReleaseSteps.findIndex((step) => step.name === "Package and stage prerelease assets");
+const packageIndex = crossReleaseSteps.findIndex((step) => step.name === "Package verified Actions artifacts only");
 assert.ok(boundaryRecheckIndex >= 0, "cross-platform release must recheck ignored Core files after tests");
 assert.equal(crossReleaseSteps[boundaryRecheckIndex].run, "npm run ensure:engine");
 assert.ok(
   packageIndex === boundaryRecheckIndex + 1,
-  "cross-platform release must recheck Core immediately before electron-builder receives publish credentials",
+  "cross-platform release must recheck Core immediately before electron-builder packages build-only barrier artifacts",
+);
+assert.match(crossReleaseSteps[packageIndex].run, /--publish never/);
+assert.match(crossReleaseSteps[packageIndex].run, /stamp-update-feeds\.mjs --release-dir=release --require/);
+assert.doesNotMatch(crossReleaseSteps[packageIndex].run, /--publish\s+always/);
+const crossArtifactStep = crossReleaseSteps.find((step) => step.name === "Upload Windows/Linux package set for the release barrier");
+assert.ok(crossArtifactStep, "Windows/Linux package matrix must upload Actions artifacts for the sole writer");
+assert.equal(crossArtifactStep.uses, "actions/upload-artifact@v4");
+assert.match(crossArtifactStep.with.path, /Windows-x64-Setup\.exe[\s\S]*?Linux-x64\.AppImage[\s\S]*?latest\.yml[\s\S]*?latest-linux\.yml/);
+const nativeUpdaterE2eJob = crossWorkflow.jobs["updater-install-e2e"];
+assert.ok(nativeUpdaterE2eJob, "the all-OS release barrier must include native updater replacement E2E");
+assert.equal(nativeUpdaterE2eJob.needs, "build-cross-platform");
+assert.equal(nativeUpdaterE2eJob.strategy["fail-fast"], false);
+assert.deepEqual(
+  nativeUpdaterE2eJob.strategy.matrix.include.map((entry) => [entry.os, entry.platform, entry.artifact_os]),
+  [["windows-latest", "win32", "Windows"], ["ubuntu-latest", "linux", "Linux"]],
+  "native updater E2E must run the Windows NSIS and Linux AppImage lifecycle on their matching runners",
+);
+const nativeUpdaterE2eSteps = nativeUpdaterE2eJob.steps;
+const nativeUpdaterArtifactStep = nativeUpdaterE2eSteps.find((step) => step.name === "Download exact native release artifact");
+const nativeUpdaterRunStep = nativeUpdaterE2eSteps.find((step) => step.name === "Run v0.8.32 to target native updater lifecycle");
+assert.ok(nativeUpdaterArtifactStep, "native updater E2E must consume the exact build-barrier artifact");
+assert.equal(nativeUpdaterArtifactStep.uses, "actions/download-artifact@v4");
+assert.equal(nativeUpdaterArtifactStep.with.name, "agentlas-release-${{ matrix.artifact_os }}");
+assert.ok(nativeUpdaterRunStep, "native updater E2E must expose a named lifecycle verifier");
+assert.equal(nativeUpdaterRunStep.shell, "bash");
+assert.equal(nativeUpdaterRunStep.env.CI, "true");
+assert.match(
+  nativeUpdaterRunStep.run,
+  /test-packaged-updater-install-e2e\.cjs[\s\S]*?--platform="\$\{\{ matrix\.platform \}\}"[\s\S]*?--artifact-dir=release[\s\S]*?--target-version="\$RESOLVED_VERSION"/,
+  "native updater E2E must run only the matching package, not a simulated updater",
+);
+assert.match(
+  nativeUpdaterRunStep.run,
+  /--timeout-ms=180000/,
+  "native updater E2E needs a bounded lifecycle timeout",
 );
 const linuxContinuityStep = workflowSteps(crossWorkflow).find(
   (step) => step.name === "Linux migration and updater continuity gates",
@@ -389,6 +540,7 @@ for (const requiredGate of [
   "npm run test:marketplace-cache",
   "npm run test:after-pack-runtime-contract",
   "npm run test:stormbreaker-core:embedded",
+  "npm run test:stormbreaker-swarm",
   "npm run test:mobile-bridge-contract",
 ]) {
   assert.match(
@@ -415,7 +567,13 @@ assert.equal(windowsParserStep.if, "runner.os == 'Windows'");
 assert.match(windowsParserStep.run, /npm run test:cli-version-parser/);
 assert.match(windowsParserStep.run, /npm run test:after-pack-runtime-contract/);
 assert.match(windowsParserStep.run, /npm run test:stormbreaker-core:embedded/);
+assert.match(windowsParserStep.run, /npm run test:stormbreaker-swarm/);
 assert.match(windowsParserStep.run, /npm run test:mobile-bridge-contract/);
+assert.match(
+  windowsParserStep.run,
+  /npm run test:updater-production/,
+  "Windows release artifacts must run the updater production contract before reaching the all-OS barrier",
+);
 const crossVerifyStep = workflowSteps(crossWorkflow).find((step) => step.name === "Verify tag matches package.json version");
 const signedResolveStep = workflowSteps(signedWorkflow).find((step) => step.name === "Resolve release inputs");
 for (const [name, step] of [["release.yml", crossVerifyStep], ["release-signed-mac.yml", signedResolveStep]]) {
@@ -443,7 +601,7 @@ for (const [name, step] of [["release.yml", crossVerifyStep], ["release-signed-m
     assert.notEqual(result.status, 0, `${name} must reject ${invalidTag}`);
   }
 }
-assert.equal(crossVerifyStep.env.RAW_TAG, "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}");
+assert.equal(crossVerifyStep.env.RAW_TAG, "${{ inputs.tag || github.ref_name }}");
 assert.equal(signedResolveStep.env.RAW_TAG, "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}");
 assert.match(signedResolveStep.run, /version.*!=.*\$\{tag#v\}/s, "manual version input must exactly match the validated tag");
 
@@ -463,7 +621,11 @@ assert.doesNotMatch(
 );
 const embeddedStormbreakerStep = stepNamed("Verify embedded Stormbreaker harness");
 assert.ok(embeddedStormbreakerStep, "signed macOS release must verify the embedded Stormbreaker command before packaging");
-assert.equal(embeddedStormbreakerStep.run, "npm run test:stormbreaker-core:embedded");
+assert.equal(
+  embeddedStormbreakerStep.run,
+  "npm run test:stormbreaker-core:embedded\nnpm run test:stormbreaker-swarm\n",
+  "signed macOS must verify both the immutable Core harness and the Desktop host executor",
+);
 assert.ok(
   signedSteps.indexOf(embeddedStormbreakerStep) < signedSteps.indexOf(stepNamed("Restore mac signing certificate")),
   "the embedded runtime gate must pass before signing credentials are restored",
@@ -489,22 +651,51 @@ assert.deepEqual(
   Object.keys(stepNamed("Check Railway release credentials").env).sort(),
   ["RAILWAY_PROJECT_ID", "RAILWAY_TOKEN"],
 );
+const allOsBarrier = signedWorkflow.jobs["release-artifact-barrier"];
+const signedArtifactJob = signedWorkflow.jobs["build-signed-mac-artifacts"];
+const publicWriterJob = signedWorkflow.jobs["publish-all-platforms"];
+assert.ok(allOsBarrier, "signed workflow must retain the all-OS release barrier");
+assert.ok(signedArtifactJob, "signed workflow must retain the post-barrier signed Mac artifact job");
+assert.ok(publicWriterJob, "signed workflow must retain one public release writer job");
 assert.deepEqual(
-  Object.keys(stepNamed("Apply Railway web release env").env).sort(),
-  ["RAILWAY_PROJECT_ID", "RAILWAY_TOKEN"],
+  allOsBarrier.needs,
+  ["cross-platform-release-build", "mac-release-preflight"],
+  "the all-OS barrier must wait for the reusable Windows/Linux workflow and macOS preflight",
+);
+assert.equal(signedArtifactJob.needs, "release-artifact-barrier");
+assert.deepEqual(
+  publicWriterJob.needs,
+  ["release-artifact-barrier", "build-signed-mac-artifacts"],
+  "the public writer must wait for every barrier-approved OS artifact",
+);
+const downloadBarrierArtifactsStep = stepNamed("Download every barrier-approved OS artifact");
+const localAssetVerificationStep = stepNamed("Verify local required manifest and hashes before first public write");
+const publicWriterStep = stepNamed("Single releases-repository writer and stable promotion");
+assert.ok(downloadBarrierArtifactsStep, "the sole writer must download all Actions barrier artifacts");
+assert.ok(localAssetVerificationStep, "the sole writer must locally verify the full asset manifest before public mutation");
+assert.ok(publicWriterStep, "the sole writer must be the only credential-bearing public mutation step");
+assert.equal(downloadBarrierArtifactsStep.uses, "actions/download-artifact@v4");
+assert.equal(downloadBarrierArtifactsStep.with.pattern, "agentlas-release-*");
+assert.equal(downloadBarrierArtifactsStep.with["merge-multiple"], true);
+assert.match(localAssetVerificationStep.run, /npm run release:assets:verify[\s\S]*?--release-dir=release/);
+assert.match(publicWriterStep.run, /npm run release:mac:publish/);
+assert.ok(
+  signedSteps.indexOf(downloadBarrierArtifactsStep) < signedSteps.indexOf(localAssetVerificationStep) &&
+    signedSteps.indexOf(localAssetVerificationStep) < signedSteps.indexOf(publicWriterStep),
+  "all barrier artifacts must be downloaded and locally checked before the only release-token step",
 );
 assert.deepEqual(
-  Object.keys(stepNamed("Complete staged release and promote verified stable").env).sort(),
-  ["AGENTLAS_RELEASE_ASSET_POLL_MS", "AGENTLAS_RELEASE_ASSET_WAIT_MS", "GH_TOKEN", "GITHUB_TOKEN"],
+  Object.keys(publicWriterStep.env).sort(),
+  ["GH_TOKEN", "GITHUB_TOKEN"],
 );
 assert.equal(
-  stepNamed("Complete staged release and promote verified stable").env.GH_TOKEN,
+  publicWriterStep.env.GH_TOKEN,
   "${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}",
   "cross-repo publish must use the dedicated PAT without a source-repo GITHUB_TOKEN fallback",
 );
 assert.equal(signedWorkflow.permissions.contents, "read", "the public source workflow must not request source-repository contents:write");
 assert.deepEqual(
-  Object.keys(stepNamed("Build, sign, notarize, and verify DMGs").env).sort(),
+  Object.keys(stepNamed("Build, sign, notarize, and verify Mac artifacts").env).sort(),
   ["APPLE_APP_SPECIFIC_PASSWORD", "APPLE_ID", "APPLE_TEAM_ID", "CSC_KEY_PASSWORD"],
 );
 assert.ok(
@@ -591,14 +782,22 @@ for (const configName of ["electron-builder.yml", "electron-builder.mac-stable.y
   );
 }
 
-const publishStep = crossPlatformWorkflow.slice(
-  crossPlatformWorkflow.indexOf("- name: Package and stage prerelease assets"),
+const packageBarrierStep = crossReleaseSteps.find((step) => step.name === "Package verified Actions artifacts only");
+assert.match(
+  packageBarrierStep.run,
+  /npx electron-builder \$\{\{ matrix\.builder_args \}\} --publish never[\s\S]*?node scripts\/stamp-update-feeds\.mjs --release-dir=release --require/,
+  "cross-platform feeds must be stamped only after build-only electron-builder output exists",
 );
-const builderIndex = publishStep.indexOf("npx electron-builder ${{ matrix.builder_args }} --publish always");
-const stampIndex = publishStep.indexOf("node scripts/stamp-update-feeds.mjs --release-dir=release --require");
-const uploadIndex = publishStep.indexOf('gh release upload "$RESOLVED_TAG"');
-assert.ok(builderIndex >= 0 && stampIndex > builderIndex && uploadIndex > stampIndex, "cross-platform feeds must be stamped and clobber-uploaded after electron-builder writes them");
-assert.match(publishStep, /gh release upload[\s\S]*?--clobber[\s\S]*?"\$\{update_feeds\[@\]\}"/);
+assert.doesNotMatch(
+  crossPlatformWorkflow,
+  /gh release (?:create|upload|edit)/,
+  "the reusable Windows/Linux workflow must contain no public-release mutation path",
+);
+assert.match(
+  signedMacWorkflow,
+  /publish-all-platforms:[\s\S]*?Download every barrier-approved OS artifact[\s\S]*?Verify local required manifest and hashes before first public write[\s\S]*?Single releases-repository writer and stable promotion/,
+  "only the signed writer job may cross the public release boundary after the full artifact barrier",
+);
 const mainSource = fs.readFileSync(path.join(root, "electron", "main.ts"), "utf8");
 const readyBlock = mainSource.slice(mainSource.indexOf("app.whenReady().then"));
 const preflightIndex = readyBlock.indexOf("preflightUpdaterStartup()");

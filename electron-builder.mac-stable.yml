@@ -11,6 +11,22 @@ directories:
   buildResources: build-resources
 
 afterPack: build-resources/after-pack-clean.cjs
+# The helper verifies the official bundle against
+# build-resources/macos-release-signing-policy.json before it can leave a macOS build.
+afterSign: build-resources/after-sign-trust.cjs
+
+# Keep this exact immutable package marker in lockstep with the base official
+# config. This standalone config intentionally does not inherit preview feed
+# settings, but it must keep the official install namespaces.
+extraMetadata:
+  agentlasInstallIdentity:
+    schemaVersion: 1
+    channel: official
+    appId: com.agentlas.desktop
+    appName: Agentlas
+    userDataNamespace: Agentlas
+    keychainService: com.agentlas.desktop
+    updateFeed: official
 
 files:
   - dist/electron/**/*
@@ -123,6 +139,12 @@ extraResources:
 
 mac:
   category: public.app-category.productivity
+  # This standalone release configuration must put the exact trust policy at
+  # process.resourcesPath before the signed app is allowed to auto-update.
+  extraResources:
+    - from: build-resources/macos-release-signing-policy.json
+      to: macos-release-signing-policy.json
+  forceCodeSigning: true
   # Electron 43 requires macOS 12 Monterey or newer. The update feed pairs this
   # product-version floor with Darwin 21 in update-compatibility.cjs.
   minimumSystemVersion: "12.0"

@@ -224,6 +224,58 @@ export function getOrCreateDivisionSession(
   });
 }
 
+/** Hidden persistent session for a complete Team/Firm nested under a parent TF.
+ * Keeping a dedicated parent prevents division-id collisions between two teams
+ * that happen to use the same role names. */
+export function getOrCreateFirmSession(
+  parentChatId: string,
+  firmId: string,
+  ceoAgentId: string,
+): Chat {
+  const marker = `⟦firm⟧${firmId}`;
+  const db = getDb();
+  const existing = db
+    .prepare(
+      "SELECT * FROM chats WHERE parent_chat_id = ? AND kind = 'division' AND title = ? LIMIT 1",
+    )
+    .get(parentChatId, marker) as ChatRow | undefined;
+  if (existing) return toChat(existing);
+  const parent = getChat(parentChatId);
+  return createChat({
+    agentId: ceoAgentId,
+    firmId,
+    projectId: parent?.projectId ?? null,
+    title: marker,
+    kind: "division",
+    parentChatId,
+  });
+}
+
+/** Hidden persistent session for a saved Agent Group nested under a top TF. */
+export function getOrCreateAgentGroupSession(
+  parentChatId: string,
+  groupId: string,
+  orchestratorAgentId: string,
+): Chat {
+  const marker = `⟦group⟧${groupId}`;
+  const db = getDb();
+  const existing = db
+    .prepare(
+      "SELECT * FROM chats WHERE parent_chat_id = ? AND kind = 'division' AND title = ? LIMIT 1",
+    )
+    .get(parentChatId, marker) as ChatRow | undefined;
+  if (existing) return toChat(existing);
+  const parent = getChat(parentChatId);
+  return createChat({
+    agentId: orchestratorAgentId,
+    agentGroupId: groupId,
+    projectId: parent?.projectId ?? null,
+    title: marker,
+    kind: "division",
+    parentChatId,
+  });
+}
+
 /** 사이트 디자인 스튜디오의 프로젝트별 숨김 지속 세션(division).
  *  같은 프로젝트의 생성/수정 턴이 한 대화로 이어져 빌려온 웹앱 디자인 마스터가
  *  프로젝트의 디자인 언어/결정 맥락을 기억한다. */

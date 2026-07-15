@@ -74,6 +74,7 @@ import {
 import {
   installAgent,
   installMyAgent,
+  getAgentById,
   listInstalledAgents,
   setAgentLocalDisplayName,
   uninstallAgent,
@@ -420,9 +421,14 @@ import type {
   CloudAgentHubPublishRequest,
   CloudAgentPrivateSaveRequest,
   CloudAgentPublishRequest,
+  CloudAgentRegisteredPublishRequest,
+  CloudAgentRegisteredSaveRequest,
+  CloudAgentRegisteredTarget,
+  CloudAgentRegisteredUploadOption,
   InvocationRunReceipt,
   McpInvocationEvent,
   McpInvocationRequest,
+  OrchestrationTarget,
   MetaAgentTeamFactoryRequest,
   McpTransport,
   MigrationOptions,
@@ -988,6 +994,34 @@ async function confirmNativeSiteProjectDeletion(
   return result.response === 1;
 }
 
+function rendererTaskForceTargets(value: unknown): OrchestrationTarget[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > 32) {
+    throw new Error("Invalid task-force roster.");
+  }
+  const seen = new Set<string>();
+  return value.map((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid task-force target.");
+    const target = raw as Record<string, unknown>;
+    const source = target.source;
+    const kind = target.entityKind;
+    const idKey = source === "local" ? kind === "agent" ? "agentId" : kind === "team" ? "firmId" : kind === "group" ? "groupId" : "" : "slug";
+    const id = idKey && typeof target[idKey] === "string" ? target[idKey].trim() : "";
+    if (!id || id.length > 160) throw new Error("Invalid task-force target identity.");
+    let normalized: OrchestrationTarget;
+    if (source === "local" && kind === "agent") normalized = { source, entityKind: kind, agentId: id };
+    else if (source === "local" && kind === "team") normalized = { source, entityKind: kind, firmId: id };
+    else if (source === "local" && kind === "group") normalized = { source, entityKind: kind, groupId: id };
+    else if ((source === "cloud" || source === "hub") && (kind === "agent" || kind === "team")) {
+      normalized = { source, entityKind: kind, slug: id };
+    } else throw new Error("Invalid task-force target kind.");
+    const key = JSON.stringify(normalized);
+    if (seen.has(key)) throw new Error("Duplicate task-force target.");
+    seen.add(key);
+    return normalized;
+  });
+}
+
 function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequest {
   // Site Agent App authority is minted only by the loopback server in Electron
   // main. A compromised renderer cannot opt into that mode or inject an MCP
@@ -997,7 +1031,61 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
     agentAppRuntimeToolGrant: _agentAppRuntimeToolGrant,
     ...rendererFields
   } = req;
-  return rendererFields;
+  return {
+    ...rendererFields,
+    taskForceTargets: rendererTaskForceTargets(rendererFields.taskForceTargets),
+  };
+}
+
+function registeredUploadRoot(target: CloudAgentRegisteredTarget): { rootPath: string; slug: string } {
+  if (!target || typeof target !== "object") throw new Error("registered-upload-target-invalid");
+  if (target.entityKind === "team" && "firmId" in target) {
+    const firm = getFirm(String(target.firmId || ""));
+    const ceo = firm ? getAgentById(firm.ceoAgentId) : null;
+    if (!firm) throw new Error("registered-team-not-found");
+    if (!ceo?.localPath || !fs.existsSync(ceo.localPath) || !fs.statSync(ceo.localPath).isDirectory()) {
+      throw new Error("registered-team-source-unavailable");
+    }
+    return { rootPath: ceo.localPath, slug: firm.slug };
+  }
+  if ("agentId" in target) {
+    const agent = getAgentById(String(target.agentId || ""));
+    if (!agent) throw new Error("registered-agent-not-found");
+    if (target.entityKind === "agent" && agent.kind === "team") throw new Error("registered-target-kind-mismatch");
+    if (target.entityKind === "team" && agent.kind !== "team") throw new Error("registered-target-kind-mismatch");
+    if (!agent.localPath || !fs.existsSync(agent.localPath) || !fs.statSync(agent.localPath).isDirectory()) {
+      throw new Error("registered-agent-source-unavailable");
+    }
+    return { rootPath: agent.localPath, slug: agent.slug };
+  }
+  throw new Error("registered-upload-target-invalid");
+}
+
+function registeredUploadOptions(): CloudAgentRegisteredUploadOption[] {
+  const firms = listFirms();
+  const firmMemberIds = new Set(firms.flatMap((firm) => firm.orgChart.map((node) => node.agentId)));
+  const teamOptions = firms.map((firm): CloudAgentRegisteredUploadOption => {
+    const ceo = getAgentById(firm.ceoAgentId);
+    return {
+      target: { entityKind: "team", firmId: firm.id },
+      name: firm.nameEn || firm.name,
+      slug: firm.slug,
+      entityKind: "team",
+      sourceReady: Boolean(ceo?.localPath && fs.existsSync(ceo.localPath)),
+    };
+  });
+  const agentOptions = listInstalledAgents()
+    .filter((agent) => agent.visibility !== "background" && !firmMemberIds.has(agent.id))
+    .map((agent): CloudAgentRegisteredUploadOption => ({
+      target: agent.kind === "team"
+        ? { entityKind: "team", agentId: agent.id }
+        : { entityKind: "agent", agentId: agent.id },
+      name: agent.localDisplayName || agent.nameEn || agent.name,
+      slug: agent.slug,
+      entityKind: agent.kind === "team" ? "team" : "agent",
+      sourceReady: Boolean(agent.localPath && fs.existsSync(agent.localPath)),
+    }));
+  return [...teamOptions, ...agentOptions];
 }
 
 export function registerIpcHandlers(): void {
@@ -2231,6 +2319,24 @@ export function registerIpcHandlers(): void {
   });
 
   // ── cloud agents ────────────────────────────────────────────
+  ipcMain.handle("cloudAgents:listRegisteredUploadOptions", () => registeredUploadOptions());
+  ipcMain.handle("cloudAgents:saveRegisteredPrivate", async (_e, input: CloudAgentRegisteredSaveRequest) => {
+    const source = registeredUploadRoot(input.target);
+    return packageAndReviewCloudAgent({
+      ...source,
+      visibility: "private-link",
+      reviewMode: "static-only",
+    });
+  });
+  ipcMain.handle("cloudAgents:publishRegisteredPublic", async (_e, input: CloudAgentRegisteredPublishRequest) => {
+    const source = registeredUploadRoot(input.target);
+    return packageAndReviewCloudAgent({
+      ...source,
+      visibility: "marketplace",
+      reviewMode: input.reviewMode,
+      notes: input.notes,
+    });
+  });
   // Owner-private save is the default product action. It keeps local
   // secret/path/hash safety checks but never opts into public Hub review.
   ipcMain.handle("cloudAgents:savePrivate", async (_e, input: CloudAgentPrivateSaveRequest) =>

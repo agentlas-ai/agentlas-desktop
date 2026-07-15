@@ -4,6 +4,8 @@ import { compareSemVer, parseSemVer } from "../../shared/semver";
 import type {
   UpdaterActionResult,
   UpdaterCompatibility,
+  UpdaterDiagnostic,
+  UpdaterDiagnosticCategory,
   UpdaterErrorCode,
   UpdaterState,
 } from "../../shared/types";
@@ -12,6 +14,9 @@ const JOURNAL_SCHEMA_VERSION = 1;
 const OFFICIAL_DOWNLOAD_URL = "https://agentlas.cloud/desktop";
 const RECOVERY_SESSION_RETRY_DELAY_MS = 500;
 const RECOVERY_SESSION_RETRY_ATTEMPTS = 4;
+const NATIVE_INSTALL_WATCHDOG_MS = 20_000;
+const NATIVE_INSTALL_RETRY_BASE_DELAY_MS = 1_000;
+const NATIVE_INSTALL_RETRY_MAX_DELAY_MS = 5 * 60_000;
 
 export const CONTINUITY_CORE_TABLES = [
   "installed_agents",
@@ -147,6 +152,11 @@ export interface InstallJournal {
   targetVersion: string;
   requestedAt: string;
   reasonCode?: UpdaterErrorCode;
+  diagnostic?: UpdaterDiagnostic;
+  /** Number of failed native handoffs for this source/target pair. */
+  nativeInstallFailures?: number;
+  /** Epoch milliseconds; avoids a tight retry loop after helper/payload failures. */
+  retryAfter?: number;
   continuity: ContinuitySnapshot;
 }
 
@@ -172,6 +182,8 @@ export interface UpdaterControllerDependencies {
   uid: number | null;
   runtimeVersion: () => string | null;
   databaseSchemaVersion: () => number | null;
+  /** Value-free macOS source identity check owned by main process. */
+  inspectInstalledAppTrust: (bundlePath: string) => Promise<InstalledAppTrustResult>;
   /** Stop mutable background writers and resolve only after their current work drains. */
   quiesceWriters?: () => Promise<void | (() => void)>;
   captureContinuity: (targetVersion: string) => Promise<ContinuitySnapshot>;
@@ -190,6 +202,8 @@ export interface UpdaterControllerDependencies {
   recoverySessionRetryAttempts?: number;
   waitForRecoveryRetry?: (delayMs: number) => Promise<void>;
   refreshSessionForRecovery?: () => Promise<void>;
+  nativeInstallWatchdogMs?: number;
+  nativeInstallRetryBaseDelayMs?: number;
 }
 
 interface InstallAccessResult {
@@ -197,6 +211,10 @@ interface InstallAccessResult {
   bundlePath: string | null;
   reason?: string;
 }
+
+export type InstalledAppTrustResult =
+  | { ok: true }
+  | { ok: false; diagnostic: UpdaterDiagnostic };
 
 const terminalStates = new Set<UpdaterState["status"]>([
   "downloaded",
@@ -209,6 +227,7 @@ const updaterErrorCodes = new Set<UpdaterErrorCode>([
   "check-failed",
   "download-failed",
   "install-not-owned",
+  "install-source-untrusted",
   "install-not-applied",
   "install-state-corrupt",
   "legacy-cleanup-failed",
@@ -221,6 +240,79 @@ const updaterErrorCodes = new Set<UpdaterErrorCode>([
   "minimum-schema-version",
 ]);
 
+const updaterDiagnosticMessages = {
+  "source-signature-class": "The running app is not signed with the official Developer ID application certificate.",
+  "source-identity": "The running app does not match the pinned Agentlas application identity.",
+  "source-designated-requirement": "The running app does not satisfy the pinned Agentlas signing requirement.",
+  "source-gatekeeper": "macOS Gatekeeper did not accept the running Agentlas app.",
+  "source-verification-unavailable": "The running app signature could not be verified by macOS.",
+  "native-install-signature": "The native updater rejected the application signature identity.",
+  "native-install-permission": "The native updater could not replace the application with the current macOS permissions.",
+  "native-install-space": "The native updater did not have enough free disk space to stage the update.",
+  "native-install-payload": "The native updater could not find or open the downloaded update payload.",
+  "native-install-state": "The native updater could not prepare its local install state.",
+  "native-install-timeout": "The native updater did not complete its handoff in time.",
+  "native-install-unknown": "The native updater stopped before application replacement began.",
+} as const satisfies Record<UpdaterDiagnosticCategory, string>;
+
+export function updaterDiagnostic(category: UpdaterDiagnosticCategory): UpdaterDiagnostic {
+  return { category, message: updaterDiagnosticMessages[category] };
+}
+
+export function isValidUpdaterDiagnostic(value: unknown): value is UpdaterDiagnostic {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.category !== "string" || !(raw.category in updaterDiagnosticMessages)) return false;
+  const category = raw.category as UpdaterDiagnosticCategory;
+  return raw.message === updaterDiagnosticMessages[category];
+}
+
+function nativeErrorClassifierText(error: unknown): string {
+  if (error instanceof Error) {
+    const coded = error as Error & { code?: unknown };
+    return `${typeof coded.code === "string" ? coded.code : ""} ${error.message}`.slice(0, 4_096);
+  }
+  if (error && typeof error === "object") {
+    const raw = error as Record<string, unknown>;
+    return `${typeof raw.code === "string" ? raw.code : ""} ${typeof raw.message === "string" ? raw.message : ""}`.slice(0, 4_096);
+  }
+  return "";
+}
+
+/** Classifies locally, then discards native error text before persistence/UI. */
+export function redactNativeUpdaterDiagnostic(error: unknown): UpdaterDiagnostic {
+  const text = nativeErrorClassifierText(error);
+  if (/code.?sign|signature|designated requirement|errsec|cssmerr|different team|team.?id/i.test(text)) {
+    return updaterDiagnostic("native-install-signature");
+  }
+  if (/\benospc\b|no space left|disk (?:is )?full|insufficient (?:disk )?space/i.test(text)) {
+    return updaterDiagnostic("native-install-space");
+  }
+  if (/\b(?:etimedout|timeout)\b|timed out|helper hang/i.test(text)) {
+    return updaterDiagnostic("native-install-timeout");
+  }
+  if (/\b(?:eacces|eperm)\b|permission|operation not permitted|authori[sz]ation/i.test(text)) {
+    return updaterDiagnostic("native-install-permission");
+  }
+  if (/\benoent\b|no such file|update\.zip|downloaded payload|pending[/\\]/i.test(text)) {
+    return updaterDiagnostic("native-install-payload");
+  }
+  if (/shipit|squirrel|install.?state|update state/i.test(text)) {
+    return updaterDiagnostic("native-install-state");
+  }
+  return updaterDiagnostic("native-install-unknown");
+}
+
+function isRetryableNativeDiagnostic(diagnostic: UpdaterDiagnostic | undefined): boolean {
+  return Boolean(diagnostic && new Set<UpdaterDiagnosticCategory>([
+    "native-install-permission",
+    "native-install-space",
+    "native-install-payload",
+    "native-install-state",
+    "native-install-timeout",
+  ]).has(diagnostic.category));
+}
+
 function safeMessage(code: UpdaterErrorCode): string {
   switch (code) {
     case "config-missing":
@@ -231,6 +323,8 @@ function safeMessage(code: UpdaterErrorCode): string {
       return "The update could not be downloaded. The installed app was left unchanged.";
     case "install-not-owned":
       return "Automatic install is disabled because this app is owned by another macOS account. Use the official installer once; your local Agentlas data stays in place.";
+    case "install-source-untrusted":
+      return "Automatic update repair is required because this copy is outside the official Developer ID lineage. The existing app and local Agentlas data were preserved.";
     case "install-not-applied":
       return "The previous update was not applied, so Agentlas will not repeat the same install. The existing app and local data were preserved.";
     case "install-state-corrupt":
@@ -303,16 +397,17 @@ export function evaluateInstallAccess(input: {
   const bundlePath = resolveMacAppBundle(input.execPath);
   if (!bundlePath) return { ok: false, bundlePath: null, reason: "not-running-from-app-bundle" };
   try {
-    const bundleStat = fs.statSync(bundlePath);
-    const executableStat = fs.statSync(input.execPath);
-    if (input.uid !== null && (bundleStat.uid !== input.uid || executableStat.uid !== input.uid)) {
-      return { ok: false, bundlePath, reason: "bundle-owner-mismatch" };
+    // A normal /Applications app may be root-owned and its parent not directly
+    // writable by the standard user. Squirrel/ShipIt owns authorization and
+    // replacement. This preflight only establishes an inspectable source app;
+    // it must not confuse filesystem ownership with signing trust.
+    if (!fs.statSync(bundlePath).isDirectory() || !fs.statSync(input.execPath).isFile()) {
+      return { ok: false, bundlePath, reason: "app-source-unavailable" };
     }
-    fs.accessSync(bundlePath, fs.constants.W_OK);
-    fs.accessSync(path.dirname(bundlePath), fs.constants.W_OK);
+    fs.accessSync(input.execPath, fs.constants.R_OK);
     return { ok: true, bundlePath };
   } catch {
-    return { ok: false, bundlePath, reason: "bundle-not-replaceable" };
+    return { ok: false, bundlePath, reason: "app-source-unavailable" };
   }
 }
 
@@ -402,6 +497,9 @@ function isValidJournal(value: unknown): value is InstallJournal {
     typeof raw.requestedAt === "string" &&
     Number.isFinite(Date.parse(raw.requestedAt)) &&
     (raw.reasonCode === undefined || (typeof raw.reasonCode === "string" && updaterErrorCodes.has(raw.reasonCode as UpdaterErrorCode))) &&
+    (raw.diagnostic === undefined || isValidUpdaterDiagnostic(raw.diagnostic)) &&
+    (raw.nativeInstallFailures === undefined || asNonNegativeInteger(raw.nativeInstallFailures) !== null) &&
+    (raw.retryAfter === undefined || asNonNegativeInteger(raw.retryAfter) !== null) &&
     isValidContinuitySnapshot(raw.continuity)
   );
 }
@@ -468,11 +566,16 @@ export class DesktopUpdaterController {
   private availableVersion: string | null = null;
   private blockedTargetVersion: string | null = null;
   private blockedReasonCode: UpdaterErrorCode = "install-not-applied";
+  private blockedDiagnostic: UpdaterDiagnostic | undefined;
+  private blockedNativeInstallFailures = 0;
+  private blockedRetryAfter: number | undefined;
   private recoveryBackupPath: string | null = null;
   private automaticInstallPaused = false;
   private lastCheckedAt: number | undefined;
   private initialized = false;
   private initPromise: Promise<void> | null = null;
+  private resumeWritersAfterInstallAttempt: (() => void) | null = null;
+  private nativeInstallWatchdog: NodeJS.Timeout | null = null;
   private readonly listeners: Array<{ event: UpdaterEvent; listener: (...args: any[]) => void }> = [];
 
   constructor(private readonly deps: UpdaterControllerDependencies) {
@@ -495,6 +598,37 @@ export class DesktopUpdaterController {
   private listen(event: UpdaterEvent, listener: (...args: any[]) => void): void {
     this.listeners.push({ event, listener });
     this.deps.updater.on(event, listener);
+  }
+
+  private armInstallWriterResume(resume: (() => void) | undefined): void {
+    let resumed = false;
+    this.resumeWritersAfterInstallAttempt = () => {
+      if (resumed) return;
+      resumed = true;
+      this.resumeWritersAfterInstallAttempt = null;
+      try {
+        resume?.();
+      } catch {
+        this.logger.warn("[updater] failed to resume writers after cancelled install");
+      }
+    };
+  }
+
+  private resumeInstallWriters(): void {
+    if (this.nativeInstallWatchdog) clearTimeout(this.nativeInstallWatchdog);
+    this.nativeInstallWatchdog = null;
+    this.resumeWritersAfterInstallAttempt?.();
+  }
+
+  private armNativeInstallWatchdog(journal: InstallJournal): void {
+    const configured = asNonNegativeInteger(this.deps.nativeInstallWatchdogMs);
+    const delayMs = configured ?? NATIVE_INSTALL_WATCHDOG_MS;
+    this.nativeInstallWatchdog = setTimeout(() => {
+      this.nativeInstallWatchdog = null;
+      if (this.state.status !== "installing") return;
+      this.blockInstallStart({ code: "ETIMEDOUT", message: "native updater handoff timed out" }, journal);
+    }, delayMs);
+    this.nativeInstallWatchdog.unref?.();
   }
 
   private journalPath(): string {
@@ -659,14 +793,27 @@ export class DesktopUpdaterController {
     this.automaticInstallPaused = true;
     this.blockedTargetVersion = version ?? null;
     this.blockedReasonCode = "legacy-cleanup-failed";
+    this.blockedDiagnostic = undefined;
+    this.blockedNativeInstallFailures = 0;
+    this.blockedRetryAfter = undefined;
     this.publish(this.manualState(version, "legacy-cleanup-failed"));
     return false;
   }
 
-  private manualState(version: string | undefined, code: UpdaterErrorCode): UpdaterState {
-    const canRetry = code === "continuity-backup-failed" || code === "legacy-cleanup-failed";
+  private manualState(
+    version: string | undefined,
+    code: UpdaterErrorCode,
+    diagnostic?: UpdaterDiagnostic,
+    nativeInstallFailures = 0,
+    retryAfter?: number,
+  ): UpdaterState {
+    const nativeRetryable =
+      code === "install-start-failed" &&
+      isRetryableNativeDiagnostic(diagnostic);
+    const canRetry = code === "continuity-backup-failed" || code === "legacy-cleanup-failed" || nativeRetryable;
     const offersInstaller = new Set<UpdaterErrorCode>([
       "install-not-owned",
+      "install-source-untrusted",
       "install-not-applied",
       "install-state-corrupt",
       "install-start-failed",
@@ -678,8 +825,10 @@ export class DesktopUpdaterController {
       version,
       code,
       error: safeMessage(code),
+      ...(diagnostic ? { diagnostic } : {}),
       canRetry,
       ...(offersInstaller ? { manualDownloadUrl: this.manualDownloadUrl } : {}),
+      ...(nativeRetryable && retryAfter !== undefined ? { retryAfter } : {}),
     };
   }
 
@@ -727,6 +876,89 @@ export class DesktopUpdaterController {
       return "minimum-schema-version";
     }
     return null;
+  }
+
+  private async verifyInstalledAppTrustOrBlock(
+    version: string,
+    access: InstallAccessResult,
+  ): Promise<boolean> {
+    if (this.deps.platform !== "darwin") return true;
+    let trust: InstalledAppTrustResult;
+    try {
+      trust = access.bundlePath
+        ? await this.deps.inspectInstalledAppTrust(access.bundlePath)
+        : { ok: false, diagnostic: updaterDiagnostic("source-verification-unavailable") };
+    } catch {
+      trust = { ok: false, diagnostic: updaterDiagnostic("source-verification-unavailable") };
+    }
+    if (trust.ok) return true;
+    if (!this.cleanupOrBlock(version)) return false;
+    this.blockedTargetVersion = version;
+    this.blockedReasonCode = "install-source-untrusted";
+    this.blockedDiagnostic = trust.diagnostic;
+    this.blockedNativeInstallFailures = 0;
+    this.blockedRetryAfter = undefined;
+    this.publish(this.manualState(version, "install-source-untrusted", trust.diagnostic));
+    return false;
+  }
+
+  private blockInstallStart(error: unknown, knownJournal?: InstallJournal): UpdaterState {
+    const diagnostic = redactNativeUpdaterDiagnostic(error);
+    this.logger.warn(`[updater] native install start failed (${diagnostic.category})`);
+    this.resumeInstallWriters();
+
+    const version = this.state.version ?? knownJournal?.targetVersion;
+    if (
+      this.state.status === "manual-required" &&
+      this.state.code === "install-start-failed" &&
+      this.blockedTargetVersion === (version ?? null)
+    ) {
+      return this.state;
+    }
+
+    const journal = knownJournal ?? this.readJournal();
+    const nativeInstallFailures = (journal?.nativeInstallFailures ?? 0) + 1;
+    const retryable = isRetryableNativeDiagnostic(diagnostic);
+    const baseDelay = asNonNegativeInteger(this.deps.nativeInstallRetryBaseDelayMs) ?? NATIVE_INSTALL_RETRY_BASE_DELAY_MS;
+    const retryAfter = retryable
+      ? this.now() + Math.min(
+        baseDelay * (2 ** Math.min(Math.max(0, nativeInstallFailures - 1), 16)),
+        NATIVE_INSTALL_RETRY_MAX_DELAY_MS,
+      )
+      : undefined;
+
+    // A timeout cannot prove that ShipIt/helper stopped. Do not race a live
+    // helper by deleting its staging state here. Explicit retry performs stale
+    // cleanup only after the bounded backoff. Definite native errors can be
+    // cleaned immediately.
+    if (diagnostic.category !== "native-install-timeout" && !this.cleanupOrBlock(version)) return this.state;
+
+    if (journal) {
+      try {
+        this.writeJournal({
+          ...journal,
+          phase: "blocked",
+          reasonCode: "install-start-failed",
+          diagnostic,
+          nativeInstallFailures,
+          ...(retryAfter !== undefined ? { retryAfter } : {}),
+        });
+      } catch {
+        this.logger.warn("[updater] failed to persist redacted install diagnostic");
+      }
+    }
+    this.blockedTargetVersion = version ?? null;
+    this.blockedReasonCode = "install-start-failed";
+    this.blockedDiagnostic = diagnostic;
+    this.blockedNativeInstallFailures = nativeInstallFailures;
+    this.blockedRetryAfter = retryAfter;
+    return this.publish(this.manualState(
+      version,
+      "install-start-failed",
+      diagnostic,
+      nativeInstallFailures,
+      retryAfter,
+    ));
   }
 
   private async verifyJournalContinuity(snapshot: ContinuitySnapshot): Promise<ContinuityVerification> {
@@ -780,6 +1012,9 @@ export class DesktopUpdaterController {
     }
     this.blockedTargetVersion = journal.targetVersion;
     this.blockedReasonCode = journal.reasonCode ?? "install-not-applied";
+    this.blockedDiagnostic = journal.diagnostic;
+    this.blockedNativeInstallFailures = journal.nativeInstallFailures ?? 0;
+    this.blockedRetryAfter = journal.retryAfter;
     this.recoveryBackupPath = journal.continuity.backupPath;
     const comparison = compareSemVer(this.deps.currentVersion(), journal.targetVersion);
     if (comparison !== null && comparison >= 0) {
@@ -804,6 +1039,9 @@ export class DesktopUpdaterController {
         this.automaticInstallPaused = true;
         this.blockedTargetVersion = journal.targetVersion;
         this.blockedReasonCode = "install-state-corrupt";
+        this.blockedDiagnostic = undefined;
+        this.blockedNativeInstallFailures = 0;
+        this.blockedRetryAfter = undefined;
         if (fs.existsSync(this.journalPath())) {
           try {
             this.writeJournal({ ...journal, phase: "blocked", reasonCode: "install-state-corrupt" });
@@ -816,6 +1054,9 @@ export class DesktopUpdaterController {
       }
       this.blockedTargetVersion = null;
       this.blockedReasonCode = "install-not-applied";
+      this.blockedDiagnostic = undefined;
+      this.blockedNativeInstallFailures = 0;
+      this.blockedRetryAfter = undefined;
       this.publish({ status: "updated", version: journal.targetVersion });
       return;
     }
@@ -826,7 +1067,13 @@ export class DesktopUpdaterController {
     const reasonCode = journal.reasonCode ?? "install-not-applied";
     this.blockedReasonCode = reasonCode;
     this.writeJournal({ ...journal, phase: "blocked", reasonCode });
-    this.publish(this.manualState(journal.targetVersion, reasonCode));
+    this.publish(this.manualState(
+      journal.targetVersion,
+      reasonCode,
+      journal.diagnostic,
+      journal.nativeInstallFailures ?? 0,
+      journal.retryAfter,
+    ));
   }
 
   init(): Promise<void> {
@@ -882,16 +1129,12 @@ export class DesktopUpdaterController {
       });
     });
     this.listen("error", (error: unknown) => {
-      this.logger.warn("[updater] electron-updater error", error);
       if (this.state.status === "installing") {
-        const journal = this.readJournal();
-        if (journal) this.writeJournal({ ...journal, phase: "blocked", reasonCode: "install-start-failed" });
-        this.blockedTargetVersion = this.state.version ?? null;
-        this.blockedReasonCode = "install-start-failed";
-        if (!this.cleanupOrBlock(this.state.version)) return;
-        this.publish(this.manualState(this.state.version, "install-start-failed"));
+        this.blockInstallStart(error);
         return;
       }
+      if (this.state.status === "manual-required" && this.state.code === "install-start-failed") return;
+      this.logger.warn("[updater] electron-updater failed outside install handoff");
       if (this.state.status === "downloaded" || this.state.status === "recovery-required") return;
       this.publish(this.errorState(this.downloadPromise ? "download-failed" : "check-failed"));
     });
@@ -916,6 +1159,8 @@ export class DesktopUpdaterController {
     if (this.timer) clearInterval(this.timer);
     this.initialTimer = null;
     this.timer = null;
+    if (this.nativeInstallWatchdog) clearTimeout(this.nativeInstallWatchdog);
+    this.nativeInstallWatchdog = null;
     for (const { event, listener } of this.listeners) this.deps.updater.removeListener?.(event, listener);
     this.listeners.length = 0;
     this.initialized = false;
@@ -935,7 +1180,13 @@ export class DesktopUpdaterController {
     }
     if (this.availableVersion === version && (this.downloadPromise || this.state.status === "downloaded")) return;
     if (this.blockedTargetVersion === version) {
-      this.publish(this.manualState(version, this.blockedReasonCode));
+      this.publish(this.manualState(
+        version,
+        this.blockedReasonCode,
+        this.blockedDiagnostic,
+        this.blockedNativeInstallFailures,
+        this.blockedRetryAfter,
+      ));
       return;
     }
 
@@ -954,13 +1205,7 @@ export class DesktopUpdaterController {
       execPath: this.deps.execPath,
       uid: this.deps.uid,
     });
-    if (!access.ok) {
-      this.blockedTargetVersion = version;
-      this.blockedReasonCode = "install-not-owned";
-      if (!this.cleanupOrBlock(version)) return;
-      this.publish(this.manualState(version, "install-not-owned"));
-      return;
-    }
+    if (!(await this.verifyInstalledAppTrustOrBlock(version, access))) return;
 
     this.availableVersion = version;
     this.publish({ status: "available", version, compatibility });
@@ -980,6 +1225,26 @@ export class DesktopUpdaterController {
 
   check(): Promise<UpdaterState> {
     if (this.checkPromise) return this.checkPromise;
+    const isNativeRetry =
+      this.state.status === "manual-required" &&
+      this.state.code === "install-start-failed" &&
+      this.state.canRetry === true;
+    if (isNativeRetry) {
+      if (this.state.retryAfter !== undefined && this.now() < this.state.retryAfter) {
+        return Promise.resolve(this.state);
+      }
+      if (!this.cleanupOrBlock(this.state.version)) return Promise.resolve(this.state);
+      // Preserve the recovery copy and durable retry counter in the journal,
+      // while the stale native payload/state is cleared. The next check obtains
+      // fresh bytes; handoff still requires a new explicit install action.
+      this.blockedTargetVersion = null;
+      this.blockedReasonCode = "install-not-applied";
+      this.blockedDiagnostic = undefined;
+      this.blockedNativeInstallFailures = 0;
+      this.blockedRetryAfter = undefined;
+      this.availableVersion = null;
+      this.publish({ status: "idle" });
+    }
     if (this.automaticInstallPaused) {
       if (this.state.code !== "legacy-cleanup-failed" || !this.clearStaleInstallArtifacts()) {
         return Promise.resolve(this.state);
@@ -987,6 +1252,9 @@ export class DesktopUpdaterController {
       this.automaticInstallPaused = false;
       this.blockedTargetVersion = null;
       this.blockedReasonCode = "install-not-applied";
+      this.blockedDiagnostic = undefined;
+      this.blockedNativeInstallFailures = 0;
+      this.blockedRetryAfter = undefined;
       this.publish({ status: "idle" });
     }
     if (this.state.status === "installing" || this.state.status === "recovery-required" || this.state.status === "downloaded") {
@@ -998,8 +1266,8 @@ export class DesktopUpdaterController {
         const result = await this.deps.updater.checkForUpdates();
         const info = result?.updateInfo;
         if (result?.isUpdateAvailable && info) {
-          await this.handleUpdateAvailable(info);
           if (this.availablePromise) await this.availablePromise;
+          else await this.handleUpdateAvailable(info);
         } else if (this.state.status === "checking") {
           this.publish({ status: "not-available" });
         }
@@ -1040,11 +1308,8 @@ export class DesktopUpdaterController {
     const version = this.state.version;
     if (!version) return { accepted: false, state: this.state };
     const access = evaluateInstallAccess({ platform: this.deps.platform, execPath: this.deps.execPath, uid: this.deps.uid });
-    if (!access.ok) {
-      this.blockedTargetVersion = version;
-      this.blockedReasonCode = "install-not-owned";
-      if (!this.cleanupOrBlock(version)) return { accepted: false, state: this.state };
-      return { accepted: false, state: this.publish(this.manualState(version, "install-not-owned")) };
+    if (!(await this.verifyInstalledAppTrustOrBlock(version, access))) {
+      return { accepted: false, state: this.state };
     }
 
     let resumeWriters: (() => void) | undefined;
@@ -1055,7 +1320,8 @@ export class DesktopUpdaterController {
       return { accepted: false, state: this.publish(this.manualState(version, "continuity-backup-failed")) };
     }
 
-    let keepWritersQuiesced = false;
+    this.armInstallWriterResume(resumeWriters);
+    let installHandedOff = false;
     try {
       let continuity: ContinuitySnapshot;
       try {
@@ -1072,6 +1338,15 @@ export class DesktopUpdaterController {
         sourceVersion: this.deps.currentVersion(),
         targetVersion: version,
         requestedAt: new Date(this.now()).toISOString(),
+        ...(() => {
+          const prior = this.readJournal();
+          return prior &&
+            prior.sourceVersion === this.deps.currentVersion() &&
+            prior.targetVersion === version &&
+            prior.reasonCode === "install-start-failed"
+            ? { nativeInstallFailures: prior.nativeInstallFailures ?? 0 }
+            : {};
+        })(),
         continuity,
       };
       try {
@@ -1092,24 +1367,17 @@ export class DesktopUpdaterController {
         // Windows updates must reuse the existing installation without opening
         // the NSIS setup wizard. The second flag relaunches Agentlas afterward.
         this.deps.updater.quitAndInstall(true, true);
-        keepWritersQuiesced = true;
+        if (this.state.status !== "installing") {
+          return { accepted: false, state: this.state };
+        }
+        installHandedOff = true;
+        this.armNativeInstallWatchdog(journal);
         return { accepted: true, state: this.state };
       } catch (error) {
-        this.logger.warn("[updater] quitAndInstall failed", error);
-        this.writeJournal({ ...journal, phase: "blocked", reasonCode: "install-start-failed" });
-        this.blockedTargetVersion = version;
-        this.blockedReasonCode = "install-start-failed";
-        if (!this.cleanupOrBlock(version)) return { accepted: false, state: this.state };
-        return { accepted: false, state: this.publish(this.manualState(version, "install-start-failed")) };
+        return { accepted: false, state: this.blockInstallStart(error, journal) };
       }
     } finally {
-      if (!keepWritersQuiesced) {
-        try {
-          resumeWriters?.();
-        } catch (error) {
-          this.logger.warn("[updater] failed to resume writers after cancelled install", error);
-        }
-      }
+      if (!installHandedOff) this.resumeInstallWriters();
     }
   }
 

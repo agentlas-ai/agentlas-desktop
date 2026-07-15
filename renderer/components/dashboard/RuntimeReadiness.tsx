@@ -66,6 +66,8 @@ function activeRuntimeLabel(runtimes: RuntimeStatus[], ko: boolean): string {
     grok: "Grok",
     byok: "BYOK API",
     ollama: "Ollama",
+    lmstudio: "LM Studio",
+    mlx: "MLX",
   };
   const model = active.model?.trim();
   const version = active.version && active.version !== "unknown" ? active.version : "";

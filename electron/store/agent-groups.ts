@@ -43,6 +43,8 @@ export interface AgentGroupRuntimeMember {
   routeLabel: string;
   warnings: AgentGroupResolvedMember["warnings"];
   installedAgentId?: string;
+  /** Present when the member is a complete installed Team/Firm execution unit. */
+  firmId?: string;
 }
 
 export interface AgentGroupRuntimeResolution {
@@ -78,7 +80,7 @@ function fallbackSnapshot(member: AgentGroupMember): AgentGroupMemberSnapshot {
 function normalizeMember(member: AgentGroupMember): AgentGroupMember | null {
   if (!member || typeof member !== "object") return null;
   const source = member.source;
-  if (source !== "installed" && source !== "firm-node" && source !== "hub") return null;
+  if (source !== "installed" && source !== "firm" && source !== "firm-node" && source !== "hub") return null;
   const id = typeof member.id === "string" && member.id.trim() ? member.id : randomUUID();
   const addedAt = typeof member.addedAt === "string" && member.addedAt ? member.addedAt : new Date().toISOString();
   const snapshot = member.snapshot && typeof member.snapshot === "object" ? member.snapshot : fallbackSnapshot(member);
@@ -350,6 +352,17 @@ function displaySnapshotFromHub(agent: MarketplaceListing): AgentGroupMemberSnap
   };
 }
 
+function displaySnapshotFromFirm(firm: InstalledFirm): AgentGroupMemberSnapshot {
+  return {
+    name: firm.name,
+    nameEn: firm.nameEn,
+    tagline: firm.tagline,
+    taglineEn: firm.taglineEn,
+    routeLabel: "Installed Team",
+    entityKind: "team",
+  };
+}
+
 function resolveMember(
   member: AgentGroupMember,
   agents: InstalledAgent[],
@@ -362,7 +375,17 @@ function resolveMember(
   let status: AgentGroupResolvedMember["status"] = "ok";
   let current: AgentGroupResolvedMember["current"] | undefined;
 
-  if (member.source === "hub") {
+  if (member.source === "firm") {
+    const firm = firms.find((candidate) =>
+      (member.firmId ? candidate.id === member.firmId : candidate.slug === member.firmSlug),
+    );
+    if (!firm) {
+      status = "missing";
+      warnings.push("firm_missing");
+    } else {
+      current = displaySnapshotFromFirm(firm);
+    }
+  } else if (member.source === "hub") {
     const hub = resolveHubListing(member, hubAgents);
     if (!hub) {
       status = "missing";
@@ -500,6 +523,38 @@ export async function resolveAgentGroupForRuntime(
   const skipped: AgentGroupRuntimeResolution["skipped"] = [];
 
   for (const member of group.members) {
+    if (member.source === "firm") {
+      const firm = firms.find((candidate) =>
+        (member.firmId ? candidate.id === member.firmId : candidate.slug === member.firmSlug),
+      );
+      if (!firm) {
+        skipped.push({
+          id: member.id,
+          name: pickSnapshotName(member.snapshot),
+          source: member.source,
+          warnings: ["firm_missing"],
+        });
+        continue;
+      }
+      const org = getResolvedOrg(firm);
+      members.push({
+        id: member.id,
+        slug: `firm:${firm.slug}`,
+        name: firm.nameEn || firm.name,
+        directive: [
+          `You are the manager of the installed Agentlas team "${firm.nameEn || firm.name}".`,
+          firm.persona,
+          `Preserve the team's ${org.divisions.length > 0 ? "CEO, division, and specialist" : "CEO"} hierarchy.`,
+        ].filter(Boolean).join("\n"),
+        source: "firm",
+        entityKind: "team",
+        routeLabel: "Installed Team",
+        warnings: [],
+        installedAgentId: firm.ceoAgentId,
+        firmId: firm.id,
+      });
+      continue;
+    }
     if (member.source === "hub") {
       const savedSlug = member.hubSlug || member.agentSlug || "";
       const hub = resolveHubListing(member, hubAgents);

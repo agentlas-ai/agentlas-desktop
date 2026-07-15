@@ -8,7 +8,7 @@
 //   · Hub 에서 빌린 에이전트 → 실제 perCallCredits(원시 decision.hub.results[] 에 살아있음).
 // 라우터가 _selected_payload/_compact_hub_result 에서 cost_hints 를 떼므로 로컬 단가는
 // 애초에 없고, BYOC 라 0 이 맞다. Hub 단가만 실측으로 노출한다(추정·휴리스틱 숫자는 쓰지 않음).
-import type { JsonObject, Recommendation, RecAgent, RecStage } from "../../shared/types";
+import type { JsonObject, OrchestrationTarget, Recommendation, RecAgent, RecStage } from "../../shared/types";
 
 function asObj(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
@@ -24,6 +24,28 @@ function str(v: unknown): string | undefined {
 function numOrNull(v: unknown): number | null {
   const n = typeof v === "string" ? Number(v) : typeof v === "number" ? v : NaN;
   return Number.isFinite(n) ? n : null;
+}
+
+function remoteEntityKind(value: Record<string, unknown>): "agent" | "team" | null {
+  const raw = (str(value.entityKind) ?? str(value.entity_kind) ?? str(value.type) ?? "").toLowerCase();
+  if (raw.includes("team") || raw.includes("firm") || raw.includes("company")) return "team";
+  if (raw === "agent" || raw === "single-agent") return "agent";
+  const agentCount = numOrNull(value.agentCount ?? value.agent_count);
+  if (agentCount != null) return agentCount > 1 ? "team" : "agent";
+  return null;
+}
+
+function remoteSource(decision: Record<string, unknown>, value: Record<string, unknown>): "cloud" | "hub" {
+  const scope = (str(value.scope) ?? str(asObj(decision.hub).scope) ?? str(decision.scope) ?? "hub").toLowerCase();
+  return scope === "cloud" || scope === "owner-cloud" ? "cloud" : "hub";
+}
+
+function localTarget(id: string, type: string): OrchestrationTarget {
+  if (type.includes("group")) return { source: "local", entityKind: "group", groupId: id };
+  if (type.includes("team") || type.includes("firm") || type.includes("company")) {
+    return { source: "local", entityKind: "team", firmId: id };
+  }
+  return { source: "local", entityKind: "agent", agentId: id };
 }
 
 /** 원시 hub.results[] 에서 slug→perCallCredits 맵(compact 전이라 비용이 살아있다). */
@@ -99,6 +121,7 @@ export function normalizeRecommendation(json: unknown, query: string): Recommend
       estCredits: null, // BYOC: 내 구독으로 실행
       canonicalCommand: canonical,
       isFirm,
+      target: localTarget(id, type),
     };
     return base({ mode: "single", agents: [agent], totalEstCredits: null });
   }
@@ -122,7 +145,13 @@ export function normalizeRecommendation(json: unknown, query: string): Recommend
         consumes: asArr(o.consumes).map((x) => String(x)),
         estCredits: null,
       });
-      if (agentId) agents.push({ id: agentId, name: agentName ?? agentId, source: "local", estCredits: null });
+      if (agentId) agents.push({
+        id: agentId,
+        name: agentName ?? agentId,
+        source: "local",
+        estCredits: null,
+        target: { source: "local", entityKind: "agent", agentId },
+      });
     });
     if (!stages.length) return base({ mode: "none" });
     return base({ mode: "pipeline", agents, stages, totalEstCredits: null });
@@ -130,25 +159,35 @@ export function normalizeRecommendation(json: unknown, query: string): Recommend
 
   // ── hub_candidates → 네트워크 TF (Hub 에이전트를 빌려 로컬 실행). 실제 perCallCredits 노출. ──
   if (action === "hub_candidates") {
-    const bySlug = new Map<string, Record<string, unknown>>();
+    const bySlug = new Map<string, Record<string, unknown>[]>();
     for (const it of asArr(asObj(decision.hub).results)) {
       const o = asObj(it);
       const slug = str(o.slug);
-      if (slug) bySlug.set(slug, o);
+      if (slug) bySlug.set(slug, [...(bySlug.get(slug) ?? []), o]);
     }
     // execution.recommended_agents 가 단계 순서를 준다(있으면 우선).
     const orderedSlugs = asArr(asObj(decision.execution).recommended_agents)
       .map((r) => str(asObj(r).agent))
       .filter((x): x is string => Boolean(x));
-    const slugs = orderedSlugs.length ? orderedSlugs : [...bySlug.keys()].slice(0, 5);
+    const selectedRows = orderedSlugs.length
+      ? orderedSlugs.flatMap((slug) => {
+          const matches = bySlug.get(slug) ?? [];
+          return matches.length === 1 ? matches : [];
+        })
+      : [...bySlug.values()].flat().slice(0, 5);
     const agents: RecAgent[] = [];
-    for (const slug of slugs) {
-      const o = bySlug.get(slug) ?? {};
+    for (const o of selectedRows) {
+      const slug = str(o.slug);
+      if (!slug) continue;
+      const source = remoteSource(decision, o);
+      const entityKind = remoteEntityKind(o);
+      if (!entityKind) continue;
       agents.push({
         id: slug,
         name: str(o.name) ?? str(o.nameEn) ?? slug,
-        source: "hub",
-        estCredits: hubCredits.get(slug) ?? null, // 실측 또는 미정(가짜 숫자 안 씀)
+        source,
+        estCredits: source === "hub" ? hubCredits.get(slug) ?? null : null,
+        target: { source, entityKind, slug },
       });
     }
     if (!agents.length) return base({ mode: "none" });
@@ -171,11 +210,18 @@ export function normalizeRecommendation(json: unknown, query: string): Recommend
       if (!id || seen.has(id)) continue;
       seen.add(id);
       const isLocal = id.startsWith("local/") || Boolean(str(o.id));
+      const source = isLocal && !str(o.slug) ? "local" : remoteSource(decision, o);
+      const type = (str(o.type) ?? str(o.entityKind) ?? "agent").toLowerCase();
+      const remoteKind = source === "local" ? null : remoteEntityKind(o);
+      if (source !== "local" && !remoteKind) continue;
       clarifyAgents.push({
         id,
         name: str(o.name_ko) ?? str(o.name) ?? str(o.nameEn) ?? id,
-        source: isLocal && !str(o.slug) ? "local" : "hub",
+        source,
         estCredits: numOrNull(o.perCallCredits ?? o.per_call_credits),
+        target: source === "local"
+          ? localTarget(id, type)
+          : { source, entityKind: remoteKind!, slug: str(o.slug) ?? id },
       });
       if (clarifyAgents.length >= 5) break;
     }

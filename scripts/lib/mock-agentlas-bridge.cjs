@@ -89,6 +89,20 @@ function setupMockAgentlasBridge(options) {
   }
 
   const now = new Date().toISOString();
+  // Keep the mobile pairing IPC modeled rather than letting the generic
+  // missing-method proxy return undefined. Settings consumes the status shape
+  // immediately, so a neutral proxy would turn a mock drift into a renderer
+  // exception instead of exercising the real contract.
+  let mobileBridgeRunning = options?.mobileBridgeRunning !== false;
+  let mobileBridgeDevices = [];
+  const mobileBridgeStatus = () => ({
+    running: mobileBridgeRunning,
+    endpoint: mobileBridgeRunning ? "wss://127.0.0.1:43123/v1/mobile" : null,
+    secure: mobileBridgeRunning,
+    hostId: mobileBridgeRunning ? "host_1234567890abcdef1234567890abcdef" : null,
+    devices: mobileBridgeDevices.map((device) => ({ ...device })),
+    error: mobileBridgeRunning ? null : "Agentlas Mobile Bridge is unavailable",
+  });
   let hubAttachmentDecision = null;
   const calls = [];
   const missingBridgeCalls = [];
@@ -438,6 +452,34 @@ function setupMockAgentlasBridge(options) {
     app: {
       getLocale: async () => "ko-KR",
       getVersion: async () => options?.appVersion || "0.0.0",
+    },
+    mobileBridge: {
+      status: async () => mobileBridgeStatus(),
+      issuePairing: async () => {
+        if (!mobileBridgeRunning) throw new Error("Agentlas Mobile Bridge is not running");
+        return {
+          version: 1,
+          hostId: "host_1234567890abcdef1234567890abcdef",
+          displayName: "QA Desktop",
+          endpoint: "wss://127.0.0.1:43123/v1/mobile",
+          pairExchangeEndpoint: "https://127.0.0.1:43123/v1/mobile/pair/exchange",
+          code: "A".repeat(22),
+          expiresAt: new Date(Date.now() + 120_000).toISOString(),
+          certificateFingerprint: "a".repeat(64),
+          certificateDer: "TUlJQg==",
+        };
+      },
+      listDevices: async () => mobileBridgeDevices.map((device) => ({ ...device })),
+      retry: async () => {
+        mobileBridgeRunning = true;
+        return mobileBridgeStatus();
+      },
+      revokeDevice: async (deviceId) => {
+        const index = mobileBridgeDevices.findIndex((device) => device.deviceId === deviceId && device.revokedAt === null);
+        if (index < 0) return { ok: false };
+        mobileBridgeDevices[index] = { ...mobileBridgeDevices[index], revokedAt: new Date().toISOString() };
+        return { ok: true };
+      },
     },
     auth: {
       getSession: async () => ({ signedIn: true, account: { email: "qa@example.com" } }),

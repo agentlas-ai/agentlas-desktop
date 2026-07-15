@@ -94,13 +94,21 @@ matches(firm, /buildAgentAppRunnerEnv\(p\.runnerEnv \?\? process\.env, p\.agentA
 matches(firm, /untrustedAllowedMcpTools: agentAppAllowedTools/, "Firm exact untrusted MCP grant");
 
 matches(taskForce, /function taskForceSessionId[\s\S]*randomUUID\(\)/, "Group fresh runner sessions");
-matches(taskForce, /const history = p\.req\.agentAppMode \? \[\] : listChatMessages/, "Group empty history");
+matches(
+  taskForce,
+  /const history = p\.req\.agentAppMode \|\| !emitFinal \? \[\] : listChatMessages/,
+  "Agent App and nested Group empty history",
+);
 matches(taskForce, /return p\.req\.agentAppMode \|\| p\.req\.appsGenerateMode \? "read"/, "Group read-only permission pin");
 matches(taskForce, /const toolsAllowed = !p\.req\.agentAppMode &&/, "Group tools disable");
 matches(taskForce, /buildAgentAppRunnerEnv\(p\.runnerEnv \?\? process\.env, p\.agentAppMcpRuntimeEnv\)/, "Group minimal environment plus opaque aliases");
 matches(taskForce, /untrustedAllowedMcpTools: agentAppAllowedTools/, "Group exact untrusted MCP grant");
 matches(taskForce, /untrustedNoTools: p\.req\.agentAppMode === true/, "Group zero-builtins runner contract");
-matches(taskForce, /if \(!p\.req\.agentAppMode\) appendChatMessage\(p\.chat\.id, "assistant"/, "Group final persistence block");
+matches(
+  taskForce,
+  /if \(emitFinal && !p\.req\.agentAppMode\) appendChatMessage\(p\.chat\.id, "assistant"/,
+  "Agent App and nested Group final persistence block",
+);
 matches(taskForce, /p\.req\.agentAppMode\s*\? cleanAgentAppControlBlocks/, "Group control-block stripping");
 matches(taskForce, /if \(!p\.req\.agentAppMode && continuation\.shouldContinue\)/, "Group continuation disable");
 assert.ok((taskForce.match(/images: p\.req\.agentAppMode \? undefined/g) || []).length >= 3, "Every group phase must disable images");

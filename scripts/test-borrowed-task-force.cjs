@@ -24,7 +24,7 @@ async function main() {
   assert.match(source, /redactSensitiveText/);
   assert.match(source, /redactEventValue/);
   assert.equal((source.match(/\.\.\.taskForceRunnerBase\(p\)/g) ?? []).length, 2);
-  assert.equal((source.match(/\.\.\.runnerBase/g) ?? []).length, 1);
+  assert.equal((source.match(/\.\.\.runnerBase/g) ?? []).length >= 4, true);
   assert.match(source, /mcpConfigPath: agentAppAllowedTools \? p\.mcpConfigPath : toolsAllowed \? p\.mcpConfigPath : undefined/);
   assert.match(source, /mcpAllowedTools: agentAppAllowedTools \?\? \(toolsAllowed \? p\.mcpAllowedTools : undefined\)/);
   assert.match(source, /mcpCodexConfigArgs: toolsAllowed \? p\.mcpCodexConfigArgs : undefined/);
@@ -58,6 +58,24 @@ async function main() {
   assert.equal(specs[0].directive, "Find evidence.");
   assert.equal(specs[1].name, "Builder");
   assert.equal(specs[1].directive, "Patch the implementation.");
+
+  const teamSpecs = mod.normalizeBorrowedAgentSpecs(
+    ["release-team"],
+    {
+      agents: [
+        {
+          slug: "release-team",
+          name: "Release Team",
+          entityKind: "team",
+          directive: "The release manager delegates signing and updater verification to the team's workers.",
+        },
+      ],
+    },
+  );
+  assert.equal(teamSpecs[0].entityKind, "team", "Hub team identity must survive bundle normalization");
+  assert.match(source, /You are a mid-level team orchestrator inside an Agentlas task force/);
+  assert.match(source, /must preserve the team hierarchy defined by your directive/);
+  assert.match(source, /Do not flatten the team into a single specialist persona/);
 
   // Hephaestus hub_invoke 레코드 형태(agentlas_cloud call 실응답): 진짜 지시문(entry_excerpt)·
   // 전역 둥지 참조(grounding.memory_root)·리스/배지 계약(next_step)이 output 아래 실려 온다.

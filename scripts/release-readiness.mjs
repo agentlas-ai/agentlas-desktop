@@ -6,6 +6,12 @@ import { join, resolve } from "node:path";
 const desktopRoot = resolve(new URL("..", import.meta.url).pathname);
 const repoRoot = resolve(desktopRoot, "..");
 const signingDir = resolve(desktopRoot, process.env.AGENTLAS_SIGNING_DIR || "signing");
+const workspaceWebRoot = join(repoRoot, "agentlas", "AgentsAtlas", "app");
+const railwayCwd = process.env.AGENTLAS_RAILWAY_CWD
+  ? resolve(process.env.AGENTLAS_RAILWAY_CWD)
+  : existsSync(workspaceWebRoot)
+    ? workspaceWebRoot
+    : desktopRoot;
 
 const desktopPkg = JSON.parse(readFileSync(join(desktopRoot, "package.json"), "utf8"));
 const currentVersion = String(desktopPkg.version || "0.0.0");
@@ -103,6 +109,12 @@ const releaseEnvValues = existsSync(releaseEnv)
         }),
     )
   : null;
+const cachedReleaseVersion = String(
+  verification?.version || releaseEnvValues?.AGENTLAS_DESKTOP_VERSION || "",
+).trim() || null;
+const cachedReleaseTag = String(
+  verification?.tag || releaseEnvValues?.AGENTLAS_DESKTOP_RELEASE_TAG || "",
+).trim() || null;
 
 const missingWorkflowSecrets = agentlasSecrets.ok
   ? requiredMacWorkflowSecrets.filter((name) => !agentlasSecrets.names.includes(name))
@@ -115,6 +127,7 @@ const railwayAccess = run("node", [
   "scripts/check-railway-release-access.mjs",
   "--environment=production",
   "--service=agentlas-web",
+  `--railway-cwd=${railwayCwd}`,
 ]);
 
 const localMacPublishReady =
@@ -138,6 +151,7 @@ console.log(JSON.stringify({
     env,
     railwayAccess: {
       ready: railwayAccess.ok,
+      cwd: railwayCwd,
       output: railwayAccess.output,
     },
     nextCommand: localMacPublishReady
@@ -166,11 +180,9 @@ console.log(JSON.stringify({
   },
   localCachedReleaseVerification: verification
     ? {
-        stale: releaseEnvValues?.AGENTLAS_DESKTOP_VERSION
-          ? releaseEnvValues.AGENTLAS_DESKTOP_VERSION !== currentVersion
-          : null,
-        envVersion: releaseEnvValues?.AGENTLAS_DESKTOP_VERSION || null,
-        envTag: releaseEnvValues?.AGENTLAS_DESKTOP_RELEASE_TAG || null,
+        stale: cachedReleaseVersion ? cachedReleaseVersion !== currentVersion : null,
+        version: cachedReleaseVersion,
+        tag: cachedReleaseTag,
         ready: verification.ready,
         failures: verification.failures,
         artifacts: verification.artifacts?.map((artifact) => ({

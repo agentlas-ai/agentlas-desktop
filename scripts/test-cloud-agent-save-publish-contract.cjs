@@ -15,8 +15,11 @@ const {
   cloudRegistrationPreconditionHeaders,
 } = require("../dist/electron/cloud-agents/package.js");
 
-assert.match(page, /api\.cloudAgents\.savePrivate\(\{ rootGrant \}\)/);
-assert.match(page, /api\.cloudAgents\.publishPublic\(\{ rootGrant \}\)/);
+assert.match(page, /api\.cloudAgents\.savePrivate\(\{ rootGrant: rootGrant! \}\)/);
+assert.match(page, /api\.cloudAgents\.publishPublic\(\{ rootGrant: rootGrant! \}\)/);
+assert.match(page, /api\.cloudAgents\.saveRegisteredPrivate\(\{ target: selectedRegistered\.target \}\)/);
+assert.match(page, /api\.cloudAgents\.publishRegisteredPublic\(\{ target: selectedRegistered\.target \}\)/);
+assert.match(page, /Teams are managed and uploaded as one package, not flattened into individual sub-agents/);
 assert.doesNotMatch(page, /cloudAgents\.(?:savePrivate|publishPublic)\(\{ rootPath:/);
 assert.doesNotMatch(page, /api\.hephaestus\.publish/);
 assert.match(page, /Agent Cloud 비공개 저장/);
@@ -25,14 +28,21 @@ assert.match(page, /Agentlas Hub 공개 발행/);
 assert.match(preload, /savePrivate: \(input\) => ipcRenderer\.invoke\("cloudAgents:savePrivate", input\)/);
 assert.match(preload, /saveBuiltPrivate: \(input\) => ipcRenderer\.invoke\("cloudAgents:saveBuiltPrivate", input\)/);
 assert.match(preload, /publishPublic: \(input\) => ipcRenderer\.invoke\("cloudAgents:publishPublic", input\)/);
+assert.match(preload, /listRegisteredUploadOptions: \(\) => ipcRenderer\.invoke\("cloudAgents:listRegisteredUploadOptions"\)/);
+assert.match(preload, /saveRegisteredPrivate: \(input\) => ipcRenderer\.invoke\("cloudAgents:saveRegisteredPrivate", input\)/);
+assert.match(preload, /publishRegisteredPublic: \(input\) => ipcRenderer\.invoke\("cloudAgents:publishRegisteredPublic", input\)/);
 assert.match(ipc, /ipcMain\.handle\("cloudAgents:savePrivate"[\s\S]*?visibility: "private-link"/);
 assert.match(ipc, /ipcMain\.handle\("cloudAgents:saveBuiltPrivate"[\s\S]*?resolveFsReadPath\(input\.folder, input\.scope\)[\s\S]*?visibility: "private-link"[\s\S]*?reviewMode: "static-only"/);
 assert.match(ipc, /ipcMain\.handle\("cloudAgents:publishPublic"[\s\S]*?visibility: "marketplace"/);
+assert.match(ipc, /ipcMain\.handle\("cloudAgents:saveRegisteredPrivate"[\s\S]*?registeredUploadRoot\(input\.target\)[\s\S]*?visibility: "private-link"/);
+assert.match(ipc, /ipcMain\.handle\("cloudAgents:publishRegisteredPublic"[\s\S]*?registeredUploadRoot\(input\.target\)[\s\S]*?visibility: "marketplace"/);
+assert.match(ipc, /firmMemberIds/);
 assert.match(ipc, /resolveCloudAgentPackageRequest\(input\)/);
 assert.match(types, /rootGrant: FsPathGrant/);
 assert.match(types, /savePrivate: \(input: CloudAgentPrivateSaveRequest\)/);
 assert.match(types, /saveBuiltPrivate: \(input: CloudAgentBuiltPrivateSaveRequest\)/);
 assert.match(types, /publishPublic: \(input: CloudAgentHubPublishRequest\)/);
+assert.match(types, /CloudAgentRegisteredTarget/);
 
 assert.match(packager, /input\.visibility \?\? "private-link"/);
 assert.match(packager, /if \(isPublicHubPublish\) \{[\s\S]*?readRoutingCard/);

@@ -4,6 +4,7 @@
 // gemini-cli 자신이 하는 갱신을 대신 해 주는 것뿐이라 어느 머신에서든 재로그인 없이 회복된다.
 // 흐름: loadCodeAssist(project 확보) → retrieveUserQuota({project}) → buckets[{modelId,remainingFraction,resetTime}].
 // (방식 출처: oss agentcat-connectors gemini_live_limits + google-gemini/gemini-cli oauth2)
+import { geminiUsageAccountFingerprint } from "./account-fingerprint";
 import type { ProviderUsage, UsageWindow } from "../../shared/types";
 import {
   repairGeminiCredentialFile,
@@ -83,11 +84,13 @@ function prettyModel(model: string): string {
 }
 
 export async function getGeminiUsage(): Promise<ProviderUsage | null> {
+  const accountFingerprint = await geminiUsageAccountFingerprint();
   const base = {
     provider: "gemini",
     backend: "google" as const,
     label: "Gemini",
     fetchedAt: Date.now(),
+    ...(accountFingerprint ? { accountFingerprint } : {}),
   };
   // 실제 채팅 런타임이 공식 CLI의 UNSUPPORTED_CLIENT를 확인했다면 네트워크 quota
   // 추측보다 그 실행 영수증이 우선이다. Antigravity는 별도 quota API를 노출하지 않는다.

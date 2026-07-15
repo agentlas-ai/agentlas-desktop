@@ -11,6 +11,11 @@ import { app, BrowserWindow, ipcMain, Menu, nativeImage, net, protocol, session,
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  configureInstallIdentity,
+  resolveInstallIdentity,
+  type InstallIdentity,
+} from "./install-identity";
 import { registerIpcHandlers } from "./ipc";
 import { buildAppMenu } from "./menu";
 import { initStore } from "./store/db";
@@ -89,14 +94,55 @@ if (!app.isReady()) {
   ]);
 }
 
-// macOS dock 표시 이름 — productName이 "Agentlas"인 production 빌드와 일치시킴
-app.setName("Agentlas");
-
-const qaUserDataDir = process.env.AGENTLAS_QA_USER_DATA_DIR?.trim();
-if (qaUserDataDir) {
-  fs.mkdirSync(qaUserDataDir, { recursive: true });
-  app.setPath("userData", qaUserDataDir);
+function readPackagedInstallMetadata(): unknown {
+  try {
+    // electron-builder injects the marker into this immutable app.asar copy,
+    // rather than relying on a mutable environment variable at launch.
+    return JSON.parse(fs.readFileSync(path.join(app.getAppPath(), "package.json"), "utf8"));
+  } catch {
+    throw new Error("Packaged install identity metadata could not be read");
+  }
 }
+
+function initializeInstallIdentity(): InstallIdentity {
+  try {
+    const qaUserDataDir = process.env.AGENTLAS_QA_USER_DATA_DIR?.trim() || null;
+    if (qaUserDataDir && !path.isAbsolute(qaUserDataDir)) {
+      throw new Error("QA userData override must be an absolute path");
+    }
+    const identity = resolveInstallIdentity({
+      packaged: app.isPackaged,
+      packageMetadata: app.isPackaged ? readPackagedInstallMetadata() : undefined,
+      qaUserDataDir,
+      // Source-driven Playwright/QA runs deliberately remain possible, but a
+      // packaged app can never switch identity through its launch environment.
+      allowQaOverride: !app.isPackaged,
+    });
+    configureInstallIdentity(identity);
+
+    // Official releases intentionally preserve their historical values:
+    // name Agentlas, Electron's default userData path, and its Keychain
+    // service. Only non-official identities receive an explicit namespace.
+    app.setName(identity.appName);
+    const userDataDir = identity.userDataOverride
+      ?? (identity.channel === "local-candidate"
+        ? path.join(app.getPath("appData"), identity.userDataNamespace)
+        : null);
+    if (userDataDir) {
+      fs.mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
+      app.setPath("userData", userDataDir);
+    }
+    return identity;
+  } catch (error) {
+    // Fail before any protected storage, store migration, or updater access.
+    // Do not print a path or package payload from an untrusted bundle.
+    console.error("[install-identity] startup refused", error instanceof Error ? error.message : "unknown error");
+    app.exit(78);
+    throw error;
+  }
+}
+
+const installIdentity = initializeInstallIdentity();
 
 /**
  * macOS dock 아이콘 — dev에서는 Electron 기본(원자 모양) 대신 우리 paw squircle.
@@ -326,7 +372,12 @@ app.on("before-quit", () => {
 app.whenReady().then(async () => {
   // Stage 1 (pre-mutation): a pending install must already have a valid,
   // contained SQLite/agent/route recovery set before initStore can migrate.
-  const updatePreflight = preflightUpdaterStartup();
+  const updatePreflight = installIdentity.updatesEnabled
+    ? preflightUpdaterStartup()
+    : { pendingInstall: false, recoveryBackupAvailable: false };
+  if (!installIdentity.updatesEnabled) {
+    console.info(`[updater] ${installIdentity.channel} install identity has no update feed`);
+  }
   // This file is derived runtime material, never recovery authority. Remove
   // legacy credential copies before either GUI or headless pending-install exits.
   try {
@@ -381,7 +432,9 @@ app.whenReady().then(async () => {
   await bootAuthFromKeychain();
   // Stage 2 (post-migration, pre-bootstrap-writers): compare the live DB and
   // managed assets against the recovery copies. Recovery-required stops here.
-  await initAutoUpdater();
+  if (installIdentity.updatesEnabled) {
+    await initAutoUpdater();
+  }
   if (getUpdaterState().status !== "recovery-required") {
     try {
       const openCrabScrub = scrubLegacyOpenCrabCredentialUrls();

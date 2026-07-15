@@ -1,7 +1,7 @@
-# Cross-platform release — builds Windows / Linux installers and publishes them to
-# the SEPARATE PUBLIC releases repo (agentlas-ai/agentlas-desktop-releases) via
-# the electron-builder GitHub publisher. The source repository is also public;
-# the separate repository is the canonical binary download and auto-update channel.
+# Cross-platform release build — verifies and packages Windows / Linux into
+# GitHub Actions artifacts only. It never writes the public releases repository.
+# The signed macOS workflow consumes these artifacts after every OS gate passes
+# and owns the single atomic staging/promotion boundary.
 #
 # The embedded Hephaestus engine is git-ignored, so a fresh checkout has no
 # engine — `npm run ensure:engine` clones the public engine repo before build.
@@ -12,26 +12,22 @@
 # users can get a "newer" DMG that cannot safely auto-update.
 # For the signed + notarized macOS pipeline, see docs/PUBLIC-RELEASE.md.
 #
-# Requires AGENTLAS_DESKTOP_RELEASE_TOKEN. Prefer a fine-grained PAT limited to
-# Contents write on agentlas-desktop-releases instead of a broad classic token.
-#
-# Trigger:
-#   git tag v0.0.3 && git push origin v0.0.3      # version comes from the tag
-#   or run "Release" manually from the Actions tab (workflow_dispatch).
-name: Release
+# A manual run is build-only; it cannot publish a release.
+name: Cross-platform Release Build
 
 on:
-  push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_call:
+    inputs:
+      tag:
+        description: "Exact stable source tag to package"
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
         description: "Stable release tag (e.g. v0.8.21). Must match package.json version."
         required: true
 
-# Distribution writes to the separate GitHub Releases repository with the
-# dedicated PAT; this source workflow itself needs only read access.
 permissions:
   contents: read
 
@@ -41,13 +37,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      HEPHAESTUS_REF: v1.1.31
-      HEPHAESTUS_COMMIT: 738b78f40b5efc9b2dd4cc66c94a3805e70c79f5
+      HEPHAESTUS_REF: v1.1.36
+      HEPHAESTUS_COMMIT: 0cb90fc354d065b9af6894d6570df3de82fb53f6
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -63,7 +59,7 @@ jobs:
       - name: Verify preflight source and engine pin
         shell: bash
         env:
-          RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           tag="$RAW_TAG"
           semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
@@ -146,7 +142,7 @@ jobs:
             npm run test:mcp-secret-isolation
           '
 
-  release:
+  build-cross-platform:
     needs: opencrab-security-preflight
     strategy:
       fail-fast: false
@@ -159,13 +155,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      HEPHAESTUS_REF: v1.1.31
-      HEPHAESTUS_COMMIT: 738b78f40b5efc9b2dd4cc66c94a3805e70c79f5
+      HEPHAESTUS_REF: v1.1.36
+      HEPHAESTUS_COMMIT: 0cb90fc354d065b9af6894d6570df3de82fb53f6
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -184,7 +180,7 @@ jobs:
       - name: Verify tag matches package.json version
         shell: bash
         env:
-          RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           tag="$RAW_TAG"
           semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
@@ -243,9 +239,11 @@ jobs:
         if: runner.os == 'Windows'
         timeout-minutes: 15
         run: |
+          npm run test:updater-production
           npm run test:cli-version-parser
           npm run test:after-pack-runtime-contract
           npm run test:stormbreaker-core:embedded
+          npm run test:stormbreaker-swarm
           npm run test:python-cache-boundary
           npm run test:release-agent-foundation-gate
           npm run test:runtime-resume-contract
@@ -294,6 +292,7 @@ jobs:
             npm run test:marketplace-cache
             npm run test:after-pack-runtime-contract
             npm run test:stormbreaker-core:embedded
+            npm run test:stormbreaker-swarm
             npm run test:provider-health
             npm run test:mobile-bridge-contract
             npm run test:mobile-read-boundary
@@ -338,38 +337,111 @@ jobs:
       - name: Reverify embedded engine release boundary
         run: npm run ensure:engine
 
-      # --publish always uploads installers + the update feed (latest*.yml) to a
-      # prerelease staging record. Only the signed macOS workflow may promote it
-      # to stable/latest after every required platform artifact exists.
-      - name: Package and stage prerelease assets
+      - name: Package verified Actions artifacts only
+        shell: bash
+        run: |
+          npx electron-builder ${{ matrix.builder_args }} --publish never
+          node scripts/stamp-update-feeds.mjs --release-dir=release --require
+
+      - name: Upload Windows/Linux package set for the release barrier
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentlas-release-${{ runner.os }}
+          path: |
+            release/Agentlas-*-Windows-x64-Setup.exe
+            release/Agentlas-*-Windows-x64-Setup.exe.blockmap
+            release/Agentlas-*-Windows-x64-Portable.exe
+            release/Agentlas-*-Linux-x64.AppImage
+            release/Agentlas-*-Linux-x64.deb
+            release/latest.yml
+            release/latest-linux.yml
+          if-no-files-found: error
+          retention-days: 3
+
+  # Package/unit contracts cannot prove that a previous installed release can
+  # actually download, replace itself, restart, and reconcile its durable
+  # journal. Exercise that lifecycle on the native target OS before the
+  # reusable workflow can satisfy the all-OS public-release barrier.
+  updater-install-e2e:
+    name: Native updater install E2E (${{ matrix.label }})
+    needs: build-cross-platform
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win32
+            artifact_os: Windows
+            label: Windows NSIS
+          - os: ubuntu-latest
+            platform: linux
+            artifact_os: Linux
+            label: Linux AppImage
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 55
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # The test launches a real AppImage under a virtual display. It refuses
+      # to replace that lifecycle with a simulated Linux updater path.
+      - name: Install Linux native updater dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev xvfb xauth dbus-x11
+
+      - name: Install updater E2E dependencies
+        run: npm ci
+
+      - name: Resolve exact updater target identity
         shell: bash
         env:
-          # Publishing to the separate public releases repo requires a cross-repo
-          # PAT. Keep it out of npm install, builds, and regression tests.
-          GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          for attempt in 1 2 3; do
-            echo "::group::electron-builder attempt $attempt"
-            if npx electron-builder ${{ matrix.builder_args }} --publish always; then
-              # electron-builder writes latest*.yml only after artifact-build hooks,
-              # so compatibility must be stamped after the builder process exits.
-              # Re-uploading only the feed with --clobber keeps installer publishing
-              # unchanged while making the final public feed authoritative.
-              node scripts/stamp-update-feeds.mjs --release-dir=release --require
-              mapfile -t update_feeds < <(find release -maxdepth 1 -type f -name 'latest*.yml' -print | sort)
-              if gh release upload "$RESOLVED_TAG" \
-                --repo agentlas-ai/agentlas-desktop-releases \
-                --clobber \
-                "${update_feeds[@]}"; then
-                echo "::endgroup::"
-                exit 0
-              fi
-              echo "::warning::compatibility feed upload failed; retrying the release attempt"
-            fi
-            echo "::endgroup::"
-            echo "::warning::release attempt $attempt failed; retrying in 15s"
-            sleep 15
-          done
-          echo "::error::build/publish/feed verification failed after 3 attempts"
-          exit 1
+          tag="$RAW_TAG"
+          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if [[ ! "$tag" =~ $semver_tag_re ]]; then
+            echo "::error::Updater E2E requires an exact stable SemVer tag (received: $tag)."
+            exit 1
+          fi
+          tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}")" || exit 1
+          head_commit="$(git rev-parse HEAD)"
+          if [ "$head_commit" != "$tagged_commit" ]; then
+            echo "::error::Updater E2E checkout does not match $tag."
+            exit 1
+          fi
+          version="${tag#v}"
+          pkgver="$(node -p \"require('./package.json').version\")"
+          if [ "$pkgver" != "$version" ]; then
+            echo "::error::package.json version $pkgver does not match $tag."
+            exit 1
+          fi
+          echo "RESOLVED_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Download exact native release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: agentlas-release-${{ matrix.artifact_os }}
+          path: release
+
+      - name: Run v0.8.32 to target native updater lifecycle
+        shell: bash
+        env:
+          # The harness has a deliberate local-host safety refusal. Actions is
+          # the disposable native execution boundary for this destructive test.
+          CI: "true"
+        run: |
+          node scripts/test-packaged-updater-install-e2e.cjs \
+            --platform="${{ matrix.platform }}" \
+            --artifact-dir=release \
+            --target-version="$RESOLVED_VERSION" \
+            --timeout-ms=180000

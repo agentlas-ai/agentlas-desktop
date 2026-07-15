@@ -298,25 +298,47 @@ async function main() {
   );
   cleanupAppleDouble(releaseDir);
 
-  const files = [
-    requireFile(join(releaseDir, `Agentlas-${version}-arm64.dmg`)),
-    requireFile(join(releaseDir, `Agentlas-${version}-arm64.dmg.blockmap`)),
-    requireFile(join(releaseDir, `Agentlas-${version}-arm64.zip`)),
-    requireFile(join(releaseDir, `Agentlas-${version}-arm64.zip.blockmap`)),
-    requireFile(join(releaseDir, `Agentlas-${version}-x64.dmg`)),
-    requireFile(join(releaseDir, `Agentlas-${version}-x64.dmg.blockmap`)),
-    requireFile(join(releaseDir, `Agentlas-${version}-x64.zip`)),
-    requireFile(join(releaseDir, `Agentlas-${version}-x64.zip.blockmap`)),
-    requireFile(join(releaseDir, "latest-mac.yml")),
-    requireFile(join(releaseDir, "desktop-release-verification.json")),
-    requireFile(join(releaseDir, "desktop-release.production.env")),
-  ];
+  // The macOS runner is the single public writer.  It must own every byte in
+  // the exact barrier contract rather than upload Mac files and poll for a
+  // different writer that no longer exists.
+  run("node", [
+    "scripts/verify-release-assets.mjs",
+    `--release-dir=${releaseDir}`,
+    `--tag=${tag}`,
+    `--version=${version}`,
+  ]);
+  const files = requiredReleaseAssetNames(version).map((name) => requireFile(join(releaseDir, name)));
 
   const initialState = createOrNormalizeStagingRelease({ repo, tag, version, notesPath, keepDraft });
   if (!initialState.isStable) {
     run("gh", ["release", "upload", tag, "--repo", repo, "--clobber", ...files], { stdio: "inherit" });
   }
   cleanupAppleDouble(releaseDir);
+
+  // Fetch every staged asset from GitHub and compare its bytes with the local
+  // manifest before any stable/latest mutation.  Listing names alone is not
+  // release provenance and does not prove users receive the intended feeds.
+  run("node", [
+    "scripts/verify-release-assets.mjs",
+    `--release-dir=${releaseDir}`,
+    `--tag=${tag}`,
+    `--version=${version}`,
+    `--repo=${repo}`,
+    "--verify-remote",
+  ]);
+
+  // Verify the bytes that the staged release actually serves, not merely the
+  // local artifacts we intended to upload. This gate runs before the release
+  // can become stable/latest and also proves the new apps accept the previous
+  // official app's designated requirement.
+  run("node", [
+    "scripts/verify-mac-update-lineage.mjs",
+    `--repo=${repo}`,
+    `--tag=${tag}`,
+    `--version=${version}`,
+    `--release-dir=${releaseDir}`,
+    "--history-count=2",
+  ]);
 
   const completeState = await waitForRequiredReleaseAssets({
     version,

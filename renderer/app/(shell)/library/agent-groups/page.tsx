@@ -37,7 +37,7 @@ import type {
   InstalledFirm,
 } from "@/lib/types";
 
-type SourceKind = "installed" | "firm-node" | "hub";
+type SourceKind = "installed" | "firm" | "firm-node" | "hub";
 type Translate = ReturnType<typeof useT>["t"];
 type SourceItem = {
   key: string;
@@ -157,6 +157,16 @@ export default function AgentGroupsPage() {
 
     for (const firm of firms) {
       const firmLoc = pickLocalized(firm, locale);
+      items.push({
+        key: `firm:${firm.id}`,
+        kind: "firm",
+        entityClass: "multi",
+        title: firmLoc.name,
+        subtitle: firmLoc.tagline,
+        route: t("agentGroups.route.team"),
+        badge: `${entityClassShortLabel("multi", locale)} · ${t("agentGroups.route.team")}`,
+        member: makeFirmMember({ firm, routeLabel: t("agentGroups.route.team") }),
+      });
       for (const node of firm.orgChart) {
         const agent = agentById.get(node.agentId);
         if (!agent) continue;
@@ -638,6 +648,24 @@ function makeFirmNodeMember(input: {
   };
 }
 
+function makeFirmMember(input: { firm: InstalledFirm; routeLabel: string }): AgentGroupMember {
+  return {
+    id: crypto.randomUUID(),
+    source: "firm",
+    firmId: input.firm.id,
+    firmSlug: input.firm.slug,
+    snapshot: {
+      name: input.firm.name,
+      nameEn: input.firm.nameEn,
+      tagline: input.firm.tagline,
+      taglineEn: input.firm.taglineEn,
+      routeLabel: input.routeLabel,
+      entityKind: "team",
+    },
+    addedAt: new Date().toISOString(),
+  };
+}
+
 function toEditableMember(member: AgentGroupResolved["members"][number]): AgentGroupMember {
   return {
     id: member.id,
@@ -680,6 +708,7 @@ function pickTagline(value: { tagline?: string; taglineEn?: string }, locale: "k
 function warningLabel(warnings: string[], t: Translate) {
   if (warnings.includes("unsupported_plugin")) return t("agentGroups.warning.plugin");
   if (warnings.includes("unsupported_multi")) return t("agentGroups.warning.unsupported");
+  if (warnings.includes("firm_missing")) return t("agentGroups.warning.firm_missing");
   if (warnings.includes("hub_missing")) return t("agentGroups.warning.hub_missing");
   if (warnings.includes("route_changed")) return t("agentGroups.warning.route_changed");
   if (warnings.includes("route_missing")) return t("agentGroups.warning.route_missing");

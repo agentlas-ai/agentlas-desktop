@@ -224,6 +224,12 @@ export function preferredMobileBridgeHost(): string {
 
 const PHYSICAL_INTERFACE_RE = /^(?:en\d+|eth\d+|eno\d+|ens\d+|enp\w+|wlan\d+|wlp\w+|wi-?fi|ethernet)/i;
 const VIRTUAL_INTERFACE_RE = /^(?:awdl|llw|utun|tun\d*|tap\d*|docker|veth|br-|bridge|vmnet|vbox|virbr|vethernet|hyper-v|parallels|lo\d*)/i;
+// On Windows, a Hyper-V external vSwitch or WSL bridged setup moves the
+// machine's REAL LAN address onto a "vEthernet (…)" adapter and leaves the
+// physical NIC unbound. Dropping those names entirely produced zero candidates
+// ("No usable LAN address") on exactly those machines, so they are allowed as
+// demoted last-resort candidates instead. Other virtual names stay excluded.
+const WINDOWS_VSWITCH_INTERFACE_RE = /^(?:vethernet|hyper-v)/i;
 
 function isUsablePrivateIpv6(address: string): boolean {
   const normalized = address.toLowerCase();
@@ -248,16 +254,22 @@ export function selectPreferredMobileBridgeHost(
     const name = candidate.interfaceName.trim();
     const tailscale = /tailscale/i.test(name) || /^100\.(?:6[4-9]|[789]\d|1[01]\d|12[0-7])\./.test(address);
     const virtual = VIRTUAL_INTERFACE_RE.test(name) && !tailscale;
-    if (virtual) return [];
-    const physical = PHYSICAL_INTERFACE_RE.test(name);
+    const windowsVSwitch = virtual && WINDOWS_VSWITCH_INTERFACE_RE.test(name);
+    if (virtual && !windowsVSwitch) return [];
+    const physical = !virtual && PHYSICAL_INTERFACE_RE.test(name);
     let score: number | null = null;
     if (physical && isLanIpv4(address)) score = 0;
     else if (physical && isUsablePrivateIpv6(address)) score = 10;
     else if (physical && isPrivateIpv4(address)) score = 20;
     else if (tailscale && isPrivateIpv4(address)) score = 30;
-    else if (isLanIpv4(address)) score = 40;
-    else if (isUsablePrivateIpv6(address)) score = 50;
-    else if (isPrivateIpv4(address)) score = 60;
+    else if (!virtual && isLanIpv4(address)) score = 40;
+    else if (!virtual && isUsablePrivateIpv6(address)) score = 50;
+    else if (!virtual && isPrivateIpv4(address)) score = 60;
+    // A vSwitch on a home/enterprise LAN band (192.168/10.x) is likely the
+    // machine's actual route to the phone; the 172.16-31 band is more often a
+    // WSL/Default Switch NAT, so it only wins when nothing else exists at all.
+    else if (windowsVSwitch && isLanIpv4(address) && !address.startsWith("172.")) score = 100;
+    else if (windowsVSwitch && isLanIpv4(address)) score = 130;
     if (score === null) return [];
     return [{ ...candidate, address, score }];
   });

@@ -724,6 +724,37 @@ function testLanAddressSelection() {
     null,
     "global IPv6 must require an explicit operator bind override",
   );
+  assert.equal(
+    selectPreferredMobileBridgeHost([
+      { interfaceName: "vEthernet (외부 스위치)", address: "192.168.0.17", internal: false },
+      { interfaceName: "lo", address: "127.0.0.1", internal: true },
+    ]),
+    "192.168.0.17",
+    "a Hyper-V external vSwitch carrying the machine's only LAN address must stay usable",
+  );
+  assert.equal(
+    selectPreferredMobileBridgeHost([
+      { interfaceName: "vEthernet (WSL)", address: "172.20.144.1", internal: false },
+      { interfaceName: "Wi-Fi", address: "192.168.1.7", internal: false },
+    ]),
+    "192.168.1.7",
+    "a real adapter must always beat a Windows vSwitch",
+  );
+  assert.equal(
+    selectPreferredMobileBridgeHost([
+      { interfaceName: "vEthernet (외부)", address: "192.168.0.17", internal: false },
+      { interfaceName: "vEthernet (WSL)", address: "172.20.144.1", internal: false },
+    ]),
+    "192.168.0.17",
+    "a LAN-band vSwitch must beat a 172.x NAT-band vSwitch",
+  );
+  assert.equal(
+    selectPreferredMobileBridgeHost([
+      { interfaceName: "docker0", address: "192.168.9.1", internal: false },
+    ]),
+    null,
+    "container bridges stay excluded even on a LAN band",
+  );
 }
 
 function testDurableReplayLedger() {

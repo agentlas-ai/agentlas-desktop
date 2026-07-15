@@ -588,10 +588,9 @@ export async function runSwarmInvocation(
     });
     stormStatus(
       p.locale === "ko"
-        ? "Stormbreaker · 최종 게이트 판정과 결과 종합을 마쳤습니다."
-        : "Stormbreaker · completed the final-gate decision and result synthesis.",
+        ? "Stormbreaker · 검증된 작업 결과를 종합했습니다. 최종 게이트는 전체 패킷 상태를 확인한 뒤 판정합니다."
+        : "Stormbreaker · synthesized verified worker results. The final gate will be evaluated from every packet state next.",
       "synthesize",
-      true,
     );
     return restrictedSwarmText(p, result.text, "swarm-synthesizer").trim();
   };
@@ -626,19 +625,57 @@ export async function runSwarmInvocation(
     });
     throw error;
   }
-  const { board, final, aborted, doneCount } = swarmResult;
+  const { board, final, aborted, doneCount, finalGate } = swarmResult;
+
+  if (p.stormbreakerMode) {
+    const failedOrIncomplete = [...finalGate.blocked, ...finalGate.incomplete];
+    stormStatus(
+      finalGate.canReportSuccess
+        ? p.locale === "ko"
+          ? `Stormbreaker · 최종 게이트 통과: 필수 패킷 ${finalGate.passing.length}/${finalGate.required}개가 검증됐습니다.`
+          : `Stormbreaker · final gate passed: ${finalGate.passing.length}/${finalGate.required} required packets verified.`
+        : finalGate.status === "aborted"
+          ? p.locale === "ko"
+            ? `Stormbreaker · 최종 게이트 미검증: 실행이 중단되었습니다. 완료 ${finalGate.passing.length}/${finalGate.required}개.`
+            : `Stormbreaker · final gate unverified: the run was stopped. ${finalGate.passing.length}/${finalGate.required} completed.`
+          : p.locale === "ko"
+            ? `Stormbreaker · 최종 게이트 차단: 필수 패킷 ${failedOrIncomplete.length}/${finalGate.required}개가 통과하지 못했습니다.`
+            : `Stormbreaker · final gate blocked: ${failedOrIncomplete.length}/${finalGate.required} required packets did not pass.`,
+      "synthesize",
+      true,
+    );
+  }
 
   const rawFinalText = aborted
     ? p.locale === "ko"
       ? `스웜을 멈췄어요. (완료 ${doneCount}개)`
       : `Swarm stopped. (${doneCount} tasks done)`
-    : final || (p.locale === "ko" ? "스웜이 완료할 작업을 찾지 못했습니다." : "The swarm found no work to complete.");
+    : finalGate.canReportSuccess
+      ? final || (p.locale === "ko" ? "스웜이 완료할 작업을 찾지 못했습니다." : "The swarm found no work to complete.")
+      : [
+          p.locale === "ko"
+            ? `Stormbreaker 최종 게이트 차단: 필수 패킷 ${finalGate.passing.length}/${finalGate.required}개만 통과했습니다. 통과하지 못한 패킷: ${[...finalGate.blocked, ...finalGate.incomplete].join(", ") || "알 수 없음"}. 아래 내용은 부분 결과이며 목표 완료 증명이 아닙니다.`
+            : `Stormbreaker final gate blocked: only ${finalGate.passing.length}/${finalGate.required} required packets passed. Non-passing packets: ${[...finalGate.blocked, ...finalGate.incomplete].join(", ") || "unknown"}. The content below is partial output, not proof that the goal completed.`,
+          final || (p.locale === "ko" ? "완료된 패킷의 결과가 없습니다." : "No completed packet result is available."),
+        ].join("\n\n");
   const finalText = restrictedSwarmText(p, rawFinalText, "swarm-final");
   tryRecordRunEvent({
     runId,
     kind: "swarm_finished",
     chatId: p.chat.id,
-    payload: { aborted, doneCount, taskCount: board.tasks.length },
+    payload: {
+      aborted,
+      doneCount,
+      taskCount: board.tasks.length,
+      finalGate: {
+        status: finalGate.status,
+        canReportSuccess: finalGate.canReportSuccess,
+        required: finalGate.required,
+        passing: finalGate.passing.length,
+        blocked: finalGate.blocked.length,
+        incomplete: finalGate.incomplete.length,
+      },
+    },
   });
   // 채팅에 먼저 저장 → 그 다음 final 이벤트(정상 종료 경로와 동일 순서, 재접속 시 유실 방지).
   appendChatMessage(p.chat.id, "assistant", finalText);

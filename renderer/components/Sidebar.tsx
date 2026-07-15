@@ -1433,24 +1433,31 @@ function ThemeToggleButton({ collapsed }: { collapsed?: boolean }) {
 }
 
 function labelOfRuntime(s: RuntimeStatus): string {
-  // Ollama는 "Ollama · <model>"로 단독 표기 (백엔드 라벨 중복 회피).
-  if (s.kind === "ollama") {
-    return s.model ? `Ollama · ${s.model}` : "Ollama";
+  // 로컬 OpenAI 호환 런타임은 "<이름> · <model>"로 단독 표기 (백엔드 라벨 중복 회피).
+  const localName = (
+    { ollama: "Ollama", lmstudio: "LM Studio", mlx: "MLX" } as Record<string, string>
+  )[s.kind];
+  if (localName) {
+    return s.model ? `${localName} · ${s.model}` : localName;
   }
-  const kind = {
-    "claude-code": "Claude Code",
-    codex: "Codex",
-    gemini: "Antigravity",
-    grok: "Grok",
-    cursor: "Cursor",
-    byok: "API",
-    ollama: "Ollama",
-  }[s.kind];
+  const kind = (
+    {
+      "claude-code": "Claude Code",
+      codex: "Codex",
+      gemini: "Antigravity",
+      grok: "Grok",
+      cursor: "Cursor",
+      byok: "API",
+      ollama: "Ollama",
+    } as Record<string, string>
+  )[s.kind];
   const backend = {
     anthropic: "Anthropic",
     openai: "OpenAI",
     google: "Google",
     ollama: "Ollama",
+    lmstudio: "LM Studio",
+    mlx: "MLX",
     upstage: "Upstage",
     custom: "Custom",
     glm: "GLM",

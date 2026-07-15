@@ -1,10 +1,11 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { IconCheck, IconFileUp } from "@/components/Icon";
-import type { FsPathGrant } from "@shared/types";
+import type { CloudAgentRegisteredUploadOption, FsPathGrant } from "@shared/types";
+import { useSearchParams } from "next/navigation";
 
 type Visibility = "private-link" | "marketplace";
 
@@ -35,12 +36,37 @@ type UploadResult = {
   careerGraph?: CareerGraphProof;
 };
 
+function registeredOptionKey(option: CloudAgentRegisteredUploadOption): string {
+  if ("firmId" in option.target) return `team:firm:${option.target.firmId}`;
+  return `${option.target.entityKind}:agent:${option.target.agentId}`;
+}
+
 export default function CloudAgentPublishPage() {
   const { locale } = useT();
+  const searchParams = useSearchParams();
+  const requestedTeamId = searchParams.get("team");
   const ko = locale !== "en";
   const [rootGrant, setRootGrant] = useState<FsPathGrant | null>(null);
+  const [registeredOptions, setRegisteredOptions] = useState<CloudAgentRegisteredUploadOption[]>([]);
+  const [registeredKey, setRegisteredKey] = useState("");
   const [running, setRunning] = useState<Visibility | null>(null);
   const [result, setResult] = useState<UploadResult | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void ipc()?.cloudAgents.listRegisteredUploadOptions().then((options) => {
+      if (!cancelled) {
+        setRegisteredOptions(options);
+        const requested = requestedTeamId ? options.find((option) => "firmId" in option.target && option.target.firmId === requestedTeamId) : null;
+        if (requested) setRegisteredKey(registeredOptionKey(requested));
+      }
+    }).catch(() => {
+      if (!cancelled) setRegisteredOptions([]);
+    });
+    return () => { cancelled = true; };
+  }, [requestedTeamId]);
+
+  const selectedRegistered = registeredOptions.find((option) => registeredOptionKey(option) === registeredKey) ?? null;
 
   async function chooseFolder() {
     const api = ipc();
@@ -48,6 +74,7 @@ export default function CloudAgentPublishPage() {
     const dir = await api.fs.pickDirectory();
     if (dir) {
       setRootGrant(dir);
+      setRegisteredKey("");
       setResult(null);
     }
   }
@@ -55,7 +82,7 @@ export default function CloudAgentPublishPage() {
   async function upload(visibility: Visibility) {
     const api = ipc();
     if (!api) return;
-    if (!rootGrant) {
+    if (!rootGrant && !selectedRegistered) {
       setResult({
         ok: false,
         title: ko ? "폴더를 먼저 선택하세요." : "Choose a folder first.",
@@ -66,9 +93,13 @@ export default function CloudAgentPublishPage() {
     setRunning(visibility);
     setResult(null);
     try {
-      const res = visibility === "marketplace"
-        ? await api.cloudAgents.publishPublic({ rootGrant })
-        : await api.cloudAgents.savePrivate({ rootGrant });
+      const res = selectedRegistered
+        ? visibility === "marketplace"
+          ? await api.cloudAgents.publishRegisteredPublic({ target: selectedRegistered.target })
+          : await api.cloudAgents.saveRegisteredPrivate({ target: selectedRegistered.target })
+        : visibility === "marketplace"
+          ? await api.cloudAgents.publishPublic({ rootGrant: rootGrant! })
+          : await api.cloudAgents.savePrivate({ rootGrant: rootGrant! });
       const json = res as unknown as Record<string, unknown>;
       const issues = extractIssues(res);
       const careerGraph = extractCareerGraph(json);
@@ -133,6 +164,45 @@ export default function CloudAgentPublishPage() {
         </header>
 
         <div className="glass-thin" style={panel}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+            <label htmlFor="registered-agent-upload" style={{ fontSize: 12, fontWeight: 800, color: "var(--ink)" }}>
+              {ko ? "내 에이전트에서 선택" : "Choose from My Agents"}
+            </label>
+            <select
+              id="registered-agent-upload"
+              value={registeredKey}
+              disabled={Boolean(running)}
+              onChange={(event) => {
+                setRegisteredKey(event.target.value);
+                if (event.target.value) setRootGrant(null);
+                setResult(null);
+              }}
+              style={{ ...folderPicker, width: "100%", appearance: "auto" }}
+            >
+              <option value="">{ko ? "등록된 팀 또는 독립 에이전트 선택" : "Select a registered team or standalone agent"}</option>
+              {registeredOptions.map((option) => (
+                <option
+                  key={registeredOptionKey(option)}
+                  value={registeredOptionKey(option)}
+                  disabled={!option.sourceReady}
+                >
+                  {option.entityKind === "team" ? (ko ? "팀" : "Team") : (ko ? "에이전트" : "Agent")} · {option.name}
+                  {!option.sourceReady ? (ko ? " · 원본 폴더 없음" : " · source folder unavailable") : ""}
+                </option>
+              ))}
+            </select>
+            <span style={{ fontSize: 11, color: "var(--muted-deep)", lineHeight: 1.45 }}>
+              {ko
+                ? "팀은 하위 에이전트를 낱개로 펼치지 않고 팀 패키지 하나로 관리·업로드합니다."
+                : "Teams are managed and uploaded as one package, not flattened into individual sub-agents."}
+            </span>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--muted-deep)", fontSize: 11 }}>
+            <span style={{ height: 1, background: "var(--line)", flex: 1 }} />
+            {ko ? "또는 로컬 폴더" : "or a local folder"}
+            <span style={{ height: 1, background: "var(--line)", flex: 1 }} />
+          </div>
           <button onClick={chooseFolder} disabled={Boolean(running)} style={folderPicker}>
             <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "left" }}>
               {rootGrant?.path || (ko ? "저장할 에이전트 폴더 선택" : "Choose an agent folder")}
@@ -149,7 +219,7 @@ export default function CloudAgentPublishPage() {
               buttonLabel={ko ? "내 Cloud에 비공개 저장" : "Save privately to my Cloud"}
               busyLabel={ko ? "안전 검사 후 저장 중..." : "Checking and saving..."}
               busy={running === "private-link"}
-              disabled={Boolean(running) || !rootGrant}
+              disabled={Boolean(running) || (!rootGrant && !selectedRegistered)}
               primary
               onClick={() => void upload("private-link")}
             />
@@ -161,7 +231,7 @@ export default function CloudAgentPublishPage() {
               buttonLabel={ko ? "Hub에 공개 발행" : "Publish publicly to Hub"}
               busyLabel={ko ? "공개 검사 후 발행 중..." : "Reviewing and publishing..."}
               busy={running === "marketplace"}
-              disabled={Boolean(running) || !rootGrant}
+              disabled={Boolean(running) || (!rootGrant && !selectedRegistered)}
               onClick={() => void upload("marketplace")}
             />
           </div>

@@ -66,7 +66,8 @@ The release scripts automatically read local certificate defaults from
 
 ## 3. Local End-To-End Release
 
-For v0.8.32, verify the local hybrid-memory contract before creating a tag. The
+For the v0.8.34 source candidate, verify the local hybrid-memory, executable
+Storm, updater-trust, and packaged-install contracts before creating a tag. The
 three focused tests exercise the bundled Model2Vec asset, Desktop/Core vector
 parity, per-turn adaptive retrieval, per-agent nest projection, and the real
 Core query path:
@@ -78,6 +79,9 @@ npm run test:memory-hybrid-retrieval
 npm run test:curator-nest-core-query
 npm run test:experience-relations
 npm run test:updater-production
+npm run test:updater-ui
+npm run test:stormbreaker-swarm
+node scripts/test-packaged-updater-install-e2e.cjs --selftest
 ```
 
 The two builder configs also run `build-resources/after-pack-clean.cjs`. A
@@ -101,15 +105,17 @@ The last command writes the verified release metadata to Railway production so:
 
 ## 4. GitHub Actions Release
 
-There are two release workflows, by design. A stable tag push starts both in
-parallel; a branch push does not publish anything. Manual dispatch is a rerun
-path, not a way to release an untagged branch: the requested tag must already
-exist, the checkout must equal that tag's commit, and all three version fields
-(`package.json`, lockfile root, and lockfile package) must match it.
+The release is deliberately split across two workflow files. A stable tag push
+starts the signed macOS orchestrator, which invokes the reusable Windows/Linux
+build barrier while its macOS preflight runs in parallel; a branch push does not
+publish anything. Manual dispatch is a rerun path, not a way to release an
+untagged branch: the requested tag must already exist, the checkout must equal
+that tag's commit, and all three version fields (`package.json`, lockfile root,
+and lockfile package) must match it.
 
-Both workflows and the final Mac publisher accept stable `vMAJOR.MINOR.PATCH`
-tags only. Prerelease suffixes are rejected so a beta/RC can never be promoted
-to the public `latest` channel by this pipeline.
+The reusable build, signed workflow, and final Mac publisher accept stable
+`vMAJOR.MINOR.PATCH` tags only. Prerelease suffixes are rejected so a beta/RC
+can never be promoted to the public `latest` channel by this pipeline.
 
 The embedded Agentlas OS ref and full commit must also agree across
 `package.json`, both release workflows, the three-OS harness, and the updater
@@ -118,52 +124,54 @@ rejects it if the resolved commit differs from the immutable pin. Treat that as
 a release blocker: synchronize and reverify every pin from an approved Core
 commit; never bypass the moved-tag check or package an ambient checkout.
 
-1. **`.github/workflows/release.yml` (Windows/Linux staging).** It runs the
-   security, migration, updater, Memory/Experience, and packaging gates, then
-   builds unsigned Windows and Linux artifacts. It uses the dedicated
-   `AGENTLAS_DESKTOP_RELEASE_TOKEN` to publish into the separate
-   `agentlas-desktop-releases` repository. The source repository's built-in
-   `GITHUB_TOKEN` is deliberately not used for cross-repository publication.
-   `electron-builder` creates or updates a **prerelease staging record** and
-   uploads the Windows setup/portable files, Linux AppImage/deb, and their update
-   feeds. This workflow cannot make the tag stable/latest. macOS is intentionally
-   excluded so an unsigned DMG cannot replace the signed/notarized Mac channel.
+1. **.github/workflows/release.yml (Windows/Linux build barrier).** It runs
+   the security, migration, updater, Memory/Experience, executable Desktop
+   Storm, and packaging gates,
+   then emits unsigned Windows and Linux installers plus their feeds as
+   short-lived Actions artifacts only. The native updater lifecycle job starts
+   from the digest-pinned public v0.8.32 NSIS/AppImage binaries, points only a
+   disposable installed/extracted copy at the private loopback feed, installs
+   the exact candidate artifact, and verifies that the resulting app rejoins
+   the official feed. It has no public-release write token and cannot create,
+   edit, or promote a release. macOS is intentionally excluded so an unsigned
+   DMG cannot replace the signed/notarized Mac channel.
 
    ```bash
    # after version, runtime pins, focused tests, and release notes agree:
    git push origin main
-   git tag -a v0.8.32 -m "Agentlas Desktop v0.8.32"
-   git push origin v0.8.32
+   git tag -a v0.8.34 -m "Agentlas Desktop v0.8.34"
+   git push origin v0.8.34
    ```
 
    The workflows enforce tag/checkout identity but do not prove that the tagged
-   commit is reachable from `origin/main`; pushing the reviewed main commit first
+   commit is reachable from origin/main; pushing the reviewed main commit first
    is the operator-side source-publication contract.
 
-2. **`.github/workflows/release-signed-mac.yml` (completion and promotion).** It
-   builds, Developer ID signs, notarizes, staples, and verifies macOS arm64/x64
-   DMG/ZIP artifacts. Its publisher uploads the Mac files and verification
-   evidence, then waits up to 15 minutes for the complete 18-file
-   Windows/Linux/Mac/update-feed/evidence set. Missing assets fail closed. With
-   `draft=false` (the tag-push default), only this publisher clears draft and
-   prerelease state and asserts the tag as stable/latest. With `draft=true`, the
-   complete release remains a draft and is not public. Manual runs require
-   explicit `version` and `tag`; `draft` and `apply_web_env` both default to
-   `false`. A tag push defaults `apply_web_env` to `true`.
+2. **.github/workflows/release-signed-mac.yml (single writer and
+   promotion).** It waits for the all-OS artifact barrier, builds, Developer ID
+   signs, notarizes, staples, and verifies macOS arm64/x64 DMG/ZIP artifacts,
+   then downloads every barrier artifact into one release directory. Before its
+   first public write it validates the exact full installer/feed/evidence
+   manifest. Windows/Linux feeds must bind every declared auto-update artifact
+   to its computed SHA-512 and byte size, while the macOS lineage gate verifies
+   both ZIP architectures. The production-rendered updater recovery UI also
+   runs in the PR/main harness and the signed macOS preflight. The sole
+   publisher uploads that entire set to the separate releases repository,
+   downloads every staged public asset again, compares bytes and the
+   source-bound macOS verification record, and only then may clear draft and
+   prerelease state and assert stable/latest. Missing, renamed, partial, or
+   byte-different artifacts fail closed. With draft=true, the complete release
+   remains a draft and is not public. Manual runs require explicit version and
+   tag; draft and apply_web_env both default to false. A tag push defaults
+   apply_web_env to true.
 
-   `docs/release.workflow.yml` is only a pointer to this active file and must not
-   be copied over it. The local equivalent uses the `signing/` folder with
-   `AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac`, followed by
-   `npm run release:mac:publish`.
+   docs/release.workflow.yml is only a pointer to this active file and must not
+   be copied over it. The local equivalent uses the signing folder with
+   AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac, followed by
+   npm run release:mac:publish.
 
-If Windows/Linux fail, their prerelease (or draft) remains incomplete and the
-Mac publisher refuses stable promotion. If signing/notarization or the Mac gate
-fails, staged Windows/Linux artifacts remain non-stable. A source tag in
-`agentlas-desktop` is therefore not proof of a public installer; the authority
-is a complete non-draft, non-prerelease `latest` release in
-`agentlas-ai/agentlas-desktop-releases`.
-
-Required for **both** release workflows on `agentlas-ai/agentlas-desktop`:
+Required for the **signed macOS workflow and its single public writer** on
+`agentlas-ai/agentlas-desktop`:
 
 - `AGENTLAS_DESKTOP_RELEASE_TOKEN` — preferably a fine-grained token limited to
   Contents write on `agentlas-ai/agentlas-desktop-releases`
@@ -226,8 +234,8 @@ Then set the remaining secrets and run:
 ```bash
 gh workflow run release-signed-mac.yml \
   -R agentlas-ai/agentlas-desktop \
-  -f version=0.8.32 \
-  -f tag=v0.8.32 \
+  -f version=0.8.34 \
+  -f tag=v0.8.34 \
   -f draft=false \
   -f apply_web_env=true
 ```

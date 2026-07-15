@@ -131,6 +131,13 @@ export interface FirmRunParams {
   locale: RuntimeLocale;
   sink: EventSink;
   signal?: AbortSignal;
+  /** Nested teams return one result to their parent TF instead of emitting a user-visible final. */
+  emitFinal?: boolean;
+}
+
+export interface FirmRunResult {
+  ok: boolean;
+  text: string;
 }
 
 function restrictedFirmText(
@@ -633,7 +640,7 @@ async function runDivision(
 }
 
 /** firm 채팅 진입점 — runMcpInvocation에서 firmId+divisions가 있으면 호출. */
-export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
+export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult> {
   const { req, chat, org, sink } = p;
   const ko = p.locale === "ko";
   // 메인 버블 진행 표시 (un-attributed → 메인 메시지 step). 네트워크 패널은 속성 이벤트로 별도.
@@ -665,11 +672,11 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
     });
     if (!solo.ok) {
       sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", solo.text) });
-      return;
+      return { ok: false, text: solo.text };
     }
     if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", solo.text);
-    sink({ kind: "final", text: solo.text });
-    return;
+    if (p.emitFinal !== false) sink({ kind: "final", text: solo.text });
+    return { ok: true, text: solo.text };
   }
 
   // 1) CEO PLAN — 어떤 하위를 쓸지 선택
@@ -703,19 +710,19 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
     if (!solo.ok) {
       if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", solo.text);
       sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", solo.text) });
-      return;
+      return { ok: false, text: solo.text };
     }
     if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", solo.text);
-    sink({ kind: "final", text: solo.text });
-    return;
+    if (p.emitFinal !== false) sink({ kind: "final", text: solo.text });
+    return { ok: true, text: solo.text };
   }
 
   const matched = matchTargets(plan.delegations, ceoReports);
   if (matched.length === 0) {
     // CEO가 위임 안 함 → plan.text가 곧 최종 답
     if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", plan.text);
-    sink({ kind: "final", text: plan.text });
-    return;
+    if (p.emitFinal !== false) sink({ kind: "final", text: plan.text });
+    return { ok: true, text: plan.text };
   }
 
   // 핸드오프: 네트워크 패널(속성) + 메인 버블(진행) 둘 다
@@ -777,9 +784,10 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<void> {
   });
   if (!finalTurn.ok) {
     sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", finalTurn.text) });
-    return;
+    return { ok: false, text: finalTurn.text };
   }
 
   if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", finalTurn.text);
-  sink({ kind: "final", text: finalTurn.text });
+  if (p.emitFinal !== false) sink({ kind: "final", text: finalTurn.text });
+  return { ok: true, text: finalTurn.text };
 }

@@ -358,6 +358,9 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("marketplace:bookmarkRemove", slug, entityKind),
   },
   cloudAgents: {
+    listRegisteredUploadOptions: () => ipcRenderer.invoke("cloudAgents:listRegisteredUploadOptions"),
+    saveRegisteredPrivate: (input) => ipcRenderer.invoke("cloudAgents:saveRegisteredPrivate", input),
+    publishRegisteredPublic: (input) => ipcRenderer.invoke("cloudAgents:publishRegisteredPublic", input),
     savePrivate: (input) => ipcRenderer.invoke("cloudAgents:savePrivate", input),
     saveBuiltPrivate: (input) => ipcRenderer.invoke("cloudAgents:saveBuiltPrivate", input),
     publishPublic: (input) => ipcRenderer.invoke("cloudAgents:publishPublic", input),

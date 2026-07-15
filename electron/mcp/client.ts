@@ -43,7 +43,7 @@ import {
 } from "../store/chats";
 import { getProject } from "../store/projects";
 import { getInterviewMode, isTrivialPrompt } from "../store/interview-mode";
-import { getFirm } from "../store/firms";
+import { getFirm, listFirms } from "../store/firms";
 import { getResolvedOrg } from "../store/org-spec";
 import { runFirmInvocation } from "./firm-orchestrator";
 import {
@@ -53,7 +53,7 @@ import {
   type BorrowedAgentSpec,
 } from "./borrowed-task-force";
 import { runSwarmInvocation } from "./swarm-run";
-import { getAgentGroup, resolveAgentGroupForRuntime } from "../store/agent-groups";
+import { getAgentGroup, listAgentGroups, resolveAgentGroupForRuntime } from "../store/agent-groups";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
 import { buildExperienceContext } from "../experience/context";
@@ -96,6 +96,7 @@ import type {
   InstalledAgent,
   McpInvocationEvent,
   McpInvocationRequest,
+  OrchestrationTarget,
   RecStage,
   RecRouterAgent,
   RuntimeStatus,
@@ -427,14 +428,20 @@ async function buildAgentGroupTaskForceSpecs(input: {
     if (member.source === "hub" && !hub) {
       throw new BorrowedAgentUnavailableError([member.slug], [`missing_directive:${member.slug}`], input.locale);
     }
+    if (member.source === "hub" && member.entityKind === "team" && !hub?.executionGraph) {
+      throw new BorrowedAgentUnavailableError([member.slug], ["team_execution_graph_unavailable"], input.locale);
+    }
     return {
       slug: member.slug,
       name: hub?.name || member.name,
       directive: member.source === "hub" ? hub!.directive : member.directive,
+      entityKind: member.entityKind === "team" ? "team" : "agent",
       source: member.source,
       routeLabel: member.routeLabel,
       warnings: member.warnings,
       installedAgentId: member.installedAgentId,
+      firmId: member.firmId,
+      executionGraph: hub?.executionGraph,
     };
   });
   if (specs.length === 0) {
@@ -449,6 +456,146 @@ async function buildAgentGroupTaskForceSpecs(input: {
     orchestratorName: resolved.group.orchestratorName,
     specs,
   };
+}
+
+function orchestrationTargetKey(target: OrchestrationTarget): string {
+  if (target.source === "local") {
+    if (target.entityKind === "agent") return `local:agent:${target.agentId}`;
+    if (target.entityKind === "team") return `local:team:${target.firmId}`;
+    return `local:group:${target.groupId}`;
+  }
+  return `${target.source}:${target.entityKind}:${target.slug.trim().toLowerCase()}`;
+}
+
+function requireOrchestrationTargets(value: unknown): OrchestrationTarget[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 32) {
+    throw new Error("A task force requires between 1 and 32 exact targets.");
+  }
+  return value.map((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error(`Invalid task-force target at index ${index}.`);
+    }
+    const target = raw as Record<string, unknown>;
+    const source = target.source;
+    const entityKind = target.entityKind;
+    if (source === "local" && entityKind === "agent" && typeof target.agentId === "string" && target.agentId.trim()) {
+      return { source, entityKind, agentId: target.agentId.trim() };
+    }
+    if (source === "local" && entityKind === "team" && typeof target.firmId === "string" && target.firmId.trim()) {
+      return { source, entityKind, firmId: target.firmId.trim() };
+    }
+    if (source === "local" && entityKind === "group" && typeof target.groupId === "string" && target.groupId.trim()) {
+      return { source, entityKind, groupId: target.groupId.trim() };
+    }
+    if (
+      (source === "cloud" || source === "hub") &&
+      (entityKind === "agent" || entityKind === "team") &&
+      typeof target.slug === "string" &&
+      target.slug.trim()
+    ) {
+      return { source, entityKind, slug: target.slug.trim() };
+    }
+    throw new Error(`Invalid task-force target at index ${index}.`);
+  });
+}
+
+async function buildStructuredTaskForceSpecs(input: {
+  targets: OrchestrationTarget[];
+  prompt: string;
+  project: string | null;
+  locale: "ko" | "en";
+  signal?: AbortSignal;
+}): Promise<BorrowedAgentSpec[]> {
+  if (input.targets.length === 0 || input.targets.length > 32) {
+    throw new Error("A task force requires between 1 and 32 exact targets.");
+  }
+  const seen = new Set<string>();
+  const targets = input.targets.filter((target) => {
+    const key = orchestrationTargetKey(target);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const specs: BorrowedAgentSpec[] = [];
+  for (const target of targets) {
+    if (target.source === "local" && target.entityKind === "agent") {
+      const locator = target.agentId.split("/").pop() || target.agentId;
+      const matches = listInstalledAgents().filter((candidate) => candidate.id === target.agentId || candidate.slug === locator);
+      const agent = matches.length === 1 ? matches[0] : null;
+      if (!agent) throw new Error(`Installed agent is unavailable: ${target.agentId}`);
+      if (agent.kind === "team") {
+        throw new Error(`Installed team package must resolve to a Team/Firm target: ${target.agentId}`);
+      }
+      specs.push({
+        slug: `installed:${agent.slug}`,
+        name: agent.nameEn || agent.name,
+        directive: buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt),
+        entityKind: "agent",
+        source: "installed",
+        routeLabel: "Installed",
+        installedAgentId: agent.id,
+      });
+      continue;
+    }
+    if (target.source === "local" && target.entityKind === "team") {
+      const locator = target.firmId.split("/").pop() || target.firmId;
+      const matches = listFirms().filter((candidate) => candidate.id === target.firmId || candidate.slug === locator);
+      const firm = matches.length === 1 ? matches[0] : null;
+      if (!firm) throw new Error(`Installed team is unavailable: ${target.firmId}`);
+      specs.push({
+        slug: `firm:${firm.slug}`,
+        name: firm.nameEn || firm.name,
+        directive: `Preserve the installed team hierarchy for ${firm.nameEn || firm.name}.`,
+        entityKind: "team",
+        source: "firm",
+        routeLabel: "Installed Team",
+        installedAgentId: firm.ceoAgentId,
+        firmId: firm.id,
+      });
+      continue;
+    }
+    if (target.source === "local" && target.entityKind === "group") {
+      const matches = listAgentGroups().filter((candidate) => candidate.id === target.groupId);
+      const group = matches.length === 1 ? matches[0] : null;
+      if (!group) throw new Error(`Agent group is unavailable: ${target.groupId}`);
+      specs.push({
+        slug: `group:${group.id}`,
+        name: group.name,
+        directive: `Use the saved Agent Group orchestrator "${group.orchestratorName}" and preserve its member boundaries.`,
+        entityKind: "group",
+        source: "group",
+        routeLabel: "Agent Group",
+        groupId: group.id,
+      });
+      continue;
+    }
+    // Exact Core selector keeps scope + entity kind + slug through Hub lookup.
+    const ref = `${target.source}/${target.entityKind}/${target.slug}`;
+    const res = await hepCall(ref, [input.prompt], { project: input.project ?? ".", signal: input.signal });
+    const [remote] = requireBorrowedAgentSpecs([target.slug], res.json ?? null, {
+      locale: input.locale,
+      transportOk: res.ok,
+      transportError: res.error || (res.exitCode == null ? "hub_call_failed" : `hub_exit_${res.exitCode}`),
+    });
+    if (!remote) throw new BorrowedAgentUnavailableError([target.slug], ["missing_directive"], input.locale);
+    if (!remote.entityKind || remote.entityKind !== target.entityKind) {
+      throw new BorrowedAgentUnavailableError(
+        [target.slug],
+        [`entity_kind_mismatch:${remote.entityKind ?? "unproven"}->${target.entityKind}`],
+        input.locale,
+      );
+    }
+    if (target.entityKind === "team" && !remote.executionGraph) {
+      throw new BorrowedAgentUnavailableError([target.slug], ["team_execution_graph_unavailable"], input.locale);
+    }
+    specs.push({
+      ...remote,
+      entityKind: target.entityKind,
+      source: target.source,
+      routeLabel: target.source === "cloud" ? "Agent Cloud" : "Hub",
+    });
+  }
+  return specs;
 }
 
 function selectAppBuilderForExistingAppEdit(
@@ -673,6 +820,7 @@ export async function runMcpInvocation(
       toolMode: "auto",
       hubMode: "local-only",
       borrowAgents: [],
+      taskForceTargets: undefined,
       pipelineStages: undefined,
       routerAgent: undefined,
       mcpBrowserProfileKey: undefined,
@@ -720,6 +868,17 @@ export async function runMcpInvocation(
     sink({ kind: "error", error: { code: "no-chat", message: tStatus(locale, "errChatNotFound") } });
     return earlyResult();
   }
+  // Group, firm, borrowed-task-force, and Stormbreaker branches return before
+  // the ordinary single-run persistence point. Keep the visible request durable
+  // exactly once regardless of which executable orchestrator owns it.
+  let userMessagePersisted = false;
+  const persistUserMessage = () => {
+    if (req.agentAppMode || userMessagePersisted) return;
+    const hasHistory = listChatMessages(chat.id, 1).length > 0;
+    appendChatMessage(chat.id, "user", req.userPrompt);
+    if (!hasHistory) autoTitleFromFirstMessage(chat.id, req.userPrompt);
+    userMessagePersisted = true;
+  };
   // Mobile runs and unattended read automations cross a stronger boundary than
   // an interactive Desktop read. Only Main derives this bit; it is never taken
   // from the renderer request.
@@ -759,6 +918,26 @@ export async function runMcpInvocation(
       : req.planMode
         ? buildPlanUserPrompt(req.userPrompt, locale)
         : req.userPrompt;
+  const explicitNetworkMatch = req.agentAppMode
+    ? null
+    : req.userPrompt.match(/^\s*\/?hep-network\b(?!\s+--stormbreaker)\s*/i);
+  const explicitNetworkGoal = explicitNetworkMatch
+    ? req.userPrompt.slice(explicitNetworkMatch[0].length).trim()
+    : null;
+  if (explicitNetworkMatch) {
+    if (!explicitNetworkGoal) {
+      sink({
+        kind: "error",
+        error: {
+          code: "hep-network-goal-required",
+          message: locale === "ko" ? "hep-network에 실행할 요청을 입력하세요." : "Provide a goal for hep-network.",
+        },
+      });
+      return earlyResult();
+    }
+    req = { ...req, userPrompt: explicitNetworkGoal };
+    effectiveUserPrompt = explicitNetworkGoal;
+  }
   const borrowedAgentSlugs = [...new Set((req.borrowAgents ?? []).map((slug) => slug.trim()).filter(Boolean))];
   let explicitBorrowUserPreamble: string | null = null;
   if (req.pipelineStages && req.pipelineStages.length > 0) {
@@ -860,6 +1039,35 @@ export async function runMcpInvocation(
   // Even a global chat executes in a concrete local folder. Persist it in the
   // run receipt so generated files do not become undiscoverable after reload.
   resolvedResultFolder = workingFolder ?? agentRunCwd();
+
+  if (explicitNetworkGoal) {
+    try {
+      const routed = await routeOnly(explicitNetworkGoal, {
+        project: workingFolder ?? undefined,
+        hubOnly: true,
+        scope: "network",
+        timeoutMs: 12_000,
+        signal,
+      });
+      throwIfInvocationAborted(signal, locale);
+      const recommendation = normalizeRecommendation(routed.json, explicitNetworkGoal);
+      const targets = recommendation.agents.map((candidate) => candidate.target);
+      if (targets.length === 0) {
+        throw new Error("Hephaestus Network returned no executable exact targets.");
+      }
+      req = { ...req, taskForceTargets: targets, borrowAgents: undefined };
+      sink({
+        kind: "tool-use",
+        status: locale === "ko"
+          ? `Hephaestus Network가 ${targets.length}개 실행 단위를 선택했습니다.`
+          : `Hephaestus Network selected ${targets.length} execution unit(s).`,
+      });
+    } catch (error) {
+      throwIfInvocationAborted(signal, locale);
+      sink({ kind: "error", error: invocationFailure(req, "hep-network-route-failed", error) });
+      return earlyResult();
+    }
+  }
 
   // 자동화 Hub 정책: 사용자가 "Hub까지 사용"을 켜둔 경우, 로컬 타깃만 고집하지 않고
   // 실행 전에 Hephaestus Network 라우터로 Hub 후보를 찾아 BYOM bundle 지시를 프롬프트에 붙인다.
@@ -1031,7 +1239,13 @@ export async function runMcpInvocation(
   // Stormbreaker is an executable Goal/UltraCode mode, not only a prompt
   // suffix. Non-trivial explicit/automatic requests enter the bounded swarm
   // path. Agent App and restricted-read invocations must never enter it.
-  const explicitStormbreakerRequest = /^\s*(?:hep-network\s+--stormbreaker|stormbreaker)\b/i.test(req.userPrompt);
+  // Slash input is a first-class Desktop surface, not merely a terminal alias.
+  // Keep the historical no-slash chips working while accepting `/hep-storm`.
+  const stormbreakerPrefix = /^\s*(?:\/?hep-storm|\/?hep-network\s+--stormbreaker|\/?stormbreaker)\b\s*/i;
+  const explicitStormbreakerRequest = stormbreakerPrefix.test(req.userPrompt);
+  const explicitStormbreakerGoal = explicitStormbreakerRequest
+    ? req.userPrompt.replace(stormbreakerPrefix, "").trim() || req.userPrompt
+    : req.userPrompt;
   const stormbreakerEngaged = !req.agentAppMode && !restrictedReadBoundary && (
     chat.kind === "division" ||
     chat.continuousMode === true ||
@@ -1044,7 +1258,10 @@ export async function runMcpInvocation(
     chat.kind !== "division" &&
     !chat.continuousMode &&
     (explicitStormbreakerRequest || isStormbreakerAutoEnabled()) &&
-    !isTrivialPrompt(req.userPrompt);
+    // `/hep-storm` is a routing slug, not a trivial task. Classify the goal
+    // after removing the explicit command so slash input reaches the same
+    // executable swarm path as the Composer Stormbreaker chip.
+    !isTrivialPrompt(explicitStormbreakerRequest ? explicitStormbreakerGoal : req.userPrompt);
 
   // ── MCP 툴 브리지 ──────────────────────────────────────────
   // Claude Code/Codex 러너에는 요청/에이전트 문맥으로 필요한 MCP 플러그인을 자동 선택한 뒤
@@ -1211,6 +1428,59 @@ export async function runMcpInvocation(
     return coreStormbreakerHarnessPromise;
   };
 
+  // ── Exact temporary top-level task force ──────────────────
+  // A recommendation is an ephemeral roster, not a chat binding mutation.
+  // Main validates every discriminated target against live inventory before
+  // handing one execution unit per Agent, Team, or Group to the orchestrator.
+  if (req.taskForceTargets !== undefined) {
+    try {
+      const targets = requireOrchestrationTargets(req.taskForceTargets);
+      const taskForceSpecs = await buildStructuredTaskForceSpecs({
+        targets,
+        prompt: effectiveUserPrompt,
+        project: workingFolder,
+        locale,
+        signal,
+      });
+      await runBorrowedTaskForceInvocation({
+        req: { ...req, userPrompt: effectiveUserPrompt },
+        chat,
+        orchestratorAgent: agent,
+        taskForceName: locale === "ko" ? "임시 태스크포스" : "Temporary task force",
+        taskForceKind: "task-force",
+        taskForceSpecs,
+        resolveGroupTaskForce: ({ groupId, prompt, signal: nestedSignal }) => buildAgentGroupTaskForceSpecs({
+          groupId,
+          prompt,
+          project: workingFolder,
+          locale,
+          sink,
+          signal: nestedSignal,
+          localOnly: req.agentAppMode || req.hubMode === "local-only",
+        }),
+        active,
+        runtimes,
+        picked,
+        runtimeOverride: runtimeChoice.override,
+        workingFolder,
+        ...(workspaceBinding ? { workspaceBinding } : {}),
+        ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
+        mcpConfigPath,
+        mcpAllowedTools,
+        mcpCodexConfigArgs,
+        agentAppMcpRuntimeEnv: mcpRuntimeEnv,
+        onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
+        runnerEnv: runnerEnv.env,
+        locale,
+        sink,
+        signal,
+      });
+    } catch (err) {
+      sink({ kind: "error", error: invocationFailure(req, "task-force-failed", err) });
+    }
+    return earlyResult();
+  }
+
   // ── Agent Group 오케스트레이션 ───────────────────────────
   // 저장된 그룹은 firm/division보다 상위의 라우팅 묶음이다. 실행 직전에
   // installed agents, org chart, live Hub catalog/bundle을 다시 풀어서 최신 경로로 호출한다.
@@ -1236,6 +1506,15 @@ export async function runMcpInvocation(
         taskForceName: groupRun.groupName,
         taskForceKind: "agent-group",
         taskForceSpecs: groupRun.specs,
+        resolveGroupTaskForce: ({ groupId, prompt, signal: nestedSignal }) => buildAgentGroupTaskForceSpecs({
+          groupId,
+          prompt,
+          project: workingFolder,
+          locale,
+          sink,
+          signal: nestedSignal,
+          localOnly: req.agentAppMode || req.hubMode === "local-only",
+        }),
         active,
         runtimes,
         picked,
@@ -1306,6 +1585,7 @@ export async function runMcpInvocation(
     chat.kind !== "division"
   ) {
     try {
+      persistUserMessage();
       const coreHarness = stormbreakerSwarm
         ? await loadCoreStormbreakerHarness()
         : undefined;
@@ -1318,7 +1598,9 @@ export async function runMcpInvocation(
         });
       }
       await runSwarmInvocation({
-        req,
+        // Persist the exact user command above, but give workers the actual
+        // goal rather than a route slug that could be mistaken for work.
+        req: stormbreakerSwarm ? { ...req, userPrompt: explicitStormbreakerGoal } : req,
         chat,
         orchestratorAgent: agent,
         active,
@@ -1626,10 +1908,7 @@ export async function runMcpInvocation(
   const history = req.agentAppMode ? [] : listChatMessages(chat.id, 80);
 
   // 사용자 메시지 영구화 + 첫 메시지면 제목 자동 생성
-  if (!req.agentAppMode) {
-    appendChatMessage(chat.id, "user", req.userPrompt);
-    if (history.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
-  }
+  persistUserMessage();
 
   sink({ kind: "thinking", status: tStatus(locale, "thinking", { agent: agent.name }) });
   if (chat.kind !== "division" && canWrite && isAutomationSetupRequest(req.userPrompt)) {

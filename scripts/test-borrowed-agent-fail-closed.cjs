@@ -38,6 +38,30 @@ function preparedAgent(slug, entry = `AUTHORITATIVE_${slug.toUpperCase().replace
   };
 }
 
+function preparedTeam(slug, { graph = true } = {}) {
+  const output = {
+    entity_kind: "team",
+    entry_excerpt: `AUTHORITATIVE_TEAM_${slug}`,
+    grounding: { directive: "Attach to the current project first." },
+    next_step: "Execute the team bundle with the user's local model.",
+    runtime_bundle: {
+      entity_kind: "team",
+      entry: { path: "AGENTS.md", content: `AUTHORITATIVE_TEAM_${slug}` },
+    },
+  };
+  if (graph) {
+    output.runtime_bundle.execution_graph = {
+      schemaVersion: "1.0",
+      manager: { path: "agents/00-manager/agent.md", content: "TEAM_MANAGER_DIRECTIVE" },
+      workers: [
+        { id: "worker-one", path: "agents/10-worker/agent.md", content: "TEAM_WORKER_ONE_DIRECTIVE" },
+        { id: "worker-two", path: "agents/20-worker/agent.md", content: "TEAM_WORKER_TWO_DIRECTIVE" },
+      ],
+    };
+  }
+  return { action: "hub_invoke", status: "prepared", slug, entityKind: "team", output };
+}
+
 async function main() {
   await app.whenReady();
 
@@ -145,6 +169,7 @@ async function main() {
     swarmMode = false,
     permission = "read",
     runnerTexts = [],
+    taskForceTargets,
     beforeRun,
   }) {
     const chat = chats.createChat({ agentId, agentGroupId, firmId, kind, title });
@@ -162,6 +187,7 @@ async function main() {
         locale: "en",
         permissions: permission,
         ...(borrowAgents ? { borrowAgents } : {}),
+        ...(taskForceTargets ? { taskForceTargets } : {}),
       },
       (event) => events.push(event),
     );
@@ -301,6 +327,46 @@ async function main() {
     swarmRealRequests.filter((request) => request.systemPrompt.includes("## Agentlas Task-Force Orchestrator")).length,
     1,
   );
+
+  const missingTeamGraph = await invoke({
+    title: "Exact Hub team missing graph",
+    taskForceTargets: [{ source: "hub", entityKind: "team", slug: "missing-team-graph" }],
+    hubResult: result({
+      schema: "hephaestus.call.v1",
+      status: "prepared",
+      agents: [preparedTeam("missing-team-graph", { graph: false })],
+    }),
+  });
+  assert.equal(missingTeamGraph.runnerDelta, 0, "an exact Hub Team without an executable graph must fail before any model call");
+  assert.match(
+    missingTeamGraph.events.find((event) => event.kind === "error")?.error?.message ?? "",
+    /team_execution_graph_unavailable/,
+  );
+
+  const executableTeam = await invoke({
+    title: "Exact executable Hub team",
+    taskForceTargets: [{ source: "hub", entityKind: "team", slug: "executable-team" }],
+    hubResult: result({
+      schema: "hephaestus.call.v1",
+      status: "prepared",
+      agents: [preparedTeam("executable-team")],
+    }),
+    runnerTexts: [
+      "outer plan",
+      "team manager plan",
+      "worker one result",
+      "worker two result",
+      "team manager synthesis",
+      "outer synthesis",
+    ],
+  });
+  assert.equal(executableTeam.runnerDelta, 6, "Hub Team must run outer planner, manager twice, every worker, and outer synthesis");
+  const executableRequests = runnerRequests.slice(executableTeam.runnerStart);
+  const executableEvidence = executableRequests.map((request) => `${request.systemPrompt}\n${request.userPrompt}`).join("\n");
+  assert.match(executableEvidence, /TEAM_MANAGER_DIRECTIVE/);
+  assert.match(executableEvidence, /TEAM_WORKER_ONE_DIRECTIVE/);
+  assert.match(executableEvidence, /TEAM_WORKER_TWO_DIRECTIVE/);
+  assert.equal(executableTeam.events.filter((event) => event.kind === "final").length, 1);
   assert.equal(
     swarmRealRequests.filter((request) => request.systemPrompt.includes("## Agentlas Task-Force Agent Host Policy")).length,
     2,
@@ -423,6 +489,28 @@ async function main() {
       },
     ],
   });
+  const nestedGroup = await invoke({
+    title: "Saved group nested in exact top task force",
+    taskForceTargets: [{ source: "local", entityKind: "group", groupId: group.id }],
+    hubResult: result({
+      schema: "hephaestus.call.v1",
+      status: "prepared",
+      agents: [preparedAgent("group-hub-agent", "NESTED_GROUP_MEMBER_DIRECTIVE")],
+    }),
+    runnerTexts: [
+      "outer planner",
+      "group planner",
+      "group member result",
+      "group synthesis",
+      "outer synthesis",
+    ],
+  });
+  assert.equal(nestedGroup.runnerDelta, 5, "top TF must execute Group planner, member, and Group synthesis before outer synthesis");
+  assert.equal(nestedGroup.events.filter((event) => event.kind === "final").length, 1);
+  assert.match(
+    runnerRequests.slice(nestedGroup.runnerStart).map((request) => `${request.systemPrompt}\n${request.userPrompt}`).join("\n"),
+    /NESTED_GROUP_MEMBER_DIRECTIVE/,
+  );
   const emptyGroup = await invoke({
     title: "Saved group empty Hub bundle",
     agentGroupId: group.id,
@@ -509,6 +597,61 @@ async function main() {
       },
     ],
   });
+
+  const installedTeamGroup = groups.createAgentGroup({
+    name: "Nested Installed Team Group",
+    description: "The complete installed firm must execute through its own manager boundary",
+    orchestratorName: "Nested Installed Team Group Orchestrator",
+    members: [
+      {
+        id: "nested-installed-team",
+        source: "firm",
+        firmId: firm.id,
+        firmSlug: firm.slug,
+        addedAt: "2026-07-11T00:00:00.000Z",
+        snapshot: {
+          name: firm.name,
+          nameEn: firm.nameEn,
+          tagline: firm.tagline,
+          taglineEn: firm.taglineEn,
+          routeLabel: "Installed Team",
+          entityKind: "team",
+        },
+      },
+    ],
+  });
+  const nestedInstalledTeam = await invoke({
+    title: "Saved group executes complete installed team",
+    agentGroupId: installedTeamGroup.id,
+    hubResult: result(null),
+    runnerTexts: ["PARENT_GROUP_PLAN", "INSTALLED_TEAM_MANAGER_RESULT", "PARENT_GROUP_SYNTHESIS"],
+  });
+  assert.equal(
+    nestedInstalledTeam.runnerDelta,
+    3,
+    "a complete installed team must run parent planner, team manager, and parent synthesis",
+  );
+  const nestedRequests = runnerRequests.slice(nestedInstalledTeam.runnerStart);
+  assert.equal(
+    nestedRequests.filter((request) => request.systemPrompt.includes("## Agentlas Task-Force Agent Host Policy")).length,
+    0,
+    "an installed team must not be executed by the flat leaf-specialist host",
+  );
+  assert.equal(
+    nestedInstalledTeam.events.filter((event) => event.kind === "final").length,
+    1,
+    "the nested team returns to the parent; only the top-level TF emits a user-visible final",
+  );
+  const nestedTeamChat = store.getDb()
+    .prepare("SELECT id, firm_id, parent_chat_id FROM chats WHERE parent_chat_id = ? AND title = ?")
+    .get(nestedInstalledTeam.chat.id, `⟦firm⟧${firm.id}`);
+  assert.equal(nestedTeamChat?.firm_id, firm.id, "the nested team keeps a dedicated firm-bound session");
+  assert.equal(nestedTeamChat?.parent_chat_id, nestedInstalledTeam.chat.id);
+  assert.match(
+    chats.listChatMessages(nestedTeamChat.id, 10).map((message) => message.text).join("\n"),
+    /INSTALLED_TEAM_MANAGER_RESULT/,
+    "the team manager result must persist in the nested team session",
+  );
   const groupExplicitRefusal = await invoke({
     title: "Saved group persisted Hub hires refused",
     agentGroupId: localOnlyGroup.id,
@@ -654,11 +797,14 @@ async function main() {
     /You are the borrowed Hub specialist|Apply the borrowed specialist agent|actual expertise and synthesize/,
     "failure paths must not emit a fake specialist persona or directive",
   );
-  assert.equal(hubCalls.length, 16, "every executable explicit path must make exactly one authoritative hep-call attempt");
+  assert.equal(hubCalls.length, 19, "every executable explicit path must make exactly one authoritative hep-call attempt");
 
   console.log(JSON.stringify({
     ok: true,
-    checks: 76,
+    checks: 79,
+    nestedAgentGroupExecutionVerified: true,
+    hubTeamGraphFailClosed: true,
+    hubTeamManagerWorkerExecutionVerified: true,
     explicitSingleRefusalBlocked: true,
     explicitSingleEmptyBlocked: true,
     failedTransportBlocked: true,

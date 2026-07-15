@@ -78,6 +78,8 @@ const BUILD_RUNTIME_ENV_KEYS: Record<RuntimeKind, readonly string[]> = {
   // No API secret is copied into build workers.
   cursor: ["CURSOR_AGENT_HOME", "CURSOR_CONFIG_DIR"],
   ollama: ["OLLAMA_HOST", "OLLAMA_API_KEY"],
+  lmstudio: ["LMSTUDIO_HOST"],
+  mlx: ["MLX_HOST"],
   // BYOK runners read their one selected key directly from the Main vault and
   // do not need any host environment credential.
   byok: [],

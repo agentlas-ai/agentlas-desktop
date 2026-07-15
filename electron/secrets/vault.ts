@@ -10,8 +10,12 @@
 import keytar from "keytar";
 import { createHash, randomUUID } from "node:crypto";
 import type { RuntimeBackend } from "../../shared/types";
+import {
+  OFFICIAL_INSTALL_IDENTITY,
+  configuredIdentity,
+  requireConfiguredInstallIdentity,
+} from "../install-identity";
 
-const SERVICE = "com.agentlas.desktop";
 const BYOK_PREFIX = "byok:";
 const BYOK_META_PREFIX = "byok-meta:";
 const ENV_PREFIX = "env:";
@@ -21,10 +25,24 @@ const memoryVault = new Map<string, string>();
 const keychainCache = new Map<string, string | null>();
 let envKeyCache: string[] | null = null;
 
+function keychainService(): string {
+  const identity = configuredIdentity();
+  if (identity) return identity.keychainService;
+
+  // Direct `electron scripts/test-*.cjs` and Node-only contract tests do not
+  // execute main.ts. Preserve their historical official namespace without
+  // giving a packaged app an implicit identity.
+  const electronDefaultApp = (process as NodeJS.Process & { defaultApp?: boolean }).defaultApp === true;
+  if (electronDefaultApp || !process.versions.electron) {
+    return OFFICIAL_INSTALL_IDENTITY.keychainService;
+  }
+  return requireConfiguredInstallIdentity().keychainService;
+}
+
 async function getPassword(account: string): Promise<string | null> {
   if (USE_MEMORY_VAULT) return memoryVault.get(account) ?? null;
   if (keychainCache.has(account)) return keychainCache.get(account) ?? null;
-  const value = await keytar.getPassword(SERVICE, account);
+  const value = await keytar.getPassword(keychainService(), account);
   keychainCache.set(account, value);
   return value;
 }
@@ -33,7 +51,7 @@ async function setPassword(account: string, value: string): Promise<void> {
   if (USE_MEMORY_VAULT) {
     memoryVault.set(account, value);
   } else {
-    await keytar.setPassword(SERVICE, account, value);
+    await keytar.setPassword(keychainService(), account, value);
   }
   keychainCache.set(account, value);
 }
@@ -42,7 +60,7 @@ async function deletePassword(account: string): Promise<void> {
   if (USE_MEMORY_VAULT) {
     memoryVault.delete(account);
   } else {
-    await keytar.deletePassword(SERVICE, account);
+    await keytar.deletePassword(keychainService(), account);
   }
   keychainCache.delete(account);
 }
@@ -202,7 +220,7 @@ export async function listEnvKeys(): Promise<string[]> {
   if (envKeyCache) return envKeyCache;
   const creds = USE_MEMORY_VAULT
     ? [...memoryVault.keys()].map((account) => ({ account, password: memoryVault.get(account) ?? "" }))
-    : await keytar.findCredentials(SERVICE);
+    : await keytar.findCredentials(keychainService());
   envKeyCache = creds
     .map((c) => c.account)
     .filter((a) => a.startsWith(ENV_PREFIX))

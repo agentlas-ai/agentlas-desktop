@@ -439,6 +439,10 @@ export function projectMobileBridgeUsage(
         : provider.status === "error"
           ? "unavailable"
           : null,
+    accountFingerprint:
+      typeof provider.accountFingerprint === "string" && /^[a-f0-9]{16}$/.test(provider.accountFingerprint)
+        ? provider.accountFingerprint
+        : null,
     windows: provider.windows.map((window) => ({
       id: window.id,
       label: window.label,

@@ -566,7 +566,7 @@ export interface MobileBridgeFirmDto {
 
 export interface MobileBridgeAgentGroupMemberDto {
   id: string;
-  source: "installed" | "firm-node" | "hub";
+  source: "installed" | "firm" | "firm-node" | "hub";
   agentId: string | null;
   agentSlug: string | null;
   hubSlug: string | null;
@@ -707,6 +707,12 @@ export interface MobileBridgeUsageProviderDto {
   windows: MobileBridgeUsageWindowDto[];
   fetchedAt: number;
   error: string | null;
+  /**
+   * Secret-free sha256(provider:accountIdentity) 앞 16 hex. 같은 구독 계정이
+   * 여러 Desktop에 연결됐을 때 Mobile이 사용량 카드를 하나로 병합하는 기준.
+   * identity를 모르면 null이고, null끼리는 절대 병합하지 않는다.
+   */
+  accountFingerprint: string | null;
 }
 
 export interface MobileBridgeSnapshot {

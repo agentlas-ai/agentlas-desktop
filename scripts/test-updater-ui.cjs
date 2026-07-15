@@ -46,6 +46,10 @@ function startServer() {
 }
 
 function setupUpdaterUiBridge(payload) {
+  // The product defaults to English.  These assertions are intentionally
+  // Korean, so select Korean before the renderer's I18nProvider boots instead
+  // of relying on the host locale or an old persisted preference.
+  window.localStorage.setItem("agentlas.locale", payload.locale || "ko");
   const setupBase = (0, eval)(`(${payload.setupSource})`);
   setupBase(payload.baseOptions);
   let state = payload.initialState;
@@ -98,6 +102,7 @@ async function newUpdaterContext(browser, setupSource, initialState) {
   await context.addInitScript(setupUpdaterUiBridge, {
     setupSource,
     baseOptions: { teamRoster: true },
+    locale: "ko",
     initialState,
   });
   return context;
@@ -147,6 +152,26 @@ async function main() {
     await manualPage.getByRole("button", { name: "공식 설치 파일" }).last().waitFor();
     await manualPage.screenshot({ path: path.join(outDir, "manual-required-settings.png"), fullPage: true });
     await manualContext.close();
+
+    const untrustedContext = await newUpdaterContext(browser, setupSource, {
+      status: "manual-required",
+      version: "0.8.33",
+      code: "install-source-untrusted",
+      canRetry: false,
+      manualDownloadUrl: "https://agentlas.cloud/desktop",
+    });
+    const untrustedPage = await untrustedContext.newPage();
+    watch(untrustedPage);
+    await untrustedPage.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
+    const untrustedAlert = untrustedPage.locator('.sidenav-update-card[role="alert"]');
+    await untrustedAlert.getByText("자동 업데이트 복구가 필요합니다", { exact: true }).waitFor();
+    await untrustedAlert.getByRole("button", { name: "공식 앱 복구" }).click();
+    assert.deepEqual(await untrustedPage.evaluate(() => window.__updaterUi.calls), ["openManualDownload"]);
+    await untrustedPage.goto(`${baseUrl}/settings.html`, { waitUntil: "domcontentloaded" });
+    await untrustedPage.getByText(/공식 Developer ID 계보가 아닌 앱에서 실행 중이라 자동 업데이트를 격리했습니다/).waitFor();
+    await untrustedPage.getByRole("button", { name: "공식 앱으로 복구" }).waitFor();
+    await untrustedPage.screenshot({ path: path.join(outDir, "untrusted-install-source.png"), fullPage: true });
+    await untrustedContext.close();
 
     const lifecycleContext = await newUpdaterContext(browser, setupSource, {
       status: "downloading",

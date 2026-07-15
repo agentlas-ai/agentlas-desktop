@@ -9,6 +9,22 @@ directories:
   buildResources: build-resources
 
 afterPack: build-resources/after-pack-clean.cjs
+# The helper verifies the official bundle against
+# build-resources/macos-release-signing-policy.json before it can leave a macOS build.
+afterSign: build-resources/after-sign-trust.cjs
+
+# This value is injected into app.asar/package.json. Runtime identity selection
+# accepts only this complete marker; launch environment variables never select
+# a packaged install namespace.
+extraMetadata:
+  agentlasInstallIdentity:
+    schemaVersion: 1
+    channel: official
+    appId: com.agentlas.desktop
+    appName: Agentlas
+    userDataNamespace: Agentlas
+    keychainService: com.agentlas.desktop
+    updateFeed: official
 
 files:
   - dist/electron/**/*
@@ -136,6 +152,15 @@ extraResources:
 # macOS first — Hardened Runtime + notarization 준비
 mac:
   category: public.app-category.productivity
+  # Runtime auto-update trust reads this immutable policy from
+  # process.resourcesPath. Keep it mac-scoped so Windows/Linux packaging never
+  # treats a macOS signing rule as an update input.
+  extraResources:
+    - from: build-resources/macos-release-signing-policy.json
+      to: macos-release-signing-policy.json
+  # An official-ID bundle must never be emitted as an unsigned local artifact.
+  # The isolated local config explicitly overrides this within its own ID.
+  forceCodeSigning: true
   # Electron 43 requires macOS 12 Monterey or newer. The update feed pairs this
   # product-version floor with Darwin 21 in update-compatibility.cjs.
   minimumSystemVersion: "12.0"
