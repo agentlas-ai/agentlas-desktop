@@ -24,10 +24,10 @@ import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import {
   autoRouteStatus,
   autoRouteSystemPreamble,
-  isEscalationWorthyPrompt,
   isGlobalOrchestrator,
   isPlainConversationalPrompt,
   selectAutoRoutedAgent,
+  shouldAutoEngageNetworkWorkforce,
   type AutoRouteChoice,
 } from "../agents/auto-router";
 import { assembleSystemPrompt } from "../system-agents/assemble";
@@ -1025,13 +1025,13 @@ export async function runMcpInvocation(
     !plainConversation &&
     !isTargetAppEdit,
   );
-  const automaticWorkforceEligible = Boolean(
-    !req.agentAppMode &&
-    isNetworkAutoEnabled() &&
-    isGlobalOrchestrator(agent) &&
-    !hasPriorContext &&
-    isEscalationWorthyPrompt(req.userPrompt),
-  );
+  const automaticWorkforceEligible = shouldAutoEngageNetworkWorkforce({
+    agentAppMode: req.agentAppMode === true,
+    networkAutoEnabled: isNetworkAutoEnabled(),
+    globalOrchestrator: isGlobalOrchestrator(agent),
+    hasPriorContext,
+    prompt: req.userPrompt,
+  });
   const autoRoute = req.agentAppMode
     ? null
     : explicitWorkforceGoal || explicitNetworkGoal || hubWorkforceRequested || automaticWorkforceEligible

@@ -4742,7 +4742,8 @@ export interface AgentlasIpc {
     /** Stormbreaker 슈퍼바이저 상태. 현재 제품 UI에서는 항상 ON이며 토글은 호환 API다. */
     getSupervisor: () => Promise<{ enabled: boolean }>;
     setSupervisor: (enabled: boolean) => Promise<{ enabled: boolean }>;
-    /** 엔진 자동 개입 토글 — 대시보드 LLM 연결·사용량 아래 스위치 2개(기본 둘 다 OFF).
+    /** 엔진 자동 개입 토글 — 대시보드 LLM 연결·사용량 아래 스위치 2개
+     *  (신규 설치: stormbreakerAuto OFF, networkAuto ON; 저장값은 보존).
      *  stormbreakerAuto: 일반 채팅에 Stormbreaker 루프 자동 주입 / networkAuto: 자동 Hub 빌림·에스컬레이션.
      *  명시 경로(컴포저 칩, `stormbreaker`/`hep-network` 프리픽스, @멘션 고용, continuousMode)는 토글과 무관하게 동작. */
     getEngineToggles: () => Promise<{ stormbreakerAuto: boolean; networkAuto: boolean }>;

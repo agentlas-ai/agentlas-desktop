@@ -13,15 +13,16 @@ interface HephaestusSettings {
    *  2026-07-12 실측: 단순 실작업에서 직접 실행 30s 완료 vs 스톰 라우트 6s 후 실행 0(hub_candidates 데드엔드).
    *  명시 실행(컴포저 Stormbreaker 칩, `stormbreaker` 프리픽스, continuousMode, division 자동화)은 항상 동작. */
   stormbreakerAuto: boolean;
-  /** hep-network 자동 개입(자동 Hub 빌림·라우터 에스컬레이션). 기본 OFF —
-   *  명시 경로(@멘션 고용, 추천 시트에서 직접 선택, hep-network 프리픽스, 자동화 hubMode)는 항상 동작. */
+  /** hep-network 자동 개입(자동 Hub Workforce 구성). 신규 설치 기본 ON —
+   *  저장 파일에 이미 true/false가 있으면 그 값을 그대로 보존하고, 명시 경로
+   *  (@멘션 고용, 추천 시트에서 직접 선택, hep-network 프리픽스, 자동화 hubMode)는 항상 동작. */
   networkAuto: boolean;
 }
 
 const DEFAULTS: HephaestusSettings = {
   supervisorEnabled: true,
   stormbreakerAuto: false,
-  networkAuto: false,
+  networkAuto: true,
 };
 
 let cache: HephaestusSettings | null = null;
@@ -32,12 +33,25 @@ function settingsPath(): string {
 
 function load(): HephaestusSettings {
   if (cache) return cache;
+  const file = settingsPath();
   try {
-    const raw = fs.readFileSync(settingsPath(), "utf8");
+    const raw = fs.readFileSync(file, "utf8");
     const parsed = JSON.parse(raw) as Partial<HephaestusSettings>;
-    cache = { ...DEFAULTS, ...parsed };
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Invalid Hephaestus settings object");
+    }
+    const hasStoredNetworkChoice = Object.prototype.hasOwnProperty.call(parsed, "networkAuto");
+    cache = {
+      ...DEFAULTS,
+      ...parsed,
+      // A stored boolean is authoritative. Invalid legacy values fail closed;
+      // a valid older file with no network key receives the new-install default.
+      networkAuto: hasStoredNetworkChoice ? parsed.networkAuto === true : DEFAULTS.networkAuto,
+    };
   } catch {
-    cache = { ...DEFAULTS };
+    // ENOENT means a genuinely fresh install. A present but unreadable/corrupt
+    // file is an existing user's state, so paid/remote auto-engagement fails closed.
+    cache = fs.existsSync(file) ? { ...DEFAULTS, networkAuto: false } : { ...DEFAULTS };
   }
   return cache;
 }
@@ -66,7 +80,8 @@ export interface EngineAutoToggles {
   networkAuto: boolean;
 }
 
-/** 엔진 자동 개입 토글(대시보드 LLM 연결·사용량 아래 스위치 2개). 기본 둘 다 OFF. */
+/** 엔진 자동 개입 토글. 신규 설치는 Stormbreaker OFF, Network Workforce ON이다.
+ *  DEFAULTS 뒤에 저장 JSON을 병합하므로 기존 true/false 선택은 변경하지 않는다. */
 export function getEngineToggles(): EngineAutoToggles {
   const s = load();
   return { stormbreakerAuto: s.stormbreakerAuto === true, networkAuto: s.networkAuto === true };

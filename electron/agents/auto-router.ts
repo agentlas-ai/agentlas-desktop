@@ -128,6 +128,25 @@ export function isEscalationWorthyPrompt(prompt: string): boolean {
   return p.length >= 80; // 복합 요청은 대체로 길다 — 짧은 단일 작업은 로컬 스코어러로 충분
 }
 
+export interface AutomaticWorkforceEligibility {
+  agentAppMode: boolean;
+  networkAutoEnabled: boolean;
+  globalOrchestrator: boolean;
+  hasPriorContext: boolean;
+  prompt: string;
+}
+
+/** Ordinary complex prompts enter Workforce only at the fresh top-level leader turn. */
+export function shouldAutoEngageNetworkWorkforce(input: AutomaticWorkforceEligibility): boolean {
+  return Boolean(
+    !input.agentAppMode &&
+    input.networkAutoEnabled &&
+    input.globalOrchestrator &&
+    !input.hasPriorContext &&
+    isEscalationWorthyPrompt(input.prompt),
+  );
+}
+
 function normalize(value: string): string {
   return value.toLowerCase().replace(/[_/]+/g, "-");
 }

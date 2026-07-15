@@ -26,6 +26,8 @@ const WORKFORCE_ONTOLOGY_MENU = [
   "Controlled roles: role:software-architect, role:backend-engineer, role:frontend-engineer, role:database-engineer, role:payments-engineer, role:quality-engineer, role:security-engineer, role:ontology-architect, role:agent-runtime-engineer, role:researcher, role:ma-diligence-lead, role:insurance-actuary, role:claims-diligence-specialist, role:underwriting-diligence-specialist, role:travel-planner.",
   "Canonical skills: skill:software-architecture, skill:api-design, skill:server-implementation, skill:frontend-implementation, skill:data-modeling, skill:database-querying, skill:billing-integration, skill:transaction-integrity, skill:test-design, skill:verification, skill:security-review, skill:ontology-modeling, skill:knowledge-graph-design, skill:multi-agent-orchestration, skill:runtime-integration, skill:evidence-synthesis, skill:deal-diligence, skill:valuation, skill:actuarial-reserving, skill:solvency-analysis, skill:claims-liability-assessment, skill:underwriting-portfolio-analysis, skill:travel-planning.",
   "Canonical tool capabilities: tool:file-system, tool:file-read, tool:file-write, tool:shell, tool:web-search, tool:browser, tool:mongodb, tool:database, tool:github, tool:payments.",
+  "Legacy Hub profiles may legitimately have empty roles, skills or toolCapabilities. Every required* field is a non-negotiable hard eligibility gate: use it only when a matching catalog declaration is mandatory, never merely because that expertise would be useful for the work.",
+  "Use a broad requiredCommunities occupational boundary when that boundary is non-negotiable, and exclude clearly irrelevant communities such as community:travel. Express task-specific semantic fit with slot title and task plus optionalCommunities and optionalSkills, so the top host LLM can compare candidate names, summaries and semantic snapshots instead of filtering legacy profiles out.",
   "Use artifact:<kind> for consumes, produces and edge artifactKinds. If no controlled role precisely applies, leave requiredRoles empty and express the job through a controlled community, canonical skills, task text and optional constraints; never invent a near-synonym role ID.",
 ].join("\n");
 const FORBIDDEN_FIT_FIELDS = new Set([
@@ -734,6 +736,7 @@ function workOrderSystemPrompt(modelId: string, runtimeId: string, benchmarkMode
     "You are the top Agentlas workforce leader.",
     "Decompose the user's goal into a small professional task force before any agent search.",
     "This is a semantic HR/job-analysis decision: express roles, skills, knowledge, tool capabilities, artifacts, authority and handoffs.",
+    "Do not turn important-but-negotiable expertise into requiredRoles, requiredSkills, requiredKnowledge or requiredToolCapabilities; those fields demand matching catalog evidence and hard-reject profiles without it.",
     "Do not name or select agents. Do not use popularity, ratings, invocation history, revenue or prior success as fit evidence.",
     `ontologyVersion must be exactly ${WORKFORCE_ONTOLOGY_VERSION}.`,
     WORKFORCE_ONTOLOGY_MENU,
@@ -751,7 +754,7 @@ function selectionSystemPrompt(modelId: string, runtimeId: string): string {
   return [
     "You are the top Agentlas workforce leader and the only soft-fit decision maker.",
     "Select exact immutable AgentRelease IDs from the Hub candidate set for every required slot.",
-    "The Hub has already applied hard eligibility. Judge semantic fit, complementary coverage, handoffs and task-specific evidence.",
+    "The Hub has already applied hard eligibility. Judge semantic fit from each slot's title/task and optional constraints against candidate names, summaries, semantic snapshots, complementary coverage, handoffs and task-specific evidence.",
     "Never use popularity, rating, invocation count, revenue, chronology or prior success as a fit signal.",
     "Never select a release outside the supplied candidate set. Never silently substitute an available agent for a better but unavailable ideal agent.",
     "Use candidate fitEvidence, qualificationEvidence, semanticSnapshot and optionalGaps. Consider at least one non-selected exact release when available.",

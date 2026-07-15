@@ -1,5 +1,5 @@
 // 엔진 자동 개입 토글 — 대시보드 "LLM 연결 · 사용량" 바로 아래 스위치 2개.
-// Stormbreaker 자동 / hep-network 자동은 이제 자동 활성이 아니라 명시적 opt-in(기본 OFF)이다.
+// Stormbreaker 자동은 opt-in, hep-network Workforce는 신규 설치에서 기본 ON이다.
 // 근거(2026-07-12 실측): 단순 실작업에서 직접 실행 30s 완료 vs 스톰 라우트 6s 후 실행 0(hub_candidates 데드엔드).
 // 컴포저의 Stormbreaker 칩·@멘션 고용·`stormbreaker`/`hep-network` 프리픽스 같은 명시 실행은 토글과 무관하게 항상 동작.
 "use client";
@@ -141,8 +141,8 @@ export function EngineAutoToggles() {
       ))}
       <div style={{ padding: "2px 10px 6px", fontSize: 10.5, lineHeight: 1.4, color: "var(--muted-deep)" }}>
         {ko
-          ? "기본값 OFF — 최신 모델은 단일 실행이 대체로 더 빠르고 정확합니다. 필요할 때만 켜세요."
-          : "Default OFF — modern models usually finish faster in a single run. Turn on only when needed."}
+          ? "신규 설치 기본값: Stormbreaker OFF · hep-network ON. 저장된 선택은 업데이트 후에도 유지됩니다."
+          : "New-install defaults: Stormbreaker OFF · hep-network ON. Saved choices survive updates."}
       </div>
     </div>
   );

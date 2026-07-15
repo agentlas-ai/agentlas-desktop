@@ -76,6 +76,8 @@
     "test:packaged-agent-app-mcp": "node scripts/test-packaged-agent-app-mcp.cjs",
     "test:cli-version-parser": "npm run build:electron && node scripts/test-cli-version-parser.cjs",
     "test:hephaestus-status-version": "npm run build:electron && electron scripts/test-hephaestus-status-version.cjs",
+    "test:hephaestus-settings-migration": "npm run build:electron && electron scripts/test-hephaestus-settings-migration.cjs",
+    "test:auto-router-gates": "npm run build:electron && node scripts/test-auto-router-gates.cjs",
     "test:python-cache-boundary": "npm run build:electron && electron scripts/test-python-cache-boundary.cjs",
     "test:project-bootstrap:desktop": "npm run build:electron && electron scripts/test-project-bootstrap-desktop.cjs",
     "test:project-bootstrap:core": "npm run build:electron && cross-env HEPHAESTUS_RUNTIME_ROOT=Hephaestus electron scripts/test-project-bootstrap-core.cjs",

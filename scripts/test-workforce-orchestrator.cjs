@@ -38,17 +38,17 @@ const workOrder = {
     requiredCommunities: ["community:software-engineering"],
     optionalCommunities: ["community:payments-engineering"],
     excludedCommunities: ["community:travel"],
-    requiredRoles: ["role:backend-engineer"],
-    requiredSkills: ["skill:api-design"],
-    optionalSkills: ["skill:billing-integration"],
+    requiredRoles: [],
+    requiredSkills: [],
+    optionalSkills: ["skill:api-design", "skill:billing-integration"],
     requiredKnowledge: [],
-    requiredToolCapabilities: ["tool:postgresql"],
-    consumes: ["artifact:requirements"],
-    produces: ["artifact:api-spec"],
+    requiredToolCapabilities: [],
+    consumes: [],
+    produces: [],
     requiredAuthorities: [],
     forbiddenAuthorities: ["authority:production-deploy"],
     runtimes: [],
-    languages: ["language:typescript"],
+    languages: [],
     modalities: ["modality:text"],
     allowedEntityKinds: ["agent"],
   }],
@@ -61,7 +61,7 @@ const workOrder = {
   },
 };
 
-const travelRelease = "release:travel-v1";
+const genericRelease = "release:generic-software-v1";
 const backendRelease = "release:backend-v7";
 const candidateSet = {
   schemaVersion: "agentlas.workforce-candidate-set.v1",
@@ -75,21 +75,21 @@ const candidateSet = {
     slotId: "slot:backend",
     candidates: [
       {
-        agentDefinitionId: "definition:travel",
-        agentReleaseId: travelRelease,
+        agentDefinitionId: "definition:generic-software",
+        agentReleaseId: genericRelease,
         packageHash: hash("1"),
         contentDigest: hash("2"),
         releaseVersion: "1.0.0",
         entityKind: "agent",
-        name: "Travel Planner",
-        communities: ["community:travel"],
-        fitEvidence: ["fit:text:term:api"],
+        name: "Generic Software Engineer",
+        communities: ["community:software-engineering"],
+        fitEvidence: ["fit:text:general-api"],
         qualificationEvidence: ["eval:schema"],
-        optionalGaps: ["gap:skill:payment-integration"],
+        optionalGaps: ["gap:skill:api-design", "gap:skill:billing-integration"],
         semanticSnapshot: {
-          summaries: ["Travel itinerary specialist"],
-          roles: ["role:travel-planner"],
-          skills: [{ concept: "skill:itinerary-planning", level: "declared" }],
+          summaries: ["General software maintenance and API support"],
+          roles: [],
+          skills: [],
           toolCapabilities: [],
           consumes: [],
           produces: [],
@@ -107,7 +107,7 @@ const candidateSet = {
         releaseVersion: "7.0.0",
         entityKind: "agent",
         name: "Backend Engineer",
-        communities: ["community:software-engineering", "community:payments"],
+        communities: ["community:software-engineering", "community:payments-engineering"],
         fitEvidence: ["fit:skills:skill:api-design", "fit:tools:tool:postgresql"],
         qualificationEvidence: ["eval:payment-api-work-sample"],
         optionalGaps: [],
@@ -146,7 +146,7 @@ const selection = {
     reasonCodes: ["fit:payment-api", "fit:postgresql-transaction"],
   }],
   edges: [],
-  alternativesConsidered: [travelRelease],
+  alternativesConsidered: [genericRelease],
   requestExpansionForSlots: [],
 };
 
@@ -278,12 +278,22 @@ function fenced(heading, value) {
   assert.match(leaderTurns[0].systemPrompt, /role:payments-engineer/);
   assert.match(leaderTurns[0].systemPrompt, /role:quality-engineer/);
   assert.match(leaderTurns[0].systemPrompt, /community:payments-engineering/);
+  assert.match(leaderTurns[0].systemPrompt, /Legacy Hub profiles may legitimately have empty roles, skills or toolCapabilities/);
+  assert.match(leaderTurns[0].systemPrompt, /Every required\* field is a non-negotiable hard eligibility gate/);
+  assert.match(leaderTurns[0].systemPrompt, /broad requiredCommunities occupational boundary/);
+  assert.match(leaderTurns[0].systemPrompt, /slot title and task plus optionalCommunities and optionalSkills/);
+  assert.match(leaderTurns[0].systemPrompt, /leave requiredRoles empty/);
+  assert.match(leaderTurns[0].systemPrompt, /never invent a near-synonym role ID/);
   assert.match(toolCalls[0].args.workOrder.workOrderId, /^work-order:/);
+  assert.deepEqual(toolCalls[0].args.workOrder.roleSlots[0].requiredRoles, []);
+  assert.deepEqual(toolCalls[0].args.workOrder.roleSlots[0].requiredSkills, []);
+  assert.deepEqual(toolCalls[0].args.workOrder.roleSlots[0].requiredToolCapabilities, []);
+  assert.deepEqual(toolCalls[0].args.workOrder.roleSlots[0].optionalSkills, ["skill:api-design", "skill:billing-integration"]);
   assert.equal(searchedCandidateSet.workOrderId, toolCalls[0].args.workOrder.workOrderId);
   assert.equal(toolCalls[2].args.validationReceipt.selectionReceiptId, validation.selectionReceiptId);
   assert.equal(toolCalls[2].args.candidateSet.candidateSetDigest, candidateSet.candidateSetDigest);
   assert.equal(result.selection.assignments[0].agentReleaseId, backendRelease, "host LLM choice must survive unchanged");
-  assert.notEqual(result.selection.assignments[0].agentReleaseId, travelRelease, "candidate insertion order is not a picker");
+  assert.notEqual(result.selection.assignments[0].agentReleaseId, genericRelease, "candidate insertion order is not a picker");
   assert.equal(result.specs.length, 1);
   assert.equal(result.specs[0].agentReleaseId, backendRelease);
   assert.equal(result.specs[0].packageHash, hash("b"));
@@ -356,14 +366,14 @@ function fenced(heading, value) {
   assert.throws(
     () => validateExecutionPreparation({
       ...preparation,
-      substitutions: [{ from: backendRelease, to: travelRelease }],
+      substitutions: [{ from: backendRelease, to: genericRelease }],
     }, validation, candidateSet),
     /unapproved substitution/,
   );
   assert.throws(
     () => validateExecutionPreparation({
       ...preparation,
-      executionRoster: [{ ...preparation.executionRoster[0], agentReleaseId: travelRelease }],
+      executionRoster: [{ ...preparation.executionRoster[0], agentReleaseId: genericRelease }],
     }, validation, candidateSet),
     /unknown or duplicate release/,
   );

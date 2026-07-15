@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const {
   isPlainConversationalPrompt,
   isEscalationWorthyPrompt,
+  shouldAutoEngageNetworkWorkforce,
 } = require("../dist/electron/agents/auto-router.js");
 
 // plain으로 판정되어야 하는 것들 — 라우팅/에스컬레이션 전부 스킵, 즉답
@@ -40,5 +41,20 @@ assert.equal(
   ),
   true,
 );
+
+const complexPrompt = "여러 전문 에이전트가 시장 조사와 제품 설계, 백엔드 구현, 품질 검증을 각각 맡고 결과를 순서대로 통합해 주세요.";
+const eligible = {
+  agentAppMode: false,
+  networkAutoEnabled: true,
+  globalOrchestrator: true,
+  hasPriorContext: false,
+  prompt: complexPrompt,
+};
+assert.equal(shouldAutoEngageNetworkWorkforce(eligible), true, "fresh top-level complex prompt must enter Workforce");
+assert.equal(shouldAutoEngageNetworkWorkforce({ ...eligible, networkAutoEnabled: false }), false, "saved opt-out must win");
+assert.equal(shouldAutoEngageNetworkWorkforce({ ...eligible, hasPriorContext: true }), false, "continuations stay in their current session");
+assert.equal(shouldAutoEngageNetworkWorkforce({ ...eligible, globalOrchestrator: false }), false, "specialists must not recursively auto-route");
+assert.equal(shouldAutoEngageNetworkWorkforce({ ...eligible, agentAppMode: true }), false, "Agent Apps remain isolated");
+assert.equal(shouldAutoEngageNetworkWorkforce({ ...eligible, prompt: "fix typo in README" }), false, "short single tasks stay local");
 
 console.log("test-auto-router-gates: PASS");

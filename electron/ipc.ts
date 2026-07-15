@@ -3048,7 +3048,7 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle("hephaestus:getSupervisor", () => ({ enabled: isSupervisorEnabled() }));
   ipcMain.handle("hephaestus:setSupervisor", (_e, enabled: boolean) => setSupervisorEnabled(enabled));
-  // 엔진 자동 개입 토글(Stormbreaker 자동 / hep-network 자동) — 대시보드 스위치. 기본 둘 다 OFF.
+  // 엔진 자동 개입 토글 — 신규 설치 기본값은 Stormbreaker OFF / hep-network Workforce ON.
   ipcMain.handle("hephaestus:getEngineToggles", () => getEngineToggles());
   ipcMain.handle("hephaestus:setEngineToggle", (_e, input: { id: "stormbreaker" | "network"; enabled: boolean }) =>
     setEngineToggle(input.id, input.enabled),

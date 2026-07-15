@@ -3,6 +3,11 @@
 // 주의: playwright addInitScript로 직렬화되므로 이 함수는 self-contained여야 한다
 // (모듈 스코프 변수/클로저 참조 금지 — 함수 본문 안에서 모든 것을 정의).
 function setupMockAgentlasBridge(options) {
+  let engineToggles = {
+    stormbreakerAuto: options?.recommendMode === "pipeline",
+    networkAuto: true,
+  };
+
   function makeHubCatalog(total) {
     const catalog = Array.from({ length: total }, (_, index) => {
       if (options?.includeInstallOnlyListing && index === total - 1) {
@@ -935,15 +940,15 @@ function setupMockAgentlasBridge(options) {
       stormbreaker: async () => ({ ok: true, runId: "storm-run" }),
       getSupervisor: async () => ({ enabled: true }),
       setSupervisor: async () => ({ enabled: true }),
-      // 추천 UI 스모크는 각 시나리오가 실제 자동 개입 게이트를 통과하도록
-      // 해당 엔진만 켠다. 기본 fixture는 둘 다 OFF라 제품 기본값을 보존한다.
-      getEngineToggles: async () => ({
-        stormbreakerAuto: options?.recommendMode === "pipeline",
-        networkAuto: options?.recommendMode === "network",
-      }),
+      // Product parity: fresh installs default Network Workforce ON while
+      // Stormbreaker remains opt-in (pipeline fixtures enable it explicitly).
+      getEngineToggles: async () => ({ ...engineToggles }),
       setEngineToggle: async (payload) => {
         record("hephaestus.setEngineToggle", payload);
-        return { stormbreakerAuto: false, networkAuto: false };
+        engineToggles = payload.id === "stormbreaker"
+          ? { ...engineToggles, stormbreakerAuto: payload.enabled === true }
+          : { ...engineToggles, networkAuto: payload.enabled === true };
+        return { ...engineToggles };
       },
       journal: async () => ({ ok: true, entries: [] }),
       startStudio: async () => ({ ok: true }),

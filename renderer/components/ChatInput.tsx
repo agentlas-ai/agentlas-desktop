@@ -644,7 +644,7 @@ export function ChatInput({
   }
 
   /** 추천을 실행 경로로 자동 디스패치. 라우터 에스컬레이션(routerAgent)은 항상 실어 보낸다.
-   *  자동 개입(대시보드 토글, 기본 OFF)이 꺼져 있으면 Hub 자동 고용/스톰 파이프라인 대신
+   *  해당 자동 개입 대시보드 토글이 꺼져 있으면 Hub 자동 고용/스톰 파이프라인 대신
    *  로컬 에이전트·plain 전송으로 강등한다 — 컴포저 칩/@멘션 같은 명시 실행은 이 함수와 무관. */
   function execAutoChoice(
     preview: Recommendation,
@@ -699,7 +699,7 @@ export function ChatInput({
     const opts = currentSendOptions();
     const chatIdAtStart = activeChatIdRef.current;
     setAutoRouting(true);
-    // 엔진 자동 개입 토글(대시보드, 기본 OFF) — Hub 자동 고용/스톰 파이프라인 디스패치를 게이트한다.
+    // 엔진 자동 개입 토글 — Hub 자동 고용/스톰 파이프라인 디스패치를 게이트한다.
     const [preview, engineToggles] = await Promise.all([
       onRecommendPreview(text).catch(() => null),
       ipc()?.hephaestus.getEngineToggles().catch(() => null) ?? Promise.resolve(null),
