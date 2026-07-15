@@ -4654,8 +4654,23 @@ export function appendAgentNestExperienceMemory(
         created_at TEXT NOT NULL,
         UNIQUE(from_ticket, to_ticket, link_type)
       );
+      CREATE TABLE IF NOT EXISTS runtime_adapters (
+        name TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        config_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
     const agentId = `hub:${normalizedSlug}`;
+    // v1 of this Desktop projection used review-state `accepted`, while Core
+    // recall intentionally reads only active experience states. This cache is
+    // already downstream of curator approval, so upgrade those old rows in
+    // place instead of leaving an invisible cross-project memory island.
+    db.prepare(
+      `UPDATE memory_candidates SET status = 'active'
+        WHERE agent_id = ? AND suggested_scope = 'agent_repo' AND status = 'accepted'`,
+    ).run(agentId);
     const selectCreated = db.prepare(
       "SELECT created_at FROM memory_candidates WHERE ticket_id = ?",
     );
@@ -4667,12 +4682,13 @@ export function appendAgentNestExperienceMemory(
         tags_json, salience, privacy_scope, source_memory_id, source_updated_at,
         embedding_adapter, embedding_dimensions, embedding_json, embedding_content_hash
       ) VALUES (?, ?, '', ?, ?, 'desktop-memory-curator', ?, ?, NULL, 'agent_repo',
-        'accepted', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        'active', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(ticket_id) DO UPDATE SET
         candidate_text = excluded.candidate_text,
         source_refs_json = excluded.source_refs_json,
         confidence = excluded.confidence,
         risk = excluded.risk,
+        status = excluded.status,
         updated_at = excluded.updated_at,
         memory_kind = excluded.memory_kind,
         tags_json = excluded.tags_json,
@@ -4691,8 +4707,11 @@ export function appendAgentNestExperienceMemory(
         const idempotencyKey = stableNestHash("agent-memory-idempotency-v1", normalizedSlug, item.id);
         const embedding = autoLocalEmbedding(item.content);
         const confidence = confidenceValue(item.confidence);
-        const privacyScope = new Set(["public", "internal", "private", "confidential"])
-          .has(item.sensitivity) ? item.sensitivity : "internal";
+        // Core's exact-agent query accepts public/internal/private. Preserve
+        // confidential data as the narrowest readable local scope; secret
+        // material was already rejected above and is never projected.
+        const privacyScope = new Set(["public", "internal", "private"])
+          .has(item.sensitivity) ? item.sensitivity : "private";
         const createdAt = (selectCreated.get(ticketId) as { created_at?: string } | undefined)?.created_at
           ?? item.updatedAt;
         const tags = [...new Set([item.kind, ...(item.tags ?? [])]
@@ -4704,7 +4723,7 @@ export function appendAgentNestExperienceMemory(
           item.content,
           JSON.stringify([{ kind: "desktop-memory", memory_id: item.id, agent_slug: normalizedSlug }]),
           confidence,
-          privacyScope === "confidential" ? "medium" : "low",
+          item.sensitivity === "confidential" ? "medium" : "low",
           createdAt,
           item.updatedAt,
           agentId,
@@ -4714,7 +4733,7 @@ export function appendAgentNestExperienceMemory(
           privacyScope,
           item.id,
           item.updatedAt,
-          embedding.adapter,
+          embedding.model,
           embedding.dimensions,
           JSON.stringify(embedding.vector),
           embedding.contentHash,
@@ -4723,28 +4742,93 @@ export function appendAgentNestExperienceMemory(
     });
     write(items);
 
+    // Re-embed stale rows before rebuilding derived links. Adapter identity,
+    // model checksum, and text hash changes invalidate old vectors without a
+    // destructive migration; explicit governance edges remain untouched.
+    const embeddingRows = db.prepare(
+      `SELECT ticket_id, candidate_text, embedding_adapter,
+              embedding_dimensions, embedding_json, embedding_content_hash
+         FROM memory_candidates
+        WHERE agent_id = ? AND status = 'active'
+        ORDER BY updated_at DESC, ticket_id ASC`,
+    ).all(agentId) as Array<{
+      ticket_id: string;
+      candidate_text: string;
+      embedding_adapter: string | null;
+      embedding_dimensions: number | null;
+      embedding_json: string | null;
+      embedding_content_hash: string | null;
+    }>;
+    const updateEmbedding = db.prepare(
+      `UPDATE memory_candidates
+          SET embedding_adapter = ?, embedding_dimensions = ?,
+              embedding_json = ?, embedding_content_hash = ?
+        WHERE ticket_id = ?`,
+    );
+    const rows = embeddingRows.map((row) => {
+      const embedding = autoLocalEmbedding(row.candidate_text);
+      const vectorJson = JSON.stringify(embedding.vector);
+      // Core's canonical schema stores the adapter NAME here; full immutable
+      // identity is registered in runtime_adapters.config_json. Writing the
+      // Desktop identity string would make every Core cosine incompatible.
+      if (
+        row.embedding_adapter !== embedding.model ||
+        row.embedding_dimensions !== embedding.dimensions ||
+        row.embedding_json !== vectorJson ||
+        row.embedding_content_hash !== embedding.contentHash
+      ) {
+        updateEmbedding.run(
+          embedding.model,
+          embedding.dimensions,
+          vectorJson,
+          embedding.contentHash,
+          row.ticket_id,
+        );
+      }
+      return { ticket_id: row.ticket_id, embedding };
+    });
+
+    // Register the full immutable adapter identity in Core's own drift table.
+    // memory_candidates.embedding_adapter stays the short executable name;
+    // runtime_adapters makes a same-name model revision trigger Core reindex.
+    const projectionEmbedding = rows[0]?.embedding;
+    if (projectionEmbedding) {
+      db.prepare(`
+        INSERT OR REPLACE INTO runtime_adapters (
+          name, kind, status, config_json, updated_at
+        ) VALUES (?, 'vector', ?, ?, ?)
+      `).run(
+        projectionEmbedding.model,
+        projectionEmbedding.degraded ? "degraded_fallback" : "available",
+        JSON.stringify({
+          name: projectionEmbedding.model,
+          status: projectionEmbedding.degraded ? "degraded_fallback" : "available",
+          identity: projectionEmbedding.adapter,
+          dimensions: projectionEmbedding.dimensions,
+          local_only: true,
+          model_sha256: projectionEmbedding.modelSha256,
+        }),
+        new Date().toISOString(),
+      );
+    }
+
     // Rebuild only derived similarity links for this one private agent cache.
-    // Explicit governance edges, if present, remain untouched.
     db.prepare("DELETE FROM memory_links WHERE link_type = 'similar_to'").run();
-    const rows = db.prepare(
-      `SELECT ticket_id, embedding_json FROM memory_candidates
-        WHERE agent_id = ? AND status IN ('accepted','approved','candidate')
-        ORDER BY created_at ASC, ticket_id ASC LIMIT 512`,
-    ).all(agentId) as Array<{ ticket_id: string; embedding_json: string | null }>;
     const insertSimilar = db.prepare(`
       INSERT OR REPLACE INTO memory_links (
         link_id, from_ticket, to_ticket, link_type, score, reason, created_at
-      ) VALUES (?, ?, ?, 'similar_to', ?, 'local_hashing cosine', ?)
+      ) VALUES (?, ?, ?, 'similar_to', ?, 'local vector cosine', ?)
     `);
     const now = new Date().toISOString();
-    for (let leftIndex = 0; leftIndex < rows.length; leftIndex += 1) {
-      const left = JSON.parse(rows[leftIndex].embedding_json || "[]") as number[];
-      for (let rightIndex = leftIndex + 1; rightIndex < rows.length; rightIndex += 1) {
-        const right = JSON.parse(rows[rightIndex].embedding_json || "[]") as number[];
+    const linkRows = rows.slice(0, 512);
+    for (let leftIndex = 0; leftIndex < linkRows.length; leftIndex += 1) {
+      const left = linkRows[leftIndex].embedding.vector;
+      for (let rightIndex = leftIndex + 1; rightIndex < linkRows.length; rightIndex += 1) {
+        const right = linkRows[rightIndex].embedding.vector;
         const similarity = cosineSimilarity(left, right);
         if (similarity < 0.5) continue;
-        const fromTicket = rows[rightIndex].ticket_id;
-        const toTicket = rows[leftIndex].ticket_id;
+        const fromTicket = linkRows[rightIndex].ticket_id;
+        const toTicket = linkRows[leftIndex].ticket_id;
         insertSimilar.run(
           stableNestHash("memory-link", fromTicket, toTicket, "similar_to").slice(0, 24),
           fromTicket,

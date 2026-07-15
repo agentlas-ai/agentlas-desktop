@@ -654,6 +654,7 @@ export function rebuildExperienceRelationIndex(): ExperienceRelationIndexStatus 
             embedding_content_hash = ?, embedding_dimensions = ?, embedding_json = ?
       WHERE id = ?`,
   );
+  const candidateAdapters = new Map<string, string>();
   for (const row of candidateRows) {
     let embedding = parseLocalEmbedding(row.embedding_model, row.embedding_dimensions, row.embedding_json, {
       adapter: row.embedding_adapter,
@@ -674,6 +675,7 @@ export function rebuildExperienceRelationIndex(): ExperienceRelationIndexStatus 
       );
     }
     candidateVectors.set(row.id, embedding.vector);
+    candidateAdapters.set(row.id, embedding.adapter);
   }
 
   const addNode = (node: NodeInsert): string => {
@@ -865,8 +867,7 @@ export function rebuildExperienceRelationIndex(): ExperienceRelationIndexStatus 
             "similar_to",
             {
               similarity: Number(similarity.toFixed(6)),
-              adapter: candidateRows.find((candidate) => candidate.id === leftId)?.embedding_adapter
-                ?? "local_hashing:degraded",
+              adapter: candidateAdapters.get(leftId) ?? "local_hashing:degraded",
             },
           );
         }

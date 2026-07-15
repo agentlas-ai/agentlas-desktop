@@ -82,20 +82,45 @@ async function main() {
   const nestDb = new Database(nestDbPath("instagram-uploader"), { readonly: true });
   const nestRows = nestDb.prepare(
     `SELECT ticket_id, idempotency_key, agent_id, source_memory_id,
-            embedding_adapter, embedding_dimensions, embedding_json
+            status, embedding_adapter, embedding_dimensions, embedding_json
        FROM memory_candidates ORDER BY ticket_id`,
   ).all();
   assert.equal(nestRows.length, 2);
   assert.ok(nestRows.every((row) => row.agent_id === "hub:instagram-uploader"));
+  assert.ok(nestRows.every((row) => row.status === "active"), "Core recall only consumes active experience rows");
   assert.ok(nestRows.every((row) => row.source_memory_id && row.idempotency_key));
-  assert.ok(nestRows.every((row) => row.embedding_adapter.startsWith("local_hashing:") && row.embedding_dimensions === 96));
+  assert.ok(nestRows.every((row) => row.embedding_adapter === "local_hashing" && row.embedding_dimensions === 96));
   assert.ok(nestRows.every((row) => JSON.parse(row.embedding_json).length === 96));
+  const adapterRegistration = nestDb.prepare(
+    "SELECT name, config_json FROM runtime_adapters WHERE kind = 'vector'",
+  ).get();
+  assert.equal(adapterRegistration.name, "local_hashing");
+  assert.match(JSON.parse(adapterRegistration.config_json).identity, /^local_hashing:sha256-bow:v1:96$/);
   nestDb.close();
   assert.equal(
     fs.existsSync(path.join(path.dirname(nestDbPath("instagram-uploader")), "project-soul-memory.md")),
     false,
     "cross-project recall must no longer rely on markdown cat",
   );
+
+  // Upgrade the old projection contract in place: Core cannot consume the
+  // prior review-state status or Desktop's full adapter identity in the row.
+  const legacyDb = new Database(nestDbPath("instagram-uploader"));
+  legacyDb.prepare(
+    "UPDATE memory_candidates SET status = 'accepted', embedding_adapter = ? WHERE ticket_id = ?",
+  ).run("local_hashing:sha256-bow:v1:96", nestRows[0].ticket_id);
+  legacyDb.close();
+  curateEvents(
+    [ev("procedure", "agent_repo", "레거시 투영을 활성 상태로 마이그레이션한다.")],
+    { ...baseCtx, borrowedAgentSlugs: ["instagram_uploader"] },
+  );
+  const upgradedDb = new Database(nestDbPath("instagram-uploader"), { readonly: true });
+  const upgradedLegacy = upgradedDb.prepare(
+    "SELECT status, embedding_adapter FROM memory_candidates WHERE ticket_id = ?",
+  ).get(nestRows[0].ticket_id);
+  upgradedDb.close();
+  assert.equal(upgradedLegacy.status, "active");
+  assert.equal(upgradedLegacy.embedding_adapter, "local_hashing");
 
   // ── 3: 프로젝트 격리 — project 스코프는 둥지로 새지 않는다 ──────────────────
   curateEvents(

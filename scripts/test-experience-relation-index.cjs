@@ -157,6 +157,42 @@ async function main() {
     assert.ok(selected.selectedCandidateIds.length <= 8);
     assert.ok(selected.approximateTokens <= 800);
 
+    const supersedesId = relations.recordExperienceGovernanceRelation({
+      fromCandidateId: second.candidate.id,
+      toCandidateId: first.candidate.id,
+      relationType: "supersedes",
+      reason: "Owner review replaced the earlier browser publishing procedure.",
+    });
+    assert.match(supersedesId, /^experience-governance-relation:/);
+    const afterSupersedes = context.buildExperienceContext({
+      agentId: "agent-rel",
+      projectPath,
+      environment,
+      basePackageHash: baseHash,
+      task: researchTask,
+    });
+    assert.equal(
+      afterSupersedes.selectedCandidateIds.includes(first.candidate.id),
+      false,
+      "a valid same-pack supersedes edge must hide its reviewed target from retrieval",
+    );
+    assert.equal(
+      afterSupersedes.selectedCandidateIds.includes(second.candidate.id),
+      true,
+      "the valid reviewed replacement must remain retrievable",
+    );
+    assert.equal(
+      experience.listPromotedExperienceProjection({
+        agentId: "agent-rel",
+        projectPath,
+        environmentKey: experience.experienceEnvironmentKey(environment),
+        basePackageHash: baseHash,
+        taskTerms: [researchTask],
+      }).some((item) => item.id === first.candidate.id),
+      false,
+      "superseded targets must be filtered before semantic ranking",
+    );
+
     const lineageFile = path.join(projectPath, ".agentlas", "experience-relations.jsonl");
     assert.ok(fs.existsSync(lineageFile), "promotion must materialize the safe project lineage source");
     const lineageText = fs.readFileSync(lineageFile, "utf8");

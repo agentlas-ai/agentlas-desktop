@@ -1393,6 +1393,20 @@ export function listPromotedExperienceProjection(input: {
         AND p.environment_key = c.environment_key
         AND p.status = 'active' AND p.base_package_hash = ?
         AND c.status = 'promoted' AND c.outcome_status IN ('attested','verified')
+        AND NOT EXISTS (
+          SELECT 1
+            FROM experience_governance_relations governance
+            JOIN experience_candidates replacement
+              ON replacement.id = governance.from_candidate_id
+             AND replacement.pack_id = governance.pack_id
+             AND replacement.agent_id = governance.agent_id
+           WHERE governance.to_candidate_id = c.id
+             AND governance.pack_id = c.pack_id
+             AND governance.agent_id = c.agent_id
+             AND governance.relation_type = 'supersedes'
+             AND replacement.status = 'promoted'
+             AND replacement.outcome_status IN ('attested','verified')
+        )
       ORDER BY c.updated_at DESC LIMIT 200`,
   ).all(
     input.agentId,

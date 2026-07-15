@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 
 /**
  * Keep this adapter byte-for-byte compatible with
@@ -25,14 +24,34 @@ export interface LocalMemoryEmbedding {
   degradedReason: string | null;
 }
 
+export const MODEL2VEC_HYBRID_DIMENSIONS = 352;
+export const MODEL2VEC_HYBRID_NAME = "model2vec_potion_base_8m_int8_hybrid";
+export const MODEL2VEC_ASSET_FORMAT = "agentlas-model2vec-int8-v1";
+export const PINNED_MODEL2VEC_CONTENT_SHA256 = "49b13567b1c99d45bfac202272527ed7e7e8321c53b65f2361efca690d9d8336";
+export const PINNED_MODEL2VEC_MODEL_ID = "minishlab/potion-base-8M";
+export const PINNED_MODEL2VEC_REVISION = "bf8b056651a2c21b8d2565580b8569da283cab23";
+const PINNED_MODEL2VEC_SOURCE_FILES: Record<string, AssetFileRecord> = {
+  "config.json": { sha256: "2a6ac0e9aaa356a68a5688070db78fc3a464fefe85d2f06a1905ce3718687553", size: 202 },
+  "tokenizer.json": { sha256: "e67e803f624fb4d67dea1c730d06e1067e1b14d830e2c2202569e3ef0f70bb50", size: 683666 },
+  "model.safetensors": { sha256: "f65d0f325faadc1e121c319e2faa41170d3fa07d8c89abd48ca5358d9a223de2", size: 30236760 },
+  "README.md": { sha256: "de8ec91bf63c5f4c0e20751c227b2d049953e1cab5f8d5d44211c59a44795bdd", size: 5203 },
+};
+const MODEL_DISCOVERY_MISS_TTL_MS = 5_000;
+
 type ModelDescriptor = {
   modelPath: string;
   modelSha256: string;
   adapter: string;
+  dimensions: number;
+  vocabSize: number;
+  vocab: Map<string, number>;
+  unknownTokenId: number;
+  embeddings: Buffer;
+  scales: Buffer;
 };
 
 let cachedModelDescriptor: ModelDescriptor | null | undefined;
-let modelBackendUnavailableReason: string | null = null;
+let cachedModelDescriptorAt = 0;
 
 const LATIN_TOKEN_PATTERN = /[a-z0-9][a-z0-9_-]{1,}/g;
 const CJK_RUN_PATTERN = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7a3]+/g;
@@ -75,162 +94,297 @@ export function localHashingEmbedding(text: string): LocalMemoryEmbedding {
 
 function modelCandidates(): string[] {
   const resources = typeof process.resourcesPath === "string" ? process.resourcesPath : "";
+  const assetSuffix = path.join("model2vec", "potion-base-8M-int8");
   return [
     process.env.AGENTLAS_MODEL2VEC_PATH ?? "",
     process.env.AGENTLAS_LOCAL_EMBEDDING_MODEL_PATH ?? "",
-    path.join(os.homedir(), ".agentlas", "models", "potion-base-8M"),
-    resources ? path.join(resources, "models", "potion-base-8M") : "",
-    resources ? path.join(resources, "Hephaestus", "models", "potion-base-8M") : "",
-    process.env.HEPHAESTUS_RUNTIME_ROOT
-      ? path.join(process.env.HEPHAESTUS_RUNTIME_ROOT, "models", "potion-base-8M")
+    process.env.AGENTLAS_RUNTIME_HOME
+      ? path.join(process.env.AGENTLAS_RUNTIME_HOME, "models", assetSuffix)
       : "",
-    path.join(process.cwd(), "Hephaestus", "models", "potion-base-8M"),
+    resources ? path.join(resources, "models", assetSuffix) : "",
+    resources ? path.join(resources, "Hephaestus", "models", assetSuffix) : "",
+    resources ? path.join(resources, "Hephaestus", "assets", assetSuffix) : "",
+    process.env.HEPHAESTUS_RUNTIME_ROOT
+      ? path.join(process.env.HEPHAESTUS_RUNTIME_ROOT, "models", assetSuffix)
+      : "",
+    process.env.HEPHAESTUS_RUNTIME_ROOT
+      ? path.join(process.env.HEPHAESTUS_RUNTIME_ROOT, "assets", assetSuffix)
+      : "",
+    path.join(process.cwd(), "Hephaestus", "models", assetSuffix),
+    path.join(process.cwd(), "Hephaestus", "assets", assetSuffix),
+    path.join(__dirname, "..", "..", "..", "Hephaestus", "assets", assetSuffix),
+    path.join(os.homedir(), ".agentlas", "runtime", "current", "models", assetSuffix),
   ].filter(Boolean);
 }
 
-function digestVerifiedModelDirectory(directory: string): ModelDescriptor | null {
+type AssetFileRecord = { sha256: string; size: number };
+
+function exactFileRecords(value: unknown, expected: Record<string, AssetFileRecord>): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = value as Record<string, unknown>;
+  const expectedNames = Object.keys(expected).sort();
+  if (JSON.stringify(Object.keys(actual).sort()) !== JSON.stringify(expectedNames)) return false;
+  return expectedNames.every((name) => {
+    const record = actual[name] as Partial<AssetFileRecord> | null;
+    return record?.sha256 === expected[name].sha256 && record?.size === expected[name].size;
+  });
+}
+
+function sha256File(file: string): string {
+  return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+
+function verifiedFile(root: string, name: string, record: AssetFileRecord): string {
+  const candidate = path.join(root, name);
+  const candidateStat = fs.lstatSync(candidate);
+  if (!candidateStat.isFile() || candidateStat.isSymbolicLink()) {
+    throw new Error(`invalid model asset file: ${name}`);
+  }
+  const target = fs.realpathSync.native(candidate);
+  const relative = path.relative(root, target);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("model asset file escaped root");
+  if (candidateStat.size !== record.size) {
+    throw new Error(`invalid model asset file: ${name}`);
+  }
+  if (!/^[0-9a-f]{64}$/.test(record.sha256) || sha256File(target) !== record.sha256) {
+    throw new Error(`model asset checksum mismatch: ${name}`);
+  }
+  return target;
+}
+
+function contentIdentity(files: Record<string, AssetFileRecord>, names: string[]): string {
+  const digest = createHash("sha256");
+  for (const name of [...names].sort()) {
+    digest.update(name).update("\0").update(files[name].sha256).update("\0")
+      .update(String(files[name].size)).update("\n");
+  }
+  return digest.digest("hex");
+}
+
+function verifyModelDirectory(directory: string): ModelDescriptor | null {
   try {
+    const inputStat = fs.lstatSync(directory);
+    if (!inputStat.isDirectory() || inputStat.isSymbolicLink()) return null;
     const root = fs.realpathSync.native(directory);
     const stat = fs.lstatSync(root);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || !/potion-base-8m/i.test(path.basename(root))) return null;
-    const files: string[] = [];
-    const visit = (current: string): void => {
-      for (const name of fs.readdirSync(current).sort()) {
-        const absolute = path.join(current, name);
-        const item = fs.lstatSync(absolute);
-        if (item.isSymbolicLink()) throw new Error("model asset cannot contain symlinks");
-        if (item.isDirectory()) visit(absolute);
-        else if (item.isFile() && name !== ".agentlas-model.json") files.push(absolute);
-      }
-    };
-    visit(root);
-    const relative = files.map((file) => path.relative(root, file));
-    if (!relative.some((file) => /(?:^|\/)config\.json$/i.test(file))) return null;
-    if (!relative.some((file) => /(?:model\.(?:safetensors|npy)|embeddings?\.(?:safetensors|npy))$/i.test(file))) return null;
-    const digest = createHash("sha256");
-    let total = 0;
-    for (let index = 0; index < files.length; index += 1) {
-      const bytes = fs.readFileSync(files[index]);
-      total += bytes.length;
-      if (total > 128 * 1024 * 1024) throw new Error("model asset exceeds local verification limit");
-      digest.update(relative[index]).update("\0").update(bytes).update("\0");
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return null;
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8")) as any;
+    if (manifest.format !== MODEL2VEC_ASSET_FORMAT || manifest.license?.spdx !== "MIT") return null;
+    if (manifest.runtime?.networkRequired !== false ||
+      !Array.isArray(manifest.runtime?.externalPackages) ||
+      manifest.runtime.externalPackages.length !== 0) return null;
+    if (manifest.quantization?.scheme !== "symmetric_per_row_int8" ||
+      manifest.quantization?.scaleDtype !== "float32le") return null;
+    const dimensions = Number(manifest.dimensions);
+    const vocabSize = Number(manifest.vocabSize);
+    if (!Number.isInteger(dimensions) || dimensions !== 256 || !Number.isInteger(vocabSize) || vocabSize <= 0) return null;
+    const required = ["embeddings.i8", "scales.f32le", "tokenizer.json", "LICENSE.model.txt"];
+    const files = manifest.files as Record<string, AssetFileRecord>;
+    if (!files || required.some((name) => !files[name])) return null;
+    const resolved = Object.fromEntries(required.map((name) => [name, verifiedFile(root, name, files[name])]));
+    if (files["embeddings.i8"].size !== vocabSize * dimensions ||
+      files["scales.f32le"].size !== vocabSize * 4) return null;
+    const modelSha256 = contentIdentity(files, required);
+    if (manifest.contentSha256 !== modelSha256 || modelSha256 !== PINNED_MODEL2VEC_CONTENT_SHA256) return null;
+    const tokenizer = JSON.parse(fs.readFileSync(resolved["tokenizer.json"], "utf8")) as any;
+    const vocabObject = tokenizer?.model?.vocab as Record<string, unknown> | undefined;
+    if (tokenizer?.model?.type !== "WordPiece" || !vocabObject || Object.keys(vocabObject).length !== vocabSize) return null;
+    const vocab = new Map<string, number>();
+    const ids: number[] = [];
+    for (const [token, rawId] of Object.entries(vocabObject)) {
+      const id = Number(rawId);
+      if (!Number.isInteger(id) || id < 0 || id >= vocabSize) return null;
+      vocab.set(token, id);
+      ids.push(id);
     }
-    const modelSha256 = digest.digest("hex");
-    const manifestPath = path.join(root, ".agentlas-model.json");
-    if (fs.existsSync(manifestPath)) {
-      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
-      if (String(manifest.modelId ?? "").toLowerCase() !== "potion-base-8m") return null;
-      const expected = String(manifest.sha256 ?? "").toLowerCase();
-      if (expected && expected !== modelSha256) return null;
-    }
+    ids.sort((left, right) => left - right);
+    if (ids.some((id, index) => id !== index)) return null;
+    const unknownTokenId = vocab.get("[UNK]");
+    if (unknownTokenId === undefined) return null;
+    const source = manifest.source as { modelId?: unknown; revision?: unknown; files?: unknown };
+    if (source?.modelId !== PINNED_MODEL2VEC_MODEL_ID || source?.revision !== PINNED_MODEL2VEC_REVISION) return null;
+    if (!exactFileRecords(source.files, PINNED_MODEL2VEC_SOURCE_FILES)) return null;
+    const assetIdentity = `model2vec:${PINNED_MODEL2VEC_MODEL_ID}:${PINNED_MODEL2VEC_REVISION}:${modelSha256}:${manifest.format}`;
     return {
       modelPath: root,
       modelSha256,
-      adapter: `model2vec:potion-base-8M:sha256:${modelSha256}`,
+      adapter: `${assetIdentity}:hybrid-hash96-v1:${MODEL2VEC_HYBRID_DIMENSIONS}`,
+      dimensions,
+      vocabSize,
+      vocab,
+      unknownTokenId,
+      embeddings: fs.readFileSync(resolved["embeddings.i8"]),
+      scales: fs.readFileSync(resolved["scales.f32le"]),
     };
   } catch {
     return null;
   }
 }
 
+export function verifyLocalModel2VecAsset(directory: string): {
+  adapter: string;
+  dimensions: number;
+  modelSha256: string;
+} | null {
+  const descriptor = verifyModelDirectory(directory);
+  return descriptor ? {
+    adapter: descriptor.adapter,
+    dimensions: MODEL2VEC_HYBRID_DIMENSIONS,
+    modelSha256: descriptor.modelSha256,
+  } : null;
+}
+
+/** Runtime installers may place the asset after Desktop has already started. */
+export function invalidateLocalEmbeddingModelCache(): void {
+  cachedModelDescriptor = undefined;
+  cachedModelDescriptorAt = 0;
+}
+
 function verifiedModelDescriptor(): ModelDescriptor | null {
-  if (modelBackendUnavailableReason) return null;
-  if (cachedModelDescriptor !== undefined) return cachedModelDescriptor;
+  if (cachedModelDescriptor !== undefined && (
+    cachedModelDescriptor !== null || Date.now() - cachedModelDescriptorAt < MODEL_DISCOVERY_MISS_TTL_MS
+  )) return cachedModelDescriptor;
   for (const candidate of modelCandidates()) {
-    const descriptor = digestVerifiedModelDirectory(candidate);
-    if (descriptor) return (cachedModelDescriptor = descriptor);
+    const descriptor = verifyModelDirectory(candidate);
+    if (descriptor) {
+      cachedModelDescriptorAt = Date.now();
+      return (cachedModelDescriptor = descriptor);
+    }
   }
+  cachedModelDescriptorAt = Date.now();
   cachedModelDescriptor = null;
   return null;
 }
 
-function coreCandidates(): string[] {
-  const resources = typeof process.resourcesPath === "string" ? process.resourcesPath : "";
-  return [
-    process.env.HEPHAESTUS_RUNTIME_ROOT ?? "",
-    resources ? path.join(resources, "Hephaestus") : "",
-    path.join(process.cwd(), "Hephaestus"),
-    path.join(__dirname, "..", "..", "..", "Hephaestus"),
-  ].filter(Boolean);
+function isWhitespace(character: string): boolean {
+  const codePoint = character.codePointAt(0) ?? 0;
+  return character === " " || character === "\t" || character === "\n" || character === "\r" ||
+    codePoint === 0x85 || codePoint === 0xa0 || /\p{Zs}/u.test(character);
 }
 
-function pythonCandidates(coreRoot: string): string[] {
-  return [
-    process.env.AGENTLAS_PYTHON ?? "",
-    path.join(coreRoot, "bin", process.platform === "win32" ? "python.exe" : "python3"),
-    process.platform === "win32" ? "python" : "/opt/homebrew/bin/python3",
-    process.platform === "win32" ? "py" : "/usr/local/bin/python3",
-    "python3",
-    "python",
-  ].filter(Boolean);
+function isControl(character: string): boolean {
+  if (character === "\t" || character === "\n" || character === "\r") return false;
+  return /[\p{Cc}\p{Cf}]/u.test(character);
 }
 
-function model2VecEmbedding(text: string, descriptor: ModelDescriptor): LocalMemoryEmbedding | null {
-  const coreRoot = coreCandidates().find((candidate) => {
-    try { return fs.statSync(path.join(candidate, "ontology", "embeddings.py")).isFile(); } catch { return false; }
-  });
-  if (!coreRoot) {
-    modelBackendUnavailableReason = "public-core-embedding-runtime-unavailable";
-    return null;
+function isChineseCharacter(codePoint: number): boolean {
+  return (codePoint >= 0x4e00 && codePoint <= 0x9fff) ||
+    (codePoint >= 0x3400 && codePoint <= 0x4dbf) ||
+    (codePoint >= 0x20000 && codePoint <= 0x2a6df) ||
+    (codePoint >= 0x2a700 && codePoint <= 0x2b73f) ||
+    (codePoint >= 0x2b740 && codePoint <= 0x2b81f) ||
+    (codePoint >= 0x2b820 && codePoint <= 0x2ceaf) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0x2f800 && codePoint <= 0x2fa1f);
+}
+
+function isPunctuation(character: string): boolean {
+  const codePoint = character.codePointAt(0) ?? 0;
+  return (codePoint >= 33 && codePoint <= 47) ||
+    (codePoint >= 58 && codePoint <= 64) ||
+    (codePoint >= 91 && codePoint <= 96) ||
+    (codePoint >= 123 && codePoint <= 126) || /\p{P}/u.test(character);
+}
+
+function bertPretokens(text: string): string[] {
+  const cleaned: string[] = [];
+  for (const character of text) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint === 0 || codePoint === 0xfffd || isControl(character)) continue;
+    if (isWhitespace(character)) cleaned.push(" ");
+    else if (isChineseCharacter(codePoint)) cleaned.push(" ", character, " ");
+    else cleaned.push(character);
   }
-  const script = [
-    "import json,os,sys",
-    "sys.path.insert(0, os.environ['HEPHAESTUS_RUNTIME_ROOT'])",
-    "from ontology.embeddings import Model2VecLocalAdapter",
-    "adapter=Model2VecLocalAdapter(os.environ['AGENTLAS_MODEL2VEC_PATH'])",
-    "vector=adapter.embed(sys.stdin.read())",
-    "print(json.dumps({'vector':vector,'dimensions':len(vector)}))",
-  ].join(";");
-  for (const python of pythonCandidates(coreRoot)) {
-    const result = spawnSync(python, ["-c", script], {
-      input: text,
-      encoding: "utf8",
-      timeout: 30_000,
-      maxBuffer: 8 * 1024 * 1024,
-      env: {
-        ...process.env,
-        HEPHAESTUS_RUNTIME_ROOT: coreRoot,
-        AGENTLAS_MODEL2VEC_PATH: descriptor.modelPath,
-        HF_HUB_OFFLINE: "1",
-        TRANSFORMERS_OFFLINE: "1",
-        NO_PROXY: "*",
-      },
-    });
-    if (result.error && (result.error as NodeJS.ErrnoException).code === "ENOENT") continue;
-    if (result.status !== 0) continue;
-    try {
-      const parsed = JSON.parse(result.stdout) as { vector?: unknown; dimensions?: unknown };
-      if (!Array.isArray(parsed.vector) || parsed.vector.length === 0 ||
-        parsed.vector.some((value) => typeof value !== "number" || !Number.isFinite(value)) ||
-        Number(parsed.dimensions) !== parsed.vector.length) continue;
-      return {
-        model: "model2vec:potion-base-8M",
-        adapter: descriptor.adapter,
-        dimensions: parsed.vector.length,
-        vector: parsed.vector,
-        modelSha256: descriptor.modelSha256,
-        contentHash: createHash("sha256").update(text, "utf8").digest("hex"),
-        degraded: false,
-        degradedReason: null,
-      };
-    } catch {
-      // Try the next local Python candidate; never fall through to a network runtime.
+  const normalized = cleaned.join("").toLowerCase().normalize("NFD").replace(/\p{Mn}/gu, "");
+  const tokens: string[] = [];
+  let current = "";
+  const flush = (): void => {
+    if (current) tokens.push(current);
+    current = "";
+  };
+  for (const character of normalized) {
+    if (isWhitespace(character)) flush();
+    else if (isPunctuation(character)) {
+      flush();
+      tokens.push(character);
+    } else current += character;
+  }
+  flush();
+  return tokens;
+}
+
+export function model2VecTokenIds(text: string, descriptor = verifiedModelDescriptor()): number[] {
+  if (!descriptor) return [];
+  const ids: number[] = [];
+  for (const token of bertPretokens(text)) {
+    const characters = Array.from(token);
+    if (characters.length > 100) continue;
+    let start = 0;
+    const pieces: number[] = [];
+    let failed = false;
+    while (start < characters.length) {
+      let end = characters.length;
+      let found: number | undefined;
+      while (start < end) {
+        const piece = `${start > 0 ? "##" : ""}${characters.slice(start, end).join("")}`;
+        found = descriptor.vocab.get(piece);
+        if (found !== undefined) break;
+        end -= 1;
+      }
+      if (found === undefined) {
+        failed = true;
+        break;
+      }
+      pieces.push(found);
+      start = end;
+    }
+    if (!failed) {
+      for (const id of pieces) {
+        if (id !== descriptor.unknownTokenId) ids.push(id);
+        if (ids.length >= 512) return ids;
+      }
     }
   }
-  modelBackendUnavailableReason = "model2vec-python-runtime-unavailable";
-  return null;
+  return ids;
+}
+
+function normalizeVector(vector: number[]): number[] {
+  const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
+  return norm === 0 ? vector : vector.map((value) => value / norm);
+}
+
+function model2VecHybridEmbedding(text: string, descriptor: ModelDescriptor): LocalMemoryEmbedding {
+  const semantic = Array<number>(descriptor.dimensions).fill(0);
+  for (const tokenId of model2VecTokenIds(text, descriptor)) {
+    const scale = descriptor.scales.readFloatLE(tokenId * 4);
+    const offset = tokenId * descriptor.dimensions;
+    for (let dimension = 0; dimension < descriptor.dimensions; dimension += 1) {
+      semantic[dimension] += descriptor.embeddings.readInt8(offset + dimension) * scale;
+    }
+  }
+  const semanticNormalized = normalizeVector(semantic);
+  const hashing = localHashingEmbedding(text).vector;
+  const factor = 1 / Math.sqrt(2);
+  const hybrid = normalizeVector([
+    ...semanticNormalized.map((value) => value * factor),
+    ...hashing.map((value) => value * factor),
+  ]).map((value) => Number(value.toFixed(6)));
+  return {
+    model: MODEL2VEC_HYBRID_NAME,
+    adapter: descriptor.adapter,
+    dimensions: MODEL2VEC_HYBRID_DIMENSIONS,
+    vector: hybrid,
+    modelSha256: descriptor.modelSha256,
+    contentHash: createHash("sha256").update(text, "utf8").digest("hex"),
+    degraded: false,
+    degradedReason: null,
+  };
 }
 
 /** Auto-select verified local Model2Vec, with explicit hash-96 degraded fallback. */
 export function autoLocalEmbedding(text: string): LocalMemoryEmbedding {
   const descriptor = verifiedModelDescriptor();
-  if (descriptor) {
-    const embedded = model2VecEmbedding(text, descriptor);
-    if (embedded) return embedded;
-  }
-  const fallback = localHashingEmbedding(text);
-  fallback.degradedReason = modelBackendUnavailableReason ?? fallback.degradedReason;
-  return fallback;
+  return descriptor ? model2VecHybridEmbedding(text, descriptor) : localHashingEmbedding(text);
 }
 
 export function parseLocalEmbedding(
@@ -250,10 +404,19 @@ export function parseLocalEmbedding(
   if (metadata.contentHash && String(metadata.contentHash) !== contentHash) return null;
   const descriptor = verifiedModelDescriptor();
   const expectedAdapter = descriptor?.adapter ?? LOCAL_HASHING_IDENTITY;
+  const expectedModel = descriptor ? MODEL2VEC_HYBRID_NAME : LOCAL_HASHING_MODEL;
+  const expectedDimensions = descriptor ? MODEL2VEC_HYBRID_DIMENSIONS : LOCAL_HASHING_DIMENSIONS;
+  const storedModel = String(model ?? "");
   const adapter = String(metadata.adapter ?? (
     model === LOCAL_HASHING_MODEL ? LOCAL_HASHING_IDENTITY : ""
   ));
-  if (adapter !== expectedAdapter) return null;
+  if (adapter !== expectedAdapter || Number(dimensions) !== expectedDimensions) return null;
+  // Core's cache projection stores adapter identity only; Desktop-owned rows
+  // additionally carry the model and checksum and must match both when present.
+  if (storedModel && storedModel !== expectedModel) return null;
+  if (storedModel && descriptor && metadata.modelSha256 !== descriptor.modelSha256) return null;
+  if (storedModel && !descriptor && metadata.modelSha256) return null;
+  if (typeof metadata.text === "string" && metadata.contentHash !== contentHash) return null;
   try {
     const vector = JSON.parse(String(vectorJson ?? "[]")) as unknown;
     if (
@@ -263,7 +426,7 @@ export function parseLocalEmbedding(
       vector.some((value) => typeof value !== "number" || !Number.isFinite(value))
     ) return null;
     return {
-      model: String(model ?? ""),
+      model: storedModel || expectedModel,
       adapter,
       dimensions: vector.length,
       vector,
