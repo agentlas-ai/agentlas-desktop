@@ -15,17 +15,21 @@ assert.ok(fs.existsSync(path.join(modelPath, "manifest.json")), "verified local 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-core-nest-query-"));
 const sandboxHome = path.join(temp, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
-process.env.HOME = sandboxHome;
-process.env.USERPROFILE = sandboxHome;
 process.env.AGENTLAS_STORE_PATH = path.join(temp, "desktop.sqlite");
 process.env.AGENTLAS_MODEL2VEC_PATH = modelPath;
 process.env.AGENTLAS_E2E = "1";
 
 const { app } = require("electron");
+// Electron resolves its Windows profile paths while the app is starting. An
+// empty test USERPROFILE at module load makes Chromium terminate with exit 3
+// before JavaScript can report an assertion. Bind Electron's own userData path
+// first, then redirect os.homedir()-based Agentlas nests after readiness.
+app.setPath("userData", path.join(temp, "user-data"));
 
 async function main() {
   await app.whenReady();
-  app.setPath("userData", path.join(temp, "user-data"));
+  process.env.HOME = sandboxHome;
+  process.env.USERPROFILE = sandboxHome;
   const desktopStore = require("../dist/electron/store/db.js");
   const { curateEvents } = require("../dist/electron/memory/curator.js");
   desktopStore.initStore();
@@ -88,7 +92,9 @@ async function main() {
   assert.match(adapterConfig.identity, /:hybrid-hash96-v1:352$/);
 
   desktopStore.getDb().close();
-  const python = process.env.AGENTLAS_PYTHON || "python3";
+  const python = process.env.AGENTLAS_PYTHON
+    || process.env.HEPHAESTUS_PYTHON
+    || (process.platform === "win32" ? "python" : "python3");
   const query = "rollback steps for a database schema migration";
   const result = spawnSync(
     python,
