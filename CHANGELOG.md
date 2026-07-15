@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.39 — 2026-07-15
+
+### Fixed
+
+- **The release scheduler guard now declares the runtime pin required by the
+  production contract.** Its invocation is intentionally mocked and has no host
+  runtime inventory; the fixture now pins its test Codex runtime instead of
+  accidentally testing the unrelated `pinned-runtime-unavailable` boundary.
+- v0.8.38 stopped in macOS preflight before packaging because that stale fixture
+  expected an unpinned automation to execute with no detectable runtime. No
+  public release, update feed, signed artifact, or production API metadata was
+  written. v0.8.39 carries the same product repair with the corrected gate.
+- Agentlas OS v1.1.37 remains pinned at immutable commit
+  c86aa86ccb3424e67be0b45ec253cc408af99df7. This source does not prove a public
+  installer; native updater, signing, and served-byte gates remain
+  authoritative.
+
 ## 0.8.38 — 2026-07-15
 
 ### Fixed

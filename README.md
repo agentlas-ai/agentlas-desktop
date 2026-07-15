@@ -69,6 +69,15 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-15 · v0.8.39 — runtime-pin release gate alignment** — The scheduler
+  guard fixture now declares the exact mocked Codex runtime required by the
+  production fail-closed contract. v0.8.38 stopped in preflight before any
+  package, public release, feed, or production metadata write; v0.8.39 retains
+  its durable automation/session/browser/orchestration repairs with the corrected
+  gate. Agentlas OS v1.1.37 remains pinned at
+  c86aa86ccb3424e67be0b45ec253cc408af99df7. This source state does not prove a
+  public installer or update-feed release.
+
 - **2026-07-15 · v0.8.38 — durable automation identity and exact nested
   orchestration** — Scheduled runs pin their runtime/provider/model, retain a
   bounded previous-outcome capsule, and refuse to create a fresh Codex or Claude

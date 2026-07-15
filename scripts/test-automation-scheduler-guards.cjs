@@ -53,6 +53,10 @@ function automationInput(name) {
     targetType: "agent",
     targetId: "scheduler-guard-agent",
     promptTemplate: `Run ${name}`,
+    // This fixture stubs the invocation and intentionally has no host runtime inventory.
+    // Pin the mocked runtime explicitly so the test exercises scheduler limits rather than
+    // violating the production fail-closed runtime-selection contract.
+    runtimeSelection: { kind: "codex", backend: "openai", source: "test-codex" },
   };
 }
 
