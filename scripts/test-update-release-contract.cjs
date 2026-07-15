@@ -64,12 +64,12 @@ assert.equal(compatibility.minimumRuntimeVersion, "1.0.4", "v0.7.0 shipped Hepha
 assert.equal(compatibility.minimumSchemaVersion, 35, "v0.7.0 shipped SQLite schema 35");
 assert.equal(
   compatibility.bundledRuntimeVersion,
-  "1.1.29",
+  "1.1.30",
   "the next Desktop patch must include the canonical first-contact bootstrap and model allocation contract",
 );
 assert.equal(runtimeSource.ref, `v${compatibility.bundledRuntimeVersion}`, "runtime source ref must match compatibility");
 assert.match(runtimeSource.commit, /^[0-9a-f]{40}$/, "runtime source must pin an immutable full commit");
-assert.equal(runtimeSource.commit, "2d161b267c9516699d18d05afcc7ec05d2ba7f09", "Agentlas OS v1.1.29 commit drift");
+assert.equal(runtimeSource.commit, "577a7d134f0a3138fe1420b58193d62687cfeec1", "Agentlas OS v1.1.30 commit drift");
 assert.equal(compatibility.bundledRuntimeVersion, manifest.version, "feed runtime must match the bundled Hephaestus manifest");
 assert.equal(
   spawnSync("git", ["-C", embeddedRuntimeRoot, "rev-parse", "HEAD^{commit}"], { encoding: "utf8" }).stdout.trim(),
@@ -245,13 +245,13 @@ assert.match(readme, /macOS 12 Monterey or newer/);
 assert.match(readme, /macOS 11 Big Sur:[\s\S]*?last compatible Agentlas release[\s\S]*?excluded/);
 assert.match(
   readmeReleaseSection,
-  /Agentlas OS v1\.1\.29[\s\S]*?Agent\s+Cloud[\s\S]*?keep it only on this computer[\s\S]*?public Hub publishing[\s\S]*?separate explicit action/,
-  "README current release section must describe the Core private-Cloud versus local-only boundary",
+  /Model2Vec[\s\S]*?adaptive all-relevant-or-top-k[\s\S]*?SQLite nests[\s\S]*?Agentlas OS v1\.1\.30[\s\S]*?does not claim a[\s\S]*?published installer/,
+  "README current release section must describe mandatory local hybrid recall and the unpublished boundary",
 );
 assert.match(
   changelogReleaseSection,
-  /Agentlas OS v1\.1\.29[\s\S]*?owner-private in Agent\s+Cloud[\s\S]*?No answer remains local-only[\s\S]*?public Hub publication is never inferred/,
-  "CHANGELOG current release section must describe the Core private-Cloud versus local-only boundary",
+  /mandatory, fully local Model2Vec hybrid[\s\S]*?No server embedding[\s\S]*?ranks every eligible row[\s\S]*?survive projection rebuilds[\s\S]*?Agentlas OS v1\.1\.30[\s\S]*?do not themselves publish a Git tag/,
+  "CHANGELOG current release section must describe governed local recall and the unpublished boundary",
 );
 assert.match(publishMacSource, /Requires macOS 12 Monterey or newer/);
 assert.match(publishMacSource, /macOS 11 Big Sur stays on the last compatible release/);
@@ -549,6 +549,39 @@ assert.match(afterPackSource, /packagedManifest\.version !== sourceManifest\.ver
 assert.match(afterPackSource, /compatibilityVersion !== sourceManifest\.version/);
 assert.match(afterPackSource, /HEPHAESTUS_REF mismatch/);
 assert.match(afterPackSource, /agentlas_cloud[\s\S]*?__main__\.py/);
+assert.match(
+  afterPackSource,
+  /MODEL2VEC_ASSET_PARTS = \["assets", "model2vec", "potion-base-8M-int8"\]/,
+  "afterPack must verify the exact packaged Model2Vec release directory",
+);
+for (const requiredModelFile of [
+  "manifest.json",
+  "embeddings.i8",
+  "scales.f32le",
+  "tokenizer.json",
+  "LICENSE.model.txt",
+]) {
+  assert.match(
+    afterPackSource,
+    new RegExp(requiredModelFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    `afterPack must require packaged Model2Vec file ${requiredModelFile}`,
+  );
+}
+assert.match(
+  afterPackSource,
+  /createHash\("sha256"\)[\s\S]*?contentSha256 !== manifest\.contentSha256/,
+  "afterPack must hash Model2Vec payloads and verify the manifest content identity",
+);
+assert.match(
+  afterPackSource,
+  /packagedModel\.manifestSha256 !== sourceModel\.manifestSha256/,
+  "afterPack must reject packaged Model2Vec manifest metadata drift",
+);
+assert.match(
+  afterPackSource,
+  /packagedModel\.contentSha256 !== sourceModel\.contentSha256/,
+  "afterPack must reject packaged Model2Vec content that drifts from the pinned source runtime",
+);
 for (const configName of ["electron-builder.yml", "electron-builder.mac-stable.yml"]) {
   const config = yaml.load(fs.readFileSync(path.join(root, configName), "utf8"));
   assert.equal(

@@ -69,6 +69,15 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-15 · v0.8.31 — governed local Model2Vec experience memory** —
+  Desktop now stores and retrieves experience with the verified local
+  `potion-base-8M` int8 + hash hybrid, vector/lexical RRF, salience prior, and an
+  adaptive all-relevant-or-top-k token budget. Borrowed-agent memory lives in
+  per-agent SQLite nests, where semantic and reviewed governance relations are
+  rebuilt safely. The embedded Agentlas OS v1.1.30 source is pinned to
+  `577a7d134f0a3138fe1420b58193d62687cfeec1`; this source note does not claim a
+  published installer or update-feed release.
+
 - **2026-07-15 · v0.8.30 — Agentlas OS v1.1.29 alignment** — Desktop now
   embeds the exact verified Core release that gives every external `/hep-build`
   host the same final choice: save the finished package privately in Agent

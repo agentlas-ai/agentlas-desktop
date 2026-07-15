@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.8.31 — 2026-07-15
+
+### Changed
+
+- **Experience recall now uses a mandatory, fully local Model2Vec hybrid.**
+  Desktop persists the verified `potion-base-8M` int8 vectors together with the
+  deterministic hash channel, fuses vector and lexical evidence with RRF, and
+  keeps salience as a prior. No server embedding or per-user API cost is used.
+- **Governed recall now ranks every eligible row before applying the token
+  budget.** If all relevant memories fit they are loaded together; otherwise
+  the vector/RRF top-k is selected. Superseded, private, and cross-owner rows
+  remain filtered before ranking.
+- **Borrowed-agent experience is projected into its per-agent SQLite nest.**
+  Semantic `similar_to` links and reviewed `supersedes` / `contradicts` edges
+  survive projection rebuilds without falling back to whole-file `cat` memory.
+- **Desktop now embeds Agentlas OS v1.1.30 at one immutable commit.** Package
+  metadata, updater contracts, release workflows, and the three-OS harness pin
+  `577a7d134f0a3138fe1420b58193d62687cfeec1`.
+
+### Boundaries and edge cases
+
+- Embeddings remain local-only. Hash-96 is an explicit degraded fallback, not
+  the normal quality path.
+- This source version and Core pin do not themselves publish a Git tag,
+  installer, update feed, or GitHub release.
+
 ## 0.8.30 — 2026-07-15
 
 ### Changed

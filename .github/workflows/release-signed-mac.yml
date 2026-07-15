@@ -45,8 +45,8 @@ jobs:
       # Publish installers to the SEPARATE public releases repository.
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
-      HEPHAESTUS_REF: v1.1.29
-      HEPHAESTUS_COMMIT: 2d161b267c9516699d18d05afcc7ec05d2ba7f09
+      HEPHAESTUS_REF: v1.1.30
+      HEPHAESTUS_COMMIT: 577a7d134f0a3138fe1420b58193d62687cfeec1
 
     steps:
       - uses: actions/checkout@v4
