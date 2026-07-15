@@ -63,6 +63,7 @@ function toAgent(row: AgentRow): InstalledAgent {
           runtimeLabel: route.runtime,
           localPath: route.path,
           assetSource: asset.source,
+          ...(route.missingSince ? { sourceMissingSince: route.missingSince } : {}),
           ...(asset.packageHash ? { packageHash: asset.packageHash } : {}),
         }
       : {}),

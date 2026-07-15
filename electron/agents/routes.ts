@@ -28,6 +28,19 @@ export interface AgentRoute {
   packageHash?: string;
   /** Legacy/local-only AgentDefinition fingerprint. Never a Hub release claim. */
   definitionHash?: string;
+  /**
+   * ISO time when the source folder was first observed to be unreadable.
+   *
+   * A local agent whose folder was deleted or moved otherwise stays in the list
+   * forever with no way to tell why it is broken. This is deliberately NOT an
+   * auto-delete signal: an external disk, a cloud-synced folder, or a rename can
+   * make a perfectly good agent look missing for a while, and silently deleting
+   * a user's agent (and its chats) over that would be unrecoverable. It only
+   * lets the UI say "this folder is gone" and offer repair/remove.
+   *
+   * Cleared as soon as the folder reads again.
+   */
+  missingSince?: string;
 }
 
 function routesFile(): string {
@@ -110,26 +123,47 @@ export function reconcileLocalRouteDefinitionHashes(): {
   scanned: number;
   updated: number;
   failed: number;
+  missing: number;
 } {
   const map = readAll();
   let scanned = 0;
   let updated = 0;
   let failed = 0;
+  let missing = 0;
+  const now = new Date().toISOString();
   for (const [agentId, route] of Object.entries(map)) {
     if (route.source === "agent-cloud" || route.source === "hub") continue;
     scanned += 1;
     try {
       const definitionHash = computeLocalAgentDefinitionHash(route.path);
-      if (route.definitionHash !== definitionHash || route.source !== "local-import") {
-        map[agentId] = { ...route, source: "local-import", definitionHash };
+      // The folder read, so any earlier missing mark is stale — a moved or
+      // temporarily unmounted folder must recover silently.
+      if (
+        route.definitionHash !== definitionHash ||
+        route.source !== "local-import" ||
+        route.missingSince
+      ) {
+        const next = { ...route, source: "local-import" as const, definitionHash };
+        delete next.missingSince;
+        map[agentId] = next;
         updated += 1;
       }
     } catch {
       failed += 1;
+      // Record WHEN the folder went missing instead of only counting the
+      // failure. Without this the agent stays in the roster forever with no
+      // explanation and no repair path. Never delete here: absence can be
+      // temporary (external disk, cloud sync, rename) and deleting a user's
+      // agent and chats over it is unrecoverable.
+      if (!route.missingSince) {
+        map[agentId] = { ...route, missingSince: now };
+        updated += 1;
+      }
+      missing += 1;
     }
   }
   if (updated > 0) writeAll(map);
-  return { scanned, updated, failed };
+  return { scanned, updated, failed, missing };
 }
 
 /**

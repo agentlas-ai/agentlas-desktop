@@ -14,7 +14,7 @@ app.setPath("userData", userDataDir);
 const { getDb, initStore } = require("../dist/electron/store/db.js");
 const { detectRuntimeLabels, importLocalFolder } = require("../dist/electron/agents/import-local.js");
 const { readAgentFile, writeAgentFile } = require("../dist/electron/agents/files.js");
-const { listRoutes, setRoute } = require("../dist/electron/agents/routes.js");
+const { listRoutes, setRoute, reconcileLocalRouteDefinitionHashes } = require("../dist/electron/agents/routes.js");
 const { getFirmBySlug, listFirms } = require("../dist/electron/store/firms.js");
 
 function writeFile(filePath, body) {
@@ -39,6 +39,37 @@ function writeFile(filePath, body) {
 
     const sameAgain = await importLocalFolder(agentRoot);
     assert.equal(sameAgain.agent.id, single.agent.id, "same folder import must be idempotent");
+
+    // Regression: the same agent imported from a DIFFERENT path is still the
+    // same agent. Matching on the folder string alone silently duplicated it as
+    // local-...-2 — real installs accumulated 11 such pairs (cardnews-maker,
+    // electron-expert, pitch-deck-architect...) whose definition hashes were
+    // identical and only the checkout location differed. Kept on its own agent
+    // so relocating its route cannot disturb the other assertions.
+    const originRoot = path.join(tempDir, "relocatable-agent");
+    writeFile(path.join(originRoot, "AGENTS.md"), "# Relocatable Agent\n\nSame definition, two checkouts.\n");
+    const origin = await importLocalFolder(originRoot);
+    const copiedRoot = path.join(tempDir, "elsewhere", "relocatable-agent");
+    fs.mkdirSync(path.dirname(copiedRoot), { recursive: true });
+    fs.cpSync(originRoot, copiedRoot, { recursive: true });
+    const copyImport = await importLocalFolder(copiedRoot);
+    assert.equal(
+      copyImport.agent.id,
+      origin.agent.id,
+      "an identical agent imported from another path must update, not duplicate",
+    );
+    const duplicateSlugs = getDb()
+      .prepare("SELECT COUNT(*) AS count FROM installed_agents WHERE slug LIKE ?")
+      .get(`${origin.agent.slug}-%`);
+    assert.equal(duplicateSlugs.count, 0, "no -2 slug may be minted for an identical agent");
+    // The route follows the folder the user actually pointed at.
+    assert.equal(copyImport.agent.localPath, copiedRoot);
+
+    // A genuinely different agent must still get its own identity.
+    const distinctRoot = path.join(tempDir, "distinct-agent");
+    writeFile(path.join(distinctRoot, "AGENTS.md"), "# Distinct Agent\n\nA different definition entirely.\n");
+    const distinct = await importLocalFolder(distinctRoot);
+    assert.notEqual(distinct.agent.id, origin.agent.id, "a different definition must not collapse into an existing agent");
 
     const updatedSystemPrompt = "# Updated System Prompt\n\nDB-backed prompt update proof.\n";
     writeAgentFile(single.agent.id, "system-prompt.md", updatedSystemPrompt);
@@ -102,6 +133,33 @@ function writeFile(filePath, body) {
     assert.equal(convertedSingle.agent.id, team.agent.id, "team-to-single conversion must preserve the owned agent identity");
     assert.equal(convertedSingle.kind, "agent");
     assert.equal(getFirmBySlug(`firm-${team.agent.slug}`), null, "team-to-single conversion must remove the stale firm projection");
+
+    // A deleted source folder must be REPORTED, not silently ignored. Before
+    // this, the reconcile pass only counted the failure, so an agent whose
+    // folder was gone (e.g. imported from trash/ and later emptied) stayed in
+    // the roster forever with no explanation and no repair path.
+    const vanishRoot = path.join(tempDir, "vanishing-agent");
+    writeFile(path.join(vanishRoot, "AGENTS.md"), "# Vanishing Agent\n\nIts folder will be deleted.\n");
+    const vanish = await importLocalFolder(vanishRoot);
+    assert.equal(listRoutes().find((r) => r.agentId === vanish.agent.id).missingSince, undefined);
+    fs.rmSync(vanishRoot, { recursive: true, force: true });
+    const gone = reconcileLocalRouteDefinitionHashes();
+    assert.ok(gone.missing >= 1, "a deleted source folder must be counted as missing");
+    const goneRoute = listRoutes().find((r) => r.agentId === vanish.agent.id);
+    assert.ok(goneRoute.missingSince, "a deleted source folder must be marked with missingSince");
+    // Never auto-delete: absence can be temporary (external disk, cloud sync).
+    assert.ok(
+      getDb().prepare("SELECT 1 FROM installed_agents WHERE id = ?").get(vanish.agent.id),
+      "a missing folder must never silently delete the user's agent",
+    );
+    // Restoring the folder must clear the mark without user action.
+    writeFile(path.join(vanishRoot, "AGENTS.md"), "# Vanishing Agent\n\nIts folder will be deleted.\n");
+    reconcileLocalRouteDefinitionHashes();
+    assert.equal(
+      listRoutes().find((r) => r.agentId === vanish.agent.id).missingSince,
+      undefined,
+      "a recovered folder must clear the missing mark",
+    );
 
     const routes = listRoutes();
     assert.ok(routes.some((route) => route.agentId === single.agent.id && route.path === agentRoot && route.kind === "agent"));

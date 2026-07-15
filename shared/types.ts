@@ -297,6 +297,14 @@ export interface InstalledAgent {
   runtimeLabel?: "claude-code" | "codex" | "gemini" | "cursor" | "generic";
   /** 로컬 임포트 원본 폴더 절대경로 (있으면 파일 패널이 이 폴더를 사용) */
   localPath?: string;
+  /**
+   * ISO time when this agent's source folder was first seen unreadable.
+   * Present only for local agents whose folder is currently gone (deleted,
+   * moved, or on an unmounted disk). The agent is intentionally kept — this
+   * lets the UI explain why it cannot run and offer repair/remove instead of
+   * showing a silently broken row.
+   */
+  sourceMissingSince?: string;
   /** 실행 폴더의 권위 출처. Agent Cloud 복원본도 로컬 실행을 위해 localPath를 가진다. */
   assetSource?: "local-import" | "agent-cloud" | "hub";
   /** Agent Cloud 복원본의 검증된 불변 package hash. */

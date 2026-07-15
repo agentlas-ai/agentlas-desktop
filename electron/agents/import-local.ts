@@ -550,15 +550,30 @@ async function importLocalFolderOnce(
 
   const now = new Date().toISOString();
 
-  // 멱등성: 같은 폴더가 이미 임포트돼 있으면 새로 만들지 않고 그 에이전트를 갱신한다.
-  // (앱에서 같은 폴더를 다시 드래그해도 local-...-2 중복이 생기지 않도록.)
-  const existing = listRoutes().find((r) => {
+  // 멱등성: 이미 임포트된 같은 에이전트면 새로 만들지 않고 그 에이전트를 갱신한다.
+  // (같은 폴더를 다시 드래그해도 local-...-2 중복이 생기지 않도록.)
+  //
+  // 경로 문자열만 비교하면 같은 에이전트를 다른 위치(사본/이동/중첩 체크아웃)에서
+  // 임포트했을 때 서로 다른 에이전트로 복제됐다. 실측: 카드뉴스 메이커·Electron
+  // Expert·Pitch Deck Architect 등 11묶음이 definitionHash가 완전히 같은데도 경로만
+  // 달라 중복 등록됐다. definitionHash는 내용에서 유도되고 로컬 경로·메모리·산출물을
+  // 의도적으로 제외하므로, "같은 에이전트인가"의 권위는 경로가 아니라 이 지문이다.
+  // 지문은 멱등성 판별의 권위이므로 라우트 조회보다 먼저 계산한다.
+  const definitionHash = computeLocalAgentDefinitionHash(dir);
+  const routes = listRoutes();
+  const sameFolder = routes.find((r) => {
     try {
       return path.resolve(r.path) === dir;
     } catch {
       return false;
     }
   });
+  // 지문 매칭은 폴더가 사라졌거나 옮겨진 라우트까지 회수한다. 폴더 일치가 있으면
+  // 그쪽이 우선 — 사용자가 방금 가리킨 그 폴더가 가장 구체적인 의도다.
+  const sameDefinition = sameFolder
+    ? undefined
+    : routes.find((r) => Boolean(r.definitionHash) && r.definitionHash === definitionHash);
+  const existing = sameFolder ?? sameDefinition;
   let row = existing
     ? (getDb().prepare("SELECT id, slug, tone FROM installed_agents WHERE id = ?").get(existing.agentId) as
         | { id: string; slug: string; tone: InstalledAgent["tone"] }
@@ -587,7 +602,6 @@ async function importLocalFolderOnce(
   }
   let firmId: string | undefined;
   const db = getDb();
-  const definitionHash = computeLocalAgentDefinitionHash(dir);
   const nextRoute = {
     agentId: id,
     path: dir,
