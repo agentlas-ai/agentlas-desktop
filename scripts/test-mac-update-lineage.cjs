@@ -70,6 +70,23 @@ function clone(value) {
     { tag: "v9.8.5", version: "9.8.5" },
     { tag: "v9.8.4", version: "9.8.4" },
   ]);
+  assert.deepEqual(
+    selectPreviousStableReleases([
+      ...releases,
+      { tagName: "v1.0.0", isDraft: false, isPrerelease: false },
+      { tagName: "v1.0.0", isDraft: false, isPrerelease: false },
+    ], candidateVersion, 2),
+    history,
+    "duplicates outside the bounded continuity window must not deadlock future releases",
+  );
+  assert.throws(
+    () => selectPreviousStableReleases([
+      ...releases,
+      { tagName: "v9.8.5", isDraft: false, isPrerelease: false },
+    ], candidateVersion, 2),
+    (error) => error.code === "stable-release-version-duplicate",
+    "a duplicate release inside the selected history window must remain fail-closed",
+  );
   const plan = historyVerificationPlan(history);
   assert.equal(plan.length, 4, "both architectures of every selected historical release must be iterated");
   assert.deepEqual(

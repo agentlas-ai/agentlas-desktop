@@ -76,25 +76,32 @@ export function selectPreviousStableReleases(releases, candidateVersion, history
   if (!Array.isArray(releases) || !parseStableVersion(candidateVersion)) {
     fail("invalid-release-list", "previous-release");
   }
-  const stable = [];
-  const seen = new Set();
+  const stableByVersion = new Map();
   for (const release of releases) {
     if (!release || release.isDraft === true || release.isPrerelease === true) continue;
     const parsed = parseStableVersion(release.tagName);
     if (!parsed) fail("stable-release-version-invalid", "previous-release-history");
-    if (seen.has(parsed.version)) fail("stable-release-version-duplicate", "previous-release-history");
-    seen.add(parsed.version);
-    stable.push({ tag: `v${parsed.version}`, version: parsed.version });
+    const matches = stableByVersion.get(parsed.version) || [];
+    matches.push({ tag: `v${parsed.version}`, version: parsed.version });
+    stableByVersion.set(parsed.version, matches);
   }
-  stable.sort((left, right) => compareStableVersions(right.version, left.version));
-  const currentStable = stable[0];
+  const stableGroups = [...stableByVersion.values()]
+    .sort((left, right) => compareStableVersions(right[0].version, left[0].version));
+  const currentStable = stableGroups[0]?.[0];
   if (!currentStable) fail("previous-stable-history-incomplete", "previous-release-history");
   const comparison = compareStableVersions(candidateVersion, currentStable.version);
   if (comparison === 0) fail("candidate-already-stable", "candidate-release");
   if (comparison < 0) fail("candidate-not-newer-than-current-stable", "lineage");
-  const history = stable.slice(0, requestedCount);
-  if (history.length !== requestedCount) fail("previous-stable-history-incomplete", "previous-release-history");
-  return history;
+  const historyGroups = stableGroups.slice(0, requestedCount);
+  if (historyGroups.length !== requestedCount) fail("previous-stable-history-incomplete", "previous-release-history");
+  // Duplicate releases are ambiguous only when they are part of the exact
+  // history window whose artifacts establish update continuity. Historical
+  // duplicates outside that bounded window cannot change this candidate's
+  // selected predecessors and must not deadlock all future releases.
+  if (historyGroups.some((matches) => matches.length !== 1)) {
+    fail("stable-release-version-duplicate", "previous-release-history");
+  }
+  return historyGroups.map(([release]) => release);
 }
 
 export function selectPreviousStableRelease(releases, candidateVersion) {

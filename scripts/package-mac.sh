@@ -196,17 +196,18 @@ cleanup_appledouble "$project_dir/dist"
 
 build_mac_arch() {
   local arch="$1"
-  local notarize_args=()
+  local builder_args=(
+    --mac "--${arch}"
+    --config electron-builder.mac-stable.yml
+  )
   cleanup_appledouble "$project_dir/dist" "$project_dir/release" "$local_release"
   # A public updater ZIP must contain the same stapled app as its DMG. Local
   # candidates stay explicitly unnotarized and can never enter this channel.
   if [[ "${AGENTLAS_PUBLIC_RELEASE:-0}" != "1" ]]; then
-    notarize_args+=(--config.mac.notarize=false)
+    builder_args+=(--config.mac.notarize=false)
   fi
   COPYFILE_DISABLE=1 electron-builder \
-    --mac "--${arch}" \
-    --config electron-builder.mac-stable.yml \
-    "${notarize_args[@]}" \
+    "${builder_args[@]}" \
     --publish never \
     --config.directories.output="$local_release"
 }

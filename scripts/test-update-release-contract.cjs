@@ -334,6 +334,16 @@ assert.match(
   /codesign --verify --deep --strict[\s\S]*smoke-signed-mac-python-cache\.cjs[\s\S]*codesign --verify --deep --strict/,
   "the signed macOS app must retain its strict code seal after exercising packaged Agentlas OS Python",
 );
+assert.match(
+  packageMacSource,
+  /local builder_args=\([\s\S]*--mac "--\$\{arch\}"[\s\S]*--config electron-builder\.mac-stable\.yml[\s\S]*\)/,
+  "the macOS builder command must keep a non-empty Bash 3 compatible argument array",
+);
+assert.doesNotMatch(
+  packageMacSource,
+  /local notarize_args=\(\)/,
+  "the public notarized build must not expand an empty array under Bash 3 set -u",
+);
 
 function parsedWorkflow(source, name) {
   const parsed = yaml.load(source);
@@ -648,6 +658,22 @@ assert.match(signedResolveStep.run, /version.*!=.*\$\{tag#v\}/s, "manual version
 
 const signedSteps = workflowSteps(signedWorkflow);
 const stepNamed = (name) => signedSteps.find((step) => step.name === name);
+for (const jobName of ["mac-release-preflight", "build-signed-mac-artifacts"]) {
+  const steps = signedWorkflow.jobs[jobName].steps;
+  const checkout = steps.find((step) => step.name === "Checkout immutable Mac release tooling");
+  const install = steps.find((step) => step.name === "Verify and install immutable Mac release tooling");
+  assert.ok(checkout && install, `${jobName} must overlay release-only fixes without moving the app tag`);
+  assert.equal(checkout.uses, "actions/checkout@v4");
+  assert.equal(checkout.with.ref, "${{ github.sha }}");
+  assert.equal(checkout.with.path, ".release-tooling");
+  assert.equal(checkout.with["persist-credentials"], false);
+  assert.match(checkout.with["sparse-checkout"], /scripts\/package-mac\.sh/);
+  assert.match(checkout.with["sparse-checkout"], /scripts\/verify-mac-update-lineage\.mjs/);
+  assert.match(install.run, /git -C \.release-tooling rev-parse HEAD/);
+  assert.match(install.run, /tooling_commit.*GITHUB_SHA/s);
+  assert.match(install.run, /cp \.release-tooling\/scripts\/package-mac\.sh scripts\/package-mac\.sh/);
+  assert.match(install.run, /cp \.release-tooling\/scripts\/verify-mac-update-lineage\.mjs scripts\/verify-mac-update-lineage\.mjs/);
+}
 const ontologyReleaseStep = stepNamed("Experience Ontology release gates");
 assert.ok(ontologyReleaseStep, "signed release must retain the Experience Ontology release gates");
 assert.match(
