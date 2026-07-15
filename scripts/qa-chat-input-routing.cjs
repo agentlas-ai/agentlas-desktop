@@ -156,6 +156,7 @@ async function main() {
               source: "local",
               estCredits: null,
               isFirm: false,
+              target: { source: "local", entityKind: "agent", agentId: "shopify-local-proof" },
             },
           ],
           totalEstCredits: null,

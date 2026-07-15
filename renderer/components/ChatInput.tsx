@@ -30,6 +30,25 @@ import { openPricing } from "@/components/UpgradeCta";
 
 type ModelOption = { id: string; label: string; tag?: string };
 
+function isOrchestrationTarget(value: unknown): value is OrchestrationTarget {
+  if (!value || typeof value !== "object") return false;
+  const target = value as Record<string, unknown>;
+  const source = target.source;
+  const entityKind = target.entityKind;
+  if (source === "local") {
+    if (entityKind === "agent") return typeof target.agentId === "string" && target.agentId.trim().length > 0;
+    if (entityKind === "team") return typeof target.firmId === "string" && target.firmId.trim().length > 0;
+    if (entityKind === "group") return typeof target.groupId === "string" && target.groupId.trim().length > 0;
+    return false;
+  }
+  return (
+    (source === "cloud" || source === "hub") &&
+    (entityKind === "agent" || entityKind === "team") &&
+    typeof target.slug === "string" &&
+    target.slug.trim().length > 0
+  );
+}
+
 const CLI_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
@@ -639,9 +658,12 @@ export function ChatInput({
       return;
     }
     const remoteTargets = engine?.networkAuto === true
-      ? preview.agents.filter((agent) => agent.source !== "local").map((agent) => agent.target)
+      ? preview.agents.filter((agent) => agent.source !== "local").map((agent) => agent.target).filter(isOrchestrationTarget)
       : [];
-    const localTargets = preview.agents.filter((agent) => agent.source === "local").map((agent) => agent.target);
+    const localTargets = preview.agents
+      .filter((agent) => agent.source === "local")
+      .map((agent) => agent.target)
+      .filter(isOrchestrationTarget);
     const targets = [...localTargets, ...remoteTargets];
     if (targets.length > 1 || targets.some((target) => target.entityKind !== "agent" || target.source !== "local")) {
       onRecommendExecute?.({ kind: "network", targets, routerAgent }, text, opts);

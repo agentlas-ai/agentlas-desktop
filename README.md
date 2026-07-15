@@ -69,7 +69,7 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
-- **2026-07-15 · v0.8.36 — executable hierarchy and repaired atomic release pipeline** —
+- **2026-07-15 · v0.8.37 — executable hierarchy and fail-closed exact routing** —
   Normal Desktop turns retain the mandatory local Model2Vec hybrid recall:
   effective tasks use owner-scoped Memory and eligible reviewed Experience,
   then rank with the adaptive all-relevant-or-top-k budget. Borrowed-agent
@@ -100,7 +100,11 @@ authority for which version is actually public, stable, and downloadable.
   v0.8.34 was an unpublished source tag whose invalid workflow produced no
   jobs. v0.8.35 then exposed a stale five-path Linux security assertion after
   the exact temporary-TF path became the sixth restricted-read propagation
-  path. v0.8.36 repairs both gates without rewriting either old tag.
+  path. v0.8.36 then passed Linux and Windows packaging, but its stale macOS
+  routing QA omitted the now-required exact target. The atomic barrier stopped
+  it before any partial public release or feed write. v0.8.37 validates the
+  target at the renderer trust boundary and aligns both Korean and English QA
+  fixtures without rewriting any older tag.
 
   The updater refuses a running macOS app outside the pinned Developer ID,
   designated-requirement, notarization, and Gatekeeper lineage before download

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.8.37 — 2026-07-15
+
+### Fixed
+
+- **Automatic routing now validates the exact orchestration target before it
+  reaches the chat executor.** Local Agent, Team, and Group targets must carry
+  their matching `agentId`, `firmId`, or `groupId`; Cloud and Hub Agent/Team
+  targets must carry a non-empty slug. A malformed or stale IPC response can no
+  longer crash the renderer while reading `entityKind`.
+- **The macOS chat-routing QA and shared renderer bridge now implement the same
+  required target contract as production.** Korean and English UI runs prove
+  that an auto-routed local Agent reaches `invoke:run` as the exact
+  `local/agent/agentId` temporary-TF member.
+
+### Boundaries and edge cases
+
+- v0.8.36 passed the Linux security preflight and produced a verified Windows
+  artifact, but the stale macOS QA response omitted its required target and the
+  atomic release barrier stopped promotion. No partial public release or feed
+  update was written; v0.8.37 replaces that unpublished candidate without
+  rewriting its immutable tag.
+- The bundled Core remains Agentlas OS v1.1.37 at immutable commit
+  c86aa86ccb3424e67be0b45ec253cc408af99df7.
+- This source commit and Core pin combination does not prove a Git tag,
+  installer, update feed, or GitHub release. Stable/latest remains blocked
+  until every native package, install-lifecycle, and served-byte gate passes.
+
 ## 0.8.36 — 2026-07-15
 
 ### Fixed

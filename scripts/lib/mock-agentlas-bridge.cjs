@@ -864,7 +864,13 @@ function setupMockAgentlasBridge(options) {
         if (options.recommendMode === "single") {
           return {
             mode: "single",
-            agents: [{ id: "agent-1", name: "오케스트레이터", source: "local", estCredits: null }],
+            agents: [{
+              id: "agent-1",
+              name: "오케스트레이터",
+              source: "local",
+              estCredits: null,
+              target: { source: "local", entityKind: "agent", agentId: "agent-1" },
+            }],
             totalEstCredits: null,
             estimate: true,
             rawAction: "single",
@@ -875,8 +881,20 @@ function setupMockAgentlasBridge(options) {
           return {
             mode: "network",
             agents: [
-              { id: "no-ai-slop-copywriter", name: "No-AI-Slop Copywriter", source: "hub", estCredits: 3 },
-              { id: "security-reviewer", name: "Security Reviewer", source: "hub", estCredits: 3 },
+              {
+                id: "no-ai-slop-copywriter",
+                name: "No-AI-Slop Copywriter",
+                source: "hub",
+                estCredits: 3,
+                target: { source: "hub", entityKind: "agent", slug: "no-ai-slop-copywriter" },
+              },
+              {
+                id: "security-reviewer",
+                name: "Security Reviewer",
+                source: "hub",
+                estCredits: 3,
+                target: { source: "hub", entityKind: "agent", slug: "security-reviewer" },
+              },
             ],
             totalEstCredits: 6,
             estimate: true,
