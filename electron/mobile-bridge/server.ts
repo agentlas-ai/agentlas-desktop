@@ -621,10 +621,20 @@ export class AgentlasMobileBridgeServer {
         state.socket.close(1009, "snapshot too large");
         return;
       }
+      // DESKTOP_MOBILE_BRIDGE: The Cloud Relay route is re-advertised on every
+      // authenticated connection, not only at pair time. A phone paired before
+      // this Desktop had a relay (or before a relay endpoint/secret rotation)
+      // otherwise keeps a null route forever and silently refuses to fall back
+      // — it just fails against a LAN address it can no longer reach. Sending
+      // it here lets an existing pairing recover with no re-pair. This is the
+      // same secret-free-per-contract payload the pair exchange returns, and it
+      // only ever crosses an already-authenticated, host-verified socket.
+      const relay = this.relayPairingInfo?.() ?? null;
       this.sendEvent(state, "bridge.ready", {
         protocolVersion: MOBILE_BRIDGE_PROTOCOL_VERSION,
         connectionId: state.context.connectionId,
         hostId: snapshot.host.id,
+        ...(relay ? { relay } : {}),
       });
       this.sendEvent(state, "snapshot.updated", snapshot as unknown as MobileBridgeJsonValue);
       if (state.socket.readyState !== WS_OPEN) return;
