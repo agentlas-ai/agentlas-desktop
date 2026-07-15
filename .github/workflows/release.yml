@@ -409,6 +409,22 @@ jobs:
       - name: Install updater E2E dependencies
         run: npm ci
 
+      - name: Configure Linux updater relaunch sandbox
+        if: runner.os == 'Linux'
+        run: |
+          node node_modules/electron/install.js
+          sandbox_path="$(find node_modules/electron -maxdepth 4 -name chrome-sandbox -print -quit)"
+          if [ -z "$sandbox_path" ]; then
+            echo "::error::Electron Linux binary installed without the required chrome-sandbox helper."
+            exit 1
+          fi
+          sandbox_path="$(realpath "$sandbox_path")"
+          sudo chown root:root "$sandbox_path"
+          sudo chmod 4755 "$sandbox_path"
+          test "$(stat -c '%U:%G:%a' "$sandbox_path")" = "root:root:4755"
+          echo "CHROME_DEVEL_SANDBOX=$sandbox_path" >> "$GITHUB_ENV"
+          echo "Configured inherited Electron SUID sandbox helper: $sandbox_path"
+
       - name: Resolve exact updater target identity
         shell: bash
         env:

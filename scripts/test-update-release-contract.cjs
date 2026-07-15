@@ -286,6 +286,7 @@ assert.doesNotMatch(
 );
 const crossPlatformWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release.yml"), "utf8");
 const signedMacWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release-signed-mac.yml"), "utf8");
+const updaterE2eRecheckWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "updater-e2e-recheck.yml"), "utf8");
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 const changelog = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
 const publishMacSource = fs.readFileSync(path.join(root, "scripts", "publish-mac-release.mjs"), "utf8");
@@ -359,6 +360,7 @@ const workflowEntries = [
   ["release.yml", parsedWorkflow(crossPlatformWorkflow, "release.yml")],
   ["release-signed-mac.yml", parsedWorkflow(signedMacWorkflow, "release-signed-mac.yml")],
 ];
+const parsedUpdaterE2eRecheckWorkflow = parsedWorkflow(updaterE2eRecheckWorkflow, "updater-e2e-recheck.yml");
 const unsafeShellExpression = /\$\{\{[^}]*\b(?:inputs\.(?:tag|version|draft|apply_web_env)|github\.(?:ref_name|event\.inputs\.(?:tag|version)))\b[^}]*\}\}/;
 const secretEnvNames = new Set([
   "APPLE_ID",
@@ -530,6 +532,7 @@ const nativeUpdaterArtifactStep = nativeUpdaterE2eSteps.find((step) => step.name
 const nativeUpdaterHarnessCheckoutStep = nativeUpdaterE2eSteps.find((step) => step.name === "Checkout immutable release verifier");
 const nativeUpdaterHarnessIdentityStep = nativeUpdaterE2eSteps.find((step) => step.name === "Verify release verifier identity");
 const nativeUpdaterRunStep = nativeUpdaterE2eSteps.find((step) => step.name === "Run v0.8.32 to target native updater lifecycle");
+const nativeUpdaterSandboxStep = nativeUpdaterE2eSteps.find((step) => step.name === "Configure Linux updater relaunch sandbox");
 assert.ok(nativeUpdaterArtifactStep, "native updater E2E must consume the exact build-barrier artifact");
 assert.equal(nativeUpdaterArtifactStep.uses, "actions/download-artifact@v4");
 assert.equal(nativeUpdaterArtifactStep.with.name, "agentlas-release-${{ matrix.artifact_os }}");
@@ -543,6 +546,18 @@ assert.ok(nativeUpdaterHarnessIdentityStep, "the updater E2E must fail closed if
 assert.match(nativeUpdaterHarnessIdentityStep.run, /git -C \.release-harness rev-parse HEAD/);
 assert.match(nativeUpdaterHarnessIdentityStep.run, /does not match immutable ref/);
 assert.ok(nativeUpdaterRunStep, "native updater E2E must expose a named lifecycle verifier");
+assert.ok(nativeUpdaterSandboxStep, "Linux updater relaunch must receive a working Chromium sandbox on hosted runners");
+assert.equal(nativeUpdaterSandboxStep.if, "runner.os == 'Linux'");
+assert.match(nativeUpdaterSandboxStep.run, /find node_modules\/electron -maxdepth 4 -name chrome-sandbox -print -quit/);
+assert.match(nativeUpdaterSandboxStep.run, /chown root:root/);
+assert.match(nativeUpdaterSandboxStep.run, /chmod 4755/);
+assert.match(nativeUpdaterSandboxStep.run, /stat -c '%U:%G:%a'/);
+assert.match(nativeUpdaterSandboxStep.run, /CHROME_DEVEL_SANDBOX=.*GITHUB_ENV/);
+const updaterRecheckSandboxStep = workflowSteps(parsedUpdaterE2eRecheckWorkflow)
+  .find((step) => step.name === "Configure Linux updater relaunch sandbox");
+assert.ok(updaterRecheckSandboxStep, "artifact-only updater recheck must reproduce the Linux relaunch sandbox boundary");
+assert.equal(updaterRecheckSandboxStep.if, "runner.os == 'Linux'");
+assert.equal(updaterRecheckSandboxStep.run, nativeUpdaterSandboxStep.run);
 assert.equal(nativeUpdaterRunStep.shell, "bash");
 assert.equal(nativeUpdaterRunStep.env.CI, "true");
 assert.match(
