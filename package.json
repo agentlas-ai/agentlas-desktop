@@ -225,6 +225,7 @@
     "watch:automation": "node scripts/audit-automation-health.mjs",
     "test:cli-image-attachments": "npm run build:electron && node scripts/test-cli-image-attachments.cjs",
     "test:desktop-feature-surfaces": "npm run build:renderer && node scripts/test-desktop-feature-surfaces.cjs",
+    "test:engine-auto-toggle-ui": "npm run build:renderer && node scripts/test-desktop-feature-surfaces.cjs --engine-toggles-only",
     "test:ontology-feature-update": "npm run build:renderer && node scripts/test-ontology-feature-update.cjs",
     "proof:existing-user-ontology-ui": "npm run build && node scripts/proof-existing-user-ontology-ui.cjs",
     "test:all-routes-ui": "npm run build:renderer && node scripts/test-all-routes-ui.cjs",

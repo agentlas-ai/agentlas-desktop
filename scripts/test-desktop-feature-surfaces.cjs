@@ -98,6 +98,11 @@ async function main() {
       console.log("desktop chat recommendation surface smoke passed");
       return;
     }
+    if (process.argv.includes("--engine-toggles-only")) {
+      await runDashboardEngineToggleSurface(browser, baseUrl, evidence);
+      console.log("desktop engine auto-toggle surface smoke passed");
+      return;
+    }
     if (process.argv.includes("--build-roster-sync-only")) {
       await runBuildRosterSyncSurface(browser, baseUrl, evidence);
       await runBuildRosterReplaySurface(browser, baseUrl, evidence);
@@ -160,6 +165,7 @@ async function main() {
       return;
     }
     await runSurface("dashboard-first-visit", () => runDashboardFirstVisitTourSurface(browser, baseUrl, evidence));
+    await runSurface("dashboard-engine-toggles", () => runDashboardEngineToggleSurface(browser, baseUrl, evidence));
     await runSurface("dashboard-attention", () => runDashboardAttentionSurface(browser, baseUrl, evidence));
     await runSurface("build", () => runBuildSurface(browser, baseUrl, evidence));
     await runSurface("build-roster-sync", () => runBuildRosterSyncSurface(browser, baseUrl, evidence));
@@ -581,6 +587,22 @@ async function runDashboardAttentionSurface(browser, baseUrl, evidence) {
   );
 
   await finishPage(context, page, errors, evidence, "dashboard-attention-surface");
+}
+
+async function runDashboardEngineToggleSurface(browser, baseUrl, evidence) {
+  const { context, page, errors } = await newPage(browser);
+  await page.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
+  const stormbreaker = page.locator('[data-engine-toggle-id="stormbreaker"]');
+  const network = page.locator('[data-engine-toggle-id="network"]');
+  await network.waitFor();
+  assert.equal(await stormbreaker.getAttribute("data-on"), "false", "fresh Stormbreaker default must remain OFF");
+  assert.equal(await network.getAttribute("data-on"), "true", "fresh Network Workforce default must be ON");
+  await page.getByText(/신규 설치 기본값: Stormbreaker OFF · hep-network ON|New-install defaults: Stormbreaker OFF · hep-network ON/).waitFor();
+  await network.click();
+  await page.waitForFunction(() => document.querySelector('[data-engine-toggle-id="network"]')?.getAttribute("data-on") === "false");
+  const call = await page.evaluate(() => window.__qa.calls.find((item) => item.name === "hephaestus.setEngineToggle"));
+  assert.deepEqual(call.payload, { id: "network", enabled: false }, "Dashboard opt-out must reach the persisted settings IPC");
+  await finishPage(context, page, errors, evidence, "dashboard-engine-auto-toggle-surface");
 }
 
 async function runDashboardFirstVisitTourSurface(browser, baseUrl, evidence) {
