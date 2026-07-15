@@ -69,6 +69,15 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-15 · v0.8.40 — canonical automation schema gate** — The migration
+  replay test reads the package's canonical schema target and verifies both Hub
+  package and durable runtime pin columns. v0.8.39 passed its Mac scheduler fix
+  but stopped in Linux preflight on the stale schema-65 assertion before any
+  package or public write. The complete OpenCrab security command sequence passes
+  before this tag. Agentlas OS v1.1.37 remains pinned at
+  c86aa86ccb3424e67be0b45ec253cc408af99df7. This source state does not prove a
+  public installer or update-feed release.
+
 - **2026-07-15 · v0.8.39 — runtime-pin release gate alignment** — The scheduler
   guard fixture now declares the exact mocked Codex runtime required by the
   production fail-closed contract. v0.8.38 stopped in preflight before any

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.40 — 2026-07-15
+
+### Fixed
+
+- **Automation migration verification now follows the canonical package schema
+  target instead of a stale literal.** The v64 permission replay still proves
+  read/write authority preservation, and now also proves the v66 Hub package pin
+  and v67 durable runtime pin columns while comparing `user_version` with
+  `agentlasUpdateCompatibility.targetSchemaVersion`.
+- v0.8.39 passed the corrected macOS scheduler guard but stopped in the Linux
+  OpenCrab preflight because the migration fixture still asserted schema 65.
+  No native packages, public release, feeds, or production metadata were
+  written. The complete OpenCrab security command sequence now passes locally
+  before the v0.8.40 tag.
+- Agentlas OS v1.1.37 remains pinned at immutable commit
+  c86aa86ccb3424e67be0b45ec253cc408af99df7. This source does not prove a public
+  installer; native updater, signing, and served-byte gates remain authoritative.
+
 ## 0.8.39 — 2026-07-15
 
 ### Fixed

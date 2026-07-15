@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const Database = require("better-sqlite3");
 const { app } = require("electron");
+const targetSchemaVersion = require("../package.json").agentlasUpdateCompatibility.targetSchemaVersion;
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-v64-automation-permission-"));
 const storePath = path.join(temp, "agentlas.sqlite");
@@ -60,7 +61,7 @@ seed.close();
     let store = require("../dist/electron/store/db.js");
     store.initStore();
     let db = store.getDb();
-    assert.equal(db.pragma("user_version", { simple: true }), 65);
+    assert.equal(db.pragma("user_version", { simple: true }), targetSchemaVersion);
 
     const permissionColumn = db
       .prepare("PRAGMA table_info(automations)")
@@ -80,6 +81,9 @@ seed.close();
     assert.equal(automations.getAutomation("legacy-write").executionPermission, "write");
     db.prepare("UPDATE automations SET execution_permission = 'read' WHERE id = ?").run("legacy-write");
     assert.equal(automations.getAutomation("legacy-write").executionPermission, "read");
+    const migratedColumns = new Set(db.prepare("PRAGMA table_info(automations)").all().map((column) => column.name));
+    assert.ok(migratedColumns.has("target_version"), "v66 must add the Hub package pin");
+    assert.ok(migratedColumns.has("runtime_selection_json"), "v67 must add the durable runtime pin");
     assert.throws(
       () => db.prepare("UPDATE automations SET execution_permission = 'full' WHERE id = ?").run("legacy-write"),
       /CHECK constraint failed/,
@@ -95,7 +99,7 @@ seed.close();
     store = require("../dist/electron/store/db.js");
     store.initStore();
     db = store.getDb();
-    assert.equal(db.pragma("user_version", { simple: true }), 65);
+    assert.equal(db.pragma("user_version", { simple: true }), targetSchemaVersion);
     assert.equal(
       db.prepare("PRAGMA table_info(automations)").all()
         .filter((column) => column.name === "execution_permission").length,
