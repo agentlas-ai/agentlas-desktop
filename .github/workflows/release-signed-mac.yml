@@ -204,7 +204,10 @@ jobs:
         run: npm run typecheck
 
       - name: Verify Agent Workforce Ontology orchestration
-        run: npm run test:workforce-orchestrator
+        run: |
+          npm run test:workforce-orchestrator
+          npm run test:hephaestus-settings-migration
+          npm run test:auto-router-gates
 
       - name: Verify embedded Stormbreaker harness
         run: |
@@ -282,6 +285,7 @@ jobs:
           npm run test:document-studio-draft-persistence
           npm run test:prompts-start-failure-ui
           npm run test:settings-resilience-ui
+          npm run test:engine-auto-toggle-ui
           npm run test:startup-founder-new-idea
           npm run test:trex-ui
           npm run test:trex-attachments-ui

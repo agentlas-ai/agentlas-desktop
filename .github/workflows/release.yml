@@ -144,6 +144,8 @@ jobs:
             npm run test:cli-image-attachments
             npm run test:owned-agent-runtime-prompts
             npm run test:workforce-orchestrator
+            npm run test:hephaestus-settings-migration
+            npm run test:auto-router-gates
             npm run test:opencrab-core
             npm run test:opencrab-product
             npm run test:opencrab-recovery-scrub
@@ -309,6 +311,8 @@ jobs:
             npm run test:mobile-execution-boundary
             npm run test:borrowed-task-force
             npm run test:workforce-orchestrator
+            npm run test:hephaestus-settings-migration
+            npm run test:auto-router-gates
             npm run test:mcp-auto-select
             npm run test:mcp-secret-isolation
             # Experience Ontology: real Memory attribution, legacy recovery,

@@ -7,6 +7,8 @@ on:
       - "electron/hephaestus/commands.ts"
       - "electron/hephaestus/engine.ts"
       - "electron/hephaestus/loop-engineering.ts"
+      - "electron/hephaestus/supervisor.ts"
+      - "electron/agents/auto-router.ts"
       - "electron/architecture/project-bootstrap.ts"
       - "electron/architecture/activation.ts"
       - "electron/memory/context.ts"
@@ -45,6 +47,8 @@ on:
       - "scripts/test-workload-routing.cjs"
       - "scripts/test-workforce-orchestrator.cjs"
       - "scripts/test-workforce-execution-receipt.cjs"
+      - "scripts/test-hephaestus-settings-migration.cjs"
+      - "scripts/test-auto-router-gates.cjs"
       - "scripts/test-build-workload-routing.cjs"
       - "scripts/test-stormbreaker-core-harness.cjs"
       - "scripts/test-stormbreaker-swarm-contract.cjs"
@@ -110,6 +114,8 @@ on:
       - "electron/hephaestus/commands.ts"
       - "electron/hephaestus/engine.ts"
       - "electron/hephaestus/loop-engineering.ts"
+      - "electron/hephaestus/supervisor.ts"
+      - "electron/agents/auto-router.ts"
       - "electron/architecture/project-bootstrap.ts"
       - "electron/architecture/activation.ts"
       - "electron/memory/context.ts"
@@ -148,6 +154,8 @@ on:
       - "scripts/test-workload-routing.cjs"
       - "scripts/test-workforce-orchestrator.cjs"
       - "scripts/test-workforce-execution-receipt.cjs"
+      - "scripts/test-hephaestus-settings-migration.cjs"
+      - "scripts/test-auto-router-gates.cjs"
       - "scripts/test-build-workload-routing.cjs"
       - "scripts/test-stormbreaker-core-harness.cjs"
       - "scripts/test-stormbreaker-swarm-contract.cjs"
@@ -253,12 +261,18 @@ jobs:
       - name: Verify Agent Workforce Ontology on Linux
         if: runner.os == 'Linux'
         working-directory: agentlas-desktop
-        run: xvfb-run -a npm run test:workforce-orchestrator
+        run: |
+          xvfb-run -a npm run test:workforce-orchestrator
+          xvfb-run -a npm run test:hephaestus-settings-migration
+          npm run test:auto-router-gates
       - name: Verify Agent Workforce Ontology on macOS and Windows
         if: runner.os != 'Linux'
         working-directory: agentlas-desktop
         shell: bash
-        run: npm run test:workforce-orchestrator
+        run: |
+          npm run test:workforce-orchestrator
+          npm run test:hephaestus-settings-migration
+          npm run test:auto-router-gates
       - name: Verify installed Core on Linux
         if: runner.os == 'Linux'
         working-directory: agentlas-desktop

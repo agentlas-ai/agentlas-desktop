@@ -41,6 +41,16 @@ assert.match(
   "Stormbreaker release gate must execute the Desktop host executor, not only the Core planner",
 );
 assert.equal(
+  pkg.scripts["test:hephaestus-settings-migration"],
+  "npm run build:electron && electron scripts/test-hephaestus-settings-migration.cjs",
+  "release gates must prove fresh Network Workforce defaults and stored opt-outs",
+);
+assert.equal(
+  pkg.scripts["test:auto-router-gates"],
+  "npm run build:electron && node scripts/test-auto-router-gates.cjs",
+  "release gates must prove ordinary complex prompts enter Workforce only at the top leader turn",
+);
+assert.equal(
   pkg.scripts["test:packaged-agent-app-mcp"],
   "node scripts/test-packaged-agent-app-mcp.cjs",
   "the packaged fuse and System Time handshake must remain directly executable",
@@ -615,6 +625,8 @@ assert.doesNotMatch(
 for (const requiredGate of [
   "npm run test:cli-version-parser",
   "npm run test:hephaestus-status-version",
+  "npm run test:hephaestus-settings-migration",
+  "npm run test:auto-router-gates",
   "npm run test:marketplace-cache",
   "npm run test:after-pack-runtime-contract",
   "npm run test:stormbreaker-core:embedded",
@@ -833,6 +845,7 @@ for (const requiredGate of [
   "npm run test:document-studio-draft-persistence",
   "npm run test:prompts-start-failure-ui",
   "npm run test:settings-resilience-ui",
+  "npm run test:engine-auto-toggle-ui",
   "npm run test:startup-founder-new-idea",
   "npm run test:trex-ui",
   "npm run test:trex-attachments-ui",

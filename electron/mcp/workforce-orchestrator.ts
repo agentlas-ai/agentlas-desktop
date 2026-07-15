@@ -20,12 +20,14 @@ const ENTITY_KINDS = new Set(["agent", "team", "group"]);
 const EVIDENCE_LEVELS = new Set(["declared", "checked", "demonstrated", "attested"]);
 const WORK_ORDER_HEADING = "## Workforce Work Order";
 const SELECTION_HEADING = "## Workforce Selection";
-const WORKFORCE_ONTOLOGY_VERSION = "awo:2026-07-15.1";
+export const WORKFORCE_ONTOLOGY_VERSION = "awo:2026-07-15.2";
+export const WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256 = "d6d30d45fe8d35fb785e165d1e80c6471a72436f0160c3933c21d4a31bf2fb32";
 const WORKFORCE_ONTOLOGY_MENU = [
   "Controlled communities: community:software-engineering, community:backend-engineering, community:frontend-engineering, community:database-engineering, community:payments-engineering, community:quality-engineering, community:security-engineering, community:data-engineering, community:ai-engineering, community:devops, community:product-design, community:research, community:marketing, community:finance, community:corporate-development, community:insurance, community:insurance-actuarial, community:insurance-claims, community:insurance-underwriting, community:human-resources, community:information-technology, community:legal, community:travel, community:operations, community:agent-systems.",
   "Controlled roles: role:software-architect, role:backend-engineer, role:frontend-engineer, role:database-engineer, role:payments-engineer, role:quality-engineer, role:security-engineer, role:ontology-architect, role:agent-runtime-engineer, role:researcher, role:ma-diligence-lead, role:insurance-actuary, role:claims-diligence-specialist, role:underwriting-diligence-specialist, role:travel-planner.",
   "Canonical skills: skill:software-architecture, skill:api-design, skill:server-implementation, skill:frontend-implementation, skill:data-modeling, skill:database-querying, skill:billing-integration, skill:transaction-integrity, skill:test-design, skill:verification, skill:security-review, skill:ontology-modeling, skill:knowledge-graph-design, skill:multi-agent-orchestration, skill:runtime-integration, skill:evidence-synthesis, skill:deal-diligence, skill:valuation, skill:actuarial-reserving, skill:solvency-analysis, skill:claims-liability-assessment, skill:underwriting-portfolio-analysis, skill:travel-planning.",
   "Canonical tool capabilities: tool:file-system, tool:file-read, tool:file-write, tool:shell, tool:web-search, tool:browser, tool:mongodb, tool:database, tool:github, tool:payments.",
+  "Canonical community aliases in this snapshot: payment maps to community:payments-engineering; security maps to community:security-engineering.",
   "Legacy Hub profiles may legitimately have empty roles, skills or toolCapabilities. Every required* field is a non-negotiable hard eligibility gate: use it only when a matching catalog declaration is mandatory, never merely because that expertise would be useful for the work.",
   "Use a broad requiredCommunities occupational boundary when that boundary is non-negotiable, and exclude clearly irrelevant communities such as community:travel. Express task-specific semantic fit with slot title and task plus optionalCommunities and optionalSkills, so the top host LLM can compare candidate names, summaries and semantic snapshots instead of filtering legacy profiles out.",
   "Use artifact:<kind> for consumes, produces and edge artifactKinds. If no controlled role precisely applies, leave requiredRoles empty and express the job through a controlled community, canonical skills, task text and optional constraints; never invent a near-synonym role ID.",
@@ -85,6 +87,7 @@ export interface WorkforceSelectionReceipt {
   preparationReceiptId: string;
   candidateSetDigest: string;
   ontologyVersion: string;
+  ontologySnapshotSha256: string;
   decisionOwner: "host_llm";
   decisionModel: string;
   decisionRuntime: string | null;
@@ -739,6 +742,7 @@ function workOrderSystemPrompt(modelId: string, runtimeId: string, benchmarkMode
     "Do not turn important-but-negotiable expertise into requiredRoles, requiredSkills, requiredKnowledge or requiredToolCapabilities; those fields demand matching catalog evidence and hard-reject profiles without it.",
     "Do not name or select agents. Do not use popularity, ratings, invocation history, revenue or prior success as fit evidence.",
     `ontologyVersion must be exactly ${WORKFORCE_ONTOLOGY_VERSION}.`,
+    `The pinned Core ontology raw JSON sha256 is ${WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256}.`,
     WORKFORCE_ONTOLOGY_MENU,
     "The Hub receives this object, so taskBrief and role tasks must be redacted of local paths, secrets, account data and private memory.",
     benchmarkMode ? "Benchmark mode: create at least two genuinely distinct required role slots so delegation and synthesis are observable." : "",
@@ -938,6 +942,7 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
     preparationReceiptId: requireId(prepared.preparation.preparationReceiptId, "preparationReceiptId"),
     candidateSetDigest: requireSha256(candidateSet.candidateSetDigest, "candidateSetDigest"),
     ontologyVersion: requireId(candidateSet.ontologyVersion, "ontologyVersion"),
+    ontologySnapshotSha256: WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256,
     decisionOwner: "host_llm",
     decisionModel: modelId,
     decisionRuntime: runtimeId,

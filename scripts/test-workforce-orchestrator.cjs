@@ -6,6 +6,8 @@ const {
   parseLeaderJson,
   parseWorkforceCommand,
   runWorkforceSelection,
+  WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256,
+  WORKFORCE_ONTOLOGY_VERSION,
   validateExecutionPreparation,
   validateCandidateSet,
   validateLeaderSelection,
@@ -28,7 +30,7 @@ const workOrder = {
   workOrderId: "work-order:test-backend",
   taskBrief: "Design and verify a payment API without local or customer data.",
   redacted: true,
-  ontologyVersion: "awo:2026-07-15.1",
+  ontologyVersion: "awo:2026-07-15.2",
   roleSlots: [{
     slotId: "slot:backend",
     title: "Backend payment engineer",
@@ -67,7 +69,7 @@ const candidateSet = {
   schemaVersion: "agentlas.workforce-candidate-set.v1",
   selectionSessionId: "selection:test-backend",
   workOrderId: workOrder.workOrderId,
-  ontologyVersion: "awo:2026-07-15.1",
+  ontologyVersion: "awo:2026-07-15.2",
   candidateSetDigest: hash("a"),
   decisionOwner: "host_llm",
   historyInfluence: "none",
@@ -274,7 +276,12 @@ function fenced(heading, value) {
     "workforce.prepare_execution",
   ]);
   assert.equal(leaderTurns.length, 2, "the active host LLM must author work order and selection");
-  assert.match(leaderTurns[0].systemPrompt, /awo:2026-07-15\.1/);
+  assert.equal(WORKFORCE_ONTOLOGY_VERSION, "awo:2026-07-15.2");
+  assert.equal(WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256, "d6d30d45fe8d35fb785e165d1e80c6471a72436f0160c3933c21d4a31bf2fb32");
+  assert.match(leaderTurns[0].systemPrompt, /awo:2026-07-15\.2/);
+  assert.match(leaderTurns[0].systemPrompt, /payment maps to community:payments-engineering/);
+  assert.match(leaderTurns[0].systemPrompt, /security maps to community:security-engineering/);
+  assert.match(leaderTurns[0].systemPrompt, new RegExp(WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256));
   assert.match(leaderTurns[0].systemPrompt, /role:payments-engineer/);
   assert.match(leaderTurns[0].systemPrompt, /role:quality-engineer/);
   assert.match(leaderTurns[0].systemPrompt, /community:payments-engineering/);
@@ -300,6 +307,7 @@ function fenced(heading, value) {
   assert.equal(result.specs[0].contentDigest, hash("c"));
   assert.equal(result.receipt.decisionOwner, "host_llm");
   assert.equal(result.receipt.historyInfluence, "none");
+  assert.equal(result.receipt.ontologySnapshotSha256, WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256);
   assert.deepEqual(result.receipt.substitutions, []);
   assert.ok(events.some((event) => event.tool?.name === "workforce.search_candidates"));
 
