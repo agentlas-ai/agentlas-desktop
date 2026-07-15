@@ -45,7 +45,7 @@ jobs:
     timeout-minutes: 35
     env:
       HEPHAESTUS_REF: v1.1.38
-      HEPHAESTUS_COMMIT: 3ff22e87c328b3ea505dd966a536f3ab6ccab09a
+      HEPHAESTUS_COMMIT: 23f441d3f3ea8db126103475a5c4857148c8ce0b
 
     steps:
       - uses: actions/checkout@v4
@@ -165,7 +165,7 @@ jobs:
     timeout-minutes: 45
     env:
       HEPHAESTUS_REF: v1.1.38
-      HEPHAESTUS_COMMIT: 3ff22e87c328b3ea505dd966a536f3ab6ccab09a
+      HEPHAESTUS_COMMIT: 23f441d3f3ea8db126103475a5c4857148c8ce0b
 
     steps:
       - uses: actions/checkout@v4

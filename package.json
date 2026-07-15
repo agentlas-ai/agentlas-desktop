@@ -27,7 +27,7 @@
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
     "ref": "v1.1.38",
-    "commit": "3ff22e87c328b3ea505dd966a536f3ab6ccab09a"
+    "commit": "23f441d3f3ea8db126103475a5c4857148c8ce0b"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
