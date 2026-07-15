@@ -16,6 +16,7 @@ interface RelaySocket {
   on(event: "open", listener: () => void): this;
   on(event: "message", listener: (data: unknown, isBinary: boolean) => void): this;
   on(event: "close" | "error", listener: (...args: unknown[]) => void): this;
+  on(event: "unexpected-response", listener: (request: unknown, response: unknown) => void): this;
   send(data: unknown, options?: { binary?: boolean }): void;
   close(code?: number, reason?: string): void;
   terminate(): void;
@@ -115,6 +116,9 @@ export class MobileBridgeCloudRelay {
   private retryTimer: NodeJS.Timeout | null = null;
   private stopped = true;
   private retryAttempt = 0;
+  // Deduplicates control-channel diagnostics so a 5s retry loop cannot spam the
+  // log. Only transitions are logged, never the cookie or relay secret.
+  private lastControlLog: "signed-out" | "connected" | "closed" | "error" | "rejected" | null = null;
   private readonly tunnels = new Set<RelaySocket>();
 
   constructor(private readonly options: MobileBridgeCloudRelayOptions) {
@@ -151,10 +155,20 @@ export class MobileBridgeCloudRelay {
     this.retryTimer.unref?.();
   }
 
+  private logControl(state: typeof this.lastControlLog, message: string, warn = false): void {
+    if (this.lastControlLog === state) return;
+    this.lastControlLog = state;
+    if (warn) console.warn(`[mobile-bridge-relay] ${message}`);
+    else console.info(`[mobile-bridge-relay] ${message}`);
+  }
+
   private connectControl(): void {
     if (this.stopped || this.control) return;
     const cookie = getSessionCookieHeader();
     if (!cookie) {
+      // The single most common reason remote access silently never works: the
+      // relay tunnel requires this Desktop to be signed in to Agentlas.
+      this.logControl("signed-out", "remote access paused — this Desktop is not signed in to Agentlas", true);
       this.options.onStatusChanged?.();
       this.scheduleConnect(5_000);
       return;
@@ -172,13 +186,29 @@ export class MobileBridgeCloudRelay {
     socket.on("open", () => {
       opened = true;
       this.retryAttempt = 0;
+      this.logControl("connected", "remote access control channel connected");
       this.options.onStatusChanged?.();
     });
+    socket.on("unexpected-response", (_request, response) => {
+      const status =
+        response && typeof response === "object" && "statusCode" in response
+          ? (response as { statusCode?: unknown }).statusCode
+          : "unknown";
+      // Server-side reason, no secrets: 401 = bad relay credential/session,
+      // 503 = relay endpoint unavailable, 429 = too many devices.
+      this.logControl("rejected", `remote access control channel rejected by server (HTTP ${status})`, true);
+    });
     socket.on("message", (data) => this.handleControlMessage(data));
-    const disconnected = () => {
+    const disconnected = (...args: unknown[]) => {
       if (this.control !== socket) return;
       this.control = null;
-      if (!opened) socket.terminate();
+      if (!opened) {
+        socket.terminate();
+        const detail = args[0] instanceof Error ? `: ${args[0].message}` : "";
+        this.logControl("error", `remote access control channel unavailable${detail}`, true);
+      } else {
+        this.logControl("closed", "remote access control channel closed; retrying");
+      }
       this.options.onStatusChanged?.();
       this.scheduleConnect();
     };

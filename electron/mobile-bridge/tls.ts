@@ -10,12 +10,20 @@ import { generate } from "selfsigned";
 const BRIDGE_DIR = "mobile-bridge";
 const CERTIFICATE_FILE = "server-cert.pem";
 const PRIVATE_KEY_FILE = "server-key.pem";
-const RENEW_BEFORE_MS = 30 * 24 * 60 * 60 * 1_000;
+// Paired phones pin the exact certificate DER (sha256), so any reissue changes
+// the fingerprint and locks every paired device out (fail-closed). This is a
+// pinned self-signed anchor verified out-of-band by the QR payload, NOT a
+// public-CA leaf, so it does not fall under the 825-day system TLS policy. A
+// century-long lifetime therefore means the certificate effectively never has
+// to rotate, which is what keeps a long-lived pairing from silently breaking.
+const CERTIFICATE_LIFETIME_MS = 100 * 365 * 24 * 60 * 60 * 1_000;
 
 export interface MobileBridgeTlsMaterial {
   serverOptions: https.ServerOptions;
   certificateFingerprint: string;
   certificateDer: string;
+  /** True only when this launch minted a NEW certificate (fingerprint changed). */
+  rotated: boolean;
 }
 
 function bridgeDirectory(userDataPath: string): string {
@@ -109,8 +117,11 @@ function materialFromPem(certificate: string, privateKey: string): MobileBridgeT
     throw new Error("Mobile Bridge TLS private key does not match its certificate");
   }
   const expiresAt = Date.parse(parsed.validTo);
-  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() + RENEW_BEFORE_MS) {
-    throw new Error("Mobile Bridge TLS certificate is expired or near expiry");
+  // Only a genuinely expired certificate is rejected. A "near expiry" renewal
+  // window was the time bomb: it reissued the certificate ahead of expiry,
+  // changing the pinned fingerprint and forcing every paired phone to re-pair.
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    throw new Error("Mobile Bridge TLS certificate is expired");
   }
   return {
     serverOptions: {
@@ -120,6 +131,7 @@ function materialFromPem(certificate: string, privateKey: string): MobileBridgeT
     },
     certificateFingerprint: normalizeFingerprint(parsed.fingerprint256),
     certificateDer: parsed.raw.toString("base64"),
+    rotated: false,
   };
 }
 
@@ -154,7 +166,7 @@ export async function loadOrCreateMobileBridgeTls(
   }
 
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + 825 * 24 * 60 * 60 * 1_000);
+  const expiresAt = new Date(now.getTime() + CERTIFICATE_LIFETIME_MS);
   const generated = await generate(
     [{ name: "commonName", value: os.hostname() || "Agentlas Desktop" }],
     {
@@ -183,7 +195,11 @@ export async function loadOrCreateMobileBridgeTls(
   // as an incomplete pair on the next launch and never silently regenerated.
   writePrivateFileAtomic(keyPath, generated.private);
   writePrivateFileAtomic(certPath, generated.cert);
-  return material;
+  // rotated: true lets the runtime surface a "paired phones must re-pair"
+  // warning instead of silently changing the pinned fingerprint. With the
+  // century-long lifetime and no renewal window this path is now only reached
+  // on first launch or genuine file loss, not on routine near-expiry.
+  return { ...material, rotated: true };
 }
 
 function isPrivateIpv4(address: string): boolean {

@@ -480,6 +480,7 @@ function setupMockAgentlasBridge(options) {
         mobileBridgeDevices[index] = { ...mobileBridgeDevices[index], revokedAt: new Date().toISOString() };
         return { ok: true };
       },
+      revealLog: async () => ({ ok: true }),
     },
     auth: {
       getSession: async () => ({ signedIn: true, account: { email: "qa@example.com" } }),

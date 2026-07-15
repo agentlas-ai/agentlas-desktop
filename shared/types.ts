@@ -3955,6 +3955,8 @@ export interface AgentlasIpc {
     listDevices: () => Promise<MobileBridgeDeviceSummary[]>;
     retry: () => Promise<MobileBridgeRuntimeStatus>;
     revokeDevice: (deviceId: string) => Promise<{ ok: boolean }>;
+    /** Reveals the main-process log file. Log contents never cross IPC. */
+    revealLog: () => Promise<{ ok: boolean }>;
   };
   /** T-rex 슬라이드 스튜디오 — 키리스 CLI 이미지 생성(codex image_gen / gemini). */
   trex: {

@@ -41,6 +41,7 @@ const api: AgentlasIpc = {
     listDevices: () => ipcRenderer.invoke("mobileBridge:listDevices"),
     retry: () => ipcRenderer.invoke("mobileBridge:retry"),
     revokeDevice: (deviceId: string) => ipcRenderer.invoke("mobileBridge:revokeDevice", deviceId),
+    revealLog: () => ipcRenderer.invoke("mobileBridge:revealLog"),
   },
   trex: {
     generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => ipcRenderer.invoke("trex:generateImage", payload),

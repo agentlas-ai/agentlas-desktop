@@ -50,7 +50,6 @@ let running: RunningBridge | null = null;
 let lastError: string | null = null;
 let runtimeOptions: MobileBridgeRuntimeOptions | null = null;
 let networkWatchTimer: NodeJS.Timeout | null = null;
-let lastObservedAutomaticHost: string | null = null;
 let lifecycleTail: Promise<void> = Promise.resolve();
 export type MobileBridgeStateChangeReason =
   | MobileBridgePairingChangeReason
@@ -106,8 +105,18 @@ function addressAlreadyInUse(error: unknown): boolean {
   );
 }
 
+const LOOPBACK_HOST = "127.0.0.1";
+
 function configuredHost(override?: string): string {
-  const host = process.env.AGENTLAS_MOBILE_BRIDGE_HOST?.trim() || override || preferredMobileBridgeHost();
+  const explicit = process.env.AGENTLAS_MOBILE_BRIDGE_HOST?.trim();
+  // A missing LAN address is NOT fatal. Binding loopback still starts the local
+  // server and its Cloud Relay tunnel, so remote access keeps working through
+  // the relay exactly like Codex/Claude do on Windows — the previous behavior
+  // (throw when no LAN address) killed the relay too, which is why the bridge
+  // appeared completely dead on machines whose real address sits on a
+  // vEthernet/WSL adapter or behind a firewall. The network watcher promotes
+  // the bind to a concrete LAN address the moment one becomes routable.
+  const host = explicit || override || automaticHostOrNull() || LOOPBACK_HOST;
   if (!host || /[/?#@\s]/.test(host) || host === "0.0.0.0" || host === "::") {
     throw new Error("AGENTLAS_MOBILE_BRIDGE_HOST must be a concrete LAN address or hostname");
   }
@@ -141,21 +150,18 @@ function networkWatchIntervalMs(): number {
 
 function ensureNetworkWatcher(): void {
   if (networkWatchTimer || explicitHostConfigured()) return;
-  lastObservedAutomaticHost = automaticHostOrNull();
   networkWatchTimer = setInterval(() => {
-    const selected = automaticHostOrNull();
-    if (selected === lastObservedAutomaticHost) return;
-    lastObservedAutomaticHost = selected;
-    if (!selected) {
-      lastError = "No usable LAN address is currently available for Agentlas Mobile Bridge";
-      emitMobileBridgeStateChange("runtime-retry-failed");
-      return;
-    }
-    if (running?.manifest.bindHost === selected) {
+    if (!running) return;
+    // The desired bind is the best automatic LAN address, or loopback when none
+    // is routable. Rebinding loopback<->LAN keeps direct pairing available
+    // whenever the network allows it, and never tears the bridge (or its relay)
+    // down just because a LAN address came or went.
+    const desired = automaticHostOrNull() ?? LOOPBACK_HOST;
+    if (running.manifest.bindHost === desired) {
       lastError = null;
       return;
     }
-    void rebindAgentlasMobileBridge("network-rebound", selected).catch((error) => {
+    void rebindAgentlasMobileBridge("network-rebound", desired).catch((error) => {
       console.error("[mobile-bridge] automatic network rebind failed", error instanceof Error ? error.message : String(error));
     });
   }, networkWatchIntervalMs());
@@ -190,6 +196,15 @@ async function startBridgeInternal(
   let relay: MobileBridgeCloudRelay | null = null;
   try {
     const tls = await loadOrCreateMobileBridgeTls(options.userDataPath);
+    if (tls.rotated && pairing.listDevices().length > 0) {
+      // A new certificate fingerprint means the pins on already-paired phones
+      // no longer match. Surface it instead of letting them fail silently — the
+      // user needs to re-scan a pairing QR. With the century-long lifetime this
+      // is only reachable on genuine key loss, never on routine near-expiry.
+      lastError =
+        "The Mobile Bridge security certificate changed. Paired phones must scan a new pairing QR code to reconnect.";
+      console.warn("[mobile-bridge] certificate rotated while devices are paired; phones must re-pair");
+    }
     const devBootstrap =
       process.env.NODE_ENV === "development" &&
       process.env.AGENTLAS_MOBILE_BRIDGE_DEV_BOOTSTRAP === "1"
@@ -257,7 +272,6 @@ async function startBridgeInternal(
         );
       });
     }
-    if (!explicitHostConfigured()) lastObservedAutomaticHost = address.host;
     emitMobileBridgeStateChange("runtime-started");
     console.info(`[mobile-bridge] listening on ${address.url}`);
     return mobileBridgeRuntimeStatus();
@@ -392,7 +406,6 @@ export function revokeMobileBridgeDevice(deviceId: string): { ok: boolean } {
 
 export async function stopAgentlasMobileBridge(): Promise<void> {
   runtimeOptions = null;
-  lastObservedAutomaticHost = null;
   if (networkWatchTimer) clearInterval(networkWatchTimer);
   networkWatchTimer = null;
   await serializeLifecycle(() => stopRunningBridge(true));

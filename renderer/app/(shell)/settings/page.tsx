@@ -925,6 +925,21 @@ function MobileBridgePanel() {
     }
   }
 
+  async function revealBridgeLog() {
+    const api = ipc();
+    if (!api) return;
+    // The log is the only way to see why remote access (Cloud Relay) is not
+    // connecting; a packaged app otherwise discards those diagnostics.
+    const result = await api.mobileBridge.revealLog();
+    if (!result?.ok) {
+      setMessage(
+        locale === "ko"
+          ? "아직 기록된 로그 파일이 없습니다. 앱을 다시 시작한 뒤 시도해 주세요."
+          : "No log file has been written yet. Restart the app and try again.",
+      );
+    }
+  }
+
   async function copyPairing() {
     if (!pairing) return;
     try {
@@ -997,6 +1012,21 @@ function MobileBridgePanel() {
             }}
           >
             {locale === "ko" ? "연결 다시 열기" : "Restart connection"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void revealBridgeLog()}
+            style={{
+              border: "1px solid var(--line)",
+              borderRadius: 999,
+              padding: "9px 16px",
+              background: "var(--paper)",
+              color: "var(--ink)",
+              fontSize: 12,
+              fontWeight: 700,
+            }}
+          >
+            {locale === "ko" ? "로그 열기" : "Open log"}
           </button>
           <button
             type="button"

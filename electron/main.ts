@@ -46,6 +46,7 @@ import { scrubLegacyOpenCrabMcpConfig } from "./mcp-tools/mcp-config";
 import { scrubLegacyOpenCrabCredentialUrls } from "./mcp-tools/registry";
 import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser/approval-server";
 import { authorizeLocalMediaPath } from "./fs/access";
+import { initFileLogging, mainLogFilePath } from "./logging";
 import { setCurrentUiLocale } from "./ui-locale";
 import {
   issueMobileBridgePairing,
@@ -370,6 +371,10 @@ app.on("before-quit", () => {
 });
 
 app.whenReady().then(async () => {
+  // Before any other stage: a packaged app discards console output, so start
+  // mirroring it to the platform log directory first. Updater and mobile-bridge
+  // diagnostics are worthless if the only copy dies with the process.
+  initFileLogging();
   // Stage 1 (pre-mutation): a pending install must already have a valid,
   // contained SQLite/agent/route recovery set before initStore can migrate.
   const updatePreflight = installIdentity.updatesEnabled
@@ -476,6 +481,14 @@ app.whenReady().then(async () => {
       return { ok: false };
     }
     return revokeMobileBridgeDevice(deviceId);
+  });
+  // Reveals the main-process log. Renderer never receives log contents, only a
+  // request to open the file manager at a main-owned path.
+  ipcMain.handle("mobileBridge:revealLog", () => {
+    const file = mainLogFilePath();
+    if (!file || !fs.existsSync(file)) return { ok: false };
+    shell.showItemInFolder(file);
+    return { ok: true };
   });
   disposeMobileBridgeStateChange = onMobileBridgeStateChanged((reason) => {
     for (const window of BrowserWindow.getAllWindows()) {

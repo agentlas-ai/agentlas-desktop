@@ -115,6 +115,19 @@ async function testTlsIdentity() {
     assert.match(first.certificateDer, /^[A-Za-z0-9+/]+={0,2}$/);
     assert.equal(second.certificateFingerprint, first.certificateFingerprint);
     assert.equal(second.certificateDer, first.certificateDer);
+    // Time-bomb guard: a fresh mint reports rotated so the runtime can warn
+    // paired phones; a subsequent load must NOT rotate (that reissue was what
+    // silently changed the pinned fingerprint and locked every phone out).
+    assert.equal(first.rotated, true, "the first mint must report rotation");
+    assert.equal(second.rotated, false, "reloading an existing certificate must never rotate");
+    const validTo = Date.parse(new (require("node:crypto").X509Certificate)(
+      String(first.serverOptions.cert),
+    ).validTo);
+    const yearsValid = (validTo - Date.now()) / (365 * 24 * 60 * 60 * 1000);
+    assert.ok(
+      yearsValid > 50,
+      `pinned certificate must outlive any renewal window to avoid forced re-pairing; got ${yearsValid.toFixed(1)}y`,
+    );
     assert.equal(String(first.serverOptions.key).includes("PRIVATE KEY"), true);
     assert.equal(String(first.serverOptions.cert).includes("CERTIFICATE"), true);
     const directory = path.join(root, "mobile-bridge");
@@ -1978,6 +1991,72 @@ async function testAutomaticNetworkRebind() {
   }
 }
 
+async function testMobileBridgeSurvivesMissingLan() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mobile-bridge-no-lan-"));
+  const previousHost = process.env.AGENTLAS_MOBILE_BRIDGE_HOST;
+  const previousPort = process.env.AGENTLAS_MOBILE_BRIDGE_PORT;
+  const previousWatch = process.env.AGENTLAS_MOBILE_BRIDGE_NETWORK_WATCH_MS;
+  const originalPreferredHost = mobileBridgeTls.preferredMobileBridgeHost;
+  delete process.env.AGENTLAS_MOBILE_BRIDGE_HOST;
+  delete process.env.AGENTLAS_MOBILE_BRIDGE_PORT;
+  process.env.AGENTLAS_MOBILE_BRIDGE_NETWORK_WATCH_MS = "1000";
+  // A second loopback address (::1) always binds, so use it as the stand-in for
+  // "a LAN address appeared". A fabricated 192.168.x would hit EADDRNOTAVAIL on
+  // the test host and mask the behavior under test.
+  const promotionHost = "::1";
+  // Simulate a machine with no routable LAN address (the Windows vEthernet /
+  // firewall case): the host selector throws exactly as it does in production.
+  let lanAvailable = false;
+  mobileBridgeTls.preferredMobileBridgeHost = () => {
+    if (!lanAvailable) throw new Error("No usable LAN address");
+    return promotionHost;
+  };
+  try {
+    const started = await startAgentlasMobileBridge({
+      userDataPath: root,
+      appVersion: "0.8.2",
+      displayName: "No LAN Desktop",
+    });
+    // The bridge must NOT die. It binds loopback so the local server and its
+    // Cloud Relay tunnel still start — remote access stays possible.
+    assert.equal(started.running, true, "the bridge must survive a missing LAN address");
+    assert.equal(
+      new URL(started.endpoint).hostname,
+      "127.0.0.1",
+      "with no LAN address the bridge must fall back to a loopback bind, not fail",
+    );
+
+    // When an address later becomes routable, the watcher must promote the bind
+    // so direct pairing becomes available without a restart.
+    lanAvailable = true;
+    const promoted = await waitUntil(() => {
+      const status = mobileBridgeRuntimeStatus();
+      return status.running && status.endpoint?.includes("[::1]") ? status : null;
+    });
+    assert.equal(new URL(promoted.endpoint).hostname, "[::1]");
+    assert.equal(promoted.hostId, started.hostId, "promotion must keep the stable host identity");
+
+    // And if the address disappears again, it must degrade back to loopback
+    // rather than tearing the bridge (and relay) down.
+    lanAvailable = false;
+    const degraded = await waitUntil(() => {
+      const status = mobileBridgeRuntimeStatus();
+      return status.running && status.endpoint?.includes("127.0.0.1") ? status : null;
+    });
+    assert.equal(new URL(degraded.endpoint).hostname, "127.0.0.1");
+  } finally {
+    await stopAgentlasMobileBridge();
+    mobileBridgeTls.preferredMobileBridgeHost = originalPreferredHost;
+    if (previousHost === undefined) delete process.env.AGENTLAS_MOBILE_BRIDGE_HOST;
+    else process.env.AGENTLAS_MOBILE_BRIDGE_HOST = previousHost;
+    if (previousPort === undefined) delete process.env.AGENTLAS_MOBILE_BRIDGE_PORT;
+    else process.env.AGENTLAS_MOBILE_BRIDGE_PORT = previousPort;
+    if (previousWatch === undefined) delete process.env.AGENTLAS_MOBILE_BRIDGE_NETWORK_WATCH_MS;
+    else process.env.AGENTLAS_MOBILE_BRIDGE_NETWORK_WATCH_MS = previousWatch;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   await testWireParsers();
   testMobileInvocationPermissionBoundary();
@@ -1996,6 +2075,7 @@ async function main() {
   await testServerBoundary();
   await testRuntimeRetryKeepsStableEndpoint();
   await testAutomaticNetworkRebind();
+  await testMobileBridgeSurvivesMissingLan();
   console.log("Mobile Bridge contract, reconnect sync, authenticated revocation, runtime retry, event ordering, and safe projection tests passed.");
 }
 
