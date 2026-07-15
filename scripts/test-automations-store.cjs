@@ -32,7 +32,8 @@ const {
 } = automationStore;
 const { parseAutomations } = require("../dist/electron/automation-emitter.js");
 const mcpClient = require("../dist/electron/mcp/client.js");
-const { runDueAutomationsNow, runAutomationNow } = require("../dist/electron/automation-scheduler.js");
+let runDueAutomationsNow;
+let runAutomationNow;
 const { removeAutomationSafely } = require("../dist/electron/automation-removal.js");
 const { getChat, appendChatMessage } = require("../dist/electron/store/chats.js");
 
@@ -382,6 +383,7 @@ function assertLocalTime(iso, expected) {
         targetType: "agent",
         targetId: "agent-1",
         promptTemplate: "must not execute legacy",
+        runtimeSelection: { kind: "codex", backend: "openai", source: "test-codex" },
       });
       const originalStartGraphRun = automationStore.startGraphRun;
       let deletedLegacyRuntimeCalls = 0;
@@ -393,6 +395,17 @@ function assertLocalTime(iso, expected) {
         if (input.automationId === deletedLegacy.id) removeAutomation(deletedLegacy.id);
         return originalStartGraphRun(input);
       };
+      const runtimeDetect = require("../dist/electron/runtime/detect.js");
+      runtimeDetect.detectRuntimes = async () => [{
+        kind: "codex",
+        backend: "openai",
+        source: "test-codex",
+        ready: true,
+        active: true,
+        model: "test-codex-model",
+        longContextEnabled: false,
+      }];
+      ({ runDueAutomationsNow, runAutomationNow } = require("../dist/electron/automation-scheduler.js"));
       try {
         await runAutomationNow(deletedLegacy.id);
       } finally {
