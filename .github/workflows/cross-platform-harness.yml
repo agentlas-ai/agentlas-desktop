@@ -262,8 +262,14 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: agentlas-desktop
         run: |
-          xvfb-run -a npm run test:workforce-orchestrator
-          xvfb-run -a npm run test:hephaestus-settings-migration
+          # Call electron directly with --no-sandbox, matching every other Linux step here.
+          # `npm run test:*` routes through package.json, which launches bare `electron` — the
+          # flag is lost and Chromium aborts on the SUID sandbox helper (chrome-sandbox must be
+          # root:4755, which a GitHub runner cannot provide). The main process is already
+          # compiled by the "Compile Desktop main process" step above.
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-workforce-orchestrator.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-workforce-execution-receipt.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-hephaestus-settings-migration.cjs
           npm run test:auto-router-gates
       - name: Verify Agent Workforce Ontology on macOS and Windows
         if: runner.os != 'Linux'

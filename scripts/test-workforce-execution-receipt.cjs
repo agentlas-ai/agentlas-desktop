@@ -213,7 +213,15 @@ async function main() {
   assert.equal(blockedReceipt.fallbackUsed, true);
   assert.equal(blockedReceipt.status, "blocked");
 
-  fs.rmSync(tmp, { recursive: true, force: true });
+  // Temp cleanup is housekeeping, not an assertion. On Windows the SQLite handle can still be
+  // open when we get here, so rmSync throws EPERM and fails a run whose every check already
+  // passed — the gate reports a product failure that did not happen. The OS reclaims its own
+  // temp dir regardless; `force` does not cover EPERM.
+  try {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  } catch (error) {
+    console.warn(`workforce execution receipt: temp cleanup skipped (${error.code || error.message})`);
+  }
   console.log("workforce execution receipt: ok");
   app.quit();
 }
