@@ -245,13 +245,13 @@ assert.match(readme, /macOS 12 Monterey or newer/);
 assert.match(readme, /macOS 11 Big Sur:[\s\S]*?last compatible Agentlas release[\s\S]*?excluded/);
 assert.match(
   readmeReleaseSection,
-  /Model2Vec[\s\S]*?adaptive all-relevant-or-top-k[\s\S]*?SQLite nests[\s\S]*?Agentlas OS v1\.1\.31[\s\S]*?does not claim a[\s\S]*?published installer/,
-  "README current release section must describe mandatory local hybrid recall and the unpublished boundary",
+  /install journal[\s\S]*?previous[\s\S]*?app version[\s\S]*?snapshot's own protected-table set[\s\S]*?31 to 32[\s\S]*?Agentlas OS v1\.1\.31[\s\S]*?does not claim a[\s\S]*?published installer/,
+  "README current release section must describe the version-skew-tolerant updater journal contract and the unpublished boundary",
 );
 assert.match(
   changelogReleaseSection,
-  /mandatory, fully local Model2Vec hybrid[\s\S]*?No server embedding[\s\S]*?ranks every eligible row[\s\S]*?survive projection rebuilds[\s\S]*?Agentlas OS v1\.1\.31[\s\S]*?do not themselves publish a Git tag/,
-  "CHANGELOG current release section must describe governed local recall and the unpublished boundary",
+  /written by[\s\S]*?previous app version[\s\S]*?self-consistent protected-table set[\s\S]*?31 to 32[\s\S]*?fail closed[\s\S]*?install-journal-corrupt\.v1\.json[\s\S]*?do not themselves publish a Git tag/,
+  "CHANGELOG current release section must describe the journal version-skew fix and the unpublished boundary",
 );
 assert.match(publishMacSource, /Requires macOS 12 Monterey or newer/);
 assert.match(publishMacSource, /macOS 11 Big Sur stays on the last compatible release/);

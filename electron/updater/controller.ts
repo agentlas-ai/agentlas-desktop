@@ -330,18 +330,23 @@ export function isValidContinuitySnapshot(value: unknown): value is ContinuitySn
     : [];
   const rowCountKeys = rowCountEntries.map(([table]) => table).sort();
   const identityHashKeys = identityHashEntries.map(([table]) => table).sort();
-  const expectedTables = raw.schemaVersion === 1
-    ? [...CONTINUITY_V1_TABLES]
-    : raw.schemaVersion === 2
-      ? [...CONTINUITY_CORE_TABLES]
-      : null;
-  const expectedTableKeys = expectedTables?.sort() ?? [];
+  // A journal is written by the PREVIOUS app version, so a schemaVersion 2
+  // protection map must be accepted with whatever table set that version
+  // protected — comparing against the current (possibly larger)
+  // CONTINUITY_CORE_TABLES quarantines every healthy journal that crosses a
+  // release which grew the list (v0.8.32 incident: 31 vs 32 tables bricked
+  // auto-update on every machine it touched). Never reintroduce that
+  // comparison. schemaVersion 1 keeps its frozen historical set.
+  const legacyTableKeys = raw.schemaVersion === 1 ? [...CONTINUITY_V1_TABLES].sort() : null;
   const validProtectedTableMaps =
-    expectedTables !== null &&
-    rowCountKeys.length === expectedTableKeys.length &&
-    identityHashKeys.length === expectedTableKeys.length &&
-    rowCountKeys.every((table, index) => table === expectedTableKeys[index]) &&
-    identityHashKeys.every((table, index) => table === expectedTableKeys[index]) &&
+    (raw.schemaVersion === 1 || raw.schemaVersion === 2) &&
+    rowCountKeys.length > 0 &&
+    rowCountKeys.length === identityHashKeys.length &&
+    rowCountKeys.every((table, index) => table === identityHashKeys[index]) &&
+    (legacyTableKeys === null
+      ? rowCountKeys.every((table) => /^[A-Za-z][A-Za-z0-9_]*$/.test(table))
+      : rowCountKeys.length === legacyTableKeys.length &&
+        rowCountKeys.every((table, index) => table === legacyTableKeys[index])) &&
     rowCountEntries.every(([, count]) => asNonNegativeInteger(count) !== null) &&
     identityHashEntries.every(([, hash]) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash));
   return (

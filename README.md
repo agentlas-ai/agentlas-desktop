@@ -69,6 +69,21 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-15 · v0.8.33 — updater accepts continuity journals across releases** —
+  The install journal that guards every auto-update is written by the previous
+  app version, so the updater now validates a schemaVersion 2 continuity
+  snapshot against the snapshot's own protected-table set, and continuity
+  verification plus recovery-copy checks iterate that recorded set. v0.8.32 grew
+  `CONTINUITY_CORE_TABLES` from 31 to 32 tables and therefore quarantined every
+  healthy inherited journal as corrupt, exited once with "Update recovery
+  required", and left automatic updates permanently paused behind a same-version
+  corrupt-journal marker; its update-feed entry was withdrawn. Newly captured
+  snapshots still protect the complete current table list, schemaVersion 1
+  journals keep their frozen historical set, and inconsistent or empty
+  protection maps still fail closed. The embedded Agentlas OS v1.1.31 source
+  remains pinned to `738b78f40b5efc9b2dd4cc66c94a3805e70c79f5`; this source note
+  does not claim a published installer or update-feed release.
+
 - **2026-07-15 · v0.8.32 — governed local Model2Vec experience memory** —
   Every ordinary Desktop invocation now sends the current effective task through
   automatic, owner-scoped Memory recall and eligible reviewed Experience recall.

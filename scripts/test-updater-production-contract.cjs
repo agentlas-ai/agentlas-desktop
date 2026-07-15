@@ -465,7 +465,7 @@ async function semanticallyDamagedJournalFailsClosed() {
   fs.rmSync(layout.root, { recursive: true, force: true });
 }
 
-async function snapshotSchemaTableSetsAreExactAndBackwardCompatible() {
+async function snapshotTableSetsTolerateProtectionListGrowth() {
   const layout = makeLayout();
   const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
   fs.mkdirSync(path.dirname(journalPath), { recursive: true });
@@ -499,14 +499,58 @@ async function snapshotSchemaTableSetsAreExactAndBackwardCompatible() {
     "a v2 protection map must not masquerade as schemaVersion 1",
   );
 
-  const incompleteCurrentSnapshot = structuredClone(currentSnapshot);
-  delete incompleteCurrentSnapshot.rowCounts.run_events;
-  delete incompleteCurrentSnapshot.tableIdentityHashes.run_events;
-  fs.writeFileSync(journalPath, JSON.stringify(installJournal(incompleteCurrentSnapshot)));
+  // v0.8.32 incident regression: v2 journals are written by the PREVIOUS app
+  // version, so a snapshot protecting fewer tables than today's list is a
+  // healthy journal, not a corrupt one. Treating it as corrupt quarantined the
+  // journal and permanently paused auto-update on every machine that crossed
+  // a release which grew CONTINUITY_CORE_TABLES.
+  const olderReleaseSnapshot = structuredClone(currentSnapshot);
+  delete olderReleaseSnapshot.rowCounts.experience_governance_relations;
+  delete olderReleaseSnapshot.tableIdentityHashes.experience_governance_relations;
+  fs.writeFileSync(journalPath, JSON.stringify(installJournal(olderReleaseSnapshot)));
+  assert.equal(
+    inspectInstallJournalFile(journalPath).status,
+    "valid",
+    "a v2 journal written before a table was added to CONTINUITY_CORE_TABLES must stay readable",
+  );
+
+  const smallerOlderSnapshot = structuredClone(currentSnapshot);
+  delete smallerOlderSnapshot.rowCounts.run_events;
+  delete smallerOlderSnapshot.tableIdentityHashes.run_events;
+  fs.writeFileSync(journalPath, JSON.stringify(installJournal(smallerOlderSnapshot)));
+  assert.equal(
+    inspectInstallJournalFile(journalPath).status,
+    "valid",
+    "v2 accepts any self-consistent protected-table set from an older release",
+  );
+
+  const newerReleaseSnapshot = structuredClone(currentSnapshot);
+  newerReleaseSnapshot.rowCounts.future_protected_table = 3;
+  newerReleaseSnapshot.tableIdentityHashes.future_protected_table = "b".repeat(64);
+  fs.writeFileSync(journalPath, JSON.stringify(installJournal(newerReleaseSnapshot)));
+  assert.equal(
+    inspectInstallJournalFile(journalPath).status,
+    "valid",
+    "a v2 journal written by a newer release with extra protected tables must stay readable",
+  );
+
+  const inconsistentMaps = structuredClone(currentSnapshot);
+  delete inconsistentMaps.tableIdentityHashes.run_events;
+  fs.writeFileSync(journalPath, JSON.stringify(installJournal(inconsistentMaps)));
   assert.equal(
     inspectInstallJournalFile(journalPath).status,
     "corrupt",
-    "v2 must fail closed when any current protected table is missing",
+    "v2 must fail closed when rowCounts and tableIdentityHashes disagree on the table set",
+  );
+
+  const emptyMaps = structuredClone(currentSnapshot);
+  emptyMaps.rowCounts = {};
+  emptyMaps.tableIdentityHashes = {};
+  fs.writeFileSync(journalPath, JSON.stringify(installJournal(emptyMaps)));
+  assert.equal(
+    inspectInstallJournalFile(journalPath).status,
+    "corrupt",
+    "v2 must fail closed on an empty protection map",
   );
 
   fs.rmSync(layout.root, { recursive: true, force: true });
@@ -1362,7 +1406,7 @@ async function v53HubBookmarkKeyMigrationIsNarrowlyApproved() {
   await undeletableLegacyStatePausesAutomaticUpdates();
   await corruptInstallJournalFailsClosedAcrossRelaunch();
   await semanticallyDamagedJournalFailsClosed();
-  await snapshotSchemaTableSetsAreExactAndBackwardCompatible();
+  await snapshotTableSetsTolerateProtectionListGrowth();
   await installJournalStopsFailedApplyLoopAndReconcilesSuccess();
   await verifiedContinuityFailsClosedWhenJournalCannotBeDeleted();
   await installQuiescesWritersBeforeContinuityCapture();

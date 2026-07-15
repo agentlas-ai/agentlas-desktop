@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.8.33 — 2026-07-15
+
+### Fixed
+
+- **The auto-updater no longer quarantines healthy install journals after a
+  release grows the protected-table list.** A continuity snapshot is written by
+  the previous app version, so schemaVersion 2 validation now accepts the
+  snapshot's own self-consistent protected-table set instead of requiring exact
+  equality with the running build's `CONTINUITY_CORE_TABLES`. v0.8.32 grew that
+  list from 31 to 32 tables, judged every inherited journal corrupt, exited once
+  with "Update recovery required", and left automatic updates permanently
+  paused behind a same-version corrupt-journal marker.
+- **Continuity verification and recovery-copy checks iterate the snapshot's
+  recorded tables.** Older journals verify exactly what their writer protected;
+  freshly captured snapshots keep protecting the full current list.
+  schemaVersion 1 journals keep their frozen historical table set, and
+  inconsistent or empty protection maps still fail closed.
+
+### Boundaries and edge cases
+
+- Machines that already ran v0.8.32 hold a corrupt-journal marker stamped with
+  that same version, so their updater does not check the feed again on its own.
+  Removing `updater/install-journal-corrupt.v1.json` from the app's user-data
+  directory and relaunching restores automatic updates without reinstalling.
+- This source version and Core pin do not themselves publish a Git tag,
+  installer, update feed, or GitHub release.
+
 ## 0.8.32 — 2026-07-15
 
 ### Changed

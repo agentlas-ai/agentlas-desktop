@@ -4,7 +4,6 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   CONTINUITY_CORE_TABLES,
-  CONTINUITY_V1_TABLES,
   isValidContinuitySnapshot,
   type ContinuitySnapshot,
   type ContinuityVerification,
@@ -24,7 +23,10 @@ const V52_AUTOMATION_RECOVERY_STALE_MS = MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS + 2
 type TableColumn = { name: string; pk: number };
 
 function protectedTablesForSnapshot(snapshot: ContinuitySnapshot): readonly string[] {
-  return snapshot.schemaVersion === 1 ? CONTINUITY_V1_TABLES : CONTINUITY_CORE_TABLES;
+  // Verify exactly the tables the snapshot's writer protected. The writer is
+  // the previous app version, so the current CONTINUITY_CORE_TABLES may be
+  // larger; verifying against it would flag healthy journals as violations.
+  return Object.keys(snapshot.rowCounts).sort();
 }
 
 function quoteIdentifier(value: string): string {
