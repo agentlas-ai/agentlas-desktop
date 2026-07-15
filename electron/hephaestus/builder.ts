@@ -29,10 +29,13 @@ import {
 import { tryRecordRunEvent } from "../store/run-events";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import type {
+  BuildAllocationPreview,
+  BuildAllocationRuntime,
   HephaestusBuildEvent,
   HephaestusBuildRequest,
   HephaestusBuildResult,
   HephaestusBuildSupplementalQuestion,
+  RuntimeSelection,
   RuntimeStatus,
 } from "../../shared/types";
 import type { ResolvedMcpBuildAttachment } from "../mcp-tools/attachment-resolver";
@@ -174,6 +177,55 @@ export async function allocateBuildRuntime(input: {
   buildWorkloadCache.set(key, resolution);
   trimBuildWorkloadCache();
   return resolution;
+}
+
+/**
+ * Resolves the model the parent allocator WOULD use, without running the build.
+ *
+ * The active runtime a user selects in Settings is only a starting point: an
+ * unpinned Build lets the allocator pick any runtime in the live inventory, so
+ * someone who deliberately chose a local/economy model could silently get a
+ * frontier one (and its cost). This lets the renderer ask first and then pin the
+ * answer, instead of discovering the swap in a log line after the fact.
+ *
+ * Returns null when no runner is available; the build path reports that.
+ */
+export async function previewBuildAllocation(
+  req: ResolvedHephaestusBuildRequest,
+  locale: RuntimeLocale,
+  signal: AbortSignal,
+): Promise<BuildAllocationPreview | null> {
+  const picked = await pickBuildRunner(req.runtime);
+  if (!picked) return null;
+  const current = picked.active;
+  if (req.runtimePinned) {
+    return { current: describeRuntime(current), allocated: describeRuntime(current), escalated: false };
+  }
+  const originalRequest = req.history?.find((entry) => entry.role === "user")?.text ?? req.request;
+  const workload = await allocateBuildRuntime({ picked, request: req, originalRequest, signal, locale });
+  const allocated = workload.runtime;
+  // "Escalated" means the allocator moved off what the user actually chose —
+  // a different engine or a different model. Effort-only changes are not worth
+  // interrupting for.
+  const escalated =
+    allocated.kind !== current.kind ||
+    (allocated.model ?? null) !== (current.model ?? null);
+  return {
+    current: describeRuntime(current),
+    allocated: describeRuntime(allocated),
+    escalated,
+    ...(workload.resolvedTier ? { tier: workload.resolvedTier } : {}),
+  };
+}
+
+function describeRuntime(runtime: RuntimeStatus | RuntimeSelection): BuildAllocationRuntime {
+  return {
+    kind: runtime.kind,
+    ...(runtime.backend ? { backend: runtime.backend } : {}),
+    ...(runtime.model ? { model: runtime.model } : {}),
+    ...(runtime.effort ? { effort: runtime.effort } : {}),
+    ...(runtime.source ? { source: runtime.source } : {}),
+  };
 }
 
 const MODE_AGENT: Record<NonNullable<HephaestusBuildRequest["mode"]>, string> = {

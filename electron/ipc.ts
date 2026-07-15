@@ -134,7 +134,7 @@ import {
 import { normalizeRecommendation } from "./hephaestus/recommendation";
 import { confirmUpload, PathGuardError, resolveFolderArg } from "./hephaestus/path-guard";
 import { getEngineToggles, isSupervisorEnabled, setEngineToggle, setSupervisorEnabled } from "./hephaestus/supervisor";
-import { runHephaestusBuild } from "./hephaestus/builder";
+import { previewBuildAllocation, runHephaestusBuild } from "./hephaestus/builder";
 import { resolveHephaestusBuildRequestForRun } from "./hephaestus/build-access";
 import { pickLocale } from "./runtime/status-i18n";
 import { currentUiLocale } from "./ui-locale";
@@ -3169,6 +3169,27 @@ export function registerIpcHandlers(): void {
   });
 
   // 빌더(hep-build) — 활성 런타임으로 Hephaestus 빌더 에이전트를 구동, 이벤트 스트리밍.
+  // Resolves which model an unpinned Build would actually run on, without
+  // starting it, so the renderer can confirm an escalation off the user's own
+  // choice before any billable work happens.
+  ipcMain.handle("hephaestus:previewAllocation", async (_event, req: HephaestusBuildRequest) => {
+    const resolvedRequest = await resolveHephaestusBuildRequestForRun(req);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60_000);
+    try {
+      return await previewBuildAllocation(
+        resolvedRequest,
+        req.locale ?? currentUiLocale(),
+        controller.signal,
+      );
+    } catch {
+      // A preview must never block a build; the build path re-resolves anyway.
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
   ipcMain.handle("hephaestus:build", async (event, req: HephaestusBuildRequest) => {
     // Renderer가 보낸 절대경로는 권한이 아니다. Native picker / trusted drop이
     // 발급한 capability를 main에서 다시 검증하고 그 경로만 builder에 전달한다.

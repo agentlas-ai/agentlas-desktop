@@ -31,6 +31,8 @@ import {
   setRuntime as setBuildRuntime,
   startBuild,
   approveBuildMcpPlan,
+  describeAllocationRuntime,
+  resolveRuntimeEscalation,
   setBuildMcpSelection,
   answerBuild,
   cancelBuild,
@@ -172,7 +174,7 @@ export default function BuildPage() {
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
-  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, result, registered, pendingQuestions, awaitingReply, turn, attachments, mcpPlan, mcpSelectedCandidateIds, mcpReceipt, cloudSaveChoice } = s;
+  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, result, registered, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpSelectedCandidateIds, mcpReceipt, cloudSaveChoice } = s;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // 드롭/파일 인풋 → 실제 디스크 경로(webUtils) → 스토어 첨부. 경로를 못 얻으면(브라우저 등) 스킵.
@@ -649,6 +651,38 @@ export default function BuildPage() {
               onContinueWithout={() => void approveBuildMcpPlan([])}
               onCancel={cancelBuild}
             />
+          )}
+
+          {phase === "runtime-approval" && pendingAllocation && (
+            <section className="build-card">
+              <div className="build-card-head">
+                <strong>{ko ? "이 빌드에 더 상위 모델을 쓸까요?" : "Use a higher model for this build?"}</strong>
+              </div>
+              <p className="build-card-note">
+                {ko
+                  ? `이 작업이 어렵다고 판단해 ${describeAllocationRuntime(pendingAllocation.allocated)} 사용을 제안합니다. 내가 고른 건 ${describeAllocationRuntime(pendingAllocation.current)}입니다.`
+                  : `This work was judged demanding, so ${describeAllocationRuntime(pendingAllocation.allocated)} is proposed. Your own choice is ${describeAllocationRuntime(pendingAllocation.current)}.`}
+              </p>
+              <p className="build-card-note">
+                {ko
+                  ? "상위 모델은 결과가 더 좋을 수 있지만 구독·크레딧을 더 씁니다. 어느 쪽을 고르든 이 빌드는 그 모델로 고정됩니다."
+                  : "A higher model may produce better results but uses more of your subscription/credits. Either choice is pinned for this build."}
+              </p>
+              <div className="build-card-actions">
+                <button
+                  className="build-secondary-button"
+                  onClick={() => void resolveRuntimeEscalation(false)}
+                >
+                  {ko ? `내 선택 유지 (${describeAllocationRuntime(pendingAllocation.current)})` : `Keep my choice (${describeAllocationRuntime(pendingAllocation.current)})`}
+                </button>
+                <button
+                  className="build-primary-button"
+                  onClick={() => void resolveRuntimeEscalation(true)}
+                >
+                  {ko ? `${describeAllocationRuntime(pendingAllocation.allocated)} 사용` : `Use ${describeAllocationRuntime(pendingAllocation.allocated)}`}
+                </button>
+              </div>
+            </section>
           )}
 
           {mcpReceipt && phase !== "mcp-review" && (

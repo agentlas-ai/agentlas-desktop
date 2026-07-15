@@ -116,6 +116,8 @@ export type {
   FirmListing,
   FirmOrgNode,
   HephaestusBuildEvent,
+  BuildAllocationPreview,
+  BuildAllocationRuntime,
   HephaestusBuildResult,
   HephaestusBuildSupplementalQuestion,
   HephaestusBuildRequest,

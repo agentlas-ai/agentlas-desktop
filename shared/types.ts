@@ -3438,6 +3438,27 @@ export interface HephaestusBuildSupplementalQuestion {
   options: Array<{ label: string; description?: string }>;
 }
 
+/** One runtime identity in a Build allocation preview. Never carries credentials. */
+export interface BuildAllocationRuntime {
+  kind: string;
+  backend?: string;
+  model?: string;
+  effort?: string;
+  source?: string;
+}
+
+/**
+ * What the parent allocator would run this Build on, resolved WITHOUT starting
+ * it. `escalated` is true when the allocator moved off the runtime the user
+ * actually selected, which is the only case worth interrupting them for.
+ */
+export interface BuildAllocationPreview {
+  current: BuildAllocationRuntime;
+  allocated: BuildAllocationRuntime;
+  escalated: boolean;
+  tier?: "economy" | "balanced" | "frontier";
+}
+
 export interface HephaestusBuildResult {
   workspace: string;
   securityScan: unknown;
@@ -3473,6 +3494,12 @@ export interface HephaestusBuildRequest {
   history?: Array<{ role: "user" | "assistant"; text: string }>;
   /** Explicit answer to the conditional OpenCrab interview question. */
   openCrabOntology?: "use" | "skip";
+  /**
+   * Records that the user was shown, and accepted, an allocator escalation off
+   * their chosen model. Present only for the receipt/log — the accepted runtime
+   * itself arrives pinned via `runtime` + `runtimePinned`.
+   */
+  runtimeEscalationAccepted?: boolean;
   /** 렌더러 표시 언어. 빌더가 UI 노출 로그/상태 메시지를 이 언어로 낸다. 미지정 시 백엔드 기본. */
   locale?: "ko" | "en";
 }
@@ -4734,6 +4761,8 @@ export interface AgentlasIpc {
     /** AO(에이전트 온톨로지) 그래프 — 정보 흐름 맵 백킹 데이터. */
     aoGraph: (input?: { agent?: string; dir?: string }) => Promise<HephaestusCommandResult>;
     /** 빌더(hep-build) 스트리밍 실행 — 데스크탑 런타임 + Hephaestus 빌더 에이전트. */
+    /** Which model an unpinned Build would use, resolved without starting it. */
+    previewAllocation: (input: HephaestusBuildRequest) => Promise<BuildAllocationPreview | null>;
     build: (input: HephaestusBuildRequest) => Promise<HephaestusBuildStartResult>;
     /** 빌더 이벤트 채널명(window.agentlasEvents.on 으로 구독). */
     buildEventChannel: (runId: string) => string;

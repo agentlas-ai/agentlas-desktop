@@ -744,6 +744,12 @@ function setupMockAgentlasBridge(options) {
     hephaestus: {
       status: async () => ({ available: true, version: "mock", reason: null }),
       doctor: async () => ({ ok: true, checks: [] }),
+      previewAllocation: async (payload) => {
+        record("hephaestus.previewAllocation", payload);
+        // Mock never escalates: UI gates must be exercised deliberately, not by
+        // a fixture that silently swaps the user's model.
+        return { current: { kind: "claude-code" }, allocated: { kind: "claude-code" }, escalated: false };
+      },
       build: async (payload) => {
         record("hephaestus.build", payload);
         lastRunId += 1;

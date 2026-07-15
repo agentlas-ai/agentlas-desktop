@@ -590,6 +590,7 @@ const api: AgentlasIpc = {
     package: (input) => ipcRenderer.invoke("hephaestus:package", input),
     securityScan: (input) => ipcRenderer.invoke("hephaestus:securityScan", input),
     aoGraph: (input) => ipcRenderer.invoke("hephaestus:aoGraph", input),
+    previewAllocation: (input) => ipcRenderer.invoke("hephaestus:previewAllocation", input),
     build: (input) => ipcRenderer.invoke("hephaestus:build", input),
     buildEventChannel: (runId: string) => `hephaestus:build:${runId}`,
     buildReady: (runId: string) => ipcRenderer.invoke("hephaestus:buildReady", runId),

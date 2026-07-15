@@ -21,11 +21,13 @@ import type {
   HephaestusBuildSupplementalQuestion,
   McpBuildAttachmentReceipt,
   McpBuildPlan,
+  BuildAllocationPreview,
+  BuildAllocationRuntime,
   RuntimeSelection,
 } from "@/lib/types";
 
 export type Mode = "single" | "team" | "package";
-export type Phase = "idle" | "running" | "mcp-review" | "interview" | "done" | "error";
+export type Phase = "idle" | "running" | "mcp-review" | "runtime-approval" | "interview" | "done" | "error";
 
 export interface LogLine {
   kind: HephaestusBuildEvent["kind"];
@@ -91,6 +93,8 @@ export interface BuildState {
   registered: boolean;
   /** 인터뷰 중 어시스턴트가 던진 선택형 질문(있으면 옵션 버튼으로 렌더). */
   pendingQuestions: ChatQuestion[];
+  /** Set only while phase === "runtime-approval": the escalation awaiting a decision. */
+  pendingAllocation: BuildAllocationPreview | null;
   /** true면 사용자 답변 대기(인터뷰 일시정지). */
   awaitingReply: boolean;
   /** 진행된 인터뷰 턴 수(헤더 표시용). */
@@ -175,6 +179,7 @@ const state: BuildState = {
   runId: null,
   registered: false,
   pendingQuestions: [],
+  pendingAllocation: null,
   awaitingReply: false,
   turn: 0,
   mcpPlan: null,
@@ -194,6 +199,7 @@ let history: ChatMsg[] = [];
 let runtimeSessionId: string | null = null;
 let resolvedBuildRuntime: RuntimeSelection | null = null;
 let resolvedBuildRuntimePinned = false;
+let runtimeEscalationAccepted: boolean | undefined;
 // 런타임이 sessionId를 반환하지 않는 BYOK/Ollama도 첨부는 한 빌드에서 정확히 한 번만 보낸다.
 let attachmentsSentForBuild = false;
 // Per-build, explicit OpenCrab consent. It is set only from the conditional
@@ -530,6 +536,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
       workspaceGrant: state.workspaceGrant,
       runtime: resolvedBuildRuntime || undefined,
       runtimePinned: resolvedBuildRuntimePinned,
+      ...(runtimeEscalationAccepted !== undefined ? { runtimeEscalationAccepted } : {}),
       mcpConsent: {
         planId: state.mcpPlan.id,
         selectedCandidateIds: [...state.mcpSelectedCandidateIds],
@@ -690,6 +697,8 @@ export async function startBuild(activeRuntime?: RuntimeSelection): Promise<void
   runtimeSessionId = null;
   resolvedBuildRuntime = state.runtime ?? activeRuntime ?? null;
   resolvedBuildRuntimePinned = state.runtime !== null;
+  runtimeEscalationAccepted = undefined;
+  state.pendingAllocation = null;
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
   autoContinues = 0;
@@ -760,7 +769,75 @@ export async function approveBuildMcpPlan(selectedCandidateIds: string[]): Promi
   if (state.phase !== "mcp-review" || !state.mcpPlan) return;
   const allowed = new Set(state.mcpPlan.candidates.map((candidate) => candidate.id));
   state.mcpSelectedCandidateIds = [...new Set(selectedCandidateIds)].filter((id) => allowed.has(id));
-  pushLog("stage", currentLocale() === "ko" ? "MCP 선택 승인 — 딥인터뷰 시작" : "MCP selection approved — starting deep interview");
+  const ko = currentLocale() === "ko";
+  // The user's selected model is only a starting point for an unpinned build:
+  // the parent allocator may move the work onto a different (costlier) engine.
+  // Resolve that BEFORE any billable turn so the swap is a decision, not a
+  // surprise discovered in the log afterwards.
+  if (!resolvedBuildRuntimePinned) {
+    const preview = await previewBuildAllocation();
+    if (!isCurrentBuild(buildGeneration)) return;
+    if (preview?.escalated) {
+      state.pendingAllocation = preview;
+      state.phase = "runtime-approval";
+      pushLog("log", ko
+        ? `상위 AI가 ${describeAllocationRuntime(preview.allocated)} 사용을 제안했습니다 (내 선택: ${describeAllocationRuntime(preview.current)}).`
+        : `The allocator proposes ${describeAllocationRuntime(preview.allocated)} (your choice: ${describeAllocationRuntime(preview.current)}).`);
+      commit();
+      return;
+    }
+  }
+  pushLog("stage", ko ? "MCP 선택 승인 — 딥인터뷰 시작" : "MCP selection approved — starting deep interview");
+  commit();
+  await runTurn(state.request.trim(), buildGeneration);
+}
+
+async function previewBuildAllocation(): Promise<BuildAllocationPreview | null> {
+  const bridge = ipc();
+  if (!bridge?.hephaestus?.previewAllocation || !state.workspaceGrant) return null;
+  try {
+    return await bridge.hephaestus.previewAllocation({
+      request: state.request.trim(),
+      mode: state.mode || undefined,
+      workspaceGrant: state.workspaceGrant,
+      runtime: resolvedBuildRuntime || undefined,
+      runtimePinned: resolvedBuildRuntimePinned,
+      mcpConsent: { planId: state.mcpPlan?.id ?? "", selectedCandidateIds: state.mcpSelectedCandidateIds },
+      locale: currentLocale(),
+    });
+  } catch {
+    // Never block a build on the preview: the build resolves allocation itself.
+    return null;
+  }
+}
+
+export function describeAllocationRuntime(runtime: BuildAllocationRuntime): string {
+  return [runtime.model ?? runtime.kind, runtime.effort].filter(Boolean).join(" · ");
+}
+
+/**
+ * Decision on an allocator escalation. Either way the answer is pinned, so the
+ * allocator cannot re-escalate behind the user on the same build.
+ */
+export async function resolveRuntimeEscalation(accept: boolean): Promise<void> {
+  if (state.phase !== "runtime-approval" || !state.pendingAllocation) return;
+  const preview = state.pendingAllocation;
+  const ko = currentLocale() === "ko";
+  const chosen = accept ? preview.allocated : preview.current;
+  resolvedBuildRuntime = {
+    kind: chosen.kind as RuntimeSelection["kind"],
+    ...(chosen.backend ? { backend: chosen.backend as RuntimeSelection["backend"] } : {}),
+    ...(chosen.model ? { model: chosen.model } : {}),
+    ...(chosen.effort ? { effort: chosen.effort } : {}),
+  } as RuntimeSelection;
+  resolvedBuildRuntimePinned = true;
+  runtimeEscalationAccepted = accept;
+  state.pendingAllocation = null;
+  state.phase = "running";
+  pushLog("log", accept
+    ? (ko ? `승인 — ${describeAllocationRuntime(chosen)}(으)로 빌드합니다.` : `Approved — building on ${describeAllocationRuntime(chosen)}.`)
+    : (ko ? `내 선택 유지 — ${describeAllocationRuntime(chosen)}(으)로 빌드합니다.` : `Keeping your choice — building on ${describeAllocationRuntime(chosen)}.`));
+  pushLog("stage", ko ? "딥인터뷰 시작" : "Starting deep interview");
   commit();
   await runTurn(state.request.trim(), buildGeneration);
 }
