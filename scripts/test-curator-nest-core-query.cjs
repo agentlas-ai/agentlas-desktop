@@ -5,10 +5,10 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const Database = require("better-sqlite3");
+const { resolveAgentlasCoreRoot, resolveModel2VecAsset } = require("./lib/agentlas-core-root.cjs");
 
-const workspaceRoot = path.resolve(__dirname, "..", "..");
-const coreRoot = path.join(workspaceRoot, "Agentlas-OS");
-const modelPath = path.join(coreRoot, "assets", "model2vec", "potion-base-8M-int8");
+const coreRoot = resolveAgentlasCoreRoot();
+const modelPath = resolveModel2VecAsset();
 assert.ok(fs.existsSync(path.join(coreRoot, "ontology", "__main__.py")), "Agentlas Core ontology CLI is required");
 assert.ok(fs.existsSync(path.join(modelPath, "manifest.json")), "verified local Model2Vec asset is required");
 

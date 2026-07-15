@@ -3,17 +3,9 @@ const assert = require("node:assert/strict");
 const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { resolveModel2VecAsset } = require("./lib/agentlas-core-root.cjs");
 
-const siblingAsset = path.resolve(
-  __dirname,
-  "..",
-  "..",
-  "Agentlas-OS",
-  "assets",
-  "model2vec",
-  "potion-base-8M-int8",
-);
-const assetPath = process.env.AGENTLAS_MODEL2VEC_PATH || siblingAsset;
+const assetPath = resolveModel2VecAsset();
 assert.ok(
   fs.existsSync(path.join(assetPath, "manifest.json")),
   `verified local Model2Vec asset is required: ${assetPath}`,

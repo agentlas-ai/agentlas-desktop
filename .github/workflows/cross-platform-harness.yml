@@ -10,6 +10,10 @@ on:
       - "electron/architecture/project-bootstrap.ts"
       - "electron/architecture/activation.ts"
       - "electron/memory/context.ts"
+      - "electron/memory/local-embedding.ts"
+      - "electron/memory/project-files.ts"
+      - "electron/memory/store.ts"
+      - "electron/experience/**"
       - "electron/mcp/client.ts"
       - "electron/mcp-tools/**"
       - "electron/site/agent-app-*.ts"
@@ -24,6 +28,10 @@ on:
       - "scripts/test-project-bootstrap-desktop.cjs"
       - "scripts/test-project-bootstrap-core.cjs"
       - "scripts/test-project-memory-read-boundary.cjs"
+      - "scripts/lib/agentlas-core-root.cjs"
+      - "scripts/test-model2vec-hybrid-parity.cjs"
+      - "scripts/test-memory-hybrid-retrieval.cjs"
+      - "scripts/test-curator-nest-core-query.cjs"
       - "scripts/test-codex-model-discovery.cjs"
       - "scripts/test-workload-routing.cjs"
       - "scripts/test-build-workload-routing.cjs"
@@ -48,6 +56,10 @@ on:
       - "electron/architecture/project-bootstrap.ts"
       - "electron/architecture/activation.ts"
       - "electron/memory/context.ts"
+      - "electron/memory/local-embedding.ts"
+      - "electron/memory/project-files.ts"
+      - "electron/memory/store.ts"
+      - "electron/experience/**"
       - "electron/mcp/client.ts"
       - "electron/mcp-tools/**"
       - "electron/site/agent-app-*.ts"
@@ -62,6 +74,10 @@ on:
       - "scripts/test-project-bootstrap-desktop.cjs"
       - "scripts/test-project-bootstrap-core.cjs"
       - "scripts/test-project-memory-read-boundary.cjs"
+      - "scripts/lib/agentlas-core-root.cjs"
+      - "scripts/test-model2vec-hybrid-parity.cjs"
+      - "scripts/test-memory-hybrid-retrieval.cjs"
+      - "scripts/test-curator-nest-core-query.cjs"
       - "scripts/test-codex-model-discovery.cjs"
       - "scripts/test-workload-routing.cjs"
       - "scripts/test-build-workload-routing.cjs"
@@ -96,7 +112,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: agentlas-ai/Agentlas-OS
-          ref: 5cd426d289f976b57fb41e0a710c6eff53d25b8c
+          ref: 1bcf5bc6595716b3dd9c45e990b5b96d4d98c616
           path: agentlas-desktop/Hephaestus
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -107,7 +123,7 @@ jobs:
       - name: Verify Core source pin
         working-directory: agentlas-desktop/Hephaestus
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "5cd426d289f976b57fb41e0a710c6eff53d25b8c"
+        run: test "$(git rev-parse HEAD)" = "1bcf5bc6595716b3dd9c45e990b5b96d4d98c616"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -133,6 +149,9 @@ jobs:
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-project-bootstrap-desktop.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-project-bootstrap-core.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-project-memory-read-boundary.cjs
+          node scripts/test-model2vec-hybrid-parity.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-memory-hybrid-retrieval.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-curator-nest-core-query.cjs
           node scripts/test-codex-model-discovery.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-workload-routing.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-build-workload-routing.cjs
@@ -150,6 +169,9 @@ jobs:
           npx --no-install electron scripts/test-project-bootstrap-desktop.cjs
           npx --no-install electron scripts/test-project-bootstrap-core.cjs
           npx --no-install electron scripts/test-project-memory-read-boundary.cjs
+          node scripts/test-model2vec-hybrid-parity.cjs
+          npx --no-install electron scripts/test-memory-hybrid-retrieval.cjs
+          npx --no-install electron scripts/test-curator-nest-core-query.cjs
           node scripts/test-codex-model-discovery.cjs
           npx --no-install electron scripts/test-workload-routing.cjs
           npx --no-install electron scripts/test-build-workload-routing.cjs

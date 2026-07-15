@@ -5,20 +5,14 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { app } = require("electron");
+const { resolveAgentlasCoreRoot, resolveModel2VecAsset } = require("./lib/agentlas-core-root.cjs");
 
 async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-memory-hybrid-"));
   process.env.AGENTLAS_STORE_PATH = path.join(temp, "agentlas.sqlite");
   process.env.AGENTLAS_E2E = "1";
-  const modelAsset = path.resolve(
-    __dirname,
-    "..",
-    "..",
-    "Agentlas-OS",
-    "assets",
-    "model2vec",
-    "potion-base-8M-int8",
-  );
+  const coreRoot = resolveAgentlasCoreRoot();
+  const modelAsset = resolveModel2VecAsset();
   assert.ok(fs.existsSync(path.join(modelAsset, "manifest.json")), "hybrid retrieval requires the bundled Model2Vec asset");
   process.env.AGENTLAS_MODEL2VEC_PATH = modelAsset;
   app.setPath("userData", path.join(temp, "user-data"));
@@ -33,7 +27,7 @@ async function main() {
     const jsVector = embedding.localHashingEmbedding(query).vector;
     const python = spawnSync("python3", ["-c", [
       "import json,sys",
-      `sys.path.insert(0, ${JSON.stringify(path.join(__dirname, "..", "Hephaestus"))})`,
+      `sys.path.insert(0, ${JSON.stringify(coreRoot)})`,
       "from ontology.embeddings import LocalHashingVectorAdapter",
       `print(json.dumps(LocalHashingVectorAdapter().embed(${JSON.stringify(query)})))`,
     ].join(";")], { encoding: "utf8" });

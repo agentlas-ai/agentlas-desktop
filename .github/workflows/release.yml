@@ -42,7 +42,7 @@ jobs:
     timeout-minutes: 35
     env:
       HEPHAESTUS_REF: v1.1.30
-      HEPHAESTUS_COMMIT: 5cd426d289f976b57fb41e0a710c6eff53d25b8c
+      HEPHAESTUS_COMMIT: 1bcf5bc6595716b3dd9c45e990b5b96d4d98c616
 
     steps:
       - uses: actions/checkout@v4
@@ -160,7 +160,7 @@ jobs:
     timeout-minutes: 45
     env:
       HEPHAESTUS_REF: v1.1.30
-      HEPHAESTUS_COMMIT: 5cd426d289f976b57fb41e0a710c6eff53d25b8c
+      HEPHAESTUS_COMMIT: 1bcf5bc6595716b3dd9c45e990b5b96d4d98c616
 
     steps:
       - uses: actions/checkout@v4
@@ -305,6 +305,9 @@ jobs:
             # privacy-safe candidate intake, exact Hub bindings, portable Cloud
             # assets, and Desktop/Mobile/Terminal state boundaries.
             npm run build:electron
+            node scripts/test-model2vec-hybrid-parity.cjs
+            npx --no-install electron scripts/test-memory-hybrid-retrieval.cjs
+            npx --no-install electron scripts/test-curator-nest-core-query.cjs
             npx --no-install electron scripts/test-memory-agent-isolation.cjs
             node scripts/test-memory-context-budget.cjs
             npx --no-install electron scripts/test-agent-learning-v57.cjs
