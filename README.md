@@ -69,6 +69,16 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-16 · v0.8.43 — deterministic Linux automation release gate** — The
+  automation-store suite now injects an exact test runtime before lazily loading
+  the scheduler, and its cached-parent deletion interception reaches the real
+  `startGraphRun` boundary. v0.8.41 stopped before packaging or public writes;
+  the corrected failure point and every remaining Linux security command pass
+  under Ubuntu 24.04 x64 and Node 22. The v0.8.42 Workforce source preparation
+  is included here instead of being published separately. Agentlas OS v1.1.39 is
+  pinned at cf71b8be1732f249b4d79d66246f7d3c0cd0790f. This source does not prove a
+  public installer or update-feed release.
+
 - **2026-07-16 · v0.8.42 — default-on host-LLM Workforce with tolerant semantic
   HR matching** — On a fresh install, an ordinary complex first-turn request now
   goes from the top model to the Hub Workforce ontology automatically: the model

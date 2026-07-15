@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.43 — 2026-07-16
+
+### Fixed
+
+- **Linux automation-store verification is now host-independent.** The test
+  injects an exact Codex inventory before lazily loading the scheduler, so
+  first-run runtime pinning cannot depend on a CLI installed on the runner.
+- **The cached-parent deletion race reaches the real scheduler boundary.** Its
+  `startGraphRun` interception is installed before the scheduler captures the
+  export, proving a deleted automation creates no run, chat, or runtime side
+  effect on slow Linux hosts as well as macOS.
+- v0.8.41 stopped in Linux OpenCrab preflight before packaging or public writes.
+  The failure was reproduced under Ubuntu 24.04 x64 with Node 22; the corrected
+  failure point and all remaining Linux security commands passed there. The
+  v0.8.42 Workforce source preparation is included in this release rather than
+  being published separately.
+- The bundled Core is Agentlas OS v1.1.39 at immutable commit
+  cf71b8be1732f249b4d79d66246f7d3c0cd0790f. This source state does not prove a
+  Git tag, installer, update feed, or GitHub release.
+
 ## 0.8.42 — 2026-07-16
 
 ### Added
