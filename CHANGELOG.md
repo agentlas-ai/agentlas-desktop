@@ -35,9 +35,11 @@
   Both builder configurations run the same `afterPack` gate, which requires the
   pinned manifest, tokenizer, MIT license, int8 embeddings, scales, file sizes,
   and SHA-256 content identity to match the embedded Agentlas OS checkout.
-- **Desktop now embeds Agentlas OS v1.1.30 at one immutable commit.** Package
+- **Desktop now embeds Agentlas OS v1.1.31 at one immutable commit.** Package
   metadata, updater contracts, release workflows, and the three-OS harness pin
-  `1bcf5bc6595716b3dd9c45e990b5b96d4d98c616`.
+  `738b78f40b5efc9b2dd4cc66c94a3805e70c79f5`. The hotfix preserves verified
+  Model2Vec bytes on Windows, installs the model during self-update, and repairs
+  detected-host memory hooks.
 
 ### Boundaries and edge cases
 

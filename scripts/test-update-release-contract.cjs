@@ -64,12 +64,12 @@ assert.equal(compatibility.minimumRuntimeVersion, "1.0.4", "v0.7.0 shipped Hepha
 assert.equal(compatibility.minimumSchemaVersion, 35, "v0.7.0 shipped SQLite schema 35");
 assert.equal(
   compatibility.bundledRuntimeVersion,
-  "1.1.30",
+  "1.1.31",
   "the next Desktop patch must include the canonical first-contact bootstrap and model allocation contract",
 );
 assert.equal(runtimeSource.ref, `v${compatibility.bundledRuntimeVersion}`, "runtime source ref must match compatibility");
 assert.match(runtimeSource.commit, /^[0-9a-f]{40}$/, "runtime source must pin an immutable full commit");
-assert.equal(runtimeSource.commit, "1bcf5bc6595716b3dd9c45e990b5b96d4d98c616", "Agentlas OS v1.1.30 commit drift");
+assert.equal(runtimeSource.commit, "738b78f40b5efc9b2dd4cc66c94a3805e70c79f5", "Agentlas OS v1.1.31 commit drift");
 assert.equal(compatibility.bundledRuntimeVersion, manifest.version, "feed runtime must match the bundled Hephaestus manifest");
 assert.equal(
   spawnSync("git", ["-C", embeddedRuntimeRoot, "rev-parse", "HEAD^{commit}"], { encoding: "utf8" }).stdout.trim(),
@@ -245,12 +245,12 @@ assert.match(readme, /macOS 12 Monterey or newer/);
 assert.match(readme, /macOS 11 Big Sur:[\s\S]*?last compatible Agentlas release[\s\S]*?excluded/);
 assert.match(
   readmeReleaseSection,
-  /Model2Vec[\s\S]*?adaptive all-relevant-or-top-k[\s\S]*?SQLite nests[\s\S]*?Agentlas OS v1\.1\.30[\s\S]*?does not claim a[\s\S]*?published installer/,
+  /Model2Vec[\s\S]*?adaptive all-relevant-or-top-k[\s\S]*?SQLite nests[\s\S]*?Agentlas OS v1\.1\.31[\s\S]*?does not claim a[\s\S]*?published installer/,
   "README current release section must describe mandatory local hybrid recall and the unpublished boundary",
 );
 assert.match(
   changelogReleaseSection,
-  /mandatory, fully local Model2Vec hybrid[\s\S]*?No server embedding[\s\S]*?ranks every eligible row[\s\S]*?survive projection rebuilds[\s\S]*?Agentlas OS v1\.1\.30[\s\S]*?do not themselves publish a Git tag/,
+  /mandatory, fully local Model2Vec hybrid[\s\S]*?No server embedding[\s\S]*?ranks every eligible row[\s\S]*?survive projection rebuilds[\s\S]*?Agentlas OS v1\.1\.31[\s\S]*?do not themselves publish a Git tag/,
   "CHANGELOG current release section must describe governed local recall and the unpublished boundary",
 );
 assert.match(publishMacSource, /Requires macOS 12 Monterey or newer/);

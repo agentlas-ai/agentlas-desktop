@@ -82,8 +82,8 @@ authority for which version is actually public, stable, and downloadable.
   links and explicitly reviewed `supersedes` / `contradicts` governance edges
   survive safe rebuilds without whole-file Markdown injection. The packaged model
   is checksum-gated and runs in-process with no embedding server or paid embedding
-  API. The embedded Agentlas OS v1.1.30 source is pinned to
-  `1bcf5bc6595716b3dd9c45e990b5b96d4d98c616`; this source note does not claim a
+  API. The embedded Agentlas OS v1.1.31 source is pinned to
+  `738b78f40b5efc9b2dd4cc66c94a3805e70c79f5`; this source note does not claim a
   published installer or update-feed release.
 
 - **2026-07-15 · v0.8.30 — Agentlas OS v1.1.29 alignment** — Desktop now
