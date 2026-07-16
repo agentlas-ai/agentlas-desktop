@@ -327,7 +327,6 @@ jobs:
         working-directory: agentlas-desktop
         shell: bash
         run: |
-          node scripts/test-site-agent-app-isolation.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-site-agent-app-capabilities.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-site-agent-app-mcp-consent.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-site-agent-app-prebuild-mcp.cjs
@@ -335,11 +334,6 @@ jobs:
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-site-agent-app-firm-isolation.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-site-agent-app-group-isolation.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-site-agent-app-runtime.cjs
-      - name: Verify Agent App exact capability on macOS and Windows
-        if: runner.os != 'Linux'
-        working-directory: agentlas-desktop
-        shell: bash
-        run: node scripts/test-site-agent-app-isolation.cjs
       - name: Verify Agent App declared capabilities on macOS and Windows
         if: runner.os != 'Linux'
         working-directory: agentlas-desktop
