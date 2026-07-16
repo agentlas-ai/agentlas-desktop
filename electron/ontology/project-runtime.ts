@@ -1411,6 +1411,33 @@ async function ensureWorkingFolderOntologyReady(projectFolder: string): Promise<
   return operation;
 }
 
+const backgroundIngestReported = new Set<string>();
+
+/**
+ * Fire-and-forget ingest for a chat turn that has write authority over an
+ * activated folder. The turn itself still queries read-only (so a slow ingest
+ * never blocks the answer); this fills the folder's ontology DB in the
+ * background so the NEXT turn has something to retrieve.
+ *
+ * Without this the DB stays empty forever: every chat turn queries with
+ * readOnly:true, which takes existingWorkingFolderOntology (never ingests), and
+ * no renderer path calls the ingesting sync. ensureWorkingFolderOntologyReady is
+ * idempotent — it dedupes concurrent runs via workingFolderQueues and skips when
+ * the index has not changed — so calling it every eligible turn is cheap.
+ */
+export function ingestWorkingFolderOntologyInBackground(projectFolder: string): void {
+  void ensureWorkingFolderOntologyReady(projectFolder).catch((error) => {
+    // Report once per project per process; a broken ingest must be findable in
+    // the log rather than failing silently like the pipes it is fixing.
+    const key = projectFolder;
+    if (backgroundIngestReported.has(key)) return;
+    backgroundIngestReported.add(key);
+    console.warn(
+      `[ontology] background ingest failed for ${projectFolder}: ${cleanText((error as Error).message, 400)}`,
+    );
+  });
+}
+
 function existingWorkingFolderOntology(projectFolder: string): WorkingFolderOntologyRuntime {
   const projectPath = fs.realpathSync.native(projectFolder);
   const memoryDir = path.join(projectPath, PROJECT_MEMORY_DIR);

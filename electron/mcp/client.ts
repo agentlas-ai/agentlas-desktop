@@ -64,7 +64,10 @@ import { runSwarmInvocation } from "./swarm-run";
 import { getAgentGroup, listAgentGroups, resolveAgentGroupForRuntime } from "../store/agent-groups";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
-import { queryWorkingFolderOntologyContext } from "../ontology/project-runtime";
+import {
+  ingestWorkingFolderOntologyInBackground,
+  queryWorkingFolderOntologyContext,
+} from "../ontology/project-runtime";
 import {
   buildExperienceContext,
   buildExperienceRoutingPrior,
@@ -2053,6 +2056,14 @@ export async function runMcpInvocation(
           readOnly: projectReadOnlyBoundary,
         });
         if (ontologyContext.used) turnContextParts.push(ontologyContext.context);
+        // The query above is deliberately read-only so a slow ingest never
+        // blocks the answer, but that path never fills the DB. When this turn
+        // has write authority over the folder, kick off a background ingest so
+        // the next turn has something to retrieve — without it the folder
+        // ontology stays provisioned-but-empty forever (0 rows across projects).
+        if (activePath && canWrite && !restrictedReadBoundary) {
+          ingestWorkingFolderOntologyInBackground(memoryReadPath);
+        }
       }
     } catch (err) {
       console.error("[architecture] buildMemoryContext failed:", err);
