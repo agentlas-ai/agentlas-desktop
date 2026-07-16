@@ -11,7 +11,8 @@
 //   HEPHAESTUS_COMMIT release workflow가 재확인하는 immutable commit (custom repo/ref 테스트도 지원)
 //   HEPHAESTUS_DIR    기본 <repo>/Hephaestus
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -57,6 +58,43 @@ function capture(cmd, args) {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
+}
+
+const sourceByteCheckoutConfig = ["-c", "core.autocrlf=false", "-c", "core.eol=lf"];
+
+function materializeSourceBytes() {
+  // actions/checkout follows the Windows global core.autocrlf setting. That is
+  // fine for ordinary source code, but the embedded runtime contains assets
+  // whose manifest records exact byte sizes and hashes. Re-materialize an
+  // already-clean checkout without CRLF conversion before it can be packaged.
+  run("git", ["-C", dir, "config", "--local", "core.autocrlf", "false"]);
+  run("git", ["-C", dir, "config", "--local", "core.eol", "lf"]);
+  const stagingDir = mkdtempSync(path.join(tmpdir(), "agentlas-core-source-"));
+  try {
+    const prefix = `${stagingDir.replaceAll("\\", "/")}/`;
+    run("git", [
+      ...sourceByteCheckoutConfig,
+      "-C",
+      dir,
+      "checkout-index",
+      "--all",
+      "--force",
+      `--prefix=${prefix}`,
+    ]);
+    cpSync(stagingDir, dir, { recursive: true, force: true, dereference: false });
+  } finally {
+    rmSync(stagingDir, { recursive: true, force: true });
+  }
+  // Refresh only index metadata after replacing files from that same index.
+  // The cached tree must remain byte-for-byte identical to HEAD.
+  run("git", [...sourceByteCheckoutConfig, "-C", dir, "add", "--update", "--"]);
+  try {
+    execFileSync("git", ["-C", dir, "diff", "--cached", "--quiet", "HEAD", "--"], {
+      stdio: "ignore",
+    });
+  } catch {
+    fail("source-byte materialization changed the embedded Agentlas OS index");
+  }
 }
 
 function fail(message) {
@@ -154,9 +192,10 @@ if (existsSync(sentinel)) {
   }
   const desired = capture("git", ["-C", dir, "rev-parse", "FETCH_HEAD^{commit}"]);
   verifyPinnedCommit(desired);
+  materializeSourceBytes();
   const current = capture("git", ["-C", dir, "rev-parse", "HEAD^{commit}"]);
   if (current !== desired) {
-    run("git", ["-C", dir, "switch", "--detach", desired]);
+    run("git", [...sourceByteCheckoutConfig, "-C", dir, "switch", "--detach", desired]);
     console.log(`[ensure-engine] Updated embedded Agentlas OS ${current.slice(0, 8)} → ${desired.slice(0, 8)}.`);
   } else {
     console.log(`[ensure-engine] Embedded Agentlas OS already pinned at ${desired.slice(0, 8)}.`);
@@ -167,13 +206,14 @@ if (existsSync(sentinel)) {
 
 console.log(`[ensure-engine] Hephaestus missing — cloning ${repo}@${ref} → ${dir}`);
 try {
-  run("git", ["clone", "--depth", "1", "--branch", ref, repo, dir]);
+  run("git", [...sourceByteCheckoutConfig, "clone", "--depth", "1", "--branch", ref, repo, dir]);
 } catch {
   // ref 가 브랜치가 아닐 수 있음(커밋 SHA) — full 클론 후 checkout 폴백.
   console.log("[ensure-engine] shallow branch clone failed; retrying with full clone + checkout");
-  run("git", ["clone", repo, dir]);
-  run("git", ["-C", dir, "checkout", ref]);
+  run("git", [...sourceByteCheckoutConfig, "clone", repo, dir]);
+  run("git", [...sourceByteCheckoutConfig, "-C", dir, "checkout", ref]);
 }
 
+materializeSourceBytes();
 verifyReady();
 console.log("[ensure-engine] Hephaestus engine ready.");
