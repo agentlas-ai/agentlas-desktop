@@ -142,7 +142,9 @@ jobs:
             npm run test:runtime-resume-contract
             npm run test:cli-image-attachments
             npm run test:owned-agent-runtime-prompts
-            npm run test:workforce-orchestrator
+            npm run test:borrowed-task-force
+            npm run test:workload-routing
+            npm run test:build-workload-routing
             npm run test:hephaestus-settings-migration
             npm run test:auto-router-gates
             npm run test:opencrab-core
@@ -305,7 +307,8 @@ jobs:
             npm run test:mobile-bridge-contract
             npm run test:mobile-execution-boundary
             npm run test:borrowed-task-force
-            npm run test:workforce-orchestrator
+            npm run test:workload-routing
+            npm run test:build-workload-routing
             npm run test:hephaestus-settings-migration
             npm run test:auto-router-gates
             npm run test:mcp-auto-select

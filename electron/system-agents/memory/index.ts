@@ -12,7 +12,7 @@ import { MEMORY_EMITTER_BLOCK } from "../../architecture/manifest";
 export const MEMORY_CORE = [
   "## Memory",
   "End EVERY completed normal reply with exactly one hidden `## Memory Events` fenced JSON envelope: `{schema_version:\"agentlas.memory-ticket.v1\",turn_summary:\"one safe sentence\",candidates:[]}`. Never omit it; use [] when nothing durable was learned.",
-  "Use non-empty candidates only for durable decisions or reusable facts. Each has memory_kind, content, suggested_scope, confidence, sensitivity, evidence_refs. Scopes: user_identity, team_memory, agent_repo, agent_team, project, session, discard. Never include secrets, credentials, raw logs, prompts, transcripts, or absolute paths. The Curator decides disposition.",
+  "Only when this turn produced a durable decision or reusable fact, use non-empty candidates. Each has memory_kind, content, suggested_scope, confidence, sensitivity, evidence_refs. Scopes: user_identity, team_memory, agent_repo, agent_team, project, session, discard. Never include secrets, credentials, raw logs, prompts, transcripts, or absolute paths. The Curator decides disposition.",
 ].join("\n");
 
 export const MEMORY_CORE_MAX_APPROX_TOKENS = 220;

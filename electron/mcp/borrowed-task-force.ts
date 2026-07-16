@@ -794,7 +794,9 @@ function taskForceRunnerBase(p: BorrowedTaskForceParams): Pick<
   };
 }
 
-function governTaskForceControlTurn(
+// Keep the established release-boundary name: this choke point now governs every
+// task-force control turn, while restricted/read-only runs remain strip-only.
+function restrictedTaskForceText(
   p: BorrowedTaskForceParams,
   text: string,
   input: {
@@ -2295,7 +2297,7 @@ async function runBorrowedAgentTurn(
         ));
         managerPlan = {
           ...managerPlan,
-          text: governTaskForceControlTurn(p, managerPlan.text, {
+          text: restrictedTaskForceText(p, managerPlan.text, {
             nodeId: `${id}:hub-team:manager`,
             phase: "manager-plan",
             attempt,
@@ -2914,7 +2916,7 @@ async function runPlanner(
           : baseSystemPrompt,
         schemaRepair ? previousError : "",
       ));
-      const attemptText = governTaskForceControlTurn(p, attemptResult.text, {
+      const attemptText = restrictedTaskForceText(p, attemptResult.text, {
         nodeId: orchestratorId,
         phase: "planner",
         attempt,
@@ -3082,7 +3084,7 @@ async function runPlanner(
       attempt: 1,
       agentId: p.orchestratorAgent.id,
     }, () => invokePlanner(plannerInvocationId, baseSystemPrompt));
-    plannerText = governTaskForceControlTurn(p, result.text, {
+    plannerText = restrictedTaskForceText(p, result.text, {
       nodeId: orchestratorId,
       phase: "planner",
       attempt: 1,
@@ -3385,7 +3387,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     p.sink({ kind: "tool-use", status: boundaryNote });
   }
   if (taskForceProjectReadOnly(p)) {
-    displayText = governTaskForceControlTurn(p, displayText, {
+    displayText = restrictedTaskForceText(p, displayText, {
       nodeId: orchestratorId,
       phase: "synthesis",
       agentId: p.orchestratorAgent.id,

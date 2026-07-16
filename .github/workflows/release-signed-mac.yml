@@ -203,9 +203,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Verify Agent Workforce Ontology orchestration
+      - name: Verify workforce runtime orchestration
         run: |
-          npm run test:workforce-orchestrator
+          # Full Core/Desktop vector parity stays in the private pre-release proof;
+          # the public Core runtime intentionally excludes benchmark fixtures.
+          npm run test:borrowed-task-force
+          npm run test:workload-routing
+          npm run test:build-workload-routing
           npm run test:hephaestus-settings-migration
           npm run test:auto-router-gates
 

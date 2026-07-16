@@ -260,7 +260,7 @@ jobs:
       - name: Compile Desktop main process
         working-directory: agentlas-desktop
         run: npm run build:electron
-      - name: Verify Agent Workforce Ontology on Linux
+      - name: Verify workforce runtime orchestration on Linux
         if: runner.os == 'Linux'
         working-directory: agentlas-desktop
         run: |
@@ -269,16 +269,22 @@ jobs:
           # flag is lost and Chromium aborts on the SUID sandbox helper (chrome-sandbox must be
           # root:4755, which a GitHub runner cannot provide). The main process is already
           # compiled by the "Compile Desktop main process" step above.
-          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-workforce-orchestrator.cjs
-          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-workforce-execution-receipt.cjs
+          # Core/Desktop vector parity is proved privately before release because its
+          # benchmark fixtures are intentionally absent from the public Core runtime.
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-borrowed-task-force.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-borrowed-agent-fail-closed.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-workload-routing.cjs
+          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-build-workload-routing.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-hephaestus-settings-migration.cjs
           npm run test:auto-router-gates
-      - name: Verify Agent Workforce Ontology on macOS and Windows
+      - name: Verify workforce runtime orchestration on macOS and Windows
         if: runner.os != 'Linux'
         working-directory: agentlas-desktop
         shell: bash
         run: |
-          npm run test:workforce-orchestrator
+          npm run test:borrowed-task-force
+          npm run test:workload-routing
+          npm run test:build-workload-routing
           npm run test:hephaestus-settings-migration
           npm run test:auto-router-gates
       - name: Verify installed Core on Linux
