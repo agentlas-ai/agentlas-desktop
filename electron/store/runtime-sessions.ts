@@ -102,3 +102,15 @@ export function clearRuntimeSession(chatId: string, kind: string): void {
     // 무시
   }
 }
+
+/**
+ * SQLite transaction이 모든 provider 세션을 지운 뒤 인메모리 resume 포인터도
+ * 같은 경계로 폐기한다. DB transaction 전에 호출하면 이후 단계 실패 시 메모리만
+ * 사라지는 부분 성공이 되므로, 호출자는 반드시 commit 성공 뒤에 실행해야 한다.
+ */
+export function evictRuntimeSessionsForChat(chatId: string): void {
+  const prefix = `${chatId}\0`;
+  for (const key of memSessions.keys()) {
+    if (key.startsWith(prefix)) memSessions.delete(key);
+  }
+}

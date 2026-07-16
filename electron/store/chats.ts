@@ -6,6 +6,7 @@ import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
 import { getAgentGroup } from "./agent-groups";
 import { getFirm } from "./firms";
+import { evictRuntimeSessionsForChat } from "./runtime-sessions";
 import { touchProject } from "./projects";
 import type { Chat, ChatHistoryEntry, HiredAgentCard } from "../../shared/types";
 import { currentUiLocale } from "../ui-locale";
@@ -537,6 +538,8 @@ export function clearChatContext(chatId: string): void {
     db.prepare("UPDATE chats SET last_viewed_at = ? WHERE id = ?").run(new Date().toISOString(), targetChatId);
   });
   clear(chatId);
+  // DB rollback 가능성이 사라진 뒤에만 프로세스 내 resume 캐시를 폐기한다.
+  evictRuntimeSessionsForChat(chatId);
   emitDesktopStoreChange({ entity: "chat", id: chatId });
 }
 
