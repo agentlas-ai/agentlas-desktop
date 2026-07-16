@@ -132,7 +132,9 @@ function installSettingsFixture(payload) {
         code: "A".repeat(22),
         expiresAt: new Date(Date.now() + mobilePairingExpiryDelay).toISOString(),
         certificateFingerprint: "a".repeat(64),
-        certificateDer: "TUlJQg==",
+        // Mirrors the real payload: the fingerprint pins the connection, the
+        // certificate never rides in the QR.
+        certificateDer: null,
       };
     },
     retry: async () => {

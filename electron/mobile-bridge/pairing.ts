@@ -591,6 +591,12 @@ export function createMobileBridgePairingPayload(
   const endpoint = new URL(manifest.url);
   endpoint.protocol = manifest.secure ? "https:" : "http:";
   endpoint.pathname = MOBILE_BRIDGE_PAIR_EXCHANGE_PATH;
+  // The certificate itself is deliberately NOT in the QR. The fingerprint is a
+  // complete pin — Mobile compares the SHA-256 of the certificate the TLS
+  // handshake presents — so shipping the whole DER proved nothing extra while
+  // costing 796 of 1228 characters on a real host. That pushed the code to a
+  // density that failed to scan on a slightly blurry camera. Keeping the
+  // payload small is what makes pairing work in practice.
   return {
     version: MOBILE_BRIDGE_PROTOCOL_VERSION,
     hostId: manifest.hostId,
@@ -600,6 +606,6 @@ export function createMobileBridgePairingPayload(
     code: challenge.code,
     expiresAt: challenge.expiresAt,
     certificateFingerprint: manifest.certificateFingerprint,
-    certificateDer: manifest.certificateDer,
+    certificateDer: null,
   };
 }

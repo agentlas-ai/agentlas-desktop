@@ -1561,6 +1561,63 @@ async function testPairingLifecycle() {
   }
 }
 
+async function testPairingQrStaysScannable() {
+  // The pairing QR carried the whole DER certificate (796 of 1228 characters on
+  // a real host). At that length the code needs a dense version-25-ish symbol,
+  // which stops decoding as soon as the camera is slightly out of focus — the
+  // user simply could not pair. The fingerprint alone is a complete pin (Mobile
+  // hashes the certificate the TLS handshake presents and compares), so the
+  // certificate must never travel here again.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mobile-bridge-qr-"));
+  try {
+    const tls = await loadOrCreateMobileBridgeTls(root);
+    const identity = loadOrCreateMobileBridgeHostIdentity(
+      root,
+      new Date("2026-07-16T00:00:00.000Z"),
+    );
+    const manifest = {
+      version: 1,
+      hostId: identity.hostId,
+      displayName: "Mason Mac Studio",
+      path: "/v1/mobile",
+      pairExchangePath: MOBILE_BRIDGE_PAIR_EXCHANGE_PATH,
+      bindHost: "192.168.200.133",
+      port: 53986,
+      secure: true,
+      url: "wss://192.168.200.133:53986/v1/mobile",
+      certificateFingerprint: tls.certificateFingerprint,
+      certificateDer: tls.certificateDer,
+      updatedAt: "2026-07-16T00:00:00.000Z",
+    };
+    // Writing validates the manifest, so a secure manifest that still carries
+    // its certificate stays legal — only the QR sheds it.
+    writeMobileBridgeEndpointManifest(root, manifest);
+
+    const manager = new MobileBridgePairingManager(root, {
+      now: () => new Date("2026-07-16T00:00:00.000Z"),
+    });
+    const payload = createMobileBridgePairingPayload(manager.issueChallenge(), manifest);
+    const encoded = JSON.stringify(payload);
+
+    assert.equal(payload.certificateDer, null, "the QR must not carry the certificate");
+    assert.equal(
+      encoded.includes(tls.certificateDer),
+      false,
+      "no field may smuggle the certificate back into the QR",
+    );
+    // The pin itself must still be there, or the phone has nothing to verify.
+    assert.equal(payload.certificateFingerprint, tls.certificateFingerprint);
+    // Version 12 alphanumeric at quartile EC holds ~535 chars; staying under
+    // that keeps the symbol coarse enough to scan off a blurry camera.
+    assert.ok(
+      encoded.length < 535,
+      `pairing QR grew to ${encoded.length} chars — dense codes stop scanning`,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function testServerBoundary() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mobile-bridge-server-"));
   const hostId = "host_fedcba9876543210fedcba9876543210";
@@ -2072,6 +2129,7 @@ async function main() {
   await testReconnectSnapshotAndDesktopMutationInvalidation();
   testAutomationLiveRunProjection();
   await testPairingLifecycle();
+  await testPairingQrStaysScannable();
   await testServerBoundary();
   await testRuntimeRetryKeepsStableEndpoint();
   await testAutomaticNetworkRebind();

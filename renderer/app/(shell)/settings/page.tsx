@@ -883,10 +883,16 @@ function MobileBridgePanel() {
     try {
       const payload = await api.mobileBridge.issuePairing();
       const encoded = JSON.stringify(payload);
+      // Scannability is set by how physically large one module lands on the
+      // phone's sensor. The payload used to be 1228 chars, forcing a ~101x101
+      // symbol into a ~200px box — under half a millimetre per module, which a
+      // slightly blurred camera cannot resolve. The payload is now 410 chars,
+      // so the same box carries a far coarser symbol and can afford medium
+      // error correction (15% recoverable) instead of the 7% floor.
       const image = await QRCode.toDataURL(encoded, {
-        errorCorrectionLevel: "L",
+        errorCorrectionLevel: "M",
         margin: 3,
-        width: 384,
+        width: 512,
         color: { dark: "#111210", light: "#FFFFFF" },
       });
       setPairing(payload);
@@ -1050,7 +1056,7 @@ function MobileBridgePanel() {
         </div>
 
         {pairing && qrDataUrl && (
-          <div data-testid="mobile-bridge-pairing" style={{ display: "grid", gridTemplateColumns: "minmax(200px, 240px) 1fr", gap: 20, marginTop: 18, alignItems: "center" }}>
+          <div data-testid="mobile-bridge-pairing" style={{ display: "grid", gridTemplateColumns: "minmax(240px, 288px) 1fr", gap: 20, marginTop: 18, alignItems: "center" }}>
             <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 18, background: "#fff", padding: 12 }}>
               {/* The data URL is produced locally; the QR contains a two-minute nonce and public certificate only. */}
               <img src={qrDataUrl} alt={locale === "ko" ? "Agentlas Mobile 연결 QR" : "Agentlas Mobile pairing QR"} style={{ display: "block", width: "100%", aspectRatio: "1" }} />
