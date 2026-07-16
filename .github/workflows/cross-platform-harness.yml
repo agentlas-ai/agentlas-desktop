@@ -236,7 +236,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: agentlas-ai/Agentlas-OS
-          ref: 49752a783e944c898ea023705104661b3beb87b2
+          ref: 98adf6d1bb0bdad5a919884c3916274d5a3e813f
           path: agentlas-desktop/Hephaestus
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -247,7 +247,7 @@ jobs:
       - name: Verify Core source pin
         working-directory: agentlas-desktop/Hephaestus
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "49752a783e944c898ea023705104661b3beb87b2"
+        run: test "$(git rev-parse HEAD)" = "98adf6d1bb0bdad5a919884c3916274d5a3e813f"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

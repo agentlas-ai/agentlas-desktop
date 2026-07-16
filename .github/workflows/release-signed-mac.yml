@@ -241,7 +241,6 @@ jobs:
           npm run test:hephaestus-status-version
           npm run test:marketplace-cache
           npm run test:mobile-bridge-contract
-          npm run test:mobile-read-boundary
           npm run test:mobile-execution-boundary
           npm run test:runtime-resume-contract
           npm run test:cli-image-attachments

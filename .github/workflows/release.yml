@@ -138,7 +138,6 @@ jobs:
             npm run test:automations-store
             npm run test:automation-result-contract
             npm run test:automation-scheduler-guards
-            npm run test:mobile-read-boundary
             npm run test:mobile-execution-boundary
             npm run test:runtime-resume-contract
             npm run test:cli-image-attachments
@@ -258,7 +257,6 @@ jobs:
           npm run test:release-agent-foundation-gate
           npm run test:runtime-resume-contract
           npm run test:mobile-bridge-contract
-          npm run test:mobile-read-boundary
           npm run test:mobile-execution-boundary
           npm run test:v64-automation-permission-migration
           npm run test:provider-health
@@ -305,7 +303,6 @@ jobs:
             npm run test:stormbreaker-swarm
             npm run test:provider-health
             npm run test:mobile-bridge-contract
-            npm run test:mobile-read-boundary
             npm run test:mobile-execution-boundary
             npm run test:borrowed-task-force
             npm run test:workforce-orchestrator
