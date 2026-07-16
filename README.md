@@ -69,6 +69,23 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-16 · v0.8.46 — a pairing QR a phone camera can actually read** — The
+  Mobile pairing QR did not decode unless the camera was perfectly focused. The
+  payload was 1228 characters, 796 of which were the full DER certificate, so a
+  ~101x101 symbol was squeezed into the pairing card at under half a millimetre
+  per module. The certificate never needed to travel there: the SHA-256
+  fingerprint is the complete pin, because Mobile hashes whatever certificate
+  the TLS handshake presents and compares it. The payload is now 410 characters
+  and the QR renders at error-correction level M instead of the level-L floor it
+  was pinned to purely to fit. Mobile pins from the fingerprint alone with no
+  trust anchor and still cross-checks a certificate when one is sent, so the
+  trust model is unchanged. The certificate stays in the endpoint manifest,
+  where the relay uses it as its CA. A contract test asserts the certificate
+  cannot return to the QR and that the payload stays under the density ceiling.
+  Agentlas OS v1.1.45 is pinned at
+  49752a783e944c898ea023705104661b3beb87b2. This source does not prove a
+  Desktop tag, public installer, or update-feed release.
+
 - **2026-07-16 · v0.8.45 — direct Workforce contracts and bounded semantic
   recovery** — The active host LLM now returns direct WorkOrder and Selection
   objects with exact top-level and nested keys. Legacy `toolCall` envelopes are

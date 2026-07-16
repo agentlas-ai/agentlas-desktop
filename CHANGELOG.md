@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.8.46 — 2026-07-16
+
+### Fixed
+
+- The Mobile pairing QR did not scan unless the camera was perfectly focused.
+  The payload carried the full DER certificate — 796 of its 1228 characters —
+  which forced a ~101x101 symbol into the pairing card at under half a
+  millimetre per module, below what a slightly blurred camera resolves. The
+  certificate proved nothing extra: the SHA-256 fingerprint is the complete pin,
+  since Mobile hashes the certificate the TLS handshake presents and compares
+  it. The payload is now 410 characters, the QR renders at error-correction
+  level M rather than the level-L floor it was pinned to only to fit, and the
+  bitmap and pairing card are larger. Mobile pins from the fingerprint alone
+  with no trust anchor and still cross-checks a certificate when one is sent, so
+  the trust model does not change. The certificate remains in the endpoint
+  manifest, where the relay uses it as its CA. A contract test asserts the
+  certificate cannot return to the QR and that the payload stays under the
+  density ceiling; it fails when the certificate is restored.
+
+Agentlas OS v1.1.45 is pinned at 49752a783e944c898ea023705104661b3beb87b2.
+These sources do not themselves publish a Git tag, installer, or update feed
+release.
+
 ## 0.8.45 — 2026-07-16
 
 ### Added
