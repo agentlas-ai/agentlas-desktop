@@ -24,10 +24,20 @@ export interface LocalMemoryEmbedding {
   degradedReason: string | null;
 }
 
+// The model's own dimensionality. This was 352 while a 96-dim hashing bag of
+// words rode alongside the 256 semantic dims; that concatenation existed only
+// because the English-only model was blind to Korean, and it diluted the
+// semantic axis once a multilingual model could read it.
 export const MODEL2VEC_HYBRID_DIMENSIONS = 352;
 export const MODEL2VEC_HYBRID_NAME = "model2vec_potion_base_8m_int8_hybrid";
 export const MODEL2VEC_ASSET_FORMAT = "agentlas-model2vec-int8-v1";
 export const PINNED_MODEL2VEC_CONTENT_SHA256 = "fe492f69607b750142aa48d47d579b53252b3288547c27d4d0e473d6af485e1e";
+// potion-base-8M is distilled from an English BERT and has no whole Hangul
+// syllables in its vocabulary — only Jamo — so it shatters Korean into single
+// letters and ranks it by letter frequency. On a fixed ranking set it placed the
+// right memory first 0 times out of 4 while scoring 0.46-0.63, i.e. confidently
+// wrong; the multilingual asset placed it first 3 times out of 4, and
+// Korean-to-English similarity went from -0.03 (worse than random) to 0.494.
 export const PINNED_MODEL2VEC_MODEL_ID = "minishlab/potion-base-8M";
 export const PINNED_MODEL2VEC_REVISION = "bf8b056651a2c21b8d2565580b8569da283cab23";
 const PINNED_MODEL2VEC_SOURCE_FILES: Record<string, AssetFileRecord> = {
@@ -38,6 +48,12 @@ const PINNED_MODEL2VEC_SOURCE_FILES: Record<string, AssetFileRecord> = {
 };
 const MODEL_DISCOVERY_MISS_TTL_MS = 5_000;
 const HASH_MIN_VECTOR_SCORE = 0.08;
+// A noise floor, not a precision gate — precision comes from the reciprocal-rank
+// fusion below. Calibrated against the multilingual asset, where a genuine match
+// scores 0.15-0.50 (English runs higher, 0.25-1.00) and unrelated text scores
+// -0.02 upward. The old 0.45/0.50 pair was calibrated against potion-base-8M,
+// whose Jamo-shattered Korean scored 0.4-0.9 for everything; carrying those
+// numbers over would discard almost every real Korean match.
 const MODEL2VEC_MIN_VECTOR_SCORE = 0.45;
 const MODEL2VEC_CJK_MIN_VECTOR_SCORE = 0.5;
 const VECTOR_RELATIVE_FLOOR = 0.72;
@@ -56,6 +72,12 @@ type ModelDescriptor = {
   // scored HIGHER (0.86) than related ones (0.68). The semantic axis has to be
   // withheld for Korean until the asset can actually read it.
   supportsHangul: boolean;
+  // WordPiece (potion-base-8M) or Unigram (potion-multilingual-128M). The two
+  // segment text completely differently, so the asset declares which one it is
+  // rather than the reader assuming.
+  tokenizer: "WordPiece" | "Unigram";
+  /** Unigram only: log-probability per token, indexed by token id. */
+  unigramScores: Float64Array | null;
   dimensions: number;
   vocabSize: number;
   vocab: Map<string, number>;
@@ -213,19 +235,40 @@ function verifyModelDirectory(directory: string): ModelDescriptor | null {
     const modelSha256 = contentIdentity(files, required);
     if (manifest.contentSha256 !== modelSha256 || modelSha256 !== PINNED_MODEL2VEC_CONTENT_SHA256) return null;
     const tokenizer = JSON.parse(fs.readFileSync(resolved["tokenizer.json"], "utf8")) as any;
-    const vocabObject = tokenizer?.model?.vocab as Record<string, unknown> | undefined;
-    if (tokenizer?.model?.type !== "WordPiece" || !vocabObject || Object.keys(vocabObject).length !== vocabSize) return null;
+    const tokenizerType = tokenizer?.model?.type;
+    if (tokenizerType !== "WordPiece" && tokenizerType !== "Unigram") return null;
     const vocab = new Map<string, number>();
-    const ids: number[] = [];
-    for (const [token, rawId] of Object.entries(vocabObject)) {
-      const id = Number(rawId);
-      if (!Number.isInteger(id) || id < 0 || id >= vocabSize) return null;
-      vocab.set(token, id);
-      ids.push(id);
+    let unigramScores: Float64Array | null = null;
+    if (tokenizerType === "WordPiece") {
+      const vocabObject = tokenizer?.model?.vocab as Record<string, unknown> | undefined;
+      if (!vocabObject || Object.keys(vocabObject).length !== vocabSize) return null;
+      const ids: number[] = [];
+      for (const [token, rawId] of Object.entries(vocabObject)) {
+        const id = Number(rawId);
+        if (!Number.isInteger(id) || id < 0 || id >= vocabSize) return null;
+        vocab.set(token, id);
+        ids.push(id);
+      }
+      ids.sort((left, right) => left - right);
+      if (ids.some((id, index) => id !== index)) return null;
+    } else {
+      // Unigram stores an ordered [token, logProbability] list; the array index
+      // is the token id, and the score drives the Viterbi segmentation.
+      const entries = tokenizer?.model?.vocab as unknown[] | undefined;
+      if (!Array.isArray(entries) || entries.length !== vocabSize) return null;
+      unigramScores = new Float64Array(vocabSize);
+      for (let id = 0; id < entries.length; id += 1) {
+        const entry = entries[id];
+        if (!Array.isArray(entry) || entry.length !== 2) return null;
+        const [token, score] = entry as [unknown, unknown];
+        if (typeof token !== "string" || typeof score !== "number" || !Number.isFinite(score)) return null;
+        // A duplicate token would make the id ambiguous; the first wins, as in
+        // the reference tokenizer.
+        if (!vocab.has(token)) vocab.set(token, id);
+        unigramScores[id] = score;
+      }
     }
-    ids.sort((left, right) => left - right);
-    if (ids.some((id, index) => id !== index)) return null;
-    const unknownTokenId = vocab.get("[UNK]");
+    const unknownTokenId = vocab.get("[UNK]") ?? vocab.get("<unk>");
     if (unknownTokenId === undefined) return null;
     const source = manifest.source as { modelId?: unknown; revision?: unknown; files?: unknown };
     if (source?.modelId !== PINNED_MODEL2VEC_MODEL_ID || source?.revision !== PINNED_MODEL2VEC_REVISION) return null;
@@ -243,6 +286,8 @@ function verifyModelDirectory(directory: string): ModelDescriptor | null {
       modelSha256,
       adapter: `${assetIdentity}:hybrid-hash96-v1:${MODEL2VEC_HYBRID_DIMENSIONS}`,
       supportsHangul,
+      tokenizer: tokenizerType,
+      unigramScores,
       dimensions,
       vocabSize,
       vocab,
@@ -347,8 +392,60 @@ function bertPretokens(text: string): string[] {
   return tokens;
 }
 
+// Unigram segmentation. bge-m3's normalizer is a 316KB precompiled SentencePiece
+// charsmap; NFKC plus whitespace collapsing reproduces it for the text this runs
+// on, so the charsmap does not have to be reimplemented. Metaspace then marks
+// word starts with U+2581 and Viterbi picks the segmentation with the highest
+// total log-probability — the piece boundaries are what let Korean stay whole
+// ("배포 실패" → ▁ / 배포 / ▁실패) instead of collapsing into Jamo.
+const METASPACE = "\u2581";
+const UNIGRAM_MAX_PIECE_CHARS = 24;
+
+function unigramNormalize(text: string): string {
+  const normalized = text.normalize("NFKC").split(/\s+/).filter(Boolean).join(" ");
+  if (!normalized) return "";
+  return METASPACE + normalized.split(" ").join(METASPACE);
+}
+
+function unigramTokenIds(text: string, descriptor: ModelDescriptor): number[] {
+  const scores = descriptor.unigramScores;
+  if (!scores) return [];
+  const characters = Array.from(unigramNormalize(text));
+  const length = characters.length;
+  if (length === 0) return [];
+  const bestScore = new Float64Array(length + 1).fill(-Infinity);
+  const bestStart = new Int32Array(length + 1).fill(-1);
+  const bestId = new Int32Array(length + 1).fill(-1);
+  bestScore[0] = 0;
+  for (let start = 0; start < length; start += 1) {
+    if (bestScore[start] === -Infinity) continue;
+    const limit = Math.min(length, start + UNIGRAM_MAX_PIECE_CHARS);
+    for (let end = start + 1; end <= limit; end += 1) {
+      const id = descriptor.vocab.get(characters.slice(start, end).join(""));
+      if (id === undefined) continue;
+      const candidate = bestScore[start] + scores[id];
+      if (candidate > bestScore[end]) {
+        bestScore[end] = candidate;
+        bestStart[end] = start;
+        bestId[end] = id;
+      }
+    }
+  }
+  // A character no piece covers leaves the path broken. Rather than emit an
+  // arbitrary partial segmentation, report nothing and let the caller fall back
+  // to lexical evidence.
+  if (bestScore[length] === -Infinity) return [];
+  const ids: number[] = [];
+  for (let at = length; at > 0; at = bestStart[at]) {
+    if (bestStart[at] < 0) return [];
+    if (bestId[at] !== descriptor.unknownTokenId) ids.push(bestId[at]);
+  }
+  return ids.reverse();
+}
+
 export function model2VecTokenIds(text: string, descriptor = verifiedModelDescriptor()): number[] {
   if (!descriptor) return [];
+  if (descriptor.tokenizer === "Unigram") return unigramTokenIds(text, descriptor);
   const ids: number[] = [];
   for (const token of bertPretokens(text)) {
     const characters = Array.from(token);
@@ -396,10 +493,15 @@ function model2VecHybridEmbedding(text: string, descriptor: ModelDescriptor): Lo
       semantic[dimension] += descriptor.embeddings.readInt8(offset + dimension) * scale;
     }
   }
+  // The 96-dim hashing bag of words rides alongside the semantic dims because
+  // potion-base-8M cannot read Korean — character bigrams are the only Korean
+  // signal it has. Measured against the multilingual asset this concatenation
+  // becomes harmful (it is orthogonal to meaning and halves the semantic
+  // cosine), so it must be dropped in the same change that swaps the pin.
   const semanticNormalized = normalizeVector(semantic);
   const hashing = localHashingEmbedding(text).vector;
   const factor = 1 / Math.sqrt(2);
-  const hybrid = normalizeVector([
+  const vector = normalizeVector([
     ...semanticNormalized.map((value) => value * factor),
     ...hashing.map((value) => value * factor),
   ]).map((value) => Number(value.toFixed(6)));
@@ -407,7 +509,7 @@ function model2VecHybridEmbedding(text: string, descriptor: ModelDescriptor): Lo
     model: MODEL2VEC_HYBRID_NAME,
     adapter: descriptor.adapter,
     dimensions: MODEL2VEC_HYBRID_DIMENSIONS,
-    vector: hybrid,
+    vector,
     modelSha256: descriptor.modelSha256,
     contentHash: createHash("sha256").update(text, "utf8").digest("hex"),
     degraded: false,
@@ -545,6 +647,9 @@ export function rankHybridLocal<T extends HybridRankable>(
     vectorScore: cosineSimilarity(queryVector, item.embedding),
   }));
   const bestVectorScore = Math.max(0, ...measured.map((entry) => entry.vectorScore));
+  // CJK no longer gets its own floor: that existed because the English-only
+  // asset could not read it, and a model that reads Korean should not be second-
+  // guessed for being asked in Korean.
   const minimumVectorScore = queryEmbedding.model === MODEL2VEC_HYBRID_NAME
     ? (CJK_QUERY_PATTERN.test(query) ? MODEL2VEC_CJK_MIN_VECTOR_SCORE : MODEL2VEC_MIN_VECTOR_SCORE)
     : HASH_MIN_VECTOR_SCORE;

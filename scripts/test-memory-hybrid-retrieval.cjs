@@ -21,6 +21,7 @@ async function main() {
   const memory = require("../dist/electron/memory/store.js");
   const context = require("../dist/electron/memory/context.js");
   const embedding = require("../dist/electron/memory/local-embedding.js");
+  const { MODEL2VEC_HYBRID_NAME, MODEL2VEC_HYBRID_DIMENSIONS } = embedding;
   store.initStore();
   try {
     const query = "check browser account badge before publishing";
@@ -99,10 +100,10 @@ async function main() {
 
     const stored = store.getDb().prepare(
       `SELECT COUNT(*) AS count FROM memory_entries
-        WHERE embedding_model = 'model2vec_potion_base_8m_int8_hybrid'
-          AND embedding_dimensions = 352
-          AND json_array_length(embedding_json) = 352`,
-    ).get().count;
+        WHERE embedding_model = ?
+          AND embedding_dimensions = ?
+          AND json_array_length(embedding_json) = ?`,
+    ).get(MODEL2VEC_HYBRID_NAME, MODEL2VEC_HYBRID_DIMENSIONS, MODEL2VEC_HYBRID_DIMENSIONS).count;
     assert.equal(stored, 261, "every write must persist its local Model2Vec hybrid embedding");
 
     const clientSource = fs.readFileSync(path.join(__dirname, "../electron/mcp/client.ts"), "utf8");
@@ -123,25 +124,27 @@ async function main() {
     // related ones scored 0.68. A threshold cannot separate distributions that
     // overlap, so the semantic axis is withheld entirely for Korean.
     const { autoLocalEmbedding, rankHybridLocal } = require("../dist/electron/memory/local-embedding.js");
-    // This pair scores 0.526 on the real asset — it cleared the old 0.5 CJK
-    // threshold, which is exactly why a threshold was the wrong instrument. The
-    // gate must withhold it on the language, not on the number.
-    const koreanDocs = [
-      { id: "related", text: "큐레이터가 기억을 기록하지 못함" },
-    ].map((doc) => ({ ...doc, embedding: autoLocalEmbedding(doc.text).vector }));
-    const koreanRanked = rankHybridLocal("메모리가 저장이 안돼", koreanDocs);
+    // Korean is ranked lexically only: potion-base-8M has no Hangul in its
+    // vocabulary — only Jamo — so it shatters Korean into letters and its cosine
+    // measures letter frequency. Measured on the real asset, unrelated Korean
+    // pairs scored 0.86 while related ones scored 0.68, so no threshold can
+    // separate them and the semantic axis is withheld on the language itself.
+    // The multilingual asset removes this restriction; until it ships, this
+    // assertion is what stops the noise from ranking.
+    const embed = (text) => ({ text, embedding: autoLocalEmbedding(text).vector });
+    const koreanRanked = rankHybridLocal("메모리가 저장이 안돼", [
+      { id: "related", ...embed("큐레이터가 기억을 기록하지 못함") },
+    ]);
     assert.ok(koreanRanked[0].vectorScore > 0.5, "fixture must score above the old CJK threshold");
     assert.ok(
       !koreanRanked[0].semanticEligible,
       "Korean must not qualify semantically while the model has no Hangul vocabulary, however high the score",
     );
-    // English keeps its semantic axis: the withholding is language-scoped, not a
-    // blanket disabling of vector search.
-    const englishDocs = [
-      { id: "related", text: "changelog update required" },
-    ].map((doc) => ({ ...doc, embedding: autoLocalEmbedding(doc.text).vector }));
+
+    // English keeps its semantic axis.
     assert.ok(
-      rankHybridLocal("update the changelog", englishDocs).some((entry) => entry.semanticEligible),
+      rankHybridLocal("update the changelog", [{ id: "related", ...embed("changelog update required") }])
+        .some((entry) => entry.semanticEligible),
       "English must still rank semantically",
     );
 

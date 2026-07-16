@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const Database = require("better-sqlite3");
 const { resolveAgentlasCoreRoot, resolveModel2VecAsset } = require("./lib/agentlas-core-root.cjs");
+const { MODEL2VEC_HYBRID_DIMENSIONS } = require("../dist/electron/memory/local-embedding.js");
 
 const coreRoot = resolveAgentlasCoreRoot();
 const modelPath = resolveModel2VecAsset();
@@ -82,14 +83,14 @@ async function main() {
   assert.ok(rows.every((row) => row.status === "active"));
   assert.ok(rows.every((row) => row.agent_id === "hub:semantic-reviewer"));
   assert.ok(rows.every((row) => row.embedding_adapter === "model2vec_potion_base_8m_int8_hybrid"));
-  assert.ok(rows.every((row) => row.embedding_dimensions === 352));
-  assert.ok(rows.every((row) => JSON.parse(row.embedding_json).length === 352));
+  assert.ok(rows.every((row) => row.embedding_dimensions === MODEL2VEC_HYBRID_DIMENSIONS));
+  assert.ok(rows.every((row) => JSON.parse(row.embedding_json).length === MODEL2VEC_HYBRID_DIMENSIONS));
   assert.equal(registeredAdapter.name, "model2vec_potion_base_8m_int8_hybrid");
   assert.equal(registeredAdapter.status, "available");
   const adapterConfig = JSON.parse(registeredAdapter.config_json);
-  assert.equal(adapterConfig.dimensions, 352);
+  assert.equal(adapterConfig.dimensions, MODEL2VEC_HYBRID_DIMENSIONS);
   assert.equal(adapterConfig.model_sha256, "fe492f69607b750142aa48d47d579b53252b3288547c27d4d0e473d6af485e1e");
-  assert.match(adapterConfig.identity, /:hybrid-hash96-v1:352$/);
+  assert.match(adapterConfig.identity, new RegExp(`:semantic-v1:${MODEL2VEC_HYBRID_DIMENSIONS}$`));
 
   desktopStore.getDb().close();
   const python = process.env.AGENTLAS_PYTHON
