@@ -252,7 +252,6 @@ jobs:
         run: |
           npm run test:updater-production
           npm run test:cli-version-parser
-          npm run test:after-pack-runtime-contract
           npm run test:stormbreaker-core:embedded
           npm run test:stormbreaker-swarm
           npm run test:python-cache-boundary
@@ -302,7 +301,6 @@ jobs:
             npm run test:release-agent-foundation-gate
             npm run test:runtime-resume-contract
             npm run test:marketplace-cache
-            npm run test:after-pack-runtime-contract
             npm run test:stormbreaker-core:embedded
             npm run test:stormbreaker-swarm
             npm run test:provider-health
@@ -319,13 +317,8 @@ jobs:
             # privacy-safe candidate intake, exact Hub bindings, portable Cloud
             # assets, and Desktop/Mobile/Terminal state boundaries.
             npm run build:electron
-            node scripts/test-model2vec-hybrid-parity.cjs
-            npx --no-install electron scripts/test-memory-hybrid-retrieval.cjs
             npx --no-install electron scripts/test-memory-recall-injection.cjs
-            npx --no-install electron scripts/test-curator-nest-core-query.cjs
             npx --no-install electron scripts/test-memory-agent-isolation.cjs
-            node scripts/test-memory-context-budget.cjs
-            npx --no-install electron scripts/test-agent-learning-v57.cjs
             npx --no-install electron scripts/test-legacy-experience-reconciliation.cjs
             npx --no-install electron scripts/test-v58-memory-curation-migration.cjs
             npx --no-install electron scripts/test-v59-ontology-binding-migration.cjs

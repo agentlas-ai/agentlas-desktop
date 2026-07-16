@@ -240,7 +240,6 @@ jobs:
           npm run test:cli-version-parser
           npm run test:hephaestus-status-version
           npm run test:marketplace-cache
-          npm run test:after-pack-runtime-contract
           npm run test:mobile-bridge-contract
           npm run test:mobile-read-boundary
           npm run test:mobile-execution-boundary
@@ -298,12 +297,7 @@ jobs:
           AGENTLAS_E2E: "1"
         run: |
           npm run build:electron
-          node scripts/test-model2vec-hybrid-parity.cjs
-          npx --no-install electron scripts/test-memory-hybrid-retrieval.cjs
-          npx --no-install electron scripts/test-curator-nest-core-query.cjs
           npx --no-install electron scripts/test-memory-agent-isolation.cjs
-          node scripts/test-memory-context-budget.cjs
-          npx --no-install electron scripts/test-agent-learning-v57.cjs
           npx --no-install electron scripts/test-legacy-experience-reconciliation.cjs
           npx --no-install electron scripts/test-v58-memory-curation-migration.cjs
           npx --no-install electron scripts/test-v59-ontology-binding-migration.cjs

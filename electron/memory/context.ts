@@ -42,6 +42,12 @@ const SOUL_MAX_CHARS = 6000;
 // never fit any budget. Rank paragraph-sized pieces instead, each still
 // carrying its heading so it reads in context.
 const SOUL_CHUNK_MAX_CHARS = 1200;
+// Soul is durable, high-context material, so weak semantic eligibility alone
+// is too permissive: generic prose can clear the model noise floor and fill the
+// whole budget for an unrelated task. Keep lexical matches, but require a real
+// residual margin for semantic-only recall (about 0.35 cosine in English and
+// 0.32 for CJK with the calibrated multilingual floors).
+const SOUL_MIN_SEMANTIC_RESIDUAL_SCORE = 0.01;
 const MAX_ENTRIES = 12;
 // SQLite LIMIT -1 means no pre-ranking recency cap. Governance filters still
 // run in SQL; adaptive load-all/top-k is decided only after every eligible row
@@ -416,7 +422,9 @@ function selectSoulText(soul: string, taskPrompt: string | undefined, projectPat
   const anchor = chunks[0];
   const rest = chunks.slice(1);
   const ranked = rankHybridLocal(prompt, rest)
-    .filter((result) => result.lexicalScore > 0 || result.semanticEligible)
+    .filter((result) => result.lexicalScore > 0 || (
+      result.semanticEligible && result.score >= SOUL_MIN_SEMANTIC_RESIDUAL_SCORE
+    ))
     .map((result) => result.item);
 
   const picked: SoulChunk[] = [];

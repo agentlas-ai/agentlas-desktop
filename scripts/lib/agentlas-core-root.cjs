@@ -25,7 +25,7 @@ function resolveModel2VecAsset() {
     process.env.AGENTLAS_MODEL2VEC_PATH
       ? path.resolve(process.env.AGENTLAS_MODEL2VEC_PATH)
       : null,
-    path.join(resolveAgentlasCoreRoot(), "assets", "model2vec", "potion-base-8M-int8"),
+    path.join(resolveAgentlasCoreRoot(), "assets", "model2vec", "potion-multilingual-128M-int8"),
   ].filter(Boolean);
   const resolved = candidates.find((candidate) =>
     fs.existsSync(path.join(candidate, "manifest.json")),

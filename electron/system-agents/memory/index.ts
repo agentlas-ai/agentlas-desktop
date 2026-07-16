@@ -11,8 +11,8 @@ import { MEMORY_EMITTER_BLOCK } from "../../architecture/manifest";
 /** 항상-켜진 최소 코어 — 모든 완료 턴이 관찰 영수증을 남기고, 후보만 선택적으로 제안한다. */
 export const MEMORY_CORE = [
   "## Memory",
-  "End EVERY completed normal reply with exactly one `## Memory Events` fenced JSON envelope: `{schema_version:\"agentlas.memory-ticket.v1\",turn_summary:\"one safe sentence\",candidates:[]}`. The runtime hides it. Never omit it; use an empty candidates array when nothing durable was learned.",
-  "Only when this turn produced a durable decision or reusable fact should candidates be non-empty; otherwise keep candidates empty. Candidates contain memory_kind, content (1-2 sentences), suggested_scope, confidence, sensitivity, evidence_refs. Scopes: user_identity, team_memory, agent_repo, project, session, discard. Never record secrets, credentials, raw logs, prompts, transcripts, or absolute paths. A separate Curator decides disposition.",
+  "End EVERY completed normal reply with exactly one hidden `## Memory Events` fenced JSON envelope: `{schema_version:\"agentlas.memory-ticket.v1\",turn_summary:\"one safe sentence\",candidates:[]}`. Never omit it; use [] when nothing durable was learned.",
+  "Use non-empty candidates only for durable decisions or reusable facts. Each has memory_kind, content, suggested_scope, confidence, sensitivity, evidence_refs. Scopes: user_identity, team_memory, agent_repo, agent_team, project, session, discard. Never include secrets, credentials, raw logs, prompts, transcripts, or absolute paths. The Curator decides disposition.",
 ].join("\n");
 
 export const MEMORY_CORE_MAX_APPROX_TOKENS = 220;

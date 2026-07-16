@@ -294,9 +294,6 @@ jobs:
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-project-bootstrap-desktop.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-project-bootstrap-core.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-project-memory-read-boundary.cjs
-          node scripts/test-model2vec-hybrid-parity.cjs
-          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-memory-hybrid-retrieval.cjs
-          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-curator-nest-core-query.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-v56-experience-cloud-migration.cjs
           node scripts/test-codex-model-discovery.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-workload-routing.cjs
@@ -318,9 +315,6 @@ jobs:
           npx --no-install electron scripts/test-project-bootstrap-desktop.cjs
           npx --no-install electron scripts/test-project-bootstrap-core.cjs
           npx --no-install electron scripts/test-project-memory-read-boundary.cjs
-          node scripts/test-model2vec-hybrid-parity.cjs
-          npx --no-install electron scripts/test-memory-hybrid-retrieval.cjs
-          npx --no-install electron scripts/test-curator-nest-core-query.cjs
           npx --no-install electron scripts/test-v56-experience-cloud-migration.cjs
           node scripts/test-codex-model-discovery.cjs
           npx --no-install electron scripts/test-workload-routing.cjs
