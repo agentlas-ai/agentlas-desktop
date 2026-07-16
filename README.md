@@ -69,6 +69,20 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-16 · v0.8.49 — governed federation without a truncated map** —
+  Desktop now sends the required network scope to Agentlas OS v1.1.48,
+  unwraps the federation envelope for model choice, and preserves the original
+  envelope plus source receipts through validation and execution. The model
+  remains the non-deterministic chooser; deterministic code is only the
+  evidence governor. The reusable sitemap walker has a conservative default,
+  while Desktop explicitly retains the full 25,000-node project budget and
+  injects it through the 24MB sitemap read boundary. This release also carries
+  the user-identity, project-ontology ingest, empty-layer observability, and
+  multilingual memory-retrieval fixes introduced in the 0.8.48 source.
+  Agentlas OS v1.1.48 is pinned at
+  `98adf6d1bb0bdad5a919884c3916274d5a3e813f`. This source is not proof of a
+  published installer or update-feed release.
+
 - **2026-07-16 · v0.8.48 — memory recall that actually fills and injects** — A
   sweep of the recall layers found the same failure repeated: real writers and
   generators existed, but a gate never opened or a size cap silently dropped the
@@ -78,7 +92,7 @@ authority for which version is actually public, stable, and downloadable.
   demoted to a throwaway note; a chat turn with write authority over a folder now
   kicks off a background ontology ingest, so the folder ontology fills instead of
   staying provisioned-but-empty; the sitemap keeps its complete 25,000-node
-  default ceiling and reads through a dedicated 24MB cap, so a large repo's
+  project ceiling and reads through a dedicated 24MB cap, so a large repo's
   sitemap is injected instead of blowing the 2MB text cap; and each layer now warns once
   when it injects nothing. Retrieval itself was proven on 468 real memories:
   Top-1 rose from 58.1% to 69.4% after the multilingual embedding, and Korean

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.49 — 2026-07-16
+
+### Fixed
+
+- Desktop now speaks the pinned Agentlas OS v1.1.48 Workforce federation
+  contract end to end: every search declares the network scope, the signed
+  federation result and source receipts remain intact, and selection plus
+  execution are rejected if their lineage no longer matches. The model still
+  chooses the team; deterministic code only preserves and verifies evidence.
+- The reusable sitemap walker keeps a conservative 5,000-node default while
+  Desktop explicitly requests its complete 25,000-node project budget. The
+  resulting 13.2MB representative map remains below the dedicated 24MB read
+  cap, so release compatibility no longer requires truncating the real map.
+- Memory identity classification, background project-ontology ingest, empty
+  layer warnings, and the multilingual 256-dimensional embedding fixes from
+  0.8.48 are included in this release candidate.
+
+Agentlas OS v1.1.48 remains pinned at 98adf6d1bb0bdad5a919884c3916274d5a3e813f.
+These sources do not themselves publish a Git tag, installer, or update feed.
+
 ## 0.8.48 — 2026-07-16
 
 ### Fixed

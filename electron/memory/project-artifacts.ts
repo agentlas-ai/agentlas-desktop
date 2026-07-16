@@ -27,7 +27,10 @@ const PROJECT_PM_HARD_MAX_FILES = 128;
 const PROJECT_PM_HARD_MAX_FILE_BYTES = 4 * 1024 * 1024;
 const PROJECT_PM_HARD_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
 const SITEMAP_DEFAULT_MAX_DEPTH = 32;
-const SITEMAP_DEFAULT_MAX_ENTRIES = 25_000;
+// Keep the reusable walker conservative by default. The Desktop product opts
+// into the complete project budget explicitly when it refreshes sitemap.json.
+const SITEMAP_DEFAULT_MAX_ENTRIES = 5_000;
+export const PROJECT_SITEMAP_MAX_ENTRIES = 25_000;
 const SITEMAP_HARD_MAX_DEPTH = 64;
 const SITEMAP_HARD_MAX_ENTRIES = 100_000;
 

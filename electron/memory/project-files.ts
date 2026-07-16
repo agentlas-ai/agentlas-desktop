@@ -17,6 +17,7 @@ import {
   generateProjectSitemap,
   ProjectArtifactError,
   PROJECT_PM_DIR,
+  PROJECT_SITEMAP_MAX_ENTRIES,
   type ProjectSitemap,
 } from "./project-artifacts";
 import { getDb } from "../store/db";
@@ -599,12 +600,16 @@ export function refreshProjectSitemap(projectPath: string): ProjectSitemap | nul
     const outputPath = path.join(dir, SITEMAP_FILE);
     let generated: ProjectSitemap;
     try {
-      generated = generateProjectSitemap(projectPath);
+      generated = generateProjectSitemap(projectPath, {
+        maxEntries: PROJECT_SITEMAP_MAX_ENTRIES,
+      });
     } catch (error) {
       if (!(error instanceof ProjectArtifactError) || error.code !== "race-detected") throw error;
       // A build may atomically replace one directory while the sitemap walks.
       // Retry once from a fresh root identity; persistent churn still defers.
-      generated = generateProjectSitemap(projectPath);
+      generated = generateProjectSitemap(projectPath, {
+        maxEntries: PROJECT_SITEMAP_MAX_ENTRIES,
+      });
     }
     let previous: Record<string, unknown> | null = null;
     try {
