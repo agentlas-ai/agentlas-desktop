@@ -8,6 +8,7 @@ directories:
   output: release
   buildResources: build-resources
 
+beforePack: build-resources/before-pack-prepare.cjs
 afterPack: build-resources/after-pack-clean.cjs
 # The helper verifies the official bundle against
 # build-resources/macos-release-signing-policy.json before it can leave a macOS build.

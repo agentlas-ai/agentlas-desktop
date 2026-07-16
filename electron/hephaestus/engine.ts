@@ -119,9 +119,11 @@ function pythonCandidates(root: string | null): string[] {
 function probePython(candidate: string, env: NodeJS.ProcessEnv): Promise<string | null> {
   return new Promise((resolve) => {
     let settled = false;
+    let timer: NodeJS.Timeout | undefined;
     const done = (v: string | null) => {
       if (!settled) {
         settled = true;
+        if (timer) clearTimeout(timer);
         resolve(v);
       }
     };
@@ -133,14 +135,18 @@ function probePython(candidate: string, env: NodeJS.ProcessEnv): Promise<string 
       child.stdout?.on("data", (d) => (out += d.toString()));
       child.on("error", () => done(null));
       child.on("close", (code) => done(code === 0 && out.trim() ? out.trim() : null));
-      setTimeout(() => {
+      // Explicit runtimes are authoritative and may have a slow first launch
+      // under Windows antivirus or a cold hosted-runner filesystem. Do not
+      // misreport a valid configured Python as missing after only 2.5 seconds.
+      const timeoutMs = candidate === process.env.HEPHAESTUS_PYTHON ? 10_000 : 2_500;
+      timer = setTimeout(() => {
         try {
           child.kill();
         } catch {
           /* noop */
         }
         done(null);
-      }, 2500);
+      }, timeoutMs);
     } catch {
       done(null);
     }
