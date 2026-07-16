@@ -69,6 +69,23 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-16 · v0.8.48 — memory recall that actually fills and injects** — A
+  sweep of the recall layers found the same failure repeated: real writers and
+  generators existed, but a gate never opened or a size cap silently dropped the
+  result, so the layer read as empty. Fixed four: a stated preference or
+  identity fact ("always use 존댓말") now loads the schema block that tells the
+  model to file it as user_identity with high confidence, so it stops being
+  demoted to a throwaway note; a chat turn with write authority over a folder now
+  kicks off a background ontology ingest, so the folder ontology fills instead of
+  staying provisioned-but-empty; the sitemap keeps its complete 25,000-node
+  default ceiling and reads through a dedicated 24MB cap, so a large repo's
+  sitemap is injected instead of blowing the 2MB text cap; and each layer now warns once
+  when it injects nothing. Retrieval itself was proven on 468 real memories:
+  Top-1 rose from 58.1% to 69.4% after the multilingual embedding, and Korean
+  now reaches English memories that scored worse than random before. Agentlas OS v1.1.48
+  is pinned at 98adf6d1bb0bdad5a919884c3916274d5a3e813f. This source does not prove a Desktop tag,
+  public installer, or update-feed release.
+
 - **2026-07-16 · v0.8.47 — governed memory and project ontology** — Every
   completed, failed, or cancelled model turn now produces one central Memory
   Ticket and episode. A no-tools semantic Curator may propose what is worth

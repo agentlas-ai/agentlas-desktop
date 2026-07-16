@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.48 — 2026-07-16
+
+### Fixed
+
+- Recall layers that were wired but silently accumulating nothing. A stated
+  preference or identity fact now loads the schema block that instructs the
+  model to file it as user_identity with high confidence (it was being demoted
+  to a session note, leaving user_identity at 0 rows). A write-authority chat
+  turn now kicks off a background folder-ontology ingest, so the ontology DB
+  fills instead of staying empty across projects. The sitemap keeps its complete
+  25,000-node default ceiling and injection reads through a dedicated 24MB cap,
+  so a large repo's sitemap (13MB here) is injected rather than dropped by the
+  2MB text cap. Each layer warns once when it injects nothing.
+- Retrieval quality was measured on 468 real memories (79% Korean): Top-1 58.1%
+  → 69.4% with the multilingual embedding, and cross-lingual recall went from
+  -0.03 (worse than random) to reachable.
+
+Agentlas OS v1.1.48 is pinned at 98adf6d1bb0bdad5a919884c3916274d5a3e813f.
+These sources do not themselves publish a Git tag, installer, or update feed release.
+
 ## 0.8.47 — 2026-07-16
 
 ### Added

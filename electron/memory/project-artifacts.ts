@@ -27,12 +27,7 @@ const PROJECT_PM_HARD_MAX_FILES = 128;
 const PROJECT_PM_HARD_MAX_FILE_BYTES = 4 * 1024 * 1024;
 const PROJECT_PM_HARD_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
 const SITEMAP_DEFAULT_MAX_DEPTH = 32;
-// 25_000 let this workspace's sitemap reach 13MB, which then blew the memory
-// read cap and made the file unreadable — injected as nothing. Injection only
-// emits per-status counts, so a coarser tree is lossless for recall while
-// keeping the file readable; the hard ceiling below still allows an explicit
-// large crawl.
-const SITEMAP_DEFAULT_MAX_ENTRIES = 4_000;
+const SITEMAP_DEFAULT_MAX_ENTRIES = 25_000;
 const SITEMAP_HARD_MAX_DEPTH = 64;
 const SITEMAP_HARD_MAX_ENTRIES = 100_000;
 

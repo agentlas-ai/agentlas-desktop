@@ -12,7 +12,11 @@ const WORK_ORDER_SCHEMA = "agentlas.workforce-work-order.v1";
 const CANDIDATE_SET_SCHEMA = "agentlas.workforce-candidate-set.v1";
 const SELECTION_SCHEMA = "agentlas.workforce-selection.v1";
 const VALIDATION_SCHEMA = "agentlas.workforce-selection-validation.v1";
+const FEDERATION_RESULT_SCHEMA = "agentlas.workforce-federation-result.v1";
+const FEDERATED_SELECTION_SCHEMA = "agentlas.workforce-federated-selection.v1";
 const PREPARATION_SCHEMA = "agentlas.workforce-execution-plan.v5";
+const WORKFORCE_SOURCE_SCOPE = "network";
+const WORKFORCE_NETWORK_SOURCES = ["local", "cloud", "hub"] as const;
 const WORKFORCE_RUNTIME_BUNDLE_DIGEST_SCHEMA = "agentlas.workforce-runtime-bundle-digest.v4";
 const WORKFORCE_PERMISSION_POLICY_SCHEMA = "agentlas.workforce-permission-policy.v1";
 const WORKFORCE_PERMISSION_POLICY_DIGEST_SCHEMA = "agentlas.workforce-permission-policy-digest.v1";
@@ -94,6 +98,15 @@ const SELECTION_EDGE_KEYS = ["fromSlot", "toSlot", "relation", "artifactKinds"] 
 const CANDIDATE_SET_KEYS = [
   "schemaVersion", "selectionSessionId", "workOrderId", "ontologyVersion",
   "candidateSetDigest", "decisionOwner", "historyInfluence", "slots", "issuedAt", "expiresAt",
+] as const;
+const FEDERATION_RESULT_KEYS = [
+  "schemaVersion", "scope", "sources", "status", "orderingPolicy", "candidateSet",
+  "candidateProvenance", "sourceReceipts", "federationDigest",
+] as const;
+const FEDERATED_SELECTION_KEYS = [
+  "schemaVersion", "status", "federationDigest", "selectionSessionId",
+  "candidateSetDigest", "workOrderDigest", "selectionDigest", "selectionValidation",
+  "selectedSourcePins", "federatedSelectionDigest",
 ] as const;
 const CANDIDATE_SLOT_KEYS = ["slotId", "candidates", "coverageGaps"] as const;
 const CANDIDATE_KEYS = [
@@ -1466,6 +1479,50 @@ export function validateCandidateSet(
   return set;
 }
 
+export function validateFederationSearchResult(
+  value: unknown,
+  order: JsonObject,
+  options: { allowUnfilled?: boolean } = {},
+): { federationResult: JsonObject; candidateSet: JsonObject } {
+  const federationResult = objectValue(value, "workforce federation result");
+  assertExactHubKeys(
+    federationResult,
+    FEDERATION_RESULT_KEYS,
+    "workforce federation result",
+  );
+  if (federationResult.schemaVersion !== FEDERATION_RESULT_SCHEMA) {
+    throw new Error("Hub returned an unsupported workforce federation schema.");
+  }
+  if (federationResult.scope !== WORKFORCE_SOURCE_SCOPE) {
+    throw new Error("Hub workforce federation result does not match the requested source scope.");
+  }
+  const sources = requireStrings(federationResult.sources, "workforce federation sources");
+  if (sources.length !== WORKFORCE_NETWORK_SOURCES.length ||
+      sources.some((source, index) => source !== WORKFORCE_NETWORK_SOURCES[index])) {
+    throw new Error("Hub workforce federation result changed the pinned network source order.");
+  }
+  if (!["succeeded", "partial", "failed"].includes(String(federationResult.status))) {
+    throw new Error("Hub workforce federation result has an invalid status.");
+  }
+  if (federationResult.orderingPolicy !== "canonical_identity_no_rerank") {
+    throw new Error("Hub workforce federation result changed the pinned ordering policy.");
+  }
+  requireArray(federationResult.candidateProvenance, "workforce candidate provenance", 3_200)
+    .forEach((row, index) => objectValue(row, `workforce candidate provenance[${index}]`));
+  const sourceReceipts = requireArray(
+    federationResult.sourceReceipts,
+    "workforce source receipts",
+    WORKFORCE_NETWORK_SOURCES.length,
+    WORKFORCE_NETWORK_SOURCES.length,
+  );
+  sourceReceipts.forEach((row, index) => objectValue(row, `workforce source receipt[${index}]`));
+  requireSha256(federationResult.federationDigest, "federationDigest");
+  return {
+    federationResult,
+    candidateSet: validateCandidateSet(federationResult.candidateSet, order, options),
+  };
+}
+
 export function candidateGapSummary(candidateSet: JsonObject, workOrder: JsonObject): JsonObject {
   const slotResults = new Map(arrayValue(candidateSet.slots).map((raw) => {
     const slot = objectValue(raw, "candidate slot");
@@ -1743,6 +1800,44 @@ export function validateSelectionReceipt(
     throw new Error("Hub validation receipt changed the host-LLM roster.");
   }
   return validation;
+}
+
+export function validateFederatedSelectionResult(
+  value: unknown,
+  selection: JsonObject,
+  candidateSet: JsonObject,
+  federationResult: JsonObject,
+): { federatedSelection: JsonObject; validation: JsonObject } {
+  const federatedSelection = objectValue(value, "federated workforce selection");
+  assertExactHubKeys(
+    federatedSelection,
+    FEDERATED_SELECTION_KEYS,
+    "federated workforce selection",
+  );
+  if (federatedSelection.schemaVersion !== FEDERATED_SELECTION_SCHEMA) {
+    throw new Error("Hub returned an unsupported federated-selection schema.");
+  }
+  if (federatedSelection.federationDigest !== federationResult.federationDigest) {
+    throw new Error("Hub federated-selection receipt does not match the federation result.");
+  }
+  if (federatedSelection.selectionSessionId !== candidateSet.selectionSessionId ||
+      federatedSelection.candidateSetDigest !== candidateSet.candidateSetDigest) {
+    throw new Error("Hub federated-selection receipt does not match the candidate session.");
+  }
+  requireSha256(federatedSelection.workOrderDigest, "workOrderDigest");
+  requireSha256(federatedSelection.selectionDigest, "selectionDigest");
+  requireSha256(federatedSelection.federatedSelectionDigest, "federatedSelectionDigest");
+  requireArray(federatedSelection.selectedSourcePins, "selected source pins", 128)
+    .forEach((row, index) => objectValue(row, `selected source pin[${index}]`));
+  const validation = validateSelectionReceipt(
+    federatedSelection.selectionValidation,
+    selection,
+    candidateSet,
+  );
+  if (federatedSelection.status !== validation.status) {
+    throw new Error("Hub federated-selection status does not match its selection validation.");
+  }
+  return { federatedSelection, validation };
 }
 
 function normalizeExecutionGraph(value: unknown): NonNullable<BorrowedAgentSpec["executionGraph"]> | undefined {
@@ -2493,6 +2588,10 @@ function emitWorkforceBenchmarkSelectionSnapshot(
   });
 }
 
+function candidateSearchArgs(workOrder: JsonObject): JsonObject {
+  return { workOrder, sourceScope: WORKFORCE_SOURCE_SCOPE };
+}
+
 export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Promise<WorkforceSelectionResult> {
   const goal = p.goal.trim();
   if (!goal) throw new Error("Workforce goal is required.");
@@ -2577,7 +2676,7 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
     refinement: 1 | 2,
     triggerKind: "cardinality" | "selection-content-expansion",
   ): void => {
-    const requestDigest = sha256Json({ workOrder });
+    const requestDigest = sha256Json(candidateSearchArgs(workOrder));
     for (const observation of hubToolObservations) {
       if (observation.tool !== "workforce.search_candidates" || observation.requestDigest !== requestDigest) continue;
       observation.authoritativeChain = false;
@@ -2686,19 +2785,23 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
   emitWorkforceBenchmarkSelectionSnapshot(p, "work-order", workOrder);
 
   let refinementsUsed = 0;
-  let candidateSet = validateCandidateSet(
-    await hubStage("workforce.search_candidates", { workOrder }),
+  let searchResult = validateFederationSearchResult(
+    await hubStage("workforce.search_candidates", candidateSearchArgs(workOrder)),
     workOrder,
     { allowUnfilled: true },
   );
+  let federationResult = searchResult.federationResult;
+  let candidateSet = searchResult.candidateSet;
   emitWorkforceBenchmarkSelectionSnapshot(p, "candidate-set", workOrder, candidateSet);
 
   const searchCurrentWorkOrder = async (): Promise<void> => {
-    candidateSet = validateCandidateSet(
-      await hubStage("workforce.search_candidates", { workOrder }),
+    searchResult = validateFederationSearchResult(
+      await hubStage("workforce.search_candidates", candidateSearchArgs(workOrder)),
       workOrder,
       { allowUnfilled: true },
     );
+    federationResult = searchResult.federationResult;
+    candidateSet = searchResult.candidateSet;
     emitWorkforceBenchmarkSelectionSnapshot(p, "candidate-set", workOrder, candidateSet);
   };
 
@@ -2894,10 +2997,17 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
 
   const executionContext = buildWorkforceExecutionContext(workOrder, selection);
 
-  const validation = validateSelectionReceipt(await hubStage(
-    "workforce.validate_selection",
-    { workOrder, candidateSet, selection },
-  ), selection, candidateSet);
+  const federatedValidation = validateFederatedSelectionResult(
+    await hubStage(
+      "workforce.validate_selection",
+      { workOrder, candidateSet, selection, federationResult },
+    ),
+    selection,
+    candidateSet,
+    federationResult,
+  );
+  const validation = federatedValidation.validation;
+  const federatedSelection = federatedValidation.federatedSelection;
 
   const prepared = validateExecutionPreparation(await hubStage(
     "workforce.prepare_execution",
@@ -2905,7 +3015,8 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
       workOrder,
       candidateSet,
       selection,
-      validationReceipt: validation,
+      federationResult,
+      federatedSelection,
     },
   ), validation, candidateSet, executionContext);
 
