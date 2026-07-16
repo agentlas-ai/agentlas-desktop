@@ -117,28 +117,38 @@ async function main() {
       /buildExperienceContext\(\{[\s\S]{0,500}task:\s*effectiveUserPrompt/,
       "every runMcpInvocation turn must pass the current effective prompt to Experience retrieval",
     );
-    // Korean must never be ranked by a semantic score the model cannot form.
-    // potion-base-8M has no Hangul in its vocabulary, so its WordPiece shatters
-    // Korean into Jamo and the resulting cosine measures letter frequency:
-    // measured on the real asset, unrelated Korean pairs scored 0.86 while
-    // related ones scored 0.68. A threshold cannot separate distributions that
-    // overlap, so the semantic axis is withheld entirely for Korean.
+    // Korean must be ranked on meaning. The shipped multilingual asset
+    // (potion-multilingual-128M) has real Hangul in its vocabulary, so unlike
+    // the English-only asset it reads Korean instead of shattering it into Jamo.
+    // These assertions fail the moment an asset that cannot read Korean is
+    // pinned again (a related Korean memory would stop qualifying, or an
+    // unrelated one would outrank it).
     const { autoLocalEmbedding, rankHybridLocal } = require("../dist/electron/memory/local-embedding.js");
-    // Korean is ranked lexically only: potion-base-8M has no Hangul in its
-    // vocabulary — only Jamo — so it shatters Korean into letters and its cosine
-    // measures letter frequency. Measured on the real asset, unrelated Korean
-    // pairs scored 0.86 while related ones scored 0.68, so no threshold can
-    // separate them and the semantic axis is withheld on the language itself.
-    // The multilingual asset removes this restriction; until it ships, this
-    // assertion is what stops the noise from ranking.
     const embed = (text) => ({ text, embedding: autoLocalEmbedding(text).vector });
     const koreanRanked = rankHybridLocal("메모리가 저장이 안돼", [
       { id: "related", ...embed("큐레이터가 기억을 기록하지 못함") },
+      { id: "unrelated", ...embed("다크모드 토글 추가") },
     ]);
-    assert.ok(koreanRanked[0].vectorScore > 0.5, "fixture must score above the old CJK threshold");
+    const koreanRelated = koreanRanked.find((entry) => entry.item.id === "related");
+    const koreanUnrelated = koreanRanked.find((entry) => entry.item.id === "unrelated");
+    assert.ok(koreanRelated.semanticEligible, "a related Korean memory must qualify semantically");
+    assert.ok(!koreanUnrelated.semanticEligible, "unrelated Korean must not qualify");
     assert.ok(
-      !koreanRanked[0].semanticEligible,
-      "Korean must not qualify semantically while the model has no Hangul vocabulary, however high the score",
+      koreanRelated.vectorScore > koreanUnrelated.vectorScore,
+      "related Korean must outscore unrelated Korean",
+    );
+
+    // Cross-lingual recall: a Korean prompt must reach an English memory. The
+    // English-only asset scored this pair at -0.03 (worse than random); the
+    // multilingual asset makes it reachable.
+    const crossRanked = rankHybridLocal("배포 실패", [
+      { id: "related", ...embed("the deployment failed and the release gate broke") },
+      { id: "unrelated", ...embed("change the onboarding button colour") },
+    ]);
+    const crossRelated = crossRanked.find((entry) => entry.item.id === "related");
+    assert.ok(
+      crossRelated.semanticEligible && crossRelated.vectorScore > 0.3,
+      `a Korean prompt must reach an English memory (scored ${crossRelated.vectorScore})`,
     );
 
     // English keeps its semantic axis.
