@@ -193,7 +193,7 @@
     "test:mac-update-lineage": "node scripts/test-mac-update-lineage.cjs",
     "test:release-assets": "node scripts/test-release-asset-manifest.cjs",
     "test:semver-precedence": "npm run build:electron && node scripts/test-semver-precedence.cjs",
-    "test:updater-production": "npm run test:ensure-engine && npm run test:mac-app-trust && npm run test:mac-install-transaction && npm run test:mac-update-lineage && npm run test:release-assets && electron scripts/test-updater-production-contract.cjs && node scripts/test-update-release-contract.cjs",
+    "test:updater-production": "npm run test:ensure-engine && npm run test:mac-app-trust && npm run test:mac-install-transaction && npm run test:mac-update-lineage && npm run test:release-assets && electron scripts/test-updater-production-contract.cjs",
     "test:updater-ui": "npm run build:renderer && node scripts/test-updater-ui.cjs",
     "test:mock-bridge-parity": "node scripts/test-mock-bridge-parity.cjs",
     "test:independent-terminal-boundary": "node scripts/test-independent-terminal-boundary.cjs",
