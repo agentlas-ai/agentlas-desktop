@@ -2,10 +2,11 @@
 // 빌드 MCP 인터뷰 카드 — grill-me 원칙(한 번에 하나, 추천 답변 동봉, 확실하면 안 물어봄)을 따른다.
 // 이전 "전체 후보 한 번에 승인" 카드(McpBuildPlanCard) 대신, 실제로 판단이 필요한 후보만
 // 하나씩 순서대로 묻는다:
-//   · readiness가 ready/available인 후보는 묻지 않고 자동 포함
+//   · readiness가 ready/available인 후보는 개별 질문 없이 추천 목록에 포함
 //   · runtime-incompatible은 이번 실행에서 사용자가 할 수 있는 게 없어 묻지 않고 자동 제외(안내만)
 //   · missing-key/disabled만 "제외(추천)" vs "그래도 포함" 2지선다로 질문
 //     — 같은 fallbackGroup에 이미 자동 포함된 대안이 있으면 추천 문구에 그 이름을 밝힌다
+// 추천이 확정적이어도 MCP 연결은 외부 도구 권한 경계이므로 마지막 한 번의 명시적 동의를 받는다.
 import { useEffect, useMemo, useState } from "react";
 import type { McpBuildCandidate, McpBuildPlan } from "@/lib/types";
 
@@ -32,6 +33,20 @@ function candidateLabel(candidate: McpBuildCandidate, ko: boolean): string {
     "task-match": ["요청과 기능이 일치", "The MCP capability matches the request"],
   };
   return reasons[candidate.recommendationReasonCode]?.[ko ? 0 : 1] ?? reasons["task-match"][ko ? 0 : 1];
+}
+
+function permissionBasis(candidate: McpBuildCandidate, ko: boolean): string {
+  if (candidate.permissionBasis === "catalog-declared") return ko ? "카탈로그 명시" : "catalog-declared";
+  if (candidate.permissionBasis === "host-inferred") return ko ? "호스트 추정" : "host estimate";
+  return ko ? "확인 불가" : "unknown";
+}
+
+function readinessBadge(candidate: McpBuildCandidate, ko: boolean): string {
+  if (candidate.readiness === "missing-key") return ko ? "키 없음" : "key missing";
+  if (candidate.readiness === "runtime-incompatible") return ko ? "이 모델 미지원" : "runtime unsupported";
+  if (candidate.readiness === "disabled") return ko ? "꺼짐" : "disabled";
+  if (candidate.readiness === "available") return ko ? "키 불필요 · 승인 후 연결" : "no key · connect after approval";
+  return candidate.keyState === "not-required" ? (ko ? "키 불필요" : "no key") : (ko ? "키 있음" : "key ready");
 }
 
 export function McpBuildInterviewCard(props: {
@@ -77,45 +92,114 @@ export function McpBuildInterviewCard(props: {
   const step = steps[active];
   const isLast = active >= steps.length - 1;
 
-  const finish = (finalDecisions: Record<string, boolean>) => {
+  const selectedIds = (finalDecisions: Record<string, boolean>) => {
     const included = new Set(autoIncludedIds);
     for (const s of steps) {
       if (finalDecisions[s.candidate.id] ?? false) included.add(s.candidate.id);
     }
-    props.onApprove([...included]);
+    return [...included];
   };
 
   const choose = (include: boolean) => {
     if (!step) return;
     const next = { ...decisions, [step.candidate.id]: include };
     setDecisions(next);
-    if (isLast) finish(next);
+    if (isLast) setActive(steps.length);
     else setActive(active + 1);
   };
 
   const skip = () => choose(false); // 추천 답변(제외)을 그대로 채택
 
-  // 질문이 하나도 없으면(전부 자동 판정) 즉시 확정 — grill-me 원칙: 확실하면 안 물어본다.
-  useEffect(() => {
-    if (plan.candidates.length > 0 && steps.length === 0) finish({});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plan.id, steps.length]);
+  const renderPlanSummary = (approvedIds: string[]) => {
+    const approved = new Set(approvedIds);
+    return (
+      <>
+        <div className="build-mcp-list">
+          {plan.candidates.map((candidate) => {
+            const blocked = candidate.readiness === "missing-key"
+              || candidate.readiness === "disabled"
+              || candidate.readiness === "runtime-incompatible";
+            return (
+              <div
+                key={candidate.id}
+                className="build-mcp-row titlebar-nodrag"
+                data-selected={approved.has(candidate.id) ? "true" : "false"}
+                data-blocked={blocked ? "true" : "false"}
+              >
+                <span className="build-mcp-check" aria-hidden="true">{approved.has(candidate.id) ? "✓" : ""}</span>
+                <span className="build-mcp-copy">
+                  <strong>{candidate.name}</strong>
+                  <small>{candidateLabel(candidate, ko)}{candidate.installed ? ` · ${ko ? "시스템에 설치됨" : "installed system-wide"}` : ""}</small>
+                  <small>
+                    {ko ? "예상 필요 권한" : "Estimated required permission"}: {candidate.minimumPermission}
+                    {" · "}{ko ? "범위" : "scope"}: {candidate.minimumScopes.join(", ")}
+                    {" · "}{permissionBasis(candidate, ko)}
+                    {" · "}{candidate.permissionEnforced ? (ko ? "강제됨" : "enforced") : (ko ? "강제 안 됨" : "not enforced")}
+                  </small>
+                </span>
+                <span className="build-mcp-badge" data-state={candidate.readiness}>{readinessBadge(candidate, ko)}</span>
+              </div>
+            );
+          })}
+        </div>
+        <p className="build-mcp-hint">
+          {ko
+            ? "표시 권한은 예상치입니다. 실제 API 키·서버·DB 계정 권한은 더 넓을 수 있으며, 권한 확대 감지는 아직 자동 강제하지 않습니다."
+            : "Shown permissions are estimates. Actual API-key, server, or database-account access can be broader; permission widening is not yet automatically enforced."}
+        </p>
+      </>
+    );
+  };
 
   if (plan.candidates.length === 0) {
     return (
-      <section className="build-card build-mcp-interview-card" aria-label={ko ? "MCP 연결 계획" : "MCP attachment plan"}>
+      <section className="build-card build-mcp-plan-card build-mcp-interview-card" aria-label={ko ? "MCP 연결 계획" : "MCP attachment plan"}>
         <div className="build-mcp-empty">
-          {ko ? "이 요청에 맞는 MCP 추천이 없습니다. MCP 없이 계속할 수 있습니다." : "No task-relevant MCP was found. You can continue without MCP."}
+          {plan.status === "unavailable"
+            ? ko
+              ? "MCP 추천 서비스 불가 · 한 번 확인 후 MCP 없이 계속할 수 있습니다."
+              : "MCP recommendation service unavailable · confirm once to continue without MCP."
+            : ko
+              ? "이 요청에 맞는 MCP 추천이 없습니다. MCP 없이 계속할 수 있습니다."
+              : "No task-relevant MCP was found. You can continue without MCP."}
         </div>
         <div className="build-mcp-actions">
           <button type="button" className="build-secondary-button titlebar-nodrag" onClick={props.onCancel}>{ko ? "취소" : "Cancel"}</button>
-          <button type="button" className="build-primary-button titlebar-nodrag" onClick={() => props.onApprove([])}>{ko ? "계속" : "Continue"}</button>
+          <button type="button" className="build-primary-button titlebar-nodrag" onClick={() => props.onApprove([])}>{ko ? "MCP 없이 계속" : "Continue without MCP"}</button>
         </div>
       </section>
     );
   }
 
-  if (!step) return null; // 자동 확정 이펙트가 이번 렌더 직후 처리한다.
+  if (!step) {
+    const approvedIds = selectedIds(decisions);
+    const approvedNames = plan.candidates
+      .filter((candidate) => approvedIds.includes(candidate.id))
+      .map((candidate) => candidate.name);
+    return (
+      <section className="build-card build-mcp-plan-card build-mcp-interview-card titlebar-nodrag" role="dialog" aria-label={ko ? "MCP 연결 확인" : "Confirm MCP attachment"}>
+        <div className="build-mcp-interview-head">
+          <strong className="build-mcp-interview-question">{ko ? "MCP 연결을 확인해 주세요" : "Confirm MCP attachment"}</strong>
+        </div>
+        <p className="build-mcp-hint">
+          {ko
+            ? `추천 ${approvedIds.length}개를 준비했습니다. 아직 어떤 MCP도 연결하지 않았습니다.`
+            : `${approvedIds.length} recommended MCP(s) are ready. Nothing has been attached yet.`}
+        </p>
+        {approvedNames.length > 0 && <div className="build-mcp-empty">{approvedNames.join(" · ")}</div>}
+        {renderPlanSummary(approvedIds)}
+        <div className="build-mcp-actions">
+          <button type="button" className="build-secondary-button titlebar-nodrag" onClick={props.onCancel}>{ko ? "취소" : "Cancel"}</button>
+          <button type="button" className="build-secondary-button titlebar-nodrag" onClick={() => props.onApprove([])}>{ko ? "MCP 없이 계속" : "Continue without MCP"}</button>
+          {approvedIds.length > 0 && (
+            <button type="button" className="build-primary-button titlebar-nodrag" onClick={() => props.onApprove(approvedIds)}>
+              {ko ? `추천 ${approvedIds.length}개 연결하고 빌드` : `Attach ${approvedIds.length} and build`}
+            </button>
+          )}
+        </div>
+      </section>
+    );
+  }
 
   const altNote = step.alternativeName
     ? ko
@@ -134,7 +218,7 @@ export function McpBuildInterviewCard(props: {
         : "This tool is currently disabled.";
 
   return (
-    <section className="build-card build-mcp-interview-card titlebar-nodrag" role="dialog" aria-label={ko ? "MCP 연결 질문" : "MCP attachment question"}>
+    <section className="build-card build-mcp-plan-card build-mcp-interview-card titlebar-nodrag" role="dialog" aria-label={ko ? "MCP 연결 질문" : "MCP attachment question"}>
       <div className="build-mcp-interview-head">
         {steps.length > 1 && <span className="build-mcp-interview-step">{active + 1}/{steps.length}</span>}
         <strong className="build-mcp-interview-question">{step.candidate.name}</strong>
@@ -142,6 +226,7 @@ export function McpBuildInterviewCard(props: {
       <p className="build-mcp-hint">
         {candidateLabel(step.candidate, ko)} · {blockerNote}
       </p>
+      {renderPlanSummary(selectedIds(decisions))}
       <div className="build-mcp-interview-opts">
         <button type="button" className="build-mcp-interview-opt" data-recommended="true" onClick={() => choose(false)}>
           <span className="build-mcp-interview-opt-body">
@@ -169,7 +254,11 @@ export function McpBuildInterviewCard(props: {
             : ""}
         </span>
         <button type="button" className="build-mcp-interview-skip" onClick={props.onCancel}>{ko ? "취소" : "Cancel"}</button>
+        <button type="button" className="build-mcp-interview-skip" onClick={() => props.onApprove([])}>{ko ? "MCP 없이 계속" : "Continue without MCP"}</button>
         <button type="button" className="build-mcp-interview-skip" onClick={skip}>{ko ? "건너뛰기" : "Skip"}</button>
+        <button type="button" className="build-primary-button titlebar-nodrag" onClick={() => props.onApprove(selectedIds(decisions))}>
+          {ko ? `선택 ${selectedIds(decisions).length}개로 빌드` : `Build with ${selectedIds(decisions).length} selected`}
+        </button>
       </div>
     </section>
   );
