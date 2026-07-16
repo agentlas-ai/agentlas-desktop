@@ -119,6 +119,7 @@
     "test:v64-automation-permission-migration": "npm run build:electron && electron scripts/test-v64-automation-permission-migration.cjs",
     "test:v65-local-memory-embeddings": "npm run build:electron && electron scripts/test-v65-local-memory-embeddings.cjs",
     "test:model2vec-hybrid-parity": "npm run build:electron && node scripts/test-model2vec-hybrid-parity.cjs",
+    "test:sitemap-readable": "npm run build:electron && electron scripts/test-sitemap-readable.cjs",
     "test:ontology-ingest-wiring": "node scripts/test-ontology-ingest-wiring.cjs",
     "test:memory-recall-injection": "npm run build:electron && electron scripts/test-memory-recall-injection.cjs",
     "test:memory-hybrid-retrieval": "npm run build:electron && electron scripts/test-memory-hybrid-retrieval.cjs",

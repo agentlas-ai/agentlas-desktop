@@ -24,6 +24,7 @@ import {
   activatedProjectMemoryFileExists,
   PROJECT_CODE_MAP_MAX_BYTES,
   PROJECT_CODE_MAP_SEED_MAX_BYTES,
+  PROJECT_SITEMAP_MAX_BYTES,
   readActivatedProjectMemoryJson,
   readActivatedProjectMemoryText,
 } from "./safe-project-read";
@@ -182,8 +183,15 @@ function summarizeCodeMap(projectPath: string): string | null {
 }
 
 function summarizeSitemap(projectPath: string): string | null {
-  const sm = readActivatedProjectMemoryJson<{ nodes?: unknown[] }>(projectPath, SITEMAP_FILE);
-  if (!sm || typeof sm !== "object") return null;
+  const sm = readActivatedProjectMemoryJson<{ nodes?: unknown[] }>(
+    projectPath,
+    SITEMAP_FILE,
+    PROJECT_SITEMAP_MAX_BYTES,
+  );
+  if (!sm || typeof sm !== "object") {
+    warnProjectMemoryGap(projectPath, "sitemap", "missing or too large to read");
+    return null;
+  }
   const nodes = sm.nodes;
   if (!Array.isArray(nodes) || nodes.length === 0) return null;
   const byStatus: Record<string, number> = {};

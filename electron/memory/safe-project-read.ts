@@ -8,6 +8,12 @@ export const PROJECT_CODE_MAP_MAX_BYTES = 16 * 1024 * 1024;
 // this repo. The full map is 1000x larger and is the find tool's business, not
 // the turn's.
 export const PROJECT_CODE_MAP_SEED_MAX_BYTES = 1024 * 1024;
+// A large repo's sitemap can reach into the tens of megabytes; on this workspace
+// it hit 13MB and blew the 2MB text cap, so it silently read as null and was
+// never injected (the same failure the code map had). Injection only ever emits
+// per-status counts, so the file never needs to be small — it just needs to be
+// readable.
+export const PROJECT_SITEMAP_MAX_BYTES = 24 * 1024 * 1024;
 
 type ProjectMemoryReadTestHook = (
   stage: "after-read",

@@ -319,6 +319,7 @@ jobs:
             npm run build:electron
             npx --no-install electron scripts/test-memory-recall-injection.cjs
             node scripts/test-ontology-ingest-wiring.cjs
+            npx --no-install electron scripts/test-sitemap-readable.cjs
             npx --no-install electron scripts/test-memory-agent-isolation.cjs
             npx --no-install electron scripts/test-legacy-experience-reconciliation.cjs
             npx --no-install electron scripts/test-v58-memory-curation-migration.cjs
