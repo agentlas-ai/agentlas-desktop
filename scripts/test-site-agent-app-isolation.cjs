@@ -69,7 +69,10 @@ matches(client, /chatId: req\.agentAppMode \? `site-agent-app:\$\{req\.runId \?\
 matches(client, /const maxPasses = req\.agentAppMode\s*\? 1/, "Agent App one-pass limit");
 matches(client, /buildAgentAppRunnerEnv\(process\.env, mcpRuntimeEnv\)/, "Agent App minimal environment plus opaque aliases");
 matches(client, /untrustedNoTools: req\.agentAppMode === true/, "Agent App zero-builtins runner contract");
-matches(client, /if \(!req\.agentAppMode\) appendChatMessage\(chat\.id, "assistant"/, "Agent App final persistence block");
+// The guard may wrap a single statement or a braced block (a session-watermark
+// call was added alongside the append); both keep persistence behind the
+// agentAppMode guard, which is the actual isolation invariant.
+matches(client, /if \(!req\.agentAppMode\)\s*\{?\s*appendChatMessage\(chat\.id, "assistant"/, "Agent App final persistence block");
 matches(client, /displayText = parseMemoryEvents\(displayText\)\.cleanedText/, "Agent App memory-control stripping");
 matches(client, /localOnly: req\.agentAppMode \|\| req\.hubMode === "local-only"/, "Agent App local-only group resolution");
 matches(client, /const continuousMode = !req\.agentAppMode/, "Agent App continuous-mode disable");
