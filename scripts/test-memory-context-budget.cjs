@@ -12,7 +12,20 @@ const approxTokens = Math.ceil(Buffer.byteLength(memory.MEMORY_CORE, "utf8") / 3
 assert.ok(approxTokens <= memory.MEMORY_CORE_MAX_APPROX_TOKENS, `memory core is ~${approxTokens} tokens`);
 assert.equal(memory.memoryEmitterPromptFor("write a normal report"), memory.MEMORY_CORE);
 assert.notEqual(memory.memoryEmitterPromptFor("remember this decision"), memory.MEMORY_CORE);
-assert.match(memory.MEMORY_CORE, /fenced `json` array/);
+// A stated preference or identity fact must load the full schema block, because
+// the always-on core has no room to explain the user_identity scope — and the
+// curator files user_identity only when the model labels it so with high
+// confidence, which is exactly what that block instructs. Without this, "always
+// use 존댓말" is emitted at medium confidence and demoted to a session note
+// (why user_identity was 0 rows). The block must actually carry the guidance.
+for (const preferenceTurn of ["always use 존댓말", "앞으로 나를 형님이라고 불러", "my name is Mason", "call me boss"]) {
+  const prompt = memory.memoryEmitterPromptFor(preferenceTurn);
+  assert.notEqual(prompt, memory.MEMORY_CORE, `preference turn must load the full block: ${preferenceTurn}`);
+  assert.match(prompt, /user_identity/);
+  assert.match(prompt, /confidence["':\s]+.*high|high[.\s]*confidence/i);
+}
+assert.equal(memory.memoryEmitterPromptFor("fix the python build"), memory.MEMORY_CORE, "an ordinary task stays on the core prompt");
+assert.match(memory.MEMORY_CORE, /fenced JSON envelope/);
 assert.match(memory.MEMORY_CORE, /user_identity, team_memory, agent_repo, agent_team, project, session, discard/);
 const compactReply = [
   "Done.",

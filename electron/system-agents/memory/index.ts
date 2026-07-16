@@ -18,10 +18,21 @@ export const MEMORY_CORE = [
 export const MEMORY_CORE_MAX_APPROX_TOKENS = 220;
 
 const MEMORY_DETAIL_RE = /\b(?:remember|memory|save this|record this|memory event)\b|기억|메모리|저장해|기록해|남겨/i;
+// A stated preference or identity fact is exactly what belongs in user_identity,
+// yet the always-on core prompt has no room to explain that scope. So when the
+// turn carries one of those signals, load the full schema block (which does
+// explain it) — otherwise the model emits the preference at medium confidence
+// and the curator throws it away. Kept deliberately narrow: imperative "call
+// me / from now on / always" phrasings and explicit self-description, not every
+// mention of a name.
+const PREFERENCE_SIGNAL_RE =
+  /\b(?:call me|from now on|always|prefer|please use|i am|i'm|my name is|my role)\b|앞으로|항상|불러|말투|반말|존댓말|내 이름|나를|프로필|선호/i;
 
-/** Full schema is loaded only when the current task is explicitly about memory. */
+/** Full schema is loaded when the task is about memory, or states a durable preference/identity. */
 export function memoryEmitterPromptFor(request: string): string {
-  return MEMORY_DETAIL_RE.test(request) ? MEMORY_EMITTER_BLOCK : MEMORY_CORE;
+  return MEMORY_DETAIL_RE.test(request) || PREFERENCE_SIGNAL_RE.test(request)
+    ? MEMORY_EMITTER_BLOCK
+    : MEMORY_CORE;
 }
 
 /** 온디맨드 — 전체 스키마(kinds/scopes enum, request_context 필드, JSON 포맷 예시). emit 시점에만 필요. */

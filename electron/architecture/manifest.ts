@@ -184,6 +184,10 @@ Rules:
 - One candidate per durable item. Keep "content" to one or two sentences.
 - "memory_kind": fact | decision | preference | risk | procedure | hypothesis | evidence | deprecation | conflict
 - "suggested_scope": user_identity | team_memory | project (this folder) | agent_repo | session (temporary) | discard
+- Use user_identity for a stable operator preference or personal fact (their name, role, language, tone,
+  how they want you to behave) — these must outlive any one project. The curator only files user_identity
+  when you label it so with "confidence": "high"; it never promotes into that scope, so a preference emitted
+  at lower confidence is demoted to a throwaway session note.
 - "agent_team" is accepted only as a legacy alias for team_memory.
 - Add "request_context" when it improves future recall: user_intent, trigger_terms,
   cwd_at_request, target_project, target_path, cross_context, outcome.
