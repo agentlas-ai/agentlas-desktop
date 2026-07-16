@@ -214,6 +214,16 @@ const map = {
 };
 fs.mkdirSync(OUT_DIR, { recursive: true });
 fs.writeFileSync(path.join(OUT_DIR, "project-map.json"), JSON.stringify(map, null, 2));
+
+// 주입용 시드. 전체 지도는 refIndex/defIndex/docIndex/fileSymbols 때문에 이 저장소에서
+// 33MB까지 커졌고, 그 크기가 read 캡을 넘겨 지도가 6개월 가까이 조용히 죽어 있었다.
+// 턴에 주입되는 건 사실 아래 몇 필드뿐이므로(모듈/진입점/최다참조), 큰 인덱스는
+// find 도구 몫으로 남기고 주입은 이 작은 파일만 읽는다.
+const seed = {
+  schemaVersion: map.schemaVersion, project: map.project, generatedAt: map.generatedAt,
+  stats: map.stats, modules, entryPoints, moduleEdges, byExt: map.byExt, topSymbols, dirs,
+};
+fs.writeFileSync(path.join(OUT_DIR, "project-seed.json"), JSON.stringify(seed, null, 2));
 fs.writeFileSync(CACHE, JSON.stringify(nextCache));
 
 const md = [

@@ -67,6 +67,15 @@ export function isRuntimeMcpCompatible(
   // variants are kept out until the CLI can represent them without leaking a
   // credential through argv.
   if (runtime.kind === "codex") return transport === "stdio";
+  // Grok CLI's own `grok mcp add` supports stdio/http/sse natively (unlike
+  // Codex's config-override constraint), so every transport this catalog
+  // knows about is representable.
+  if (runtime.kind === "grok") return true;
+  // Ollama/LM Studio/MLX have no CLI of their own — Agentlas' in-process
+  // OpenAI-style tool loop (electron/runtime/local-tool-loop.ts) resolves
+  // each configured server directly via the MCP SDK client, so transport
+  // choice doesn't matter here either.
+  if (runtime.kind === "ollama" || runtime.kind === "lmstudio" || runtime.kind === "mlx") return true;
   return false;
 }
 

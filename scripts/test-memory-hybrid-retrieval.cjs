@@ -116,6 +116,47 @@ async function main() {
       /buildExperienceContext\(\{[\s\S]{0,500}task:\s*effectiveUserPrompt/,
       "every runMcpInvocation turn must pass the current effective prompt to Experience retrieval",
     );
+    // Korean must never be ranked by a semantic score the model cannot form.
+    // potion-base-8M has no Hangul in its vocabulary, so its WordPiece shatters
+    // Korean into Jamo and the resulting cosine measures letter frequency:
+    // measured on the real asset, unrelated Korean pairs scored 0.86 while
+    // related ones scored 0.68. A threshold cannot separate distributions that
+    // overlap, so the semantic axis is withheld entirely for Korean.
+    const { autoLocalEmbedding, rankHybridLocal } = require("../dist/electron/memory/local-embedding.js");
+    // This pair scores 0.526 on the real asset — it cleared the old 0.5 CJK
+    // threshold, which is exactly why a threshold was the wrong instrument. The
+    // gate must withhold it on the language, not on the number.
+    const koreanDocs = [
+      { id: "related", text: "큐레이터가 기억을 기록하지 못함" },
+    ].map((doc) => ({ ...doc, embedding: autoLocalEmbedding(doc.text).vector }));
+    const koreanRanked = rankHybridLocal("메모리가 저장이 안돼", koreanDocs);
+    assert.ok(koreanRanked[0].vectorScore > 0.5, "fixture must score above the old CJK threshold");
+    assert.ok(
+      !koreanRanked[0].semanticEligible,
+      "Korean must not qualify semantically while the model has no Hangul vocabulary, however high the score",
+    );
+    // English keeps its semantic axis: the withholding is language-scoped, not a
+    // blanket disabling of vector search.
+    const englishDocs = [
+      { id: "related", text: "changelog update required" },
+    ].map((doc) => ({ ...doc, embedding: autoLocalEmbedding(doc.text).vector }));
+    assert.ok(
+      rankHybridLocal("update the changelog", englishDocs).some((entry) => entry.semanticEligible),
+      "English must still rank semantically",
+    );
+
+    // A version is one identifier. The Latin pattern stops at the dot and needs
+    // two characters, so "0.9.0" used to tokenize to nothing at all — a prompt
+    // naming only a version could not be searched — and "v0.8.46" fractured
+    // into "v0" and "46", never matching a prompt that wrote it without the v.
+    const { localEmbeddingTokens, lexicalOverlap } = require("../dist/electron/memory/local-embedding.js");
+    assert.ok(localEmbeddingTokens("0.9.0").includes("0.9.0"), "a bare version must tokenize");
+    assert.ok(localEmbeddingTokens("v0.8.46").includes("0.8.46"), "a v-prefixed version must normalize");
+    assert.ok(
+      lexicalOverlap("deploy 0.8.46", "shipped v0.8.46 to the feed") > 0,
+      "the same version must match whether or not it was written with a v",
+    );
+
     console.log(JSON.stringify({
       ok: true,
       pythonParity: true,

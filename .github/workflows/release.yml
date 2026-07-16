@@ -321,6 +321,7 @@ jobs:
             npm run build:electron
             node scripts/test-model2vec-hybrid-parity.cjs
             npx --no-install electron scripts/test-memory-hybrid-retrieval.cjs
+            npx --no-install electron scripts/test-memory-recall-injection.cjs
             npx --no-install electron scripts/test-curator-nest-core-query.cjs
             npx --no-install electron scripts/test-memory-agent-isolation.cjs
             node scripts/test-memory-context-budget.cjs

@@ -74,6 +74,8 @@ const DICT = {
     compacted: "컨텍스트 압축 — 이전 대화 {n}개 메시지를 요약으로 접었습니다",
     compactedDigestHeader: "[압축된 이전 대화 요약 — 오래된 맥락을 간추렸습니다]",
     aborted: "사용자가 정지 버튼으로 실행을 중지했습니다.",
+    mcpToolsAttached: "MCP 도구 {count}개 연결됨",
+    mcpToolCallUnsupported: "이 모델/서버는 도구 호출(tool_calls) 응답 형식을 지원하지 않는 것 같습니다 — 도구 없이 텍스트로만 계속합니다.",
   },
   en: {
     thinking: "{agent} is thinking...",
@@ -124,6 +126,8 @@ const DICT = {
     compacted: "Context compacted — folded {n} earlier messages into a summary",
     compactedDigestHeader: "[Summary of compacted earlier conversation — older context condensed]",
     aborted: "Run stopped from the stop button.",
+    mcpToolsAttached: "{count} MCP tool(s) attached",
+    mcpToolCallUnsupported: "This model/server doesn't seem to support tool-call responses — continuing with text only, no tools.",
   },
 } as const;
 

@@ -18,7 +18,7 @@ import { grantForDroppedFile, ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
 import { KeyStatusBanner } from "@/components/KeyStatusBanner";
-import { McpBuildPlanCard } from "@/components/build/McpBuildPlanCard";
+import { McpBuildInterviewCard } from "@/components/build/McpBuildInterviewCard";
 import { McpAttachmentReceiptCard } from "@/components/build/McpAttachmentReceiptCard";
 import { CloudSaveChoiceDialog } from "@/components/build/CloudSaveChoiceDialog";
 import type { DirListing, FsReadScope, HephaestusStatus, RuntimeSelection, RuntimeStatus } from "@/lib/types";
@@ -33,7 +33,6 @@ import {
   approveBuildMcpPlan,
   describeAllocationRuntime,
   resolveRuntimeEscalation,
-  setBuildMcpSelection,
   answerBuild,
   cancelBuild,
   resetBuild,
@@ -174,7 +173,7 @@ export default function BuildPage() {
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
-  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, result, registered, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpSelectedCandidateIds, mcpReceipt, cloudSaveChoice } = s;
+  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, result, registered, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpReceipt, cloudSaveChoice } = s;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // 드롭/파일 인풋 → 실제 디스크 경로(webUtils) → 스토어 첨부. 경로를 못 얻으면(브라우저 등) 스킵.
@@ -642,13 +641,10 @@ export default function BuildPage() {
           </section>
 
           {phase === "mcp-review" && mcpPlan && (
-            <McpBuildPlanCard
+            <McpBuildInterviewCard
               plan={mcpPlan}
-              selectedIds={mcpSelectedCandidateIds}
               ko={ko}
-              onChange={setBuildMcpSelection}
-              onApprove={() => void approveBuildMcpPlan(mcpSelectedCandidateIds)}
-              onContinueWithout={() => void approveBuildMcpPlan([])}
+              onApprove={(selectedIds) => void approveBuildMcpPlan(selectedIds)}
               onCancel={cancelBuild}
             />
           )}

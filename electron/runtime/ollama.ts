@@ -7,9 +7,10 @@
 //   - 서버 버전: GET  {host}/api/version      → { version }
 //   - 채팅 SSE:  POST {host}/v1/chat/completions  (OpenAI Chat Completions 호환)
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
+import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { compactHistory } from "./compact";
+import { runLocalOpenAiChat, type ChatMessage, type LocalChatContent } from "./local-tool-loop";
 
 /** 기본 로컬 호스트. env OLLAMA_HOST로 재정의 가능(원격 Ollama도 지원). */
 export function ollamaHost(): string {
@@ -56,30 +57,6 @@ export async function probeOllama(timeoutMs = 1500): Promise<OllamaProbe | null>
   }
 }
 
-// ── OpenAI 호환 SSE 라인 파서 (byok.ts와 동일 포맷) ──────────
-async function* iterSseLines(resp: Response): AsyncGenerator<string, void, unknown> {
-  if (!resp.body) return;
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, nl).trim();
-      buffer = buffer.slice(nl + 1);
-      if (line) yield line;
-    }
-  }
-  if (buffer.trim()) yield buffer.trim();
-}
-
-type OllamaContent =
-  | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
-
 export const runOllama: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
@@ -100,10 +77,7 @@ export const runOllama: Runner = async (
   if (digest) events.onStatus(tStatus(req.locale, "compacted", { n: droppedCount }));
   const systemText = digest ? `${req.systemPrompt}\n\n${digest}` : req.systemPrompt;
 
-  const messages: Array<{
-    role: "system" | "user" | "assistant";
-    content: string | OllamaContent[];
-  }> = [{
+  const messages: ChatMessage[] = [{
     role: "system",
     content: wrapSystemPrompt(
       systemText,
@@ -123,7 +97,7 @@ export const runOllama: Runner = async (
 
   // 비전 모델이면 image_url(OpenAI 호환)로 첨부. 텍스트 모델은 조용히 무시한다.
   if (req.images && req.images.length > 0) {
-    const content: OllamaContent[] = req.images.map((img) => ({
+    const content: LocalChatContent[] = req.images.map((img) => ({
       type: "image_url" as const,
       image_url: { url: `data:${img.mediaType};base64,${img.data}` },
     }));
@@ -133,52 +107,15 @@ export const runOllama: Runner = async (
     messages.push({ role: "user", content: req.userPrompt });
   }
 
-  let resp: Response;
-  try {
-    resp = await fetch(`${host}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      signal: req.signal,
-      body: JSON.stringify({ model, stream: true, messages }),
-    });
-  } catch {
-    throw new Error(tStatus(req.locale, "errOllamaUnreachable", { host }));
-  }
-
-  if (!resp.ok) {
-    const errText = await resp.text().catch(() => "");
-    throw new Error(`Ollama ${resp.status}: ${errText.slice(0, 300)}`);
-  }
-
-  let acc = "";
-  let lastEmit = 0;
-  for await (const line of iterSseLines(resp)) {
-    if (!line.startsWith("data:")) continue;
-    const payload = line.slice(5).trim();
-    if (payload === "[DONE]") break;
-    try {
-      const event = JSON.parse(payload) as {
-        choices?: Array<{ delta?: { content?: string } }>;
-      };
-      const delta = event.choices?.[0]?.delta?.content;
-      if (delta) {
-        acc += delta;
-        const now = Date.now();
-        if (now - lastEmit > 80) {
-          events.onPartial(acc);
-          lastEmit = now;
-        }
-      }
-    } catch {
-      // 빈 줄 / keep-alive — 무시
-    }
-  }
-  return {
-    text: acc.trim(),
-    workforcePermissionEnforcement: workforceZeroToolsEnforcement(
+  return runLocalOpenAiChat(
+    {
       req,
-      "ollama",
-      ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
-    ),
-  };
+      events,
+      runtimeKind: "ollama",
+      host,
+      model,
+      unreachableMessage: tStatus(req.locale, "errOllamaUnreachable", { host }),
+    },
+    messages,
+  );
 };

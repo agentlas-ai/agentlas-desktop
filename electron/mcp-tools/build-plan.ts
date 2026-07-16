@@ -57,7 +57,28 @@ const CATALOG_RULES: Record<string, CatalogRule> = {
     capability: "agent-routing",
     fallbackGroup: "agent-routing",
     priority: 100,
-    hints: ["agentlas", "hephaestus", "hub", "cloud", "agent", "team", "route", "에이전트", "허브", "클라우드", "팀", "라우팅"],
+    // "agent"/"team"/"에이전트"/"팀" 단독 단어는 빼야 한다 — 빌드 요청은 거의 항상
+    // "~하는 에이전트 만들어줘"라서 그 단어들만으로는 모든 빌드가 자동 매치되는
+    // 자기참조 오탐이 난다(2026-07-16 실측). 실제 Hub/Cloud 라우팅 의도가 드러나는
+    // 구체적인 구문만 남긴다.
+    hints: [
+      "hephaestus",
+      "agentlas hub",
+      "agentlas 허브",
+      "허브에서",
+      "허브 에이전트",
+      "허브 플러그인",
+      "허브 팀",
+      "hub agent",
+      "hub specialist",
+      "hub plugin",
+      "에이전트 빌려",
+      "팀 빌려",
+      "다른 에이전트 호출",
+      "에이전트 라우팅",
+      "클라우드 에이전트",
+      "클라우드 팀",
+    ],
   },
   "brave-search": {
     capability: "web-search",

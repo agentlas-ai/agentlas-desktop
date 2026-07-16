@@ -42,11 +42,20 @@ const MODEL2VEC_MIN_VECTOR_SCORE = 0.45;
 const MODEL2VEC_CJK_MIN_VECTOR_SCORE = 0.5;
 const VECTOR_RELATIVE_FLOOR = 0.72;
 const CJK_QUERY_PATTERN = /[぀-ヿ㐀-䶿一-鿿가-힣]+/;
+const HANGUL_PATTERN = /[가-힣]/;
 
 type ModelDescriptor = {
   modelPath: string;
   modelSha256: string;
   adapter: string;
+  // True when the vocabulary has whole Hangul syllables. potion-base-8M is
+  // distilled from an English BERT and has none — only Hangul Jamo — so its
+  // WordPiece shatters Korean into individual letters. Measured on this model:
+  // "배포 실패" tokenizes to ᄇ ᅢ ᄑ ᅩ ᄉ ᅵ ᆯ ᄑ ᅢ. Comparing those vectors measures
+  // letter frequency, not meaning, which is why unrelated Korean sentences
+  // scored HIGHER (0.86) than related ones (0.68). The semantic axis has to be
+  // withheld for Korean until the asset can actually read it.
+  supportsHangul: boolean;
   dimensions: number;
   vocabSize: number;
   vocab: Map<string, number>;
@@ -60,10 +69,22 @@ let cachedModelDescriptorAt = 0;
 
 const LATIN_TOKEN_PATTERN = /[a-z0-9][a-z0-9_-]{1,}/g;
 const CJK_RUN_PATTERN = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7a3]+/g;
+// A version is one identifier, but the general Latin pattern cannot see it: the
+// dot ends a token and a token must be two characters, so "0.9.0" produced no
+// tokens whatsoever — a prompt naming only a version fell back to dumping the
+// most recent entries instead of searching — and "v0.8.46" fractured into "v0"
+// and "46". The leading "v" is dropped so a memory written as "v0.8.46" is
+// still found by a prompt that says "0.8.46".
+const VERSION_TOKEN_PATTERN = /v?\d+(?:\.\d+)+(?:-[a-z0-9.]+)?/g;
 
 export function localEmbeddingTokens(text: string): string[] {
   const lowered = text.toLowerCase();
-  const tokens: string[] = lowered.match(LATIN_TOKEN_PATTERN) ?? [];
+  const tokens: string[] = [];
+  const withoutVersions = lowered.replace(VERSION_TOKEN_PATTERN, (version) => {
+    tokens.push(version.replace(/^v/, ""));
+    return " ";
+  });
+  tokens.push(...(withoutVersions.match(LATIN_TOKEN_PATTERN) ?? []));
   for (const run of lowered.match(CJK_RUN_PATTERN) ?? []) {
     if (run.length === 1) {
       tokens.push(run);
@@ -210,10 +231,18 @@ function verifyModelDirectory(directory: string): ModelDescriptor | null {
     if (source?.modelId !== PINNED_MODEL2VEC_MODEL_ID || source?.revision !== PINNED_MODEL2VEC_REVISION) return null;
     if (!exactFileRecords(source.files, PINNED_MODEL2VEC_SOURCE_FILES)) return null;
     const assetIdentity = `model2vec:${PINNED_MODEL2VEC_MODEL_ID}:${PINNED_MODEL2VEC_REVISION}:${modelSha256}:${manifest.format}`;
+    let supportsHangul = false;
+    for (const token of vocab.keys()) {
+      if (HANGUL_PATTERN.test(token)) {
+        supportsHangul = true;
+        break;
+      }
+    }
     return {
       modelPath: root,
       modelSha256,
       adapter: `${assetIdentity}:hybrid-hash96-v1:${MODEL2VEC_HYBRID_DIMENSIONS}`,
+      supportsHangul,
       dimensions,
       vocabSize,
       vocab,
@@ -482,6 +511,26 @@ export interface HybridRanked<T extends HybridRankable> {
   semanticEligible: boolean;
 }
 
+let reportedHangulGap = false;
+
+/**
+ * True when the text is Korean but the loaded model has no Hangul lexical
+ * units, so its vector carries no meaning for that text.
+ */
+function hangulBeyondModel(text: string): boolean {
+  if (!HANGUL_PATTERN.test(text)) return false;
+  const descriptor = verifiedModelDescriptor();
+  if (!descriptor || descriptor.supportsHangul) return false;
+  if (!reportedHangulGap) {
+    reportedHangulGap = true;
+    console.warn(
+      "[memory] the local embedding model has no Hangul vocabulary — Korean text is ranked lexically only. " +
+        "Semantic recall for Korean needs a multilingual asset.",
+    );
+  }
+  return true;
+}
+
 /** Reciprocal-rank fusion: lexical and local-vector ranks remain independently auditable. */
 export function rankHybridLocal<T extends HybridRankable>(
   query: string,
@@ -499,9 +548,17 @@ export function rankHybridLocal<T extends HybridRankable>(
   const minimumVectorScore = queryEmbedding.model === MODEL2VEC_HYBRID_NAME
     ? (CJK_QUERY_PATTERN.test(query) ? MODEL2VEC_CJK_MIN_VECTOR_SCORE : MODEL2VEC_MIN_VECTOR_SCORE)
     : HASH_MIN_VECTOR_SCORE;
+  // A score the model cannot form an opinion about is not a weak signal, it is
+  // noise: with no Hangul in the vocabulary the semantic half compares letter
+  // frequency, and unrelated Korean then outranks related Korean. Withhold the
+  // semantic axis for any comparison that touches Korean, and let lexical rank
+  // stand alone, rather than let a threshold decide which noise gets through.
+  const semanticBlind = hangulBeyondModel(query);
   const measuredWithGate = measured.map((entry) => ({
     ...entry,
-    semanticEligible: entry.vectorScore >= minimumVectorScore
+    semanticEligible: !semanticBlind
+      && !hangulBeyondModel(entry.item.text)
+      && entry.vectorScore >= minimumVectorScore
       && entry.vectorScore >= bestVectorScore * VECTOR_RELATIVE_FLOOR,
   }));
   const lexical = [...measuredWithGate].filter((entry) => entry.lexicalScore > 0).sort((left, right) =>

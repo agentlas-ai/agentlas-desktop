@@ -1269,7 +1269,13 @@ export async function runMcpInvocation(
   let mcpCodexConfigArgs: string[] | undefined;
   let mcpRuntimeEnv: Record<string, string> | undefined;
   let mcpAutoSelectionPrompt = "";
-  const runtimeCanUseMcp = active.kind === "claude-code" || active.kind === "codex";
+  const runtimeCanUseMcp =
+    active.kind === "claude-code" ||
+    active.kind === "codex" ||
+    active.kind === "grok" ||
+    active.kind === "ollama" ||
+    active.kind === "lmstudio" ||
+    active.kind === "mlx";
   const agentAppToolGrant = req.agentAppMode ? req.agentAppRuntimeToolGrant : undefined;
   let acceptedAgentAppInlineMcpConfig: string | undefined;
   const markAgentAppMcpRuntimeUnavailable = () => {

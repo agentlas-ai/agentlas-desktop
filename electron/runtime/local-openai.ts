@@ -4,9 +4,10 @@
 //   - 채팅 SSE:  POST {host}/v1/chat/completions  (OpenAI Chat Completions 호환)
 // API 키 불필요, 클라우드 미경유 — 완전 로컬. (PRD §3.1 BYOC의 로컬 변형)
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
+import { wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { compactHistory } from "./compact";
+import { runLocalOpenAiChat, type ChatMessage, type LocalChatContent } from "./local-tool-loop";
 
 /** "localhost:1234"처럼 스킴이 없으면 http:// 보정하고 끝 슬래시를 제거한다. */
 export function normalizeLocalHost(raw: string | undefined, fallback: string): string {
@@ -42,30 +43,6 @@ export async function probeOpenAiLocal(
   }
 }
 
-// ── OpenAI 호환 SSE 라인 파서 (ollama.ts / byok.ts와 동일 포맷) ──────────
-async function* iterSseLines(resp: Response): AsyncGenerator<string, void, unknown> {
-  if (!resp.body) return;
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, nl).trim();
-      buffer = buffer.slice(nl + 1);
-      if (line) yield line;
-    }
-  }
-  if (buffer.trim()) yield buffer.trim();
-}
-
-type LocalContent =
-  | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
-
 /**
  * host를 바인딩해 OpenAI 호환 로컬 서버 채팅 Runner를 만든다.
  * hostFn은 호출 시점에 평가한다(env 재정의를 매 실행 반영).
@@ -91,10 +68,7 @@ export function makeLocalOpenAiRunner(
     if (digest) events.onStatus(tStatus(req.locale, "compacted", { n: droppedCount }));
     const systemText = digest ? `${req.systemPrompt}\n\n${digest}` : req.systemPrompt;
 
-    const messages: Array<{
-      role: "system" | "user" | "assistant";
-      content: string | LocalContent[];
-    }> = [{
+    const messages: ChatMessage[] = [{
       role: "system",
       content: wrapSystemPrompt(
         systemText,
@@ -114,7 +88,7 @@ export function makeLocalOpenAiRunner(
 
     // 비전 모델이면 image_url(OpenAI 호환)로 첨부. 텍스트 모델은 조용히 무시한다.
     if (req.images && req.images.length > 0) {
-      const content: LocalContent[] = req.images.map((img) => ({
+      const content: LocalChatContent[] = req.images.map((img) => ({
         type: "image_url" as const,
         image_url: { url: `data:${img.mediaType};base64,${img.data}` },
       }));
@@ -124,57 +98,19 @@ export function makeLocalOpenAiRunner(
       messages.push({ role: "user", content: req.userPrompt });
     }
 
-    let resp: Response;
-    try {
-      resp = await fetch(`${host}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        signal: req.signal,
-        body: JSON.stringify({ model, stream: true, messages }),
-      });
-    } catch {
-      throw new Error(
-        req.locale === "ko"
-          ? `로컬 서버에 연결할 수 없습니다: ${host}`
-          : `Cannot reach local server: ${host}`,
-      );
-    }
-
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => "");
-      throw new Error(`${host} ${resp.status}: ${errText.slice(0, 300)}`);
-    }
-
-    let acc = "";
-    let lastEmit = 0;
-    for await (const line of iterSseLines(resp)) {
-      if (!line.startsWith("data:")) continue;
-      const payload = line.slice(5).trim();
-      if (payload === "[DONE]") break;
-      try {
-        const event = JSON.parse(payload) as {
-          choices?: Array<{ delta?: { content?: string } }>;
-        };
-        const delta = event.choices?.[0]?.delta?.content;
-        if (delta) {
-          acc += delta;
-          const now = Date.now();
-          if (now - lastEmit > 80) {
-            events.onPartial(acc);
-            lastEmit = now;
-          }
-        }
-      } catch {
-        // 빈 줄 / keep-alive — 무시
-      }
-    }
-    return {
-      text: acc.trim(),
-      workforcePermissionEnforcement: workforceZeroToolsEnforcement(
+    return runLocalOpenAiChat(
+      {
         req,
+        events,
         runtimeKind,
-        ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
-      ),
-    };
+        host,
+        model,
+        unreachableMessage:
+          req.locale === "ko"
+            ? `로컬 서버에 연결할 수 없습니다: ${host}`
+            : `Cannot reach local server: ${host}`,
+      },
+      messages,
+    );
   };
 }

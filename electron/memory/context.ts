@@ -23,12 +23,22 @@ import {
 import {
   activatedProjectMemoryFileExists,
   PROJECT_CODE_MAP_MAX_BYTES,
+  PROJECT_CODE_MAP_SEED_MAX_BYTES,
   readActivatedProjectMemoryJson,
   readActivatedProjectMemoryText,
 } from "./safe-project-read";
-import { localEmbeddingTokens, rankHybridLocal } from "./local-embedding";
+import { autoLocalEmbedding, localEmbeddingTokens, rankHybridLocal } from "./local-embedding";
 
-const SOUL_MAX_CHARS = 1800;
+// 1800 was small enough that a 31k-char soul contributed 5.8% of itself, and
+// because the cut was positional the 94% it dropped included rules that would
+// have prevented real failures. Relevance selection only helps if the budget can
+// hold more than a couple of bullets.
+const SOUL_MAX_CHARS = 6000;
+// Sections in a hand-written soul are chapter-sized — this repo's "Current
+// State" alone is 13k chars — so ranking whole sections means the useful ones
+// never fit any budget. Rank paragraph-sized pieces instead, each still
+// carrying its heading so it reads in context.
+const SOUL_CHUNK_MAX_CHARS = 1200;
 const MAX_ENTRIES = 12;
 // SQLite LIMIT -1 means no pre-ranking recency cap. Governance filters still
 // run in SQL; adaptive load-all/top-k is decided only after every eligible row
@@ -46,6 +56,19 @@ const CODEMAP_SYMBOLS = 6;
 const CAREER_GRAPH_SOURCES = 6;
 const codeMapTriggered = new Set<string>();
 
+// Every recall layer here fails by returning null inside a catch or a size
+// check, so a run that injected nothing looked exactly like a run that injected
+// everything. That silence is why a dead code map and a 94%-truncated soul went
+// unnoticed for months. Report each gap once per project per process — enough
+// to be findable in the log, quiet enough not to spam a long session.
+const reportedGaps = new Set<string>();
+function warnProjectMemoryGap(projectPath: string, layer: string, detail: string): void {
+  const key = `${projectPath}::${layer}::${detail}`;
+  if (reportedGaps.has(key)) return;
+  reportedGaps.add(key);
+  console.warn(`[memory] ${layer} (${projectPath}): ${detail}`);
+}
+
 function codeMapGenPath(): string | null {
   const cands = [
     path.join(__dirname, "code-map-gen.mjs"),
@@ -61,11 +84,45 @@ function codeMapGenPath(): string | null {
   return null;
 }
 
-// Best-effort, non-blocking: generate the map once per project per session if missing.
+const CODE_MAP_SEED_FILE = "code-map/project-seed.json";
+const CODE_MAP_FULL_FILE = "code-map/project-map.json";
+
+type CodeMapSeed = {
+  project?: string;
+  stats?: { codeFiles?: number; symbols?: number };
+  modules?: { id: string; role: string }[];
+  entryPoints?: { path: string }[];
+  topSymbols?: { name: string; defAt: string }[];
+};
+
+// Reads what the turn actually injects. Prefers the small seed; an older
+// project that predates the seed still works through the full map.
+function readCodeMapSeed(projectPath: string): CodeMapSeed | null {
+  return (
+    readActivatedProjectMemoryJson<CodeMapSeed>(
+      projectPath,
+      CODE_MAP_SEED_FILE,
+      PROJECT_CODE_MAP_SEED_MAX_BYTES,
+    ) ??
+    readActivatedProjectMemoryJson<CodeMapSeed>(
+      projectPath,
+      CODE_MAP_FULL_FILE,
+      PROJECT_CODE_MAP_MAX_BYTES,
+    )
+  );
+}
+
+// Best-effort, non-blocking: generate the map once per project per session when
+// what we inject is missing OR unreadable.
+//
+// This used to check fs.existsSync on the full map, which made a map that had
+// outgrown the read cap permanently dead: the file existed, so generation was
+// skipped forever, and the read failed forever. On this repo that state went
+// unnoticed from Jun 30 until it was measured. Deciding on readability instead
+// means an unusable map repairs itself on the next attach.
 function ensureCodeMap(projectPath: string): void {
   try {
-    const mapFile = path.join(projectPath, ".agentlas", "code-map", "project-map.json");
-    if (fs.existsSync(mapFile)) return;
+    if (readCodeMapSeed(projectPath)) return;
     if (codeMapTriggered.has(projectPath)) return;
     const gen = codeMapGenPath();
     if (!gen) return;
@@ -83,14 +140,11 @@ function ensureCodeMap(projectPath: string): void {
 
 function summarizeCodeMap(projectPath: string): string | null {
   try {
-    const m = readActivatedProjectMemoryJson<{
-      project?: string;
-      stats?: { codeFiles?: number; symbols?: number };
-      modules?: { id: string; role: string }[];
-      entryPoints?: { path: string }[];
-      topSymbols?: { name: string; defAt: string }[];
-    }>(projectPath, "code-map/project-map.json", PROJECT_CODE_MAP_MAX_BYTES);
-    if (!m) return null;
+    const m = readCodeMapSeed(projectPath);
+    if (!m) {
+      warnProjectMemoryGap(projectPath, "code-map", "no readable seed or map — regenerating in the background");
+      return null;
+    }
     const mods = (m.modules ?? [])
       .slice(0, CODEMAP_MODULES)
       .map((x) => `${x.id}(${x.role})`)
@@ -225,6 +279,135 @@ function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string): Memor
   return selected;
 }
 
+// The soul is one long hand-written document, and it used to be cut with
+// slice(0, 1800) — the head survived and everything after it was thrown away.
+// On this repo that meant 94% of a 31k-char soul was dropped, including the
+// release rule sitting at char 4,527 that would have prevented a failed tag.
+// Position in the file says nothing about relevance to the current turn, so
+// rank sections the same way memories are ranked and keep the head as the
+// anchor (it holds identity/purpose the rest is read against).
+type SoulChunk = { id: string; text: string; embedding: readonly number[]; order: number };
+
+// A soul section is chapter-sized — this repo's "Current State" alone is 13k
+// chars — so ranking whole sections means the useful ones never fit any budget.
+// Blank lines are not a reliable boundary either: these souls are written as
+// bullet lists whose items wrap onto continuation lines, so a whole section is
+// one "paragraph". Split on the units the document is actually made of, then
+// regroup them up to a rankable size.
+function soulUnits(body: string): string[] {
+  const units: string[] = [];
+  for (const paragraph of body.split(/\n{2,}/)) {
+    const block = paragraph.trim();
+    if (!block) continue;
+    if (block.length <= SOUL_CHUNK_MAX_CHARS) {
+      units.push(block);
+      continue;
+    }
+    // Top-level list items; continuation lines stay with their item because the
+    // lookahead only matches a line that starts a new one.
+    const items = block.split(/\n(?=[-*+] |\d+\. )/);
+    for (const item of items) {
+      const trimmed = item.trim();
+      if (trimmed) units.push(trimmed);
+    }
+  }
+  return units;
+}
+
+function soulChunks(full: string): SoulChunk[] {
+  const headings = [...full.matchAll(/^#{1,6} .*$/gm)];
+  const texts: string[] = [];
+  const addSection = (sectionText: string): void => {
+    const section = sectionText.trim();
+    if (!section) return;
+    if (section.length <= SOUL_CHUNK_MAX_CHARS) {
+      texts.push(section);
+      return;
+    }
+    const newline = section.indexOf("\n");
+    const heading = newline === -1 ? section : section.slice(0, newline);
+    const body = newline === -1 ? "" : section.slice(newline + 1);
+    let buffer = "";
+    const flush = (): void => {
+      const piece = buffer.trim();
+      buffer = "";
+      // The heading rides along so a ranked fragment still says what it is about.
+      if (piece) texts.push(`${heading}\n${piece}`);
+    };
+    for (const unit of soulUnits(body)) {
+      if (buffer && buffer.length + unit.length > SOUL_CHUNK_MAX_CHARS) flush();
+      buffer += `${unit}\n`;
+    }
+    flush();
+  };
+
+  if (headings.length === 0) {
+    addSection(full);
+  } else {
+    const firstStart = headings[0].index ?? 0;
+    if (firstStart > 0) addSection(full.slice(0, firstStart));
+    for (let i = 0; i < headings.length; i += 1) {
+      const start = headings[i].index ?? 0;
+      const end = i + 1 < headings.length ? (headings[i + 1].index ?? full.length) : full.length;
+      addSection(full.slice(start, end));
+    }
+  }
+  // Order is the document's own order, tracked as a sequence rather than a char
+  // offset because splitting consumes the separators.
+  return texts.map((text, order) => ({
+    id: `soul:${order}`,
+    text,
+    embedding: autoLocalEmbedding(text).vector,
+    order,
+  }));
+}
+
+function selectSoulText(soul: string, taskPrompt: string | undefined, projectPath: string): string {
+  const full = soul.trim();
+  if (full.length <= SOUL_MAX_CHARS) return full;
+
+  const prompt = (taskPrompt ?? "").trim();
+  const chunks = soulChunks(full);
+  if (chunks.length < 2 || !prompt) {
+    warnProjectMemoryGap(
+      projectPath,
+      "project-soul",
+      `truncated to ${SOUL_MAX_CHARS} of ${full.length} chars (${chunks.length < 2 ? "not divisible into sections" : "no prompt to rank against"})`,
+    );
+    return `${full.slice(0, SOUL_MAX_CHARS)}\n…(truncated)`;
+  }
+
+  // The head names the project and its purpose; everything else is read against
+  // it, so it is admitted rather than made to compete for a slot.
+  const anchor = chunks[0];
+  const rest = chunks.slice(1);
+  const ranked = rankHybridLocal(prompt, rest)
+    .filter((result) => result.lexicalScore > 0 || result.semanticEligible)
+    .map((result) => result.item);
+
+  const picked: SoulChunk[] = [];
+  let budget = SOUL_MAX_CHARS - Math.min(anchor.text.length, SOUL_MAX_CHARS);
+  for (const chunk of ranked) {
+    if (chunk.text.length > budget) continue;
+    picked.push(chunk);
+    budget -= chunk.text.length + 2;
+  }
+
+  const dropped = rest.length - picked.length;
+  if (dropped > 0) {
+    warnProjectMemoryGap(
+      projectPath,
+      "project-soul",
+      `${full.length} chars > ${SOUL_MAX_CHARS} cap — kept ${picked.length + 1}/${chunks.length} chunks by relevance, dropped ${dropped}`,
+    );
+  }
+  // Reading order follows the document, not the ranking, so what the model sees
+  // still reads as the document it was written as.
+  const ordered = [anchor, ...picked].sort((a, b) => a.order - b.order);
+  return ordered.map((chunk) => chunk.text).join("\n\n");
+}
+
+
 function globalMemorySections(perAgent: boolean, agentId?: string | null, taskPrompt?: string): string[] {
   const entries = perAgent
     ? listGlobalMemoryForAgent(agentId ?? null, MEMORY_CANDIDATE_LIMIT)
@@ -266,9 +449,9 @@ export function buildMemoryContext(
     }
     const soul = readActivatedProjectMemoryText(projectPath, PROJECT_SOUL_FILE);
     if (soul && soul.trim()) {
-      const trimmed =
-        soul.length > SOUL_MAX_CHARS ? soul.slice(0, SOUL_MAX_CHARS) + "\n…(truncated)" : soul;
-      sections.push(`### Project memory (${projectPath})\n${trimmed.trim()}`);
+      sections.push(`### Project memory (${projectPath})\n${selectSoulText(soul, options.taskPrompt, projectPath)}`);
+    } else {
+      warnProjectMemoryGap(projectPath, "project-soul", "missing or empty");
     }
     const sitemap = summarizeSitemap(projectPath);
     if (sitemap) sections.push(sitemap);

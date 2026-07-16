@@ -4,6 +4,10 @@ import { verifyActivatedFolderIdentity } from "../architecture/activation";
 
 export const PROJECT_MEMORY_TEXT_MAX_BYTES = 2 * 1024 * 1024;
 export const PROJECT_CODE_MAP_MAX_BYTES = 16 * 1024 * 1024;
+// The injected seed carries only modules/entry points/top symbols — ~31KB on
+// this repo. The full map is 1000x larger and is the find tool's business, not
+// the turn's.
+export const PROJECT_CODE_MAP_SEED_MAX_BYTES = 1024 * 1024;
 
 type ProjectMemoryReadTestHook = (
   stage: "after-read",

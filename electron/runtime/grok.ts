@@ -53,6 +53,99 @@ async function firstExisting(paths: string[]): Promise<string | null> {
   return null;
 }
 
+interface GrokMcpServerConfigEntry {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+}
+
+/** `grok mcp add/remove` 한 번을 실행하고 종료를 기다린다(리컨실 전용, 단발성). */
+async function runGrokMcpCli(
+  bin: string,
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let child: ReturnType<typeof spawnCli>;
+    try {
+      child = spawnCli(bin, args, { stdio: ["ignore", "ignore", "pipe"], env, cwd });
+    } catch (e) {
+      reject(e instanceof Error ? e : new Error(String(e)));
+      return;
+    }
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`grok ${args.slice(0, 2).join(" ")} exit ${code}${stderr ? `: ${stderr.slice(0, 300)}` : ""}`));
+    });
+  });
+}
+
+/**
+ * Claude Code의 `--mcp-config <path>`와 달리 grok CLI는 MCP 서버를
+ * `~/.grok/config.toml` 또는 `./.grok/config.toml`에 등록하는 방식이다
+ * (`grok mcp add/remove`, 확인됨: stdio/http/sse 전부 지원). 이 실행 한 번만을 위해
+ * 승인된 서버를 프로젝트 스코프(cwd 기준 `./.grok/config.toml`)에 등록하고, 실행이
+ * 끝나면 반드시 제거한다 — 다른 빌드/채팅의 grok 실행에 남아있지 않도록.
+ */
+async function reconcileGrokMcpServers(
+  bin: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  mcpConfigPath: string | undefined,
+): Promise<{ cleanup: () => Promise<void> }> {
+  const noop = { cleanup: async () => {} };
+  if (!mcpConfigPath) return noop;
+  let parsed: { mcpServers?: Record<string, GrokMcpServerConfigEntry> };
+  try {
+    parsed = JSON.parse(await fs.readFile(mcpConfigPath, "utf8"));
+  } catch {
+    return noop;
+  }
+  const entries = Object.entries(parsed.mcpServers ?? {});
+  if (entries.length === 0) return noop;
+
+  const added: string[] = [];
+  for (const [key, server] of entries) {
+    try {
+      if (server.command) {
+        const args = ["mcp", "add", "--scope", "project"];
+        for (const [k, v] of Object.entries(server.env ?? {})) args.push("-e", `${k}=${v}`);
+        args.push(key, "--", server.command, ...(server.args ?? []));
+        await runGrokMcpCli(bin, args, cwd, env);
+      } else if (server.url) {
+        const transport = server.url.startsWith("http://") || server.url.startsWith("https://") ? "http" : "sse";
+        const args = ["mcp", "add", "--scope", "project", "--transport", transport, key, server.url];
+        for (const [h, v] of Object.entries(server.headers ?? {})) args.push("--header", `${h}: ${v}`);
+        await runGrokMcpCli(bin, args, cwd, env);
+      } else {
+        continue;
+      }
+      added.push(key);
+    } catch (err) {
+      console.error(`[grok] mcp add failed for "${key}":`, err);
+    }
+  }
+  return {
+    cleanup: async () => {
+      for (const key of added) {
+        try {
+          await runGrokMcpCli(bin, ["mcp", "remove", "--scope", "project", key], cwd, env);
+        } catch (err) {
+          console.error(`[grok] mcp remove failed for "${key}":`, err);
+        }
+      }
+    },
+  };
+}
+
 // grok-cli는 GROK_API_KEY를 읽는다. 앱은 같은 키를 XAI_API_KEY로 저장하므로 둘 다 채워준다.
 function grokEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = { ...base };
@@ -212,6 +305,9 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
   }
   const bin = await getBin();
   if (!bin) throw new Error(tStatus(req.locale, "errCliMissingGrok"));
+  // Nested function declarations don't inherit outer const-narrowing in TS —
+  // re-bind to a definitely-non-null local for use inside runGrokProcess().
+  const grokBin: string = bin;
 
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 
@@ -242,10 +338,18 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     }
   };
 
-  return await new Promise<RunnerResult>((resolve, reject) => {
+  const mcpReconcile = await reconcileGrokMcpServers(bin, cwd, env, req.mcpConfigPath);
+  try {
+    return await runGrokProcess();
+  } finally {
+    await mcpReconcile.cleanup();
+  }
+
+  function runGrokProcess(): Promise<RunnerResult> {
+    return new Promise<RunnerResult>((resolve, reject) => {
     let child: ReturnType<typeof spawnCli>;
     try {
-      child = spawnCli(bin, args, { stdio: ["ignore", "pipe", "pipe"], env, cwd, ...detachedSpawnOpts() });
+      child = spawnCli(grokBin, args, { stdio: ["ignore", "pipe", "pipe"], env, cwd, ...detachedSpawnOpts() });
     } catch (e) {
       void fs.rm(promptFile, { force: true });
       reject(e instanceof Error ? e : new Error(String(e)));
@@ -380,4 +484,5 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       reject(new Error(`grok CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));
     });
   });
+  }
 };

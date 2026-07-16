@@ -3193,6 +3193,23 @@ button[data-toggle-state="on"] {
 .build-mcp-receipt-group[data-state="attached"] { border-left: 3px solid #2f9e71; }
 .build-mcp-receipt-group[data-state="failed"], .build-mcp-receipt-group[data-state="degraded"] { border-left: 3px solid #d97706; }
 
+/* grill-me 스타일 MCP 인터뷰(McpBuildInterviewCard) — 한 번에 하나씩 질문 */
+.build-mcp-interview-card { display: grid; gap: 10px; }
+.build-mcp-interview-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.build-mcp-interview-step { flex-shrink: 0; padding: 2px 7px; border-radius: 6px; background: var(--rd-surface-2); font-size: 11px; font-weight: 700; color: var(--rd-ink-3); }
+.build-mcp-interview-question { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 700; color: var(--rd-ink); }
+.build-mcp-interview-opts { display: grid; gap: 6px; }
+.build-mcp-interview-opt { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 12px; border: 1px solid var(--rd-hair); border-radius: 9px; background: var(--rd-surface-2); color: var(--rd-ink); text-align: left; cursor: pointer; font-family: inherit; }
+.build-mcp-interview-opt:hover { border-color: var(--rd-accent); }
+.build-mcp-interview-opt[data-recommended="true"] { border-color: color-mix(in oklch, var(--rd-accent) 45%, var(--rd-hair)); }
+.build-mcp-interview-opt-body { display: grid; gap: 2px; }
+.build-mcp-interview-opt-body strong { font-size: 12.5px; font-weight: 650; }
+.build-mcp-interview-opt-body span { font-size: 11.5px; color: var(--rd-ink-3); line-height: 1.4; }
+.build-mcp-interview-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.build-mcp-interview-hint { flex: 1; min-width: 0; font-size: 11.5px; color: var(--rd-ink-3); line-height: 1.4; }
+.build-mcp-interview-skip { padding: 6px 12px; border: 1px solid var(--rd-hair); border-radius: 8px; background: var(--rd-surface); color: var(--rd-ink-2); font-size: 12px; font-weight: 600; cursor: pointer; }
+.build-mcp-interview-skip:hover { background: var(--rd-surface-2); }
+
 @media (max-width: 680px) {
   .rd .build-mcp-row { grid-template-columns: 24px minmax(0, 1fr); }
   .build-mcp-badge { grid-column: 2; justify-self: start; }
