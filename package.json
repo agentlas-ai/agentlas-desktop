@@ -52,6 +52,7 @@
     "release:mac:verify": "node scripts/verify-mac-release.mjs --write-env",
     "release:mac:candidate": "node scripts/verify-mac-release.mjs --write-env --allow-unnotarized",
     "release:assets:verify": "node scripts/verify-release-assets.mjs",
+    "release:preflight": "node scripts/release-preflight.mjs",
     "release:readiness": "node scripts/release-readiness.mjs",
     "release:csr": "bash scripts/create-apple-csr.sh",
     "release:p12": "bash scripts/create-p12-from-apple-cert.sh",
