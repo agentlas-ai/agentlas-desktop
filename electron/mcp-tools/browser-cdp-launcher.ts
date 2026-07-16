@@ -17,6 +17,8 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
+import { BROWSER_APPROVAL_FILE_ENV } from "../browser/approval-channel";
+import { PLAYWRIGHT_MCP_PACKAGE } from "./playwright-mcp-version";
 
 export const BROWSER_CDP_LAUNCHER_BASENAME = "agentlas-browser-cdp.mjs";
 
@@ -808,6 +810,7 @@ const CDP_PROFILE = process.env.AGENTLAS_CDP_PROFILE || path.join(os.homedir(), 
 const OWNER_FILE = path.join(CDP_PROFILE, '.agentlas-cdp-owner.json');
 const HEADLESS = String(process.env.AGENTLAS_CDP_HEADLESS || '').toLowerCase() === '1';
 const SKILLS_DIR = process.env.AGENTLAS_BROWSER_SKILLS_DIR || path.join(os.homedir(), '.agentlas', 'browser-skills');
+const APPROVAL_FILE = process.env.${BROWSER_APPROVAL_FILE_ENV} || '';
 const log = (...a) => console.error('[agentlas-browser]', ...a);
 
 function chromeInfo() {
@@ -896,7 +899,7 @@ function readCdpPageUrl() {
   });
 }
 function readApprovalInfo() {
-  try { const p = path.join(os.homedir(), '.agentlas', 'browser-approval.json'); if (!fs.existsSync(p)) return null; return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return null; }
+  try { if (!APPROVAL_FILE || !path.isAbsolute(APPROVAL_FILE) || !fs.existsSync(APPROVAL_FILE)) return null; return JSON.parse(fs.readFileSync(APPROVAL_FILE, 'utf8')); } catch (e) { return null; }
 }
 function requestApproval(site, actionType, summary) {
   return new Promise((resolve) => {
@@ -937,7 +940,7 @@ function loadSkill(name) { const p = skillPath(name); if (!fs.existsSync(p)) ret
 async function main() {
   await ensureChrome();
   const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  const child = spawn(npx, ['-y', '@playwright/mcp@latest', '--cdp-endpoint', 'http://127.0.0.1:' + PORT], { stdio: ['pipe', 'pipe', 'inherit'] });
+  const child = spawn(npx, ['-y', '${PLAYWRIGHT_MCP_PACKAGE}', '--cdp-endpoint', 'http://127.0.0.1:' + PORT], { stdio: ['pipe', 'pipe', 'inherit'] });
   child.on('error', (e) => { log('failed to start @playwright/mcp', String(e)); process.exit(1); });
   child.on('exit', (code) => process.exit(code == null ? 0 : code));
 

@@ -14,6 +14,13 @@ import {
   wrapSystemPrompt,
 } from "./runner";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
+import {
+  CLI_HISTORY_CONTEXT_TOKENS,
+  composeResumeTurnPrompt,
+  renderConversationContext,
+  renderGapContext,
+  unseenHistoryGap,
+} from "./continuity";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
@@ -282,28 +289,32 @@ export async function probeClaudeEfforts(): Promise<Array<{ id: string; label: s
 }
 
 function flattenHistory(req: RunnerRequest): string {
-  // CLI는 단일 turn — 이전 대화를 user 메시지에 inline으로 prepend.
+  // CLI는 단일 turn — 이전 대화를 연속성 프레이밍과 함께 user 메시지에 inline으로 prepend.
+  // 컨텍스트 예산을 넘길 때만 오래된 턴이 다이제스트로 접힌다(그 외 원문 유지).
   if (req.history.length === 0) return req.userPrompt;
-  const user = tStatus(req.locale, "speakerUser");
-  const assistant = tStatus(req.locale, "speakerAssistant");
-  const lines: string[] = [tStatus(req.locale, "histPrev")];
-  for (const m of req.history) {
-    if (m.role === "user") lines.push(`${user}: ${m.text}`);
-    else if (m.role === "assistant") lines.push(`${assistant}: ${m.text}`);
-  }
-  lines.push(tStatus(req.locale, "histThis"), req.userPrompt);
-  return lines.join("\n\n");
+  const { block } = renderConversationContext(req.history, req.locale, CLI_HISTORY_CONTEXT_TOKENS);
+  return [block, "", tStatus(req.locale, "histThis"), req.userPrompt].join("\n");
 }
 
 /**
- * 세션 지문 — 시스템 프롬프트/모델/effort/권한이 바뀌면 기존 Claude 세션을 이어 쓰지 않는다.
- * 사용자 입력은 매 턴 달라지므로 지문에 넣지 않는다. 넣으면 일반 채팅 세션이 매번 끊긴다.
+ * 세션 지문 — 안정 시드(sessionFingerprintSeed)가 있으면 시드만 해시한다. 시드가 곧
+ * 세션 정체성의 전부다: 모델/effort/권한은 매 호출 CLI 인자로 다시 적용되므로 세션을
+ * 가를 이유가 없고, 지문에 섞으면 칩 하나 바꿀 때마다 대화 연속성이 끊긴다
+ * (2026-07-16 세션유지 사고 — 턴마다 fingerprint_changed로 세션 전멸).
+ * 시드가 없는 레거시 호출만 시스템 프롬프트 전체 해시로 폴백한다.
  * Build처럼 runtimeSessionId를 직접 넘기는 표면은 호출자가 세션 수명을 관리한다.
  */
 function systemFingerprint(req: RunnerRequest): string {
+  if (req.sessionFingerprintSeed) {
+    return crypto
+      .createHash("sha256")
+      .update("seed.v2\0")
+      .update(req.sessionFingerprintSeed)
+      .digest("hex");
+  }
   return crypto
     .createHash("sha256")
-    .update(req.sessionFingerprintSeed ?? req.systemPrompt)
+    .update(req.systemPrompt)
     .update("\0")
     .update(req.locale)
     .update("\0")
@@ -391,7 +402,23 @@ export const runClaudeCode: Runner = async (
     clearRuntimeSession(runReq.chatId, KIND);
   }
   const resumeSessionId = runReq.untrustedNoTools ? null : (runReq.runtimeSessionId ?? storedSessionId);
-  const flatUser = resumeSessionId ? runReq.userPrompt : flattenHistory(runReq);
+  // gap-replay — 이 세션이 마지막으로 본 이후 다른 경로(스웜/다른 러너)로 진행된 턴을 메운다.
+  // 호출자가 세션 수명을 직접 관리하는 runtimeSessionId(Build 등)에는 적용하지 않는다.
+  const gapContext = !runReq.runtimeSessionId && storedSessionId && savedSession
+    ? renderGapContext(unseenHistoryGap(runReq.history, savedSession.updatedAt), runReq.locale)
+    : "";
+  // resume 턴: 시스템 프롬프트가 재전송되지 않으므로 gap+턴 컨텍스트를 사용자 메시지에 싣는다.
+  // 새 세션: 턴 컨텍스트를 시스템 프롬프트 뒤에 붙여 세션을 시드한다.
+  const flatUser = resumeSessionId
+    ? composeResumeTurnPrompt(
+        runReq.userPrompt,
+        [gapContext, runReq.turnContext ?? ""].filter(Boolean).join("\n\n"),
+        runReq.locale,
+      )
+    : flattenHistory(runReq);
+  const seededSystemPrompt = !resumeSessionId && runReq.turnContext?.trim()
+    ? `${systemPrompt}\n\n${runReq.turnContext.trim()}`
+    : systemPrompt;
 
   if (stagedImages.images.length > 0) {
     events.onStatus(
@@ -478,7 +505,7 @@ export const runClaudeCode: Runner = async (
     `agentlas-claude-sys-${process.pid}-${crypto.randomUUID()}.txt`,
   );
   try {
-    await fs.writeFile(sysPromptFile, systemPrompt, "utf8");
+    await fs.writeFile(sysPromptFile, seededSystemPrompt, "utf8");
   } catch (error) {
     cleanupAgentAppMcpConfig();
     throw error;

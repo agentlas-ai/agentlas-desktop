@@ -29,9 +29,15 @@ import {
 } from "../store/chats";
 import { getFirm } from "../store/firms";
 import { getResolvedOrg } from "../store/org-spec";
-import { curateReply, stripReplyMemoryEventsReadOnly } from "../memory/curator";
+import {
+  curateReply,
+  recordTerminalMemoryTurn,
+  stripReplyMemoryEventsReadOnly,
+} from "../memory/curator";
+import { runSemanticMemoryReview } from "../memory/semantic-curator";
 import { buildMemoryContext } from "../memory/context";
-import { parseMemoryEvents } from "../memory/events";
+import { queryWorkingFolderOntologyContext } from "../ontology/project-runtime";
+import { parseMemoryEvents, stripAllMemoryEventBlocks } from "../memory/events";
 import { parseAutomations } from "../automation-emitter";
 import { parseSurfaces } from "../surface-emitter";
 import { getAgentConcurrency } from "../store/concurrency";
@@ -546,6 +552,67 @@ function taskForceAllowsTools(p: BorrowedTaskForceParams): boolean {
   return permission === "write" || permission === "full";
 }
 
+function taskForceProjectReadOnly(p: BorrowedTaskForceParams): boolean {
+  return p.restrictedReadBoundary === true || !taskForceAllowsTools(p);
+}
+
+function taskForceMemoryTurnId(
+  p: BorrowedTaskForceParams,
+  nodeId: string,
+  phase: string,
+  attempt?: number,
+): string {
+  const suffix = attempt === undefined ? "" : `:attempt:${attempt}`;
+  return `task-force:run:${p.req.runId ?? "direct"}:chat:${p.chat.id}:node:${nodeId}:phase:${phase}${suffix}`;
+}
+
+function recordTaskForceTerminalTurn(
+  p: BorrowedTaskForceParams,
+  input: {
+    nodeId: string;
+    phase: string;
+    attempt?: number;
+    agentId?: string | null;
+    status: "failed" | "cancelled" | "curation_failed";
+  },
+): void {
+  try {
+    recordTerminalMemoryTurn({
+      turnId: taskForceMemoryTurnId(p, input.nodeId, input.phase, input.attempt),
+      projectPath: p.req.agentAppMode ? null : p.memoryReadPath ?? null,
+      projectId: p.req.agentAppMode ? null : p.chat.projectId ?? null,
+      agentId: input.agentId === undefined ? p.chat.agentId : input.agentId,
+      chatId: p.chat.id,
+      runId: p.req.runId,
+      nodeId: input.nodeId,
+      cwdAtRequest: p.req.agentAppMode ? null : p.workingFolder ?? null,
+    }, input.status);
+  } catch (ticketError) {
+    console.error("[memory] task-force terminal turn receipt failed:", ticketError);
+  }
+}
+
+async function observeTaskForceModelCall<T>(
+  p: BorrowedTaskForceParams,
+  input: {
+    nodeId: string;
+    phase: string;
+    attempt?: number;
+    agentId?: string | null;
+  },
+  call: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    recordTaskForceTerminalTurn(p, {
+      ...input,
+      status: p.signal?.aborted ? "cancelled" : "failed",
+    });
+    throw error;
+  }
+}
+
 async function prepareTaskForceMemoryBoundary(
   p: BorrowedTaskForceParams,
 ): Promise<BorrowedTaskForceParams> {
@@ -583,23 +650,30 @@ async function prepareTaskForceMemoryBoundary(
   };
 }
 
-function taskForceMemoryContext(
+async function taskForceMemoryContext(
   p: BorrowedTaskForceParams,
   agentId: string | null,
   task: string,
-): string {
+): Promise<string> {
   if (p.req.agentAppMode) return "";
   try {
-    return buildMemoryContext(p.memoryReadPath ?? null, agentId, {
+    const memory = buildMemoryContext(p.memoryReadPath ?? null, agentId, {
       materializeCodeMap: Boolean(p.memoryCanMaterializeCodeMap),
       taskPrompt: task,
+      projectId: p.chat.projectId ?? null,
     });
+    const ontology = p.memoryReadPath
+      ? await queryWorkingFolderOntologyContext(p.memoryReadPath, task, {
+          readOnly: taskForceProjectReadOnly(p),
+        })
+      : null;
+    return [memory, ontology?.used ? ontology.context : ""].filter(Boolean).join("\n\n");
   } catch {
     return "";
   }
 }
 
-function curateOwnedTaskForceResult(input: {
+async function curateOwnedTaskForceResult(input: {
   p: BorrowedTaskForceParams;
   spec: BorrowedAgentSpec;
   text: string;
@@ -607,13 +681,22 @@ function curateOwnedTaskForceResult(input: {
   nodeId: string;
   task: string;
   runtimeKind: string;
-}): string {
+  runner: Runner;
+  backendLabel: string;
+  model?: string;
+  effort?: string;
+  env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  phase: string;
+  attempt?: number;
+}): Promise<string> {
   const { p, spec, text, installedAgent, nodeId, task, runtimeKind } = input;
-  if (p.req.agentAppMode) return text;
   try {
+    const readOnly = taskForceProjectReadOnly(p);
     const context = {
-      projectPath: taskForceAllowsTools(p) ? p.memoryReadPath ?? null : null,
-      projectId: taskForceAllowsTools(p) ? p.chat.projectId ?? null : null,
+      turnId: taskForceMemoryTurnId(p, nodeId, input.phase, input.attempt),
+      projectPath: p.memoryReadPath ?? null,
+      projectId: p.chat.projectId ?? null,
       agentId: installedAgent?.id ?? p.chat.agentId,
       chatId: p.chat.id,
       runId: p.req.runId,
@@ -634,12 +717,36 @@ function curateOwnedTaskForceResult(input: {
         ? { borrowedAgentSlugs: [spec.slug] }
         : {}),
     };
-    const curated = p.restrictedReadBoundary
+    const semanticOptions = readOnly
+      ? {}
+      : await runSemanticMemoryReview({
+          replyText: text,
+          runner: input.runner,
+          backendLabel: input.backendLabel,
+          model: input.model,
+          effort: input.effort,
+          env: input.env,
+          locale: p.locale,
+          signal: input.signal,
+          hasProject: Boolean(context.projectPath),
+          hasAgent: Boolean(context.agentId),
+        }).catch(() => ({ semanticAttempted: true, semanticFailed: true }));
+    const curated = readOnly
       ? stripReplyMemoryEventsReadOnly(text, context)
-      : curateReply(text, context);
-    return curated.cleanedText || text;
+      : curateReply(text, context, semanticOptions);
+    return readOnly ? curated.cleanedText : curated.cleanedText || text;
   } catch {
-    return text;
+    recordTaskForceTerminalTurn(p, {
+      nodeId,
+      phase: input.phase,
+      attempt: input.attempt,
+      agentId: installedAgent?.id ?? p.chat.agentId,
+      status: "curation_failed",
+    });
+    const stripped = stripAllMemoryEventBlocks(text).cleanedText;
+    return stripped || (p.locale === "ko"
+      ? "응답은 완료됐지만 메모리 제어 블록 정리에 실패해 본문을 숨겼습니다."
+      : "The response completed, but its memory control block could not be safely finalized, so the body was withheld.");
   }
 }
 
@@ -687,22 +794,40 @@ function taskForceRunnerBase(p: BorrowedTaskForceParams): Pick<
   };
 }
 
-function restrictedTaskForceText(
+function governTaskForceControlTurn(
   p: BorrowedTaskForceParams,
   text: string,
-  nodeId: string,
-  agentId: string | null = p.chat.agentId,
+  input: {
+    nodeId: string;
+    phase: string;
+    attempt?: number;
+    agentId?: string | null;
+  },
 ): string {
-  if (!p.restrictedReadBoundary) return text;
-  return stripReplyMemoryEventsReadOnly(text, {
-    projectPath: p.workingFolder ?? null,
+  const context = {
+    turnId: taskForceMemoryTurnId(p, input.nodeId, input.phase, input.attempt),
+    projectPath: p.memoryReadPath ?? null,
     projectId: p.chat.projectId ?? null,
-    agentId,
+    agentId: input.agentId === undefined ? p.chat.agentId : input.agentId,
     chatId: p.chat.id,
     runId: p.req.runId,
-    nodeId,
+    nodeId: input.nodeId,
     cwdAtRequest: p.workingFolder ?? null,
-  }).cleanedText;
+  };
+  const readOnly = taskForceProjectReadOnly(p);
+  try {
+    const curated = readOnly
+      ? stripReplyMemoryEventsReadOnly(text, context)
+      : curateReply(text, context);
+    return readOnly ? curated.cleanedText : curated.cleanedText || text;
+  } catch (error) {
+    recordTaskForceTerminalTurn(p, {
+      ...input,
+      status: "curation_failed",
+    });
+    console.error("[memory] task-force control-turn curation failed:", error);
+    return stripAllMemoryEventBlocks(text).cleanedText || text;
+  }
 }
 
 function taskForceSessionId(p: BorrowedTaskForceParams, suffix: string): string {
@@ -1936,7 +2061,7 @@ async function runBorrowedAgentTurn(
       ? getAgentById(spec.installedAgentId)
       : null;
   const nodeTask = packet.brief || p.req.userPrompt;
-  const nodeMemory = taskForceMemoryContext(p, installedAgent?.id ?? null, nodeTask);
+  const nodeMemory = await taskForceMemoryContext(p, installedAgent?.id ?? null, nodeTask);
   const nodeMemoryEmitter = !p.req.agentAppMode && !p.restrictedReadBoundary
     ? memoryEmitterPromptFor(nodeTask)
     : "";
@@ -2122,7 +2247,12 @@ async function runBorrowedAgentTurn(
       for (let attempt = 1; attempt <= MAX_TEAM_MANAGER_SCHEMA_ATTEMPTS; attempt += 1) {
         managerPlanInvocationId = `${nestedExecutionId}:manager-plan:${attempt}`;
         const repair = attempt > 1;
-        managerPlan = await picked.runner(
+        managerPlan = await observeTaskForceModelCall(p, {
+          nodeId: `${id}:hub-team:manager`,
+          phase: "manager-plan",
+          attempt,
+          agentId: null,
+        }, () => picked.runner(
           {
             systemPrompt: [
               buildBorrowedAgentSystemPrompt(managerSpec, packagePermission),
@@ -2162,7 +2292,16 @@ async function runBorrowedAgentTurn(
               tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError },
             })),
           },
-        );
+        ));
+        managerPlan = {
+          ...managerPlan,
+          text: governTaskForceControlTurn(p, managerPlan.text, {
+            nodeId: `${id}:hub-team:manager`,
+            phase: "manager-plan",
+            attempt,
+            agentId: null,
+          }),
+        };
         try {
           parsedManagerPlan = parseStrictTeamManagerPlan(managerPlan.text, expectedWorkerIds);
           break;
@@ -2197,7 +2336,11 @@ async function runBorrowedAgentTurn(
         };
         let observedWorkerResult: RunnerResult | undefined;
         try {
-          const result = await picked.runner(
+          const result = await observeTaskForceModelCall(p, {
+            nodeId: `${id}:hub-team:${worker.id}`,
+            phase: "worker",
+            agentId: null,
+          }, () => picked.runner(
             {
               systemPrompt: [
                 buildBorrowedAgentSystemPrompt(workerSpec, packagePermission),
@@ -2231,8 +2374,24 @@ async function runBorrowedAgentTurn(
                 tool: { name, args: redactEventValue(args), result: redactEventValue(toolResult), id: toolId, isError },
               })),
             },
-          );
+          ));
           observedWorkerResult = result;
+          const workerText = await curateOwnedTaskForceResult({
+            p,
+            spec,
+            text: redactSensitiveText(result.text),
+            installedAgent: null,
+            nodeId: `${id}:hub-team:${worker.id}`,
+            task: nodeTask,
+            runtimeKind: active.kind,
+            runner: picked.runner,
+            backendLabel: picked.label,
+            model: active.model ?? undefined,
+            effort: active.effort ?? undefined,
+            env: p.runnerEnv,
+            signal: link.signal,
+            phase: "worker",
+          });
           const workerResolution = reconcileWorkloadRunnerResult(workloadResolution, result);
           if (p.workforceSelectionReceipt) {
             assertStrictPlannerResolution(
@@ -2241,15 +2400,6 @@ async function runBorrowedAgentTurn(
               `executed nested-worker allocation for ${packet.agent}:${worker.id}`,
             );
           }
-          const workerText = curateOwnedTaskForceResult({
-            p,
-            spec,
-            text: redactSensitiveText(result.text),
-            installedAgent: null,
-            nodeId: `${id}:hub-team:${worker.id}`,
-            task: nodeTask,
-            runtimeKind: active.kind,
-          });
           return {
             worker,
             ok: true,
@@ -2288,7 +2438,11 @@ async function runBorrowedAgentTurn(
         }
       });
       const managerSynthesisInvocationId = `${nestedExecutionId}:manager-synthesis`;
-      const managerSynthesis = await picked.runner(
+      const managerSynthesis = await observeTaskForceModelCall(p, {
+        nodeId: `${id}:hub-team:manager`,
+        phase: "manager-synthesis",
+        agentId: null,
+      }, () => picked.runner(
         {
           systemPrompt: [
             buildBorrowedAgentSystemPrompt(managerSpec, packagePermission),
@@ -2325,7 +2479,23 @@ async function runBorrowedAgentTurn(
             tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError },
           })),
         },
-      );
+      ));
+      const teamText = await curateOwnedTaskForceResult({
+        p,
+        spec,
+        text: redactSensitiveText(managerSynthesis.text),
+        installedAgent: null,
+        nodeId: `${id}:hub-team:manager`,
+        task: nodeTask,
+        runtimeKind: active.kind,
+        runner: picked.runner,
+        backendLabel: picked.label,
+        model: active.model ?? undefined,
+        effort: active.effort ?? undefined,
+        env: p.runnerEnv,
+        signal: link.signal,
+        phase: "manager-synthesis",
+      });
       const managerSynthesisResolution = reconcileWorkloadRunnerResult(workloadResolution, managerSynthesis);
       if (p.workforceSelectionReceipt) {
         assertStrictPlannerResolution(
@@ -2343,15 +2513,6 @@ async function runBorrowedAgentTurn(
           : p.locale === "ko" ? `${spec.name} 팀 일부 실패` : `${spec.name} team completed with worker failures`,
         tokens,
       }));
-      const teamText = curateOwnedTaskForceResult({
-        p,
-        spec,
-        text: redactSensitiveText(managerSynthesis.text),
-        installedAgent: null,
-        nodeId: `${id}:hub-team:manager`,
-        task: nodeTask,
-        runtimeKind: active.kind,
-      });
       return {
         ...resultMeta,
         spec,
@@ -2403,7 +2564,11 @@ async function runBorrowedAgentTurn(
       task: nodeTask,
     }) : null;
     if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
-    const result = await picked.runner(
+    const result = await observeTaskForceModelCall(p, {
+      nodeId: id,
+      phase: "worker",
+      agentId: installedAgent?.id ?? p.chat.agentId,
+    }, () => picked.runner(
       {
         systemPrompt: [
           buildBorrowedAgentSystemPrompt(spec, packagePermission),
@@ -2436,8 +2601,24 @@ async function runBorrowedAgentTurn(
             tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError },
           })),
       },
-    );
+    ));
     observedDirectResult = result;
+    const workerText = await curateOwnedTaskForceResult({
+      p,
+      spec,
+      text: redactSensitiveText(result.text),
+      installedAgent,
+      nodeId: id,
+      task: nodeTask,
+      runtimeKind: active.kind,
+      runner: picked.runner,
+      backendLabel: picked.label,
+      model: active.model ?? undefined,
+      effort: active.effort ?? undefined,
+      env: p.runnerEnv,
+      signal: link.signal,
+      phase: "worker",
+    });
     const executedResolution = reconcileWorkloadRunnerResult(workloadResolution, result);
     if (p.workforceSelectionReceipt) {
       assertStrictPlannerResolution(packet.allocation, executedResolution, `executed allocation for ${packet.agent}`);
@@ -2456,17 +2637,6 @@ async function runBorrowedAgentTurn(
       status: p.locale === "ko" ? `${spec.name} 완료` : `${spec.name} completed`,
       tokens: result.tokens,
     }));
-    const workerText = curateOwnedTaskForceResult({
-      p,
-      spec,
-      text: redactSensitiveText(
-        restrictedTaskForceText(p, result.text, id, spec.installedAgentId ?? spec.slug),
-      ),
-      installedAgent,
-      nodeId: id,
-      task: nodeTask,
-      runtimeKind: active.kind,
-    });
     return {
       ...resultMeta,
       spec,
@@ -2590,7 +2760,7 @@ async function runPlanner(
 }> {
   const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
   const orchestratorName = p.orchestratorAgent.nameEn || p.orchestratorAgent.name || "Agentlas Orchestrator";
-  const plannerMemory = taskForceMemoryContext(p, p.orchestratorAgent.id, p.req.userPrompt);
+  const plannerMemory = await taskForceMemoryContext(p, p.orchestratorAgent.id, p.req.userPrompt);
   const plannerOntology = p.req.agentAppMode
     ? null
     : await buildAgentRuntimeOntologyContext({
@@ -2732,19 +2902,24 @@ async function runPlanner(
         ? plannerInvocationBaseId
         : `${plannerInvocationBaseId}:schema-repair-${attempt}:${randomUUID()}`;
       const schemaRepair = attempt > 1;
-      const attemptResult = await invokePlanner(
+      const attemptResult = await observeTaskForceModelCall(p, {
+        nodeId: orchestratorId,
+        phase: "planner",
+        attempt,
+        agentId: p.orchestratorAgent.id,
+      }, () => invokePlanner(
         plannerInvocationId,
         schemaRepair
           ? plannerRepairSystemPrompt(baseSystemPrompt, previousError, previousOutput, plannerCandidateRuntimes, specs)
           : baseSystemPrompt,
         schemaRepair ? previousError : "",
-      );
-      const attemptText = restrictedTaskForceText(
-        p,
-        attemptResult.text,
-        orchestratorId,
-        p.orchestratorAgent.id,
-      );
+      ));
+      const attemptText = governTaskForceControlTurn(p, attemptResult.text, {
+        nodeId: orchestratorId,
+        phase: "planner",
+        attempt,
+        agentId: p.orchestratorAgent.id,
+      });
       const outputDigest = `sha256:${createHash("sha256").update(attemptResult.text, "utf8").digest("hex")}`;
       const outputBytes = Buffer.byteLength(attemptResult.text, "utf8");
       try {
@@ -2901,8 +3076,18 @@ async function runPlanner(
       }
     }
   } else {
-    result = await invokePlanner(plannerInvocationId, baseSystemPrompt);
-    plannerText = restrictedTaskForceText(p, result.text, orchestratorId, p.orchestratorAgent.id);
+    result = await observeTaskForceModelCall(p, {
+      nodeId: orchestratorId,
+      phase: "planner",
+      attempt: 1,
+      agentId: p.orchestratorAgent.id,
+    }, () => invokePlanner(plannerInvocationId, baseSystemPrompt));
+    plannerText = governTaskForceControlTurn(p, result.text, {
+      nodeId: orchestratorId,
+      phase: "planner",
+      attempt: 1,
+      agentId: p.orchestratorAgent.id,
+    });
     const parsedPlan = parseBorrowedWorkloadPlan(plannerText);
     const normalized = normalizePacketsForRoster(parsedPlan.packets, specs, p.req.userPrompt);
     packets = normalized.packets;
@@ -2973,6 +3158,9 @@ async function runPlanner(
 }
 
 async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams): Promise<BorrowedTaskForceResult> {
+  if (!p.req.runId) {
+    p = { ...p, req: { ...p.req, runId: `task-force-direct-${randomUUID()}` } };
+  }
   if (p.workforceSelectionReceipt && p.active.kind === "codex") {
     throw new Error("workforce_runtime_isolation_unverified:codex-collaboration-authority");
   }
@@ -3101,7 +3289,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         task: p.req.userPrompt,
         includeOperational: false,
       });
-  const synthesisMemory = taskForceMemoryContext(p, p.orchestratorAgent.id, p.req.userPrompt);
+  const synthesisMemory = await taskForceMemoryContext(p, p.orchestratorAgent.id, p.req.userPrompt);
   const synthesisMemoryEmitter = !p.req.agentAppMode && !p.restrictedReadBoundary
     ? memoryEmitterPromptFor(p.req.userPrompt)
     : "";
@@ -3128,7 +3316,11 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         ? p.req.images
         : undefined
       : p.req.images;
-  const final = await synthesisPicked.runner(
+  const final = await observeTaskForceModelCall(p, {
+    nodeId: orchestratorId,
+    phase: "synthesis",
+    agentId: p.orchestratorAgent.id,
+  }, () => synthesisPicked.runner(
     {
       systemPrompt: [
         buildSynthesisSystemPrompt(p.orchestratorAgent, p.locale, taskForcePermission(p)),
@@ -3165,7 +3357,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         phase: "synthesize",
       }),
       onPartial: (text) => {
-        if (emitFinal && !p.req.agentAppMode && !p.restrictedReadBoundary) {
+        if (emitFinal && !p.req.agentAppMode && !taskForceProjectReadOnly(p)) {
           p.sink({ kind: "partial", text: redactSensitiveText(text) });
         }
       },
@@ -3180,7 +3372,68 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
           phase: "synthesize",
         }),
     },
-  );
+  ));
+  const continuation = stripStormbreakerContinueMarker(redactSensitiveText(final.text));
+  let displayText = p.req.agentAppMode
+    ? cleanAgentAppControlBlocks(continuation.text)
+    : continuation.text;
+  if (!p.req.agentAppMode && continuation.shouldContinue) {
+    const boundaryNote = p.locale === "ko"
+      ? "안전 경계: 다중 Hub/에이전트 그룹 작업은 로컬 단일 에이전트 자동화로 대체하지 않습니다. 계속하려면 같은 조합으로 다시 실행해 모든 Hub bundle을 재검증해야 합니다."
+      : "Safety boundary: a multi-Hub or Agent Group run is never replaced by a local single-agent continuation. Resume with the same roster so every Hub bundle is revalidated.";
+    displayText = [displayText, boundaryNote].filter(Boolean).join("\n\n");
+    p.sink({ kind: "tool-use", status: boundaryNote });
+  }
+  if (taskForceProjectReadOnly(p)) {
+    displayText = governTaskForceControlTurn(p, displayText, {
+      nodeId: orchestratorId,
+      phase: "synthesis",
+      agentId: p.orchestratorAgent.id,
+    });
+  } else {
+    try {
+      const curationContext = {
+        turnId: taskForceMemoryTurnId(p, orchestratorId, "synthesis"),
+        projectPath: p.memoryReadPath ?? null,
+        projectId: p.chat.projectId ?? null,
+        agentId: p.chat.agentId,
+        chatId: p.chat.id,
+        runId: p.req.runId,
+        nodeId: orchestratorId,
+        cwdAtRequest: p.memoryReadPath ?? null,
+        // 종합문은 여러 워커의 혼합 산출물이라 단일 borrowed-agent의 소유 학습으로 볼 수 없다.
+        // 결정론 큐레이터가 agent_repo 제안을 project/session으로 강등하고 출처를 기록한다.
+        sourceProvenance: "task-force-synthesis",
+      } as const;
+      const semanticOptions = await runSemanticMemoryReview({
+        replyText: displayText,
+        runner: synthesisPicked.runner,
+        backendLabel: synthesisPicked.label,
+        model: synthesisActive.model ?? undefined,
+        effort: synthesisActive.effort ?? undefined,
+        env: p.runnerEnv,
+        locale: p.locale,
+        signal: p.signal,
+        hasProject: Boolean(curationContext.projectPath),
+        hasAgent: Boolean(curationContext.agentId),
+        sourceProvenance: "task-force-synthesis",
+      }).catch(() => ({ semanticAttempted: true, semanticFailed: true }));
+      const curated = curateReply(displayText, {
+        ...curationContext,
+        // Keep the ownership boundary explicit at the final deterministic write gate.
+        sourceProvenance: "task-force-synthesis",
+      }, semanticOptions);
+      displayText = redactSensitiveText(curated.cleanedText || displayText);
+    } catch (error) {
+      recordTaskForceTerminalTurn(p, {
+        nodeId: orchestratorId,
+        phase: "synthesis",
+        agentId: p.orchestratorAgent.id,
+        status: "curation_failed",
+      });
+      console.error("[memory] task-force synthesis curation failed:", error);
+    }
+  }
   const executedSynthesisResolution = reconcileWorkloadRunnerResult(synthesisResolution, final);
   if (p.workforceSelectionReceipt) {
     assertStrictPlannerResolution(
@@ -3197,43 +3450,6 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     agentId: p.orchestratorAgent.id,
     payload: workloadAllocationReceipt(executedSynthesisResolution),
   });
-
-  const continuation = stripStormbreakerContinueMarker(redactSensitiveText(final.text));
-  let displayText = p.req.agentAppMode
-    ? cleanAgentAppControlBlocks(continuation.text)
-    : continuation.text;
-  if (!p.req.agentAppMode && continuation.shouldContinue) {
-    const boundaryNote = p.locale === "ko"
-      ? "안전 경계: 다중 Hub/에이전트 그룹 작업은 로컬 단일 에이전트 자동화로 대체하지 않습니다. 계속하려면 같은 조합으로 다시 실행해 모든 Hub bundle을 재검증해야 합니다."
-      : "Safety boundary: a multi-Hub or Agent Group run is never replaced by a local single-agent continuation. Resume with the same roster so every Hub bundle is revalidated.";
-    displayText = [displayText, boundaryNote].filter(Boolean).join("\n\n");
-    p.sink({ kind: "tool-use", status: boundaryNote });
-  }
-  displayText = restrictedTaskForceText(p, displayText, orchestratorId, p.orchestratorAgent.id);
-  if (emitFinal && !p.req.agentAppMode && !p.restrictedReadBoundary) {
-    try {
-      // A normal Desktop read may retain attributable agent experience in the
-      // private DB, but it must not create project-local .agentlas files. A
-      // synthesis has no single borrowed owner, so without write permission it
-      // safely degrades to a session-only curation receipt.
-      const canWriteProjectMemory = taskForceAllowsTools(p);
-      const curated = curateReply(displayText, {
-        projectPath: canWriteProjectMemory ? p.memoryReadPath ?? null : null,
-        projectId: canWriteProjectMemory ? p.chat.projectId ?? null : null,
-        agentId: p.chat.agentId,
-        chatId: p.chat.id,
-        runId: p.req.runId,
-        nodeId: orchestratorId,
-        cwdAtRequest: canWriteProjectMemory ? p.memoryReadPath ?? null : null,
-        // 종합문은 여러 워커의 혼합 산출물이라 단일 borrowed-agent의 소유 학습으로 볼 수 없다.
-        // 결정론 큐레이터가 agent_repo 제안을 project/session으로 강등하고 출처를 기록한다.
-        sourceProvenance: "task-force-synthesis",
-      });
-      displayText = redactSensitiveText(curated.cleanedText || displayText);
-    } catch {
-      // Curator failures should not block the user's task-force answer.
-    }
-  }
   const workforce = p.workforceSelectionReceipt;
   const verifierIssues: string[] = [];
   if (!plan.parseSuccess) verifierIssues.push("planner_parse_failed");

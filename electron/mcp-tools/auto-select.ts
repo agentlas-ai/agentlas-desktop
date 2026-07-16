@@ -110,7 +110,16 @@ const KEYWORD_HINTS: Record<string, string[]> = {
     "게시",
     "스크린샷",
   ],
-  "cua-driver": ["desktop", "app", "screen", "ui", "electron", "mac", "데스크탑", "앱", "화면", "검증"],
+  "agentlas-browser": [
+    "browser", "chrome", "web", "login", "click", "upload", "post", "comment", "reply",
+    "instagram", "threads", "reddit", "x.com", "linkedin", "youtube",
+    "브라우저", "크롬", "웹", "로그인", "클릭", "업로드", "게시", "댓글", "답글",
+    "인스타", "스레드", "레딧", "링크드인", "유튜브",
+  ],
+  "cua-driver": [
+    "computer use", "desktop", "app", "screen", "ui", "electron", "mac", "blocked", "captcha",
+    "컴퓨터 유즈", "데스크탑", "앱", "화면", "검증", "차단", "캡차",
+  ],
   "brave-search": ["latest", "recent", "news", "research", "search", "오늘", "최신", "뉴스", "검색", "리서치", "조사"],
   github: ["github", "repo", "repository", "pull request", "pr", "issue", "commit", "깃허브", "리포", "이슈"],
   filesystem: ["file", "folder", "repo", "workspace", "write", "edit", "파일", "폴더", "워크스페이스", "수정"],
@@ -447,9 +456,16 @@ export async function autoSelectMcpTools(input: {
   );
   const hubAllowed = input.hubMode !== "local-only";
   const localInventory = listLocalPluginInventory(installed);
+  // Generic social/web actions currently resolve to Computer Use first, but a
+  // missing native driver must not strand a task that the authenticated
+  // Agentlas Browser can safely complete. Explicit Computer Use selections
+  // remain strict and never receive this browser fallback.
+  const allowAutomaticBrowserFallback = input.toolMode == null && effectiveToolMode === "computer-use";
   const picked = MCP_TOOL_CATALOG.map((entry) => ({
     entry,
-    score: scoreWithAutomationPolicy(entry, scoreEntry(entry, haystack), effectiveToolMode),
+    score: allowAutomaticBrowserFallback && entry.id === "agentlas-browser"
+      ? Math.max(90, scoreEntry(entry, haystack))
+      : scoreWithAutomationPolicy(entry, scoreEntry(entry, haystack), effectiveToolMode),
   }))
     .filter((item) => {
       if (item.entry.id === "hephaestus-network") return hubAllowed;
@@ -581,6 +597,9 @@ export function buildMcpAutoSelectionPrompt(
   const installed = selected.tools.filter((tool) => tool.installed);
   const blocked = selected.tools.filter((tool) => !tool.installed && tool.missingEnv.length > 0);
   const unavailable = selected.tools.filter((tool) => tool.state !== "ready");
+  const browserReady = installed.some((tool) => tool.id === "agentlas-browser");
+  const computerUseSelected = selected.tools.some((tool) => tool.id === "cua-driver");
+  const computerUseReady = installed.some((tool) => tool.id === "cua-driver");
   const modeLine =
     opts?.toolMode === "browser"
       ? "This automation is bound to Agentlas Browser (real-login CDP). Use only that browser host for web work; never create a fresh Playwright profile."
@@ -614,6 +633,13 @@ export function buildMcpAutoSelectionPrompt(
     `Agentlas plugin universe is active: ${selected.localPluginCount} local plugin/tool entries + ${selected.hubPluginCount} Hub plugins.`,
     modeLine,
     hubLine,
+    computerUseReady
+      ? "Computer Use is available for desktop/screen interaction. Prefer Agentlas Browser for authenticated web pages when both tools can complete the task."
+      : computerUseSelected && browserReady
+        ? "The native Computer Use driver is unavailable in this run. Do not claim OS-level control; use Agentlas Browser only for work that stays inside the authenticated browser."
+        : computerUseSelected
+          ? "The native Computer Use driver is unavailable in this run. Do not claim screen interaction or OS-level control."
+          : "",
     selected.localInventory.length > 0
       ? `Local inventory for Hub plugin resolution: ${inventoryPreview}${inventoryMore}.`
       : "",

@@ -12,6 +12,8 @@ import {
   OPENCRAB_MCP_URL_SENTINEL,
 } from "../opencrab/constants";
 import { systemTimeMcpLaunchArgs } from "./system-time-server";
+import { PLAYWRIGHT_MCP_PACKAGE } from "./playwright-mcp-version";
+import { computerUseMcpLaunchArgs } from "../computer-use/mcp-server";
 
 export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
   // ── 선택형 지식 그래프 ─────────────────────────────────────
@@ -253,22 +255,21 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
   },
   {
     id: "cua-driver",
-    name: "CUA Driver",
-    nameEn: "CUA Driver",
+    name: "Agentlas 컴퓨터 유즈",
+    nameEn: "Agentlas Computer Use",
     description:
-      "로컬 데스크톱 앱을 조작·검증하는 Computer Use Driver (MCP, 키 불필요)",
+      "Agentlas가 화면을 보고 macOS 앱의 마우스·키보드를 직접 조작 (모든 AI 엔진 공용, 키 불필요)",
     descriptionEn:
-      "Drive and verify local desktop apps with CUA Driver (MCP, no key)",
+      "Agentlas-native screen, mouse, keyboard, drag, and scroll control shared by every AI engine (MCP, no key)",
     category: "web",
     transport: "stdio",
-    command: "cua-driver",
-    args: ["mcp"],
+    command: process.execPath,
+    args: computerUseMcpLaunchArgs(),
     trust: "official",
-    docsUrl: "https://cua.ai/docs/cua-driver/guide/getting-started/installation",
-    setupUrl: "https://cua.ai/docs/cua-driver/guide/getting-started/installation",
+    docsUrl: "https://agentlas.cloud/desktop",
     brandColor: "#F97316",
     mark: "CU",
-    // 키 없음 — 드라이버 설치와 OS Accessibility/Screen Recording 권한이 필요.
+    // 키 없음 — 앱에 동봉된 서명 드라이버와 OS Accessibility/Screen Recording 권한을 사용.
     envRequirements: [],
   },
   {
@@ -282,7 +283,7 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     command: "npx",
     // --user-data-dir: 영속 프로파일(persistent context). 매번 새 임시 브라우저(쿠키·로그인 날아감)
     // 대신 디스크의 프로파일로 띄워, 한 번 로그인하면 다음 실행에도 세션이 유지된다(expandHome가 ~ 확장).
-    args: ["-y", "@playwright/mcp@latest", "--user-data-dir", "~/.agentlas/browser-profile"],
+    args: ["-y", PLAYWRIGHT_MCP_PACKAGE, "--user-data-dir", "~/.agentlas/browser-profile"],
     trust: "official",
     docsUrl: "https://github.com/microsoft/playwright-mcp",
     brandColor: "#2EAD33",

@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.8.47 — 2026-07-16
+
+### Added
+
+- Every completed, failed, or cancelled user turn now records exactly one
+  compact Memory Ticket episode. A separate no-tools Curator may propose durable
+  candidates, while deterministic privacy, permission, owner, and scope gates
+  retain final authority.
+- User-global, team, agent, and project memory share one chronological episode
+  ledger without allowing one project's local memory into another. Project
+  ontology now ingests bounded working-folder files, `.agentlas/ontology-inbox`,
+  sitemap structure, and bounded `.agentlas/pm` material through one auditable
+  lifecycle.
+- Promoted, attested experience relations can influence pre-route agent choice
+  only for the exact provider environment or its attested Agentlas Desktop host
+  envelope, plus the exact project, content hash, and canonical relation. Graph
+  centrality is never treated as query-independent authority.
+- Browser now shows a live Agentlas Chrome frame and a read-only Mac screen
+  preview with explicit permission state. Click and typing remain disabled until
+  an Agentlas-owned signed native driver is available.
+- Build mode now scaffolds and verifies the Agentlas OS package contract, then
+  offers up to two blocker-targeted repair turns instead of accepting incomplete
+  packages as routing-ready.
+
+### Fixed
+
+- Read-only turns keep their central receipt but do not materialize project
+  files or durable memory. Firm and task-force planner/worker/synthesis turns
+  receive distinct idempotent ticket identities, and global/project timeline
+  recall requires the exact canonical project pair.
+- Korean and cross-lingual memory recall uses the verified multilingual
+  Model2Vec asset with calibrated lexical/vector fusion. The packaged runtime
+  rejects missing, reordered, or hash-mismatched tensor parts.
+- Browser approval capabilities are isolated per app instance, and the browser
+  MCP host is pinned to the reviewed Playwright MCP release instead of resolving
+  `latest` at every run. Agentlas no longer borrows another app's private
+  Computer Use executable.
+
+Agentlas OS v1.1.48 is pinned at
+98adf6d1bb0bdad5a919884c3916274d5a3e813f.
+These source changes do not themselves publish a Git tag, installer, update
+feed, or GitHub release.
+
 ## 0.8.46 — 2026-07-16
 
 ### Fixed

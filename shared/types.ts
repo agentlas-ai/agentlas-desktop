@@ -697,7 +697,7 @@ export interface OntologyInboxEntry {
 export interface OntologyProjectStatus {
   projectId: string;
   projectName: string;
-  state: "active" | "needs_project_folder" | "error";
+  state: "provisioned" | "ingesting" | "ready" | "degraded" | "failed";
   projectPath: string | null;
   memoryDir: string | null;
   inboxPath: string | null;
@@ -713,6 +713,30 @@ export interface OntologyProjectStatus {
   };
   sources: OntologyRegisteredSource[];
   inboxEntries: OntologyInboxEntry[];
+  counts: {
+    registeredSources: number;
+    availableRegisteredSources: number;
+    missingRegisteredSources: number;
+    inboxEntries: number;
+    supportedInboxEntries: number;
+    unsupportedInboxEntries: number;
+    syncedPaths: number;
+    ingestedSources: number;
+    chunksWritten: number;
+    entitiesWritten: number;
+    relationsWritten: number;
+    idempotentSkips: number;
+    parserErrors: number;
+    unsupportedSources: number;
+    databaseSources: number;
+    databaseChunks: number;
+    databaseEntities: number;
+    databaseRelations: number;
+  };
+  warnings: string[];
+  lastOperation?: "provision" | "sync" | "register";
+  lastIngestStartedAt?: string;
+  lastIngestCompletedAt?: string;
   error?: string;
 }
 
@@ -1019,6 +1043,41 @@ export interface BrowserActionLog {
   target: string | null;
   result: string | null;
   approval: string | null;
+}
+export interface BrowserLiveFrame {
+  available: boolean;
+  dataUrl: string | null;
+  targetId: string | null;
+  title: string | null;
+  /** Query, fragment, and URL credentials are always removed. */
+  url: string | null;
+  width: number | null;
+  height: number | null;
+  capturedAt: string;
+  error: "browser-offline" | "no-page" | "capture-failed" | null;
+}
+export interface ComputerUsePreviewSource {
+  id: string;
+  name: string;
+  displayId: string | null;
+  width: number;
+  height: number;
+  bounds: { x: number; y: number; width: number; height: number } | null;
+  scaleFactor: number | null;
+}
+export interface ComputerUsePreview {
+  platform: NodeJS.Platform;
+  screenPermission: "not-determined" | "granted" | "denied" | "restricted" | "unknown";
+  accessibility: boolean;
+  observationAvailable: boolean;
+  /** False until an Agentlas-owned, signed native input driver is installed. */
+  interactionAvailable: boolean;
+  interactionDriver: "agentlas-native-required" | "agentlas-native";
+  sources: ComputerUsePreviewSource[];
+  selectedSourceId: string | null;
+  dataUrl: string | null;
+  capturedAt: string;
+  error: "screen-unavailable" | "capture-failed" | null;
 }
 /** electron → renderer 로 밀리는 승인 요청(경량 바텀시트가 받는다). */
 export interface BrowserApprovalRequestEvent {
@@ -3485,6 +3544,8 @@ export interface BuildAllocationPreview {
 export interface HephaestusBuildResult {
   workspace: string;
   securityScan: unknown;
+  /** 엔진 package-contract verify 결과(JSON) — blockers가 비면 routing-ready 패키지. */
+  packageContract?: unknown;
   mcpReceipt: McpBuildAttachmentReceipt;
   supplementalQuestion?: HephaestusBuildSupplementalQuestion;
 }
@@ -4523,6 +4584,12 @@ export interface AgentlasIpc {
     revokePermission: (site: string, actionType: string) => Promise<{ ok: true }>;
     resolveApproval: (requestId: string, decision: BrowserApprovalDecision) => Promise<{ ok: boolean }>;
     listLogs: (limit?: number) => Promise<BrowserActionLog[]>;
+    captureLiveFrame: () => Promise<BrowserLiveFrame>;
+    focusLiveTarget: (targetId?: string) => Promise<{ ok: boolean }>;
+  };
+  computerUse: {
+    capturePreview: (sourceId?: string) => Promise<ComputerUsePreview>;
+    revealPreview: () => Promise<{ ok: boolean }>;
   };
   projects: {
     list: () => Promise<Project[]>;
@@ -4536,6 +4603,8 @@ export interface AgentlasIpc {
   };
   ontology: {
     getProject: (projectId: string) => Promise<OntologyProjectStatus>;
+    provision: (projectId: string) => Promise<OntologyProjectStatus>;
+    sync: (projectId: string) => Promise<OntologyProjectStatus>;
     addSource: (
       projectId: string,
       absPath: string,

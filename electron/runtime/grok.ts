@@ -7,6 +7,7 @@ import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
+import { CLI_HISTORY_CONTEXT_TOKENS, renderConversationContext } from "./continuity";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { readEnvVar } from "../secrets/vault";
@@ -239,15 +240,12 @@ function buildPrompt(req: RunnerRequest): string {
     req.restrictedReadBoundary,
     req.untrustedNoTools,
   );
-  const user = tStatus(req.locale, "speakerUser");
-  const assistant = tStatus(req.locale, "speakerAssistant");
-  const parts: string[] = [`[SYSTEM]\n${sys}`, ""];
+  // 세션 미지원 러너 — 매 턴 히스토리를 연속성 프레이밍+압축과 함께 재주입한다.
+  const turnContext = req.turnContext?.trim();
+  const parts: string[] = [`[SYSTEM]\n${sys}${turnContext ? `\n\n${turnContext}` : ""}`, ""];
   if (req.history.length > 0) {
-    parts.push(tStatus(req.locale, "histPrevSection"));
-    for (const m of req.history) {
-      parts.push(`${m.role === "user" ? user : assistant}: ${m.text}`);
-    }
-    parts.push("");
+    const { block } = renderConversationContext(req.history, req.locale, CLI_HISTORY_CONTEXT_TOKENS);
+    parts.push(block, "");
   }
   parts.push(tStatus(req.locale, "histThisSection"), req.userPrompt);
   return parts.join("\n");

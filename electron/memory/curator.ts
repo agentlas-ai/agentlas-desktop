@@ -1,7 +1,6 @@
-// Deterministic Memory Curator — runs after EVERY turn (no extra LLM call, no latency).
-// It applies the curator contract in code: safety redaction, scope resolution, dedup,
-// and durable persistence. The Memory Curator *agent* (LLM) remains available for explicit
-// deep curation; this is the always-on substrate that keeps memory flowing for every chat.
+// Memory governance boundary — runs after EVERY completed turn. A no-tools
+// semantic Curator may propose disposition/scope; deterministic policy remains
+// the final privacy, owner isolation, deduplication, graph, and write authority.
 import {
   appendAgentNestExperienceMemory,
   type AgentNestExperienceItem,
@@ -24,8 +23,22 @@ import { tryRecordRunEvent } from "../store/run-events";
 // looksSecret is the single chokepoint before memory writes, including the agent_repo nest
 // mirroring that crosses projects — a miss here reaches the widest surface in the product.
 import { looksSecret } from "../../shared/secret-patterns";
+import { linkMemoryEntryBySimilarity } from "./graph";
+import type { SemanticMemoryDecision } from "./semantic-curator";
+import {
+  beginMemoryTicket,
+  completeMemoryTicket,
+  memoryDecisionReport,
+  readMemoryTicketReport,
+  recordMemoryDecision,
+  type MemoryCuratorMode,
+  type MemoryEmitterStatus,
+} from "./tickets";
+import { appendCuratorDecision } from "./project-artifacts";
 
 export interface CurationContext {
+  /** Main-authored before the model call. Renderer/model input is never trusted here. */
+  turnId?: string | null;
   projectPath: string | null;
   projectId: string | null;
   agentId: string | null;
@@ -59,6 +72,60 @@ export interface CurationReport {
   redacted: number;
   sessionOnly: number;
   discarded: number;
+}
+
+export interface CurateReplyOptions {
+  semanticDecisions?: SemanticMemoryDecision[];
+  semanticAttempted?: boolean;
+  semanticFailed?: boolean;
+}
+
+export interface CuratedReply {
+  cleanedText: string;
+  report: CurationReport;
+  ticketId: string;
+  emitterStatus: MemoryEmitterStatus;
+  curatorMode: MemoryCuratorMode;
+}
+
+function emptyReport(): CurationReport {
+  return { written: 0, deduped: 0, redacted: 0, sessionOnly: 0, discarded: 0 };
+}
+
+export type TerminalMemoryTurnStatus = "failed" | "cancelled" | "curation_failed";
+
+/**
+ * A runner that terminates without a final reply still crossed the model-turn
+ * boundary. Record one content-free central ticket/episode; never infer a
+ * durable candidate and never touch project-local files from an error path.
+ */
+export function recordTerminalMemoryTurn(
+  ctx: CurationContext,
+  status: TerminalMemoryTurnStatus,
+): { ticketId: string; created: boolean } {
+  const report = emptyReport();
+  const ticket = beginMemoryTicket({
+    context: ctx,
+    emitterStatus: "missing",
+    candidateCount: 0,
+    turnSummary: status === "cancelled"
+      ? "The model turn was cancelled before a final response."
+      : status === "curation_failed"
+        ? "The model turn completed but its semantic memory review was unavailable."
+        : "The model turn ended without a final response.",
+  });
+  if (ticket.created) {
+    completeMemoryTicket(ticket.ticketId, report, "policy", {
+      failureCode: status === "cancelled"
+        ? "turn-cancelled"
+        : status === "curation_failed"
+          ? "curation-failed"
+          : "turn-failed",
+      outcome: "no_candidates",
+    });
+    recordCurationReceipt(ctx, report);
+  }
+  return { ticketId: ticket.ticketId, created: ticket.created };
 }
 
 function recordCurationReceipt(ctx: CurationContext, report: CurationReport): void {
@@ -219,25 +286,147 @@ function evidenceWithSourceProvenance(ev: RawMemoryEvent, ctx: CurationContext):
   return [...new Set(evidence)];
 }
 
+interface EventCurationOptions {
+  ticketId?: string;
+  curatorMode?: MemoryCuratorMode;
+  semanticDecisions?: SemanticMemoryDecision[];
+  projectPath?: string | null;
+}
+
+function safeDecisionReasonCode(value: string): string {
+  const normalized = value.replace(/[^A-Za-z0-9._:-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+  return normalized || "policy-decision";
+}
+
+function recordCandidateDecision(input: {
+  options: EventCurationOptions;
+  index: number;
+  event: RawMemoryEvent;
+  scope: MemoryScope;
+  action: "written" | "deduped" | "redacted" | "session" | "discarded" | "deferred";
+  reason: string;
+  targetMemoryId?: string | null;
+}): void {
+  if (!input.options.ticketId) return;
+  recordMemoryDecision({
+    ticketId: input.options.ticketId,
+    candidateIndex: input.index,
+    content: input.event.content,
+    memoryKind: input.event.memory_kind,
+    proposedScope: input.event.suggested_scope,
+    resolvedScope: input.scope,
+    action: input.action,
+    reasonCode: input.reason,
+    targetMemoryId: input.targetMemoryId,
+    confidence: input.event.confidence,
+    sensitivity: input.event.sensitivity,
+    curatorMode: input.options.curatorMode ?? "policy",
+  });
+  if (input.options.projectPath) {
+    try {
+      appendCuratorDecision(input.options.projectPath, {
+        content: input.event.content,
+        action: input.action,
+        reasonCode: safeDecisionReasonCode(input.reason),
+        ticketId: input.options.ticketId,
+        targetMemoryId: input.targetMemoryId,
+        candidateIndex: input.index,
+        memoryKind: input.event.memory_kind,
+        proposedScope: input.event.suggested_scope,
+        resolvedScope: input.scope,
+        confidence: input.event.confidence,
+        sensitivity: input.event.sensitivity,
+        curatorMode: input.options.curatorMode ?? "policy",
+      });
+    } catch (error) {
+      console.warn(`[memory] project curator projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
+    }
+  }
+}
+
+function appendTurnOutcomeDecision(input: {
+  projectPath: string | null;
+  ticketId: string;
+  outcome: "decided" | "no_candidates" | "malformed_output" | "curator_failed" | "read_only";
+  report: CurationReport;
+  curatorMode: MemoryCuratorMode;
+}): void {
+  if (!input.projectPath) return;
+  const action = input.outcome === "curator_failed"
+    ? "deferred"
+    : input.outcome === "decided"
+      ? input.report.written > 0
+        ? "written"
+        : input.report.deduped > 0
+          ? "deduped"
+          : input.report.redacted > 0
+            ? "redacted"
+            : input.report.sessionOnly > 0
+              ? "session"
+              : "discarded"
+      : "discarded";
+  try {
+    appendCuratorDecision(input.projectPath, {
+      content: `memory-ticket:${input.ticketId}`,
+      action,
+      reasonCode: `episode-${input.outcome.replaceAll("_", "-")}`,
+      ticketId: input.ticketId,
+      curatorMode: input.curatorMode,
+    });
+  } catch (error) {
+    console.warn(`[memory] project curator outcome projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
+  }
+}
+
+function scopeForCandidate(
+  event: RawMemoryEvent,
+  index: number,
+  ctx: CurationContext,
+  options: EventCurationOptions,
+): { scope: MemoryScope; reason: string; deferred: boolean } {
+  const semantic = options.semanticDecisions?.find((decision) => decision.candidateIndex === index);
+  if (!semantic) return { scope: resolveScope(event, ctx), reason: "policy-scope", deferred: false };
+  if (semantic.disposition === "discard") {
+    return { scope: "discard", reason: semantic.reasonCode, deferred: false };
+  }
+  if (semantic.disposition === "session" || semantic.disposition === "defer") {
+    return {
+      scope: "session",
+      reason: semantic.reasonCode,
+      deferred: semantic.disposition === "defer",
+    };
+  }
+  // The model may propose scope, but the same deterministic narrowing gates are
+  // re-applied here. It cannot create a project/agent owner or widen synthesis.
+  return {
+    scope: resolveScope({ ...event, suggested_scope: semantic.resolvedScope }, ctx),
+    reason: semantic.reasonCode,
+    deferred: false,
+  };
+}
+
 /** Curate a batch of raw events into durable memory. Pure side effects + a report. */
 export function curateEvents(
   events: RawMemoryEvent[],
   ctx: CurationContext,
+  options: EventCurationOptions = {},
 ): CurationReport {
-  const report: CurationReport = {
-    written: 0,
-    deduped: 0,
-    redacted: 0,
-    sessionOnly: 0,
-    discarded: 0,
-  };
+  const report = emptyReport();
   const soulLines: string[] = [];
   // agent_repo 스코프(에이전트 기술·경험) 배움 — 빌린 에이전트의 전역 둥지로 미러링할 후보.
   const nestExperienceItems: AgentNestExperienceItem[] = [];
 
-  for (const ev of events) {
+  for (const [index, ev] of events.entries()) {
     if (ev.sensitivity === "secret" || looksSecret(ev.content)) {
       report.redacted += 1;
+      recordCandidateDecision({
+        options,
+        index,
+        event: ev,
+        scope: "discard",
+        action: "redacted",
+        reason: "policy-secret",
+      });
       if (ctx.projectPath) {
         appendMemoryLog(ctx.projectPath, {
           action: "redacted",
@@ -249,14 +438,31 @@ export function curateEvents(
       continue;
     }
 
-    const scope = resolveScope(ev, ctx);
+    const resolved = scopeForCandidate(ev, index, ctx, options);
+    const scope = resolved.scope;
     if (scope === "discard") {
       report.discarded += 1;
+      recordCandidateDecision({
+        options,
+        index,
+        event: ev,
+        scope,
+        action: "discarded",
+        reason: resolved.reason,
+      });
       continue;
     }
     if (scope === "session") {
       // Temporary — log only, never durable.
       report.sessionOnly += 1;
+      recordCandidateDecision({
+        options,
+        index,
+        event: ev,
+        scope,
+        action: resolved.deferred ? "deferred" : "session",
+        reason: resolved.reason,
+      });
       if (ctx.projectPath) {
         appendMemoryLog(ctx.projectPath, {
           action: "session",
@@ -273,6 +479,14 @@ export function curateEvents(
     const requestContext = buildRequestContext(ev, ctx, projectPath);
     if (hasEquivalentMemory(scope, ev.memory_kind, ev.content, projectPath, ctx.agentId)) {
       report.deduped += 1;
+      recordCandidateDecision({
+        options,
+        index,
+        event: ev,
+        scope,
+        action: "deduped",
+        reason: "policy-exact-duplicate",
+      });
       continue;
     }
 
@@ -290,6 +504,22 @@ export function curateEvents(
       requestContext,
     });
     report.written += 1;
+    recordCandidateDecision({
+      options,
+      index,
+      event: ev,
+      scope,
+      action: "written",
+      reason: resolved.reason,
+      targetMemoryId: entry.id,
+    });
+    try {
+      linkMemoryEntryBySimilarity(entry);
+    } catch (error) {
+      // Graph is a rebuildable projection; an edge failure can never undo the
+      // admitted memory or its ticket/decision receipt.
+      console.warn(`[memory] relation projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
+    }
     if (ctx.agentId && ctx.experienceIntake) {
       try {
         autoIntakeCuratedMemory({
@@ -360,17 +590,73 @@ export function curateEvents(
  * Convenience: parse an agent reply, curate its events, return the cleaned text + report.
  * Called from the run path after each assistant turn.
  */
+function fallbackTurnObservation(cleanedText: string): string | null {
+  const plain = cleanedText
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/[#>*_`~-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return plain ? plain.slice(0, 360) : null;
+}
+
 export function curateReply(
   replyText: string,
   ctx: CurationContext,
-): { cleanedText: string; report: CurationReport } {
-  const { events, cleanedText } = parseMemoryEvents(replyText);
-  const report =
-    events.length > 0
-      ? curateEvents(events, ctx)
-      : { written: 0, deduped: 0, redacted: 0, sessionOnly: 0, discarded: 0 };
+  options: CurateReplyOptions = {},
+): CuratedReply {
+  const parsed = parseMemoryEvents(replyText);
+  const ticket = beginMemoryTicket({
+    context: ctx,
+    emitterStatus: parsed.emitterStatus,
+    candidateCount: parsed.candidateCount,
+    turnSummary: parsed.turnSummary ?? fallbackTurnObservation(parsed.cleanedText),
+  });
+  if (!ticket.created) {
+    return {
+      cleanedText: parsed.cleanedText,
+      report: readMemoryTicketReport(ticket.ticketId),
+      ticketId: ticket.ticketId,
+      emitterStatus: ticket.emitterStatus,
+      curatorMode: "policy",
+    };
+  }
+  const curatorMode: MemoryCuratorMode = options.semanticAttempted
+    ? options.semanticFailed
+      ? "policy_fallback"
+      : "semantic"
+    : "policy";
+  const attemptedReport = parsed.events.length > 0
+    ? curateEvents(parsed.events, ctx, {
+        ticketId: ticket.ticketId,
+        curatorMode,
+        semanticDecisions: options.semanticDecisions,
+        projectPath: ctx.projectPath,
+      })
+    : emptyReport();
+  const report = memoryDecisionReport(ticket.ticketId, attemptedReport);
+  const outcome = parsed.emitterStatus === "malformed"
+    ? "malformed_output"
+    : options.semanticFailed
+      ? "curator_failed"
+      : parsed.events.length === 0
+        ? "no_candidates"
+        : "decided";
+  appendTurnOutcomeDecision({
+    projectPath: ctx.projectPath,
+    ticketId: ticket.ticketId,
+    outcome,
+    report,
+    curatorMode,
+  });
+  completeMemoryTicket(ticket.ticketId, report, curatorMode, { outcome });
   recordCurationReceipt(ctx, report);
-  return { cleanedText, report };
+  return {
+    cleanedText: parsed.cleanedText,
+    report,
+    ticketId: ticket.ticketId,
+    emitterStatus: parsed.emitterStatus,
+    curatorMode,
+  };
 }
 
 /**
@@ -383,15 +669,57 @@ export function stripReplyMemoryEventsReadOnly(
   replyText: string,
   ctx: CurationContext,
   previouslyDiscarded = 0,
-): { cleanedText: string; report: CurationReport } {
-  const { events, cleanedText } = stripAllMemoryEventBlocks(replyText);
+): CuratedReply {
+  const parsed = stripAllMemoryEventBlocks(replyText);
   const report: CurationReport = {
     written: 0,
     deduped: 0,
     redacted: 0,
     sessionOnly: 0,
-    discarded: Math.max(0, previouslyDiscarded) + events.length,
+    discarded: Math.max(0, previouslyDiscarded) + parsed.events.length,
   };
+  let finalReport = report;
+  const ticket = beginMemoryTicket({
+    context: ctx,
+    emitterStatus: "read_only",
+    candidateCount: parsed.candidateCount + Math.max(0, previouslyDiscarded),
+    turnSummary: parsed.turnSummary ?? fallbackTurnObservation(parsed.cleanedText),
+  });
+  if (ticket.created) {
+    for (const [index, event] of parsed.events.entries()) {
+      recordCandidateDecision({
+        options: {
+          ticketId: ticket.ticketId,
+          curatorMode: "read_only",
+          // The DB receipt may retain a one-way project-path hash, but a
+          // read-only run must never append to project-local files.
+          projectPath: null,
+        },
+        index,
+        event,
+        scope: "discard",
+        action: "discarded",
+        reason: "read-only-boundary",
+      });
+    }
+    appendTurnOutcomeDecision({
+      projectPath: null,
+      ticketId: ticket.ticketId,
+      outcome: "read_only",
+      report,
+      curatorMode: "read_only",
+    });
+    const stableReport = memoryDecisionReport(ticket.ticketId, report);
+    stableReport.discarded = Math.max(stableReport.discarded, report.discarded);
+    finalReport = stableReport;
+    completeMemoryTicket(ticket.ticketId, stableReport, "read_only", { readOnly: true, outcome: "read_only" });
+  }
   recordCurationReceipt(ctx, report);
-  return { cleanedText, report };
+  return {
+    cleanedText: parsed.cleanedText,
+    report: ticket.created ? finalReport : readMemoryTicketReport(ticket.ticketId),
+    ticketId: ticket.ticketId,
+    emitterStatus: "read_only",
+    curatorMode: "read_only",
+  };
 }

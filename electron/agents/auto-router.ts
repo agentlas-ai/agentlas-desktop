@@ -10,6 +10,12 @@ export interface AutoRouteChoice {
   matchedTerms: string[];
 }
 
+export interface AutoRouteExperiencePrior {
+  score: number;
+  reason: string;
+  matchedTerms: string[];
+}
+
 const STOP_WORDS = new Set([
   "the",
   "and",
@@ -362,7 +368,13 @@ function routeHintScore(promptText: string, agent: InstalledAgent, locale: Runti
   };
 }
 
-function scoreAgent(prompt: string, promptTerms: string[], agent: InstalledAgent, locale: RuntimeLocale): { score: number; reason: string; terms: string[] } {
+function scoreAgent(
+  prompt: string,
+  promptTerms: string[],
+  agent: InstalledAgent,
+  locale: RuntimeLocale,
+  experiencePrior?: AutoRouteExperiencePrior,
+): { score: number; reason: string; terms: string[] } {
   const promptText = normalize(prompt);
   if (agent.slug === APP_BUILDER_SLUG && !isAppBuilderWorthyPrompt(promptText)) {
     return {
@@ -403,10 +415,19 @@ function scoreAgent(prompt: string, promptTerms: string[], agent: InstalledAgent
   if (card) {
     score += cardScoreAdjustment(promptTerms, card);
   }
+  if (experiencePrior) {
+    score += Math.max(0, Math.min(20, experiencePrior.score));
+    matchedTerms.push(...experiencePrior.matchedTerms);
+  }
 
   const uniqueTerms = [...new Set(matchedTerms)].slice(0, 6);
+  const experienceReason = experiencePrior
+    ? locale === "ko"
+      ? `검토·승격된 Experience가 ${experiencePrior.matchedTerms.join(", ")} 작업과 일치합니다`
+      : experiencePrior.reason
+    : undefined;
   const reason =
-    hint.reason ||
+    hint.reason || experienceReason ||
     (locale === "ko"
       ? uniqueTerms.length
         ? `요청어 ${uniqueTerms.map((term) => `"${term}"`).join(", ")}가 이 에이전트의 역할/트리거와 가장 가깝습니다`
@@ -432,6 +453,8 @@ export function selectAutoRoutedAgent(
     /** true면(앱 생성 모드 등) 무매치여도 기본 조율 에이전트로 폴백한다. 기본 false —
      *  확신 없는 라우팅 대신 null을 돌려주고, 호출부가 현재(오케스트레이터) 경로로 즉답한다. */
     allowFallback?: boolean;
+    /** Reviewed exact-base Experience evidence, keyed by installed agent id. */
+    experiencePriors?: ReadonlyMap<string, AutoRouteExperiencePrior>;
   },
 ): AutoRouteChoice | null {
   const candidates = agents.filter((agent) => !isGlobalOrchestrator(agent));
@@ -439,8 +462,14 @@ export function selectAutoRoutedAgent(
 
   const promptTerms = tokenize(userPrompt);
   const ranked = candidates
-    .map((agent) => ({ agent, ...scoreAgent(userPrompt, promptTerms, agent, locale) }))
-    .sort((a, b) => b.score - a.score);
+    .map((agent) => ({
+      agent,
+      ...scoreAgent(userPrompt, promptTerms, agent, locale, opts?.experiencePriors?.get(agent.id)),
+    }))
+    .sort((a, b) =>
+      b.score - a.score ||
+      a.agent.slug.localeCompare(b.agent.slug) ||
+      a.agent.id.localeCompare(b.agent.id));
 
   const best = ranked[0];
   if (best && best.score >= MIN_SPECIALIST_SCORE) {

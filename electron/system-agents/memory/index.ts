@@ -8,14 +8,14 @@
 import type { SystemAgentSpec, OnDemandModule } from "../types";
 import { MEMORY_EMITTER_BLOCK } from "../../architecture/manifest";
 
-/** 항상-켜진 최소 코어 — 모델이 매 턴 "기억할 게 있으면 남겨라"를 알게 한다(안전 규칙 포함). */
+/** 항상-켜진 최소 코어 — 모든 완료 턴이 관찰 영수증을 남기고, 후보만 선택적으로 제안한다. */
 export const MEMORY_CORE = [
   "## Memory",
-  "Only when this turn produced a durable decision, fact, preference, risk, or reusable procedure, end with `## Memory Events` and a fenced `json` array; otherwise emit nothing.",
-  "Each item: memory_kind, content (1-2 sentences), suggested_scope. Scopes: user_identity, team_memory, agent_repo, agent_team, project, session, discard. Never record secrets, credentials, raw logs, prompts, or transcripts. A curator validates it.",
+  "End EVERY completed normal reply with exactly one `## Memory Events` fenced JSON envelope: `{schema_version:\"agentlas.memory-ticket.v1\",turn_summary:\"one safe sentence\",candidates:[]}`. The runtime hides it. Never omit it; use an empty candidates array when nothing durable was learned.",
+  "Only when this turn produced a durable decision or reusable fact should candidates be non-empty; otherwise keep candidates empty. Candidates contain memory_kind, content (1-2 sentences), suggested_scope, confidence, sensitivity, evidence_refs. Scopes: user_identity, team_memory, agent_repo, project, session, discard. Never record secrets, credentials, raw logs, prompts, transcripts, or absolute paths. A separate Curator decides disposition.",
 ].join("\n");
 
-export const MEMORY_CORE_MAX_APPROX_TOKENS = 150;
+export const MEMORY_CORE_MAX_APPROX_TOKENS = 220;
 
 const MEMORY_DETAIL_RE = /\b(?:remember|memory|save this|record this|memory event)\b|기억|메모리|저장해|기록해|남겨/i;
 

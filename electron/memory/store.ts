@@ -266,6 +266,39 @@ export function listGlobalMemoryForAgent(agentId: string | null, limit = 30): Me
   return rows.map(toEntry);
 }
 
+/** Candidates that share the same governed owner boundary as one new memory. */
+export function listMemoryRelationCandidates(entry: MemoryEntry, limit = 160): MemoryEntry[] {
+  const capped = Math.max(1, Math.min(500, Math.floor(limit)));
+  let rows: Row[] = [];
+  if (entry.scope === "user_identity") {
+    rows = getDb().prepare(
+      `SELECT * FROM memory_entries
+       WHERE scope = 'user_identity' AND superseded_at IS NULL AND id <> ?
+       ORDER BY created_at DESC LIMIT ?`,
+    ).all(entry.id, capped) as Row[];
+  } else if (entry.scope === "team_memory" || entry.scope === "agent_team") {
+    rows = getDb().prepare(
+      `SELECT * FROM memory_entries
+       WHERE scope IN ('team_memory','agent_team') AND superseded_at IS NULL AND id <> ?
+       ORDER BY created_at DESC LIMIT ?`,
+    ).all(entry.id, capped) as Row[];
+  } else if (entry.scope === "agent_repo" && entry.agentId) {
+    rows = getDb().prepare(
+      `SELECT * FROM memory_entries
+       WHERE scope = 'agent_repo' AND agent_id = ? AND superseded_at IS NULL AND id <> ?
+       ORDER BY created_at DESC LIMIT ?`,
+    ).all(entry.agentId, entry.id, capped) as Row[];
+  } else if (entry.scope === "project" && (entry.projectId || entry.projectPath)) {
+    rows = getDb().prepare(
+      `SELECT * FROM memory_entries
+       WHERE scope = 'project' AND superseded_at IS NULL AND id <> ?
+         AND ((project_id IS NOT NULL AND project_id = ?) OR (project_path IS NOT NULL AND project_path = ?))
+       ORDER BY created_at DESC LIMIT ?`,
+    ).all(entry.id, entry.projectId, entry.projectPath, capped) as Row[];
+  }
+  return rows.map(toEntry);
+}
+
 /** Dedup check: same scope+kind+content already live for this path (or globally). */
 export function hasEquivalentMemory(
   scope: MemoryScope,

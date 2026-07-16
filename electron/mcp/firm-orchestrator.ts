@@ -25,9 +25,15 @@ import {
 } from "../store/chats";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
+import { queryWorkingFolderOntologyContext } from "../ontology/project-runtime";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
-import { curateReply, stripReplyMemoryEventsReadOnly } from "../memory/curator";
-import { parseMemoryEvents } from "../memory/events";
+import {
+  curateReply,
+  recordTerminalMemoryTurn,
+  stripReplyMemoryEventsReadOnly,
+} from "../memory/curator";
+import { runSemanticMemoryReview } from "../memory/semantic-curator";
+import { parseMemoryEvents, stripAllMemoryEventBlocks } from "../memory/events";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { parseAutomations } from "../automation-emitter";
 import { parseSurfaces } from "../surface-emitter";
@@ -144,19 +150,42 @@ function restrictedFirmText(
   p: FirmRunParams,
   text: string,
   nodeId: string,
+  phase: NodeTurn["phase"],
   agentId: string | null,
   chatId: string | null | undefined,
+  projectPath: string | null,
 ): string {
-  if (!p.restrictedReadBoundary) return text;
-  return stripReplyMemoryEventsReadOnly(text, {
-    projectPath: p.workingFolder ?? null,
-    projectId: p.chat.projectId ?? null,
+  if (!firmProjectReadOnly(p)) return text;
+  const context = {
+    turnId: firmMemoryTurnId(p, nodeId, phase),
+    projectPath: p.req.agentAppMode ? null : projectPath,
+    projectId: p.req.agentAppMode ? null : p.chat.projectId ?? null,
     agentId,
     chatId: chatId ?? p.chat.id,
     runId: p.req.runId,
     nodeId,
-    cwdAtRequest: p.workingFolder ?? null,
-  }).cleanedText;
+    cwdAtRequest: p.req.agentAppMode ? null : p.workingFolder ?? null,
+  };
+  try {
+    return stripReplyMemoryEventsReadOnly(text, context).cleanedText;
+  } catch (error) {
+    try {
+      recordTerminalMemoryTurn(context, "curation_failed");
+    } catch (ticketError) {
+      console.error("[memory] firm read-only curation failure receipt failed:", ticketError);
+    }
+    console.error("[memory] firm read-only curation failed:", error);
+    return stripAllMemoryEventBlocks(text).cleanedText;
+  }
+}
+
+function firmProjectReadOnly(p: FirmRunParams): boolean {
+  return p.restrictedReadBoundary === true ||
+    (p.req.permissions !== "write" && p.req.permissions !== "full");
+}
+
+function firmMemoryTurnId(p: FirmRunParams, nodeId: string, phase: NodeTurn["phase"]): string {
+  return `firm:run:${p.req.runId ?? "direct"}:chat:${p.chat.id}:node:${nodeId}:phase:${phase}`;
 }
 
 /** 간단한 동시성 풀 — items를 cap개씩 병렬 실행. */
@@ -214,6 +243,20 @@ async function runNodeTurnSafe(
     const r = await runNodeTurn(p, { ...turn, signal: link.signal });
     return { ...r, ok: true };
   } catch (err) {
+    try {
+      recordTerminalMemoryTurn({
+        turnId: firmMemoryTurnId(p, turn.node.id, turn.phase),
+        projectPath: p.req.agentAppMode ? null : p.workingFolder ?? getChatWorkingFolder(p.chat.id),
+        projectId: p.req.agentAppMode ? null : p.chat.projectId ?? null,
+        agentId: turn.node.agentId ?? turn.node.id,
+        chatId: turn.chatId ?? p.chat.id,
+        runId: p.req.runId,
+        nodeId: turn.node.id,
+        cwdAtRequest: p.req.agentAppMode ? null : p.workingFolder ?? null,
+      }, p.signal?.aborted ? "cancelled" : "failed");
+    } catch (ticketError) {
+      console.error("[memory] firm terminal turn receipt failed:", ticketError);
+    }
     if (p.signal?.aborted) throw err; // 사용자 취소는 전파
     if (err instanceof MobileReadRuntimeBoundaryError) throw err;
     // 실패/타임아웃 노드도 per-node 완료 신호 → UI에서 ▶ 가 멈추고 정리된다(스턱 방지).
@@ -368,8 +411,15 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       const mem = buildMemoryContext(memoryReadPath, memoryOwnerId, {
         materializeCodeMap: Boolean(activePath),
         taskPrompt: turn.userPrompt,
+        projectId: p.chat.projectId ?? null,
       });
       if (mem) systemPrompt += `\n\n${mem}`;
+      if (memoryReadPath) {
+        const ontologyContext = await queryWorkingFolderOntologyContext(memoryReadPath, turn.userPrompt, {
+          readOnly: firmProjectReadOnly(p),
+        });
+        if (ontologyContext.used) systemPrompt += `\n\n${ontologyContext.context}`;
+      }
     } catch {
       // ignore memory failures
     }
@@ -388,7 +438,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       candidateRuntimes,
     )}`;
   }
-  if (!p.req.agentAppMode && !p.restrictedReadBoundary) {
+  if (!p.req.agentAppMode && !firmProjectReadOnly(p)) {
     systemPrompt += `\n\n${memoryEmitterPromptFor(turn.userPrompt)}`;
   }
 
@@ -491,7 +541,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         if (turn.toMainBubble) p.sink({ kind: "tool-use", status });
       },
       onPartial: (text) => {
-        if (!p.req.agentAppMode && !p.restrictedReadBoundary) {
+        if (!p.req.agentAppMode && !firmProjectReadOnly(p)) {
           emit({ kind: "partial", text });
           if (turn.toMainBubble) p.sink({ kind: "partial", text });
         }
@@ -503,32 +553,23 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       },
     },
   );
-  if (workloadResolution) {
-    const executedResolution = reconcileWorkloadRunnerResult(workloadResolution, result);
-    tryRecordRunEvent({
-      runId: p.req.runId ?? `firm:${p.chat.id}`,
-      kind: "workload_allocation",
-      chatId: p.chat.id,
-      nodeId: node.id,
-      agentId: memoryOwnerId,
-      payload: workloadAllocationReceipt(executedResolution),
-    });
-  }
-
   // delegation 블록 분리 → 메모리 큐레이션(노드 agentId로) → 정리된 텍스트
   const safeResultText = restrictedFirmText(
     p,
     result.text,
     node.id,
+    phase,
     memoryOwnerId,
     turn.chatId,
+    memoryReadPath,
   );
   const { delegations, synthesisAllocation, cleanedText } = parseDelegations(safeResultText);
   let display = p.req.agentAppMode ? cleanAgentAppControlBlocks(cleanedText) : cleanedText;
-  if (!p.req.agentAppMode && !p.restrictedReadBoundary) {
+  if (!p.req.agentAppMode && !firmProjectReadOnly(p)) {
     try {
-      const { cleanedText: c2 } = curateReply(display, {
-        projectPath: activePath,
+      const curationContext = {
+        turnId: firmMemoryTurnId(p, node.id, phase),
+        projectPath: memoryReadPath,
         projectId: p.chat.projectId ?? null,
         agentId: memoryOwnerId,
         chatId: turn.chatId,
@@ -546,11 +587,49 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
               },
             }
           : {}),
-      });
+      };
+      const semanticOptions = await runSemanticMemoryReview({
+        replyText: display,
+        runner: picked.runner,
+        backendLabel: picked.label,
+        model: active.model ?? undefined,
+        effort: active.effort ?? undefined,
+        env: p.runnerEnv,
+        locale: p.locale,
+        signal: turn.signal ?? p.signal,
+        hasProject: Boolean(memoryReadPath),
+        hasAgent: Boolean(memoryOwnerId),
+      }).catch(() => ({ semanticAttempted: true, semanticFailed: true }));
+      const { cleanedText: c2 } = curateReply(display, curationContext, semanticOptions);
       display = c2 || display;
-    } catch {
-      // ignore curation failures
+    } catch (error) {
+      try {
+        recordTerminalMemoryTurn({
+          turnId: firmMemoryTurnId(p, node.id, phase),
+          projectPath: memoryReadPath,
+          projectId: p.chat.projectId ?? null,
+          agentId: memoryOwnerId,
+          chatId: turn.chatId,
+          runId: p.req.runId,
+          nodeId: node.id,
+          cwdAtRequest: workingFolder,
+        }, "curation_failed");
+      } catch (ticketError) {
+        console.error("[memory] firm curation failure receipt failed:", ticketError);
+      }
+      console.error("[memory] firm curation failed:", error);
     }
+  }
+  if (workloadResolution) {
+    const executedResolution = reconcileWorkloadRunnerResult(workloadResolution, result);
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `firm:${p.chat.id}`,
+      kind: "workload_allocation",
+      chatId: p.chat.id,
+      nodeId: node.id,
+      agentId: memoryOwnerId,
+      payload: workloadAllocationReceipt(executedResolution),
+    });
   }
   // per-node 완료 신호 — 이 노드의 한 턴이 끝났다. UI(오케스트레이션 트리)가 이 노드만 ▶→✓ 로 정리한다.
   // 단, plan 턴은 곧 delegate/synthesize가 이어지므로 완료로 보지 않는다 — orchestrator/본부 행이
@@ -659,6 +738,9 @@ async function runDivision(
 
 /** firm 채팅 진입점 — runMcpInvocation에서 firmId+divisions가 있으면 호출. */
 export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult> {
+  if (!p.req.runId) {
+    p = { ...p, req: { ...p.req, runId: `firm-direct-${randomUUID()}` } };
+  }
   const { req, chat, org, sink } = p;
   const ko = p.locale === "ko";
   // 메인 버블 진행 표시 (un-attributed → 메인 메시지 step). 네트워크 패널은 속성 이벤트로 별도.

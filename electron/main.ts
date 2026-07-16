@@ -45,6 +45,7 @@ import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
 import { scrubLegacyOpenCrabMcpConfig } from "./mcp-tools/mcp-config";
 import { scrubLegacyOpenCrabCredentialUrls } from "./mcp-tools/registry";
 import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser/approval-server";
+import { startComputerUseControlServer, stopComputerUseControlServer } from "./computer-use/control-server";
 import { authorizeLocalMediaPath } from "./fs/access";
 import { initFileLogging, mainLogFilePath } from "./logging";
 import { setCurrentUiLocale } from "./ui-locale";
@@ -572,6 +573,9 @@ app.whenReady().then(async () => {
   void startBrowserApprovalServer().catch((err) =>
     console.error("[browser] approval server failed:", err),
   );
+  void startComputerUseControlServer().catch((err) =>
+    console.error("[computer-use] control server failed:", err),
+  );
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
   try {
     const { reconcileTelegramWorkers } = await import("./telegram/connect");
@@ -622,6 +626,11 @@ app.whenReady().then(async () => {
 app.on("before-quit", async () => {
   try {
     stopBrowserApprovalServer();
+  } catch {
+    // ignore shutdown cleanup errors
+  }
+  try {
+    stopComputerUseControlServer();
   } catch {
     // ignore shutdown cleanup errors
   }

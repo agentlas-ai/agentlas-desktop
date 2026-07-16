@@ -14,7 +14,7 @@ import { workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from ".
 import { tStatus } from "./status-i18n";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { mcpConfigKey } from "../mcp-tools/mcp-config";
-import { testServerConnection, callServerTool } from "../mcp-tools/client";
+import { testServerConnection, callServerToolContent } from "../mcp-tools/client";
 import type { InstalledMcpServer } from "../../shared/types";
 
 export type LocalChatContent =
@@ -114,27 +114,52 @@ async function runOneToolCall(
   byName: Map<string, ResolvedTool>,
   call: OpenAiToolCall,
   events: RunnerEvents,
-): Promise<ChatMessage> {
+): Promise<{ toolMessage: ChatMessage; visionMessage: ChatMessage | null }> {
   const resolved = byName.get(call.function.name);
   if (!resolved) {
     events.onTool?.(call.function.name, call.function.arguments, "unknown tool", call.id, true);
-    return { role: "tool", tool_call_id: call.id, content: `Error: unknown tool "${call.function.name}"` };
+    return {
+      toolMessage: { role: "tool", tool_call_id: call.id, content: `Error: unknown tool "${call.function.name}"` },
+      visionMessage: null,
+    };
   }
   let args: Record<string, unknown> = {};
   try {
     args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
   } catch {
     events.onTool?.(call.function.name, call.function.arguments, "invalid JSON arguments", call.id, true);
-    return { role: "tool", tool_call_id: call.id, content: "Error: invalid JSON arguments" };
+    return {
+      toolMessage: { role: "tool", tool_call_id: call.id, content: "Error: invalid JSON arguments" },
+      visionMessage: null,
+    };
   }
   try {
-    const text = (await callServerTool(resolved.server, resolved.serverToolName, args, { timeoutMs: 30_000 })) ?? "";
+    const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, { timeoutMs: 30_000 });
+    const text = result?.text ?? "";
     events.onTool?.(call.function.name, call.function.arguments, text, call.id, false);
-    return { role: "tool", tool_call_id: call.id, content: text.slice(0, MAX_TOOL_RESULT_CHARS) };
+    const images = result?.images ?? [];
+    return {
+      toolMessage: { role: "tool", tool_call_id: call.id, content: text.slice(0, MAX_TOOL_RESULT_CHARS) },
+      visionMessage: images.length > 0
+        ? {
+            role: "user",
+            content: [
+              { type: "text", text: "Current Agentlas Computer Use screenshot returned by the preceding tool call." },
+              ...images.map((image) => ({
+                type: "image_url" as const,
+                image_url: { url: `data:${image.mediaType};base64,${image.data}` },
+              })),
+            ],
+          }
+        : null,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     events.onTool?.(call.function.name, call.function.arguments, message, call.id, true);
-    return { role: "tool", tool_call_id: call.id, content: `Error: ${message}` };
+    return {
+      toolMessage: { role: "tool", tool_call_id: call.id, content: `Error: ${message}` },
+      visionMessage: null,
+    };
   }
 }
 
@@ -299,9 +324,15 @@ export async function runLocalOpenAiChat(
     }
     sawAnyToolCall = true;
     messages.push({ role: "assistant", content: result.text, tool_calls: result.toolCalls });
+    const visionMessages: ChatMessage[] = [];
     for (const call of result.toolCalls) {
-      messages.push(await runOneToolCall(byName, call, events));
+      const outcome = await runOneToolCall(byName, call, events);
+      messages.push(outcome.toolMessage);
+      if (outcome.visionMessage) visionMessages.push(outcome.visionMessage);
     }
+    // Keep every protocol-required tool response directly after the assistant
+    // tool_calls message, then provide screenshots as normal vision input.
+    messages.push(...visionMessages);
     finalText = result.text;
     // 다음 루프에서 도구 결과를 포함해 다시 요청한다.
   }

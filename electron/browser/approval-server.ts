@@ -1,21 +1,18 @@
 // Browser 승인 서버 — agentlas-browser 런처(.mjs)가 되돌릴 수 없는 행동(전송/게시/결제/삭제)을
 // 실행하기 전에 이 로컬 엔드포인트를 때려 사용자 승인을 받는다. webhook-server.ts 선례를 따라
-// 127.0.0.1의 임의 포트에만 바인딩하고, 포트+토큰을 ~/.agentlas/browser-approval.json 에 써서
-// 런처가 찾게 한다(토큰이 없는 로컬 프로세스가 승인 시트를 임의로 못 띄우게 하는 capability).
+// 127.0.0.1의 임의 포트에만 바인딩하고, 포트+토큰을 현재 앱 인스턴스의
+// userData/browser/approval.json에 써서 런처가 찾게 한다. 설치본과 개발본이 같이 떠도
+// 서로의 포트·DB·승인 창을 덮어쓰지 않는 인스턴스별 capability이다.
 import http from "node:http";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { browserRequestApproval } from "./connect";
+import { browserApprovalInfoPath } from "./approval-channel";
 
 let server: http.Server | null = null;
 let boundPort = 0;
 let token = "";
-
-function infoPath(): string {
-  return path.join(os.homedir(), ".agentlas", "browser-approval.json");
-}
 
 function readBody(req: http.IncomingMessage, maxBytes = 64 * 1024): Promise<string> {
   return new Promise((resolve) => {
@@ -78,8 +75,14 @@ export function startBrowserApprovalServer(): Promise<number> {
       boundPort = typeof addr === "object" && addr ? addr.port : 0;
       server = srv;
       try {
-        fs.mkdirSync(path.dirname(infoPath()), { recursive: true });
-        fs.writeFileSync(infoPath(), JSON.stringify({ port: boundPort, token }), { mode: 0o600 });
+        const infoPath = browserApprovalInfoPath();
+        const infoDir = path.dirname(infoPath);
+        fs.mkdirSync(infoDir, { recursive: true, mode: 0o700 });
+        try { fs.chmodSync(infoDir, 0o700); } catch { /* best-effort */ }
+        const temp = `${infoPath}.${process.pid}.${randomUUID()}.tmp`;
+        fs.writeFileSync(temp, JSON.stringify({ port: boundPort, token }), { mode: 0o600 });
+        try { fs.chmodSync(temp, 0o600); } catch { /* best-effort */ }
+        fs.renameSync(temp, infoPath);
       } catch {
         /* best-effort */
       }
@@ -99,7 +102,7 @@ export function stopBrowserApprovalServer(): void {
   server = null;
   boundPort = 0;
   try {
-    fs.rmSync(infoPath(), { force: true });
+    fs.rmSync(browserApprovalInfoPath(), { force: true });
   } catch {
     /* ignore */
   }

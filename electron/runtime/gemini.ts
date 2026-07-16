@@ -9,6 +9,13 @@ import { rmSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
+import {
+  CLI_HISTORY_CONTEXT_TOKENS,
+  composeResumeTurnPrompt,
+  renderConversationContext,
+  renderGapContext,
+  unseenHistoryGap,
+} from "./continuity";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
@@ -140,26 +147,29 @@ function buildPrompt(req: RunnerRequest): string {
     req.restrictedReadBoundary,
     req.untrustedNoTools,
   );
-  const user = tStatus(req.locale, "speakerUser");
-  const assistant = tStatus(req.locale, "speakerAssistant");
-  const parts: string[] = [`[SYSTEM]\n${sys}`, ""];
+  // 새 세션 시드: 턴 컨텍스트는 시스템 섹션 뒤에, 히스토리는 연속성 프레이밍+압축과 함께.
+  const turnContext = req.turnContext?.trim();
+  const parts: string[] = [`[SYSTEM]\n${sys}${turnContext ? `\n\n${turnContext}` : ""}`, ""];
   if (req.history.length > 0) {
-    parts.push(tStatus(req.locale, "histPrevSection"));
-    for (const m of req.history) {
-      const tag = m.role === "user" ? user : assistant;
-      parts.push(`${tag}: ${m.text}`);
-    }
-    parts.push("");
+    const { block } = renderConversationContext(req.history, req.locale, CLI_HISTORY_CONTEXT_TOKENS);
+    parts.push(block, "");
   }
   parts.push(tStatus(req.locale, "histThisSection"), req.userPrompt);
   return parts.join("\n");
 }
 
 /**
- * Gemini CLI 세션 지문. 사용자 입력은 매 턴 달라지므로 제외하고, 세션을 갈라야 하는
- * 시스템/권한/표면/모델 설정만 반영한다.
+ * Gemini CLI 세션 지문 — 안정 시드(sessionFingerprintSeed)가 있으면 시드만 해시한다.
+ * 모델/권한은 매 호출 인자로 재적용되므로 지문에 섞으면 설정 변경마다 대화 연속성이
+ * 끊긴다(2026-07-16 세션유지 사고). 시드 없는 레거시 호출만 전체 해시로 폴백.
  */
 function systemFingerprint(req: RunnerRequest): string {
+  if (req.sessionFingerprintSeed) {
+    return createHash("sha256")
+      .update("seed.v2\0")
+      .update(req.sessionFingerprintSeed)
+      .digest("hex");
+  }
   return createHash("sha256")
     .update(req.systemPrompt)
     .update("\0")
@@ -248,7 +258,19 @@ async function runPreparedGemini(
     events.onStatus(tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
   }
 
-  const prompt = resumeSessionId ? runReq.userPrompt : buildPrompt(runReq);
+  // gap-replay — 이 세션이 마지막으로 본 이후 다른 경로(스웜/다른 러너)로 진행된 턴을 메운다.
+  // 호출자가 세션 수명을 직접 관리하는 runtimeSessionId(Build 등)에는 적용하지 않는다.
+  const gapContext = resumeSessionId && !runReq.runtimeSessionId && storedSessionId && savedSession
+    ? renderGapContext(unseenHistoryGap(runReq.history, savedSession.updatedAt), runReq.locale)
+    : "";
+  // resume 턴: 시스템 프롬프트가 재전송되지 않으므로 gap+턴 컨텍스트를 사용자 메시지에 싣는다.
+  const prompt = resumeSessionId
+    ? composeResumeTurnPrompt(
+        runReq.userPrompt,
+        [gapContext, runReq.turnContext ?? ""].filter(Boolean).join("\n\n"),
+        runReq.locale,
+      )
+    : buildPrompt(runReq);
 
   // agy에는 stdin/prompt-file 입력이 없다. 전체 시스템·히스토리를 argv에 넣으면 로컬
   // process listing에 노출되고 Windows 길이 제한도 넘는다. 0600 파일에는 본문을,

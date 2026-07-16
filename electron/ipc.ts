@@ -237,7 +237,12 @@ import {
 import { getUsageSnapshot, invalidateUsage, retryUsageProvider } from "./usage";
 import { isUsageRetryProviderId } from "./usage/retry-policy";
 import { listPendingConfirmations } from "./confirm";
-import { addProjectOntologySource, getProjectOntologyStatus } from "./ontology/project-runtime";
+import {
+  addProjectOntologySource,
+  getProjectOntologyStatus,
+  provisionProjectOntology,
+  syncProjectOntology,
+} from "./ontology/project-runtime";
 import { getAgentOntologyHubProjection, resolveAgentOntologyHubAttach } from "./ontology/agent-hub-projection";
 import {
   createProject,
@@ -370,6 +375,8 @@ import {
   browserListLogs,
 } from "./browser/connect";
 import type { BrowserPermissionDecision } from "./browser/connect";
+import { captureBrowserLiveFrame, focusBrowserLiveTarget } from "./browser/live-view";
+import { captureComputerUsePreview } from "./computer-use/preview";
 import {
   archiveAppPackage,
   activateLocalCommerceStack,
@@ -2431,6 +2438,25 @@ export function registerIpcHandlers(): void {
     browserResolveApproval(requestId, decision),
   );
   ipcMain.handle("browser:listLogs", (_e, limit?: number) => browserListLogs(limit));
+  ipcMain.handle("browser:captureLiveFrame", (event) => {
+    assertTrustedSitePublishIpcSender(event);
+    return captureBrowserLiveFrame();
+  });
+  ipcMain.handle("browser:focusLiveTarget", (event, targetId?: string) => {
+    assertTrustedSitePublishIpcSender(event);
+    return focusBrowserLiveTarget(typeof targetId === "string" ? targetId.slice(0, 256) : undefined);
+  });
+  ipcMain.handle("computerUse:capturePreview", (event, sourceId?: string) => {
+    assertTrustedSitePublishIpcSender(event);
+    return captureComputerUsePreview(typeof sourceId === "string" ? sourceId.slice(0, 256) : undefined);
+  });
+  ipcMain.handle("computerUse:revealPreview", (event) => {
+    assertTrustedSitePublishIpcSender(event);
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed()) return { ok: false };
+    win.minimize();
+    return { ok: true };
+  });
 
   // ── projects ───────────────────────────────────────────
   ipcMain.handle("projects:list", () => listProjects());
@@ -2466,6 +2492,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("ontology:getProject", (_e, projectId: string) =>
     getProjectOntologyStatus(projectId),
   );
+  ipcMain.handle("ontology:provision", (_e, projectId: string) =>
+    provisionProjectOntology(projectId),
+  );
+  ipcMain.handle("ontology:sync", (_e, projectId: string) =>
+    syncProjectOntology(projectId),
+  );
   ipcMain.handle(
     "ontology:addSource",
     (
@@ -2478,7 +2510,7 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle("ontology:openInbox", async (_e, projectId: string) => {
     const status = getProjectOntologyStatus(projectId);
-    if (status.state !== "active" || !status.inboxPath) {
+    if (!status.inboxPath || status.state === "failed") {
       return { ok: false, path: null, message: status.error || "Project folder is not set." };
     }
     const message = await shell.openPath(status.inboxPath);

@@ -23,6 +23,13 @@ extraMetadata:
     keychainService: com.agentlas.desktop.candidate
     updateFeed: none
 
+# Keep the native Computer Use helper in QA candidates through the global
+# resource list. The mac-scoped list below must remain cleared so the official
+# update-signing policy inherited from the base config cannot enter this app.
+extraResources:
+  - from: build-resources/native/macos/agentlas-input-driver
+    to: native/macos/agentlas-input-driver
+
 mac:
   # electron-builder extends the base mac config. Null clears only the
   # platform-scoped official trust policy; global runtime extraResources stay

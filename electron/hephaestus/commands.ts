@@ -243,6 +243,28 @@ export function hepPackage(
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 180_000, ...opts });
 }
 
+/** contract scaffold: 패키지 계약 템플릿을 워크스페이스에 복사(기존 파일은 절대 덮지 않음). */
+export function contractScaffold(
+  folder: string,
+  opts: { mode?: "single" | "team" | "package"; id?: string; name?: string } & HephaestusRunOptions = {},
+): Promise<HephaestusResult> {
+  const args = ["contract", "scaffold", assertPositional(folder, "folder")];
+  if (opts.mode) args.push("--mode", opts.mode);
+  if (opts.id) args.push("--id", opts.id);
+  if (opts.name) args.push("--name", opts.name);
+  return runHephaestus("agentlas_cloud", args, { timeoutMs: 60_000, ...opts });
+}
+
+/** contract verify: 패키지 계약 완결성 게이트 — blockers JSON은 모델 자가수리 워크리스트. */
+export function contractVerify(
+  folder: string,
+  opts: { mode?: "single" | "team" | "package" } & HephaestusRunOptions = {},
+): Promise<HephaestusResult> {
+  const args = ["contract", "verify", assertPositional(folder, "folder")];
+  if (opts.mode) args.push("--mode", opts.mode);
+  return runHephaestus("agentlas_cloud", args, { timeoutMs: 60_000, ...opts });
+}
+
 /** security scan: 정적 보안 규칙(+ 선택적 LLM 판단). 업로드/빌드 게이트. */
 export function securityScan(
   folder: string,

@@ -42,6 +42,7 @@ import {
   setChatWorkingFolder,
 } from "../store/chats";
 import { getProject } from "../store/projects";
+import { touchRuntimeSession } from "../store/runtime-sessions";
 import { getInterviewMode, isTrivialPrompt } from "../store/interview-mode";
 import { getFirm, listFirms } from "../store/firms";
 import { getResolvedOrg } from "../store/org-spec";
@@ -63,13 +64,25 @@ import { runSwarmInvocation } from "./swarm-run";
 import { getAgentGroup, listAgentGroups, resolveAgentGroupForRuntime } from "../store/agent-groups";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
-import { buildExperienceContext } from "../experience/context";
+import { queryWorkingFolderOntologyContext } from "../ontology/project-runtime";
+import {
+  buildExperienceContext,
+  buildExperienceRoutingPrior,
+  type ExperienceRoutingPrior,
+} from "../experience/context";
 import { resolveDesktopOperationalRuntimeSession } from "../ontology/operational-runtime-session";
 import { operationalRuntimeOverlayMatchesTask } from "../ontology/operational-runtime-contract";
 import { resolveDesktopTasteRuntimeSession } from "../ontology/taste-runtime-session";
 import { tasteRuntimeOverlayMatchesTask } from "../ontology/taste-runtime-contract";
-import { curateReply, stripReplyMemoryEventsReadOnly } from "../memory/curator";
+import {
+  curateReply,
+  recordTerminalMemoryTurn,
+  stripReplyMemoryEventsReadOnly,
+} from "../memory/curator";
 import { stripAllMemoryEventBlocks } from "../memory/events";
+import {
+  runSemanticMemoryReview,
+} from "../memory/semantic-curator";
 import { harvestCompactionSummaries } from "../memory/compaction-harvest";
 import { parseMemoryEvents } from "../memory/events";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
@@ -910,6 +923,11 @@ export async function runMcpInvocation(
   // from the renderer request.
   const restrictedReadBoundary =
     Boolean(workspaceBinding) || (executionContext?.source === "automation" && !canWrite);
+  // Interactive Desktop `permissions=read` may consume already-activated
+  // memory/ontology, but it has the same project-write prohibition as the
+  // stronger Mobile/automation boundary. Keep runtime eligibility separate
+  // from this filesystem/curation boundary.
+  const projectReadOnlyBoundary = !canWrite || restrictedReadBoundary;
   const suppressProjectBinding = executionContext?.source === "site-studio";
   // Site Studio owns a project-scoped hidden conversation, but that identity is
   // not authority to consume an arbitrary Desktop Project. Freeze the effective
@@ -1012,6 +1030,8 @@ export async function runMcpInvocation(
     }
   }
 
+  const runtimes = await detectRuntimes();
+  throwIfInvocationAborted(signal, locale);
   const installedAgents = listInstalledAgents();
   // Agent Apps are request/response surfaces, not durable chat continuations.
   // An earlier browser request must not influence a later caller's routing.
@@ -1034,6 +1054,40 @@ export async function runMcpInvocation(
     hasPriorContext,
     prompt: req.userPrompt,
   });
+  const preRouteProjectPath = workspaceBinding
+    ? boundMobileWorkingFolder
+    : suppressProjectBinding
+      ? null
+      : getChatWorkingFolder(chat.id) ?? (
+        invocationProjectId ? getProject(invocationProjectId)?.folderPath ?? null : null
+      );
+  const experiencePriors = new Map<string, ExperienceRoutingPrior>();
+  if (!req.agentAppMode && !hasPriorContext && !plainConversation && isGlobalOrchestrator(agent)) {
+    for (const candidate of installedAgents) {
+      if (isGlobalOrchestrator(candidate)) continue;
+      const candidateRuntime = req.runtimeSelection
+        ? selectExactRuntime(runtimes, req.runtimeSelection)
+        : selectRuntimeForTargets(runtimes, [{ scope: "agent", targetId: candidate.id }]);
+      if (!candidateRuntime) continue;
+      try {
+        const prior = buildExperienceRoutingPrior({
+          agentId: candidate.id,
+          projectId: invocationProjectId,
+          projectPath: preRouteProjectPath,
+          environment: {
+            platform: process.platform,
+            arch: process.arch,
+            runtimeKind: candidateRuntime.active.kind,
+          },
+          basePackageHash: candidate.packageHash ?? null,
+          task: effectiveUserPrompt,
+        });
+        if (prior) experiencePriors.set(candidate.id, prior);
+      } catch (error) {
+        console.warn(`[experience] pre-route evidence unavailable for ${candidate.slug}: ${error instanceof Error ? error.message : "unknown"}`);
+      }
+    }
+  }
   const autoRoute = req.agentAppMode
     ? null
     : explicitWorkforceGoal || explicitNetworkGoal || hubWorkforceRequested || automaticWorkforceEligible
@@ -1049,6 +1103,7 @@ export async function runMcpInvocation(
         // 오케스트레이터가 그냥 답한다("사용 에이전트: PM Soul" 소음/오배정 반복 제거).
         selectAutoRoutedAgent(effectiveUserPrompt, installedAgents, locale, {
           allowFallback: false,
+          experiencePriors,
         })
       : null;
   if (autoRoute) {
@@ -1142,8 +1197,6 @@ export async function runMcpInvocation(
     });
   }
 
-  const runtimes = await detectRuntimes();
-  throwIfInvocationAborted(signal, locale);
   const runtimeTargets = [
     { scope: "agent" as const, targetId: agent.id },
     { scope: "firm" as const, targetId: chat.firmId },
@@ -1872,6 +1925,13 @@ export async function runMcpInvocation(
 
   // 프로젝트 컨텍스트 노트가 있으면 system prompt 뒤에 append
   let systemPrompt = buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt);
+  // ── 턴 컨텍스트 — 사용자 프롬프트에 따라 매 턴 달라지는 주입(메모리 캡슐·온톨로지·
+  // MCP 자동선택·브리핑 게이트·Experience/Taste)은 시스템 프롬프트가 아니라 여기 모은다.
+  // 시스템 프롬프트를 턴마다 바꾸면 CLI 세션 지문이 매번 달라져 대화 연속성이 전멸한다
+  // (2026-07-16 사고: 매 턴 fingerprint_changed → 세션 폐기 → "이전 세션을 보면~").
+  // 세션 지원 러너는 새 세션이면 시스템 프롬프트 뒤에 붙이고, resume 턴이면 사용자
+  // 메시지 앞에 싣는다. 세션 미지원 러너에는 기존처럼 시스템 프롬프트에 합쳐 전달한다.
+  const turnContextParts: string[] = [];
   if (autoRoute) {
     systemPrompt = `${autoRouteSystemPreamble(
       autoRoute,
@@ -1910,7 +1970,7 @@ export async function runMcpInvocation(
     chat.kind !== "division" &&
     !isTrivialPrompt(req.userPrompt)
   ) {
-    systemPrompt =
+    turnContextParts.push(
       `## Briefing gate (before executing)\n` +
       `First judge silently: are the goal, constraints and success criteria of this request specific enough ` +
       `that a stranger would produce the same result? If YES — proceed normally and ask NOTHING. ` +
@@ -1918,7 +1978,8 @@ export async function runMcpInvocation(
       `weakest of: what NOT to do (anti-scope), smallest acceptable version, done signal, audience. ` +
       `Then STOP and wait. After the answers arrive, restate the goal in one sentence and proceed — never ask a second batch; ` +
       `record what is still open as explicit assumptions instead. 'decide later' is a valid answer (record as deferred). ` +
-      `Never use this gate for greetings, pure questions, or already-specific instructions.\n\n${systemPrompt}`;
+      `Never use this gate for greetings, pure questions, or already-specific instructions.`,
+    );
   }
   if (invocationProjectId) {
     const project = getProject(invocationProjectId);
@@ -1984,8 +2045,15 @@ export async function runMcpInvocation(
       const memoryContext = buildMemoryContext(memoryReadPath, agent.id, {
         materializeCodeMap: Boolean(activePath && canWrite),
         taskPrompt: effectiveUserPrompt,
+        projectId: invocationProjectId,
       });
-      if (memoryContext) systemPrompt = `${systemPrompt}\n\n${memoryContext}`;
+      if (memoryContext) turnContextParts.push(memoryContext);
+      if (memoryReadPath) {
+        const ontologyContext = await queryWorkingFolderOntologyContext(memoryReadPath, effectiveUserPrompt, {
+          readOnly: projectReadOnlyBoundary,
+        });
+        if (ontologyContext.used) turnContextParts.push(ontologyContext.context);
+      }
     } catch (err) {
       console.error("[architecture] buildMemoryContext failed:", err);
     }
@@ -2025,7 +2093,7 @@ export async function runMcpInvocation(
       effectiveUserPrompt,
     ) ? remoteOperationalSnapshot : null;
     if (applicableRemoteOperational) {
-      systemPrompt = `${systemPrompt}\n\n${applicableRemoteOperational.directive}`;
+      turnContextParts.push(applicableRemoteOperational.directive);
       sink({
         kind: "tool-use",
         status: locale === "ko"
@@ -2043,7 +2111,7 @@ export async function runMcpInvocation(
           task: effectiveUserPrompt,
           reservedApproxTokens: applicableTasteSnapshot?.overlay.estimatedTokens ?? 0,
         });
-        if (experienceContext.prompt) systemPrompt = `${systemPrompt}\n\n${experienceContext.prompt}`;
+        if (experienceContext.prompt) turnContextParts.push(experienceContext.prompt);
       } catch (err) {
         // Experience is an optional host-local projection. A damaged/missing
         // projection can never block the base agent or Memory architecture.
@@ -2055,7 +2123,7 @@ export async function runMcpInvocation(
     // Taste stays a separate, lower-authority aesthetic overlay. The exact
     // verified snapshot is frozen for this chat and can change only when a
     // new runtime session starts.
-    systemPrompt = `${systemPrompt}\n\n${applicableTasteSnapshot.directive}`;
+    turnContextParts.push(applicableTasteSnapshot.directive);
     sink({
       kind: "tool-use",
       status: locale === "ko"
@@ -2066,9 +2134,9 @@ export async function runMcpInvocation(
   // Compact core is always on; the full schema is loaded only for explicit
   // memory tasks. This keeps the recurring contract under ~150 tokens.
   if (!req.agentAppMode && !restrictedReadBoundary) {
-    systemPrompt = `${systemPrompt}\n\n${memoryEmitterPromptFor(effectiveUserPrompt)}`;
+    turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt));
   }
-  if (mcpAutoSelectionPrompt) systemPrompt = `${systemPrompt}\n\n${mcpAutoSelectionPrompt}`;
+  if (mcpAutoSelectionPrompt) turnContextParts.push(mcpAutoSelectionPrompt);
   if (!req.agentAppMode && chat.kind === "division" && (req.toolMode || req.hubMode)) {
     const supervisor = assembleSystemPrompt(
       AUTOMATION_SUPERVISOR_SYSTEM_AGENT,
@@ -2101,10 +2169,21 @@ export async function runMcpInvocation(
       });
       return earlyResult();
     }
-    systemPrompt = `${systemPrompt}\n\n${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`;
+    // division(무인 시드)은 기존처럼 시스템 프롬프트에. 인터랙티브 채팅은 engaged가 턴 단위
+    // 상태이므로 턴 컨텍스트로 — resume 세션에서도 이번 턴에 확실히 전달된다.
+    if (chat.kind === "division") {
+      systemPrompt = `${systemPrompt}\n\n${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`;
+    } else {
+      turnContextParts.push(`${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`);
+    }
   }
   // 사용자 채팅에서만 자동화 생성 protocol 주입 (백그라운드 automation 실행 세션은 제외 → 재귀 방지)
-  if (chat.kind !== "division" && canWrite) systemPrompt = `${systemPrompt}\n\n${AUTOMATION_PROTOCOL}`;
+  if (chat.kind !== "division" && canWrite) {
+    systemPrompt = `${systemPrompt}\n\n${AUTOMATION_PROTOCOL}`;
+    // 자동화형 요청이면 턴 컨텍스트로도 전달 — read 권한으로 시작해 protocol 없이 생성된
+    // resume 세션에서도 자동화 계약이 이번 턴에 도달하게 한다.
+    if (isAutomationSetupRequest(req.userPrompt)) turnContextParts.push(AUTOMATION_PROTOCOL);
+  }
   // 무인 실행은 질문을 받을 사람이 없다. ASK_PROTOCOL(래퍼가 앞에 주입)보다 뒤에 오는 최종
   // 지침으로 질문 fence를 금지하고, 안전한 기본값이 없으면 "NEEDS-INPUT:"으로 명시적 실패를
   // 유도한다. automation-result.ts 분류기가 이 계약을 짝으로 감지한다(조용한 가짜 성공 방지).
@@ -2134,12 +2213,24 @@ export async function runMcpInvocation(
     });
   }
 
+  // Main-authored before model execution. The renderer/model never controls
+  // Memory Ticket identity, so success/error/cancel handling converges.
+  const memoryTurnId = `chat:${chat.id}:run:${req.runId ?? randomUUID()}:node:root`;
+  let modelTurnStarted = false;
   try {
     const runtimeUserPrompt = explicitBorrowUserPreamble
       ? `${explicitBorrowUserPreamble}\n\nRequest:\n${effectiveUserPrompt}`
       : effectiveUserPrompt;
+    // 세션 지원 러너(claude-code/codex/gemini)는 턴 컨텍스트를 분리 전달해 러너가
+    // 새 세션/resume에 맞게 배치한다. 그 외 stateless 러너는 기존처럼 시스템 프롬프트에 합친다.
+    const turnContext = turnContextParts.filter((part) => part && part.trim()).join("\n\n");
+    const sessionCapableRuntime =
+      active.kind === "claude-code" || active.kind === "codex" || active.kind === "gemini";
     const runnerReq = {
-      systemPrompt,
+      systemPrompt: sessionCapableRuntime || !turnContext
+        ? systemPrompt
+        : `${systemPrompt}\n\n${turnContext}`,
+      ...(sessionCapableRuntime && turnContext ? { turnContext } : {}),
       history,
       userPrompt: runtimeUserPrompt,
       images: req.images,
@@ -2151,23 +2242,34 @@ export async function runMcpInvocation(
       permission: req.permissions,
       ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
       ...(isUnattendedExecution(executionContext) ? { unattended: true as const } : {}),
-      ...(isUnattendedExecution(executionContext)
-        ? {
-            sessionFingerprintSeed: JSON.stringify({
-              agentId: agent.id,
-              agentSystemPrompt: agent.systemPrompt,
-              permission: req.permissions,
-              runtime: req.runtimeSelection ?? {
-                kind: active.kind,
-                backend: active.backend,
-                model: active.model,
-                effort: active.effort,
-              },
-              toolMode: req.toolMode,
-              hubMode: req.hubMode,
-            }),
-          }
-        : {}),
+      // 세션 지문 시드 — 항상 전달한다. 인터랙티브 채팅은 (chatId, agentId)만이 세션
+      // 정체성이라 모델/effort/권한/턴별 주입이 바뀌어도 같은 CLI 세션을 이어간다
+      // (무조건 세션 유지 계약, 2026-07-16). 무인 실행은 기존 안정 시드를 유지한다.
+      ...(req.agentAppMode
+        ? {}
+        : {
+            sessionFingerprintSeed: JSON.stringify(
+              isUnattendedExecution(executionContext)
+                ? {
+                    agentId: agent.id,
+                    agentSystemPrompt: agent.systemPrompt,
+                    permission: req.permissions,
+                    runtime: req.runtimeSelection ?? {
+                      kind: active.kind,
+                      backend: active.backend,
+                      model: active.model,
+                      effort: active.effort,
+                    },
+                    toolMode: req.toolMode,
+                    hubMode: req.hubMode,
+                  }
+                : {
+                    v: "agentlas.chat-session-seed.v1",
+                    chatId: chat.id,
+                    agentId: agent.id,
+                  },
+            ),
+          }),
       // 세션 resume 키 — CLI 러너가 (chatId, kind)별 세션을 재사용해
       // 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
       chatId: req.agentAppMode ? `site-agent-app:${req.runId ?? randomUUID()}` : chat.id,
@@ -2200,7 +2302,7 @@ export async function runMcpInvocation(
       // A partial JSON fence cannot be safely sanitized. Restricted runs are
       // final-only so cancel/error can never persist an unfinished Memory block.
       onPartial: (text: string) => {
-        if (!restrictedReadBoundary) {
+        if (!projectReadOnlyBoundary) {
           sink({ kind: "partial", text: partialFloor ? `${partialFloor}\n${text}` : text });
         }
       },
@@ -2221,7 +2323,7 @@ export async function runMcpInvocation(
     };
     // "계속 라이브로" 모드: 채팅에 켜져 있으면 짧은 상한(3턴)에서 멈춰 30분 간격 백그라운드로
     // 넘기지 않고, 같은 채팅에서 라이브 스트리밍을 계속 이어간다(사실상 무제한, 안전 상한만).
-    const continuousMode = !req.agentAppMode && !restrictedReadBoundary && chat.kind !== "division" && chat.continuousMode === true;
+    const continuousMode = !req.agentAppMode && !projectReadOnlyBoundary && chat.kind !== "division" && chat.continuousMode === true;
     const maxPasses = req.agentAppMode
       ? 1
       : continuousMode
@@ -2229,12 +2331,13 @@ export async function runMcpInvocation(
         : STORMBREAKER_MAX_EXECUTION_PASSES;
     let restrictedDiscardedMemoryEvents = 0;
     const sanitizeRestrictedPass = (passResult: Awaited<ReturnType<Runner>>) => {
-      if (!restrictedReadBoundary) return passResult;
+      if (!projectReadOnlyBoundary) return passResult;
       const parsed = stripAllMemoryEventBlocks(passResult.text);
       restrictedDiscardedMemoryEvents += parsed.events.length;
       return { ...passResult, text: parsed.cleanedText };
     };
     let activeRunnerReq = runnerReq;
+    modelTurnStarted = true;
     let result = await picked.runner(activeRunnerReq, runnerEvents);
     result = sanitizeRestrictedPass(result);
     advanceUsageFloor();
@@ -2254,6 +2357,8 @@ export async function runMcpInvocation(
         // 이 턴의 완료된 결과를 즉시 별도 assistant 메시지로 남긴다 — 화면엔 새 말풍선이
         // 계속 이어 붙는 것처럼 보이고, 앱이 중간에 꺼져도 그때까지 기록은 남는다.
         appendChatMessage(chat.id, "assistant", continuation.text);
+        // 세션 워터마크 전진 — 다음 resume 턴이 방금 자기 답변을 gap으로 재주입하지 않게.
+        if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind);
         sink({
           kind: "tool-use",
           status:
@@ -2488,10 +2593,14 @@ export async function runMcpInvocation(
     } catch (err) {
       console.error("[surface] parseSurfaces failed:", err);
     }
-    if (!req.agentAppMode) {
+    if (!req.agentAppMode || projectReadOnlyBoundary) {
       try {
         const curationContext = {
-          projectPath: activePath,
+          turnId: memoryTurnId,
+          // Activated read identity scopes the DB episode even when this turn
+          // cannot write project files. The read-only curator path records only
+          // a one-way hash and never appends project artifacts.
+          projectPath: memoryReadPath,
           projectId: invocationProjectId,
           agentId: agent.id,
           chatId: chat.id,
@@ -2507,18 +2616,50 @@ export async function runMcpInvocation(
           // 단일 borrow 실행 — 빌린 에이전트의 agent_repo 배움을 그 전역 둥지로 미러링.
           borrowedAgentSlugs,
         };
-        const { cleanedText } = restrictedReadBoundary
+        const semanticOptions = projectReadOnlyBoundary
+          ? {}
+          : await runSemanticMemoryReview({
+              replyText: displayText,
+              runner: picked.runner,
+              backendLabel: picked.label,
+              model: active.model ?? undefined,
+              effort: active.effort ?? undefined,
+              env: runnerEnv.env,
+              locale,
+              signal,
+              hasProject: Boolean(memoryReadPath),
+              hasAgent: Boolean(agent.id),
+            });
+        const { cleanedText } = projectReadOnlyBoundary
           ? stripReplyMemoryEventsReadOnly(
               displayText,
               curationContext,
               restrictedDiscardedMemoryEvents,
             )
-          : curateReply(displayText, curationContext);
+          : curateReply(displayText, curationContext, semanticOptions);
         // Restricted cleanup may intentionally remove the entire response. Never
         // restore the raw control block through the ordinary empty-text fallback.
-        displayText = restrictedReadBoundary ? cleanedText : cleanedText || displayText;
+        displayText = projectReadOnlyBoundary ? cleanedText : cleanedText || displayText;
       } catch (err) {
         console.error("[architecture] curateReply failed:", err);
+        try {
+          recordTerminalMemoryTurn({
+            turnId: memoryTurnId,
+            projectPath: req.agentAppMode ? null : memoryReadPath,
+            projectId: req.agentAppMode ? null : invocationProjectId,
+            agentId: agent.id,
+            chatId: chat.id,
+            runId: req.runId,
+            cwdAtRequest: req.agentAppMode ? null : workingFolder,
+            borrowedAgentSlugs,
+          }, "curation_failed");
+        } catch (ticketError) {
+          console.error("[memory] curation failure receipt failed:", ticketError);
+        }
+        const stripped = stripAllMemoryEventBlocks(displayText).cleanedText.trim();
+        displayText = stripped || (locale === "ko"
+          ? "응답은 완료됐지만 메모리 제어 블록을 안전하게 정리하지 못해 본문을 숨겼습니다."
+          : "The response completed, but its memory control block could not be safely finalized, so the body was withheld.");
       }
     }
 
@@ -2526,12 +2667,12 @@ export async function runMcpInvocation(
     // 큐레이터 인테이크(session/hypothesis) 티어로만 흘려보낸다. 심사·승격은 Curator 에이전트 몫.
     // 실패-무해: 트랜스크립트가 없거나(다른 런타임) 요약이 없으면 조용히 0건.
     try {
-      if (!req.agentAppMode && !restrictedReadBoundary && result.sessionId) {
+      if (!req.agentAppMode && !projectReadOnlyBoundary && result.sessionId) {
         harvestCompactionSummaries({
           sessionId: result.sessionId,
           cwd: workingFolder,
           ctx: {
-            projectPath: activePath,
+            projectPath: memoryReadPath,
             projectId: invocationProjectId,
             agentId: agent.id,
             chatId: chat.id,
@@ -2561,7 +2702,12 @@ export async function runMcpInvocation(
     // 다중 패스(비-continuousMode)면 이전 패스 전문을 접두 — 라이브에서 보이던 본문/도구
     // 앵커 좌표계가 final에서도 유지된다. 단일 패스는 floor가 비어 그대로.
     const displayWithFloor = partialFloor ? `${partialFloor}\n${displayText}` : displayText;
-    if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", displayWithFloor);
+    if (!req.agentAppMode) {
+      appendChatMessage(chat.id, "assistant", displayWithFloor);
+      // 세션 워터마크 전진 — 이 kind의 세션은 방금 답변까지 봤다. 다음 resume 턴의
+      // gap-replay가 자기 답변을 중복 주입하지 않고, 스웜/다른 러너 턴만 메우게 된다.
+      if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind);
+    }
     // 연속 패스에서 result.tokens는 마지막 패스만 반영 — 라이브 누적 최고치와 큰 쪽을 확정치로.
     sink({ kind: "final", text: displayWithFloor, tokens: Math.max(result.tokens ?? 0, liveUsageHigh) || undefined });
     return {
@@ -2571,6 +2717,22 @@ export async function runMcpInvocation(
       resultFolder: resolvedResultFolder,
     };
   } catch (err) {
+    if (modelTurnStarted) {
+      try {
+        recordTerminalMemoryTurn({
+          turnId: memoryTurnId,
+          projectPath: memoryReadPath,
+          projectId: invocationProjectId,
+          agentId: agent.id,
+          chatId: chat.id,
+          runId: req.runId,
+          cwdAtRequest: workingFolder,
+          borrowedAgentSlugs,
+        }, signal?.aborted ? "cancelled" : "failed");
+      } catch (ticketError) {
+        console.error("[memory] terminal turn receipt failed:", ticketError);
+      }
+    }
     sink({ kind: "error", error: invocationFailure(req, "runner-failed", err) });
     return earlyResult();
   }

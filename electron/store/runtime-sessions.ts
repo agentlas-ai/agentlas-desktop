@@ -1,22 +1,49 @@
 // CLI 런타임 세션 매핑 — chat × backend(kind)별로 CLI 세션 id를 보관한다.
 // 세션 resume를 지원하는 러너(Claude Code/Codex)가 두 번째 턴부터 시스템 프롬프트/히스토리를
-// 재전송하지 않고 이어가도록 한다. fingerprint가 달라지면(시스템 프롬프트/모델 변경)
-// 기존 세션을 버리고 새로 시작한다.
+// 재전송하지 않고 이어가도록 한다. fingerprint는 호출 표면이 정한 안정 세션 정체성이고,
+// 정체성이 달라질 때만 기존 세션을 버리고 새로 시작한다.
+//
+// updatedAt은 "이 세션이 대화를 어디까지 봤는가"의 워터마크다. 러너는 resume 시
+// updatedAt 이후에 쌓인 채팅 메시지(스웜/Ollama 등 다른 경로의 턴)를 gap-replay하고,
+// 호출자는 assistant 메시지 저장 후 touchRuntimeSession으로 워터마크를 전진시킨다.
+//
+// 인메모리 폴백: DB 쓰기/읽기가 어떤 이유로든 실패해도(테이블 없음·잠김·디스크 오류)
+// 프로세스가 살아 있는 동안 세션 연속성이 끊기지 않는다. 디스크는 앱 재시작 간 연속성,
+// 메모리는 "어떤 버그가 있어도" 턴 간 연속성을 책임진다. 같은 프로세스에서는 save가
+// 항상 메모리를 먼저 갱신하므로 메모리가 DB 이상으로 최신이다 — get은 메모리를 우선한다.
 import { getDb } from "./db";
 
 export interface RuntimeSession {
   sessionId: string;
   fingerprint: string;
+  /** 이 세션이 채팅 히스토리를 마지막으로 반영한 시각(ISO). 구버전 행/폴백은 null. */
+  updatedAt: string | null;
 }
 
+const memSessions = new Map<string, RuntimeSession>();
+const memKey = (chatId: string, kind: string): string => `${chatId}\0${kind}`;
+
 export function getRuntimeSession(chatId: string, kind: string): RuntimeSession | null {
+  const mem = memSessions.get(memKey(chatId, kind)) ?? null;
+  if (mem) return mem;
   try {
     const row = getDb()
       .prepare(
-        "SELECT session_id, fingerprint FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ?",
+        "SELECT session_id, fingerprint, updated_at FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ?",
       )
-      .get(chatId, kind) as { session_id: string; fingerprint: string } | undefined;
-    return row ? { sessionId: row.session_id, fingerprint: row.fingerprint } : null;
+      .get(chatId, kind) as
+        | { session_id: string; fingerprint: string; updated_at: string | null }
+        | undefined;
+    if (!row) return null;
+    const resolved = {
+      sessionId: row.session_id,
+      fingerprint: row.fingerprint,
+      updatedAt: row.updated_at ?? null,
+    };
+    // 첫 DB 읽기도 메모리에 승격한다. 이후 DB가 잠기거나 일시 실패해도 같은
+    // 프로세스의 다음 턴은 이미 확인한 세션을 잃지 않는다.
+    memSessions.set(memKey(chatId, kind), resolved);
+    return resolved;
   } catch {
     // 테이블 없음(구버전 DB) 등 — 세션 미사용으로 폴백.
     return null;
@@ -29,21 +56,44 @@ export function saveRuntimeSession(
   sessionId: string,
   fingerprint: string,
 ): boolean {
+  const now = new Date().toISOString();
+  // 메모리 먼저 — DB가 실패해도 이 프로세스 안에서는 세션이 절대 유실되지 않는다.
+  memSessions.set(memKey(chatId, kind), { sessionId, fingerprint, updatedAt: now });
   try {
     getDb()
       .prepare(
         `INSERT OR REPLACE INTO chat_runtime_sessions(chat_id, kind, session_id, fingerprint, updated_at)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(chatId, kind, sessionId, fingerprint, new Date().toISOString());
+      .run(chatId, kind, sessionId, fingerprint, now);
     return true;
   } catch {
-    // Callers can now emit a lifecycle receipt instead of silently losing continuity.
+    // false = 디스크 영속화 실패(재시작 시 유실 가능) — 호출자가 lifecycle receipt를 남긴다.
+    // 인메모리 폴백 덕에 진행 중인 대화의 연속성은 유지된다.
     return false;
   }
 }
 
+/**
+ * 세션 워터마크 전진 — 이 kind의 세션이 방금 저장된 assistant 메시지까지 봤다고 표시한다.
+ * assistant 메시지를 채팅에 append한 "뒤에" 호출해야 다음 resume 턴이 자기 자신의 직전
+ * 답변을 gap으로 오인해 재주입하지 않는다.
+ */
+export function touchRuntimeSession(chatId: string, kind: string): void {
+  const now = new Date().toISOString();
+  const mem = memSessions.get(memKey(chatId, kind));
+  if (mem) mem.updatedAt = now;
+  try {
+    getDb()
+      .prepare("UPDATE chat_runtime_sessions SET updated_at = ? WHERE chat_id = ? AND kind = ?")
+      .run(now, chatId, kind);
+  } catch {
+    // 무시 — 인메모리 워터마크가 프로세스 내 연속성을 지킨다.
+  }
+}
+
 export function clearRuntimeSession(chatId: string, kind: string): void {
+  memSessions.delete(memKey(chatId, kind));
   try {
     getDb()
       .prepare("DELETE FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ?")

@@ -352,6 +352,24 @@ function appendTimeline(
 
 type ToolEvent = NonNullable<McpInvocationEvent["tool"]>;
 
+function computerUseModeForTool(toolName: string): "browser" | "computer" | null {
+  const name = toolName.toLowerCase();
+  if (name.includes("browser_")) return "browser";
+  if (
+    name.includes("computer-use") ||
+    name.includes("cua-driver") ||
+    /(?:^|__)(?:get_app_state|list_apps|click|drag|scroll|type_text|press_key|set_value|select_text)$/u.test(name)
+  ) return "computer";
+  return null;
+}
+
+function announceComputerUseActivity(mode: "browser" | "computer" | null, phase: "active" | "finished"): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("agentlas:computer-use-activity", {
+    detail: mode ? { mode, phase } : { phase },
+  }));
+}
+
 function toolStepFromEvent(tool: ToolEvent, meta?: Partial<StreamStep>): StreamStep {
   return {
     id: uid(),
@@ -744,6 +762,10 @@ function ChatPage() {
   // 기록해 도구 인터리브 앵커(anchorTextLen)가 렌더 텍스트와 같은 좌표계를 쓰게 한다.
   // (raw 버퍼 길이를 쓰면 ask fence/멀티모달 마커 제거만큼 앵커가 뒤로 밀린다)
   const processedTextLenRef = useRef(0);
+  // Only a run that actually used Browser / Computer Use may auto-minimize the
+  // floating screen. Ordinary chat completions must not close a view the user
+  // opened manually.
+  const computerUseActiveRef = useRef(false);
   // runId가 도착하기 전(invoke:run 왕복 중)에 Stop을 누른 경우를 기억 — 도착 즉시 취소한다.
   const cancelRequestedRef = useRef(false);
   // 스티어링으로 인한 취소인지 구분 — 이 취소는 "aborted" 에러 버블을 띄우지 않고,
@@ -887,6 +909,15 @@ function ChatPage() {
   // send()의 인라인 핸들러를 추출해 재접속 경로와 공유 — lastStatusRef는 중복 status 억제용(공유).
   const consumeEvent = useCallback(
     (ev: McpInvocationEvent, placeholderId: string, lastStatusRef: { text: string }) => {
+      const computerUseMode = ev.tool ? computerUseModeForTool(ev.tool.name) : null;
+      if (computerUseMode) {
+        computerUseActiveRef.current = true;
+        announceComputerUseActivity(computerUseMode, "active");
+      }
+      if ((ev.kind === "final" || ev.kind === "error") && computerUseActiveRef.current) {
+        computerUseActiveRef.current = false;
+        announceComputerUseActivity(null, "finished");
+      }
       const fallbackAgentId = agent?.id ?? "active-agent";
       const fallbackAgentName =
         agentGroup?.orchestratorName ||

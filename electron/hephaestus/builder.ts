@@ -41,7 +41,7 @@ import type {
 import type { ResolvedMcpBuildAttachment } from "../mcp-tools/attachment-resolver";
 import { emptyMcpBuildReceipt } from "../mcp-tools/attachment-resolver";
 import { hephaestusRoot } from "./engine";
-import { securityScan } from "./commands";
+import { contractScaffold, contractVerify, securityScan } from "./commands";
 import { isCompletedBuildTurn } from "./build-turn";
 import { stageAttachments, type ResolvedHephaestusBuildAttachment } from "./build-attachments";
 import { verifiedCompletedPackageRoot } from "./build-result-path";
@@ -387,6 +387,50 @@ export function classifyHephaestusBuildMode(
   return "single";
 }
 
+/**
+ * 필수 아티팩트 목록은 엔진의 기계화된 계약(package-contract.json)에서 파생한다 —
+ * 데스크탑이 자체 목록을 유지하면 OS 계약과 드리프트가 생긴다. 계약 파일이
+ * 없는 구버전 엔진에서는 기존 정적 한 줄로 폴백한다.
+ */
+export function contractRequirementLines(
+  root: string,
+  mode: NonNullable<HephaestusBuildRequest["mode"]>,
+): string[] {
+  const raw = readIf(root, "package-contract.json");
+  if (raw) {
+    try {
+      const contract = JSON.parse(raw) as {
+        kind?: string;
+        artifacts?: Array<{ path?: string; modes?: string[]; required?: boolean; description?: string }>;
+      };
+      if (contract.kind === "agentlas-package-contract" && Array.isArray(contract.artifacts)) {
+        const lines = contract.artifacts
+          .filter((artifact) => Boolean(artifact.path) && (artifact.modes ?? []).includes(mode))
+          .map((artifact) =>
+            `  - ${artifact.path} (${artifact.required === false ? "optional" : "required"}): ${artifact.description ?? ""}`.trimEnd(),
+          );
+        if (lines.length > 0) {
+          return [
+            "- Write EVERY artifact in the machine-readable package contract below as REAL files in the",
+            "  current working directory. The host re-verifies this exact list after the build and sends",
+            "  back blockers for anything missing or unfilled — the build is not complete until it passes.",
+            "  Scaffolded template files may already exist in the workspace: FILL them (replace every",
+            "  {{PLACEHOLDER}}), never delete them and never leave placeholders behind.",
+            ...lines,
+            "- Plus runtime adapters and scripts/verify-package.sh per the builder discipline above.",
+          ];
+        }
+      }
+    } catch {
+      // Malformed contract file — fall back to the legacy static line below.
+    }
+  }
+  return [
+    "- Write every required file (AGENTS.md, agent.md or agents/*/agent.md, agentlas.json, .agentlas/*,",
+    "  runtime adapters, scripts/verify-package.sh, docs/*) as REAL files in the current working directory.",
+  ];
+}
+
 /** 캐논 AGENTS.md + 정확히 한 개의 선택된 빌더 + 출력 지침. */
 export function composeBuilderPrompt(root: string, req: ResolvedHephaestusBuildRequest, locale: RuntimeLocale): string {
   const ko = locale === "ko";
@@ -469,8 +513,7 @@ export function composeBuilderPrompt(root: string, req: ResolvedHephaestusBuildR
       "  success uses verified run evidence, while aesthetic preference uses explicit randomized human",
       "  pairwise A/B evidence with sample size, distinct raters, and disagreement. Never merge them into",
       "  the same or a single universal quality score, and never copy either asset into the base package.",
-      "- Write every required file (AGENTS.md, agent.md or agents/*/agent.md, agentlas.json, .agentlas/*,",
-      "  runtime adapters, scripts/verify-package.sh, docs/*) as REAL files in the current working directory.",
+      ...contractRequirementLines(root, selectedMode),
       "- Canonical mode shape is strict: mode=single MUST include root `agent.md` (not only `.agents/*`);",
       "  mode=team MUST include `agents/<worker>/agent.md`. Do not substitute editor-specific hidden folders.",
       "- Token/tool stop discipline: build the smallest complete package for the selected mode and acceptance",
@@ -650,6 +693,27 @@ export async function runHephaestusBuild(
     }
   }
 
+  const buildMode = req.mode ?? classifyHephaestusBuildMode(req.request, {
+    hasAttachments: Boolean(req.attachments?.length),
+  });
+  // 완결성은 모델 기억력이 아니라 호스트가 보장한다: 첫 턴 전에 계약 템플릿을
+  // 워크스페이스에 스캐폴드(기존 파일 무손상). 모델은 빈칸만 채우면 되고, 자율
+  // 루프 런타임(claude-code 등)은 스캐폴드 위에 자유롭게 덧쓴다. 구버전 엔진
+  // (contract 커맨드 없음)이면 조용히 건너뛴다 — 프롬프트 계약 목록이 여전히 있다.
+  if (!req.runtimeSessionId && !signal.aborted) {
+    const scaffolded = await contractScaffold(req.workspace, { mode: buildMode, signal });
+    const created = (scaffolded.json as { created?: string[] } | null)?.created ?? [];
+    if (created.length > 0) {
+      sink({
+        runId,
+        kind: "log",
+        text: ko
+          ? `패키지 계약 스캐폴드 — 템플릿 ${created.length}개 준비(빌더가 빈칸을 채웁니다)`
+          : `Package contract scaffold — ${created.length} template files staged (builder fills the blanks)`,
+      });
+    }
+  }
+
   const agentPrompt = composeBuilderPrompt(root, req, locale);
   // Build-only wrapper: no general Surface protocol or connection skill, and no
   // second wrapping inside the selected runtime (sentinel-enforced in runner.ts).
@@ -809,14 +873,95 @@ export async function runHephaestusBuild(
       }
     }
 
+    // ── 패키지 계약 게이트 + 표적 수리 루프 ─────────────────────────────
+    // 연구 근거: 구조화는 생성이 아니라 검증을 조인다. 어떤 런타임이든 생성은
+    // 자유롭게 두고, 완성 후 기계 계약(verify JSON)의 blockers만 되먹여 그
+    // 항목만 고치게 한다. blockers가 줄지 않으면 조기 종료(모델 무관 규칙).
+    let contractReport: unknown = null;
+    let finalResultText = resultText;
+    let finalSessionId = result.sessionId;
+    // completedPackage.error(BUILD_COMPLETE 타깃 무효)는 보안스캔 게이트일 뿐이다.
+    // 계약 검증은 Main이 소유한 워크스페이스 경로(realpath 폴백)를 대상으로 하므로
+    // 모델이 완료 폴더명을 잘못 표시해도 호스트가 소유한 경로에서 검증한다.
+    if (!signal.aborted && isCompletedBuildTurn(resultText)) {
+      const readBlockers = (report: unknown): string[] | null => {
+        const blockers = (report as { blockers?: unknown } | null)?.blockers;
+        return Array.isArray(blockers) ? blockers.map(String) : null;
+      };
+      const runContractVerify = async (): Promise<unknown> => {
+        const res = await contractVerify(completedPackageRoot, { mode: buildMode, signal });
+        if (res.json && readBlockers(res.json) !== null) return res.json;
+        // 구버전 엔진(contract 커맨드 없음)/무결과 — 클린처럼 보이지 않게 명시.
+        return { status: "unverified", reason: res.error || "contract verify returned no result" };
+      };
+      contractReport = await runContractVerify();
+      let previousCount = Number.POSITIVE_INFINITY;
+      for (let round = 1; round <= 2 && !signal.aborted; round += 1) {
+        const blockers = readBlockers(contractReport);
+        if (!blockers || blockers.length === 0 || blockers.length >= previousCount) break;
+        previousCount = blockers.length;
+        sink({
+          runId,
+          kind: "stage",
+          stage: "contract",
+          text: ko
+            ? `패키지 계약 미충족 ${blockers.length}건 — 표적 수리 ${round}/2`
+            : `Package contract blockers: ${blockers.length} — targeted repair ${round}/2`,
+        });
+        const repairPrompt = [
+          "CONTRACT_REPAIR: The generated package failed the machine-readable package contract gate.",
+          "Fix ONLY the items below by writing or updating real files inside the existing package folder.",
+          "Do not rebuild from scratch, do not ask questions, and end your reply with the same",
+          "'BUILD_COMPLETE:' line as before.",
+          "",
+          ...blockers.slice(0, 40).map((blocker) => `- ${blocker}`),
+        ].join("\n");
+        try {
+          const repairResult = await buildPicked.runner(
+            {
+              ...makeRunnerRequest(finalMcpAttachment),
+              userPrompt: repairPrompt,
+              runtimeSessionId: finalSessionId,
+              history: [
+                ...historyEntries,
+                { id: "build-repair-user", role: "user" as const, text: userPrompt, createdAt: nowIso },
+                { id: "build-repair-assistant", role: "assistant" as const, text: finalResultText.slice(-8_000), createdAt: nowIso },
+              ],
+            },
+            runnerEvents,
+          );
+          finalSessionId = repairResult.sessionId ?? finalSessionId;
+          if (repairResult.text.trim()) finalResultText = repairResult.text;
+        } catch {
+          break; // 수리 턴 실패 — 마지막 verify 결과를 그대로 보고한다.
+        }
+        contractReport = await runContractVerify();
+      }
+      const finalBlockers = readBlockers(contractReport);
+      sink({
+        runId,
+        kind: "stage",
+        stage: "contract",
+        text:
+          finalBlockers && finalBlockers.length === 0
+            ? (ko ? "패키지 계약 통과 — 라우팅 준비 완료" : "Package contract passed — routing-ready")
+            : finalBlockers
+              ? (ko
+                  ? `패키지 계약 미충족 ${finalBlockers.length}건 남음 — 결과에 첨부됨`
+                  : `Package contract: ${finalBlockers.length} blocker(s) remain — attached to result`)
+              : (ko ? "패키지 계약 미검증 — 통과로 간주하지 말 것" : "Package contract unverified — do not treat as passing"),
+      });
+    }
+
     sink({
       runId,
       kind: "done",
-      text: resultText,
-      sessionId: result.sessionId,
+      text: finalResultText,
+      sessionId: finalSessionId,
       result: {
         workspace: completedPackageRoot,
         securityScan: scan,
+        ...(contractReport !== null ? { packageContract: contractReport } : {}),
         mcpReceipt,
         ...(supplementalQuestion ? { supplementalQuestion } : {}),
       } satisfies HephaestusBuildResult,

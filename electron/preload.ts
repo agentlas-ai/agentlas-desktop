@@ -412,6 +412,12 @@ const api: AgentlasIpc = {
     resolveApproval: (requestId: string, decision) =>
       ipcRenderer.invoke("browser:resolveApproval", requestId, decision),
     listLogs: (limit?: number) => ipcRenderer.invoke("browser:listLogs", limit),
+    captureLiveFrame: () => ipcRenderer.invoke("browser:captureLiveFrame"),
+    focusLiveTarget: (targetId?: string) => ipcRenderer.invoke("browser:focusLiveTarget", targetId),
+  },
+  computerUse: {
+    capturePreview: (sourceId?: string) => ipcRenderer.invoke("computerUse:capturePreview", sourceId),
+    revealPreview: () => ipcRenderer.invoke("computerUse:revealPreview"),
   },
   projects: {
     list: () => ipcRenderer.invoke("projects:list"),
@@ -423,6 +429,8 @@ const api: AgentlasIpc = {
   },
   ontology: {
     getProject: (projectId: string) => ipcRenderer.invoke("ontology:getProject", projectId),
+    provision: (projectId: string) => ipcRenderer.invoke("ontology:provision", projectId),
+    sync: (projectId: string) => ipcRenderer.invoke("ontology:sync", projectId),
     addSource: (projectId, absPath, scope, kind) =>
       ipcRenderer.invoke("ontology:addSource", projectId, absPath, scope, kind),
     openInbox: (projectId: string) => ipcRenderer.invoke("ontology:openInbox", projectId),

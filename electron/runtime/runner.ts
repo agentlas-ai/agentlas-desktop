@@ -39,6 +39,13 @@ export interface RunnerRequest {
    * overlays stay in the prompt but do not force a new CLI conversation every run. */
   sessionFingerprintSeed?: string;
   /**
+   * 이번 턴에만 유효한 호스트 주입 컨텍스트(메모리 캡슐·온톨로지·MCP 자동선택·브리핑 게이트 등).
+   * 시스템 프롬프트와 분리해 두어야 세션 지문이 턴마다 바뀌지 않는다. 세션 지원 러너는
+   * 새 세션이면 시스템 프롬프트 뒤에 붙이고, resume 턴이면 사용자 메시지 앞에 싣는다
+   * (resume에서는 시스템 프롬프트가 재전송되지 않는다).
+   */
+  turnContext?: string;
+  /**
    * 에이전트가 실제로 실행될 작업 디렉터리(= 사용자가 지정한 프로젝트/워킹 폴더).
    * 미설정이면 러너가 안전한 기본 폴더(agentRunCwd)를 쓴다. 파일 생성·빌드는 이 폴더에서 일어난다.
    */

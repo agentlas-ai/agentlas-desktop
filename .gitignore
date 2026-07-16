@@ -81,22 +81,9 @@ output/playwright/
 /output/experience-chip-management-ko.png
 /findings/
 
-# Internal working documents are local-only. Public product documentation is
-# explicitly allow-listed below; new plans, PRDs, research, QA receipts, and
-# private screenshots under docs/ must never enter a release commit.
+# Internal working documents are local-only. New docs, plans, PRDs, research,
+# QA receipts, and private screenshots must never enter a release commit.
 /docs/**
-!/docs/ARCHITECTURE.md
-!/docs/ARCHITECTURE_PLAYBOOK.md
-!/docs/M0-CHECKLIST.md
-!/docs/PUBLIC-RELEASE.md
-!/docs/AGENT_VISIBILITY_CONTRACT.md
-!/docs/UPDATER_RECOVERY_CONTRACT.md
-!/docs/cloud-agent-framework.md
-!/docs/document-studio.md
-!/docs/generated-app-engine.md
-!/docs/menu-action-contract.md
-!/docs/system-agents-architecture.md
-!/docs/screenshot.png
 
 # Other conventional local-only document roots and root-level PM receipts.
 /internal/
@@ -114,6 +101,51 @@ output/playwright/
 /*_RESEARCH*.md
 /*_PLAN*.md
 /*_NOTES*.md
+
+# Development-only material. This does not untrack historical source files;
+# the public release builder is the authority for the installable artifact.
+tests/
+test/
+**/tests/
+**/test/
+benchmarks/
+**/benchmarks/
+fixtures/
+**/fixtures/
+research/
+plans/
+reports/
+receipts/
+evidence/
+artifacts/
+output/
+tmp/
+temp/
+scratch/
+coverage/
+playwright-report/
+test-results/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+**/*_test.py
+**/test_*.py
+**/*.test.js
+**/*.test.ts
+**/*.test.mjs
+**/*.test.cjs
+**/test-*.js
+**/test-*.ts
+**/test-*.mjs
+**/test-*.cjs
+**/test_*.sh
+**/*-smoke.ts
+**/*-smoke.mjs
+**/*-smoke.cjs
+**/*-benchmark.*
+**/*benchmark*.*
+.env.example
+*.env.example
 
 # ── Embedded engine (separate open-source repo) ──────────────────────────────
 # Hephaestus is its own public repo (github.com/agentlas-ai/Hephaestus). It is
@@ -191,3 +223,19 @@ signing/*
 credentials/*
 !credentials/README.md
 # <<< agentlas local project state <<<
+
+# Agentlas local credentials and signing material never enter public commits.
+.env
+.env.local
+.env.*.local
+._*
+signing/
+credentials/
+.agentlas/ontology-runtime.sqlite*
+.agentlas/career-graph.sqlite*
+.agentlas/experience-relations.jsonl*
+.agentlas/.experience-relations.jsonl.*
+
+# Rebuilt from native/macos/AgentlasInputDriver.swift for each macOS package.
+/build-resources/native/macos/agentlas-input-driver
+/build-resources/native/macos/.build-*

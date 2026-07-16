@@ -3,7 +3,11 @@
 //   - 에이전트 출력의 `## Spawn` 블록을 파싱해 런타임에 새 작업/핸드오프를 그래프에 추가(emergent)
 //   - 준비/실행 작업이 소진되면 종합 → 최종 답변을 메인 버블에 스트리밍 + 채팅에 저장
 import type { McpInvocationEvent } from "../../shared/types";
-import { appendChatMessage } from "../store/chats";
+import { appendChatMessage, listChatMessages } from "../store/chats";
+import {
+  renderConversationContext,
+  SWARM_HISTORY_CONTEXT_TOKENS,
+} from "../runtime/continuity";
 import { getAgentConcurrency } from "../store/concurrency";
 import { tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
 import type { BorrowedTaskForceParams } from "./borrowed-task-force";
@@ -58,6 +62,7 @@ function swarmProtocol(
   board: SwarmBoard,
   task: SwarmTask,
   runtimeInventory: ReturnType<typeof workloadRuntimeInventory>,
+  conversationContext = "",
 ): string {
   const doneList = board.tasks
     .filter((t) => t.status === "done")
@@ -72,6 +77,9 @@ function swarmProtocol(
   return [
     "You are one worker in an EMERGENT AGENT SWARM collaborating on a shared goal.",
     `SHARED GOAL: ${goal}`,
+    conversationContext
+      ? `\nONGOING CONVERSATION (this swarm continues the user's chat — interpret the goal in this context, and never call it a previous session):\n${conversationContext}`
+      : "",
     "",
     "YOUR TASK RIGHT NOW:",
     `- ${task.title}${task.role ? ` (role: ${task.role})` : ""}`,
@@ -212,6 +220,24 @@ export async function runSwarmInvocation(
   const goal = p.req.userPrompt;
   if (p.stormbreakerMode && !p.stormbreakerHarness) {
     throw new Error("Stormbreaker requires the canonical Goal + UltraCode harness from Agentlas Core.");
+  }
+  // 대화 연속성 — 스웜으로 빠져도 같은 채팅의 맥락이 워커/신시사이저에 전달돼야 한다
+  // (2026-07-16 세션유지 계약). persistUserMessage가 이미 실행됐으므로 방금 저장된
+  // 이번 턴 user 메시지는 히스토리에서 제외한다.
+  let conversationContext = "";
+  try {
+    const rawHistory = listChatMessages(p.chat.id, 60);
+    const priorHistory =
+      rawHistory.length > 0 && rawHistory[rawHistory.length - 1].role === "user"
+        ? rawHistory.slice(0, -1)
+        : rawHistory;
+    conversationContext = renderConversationContext(
+      priorHistory,
+      p.locale,
+      SWARM_HISTORY_CONTEXT_TOKENS,
+    ).block;
+  } catch {
+    // 히스토리 조회 실패가 스웜 실행 자체를 막아선 안 된다 — 맥락 없이 진행.
   }
   const coreHarnessPrompt = p.stormbreakerMode ? p.stormbreakerHarness?.system_prompt : undefined;
   if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(p.active.kind)) {
@@ -453,7 +479,7 @@ export async function runSwarmInvocation(
             p.orchestratorAgent.systemPrompt,
           ),
           coreHarnessPrompt,
-          swarmProtocol(goal, board, task, runtimeInventory),
+          swarmProtocol(goal, board, task, runtimeInventory, conversationContext),
           p.stormbreakerMode ? STORMBREAKER_LOOP_PROTOCOL : "",
           ontology.prompt,
         ].filter(Boolean).join("\n\n"),
@@ -569,6 +595,9 @@ export async function runSwarmInvocation(
           "Integrate them into ONE coherent final answer for the user. Reconcile overlaps, note anything incomplete.",
           "Do not just concatenate. Do not include a `## Spawn` block.",
           `SHARED GOAL: ${goal}`,
+          conversationContext
+            ? `ONGOING CONVERSATION (this swarm continues the user's chat — answer as its natural next reply, and never call it a previous session):\n${conversationContext}`
+            : "",
           ontology.prompt,
         ].join("\n"),
         history: [],

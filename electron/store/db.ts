@@ -12,7 +12,7 @@ import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 67;
+const SCHEMA_VERSION = 68;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -1064,7 +1064,7 @@ export function initStore(): void {
 
   // ── v24 → v25: CLI 런타임 세션 매핑 (chat × backend별 세션 id) ──
   //   세션 resume(Claude Code/Codex 등)로 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
-  //   fingerprint: 시스템 프롬프트/권한/표면 모드/모델/effort가 바뀌면 새 세션을 시작하기 위한 해시.
+  //   fingerprint: 호출 표면이 정한 안정 세션 정체성 해시. 정체성이 바뀔 때만 새 세션을 시작한다.
   if (userVersion < 25) {
     _db.exec(`
       CREATE TABLE IF NOT EXISTS chat_runtime_sessions (
@@ -2539,6 +2539,140 @@ export function initStore(): void {
     if (!columns.has("runtime_selection_json")) {
       _db.exec("ALTER TABLE automations ADD COLUMN runtime_selection_json TEXT");
     }
+  }
+
+  // v68: every completed, failed, or cancelled model turn gets one
+  // content-bounded Memory Ticket.
+  // The ticket/episode ledger observes every turn; only candidate decisions
+  // approved by the Curator can become durable memory_entries. Relation edges
+  // are local embedding projections and never create new memory content.
+  if (userVersion < 68) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS memory_tickets (
+        ticket_id TEXT PRIMARY KEY,
+        turn_key TEXT NOT NULL UNIQUE,
+        turn_id TEXT,
+        run_id TEXT,
+        node_id TEXT,
+        chat_id TEXT,
+        agent_id TEXT,
+        project_id TEXT,
+        project_path_hash TEXT,
+        emitter_status TEXT NOT NULL
+          CHECK(emitter_status IN ('valid','empty','missing','malformed','read_only')),
+        candidate_count INTEGER NOT NULL DEFAULT 0 CHECK(candidate_count >= 0),
+        state TEXT NOT NULL DEFAULT 'received'
+          CHECK(state IN ('received','completed','read_only','failed')),
+        curator_mode TEXT NOT NULL DEFAULT 'policy'
+          CHECK(curator_mode IN ('semantic','policy','policy_fallback','read_only')),
+        curation_outcome TEXT NOT NULL DEFAULT 'no_candidates'
+          CHECK(curation_outcome IN ('decided','no_candidates','malformed_output','curator_failed','read_only')),
+        written_count INTEGER NOT NULL DEFAULT 0 CHECK(written_count >= 0),
+        deduped_count INTEGER NOT NULL DEFAULT 0 CHECK(deduped_count >= 0),
+        redacted_count INTEGER NOT NULL DEFAULT 0 CHECK(redacted_count >= 0),
+        session_count INTEGER NOT NULL DEFAULT 0 CHECK(session_count >= 0),
+        discarded_count INTEGER NOT NULL DEFAULT 0 CHECK(discarded_count >= 0),
+        failure_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_tickets_project_created
+        ON memory_tickets(project_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_tickets_agent_created
+        ON memory_tickets(agent_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_tickets_status_created
+        ON memory_tickets(emitter_status, state, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS memory_decisions (
+        decision_id TEXT PRIMARY KEY,
+        ticket_id TEXT NOT NULL,
+        candidate_index INTEGER NOT NULL CHECK(candidate_index >= 0),
+        content_hash TEXT NOT NULL
+          CHECK(length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),
+        memory_kind TEXT NOT NULL,
+        proposed_scope TEXT NOT NULL,
+        resolved_scope TEXT NOT NULL,
+        action TEXT NOT NULL
+          CHECK(action IN ('written','deduped','redacted','session','discarded','deferred')),
+        reason_code TEXT NOT NULL,
+        target_memory_id TEXT,
+        confidence TEXT NOT NULL,
+        sensitivity TEXT NOT NULL,
+        curator_mode TEXT NOT NULL
+          CHECK(curator_mode IN ('semantic','policy','policy_fallback','read_only')),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(ticket_id) REFERENCES memory_tickets(ticket_id) ON DELETE CASCADE,
+        FOREIGN KEY(target_memory_id) REFERENCES memory_entries(id) ON DELETE SET NULL,
+        UNIQUE(ticket_id, candidate_index)
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_decisions_ticket_action
+        ON memory_decisions(ticket_id, action, candidate_index);
+
+      CREATE TABLE IF NOT EXISTS memory_relation_edges (
+        relation_id TEXT PRIMARY KEY,
+        from_memory_id TEXT NOT NULL,
+        to_memory_id TEXT NOT NULL,
+        relation_type TEXT NOT NULL
+          CHECK(relation_type IN ('similar_to','supersedes','contradicts')),
+        score REAL,
+        owner_scope_key TEXT NOT NULL,
+        embedding_model TEXT,
+        embedding_adapter TEXT,
+        embedding_model_sha256 TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(from_memory_id) REFERENCES memory_entries(id) ON DELETE CASCADE,
+        FOREIGN KEY(to_memory_id) REFERENCES memory_entries(id) ON DELETE CASCADE,
+        CHECK(from_memory_id <> to_memory_id),
+        CHECK(score IS NULL OR (score >= -1.0 AND score <= 1.0)),
+        UNIQUE(from_memory_id, to_memory_id, relation_type)
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_relation_from
+        ON memory_relation_edges(from_memory_id, relation_type, score DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_relation_to
+        ON memory_relation_edges(to_memory_id, relation_type, score DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_relation_owner
+        ON memory_relation_edges(owner_scope_key, relation_type, score DESC);
+
+      CREATE TABLE IF NOT EXISTS memory_episodes (
+        episode_id TEXT PRIMARY KEY,
+        ticket_id TEXT NOT NULL UNIQUE,
+        project_id TEXT,
+        project_path_hash TEXT,
+        agent_id TEXT,
+        chat_id TEXT,
+        summary TEXT,
+        summary_hash TEXT,
+        embedding_model TEXT,
+        embedding_adapter TEXT,
+        embedding_model_sha256 TEXT,
+        embedding_content_hash TEXT,
+        embedding_dimensions INTEGER,
+        embedding_json TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(ticket_id) REFERENCES memory_tickets(ticket_id) ON DELETE CASCADE,
+        CHECK(project_path_hash IS NULL OR
+          (length(project_path_hash) = 64 AND project_path_hash NOT GLOB '*[^0-9a-f]*')),
+        CHECK(summary_hash IS NULL OR
+          (length(summary_hash) = 64 AND summary_hash NOT GLOB '*[^0-9a-f]*'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_episodes_project_created
+        ON memory_episodes(project_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_episodes_project_path_created
+        ON memory_episodes(project_path_hash, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_episodes_agent_created
+        ON memory_episodes(agent_id, created_at DESC);
+    `);
+  }
+
+  // Development builds may already have created the v68 table before the
+  // folder-hash timeline key was added. Keep that local state upgradeable.
+  if (tableExists(_db, "memory_episodes")) {
+    const episodeColumns = new Set(schemaColumns(_db, "memory_episodes").map((column) => column.name));
+    if (!episodeColumns.has("project_path_hash")) {
+      _db.exec("ALTER TABLE memory_episodes ADD COLUMN project_path_hash TEXT");
+    }
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_episodes_project_path_created
+      ON memory_episodes(project_path_hash, created_at DESC)`);
   }
 
   // Run on every boot as well as the v52 upgrade. A hard process exit can

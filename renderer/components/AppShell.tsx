@@ -18,6 +18,7 @@ import { IconLayers, IconBug, IconCheck } from "./Icon";
 import { PageTour, replayCurrentPageTour } from "./PageTour";
 import { BuildDoneToast } from "./BuildDoneToast";
 import { BrowserActionApprovalSheet } from "./BrowserActionApprovalSheet";
+import FloatingComputerUsePanel from "./browser/FloatingComputerUsePanel";
 import { OntologyChipFeatureUpdateModal } from "./OntologyChipFeatureUpdateModal";
 import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import {
@@ -238,6 +239,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <PageTour pathname={pathname} />
       <BuildDoneToast />
       <BrowserActionApprovalSheet />
+      {showWorkspaceSidebar && <FloatingComputerUsePanel />}
       <OntologyChipFeatureUpdateModal
         eligible={featureUpdateEligible}
         locale={locale}

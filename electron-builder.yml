@@ -78,6 +78,9 @@ extraResources:
       - "!output/**"
       - "!tests/**"
       - "!benchmarks/**"
+      - "!docs/**"
+      - "!**/docs/**"
+      - "!research/**"
       - "!examples/**"
       - "!.playwright-mcp/**"
       - "!.pytest_cache/**"
@@ -158,6 +161,8 @@ mac:
   extraResources:
     - from: build-resources/macos-release-signing-policy.json
       to: macos-release-signing-policy.json
+    - from: build-resources/native/macos/agentlas-input-driver
+      to: native/macos/agentlas-input-driver
   # An official-ID bundle must never be emitted as an unsigned local artifact.
   # The isolated local config explicitly overrides this within its own ID.
   forceCodeSigning: true

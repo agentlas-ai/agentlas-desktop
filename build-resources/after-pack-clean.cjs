@@ -5,21 +5,45 @@ const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 
 const execFileAsync = promisify(execFile);
-const MODEL2VEC_ASSET_PARTS = ["assets", "model2vec", "potion-base-8M-int8"];
+const MODEL2VEC_ASSET_PARTS = ["assets", "model2vec", "potion-multilingual-128M-int8"];
 const MODEL2VEC_REQUIRED_FILES = [
-  "embeddings.i8",
   "scales.f32le",
   "tokenizer.json",
   "LICENSE.model.txt",
 ];
 const MODEL2VEC_ASSET_FORMAT = "agentlas-model2vec-int8-v1";
+const MODEL2VEC_CONTENT_SHA256 = "aa806dbd4c6025f47b0242f8b92eb789109a0c612524980eb905fda3b5b73bde";
+const MODEL2VEC_ORDERED_PARTS = [
+  {
+    name: "embeddings.i8.part-000",
+    sha256: "e41c2cd2bf7f77925d5f6162242f22d31e731c4daec44adc4d71fbe27d51ac36",
+    size: 67_108_864,
+  },
+  {
+    name: "embeddings.i8.part-001",
+    sha256: "2720f905f4959b0067e875b38cbb70b72ab2107ec5026899294c700146439f3f",
+    size: 60_981_504,
+  },
+];
+const MODEL2VEC_ORDERED_PARTS_SHA256 = "4d0382e963f7fd099b4f7be64c004c5772c4962662ce9af2cf76b7a19a114e91";
 
-function model2VecContentIdentity(files) {
+function model2VecContentIdentity(files, names) {
   const digest = createHash("sha256");
-  for (const name of [...MODEL2VEC_REQUIRED_FILES].sort()) {
+  for (const name of [...names].sort()) {
     const record = files[name];
     digest.update(name).update("\0").update(record.sha256).update("\0")
       .update(String(record.size)).update("\n");
+  }
+  return digest.digest("hex");
+}
+
+function model2VecOrderedPartsIdentity(files, names) {
+  const digest = createHash("sha256");
+  for (const [index, name] of names.entries()) {
+    const record = files[name];
+    if (!record) return "";
+    digest.update(String(index)).update("\0").update(name).update("\0")
+      .update(record.sha256).update("\0").update(String(record.size)).update("\n");
   }
   return digest.digest("hex");
 }
@@ -52,8 +76,26 @@ async function verifyModel2VecAsset(assetRoot, label) {
   if (!manifest.files || typeof manifest.files !== "object" || Array.isArray(manifest.files)) {
     throw new Error(`[afterPack] ${label} Model2Vec manifest files missing or invalid`);
   }
+  const embeddingParts = Array.isArray(manifest.embeddingParts)
+    ? manifest.embeddingParts.filter((name) => typeof name === "string" && /^embeddings\.i8\.part-\d{3}$/.test(name))
+    : [];
+  if (!embeddingParts.length || embeddingParts.length !== manifest.embeddingParts.length
+    || new Set(embeddingParts).size !== embeddingParts.length
+    || JSON.stringify(embeddingParts) !== JSON.stringify(MODEL2VEC_ORDERED_PARTS.map((part) => part.name))) {
+    throw new Error(`[afterPack] ${label} Model2Vec embeddingParts missing or invalid`);
+  }
+  if (!MODEL2VEC_ORDERED_PARTS.every((part) => (
+    manifest.files[part.name]?.sha256 === part.sha256 && manifest.files[part.name]?.size === part.size
+  ))) {
+    throw new Error(`[afterPack] ${label} Model2Vec ordered embedding part record mismatch`);
+  }
+  const orderedPartsSha256 = model2VecOrderedPartsIdentity(manifest.files, embeddingParts);
+  if (orderedPartsSha256 !== MODEL2VEC_ORDERED_PARTS_SHA256) {
+    throw new Error(`[afterPack] ${label} Model2Vec ordered embedding part identity mismatch`);
+  }
+  const requiredFiles = [...embeddingParts, ...MODEL2VEC_REQUIRED_FILES];
 
-  for (const name of MODEL2VEC_REQUIRED_FILES) {
+  for (const name of requiredFiles) {
     const record = manifest.files[name];
     const filePath = path.join(assetRoot, name);
     if (!record || !/^[0-9a-f]{64}$/.test(String(record.sha256 || ""))
@@ -76,9 +118,16 @@ async function verifyModel2VecAsset(assetRoot, label) {
       throw new Error(`[afterPack] ${label} Model2Vec asset checksum mismatch: ${name}`);
     }
   }
+  const dimensions = Number(manifest.dimensions);
+  const vocabSize = Number(manifest.vocabSize);
+  const embeddingBytes = embeddingParts.reduce((sum, name) => sum + manifest.files[name].size, 0);
+  if (!Number.isInteger(dimensions) || dimensions !== 256 || !Number.isInteger(vocabSize)
+    || vocabSize <= 0 || embeddingBytes !== dimensions * vocabSize) {
+    throw new Error(`[afterPack] ${label} Model2Vec split embedding shape mismatch`);
+  }
 
-  const contentSha256 = model2VecContentIdentity(manifest.files);
-  if (contentSha256 !== manifest.contentSha256) {
+  const contentSha256 = model2VecContentIdentity(manifest.files, requiredFiles);
+  if (contentSha256 !== manifest.contentSha256 || contentSha256 !== MODEL2VEC_CONTENT_SHA256) {
     throw new Error(`[afterPack] ${label} Model2Vec contentSha256 mismatch`);
   }
   return { contentSha256, manifestPath, manifestSha256 };
@@ -127,6 +176,10 @@ function isForbiddenRuntimePath(relativePath) {
   if (base.startsWith("._")) return true;
   if ([".git", "signing", "credentials", ".memory.local", ".ontology-runtime", ".codex", "__pycache__"]
     .some((segment) => lowerParts.includes(segment))) return true;
+  if (["tests", "test", "benchmarks", "benchmark", "fixtures", "fixture", "docs", "findings", "evidence", "artifacts", "output"]
+    .some((segment) => lowerParts.includes(segment))) return true;
+  if (lowerParts[0] === "research") return true;
+  if (/^(?:test[-_]|.*[-_.]test\.|.*benchmark|.*fixture)/.test(base)) return true;
   if (lowerParts[0] === ".agentlas") {
     const mutablePath = lowerParts.slice(1).join("/");
     if (/^(?:ontology-runtime\.sqlite|career-graph\.sqlite|experience-relations\.jsonl)/.test(mutablePath)) return true;
@@ -229,6 +282,46 @@ async function verifyEmbeddedAgentlasOs(context) {
   );
 }
 
+async function verifyMacComputerUseDriver(context) {
+  if (context.electronPlatformName !== "darwin") return;
+  const projectDir = context.packager?.projectDir || process.cwd();
+  const productFilename = context.packager?.appInfo?.productFilename || "Agentlas";
+  const sourcePath = path.join(projectDir, "build-resources", "native", "macos", "agentlas-input-driver");
+  const packagedPath = path.join(
+    context.appOutDir,
+    `${productFilename}.app`,
+    "Contents",
+    "Resources",
+    "native",
+    "macos",
+    "agentlas-input-driver",
+  );
+  const [sourceStat, packagedStat, sourceBytes, packagedBytes] = await Promise.all([
+    lstat(sourcePath),
+    lstat(packagedPath),
+    readFile(sourcePath),
+    readFile(packagedPath),
+  ]);
+  if (
+    !sourceStat.isFile() || sourceStat.isSymbolicLink() ||
+    !packagedStat.isFile() || packagedStat.isSymbolicLink() ||
+    (packagedStat.mode & 0o111) === 0
+  ) {
+    throw new Error("[afterPack] Agentlas Computer Use driver is missing, mutable, or non-executable");
+  }
+  const sourceDigest = createHash("sha256").update(sourceBytes).digest("hex");
+  const packagedDigest = createHash("sha256").update(packagedBytes).digest("hex");
+  if (sourceDigest !== packagedDigest) {
+    throw new Error("[afterPack] packaged Agentlas Computer Use driver differs from the built source artifact");
+  }
+  const { stdout } = await execFileAsync("/usr/bin/lipo", ["-archs", packagedPath]);
+  const architectures = String(stdout).trim().split(/\s+/);
+  if (!architectures.includes("arm64") || !architectures.includes("x86_64")) {
+    throw new Error(`[afterPack] Agentlas Computer Use driver is not universal: ${architectures.join(" ")}`);
+  }
+  console.log(`[afterPack] verified Agentlas Computer Use driver ${sourceDigest} (${architectures.join("+")})`);
+}
+
 exports.default = async function afterPackClean(context) {
   if (process.platform === "darwin" && context.electronPlatformName === "darwin") {
     try {
@@ -244,4 +337,5 @@ exports.default = async function afterPackClean(context) {
   }
 
   await verifyEmbeddedAgentlasOs(context);
+  await verifyMacComputerUseDriver(context);
 };

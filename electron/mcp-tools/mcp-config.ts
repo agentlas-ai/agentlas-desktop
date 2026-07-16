@@ -24,6 +24,12 @@ import {
 } from "../opencrab/constants";
 import type { InstalledMcpServer } from "../../shared/types";
 import { isAuthenticSystemTimeMcpLaunch, isCanonicalSystemTimeMcpServer } from "./system-time-server";
+import { BROWSER_APPROVAL_FILE_ENV, browserApprovalInfoPath } from "../browser/approval-channel";
+import {
+  isAuthenticComputerUseMcpLaunch,
+  isCanonicalComputerUseMcpServer,
+} from "../computer-use/mcp-server";
+import { COMPUTER_USE_CONTROL_FILE_ENV, computerUseControlInfoPath } from "../computer-use/channel";
 
 function expandHome(arg: string): string {
   if (arg === "~") return os.homedir();
@@ -31,31 +37,11 @@ function expandHome(arg: string): string {
   return arg;
 }
 
-function bundledComputerUseClient(): string | null {
-  const candidates = [
-    path.join(
-      os.homedir(),
-      ".codex",
-      "computer-use",
-      "Codex Computer Use.app",
-      "Contents",
-      "SharedSupport",
-      "SkyComputerUseClient.app",
-      "Contents",
-      "MacOS",
-      "SkyComputerUseClient",
-    ),
-    "/Applications/Codex.app/Contents/Resources/plugins/openai-bundled/plugins/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient",
-  ];
-  return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
-}
-
 function resolveStdioCommand(s: InstalledMcpServer): string {
-  const command = expandHome(s.command ?? "");
-  if (s.catalogId === "cua-driver" && (command === "cua-driver" || !fs.existsSync(command))) {
-    return bundledComputerUseClient() ?? command;
-  }
-  return command;
+  // Never borrow another app's private/signed Computer Use helper. OpenAI's
+  // service authenticates its sender and rejects Agentlas anyway; silently
+  // substituting it made the catalog look installed while every action failed.
+  return expandHome(s.command ?? "");
 }
 
 /** MCP tool 이름 mcp__<key>__<tool> 의 key — 안전한 슬러그. */
@@ -157,7 +143,8 @@ const OPERATIONAL_KEYS = [
   "TMP", "SHELL", "TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
   "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "NPM_CONFIG_PREFIX",
   "NPM_CONFIG_CACHE", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
-  "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "NO_COLOR"
+  "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "NO_COLOR",
+  "AGENTLAS_BROWSER_APPROVAL_FILE", "AGENTLAS_COMPUTER_USE_CONTROL_FILE"
 ];
 const PROXY_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 let mapping;
@@ -373,6 +360,11 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       // Official built-ins never fall through to generic stdio/remote paths.
       continue;
     }
+    if (s.catalogId === "cua-driver" && !isCanonicalComputerUseMcpServer(s)) {
+      // The native input capability must never fall through to a mutable or
+      // externally installed executable with the same catalog id.
+      continue;
+    }
     // Re-check every required value immediately before serialization. A key can
     // be revoked after consent; that server is omitted instead of poisoning the
     // whole CLI bootstrap.
@@ -392,6 +384,12 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     const key = mcpConfigKey(s);
     if (s.transport === "stdio" && s.command) {
       const command = resolveStdioCommand(s);
+      const builtInEnv: Record<string, string> =
+        s.catalogId === "agentlas-browser"
+          ? { [BROWSER_APPROVAL_FILE_ENV]: browserApprovalInfoPath() }
+          : s.catalogId === "cua-driver"
+            ? { [COMPUTER_USE_CONTROL_FILE_ENV]: computerUseControlInfoPath() }
+            : {};
       const secretAliases: Record<string, string> = {};
       for (const rawKey of s.envKeys) {
         const envKey = validateEnvKey(rawKey);
@@ -403,11 +401,14 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       }
       const args = argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
       const aliases = Object.values(secretAliases);
-      if (aliases.length === 0 && isAuthenticSystemTimeMcpLaunch(command, args)) {
+      if (
+        aliases.length === 0 &&
+        (isAuthenticSystemTimeMcpLaunch(command, args) || isAuthenticComputerUseMcpLaunch(command, args))
+      ) {
         // The keyless built-in already has an exact, compressed in-memory
         // launch contract. Bypass the mutable per-run wrapper so no pathname is
         // re-opened between Agent App validation and runtime spawn.
-        const inlineEnv = { ELECTRON_RUN_AS_NODE: "1" };
+        const inlineEnv = { ELECTRON_RUN_AS_NODE: "1", ...builtInEnv };
         mcpServers[key] = { command: process.execPath, args, env: inlineEnv };
         pushCodexConfig(codexConfigArgs, key, "command", tomlString(process.execPath));
         pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(args));
@@ -423,6 +424,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         ];
         const wrapperEnv = {
           ELECTRON_RUN_AS_NODE: "1",
+          ...builtInEnv,
           ...Object.fromEntries(aliases.map((alias) => [alias, envReference(alias)])),
         };
         mcpServers[key] = {
@@ -439,7 +441,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           codexConfigArgs,
           key,
           "env",
-          tomlInlineStringTable({ ELECTRON_RUN_AS_NODE: "1" }),
+          tomlInlineStringTable({ ELECTRON_RUN_AS_NODE: "1", ...builtInEnv }),
         );
         if (aliases.length > 0) {
           pushCodexConfig(codexConfigArgs, key, "env_vars", tomlStringArray(aliases));

@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.8.46",
+  "version": "0.8.47",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -21,21 +21,21 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 67,
-    "bundledRuntimeVersion": "1.1.45"
+    "targetSchemaVersion": 68,
+    "bundledRuntimeVersion": "1.1.48"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.1.45",
-    "commit": "49752a783e944c898ea023705104661b3beb87b2"
+    "ref": "v1.1.48",
+    "commit": "98adf6d1bb0bdad5a919884c3916274d5a3e813f"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
     "dev:renderer": "cd renderer && next dev -p 3100",
-    "dev:electron": "wait-on http://localhost:3100 && tsc -p electron/tsconfig.json && cross-env NODE_ENV=development ELECTRON_START_URL=http://localhost:3100 electron .",
+    "dev:electron": "wait-on http://localhost:3100 && node scripts/build-macos-input-driver.cjs && tsc -p electron/tsconfig.json && cross-env NODE_ENV=development ELECTRON_START_URL=http://localhost:3100 electron .",
     "build": "npm run build:renderer && npm run build:electron",
     "build:renderer": "cd renderer && cross-env AGENTLAS_NEXT_DIST_DIR=.next-build next build && node -e \"require('fs').cpSync('.next-build','../dist/renderer',{recursive:true})\"",
-    "build:electron": "tsc -p electron/tsconfig.json && node -e \"require('fs').copyFileSync('electron/memory/code-map-gen.mjs','dist/electron/memory/code-map-gen.mjs')\"",
+    "build:electron": "node scripts/build-macos-input-driver.cjs && tsc -p electron/tsconfig.json && node -e \"require('fs').copyFileSync('electron/memory/code-map-gen.mjs','dist/electron/memory/code-map-gen.mjs')\"",
     "prebuild:renderer": "node -e \"const fs=require('fs');['dist/renderer','renderer/.next-build','renderer/out'].forEach(d=>fs.rmSync(d,{recursive:true,force:true,maxRetries:5,retryDelay:100}))\"",
     "postinstall": "electron-rebuild --force",
     "ensure:engine": "node scripts/ensure-engine.mjs",

@@ -10,6 +10,13 @@ import crypto from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
+import {
+  CLI_HISTORY_CONTEXT_TOKENS,
+  composeResumeTurnPrompt,
+  renderConversationContext,
+  renderGapContext,
+  unseenHistoryGap,
+} from "./continuity";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
@@ -89,16 +96,12 @@ function buildPrompt(req: RunnerRequest): string {
     req.restrictedReadBoundary,
     req.untrustedNoTools,
   );
-  const user = tStatus(req.locale, "speakerUser");
-  const assistant = tStatus(req.locale, "speakerAssistant");
-  const parts: string[] = [`[SYSTEM]\n${sys}`, ""];
+  // 새 세션 시드: 턴 컨텍스트는 시스템 섹션 뒤에, 히스토리는 연속성 프레이밍+압축과 함께.
+  const turnContext = req.turnContext?.trim();
+  const parts: string[] = [`[SYSTEM]\n${sys}${turnContext ? `\n\n${turnContext}` : ""}`, ""];
   if (req.history.length > 0) {
-    parts.push(tStatus(req.locale, "histPrevSection"));
-    for (const m of req.history) {
-      const tag = m.role === "user" ? user : assistant;
-      parts.push(`${tag}: ${m.text}`);
-    }
-    parts.push("");
+    const { block } = renderConversationContext(req.history, req.locale, CLI_HISTORY_CONTEXT_TOKENS);
+    parts.push(block, "");
   }
   parts.push(tStatus(req.locale, "histThisSection"), req.userPrompt);
   return parts.join("\n");
@@ -127,15 +130,22 @@ function resumePermissionArgs(permission?: RunnerRequest["permission"]): string[
 }
 
 /**
- * 세션 지문 — 시스템 프롬프트/권한/표면 모드/모델/effort가 바뀌면 값이 달라져,
- * 기존 세션을 버리고 새 세션을 시작하게 한다(이전 인격/설정을 끌고 가지 않도록).
- * 사용자 입력은 매 턴 달라지므로 지문에 넣지 않는다. 넣으면 chatId 저장 세션이 사실상
- * 재사용되지 않는다.
+ * 세션 지문 — 안정 시드(sessionFingerprintSeed)가 있으면 시드만 해시한다. 시드가 곧
+ * 세션 정체성의 전부다: 모델/effort/권한은 매 호출 CLI 인자로 다시 적용되므로 세션을
+ * 가를 이유가 없고, 지문에 섞으면 설정 하나 바꿀 때마다 대화 연속성이 끊긴다
+ * (2026-07-16 세션유지 사고). 시드가 없는 레거시 호출만 전체 해시로 폴백한다.
  */
 function systemFingerprint(req: RunnerRequest): string {
+  if (req.sessionFingerprintSeed) {
+    return crypto
+      .createHash("sha256")
+      .update("seed.v2\0")
+      .update(req.sessionFingerprintSeed)
+      .digest("hex");
+  }
   return crypto
     .createHash("sha256")
-    .update(req.sessionFingerprintSeed ?? req.systemPrompt)
+    .update(req.systemPrompt)
     .update("\0")
     .update(req.locale)
     .update("\0")
@@ -452,7 +462,23 @@ export const runCodex: Runner = async (
       resumeSessionId!,
       "-",
     ];
-    const r = await runCodexProcess(bin, args, runReq.userPrompt, runReq, events);
+    // gap-replay — 이 세션이 마지막으로 본 이후 다른 경로(스웜/다른 러너)로 진행된 턴을 메운다.
+    // 호출자가 세션 수명을 직접 관리하는 runtimeSessionId(Build 등)에는 적용하지 않는다.
+    const gapContext = !runReq.runtimeSessionId && storedSessionId && existing
+      ? renderGapContext(unseenHistoryGap(runReq.history, existing.updatedAt), runReq.locale)
+      : "";
+    // resume 턴: 시스템 프롬프트가 재전송되지 않으므로 gap+턴 컨텍스트를 사용자 메시지에 싣는다.
+    const r = await runCodexProcess(
+      bin,
+      args,
+      composeResumeTurnPrompt(
+        runReq.userPrompt,
+        [gapContext, runReq.turnContext ?? ""].filter(Boolean).join("\n\n"),
+        runReq.locale,
+      ),
+      runReq,
+      events,
+    );
     if (runReq.signal?.aborted) {
       // 취소여도 스레드가 생겼으면 저장 → steering 메시지가 이 세션을 resume해 문맥 유지.
       if (runReq.chatId && fingerprint && r.threadId) saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint);

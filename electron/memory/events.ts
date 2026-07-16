@@ -9,6 +9,7 @@ import {
   type MemoryScope,
 } from "../architecture/manifest";
 import type { RequestContext } from "./store";
+import type { MemoryEmitterStatus } from "./tickets";
 
 export interface RawMemoryEvent {
   memory_kind: MemoryKind;
@@ -22,6 +23,11 @@ export interface RawMemoryEvent {
 
 export interface ParsedMemory {
   events: RawMemoryEvent[];
+  /** Number of raw candidate slots in the envelope, including invalid ones. */
+  candidateCount: number;
+  /** Compact model-authored turn observation; never a raw prompt/transcript. */
+  turnSummary: string | null;
+  emitterStatus: Exclude<MemoryEmitterStatus, "read_only">;
   /** Reply text with the Memory Events block removed (trimmed). */
   cleanedText: string;
 }
@@ -110,19 +116,41 @@ function normalize(raw: unknown): RawMemoryEvent | null {
  */
 export function parseMemoryEvents(text: string): ParsedMemory {
   const headingIdx = text.lastIndexOf(MEMORY_EVENTS_HEADING);
-  if (headingIdx < 0) return { events: [], cleanedText: text.trim() };
+  if (headingIdx < 0) {
+    return { events: [], candidateCount: 0, turnSummary: null, emitterStatus: "missing", cleanedText: text.trim() };
+  }
 
   const after = text.slice(headingIdx + MEMORY_EVENTS_HEADING.length);
   const fence = after.match(/```(?:json)?\s*([\s\S]*?)```/);
   let events: RawMemoryEvent[] = [];
+  let candidateCount = 0;
+  let turnSummary: string | null = null;
+  let emitterStatus: ParsedMemory["emitterStatus"] = "malformed";
   if (fence) {
     try {
       const data = JSON.parse(fence[1].trim());
       if (Array.isArray(data)) {
+        candidateCount = data.length;
         events = data.map(normalize).filter((e): e is RawMemoryEvent => e !== null);
+        emitterStatus = data.length === 0 ? "empty" : events.length > 0 ? "valid" : "malformed";
+      } else if (data && typeof data === "object") {
+        const envelope = data as Record<string, unknown>;
+        const candidates = Array.isArray(envelope.candidates) ? envelope.candidates : null;
+        if (candidates) {
+          candidateCount = candidates.length;
+          events = candidates.map(normalize).filter((e): e is RawMemoryEvent => e !== null);
+          const summary = coerceString(envelope.turn_summary, 360);
+          turnSummary = summary ?? null;
+          emitterStatus = candidates.length === 0
+            ? "empty"
+            : events.length > 0
+              ? "valid"
+              : "malformed";
+        }
       }
     } catch {
       events = [];
+      emitterStatus = "malformed";
     }
   }
 
@@ -134,7 +162,7 @@ export function parseMemoryEvents(text: string): ParsedMemory {
     cut = text.length; // no fence found — drop the dangling heading and tail too
   }
   const cleaned = (text.slice(0, headingIdx) + text.slice(cut)).trim();
-  return { events, cleanedText: cleaned };
+  return { events, candidateCount, turnSummary, emitterStatus, cleanedText: cleaned };
 }
 
 /**
@@ -146,14 +174,22 @@ export function parseMemoryEvents(text: string): ParsedMemory {
 export function stripAllMemoryEventBlocks(text: string): ParsedMemory {
   let cleanedText = text.trim();
   const events: RawMemoryEvent[] = [];
+  let candidateCount = 0;
+  let turnSummary: string | null = null;
+  let emitterStatus: ParsedMemory["emitterStatus"] = "missing";
   for (let index = 0; index < 32 && cleanedText.includes(MEMORY_EVENTS_HEADING); index += 1) {
     const previous = cleanedText;
     const parsed = parseMemoryEvents(previous);
     events.push(...parsed.events);
+    candidateCount += parsed.candidateCount;
+    if (parsed.turnSummary) turnSummary = parsed.turnSummary;
+    if (parsed.emitterStatus === "malformed") emitterStatus = "malformed";
+    else if (emitterStatus !== "malformed" && parsed.emitterStatus === "valid") emitterStatus = "valid";
+    else if (emitterStatus === "missing") emitterStatus = parsed.emitterStatus;
     cleanedText = parsed.cleanedText;
     if (cleanedText === previous) break;
   }
   const remaining = cleanedText.indexOf(MEMORY_EVENTS_HEADING);
   if (remaining >= 0) cleanedText = cleanedText.slice(0, remaining).trim();
-  return { events, cleanedText };
+  return { events, candidateCount, turnSummary, emitterStatus, cleanedText };
 }

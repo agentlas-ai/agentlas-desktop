@@ -26,6 +26,8 @@ import {
 } from "../opencrab/constants";
 import type { InstalledMcpServer, McpServerStatus } from "../../shared/types";
 import { isCanonicalSystemTimeMcpServer } from "./system-time-server";
+import { isCanonicalComputerUseMcpServer } from "../computer-use/mcp-server";
+import { COMPUTER_USE_CONTROL_FILE_ENV, computerUseControlInfoPath } from "../computer-use/channel";
 
 /** npx 첫 다운로드까지 고려한 넉넉한 연결 타임아웃. */
 const CONNECT_TIMEOUT_MS = 45_000;
@@ -245,16 +247,20 @@ function createTransport(server: InstalledMcpServer, resolved: Record<string, st
   if (server.catalogId === "agentlas-time" && !isCanonicalSystemTimeMcpServer(server)) {
     throw new Error("Agentlas System Time MCP launch contract is invalid");
   }
+  if (server.catalogId === "cua-driver" && !isCanonicalComputerUseMcpServer(server)) {
+    throw new Error("Agentlas Computer Use MCP launch contract is invalid");
+  }
   if (server.transport === "stdio") {
     if (!server.command) throw new Error("stdio server has no command");
     const baseEnv = withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" });
     const stdioEnv = Object.fromEntries(
       Object.entries(baseEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
     );
-    if (
-      isCanonicalSystemTimeMcpServer(server)
-    ) {
+    if (isCanonicalSystemTimeMcpServer(server) || isCanonicalComputerUseMcpServer(server)) {
       stdioEnv.ELECTRON_RUN_AS_NODE = "1";
+    }
+    if (isCanonicalComputerUseMcpServer(server)) {
+      stdioEnv[COMPUTER_USE_CONTROL_FILE_ENV] = computerUseControlInfoPath();
     }
     return new StdioClientTransport({
       command: expandHome(server.command),
@@ -362,19 +368,17 @@ export async function testServerConnection(
   }
 }
 
-/**
- * 한 서버에 붙어 tool 1개를 호출하고 텍스트 결과를 반환한다(폴 소스용, 설계 §3.4 Tier 1).
- * 매 폴마다 spawn→call→close하는 단발 호출이라 무겁지만, 폴 매니저의 적응형 간격이
- * 호출 빈도를 통제하므로(설계 §3.1) 유휴 비용은 0에 수렴한다. 필수 env 미충족이면 null.
- *
- * 반환은 MCP content의 text 조각을 이어붙인 문자열(구조화 파싱은 호출자가). 실패 시 throw.
- */
-export async function callServerTool(
+export interface McpToolContentResult {
+  text: string;
+  images: Array<{ mediaType: "image/png" | "image/jpeg"; data: string }>;
+}
+
+async function callServerToolContentInternal(
   server: InstalledMcpServer,
   toolName: string,
   args: Record<string, unknown>,
   options?: { timeoutMs?: number; maxTextChars?: number },
-): Promise<string | null> {
+): Promise<McpToolContentResult | null> {
   let resolved: Record<string, string> = {};
   let client: Client | null = null;
   const boundaryState: McpToolCallBoundaryState = { phase: "pre-request", requestId: null };
@@ -390,13 +394,30 @@ export async function callServerTool(
 
     const timeoutMs = Math.max(250, Math.min(options?.timeoutMs ?? CONNECT_TIMEOUT_MS, CONNECT_TIMEOUT_MS));
     const maxTextChars = resolveMcpToolTextLimit(options?.maxTextChars);
-    const text = await withTimeout(
+    const result = await withTimeout(
       (async () => {
         await activeClient.connect(transport);
         const res = (await activeClient.callTool({ name: toolName, arguments: args })) as {
-          content?: Array<{ type?: string; text?: string }>;
+          content?: Array<{ type?: string; text?: string; data?: string; mimeType?: string }>;
         };
-        return joinMcpToolText(res.content ?? [], maxTextChars);
+        const content = res.content ?? [];
+        const text = joinMcpToolText(content, maxTextChars);
+        const images: McpToolContentResult["images"] = [];
+        let imageBytes = 0;
+        for (const item of content) {
+          if (
+            item?.type !== "image" ||
+            (item.mimeType !== "image/png" && item.mimeType !== "image/jpeg") ||
+            typeof item.data !== "string" ||
+            !/^[A-Za-z0-9+/=]+$/.test(item.data)
+          ) continue;
+          imageBytes += Math.ceil(item.data.length * 0.75);
+          if (images.length >= 4 || imageBytes > 8 * 1024 * 1024) {
+            throw new McpToolResponseTooLargeError(8 * 1024 * 1024);
+          }
+          images.push({ mediaType: item.mimeType, data: item.data });
+        }
+        return { text, images };
       })(),
       timeoutMs,
       () => {
@@ -404,7 +425,7 @@ export async function callServerTool(
       },
     );
     await activeClient.close().catch(() => {});
-    return text;
+    return result;
   } catch (err) {
     await client?.close().catch(() => {});
     const rawMessage = err instanceof Error ? err.message : String(err);
@@ -420,6 +441,30 @@ export async function callServerTool(
       reason,
     );
   }
+}
+
+/** Call one MCP tool and retain safe PNG/JPEG content for vision-capable local engines. */
+export function callServerToolContent(
+  server: InstalledMcpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  options?: { timeoutMs?: number; maxTextChars?: number },
+): Promise<McpToolContentResult | null> {
+  return callServerToolContentInternal(server, toolName, args, options);
+}
+
+/**
+ * Text-only compatibility wrapper used by poll sources and existing callers.
+ * Image-aware local model loops call callServerToolContent instead.
+ */
+export async function callServerTool(
+  server: InstalledMcpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  options?: { timeoutMs?: number; maxTextChars?: number },
+): Promise<string | null> {
+  const result = await callServerToolContentInternal(server, toolName, args, options);
+  return result?.text ?? null;
 }
 
 export async function testServerById(id: string): Promise<McpServerStatus> {

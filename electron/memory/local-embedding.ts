@@ -28,23 +28,37 @@ export interface LocalMemoryEmbedding {
 // words rode alongside the 256 semantic dims; that concatenation existed only
 // because the English-only model was blind to Korean, and it diluted the
 // semantic axis once a multilingual model could read it.
-export const MODEL2VEC_HYBRID_DIMENSIONS = 352;
-export const MODEL2VEC_HYBRID_NAME = "model2vec_potion_base_8m_int8_hybrid";
+/** Kept as an exported compatibility name; the multilingual adapter is pure 256-d semantic output. */
+export const MODEL2VEC_HYBRID_DIMENSIONS = 256;
+export const MODEL2VEC_HYBRID_NAME = "model2vec_potion_multilingual_128m_int8";
 export const MODEL2VEC_ASSET_FORMAT = "agentlas-model2vec-int8-v1";
-export const PINNED_MODEL2VEC_CONTENT_SHA256 = "fe492f69607b750142aa48d47d579b53252b3288547c27d4d0e473d6af485e1e";
+export const PINNED_MODEL2VEC_CONTENT_SHA256 = "aa806dbd4c6025f47b0242f8b92eb789109a0c612524980eb905fda3b5b73bde";
 // potion-base-8M is distilled from an English BERT and has no whole Hangul
 // syllables in its vocabulary — only Jamo — so it shatters Korean into single
 // letters and ranks it by letter frequency. On a fixed ranking set it placed the
 // right memory first 0 times out of 4 while scoring 0.46-0.63, i.e. confidently
 // wrong; the multilingual asset placed it first 3 times out of 4, and
 // Korean-to-English similarity went from -0.03 (worse than random) to 0.494.
-export const PINNED_MODEL2VEC_MODEL_ID = "minishlab/potion-base-8M";
-export const PINNED_MODEL2VEC_REVISION = "bf8b056651a2c21b8d2565580b8569da283cab23";
+export const PINNED_MODEL2VEC_MODEL_ID = "minishlab/potion-multilingual-128M";
+export const PINNED_MODEL2VEC_REVISION = "73908c3438cf03b6a01bcb9611d62b23d0726f08";
+const PINNED_MODEL2VEC_EMBEDDING_PARTS = [
+  {
+    name: "embeddings.i8.part-000",
+    sha256: "e41c2cd2bf7f77925d5f6162242f22d31e731c4daec44adc4d71fbe27d51ac36",
+    size: 67_108_864,
+  },
+  {
+    name: "embeddings.i8.part-001",
+    sha256: "2720f905f4959b0067e875b38cbb70b72ab2107ec5026899294c700146439f3f",
+    size: 60_981_504,
+  },
+] as const;
+const PINNED_MODEL2VEC_ORDERED_PARTS_SHA256 = "4d0382e963f7fd099b4f7be64c004c5772c4962662ce9af2cf76b7a19a114e91";
 const PINNED_MODEL2VEC_SOURCE_FILES: Record<string, AssetFileRecord> = {
-  "config.json": { sha256: "2a6ac0e9aaa356a68a5688070db78fc3a464fefe85d2f06a1905ce3718687553", size: 202 },
-  "tokenizer.json": { sha256: "e67e803f624fb4d67dea1c730d06e1067e1b14d830e2c2202569e3ef0f70bb50", size: 683666 },
-  "model.safetensors": { sha256: "f65d0f325faadc1e121c319e2faa41170d3fa07d8c89abd48ca5358d9a223de2", size: 30236760 },
-  "README.md": { sha256: "de8ec91bf63c5f4c0e20751c227b2d049953e1cab5f8d5d44211c59a44795bdd", size: 5203 },
+  "config.json": { sha256: "595e4cab2093732efd5dbe084fd5c1826b5eea693b73b4c1fd971672867d2e54", size: 271 },
+  "tokenizer.json": { sha256: "19f1909063da3cfe3bd83a782381f040dccea475f4816de11116444a73e1b6a1", size: 18616131 },
+  "model.safetensors": { sha256: "14b5eb39cb4ce5666da8ad1f3dc6be4346e9b2d601c073302fa0a31bf7943397", size: 512361560 },
+  "README.md": { sha256: "9505454b6a3efbb25257124de875cb73e02bd663a822528525a3c29b1c4d91ac", size: 5575 },
 };
 const MODEL_DISCOVERY_MISS_TTL_MS = 5_000;
 const HASH_MIN_VECTOR_SCORE = 0.08;
@@ -54,9 +68,13 @@ const HASH_MIN_VECTOR_SCORE = 0.08;
 // -0.02 upward. The old 0.45/0.50 pair was calibrated against potion-base-8M,
 // whose Jamo-shattered Korean scored 0.4-0.9 for everything; carrying those
 // numbers over would discard almost every real Korean match.
-const MODEL2VEC_MIN_VECTOR_SCORE = 0.45;
-const MODEL2VEC_CJK_MIN_VECTOR_SCORE = 0.5;
+const MODEL2VEC_MIN_VECTOR_SCORE = 0.15;
+const MODEL2VEC_CJK_MIN_VECTOR_SCORE = 0.12;
 const VECTOR_RELATIVE_FLOOR = 0.72;
+// Semantic magnitude is deliberately a small correction to lexical evidence.
+// Equal-rank fusion can let weak semantic evidence overrule exact text; this
+// residual preserves lexical authority while retaining cross-language recall.
+const SEMANTIC_RESIDUAL_WEIGHT = 0.05;
 const CJK_QUERY_PATTERN = /[぀-ヿ㐀-䶿一-鿿가-힣]+/;
 const HANGUL_PATTERN = /[가-힣]/;
 
@@ -142,7 +160,7 @@ export function localHashingEmbedding(text: string): LocalMemoryEmbedding {
 
 function modelCandidates(): string[] {
   const resources = typeof process.resourcesPath === "string" ? process.resourcesPath : "";
-  const assetSuffix = path.join("model2vec", "potion-base-8M-int8");
+  const assetSuffix = path.join("model2vec", "potion-multilingual-128M-int8");
   return [
     process.env.AGENTLAS_MODEL2VEC_PATH ?? "",
     process.env.AGENTLAS_LOCAL_EMBEDDING_MODEL_PATH ?? "",
@@ -209,6 +227,17 @@ function contentIdentity(files: Record<string, AssetFileRecord>, names: string[]
   return digest.digest("hex");
 }
 
+function orderedPartsIdentity(files: Record<string, AssetFileRecord>, names: string[]): string {
+  const digest = createHash("sha256");
+  for (const [index, name] of names.entries()) {
+    const record = files[name];
+    if (!record) return "";
+    digest.update(String(index)).update("\0").update(name).update("\0")
+      .update(record.sha256).update("\0").update(String(record.size)).update("\n");
+  }
+  return digest.digest("hex");
+}
+
 function verifyModelDirectory(directory: string): ModelDescriptor | null {
   try {
     const inputStat = fs.lstatSync(directory);
@@ -226,11 +255,28 @@ function verifyModelDirectory(directory: string): ModelDescriptor | null {
     const dimensions = Number(manifest.dimensions);
     const vocabSize = Number(manifest.vocabSize);
     if (!Number.isInteger(dimensions) || dimensions !== 256 || !Number.isInteger(vocabSize) || vocabSize <= 0) return null;
-    const required = ["embeddings.i8", "scales.f32le", "tokenizer.json", "LICENSE.model.txt"];
+    const rawEmbeddingParts: unknown[] = Array.isArray(manifest.embeddingParts)
+      ? manifest.embeddingParts
+      : [];
+    const embeddingParts: string[] = rawEmbeddingParts.filter((name: unknown): name is string => (
+      typeof name === "string" && /^embeddings\.i8\.part-\d{3}$/.test(name)
+    ));
+    if (
+      embeddingParts.length === 0 ||
+      embeddingParts.length !== rawEmbeddingParts.length ||
+      new Set(embeddingParts).size !== embeddingParts.length ||
+      JSON.stringify(embeddingParts) !== JSON.stringify(PINNED_MODEL2VEC_EMBEDDING_PARTS.map((part) => part.name))
+    ) return null;
+    const required = [...embeddingParts, "scales.f32le", "tokenizer.json", "LICENSE.model.txt"];
     const files = manifest.files as Record<string, AssetFileRecord>;
     if (!files || required.some((name) => !files[name])) return null;
+    if (!PINNED_MODEL2VEC_EMBEDDING_PARTS.every((part) => (
+      files[part.name]?.sha256 === part.sha256 && files[part.name]?.size === part.size
+    ))) return null;
+    const orderedPartsSha256 = orderedPartsIdentity(files, embeddingParts);
+    if (orderedPartsSha256 !== PINNED_MODEL2VEC_ORDERED_PARTS_SHA256) return null;
     const resolved = Object.fromEntries(required.map((name) => [name, verifiedFile(root, name, files[name])]));
-    if (files["embeddings.i8"].size !== vocabSize * dimensions ||
+    if (embeddingParts.reduce((sum, name) => sum + files[name].size, 0) !== vocabSize * dimensions ||
       files["scales.f32le"].size !== vocabSize * 4) return null;
     const modelSha256 = contentIdentity(files, required);
     if (manifest.contentSha256 !== modelSha256 || modelSha256 !== PINNED_MODEL2VEC_CONTENT_SHA256) return null;
@@ -273,7 +319,7 @@ function verifyModelDirectory(directory: string): ModelDescriptor | null {
     const source = manifest.source as { modelId?: unknown; revision?: unknown; files?: unknown };
     if (source?.modelId !== PINNED_MODEL2VEC_MODEL_ID || source?.revision !== PINNED_MODEL2VEC_REVISION) return null;
     if (!exactFileRecords(source.files, PINNED_MODEL2VEC_SOURCE_FILES)) return null;
-    const assetIdentity = `model2vec:${PINNED_MODEL2VEC_MODEL_ID}:${PINNED_MODEL2VEC_REVISION}:${modelSha256}:${manifest.format}`;
+    const assetIdentity = `model2vec:${PINNED_MODEL2VEC_MODEL_ID}:${PINNED_MODEL2VEC_REVISION}:${modelSha256}:${orderedPartsSha256}:${manifest.format}`;
     let supportsHangul = false;
     for (const token of vocab.keys()) {
       if (HANGUL_PATTERN.test(token)) {
@@ -284,7 +330,7 @@ function verifyModelDirectory(directory: string): ModelDescriptor | null {
     return {
       modelPath: root,
       modelSha256,
-      adapter: `${assetIdentity}:hybrid-hash96-v1:${MODEL2VEC_HYBRID_DIMENSIONS}`,
+      adapter: `${assetIdentity}:semantic-v1:${MODEL2VEC_HYBRID_DIMENSIONS}`,
       supportsHangul,
       tokenizer: tokenizerType,
       unigramScores,
@@ -292,7 +338,7 @@ function verifyModelDirectory(directory: string): ModelDescriptor | null {
       vocabSize,
       vocab,
       unknownTokenId,
-      embeddings: fs.readFileSync(resolved["embeddings.i8"]),
+      embeddings: Buffer.concat(embeddingParts.map((name) => fs.readFileSync(resolved[name]))),
       scales: fs.readFileSync(resolved["scales.f32le"]),
     };
   } catch {
@@ -493,18 +539,10 @@ function model2VecHybridEmbedding(text: string, descriptor: ModelDescriptor): Lo
       semantic[dimension] += descriptor.embeddings.readInt8(offset + dimension) * scale;
     }
   }
-  // The 96-dim hashing bag of words rides alongside the semantic dims because
-  // potion-base-8M cannot read Korean — character bigrams are the only Korean
-  // signal it has. Measured against the multilingual asset this concatenation
-  // becomes harmful (it is orthogonal to meaning and halves the semantic
-  // cosine), so it must be dropped in the same change that swaps the pin.
-  const semanticNormalized = normalizeVector(semantic);
-  const hashing = localHashingEmbedding(text).vector;
-  const factor = 1 / Math.sqrt(2);
-  const vector = normalizeVector([
-    ...semanticNormalized.map((value) => value * factor),
-    ...hashing.map((value) => value * factor),
-  ]).map((value) => Number(value.toFixed(6)));
+  // The multilingual model reads Korean directly. Keep lexical overlap as an
+  // independently auditable retrieval rank instead of contaminating the
+  // semantic vector with the obsolete English-model hash96 compensation axis.
+  const vector = normalizeVector(semantic).map((value) => Number(value.toFixed(6)));
   return {
     model: MODEL2VEC_HYBRID_NAME,
     adapter: descriptor.adapter,
@@ -633,11 +671,11 @@ function hangulBeyondModel(text: string): boolean {
   return true;
 }
 
-/** Reciprocal-rank fusion: lexical and local-vector ranks remain independently auditable. */
+/** Calibrated late fusion: lexical and local-vector evidence remain independently auditable. */
 export function rankHybridLocal<T extends HybridRankable>(
   query: string,
   items: readonly T[],
-  rrfK = 60,
+  _rrfK = 60,
 ): HybridRanked<T>[] {
   const queryEmbedding = autoLocalEmbedding(query);
   const queryVector = queryEmbedding.vector;
@@ -666,18 +704,10 @@ export function rankHybridLocal<T extends HybridRankable>(
       && entry.vectorScore >= minimumVectorScore
       && entry.vectorScore >= bestVectorScore * VECTOR_RELATIVE_FLOOR,
   }));
-  const lexical = [...measuredWithGate].filter((entry) => entry.lexicalScore > 0).sort((left, right) =>
-    right.lexicalScore - left.lexicalScore || left.item.id.localeCompare(right.item.id));
-  const vector = [...measuredWithGate].filter((entry) => entry.semanticEligible).sort((left, right) =>
-    right.vectorScore - left.vectorScore || left.item.id.localeCompare(right.item.id));
-  const lexicalRank = new Map(lexical.map((entry, index) => [entry.item.id, index + 1]));
-  const vectorRank = new Map(vector.map((entry, index) => [entry.item.id, index + 1]));
   return measuredWithGate.map((entry) => {
-    const lexicalContribution = entry.lexicalScore > 0
-      ? 1 / (rrfK + (lexicalRank.get(entry.item.id) ?? items.length + 1))
-      : 0;
+    const lexicalContribution = entry.lexicalScore;
     const vectorContribution = entry.semanticEligible
-      ? 1 / (rrfK + (vectorRank.get(entry.item.id) ?? items.length + 1))
+      ? Math.max(0, entry.vectorScore - minimumVectorScore) * SEMANTIC_RESIDUAL_WEIGHT
       : 0;
     return {
       ...entry,

@@ -69,6 +69,24 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-16 · v0.8.47 — governed memory and project ontology** — Every
+  completed, failed, or cancelled model turn now produces one central Memory
+  Ticket and episode. A no-tools semantic Curator may propose what is worth
+  retaining, while deterministic privacy, ownership, permission, and project
+  boundaries retain final authority. User-global, team, agent, and exact-project
+  memory share one chronological ledger without allowing one project's local
+  memory into another. Project ontology now has a bounded lifecycle, sitemap,
+  `.agentlas/pm` input, recursive inbox freshness checks, and fail-closed
+  symlink, hardlink, and path-race protection.
+
+  Korean and cross-lingual recall uses the verified multilingual Model2Vec
+  asset, and promoted Experience relations can influence routing only under the
+  exact attested package, environment, and project relation. Browser approval is
+  isolated per app instance, with a pinned Browser host and read-only live
+  Browser/Mac previews. Agentlas OS v1.1.48 is pinned at
+  98adf6d1bb0bdad5a919884c3916274d5a3e813f. This source does not prove a
+  Desktop tag, public installer, or update-feed release.
+
 - **2026-07-16 · v0.8.46 — a pairing QR a phone camera can actually read** — The
   Mobile pairing QR did not decode unless the camera was perfectly focused. The
   payload was 1228 characters, 796 of which were the full DER certificate, so a

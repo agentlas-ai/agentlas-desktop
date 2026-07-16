@@ -167,9 +167,10 @@ export const SUPER_ONTOLOGY_MEMORY_BRIDGE_FILE = "super-ontology-memory-bridge.j
  */
 export const MEMORY_EMITTER_BLOCK = `## Memory (Agentlas curated memory)
 
-If — and only if — this turn produced something durable (a decision, a stable fact,
-a user preference, a risk, a reusable procedure), end your reply with a Memory Events
-block. Emit nothing when nothing durable was learned.
+At the end of EVERY completed normal reply, emit exactly one hidden Memory Events
+envelope. The runtime removes it before display. This envelope is the per-turn receipt:
+always include a compact safe turn_summary, and use an empty candidates array when
+nothing durable was learned. Do not skip the envelope.
 
 Rules:
 - Never include secrets, credentials, API keys, raw logs, or full transcripts.
@@ -180,37 +181,44 @@ Rules:
   project's ${PROJECT_MEMORY_DIR}/${LOCAL_CREDENTIALS_MAP_FILE} and the top
   "Local Credential Index" section of ${PROJECT_MEMORY_DIR}/${PROJECT_SOUL_FILE}
   before saying a credential is missing.
-- One event per durable item. Keep "content" to one or two sentences.
+- One candidate per durable item. Keep "content" to one or two sentences.
 - "memory_kind": fact | decision | preference | risk | procedure | hypothesis | evidence | deprecation | conflict
 - "suggested_scope": user_identity | team_memory | project (this folder) | agent_repo | session (temporary) | discard
 - "agent_team" is accepted only as a legacy alias for team_memory.
 - Add "request_context" when it improves future recall: user_intent, trigger_terms,
   cwd_at_request, target_project, target_path, cross_context, outcome.
 - Never put the raw user prompt or transcript in request_context.
-- Suggest a scope; the Memory Curator decides the final destination.
+- Suggest a scope; the separate Memory Curator decides the final destination.
+- turn_summary is one value-free sentence about the completed outcome. It is not the
+  user prompt, a transcript, raw log, secret, or absolute local path.
 
-Format (omit entirely if empty):
+Format (always emit, including an empty candidates array):
 
 ${MEMORY_EVENTS_HEADING}
 \`\`\`json
-[
-  {
-    "memory_kind": "decision",
-    "content": "...",
-    "suggested_scope": "project",
-    "confidence": "high",
-    "evidence_refs": [],
-    "request_context": {
-      "user_intent": "...",
-      "trigger_terms": ["..."],
-      "cwd_at_request": null,
-      "target_project": null,
-      "target_path": null,
-      "cross_context": false,
-      "outcome": "..."
+{
+  "schema_version": "agentlas.memory-ticket.v1",
+  "turn_summary": "Completed outcome in one safe sentence.",
+  "candidates": [
+    {
+      "memory_kind": "decision",
+      "content": "...",
+      "suggested_scope": "project",
+      "confidence": "high",
+      "sensitivity": "internal",
+      "evidence_refs": [],
+      "request_context": {
+        "user_intent": "...",
+        "trigger_terms": ["..."],
+        "cwd_at_request": null,
+        "target_project": null,
+        "target_path": null,
+        "cross_context": false,
+        "outcome": "..."
+      }
     }
-  }
-]
+  ]
+}
 \`\`\``;
 
 // ── Built-in agents ──────────────────────────────────────────────────────────

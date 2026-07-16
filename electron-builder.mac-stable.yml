@@ -69,6 +69,9 @@ extraResources:
       - "!output/**"
       - "!tests/**"
       - "!benchmarks/**"
+      - "!docs/**"
+      - "!**/docs/**"
+      - "!research/**"
       - "!examples/**"
       - "!.playwright-mcp/**"
       - "!.pytest_cache/**"
@@ -144,6 +147,8 @@ mac:
   extraResources:
     - from: build-resources/macos-release-signing-policy.json
       to: macos-release-signing-policy.json
+    - from: build-resources/native/macos/agentlas-input-driver
+      to: native/macos/agentlas-input-driver
   forceCodeSigning: true
   # Electron 43 requires macOS 12 Monterey or newer. The update feed pairs this
   # product-version floor with Darwin 21 in update-compatibility.cjs.
