@@ -69,15 +69,6 @@ function materializeSourceBytes() {
   // already-clean checkout without CRLF conversion before it can be packaged.
   run("git", ["-C", dir, "config", "--local", "core.autocrlf", "false"]);
   run("git", ["-C", dir, "config", "--local", "core.eol", "lf"]);
-  const sourceDrift = capture("git", [
-    ...sourceByteCheckoutConfig,
-    "-C",
-    dir,
-    "status",
-    "--porcelain",
-    "--untracked-files=no",
-  ]);
-  if (!sourceDrift) return;
   const stagingDir = mkdtempSync(path.join(tmpdir(), "agentlas-core-source-"));
   try {
     const prefix = `${stagingDir.replaceAll("\\", "/")}/`;
@@ -104,6 +95,7 @@ function materializeSourceBytes() {
   } catch {
     fail("source-byte materialization changed the embedded Agentlas OS index");
   }
+  console.log("[ensure-engine] Re-materialized tracked Agentlas OS files with source line endings.");
 }
 
 function fail(message) {
