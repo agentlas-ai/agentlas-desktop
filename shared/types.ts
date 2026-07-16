@@ -2533,6 +2533,41 @@ export interface CloudAgentRegistrationResult {
   localSyncStored?: boolean;
 }
 
+/** Exact immutable Hub release reference inside an owner cloud combination. */
+export interface CloudAgentCombinationMemberRef {
+  agentDefinitionId: string;
+  agentReleaseId: string;
+}
+
+/**
+ * Owner-scoped Agent Cloud combination (cargo.list_combinations /
+ * cargo.save_combination / cargo.delete_combination). Holds Hub release
+ * references only — never package bytes.
+ */
+export interface CloudAgentCombination {
+  combinationId: string;
+  name: string;
+  description: string;
+  members: CloudAgentCombinationMemberRef[];
+  revision: number;
+  updatedAt: string;
+}
+
+/** Exact semantic result of the current Agent Cloud delete contract. */
+export interface CloudAgentDeleteResult {
+  schema: "agentlas.agent_cloud.delete.v1";
+  deleted: true;
+  slug: string;
+  scope: "owner-private" | "hub-public";
+  operation?: "unpublished" | "already_unpublished";
+  deletionMode: "hard-delete" | "soft-unpublish";
+  deletedResource: "cloud-package" | "hub-listing";
+  packageBytesRetained: boolean;
+  reconciled?: boolean;
+  revision: string;
+  deletedAt: string;
+}
+
 export interface CloudAgentPackageResult {
   status: CloudAgentPackageStatus;
   rootPath: string;

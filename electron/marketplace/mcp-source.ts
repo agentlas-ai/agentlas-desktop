@@ -5,6 +5,9 @@
 // 응답 실패/타임아웃 시 하드코딩 카탈로그로 대체하지 않는다.
 import type {
   AgentEnvRequirement,
+  CloudAgentCombination,
+  CloudAgentCombinationMemberRef,
+  CloudAgentDeleteResult,
   CloudAgentPackageDownload,
   CloudAgentPackageDownloadFile,
   CloudAgentRevisionIdentity,
@@ -36,6 +39,28 @@ export class OwnerPackageRestoreError extends Error {
     // owner_only / no_cloud_package without parsing translated prose.
     super(code);
     this.name = "OwnerPackageRestoreError";
+  }
+}
+
+/**
+ * Owner-only Agent Cloud action refusal (delete_agent / combinations). The
+ * server code (owner_only, agent_not_found, insufficient_credits, …) is the
+ * exact Error.message so callers can surface it verbatim — never as success.
+ */
+export class OwnerCloudActionError extends Error {
+  constructor(
+    readonly code: string,
+    readonly detail?: string,
+    readonly refusal: {
+      retryable?: boolean;
+      expectedRevision?: number;
+      currentRevision?: number;
+      packageBytesRetained?: boolean;
+      actionState?: "not-committed" | "partially-committed" | "unknown";
+    } = {},
+  ) {
+    super(code);
+    this.name = "OwnerCloudActionError";
   }
 }
 
@@ -111,6 +136,149 @@ function trustGrade(value: unknown): MarketplaceListing["trustGrade"] {
 function restoreError(raw: Record<string, unknown>): never {
   const code = cleanString(raw.error, "invalid_restore_contract");
   throw new OwnerPackageRestoreError(code, cleanString(raw.message) || undefined);
+}
+
+/** cargo.* owner actions return refusals inside the result payload (restore
+ * pattern). Surface the exact server code; never coerce it into success. */
+function throwIfOwnerActionRefusal(raw: unknown): void {
+  const root = asRecord(raw);
+  if (root && typeof root.error === "string" && root.error.trim()) {
+    const code = root.error.trim();
+    const knownNoCommit = new Set([
+      "owner_only",
+      "agent_not_found",
+      "combination_not_found",
+      "insufficient_credits",
+      "invalid_combination",
+      "invalid_combination_revision",
+      "cloud_delete_commit_failed",
+      "cloud_revision_conflict",
+      "combination_revision_conflict",
+      "combination_write_conflict",
+    ]);
+    const positiveRevision = (value: unknown): number | undefined =>
+      Number.isSafeInteger(value) && Number(value) >= 1 ? Number(value) : undefined;
+    throw new OwnerCloudActionError(
+      code,
+      cleanString(root.message) || undefined,
+      {
+        ...(typeof root.retryable === "boolean" ? { retryable: root.retryable } : {}),
+        ...(positiveRevision(root.expectedRevision) !== undefined
+          ? { expectedRevision: positiveRevision(root.expectedRevision) }
+          : {}),
+        ...(positiveRevision(root.currentRevision) !== undefined
+          ? { currentRevision: positiveRevision(root.currentRevision) }
+          : {}),
+        ...(typeof root.packageBytesRetained === "boolean"
+          ? { packageBytesRetained: root.packageBytesRetained }
+          : {}),
+        actionState: code === "workforce_withdrawal_pending"
+          ? "partially-committed"
+          : knownNoCommit.has(code)
+            ? "not-committed"
+            : "unknown",
+      },
+    );
+  }
+}
+
+function normalizeDeleteResult(raw: unknown, requestedSlug: string): CloudAgentDeleteResult | null {
+  const root = asRecord(raw);
+  if (!root || root.schema !== "agentlas.agent_cloud.delete.v1" || root.deleted !== true) return null;
+  const slug = cleanString(root.slug);
+  const scope = root.scope;
+  const deletionMode = root.deletionMode;
+  const deletedResource = root.deletedResource;
+  const operation = root.operation;
+  const revision = cleanString(root.revision);
+  const deletedAt = cleanString(root.deletedAt);
+  if (
+    slug !== requestedSlug ||
+    (scope !== "owner-private" && scope !== "hub-public") ||
+    !/^(?:rev_[a-f0-9]{32}|legacy_[a-f0-9]{64})$/.test(revision) ||
+    !Number.isFinite(Date.parse(deletedAt))
+  ) return null;
+  if (scope === "owner-private") {
+    if (
+      deletionMode !== "hard-delete" ||
+      deletedResource !== "cloud-package" ||
+      root.packageBytesRetained !== false ||
+      operation !== undefined ||
+      root.reconciled !== undefined
+    ) return null;
+    return {
+      schema: "agentlas.agent_cloud.delete.v1",
+      deleted: true,
+      slug,
+      scope,
+      deletionMode,
+      deletedResource,
+      packageBytesRetained: false,
+      revision,
+      deletedAt,
+    };
+  }
+  if (
+    deletionMode !== "soft-unpublish" ||
+    deletedResource !== "hub-listing" ||
+    root.packageBytesRetained !== true ||
+    (operation !== "unpublished" && operation !== "already_unpublished") ||
+    typeof root.reconciled !== "boolean"
+  ) return null;
+  return {
+    schema: "agentlas.agent_cloud.delete.v1",
+    deleted: true,
+    slug,
+    scope,
+    operation,
+    deletionMode,
+    deletedResource,
+    packageBytesRetained: true,
+    reconciled: root.reconciled,
+    revision,
+    deletedAt,
+  };
+}
+
+function normalizeCombinationMember(raw: unknown): CloudAgentCombinationMemberRef | null {
+  const row = asRecord(raw);
+  if (!row) return null;
+  const agentDefinitionId = cleanString(row.agentDefinitionId);
+  const agentReleaseId = cleanString(row.agentReleaseId);
+  if (!agentDefinitionId || !agentReleaseId) return null;
+  return { agentDefinitionId, agentReleaseId };
+}
+
+function normalizeCombination(raw: unknown): CloudAgentCombination | null {
+  const row = asRecord(raw);
+  if (!row) return null;
+  const combinationId = cleanString(row.combinationId);
+  const name = cleanString(row.name);
+  const description = typeof row.description === "string" ? row.description : null;
+  const revision = row.revision;
+  const updatedAt = cleanString(row.updatedAt);
+  if (
+    !combinationId ||
+    !name ||
+    description === null ||
+    !Number.isSafeInteger(revision) ||
+    Number(revision) < 1 ||
+    !updatedAt ||
+    !Number.isFinite(Date.parse(updatedAt)) ||
+    !Array.isArray(row.members) ||
+    row.members.length < 1 ||
+    row.members.length > 32
+  ) return null;
+  const members = row.members.map(normalizeCombinationMember);
+  if (members.some((member) => member === null)) return null;
+  return {
+    combinationId,
+    name,
+    description,
+    members: members as CloudAgentCombinationMemberRef[],
+    revision: Number(revision),
+    updatedAt,
+  };
 }
 
 function normalizeRestoreFile(raw: unknown): CloudAgentPackageDownloadFile | null {
@@ -844,5 +1012,109 @@ export class McpSource implements MarketplaceSource {
       // Optional draft metadata must never prevent an already-authorized restore.
     }
     return restorePayloadToListing(restored, metadata, `${this.opts.baseUrl}/tools/call`);
+  }
+
+  /**
+   * Owner-only Agent Cloud delete. The exact hard-delete or soft-unpublish
+   * semantics are preserved; server refusals surface as OwnerCloudActionError.
+   * This never touches a local installation.
+   */
+  async deleteMyAgent(idOrSlug: string): Promise<CloudAgentDeleteResult> {
+    const slug = cleanString(idOrSlug);
+    if (!slug) throw new OwnerCloudActionError("missing_slug");
+    const raw = await this.call<unknown>("cargo.delete_agent", { slug });
+    throwIfOwnerActionRefusal(raw);
+    const deleted = normalizeDeleteResult(raw, slug);
+    if (!deleted) {
+      throw new OwnerCloudActionError(
+        "invalid_delete_contract",
+        "cargo.delete_agent did not return the exact hard-delete or soft-unpublish contract.",
+        { actionState: "unknown" },
+      );
+    }
+    return deleted;
+  }
+
+  /** Owner combinations — cargo.list_combinations {} → { combinations: [...] }. */
+  async listMyCombinations(): Promise<CloudAgentCombination[]> {
+    const raw = await this.call<unknown>("cargo.list_combinations", {});
+    throwIfOwnerActionRefusal(raw);
+    const root = asRecord(raw);
+    if (!root || !Array.isArray(root.combinations)) {
+      throw new OwnerCloudActionError(
+        "invalid_combination_contract",
+        "cargo.list_combinations did not return a combinations array.",
+      );
+    }
+    const combinations = root.combinations.map(normalizeCombination);
+    if (combinations.some((combination) => combination === null)) {
+      throw new OwnerCloudActionError(
+        "invalid_combination_contract",
+        "cargo.list_combinations returned a malformed combination.",
+      );
+    }
+    return combinations as CloudAgentCombination[];
+  }
+
+  /**
+   * Save/update one owner combination — cargo.save_combination
+   * { name, description, members, combinationId?, expectedRevision? } → saved
+   * combination (server issues combinationId for new rows; updates require CAS).
+   */
+  async saveMyCombination(input: {
+    name: string;
+    description: string;
+    members: CloudAgentCombinationMemberRef[];
+    combinationId?: string;
+    expectedRevision?: number;
+  }): Promise<CloudAgentCombination> {
+    if (input.combinationId && (!Number.isSafeInteger(input.expectedRevision) || Number(input.expectedRevision) < 1)) {
+      throw new OwnerCloudActionError(
+        "invalid_combination_revision",
+        "Updating a cloud combination requires its positive numeric revision.",
+      );
+    }
+    if (!input.combinationId && input.expectedRevision !== undefined) {
+      throw new OwnerCloudActionError(
+        "invalid_combination_revision",
+        "A revision is valid only when updating an existing cloud combination.",
+      );
+    }
+    const raw = await this.call<unknown>("cargo.save_combination", {
+      name: input.name,
+      description: input.description,
+      members: input.members.map((member) => ({
+        agentDefinitionId: member.agentDefinitionId,
+        agentReleaseId: member.agentReleaseId,
+      })),
+      ...(input.combinationId ? { combinationId: input.combinationId } : {}),
+      ...(input.combinationId ? { expectedRevision: input.expectedRevision } : {}),
+    });
+    throwIfOwnerActionRefusal(raw);
+    const root = asRecord(raw);
+    const combination = normalizeCombination(root?.combination ?? root);
+    if (!combination) {
+      throw new OwnerCloudActionError(
+        "invalid_combination_contract",
+        "cargo.save_combination did not return the saved combination.",
+      );
+    }
+    return combination;
+  }
+
+  /** cargo.delete_combination { combinationId } → { deleted: true, combinationId }. */
+  async deleteMyCombination(combinationId: string): Promise<{ deleted: true; combinationId: string }> {
+    const id = cleanString(combinationId);
+    if (!id) throw new OwnerCloudActionError("missing_combination_id");
+    const raw = await this.call<unknown>("cargo.delete_combination", { combinationId: id });
+    throwIfOwnerActionRefusal(raw);
+    const root = asRecord(raw);
+    if (!root || root.deleted !== true || cleanString(root.combinationId) !== id) {
+      throw new OwnerCloudActionError(
+        "invalid_delete_contract",
+        "cargo.delete_combination did not acknowledge the exact requested combination.",
+      );
+    }
+    return { deleted: true, combinationId: id };
   }
 }

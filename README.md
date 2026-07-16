@@ -69,7 +69,7 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
-- **2026-07-16 · v0.8.49 — governed federation without a truncated map** —
+- **2026-07-17 · v0.8.49 — governed federation and real Mobile Cloud actions** —
   Desktop now sends the required network scope to Agentlas OS v1.1.48,
   unwraps the federation envelope for model choice, and preserves the original
   envelope plus source receipts through validation and execution. The model
@@ -78,7 +78,15 @@ authority for which version is actually public, stable, and downloadable.
   while Desktop explicitly retains the full 25,000-node project budget and
   injects it through the 24MB sitemap read boundary. This release also carries
   the user-identity, project-ontology ingest, empty-layer observability, and
-  multilingual memory-retrieval fixes introduced in the 0.8.48 source.
+  multilingual memory-retrieval fixes introduced in the 0.8.48 source. A
+  paired Mobile client can also preview and privately upload a registered local
+  Agent or Team, delete only its Cloud/Hub projection with exact hard-delete or
+  soft-unpublish semantics, and create or CAS-update combinations of exact Hub
+  releases. A remote Hephaestus build starts only after a per-run native Desktop
+  approval; accepted starts are explicitly non-replayable, and an interview turn
+  reports structured `awaiting-input` with `resumable: false` instead of fake
+  completion. Upload receipt-recovery state and structured Cloud refusal details
+  remain visible across the bridge.
   Agentlas OS v1.1.48 is pinned at
   `98adf6d1bb0bdad5a919884c3916274d5a3e813f`. This source is not proof of a
   published installer or update-feed release.

@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 import {
+  extractBuildInterviewQuestions,
+  isCompletedBuildTurn,
+  type BuildInterviewQuestion,
+} from "../../shared/build-turn";
+import {
   browserResolveApproval,
   listPendingBrowserApprovals,
   onBrowserApprovalLifecycle,
@@ -43,11 +48,23 @@ import {
 } from "../store/chats";
 import { getProject } from "../store/projects";
 import { createAgentGroup } from "../store/agent-groups";
+import { OwnerCloudActionError } from "../marketplace/mcp-source";
+import {
+  createDesktopMobileBridgeBuildActions,
+  createDesktopMobileBridgeCloudAgentActions,
+  type MobileBridgeBuildApprovalDecision,
+  type MobileBridgeBuildActions,
+  type MobileBridgeCloudAgentActions,
+} from "./cloud-actions";
 import { getUsageSnapshot } from "../usage";
 import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
 import type { TerminalOntologyLoadoutFeedWriter } from "../ontology/terminal-loadout-feed";
 import type {
   Chat,
+  CloudAgentCombination,
+  CloudAgentCombinationMemberRef,
+  CloudAgentRegisteredUploadOption,
+  HephaestusBuildEvent,
   ImageAttachment,
   InvocationRunReceipt,
   McpInvocationEvent,
@@ -59,6 +76,15 @@ import type {
 import {
   MOBILE_BRIDGE_PROTOCOL_VERSION,
   isMobileBridgeJsonValue,
+  type MobileBridgeBuildEventDto,
+  type MobileBridgeBuildQuestionDto,
+  type MobileBridgeBuildRefusalDto,
+  type MobileBridgeBuildStatus,
+  type MobileBridgeCloudCombinationDto,
+  type MobileBridgeCloudDeleteResultDto,
+  type MobileBridgeCloudRefusalDto,
+  type MobileBridgeCloudUploadSaveDto,
+  type MobileBridgeCloudUploadPreviewDto,
   type MobileBridgeInvocationEventDto,
   type MobileBridgeBrowserApprovalDto,
   type MobileBridgeInvokeSteerParams,
@@ -95,6 +121,22 @@ const RUN_ID_RE = /^[^\u0000-\u001f]{1,160}$/;
 const EVENT_TEXT_MAX_BYTES = 200_000;
 const EVENT_DELTA_MAX_BYTES = 64_000;
 const TOOL_COUNT_CAP = 1_000;
+const BUILD_EVENT_TEXT_MAX_BYTES = 16_000;
+const BUILD_SUMMARY_MAX_BYTES = 2_000;
+const BUILD_RUN_HISTORY_LIMIT = 64;
+const BUILD_APPROVAL_TIMEOUT_MS = 90_000;
+// A paired phone can start a full-authority Hephaestus build. Keep that scarce
+// operation single-flight per Desktop authority so repeated requests cannot
+// fan out unbounded local model/tool processes. Desktop-native builds are not
+// part of this registry and remain unaffected.
+const MAX_CONCURRENT_MOBILE_BUILDS = 1;
+const HANGUL_RE = /[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/;
+
+type InternalMobileBuildStatus = MobileBridgeBuildStatus | "awaiting-approval";
+
+function activeMobileBuildStatus(status: InternalMobileBuildStatus): boolean {
+  return status === "awaiting-approval" || status === "running";
+}
 
 export interface AgentlasDesktopMobileBridgeAuthorityOptions {
   /** DESKTOP_MOBILE_BRIDGE: Stable identity loaded from the Desktop userData store. */
@@ -108,6 +150,13 @@ export interface AgentlasDesktopMobileBridgeAuthorityOptions {
   ontologyHubClient?: OntologyHubClient;
   /** Content-free, private projection consumed only after an explicit Terminal flag. */
   terminalOntologyLoadoutFeedWriter?: TerminalOntologyLoadoutFeedWriter;
+  /**
+   * Agent Cloud passthrough adapter (upload/delete/combinations). Tests inject
+   * fakes; production omits it and gets the real Desktop internals.
+   */
+  cloudAgentActions?: MobileBridgeCloudAgentActions;
+  /** Hephaestus build runner adapter. Same injection rule as cloudAgentActions. */
+  buildActions?: MobileBridgeBuildActions;
 }
 
 export type MobileBridgeAuthorityHandle = MobileBridgeAuthority & { dispose(): void };
@@ -542,6 +591,21 @@ function createChatParams(request: MobileBridgeRpcRequest): Parameters<typeof cr
   };
 }
 
+/** Authority-side revalidation of exact Hub release references (defense in depth). */
+function parseCloudCombinationMembers(value: unknown): CloudAgentCombinationMemberRef[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 32) {
+    throw new TypeError("members must contain 1 to 32 exact Hub release references");
+  }
+  return value.map((item, index) => {
+    if (!isRecord(item)) throw new TypeError(`members[${index}] must be an object`);
+    assertOnlyKeys(item, ["agentDefinitionId", "agentReleaseId"], `members[${index}]`);
+    return {
+      agentDefinitionId: requiredIdentifier(item, "agentDefinitionId", RUN_ID_RE),
+      agentReleaseId: requiredIdentifier(item, "agentReleaseId", RUN_ID_RE),
+    };
+  });
+}
+
 /** DESKTOP_MOBILE_BRIDGE: History strips in-memory data URLs; attachments never cross this v1 method. */
 function projectInvocationHistory(
   history: ReturnType<typeof invocationService.history>,
@@ -696,6 +760,18 @@ export function projectMobileBridgeInvocationEvent(
 export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthority {
   private readonly listeners = new Set<AuthorityListener>();
   private readonly onError: (error: Error) => void;
+  private readonly cloudAgentActions: MobileBridgeCloudAgentActions;
+  private readonly buildActions: MobileBridgeBuildActions;
+  private readonly buildRuns = new Map<string, {
+    status: InternalMobileBuildStatus;
+    /** True until the builder promise settles, even after a terminal event. */
+    active: boolean;
+    summary: string | null;
+    questions: MobileBridgeBuildQuestionDto[];
+    refusal: MobileBridgeBuildRefusalDto | null;
+    controller: AbortController;
+    startedAt: number;
+  }>();
   private upstreamUnsubscribers: Array<() => void> = [];
   private refreshQueued = false;
   private refreshRunning = false;
@@ -721,6 +797,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       throw new Error("Invalid Mobile Bridge app version");
     }
     this.onError = options.onError ?? ((error) => console.error("[mobile-bridge-authority]", error.message));
+    this.cloudAgentActions = options.cloudAgentActions ?? createDesktopMobileBridgeCloudAgentActions();
+    this.buildActions = options.buildActions ?? createDesktopMobileBridgeBuildActions();
   }
 
   /** DESKTOP_MOBILE_BRIDGE: Initial state is always a fresh Desktop projection; no seed fallback. */
@@ -1289,6 +1367,226 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         this.scheduleSnapshotUpdated();
         return asJsonValue(receipt, request.method);
       }
+      // DESKTOP_MOBILE_BRIDGE: Agent Cloud passthrough. Uploads reuse the exact
+      // registered-upload + packageAndReviewCloudAgent internals behind the
+      // Desktop `cloudAgents:saveRegisteredPrivate` IPC (pinned private-link +
+      // static-only); delete/combinations call the authenticated cargo.* client.
+      // Server refusals surface through `refusal` with an explicit actionState;
+      // partially committed withdrawal must not be treated as a no-op. Local
+      // installations are never modified by these methods.
+      case "agents.cloudUploadPreview": {
+        const params = guardedParams(request, ["agentLocalId"]);
+        const agentLocalId = requiredIdentifier(params, "agentLocalId");
+        const option = this.registeredUploadOptionForAgent(agentLocalId);
+        let estimatedFileCount: number | null = null;
+        if (option.sourceReady) {
+          try {
+            estimatedFileCount = this.cloudAgentActions.estimateUploadFileCount(option.target);
+          } catch {
+            estimatedFileCount = null;
+          }
+        }
+        const preview: MobileBridgeCloudUploadPreviewDto = {
+          agentLocalId,
+          name: boundedRedactedText(option.name, 512),
+          slug: boundedRedactedText(option.slug, 512),
+          entityKind: option.entityKind,
+          sourceReady: option.sourceReady,
+          estimatedFileCount,
+          visibility: "private-link",
+        };
+        return asJsonValue(preview, request.method);
+      }
+      case "agents.cloudUploadSave": {
+        const params = guardedParams(request, ["agentLocalId", "idempotencyKey"]);
+        const agentLocalId = requiredIdentifier(params, "agentLocalId");
+        this.consumeWriteIdempotencyKey(request, params);
+        const option = this.registeredUploadOptionForAgent(agentLocalId);
+        const sessionRefusal = this.cloudSessionRefusal();
+        if (sessionRefusal) return asJsonValue({ refusal: sessionRefusal }, request.method);
+        const result = await this.cloudAgentActions.saveRegisteredPrivate(option.target);
+        if (result.status !== "registered" || !result.registration) {
+          // The local security review blocked the package or the registration
+          // did not commit. Never report success; surface the bounded summary.
+          return asJsonValue({
+            refusal: {
+              code: result.status === "blocked" ? "package_blocked" : "not_registered",
+              message: boundedRedactedText(result.summary, 1_000),
+            },
+          }, request.method);
+        }
+        this.scheduleSnapshotUpdated();
+        const localSyncStored = result.registration.localSyncStored === true;
+        const upload: MobileBridgeCloudUploadSaveDto = {
+          slug: result.registration.slug,
+          visibility: "private-link",
+          status: localSyncStored ? "registered" : "registered-recovery-required",
+          localSyncStored,
+          recoveryRequired: !localSyncStored,
+          ...(!localSyncStored
+            ? {
+                recovery: {
+                  code: "local_revision_receipt_not_saved" as const,
+                  message:
+                    "Agent Cloud committed the package, but Desktop could not save its local revision receipt. Restore the latest Cloud copy before the next edit or save.",
+                },
+              }
+            : {}),
+        };
+        return asJsonValue(upload, request.method);
+      }
+      case "agents.cloudDelete": {
+        const params = guardedParams(request, ["slug", "idempotencyKey"]);
+        const slug = requiredIdentifier(params, "slug", RUN_ID_RE);
+        this.consumeWriteIdempotencyKey(request, params);
+        const sessionRefusal = this.cloudSessionRefusal();
+        if (sessionRefusal) return asJsonValue({ refusal: sessionRefusal }, request.method);
+        try {
+          // Server-side delete only. The local installation, if any, stays.
+          const result = await this.cloudAgentActions.deleteMyAgent(slug);
+          const deleted: MobileBridgeCloudDeleteResultDto = {
+            schema: result.schema,
+            deleted: true,
+            slug: boundedRedactedText(result.slug, 160),
+            scope: result.scope,
+            ...(result.operation ? { operation: result.operation } : {}),
+            deletionMode: result.deletionMode,
+            deletedResource: result.deletedResource,
+            packageBytesRetained: result.packageBytesRetained,
+            ...(result.reconciled !== undefined ? { reconciled: result.reconciled } : {}),
+            revision: boundedRedactedText(result.revision, 96),
+            deletedAt: boundedRedactedText(result.deletedAt, 64),
+          };
+          return asJsonValue(deleted, request.method);
+        } catch (error) {
+          const refusal = this.cloudRefusalOf(error);
+          if (refusal) return asJsonValue({ refusal }, request.method);
+          throw error;
+        }
+      }
+      case "groups.cloudList": {
+        noParams(request);
+        const sessionRefusal = this.cloudSessionRefusal();
+        if (sessionRefusal) return asJsonValue({ refusal: sessionRefusal }, request.method);
+        try {
+          const combinations = await this.cloudAgentActions.listMyCombinations();
+          return asJsonValue({
+            combinations: combinations
+              .slice(0, 100)
+              .map((combination) => this.projectCloudCombination(combination)),
+          }, request.method);
+        } catch (error) {
+          const refusal = this.cloudRefusalOf(error);
+          if (refusal) return asJsonValue({ refusal }, request.method);
+          throw error;
+        }
+      }
+      case "groups.cloudSave": {
+        const params = guardedParams(request, [
+          "name",
+          "description",
+          "members",
+          "combinationId",
+          "expectedRevision",
+          "idempotencyKey",
+        ]);
+        const name = requiredBoundedString(params, "name", 120).trim();
+        const description = optionalText(params, "description", 1_000)?.trim() ?? "";
+        const members = parseCloudCombinationMembers(params.members);
+        const combinationId = optionalIdentifier(params, "combinationId", 128);
+        const expectedRevision = optionalInteger(
+          params,
+          "expectedRevision",
+          1,
+          Number.MAX_SAFE_INTEGER,
+        );
+        this.consumeWriteIdempotencyKey(request, params);
+        if (!name) throw new TypeError("name must not be blank");
+        if ((combinationId === undefined) !== (expectedRevision === undefined)) {
+          throw new TypeError("combinationId and expectedRevision are required together for updates");
+        }
+        const sessionRefusal = this.cloudSessionRefusal();
+        if (sessionRefusal) return asJsonValue({ refusal: sessionRefusal }, request.method);
+        try {
+          const saved = await this.cloudAgentActions.saveMyCombination({
+            name,
+            description,
+            members,
+            ...(combinationId !== undefined ? { combinationId, expectedRevision } : {}),
+          });
+          return asJsonValue(this.projectCloudCombination(saved), request.method);
+        } catch (error) {
+          const refusal = this.cloudRefusalOf(error);
+          if (refusal) return asJsonValue({ refusal }, request.method);
+          throw error;
+        }
+      }
+
+      // DESKTOP_MOBILE_BRIDGE: Remote Hephaestus build. After a per-run local
+      // approval, `build.start` answers with { runId, replayable: false }; all
+      // progress is pushed as ordered `build.event` frames and `build.status`
+      // reads the bounded in-process registry. Workspace paths, runtime session
+      // ids, and raw build results never cross the bridge.
+      case "build.start": {
+        const params = guardedParams(request, ["goal", "idempotencyKey"]);
+        const goal = requiredText(params, "goal", 20_000);
+        this.consumeWriteIdempotencyKey(request, params);
+        const activeBuilds = [...this.buildRuns.values()].filter((run) => run.active).length;
+        if (activeBuilds >= MAX_CONCURRENT_MOBILE_BUILDS) {
+          throw new Error("A Mobile build is already running on this Desktop");
+        }
+        const runId = randomUUID();
+        const controller = new AbortController();
+        this.buildRuns.set(runId, {
+          status: "awaiting-approval",
+          active: true,
+          summary: null,
+          questions: [],
+          refusal: null,
+          controller,
+          startedAt: Date.now(),
+        });
+        this.pruneBuildRuns();
+        const locale: "ko" | "en" = HANGUL_RE.test(goal) ? "ko" : "en";
+        const approval = await this.awaitBuildApproval({ runId, goal, locale, controller });
+        const reserved = this.buildRuns.get(runId);
+        if (!approval.approved || !reserved || controller.signal.aborted || this.disposed) {
+          this.buildRuns.delete(runId);
+          const refusal = this.buildApprovalRefusal(
+            approval.approved ? "desktop_approval_unavailable" : approval.code,
+          );
+          return asJsonValue({ refusal }, request.method);
+        }
+        reserved.status = "running";
+        const completion = Promise.resolve().then(() => this.buildActions.run({
+          runId,
+          goal,
+          locale,
+          sink: (event) => this.handleBuildEvent(runId, event),
+          signal: controller.signal,
+        }));
+        void completion.then(
+          () => this.finalizeBuildRun(runId, null),
+          (error) => this.finalizeBuildRun(runId, errorOf(error)),
+        );
+        return asJsonValue({ runId, replayable: false }, request.method);
+      }
+      case "build.status": {
+        const params = guardedParams(request, ["runId"]);
+        const runId = requiredIdentifier(params, "runId", RUN_ID_RE);
+        const run = this.buildRuns.get(runId);
+        if (!run) throw new Error("Build run not found");
+        if (run.status === "awaiting-approval") {
+          throw new Error("Build approval is still pending on Desktop");
+        }
+        return asJsonValue({
+          status: run.status,
+          summary: run.summary,
+          ...(run.questions.length > 0 ? { questions: run.questions } : {}),
+          ...(run.refusal ? { refusal: run.refusal, resumable: false as const } : {}),
+        }, request.method);
+      }
+
       case "device.revokeSelf": {
         noParams(request);
         if (context.devBootstrap || context.devicePlatform === "dev") {
@@ -1325,11 +1623,292 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    for (const run of this.buildRuns.values()) {
+      if (!run.active) continue;
+      try {
+        run.controller.abort();
+      } catch (error) {
+        this.onError(errorOf(error));
+      }
+    }
+    this.buildRuns.clear();
     this.detachDesktopSubscriptions();
     this.listeners.clear();
     this.pendingAutomationIds.clear();
     this.refreshRequested = false;
     this.refreshQueued = false;
+  }
+
+  /**
+   * The durable replay ledger keys on the envelope idempotencyKey. The wire
+   * contract also carries the key inside params, so require both to be present
+   * and identical — a retry with a fresh envelope key must not silently bypass
+   * write-ahead replay protection.
+   */
+  private consumeWriteIdempotencyKey(
+    request: MobileBridgeRpcRequest,
+    params: Record<string, unknown>,
+  ): string {
+    const key = requiredBoundedString(params, "idempotencyKey", 160);
+    if (request.idempotencyKey !== key) {
+      throw new TypeError(
+        `${request.method} requires the envelope idempotencyKey to equal params.idempotencyKey`,
+      );
+    }
+    return key;
+  }
+
+  private registeredUploadOptionForAgent(agentLocalId: string): CloudAgentRegisteredUploadOption {
+    const option = this.cloudAgentActions
+      .listRegisteredUploadOptions()
+      .find((item) => (
+        ("agentId" in item.target && item.target.agentId === agentLocalId) ||
+        ("firmId" in item.target && item.target.firmId === agentLocalId)
+      ));
+    if (!option) {
+      throw new Error("The selected local agent is unavailable for Agent Cloud upload");
+    }
+    return option;
+  }
+
+  /** Fail closed before any doomed server call when Desktop has no cloud session. */
+  private cloudSessionRefusal(): MobileBridgeCloudRefusalDto | null {
+    if (this.cloudAgentActions.hasCloudSession()) return null;
+    return {
+      code: "not_signed_in",
+      message: "Sign in to agentlas.cloud on this Desktop first.",
+    };
+  }
+
+  /** Exact server refusal codes (owner_only, agent_not_found, …) pass through verbatim. */
+  private cloudRefusalOf(error: unknown): MobileBridgeCloudRefusalDto | null {
+    if (!(error instanceof OwnerCloudActionError)) return null;
+    return {
+      code: boundedRedactedText(error.code, 160),
+      message: boundedRedactedText(error.detail ?? error.code, 1_000),
+      ...(typeof error.refusal.retryable === "boolean"
+        ? { retryable: error.refusal.retryable }
+        : {}),
+      ...(error.refusal.expectedRevision !== undefined
+        ? { expectedRevision: error.refusal.expectedRevision }
+        : {}),
+      ...(error.refusal.currentRevision !== undefined
+        ? { currentRevision: error.refusal.currentRevision }
+        : {}),
+      ...(typeof error.refusal.packageBytesRetained === "boolean"
+        ? { packageBytesRetained: error.refusal.packageBytesRetained }
+        : {}),
+      ...(error.refusal.actionState ? { actionState: error.refusal.actionState } : {}),
+    };
+  }
+
+  private buildApprovalRefusal(
+    code: Extract<
+      MobileBridgeBuildRefusalDto["code"],
+      "desktop_approval_denied" | "desktop_approval_unavailable" | "desktop_approval_timed_out"
+    >,
+  ): MobileBridgeBuildRefusalDto {
+    const messages: Record<typeof code, string> = {
+      desktop_approval_denied: "The user denied this full-access Mobile build on Desktop.",
+      desktop_approval_unavailable:
+        "Desktop could not present a local approval dialog. No builder was started.",
+      desktop_approval_timed_out:
+        "Desktop approval timed out. No builder was started; submit a new request to try again.",
+    };
+    return { code, message: messages[code], retryable: code !== "desktop_approval_denied" };
+  }
+
+  private async awaitBuildApproval(input: {
+    runId: string;
+    goal: string;
+    locale: "ko" | "en";
+    controller: AbortController;
+  }): Promise<MobileBridgeBuildApprovalDecision | {
+    approved: false;
+    code: "desktop_approval_timed_out";
+  }> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (
+        decision: MobileBridgeBuildApprovalDecision | {
+          approved: false;
+          code: "desktop_approval_timed_out";
+        },
+      ): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        input.controller.signal.removeEventListener("abort", onAbort);
+        resolve(decision);
+      };
+      const onAbort = (): void => finish({ approved: false, code: "desktop_approval_unavailable" });
+      const timer = setTimeout(
+        () => finish({ approved: false, code: "desktop_approval_timed_out" }),
+        BUILD_APPROVAL_TIMEOUT_MS,
+      );
+      timer.unref?.();
+      input.controller.signal.addEventListener("abort", onAbort, { once: true });
+      if (input.controller.signal.aborted) {
+        onAbort();
+        return;
+      }
+      void Promise.resolve()
+        .then(() => this.buildActions.requestLocalApproval({
+          runId: input.runId,
+          goal: input.goal,
+          locale: input.locale,
+        }))
+        .then(finish, (error) => {
+          this.onError(errorOf(error));
+          finish({ approved: false, code: "desktop_approval_unavailable" });
+        });
+    });
+  }
+
+  private projectCloudCombination(combination: CloudAgentCombination): MobileBridgeCloudCombinationDto {
+    return {
+      combinationId: boundedRedactedText(combination.combinationId, 256),
+      name: boundedRedactedText(combination.name, 512),
+      description: boundedRedactedText(combination.description, 2_048),
+      members: combination.members.slice(0, 32).map((member) => ({
+        agentDefinitionId: boundedRedactedText(member.agentDefinitionId, 256),
+        agentReleaseId: boundedRedactedText(member.agentReleaseId, 256),
+      })),
+      revision: combination.revision,
+      updatedAt: boundedRedactedText(combination.updatedAt, 64),
+    };
+  }
+
+  private projectBuildQuestions(text: unknown, result: unknown): MobileBridgeBuildQuestionDto[] {
+    const candidates: BuildInterviewQuestion[] = extractBuildInterviewQuestions(text);
+    if (isRecord(result) && isRecord(result.supplementalQuestion)) {
+      const supplemental = result.supplementalQuestion;
+      const question = typeof supplemental.question === "string" ? supplemental.question.trim() : "";
+      const options = Array.isArray(supplemental.options)
+        ? supplemental.options.flatMap((option) => {
+            if (!isRecord(option)) return [];
+            const label = typeof option.label === "string" ? option.label.trim() : "";
+            if (!label) return [];
+            const description = typeof option.description === "string" ? option.description.trim() : "";
+            return [{ label, ...(description ? { description } : {}) }];
+          }).slice(0, 8)
+        : [];
+      if (question && options.length >= 2) {
+        candidates.push({ question, options, multiSelect: false });
+      }
+    }
+    const seen = new Set<string>();
+    return candidates.flatMap((candidate) => {
+      if (seen.size >= 7) return [];
+      const question = boundedRedactedText(candidate.question, 4_000);
+      if (!question || seen.has(question)) return [];
+      const options = candidate.options.flatMap((option) => {
+        const label = boundedRedactedText(option.label, 200);
+        if (!label) return [];
+        const description = option.description
+          ? boundedRedactedText(option.description, 1_000)
+          : "";
+        return [{ label, ...(description ? { description } : {}) }];
+      }).slice(0, 8);
+      if (options.length < 2) return [];
+      seen.add(question);
+      const header = candidate.header ? boundedRedactedText(candidate.header, 200) : "";
+      return [{
+        question,
+        ...(header ? { header } : {}),
+        options,
+        multiSelect: candidate.multiSelect,
+      }];
+    });
+  }
+
+  /** DESKTOP_MOBILE_BRIDGE: Builder events cross the bridge as sanitized display copy only. */
+  private handleBuildEvent(runId: string, event: HephaestusBuildEvent): void {
+    const run = this.buildRuns.get(runId);
+    if (!run) return;
+    let projectedKind: MobileBridgeBuildEventDto["kind"] = event.kind;
+    let text = typeof event.text === "string"
+      ? boundedRedactedText(stripMobileBridgeControlFences(event.text), BUILD_EVENT_TEXT_MAX_BYTES)
+      : undefined;
+    if (event.kind === "done") {
+      if (isCompletedBuildTurn(event.text)) {
+        run.status = "done";
+        run.questions = [];
+        run.refusal = null;
+      } else {
+        const questions = this.projectBuildQuestions(event.text, event.result);
+        if (questions.length > 0) {
+          run.status = "awaiting-input";
+          run.questions = questions;
+          run.refusal = {
+            code: "mobile_build_resume_unsupported",
+            message:
+              "This Build requires interview answers. Mobile Bridge v1 cannot safely resume the full-access runtime session; continue from Desktop instead.",
+            retryable: false,
+          };
+          projectedKind = "awaiting-input";
+          text = text || "Build is awaiting interview input on Desktop.";
+        } else {
+          run.status = "failed";
+          run.questions = [];
+          run.refusal = {
+            code: "build_completion_unproven",
+            message: "The builder turn ended without a final BUILD_COMPLETE receipt.",
+            retryable: true,
+          };
+          projectedKind = "error";
+          text = text || run.refusal.message;
+        }
+      }
+    } else if (event.kind === "error" && run.status !== "done") {
+      run.status = "failed";
+      run.questions = [];
+    }
+    if (text && (event.kind === "stage" || event.kind === "done" || event.kind === "error")) {
+      run.summary = boundedRedactedText(text, BUILD_SUMMARY_MAX_BYTES);
+    }
+    // sessionId (provider session identity) and result (contains the local
+    // workspace path and scan output) are intentionally never projected.
+    this.emitBuildEvent({
+      runId,
+      kind: projectedKind,
+      status: run.status === "awaiting-approval" ? "running" : run.status,
+      ...(typeof event.stage === "string" ? { stage: boundedRedactedText(event.stage, 256) } : {}),
+      ...(text !== undefined ? { text } : {}),
+      ...(run.questions.length > 0 ? { questions: run.questions } : {}),
+      ...(run.refusal ? { refusal: run.refusal, resumable: false as const } : {}),
+    });
+  }
+
+  private emitBuildEvent(payload: MobileBridgeBuildEventDto): void {
+    this.emit({ event: "build.event", payload: asJsonValue(payload, "build.event") });
+  }
+
+  private finalizeBuildRun(runId: string, failure: Error | null): void {
+    if (failure) this.onError(failure);
+    const run = this.buildRuns.get(runId);
+    if (!run) return;
+    run.active = false;
+    if (activeMobileBuildStatus(run.status)) {
+      // The builder settled without a terminal done/error event (startup
+      // failure, abort, or crash). Never leave the phone believing it runs.
+      run.status = "failed";
+      // Internal failure messages may carry local paths; keep a fixed marker.
+      run.summary = run.summary ?? (failure ? "Build failed before completion." : "Build ended without completing.");
+      this.emitBuildEvent({ runId, kind: "error", status: "failed", text: run.summary });
+    }
+    this.pruneBuildRuns();
+  }
+
+  private pruneBuildRuns(): void {
+    if (this.buildRuns.size <= BUILD_RUN_HISTORY_LIMIT) return;
+    const terminal = [...this.buildRuns.entries()]
+      .filter(([, run]) => !run.active)
+      .sort(([, a], [, b]) => a.startedAt - b.startedAt);
+    for (const [id] of terminal) {
+      if (this.buildRuns.size <= BUILD_RUN_HISTORY_LIMIT) break;
+      this.buildRuns.delete(id);
+    }
   }
 
   private async projectSnapshot(): Promise<MobileBridgeSnapshot> {

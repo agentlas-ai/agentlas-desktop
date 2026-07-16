@@ -116,6 +116,11 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
       "browser-approvals",
       "automations",
       "usage",
+      // v1 cloud-actions extension: registered upload preview/save, server-side
+      // cloud delete, owner cloud combinations, and remote Hephaestus builds.
+      "cloud-agent-actions",
+      "cloud-groups",
+      "remote-build",
       ...(options.ontology?.supported ? ["ontology-chips"] : []),
     ],
   };

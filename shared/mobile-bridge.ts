@@ -66,6 +66,13 @@ export const MOBILE_BRIDGE_METHODS = [
   "hephaestus.routePreview",
   "ontology.projections.list",
   "ontology.attach.resolve",
+  "agents.cloudUploadPreview",
+  "agents.cloudUploadSave",
+  "agents.cloudDelete",
+  "build.start",
+  "build.status",
+  "groups.cloudList",
+  "groups.cloudSave",
   "device.revokeSelf",
 ] as const;
 
@@ -94,6 +101,10 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "automations.runNow",
   "runtime.setActive",
   "ontology.attach.resolve",
+  "agents.cloudUploadSave",
+  "agents.cloudDelete",
+  "build.start",
+  "groups.cloudSave",
 ]);
 
 export const MOBILE_BRIDGE_EVENT_NAMES = [
@@ -105,6 +116,7 @@ export const MOBILE_BRIDGE_EVENT_NAMES = [
   "browser.approval",
   "automation.updated",
   "ontology.updated",
+  "build.event",
 ] as const;
 
 export type MobileBridgeEventName = (typeof MOBILE_BRIDGE_EVENT_NAMES)[number];
@@ -715,6 +727,124 @@ export interface MobileBridgeUsageProviderDto {
   accountFingerprint: string | null;
 }
 
+/**
+ * DESKTOP_MOBILE_BRIDGE: Cloud passthrough refusal. When the Agent Cloud server
+ * refuses an owner action (owner_only, agent_not_found, no_cloud_package,
+ * insufficient_credits, …) the exact server code is surfaced verbatim instead
+ * of a fake success or a generic authority error. `actionState` is mandatory
+ * whenever the server reports that part of a destructive action already
+ * committed; callers must not interpret every refusal as a no-op.
+ */
+export interface MobileBridgeCloudRefusalDto {
+  code: string;
+  message: string;
+  retryable?: boolean;
+  expectedRevision?: number;
+  currentRevision?: number;
+  packageBytesRetained?: boolean;
+  actionState?: "not-committed" | "partially-committed" | "unknown";
+}
+
+export interface MobileBridgeCloudUploadPreviewDto {
+  agentLocalId: string;
+  name: string;
+  slug: string;
+  entityKind: "agent" | "team";
+  sourceReady: boolean;
+  /** Bounded local estimate; null when the source folder is unavailable. */
+  estimatedFileCount: number | null;
+  visibility: "private-link";
+}
+
+export interface MobileBridgeCloudUploadSaveDto {
+  slug: string;
+  visibility: "private-link";
+  status: "registered" | "registered-recovery-required";
+  localSyncStored: boolean;
+  recoveryRequired: boolean;
+  recovery?: {
+    code: "local_revision_receipt_not_saved";
+    message: string;
+  };
+}
+
+export interface MobileBridgeCloudDeleteResultDto {
+  schema: "agentlas.agent_cloud.delete.v1";
+  deleted: true;
+  slug: string;
+  scope: "owner-private" | "hub-public";
+  operation?: "unpublished" | "already_unpublished";
+  deletionMode: "hard-delete" | "soft-unpublish";
+  deletedResource: "cloud-package" | "hub-listing";
+  packageBytesRetained: boolean;
+  reconciled?: boolean;
+  revision: string;
+  deletedAt: string;
+}
+
+export interface MobileBridgeCloudCombinationMemberDto {
+  agentDefinitionId: string;
+  agentReleaseId: string;
+}
+
+/** Owner-scoped cloud combination. Hub release references only; no package bytes. */
+export interface MobileBridgeCloudCombinationDto {
+  combinationId: string;
+  name: string;
+  description: string;
+  members: MobileBridgeCloudCombinationMemberDto[];
+  revision: number;
+  updatedAt: string;
+}
+
+export interface MobileBridgeBuildQuestionDto {
+  question: string;
+  header?: string;
+  options: Array<{ label: string; description?: string }>;
+  multiSelect: boolean;
+}
+
+export type MobileBridgeBuildStatus =
+  | "running"
+  | "awaiting-input"
+  | "done"
+  | "failed";
+
+export interface MobileBridgeBuildRefusalDto {
+  code:
+    | "mobile_build_resume_unsupported"
+    | "build_completion_unproven"
+    | "desktop_approval_denied"
+    | "desktop_approval_unavailable"
+    | "desktop_approval_timed_out";
+  message: string;
+  retryable: boolean;
+}
+
+/**
+ * DESKTOP_MOBILE_BRIDGE: Hephaestus build progress pushed over the ordered
+ * event stream. Local workspace paths, runtime session ids, and raw build
+ * results never cross the bridge; `text` is sanitized display copy only.
+ */
+export interface MobileBridgeBuildEventDto {
+  runId: string;
+  kind: "log" | "stage" | "partial" | "done" | "error" | "awaiting-input";
+  status: MobileBridgeBuildStatus;
+  stage?: string;
+  text?: string;
+  questions?: MobileBridgeBuildQuestionDto[];
+  refusal?: MobileBridgeBuildRefusalDto;
+  resumable?: false;
+}
+
+export interface MobileBridgeBuildStatusDto {
+  status: MobileBridgeBuildStatus;
+  summary: string | null;
+  questions?: MobileBridgeBuildQuestionDto[];
+  refusal?: MobileBridgeBuildRefusalDto;
+  resumable?: false;
+}
+
 export interface MobileBridgeSnapshot {
   schemaVersion: typeof MOBILE_BRIDGE_PROTOCOL_VERSION;
   generatedAt: string;
@@ -756,6 +886,7 @@ const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "hub.borrowable.list",
   "hephaestus.engineToggles",
   "ontology.projections.list",
+  "groups.cloudList",
   "device.revokeSelf",
 ]);
 
@@ -998,6 +1129,24 @@ function ontologyRevision(value: unknown, field: string): string | null {
     : `${field} must be a canonical revision`;
 }
 
+/** Cloud combination members are exact immutable Hub release references. */
+function validateCloudCombinationMembers(value: unknown): string | null {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 32) {
+    return "members must contain 1 to 32 exact Hub release references";
+  }
+  for (const item of value) {
+    if (!isRecord(item) || !hasOnlyKeys(item, ["agentDefinitionId", "agentReleaseId"])) {
+      return "members entries accept only agentDefinitionId and agentReleaseId";
+    }
+    const error = firstError(
+      ontologyRef(item.agentDefinitionId, "agentDefinitionId"),
+      ontologyRef(item.agentReleaseId, "agentReleaseId"),
+    );
+    if (error) return error;
+  }
+  return null;
+}
+
 function validateParams(method: MobileBridgeMethod, params: Record<string, unknown>): string | null {
   if (!isMobileBridgeJsonValue(params)) return "params must contain only bounded JSON values";
   if (EMPTY_METHODS.has(method)) {
@@ -1153,6 +1302,63 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         : "hephaestus.routePreview contains unsupported fields";
     case "ontology.attach.resolve":
       return validateOntologyAttach(params);
+    case "agents.cloudUploadPreview":
+      return hasOnlyKeys(params, ["agentLocalId"])
+        ? requiredString(params, "agentLocalId")
+        : "agents.cloudUploadPreview accepts only agentLocalId";
+    case "agents.cloudUploadSave":
+      return hasOnlyKeys(params, ["agentLocalId", "idempotencyKey"])
+        ? firstError(
+            requiredString(params, "agentLocalId"),
+            requiredString(params, "idempotencyKey", 160),
+          )
+        : "agents.cloudUploadSave accepts only agentLocalId and idempotencyKey";
+    case "agents.cloudDelete":
+      return hasOnlyKeys(params, ["slug", "idempotencyKey"])
+        ? firstError(
+            requiredString(params, "slug", 160),
+            requiredString(params, "idempotencyKey", 160),
+          )
+        : "agents.cloudDelete accepts only slug and idempotencyKey";
+    case "build.start":
+      return hasOnlyKeys(params, ["goal", "idempotencyKey"])
+        ? firstError(
+            requiredText(params, "goal", 20_000),
+            requiredString(params, "idempotencyKey", 160),
+          )
+        : "build.start accepts only goal and idempotencyKey";
+    case "build.status":
+      return hasOnlyKeys(params, ["runId"])
+        ? requiredString(params, "runId", 160)
+        : "build.status accepts only runId";
+    case "groups.cloudSave": {
+      if (!hasOnlyKeys(params, [
+        "name",
+        "description",
+        "members",
+        "combinationId",
+        "expectedRevision",
+        "idempotencyKey",
+      ])) {
+        return "groups.cloudSave contains unsupported fields";
+      }
+      const hasCombinationId = params.combinationId !== undefined;
+      const hasExpectedRevision = params.expectedRevision !== undefined;
+      if (hasCombinationId !== hasExpectedRevision) {
+        return "groups.cloudSave updates require combinationId and expectedRevision together";
+      }
+      const membersError = validateCloudCombinationMembers(params.members);
+      if (membersError) return membersError;
+      return firstError(
+        requiredString(params, "name", 120),
+        optionalText(params, "description", 1_000),
+        hasCombinationId ? requiredString(params, "combinationId", 128) : null,
+        hasExpectedRevision
+          ? optionalInteger(params, "expectedRevision", 1, Number.MAX_SAFE_INTEGER)
+          : null,
+        requiredString(params, "idempotencyKey", 160),
+      );
+    }
     // Empty-parameter methods returned above. Keep this fail-closed fallback so
     // a future method cannot become callable before it receives a validator.
     default:

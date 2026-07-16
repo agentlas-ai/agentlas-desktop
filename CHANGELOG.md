@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.8.49 — 2026-07-16
+## 0.8.49 — 2026-07-17
+
+### Added
+
+- A paired Agentlas Mobile client can now preview and privately save a
+  registered local Agent or Team to Agent Cloud, preserve local-receipt recovery
+  state, distinguish owner-private hard delete from Hub soft unpublish, and list,
+  create, or numeric-revision CAS-update owner Cloud combinations from exact Hub
+  release references. Cloud refusals retain retry/revision/partial-commit detail.
+- A paired Mobile client may request one remote Hephaestus build, but the full
+  runner cannot start until the local user approves a native Desktop warning for
+  that exact run. Accepted starts are non-replayable, and interview output becomes
+  structured `awaiting-input` / `resumable: false` rather than a false success.
+  Build events continue to omit local paths, provider sessions, and raw results.
 
 ### Fixed
 
@@ -16,6 +29,10 @@
 - Memory identity classification, background project-ontology ingest, empty
   layer warnings, and the multilingual 256-dimensional embedding fixes from
   0.8.48 are included in this release candidate.
+- Firm-backed Teams resolve through their opaque local firm identity for Cloud
+  upload, malformed Cloud-combination replies fail closed, and Mobile-triggered
+  full-authority builds are single-flight per Desktop behind the local approval
+  gate.
 
 Agentlas OS v1.1.48 remains pinned at 98adf6d1bb0bdad5a919884c3916274d5a3e813f.
 These sources do not themselves publish a Git tag, installer, or update feed.

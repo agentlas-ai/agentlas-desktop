@@ -402,6 +402,7 @@ import { runToolFactorySmoke, scaffoldAgentTool } from "./tool-factory/scaffold"
 import { createCommerceAgentTeam } from "./meta-agent/commerce-team";
 import { packageAndReviewCloudAgent } from "./cloud-agents/package";
 import { resolveCloudAgentPackageRequest } from "./cloud-agents/access";
+import { registeredUploadOptions, registeredUploadRoot } from "./cloud-agents/registered-upload";
 import { selectedMultimodalEnvRequirements } from "../shared/multimodal";
 import type {
   AppFactoryAppRecord,
@@ -430,8 +431,6 @@ import type {
   CloudAgentPublishRequest,
   CloudAgentRegisteredPublishRequest,
   CloudAgentRegisteredSaveRequest,
-  CloudAgentRegisteredTarget,
-  CloudAgentRegisteredUploadOption,
   InvocationRunReceipt,
   McpInvocationEvent,
   McpInvocationRequest,
@@ -1044,56 +1043,11 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
   };
 }
 
-function registeredUploadRoot(target: CloudAgentRegisteredTarget): { rootPath: string; slug: string } {
-  if (!target || typeof target !== "object") throw new Error("registered-upload-target-invalid");
-  if (target.entityKind === "team" && "firmId" in target) {
-    const firm = getFirm(String(target.firmId || ""));
-    const ceo = firm ? getAgentById(firm.ceoAgentId) : null;
-    if (!firm) throw new Error("registered-team-not-found");
-    if (!ceo?.localPath || !fs.existsSync(ceo.localPath) || !fs.statSync(ceo.localPath).isDirectory()) {
-      throw new Error("registered-team-source-unavailable");
-    }
-    return { rootPath: ceo.localPath, slug: firm.slug };
-  }
-  if ("agentId" in target) {
-    const agent = getAgentById(String(target.agentId || ""));
-    if (!agent) throw new Error("registered-agent-not-found");
-    if (target.entityKind === "agent" && agent.kind === "team") throw new Error("registered-target-kind-mismatch");
-    if (target.entityKind === "team" && agent.kind !== "team") throw new Error("registered-target-kind-mismatch");
-    if (!agent.localPath || !fs.existsSync(agent.localPath) || !fs.statSync(agent.localPath).isDirectory()) {
-      throw new Error("registered-agent-source-unavailable");
-    }
-    return { rootPath: agent.localPath, slug: agent.slug };
-  }
-  throw new Error("registered-upload-target-invalid");
-}
-
-function registeredUploadOptions(): CloudAgentRegisteredUploadOption[] {
-  const firms = listFirms();
-  const firmMemberIds = new Set(firms.flatMap((firm) => firm.orgChart.map((node) => node.agentId)));
-  const teamOptions = firms.map((firm): CloudAgentRegisteredUploadOption => {
-    const ceo = getAgentById(firm.ceoAgentId);
-    return {
-      target: { entityKind: "team", firmId: firm.id },
-      name: firm.nameEn || firm.name,
-      slug: firm.slug,
-      entityKind: "team",
-      sourceReady: Boolean(ceo?.localPath && fs.existsSync(ceo.localPath)),
-    };
-  });
-  const agentOptions = listInstalledAgents()
-    .filter((agent) => agent.visibility !== "background" && !firmMemberIds.has(agent.id))
-    .map((agent): CloudAgentRegisteredUploadOption => ({
-      target: agent.kind === "team"
-        ? { entityKind: "team", agentId: agent.id }
-        : { entityKind: "agent", agentId: agent.id },
-      name: agent.localDisplayName || agent.nameEn || agent.name,
-      slug: agent.slug,
-      entityKind: agent.kind === "team" ? "team" : "agent",
-      sourceReady: Boolean(agent.localPath && fs.existsSync(agent.localPath)),
-    }));
-  return [...teamOptions, ...agentOptions];
-}
+// registeredUploadRoot / registeredUploadOptions moved to
+// ./cloud-agents/registered-upload so the Mobile Bridge authority reuses the
+// exact same internal path instead of re-implementing renderer IPC. That module
+// owns the firmMemberIds filter which prevents a Team's internal workers from
+// appearing again as ordinary upload choices.
 
 export function registerIpcHandlers(): void {
   // ── app ─────────────────────────────────────────────────

@@ -781,12 +781,12 @@ export class AgentlasMobileBridgeServer {
       const result = await withTimeout(authorityPromise, this.requestTimeoutMs);
       let response = this.responseFromAuthority(request.id, result);
       if (writeRequest && this.replayStore && replayFingerprint) {
-        response = this.completeReplay(
+        response = this.settleReplay(
+          request,
           state.context.deviceId,
           replayKey,
           replayFingerprint,
           response,
-          request.id,
         );
       }
       if (selfRevocation) {
@@ -807,17 +807,17 @@ export class AgentlasMobileBridgeServer {
           this.onError(errorOf(ledgerError));
         }
         // The authority promise is deliberately not cancelled. If it eventually
-        // settles in this process, make its actual result replayable. A crash
+        // settles in this process, apply that method's replay policy. A crash
         // leaves the write-ahead entry uncertain and future retries fail closed.
         void authorityPromise.then(
           (result) => {
             const response = this.responseFromAuthority(request.id, result);
-            this.completeReplay(
+            this.settleReplay(
+              request,
               state.context.deviceId,
               replayKey,
               replayFingerprint,
               response,
-              request.id,
             );
           },
           () => {
@@ -898,6 +898,51 @@ export class AgentlasMobileBridgeServer {
         requestId,
         "idempotency_unavailable",
         "Desktop ran the command but could not persist its replay result; retry is blocked",
+      );
+    }
+  }
+
+  /**
+   * `build.start` acknowledges an asynchronous, in-memory run. A completed
+   * replay entry would survive Desktop restart while its runId disappeared, so
+   * accepted starts are deliberately non-replayable: the first caller receives
+   * the runId, while every retry fails closed as uncertain. Refusals and
+   * pre-admission failures remain normally replayable.
+   */
+  private settleReplay(
+    request: MobileBridgeRpcRequest,
+    deviceId: string,
+    key: string,
+    fingerprint: string,
+    response: MobileBridgeReplayResponse,
+  ): MobileBridgeReplayResponse {
+    const result = response.ok ? response.result : null;
+    const acceptedNonReplayableBuild =
+      request.method === "build.start" &&
+      result !== null &&
+      typeof result === "object" &&
+      !Array.isArray(result) &&
+      typeof result.runId === "string" &&
+      result.replayable === false;
+    if (!acceptedNonReplayableBuild) {
+      return this.completeReplay(deviceId, key, fingerprint, response, request.id);
+    }
+    if (!this.replayStore) {
+      return mobileBridgeFailure(
+        request.id,
+        "idempotency_unavailable",
+        "Desktop accepted the build but cannot preserve its non-replayable state",
+      );
+    }
+    try {
+      this.replayStore.markUncertain(deviceId, key, fingerprint);
+      return response;
+    } catch (error) {
+      this.onError(errorOf(error));
+      return mobileBridgeFailure(
+        request.id,
+        "idempotency_unavailable",
+        "Desktop accepted the build but could not block unsafe replay; do not retry this key",
       );
     }
   }
