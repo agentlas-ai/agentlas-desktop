@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.8.50 — 2026-07-17
+
+### Added
+
+- Dashboard Hub search now accepts a natural-language outcome and preserves the
+  Hub semantic ranking across public descriptions, capabilities, trigger
+  examples, lexical evidence, and embeddings. Recommendation cards show their
+  rank and public fit context instead of pretending the agent name was the only
+  search signal.
+
+### Fixed
+
+- Compact semantic search rows are enriched from the matching public catalog
+  entry before identity deduplication. This removes the duplicate generic
+  `Callable Hub agent` / install-only card that appeared beside the real Team or
+  Agent card, while preserving legitimate Agent and Team namespaces that share
+  a slug.
+- Hub usage badges wrap within narrow cards, the Site prompt focus ring is no
+  longer clipped by its rounded container, and the Site window header reserves
+  the macOS traffic-light region at compact widths.
+- The ambiguous `바이브코딩으로` action is now `Build에서 이어서 구현`, with
+  an explicit tooltip explaining that the selected project folder receives the
+  design revision before Desktop continues in Build.
+- Startup Founder Studio now waits until its authenticated local request bridge
+  is ready before enabling `New Idea`, preventing a cold-start submission from
+  racing the launcher and disappearing before `requests.jsonl` is created.
+
 ## 0.8.49 — 2026-07-17
 
 ### Added

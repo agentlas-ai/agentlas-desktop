@@ -755,8 +755,18 @@ export default function SiteStudioPage() {
         <button type="button" style={ghostBtn} onClick={() => void exportZip()} disabled={siteBusy}>
           ZIP
         </button>
-        <button type="button" style={primaryBtn} onClick={() => void handoffToWorkspace()} disabled={!projectId || siteBusy}>
-          {handingOff ? (ko ? "가져오는 중…" : "Importing…") : (ko ? "바이브코딩으로" : "Use in Build")}
+        <button
+          type="button"
+          style={primaryBtn}
+          onClick={() => void handoffToWorkspace()}
+          disabled={!projectId || siteBusy}
+          title={
+            ko
+              ? "구현할 프로젝트 폴더를 선택하면 디자인 리비전을 복사하고 Build 화면으로 이동합니다."
+              : "Choose a project folder to copy the design revision there and continue in Build."
+          }
+        >
+          {handingOff ? (ko ? "Build로 넘기는 중…" : "Sending to Build…") : (ko ? "Build에서 이어서 구현" : "Continue in Build")}
         </button>
       </div>
 

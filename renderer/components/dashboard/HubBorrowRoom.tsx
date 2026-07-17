@@ -124,6 +124,7 @@ export function HubBorrowRoom() {
   }
 
   const online = status ? status.online && !status.usingFallback : false;
+  const intent = query.trim();
 
   return (
     <div className="dashboard-module hub-borrow">
@@ -139,9 +140,24 @@ export function HubBorrowRoom() {
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder={ko ? "검증된 에이전트 검색 (예: 마케팅, 리서치)" : "Search verified agents"}
+          placeholder={
+            ko
+              ? "검증된 에이전트 검색 — 하려는 일을 문장으로 입력 (예: API 백엔드 만들어줘)"
+              : "Search verified agents — describe the outcome you need"
+          }
         />
       </label>
+
+      {intent && (
+        <div className="hub-borrow-context" role="status" aria-live="polite">
+          <strong>{ko ? "목적 기반 추천" : "Intent-based recommendations"}</strong>
+          <span>
+            {ko
+              ? "이름이 아니라 Hub 설명·역량·트리거의 의미 일치 순입니다."
+              : "Ranked by semantic fit across Hub descriptions, capabilities, and triggers — not name alone."}
+          </span>
+        </div>
+      )}
 
       {results === null ? (
         <div className="dashboard-module-empty">{ko ? "허브 에이전트를 불러오는 중…" : "Loading Hub agents…"}</div>
@@ -149,15 +165,26 @@ export function HubBorrowRoom() {
         <div className="dashboard-module-empty">{ko ? "검색 결과가 없어요." : "No results."}</div>
       ) : (
         <div className="hub-borrow-carousel" role="list">
-          {results.slice(0, 6).map((r) => {
+          {results.slice(0, 6).map((r, index) => {
             const entityClass = classifyHubEntity(r);
             const listingIdentity = hubListingIdentityKey(r);
             const isBookmarked = bookmarked.has(listingIdentity);
             const callable = isCallableHubListing(r);
             const verificationFacts = hubVerificationFacts(r, locale).slice(0, 2);
             return (
-              <div key={listingIdentity} className="hub-borrow-card" role="listitem" data-entity-kind={entityClass}>
+              <div
+                key={listingIdentity}
+                className="hub-borrow-card"
+                role="listitem"
+                data-entity-kind={entityClass}
+                data-contextual={intent ? "true" : "false"}
+              >
                 <div className="hub-borrow-card-top">
+                  {intent && (
+                    <span className="hub-borrow-rank" data-primary={index === 0 ? "true" : "false"}>
+                      {index === 0 ? (ko ? "가장 적합" : "Best fit") : ko ? `추천 ${index + 1}` : `Pick ${index + 1}`}
+                    </span>
+                  )}
                   <span
                     className="hub-borrow-trust"
                     data-grade={r.trustGrade}
@@ -172,9 +199,19 @@ export function HubBorrowRoom() {
                 <div className="hub-borrow-card-name" title={ko ? r.name : r.nameEn || r.name}>
                   {ko ? r.name : r.nameEn || r.name}
                 </div>
-                <div className="hub-borrow-card-tagline">
+                <div
+                  className="hub-borrow-card-tagline"
+                  title={(ko ? r.tagline : r.taglineEn || r.tagline) || ""}
+                >
                   {(ko ? r.tagline : r.taglineEn || r.tagline) || ""}
                 </div>
+                {intent && (
+                  <div className="hub-borrow-card-reason">
+                    {ko
+                      ? `Hub 의미검색 ${index + 1}위 · 요청 목적과 공개 설명 신호가 일치`
+                      : `Hub semantic rank ${index + 1} · public description signals match your intent`}
+                  </div>
+                )}
                 <div className="hub-borrow-card-facts" aria-label={ko ? "검증 사실" : "Verification facts"}>
                   <span data-callable={callable ? "true" : "false"}>
                     {callable ? (ko ? "Hub 호출 가능" : "Hub callable") : (ko ? "설치 전용" : "Install only")}

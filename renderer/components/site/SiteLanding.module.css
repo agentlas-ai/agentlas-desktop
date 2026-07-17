@@ -36,7 +36,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding: 0 clamp(20px, 4vw, 56px);
+  padding: 0 clamp(20px, 4vw, 56px) 0 max(88px, 4vw);
   border-bottom: 1px solid rgb(228 235 231 / 0.86);
   background: rgb(255 255 255 / 0.9);
   backdrop-filter: blur(18px);
@@ -72,11 +72,13 @@
 
 .composer { width: min(800px, 100%); margin: 38px auto 0; overflow: hidden; border: 1px solid #dfe8e3; border-radius: 20px; background: #fff; text-align: left; box-shadow: 0 20px 60px rgb(19 52 43 / 0.1), 0 2px 8px rgb(19 52 43 / 0.04); }
 .composer[data-busy="true"] { opacity: 0.76; }
+.composer:focus-within { border-color: rgb(15 123 101 / 0.58); box-shadow: 0 0 0 3px rgb(15 123 101 / 0.18), 0 20px 60px rgb(19 52 43 / 0.1), 0 2px 8px rgb(19 52 43 / 0.04); }
 .surfaceSwitch { display: flex; gap: 5px; padding: 11px 12px 0; }
 .surfaceSwitch button { height: 28px; padding: 0 11px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: #6c7873; cursor: pointer; font-size: 11px; font-weight: 650; }
 .surfaceSwitch button:hover { background: var(--soft); color: var(--ink); }
 .surfaceSwitch button[data-selected="true"] { border-color: #d9e7e1; background: #ecf7f3; color: var(--teal-dark); }
 .composer textarea { width: 100%; min-height: 92px; display: block; resize: none; padding: 18px 20px 12px; border: 0; outline: 0; background: transparent; color: var(--ink); font-size: 16px; line-height: 1.55; }
+.composer textarea:focus-visible { outline: none; }
 .composer textarea::placeholder { color: #9ba5a1; }
 .composerFooter { min-height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 8px 12px 12px 16px; }
 .composerContext { min-width: 0; }
@@ -257,7 +259,7 @@
 }
 
 @media (max-width: 680px) {
-  .header { height: 64px; padding: 0 16px; }
+  .header { height: 64px; padding: 0 16px 0 88px; }
   .brand small,
   .selectedProject { display: none; }
   .hero { width: min(100% - 28px, 920px); padding-top: 58px; }

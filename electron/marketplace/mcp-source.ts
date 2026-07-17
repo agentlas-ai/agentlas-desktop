@@ -643,6 +643,27 @@ function dedupeListings(listings: MarketplaceListing[]): MarketplaceListing[] {
   return Array.from(byIdentity.values());
 }
 
+function enrichRankedListing(
+  ranked: MarketplaceListing,
+  catalog: MarketplaceListing | undefined,
+): MarketplaceListing {
+  if (!catalog) return ranked;
+  return {
+    ...catalog,
+    ...ranked,
+    // Semantic search is the ranking authority, while the public catalog is
+    // the display-metadata authority when a compact/legacy Hub response omits
+    // localized copy or entity shape.
+    name: cleanString(ranked.name, catalog.name),
+    nameEn: cleanString(ranked.nameEn, catalog.nameEn || catalog.name),
+    tagline: cleanString(ranked.tagline, catalog.tagline),
+    taglineEn: cleanString(ranked.taglineEn, catalog.taglineEn || catalog.tagline),
+    source: cleanString(ranked.source, catalog.source || "hub-index"),
+    entityKind: cleanString(ranked.entityKind, catalog.entityKind || "agent"),
+    manifestUrl: cleanString(ranked.manifestUrl, catalog.manifestUrl),
+  };
+}
+
 function marketPublicAgentToListing(raw: Record<string, unknown>): MarketplaceListing | null {
   const slug = cleanString(raw.slug);
   if (!slug) return null;
@@ -891,11 +912,31 @@ export class McpSource implements MarketplaceSource {
     ];
     if (q.trim()) sources.push(this.searchHubAgents(q));
     const results = await Promise.allSettled(sources);
-    const listings = results.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
+    const publicCatalog = results
+      .slice(0, 2)
+      .flatMap((result) => (result.status === "fulfilled" ? result.value : []));
+    const catalogBySlug = new Map(
+      publicCatalog.map((listing) => [listing.slug.trim().toLowerCase(), listing] as const),
+    );
+    const semanticAttempt = results[2];
+    const semanticResults = q.trim() && semanticAttempt?.status === "fulfilled"
+      ? semanticAttempt.value.map((listing) => enrichRankedListing(
+          listing,
+          catalogBySlug.get(listing.slug.trim().toLowerCase()),
+        ))
+      : [];
+    // Preserve the Hub semantic rank. The server has already matched natural
+    // language against routing descriptions, capabilities, trigger examples,
+    // lexical evidence, and embeddings. Applying a final literal substring
+    // filter here used to erase valid intent matches such as
+    // "API 백엔드 만들어줘" -> backend-engineering-team.
+    const directCatalogMatches = publicCatalog.filter((listing) => matchesQuery(listing, q));
+    const filtered = q.trim()
+      ? dedupeListings([...semanticResults, ...directCatalogMatches])
+      : dedupeListings(publicCatalog);
     const errors = results
       .filter((result): result is PromiseRejectedResult => result.status === "rejected")
       .map((result) => (result.reason instanceof Error ? result.reason.message : String(result.reason)));
-    const filtered = dedupeListings(listings).filter((listing) => matchesQuery(listing, q));
     if (errors.length > 0) {
       if (results.some((result) => result.status === "fulfilled")) {
         throw new PartialHubResultError(`public marketplace partial failure: ${errors.join("; ")}`, filtered);
@@ -929,11 +970,18 @@ export class McpSource implements MarketplaceSource {
   }
 
   /** 허브 에이전트 검색 — MCP marketplace.search_agents.
-   *  서버는 query를 느슨히 적용하고 limit 상한이 작으므로 넉넉히 받아 client matchesQuery로 최종 필터한다.
-   *  install-only 에이전트도 정당한 허브 결과이므로 liveHub 필터를 적용하지 않는다. */
+   *  서버의 의미 순위가 추천 권위다. install-only 에이전트도 정당한 허브 결과이므로
+   *  liveHub 필터나 클라이언트 글자 일치 필터를 적용하지 않는다. */
   private async searchHubAgents(q: string): Promise<MarketplaceListing[]> {
-    // 게이트웨이 스키마는 `q`(limit≤20)지만 `query`도 받는다 — 양쪽 모두 보내 안전하게.
-    const raw = await this.call<unknown>("marketplace.search_agents", { query: q, q, limit: 60 });
+    // verbose=true keeps the public localized description/tagline needed by
+    // the Dashboard recommendation cards. Internal routing text, triggers,
+    // embeddings, and package instructions remain stripped by Hub.
+    const raw = await this.call<unknown>("marketplace.search_agents", {
+      query: q,
+      q,
+      limit: 20,
+      verbose: true,
+    });
     // 서버 응답은 { count, total, results, ... } 형태 — asArray가 "results"를 추출한다.
     const rows = asArray<MarketplaceListing>(raw, "results", "agents", "listings");
     // search_agents 결과엔 source 마커가 없어(렌더러의 isLiveHubListing 필터가 source∈{hub-*}/cloud-callable/

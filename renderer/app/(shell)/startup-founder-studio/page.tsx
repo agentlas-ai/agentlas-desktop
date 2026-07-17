@@ -108,7 +108,24 @@ export default function StartupFounderStudioPage() {
           <h1 style={title}>{locale === "ko" ? STARTUP_NAME_KO : STARTUP_NAME_EN}</h1>
           {locale === "ko" ? <p style={subtitle}>{STARTUP_NAME_EN}</p> : null}
         </div>
-        <button onClick={() => setIdeaPromptOpen(true)} className="titlebar-nodrag" style={{ ...ghostButton, marginLeft: "auto" }}>
+        <button
+          onClick={() => setIdeaPromptOpen(true)}
+          disabled={phase === "starting"}
+          className="titlebar-nodrag"
+          style={{
+            ...ghostButton,
+            marginLeft: "auto",
+            opacity: phase === "starting" ? 0.52 : 1,
+            cursor: phase === "starting" ? "wait" : "pointer",
+          }}
+          title={
+            phase === "starting"
+              ? locale === "ko"
+                ? "스튜디오 요청 브리지를 준비하는 중입니다."
+                : "Preparing the Studio request bridge."
+              : undefined
+          }
+        >
           {locale === "ko" ? "새 아이디어" : "New Idea"}
         </button>
         <button

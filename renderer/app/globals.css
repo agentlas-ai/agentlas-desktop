@@ -5054,7 +5054,7 @@ button[data-toggle-state="on"] {
 
 .rd .hub-card-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 112px);
   gap: 10px;
   align-items: start;
 }
@@ -5105,8 +5105,13 @@ button[data-toggle-state="on"] {
 
 .rd .hub-credit-tag {
   flex: none;
-  max-width: 112px;
+  min-width: 0;
+  max-width: 100%;
   justify-content: center;
+  white-space: normal !important;
+  overflow-wrap: anywhere;
+  text-align: center;
+  line-height: 1.25;
 }
 
 .rd .hub-card-copy {
@@ -5170,7 +5175,7 @@ button[data-toggle-state="on"] {
   }
 
   .rd .hub-card-head {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 112px);
   }
 
   .rd .hub-card-title {
@@ -6884,6 +6889,22 @@ button[data-toggle-state="on"] {
   color: var(--rd-ink);
   width: 100%;
 }
+.hub-borrow-context {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 8px 20px 2px;
+  color: var(--rd-ink-3);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.hub-borrow-context strong {
+  flex: 0 0 auto;
+  color: var(--rd-accent);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
 .hub-borrow .dashboard-module-head {
   min-height: 48px;
   padding: 0 20px;
@@ -6977,6 +6998,23 @@ button[data-toggle-state="on"] {
   gap: 8px;
   flex-wrap: wrap;
 }
+.hub-borrow-rank {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--rd-hair-2);
+  border-radius: 999px;
+  color: var(--rd-ink-3);
+  background: var(--rd-surface-2);
+  font-size: 9px;
+  font-weight: 700;
+}
+.hub-borrow-rank[data-primary="true"] {
+  border-color: color-mix(in oklch, var(--rd-accent) 38%, var(--rd-hair));
+  color: var(--rd-accent);
+  background: var(--rd-accent-soft);
+}
 .hub-borrow-card-name {
   font-size: 14px;
   font-weight: 650;
@@ -6994,6 +7032,15 @@ button[data-toggle-state="on"] {
   -webkit-box-orient: vertical;
   overflow: hidden;
   min-height: 36px;
+}
+.hub-borrow-card[data-contextual="true"] .hub-borrow-card-tagline {
+  -webkit-line-clamp: 3;
+  min-height: 54px;
+}
+.hub-borrow-card-reason {
+  color: var(--rd-ink-4);
+  font-size: 10px;
+  line-height: 1.45;
 }
 
 .hub-borrow-card-facts {
