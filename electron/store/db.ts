@@ -4,6 +4,7 @@
 //
 // 스키마 버전 관리: user_version pragma로 마이그레이션. M0 → projects/chats 도입 시 chat_messages 재구성.
 import Database from "better-sqlite3";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { app } from "electron";
@@ -12,7 +13,7 @@ import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 68;
+const SCHEMA_VERSION = 70;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -83,7 +84,22 @@ function tableExists(db: Database.Database, table: string): boolean {
 
 type RecoverableAutomationRunRow = {
   id: string;
+  automation_id: string;
+  started_at: string | null;
+  last_activity_at: string | null;
   node_states_json: string | null;
+  occurrence_id: string | null;
+  graph_digest: string | null;
+  checkpoint_json: string | null;
+  claimed_at: string | null;
+  lease_owner: string | null;
+  latest_run_event_at: string | null;
+  latest_failure_event_at: string | null;
+};
+
+type RecoverableTriggerEventRow = {
+  id: string;
+  run_outcome: string | null;
 };
 
 function failRunningWorkflowNodes(raw: string | null): string | null {
@@ -104,22 +120,95 @@ function failRunningWorkflowNodes(raw: string | null): string | null {
   }
 }
 
+const AUTOMATION_RECOVERY_LEASE_TTL_MS = 15 * 60 * 1000;
+
+function trustedRecoveryPid(owner: string | null): number | null {
+  const match = owner?.match(/^([1-9][0-9]*):(gui|headless)$/);
+  if (!match) return null;
+  const pid = Number(match[1]);
+  return Number.isSafeInteger(pid) && pid <= 2_147_483_647 ? pid : null;
+}
+
+function recoveryProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return Boolean(error && typeof error === "object" && "code" in error && error.code === "EPERM");
+  }
+}
+
+function finiteTimestamp(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function recoveryOwnerActive(row: RecoverableAutomationRunRow, nowMs: number): boolean {
+  const claimedAt = finiteTimestamp(row.claimed_at);
+  if (claimedAt == null) return false;
+  const age = nowMs - claimedAt;
+  if (age <= AUTOMATION_RECOVERY_LEASE_TTL_MS) return true;
+  const pid = trustedRecoveryPid(row.lease_owner);
+  return pid != null && age <= AUTOMATION_RUN_STALE_AFTER_MS && recoveryProcessAlive(pid);
+}
+
+function rowHasFreshActivity(row: RecoverableAutomationRunRow, cutoffMs: number): boolean {
+  const times = [
+    row.last_activity_at,
+    row.started_at,
+    row.latest_run_event_at,
+    row.latest_failure_event_at,
+  ].map(finiteTimestamp).filter((value): value is number => value != null);
+  return times.length > 0 && Math.max(...times) > cutoffMs;
+}
+
+function canonicalRecoveryValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalRecoveryValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+        .map(([key, child]) => [key, canonicalRecoveryValue(child)]),
+    );
+  }
+  return value;
+}
+
+function sealedRecoveryCheckpointIsReplaySafe(row: RecoverableAutomationRunRow): boolean {
+  if (!row.checkpoint_json || !row.occurrence_id || !row.graph_digest) return false;
+  try {
+    const checkpoint = JSON.parse(row.checkpoint_json) as Record<string, unknown>;
+    if (
+      !checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint) ||
+      checkpoint.schemaVersion !== "agentlas.automation-graph-checkpoint.v3" ||
+      checkpoint.occurrenceId !== row.occurrence_id || checkpoint.graphDigest !== row.graph_digest ||
+      !Array.isArray(checkpoint.ambiguousNodeIds) || !Array.isArray(checkpoint.inFlightNodeIds) ||
+      checkpoint.ambiguousNodeIds.some((id) => typeof id !== "string") ||
+      checkpoint.inFlightNodeIds.some((id) => typeof id !== "string") ||
+      typeof checkpoint.checkpointDigest !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/.test(checkpoint.checkpointDigest)
+    ) return false;
+    const payload = { ...checkpoint };
+    delete payload.checkpointDigest;
+    const digest = `sha256:${createHash("sha256")
+      .update(JSON.stringify(canonicalRecoveryValue(payload)))
+      .digest("hex")}`;
+    return digest === checkpoint.checkpointDigest &&
+      checkpoint.ambiguousNodeIds.length === 0 && checkpoint.inFlightNodeIds.length === 0;
+  } catch {
+    return false;
+  }
+}
+
 function recoverStaleAutomationRunsInDb(db: Database.Database, now: Date): number {
   if (!tableExists(db, "automation_runs") || !tableExists(db, "automations")) return 0;
-  const cutoff = new Date(now.getTime() - AUTOMATION_RUN_STALE_AFTER_MS).toISOString();
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) throw new Error("automation_recovery_time_invalid");
+  const cutoffMs = nowMs - AUTOMATION_RUN_STALE_AFTER_MS;
   const hasRunEvents = tableExists(db, "run_events");
   const hasFailureEvents = tableExists(db, "failure_events");
-  const quietClauses = [
-    "COALESCE(r.last_activity_at, r.started_at) IS NOT NULL",
-    "COALESCE(r.last_activity_at, r.started_at) <= @cutoff",
-    ...(hasRunEvents
-      ? ["NOT EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = r.id AND e.ts > @cutoff)"]
-      : []),
-    ...(hasFailureEvents
-      ? ["NOT EXISTS (SELECT 1 FROM failure_events f WHERE f.run_id = r.id AND f.ts > @cutoff)"]
-      : []),
-  ];
-  const quietSql = quietClauses.join(" AND ");
+  const hasTriggerEvents = tableExists(db, "automation_trigger_events");
 
   const recover = db.transaction(() => {
     // Guarded inserts prevent this in the normal path, but a peer running an
@@ -132,36 +221,126 @@ function recoverStaleAutomationRunsInDb(db: Database.Database, now: Date): numbe
       WHERE automation_id IS NULL
          OR NOT EXISTS (SELECT 1 FROM automations a WHERE a.id = run_history.automation_id);
     `);
-    const candidates = db
-      .prepare(
-        `SELECT r.id, r.node_states_json
-         FROM automation_runs r
-         WHERE r.status = 'running'
-           AND r.automation_id IS NOT NULL
-           AND EXISTS (SELECT 1 FROM automations a WHERE a.id = r.automation_id)
-           AND ${quietSql}`,
-      )
-      .all({ cutoff }) as RecoverableAutomationRunRow[];
-    if (candidates.length === 0) return 0;
+    const candidates = db.prepare(
+      `SELECT r.id, r.automation_id, r.started_at, r.last_activity_at,
+              r.node_states_json, r.occurrence_id, r.graph_digest, r.checkpoint_json,
+              a.claimed_at, a.lease_owner,
+              ${hasRunEvents ? "(SELECT MAX(e.ts) FROM run_events e WHERE e.run_id = r.id)" : "NULL"} AS latest_run_event_at,
+              ${hasFailureEvents ? "(SELECT MAX(f.ts) FROM failure_events f WHERE f.run_id = r.id)" : "NULL"} AS latest_failure_event_at
+       FROM automation_runs r
+       JOIN automations a ON a.id = r.automation_id
+       WHERE r.status = 'running'`,
+    ).all() as RecoverableAutomationRunRow[];
+    const staleCandidates = candidates.filter((candidate) =>
+      !rowHasFreshActivity(candidate, cutoffMs) && !recoveryOwnerActive(candidate, nowMs)
+    );
+    if (staleCandidates.length === 0) return 0;
 
-    // Recheck silence and status in the UPDATE itself. If another process
-    // wrote progress or finalized between selection and write-lock acquisition,
-    // its current state wins and this recovery becomes a no-op.
+    // The IMMEDIATE transaction already prevents a peer writer from entering
+    // between the scan and this update. Keep an explicit snapshot CAS as well:
+    // it makes that safety property local to the mutation and prevents a future
+    // refactor (or a same-transaction recovery hook) from overwriting a newly
+    // renewed lease, heartbeat, checkpoint, or run/failure event.
     const update = db.prepare(
-      `UPDATE automation_runs AS r
-       SET status = 'error', node_states_json = @nodeStatesJson
-       WHERE r.id = @id
-         AND r.status = 'running'
-         AND ${quietSql}`,
+      `UPDATE automation_runs
+       SET status = 'error', node_states_json = ?, last_activity_at = ?
+       WHERE id = ? AND automation_id = ? AND status = 'running'
+         AND started_at IS ?
+         AND last_activity_at IS ?
+         AND node_states_json IS ?
+         AND occurrence_id IS ?
+         AND graph_digest IS ?
+         AND checkpoint_json IS ?
+         AND EXISTS (
+           SELECT 1 FROM automations a
+           WHERE a.id = automation_runs.automation_id
+             AND a.claimed_at IS ?
+             AND a.lease_owner IS ?
+         )
+         ${hasRunEvents
+           ? "AND (SELECT MAX(e.ts) FROM run_events e WHERE e.run_id = automation_runs.id) IS ?"
+           : ""}
+         ${hasFailureEvents
+           ? "AND (SELECT MAX(f.ts) FROM failure_events f WHERE f.run_id = automation_runs.id) IS ?"
+           : ""}`,
     );
     let recovered = 0;
-    for (const candidate of candidates) {
-      const result = update.run({
-        id: candidate.id,
-        cutoff,
-        nodeStatesJson: failRunningWorkflowNodes(candidate.node_states_json),
-      });
+    for (const candidate of staleCandidates) {
+      const result = update.run(
+        failRunningWorkflowNodes(candidate.node_states_json),
+        now.toISOString(),
+        candidate.id,
+        candidate.automation_id,
+        candidate.started_at,
+        candidate.last_activity_at,
+        candidate.node_states_json,
+        candidate.occurrence_id,
+        candidate.graph_digest,
+        candidate.checkpoint_json,
+        candidate.claimed_at,
+        candidate.lease_owner,
+        ...(hasRunEvents ? [candidate.latest_run_event_at] : []),
+        ...(hasFailureEvents ? [candidate.latest_failure_event_at] : []),
+      );
+      if (result.changes !== 1) continue;
       recovered += result.changes;
+
+      if (hasTriggerEvents) {
+        const triggerRows = db.prepare(
+          `SELECT id, run_outcome
+           FROM automation_trigger_events
+           WHERE automation_id = ? AND status = 'claimed'
+             AND (run_id = ? OR ('trigger-event:' || id) = ?)`,
+        ).all(candidate.automation_id, candidate.id, candidate.occurrence_id) as RecoverableTriggerEventRow[];
+        const replaySafe = sealedRecoveryCheckpointIsReplaySafe(candidate);
+        for (const event of triggerRows) {
+          if (event.run_outcome === "ok" || event.run_outcome === "skipped") {
+            db.prepare(
+              `UPDATE automation_trigger_events
+               SET status = 'delivered', claim_owner = NULL, claimed_until = NULL,
+                   delivered_at = ?, last_error = NULL, updated_at = ?
+               WHERE id = ? AND status = 'claimed'`,
+            ).run(now.toISOString(), now.toISOString(), event.id);
+          } else if (replaySafe) {
+            db.prepare(
+              `UPDATE automation_trigger_events
+               SET status = 'pending', claim_owner = NULL, claimed_until = NULL,
+                   run_id = NULL, run_outcome = NULL, next_attempt_at = ?,
+                   last_error = NULL, updated_at = ?
+               WHERE id = ? AND status = 'claimed'`,
+            ).run(now.toISOString(), now.toISOString(), event.id);
+          } else {
+            db.prepare(
+              `UPDATE automation_trigger_events
+               SET status = 'parked', claim_owner = NULL, claimed_until = NULL,
+                   run_id = ?, last_error = ?, updated_at = ?
+               WHERE id = ? AND status = 'claimed'`,
+            ).run(
+              candidate.id,
+              "trigger_event_stale_run_reconciliation_required",
+              now.toISOString(),
+              event.id,
+            );
+          }
+        }
+      }
+      if (hasRunEvents) {
+        const seq = Number((db.prepare(
+          "SELECT COALESCE(MAX(seq) + 1, 0) AS seq FROM run_events WHERE run_id = ?",
+        ).get(candidate.id) as { seq?: number } | undefined)?.seq ?? 0);
+        db.prepare(
+          `INSERT INTO run_events
+             (id, run_id, seq, ts, kind, automation_id, payload_json)
+           VALUES (?, ?, ?, ?, 'automation_stale_run_recovered', ?, ?)`,
+        ).run(
+          `evt_${randomUUID()}`,
+          candidate.id,
+          seq,
+          now.toISOString(),
+          candidate.automation_id,
+          JSON.stringify({ replaySafeCheckpoint: sealedRecoveryCheckpointIsReplaySafe(candidate) }),
+        );
+      }
     }
     return recovered;
   });
@@ -419,6 +598,10 @@ export function initStore(): void {
   preparePrivateStorePath(dbPath);
   _db = new Database(dbPath);
   _db.pragma("journal_mode = WAL");
+  // GUI and launchd share this WAL. Event-source callbacks must wait briefly
+  // for the current writer instead of dropping a filesystem/chain delivery on
+  // an immediate SQLITE_BUSY. Long-running work never holds a DB transaction.
+  _db.pragma("busy_timeout = 5000");
   hardenStoreSidecars(dbPath);
   _db.pragma("foreign_keys = ON");
 
@@ -1250,7 +1433,11 @@ export function initStore(): void {
         started_at TEXT,
         last_activity_at TEXT,
         status TEXT,
-        node_states_json TEXT
+        node_states_json TEXT,
+        occurrence_id TEXT,
+        graph_digest TEXT,
+        checkpoint_json TEXT,
+        resume_of_run_id TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_automation_runs_auto
       ON automation_runs(automation_id, started_at);
@@ -2673,6 +2860,80 @@ export function initStore(): void {
     }
     _db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_episodes_project_path_created
       ON memory_episodes(project_path_hash, created_at DESC)`);
+  }
+
+  // v69: resumable workflow occurrences. A later node failure must not replay
+  // an already committed side-effect node (for example, post a second comment).
+  // The checkpoint is local-only and digest-bound to the exact graph/runtime
+  // policy; ambiguous in-flight side effects remain blocked for reconciliation.
+  if (userVersion < 69 && tableExists(_db, "automation_runs")) {
+    const runColumns = new Set(schemaColumns(_db, "automation_runs").map((column) => column.name));
+    if (!runColumns.has("occurrence_id")) {
+      _db.exec("ALTER TABLE automation_runs ADD COLUMN occurrence_id TEXT");
+    }
+    if (!runColumns.has("graph_digest")) {
+      _db.exec("ALTER TABLE automation_runs ADD COLUMN graph_digest TEXT");
+    }
+    if (!runColumns.has("checkpoint_json")) {
+      _db.exec("ALTER TABLE automation_runs ADD COLUMN checkpoint_json TEXT");
+    }
+    if (!runColumns.has("resume_of_run_id")) {
+      _db.exec("ALTER TABLE automation_runs ADD COLUMN resume_of_run_id TEXT");
+    }
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_automation_runs_occurrence
+      ON automation_runs(automation_id, occurrence_id, started_at)`);
+  }
+
+  // v70: durable event-trigger outbox. Source events are inserted here before
+  // webhook acknowledgement or poll cursor advancement. A DB claim lease and
+  // bound graph run receipt prevent GUI/headless peers from executing the same
+  // delivery twice, while finite backoff parks a poison event without turning
+  // the automation off or discarding the original payload.
+  if (userVersion < 70) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS automation_trigger_events (
+        id TEXT PRIMARY KEY,
+        automation_id TEXT NOT NULL,
+        trigger_kind TEXT NOT NULL CHECK(trigger_kind IN ('fs','chain','webhook','poll')),
+        dedupe_key TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK(status IN ('pending','claimed','delivered','parked')),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+        next_attempt_at TEXT NOT NULL,
+        claim_owner TEXT,
+        claimed_until TEXT,
+        run_id TEXT,
+        run_outcome TEXT CHECK(run_outcome IS NULL OR run_outcome IN
+          ('ok','partial','error','skipped','blocked','needs_input')),
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        delivered_at TEXT,
+        FOREIGN KEY(automation_id) REFERENCES automations(id) ON DELETE CASCADE,
+        UNIQUE(automation_id, trigger_kind, dedupe_key),
+        CHECK(
+          (status = 'claimed' AND claim_owner IS NOT NULL AND claimed_until IS NOT NULL) OR
+          (status <> 'claimed' AND claim_owner IS NULL AND claimed_until IS NULL)
+        ),
+        CHECK((status = 'delivered' AND delivered_at IS NOT NULL) OR status <> 'delivered')
+      );
+      CREATE INDEX IF NOT EXISTS idx_automation_trigger_events_due
+        ON automation_trigger_events(status, next_attempt_at, created_at);
+      CREATE INDEX IF NOT EXISTS idx_automation_trigger_events_automation
+        ON automation_trigger_events(automation_id, status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_automation_trigger_events_run
+        ON automation_trigger_events(run_id) WHERE run_id IS NOT NULL;
+    `);
+  }
+  // A development build may have opened the first v70 draft before the
+  // scheduler-level outcome receipt was added. Keep that local DB upgradeable
+  // without spending a second public schema number.
+  if (tableExists(_db, "automation_trigger_events")) {
+    const eventColumns = new Set(schemaColumns(_db, "automation_trigger_events").map((column) => column.name));
+    if (!eventColumns.has("run_outcome")) {
+      _db.exec("ALTER TABLE automation_trigger_events ADD COLUMN run_outcome TEXT");
+    }
   }
 
   // Run on every boot as well as the v52 upgrade. A hard process exit can

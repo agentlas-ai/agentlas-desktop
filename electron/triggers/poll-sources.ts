@@ -12,9 +12,12 @@
 //
 // nextPollAt/currentInterval은 프로세스 인메모리 상태다(앱 꺼지면 폴도 정지 — 설계 §3.1의
 // 안전장치). lastSeen 커서만 trigger_json에 영속화해 재기동 후에도 중복 발사를 막는다.
+import { randomUUID } from "node:crypto";
 import type { Automation, PollSource, Trigger } from "../../shared/types";
-import { listEnabledByTrigger, updateAutomation } from "../store/automations";
+import { listEnabledByTrigger } from "../store/automations";
+import { advancePollCursor, enqueueTriggerEvent } from "../store/trigger-events";
 import { evaluateCondition } from "./condition";
+import { wakeTriggerOutbox } from "./outbox";
 import { callServerTool } from "../mcp-tools/client";
 import { getServer } from "../mcp-tools/registry";
 
@@ -111,7 +114,27 @@ async function pollOne(a: Automation, trigger: Extract<Trigger, { kind: "poll" }
 
   // dedup: 값이 그대로면(변화 없음) 발사하지 않는다(설계 §3.3 커서). changed 연산자는 위에서 처리됨.
   if (pass && changed) {
-    fire(a.id);
+    try {
+      enqueueTriggerEvent({
+        automationId: a.id,
+        triggerKind: "poll",
+        dedupeKey: `poll:${randomUUID()}`,
+        payload: { output: observed, value: observed },
+        pollCursor: {
+          expectedTrigger: trigger,
+          nextTrigger: { ...trigger, lastSeen: observed },
+        },
+      });
+      st.lastSeen = observed;
+      wakeTriggerOutbox();
+    } catch (error) {
+      // The cursor remains unchanged when enqueue fails, so the next poll can
+      // deliver the same observation instead of silently losing it.
+      console.error(`[poll] durable enqueue failed (${a.name}):`, error);
+      st.currentIntervalMs = min;
+      st.nextPollAt = now.getTime() + min;
+      return;
+    }
   }
 
   // 적응형 간격: 변했으면 min으로 조이고, 아니면 2배로 늘린다(max 상한). 시장 마감 게이팅.
@@ -124,32 +147,19 @@ async function pollOne(a: Automation, trigger: Extract<Trigger, { kind: "poll" }
   st.nextPollAt = now.getTime() + nextInterval;
 
   // lastSeen 커서 갱신 + 영속화(재기동 후 중복 발사 방지). 값이 바뀐 경우에만 write.
-  if (changed) {
-    st.lastSeen = observed;
-    persistCursor(a, trigger, observed);
-  }
-}
-
-/** fire — 트리거 매니저가 주입한 RunFn(스케줄러)으로 위임. 스케줄러가 공유 리스를 잡고 실행. */
-type RunFn = (automationId: string) => Promise<void>;
-let runFn: RunFn | null = null;
-/** 폴 매니저에 실행 함수 주입(트리거 매니저 기동 시). */
-export function setPollRunFn(fn: RunFn): void {
-  runFn = fn;
-}
-function fire(automationId: string): void {
-  if (!runFn) return;
-  void runFn(automationId).catch(() => {
-    /* 실행 오류는 스케줄러가 run_history에 기록 */
-  });
-}
-
-/** lastSeen 커서를 trigger_json에 영속화(updateAutomation 경유). best-effort. */
-function persistCursor(a: Automation, trigger: Extract<Trigger, { kind: "poll" }>, value: string): void {
-  try {
-    updateAutomation(a.id, { trigger: { ...trigger, lastSeen: value } });
-  } catch (err) {
-    console.error("[poll] persist cursor failed:", err);
+  if (changed && !pass) {
+    try {
+      if (advancePollCursor(a.id, trigger, { ...trigger, lastSeen: observed })) {
+        st.lastSeen = observed;
+      } else {
+        // The automation was edited while this fetch was in flight. Discard
+        // the stale in-memory state and rehydrate the new source next tick.
+        states.delete(a.id);
+      }
+    } catch (error) {
+      console.error("[poll] persist cursor failed:", error);
+      states.delete(a.id);
+    }
   }
 }
 

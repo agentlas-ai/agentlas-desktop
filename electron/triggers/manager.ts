@@ -3,38 +3,94 @@
 // 기존 실행 경로(automation-scheduler.runAutomationNow)로 합류한다. 실행 엔진은 손대지 않는다.
 //
 // 자동화당 watcher-프로세스를 절대 만들지 않는다(설계 §3.1 금지). fs는 경로당 watcher 1개
-// (fs-watcher.ts가 공유), chain은 EventEmitter 1개(chain-bus.ts). poll 계열은 P2.
+// (fs-watcher.ts가 공유), chain은 durable terminal receipt/outbox가 진실이고 EventEmitter는
+// 이미 커밋된 fan-out을 즉시 깨우는 가속 신호뿐이다. poll 계열은 P2.
 //
 // launchd 헤드리스 러너에서는 이벤트 트리거를 등록하지 않는다(창 없이 1회 실행 후 종료).
-// 이벤트 계열은 "앱 켜졌을 때만" 도는 Tier 0 소스라는 설계 전제를 그대로 따른다.
+// launchd가 만든 durable chain occurrence는 같은 DB outbox에 남아 GUI 없이도 drain된다.
 import type { Automation } from "../../shared/types";
-import { listEnabledByTrigger } from "../store/automations";
+import { randomUUID } from "node:crypto";
+import { listEnabledByTrigger, reconcileDurableChainDeliveries } from "../store/automations";
+import { enqueueTriggerEvent, parkRejectedSourceTriggerEvent } from "../store/trigger-events";
 import { watchPath, unwatchAutomation, closeAllWatchers, type FsChangeKind } from "./fs-watcher";
 import { onAutomationDone, type AutomationCompletion } from "./chain-bus";
 import { evaluateCondition } from "./condition";
-import { setPollRunFn, runPollDue, forgetPollState, clearPollStates } from "./poll-sources";
+import { runPollDue, forgetPollState, clearPollStates } from "./poll-sources";
 import { startWebhookServer, stopWebhookServer } from "./webhook-server";
+import {
+  startTriggerOutbox,
+  stopTriggerOutbox,
+  wakeTriggerOutbox,
+  type TriggerEventRunFn,
+} from "./outbox";
 
 // 자동화 id → fs 구독 해제 함수들.
 const fsUnsubs = new Map<string, Array<() => void>>();
 let chainUnsub: (() => void) | null = null;
 let started = false;
-// 동일한 잘못된 edge가 완료 이벤트마다 경고를 쏟지 않도록 프로세스 생명주기 동안 1회만 기록.
-const warnedCycleEdges = new Set<string>();
+const sourceRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-/** 매니저가 발사할 때 호출할 실행 함수(스케줄러가 주입 — 정적 순환 회피). */
-type RunFn = (automationId: string, ctx?: { output?: string }) => Promise<void>;
-let runFn: RunFn | null = null;
-
-function fire(a: Automation, vars: Record<string, unknown>): void {
+function fire(a: Automation, vars: Record<string, unknown>, dedupeKey: string): void {
   // 트리거 게이트 조건(onlyIf) 1회 평가. false면 스킵(설계 §3.4 Tier 0 #3 하이브리드).
   const cond = a.trigger && "onlyIf" in a.trigger ? a.trigger.onlyIf : undefined;
   if (!evaluateCondition(cond, vars)) return;
-  if (!runFn) return;
-  const output = typeof vars.output === "string" ? vars.output : undefined;
-  void runFn(a.id, output ? { output } : undefined).catch(() => {
-    /* 실행 오류는 스케줄러가 run_history에 기록 */
-  });
+  if (!a.trigger || a.trigger.kind === "schedule" || a.trigger.kind === "poll") return;
+  const payload = Object.fromEntries(
+    Object.entries(vars).filter(([, value]) =>
+      value == null || typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+    ),
+  );
+  const persist = (attempt: number): void => {
+    try {
+      enqueueTriggerEvent({
+        automationId: a.id,
+        triggerKind: a.trigger!.kind,
+        dedupeKey,
+        payload,
+      });
+      const pending = sourceRetryTimers.get(dedupeKey);
+      if (pending) clearTimeout(pending);
+      sourceRetryTimers.delete(dedupeKey);
+      wakeTriggerOutbox();
+    } catch (error) {
+      // fs.watch and the in-process chain accelerator have no sender retry
+      // contract. Keep the same stable occurrence in memory and never let an
+      // enqueue failure escape the callback and terminate the main process.
+      console.error(`[triggers] source event persistence failed (${dedupeKey}):`, error);
+      if (/trigger_event_enqueue_rejected/.test(error instanceof Error ? error.message : String(error))) {
+        try {
+          const parked = parkRejectedSourceTriggerEvent({
+            automationId: a.id,
+            triggerKind: a.trigger!.kind,
+            dedupeKey,
+            payload,
+            error: "trigger_event_source_contract_changed_before_enqueue",
+          });
+          if (parked) wakeTriggerOutbox();
+          return;
+        } catch (parkError) {
+          console.error(`[triggers] source event attention persistence failed (${dedupeKey}):`, parkError);
+        }
+      }
+      if (sourceRetryTimers.has(dedupeKey)) return;
+      const timer = setTimeout(() => {
+        sourceRetryTimers.delete(dedupeKey);
+        persist(Math.min(attempt + 1, 8));
+      }, Math.min(1_000 * 2 ** attempt, 30_000));
+      timer.unref?.();
+      sourceRetryTimers.set(dedupeKey, timer);
+    }
+  };
+  persist(0);
+}
+
+function reconcileChainReceipts(): void {
+  try {
+    const repaired = reconcileDurableChainDeliveries();
+    if (repaired.inserted > 0) wakeTriggerOutbox();
+  } catch (error) {
+    console.error("[triggers] durable chain receipt reconciliation failed:", error);
+  }
 }
 
 function registerFs(a: Automation): void {
@@ -46,80 +102,41 @@ function registerFs(a: Automation): void {
     automationId: a.id,
     on,
     debounceMs,
-    fire: (info) => fire(a, { path: info.path, changedPath: info.changedPath ?? "", kind: info.kind }),
+    fire: (info) => fire(
+      a,
+      { path: info.path, changedPath: info.changedPath ?? "", kind: info.kind },
+      `fs:${randomUUID()}`,
+    ),
   });
   const list = fsUnsubs.get(a.id) ?? [];
   list.push(unsub);
   fsUnsubs.set(a.id, list);
 }
 
-/**
- * enabled chain들을 source(afterAutomationId) → target(automation id) 그래프로 보고,
- * 지금 발사할 edge가 target에서 source로 돌아오는 경로를 닫는지 검사한다.
- * self edge와 A↔B/장거리 순환을 같은 규칙으로 차단하고 DAG/fan-out은 허용한다.
- */
-function closesChainCycle(sourceId: string, targetId: string, chained: Automation[]): boolean {
-  if (sourceId === targetId) return true;
-  const targetsBySource = new Map<string, string[]>();
-  for (const automation of chained) {
-    if (!automation.trigger || automation.trigger.kind !== "chain") continue;
-    const source = automation.trigger.afterAutomationId;
-    const targets = targetsBySource.get(source) ?? [];
-    targets.push(automation.id);
-    targetsBySource.set(source, targets);
-  }
-
-  const pending = [targetId];
-  const visited = new Set<string>();
-  while (pending.length > 0) {
-    const current = pending.pop() as string;
-    if (current === sourceId) return true;
-    if (visited.has(current)) continue;
-    visited.add(current);
-    for (const next of targetsBySource.get(current) ?? []) {
-      if (!visited.has(next)) pending.push(next);
-    }
-  }
-  return false;
-}
-
-function handleChain(completion: AutomationCompletion): void {
-  // 선행 실행이 성공했을 때만 체인(실패 전파 방지).
-  if (!completion.ok) return;
-  // chain 트리거를 가진 enabled 자동화 중, afterAutomationId가 방금 끝난 것과 일치하는 것 발사.
-  const chained = listEnabledByTrigger("chain");
-  for (const a of chained) {
-    if (a.trigger && a.trigger.kind === "chain" && a.trigger.afterAutomationId === completion.automationId) {
-      if (closesChainCycle(completion.automationId, a.id, chained)) {
-        const edge = `${completion.automationId}->${a.id}`;
-        if (!warnedCycleEdges.has(edge)) {
-          warnedCycleEdges.add(edge);
-          console.warn(`[triggers] blocked cyclic chain edge ${edge}`);
-        }
-        continue;
-      }
-      fire(a, { output: completion.output ?? "", ok: String(completion.ok) });
-    }
-  }
+function handleChain(_completion: AutomationCompletion): void {
+  // The scheduler already committed the exact fan-out beside its terminal
+  // receipt. This in-process bus is only a low-latency wake signal; it is never
+  // the source of truth and cannot create a second interpretation of output or
+  // cycle policy.
+  reconcileChainReceipts();
+  wakeTriggerOutbox();
 }
 
 /**
  * 트리거 매니저 기동 — 이벤트 계열 트리거를 리스너에 등록한다. 스케줄러의 실행 함수를
  * 주입받아 정적 순환을 피한다. 이미 시작됐으면 재동기화만 한다.
  */
-export function startTriggerManager(run: RunFn): void {
-  runFn = run;
+export function startTriggerManager(run: TriggerEventRunFn): void {
+  startTriggerOutbox(run);
   if (!started) {
     started = true;
     chainUnsub = onAutomationDone(handleChain);
-    // 폴 매니저(설계 §3.4 Tier 1)에 실행 함수 주입. 폴 자체는 새 타이머 없이 스케줄러
-    // 60초 틱이 pollTick()으로 구동한다(per-automation 타이머 금지).
-    setPollRunFn((id) => run(id));
     // webhook 리스너(설계 §3.4 Tier 2) 기동 — 소켓 1개 공유. 로컬 전용(공인 URL은 터널 필요).
-    void startWebhookServer((id, ctx) => run(id, ctx)).catch((err) => {
+    void startWebhookServer().catch((err) => {
       console.error("[triggers] startWebhookServer failed:", err);
     });
   }
+  reconcileChainReceipts();
   syncTriggers();
 }
 
@@ -129,6 +146,7 @@ export function startTriggerManager(run: RunFn): void {
  */
 export async function pollTick(now: Date = new Date()): Promise<void> {
   if (!started) return;
+  reconcileChainReceipts();
   try {
     await runPollDue(now);
   } catch (err) {
@@ -169,8 +187,9 @@ export function stopTriggerManager(): void {
   fsUnsubs.clear();
   stopWebhookServer();
   clearPollStates();
+  stopTriggerOutbox();
+  for (const timer of sourceRetryTimers.values()) clearTimeout(timer);
+  sourceRetryTimers.clear();
   prevPollIds = new Set();
-  warnedCycleEdges.clear();
   started = false;
-  runFn = null;
 }

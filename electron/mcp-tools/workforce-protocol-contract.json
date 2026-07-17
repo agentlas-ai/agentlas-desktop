@@ -1,0 +1,102 @@
+{
+  "schemaVersion": "agentlas.desktop-workforce-protocol-contract.v1",
+  "protocolMetadata": {
+    "schemaVersion": "agentlas.workforce-protocol-metadata.v1",
+    "protocolVersion": "2026-07-17.2",
+    "ontologyVersion": "awo:2026-07-15.2",
+    "ontologySnapshotSha256": "d6d30d45fe8d35fb785e165d1e80c6471a72436f0160c3933c21d4a31bf2fb32",
+    "candidateSetSchemaVersion": "agentlas.workforce-candidate-set.v1",
+    "federationResultSchemaVersion": "agentlas.workforce-federation-result.v1",
+    "federatedSelectionSchemaVersion": "agentlas.workforce-federated-selection-validation.v1",
+    "federatedPreparationSchemaVersion": "agentlas.workforce-federated-preparation.v1",
+    "executionPlanSchemaVersion": "agentlas.workforce-execution-plan.v5",
+    "sourceScopeRequired": true,
+    "prepareAttemptSchemaVersion": "agentlas.workforce-prepare-attempt.v1",
+    "sourceFetchIdempotencySchemaVersion": "agentlas.workforce-source-fetch-idempotency.v1",
+    "sourceBundleReceiptSchemaVersion": "agentlas.workforce-source-bundle-verification.v1",
+    "prepareIdempotencyRequired": true
+  },
+  "tools": {
+    "requiredNames": [
+      "workforce.search_candidates",
+      "workforce.validate_selection",
+      "workforce.prepare_execution"
+    ],
+    "searchCandidates": {
+      "name": "workforce.search_candidates",
+      "requiredInputFields": [
+        "workOrder",
+        "sourceScope"
+      ],
+      "sourceScopeValues": [
+        "network",
+        "local",
+        "cloud",
+        "hub"
+      ]
+    },
+    "validateSelection": {
+      "name": "workforce.validate_selection",
+      "requiredInputFields": [
+        "workOrder",
+        "candidateSet",
+        "selection",
+        "federationResult"
+      ]
+    },
+    "prepareExecution": {
+      "name": "workforce.prepare_execution",
+      "requiredInputFields": [
+        "workOrder",
+        "candidateSet",
+        "selection",
+        "federationResult",
+        "federatedSelection",
+        "prepareAttempt"
+      ],
+      "inputPropertyFields": [
+        "workOrder",
+        "candidateSet",
+        "selection",
+        "validationReceipt",
+        "federationResult",
+        "federatedSelection",
+        "prepareAttempt"
+      ],
+      "prepareAttemptRequiredFields": [
+        "schemaVersion",
+        "occurrenceId",
+        "workOrderDigest",
+        "selectionDigest",
+        "federatedSelectionDigest",
+        "selectedSourcePinDigests",
+        "idempotencyKey"
+      ]
+    }
+  },
+  "prepareResponse": {
+    "requiredFields": [
+      "schemaVersion",
+      "status",
+      "federationDigest",
+      "federatedSelectionDigest",
+      "candidateSetDigest",
+      "runtimeSourcePins",
+      "executionPlan",
+      "federatedPreparationDigest"
+    ],
+    "executionPlanRequiredFields": [
+      "schemaVersion",
+      "status",
+      "issues",
+      "preparationReceiptId",
+      "selectionReceiptId",
+      "candidateSetDigest",
+      "decisionOwner",
+      "substitutions",
+      "executionContext",
+      "executionContextDigest",
+      "executionRoster"
+    ]
+  }
+}

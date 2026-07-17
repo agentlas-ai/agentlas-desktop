@@ -129,12 +129,15 @@ function NewAutomationPage() {
       targetType === "firm"
         ? firms.some((f) => f.id === targetId)
         : targetType === "hub"
-          ? hubAgents.some((a) => a.slug === targetId)
+          ? hubAgents.some((a) => a.slug === targetId && a.callable === true && Boolean(a.packageHash))
           : agents.some((a) => a.id === targetId);
     if (valid) return;
     if (targetType === "firm" && firms[0]) setTargetId(firms[0].id);
     if (targetType === "agent" && agents[0]) setTargetId(agents[0].id);
-    if (targetType === "hub" && hubAgents[0]) setTargetId(hubAgents[0].slug);
+    if (targetType === "hub") {
+      const exact = hubAgents.find((agent) => agent.callable === true && Boolean(agent.packageHash));
+      if (exact) setTargetId(exact.slug);
+    }
   }, [targetType, targetId, agents, firms, hubAgents, editId, loaded]);
 
   function buildTrigger(): Trigger | null {
@@ -157,10 +160,19 @@ function NewAutomationPage() {
       targetType === "firm"
         ? firms.some((f) => f.id === targetId)
         : targetType === "hub"
-          ? hubAgents.some((a) => a.slug === targetId)
+          ? hubAgents.some((a) => a.slug === targetId && a.callable === true && Boolean(a.packageHash))
           : agents.some((a) => a.id === targetId);
     if (!validTarget) {
       setError(locale === "ko" ? "선택한 대상이 없습니다. 다른 대상 탭을 선택하세요." : "No valid target is selected. Choose another target tab.");
+      return;
+    }
+    const selectedHubVersion = targetType === "hub"
+      ? hubAgents.find((agent) => agent.slug === targetId && agent.callable === true)?.packageHash
+      : undefined;
+    if (targetType === "hub" && !selectedHubVersion) {
+      setError(locale === "ko"
+        ? "정확한 Hub 패키지 버전을 확인할 수 없어 자동화를 저장하지 않았습니다. Hub 목록을 새로고침한 뒤 다시 선택하세요."
+        : "The exact Hub package version is unavailable. Refresh Hub and select the agent again.");
       return;
     }
     if (triggerType === "fs" && !fsPath.trim()) {
@@ -179,6 +191,7 @@ function NewAutomationPage() {
         scheduleHuman,
         targetType,
         targetId,
+        targetVersion: targetType === "hub" ? selectedHubVersion : "",
         promptTemplate: prompt.trim() || (locale === "ko" ? "오늘 할 일 요약해줘" : "Summarize today's tasks"),
         toolMode,
         hubMode,

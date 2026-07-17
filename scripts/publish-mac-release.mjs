@@ -28,8 +28,16 @@ export function requiredReleaseAssetNames(version) {
     "latest-linux.yml",
     "latest-mac.yml",
     "desktop-release-verification.json",
-    "desktop-release.production.env",
   ];
+}
+
+/**
+ * Explicit public allowlist. Production Railway variables are derived in
+ * memory from desktop-release-verification.json; env files, tests, and
+ * internal evidence never become GitHub release assets.
+ */
+export function publicReleaseAssetNames(version) {
+  return requiredReleaseAssetNames(version);
 }
 
 export function assertStableReleaseIdentity(version, tag) {
@@ -41,7 +49,7 @@ export function assertStableReleaseIdentity(version, tag) {
   }
 }
 
-export function inspectReleaseState(version, release) {
+export function inspectReleaseState(version, release, requiredAssets = requiredReleaseAssetNames(version)) {
   const assetNames = new Set(
     Array.isArray(release?.assets)
       ? release.assets
@@ -49,17 +57,19 @@ export function inspectReleaseState(version, release) {
         .filter((name) => typeof name === "string" && name.length > 0)
       : [],
   );
-  const requiredAssets = requiredReleaseAssetNames(version);
   const missingAssets = requiredAssets.filter((name) => !assetNames.has(name));
+  const requiredAssetSet = new Set(requiredAssets);
+  const unexpectedAssets = [...assetNames].filter((name) => !requiredAssetSet.has(name)).sort();
   const isDraft = release?.isDraft === true;
   const isPrerelease = release?.isPrerelease === true;
   return {
     isDraft,
     isPrerelease,
     isStable: !isDraft && !isPrerelease,
-    complete: missingAssets.length === 0,
+    complete: missingAssets.length === 0 && unexpectedAssets.length === 0,
     requiredAssets,
     missingAssets,
+    unexpectedAssets,
     assetNames: [...assetNames].sort(),
   };
 }
@@ -88,7 +98,8 @@ export async function waitForRequiredReleaseAssets({
     if (!state) throw new Error(`Release v${version} disappeared while waiting for staged assets.`);
     if (state.isStable && !state.complete) {
       throw new Error(
-        `Refusing partial stable release v${version}; missing required assets: ${state.missingAssets.join(", ")}`,
+        `Refusing non-exact stable release v${version}; missing required assets: ${state.missingAssets.join(", ") || "none"}; ` +
+        `unexpected public assets: ${state.unexpectedAssets.join(", ") || "none"}`,
       );
     }
     if (state.complete) return state;
@@ -96,7 +107,8 @@ export async function waitForRequiredReleaseAssets({
     const remaining = deadline - now();
     if (remaining <= 0) {
       throw new Error(
-        `Timed out waiting for required release assets for v${version}; stable promotion is blocked. Missing: ${state.missingAssets.join(", ")}`,
+        `Timed out waiting for the exact public release assets for v${version}; stable promotion is blocked. ` +
+        `Missing: ${state.missingAssets.join(", ") || "none"}; unexpected: ${state.unexpectedAssets.join(", ") || "none"}`,
       );
     }
     onWait(state, remaining);
@@ -157,7 +169,7 @@ function readReleaseState({ repo, tag, version }) {
     throw new Error(`Could not inspect staged release ${tag}; refusing to guess its state.\n${result.output}`);
   }
   try {
-    return inspectReleaseState(version, JSON.parse(result.stdout));
+    return inspectReleaseState(version, JSON.parse(result.stdout), publicReleaseAssetNames(version));
   } catch (error) {
     throw new Error(`Could not parse staged release ${tag}; refusing stable promotion. ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -187,6 +199,11 @@ function readLatestStableTag(repo) {
 }
 
 function assertNoPartialStable(state, tag) {
+  if (state?.unexpectedAssets?.length) {
+    throw new Error(
+      `Refusing release ${tag} with assets outside the public allowlist: ${state.unexpectedAssets.join(", ")}`,
+    );
+  }
   if (state?.isStable && !state.complete) {
     throw new Error(
       `Refusing to modify partial stable release ${tag}; missing required assets: ${state.missingAssets.join(", ")}`,
@@ -273,7 +290,7 @@ async function main() {
     { name: "AGENTLAS_RELEASE_ASSET_POLL_MS", min: 250, max: 60_000 },
   );
 
-  run("node", ["scripts/verify-mac-release.mjs", "--write-env", `--repo=${repo}`, `--tag=${tag}`, `--version=${version}`]);
+  run("node", ["scripts/verify-mac-release.mjs", `--repo=${repo}`, `--tag=${tag}`, `--version=${version}`]);
   run("node", ["scripts/fix-mac-latest-zip.mjs"]);
   cleanupAppleDouble(releaseDir);
 
@@ -306,12 +323,13 @@ async function main() {
     `--release-dir=${releaseDir}`,
     `--tag=${tag}`,
     `--version=${version}`,
+    "--public-allowlist",
   ]);
-  const files = requiredReleaseAssetNames(version).map((name) => requireFile(join(releaseDir, name)));
+  const publicFiles = publicReleaseAssetNames(version).map((name) => requireFile(join(releaseDir, name)));
 
   const initialState = createOrNormalizeStagingRelease({ repo, tag, version, notesPath, keepDraft });
   if (!initialState.isStable) {
-    run("gh", ["release", "upload", tag, "--repo", repo, "--clobber", ...files], { stdio: "inherit" });
+    run("gh", ["release", "upload", tag, "--repo", repo, "--clobber", ...publicFiles], { stdio: "inherit" });
   }
   cleanupAppleDouble(releaseDir);
 
@@ -325,6 +343,7 @@ async function main() {
     `--version=${version}`,
     `--repo=${repo}`,
     "--verify-remote",
+    "--public-allowlist",
   ]);
 
   // Verify the bytes that the staged release actually serves, not merely the
@@ -347,7 +366,8 @@ async function main() {
     pollMs,
     onWait: (state, remaining) => {
       console.log(
-        `[release-stage] waiting up to ${Math.ceil(remaining / 1000)}s for ${state.missingAssets.length} asset(s): ${state.missingAssets.join(", ")}`,
+        `[release-stage] waiting up to ${Math.ceil(remaining / 1000)}s; ` +
+        `missing=${state.missingAssets.join(", ") || "none"}; unexpected=${state.unexpectedAssets.join(", ") || "none"}`,
       );
     },
   });
@@ -392,7 +412,7 @@ async function main() {
     promoted,
     draft: keepDraft,
     requiredAssetCount: finalState.requiredAssets.length,
-    uploaded: files.map((file) => basename(file)),
+    uploaded: publicFiles.map((file) => basename(file)),
   }, null, 2));
 }
 

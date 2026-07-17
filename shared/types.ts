@@ -362,6 +362,8 @@ export interface MarketplaceListing {
   ownerName?: string;
   publishedAt?: string;
   visibility?: AgentVisibility;
+  /** Exact immutable Hub release hash exposed by callable marketplace search rows. */
+  packageHash?: string;
   cloudPackage?: CloudAgentPackageDownload;
   /** Owner restore baseline used only for optimistic Cloud writes. */
   cloudRegistration?: CloudAgentRevisionIdentity;
@@ -997,10 +999,95 @@ export interface AutomationRunRecord {
   scheduledFor: string | null;
   /** 실제 실행 시각(ISO). */
   ranAt: string;
-  status: "ok" | "error" | "skipped";
+  status: "ok" | "partial" | "error" | "skipped" | "blocked" | "needs_input";
   /** 이 실행에서 병합/스킵된 놓친 발생 수. */
   skippedCount: number;
   error: string | null;
+}
+
+/** A retained event occurrence that cannot be safely replayed automatically. */
+export interface AutomationTriggerEventAttention {
+  id: string;
+  automationId: string;
+  triggerKind: Exclude<TriggerKind, "schedule">;
+  attemptCount: number;
+  lastError: string;
+  runId: string | null;
+  runOutcome: AutomationRunRecord["status"] | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutomationTriggerEventReconcileInput {
+  eventId: string;
+  automationId: string;
+  /** Optimistic CAS token from AutomationTriggerEventAttention.updatedAt. */
+  expectedUpdatedAt: string;
+  /** completed = external action happened; retry = external action did not happen. */
+  resolution: "completed" | "retry";
+}
+
+export interface AutomationGraphReconciliationNode {
+  nodeId: string;
+  label: string;
+  nodeType: WorkflowNodeType;
+  uncertainty: "ambiguous" | "in_flight";
+  /** Variable name populated by this node, when the graph declares one. */
+  produces: string | null;
+  /** Completion needs a human-supplied output when the node populates a variable. */
+  outputRequired: boolean;
+  /** An untrusted pre-reconciliation output existed and will be audit-digested. */
+  hasRecordedOutput: boolean;
+}
+
+export interface AutomationGraphReconciliationEvent {
+  id: string;
+  triggerKind: Exclude<TriggerKind, "schedule">;
+  status: "pending" | "parked";
+  updatedAt: string;
+}
+
+/** Strict, latest-failed v3 checkpoint view. Raw checkpoint payloads are never exposed. */
+export interface AutomationGraphReconciliation {
+  automationId: string;
+  runId: string;
+  occurrenceId: string;
+  graphDigest: string;
+  checkpointDigest: string;
+  updatedAt: string;
+  triggerEvent: AutomationGraphReconciliationEvent | null;
+  nodes: AutomationGraphReconciliationNode[];
+}
+
+export interface AutomationGraphReconciliationDecision {
+  nodeId: string;
+  /** completed = it happened; retry = it definitely did not happen. */
+  resolution: "completed" | "retry";
+  /** Required and non-empty for completed nodes whose config declares `produces`. */
+  output?: string;
+}
+
+export interface AutomationGraphReconcileInput {
+  automationId: string;
+  runId: string;
+  occurrenceId: string;
+  graphDigest: string;
+  checkpointDigest: string;
+  expectedUpdatedAt: string;
+  eventId?: string | null;
+  expectedEventUpdatedAt?: string | null;
+  decisions: AutomationGraphReconciliationDecision[];
+}
+
+export interface AutomationGraphReconcileResult {
+  automationId: string;
+  runId: string;
+  checkpointDigest: string;
+  updatedAt: string;
+  eventStatus: "pending" | "delivered" | null;
+  resumeRequired: boolean;
+  completedNodeIds: string[];
+  retryNodeIds: string[];
 }
 
 export type AutomationToolMode = "auto" | "browser" | "computer-use";
@@ -4736,6 +4823,16 @@ export interface AgentlasIpc {
     updateGraph: (id: string, graph: WorkflowGraph | null) => Promise<Automation>;
     runNow: (id: string) => Promise<void>;
     listRuns: (id: string, limit?: number) => Promise<AutomationRunRecord[]>;
+    listTriggerAttention: (automationId: string) => Promise<AutomationTriggerEventAttention[]>;
+    reconcileTriggerEvent: (
+      input: AutomationTriggerEventReconcileInput,
+    ) => Promise<AutomationTriggerEventAttention | null>;
+    getGraphReconciliation: (
+      automationId: string,
+    ) => Promise<AutomationGraphReconciliation | null>;
+    reconcileGraph: (
+      input: AutomationGraphReconcileInput,
+    ) => Promise<AutomationGraphReconcileResult>;
     /** 그래프 라이브 실행 상태 채널명 — agentlasEvents.on으로 구독해 per-node 상태를 받는다(설계 §5 P2). */
     liveRunChannel: (automationId: string) => string;
     /** 이 자동화의 최근 실행 스냅샷(per-node 상태). 라이브 오버레이 초기 하이드레이트용. */

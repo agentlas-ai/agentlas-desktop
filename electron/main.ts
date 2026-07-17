@@ -42,6 +42,7 @@ import { reconcileLocalRouteDefinitionHashes } from "./agents/routes";
 import { reconcileExistingCuratedMemoryCandidates } from "./experience/store";
 import { seedBuiltinAgents } from "./architecture/seed";
 import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
+import { startHephaestusRuntimeAutoUpdate } from "./hephaestus/engine";
 import { scrubLegacyOpenCrabMcpConfig } from "./mcp-tools/mcp-config";
 import { scrubLegacyOpenCrabCredentialUrls } from "./mcp-tools/registry";
 import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser/approval-server";
@@ -406,12 +407,19 @@ app.whenReady().then(async () => {
     }
     try {
       initStore();
+      ensureDefaultMcpPluginsInstalled();
+      await startHephaestusRuntimeAutoUpdate();
       const openCrabScrub = scrubLegacyOpenCrabCredentialUrls();
       if (openCrabScrub.scrubbed > 0) {
         console.warn(`[opencrab] disabled and scrubbed ${openCrabScrub.scrubbed} legacy credential URL row(s)`);
       }
-      const { runDueAutomationsNow } = await import("./automation-scheduler");
+      const { runDueAutomationsNow, runAutomationFromTrigger } = await import("./automation-scheduler");
       await runDueAutomationsNow();
+      // Events accepted by a previous GUI session live in the SQLite outbox.
+      // A headless wake drains a bounded batch too; atomic event + automation
+      // leases make this safe if the GUI is concurrently active.
+      const { drainTriggerOutboxOnce } = await import("./triggers/outbox");
+      await drainTriggerOutboxOnce((id, ctx, hooks) => runAutomationFromTrigger(id, ctx, hooks));
     } catch (err) {
       console.error("[headless-automations] failed:", err);
     } finally {
@@ -509,6 +517,15 @@ app.whenReady().then(async () => {
     await createWindow();
     return;
   }
+  // Agentlas OS is independently releaseable. Desktop immediately runs from
+  // the newer of its immutable bundle and managed runtime, then starts the
+  // digest-verified updater in the background. Offline machines keep the
+  // bundle; successful updates atomically switch ~/.agentlas/runtime/current.
+  try {
+    await startHephaestusRuntimeAutoUpdate();
+  } catch (err) {
+    console.error("[hephaestus] Agentlas OS auto-update bootstrap failed:", err);
+  }
   // A session can expire by TTL or be rejected by the server while every
   // renderer remains mounted. Switch the bookmark authority boundary and
   // account UI immediately instead of waiting for a future focus event.
@@ -595,7 +612,7 @@ app.whenReady().then(async () => {
   try {
     const { startTriggerManager } = await import("./triggers/manager");
     const { runAutomationFromTrigger } = await import("./automation-scheduler");
-    startTriggerManager((id) => runAutomationFromTrigger(id));
+    startTriggerManager((id, ctx, hooks) => runAutomationFromTrigger(id, ctx, hooks));
   } catch (err) {
     console.error("[triggers] startTriggerManager failed:", err);
   }

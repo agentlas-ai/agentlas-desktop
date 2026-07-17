@@ -44,8 +44,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      HEPHAESTUS_REF: v1.1.48
-      HEPHAESTUS_COMMIT: 98adf6d1bb0bdad5a919884c3916274d5a3e813f
+      HEPHAESTUS_REF: v1.1.50
+      HEPHAESTUS_COMMIT: 5fc22464c1db33dabc0d4de2170053d1584b5682
 
     steps:
       - uses: actions/checkout@v4
@@ -167,8 +167,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      HEPHAESTUS_REF: v1.1.48
-      HEPHAESTUS_COMMIT: 98adf6d1bb0bdad5a919884c3916274d5a3e813f
+      HEPHAESTUS_REF: v1.1.50
+      HEPHAESTUS_COMMIT: 5fc22464c1db33dabc0d4de2170053d1584b5682
 
     steps:
       - uses: actions/checkout@v4
@@ -236,6 +236,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Fetch SHA-256-pinned standalone Python for the package
+        run: npm run fetch:python
 
       - name: Dependency security audit
         run: npm audit --audit-level=high
@@ -348,11 +351,27 @@ jobs:
       - name: Reverify embedded engine release boundary
         run: npm run ensure:engine
 
+      # Tests and native rebuilds run for several minutes after the first
+      # fetch. Re-materialize the immutable platform asset at the final package
+      # boundary so no stale/cross-arch directory can reach electron-builder.
+      - name: Reverify pinned standalone Python at package boundary
+        run: npm run fetch:python
+
       - name: Package verified Actions artifacts only
         shell: bash
         run: |
           npx electron-builder ${{ matrix.builder_args }} --publish never
           node scripts/stamp-update-feeds.mjs --release-dir=release --require
+
+      - name: Verify packaged Windows Python and Workforce MCP
+        if: runner.os == 'Windows'
+        shell: bash
+        run: node scripts/verify-packaged-workforce-runtime.cjs --resources=release/win-unpacked/resources
+
+      - name: Verify packaged Linux Python and Workforce MCP
+        if: runner.os == 'Linux'
+        shell: bash
+        run: node scripts/verify-packaged-workforce-runtime.cjs --resources=release/linux-unpacked/resources
 
       - name: Upload Windows/Linux package set for the release barrier
         uses: actions/upload-artifact@v4

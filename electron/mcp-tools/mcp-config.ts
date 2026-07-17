@@ -30,6 +30,7 @@ import {
   isCanonicalComputerUseMcpServer,
 } from "../computer-use/mcp-server";
 import { COMPUTER_USE_CONTROL_FILE_ENV, computerUseControlInfoPath } from "../computer-use/channel";
+import { resolveHephaestusStdioLaunch } from "../hephaestus/engine";
 
 function expandHome(arg: string): string {
   if (arg === "~") return os.homedir();
@@ -99,6 +100,7 @@ function safeProfileKey(value: string): string {
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SECRET_ALIAS_PREFIX = "AGENTLAS_MCP_SECRET_";
+const HEPHAESTUS_NETWORK_CATALOG_ID = "hephaestus-network";
 
 function validateEnvKey(value: string): string {
   const key = value.trim();
@@ -383,13 +385,23 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
 
     const key = mcpConfigKey(s);
     if (s.transport === "stdio" && s.command) {
-      const command = resolveStdioCommand(s);
-      const builtInEnv: Record<string, string> =
+      let command = resolveStdioCommand(s);
+      let args = argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
+      let builtInEnv: Record<string, string> =
         s.catalogId === "agentlas-browser"
           ? { [BROWSER_APPROVAL_FILE_ENV]: browserApprovalInfoPath() }
           : s.catalogId === "cua-driver"
             ? { [COMPUTER_USE_CONTROL_FILE_ENV]: computerUseControlInfoPath() }
             : {};
+      if (s.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID) {
+        const launch = await resolveHephaestusStdioLaunch("agentlas_cloud", ["mcp", "serve"]);
+        if (!launch) continue;
+        command = launch.command;
+        args = launch.args;
+        builtInEnv = Object.fromEntries(
+          Object.entries(launch.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+        );
+      }
       const secretAliases: Record<string, string> = {};
       for (const rawKey of s.envKeys) {
         const envKey = validateEnvKey(rawKey);
@@ -399,7 +411,6 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         secretAliases[envKey] = alias;
         runtimeEnv[alias] = value;
       }
-      const args = argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
       const aliases = Object.values(secretAliases);
       if (
         aliases.length === 0 &&

@@ -60,6 +60,8 @@ import {
   isWorkforceLeaderRuntimeAllowed,
   parseWorkforceCommand,
   runWorkforceSelection,
+  type WorkforcePrepareCheckpointReceipt,
+  workforceFailureCode,
 } from "./workforce-orchestrator";
 import { runSwarmInvocation } from "./swarm-run";
 import { getAgentGroup, listAgentGroups, resolveAgentGroupForRuntime } from "../store/agent-groups";
@@ -822,6 +824,25 @@ export async function pickActiveRunner(): Promise<
  *  여기 source를 추가하고 넘겨라 — 안 넘기면 대화형으로 오인된다(fail-open). */
 export interface InvocationExecutionContext {
   source: "automation" | "site-studio" | "telegram" | "trex";
+  /** Main-owned workflow node identity; keeps Memory Tickets distinct within one parent run. */
+  nodeId?: string;
+  /** Durable logical graph occurrence shared by resume runs. */
+  occurrenceId?: string;
+  /**
+   * Main-process-only checkpoint hook. It fires immediately after Hub response
+   * validation and before any borrowed worker starts, closing the crash window
+   * that a final invocation result alone would leave.
+   */
+  onWorkforcePrepareReceipt?: (receipt: WorkforcePrepareCheckpointReceipt) => void;
+}
+
+export interface McpInvocationResult {
+  finalText?: string;
+  tokens?: number;
+  stormbreakerContinueRequested: boolean;
+  resultFolder?: string;
+  /** Trusted main-process metadata; never accepted from model/tool event text. */
+  workforcePrepareReceipt?: WorkforcePrepareCheckpointReceipt;
 }
 
 /** 질문에 답할 사람이 없는 실행인가 — UNATTENDED_NO_ASK_DIRECTIVE 부착 기준. */
@@ -845,7 +866,7 @@ export async function runMcpInvocation(
   signal?: AbortSignal,
   workspaceBinding?: InvocationWorkspaceBinding,
   executionContext?: InvocationExecutionContext,
-): Promise<{ finalText?: string; tokens?: number; stormbreakerContinueRequested: boolean; resultFolder?: string }> {
+): Promise<McpInvocationResult> {
   // 한 마이크로태스크 양보 — ipc:run 핸들러가 { runId }를 반환하고 렌더러가 이벤트 채널을
   // 구독한 뒤에야 sink가 발화하도록 보장한다. 이게 없으면 동기 early-return(no-chat/no-agent)
   // 에러가 구독 전에 발화돼 렌더러가 종료 이벤트를 놓치고 busy(정지 버튼)가 영구 고착된다.
@@ -894,6 +915,7 @@ export async function runMcpInvocation(
   let runtimeAgentId: string | undefined;
   let finalTextFromSink = "";
   let resolvedResultFolder: string | undefined;
+  let workforcePrepareReceipt: WorkforcePrepareCheckpointReceipt | undefined;
   sink = (ev: McpInvocationEvent) => {
     if (ev.kind === "final" && ev.text?.trim()) {
       finalTextFromSink = ev.text.trim();
@@ -904,6 +926,7 @@ export async function runMcpInvocation(
     finalText: finalTextFromSink || undefined,
     stormbreakerContinueRequested: false,
     resultFolder: resolvedResultFolder,
+    workforcePrepareReceipt,
   });
   const locale = pickLocale(req);
   const chat = getChat(req.chatId);
@@ -1566,9 +1589,11 @@ export async function runMcpInvocation(
       const workforceLeaderRunnerEvidence: WorkforceLeaderRunnerEvidence[] = [];
       const workforce = await runWorkforceSelection({
         goal: explicitWorkforceGoal,
+        occurrenceId: executionContext?.occurrenceId ?? req.runId,
         inputModalities: req.images?.length ? ["modality:image"] : [],
         active,
         benchmarkMode: workforceBenchmarkMode,
+        sourcePolicy: req.hubMode === "hub-first" ? "hub-required" : "network",
         signal,
         sink,
         auditSchemaAttempt: (attempt) => tryRecordRunEvent({
@@ -1664,6 +1689,8 @@ export async function runMcpInvocation(
           return result.text;
         },
       });
+      workforcePrepareReceipt = workforce.prepareCheckpointReceipt;
+      executionContext?.onWorkforcePrepareReceipt?.(workforcePrepareReceipt);
       emitWorkforceBenchmarkSelectionArtifacts(sink, workforceBenchmarkMode, workforce);
       tryRecordRunEvent({
         runId: req.runId ?? `task-force:${chat.id}`,
@@ -1736,7 +1763,16 @@ export async function runMcpInvocation(
       }
     } catch (error) {
       throwIfInvocationAborted(signal, locale);
-      sink({ kind: "error", error: invocationFailure(req, "workforce-execution-failed", error) });
+      const failureCode = workforceFailureCode(error);
+      sink({
+        kind: "error",
+        error: failureCode
+          ? {
+              code: failureCode,
+              message: error instanceof Error ? error.message : String(error),
+            }
+          : invocationFailure(req, "workforce-execution-failed", error),
+      });
     }
     return earlyResult();
   }
@@ -2282,7 +2318,7 @@ export async function runMcpInvocation(
 
   // Main-authored before model execution. The renderer/model never controls
   // Memory Ticket identity, so success/error/cancel handling converges.
-  const memoryTurnId = `chat:${chat.id}:run:${req.runId ?? randomUUID()}:node:root`;
+  const memoryTurnId = `chat:${chat.id}:run:${req.runId ?? randomUUID()}:node:${executionContext?.nodeId ?? "root"}`;
   let modelTurnStarted = false;
   try {
     const runtimeUserPrompt = explicitBorrowUserPreamble
@@ -2782,6 +2818,7 @@ export async function runMcpInvocation(
       tokens: result.tokens,
       stormbreakerContinueRequested,
       resultFolder: resolvedResultFolder,
+      workforcePrepareReceipt,
     };
   } catch (err) {
     if (modelTurnStarted) {

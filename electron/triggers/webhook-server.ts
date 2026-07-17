@@ -11,16 +11,15 @@
 //    TODO(P2+): 터널/릴레이 연동 — 공인 endpoint를 받아 이 로컬 포트로 포워딩하거나,
 //               Hub가 webhook을 대신 받아 데스크톱으로 push(백엔드 작업 필요).
 import http from "node:http";
+import { createHash, randomUUID } from "node:crypto";
 import type { Automation } from "../../shared/types";
 import { listEnabledByTrigger } from "../store/automations";
+import { enqueueTriggerEvent } from "../store/trigger-events";
 import { evaluateCondition } from "./condition";
+import { wakeTriggerOutbox } from "./outbox";
 
 let server: http.Server | null = null;
 let boundPort = 0;
-
-/** webhook 발사 시 호출할 실행 함수(트리거 매니저가 주입). */
-type RunFn = (automationId: string, ctx?: { output?: string }) => Promise<void>;
-let runFn: RunFn | null = null;
 
 /** token → enabled webhook 자동화 조회(요청마다 최신 상태 반영). */
 function findByToken(token: string): Automation | null {
@@ -33,7 +32,10 @@ function findByToken(token: string): Automation | null {
 }
 
 /** 요청 본문을 최대 크기까지 읽어 문자열로. 과도한 본문은 잘라 폭주 방지. */
-function readBody(req: http.IncomingMessage, maxBytes = 256 * 1024): Promise<string> {
+function readBody(
+  req: http.IncomingMessage,
+  maxBytes = 256 * 1024,
+): Promise<{ body: string; tooLarge: boolean }> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let total = 0;
@@ -41,17 +43,31 @@ function readBody(req: http.IncomingMessage, maxBytes = 256 * 1024): Promise<str
       total += c.length;
       if (total <= maxBytes) chunks.push(c);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", () => resolve(""));
+    req.on("end", () => resolve({ body: Buffer.concat(chunks).toString("utf8"), tooLarge: total > maxBytes }));
+    req.on("error", () => resolve({ body: "", tooLarge: false }));
   });
+}
+
+function firstHeader(req: http.IncomingMessage, name: string): string | null {
+  const value = req.headers[name];
+  const first = Array.isArray(value) ? value[0] : value;
+  return typeof first === "string" && first.trim() ? first.trim().slice(0, 512) : null;
+}
+
+/** Prefer sender delivery ids so a retry after a lost HTTP response is idempotent. */
+function webhookDedupeKey(req: http.IncomingMessage, token: string): string {
+  const senderId = firstHeader(req, "idempotency-key") ??
+    firstHeader(req, "x-github-delivery") ??
+    firstHeader(req, "x-agentlas-event-id");
+  if (!senderId) return `webhook:${randomUUID()}`;
+  return `webhook:${createHash("sha256").update(token).update("\0").update(senderId).digest("hex")}`;
 }
 
 /**
  * webhook 리스너 기동 — 이미 떠 있으면 재사용(포트 유지). 127.0.0.1의 임의 포트에 바인딩한다.
  * @returns 바인딩된 포트(0이면 실패).
  */
-export function startWebhookServer(run: RunFn): Promise<number> {
-  runFn = run;
+export function startWebhookServer(): Promise<number> {
   if (server && boundPort) return Promise.resolve(boundPort);
   return new Promise((resolve) => {
     const srv = http.createServer((req, res) => {
@@ -79,7 +95,11 @@ export function startWebhookServer(run: RunFn): Promise<number> {
         res.writeHead(404, { "content-type": "text/plain" }).end("not found");
         return;
       }
-      void readBody(req).then((body) => {
+      void readBody(req).then(({ body, tooLarge }) => {
+        if (tooLarge) {
+          res.writeHead(413, { "content-type": "application/json" }).end('{"ok":false,"error":"payload_too_large"}');
+          return;
+        }
         // onlyIf 게이트 1회 평가(설계 §3.4). body 전체를 {{body}}로 노출.
         const cond = automation.trigger && "onlyIf" in automation.trigger ? automation.trigger.onlyIf : undefined;
         const vars = { body, output: body };
@@ -87,12 +107,28 @@ export function startWebhookServer(run: RunFn): Promise<number> {
           res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true,"fired":false}');
           return;
         }
-        if (runFn) {
-          void runFn(automation.id, { output: body }).catch(() => {
-            /* 실행 오류는 스케줄러가 run_history에 기록 */
+        try {
+          const queued = enqueueTriggerEvent({
+            automationId: automation.id,
+            triggerKind: "webhook",
+            dedupeKey: webhookDedupeKey(req, token),
+            payload: {
+              output: body,
+              body,
+              contentType: firstHeader(req, "content-type") ?? "",
+            },
           });
+          wakeTriggerOutbox();
+          res.writeHead(202, { "content-type": "application/json" }).end(
+            JSON.stringify({ ok: true, fired: true, queued: true, duplicate: !queued.inserted }),
+          );
+        } catch (error) {
+          console.error("[triggers] webhook enqueue failed:", error);
+          // 503 asks a conforming sender to retry. Never return 2xx until the
+          // event and its payload are committed to the local outbox.
+          res.writeHead(503, { "content-type": "application/json", "retry-after": "5" })
+            .end('{"ok":false,"error":"enqueue_failed"}');
         }
-        res.writeHead(202, { "content-type": "application/json" }).end('{"ok":true,"fired":true}');
       });
     });
 
@@ -133,5 +169,4 @@ export function stopWebhookServer(): void {
     server = null;
     boundPort = 0;
   }
-  runFn = null;
 }

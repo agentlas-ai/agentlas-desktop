@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.8.55 — 2026-07-17
+
+### Added
+
+- A durable trigger outbox and graph reconciliation store preserve every
+  scheduled occurrence, chain event, node checkpoint, and external-effect
+  receipt across process restarts.
+- Signed packages carry a pinned standalone CPython 3.12 runtime on macOS,
+  Windows, and Linux. The release gate launches the packaged binary in an
+  isolated environment and verifies the exact Workforce MCP inventory and
+  protocol metadata before an installer can be published.
+
+### Changed
+
+- Hub Workforce preparation uses the exact Agentlas OS protocol, immutable
+  source commit, complete tool schemas, source scope, account identity, and
+  prepared-attempt receipt. Runtime or schema drift is a typed incompatibility,
+  never a hidden local or alternate-source fallback.
+- Automation outcomes distinguish completed, blocked, awaiting input, partial,
+  refused, and failed states. A non-successful run remains enabled and visible;
+  repeated errors no longer silently disable the schedule.
+
+### Fixed
+
+- A successful external action such as posting a comment is checkpointed before
+  the next node starts. If a later Hub call, verification step, app shutdown, or
+  network interruption fails, recovery skips the completed action and resumes
+  from the durable receipt instead of posting it again.
+- Trigger claims, stale-run recovery, and result commits use transactional
+  compare-and-swap state so two schedulers cannot both replay one occurrence.
+- Ambiguous external effects fail closed into a visible reconciliation state;
+  users can inspect and resolve the exact occurrence without losing the
+  automation or its selected session agent.
+
+Agentlas OS v1.1.50 is pinned at
+5fc22464c1db33dabc0d4de2170053d1584b5682. These source changes do not themselves publish a Git tag, installer, GitHub release, or update feed.
+
 ## 0.8.54 — 2026-07-17
 
 ### Changed

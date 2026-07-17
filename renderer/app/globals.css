@@ -2284,6 +2284,12 @@ button[data-toggle-state="off"] {
   border-color: color-mix(in oklch, var(--red-deep, #c0392b) 26%, var(--paper-edge));
 }
 
+.automation-run-row[data-status="partial"],
+.automation-run-row[data-status="blocked"],
+.automation-run-row[data-status="needs_input"] {
+  border-color: color-mix(in oklch, var(--amber-deep, #a15c00) 30%, var(--paper-edge));
+}
+
 .automation-run-row > div {
   display: flex;
   justify-content: space-between;
@@ -2310,6 +2316,204 @@ button[data-toggle-state="off"] {
 
 .automation-run-message {
   color: var(--red-deep, #c0392b);
+}
+
+.automation-reconcile-card,
+.automation-event-attention {
+  display: grid;
+  gap: 11px;
+  padding: 12px;
+  border: 1px solid color-mix(in oklch, var(--amber-deep, #a15c00) 38%, var(--paper-edge));
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--amber-deep, #a15c00) 5%, var(--paper));
+}
+
+.automation-reconcile-head,
+.automation-event-attention > div:first-child {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.automation-reconcile-head > div,
+.automation-event-attention > div:first-child {
+  min-width: 0;
+}
+
+.automation-reconcile-head span,
+.automation-event-attention span {
+  display: block;
+  color: var(--amber-deep, #8a5100);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+
+.automation-reconcile-head strong,
+.automation-event-attention strong {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.automation-reconcile-head code {
+  max-width: 44%;
+  overflow: hidden;
+  color: var(--muted-deep);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automation-reconcile-card > p,
+.automation-event-attention > p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.automation-reconcile-event-note {
+  padding: 8px 9px;
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--amber-deep, #a15c00) 8%, var(--paper));
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.automation-reconcile-node-list,
+.automation-event-attention-list {
+  display: grid;
+  gap: 8px;
+}
+
+.automation-reconcile-node {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 10px;
+  background: var(--paper);
+}
+
+.automation-reconcile-node legend {
+  width: 100%;
+  padding: 0;
+}
+
+.automation-reconcile-node legend strong,
+.automation-reconcile-node legend span {
+  display: block;
+}
+
+.automation-reconcile-node legend strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.automation-reconcile-node legend span {
+  margin-top: 2px;
+  color: var(--muted-deep);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.automation-reconcile-choices,
+.automation-event-attention-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.automation-reconcile-choices button,
+.automation-event-attention-actions button,
+.automation-reconcile-submit {
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 9px;
+  background: var(--paper-2);
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 720;
+  line-height: 1.25;
+}
+
+.automation-reconcile-choices button {
+  text-align: left;
+}
+
+.automation-reconcile-choices button[data-selected="true"] {
+  border-color: var(--accent);
+  background: var(--fill-1);
+  box-shadow: 0 0 0 1px var(--accent-soft);
+}
+
+.automation-reconcile-choices button small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted-deep);
+  font-size: 8.5px;
+  font-weight: 560;
+}
+
+.automation-reconcile-output {
+  display: grid;
+  gap: 5px;
+}
+
+.automation-reconcile-output > span {
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 680;
+}
+
+.automation-reconcile-output em {
+  margin-left: 6px;
+  color: var(--red-deep, #c0392b);
+  font-size: 9px;
+  font-style: normal;
+}
+
+.automation-reconcile-output textarea {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  padding: 8px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  background: var(--paper-2);
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.automation-reconcile-submit {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink, #fff);
+  text-align: center;
+}
+
+.automation-reconcile-choices button:disabled,
+.automation-event-attention-actions button:disabled,
+.automation-reconcile-submit:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+@media (max-width: 720px) {
+  .automation-reconcile-choices,
+  .automation-event-attention-actions {
+    grid-template-columns: 1fr;
+  }
 }
 
 .dashboard-activity-module {

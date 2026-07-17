@@ -119,9 +119,9 @@ extraResources:
       - "!**/.claude/settings.*.local.json"
       - "!**/*.log"
       - "!**/._*"
-  # 선택적 standalone Python 런타임. 기본은 빈 디렉터리(.gitkeep만) → 시스템 python 폴백.
-  # `npm run fetch:python` 으로 현재 플랫폼용 python-build-standalone 을 채우면, 그대로 동봉되어
-  # Python 미설치 머신에서도 엔진이 동작한다. 엔진 폴더가 아니라 데스크탑 리소스에 둔다(엔진 청결 유지).
+  # 필수 standalone Python 런타임. release/package entrypoint가 정확한 플랫폼·SHA-256 자산을
+  # 매 빌드 직전에 채우고 afterPack이 manifest/executable/tree/arch를 모두 검증한다.
+  # 시스템 Python 폴백은 배포 계약이 아니며 빈 디렉터리는 패키징 실패다.
   - from: build-resources/python-runtime
     to: python-runtime
     filter:

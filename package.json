@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.8.54",
+  "version": "0.8.55",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -21,13 +21,13 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 68,
-    "bundledRuntimeVersion": "1.1.48"
+    "targetSchemaVersion": 70,
+    "bundledRuntimeVersion": "1.1.50"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.1.48",
-    "commit": "98adf6d1bb0bdad5a919884c3916274d5a3e813f"
+    "ref": "v1.1.50",
+    "commit": "5fc22464c1db33dabc0d4de2170053d1584b5682"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
@@ -46,9 +46,9 @@
     "e2e:smoke": "node scripts/e2e-smoke.mjs",
     "package:mac": "npm run ensure:engine && bash scripts/package-mac.sh",
     "install:mac:stable": "bash scripts/install-stable-mac.sh",
-    "dist:mac:unsigned": "npm run ensure:engine && npm run build && electron-builder --mac --dir --publish never --config electron-builder.mac-local.yml && node scripts/verify-local-mac-candidate.mjs",
-    "dist:win": "npm run ensure:engine && npm run build && electron-builder --win",
-    "dist:linux": "npm run ensure:engine && npm run build && electron-builder --linux",
+    "dist:mac:unsigned": "npm run ensure:engine && npm run build && npm run fetch:python && electron-builder --mac --dir --publish never --config electron-builder.mac-local.yml && node scripts/verify-local-mac-candidate.mjs",
+    "dist:win": "npm run ensure:engine && npm run build && npm run fetch:python && electron-builder --win",
+    "dist:linux": "npm run ensure:engine && npm run build && npm run fetch:python && electron-builder --linux",
     "release:mac:verify": "node scripts/verify-mac-release.mjs --write-env",
     "release:mac:candidate": "node scripts/verify-mac-release.mjs --write-env --allow-unnotarized",
     "release:assets:verify": "node scripts/verify-release-assets.mjs",

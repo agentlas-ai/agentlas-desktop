@@ -696,7 +696,7 @@ export interface MobileBridgeAutomationDto {
   hubMode: string;
   runState: "unknown" | "idle" | "queued" | "running" | "completed" | "failed";
   /** Stable marker only; raw scheduler errors may contain local paths. */
-  lastError: "automation_failed" | null;
+  lastError: "automation_failed" | "automation_partial" | "automation_blocked" | "automation_needs_input" | null;
 }
 
 export interface MobileBridgeUsageWindowDto {

@@ -427,6 +427,8 @@ import type {
   AgentRuntimeOverrideSetInput,
   Automation,
   AutomationCreateInput,
+  AutomationGraphReconcileInput,
+  AutomationTriggerEventReconcileInput,
   CloudAgentBuiltPrivateSaveRequest,
   CloudAgentHubPublishRequest,
   CloudAgentPrivateSaveRequest,
@@ -463,6 +465,14 @@ import type {
   AutomationUpdatePatch,
   ScheduleSpec,
 } from "../shared/types";
+import {
+  listTriggerEventAttention,
+  reconcileParkedTriggerEvent,
+} from "./store/trigger-events";
+import {
+  getAutomationGraphReconciliation,
+  reconcileAutomationGraph,
+} from "./store/graph-reconciliation";
 
 // DESKTOP_MOBILE_BRIDGE: live invocation authority moved to invocation/service.ts.
 // Hephaestus 빌더(hep-build) 진행 중 실행 — 취소용 AbortController 레지스트리.
@@ -2592,6 +2602,32 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("automations:get", (_e, id: string) => getAutomation(id));
   ipcMain.handle("automations:listRuns", (_e, id: string, limit?: number) => listRunHistory(id, limit ?? 50));
+  ipcMain.handle("automations:listTriggerAttention", (_e, automationId: string) =>
+    listTriggerEventAttention(automationId),
+  );
+  ipcMain.handle(
+    "automations:reconcileTriggerEvent",
+    (_e, input: AutomationTriggerEventReconcileInput) => reconcileParkedTriggerEvent(input),
+  );
+  ipcMain.handle("automations:getGraphReconciliation", (_e, automationId: string) =>
+    getAutomationGraphReconciliation(automationId),
+  );
+  ipcMain.handle(
+    "automations:reconcileGraph",
+    async (_e, input: AutomationGraphReconcileInput) => {
+      const result = reconcileAutomationGraph(input);
+      if (result.resumeRequired && result.eventStatus === "pending") {
+        const { wakeTriggerOutbox } = await import("./triggers/outbox");
+        wakeTriggerOutbox();
+      } else if (result.resumeRequired && result.eventStatus === null) {
+        const { runAutomationNow } = await import("./automation-scheduler");
+        void runAutomationNow(result.automationId).catch((error) => {
+          console.error(`[automation] reconciled graph resume failed (${result.automationId}):`, error);
+        });
+      }
+      return result;
+    },
+  );
   ipcMain.handle("automations:updateGraph", (_e, id: string, graph: WorkflowGraph | null) =>
     updateAutomationGraph(id, graph),
   );

@@ -171,16 +171,20 @@ export function NodeConfigPanel({
           <Field label={t("auto.cfg.ref")}>
             <select
               value={s("ref")}
-              onChange={(e) =>
+              onChange={(e) => {
+                const selectedHub = hubAgents.find((agent) =>
+                  agent.slug === e.target.value && agent.callable === true && Boolean(agent.packageHash),
+                );
                 onPatch({
                   ref: e.target.value,
                   targetType: firmMatch(firms, e.target.value)
                     ? "firm"
-                    : hubMatch(hubAgents, e.target.value)
+                    : selectedHub
                       ? "hub"
                       : "agent",
-                })
-              }
+                  targetVersion: selectedHub?.packageHash ?? null,
+                });
+              }}
               style={inp}
             >
               <option value="">—</option>
@@ -199,7 +203,7 @@ export function NodeConfigPanel({
                 ))}
               </optgroup>
               <optgroup label="Hub">
-                {hubAgents.map((a) => (
+                {hubAgents.filter((a) => a.callable === true && Boolean(a.packageHash)).map((a) => (
                   <option key={a.slug} value={a.slug}>
                     {pickLocalized(a, locale).name} — Hub
                   </option>

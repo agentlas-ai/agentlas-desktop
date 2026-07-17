@@ -152,7 +152,7 @@ exercise_signed_app_python_boundary() {
     arm64) host_arch="arm64" ;;
     x86_64) host_arch="x86_64" ;;
     *)
-      echo "Unsupported macOS host architecture for signed-app Python smoke: $(uname -m)" >&2
+      echo "Unsupported macOS host architecture for packaged runtime verification: $(uname -m)" >&2
       return 1
       ;;
   esac
@@ -173,14 +173,14 @@ exercise_signed_app_python_boundary() {
 
   codesign --verify --deep --strict --verbose=2 "$signed_app"
   # Release signing/notarization credentials exist in this shell. The embedded
-  # Core must never inherit them merely because this smoke exercises Python.
+  # Core must never inherit them merely because verification exercises Python.
   env -i \
     PATH="$PATH" \
     HOME="$HOME" \
     TMPDIR="${TMPDIR:-/tmp}" \
     LANG="${LANG:-en_US.UTF-8}" \
     CI="${CI:-1}" \
-    ./node_modules/.bin/electron scripts/smoke-signed-mac-python-cache.cjs "--app=$signed_app"
+    ./node_modules/.bin/electron scripts/verify-packaged-workforce-runtime.cjs "--app=$signed_app"
   # The exercise imports the packaged bridge and real embedded Agentlas OS from
   # this exact signed app. Any new Resources/__pycache__ now invalidates the seal.
   codesign --verify --deep --strict --verbose=2 "$signed_app"
@@ -206,6 +206,10 @@ build_mac_arch() {
   if [[ "${AGENTLAS_PUBLIC_RELEASE:-0}" != "1" ]]; then
     builder_args+=(--config.mac.notarize=false)
   fi
+  # Each installer must carry a native, SHA-256-pinned Python. The two Mac
+  # architectures are built separately, so refresh the extraResource before
+  # each electron-builder invocation instead of relying on host Python/Rosetta.
+  PYBS_ARCH="$arch" npm run fetch:python
   COPYFILE_DISABLE=1 electron-builder \
     "${builder_args[@]}" \
     --publish never \
@@ -233,7 +237,7 @@ if [[ "${AGENTLAS_PUBLIC_RELEASE:-0}" == "1" ]]; then
     sign_dmg "$dmg_path"
     notarize_dmg "$dmg_path"
   done < <(find "$project_dir/release" -maxdepth 1 -type f -name 'Agentlas-*.dmg' | sort)
-  node scripts/verify-mac-release.mjs --write-env "--repo=${stable_repo}"
+  node scripts/verify-mac-release.mjs "--repo=${stable_repo}"
 else
   node scripts/verify-mac-release.mjs --write-env --allow-unnotarized "--repo=${stable_repo}"
 fi

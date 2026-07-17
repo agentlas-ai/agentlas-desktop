@@ -22,7 +22,11 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { assertStableReleaseIdentity, requiredReleaseAssetNames } from "./publish-mac-release.mjs";
+import {
+  assertStableReleaseIdentity,
+  publicReleaseAssetNames,
+  requiredReleaseAssetNames,
+} from "./publish-mac-release.mjs";
 
 const require = createRequire(import.meta.url);
 const yaml = require("js-yaml");
@@ -82,8 +86,9 @@ function requireText(file, expressions) {
   }
 }
 
-function requireVerificationEvidence(releaseDir, version, tag) {
+function requireVerificationEvidence(releaseDir, version, tag, requirePrivateWebEnv) {
   const verification = JSON.parse(readFileSync(join(releaseDir, "desktop-release-verification.json"), "utf8"));
+  assertPublicVerificationShape(verification, version, tag);
   if (
     verification?.ready !== true ||
     verification?.version !== version ||
@@ -93,6 +98,7 @@ function requireVerificationEvidence(releaseDir, version, tag) {
   ) {
     throw new Error("desktop-release-verification.json does not prove the exact ready macOS release.");
   }
+  if (!requirePrivateWebEnv) return;
   const env = readFileSync(join(releaseDir, "desktop-release.production.env"), "utf8");
   for (const expected of [
     `AGENTLAS_DESKTOP_VERSION=${version}`,
@@ -102,6 +108,56 @@ function requireVerificationEvidence(releaseDir, version, tag) {
   ]) {
     if (!env.split(/\r?\n/).includes(expected)) {
       throw new Error(`desktop-release.production.env is missing ${expected}`);
+    }
+  }
+}
+
+function exactKeys(value, keys) {
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
+}
+
+function isIsoTimestamp(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value) &&
+    Number.isFinite(Date.parse(value));
+}
+
+export function assertPublicVerificationShape(verification, version, tag) {
+  const rootKeys = [
+    "schemaVersion", "generatedAt", "sourceCommit", "repo", "tag",
+    "version", "ready", "allowUnnotarized", "artifacts",
+  ];
+  if (!exactKeys(verification, rootKeys) ||
+      verification.schemaVersion !== "agentlas.desktop-release-verification.v2" ||
+      !isIsoTimestamp(verification.generatedAt) ||
+      !/^[0-9a-f]{40}$/i.test(String(verification.sourceCommit || "")) ||
+      !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(verification.repo || "")) ||
+      verification.version !== version || verification.tag !== tag || tag !== `v${version}` ||
+      typeof verification.ready !== "boolean" || typeof verification.allowUnnotarized !== "boolean") {
+    throw new Error("desktop-release-verification.json is not the exact public v2 schema.");
+  }
+  const artifactKeys = [
+    "arch", "fileName", "sizeBytes", "sha256", "sha512", "notarized",
+    "gatekeeperAccepted", "innerApp", "url",
+  ];
+  const innerKeys = ["gatekeeperAccepted", "notarized"];
+  const artifacts = verification.artifacts;
+  if (!Array.isArray(artifacts) || artifacts.length !== 2) {
+    throw new Error("desktop-release-verification.json must contain exactly two public artifacts.");
+  }
+  const byArch = Object.fromEntries(artifacts.map((artifact) => [artifact?.arch, artifact]));
+  for (const arch of ["arm64", "x64"]) {
+    const artifact = byArch[arch];
+    const expectedFile = `Agentlas-${version}-${arch}.dmg`;
+    const expectedUrl = `https://github.com/${verification.repo}/releases/download/${tag}/${expectedFile}`;
+    if (!exactKeys(artifact, artifactKeys) || !exactKeys(artifact?.innerApp, innerKeys) ||
+        artifact.fileName !== expectedFile || artifact.url !== expectedUrl ||
+        !Number.isSafeInteger(artifact.sizeBytes) || artifact.sizeBytes <= 0 ||
+        !/^[0-9a-f]{64}$/.test(String(artifact.sha256 || "")) ||
+        !/^[A-Za-z0-9+/]{86}==$/.test(String(artifact.sha512 || "")) ||
+        typeof artifact.notarized !== "boolean" || typeof artifact.gatekeeperAccepted !== "boolean" ||
+        typeof artifact.innerApp.notarized !== "boolean" || typeof artifact.innerApp.gatekeeperAccepted !== "boolean") {
+      throw new Error(`desktop-release-verification.json public artifact shape failed for ${arch}.`);
     }
   }
 }
@@ -203,14 +259,21 @@ export function validateCrossPlatformUpdateFeed({ feedName, feed, version, compa
   };
 }
 
-export function validateLocalReleaseDirectory({ releaseDir, version, tag, sourceCommit }) {
+export function validateLocalReleaseDirectory({
+  releaseDir,
+  version,
+  tag,
+  sourceCommit,
+  assetNames,
+  requirePrivateWebEnv = false,
+}) {
   assertStableReleaseIdentity(version, tag);
   if (!/^[0-9a-f]{40}$/i.test(sourceCommit)) throw new Error("sourceCommit must be an exact Git commit SHA.");
   if (!existsSync(releaseDir) || !lstatSync(releaseDir).isDirectory()) {
     throw new Error(`Release directory does not exist: ${releaseDir}`);
   }
   assertNoAppleDouble(releaseDir);
-  const required = requiredReleaseAssetNames(version);
+  const required = assetNames ?? requiredReleaseAssetNames(version);
   const assets = required.map((name) => requireRegularFile(join(releaseDir, name)));
   const assetByName = new Map(assets.map((asset) => [asset.name, asset]));
   const compatibility = loadUpdateCompatibility(join(desktopRoot, "package.json"));
@@ -236,7 +299,7 @@ export function validateLocalReleaseDirectory({ releaseDir, version, tag, source
     new RegExp(`Agentlas-${version}-arm64\\.zip`),
     new RegExp(`Agentlas-${version}-x64\\.zip`),
   ]);
-  requireVerificationEvidence(releaseDir, version, tag);
+  requireVerificationEvidence(releaseDir, version, tag, requirePrivateWebEnv);
   const verification = JSON.parse(readFileSync(join(releaseDir, "desktop-release-verification.json"), "utf8"));
   if (verification.sourceCommit.toLowerCase() !== sourceCommit.toLowerCase()) {
     throw new Error("desktop-release-verification.json does not bind this exact Desktop source commit.");
@@ -282,6 +345,11 @@ export function assertRemoteReleaseHeader({ remote, manifest }) {
   );
   for (const asset of manifest.assets) {
     if (!remoteNames.has(asset.name)) throw new Error(`Staged public release is missing ${asset.name}`);
+  }
+  const expectedNames = new Set(manifest.assets.map((asset) => asset.name));
+  const unexpected = [...remoteNames].filter((name) => !expectedNames.has(name)).sort();
+  if (unexpected.length > 0) {
+    throw new Error(`Staged public release contains assets outside the explicit allowlist: ${unexpected.join(", ")}`);
   }
 }
 
@@ -341,7 +409,15 @@ async function main() {
   const tag = String(args.get("--tag") || `v${version}`);
   const releaseDir = resolve(desktopRoot, String(args.get("--release-dir") || "release"));
   const sourceCommit = String(args.get("--source-commit") || currentCommit());
-  const manifest = validateLocalReleaseDirectory({ releaseDir, version, tag, sourceCommit });
+  const publicAllowlist = args.get("--public-allowlist") === "true";
+  const manifest = validateLocalReleaseDirectory({
+    releaseDir,
+    version,
+    tag,
+    sourceCommit,
+    assetNames: publicAllowlist ? publicReleaseAssetNames(version) : undefined,
+    requirePrivateWebEnv: false,
+  });
   if (args.get("--verify-remote") === "true") {
     const repo = args.get("--repo") || process.env.AGENTLAS_DESKTOP_GITHUB_REPO;
     if (!repo) throw new Error("--verify-remote requires --repo or AGENTLAS_DESKTOP_GITHUB_REPO.");

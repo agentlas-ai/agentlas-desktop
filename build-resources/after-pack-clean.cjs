@@ -1,4 +1,4 @@
-const { access, lstat, readFile, readdir, rm } = require("node:fs/promises");
+const { access, lstat, readFile, readdir, readlink, realpath, rm } = require("node:fs/promises");
 const { createHash } = require("node:crypto");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
@@ -26,6 +26,30 @@ const MODEL2VEC_ORDERED_PARTS = [
   },
 ];
 const MODEL2VEC_ORDERED_PARTS_SHA256 = "4d0382e963f7fd099b4f7be64c004c5772c4962662ce9af2cf76b7a19a114e91";
+const PYTHON_RUNTIME_VERSION = "3.12.13";
+const PYTHON_RUNTIME_RELEASE = "20260510";
+const PYTHON_RUNTIME_ASSETS = {
+  "aarch64-apple-darwin": {
+    archiveName: "cpython-3.12.13+20260510-aarch64-apple-darwin-install_only.tar.gz",
+    archiveSha256: "5a30271f8d345a5b02b0c9e4e31e0f1e1455a8e4a04fba95cd9762472abc3b17",
+    executableRelativePath: "bin/python3",
+  },
+  "x86_64-apple-darwin": {
+    archiveName: "cpython-3.12.13+20260510-x86_64-apple-darwin-install_only.tar.gz",
+    archiveSha256: "cd369e76973c3179bc578230d8615ab621968ed758c5e32f636eecef4ad79894",
+    executableRelativePath: "bin/python3",
+  },
+  "x86_64-pc-windows-msvc": {
+    archiveName: "cpython-3.12.13+20260510-x86_64-pc-windows-msvc-install_only.tar.gz",
+    archiveSha256: "346dfbcb95171dd6d1275e6f8cb2e656cc15cb054c399ae54db57bfad4b1a60f",
+    executableRelativePath: "python.exe",
+  },
+  "x86_64-unknown-linux-gnu": {
+    archiveName: "cpython-3.12.13+20260510-x86_64-unknown-linux-gnu-install_only.tar.gz",
+    archiveSha256: "e7332b4b4bb85006deb48d251c786a04c14de104c9b3a006b33457a4a604b8bc",
+    executableRelativePath: "bin/python3",
+  },
+};
 
 function model2VecContentIdentity(files, names) {
   const digest = createHash("sha256");
@@ -212,6 +236,119 @@ async function findForbiddenRuntimePaths(root) {
   return found.sort();
 }
 
+async function pythonRuntimeTreeSha256(root) {
+  const records = [];
+  const walk = async (relative) => {
+    const absolute = path.join(root, ...relative.split("/").filter(Boolean));
+    const entries = await readdir(absolute, { withFileTypes: true });
+    for (const entry of entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
+      const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
+      if (childRelative === ".gitkeep" || childRelative === "agentlas-python-runtime.json") continue;
+      const childAbsolute = path.join(root, ...childRelative.split("/"));
+      const stat = await lstat(childAbsolute);
+      if (stat.isDirectory()) await walk(childRelative);
+      else if (stat.isSymbolicLink()) records.push({ kind: "L", relative: childRelative, target: await readlink(childAbsolute) });
+      else if (stat.isFile()) records.push({ kind: "F", relative: childRelative, size: stat.size, absolute: childAbsolute });
+      else throw new Error(`[afterPack] unsupported Python runtime entry: ${childRelative}`);
+    }
+  };
+  await walk("");
+  const digest = createHash("sha256");
+  for (const record of records.sort((left, right) => left.relative < right.relative ? -1 : left.relative > right.relative ? 1 : 0)) {
+    if (record.kind === "L") {
+      digest.update("L\0").update(record.relative).update("\0").update(record.target).update("\n");
+    } else {
+      const contentSha256 = createHash("sha256").update(await readFile(record.absolute)).digest("hex");
+      digest.update("F\0").update(record.relative).update("\0")
+        .update(String(record.size)).update("\0").update(contentSha256).update("\n");
+    }
+  }
+  return digest.digest("hex");
+}
+
+async function verifyBundledPython(projectDir, resourcesDir, platform, builderArch) {
+  const sourceRoot = path.join(projectDir, "build-resources", "python-runtime");
+  const packagedRoot = path.join(resourcesDir, "python-runtime");
+  const manifestName = "agentlas-python-runtime.json";
+  const [sourceManifestText, packagedManifestText] = await Promise.all([
+    readFile(path.join(sourceRoot, manifestName), "utf8"),
+    readFile(path.join(packagedRoot, manifestName), "utf8"),
+  ]);
+  if (sourceManifestText !== packagedManifestText) {
+    throw new Error("[afterPack] packaged Python runtime manifest drift");
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(sourceManifestText);
+  } catch (error) {
+    throw new Error("[afterPack] Python runtime manifest is invalid JSON", { cause: error });
+  }
+  const exactKeys = [
+    "schemaVersion", "pythonVersion", "releaseTag", "triple", "archiveName",
+    "archiveSha256", "executableRelativePath", "executableSha256", "runtimeTreeSha256",
+  ].sort();
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest) ||
+      Object.keys(manifest).sort().join("\0") !== exactKeys.join("\0")) {
+    throw new Error("[afterPack] Python runtime manifest shape is invalid");
+  }
+  const normalizedArch = builderArch === 3 || String(builderArch).toLowerCase() === "arm64"
+    ? "arm64"
+    : builderArch === 1 || String(builderArch).toLowerCase() === "x64"
+      ? "x64"
+      : null;
+  const expectedTriple = platform === "darwin"
+    ? normalizedArch === "arm64" ? "aarch64-apple-darwin" : normalizedArch === "x64" ? "x86_64-apple-darwin" : null
+    : platform === "win32"
+      ? normalizedArch === "x64" ? "x86_64-pc-windows-msvc" : null
+      : normalizedArch === "x64" ? "x86_64-unknown-linux-gnu" : null;
+  const locked = expectedTriple ? PYTHON_RUNTIME_ASSETS[expectedTriple] : null;
+  if (
+    manifest.schemaVersion !== "agentlas.python-runtime.v1" ||
+    manifest.pythonVersion !== PYTHON_RUNTIME_VERSION ||
+    manifest.releaseTag !== PYTHON_RUNTIME_RELEASE ||
+    manifest.triple !== expectedTriple || !locked ||
+    manifest.archiveName !== locked.archiveName ||
+    manifest.archiveSha256 !== locked.archiveSha256 ||
+    manifest.executableRelativePath !== locked.executableRelativePath ||
+    typeof manifest.executableSha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(manifest.executableSha256) ||
+    typeof manifest.runtimeTreeSha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(manifest.runtimeTreeSha256)
+  ) {
+    throw new Error("[afterPack] Python runtime does not match the pinned platform asset");
+  }
+  const sourceExecutable = path.join(sourceRoot, ...manifest.executableRelativePath.split("/"));
+  const packagedExecutable = path.join(packagedRoot, ...manifest.executableRelativePath.split("/"));
+  const [sourceReal, packagedReal] = await Promise.all([
+    realpath(sourceExecutable),
+    realpath(packagedExecutable),
+  ]);
+  const sourceBoundary = `${await realpath(sourceRoot)}${path.sep}`;
+  const packagedBoundary = `${await realpath(packagedRoot)}${path.sep}`;
+  if (!`${sourceReal}${path.sep}`.startsWith(sourceBoundary) ||
+      !`${packagedReal}${path.sep}`.startsWith(packagedBoundary)) {
+    throw new Error("[afterPack] Python executable symlink escapes its runtime root");
+  }
+  const [sourceBytes, packagedBytes] = await Promise.all([
+    readFile(sourceExecutable),
+    readFile(packagedExecutable),
+  ]);
+  const sourceSha256 = createHash("sha256").update(sourceBytes).digest("hex");
+  const packagedSha256 = createHash("sha256").update(packagedBytes).digest("hex");
+  if (sourceSha256 !== manifest.executableSha256 || packagedSha256 !== manifest.executableSha256) {
+    throw new Error("[afterPack] packaged Python executable checksum mismatch");
+  }
+  const [sourceTreeSha256, packagedTreeSha256] = await Promise.all([
+    pythonRuntimeTreeSha256(sourceRoot),
+    pythonRuntimeTreeSha256(packagedRoot),
+  ]);
+  if (sourceTreeSha256 !== manifest.runtimeTreeSha256 || packagedTreeSha256 !== manifest.runtimeTreeSha256) {
+    throw new Error("[afterPack] packaged Python runtime tree checksum mismatch");
+  }
+  await access(packagedExecutable);
+  return manifest;
+}
+
 async function verifyEmbeddedAgentlasOs(context) {
   const projectDir = context.packager?.projectDir || process.cwd();
   const productFilename = context.packager?.appInfo?.productFilename || "Agentlas";
@@ -276,9 +413,16 @@ async function verifyEmbeddedAgentlasOs(context) {
     const remainder = forbiddenPaths.length > 8 ? ` (+${forbiddenPaths.length - 8} more)` : "";
     throw new Error(`[afterPack] forbidden mutable Agentlas OS resources reached the package: ${preview}${remainder}`);
   }
+  const pythonRuntime = await verifyBundledPython(
+    projectDir,
+    resourcesDir,
+    context.electronPlatformName,
+    context.arch,
+  );
   console.log(
     `[afterPack] verified embedded Agentlas OS v${packagedManifest.version} `
-      + `with Model2Vec ${packagedModel.contentSha256} (${context.electronPlatformName})`,
+      + `with Model2Vec ${packagedModel.contentSha256} and Python ${pythonRuntime.pythonVersion} `
+      + `(${pythonRuntime.triple})`,
   );
 }
 

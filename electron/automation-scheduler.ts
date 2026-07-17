@@ -18,6 +18,8 @@ import {
   countConsecutiveFailures,
   isAutomationRunParentMissingError,
   pinAutomationRuntimeIfUnset,
+  getAutomationExecutionContractState,
+  pinLegacyAutomationHubVersions,
 } from "./store/automations";
 import { checkComputerUsePermissions } from "./mac-permissions";
 import { getOrCreateAutomationSession, appendChatMessage, listChatMessages } from "./store/chats";
@@ -28,7 +30,11 @@ import { runGraph } from "./workflow/run-graph";
 import { broadcastLiveRun } from "./workflow/live-run";
 import { isStormbreakerLongRunPrompt } from "./hephaestus/loop-engineering";
 import { emitAutomationDone } from "./triggers/chain-bus";
-import { classifyAutomationOutput, type AutomationResultStatus } from "./automation-result";
+import {
+  classifyAutomationFailure,
+  classifyAutomationOutput,
+  type AutomationResultStatus,
+} from "./automation-result";
 import {
   recordMcpInvocationEvent,
   tryRecordFailureEvent,
@@ -47,6 +53,13 @@ import {
 import { recoverStaleAutomationRuns } from "./store/db";
 import { detectRuntimes } from "./runtime/detect";
 import { pickActive } from "./runtime/selection";
+import { synthesizeLegacyGraph } from "./automation-emitter";
+import { getSource as getMarketSource } from "./marketplace";
+import type {
+  TriggerDeliveryHooks,
+  TriggerDispatchResult,
+  TriggerEventPayload,
+} from "./store/trigger-events";
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let startupTimer: ReturnType<typeof setTimeout> | null = null;
@@ -106,9 +119,27 @@ function notifyDone(a: Automation, status: AutomationResultStatus, error?: strin
     if (!Notification.isSupported()) return;
     const ok = status === "ok";
     const skipped = status === "skipped";
+    const partial = status === "partial";
+    const waiting = status === "blocked" || status === "needs_input";
     new Notification({
-      title: ok ? `Automation ran: ${a.name}` : skipped ? `Automation skipped: ${a.name}` : `Automation failed: ${a.name}`,
-      body: ok ? "Completed successfully." : error ? error.slice(0, 200) : skipped ? "Nothing was eligible to run." : "See run history.",
+      title: ok
+        ? `Automation ran: ${a.name}`
+        : skipped
+          ? `Automation skipped: ${a.name}`
+          : partial
+            ? `Automation partially completed: ${a.name}`
+            : waiting
+              ? `Automation needs attention: ${a.name}`
+              : `Automation failed: ${a.name}`,
+      body: ok
+        ? "Completed successfully."
+        : error
+          ? error.slice(0, 200)
+          : skipped
+            ? "Nothing was eligible to run."
+            : waiting
+              ? "It remains enabled and will retry on the next schedule."
+              : "See run history.",
       silent: true,
     }).show();
   } catch (err) {
@@ -136,11 +167,10 @@ function buildAutomationContinuityPrompt(chatId: string, prompt: string): string
 
 // ── 실패 처리 정책(2026-07-08) ─────────────────────────────────────────────
 // 문제: 자동화가 실패해도 챗창에 아무 피드백이 없고(프롬프트만 복붙처럼 쌓임),
-// 같은 프롬프트를 매 스케줄마다 무한 재실행했다(시스템 원인이면 전부 실패).
+// 같은 시스템 원인이면 매 스케줄마다 실패 원인을 알 수 없었다.
 // 정책: 실패 시 (1) Runtime Doctor가 아는 시스템 원인은 즉시 수리, (2) 실패 원인을
-// 자동화 챗에 system 메시지로 표출, (3) 수리 못 했고 연속 실패가 임계에 닿으면
-// 자동 일시정지, (4) 수리 못 한 반복 실패는 System Optimizer(LLM) 원샷 진단 발사.
-const FAILURE_PAUSE_THRESHOLD = 3;
+// 자동화 챗에 system 메시지로 표출, (3) 자동화 enabled 상태는 유지,
+// (4) 수리 못 한 반복 실패는 System Optimizer(LLM) 원샷 진단 발사.
 const OPTIMIZER_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 자동화당 최대 6시간에 1회
 // 무활동 워치독 — 러너 이벤트가 이 시간 이상 끊기면 행(hang)으로 판정하고 자동 중단한다.
 // 프로세스가 안 죽는 행은 실패 이벤트가 영영 안 와서 닥터/피드백 경로에 도달하지 못한다
@@ -238,7 +268,7 @@ function schedulerExecutionPermission(a: Automation): "read" | "write" {
   return a.executionPermission === "read" ? "read" : "write";
 }
 
-/** 실패 원인을 챗에 표출하고, 아는 원인은 수리하고, 반복 실패는 멈춘다. best-effort. */
+/** 실패 원인을 표출하고 아는 원인은 수리한다. 반복 실패도 자동화를 끄지는 않는다. */
 function handleAutomationFailure(a: Automation, error: string): void {
   let doctor: DoctorReport | null = null;
   try {
@@ -257,19 +287,10 @@ function handleAutomationFailure(a: Automation, error: string): void {
   if (doctor?.summary) lines.push(`🩺 Runtime Doctor: ${doctor.summary}`);
   for (const act of doctor?.actions ?? []) lines.push(`🔧 ${act.title} — ${act.detail}`);
 
-  let paused = false;
   if (doctor?.repaired) {
     lines.push("✅ 시스템 원인을 자동 수리했습니다. 다음 예약에 자동으로 재시도합니다.");
-  } else if (streak >= FAILURE_PAUSE_THRESHOLD) {
-    try {
-      toggleAutomation(a.id, false);
-      paused = true;
-      lines.push(
-        `⏸️ ${streak}회 연속 실패로 자동 일시정지했습니다(같은 프롬프트 무한 재실행 방지). 원인 해결 후 자동화 화면에서 다시 켜세요.`,
-      );
-    } catch (err) {
-      console.error("[automation] auto-pause failed:", err);
-    }
+  } else {
+    lines.push("🔁 자동화는 켜진 상태로 유지됩니다. 다음 예약에서 다시 시도합니다.");
   }
 
   try {
@@ -306,7 +327,7 @@ function handleAutomationFailure(a: Automation, error: string): void {
         runId,
         kind: "system_optimizer_started",
         automationId: a.id,
-        payload: { streak, paused, doctorKind: doctor?.kind ?? "unknown" },
+        payload: { streak, paused: false, doctorKind: doctor?.kind ?? "unknown" },
       });
       let removeAbortListener = () => {};
       const abortGate = new Promise<never>((_resolve, reject) => {
@@ -361,33 +382,66 @@ function handleAutomationFailure(a: Automation, error: string): void {
     console.error("[automation] failure feedback failed:", err);
   }
 
-  if (paused) {
-    try {
-      if (app.isReady() && Notification.isSupported()) {
-        new Notification({
-          title: `Automation paused: ${a.name}`,
-          body: `${streak}회 연속 실패로 자동 일시정지했습니다. 챗의 진단 메시지를 확인하세요.`,
-          silent: true,
-        }).show();
-      }
-    } catch {
-      /* best-effort */
-    }
+}
+
+function recordAutomationAttention(
+  a: Automation,
+  status: Extract<AutomationResultStatus, "partial" | "blocked" | "needs_input">,
+  detail: string,
+): void {
+  try {
+    const persisted = getAutomation(a.id);
+    const chat = getOrCreateAutomationSession(automationSessionInput(a));
+    const headline = status === "partial"
+      ? "⚠️ Automation partially completed"
+      : status === "needs_input"
+        ? "👤 Automation needs user input"
+        : "⛔ Automation is blocked";
+    appendChatMessage(
+      chat.id,
+      "system",
+      `${headline}: ${detail.slice(0, 500)}\n${persisted?.enabled
+        ? `🔁 오류 때문에 자동화를 끄지 않았습니다.${persisted.nextRunAt ? ` 다음 재시도: ${persisted.nextRunAt}` : ""}`
+        : "⏹️ 명시한 종료 시각 또는 완료 횟수 정책에 따라 예약이 종료됐습니다."}`,
+    );
+  } catch (error) {
+    console.error("[automation] attention message failed:", error);
   }
 }
 
 async function runOne(
   a: Automation,
-  opts?: { claim?: boolean; advanceSchedule?: boolean; allowDisabledLease?: boolean },
-): Promise<void> {
-  if (installQuiescing) return;
-  if (running.has(a.id)) return; // 직전 실행이 아직 진행 중이면 건너뜀
+  opts?: {
+    claim?: boolean;
+    advanceSchedule?: boolean;
+    allowDisabledLease?: boolean;
+    triggerDelivery?: TriggerDeliveryHooks;
+    triggerContext?: TriggerEventPayload;
+  },
+): Promise<TriggerDispatchResult> {
+  if (installQuiescing) return { accepted: false };
+  if (running.has(a.id)) return { accepted: false }; // 직전 실행이 아직 진행 중이면 건너뜀
   // 모든 실행 경로가 같은 크로스프로세스 리스를 사용한다. GUI의 Run now나 이벤트 트리거도
   // headless due 실행과 겹치면 외부 게시/결제 같은 부작용을 두 번 낼 수 있으므로 건너뛴다.
   if (
     opts?.claim &&
     !claimAutomationRun(a.id, LEASE_OWNER, new Date(), { allowDisabled: opts.allowDisabledLease === true })
-  ) return;
+  ) return { accepted: false };
+  try {
+    opts?.triggerDelivery?.onAccepted();
+  } catch (error) {
+    // The outbox receipt is the authority for an event-trigger occurrence. If
+    // it cannot be advanced while we own the automation lease, do not execute.
+    if (opts?.claim) {
+      try {
+        releaseAutomationRun(a.id, LEASE_OWNER);
+      } catch {
+        /* owner CAS protects a peer lease */
+      }
+    }
+    console.error("[automation] trigger delivery acceptance failed:", error);
+    return { accepted: false };
+  }
   running.add(a.id);
   let runStatus: AutomationResultStatus = "ok";
   let runError: string | null = null;
@@ -428,7 +482,19 @@ async function runOne(
       }, AUTOMATION_LEASE_HEARTBEAT_MS);
       leaseHeartbeatTimer.unref?.();
     }
-    if (!a.runtimeSelection) {
+    const storedContract = getAutomationExecutionContractState(a.id);
+    if (!storedContract) throw new Error(`Automation not found: ${a.id}`);
+    if (storedContract.runtimeSelection === "invalid") {
+      throw new Error(
+        "pinned_runtime_contract_invalid: the saved runtime pin is malformed and requires an explicit runtime selection.",
+      );
+    }
+    if (storedContract.hubMode === "invalid") {
+      throw new Error(
+        "automation_hub_mode_contract_invalid: the saved Hub routing policy is unknown and requires an explicit selection.",
+      );
+    }
+    if (storedContract.runtimeSelection === "missing") {
       const activeRuntime = pickActive(await detectRuntimes());
       if (!activeRuntime) throw new Error("No runtime is available to pin for this automation.");
       a = pinAutomationRuntimeIfUnset(a.id, {
@@ -445,21 +511,75 @@ async function runOne(
         automationId: a.id,
         payload: { kind: a.runtimeSelection?.kind, model: a.runtimeSelection?.model ?? null },
       });
+      if (!a.runtimeSelection) {
+        throw new Error(
+          "pinned_runtime_contract_invalid: the runtime pin compare-and-set did not produce a valid exact selection.",
+        );
+      }
+    }
+    const missingHubSlugs = new Set<string>();
+    if (a.targetType === "hub" && !a.targetVersion) missingHubSlugs.add(a.targetId);
+    for (const node of a.graph?.nodes ?? []) {
+      if (
+        node.type === "agent" && node.config?.targetType === "hub" &&
+        typeof node.config.ref === "string" && node.config.ref.trim() &&
+        typeof node.config.targetVersion !== "string"
+      ) {
+        missingHubSlugs.add(node.config.ref.trim());
+      }
+    }
+    if (missingHubSlugs.size > 0) {
+      const exactHashes: Record<string, string> = {};
+      for (const slug of [...missingHubSlugs].sort()) {
+        const listing = await getMarketSource().getListingBySlug(slug);
+        const packageHash = listing?.packageHash ?? listing?.cloudPackage?.packageHash;
+        if (
+          !listing || listing.slug !== slug || listing.callable !== true ||
+          typeof packageHash !== "string" || !/^[0-9a-f]{64}$/.test(packageHash)
+        ) {
+          throw new Error(`automation_hub_version_pin_unavailable: exact callable release unavailable for ${slug}`);
+        }
+        exactHashes[slug] = packageHash;
+      }
+      const migrated = pinLegacyAutomationHubVersions(a.id, exactHashes);
+      a = migrated.automation;
+      if (migrated.pinned.length > 0) {
+        tryRecordRunEvent({
+          runId: currentRunId ?? `automation-hub-pin-${a.id}-${Date.now()}`,
+          kind: "automation_hub_version_pinned",
+          automationId: a.id,
+          payload: { pins: migrated.pinned },
+        });
+      }
+    }
+
+    // Legacy rows must cross the same durable occurrence/checkpoint boundary as
+    // visual graphs. A one-node prompt can still post externally and then fail;
+    // running it through the old direct path would replay the whole prompt on
+    // the next schedule with no ambiguity guard.
+    if (!a.graph || a.graph.nodes.length === 0) {
+      a = { ...a, graph: synthesizeLegacyGraph(a) };
     }
     // 컴퓨터유즈 자동화 preflight — macOS 접근성 권한이 없으면 실행하지 않고 '대기'로 스킵한다.
     // (예전엔 권한 없이 실행돼 브라우저 자동화가 부분 실행 후 먹통/혼란. 이제 빠르게 감지 →
     //  다음 예약에 자동 재시도, false-fail도 false-success도 아님.)
     const cuaPerm = a.toolMode === "computer-use" ? checkComputerUsePermissions() : null;
     if (cuaPerm && !cuaPerm.ok) {
-      runStatus = "skipped";
+      runStatus = "needs_input";
       runError =
         `macOS ${cuaPerm.missing.join(" · ")} 권한이 꺼져 있어 컴퓨터유즈 자동화를 건너뜁니다(먹통 방지). ` +
         `시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에서 Agentlas를 켜세요. 켜면 다음 예약에 자동 재시도합니다.`;
       console.warn(`[automation] CUA preflight skip (${a.name}): missing ${cuaPerm.missing.join(", ")}`);
+    } else if (a.targetType === "hub" && !a.targetVersion) {
+      runStatus = "needs_input";
+      runError =
+        "[hub_version_pin_required] automation_hub_version_pin_required: " +
+        "정확한 Hub 패키지 버전을 선택해야 자동화를 실행할 수 있습니다. 자동화 편집 화면에서 Hub 대상을 다시 선택하세요.";
     } else if (a.graph && a.graph.nodes.length > 0) {
       // 그래프 경로 — 위상 러너로 실행. per-node 상태를 라이브 채널로 방송해 캔버스가 애니메이션.
       const runId = `run-${a.id}-${Date.now()}`;
       currentRunId = runId;
+      opts?.triggerDelivery?.onRunBound(runId);
       // 무활동 워치독 — 그래프 경로도 이벤트가 끊기면 행으로 판정한다(노드 자체 타임아웃
       // 1800s보다 훨씬 먼저 사용자에게 실패 피드백이 가도록).
       const graphWatchdog = createAutomationWatchdogState();
@@ -492,8 +612,10 @@ async function runOne(
         const graphRun = Promise.resolve().then(() =>
           runGraph(a, a.graph!, {
             signal: controller.signal,
-            runId,
-            sink: (ev) => {
+          runId,
+          occurrenceId: opts?.triggerDelivery?.occurrenceId,
+          initialVars: opts?.triggerContext,
+          sink: (ev) => {
               // A cancellation-ignoring runtime may emit after the scheduler's finite abort
               // boundary. Do not revive watchdog/live state after this run has been finalized.
               if (!acceptGraphEvents) return;
@@ -514,17 +636,26 @@ async function runOne(
         acceptGraphEvents = false;
         clearInterval(graphStallTimer);
       }
-      runStatus = result.ok && !graphStall ? "ok" : "error";
-      runError = graphStall
+      const graphError = graphStall
         ? automationWatchdogError(graphStall)
         : result.error ?? null;
+      runStatus = result.ok && !graphStall ? "ok" : "error";
+      runError = graphError;
       // 그래프 outputs 중 마지막 노드 출력을 체인 페이로드로 노출.
       const outVals = Object.values(result.outputs ?? {});
       output = outVals.length ? outVals[outVals.length - 1] : undefined;
       if (runStatus === "ok") {
         const classified = classifyAutomationOutput(output);
-        runStatus = classified.status;
-        runError = classified.reason;
+        runStatus = classified.outcome;
+        runError = classified.reasonCode && classified.reason
+          ? `[${classified.reasonCode}] ${classified.reason}`
+          : classified.reason;
+      } else {
+        const classified = classifyAutomationFailure(graphError);
+        runStatus = outVals.length > 0 ? "partial" : classified.status;
+        runError = classified.reasonCode
+          ? `[${classified.reasonCode}] ${classified.reason ?? graphError ?? "automation failed"}`
+          : classified.reason ?? graphError;
       }
     } else {
       // 레거시 단일 프롬프트 경로(완전 backward-compat).
@@ -583,8 +714,7 @@ async function runOne(
           userPrompt: buildAutomationContinuityPrompt(chat.id, a.promptTemplate),
           permissions: schedulerExecutionPermission(a),
           borrowAgents: a.targetType === "hub" ? [a.targetId] : undefined,
-          // 핀이 있으면 그 버전으로만 실행한다. 없으면 기존대로 latest — 즉 작성자가 재게시하면
-          // 이 자동화의 지시문이 예고 없이 바뀐다. 핀은 그 drift를 명시적 실패로 바꾼다.
+          // Hub 자동화는 위 preflight에서 exact package pin을 강제한다.
           borrowVersions:
             a.targetType === "hub" && a.targetVersion ? { [a.targetId]: a.targetVersion } : undefined,
           runtimeSelection: a.runtimeSelection,
@@ -648,11 +778,14 @@ async function runOne(
         if (runnerError) throw new Error(runnerError);
         if (!output?.trim()) throw new Error("Automation finished without an assistant result");
         const classified = classifyAutomationOutput(output);
-        runStatus = classified.status;
-        runError = classified.reason;
-        emitLegacyState("n1", runStatus === "error" ? "failed" : runStatus === "skipped" ? "skipped" : "done");
+        runStatus = classified.outcome;
+        runError = classified.reasonCode && classified.reason
+          ? `[${classified.reasonCode}] ${classified.reason}`
+          : classified.reason;
+        const legacyNodeFailed = runStatus === "error" || runStatus === "blocked" || runStatus === "needs_input";
+        emitLegacyState("n1", legacyNodeFailed ? "failed" : runStatus === "skipped" ? "skipped" : "done");
         try {
-          finishGraphRun(runId, runStatus === "error" ? "error" : "ok");
+          finishGraphRun(runId, legacyNodeFailed ? "error" : "ok");
         } catch {
           /* ignore */
         }
@@ -680,15 +813,19 @@ async function runOne(
       }
     }
   } catch (err) {
-    runStatus = "error";
-    runError = err instanceof Error ? err.message : String(err);
+    const rawError = err instanceof Error ? err.message : String(err);
+    const classified = classifyAutomationFailure(rawError);
+    runStatus = classified.status;
+    runError = classified.reasonCode
+      ? `[${classified.reasonCode}] ${classified.reason ?? rawError}`
+      : classified.reason ?? rawError;
     parentMissing = isAutomationRunParentMissingError(err);
     if (!parentMissing) {
       tryRecordFailureEvent({
         runId: currentRunId,
         source: "automation",
         automationId: a.id,
-        errorCode: "automation_failed",
+        errorCode: `automation_${runStatus}`,
         errorMessage: runError,
       });
       console.error(`[automation] run failed (${a.name}):`, err);
@@ -703,23 +840,53 @@ async function runOne(
     // (예약 슬롯을 잡아먹거나 이벤트 자동화를 시계 스케줄로 승격하는 버그 방지).
     // run_history 기록·run_count·종료 정책은 어느 경우든 동일하게 적용한다.
     if (!leaseOwnershipLost) {
-      try {
-        markAutomationRun(a.id, new Date(), {
-          status: runStatus,
-          error: runError,
-          advanceSchedule: opts?.advanceSchedule ?? true,
-        });
-      } catch (err) {
-        console.error("[automation] markAutomationRun failed:", err);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          markAutomationRun(a.id, new Date(), {
+            status: runStatus,
+            error: runError,
+            advanceSchedule: opts?.advanceSchedule ?? true,
+            executionConsumed: runStatus === "ok" || runStatus === "skipped",
+            sourceRunId: currentRunId,
+            output,
+          });
+          break;
+        } catch (err) {
+          const busy = err && typeof err === "object" && "code" in err &&
+            (err.code === "SQLITE_BUSY" || err.code === "SQLITE_LOCKED");
+          if (busy && attempt < 2) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 100 * 2 ** attempt));
+            continue;
+          }
+          console.error("[automation] markAutomationRun failed:", err);
+          break;
+        }
       }
     }
-    // 실패 피드백·수리·자동 일시정지 — run_history 기록(markAutomationRun) 이후에 호출해야
+    // 실패 피드백·수리 — run_history 기록(markAutomationRun) 이후에 호출해야
     // countConsecutiveFailures가 이번 실패를 포함한다.
     if (runStatus === "error" && !parentMissing && !leaseOwnershipLost) {
       try {
         handleAutomationFailure(a, runError ?? "unknown error");
       } catch (err) {
         console.error("[automation] handleAutomationFailure failed:", err);
+      }
+    } else if (
+      (runStatus === "partial" || runStatus === "blocked" || runStatus === "needs_input") &&
+      !parentMissing &&
+      !leaseOwnershipLost
+    ) {
+      recordAutomationAttention(a, runStatus, runError ?? runStatus);
+    }
+    if (!parentMissing && !leaseOwnershipLost && opts?.triggerDelivery) {
+      try {
+        // This scheduler-level result can differ from automation_runs.status:
+        // a graph may finish mechanically but classify as partial/blocked.
+        opts.triggerDelivery.onCompleted(runStatus, runError);
+      } catch (error) {
+        // The outbox will retry sealing the receipt after runOne returns. Until
+        // then a graph-only `ok` is treated as ambiguous and never replayed.
+        console.error("[automation] trigger delivery completion receipt failed:", error);
       }
     }
     // 예약 경로에서 이 프로세스가 실제로 획득한 리스만 해제한다. Run now/이벤트 경로는
@@ -742,15 +909,23 @@ async function runOne(
       });
     }
     running.delete(a.id);
-    // 체인 트리거용 완료 이벤트 방출(설계 §3.4 Tier 0 #2). 인프로세스 EventEmitter.
+    // Durable chain fan-out은 markAutomationRun transaction에서 이미 끝났다.
+    // 이 신호는 GUI outbox를 즉시 깨우는 저지연 가속일 뿐이다.
     if (!parentMissing && !leaseOwnershipLost) {
       try {
-        emitAutomationDone({ automationId: a.id, ok: runStatus === "ok", output, at: new Date().toISOString() });
+        emitAutomationDone({
+          automationId: a.id,
+          ok: runStatus === "ok",
+          runId: currentRunId ?? undefined,
+          output,
+          at: new Date().toISOString(),
+        });
       } catch {
         /* best-effort */
       }
     }
   }
+  return { accepted: true, status: runStatus, error: runError, output };
 }
 
 export async function runDueAutomationsNow(now: Date = new Date()): Promise<void> {
@@ -763,7 +938,9 @@ export async function runDueAutomationsNow(now: Date = new Date()): Promise<void
     return;
   }
   // due-폴링 경로는 크로스프로세스 리스로 클레임(headless vs GUI 이중 실행 방지).
-  await runWithConcurrency(due, MAX_CONCURRENT_AUTOMATIONS, (a) => runOne(a, { claim: true }));
+  await runWithConcurrency(due, MAX_CONCURRENT_AUTOMATIONS, async (a) => {
+    await runOne(a, { claim: true });
+  });
 }
 
 /** "Run now" — 스케줄 무관하게 지정 자동화를 즉시 1회 실행(enabled 여부 무시). */
@@ -780,11 +957,15 @@ export async function runAutomationNow(id: string): Promise<void> {
  * 이벤트 트리거(fs/chain)가 발사할 때 호출 — 지정 자동화를 즉시 1회 실행한다.
  * 트리거 매니저에 주입되는 RunFn. due/Run now와 같은 리스를 획득해 중복 실행을 막는다.
  */
-export async function runAutomationFromTrigger(id: string): Promise<void> {
-  if (installQuiescing) return;
+export async function runAutomationFromTrigger(
+  id: string,
+  ctx: TriggerEventPayload = {},
+  triggerDelivery?: TriggerDeliveryHooks,
+): Promise<TriggerDispatchResult> {
+  if (installQuiescing) return { accepted: false };
   const a = getAutomation(id);
-  if (!a) return;
-  await runOne(a, { claim: true, advanceSchedule: false });
+  if (!a) return { accepted: false };
+  return runOne(a, { claim: true, advanceSchedule: false, triggerDelivery, triggerContext: ctx });
 }
 
 function tick(): void {

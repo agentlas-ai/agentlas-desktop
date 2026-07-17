@@ -47,21 +47,8 @@ jobs:
           GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
         run: |
           mkdir -p release
-          gh release download "$RESOLVED_TAG" --repo agentlas-ai/agentlas-desktop-releases --pattern desktop-release.production.env --dir release --clobber
-          node - <<'NODE'
-          const fs = require('node:fs');
-          const values = Object.fromEntries(fs.readFileSync('release/desktop-release.production.env', 'utf8')
-            .split(/\r?\n/).filter(Boolean).map((line) => {
-              const index = line.indexOf('=');
-              return [line.slice(0, index), line.slice(index + 1)];
-            }));
-          if (values.AGENTLAS_DESKTOP_VERSION !== process.env.RESOLVED_VERSION ||
-              values.AGENTLAS_DESKTOP_RELEASE_TAG !== process.env.RESOLVED_TAG ||
-              values.AGENTLAS_DESKTOP_RELEASE_VERIFIED !== 'true' ||
-              values.AGENTLAS_DESKTOP_RELEASE_NOTARIZED !== 'true') {
-            throw new Error('Published production metadata does not match the requested verified release.');
-          }
-          NODE
+          gh release download "$RESOLVED_TAG" --repo agentlas-ai/agentlas-desktop-releases --pattern desktop-release-verification.json --dir release --clobber
+          npm run release:web-env -- --verification-file=release/desktop-release-verification.json --expected-version="$RESOLVED_VERSION" --expected-tag="$RESOLVED_TAG"
 
       - name: Install pinned Railway CLI
         run: npm install -g @railway/cli@5.26.0
@@ -74,4 +61,4 @@ jobs:
           test -n "$RAILWAY_TOKEN"
           test -n "$RAILWAY_PROJECT_ID"
           npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web
-          npm run release:web-env -- --apply --restart --environment=production --service=agentlas-web --verify-url=https://agentlas.cloud/api/desktop/latest
+          npm run release:web-env -- --apply --restart --verification-file=release/desktop-release-verification.json --expected-version="$RESOLVED_VERSION" --expected-tag="$RESOLVED_TAG" --environment=production --service=agentlas-web --verify-url=https://agentlas.cloud/api/desktop/latest

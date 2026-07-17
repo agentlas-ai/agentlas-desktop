@@ -310,6 +310,7 @@ export function synthesizeLegacyGraph(automation: {
   promptTemplate: string;
   targetType: "agent" | "firm" | "hub";
   targetId: string;
+  targetVersion?: string;
 }): WorkflowGraph {
   return {
     version: 1,
@@ -329,6 +330,9 @@ export function synthesizeLegacyGraph(automation: {
           ref: automation.targetId,
           targetType: automation.targetType,
           prompt: automation.promptTemplate,
+          ...(automation.targetType === "hub" && automation.targetVersion
+            ? { targetVersion: automation.targetVersion }
+            : {}),
         },
         label: automation.targetType === "firm" ? "Firm" : automation.targetType === "hub" ? "Hub Agent" : "Agent",
       },

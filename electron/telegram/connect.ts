@@ -189,7 +189,10 @@ const TELEGRAM_COPY = {
     "automation.error_label": "오류: {error}",
     "automation.summary_label": "요약: {summary}",
     "automation.status_completed": "완료",
+    "automation.status_partial": "부분 완료",
     "automation.status_skipped": "건너뜀",
+    "automation.status_blocked": "차단됨 (자동화 유지)",
+    "automation.status_needs_input": "입력 필요 (자동화 유지)",
     "automation.status_failed": "실패",
     "botfather.connect_title": "Agentlas Telegram 연결",
     "botfather.login_timeout": "Telegram 로그인이 끝나지 않았습니다. 열린 창에서 로그인한 뒤 다시 시도해주세요.",
@@ -240,7 +243,10 @@ const TELEGRAM_COPY = {
     "automation.error_label": "Error: {error}",
     "automation.summary_label": "Summary: {summary}",
     "automation.status_completed": "Completed",
+    "automation.status_partial": "Partially completed",
     "automation.status_skipped": "Skipped",
+    "automation.status_blocked": "Blocked (automation remains enabled)",
+    "automation.status_needs_input": "Needs input (automation remains enabled)",
     "automation.status_failed": "Failed",
     "botfather.connect_title": "Agentlas Telegram Connect",
     "botfather.login_timeout": "Telegram login did not finish. Log in in the opened window, then try again.",
@@ -1705,7 +1711,7 @@ async function sendLongMessage(token: string, chatId: string, text: string): Pro
 
 export async function notifyTelegramAutomationDone(
   automation: Automation,
-  status: "ok" | "error" | "skipped",
+  status: "ok" | "partial" | "error" | "skipped" | "blocked" | "needs_input",
   detail?: { error?: string | null; output?: string; at?: string },
 ): Promise<void> {
   const rows = getDb()
@@ -1740,7 +1746,7 @@ export async function notifyTelegramAutomationDone(
 
 function formatAutomationReport(
   automation: Automation,
-  status: "ok" | "error" | "skipped",
+  status: "ok" | "partial" | "error" | "skipped" | "blocked" | "needs_input",
   detail?: { error?: string | null; output?: string; at?: string },
 ): string {
   const ko = currentUiLocale() === "ko";
@@ -1749,8 +1755,14 @@ function formatAutomationReport(
   const title = tg("automation.report_title", { name: automation.name });
   const statusText = status === "ok"
     ? tg("automation.status_completed")
+    : status === "partial"
+      ? tg("automation.status_partial")
     : status === "skipped"
       ? tg("automation.status_skipped")
+      : status === "blocked"
+        ? tg("automation.status_blocked")
+        : status === "needs_input"
+          ? tg("automation.status_needs_input")
       : tg("automation.status_failed");
   const lines = [
     title,

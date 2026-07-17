@@ -52,8 +52,8 @@ jobs:
       AGENTLAS_PUBLIC_RELEASE: "1"
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.48
-      HEPHAESTUS_COMMIT: 98adf6d1bb0bdad5a919884c3916274d5a3e813f
+      HEPHAESTUS_REF: v1.1.50
+      HEPHAESTUS_COMMIT: 5fc22464c1db33dabc0d4de2170053d1584b5682
 
     steps:
       - uses: actions/checkout@v4
@@ -347,8 +347,8 @@ jobs:
       AGENTLAS_PUBLIC_RELEASE: "1"
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.48
-      HEPHAESTUS_COMMIT: 98adf6d1bb0bdad5a919884c3916274d5a3e813f
+      HEPHAESTUS_REF: v1.1.50
+      HEPHAESTUS_COMMIT: 5fc22464c1db33dabc0d4de2170053d1584b5682
 
     steps:
       - uses: actions/checkout@v4
@@ -485,7 +485,6 @@ jobs:
             release/Agentlas-*.zip
             release/Agentlas-*.zip.blockmap
             release/desktop-release-verification.json
-            release/desktop-release.production.env
             release/latest-mac.yml
             release/update-lineage-verification.json
           if-no-files-found: error
@@ -502,8 +501,8 @@ jobs:
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.48
-      HEPHAESTUS_COMMIT: 98adf6d1bb0bdad5a919884c3916274d5a3e813f
+      HEPHAESTUS_REF: v1.1.50
+      HEPHAESTUS_COMMIT: 5fc22464c1db33dabc0d4de2170053d1584b5682
 
     steps:
       - uses: actions/checkout@v4
@@ -581,6 +580,7 @@ jobs:
           --release-dir=release
           --tag="$RESOLVED_TAG"
           --version="$RESOLVED_VERSION"
+          --public-allowlist
 
       - name: Single releases-repository writer and stable promotion
         env:
@@ -604,7 +604,7 @@ jobs:
           test -n "$RAILWAY_TOKEN"
           test -n "$RAILWAY_PROJECT_ID"
           npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web
-          npm run release:web-env -- --apply --restart --environment=production --service=agentlas-web --verify-url=https://agentlas.cloud/api/desktop/latest
+          npm run release:web-env -- --apply --restart --verification-file=release/desktop-release-verification.json --expected-version="$RESOLVED_VERSION" --expected-tag="$RESOLVED_TAG" --environment=production --service=agentlas-web --verify-url=https://agentlas.cloud/api/desktop/latest
 
       - name: Upload complete release evidence
         if: always()
@@ -613,7 +613,6 @@ jobs:
           name: agentlas-desktop-release-evidence
           path: |
             release/desktop-release-verification.json
-            release/desktop-release.production.env
             release/latest-mac.yml
             release/update-lineage-verification.json
             release/release-asset-manifest.json

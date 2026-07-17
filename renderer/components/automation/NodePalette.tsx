@@ -68,10 +68,15 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
 
   const agentSeeds = useMemo(
     () => [
-      ...firms.map((f) => ({ label: `${pickLocalized(f, locale).name} — CEO`, ref: f.id, targetType: "firm" as const })),
-      ...agents.map((a) => ({ label: pickLocalized(a, locale).name, ref: a.id, targetType: "agent" as const })),
-      ...groups.map((g) => ({ label: g.name, ref: g.id, targetType: "agent" as const })),
-      ...hubAgents.map((a) => ({ label: `${pickLocalized(a, locale).name} — Hub`, ref: a.slug, targetType: "hub" as const })),
+      ...firms.map((f) => ({ label: `${pickLocalized(f, locale).name} — CEO`, ref: f.id, targetType: "firm" as const, targetVersion: undefined })),
+      ...agents.map((a) => ({ label: pickLocalized(a, locale).name, ref: a.id, targetType: "agent" as const, targetVersion: undefined })),
+      ...groups.map((g) => ({ label: g.name, ref: g.id, targetType: "agent" as const, targetVersion: undefined })),
+      ...hubAgents.filter((a) => a.callable === true && Boolean(a.packageHash)).map((a) => ({
+        label: `${pickLocalized(a, locale).name} — Hub`,
+        ref: a.slug,
+        targetType: "hub" as const,
+        targetVersion: a.packageHash,
+      })),
     ],
     [agents, firms, groups, hubAgents, locale],
   );
@@ -113,7 +118,15 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
             key={`${a.targetType}:${a.ref}`}
             icon={a.targetType === "firm" ? <IconBuilding size={13} /> : <IconSparkles size={13} />}
             label={a.label}
-            onClick={() => onAdd({ type: "agent", config: { ref: a.ref, targetType: a.targetType }, label: a.label })}
+            onClick={() => onAdd({
+              type: "agent",
+              config: {
+                ref: a.ref,
+                targetType: a.targetType,
+                ...(a.targetVersion ? { targetVersion: a.targetVersion } : {}),
+              },
+              label: a.label,
+            })}
           />
         ))}
       </Section>

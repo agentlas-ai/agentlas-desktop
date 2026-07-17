@@ -4,19 +4,45 @@ import type {
   RuntimeKind,
   RuntimeStatus,
 } from "../../shared/types";
-import { callServerTool, McpToolCallError } from "../mcp-tools/client";
+import { callServerTool, createMcpRuntimePin, McpToolCallError } from "../mcp-tools/client";
 import { listInstalledServers } from "../mcp-tools/registry";
+import workforceProtocolContract from "../mcp-tools/workforce-protocol-contract.json";
 import type { BorrowedAgentSpec } from "./borrowed-task-force";
 
 const WORK_ORDER_SCHEMA = "agentlas.workforce-work-order.v1";
-const CANDIDATE_SET_SCHEMA = "agentlas.workforce-candidate-set.v1";
+const CANDIDATE_SET_SCHEMA = workforceProtocolContract.protocolMetadata.candidateSetSchemaVersion;
 const SELECTION_SCHEMA = "agentlas.workforce-selection.v1";
 const VALIDATION_SCHEMA = "agentlas.workforce-selection-validation.v1";
-const FEDERATION_RESULT_SCHEMA = "agentlas.workforce-federation-result.v1";
-const FEDERATED_SELECTION_SCHEMA = "agentlas.workforce-federated-selection.v1";
-const PREPARATION_SCHEMA = "agentlas.workforce-execution-plan.v5";
+const FEDERATION_RESULT_SCHEMA = workforceProtocolContract.protocolMetadata.federationResultSchemaVersion;
+const FEDERATED_SELECTION_SCHEMA = workforceProtocolContract.protocolMetadata.federatedSelectionSchemaVersion;
+const FEDERATED_PREPARATION_SCHEMA = workforceProtocolContract.protocolMetadata.federatedPreparationSchemaVersion;
+const SOURCE_PIN_SCHEMA = "agentlas.workforce-source-pin.v1";
+const PREPARE_ATTEMPT_SCHEMA = workforceProtocolContract.protocolMetadata.prepareAttemptSchemaVersion;
+const PREPARATION_SCHEMA = workforceProtocolContract.protocolMetadata.executionPlanSchemaVersion;
 const WORKFORCE_SOURCE_SCOPE = "network";
+const WORKFORCE_HUB_SOURCE_SCOPE = "hub";
 const WORKFORCE_NETWORK_SOURCES = ["local", "cloud", "hub"] as const;
+const WORKFORCE_HUB_SOURCES = ["hub"] as const;
+const WORKFORCE_SOURCE_FAILURE_CODES = new Set<string>([
+  "source_not_configured",
+  "source_not_supported",
+  "source_unavailable",
+  "source_timeout",
+  "source_unauthorized",
+  "source_forbidden",
+  "source_rate_limited",
+  "source_invalid_candidate_set",
+  "source_candidate_set_expired",
+  "source_work_order_mismatch",
+  "source_ontology_mismatch",
+  "source_slot_mismatch",
+  "source_candidate_set_digest_mismatch",
+  "source_history_influence_forbidden",
+  "insufficient_credits",
+  "owner_only",
+  "no_cloud_package",
+  "agent_not_found",
+]);
 const WORKFORCE_RUNTIME_BUNDLE_DIGEST_SCHEMA = "agentlas.workforce-runtime-bundle-digest.v4";
 const WORKFORCE_PERMISSION_POLICY_SCHEMA = "agentlas.workforce-permission-policy.v1";
 const WORKFORCE_PERMISSION_POLICY_DIGEST_SCHEMA = "agentlas.workforce-permission-policy-digest.v1";
@@ -71,6 +97,10 @@ const SELECTION_HEADING = "## Workforce Selection";
 const MAX_SCHEMA_ATTEMPTS = 2;
 const MAX_WORK_ORDER_REFINEMENTS = 2;
 const MAX_SEARCH_TRANSPORT_ATTEMPTS = 2;
+const MAX_PREPARE_TRANSPORT_ATTEMPTS = 32;
+const MAX_WORKFORCE_SESSION_REFRESHES = 2;
+const WORKFORCE_SESSION_SAFETY_WINDOW_MS = 45_000;
+const WORKFORCE_PREPARE_BUSY_WAIT_MAX_MS = 2 * 60_000;
 const WORKFORCE_MAX_MCP_TEXT_CHARS = 16 * 1024 * 1024;
 const AMBIGUOUS_SEARCH_RETRY_CLASS = "ambiguous_search_transport";
 const WORK_ORDER_KEYS = [
@@ -103,6 +133,22 @@ const FEDERATION_RESULT_KEYS = [
   "schemaVersion", "scope", "sources", "status", "orderingPolicy", "candidateSet",
   "candidateProvenance", "sourceReceipts", "federationDigest",
 ] as const;
+const SUCCEEDED_SOURCE_RECEIPT_KEYS = [
+  "source", "status", "selectionSessionId", "candidateSetDigest", "issuedAt", "expiresAt",
+  "slotCount", "candidateCount", "receiptDigest",
+] as const;
+const FAILED_SOURCE_RECEIPT_KEYS = [
+  "source", "status", "failureCode", "observedAt", "receiptDigest",
+] as const;
+const CANDIDATE_PROVENANCE_KEYS = [
+  "slotId", "agentDefinitionId", "selectedAgentReleaseId", "selectedSource",
+  "resolution", "appearances",
+] as const;
+const CANDIDATE_APPEARANCE_KEYS = [
+  "source", "sourceRank", "candidateSetDigest", "agentReleaseId", "releaseVersion",
+  "packageHash", "contentDigest", "entityKind",
+] as const;
+const CANDIDATE_APPEARANCE_OPTIONAL_KEYS = ["lineageAttestation"] as const;
 const FEDERATED_SELECTION_KEYS = [
   "schemaVersion", "status", "federationDigest", "selectionSessionId",
   "candidateSetDigest", "workOrderDigest", "selectionDigest", "selectionValidation",
@@ -114,18 +160,23 @@ const CANDIDATE_KEYS = [
   "entityKind", "name", "communities", "fitEvidence", "qualificationEvidence",
   "optionalGaps", "semanticSnapshot", "operational",
 ] as const;
+const CANDIDATE_OPTIONAL_KEYS = ["missingMandatory"] as const;
 const CANDIDATE_SEMANTIC_KEYS = [
   "summaries", "roles", "skills", "toolCapabilities", "consumes", "produces",
   "authorities", "runtimes", "languages",
 ] as const;
+const CANDIDATE_SEMANTIC_OPTIONAL_KEYS = ["knowledge", "modalities"] as const;
 const CANDIDATE_OPERATIONAL_KEYS = ["callable", "installable"] as const;
 const CANDIDATE_OPERATIONAL_OPTIONAL_KEYS = ["unavailableReasons"] as const;
-const LEVELED_CONCEPT_KEYS = ["concept", "level"] as const;
-const PREPARATION_KEYS = [
-  "schemaVersion", "status", "issues", "preparationReceiptId", "selectionReceiptId",
-  "candidateSetDigest", "decisionOwner", "substitutions", "executionContext",
-  "executionContextDigest", "executionRoster",
+const SOURCE_PIN_KEYS = [
+  "schemaVersion", "federationDigest", "federatedSelectionSessionId", "slotId", "source",
+  "sourceSelectionSessionId", "sourceCandidateSetDigest", "agentDefinitionId", "agentReleaseId",
+  "releaseVersion", "packageHash", "contentDigest", "entityKind", "lineageAttestation",
+  "sourcePinDigest",
 ] as const;
+const FEDERATED_PREPARATION_KEYS = workforceProtocolContract.prepareResponse.requiredFields;
+const LEVELED_CONCEPT_KEYS = ["concept", "level"] as const;
+const PREPARATION_KEYS = workforceProtocolContract.prepareResponse.executionPlanRequiredFields;
 const EXECUTION_BUNDLE_KEYS = [
   "slotId", "agentDefinitionId", "agentReleaseId", "releaseVersion", "packageHash",
   "contentDigest", "entityKind", "directiveBundle", "permissionPolicy",
@@ -141,8 +192,8 @@ const EXECUTION_CONTEXT_KEYS = [
 ] as const;
 const EXECUTION_CONTEXT_SLOT_KEYS = [...WORK_ORDER_SLOT_KEYS, "minimumEvidenceLevel"] as const;
 const EXECUTION_CONTEXT_ASSIGNMENT_KEYS = ["slotId", "agentReleaseId", "reasonCodes"] as const;
-export const WORKFORCE_ONTOLOGY_VERSION = "awo:2026-07-15.2";
-export const WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256 = "d6d30d45fe8d35fb785e165d1e80c6471a72436f0160c3933c21d4a31bf2fb32";
+export const WORKFORCE_ONTOLOGY_VERSION = workforceProtocolContract.protocolMetadata.ontologyVersion;
+export const WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256 = workforceProtocolContract.protocolMetadata.ontologySnapshotSha256;
 const WORKFORCE_LEADER_SAFE_RUNTIME_KINDS = new Set<RuntimeKind>([
   "claude-code",
   "byok",
@@ -203,16 +254,33 @@ class WorkforceHubCallError extends Error {
   constructor(
     readonly code: string,
     message: string,
-    readonly details?: { retryClass?: string },
+    readonly details?: {
+      retryClass?: string;
+      retryAfterMs?: number;
+      receiptExpiresAt?: string;
+    },
   ) {
     super(message);
     this.name = "WorkforceHubCallError";
   }
 }
 
+export function workforceFailureCode(error: unknown): string | null {
+  if (
+    error instanceof WorkforceHubCallError ||
+    error instanceof NonRepairableWorkforceDecisionError ||
+    error instanceof RepairableWorkforceDecisionError
+  ) {
+    return error.code;
+  }
+  return null;
+}
+
 export interface WorkforceHubMcp {
   call(toolName: WorkforceToolName, args: JsonObject, signal?: AbortSignal): Promise<unknown>;
 }
+
+export type WorkforceSourcePolicy = "network" | "hub-required";
 
 export type WorkforceToolName =
   | "workforce.search_candidates"
@@ -231,7 +299,7 @@ export interface WorkforceLeaderTurn {
 
 export interface WorkforceSchemaAttempt {
   schemaVersion: "agentlas.workforce-schema-attempt.v1";
-  stage: "work-order" | "leader-work-order-refinement" | "leader-work-order-refinement-2" | "selection" | "leader-selection-expansion";
+  stage: "work-order" | "leader-work-order-refinement" | "leader-work-order-refinement-2" | "selection" | "leader-selection-expansion" | "leader-selection-session-refresh";
   attempt: number;
   maxAttempts: number;
   invocationId: string;
@@ -245,7 +313,7 @@ export interface WorkforceSchemaAttempt {
   sameModelRetry: boolean;
   authoritativeDecision?: false;
   superseded?: true;
-  supersededReason?: "selection-content-expansion" | "repeated-expansion-rejected";
+  supersededReason?: "selection-content-expansion" | "repeated-expansion-rejected" | "session-refresh";
 }
 
 export interface WorkforceHubToolObservation {
@@ -256,9 +324,14 @@ export interface WorkforceHubToolObservation {
   attempt: number;
   maxAttempts: number;
   retryScheduled: boolean;
-  replaySafety: "deterministic-selection-session-replace-upsert" | "not-retried";
+  replaySafety:
+    | "deterministic-selection-session-replace-upsert"
+    | "exact-pin-idempotency-receipt-cache"
+    | "not-retried";
   authoritativeChain: boolean;
   supersededByWorkOrderRefinement?: true;
+  supersededBySessionRefresh?: true;
+  sessionRefresh?: 1 | 2;
   refinement?: 1 | 2;
   maxRefinements?: 2;
   triggerKind?: "cardinality" | "selection-content-expansion";
@@ -289,7 +362,7 @@ export interface WorkforceLeaderDecisionSupersession {
   supersessionId: string;
   phase: "selection";
   invocationId: string;
-  reason: "selection-content-expansion" | "repeated-expansion-rejected";
+  reason: "selection-content-expansion" | "repeated-expansion-rejected" | "session-refresh";
   authoritativeDecision: false;
   supersededAt: string;
 }
@@ -447,10 +520,34 @@ export interface WorkforceSelectionReceipt {
     runtimeId: string;
     status: "completed";
     authoritativeDecision?: false;
-    supersededReason?: "selection-content-expansion" | "repeated-expansion-rejected";
+    supersededReason?: "selection-content-expansion" | "repeated-expansion-rejected" | "session-refresh";
   }>;
   schemaAttempts: WorkforceSchemaAttempt[];
   workOrderRefinements: WorkforceWorkOrderRefinementReceipt[];
+}
+
+/**
+ * Main-process-only proof that Hub accepted the exact prepare idempotency key
+ * and returned a schema-validated immutable roster. This is deliberately much
+ * smaller than the runtime bundles: graph checkpoints need replay authority,
+ * not a second copy of agent directives.
+ */
+export interface WorkforcePrepareCheckpointReceipt {
+  schemaVersion: "agentlas.workforce-prepare-checkpoint-receipt.v1";
+  occurrenceId: string;
+  idempotencyKey: string;
+  preparationReceiptId: string;
+  requestDigest: string;
+  responseDigest: string;
+  workOrderDigest: string;
+  selectionDigest: string;
+  federatedSelectionDigest: string;
+  selectedSourcePinDigests: string[];
+  candidateSetDigest: string;
+  selectionReceiptId: string;
+  executionContextDigest: string;
+  preparedReleasesDigest: string;
+  receiptDigest: string;
 }
 
 export function workforceExecutionContextDigest(context: WorkforceExecutionContext): string {
@@ -695,6 +792,7 @@ export interface WorkforceSelectionResult {
   preparation: JsonObject;
   specs: BorrowedAgentSpec[];
   receipt: WorkforceSelectionReceipt;
+  prepareCheckpointReceipt: WorkforcePrepareCheckpointReceipt;
 }
 
 export interface WorkforceBenchmarkSelectionArtifacts {
@@ -718,12 +816,16 @@ export interface WorkforceBenchmarkSelectionSnapshot {
 
 export interface RunWorkforceSelectionParams {
   goal: string;
+  /** Main-owned logical occurrence; retries of the same occurrence reuse this exact value. */
+  occurrenceId?: string;
   /** Main-observed local inputs. Values guide the host LLM only; bytes never cross Hub MCP. */
   inputModalities?: string[];
   active: RuntimeStatus;
   leader: (turn: WorkforceLeaderTurn) => Promise<string>;
   sink: EventSink;
   hubMcp?: WorkforceHubMcp;
+  /** `hub-required` is fail-closed: no Local or owner-Cloud candidate may enter the roster. */
+  sourcePolicy?: WorkforceSourcePolicy;
   signal?: AbortSignal;
   benchmarkMode?: boolean;
   auditSchemaAttempt?: (attempt: WorkforceSchemaAttempt) => void;
@@ -807,6 +909,24 @@ function stableJsonValue(value: unknown): unknown {
 function sha256Json(value: unknown): string {
   const bytes = typeof value === "string" ? value : (JSON.stringify(stableJsonValue(value)) ?? "null");
   return `sha256:${createHash("sha256").update(bytes, "utf8").digest("hex")}`;
+}
+
+/** Exact mirror of Core federation.py `_federation_preimage`. */
+export function workforceFederationDigest(result: JsonObject): string {
+  const candidateSet = objectValue(result.candidateSet, "federated candidate set");
+  const candidateSetWithoutSession = Object.fromEntries(
+    Object.entries(candidateSet).filter(([key]) => key !== "selectionSessionId"),
+  );
+  return sha256Json({
+    scope: result.scope,
+    sources: result.sources,
+    candidateSet: candidateSetWithoutSession,
+    orderingPolicy: result.orderingPolicy,
+    sourceReceipts: result.sourceReceipts,
+    candidateProvenance: result.candidateProvenance,
+    issuedAt: candidateSet.issuedAt,
+    expiresAt: candidateSet.expiresAt,
+  });
 }
 
 function containsLoneUnicodeSurrogate(value: string): boolean {
@@ -1422,7 +1542,7 @@ export function validateCandidateSet(
     const candidates = requireArray(slot.candidates, `candidate slot ${slotId}.candidates`, 100);
     for (const candidateRaw of candidates) {
       const candidate = objectValue(candidateRaw, "candidate");
-      assertExactHubKeys(candidate, CANDIDATE_KEYS, "candidate");
+      assertExactHubKeys(candidate, CANDIDATE_KEYS, "candidate", CANDIDATE_OPTIONAL_KEYS);
       requireId(candidate.agentDefinitionId, "candidate agentDefinitionId");
       const releaseId = requireId(candidate.agentReleaseId, "candidate agentReleaseId");
       if (releases.has(releaseId)) throw new Error(`Hub candidate set duplicated release ${releaseId} in ${slotId}.`);
@@ -1442,18 +1562,32 @@ export function validateCandidateSet(
       requireIds(candidate.communities, "candidate communities");
       requireIds(candidate.fitEvidence, "candidate fitEvidence");
       requireIds(candidate.qualificationEvidence, "candidate qualificationEvidence");
+      if (Object.prototype.hasOwnProperty.call(candidate, "missingMandatory")) {
+        requireIds(candidate.missingMandatory, "candidate missingMandatory");
+      }
       requireIds(candidate.optionalGaps, "candidate optionalGaps");
       const semantic = objectValue(candidate.semanticSnapshot, "candidate semanticSnapshot");
-      assertExactHubKeys(semantic, CANDIDATE_SEMANTIC_KEYS, "candidate semanticSnapshot");
+      assertExactHubKeys(
+        semantic,
+        CANDIDATE_SEMANTIC_KEYS,
+        "candidate semanticSnapshot",
+        CANDIDATE_SEMANTIC_OPTIONAL_KEYS,
+      );
       requireStrings(semantic.summaries, "candidate semanticSnapshot.summaries");
       requireIds(semantic.roles, "candidate semanticSnapshot.roles");
       requireLeveledConcepts(semantic.skills, "candidate semanticSnapshot.skills");
+      if (Object.prototype.hasOwnProperty.call(semantic, "knowledge")) {
+        requireLeveledConcepts(semantic.knowledge, "candidate semanticSnapshot.knowledge");
+      }
       requireLeveledConcepts(semantic.toolCapabilities, "candidate semanticSnapshot.toolCapabilities");
       requireIds(semantic.consumes, "candidate semanticSnapshot.consumes");
       requireIds(semantic.produces, "candidate semanticSnapshot.produces");
       requireIds(semantic.authorities, "candidate semanticSnapshot.authorities");
       requireStrings(semantic.runtimes, "candidate semanticSnapshot.runtimes");
       requireStrings(semantic.languages, "candidate semanticSnapshot.languages");
+      if (Object.prototype.hasOwnProperty.call(semantic, "modalities")) {
+        requireStrings(semantic.modalities, "candidate semanticSnapshot.modalities");
+      }
       const operational = objectValue(candidate.operational, "candidate operational");
       assertExactHubKeys(
         operational,
@@ -1478,11 +1612,106 @@ export function validateCandidateSet(
   return set;
 }
 
+function validateHubRequiredProvenance(
+  provenanceRows: JsonObject[],
+  candidateSet: JsonObject,
+  hubReceipt: JsonObject,
+): void {
+  try {
+    const cards = new Map<string, JsonObject>();
+    for (const rawSlot of arrayValue(candidateSet.slots)) {
+      const slot = objectValue(rawSlot, "Hub-required candidate slot");
+      const slotId = requireId(slot.slotId, "Hub-required candidate slotId");
+      for (const rawCandidate of arrayValue(slot.candidates)) {
+        const candidate = objectValue(rawCandidate, "Hub-required candidate");
+        const definitionId = requireId(candidate.agentDefinitionId, "Hub-required candidate definitionId");
+        const releaseId = requireId(candidate.agentReleaseId, "Hub-required candidate releaseId");
+        const key = `${slotId}\u0000${definitionId}\u0000${releaseId}`;
+        if (cards.has(key)) throw new Error("duplicate Hub-required candidate identity");
+        cards.set(key, candidate);
+      }
+    }
+    if (provenanceRows.length !== cards.size) {
+      throw new Error("Hub-required provenance does not cover the federated candidate set");
+    }
+    const observed = new Set<string>();
+    for (const [index, row] of provenanceRows.entries()) {
+      assertExactHubKeys(row, CANDIDATE_PROVENANCE_KEYS, `Hub candidate provenance[${index}]`);
+      const slotId = requireId(row.slotId, `Hub candidate provenance[${index}].slotId`);
+      const definitionId = requireId(
+        row.agentDefinitionId,
+        `Hub candidate provenance[${index}].agentDefinitionId`,
+      );
+      const releaseId = requireId(
+        row.selectedAgentReleaseId,
+        `Hub candidate provenance[${index}].selectedAgentReleaseId`,
+      );
+      const key = `${slotId}\u0000${definitionId}\u0000${releaseId}`;
+      const card = cards.get(key);
+      if (!card || observed.has(key)) throw new Error("Hub candidate provenance identity mismatch");
+      observed.add(key);
+      if (row.selectedSource !== "hub" || row.resolution !== "unique_definition") {
+        throw new Error("Hub-required provenance selected a non-Hub or ambiguous source");
+      }
+      const appearances = requireArray(
+        row.appearances,
+        `Hub candidate provenance[${index}].appearances`,
+        1,
+        1,
+      );
+      const appearance = objectValue(appearances[0], `Hub candidate provenance[${index}].appearance`);
+      assertExactHubKeys(
+        appearance,
+        CANDIDATE_APPEARANCE_KEYS,
+        `Hub candidate provenance[${index}].appearance`,
+        CANDIDATE_APPEARANCE_OPTIONAL_KEYS,
+      );
+      if (
+        appearance.source !== "hub" ||
+        appearance.candidateSetDigest !== hubReceipt.candidateSetDigest ||
+        appearance.agentReleaseId !== releaseId ||
+        appearance.releaseVersion !== card.releaseVersion ||
+        appearance.packageHash !== card.packageHash ||
+        appearance.contentDigest !== card.contentDigest ||
+        appearance.entityKind !== card.entityKind ||
+        !Number.isInteger(appearance.sourceRank) ||
+        Number(appearance.sourceRank) < 0 ||
+        Number(appearance.sourceRank) >= 100
+      ) {
+        throw new Error("Hub source receipt, provenance appearance, and federated card are not bound");
+      }
+      requireSha256(appearance.candidateSetDigest, "Hub provenance candidateSetDigest");
+      if (Object.prototype.hasOwnProperty.call(appearance, "lineageAttestation")) {
+        objectValue(appearance.lineageAttestation, "Hub provenance lineageAttestation");
+      }
+    }
+  } catch (error) {
+    if (error instanceof WorkforceHubCallError) throw error;
+    throw new WorkforceHubCallError(
+      "hub_source_provenance_mismatch",
+      "hub_source_provenance_mismatch: Hub receipt, provenance, and federated candidate set are not cryptographically bound.",
+    );
+  }
+}
+
 export function validateFederationSearchResult(
   value: unknown,
   order: JsonObject,
-  options: { allowUnfilled?: boolean } = {},
+  options: { allowUnfilled?: boolean; sourcePolicy?: WorkforceSourcePolicy } = {},
 ): { federationResult: JsonObject; candidateSet: JsonObject } {
+  const sourcePolicy = options.sourcePolicy ?? "network";
+  const expectedScope = sourcePolicy === "hub-required"
+    ? WORKFORCE_HUB_SOURCE_SCOPE
+    : WORKFORCE_SOURCE_SCOPE;
+  const expectedSources: readonly string[] = sourcePolicy === "hub-required"
+    ? WORKFORCE_HUB_SOURCES
+    : WORKFORCE_NETWORK_SOURCES;
+  const failSourcePolicy = (code: string, message: string): never => {
+    if (sourcePolicy === "hub-required") {
+      throw new WorkforceHubCallError(code, `${code}: ${message}`);
+    }
+    throw new Error(message);
+  };
   const federationResult = objectValue(value, "workforce federation result");
   assertExactHubKeys(
     federationResult,
@@ -1492,33 +1721,158 @@ export function validateFederationSearchResult(
   if (federationResult.schemaVersion !== FEDERATION_RESULT_SCHEMA) {
     throw new Error("Hub returned an unsupported workforce federation schema.");
   }
-  if (federationResult.scope !== WORKFORCE_SOURCE_SCOPE) {
-    throw new Error("Hub workforce federation result does not match the requested source scope.");
+  if (federationResult.scope !== expectedScope) {
+    failSourcePolicy(
+      "hub_source_scope_mismatch",
+      "Hub workforce federation result does not match the requested source scope.",
+    );
   }
   const sources = requireStrings(federationResult.sources, "workforce federation sources");
-  if (sources.length !== WORKFORCE_NETWORK_SOURCES.length ||
-      sources.some((source, index) => source !== WORKFORCE_NETWORK_SOURCES[index])) {
-    throw new Error("Hub workforce federation result changed the pinned network source order.");
+  if (sources.length !== expectedSources.length ||
+      sources.some((source, index) => source !== expectedSources[index])) {
+    failSourcePolicy(
+      "hub_source_scope_mismatch",
+      "Hub workforce federation result changed the pinned source order.",
+    );
   }
   if (!["succeeded", "partial", "failed"].includes(String(federationResult.status))) {
-    throw new Error("Hub workforce federation result has an invalid status.");
+    failSourcePolicy(
+      "hub_source_result_invalid",
+      "Hub workforce federation result has an invalid status.",
+    );
   }
   if (federationResult.orderingPolicy !== "canonical_identity_no_rerank") {
     throw new Error("Hub workforce federation result changed the pinned ordering policy.");
   }
-  requireArray(federationResult.candidateProvenance, "workforce candidate provenance", 3_200)
-    .forEach((row, index) => objectValue(row, `workforce candidate provenance[${index}]`));
-  const sourceReceipts = requireArray(
-    federationResult.sourceReceipts,
-    "workforce source receipts",
-    WORKFORCE_NETWORK_SOURCES.length,
-    WORKFORCE_NETWORK_SOURCES.length,
+  const candidateProvenance = requireArray(
+    federationResult.candidateProvenance,
+    "workforce candidate provenance",
+    3_200,
+  ).map((row, index) => objectValue(row, `workforce candidate provenance[${index}]`));
+  if (sourcePolicy === "hub-required" && candidateProvenance.some((row) => (
+    row.selectedSource !== "hub" ||
+    !Array.isArray(row.appearances) ||
+    row.appearances.some((appearance) => (
+      !appearance ||
+      typeof appearance !== "object" ||
+      Array.isArray(appearance) ||
+      (appearance as JsonObject).source !== "hub"
+    ))
+  ))) {
+    failSourcePolicy(
+      "hub_source_provenance_mismatch",
+      "Hub-required candidate provenance contains a non-Hub source.",
+    );
+  }
+  let receipts: JsonObject[];
+  try {
+    receipts = requireArray(
+      federationResult.sourceReceipts,
+      "workforce source receipts",
+      expectedSources.length,
+      expectedSources.length,
+    ).map((row, index) => objectValue(row, `workforce source receipt[${index}]`));
+  } catch (error) {
+    if (sourcePolicy === "hub-required") {
+      failSourcePolicy("hub_source_receipt_invalid", "Hub-required search returned no exact Hub source receipt.");
+    }
+    throw error;
+  }
+  let hubReceipt: JsonObject | null = null;
+  if (sourcePolicy === "hub-required") {
+    const receipt = receipts[0];
+    const hasExactKeys = (required: readonly string[]): boolean => (
+      Object.keys(receipt).length === required.length &&
+      required.every((key) => Object.prototype.hasOwnProperty.call(receipt, key))
+    );
+    const hasValidReceiptDigest = (): boolean => {
+      if (typeof receipt.receiptDigest !== "string" || !SHA256_RE.test(receipt.receiptDigest)) return false;
+      const computed = sha256Json(Object.fromEntries(
+        Object.entries(receipt).filter(([key]) => key !== "receiptDigest"),
+      ));
+      return equalSha256(receipt.receiptDigest, computed);
+    };
+    if (receipt.source !== "hub") {
+      failSourcePolicy("hub_source_receipt_invalid", "Hub-required search returned no exact Hub source receipt.");
+    }
+    if (receipt.status === "failed") {
+      const failureCode = typeof receipt.failureCode === "string" ? receipt.failureCode : "";
+      let timestampValid = true;
+      try {
+        requireDateTime(receipt.observedAt, "Hub source receipt observedAt");
+      } catch {
+        timestampValid = false;
+      }
+      if (
+        !hasExactKeys(FAILED_SOURCE_RECEIPT_KEYS) ||
+        !WORKFORCE_SOURCE_FAILURE_CODES.has(failureCode) ||
+        !timestampValid ||
+        !hasValidReceiptDigest()
+      ) {
+        failSourcePolicy("hub_source_receipt_invalid", "Hub-required search returned an invalid failed receipt.");
+      }
+      throw new WorkforceHubCallError(
+        failureCode,
+        `${failureCode}: Hub candidate search did not succeed; no Local or Cloud roster was selected.`,
+      );
+    }
+    let issuedAt: { epochMs: number } | null = null;
+    let expiresAt: { epochMs: number } | null = null;
+    try {
+      issuedAt = requireDateTime(receipt.issuedAt, "Hub source receipt issuedAt");
+      expiresAt = requireDateTime(receipt.expiresAt, "Hub source receipt expiresAt");
+    } catch {
+      // Converted below into the finite fail-closed source-policy error.
+    }
+    if (
+      receipt.status !== "succeeded" ||
+      !hasExactKeys(SUCCEEDED_SOURCE_RECEIPT_KEYS) ||
+      typeof receipt.selectionSessionId !== "string" || !ID_RE.test(receipt.selectionSessionId) ||
+      typeof receipt.candidateSetDigest !== "string" || !SHA256_RE.test(receipt.candidateSetDigest) ||
+      !Number.isInteger(receipt.slotCount) || Number(receipt.slotCount) < 0 ||
+      !Number.isInteger(receipt.candidateCount) || Number(receipt.candidateCount) < 0 ||
+      !issuedAt || !expiresAt || issuedAt.epochMs >= expiresAt.epochMs ||
+      !hasValidReceiptDigest()
+    ) {
+      failSourcePolicy("hub_source_receipt_invalid", "Hub-required search returned no valid succeeded Hub receipt.");
+    }
+    hubReceipt = receipt;
+    if (federationResult.status !== "succeeded") {
+      failSourcePolicy("hub_source_result_not_succeeded", "Hub-required search did not complete successfully.");
+    }
+  }
+  const declaredFederationDigest = requireSha256(
+    federationResult.federationDigest,
+    "federationDigest",
   );
-  sourceReceipts.forEach((row, index) => objectValue(row, `workforce source receipt[${index}]`));
-  requireSha256(federationResult.federationDigest, "federationDigest");
+  const computedFederationDigest = workforceFederationDigest(federationResult);
+  if (!equalSha256(declaredFederationDigest, computedFederationDigest)) {
+    failSourcePolicy(
+      "hub_federation_digest_mismatch",
+      "Workforce federation result does not match the Core canonical preimage.",
+    );
+  }
+  const candidateSet = validateCandidateSet(federationResult.candidateSet, order, options);
+  const expectedSelectionSessionId = `selection:${declaredFederationDigest.slice("sha256:".length, "sha256:".length + 24)}`;
+  if (candidateSet.selectionSessionId !== expectedSelectionSessionId) {
+    failSourcePolicy(
+      "hub_federation_session_mismatch",
+      "Federated candidate session is not derived from the canonical federation digest.",
+    );
+  }
+  if (sourcePolicy === "hub-required") {
+    const requiredHubReceipt = hubReceipt;
+    if (!requiredHubReceipt) {
+      throw new WorkforceHubCallError(
+        "hub_source_receipt_invalid",
+        "hub_source_receipt_invalid: Hub-required search returned no succeeded Hub receipt.",
+      );
+    }
+    validateHubRequiredProvenance(candidateProvenance, candidateSet, requiredHubReceipt as JsonObject);
+  }
   return {
     federationResult,
-    candidateSet: validateCandidateSet(federationResult.candidateSet, order, options),
+    candidateSet,
   };
 }
 
@@ -1803,9 +2157,11 @@ export function validateSelectionReceipt(
 
 export function validateFederatedSelectionResult(
   value: unknown,
+  workOrder: JsonObject,
   selection: JsonObject,
   candidateSet: JsonObject,
   federationResult: JsonObject,
+  sourcePolicy: WorkforceSourcePolicy = "network",
 ): { federatedSelection: JsonObject; validation: JsonObject } {
   const federatedSelection = objectValue(value, "federated workforce selection");
   assertExactHubKeys(
@@ -1823,11 +2179,24 @@ export function validateFederatedSelectionResult(
       federatedSelection.candidateSetDigest !== candidateSet.candidateSetDigest) {
     throw new Error("Hub federated-selection receipt does not match the candidate session.");
   }
-  requireSha256(federatedSelection.workOrderDigest, "workOrderDigest");
-  requireSha256(federatedSelection.selectionDigest, "selectionDigest");
-  requireSha256(federatedSelection.federatedSelectionDigest, "federatedSelectionDigest");
-  requireArray(federatedSelection.selectedSourcePins, "selected source pins", 128)
-    .forEach((row, index) => objectValue(row, `selected source pin[${index}]`));
+  const workOrderDigest = requireSha256(federatedSelection.workOrderDigest, "workOrderDigest");
+  if (!equalSha256(workOrderDigest, sha256Json(workOrder))) {
+    throw new Error("Hub federated-selection receipt changed the exact WorkOrder.");
+  }
+  const selectionDigest = requireSha256(federatedSelection.selectionDigest, "selectionDigest");
+  if (!equalSha256(selectionDigest, sha256Json(selection))) {
+    throw new Error("Hub federated-selection receipt changed the exact host selection.");
+  }
+  const declaredFederatedSelectionDigest = requireSha256(
+    federatedSelection.federatedSelectionDigest,
+    "federatedSelectionDigest",
+  );
+  const computedFederatedSelectionDigest = sha256Json(Object.fromEntries(
+    Object.entries(federatedSelection).filter(([key]) => key !== "federatedSelectionDigest"),
+  ));
+  if (!equalSha256(declaredFederatedSelectionDigest, computedFederatedSelectionDigest)) {
+    throw new Error("Hub federated-selection wrapper digest mismatch.");
+  }
   const validation = validateSelectionReceipt(
     federatedSelection.selectionValidation,
     selection,
@@ -1836,7 +2205,130 @@ export function validateFederatedSelectionResult(
   if (federatedSelection.status !== validation.status) {
     throw new Error("Hub federated-selection status does not match its selection validation.");
   }
+  const selectedPairs = new Set(arrayValue(validation.idealTeam).map((raw) => {
+    const row = objectValue(raw, "ideal team row");
+    return `${requireId(row.slotId, "ideal team slotId")}\u0000${requireId(row.agentReleaseId, "ideal team agentReleaseId")}`;
+  }));
+  const observedPairs = new Set<string>();
+  requireArray(federatedSelection.selectedSourcePins, "selected source pins", 128)
+    .forEach((raw, index) => {
+      const pin = validateSourcePin(
+        raw,
+        `selected source pin[${index}]`,
+        federationResult,
+        candidateSet,
+        sourcePolicy,
+      );
+      const pair = `${String(pin.slotId)}\u0000${String(pin.agentReleaseId)}`;
+      if (!selectedPairs.has(pair) || observedPairs.has(pair)) {
+        throw new Error("Hub federated-selection source pins do not match the selected roster.");
+      }
+      observedPairs.add(pair);
+    });
+  if (observedPairs.size !== selectedPairs.size) {
+    throw new Error("Hub federated-selection omitted a selected source pin.");
+  }
   return { federatedSelection, validation };
+}
+
+function validateSourcePin(
+  value: unknown,
+  label: string,
+  federationResult: JsonObject,
+  candidateSet: JsonObject,
+  sourcePolicy: WorkforceSourcePolicy = "network",
+): JsonObject {
+  const pin = objectValue(value, label);
+  assertExactHubKeys(pin, SOURCE_PIN_KEYS, label);
+  if (pin.schemaVersion !== SOURCE_PIN_SCHEMA) throw new Error(`${label} schema is unsupported.`);
+  if (pin.federationDigest !== federationResult.federationDigest) {
+    throw new Error(`${label} federation digest mismatch.`);
+  }
+  if (pin.federatedSelectionSessionId !== candidateSet.selectionSessionId) {
+    throw new Error(`${label} selection session mismatch.`);
+  }
+  const slotId = requireId(pin.slotId, `${label}.slotId`);
+  const agentDefinitionId = requireId(pin.agentDefinitionId, `${label}.agentDefinitionId`);
+  const agentReleaseId = requireId(pin.agentReleaseId, `${label}.agentReleaseId`);
+  if (!WORKFORCE_NETWORK_SOURCES.includes(pin.source as typeof WORKFORCE_NETWORK_SOURCES[number])) {
+    throw new Error(`${label} source is invalid.`);
+  }
+  if (sourcePolicy === "hub-required" && pin.source !== "hub") {
+    throw new WorkforceHubCallError(
+      "hub_source_pin_mismatch",
+      "hub_source_pin_mismatch: Hub-required Workforce selected a non-Hub source pin.",
+    );
+  }
+  requireId(pin.sourceSelectionSessionId, `${label}.sourceSelectionSessionId`);
+  requireSha256(pin.sourceCandidateSetDigest, `${label}.sourceCandidateSetDigest`);
+  requireBoundedString(pin.releaseVersion, `${label}.releaseVersion`, 100);
+  const packageHash = requireSha256(pin.packageHash, `${label}.packageHash`);
+  const contentDigest = requireSha256(pin.contentDigest, `${label}.contentDigest`);
+  if (typeof pin.entityKind !== "string" || !EXECUTABLE_ENTITY_KINDS.has(pin.entityKind)) {
+    throw new Error(`${label} entityKind is not executable.`);
+  }
+  if (pin.lineageAttestation !== null) objectValue(pin.lineageAttestation, `${label}.lineageAttestation`);
+  const declaredDigest = requireSha256(pin.sourcePinDigest, `${label}.sourcePinDigest`);
+  const computedDigest = sha256Json(Object.fromEntries(
+    Object.entries(pin).filter(([key]) => key !== "sourcePinDigest"),
+  ));
+  if (!equalSha256(declaredDigest, computedDigest)) throw new Error(`${label} digest mismatch.`);
+  if (sourcePolicy === "hub-required") {
+    const receipt = arrayValue(federationResult.sourceReceipts)
+      .map((raw) => objectValue(raw, "Hub source receipt"))
+      .find((row) => row.source === "hub" && row.status === "succeeded");
+    const provenance = arrayValue(federationResult.candidateProvenance)
+      .map((raw) => objectValue(raw, "Hub candidate provenance"))
+      .find((row) => (
+        row.slotId === slotId &&
+        row.agentDefinitionId === agentDefinitionId &&
+        row.selectedAgentReleaseId === agentReleaseId &&
+        row.selectedSource === "hub"
+      ));
+    const appearance = provenance
+      ? arrayValue(provenance.appearances)
+          .map((raw) => objectValue(raw, "Hub candidate appearance"))
+          .find((row) => row.source === "hub" && row.agentReleaseId === agentReleaseId)
+      : null;
+    const appearanceLineage = appearance && Object.prototype.hasOwnProperty.call(appearance, "lineageAttestation")
+      ? appearance.lineageAttestation
+      : null;
+    if (
+      !receipt ||
+      !provenance ||
+      !appearance ||
+      pin.sourceSelectionSessionId !== receipt.selectionSessionId ||
+      pin.sourceCandidateSetDigest !== receipt.candidateSetDigest ||
+      appearance.candidateSetDigest !== receipt.candidateSetDigest ||
+      pin.releaseVersion !== appearance.releaseVersion ||
+      pin.packageHash !== appearance.packageHash ||
+      pin.contentDigest !== appearance.contentDigest ||
+      pin.entityKind !== appearance.entityKind ||
+      JSON.stringify(stableJsonValue(pin.lineageAttestation)) !==
+        JSON.stringify(stableJsonValue(appearanceLineage))
+    ) {
+      throw new WorkforceHubCallError(
+        "hub_source_pin_mismatch",
+        "hub_source_pin_mismatch: Hub source pin is not bound to its receipt and provenance appearance.",
+      );
+    }
+  }
+  const candidate = arrayValue(candidateSet.slots)
+    .map((raw) => objectValue(raw, "candidate slot"))
+    .filter((slot) => slot.slotId === slotId)
+    .flatMap((slot) => arrayValue(slot.candidates).map((raw) => objectValue(raw, "candidate")))
+    .find((row) => row.agentReleaseId === agentReleaseId);
+  if (
+    !candidate ||
+    candidate.agentDefinitionId !== agentDefinitionId ||
+    candidate.packageHash !== packageHash ||
+    candidate.contentDigest !== contentDigest ||
+    candidate.releaseVersion !== pin.releaseVersion ||
+    candidate.entityKind !== pin.entityKind
+  ) {
+    throw new Error(`${label} release identity does not match the frozen candidate set.`);
+  }
+  return pin;
 }
 
 function normalizeExecutionGraph(value: unknown): NonNullable<BorrowedAgentSpec["executionGraph"]> | undefined {
@@ -1882,12 +2374,68 @@ export function validateExecutionPreparation(
   value: unknown,
   validation: JsonObject,
   candidateSet: JsonObject,
+  federationResult: JsonObject,
+  federatedSelection: JsonObject,
   expectedContext?: WorkforceExecutionContext,
+  sourcePolicy: WorkforceSourcePolicy = "network",
 ): { preparation: JsonObject; bundles: WorkforceExecutionBundle[]; executionContext: WorkforceExecutionContext } {
-  const preparation = objectValue(value, "execution preparation");
+  const wrapper = objectValue(value, "federated execution preparation");
+  assertExactHubKeys(wrapper, FEDERATED_PREPARATION_KEYS, "federated execution preparation");
+  if (wrapper.schemaVersion !== FEDERATED_PREPARATION_SCHEMA) {
+    throw new Error("Hub returned an unsupported federated-preparation schema.");
+  }
+  if (
+    wrapper.federationDigest !== federationResult.federationDigest ||
+    wrapper.federatedSelectionDigest !== federatedSelection.federatedSelectionDigest ||
+    wrapper.candidateSetDigest !== candidateSet.candidateSetDigest
+  ) {
+    throw new Error("Federated preparation wrapper does not match the pinned selection transaction.");
+  }
+  const declaredWrapperDigest = requireSha256(
+    wrapper.federatedPreparationDigest,
+    "federatedPreparationDigest",
+  );
+  const computedWrapperDigest = sha256Json(Object.fromEntries(
+    Object.entries(wrapper).filter(([key]) => key !== "federatedPreparationDigest"),
+  ));
+  if (!equalSha256(declaredWrapperDigest, computedWrapperDigest)) {
+    throw new Error("Federated preparation wrapper digest mismatch.");
+  }
+  const selectedPinDigests = new Set(requireArray(
+    federatedSelection.selectedSourcePins,
+    "selected source pins",
+    128,
+  ).map((raw, index) => String(validateSourcePin(
+    raw,
+    `selected source pin[${index}]`,
+    federationResult,
+    candidateSet,
+    sourcePolicy,
+  ).sourcePinDigest)));
+  const runtimePinDigests = new Set(requireArray(
+    wrapper.runtimeSourcePins,
+    "runtime source pins",
+    128,
+  ).map((raw, index) => String(validateSourcePin(
+    raw,
+    `runtime source pin[${index}]`,
+    federationResult,
+    candidateSet,
+    sourcePolicy,
+  ).sourcePinDigest)));
+  if (
+    selectedPinDigests.size !== runtimePinDigests.size ||
+    [...selectedPinDigests].some((digest) => !runtimePinDigests.has(digest))
+  ) {
+    throw new Error("Federated preparation runtime source pins changed the selected roster.");
+  }
+  const preparation = objectValue(wrapper.executionPlan, "execution preparation plan");
   assertExactHubKeys(preparation, PREPARATION_KEYS, "execution preparation");
   if (preparation.schemaVersion !== PREPARATION_SCHEMA || preparation.status !== "prepared") {
     throw new Error("Hub did not prepare the exact selected workforce.");
+  }
+  if (wrapper.status !== preparation.status) {
+    throw new Error("Federated preparation status does not match its execution plan.");
   }
   if (preparation.selectionReceiptId !== validation.selectionReceiptId) {
     throw new Error("Prepared workforce does not match the accepted selection receipt.");
@@ -2044,17 +2592,48 @@ function mcpJson(value: string | null, toolName: string): unknown {
   if (value.startsWith("hephaestus tool failed:")) {
     throw new WorkforceHubCallError("hub_tool_error", value.slice(0, 500));
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(value);
+    parsed = JSON.parse(value) as unknown;
   } catch {
     // The MCP transport completed and returned a text payload. This is a
     // malformed tool result, not an ambiguous outer transport response, so it
     // must fail closed and must never enter the search replay path.
     throw new WorkforceHubCallError("hub_tool_invalid", `${toolName} returned invalid MCP JSON.`);
   }
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const payload = parsed as JsonObject;
+    const status = typeof payload.status === "string" ? payload.status : "";
+    if (status === "error" || status === "rejected" || status === "blocked") {
+      const rawError = payload.error;
+      const rawCode = typeof rawError === "string"
+        ? rawError
+        : rawError && typeof rawError === "object" && !Array.isArray(rawError) &&
+            typeof (rawError as JsonObject).code === "string"
+          ? String((rawError as JsonObject).code)
+          : typeof payload.detail === "string"
+            ? payload.detail
+            : "hub_tool_error";
+      const code = /^[a-z0-9][a-z0-9_:-]{0,95}$/i.test(rawCode) ? rawCode : "hub_tool_error";
+      const retryAfterMs = Number.isInteger(payload.retryAfterMs) && Number(payload.retryAfterMs) >= 100
+        ? Math.min(10_000, Number(payload.retryAfterMs))
+        : undefined;
+      const receiptExpiresAt = typeof payload.receiptExpiresAt === "string" &&
+        Number.isFinite(Date.parse(payload.receiptExpiresAt))
+        ? payload.receiptExpiresAt
+        : undefined;
+      throw new WorkforceHubCallError(
+        code,
+        `${toolName} failed: ${code}`,
+        retryAfterMs || receiptExpiresAt ? { retryAfterMs, receiptExpiresAt } : undefined,
+      );
+    }
+  }
+  return parsed;
 }
 
 export function installedWorkforceHubMcp(): WorkforceHubMcp {
+  const runtimePin = createMcpRuntimePin();
   return {
     async call(toolName, args, signal) {
       throwIfAborted(signal);
@@ -2063,14 +2642,30 @@ export function installedWorkforceHubMcp(): WorkforceHubMcp {
       let result: string | null;
       try {
         result = await callServerTool(server, toolName, args, {
-          timeoutMs: 45_000,
+          // A fresh install may need to cold-start the bundled Python runtime
+          // and perform several exact immutable package fetches. Keep the
+          // timeout inside the Workforce-only ceiling; the provider-side
+          // idempotency key makes a bounded prepare retry safe.
+          timeoutMs: 5 * 60_000,
           maxTextChars: WORKFORCE_MAX_MCP_TEXT_CHARS,
+          runtimePin,
+          signal,
         });
       } catch (error) {
         if (error instanceof McpToolCallError && error.reason === "response-too-large") {
           throw new WorkforceHubCallError(
             "hub_response_too_large",
             `${toolName} returned more than ${WORKFORCE_MAX_MCP_TEXT_CHARS} text characters.`,
+          );
+        }
+        if (
+          error instanceof McpToolCallError &&
+          error.boundary === "pre-request-error" &&
+          error.message.startsWith("workforce_runtime_incompatible:")
+        ) {
+          throw new WorkforceHubCallError(
+            "workforce_runtime_incompatible",
+            error.message.slice(0, 1_000),
           );
         }
         if (error instanceof McpToolCallError && error.boundary !== "ambiguous-transport") {
@@ -2081,8 +2676,9 @@ export function installedWorkforceHubMcp(): WorkforceHubMcp {
               : `${toolName} returned an explicit MCP protocol error.`,
           );
         }
-        // No valid MCP response was available. Only search_candidates may
-        // replay this ambiguous transport boundary, and only once.
+        // No valid MCP response was available. The orchestration layer decides
+        // replay policy: search is deterministic-upserted, while prepare is
+        // replayed only with its exact provider idempotency key and receipt.
         throw new WorkforceHubCallError(
           "hub_transport_error",
           `${toolName} transport failed before a valid response was available.`,
@@ -2425,6 +3021,23 @@ function hubErrorCode(error: unknown): string {
   return /^[a-z0-9][a-z0-9_:-]{0,95}$/i.test(raw) ? raw : "hub_tool_failed";
 }
 
+const REFRESHABLE_WORKFORCE_SESSION_CODES = new Set([
+  "federation_session_expired",
+  "federation_session_not_found",
+  "source_candidate_set_expired",
+  "source_candidate_set_not_found",
+  "federated_selection_not_pinned",
+]);
+
+function isRefreshableWorkforceSessionError(error: unknown): boolean {
+  return REFRESHABLE_WORKFORCE_SESSION_CODES.has(hubErrorCode(error));
+}
+
+function candidateSetExpiresSoon(candidateSet: JsonObject, now = Date.now()): boolean {
+  const expiresAt = Date.parse(String(candidateSet.expiresAt ?? ""));
+  return Number.isFinite(expiresAt) && expiresAt - now <= WORKFORCE_SESSION_SAFETY_WINDOW_MS;
+}
+
 function hubRetryClass(error: unknown): string | null {
   if (!error || typeof error !== "object" || !("details" in error)) return null;
   const details = (error as { details?: unknown }).details;
@@ -2433,10 +3046,61 @@ function hubRetryClass(error: unknown): string | null {
   return value === AMBIGUOUS_SEARCH_RETRY_CLASS ? value : null;
 }
 
+export function hubRetryAfterMs(error: unknown): number {
+  if (!error || typeof error !== "object" || !("details" in error)) return 250;
+  const details = (error as { details?: unknown }).details;
+  if (!details || typeof details !== "object") return 250;
+  const value = (details as { retryAfterMs?: unknown }).retryAfterMs;
+  return typeof value === "number" && Number.isInteger(value)
+    ? Math.max(100, Math.min(10_000, value))
+    : 250;
+}
+
+export function hubReceiptExpiresAt(error: unknown): number | null {
+  if (!error || typeof error !== "object" || !("details" in error)) return null;
+  const details = (error as { details?: unknown }).details;
+  if (!details || typeof details !== "object") return null;
+  const value = Date.parse(String((details as { receiptExpiresAt?: unknown }).receiptExpiresAt ?? ""));
+  return Number.isFinite(value) ? value : null;
+}
+
+export function waitForWorkforceRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => finish(), Math.max(0, ms));
+    const onAbort = () => finish(new Error("Workforce orchestration was aborted."));
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
 function isAmbiguousSearchTransportError(error: unknown): boolean {
   const code = hubErrorCode(error);
   return (code === "hub_transport_error" || code === "hub_invalid_response") &&
     hubRetryClass(error) === AMBIGUOUS_SEARCH_RETRY_CLASS;
+}
+
+const RETRYABLE_PREPARE_CODES = new Set([
+  ...REFRESHABLE_WORKFORCE_SESSION_CODES,
+  "source_timeout",
+  "source_unavailable",
+  "source_bundle_fetch_failed",
+  "prepare_receipt_cache_busy",
+  "hub_transport_error",
+  "hub_invalid_response",
+]);
+
+function isRetryablePrepareError(error: unknown): boolean {
+  return RETRYABLE_PREPARE_CODES.has(hubErrorCode(error));
 }
 
 function emitHubToolObservation(
@@ -2494,7 +3158,9 @@ function emitLeaderDecisionSupersession(
     done: true,
     status: supersession.reason === "repeated-expansion-rejected"
       ? "Repeated Workforce candidate expansion rejected; provisional selection is non-authoritative"
-      : "Provisional Workforce selection superseded by semantic expansion",
+      : supersession.reason === "session-refresh"
+        ? "Expired Workforce transaction superseded; host selection will be re-authored from a fresh candidate set"
+        : "Provisional Workforce selection superseded by semantic expansion",
     tool: {
       name: "agentlas.workforce.leader_decision_supersession",
       id: supersession.supersessionId,
@@ -2587,13 +3253,52 @@ function emitWorkforceBenchmarkSelectionSnapshot(
   });
 }
 
-function candidateSearchArgs(workOrder: JsonObject): JsonObject {
-  return { workOrder, sourceScope: WORKFORCE_SOURCE_SCOPE };
+function candidateSearchArgs(
+  workOrder: JsonObject,
+  sourcePolicy: WorkforceSourcePolicy,
+): JsonObject {
+  return {
+    workOrder,
+    sourceScope: sourcePolicy === "hub-required"
+      ? WORKFORCE_HUB_SOURCE_SCOPE
+      : WORKFORCE_SOURCE_SCOPE,
+  };
+}
+
+export function workforcePrepareAttempt(
+  occurrenceId: string,
+  workOrder: JsonObject,
+  selection: JsonObject,
+  federatedSelection: JsonObject,
+): JsonObject {
+  if (!occurrenceId.trim() || Buffer.byteLength(occurrenceId, "utf8") > 512 || occurrenceId.includes("\0")) {
+    throw new Error("Workforce prepare occurrenceId is invalid.");
+  }
+  const selectedSourcePinDigests = arrayValue(federatedSelection.selectedSourcePins).map((raw) => (
+    requireSha256(objectValue(raw, "federated source pin").sourcePinDigest, "sourcePinDigest")
+  ));
+  if (selectedSourcePinDigests.length < 1 || new Set(selectedSourcePinDigests).size !== selectedSourcePinDigests.length) {
+    throw new Error("Workforce prepare source pin digests are invalid.");
+  }
+  const payload: JsonObject = {
+    schemaVersion: PREPARE_ATTEMPT_SCHEMA,
+    occurrenceId,
+    workOrderDigest: sha256Json(workOrder),
+    selectionDigest: sha256Json(selection),
+    federatedSelectionDigest: requireSha256(
+      federatedSelection.federatedSelectionDigest,
+      "federatedSelectionDigest",
+    ),
+    selectedSourcePinDigests,
+  };
+  payload.idempotencyKey = sha256Json(payload);
+  return payload;
 }
 
 export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Promise<WorkforceSelectionResult> {
   const goal = p.goal.trim();
   if (!goal) throw new Error("Workforce goal is required.");
+  const sourcePolicy = p.sourcePolicy ?? "network";
   const hub = p.hubMcp ?? installedWorkforceHubMcp();
   const modelId = canonicalModelId(p.active);
   const runtimeId = canonicalRuntimeId(p.active);
@@ -2605,10 +3310,25 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
   const schemaAttempts: WorkforceSchemaAttempt[] = [];
   const workOrderRefinements: WorkforceWorkOrderRefinementReceipt[] = [];
   const requiredWorkOrderId = `work-order:${randomUUID()}`;
+  const occurrenceId = p.occurrenceId?.trim() || `workforce-occurrence:${randomUUID()}`;
 
   const hubStage = async (tool: WorkforceToolName, args: JsonObject): Promise<unknown> => {
-    const maxAttempts = tool === "workforce.search_candidates" ? MAX_SEARCH_TRANSPORT_ATTEMPTS : 1;
+    const maxAttempts = tool === "workforce.search_candidates"
+      ? MAX_SEARCH_TRANSPORT_ATTEMPTS
+      : tool === "workforce.prepare_execution"
+        ? MAX_PREPARE_TRANSPORT_ATTEMPTS
+        : 1;
     const requestDigest = sha256Json(args);
+    const candidateSetValue = args.candidateSet && typeof args.candidateSet === "object" && !Array.isArray(args.candidateSet)
+      ? args.candidateSet as JsonObject
+      : null;
+    const candidateExpiry = Date.parse(String(candidateSetValue?.expiresAt ?? ""));
+    let prepareBusyDeadline = Math.min(
+      Date.now() + WORKFORCE_PREPARE_BUSY_WAIT_MAX_MS,
+      Number.isFinite(candidateExpiry)
+        ? candidateExpiry - WORKFORCE_SESSION_SAFETY_WINDOW_MS
+        : Number.POSITIVE_INFINITY,
+    );
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const invocationId = `mcp:${randomUUID()}`;
       const startedAt = new Date().toISOString();
@@ -2626,7 +3346,9 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
           retryScheduled: false,
           replaySafety: tool === "workforce.search_candidates"
             ? "deterministic-selection-session-replace-upsert"
-            : "not-retried",
+            : tool === "workforce.prepare_execution"
+              ? "exact-pin-idempotency-receipt-cache"
+              : "not-retried",
           authoritativeChain: true,
           startedAt,
           completedAt: new Date().toISOString(),
@@ -2638,10 +3360,18 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
         emitHubToolObservation(p, observation);
         return result;
       } catch (error) {
-        const retryScheduled = tool === "workforce.search_candidates" &&
-          attempt < maxAttempts &&
-          p.signal?.aborted !== true &&
-          isAmbiguousSearchTransportError(error);
+        const code = hubErrorCode(error);
+        const prepareBusy = tool === "workforce.prepare_execution" && code === "prepare_receipt_cache_busy";
+        const remoteReceiptExpiry = prepareBusy ? hubReceiptExpiresAt(error) : null;
+        if (remoteReceiptExpiry !== null) {
+          prepareBusyDeadline = Math.min(prepareBusyDeadline, remoteReceiptExpiry);
+        }
+        const retryScheduled = attempt < maxAttempts && p.signal?.aborted !== true && (
+          (tool === "workforce.search_candidates" && isAmbiguousSearchTransportError(error)) ||
+          (tool === "workforce.prepare_execution" && isRetryablePrepareError(error) && (
+            prepareBusy ? Date.now() < prepareBusyDeadline : attempt < 2
+          ))
+        );
         const observation: WorkforceHubToolObservation = {
           schemaVersion: "agentlas.workforce-hub-tool-observation.v1",
           tool,
@@ -2652,7 +3382,9 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
           retryScheduled,
           replaySafety: tool === "workforce.search_candidates"
             ? "deterministic-selection-session-replace-upsert"
-            : "not-retried",
+            : tool === "workforce.prepare_execution"
+              ? "exact-pin-idempotency-receipt-cache"
+              : "not-retried",
           authoritativeChain: true,
           startedAt,
           completedAt: new Date().toISOString(),
@@ -2665,6 +3397,11 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
         emitMcpStatus(p.sink, tool, invocationId, true, true);
         emitHubToolObservation(p, observation);
         if (!retryScheduled) throw error;
+        if (prepareBusy) {
+          const remaining = prepareBusyDeadline - Date.now();
+          if (remaining <= 0) throw error;
+          await waitForWorkforceRetry(Math.min(hubRetryAfterMs(error), remaining), p.signal);
+        }
       }
     }
     throw new Error(`${tool} retry loop exited unexpectedly.`);
@@ -2675,7 +3412,7 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
     refinement: 1 | 2,
     triggerKind: "cardinality" | "selection-content-expansion",
   ): void => {
-    const requestDigest = sha256Json(candidateSearchArgs(workOrder));
+    const requestDigest = sha256Json(candidateSearchArgs(workOrder, sourcePolicy));
     for (const observation of hubToolObservations) {
       if (observation.tool !== "workforce.search_candidates" || observation.requestDigest !== requestDigest) continue;
       observation.authoritativeChain = false;
@@ -2712,7 +3449,9 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
     }
     for (const attempt of schemaAttempts) {
       if (attempt.stage !== "selection" || attempt.invocationId !== invocationId) continue;
-      attempt.stage = "leader-selection-expansion";
+      attempt.stage = reason === "session-refresh"
+        ? "leader-selection-session-refresh"
+        : "leader-selection-expansion";
       attempt.authoritativeDecision = false;
       attempt.superseded = true;
       attempt.supersededReason = reason;
@@ -2785,9 +3524,9 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
 
   let refinementsUsed = 0;
   let searchResult = validateFederationSearchResult(
-    await hubStage("workforce.search_candidates", candidateSearchArgs(workOrder)),
+    await hubStage("workforce.search_candidates", candidateSearchArgs(workOrder, sourcePolicy)),
     workOrder,
-    { allowUnfilled: true },
+    { allowUnfilled: true, sourcePolicy },
   );
   let federationResult = searchResult.federationResult;
   let candidateSet = searchResult.candidateSet;
@@ -2795,9 +3534,9 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
 
   const searchCurrentWorkOrder = async (): Promise<void> => {
     searchResult = validateFederationSearchResult(
-      await hubStage("workforce.search_candidates", candidateSearchArgs(workOrder)),
+      await hubStage("workforce.search_candidates", candidateSearchArgs(workOrder, sourcePolicy)),
       workOrder,
-      { allowUnfilled: true },
+      { allowUnfilled: true, sourcePolicy },
     );
     federationResult = searchResult.federationResult;
     candidateSet = searchResult.candidateSet;
@@ -2963,9 +3702,10 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
     return authoredSelection;
   };
 
-  let selection = await runLeaderSelection();
-  const firstExpansion = requireIds(selection.requestExpansionForSlots, "selection requestExpansionForSlots");
-  if (firstExpansion.length > 0) {
+  const selectCurrentCandidateSet = async (): Promise<JsonObject> => {
+    let authored = await runLeaderSelection();
+    const firstExpansion = requireIds(authored.requestExpansionForSlots, "selection requestExpansionForSlots");
+    if (firstExpansion.length === 0) return authored;
     const provisional = leaderInvocations[leaderInvocations.length - 1];
     if (provisional?.phase === "selection") supersedeLeaderSelection(provisional.invocationId);
     if (refinementsUsed >= MAX_WORK_ORDER_REFINEMENTS) {
@@ -2981,8 +3721,8 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
     await searchCurrentWorkOrder();
     await fillRequiredCardinality();
     candidateSet = validateCandidateSet(candidateSet, workOrder);
-    selection = await runLeaderSelection();
-    if (requireIds(selection.requestExpansionForSlots, "selection requestExpansionForSlots").length > 0) {
+    authored = await runLeaderSelection();
+    if (requireIds(authored.requestExpansionForSlots, "selection requestExpansionForSlots").length > 0) {
       const repeatedProvisional = leaderInvocations[leaderInvocations.length - 1];
       if (repeatedProvisional?.phase === "selection") {
         supersedeLeaderSelection(repeatedProvisional.invocationId, "repeated-expansion-rejected");
@@ -2992,32 +3732,121 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
         "candidate_expansion_repeated: Host LLM repeated semantic candidate expansion after a replacement WorkOrder and re-search.",
       );
     }
+    return authored;
+  };
+
+  let sessionRefreshes = 0;
+  let selection = await selectCurrentCandidateSet();
+  let validation: JsonObject | null = null;
+  let federatedSelection: JsonObject | null = null;
+  let prepared: ReturnType<typeof validateExecutionPreparation> | null = null;
+  let acceptedPrepareAttempt: JsonObject | null = null;
+  let acceptedPrepareObservation: WorkforceHubToolObservation | null = null;
+
+  const refreshSession = async (): Promise<void> => {
+    if (sessionRefreshes >= MAX_WORKFORCE_SESSION_REFRESHES) {
+      throw new WorkforceHubCallError(
+        "workforce_session_refresh_exhausted",
+        "Workforce session expired repeatedly before the exact roster could be prepared.",
+      );
+    }
+    const authoritativeSelection = [...leaderInvocations]
+      .reverse()
+      .find((row) => row.phase === "selection" && row.authoritativeDecision !== false);
+    if (authoritativeSelection) supersedeLeaderSelection(authoritativeSelection.invocationId, "session-refresh");
+    sessionRefreshes += 1;
+    for (const observation of hubToolObservations) {
+      if (!observation.authoritativeChain) continue;
+      observation.authoritativeChain = false;
+      observation.supersededBySessionRefresh = true;
+      observation.sessionRefresh = sessionRefreshes as 1 | 2;
+    }
+    p.sink({
+      kind: "thinking",
+      status: `Workforce transaction expired; refreshing candidate set ${sessionRefreshes}/${MAX_WORKFORCE_SESSION_REFRESHES}`,
+      model: modelId,
+      agentId: "workforce:leader",
+      agentName: "Agentlas Workforce Leader",
+      role: "workforce-leader",
+      tier: 1,
+      phase: "plan",
+    });
+    await searchCurrentWorkOrder();
+    await fillRequiredCardinality();
+    candidateSet = validateCandidateSet(candidateSet, workOrder);
+    selection = await selectCurrentCandidateSet();
+  };
+
+  for (;;) {
+    if (candidateSetExpiresSoon(candidateSet)) {
+      await refreshSession();
+      continue;
+    }
+    const executionContext = buildWorkforceExecutionContext(workOrder, selection);
+    try {
+      const federatedValidation = validateFederatedSelectionResult(
+        await hubStage(
+          "workforce.validate_selection",
+          { workOrder, candidateSet, selection, federationResult },
+        ),
+        workOrder,
+        selection,
+        candidateSet,
+        federationResult,
+        sourcePolicy,
+      );
+      validation = federatedValidation.validation;
+      federatedSelection = federatedValidation.federatedSelection;
+      const prepareAttempt = workforcePrepareAttempt(
+        occurrenceId,
+        workOrder,
+        selection,
+        federatedSelection,
+      );
+      const prepareArgs: JsonObject = {
+        workOrder,
+        candidateSet,
+        selection,
+        federationResult,
+        federatedSelection,
+        prepareAttempt,
+      };
+      const prepareResult = await hubStage("workforce.prepare_execution", prepareArgs);
+      prepared = validateExecutionPreparation(
+        prepareResult,
+        validation,
+        candidateSet,
+        federationResult,
+        federatedSelection,
+        executionContext,
+        sourcePolicy,
+      );
+      const observation = [...hubToolObservations].reverse().find((row) => (
+        row.tool === "workforce.prepare_execution" &&
+        row.status === "succeeded" &&
+        row.authoritativeChain !== false &&
+        row.requestDigest === sha256Json(prepareArgs) &&
+        row.responseDigest === sha256Json(prepareResult)
+      ));
+      if (!observation?.responseDigest) {
+        throw new Error("Validated Workforce preparation has no bound Hub transport receipt.");
+      }
+      acceptedPrepareAttempt = prepareAttempt;
+      acceptedPrepareObservation = observation;
+      break;
+    } catch (error) {
+      if (!isRefreshableWorkforceSessionError(error)) throw error;
+      validation = null;
+      federatedSelection = null;
+      prepared = null;
+      acceptedPrepareAttempt = null;
+      acceptedPrepareObservation = null;
+      await refreshSession();
+    }
   }
-
-  const executionContext = buildWorkforceExecutionContext(workOrder, selection);
-
-  const federatedValidation = validateFederatedSelectionResult(
-    await hubStage(
-      "workforce.validate_selection",
-      { workOrder, candidateSet, selection, federationResult },
-    ),
-    selection,
-    candidateSet,
-    federationResult,
-  );
-  const validation = federatedValidation.validation;
-  const federatedSelection = federatedValidation.federatedSelection;
-
-  const prepared = validateExecutionPreparation(await hubStage(
-    "workforce.prepare_execution",
-    {
-      workOrder,
-      candidateSet,
-      selection,
-      federationResult,
-      federatedSelection,
-    },
-  ), validation, candidateSet, executionContext);
+  if (!validation || !federatedSelection || !prepared || !acceptedPrepareAttempt || !acceptedPrepareObservation) {
+    throw new Error("Workforce preparation loop ended without an authoritative transaction.");
+  }
 
   mcpCalls.push(...hubToolObservations
     .filter((row) => row.status === "succeeded" && row.authoritativeChain !== false)
@@ -3088,6 +3917,38 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
     schemaAttempts,
     workOrderRefinements,
   };
+  const prepareReceiptPayload = {
+    schemaVersion: "agentlas.workforce-prepare-checkpoint-receipt.v1" as const,
+    occurrenceId: requireBoundedString(
+      acceptedPrepareAttempt.occurrenceId,
+      "prepare occurrenceId",
+      512,
+    ),
+    idempotencyKey: requireSha256(acceptedPrepareAttempt.idempotencyKey, "prepare idempotencyKey"),
+    preparationReceiptId: receipt.preparationReceiptId,
+    requestDigest: requireSha256(acceptedPrepareObservation.requestDigest, "prepare requestDigest"),
+    responseDigest: requireSha256(acceptedPrepareObservation.responseDigest, "prepare responseDigest"),
+    workOrderDigest: requireSha256(acceptedPrepareAttempt.workOrderDigest, "prepare workOrderDigest"),
+    selectionDigest: requireSha256(acceptedPrepareAttempt.selectionDigest, "prepare selectionDigest"),
+    federatedSelectionDigest: requireSha256(
+      acceptedPrepareAttempt.federatedSelectionDigest,
+      "prepare federatedSelectionDigest",
+    ),
+    selectedSourcePinDigests: requireArray(
+      acceptedPrepareAttempt.selectedSourcePinDigests,
+      "prepare selectedSourcePinDigests",
+      128,
+      1,
+    ).map((digest, index) => requireSha256(digest, `prepare selectedSourcePinDigests[${index}]`)),
+    candidateSetDigest: receipt.candidateSetDigest,
+    selectionReceiptId: receipt.selectionReceiptId,
+    executionContextDigest: receipt.executionContextDigest,
+    preparedReleasesDigest: sha256Json(receipt.preparedReleases),
+  };
+  const prepareCheckpointReceipt: WorkforcePrepareCheckpointReceipt = {
+    ...prepareReceiptPayload,
+    receiptDigest: sha256Json(prepareReceiptPayload),
+  };
   return {
     workOrder,
     candidateSet,
@@ -3096,5 +3957,6 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
     preparation: prepared.preparation,
     specs,
     receipt,
+    prepareCheckpointReceipt,
   };
 }

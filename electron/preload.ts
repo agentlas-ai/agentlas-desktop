@@ -7,6 +7,8 @@ import type {
   BugReportInput,
   Automation,
   AutomationCreateInput,
+  AutomationGraphReconcileInput,
+  AutomationTriggerEventReconcileInput,
   FsPathGrant,
   FsReadScope,
   McpInvocationEvent,
@@ -479,6 +481,14 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("automations:updateGraph", id, graph),
     runNow: (id: string) => ipcRenderer.invoke("automations:runNow", id),
     listRuns: (id: string, limit?: number) => ipcRenderer.invoke("automations:listRuns", id, limit),
+    listTriggerAttention: (automationId: string) =>
+      ipcRenderer.invoke("automations:listTriggerAttention", automationId),
+    reconcileTriggerEvent: (input: AutomationTriggerEventReconcileInput) =>
+      ipcRenderer.invoke("automations:reconcileTriggerEvent", input),
+    getGraphReconciliation: (automationId: string) =>
+      ipcRenderer.invoke("automations:getGraphReconciliation", automationId),
+    reconcileGraph: (input: AutomationGraphReconcileInput) =>
+      ipcRenderer.invoke("automations:reconcileGraph", input),
     liveRunChannel: (automationId: string) => `automations:liveRun:${automationId}`,
     latestRun: (automationId: string) => ipcRenderer.invoke("automations:latestRun", automationId),
     getSession: (automationId: string) => ipcRenderer.invoke("automations:getSession", automationId),

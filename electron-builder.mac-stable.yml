@@ -56,7 +56,7 @@ electronFuses:
   enableEmbeddedAsarIntegrityValidation: true
   onlyLoadAppFromAsar: true
 
-# ── Embedded Hephaestus engine + optional Python runtime ─────────────────────
+# ── Embedded Hephaestus engine + mandatory pinned Python runtime ─────────────
 # Keep the from/to/filter rules in sync with electron-builder.yml's extraResources.
 # This file is a standalone (non-`extends`) duplicate, so without this block the
 # signed/notarized mac release would ship WITHOUT the embedded engine.
@@ -110,7 +110,8 @@ extraResources:
       - "!**/.claude/settings.*.local.json"
       - "!**/*.log"
       - "!**/._*"
-  # 선택적 standalone Python. 비우면 시스템 python 폴백; `npm run fetch:python` 으로 채우면 동봉.
+  # 필수 standalone Python. 패키징 직전 immutable SHA-256 asset을 다시 받고,
+  # afterPack이 플랫폼/실행파일/tree 전체를 검증한다. 빈 디렉터리는 실패다.
   - from: build-resources/python-runtime
     to: python-runtime
     filter:

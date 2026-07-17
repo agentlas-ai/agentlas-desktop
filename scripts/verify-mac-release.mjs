@@ -209,17 +209,16 @@ if (appleDouble.output) {
 }
 
 const ready = failures.length === 0;
-const latestMac = writeLatestMacYml(artifacts);
+writeLatestMacYml(artifacts);
 const summary = {
+  schemaVersion: "agentlas.desktop-release-verification.v2",
   generatedAt: new Date().toISOString(),
   sourceCommit: exactSourceCommit(),
-  releaseDir,
   repo,
   tag,
   version,
   ready,
   allowUnnotarized,
-  latestMac,
   artifacts: artifacts.map((artifact) => ({
     arch: artifact.arch,
     fileName: artifact.fileName,
@@ -231,41 +230,9 @@ const summary = {
     innerApp: artifact.inner?.dmgApp ? {
       gatekeeperAccepted: artifact.inner.dmgApp.gatekeeperAccepted,
       notarized: artifact.inner.dmgApp.notarized,
-      developerId: artifact.inner.dmgApp.developerId,
-      bundleIdentifier: artifact.inner.dmgApp.bundleIdentifier,
-      teamIdentifier: artifact.inner.dmgApp.teamIdentifier,
-      leafAuthority: artifact.inner.dmgApp.leafAuthority,
-      designatedRequirement: artifact.inner.dmgApp.designatedRequirement,
-      updaterTrustPolicy: artifact.inner.dmgSigningPolicy ? {
-        present: artifact.inner.dmgSigningPolicy.present,
-        matchesSource: artifact.inner.dmgSigningPolicy.matchesSource,
-        sha256: artifact.inner.dmgSigningPolicy.sha256,
-      } : null,
-    } : null,
-    updaterZipApp: artifact.inner?.zipApp ? {
-      fileName: artifact.inner.zipFile.split("/").at(-1),
-      gatekeeperAccepted: artifact.inner.zipApp.gatekeeperAccepted,
-      notarized: artifact.inner.zipApp.notarized,
-      developerId: artifact.inner.zipApp.developerId,
-      bundleIdentifier: artifact.inner.zipApp.bundleIdentifier,
-      teamIdentifier: artifact.inner.zipApp.teamIdentifier,
-      leafAuthority: artifact.inner.zipApp.leafAuthority,
-      designatedRequirement: artifact.inner.zipApp.designatedRequirement,
-      matchesDmgDesignatedRequirement: artifact.inner.designatedRequirementMatches,
-      updaterTrustPolicy: artifact.inner.zipSigningPolicy ? {
-        present: artifact.inner.zipSigningPolicy.present,
-        matchesSource: artifact.inner.zipSigningPolicy.matchesSource,
-        sha256: artifact.inner.zipSigningPolicy.sha256,
-      } : null,
     } : null,
     url: artifactUrl(artifact.arch),
-    checks: {
-      hdiutil: artifact.hdiutil ? { ok: artifact.hdiutil.ok, output: artifact.hdiutil.output } : null,
-      stapler: artifact.stapler ? { ok: artifact.stapler.ok, output: artifact.stapler.output } : null,
-      spctl: artifact.spctl ? { ok: artifact.spctl.ok, output: artifact.spctl.output } : null,
-    },
   })),
-  failures,
 };
 
 mkdirSync(releaseDir, { recursive: true });

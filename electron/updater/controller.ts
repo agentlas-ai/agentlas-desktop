@@ -33,6 +33,9 @@ export const CONTINUITY_CORE_TABLES = [
   "failure_events",
   "automations",
   "automation_runs",
+  // Accepted fs/chain/webhook/poll deliveries must survive an app update. The
+  // bound run receipt is what prevents a post-update replay of external work.
+  "automation_trigger_events",
   "agent_evolution_proposals",
   "agent_evolution_receipts",
   "agent_asset_versions",

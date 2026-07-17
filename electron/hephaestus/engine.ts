@@ -17,9 +17,9 @@ import type { ChildProcess } from "node:child_process";
 import { detachedSpawnOpts, killCliTree, trackRunChild, withCliPath } from "../runtime/exec";
 import { withPythonCacheBoundary } from "../runtime/python-cache";
 import { currentUiLocale } from "../ui-locale";
-import { hephaestusRoot, resetHephaestusRootCache } from "./root";
+import { hephaestusRoot, readHephaestusVersion, resetHephaestusRootCache } from "./root";
 
-export { hephaestusRoot } from "./root";
+export { hephaestusRoot, readHephaestusVersion } from "./root";
 
 // bin/hephaestus 의 `run_python_module` 과 바이트 동일한 부트스트랩.
 // `python -c <BOOTSTRAP> <module> <args...>` 형태로 호출하면 sys.argv[0] 이 모듈명이 되고,
@@ -138,7 +138,11 @@ function probePython(candidate: string, env: NodeJS.ProcessEnv): Promise<string 
       // Explicit runtimes are authoritative and may have a slow first launch
       // under Windows antivirus or a cold hosted-runner filesystem. Do not
       // misreport a valid configured Python as missing after only 2.5 seconds.
-      const timeoutMs = candidate === process.env.HEPHAESTUS_PYTHON ? 10_000 : 2_500;
+      const isBundledRuntime = path.isAbsolute(candidate) &&
+        candidate.split(path.sep).includes("python-runtime");
+      const timeoutMs = candidate === process.env.HEPHAESTUS_PYTHON || isBundledRuntime
+        ? 10_000
+        : 2_500;
       timer = setTimeout(() => {
         try {
           child.kill();
@@ -183,6 +187,92 @@ export async function resolveHephaestusPython(): Promise<{ python: string; versi
 export function resetHephaestusCache(): void {
   resetHephaestusRootCache();
   cachedPython = undefined;
+}
+
+export interface HephaestusStdioLaunch {
+  command: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  runtimeRoot: string;
+}
+
+/**
+ * Build the same cross-platform Python launch contract used by the core bridge.
+ * This keeps MCP off the mutable `~/.agentlas/.../bin/hephaestus` shell path and
+ * lets packaged Windows/macOS/Linux apps use their bundled Python runtime.
+ */
+export async function resolveHephaestusStdioLaunch(
+  module: string,
+  args: string[],
+  runtimeRootOverride?: string,
+): Promise<HephaestusStdioLaunch | null> {
+  const selectedRoot = runtimeRootOverride?.trim() || hephaestusRoot();
+  if (!selectedRoot) return null;
+  let runtimeRoot: string;
+  try {
+    // A managed `current` path is mutable. Resolve it once so a multi-call
+    // Workforce transaction can pin the immutable target directory.
+    runtimeRoot = fs.realpathSync(selectedRoot);
+    if (!fs.existsSync(path.join(runtimeRoot, "agentlas_cloud", "__main__.py"))) return null;
+  } catch {
+    return null;
+  }
+  const py = await resolveHephaestusPython();
+  if (!py) return null;
+  const pythonArgs = py.python === "py"
+    ? ["-3", "-c", PY_BOOTSTRAP, module, ...args]
+    : ["-c", PY_BOOTSTRAP, module, ...args];
+  return {
+    command: py.python,
+    args: pythonArgs,
+    runtimeRoot,
+    env: withPythonCacheBoundary({
+      HEPHAESTUS_RUNTIME_ROOT: runtimeRoot,
+      PYTHONPATH: runtimeRoot,
+      PYTHONUTF8: "1",
+      PYTHONIOENCODING: "utf-8",
+    }),
+  };
+}
+
+/**
+ * Start the Agentlas OS digest-verified updater without delaying Desktop.
+ * The Python worker owns its lock, download verification, staged healthcheck,
+ * and atomic `runtime/current` switch. The immutable bundled runtime remains
+ * usable while this detached worker runs or when the machine is offline.
+ */
+export async function startHephaestusRuntimeAutoUpdate(): Promise<boolean> {
+  if (
+    process.env.HEPHAESTUS_AUTO_UPDATE === "0" ||
+    process.env.HEPHAESTUS_UPDATE_CHECK === "0"
+  ) return false;
+  const runtimeRoot = hephaestusRoot();
+  if (!runtimeRoot) return false;
+  const launch = await resolveHephaestusStdioLaunch(
+    "agentlas_cloud.update",
+    ["--auto-update-worker", runtimeRoot],
+  );
+  if (!launch) return false;
+  try {
+    const child = crossSpawn(launch.command, launch.args, {
+      cwd: safeCwd(),
+      env: withCliPath({ ...process.env, ...launch.env }),
+      stdio: "ignore",
+      detached: true,
+      windowsHide: true,
+    });
+    child.once("error", (error) => {
+      console.error("[hephaestus] Agentlas OS auto-update worker failed to start:", error.message);
+    });
+    child.unref();
+    return true;
+  } catch (error) {
+    console.error(
+      "[hephaestus] Agentlas OS auto-update worker failed to start:",
+      error instanceof Error ? error.message : String(error),
+    );
+    return false;
+  }
 }
 
 function safeCwd(cwd?: string): string {
@@ -428,35 +518,6 @@ export interface HephaestusAvailability {
   version: string | null;
   /** Interpreter version is diagnostic metadata, not the Agentlas OS version. */
   pythonVersion: string | null;
-}
-
-function normalizeHephaestusVersion(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const match = value.trim().match(/^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$/);
-  return match?.[1] ?? null;
-}
-
-export function readHephaestusVersion(root: string | null): string | null {
-  if (!root) return null;
-  // Managed installs (`~/.agentlas/runtime/current`) expose RELEASE as their
-  // canonical version marker, while bundled Desktop resources expose a
-  // manifest. Keep package.json as a development-tree fallback only.
-  try {
-    const release = normalizeHephaestusVersion(fs.readFileSync(path.join(root, "RELEASE"), "utf8"));
-    if (release) return release;
-  } catch {
-    // Fall through to bundled/development metadata.
-  }
-  for (const fileName of ["manifest.json", "package.json"]) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(path.join(root, fileName), "utf8")) as { version?: unknown };
-      const version = normalizeHephaestusVersion(parsed.version);
-      if (version) return version;
-    } catch {
-      // Try the next canonical version file.
-    }
-  }
-  return null;
 }
 
 /** 엔진 가용성(번들 존재 + python) 확인. UI 게이트/설정 표시에 사용. */

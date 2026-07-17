@@ -55,7 +55,12 @@ function synthesizeLegacyGraph(a: Automation): WorkflowGraph {
         id: "n1",
         type: "agent",
         position: { x: 280, y: 120 },
-        config: { ref: a.targetId, targetType: a.targetType, prompt: a.promptTemplate },
+        config: {
+          ref: a.targetId,
+          targetType: a.targetType,
+          prompt: a.promptTemplate,
+          ...(a.targetType === "hub" && a.targetVersion ? { targetVersion: a.targetVersion } : {}),
+        },
         label: a.targetType === "firm" ? "Firm" : a.targetType === "hub" ? "Hub Agent" : "Agent",
       },
     ],

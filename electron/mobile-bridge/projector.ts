@@ -369,6 +369,12 @@ export function projectMobileBridgeAutomation(
 ): MobileBridgeAutomationDto {
   const latestRun = listRunHistory(automation.id, 1)[0];
   const liveRunState = getAutomationLiveRunState(automation.id);
+  const latestNeedsAttention = latestRun != null && (
+    latestRun.status === "error" ||
+    latestRun.status === "partial" ||
+    latestRun.status === "blocked" ||
+    latestRun.status === "needs_input"
+  );
   return {
     id: automation.id,
     name: displayText(automation.name, 1_024),
@@ -386,14 +392,20 @@ export function projectMobileBridgeAutomation(
     hubMode: automation.hubMode ?? "hub-allowed",
     runState: liveRunState ?? (latestRun == null
       ? "unknown"
-      : latestRun.status === "error"
+      : latestNeedsAttention
         ? "failed"
         : latestRun.status === "ok"
           ? "completed"
           : "idle"),
-    lastError: liveRunState == null && latestRun?.status === "error"
-      ? "automation_failed"
-      : null,
+    lastError: liveRunState != null || !latestNeedsAttention
+      ? null
+      : latestRun?.status === "partial"
+        ? "automation_partial"
+        : latestRun?.status === "blocked"
+          ? "automation_blocked"
+          : latestRun?.status === "needs_input"
+            ? "automation_needs_input"
+            : "automation_failed",
     // DESKTOP_MOBILE_BRIDGE: promptTemplate, graph, webhook token, fs path,
     // and poll-source configuration remain on the Desktop.
   };

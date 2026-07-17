@@ -5,12 +5,13 @@
 // v33: next-run 계산을 schedule.ts(croner)에 위임한다. computeNextRun은 이제 string|null을
 // 반환하며(null=미래 발생 없음 → 종료), markAutomationRun은 misfire coalesce 정책 + run_history
 // 기록 + max_runs/end_at 종료를 적용한다. graph_json/schedule_json/timezone은 additive.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { emitDesktopStoreChange } from "./change-bus";
 import { AUTOMATION_RUN_STALE_AFTER_MS, getDb } from "./db";
 import { nextRun, specFromStored, defaultTz } from "./schedule";
 import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
+import { evaluateCondition } from "../triggers/condition";
 import type {
   Automation,
   AutomationExecutionPermission,
@@ -95,7 +96,10 @@ function normalizeToolMode(value: string | null | undefined): AutomationToolMode
 }
 
 function normalizeHubMode(value: string | null | undefined): AutomationHubMode {
-  return value === "hub-first" || value === "local-only" || value === "hub-allowed" ? value : "hub-allowed";
+  if (value === "hub-first" || value === "local-only" || value === "hub-allowed") return value;
+  // NULL is the documented legacy default. A present-but-unknown value is a
+  // damaged/future contract and must never widen execution to Network/Cloud.
+  return value == null ? "hub-allowed" : "local-only";
 }
 
 /**
@@ -107,15 +111,65 @@ function normalizeExecutionPermission(value: unknown): AutomationExecutionPermis
   return value == null ? "write" : "read";
 }
 
-function parseRuntimeSelection(raw: string | null | undefined): RuntimeSelection | undefined {
-  if (!raw) return undefined;
+const RUNTIME_KINDS = new Set([
+  "claude-code", "codex", "gemini", "grok", "cursor", "byok", "ollama", "lmstudio", "mlx",
+]);
+const RUNTIME_BACKENDS = new Set([
+  "anthropic", "openai", "google", "ollama", "lmstudio", "mlx", "upstage", "custom", "glm",
+  "kimi", "deepseek", "minimax", "xai", "openrouter", "cursor",
+]);
+const RUNTIME_SELECTION_KEYS = new Set(["kind", "backend", "source", "model", "longContext", "effort"]);
+
+type StoredContractState = "missing" | "valid" | "invalid";
+
+function decodeRuntimeSelection(raw: string | null | undefined): {
+  state: StoredContractState;
+  value?: RuntimeSelection;
+} {
+  if (raw == null) return { state: "missing" };
   try {
-    const value = JSON.parse(raw) as RuntimeSelection;
-    if (value && typeof value.kind === "string") return value;
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    if (
+      value && typeof value === "object" && !Array.isArray(value) &&
+      Object.keys(value).every((key) => RUNTIME_SELECTION_KEYS.has(key)) &&
+      typeof value.kind === "string" && RUNTIME_KINDS.has(value.kind) &&
+      (value.backend === undefined || typeof value.backend === "string" && RUNTIME_BACKENDS.has(value.backend)) &&
+      (value.source === undefined || typeof value.source === "string" && value.source.length > 0 && value.source.length <= 2_048) &&
+      (value.model === undefined || typeof value.model === "string" && value.model.length > 0 && value.model.length <= 512) &&
+      (value.longContext === undefined || typeof value.longContext === "boolean") &&
+      (value.effort === undefined || typeof value.effort === "string" && value.effort.length <= 128)
+    ) {
+      return { state: "valid", value: value as unknown as RuntimeSelection };
+    }
   } catch {
-    /* malformed pins fail closed as absent and are re-pinned by the scheduler */
+    // The caller distinguishes damaged data from a truly missing legacy pin.
   }
-  return undefined;
+  return { state: "invalid" };
+}
+
+function parseRuntimeSelection(raw: string | null | undefined): RuntimeSelection | undefined {
+  return decodeRuntimeSelection(raw).value;
+}
+
+export interface AutomationExecutionContractState {
+  runtimeSelection: StoredContractState;
+  hubMode: StoredContractState;
+}
+
+/** Raw-row integrity gate used immediately before unattended execution. */
+export function getAutomationExecutionContractState(id: string): AutomationExecutionContractState | null {
+  const row = getDb().prepare(
+    "SELECT runtime_selection_json, hub_mode FROM automations WHERE id = ?",
+  ).get(id) as Pick<AutomationRow, "runtime_selection_json" | "hub_mode"> | undefined;
+  if (!row) return null;
+  return {
+    runtimeSelection: decodeRuntimeSelection(row.runtime_selection_json).state,
+    hubMode: row.hub_mode == null
+      ? "missing"
+      : row.hub_mode === "hub-first" || row.hub_mode === "local-only" || row.hub_mode === "hub-allowed"
+        ? "valid"
+        : "invalid",
+  };
 }
 
 function toAutomation(row: AutomationRow): Automation {
@@ -188,6 +242,91 @@ export function pinAutomationRuntimeIfUnset(id: string, selection: RuntimeSelect
   if (!automation) throw new Error(`Automation not found: ${id}`);
   emitDesktopStoreChange({ entity: "automation", id });
   return automation;
+}
+
+export interface AutomationHubVersionPinReceipt {
+  slug: string;
+  packageHash: string;
+  scope: "automation" | "graph-node";
+  nodeId?: string;
+}
+
+/**
+ * Freeze legacy NULL Hub targets exactly once. The transaction re-reads the
+ * row, so concurrent GUI/headless migrations preserve the first valid winner
+ * instead of silently moving a recurring automation to a newer release.
+ */
+export function pinLegacyAutomationHubVersions(
+  id: string,
+  packageHashes: Readonly<Record<string, string>>,
+): { automation: Automation; pinned: AutomationHubVersionPinReceipt[] } {
+  for (const [slug, packageHash] of Object.entries(packageHashes)) {
+    if (!slug || !/^[0-9a-f]{64}$/.test(packageHash)) {
+      throw new Error(`automation_hub_version_pin_invalid: ${slug || "missing-slug"}`);
+    }
+  }
+  const db = getDb();
+  const pinned: AutomationHubVersionPinReceipt[] = [];
+  const commit = db.transaction(() => {
+    const row = db.prepare("SELECT * FROM automations WHERE id = ?").get(id) as AutomationRow | undefined;
+    if (!row) throw new Error(`Automation not found: ${id}`);
+    let targetVersion = row.target_version;
+    if (row.target_type === "hub") {
+      if (targetVersion != null && !/^[0-9a-f]{64}$/.test(targetVersion)) {
+        throw new Error("automation_hub_version_pin_invalid: saved automation target hash is malformed");
+      }
+      if (targetVersion == null) {
+        const packageHash = packageHashes[row.target_id];
+        if (!packageHash) throw new Error(`automation_hub_version_pin_unavailable: ${row.target_id}`);
+        targetVersion = packageHash;
+        pinned.push({ slug: row.target_id, packageHash, scope: "automation" });
+      }
+    }
+
+    let graphJson = row.graph_json;
+    if (graphJson) {
+      let graph: WorkflowGraph;
+      try {
+        graph = JSON.parse(graphJson) as WorkflowGraph;
+      } catch {
+        throw new Error("automation_graph_contract_invalid: saved graph JSON is malformed");
+      }
+      if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) {
+        throw new Error("automation_graph_contract_invalid: saved graph shape is malformed");
+      }
+      let changed = false;
+      graph = {
+        ...graph,
+        nodes: graph.nodes.map((node) => {
+          if (node.type !== "agent" || node.config?.targetType !== "hub") return node;
+          const slug = typeof node.config.ref === "string" ? node.config.ref.trim() : "";
+          const current = typeof node.config.targetVersion === "string" ? node.config.targetVersion : "";
+          if (!slug) throw new Error(`automation_hub_version_pin_invalid: Hub node ${node.id} has no slug`);
+          if (current && !/^[0-9a-f]{64}$/.test(current)) {
+            throw new Error(`automation_hub_version_pin_invalid: Hub node ${node.id} hash is malformed`);
+          }
+          if (current) return node;
+          const packageHash = packageHashes[slug];
+          if (!packageHash) throw new Error(`automation_hub_version_pin_unavailable: ${slug}`);
+          changed = true;
+          pinned.push({ slug, packageHash, scope: "graph-node", nodeId: node.id });
+          return { ...node, config: { ...node.config, targetVersion: packageHash } };
+        }),
+      };
+      if (changed) graphJson = JSON.stringify(graph);
+    }
+    if (targetVersion !== row.target_version || graphJson !== row.graph_json) {
+      const updated = db.prepare(
+        "UPDATE automations SET target_version = ?, graph_json = ? WHERE id = ?",
+      ).run(targetVersion, graphJson, id);
+      if (updated.changes !== 1) throw new Error("automation_hub_version_pin_conflict: row disappeared during migration");
+    }
+  });
+  commit.immediate();
+  const automation = getAutomation(id);
+  if (!automation) throw new Error(`Automation not found: ${id}`);
+  if (pinned.length > 0) emitDesktopStoreChange({ entity: "automation", id });
+  return { automation, pinned };
 }
 
 export function createAutomation(input: {
@@ -440,6 +579,21 @@ interface AutomationRunSnapshotRow {
   last_activity_at: string | null;
   status: string | null;
   node_states_json: string | null;
+  occurrence_id: string | null;
+  graph_digest: string | null;
+  checkpoint_json: string | null;
+  resume_of_run_id: string | null;
+}
+
+const MAX_AUTOMATION_CHECKPOINT_BYTES = 1024 * 1024;
+
+export interface FailedGraphCheckpoint {
+  runId: string;
+  automationId: string;
+  occurrenceId: string | null;
+  graphDigest: string | null;
+  checkpoint: unknown;
+  nodeStates: Record<string, WorkflowNodeRunState>;
 }
 
 export class AutomationRunParentMissingError extends Error {
@@ -571,15 +725,25 @@ export function startGraphRun(input: {
   automationId: string;
   nodeIds: string[];
   startedAt?: string;
+  occurrenceId?: string;
+  graphDigest?: string;
+  checkpoint?: unknown;
+  resumeOfRunId?: string;
+  initialNodeStates?: Record<string, WorkflowNodeRunState>;
 }): void {
   const nodeStates: Record<string, WorkflowNodeRunState> = {};
-  for (const id of input.nodeIds) nodeStates[id] = "pending";
+  for (const id of input.nodeIds) nodeStates[id] = input.initialNodeStates?.[id] ?? "pending";
   const startedAt = input.startedAt ?? new Date().toISOString();
+  const checkpointJson = input.checkpoint == null ? null : JSON.stringify(input.checkpoint);
+  if (checkpointJson && Buffer.byteLength(checkpointJson, "utf8") > MAX_AUTOMATION_CHECKPOINT_BYTES) {
+    throw new Error("Automation checkpoint exceeds the local durability limit.");
+  }
   const inserted = getDb()
     .prepare(
       `INSERT INTO automation_runs
-         (id, automation_id, started_at, last_activity_at, status, node_states_json)
-       SELECT ?, ?, ?, ?, 'running', ?
+         (id, automation_id, started_at, last_activity_at, status, node_states_json,
+          occurrence_id, graph_digest, checkpoint_json, resume_of_run_id)
+       SELECT ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?
        WHERE EXISTS (SELECT 1 FROM automations WHERE id = ?)`,
     )
     .run(
@@ -588,10 +752,61 @@ export function startGraphRun(input: {
       startedAt,
       startedAt,
       JSON.stringify(nodeStates),
+      input.occurrenceId ?? input.runId,
+      input.graphDigest ?? null,
+      checkpointJson,
+      input.resumeOfRunId ?? null,
       input.automationId,
     );
   if (inserted.changes !== 1) throw new AutomationRunParentMissingError(input.automationId);
   emitDesktopStoreChange({ entity: "automation", id: input.automationId });
+}
+
+/** Atomically seal a node state with the resume checkpoint that justifies it. */
+export function checkpointGraphRunNode(
+  runId: string,
+  nodeId: string,
+  state: WorkflowNodeRunState,
+  checkpoint: unknown,
+): void {
+  const checkpointJson = JSON.stringify(checkpoint);
+  if (Buffer.byteLength(checkpointJson, "utf8") > MAX_AUTOMATION_CHECKPOINT_BYTES) {
+    throw new Error("Automation checkpoint exceeds the local durability limit.");
+  }
+  const db = getDb();
+  const commit = db.transaction(() => {
+    const row = db
+      .prepare("SELECT node_states_json FROM automation_runs WHERE id = ? AND status = 'running'")
+      .get(runId) as { node_states_json: string | null } | undefined;
+    if (!row) throw new Error("Automation checkpoint row is not running.");
+    let states: Record<string, WorkflowNodeRunState> = {};
+    try {
+      states = row.node_states_json ? JSON.parse(row.node_states_json) as Record<string, WorkflowNodeRunState> : {};
+    } catch {
+      states = {};
+    }
+    states[nodeId] = state;
+    const updated = db.prepare(
+      `UPDATE automation_runs
+       SET node_states_json = ?, checkpoint_json = ?, last_activity_at = ?
+       WHERE id = ? AND status = 'running'`,
+    ).run(JSON.stringify(states), checkpointJson, new Date().toISOString(), runId);
+    if (updated.changes !== 1) throw new Error("Automation checkpoint update lost its running row.");
+  });
+  commit.immediate();
+}
+
+/** Persist in-flight tool evidence before an external side effect can be retried. */
+export function saveGraphRunCheckpoint(runId: string, checkpoint: unknown): void {
+  const checkpointJson = JSON.stringify(checkpoint);
+  if (Buffer.byteLength(checkpointJson, "utf8") > MAX_AUTOMATION_CHECKPOINT_BYTES) {
+    throw new Error("Automation checkpoint exceeds the local durability limit.");
+  }
+  const updated = getDb().prepare(
+    `UPDATE automation_runs SET checkpoint_json = ?, last_activity_at = ?
+     WHERE id = ? AND status = 'running'`,
+  ).run(checkpointJson, new Date().toISOString(), runId);
+  if (updated.changes !== 1) throw new Error("Automation checkpoint row is not running.");
 }
 
 /** 실행 중 노드 상태 갱신(running/done/failed/skipped). 행이 없으면 조용히 무시. */
@@ -678,12 +893,257 @@ export function getLatestGraphRun(automationId: string): WorkflowRunSnapshot | n
   };
 }
 
+/** Latest terminal row only; an intervening successful run cancels old resume state. */
+export function getLatestFailedGraphCheckpoint(automationId: string): FailedGraphCheckpoint | null {
+  const row = getDb()
+    .prepare(
+      "SELECT * FROM automation_runs WHERE automation_id = ? ORDER BY started_at DESC LIMIT 1",
+    )
+    .get(automationId) as AutomationRunSnapshotRow | undefined;
+  if (!row || row.status !== "error") return null;
+  let nodeStates: Record<string, WorkflowNodeRunState> = {};
+  let checkpoint: unknown = null;
+  try {
+    nodeStates = row.node_states_json ? JSON.parse(row.node_states_json) as Record<string, WorkflowNodeRunState> : {};
+  } catch {
+    nodeStates = {};
+  }
+  try {
+    checkpoint = row.checkpoint_json ? JSON.parse(row.checkpoint_json) : null;
+  } catch {
+    checkpoint = null;
+  }
+  return {
+    runId: row.id,
+    automationId: row.automation_id ?? automationId,
+    occurrenceId: row.occurrence_id,
+    graphDigest: row.graph_digest,
+    checkpoint,
+    nodeStates,
+  };
+}
+
+const AUTOMATION_TERMINAL_RECEIPT_SCHEMA = "agentlas.automation-terminal-receipt.v1";
+const AUTOMATION_TERMINAL_RECEIPT_KIND = "automation_scheduler_terminal";
+const CHAIN_PAYLOAD_OUTPUT_BUDGET = 240 * 1024;
+
+interface AutomationTerminalReceipt {
+  schemaVersion: typeof AUTOMATION_TERMINAL_RECEIPT_SCHEMA;
+  sourceAutomationId: string;
+  sourceRunId: string;
+  status: AutomationRunRecord["status"];
+  output: string;
+  outputDigest: string;
+  outputBytes: number;
+  outputTruncated: boolean;
+  fanoutTargetIds: string[];
+}
+
+function sha256Text(value: string): string {
+  return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
+}
+
+function boundedChainOutput(value: string | undefined): {
+  output: string;
+  outputDigest: string;
+  outputBytes: number;
+  outputTruncated: boolean;
+} {
+  const original = value ?? "";
+  const outputBytes = Buffer.byteLength(original, "utf8");
+  if (outputBytes <= CHAIN_PAYLOAD_OUTPUT_BUDGET) {
+    return { output: original, outputDigest: sha256Text(original), outputBytes, outputTruncated: false };
+  }
+  let output = original;
+  while (Buffer.byteLength(output, "utf8") > CHAIN_PAYLOAD_OUTPUT_BUDGET) {
+    const ratio = CHAIN_PAYLOAD_OUTPUT_BUDGET / Buffer.byteLength(output, "utf8");
+    output = output.slice(0, Math.max(0, Math.floor(output.length * ratio) - 1));
+  }
+  return { output, outputDigest: sha256Text(original), outputBytes, outputTruncated: true };
+}
+
+function closesDurableChainCycle(sourceId: string, targetId: string, chained: Automation[]): boolean {
+  if (sourceId === targetId) return true;
+  const targetsBySource = new Map<string, string[]>();
+  for (const automation of chained) {
+    if (!automation.trigger || automation.trigger.kind !== "chain") continue;
+    const targets = targetsBySource.get(automation.trigger.afterAutomationId) ?? [];
+    targets.push(automation.id);
+    targetsBySource.set(automation.trigger.afterAutomationId, targets);
+  }
+  const pending = [targetId];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const current = pending.pop() as string;
+    if (current === sourceId) return true;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const next of targetsBySource.get(current) ?? []) pending.push(next);
+  }
+  return false;
+}
+
+function eligibleChainTargets(sourceAutomationId: string, output: string): string[] {
+  const chained = listEnabledByTrigger("chain");
+  const result: string[] = [];
+  for (const automation of chained) {
+    if (
+      !automation.trigger || automation.trigger.kind !== "chain" ||
+      automation.trigger.afterAutomationId !== sourceAutomationId
+    ) continue;
+    if (closesDurableChainCycle(sourceAutomationId, automation.id, chained)) {
+      console.warn(`[triggers] blocked cyclic durable chain edge ${sourceAutomationId}->${automation.id}`);
+      continue;
+    }
+    if (!evaluateCondition(automation.trigger.onlyIf, { output, ok: "true" })) continue;
+    result.push(automation.id);
+  }
+  return [...new Set(result)].sort();
+}
+
+function parseAutomationTerminalReceipt(value: unknown): AutomationTerminalReceipt | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const keys = [
+    "schemaVersion", "sourceAutomationId", "sourceRunId", "status", "output",
+    "outputDigest", "outputBytes", "outputTruncated", "fanoutTargetIds",
+  ];
+  if (Object.keys(row).sort().join("\0") !== keys.sort().join("\0")) return null;
+  const statuses = new Set(["ok", "partial", "error", "skipped", "blocked", "needs_input"]);
+  if (
+    row.schemaVersion !== AUTOMATION_TERMINAL_RECEIPT_SCHEMA ||
+    typeof row.sourceAutomationId !== "string" || !row.sourceAutomationId ||
+    typeof row.sourceRunId !== "string" || !row.sourceRunId ||
+    typeof row.status !== "string" || !statuses.has(row.status) ||
+    typeof row.output !== "string" || typeof row.outputDigest !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/.test(row.outputDigest) ||
+    typeof row.outputBytes !== "number" || !Number.isSafeInteger(row.outputBytes) || row.outputBytes < 0 ||
+    typeof row.outputTruncated !== "boolean" || !Array.isArray(row.fanoutTargetIds) ||
+    row.fanoutTargetIds.some((id) => typeof id !== "string" || !id) ||
+    new Set(row.fanoutTargetIds).size !== row.fanoutTargetIds.length ||
+    (!row.outputTruncated && sha256Text(row.output) !== row.outputDigest) ||
+    Buffer.byteLength(row.output, "utf8") > CHAIN_PAYLOAD_OUTPUT_BUDGET
+  ) return null;
+  return row as unknown as AutomationTerminalReceipt;
+}
+
+function chainEventPayload(receipt: AutomationTerminalReceipt): string {
+  return JSON.stringify({
+    output: receipt.output,
+    ok: "true",
+    sourceAutomationId: receipt.sourceAutomationId,
+    sourceRunId: receipt.sourceRunId,
+    outputDigest: receipt.outputDigest,
+    outputBytes: receipt.outputBytes,
+    outputTruncated: receipt.outputTruncated,
+  });
+}
+
+function insertChainEventForReceipt(receipt: AutomationTerminalReceipt, targetId: string, nowIso: string): boolean {
+  const dedupeKey = `chain:${receipt.sourceAutomationId}:${receipt.sourceRunId}:${targetId}`;
+  const inserted = getDb().prepare(
+    `INSERT OR IGNORE INTO automation_trigger_events (
+       id, automation_id, trigger_kind, dedupe_key, payload_json, status,
+       attempt_count, next_attempt_at, created_at, updated_at
+     )
+     SELECT ?, ?, 'chain', ?, ?, 'pending', 0, ?, ?, ?
+     WHERE EXISTS (
+       SELECT 1 FROM automations
+       WHERE id = ? AND trigger_type = 'chain'
+     )`,
+  ).run(
+    randomUUID(), targetId, dedupeKey, chainEventPayload(receipt),
+    nowIso, nowIso, nowIso, targetId,
+  );
+  return inserted.changes === 1;
+}
+
+/** Called inside the same transaction that records run_history. */
+function recordAutomationTerminalReceipt(
+  automationId: string,
+  runId: string,
+  status: AutomationRunRecord["status"],
+  output: string | undefined,
+  nowIso: string,
+): AutomationTerminalReceipt {
+  const bounded = boundedChainOutput(output);
+  const receipt: AutomationTerminalReceipt = {
+    schemaVersion: AUTOMATION_TERMINAL_RECEIPT_SCHEMA,
+    sourceAutomationId: automationId,
+    sourceRunId: runId,
+    status,
+    ...bounded,
+    // Gate on the exact source value; only the durable transport copy is
+    // bounded. A large output must not silently change an equality/contains
+    // decision before the receipt is sealed.
+    fanoutTargetIds: status === "ok" ? eligibleChainTargets(automationId, output ?? "") : [],
+  };
+  const existing = getDb().prepare(
+    `SELECT payload_json FROM run_events
+     WHERE run_id = ? AND automation_id = ? AND kind = ?
+     ORDER BY seq ASC LIMIT 1`,
+  ).get(runId, automationId, AUTOMATION_TERMINAL_RECEIPT_KIND) as { payload_json: string } | undefined;
+  if (existing) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(existing.payload_json); } catch { parsed = null; }
+    const prior = parseAutomationTerminalReceipt(parsed);
+    if (
+      !prior || prior.status !== receipt.status || prior.outputDigest !== receipt.outputDigest ||
+      prior.fanoutTargetIds.join("\0") !== receipt.fanoutTargetIds.join("\0")
+    ) throw new Error("automation_terminal_receipt_conflict");
+    return prior;
+  }
+  const seq = Number((getDb().prepare(
+    "SELECT COALESCE(MAX(seq) + 1, 0) AS seq FROM run_events WHERE run_id = ?",
+  ).get(runId) as { seq?: number } | undefined)?.seq ?? 0);
+  getDb().prepare(
+    `INSERT INTO run_events
+       (id, run_id, seq, ts, kind, automation_id, payload_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    `evt_${randomUUID()}`, runId, seq, nowIso,
+    AUTOMATION_TERMINAL_RECEIPT_KIND, automationId, JSON.stringify(receipt),
+  );
+  for (const targetId of receipt.fanoutTargetIds) insertChainEventForReceipt(receipt, targetId, nowIso);
+  return receipt;
+}
+
+/** Repair missing fan-out rows from immutable scheduler terminal receipts. */
+export function reconcileDurableChainDeliveries(limit = 200): { receipts: number; inserted: number } {
+  const capped = Math.max(1, Math.min(1_000, Math.floor(limit)));
+  const rows = getDb().prepare(
+    `SELECT payload_json, ts FROM run_events
+     WHERE kind = ? ORDER BY ts DESC, rowid DESC LIMIT ?`,
+  ).all(AUTOMATION_TERMINAL_RECEIPT_KIND, capped) as Array<{ payload_json: string; ts: string }>;
+  let receipts = 0;
+  let inserted = 0;
+  for (const row of rows) {
+    let raw: unknown;
+    try { raw = JSON.parse(row.payload_json); } catch { raw = null; }
+    const receipt = parseAutomationTerminalReceipt(raw);
+    if (!receipt || receipt.status !== "ok") continue;
+    receipts += 1;
+    const commit = getDb().transaction(() => {
+      for (const targetId of receipt.fanoutTargetIds) {
+        const target = getAutomation(targetId);
+        if (
+          !target?.trigger || target.trigger.kind !== "chain" ||
+          target.trigger.afterAutomationId !== receipt.sourceAutomationId
+        ) continue;
+        if (insertChainEventForReceipt(receipt, targetId, row.ts)) inserted += 1;
+      }
+    });
+    commit.immediate();
+  }
+  return { receipts, inserted };
+}
+
 /** run_history 행 1개 기록. 놓친 실행/스킵/에러를 가시화(설계 §2.7). */
 export function recordRun(input: {
   automationId: string;
   scheduledFor?: string | null;
   ranAt?: string;
-  status: "ok" | "error" | "skipped";
+  status: AutomationRunRecord["status"];
   skippedCount?: number;
   error?: string | null;
 }): void {
@@ -744,7 +1204,19 @@ export function listRunHistory(automationId: string, limit = 50): AutomationRunR
 export function markAutomationRun(
   id: string,
   at: Date = new Date(),
-  opts?: { status?: "ok" | "error" | "skipped"; error?: string | null; advanceSchedule?: boolean },
+  opts?: {
+    status?: AutomationRunRecord["status"];
+    error?: string | null;
+    advanceSchedule?: boolean;
+    /** False for partial/blocked/error attempts: keep max_runs for completed occurrences. */
+    executionConsumed?: boolean;
+    /** One-shot failures remain retryable instead of silently disabling. */
+    deferredRetryMs?: number;
+    /** Durable scheduler run receipt used for exactly-once chain fan-out. */
+    sourceRunId?: string | null;
+    /** Final source output carried into chain trigger variables. */
+    output?: string;
+  },
 ): void {
   const db = getDb();
   const row = db.prepare("SELECT * FROM automations WHERE id = ?").get(id) as AutomationRow | undefined;
@@ -775,34 +1247,52 @@ export function markAutomationRun(
     if (skipped > 0) skipped -= 1; // 이번 발사 1회는 스킵이 아니라 실제 실행
   }
 
-  const runCount = (row.run_count ?? 0) + 1;
+  const executionConsumed = opts?.executionConsumed ?? true;
+  const runCount = (row.run_count ?? 0) + (executionConsumed ? 1 : 0);
   // 전진하지 않으면 next_run_at은 그대로 둔다(이벤트=null 유지, 시계=다음 예약 슬롯 유지).
-  const nextRunAt = advance
+  const computedNextRunAt = advance
     ? computeNextRun(row.schedule, at, { scheduleJson: row.schedule_json, timezone: tz })
     : row.next_run_at;
 
   // 종료 조건 판정. reachedMax/pastEnd는 트리거 종류 무관하게 적용(N회/기한 후 자동 비활성).
-  const reachedMax = row.max_runs != null && runCount >= row.max_runs;
+  const reachedMax = executionConsumed && row.max_runs != null && runCount >= row.max_runs;
   const pastEnd = row.end_at != null && Date.parse(row.end_at) <= at.getTime();
-  const noFuture = advance && nextRunAt == null;
-  const shouldDisable = reachedMax || pastEnd || noFuture;
+  const noFuture = advance && computedNextRunAt == null;
+  const deferredRetryMs = Math.max(60_000, Math.min(opts?.deferredRetryMs ?? 15 * 60_000, 24 * 60 * 60_000));
+  const deferredRetryAt = new Date(at.getTime() + deferredRetryMs).toISOString();
+  const nextRunAt = !executionConsumed && !pastEnd && advance
+    ? computedNextRunAt == null || Date.parse(computedNextRunAt) > Date.parse(deferredRetryAt)
+      ? deferredRetryAt
+      : computedNextRunAt
+    : computedNextRunAt;
+  const shouldDisable = reachedMax || pastEnd || (noFuture && executionConsumed);
 
-  db.prepare(
-    "UPDATE automations SET last_run_at = ?, next_run_at = ?, run_count = ?, enabled = ? WHERE id = ?",
-  ).run(at.toISOString(), shouldDisable ? null : nextRunAt, runCount, shouldDisable ? 0 : row.enabled, id);
-
-  try {
-    recordRun({
-      automationId: id,
-      scheduledFor: row.next_run_at,
-      ranAt: at.toISOString(),
-      status: opts?.status ?? "ok",
-      skippedCount: skipped > 0 ? skipped : 0,
-      error: opts?.error ?? null,
-    });
-  } catch (err) {
-    console.error("[automation] recordRun failed:", err);
+  const atIso = at.toISOString();
+  const terminalStatus = opts?.status ?? "ok";
+  const sourceRunId = opts?.sourceRunId?.trim() || null;
+  if (sourceRunId && (sourceRunId.length > 512 || sourceRunId.includes("\0"))) {
+    throw new Error("automation_terminal_run_id_invalid");
   }
+  // Source history, its immutable scheduler receipt, and every downstream
+  // chain occurrence are one commit. A crash can expose all of them or none of
+  // them, never a successful source receipt without its fan-out.
+  const commit = db.transaction(() => {
+    const updated = db.prepare(
+      "UPDATE automations SET last_run_at = ?, next_run_at = ?, run_count = ?, enabled = ? WHERE id = ?",
+    ).run(atIso, shouldDisable ? null : nextRunAt, runCount, shouldDisable ? 0 : row.enabled, id);
+    if (updated.changes !== 1) throw new AutomationRunParentMissingError(id);
+    db.prepare(
+      `INSERT INTO run_history (id, automation_id, scheduled_for, ran_at, status, skipped_count, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      randomUUID(), id, row.next_run_at, atIso, terminalStatus,
+      skipped > 0 ? skipped : 0, opts?.error ?? null,
+    );
+    if (sourceRunId) {
+      recordAutomationTerminalReceipt(id, sourceRunId, terminalStatus, opts?.output, atIso);
+    }
+  });
+  commit.immediate();
   emitDesktopStoreChange({ entity: "automation", id });
 }
 

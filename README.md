@@ -69,6 +69,19 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-17 · v0.8.55 — durable Hub Workforce automations on every
+  supported computer** — Desktop now speaks the exact versioned Workforce
+  protocol published by Agentlas OS, validates the complete MCP tool inventory
+  and immutable runtime source, and packages a standalone Python runtime for
+  macOS, Windows, and Linux. Scheduled graph runs persist trigger events,
+  external-effect receipts, and node checkpoints before advancing, so a posted
+  comment is never repeated merely because a later Hub step or app restart
+  fails. Typed blocked, input, partial, and refusal outcomes keep the schedule
+  enabled and expose a recoverable state instead of silently pausing it.
+  Agentlas OS v1.1.50 is pinned at
+  `5fc22464c1db33dabc0d4de2170053d1584b5682`. This source does not prove a
+  Desktop tag, public installer, or update-feed release.
+
 - **2026-07-17 · v0.8.54 — uninterrupted automations and runtime upkeep** —
   Existing chats, scheduled automations, Site Studio, Telegram, and TREX keep
   their selected session agent under the default local-first Hub policy; only
