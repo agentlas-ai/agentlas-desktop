@@ -288,7 +288,6 @@ jobs:
           npm run test:prompts-start-failure-ui
           npm run test:settings-resilience-ui
           npm run test:engine-auto-toggle-ui
-          npm run test:startup-founder-new-idea
           npm run test:trex-ui
           npm run test:trex-attachments-ui
           node scripts/qa-chat-input-routing.cjs

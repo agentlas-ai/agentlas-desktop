@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.52 — 2026-07-17
+
+### Changed
+
+- The hidden, currently unused Startup Founder Studio UI contract no longer
+  blocks signed Desktop releases. Its feature-specific regression remains
+  available to run independently while the release gate stays focused on
+  shipped, user-visible Desktop surfaces and protocol compatibility.
+
+### Fixed
+
+- Mobile and unattended read-only runs now fall back visibly to an available
+  BYOK or Ollama runtime when the Desktop's active CLI runtime lacks the verified
+  restricted-read boundary. They still fail closed when no safe runtime is
+  connected.
+
 ## 0.8.51 — 2026-07-17
 
 ### Fixed

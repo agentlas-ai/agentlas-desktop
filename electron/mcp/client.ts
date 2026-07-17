@@ -1241,28 +1241,48 @@ export async function runMcpInvocation(
     });
   }
 
-  const active = runtimeChoice.active;
-  const picked = runtimeChoice.picked;
+  let active = runtimeChoice.active;
+  let picked = runtimeChoice.picked;
   if (restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
-    const restrictedSource = workspaceBinding ? "mobile" : "automation";
-    sink({
-      kind: "error",
-      error: {
-        code:
-          restrictedSource === "mobile"
-            ? "mobile-runtime-not-read-sandboxed"
-            : "automation-runtime-not-read-sandboxed",
-        message:
-          restrictedSource === "mobile"
-            ? locale === "ko"
-              ? "이 런타임은 모바일 읽기 전용 경계가 검증되지 않았습니다. Desktop에서 BYOK 또는 Ollama를 선택하세요."
-              : "This runtime has no verified Mobile read-only boundary. Select BYOK or Ollama on Desktop."
-            : locale === "ko"
-              ? "이 런타임은 무인 읽기 자동화의 격리 경계가 검증되지 않았습니다. BYOK 또는 Ollama를 선택하세요."
-              : "This runtime has no verified boundary for unattended read automation. Select BYOK or Ollama.",
-      },
-    });
-    return earlyResult();
+    // 활성 런타임이 읽기 경계 미검증(CLI 계열)이어도 모바일 채팅을 죽이지 않는다 —
+    // 경계가 검증된 런타임(BYOK/Ollama)이 연결돼 있으면 가시적 폴백으로 그쪽에서
+    // 실행한다(2026-07-17: 활성=claude-code인 데스크탑에서 모바일 채팅 전멸 수리).
+    // 검증된 런타임이 하나도 없을 때만 기존 fail-closed 에러를 유지한다.
+    const readBoundaryFallback = runtimes
+      .filter((runtime) => isMobileReadRuntimeAllowed(runtime.kind))
+      .map((runtime) => ({ active: runtime, picked: pickRunner(runtime) }))
+      .find((candidate) => candidate.picked != null);
+    if (readBoundaryFallback && readBoundaryFallback.picked) {
+      sink({
+        kind: "tool-use",
+        status:
+          locale === "ko"
+            ? `${active.kind} 런타임은 모바일 읽기 경계가 검증되지 않아 ${readBoundaryFallback.picked.label}(으)로 실행합니다.`
+            : `${active.kind} has no verified Mobile read boundary; running on ${readBoundaryFallback.picked.label} instead.`,
+      });
+      active = readBoundaryFallback.active;
+      picked = readBoundaryFallback.picked;
+    } else {
+      const restrictedSource = workspaceBinding ? "mobile" : "automation";
+      sink({
+        kind: "error",
+        error: {
+          code:
+            restrictedSource === "mobile"
+              ? "mobile-runtime-not-read-sandboxed"
+              : "automation-runtime-not-read-sandboxed",
+          message:
+            restrictedSource === "mobile"
+              ? locale === "ko"
+                ? "이 런타임은 모바일 읽기 전용 경계가 검증되지 않았습니다. Desktop에서 BYOK 또는 Ollama를 연결하세요."
+                : "This runtime has no verified Mobile read-only boundary. Connect BYOK or Ollama on Desktop."
+              : locale === "ko"
+                ? "이 런타임은 무인 읽기 자동화의 격리 경계가 검증되지 않았습니다. BYOK 또는 Ollama를 선택하세요."
+                : "This runtime has no verified boundary for unattended read automation. Select BYOK or Ollama.",
+        },
+      });
+      return earlyResult();
+    }
   }
   if (!picked) {
     sink({
