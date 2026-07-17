@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.51 — 2026-07-17
+
+### Fixed
+
+- A new Startup Founder Studio idea now queues directly through the already
+  authenticated local request bridge. A transient slow manifest response no
+  longer tears down a healthy Studio server and loses the idea during a cold
+  replacement startup.
+- `New Idea` remains unavailable unless the Studio has a live bridge URL, and
+  reuse health checks require repeated failure before restarting the server.
+
 ## 0.8.50 — 2026-07-17
 
 ### Added

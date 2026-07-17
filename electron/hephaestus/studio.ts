@@ -261,6 +261,14 @@ function probeManifest(port: number): Promise<boolean> {
   });
 }
 
+async function probeManifestWithRetry(port: number, attempts = 3): Promise<boolean> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (await probeManifest(port)) return true;
+    if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
 export interface StudioStartResult {
   ok: boolean;
   url?: string;
@@ -320,13 +328,24 @@ async function queueStudioIdea(idea: string): Promise<{ ok: boolean; reason?: st
 /** 스튜디오 런처를 띄우고(이미 떠있으면 재사용) iframe 용 로컬 URL 을 반환.
  *  동시 호출(빠른 새로고침/다시시도)은 하나의 spawn 으로 합류시켜 고아 프로세스 누수를 막는다. */
 export async function startStudio(input?: StudioStartInput): Promise<StudioStartResult> {
+  const idea = input?.idea?.trim() ?? "";
+  // A new idea is a write to the already authenticated request bridge, not a
+  // reason to cold-restart the GUI server. Queue it first and let the request
+  // endpoint's bounded retry absorb a briefly busy CI/user machine. The old
+  // path ran a single 800 ms manifest probe first and could tear down a healthy
+  // server under load, losing the submission during the replacement startup.
+  if (idea && activeUrl && activeRequestToken) {
+    const reusedUrl = activeUrl;
+    const queued = await queueStudioIdea(idea);
+    if (queued.ok) return { ok: true, url: reusedUrl, ideaQueued: true };
+  }
+
   if (!starting) {
     starting = startStudioInner().finally(() => {
       starting = null;
     });
   }
   const started = await starting;
-  const idea = input?.idea?.trim() ?? "";
   if (!started.ok || !idea) return started;
   const queued = await queueStudioIdea(idea);
   if (!queued.ok) return { ...started, ok: false, reason: queued.reason };
@@ -337,7 +356,7 @@ async function startStudioInner(): Promise<StudioStartResult> {
   const ko = currentUiLocale() === "ko";
   installStudioMediaGuard();
   if (proc && activeUrl) {
-    if (await probeManifest(Number(new URL(activeUrl).port))) return { ok: true, url: activeUrl };
+    if (await probeManifestWithRetry(Number(new URL(activeUrl).port))) return { ok: true, url: activeUrl };
     stopStudio();
   }
   const root = studioRoot();

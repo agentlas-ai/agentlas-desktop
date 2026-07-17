@@ -40,7 +40,7 @@ export default function StartupFounderStudioPage() {
             ok: false,
             reason: locale === "ko" ? "스튜디오 서버 시작 시간 초과." : "Studio server startup timed out.",
           }),
-        25_000,
+        45_000,
       ),
     );
 
@@ -96,6 +96,8 @@ export default function StartupFounderStudioPage() {
     };
   }, []);
 
+  const studioReady = phase === "ready" && Boolean(url);
+
   return (
     <div style={shell}>
       <header className="titlebar-drag" style={header}>
@@ -110,19 +112,23 @@ export default function StartupFounderStudioPage() {
         </div>
         <button
           onClick={() => setIdeaPromptOpen(true)}
-          disabled={phase === "starting"}
+          disabled={!studioReady}
           className="titlebar-nodrag"
           style={{
             ...ghostButton,
             marginLeft: "auto",
-            opacity: phase === "starting" ? 0.52 : 1,
-            cursor: phase === "starting" ? "wait" : "pointer",
+            opacity: studioReady ? 1 : 0.52,
+            cursor: phase === "starting" ? "wait" : studioReady ? "pointer" : "not-allowed",
           }}
           title={
-            phase === "starting"
+            !studioReady
               ? locale === "ko"
-                ? "스튜디오 요청 브리지를 준비하는 중입니다."
-                : "Preparing the Studio request bridge."
+                ? phase === "starting"
+                  ? "스튜디오 요청 브리지를 준비하는 중입니다."
+                  : "먼저 스튜디오를 다시 시작해 주세요."
+                : phase === "starting"
+                  ? "Preparing the Studio request bridge."
+                  : "Restart the Studio first."
               : undefined
           }
         >
