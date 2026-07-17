@@ -700,10 +700,9 @@ function ChatPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [messages, setMessages] = useState<StreamMessage[]>([]);
 
-  // Context volume indicator only. Actual compaction happens in the runtime
-  // layer: CLI tools manage their own sessions, while BYOK/Ollama use
-  // electron/runtime/compact.ts before requests are sent.
-  const maxTokens = 100000;
+  // 화면에 복원된 대화 기록의 논리적 분량만 표시한다. 실제 모델 물리창 점유율은
+  // CLI/BYOK별 시스템 프롬프트·툴·출력 예약과 compaction 뒤에야 정해지므로 가짜
+  // 100k 분모나 퍼센트를 만들지 않는다.
   const currentTokens = useMemo(() => {
     return messages.reduce((acc, msg) => acc + (msg.tokens ?? Math.floor((msg.text?.length || 0) / 4)), 0);
   }, [messages]);
@@ -782,6 +781,7 @@ function ChatPage() {
         planMode?: boolean;
         goalMode?: boolean;
         appsGenerateMode?: boolean;
+        sessionRouting?: boolean;
       };
     }>
   >([]);
@@ -1854,6 +1854,8 @@ function ChatPage() {
         taskForceTargets?: OrchestrationTarget[];
         /** Router Agent 에스컬레이션 — main 런타임이 시스템 프롬프트 앞에 주입한다. */
         routerAgent?: RecRouterAgent;
+        /** Current session roster first; Agent Hub/Cloud only when the model identifies a capability gap. */
+        sessionRouting?: boolean;
       },
     ) => {
       const api = ipc();
@@ -2023,6 +2025,7 @@ function ChatPage() {
           taskForceTargets: opts?.taskForceTargets,
           pipelineStages: opts?.pipelineStages,
           routerAgent: opts?.routerAgent,
+          sessionRouting: opts?.sessionRouting,
         });
         window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chat.id } }));
         // runId 도착 전에 Stop을 눌렀다면(레이스) 구독을 건 직후 즉시 취소 — abort 종료 이벤트를 수신해 busy 해제.
@@ -2668,8 +2671,9 @@ function ChatPage() {
     [refreshHubBookmarks],
   );
 
-  // 추천 토글 ON → 보내기 전 라우터 미리보기. routeOnly(실행 없음)를 정규화해 추천 시트에 넘긴다.
-  // 실패/비가용 시에도 throw 하지 않고 null → 시트가 "그냥 보내기" 폴백을 보여준다.
+  // 세션 팀 자동 보강은 기존 routePreview 호스트 계약을 유지하되 sessionRosterFirst를
+  // 명시한다. 현재 main은 이 요청에서 전역검색을 하지 않고 none을 반환하므로, 실제
+  // gap 판단과 필요 시 Hub/Cloud 보강은 현재 세션 LLM이 맡는다.
   async function handleRecommendPreview(text: string): Promise<Recommendation | null> {
     const api = ipc();
     if (!api || !chat) return null;
@@ -2682,6 +2686,7 @@ function ChatPage() {
         query: buildRoutingQueryWithContext(text),
         project: folder ?? undefined,
         allowLocal: true, // 로컬 카드 + 허브 혼합 추천
+        sessionRosterFirst: true,
       });
     } catch {
       return null;
@@ -3379,6 +3384,7 @@ function ChatPage() {
         <button
           type="button"
           data-testid="workspace-agents-pill"
+          data-popover-trigger="agent-picker"
           onClick={() => setAgentPickerSignal((v) => v + 1)}
           disabled={!chat}
           title={t("workspace.bar.agents_hint")}
@@ -3431,6 +3437,7 @@ function ChatPage() {
               planMode: opts?.planMode,
               goalMode: opts?.goalMode,
               appsGenerateMode: opts?.appsGenerateMode,
+              sessionRouting: opts?.sessionRouting,
             });
           }}
           queuedCount={queuedSteers.length}
@@ -3461,7 +3468,7 @@ function ChatPage() {
           modelOptions={modelOptions}
           onSelectModel={switchModel}
           onSelectEffort={switchEffort}
-          tokensUsage={{ current: currentTokens, limit: maxTokens }}
+          tokensUsage={{ current: currentTokens }}
           showModeToggles={chat.kind !== "division"}
           continuousMode={chat.continuousMode === true}
           swarmMode={chat.swarmMode === true}

@@ -14,10 +14,12 @@ export type ByokBackend =
   | "google"
   | "upstage"
   | "custom"
-  // Anthropic Messages API 호환 서드파티(구독/종량제) — base URL만 프리셋으로 바꿔 호출한다.
   | "glm"
   | "kimi"
-  | "deepseek";
+  | "deepseek"
+  | "minimax"
+  | "xai"
+  | "openrouter";
 
 export interface ModelOption {
   /** vendor API에 그대로 전달되는 모델 ID */
@@ -43,114 +45,27 @@ export interface ModelOption {
 /** Anthropic 1M 컨텍스트 베타 헤더 값. beta-header 모델 + 사용자 토글 ON일 때만 전송. */
 export const ANTHROPIC_1M_BETA = "context-1m-2025-08-07";
 
-// ── 카탈로그 ─────────────────────────────────────────────
-// 모델 ID/세대는 여기서만 관리. 새 모델 추가는 이 배열에 한 줄.
+// Provider model IDs are intentionally not compiled into the app. The main
+// process reads each provider's live catalog and the UI always offers a manual
+// model-ID escape hatch. This keeps new model generations usable without a
+// desktop release. Unknown capabilities stay unknown; we never invent a
+// context-window or multimodal claim from a model-name regex.
 export const BYOK_MODELS: Record<ByokBackend, ModelOption[]> = {
-  anthropic: [
-    {
-      id: "claude-opus-4-8",
-      label: "Claude Opus 4.8",
-      contextWindow: 200_000,
-      multimodal: true,
-      longContext: { tokens: 1_000_000, mode: "beta-header" },
-    },
-    {
-      id: "claude-sonnet-4-6",
-      label: "Claude Sonnet 4.6",
-      contextWindow: 200_000,
-      multimodal: true,
-      longContext: { tokens: 1_000_000, mode: "beta-header" },
-    },
-    {
-      id: "claude-haiku-4-5-20251001",
-      label: "Claude Haiku 4.5",
-      contextWindow: 200_000,
-      multimodal: true,
-    },
-  ],
-  openai: [
-    {
-      id: "gpt-4.1",
-      label: "GPT-4.1",
-      contextWindow: 1_000_000,
-      multimodal: true,
-      longContext: { tokens: 1_000_000, mode: "auto" },
-    },
-    { id: "gpt-4o", label: "GPT-4o", contextWindow: 128_000, multimodal: true },
-    { id: "gpt-4o-mini", label: "GPT-4o mini", contextWindow: 128_000, multimodal: true },
-  ],
-  google: [
-    {
-      id: "gemini-2.5-pro",
-      label: "Gemini 2.5 Pro",
-      contextWindow: 1_000_000,
-      multimodal: true,
-      longContext: { tokens: 1_000_000, mode: "auto" },
-    },
-    {
-      id: "gemini-2.5-flash",
-      label: "Gemini 2.5 Flash",
-      contextWindow: 1_000_000,
-      multimodal: true,
-      longContext: { tokens: 1_000_000, mode: "auto" },
-    },
-    {
-      id: "gemini-1.5-flash",
-      label: "Gemini 1.5 Flash",
-      contextWindow: 1_000_000,
-      multimodal: true,
-      longContext: { tokens: 1_000_000, mode: "auto" },
-    },
-  ],
-  // Upstage Solar — Korean sovereign LLM (OpenAI-compatible API). Text-only (no multimodal).
-  upstage: [
-    { id: "solar-pro2", label: "Solar Pro 2 (한국 소버린)", contextWindow: 65_536, multimodal: false },
-    {
-      id: "solar-pro3",
-      label: "Solar Pro 3",
-      contextWindow: 131_072,
-      multimodal: false,
-      longContext: { tokens: 131_072, mode: "auto" },
-    },
-    { id: "solar-mini", label: "Solar Mini", contextWindow: 32_768, multimodal: false },
-  ],
-  custom: [
-    { id: "deepseek-chat", label: "DeepSeek Chat", contextWindow: 64_000, multimodal: false },
-    { id: "grok-2-latest", label: "Grok 2", contextWindow: 131_072, multimodal: false },
-    { id: "glm-4", label: "GLM-4", contextWindow: 128_000, multimodal: false },
-    { id: "custom", label: "Other Compatible Model", contextWindow: 128_000, multimodal: false }
-  ],
-  // ── Anthropic Messages API 호환 서드파티 ──────────────────
-  // 모델 ID는 각 프로바이더가 자체 관리 — 세대가 바뀌면 갱신. 잘못된 ID는 서버가 거부할 뿐 크래시 없음.
-  // "custom" 항목으로 사용자가 최신 모델명을 직접 입력할 수 있게 둔다.
-  glm: [
-    { id: "glm-4.6", label: "GLM-4.6", contextWindow: 200_000, multimodal: false },
-    { id: "glm-4.5-air", label: "GLM-4.5 Air", contextWindow: 128_000, multimodal: false },
-    { id: "custom", label: "다른 GLM 모델 직접 입력", contextWindow: 200_000, multimodal: false },
-  ],
-  kimi: [
-    { id: "kimi-k2-0711-preview", label: "Kimi K2", contextWindow: 128_000, multimodal: false },
-    { id: "kimi-k2-turbo-preview", label: "Kimi K2 Turbo", contextWindow: 128_000, multimodal: false },
-    { id: "custom", label: "다른 Kimi 모델 직접 입력", contextWindow: 128_000, multimodal: false },
-  ],
-  deepseek: [
-    { id: "deepseek-chat", label: "DeepSeek Chat (V3)", contextWindow: 64_000, multimodal: false },
-    { id: "deepseek-reasoner", label: "DeepSeek Reasoner (R1)", contextWindow: 64_000, multimodal: false },
-    { id: "custom", label: "다른 DeepSeek 모델 직접 입력", contextWindow: 64_000, multimodal: false },
-  ],
+  anthropic: [],
+  openai: [],
+  google: [],
+  upstage: [],
+  custom: [],
+  glm: [],
+  kimi: [],
+  deepseek: [],
+  minimax: [],
+  xai: [],
+  openrouter: [],
 };
 
-/** 백엔드별 기본 모델 — 사용자가 명시 선택 전 fallback. */
-export const DEFAULT_BYOK_MODEL: Record<ByokBackend, string> = {
-  anthropic: "claude-sonnet-4-6",
-  openai: "gpt-4o-mini",
-  google: "gemini-1.5-flash",
-  upstage: "solar-pro2",
-  custom: "deepseek-chat",
-  glm: "glm-4.6",
-  kimi: "kimi-k2-0711-preview",
-  deepseek: "deepseek-chat",
-};
+/** No versioned BYOK default is pinned. Discovery/manual selection is authoritative. */
+export const DEFAULT_BYOK_MODEL: Partial<Record<ByokBackend, string>> = {};
 
 const BYOK_BACKENDS_ALL: ByokBackend[] = [
   "anthropic",
@@ -161,6 +76,9 @@ const BYOK_BACKENDS_ALL: ByokBackend[] = [
   "glm",
   "kimi",
   "deepseek",
+  "minimax",
+  "xai",
+  "openrouter",
 ];
 
 function isByokBackend(backend: string): backend is ByokBackend {
@@ -188,18 +106,6 @@ export const ANTHROPIC_COMPAT_PROVIDERS: Partial<Record<ByokBackend, AnthropicCo
     baseUrl: "https://api.z.ai/api/anthropic",
     signupUrl: "https://z.ai/subscribe",
     hasSubscription: true,
-  },
-  kimi: {
-    label: "Kimi (Moonshot)",
-    baseUrl: "https://api.moonshot.ai/anthropic",
-    signupUrl: "https://platform.moonshot.ai/console/api-keys",
-    hasSubscription: true,
-  },
-  deepseek: {
-    label: "DeepSeek",
-    baseUrl: "https://api.deepseek.com/anthropic",
-    signupUrl: "https://platform.deepseek.com/api_keys",
-    hasSubscription: false,
   },
 };
 
@@ -305,73 +211,35 @@ export function cliModelTagLabel(tag: string | undefined, locale: string): strin
   return locale === "ko" ? entry.ko : entry.en;
 }
 
-// 모델 ID/라벨은 여기서만 관리 — 새 세대는 이 배열에 한 줄. 잘못된 ID는 CLI가 거부할 뿐 크래시 없음.
+// CLI inventories are runtime-authoritative. Only vendor-maintained aliases or
+// non-versioned automatic selectors live here as offline fallbacks.
 export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
-  // Claude Code — `claude --model`. 별칭(opus/sonnet/haiku)은 항상 최신, 레거시는 풀ID.
+  // Claude Code aliases follow the account's current generation.
   "claude-code": [
-    { id: "claude-fable-5", label: "Claude Fable 5" },
-    { id: "opus", label: "Opus 4.8", workforceTier: "frontier" },
-    { id: "sonnet", label: "Sonnet 4.6", workforceTier: "balanced" },
-    { id: "haiku", label: "Haiku 4.5", workforceTier: "economy" },
-    { id: "claude-opus-4-7", label: "Opus 4.7", tag: "legacy", workforceTier: "frontier" },
-    { id: "claude-opus-4-6", label: "Opus 4.6", tag: "legacy", workforceTier: "frontier" },
+    { id: "opus", label: "Opus", workforceTier: "frontier" },
+    { id: "sonnet", label: "Sonnet", workforceTier: "balanced" },
+    { id: "haiku", label: "Haiku", workforceTier: "economy" },
   ],
-  // Codex — `codex exec -m <model>`. 구독 기본 외 명시 모델.
-  codex: [
-    // Modern Codex uses the GPT family directly. This is only an offline
-    // fallback/label catalog; detect.ts prefers the signed-in account's
-    // ~/.codex/models_cache.json and never invents a `gpt-5.6-codex` alias.
-    { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", tag: "preview", workforceTier: "frontier" },
-    { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", tag: "preview", workforceTier: "balanced" },
-    { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", tag: "preview", workforceTier: "economy" },
-    { id: "gpt-5.5", label: "GPT-5.5" },
-    { id: "gpt-5.4", label: "GPT-5.4" },
-    { id: "gpt-5.4-mini", label: "GPT-5.4 Mini" },
-    { id: "gpt-5.3-codex-spark", label: "GPT-5.3 Codex Spark", tag: "legacy" },
-  ],
-  // Gemini — `gemini -m <model>`.
-  gemini: [
-    { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
-    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
-  ],
-  // Grok CLI — `grok --model <id>` (GROK_MODEL). 정적 폴백 — detect가 `grok models`로 라이브 목록을 덮어쓴다.
-  grok: [
-    { id: "grok-4.5", label: "Grok 4.5" },
-    { id: "grok-4.3", label: "Grok 4.3" },
-    { id: "grok-4.20-non-reasoning", label: "Grok 4.20" },
-  ],
-  // Cursor Agent CLI — Auto is the safe default because Cursor's subscription
-  // inventory changes per account. Composer is the dedicated Cursor model.
-  cursor: [
-    { id: "auto", label: "Cursor Auto" },
-    { id: "composer-2.5", label: "Composer 2.5" },
-    { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
-    { id: "opus-4.8", label: "Opus 4.8" },
-    { id: "grok-4.5", label: "Grok 4.5" },
-  ],
+  codex: [],
+  gemini: [],
+  grok: [],
+  cursor: [{ id: "auto", label: "Cursor Auto" }],
 };
 
 export function cliModels(kind: string): CliModelOption[] {
   return (CLI_MODELS as Record<string, CliModelOption[] | undefined>)[kind] ?? [];
 }
 
-// ── 작업량(reasoning effort) — Claude Code `--effort` 전용 ─────
-// CLI 값: low/medium/high/xhigh/max. (xhigh = 인터랙티브 메뉴의 "Extra")
+// ── 작업량(reasoning effort) — installed runtime discovery only ─────
 export interface EffortOption {
   id: string;
   label: string;
 }
-export const CLAUDE_EFFORTS: EffortOption[] = [
-  { id: "low", label: "Low" },
-  { id: "medium", label: "Medium" },
-  { id: "high", label: "High" },
-  { id: "xhigh", label: "Extra" },
-  { id: "max", label: "Max" },
-];
+export const CLAUDE_EFFORTS: EffortOption[] = [];
 
-/** 이 런타임이 작업량(effort) 선택을 지원하는가 — 현재 claude-code만. */
-export function runtimeEfforts(kind: string): EffortOption[] {
-  return kind === "claude-code" ? CLAUDE_EFFORTS : [];
+/** Static effort fallbacks are intentionally empty; detect.ts supplies live values. */
+export function runtimeEfforts(_kind: string): EffortOption[] {
+  return [];
 }
 
 /** 이 런타임이 모델 선택 UI를 가질 수 있는가 (BYOK = 항상, CLI = 카탈로그 있을 때, ollama = 받은 모델 있을 때 UI에서 판단) */

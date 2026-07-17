@@ -245,10 +245,10 @@
   /* ── 브랜드 팔레트(고정) ── Sea Foam·Moss·Citronella·Midnight + 뉴트럴 그레이.
      페이지 캔버스는 퓨어 화이트, 보조 표면에만 Mirrorball/Hourglass 톤을 쓴다. 텍스트=Midnight,
      강조=Moss(올리브), 보조=Sea Foam, 하이라이트=Citronella. */
-  --rd-bg: #ffffff;          /* 퓨어 화이트 — 페이지 캔버스 */
-  --rd-bg-soft: #efeee9;     /* Linen-ish */
+  --rd-bg: #fcfcfc;          /* 사용자 기준 캡처의 near-white 캔버스 */
+  --rd-bg-soft: #f8f8f7;     /* 섹션 구분은 색 대신 1~2단계 명도차만 */
   --rd-surface: #ffffff;     /* 화이트 카드(캔버스 위에서 뜨게) */
-  --rd-surface-2: #f3f2ed;   /* 연한 warm — 인풋/리세스 면 */
+  --rd-surface-2: #fafaf9;   /* 연한 neutral — 인풋/리세스 면 */
   --rd-ink: #001519;         /* Midnight */
   --rd-ink-2: rgba(0, 21, 25, 0.72);
   --rd-ink-3: rgba(0, 21, 25, 0.62);
@@ -274,16 +274,16 @@
   --rd-r-xl: 28px;
   /* 소프트 섀도우 — 낮은 opacity + 높은 blur + 큰 Y + 음의 spread(접점은 좁게, 가장자리는
      부드럽게) + 탈채도 쿨톤. 하드한 1px 라인 대신 자연스러운 떠 있는 느낌. */
-  --rd-shadow-1: 0 1px 2px rgba(20, 22, 45, 0.04), 0 6px 20px -6px rgba(20, 22, 45, 0.10);
-  --rd-shadow-2: 0 4px 10px -2px rgba(20, 22, 45, 0.06), 0 18px 44px -12px rgba(20, 22, 45, 0.16);
+  --rd-shadow-1: 0 1px 3px rgba(20, 22, 45, 0.05), 0 8px 24px -8px rgba(20, 22, 45, 0.12);
+  --rd-shadow-2: 0 4px 12px -2px rgba(20, 22, 45, 0.07), 0 20px 48px -14px rgba(20, 22, 45, 0.17);
   --rd-shadow-3: 0 8px 18px -4px rgba(20, 22, 45, 0.08), 0 36px 80px -16px rgba(20, 22, 45, 0.22);
 
   /* ── Color (브랜드 팔레트로 매핑) ───────────────────────── */
   --ink: #001519;            /* Midnight */
   --ink-soft: #51504e;       /* Eve */
   --paper: #ffffff;          /* 화이트 — 사이드바·챗 등 chrome 표면 */
-  --paper-2: #f6f5f2;        /* 따뜻한 near-white */
-  --paper-edge: #eae9e3;     /* 아주 연한 warm 헤어라인 */
+  --paper-2: #fafafa;        /* 사용자 기준 캡처와 같은 neutral near-white */
+  --paper-edge: #ececea;     /* 아주 연한 neutral 헤어라인 */
   --muted: #b8bbbf;          /* Disco */
   --muted-deep: #868483;     /* Cheers */
 
@@ -351,8 +351,8 @@
   --radius-md: 12px;
   --radius-lg: 16px;
   --radius-xl: 22px;
-  --shadow-1: 0 1px 2px rgba(20, 22, 45, 0.04), 0 5px 16px -6px rgba(20, 22, 45, 0.09);
-  --shadow-2: 0 2px 6px -1px rgba(20, 22, 45, 0.05), 0 12px 30px -10px rgba(20, 22, 45, 0.12);
+  --shadow-1: 0 1px 3px rgba(20, 22, 45, 0.05), 0 8px 22px -8px rgba(20, 22, 45, 0.11);
+  --shadow-2: 0 3px 9px -2px rgba(20, 22, 45, 0.07), 0 16px 36px -12px rgba(20, 22, 45, 0.15);
   --hairline: 1px solid var(--paper-edge);
 
   /* ── Neumorphism (버튼·박스 soft-UI 음영) — 소프트 섀도우로 ───────────── */
@@ -475,7 +475,7 @@ body {
 }
 
 body {
-  background: var(--paper);
+  background: var(--rd-bg);
 }
 
 button,
@@ -877,6 +877,18 @@ a:hover {
   font-weight: 600;
 }
 
+.rd .hub-web-topbar-heading {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.rd .hub-web-topbar-subtitle {
+  color: var(--rd-ink-3);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
 .rd .hub-web-topbar-actions {
   display: flex;
   align-items: center;
@@ -936,7 +948,71 @@ a:hover {
 
 .rd .hub-page-root {
   display: grid;
-  gap: 2px;
+  gap: 12px;
+}
+
+.rd .hub-market-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 2px 0;
+}
+
+.rd .hub-market-filters {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 2px 1px 5px;
+  scrollbar-width: none;
+}
+
+.rd .hub-market-filters::-webkit-scrollbar {
+  display: none;
+}
+
+.rd .hub-market-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 7px 11px;
+  border: 1px solid var(--rd-hair);
+  border-radius: 10px;
+  background: var(--rd-surface);
+  color: var(--rd-ink-2);
+  box-shadow: var(--rd-shadow-1);
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.rd .hub-market-filter[data-active="true"] {
+  border-color: color-mix(in oklch, var(--rd-accent) 44%, var(--rd-hair));
+  background: color-mix(in oklch, var(--rd-accent) 9%, var(--rd-surface));
+  color: var(--rd-accent-text);
+}
+
+.rd .hub-market-filter-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--rd-surface-2);
+  color: var(--rd-ink-3);
+  font-family: var(--rd-f-mono);
+  font-size: 9.5px;
+}
+
+.rd .hub-market-result-count {
+  flex-shrink: 0;
+  color: var(--rd-ink-3);
+  font-size: 11.5px;
 }
 
 .rd .portal-panel.hub-results-panel {
@@ -5050,6 +5126,39 @@ button[data-toggle-state="on"] {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.rd .hub-card-availability {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: max-content;
+  max-width: 100%;
+  margin-bottom: 10px;
+  color: var(--rd-ink-3);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.rd .hub-card-availability-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 999px;
+  background: var(--rd-warn);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--rd-warn) 13%, transparent);
+}
+
+.rd .hub-card-availability[data-callable="true"] .hub-card-availability-dot {
+  background: var(--rd-ok);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--rd-ok) 13%, transparent);
+}
+
+@media (max-width: 720px) {
+  .rd .hub-web-topbar-subtitle,
+  .rd .hub-market-result-count {
+    display: none;
+  }
 }
 
 .rd .hub-card-head {

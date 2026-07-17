@@ -224,7 +224,7 @@ export default function TrexGalleryPage() {
   if (process.env.NODE_ENV === "production") return null;
   const modes: ArtMode[] = ["editorial", "cinematic", "diagrammatic", "hybrid"];
   return (
-    <div style={{ padding: 28, background: "#e9ebef", minHeight: "100vh", color: "#111" }}>
+    <div style={{ padding: 28, background: "var(--rd-bg)", minHeight: "100vh", color: "#111" }}>
       <GlobalStyle />
       <h1 style={{ fontSize: 20, fontWeight: 900, marginBottom: 6 }}>T-rex 렌더 QA 갤러리</h1>
       <p style={{ fontSize: 12, color: "#555", marginBottom: 28 }}>4모드 × 7역할 × 방향/장수. 각 슬라이드 좌상단 숫자 = 슬라이드 인덱스. 겹침·오버플로·대비·방향 회귀 확인용.</p>

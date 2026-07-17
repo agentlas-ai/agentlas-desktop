@@ -4,6 +4,7 @@ import type { CSSProperties, ReactNode } from "react";
 import type { InstalledAgent } from "@/lib/types";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
+import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { AgentAvatar } from "./AgentAvatar";
 import { IconCheck, IconChevronDown, IconSearch } from "./Icon";
 
@@ -38,6 +39,7 @@ export function AgentPicker({
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
   // 호출자가 이미 팀 포함 여부를 결정해 걸러 넘긴다 — 여기서 기본 옵션으로 재필터하면
   // 팀이 도로 빠져 0.7.20의 "팀 선택 허용"이 무효가 된다(실사고: 팀 검색 0건·선택 불가).
   // 내부 필터는 background/system 누출 방지용 안전망으로만 유지한다.
@@ -54,14 +56,12 @@ export function AgentPicker({
     });
   }, [displayAgents, locale, query]);
 
-  useEffect(() => {
-    if (!open) return;
-    function onDoc(e: MouseEvent) {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
+  useDismissibleLayer({
+    open,
+    roots: [rootRef],
+    restoreFocusRef: triggerRef,
+    onDismiss: () => setOpen(false),
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -116,6 +116,7 @@ export function AgentPicker({
       }}
     >
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-label={ariaLabel}

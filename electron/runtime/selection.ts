@@ -7,8 +7,11 @@ import {
   runGlmByok,
   runGoogleByok,
   runKimiByok,
+  runMinimaxByok,
   runOpenAIByok,
+  runOpenRouterByok,
   runUpstageByok,
+  runXaiByok,
 } from "./byok";
 import { runClaudeCode } from "./claude-code";
 import { runCodex } from "./codex";
@@ -65,6 +68,9 @@ const RUNNER_LABEL: Record<string, string> = {
   "byok:glm": "GLM (Z.ai)",
   "byok:kimi": "Kimi (Moonshot)",
   "byok:deepseek": "DeepSeek",
+  "byok:minimax": "MiniMax",
+  "byok:xai": "xAI",
+  "byok:openrouter": "OpenRouter",
 };
 
 export interface RuntimeChoice {
@@ -117,6 +123,12 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
       return { runner: runKimiByok, label: RUNNER_LABEL["byok:kimi"] };
     if (active.backend === "deepseek")
       return { runner: runDeepseekByok, label: RUNNER_LABEL["byok:deepseek"] };
+    if (active.backend === "minimax")
+      return { runner: runMinimaxByok, label: RUNNER_LABEL["byok:minimax"] };
+    if (active.backend === "xai")
+      return { runner: runXaiByok, label: RUNNER_LABEL["byok:xai"] };
+    if (active.backend === "openrouter")
+      return { runner: runOpenRouterByok, label: RUNNER_LABEL["byok:openrouter"] };
   }
   return null;
 }

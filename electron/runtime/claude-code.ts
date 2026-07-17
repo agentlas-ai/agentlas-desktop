@@ -235,13 +235,13 @@ async function getBin(): Promise<string | null> {
 // ── 작업량(effort) 자동 동기화 ─────────────────────────────
 // 하드코딩 대신 `claude --help`를 파싱해 이 CLI 버전이 실제 지원하는 --effort 레벨만 노출한다.
 // CLI가 업데이트돼 레벨이 바뀌면 자동 반영. --effort 자체가 없으면 빈 배열(=작업량 미지원).
-const EFFORT_LABELS: Record<string, string> = {
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "Extra",
-  max: "Max",
-};
+function effortLabel(id: string): string {
+  return id
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
 
 function runClaudeHelp(bin: string, timeoutMs = 4000): Promise<string> {
   return new Promise((resolve) => {
@@ -265,7 +265,7 @@ function runClaudeHelp(bin: string, timeoutMs = 4000): Promise<string> {
 }
 
 function parseEffortChoices(help: string): string[] {
-  // 예: "--effort <level>  Effort level for the current session (low, medium, high, xhigh, max)"
+  // Parse the choices printed by the installed CLI instead of assuming a version-specific set.
   const m = help.match(/--effort[\s\S]{0,240}?\(([a-z0-9, ]+)\)/i);
   if (!m) return [];
   return m[1]
@@ -284,7 +284,7 @@ export async function probeClaudeEfforts(): Promise<Array<{ id: string; label: s
     return cachedEfforts;
   }
   const help = await runClaudeHelp(bin);
-  cachedEfforts = parseEffortChoices(help).map((id) => ({ id, label: EFFORT_LABELS[id] ?? id }));
+  cachedEfforts = parseEffortChoices(help).map((id) => ({ id, label: effortLabel(id) }));
   return cachedEfforts;
 }
 
@@ -448,7 +448,7 @@ export const runClaudeCode: Runner = async (
 
   // 모델 선택 — opus/sonnet/haiku 별칭(또는 풀 ID). 미지정이면 구독 기본 모델.
   const modelArgs = req.model && req.model.trim() ? ["--model", req.model.trim()] : [];
-  // 작업량(reasoning effort) — low/medium/high/xhigh/max. 미지정이면 CLI 기본.
+  // 작업량(reasoning effort) — installed CLI가 노출한 값을 그대로 전달. 미지정이면 CLI 기본.
   const effortArgs = req.effort && req.effort.trim() ? ["--effort", req.effort.trim()] : [];
 
   // MCP 서버 구성 주입 — mcp/client.ts가 설치·활성 서버를 .mcp.json으로 직렬화해 경로를 넘긴다.

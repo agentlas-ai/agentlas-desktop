@@ -121,6 +121,8 @@ interface SendOptions {
   permissions?: PermissionLevel;
   appsGenerateMode?: boolean;
   taskForceTargets?: OrchestrationTarget[];
+  /** Keep the current chat roster first; recruit from Agent Hub/Cloud only on a real capability gap. */
+  sessionRouting?: boolean;
 }
 
 /** popover에 그릴 한 행 + 평탄화 인덱스용 메타. group은 같은 헤더 아래로 그룹핑되지만 인덱스는 flat. */
@@ -150,6 +152,7 @@ type AppGenerateChoice = "dedicated" | "chat";
 // /hep-network 직접 입력은 여전히 허브 라우팅으로 동작하지만, 하단에서는 추천/네트워크 선택을 한 흐름으로 묶는다.
 // recommend 는 프리픽스가 아니라 전송 동작을 바꾼다(실행 전에 추천 시트를 띄움). composeHepPrefix 는 무시한다.
 type HepToggleId = "network" | "stormbreaker" | "recommend";
+type ChatInputLayer = "plus" | "permission" | "model" | "context" | "agent-picker" | "apps-question";
 
 const HEP_TOGGLES: Array<{
   id: HepToggleId;
@@ -160,10 +163,10 @@ const HEP_TOGGLES: Array<{
 }> = [
   {
     id: "recommend",
-    labelKo: "알아서 에이전트 부르기",
-    labelEn: "Find agent",
-    titleKo: "요청에 맞는 에이전트·네트워크 TF·예상 비용을 먼저 확인하고 호출",
-    titleEn: "Find the right agent, network TF, and estimated credits first",
+    labelKo: "세션 팀 자동 보강",
+    labelEn: "Dynamic session team",
+    titleKo: "현재 세션 팀을 먼저 쓰고, 역량이 부족할 때만 Agent Hub·Cloud에서 보강",
+    titleEn: "Use the current session team first, then recruit from Agent Hub or Cloud only for a capability gap",
   },
   {
     id: "stormbreaker",
@@ -267,8 +270,8 @@ export function ChatInput({
   onSelectModel?: (id: string) => void;
   /** 작업량 선택 — "" 이면 기본. claude-code 전용. */
   onSelectEffort?: (id: string) => void;
-  /** 컨텍스트 사용량 표시용 */
-  tokensUsage?: { current: number; limit: number };
+  /** 화면에 복원된 대화 기록의 논리 토큰 추정치. 물리 모델 창 점유율이 아니다. */
+  tokensUsage?: { current: number };
   /** 실행 모드 토글 노출 여부(division 챗은 숨김). + 메뉴에 "계속 라이브로"·"스웜"을 넣는다. */
   showModeToggles?: boolean;
   /** 계속 라이브로(continuousMode) 현재 상태 + 토글. */
@@ -292,7 +295,29 @@ export function ChatInput({
   const [images, setImages] = useState<PreviewedImage[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
-  const [plusOpen, setPlusOpen] = useState(false);
+  // 메뉴는 한 번에 하나만 열린다. 서로 독립된 boolean을 두면 권한/모델/컨텍스트가
+  // 동시에 겹치고, 바깥 클릭 처리도 "어느 메뉴 안인가"를 구분하지 못한다.
+  const [activeLayer, setActiveLayer] = useState<ChatInputLayer | null>(null);
+  function setLayerOpen(layer: ChatInputLayer, next: boolean | ((open: boolean) => boolean)) {
+    setActiveLayer((current) => {
+      const open = current === layer;
+      const shouldOpen = typeof next === "function" ? next(open) : next;
+      if (shouldOpen) return layer;
+      return open ? null : current;
+    });
+  }
+  const plusOpen = activeLayer === "plus";
+  const agentPickerOpen = activeLayer === "agent-picker";
+  const permOpen = activeLayer === "permission";
+  const modelOpen = activeLayer === "model";
+  const contextMenuOpen = activeLayer === "context";
+  const appsGenerateQuestionOpen = activeLayer === "apps-question";
+  const setPlusOpen = (next: boolean | ((open: boolean) => boolean)) => setLayerOpen("plus", next);
+  const setAgentPickerOpen = (next: boolean | ((open: boolean) => boolean)) => setLayerOpen("agent-picker", next);
+  const setPermOpen = (next: boolean | ((open: boolean) => boolean)) => setLayerOpen("permission", next);
+  const setModelOpen = (next: boolean | ((open: boolean) => boolean)) => setLayerOpen("model", next);
+  const setContextMenuOpen = (next: boolean | ((open: boolean) => boolean)) => setLayerOpen("context", next);
+  const setAppsGenerateQuestionOpen = (next: boolean | ((open: boolean) => boolean)) => setLayerOpen("apps-question", next);
 
   // 외부 프리필 — 입력창이 비어있을 때만 채운다(입력 중 내용 덮어쓰기 금지).
   useEffect(() => {
@@ -326,21 +351,18 @@ export function ChatInput({
   // 게이트 바텀시트 — 유일하게 묻는 두 경우: 크레딧 부족(paywall) / 적합 에이전트 없음(build 제안).
   const [gateSheet, setGateSheet] = useState<AutoRouteGate | null>(null);
   const [appsGenerateMode, setAppsGenerateMode] = useState(false);
-  const [appsGenerateQuestionOpen, setAppsGenerateQuestionOpen] = useState(false);
-  const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
-  // 전역대화 옆 "에이전트 부르기" 필에서 오는 열기 시그널 — 0은 초기값이라 무시.
+  // 전역대화 옆 "에이전트 부르기" 필은 같은 버튼을 다시 누르면 닫히는 실제 토글이다.
   useEffect(() => {
-    if (agentPickerSignal > 0) setAgentPickerOpen(true);
+    if (agentPickerSignal > 0) setAgentPickerOpen((open) => !open);
+    // signal 변화만 토글 원인이다. activeLayer를 deps에 넣으면 메뉴 자체 변경 때 재토글된다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentPickerSignal]);
   const [appsGenerateChoice, setAppsGenerateChoice] = useState<AppGenerateChoice>("dedicated");
   // 기본값을 write로 — 바이브코딩 앱에서 read-only 기본은 첫 "만들어줘"가 파일을 못 써 조용히 실패한다.
   // write는 cwd 파일 편집만 허용(셸·외부 자동호출은 차단)이라 안전한 기본값.
   const [permissions, setPermissions] = useState<PermissionLevel>("write");
-  const [permOpen, setPermOpen] = useState(false);
-  const [modelOpen, setModelOpen] = useState(false);
   // 컨텍스트는 진단 지표가 아니라 다음 행동(새 세션/비우기)으로 바로 이어져야 한다.
-  const [contextMenuOpen, setContextMenuOpen] = useState(false);
   // / 슬래시 + @ 멘션 인라인 자동완성
   const [trigger, setTrigger] = useState<null | {
     kind: "slash" | "mention";
@@ -432,10 +454,11 @@ export function ChatInput({
     })
     .filter(Boolean)
     .join(" + ");
-  const contextPercent = tokensUsage
-    ? Math.min(100, Math.max(0, Math.round((tokensUsage.current / Math.max(1, tokensUsage.limit)) * 100)))
-    : 0;
-  const contextTone = contextPercent >= 90 ? "var(--red)" : contextPercent >= 75 ? "var(--amber-deep)" : "var(--accent)";
+  const contextTokenLabel = tokensUsage
+    ? tokensUsage.current >= 1_000_000
+      ? `~${(tokensUsage.current / 1_000_000).toFixed(1)}M`
+      : `~${Math.max(1, Math.round(tokensUsage.current / 1_000))}k`
+    : "";
 
   // ── 파일 첨부 ──────────────────────────────────────────
   async function addFiles(files: FileList | File[]) {
@@ -620,9 +643,10 @@ export function ChatInput({
   function submit() {
     if (submitDisabled) return;
     const text = input.trim();
-    // 추천 토글 ON → 묻지 않고 자동 라우팅(codex hep-network처럼 바로 상황에 맞는 에이전트를 부른다).
-    // 크레딧 부족·적합 에이전트 없음일 때만 게이트 시트가 뜬다.
-    if (hepToggles.has("recommend") && text && onRecommendPreview) {
+    // 세션 팀 자동 보강은 매 턴 전역 검색을 하지 않는다. 현재 채팅에 붙은
+    // 에이전트/팀을 먼저 실행하고, 런타임 LLM이 실제 역량 공백을 판단한 경우에만
+    // Agent Hub·Cloud 보강 도구를 사용한다.
+    if (hepToggles.has("recommend") && text) {
       void autoRouteAndSend(text);
       return;
     }
@@ -708,9 +732,10 @@ export function ChatInput({
     // 그새 채팅이 바뀌었으면 이 세션에 콜하지 않는다(세션 격리).
     if (activeChatIdRef.current !== chatIdAtStart) return;
 
-    // 1) 추천 없음/실패 → 그냥 보낸다(있다면 에스컬레이션만 동봉).
+    // 1) 세션 우선 호스트의 정상 경로. routePreview는 전역검색 없이 none을
+    // 반환하고, 현재 세션 roster와 LLM의 동적 gap 판단을 main에 명시한다.
     if (!preview || preview.mode === "none") {
-      onRecommendExecute?.({ kind: "plain", routerAgent: preview?.routerAgent }, text, opts);
+      onSend(text, { ...opts, sessionRouting: true });
       finishComposerAfterSend();
       return;
     }
@@ -772,23 +797,39 @@ export function ChatInput({
     setTimeout(() => textareaRef.current?.focus(), 0);
   }
 
-  // 클릭 외부 — 메뉴 닫기
+  // 모든 ChatInput 메뉴의 단일 dismiss 계약: 자기 trigger/panel 안은 유지,
+  // 나머지 화면은 pointerdown에 닫고, Escape는 닫은 뒤 trigger로 포커스를 돌린다.
   useEffect(() => {
-    if (!plusOpen && !permOpen && !modelOpen && !agentPickerOpen) return;
-    function onDown(e: MouseEvent) {
-      const target = e.target as HTMLElement;
-      if (!target.closest("[data-popover-root]")) {
-        setPlusOpen(false);
-        setPlusSubmenu(null);
-        setPermOpen(false);
-        setModelOpen(false);
-        setAgentPickerOpen(false);
-        setSelectedAgentIds(new Set());
-      }
+    if (!activeLayer) return;
+    function dismiss() {
+      setActiveLayer(null);
+      setPlusSubmenu(null);
+      if (activeLayer === "agent-picker") setSelectedAgentIds(new Set());
     }
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [plusOpen, permOpen, modelOpen, agentPickerOpen]);
+    function onPointerDown(e: PointerEvent) {
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      if (
+        target.closest(`[data-popover-trigger="${activeLayer}"]`) ||
+        target.closest(`[data-popover-kind="${activeLayer}"]`)
+      ) return;
+      dismiss();
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== "Escape" || e.metaKey || e.ctrlKey || e.altKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const trigger = document.querySelector<HTMLElement>(`[data-popover-trigger="${activeLayer}"]`);
+      dismiss();
+      window.requestAnimationFrame(() => trigger?.focus());
+    }
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [activeLayer]);
 
   // 자동완성은 footer 전체가 아니라 목록 자체만 "내부"로 본다. 그래서 입력창이나
   // 채팅 본문을 누르면 닫히고, 목록 행을 누르는 동작은 그대로 onPick까지 전달된다.
@@ -814,7 +855,6 @@ export function ChatInput({
 
   return (
     <footer
-      data-popover-root
       className="titlebar-nodrag chat-input-footer"
       style={{
         borderTop: "var(--hairline)",
@@ -1052,6 +1092,7 @@ export function ChatInput({
           <div style={{ display: "flex", justifyContent: "flex-end" }}>
             <button
               type="button"
+              data-popover-root
               onClick={() => {
                 dismissStormWarning();
                 setShowStormWarning(false);
@@ -1343,13 +1384,6 @@ export function ChatInput({
               e.preventDefault();
               return;
             }
-            if (e.key === "Escape" && (plusOpen || permOpen || modelOpen)) {
-              setPlusOpen(false);
-              setPermOpen(false);
-              setModelOpen(false);
-              e.preventDefault();
-              return;
-            }
             // 실행 중 Cmd/Ctrl+Esc = 정지. 일반 Esc는 입력/IME 취소와 겹쳐 오발동하기 쉽다.
             if (busy && onStop && e.key === "Escape" && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
@@ -1412,6 +1446,7 @@ export function ChatInput({
             {/* + 메뉴 */}
             <button
               type="button"
+              data-popover-trigger="plus"
               onClick={() => {
                 setPlusOpen((v) => !v);
                 setPlusSubmenu(null);
@@ -1514,6 +1549,7 @@ export function ChatInput({
             {/* 권한 칩 */}
             <button
               className="chat-input-chip"
+              data-popover-trigger="permission"
               onClick={() => setPermOpen((v) => !v)}
               disabled={disabled}
               style={{
@@ -1546,6 +1582,7 @@ export function ChatInput({
               ((modelOptions?.length ?? 0) > 0 || (runtime.efforts?.length ?? 0) > 0) && (
                 <button
                   className="chat-input-chip chat-input-model-chip"
+                  data-popover-trigger="model"
                   onClick={() => setModelOpen((v) => !v)}
                   disabled={disabled}
                   title={t("chatinput.model")}
@@ -1571,8 +1608,9 @@ export function ChatInput({
               <div style={{ position: "relative", flexShrink: 0 }}>
                 <button
                   type="button"
+                  data-popover-trigger="context"
                   className="chat-input-context-pill"
-                  title={`${t("chatinput.context.menu_title")} · ${Math.round(tokensUsage.current / 1000)}k / ${Math.round(tokensUsage.limit / 1000)}k`}
+                  title={`${t("chatinput.context.menu_title")} · ${contextTokenLabel}`}
                   aria-label={t("chatinput.context.menu_title")}
                   aria-expanded={contextMenuOpen}
                   onClick={() => setContextMenuOpen((open) => !open)}
@@ -1585,10 +1623,7 @@ export function ChatInput({
                   }}
                 >
                   <span>{t("chatinput.context.label")}</span>
-                  <div className="chat-input-context-meter" style={{ width: 40, height: 4, borderRadius: 2, background: "var(--fill-3)", overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${contextPercent}%`, background: contextTone, transition: "width 0.3s" }} />
-                  </div>
-                  <span className="chat-input-context-percent" style={{ color: contextTone }}>{contextPercent}%</span>
+                  <span className="chat-input-context-percent" style={{ color: "var(--accent)" }}>{contextTokenLabel}</span>
                   <IconChevronDown size={10} style={{ opacity: 0.65 }} />
                 </button>
                 {contextMenuOpen && (
@@ -1596,6 +1631,7 @@ export function ChatInput({
                     role="dialog"
                     aria-label={t("chatinput.context.menu_title")}
                     data-chat-context-menu="true"
+                    data-popover-kind="context"
                     style={{
                       position: "absolute", right: 0, bottom: "calc(100% + 8px)", zIndex: 50,
                       width: 286, padding: 10, display: "grid", gap: 8,
@@ -1606,7 +1642,7 @@ export function ChatInput({
                     <div>
                       <div style={{ display: "flex", justifyContent: "space-between", gap: 8, color: "var(--ink)", fontSize: 12, fontWeight: 800 }}>
                         <span>{t("chatinput.context.menu_title")}</span>
-                        <span style={{ color: contextTone }}>{contextPercent}%</span>
+                        <span style={{ color: "var(--accent)" }}>{contextTokenLabel}</span>
                       </div>
                       <p style={{ margin: "4px 0 0", color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.45 }}>
                         {t("chatinput.context.menu_desc")}
@@ -1796,6 +1832,8 @@ function BottomQuestionSheet({
       role="dialog"
       aria-modal="false"
       aria-label={title}
+      data-popover-root
+      data-popover-kind="apps-question"
       style={{
         position: "absolute",
         left: 0,
@@ -2381,7 +2419,7 @@ function PlusMenu({
 }) {
   if (submenu === "plugins") {
     return (
-      <Popover>
+      <Popover dataKind="plus">
         <button
           onClick={() => setSubmenu(null)}
           style={{
@@ -2414,7 +2452,7 @@ function PlusMenu({
     );
   }
   return (
-    <Popover dataKind="plus-menu" role="menu">
+    <Popover dataKind="plus" role="menu">
       <Row
         onClick={onAddFile}
         icon={<IconFileUp size={14} />}
@@ -2537,7 +2575,7 @@ function PermissionMenu({
     { id: "full", color: "var(--red-deep)" },
   ];
   return (
-    <Popover title={t("chatinput.perm.title")}>
+    <Popover title={t("chatinput.perm.title")} dataKind="permission">
       {opts.map((o) => (
         <Row
           key={o.id}
@@ -2577,7 +2615,7 @@ function ModelMenu({
   const effortIcon = <IconRoute size={13} style={{ color: "var(--muted-deep)" }} />;
 
   return (
-    <Popover title={t("chatinput.model")} align="right">
+    <Popover title={t("chatinput.model")} dataKind="model" align="right">
       {allowDefaultModel && (
         <Row
           onClick={() => onSelectModel("")}
@@ -2675,7 +2713,12 @@ function Popover({
           {title}
         </div>
       )}
-      {children}
+      {dataKind === "plus" ? (
+        // Keep the established QA/accessibility boundary as a nested alias.
+        // The outer `plus` layer owns dismissal; the alias lets older hosts
+        // locate the same real menu without changing click behavior.
+        <div data-popover-kind="plus-menu">{children}</div>
+      ) : children}
     </div>
   );
 }
@@ -2942,6 +2985,7 @@ function AgentPickerPopup({
       aria-modal="true"
       aria-label={t("chatinput.agent_picker.title")}
       data-popover-root
+      data-popover-kind="agent-picker"
       style={{
         position: "absolute",
         left: 0,

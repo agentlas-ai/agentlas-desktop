@@ -1,8 +1,9 @@
 // 모델 목록 동적 동기화 — 하드코딩 대신 실제 소스에서 가져온다.
-//   - BYOK: 각 provider의 /models 엔드포인트를 사용자 키로 조회 (Anthropic/OpenAI/Google)
-//   - 실패/무키: shared/models.ts의 카탈로그로 fallback
+//   - BYOK: 각 provider의 /models 엔드포인트를 사용자 키로 조회
+//   - 실패/무키: 빈 목록 + UI의 manual model ID 입력 (버전 ID를 앱에 고정하지 않음)
 // 5분 메모리 캐시 — detect/picker가 자주 호출해도 네트워크는 가끔만.
 import { readApiKey } from "../secrets/vault";
+import { getDb } from "../store/db";
 import {
   BYOK_MODELS,
   byokModels,
@@ -16,8 +17,33 @@ type ModelOption = CliModelOption;
 const TTL_MS = 5 * 60 * 1000;
 const cache = new Map<ByokBackend, { at: number; models: ModelOption[] }>();
 
+const BYOK_BACKENDS: readonly ByokBackend[] = [
+  "anthropic",
+  "openai",
+  "google",
+  "upstage",
+  "custom",
+  "glm",
+  "kimi",
+  "deepseek",
+  "minimax",
+  "xai",
+  "openrouter",
+];
+
+const OPENAI_COMPAT_BASE_URL: Partial<Record<ByokBackend, string>> = {
+  openai: "https://api.openai.com/v1",
+  upstage: "https://api.upstage.ai/v1",
+  glm: "https://api.z.ai/api/paas/v4",
+  kimi: "https://api.moonshot.ai/v1",
+  deepseek: "https://api.deepseek.com",
+  minimax: "https://api.minimax.io/v1",
+  xai: "https://api.x.ai/v1",
+  openrouter: "https://openrouter.ai/api/v1",
+};
+
 function isByok(backend: string): backend is ByokBackend {
-  return backend === "anthropic" || backend === "openai" || backend === "google";
+  return (BYOK_BACKENDS as readonly string[]).includes(backend);
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit, ms = 4000): Promise<Response> {
@@ -42,19 +68,35 @@ async function fetchAnthropic(key: string): Promise<ModelOption[]> {
     .map((m) => ({ id: m.id, label: m.display_name ?? m.id }));
 }
 
-async function fetchOpenAI(key: string): Promise<ModelOption[]> {
-  const res = await fetchWithTimeout("https://api.openai.com/v1/models", {
+function customBaseUrl(): string | null {
+  try {
+    const row = getDb().prepare("SELECT value FROM meta WHERE key = 'custom_base_url'").get() as
+      | { value?: string }
+      | undefined;
+    return row?.value?.trim().replace(/\/$/, "") || null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchOpenAICompatible(baseUrl: string, key: string): Promise<ModelOption[]> {
+  const res = await fetchWithTimeout(`${baseUrl.replace(/\/$/, "")}/models`, {
     headers: { authorization: `Bearer ${key}` },
   });
   if (!res.ok) throw new Error(`models endpoint returned HTTP ${res.status}`);
-  const json = (await res.json()) as { data?: Array<{ id?: string }> };
-  return (json.data ?? [])
-    .map((m) => m.id)
-    .filter((id): id is string => typeof id === "string")
-    // 채팅 가능한 모델만 — 임베딩/오디오/이미지 모델 제외.
-    .filter((id) => /^(gpt-|o\d|chatgpt)/.test(id) && !/(embedding|whisper|tts|audio|image|dall-e|moderation|realtime|transcribe)/.test(id))
-    .sort()
-    .map((id) => ({ id, label: id }));
+  const json = (await res.json()) as {
+    data?: Array<{ id?: string; name?: string; display_name?: string }>;
+    models?: Array<{ id?: string; name?: string; display_name?: string }>;
+  };
+  const rows = json.data ?? json.models ?? [];
+  return rows
+    .filter((model): model is { id: string; name?: string; display_name?: string } =>
+      typeof model.id === "string" && model.id.trim().length > 0,
+    )
+    .map((model) => ({
+      id: model.id,
+      label: model.display_name?.trim() || model.name?.trim() || model.id,
+    }));
 }
 
 async function fetchGoogle(key: string): Promise<ModelOption[]> {
@@ -69,7 +111,7 @@ async function fetchGoogle(key: string): Promise<ModelOption[]> {
   return (json.models ?? [])
     .filter((m) => (m.supportedGenerationMethods ?? []).includes("generateContent"))
     .map((m) => ({ id: (m.name ?? "").replace(/^models\//, ""), label: m.displayName || (m.name ?? "").replace(/^models\//, "") }))
-    .filter((m) => m.id && m.id.includes("gemini"));
+    .filter((m) => m.id);
 }
 
 /** BYOK 백엔드의 실제 모델 목록 — provider API 조회(키 필요), 실패 시 카탈로그 fallback. now는 캐시 TTL용. */
@@ -84,21 +126,21 @@ export async function fetchByokModels(backend: ByokBackend, now: number): Promis
       models =
         backend === "anthropic"
           ? await fetchAnthropic(key)
-          : backend === "openai"
-            ? await fetchOpenAI(key)
-            : await fetchGoogle(key);
+          : backend === "google"
+            ? await fetchGoogle(key)
+            : await fetchOpenAICompatible(
+                backend === "custom" ? customBaseUrl() ?? "" : OPENAI_COMPAT_BASE_URL[backend] ?? "",
+                key,
+              );
     }
   } catch (err) {
-    // 실시간 조회 실패를 조용히 삼키지 않는다 — 카탈로그로 표시하더라도 이유를 로그로 남겨
-    // "라이브 목록인 줄 알고 넘어가는" 일을 막는다.
+    // 실시간 조회 실패를 조용히 삼키지 않는다. UI는 manual ID 입력을 계속 제공한다.
     console.warn(
-      `[providers] live ${backend} model fetch failed; falling back to built-in catalog:`,
+      `[providers] live ${backend} model fetch failed; manual model selection remains available:`,
       err instanceof Error ? err.message : err,
     );
   }
-  if (models.length === 0) {
-    models = byokModels(backend).map((m) => ({ id: m.id, label: m.label }));
-  }
+  if (models.length === 0) models = byokModels(backend).map((m) => ({ id: m.id, label: m.label }));
   cache.set(backend, { at: now, models });
   return models;
 }

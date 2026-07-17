@@ -709,6 +709,13 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           </span>
         </SidebarLink>
 
+        <SidebarLink href="/marketplace" active={pathname.startsWith("/marketplace")}>
+          <IconUsers size={14} style={{ flexShrink: 0, color: "currentColor" }} />
+          <span style={{ minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            {t("nav.agent_hub")}
+          </span>
+        </SidebarLink>
+
         <SidebarSection
           title={t("sidebar.chats")}
           icon={<IconChat size={12} />}
@@ -1463,6 +1470,9 @@ function labelOfRuntime(s: RuntimeStatus): string {
     glm: "GLM",
     kimi: "Kimi",
     deepseek: "DeepSeek",
+    minimax: "MiniMax",
+    xai: "xAI",
+    openrouter: "OpenRouter",
     cursor: "Cursor",
   }[s.backend ?? ""];
   return `${kind} · ${backend}`;
@@ -1578,6 +1588,12 @@ function CollapsedNav({
       label: t("sidebar.chats"),
       icon: <IconChat size={16} />,
       isActive: pathname === "/chat",
+    },
+    {
+      href: "/marketplace",
+      label: t("nav.agent_hub"),
+      icon: <IconUsers size={16} />,
+      isActive: pathname.startsWith("/marketplace"),
     },
     {
       href: "/project/new",

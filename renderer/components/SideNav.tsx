@@ -134,6 +134,7 @@ export function SideNav({
     () => [
       { label: t("nav.dashboard"), href: "/dashboard", icon: IconHome },
       { label: t("nav.workspace"), href: "/chat", icon: IconChat },
+      { label: t("nav.agent_hub"), href: "/marketplace", icon: IconUsers },
       { label: t("nav.automations"), href: "/automation", icon: IconBolt },
     ],
     [t],

@@ -1,7 +1,7 @@
 // Unified right rail for chat: files, agent workflow, and artifact/viewer panel.
 "use client";
 
-import { useEffect, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Markdown, type CodeArtifact } from "./Markdown";
 import { WorkspacePanel, type WorkspaceFilePreview } from "./WorkspacePanel";
 import {
@@ -20,6 +20,7 @@ import { IconClose, IconFileUp, IconFilm, IconFolder, IconImage, IconLayers, Ico
 import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import { receiptAutoExpanded } from "@/lib/run-receipt-state";
+import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 
 export type ChatRightPanelTab = "file" | "agent" | "panel";
 type PanelViewerSource = "workbench" | "file";
@@ -344,16 +345,6 @@ function FileTab({
   const { locale } = useT();
   const ko = locale === "ko";
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: WorkspaceFilePreview } | null>(null);
-  useEffect(() => {
-    if (!contextMenu) return;
-    const close = () => setContextMenu(null);
-    window.addEventListener("click", close);
-    window.addEventListener("blur", close);
-    return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("blur", close);
-    };
-  }, [contextMenu]);
   const rawOutputRows: Array<OutputRow | null> = [
     surface
       ? {
@@ -607,12 +598,21 @@ function FileContextMenu({
 }) {
   const { locale } = useT();
   const ko = locale === "ko";
+  const menuRef = useRef<HTMLDivElement>(null);
+  useDismissibleLayer({
+    open: true,
+    roots: [menuRef],
+    onDismiss: onClose,
+    dismissOnScroll: true,
+    dismissOnWindowBlur: true,
+  });
   const run = (fn: () => void) => {
     fn();
     onClose();
   };
   return (
     <div
+      ref={menuRef}
       role="menu"
       style={{
         position: "fixed",
@@ -626,7 +626,6 @@ function FileContextMenu({
         background: "var(--paper)",
         boxShadow: "0 14px 34px rgba(15, 23, 42, 0.18)",
       }}
-      onClick={(event) => event.stopPropagation()}
     >
       <button type="button" role="menuitem" style={contextMenuItemStyle} onClick={() => run(() => void openWorkspaceFileExternal(file, ko))}>
         {ko ? "외부 앱으로 열기" : "Open externally"}

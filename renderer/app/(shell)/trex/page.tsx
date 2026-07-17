@@ -1198,7 +1198,7 @@ function blockLabel(k: BlockKind, ko: boolean): string {
 }
 
 /* ─────────────── 스타일 ─────────────── */
-const shell: CSSProperties = { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "#f6f7f9", color: "var(--ink)" };
+const shell: CSSProperties = { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--rd-bg)", color: "var(--ink)" };
 const topbar: CSSProperties = { minHeight: 44, borderBottom: "1px solid var(--paper-edge)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 12, padding: "6px 16px 6px 90px", flexShrink: 0 };
 const backLink: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 6, color: "var(--accent)", fontWeight: 800, fontSize: 12, textDecoration: "none" };
 const wordmark: CSSProperties = { fontSize: 13, fontWeight: 800, color: "var(--ink)" };

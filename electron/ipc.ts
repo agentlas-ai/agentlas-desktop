@@ -19,7 +19,7 @@ import type {
 } from "../shared/site-studio";
 import { clearDetectCache, detectRuntimes, setActiveRuntime } from "./runtime/detect";
 import { agentRunCwd } from "./runtime/exec";
-import { listRuntimeModels } from "./runtime/providers";
+import { clearModelCache, listRuntimeModels } from "./runtime/providers";
 import { installCli, openCliLogin, updateCli, type InstallableCli } from "./runtime/install-cli";
 import { listRuntimeCommands } from "./runtime/commands";
 import { resolveInvocationRunId } from "./runtime/run-id";
@@ -1986,13 +1986,15 @@ export function registerIpcHandlers(): void {
   );
 
   // ── secrets (macOS Keychain) ────────────────────────────
-  ipcMain.handle("secrets:saveApiKey", (_e, backend: RuntimeBackend, key: string) =>
-    saveApiKey(backend, key),
-  );
+  ipcMain.handle("secrets:saveApiKey", async (_e, backend: RuntimeBackend, key: string) => {
+    await saveApiKey(backend, key);
+    clearModelCache();
+  });
   ipcMain.handle("secrets:hasApiKey", (_e, backend: RuntimeBackend) => hasApiKey(backend));
-  ipcMain.handle("secrets:deleteApiKey", (_e, backend: RuntimeBackend) =>
-    deleteApiKey(backend),
-  );
+  ipcMain.handle("secrets:deleteApiKey", async (_e, backend: RuntimeBackend) => {
+    await deleteApiKey(backend);
+    clearModelCache();
+  });
   
   // ── custom backend config ───────────────────────────────
   ipcMain.handle("config:getCustomBaseUrl", () => {
@@ -2007,6 +2009,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("config:setCustomBaseUrl", (_e, url: unknown) => {
     const safe = validateCustomBaseUrl(typeof url === "string" ? url : "");
     getDb().prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('custom_base_url', ?)").run(safe);
+    clearModelCache();
   });
 
   // ── 에이전트 동시성(스웜 크기) — 사양 기반 추천 + 사용자 슬라이더 ─────────
@@ -3056,8 +3059,11 @@ export function registerIpcHandlers(): void {
     "hephaestus:routePreview",
     async (
       _e,
-      input: { query: string; project?: string; scope?: "network" | "cloud"; allowLocal?: boolean; offline?: boolean },
+      input: { query: string; project?: string; scope?: "network" | "cloud"; allowLocal?: boolean; offline?: boolean; sessionRosterFirst?: boolean },
     ) => {
+      // 세션 팀 자동 보강은 매 턴 전역 카탈로그를 검색하지 않는다. none은 실패가
+      // 아니라 "현재 roster를 먼저 실행하고 LLM이 실제 gap에서만 보강"하라는 계약이다.
+      if (input.sessionRosterFirst) return normalizeRecommendation(null, input.query);
       try {
         const res = await routeOnly(input.query, {
           project: input.project,

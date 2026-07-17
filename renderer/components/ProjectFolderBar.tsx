@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import type { FsPathGrant } from "@/lib/types";
 import { IconChat, IconChevronDown, IconCheck, IconFolder } from "./Icon";
 
@@ -29,6 +30,7 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
   const [folder, setFolder] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
 
   // 현재 채팅의 워킹 폴더 로드
   useEffect(() => {
@@ -46,15 +48,12 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
     };
   }, [chatId, reloadToken]);
 
-  // 바깥 클릭 시 메뉴 닫기
-  useEffect(() => {
-    if (!open) return;
-    function onDoc(e: MouseEvent) {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
+  useDismissibleLayer({
+    open,
+    roots: [rootRef],
+    restoreFocusRef: triggerRef,
+    onDismiss: () => setOpen(false),
+  });
 
   const apply = useCallback(
     async (next: FsPathGrant | null) => {
@@ -81,6 +80,7 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
   return (
     <div ref={rootRef} style={{ position: "relative", display: "inline-flex" }}>
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
         disabled={!chatId}

@@ -965,6 +965,30 @@ export async function runMcpInvocation(
       : req.planMode
         ? buildPlanUserPrompt(req.userPrompt, locale)
         : req.userPrompt;
+  if (req.sessionRouting) {
+    const incumbentRoster = [
+      agent.nameEn || agent.name || agent.slug,
+      ...chat.hiredAgents.map((card) => card.name || card.slug),
+    ].filter(Boolean);
+    const sessionRoutingPolicy = locale === "ko"
+      ? [
+          "[Agentlas 세션 팀 정책]",
+          `현재 세션 팀: ${incumbentRoster.join(", ")}`,
+          "이 팀이 요청을 수행할 수 있으면 그대로 수행하세요. 매 메시지마다 전역 에이전트를 검색하거나 다른 에이전트 이름을 끼워 넣지 마세요.",
+          "현재 팀에 실제 역량·도구 공백이 있을 때만 사용 가능한 Agentlas Workforce/Hephaestus 도구로 Agent Hub 또는 Cloud에서 필요한 최소 인원만 동적으로 보강하세요.",
+          "보강이 필요하면 이유와 새로 합류한 역할만 짧게 알리고, 관련 없는 휴면 에이전트는 언급하지 마세요.",
+          "[/Agentlas 세션 팀 정책]",
+        ].join("\n")
+      : [
+          "[Agentlas session-team policy]",
+          `Current session team: ${incumbentRoster.join(", ")}`,
+          "If this team can complete the request, keep it and execute. Do not globally search or inject unrelated agent names on every message.",
+          "Only on a genuine capability or tool gap, use available Agentlas Workforce/Hephaestus tools to recruit the minimum required role from Agent Hub or Cloud.",
+          "When recruiting, state the gap and the newly joined role briefly; never mention unrelated dormant agents.",
+          "[/Agentlas session-team policy]",
+        ].join("\n");
+    effectiveUserPrompt = `${sessionRoutingPolicy}\n\n${effectiveUserPrompt}`;
+  }
   // `/hep-network` now enters the host-LLM Agent Workforce Ontology path.
   // The old lexical recommendation path remains available only as the explicit
   // compatibility command `/hep-network --legacy`.
@@ -1050,7 +1074,7 @@ export async function runMcpInvocation(
     !plainConversation &&
     !isTargetAppEdit,
   );
-  const automaticWorkforceEligible = shouldAutoEngageNetworkWorkforce({
+  const automaticWorkforceEligible = !req.sessionRouting && shouldAutoEngageNetworkWorkforce({
     agentAppMode: req.agentAppMode === true,
     networkAutoEnabled: isNetworkAutoEnabled(),
     globalOrchestrator: isGlobalOrchestrator(agent),
@@ -1094,6 +1118,8 @@ export async function runMcpInvocation(
   const autoRoute = req.agentAppMode
     ? null
     : explicitWorkforceGoal || explicitNetworkGoal || hubWorkforceRequested || automaticWorkforceEligible
+      ? null
+    : req.sessionRouting
       ? null
     : isTargetAppEdit
     ? selectAppBuilderForExistingAppEdit(installedAgents, locale)

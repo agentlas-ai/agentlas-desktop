@@ -37,6 +37,13 @@ function prepareContext(
   events: RunnerEvents,
 ): { model: string; recent: RunnerRequest["history"]; system: string } {
   const model = resolveModel(backend, req);
+  if (!model) {
+    throw new Error(
+      req.locale === "ko"
+        ? "사용할 모델 ID가 없습니다. 설정에서 실시간 모델을 선택하거나 모델 ID를 직접 입력하세요."
+        : "No model ID is selected. Choose a live model or enter a model ID in Settings.",
+    );
+  }
   const { recent, digest, droppedCount } = compactHistory(req.history, {
     contextWindow: effectiveContextWindow(backend, model, !!req.longContext),
     locale: req.locale,
@@ -221,13 +228,124 @@ function makeAnthropicCompatByok(backend: ByokBackend): Runner {
 }
 
 export const runGlmByok: Runner = makeAnthropicCompatByok("glm");
-export const runKimiByok: Runner = makeAnthropicCompatByok("kimi");
-export const runDeepseekByok: Runner = makeAnthropicCompatByok("deepseek");
 
 // ── OpenAI Chat Completions ──────────────────────────────
 type OpenAIContent =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string } };
+
+async function runOpenAICompatible(
+  backend: ByokBackend,
+  baseUrl: string,
+  providerLabel: string,
+  req: RunnerRequest,
+  events: RunnerEvents,
+): Promise<RunnerResult> {
+  const key = await readApiKey(backend);
+  if (!key) {
+    throw new Error(
+      req.locale === "ko"
+        ? `${providerLabel} API 키가 없습니다. 설정에서 키를 저장하세요.`
+        : `Missing ${providerLabel} API key. Save it in Settings.`,
+    );
+  }
+
+  events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
+  const { model, recent, system } = prepareContext(backend, req, events);
+  const messages: Array<{
+    role: "system" | "user" | "assistant";
+    content: string | OpenAIContent[];
+  }> = [{ role: "system", content: system }];
+  for (const message of recent) {
+    if (message.role === "user" || message.role === "assistant") {
+      messages.push({ role: message.role, content: message.text });
+    }
+  }
+  if (req.images && req.images.length > 0) {
+    const content: OpenAIContent[] = req.images.map((image) => ({
+      type: "image_url",
+      image_url: { url: `data:${image.mediaType};base64,${image.data}` },
+    }));
+    content.push({ type: "text", text: req.userPrompt });
+    messages.push({ role: "user", content });
+  } else {
+    messages.push({ role: "user", content: req.userPrompt });
+  }
+
+  const resp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+    signal: req.signal,
+    body: JSON.stringify({ model, stream: true, messages }),
+  });
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => "");
+    throw new Error(`${providerLabel} API ${resp.status}: ${errText.slice(0, 300)}`);
+  }
+
+  let acc = "";
+  let lastEmit = 0;
+  for await (const line of iterSseLines(resp)) {
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice(5).trim();
+    if (payload === "[DONE]") break;
+    try {
+      const event = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
+      const delta = event.choices?.[0]?.delta?.content;
+      if (!delta) continue;
+      acc += delta;
+      const now = Date.now();
+      if (now - lastEmit > 80) {
+        events.onPartial(acc);
+        lastEmit = now;
+      }
+    } catch {
+      // Provider ping or non-content event.
+    }
+  }
+  return {
+    text: acc.trim(),
+    workforcePermissionEnforcement: workforceZeroToolsEnforcement(
+      req,
+      "byok",
+      ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
+    ),
+  };
+}
+
+function makeOpenAICompatibleByok(
+  backend: ByokBackend,
+  baseUrl: string,
+  providerLabel: string,
+): Runner {
+  return (req, events) => runOpenAICompatible(backend, baseUrl, providerLabel, req, events);
+}
+
+export const runKimiByok: Runner = makeOpenAICompatibleByok(
+  "kimi",
+  "https://api.moonshot.ai/v1",
+  "Kimi",
+);
+export const runDeepseekByok: Runner = makeOpenAICompatibleByok(
+  "deepseek",
+  "https://api.deepseek.com",
+  "DeepSeek",
+);
+export const runMinimaxByok: Runner = makeOpenAICompatibleByok(
+  "minimax",
+  "https://api.minimax.io/v1",
+  "MiniMax",
+);
+export const runXaiByok: Runner = makeOpenAICompatibleByok(
+  "xai",
+  "https://api.x.ai/v1",
+  "xAI",
+);
+export const runOpenRouterByok: Runner = makeOpenAICompatibleByok(
+  "openrouter",
+  "https://openrouter.ai/api/v1",
+  "OpenRouter",
+);
 
 export const runOpenAIByok: Runner = async (
   req: RunnerRequest,

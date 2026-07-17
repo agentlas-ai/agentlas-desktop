@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import type { AuthSession } from "@/lib/types";
 import { useT } from "@/lib/i18n";
+import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { IconChevronDown } from "./Icon";
 
 export function AccountChip() {
@@ -16,6 +17,7 @@ export function AccountChip() {
   const [busy, setBusy] = useState(false);
   const [popoverOpen, setPopoverOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   // 마운트 시 조회 + 이메일이 아직 안 채워졌으면 재조회.
   // main은 부팅 시 keychain에서 세션을 먼저 복원하고 이메일/이름은 백그라운드로 가져오므로,
@@ -59,17 +61,12 @@ export function AccountChip() {
     window.dispatchEvent(new Event("agentlas:auth-changed"));
   }
 
-  // 외부 클릭으로 popover 닫기
-  useEffect(() => {
-    if (!popoverOpen) return;
-    function onDown(e: MouseEvent) {
-      const root = rootRef.current;
-      if (!root) return;
-      if (!root.contains(e.target as Node)) setPopoverOpen(false);
-    }
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [popoverOpen]);
+  useDismissibleLayer({
+    open: popoverOpen,
+    roots: [rootRef],
+    restoreFocusRef: triggerRef,
+    onDismiss: () => setPopoverOpen(false),
+  });
 
   async function signIn() {
     const api = ipc();
@@ -164,6 +161,7 @@ export function AccountChip() {
         </div>
       ) : (
         <button
+          ref={triggerRef}
           onClick={() => setPopoverOpen((v) => !v)}
           style={{
             display: "flex",

@@ -17,9 +17,6 @@ import type {
 } from "@/lib/types";
 import {
   type ByokBackend,
-  BYOK_MODELS,
-  findByokModel,
-  needsLongContextToggle,
 } from "@shared/models";
 import { AUTO_PROVIDER } from "@shared/multimodal";
 import { navigate } from "@/lib/navigation";
@@ -39,6 +36,9 @@ const BYOK_BACKENDS: ByokBackend[] = [
   "glm",
   "kimi",
   "deepseek",
+  "minimax",
+  "xai",
+  "openrouter",
   "custom",
 ];
 
@@ -54,6 +54,9 @@ const BACKEND_LABEL_KO: Record<RuntimeBackend, string> = {
   glm: "GLM (Z.ai)",
   kimi: "Kimi (Moonshot)",
   deepseek: "DeepSeek",
+  minimax: "MiniMax",
+  xai: "xAI (Grok API)",
+  openrouter: "OpenRouter",
   cursor: "Cursor",
 };
 
@@ -69,6 +72,9 @@ const BACKEND_LABEL_EN: Record<RuntimeBackend, string> = {
   glm: "GLM (Z.ai)",
   kimi: "Kimi (Moonshot)",
   deepseek: "DeepSeek",
+  minimax: "MiniMax",
+  xai: "xAI (Grok API)",
+  openrouter: "OpenRouter",
   cursor: "Cursor",
 };
 
@@ -85,6 +91,9 @@ const BACKEND_KEY_HINT_KO: Record<ByokBackend, string> = {
   glm: "z.ai/subscribe · 구독 코딩 플랜",
   kimi: "platform.moonshot.ai · 구독 코딩 플랜",
   deepseek: "platform.deepseek.com/api_keys · 종량제",
+  minimax: "platform.minimax.io",
+  xai: "console.x.ai",
+  openrouter: "openrouter.ai/settings/keys",
 };
 
 const BACKEND_KEY_HINT_EN: Record<ByokBackend, string> = {
@@ -96,6 +105,9 @@ const BACKEND_KEY_HINT_EN: Record<ByokBackend, string> = {
   glm: "z.ai/subscribe · subscription coding plan",
   kimi: "platform.moonshot.ai · subscription coding plan",
   deepseek: "platform.deepseek.com/api_keys · pay-as-you-go",
+  minimax: "platform.minimax.io",
+  xai: "console.x.ai",
+  openrouter: "openrouter.ai/settings/keys",
 };
 
 function backendKeyHint(b: ByokBackend, locale: string): string {
@@ -116,6 +128,9 @@ export default function SettingsPage() {
     glm: "",
     kimi: "",
     deepseek: "",
+    minimax: "",
+    xai: "",
+    openrouter: "",
   });
   const [hasKey, setHasKey] = useState<Record<ByokBackend, boolean>>({
     anthropic: false,
@@ -126,6 +141,9 @@ export default function SettingsPage() {
     glm: false,
     kimi: false,
     deepseek: false,
+    minimax: false,
+    xai: false,
+    openrouter: false,
   });
   const [customBaseUrl, setCustomBaseUrl] = useState("");
   const [draftCustomBaseUrl, setDraftCustomBaseUrl] = useState("");
@@ -165,7 +183,18 @@ export default function SettingsPage() {
     if (!api) return;
     api.system?.concurrencyInfo().then(setConcurrency).catch(() => {});
     api.interview?.getMode().then(setInterviewMode).catch(() => {});
-    const runtimeRefresh = api.runtime.detect().then(setStatuses);
+    const runtimeRefresh = api.runtime.detect().then((nextStatuses) => {
+      setStatuses(nextStatuses);
+      // New provider families are discovered from the runtime inventory rather
+      // than adding one secret IPC round-trip per provider forever. This keeps
+      // Settings startup bounded as the provider catalog grows.
+      setHasKey((current) => ({
+        ...current,
+        minimax: nextStatuses.some((status) => status.kind === "byok" && status.backend === "minimax"),
+        xai: nextStatuses.some((status) => status.kind === "byok" && status.backend === "xai"),
+        openrouter: nextStatuses.some((status) => status.kind === "byok" && status.backend === "openrouter"),
+      }));
+    });
     const keyRefresh = Promise.all([
       api.secrets.hasApiKey("anthropic"),
       api.secrets.hasApiKey("openai"),
@@ -177,7 +206,8 @@ export default function SettingsPage() {
       api.secrets.hasApiKey("deepseek"),
       api.config.getCustomBaseUrl(),
     ]).then(([a, o, g, u, c, glmK, kimiK, dsK, baseUrl]) => {
-      setHasKey({
+      setHasKey((current) => ({
+        ...current,
         anthropic: a,
         openai: o,
         google: g,
@@ -186,7 +216,7 @@ export default function SettingsPage() {
         glm: glmK,
         kimi: kimiK,
         deepseek: dsK,
-      });
+      }));
       setCustomBaseUrl(baseUrl);
       setDraftCustomBaseUrl(baseUrl);
     });
@@ -1696,10 +1726,8 @@ function UpdatePanel() {
 }
 
 
-// ── BYOK 모델 선택 + 1M 컨텍스트 토글 ─────────────────────
-// 모델 칩을 누르면 해당 백엔드가 그 모델로 활성화된다. 긴 컨텍스트는:
-//  - beta-header 모델(Anthropic): 사용자 토글(opt-in) — 켜면 1M 베타 헤더 전송
-//  - auto 모델(GPT-4.1 · Gemini): 모델 내장 → "1M 내장" 배지만 표시
+// ── BYOK live model catalog + manual ID escape hatch ─────
+// Model generations are provider-owned. Never pin versioned IDs in the UI.
 function ByokModelControls({
   backend,
   status,
@@ -1709,24 +1737,65 @@ function ByokModelControls({
   status?: RuntimeStatus;
   onActivate: (backend: ByokBackend, model: string, longContext: boolean) => void | Promise<void>;
 }) {
-  const { t } = useT();
-  const models = BYOK_MODELS[backend];
-  const currentModel = status?.model ?? models[0]?.id;
-  const longOn = status?.longContextEnabled ?? false;
-  const showToggle = needsLongContextToggle(backend, currentModel);
-  const autoLong = !!findByokModel(backend, currentModel)?.longContext && !showToggle;
+  const { t, locale } = useT();
+  const [models, setModels] = useState<Array<{ id: string; label: string }>>([]);
+  const [manualModel, setManualModel] = useState(status?.model ?? "");
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const currentModel = status?.model ?? "";
+
+  useEffect(() => {
+    let live = true;
+    const api = ipc();
+    if (!api) {
+      setLoading(false);
+      return () => { live = false; };
+    }
+    setLoading(true);
+    setLoadError(false);
+    void api.runtime
+      .listModels({ kind: "byok", backend, availableModels: status?.availableModels })
+      .then((next) => {
+        if (!live) return;
+        const unique = new Map(next.map((model) => [model.id, model] as const));
+        if (currentModel && !unique.has(currentModel)) {
+          unique.set(currentModel, { id: currentModel, label: currentModel });
+        }
+        setModels([...unique.values()]);
+      })
+      .catch(() => {
+        if (live) setLoadError(true);
+      })
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => { live = false; };
+  }, [backend, currentModel, status?.availableModels]);
+
+  useEffect(() => {
+    if (currentModel) setManualModel(currentModel);
+  }, [currentModel]);
+
+  const activateManual = () => {
+    const model = manualModel.trim();
+    if (model) void onActivate(backend, model, false);
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
       <div style={{ fontSize: 11, color: "var(--muted-deep)" }}>{t("settings.byok.model_label")}</div>
+      <div style={{ fontSize: 11, color: "var(--muted-deep)", lineHeight: 1.5 }}>
+        {locale === "ko"
+          ? "공급자의 실시간 모델 목록입니다. 새 모델은 앱 업데이트 없이 나타나며, 목록이 없으면 아래에 모델 ID를 직접 입력하세요."
+          : "Live provider catalog. New models appear without an app update; enter a model ID below when a provider exposes no catalog."}
+      </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
         {models.map((m) => {
           const isCurrent = currentModel === m.id;
           return (
             <button
               key={m.id}
-              // 다른 모델로 바꾸면 1M 토글은 초기화(off), 같은 모델 재클릭이면 현재 상태 유지.
-              onClick={() => void onActivate(backend, m.id, isCurrent ? longOn : false)}
+              onClick={() => void onActivate(backend, m.id, false)}
               style={{
                 padding: "6px 12px",
                 borderRadius: 999,
@@ -1743,42 +1812,57 @@ function ByokModelControls({
               }}
             >
               {m.label}
-              {m.longContext && (
-                <span
-                  style={{
-                    fontSize: 9.5,
-                    fontFamily: "var(--font-head)",
-                    padding: "1px 5px",
-                    borderRadius: 999,
-                    background: isCurrent ? "rgba(255,255,255,0.22)" : "var(--fill-1)",
-                    color: isCurrent ? "var(--paper)" : "var(--accent)",
-                  }}
-                >
-                  1M
-                </span>
-              )}
             </button>
           );
         })}
       </div>
-      {showToggle && currentModel && (
-        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, cursor: "pointer" }}>
-          <input
-            type="checkbox"
-            checked={longOn}
-            onChange={(e) => void onActivate(backend, currentModel, e.target.checked)}
-          />
-          <span style={{ fontWeight: 600 }}>{t("settings.byok.context1m")}</span>
-          <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>
-            {t("settings.byok.context1m_hint")}
-          </span>
-        </label>
-      )}
-      {autoLong && (
-        <div style={{ fontSize: 11, color: "var(--green-deep)", fontWeight: 600 }}>
-          ✓ {t("settings.byok.context1m_auto")}
+      {loading && <div style={{ fontSize: 11, color: "var(--muted-deep)" }}>{locale === "ko" ? "모델 목록을 읽는 중…" : "Loading model catalog…"}</div>}
+      {!loading && models.length === 0 && (
+        <div style={{ fontSize: 11, color: loadError ? "var(--red-deep)" : "var(--muted-deep)" }}>
+          {locale === "ko" ? "이 공급자는 모델 목록을 주지 않았습니다. 모델 ID를 직접 입력하세요." : "This provider did not return a model catalog. Enter a model ID manually."}
         </div>
       )}
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          value={manualModel}
+          onChange={(event) => setManualModel(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              activateManual();
+            }
+          }}
+          placeholder={locale === "ko" ? "모델 ID 직접 입력" : "Enter model ID"}
+          style={{
+            flex: 1,
+            minWidth: 180,
+            padding: "8px 10px",
+            border: "1px solid var(--paper-edge)",
+            borderRadius: "var(--radius-md)",
+            background: "var(--paper-2)",
+            color: "var(--ink)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+          }}
+        />
+        <button
+          type="button"
+          onClick={activateManual}
+          disabled={!manualModel.trim()}
+          style={{
+            padding: "8px 12px",
+            border: "1px solid var(--paper-edge)",
+            borderRadius: "var(--radius-md)",
+            background: "var(--paper)",
+            color: "var(--ink)",
+            fontSize: 12,
+            fontWeight: 700,
+            opacity: manualModel.trim() ? 1 : 0.5,
+          }}
+        >
+          {locale === "ko" ? "이 모델 사용" : "Use model"}
+        </button>
+      </div>
     </div>
   );
 }

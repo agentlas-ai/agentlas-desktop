@@ -83,15 +83,6 @@ function dropInstallOnlyShadows(listings: MarketplaceListing[]): MarketplaceList
   });
 }
 
-/** 카드 필터와 hep-search 폴백 판정이 같은 기준을 쓰도록 공용 predicate로 추출. */
-function listingMatchesQuery(l: MarketplaceListing, normalizedQuery: string): boolean {
-  if (!normalizedQuery) return true;
-  return [l.slug, l.name, l.nameEn, l.tagline, l.taglineEn, l.ownerName, l.category, l.developer]
-    .join(" ")
-    .toLowerCase()
-    .includes(normalizedQuery);
-}
-
 // ── hep-search 폴백 — Hub 검색 0건(또는 실패) 시 엔진(hephaestus search) 후보를 보조 표기 ──
 type HepFallbackItem = { slug: string; name: string; description: string; scope: string };
 type HepFallbackState = { query: string; status: "loading" | "done"; items: HepFallbackItem[] };
@@ -140,6 +131,7 @@ function MarketplacePage() {
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 12;
   const [hubView, setHubView] = useState<HubView>(() => searchParams.get("view") === "experience" ? "experience" : "agents");
+  const [category, setCategory] = useState<HubCategory>("all");
   const [experienceCatalog, setExperienceCatalog] = useState<ExperienceHubCatalogResult | null>(null);
   const [experienceCatalogLoading, setExperienceCatalogLoading] = useState(false);
   const [experienceCatalogRevision, setExperienceCatalogRevision] = useState(0);
@@ -171,7 +163,7 @@ function MarketplacePage() {
 
   useEffect(() => {
     setPage(1);
-  }, [q]);
+  }, [q, category]);
 
   async function ensureSignedIn(): Promise<boolean> {
     const api = ipc();
@@ -290,8 +282,9 @@ function MarketplacePage() {
           setHepFallback(null);
           return;
         }
-        const hasHubMatch = Array.isArray(results)
-          && results.filter(isLiveHubListing).some((l) => listingMatchesQuery(l, query.toLowerCase()));
+        // marketplace.search는 설명·역량·트리거·임베딩까지 사용한 서버 권위 검색이다.
+        // 자연어 질의가 카드 문자열에 그대로 없다는 이유로 결과를 버리면 의미검색이 깨진다.
+        const hasHubMatch = Array.isArray(results) && results.some(isLiveHubListing);
         if (hasHubMatch) {
           setHepFallback(null);
           return;
@@ -341,12 +334,12 @@ function MarketplacePage() {
       announceHubBookmarkChange({ action: "added", bookmark });
       setImportNotice({
         tone: "ok",
-        text: ko ? "Hub 북마크에 추가했습니다." : "Added to Hub bookmarks.",
+        text: ko ? "인재 풀에 저장했습니다." : "Saved to your candidate pool.",
       });
     } catch (err) {
       setImportNotice({
         tone: "error",
-        text: ko ? `북마크하지 못했습니다. ${String(err)}` : `Bookmark failed. ${String(err)}`,
+        text: ko ? `인재 풀에 저장하지 못했습니다. ${String(err)}` : `Could not save this candidate. ${String(err)}`,
       });
     } finally {
       setBookmarking(null);
@@ -375,15 +368,24 @@ function MarketplacePage() {
   const hubLive = sourceStatus ? sourceStatus.online && !sourceStatus.usingFallback && !sourceStatus.lastError : false;
   const hubAvailable = Boolean(sourceStatus?.online && !sourceStatus.usingFallback);
 
-  const matchingListings = orderListingsForHub(
-    dropInstallOnlyShadows(
-      listings.filter(isLiveHubListing).filter((l) => listingMatchesQuery(l, normalizedQuery)),
-    ),
-    hubLive,
-  );
+  const liveListings = dropInstallOnlyShadows(listings.filter(isLiveHubListing));
+  // 검색 중에는 서버의 의미 순위를 그대로 보존한다. 유형/호출 수 기반 로컬 정렬은
+  // 검색어가 없는 둘러보기 모드에서만 사용한다.
+  const matchingListings = normalizedQuery
+    ? liveListings
+    : orderListingsForHub(liveListings, hubLive);
 
-  // 허브 메뉴 단순화(요청): 상단 카테고리 섹션 제거 — 검색 + 카드 리스트 + 페이지네이션만.
-  const activeListings = matchingListings;
+  // Agent Hub 정보구조: 에이전트·팀·플러그인은 같은 시장에서 검색하되,
+  // 사용자가 필요한 고용 단위를 즉시 좁힐 수 있게 실제 엔티티 종류로 필터한다.
+  const categoryCounts: Record<HubCategory, number> = {
+    all: matchingListings.length,
+    agent: matchingListings.filter((listing) => hubCategoryFor(listing) === "agent").length,
+    team: matchingListings.filter((listing) => hubCategoryFor(listing) === "team").length,
+    plugin: matchingListings.filter((listing) => hubCategoryFor(listing) === "plugin").length,
+  };
+  const activeListings = category === "all"
+    ? matchingListings
+    : matchingListings.filter((listing) => hubCategoryFor(listing) === category);
   const hubSuggestions = normalizedQuery ? matchingListings.slice(0, 6) : [];
 
   const activeTotal = activeListings.length;
@@ -428,7 +430,12 @@ function MarketplacePage() {
         <div className="hub-web-frame">
           <div className="hub-web-main">
               <div className="hub-web-topbar" data-tour-id="hub.status">
-              <div className="hub-web-topbar-title">Hub</div>
+              <div className="hub-web-topbar-heading">
+                <div className="hub-web-topbar-title">Agent Hub</div>
+                <div className="hub-web-topbar-subtitle">
+                  {ko ? "프로젝트에 필요한 AI 동료·팀·플러그인을 찾고 고용하세요." : "Find and hire the AI talent, teams, and plugins your project needs."}
+                </div>
+              </div>
               <div className="hub-web-topbar-actions" aria-label={ko ? "허브 계정 상태" : "Hub account state"}>
                 <span>{accountLabel}</span>
                 <span
@@ -460,7 +467,7 @@ function MarketplacePage() {
                 data-active={hubView === "agents"}
                 onClick={() => setHubView("agents")}
               >
-                {ko ? "일할 에이전트 찾기" : "Find agents"}
+                {ko ? "AI 인재·도구" : "AI talent & tools"}
               </button>
               <button
                 type="button"
@@ -527,8 +534,8 @@ function MarketplacePage() {
                     setSearchFocused(false);
                   }
                 }}
-                placeholder={ko ? "에이전트, 팀, 플러그인 검색..." : "Search agents, teams, plugins..."}
-                aria-label={ko ? "허브 검색" : "Search the Hub"}
+                placeholder={ko ? "할 일을 설명하거나 에이전트·팀·플러그인 검색..." : "Describe the job or search agents, teams, and plugins..."}
+                aria-label={ko ? "Agent Hub 검색" : "Search Agent Hub"}
                 role="combobox"
                 aria-autocomplete="list"
                 aria-expanded={searchFocused && normalizedQuery.length > 0}
@@ -632,6 +639,32 @@ function MarketplacePage() {
                 )}
               </div>
             )}
+          </div>
+
+          <div className="hub-market-toolbar" aria-label={ko ? "마켓 필터" : "Market filters"}>
+            <div className="hub-market-filters" role="group" aria-label={ko ? "인재·도구 유형" : "Talent and tool type"}>
+              {([
+                ["all", ko ? "전체" : "All"],
+                ["agent", ko ? "에이전트" : "Agents"],
+                ["team", ko ? "팀" : "Teams"],
+                ["plugin", ko ? "플러그인" : "Plugins"],
+              ] as Array<[HubCategory, string]>).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  className="hub-market-filter"
+                  data-active={category === value}
+                  aria-pressed={category === value}
+                  onClick={() => setCategory(value)}
+                >
+                  <span>{label}</span>
+                  <span className="hub-market-filter-count">{categoryCounts[value]}</span>
+                </button>
+              ))}
+            </div>
+            <span className="hub-market-result-count">
+              {ko ? `${activeListings.length}개 후보` : `${activeListings.length} candidates`}
+            </span>
           </div>
 
           {sourceStatus && !hubAvailable && (
@@ -999,6 +1032,16 @@ function AgentCard({
   const verificationFacts = hubVerificationFacts(listing, locale);
   return (
     <div className="card portal-entity-card hub-entity-card" data-entity-kind={entityKind}>
+      <div className="hub-card-availability" data-callable={callable ? "true" : "false"}>
+        <span className="hub-card-availability-dot" aria-hidden="true" />
+        <span>
+          {plugin
+            ? (ko ? "도구 연결 가능" : "Tool available")
+            : callable
+              ? (ko ? "지금 호출 가능" : "Ready to call")
+              : (ko ? "설치 후 사용" : "Install to use")}
+        </span>
+      </div>
       <div className="hub-card-head">
         <div className="hub-card-main">
           <div className="hub-card-kicker">
@@ -1053,10 +1096,10 @@ function AgentCard({
           {plugin
             ? (ko ? "설치 명령 복사" : "Copy install command")
             : bookmarking
-              ? (ko ? "북마크 중…" : "Bookmarking…")
+              ? (ko ? "후보 저장 중…" : "Saving…")
               : bookmarked
-                ? (ko ? "북마크됨" : "Bookmarked")
-                : (ko ? "북마크" : "Bookmark")}
+                ? (ko ? "인재 풀에 저장됨" : "Saved candidate")
+                : (ko ? "인재 풀에 저장" : "Save candidate")}
         </button>
         {callable ? (
           <button

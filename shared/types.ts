@@ -176,6 +176,9 @@ export type RuntimeBackend =
   | "glm"
   | "kimi"
   | "deepseek"
+  | "minimax"
+  | "xai"
+  | "openrouter"
   | "cursor";
 
 export interface RuntimeSelection {
@@ -2756,6 +2759,8 @@ export interface McpInvocationRequest {
   pipelineStages?: RecStage[];
   /** 저신뢰 라우팅 결정을 호스트 LLM Router Agent로 재판단해야 할 때 전달되는 에스컬레이션. */
   routerAgent?: RecRouterAgent;
+  /** Keep the bound chat roster first and recruit from Network/Cloud only after a model-judged capability gap. */
+  sessionRouting?: boolean;
 }
 
 /** Main-owned Codex-style steering acknowledgement shared by Desktop and Mobile. */
@@ -4872,6 +4877,8 @@ export interface AgentlasIpc {
       scope?: "network" | "cloud";
       allowLocal?: boolean;
       offline?: boolean;
+      /** Preserve the route-preview host contract without running a global search for every turn. */
+      sessionRosterFirst?: boolean;
     }) => Promise<Recommendation>;
     /** 패키지된 GUI 숏컷(스튜디오 등) 복원/실행. */
     localGui: (input: { shortcut: string; detach?: boolean; noOpen?: boolean }) => Promise<HephaestusCommandResult>;

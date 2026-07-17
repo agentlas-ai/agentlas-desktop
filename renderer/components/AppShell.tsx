@@ -3,7 +3,7 @@
 // + Electron 메뉴 → 라우터 브릿지.
 // + 자동 업데이트 배너 (downloading/downloaded 상태에서만 노출).
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Sidebar } from "./Sidebar";
 import { MenuBridge } from "./MenuBridge";
@@ -21,6 +21,7 @@ import { BrowserActionApprovalSheet } from "./BrowserActionApprovalSheet";
 import FloatingComputerUsePanel from "./browser/FloatingComputerUsePanel";
 import { OntologyChipFeatureUpdateModal } from "./OntologyChipFeatureUpdateModal";
 import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
+import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import {
   isOberonBackgroundJobActive,
   startOberonBackgroundJobMonitor,
@@ -359,7 +360,16 @@ function GuideFab({
   const [open, setOpen] = useState(false);
   const [hidden, setHidden] = useState(false);
   const [bugOpen, setBugOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const bottom = avoidComposer ? 102 : 20;
+
+  useDismissibleLayer({
+    open,
+    roots: [rootRef],
+    restoreFocusRef: triggerRef,
+    onDismiss: () => setOpen(false),
+  });
 
   useEffect(() => {
     try {
@@ -383,6 +393,7 @@ function GuideFab({
 
   return (
     <div
+      ref={rootRef}
       className="guide-fab titlebar-nodrag"
       style={{
         position: "fixed",
@@ -453,6 +464,7 @@ function GuideFab({
       <BugReportModal open={bugOpen} onClose={() => setBugOpen(false)} />
       <div style={{ position: "relative", width: 46, height: 46 }}>
         <button
+          ref={triggerRef}
           onClick={() => setOpen((o) => !o)}
           aria-label={ko ? "도움말" : "Help"}
           style={{

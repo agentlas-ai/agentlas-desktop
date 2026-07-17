@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { dropChatViewSnapshot } from "@/lib/chat-view-cache";
 import { pickLocalized, useT } from "@/lib/i18n";
+import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import type { Chat, InstalledAgent } from "@/lib/types";
 import { IconMoreHorizontal } from "./Icon";
 
@@ -42,23 +43,19 @@ export const ChatRow = memo(function ChatRow({
   const [renaming, setRenaming] = useState(false);
   const [titleDraft, setTitleDraft] = useState(chat.title);
   const inputRef = useRef<HTMLInputElement>(null);
+  const menuTriggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (renaming) inputRef.current?.focus();
   }, [renaming]);
 
-  // 외부 클릭 시 메뉴 닫기
-  useEffect(() => {
-    if (!menuOpen) return;
-    function onDown(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    }
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [menuOpen]);
+  useDismissibleLayer({
+    open: menuOpen,
+    roots: [menuTriggerRef, menuRef],
+    restoreFocusRef: menuTriggerRef,
+    onDismiss: () => setMenuOpen(false),
+  });
 
   async function saveRename() {
     const api = ipc();
@@ -193,6 +190,7 @@ export const ChatRow = memo(function ChatRow({
       {/* hover 시 ⋯ 버튼 */}
       {!renaming && (hovered || menuOpen) && (
         <button
+          ref={menuTriggerRef}
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();

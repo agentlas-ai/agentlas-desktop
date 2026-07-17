@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import Link from "next/link";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import {
   CITATION_STYLES,
   buildBibliography,
@@ -91,6 +92,10 @@ export default function DocumentStudioPage() {
   const [rightOpen, setRightOpen] = useState(true);
 
   const editorRef = useRef<HTMLTextAreaElement>(null);
+  const citationRootRef = useRef<HTMLDivElement>(null);
+  const citationTriggerRef = useRef<HTMLButtonElement>(null);
+  const exportRootRef = useRef<HTMLDivElement>(null);
+  const exportTriggerRef = useRef<HTMLButtonElement>(null);
   const selection = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
   const firstSave = useRef(true); // 초기 [] 로 저장된 소스를 덮어쓰지 않도록 첫 저장을 건너뛴다.
   const draftHydratedRef = useRef(false);
@@ -99,6 +104,19 @@ export default function DocumentStudioPage() {
     body: "",
     figureSrc: "",
     figureCaption: "",
+  });
+
+  useDismissibleLayer({
+    open: citationOpen,
+    roots: [citationRootRef],
+    restoreFocusRef: citationTriggerRef,
+    onDismiss: () => setCitationOpen(false),
+  });
+  useDismissibleLayer({
+    open: exportOpen,
+    roots: [exportRootRef],
+    restoreFocusRef: exportTriggerRef,
+    onDismiss: () => setExportOpen(false),
   });
 
   if (draftHydrated) {
@@ -413,8 +431,8 @@ export default function DocumentStudioPage() {
           <IconPlus size={13} />
           {locale === "en" ? "New document" : "새 문서"}
         </button>
-        <div style={{ position: "relative", marginLeft: "auto" }} className="titlebar-nodrag">
-          <button type="button" onClick={() => setCitationOpen((o) => !o)} style={citationButton} title={locale === "en" ? "Citation style" : "인용 스타일"}>
+        <div ref={citationRootRef} style={{ position: "relative", marginLeft: "auto" }} className="titlebar-nodrag">
+          <button ref={citationTriggerRef} type="button" onClick={() => { setCitationOpen((o) => !o); setExportOpen(false); }} style={citationButton} title={locale === "en" ? "Citation style" : "인용 스타일"}>
             {citationStyle}
             <IconChevronDown size={13} />
           </button>
@@ -431,8 +449,8 @@ export default function DocumentStudioPage() {
             </div>
           )}
         </div>
-        <div style={{ position: "relative" }} className="titlebar-nodrag">
-          <button onClick={() => setExportOpen((o) => !o)} style={exportButton}>
+        <div ref={exportRootRef} style={{ position: "relative" }} className="titlebar-nodrag">
+          <button ref={exportTriggerRef} onClick={() => { setExportOpen((o) => !o); setCitationOpen(false); }} style={exportButton}>
             <IconFileUp size={14} />
             {locale === "en" ? "Export" : "내보내기"}
             <IconChevronDown size={12} />

@@ -69,6 +69,24 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-17 · v0.8.53 — Agent Hub, session-first teams, and live model
+  catalogs** — Agent Hub is now a first-class destination in the main navigation,
+  using a people-style job-market information architecture:
+  Agents, Teams, and Hub plugins share semantic job search, real entity filters,
+  callable availability, and a reusable candidate pool. An enabled session
+  router keeps the people already attached to that conversation and recruits
+  the minimum missing role from Agent Hub or Cloud only when the active model
+  identifies a real capability or tool gap. API users can select MiniMax, xAI,
+  OpenRouter, Kimi, DeepSeek, GLM, Upstage, Google, OpenAI, Anthropic, or a custom
+  compatible provider through live model discovery plus a manual model-ID path;
+  version-shaped model and effort lists are no longer compiled into Desktop.
+  Popovers now dismiss consistently outside or with Escape, near-white surfaces
+  use the shared elevation tokens, and the conversation chip reports loaded
+  logical history instead of a fake fixed-window percentage. Agentlas OS
+  v1.1.48 is pinned at
+  `98adf6d1bb0bdad5a919884c3916274d5a3e813f`. This source does not prove a
+  Desktop tag, public installer, or update-feed release.
+
 - **2026-07-17 · v0.8.49 — governed federation and real Mobile Cloud actions** —
   Desktop now sends the required network scope to Agentlas OS v1.1.48,
   unwraps the federation envelope for model choice, and preserves the original

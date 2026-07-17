@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.8.53 — 2026-07-17
+
+### Added
+
+- Agent Hub is now a first-class destination in the main navigation, using a
+  people-style job-market information architecture. Agents, Teams, and callable
+  Hub plugins share one semantic search surface with real
+  entity filters, availability state, and a reusable candidate pool.
+- MiniMax, xAI, and OpenRouter join the API-provider set. Every BYOK provider
+  now discovers model IDs from its live catalog and retains a manual model-ID
+  path, so future model generations do not require a Desktop code change.
+
+### Changed
+
+- Session routing keeps the Agents already attached to the conversation. It
+  recruits the minimum extra role from Agent Hub or Cloud only when the active
+  model identifies a real capability or tool gap; it no longer runs a global
+  candidate search for every message.
+- The context chip reports the logical size of the history loaded on screen,
+  not a fabricated percentage against a fixed 100,000-token denominator.
+- Near-white canvas tokens and shared subtle elevation make recessed surfaces
+  lighter while keeping the existing Agentlas design system.
+
+### Fixed
+
+- Composer menus, account and credit popovers, project and agent pickers,
+  document menus, chat-row actions, file context menus, and the help menu now
+  share one outside-pointer and Escape dismissal contract with keyboard focus
+  restoration.
+- Kimi and DeepSeek now use their OpenAI-compatible chat endpoints instead of
+  being sent to obsolete Anthropic-compatible routes. Unknown model capability
+  metadata stays unknown instead of being guessed from version-shaped names.
+
+Agentlas OS v1.1.48 is pinned at
+98adf6d1bb0bdad5a919884c3916274d5a3e813f. These source changes do not
+themselves publish a Git tag, installer, update feed, or GitHub release.
+
 ## 0.8.52 — 2026-07-17
 
 ### Changed

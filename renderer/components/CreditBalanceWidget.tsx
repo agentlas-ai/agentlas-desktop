@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
+import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { openPricing } from "./UpgradeCta";
 import type { HubCreditBalance } from "@/lib/types";
 
@@ -24,6 +25,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   const refresh = useCallback(async () => {
     const api = ipc();
@@ -56,21 +58,12 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
     return () => window.removeEventListener("agentlas:auth-changed", onAuthChanged);
   }, [refresh]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  useDismissibleLayer({
+    open,
+    roots: [rootRef],
+    restoreFocusRef: triggerRef,
+    onDismiss: () => setOpen(false),
+  });
 
   // 미로그인이거나 아직 로딩 전이면 숨김.
   if (!bal || !bal.authenticated) return null;
@@ -108,6 +101,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
   return (
     <div ref={rootRef} style={{ position: "relative" }}>
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
         title={ko ? "크레딧 잔액" : "Credit balance"}
