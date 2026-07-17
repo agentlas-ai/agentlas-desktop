@@ -1096,10 +1096,10 @@ function AgentCard({
           {plugin
             ? (ko ? "설치 명령 복사" : "Copy install command")
             : bookmarking
-              ? (ko ? "후보 저장 중…" : "Saving…")
+              ? (ko ? "북마크 중…" : "Saving bookmark…")
               : bookmarked
-                ? (ko ? "인재 풀에 저장됨" : "Saved candidate")
-                : (ko ? "인재 풀에 저장" : "Save candidate")}
+                ? (ko ? "북마크됨" : "Bookmarked")
+                : (ko ? "북마크" : "Bookmark")}
         </button>
         {callable ? (
           <button
