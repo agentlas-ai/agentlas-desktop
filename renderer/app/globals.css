@@ -1931,6 +1931,14 @@ button[data-dashboard-chevron="open"] {
   line-height: 1.3;
 }
 
+.dashboard-engine-copy div:last-child[data-runtime-version="true"] {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+
 .dashboard-engine-connected,
 .dashboard-engine-default {
   flex-shrink: 0;
@@ -5126,6 +5134,7 @@ button[data-toggle-state="on"] {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  container-type: inline-size;
 }
 
 .rd .hub-card-availability {
@@ -5278,13 +5287,23 @@ button[data-toggle-state="on"] {
   min-width: 0;
 }
 
+/* Grid cards can be narrow even on a wide window, so viewport media queries
+   cannot protect this header. Move the credit badge below the identity when
+   the card itself is narrow instead of squeezing Korean names into 2-3 glyphs. */
+@container (max-width: 310px) {
+  .rd .hub-card-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rd .hub-credit-tag {
+    width: max-content;
+    justify-self: start;
+  }
+}
+
 @media (max-width: 520px) {
   .rd .hub-entity-card {
     padding: 14px;
-  }
-
-  .rd .hub-card-head {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 112px);
   }
 
   .rd .hub-card-title {

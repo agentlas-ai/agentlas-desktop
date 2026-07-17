@@ -371,7 +371,7 @@ export const runCodex: Runner = async (
         : "Codex CLI isolation is verified only with no external tools. This run's MCP grant cannot be admitted.",
     );
   }
-  // Measured on the installed Codex CLI 0.144.4 (2026-07-16): even with
+  // Measured on Codex CLI 0.144.4 and again on 0.144.5 (2026-07-17): even with
   // `--disable multi_agent` and every other configurable tool feature disabled,
   // the runtime still emitted a collaboration tool call. Read-only filesystem
   // sandboxing does not revoke that delegation authority. Until Codex exposes a
@@ -381,8 +381,8 @@ export const runCodex: Runner = async (
   if (req.untrustedNoTools) {
     throw new Error(
       req.locale === "ko"
-        ? "Codex CLI 0.144.4에서 서브에이전트 협업 권한이 제거되지 않음이 실측되어 격리된 Agent App/Workforce 실행을 차단했습니다."
-        : "Codex CLI 0.144.4 still exposes collaboration/delegation authority after tool features are disabled. Isolated Agent App and Workforce execution is blocked before process spawn.",
+        ? "현재 Codex CLI에서 서브에이전트 협업 권한을 완전히 제거할 수 없어 격리된 Agent App/Workforce 실행을 차단했습니다."
+        : "The current Codex CLI still exposes collaboration/delegation authority after tool features are disabled. Isolated Agent App and Workforce execution is blocked before process spawn.",
     );
   }
   if (req.restrictedReadBoundary) {

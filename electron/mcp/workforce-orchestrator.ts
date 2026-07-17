@@ -145,7 +145,6 @@ export const WORKFORCE_ONTOLOGY_VERSION = "awo:2026-07-15.2";
 export const WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256 = "d6d30d45fe8d35fb785e165d1e80c6471a72436f0160c3933c21d4a31bf2fb32";
 const WORKFORCE_LEADER_SAFE_RUNTIME_KINDS = new Set<RuntimeKind>([
   "claude-code",
-  "codex",
   "byok",
   "ollama",
   "lmstudio",

@@ -1,4 +1,4 @@
-import type { InstalledAgent } from "../../shared/types";
+import type { AutomationHubMode, InstalledAgent } from "../../shared/types";
 import { APP_BUILDER_SLUG, GLOBAL_ORCHESTRATOR_SLUG } from "../architecture/manifest";
 import { cardScoreAdjustment, findCardForAgent } from "./routing-cards";
 import type { RuntimeLocale } from "../runtime/status-i18n";
@@ -139,7 +139,33 @@ export interface AutomaticWorkforceEligibility {
   networkAutoEnabled: boolean;
   globalOrchestrator: boolean;
   hasPriorContext: boolean;
+  /** Undefined only for an ordinary interactive Desktop chat turn. */
+  executionSource?: "automation" | "site-studio" | "telegram" | "trex";
   prompt: string;
+}
+
+export interface HubFirstWorkforceEligibility {
+  agentAppMode: boolean;
+  hubMode?: AutomationHubMode;
+  borrowedAgentCount: number;
+  plainConversation: boolean;
+  targetAppEdit: boolean;
+}
+
+/**
+ * `hub-allowed` means the selected local/session agent gets the first attempt.
+ * Only the explicit `hub-first` policy may pre-empt that target and construct a
+ * Workforce before execution. Existing exact Hub borrows already have their own
+ * verified package path and must not be expanded into a second Workforce.
+ */
+export function shouldForceHubFirstWorkforce(input: HubFirstWorkforceEligibility): boolean {
+  return Boolean(
+    !input.agentAppMode &&
+    input.hubMode === "hub-first" &&
+    input.borrowedAgentCount === 0 &&
+    !input.plainConversation &&
+    !input.targetAppEdit,
+  );
 }
 
 /** Ordinary complex prompts enter Workforce only at the fresh top-level leader turn. */
@@ -149,6 +175,7 @@ export function shouldAutoEngageNetworkWorkforce(input: AutomaticWorkforceEligib
     input.networkAutoEnabled &&
     input.globalOrchestrator &&
     !input.hasPriorContext &&
+    input.executionSource == null &&
     isEscalationWorthyPrompt(input.prompt),
   );
 }

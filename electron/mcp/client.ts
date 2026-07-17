@@ -28,6 +28,7 @@ import {
   isPlainConversationalPrompt,
   selectAutoRoutedAgent,
   shouldAutoEngageNetworkWorkforce,
+  shouldForceHubFirstWorkforce,
   type AutoRouteChoice,
 } from "../agents/auto-router";
 import { assembleSystemPrompt } from "../system-agents/assemble";
@@ -1066,19 +1067,22 @@ export async function runMcpInvocation(
   // plain 대화(인사/맞장구)는 라우팅 전체를 건너뛰고 기본 LLM이 즉답 — 전문 에이전트로
   // 잘못 위임되거나 아래 Hephaestus 에스컬레이션 선지연을 무는 엣지케이스를 없앤다.
   const plainConversation = !isTargetAppEdit && isPlainConversationalPrompt(req.userPrompt);
-  const hubWorkforceRequested = Boolean(
-    !req.agentAppMode &&
-    req.hubMode &&
-    req.hubMode !== "local-only" &&
-    borrowedAgentSlugs.length === 0 &&
-    !plainConversation &&
-    !isTargetAppEdit,
-  );
+  const hubWorkforceRequested = shouldForceHubFirstWorkforce({
+    agentAppMode: req.agentAppMode === true,
+    hubMode: req.hubMode,
+    borrowedAgentCount: borrowedAgentSlugs.length,
+    plainConversation,
+    targetAppEdit: isTargetAppEdit,
+  });
+  // Scheduled runs already carry an explicit target and their own Hub policy.
+  // Applying the global chat auto-route here used to turn every default
+  // `hub-allowed` automation into Workforce before the selected agent could run.
   const automaticWorkforceEligible = !req.sessionRouting && shouldAutoEngageNetworkWorkforce({
     agentAppMode: req.agentAppMode === true,
     networkAutoEnabled: isNetworkAutoEnabled(),
     globalOrchestrator: isGlobalOrchestrator(agent),
     hasPriorContext,
+    executionSource: executionContext?.source,
     prompt: req.userPrompt,
   });
   const preRouteProjectPath = workspaceBinding
@@ -1199,9 +1203,9 @@ export async function runMcpInvocation(
     }
   }
 
-  // 자동화 Hub 정책: Hub 사용이 켜진 비단순 요청은 lexical 후보 프리앰블로
-  // 우회하지 않고 같은 Workforce leader → MCP search/validate/prepare 경로를 탄다.
-  // local-only는 명시적으로 이 경로를 막는다.
+  // 자동화 Hub 정책: 명시적인 Hub-first만 Workforce를 선행 구성한다.
+  // hub-allowed(로컬 우선)는 선택된 에이전트를 먼저 실행하고, local-only는
+  // 이 경로를 막는다. 정확한 Hub 대상은 borrowAgents 경로가 별도로 소유한다.
   if (!explicitWorkforceGoal && !explicitNetworkGoal && hubWorkforceRequested) {
     explicitWorkforceGoal = effectiveUserPrompt;
     sink({
@@ -1270,41 +1274,47 @@ export async function runMcpInvocation(
   let active = runtimeChoice.active;
   let picked = runtimeChoice.picked;
   if (restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
-    // 활성 런타임이 읽기 경계 미검증(CLI 계열)이어도 모바일 채팅을 죽이지 않는다 —
-    // 경계가 검증된 런타임(BYOK/Ollama)이 연결돼 있으면 가시적 폴백으로 그쪽에서
-    // 실행한다(2026-07-17: 활성=claude-code인 데스크탑에서 모바일 채팅 전멸 수리).
-    // 검증된 런타임이 하나도 없을 때만 기존 fail-closed 에러를 유지한다.
-    const readBoundaryFallback = runtimes
-      .filter((runtime) => isMobileReadRuntimeAllowed(runtime.kind))
-      .map((runtime) => ({ active: runtime, picked: pickRunner(runtime) }))
-      .find((candidate) => candidate.picked != null);
-    if (readBoundaryFallback && readBoundaryFallback.picked) {
-      sink({
-        kind: "tool-use",
-        status:
-          locale === "ko"
-            ? `${active.kind} 런타임은 모바일 읽기 경계가 검증되지 않아 ${readBoundaryFallback.picked.label}(으)로 실행합니다.`
-            : `${active.kind} has no verified Mobile read boundary; running on ${readBoundaryFallback.picked.label} instead.`,
-      });
-      active = readBoundaryFallback.active;
-      picked = readBoundaryFallback.picked;
+    if (workspaceBinding) {
+      // 기존 Mobile 계약은 유지한다. 검증된 read 런타임이 연결돼 있으면 가시적으로
+      // 전환하고, 없을 때만 Mobile 경계 오류로 중단한다.
+      const readBoundaryFallback = runtimes
+        .filter((runtime) => isMobileReadRuntimeAllowed(runtime.kind))
+        .map((runtime) => ({ active: runtime, picked: pickRunner(runtime) }))
+        .find((candidate) => candidate.picked != null);
+      if (readBoundaryFallback?.picked) {
+        sink({
+          kind: "tool-use",
+          status:
+            locale === "ko"
+              ? `${active.kind} 런타임은 모바일 읽기 경계가 검증되지 않아 ${readBoundaryFallback.picked.label}(으)로 실행합니다.`
+              : `${active.kind} has no verified Mobile read boundary; running on ${readBoundaryFallback.picked.label} instead.`,
+        });
+        active = readBoundaryFallback.active;
+        picked = readBoundaryFallback.picked;
+      } else {
+        sink({
+          kind: "error",
+          error: {
+            code: "mobile-runtime-not-read-sandboxed",
+            message:
+              locale === "ko"
+                ? "이 런타임은 모바일 읽기 전용 경계가 검증되지 않았습니다. Desktop에서 BYOK 또는 Ollama를 연결하세요."
+                : "This runtime has no verified Mobile read-only boundary. Connect BYOK or Ollama on Desktop.",
+          },
+        });
+        return earlyResult();
+      }
     } else {
-      const restrictedSource = workspaceBinding ? "mobile" : "automation";
+      // 무인 자동화의 런타임 고정은 세션/모델/권한 계약이다. 다른 Provider로 바꿔
+      // 성공처럼 보이게 하지 않고, 사용자가 런타임 또는 권한을 명시적으로 바꾸게 한다.
       sink({
         kind: "error",
         error: {
-          code:
-            restrictedSource === "mobile"
-              ? "mobile-runtime-not-read-sandboxed"
-              : "automation-runtime-not-read-sandboxed",
+          code: "automation-runtime-not-read-sandboxed",
           message:
-            restrictedSource === "mobile"
-              ? locale === "ko"
-                ? "이 런타임은 모바일 읽기 전용 경계가 검증되지 않았습니다. Desktop에서 BYOK 또는 Ollama를 연결하세요."
-                : "This runtime has no verified Mobile read-only boundary. Connect BYOK or Ollama on Desktop."
-              : locale === "ko"
-                ? "이 런타임은 무인 읽기 자동화의 격리 경계가 검증되지 않았습니다. BYOK 또는 Ollama를 선택하세요."
-                : "This runtime has no verified boundary for unattended read automation. Select BYOK or Ollama.",
+            locale === "ko"
+              ? `고정된 ${active.kind} 런타임은 무인 읽기 자동화의 격리 경계가 검증되지 않았습니다. 이 자동화의 런타임 또는 실행 권한을 변경하세요.`
+              : `The pinned ${active.kind} runtime has no verified boundary for unattended read automation. Change this automation's runtime or execution permission.`,
         },
       });
       return earlyResult();

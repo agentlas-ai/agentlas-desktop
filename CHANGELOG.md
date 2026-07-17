@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.8.54 — 2026-07-17
+
+### Changed
+
+- LLM usage snapshots now include each installed CLI's detected and latest
+  version. Claude Code, Codex, Gemini CLI, Antigravity, and Grok check their
+  authoritative release source and update in the background only while the
+  shared execution queue is completely idle. The post-update binary version
+  must be re-detected before the update is reported as complete.
+
+### Fixed
+
+- Default `hub-allowed` automations, Site Studio, Telegram, TREX, and existing
+  chat sessions no longer get replaced by a fresh global Workforce route.
+  Only an explicit `hub-first` policy may pre-empt the selected target.
+- CLI maintenance never interrupts an active or queued chat, automation, or
+  Workforce run. Pinned unattended read automations also no longer switch to a
+  different provider as a hidden fallback.
+- Narrow Agent Hub cards move the credit badge below the identity block based
+  on the card's own width, preventing long Korean or English names from being
+  squeezed or pushed outside the card.
+- Codex remains excluded from isolated Workforce leadership until its
+  delegation authority can be removed by a measured runtime capability; error
+  copy no longer hard-codes an already stale CLI version.
+
+Agentlas OS v1.1.48 remains pinned at
+98adf6d1bb0bdad5a919884c3916274d5a3e813f.
+These source changes do not themselves publish a Git tag, installer, GitHub
+release, or update feed.
+
 ## 0.8.53 — 2026-07-17
 
 ### Added

@@ -2973,10 +2973,34 @@ export interface ProviderUsage {
   accountFingerprint?: string;
 }
 
+/** Usage 조회와 함께 반환되는 설치형 CLI의 버전/자동 업데이트 상태. */
+export type CliRuntimeUpdateState =
+  | "not-installed"
+  | "checking"
+  | "current"
+  | "update-available"
+  | "updating"
+  | "updated"
+  | "deferred-active-runs"
+  | "check-failed"
+  | "update-failed"
+  | "unverifiable";
+
+export interface CliRuntimeVersionStatus {
+  kind: UsageRetryProviderId;
+  installedVersion: string | null;
+  latestVersion: string | null;
+  state: CliRuntimeUpdateState;
+  /** 마지막으로 공식 최신 버전을 확인했거나 source-owned updater를 검증한 시각. */
+  checkedAt: number | null;
+}
+
 /** 전체 엔진 사용량 스냅샷 — 대시보드 "엔진 연결·사용량" 모듈이 소비. */
 export interface UsageSnapshot {
   providers: ProviderUsage[];
   fetchedAt: number;
+  /** Main이 runtime.detect와 결합한 설치 버전 + 무중단 자동 업데이트 상태. */
+  runtimeVersions?: CliRuntimeVersionStatus[];
 }
 
 /** Renderer의 단일 Provider 재시도 결과. attempted=false면 main cooldown 안에서 기존 snapshot을 반환했다. */

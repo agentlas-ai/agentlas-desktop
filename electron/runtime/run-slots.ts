@@ -7,6 +7,7 @@
 import { getAgentConcurrency } from "../store/concurrency";
 
 let inUse = 0;
+let maintenance = false;
 
 interface Waiter {
   resolve: (release: () => void) => void;
@@ -34,6 +35,9 @@ function makeRelease(): () => void {
 }
 
 function pump(): void {
+  // CLI 파일을 교체하는 동안에는 새 자식 프로세스를 절대 스폰하지 않는다. 업데이트가
+  // 끝나면 release가 pump를 다시 호출해 기존 FIFO 순서 그대로 이어간다.
+  if (maintenance) return;
   while (inUse < getAgentConcurrency() && queue.length > 0) {
     const w = queue.shift()!;
     if (w.signal && w.onAbort) w.signal.removeEventListener("abort", w.onAbort);
@@ -56,7 +60,7 @@ export function acquireRunSlot(
   onQueued?: (position: number) => void,
 ): Promise<() => void> {
   if (signal?.aborted) return Promise.reject(abortError());
-  if (inUse < getAgentConcurrency()) {
+  if (!maintenance && inUse < getAgentConcurrency()) {
     inUse += 1;
     return Promise.resolve(makeRelease());
   }
@@ -79,7 +83,24 @@ export function acquireRunSlot(
   });
 }
 
+/**
+ * CLI 설치 파일을 원자적으로 교체하기 위한 짧은 유지보수 잠금.
+ * 실행 중이거나 이미 기다리는 작업이 하나라도 있으면 선점하지 않고 즉시 null을 반환한다.
+ * 따라서 자동 업데이트가 채팅·자동화·Workforce의 세션을 끊거나 새 작업보다 앞질러 가지 않는다.
+ */
+export function tryAcquireRuntimeMaintenance(): (() => void) | null {
+  if (maintenance || inUse > 0 || queue.length > 0) return null;
+  maintenance = true;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    maintenance = false;
+    pump();
+  };
+}
+
 /** 진단/표시용 스냅샷. */
-export function runSlotStats(): { inUse: number; queued: number; limit: number } {
-  return { inUse, queued: queue.length, limit: getAgentConcurrency() };
+export function runSlotStats(): { inUse: number; queued: number; limit: number; maintenance: boolean } {
+  return { inUse, queued: queue.length, limit: getAgentConcurrency(), maintenance };
 }

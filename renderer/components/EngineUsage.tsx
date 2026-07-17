@@ -12,6 +12,7 @@ import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
 import type {
+  CliRuntimeVersionStatus,
   EnvVarMeta,
   ProviderUsage,
   RuntimeStatus,
@@ -227,6 +228,30 @@ export function EngineUsage() {
   function usageFor(id: string): ProviderUsage | undefined {
     return snap?.providers.find((p) => p.provider === id);
   }
+  function runtimeVersionFor(e: EngineDef): CliRuntimeVersionStatus | undefined {
+    if (!e.cliKind) return undefined;
+    return snap?.runtimeVersions?.find((version) => version.kind === e.cliKind);
+  }
+  function runtimeVersionText(version: CliRuntimeVersionStatus | undefined): string {
+    if (!version || version.state === "not-installed") return "";
+    const installed = version.installedVersion ? `v${version.installedVersion}` : (ko ? "버전 불명" : "unknown version");
+    const target = version.latestVersion && version.latestVersion !== version.installedVersion
+      ? ` → v${version.latestVersion}`
+      : "";
+    const state = {
+      checking: ko ? "버전 확인 중" : "checking version",
+      current: ko ? "최신" : "current",
+      "update-available": ko ? "자동 업데이트 대기" : "auto-update pending",
+      updating: ko ? "자동 업데이트 중" : "auto-updating",
+      updated: ko ? "자동 업데이트됨" : "auto-updated",
+      "deferred-active-runs": ko ? "작업 종료 후 업데이트" : "updates after active work",
+      "check-failed": ko ? "최신 버전 확인 실패" : "version check failed",
+      "update-failed": ko ? "자동 업데이트 실패" : "auto-update failed",
+      unverifiable: ko ? "버전 검증 불가" : "version unverifiable",
+      "not-installed": "",
+    }[version.state];
+    return `${installed}${target} · ${state}`;
+  }
   function isConnected(e: EngineDef): boolean {
     // 사용량/오류 영수증은 runtime 설치 증거가 아니다. 오래된 receipt가 Connect를 숨기면 안 된다.
     if (e.auth === "cli") return runtimes.some((r) => r.kind === e.cliKind);
@@ -417,6 +442,8 @@ export function EngineUsage() {
           const u = usageFor(e.id);
           const connected = isConnected(e);
           const rt = runtimeFor(e);
+          const runtimeVersion = runtimeVersionFor(e);
+          const runtimeVersionLabel = runtimeVersionText(runtimeVersion);
           const hasBars = connected && (u?.windows.length ?? 0) > 0;
           return (
             <div
@@ -435,8 +462,11 @@ export function EngineUsage() {
                   <div
                     style={connected && u?.status === "error" ? { color: "var(--red-deep, #c0392b)" } : undefined}
                     data-terminal-state={connected && isTerminalProviderError(u) ? "true" : undefined}
+                    data-runtime-version={connected && runtimeVersionLabel ? "true" : undefined}
+                    title={runtimeVersionLabel || undefined}
                   >
                     {connected ? statusText(e, u) : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected") : e.auth === "apikey" ? (ko ? "API 키 · 미연결" : "API key · not connected") : ko ? "미설치" : "not installed"}
+                    {connected && runtimeVersionLabel ? ` · ${runtimeVersionLabel}` : ""}
                   </div>
                 </div>
                 {connected && isTerminalProviderError(u) ? (

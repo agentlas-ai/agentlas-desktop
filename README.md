@@ -69,6 +69,19 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-17 · v0.8.54 — uninterrupted automations and runtime upkeep** —
+  Existing chats, scheduled automations, Site Studio, Telegram, and TREX keep
+  their selected session agent under the default local-first Hub policy; only
+  an explicit Hub-first policy may construct a new Workforce before that
+  target. The usage surface now reports each installed subscription CLI's
+  detected version, authoritative latest version, and update state. Supported
+  CLI updates run only while the shared chat and automation queue is completely
+  idle, and completion is reported only after the installed binary version is
+  detected again. Narrow Agent Hub cards also reflow credit badges by card
+  width so long names remain readable. Agentlas OS v1.1.48 is pinned at
+  `98adf6d1bb0bdad5a919884c3916274d5a3e813f`. This source does not prove a
+  Desktop tag, public installer, or update-feed release.
+
 - **2026-07-17 · v0.8.53 — Agent Hub, session-first teams, and live model
   catalogs** — Agent Hub is now a first-class destination in the main navigation,
   using a people-style job-market information architecture:

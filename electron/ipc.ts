@@ -18,7 +18,9 @@ import type {
   SiteSurface,
 } from "../shared/site-studio";
 import { clearDetectCache, detectRuntimes, setActiveRuntime } from "./runtime/detect";
+import { runtimeVersionsWithAutoUpdate } from "./runtime/auto-update";
 import { agentRunCwd } from "./runtime/exec";
+import { tryAcquireRuntimeMaintenance } from "./runtime/run-slots";
 import { clearModelCache, listRuntimeModels } from "./runtime/providers";
 import { installCli, openCliLogin, updateCli, type InstallableCli } from "./runtime/install-cli";
 import { listRuntimeCommands } from "./runtime/commands";
@@ -1829,17 +1831,33 @@ export function registerIpcHandlers(): void {
   });
 
   // ── usage (LLM 엔진 사용량 — 프로바이더 OAuth usage) ─────
-  ipcMain.handle("usage:snapshot", (_e, opts?: unknown) => {
+  ipcMain.handle("usage:snapshot", async (_e, opts?: unknown) => {
     const force = !!opts && typeof opts === "object" && !Array.isArray(opts)
       && (opts as { force?: unknown }).force === true;
-    return getUsageSnapshot(force ? { force: true } : undefined);
+    // Usage와 설치 버전을 같은 영수증으로 반환한다. 최신 확인/업데이트 자체는
+    // single-flight 백그라운드라 사용량 UI를 기다리게 하지 않는다.
+    const [snapshot, runtimes] = await Promise.all([
+      getUsageSnapshot(force ? { force: true } : undefined),
+      detectRuntimes(force),
+    ]);
+    return {
+      ...snapshot,
+      runtimeVersions: runtimeVersionsWithAutoUpdate(runtimes),
+    };
   });
   // Renderer는 임의 invalidate를 할 수 없다. allowlist+main cooldown 아래 대상 Provider만 원자적으로 재시도한다.
   ipcMain.handle("usage:retry", async (_e, providerId?: unknown) => {
     if (!isUsageRetryProviderId(providerId)) throw new Error("invalid usage retry provider");
     const result = await retryUsageProvider(providerId);
     if (result.attempted) clearDetectCache();
-    return result;
+    const runtimes = await detectRuntimes(result.attempted);
+    return {
+      ...result,
+      snapshot: {
+        ...result.snapshot,
+        runtimeVersions: runtimeVersionsWithAutoUpdate(runtimes),
+      },
+    };
   });
 
   // ── billing (Agentlas Hub 크레딧 — 구독/렌트수익 2계좌 + 일방 전송) ─────
@@ -1962,7 +1980,22 @@ export function registerIpcHandlers(): void {
     if (kind === "claude-code" || kind === "codex" || kind === "gemini") invalidateUsage(kind);
     return openCliLogin(kind);
   });
-  ipcMain.handle("runtime:updateCli", (_e, kind: InstallableCli) => updateCli(kind));
+  ipcMain.handle("runtime:updateCli", async (_e, kind: InstallableCli) => {
+    const releaseMaintenance = tryAcquireRuntimeMaintenance();
+    if (!releaseMaintenance) {
+      return {
+        ok: false,
+        message: "CLI update deferred until active chats and automations finish",
+      };
+    }
+    try {
+      const result = await updateCli(kind);
+      if (result.ok) clearDetectCache();
+      return result;
+    } finally {
+      releaseMaintenance();
+    }
+  });
   ipcMain.handle("runtime:listCommands", () => listRuntimeCommands());
   ipcMain.handle(
     "runtime:listModels",
