@@ -226,8 +226,61 @@ export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
   cursor: [{ id: "auto", label: "Cursor Auto" }],
 };
 
+const DISCOVERED_CLI_MODELS = new Map<string, CliModelOption[]>();
+
+// Codex publishes capacity siblings with stable semantic suffixes while the
+// version prefix changes. Classify the suffix, never a versioned model ID.
+// Completing a family only after two siblings were actually discovered keeps
+// the host's Workforce tier map coherent without turning these inferred
+// siblings into picker options; RuntimeStatus.availableModels remains the
+// signed-in account's exact inventory.
+const CODEX_WORKFORCE_SUFFIXES = [
+  { suffix: "-sol", workforceTier: "frontier" },
+  { suffix: "-terra", workforceTier: "balanced" },
+  { suffix: "-luna", workforceTier: "economy" },
+] as const satisfies ReadonlyArray<{
+  suffix: string;
+  workforceTier: NonNullable<CliModelOption["workforceTier"]>;
+}>;
+
+function codexTier(id: string): CliModelOption["workforceTier"] {
+  return CODEX_WORKFORCE_SUFFIXES.find((entry) => id.endsWith(entry.suffix))?.workforceTier;
+}
+
+/** Register a runtime-owned CLI inventory without compiling model versions into Desktop. */
+export function registerDiscoveredCliModels(kind: string, modelIds: readonly string[]): void {
+  const unique = [...new Set(modelIds.map((id) => id.trim()).filter(Boolean))];
+  const models = unique.map((id) => ({ id, label: id, ...(codexTier(id) ? { workforceTier: codexTier(id) } : {}) }));
+
+  if (kind === "codex") {
+    const families = new Map<string, Set<string>>();
+    for (const id of unique) {
+      const match = CODEX_WORKFORCE_SUFFIXES.find((entry) => id.endsWith(entry.suffix));
+      if (!match) continue;
+      const prefix = id.slice(0, -match.suffix.length);
+      if (!prefix) continue;
+      const siblings = families.get(prefix) ?? new Set<string>();
+      siblings.add(match.suffix);
+      families.set(prefix, siblings);
+    }
+    for (const [prefix, siblings] of families) {
+      if (siblings.size < 2) continue;
+      for (const entry of CODEX_WORKFORCE_SUFFIXES) {
+        const id = `${prefix}${entry.suffix}`;
+        if (!models.some((model) => model.id === id)) {
+          models.push({ id, label: id, workforceTier: entry.workforceTier });
+        }
+      }
+    }
+  }
+
+  DISCOVERED_CLI_MODELS.set(kind, models);
+}
+
 export function cliModels(kind: string): CliModelOption[] {
-  return (CLI_MODELS as Record<string, CliModelOption[] | undefined>)[kind] ?? [];
+  return DISCOVERED_CLI_MODELS.get(kind) ??
+    (CLI_MODELS as Record<string, CliModelOption[] | undefined>)[kind] ??
+    [];
 }
 
 // ── 작업량(reasoning effort) — installed runtime discovery only ─────

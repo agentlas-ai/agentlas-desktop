@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import { constants, type BigIntStats } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { registerDiscoveredCliModels } from "../../shared/models";
 
 const MAX_MODEL_CACHE_BYTES = 2 * 1024 * 1024;
 const MAX_MODEL_COUNT = 512;
@@ -256,10 +257,17 @@ export async function readCodexModelInventory(
         efforts: modelEfforts(model),
       });
     }
+    if (inventory.length > 0) {
+      // Keep the last valid account inventory. A transient/corrupt cache read
+      // must not replace it with a compiled version list or erase allocation
+      // tiers midway through the process lifetime.
+      registerDiscoveredCliModels("codex", inventory.map((model) => model.id));
+    }
     return inventory;
   } catch {
-    // First launch/offline/corrupt cache: caller deliberately falls back to the
-    // small built-in public catalog instead of failing runtime detection.
+    // First launch/offline/corrupt cache: fail closed for this read. The last
+    // valid process inventory remains registered, and the CLI keeps its own
+    // account default when no explicit model is available.
     return [];
   }
 }
