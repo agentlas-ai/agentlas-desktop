@@ -13,7 +13,7 @@ import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 70;
+const SCHEMA_VERSION = 72;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -590,6 +590,166 @@ function repairOrphanChatsV50(db: Database.Database): void {
     }
   });
   migrate();
+}
+
+// ── v71/v72 Task 정본화 백필 헬퍼 (릴리스 A: 가산적·무손실) ─────────────
+// 이 단계는 chats를 재건축하지 않는다. tasks / task_agent_participants만 추가하고
+// 기존 chats에서 결정적으로 백필한다. chats.task_id 컬럼과 파괴적 재건축은 v73
+// (릴리스 B)에서 별도로 수행하며, 그때 아래와 같은 재귀 부모 해석으로 task_id를
+// 채운다. Release A와 B 사이에 생성된 chat도 v73 진입 시 같은 백필을 재실행한다.
+
+/** 결정적 Task ID — chat id에서 파생(멱등: 재실행해도 같은 id). */
+function taskIdForChat(chatId: string): string {
+  return `task_${chatId}`;
+}
+
+/** parent_chat_id 사슬을 루트까지 걷는다. 루트가 kind='user'면 그 chat id를,
+ *  아니면(고아 division 등) null을 반환한다. 사이클/과도한 깊이는 안전하게 끊는다. */
+function resolveRootUserChatId(
+  db: Database.Database,
+  startChatId: string,
+  rowByIdCache: Map<string, { kind: string | null; parent_chat_id: string | null } | null>,
+): string | null {
+  const getRow = (id: string) => {
+    if (rowByIdCache.has(id)) return rowByIdCache.get(id) ?? null;
+    const row = db
+      .prepare("SELECT kind, parent_chat_id FROM chats WHERE id = ? LIMIT 1")
+      .get(id) as { kind: string | null; parent_chat_id: string | null } | undefined;
+    const value = row ?? null;
+    rowByIdCache.set(id, value);
+    return value;
+  };
+
+  const seen = new Set<string>();
+  let currentId: string | null = startChatId;
+  let depth = 0;
+  while (currentId && depth < 64) {
+    if (seen.has(currentId)) return null; // 사이클 방어
+    seen.add(currentId);
+    const row = getRow(currentId);
+    if (!row) return null; // dangling 부모
+    if (row.kind !== "division") {
+      // kind='user' 또는 legacy NULL(=user로 취급) → 루트 사용자 chat
+      return currentId;
+    }
+    if (!row.parent_chat_id) return null; // 부모 없는 division = 고아 → task 없음
+    currentId = row.parent_chat_id;
+    depth += 1;
+  }
+  return null;
+}
+
+/** v71: 최상위 사용자 chat 1개당 durable Task 1개. 멱등(origin_chat_id 가드). */
+function backfillTasksV71(db: Database.Database): void {
+  if (!tableExists(db, "chats") || !tableExists(db, "tasks")) return;
+  const chatColumnNames = new Set(schemaColumns(db, "chats").map((column) => column.name));
+  if (!chatColumnNames.has("kind")) return; // kind 이전(v13 미만) DB에는 사용자/division 구분 없음
+  db.exec(`
+    INSERT INTO tasks (id, title, project_id, firm_id, status, created_at, updated_at, archived_at, origin_chat_id)
+    SELECT
+      'task_' || c.id,
+      c.title,
+      c.project_id,
+      c.firm_id,
+      CASE WHEN c.archived_at IS NOT NULL THEN 'archived' ELSE 'open' END,
+      c.created_at,
+      c.updated_at,
+      c.archived_at,
+      c.id
+    FROM chats c
+    WHERE c.kind <> 'division'
+      AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.origin_chat_id = c.id);
+  `);
+}
+
+/** v72: 각 chat의 루트 Task에 참여 에이전트를 기록. 재귀 부모 해석 + hired_agents 병합.
+ *  agent_slug는 NOT NULL(미해석 시 센티널 'agent:<id>'), upsert로 중복 병합. */
+function backfillTaskParticipantsV72(db: Database.Database): void {
+  if (
+    !tableExists(db, "chats") ||
+    !tableExists(db, "tasks") ||
+    !tableExists(db, "task_agent_participants")
+  ) {
+    return;
+  }
+  const chatColumnNames = new Set(schemaColumns(db, "chats").map((column) => column.name));
+  if (!chatColumnNames.has("kind") || !chatColumnNames.has("agent_id")) return;
+  const hasHired = chatColumnNames.has("hired_agents");
+
+  const chats = db
+    .prepare(
+      `SELECT id, agent_id, updated_at${hasHired ? ", hired_agents" : ""} FROM chats ORDER BY rowid`,
+    )
+    .all() as Array<{ id: string; agent_id: string | null; updated_at: string | null; hired_agents?: string | null }>;
+
+  const slugByAgentId = new Map<string, string | null>();
+  const resolveSlug = (agentId: string | null): string => {
+    if (!agentId) return "agent:__none__";
+    if (!slugByAgentId.has(agentId)) {
+      const row = db
+        .prepare("SELECT slug FROM installed_agents WHERE id = ? LIMIT 1")
+        .get(agentId) as { slug: string | null } | undefined;
+      slugByAgentId.set(agentId, row?.slug ?? null);
+    }
+    const slug = slugByAgentId.get(agentId);
+    return slug && slug.length > 0 ? slug : `agent:${agentId}`;
+  };
+
+  const upsert = db.prepare(`
+    INSERT INTO task_agent_participants
+      (task_id, agent_id, agent_slug, role, first_seen_at, last_seen_at)
+    VALUES (@task_id, @agent_id, @agent_slug, @role, @seen_at, @seen_at)
+    ON CONFLICT(task_id, agent_slug) DO UPDATE SET
+      last_seen_at = excluded.last_seen_at,
+      agent_id = COALESCE(excluded.agent_id, task_agent_participants.agent_id)
+  `);
+
+  const rootCache = new Map<string, { kind: string | null; parent_chat_id: string | null } | null>();
+  const nowIso = new Date().toISOString();
+
+  const run = db.transaction(() => {
+    for (const chat of chats) {
+      const rootChatId = resolveRootUserChatId(db, chat.id, rootCache);
+      if (!rootChatId) continue; // 고아 division 등 → Task 없음
+      const taskId = taskIdForChat(rootChatId);
+      // 루트 task가 실제 존재할 때만(빈 shell 등 제외 대비)
+      const taskExists = db.prepare("SELECT 1 FROM tasks WHERE id = ? LIMIT 1").get(taskId);
+      if (!taskExists) continue;
+      const seenAt = chat.updated_at ?? nowIso;
+
+      if (chat.agent_id) {
+        upsert.run({
+          task_id: taskId,
+          agent_id: chat.agent_id,
+          agent_slug: resolveSlug(chat.agent_id),
+          role: null,
+          seen_at: seenAt,
+        });
+      }
+
+      if (hasHired && chat.hired_agents) {
+        try {
+          const parsed = JSON.parse(chat.hired_agents);
+          if (Array.isArray(parsed)) {
+            for (const item of parsed) {
+              const slug = item && typeof item === "object" && typeof item.slug === "string" ? item.slug.trim() : "";
+              if (!slug) continue;
+              upsert.run({
+                task_id: taskId,
+                agent_id: null,
+                agent_slug: slug,
+                role: "hired",
+                seen_at: seenAt,
+              });
+            }
+          }
+        } catch {
+          // 손상된 hired_agents JSON은 조용히 건너뛴다(백필은 best-effort).
+        }
+      }
+    }
+  });
+  run();
 }
 
 export function initStore(): void {
@@ -2934,6 +3094,72 @@ export function initStore(): void {
     if (!eventColumns.has("run_outcome")) {
       _db.exec("ALTER TABLE automation_trigger_events ADD COLUMN run_outcome TEXT");
     }
+  }
+
+  // v71: canonical durable Task. A chat today is agent-owned (chats.agent_id
+  // NOT NULL + ON DELETE CASCADE), so deleting an agent destroys its chats. The
+  // durable Task is the object One/Work/Mobile all project. This release (A) is
+  // purely additive — it introduces `tasks` and backfills one task per top-level
+  // user chat. The destructive `chats` rebuild that decouples agent_id and adds
+  // chats.task_id is deferred to v73 (release B), so this additive backfill can
+  // be validated in production first. Idempotent: rerunnable after a hard exit
+  // between this gate and the single end-of-ladder user_version write.
+  // Guarded on the parent tables tasks FK-references. A real v70 DB always has
+  // projects (v2) and firms (v3); a partial dev/test fixture may not, and the
+  // tasks FK check would otherwise raise "no such table" on backfill.
+  if (
+    userVersion < 71 &&
+    tableExists(_db, "chats") &&
+    tableExists(_db, "projects") &&
+    tableExists(_db, "firms")
+  ) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL DEFAULT '',
+        project_id TEXT,
+        firm_id TEXT,
+        status TEXT NOT NULL DEFAULT 'open',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        archived_at TEXT,
+        origin_chat_id TEXT,
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL,
+        FOREIGN KEY(firm_id)    REFERENCES firms(id)    ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_tasks_project_updated ON tasks(project_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_tasks_firm_updated ON tasks(firm_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_tasks_origin_chat ON tasks(origin_chat_id);
+    `);
+    backfillTasksV71(_db);
+  }
+
+  // v72: which agents participated in a task. agent_id is nullable with
+  // ON DELETE SET NULL (the key inversion vs chats' current CASCADE) so an agent
+  // can be freely deleted while participation history survives via agent_slug.
+  // agent_slug is NOT NULL: SQLite permits NULL in non-INTEGER PK columns and
+  // treats NULLs as distinct, so a nullable slug PK would never dedupe. Backfill
+  // resolves each chat's root user task via a cycle-guarded parent walk and
+  // upserts (parent chat + its division sessions collapse to one task/one slug).
+  // Guarded on `tasks` (created by v71 above; absent if v71 was skipped on a
+  // partial fixture) and installed_agents (the participant FK parent).
+  if (userVersion < 72 && tableExists(_db, "tasks") && tableExists(_db, "installed_agents")) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS task_agent_participants (
+        task_id TEXT NOT NULL,
+        agent_id TEXT,
+        agent_slug TEXT NOT NULL,
+        role TEXT,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        PRIMARY KEY(task_id, agent_slug),
+        FOREIGN KEY(task_id)  REFERENCES tasks(id)            ON DELETE CASCADE,
+        FOREIGN KEY(agent_id) REFERENCES installed_agents(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_task_participants_agent ON task_agent_participants(agent_id);
+    `);
+    backfillTaskParticipantsV72(_db);
   }
 
   // Run on every boot as well as the v52 upgrade. A hard process exit can

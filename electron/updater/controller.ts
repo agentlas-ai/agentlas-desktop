@@ -68,6 +68,13 @@ export const CONTINUITY_CORE_TABLES = [
   "mcp_servers",
   "agent_mcp_servers",
   "agent_runtime_overrides",
+  // Canonical durable Task and its agent-participation history. The Task is the
+  // object One/Work/Mobile all project; participation survives free agent
+  // deletion via agent_slug. Verification is snapshot-self-set, so appending
+  // these is safe — a pre-v71 snapshot never asked for them, a v72+ snapshot
+  // includes them. (Never reintroduce an exact-match table-list gate.)
+  "tasks",
+  "task_agent_participants",
 ] as const;
 
 // schemaVersion 1 journals shipped before the Experience/Ontology continuity
