@@ -161,6 +161,17 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
     fs.writeFileSync(path.join(tamperedPythonTree.packagedPython.root, "lib-extra.py"), "unexpected\n");
     await assert.rejects(afterPack(tamperedPythonTree), /Python runtime tree checksum mismatch/);
 
+    // Bytecode caches are outside the runtime contract: any interpreter start
+    // writes __pycache__ into the SOURCE tree while packaging filters it out.
+    // The tree hash must ignore them on both sides or every build after a
+    // local python invocation fails with a false checksum mismatch.
+    const bytecodePollutedPython = fixture("linux", "bytecode-polluted-python");
+    const pycacheDir = path.join(bytecodePollutedPython.sourcePython.root, "lib", "__pycache__");
+    fs.mkdirSync(pycacheDir, { recursive: true });
+    fs.writeFileSync(path.join(pycacheDir, "encodings.cpython-312.pyc"), "bytecode\n");
+    fs.writeFileSync(path.join(bytecodePollutedPython.sourcePython.root, "lib", "stray.pyc"), "bytecode\n");
+    await afterPack(bytecodePollutedPython);
+
     const extendedPythonManifest = fixture("linux", "extended-python-manifest");
     for (const runtime of [extendedPythonManifest.sourcePython, extendedPythonManifest.packagedPython]) {
       const manifest = JSON.parse(fs.readFileSync(runtime.manifestPath, "utf8"));

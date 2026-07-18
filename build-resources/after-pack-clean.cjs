@@ -244,6 +244,10 @@ async function pythonRuntimeTreeSha256(root) {
     for (const entry of entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
       const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
       if (childRelative === ".gitkeep" || childRelative === "agentlas-python-runtime.json") continue;
+      // Bytecode caches are not part of the runtime contract: any interpreter
+      // start writes them into the source tree, and packaging filters them out
+      // (!**/__pycache__/**, !**/*.pyc). Hash the same domain on both sides.
+      if (entry.name === "__pycache__" || /\.py[co]$/.test(entry.name)) continue;
       const childAbsolute = path.join(root, ...childRelative.split("/"));
       const stat = await lstat(childAbsolute);
       if (stat.isDirectory()) await walk(childRelative);

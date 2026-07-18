@@ -73,6 +73,10 @@ async function testLeaseOwnership(db, automations) {
   // Run now and event-triggered executions must respect a live peer lease. Otherwise
   // a GUI click can duplicate the external side effects of a headless due run.
   const immediate = automations.createAutomation(automationInput("Immediate paths respect lease"));
+  // Durable-run contract: unattended execution requires an exact runtime pin.
+  // CI runners have no local CLI for the first-run auto-pin, so pin explicitly
+  // the way a configured automation already is.
+  automations.pinAutomationRuntimeIfUnset(immediate.id, { kind: "codex" });
   const peerClaimedAt = new Date();
   const peerOwner = "2147483647:headless";
   assert.equal(automations.claimAutomationRun(immediate.id, peerOwner, peerClaimedAt), true);
@@ -98,6 +102,7 @@ async function testLeaseOwnership(db, automations) {
     assert.deepEqual(rowFor(db, immediate.id), { claimed_at: null, lease_owner: null });
 
     const disabled = automations.createAutomation(automationInput("Disabled manual run"));
+    automations.pinAutomationRuntimeIfUnset(disabled.id, { kind: "codex" });
     automations.toggleAutomation(disabled.id, false);
     await scheduler.runAutomationNow(disabled.id);
     assert.equal(immediateCalls, 2, "Run now must remain available for a disabled automation");
@@ -142,37 +147,74 @@ async function testChainCycles(automations) {
   const originalWarn = console.warn;
   console.warn = (...args) => {
     const message = args.map(String).join(" ");
-    if (message.includes("blocked cyclic chain")) warnings.push(message);
+    if (message.includes("blocked cyclic durable chain edge")) warnings.push(message);
     else originalWarn(...args);
+  };
+  const waitFor = async (predicate, timeoutMs = 8_000) => {
+    const startedAt = Date.now();
+    while (!predicate() && Date.now() - startedAt < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return predicate();
   };
   try {
     triggerManager = require("../dist/electron/triggers/manager.js");
     const { emitAutomationDone } = require("../dist/electron/triggers/chain-bus.js");
-    triggerManager.startTriggerManager(async (id) => {
+    // The outbox hands each durable occurrence to the scheduler contract.
+    // Accept and classify ok so a delivery can be acknowledged exactly once.
+    triggerManager.startTriggerManager(async (id, _ctx, hooks) => {
+      hooks.onAccepted();
       calls.push(id);
+      return { accepted: true, status: "ok" };
     });
 
-    // Repeated completion events simulate the high-speed failure mode without
-    // allowing the fake runner to recursively emit more completions.
+    // Durable truth: the scheduler seals one terminal receipt per finished run
+    // (markAutomationRun with sourceRunId). Cycle policy fires while the
+    // receipt's fan-out is computed; the chain bus is only a wake accelerator.
+    const sealTerminalReceipt = (automation, runId, output) => {
+      automations.markAutomationRun(automation.id, new Date(), {
+        status: "ok",
+        advanceSchedule: false,
+        sourceRunId: runId,
+        output,
+      });
+      emitAutomationDone({ automationId: automation.id, ok: true, output, at: new Date().toISOString() });
+    };
+
+    sealTerminalReceipt(self, "run-cycle-self", "self");
+    sealTerminalReceipt(left, "run-cycle-left", "left");
+    sealTerminalReceipt(right, "run-cycle-right", "right");
+    assert.equal(warnings.length, 3, "each blocked cycle edge should surface a diagnostic once");
+
+    // Repeated completion signals simulate the high-speed failure mode. The
+    // receipts already exist, so reconciliation must neither warn again nor
+    // create occurrences for the cyclic edges.
     for (let i = 0; i < 20; i += 1) {
       emitAutomationDone({ automationId: self.id, ok: true, at: new Date().toISOString() });
       emitAutomationDone({ automationId: left.id, ok: true, at: new Date().toISOString() });
       emitAutomationDone({ automationId: right.id, ok: true, at: new Date().toISOString() });
     }
-    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     assert.equal(
       calls.filter((id) => id === self.id || id === left.id || id === right.id).length,
       0,
       "self and indirect cycles must never reach the automation runner",
     );
-    assert.ok(warnings.length >= 3, "each blocked cycle edge should surface a diagnostic once");
-    assert.ok(warnings.length <= 3, "repeated cyclic completions must not spam diagnostics");
+    assert.equal(warnings.length, 3, "repeated cyclic completions must not spam diagnostics");
 
-    emitAutomationDone({ automationId: source.id, ok: true, output: "source", at: new Date().toISOString() });
-    emitAutomationDone({ automationId: middle.id, ok: true, output: "middle", at: new Date().toISOString() });
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(calls.filter((id) => id === middle.id).length, 1, "a valid chain edge must still fire");
-    assert.equal(calls.filter((id) => id === leaf.id).length, 1, "a valid multi-step DAG must still fire");
+    sealTerminalReceipt(source, "run-dag-source", "source");
+    assert.ok(
+      await waitFor(() => calls.filter((id) => id === middle.id).length >= 1),
+      "a valid chain edge must still fire",
+    );
+    sealTerminalReceipt(middle, "run-dag-middle", "middle");
+    assert.ok(
+      await waitFor(() => calls.filter((id) => id === leaf.id).length >= 1),
+      "a valid multi-step DAG must still fire",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(calls.filter((id) => id === middle.id).length, 1, "a chain edge must deliver exactly once");
+    assert.equal(calls.filter((id) => id === leaf.id).length, 1, "a DAG leaf must deliver exactly once");
   } finally {
     console.warn = originalWarn;
     triggerManager?.stopTriggerManager();

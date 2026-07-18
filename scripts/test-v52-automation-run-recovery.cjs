@@ -27,7 +27,13 @@ function seedV51Fixture() {
       name TEXT NOT NULL,
       installed_at TEXT NOT NULL
     );
-    CREATE TABLE automations (id TEXT PRIMARY KEY);
+    -- Every real v51 database passed the v34 gate, so it owns the lease
+    -- columns durable run recovery reads (a.claimed_at / a.lease_owner).
+    CREATE TABLE automations (
+      id TEXT PRIMARY KEY,
+      claimed_at TEXT,
+      lease_owner TEXT
+    );
     CREATE TABLE automation_runs (
       id TEXT PRIMARY KEY,
       automation_id TEXT,
@@ -45,12 +51,17 @@ function seedV51Fixture() {
       skipped_count INTEGER DEFAULT 0,
       error TEXT
     );
+    -- run_events was born at the v38 gate with these exact columns; durable
+    -- recovery receipts write automation_id, so a faithful v51 fixture has it.
     CREATE TABLE run_events (
       id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL,
       seq INTEGER NOT NULL,
       ts TEXT NOT NULL,
       kind TEXT NOT NULL,
+      chat_id TEXT,
+      automation_id TEXT,
+      node_id TEXT,
       agent_id TEXT,
       payload_json TEXT NOT NULL DEFAULT '{}',
       UNIQUE(run_id, seq)
@@ -147,7 +158,16 @@ async function main() {
       ["history-live"],
       "v52 must delete null/orphan run history while preserving a live parent's history",
     );
-    assert.equal(first.result.runEvents.length, 2, "append-only run evidence must be preserved");
+    const seededEvents = first.result.runEvents.filter((row) => row.kind === "progress");
+    assert.equal(seededEvents.length, 2, "append-only run evidence must be preserved");
+    const recoveryReceipts = first.result.runEvents.filter(
+      (row) => row.kind === "automation_stale_run_recovered",
+    );
+    assert.deepEqual(
+      recoveryReceipts.map((row) => row.run_id).sort(),
+      ["run-stale-no-event", "run-stale-old-event"],
+      "boot recovery must journal one durable receipt per recovered run",
+    );
     assert.equal(first.result.failures.length, 1, "append-only failure evidence must be preserved");
 
     const runs = new Map(first.result.runs.map((row) => [row.id, row]));

@@ -87,6 +87,10 @@ async function runtimeTreeSha256(root) {
     for (const name of readdirSync(absolute).sort()) {
       const childRelative = relative ? `${relative}/${name}` : name;
       if (childRelative === ".gitkeep" || childRelative === "agentlas-python-runtime.json") continue;
+      // 바이트코드 캐시는 계약 밖 — 인터프리터를 한 번만 실행해도 소스 트리에 생기고
+      // 패키징 필터(!**/__pycache__/**, !**/*.pyc)가 걷어낸다. afterPack 검증과
+      // 같은 해시 도메인을 유지해야 소스/패키지 양쪽이 manifest와 일치한다.
+      if (name === "__pycache__" || /\.py[co]$/.test(name)) continue;
       const childAbsolute = path.join(root, ...childRelative.split("/"));
       const stat = lstatSync(childAbsolute);
       if (stat.isDirectory()) walk(childRelative);
@@ -201,7 +205,11 @@ writeFileSync(
 );
 let versionEvidence = `${pyver} (${triple})`;
 if (targetArch === process.arch) {
-  versionEvidence = execFileSync(bin, ["--version"]).toString().trim();
+  // 증거 실행이 소스 트리에 바이트코드 캐시를 쓰지 않게 한다 — 해시 도메인에서
+  // 제외했더라도 fetch 직후의 트리는 아카이브 그대로가 가장 진단하기 쉽다.
+  versionEvidence = execFileSync(bin, ["--version"], {
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  }).toString().trim();
 } else if (process.platform === "darwin") {
   const arches = execFileSync("lipo", ["-archs", bin]).toString().trim().split(/\s+/);
   const expectedArch = targetArch === "x64" ? "x86_64" : "arm64";
