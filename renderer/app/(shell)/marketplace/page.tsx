@@ -1087,11 +1087,17 @@ function AgentCard({
           <div className="portal-card-title hub-card-title">{loc.name}</div>
           <div className="hub-card-author">{author}</div>
         </div>
-        <RdTag className="hub-credit-tag" bg={plugin ? C.peach : entityKind === "multi" ? C.purple : C.green}>
+        <RdTag
+          className="hub-credit-tag"
+          bg={plugin ? C.peach : entityKind === "multi" ? C.purple : C.green}
+          title={callable && !plugin
+            ? (ko ? `24시간 사용 · ${perCallCredits} 크레딧` : `24-hour use · ${perCallCredits} credits`)
+            : undefined}
+        >
           {plugin
             ? (ko ? "도구" : "Tool")
             : callable
-              ? (ko ? `${perCallCredits}크레딧 · 24시간` : `${perCallCredits} credits · 24h`)
+              ? (ko ? `24시간 사용 · ${perCallCredits} 크레딧` : `24-hour use · ${perCallCredits} credits`)
               : (ko ? "설치 전용" : "Install only")}
         </RdTag>
       </div>
