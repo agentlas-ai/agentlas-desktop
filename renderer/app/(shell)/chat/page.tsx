@@ -493,12 +493,33 @@ function historyEntryToStreamMessage(entry: { id: string; role: string; text: st
 // 버그를 막는다. answer 상태는 DB에 저장되지 않으므로(본문만 저장), 대화 순서로 복원한다:
 // 질문을 가진 에이전트 메시지 '뒤에' 다른 메시지가 있으면 = 이미 답하고 대화가 진행된 것 → answered 처리.
 // 답 라벨은 바로 뒤의 user 메시지에서 복원(멀티select 불릿 분해). 마지막 메시지의 질문만 미답으로 남긴다.
-function restoreAnsweredQuestions(messages: StreamMessage[]): StreamMessage[] {
+/** 답변 확정 영수증 로드 — 실패는 빈 맵(영수증은 보강 정보, 히스토리 표시를 막지 않는다). */
+async function fetchCommittedReplies(
+  api: ReturnType<typeof ipc>,
+  chatId: string,
+): Promise<Map<string, string>> {
+  try {
+    const rows = await api?.confirm?.committedAnswers?.(chatId);
+    return new Map((rows ?? []).map((row) => [row.sourceMessageId, row.reply]));
+  } catch {
+    return new Map();
+  }
+}
+
+function restoreAnsweredQuestions(
+  messages: StreamMessage[],
+  committedReplies?: Map<string, string>,
+): StreamMessage[] {
   return messages.map((msg, i) => {
     if (!msg.questions || msg.questions.length === 0) return msg;
-    if (i >= messages.length - 1) return msg; // 마지막 = 아직 답할 차례
-    const nextUser = messages.slice(i + 1).find((m) => m.role === "user");
-    const answerText = nextUser?.text?.trim() ?? "";
+    // 마지막 메시지 = 아직 답할 차례 — 단, 답변 확정 영수증이 있으면 이미 답한 질문이다.
+    // (후속 user 메시지 persist가 실행 분기에서 유실돼도 시트를 다시 열지 않는다.)
+    const committedReply = committedReplies?.get(msg.id)?.trim() ?? "";
+    if (i >= messages.length - 1 && !committedReply) return msg;
+    const nextUser = i >= messages.length - 1
+      ? undefined
+      : messages.slice(i + 1).find((m) => m.role === "user");
+    const answerText = (nextUser?.text?.trim() ?? "") || committedReply;
     // 질문 시트 배치 스캐폴드("질문: …\n선택: …\n답변: …" 청크의 \n\n join —
     // ChatQuestionSheet.composeQuestionReply와 짝)는 질문별로 파싱해 각 질문에 제 답만 넣는다.
     // (예전처럼 전체 줄을 모든 질문에 주입하면 재로드 후 인용 카드가 오염된다)
@@ -1537,14 +1558,18 @@ function ChatPage() {
       void api.marketplace.bookmarks().then((bookmarks) => {
         if (!cancelled && hubBookmarkGenerationRef.current === bookmarkGeneration) setHubBookmarks(bookmarks);
       }).catch(() => undefined);
-      void api.invoke.history(chatId).then((history) => {
-        if (cancelled) return;
-        const historyMessages: StreamMessage[] = restoreAnsweredQuestions(history.map(historyEntryToStreamMessage));
-        setMessages((current) => {
-          const hasLiveDraft = current.some((msg) => msg.busy || msg.streaming);
-          return hasLiveDraft ? current : historyMessages;
-        });
-      }).catch(() => undefined);
+      void Promise.all([api.invoke.history(chatId), fetchCommittedReplies(api, chatId)])
+        .then(([history, committedReplies]) => {
+          if (cancelled) return;
+          const historyMessages: StreamMessage[] = restoreAnsweredQuestions(
+            history.map(historyEntryToStreamMessage),
+            committedReplies,
+          );
+          setMessages((current) => {
+            const hasLiveDraft = current.some((msg) => msg.busy || msg.streaming);
+            return hasLiveDraft ? current : historyMessages;
+          });
+        }).catch(() => undefined);
       // CLI 슬래시 명령 스캔 (매 진입 시 최신) — 느려도 채팅 표시를 막지 않게 후속 로드.
       void api.runtime.listCommands().then((cmds) => {
         if (!cancelled) setCliCommands(cmds);
@@ -1745,8 +1770,12 @@ function ChatPage() {
         typeof api.invoke.receipt === "function"
           ? api.invoke.receipt(endedRunId).catch(() => null)
           : Promise.resolve(null);
-      void Promise.all([api.invoke.history(chatId), receiptPromise]).then(([h, receipt]) => {
-        const next = restoreAnsweredQuestions(h.map(historyEntryToStreamMessage));
+      void Promise.all([
+        api.invoke.history(chatId),
+        receiptPromise,
+        fetchCommittedReplies(api, chatId),
+      ]).then(([h, receipt, committedReplies]) => {
+        const next = restoreAnsweredQuestions(h.map(historyEntryToStreamMessage), committedReplies);
         const recovery = receiptRecoveryMessage(receipt, locale);
         const status = receiptRecoveryStatus(receipt, locale);
         setLiveAgents((prev) =>
@@ -1783,14 +1812,15 @@ function ChatPage() {
         setLiveAgents((prev) =>
           Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
         );
-        const [h, receipt] = await Promise.all([
+        const [h, receipt, committedReplies] = await Promise.all([
           api.invoke.history(chatId),
           endedRunId && typeof api.invoke.receipt === "function"
             ? api.invoke.receipt(endedRunId).catch(() => null)
             : Promise.resolve(null),
+          fetchCommittedReplies(api, chatId),
         ]);
         if (!stopped) {
-          const next = restoreAnsweredQuestions(h.map(historyEntryToStreamMessage));
+          const next = restoreAnsweredQuestions(h.map(historyEntryToStreamMessage), committedReplies);
           const recovery = receiptRecoveryMessage(receipt, locale);
           const status = receiptRecoveryStatus(receipt, locale);
           setLiveAgents((prev) =>
@@ -2154,11 +2184,16 @@ function ChatPage() {
         ),
       );
       const perms = perQuestion.map((p) => inferPermissionFromAnswer(p.answers)).find(Boolean);
+      // 답변 제출을 durable 영수증으로 즉시 확정 — 후속 실행이 어떤 분기로 빠지든 배지·
+      // "답변 필요" 목록·시트가 이 질문을 다시 띄우지 않는다. 확정 직후 배지도 즉시 갱신.
+      void ipc()?.confirm?.commitAnswer?.({ chatId, reply })
+        .then(() => window.dispatchEvent(new Event("agentlas:attention-refresh")))
+        .catch(() => undefined);
       void send(reply, { permissions: perms ?? DEFAULT_PERMISSION });
     },
     // send는 동일 useCallback에 의존
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [busy, send],
+    [busy, chatId, send],
   );
 
   /** 질문 시트 × 닫기 — 이 배치의 미답 질문을 잠가("—") 시트를 접는다. 전송 없음. */

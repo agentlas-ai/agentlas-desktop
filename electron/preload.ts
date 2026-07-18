@@ -208,6 +208,9 @@ const api: AgentlasIpc = {
   },
   confirm: {
     listPending: () => ipcRenderer.invoke("confirm:listPending"),
+    commitAnswer: (input: { chatId: string; reply: string }) =>
+      ipcRenderer.invoke("confirm:commitAnswer", input),
+    committedAnswers: (chatId: string) => ipcRenderer.invoke("confirm:committedAnswers", chatId),
   },
   attention: {
     setPendingConfirmations: (count: number) =>

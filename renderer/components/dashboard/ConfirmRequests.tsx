@@ -48,8 +48,12 @@ export function ConfirmRequests() {
   }, []);
 
   // 초기 1회 load는 유지, 주기 폴링(10s)은 탭 보일 때만 — useVisibleInterval이 hidden 시 정지.
+  // 답변 확정 직후에는 폴링을 기다리지 않고 즉시 목록을 갱신한다(AppShell 배지와 동일 신호).
   useEffect(() => {
     void load();
+    const refresh = () => void load();
+    window.addEventListener("agentlas:attention-refresh", refresh);
+    return () => window.removeEventListener("agentlas:attention-refresh", refresh);
   }, [load]);
   useVisibleInterval(() => void load(), POLL_MS);
 

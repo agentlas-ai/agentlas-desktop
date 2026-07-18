@@ -233,6 +233,7 @@ jobs:
           npx playwright install chromium
           npm run test:automation-scheduler-guards
           npm run test:automation-trigger-safety
+          npm run test:question-answer-receipt
           npm run test:v52-automation-run-recovery
           npm run test:v64-automation-permission-migration
           npm run test:v53-hub-bookmark-sync

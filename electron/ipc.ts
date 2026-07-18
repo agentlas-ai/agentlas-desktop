@@ -238,7 +238,11 @@ import {
 } from "./store/run-events";
 import { getUsageSnapshot, invalidateUsage, retryUsageProvider } from "./usage";
 import { isUsageRetryProviderId } from "./usage/retry-policy";
-import { listPendingConfirmations } from "./confirm";
+import {
+  commitPendingConfirmationAnswer,
+  listCommittedQuestionAnswers,
+  listPendingConfirmations,
+} from "./confirm";
 import {
   addProjectOntologySource,
   getProjectOntologyStatus,
@@ -1971,6 +1975,13 @@ export function registerIpcHandlers(): void {
 
   // ── confirm (확인 요청 — 챗에서 사용자 결정 대기) ────────
   ipcMain.handle("confirm:listPending", () => listPendingConfirmations());
+  ipcMain.handle("confirm:commitAnswer", (_e, input: { chatId?: unknown; reply?: unknown }) =>
+    commitPendingConfirmationAnswer(
+      typeof input?.chatId === "string" ? input.chatId : "",
+      typeof input?.reply === "string" ? input.reply : "",
+    ));
+  ipcMain.handle("confirm:committedAnswers", (_e, chatId: unknown) =>
+    listCommittedQuestionAnswers(typeof chatId === "string" ? chatId : ""));
 
   // ── attention (Dock/taskbar/app badge — 놓치면 에이전트가 멈추는 승인 요청) ─────
   ipcMain.handle("attention:setPendingConfirmations", (e, count: number) => {

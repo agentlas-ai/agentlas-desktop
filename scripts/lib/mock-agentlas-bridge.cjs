@@ -512,6 +512,11 @@ function setupMockAgentlasBridge(options) {
     },
     confirm: {
       listPending: async () => pendingConfirmations,
+      commitAnswer: async (input) => {
+        record("confirm.commitAnswer", input);
+        return { chatId: input?.chatId ?? "", sourceMessageId: "mock-question-message" };
+      },
+      committedAnswers: async () => [],
     },
     attention: {
       setPendingConfirmations: async (count) => record("attention.setPendingConfirmations", count),

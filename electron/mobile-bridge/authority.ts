@@ -17,7 +17,7 @@ import {
   captureInvocationWorkspaceBinding,
   enforceMobileReadOnlyPermission,
 } from "../invocation/workspace-binding";
-import { claimPendingConfirmationAnswer } from "../confirm";
+import { claimPendingConfirmationAnswer, recordCommittedAnswerReceipt } from "../confirm";
 import { detectRuntimes, setActiveRuntime } from "../runtime/detect";
 import { listRuntimeCommands } from "../runtime/commands";
 import { listInstalledAgents } from "../mcp/registry";
@@ -1126,6 +1126,12 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           rollbackQuestionClaim?.();
           throw error;
         }
+        // Admission succeeded and the claim is kept: seal the durable answer
+        // receipt so the question stays resolved even if the run's own user
+        // message persistence branch is skipped or the process dies mid-run.
+        if (expectedQuestionMessageId) {
+          recordCommittedAnswerReceipt(invocation.chatId, expectedQuestionMessageId, invocation.userPrompt ?? "");
+        }
         this.scheduleSnapshotUpdated();
         return asJsonValue(result, request.method);
       }
@@ -1143,6 +1149,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         } catch (error) {
           rollbackQuestionClaim?.();
           throw error;
+        }
+        if (expectedQuestionMessageId) {
+          recordCommittedAnswerReceipt(invocation.chatId, expectedQuestionMessageId, invocation.userPrompt ?? "");
         }
         this.scheduleSnapshotUpdated();
         return asJsonValue(result, request.method);

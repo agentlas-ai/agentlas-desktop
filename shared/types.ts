@@ -3120,6 +3120,18 @@ export interface PendingConfirmation {
   createdAt: string;
 }
 
+/** 질문 답변 확정 영수증 — 답변 제출이 수락된 순간 append-only 원장(run_events)에
+ *  남는 정본. 후속 user 메시지가 실행 분기에서 유실돼도 이 영수증이 질문을 durable하게
+ *  해소해, 알림 배지·"답변 필요" 목록·바텀시트가 이미 답한 질문을 다시 띄우지 않는다. */
+export interface CommittedQuestionAnswer {
+  /** 답한 질문을 소유한 assistant 메시지 id. */
+  sourceMessageId: string;
+  /** 제출 당시의 답장 본문(원장 정책에 따라 800자 절단·시크릿 마스킹). */
+  reply: string;
+  /** 확정 시각(ISO). */
+  ts: string;
+}
+
 /** electron-updater의 자동 업데이트 상태. main → renderer로 broadcast. */
 export type UpdaterErrorCode =
   | "config-missing"
@@ -4496,6 +4508,10 @@ export interface AgentlasIpc {
   /** 확인 요청 — 에이전트가 챗에서 사용자 결정을 기다리는 채팅 목록(미답변 질문 fence 기준). */
   confirm: {
     listPending: () => Promise<PendingConfirmation[]>;
+    /** 답변 제출 수락을 durable 영수증으로 확정 — 실행 분기와 무관하게 질문을 해소한다. */
+    commitAnswer: (input: { chatId: string; reply: string }) =>
+      Promise<{ chatId: string; sourceMessageId: string }>;
+    committedAnswers: (chatId: string) => Promise<CommittedQuestionAnswer[]>;
   };
   /** 앱 주의 표시 — Dock/taskbar badge와 네이티브 알림을 갱신한다. */
   attention: {
