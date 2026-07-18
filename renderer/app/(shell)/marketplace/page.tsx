@@ -997,6 +997,23 @@ function RdTag({
   );
 }
 
+// 카드 아바타 타일 — 슬러그에서 결정적으로 색을 뽑아 텍스트뿐인 카드에 시각 정체성을 준다.
+// (채용 플랫폼 카드 문법: 정체성 타일 + 이름 + 한 줄 소개 + 실적 한 줄 + 배지 + CTA.)
+function identityHue(slug: string): number {
+  let hash = 0;
+  for (let i = 0; i < slug.length; i += 1) hash = (hash * 31 + slug.charCodeAt(i)) >>> 0;
+  return hash % 360;
+}
+
+function identityGradient(slug: string): string {
+  const hue = identityHue(slug);
+  return `linear-gradient(135deg, oklch(0.9 0.055 ${hue}), oklch(0.79 0.095 ${(hue + 42) % 360}))`;
+}
+
+function identityInitial(name: string): string {
+  return Array.from(name.trim())[0]?.toUpperCase() ?? "?";
+}
+
 function AgentCard({
   listing,
   locale,
@@ -1030,6 +1047,15 @@ function AgentCard({
       : listing.installCli || null;
   const cardLabel = entityClassLabel(entityKind, locale);
   const verificationFacts = hubVerificationFacts(listing, locale);
+  const statFacts = [
+    listing.totalBorrows
+      ? (ko ? `전체 호출 ${listing.totalBorrows}회` : `${listing.totalBorrows} total calls`)
+      : null,
+    ...verificationFacts,
+    listing.cloudPackage
+      ? (ko ? `로컬 파일 ${listing.cloudPackage.fileCount}개` : `${listing.cloudPackage.fileCount} local files`)
+      : null,
+  ].filter((fact): fact is string => Boolean(fact));
   return (
     <div className="card portal-entity-card hub-entity-card" data-entity-kind={entityKind}>
       <div className="hub-card-availability" data-callable={callable ? "true" : "false"}>
@@ -1043,6 +1069,13 @@ function AgentCard({
         </span>
       </div>
       <div className="hub-card-head">
+        <div
+          className="hub-card-avatar"
+          aria-hidden="true"
+          style={{ background: identityGradient(listing.slug) }}
+        >
+          {identityInitial(loc.name)}
+        </div>
         <div className="hub-card-main">
           <div className="hub-card-kicker">
             {plugin
@@ -1058,16 +1091,20 @@ function AgentCard({
           {plugin
             ? (ko ? "도구" : "Tool")
             : callable
-              ? (ko ? `24시간 사용 · ${perCallCredits} 크레딧` : `24-hour use · ${perCallCredits} credits`)
+              ? (ko ? `${perCallCredits}크레딧 · 24시간` : `${perCallCredits} credits · 24h`)
               : (ko ? "설치 전용" : "Install only")}
         </RdTag>
       </div>
       <div className="hub-card-copy">{loc.tagline}</div>
+      {statFacts.length > 0 && (
+        // 실적은 칩 무더기 대신 이력서식 한 줄 요약 — 카드 높이를 흔들지 않고,
+        // 넘치면 말줄임 + 툴팁으로 전체를 보여준다.
+        <div className="hub-card-stats" title={statFacts.join(" · ")}>
+          {statFacts.join(" · ")}
+        </div>
+      )}
       <div className="portal-chip-row hub-card-meta">
         {!plugin && <SecurityGradeTag listing={listing} locale={locale} />}
-        {listing.cloudPackage && (
-          <RdTag dashed>{ko ? `로컬 파일 ${listing.cloudPackage.fileCount}개` : `${listing.cloudPackage.fileCount} local files`}</RdTag>
-        )}
         <RdTag dashed bg={plugin ? C.peach : entityKind === "multi" ? C.purple : C.green}>{plugin ? (listing.category || cardLabel) : cardLabel}</RdTag>
         {sameSlugInstalled && !plugin ? (
           <RdTag
@@ -1081,8 +1118,6 @@ function AgentCard({
               : (ko ? "이 Mac에 설치됨" : "Installed on this Mac")}
           </RdTag>
         ) : null}
-        {listing.totalBorrows ? <RdTag dashed>{ko ? `전체 호출 ${listing.totalBorrows}회` : `${listing.totalBorrows} total calls`}</RdTag> : null}
-        {verificationFacts.map((fact) => <RdTag key={fact} dashed>{fact}</RdTag>)}
         {plugin && command ? <RdTag className="hub-command-chip" dashed>{command}</RdTag> : null}
         {!plugin && !callable ? <RdTag dashed>{ko ? "Hub 호출 불가" : "Hub call unavailable"}</RdTag> : null}
       </div>

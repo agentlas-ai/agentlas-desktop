@@ -5376,9 +5376,25 @@ button[data-toggle-state="on"] {
 
 .rd .hub-card-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 112px);
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, max-content);
   gap: 10px;
   align-items: start;
+}
+
+/* 정체성 타일 — 텍스트뿐인 카드에 시각 앵커를 준다(채용 플랫폼 프로필 카드 문법).
+   배경 그라디언트는 슬러그에서 결정적으로 계산해 인라인으로 들어온다. */
+.rd .hub-card-avatar {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid color-mix(in oklch, var(--rd-ink) 10%, transparent);
+  border-radius: 12px;
+  color: color-mix(in oklch, var(--rd-ink) 82%, transparent);
+  font-family: var(--rd-f-display);
+  font-size: 19px;
+  font-weight: 600;
+  user-select: none;
 }
 
 .rd .hub-card-main {
@@ -5430,8 +5446,10 @@ button[data-toggle-state="on"] {
   min-width: 0;
   max-width: 100%;
   justify-content: center;
-  white-space: normal !important;
-  overflow-wrap: anywhere;
+  /* 배지가 두 줄로 접히며 헤더 높이를 흔들던 원인 — 항상 한 줄 고정. */
+  white-space: nowrap !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
   text-align: center;
   line-height: 1.25;
 }
@@ -5449,12 +5467,31 @@ button[data-toggle-state="on"] {
   -webkit-box-orient: vertical;
 }
 
+/* 실적 한 줄 요약 — 칩 무더기 대신 이력서식 단일 행. 넘치면 말줄임(전체는 title 툴팁). */
+.rd .hub-card-stats {
+  min-width: 0;
+  margin-top: 10px;
+  overflow: hidden;
+  color: var(--rd-ink-2);
+  font-family: var(--rd-f-mono);
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rd .hub-card-meta {
-  margin-top: 12px;
+  margin-top: 10px;
 }
 
 .rd .hub-card-meta .chip {
+  /* 고정 24px 필 안에서 긴 라벨이 카드 밖으로 흘러 잘리던 원인 — 필 내부 말줄임.
+     inline-flex는 익명 flex item에 ellipsis가 안 걸리므로 inline-block으로 전환. */
+  display: inline-block;
   max-width: 100%;
+  overflow: hidden;
+  line-height: 22px;
+  text-overflow: ellipsis;
 }
 
 .rd .hub-command-chip {
@@ -5496,11 +5533,13 @@ button[data-toggle-state="on"] {
    the card itself is narrow instead of squeezing Korean names into 2-3 glyphs. */
 @container (max-width: 310px) {
   .rd .hub-card-head {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr);
   }
 
   .rd .hub-credit-tag {
+    grid-column: 1 / -1;
     width: max-content;
+    max-width: 100%;
     justify-self: start;
   }
 }
