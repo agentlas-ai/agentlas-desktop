@@ -52,8 +52,11 @@ function hubCategoryFor(listing: MarketplaceListing): HubCategory {
 function hubListingScore(listing: MarketplaceListing): number {
   if (!isLiveHubListing(listing)) return 0;
   const category = hubCategoryFor(listing);
-  const base = category === "team" ? 1200 : category === "agent" ? 1100 : 900;
-  return base + (listing.verifiedInvocations ?? listing.installCount ?? 0);
+  // 종류는 절대 계층이다: 첫 화면(둘러보기)은 멀티 에이전트 팀 → 싱글 에이전트 →
+  // 플러그인 순으로 이끈다. 호출 실적은 같은 종류 안에서만 순서를 정한다 —
+  // 인기 에이전트가 팀 구역을 추월해 첫 화면을 차지하던 가산 방식은 폐기.
+  const tier = category === "team" ? 3 : category === "agent" ? 2 : 1;
+  return tier * 1_000_000 + (listing.verifiedInvocations ?? listing.installCount ?? 0);
 }
 
 function orderListingsForHub(listings: MarketplaceListing[], hubLive: boolean): MarketplaceListing[] {
