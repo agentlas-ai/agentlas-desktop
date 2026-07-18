@@ -29,6 +29,9 @@ const {
   finishGraphRun,
   toggleAutomation,
   updateAutomation,
+  getAutomationExecutionContractState,
+  pinAutomationRuntimeIfUnset,
+  pinLegacyAutomationHubVersions,
 } = automationStore;
 const { parseAutomations } = require("../dist/electron/automation-emitter.js");
 const mcpClient = require("../dist/electron/mcp/client.js");
@@ -228,6 +231,144 @@ function assertLocalTime(iso, expected) {
       "the backward-compatible default must be durable, not scheduler-only",
     );
     assert.equal(created.toolMode, "auto", "non-web automations should keep auto mode");
+
+    const exactRuntimeContract = createAutomation({
+      name: "Exact runtime contract",
+      scheduleHuman: "daily-09:00",
+      targetType: "agent",
+      targetId: "agent-1",
+      promptTemplate: "runtime contract",
+    });
+    assert.deepEqual(
+      getAutomationExecutionContractState(exactRuntimeContract.id),
+      { runtimeSelection: "missing", hubMode: "valid" },
+      "legacy NULL pins are the only state eligible for first-run pinning",
+    );
+    const firstPin = { kind: "codex", backend: "openai", source: "/usr/local/bin/codex", model: "gpt-exact" };
+    assert.deepEqual(pinAutomationRuntimeIfUnset(exactRuntimeContract.id, firstPin).runtimeSelection, firstPin);
+    assert.equal(getAutomationExecutionContractState(exactRuntimeContract.id).runtimeSelection, "valid");
+
+    getDb().prepare("UPDATE automations SET runtime_selection_json = ? WHERE id = ?")
+      .run("{malformed", exactRuntimeContract.id);
+    assert.equal(
+      getAutomationExecutionContractState(exactRuntimeContract.id).runtimeSelection,
+      "invalid",
+      "malformed JSON must not be treated as a missing pin",
+    );
+    pinAutomationRuntimeIfUnset(exactRuntimeContract.id, firstPin);
+    assert.equal(
+      getDb().prepare("SELECT runtime_selection_json AS value FROM automations WHERE id = ?").get(exactRuntimeContract.id).value,
+      "{malformed",
+      "first-run CAS must never overwrite damaged non-NULL state",
+    );
+
+    getDb().prepare("UPDATE automations SET runtime_selection_json = ? WHERE id = ?")
+      .run(JSON.stringify({ kind: 42 }), exactRuntimeContract.id);
+    assert.equal(
+      getAutomationExecutionContractState(exactRuntimeContract.id).runtimeSelection,
+      "invalid",
+      "wrong-shaped runtime pins fail closed",
+    );
+
+    getDb().prepare("UPDATE automations SET runtime_selection_json = ? WHERE id = ?")
+      .run(JSON.stringify({ kind: "future-runtime" }), exactRuntimeContract.id);
+    assert.equal(
+      getAutomationExecutionContractState(exactRuntimeContract.id).runtimeSelection,
+      "invalid",
+      "unknown future runtime kinds require an explicit migration",
+    );
+
+    getDb().prepare("UPDATE automations SET runtime_selection_json = NULL WHERE id = ?").run(exactRuntimeContract.id);
+    pinAutomationRuntimeIfUnset(exactRuntimeContract.id, firstPin);
+    pinAutomationRuntimeIfUnset(exactRuntimeContract.id, { kind: "claude-code", backend: "anthropic" });
+    assert.deepEqual(
+      getAutomation(exactRuntimeContract.id).runtimeSelection,
+      firstPin,
+      "concurrent first-run pin attempts preserve the CAS winner",
+    );
+
+    getDb().prepare("UPDATE automations SET hub_mode = ? WHERE id = ?")
+      .run("future-hub-policy", exactRuntimeContract.id);
+    assert.equal(
+      getAutomationExecutionContractState(exactRuntimeContract.id).hubMode,
+      "invalid",
+      "unknown Hub policies must not widen to hub-allowed",
+    );
+    assert.equal(getAutomation(exactRuntimeContract.id).hubMode, "local-only", "damaged Hub policy projects fail-closed");
+    removeAutomation(exactRuntimeContract.id);
+
+    const hashA = "a".repeat(64);
+    const hashB = "b".repeat(64);
+    const legacyTopHub = createAutomation({
+      name: "Legacy top-level Hub pin",
+      scheduleHuman: "daily-09:00",
+      targetType: "hub",
+      targetId: "exact-hub-agent",
+      promptTemplate: "run exact Hub release",
+    });
+    const topPinned = pinLegacyAutomationHubVersions(legacyTopHub.id, { "exact-hub-agent": hashA });
+    assert.equal(topPinned.automation.targetVersion, hashA, "legacy top-level Hub target must freeze once");
+    assert.equal(topPinned.pinned.length, 1);
+
+    const legacyGraphHub = createAutomation({
+      name: "Legacy graph Hub pin",
+      scheduleHuman: "daily-09:00",
+      targetType: "agent",
+      targetId: "agent-1",
+      promptTemplate: "graph exact Hub release",
+      graphJson: {
+        version: 1,
+        nodes: [{
+          id: "hub-node",
+          type: "agent",
+          position: { x: 0, y: 0 },
+          config: { targetType: "hub", ref: "graph-hub-agent", prompt: "run" },
+        }],
+        edges: [],
+      },
+    });
+    const graphPinned = pinLegacyAutomationHubVersions(legacyGraphHub.id, { "graph-hub-agent": hashA });
+    assert.equal(graphPinned.automation.graph.nodes[0].config.targetVersion, hashA, "legacy graph node must freeze once");
+
+    const losingConcurrentPin = pinLegacyAutomationHubVersions(legacyTopHub.id, { "exact-hub-agent": hashB });
+    assert.equal(
+      losingConcurrentPin.automation.targetVersion,
+      hashA,
+      "a concurrent GUI/headless pin attempt must preserve the transaction winner",
+    );
+    assert.equal(losingConcurrentPin.pinned.length, 0);
+
+    const changedRemoteAfterPin = pinLegacyAutomationHubVersions(legacyGraphHub.id, { "graph-hub-agent": hashB });
+    assert.equal(
+      changedRemoteAfterPin.automation.graph.nodes[0].config.targetVersion,
+      hashA,
+      "a newer Hub publication after migration must not drift an existing automation",
+    );
+
+    const unavailableLegacyHub = createAutomation({
+      name: "Unavailable legacy Hub pin",
+      scheduleHuman: "daily-09:00",
+      targetType: "hub",
+      targetId: "offline-hub-agent",
+      promptTemplate: "wait for exact Hub release",
+    });
+    assert.throws(
+      () => pinLegacyAutomationHubVersions(unavailableLegacyHub.id, {}),
+      /automation_hub_version_pin_unavailable/,
+      "an unavailable Hub must leave the automation intact for deferred retry",
+    );
+    assert.equal(getAutomation(unavailableLegacyHub.id).targetVersion, undefined);
+
+    getDb().prepare("UPDATE automations SET target_version = ? WHERE id = ?")
+      .run("latest", unavailableLegacyHub.id);
+    assert.throws(
+      () => pinLegacyAutomationHubVersions(unavailableLegacyHub.id, { "offline-hub-agent": hashA }),
+      /automation_hub_version_pin_invalid/,
+      "present-but-non-immutable Hub version state must fail closed",
+    );
+    removeAutomation(legacyTopHub.id);
+    removeAutomation(legacyGraphHub.id);
+    removeAutomation(unavailableLegacyHub.id);
     assert.ok(created.nextRunAt, "nextRunAt should be set on create");
     assert.equal(listAutomations().length, 1);
 
@@ -852,7 +993,11 @@ function assertLocalTime(iso, expected) {
         .prepare("UPDATE automations SET next_run_at = ? WHERE id = ?")
         .run(new Date("2026-06-01T00:00:00.000Z").toISOString(), storm.id);
       await runDueAutomationsNow(new Date("2026-06-01T00:00:01.000Z"));
-      assert.equal(getAutomation(storm.id).enabled, false, "long-run automation without continue should disable itself");
+      assert.equal(
+        getAutomation(storm.id).enabled,
+        true,
+        "a missing long-run continuation signal must not silently disable a recurring automation",
+      );
     } finally {
       mcpClient.runMcpInvocation = originalRunMcpInvocation;
     }

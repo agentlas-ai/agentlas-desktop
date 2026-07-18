@@ -24,4 +24,17 @@ assert.deepEqual(
 assert.equal(classifyAutomationOutput("Published 3 approved posts successfully").outcome, "ok");
 assert.equal(classifyAutomationOutput("").reasonCode, "missing_result");
 
+for (const [text, outcome, code] of [
+  ["pinned_runtime_contract_invalid: malformed", "needs_input", "pinned_runtime_contract_invalid"],
+  ["automation_hub_mode_contract_invalid: future value", "needs_input", "hub_mode_contract_invalid"],
+  ["automation_hub_version_pin_unavailable: exact release unavailable", "blocked", "hub_version_pin_temporarily_unavailable"],
+  ["automation_hub_version_pin_invalid: latest", "blocked", "hub_version_pin_invalid"],
+  ["automation_ambiguous_side_effect: provider outcome unknown", "blocked", "ambiguous_side_effect"],
+  ["workforce_session_refresh_exhausted", "blocked", "workforce_session_unavailable"],
+]) {
+  const result = classifyAutomationOutput(text);
+  assert.equal(result.outcome, outcome, text);
+  assert.equal(result.reasonCode, code, text);
+}
+
 console.log("automation typed result contract ok");

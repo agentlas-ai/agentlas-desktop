@@ -793,12 +793,14 @@ const recoveryDownloadStep = recoverySteps.find((step) => step.name === "Downloa
 const recoveryApplyStep = recoverySteps.find((step) => step.name === "Apply and verify production desktop release metadata");
 assert.ok(recoveryDownloadStep, "web env recovery must download metadata from the already-published release");
 assert.ok(recoveryApplyStep, "web env recovery must apply and verify production metadata");
-assert.match(recoveryDownloadStep.run, /gh release download[\s\S]*desktop-release\.production\.env/);
+assert.match(recoveryDownloadStep.run, /gh release download[\s\S]*desktop-release-verification\.json/);
+assert.doesNotMatch(recoveryDownloadStep.run, /desktop-release\.production\.env/);
+assert.match(recoveryDownloadStep.run, /release:web-env[\s\S]*--verification-file=/);
 assert.deepEqual(Object.keys(recoveryApplyStep.env).sort(), ["RAILWAY_PROJECT_ID", "RAILWAY_TOKEN"]);
 assert.equal(downloadBarrierArtifactsStep.uses, "actions/download-artifact@v4");
 assert.equal(downloadBarrierArtifactsStep.with.pattern, "agentlas-release-*");
 assert.equal(downloadBarrierArtifactsStep.with["merge-multiple"], true);
-assert.match(localAssetVerificationStep.run, /npm run release:assets:verify[\s\S]*?--release-dir=release/);
+assert.match(localAssetVerificationStep.run, /npm run release:assets:verify[\s\S]*?--release-dir=release[\s\S]*?--public-allowlist/);
 assert.match(publicWriterStep.run, /npm run release:mac:publish/);
 assert.ok(
   signedSteps.indexOf(downloadBarrierArtifactsStep) < signedSteps.indexOf(localAssetVerificationStep) &&

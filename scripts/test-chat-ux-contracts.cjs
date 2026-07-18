@@ -28,6 +28,14 @@ assert.match(input, /key: "\/hep-storm"/,
 assert.equal((i18n.match(/"chatinput\.cmd\.hep_storm"/g) || []).length, 2,
   "the Stormbreaker slash route must be localized in Korean and English");
 
+const permissionTrigger = input.indexOf('data-popover-trigger="permission"');
+const modelTrigger = input.indexOf('data-popover-trigger="model"');
+const rightToolbar = input.indexOf('className="chat-input-tools-right"');
+assert.ok(permissionTrigger >= 0 && modelTrigger > permissionTrigger && rightToolbar > modelTrigger,
+  "the model setting must sit directly after permissions in the left toolbar group");
+assert.match(input, /<Popover title=\{t\("chatinput\.model"\)\} dataKind="model">/,
+  "the model menu must open from the left-side settings group");
+
 assert.match(stream, /setHasNewContent\(true\)/,
   "stream updates while scrolled up must mark new content");
 assert.match(stream, /className="agentlas-chat-latest-button"/,

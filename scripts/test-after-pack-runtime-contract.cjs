@@ -8,20 +8,74 @@ const path = require("node:path");
 const afterPack = require("../build-resources/after-pack-clean.cjs").default;
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-after-pack-runtime-"));
 const previousRef = process.env.HEPHAESTUS_REF;
-const modelPayloads = {
-  "embeddings.i8": Buffer.from([1, 2, 3, 4, 5, 6]),
-  "scales.f32le": Buffer.alloc(12, 7),
-  "tokenizer.json": Buffer.from('{"model":{"type":"WordPiece","vocab":{}}}\n'),
-  "LICENSE.model.txt": Buffer.from("MIT fixture\n"),
-};
+const canonicalModelRoot = path.join(
+  __dirname,
+  "..",
+  "Hephaestus",
+  "assets",
+  "model2vec",
+  "potion-multilingual-128M-int8",
+);
+const canonicalMacDriver = path.join(
+  __dirname,
+  "..",
+  "build-resources",
+  "native",
+  "macos",
+  "agentlas-input-driver",
+);
 
 function sha256(payload) {
   return createHash("sha256").update(payload).digest("hex");
 }
 
-function modelContentIdentity(files) {
+function writePythonRuntime(root, platform, triple = platform === "darwin" ? "x86_64-apple-darwin" : platform === "win32" ? "x86_64-pc-windows-msvc" : "x86_64-unknown-linux-gnu") {
+  const lock = {
+    "x86_64-apple-darwin": [
+      "cpython-3.12.13+20260510-x86_64-apple-darwin-install_only.tar.gz",
+      "cd369e76973c3179bc578230d8615ab621968ed758c5e32f636eecef4ad79894",
+    ],
+    "aarch64-apple-darwin": [
+      "cpython-3.12.13+20260510-aarch64-apple-darwin-install_only.tar.gz",
+      "5a30271f8d345a5b02b0c9e4e31e0f1e1455a8e4a04fba95cd9762472abc3b17",
+    ],
+    "x86_64-pc-windows-msvc": [
+      "cpython-3.12.13+20260510-x86_64-pc-windows-msvc-install_only.tar.gz",
+      "346dfbcb95171dd6d1275e6f8cb2e656cc15cb054c399ae54db57bfad4b1a60f",
+    ],
+    "x86_64-unknown-linux-gnu": [
+      "cpython-3.12.13+20260510-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "e7332b4b4bb85006deb48d251c786a04c14de104c9b3a006b33457a4a604b8bc",
+    ],
+  }[triple];
+  const executableRelativePath = platform === "win32" ? "python.exe" : "bin/python3";
+  const executable = Buffer.from(`private-python-fixture:${triple}\n`);
+  const executablePath = path.join(root, ...executableRelativePath.split("/"));
+  fs.mkdirSync(path.dirname(executablePath), { recursive: true });
+  fs.writeFileSync(executablePath, executable, { mode: 0o755 });
+  const executableSha256 = sha256(executable);
+  const tree = createHash("sha256")
+    .update("F\0").update(executableRelativePath).update("\0")
+    .update(String(executable.length)).update("\0").update(executableSha256).update("\n")
+    .digest("hex");
+  const manifest = {
+    schemaVersion: "agentlas.python-runtime.v1",
+    pythonVersion: "3.12.13",
+    releaseTag: "20260510",
+    triple,
+    archiveName: lock[0],
+    archiveSha256: lock[1],
+    executableRelativePath,
+    executableSha256,
+    runtimeTreeSha256: tree,
+  };
+  fs.writeFileSync(path.join(root, "agentlas-python-runtime.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  return { root, executablePath, manifestPath: path.join(root, "agentlas-python-runtime.json"), manifest };
+}
+
+function modelContentIdentity(files, names) {
   const digest = createHash("sha256");
-  for (const name of Object.keys(modelPayloads).sort()) {
+  for (const name of [...names].sort()) {
     const record = files[name];
     digest.update(name).update("\0").update(record.sha256).update("\0")
       .update(String(record.size)).update("\n");
@@ -30,20 +84,11 @@ function modelContentIdentity(files) {
 }
 
 function writeModelAsset(runtimeRoot) {
-  const modelRoot = path.join(runtimeRoot, "assets", "model2vec", "potion-base-8M-int8");
-  fs.mkdirSync(modelRoot, { recursive: true });
-  const files = {};
-  for (const [name, payload] of Object.entries(modelPayloads)) {
-    fs.writeFileSync(path.join(modelRoot, name), payload);
-    files[name] = { sha256: sha256(payload), size: payload.length };
-  }
-  fs.writeFileSync(path.join(modelRoot, "manifest.json"), `${JSON.stringify({
-    format: "agentlas-model2vec-int8-v1",
-    dimensions: 2,
-    vocabSize: 3,
-    files,
-    contentSha256: modelContentIdentity(files),
-  }, null, 2)}\n`);
+  const modelRoot = path.join(runtimeRoot, "assets", "model2vec", "potion-multilingual-128M-int8");
+  fs.cpSync(canonicalModelRoot, modelRoot, {
+    recursive: true,
+    mode: fs.constants.COPYFILE_FICLONE,
+  });
   return modelRoot;
 }
 
@@ -55,6 +100,8 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
     : path.join(appOutDir, "resources");
   const sourceRoot = path.join(projectDir, "Hephaestus");
   const packagedRoot = path.join(resourcesDir, "Hephaestus");
+  const sourcePython = writePythonRuntime(path.join(projectDir, "build-resources", "python-runtime"), platform);
+  const packagedPython = writePythonRuntime(path.join(resourcesDir, "python-runtime"), platform);
   fs.mkdirSync(path.join(sourceRoot, "agentlas_cloud"), { recursive: true });
   fs.mkdirSync(path.join(packagedRoot, "agentlas_cloud"), { recursive: true });
   fs.writeFileSync(path.join(sourceRoot, "manifest.json"), JSON.stringify({ version: "1.1.14" }));
@@ -62,6 +109,16 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
   fs.writeFileSync(path.join(packagedRoot, "agentlas_cloud", "__main__.py"), "# fixture\n");
   writeModelAsset(sourceRoot);
   const packagedModelRoot = writeModelAsset(packagedRoot);
+  if (platform === "darwin") {
+    const sourceDriver = path.join(projectDir, "build-resources", "native", "macos", "agentlas-input-driver");
+    const packagedDriver = path.join(resourcesDir, "native", "macos", "agentlas-input-driver");
+    fs.mkdirSync(path.dirname(sourceDriver), { recursive: true });
+    fs.mkdirSync(path.dirname(packagedDriver), { recursive: true });
+    fs.copyFileSync(canonicalMacDriver, sourceDriver, fs.constants.COPYFILE_FICLONE);
+    fs.copyFileSync(canonicalMacDriver, packagedDriver, fs.constants.COPYFILE_FICLONE);
+    fs.chmodSync(sourceDriver, 0o755);
+    fs.chmodSync(packagedDriver, 0o755);
+  }
   fs.mkdirSync(path.join(packagedRoot, ".agentlas"), { recursive: true });
   fs.writeFileSync(path.join(packagedRoot, ".agentlas", "routing-card.json"), "{}\n");
   fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({
@@ -69,10 +126,13 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
   }));
   return {
     appOutDir,
+    arch: 1,
     electronPlatformName: platform,
     packager: { projectDir, appInfo: { productFilename: "Agentlas" } },
     packagedModelRoot,
     packagedRoot,
+    sourcePython,
+    packagedPython,
   };
 }
 
@@ -82,6 +142,32 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
     for (const platform of ["darwin", "win32", "linux"]) {
       await afterPack(fixture(platform, platform));
     }
+
+    const missingPythonManifest = fixture("linux", "missing-python-manifest");
+    fs.rmSync(missingPythonManifest.packagedPython.manifestPath);
+    await assert.rejects(afterPack(missingPythonManifest), /python-runtime.*agentlas-python-runtime\.json|Python runtime manifest/i);
+
+    const wrongPythonArch = fixture("darwin", "wrong-python-arch");
+    const armManifest = writePythonRuntime(wrongPythonArch.sourcePython.root, "darwin", "aarch64-apple-darwin").manifest;
+    writePythonRuntime(wrongPythonArch.packagedPython.root, "darwin", "aarch64-apple-darwin");
+    assert.equal(armManifest.triple, "aarch64-apple-darwin");
+    await assert.rejects(afterPack(wrongPythonArch), /pinned platform asset/);
+
+    const tamperedPythonExecutable = fixture("linux", "tampered-python-executable");
+    fs.appendFileSync(tamperedPythonExecutable.packagedPython.executablePath, "tampered\n");
+    await assert.rejects(afterPack(tamperedPythonExecutable), /Python executable checksum mismatch/);
+
+    const tamperedPythonTree = fixture("linux", "tampered-python-tree");
+    fs.writeFileSync(path.join(tamperedPythonTree.packagedPython.root, "lib-extra.py"), "unexpected\n");
+    await assert.rejects(afterPack(tamperedPythonTree), /Python runtime tree checksum mismatch/);
+
+    const extendedPythonManifest = fixture("linux", "extended-python-manifest");
+    for (const runtime of [extendedPythonManifest.sourcePython, extendedPythonManifest.packagedPython]) {
+      const manifest = JSON.parse(fs.readFileSync(runtime.manifestPath, "utf8"));
+      manifest.unexpected = true;
+      fs.writeFileSync(runtime.manifestPath, `${JSON.stringify(manifest)}\n`);
+    }
+    await assert.rejects(afterPack(extendedPythonManifest), /manifest shape is invalid/);
 
     await assert.rejects(
       afterPack(fixture("linux", "bad-compat", "1.1.13")),
@@ -105,20 +191,20 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
     );
 
     const missingModel = fixture("linux", "missing-model");
-    fs.rmSync(path.join(missingModel.packagedModelRoot, "embeddings.i8"));
+    fs.rmSync(path.join(missingModel.packagedModelRoot, "embeddings.i8.part-000"));
     await assert.rejects(
       afterPack(missingModel),
-      /packaged Model2Vec asset missing: embeddings\.i8/,
+      /packaged Model2Vec asset missing: embeddings\.i8\.part-000/,
     );
 
     const tamperedPayload = fixture("linux", "tampered-model-payload");
-    const tamperedEmbeddingPath = path.join(tamperedPayload.packagedModelRoot, "embeddings.i8");
+    const tamperedEmbeddingPath = path.join(tamperedPayload.packagedModelRoot, "embeddings.i8.part-000");
     const tamperedEmbedding = fs.readFileSync(tamperedEmbeddingPath);
     tamperedEmbedding[0] ^= 0xff;
     fs.writeFileSync(tamperedEmbeddingPath, tamperedEmbedding);
     await assert.rejects(
       afterPack(tamperedPayload),
-      /packaged Model2Vec asset checksum mismatch: embeddings\.i8/,
+      /packaged Model2Vec asset checksum mismatch: embeddings\.i8\.part-000/,
     );
 
     const tamperedManifest = fixture("linux", "tampered-model-manifest");
@@ -138,22 +224,25 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
     fs.writeFileSync(tamperedMetadataPath, `${JSON.stringify(metadataManifest)}\n`);
     await assert.rejects(
       afterPack(tamperedMetadata),
-      /packaged Model2Vec manifest drift/,
+      /packaged Model2Vec split embedding shape mismatch/,
     );
 
     const repackedPayload = fixture("linux", "repacked-model-payload");
-    const repackedEmbeddingPath = path.join(repackedPayload.packagedModelRoot, "embeddings.i8");
+    const repackedEmbeddingPath = path.join(repackedPayload.packagedModelRoot, "embeddings.i8.part-000");
     const repackedEmbedding = fs.readFileSync(repackedEmbeddingPath);
     repackedEmbedding[0] ^= 0xff;
     fs.writeFileSync(repackedEmbeddingPath, repackedEmbedding);
     const repackedManifestPath = path.join(repackedPayload.packagedModelRoot, "manifest.json");
     const repackedManifest = JSON.parse(fs.readFileSync(repackedManifestPath, "utf8"));
-    repackedManifest.files["embeddings.i8"].sha256 = sha256(repackedEmbedding);
-    repackedManifest.contentSha256 = modelContentIdentity(repackedManifest.files);
+    repackedManifest.files["embeddings.i8.part-000"].sha256 = sha256(repackedEmbedding);
+    repackedManifest.contentSha256 = modelContentIdentity(
+      repackedManifest.files,
+      [...repackedManifest.embeddingParts, "scales.f32le", "tokenizer.json", "LICENSE.model.txt"],
+    );
     fs.writeFileSync(repackedManifestPath, `${JSON.stringify(repackedManifest, null, 2)}\n`);
     await assert.rejects(
       afterPack(repackedPayload),
-      /packaged Model2Vec content drift/,
+      /packaged Model2Vec ordered embedding part record mismatch/,
     );
     console.log(
       "test-after-pack-runtime-contract: PASS "

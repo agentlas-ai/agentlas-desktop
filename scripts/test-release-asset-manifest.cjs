@@ -4,6 +4,7 @@ const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 const yaml = require("js-yaml");
 
@@ -68,23 +69,86 @@ function sha512(value) {
         "",
       ].join("\n"),
     );
-    fs.writeFileSync(
-      path.join(releaseDir, "desktop-release-verification.json"),
-      JSON.stringify({ ready: true, version, tag, sourceCommit }),
-    );
-    fs.writeFileSync(
-      path.join(releaseDir, "desktop-release.production.env"),
-      [
-        "AGENTLAS_DESKTOP_VERSION=" + version,
-        "AGENTLAS_DESKTOP_RELEASE_TAG=" + tag,
-        "AGENTLAS_DESKTOP_RELEASE_VERIFIED=true",
-        "AGENTLAS_DESKTOP_RELEASE_NOTARIZED=true",
-        "",
-      ].join("\n"),
-    );
+    const macArtifact = (arch) => {
+      const fileName = `Agentlas-${version}-${arch}.dmg`;
+      const bytes = fs.readFileSync(path.join(releaseDir, fileName));
+      return {
+        arch,
+        fileName,
+        sizeBytes: bytes.length,
+        sha256: sha256(bytes),
+        sha512: sha512(bytes),
+        notarized: true,
+        gatekeeperAccepted: true,
+        innerApp: { notarized: true, gatekeeperAccepted: true },
+        url: `https://github.com/agentlas-ai/agentlas-desktop-releases/releases/download/${tag}/${fileName}`,
+      };
+    };
+    const releaseVerification = {
+      schemaVersion: "agentlas.desktop-release-verification.v2",
+      generatedAt: "2026-07-17T00:00:00.000Z",
+      ready: true,
+      allowUnnotarized: false,
+      version,
+      tag,
+      sourceCommit,
+      repo: "agentlas-ai/agentlas-desktop-releases",
+      artifacts: [macArtifact("arm64"), macArtifact("x64")],
+    };
+    const verificationPath = path.join(releaseDir, "desktop-release-verification.json");
+    fs.writeFileSync(verificationPath, JSON.stringify(releaseVerification));
 
+    const runWebEnvDry = (metadata, suffix, extra = []) => {
+      const file = path.join(releaseDir, `web-env-${suffix}.json`);
+      fs.writeFileSync(file, JSON.stringify(metadata));
+      return spawnSync(process.execPath, [
+        path.join(root, "scripts", "apply-web-release-env.mjs"),
+        `--verification-file=${file}`,
+        `--expected-version=${version}`,
+        `--expected-tag=${tag}`,
+        ...extra,
+      ], { cwd: root, encoding: "utf8" });
+    };
+    const webEnvDryRun = runWebEnvDry(releaseVerification, "valid");
+    assert.equal(webEnvDryRun.status, 0, webEnvDryRun.stderr);
+    assert.match(webEnvDryRun.stdout, new RegExp(`AGENTLAS_DESKTOP_VERSION=${version}`));
+    assert.match(webEnvDryRun.stdout, /AGENTLAS_DESKTOP_RELEASE_NOTARIZED=true/);
+    assert.equal(
+      fs.existsSync(path.join(releaseDir, "desktop-release.production.env")),
+      false,
+      "web metadata recovery must derive variables in memory without materializing a production env file",
+    );
+    for (const [label, metadata, extra, expectedError] of [
+      ["wrong-repo", {
+        ...releaseVerification,
+        repo: "attacker/releases",
+        artifacts: releaseVerification.artifacts.map((artifact) => ({
+          ...artifact,
+          url: `https://github.com/attacker/releases/releases/download/${tag}/${artifact.fileName}`,
+        })),
+      }, [], /expected release repository/],
+      ["wrong-version", releaseVerification, ["--expected-version=9.8.8"], /expected-version/],
+      ["not-ready", { ...releaseVerification, ready: false }, [], /does not prove an exact ready stable release/],
+      ["missing-arch", { ...releaseVerification, artifacts: [releaseVerification.artifacts[0]] }, [], /exactly one arm64 and one x64/],
+      ["unnotarized-inner", {
+        ...releaseVerification,
+        artifacts: [
+          { ...releaseVerification.artifacts[0], innerApp: { notarized: false, gatekeeperAccepted: true } },
+          releaseVerification.artifacts[1],
+        ],
+      }, [], /artifact contract failed/],
+    ]) {
+      const rejected = runWebEnvDry(metadata, label, extra);
+      assert.notEqual(rejected.status, 0, `${label} must fail closed`);
+      assert.match(rejected.stderr, expectedError, `${label} must report the exact rejected boundary`);
+    }
     const manifest = verifier.validateLocalReleaseDirectory({ releaseDir, version, tag, sourceCommit });
-    assert.equal(manifest.assets.length, 18);
+    assert.equal(manifest.assets.length, 17);
+    assert.equal(
+      manifest.assets.some((asset) => asset.name === "desktop-release.production.env"),
+      false,
+      "the public manifest must never contain the private production env handoff",
+    );
     assert.equal(manifest.sourceCommit, sourceCommit);
     assert.equal(
       manifest.assets.find((asset) => asset.name === "latest-mac.yml").sha256,
@@ -111,6 +175,28 @@ function sha512(value) {
       }),
       /exact release tag/,
     );
+    assert.throws(
+      () => verifier.assertRemoteReleaseHeader({
+        remote: {
+          ...remote,
+          assets: [...remote.assets, { name: "desktop-release.production.env" }],
+        },
+        manifest,
+      }),
+      /outside the explicit allowlist/,
+      "a stale private env asset must block public promotion even when all required assets exist",
+    );
+    assert.throws(
+      () => verifier.assertRemoteReleaseHeader({
+        remote: {
+          ...remote,
+          assets: [...remote.assets, { name: "test-workforce-regression.json" }],
+        },
+        manifest,
+      }),
+      /outside the explicit allowlist/,
+      "test and internal evidence assets must block public promotion",
+    );
     assert.doesNotThrow(() => verifier.compareRemoteAsset({
       expected: manifest.assets[0],
       actual: manifest.assets[0],
@@ -122,6 +208,41 @@ function sha512(value) {
       }),
       /Remote release bytes differ/,
     );
+
+    const publicVerificationRejections = [
+      ["absolute releaseDir", { ...releaseVerification, releaseDir: "/Users/build/private/release" }],
+      ["env file path", { ...releaseVerification, envFile: "/tmp/desktop-release.production.env" }],
+      ["command evidence", {
+        ...releaseVerification,
+        artifacts: [
+          { ...releaseVerification.artifacts[0], checks: { spctl: { output: "private command output" } } },
+          releaseVerification.artifacts[1],
+        ],
+      }],
+      ["signing internals", {
+        ...releaseVerification,
+        artifacts: [
+          {
+            ...releaseVerification.artifacts[0],
+            innerApp: { ...releaseVerification.artifacts[0].innerApp, developerId: "internal evidence" },
+          },
+          releaseVerification.artifacts[1],
+        ],
+      }],
+      ["absolute latest path", {
+        ...releaseVerification,
+        latestMac: { fileName: "/private/tmp/latest-mac.yml" },
+      }],
+    ];
+    for (const [label, rejectedVerification] of publicVerificationRejections) {
+      fs.writeFileSync(verificationPath, JSON.stringify(rejectedVerification));
+      assert.throws(
+        () => verifier.validateLocalReleaseDirectory({ releaseDir, version, tag, sourceCommit }),
+        /public v2 schema|public artifact shape/,
+        `${label} must not reach the public verification asset`,
+      );
+    }
+    fs.writeFileSync(verificationPath, JSON.stringify(releaseVerification));
 
     const validWindowsFeed = fs.readFileSync(path.join(releaseDir, "latest.yml"), "utf8");
     const tamperedWindowsFeed = yaml.load(validWindowsFeed);

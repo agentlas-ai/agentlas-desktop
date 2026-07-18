@@ -239,3 +239,9 @@ credentials/
 # Rebuilt from native/macos/AgentlasInputDriver.swift for each macOS package.
 /build-resources/native/macos/agentlas-input-driver
 /build-resources/native/macos/.build-*
+
+# Fetched CPython runtime (scripts/fetch-python-runtime.mjs writes the tree +
+# manifest deterministically from its pinned version). It is a build cache, not
+# source; only .gitkeep is tracked so the directory exists for the fetcher.
+/build-resources/python-runtime/*
+!/build-resources/python-runtime/.gitkeep

@@ -1574,10 +1574,7 @@ export function ChatInput({
               <IconChevronDown size={11} style={{ opacity: 0.6, flexShrink: 0 }} />
             </button>
 
-          </div>
-
-          <div className="chat-input-tools-right" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {/* 모델·작업량 칩 — 영상처럼 우측 정렬("Opus 4.8 · 엑스트라"). 지원 런타임만 */}
+            {/* 모델·작업량은 권한 바로 뒤에 둔다. 둘 다 이 작업의 실행 범위를 정하는 설정이다. */}
             {runtime &&
               ((modelOptions?.length ?? 0) > 0 || (runtime.efforts?.length ?? 0) > 0) && (
                 <button
@@ -1603,6 +1600,10 @@ export function ChatInput({
                   <IconChevronDown size={11} style={{ opacity: 0.6, flexShrink: 0 }} />
                 </button>
               )}
+
+          </div>
+
+          <div className="chat-input-tools-right" style={{ display: "flex", alignItems: "center", gap: 8 }}>
             {/* 컨텍스트 지표는 "Runtime" 상태표가 아니라 세션 전환/정리 진입점이다. */}
             {tokensUsage && (
               <div style={{ position: "relative", flexShrink: 0 }}>
@@ -2615,7 +2616,7 @@ function ModelMenu({
   const effortIcon = <IconRoute size={13} style={{ color: "var(--muted-deep)" }} />;
 
   return (
-    <Popover title={t("chatinput.model")} dataKind="model" align="right">
+    <Popover title={t("chatinput.model")} dataKind="model">
       {allowDefaultModel && (
         <Row
           onClick={() => onSelectModel("")}

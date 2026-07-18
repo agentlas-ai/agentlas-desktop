@@ -71,6 +71,7 @@ on:
       - "scripts/publish-mac-release.mjs"
       - "scripts/release-readiness.mjs"
       - "scripts/smoke-signed-mac-python-cache.cjs"
+      - "scripts/verify-packaged-workforce-runtime.cjs"
       - "scripts/stamp-update-feeds.mjs"
       - "scripts/fix-mac-latest-zip.mjs"
       - "scripts/verify-local-mac-candidate.mjs"
@@ -179,6 +180,7 @@ on:
       - "scripts/publish-mac-release.mjs"
       - "scripts/release-readiness.mjs"
       - "scripts/smoke-signed-mac-python-cache.cjs"
+      - "scripts/verify-packaged-workforce-runtime.cjs"
       - "scripts/stamp-update-feeds.mjs"
       - "scripts/fix-mac-latest-zip.mjs"
       - "scripts/verify-local-mac-candidate.mjs"
@@ -388,6 +390,7 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: |
           npm run build
+          npm run fetch:python
           npx --no-install electron-builder --dir --publish never --config.directories.output="${{ runner.temp }}/agentlas-package-smoke" -c.mac.identity=null -c.mac.notarize=false
           npm run test:packaged-agent-app-mcp -- "${{ runner.temp }}/agentlas-package-smoke"
       - name: Build and verify isolated macOS local-candidate Agent App MCP boundary
@@ -397,6 +400,7 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: |
+          npm run fetch:python
           npx --no-install electron-builder --dir --publish never --config electron-builder.mac-local.yml --config.directories.output="${{ runner.temp }}/agentlas-local-candidate-package-smoke" -c.mac.identity=null -c.mac.notarize=false
           node scripts/verify-local-mac-candidate.mjs --output="${{ runner.temp }}/agentlas-local-candidate-package-smoke"
           npm run test:packaged-agent-app-mcp -- "${{ runner.temp }}/agentlas-local-candidate-package-smoke"

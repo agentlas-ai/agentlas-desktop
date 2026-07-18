@@ -287,6 +287,8 @@ async function main() {
     assert.equal(request.env.MCP_RUNTIME_ENV_CANARY, undefined);
     assert.doesNotMatch(request.systemPrompt, /MCP_AUTO_SELECTION_PROMPT_CANARY/);
     assert.doesNotMatch(request.systemPrompt, /## Setting up automations/);
+    assert.doesNotMatch(request.turnContext ?? "", /MCP_AUTO_SELECTION_PROMPT_CANARY/);
+    assert.doesNotMatch(request.turnContext ?? "", /## Setting up automations/);
   }
 
   const write = await invoke(
@@ -299,7 +301,7 @@ async function main() {
   );
   assert.equal(write.runnerRequest.permission, "write");
   assert.match(write.runnerRequest.systemPrompt, /## Setting up automations/);
-  assert.match(write.runnerRequest.systemPrompt, /MCP_AUTO_SELECTION_PROMPT_CANARY/);
+  assert.match(write.runnerRequest.turnContext ?? "", /MCP_AUTO_SELECTION_PROMPT_CANARY/);
   assert.equal(write.runnerRequest.mcpConfigPath, path.join(temp, "fixture-mcp.json"));
   assert.deepEqual(write.runnerRequest.mcpAllowedTools, ["mcp__fixture"]);
   assert.equal(write.runnerRequest.env.MCP_RUNTIME_ENV_CANARY, "must-only-reach-write");
@@ -351,11 +353,11 @@ async function main() {
     assert.equal(request.env.MCP_RUNTIME_ENV_CANARY, undefined);
     assert.doesNotMatch(request.systemPrompt, /MCP_AUTO_SELECTION_PROMPT_CANARY/);
     assert.doesNotMatch(request.systemPrompt, /## Setting up automations/);
-    assert.match(request.systemPrompt, new RegExp(activatedMemorySentinel),
+    assert.match(request.turnContext ?? "", new RegExp(activatedMemorySentinel),
       "an ordinary Desktop read must recall an already activated project's memory");
     assert.match(request.systemPrompt, new RegExp(projectContextSentinel),
       "an ordinary Desktop project chat must retain its explicit context note");
-    assert.match(request.systemPrompt, new RegExp(projectExperienceSentinel),
+    assert.match(request.turnContext ?? "", new RegExp(projectExperienceSentinel),
       "an ordinary Desktop project chat must retain project-scoped Experience selection");
   }
   assert.deepEqual({
@@ -376,10 +378,13 @@ async function main() {
   assert.equal(siteStudioEvents.some((event) => event.kind === "error"), false);
   const siteStudioRequest = runnerRequests.at(-1);
   assert.doesNotMatch(siteStudioRequest.systemPrompt, new RegExp(activatedMemorySentinel));
+  assert.doesNotMatch(siteStudioRequest.turnContext ?? "", new RegExp(activatedMemorySentinel));
   assert.doesNotMatch(siteStudioRequest.systemPrompt, new RegExp(projectContextSentinel),
     "Site Studio must ignore a stale/tampered hidden-chat project context note");
+  assert.doesNotMatch(siteStudioRequest.turnContext ?? "", new RegExp(projectContextSentinel));
   assert.doesNotMatch(siteStudioRequest.systemPrompt, new RegExp(projectExperienceSentinel),
     "Site Studio must ignore project-scoped Experience even when the hidden chat row is tampered");
+  assert.doesNotMatch(siteStudioRequest.turnContext ?? "", new RegExp(projectExperienceSentinel));
   assert.deepEqual(
     {
       projectId: experienceContextInputs.at(-1)?.projectId ?? null,
@@ -406,6 +411,7 @@ async function main() {
   assert.equal(restrictedEvents.some((event) => event.kind === "error"), false);
   assert.doesNotMatch(runnerRequests.at(-1).systemPrompt, new RegExp(activatedMemorySentinel),
     "Mobile/automation restricted reads must not receive mutable local project memory");
+  assert.doesNotMatch(runnerRequests.at(-1).turnContext ?? "", new RegExp(activatedMemorySentinel));
   active.kind = "codex";
 
   console.log("Mobile read permission boundary: PASS");

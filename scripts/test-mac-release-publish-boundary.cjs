@@ -64,8 +64,13 @@ assert.match(
 );
 assert.match(
   publishMac,
-  /const files = requiredReleaseAssetNames\(version\)\.map\(\(name\) => requireFile\(join\(releaseDir, name\)\)\);/,
-  "the single writer must upload the exact full barrier contract, not a Mac-only subset",
+  /const publicFiles = publicReleaseAssetNames\(version\)\.map\(\(name\) => requireFile\(join\(releaseDir, name\)\)\);/,
+  "the single writer must upload only the exact explicit public barrier contract",
+);
+assert.doesNotMatch(
+  publishMac,
+  /"gh", \["release", "upload"[^\n]*desktop-release\.production\.env/,
+  "the public writer must never upload the private production env handoff",
 );
 assert.match(
   releaseAssetVerifier,
@@ -99,6 +104,7 @@ assert.doesNotMatch(
     assertStableReleaseIdentity,
     boundedMilliseconds,
     inspectReleaseState,
+    publicReleaseAssetNames,
     requiredReleaseAssetNames,
     waitForRequiredReleaseAssets,
   } = await import(moduleUrl);
@@ -118,7 +124,8 @@ assert.doesNotMatch(
     );
   }
   const required = requiredReleaseAssetNames(version);
-  assert.equal(required.length, 18, "stable promotion must require the full 18-file platform contract");
+  assert.equal(required.length, 17, "stable promotion must require the full 17-file public platform contract");
+  assert.deepEqual(publicReleaseAssetNames(version), required);
   assert.equal(new Set(required).size, required.length, "required release assets must be unique");
   const expectedRequiredAssets = [
     `Agentlas-${version}-Windows-x64-Setup.exe`,
@@ -138,9 +145,8 @@ assert.doesNotMatch(
     "latest-linux.yml",
     "latest-mac.yml",
     "desktop-release-verification.json",
-    "desktop-release.production.env",
   ];
-  assert.deepEqual(required, expectedRequiredAssets, "stable promotion must require exactly every Windows/Linux/Mac installer, updater feed, and evidence asset");
+  assert.deepEqual(required, expectedRequiredAssets, "stable promotion must require exactly every public Windows/Linux/Mac installer, updater feed, and verification asset");
 
   const stagedPartial = inspectReleaseState(version, {
     isDraft: false,
@@ -149,7 +155,7 @@ assert.doesNotMatch(
   });
   assert.equal(stagedPartial.isStable, false);
   assert.equal(stagedPartial.complete, false);
-  assert.deepEqual(stagedPartial.missingAssets, ["desktop-release.production.env"]);
+  assert.deepEqual(stagedPartial.missingAssets, ["desktop-release-verification.json"]);
 
   const stagedComplete = inspectReleaseState(version, {
     isDraft: false,
@@ -158,6 +164,14 @@ assert.doesNotMatch(
   });
   assert.equal(stagedComplete.complete, true);
   assert.equal(stagedComplete.isStable, false);
+
+  const stagedWithPrivateAsset = inspectReleaseState(version, {
+    isDraft: false,
+    isPrerelease: true,
+    assets: [...required, "desktop-release.production.env"].map((name) => ({ name })),
+  }, publicReleaseAssetNames(version));
+  assert.equal(stagedWithPrivateAsset.complete, false);
+  assert.deepEqual(stagedWithPrivateAsset.unexpectedAssets, ["desktop-release.production.env"]);
 
   const stablePartial = inspectReleaseState(version, {
     isDraft: false,
@@ -173,7 +187,7 @@ assert.doesNotMatch(
       sleep: async () => {},
       now: () => 0,
     }),
-    /Refusing partial stable release/,
+    /Refusing non-exact stable release/,
     "a partial stable release must fail immediately",
   );
 
