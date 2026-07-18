@@ -157,7 +157,13 @@ if (observedSha256 !== asset.sha256) {
 console.log(`[fetch-python] sha256 verified ${observedSha256}`);
 
 console.log("[fetch-python] extracting…");
-execFileSync("tar", ["-xzf", tarPath, "-C", tmp], { stdio: "inherit" });
+// Windows에서 PATH의 tar가 Git Bash GNU tar면 `C:\...`를 원격 호스트로 해석해
+// "Cannot connect to C:"로 죽는다. System32의 bsdtar는 Windows 경로를 그대로 안다.
+const systemTar = process.platform === "win32"
+  ? path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe")
+  : null;
+const tarBin = systemTar && existsSync(systemTar) ? systemTar : "tar";
+execFileSync(tarBin, ["-xzf", tarPath, "-C", tmp], { stdio: "inherit" });
 // 아카이브는 최상위 python/ 디렉터리를 가진다.
 const extractedPython = path.join(tmp, "python");
 if (!existsSync(extractedPython)) fail("추출물에 python/ 디렉터리가 없습니다.");
