@@ -3,25 +3,20 @@ import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { PawLogo } from "./PawLogo";
-import { 
-  IconChevronDown, IconApps, IconWand, IconSettings, IconBuilding, 
-  IconFileUp, IconStore, IconBolt, IconKey, IconLayers
+import {
+  IconChevronDown, IconWand, IconSettings, IconBuilding,
+  IconFileUp, IconStore, IconKey, IconLayers
 } from "./Icon";
 import { AccountChip } from "./AccountChip";
 import { useT } from "@/lib/i18n";
 
-type DropdownState = "agent_forge" | "studio" | "hub" | "environment" | null;
+type DropdownState = "agent_forge" | "hub" | "environment" | null;
 
 export function TopNavbar() {
   const pathname = usePathname() ?? "/";
   const { t } = useT();
   const [activeDropdown, setActiveDropdown] = useState<DropdownState>(null);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const studioActive =
-    pathname.startsWith("/apps") ||
-    pathname.startsWith("/automation") ||
-    pathname.startsWith("/oberon") ||
-    pathname.startsWith("/startup-founder-studio");
   const agentForgeActive =
     pathname.startsWith("/library/agents") ||
     pathname.startsWith("/library/agent-groups") ||
@@ -88,7 +83,7 @@ export function TopNavbar() {
               borderRadius: 12,
               boxShadow: "0 8px 30px rgba(0,0,0,0.12)",
               padding: 6,
-              minWidth: dropdown === "studio" || dropdown === "environment" ? 260 : 220,
+              minWidth: dropdown === "environment" ? 260 : 220,
               display: "flex", flexDirection: "column", gap: 2,
               animation: "slideDown 0.15s ease-out"
             }}
@@ -98,12 +93,6 @@ export function TopNavbar() {
               <DropdownLink href="/build" icon={<IconBuilding size={14} />} label={t("nav.build")} sub={t("nav.top.build_sub")} />
               <DropdownLink href="/library/agents" icon={<IconWand size={14} />} label={t("nav.agent")} sub={t("nav.top.agent_sub")} />
               <DropdownLink href="/library/agent-groups" icon={<IconLayers size={14} />} label={t("nav.agent_group")} sub={t("nav.top.agent_group_sub")} />
-            </>
-          )}
-          {dropdown === "studio" && (
-            <>
-              <DropdownLink href="/apps" icon={<IconApps size={14} />} label={t("nav.apps")} sub={t("nav.top.apps_sub")} />
-              <DropdownLink href="/automation" icon={<IconBolt size={14} />} label={t("nav.automations")} sub={t("nav.top.automations_sub")} />
             </>
           )}
           {dropdown === "hub" && (
@@ -151,7 +140,7 @@ export function TopNavbar() {
           <NavItem label={t("nav.dashboard")} href="/dashboard" active={pathname.startsWith("/dashboard")} />
           <NavItem label={t("nav.workspace")} href="/chat" active={pathname.startsWith("/chat") || pathname.startsWith("/project")} />
           <NavItem label={t("nav.group.agent_forge")} href="/build" dropdown="agent_forge" active={agentForgeActive} />
-          <NavItem label={t("nav.group.studio")} href="/apps" dropdown="studio" active={studioActive} />
+          <NavItem label={t("nav.site")} href="/site" active={pathname.startsWith("/site")} />
           <NavItem label={t("nav.group.hub")} href="/marketplace" dropdown="hub" active={pathname.startsWith("/marketplace") || pathname.startsWith("/cloud")} />
           <NavItem label={t("nav.group.environment")} href="/library/env" dropdown="environment" active={environmentActive} />
         </nav>

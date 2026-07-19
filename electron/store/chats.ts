@@ -10,6 +10,11 @@ import { evictRuntimeSessionsForChat } from "./runtime-sessions";
 import { touchProject } from "./projects";
 import type { Chat, ChatHistoryEntry, HiredAgentCard } from "../../shared/types";
 import { currentUiLocale } from "../ui-locale";
+import {
+  ensureCanonicalTaskForChat,
+  findCanonicalTaskForChat,
+  removeCanonicalTaskForOriginChat,
+} from "./tasks";
 
 interface ChatRow {
   id: string;
@@ -48,8 +53,13 @@ function parseHiredAgents(raw: string | null): HiredAgentCard[] {
 }
 
 function toChat(row: ChatRow): Chat {
+  // A general One conversation deliberately has no Task until execution
+  // signals promote it. Existing Work/Task chats are reconciled on read.
+  const existingTask = findCanonicalTaskForChat(row.id);
+  const task = existingTask ? ensureCanonicalTaskForChat(row.id) : null;
   return {
     id: row.id,
+    ...(task ? { taskId: task.id } : {}),
     projectId: row.project_id,
     firmId: row.firm_id,
     agentGroupId: row.agent_group_id,
@@ -134,6 +144,8 @@ export function createChat(input: {
   kind?: "user" | "division";
   /** 본부 세션 → 부모 firm 채팅 링크 */
   parentChatId?: string | null;
+  /** One general conversation stays Task-free until explicit promotion. */
+  taskMode?: "task" | "conversation";
 }): Chat {
   const ko = currentUiLocale() === "ko";
   let resolvedAgentId = input.agentId;
@@ -192,6 +204,7 @@ export function createChat(input: {
       now,
     );
   if (input.projectId) touchProject(input.projectId);
+  if (input.taskMode !== "conversation") ensureCanonicalTaskForChat(id);
   const chat = getChat(id) as Chat;
   emitDesktopStoreChange({ entity: "chat", id });
   return chat;
@@ -388,8 +401,12 @@ export function unarchiveChat(id: string): Chat {
 }
 
 export function removeChat(id: string): void {
+  const task = findCanonicalTaskForChat(id);
   const result = getDb().prepare("DELETE FROM chats WHERE id = ?").run(id);
-  if (result.changes > 0) emitDesktopStoreChange({ entity: "chat", id });
+  if (result.changes > 0) {
+    if (task?.originChatId === id) removeCanonicalTaskForOriginChat(id);
+    emitDesktopStoreChange({ entity: "chat", id });
+  }
 }
 
 /** 자동화 삭제 시 연결된 숨김 실행 세션도 같이 삭제한다.
@@ -543,6 +560,11 @@ export function clearChatContext(chatId: string): void {
   emitDesktopStoreChange({ entity: "chat", id: chatId });
 }
 
+function autoTitleValue(message: string): string {
+  const condensed = message.replace(/\s+/g, " ").trim();
+  return condensed.length > 36 ? condensed.slice(0, 34) + "…" : condensed;
+}
+
 export function autoTitleFromFirstMessage(chatId: string, firstMessage: string): void {
   const chat = getChat(chatId);
   if (!chat) return;
@@ -550,7 +572,27 @@ export function autoTitleFromFirstMessage(chatId: string, firstMessage: string):
   // 빈 문자열은 "untitled" 상태 — locale별 placeholder가 UI에서만 보임.
   // 과거 빌드(v6 이전)에서 "새 채팅"으로 저장된 행도 함께 처리.
   if (chat.title.length > 0 && chat.title !== "새 채팅" && chat.title !== "New chat") return;
-  const condensed = firstMessage.replace(/\s+/g, " ").trim();
-  const truncated = condensed.length > 36 ? condensed.slice(0, 34) + "…" : condensed;
+  const truncated = autoTitleValue(firstMessage);
   if (truncated) renameChat(chatId, truncated);
+}
+
+/**
+ * When a general One conversation becomes executable work, replace only the
+ * title that was mechanically derived from its first user turn. A title the
+ * user renamed themselves is never touched.
+ */
+export function retitleAutoTitledChatForTask(chatId: string, taskPrompt: string): Chat | null {
+  const chat = getChat(chatId);
+  if (!chat) return null;
+  const firstUser = getDb()
+    .prepare("SELECT text FROM chat_messages WHERE chat_id = ? AND role = 'user' ORDER BY created_at ASC LIMIT 1")
+    .get(chatId) as { text: string } | undefined;
+  const inheritedAutoTitle = firstUser ? autoTitleValue(firstUser.text) : "";
+  const isAutomatic = chat.title === inheritedAutoTitle
+    || chat.title === ""
+    || chat.title === "새 채팅"
+    || chat.title === "New chat";
+  if (!isAutomatic) return chat;
+  const taskTitle = autoTitleValue(taskPrompt.replace(/^\s*(?:\/?workforce\b|\/?hep-network\b)(?:\s+--(?:benchmark|legacy))?\s*/i, ""));
+  return taskTitle ? renameChat(chatId, taskTitle) : chat;
 }

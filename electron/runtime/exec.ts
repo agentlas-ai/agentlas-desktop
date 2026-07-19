@@ -15,10 +15,9 @@ import type { ChildProcess, SpawnOptions } from "node:child_process";
  * 패키지된 GUI 앱(Finder/Dock 실행)은 로그인 셸의 PATH를 상속받지 못해 PATH가
  * 최소(`/usr/bin:/bin:/usr/sbin:/sbin`)다. 그 결과 (1) bare 커맨드(claude/codex/gemini)
  * 감지가 실패하고, (2) node 기반 CLI(codex.js/gemini.js)가 셰뱅의 `env node`로 node를
- * 못 찾아 죽는다. 흔한 CLI/런타임 bin 디렉터리를 PATH 뒤에 덧붙여 둘 다 해결한다.
- * 기존 로그인 셸 PATH 항목이 우선순위를 유지하도록 append(prepend 아님). 다만 Finder/Dock의
- * 최소 PATH에 없는 보충 후보끼리는 사용자 standalone(~/.local/bin)을 Homebrew/npm보다 먼저
- * 둬, 이미 최신 standalone이 있는데 오래된 전역 npm 심을 집는 일을 막는다.
+ * 못 찾아 죽는다. 흔한 CLI/런타임 bin 디렉터리를 보강해 둘 다 해결한다. Agentlas가 직접
+ * 설치하고 검증한 prefix만 기존 PATH보다 먼저 두고, 그 밖의 사용자/시스템 후보는 원래
+ * PATH 우선순위를 유지한다.
  */
 function cliSearchDirs(): string[] {
   if (process.platform === "win32") {
@@ -46,17 +45,35 @@ function cliSearchDirs(): string[] {
   ];
 }
 
-/** base 환경의 PATH 뒤에 흔한 CLI/node bin 디렉터리를 덧붙인 새 env 반환. */
+function managedCliDir(): string {
+  return process.platform === "win32"
+    ? path.join(os.homedir(), ".agentlas", "npm")
+    : path.join(os.homedir(), ".agentlas", "npm", "bin");
+}
+
+function preferredManagedCliDir(): string | null {
+  const managed = managedCliDir();
+  // Preview builds briefly stored a generic node.cmd beside provider shims.
+  // Never put that directory before a project's PATH until Connect migrates it
+  // to the isolated npm-bootstrap directory and direct provider launchers.
+  if (process.platform === "win32" && fs.existsSync(path.join(managed, "node.cmd"))) return null;
+  return managed;
+}
+
+/** Agentlas 관리 CLI를 우선하고 그 뒤에 기존 PATH와 보충 경로를 둔 새 env 반환. */
 export function withCliPath(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const sep = path.delimiter;
   // Windows는 환경변수 키가 대소문자 무관 — 실제 키 이름을 찾아 그대로 갱신한다.
   const pathKey =
     Object.keys(base).find((k) => k.toLowerCase() === "path") ?? "PATH";
   const existing = (base[pathKey] ?? "").split(sep).filter(Boolean);
-  const have = new Set(existing);
-  const extras = cliSearchDirs().filter((d) => d && !have.has(d));
-  if (extras.length === 0) return base;
-  return { ...base, [pathKey]: [...existing, ...extras].join(sep) };
+  const managed = preferredManagedCliDir();
+  const merged = Array.from(new Set([
+    ...(managed ? [managed] : []),
+    ...existing.filter((entry) => entry !== managed),
+    ...cliSearchDirs(),
+  ].filter(Boolean)));
+  return { ...base, [pathKey]: merged.join(sep) };
 }
 
 /** child_process.spawn 대체 — Windows `.cmd`/`.bat` 심 해석 + GUI용 PATH 보강. */

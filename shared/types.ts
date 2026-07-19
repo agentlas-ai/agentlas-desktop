@@ -6,6 +6,405 @@ import type {
   MultimodalSettings,
 } from "./multimodal";
 import type { OberonTitleSpec } from "./oberon-titles";
+import type { OneSurfaceManifestV1 } from "./one-surface";
+import type { DurableOneSurfaceResult } from "./one-surface-durable";
+import type {
+  OneOperatingPrincipleCreateInput,
+  OneOperatingPrincipleDeleteInput,
+  OneOperatingPrincipleEnabledInput,
+  OneOperatingPrincipleUpdateInput,
+  OneProfile,
+  OneProfileUpdateInput,
+} from "./one-profile";
+import type {
+  AcknowledgeOneFeatureIntroInput,
+  DeferOneFeatureIntroInput,
+  OneFeatureIntroState,
+} from "./one-feature-intro";
+import type {
+  GetOneActivationStateInput,
+  OneActivationState,
+  ResolveOneActivationConcernInput,
+  ResolveOneActivationMobileInput,
+  ResolveOneActivationWorkInput,
+  SkipOneActivationInput,
+} from "./one-activation";
+import type {
+  OneBriefingActionPacket,
+  OneBriefingActionRef,
+  OneBriefingActionStartResult,
+  OneBriefingChannel,
+  OneBriefingFeedback,
+  OneBriefingPreferences,
+  OneBriefingSnapshot,
+  OpenOneBriefingTaskInput,
+  OpenOneBriefingTaskResult,
+  PrepareOneBriefingActionInput,
+  StartOneBriefingActionInput,
+} from "./one-briefing";
+import type {
+  ConnectOneProjectDeadlineInput,
+  OneProjectDeadlineState,
+  RemoveOneProjectDeadlineInput,
+} from "./one-project-deadline";
+import type {
+  AutoResolveOneTeamPreflightInput,
+  OneTeamPreflightProposal,
+  OneTeamPreflightRef,
+  PrepareOneTeamPreflightInput,
+  PrepareOneTeamPreflightResult,
+  ResolveOneTeamPreflightInput,
+  ResolveOneTeamPreflightResult,
+} from "./one-team-preflight";
+import type {
+  BindOneAttachmentsToTeamInput,
+  DiscardOneAttachmentsInput,
+  OneAttachmentRef,
+  PrepareOneAttachmentsInput,
+  PreparedOneAttachments,
+} from "./one-attachments";
+import type { OneRecurrenceSelectionV1 } from "./one-recurrence";
+import type {
+  OneArtifactBindingRequestV1,
+  OneArtifactOpenResultV1,
+  OneArtifactPreviewCapabilityV1,
+  OneArtifactPreviewRevokeV1,
+} from "./one-artifacts";
+import type {
+  DeleteOneMemoryAssetInput,
+  DeleteOneMemoryCandidateInput,
+  EditAndSaveOneMemoryCandidateInput,
+  OneMemoryAsset,
+  OneMemoryCandidate,
+  OneMemoryMutationResult,
+  OneMemorySavedResult,
+  OneMemoryState,
+  OneMemoryUseOnceRef,
+  OneMemoryUseOnceReceipt,
+  OneMemoryUseOnceTarget,
+  ProposeOneMemoryCandidateInput,
+  RejectOneMemoryCandidateInput,
+  SaveOneMemoryCandidateInput,
+  SetOneMemoryAssetEnabledInput,
+  UpdateOneMemoryAssetInput,
+  UseOneMemoryCandidateOnceInput,
+} from "./one-memory";
+import type {
+  AcceptOneSuggestionForReviewInput,
+  DismissOneSuggestionInput,
+  NeverAskOneSuggestionInput,
+  OneEcosystemSuggestion,
+  OneSuggestionReviewHandoff,
+  OneSuggestionReviewHandoffInput,
+  OneSuggestionMutationResult,
+  OneSuggestionReviewRequest,
+  OneSuggestionState,
+  SnoozeOneSuggestionInput,
+} from "./one-suggestions";
+import type { OneSuggestionReviewSeed } from "./one-review-seed";
+import type {
+  GetOneHubDerivativeDraftInput,
+  OneHubDerivativeDraft,
+} from "./one-hub-derivative";
+import type {
+  OneValueClosureMutationResult,
+  OneValueClosureRecord,
+  OneValueClosureState,
+  SetOneValueClosureReflectionInput,
+} from "./one-value-closure";
+import type {
+  OneWeeklyReflectionSnapshotV1,
+  ResolveOneWeeklyReflectionInputV1,
+} from "./one-weekly-reflection";
+import type {
+  OneImprovementProofRecord,
+  OneImprovementProofReadState,
+} from "./one-improvement-proof";
+import type {
+  OneExperienceReuseRecord,
+  OneExperienceReuseState,
+} from "./one-experience-reuse";
+import type {
+  AgentlasOneTaskProjectionV1,
+  OneTaskProjectionListRequest,
+  OneTaskProjectionRequest,
+} from "./one-task-projection";
+import type {
+  OneSearchPageV1,
+  OneSearchRequestV1,
+  OneTaskArchiveMutationInputV1,
+  OneTaskArchiveMutationResultV1,
+} from "./one-search";
+export type {
+  OneOperatingPrinciple,
+  OneOperatingPrincipleCreateInput,
+  OneOperatingPrincipleDeleteInput,
+  OneOperatingPrincipleEnabledInput,
+  OneOperatingPrincipleScope,
+  OneOperatingPrincipleUpdateInput,
+  OneProfile,
+  OneProfileDeviceProjection,
+  OneProfileLocale,
+  OneProfileUpdateInput,
+} from "./one-profile";
+export type {
+  GetOneHubDerivativeDraftInput,
+  OneHubDerivativeDraft,
+  OneHubDerivativeExcludedSummary,
+  OneHubDerivativeExclusionCategory,
+  OneHubDerivativeIncludedFile,
+  OneHubDerivativeState,
+  OneHubDerivativeUnknownGate,
+} from "./one-hub-derivative";
+export type {
+  AcknowledgeOneFeatureIntroInput,
+  DeferOneFeatureIntroInput,
+  OneFeatureIntroAcknowledgement,
+  OneFeatureIntroBlockingStateCategory,
+  OneFeatureIntroDeferral,
+  OneFeatureIntroResolution,
+  OneFeatureIntroState,
+} from "./one-feature-intro";
+export type {
+  GetOneActivationStateInput,
+  OneActivationConcernStep,
+  OneActivationEligibility,
+  OneActivationFirstValueStep,
+  OneActivationMobileResolution,
+  OneActivationMobileStep,
+  OneActivationRoute,
+  OneActivationState,
+  OneActivationStatus,
+  OneActivationWorkNavigationStep,
+  ResolveOneActivationConcernInput,
+  ResolveOneActivationMobileInput,
+  ResolveOneActivationWorkInput,
+  SkipOneActivationInput,
+} from "./one-activation";
+export type {
+  OneRecurrenceCadence,
+  OneRecurrenceIntentKind,
+  OneRecurrenceSelectionV1,
+} from "./one-recurrence";
+export type {
+  OneArtifactBindingRequestV1,
+  OneArtifactOpenResultV1,
+  OneArtifactPreviewCapabilityV1,
+  OneArtifactPreviewRevokeV1,
+} from "./one-artifacts";
+export type {
+  OneBriefingActionFailureCategory,
+  OneBriefingActionPacket,
+  OneBriefingActionPacketStatus,
+  OneBriefingActionRef,
+  OneBriefingActionStartResult,
+  OneBriefingCadence,
+  OneBriefingChannel,
+  OneBriefingConfidence,
+  OneBriefingEvidence,
+  OneBriefingFeedback,
+  OneBriefingFreshness,
+  OneBriefingKind,
+  OneBriefingPreferences,
+  OneBriefingPreparedAction,
+  OneBriefingReasonCode,
+  OneBriefingSnapshot,
+  OpenOneBriefingTaskInput,
+  OpenOneBriefingTaskResult,
+  OneProactiveBriefing,
+  PrepareOneBriefingActionInput,
+  StartOneBriefingActionInput,
+} from "./one-briefing";
+export type {
+  ConnectOneProjectDeadlineInput,
+  OneProjectDeadlineCheck,
+  OneProjectDeadlineLeadMinutes,
+  OneProjectDeadlineState,
+  RemoveOneProjectDeadlineInput,
+} from "./one-project-deadline";
+export type {
+  AutoResolveOneTeamPreflightInput,
+  OneTeamPreflightComplexityReason,
+  OneTeamPreflightInputScope,
+  OneTeamPreflightPermission,
+  OneTeamPreflightPermissionScope,
+  OneTeamPreflightProposal,
+  OneTeamPreflightRef,
+  OneTeamPreflightResolution,
+  OneTeamPreflightRole,
+  OneTeamPreflightStatus,
+  PrepareOneTeamPreflightInput,
+  PrepareOneTeamPreflightResult,
+  ResolveOneTeamPreflightInput,
+  ResolveOneTeamPreflightResult,
+} from "./one-team-preflight";
+export type {
+  DeleteOneMemoryAssetInput,
+  DeleteOneMemoryCandidateInput,
+  EditAndSaveOneMemoryCandidateInput,
+  OneMemoryAsset,
+  OneMemoryCandidate,
+  OneMemoryCandidateResolution,
+  OneMemoryCandidateSource,
+  OneMemoryCandidateStatus,
+  OneMemoryInvocationScope,
+  OneMemoryMutationResult,
+  OneMemoryProposalBasis,
+  OneMemorySavedResult,
+  OneMemoryScope,
+  OneMemoryState,
+  OneMemoryUseOnceRef,
+  OneMemoryUseOnceReceipt,
+  OneMemoryUseOnceTarget,
+  ProposeOneMemoryCandidateInput,
+  RejectOneMemoryCandidateInput,
+  SaveOneMemoryCandidateInput,
+  SetOneMemoryAssetEnabledInput,
+  UpdateOneMemoryAssetInput,
+  UseOneMemoryCandidateOnceInput,
+} from "./one-memory";
+export type {
+  AcceptOneSuggestionForReviewInput,
+  ArbitrateOneSuggestionInput,
+  DismissOneSuggestionInput,
+  MarkOneSuggestionIgnoredInput,
+  NeverAskOneSuggestionInput,
+  OneAgentBuildProposal,
+  OneAgentBuildSignal,
+  OneAutomationPermissionPreview,
+  OneAutomationPreview,
+  OneAutomationProposal,
+  OneAutomationSignal,
+  OneEcosystemSuggestion,
+  OneHubDerivativeProposal,
+  OneHubDerivativeSignal,
+  OneHubEconomyAvailability,
+  OneHubPrivateExclusion,
+  OneRetainTeamProposal,
+  OneRetainTeamSignal,
+  OneSuggestionArbitrationReason,
+  OneSuggestionArbitrationResult,
+  OneSuggestionCandidateSignals,
+  OneSuggestionMutationResult,
+  OneSuggestionPatternFeedback,
+  OneSuggestionProposal,
+  OneSuggestionReviewHandoff,
+  OneSuggestionReviewHandoffInput,
+  OneSuggestionReviewSurface,
+  OneSuggestionReviewKind,
+  OneSuggestionReviewRequest,
+  OneSuggestionState,
+  OneSuggestionStatus,
+  OneSuggestionSuppression,
+  OneSuggestionSuppressionMode,
+  OneSuggestionTaskArbitration,
+  OneSuggestionTaskEvidence,
+  OneSuggestionType,
+  SnoozeOneSuggestionInput,
+} from "./one-suggestions";
+export type {
+  OneAgentBuildReviewSeed,
+  OneAutomationReviewSeed,
+  OneBlockedReviewSeed,
+  OneHubDerivativeReviewSeed,
+  OneRetainTeamReviewSeed,
+  OneReviewInstalledAgentRef,
+  OneReviewSeedBinding,
+  OneReviewSeedBlockedReason,
+  OneReviewSeedSurface,
+  OneSuggestionReviewSeed,
+} from "./one-review-seed";
+export type {
+  CreateOneValueClosureInput,
+  OneOriginalPreservationStatus,
+  OneTrustedOutcomeEvidence,
+  OneTrustedOutcomeEvidenceKind,
+  OneTrustedOutcomeEvidenceSource,
+  OneValueClosureEstimate,
+  OneValueClosureEstimateItem,
+  OneValueClosureFactItem,
+  OneValueClosureLifecycleClaim,
+  OneValueClosureMutationResult,
+  OneValueClosureOriginalPreservation,
+  OneValueClosureOutcomeStatus,
+  OneValueClosurePhase,
+  OneValueClosurePhaseStatus,
+  OneValueClosureRecord,
+  OneValueClosureReflection,
+  OneValueClosureRemainingOwner,
+  OneValueClosureRemainingStatus,
+  OneValueClosureRemainingWork,
+  OneValueClosureState,
+  OneValueClosureV1,
+  OneValueClosureValueItem,
+  SetOneValueClosureReflectionInput,
+} from "./one-value-closure";
+export type {
+  OneWeeklyReflectionEstimateV1,
+  OneWeeklyReflectionFactV1,
+  OneWeeklyReflectionOutcomeV1,
+  OneWeeklyReflectionPreservationV1,
+  OneWeeklyReflectionRemainingWorkV1,
+  OneWeeklyReflectionSnapshotV1,
+  OneWeeklyReflectionStatus,
+  OneWeeklyReflectionTimeZoneSource,
+  OneWeeklyReflectionV1,
+  ResolveOneWeeklyReflectionInputV1,
+} from "./one-weekly-reflection";
+export type {
+  OneImprovementAssetBinding,
+  OneImprovementAssetControl,
+  OneImprovementAssetType,
+  OneImprovementAssetVersionRef,
+  OneImprovementBaselineTaskRef,
+  OneImprovementChangeKind,
+  OneImprovementChangeV1,
+  OneImprovementComparisonDirection,
+  OneImprovementComparisonRecord,
+  OneImprovementEstimateChangeV1,
+  OneImprovementEstimateV1,
+  OneImprovementEvidenceType,
+  OneImprovementMeasuredChangeV1,
+  OneImprovementProofRecord,
+  OneImprovementProofReadState,
+  OneImprovementProofState,
+  OneImprovementProofV1,
+  OneImprovementQualitativeChangeV1,
+  OneImprovementResult,
+  OneImprovementReusedAssetV1,
+  OneImprovementRuntimeAssetKind,
+} from "./one-improvement-proof";
+export type {
+  OneExperienceReuseAssetBinding,
+  OneExperienceReuseReceiptV1,
+  OneExperienceReuseRecord,
+  OneExperienceReuseScope,
+  OneExperienceReuseState,
+} from "./one-experience-reuse";
+export type {
+  AgentlasOneTaskProjectionV1,
+  OneTaskProjectionActionIntent,
+  OneTaskProjectionConnection,
+  OneTaskProjectionListRequest,
+  OneTaskProjectionMode,
+  OneTaskProjectionMutationMode,
+  OneTaskProjectionPendingIntent,
+  OneTaskProjectionPendingOperation,
+  OneTaskProjectionRequest,
+  OneTaskProjectionSemanticAction,
+  OneTaskProjectionStatusSource,
+  OneTaskProjectionStatusValue,
+  OneTaskProjectionSurface,
+} from "./one-task-projection";
+export type {
+  OneSearchHitKind,
+  OneSearchHitV1,
+  OneSearchMatchKind,
+  OneSearchPageV1,
+  OneSearchRequestV1,
+  OneTaskArchiveMutationInputV1,
+  OneTaskArchiveMutationResultV1,
+} from "./one-search";
 import type {
   SiteAgentAppPublishBackendRequest,
   SiteAgentAppPublishBackendResult,
@@ -747,6 +1146,8 @@ export interface OntologyProjectStatus {
 
 export interface Chat {
   id: string;
+  /** One/Work/Mobile이 함께 여는 durable Task. 구버전 row에는 없을 수 있다. */
+  taskId?: string;
   /** 프로젝트 소속이면 그 id, 아니면 null */
   projectId: string | null;
   /** 회사 채팅이면 firm id, 아니면 null. firmId가 있으면 agentId = firm.ceoAgentId */
@@ -772,6 +1173,51 @@ export interface Chat {
   /** 이 채팅에 고용(빌림)된 허브 에이전트 카드 — 메타데이터만(패키지 내용 없음, 복사 방지).
    *  있으면 매 send에 borrowAgents로 자동 재주입된다. 해고(clear) 전까지 유지. */
   hiredAgents: HiredAgentCard[];
+}
+
+export type CanonicalTaskStatus =
+  | "open"
+  | "running"
+  | "waiting-decision"
+  | "partial"
+  | "completed"
+  | "failed"
+  | "archived";
+
+export interface CanonicalTaskParticipant {
+  taskId: string;
+  agentId: string | null;
+  agentSlug: string;
+  role: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+export interface CanonicalTask {
+  id: string;
+  /** Monotonic-enough canonical projection version derived from authoritative updatedAt. */
+  version: number;
+  title: string;
+  projectId: string | null;
+  firmId: string | null;
+  status: CanonicalTaskStatus;
+  originChatId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+  participants: CanonicalTaskParticipant[];
+}
+
+export interface CanonicalTaskResultAcceptance {
+  taskId: string;
+  expectedVersion: number;
+  expectedRunId: string;
+}
+
+export interface CanonicalTaskResultContinuation {
+  taskId: string;
+  expectedVersion: number;
+  userPrompt: string;
 }
 
 /** 고용(빌림) 카드 — 허브 에이전트의 로컬 표시용 메타데이터. 시스템 프롬프트/플레이북 등
@@ -2784,6 +3230,26 @@ export interface McpInvocationRequest {
   /** 새 모델: chatId 기반. 에이전트는 chat에서 lookup */
   chatId: string;
   userPrompt: string;
+  /** One may begin as general conversation and promote only on real work signals. */
+  taskIntent?: "task" | "conversation";
+  /** Renderer signal selecting the One product surface. Main derives all approved context itself. */
+  oneMode?: boolean;
+  /** Opaque, Main-issued one-time Memory capability. Main consumes it only after durable start acceptance. */
+  oneMemoryUseOnceRef?: OneMemoryUseOnceRef;
+  /** Main-only Briefing review capability. Renderer IPC always strips this field. */
+  oneBriefingActionRef?: OneBriefingActionRef;
+  /** Opaque Main-issued adaptive-team reservation. Candidate, cost, permission, and prompt remain in Main. */
+  oneTeamPreflightRef?: OneTeamPreflightRef;
+  /** Opaque, process-local, single-use Desktop One attachment capability. */
+  oneAttachmentRef?: OneAttachmentRef;
+  /**
+   * Explicit closed recurrence controls for proposal evidence only. Main
+   * validates and removes this value before dispatch; it never becomes prompt
+   * context and cannot create, enable, save, or run an automation.
+   */
+  oneRecurrenceSelection?: OneRecurrenceSelectionV1;
+  /** Main-only approved One Profile/Memory context. Renderer IPC always strips this field. */
+  oneProfileContext?: string;
   /** Main-only Site Agent App invocation. Pins the selected target and disables router/automation expansion. */
   agentAppMode?: boolean;
   /**
@@ -2891,6 +3357,8 @@ export interface McpInvocationEvent {
   /** Agent OS surface manifest, emitted when an agent produces a safe interactive surface. */
   surfaceId?: string;
   surface?: AgentlasSurfaceManifest;
+  /** Main-authoritative, non-executable semantic projection consumed unchanged by One and Mobile. */
+  oneSurface?: OneSurfaceManifestV1;
   /** 도구 호출/결과 이벤트 — Claude Code식 접기/펴기 블록용 (이름 + 인자 JSON + 결과) */
   tool?: { name: string; args?: string; result?: string; id?: string; isError?: boolean };
   /** 생성 토큰 수 — final에 동봉. kind:"usage"면 실행 중 라이브 누적치(단조 증가, 추정 포함). */
@@ -3118,6 +3586,8 @@ export interface PendingConfirmation {
   firmId: string | null;
   /** 질문 메시지 시각(ISO) */
   createdAt: string;
+  /** One에서 사용자가 미룬 시각. 질문은 Work의 정본 승인 목록에서는 계속 pending이다. */
+  snoozedUntil?: string;
 }
 
 /** 질문 답변 확정 영수증 — 답변 제출이 수락된 순간 append-only 원장(run_events)에
@@ -4511,6 +4981,9 @@ export interface AgentlasIpc {
     /** 답변 제출 수락을 durable 영수증으로 확정 — 실행 분기와 무관하게 질문을 해소한다. */
     commitAnswer: (input: { chatId: string; reply: string }) =>
       Promise<{ chatId: string; sourceMessageId: string }>;
+    /** 정확한 현재 Decision만 24시간 미룬다. 실행·승인 상태는 바꾸지 않는다. */
+    snooze: (input: { chatId: string; sourceMessageId: string; resumeAt: string }) =>
+      Promise<{ chatId: string; sourceMessageId: string; snoozedUntil: string }>;
     committedAnswers: (chatId: string) => Promise<CommittedQuestionAnswer[]>;
   };
   /** 앱 주의 표시 — Dock/taskbar badge와 네이티브 알림을 갱신한다. */
@@ -4533,7 +5006,7 @@ export interface AgentlasIpc {
   runtime: {
     detect: (force?: boolean) => Promise<RuntimeStatus[]>;
     setActive: (selection: RuntimeSelection) => Promise<RuntimeStatus[]>;
-    /** CLI 미설치 사용자용 — 고정 명령으로 `npm i -g <pkg>` 실행. 성공 후 detect()로 재인식. */
+    /** CLI 미설치 사용자용 — Windows는 앱에 동봉한 검증된 Node/npm으로 무관리자 설치. */
     installCli: (
       kind: "claude-code" | "codex" | "gemini" | "grok",
     ) => Promise<{ ok: boolean; message: string; command?: string }>;
@@ -4797,6 +5270,8 @@ export interface AgentlasIpc {
       title?: string;
       /** 새 컨텍스트지만 기존 채팅의 main-owned 작업 폴더를 이어받는다. */
       continueFromChatId?: string | null;
+      /** Keep a One general conversation Task-free until runtime promotion. */
+      taskMode?: "task" | "conversation";
     }) => Promise<Chat>;
     rename: (id: string, title: string) => Promise<Chat>;
     /** 채팅의 에이전트 변경. firm 채팅이면 firm 해제 후 개별 에이전트 모드로 전환 */
@@ -4818,6 +5293,152 @@ export interface AgentlasIpc {
     recap: (id: string) => Promise<{ summary: string; count: number; sinceIso: string } | null>;
     /** 이 채팅을 방금 봤다고 기록(recap 기준점 갱신). */
     markViewed: (id: string) => Promise<void>;
+  };
+  /** One/Work/Mobile의 공통 정본. Chat은 이 Task의 대화 투영이다. */
+  tasks: {
+    list: (input?: { limit?: number; includeArchived?: boolean }) => Promise<CanonicalTask[]>;
+    get: (id: string) => Promise<CanonicalTask | null>;
+    /** Main-owned semantic projection. Renderer input can choose a surface, never authority. */
+    listProjections: (input: OneTaskProjectionListRequest) => Promise<AgentlasOneTaskProjectionV1[]>;
+    getProjection: (id: string, input: OneTaskProjectionRequest) => Promise<AgentlasOneTaskProjectionV1 | null>;
+    /** Read-only lookup. Unlike forChat, this never promotes a conversation. */
+    findForChat: (chatId: string) => Promise<CanonicalTask | null>;
+    forChat: (chatId: string) => Promise<CanonicalTask | null>;
+    /** Explicit user acceptance; Main verifies Task version and completed run receipt. */
+    acceptResult: (input: CanonicalTaskResultAcceptance) => Promise<CanonicalTask>;
+    /** Start separate follow-up work with only a bounded Main-owned result summary. */
+    continueFromResult: (input: CanonicalTaskResultContinuation) => Promise<Chat>;
+  };
+  /** Main-owned full-history search and atomic Task/conversation re-entry controls. */
+  oneSearch: {
+    search: (input: OneSearchRequestV1) => Promise<OneSearchPageV1>;
+    mutateArchive: (input: OneTaskArchiveMutationInputV1) => Promise<OneTaskArchiveMutationResultV1>;
+  };
+  /** Desktop One file preparation. Grants enter Main once; returned refs contain no path. */
+  oneAttachments: {
+    prepare: (input: PrepareOneAttachmentsInput) => Promise<PreparedOneAttachments>;
+    bindToTeam: (input: BindOneAttachmentsToTeamInput) => Promise<PreparedOneAttachments>;
+    forTeam: (proposalId: string) => Promise<PreparedOneAttachments | null>;
+    discard: (input: DiscardOneAttachmentsInput) => Promise<{ discarded: boolean }>;
+  };
+  /** Desktop-only opaque previews for exact Main-bound One result artifacts. */
+  oneArtifacts: {
+    issuePreview: (input: OneArtifactBindingRequestV1) => Promise<OneArtifactPreviewCapabilityV1 | null>;
+    revokePreview: (input: OneArtifactPreviewRevokeV1) => Promise<{ revoked: boolean }>;
+    open: (input: OneArtifactBindingRequestV1) => Promise<OneArtifactOpenResultV1>;
+  };
+  /** Persistent One identity and user-approved operating principles. */
+  oneProfile: {
+    get: () => Promise<OneProfile>;
+    update: (input: OneProfileUpdateInput) => Promise<OneProfile>;
+    addPrinciple: (input: OneOperatingPrincipleCreateInput) => Promise<OneProfile>;
+    updatePrinciple: (input: OneOperatingPrincipleUpdateInput) => Promise<OneProfile>;
+    setPrincipleEnabled: (input: OneOperatingPrincipleEnabledInput) => Promise<OneProfile>;
+    deletePrinciple: (input: OneOperatingPrincipleDeleteInput) => Promise<OneProfile>;
+  };
+  /** Version-gated feature introduction bound to Main's persistent One identity. */
+  oneFeatureIntro: {
+    getState: () => Promise<OneFeatureIntroState>;
+    acknowledge: (input: AcknowledgeOneFeatureIntroInput) => Promise<OneFeatureIntroState>;
+    defer: (input: DeferOneFeatureIntroInput) => Promise<OneFeatureIntroState>;
+  };
+  /** Main-owned Desktop-first activation; renderer never owns completion. */
+  oneActivation: {
+    getState: (input: GetOneActivationStateInput) => Promise<OneActivationState>;
+    resolveConcern: (input: ResolveOneActivationConcernInput) => Promise<OneActivationState>;
+    resolveWork: (input: ResolveOneActivationWorkInput) => Promise<OneActivationState>;
+    skip: (input: SkipOneActivationInput) => Promise<OneActivationState>;
+    resolveMobile: (input: ResolveOneActivationMobileInput) => Promise<OneActivationState>;
+  };
+  /** Editable Memory candidates and explicitly approved reusable Memory assets. */
+  oneMemory: {
+    getState: () => Promise<OneMemoryState>;
+    propose: (input: ProposeOneMemoryCandidateInput) => Promise<OneMemoryMutationResult<OneMemoryCandidate>>;
+    save: (input: SaveOneMemoryCandidateInput) => Promise<OneMemoryMutationResult<OneMemorySavedResult>>;
+    editAndSave: (input: EditAndSaveOneMemoryCandidateInput) => Promise<OneMemoryMutationResult<OneMemorySavedResult>>;
+    useOnce: (input: UseOneMemoryCandidateOnceInput) => Promise<OneMemoryMutationResult<OneMemoryUseOnceReceipt>>;
+    reject: (input: RejectOneMemoryCandidateInput) => Promise<OneMemoryMutationResult<OneMemoryCandidate>>;
+    deleteCandidate: (input: DeleteOneMemoryCandidateInput) => Promise<OneMemoryMutationResult<{ candidateId: string; deletedAt: string }>>;
+    updateAsset: (input: UpdateOneMemoryAssetInput) => Promise<OneMemoryMutationResult<OneMemoryAsset>>;
+    setAssetEnabled: (input: SetOneMemoryAssetEnabledInput) => Promise<OneMemoryMutationResult<OneMemoryAsset>>;
+    deleteAsset: (input: DeleteOneMemoryAssetInput) => Promise<OneMemoryMutationResult<{ memoryId: string; deletedAt: string }>>;
+  };
+  /** Evidence-gated ecosystem suggestions. Renderer actions create review drafts only. */
+  oneSuggestions: {
+    getState: () => Promise<OneSuggestionState>;
+    acceptForReview: (input: AcceptOneSuggestionForReviewInput) => Promise<OneSuggestionMutationResult<OneSuggestionReviewRequest>>;
+    getReviewHandoff: (input: OneSuggestionReviewHandoffInput) => Promise<OneSuggestionReviewHandoff>;
+    getReviewSeed: (input: OneSuggestionReviewHandoffInput) => Promise<OneSuggestionReviewSeed>;
+    snooze: (input: SnoozeOneSuggestionInput) => Promise<OneSuggestionMutationResult<OneEcosystemSuggestion>>;
+    dismiss: (input: DismissOneSuggestionInput) => Promise<OneSuggestionMutationResult<OneEcosystemSuggestion>>;
+    neverAsk: (input: NeverAskOneSuggestionInput) => Promise<OneSuggestionMutationResult<OneEcosystemSuggestion>>;
+  };
+  /** Local-only sanitized public derivative. This surface has no publish operation. */
+  oneHubDerivative: {
+    getDraft: (input: GetOneHubDerivativeDraftInput) => Promise<OneHubDerivativeDraft>;
+  };
+  /** Trusted Outcome read projection. Creation remains Main-only. */
+  oneValueClosure: {
+    getState: () => Promise<OneValueClosureState>;
+    latestForTask: (taskId: string) => Promise<OneValueClosureRecord | null>;
+    setReflection: (input: SetOneValueClosureReflectionInput) => Promise<OneValueClosureMutationResult<OneValueClosureRecord>>;
+  };
+  /** Optional current-week reflection derived only from explicitly included, verified Value Closures. */
+  oneWeeklyReflection: {
+    get: () => Promise<OneWeeklyReflectionSnapshotV1>;
+    resolve: (input: ResolveOneWeeklyReflectionInputV1) => Promise<OneWeeklyReflectionSnapshotV1>;
+  };
+  /** Read-only receipt that approved experience was reused. Creation remains Main-only. */
+  oneExperienceReuse: {
+    getState: () => Promise<OneExperienceReuseState>;
+    latestForTask: (taskId: string) => Promise<OneExperienceReuseRecord | null>;
+  };
+  /** Read-only, receipt-backed evidence of reuse. Trusted creation remains Main-only. */
+  oneImprovementProof: {
+    /** Main-only evidence bodies are intentionally omitted from this read model. */
+    getState: () => Promise<OneImprovementProofReadState>;
+    list: (input?: { taskId?: string }) => Promise<OneImprovementProofRecord[]>;
+    latestForTask: (taskId: string) => Promise<OneImprovementProofRecord | null>;
+  };
+  /** Evidence-gated proactive findings. Main owns detection, suppression, and cadence. */
+  oneBriefing: {
+    get: () => Promise<OneBriefingSnapshot>;
+    /** First click: prepare a review receipt only. Never creates a chat, Task, or run. */
+    prepareAction: (input: PrepareOneBriefingActionInput) => Promise<OneBriefingActionPacket>;
+    getAction: (input: PrepareOneBriefingActionInput) => Promise<OneBriefingActionPacket | null>;
+    /** Second explicit click: exact revalidation, one canonical Task, then a read-only run. */
+    startAction: (input: StartOneBriefingActionInput) => Promise<OneBriefingActionStartResult>;
+    /** Exact Main-revalidated read-only navigation. Never starts or mutates a Task. */
+    openTask: (input: OpenOneBriefingTaskInput) => Promise<OpenOneBriefingTaskResult>;
+    setPreferences: (input: {
+      cadence?: OneBriefingPreferences["cadence"];
+      channels?: OneBriefingChannel[];
+      quietHours?: OneBriefingPreferences["quietHours"];
+    }) => Promise<OneBriefingPreferences>;
+    feedback: (input: {
+      candidateId: string;
+      expectedDetectedAt: string;
+      feedback: OneBriefingFeedback;
+    }) => Promise<OneBriefingSnapshot>;
+  };
+  /**
+   * Explicit, local, read-only project deadline checks. Main keeps the
+   * expected relative path private; read projections expose only schedule and
+   * opaque check metadata.
+   */
+  oneProjectDeadlines: {
+    getState: (projectId: string) => Promise<OneProjectDeadlineState>;
+    connect: (input: ConnectOneProjectDeadlineInput) => Promise<OneProjectDeadlineState>;
+    remove: (input: RemoveOneProjectDeadlineInput) => Promise<OneProjectDeadlineState>;
+  };
+  /** Read-only adaptive-team proposal plus explicit, exact resolution. */
+  oneTeamPreflight: {
+    prepare: (input: PrepareOneTeamPreflightInput) => Promise<PrepareOneTeamPreflightResult>;
+    getForChat: (chatId: string) => Promise<OneTeamPreflightProposal | null>;
+    autoResolve: (input: AutoResolveOneTeamPreflightInput) => Promise<ResolveOneTeamPreflightResult>;
+    resolve: (input: ResolveOneTeamPreflightInput) => Promise<ResolveOneTeamPreflightResult>;
+    /** Fail-close a reservation whose renderer-to-Main start handoff was rejected. */
+    failStart: (ref: OneTeamPreflightRef) => Promise<OneTeamPreflightProposal | null>;
   };
   /** 고용(빌림) 로스터 — 사이드바 "고용 중" 섹션. 리스 캐시+기억 둥지 기반 읽기 전용. */
   hired: {
@@ -4970,6 +5591,12 @@ export interface AgentlasIpc {
     receipt: (runId: string) => Promise<InvocationRunReceipt | null>;
     /** 채팅의 가장 최근 실행 receipt — 결과 폴더/실패 진단 복원용. */
     latestReceipt: (chatId: string) => Promise<InvocationRunReceipt | null>;
+    /** Exact Main-projected surface for one canonical Task/run binding. */
+    latestOneSurface: (input: {
+      runId: string;
+      chatId: string;
+      taskId: string;
+    }) => Promise<DurableOneSurfaceResult | null>;
   };
   /** 임베딩된 Hephaestus 엔진 브리지. 데스크탑↔엔진 연결은 전부 이 도메인으로 흐른다.
    *  (Hephaestus 소스에는 데스크탑 흔적이 없다 — 엔진은 범용 CLI/JSON 으로만 호출됨.) */

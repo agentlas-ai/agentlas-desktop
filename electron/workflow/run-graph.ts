@@ -496,8 +496,6 @@ const REPLAY_SAFE_PRE_DISPATCH_ERROR_CODES = new Set([
   "hep-network-route-failed",
   "pinned-runtime-unavailable",
   "no-runtime",
-  "mobile-runtime-not-read-sandboxed",
-  "automation-runtime-not-read-sandboxed",
   "no-runner",
   "workforce-leader-runtime-unsupported",
   "stormbreaker-core-harness-unavailable",

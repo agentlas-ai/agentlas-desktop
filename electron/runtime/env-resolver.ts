@@ -196,7 +196,15 @@ export async function buildRunnerEnv(
 
   for (const key of vaultKeys) {
     if (isProtectedRunnerEnvKey(key) || env[key]) continue;
-    const value = await readEnvVar(key);
+    let value: string | null = null;
+    try {
+      value = await readEnvVar(key);
+    } catch {
+      // Keychain can be temporarily unavailable while the Mac is locked.
+      // Missing optional credentials must narrow the run's capabilities, not
+      // abort a text-only One conversation before its selected LLM starts.
+      continue;
+    }
     if (value) {
       env[key] = value;
       injected.add(key);

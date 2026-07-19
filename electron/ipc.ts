@@ -155,6 +155,45 @@ import type {
   FsPathGrant,
   FsReadScope,
   HiredAgentCard,
+  CanonicalTaskResultAcceptance,
+  OneOperatingPrincipleCreateInput,
+  OneOperatingPrincipleDeleteInput,
+  OneOperatingPrincipleEnabledInput,
+  OneOperatingPrincipleUpdateInput,
+  OneProfileUpdateInput,
+  AcknowledgeOneFeatureIntroInput,
+  DeferOneFeatureIntroInput,
+  PrepareOneBriefingActionInput,
+  OpenOneBriefingTaskInput,
+  StartOneBriefingActionInput,
+  OneBriefingChannel,
+  OneBriefingFeedback,
+  OneBriefingPreferences,
+  ConnectOneProjectDeadlineInput,
+  RemoveOneProjectDeadlineInput,
+  AutoResolveOneTeamPreflightInput,
+  OneTeamPreflightRef,
+  PrepareOneTeamPreflightInput,
+  ResolveOneTeamPreflightInput,
+  DeleteOneMemoryAssetInput,
+  DeleteOneMemoryCandidateInput,
+  EditAndSaveOneMemoryCandidateInput,
+  ProposeOneMemoryCandidateInput,
+  RejectOneMemoryCandidateInput,
+  SaveOneMemoryCandidateInput,
+  SetOneMemoryAssetEnabledInput,
+  UpdateOneMemoryAssetInput,
+  UseOneMemoryCandidateOnceInput,
+  AcceptOneSuggestionForReviewInput,
+  GetOneHubDerivativeDraftInput,
+  DismissOneSuggestionInput,
+  NeverAskOneSuggestionInput,
+  OneSuggestionReviewHandoffInput,
+  SnoozeOneSuggestionInput,
+  SetOneValueClosureReflectionInput,
+  ResolveOneWeeklyReflectionInputV1,
+  OneArtifactBindingRequestV1,
+  OneArtifactPreviewRevokeV1,
 } from "../shared/types";
 import { resolveExperiencePackCreateIpcInput } from "./experience/access";
 import { getExperienceHubCatalog } from "./experience/hub-catalog";
@@ -168,6 +207,7 @@ import {
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
 import { grantDroppedPath, grantPath, pathFromGrant, resolveFsReadPath } from "./fs/access";
 import { getAuthSession, signInWithBrowser, signInWithGoogle, signOut } from "./auth";
+import { revokeAllMobileBridgeDevicesForAuthChange } from "./mobile-bridge/runtime";
 import { getBillingCredits, transferEarnings } from "./billing";
 import {
   addHubPromptBookmark,
@@ -242,6 +282,7 @@ import {
   commitPendingConfirmationAnswer,
   listCommittedQuestionAnswers,
   listPendingConfirmations,
+  snoozePendingConfirmation,
 } from "./confirm";
 import {
   addProjectOntologySource,
@@ -279,6 +320,126 @@ import {
   unarchiveChat,
   getOrCreateAutomationSession,
 } from "./store/chats";
+import {
+  acceptCanonicalTaskResult,
+  getCanonicalTask,
+  findCanonicalTaskForChat,
+  getCanonicalTaskForChat,
+  listCanonicalTasks,
+} from "./store/tasks";
+import { mutateOneTaskArchive, searchOneHistory } from "./one/search";
+import { continueOneFromTaskResult } from "./one/task-continuation";
+import {
+  bindOneAttachmentsToTeam,
+  discardOneAttachments,
+  getOneAttachmentsForTeam,
+  prepareOneAttachments,
+} from "./one/attachments";
+import {
+  issueOneArtifactPreviewCapability,
+  resolveOneArtifactOpenPath,
+  revokeOneArtifactPreview,
+} from "./one/artifact-preview";
+import {
+  addOneOperatingPrinciple,
+  deleteOneOperatingPrinciple,
+  getOneProfile,
+  setOneOperatingPrincipleEnabled,
+  updateOneOperatingPrinciple,
+  updateOneProfile,
+} from "./store/one-profile";
+import {
+  getOneBriefingSnapshot,
+  recordOneBriefingFeedback,
+  resolveOneBriefingTaskNavigation,
+  setOneBriefingPreferences,
+} from "./one/briefing";
+import {
+  failOneBriefingActionStart,
+  getOneBriefingActionPacket,
+  getOneBriefingActionPacketForCandidate,
+  OneBriefingActionError,
+  prepareOneBriefingActionPacket,
+  reserveOneBriefingActionExecution,
+} from "./one/briefing-actions";
+import {
+  connectOneProjectDeadline,
+  getOneProjectDeadlineState,
+  removeOneProjectDeadline,
+} from "./store/one-project-deadlines";
+import {
+  autoResolveOneTeamPreflight,
+  failOneTeamPreflightStart,
+  getOneTeamPreflightForChat,
+  prepareOneTeamPreflight,
+  resolveOneTeamPreflight,
+} from "./one/team-preflight";
+import {
+  acknowledgeOneFeatureIntro,
+  deferOneFeatureIntro,
+  getOneFeatureIntroState,
+} from "./one/feature-intro";
+import {
+  deleteOneMemoryAsset,
+  deleteOneMemoryCandidate,
+  editAndSaveOneMemoryCandidate,
+  getOneMemoryState,
+  proposeOneMemoryCandidate,
+  rejectOneMemoryCandidate,
+  saveOneMemoryCandidate,
+  sealOneMemoryCandidateProvenance,
+  setOneMemoryAssetEnabled,
+  updateOneMemoryAsset,
+  useOneMemoryCandidateOnce,
+} from "./one/memory-candidates";
+import {
+  acceptOneSuggestionForReviewFromUser,
+  dismissOneSuggestion,
+  getOneSuggestionReviewHandoff,
+  getOneSuggestionState,
+  neverAskOneSuggestion,
+  snoozeOneSuggestion,
+} from "./one/suggestions";
+import { getOneSuggestionReviewSeed } from "./one/review-seed";
+import { getOneHubDerivativeDraft } from "./one/hub-derivative";
+import {
+  getLatestOneValueClosure,
+  getOneValueClosureState,
+  setOneValueClosureReflection,
+} from "./one/value-closure";
+import {
+  getOneWeeklyReflectionSnapshot,
+  resolveOneWeeklyReflection,
+} from "./one/weekly-reflection";
+import {
+  ensureAcceptedResultValueClosure,
+  ensureVerifiedAcceptedResultValueClosure,
+} from "./one/accepted-result-value-closure";
+import {
+  getOneActivationState,
+  resolveOneActivationConcern,
+  resolveOneActivationMobile,
+  resolveOneActivationWork,
+  skipOneActivation,
+  tryCompleteOneActivationFirstValue,
+} from "./one/activation";
+import {
+  ensureOneExperienceReuseReceipt,
+  getLatestOneExperienceReuseReceipt,
+  getOneExperienceReuseState,
+} from "./one/experience-reuse";
+import { tryProduceAcceptedResultSuggestion } from "./one/completion-suggestion-producer";
+import {
+  getLatestOneImprovementProof,
+  getOneImprovementProofState,
+  listOneImprovementProofs,
+} from "./one/improvement-proof";
+import {
+  reconcileOneImprovementProofs,
+  tryProduceOneImprovementProofForTask,
+} from "./one/improvement-proof-producer";
+import { createOneTaskProjectionRuntime } from "./one/task-projection";
+import { loadOrCreateMobileBridgeHostIdentity } from "./mobile-bridge/pairing";
 import { listHiredAgents } from "./agents/hired-agents";
 import { getAgentConcurrencyInfo, setAgentConcurrency } from "./store/concurrency";
 import { getInterviewMode, setInterviewMode, type InterviewMode } from "./store/interview-mode";
@@ -486,6 +647,28 @@ const buildReadySignals = new Map<string, () => void>();
 // 조기 실패가 렌더러의 invoke 응답보다 먼저 끝나도 terminal event를 잃지 않는다.
 // 렌더러가 사라진 비정상 경로만 유한 시간 뒤 정리한다.
 const BUILD_READY_GRACE_MS = 30_000;
+const ONE_IMPROVEMENT_PROOF_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
+
+function strictOneImprovementProofTaskId(value: unknown, label: string): string {
+  if (typeof value !== "string" || !ONE_IMPROVEMENT_PROOF_TASK_ID_RE.test(value)) {
+    throw new TypeError(`${label} must be an opaque Task id`);
+  }
+  return value;
+}
+
+function oneImprovementProofListTaskId(input: unknown): string | undefined {
+  if (input === undefined) return undefined;
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("Invalid Improvement Proof list request");
+  }
+  const record = input as Record<string, unknown>;
+  if (Object.keys(record).some((key) => key !== "taskId")) {
+    throw new TypeError("Improvement Proof list request contains unsupported fields");
+  }
+  return record.taskId === undefined
+    ? undefined
+    : strictOneImprovementProofTaskId(record.taskId, "Improvement Proof list taskId");
+}
 let pendingConfirmationCount = 0;
 let pendingConfirmationBounceId: number | null = null;
 let lastPendingConfirmationNoticeAt = 0;
@@ -1051,11 +1234,27 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
   const {
     agentAppMode: _agentAppMode,
     agentAppRuntimeToolGrant: _agentAppRuntimeToolGrant,
+    oneBriefingActionRef: _oneBriefingActionRef,
+    oneProfileContext: _oneProfileContext,
+    oneTeamExecutionPolicy: _oneTeamExecutionPolicy,
+    oneTeamRuntimeBinding: _oneTeamRuntimeBinding,
+    oneAttachmentContext: _oneAttachmentContext,
+    oneAttachmentRedactions: _oneAttachmentRedactions,
     ...rendererFields
-  } = req;
+  } = req as McpInvocationRequest & {
+    oneTeamExecutionPolicy?: unknown;
+    oneTeamRuntimeBinding?: unknown;
+    oneAttachmentContext?: unknown;
+    oneAttachmentRedactions?: unknown;
+  };
   return {
     ...rendererFields,
-    taskForceTargets: rendererTaskForceTargets(rendererFields.taskForceTargets),
+    oneMode: rendererFields.oneMode === true,
+    // One's exact team roster is minted from an opaque Main capability. A
+    // renderer may carry the ref, never candidate identities themselves.
+    taskForceTargets: rendererFields.oneMode === true
+      ? undefined
+      : rendererTaskForceTargets(rendererFields.taskForceTargets),
   };
 }
 
@@ -1066,6 +1265,30 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
 // appearing again as ordinary upload choices.
 
 export function registerIpcHandlers(): void {
+  let oneProjectionHostRef: string | null = null;
+  const oneTaskProjectionRuntime = createOneTaskProjectionRuntime({
+    getAuthoritySnapshot: ({ taskId }) => {
+      const task = getCanonicalTask(taskId);
+      if (!task) return null;
+      const chatAvailable = Boolean(task.originChatId && getChat(task.originChatId));
+      if (!oneProjectionHostRef) {
+        try {
+          oneProjectionHostRef = loadOrCreateMobileBridgeHostIdentity(app.getPath("userData")).hostId;
+        } catch {
+          // A Desktop-only install can still expose an honest local authority ref.
+          oneProjectionHostRef = "desktop:local";
+        }
+      }
+      return {
+        connection: "online" as const,
+        lastSyncedAt: task.updatedAt,
+        authoritativeHostRef: oneProjectionHostRef,
+        executionAuthorityAvailable: chatAvailable,
+        mutationMode: chatAvailable ? "direct" as const : "read_only" as const,
+      };
+    },
+  });
+
   // ── app ─────────────────────────────────────────────────
   // macOS "시스템 설정 > 언어 및 지역"의 1순위 언어. Electron이 BCP47 형태로 반환.
   // ex) "ko-KR", "en-US", "ja-JP". 첫 실행 시 i18n 자동 감지에 사용.
@@ -1820,6 +2043,7 @@ export function registerIpcHandlers(): void {
     const win = BrowserWindow.fromWebContents(e.sender);
     const session = await signInWithGoogle(win);
     if (session.signedIn) {
+      revokeAllMobileBridgeDevicesForAuthChange(app.getPath("userData"));
       // Replace any mounted previous-account slice immediately from B's local
       // cache (often []); network reconciliation may take up to the timeout.
       failCloseActiveHubBookmarks();
@@ -1831,6 +2055,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("auth:signInWithBrowser", async () => {
     const session = await signInWithBrowser();
     if (session.signedIn) {
+      revokeAllMobileBridgeDevicesForAuthChange(app.getPath("userData"));
       failCloseActiveHubBookmarks();
       broadcastHubBookmarkSnapshot();
       void syncHubBookmarks({ rerunIfBusy: true });
@@ -1838,6 +2063,7 @@ export function registerIpcHandlers(): void {
     return session;
   });
   ipcMain.handle("auth:signOut", async () => {
+    revokeAllMobileBridgeDevicesForAuthChange(app.getPath("userData"));
     await signOut();
     failCloseActiveHubBookmarks();
     broadcastHubBookmarkSnapshot();
@@ -1982,6 +2208,12 @@ export function registerIpcHandlers(): void {
     ));
   ipcMain.handle("confirm:committedAnswers", (_e, chatId: unknown) =>
     listCommittedQuestionAnswers(typeof chatId === "string" ? chatId : ""));
+  ipcMain.handle("confirm:snooze", (_e, input: { chatId?: unknown; sourceMessageId?: unknown; resumeAt?: unknown }) =>
+    snoozePendingConfirmation(
+      typeof input?.chatId === "string" ? input.chatId : "",
+      typeof input?.sourceMessageId === "string" ? input.sourceMessageId : "",
+      typeof input?.resumeAt === "string" ? input.resumeAt : "",
+    ));
 
   // ── attention (Dock/taskbar/app badge — 놓치면 에이전트가 멈추는 승인 요청) ─────
   ipcMain.handle("attention:setPendingConfirmations", (e, count: number) => {
@@ -2549,6 +2781,7 @@ export function registerIpcHandlers(): void {
         projectId?: string | null;
         title?: string;
         continueFromChatId?: string | null;
+        taskMode?: "task" | "conversation";
       },
     ) => createChat(input),
   );
@@ -2574,6 +2807,335 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("chats:setHiredAgents", (_e, id: string, cards: HiredAgentCard[]) =>
     setChatHiredAgents(id, Array.isArray(cards) ? cards : []),
   );
+  ipcMain.handle("tasks:list", (_e, input?: { limit?: number; includeArchived?: boolean }) =>
+    listCanonicalTasks(input),
+  );
+  ipcMain.handle("tasks:get", (_e, id: string) => getCanonicalTask(id));
+  ipcMain.handle("tasks:listProjections", (_e, input) =>
+    oneTaskProjectionRuntime.listProjections(input));
+  ipcMain.handle("tasks:getProjection", (_e, id: string, input) =>
+    oneTaskProjectionRuntime.getProjection(id, input));
+  ipcMain.handle("tasks:findForChat", (_e, chatId: string) => findCanonicalTaskForChat(chatId));
+  ipcMain.handle("tasks:forChat", (_e, chatId: string) => getCanonicalTaskForChat(chatId));
+  ipcMain.handle("tasks:acceptResult", (_e, input: CanonicalTaskResultAcceptance) => {
+    if (
+      !input ||
+      typeof input !== "object" ||
+      typeof input.taskId !== "string" ||
+      !Number.isSafeInteger(input.expectedVersion) ||
+      typeof input.expectedRunId !== "string"
+    ) {
+      throw new TypeError("Invalid Task result acceptance request");
+    }
+    const task = getCanonicalTask(input.taskId);
+    const receipt = task?.originChatId
+      ? invocationService.latestReceipt(task.originChatId)
+      : null;
+    const accepted = acceptCanonicalTaskResult(input, receipt);
+    const closure = ensureAcceptedResultValueClosure({
+      priorTaskVersion: input.expectedVersion,
+      acceptedTask: accepted,
+      expectedRunId: input.expectedRunId,
+      receipt,
+      confirmedByUser: true,
+    });
+    try {
+      ensureVerifiedAcceptedResultValueClosure({
+        priorTaskVersion: input.expectedVersion,
+        acceptedTask: accepted,
+        expectedRunId: input.expectedRunId,
+        receipt,
+        confirmedByUser: true,
+      });
+    } catch {
+      // Host artifact verification is an optional fail-closed sibling record.
+      // Acceptance remains partial when exact bound bytes cannot be re-proven.
+    }
+    try {
+      sealOneMemoryCandidateProvenance({
+        sourceTaskId: accepted.id,
+        sourceTaskVersion: accepted.version,
+        sourceRunId: input.expectedRunId,
+        sourceValueClosureId: closure.value.closure.valueClosureId,
+        sourceValueClosureVersion: closure.value.version,
+      });
+    } catch {
+      // Memory review is optional. Provenance sealing must never roll back the
+      // already-authoritative Task acceptance and accepted Value Closure.
+    }
+    try {
+      const hostId = loadOrCreateMobileBridgeHostIdentity(app.getPath("userData")).hostId;
+      tryProduceAcceptedResultSuggestion({
+        hostId,
+        taskId: accepted.id,
+        expectedTaskVersion: accepted.version,
+        expectedTaskUpdatedAt: accepted.updatedAt,
+        expectedRunId: input.expectedRunId,
+        valueClosureId: closure.value.closure.valueClosureId,
+        expectedValueClosureVersion: closure.value.version,
+        confirmedByUser: true,
+      });
+    } catch {
+      // Ecosystem growth is optional and must never roll back result acceptance.
+    }
+    try {
+      tryCompleteOneActivationFirstValue({
+        taskId: accepted.id,
+        expectedTaskVersion: accepted.version,
+        valueClosureId: closure.value.closure.valueClosureId,
+        expectedValueClosureVersion: closure.value.version,
+      });
+    } catch {
+      // First-use activation is optional. It must never roll back the accepted
+      // Task result or its exact Value Closure.
+    }
+    try {
+      ensureOneExperienceReuseReceipt({
+        taskId: accepted.id,
+        expectedTaskVersion: accepted.version,
+        expectedTaskUpdatedAt: accepted.updatedAt,
+        expectedRunId: input.expectedRunId,
+        valueClosureId: closure.value.closure.valueClosureId,
+        expectedValueClosureVersion: closure.value.version,
+        confirmedByUser: true,
+      });
+    } catch {
+      // Compounding evidence is optional. Its failure must never roll back the
+      // already-authoritative result acceptance or accepted Value Closure.
+    }
+    try {
+      tryProduceOneImprovementProofForTask(accepted.id);
+    } catch {
+      // Improvement Proof is a derived, evidence-gated record. It must never
+      // roll back the accepted result when verified comparison data is absent.
+    }
+    return accepted;
+  });
+  ipcMain.handle("tasks:continueFromResult", (_e, input: {
+    taskId: string;
+    expectedVersion: number;
+    userPrompt: string;
+  }) => {
+    if (
+      !input
+      || typeof input !== "object"
+      || Object.keys(input).length !== 3
+      || typeof input.taskId !== "string"
+      || !Number.isSafeInteger(input.expectedVersion)
+      || typeof input.userPrompt !== "string"
+    ) {
+      throw new TypeError("Invalid Task result continuation request");
+    }
+    const projection = oneTaskProjectionRuntime.getProjection(input.taskId, {
+      surface: "one",
+      mode: "detailed",
+    });
+    if (!projection || projection.canonicalVersion !== input.expectedVersion) {
+      throw new Error("Task changed before the follow-up started; review the current Task state");
+    }
+    return continueOneFromTaskResult({
+      ...input,
+      summary: projection.display.summary,
+      locale: /[\u3131-\u318e\uac00-\ud7a3]/u.test(input.userPrompt)
+        ? "ko"
+        : currentUiLocale().toLowerCase().startsWith("ko") ? "ko" : "en",
+    });
+  });
+  ipcMain.handle("oneSearch:search", (_e, input: unknown) => searchOneHistory(input));
+  ipcMain.handle("oneSearch:mutateArchive", (_e, input: unknown) => {
+    const taskId = input && typeof input === "object" && "taskId" in input
+      ? String((input as { taskId?: unknown }).taskId ?? "")
+      : "";
+    const task = taskId ? getCanonicalTask(taskId) : null;
+    if (task?.originChatId && invocationService.activeChatIds().includes(task.originChatId)) {
+      throw new Error("A running Task cannot be archived or restored");
+    }
+    return mutateOneTaskArchive(input);
+  });
+  ipcMain.handle("oneAttachments:prepare", (_e, input) => prepareOneAttachments(input));
+  ipcMain.handle("oneAttachments:bindToTeam", (_e, input) => bindOneAttachmentsToTeam(input));
+  ipcMain.handle("oneAttachments:forTeam", (_e, proposalId) => getOneAttachmentsForTeam(String(proposalId ?? "")));
+  ipcMain.handle("oneAttachments:discard", (_e, input) => discardOneAttachments(input));
+  ipcMain.handle("oneArtifacts:issuePreview", (_e, input: OneArtifactBindingRequestV1) =>
+    issueOneArtifactPreviewCapability(input));
+  ipcMain.handle("oneArtifacts:revokePreview", (_e, input: OneArtifactPreviewRevokeV1) => ({
+    revoked: revokeOneArtifactPreview(input),
+  }));
+  ipcMain.handle("oneArtifacts:open", async (_e, input: OneArtifactBindingRequestV1) => {
+    const artifactPath = resolveOneArtifactOpenPath(input);
+    if (!artifactPath) return { opened: false };
+    const error = await shell.openPath(artifactPath);
+    return { opened: error === "" };
+  });
+  ipcMain.handle("oneProfile:get", () => getOneProfile());
+  ipcMain.handle("oneProfile:update", (_e, input: OneProfileUpdateInput) => updateOneProfile(input));
+  ipcMain.handle("oneProfile:addPrinciple", (_e, input: OneOperatingPrincipleCreateInput) =>
+    addOneOperatingPrinciple(input));
+  ipcMain.handle("oneProfile:updatePrinciple", (_e, input: OneOperatingPrincipleUpdateInput) =>
+    updateOneOperatingPrinciple(input));
+  ipcMain.handle("oneProfile:setPrincipleEnabled", (_e, input: OneOperatingPrincipleEnabledInput) =>
+    setOneOperatingPrincipleEnabled(input));
+  ipcMain.handle("oneProfile:deletePrinciple", (_e, input: OneOperatingPrincipleDeleteInput) =>
+    deleteOneOperatingPrinciple(input));
+  ipcMain.handle("oneFeatureIntro:getState", () => getOneFeatureIntroState());
+  ipcMain.handle("oneFeatureIntro:acknowledge", (_e, input: AcknowledgeOneFeatureIntroInput) =>
+    acknowledgeOneFeatureIntro(input));
+  ipcMain.handle("oneFeatureIntro:defer", (_e, input: DeferOneFeatureIntroInput) =>
+    deferOneFeatureIntro(input));
+  ipcMain.handle("oneActivation:getState", (_e, input) => getOneActivationState(input));
+  ipcMain.handle("oneActivation:resolveConcern", (_e, input) => resolveOneActivationConcern(input));
+  ipcMain.handle("oneActivation:resolveWork", (_e, input) => resolveOneActivationWork(input));
+  ipcMain.handle("oneActivation:skip", (_e, input) => skipOneActivation(input));
+  ipcMain.handle("oneActivation:resolveMobile", (_e, input) => resolveOneActivationMobile(input));
+  ipcMain.handle("oneMemory:getState", () => getOneMemoryState());
+  ipcMain.handle("oneMemory:propose", (_e, input: ProposeOneMemoryCandidateInput) =>
+    proposeOneMemoryCandidate(input));
+  ipcMain.handle("oneMemory:save", (_e, input: SaveOneMemoryCandidateInput) =>
+    saveOneMemoryCandidate(input));
+  ipcMain.handle("oneMemory:editAndSave", (_e, input: EditAndSaveOneMemoryCandidateInput) =>
+    editAndSaveOneMemoryCandidate(input));
+  ipcMain.handle("oneMemory:useOnce", (_e, input: UseOneMemoryCandidateOnceInput) =>
+    useOneMemoryCandidateOnce(input));
+  ipcMain.handle("oneMemory:reject", (_e, input: RejectOneMemoryCandidateInput) =>
+    rejectOneMemoryCandidate(input));
+  ipcMain.handle("oneMemory:deleteCandidate", (_e, input: DeleteOneMemoryCandidateInput) =>
+    deleteOneMemoryCandidate(input));
+  ipcMain.handle("oneMemory:updateAsset", (_e, input: UpdateOneMemoryAssetInput) =>
+    updateOneMemoryAsset(input));
+  ipcMain.handle("oneMemory:setAssetEnabled", (_e, input: SetOneMemoryAssetEnabledInput) =>
+    setOneMemoryAssetEnabled(input));
+  ipcMain.handle("oneMemory:deleteAsset", (_e, input: DeleteOneMemoryAssetInput) =>
+    deleteOneMemoryAsset(input));
+  ipcMain.handle("oneSuggestions:getState", () => getOneSuggestionState());
+  ipcMain.handle("oneSuggestions:acceptForReview", (_e, input: AcceptOneSuggestionForReviewInput) =>
+    acceptOneSuggestionForReviewFromUser(input));
+  ipcMain.handle("oneSuggestions:getReviewHandoff", (_e, input: OneSuggestionReviewHandoffInput) =>
+    getOneSuggestionReviewHandoff(input));
+  ipcMain.handle("oneSuggestions:getReviewSeed", (_e, input: OneSuggestionReviewHandoffInput) =>
+    getOneSuggestionReviewSeed(input));
+  ipcMain.handle("oneSuggestions:snooze", (_e, input: SnoozeOneSuggestionInput) =>
+    snoozeOneSuggestion(input));
+  ipcMain.handle("oneSuggestions:dismiss", (_e, input: DismissOneSuggestionInput) =>
+    dismissOneSuggestion(input));
+  ipcMain.handle("oneSuggestions:neverAsk", (_e, input: NeverAskOneSuggestionInput) =>
+    neverAskOneSuggestion(input));
+  ipcMain.handle("oneHubDerivative:getDraft", (_e, input: GetOneHubDerivativeDraftInput) => {
+    const handoff = getOneSuggestionReviewHandoff(input);
+    if (handoff.type !== "hub_derivative" || handoff.reviewKind !== "hub_derivative_draft") {
+      throw new Error("This review handoff is not a Hub public derivative");
+    }
+    return getOneHubDerivativeDraft(input);
+  });
+  ipcMain.handle("oneValueClosure:getState", () => getOneValueClosureState());
+  ipcMain.handle("oneValueClosure:latestForTask", (_e, taskId: string) =>
+    getLatestOneValueClosure(taskId));
+  ipcMain.handle("oneValueClosure:setReflection", (_e, input: SetOneValueClosureReflectionInput) =>
+    setOneValueClosureReflection(input));
+  ipcMain.handle("oneWeeklyReflection:get", () => getOneWeeklyReflectionSnapshot());
+  ipcMain.handle("oneWeeklyReflection:resolve", (_e, input: ResolveOneWeeklyReflectionInputV1) =>
+    resolveOneWeeklyReflection(input));
+  ipcMain.handle("oneExperienceReuse:getState", () => getOneExperienceReuseState());
+  ipcMain.handle("oneExperienceReuse:latestForTask", (_e, taskId: string) =>
+    getLatestOneExperienceReuseReceipt(taskId));
+  ipcMain.handle("oneImprovementProof:getState", () => {
+    reconcileOneImprovementProofs();
+    const { evidence: _mainOnlyEvidence, ...readState } = getOneImprovementProofState();
+    return readState;
+  });
+  ipcMain.handle("oneImprovementProof:list", (_e, input: unknown) => {
+    reconcileOneImprovementProofs();
+    return listOneImprovementProofs(oneImprovementProofListTaskId(input));
+  });
+  ipcMain.handle("oneImprovementProof:latestForTask", (_e, taskId: unknown) => {
+    const exactTaskId = strictOneImprovementProofTaskId(taskId, "Improvement Proof taskId");
+    tryProduceOneImprovementProofForTask(exactTaskId);
+    const task = getCanonicalTask(exactTaskId);
+    const latest = getLatestOneImprovementProof(exactTaskId);
+    return task && latest?.currentTaskVersion === task.version ? latest : null;
+  });
+  ipcMain.handle("oneBriefing:get", () => getOneBriefingSnapshot());
+  ipcMain.handle("oneBriefing:openTask", (_e, input: OpenOneBriefingTaskInput) =>
+    resolveOneBriefingTaskNavigation(input));
+  ipcMain.handle("oneTeamPreflight:prepare", (_e, input: PrepareOneTeamPreflightInput) =>
+    prepareOneTeamPreflight(input));
+  ipcMain.handle("oneTeamPreflight:getForChat", (_e, chatId: string) =>
+    getOneTeamPreflightForChat(chatId));
+  ipcMain.handle("oneTeamPreflight:autoResolve", (_e, input: AutoResolveOneTeamPreflightInput) =>
+    autoResolveOneTeamPreflight(input));
+  ipcMain.handle("oneTeamPreflight:resolve", (_e, input: ResolveOneTeamPreflightInput) =>
+    resolveOneTeamPreflight(input));
+  ipcMain.handle("oneTeamPreflight:failStart", (_e, ref: OneTeamPreflightRef) =>
+    failOneTeamPreflightStart(ref));
+  ipcMain.handle("oneBriefing:prepareAction", (_e, input: PrepareOneBriefingActionInput) =>
+    prepareOneBriefingActionPacket(input));
+  ipcMain.handle("oneBriefing:getAction", (_e, input: PrepareOneBriefingActionInput) =>
+    getOneBriefingActionPacketForCandidate(input));
+  ipcMain.handle("oneBriefing:startAction", (_e, input: StartOneBriefingActionInput) => {
+    try {
+      const reservation = reserveOneBriefingActionExecution(input);
+      if (reservation.kind === "already_started") {
+        return {
+          ok: true,
+          packet: reservation.packet,
+          runId: reservation.packet.run?.runId ?? null,
+          errorCategory: null,
+        };
+      }
+      try {
+        const started = invocationService.start({
+          runId: reservation.ref.reservedRunId,
+          chatId: reservation.chatId,
+          // InvocationService replaces both this placeholder and every mutable
+          // execution field from the Main-only packet capability.
+          userPrompt: "Briefing review",
+          taskIntent: "task",
+          oneMode: true,
+          oneBriefingActionRef: reservation.ref,
+          locale: currentUiLocale(),
+          permissions: "read",
+          sessionRouting: false,
+          hubMode: "local-only",
+          borrowAgents: [],
+        });
+        const packet = getOneBriefingActionPacket(reservation.packet.packetId);
+        if (!packet || packet.status !== "started" || packet.run?.runId !== started.runId) {
+          const recovered = failOneBriefingActionStart(reservation.ref, "recovery_required");
+          return { ok: false, packet: recovered, runId: null, errorCategory: "recovery_required" };
+        }
+        return { ok: true, packet, runId: started.runId, errorCategory: null };
+      } catch {
+        const category = hasInvocationRunReceipt(reservation.ref.reservedRunId)
+          ? "recovery_required" as const
+          : "start_rejected" as const;
+        const packet = failOneBriefingActionStart(reservation.ref, category);
+        return { ok: false, packet, runId: null, errorCategory: category };
+      }
+    } catch (error) {
+      if (!(error instanceof OneBriefingActionError)) throw error;
+      const packet = getOneBriefingActionPacket(input?.packetId ?? "invalid");
+      if (!packet) throw error;
+      return { ok: false, packet, runId: null, errorCategory: error.category };
+    }
+  });
+  ipcMain.handle("oneBriefing:setPreferences", (_e, input: {
+    cadence?: OneBriefingPreferences["cadence"];
+    channels?: OneBriefingChannel[];
+    quietHours?: OneBriefingPreferences["quietHours"];
+  }) => setOneBriefingPreferences(input ?? {}));
+  ipcMain.handle("oneBriefing:feedback", (_e, input: {
+    candidateId: string;
+    expectedDetectedAt: string;
+    feedback: OneBriefingFeedback;
+  }) => {
+    if (!input || typeof input !== "object") throw new TypeError("Invalid One Briefing feedback request");
+    return recordOneBriefingFeedback(input);
+  });
+  ipcMain.handle("oneProjectDeadlines:getState", (_e, projectId: string) =>
+    getOneProjectDeadlineState(projectId));
+  ipcMain.handle("oneProjectDeadlines:connect", (_e, input: ConnectOneProjectDeadlineInput) =>
+    connectOneProjectDeadline(input));
+  ipcMain.handle("oneProjectDeadlines:remove", (_e, input: RemoveOneProjectDeadlineInput) =>
+    removeOneProjectDeadline(input));
   // 사이드바 "고용 중" 로스터 — 리스 캐시 + 기억 둥지(~/.agentlas/networking) 스캔.
   ipcMain.handle("hired:list", () => listHiredAgents());
 
@@ -3090,6 +3652,19 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("invoke:attach", (_event, chatId: string) => invocationService.attach(chatId));
   ipcMain.handle("invoke:receipt", (_event, runId: string) => invocationService.receipt(runId));
   ipcMain.handle("invoke:latestReceipt", (_event, chatId: string) => invocationService.latestReceipt(chatId));
+  ipcMain.handle("invoke:latestOneSurface", (_event, input: unknown) => {
+    if (
+      !input ||
+      typeof input !== "object" ||
+      Array.isArray(input) ||
+      typeof (input as { runId?: unknown }).runId !== "string" ||
+      typeof (input as { chatId?: unknown }).chatId !== "string" ||
+      typeof (input as { taskId?: unknown }).taskId !== "string"
+    ) {
+      throw new TypeError("Invalid OneSurface restore request");
+    }
+    return invocationService.latestOneSurface(input as { runId: string; chatId: string; taskId: string });
+  });
   ipcMain.handle("invoke:history", (_event, chatId: string) => invocationService.history(chatId));
   ipcMain.handle("invoke:clearHistory", (_e, chatId: string) => {
     // Renderer busy는 projection일 뿐 권위가 아니다. attach가 끝나기 전의 창에서도

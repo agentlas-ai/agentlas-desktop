@@ -25,11 +25,7 @@ import {
 } from "../runtime/workload-routing";
 import { pickRunner } from "../runtime/selection";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
-import {
-  isMobileReadRuntimeAllowed,
-  MobileReadRuntimeBoundaryError,
-  revalidateInvocationWorkspaceBinding,
-} from "../invocation/workspace-binding";
+import { revalidateInvocationWorkspaceBinding } from "../invocation/workspace-binding";
 import { stripReplyMemoryEventsReadOnly } from "../memory/curator";
 import { STORMBREAKER_LOOP_PROTOCOL } from "../hephaestus/loop-engineering";
 import type { CoreStormbreakerHarness } from "../hephaestus/commands";
@@ -38,6 +34,11 @@ import type { CoreStormbreakerHarness } from "../hephaestus/commands";
 // 각 작업 = 실 LLM 호출이라 비용이 나가므로 보수적으로. (동시 실행 수는 별개로 슬라이더가 제어)
 const SWARM_MAX_TASKS = 24;
 const SWARM_MAX_ROUNDS = 100_000;
+
+function mainOneProfileContext(req: BorrowedTaskForceParams["req"]): string {
+  const value = (req as BorrowedTaskForceParams["req"] & { oneProfileContext?: unknown }).oneProfileContext;
+  return typeof value === "string" && value.length > 0 && value.length <= 16_000 ? value : "";
+}
 
 function restrictedSwarmText(
   p: BorrowedTaskForceParams,
@@ -221,14 +222,14 @@ export async function runSwarmInvocation(
   if (p.stormbreakerMode && !p.stormbreakerHarness) {
     throw new Error("Stormbreaker requires the canonical Goal + UltraCode harness from Agentlas Core.");
   }
-  // 대화 연속성 — 스웜으로 빠져도 같은 채팅의 맥락이 워커/신시사이저에 전달돼야 한다
-  // (2026-07-16 세션유지 계약). persistUserMessage가 이미 실행됐으므로 방금 저장된
-  // 이번 턴 user 메시지는 히스토리에서 제외한다.
+  // 대화 연속성 — 스웜으로 빠져도 같은 채팅의 맥락이 워커/신시사이저에 전달돼야 한다.
+  // Main이 현재 턴을 저장하기 전에 캡처한 히스토리를 우선 사용한다.
   let conversationContext = "";
   try {
-    const rawHistory = listChatMessages(p.chat.id, 60);
-    const priorHistory =
-      rawHistory.length > 0 && rawHistory[rawHistory.length - 1].role === "user"
+    const rawHistory = p.priorHistory ?? listChatMessages(p.chat.id, 60);
+    const priorHistory = p.priorHistory
+      ? rawHistory
+      : rawHistory.length > 0 && rawHistory[rawHistory.length - 1].role === "user"
         ? rawHistory.slice(0, -1)
         : rawHistory;
     conversationContext = renderConversationContext(
@@ -240,11 +241,6 @@ export async function runSwarmInvocation(
     // 히스토리 조회 실패가 스웜 실행 자체를 막아선 안 된다 — 맥락 없이 진행.
   }
   const coreHarnessPrompt = p.stormbreakerMode ? p.stormbreakerHarness?.system_prompt : undefined;
-  if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(p.active.kind)) {
-    throw new MobileReadRuntimeBoundaryError(
-      "This swarm runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
-    );
-  }
   const sameRuntime = (left: typeof p.active, right: typeof p.active) => (
     left.kind === right.kind && left.backend === right.backend && left.source === right.source
   );
@@ -253,14 +249,7 @@ export async function runSwarmInvocation(
   const runnableRuntimes = availableRuntimes.filter((runtime, index, list) => (
     list.findIndex((candidate) => sameRuntime(candidate, runtime)) === index && Boolean(pickRunner(runtime))
   ));
-  const candidateRuntimes = p.restrictedReadBoundary
-    ? runnableRuntimes.filter((runtime) => isMobileReadRuntimeAllowed(runtime.kind))
-    : runnableRuntimes;
-  if (p.restrictedReadBoundary && candidateRuntimes.length === 0) {
-    throw new MobileReadRuntimeBoundaryError(
-      "This swarm has no verified restricted read-only runtime. Select BYOK or Ollama on Desktop.",
-    );
-  }
+  const candidateRuntimes = runnableRuntimes;
   if (candidateRuntimes.length === 0) candidateRuntimes.push(p.active);
   const runtimeInventory = workloadRuntimeInventory(candidateRuntimes);
   const runId = p.req.runId ?? `swarm-${Date.now()}`;
@@ -462,11 +451,6 @@ export async function runSwarmInvocation(
       task: task.brief || task.title,
       includeOperational: false,
     });
-    if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
-      throw new MobileReadRuntimeBoundaryError(
-        "This swarm worker runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
-      );
-    }
     if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
     const result = await taskRunner.runner(
       {
@@ -478,6 +462,7 @@ export async function runSwarmInvocation(
             p.orchestratorAgent.id,
             p.orchestratorAgent.systemPrompt,
           ),
+          !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
           coreHarnessPrompt,
           swarmProtocol(goal, board, task, runtimeInventory, conversationContext),
           p.stormbreakerMode ? STORMBREAKER_LOOP_PROTOCOL : "",
@@ -576,11 +561,6 @@ export async function runSwarmInvocation(
       task: goal,
       includeOperational: false,
     });
-    if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
-      throw new MobileReadRuntimeBoundaryError(
-        "This swarm synthesis runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
-      );
-    }
     if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
     const result = await synthesisRunner.runner(
       {
@@ -589,6 +569,7 @@ export async function runSwarmInvocation(
             p.orchestratorAgent.id,
             p.orchestratorAgent.systemPrompt,
           ),
+          !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
           coreHarnessPrompt,
           p.stormbreakerMode ? STORMBREAKER_LOOP_PROTOCOL : "",
           "You are the synthesizer of an agent swarm. Below are the results your peers produced for the shared goal.",

@@ -1,4 +1,5 @@
 import os from "node:os";
+import { randomBytes } from "node:crypto";
 
 import type {
   MobileBridgeDeviceSummary,
@@ -16,15 +17,18 @@ import {
   loadOrCreateMobileBridgeCredential,
   loadOrCreateMobileBridgeHostIdentity,
   readMobileBridgeEndpointManifest,
+  revokeAllStoredMobileBridgeDevices,
   writeMobileBridgeEndpointManifest,
   type MobileBridgeEndpointManifest,
   type MobileBridgePairingChangeReason,
 } from "./pairing";
 import { MobileBridgeRequestReplayStore } from "./replay";
 import { AgentlasMobileBridgeServer } from "./server";
+import { MobileBridgeAccountPairingClient } from "./account-pairing";
 import { MobileBridgeCloudRelay } from "./relay";
 import { loadOrCreateMobileBridgeTls, preferredMobileBridgeHost } from "./tls";
 import { getDefaultOntologyHubClient } from "./ontology-hub-client";
+import { getSessionCookieHeader } from "../auth";
 import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
 import {
   TerminalOntologyLoadoutFeedWriter,
@@ -40,6 +44,7 @@ interface MobileBridgeRuntimeOptions {
 interface RunningBridge {
   authority: MobileBridgeAuthorityHandle;
   pairing: MobileBridgePairingManager;
+  accountPairing: MobileBridgeAccountPairingClient;
   server: AgentlasMobileBridgeServer;
   relay: MobileBridgeCloudRelay;
   manifest: MobileBridgeEndpointManifest;
@@ -174,8 +179,16 @@ async function startBridgeInternal(
 ): Promise<MobileBridgeRuntimeStatus> {
   if (running) return mobileBridgeRuntimeStatus();
   lastError = null;
+  // A credential issued under an earlier account must never become usable on
+  // a signed-out boot. This covers TTL expiry during keychain restore and a
+  // previous shutdown that happened before explicit logout cleanup completed.
+  if (!getSessionCookieHeader()) {
+    revokeAllStoredMobileBridgeDevices(options.userDataPath);
+  }
   const identity = loadOrCreateMobileBridgeHostIdentity(options.userDataPath);
+  const accountPairing = new MobileBridgeAccountPairingClient();
   const pairing = new MobileBridgePairingManager(options.userDataPath, {
+    consumePairingAssertion: (input) => accountPairing.consumePairingAssertion(input),
     onChanged: emitMobileBridgeStateChange,
   });
   const replayStore = new MobileBridgeRequestReplayStore(options.userDataPath);
@@ -244,7 +257,7 @@ async function startBridgeInternal(
       certificateDer: tls.certificateDer,
       onStatusChanged: () => emitMobileBridgeStateChange("runtime-started"),
     });
-    running = { authority, pairing, server, relay, manifest, terminalLoadoutFeedWriter };
+    running = { authority, pairing, accountPairing, server, relay, manifest, terminalLoadoutFeedWriter };
     relay.start();
     // Refresh once at Desktop startup even when no phone is connected. This is
     // a read-only Hub query; the independent Terminal still has to opt in with
@@ -387,10 +400,19 @@ export function mobileBridgeRuntimeStatus(): MobileBridgeRuntimeStatus {
   };
 }
 
-export function issueMobileBridgePairing(): MobileBridgePairingPayload {
-  if (!running) throw new Error("Agentlas Mobile Bridge is not running");
-  const challenge = running.pairing.issueChallenge();
-  return createMobileBridgePairingPayload(challenge, running.manifest);
+export async function issueMobileBridgePairing(): Promise<MobileBridgePairingPayload> {
+  const state = running;
+  if (!state) throw new Error("Agentlas Mobile Bridge is not running");
+  const pairingAttemptId = `pair_${randomBytes(24).toString("base64url")}`;
+  const accountProof = await state.accountPairing.issueDesktopProof({
+    hostId: state.manifest.hostId,
+    pairingAttemptId,
+  });
+  // A network rebind replaces the server/manifest. Never attach a proof minted
+  // for the outgoing host instance to the replacement pairing endpoint.
+  if (running !== state) throw new Error("Agentlas Mobile Bridge changed while preparing the pairing proof");
+  const challenge = state.pairing.issueChallenge(accountProof);
+  return createMobileBridgePairingPayload(challenge, state.manifest);
 }
 
 export function listMobileBridgeDevices(): MobileBridgeDeviceSummary[] {
@@ -402,6 +424,32 @@ export function revokeMobileBridgeDevice(deviceId: string): { ok: boolean } {
   const ok = running.pairing.revokeDevice(deviceId);
   if (ok) running.server.disconnectDevice(deviceId);
   return { ok };
+}
+
+/**
+ * Account-bound pairing credentials must not survive Desktop logout, silent
+ * session invalidation, or a replacement sign-in. The stopped-server path
+ * revokes the durable file directly; the live path additionally disconnects
+ * every authenticated socket and invalidates any outstanding QR challenge.
+ */
+export function revokeAllMobileBridgeDevicesForAuthChange(
+  fallbackUserDataPath?: string,
+): { revoked: number } {
+  const state = running;
+  if (!state) {
+    const userDataPath = runtimeOptions?.userDataPath ?? fallbackUserDataPath;
+    if (!userDataPath) return { revoked: 0 };
+    return { revoked: revokeAllStoredMobileBridgeDevices(userDataPath).length };
+  }
+  state.pairing.dispose();
+  let revoked = 0;
+  for (const device of state.pairing.listDevices()) {
+    if (device.revokedAt !== null) continue;
+    if (!state.pairing.revokeDevice(device.deviceId)) continue;
+    revoked += 1;
+    state.server.disconnectDevice(device.deviceId);
+  }
+  return { revoked };
 }
 
 export async function stopAgentlasMobileBridge(): Promise<void> {

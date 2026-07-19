@@ -115,7 +115,7 @@ const SECRET_PATTERNS: Array<{ id: string; re: RegExp; label: string }> = [
   { id: "generic-secret", re: /\b(?:api[_-]?key|secret|token|password)\s*[:=]\s*['"][^'"]{8,}['"]/i, label: "hard-coded credential" },
 ];
 
-interface PackagedFile {
+export interface PackagedFile {
   path: string;
   bytes: number;
   sha256: string;
@@ -130,20 +130,37 @@ interface StaticScanResult {
   totalBytes: number;
 }
 
+/**
+ * Main-only, read-only package snapshot used by review workflows. It reuses
+ * the exact Cloud/Hub path, symlink, stable-read, size and secret scanner, but
+ * deliberately performs no package write and no Cloud/Hub request.
+ */
+export interface CloudAgentLocalReviewScan {
+  rootPath: string;
+  packageHash: string;
+  files: CloudAgentPackageFile[];
+  included: PackagedFile[];
+  findings: CloudAgentSecurityFinding[];
+  totalBytes: number;
+}
+
 type PackageSnapshot = Map<string, PackagedFile>;
+
+function resolveCloudAgentRoot(inputPath: string): string {
+  const requestedRoot = path.resolve(inputPath);
+  try {
+    const rootStat = fs.lstatSync(requestedRoot);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("not a real directory");
+    return fs.realpathSync.native(requestedRoot);
+  } catch {
+    throw new Error(`Cloud agent root is not a directory: ${inputPath}`);
+  }
+}
 
 export async function packageAndReviewCloudAgent(
   input: CloudAgentPackageRequest,
 ): Promise<CloudAgentPackageResult> {
-  const requestedRoot = path.resolve(input.rootPath);
-  let rootPath: string;
-  try {
-    const rootStat = fs.lstatSync(requestedRoot);
-    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("not a real directory");
-    rootPath = fs.realpathSync.native(requestedRoot);
-  } catch {
-    throw new Error(`Cloud agent root is not a directory: ${input.rootPath}`);
-  }
+  const rootPath = resolveCloudAgentRoot(input.rootPath);
 
   const visibility = input.visibility ?? "private-link";
   const isPublicHubPublish = visibility === "marketplace";
@@ -623,6 +640,25 @@ function scanAgentFolder(rootPath: string, restoredExecutablePaths: ReadonlySet<
   }
 
   return { files, included, findings, totalBytes };
+}
+
+export function scanCloudAgentFolderForLocalReview(rootPathValue: string): CloudAgentLocalReviewScan {
+  const rootPath = resolveCloudAgentRoot(rootPathValue);
+  const restoreMarker = readCloudAgentRestoreMarker(rootPath);
+  const restoredExecutablePaths = new Set(
+    restoreMarker?.packageHashVersion === PACKAGE_HASH_VERSION
+      ? restoreMarker.executablePaths ?? []
+      : [],
+  );
+  const scan = scanAgentFolder(rootPath, restoredExecutablePaths);
+  return {
+    rootPath,
+    packageHash: hashPackage(scan.included),
+    files: scan.files.map((file) => ({ ...file })),
+    included: scan.included.map((file) => ({ ...file })),
+    findings: scan.findings.map((finding) => ({ ...finding })),
+    totalBytes: scan.totalBytes,
+  };
 }
 
 export function portableExecutableForHost(

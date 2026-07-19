@@ -279,6 +279,10 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
       if (!config.includes(required)) throw new Error(`${configName} is missing ${required}`);
     }
   }
+  const baseBuilderConfig = readFileSync(join(root, "electron-builder.yml"), "utf8");
+  if (!baseBuilderConfig.includes("from: build-resources/node-runtime")) {
+    throw new Error("electron-builder.yml is missing the private Windows Node runtime");
+  }
 
   const releaseWorkflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
   const signedWorkflow = readFileSync(join(root, ".github", "workflows", "release-signed-mac.yml"), "utf8");
@@ -297,6 +301,9 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
   }
   if (!releaseWorkflow.includes("npm run fetch:python")) {
     throw new Error("cross-platform release does not fetch pinned standalone Python");
+  }
+  if (!/runner\.os == 'Windows'[\s\S]{0,160}npm run fetch:node/.test(releaseWorkflow)) {
+    throw new Error("cross-platform release does not fetch the pinned Windows Node runtime");
   }
   if (!signedWorkflow.includes("--public-allowlist") ||
       !signedWorkflow.includes("--verification-file=release/desktop-release-verification.json")) {

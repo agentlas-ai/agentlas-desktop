@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
 import Link from "next/link";
 import {
@@ -21,7 +21,8 @@ import { KeyStatusBanner } from "@/components/KeyStatusBanner";
 import { McpBuildInterviewCard } from "@/components/build/McpBuildInterviewCard";
 import { McpAttachmentReceiptCard } from "@/components/build/McpAttachmentReceiptCard";
 import { CloudSaveChoiceDialog } from "@/components/build/CloudSaveChoiceDialog";
-import type { DirListing, FsReadScope, HephaestusStatus, RuntimeSelection, RuntimeStatus } from "@/lib/types";
+import { OneSuggestionReviewHandoffBanner, type OneReviewSeedApplyResult } from "@/components/one/OneSuggestionReviewHandoff";
+import type { DirListing, FsReadScope, HephaestusStatus, OneSuggestionReviewSeed, RuntimeSelection, RuntimeStatus } from "@/lib/types";
 import {
   subscribe as buildSubscribe,
   getSnapshot as getBuildSnapshot,
@@ -175,6 +176,32 @@ export default function BuildPage() {
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
   const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, result, registered, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpReceipt, cloudSaveChoice } = s;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const applyOneReviewSeed = useCallback((seed: OneSuggestionReviewSeed): OneReviewSeedApplyResult => {
+    if (seed.kind !== "agent_build" || seed.targetSurface !== "build" || seed.buildMode !== "single") return "blocked";
+    if (status === null) return "defer";
+    if (!status.available) return "blocked";
+    const current = getBuildSnapshot();
+    if (
+      current.phase !== "idle"
+      || current.request !== ""
+      || current.mode !== ""
+      || current.attachments.length !== 0
+      || current.log.length !== 0
+      || current.runId !== null
+      || current.result !== null
+      || current.pendingQuestions.length !== 0
+      || current.pendingAllocation !== null
+      || current.mcpPlan !== null
+      || current.mcpReceipt !== null
+      || current.cloudSaveChoice !== null
+    ) return "blocked";
+    setBuildMode("single");
+    setBuildRequest(ko
+      ? "반복해서 완료한 작업 패턴을 맡을 단일 에이전트 하나를 새로 설계해줘. 역할·입력·출력·권한 경계를 먼저 인터뷰하고, 기존 에이전트의 시스템 프롬프트·파일·메모리·로컬 경로·자격 증명은 복사하지 마."
+      : "Design one new single agent for the repeated completed-work pattern. Interview me first about its role, inputs, outputs, and permission boundaries; do not copy any existing system prompt, files, memory, local paths, or credentials.");
+    return "applied";
+  }, [ko, status]);
 
   // 드롭/파일 인풋 → 실제 디스크 경로(webUtils) → 스토어 첨부. 경로를 못 얻으면(브라우저 등) 스킵.
   const addDroppedFiles = async (files: FileList) => {
@@ -426,6 +453,10 @@ export default function BuildPage() {
           </header>
 
           <KeyStatusBanner mode="banner" />
+
+          <Suspense fallback={null}>
+            <OneSuggestionReviewHandoffBanner surface="build" locale={locale} onReviewSeed={applyOneReviewSeed} />
+          </Suspense>
 
           {engineMissing && (
             <div className="build-alert">

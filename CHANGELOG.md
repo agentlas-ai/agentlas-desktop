@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.8.56 — 2026-07-20
+
+### Added
+
+- Agentlas One is now a first-class Desktop experience: one simple conversation
+  can turn a request into a structured result while One quietly chooses,
+  assembles, and coordinates the smallest useful agent team.
+- One keeps approved preferences, reusable experience, measured improvements,
+  project knowledge, task logs, and generated-result references in an organized
+  local `~/.agentlas/one` workspace without exposing raw private transcripts.
+- Proactive briefings surface useful risks, unfinished work, and ready results
+  before the user has to know which agent, tool, or workflow to choose.
+- Windows packages include a private pinned Node.js runtime so CLI providers can
+  be installed from the Connect action even on a new PC without Node or npm.
+
+### Changed
+
+- One results adapt to the work: comparisons, plans, timelines, documents,
+  files, media, and evidence render as compact, responsive interfaces instead
+  of a developer-oriented event stream.
+- The composer starts as a single line, grows naturally through ten lines, and
+  then scrolls. System messages, failures, approvals, and follow-up guidance use
+  the conversation language and everyday wording.
+- One can suggest creating a reusable agent, keeping a recurring team, or
+  preparing a privacy-safe Hub derivative only after real repeated use. Nothing
+  is published, purchased, or sent outside the device without confirmation.
+- Mobile-facing One projections are scoped to the selected paired Desktop so
+  conversations and briefings from different computers never mix. This release
+  publishes Desktop installers only; mobile store builds are unchanged.
+
+### Fixed
+
+- Hidden implementation details, raw provider errors, internal IDs, risk codes,
+  and orchestration vocabulary no longer leak into beginner-facing One screens.
+- Sidebar navigation keeps unfinished experimental agent apps out of the public
+  surface and gives One a minimal full-width workspace.
+- Agent Hub credit metadata no longer competes with agent titles for horizontal
+  space.
+
+Agentlas OS v1.1.50 remains pinned at
+5fc22464c1db33dabc0d4de2170053d1584b5682.
+These source changes do not themselves publish a Git tag, installer, GitHub
+release, or update feed.
+
 ## 0.8.55 — 2026-07-17
 
 ### Added

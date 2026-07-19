@@ -19,6 +19,7 @@ import {
   type MobileBridgeEventName,
   type MobileBridgeJsonValue,
   type MobileBridgePairExchangeRequest,
+  type MobileBridgePairExchangeFailure,
   type MobileBridgePairExchangeResponse,
   type MobileBridgeRpcRequest,
   type MobileBridgeServerMessage,
@@ -106,6 +107,11 @@ export interface MobileBridgeAuthorityEvent {
  */
 export interface MobileBridgeAuthority {
   snapshot(context: MobileBridgeConnectionContext): Promise<MobileBridgeSnapshot>;
+  pairingVerification?(context: MobileBridgeConnectionContext): Promise<{
+    hostId: string;
+    sampleTaskId: string | null;
+    sampleTaskVersion: number | null;
+  }>;
   request(
     request: MobileBridgeRpcRequest,
     context: MobileBridgeConnectionContext,
@@ -121,11 +127,13 @@ export interface MobileBridgeAuthenticatedDevice {
 
 export interface MobileBridgePairingAuthority {
   authenticate(token: string): MobileBridgeAuthenticatedDevice | null;
-  exchange(request: MobileBridgePairExchangeRequest): {
+  exchange(request: MobileBridgePairExchangeRequest): Promise<{
     deviceId: string;
     token: string;
     issuedAt: string;
-  };
+  }>;
+  /** Roll back a credential if post-exchange verification cannot be produced. */
+  revokeDevice(deviceId: string): boolean;
 }
 
 export interface AgentlasMobileBridgeServerOptions {
@@ -235,12 +243,19 @@ function responseForRequest(
     : { ...response, id: requestId };
 }
 
-type PairingFailureCode = "pairing_denied" | "pairing_expired" | "pairing_unavailable";
+type PairingFailureCode = MobileBridgePairExchangeFailure["error"]["code"];
 
 function pairingFailureCode(value: unknown): PairingFailureCode | null {
   if (!value || typeof value !== "object") return null;
   const code = (value as { code?: unknown }).code;
-  return code === "pairing_denied" || code === "pairing_expired" || code === "pairing_unavailable"
+  return code === "pairing_denied" ||
+    code === "pairing_expired" ||
+    code === "pairing_unavailable" ||
+    code === "invalid_account_assertion" ||
+    code === "account_mismatch" ||
+    code === "binding_mismatch" ||
+    code === "assertion_replayed" ||
+    code === "account_authority_unavailable"
     ? code
     : null;
 }
@@ -533,28 +548,83 @@ export class AgentlasMobileBridgeServer {
       this.sendPairResponse(response, 400, parsed.error);
       return;
     }
+    let issuedCredential: Awaited<ReturnType<MobileBridgePairingAuthority["exchange"]>> | null = null;
     try {
-      const credential = this.pairing.exchange(parsed.value);
       const relay = this.relayPairingInfo?.() ?? null;
+      const credential = await this.pairing.exchange(parsed.value);
+      issuedCredential = credential;
+      const pairingContext: MobileBridgeConnectionContext = {
+        connectionId: `pair-exchange:${credential.deviceId}`,
+        remoteAddress: request.socket.remoteAddress ?? null,
+        connectedAt: credential.issuedAt,
+        deviceId: credential.deviceId,
+        deviceName: parsed.value.device.name,
+        devicePlatform: parsed.value.device.platform,
+        devBootstrap: false,
+      };
+      const seed = this.authority.pairingVerification
+        ? await this.authority.pairingVerification(pairingContext)
+        : null;
+      const verification = seed
+        ? {
+            verificationId: `pairing_${createHash("sha256")
+              .update(`${parsed.value.id}:${credential.deviceId}:${credential.issuedAt}`)
+              .digest("hex")
+              .slice(0, 32)}`,
+            hostId: seed.hostId,
+            issuedAt: credential.issuedAt,
+            sampleTaskId: seed.sampleTaskId,
+            sampleTaskVersion: seed.sampleTaskVersion,
+          }
+        : null;
       this.sendPairResponse(response, 200, {
         v: MOBILE_BRIDGE_PROTOCOL_VERSION,
         type: "pair.exchange.response",
         id: parsed.value.id,
         ok: true,
         credential,
+        ...(verification ? { verification } : {}),
         ...(relay ? { relay } : {}),
       });
     } catch (error) {
+      if (issuedCredential) {
+        try {
+          this.pairing.revokeDevice(issuedCredential.deviceId);
+        } catch {
+          // The original failure remains authoritative. A production pairing
+          // manager persists revocation synchronously; never expose the token.
+        }
+      }
       // DESKTOP_MOBILE_BRIDGE: Never log the raw request/code or returned token.
       const code = pairingFailureCode(error) ?? "pairing_unavailable";
-      const status = code === "pairing_expired" ? 410 : code === "pairing_denied" ? 401 : 503;
+      const status = code === "pairing_expired"
+        ? 410
+        : code === "pairing_denied" || code === "invalid_account_assertion"
+          ? 401
+          : code === "account_mismatch" || code === "binding_mismatch"
+            ? 403
+            : code === "assertion_replayed"
+              ? 409
+              : 503;
       this.sendPairResponse(
         response,
         status,
         mobileBridgePairFailure(
           parsed.value.id,
           code,
-          code === "pairing_expired" ? "Pairing code expired" : code === "pairing_denied" ? "Pairing denied" : "Pairing unavailable",
+          code === "pairing_expired"
+            ? "Pairing code expired"
+            : code === "pairing_denied"
+              ? "Pairing denied"
+              : code === "invalid_account_assertion"
+                ? "Mobile account assertion is invalid"
+                : code === "account_mismatch"
+                  ? "Desktop and Mobile Agentlas accounts do not match"
+                  : code === "binding_mismatch"
+                    ? "Mobile account assertion is bound to a different pairing attempt"
+                    : code === "assertion_replayed"
+                      ? "Mobile account assertion was already used"
+                      : "Agentlas account pairing authority is unavailable",
         ),
       );
     }

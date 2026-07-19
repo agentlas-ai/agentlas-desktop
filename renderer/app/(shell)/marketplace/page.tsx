@@ -1042,6 +1042,7 @@ function AgentCard({
   const perCallCredits = typeof listing.perCallCredits === "number" && Number.isFinite(listing.perCallCredits)
     ? listing.perCallCredits
     : entityKind === "multi" ? TEAM_CALL_CREDITS : plugin ? 0 : AGENT_CALL_CREDITS;
+  const creditTooltipId = `hub-credit-${entityKind}-${listing.slug}`;
   const author = listing.ownerName ? (ko ? `${listing.ownerName} 제공` : `by ${listing.ownerName}`) : "Agentlas Hub";
   const command = plugin
     ? (listing.installCli || `npx agentlas@latest plugin add ${listing.slug}`)
@@ -1090,19 +1091,28 @@ function AgentCard({
           <div className="portal-card-title hub-card-title">{loc.name}</div>
           <div className="hub-card-author">{author}</div>
         </div>
-        <RdTag
-          className="hub-credit-tag"
-          bg={plugin ? C.peach : entityKind === "multi" ? C.purple : C.green}
-          title={callable && !plugin
-            ? (ko ? `24시간 사용 · ${perCallCredits} 크레딧` : `24-hour use · ${perCallCredits} credits`)
-            : undefined}
-        >
-          {plugin
-            ? (ko ? "도구" : "Tool")
-            : callable
-              ? (ko ? `24시간 사용 · ${perCallCredits} 크레딧` : `24-hour use · ${perCallCredits} credits`)
-              : (ko ? "설치 전용" : "Install only")}
-        </RdTag>
+        {callable && !plugin ? (
+          <span
+            className="hub-credit-orb-wrap"
+            tabIndex={0}
+            aria-label={ko
+              ? `24시간 사용, ${perCallCredits} 크레딧`
+              : `24-hour use, ${perCallCredits} credits`}
+            aria-describedby={creditTooltipId}
+          >
+            <span className="hub-credit-orb" aria-hidden="true">{perCallCredits}</span>
+            <span id={creditTooltipId} className="hub-credit-tooltip" role="tooltip">
+              {ko ? `24시간 사용 · ${perCallCredits} 크레딧` : `24-hour use · ${perCallCredits} credits`}
+            </span>
+          </span>
+        ) : (
+          <RdTag
+            className="hub-credit-tag"
+            bg={plugin ? C.peach : C.purple}
+          >
+            {plugin ? (ko ? "도구" : "Tool") : (ko ? "설치 전용" : "Install only")}
+          </RdTag>
+        )}
       </div>
       <div className="hub-card-copy">{loc.tagline}</div>
       {statFacts.length > 0 && (

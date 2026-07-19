@@ -3,11 +3,17 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  MOBILE_BRIDGE_PAIR_ASSERTION_AUDIENCE,
   MOBILE_BRIDGE_PAIR_EXCHANGE_PATH,
   MOBILE_BRIDGE_PROTOCOL_VERSION,
   type MobileBridgePairExchangeRequest,
   type MobileBridgePairingPayload,
 } from "../../shared/mobile-bridge";
+import {
+  MobileBridgeAccountPairingError,
+  type MobileBridgeConsumedPairingAssertion,
+  type MobileBridgeDesktopAccountProof,
+} from "./account-pairing";
 
 const BRIDGE_DIR = "mobile-bridge";
 const HOST_IDENTITY_FILE = "identity.json";
@@ -58,6 +64,10 @@ export interface MobileBridgeEndpointManifest {
 export interface MobileBridgePairingChallenge {
   code: string;
   expiresAt: string;
+  hostId: string;
+  pairingAttemptId: string;
+  desktopAccountProof: string;
+  accountAuthorityOrigin: string;
 }
 
 interface StoredMobileBridgeDevice {
@@ -93,7 +103,12 @@ export interface MobileBridgeIssuedCredential {
 export type MobileBridgePairingErrorCode =
   | "pairing_denied"
   | "pairing_expired"
-  | "pairing_unavailable";
+  | "pairing_unavailable"
+  | "invalid_account_assertion"
+  | "account_mismatch"
+  | "binding_mismatch"
+  | "assertion_replayed"
+  | "account_authority_unavailable";
 
 export class MobileBridgePairingError extends Error {
   constructor(readonly code: MobileBridgePairingErrorCode, message: string) {
@@ -106,6 +121,13 @@ export interface MobileBridgePairingManagerOptions {
   ttlMs?: number;
   maxAttempts?: number;
   now?: () => Date;
+  consumePairingAssertion?: (input: {
+    pairingAssertion: string;
+    audience: typeof MOBILE_BRIDGE_PAIR_ASSERTION_AUDIENCE;
+    hostId: string;
+    deviceNonce: string;
+    pairingAttemptId: string;
+  }) => Promise<MobileBridgeConsumedPairingAssertion>;
   onChanged?: (reason: MobileBridgePairingChangeReason) => void;
 }
 
@@ -120,6 +142,11 @@ interface ActiveChallenge {
   codeHash: Buffer;
   expiresAtMs: number;
   attempts: number;
+  hostId: string;
+  pairingAttemptId: string;
+  desktopAccountProof: string;
+  expectedAccountSubject: string;
+  accountAuthorityOrigin: string;
 }
 
 function bridgeDir(userDataPath: string): string {
@@ -214,6 +241,53 @@ function validToken(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43,128}$/.test(value);
 }
 
+function validPairingAttemptId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(value);
+}
+
+function validAccountSubject(value: unknown): value is string {
+  return typeof value === "string" && /^mps_[A-Za-z0-9_-]{43}$/.test(value);
+}
+
+function validOpaqueProof(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 4096 && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(value);
+}
+
+function validAccountAuthorityOrigin(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 512) return false;
+  try {
+    const parsed = new URL(value);
+    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const loopback = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+    return (parsed.protocol === "https:" || (parsed.protocol === "http:" && loopback)) &&
+      !parsed.username && !parsed.password && !parsed.search && !parsed.hash &&
+      (parsed.pathname === "" || parsed.pathname === "/") && parsed.origin === value;
+  } catch {
+    return false;
+  }
+}
+
+function sameStableValue(left: string, right: string): boolean {
+  return timingSafeEqual(hashSecret(left), hashSecret(right));
+}
+
+function accountPairingFailureCode(error: unknown): MobileBridgePairingErrorCode {
+  if (!(error instanceof MobileBridgeAccountPairingError)) return "account_authority_unavailable";
+  switch (error.code) {
+    case "invalid_proof":
+    case "invalid_request":
+      return "invalid_account_assertion";
+    case "account_mismatch":
+      return "account_mismatch";
+    case "binding_mismatch":
+      return "binding_mismatch";
+    case "replayed":
+      return "assertion_replayed";
+    default:
+      return "account_authority_unavailable";
+  }
+}
+
 function validCredential(value: unknown): value is MobileBridgeCredential {
   return (
     isRecord(value) &&
@@ -262,6 +336,28 @@ function readDevices(userDataPath: string): StoredMobileBridgeDevices {
 
 function writeDevices(userDataPath: string, store: StoredMobileBridgeDevices): void {
   writePrivateJsonAtomic(mobileBridgeDeviceStorePath(userDataPath), store);
+}
+
+/**
+ * Revokes every durable phone credential when Desktop account authority is
+ * lost or replaced. This also works while the bridge server is stopped, so a
+ * failed bind cannot leave an old-account bearer token valid for the next
+ * successful start.
+ */
+export function revokeAllStoredMobileBridgeDevices(
+  userDataPath: string,
+  now: Date = new Date(),
+): string[] {
+  const store = readDevices(userDataPath);
+  const revokedAt = now.toISOString();
+  const revoked: string[] = [];
+  for (const device of store.devices) {
+    if (device.revokedAt !== null) continue;
+    device.revokedAt = revokedAt;
+    revoked.push(device.deviceId);
+  }
+  if (revoked.length > 0) writeDevices(userDataPath, store);
+  return revoked;
 }
 
 /**
@@ -429,6 +525,7 @@ export class MobileBridgePairingManager {
   private readonly ttlMs: number;
   private readonly maxAttempts: number;
   private readonly now: () => Date;
+  private readonly consumePairingAssertion?: MobileBridgePairingManagerOptions["consumePairingAssertion"];
   private readonly onChanged: (reason: MobileBridgePairingChangeReason) => void;
   private activeChallenge: ActiveChallenge | null = null;
   private activeChallengeTimer: NodeJS.Timeout | null = null;
@@ -443,6 +540,7 @@ export class MobileBridgePairingManager {
       Math.min(DEFAULT_MAX_PAIRING_ATTEMPTS, options.maxAttempts ?? DEFAULT_MAX_PAIRING_ATTEMPTS),
     );
     this.now = options.now ?? (() => new Date());
+    this.consumePairingAssertion = options.consumePairingAssertion;
     this.onChanged = options.onChanged ?? (() => {});
   }
 
@@ -450,11 +548,39 @@ export class MobileBridgePairingManager {
    * DESKTOP_MOBILE_BRIDGE: Returns the raw 128-bit nonce exactly once to an
    * explicit pairing UI. Only its SHA-256 hash remains in memory.
    */
-  issueChallenge(): MobileBridgePairingChallenge {
+  issueChallenge(accountProof: MobileBridgeDesktopAccountProof): MobileBridgePairingChallenge {
+    if (!this.consumePairingAssertion) {
+      throw new MobileBridgePairingError(
+        "account_authority_unavailable",
+        "Same-account pairing authority is unavailable",
+      );
+    }
+    if (
+      !validHostId(accountProof.hostId) ||
+      !validPairingAttemptId(accountProof.pairingAttemptId) ||
+      !validOpaqueProof(accountProof.desktopAccountProof) ||
+      !validAccountSubject(accountProof.accountSubject) ||
+      !validAccountAuthorityOrigin(accountProof.accountAuthorityOrigin) ||
+      !Number.isInteger(accountProof.expiresIn) ||
+      accountProof.expiresIn < 10 ||
+      accountProof.expiresIn > 5 * 60
+    ) {
+      throw new MobileBridgePairingError("account_authority_unavailable", "Desktop account proof is invalid");
+    }
     this.clearChallengeTimer();
     const raw = randomBytes(16).toString("base64url");
-    const expiresAtMs = this.now().getTime() + this.ttlMs;
-    const challenge: ActiveChallenge = { codeHash: hashSecret(raw), expiresAtMs, attempts: 0 };
+    const nowMs = this.now().getTime();
+    const expiresAtMs = Math.min(nowMs + this.ttlMs, nowMs + accountProof.expiresIn * 1_000);
+    const challenge: ActiveChallenge = {
+      codeHash: hashSecret(raw),
+      expiresAtMs,
+      attempts: 0,
+      hostId: accountProof.hostId,
+      pairingAttemptId: accountProof.pairingAttemptId,
+      desktopAccountProof: accountProof.desktopAccountProof,
+      expectedAccountSubject: accountProof.accountSubject,
+      accountAuthorityOrigin: accountProof.accountAuthorityOrigin,
+    };
     this.activeChallenge = challenge;
     this.activeChallengeTimer = setTimeout(() => {
       if (this.activeChallenge !== challenge) return;
@@ -464,7 +590,14 @@ export class MobileBridgePairingManager {
     }, this.ttlMs);
     this.activeChallengeTimer.unref?.();
     this.emitChanged("challenge-issued");
-    return { code: raw, expiresAt: new Date(expiresAtMs).toISOString() };
+    return {
+      code: raw,
+      expiresAt: new Date(expiresAtMs).toISOString(),
+      hostId: accountProof.hostId,
+      pairingAttemptId: accountProof.pairingAttemptId,
+      desktopAccountProof: accountProof.desktopAccountProof,
+      accountAuthorityOrigin: accountProof.accountAuthorityOrigin,
+    };
   }
 
   /**
@@ -472,7 +605,7 @@ export class MobileBridgePairingManager {
    * before disk writes, and is invalidated after bounded wrong attempts. The
    * plaintext device token is returned once and only its hash is persisted.
    */
-  exchange(request: MobileBridgePairExchangeRequest): MobileBridgeIssuedCredential {
+  async exchange(request: MobileBridgePairExchangeRequest): Promise<MobileBridgeIssuedCredential> {
     const challenge = this.activeChallenge;
     if (!challenge) {
       throw new MobileBridgePairingError("pairing_unavailable", "Pairing is not currently available");
@@ -494,9 +627,41 @@ export class MobileBridgePairingManager {
       }
       throw new MobileBridgePairingError("pairing_denied", "Pairing code was not accepted");
     }
+    if (!sameStableValue(challenge.pairingAttemptId, request.pairingAttemptId)) {
+      challenge.attempts += 1;
+      if (challenge.attempts >= this.maxAttempts) {
+        this.activeChallenge = null;
+        this.clearChallengeTimer();
+        this.emitChanged("challenge-invalidated");
+      }
+      throw new MobileBridgePairingError("binding_mismatch", "Pairing attempt binding was not accepted");
+    }
     // Consume first: a write failure must not make the nonce reusable.
     this.activeChallenge = null;
     this.clearChallengeTimer();
+
+    let consumed: MobileBridgeConsumedPairingAssertion;
+    try {
+      consumed = await this.consumePairingAssertion!({
+        pairingAssertion: request.pairingAssertion,
+        audience: request.audience,
+        hostId: challenge.hostId,
+        deviceNonce: request.deviceNonce,
+        pairingAttemptId: request.pairingAttemptId,
+      });
+    } catch (error) {
+      this.emitChanged("challenge-invalidated");
+      const code = accountPairingFailureCode(error);
+      throw new MobileBridgePairingError(code, "Mobile account assertion was not accepted");
+    }
+    if (
+      !validAccountSubject(consumed.accountSubject) ||
+      !/^mpr_[A-Za-z0-9_-]{24}$/.test(consumed.receiptId) ||
+      !sameStableValue(challenge.expectedAccountSubject, consumed.accountSubject)
+    ) {
+      this.emitChanged("challenge-invalidated");
+      throw new MobileBridgePairingError("account_mismatch", "Desktop and Mobile Agentlas accounts do not match");
+    }
 
     const token = randomBytes(32).toString("base64url");
     const issuedAt = now.toISOString();
@@ -578,8 +743,9 @@ export class MobileBridgePairingManager {
 }
 
 /**
- * DESKTOP_MOBILE_BRIDGE: The QR contains only a two-minute one-time nonce. It
- * never contains the per-device bearer credential or dev bootstrap token.
+ * DESKTOP_MOBILE_BRIDGE: The QR contains a two-minute one-time nonce plus the
+ * short-lived Web-signed Desktop account proof. It never contains the session
+ * cookie, stable account subject, per-device bearer credential, or dev token.
  */
 export function createMobileBridgePairingPayload(
   challenge: MobileBridgePairingChallenge,
@@ -588,6 +754,10 @@ export function createMobileBridgePairingPayload(
   validManifest(manifest);
   if (!/^[A-Za-z0-9_-]{22}$/.test(challenge.code)) throw new Error("Invalid Mobile Bridge pairing challenge");
   if (!Number.isFinite(Date.parse(challenge.expiresAt))) throw new Error("Invalid Mobile Bridge pairing expiry");
+  if (challenge.hostId !== manifest.hostId) throw new Error("Mobile Bridge account proof does not match the host identity");
+  if (!validPairingAttemptId(challenge.pairingAttemptId)) throw new Error("Invalid Mobile Bridge pairing attempt");
+  if (!validOpaqueProof(challenge.desktopAccountProof)) throw new Error("Invalid Mobile Bridge Desktop account proof");
+  if (!validAccountAuthorityOrigin(challenge.accountAuthorityOrigin)) throw new Error("Invalid Mobile Bridge account authority origin");
   const endpoint = new URL(manifest.url);
   endpoint.protocol = manifest.secure ? "https:" : "http:";
   endpoint.pathname = MOBILE_BRIDGE_PAIR_EXCHANGE_PATH;
@@ -605,6 +775,9 @@ export function createMobileBridgePairingPayload(
     pairExchangeEndpoint: endpoint.toString(),
     code: challenge.code,
     expiresAt: challenge.expiresAt,
+    desktopAccountProof: challenge.desktopAccountProof,
+    pairingAttemptId: challenge.pairingAttemptId,
+    accountAuthorityOrigin: challenge.accountAuthorityOrigin,
     certificateFingerprint: manifest.certificateFingerprint,
     certificateDer: null,
   };

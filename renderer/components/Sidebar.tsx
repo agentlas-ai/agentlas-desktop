@@ -31,7 +31,7 @@ import {
   IconUsers,
 } from "./Icon";
 import { PromptPickerDialog } from "./PromptPickerDialog";
-import { PawLogo } from "./PawLogo";
+import { ProductModeMenu } from "./one/ProductModeMenu";
 import { ChatRow } from "./ChatRow";
 import { AccountChip } from "./AccountChip";
 import { VersionChip } from "./VersionChip";
@@ -502,18 +502,9 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           >
             <IconChevronRight size={16} />
           </button>
-          {/* 2) 로고 — 장식, 클릭 안 됨 */}
-          <div
-            aria-hidden
-            style={{
-              width: 36,
-              height: 30,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <PawLogo size={22} />
+          {/* 2) Agentlas 제품 전환 — One / Work */}
+          <div className="titlebar-nodrag">
+            <ProductModeMenu current="work" compact />
           </div>
           {/* 3) 새 채팅 */}
           <button
@@ -622,19 +613,9 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
           gap: 8,
         }}
       >
-        <PawLogo size={20} style={{ flexShrink: 0 }} />
-        <span
-          style={{
-            fontFamily: "var(--font-head)",
-            fontSize: 14,
-            fontWeight: 700,
-            color: "var(--ink)",
-            letterSpacing: 0,
-            flex: 1,
-          }}
-        >
-          Agentlas
-        </span>
+        <div className="titlebar-nodrag" style={{ flex: 1, minWidth: 0 }}>
+          <ProductModeMenu current="work" />
+        </div>
         <button
           onClick={toggleCollapsed}
           aria-label={t("sidebar.collapse")}

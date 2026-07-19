@@ -7,7 +7,7 @@
 // - nodeIntegration: false
 // - sandbox: true (renderer는 sandboxed)
 // - 모든 Node API는 preload → ipc 경로로만 노출
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, net, protocol, session, shell } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, net, Notification, protocol, session, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -20,6 +20,8 @@ import { registerIpcHandlers } from "./ipc";
 import { buildAppMenu } from "./menu";
 import { initStore } from "./store/db";
 import { startAutomationScheduler, stopAutomationScheduler } from "./automation-scheduler";
+import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime } from "./one/briefing";
+import { invocationService } from "./invocation/service";
 import {
   disposeAutoUpdater,
   getUpdaterState,
@@ -30,7 +32,7 @@ import {
 import { scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls } from "./updater/continuity";
 import { disposeAppFactoryLaunches } from "./app-factory/operations";
 import { disposeSiteAgentAppRuntimes } from "./site/agent-app-runtime";
-import { bootAuthFromKeychain, onAuthSessionInvalidated } from "./auth";
+import { bootAuthFromKeychain, getAuthSession, onAuthSessionInvalidated } from "./auth";
 import {
   broadcastHubBookmarkSnapshot,
   failCloseActiveHubBookmarks,
@@ -48,6 +50,8 @@ import { scrubLegacyOpenCrabCredentialUrls } from "./mcp-tools/registry";
 import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser/approval-server";
 import { startComputerUseControlServer, stopComputerUseControlServer } from "./computer-use/control-server";
 import { authorizeLocalMediaPath } from "./fs/access";
+import { serveOneArtifactProtocolRequest } from "./one/artifact-preview";
+import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
 import { initFileLogging, mainLogFilePath } from "./logging";
 import { setCurrentUiLocale } from "./ui-locale";
 import {
@@ -55,6 +59,7 @@ import {
   listMobileBridgeDevices,
   mobileBridgeRuntimeStatus,
   onMobileBridgeStateChanged,
+  revokeAllMobileBridgeDevicesForAuthChange,
   revokeMobileBridgeDevice,
   retryAgentlasMobileBridge,
   startAgentlasMobileBridge,
@@ -173,6 +178,56 @@ function applyDockIcon(): void {
 
 let mainWindow: BrowserWindow | null = null;
 let shellReadyForWindows = false;
+let oneBriefingLaunchTimer: NodeJS.Timeout | null = null;
+let oneBriefingInterval: NodeJS.Timeout | null = null;
+
+async function openOneFromNotification(): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  mainWindow.webContents.send("menu:navigate", "/one");
+}
+
+function checkOneBriefingDesktopNotification(): void {
+  if (!getAuthSession().signedIn) return;
+  if (!Notification.isSupported()) return;
+  try {
+    const candidate = claimOneBriefingDesktopNotification();
+    if (!candidate) return;
+    // Privacy boundary: OS surfaces never receive a project, Task, customer,
+    // automation title, or evidence. Details remain inside authenticated One.
+    const notification = new Notification({
+      title: "Agentlas One",
+      body: "One found something that may need your attention. Open Agentlas to review it.",
+      silent: true,
+    });
+    notification.on("click", () => { void openOneFromNotification(); });
+    notification.show();
+  } catch (error) {
+    console.warn("[one-briefing] desktop notification check failed", error);
+  }
+}
+
+function startOneBriefingScheduler(): void {
+  if (oneBriefingLaunchTimer || oneBriefingInterval) return;
+  configureOneBriefingRuntime({ activeChatIds: () => invocationService.activeChatIds() });
+  oneBriefingLaunchTimer = setTimeout(() => {
+    oneBriefingLaunchTimer = null;
+    checkOneBriefingDesktopNotification();
+  }, 8_000);
+  oneBriefingLaunchTimer.unref();
+  oneBriefingInterval = setInterval(checkOneBriefingDesktopNotification, 15 * 60 * 1_000);
+  oneBriefingInterval.unref();
+}
+
+function stopOneBriefingScheduler(): void {
+  if (oneBriefingLaunchTimer) clearTimeout(oneBriefingLaunchTimer);
+  if (oneBriefingInterval) clearInterval(oneBriefingInterval);
+  oneBriefingLaunchTimer = null;
+  oneBriefingInterval = null;
+}
 
 const allowMultiInstance = process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
 const singleInstanceLock = allowMultiInstance || app.requestSingleInstanceLock();
@@ -228,6 +283,9 @@ function registerRendererProtocol(): void {
     // symlinks and ancestor symlink escapes are rejected by the shared policy.
     try {
       const url = new URL(request.url);
+      if (url.hostname === "one-artifact") {
+        return serveOneArtifactProtocolRequest(request.url, request.headers.get("range"));
+      }
       if (url.hostname === "localfile") {
         const p = url.searchParams.get("p");
         if (p) {
@@ -355,6 +413,7 @@ app.on("before-quit", () => {
   if (quitCleanupDone) return;
   quitCleanupDone = true;
   try { stopAutomationScheduler(); } catch {}
+  try { stopOneBriefingScheduler(); } catch {}
   // 트리거 매니저 정지 — webhook 소켓/폴 상태/fs watcher 정리(설계 §3, P2). 동적 import라
   // 미기동(헤드리스)이면 조용히 스킵.
   void import("./triggers/manager").then((m) => {
@@ -442,6 +501,13 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => !DENIED_PERMISSIONS.has(permission));
   applyDockIcon();
   initStore();
+  try {
+    reconcileOneHubDerivativeDraftStorage();
+  } catch (error) {
+    // Corrupt state or unsafe ancestry stays untouched and disables this
+    // review-only path; application startup must not overwrite or delete it.
+    console.error("[one-hub-derivative] startup reconciliation blocked:", error);
+  }
   // Restore/decrypt the account before the post-migration continuity check.
   await bootAuthFromKeychain();
   // Stage 2 (post-migration, pre-bootstrap-writers): compare the live DB and
@@ -530,6 +596,7 @@ app.whenReady().then(async () => {
   // renderer remains mounted. Switch the bookmark authority boundary and
   // account UI immediately instead of waiting for a future focus event.
   disposeAuthSessionInvalidation = onAuthSessionInvalidated(() => {
+    revokeAllMobileBridgeDevicesForAuthChange(app.getPath("userData"));
     failCloseActiveHubBookmarks();
     broadcastHubBookmarkSnapshot();
     broadcastSignedOutSession();
@@ -625,6 +692,7 @@ app.whenReady().then(async () => {
     console.error("[hephaestus-sync] start failed:", err);
   }
   await createWindow();
+  startOneBriefingScheduler();
   // Warm the account-isolated Hub bookmark cache after auth restore. This is
   // intentionally non-blocking; AppShell also triggers/subscribes on mount so
   // a renderer that was not ready for this first broadcast still reconciles.

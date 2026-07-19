@@ -12,6 +12,8 @@ export type DesktopStoreEntity =
   | "agent-group"
   | "project"
   | "chat"
+  | "task"
+  | "one-profile"
   | "automation";
 
 export interface DesktopStoreChange {

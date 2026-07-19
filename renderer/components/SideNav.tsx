@@ -1,13 +1,13 @@
 // 좌측 글로벌 내비게이션 사이드바 — 기존 상단 TopNavbar를 대체.
 // 레퍼런스(Untitled UI) 패턴: 로고 헤더 → 검색 → 1차 메뉴 → 펼침 섹션 → 하단 설정/계정.
-//   · 상단 드롭다운(Agent Forge/Agent Apps/Hub/Environment)을 펼침 섹션으로 변환.
+//   · 상단 드롭다운(Agent Cloud/Environment)을 펼침 섹션으로 변환.
 //   · 접기(collapsed) 모드: 아이콘만 + hover 툴팁. 상태는 localStorage 영속.
 //   · 최상단은 titlebar-drag(맥 신호등 회피 + 창 드래그).
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { PawLogo } from "./PawLogo";
+import { ProductModeMenu } from "./one/ProductModeMenu";
 import { AccountChip } from "./AccountChip";
 import { CreditBalanceWidget } from "./CreditBalanceWidget";
 import { UpdateBanner } from "./UpdateBanner";
@@ -32,7 +32,6 @@ import {
   IconSettings,
   IconChevronDown,
   IconSidebar,
-  IconSparkles,
 } from "./Icon";
 import type { MarketplaceListing } from "@/lib/types";
 import type { ComponentType } from "react";
@@ -136,6 +135,7 @@ export function SideNav({
       { label: t("nav.workspace"), href: "/chat", icon: IconChat },
       { label: t("nav.agent_hub"), href: "/marketplace", icon: IconUsers },
       { label: t("nav.automations"), href: "/automation", icon: IconBolt },
+      { label: t("nav.site"), href: "/site", icon: IconApps },
     ],
     [t],
   );
@@ -164,18 +164,6 @@ export function SideNav({
           { label: t("nav.agent"), href: "/library/agents", icon: IconUsers },
           { label: t("nav.agent_group"), href: "/library/agent-groups", icon: IconLayers },
           { label: t("nav.agent_upload"), href: "/cloud", icon: IconFileUp },
-        ],
-      },
-      {
-        id: "studio",
-        label: t("nav.group.studio"),
-        href: "/oberon",
-        icon: IconApps,
-        isActive: (p) => p.startsWith("/oberon") || p.startsWith("/trex") || p.startsWith("/site") || p.startsWith("/apps") || p.startsWith("/startup-founder-studio"),
-        items: [
-          { label: t("nav.oberon"), href: "/oberon", icon: IconSparkles },
-          { label: t("nav.trex"), href: "/trex", icon: IconLayers },
-          { label: t("nav.site"), href: "/site", icon: IconApps },
         ],
       },
       {
@@ -235,15 +223,7 @@ export function SideNav({
       <div className="sidenav-drag titlebar-drag" />
 
       <div className="sidenav-header titlebar-nodrag">
-        <Link href="/" className="sidenav-brand" title="Agentlas">
-          <PawLogo size={22} />
-          {!collapsed && (
-            <span className="sidenav-brand-text">
-              <strong>Agentlas</strong>
-              <span>{t("nav.brand_sub")}</span>
-            </span>
-          )}
-        </Link>
+        <ProductModeMenu current="work" compact={collapsed} />
         {!forceCollapsed && (
           <button
             type="button"

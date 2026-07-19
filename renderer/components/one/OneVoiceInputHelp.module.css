@@ -1,0 +1,106 @@
+.root {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.trigger {
+  width: 44px;
+  min-height: 44px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #5f666b;
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.trigger:hover,
+.trigger:focus-visible {
+  background: #f0f2f1;
+  outline: 3px solid rgba(96, 122, 54, 0.13);
+}
+
+.trigger:disabled {
+  color: #b8bdc0;
+  cursor: default;
+}
+
+.panel {
+  position: absolute;
+  z-index: 30;
+  left: 0;
+  bottom: calc(100% + 12px);
+  width: min(330px, calc(100vw - 40px));
+  max-height: min(70vh, 460px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+  padding: 16px;
+  border: 1px solid #dfe2e4;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 16px 48px rgba(25, 31, 36, 0.14);
+  color: #202326;
+}
+
+.panel strong {
+  display: block;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.panel p {
+  margin: 8px 0;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.panel small {
+  display: block;
+  color: #73797d;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.panel button {
+  min-width: 44px;
+  min-height: 44px;
+  margin: 12px 0 0;
+  padding: 0 14px;
+  border: 1px solid #d8ddda;
+  border-radius: 12px;
+  background: #f8f9f8;
+  color: #202326;
+}
+
+.panel button:hover,
+.panel button:focus-visible {
+  border-color: #aeb99f;
+  outline: 3px solid rgba(96, 122, 54, 0.13);
+}
+
+@media (max-width: 599px) {
+  .panel {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: 84px;
+    width: auto;
+  }
+}
+
+@media (max-height: 420px) {
+  .panel {
+    bottom: 12px;
+    max-height: calc(100vh - 24px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trigger,
+  .panel button { transition: none; }
+}

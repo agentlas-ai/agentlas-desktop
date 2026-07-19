@@ -6,6 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type {
   Chat,
   ChatHistoryEntry,
+  AgentlasSurfaceManifest,
   AgentRuntimeOverride,
   InstalledAgent,
   McpInvocationEvent,
@@ -70,8 +71,6 @@ import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import {
-  isMobileReadRuntimeAllowed,
-  MobileReadRuntimeBoundaryError,
   revalidateInvocationWorkspaceBinding,
   type InvocationWorkspaceBinding,
 } from "../invocation/workspace-binding";
@@ -91,14 +90,24 @@ import {
   type WorkforcePairRuntimeGrant,
   type WorkforcePlannerCapabilityBinding,
 } from "./workforce-tool-inventory";
+import {
+  oneAttachmentExecutionPrompt,
+  redactOneAttachmentText,
+} from "../one/attachments";
 
 type EventSink = (ev: McpInvocationEvent) => void;
+
+function mainOneProfileContext(req: McpInvocationRequest): string {
+  const value = (req as McpInvocationRequest & { oneProfileContext?: unknown }).oneProfileContext;
+  return typeof value === "string" && value.length > 0 && value.length <= 16_000 ? value : "";
+}
 
 const BORROWED_AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 const PACKET_HEADING = "## Agent Input Packets";
 const TEAM_MANAGER_PLAN_HEADING = "## Workforce Team Manager Plan";
 const MAX_WORKFORCE_PLANNER_SCHEMA_ATTEMPTS = 2;
 const MAX_TEAM_MANAGER_SCHEMA_ATTEMPTS = 2;
+const TASK_FORCE_MODEL_CALL_RECEIPT_SCHEMA = "agentlas.one-model-call-receipt.v1";
 const BORROWED_SECRET_FILE_GUARD =
   "Do not read, request, quote, or summarize secret-like files or credentials (.env*, signing/, keychains, private keys, tokens, cookies, API keys, billing/payment data). If a task appears to require them, report that the host must review them locally instead.";
 
@@ -204,6 +213,10 @@ export interface BorrowedTaskForceParams {
   req: McpInvocationRequest;
   chat: Chat;
   orchestratorAgent: InstalledAgent;
+  /** Conversation turns captured before the current user request was stored. */
+  priorHistory?: ChatHistoryEntry[];
+  /** Main-memory-only One snapshot. When present, never reopen package prompt files. */
+  orchestratorEffectivePrompt?: string;
   taskForceName?: string;
   taskForceKind?: "hub" | "agent-group" | "task-force";
   taskForceSpecs?: BorrowedAgentSpec[];
@@ -359,14 +372,7 @@ function taskForceCandidateRuntimes(p: BorrowedTaskForceParams): RuntimeStatus[]
   const runnable = authorityEligible.filter((runtime, index, list) => (
     list.findIndex((candidate) => sameRuntime(candidate, runtime)) === index && Boolean(pickRunner(runtime))
   ));
-  const candidates = p.restrictedReadBoundary
-    ? runnable.filter((runtime) => isMobileReadRuntimeAllowed(runtime.kind))
-    : runnable;
-  if (p.restrictedReadBoundary && candidates.length === 0) {
-    throw new MobileReadRuntimeBoundaryError(
-      "This task-force has no verified restricted read-only runtime. Select BYOK or Ollama on Desktop.",
-    );
-  }
+  const candidates = runnable;
   if (p.workforceSelectionReceipt && candidates.length === 0) {
     throw new Error("workforce_runtime_isolation_unverified:no-executable-runtime");
   }
@@ -602,9 +608,51 @@ async function observeTaskForceModelCall<T>(
   },
   call: () => Promise<T>,
 ): Promise<T> {
+  // UI orchestration ids (`borrow:<slug>`, `*:borrow-orchestrator`) are useful
+  // presentation aliases, but they are not durable installed-Agent identity.
+  // Bind the receipt only when Main can still resolve the exact installed id.
+  // A missing/changed binding leaves agent_id null and therefore cannot later
+  // satisfy One's exact run-start roster proof.
+  const canonicalAgentId = input.agentId && getAgentById(input.agentId)?.id === input.agentId
+    ? input.agentId
+    : null;
+  // Avoid an `sk-` substring in this opaque value: the generic ledger secret
+  // scrubber intentionally redacts anything shaped like an OpenAI key.
+  const callRef = `one-model-call:${randomUUID()}`;
+  const receiptBase = {
+    schemaVersion: TASK_FORCE_MODEL_CALL_RECEIPT_SCHEMA,
+    callRef,
+    phase: input.phase,
+    ...(input.attempt === undefined ? {} : { attempt: input.attempt }),
+  };
+  tryRecordRunEvent({
+    runId: p.req.runId ?? `task-force:${p.chat.id}`,
+    kind: "task_force_model_call_started",
+    chatId: p.chat.id,
+    nodeId: input.nodeId,
+    agentId: canonicalAgentId,
+    payload: { ...receiptBase, status: "started" },
+  });
   try {
-    return await call();
+    const result = await call();
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `task-force:${p.chat.id}`,
+      kind: "task_force_model_call_completed",
+      chatId: p.chat.id,
+      nodeId: input.nodeId,
+      agentId: canonicalAgentId,
+      payload: { ...receiptBase, status: "completed" },
+    });
+    return result;
   } catch (error) {
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `task-force:${p.chat.id}`,
+      kind: "task_force_model_call_failed",
+      chatId: p.chat.id,
+      nodeId: input.nodeId,
+      agentId: canonicalAgentId,
+      payload: { ...receiptBase, status: "failed" },
+    });
     recordTaskForceTerminalTurn(p, {
       ...input,
       status: p.signal?.aborted ? "cancelled" : "failed",
@@ -1687,6 +1735,7 @@ function emitPlannerSchemaAttempt(
 
 function buildPlannerSystemPrompt(
   orchestrator: InstalledAgent,
+  orchestratorEffectivePrompt: string | undefined,
   locale: RuntimeLocale,
   permission: RunnerRequest["permission"],
   runtimes: RuntimeStatus[],
@@ -1698,7 +1747,7 @@ function buildPlannerSystemPrompt(
     ? `End with the same JSON shape and exact frozen roster slugs as this parser-valid contract example, replacing only the semantic packet fields and allocation estimates with your exact decisions:\n${plannerExactShape(runtimes, specs)}`
     : `End with exactly this block:\n${PACKET_HEADING}\n\`\`\`json\n{"packets":[{"agent":"<slug>","inputType":"<research|implementation|review|writing|analysis|planning|other>","inputKind":"<text|codebase|files|image|data|browser|mixed>","brief":"<focused subtask>","context":["<facts/files/constraints to pass>"],"expectedOutput":"<deliverable>","constraints":["<limits>"],"allocation":${workloadAllocationPromptExample("delegate")}}],"synthesis":${workloadAllocationPromptExample("synthesize")}}\n\`\`\``;
   return [
-    buildEffectiveAgentSystemPrompt(orchestrator.id, orchestrator.systemPrompt),
+    orchestratorEffectivePrompt ?? buildEffectiveAgentSystemPrompt(orchestrator.id, orchestrator.systemPrompt),
     "",
     "## Agentlas Task-Force Orchestrator",
     "You are coordinating Agentlas task-force agents. Do not answer the user yet.",
@@ -1864,11 +1913,12 @@ function buildBorrowedAgentSystemPrompt(spec: BorrowedAgentSpec, permission: Run
 
 function buildSynthesisSystemPrompt(
   orchestrator: InstalledAgent,
+  orchestratorEffectivePrompt: string | undefined,
   locale: RuntimeLocale,
   permission: RunnerRequest["permission"],
 ): string {
   return [
-    buildEffectiveAgentSystemPrompt(orchestrator.id, orchestrator.systemPrompt),
+    orchestratorEffectivePrompt ?? buildEffectiveAgentSystemPrompt(orchestrator.id, orchestrator.systemPrompt),
     "",
     "## Agentlas Task-Force Synthesis",
     `Current host permission mode: ${taskForcePermissionLabel(permission)}.`,
@@ -1987,6 +2037,10 @@ async function runBorrowedAgentTurn(
   workforceGrant?: WorkforcePairRuntimeGrant,
 ): Promise<BorrowedAgentResult> {
   const id = agentNodeId(spec.slug);
+  const installedAgent =
+    (spec.source === "installed" || spec.source === "firm-node") && spec.installedAgentId
+      ? getAgentById(spec.installedAgentId)
+      : null;
   const invocationId = `task-force-child:${randomUUID()}`;
   const handoffId = `task-force-handoff:${randomUUID()}`;
   const link = linkAbort(p.signal);
@@ -1998,6 +2052,7 @@ async function runBorrowedAgentTurn(
   const tag = (ev: McpInvocationEvent): McpInvocationEvent => ({
     ...ev,
     agentId: id,
+    ...(installedAgent ? { runtimeAgentId: installedAgent.id } : {}),
     agentName: spec.name,
     role: spec.slug,
     tier: 2,
@@ -2030,7 +2085,7 @@ async function runBorrowedAgentTurn(
   const workforceResponsibility = p.workforceSelectionReceipt
     ? workforceResponsibilityForSpec(p.workforceSelectionReceipt, spec)
     : undefined;
-  const authoritativePacketPrompt = packetToPrompt(packet, p.req.userPrompt, workforceResponsibility);
+  const authoritativePacketPrompt = packetToPrompt(packet, oneAttachmentExecutionPrompt(p.req), workforceResponsibility);
   const workforceImages = workforceImagesForResponsibility(p, workforceResponsibility);
   const resultMeta = {
     invocationId,
@@ -2039,11 +2094,6 @@ async function runBorrowedAgentTurn(
     provider: providerLabel(active),
     workforceResponsibility,
   };
-  if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
-    throw new MobileReadRuntimeBoundaryError(
-      "This task-force worker runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
-    );
-  }
   const picked = sameRuntime(active, p.active) ? p.picked : pickRunner(active) ?? p.picked;
   if (workloadResolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
     p.sink(tag({
@@ -2058,11 +2108,7 @@ async function runBorrowedAgentTurn(
     status: p.locale === "ko" ? `${spec.name} · 입력 패킷 실행 중` : `${spec.name} · running input packet`,
     model: modelLabel(active),
   }));
-  const installedAgent =
-    (spec.source === "installed" || spec.source === "firm-node") && spec.installedAgentId
-      ? getAgentById(spec.installedAgentId)
-      : null;
-  const nodeTask = packet.brief || p.req.userPrompt;
+  const nodeTask = packet.brief || oneAttachmentExecutionPrompt(p.req);
   const nodeMemory = await taskForceMemoryContext(p, installedAgent?.id ?? null, nodeTask);
   const nodeMemoryEmitter = !p.req.agentAppMode && !p.restrictedReadBoundary
     ? memoryEmitterPromptFor(nodeTask)
@@ -2258,6 +2304,7 @@ async function runBorrowedAgentTurn(
           {
             systemPrompt: [
               buildBorrowedAgentSystemPrompt(managerSpec, packagePermission),
+              !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
               nodeMemory,
               "You are the manager of this exact prepared team. Return a structured delegation plan only; do not perform worker tasks and do not change, omit, add, or reorder declared workers.",
               `Required response shape:\n${TEAM_MANAGER_PLAN_HEADING}\n\`\`\`json\n${JSON.stringify({
@@ -2346,6 +2393,7 @@ async function runBorrowedAgentTurn(
             {
               systemPrompt: [
                 buildBorrowedAgentSystemPrompt(workerSpec, packagePermission),
+                !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
                 nodeMemory,
                 nodeMemoryEmitter,
               ].filter(Boolean).join("\n\n"),
@@ -2448,6 +2496,7 @@ async function runBorrowedAgentTurn(
         {
           systemPrompt: [
             buildBorrowedAgentSystemPrompt(managerSpec, packagePermission),
+            !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
             nodeMemory,
             nodeMemoryEmitter,
           ].filter(Boolean).join("\n\n"),
@@ -2574,6 +2623,7 @@ async function runBorrowedAgentTurn(
       {
         systemPrompt: [
           buildBorrowedAgentSystemPrompt(spec, packagePermission),
+          !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
           nodeMemory,
           ontology?.prompt,
           nodeMemoryEmitter,
@@ -2808,8 +2858,10 @@ async function runPlanner(
       })
     : null;
   const baseSystemPrompt = [
+    !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
     buildPlannerSystemPrompt(
       p.orchestratorAgent,
+      p.orchestratorEffectivePrompt,
       p.locale,
       taskForcePermission(p),
       plannerCandidateRuntimes,
@@ -2822,7 +2874,7 @@ async function runPlanner(
   ].filter(Boolean).join("\n\n");
   const baseUserPrompt = buildPlannerPrompt(
     specs,
-    p.req.userPrompt,
+    oneAttachmentExecutionPrompt(p.req),
     p.req.agentAppMode ? undefined : p.workingFolder,
     executionContext,
   );
@@ -3091,7 +3143,7 @@ async function runPlanner(
       agentId: p.orchestratorAgent.id,
     });
     const parsedPlan = parseBorrowedWorkloadPlan(plannerText);
-    const normalized = normalizePacketsForRoster(parsedPlan.packets, specs, p.req.userPrompt);
+    const normalized = normalizePacketsForRoster(parsedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req));
     packets = normalized.packets;
     synthesisAllocation = parsedPlan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize");
     parseSuccess = normalized.parseSuccess;
@@ -3184,8 +3236,13 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     throw new Error("Task force requires runnable agents.");
   }
 
-  const history = p.req.agentAppMode || !emitFinal ? [] : listChatMessages(p.chat.id, 80);
-  if (!p.req.agentAppMode && emitFinal) {
+  const suppliedPriorHistory = Array.isArray(p.priorHistory);
+  const history = p.req.agentAppMode || !emitFinal
+    ? []
+    : suppliedPriorHistory
+      ? p.priorHistory!.map((entry) => ({ ...entry }))
+      : listChatMessages(p.chat.id, 80);
+  if (!p.req.agentAppMode && emitFinal && !suppliedPriorHistory) {
     appendChatMessage(p.chat.id, "user", p.req.userPrompt);
     if (history.length === 0) autoTitleFromFirstMessage(p.chat.id, p.req.userPrompt);
   }
@@ -3250,11 +3307,6 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     assertStrictPlannerResolution(plan.synthesisAllocation, synthesisResolution, "planner synthesis allocation");
   }
   const synthesisActive = synthesisResolution.runtime;
-  if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(synthesisActive.kind)) {
-    throw new MobileReadRuntimeBoundaryError(
-      "This task-force synthesis runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
-    );
-  }
   const synthesisPicked = sameRuntime(synthesisActive, p.active) ? p.picked : pickRunner(synthesisActive) ?? p.picked;
   if (synthesisResolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
     p.sink({
@@ -3325,14 +3377,20 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   }, () => synthesisPicked.runner(
     {
       systemPrompt: [
-        buildSynthesisSystemPrompt(p.orchestratorAgent, p.locale, taskForcePermission(p)),
+        buildSynthesisSystemPrompt(
+          p.orchestratorAgent,
+          p.orchestratorEffectivePrompt,
+          p.locale,
+          taskForcePermission(p),
+        ),
+        !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
         synthesisMemory,
         synthesisOntology?.prompt,
         synthesisMemoryEmitter,
       ].filter(Boolean).join("\n\n"),
       history,
       userPrompt: buildSynthesisPrompt({
-        originalRequest: p.req.userPrompt,
+        originalRequest: oneAttachmentExecutionPrompt(p.req),
         planText: plan.text,
         packets: plan.packets,
         results,
@@ -3342,6 +3400,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       model: synthesisActive.model ?? undefined,
       longContext: synthesisActive.longContextEnabled ?? false,
       effort: synthesisActive.effort ?? undefined,
+      forceSurface: p.req.oneMode === true && emitFinal && !p.req.agentAppMode,
       signal: p.signal,
       ...synthesisRunnerBoundary,
       cwd: p.req.agentAppMode || p.workforceSelectionReceipt ? undefined : p.workingFolder ?? undefined,
@@ -3359,7 +3418,11 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         phase: "synthesize",
       }),
       onPartial: (text) => {
-        if (emitFinal && !p.req.agentAppMode && !taskForceProjectReadOnly(p)) {
+        // A One team synthesis may stream an incomplete Surface fence or a raw
+        // Main-private media path before the final parser can validate/strip
+        // it. Keep team progress observable through status events and publish
+        // only the validated final Surface. Ordinary Work streaming is unchanged.
+        if (emitFinal && p.req.oneMode !== true && !p.req.agentAppMode && !taskForceProjectReadOnly(p)) {
           p.sink({ kind: "partial", text: redactSensitiveText(text) });
         }
       },
@@ -3385,6 +3448,48 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       : "Safety boundary: a multi-Hub or Agent Group run is never replaced by a local single-agent continuation. Resume with the same roster so every Hub bundle is revalidated.";
     displayText = [displayText, boundaryNote].filter(Boolean).join("\n\n");
     p.sink({ kind: "tool-use", status: boundaryNote });
+  }
+  // Saved-team One runs return before client.ts reaches the ordinary Surface
+  // parser. Parse the top-level synthesis here, then hand the validated raw
+  // manifest to the same InvocationService sink used by every other Surface.
+  // Nested units never own visible/durable result surfaces.
+  let oneTaskForceSurfaces: AgentlasSurfaceManifest[] = [];
+  if (emitFinal && p.req.oneMode === true && !p.req.agentAppMode) {
+    try {
+      displayText = displayText.split(SURFACE_INTENT_MARKER).join("");
+      const parsed = parseSurfaces(displayText);
+      oneTaskForceSurfaces = parsed.errors.length === 0 && parsed.surfaces.length === 1
+        ? [parsed.surfaces[0].manifest]
+        : [];
+      const parserFailed = parsed.diagnostics.some((diagnostic) => diagnostic.code === "surface-parse-failed");
+      if (parserFailed) {
+        oneTaskForceSurfaces = [];
+        displayText = p.locale === "ko"
+          ? "팀 실행은 완료됐지만 구조화 결과를 안전하게 검증할 수 없어 표시하지 않았습니다."
+          : "The team run completed, but its structured result could not be safely validated, so it was not displayed.";
+      } else if (parsed.surfaces.length > 0 || parsed.errors.length > 0) {
+        const exactSafeSurface = oneTaskForceSurfaces.length === 1;
+        displayText = parsed.cleanedText.trim() || (exactSafeSurface
+          ? p.locale === "ko"
+            ? "팀이 구조화된 결과를 완성했습니다."
+            : "The team completed a structured result."
+          : p.locale === "ko"
+            ? "팀 실행은 완료됐지만 구조화 결과가 하나의 안전한 Surface로 검증되지 않아 표시하지 않았습니다."
+            : "The team run completed, but its structured result was not displayed because it did not validate as exactly one safe Surface.");
+      }
+    } catch {
+      // Never log the rejected model body: a legacy manifest may contain a
+      // local media path that must remain Main-private.
+      oneTaskForceSurfaces = [];
+      // The parser itself is an untrusted-input boundary. If recursive or
+      // otherwise hostile JSON makes it throw, none of the original synthesis
+      // may continue to chat/final because it can still contain a raw Surface
+      // fence and Main-private transport values.
+      displayText = p.locale === "ko"
+        ? "팀 실행은 완료됐지만 구조화 결과를 안전하게 검증할 수 없어 표시하지 않았습니다."
+        : "The team run completed, but its structured result could not be safely validated, so it was not displayed.";
+      console.error("[surface] task-force synthesis parse failed");
+    }
   }
   if (taskForceProjectReadOnly(p)) {
     displayText = restrictedTaskForceText(p, displayText, {
@@ -3711,6 +3816,32 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         isError: receipt?.verifier.verdict === "fail",
       },
       agentId: orchestratorId,
+      agentName: orchestratorName,
+      role: "orchestrator",
+      tier: 1,
+      phase: "synthesize",
+    });
+  }
+  const surfaceExecutionVerified = verifierIssues.length === 0
+    && results.every((result) => result.ok)
+    && (!receipt || receipt.verifier.verdict === "pass");
+  if (oneTaskForceSurfaces.length > 0 && !surfaceExecutionVerified) {
+    oneTaskForceSurfaces = [];
+    displayText = [
+      displayText,
+      p.locale === "ko"
+        ? "구조화 결과는 팀 실행 검증을 통과하지 못해 표시하지 않았습니다."
+        : "The structured result was not displayed because the team execution did not pass verification.",
+    ].filter(Boolean).join("\n\n");
+  }
+  displayText = redactOneAttachmentText(p.req, displayText);
+  for (let index = 0; index < oneTaskForceSurfaces.length; index += 1) {
+    p.sink({
+      kind: "surface",
+      surfaceId: `surface:${p.req.runId}:${index + 1}`,
+      surface: oneTaskForceSurfaces[index],
+      agentId: orchestratorId,
+      runtimeAgentId: p.orchestratorAgent.id,
       agentName: orchestratorName,
       role: "orchestrator",
       tier: 1,

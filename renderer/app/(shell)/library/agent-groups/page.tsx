@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type DragEvent } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState, type DragEvent } from "react";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import {
   IconBolt,
@@ -21,6 +21,7 @@ import { classifyHubEntity, classifyInstalledAgent, entityClassLabel, entityClas
 import { pickLocalized, useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { visibleRosterAgents } from "@/lib/agent-roster";
+import { OneSuggestionReviewHandoffBanner, type OneReviewSeedApplyResult } from "@/components/one/OneSuggestionReviewHandoff";
 import {
   callableHubBookmarks,
   hubBookmarkIdentityKey,
@@ -35,6 +36,7 @@ import type {
   HubAgentBookmark,
   InstalledAgent,
   InstalledFirm,
+  OneSuggestionReviewSeed,
 } from "@/lib/types";
 
 type SourceKind = "installed" | "firm" | "firm-node" | "hub";
@@ -67,7 +69,9 @@ export default function AgentGroupsPage() {
   const [draggingKey, setDraggingKey] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [rosterLoaded, setRosterLoaded] = useState(false);
   const [toast, setToast] = useState("");
+  const [managementTargetHandled, setManagementTargetHandled] = useState(false);
 
   const refresh = useCallback(async () => {
     const api = ipc();
@@ -92,6 +96,7 @@ export default function AgentGroupsPage() {
       setToast(String(err));
       setHubStatus("offline");
     } finally {
+      setRosterLoaded(true);
       setBusy(false);
     }
   }, []);
@@ -99,6 +104,15 @@ export default function AgentGroupsPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (managementTargetHandled || groups.length === 0) return;
+    const targetId = new URLSearchParams(window.location.search).get("edit");
+    setManagementTargetHandled(true);
+    if (!targetId) return;
+    const target = groups.find((group) => group.id === targetId);
+    if (target) editGroup(target);
+  }, [groups, managementTargetHandled]);
 
   useEffect(
     () => onHubBookmarkChange((change) => {
@@ -130,6 +144,40 @@ export default function AgentGroupsPage() {
     const timer = window.setTimeout(() => setToast(""), 2800);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  const applyOneReviewSeed = useCallback((seed: OneSuggestionReviewSeed): OneReviewSeedApplyResult => {
+    if (seed.kind !== "retain_team" || seed.targetSurface !== "agent_groups") return "blocked";
+    if (!rosterLoaded || busy) return "defer";
+    if (
+      editingGroupId !== null
+      || groupName !== ""
+      || groupDescription !== ""
+      || groupOrchestratorName !== ""
+      || draftMembers.length !== 0
+    ) return "blocked";
+    const currentById = new Map(agents.map((agent) => [agent.id, agent] as const));
+    const exact = seed.candidates.map((candidate) => {
+      const installed = currentById.get(candidate.agentId);
+      return installed
+        && installed.slug === candidate.slug
+        && installed.installedAt === candidate.installedAt
+        && (installed.packageHash ?? null) === candidate.packageHash
+        && !installed.sourceMissingSince
+        ? installed
+        : null;
+    });
+    if (exact.some((agent) => agent === null)) return "blocked";
+    setGroupName(locale === "ko" ? "One 검토 팀" : "One review team");
+    setGroupDescription(locale === "ko"
+      ? "반복해서 수락한 내부 완료에서 관찰된 구성입니다. 저장 전에 각 구성원의 역할과 권한을 검토하세요."
+      : "Observed across repeated accepted internal completions. Review every member's role and permissions before saving.");
+    setDraftMembers(exact.map((agent) => makeInstalledMember({
+      source: "installed",
+      agent: agent!,
+      routeLabel: t("agentGroups.route.installed"),
+    })));
+    return "applied";
+  }, [agents, busy, draftMembers.length, editingGroupId, groupDescription, groupName, groupOrchestratorName, locale, rosterLoaded, t]);
 
   const sourceItems = useMemo(() => {
     const agentById = new Map(agents.map((agent) => [agent.id, agent]));
@@ -363,6 +411,10 @@ export default function AgentGroupsPage() {
           <Metric label={t("agentGroups.metric.saved")} value={String(groups.length)} />
         </div>
       </section>
+
+      <Suspense fallback={null}>
+        <OneSuggestionReviewHandoffBanner surface="agent_groups" locale={locale} onReviewSeed={applyOneReviewSeed} />
+      </Suspense>
 
       <section className="agent-groups-workbench">
         <aside className="agent-groups-source">

@@ -358,6 +358,10 @@ jobs:
       - name: Reverify pinned standalone Python at package boundary
         run: npm run fetch:python
 
+      - name: Materialize pinned private Node runtime for Windows CLI bootstrap
+        if: runner.os == 'Windows'
+        run: npm run fetch:node
+
       - name: Package verified Actions artifacts only
         shell: bash
         run: |

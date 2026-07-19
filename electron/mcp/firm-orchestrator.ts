@@ -59,13 +59,16 @@ import {
   type WorkloadAllocation,
 } from "../runtime/workload-routing";
 import {
-  isMobileReadRuntimeAllowed,
-  MobileReadRuntimeBoundaryError,
   revalidateInvocationWorkspaceBinding,
   type InvocationWorkspaceBinding,
 } from "../invocation/workspace-binding";
 
 type EventSink = (ev: McpInvocationEvent) => void;
+
+function mainOneProfileContext(req: McpInvocationRequest): string {
+  const value = (req as McpInvocationRequest & { oneProfileContext?: unknown }).oneProfileContext;
+  return typeof value === "string" && value.length > 0 && value.length <= 16_000 ? value : "";
+}
 
 function sameRuntime(left: RuntimeStatus, right: RuntimeStatus): boolean {
   return left.kind === right.kind && left.backend === right.backend && left.source === right.source;
@@ -81,14 +84,7 @@ function firmCandidateRuntimes(
   const runnable = supplied.filter((runtime, index, list) => (
     list.findIndex((candidate) => sameRuntime(candidate, runtime)) === index && Boolean(pickRunner(runtime))
   ));
-  const candidates = p.restrictedReadBoundary
-    ? runnable.filter((runtime) => isMobileReadRuntimeAllowed(runtime.kind))
-    : runnable;
-  if (p.restrictedReadBoundary && candidates.length === 0) {
-    throw new MobileReadRuntimeBoundaryError(
-      "This firm has no verified restricted read-only runtime. Select BYOK or Ollama on Desktop.",
-    );
-  }
+  const candidates = runnable;
   return candidates.length > 0 ? candidates : [baseActive];
 }
 
@@ -120,6 +116,8 @@ export interface FirmRunParams {
   chat: { id: string; projectId: string | null; firmId: string | null };
   org: ResolvedOrg;
   ceoAgent: InstalledAgent;
+  /** Conversation turns captured before the current user request was stored. */
+  priorHistory?: ChatHistoryEntry[];
   active: RuntimeStatus;
   runtimes: RuntimeStatus[];
   picked: { runner: Runner; label: string };
@@ -258,7 +256,6 @@ async function runNodeTurnSafe(
       console.error("[memory] firm terminal turn receipt failed:", ticketError);
     }
     if (p.signal?.aborted) throw err; // 사용자 취소는 전파
-    if (err instanceof MobileReadRuntimeBoundaryError) throw err;
     // 실패/타임아웃 노드도 per-node 완료 신호 → UI에서 ▶ 가 멈추고 정리된다(스턱 방지).
     p.sink({
       kind: "tool-use",
@@ -403,6 +400,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   let systemPrompt = node.agentId
     ? buildEffectiveAgentSystemPrompt(node.agentId, firmRolePrompt)
     : firmRolePrompt;
+  const approvedOneContext = !p.workspaceBinding && !p.req.agentAppMode
+    ? mainOneProfileContext(p.req)
+    : "";
+  if (approvedOneContext) systemPrompt += `\n\n${approvedOneContext}`;
   if (node.agentId && node.prompt?.trim() && !systemPrompt.includes(node.prompt.trim())) {
     systemPrompt += `\n\n## Firm role context\n${node.prompt.trim()}`;
   }
@@ -453,11 +454,6 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     : null;
   const active = workloadResolution?.runtime ?? baseActive;
   const picked = sameRuntime(active, baseActive) ? basePicked : pickRunner(active) ?? basePicked;
-  if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
-    throw new MobileReadRuntimeBoundaryError(
-      "This firm node runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
-    );
-  }
   if (workloadResolution) {
     if (workloadResolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
       emit({
@@ -747,8 +743,13 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
   const mainStatus = (text: string) => sink({ kind: "tool-use", status: text });
 
   // 메인 히스토리 캡처 후 사용자 메시지 영구화 (단일 경로와 동일)
-  const history = req.agentAppMode ? [] : listChatMessages(chat.id, 80);
-  if (!req.agentAppMode) {
+  const suppliedPriorHistory = Array.isArray(p.priorHistory);
+  const history = req.agentAppMode
+    ? []
+    : suppliedPriorHistory
+      ? p.priorHistory!.map((entry) => ({ ...entry }))
+      : listChatMessages(chat.id, 80);
+  if (!req.agentAppMode && !suppliedPriorHistory) {
     appendChatMessage(chat.id, "user", req.userPrompt);
     if (history.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
   }

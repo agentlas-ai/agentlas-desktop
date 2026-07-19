@@ -426,10 +426,24 @@ export function parseSurfaces(text: string): {
 
     const body = afterOpen.slice(0, close).trim();
     if (surfaces.length < MAX_SURFACES_PER_REPLY) {
-      const parsed = parseOneSurface(body);
-      diagnostics.push(...(parsed.diagnostics ?? []));
-      if (parsed.manifest) surfaces.push({ manifest: parsed.manifest });
-      else errors.push(parsed.error ?? "Surface manifest was rejected.");
+      try {
+        const parsed = parseOneSurface(body);
+        diagnostics.push(...(parsed.diagnostics ?? []));
+        if (parsed.manifest) surfaces.push({ manifest: parsed.manifest });
+        else errors.push(parsed.error ?? "Surface manifest was rejected.");
+      } catch {
+        // Surface JSON is untrusted model output. Keep the parser total even
+        // when validation hits hostile recursion, and never log or retain the
+        // rejected body because it may contain Main-private transport values.
+        const diagnostic = makeDiagnostic(
+          "surface-parse-failed",
+          "$",
+          "Surface manifest could not be safely validated.",
+          "Emit a smaller and shallower manifest using only the trusted Surface catalog.",
+        );
+        diagnostics.push(diagnostic);
+        errors.push(formatDiagnostics([diagnostic]));
+      }
     }
 
     remaining = afterOpen.slice(close + SURFACE_CLOSE_FENCE.length);
@@ -618,7 +632,36 @@ function validateDataSets(raw: unknown, diagnostics: SurfaceManifestDiagnostic[]
     }
     const dataSet: AgentlasSurfaceDataSet = { ...normalized, type };
     if (normalized.columns !== undefined && !isStringArray(normalized.columns)) delete dataSet.columns;
-    if (normalized.rows !== undefined && !isJsonObjectArray(normalized.rows)) delete dataSet.rows;
+    if (type === "table" && isStringArray(normalized.columns) && Array.isArray(normalized.rows)) {
+      const columns = normalized.columns;
+      const repairedRows = normalized.rows.flatMap((row) => {
+        if (!Array.isArray(row)) return isJsonObject(row) ? [row] : [];
+        const item: JsonObject = { trust: "unverified" };
+        columns.forEach((column, index) => {
+          const cell = row[index];
+          if (cell === null || typeof cell === "string" || typeof cell === "number" || typeof cell === "boolean" || Array.isArray(cell) || isJsonObject(cell)) {
+            item[column] = cell;
+          }
+        });
+        return [item];
+      });
+      if (repairedRows.length > 0) {
+        dataSet.rows = repairedRows;
+        if (normalized.rows.some((row) => Array.isArray(row))) {
+          diagnostics.push(makeDiagnostic(
+            "table-array-rows-repaired",
+            `$.data.${key}.rows`,
+            `Table data set "${key}" was repaired from positional rows using its declared columns.`,
+            undefined,
+            "repaired",
+          ));
+        }
+      } else {
+        delete dataSet.rows;
+      }
+    } else if (normalized.rows !== undefined && !isJsonObjectArray(normalized.rows)) {
+      delete dataSet.rows;
+    }
     if (normalized.items !== undefined && !isJsonObjectArray(normalized.items)) delete dataSet.items;
     if (normalized.summary !== undefined && typeof normalized.summary !== "string") delete dataSet.summary;
     out[key] = dataSet;
@@ -808,15 +851,23 @@ function normalizeDataSet(
   if (Array.isArray(value)) {
     const rows = value.filter(isJsonObject);
     if (rows.length === 0) return null;
+    const artifactLike = /(?:artifact|file|output|deliverable)/i.test(key)
+      && rows.some((row) => ["path", "filePath", "localPath", "file", "name"].some((field) => typeof row[field] === "string"));
     diagnostics.push(
       makeDiagnostic(
         "dataset-array-repaired",
         `$.data.${key}`,
-        `Data set "${key}" was repaired from a bare array to a table dataset.`,
+        `Data set "${key}" was repaired from a bare array to an ${artifactLike ? "artifact" : "table"} dataset.`,
         undefined,
         "repaired",
       ),
     );
+    if (artifactLike) {
+      return {
+        type: "artifacts",
+        items: rows.map((row) => ({ ...row, ...(typeof row.trust === "string" ? {} : { trust: "unverified" }) })),
+      };
+    }
     return { type: "table", rows };
   }
   if (!isJsonObject(value)) return null;

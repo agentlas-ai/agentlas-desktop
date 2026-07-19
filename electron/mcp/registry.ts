@@ -131,6 +131,15 @@ export function backfillEntityKinds(): void {
 
 export function listInstalledAgents(): InstalledAgent[] {
   recoverCloudRegistryTransactions();
+  return listInstalledAgentsReadOnly();
+}
+
+/**
+ * Canonical installed-agent projection without recovery, reconciliation, or
+ * any other write side effect. Read-only review/preview IPC must use this path
+ * so merely opening a proposal can never mutate product state.
+ */
+export function listInstalledAgentsReadOnly(): InstalledAgent[] {
   const rows = getDb()
     .prepare("SELECT * FROM installed_agents ORDER BY installed_at DESC")
     .all() as AgentRow[];

@@ -224,6 +224,14 @@ dmg:
 # SmartScreen shows a one-time "More info → Run anyway"; the portable .exe runs
 # without installing. Add CSC_LINK / CSC_KEY_PASSWORD in CI later to ship signed.
 win:
+  # Private Node+npm bootstrap for official CLI packages. This is copied only
+  # into Windows builds and never installed system-wide or added to system PATH.
+  extraResources:
+    - from: build-resources/node-runtime
+      to: node-runtime
+      filter:
+        - "**/*"
+        - "!.gitkeep"
   target:
     - target: nsis
       arch:

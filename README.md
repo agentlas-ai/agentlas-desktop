@@ -69,6 +69,22 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-20 · v0.8.56 — Agentlas One** — One gives every request one simple
+  starting point, then quietly assembles the smallest useful team, keeps the
+  work moving, and returns a structured result instead of an implementation
+  log. Approved preferences, reusable experience, measured improvements,
+  project knowledge, task history, and result references stay organized in the
+  local `~/.agentlas/one` workspace. Proactive briefings surface useful risks
+  and ready results before the user has to choose an agent or workflow. One uses
+  everyday language, adapts layouts to comparisons, plans, documents, files,
+  and media, and asks before any external action. Windows also carries a pinned
+  private Node.js runtime so Connect can install supported CLI providers on a
+  new PC without a separate Node or npm setup. This version publishes Desktop
+  installers for macOS, Windows, and Linux; mobile store builds are unchanged.
+  Agentlas OS v1.1.50 remains pinned at
+  `5fc22464c1db33dabc0d4de2170053d1584b5682`. This source does not prove a
+  Desktop tag, public installer, or update-feed release.
+
 - **2026-07-17 · v0.8.55 — durable Hub Workforce automations on every
   supported computer** — Desktop now speaks the exact versioned Workforce
   protocol published by Agentlas OS, validates the complete MCP tool inventory

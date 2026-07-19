@@ -245,3 +245,11 @@ credentials/
 # source; only .gitkeep is tracked so the directory exists for the fetcher.
 /build-resources/python-runtime/*
 !/build-resources/python-runtime/.gitkeep
+
+# Official Node.js runtime fetched only for the Windows no-Node CLI bootstrap.
+# Keep the immutable fetcher/manifest contract in git, never the large runtime tree.
+/build-resources/node-runtime/*
+!/build-resources/node-runtime/.gitkeep
+
+# Local visual QA evidence is never source or release material.
+/.artifacts/

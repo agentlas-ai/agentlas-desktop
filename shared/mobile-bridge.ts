@@ -1,3 +1,8 @@
+import type { OneSurfaceManifestV1 } from "./one-surface";
+import type { AgentlasOneTaskProjectionV1 } from "./one-task-projection";
+import { ONE_DECISION_CONTRACT_VERSION, type OneDecisionViewV1 } from "./one-decision";
+import type { OneMobileEcosystemSuggestionV1 } from "./one-mobile-suggestion";
+
 /**
  * Agentlas Desktop Mobile Bridge wire contract.
  *
@@ -14,6 +19,7 @@ export const MOBILE_BRIDGE_PROTOCOL_VERSION = 1 as const;
 // separately capped by the projector's much smaller safe-payload budget.
 export const MOBILE_BRIDGE_MAX_MESSAGE_BYTES = 30 * 1024 * 1024;
 export const MOBILE_BRIDGE_PAIR_EXCHANGE_PATH = "/v1/mobile/pair/exchange";
+export const MOBILE_BRIDGE_PAIR_ASSERTION_AUDIENCE = "agentlas_desktop_mobile_pair" as const;
 
 export type MobileBridgeJsonPrimitive = string | number | boolean | null;
 export type MobileBridgeJsonValue =
@@ -41,10 +47,14 @@ export const MOBILE_BRIDGE_METHODS = [
   "chats.setBorrowedAgents",
   "chats.switchAgent",
   "chats.clearContext",
+  "tasks.latestResult",
+  "tasks.acceptResult",
+  "one.suggestions.act",
   "workspace.setProject",
   "workspace.clear",
   "composer.context",
   "invoke.history",
+  "one.invoke.start",
   "invoke.start",
   "invoke.steer",
   "invoke.cancel",
@@ -91,8 +101,11 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "chats.setBorrowedAgents",
   "chats.switchAgent",
   "chats.clearContext",
+  "tasks.acceptResult",
+  "one.suggestions.act",
   "workspace.setProject",
   "workspace.clear",
+  "one.invoke.start",
   "invoke.start",
   "invoke.steer",
   "invoke.cancel",
@@ -144,7 +157,32 @@ export interface MobileBridgeInvokeSteerParams {
   borrowAgents?: string[];
   images?: MobileBridgeImageAttachmentDto[];
   expectedQuestionMessageId?: string;
+  expectedTaskId?: string;
+  expectedTaskVersion?: number;
+  expectedDecisionContractVersion?: typeof ONE_DECISION_CONTRACT_VERSION;
   expectedRunId: string;
+}
+
+/**
+ * Closed first-turn contract for the consumer-facing One surface on Mobile.
+ *
+ * The phone deliberately cannot select a chat, agent, firm, group, project,
+ * permission, runtime, Hub route, borrowed target, Task, Profile, or Memory
+ * capability. Desktop Main creates the conversation and derives every such
+ * authority from its current authenticated host state.
+ */
+export interface MobileBridgeOneInvokeStartParams {
+  schemaVersion: 1;
+  userPrompt: string;
+  images?: MobileBridgeImageAttachmentDto[];
+}
+
+/** Exact accepted start identity. Any later Task is projected by snapshot.updated. */
+export interface MobileBridgeOneInvokeStartReceiptDto {
+  schemaVersion: 1;
+  authoritativeHostRef: string;
+  chatId: string;
+  runId: string;
 }
 
 export interface MobileBridgeImageAttachmentDto {
@@ -164,6 +202,10 @@ export interface MobileBridgePairExchangeRequest {
   type: "pair.exchange";
   id: string;
   code: string;
+  pairingAttemptId: string;
+  deviceNonce: string;
+  pairingAssertion: string;
+  audience: typeof MOBILE_BRIDGE_PAIR_ASSERTION_AUDIENCE;
   device: {
     name: string;
     platform: "ios" | "android";
@@ -172,9 +214,10 @@ export interface MobileBridgePairExchangeRequest {
 }
 
 /**
- * DESKTOP_MOBILE_BRIDGE: QR/deep-link envelope. The only credential-like value
- * allowed here is the short-lived, one-use pairing code; device bearer tokens
- * are returned only by the pair-exchange response.
+ * DESKTOP_MOBILE_BRIDGE: QR/deep-link envelope. Credential-like values are
+ * limited to the short-lived one-use code and the Web-signed Desktop account
+ * proof. Session cookies, stable account subjects, and device bearer tokens are
+ * forbidden; the bearer token is returned only after assertion consumption.
  */
 export interface MobileBridgePairingPayload {
   version: typeof MOBILE_BRIDGE_PROTOCOL_VERSION;
@@ -184,6 +227,11 @@ export interface MobileBridgePairingPayload {
   pairExchangeEndpoint: string;
   code: string;
   expiresAt: string;
+  /** Fresh Web proof bound to this exact Desktop host and pairing attempt. */
+  desktopAccountProof: string;
+  pairingAttemptId: string;
+  /** Public configured Agentlas Web origin. No cookie or account subject crosses the QR. */
+  accountAuthorityOrigin: string;
   certificateFingerprint: string | null;
   /** Public DER certificate, base64 encoded. Required for pinned WSS/HTTPS. */
   certificateDer: string | null;
@@ -199,6 +247,14 @@ export interface MobileBridgePairExchangeSuccess {
     token: string;
     issuedAt: string;
   };
+  /** Pair-exchange-bound proof seed. Mobile still waits for a newer host heartbeat and this exact Task projection. */
+  verification?: {
+    verificationId: string;
+    hostId: string;
+    issuedAt: string;
+    sampleTaskId: string | null;
+    sampleTaskVersion: number | null;
+  };
   /** Optional zero-storage cloud route. Issued only after local one-time pairing. */
   relay?: {
     endpoint: string;
@@ -212,7 +268,16 @@ export interface MobileBridgePairExchangeFailure {
   id: string | null;
   ok: false;
   error: {
-    code: "invalid_pairing_request" | "pairing_denied" | "pairing_expired" | "pairing_unavailable";
+    code:
+      | "invalid_pairing_request"
+      | "pairing_denied"
+      | "pairing_expired"
+      | "pairing_unavailable"
+      | "invalid_account_assertion"
+      | "account_mismatch"
+      | "binding_mismatch"
+      | "assertion_replayed"
+      | "account_authority_unavailable";
     message: string;
   };
 }
@@ -314,6 +379,8 @@ export interface MobileBridgeInvocationEventDto {
   role?: string;
   phase?: "plan" | "delegate" | "synthesize";
   reasoning?: { phase: "start" | "end"; durationMs?: number };
+  /** Main-sanitized, non-executable semantic result shared with Flutter. */
+  surface?: OneSurfaceManifestV1;
 }
 
 export interface MobileBridgeHostDto {
@@ -626,6 +693,14 @@ export interface MobileBridgeHiredAgentDto {
 
 export interface MobileBridgeChatDto {
   id: string;
+  /** Main-owned origin marker. Titles or coordinator names are never used to infer this. */
+  oneOrigin: boolean;
+  /** Null only for a general One conversation that has not become a Task. */
+  taskId: string | null;
+  taskVersion: number | null;
+  /** Main-owned Task state. Mobile must not infer completion from message text. */
+  taskStatus: "open" | "running" | "waiting-decision" | "partial" | "completed" | "failed" | "archived" | null;
+  taskUpdatedAt: string | null;
   projectId: string | null;
   /** Basename only. Absolute Desktop paths never cross the bridge. */
   workingFolderName: string | null;
@@ -649,7 +724,41 @@ export interface MobileBridgeChatMessageDto {
   createdAt: string;
 }
 
+/**
+ * Read-only, restart-safe projection of the newest completed run for one exact
+ * canonical Task. This is intentionally fetched on demand instead of being
+ * embedded in every chat snapshot, because a Surface may be up to 512 KiB.
+ */
+export interface MobileBridgeTaskResultSnapshotDto {
+  taskId: string;
+  taskVersion: number;
+  taskStatus: "partial" | "completed";
+  taskUpdatedAt: string;
+  chatId: string;
+  runId: string;
+  receipt: {
+    status: "completed";
+    startedAt: string;
+    updatedAt: string;
+    finishedAt: string;
+    eventCount: number;
+  };
+  /** Null for a valid plain-text result that did not produce a semantic Surface. */
+  surface: OneSurfaceManifestV1 | null;
+}
+
+export interface MobileBridgePairingTaskDto {
+  hostId: string;
+  taskId: string;
+  taskVersion: number;
+  updatedAt: string;
+}
+
 export interface MobileBridgePendingConfirmationDto {
+  /** Durable Task identity shared by Desktop One, Work, and Mobile. */
+  taskId: string;
+  /** Stable Decision identity. For chat questions this is the source message id. */
+  decisionId: string;
   chatId: string;
   sourceMessageId: string;
   chatTitle: string;
@@ -664,6 +773,357 @@ export interface MobileBridgePendingConfirmationDto {
   agentId: string;
   firmId: string | null;
   createdAt: string;
+}
+
+/**
+ * Main-owned Decision projection for One Mobile. The nested view is the exact
+ * closed `OneDecisionViewV1` produced by Desktop Main; Mobile must never infer
+ * risk, options, or authority from the legacy pending-confirmation DTO.
+ */
+export interface MobileBridgeOneDecisionDto {
+  /** The authenticated Desktop host that produced this exact projection. */
+  authoritativeHostRef: string;
+  /** Optimistic-concurrency version of `view.taskId` at projection time. */
+  canonicalTaskVersion: number;
+  /** Exact output of Main's `normalizeOneDecision`, without device recomposition. */
+  view: OneDecisionViewV1;
+}
+
+export type MobileBridgeOneValueClosurePhase = "discovery" | "preparation" | "execution" | "verification";
+export type MobileBridgeOneValueClosurePhaseStatus =
+  | "not_started"
+  | "prepared"
+  | "in_progress"
+  | "completed"
+  | "failed"
+  | "not_applicable";
+
+/**
+ * Main-owned, content-free Value Closure summary. Narrative claims, outcome
+ * payloads, artifact paths, and evidence identifiers never cross this DTO.
+ */
+export interface MobileBridgeOneValueClosureDto {
+  authoritativeHostRef: string;
+  taskId: string;
+  canonicalTaskVersion: number;
+  valueClosureId: string;
+  valueClosureVersion: number;
+  generatedAt: string;
+  status: "ready";
+  verification: {
+    outcomeStatus: "verified" | "partially_verified";
+    phases: Array<{
+      phase: MobileBridgeOneValueClosurePhase;
+      status: MobileBridgeOneValueClosurePhaseStatus;
+      evidenceCount: number;
+    }>;
+    receiptCount: number;
+    trustedEvidenceCount: number;
+  };
+  remainingWork: {
+    total: number;
+    pending: number;
+    blocked: number;
+    notRequired: number;
+    userOwned: number;
+    oneOwned: number;
+    externalOwned: number;
+  };
+}
+
+/**
+ * Content-free proof that approved experience from an earlier Task was used.
+ * Asset ids, source Task ids, Memory text, paths, and evidence bodies stay in
+ * Desktop Main. This receipt explicitly does not claim an improvement.
+ */
+export interface MobileBridgeOneExperienceReuseDto {
+  authoritativeHostRef: string;
+  taskId: string;
+  canonicalTaskVersion: number;
+  reuseReceiptId: string;
+  reuseReceiptVersion: number;
+  valueClosureId: string;
+  valueClosureVersion: number;
+  createdAt: string;
+  reuseStatus: "approved_experience_reused";
+  comparisonStatus: "not_yet_measured";
+  improvementClaimed: false;
+  reusedAssetCount: number;
+  sourceTaskCount: number;
+  scopes: Array<"personal" | "project" | "agent" | "team">;
+}
+
+export interface MobileBridgeOneImprovementReusedAssetDto {
+  assetId: string;
+  assetVersion: number;
+  assetKind: "memory" | "agent" | "team" | "automation";
+  sourceTaskId: string;
+  sourceTaskVersion: number;
+}
+
+export type MobileBridgeOneImprovementMetricDto =
+  | {
+      type: "measured";
+      changeKind: "instruction_reduction" | "time_reduction" | "revision_reduction" | "quality_improvement" | "risk_avoidance";
+      baseline: number;
+      current: number;
+      unit: string;
+      comparisonDirection: "lower_is_better" | "higher_is_better";
+    }
+  | {
+      type: "estimate";
+      changeKind: "instruction_reduction" | "time_reduction" | "revision_reduction" | "quality_improvement" | "risk_avoidance";
+      value: number;
+      unit: string;
+    }
+  | {
+      type: "qualitative";
+      changeKind: "instruction_reduction" | "time_reduction" | "revision_reduction" | "quality_improvement" | "risk_avoidance";
+      baselineRefCount: number;
+      currentRefCount: number;
+    };
+
+export interface MobileBridgeOneImprovementComparisonDto {
+  comparisonRef: string;
+  baselineTaskId: string;
+  baselineTaskVersion: number;
+  currentTaskVersion: number;
+  evidenceType: "measured" | "qualitative" | "estimate";
+  result: "improved" | "no_change" | "regression";
+  receiptRefs: string[];
+  evidenceCount: number;
+  metric: MobileBridgeOneImprovementMetricDto;
+}
+
+/**
+ * Projection of an actual persisted Improvement Proof record. Labels,
+ * statements, methods, prompts, Surface refs, and Main-only attestations are
+ * intentionally absent.
+ */
+export interface MobileBridgeOneImprovementProofDto {
+  authoritativeHostRef: string;
+  taskId: string;
+  canonicalTaskVersion: number;
+  improvementProofId: string;
+  improvementProofVersion: number;
+  generatedAt: string;
+  status: "verified";
+  compoundingStep: "remembered" | "reused" | "improved_result";
+  attributionStatus: "established" | "not_established";
+  reusedAssets: MobileBridgeOneImprovementReusedAssetDto[];
+  comparisons: MobileBridgeOneImprovementComparisonDto[];
+}
+
+const MOBILE_BRIDGE_PROOF_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
+const MOBILE_BRIDGE_HOST_REF_RE = /^host_[a-f0-9]{32}$/;
+const MOBILE_BRIDGE_CLOSURE_REF_RE = /^value_closure_[a-f0-9]{32}$/;
+const MOBILE_BRIDGE_REUSE_REF_RE = /^one_reuse_receipt_[a-f0-9]{32}$/;
+const MOBILE_BRIDGE_IMPROVEMENT_REF_RE = /^improvement_proof_[a-f0-9]{32}$/;
+const MOBILE_BRIDGE_UNSAFE_PROOF_LABEL_RE = /(?:<|\b(?:https?|file|javascript|data):(?:\/\/)?|(?:^|[\s("'=:\[{])\/(?:Applications|System|Users|home|private|var|tmp|Volumes|opt|etc|usr|Library|root|mnt|media|srv|run|proc|sys|dev|bin|sbin|workspace|workspaces|app|data)(?:\/|$)|[A-Za-z]:\\|\\\\[^\\]+\\|(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}|(?:api[_-]?key|secret|password|token)\s*[:=]|\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b)/i;
+const MOBILE_BRIDGE_VALUE_PHASES: readonly MobileBridgeOneValueClosurePhase[] = [
+  "discovery", "preparation", "execution", "verification",
+];
+const MOBILE_BRIDGE_VALUE_PHASE_STATUSES: readonly MobileBridgeOneValueClosurePhaseStatus[] = [
+  "not_started", "prepared", "in_progress", "completed", "failed", "not_applicable",
+];
+const MOBILE_BRIDGE_IMPROVEMENT_CHANGE_KINDS = [
+  "instruction_reduction", "time_reduction", "revision_reduction", "quality_improvement", "risk_avoidance",
+] as const;
+
+function mobileBridgeExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  const allowed = new Set(expected);
+  return keys.length === expected.length && keys.every((key) => allowed.has(key));
+}
+
+function mobileBridgeRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function mobileBridgeProjectionId(value: unknown): value is string {
+  return typeof value === "string"
+    && MOBILE_BRIDGE_PROOF_ID_RE.test(value)
+    && !MOBILE_BRIDGE_UNSAFE_PROOF_LABEL_RE.test(value);
+}
+
+function mobileBridgePositiveVersion(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) > 0;
+}
+
+function mobileBridgeBoundedCount(value: unknown, max: number): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= max;
+}
+
+function mobileBridgeTimestamp(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value));
+}
+
+function mobileBridgeProofUnit(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length >= 1
+    && value.length <= 160
+    && !/[\u0000-\u001F\u007F]/.test(value)
+    && !MOBILE_BRIDGE_UNSAFE_PROOF_LABEL_RE.test(value);
+}
+
+function mobileBridgeUniqueIds(value: unknown, min: number, max: number): value is string[] {
+  return Array.isArray(value)
+    && value.length >= min
+    && value.length <= max
+    && value.every(mobileBridgeProjectionId)
+    && new Set(value).size === value.length;
+}
+
+export function isMobileBridgeOneValueClosureDto(value: unknown): value is MobileBridgeOneValueClosureDto {
+  if (!mobileBridgeRecord(value) || !mobileBridgeExactKeys(value, [
+    "authoritativeHostRef", "taskId", "canonicalTaskVersion", "valueClosureId",
+    "valueClosureVersion", "generatedAt", "status", "verification", "remainingWork",
+  ])) return false;
+  if (typeof value.authoritativeHostRef !== "string" || !MOBILE_BRIDGE_HOST_REF_RE.test(value.authoritativeHostRef)) return false;
+  if (!mobileBridgeProjectionId(value.taskId) || !mobileBridgePositiveVersion(value.canonicalTaskVersion)) return false;
+  if (typeof value.valueClosureId !== "string" || !MOBILE_BRIDGE_CLOSURE_REF_RE.test(value.valueClosureId)) return false;
+  if (!mobileBridgePositiveVersion(value.valueClosureVersion) || !mobileBridgeTimestamp(value.generatedAt) || value.status !== "ready") return false;
+  if (!mobileBridgeRecord(value.verification) || !mobileBridgeExactKeys(value.verification, [
+    "outcomeStatus", "phases", "receiptCount", "trustedEvidenceCount",
+  ])) return false;
+  if (!["verified", "partially_verified"].includes(String(value.verification.outcomeStatus))) return false;
+  if (!mobileBridgeBoundedCount(value.verification.receiptCount, 128)
+    || !mobileBridgeBoundedCount(value.verification.trustedEvidenceCount, 128)
+    || value.verification.receiptCount !== value.verification.trustedEvidenceCount) return false;
+  if (!Array.isArray(value.verification.phases) || value.verification.phases.length !== 4) return false;
+  for (let index = 0; index < MOBILE_BRIDGE_VALUE_PHASES.length; index += 1) {
+    const phase = value.verification.phases[index];
+    if (!mobileBridgeRecord(phase) || !mobileBridgeExactKeys(phase, ["phase", "status", "evidenceCount"])) return false;
+    if (phase.phase !== MOBILE_BRIDGE_VALUE_PHASES[index]
+      || !MOBILE_BRIDGE_VALUE_PHASE_STATUSES.includes(phase.status as MobileBridgeOneValueClosurePhaseStatus)
+      || !mobileBridgeBoundedCount(phase.evidenceCount, 32)) return false;
+    if (phase.status === "completed" && phase.evidenceCount < 1) return false;
+  }
+  const verificationPhase = value.verification.phases[3];
+  if (value.verification.outcomeStatus === "verified" && verificationPhase.status !== "completed") return false;
+  if (!mobileBridgeRecord(value.remainingWork) || !mobileBridgeExactKeys(value.remainingWork, [
+    "total", "pending", "blocked", "notRequired", "userOwned", "oneOwned", "externalOwned",
+  ])) return false;
+  const counts = [
+    value.remainingWork.total, value.remainingWork.pending, value.remainingWork.blocked,
+    value.remainingWork.notRequired, value.remainingWork.userOwned, value.remainingWork.oneOwned,
+    value.remainingWork.externalOwned,
+  ];
+  if (!counts.every((count) => mobileBridgeBoundedCount(count, 32))) return false;
+  return Number(value.remainingWork.pending) + Number(value.remainingWork.blocked) + Number(value.remainingWork.notRequired) === Number(value.remainingWork.total)
+    && Number(value.remainingWork.userOwned) + Number(value.remainingWork.oneOwned) + Number(value.remainingWork.externalOwned) === Number(value.remainingWork.total);
+}
+
+export function isMobileBridgeOneExperienceReuseDto(value: unknown): value is MobileBridgeOneExperienceReuseDto {
+  if (!mobileBridgeRecord(value) || !mobileBridgeExactKeys(value, [
+    "authoritativeHostRef", "taskId", "canonicalTaskVersion", "reuseReceiptId",
+    "reuseReceiptVersion", "valueClosureId", "valueClosureVersion", "createdAt", "reuseStatus", "comparisonStatus",
+    "improvementClaimed", "reusedAssetCount", "sourceTaskCount", "scopes",
+  ])) return false;
+  if (typeof value.authoritativeHostRef !== "string" || !MOBILE_BRIDGE_HOST_REF_RE.test(value.authoritativeHostRef)) return false;
+  if (!mobileBridgeProjectionId(value.taskId) || !mobileBridgePositiveVersion(value.canonicalTaskVersion)) return false;
+  if (typeof value.reuseReceiptId !== "string" || !MOBILE_BRIDGE_REUSE_REF_RE.test(value.reuseReceiptId)) return false;
+  if (!mobileBridgePositiveVersion(value.reuseReceiptVersion)
+    || typeof value.valueClosureId !== "string"
+    || !MOBILE_BRIDGE_CLOSURE_REF_RE.test(value.valueClosureId)
+    || !mobileBridgePositiveVersion(value.valueClosureVersion)
+    || !mobileBridgeTimestamp(value.createdAt)) return false;
+  if (value.reuseStatus !== "approved_experience_reused"
+    || value.comparisonStatus !== "not_yet_measured"
+    || value.improvementClaimed !== false) return false;
+  if (!mobileBridgeBoundedCount(value.reusedAssetCount, 32) || Number(value.reusedAssetCount) < 1) return false;
+  if (!mobileBridgeBoundedCount(value.sourceTaskCount, 32)
+    || Number(value.sourceTaskCount) < 1
+    || Number(value.sourceTaskCount) > Number(value.reusedAssetCount)) return false;
+  const scopes = ["personal", "project", "agent", "team"] as const;
+  return Array.isArray(value.scopes)
+    && value.scopes.length >= 1
+    && value.scopes.length <= scopes.length
+    && value.scopes.every((item) => scopes.includes(item as typeof scopes[number]))
+    && new Set(value.scopes).size === value.scopes.length;
+}
+
+function isMobileBridgeOneImprovementMetricDto(value: unknown): value is MobileBridgeOneImprovementMetricDto {
+  if (!mobileBridgeRecord(value)
+    || !MOBILE_BRIDGE_IMPROVEMENT_CHANGE_KINDS.includes(value.changeKind as typeof MOBILE_BRIDGE_IMPROVEMENT_CHANGE_KINDS[number])) return false;
+  if (value.type === "measured") {
+    return mobileBridgeExactKeys(value, ["type", "changeKind", "baseline", "current", "unit", "comparisonDirection"])
+      && typeof value.baseline === "number" && Number.isFinite(value.baseline)
+      && typeof value.current === "number" && Number.isFinite(value.current)
+      && mobileBridgeProofUnit(value.unit)
+      && ["lower_is_better", "higher_is_better"].includes(String(value.comparisonDirection));
+  }
+  if (value.type === "estimate") {
+    return mobileBridgeExactKeys(value, ["type", "changeKind", "value", "unit"])
+      && typeof value.value === "number" && Number.isFinite(value.value)
+      && mobileBridgeProofUnit(value.unit);
+  }
+  if (value.type === "qualitative") {
+    return mobileBridgeExactKeys(value, ["type", "changeKind", "baselineRefCount", "currentRefCount"])
+      && mobileBridgeBoundedCount(value.baselineRefCount, 32) && Number(value.baselineRefCount) >= 1
+      && mobileBridgeBoundedCount(value.currentRefCount, 32) && Number(value.currentRefCount) >= 1;
+  }
+  return false;
+}
+
+export function isMobileBridgeOneImprovementProofDto(value: unknown): value is MobileBridgeOneImprovementProofDto {
+  if (!mobileBridgeRecord(value) || !mobileBridgeExactKeys(value, [
+    "authoritativeHostRef", "taskId", "canonicalTaskVersion", "improvementProofId",
+    "improvementProofVersion", "generatedAt", "status", "compoundingStep", "attributionStatus", "reusedAssets", "comparisons",
+  ])) return false;
+  if (typeof value.authoritativeHostRef !== "string" || !MOBILE_BRIDGE_HOST_REF_RE.test(value.authoritativeHostRef)) return false;
+  if (!mobileBridgeProjectionId(value.taskId) || !mobileBridgePositiveVersion(value.canonicalTaskVersion)) return false;
+  if (typeof value.improvementProofId !== "string" || !MOBILE_BRIDGE_IMPROVEMENT_REF_RE.test(value.improvementProofId)) return false;
+  if (!mobileBridgePositiveVersion(value.improvementProofVersion) || !mobileBridgeTimestamp(value.generatedAt) || value.status !== "verified") return false;
+  if (!["remembered", "reused", "improved_result"].includes(String(value.compoundingStep))) return false;
+  if (!["established", "not_established"].includes(String(value.attributionStatus))) return false;
+  if (value.compoundingStep === "improved_result" && value.attributionStatus !== "established") return false;
+  if (!Array.isArray(value.reusedAssets) || value.reusedAssets.length < 1 || value.reusedAssets.length > 16) return false;
+  const assetKeys = new Set<string>();
+  for (const asset of value.reusedAssets) {
+    if (!mobileBridgeRecord(asset) || !mobileBridgeExactKeys(asset, [
+      "assetId", "assetVersion", "assetKind", "sourceTaskId", "sourceTaskVersion",
+    ])) return false;
+    if (!mobileBridgeProjectionId(asset.assetId) || !mobileBridgePositiveVersion(asset.assetVersion)
+      || !["memory", "agent", "team", "automation"].includes(String(asset.assetKind))
+      || !mobileBridgeProjectionId(asset.sourceTaskId) || !mobileBridgePositiveVersion(asset.sourceTaskVersion)) return false;
+    const key = `${asset.assetId}:${asset.assetVersion}`;
+    if (assetKeys.has(key)) return false;
+    assetKeys.add(key);
+  }
+  if (!Array.isArray(value.comparisons) || value.comparisons.length < 1 || value.comparisons.length > 16) return false;
+  const comparisonRefs = new Set<string>();
+  for (const comparison of value.comparisons) {
+    if (!mobileBridgeRecord(comparison) || !mobileBridgeExactKeys(comparison, [
+      "comparisonRef", "baselineTaskId", "baselineTaskVersion", "currentTaskVersion",
+      "evidenceType", "result", "receiptRefs", "evidenceCount", "metric",
+    ])) return false;
+    if (!mobileBridgeProjectionId(comparison.comparisonRef) || comparisonRefs.has(comparison.comparisonRef)) return false;
+    comparisonRefs.add(comparison.comparisonRef);
+    if (!mobileBridgeProjectionId(comparison.baselineTaskId)
+      || comparison.baselineTaskId === value.taskId
+      || !mobileBridgePositiveVersion(comparison.baselineTaskVersion)
+      || comparison.currentTaskVersion !== value.canonicalTaskVersion
+      || !["measured", "qualitative", "estimate"].includes(String(comparison.evidenceType))
+      || !["improved", "no_change", "regression"].includes(String(comparison.result))
+      || !mobileBridgeUniqueIds(comparison.receiptRefs, 1, 32)
+      || !mobileBridgeBoundedCount(comparison.evidenceCount, 32) || Number(comparison.evidenceCount) < 1
+      || !isMobileBridgeOneImprovementMetricDto(comparison.metric)
+      || comparison.metric.type !== comparison.evidenceType) return false;
+  }
+  const hasImprovement = value.comparisons.some((comparison) => comparison.result === "improved");
+  if (value.compoundingStep === "improved_result"
+    && (!hasImprovement || value.attributionStatus !== "established")) return false;
+  return true;
+}
+
+/** Durable-claim acknowledgement only; it never claims the proposed action ran. */
+export interface MobileBridgeDecisionAnswerAcknowledgementDto {
+  contractVersion: typeof ONE_DECISION_CONTRACT_VERSION;
+  decisionId: string;
+  taskId: string;
+  taskVersion: number;
+  status: "answer_claimed";
 }
 
 /** A reconnect-safe, secret-free view of one live irreversible browser action. */
@@ -845,6 +1305,89 @@ export interface MobileBridgeBuildStatusDto {
   resumable?: false;
 }
 
+/**
+ * Minimal, explicit-user-approved One identity projected to a paired device.
+ * `profileContext`, principle scope refs, disabled principles, and any value
+ * that required redaction are intentionally absent from this contract.
+ */
+export interface MobileBridgeOneProfileDto {
+  contractVersion: "1.0.0";
+  oneId: string;
+  version: number;
+  displayName: string;
+  role: string;
+  preferredLocale: "system" | "ko" | "en";
+  timeZone: string | null;
+  updatedAt: string;
+  operatingPrinciples: Array<{
+    id: string;
+    content: string;
+    scope: "personal" | "project" | "agent" | "team";
+    approvalSource: "explicit_user";
+    approvedAt: string;
+    updatedAt: string;
+  }>;
+  omittedOperatingPrincipleCount: number;
+}
+
+export interface MobileBridgeOneBriefingCandidateDto {
+  contractVersion: "1.0.0";
+  candidateId: string;
+  kind: "risk" | "opportunity" | "anomaly" | "repetition" | "decision" | "completion";
+  reasonCode:
+    | "project_folder_missing"
+    | "project_folder_unreadable"
+    | "project_folder_not_directory"
+    | "project_deadline_conflict"
+    | "automation_error"
+    | "automation_blocked"
+    | "automation_needs_input"
+    | "automation_partial"
+    | "task_waiting_decision_stale"
+    | "task_running_without_active_run"
+    | "task_failed_repeated"
+    | "task_failed_abandoned"
+    | "task_partial_abandoned";
+  severity: 1 | 2 | 3 | 4;
+  source: {
+    kind: "project_folder" | "automation_run" | "canonical_task";
+    refId: string;
+    label: string;
+  };
+  detectedAt: string;
+  expiresAt: string;
+  confidence: "high" | "medium" | "low";
+  preparedAction: {
+    kind: "open_project" | "open_automation" | "open_task";
+    targetId: string;
+    label: string;
+    /** Navigation only. Mobile cannot infer that execution has begun. */
+    executionStarted: false;
+  };
+}
+
+/**
+ * Main-owned Briefing decision projected without detector inputs, raw paths,
+ * raw scheduler errors, prompts, evidence payloads, or unsupported channels.
+ * Mobile renders this exact candidate and never re-runs the detector.
+ */
+export interface MobileBridgeOneBriefingDto {
+  contractVersion: "1.0.0";
+  evaluatedAt: string;
+  preferences: {
+    cadence: "important_only" | "daily" | "weekdays" | "weekly";
+    /** Only the channel that is actually implemented across this bridge. */
+    channels: ["in_app"];
+    quietHours: {
+      enabled: boolean;
+      startHour: number;
+      endHour: number;
+    };
+    updatedAt: string;
+  };
+  candidate: MobileBridgeOneBriefingCandidateDto | null;
+}
+
 export interface MobileBridgeSnapshot {
   schemaVersion: typeof MOBILE_BRIDGE_PROTOCOL_VERSION;
   generatedAt: string;
@@ -861,8 +1404,29 @@ export interface MobileBridgeSnapshot {
   automations: MobileBridgeAutomationDto[];
   usage: MobileBridgeUsageProviderDto[];
   activeChatIds: string[];
+  /** Main-composed Task summaries. Every row is bound to this snapshot's host id. */
+  taskProjections?: AgentlasOneTaskProjectionV1[];
+  /**
+   * Absent on older Desktop builds. New builds emit an empty array when there
+   * is no current safe Decision so Mobile can clear stale approval UI.
+   */
+  oneDecisions?: MobileBridgeOneDecisionDto[];
+  /** Absent on older builds; new Desktop builds emit [] to clear stale Mobile cards. */
+  oneValueClosures?: MobileBridgeOneValueClosureDto[];
+  /** Approved reuse only; no raw Memory or improvement assertion crosses the bridge. */
+  oneExperienceReuseReceipts?: MobileBridgeOneExperienceReuseDto[];
+  /** Actual persisted proof records only; Surface/result presence never creates a row. */
+  oneImprovementProofs?: MobileBridgeOneImprovementProofDto[];
+  /** Zero or one Main-selected, review-only ecosystem suggestion. */
+  oneEcosystemSuggestions?: OneMobileEcosystemSuggestionV1[];
+  /** System-only Task receipt for exact post-exchange pairing verification. */
+  pairingVerificationTasks?: MobileBridgePairingTaskDto[];
   /** Absent when the authenticated Web producer is not shipped or not proven available. */
   ontologyChipProjections?: MobileBridgeOntologyProjectionDto[];
+  /** Absent on older Desktop builds. Main remains the only profile authority. */
+  oneProfile?: MobileBridgeOneProfileDto;
+  /** Absent on older Desktop builds. Candidate selection is already complete in Main. */
+  oneBriefing?: MobileBridgeOneBriefingDto;
 }
 
 export type MobileBridgeRequestParseResult =
@@ -994,17 +1558,7 @@ function firstError(...errors: Array<string | null>): string | null {
   return errors.find((error): error is string => Boolean(error)) ?? null;
 }
 
-function validateInvokeOptions(params: Record<string, unknown>): string | null {
-  const borrowAgents = params.borrowAgents;
-  if (
-    borrowAgents !== undefined &&
-    (!Array.isArray(borrowAgents) ||
-      borrowAgents.length > 8 ||
-      borrowAgents.some((item) => typeof item !== "string" || item.length < 1 || item.length > 160))
-  ) {
-    return "borrowAgents must be an array of at most 8 non-empty strings";
-  }
-  const images = params.images;
+function validateImageAttachments(images: unknown): string | null {
   if (images !== undefined) {
     if (!Array.isArray(images) || images.length > 4) {
       return "images must be an array of at most 4 attachments";
@@ -1033,16 +1587,47 @@ function validateInvokeOptions(params: Record<string, unknown>): string | null {
       }
     }
   }
+  return null;
+}
+
+function validateInvokeOptions(params: Record<string, unknown>): string | null {
+  const borrowAgents = params.borrowAgents;
+  if (
+    borrowAgents !== undefined &&
+    (!Array.isArray(borrowAgents) ||
+      borrowAgents.length > 8 ||
+      borrowAgents.some((item) => typeof item !== "string" || item.length < 1 || item.length > 160))
+  ) {
+    return "borrowAgents must be an array of at most 8 non-empty strings";
+  }
+  const hasDecisionId = params.expectedQuestionMessageId !== undefined;
+  const hasDecisionTaskId = params.expectedTaskId !== undefined;
+  const hasDecisionTaskVersion = params.expectedTaskVersion !== undefined;
+  const hasDecisionContract = params.expectedDecisionContractVersion !== undefined;
+  const decisionBindingError = hasDecisionId
+    ? !hasDecisionTaskId || !hasDecisionTaskVersion || !hasDecisionContract
+      ? "Decision answers require expectedQuestionMessageId, expectedTaskId, expectedTaskVersion, and expectedDecisionContractVersion"
+      : params.expectedDecisionContractVersion !== ONE_DECISION_CONTRACT_VERSION
+        ? "expectedDecisionContractVersion is unsupported"
+        : null
+    : hasDecisionTaskId || hasDecisionTaskVersion || hasDecisionContract
+      ? "Decision Task preconditions require expectedQuestionMessageId"
+      : null;
   return firstError(
+    validateImageAttachments(params.images),
     optionalString(params, "runId", 160),
     requiredString(params, "chatId", 256),
     optionalString(params, "expectedQuestionMessageId", 256),
+    optionalString(params, "expectedTaskId", 256),
+    optionalInteger(params, "expectedTaskVersion", 1, Number.MAX_SAFE_INTEGER),
+    optionalString(params, "expectedDecisionContractVersion", 32),
     requiredText(params, "userPrompt", 200_000),
     validateEnum(params, "locale", ["ko", "en"]),
     validateEnum(params, "permissions", ["read", "write", "full"]),
     optionalBoolean(params, "planMode"),
     optionalBoolean(params, "goalMode"),
     optionalBoolean(params, "appsGenerateMode"),
+    decisionBindingError,
   );
 }
 
@@ -1228,6 +1813,54 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["id", "agentId"])
         ? firstError(requiredString(params, "id"), requiredString(params, "agentId"))
         : "chats.switchAgent accepts only id and agentId";
+    case "tasks.acceptResult":
+      return hasOnlyKeys(params, ["taskId", "expectedVersion", "expectedRunId"])
+        ? firstError(
+            requiredString(params, "taskId"),
+            params.expectedVersion === undefined
+              ? "expectedVersion is required"
+              : optionalInteger(params, "expectedVersion", 1, Number.MAX_SAFE_INTEGER),
+            requiredString(params, "expectedRunId", 160),
+          )
+        : "tasks.acceptResult accepts only taskId, expectedVersion, and expectedRunId";
+    case "tasks.latestResult":
+      return hasOnlyKeys(params, ["taskId", "chatId", "expectedVersion"])
+        ? firstError(
+            requiredString(params, "taskId"),
+            requiredString(params, "chatId"),
+            params.expectedVersion === undefined
+              ? "expectedVersion is required"
+              : optionalInteger(params, "expectedVersion", 1, Number.MAX_SAFE_INTEGER),
+          )
+        : "tasks.latestResult accepts only taskId, chatId, and expectedVersion";
+    case "one.suggestions.act": {
+      if (!hasOnlyKeys(params, [
+        "schemaVersion", "action", "expectedStoreVersion", "suggestionId", "expectedSuggestionVersion",
+        "originTaskId", "expectedTaskVersion", "valueClosureId", "expectedValueClosureVersion",
+        "confirmedByUser", "reviewOnly",
+      ])) return "one.suggestions.act contains unsupported fields";
+      return firstError(
+        params.schemaVersion === 1 ? null : "one.suggestions.act requires schemaVersion 1",
+        validateEnum(params, "action", ["review", "snooze", "dismiss", "never_ask_again"], false),
+        params.expectedStoreVersion === undefined
+          ? "expectedStoreVersion is required"
+          : optionalInteger(params, "expectedStoreVersion", 1, Number.MAX_SAFE_INTEGER),
+        requiredString(params, "suggestionId", 160),
+        params.expectedSuggestionVersion === undefined
+          ? "expectedSuggestionVersion is required"
+          : optionalInteger(params, "expectedSuggestionVersion", 1, Number.MAX_SAFE_INTEGER),
+        requiredString(params, "originTaskId", 160),
+        params.expectedTaskVersion === undefined
+          ? "expectedTaskVersion is required"
+          : optionalInteger(params, "expectedTaskVersion", 1, Number.MAX_SAFE_INTEGER),
+        requiredString(params, "valueClosureId", 160),
+        params.expectedValueClosureVersion === undefined
+          ? "expectedValueClosureVersion is required"
+          : optionalInteger(params, "expectedValueClosureVersion", 1, Number.MAX_SAFE_INTEGER),
+        params.confirmedByUser === true ? null : "confirmedByUser must be true",
+        params.reviewOnly === true ? null : "reviewOnly must be true",
+      );
+    }
     case "workspace.setProject":
       return hasOnlyKeys(params, ["chatId", "projectId"])
         ? firstError(requiredString(params, "chatId"), requiredString(params, "projectId"))
@@ -1244,13 +1877,26 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["chatId"])
         ? requiredString(params, "chatId")
         : "composer.context accepts only chatId";
+    case "one.invoke.start":
+      if (!hasOnlyKeys(params, ["schemaVersion", "userPrompt", "permissions", "images"])) {
+        return "one.invoke.start contains unsupported fields";
+      }
+      return firstError(
+        params.schemaVersion === 1 ? null : "one.invoke.start requires schemaVersion 1",
+        requiredText(params, "userPrompt", 200_000),
+        typeof params.userPrompt === "string" && params.userPrompt.trim().length > 0
+          ? null
+          : "one.invoke.start userPrompt must contain visible text",
+        validateEnum(params, "permissions", ["read", "write", "full"]),
+        validateImageAttachments(params.images),
+      );
     case "invoke.start":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents", "images", "expectedQuestionMessageId"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents", "images", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
         return "invoke.start contains unsupported fields";
       }
       return validateInvokeOptions(params);
     case "invoke.steer":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents", "images", "expectedRunId", "expectedQuestionMessageId"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents", "images", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
         return "invoke.steer contains unsupported fields";
       }
       return firstError(validateInvokeOptions(params), requiredString(params, "expectedRunId", 160));
@@ -1482,7 +2128,17 @@ export function mobileBridgePairFailure(
 export function parseMobileBridgePairExchangeRequest(
   input: unknown,
 ): MobileBridgePairExchangeParseResult {
-  if (!isRecord(input) || !hasOnlyKeys(input, ["v", "type", "id", "code", "device"])) {
+  if (!isRecord(input) || !hasOnlyKeys(input, [
+    "v",
+    "type",
+    "id",
+    "code",
+    "pairingAttemptId",
+    "deviceNonce",
+    "pairingAssertion",
+    "audience",
+    "device",
+  ])) {
     return { ok: false, error: mobileBridgePairFailure(null, "invalid_pairing_request", "Invalid pairing request") };
   }
   const id = typeof input.id === "string" && input.id.length > 0 && input.id.length <= 128
@@ -1494,6 +2150,18 @@ export function parseMobileBridgePairExchangeRequest(
   const code = input.code;
   if (typeof code !== "string" || !/^[A-Za-z0-9_-]{22}$/.test(code)) {
     return { ok: false, error: mobileBridgePairFailure(id, "invalid_pairing_request", "Invalid pairing code") };
+  }
+  if (
+    typeof input.pairingAttemptId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(input.pairingAttemptId) ||
+    typeof input.deviceNonce !== "string" ||
+    !/^[A-Za-z0-9_-]{32,128}$/.test(input.deviceNonce) ||
+    typeof input.pairingAssertion !== "string" ||
+    input.pairingAssertion.length > 4096 ||
+    !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(input.pairingAssertion) ||
+    input.audience !== MOBILE_BRIDGE_PAIR_ASSERTION_AUDIENCE
+  ) {
+    return { ok: false, error: mobileBridgePairFailure(id, "invalid_pairing_request", "Invalid account assertion binding") };
   }
   if (!isRecord(input.device) || !hasOnlyKeys(input.device, ["name", "platform", "appVersion"])) {
     return { ok: false, error: mobileBridgePairFailure(id, "invalid_pairing_request", "Invalid device metadata") };
@@ -1510,6 +2178,10 @@ export function parseMobileBridgePairExchangeRequest(
       type: "pair.exchange",
       id,
       code,
+      pairingAttemptId: input.pairingAttemptId,
+      deviceNonce: input.deviceNonce,
+      pairingAssertion: input.pairingAssertion,
+      audience: MOBILE_BRIDGE_PAIR_ASSERTION_AUDIENCE,
       device: {
         name: input.device.name as string,
         platform: input.device.platform,

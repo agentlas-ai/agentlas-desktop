@@ -52,6 +52,7 @@ import { surfaceApprovalRequirement, type SurfaceApprovalRequirement } from "@/l
 import { KeyStatusBanner } from "@/components/KeyStatusBanner";
 import { hubBookmarkIdentityKey, onHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { onAgentRosterChange } from "@/lib/agent-roster-events";
+import { OneSuggestionReviewHandoffBanner } from "@/components/one/OneSuggestionReviewHandoff";
 
 function uid(): string {
   return Math.random().toString(36).slice(2);
@@ -693,7 +694,20 @@ export default function ChatPageWrapper() {
 
 function ChatPage() {
   const searchParams = useSearchParams();
-  const chatId = searchParams.get("id") ?? "";
+  const queryChatId = searchParams.get("id") ?? "";
+  const requestedTaskId = searchParams.get("task") ?? "";
+  const [validatedTaskTarget, setValidatedTaskTarget] = useState<{
+    taskId: string;
+    chatId: string;
+  } | null>(null);
+  // Bind the resolution to the exact requested Task. Navigating A→B must fail
+  // closed immediately instead of rendering A for one frame while B resolves.
+  const validatedTaskChatId = requestedTaskId
+    ? validatedTaskTarget?.taskId === requestedTaskId
+      ? validatedTaskTarget.chatId
+      : null
+    : "";
+  const chatId = requestedTaskId ? (validatedTaskChatId ?? "") : queryChatId;
   const surfaceParam = searchParams.get("surface") ?? "";
   // 홈 composer가 ?prompt=...로 첫 메시지를 실어서 보내면 자동 전송 (한 번만)
   const seedPrompt = searchParams.get("prompt") ?? "";
@@ -720,6 +734,36 @@ function ChatPage() {
   const [resolvedOrg, setResolvedOrg] = useState<ResolvedOrg | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [messages, setMessages] = useState<StreamMessage[]>([]);
+
+  // A Task deep link is authoritative. Resolve it through Main before loading
+  // Work so a stale or mismatched chat query can never open another Task.
+  useEffect(() => {
+    if (!requestedTaskId) {
+      setValidatedTaskTarget(null);
+      return;
+    }
+    let cancelled = false;
+    const api = ipc();
+    if (!api) return;
+    void api.tasks.get(requestedTaskId).then((task) => {
+      if (cancelled) return;
+      const originChatId = task?.originChatId ?? "";
+      setValidatedTaskTarget({ taskId: requestedTaskId, chatId: originChatId });
+      if (originChatId && originChatId !== queryChatId) {
+        router.replace(`/chat?id=${encodeURIComponent(originChatId)}&task=${encodeURIComponent(requestedTaskId)}`);
+      } else if (!originChatId) {
+        router.replace("/one");
+      }
+    }).catch(() => {
+      if (!cancelled) {
+        setValidatedTaskTarget({ taskId: requestedTaskId, chatId: "" });
+        router.replace("/one");
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [queryChatId, requestedTaskId, router]);
 
   // 화면에 복원된 대화 기록의 논리적 분량만 표시한다. 실제 모델 물리창 점유율은
   // CLI/BYOK별 시스템 프롬프트·툴·출력 예약과 compaction 뒤에야 정해지므로 가짜
@@ -1890,7 +1934,13 @@ function ChatPage() {
     ) => {
       const api = ipc();
       const events = ipcEvents();
-      if (!api || !events || !chat || busy) return false;
+      if (
+        !api ||
+        !events ||
+        !chat ||
+        busy ||
+        (requestedTaskId && validatedTaskChatId !== chat.id)
+      ) return false;
       // 새 실행은 이전 실행의 steering 취소 상태를 절대 상속하지 않는다.
       steerCancelRef.current = false;
       setCancelPending(false);
@@ -2091,7 +2141,20 @@ function ChatPage() {
         return false;
       }
     },
-    [agent, agentGroup, allGeneratedApps, chat, busy, locale, router, setNetworkOpenPersisted, t, subscribeRun],
+    [
+      agent,
+      agentGroup,
+      allGeneratedApps,
+      chat,
+      busy,
+      locale,
+      requestedTaskId,
+      router,
+      setNetworkOpenPersisted,
+      subscribeRun,
+      t,
+      validatedTaskChatId,
+    ],
   );
 
   // 진행 중 실행 취소 — 입력창의 정지 버튼(전송 버튼이 busy일 때 변신) / Cmd/Ctrl+Esc.
@@ -2884,8 +2947,14 @@ function ChatPage() {
     router.replace("/");
   }
 
+  if (
+    requestedTaskId &&
+    (validatedTaskChatId === null || !validatedTaskChatId || chat?.id !== validatedTaskChatId)
+  ) {
+    return null;
+  }
   if (!chat) {
-    if (chatId) return null; // 특정 채팅 로딩 중
+    if (chatId) return null; // 특정 Task/채팅 로딩 중
     return (
       <div style={{ display: "flex", flex: 1, height: "100%", width: "100%", alignItems: "center", justifyContent: "center", padding: 24 }}>
         <div style={{ textAlign: "center", maxWidth: 440 }}>
@@ -3243,6 +3312,10 @@ function ChatPage() {
           <IconTrash size={16} />
         </button>
       </header>
+
+      <div style={{ margin: "0 16px" }}>
+        <OneSuggestionReviewHandoffBanner surface="work" locale={locale} />
+      </div>
 
       {/* ContinuityReceipt(복원 배너) — 실제로 알 수 있는 사실만: 마지막 작업 폴더가 로컬에서
           복원됐다는 점. 기기 간 클라우드 동기화는 백엔드 미확인이라 단정하지 않는다.

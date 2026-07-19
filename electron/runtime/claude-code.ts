@@ -599,6 +599,7 @@ export const runClaudeCode: Runner = async (
     let finalText = "";
     let tokens: number | undefined;
     let stderr = "";
+    let structuredRuntimeError: Error | null = null;
     let lastEmit = 0;
     let sessionId: string | undefined;
     let accCapped = false;
@@ -709,6 +710,9 @@ export const runClaudeCode: Runner = async (
       };
       result?: unknown;
       usage?: { output_tokens?: number };
+      error?: unknown;
+      is_error?: boolean;
+      terminal_reason?: string;
       event?: {
         type?: string;
         index?: number;
@@ -735,6 +739,13 @@ export const runClaudeCode: Runner = async (
       }
       if (typeof ev.session_id === "string" && ev.session_id) {
         sessionId = ev.session_id;
+      }
+      if (ev.error === "authentication_failed") {
+        structuredRuntimeError = new Error(
+          runReq.locale === "ko"
+            ? "Claude Code 로그인이 만료됐습니다. 설정에서 Claude를 다시 연결한 뒤 재시도해주세요."
+            : "Claude Code is signed out. Reconnect Claude in Settings, then try again.",
+        );
       }
       if (isAgentAppMcpInit && hasExactUntrustedMcpGrant &&
           !runReq.agentAppMcpFallbackAttempted) {
@@ -860,6 +871,16 @@ export const runClaudeCode: Runner = async (
       } else if (ev.type === "result") {
         if (typeof ev.result === "string") finalText = ev.result;
         if (ev.usage?.output_tokens != null) tokens = ev.usage.output_tokens;
+        if (
+          ev.is_error === true
+          && (ev.terminal_reason === "api_error" || /not logged in|please run \/login/i.test(finalText))
+        ) {
+          structuredRuntimeError = new Error(
+            runReq.locale === "ko"
+              ? "Claude Code 로그인이 만료됐습니다. 설정에서 Claude를 다시 연결한 뒤 재시도해주세요."
+              : "Claude Code is signed out. Reconnect Claude in Settings, then try again.",
+          );
+        }
       }
     }
 
@@ -957,6 +978,10 @@ export const runClaudeCode: Runner = async (
               ),
         });
       } else {
+        if (structuredRuntimeError) {
+          rejectRuntime(structuredRuntimeError);
+          return;
+        }
         if (runReq.untrustedNoTools) {
           // Pre-init failures already replay once through the exact init gate.
           // After a connected receipt, never issue a second model request: it

@@ -1,0 +1,110 @@
+.card {
+  display: grid;
+  gap: 16px;
+  margin-top: 18px;
+  padding: 21px 22px;
+  border: 1px solid #dfe4d8;
+  border-radius: 18px;
+  background: #fbfcf9;
+  color: #1f221d;
+}
+
+.copy {
+  min-width: 0;
+}
+
+.eyebrow {
+  margin: 0 0 6px;
+  color: #5a713b;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.copy h3 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.35;
+  letter-spacing: -0.025em;
+}
+
+.copy blockquote {
+  margin: 14px 0 8px;
+  padding-left: 13px;
+  border-left: 2px solid #9db285;
+  color: #454b40;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.copy small {
+  color: #747a70;
+  font-size: 11px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.primary,
+.secondary,
+.textButton {
+  min-height: 44px;
+  padding: 0 15px;
+  border-radius: 11px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.primary {
+  border: 1px solid #567137;
+  background: #607a3e;
+  color: #fff;
+}
+
+.secondary {
+  border: 1px solid #dfe3da;
+  background: #fff;
+  color: #4c5248;
+}
+
+.textButton {
+  border: 1px solid transparent;
+  background: transparent;
+  color: #747a70;
+}
+
+.primary:disabled,
+.secondary:disabled,
+.textButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.primary:focus-visible,
+.secondary:focus-visible,
+.textButton:focus-visible {
+  outline: 3px solid rgba(96, 122, 62, 0.2);
+  outline-offset: 2px;
+}
+
+.error {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fff2ef;
+  color: #8e352b;
+  font-size: 12px;
+}
+
+@media (max-width: 680px) {
+  .card { padding: 18px; }
+  .actions { display: grid; justify-content: stretch; }
+  .actions button { width: 100%; }
+}

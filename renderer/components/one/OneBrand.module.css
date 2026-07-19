@@ -1,0 +1,69 @@
+.mark,
+.lockup {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  overflow: hidden;
+  background: transparent;
+}
+
+.mark img,
+.lockup img {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+}
+
+.small {
+  width: 30px;
+  height: 19px;
+}
+
+.medium {
+  width: 38px;
+  height: 24px;
+}
+
+.thinking {
+  width: 52px;
+  height: 31px;
+}
+
+.lockup {
+  width: 126px;
+  height: 74px;
+}
+
+.sweepingLight {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  background: linear-gradient(
+    102deg,
+    transparent 20%,
+    rgba(164, 207, 120, .08) 34%,
+    rgba(226, 255, 198, .92) 50%,
+    rgba(164, 207, 120, .18) 63%,
+    transparent 78%
+  );
+  -webkit-mask: url("/brand/agentlas-one-mark.png") center / contain no-repeat;
+  mask: url("/brand/agentlas-one-mark.png") center / contain no-repeat;
+  mix-blend-mode: screen;
+  transform: translateX(-135%);
+  animation: sweepLight 1.9s cubic-bezier(.42, 0, .28, 1) infinite;
+}
+
+@keyframes sweepLight {
+  0%, 12% { opacity: 0; transform: translateX(-135%); }
+  22% { opacity: 1; }
+  68% { opacity: 1; }
+  82%, 100% { opacity: 0; transform: translateX(135%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sweepingLight { display: none; }
+}

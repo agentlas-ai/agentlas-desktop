@@ -4,7 +4,7 @@
 // - "빈 캔버스에서 만들기" 진입점(빈 자동화 생성 후 flow 편집기로 이동).
 // - ?id= 가 있으면 기존 자동화를 로드해 in-place 수정(삭제-재생성 회피).
 "use client";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
@@ -17,12 +17,14 @@ import type {
   InstalledAgent,
   InstalledFirm,
   MarketplaceListing,
+  OneSuggestionReviewSeed,
   ScheduleSpec,
   Trigger,
   TriggerKind,
 } from "@/lib/types";
 import { ScheduleBuilder, type ScheduleBuilderValue } from "@/components/automation/ScheduleBuilder";
 import { IconBuilding, IconSparkles } from "@/components/Icon";
+import { OneSuggestionReviewHandoffBanner, type OneReviewSeedApplyResult } from "@/components/one/OneSuggestionReviewHandoff";
 import { shouldPreferComputerUseForAutomation } from "@shared/automation-tool-policy";
 
 type TargetType = "agent" | "firm" | "hub";
@@ -61,6 +63,27 @@ function NewAutomationPage() {
   const [chainAfter, setChainAfter] = useState("");
   const [allAutomations, setAllAutomations] = useState<Automation[]>([]);
   const [loaded, setLoaded] = useState(!editId);
+  const reviewUntouchedRef = useRef(true);
+
+  const applyOneReviewSeed = useCallback((seed: OneSuggestionReviewSeed): OneReviewSeedApplyResult => {
+    if (seed.kind !== "automation" || seed.targetSurface !== "automation") return "blocked";
+    if (!loaded) return "defer";
+    if (
+      editId
+      || !reviewUntouchedRef.current
+      || name !== ""
+      || prompt !== ""
+      || initialSpec !== null
+      || fsPath !== ""
+      || chainAfter !== ""
+      || toolModeTouched
+    ) return "blocked";
+    // Intentionally materialize only the safe label. triggerPreview and
+    // permission remain read-only in the verified banner; schedule, prompt,
+    // target, enablement, and execution are never inferred here.
+    setName(seed.name);
+    return "applied";
+  }, [chainAfter, editId, fsPath, initialSpec, loaded, name, prompt, toolModeTouched]);
 
   useEffect(() => {
     const api = ipc();
@@ -230,7 +253,15 @@ function NewAutomationPage() {
         </h1>
       </header>
 
-      <section className="titlebar-nodrag" data-tour-id="automation.form" style={{ maxWidth: 640, margin: "32px auto", padding: "0 24px" }}>
+      <section
+        className="titlebar-nodrag"
+        data-tour-id="automation.form"
+        style={{ maxWidth: 640, margin: "32px auto", padding: "0 24px" }}
+        onChangeCapture={() => { reviewUntouchedRef.current = false; }}
+        onClickCapture={() => { reviewUntouchedRef.current = false; }}
+      >
+        <OneSuggestionReviewHandoffBanner surface="automation" locale={locale} onReviewSeed={applyOneReviewSeed} />
+
         <Field label={t("auto.field.name")}>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("auto.field.name.placeholder")} autoFocus style={inputStyle} />
         </Field>

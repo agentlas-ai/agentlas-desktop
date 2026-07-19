@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { GLOBAL_ORCHESTRATOR_SLUG } from "../architecture/manifest";
 import {
   extractBuildInterviewQuestions,
   isCompletedBuildTurn,
@@ -12,12 +13,38 @@ import {
   type BrowserPermissionDecision,
 } from "../browser/connect";
 import { onDesktopStoreChange } from "../store/change-bus";
+import {
+  acceptCanonicalTaskResult,
+  ensurePairingVerificationTask,
+  findCanonicalTaskForChat,
+  getCanonicalTask,
+} from "../store/tasks";
+import {
+  ensureAcceptedResultValueClosure,
+  ensureVerifiedAcceptedResultValueClosure,
+} from "../one/accepted-result-value-closure";
+import { tryCompleteOneActivationFirstValue } from "../one/activation";
+import { ensureOneExperienceReuseReceipt } from "../one/experience-reuse";
+import { sealOneMemoryCandidateProvenance } from "../one/memory-candidates";
+import { tryProduceAcceptedResultSuggestion } from "../one/completion-suggestion-producer";
+import { tryProduceOneImprovementProofForTask } from "../one/improvement-proof-producer";
+import { performOneMobileSuggestionAction } from "../one/mobile-suggestions";
 import { invocationService } from "../invocation/service";
 import {
+  captureMobileOneInvocationBinding,
   captureInvocationWorkspaceBinding,
-  enforceMobileReadOnlyPermission,
+  normalizeRemoteInvocationPermission,
 } from "../invocation/workspace-binding";
-import { claimPendingConfirmationAnswer, recordCommittedAnswerReceipt } from "../confirm";
+import {
+  claimPendingConfirmationAnswer,
+  listPendingConfirmations,
+  recordCommittedAnswerReceipt,
+} from "../confirm";
+import {
+  ONE_DECISION_CONTRACT_VERSION,
+  isPendingConfirmationSnoozed,
+  normalizeOneDecision,
+} from "../../shared/one-decision";
 import { detectRuntimes, setActiveRuntime } from "../runtime/detect";
 import { listRuntimeCommands } from "../runtime/commands";
 import { listInstalledAgents } from "../mcp/registry";
@@ -38,6 +65,7 @@ import {
   getChat,
   getChatWorkingFolder,
   listRecentChats,
+  removeChat,
   renameChat,
   setChatContinuousMode,
   setChatHiredAgents,
@@ -89,6 +117,7 @@ import {
   type MobileBridgeBrowserApprovalDto,
   type MobileBridgeInvokeSteerParams,
   type MobileBridgeJsonValue,
+  type MobileBridgeOneInvokeStartReceiptDto,
   type MobileBridgeRpcRequest,
   type MobileBridgeSnapshot,
   type MobileBridgeToolPayloadSize,
@@ -479,18 +508,77 @@ function requireChat(id: string): Chat {
   return chat;
 }
 
+interface MobileDecisionAnswerPrecondition {
+  decisionId: string;
+  taskId: string;
+  taskVersion: number;
+  contractVersion: typeof ONE_DECISION_CONTRACT_VERSION;
+}
+
+function mobileDecisionAnswerAcknowledgement(expected: MobileDecisionAnswerPrecondition) {
+  return {
+    contractVersion: expected.contractVersion,
+    decisionId: expected.decisionId,
+    taskId: expected.taskId,
+    taskVersion: expected.taskVersion,
+    status: "answer_claimed" as const,
+  };
+}
+
+function validateCurrentMobileDecisionAnswer(
+  invocation: McpInvocationRequest,
+  expected: MobileDecisionAnswerPrecondition,
+): void {
+  const currentTask = findCanonicalTaskForChat(invocation.chatId);
+  if (
+    !currentTask
+    || currentTask.id !== expected.taskId
+    || currentTask.version !== expected.taskVersion
+    || currentTask.status !== "waiting-decision"
+    || currentTask.archivedAt !== null
+    || getCanonicalTask(expected.taskId)?.version !== expected.taskVersion
+  ) {
+    throw new Error("Decision Task is stale or no longer waiting for this answer");
+  }
+  const pending = listPendingConfirmations().find((candidate) =>
+    candidate.chatId === invocation.chatId
+    && candidate.sourceMessageId === expected.decisionId
+  );
+  if (!pending || isPendingConfirmationSnoozed(pending, Date.now())) {
+    throw new Error("Decision is stale, snoozed, or no longer pending");
+  }
+  const view = normalizeOneDecision(pending, currentTask.id);
+  if (
+    view.contractVersion !== expected.contractVersion
+    || view.decisionId !== expected.decisionId
+    || view.taskId !== expected.taskId
+    || view.chatId !== invocation.chatId
+  ) {
+    throw new Error("Decision projection changed; refresh before answering");
+  }
+  const reply = invocation.userPrompt ?? "";
+  const optionAllowed = view.options.some((option) =>
+    option.label === reply
+    && option.enabled
+    && option.disposition !== "modify"
+  );
+  if (!optionAllowed && reply !== view.controls.reject.reply) {
+    throw new Error("Decision reply is not allowed by the current Main contract");
+  }
+}
+
 function invocationParams(
   request: MobileBridgeRpcRequest,
   steering: false,
-): { invocation: McpInvocationRequest; expectedQuestionMessageId?: string };
+): { invocation: McpInvocationRequest; decisionAnswer?: MobileDecisionAnswerPrecondition };
 function invocationParams(
   request: MobileBridgeRpcRequest,
   steering: true,
-): { invocation: McpInvocationRequest; expectedRunId: string; expectedQuestionMessageId?: string };
+): { invocation: McpInvocationRequest; expectedRunId: string; decisionAnswer?: MobileDecisionAnswerPrecondition };
 function invocationParams(
   request: MobileBridgeRpcRequest,
   steering: boolean,
-): { invocation: McpInvocationRequest; expectedRunId?: string; expectedQuestionMessageId?: string } {
+): { invocation: McpInvocationRequest; expectedRunId?: string; decisionAnswer?: MobileDecisionAnswerPrecondition } {
   const params = guardedParams(
     request,
     steering
@@ -506,6 +594,9 @@ function invocationParams(
           "borrowAgents",
           "images",
           "expectedQuestionMessageId",
+          "expectedTaskId",
+          "expectedTaskVersion",
+          "expectedDecisionContractVersion",
           "expectedRunId",
         ]
       : [
@@ -520,6 +611,9 @@ function invocationParams(
           "borrowAgents",
           "images",
           "expectedQuestionMessageId",
+          "expectedTaskId",
+          "expectedTaskVersion",
+          "expectedDecisionContractVersion",
         ],
   );
   const chatId = requiredIdentifier(params, "chatId");
@@ -536,6 +630,30 @@ function invocationParams(
   const borrowAgents = optionalBorrowAgents(params);
   const images = optionalImages(params);
   const expectedQuestionMessageId = optionalIdentifier(params, "expectedQuestionMessageId");
+  const expectedTaskId = optionalIdentifier(params, "expectedTaskId");
+  const expectedTaskVersion = optionalInteger(params, "expectedTaskVersion", 1, Number.MAX_SAFE_INTEGER);
+  const expectedDecisionContractVersion = optionalIdentifier(params, "expectedDecisionContractVersion", 32);
+  const hasDecisionPrecondition = expectedQuestionMessageId !== undefined
+    || expectedTaskId !== undefined
+    || expectedTaskVersion !== undefined
+    || expectedDecisionContractVersion !== undefined;
+  let decisionAnswer: MobileDecisionAnswerPrecondition | undefined;
+  if (hasDecisionPrecondition) {
+    if (
+      expectedQuestionMessageId === undefined
+      || expectedTaskId === undefined
+      || expectedTaskVersion === undefined
+      || expectedDecisionContractVersion !== ONE_DECISION_CONTRACT_VERSION
+    ) {
+      throw new TypeError("Decision answers require exact Decision, Task, version, and contract preconditions");
+    }
+    decisionAnswer = {
+      decisionId: expectedQuestionMessageId,
+      taskId: expectedTaskId,
+      taskVersion: expectedTaskVersion,
+      contractVersion: ONE_DECISION_CONTRACT_VERSION,
+    };
+  }
   if (runId !== undefined) invocation.runId = runId;
   if (locale !== undefined) invocation.locale = locale;
   if (permissions !== undefined) invocation.permissions = permissions;
@@ -550,7 +668,7 @@ function invocationParams(
   return {
     invocation: enforceMobileInvocationPermissionBoundary(invocation),
     ...(expectedRunId !== undefined ? { expectedRunId } : {}),
-    ...(expectedQuestionMessageId !== undefined ? { expectedQuestionMessageId } : {}),
+    ...(decisionAnswer !== undefined ? { decisionAnswer } : {}),
   };
 }
 
@@ -559,7 +677,7 @@ export function enforceMobileInvocationPermissionBoundary(
 ): McpInvocationRequest {
   return {
     ...invocation,
-    permissions: enforceMobileReadOnlyPermission(invocation.permissions),
+    permissions: normalizeRemoteInvocationPermission(invocation.permissions),
   };
 }
 
@@ -589,6 +707,47 @@ function createChatParams(request: MobileBridgeRpcRequest): Parameters<typeof cr
     ...(title !== undefined ? { title } : {}),
     ...(continueFromChatId !== undefined ? { continueFromChatId } : {}),
   };
+}
+
+function assertMobileOneDeviceAuthority(context: MobileBridgeConnectionContext): void {
+  if (
+    context.devBootstrap
+    || context.devicePlatform === "dev"
+    || !/^device_[a-f0-9]{32}$/.test(context.deviceId)
+  ) {
+    throw new Error(
+      "Mobile One requires an iOS or Android pairing credential issued after account verification",
+    );
+  }
+}
+
+function mobileOneStartParams(request: MobileBridgeRpcRequest): {
+  userPrompt: string;
+  permissions: "read" | "write" | "full";
+  images?: ImageAttachment[];
+} {
+  const params = guardedParams(request, ["schemaVersion", "userPrompt", "permissions", "images"]);
+  if (params.schemaVersion !== 1) {
+    throw new TypeError("one.invoke.start requires schemaVersion 1");
+  }
+  const userPrompt = requiredText(params, "userPrompt", 200_000);
+  if (userPrompt.trim().length === 0) {
+    throw new TypeError("one.invoke.start userPrompt must contain visible text");
+  }
+  const permissions = normalizeRemoteInvocationPermission(
+    optionalEnum(params, "permissions", ["read", "write", "full"] as const),
+  );
+  const images = optionalImages(params);
+  return {
+    userPrompt,
+    permissions,
+    ...(images !== undefined ? { images } : {}),
+  };
+}
+
+function mobileOneConversationTitle(userPrompt: string): string {
+  const firstLine = userPrompt.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  return (firstLine || "One").slice(0, 200);
 }
 
 /** Authority-side revalidation of exact Hub release references (defense in depth). */
@@ -678,6 +837,7 @@ function summarizeToolPayload(value: string | undefined): MobileBridgeToolPayloa
 
 export function projectMobileBridgeInvocationEvent(
   event: McpInvocationEvent,
+  context?: { taskId?: string | null; syncedAt?: string },
 ): MobileBridgeInvocationEventDto {
   const projected: MobileBridgeInvocationEventDto = { kind: event.kind };
   if (typeof event.status === "string") {
@@ -740,7 +900,10 @@ export function projectMobileBridgeInvocationEvent(
       output: summarizeToolPayload(event.tool.result),
     };
   }
-  // DESKTOP_MOBILE_BRIDGE: surface manifest, surfaceId, provider/model/session
+  if (event.kind === "surface" && event.oneSurface && context?.taskId && event.oneSurface.taskId === context.taskId) {
+    projected.surface = event.oneSurface;
+  }
+  // DESKTOP_MOBILE_BRIDGE: raw surface manifest, provider/model/session
   // metadata, delegation graph, env, and local filesystem fields are omitted.
   // TypeScript owns the DTO shape; a final runtime assertion prevents future
   // optional fields from becoming non-JSON without review.
@@ -808,6 +971,27 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.lastConfirmationFingerprint = this.confirmationFingerprint(snapshot);
     this.lastOntologyFingerprint = this.ontologyFingerprint(snapshot);
     return snapshot;
+  }
+
+  async pairingVerification(_context: MobileBridgeConnectionContext): Promise<{
+    hostId: string;
+    sampleTaskId: string | null;
+    sampleTaskVersion: number | null;
+  }> {
+    this.assertAvailable();
+    // A credential must never outlive a verification receipt the Mobile client
+    // is able to prove. Let failures reach the server so it rolls the freshly
+    // issued device credential back instead of returning an unusable success.
+    const sample = ensurePairingVerificationTask(
+      this.options.hostIdentity.hostId,
+      _context.connectedAt,
+      _context.deviceId,
+    );
+    return {
+      hostId: this.options.hostIdentity.hostId,
+      sampleTaskId: sample.id,
+      sampleTaskVersion: sample.version,
+    };
   }
 
   /** DESKTOP_MOBILE_BRIDGE: Exact compile-time allowlist; there is no dynamic IPC passthrough. */
@@ -1066,6 +1250,164 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           request.method,
         );
       }
+      case "tasks.acceptResult": {
+        const params = guardedParams(request, ["taskId", "expectedVersion", "expectedRunId"]);
+        const taskId = requiredIdentifier(params, "taskId");
+        const expectedVersion = optionalInteger(params, "expectedVersion", 1, Number.MAX_SAFE_INTEGER);
+        if (expectedVersion === undefined) throw new TypeError("expectedVersion is required");
+        const expectedRunId = requiredIdentifier(params, "expectedRunId", RUN_ID_RE);
+        const current = getCanonicalTask(taskId);
+        const receipt = current?.originChatId
+          ? invocationService.latestReceipt(current.originChatId)
+          : null;
+        const accepted = acceptCanonicalTaskResult(
+          { taskId, expectedVersion, expectedRunId },
+          receipt,
+        );
+        const closure = ensureAcceptedResultValueClosure({
+          priorTaskVersion: expectedVersion,
+          acceptedTask: accepted,
+          expectedRunId,
+          receipt,
+          confirmedByUser: true,
+        });
+        try {
+          ensureVerifiedAcceptedResultValueClosure({
+            priorTaskVersion: expectedVersion,
+            acceptedTask: accepted,
+            expectedRunId,
+            receipt,
+            confirmedByUser: true,
+          });
+        } catch {
+          // Mobile uses the same Main-only fail-closed artifact verifier as
+          // Desktop. A missing or stale binding leaves acceptance partial.
+        }
+        try {
+          sealOneMemoryCandidateProvenance({
+            sourceTaskId: accepted.id,
+            sourceTaskVersion: accepted.version,
+            sourceRunId: expectedRunId,
+            sourceValueClosureId: closure.value.closure.valueClosureId,
+            sourceValueClosureVersion: closure.value.version,
+          });
+        } catch {
+          // Mobile acceptance remains authoritative when optional Memory
+          // provenance sealing races or finds no pending review candidate.
+        }
+        tryProduceAcceptedResultSuggestion({
+          hostId: this.options.hostIdentity.hostId,
+          taskId: accepted.id,
+          expectedTaskVersion: accepted.version,
+          expectedTaskUpdatedAt: accepted.updatedAt,
+          expectedRunId,
+          valueClosureId: closure.value.closure.valueClosureId,
+          expectedValueClosureVersion: closure.value.version,
+          confirmedByUser: true,
+        });
+        try {
+          tryCompleteOneActivationFirstValue({
+            taskId: accepted.id,
+            expectedTaskVersion: accepted.version,
+            valueClosureId: closure.value.closure.valueClosureId,
+            expectedValueClosureVersion: closure.value.version,
+          });
+        } catch {
+          // Mobile acceptance remains authoritative even if optional Desktop
+          // first-use activation evidence cannot be advanced.
+        }
+        try {
+          ensureOneExperienceReuseReceipt({
+            taskId: accepted.id,
+            expectedTaskVersion: accepted.version,
+            expectedTaskUpdatedAt: accepted.updatedAt,
+            expectedRunId,
+            valueClosureId: closure.value.closure.valueClosureId,
+            expectedValueClosureVersion: closure.value.version,
+            confirmedByUser: true,
+          });
+        } catch {
+          // The accepted Task and Value Closure remain authoritative even when
+          // optional compounding evidence cannot be recorded.
+        }
+        try {
+          tryProduceOneImprovementProofForTask(accepted.id);
+        } catch {
+          // Improvement Proof is derived from separately verified comparable
+          // runs. Missing proof data must never roll back Mobile acceptance.
+        }
+        if (accepted.originChatId) this.scheduleSnapshotUpdated(accepted.originChatId);
+        return asJsonValue({
+          taskId: accepted.id,
+          taskVersion: accepted.version,
+          taskStatus: accepted.status,
+          taskUpdatedAt: accepted.updatedAt,
+        }, request.method);
+      }
+      case "tasks.latestResult": {
+        const params = guardedParams(request, ["taskId", "chatId", "expectedVersion"]);
+        const taskId = requiredIdentifier(params, "taskId");
+        const chatId = requiredIdentifier(params, "chatId");
+        const expectedVersion = optionalInteger(
+          params,
+          "expectedVersion",
+          1,
+          Number.MAX_SAFE_INTEGER,
+        );
+        if (expectedVersion === undefined) throw new TypeError("expectedVersion is required");
+
+        const task = getCanonicalTask(taskId);
+        if (
+          !task ||
+          task.originChatId !== chatId ||
+          task.version !== expectedVersion ||
+          (task.status !== "partial" && task.status !== "completed")
+        ) {
+          return null;
+        }
+        const receipt = invocationService.latestReceipt(chatId);
+        if (!receipt || receipt.chatId !== chatId || receipt.status !== "completed") {
+          return null;
+        }
+        const surface = invocationService.latestOneSurface({
+          runId: receipt.runId,
+          chatId,
+          taskId,
+        })?.manifest ?? null;
+        return asJsonValue(
+          {
+            taskId,
+            taskVersion: task.version,
+            taskStatus: task.status,
+            taskUpdatedAt: task.updatedAt,
+            chatId,
+            runId: receipt.runId,
+            receipt: {
+              status: "completed",
+              startedAt: receipt.startedAt,
+              updatedAt: receipt.updatedAt,
+              finishedAt: receipt.finishedAt ?? receipt.updatedAt,
+              eventCount: receipt.eventCount,
+            },
+            surface,
+          },
+          request.method,
+        );
+      }
+      case "one.suggestions.act": {
+        const params = guardedParams(request, [
+          "schemaVersion", "action", "expectedStoreVersion", "suggestionId", "expectedSuggestionVersion",
+          "originTaskId", "expectedTaskVersion", "valueClosureId", "expectedValueClosureVersion",
+          "confirmedByUser", "reviewOnly",
+        ]);
+        const acknowledgement = performOneMobileSuggestionAction(
+          params,
+          this.options.hostIdentity.hostId,
+        );
+        const task = getCanonicalTask(acknowledgement.originTaskId);
+        this.scheduleSnapshotUpdated(task?.originChatId ?? undefined);
+        return asJsonValue(acknowledgement, request.method);
+      }
       case "workspace.setProject": {
         const params = guardedParams(request, ["chatId", "projectId"]);
         const chatId = requiredIdentifier(params, "chatId");
@@ -1111,13 +1453,64 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const limit = optionalInteger(params, "limit", 1, 200) ?? 200;
         return projectInvocationHistory(invocationService.history(chatId), limit);
       }
+      case "one.invoke.start": {
+        assertMobileOneDeviceAuthority(context);
+        const input = mobileOneStartParams(request);
+        const coordinator = listInstalledAgents().find(
+          (agent) => agent.slug === GLOBAL_ORCHESTRATOR_SLUG,
+        );
+        if (!coordinator) {
+          throw new Error("The canonical One coordinator is not installed on this Desktop");
+        }
+
+        // Main creates a Task-free One conversation and keeps its identity,
+        // project/team selection, and durable One capabilities authoritative.
+        // Permission is the normal Desktop execution choice and is forwarded
+        // from the paired Mobile remote without creating a second mobile mode.
+        const chat = createChat({
+          agentId: coordinator.id,
+          title: mobileOneConversationTitle(input.userPrompt),
+          taskMode: "conversation",
+        });
+        let result;
+        try {
+          result = invocationService.start(
+            {
+              chatId: chat.id,
+              userPrompt: input.userPrompt,
+              taskIntent: "conversation",
+              oneMode: true,
+              permissions: input.permissions,
+              sessionRouting: false,
+              hubMode: "local-only",
+              borrowAgents: [],
+              ...(input.images ? { images: input.images } : {}),
+            },
+            captureMobileOneInvocationBinding(),
+          );
+        } catch (error) {
+          // No accepted run exists, so do not leave a misleading empty One
+          // conversation behind after a fail-closed admission rejection.
+          removeChat(chat.id);
+          throw error;
+        }
+        const receipt: MobileBridgeOneInvokeStartReceiptDto = {
+          schemaVersion: 1,
+          authoritativeHostRef: this.options.hostIdentity.hostId,
+          chatId: chat.id,
+          runId: result.runId,
+        };
+        this.scheduleSnapshotUpdated(chat.id);
+        return asJsonValue(receipt, request.method);
+      }
       case "invoke.start": {
-        const { invocation, expectedQuestionMessageId } = invocationParams(request, false);
+        const { invocation, decisionAnswer } = invocationParams(request, false);
+        if (decisionAnswer) validateCurrentMobileDecisionAnswer(invocation, decisionAnswer);
         const workspaceBinding = captureInvocationWorkspaceBinding(
           getChatWorkingFolder(invocation.chatId),
         );
-        const rollbackQuestionClaim = expectedQuestionMessageId
-          ? claimPendingConfirmationAnswer(invocation.chatId, expectedQuestionMessageId)
+        const rollbackQuestionClaim = decisionAnswer
+          ? claimPendingConfirmationAnswer(invocation.chatId, decisionAnswer.decisionId)
           : null;
         let result;
         try {
@@ -1129,19 +1522,22 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         // Admission succeeded and the claim is kept: seal the durable answer
         // receipt so the question stays resolved even if the run's own user
         // message persistence branch is skipped or the process dies mid-run.
-        if (expectedQuestionMessageId) {
-          recordCommittedAnswerReceipt(invocation.chatId, expectedQuestionMessageId, invocation.userPrompt ?? "");
+        if (decisionAnswer) {
+          recordCommittedAnswerReceipt(invocation.chatId, decisionAnswer.decisionId, invocation.userPrompt ?? "");
         }
         this.scheduleSnapshotUpdated();
-        return asJsonValue(result, request.method);
+        return asJsonValue(decisionAnswer
+          ? { ...result, decisionAcknowledgement: mobileDecisionAnswerAcknowledgement(decisionAnswer) }
+          : result, request.method);
       }
       case "invoke.steer": {
-        const { invocation, expectedRunId, expectedQuestionMessageId } = invocationParams(request, true);
+        const { invocation, expectedRunId, decisionAnswer } = invocationParams(request, true);
+        if (decisionAnswer) validateCurrentMobileDecisionAnswer(invocation, decisionAnswer);
         const workspaceBinding = captureInvocationWorkspaceBinding(
           getChatWorkingFolder(invocation.chatId),
         );
-        const rollbackQuestionClaim = expectedQuestionMessageId
-          ? claimPendingConfirmationAnswer(invocation.chatId, expectedQuestionMessageId)
+        const rollbackQuestionClaim = decisionAnswer
+          ? claimPendingConfirmationAnswer(invocation.chatId, decisionAnswer.decisionId)
           : null;
         let result;
         try {
@@ -1150,11 +1546,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           rollbackQuestionClaim?.();
           throw error;
         }
-        if (expectedQuestionMessageId) {
-          recordCommittedAnswerReceipt(invocation.chatId, expectedQuestionMessageId, invocation.userPrompt ?? "");
+        if (decisionAnswer) {
+          recordCommittedAnswerReceipt(invocation.chatId, decisionAnswer.decisionId, invocation.userPrompt ?? "");
         }
         this.scheduleSnapshotUpdated();
-        return asJsonValue(result, request.method);
+        return asJsonValue(decisionAnswer
+          ? { ...result, decisionAcknowledgement: mobileDecisionAnswerAcknowledgement(decisionAnswer) }
+          : result, request.method);
       }
       case "invoke.cancel": {
         const params = guardedParams(request, ["runId"]);
@@ -1165,12 +1563,14 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "invoke.attach": {
         const params = guardedParams(request, ["chatId"]);
-        const attached = invocationService.attach(requiredIdentifier(params, "chatId"));
+        const chatId = requiredIdentifier(params, "chatId");
+        const attached = invocationService.attach(chatId);
         if (!attached) return null;
+        const taskId = findCanonicalTaskForChat(chatId)?.id ?? null;
         return asJsonValue(
           {
             runId: attached.runId,
-            events: attached.events.map((event) => projectMobileBridgeInvocationEvent(event)),
+            events: attached.events.map((event) => projectMobileBridgeInvocationEvent(event, { taskId })),
           },
           request.method,
         );
@@ -1966,10 +2366,11 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     if (this.upstreamUnsubscribers.length > 0) return;
     this.upstreamUnsubscribers = [
       invocationService.onEvent(({ runId, chatId, event }) => {
+        const taskId = findCanonicalTaskForChat(chatId)?.id ?? null;
         this.emit({
           event: "invoke.event",
           payload: asJsonValue(
-            { runId, chatId, event: projectMobileBridgeInvocationEvent(event) },
+            { runId, chatId, event: projectMobileBridgeInvocationEvent(event, { taskId }) },
             "invoke.event envelope",
           ),
         });

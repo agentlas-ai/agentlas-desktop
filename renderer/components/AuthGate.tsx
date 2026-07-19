@@ -11,8 +11,8 @@ import { Landing } from "./Landing";
 import { useT } from "@/lib/i18n";
 
 // DEV 전용 QA 라우트 — 브라우저(Playwright) 렌더 회귀 검증용으로 게이트를 우회한다.
-// 프로덕션 빌드에선 절대 우회하지 않는다(해당 페이지 자체도 프로덕션에서 null 렌더).
-const DEV_QA_ROUTES = ["/trex-gallery", "/surface-preview", "/qa-qsheet"];
+// 프로덕션 빌드에선 절대 우회하지 않는다. /one 역시 production에서는 계속 인증을 요구한다.
+const DEV_QA_ROUTES = ["/one", "/trex-gallery", "/surface-preview", "/qa-qsheet"];
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
   // null = 아직 조회 전 (세션 확인 중 — 흰 화면 깜빡임 방지용 다크 스플래시)

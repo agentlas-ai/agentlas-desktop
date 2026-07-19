@@ -117,6 +117,30 @@ function normalize(raw: unknown): RawMemoryEvent | null {
 export function parseMemoryEvents(text: string): ParsedMemory {
   const headingIdx = text.lastIndexOf(MEMORY_EVENTS_HEADING);
   if (headingIdx < 0) {
+    // Host models occasionally omit only the heading while still returning the
+    // exact private memory-ticket envelope at the end of an otherwise normal
+    // reply. Recognize that closed schema instead of leaking its JSON into the
+    // user conversation. Ordinary visible JSON is untouched.
+    const tailFence = text.match(/(?:^|\n)```json\s*([\s\S]*?)```\s*$/i);
+    if (tailFence && tailFence.index != null) {
+      try {
+        const data = JSON.parse(tailFence[1].trim()) as Record<string, unknown>;
+        if (data?.schema_version === "agentlas.memory-ticket.v1" && Array.isArray(data.candidates)) {
+          const candidates = data.candidates;
+          const events = candidates.map(normalize).filter((event): event is RawMemoryEvent => event !== null);
+          const turnSummary = coerceString(data.turn_summary, 360) ?? null;
+          return {
+            events,
+            candidateCount: candidates.length,
+            turnSummary,
+            emitterStatus: candidates.length === 0 ? "empty" : events.length > 0 ? "valid" : "malformed",
+            cleanedText: text.slice(0, tailFence.index).trim(),
+          };
+        }
+      } catch {
+        // Not the exact memory-ticket envelope. Preserve it as visible content.
+      }
+    }
     return { events: [], candidateCount: 0, turnSummary: null, emitterStatus: "missing", cleanedText: text.trim() };
   }
 

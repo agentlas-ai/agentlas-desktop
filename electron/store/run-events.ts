@@ -8,6 +8,9 @@ import type {
   OrchestrationTarget,
   RunEventUi,
 } from "../../shared/types";
+import { parseDurableOneSurfaceJson } from "../../shared/one-surface-durable";
+import { parseOneDomainEventJson } from "../../shared/one-domain-events";
+import { isOneRecurrenceSelectionV1 } from "../../shared/one-recurrence";
 
 interface RunEventRow {
   id: string;
@@ -35,6 +38,9 @@ interface FailureEventRow {
   error_message: string;
   payload_json: string;
 }
+
+export const ONE_SURFACE_SNAPSHOT_EVENT_KIND = "one_surface_snapshot";
+export const ONE_DOMAIN_EVENT_KIND = "one_domain_event";
 
 export interface RecordRunEventInput {
   runId: string;
@@ -73,6 +79,21 @@ function safePayload(input: Record<string, unknown> | undefined): Record<string,
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input ?? {})) {
     if (value == null) continue;
+    // OneSurface is already normalized and redacted by Main. Preserve its exact
+    // JSON only after the closed durable contract passes again at the ledger
+    // boundary; ordinary strings stay on the small diagnostic limit below.
+    if (key === "oneSurfaceJson" && typeof value === "string") {
+      if (parseDurableOneSurfaceJson(value)) out[key] = value;
+      continue;
+    }
+    if (key === "oneDomainEventJson" && typeof value === "string") {
+      if (parseOneDomainEventJson(value)) out[key] = value;
+      continue;
+    }
+    if (key === "oneRecurrenceSelection") {
+      if (isOneRecurrenceSelectionV1(value)) out[key] = { ...value };
+      continue;
+    }
     if (typeof value === "string") {
       out[key] = truncate(value, 800);
     } else if (typeof value === "number" || typeof value === "boolean") {
@@ -113,6 +134,12 @@ function normalizeLimit(value: unknown, fallback: number): number {
 }
 
 function runRowToUi(row: RunEventRow): RunEventUi {
+  const payload = parsePayload(row.payload_json);
+  // The generic ledger API is diagnostic and broadly renderer-visible. Exact
+  // semantic results may leave Main only through the Task/run-bound restore
+  // API, never through runLedger.events.
+  if (row.kind === ONE_SURFACE_SNAPSHOT_EVENT_KIND) delete payload.oneSurfaceJson;
+  if (row.kind === ONE_DOMAIN_EVENT_KIND) delete payload.oneDomainEventJson;
   return {
     id: row.id,
     runId: row.run_id,
@@ -123,7 +150,7 @@ function runRowToUi(row: RunEventRow): RunEventUi {
     automationId: row.automation_id ?? undefined,
     nodeId: row.node_id ?? undefined,
     agentId: row.agent_id ?? undefined,
-    payload: parsePayload(row.payload_json),
+    payload,
   };
 }
 
@@ -457,4 +484,26 @@ export function getLatestInvocationRunReceipt(chatId: string): InvocationRunRece
     )
     .get(chatId) as { run_id?: string } | undefined;
   return row?.run_id ? getInvocationRunReceipt(row.run_id) : null;
+}
+
+/**
+ * Whether this chat was created or used through Agentlas One.
+ *
+ * The durable invocation-start receipt is the authority here. Agent names,
+ * chat titles, and Task presence are deliberately not used because the same
+ * coordinator can also appear in Work and a general One conversation can stay
+ * Task-free.
+ */
+export function isOneInvocationChat(chatId: string): boolean {
+  if (!chatId) return false;
+  const rows = getDb()
+    .prepare(
+      `SELECT payload_json
+       FROM run_events
+       WHERE chat_id = ? AND kind = 'invoke_started'
+       ORDER BY datetime(ts) DESC, rowid DESC
+       LIMIT 100`,
+    )
+    .all(chatId) as Array<{ payload_json: string }>;
+  return rows.some((row) => parsePayload(row.payload_json).oneMode === true);
 }

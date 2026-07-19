@@ -50,6 +50,23 @@ const PYTHON_RUNTIME_ASSETS = {
     executableRelativePath: "bin/python3",
   },
 };
+const NODE_RUNTIME_VERSION = "24.18.0";
+const NODE_RUNTIME_ASSETS = {
+  "win32:x64": {
+    archiveName: "node-v24.18.0-win-x64.zip",
+    archiveSha256: "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821",
+    nodeSha256: "9a4eb5f1c29c6a2e93852ead46b999e284a6a5ca8bab4d4e241d587d025a52de",
+    npmCliSha256: "3ce7cba6f5128dd5f54c98b6a5036b0f850496878cc2e21044b675fe3c594e3e",
+    runtimeTreeSha256: "ced095085eece2e24bb5fe957ab94253b6983729f66df9e112b79d5144116eb6",
+  },
+  "win32:arm64": {
+    archiveName: "node-v24.18.0-win-arm64.zip",
+    archiveSha256: "f274669adb93b1fd0fbf8f21fd078609e9dcc84333d4f2718d2dde3f9a161a01",
+    nodeSha256: "c7225670c3f477778e18c43a55867f7a0d76468221245e5981ab80eb953c8102",
+    npmCliSha256: "3ce7cba6f5128dd5f54c98b6a5036b0f850496878cc2e21044b675fe3c594e3e",
+    runtimeTreeSha256: "893e18bdab084c0af59c27eb8573f2bd3d2917b76919336efe97f9440039fb97",
+  },
+};
 
 function model2VecContentIdentity(files, names) {
   const digest = createHash("sha256");
@@ -270,6 +287,36 @@ async function pythonRuntimeTreeSha256(root) {
   return digest.digest("hex");
 }
 
+async function nodeRuntimeTreeSha256(root) {
+  const records = [];
+  const walk = async (relative) => {
+    const absolute = path.join(root, ...relative.split("/").filter(Boolean));
+    const entries = await readdir(absolute, { withFileTypes: true });
+    for (const entry of entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
+      const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
+      if (childRelative === ".gitkeep" || childRelative === "agentlas-node-runtime.json") continue;
+      const childAbsolute = path.join(root, ...childRelative.split("/"));
+      const stat = await lstat(childAbsolute);
+      if (stat.isDirectory()) await walk(childRelative);
+      else if (stat.isSymbolicLink()) records.push({ kind: "L", relative: childRelative, target: await readlink(childAbsolute) });
+      else if (stat.isFile()) records.push({ kind: "F", relative: childRelative, size: stat.size, absolute: childAbsolute });
+      else throw new Error(`[afterPack] unsupported Node runtime entry: ${childRelative}`);
+    }
+  };
+  await walk("");
+  const digest = createHash("sha256");
+  for (const record of records.sort((left, right) => left.relative < right.relative ? -1 : left.relative > right.relative ? 1 : 0)) {
+    if (record.kind === "L") {
+      digest.update("L\0").update(record.relative).update("\0").update(record.target).update("\n");
+    } else {
+      const contentSha256 = createHash("sha256").update(await readFile(record.absolute)).digest("hex");
+      digest.update("F\0").update(record.relative).update("\0")
+        .update(String(record.size)).update("\0").update(contentSha256).update("\n");
+    }
+  }
+  return digest.digest("hex");
+}
+
 async function verifyBundledPython(projectDir, resourcesDir, platform, builderArch) {
   const sourceRoot = path.join(projectDir, "build-resources", "python-runtime");
   const packagedRoot = path.join(resourcesDir, "python-runtime");
@@ -353,6 +400,95 @@ async function verifyBundledPython(projectDir, resourcesDir, platform, builderAr
   return manifest;
 }
 
+async function verifyBundledNode(projectDir, resourcesDir, platform, builderArch) {
+  if (platform !== "win32") return null;
+  const sourceRoot = path.join(projectDir, "build-resources", "node-runtime");
+  const packagedRoot = path.join(resourcesDir, "node-runtime");
+  const manifestName = "agentlas-node-runtime.json";
+  const [sourceManifestText, packagedManifestText] = await Promise.all([
+    readFile(path.join(sourceRoot, manifestName), "utf8"),
+    readFile(path.join(packagedRoot, manifestName), "utf8"),
+  ]);
+  if (sourceManifestText !== packagedManifestText) {
+    throw new Error("[afterPack] packaged Node runtime manifest drift");
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(sourceManifestText);
+  } catch (error) {
+    throw new Error("[afterPack] Node runtime manifest is invalid JSON", { cause: error });
+  }
+  const exactKeys = [
+    "schemaVersion", "nodeVersion", "platform", "arch", "archiveName", "archiveSha256",
+    "nodeRelativePath", "nodeSha256", "npmCliRelativePath", "npmCliSha256", "runtimeTreeSha256",
+  ].sort();
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest) ||
+      Object.keys(manifest).sort().join("\0") !== exactKeys.join("\0")) {
+    throw new Error("[afterPack] Node runtime manifest shape is invalid");
+  }
+  const normalizedArch = builderArch === 3 || String(builderArch).toLowerCase() === "arm64"
+    ? "arm64"
+    : builderArch === 1 || String(builderArch).toLowerCase() === "x64"
+      ? "x64"
+      : null;
+  const locked = normalizedArch ? NODE_RUNTIME_ASSETS[`win32:${normalizedArch}`] : null;
+  if (
+    manifest.schemaVersion !== "agentlas.node-runtime.v1" ||
+    manifest.nodeVersion !== NODE_RUNTIME_VERSION ||
+    manifest.platform !== "win32" ||
+    manifest.arch !== normalizedArch || !locked ||
+    manifest.archiveName !== locked.archiveName ||
+    manifest.archiveSha256 !== locked.archiveSha256 ||
+    manifest.nodeRelativePath !== "node.exe" ||
+    manifest.nodeSha256 !== locked.nodeSha256 ||
+    manifest.npmCliRelativePath !== "node_modules/npm/bin/npm-cli.js" ||
+    manifest.npmCliSha256 !== locked.npmCliSha256 ||
+    manifest.runtimeTreeSha256 !== locked.runtimeTreeSha256
+  ) {
+    throw new Error("[afterPack] Node runtime does not match the pinned Windows asset");
+  }
+
+  for (const [relative, expectedSha256, label] of [
+    [manifest.nodeRelativePath, manifest.nodeSha256, "Node executable"],
+    [manifest.npmCliRelativePath, manifest.npmCliSha256, "npm CLI"],
+  ]) {
+    const [sourceRootReal, packagedRootReal] = await Promise.all([realpath(sourceRoot), realpath(packagedRoot)]);
+    const sourcePath = path.join(sourceRoot, ...relative.split("/"));
+    const packagedPath = path.join(packagedRoot, ...relative.split("/"));
+    const [sourceStat, packagedStat, sourceReal, packagedReal] = await Promise.all([
+      lstat(sourcePath),
+      lstat(packagedPath),
+      realpath(sourcePath),
+      realpath(packagedPath),
+    ]);
+    if (
+      !sourceStat.isFile() || sourceStat.isSymbolicLink() ||
+      !packagedStat.isFile() || packagedStat.isSymbolicLink() ||
+      !`${sourceReal}${path.sep}`.startsWith(`${sourceRootReal}${path.sep}`) ||
+      !`${packagedReal}${path.sep}`.startsWith(`${packagedRootReal}${path.sep}`)
+    ) {
+      throw new Error(`[afterPack] ${label} is missing, mutable, or escapes its runtime root`);
+    }
+    const [sourceBytes, packagedBytes] = await Promise.all([readFile(sourcePath), readFile(packagedPath)]);
+    const sourceSha256 = createHash("sha256").update(sourceBytes).digest("hex");
+    const packagedSha256 = createHash("sha256").update(packagedBytes).digest("hex");
+    if (sourceSha256 !== expectedSha256 || packagedSha256 !== expectedSha256) {
+      throw new Error(`[afterPack] packaged ${label} checksum mismatch`);
+    }
+  }
+  const [sourceTreeSha256, packagedTreeSha256] = await Promise.all([
+    nodeRuntimeTreeSha256(sourceRoot),
+    nodeRuntimeTreeSha256(packagedRoot),
+  ]);
+  if (
+    sourceTreeSha256 !== locked.runtimeTreeSha256 ||
+    packagedTreeSha256 !== locked.runtimeTreeSha256
+  ) {
+    throw new Error("[afterPack] packaged Node runtime tree checksum mismatch");
+  }
+  return manifest;
+}
+
 async function verifyEmbeddedAgentlasOs(context) {
   const projectDir = context.packager?.projectDir || process.cwd();
   const productFilename = context.packager?.appInfo?.productFilename || "Agentlas";
@@ -423,10 +559,17 @@ async function verifyEmbeddedAgentlasOs(context) {
     context.electronPlatformName,
     context.arch,
   );
+  const nodeRuntime = await verifyBundledNode(
+    projectDir,
+    resourcesDir,
+    context.electronPlatformName,
+    context.arch,
+  );
   console.log(
     `[afterPack] verified embedded Agentlas OS v${packagedManifest.version} `
       + `with Model2Vec ${packagedModel.contentSha256} and Python ${pythonRuntime.pythonVersion} `
-      + `(${pythonRuntime.triple})`,
+      + `(${pythonRuntime.triple})`
+      + (nodeRuntime ? ` and private Node ${nodeRuntime.nodeVersion} (${nodeRuntime.arch})` : ""),
   );
 }
 

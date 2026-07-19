@@ -196,6 +196,7 @@ export const WORKFORCE_ONTOLOGY_VERSION = workforceProtocolContract.protocolMeta
 export const WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256 = workforceProtocolContract.protocolMetadata.ontologySnapshotSha256;
 const WORKFORCE_LEADER_SAFE_RUNTIME_KINDS = new Set<RuntimeKind>([
   "claude-code",
+  "codex",
   "byok",
   "ollama",
   "lmstudio",

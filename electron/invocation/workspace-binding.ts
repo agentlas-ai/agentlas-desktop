@@ -8,7 +8,7 @@ import fs from "node:fs";
  * Desktop has already bound to that chat.
  */
 export interface InvocationWorkspaceBinding {
-  readonly source: "mobile";
+  readonly source: "mobile" | "mobile-one";
   readonly canonicalPath: string | null;
   /** BigInt strings keep the host file identity precise without entering JSON DTOs. */
   readonly directoryIdentity: {
@@ -95,13 +95,29 @@ export function captureInvocationWorkspaceBinding(
 }
 
 /**
+ * Main-only identity for a Mobile One first turn. It intentionally carries no
+ * caller-selected folder; the paired Desktop remains the sole owner of the
+ * workspace, runtime, and One context. The distinct source is never
+ * serializable on the Mobile wire.
+ */
+export function captureMobileOneInvocationBinding(): InvocationWorkspaceBinding {
+  return Object.freeze({
+    source: "mobile-one",
+    canonicalPath: null,
+    directoryIdentity: null,
+  });
+}
+
+/**
  * Revalidate immediately before execution. The path must still resolve to the
  * exact directory captured by Desktop; replacement symlinks fail closed.
  */
 export function revalidateInvocationWorkspaceBinding(
   binding: InvocationWorkspaceBinding,
 ): string | null {
-  if (binding.source !== "mobile") throw unavailableWorkspaceError();
+  if (binding.source !== "mobile" && binding.source !== "mobile-one") {
+    throw unavailableWorkspaceError();
+  }
   if (binding.canonicalPath === null) {
     if (binding.directoryIdentity !== null) throw unavailableWorkspaceError();
     return null;
@@ -123,7 +139,11 @@ export function invocationWorkspaceBindingsEqual(
   right: InvocationWorkspaceBinding | undefined,
 ): boolean {
   if (!left || !right) return left === right;
-  if (left.source !== "mobile" || right.source !== "mobile") return false;
+  if (left.source !== right.source) return false;
+  if (
+    (left.source !== "mobile" && left.source !== "mobile-one") ||
+    (right.source !== "mobile" && right.source !== "mobile-one")
+  ) return false;
   if (left.canonicalPath !== right.canonicalPath) return false;
   if (left.canonicalPath === null) {
     return left.directoryIdentity === null && right.directoryIdentity === null;
@@ -135,25 +155,18 @@ export function invocationWorkspaceBindingsEqual(
   );
 }
 
-export function enforceMobileReadOnlyPermission(permission: unknown): "read" {
-  if (permission === undefined || permission === "read") return "read";
-  throw new Error(
-    "Mobile can run read-only chats for now. Start write or full-access work on Desktop.",
-  );
-}
-
-export function isMobileReadRuntimeAllowed(kind: string): boolean {
-  // BYOK and Ollama receive text/images over their API protocols and do not
-  // inherit a local CLI's filesystem/config/plugin authority. CLI runtimes stay
-  // blocked until a release-gated host denial probe proves the same boundary.
-  return kind === "byok" || kind === "ollama";
-}
-
-export class MobileReadRuntimeBoundaryError extends Error {
-  readonly code = "mobile-runtime-not-read-sandboxed";
-
-  constructor(message: string) {
-    super(message);
-    this.name = "MobileReadRuntimeBoundaryError";
-  }
+/**
+ * Normalize the standard Desktop permission contract at a remote entry point.
+ *
+ * A paired phone is a remote Desktop surface, not a reduced-capability
+ * runtime. The Desktop process still owns the authenticated pairing, selected
+ * workspace, approval prompts, and every tool's own confirmation policy. An
+ * omitted or malformed value remains fail-closed to read, but valid write and
+ * full requests must reach that same Desktop authority unchanged.
+ */
+export function normalizeRemoteInvocationPermission(
+  permission: unknown,
+): "read" | "write" | "full" {
+  if (permission === "write" || permission === "full") return permission;
+  return "read";
 }

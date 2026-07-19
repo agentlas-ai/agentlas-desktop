@@ -4,10 +4,13 @@
 //   확인 대기 = 채팅의 "마지막 메시지가 미답변 질문 fence를 가진 assistant 메시지"인 경우.
 //   사용자가 챗에서 답하면 후속 user 메시지가 쌓여 마지막이 더 이상 assistant가 아니게 되므로 자동 해소된다.
 // fence 포맷은 renderer/lib/ask-question.ts와 동일: <<agentlas-ask>>{json}<</agentlas-ask>>.
+import { createHash } from "node:crypto";
 import type { CommittedQuestionAnswer, PendingConfirmation } from "../../shared/types";
 import { getLastChatMessage, listRecentChats } from "../store/chats";
 import { getDb } from "../store/db";
-import { tryRecordRunEvent } from "../store/run-events";
+import { recordRunEvent, tryRecordRunEvent } from "../store/run-events";
+import { ensureCanonicalTaskForChat } from "../store/tasks";
+import { tryRecordOneDomainEvent } from "../one/domain-events";
 
 const OPEN = "<<agentlas-ask>>";
 const CLOSE = "<</agentlas-ask>>";
@@ -17,7 +20,44 @@ const claimedQuestionMessages = new Set<string>();
 // 실행 분기(그룹/펌/차용/Stormbreaker)마다 다른 지점에 있어 유실될 수 있으므로, 답변
 // "제출 수락" 자체를 append-only 원장에 남겨 질문 해소를 실행 결과와 분리한다.
 const ANSWER_RECEIPT_KIND = "question_answer_committed";
+const SNOOZE_RECEIPT_KIND = "question_answer_snoozed";
 const answerReceiptRunId = (chatId: string): string => `confirm:${chatId}`;
+
+function approvalEventId(sourceMessageId: string): string {
+  const digest = createHash("sha256").update(sourceMessageId).digest("hex").slice(0, 32);
+  return `event:approval-resolved:${digest}`;
+}
+
+function decisionEntityId(sourceMessageId: string): string {
+  const digest = createHash("sha256").update(sourceMessageId).digest("hex").slice(0, 32);
+  return `decision:${digest}`;
+}
+
+function decisionOptionRef(reply: string): string {
+  const digest = createHash("sha256").update(reply).digest("hex").slice(0, 24);
+  return `option:${digest}`;
+}
+
+function latestDecisionSnooze(chatId: string, sourceMessageId: string): string | null {
+  if (!chatId || !sourceMessageId) return null;
+  try {
+    const rows = getDb()
+      .prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND kind = ? ORDER BY seq DESC LIMIT 50")
+      .all(answerReceiptRunId(chatId), SNOOZE_RECEIPT_KIND) as Array<{ payload_json: string }>;
+    for (const row of rows) {
+      try {
+        const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+        if (payload.sourceMessageId !== sourceMessageId || typeof payload.resumeAt !== "string") continue;
+        return Number.isFinite(Date.parse(payload.resumeAt)) ? payload.resumeAt : null;
+      } catch {
+        // A malformed diagnostic receipt cannot hide a live Decision.
+      }
+    }
+  } catch {
+    // Missing/locked ledger fails open: the pending Decision remains visible.
+  }
+  return null;
+}
 
 function firstQuestion(
   text: string,
@@ -136,9 +176,68 @@ export function commitPendingConfirmationAnswer(
   ) {
     throw new Error("This question answer was already accepted");
   }
-  recordCommittedAnswerReceipt(chatId, last.id, reply);
+  const normalizedReply = reply.trim().slice(0, 4_000);
+  if (!normalizedReply) throw new Error("Decision response is empty");
+  recordCommittedAnswerReceipt(chatId, last.id, normalizedReply);
   claimedQuestionMessages.add(`${chatId}\0${last.id}`);
+  // A committed user answer is the real approval-resolution boundary. This
+  // evidence does not imply that an external action or outcome subsequently ran.
+  const task = ensureCanonicalTaskForChat(chatId);
+  if (task) {
+    tryRecordOneDomainEvent({
+      eventId: approvalEventId(last.id),
+      eventType: "approval.resolved",
+      actor: "user",
+      entityId: decisionEntityId(last.id),
+      ...(task.projectId ? { projectId: task.projectId } : {}),
+      taskId: task.id,
+      version: 1,
+      visibility: task.projectId ? "project" : "personal",
+      entries: [
+        { name: "decisionId", value: last.id },
+        { name: "selectedOption", value: decisionOptionRef(normalizedReply) },
+        { name: "actor", value: "user" },
+      ],
+    });
+  }
   return { chatId, sourceMessageId: last.id };
+}
+
+/**
+ * Append-only One presentation preference for the exact current Decision.
+ * Snoozing never resolves, claims, approves, or executes the question.
+ */
+export function snoozePendingConfirmation(
+  chatId: string,
+  sourceMessageId: string,
+  resumeAt: string,
+): { chatId: string; sourceMessageId: string; snoozedUntil: string } {
+  const resumeTime = Date.parse(resumeAt);
+  const now = Date.now();
+  if (!Number.isFinite(resumeTime) || resumeTime < now + 60_000 || resumeTime > now + 30 * 24 * 60 * 60 * 1_000) {
+    throw new Error("Decision snooze must be between 1 minute and 30 days");
+  }
+  const last = getLastChatMessage(chatId);
+  if (
+    !last
+    || last.id !== sourceMessageId
+    || last.role !== "assistant"
+    || !last.text.includes(OPEN)
+    || !firstQuestion(last.text)
+    || listCommittedQuestionAnswers(chatId).some((receipt) => receipt.sourceMessageId === sourceMessageId)
+  ) {
+    throw new Error("Question is stale or no longer pending");
+  }
+  const snoozedUntil = new Date(resumeTime).toISOString();
+  if (latestDecisionSnooze(chatId, sourceMessageId) !== snoozedUntil) {
+    recordRunEvent({
+      runId: answerReceiptRunId(chatId),
+      kind: SNOOZE_RECEIPT_KIND,
+      chatId,
+      payload: { sourceMessageId, resumeAt: snoozedUntil },
+    });
+  }
+  return { chatId, sourceMessageId, snoozedUntil };
 }
 
 /** 지금 사용자 확인을 기다리는 채팅들. 최신순. */
@@ -154,6 +253,7 @@ export function listPendingConfirmations(): PendingConfirmation[] {
     // 답변 확정 영수증이 있으면 이미 답한 질문 — 후속 user 메시지가 아직(또는 영영)
     // 안 쌓였어도 대기 목록/배지에 다시 올리지 않는다.
     if (listCommittedQuestionAnswers(c.id).some((r) => r.sourceMessageId === last.id)) continue;
+    const snoozedUntil = latestDecisionSnooze(c.id, last.id);
     out.push({
       chatId: c.id,
       sourceMessageId: last.id,
@@ -166,6 +266,7 @@ export function listPendingConfirmations(): PendingConfirmation[] {
       agentId: c.agentId,
       firmId: c.firmId,
       createdAt: last.createdAt,
+      ...(snoozedUntil && Date.parse(snoozedUntil) > Date.now() ? { snoozedUntil } : {}),
     });
   }
   out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));

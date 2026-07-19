@@ -8,7 +8,7 @@ import { useRouter } from "next/navigation";
 import { Sidebar } from "./Sidebar";
 import { MenuBridge } from "./MenuBridge";
 import { ImportAgentsModal } from "./ImportAgentsModal";
-import { ipc, updaterEvents } from "@/lib/ipc";
+import { ipc, ipcEvents, updaterEvents } from "@/lib/ipc";
 import { SideNav } from "./SideNav";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { usePathname } from "next/navigation";
@@ -20,6 +20,13 @@ import { BuildDoneToast } from "./BuildDoneToast";
 import { BrowserActionApprovalSheet } from "./BrowserActionApprovalSheet";
 import FloatingComputerUsePanel from "./browser/FloatingComputerUsePanel";
 import { OntologyChipFeatureUpdateModal } from "./OntologyChipFeatureUpdateModal";
+import { OneFeatureIntro } from "./one/OneFeatureIntro";
+import { ONE_INTRO_ACK_KEY } from "@/lib/one-task-adapter";
+import type {
+  OneFeatureIntroBlockingStateCategory,
+  OneFeatureIntroResolution,
+  OneFeatureIntroState,
+} from "@shared/one-feature-intro";
 import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import {
@@ -38,8 +45,11 @@ const ATTENTION_POLL_MS = 3_000;
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [importOpen, setImportOpen] = useState(false);
   const [pendingConfirmations, setPendingConfirmations] = useState(0);
+  const [activeChatCount, setActiveChatCount] = useState<number | null>(null);
   const [oberonJobs, setOberonJobs] = useState<OberonBackgroundJob[]>([]);
   const [appUpdateBusy, setAppUpdateBusy] = useState(true);
+  const [oneIntroState, setOneIntroState] = useState<OneFeatureIntroState | null>(null);
+  const introDeferralInFlightRef = useRef<string | null>(null);
   const router = useRouter();
   const pathname = usePathname() ?? "/";
   const { locale } = useT();
@@ -97,6 +107,82 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
+  // Main is the durable authority for feature-intro versions. A pre-migration
+  // renderer acknowledgement is consumed exactly once and converted to an
+  // explicit legacy_migrated receipt; it is never consulted as authority again.
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      const api = ipc();
+      if (!api?.oneFeatureIntro) return;
+      try {
+        let state = await api.oneFeatureIntro.getState();
+        let legacyVersion = 0;
+        try {
+          legacyVersion = Number(window.localStorage.getItem(ONE_INTRO_ACK_KEY) ?? "0");
+        } catch {
+          // Main state remains authoritative when legacy renderer storage is unavailable.
+        }
+        if (
+          Number.isSafeInteger(legacyVersion)
+          && legacyVersion >= state.currentIntroVersion
+          && state.acknowledgedIntroVersion < state.currentIntroVersion
+        ) {
+          state = await api.oneFeatureIntro.acknowledge({
+            expectedStoreVersion: state.version,
+            introVersion: state.currentIntroVersion,
+            resolution: "legacy_migrated",
+            confirmedByUser: true,
+          });
+        }
+        try {
+          window.localStorage.removeItem(ONE_INTRO_ACK_KEY);
+        } catch {
+          // A stale legacy key is harmless because it is never read after this mount.
+        }
+        if (!cancelled) setOneIntroState(state);
+      } catch {
+        // Optional news stays hidden when Main authority cannot be verified.
+        if (!cancelled) setOneIntroState(null);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const acknowledgeOneIntro = useCallback(async (resolution: OneFeatureIntroResolution) => {
+    const api = ipc();
+    if (!api?.oneFeatureIntro || !oneIntroState) return;
+    let current = oneIntroState;
+    if (current.acknowledgedIntroVersion >= current.currentIntroVersion) return;
+    try {
+      const next = await api.oneFeatureIntro.acknowledge({
+        expectedStoreVersion: current.version,
+        introVersion: current.currentIntroVersion,
+        resolution,
+        confirmedByUser: true,
+      });
+      setOneIntroState(next);
+    } catch {
+      // One bounded CAS refresh handles another renderer or deferral winning
+      // the race without turning an acknowledgement into a blind overwrite.
+      current = await api.oneFeatureIntro.getState();
+      if (current.acknowledgedIntroVersion >= current.currentIntroVersion) {
+        setOneIntroState(current);
+        return;
+      }
+      const next = await api.oneFeatureIntro.acknowledge({
+        expectedStoreVersion: current.version,
+        introVersion: current.currentIntroVersion,
+        resolution,
+        confirmedByUser: true,
+      });
+      setOneIntroState(next);
+    }
+  }, [oneIntroState]);
+
   const syncAttention = useCallback(async () => {
     const api = ipc();
     if (!api) {
@@ -127,6 +213,30 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       void api?.attention?.setPendingConfirmations(0);
     };
   }, [syncAttention]);
+
+  // Feature news must never cover live work. Seed from main-owned authority,
+  // then follow the same active-chat broadcast used by the Work sidebar. A
+  // null seed is deliberately ineligible so launch cannot flash the intro
+  // before the authoritative run state arrives.
+  useEffect(() => {
+    let cancelled = false;
+    const apply = (chatIds: string[]) => {
+      if (!cancelled) setActiveChatCount(new Set(chatIds).size);
+    };
+    const api = ipc();
+    if (api?.invoke?.activeChats) {
+      void api.invoke.activeChats().then(apply).catch(() => {
+        // Unknown authority remains fail-closed for this optional modal.
+      });
+    } else {
+      setActiveChatCount(0);
+    }
+    const unsubscribe = ipcEvents()?.onActiveChats(apply);
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, []);
 
   // 온보딩을 마쳤는데 로컬 에이전트가 0개면 "내 에이전트 가져오기" 팝업을 한 번 띄운다.
   useEffect(() => {
@@ -198,12 +308,59 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const showWorkspaceSidebar = pathname.startsWith("/chat") || pathname.startsWith("/project");
   const featureUpdatePath = pathname.replace(/\.html$/, "");
-  const featureUpdateEligible =
-    (featureUpdatePath === "/" || featureUpdatePath === "/dashboard" || featureUpdatePath.startsWith("/library")) &&
-    !importOpen &&
-    pendingConfirmations === 0 &&
-    !appUpdateBusy &&
-    !oberonJobs.some(isOberonBackgroundJobActive);
+  const featureUpdateRouteEligible =
+    featureUpdatePath === "/"
+    || featureUpdatePath === "/dashboard"
+    || featureUpdatePath.startsWith("/library");
+  const oneIntroPending = Boolean(
+    oneIntroState
+    && oneIntroState.acknowledgedIntroVersion < oneIntroState.currentIntroVersion,
+  );
+  const oneIntroBlockingCategory: OneFeatureIntroBlockingStateCategory | null = !oneIntroPending
+    ? null
+    : pendingConfirmations > 0
+      ? "pending_approval"
+      : activeChatCount === null
+        ? "authority_unknown"
+        : activeChatCount > 0
+          ? "active_task"
+          : appUpdateBusy
+            ? "app_update"
+            : oberonJobs.some(isOberonBackgroundJobActive)
+              ? "active_background_work"
+              : importOpen
+                ? "import_flow"
+                : !featureUpdateRouteEligible
+                  ? "route_ineligible"
+                  : null;
+  const featureUpdateEligible = featureUpdateRouteEligible && oneIntroBlockingCategory === null;
+
+  useEffect(() => {
+    const api = ipc();
+    const category = oneIntroBlockingCategory;
+    const state = oneIntroState;
+    if (!api?.oneFeatureIntro || !state || !category || !oneIntroPending) return;
+    if (state.deferrals.some((item) =>
+      item.introVersion === state.currentIntroVersion
+      && item.blockingStateCategory === category)) return;
+    const requestKey = `${state.currentIntroVersion}:${category}`;
+    if (introDeferralInFlightRef.current === requestKey) return;
+    introDeferralInFlightRef.current = requestKey;
+    void api.oneFeatureIntro.defer({
+      expectedStoreVersion: state.version,
+      introVersion: state.currentIntroVersion,
+      blockingStateCategory: category,
+    }).then(setOneIntroState).catch(async () => {
+      // A concurrent acknowledgement or deferral may have advanced the CAS.
+      // Refreshing is safe; the Main runtime deduplicates exact deferrals.
+      const latest = await api.oneFeatureIntro.getState().catch(() => null);
+      if (latest) setOneIntroState(latest);
+    }).finally(() => {
+      if (introDeferralInFlightRef.current === requestKey) {
+        introDeferralInFlightRef.current = null;
+      }
+    });
+  }, [oneIntroBlockingCategory, oneIntroPending, oneIntroState]);
 
   return (
     <div
@@ -242,9 +399,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <BrowserActionApprovalSheet />
       {showWorkspaceSidebar && <FloatingComputerUsePanel />}
       <OntologyChipFeatureUpdateModal
-        eligible={featureUpdateEligible}
+        eligible={featureUpdateEligible && oneIntroState !== null && !oneIntroPending}
         locale={locale}
         onOpen={() => router.push("/library/agents?tab=ontology")}
+      />
+      <OneFeatureIntro
+        eligible={featureUpdateEligible && oneIntroPending}
+        needsAcknowledgement={oneIntroPending}
+        locale={locale === "ko" ? "ko" : "en"}
+        onResolve={acknowledgeOneIntro}
+        onOpenOne={() => {
+          router.push("/one");
+        }}
+        onKeepWork={() => undefined}
       />
       <BackgroundWorkPill
         jobs={oberonJobs}
@@ -847,10 +1014,10 @@ const TOUR_STEPS = [
       "This is where you build and fine-tune your own agents or teams. It's an advanced menu meant for those comfortable with development, so it's fine to skip it at first.",
   },
   {
-    title: "Agent Apps",
-    body: "바로 쓸 수 있는 에이전트 앱들이에요(창업·커머스·크리에이티브 등). 하고 싶은 걸 적으면 알아서 만들어 줘요.",
+    title: "Sites",
+    body: "웹·모바일·에이전트용 인터페이스를 한 곳에서 만들고 다듬는 화면이에요.",
     bodyEn:
-      "These are ready-to-use agent apps (for startups, commerce, creative work, and more). Just write down what you want to do, and it builds it for you.",
+      "Build and refine interfaces for the web, mobile, and agents in one place.",
   },
   {
     title: "Hub",

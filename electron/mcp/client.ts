@@ -94,7 +94,8 @@ import { parseMemoryEvents } from "../memory/events";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
-import { parseSurfaces } from "../surface-emitter";
+import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, parseSurfaces } from "../surface-emitter";
+import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay } from "../one/markdown-surface";
 import { createAutomation, listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { tryRecordRunEvent } from "../store/run-events";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
@@ -108,8 +109,7 @@ import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
 import { buildAgentAppRunnerEnv, buildRunnerEnv } from "../runtime/env-resolver";
 import { agentRunCwd } from "../runtime/exec";
 import {
-  enforceMobileReadOnlyPermission,
-  isMobileReadRuntimeAllowed,
+  normalizeRemoteInvocationPermission,
   revalidateInvocationWorkspaceBinding,
   type InvocationWorkspaceBinding,
 } from "../invocation/workspace-binding";
@@ -117,20 +117,169 @@ import { type Runner, SURFACE_INTENT_MARKER, UNATTENDED_NO_ASK_DIRECTIVE } from 
 import { pickActive, pickRunner, selectAgentAppRuntimeForTargets, selectExactRuntime, selectRuntimeForTargets } from "../runtime/selection";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
+import {
+  oneTeamRuntimeBinding,
+  oneTeamRuntimeBindingMatches,
+  type OneTeamRuntimeBinding,
+} from "../one/team-preflight";
+import {
+  exactOneParticipantEffectivePrompt,
+  validatedOneParticipantEffectivePromptMap,
+  type OneParticipantExecutionSnapshot,
+  type OneParticipantEffectivePromptSnapshot,
+} from "../one/task-kind";
+import {
+  mainOneAttachmentContext,
+  redactOneAttachmentEvent,
+  redactOneAttachmentText,
+} from "../one/attachments";
 import type {
   Chat,
   AppFactoryAppRecord,
   InstalledAgent,
   McpInvocationEvent,
   McpInvocationRequest,
+  AgentlasSurfaceManifest,
+  JsonObject,
   OrchestrationTarget,
   RecStage,
   RecRouterAgent,
   RuntimeStatus,
 } from "../../shared/types";
 
+const ONE_LOCAL_ARTIFACT_PATH_KEYS = ["path", "filePath", "localPath", "file"] as const;
+const ONE_LOCAL_ARTIFACT_EXTENSIONS = new Set([
+  ".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".bmp",
+  ".mp4", ".webm", ".mov", ".m4v", ".ogv",
+  ".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac",
+  ".pdf", ".docx", ".txt", ".md", ".xlsx", ".csv", ".json", ".zip",
+]);
+
+function sealOneLocalArtifactPaths(
+  manifest: AgentlasSurfaceManifest,
+  resultFolder: string | undefined,
+): AgentlasSurfaceManifest {
+  if (!resultFolder || !path.isAbsolute(resultFolder)) return manifest;
+  let root: string;
+  try {
+    root = fs.realpathSync.native(path.resolve(resultFolder));
+  } catch {
+    return manifest;
+  }
+  const insideRoot = (candidate: string): boolean => {
+    const relative = path.relative(root, candidate);
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  };
+  const sealRow = (row: JsonObject): JsonObject => {
+    const next = { ...row };
+    for (const key of ONE_LOCAL_ARTIFACT_PATH_KEYS) {
+      const value = row[key];
+      if (typeof value !== "string" || !value.trim() || path.isAbsolute(value) || value.includes("://")) continue;
+      const candidate = path.resolve(root, value.trim());
+      if (!insideRoot(candidate)) continue;
+      try {
+        const canonical = fs.realpathSync.native(candidate);
+        const stat = fs.lstatSync(candidate);
+        if (canonical === candidate && stat.isFile()) next[key] = canonical;
+      } catch {
+        // A claimed file that is absent or linked never gains local authority.
+      }
+    }
+    return next;
+  };
+  const verifiedArtifactRow = (row: JsonObject): JsonObject | null => {
+    const claimedPath = ONE_LOCAL_ARTIFACT_PATH_KEYS
+      .map((key) => row[key])
+      .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+    const claimedLabel = [row.label, row.name, row.title]
+      .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+    const claim = (claimedPath || claimedLabel || "").trim();
+    if (!claim || claim.includes("://")) return null;
+    const candidate = path.isAbsolute(claim) ? path.resolve(claim) : path.resolve(root, claim);
+    if (!insideRoot(candidate) || !ONE_LOCAL_ARTIFACT_EXTENSIONS.has(path.extname(candidate).toLocaleLowerCase())) return null;
+    try {
+      const canonical = fs.realpathSync.native(candidate);
+      const stat = fs.lstatSync(candidate);
+      if (canonical !== candidate || !stat.isFile()) return null;
+      return {
+        ...row,
+        label: claimedLabel?.trim() || path.basename(canonical),
+        path: canonical,
+      };
+    } catch {
+      return null;
+    }
+  };
+  return {
+    ...manifest,
+    data: Object.fromEntries(Object.entries(manifest.data).map(([key, dataset]) => {
+      if (dataset.type !== "artifacts" && dataset.type !== "media") return [key, dataset];
+      if (dataset.type === "artifacts") {
+        return [key, {
+          ...dataset,
+          ...(Array.isArray(dataset.rows) ? { rows: dataset.rows.flatMap((row) => {
+            const verified = verifiedArtifactRow(row);
+            return verified ? [verified] : [];
+          }) } : {}),
+          ...(Array.isArray(dataset.items) ? { items: dataset.items.flatMap((item) => {
+            const verified = verifiedArtifactRow(item);
+            return verified ? [verified] : [];
+          }) } : {}),
+        }];
+      }
+      return [key, {
+        ...dataset,
+        ...(Array.isArray(dataset.rows) ? { rows: dataset.rows.map((row) => sealRow(row)) } : {}),
+        ...(Array.isArray(dataset.items) ? { items: dataset.items.map((item) => sealRow(item)) } : {}),
+      }];
+    })),
+  };
+}
+
+function mainOneProfileContext(req: McpInvocationRequest): string {
+  const value = (req as McpInvocationRequest & { oneProfileContext?: unknown }).oneProfileContext;
+  return typeof value === "string" && value.length > 0 && value.length <= 16_000 ? value : "";
+}
+
+type MainBoundOneInvocationRequest = McpInvocationRequest & {
+  oneTeamExecutionPolicy?: "solo_locked" | "confirmed_existing_roster" | "confirmed_external_workforce";
+  oneTeamRuntimeBinding?: OneTeamRuntimeBinding;
+  oneParticipantExecutionSnapshot?: OneParticipantExecutionSnapshot;
+};
+
+function mainOneTeamExecutionPolicy(
+  req: McpInvocationRequest,
+): MainBoundOneInvocationRequest["oneTeamExecutionPolicy"] {
+  const value = (req as MainBoundOneInvocationRequest).oneTeamExecutionPolicy;
+  return value === "solo_locked"
+    || value === "confirmed_existing_roster"
+    || value === "confirmed_external_workforce"
+    ? value
+    : undefined;
+}
+
+function mainOneTeamRuntimeBinding(req: McpInvocationRequest): OneTeamRuntimeBinding | undefined {
+  const value = (req as MainBoundOneInvocationRequest).oneTeamRuntimeBinding;
+  return value && typeof value === "object" ? value : undefined;
+}
+
+function mainOneParticipantExecutionSnapshot(req: McpInvocationRequest): unknown {
+  return (req as MainBoundOneInvocationRequest).oneParticipantExecutionSnapshot;
+}
+
 type EventSink = (ev: McpInvocationEvent) => void;
 const careerGraphRefreshTriggered = new Set<string>();
+
+/**
+ * Some host CLIs occasionally stop immediately after opening the hidden
+ * memory JSON fence. A language-qualified fence at end-of-message cannot be a
+ * valid closing fence, so keeping it only creates an empty black code block in
+ * One and Work. Bare closing fences and every complete code block are left
+ * untouched.
+ */
+function stripDanglingLanguageFence(text: string): string {
+  return text.replace(/\n[ \t]*```[A-Za-z0-9_+.-]+[ \t]*$/u, "").trim();
+}
 
 function invocationFailure(
   req: McpInvocationRequest,
@@ -537,6 +686,8 @@ async function buildStructuredTaskForceSpecs(input: {
   project: string | null;
   locale: "ko" | "en";
   signal?: AbortSignal;
+  /** Main-owned One snapshot. When present, local directives must not re-read disk. */
+  localEffectivePrompts?: ReadonlyMap<string, OneParticipantEffectivePromptSnapshot>;
 }): Promise<BorrowedAgentSpec[]> {
   if (input.targets.length === 0 || input.targets.length > 32) {
     throw new Error("A task force requires between 1 and 32 exact targets.");
@@ -558,10 +709,16 @@ async function buildStructuredTaskForceSpecs(input: {
       if (agent.kind === "team") {
         throw new Error(`Installed team package must resolve to a Team/Firm target: ${target.agentId}`);
       }
+      const frozenPrompt = input.localEffectivePrompts
+        ? exactOneParticipantEffectivePrompt(input.localEffectivePrompts, agent.id, agent.slug)
+        : null;
+      if (input.localEffectivePrompts && frozenPrompt === null) {
+        throw new Error(`Installed agent is outside the exact One prompt snapshot: ${target.agentId}`);
+      }
       specs.push({
         slug: `installed:${agent.slug}`,
         name: agent.nameEn || agent.name,
-        directive: buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt),
+        directive: frozenPrompt ?? buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt),
         entityKind: "agent",
         source: "installed",
         routeLabel: "Installed",
@@ -854,6 +1011,61 @@ function isUnattendedExecution(executionContext?: InvocationExecutionContext): b
   );
 }
 
+function oneTaskSurfaceRecipe(prompt: string, ko: boolean): string | null {
+  if (/(?:여행|trip|itinerary)/i.test(prompt) && /(?:일정|동선|예산|schedule|route|budget)/i.test(prompt)) {
+    return ko
+      ? "이 여행 결과의 Surface에는 data.schedule={type:'timeline',items:[{title,detail,status,evidenceIds}]}와 widgets.timeline, data.costs={type:'pricing',currency:'KRW',limit,items:[{label,amount,verificationStatus,evidenceIds}]}와 widgets.cost-summary, data.checklist={type:'launch-checklist',items:[{label,status}]}와 widgets.launch-checklist를 반드시 각각 넣으세요. 숫자·날짜가 있는 일정/비용 항목에는 반드시 Surface evidence에 존재하는 id를 evidenceIds로 연결하고, 출처 없는 추정값에는 trust:'estimated'를 넣으세요. 일정·예산·체크리스트를 markdown이나 하나의 table로 합치지 마세요. 좌표를 실제로 확인했을 때만 data.routes={type:'routes',items:[{label,latitude,longitude,evidenceIds}]}와 widgets.map을 추가하세요."
+      : "This travel Surface must separately include data.schedule={type:'timeline',items:[{title,detail,status,evidenceIds}]} with widgets.timeline, data.costs={type:'pricing',currency,limit,items:[{label,amount,verificationStatus,evidenceIds}]} with widgets.cost-summary, and data.checklist={type:'launch-checklist',items:[{label,status}]} with widgets.launch-checklist. Every schedule or cost item containing a number or date must reference ids that exist in Surface evidence; use trust:'estimated' for an unsupported estimate. Do not flatten the schedule, budget, and checklist into markdown or one table. Add data.routes={type:'routes',items:[{label,latitude,longitude,evidenceIds}]} with widgets.map only for coordinates actually verified.";
+  }
+  if (/(?:문제(?:집)?\s*해설|풀이|영어\s*(?:공부|회화|학습)|worksheet|study\s+plan|explain\s+the\s+(?:problem|answer))/i.test(prompt)) {
+    return ko
+      ? "학습 결과는 핵심 설명을 data.summary markdown으로, 풀이·학습 단계를 data.steps table로, 사용자가 할 일을 data.checklist launch-checklist로 분리하세요. 정답만 쓰지 말고 단계의 순서를 보존하세요."
+      : "Separate the learning result into a concise data.summary markdown explanation, ordered data.steps table, and data.checklist launch-checklist for practice. Preserve the reasoning steps instead of returning only the answer.";
+  }
+  if (/(?:문서|워드|word\s+(?:문서|file|document)|report)/i.test(prompt)) {
+    return ko
+      ? "문서 결과는 data.summary markdown과, 실제 파일 생성에 성공한 경우에만 data.artifacts={type:'artifacts',items:[{label,type}]} 및 widgets.report를 사용하세요. 존재하지 않는 파일을 선언하지 마세요."
+      : "Use data.summary markdown for the document result and data.artifacts={type:'artifacts',items:[{label,type}]} only when the file was actually created. Never declare a nonexistent file.";
+  }
+  if (/(?:엑셀|excel|스프레드시트|spreadsheet)/i.test(prompt)) {
+    return ko
+      ? "스프레드시트 결과는 실제 행·열을 data.table과 widgets.table로 보존하고, 실제 파일 생성에 성공한 경우에만 data.artifacts를 추가하세요."
+      : "Preserve actual rows and columns in data.table with widgets.table, and add data.artifacts only if the spreadsheet file was actually created.";
+  }
+  if (/(?:사진|이미지|영상|비디오|photo|image|video)/i.test(prompt)) {
+    return ko
+      ? "미디어 결과는 실제 입력·생성 자산만 data.media와 widgets.asset-board로 보존하고, 자막·장면·출력 파일은 각각 별도 데이터로 두세요. 생성하지 않은 이미지를 미리보기처럼 선언하지 마세요."
+      : "Use data.media with widgets.asset-board only for actual input or generated assets, keeping scenes, captions, and output files separate. Never declare media that was not created.";
+  }
+  return null;
+}
+
+function deterministicOneCompletionCopy(
+  prompt: string,
+  surface: AgentlasSurfaceManifest,
+  locale: "ko" | "en",
+): string {
+  const types = new Set(Object.values(surface.data).map((dataset) => dataset.type));
+  if (types.has("artifacts") || types.has("media")) {
+    return locale === "ko"
+      ? "요청한 결과와 파일을 준비했어요. 아래에서 바로 확인할 수 있어요."
+      : "Your result and files are ready. You can review them below.";
+  }
+  if (types.has("timeline") || (/(?:여행|trip|itinerary)/i.test(prompt) && types.has("pricing"))) {
+    return locale === "ko"
+      ? "일정과 비용, 준비할 내용을 한눈에 정리했어요."
+      : "I organized the schedule, costs, and preparations below.";
+  }
+  if (types.has("table")) {
+    return locale === "ko"
+      ? "확인한 내용과 비교 결과를 한눈에 정리했어요."
+      : "I organized the checked details and comparison below.";
+  }
+  return locale === "ko"
+    ? "필요한 결과만 보기 쉽게 정리했어요."
+    : "I organized the result so it is easy to review.";
+}
+
 /**
  * Renderer → main IPC 진입점. chatId 기반.
  * 1) chat → agent + project lookup → system prompt 조립
@@ -898,11 +1110,7 @@ export async function runMcpInvocation(
   }
   // Every caller, including legacy/direct integrations, crosses the same
   // fail-closed boundary. Unknown or omitted permission is read-only.
-  const normalizedPermission = workspaceBinding
-    ? enforceMobileReadOnlyPermission(req.permissions)
-    : req.permissions === "write" || req.permissions === "full"
-      ? req.permissions
-      : "read";
+  const normalizedPermission = normalizeRemoteInvocationPermission(req.permissions);
   if (req.permissions !== normalizedPermission) req = { ...req, permissions: normalizedPermission };
   const canWrite = normalizedPermission === "write" || normalizedPermission === "full";
   // A Mobile run consumes only the main-owned snapshot captured at the Bridge
@@ -916,7 +1124,8 @@ export async function runMcpInvocation(
   let finalTextFromSink = "";
   let resolvedResultFolder: string | undefined;
   let workforcePrepareReceipt: WorkforcePrepareCheckpointReceipt | undefined;
-  sink = (ev: McpInvocationEvent) => {
+  sink = (rawEvent: McpInvocationEvent) => {
+    const ev = redactOneAttachmentEvent(req, rawEvent);
     if (ev.kind === "final" && ev.text?.trim()) {
       finalTextFromSink = ev.text.trim();
     }
@@ -929,43 +1138,170 @@ export async function runMcpInvocation(
     workforcePrepareReceipt,
   });
   const locale = pickLocale(req);
+  const oneTeamExecutionPolicy = mainOneTeamExecutionPolicy(req);
+  const boundOneTeamRuntime = mainOneTeamRuntimeBinding(req);
+  if (oneTeamExecutionPolicy) {
+    const exactLocalTargets = req.taskForceTargets?.every((target) =>
+      target.source === "local" && target.entityKind === "agent");
+    if (
+      oneTeamExecutionPolicy === "confirmed_existing_roster"
+      && (!boundOneTeamRuntime || !req.taskForceTargets?.length || !exactLocalTargets)
+    ) {
+      sink({
+        kind: "error",
+        error: {
+          code: "one-team-binding-invalid",
+          message: locale === "ko"
+            ? "확정된 One 팀의 실행 바인딩이 유효하지 않아 실행을 중단했습니다."
+            : "The confirmed One team binding is invalid, so execution was stopped.",
+        },
+      });
+      return earlyResult();
+    }
+    if (
+      oneTeamExecutionPolicy === "solo_locked"
+      && /^\s*(?:\/?workforce\b|\/?hep-network\b)/i.test(req.userPrompt)
+    ) {
+      sink({
+        kind: "error",
+        error: {
+          code: "one-team-preflight-required",
+          message: locale === "ko"
+            ? "외부 팀을 부르기 전에 One의 팀 제안과 명시적 확인이 필요합니다."
+            : "One must show a team proposal and receive explicit confirmation before external recruitment.",
+        },
+      });
+      return earlyResult();
+    }
+    if (
+      oneTeamExecutionPolicy === "confirmed_external_workforce"
+      && (!boundOneTeamRuntime || !/^\s*\/?workforce\b/i.test(req.userPrompt))
+    ) {
+      sink({
+        kind: "error",
+        error: {
+          code: "one-workforce-binding-invalid",
+          message: locale === "ko"
+            ? "확인된 One Workforce 실행 바인딩이 유효하지 않아 시작하지 않았습니다."
+            : "The confirmed One Workforce binding is invalid, so execution did not start.",
+        },
+      });
+      return earlyResult();
+    }
+    req = {
+      ...req,
+      sessionRouting: false,
+      hubMode: oneTeamExecutionPolicy === "confirmed_external_workforce" ? "hub-first" : "local-only",
+      borrowAgents: [],
+      borrowVersions: undefined,
+      pipelineStages: undefined,
+      routerAgent: undefined,
+      taskForceTargets: oneTeamExecutionPolicy === "confirmed_existing_roster"
+        ? req.taskForceTargets
+        : undefined,
+    };
+  }
   const chat = getChat(req.chatId);
   if (!chat) {
     sink({ kind: "error", error: { code: "no-chat", message: tStatus(locale, "errChatNotFound") } });
     return earlyResult();
   }
+  // Freeze conversation state before this turn becomes durable. Every routing
+  // decision and model history below must see only earlier turns; otherwise the
+  // current request is duplicated as both history and the active user prompt.
+  const priorHistory = req.agentAppMode ? [] : listChatMessages(chat.id, 80);
+  const hadPriorConversationContext = req.agentAppMode
+    ? false
+    : hasPriorConversationContext(chat.id);
   // Group, firm, borrowed-task-force, and Stormbreaker branches return before
   // the ordinary single-run persistence point. Keep the visible request durable
   // exactly once regardless of which executable orchestrator owns it.
   let userMessagePersisted = false;
   const persistUserMessage = () => {
     if (req.agentAppMode || userMessagePersisted) return;
-    const hasHistory = listChatMessages(chat.id, 1).length > 0;
     appendChatMessage(chat.id, "user", req.userPrompt);
-    if (!hasHistory) autoTitleFromFirstMessage(chat.id, req.userPrompt);
+    if (priorHistory.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
     userMessagePersisted = true;
   };
-  // Mobile runs and unattended read automations cross a stronger boundary than
-  // an interactive Desktop read. Only Main derives this bit; it is never taken
-  // from the renderer request.
-  const restrictedReadBoundary =
-    Boolean(workspaceBinding) || (executionContext?.source === "automation" && !canWrite);
-  // Interactive Desktop `permissions=read` may consume already-activated
-  // memory/ontology, but it has the same project-write prohibition as the
-  // stronger Mobile/automation boundary. Keep runtime eligibility separate
-  // from this filesystem/curation boundary.
+  // The user's turn belongs to the conversation even when routing, provider
+  // authentication, or a later authority check fails before model dispatch.
+  // Persist it at the first safe point after the exact local chat is resolved;
+  // later orchestration branches keep calling this idempotent helper.
+  persistUserMessage();
+  // Mobile, Desktop, and scheduled work all use the same runtime contract.
+  // Pairing, canonical workspace binding, and each Desktop tool's own
+  // confirmation remain the authority checks; there is no second reduced
+  // runtime or no-tool execution mode for a remote invocation.
+  const restrictedReadBoundary = false;
+  // An unattended read automation may work in its selected folder, but it must
+  // not silently inherit mutable Desktop-only project notes, activated memory,
+  // ontology, or project-scoped Experience. This is deliberately narrower than
+  // `restrictedReadBoundary`: the selected runtime and its read tools remain
+  // available, preserving Desktop/Mobile execution parity.
+  const suppressMutableProjectContext =
+    executionContext?.source === "automation" && !canWrite;
+  // Permission still controls normal Desktop write authority. It is unrelated
+  // to whether the request originated from a paired phone.
   const projectReadOnlyBoundary = !canWrite || restrictedReadBoundary;
   const suppressProjectBinding = executionContext?.source === "site-studio";
   // Site Studio owns a project-scoped hidden conversation, but that identity is
   // not authority to consume an arbitrary Desktop Project. Freeze the effective
   // project id once in Main so a stale/tampered chat row cannot re-enter through
   // context notes, Experience selection, firm delegation, or curation.
-  const invocationProjectId = suppressProjectBinding ? null : chat.projectId;
+  const invocationProjectId = suppressProjectBinding || suppressMutableProjectContext
+    ? null
+    : chat.projectId;
   let agent = getAgentById(chat.agentId);
   if (!agent) {
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
     return earlyResult();
   }
+  const oneParticipantEffectivePrompts = oneTeamExecutionPolicy
+    ? validatedOneParticipantEffectivePromptMap(mainOneParticipantExecutionSnapshot(req))
+    : null;
+  if (oneTeamExecutionPolicy) {
+    const targetIds = oneTeamExecutionPolicy === "confirmed_existing_roster"
+      ? (req.taskForceTargets ?? []).flatMap((target) =>
+          target.source === "local" && target.entityKind === "agent" ? [target.agentId] : [])
+      : [];
+    const expectedIds = [agent.id, ...targetIds];
+    const actualIds = oneParticipantEffectivePrompts
+      ? [...oneParticipantEffectivePrompts.keys()]
+      : [];
+    const exactIds = new Set(expectedIds).size === expectedIds.length
+      && [...expectedIds].sort().join("\u0000") === [...actualIds].sort().join("\u0000");
+    const exactSlugs = exactIds && expectedIds.every((agentId) => {
+      const liveAgent = getAgentById(agentId);
+      const frozen = oneParticipantEffectivePrompts?.get(agentId);
+      return Boolean(liveAgent && frozen && liveAgent.slug === frozen.agentSlug && liveAgent.kind !== "team");
+    });
+    if (!oneParticipantEffectivePrompts || !exactIds || !exactSlugs) {
+      sink({
+        kind: "error",
+        error: {
+          code: "one-participant-prompt-snapshot-invalid",
+          message: locale === "ko"
+            ? "확정된 One 참여자의 실행 프롬프트 스냅샷이 유효하지 않아 실행을 중단했습니다."
+            : "The exact One participant prompt snapshot is invalid, so execution was stopped.",
+        },
+      });
+      return earlyResult();
+    }
+  }
+  const effectivePromptFor = (candidate: InstalledAgent): string => {
+    if (!oneParticipantEffectivePrompts) {
+      return buildEffectiveAgentSystemPrompt(candidate.id, candidate.systemPrompt);
+    }
+    const frozen = exactOneParticipantEffectivePrompt(
+      oneParticipantEffectivePrompts,
+      candidate.id,
+      candidate.slug,
+    );
+    if (frozen === null) {
+      throw new Error(`One participant prompt snapshot is unavailable: ${candidate.id}`);
+    }
+    return frozen;
+  };
   runtimeAgentId = agent.id;
   const targetApp = req.targetAppId ? getAgentApp(req.targetAppId) : null;
   const isTargetAppEdit = Boolean(targetApp && req.targetAppAction === "edit");
@@ -989,6 +1325,41 @@ export async function runMcpInvocation(
       : req.planMode
         ? buildPlanUserPrompt(req.userPrompt, locale)
         : req.userPrompt;
+  if (oneTeamExecutionPolicy) {
+    const taskSurfaceRecipe = oneTaskSurfaceRecipe(req.userPrompt, locale === "ko");
+    const lockedBoundary = locale === "ko"
+      ? [
+          "[Agentlas One 실행 경계]",
+          oneTeamExecutionPolicy === "confirmed_existing_roster"
+            ? "Main이 확정한 기존 설치 로스터만 사용하세요. 다른 에이전트나 팀을 검색·대여·채용하거나 결제를 시도하지 마세요."
+            : oneTeamExecutionPolicy === "confirmed_external_workforce"
+              ? "사용자가 이 요청에 필요한 Hub Workforce 편성과 실행을 확인했습니다. Hub가 검증하고 고정한 정확한 릴리스만 사용하고, 대체 후보를 조용히 끼워 넣지 마세요."
+              : "이 요청은 단일 에이전트 실행입니다. 다른 에이전트나 팀을 검색·대여·채용하거나 결제를 시도하지 마세요.",
+          "최종 답변에 '사용 에이전트:', '사용 스킬:' 같은 라우팅 보고를 쓰지 말고 사용자에게 필요한 답부터 바로 시작하세요.",
+          "이 경계를 넓혀야 한다면 실행하지 말고 One에서 새 팀 검토가 필요하다고 알리세요.",
+          `조사·비교·일정·문서·미디어처럼 구조화할 수 있는 최종 결과는 긴 평문으로 끝내지 말고, 검증한 사실과 출처를 담은 정확히 하나의 기계 판독 Surface를 답변 맨 끝에 ${SURFACE_OPEN_FENCE} JSON ${SURFACE_CLOSE_FENCE} 형식으로 반환하세요. "Agentlas Surface"라는 Markdown 제목이나 가짜 표로 대신하지 마세요. 비교는 data.table·widgets.table/source-matrix, 날짜별 일정은 data.timeline·widgets.timeline, 좌표가 확인된 이동 경로는 data.routes·widgets.map, 예산은 data.pricing의 currency·limit·items(label, amount, verificationStatus), 실제로 만든 파일만 data.artifacts를 사용하세요. 좌표·금액·파일을 추측해 채우지 마세요.`,
+          "Surface의 제목·요약·data.summary에는 사용자가 받을 완성된 결론만 쓰세요. '이제 검색하겠습니다', 도구 호출 계획, 진행 상황, 메모리나 작업 폴더를 확인한 과정은 넣지 마세요. 반환 전에 추천 제목·설명·표의 제품명과 숫자가 서로 모순되지 않는지 다시 확인하세요.",
+          "비교 표에는 choice 열을 두고 정확히 한 행만 recommended로 표시하세요. 추천 행을 포함한 모든 행은 사용자가 결정할 핵심 열을 구체적인 값이나 '확인하지 못함' 같은 정직한 상태로 채우세요. 대시(—), 빈칸, 임시 문구로 채우지 말고, 근거가 부족하면 추천을 단정하지 마세요. Surface 문자열 안에는 URL이나 Markdown 링크 문법을 넣지 말고 출처는 evidence에만 넣으세요.",
+          ...(taskSurfaceRecipe ? [taskSurfaceRecipe] : []),
+          "[/Agentlas One 실행 경계]",
+        ].join("\n")
+      : [
+          "[Agentlas One execution boundary]",
+          oneTeamExecutionPolicy === "confirmed_existing_roster"
+            ? "Use only the exact existing installed roster confirmed by Main. Do not search for, borrow, recruit, or pay any other agent or team."
+            : oneTeamExecutionPolicy === "confirmed_external_workforce"
+              ? "The user confirmed Hub Workforce selection and execution for this request. Use only the exact releases validated and pinned by Hub, and never silently substitute another candidate."
+              : "This is a single-agent run. Do not search for, borrow, recruit, or pay any other agent or team.",
+          "Never include routing reports such as 'Agents used:' or 'Skills used:' in the final answer. Start directly with the answer the user needs.",
+          "If the boundary is insufficient, stop and say that a new One team review is required.",
+          `For a structured final result such as research, comparison, schedule, document, or media work, do not end with a long plain-text answer. Return exactly one machine-readable Surface at the very end in the form ${SURFACE_OPEN_FENCE} JSON ${SURFACE_CLOSE_FENCE}. Do not substitute a Markdown heading named "Agentlas Surface" or a fake text table. Use data.table with widgets.table/source-matrix for comparisons, data.timeline with widgets.timeline for dated plans, data.routes with widgets.map only for verified coordinates, data.pricing with currency, limit, and items(label, amount, verificationStatus) for budgets, and data.artifacts only for files that were actually created. Never invent coordinates, prices, or files to fill a Surface.`,
+          "Write only the finished user-facing conclusion in the Surface title, summary, and data.summary. Never include future tool plans, progress narration, or checks of memory and work folders. Before returning, verify that the recommendation title, explanation, product names, and numbers in every table do not contradict one another.",
+          "For a comparison table, include a choice column and mark exactly one row recommended. Fill every decision-critical cell in every row, including the recommended row, with a concrete value or an honest state such as 'not verified'. Never use dashes, blanks, or placeholder copy. If the evidence is insufficient, do not make a definitive recommendation. Put no URL or Markdown link syntax inside Surface strings; keep sources only in evidence.",
+          ...(taskSurfaceRecipe ? [taskSurfaceRecipe] : []),
+          "[/Agentlas One execution boundary]",
+        ].join("\n");
+    effectiveUserPrompt = `${lockedBoundary}\n\n${effectiveUserPrompt}`;
+  }
   if (req.sessionRouting) {
     const incumbentRoster = [
       agent.nameEn || agent.name || agent.slug,
@@ -1083,10 +1454,22 @@ export async function runMcpInvocation(
 
   const runtimes = await detectRuntimes();
   throwIfInvocationAborted(signal, locale);
+  if (boundOneTeamRuntime && !oneTeamRuntimeBindingMatches(boundOneTeamRuntime, runtimes)) {
+    sink({
+      kind: "error",
+      error: {
+        code: "one-team-runtime-changed",
+        message: locale === "ko"
+          ? "팀 확인 후 활성 런타임이 바뀌었습니다. 현재 상태로 팀을 다시 검토해주세요."
+          : "The active runtime changed after team confirmation. Review the team again against the current runtime.",
+      },
+    });
+    return earlyResult();
+  }
   const installedAgents = listInstalledAgents();
   // Agent Apps are request/response surfaces, not durable chat continuations.
   // An earlier browser request must not influence a later caller's routing.
-  const hasPriorContext = req.agentAppMode ? false : hasPriorConversationContext(chat.id);
+  const hasPriorContext = hadPriorConversationContext;
   // plain 대화(인사/맞장구)는 라우팅 전체를 건너뛰고 기본 LLM이 즉답 — 전문 에이전트로
   // 잘못 위임되거나 아래 Hephaestus 에스컬레이션 선지연을 무는 엣지케이스를 없앤다.
   const plainConversation = !isTargetAppEdit && isPlainConversationalPrompt(req.userPrompt);
@@ -1100,7 +1483,7 @@ export async function runMcpInvocation(
   // Scheduled runs already carry an explicit target and their own Hub policy.
   // Applying the global chat auto-route here used to turn every default
   // `hub-allowed` automation into Workforce before the selected agent could run.
-  const automaticWorkforceEligible = !req.sessionRouting && shouldAutoEngageNetworkWorkforce({
+  const automaticWorkforceEligible = !oneTeamExecutionPolicy && !req.sessionRouting && shouldAutoEngageNetworkWorkforce({
     agentAppMode: req.agentAppMode === true,
     networkAutoEnabled: isNetworkAutoEnabled(),
     globalOrchestrator: isGlobalOrchestrator(agent),
@@ -1108,7 +1491,9 @@ export async function runMcpInvocation(
     executionSource: executionContext?.source,
     prompt: req.userPrompt,
   });
-  const preRouteProjectPath = workspaceBinding
+  const preRouteProjectPath = suppressMutableProjectContext
+    ? null
+    : workspaceBinding
     ? boundMobileWorkingFolder
     : suppressProjectBinding
       ? null
@@ -1144,7 +1529,7 @@ export async function runMcpInvocation(
   }
   const autoRoute = req.agentAppMode
     ? null
-    : explicitWorkforceGoal || explicitNetworkGoal || hubWorkforceRequested || automaticWorkforceEligible
+    : oneTeamExecutionPolicy || explicitWorkforceGoal || explicitNetworkGoal || hubWorkforceRequested || automaticWorkforceEligible
       ? null
     : req.sessionRouting
       ? null
@@ -1296,52 +1681,17 @@ export async function runMcpInvocation(
 
   let active = runtimeChoice.active;
   let picked = runtimeChoice.picked;
-  if (restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
-    if (workspaceBinding) {
-      // 기존 Mobile 계약은 유지한다. 검증된 read 런타임이 연결돼 있으면 가시적으로
-      // 전환하고, 없을 때만 Mobile 경계 오류로 중단한다.
-      const readBoundaryFallback = runtimes
-        .filter((runtime) => isMobileReadRuntimeAllowed(runtime.kind))
-        .map((runtime) => ({ active: runtime, picked: pickRunner(runtime) }))
-        .find((candidate) => candidate.picked != null);
-      if (readBoundaryFallback?.picked) {
-        sink({
-          kind: "tool-use",
-          status:
-            locale === "ko"
-              ? `${active.kind} 런타임은 모바일 읽기 경계가 검증되지 않아 ${readBoundaryFallback.picked.label}(으)로 실행합니다.`
-              : `${active.kind} has no verified Mobile read boundary; running on ${readBoundaryFallback.picked.label} instead.`,
-        });
-        active = readBoundaryFallback.active;
-        picked = readBoundaryFallback.picked;
-      } else {
-        sink({
-          kind: "error",
-          error: {
-            code: "mobile-runtime-not-read-sandboxed",
-            message:
-              locale === "ko"
-                ? "이 런타임은 모바일 읽기 전용 경계가 검증되지 않았습니다. Desktop에서 BYOK 또는 Ollama를 연결하세요."
-                : "This runtime has no verified Mobile read-only boundary. Connect BYOK or Ollama on Desktop.",
-          },
-        });
-        return earlyResult();
-      }
-    } else {
-      // 무인 자동화의 런타임 고정은 세션/모델/권한 계약이다. 다른 Provider로 바꿔
-      // 성공처럼 보이게 하지 않고, 사용자가 런타임 또는 권한을 명시적으로 바꾸게 한다.
-      sink({
-        kind: "error",
-        error: {
-          code: "automation-runtime-not-read-sandboxed",
-          message:
-            locale === "ko"
-              ? `고정된 ${active.kind} 런타임은 무인 읽기 자동화의 격리 경계가 검증되지 않았습니다. 이 자동화의 런타임 또는 실행 권한을 변경하세요.`
-              : `The pinned ${active.kind} runtime has no verified boundary for unattended read automation. Change this automation's runtime or execution permission.`,
-        },
-      });
-      return earlyResult();
-    }
+  if (boundOneTeamRuntime && oneTeamRuntimeBinding(active).digest !== boundOneTeamRuntime.digest) {
+    sink({
+      kind: "error",
+      error: {
+        code: "one-team-runtime-selection-changed",
+        message: locale === "ko"
+          ? "확인한 런타임과 실제 실행 런타임이 달라 실행을 중단했습니다."
+          : "The runtime selected for execution differs from the confirmed runtime, so execution was stopped.",
+      },
+    });
+    return earlyResult();
   }
   if (!picked) {
     sink({
@@ -1379,13 +1729,14 @@ export async function runMcpInvocation(
   const explicitStormbreakerGoal = explicitStormbreakerRequest
     ? req.userPrompt.replace(stormbreakerPrefix, "").trim() || req.userPrompt
     : req.userPrompt;
-  const stormbreakerEngaged = !req.agentAppMode && !restrictedReadBoundary && (
+  const stormbreakerEngaged = !oneTeamExecutionPolicy && !req.agentAppMode && !restrictedReadBoundary && (
     chat.kind === "division" ||
     chat.continuousMode === true ||
     explicitStormbreakerRequest ||
     isStormbreakerAutoEnabled()
   );
   const stormbreakerSwarm =
+    !oneTeamExecutionPolicy &&
     !req.agentAppMode &&
     !restrictedReadBoundary &&
     chat.kind !== "division" &&
@@ -1472,7 +1823,7 @@ export async function runMcpInvocation(
   // Workforce capability choice belongs to the same top host LLM that owns the
   // roster. The ordinary lexical auto-selector may search/install broad tools,
   // so it is never an authority source for an explicit Workforce execution.
-  if (runtimeCanUseMcp && !req.agentAppMode && canWrite && !explicitWorkforceGoal) {
+  if (runtimeCanUseMcp && !oneTeamExecutionPolicy && !req.agentAppMode && canWrite && !explicitWorkforceGoal) {
     try {
       const selectedContext = await autoSelectMcpTools({
         userPrompt: effectiveUserPrompt,
@@ -1731,6 +2082,7 @@ export async function runMcpInvocation(
         taskForceName: locale === "ko" ? "Agent Workforce TF" : "Agent Workforce task force",
         taskForceKind: "task-force",
         taskForceSpecs: workforce.specs,
+        priorHistory,
         active,
         runtimes,
         picked,
@@ -1790,14 +2142,21 @@ export async function runMcpInvocation(
         project: workingFolder,
         locale,
         signal,
+        ...(oneParticipantEffectivePrompts
+          ? { localEffectivePrompts: oneParticipantEffectivePrompts }
+          : {}),
       });
       await runBorrowedTaskForceInvocation({
         req: { ...req, userPrompt: effectiveUserPrompt },
         chat,
         orchestratorAgent: agent,
+        ...(oneParticipantEffectivePrompts
+          ? { orchestratorEffectivePrompt: effectivePromptFor(agent) }
+          : {}),
         taskForceName: locale === "ko" ? "임시 태스크포스" : "Temporary task force",
         taskForceKind: "task-force",
         taskForceSpecs,
+        priorHistory,
         resolveGroupTaskForce: ({ groupId, prompt, signal: nestedSignal }) => buildAgentGroupTaskForceSpecs({
           groupId,
           prompt,
@@ -1833,7 +2192,7 @@ export async function runMcpInvocation(
   // ── Agent Group 오케스트레이션 ───────────────────────────
   // 저장된 그룹은 firm/division보다 상위의 라우팅 묶음이다. 실행 직전에
   // installed agents, org chart, live Hub catalog/bundle을 다시 풀어서 최신 경로로 호출한다.
-  if (chat.agentGroupId) {
+  if (!oneTeamExecutionPolicy && chat.agentGroupId) {
     try {
       const groupRun = await buildAgentGroupTaskForceSpecs({
         groupId: chat.agentGroupId,
@@ -1855,6 +2214,7 @@ export async function runMcpInvocation(
         taskForceName: groupRun.groupName,
         taskForceKind: "agent-group",
         taskForceSpecs: groupRun.specs,
+        priorHistory,
         resolveGroupTaskForce: ({ groupId, prompt, signal: nestedSignal }) => buildAgentGroupTaskForceSpecs({
           groupId,
           prompt,
@@ -1899,6 +2259,7 @@ export async function runMcpInvocation(
         req: { ...req, borrowAgents: borrowedAgentSlugs },
         chat,
         orchestratorAgent: agent,
+        priorHistory,
         active,
         runtimes,
         picked,
@@ -1928,6 +2289,7 @@ export async function runMcpInvocation(
   // Explicit single borrow also bypasses swarm: its verified Hub user preamble
   // must reach the selected primary runtime unchanged instead of being discarded.
   if (
+    !oneTeamExecutionPolicy &&
     !req.agentAppMode &&
     (chat.swarmMode || stormbreakerSwarm) &&
     borrowedAgentSlugs.length === 0 &&
@@ -1952,6 +2314,7 @@ export async function runMcpInvocation(
         req: stormbreakerSwarm ? { ...req, userPrompt: explicitStormbreakerGoal } : req,
         chat,
         orchestratorAgent: agent,
+        priorHistory,
         active,
         runtimes,
         picked,
@@ -1979,7 +2342,7 @@ export async function runMcpInvocation(
   // ── 멀티 에이전트 firm 오케스트레이션 ──
   // 회사 채팅이고 정규화된 조직에 본부/전문가가 있으면 3-tier 오케스트레이터로 분기.
   // (본부가 없는 firm은 아래 단일 CEO 경로 — 기존 동작 유지)
-  if (chat.firmId) {
+  if (!oneTeamExecutionPolicy && chat.firmId) {
     const firm = getFirm(chat.firmId);
     if (firm) {
       const org = getResolvedOrg(firm);
@@ -1993,6 +2356,7 @@ export async function runMcpInvocation(
             chat: { id: chat.id, projectId: invocationProjectId, firmId: chat.firmId },
             org,
             ceoAgent: agent,
+            priorHistory,
             active,
             runtimes,
             picked,
@@ -2019,7 +2383,7 @@ export async function runMcpInvocation(
   }
 
   // 프로젝트 컨텍스트 노트가 있으면 system prompt 뒤에 append
-  let systemPrompt = buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt);
+  let systemPrompt = effectivePromptFor(agent);
   // ── 턴 컨텍스트 — 사용자 프롬프트에 따라 매 턴 달라지는 주입(메모리 캡슐·온톨로지·
   // MCP 자동선택·브리핑 게이트·Experience/Taste)은 시스템 프롬프트가 아니라 여기 모은다.
   // 시스템 프롬프트를 턴마다 바꾸면 CLI 세션 지문이 매번 달라져 대화 연속성이 전멸한다
@@ -2027,6 +2391,16 @@ export async function runMcpInvocation(
   // 세션 지원 러너는 새 세션이면 시스템 프롬프트 뒤에 붙이고, resume 턴이면 사용자
   // 메시지 앞에 싣는다. 세션 미지원 러너에는 기존처럼 시스템 프롬프트에 합쳐 전달한다.
   const turnContextParts: string[] = [];
+  // One context remains Main-selected regardless of whether the chat is shown
+  // in Desktop or on its paired Mobile remote.
+  const approvedOneContext = (!workspaceBinding || workspaceBinding.source === "mobile-one") && !req.agentAppMode
+    ? mainOneProfileContext(req)
+    : "";
+  if (approvedOneContext) turnContextParts.push(approvedOneContext);
+  const approvedOneAttachmentContext = !workspaceBinding && !req.agentAppMode
+    ? mainOneAttachmentContext(req)
+    : "";
+  if (approvedOneAttachmentContext) turnContextParts.push(approvedOneAttachmentContext);
   if (autoRoute) {
     systemPrompt = `${autoRouteSystemPreamble(
       autoRoute,
@@ -2122,7 +2496,7 @@ export async function runMcpInvocation(
       console.error("[architecture] recordFolderVisit failed:", err);
     }
   }
-  const memoryReadPath = workingFolder && (
+  const memoryReadPath = !suppressMutableProjectContext && workingFolder && (
     activePath === workingFolder ||
     canReadActivatedFolderMemory(workingFolder, {
       permission: normalizedPermission,
@@ -2208,7 +2582,7 @@ export async function runMcpInvocation(
         const experienceContext = buildExperienceContext({
           agentId: agent.id,
           projectId: invocationProjectId,
-          projectPath: workingFolder,
+          projectPath: suppressMutableProjectContext ? null : workingFolder,
           environment: { platform: process.platform, arch: process.arch, runtimeKind: active.kind },
           basePackageHash: agent.packageHash ?? null,
           task: effectiveUserPrompt,
@@ -2294,7 +2668,7 @@ export async function runMcpInvocation(
     systemPrompt = `${systemPrompt}\n\n${UNATTENDED_NO_ASK_DIRECTIVE}`;
   }
 
-  const history = req.agentAppMode ? [] : listChatMessages(chat.id, 80);
+  const history = priorHistory;
 
   // 사용자 메시지 영구화 + 첫 메시지면 제목 자동 생성
   persistUserMessage();
@@ -2370,6 +2744,7 @@ export async function runMcpInvocation(
                     v: "agentlas.chat-session-seed.v1",
                     chatId: chat.id,
                     agentId: agent.id,
+                    executionMode: oneTeamExecutionPolicy ? "one-task-surface-v1" : "conversation",
                   },
             ),
           }),
@@ -2389,7 +2764,10 @@ export async function runMcpInvocation(
       // 활성화(2회 방문) 게이팅과 무관하게, 폴더가 지정돼 있으면 즉시 cwd로 사용한다.
       cwd: req.agentAppMode ? undefined : workingFolder ?? undefined,
       locale,
-      forceSurface: undefined,
+      // A confirmed One Task is a result surface, not an ordinary chat turn.
+      // Force the declarative protocol while casual One conversation remains
+      // lightweight and plain-text capable.
+      forceSurface: oneTeamExecutionPolicy ? true : undefined,
     };
     // 라이브 토큰은 러너 1회 실행 기준 누적치 — Stormbreaker 연속 패스에서 다음 패스가
     // 0부터 다시 세도 표시가 뒤로 가지 않도록 이전 패스 최고치를 floor로 더한다.
@@ -2400,6 +2778,21 @@ export async function runMcpInvocation(
     // 접두해 본문/앵커 좌표계를 패스 전체에 걸쳐 단조로 유지한다. (continuousMode는 패스마다
     // 별도 assistant 메시지를 남기므로 제외 — 접두하면 내용이 중복된다)
     let partialFloor = "";
+    const observedOneSourceUrls = new Set<string>();
+    let observedOneToolEvidence = false;
+    let observedOneToolFailure = false;
+    const collectObservedSourceUrls = (value?: string) => {
+      if (!value || !oneTeamExecutionPolicy || observedOneSourceUrls.size >= 32) return;
+      for (const match of value.matchAll(/https:\/\/[^\s"'<>\\)\]]+/g)) {
+        if (observedOneSourceUrls.size >= 32) break;
+        try {
+          const parsed = new URL(match[0]);
+          if (parsed.protocol === "https:" && !parsed.username && !parsed.password) observedOneSourceUrls.add(parsed.href);
+        } catch {
+          // Tool output is untrusted text; malformed URLs are ignored.
+        }
+      }
+    };
     const runnerEvents = {
       onStatus: (status: string) => sink({ kind: "tool-use", status }),
       // A partial JSON fence cannot be safely sanitized. Restricted runs are
@@ -2410,8 +2803,20 @@ export async function runMcpInvocation(
         }
       },
       // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
-      onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean) =>
-        sink({ kind: "tool-use", tool: { name, args, result, id, isError } }),
+      onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean) => {
+        if (isError) observedOneToolFailure = true;
+        if (!isError) {
+          collectObservedSourceUrls(args);
+          collectObservedSourceUrls(result);
+          // Some provider runners emit a successful tool completion without
+          // echoing its result text back through this callback. The signed
+          // invocation event is still enough to admit an explicitly
+          // unverified deterministic fallback; file claims remain subject to
+          // the separate exact-result-folder filesystem seal below.
+          if (oneTeamExecutionPolicy && name.trim()) observedOneToolEvidence = true;
+        }
+        sink({ kind: "tool-use", tool: { name, args, result, id, isError } });
+      },
       // 라이브 누적 토큰 — 상태줄 "{N}s · {tokens} tokens" 실시간 갱신.
       onUsage: (tokens: number) => {
         liveUsageHigh = Math.max(liveUsageHigh, liveUsageFloor + tokens);
@@ -2459,7 +2864,7 @@ export async function runMcpInvocation(
       if (continuousMode) {
         // 이 턴의 완료된 결과를 즉시 별도 assistant 메시지로 남긴다 — 화면엔 새 말풍선이
         // 계속 이어 붙는 것처럼 보이고, 앱이 중간에 꺼져도 그때까지 기록은 남는다.
-        appendChatMessage(chat.id, "assistant", continuation.text);
+        appendChatMessage(chat.id, "assistant", redactOneAttachmentText(req, continuation.text));
         // 세션 워터마크 전진 — 다음 resume 턴이 방금 자기 답변을 gap으로 재주입하지 않게.
         if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind);
         sink({
@@ -2685,16 +3090,76 @@ export async function runMcpInvocation(
       displayText = appendAutomationSummary(displayText, automationPermissionRequiredText(locale));
     }
     try {
-      let surfaceParse = parseSurfaces(displayText);
-      if (surfaceParse.surfaces.length > 0 || surfaceParse.errors.length > 0) {
-        displayText =
-          surfaceParse.cleanedText.trim() ||
-          (locale === "ko"
-            ? "앱/패널 자동 생성은 꺼져 있습니다. 채팅 답변만 표시합니다."
-            : "Automatic App/workbench generation is disabled. Showing chat output only.");
+      const surfaceParse = parseSurfaces(displayText);
+      if (surfaceParse.diagnostics.some((diagnostic) => diagnostic.code === "surface-parse-failed")) {
+        displayText = locale === "ko"
+          ? "구조화 결과를 안전하게 검증할 수 없어 표시하지 않았습니다."
+          : "The structured result could not be safely validated, so it was not displayed.";
+      } else {
+        const parsedOneSurface = req.oneMode === true
+          && surfaceParse.errors.length === 0
+          && surfaceParse.surfaces.length === 1
+          ? sealOneLocalArtifactPaths(surfaceParse.surfaces[0].manifest, resolvedResultFolder)
+          : null;
+        const rawDeterministicOneSurface = req.oneMode === true
+          && oneTeamExecutionPolicy
+          ? buildOneSurfaceFromMarkdown({
+              // A model may append an invalid hidden Surface after an otherwise
+              // useful cited answer. The parser already removed that untrusted
+              // block; keep the clean visible Markdown eligible for the same
+              // deterministic, closed validator instead of discarding both.
+              markdown: surfaceParse.cleanedText.trim() || displayText,
+              fallbackTitle: chat.title,
+              taskPrompt: req.userPrompt,
+              observedSourceUrls: [...observedOneSourceUrls],
+              allowUncitedStructured: observedOneToolEvidence,
+            })
+          : null;
+        const deterministicOneSurface = rawDeterministicOneSurface
+          ? sealOneLocalArtifactPaths(rawDeterministicOneSurface, resolvedResultFolder)
+          : null;
+        const oneSurface = chooseOneSurfaceForDisplay(parsedOneSurface, deterministicOneSurface);
+        const usedDeterministicOneSurface = Boolean(
+          deterministicOneSurface && oneSurface === deterministicOneSurface,
+        );
+        if (oneSurface) {
+          sink({
+            kind: "surface",
+            surfaceId: `surface:${req.runId ?? chat.id}:1`,
+            surface: oneSurface,
+            runtimeAgentId,
+            agentName: agent.name,
+            role: "orchestrator",
+            tier: 1,
+            phase: "synthesize",
+          });
+        }
+        if (!oneSurface && observedOneToolFailure && oneTeamExecutionPolicy) {
+          displayText = locale === "ko"
+            ? "확인 과정 일부가 멈춰 결과를 확정하지 않았어요. 잠시 뒤 다시 맡겨주세요."
+            : "Part of the check stopped, so One did not finalize the result. Please try again shortly.";
+        } else if (usedDeterministicOneSurface && deterministicOneSurface) {
+          displayText = deterministicOneCompletionCopy(req.userPrompt, deterministicOneSurface, locale);
+        } else if (surfaceParse.surfaces.length > 0 || surfaceParse.errors.length > 0) {
+          displayText =
+            surfaceParse.cleanedText.trim() ||
+            (parsedOneSurface
+              ? locale === "ko"
+                ? "One이 구조화된 결과를 완성했습니다."
+                : "One completed a structured result."
+              : locale === "ko"
+                ? "앱/패널 자동 생성은 꺼져 있습니다. 채팅 답변만 표시합니다."
+                : "Automatic App/workbench generation is disabled. Showing chat output only.");
+        }
       }
-    } catch (err) {
-      console.error("[surface] parseSurfaces failed:", err);
+    } catch {
+      // Defensive fallback for failures outside an individual manifest. Never
+      // retain or log the rejected model body because it may contain a local
+      // path or another Main-private Surface transport value.
+      displayText = locale === "ko"
+        ? "구조화 결과를 안전하게 검증할 수 없어 표시하지 않았습니다."
+        : "The structured result could not be safely validated, so it was not displayed.";
+      console.error("[surface] parseSurfaces failed");
     }
     if (!req.agentAppMode || projectReadOnlyBoundary) {
       try {
@@ -2804,7 +3269,10 @@ export async function runMcpInvocation(
 
     // 다중 패스(비-continuousMode)면 이전 패스 전문을 접두 — 라이브에서 보이던 본문/도구
     // 앵커 좌표계가 final에서도 유지된다. 단일 패스는 floor가 비어 그대로.
-    const displayWithFloor = partialFloor ? `${partialFloor}\n${displayText}` : displayText;
+    const displayWithFloor = stripDanglingLanguageFence(redactOneAttachmentText(
+      req,
+      partialFloor ? `${partialFloor}\n${displayText}` : displayText,
+    ));
     if (!req.agentAppMode) {
       appendChatMessage(chat.id, "assistant", displayWithFloor);
       // 세션 워터마크 전진 — 이 kind의 세션은 방금 답변까지 봤다. 다음 resume 턴의

@@ -5376,7 +5376,7 @@ button[data-toggle-state="on"] {
 
 .rd .hub-card-head {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) minmax(0, max-content);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 10px;
   align-items: start;
 }
@@ -5417,9 +5417,8 @@ button[data-toggle-state="on"] {
 }
 
 .rd .hub-card-title {
-  display: -webkit-box;
+  display: block;
   min-width: 0;
-  overflow: hidden;
   color: var(--rd-ink);
   font-family: var(--rd-f-display);
   font-size: 21px;
@@ -5427,8 +5426,6 @@ button[data-toggle-state="on"] {
   line-height: 1.12;
   letter-spacing: 0;
   overflow-wrap: anywhere;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
 }
 
 .rd .hub-card-author {
@@ -5452,6 +5449,66 @@ button[data-toggle-state="on"] {
   text-overflow: ellipsis;
   text-align: center;
   line-height: 1.25;
+}
+
+/* 호출 가격은 제목 폭을 먹는 문장이 아니라 작은 숫자 표식으로 보인다.
+   전체 24시간/크레딧 조건은 hover와 keyboard focus 모두에서 같은 툴팁으로 제공한다. */
+.rd .hub-credit-orb-wrap {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border-radius: 999px;
+  outline: none;
+}
+
+.rd .hub-credit-orb {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid color-mix(in oklch, var(--rd-ok) 32%, var(--rd-hair));
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--rd-ok) 13%, var(--rd-surface));
+  color: color-mix(in oklch, var(--rd-ok) 74%, var(--rd-ink));
+  font-family: var(--rd-f-mono);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.rd .hub-credit-orb-wrap:focus-visible .hub-credit-orb {
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--rd-ok) 20%, transparent);
+}
+
+.rd .hub-credit-tooltip {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 7px);
+  right: 0;
+  width: max-content;
+  max-width: min(220px, 70vw);
+  padding: 7px 9px;
+  border: 1px solid var(--rd-hair-2);
+  border-radius: 8px;
+  background: var(--rd-ink);
+  box-shadow: 0 8px 24px color-mix(in oklch, var(--rd-ink) 16%, transparent);
+  color: var(--rd-surface);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.rd .hub-credit-orb-wrap:hover .hub-credit-tooltip,
+.rd .hub-credit-orb-wrap:focus-visible .hub-credit-tooltip {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .rd .hub-card-copy {
@@ -5541,6 +5598,11 @@ button[data-toggle-state="on"] {
     width: max-content;
     max-width: 100%;
     justify-self: start;
+  }
+
+  .rd .hub-credit-orb-wrap {
+    grid-column: 1 / -1;
+    justify-self: end;
   }
 }
 

@@ -81,8 +81,13 @@ export type GrokAuthSource = "oauth" | "api-key" | "unavailable";
 
 export async function grokAuthSource(): Promise<GrokAuthSource> {
   if (grokOAuthReady()) return "oauth";
-  if (await hasEnvVar("XAI_API_KEY")) return "api-key";
-  if (await hasEnvVar("GROK_API_KEY")) return "api-key";
+  try {
+    if (await hasEnvVar("XAI_API_KEY")) return "api-key";
+    if (await hasEnvVar("GROK_API_KEY")) return "api-key";
+  } catch {
+    // A locked or temporarily unavailable OS vault means the API-key-backed
+    // provider is not ready. It must not make an unrelated text run fail.
+  }
   try {
     const raw = fs.readFileSync(path.join(os.homedir(), ".grok/user-settings.json"), "utf8");
     const settings = JSON.parse(raw) as { apiKey?: unknown };
@@ -138,8 +143,15 @@ export async function isProviderReady(provider: MultimodalProvider): Promise<boo
   }
   // 나노바나나는 agy 키리스가 우선이지만 GEMINI_API_KEY 폴백도 허용(trex와 동일).
   if (provider.envKeys.length === 0) return true; // 키 불필요 엔진(이론상 CLI 미등록)
-  const checks = await Promise.all(provider.envKeys.map((key) => hasEnvVar(key)));
-  return checks.every(Boolean);
+  try {
+    const checks = await Promise.all(provider.envKeys.map((key) => hasEnvVar(key)));
+    return checks.every(Boolean);
+  } catch {
+    // Provider availability is optional execution context. Treat a locked or
+    // unavailable credential vault exactly like a missing key so plain text
+    // conversations and local subscription runtimes can continue.
+    return false;
+  }
 }
 
 export interface ResolvedProvider {
