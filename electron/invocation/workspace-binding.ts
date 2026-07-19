@@ -155,18 +155,25 @@ export function invocationWorkspaceBindingsEqual(
   );
 }
 
-/**
- * Normalize the standard Desktop permission contract at a remote entry point.
- *
- * A paired phone is a remote Desktop surface, not a reduced-capability
- * runtime. The Desktop process still owns the authenticated pairing, selected
- * workspace, approval prompts, and every tool's own confirmation policy. An
- * omitted or malformed value remains fail-closed to read, but valid write and
- * full requests must reach that same Desktop authority unchanged.
- */
-export function normalizeRemoteInvocationPermission(
-  permission: unknown,
-): "read" | "write" | "full" {
-  if (permission === "write" || permission === "full") return permission;
-  return "read";
+export function enforceMobileReadOnlyPermission(permission: unknown): "read" {
+  if (permission === undefined || permission === "read") return "read";
+  throw new Error(
+    "Mobile can run read-only chats for now. Start write or full-access work on Desktop.",
+  );
+}
+
+export function isMobileReadRuntimeAllowed(kind: string): boolean {
+  // BYOK and Ollama receive text/images over their API protocols and do not
+  // inherit a local CLI's filesystem/config/plugin authority. CLI runtimes stay
+  // blocked until a release-gated host denial probe proves the same boundary.
+  return kind === "byok" || kind === "ollama";
+}
+
+export class MobileReadRuntimeBoundaryError extends Error {
+  readonly code = "mobile-runtime-not-read-sandboxed";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "MobileReadRuntimeBoundaryError";
+  }
 }

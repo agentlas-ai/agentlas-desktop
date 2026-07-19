@@ -33,7 +33,7 @@ import { invocationService } from "../invocation/service";
 import {
   captureMobileOneInvocationBinding,
   captureInvocationWorkspaceBinding,
-  normalizeRemoteInvocationPermission,
+  enforceMobileReadOnlyPermission,
 } from "../invocation/workspace-binding";
 import {
   claimPendingConfirmationAnswer,
@@ -677,7 +677,7 @@ export function enforceMobileInvocationPermissionBoundary(
 ): McpInvocationRequest {
   return {
     ...invocation,
-    permissions: normalizeRemoteInvocationPermission(invocation.permissions),
+    permissions: enforceMobileReadOnlyPermission(invocation.permissions),
   };
 }
 
@@ -734,7 +734,7 @@ function mobileOneStartParams(request: MobileBridgeRpcRequest): {
   if (userPrompt.trim().length === 0) {
     throw new TypeError("one.invoke.start userPrompt must contain visible text");
   }
-  const permissions = normalizeRemoteInvocationPermission(
+  const permissions = enforceMobileReadOnlyPermission(
     optionalEnum(params, "permissions", ["read", "write", "full"] as const),
   );
   const images = optionalImages(params);

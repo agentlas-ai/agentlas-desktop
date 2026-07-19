@@ -25,7 +25,11 @@ import {
 } from "../runtime/workload-routing";
 import { pickRunner } from "../runtime/selection";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
-import { revalidateInvocationWorkspaceBinding } from "../invocation/workspace-binding";
+import {
+  isMobileReadRuntimeAllowed,
+  MobileReadRuntimeBoundaryError,
+  revalidateInvocationWorkspaceBinding,
+} from "../invocation/workspace-binding";
 import { stripReplyMemoryEventsReadOnly } from "../memory/curator";
 import { STORMBREAKER_LOOP_PROTOCOL } from "../hephaestus/loop-engineering";
 import type { CoreStormbreakerHarness } from "../hephaestus/commands";
@@ -241,6 +245,11 @@ export async function runSwarmInvocation(
     // 히스토리 조회 실패가 스웜 실행 자체를 막아선 안 된다 — 맥락 없이 진행.
   }
   const coreHarnessPrompt = p.stormbreakerMode ? p.stormbreakerHarness?.system_prompt : undefined;
+  if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(p.active.kind)) {
+    throw new MobileReadRuntimeBoundaryError(
+      "This swarm runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
+    );
+  }
   const sameRuntime = (left: typeof p.active, right: typeof p.active) => (
     left.kind === right.kind && left.backend === right.backend && left.source === right.source
   );
@@ -249,7 +258,14 @@ export async function runSwarmInvocation(
   const runnableRuntimes = availableRuntimes.filter((runtime, index, list) => (
     list.findIndex((candidate) => sameRuntime(candidate, runtime)) === index && Boolean(pickRunner(runtime))
   ));
-  const candidateRuntimes = runnableRuntimes;
+  const candidateRuntimes = p.restrictedReadBoundary
+    ? runnableRuntimes.filter((runtime) => isMobileReadRuntimeAllowed(runtime.kind))
+    : runnableRuntimes;
+  if (p.restrictedReadBoundary && candidateRuntimes.length === 0) {
+    throw new MobileReadRuntimeBoundaryError(
+      "This swarm has no verified restricted read-only runtime. Select BYOK or Ollama on Desktop.",
+    );
+  }
   if (candidateRuntimes.length === 0) candidateRuntimes.push(p.active);
   const runtimeInventory = workloadRuntimeInventory(candidateRuntimes);
   const runId = p.req.runId ?? `swarm-${Date.now()}`;
@@ -451,6 +467,11 @@ export async function runSwarmInvocation(
       task: task.brief || task.title,
       includeOperational: false,
     });
+    if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
+      throw new MobileReadRuntimeBoundaryError(
+        "This swarm worker runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
+      );
+    }
     if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
     const result = await taskRunner.runner(
       {
@@ -561,6 +582,11 @@ export async function runSwarmInvocation(
       task: goal,
       includeOperational: false,
     });
+    if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
+      throw new MobileReadRuntimeBoundaryError(
+        "This swarm synthesis runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
+      );
+    }
     if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
     const result = await synthesisRunner.runner(
       {
