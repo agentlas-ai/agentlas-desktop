@@ -2548,7 +2548,7 @@ export async function runMcpInvocation(
       console.error("[architecture] recordFolderVisit failed:", err);
     }
   }
-  const memoryReadPath = !suppressMutableProjectContext && workingFolder && (
+  const memoryReadPath = workingFolder && !suppressMutableProjectContext && (
     activePath === workingFolder ||
     canReadActivatedFolderMemory(workingFolder, {
       permission: normalizedPermission,
