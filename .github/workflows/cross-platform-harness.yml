@@ -391,6 +391,7 @@ jobs:
         run: |
           npm run build
           npm run fetch:python
+          if [ "${{ runner.os }}" = "Windows" ]; then npm run fetch:node; fi
           npx --no-install electron-builder --dir --publish never --config.directories.output="${{ runner.temp }}/agentlas-package-smoke" -c.mac.identity=null -c.mac.notarize=false
           npm run test:packaged-agent-app-mcp -- "${{ runner.temp }}/agentlas-package-smoke"
       - name: Build and verify isolated macOS local-candidate Agent App MCP boundary

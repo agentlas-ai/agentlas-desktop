@@ -286,6 +286,7 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
 
   const releaseWorkflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
   const signedWorkflow = readFileSync(join(root, ".github", "workflows", "release-signed-mac.yml"), "utf8");
+  const harnessWorkflow = readFileSync(join(root, ".github", "workflows", "cross-platform-harness.yml"), "utf8");
   for (const [name, workflow] of [["release.yml", releaseWorkflow], ["release-signed-mac.yml", signedWorkflow]]) {
     const refs = [...workflow.matchAll(/HEPHAESTUS_REF:\s*([^\s]+)/g)].map((match) => match[1]);
     const commits = [...workflow.matchAll(/HEPHAESTUS_COMMIT:\s*([^\s]+)/g)].map((match) => match[1]);
@@ -304,6 +305,9 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
   }
   if (!/runner\.os == 'Windows'[\s\S]{0,160}npm run fetch:node/.test(releaseWorkflow)) {
     throw new Error("cross-platform release does not fetch the pinned Windows Node runtime");
+  }
+  if (!/runner\.os[^\n]*Windows[\s\S]{0,160}npm run fetch:node/.test(harnessWorkflow)) {
+    throw new Error("cross-platform package smoke does not fetch the pinned Windows Node runtime");
   }
   if (!signedWorkflow.includes("--public-allowlist") ||
       !signedWorkflow.includes("--verification-file=release/desktop-release-verification.json")) {
