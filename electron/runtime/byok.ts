@@ -139,6 +139,18 @@ async function runAnthropicMessages(
     headers["anthropic-beta"] = ANTHROPIC_1M_BETA;
   }
 
+  // Prompt caching: only real Anthropic honors `cache_control`. Marking the
+  // (large, stable) system prompt as a cache breakpoint bills cached input
+  // ~90% cheaper on hits and consumes far less of a subscription's usage
+  // limit; below the per-model minimum (~1024 tokens) Anthropic silently skips
+  // it, so it is a harmless no-op for short prompts. Third-party
+  // Anthropic-compatible endpoints (GLM/Kimi/DeepSeek) keep the plain string
+  // form — they cache automatically server-side and may reject the extra field.
+  const systemField =
+    backend === "anthropic"
+      ? [{ type: "text" as const, text: system, cache_control: { type: "ephemeral" as const } }]
+      : system;
+
   const resp = await fetch(`${baseUrl}/v1/messages`, {
     method: "POST",
     headers,
@@ -147,7 +159,7 @@ async function runAnthropicMessages(
       model,
       max_tokens: 8192,
       stream: true,
-      system,
+      system: systemField,
       messages,
     }),
   });
