@@ -283,6 +283,9 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
   if (!baseBuilderConfig.includes("from: build-resources/node-runtime")) {
     throw new Error("electron-builder.yml is missing the private Windows Node runtime");
   }
+  if (!baseBuilderConfig.includes("from: build-resources/node-runtime/node_modules")) {
+    throw new Error("electron-builder.yml does not preserve the private Windows npm module tree");
+  }
 
   const releaseWorkflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
   const signedWorkflow = readFileSync(join(root, ".github", "workflows", "release-signed-mac.yml"), "utf8");

@@ -232,6 +232,13 @@ win:
       filter:
         - "**/*"
         - "!.gitkeep"
+    # electron-builder intentionally refuses to traverse a FileSet whose root
+    # child is named node_modules. Copy the immutable official Node distribution's
+    # module tree from that directory as its own FileSet so npm/Corepack survive.
+    - from: build-resources/node-runtime/node_modules
+      to: node-runtime/node_modules
+      filter:
+        - "**/*"
   target:
     - target: nsis
       arch:
