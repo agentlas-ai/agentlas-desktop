@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.56 — 2026-07-20
+## 0.8.57 — 2026-07-20
 
 ### Added
 
@@ -38,6 +38,8 @@
   surface and gives One a minimal full-width workspace.
 - Agent Hub credit metadata no longer competes with agent titles for horizontal
   space.
+- One keeps its automatic team policy while preserving the mobile read-boundary
+  release check across saved agent-group routes.
 
 Agentlas OS v1.1.50 remains pinned at
 5fc22464c1db33dabc0d4de2170053d1584b5682.

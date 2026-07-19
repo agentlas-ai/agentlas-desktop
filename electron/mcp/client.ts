@@ -2244,59 +2244,61 @@ export async function runMcpInvocation(
   // ── Agent Group 오케스트레이션 ───────────────────────────
   // 저장된 그룹은 firm/division보다 상위의 라우팅 묶음이다. 실행 직전에
   // installed agents, org chart, live Hub catalog/bundle을 다시 풀어서 최신 경로로 호출한다.
-  if (!oneTeamExecutionPolicy && chat.agentGroupId) {
-    try {
-      const groupRun = await buildAgentGroupTaskForceSpecs({
-        groupId: chat.agentGroupId,
-        prompt: effectiveUserPrompt,
-        project: workingFolder,
-        locale,
-        sink,
-        signal,
-        localOnly: req.agentAppMode || req.hubMode === "local-only",
-      });
-      await runBorrowedTaskForceInvocation({
-        req: { ...req, userPrompt: effectiveUserPrompt },
-        chat,
-        orchestratorAgent: {
-          ...agent,
-          name: groupRun.orchestratorName || agent.name,
-          nameEn: groupRun.orchestratorName || agent.nameEn || agent.name,
-        },
-        taskForceName: groupRun.groupName,
-        taskForceKind: "agent-group",
-        taskForceSpecs: groupRun.specs,
-        priorHistory,
-        resolveGroupTaskForce: ({ groupId, prompt, signal: nestedSignal }) => buildAgentGroupTaskForceSpecs({
-          groupId,
-          prompt,
+  if (chat.agentGroupId) {
+    if (!oneTeamExecutionPolicy) {
+      try {
+        const groupRun = await buildAgentGroupTaskForceSpecs({
+          groupId: chat.agentGroupId,
+          prompt: effectiveUserPrompt,
           project: workingFolder,
           locale,
           sink,
-          signal: nestedSignal,
+          signal,
           localOnly: req.agentAppMode || req.hubMode === "local-only",
-        }),
-        active,
-        runtimes,
-        picked,
-        runtimeOverride: runtimeChoice.override,
-        workingFolder,
-        ...(workspaceBinding ? { workspaceBinding } : {}),
-        ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
-        mcpConfigPath,
-        mcpAllowedTools,
-        mcpCodexConfigArgs,
-        agentAppMcpRuntimeEnv: mcpRuntimeEnv,
-        onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
-        runnerEnv: runnerEnv.env,
-        locale,
-        sink,
-        signal,
-      });
-    } catch (err) {
-      sink({ kind: "error", error: invocationFailure(req, "agent-group-failed", err) });
+        });
+        await runBorrowedTaskForceInvocation({
+          req: { ...req, userPrompt: effectiveUserPrompt },
+          chat,
+          orchestratorAgent: {
+            ...agent,
+            name: groupRun.orchestratorName || agent.name,
+            nameEn: groupRun.orchestratorName || agent.nameEn || agent.name,
+          },
+          taskForceName: groupRun.groupName,
+          taskForceKind: "agent-group",
+          taskForceSpecs: groupRun.specs,
+          priorHistory,
+          resolveGroupTaskForce: ({ groupId, prompt, signal: nestedSignal }) => buildAgentGroupTaskForceSpecs({
+            groupId,
+            prompt,
+            project: workingFolder,
+            locale,
+            sink,
+            signal: nestedSignal,
+            localOnly: req.agentAppMode || req.hubMode === "local-only",
+          }),
+          active,
+          runtimes,
+          picked,
+          runtimeOverride: runtimeChoice.override,
+          workingFolder,
+          ...(workspaceBinding ? { workspaceBinding } : {}),
+          ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
+          mcpConfigPath,
+          mcpAllowedTools,
+          mcpCodexConfigArgs,
+          agentAppMcpRuntimeEnv: mcpRuntimeEnv,
+          onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
+          runnerEnv: runnerEnv.env,
+          locale,
+          sink,
+          signal,
+        });
+      } catch (err) {
+        sink({ kind: "error", error: invocationFailure(req, "agent-group-failed", err) });
+      }
+      return earlyResult();
     }
-    return earlyResult();
   }
 
   // ── Hub borrowed task force ─────────────────────────────────

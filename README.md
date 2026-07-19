@@ -69,7 +69,7 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
-- **2026-07-20 · v0.8.56 — Agentlas One** — One gives every request one simple
+- **2026-07-20 · v0.8.57 — Agentlas One** — One gives every request one simple
   starting point, then quietly assembles the smallest useful team, keeps the
   work moving, and returns a structured result instead of an implementation
   log. Approved preferences, reusable experience, measured improvements,
