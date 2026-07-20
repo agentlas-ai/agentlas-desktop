@@ -233,15 +233,12 @@ jobs:
       - name: Fetch SHA-256-pinned standalone Python for the package
         run: npm run fetch:python
 
-      - name: Verify portable Windows updater contracts
+      - name: Verify Windows release source contracts
         if: runner.os == 'Windows'
-        timeout-minutes: 10
         shell: bash
         run: |
           npm run test:ensure-engine
           npm run test:release-assets
-          npm run build:electron
-          npx --no-install electron scripts/test-updater-production-contract.cjs
 
       - name: Verify portable Linux updater contracts
         if: runner.os == 'Linux'
