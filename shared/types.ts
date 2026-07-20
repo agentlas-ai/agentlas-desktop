@@ -22,6 +22,16 @@ import type {
   OneFeatureIntroState,
 } from "./one-feature-intro";
 import type {
+  CompleteOneOnboardingInput,
+  LimitOneOnboardingProviderInput,
+  OneOnboardingExecutionAuthorization,
+  OneOnboardingState,
+  ProvisionOneOnboardingStarterTeamInput,
+  ReopenOneOnboardingProviderInput,
+  UpdateOneOnboardingInput,
+  VerifyOneOnboardingProviderInput,
+} from "./one-onboarding";
+import type {
   GetOneActivationStateInput,
   OneActivationState,
   ResolveOneActivationConcernInput,
@@ -960,6 +970,8 @@ export interface AgentGroupMemberSnapshot {
   runtimeLabel?: InstalledAgent["runtimeLabel"];
   entityKind?: string;
   routingStatus?: string | null;
+  /** Exact immutable Hub bundle pin. Saved groups fail closed if this version is unavailable. */
+  packageHash?: string;
 }
 
 export interface AgentGroupMember {
@@ -5341,6 +5353,16 @@ export interface AgentlasIpc {
     getState: () => Promise<OneFeatureIntroState>;
     acknowledge: (input: AcknowledgeOneFeatureIntroInput) => Promise<OneFeatureIntroState>;
     defer: (input: DeferOneFeatureIntroInput) => Promise<OneFeatureIntroState>;
+  };
+  oneOnboarding: {
+    getState: () => Promise<OneOnboardingState>;
+    update: (input: UpdateOneOnboardingInput) => Promise<OneOnboardingState>;
+    verifyProvider: (input: VerifyOneOnboardingProviderInput) => Promise<OneOnboardingState>;
+    chooseLimited: (input: LimitOneOnboardingProviderInput) => Promise<OneOnboardingState>;
+    reopenProvider: (input: ReopenOneOnboardingProviderInput) => Promise<OneOnboardingState>;
+    getExecutionAuthorization: () => Promise<OneOnboardingExecutionAuthorization>;
+    provisionStarterTeam: (input: ProvisionOneOnboardingStarterTeamInput) => Promise<OneOnboardingState>;
+    complete: (input: CompleteOneOnboardingInput) => Promise<OneOnboardingState>;
   };
   /** Main-owned Desktop-first activation; renderer never owns completion. */
   oneActivation: {

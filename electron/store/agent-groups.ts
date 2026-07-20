@@ -40,6 +40,8 @@ export interface AgentGroupRuntimeMember {
   directive: string;
   source: AgentGroupMemberSource;
   entityKind?: HubGroupEntityKind;
+  /** Exact Hub release selected when this saved group was created. */
+  packageHash?: string;
   routeLabel: string;
   warnings: AgentGroupResolvedMember["warnings"];
   installedAgentId?: string;
@@ -584,6 +586,7 @@ export async function resolveAgentGroupForRuntime(
         directive: `You are the Agentlas Hub specialist "${hub.nameEn || hub.name || slug}". ${hub.taglineEn || hub.tagline || ""}`.trim(),
         source: member.source,
         entityKind: hubEntityKindForListing(hub),
+        packageHash: member.snapshot.packageHash,
         routeLabel: "Hub",
         warnings: [],
       });

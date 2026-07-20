@@ -195,6 +195,14 @@ import type {
   OneArtifactBindingRequestV1,
   OneArtifactPreviewRevokeV1,
 } from "../shared/types";
+import type {
+  CompleteOneOnboardingInput,
+  LimitOneOnboardingProviderInput,
+  ProvisionOneOnboardingStarterTeamInput,
+  ReopenOneOnboardingProviderInput,
+  UpdateOneOnboardingInput,
+  VerifyOneOnboardingProviderInput,
+} from "../shared/one-onboarding";
 import { resolveExperiencePackCreateIpcInput } from "./experience/access";
 import { getExperienceHubCatalog } from "./experience/hub-catalog";
 import {
@@ -379,6 +387,16 @@ import {
   deferOneFeatureIntro,
   getOneFeatureIntroState,
 } from "./one/feature-intro";
+import {
+  completeOneOnboarding,
+  getOneOnboardingExecutionAuthorization,
+  getOneOnboardingState,
+  limitOneOnboardingProvider,
+  provisionOneOnboardingStarterTeam,
+  reopenOneOnboardingProvider,
+  updateOneOnboarding,
+  verifyOneOnboardingProvider,
+} from "./one/onboarding";
 import {
   deleteOneMemoryAsset,
   deleteOneMemoryCandidate,
@@ -2982,6 +3000,21 @@ export function registerIpcHandlers(): void {
     acknowledgeOneFeatureIntro(input));
   ipcMain.handle("oneFeatureIntro:defer", (_e, input: DeferOneFeatureIntroInput) =>
     deferOneFeatureIntro(input));
+  ipcMain.handle("oneOnboarding:getState", () => getOneOnboardingState());
+  ipcMain.handle("oneOnboarding:update", (_e, input: UpdateOneOnboardingInput) =>
+    updateOneOnboarding(input));
+  ipcMain.handle("oneOnboarding:verifyProvider", (_e, input: VerifyOneOnboardingProviderInput) =>
+    verifyOneOnboardingProvider(input));
+  ipcMain.handle("oneOnboarding:chooseLimited", (_e, input: LimitOneOnboardingProviderInput) =>
+    limitOneOnboardingProvider(input));
+  ipcMain.handle("oneOnboarding:reopenProvider", (_e, input: ReopenOneOnboardingProviderInput) =>
+    reopenOneOnboardingProvider(input));
+  ipcMain.handle("oneOnboarding:getExecutionAuthorization", () =>
+    getOneOnboardingExecutionAuthorization());
+  ipcMain.handle("oneOnboarding:provisionStarterTeam", (_e, input: ProvisionOneOnboardingStarterTeamInput) =>
+    provisionOneOnboardingStarterTeam(input));
+  ipcMain.handle("oneOnboarding:complete", (_e, input: CompleteOneOnboardingInput) =>
+    completeOneOnboarding(input));
   ipcMain.handle("oneActivation:getState", (_e, input) => getOneActivationState(input));
   ipcMain.handle("oneActivation:resolveConcern", (_e, input) => resolveOneActivationConcern(input));
   ipcMain.handle("oneActivation:resolveWork", (_e, input) => resolveOneActivationWork(input));

@@ -65,6 +65,10 @@ import {
 } from "./workforce-orchestrator";
 import { runSwarmInvocation } from "./swarm-run";
 import { getAgentGroup, listAgentGroups, resolveAgentGroupForRuntime } from "../store/agent-groups";
+import {
+  getOneOnboardingExecutionAuthorization,
+  oneOnboardingStarterGroupReference,
+} from "../one/onboarding";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
 import {
@@ -556,6 +560,62 @@ async function buildAgentGroupTaskForceSpecs(input: {
         : "Local Agent App runs never send browser input to Hub. Choose an agent group with local members only.",
     );
   }
+  const onboardingReference = oneOnboardingStarterGroupReference(input.groupId);
+  if (onboardingReference === "invalid") {
+    throw new Error(
+      input.locale === "ko"
+        ? "온보딩 스타터 팀이 변경되었습니다. 왼쪽 아래 Las 도움말에서 ‘스타터 팀 복구’를 누른 뒤 실행하세요."
+        : "The onboarding starter team changed. Open Las help at lower left and choose Repair starter team before running it.",
+    );
+  }
+  if (onboardingReference === "valid" && savedGroup) {
+    const authorization = await getOneOnboardingExecutionAuthorization();
+    if (!authorization.allowed || authorization.groupId !== savedGroup.id) {
+      throw new Error(
+        input.locale === "ko"
+          ? "선택한 AI 구독의 로그인과 실행 준비가 아직 확인되지 않았습니다. 설정에서 연결한 뒤 다시 시도하세요."
+          : "The selected AI subscription is not signed in and ready. Connect it in Settings, then retry.",
+      );
+    }
+    const specs: BorrowedAgentSpec[] = [];
+    const slugs = savedGroup.members.map((member) => member.hubSlug || member.agentSlug || "");
+    try {
+      for (const member of savedGroup.members) {
+        const slug = member.hubSlug || member.agentSlug || "";
+        const version = member.snapshot.packageHash;
+        const res = await hepCall(slug, [input.prompt], {
+          project: input.project ?? ".",
+          signal: input.signal,
+          version,
+        });
+        const [spec] = requireBorrowedAgentSpecs([slug], res.json ?? null, {
+          locale: input.locale,
+          transportOk: res.ok,
+          transportError: res.error || (res.exitCode == null ? "hub_call_failed" : `hub_exit_${res.exitCode}`),
+        });
+        if (!spec) throw new BorrowedAgentUnavailableError([slug], [`missing_directive:${slug}`], input.locale);
+        if (member.hubEntityKind === "team" && !spec.executionGraph) {
+          throw new BorrowedAgentUnavailableError([slug], ["team_execution_graph_unavailable"], input.locale);
+        }
+        specs.push({
+          ...spec,
+          entityKind: member.hubEntityKind === "team" ? "team" : "agent",
+          source: "hub",
+          routeLabel: "Hub · pinned onboarding starter",
+          warnings: [],
+        });
+      }
+    } catch (error) {
+      if (input.signal?.aborted || error instanceof BorrowedAgentUnavailableError) throw error;
+      throw new BorrowedAgentUnavailableError(slugs, ["hub_call_failed"], input.locale);
+    }
+    throwIfInvocationAborted(input.signal, input.locale);
+    return {
+      groupName: savedGroup.name,
+      orchestratorName: savedGroup.orchestratorName,
+      specs,
+    };
+  }
   const resolved = await resolveAgentGroupForRuntime(input.groupId, { allowHub: !input.localOnly });
   if (!resolved) {
     throw new Error(
@@ -585,19 +645,38 @@ async function buildAgentGroupTaskForceSpecs(input: {
     );
     throw new BorrowedAgentUnavailableError(slugs, reasons, input.locale);
   }
-  const hubSlugs = resolved.members.filter((member) => member.source === "hub").map((member) => member.slug);
+  const hubMembers = resolved.members.filter((member) => member.source === "hub");
+  const hubSlugs = hubMembers.map((member) => member.slug);
   let hubSpecs = new Map<string, BorrowedAgentSpec>();
   if (hubSlugs.length > 0) {
     try {
-      const res = await hepCall(hubSlugs.join(","), [input.prompt], {
-        project: input.project ?? ".",
-        signal: input.signal,
-      });
-      hubSpecs = new Map(requireBorrowedAgentSpecs(hubSlugs, res.json ?? null, {
-        locale: input.locale,
-        transportOk: res.ok,
-        transportError: res.error || (res.exitCode == null ? "hub_call_failed" : `hub_exit_${res.exitCode}`),
-      }).map((spec) => [spec.slug, spec]));
+      const hasPinnedVersion = hubMembers.some((member) => Boolean(member.packageHash));
+      if (hasPinnedVersion) {
+        const specs: BorrowedAgentSpec[] = [];
+        for (const member of hubMembers) {
+          const res = await hepCall(member.slug, [input.prompt], {
+            project: input.project ?? ".",
+            signal: input.signal,
+            version: member.packageHash,
+          });
+          specs.push(...requireBorrowedAgentSpecs([member.slug], res.json ?? null, {
+            locale: input.locale,
+            transportOk: res.ok,
+            transportError: res.error || (res.exitCode == null ? "hub_call_failed" : `hub_exit_${res.exitCode}`),
+          }));
+        }
+        hubSpecs = new Map(specs.map((spec) => [spec.slug, spec]));
+      } else {
+        const res = await hepCall(hubSlugs.join(","), [input.prompt], {
+          project: input.project ?? ".",
+          signal: input.signal,
+        });
+        hubSpecs = new Map(requireBorrowedAgentSpecs(hubSlugs, res.json ?? null, {
+          locale: input.locale,
+          transportOk: res.ok,
+          transportError: res.error || (res.exitCode == null ? "hub_call_failed" : `hub_exit_${res.exitCode}`),
+        }).map((spec) => [spec.slug, spec]));
+      }
     } catch (error) {
       if (input.signal?.aborted) throw error;
       if (error instanceof BorrowedAgentUnavailableError) throw error;

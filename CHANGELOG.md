@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.8.59 — 2026-07-20
+
+### Added
+
+- Added a seven-scene One first-run tutorial with beginner, CLI-familiar, and
+  expert paths, restart recovery, and a direct first-request handoff.
+- Added a mint Las character treatment and a local-device/firewall illustration
+  that explains the boundary between a web chat and work performed on the Mac.
+- Added an exact pinned starter organization with frontend, backend,
+  infrastructure, bug/security, and copy specialists.
+
+### Changed
+
+- AI-provider readiness and limited mode are now owned and revalidated by the
+  Desktop main process instead of renderer state.
+- Starter-team execution fails closed if a slug, package hash, provider, or
+  saved group no longer matches the completed onboarding state.
+- The exact onboarding starter releases use a non-expiring workspace grant and
+  zero Hub credits while remaining subject to runtime safety and availability.
+- Keyboard focus, screen-reader status, contrast, localization, sound controls,
+  and reduced-motion behavior now cover the complete tutorial flow.
+- Agentlas OS v1.1.50 remains pinned at
+  `5fc22464c1db33dabc0d4de2170053d1584b5682`. Source readiness does not prove
+  that a public Desktop release or update-feed entry exists.
+
 ## 0.8.58 — 2026-07-20
 
 ### Added

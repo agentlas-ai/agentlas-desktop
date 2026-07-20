@@ -97,6 +97,7 @@ import { OneBrandLockup, OneBrandMark } from "./OneBrand";
 import { OneAdaptiveResult } from "./OneAdaptiveResult";
 import { OneActivation } from "./OneActivation";
 import { OneFeatureIntro } from "./OneFeatureIntro";
+import { OneOnboarding } from "./OneOnboarding";
 import { OneMemorySheet } from "./OneMemorySheet";
 import { OneMemoryCandidateCard } from "./OneMemoryCandidateCard";
 import { OneProfileSheet } from "./OneProfileSheet";
@@ -407,6 +408,7 @@ export function OneShell() {
   const [oneExperienceReuse, setOneExperienceReuse] = useState<OneExperienceReuseState | null>(null);
   const [oneImprovementProofs, setOneImprovementProofs] = useState<OneImprovementProofReadState | null>(null);
   const [oneIntroState, setOneIntroState] = useState<OneFeatureIntroState | null>(null);
+  const [oneOnboardingVisible, setOneOnboardingVisible] = useState(true);
   const [oneActivationState, setOneActivationState] = useState<OneActivationState | null>(null);
   const [briefingSnapshot, setBriefingSnapshot] = useState<OneBriefingSnapshot | null>(null);
   const [briefingActionPacket, setBriefingActionPacket] = useState<OneBriefingActionPacket | null>(null);
@@ -1246,6 +1248,21 @@ export function OneShell() {
       setError(ko ? "Agentlas Desktop에 연결되지 않았습니다." : "Agentlas Desktop is not connected.");
       return;
     }
+    const onboardingState = await api.oneOnboarding.getState().catch(() => null);
+    const onboardingAuthorization = onboardingState?.status === "completed"
+      ? await api.oneOnboarding.getExecutionAuthorization().catch(() => null)
+      : null;
+    if (onboardingState?.status === "completed" && !onboardingAuthorization?.allowed) {
+      const teamChanged = onboardingAuthorization?.reason === "starter_team_changed";
+      setError(teamChanged
+        ? (ko
+            ? "스타터 팀이 삭제되거나 바뀌었어요. 왼쪽 아래 Las 도움말에서 ‘스타터 팀 복구’를 눌러 주세요."
+            : "Your starter team was deleted or changed. Open Las help at lower left and choose Repair starter team.")
+        : (ko
+            ? "실제 팀을 실행할 AI 연결이 확인되지 않았어요. 설정에서 로그인하거나 왼쪽 아래 Las 도움말에서 ‘AI 연결 바꾸기’를 눌러 주세요."
+            : "An AI connection for live team execution is not verified. Sign in from Settings or choose Change AI connection in Las help."));
+      return;
+    }
     const canContinueInPlace = Boolean(
       selected?.chatId && ["partial", "completed", "failed"].includes(selected.canonicalStatus ?? ""),
     );
@@ -1344,7 +1361,12 @@ export function OneShell() {
         await prepareOrRun(conversation.id, null, null, "conversation");
         return;
       }
-      const chat = await api.chats.create({ title: value.split(/\r?\n/)[0].slice(0, 72), taskMode: "conversation" });
+      const starterGroupId = onboardingAuthorization?.allowed ? onboardingAuthorization.groupId : null;
+      const chat = await api.chats.create({
+        title: value.split(/\r?\n/)[0].slice(0, 72),
+        taskMode: "conversation",
+        ...(starterGroupId ? { agentGroupId: starterGroupId } : {}),
+      });
       setConversation(chat);
       selectedConversationIdRef.current = chat.id;
       router.replace(`/one?chat=${encodeURIComponent(chat.id)}`);
@@ -1612,7 +1634,7 @@ export function OneShell() {
                 : activationBlocksIntro
                   ? "route_ineligible"
                 : null;
-  const introEligible = loaded && oneIntroPending && introBlockingCategory === null;
+  const introEligible = loaded && oneIntroPending && introBlockingCategory === null && !oneOnboardingVisible;
   const workHref = selected?.chatId
     ? `/chat?id=${encodeURIComponent(selected.chatId)}&task=${encodeURIComponent(selected.taskId)}`
     : "/dashboard";
@@ -2554,6 +2576,14 @@ export function OneShell() {
         valueClosureState={oneValueClosures}
         onValueClosureStateChange={handleValueClosuresChange}
         onManageImprovementAsset={manageImprovementAsset}
+      />
+      <OneOnboarding
+        locale={appLocale}
+        onVisibilityChange={setOneOnboardingVisible}
+        onComplete={(projectSeed) => {
+          setComposer(projectSeed);
+          window.setTimeout(() => composerInputRef.current?.focus(), 0);
+        }}
       />
       <OneFeatureIntro
         eligible={introEligible}

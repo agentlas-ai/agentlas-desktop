@@ -69,19 +69,16 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
-- **2026-07-20 · v0.8.58 — Agentlas One** — One gives every request one simple
-  starting point, then quietly assembles the smallest useful team, keeps the
-  work moving, and returns a structured result instead of an implementation
-  log. Approved preferences, reusable experience, measured improvements,
-  project knowledge, task history, and result references stay organized in the
-  local `~/.agentlas/one` workspace. Proactive briefings surface useful risks
-  and ready results before the user has to choose an agent or workflow. One uses
-  everyday language, adapts layouts to comparisons, plans, documents, files,
-  and media, and asks before any external action. Windows also carries a pinned
-  private Node.js runtime so Connect can install supported CLI providers on a
-  new PC without a separate Node or npm setup. This version publishes Desktop
-  installers for macOS, Windows, and Linux; mobile store builds are unchanged.
-  Agentlas OS v1.1.50 remains pinned at
+- **2026-07-20 · v0.8.59 — One first-run onboarding** — A seven-scene,
+  keyboard-accessible tutorial now introduces One in everyday language,
+  verifies or limits the selected AI provider through the Desktop main process,
+  and provisions a pinned five-agent starter team. The exact starter releases
+  are reusable at zero Hub credits for the workspace, while provider and team
+  integrity are checked again before execution. The tutorial uses a calm mint
+  visual system, a new local-firewall illustration, reduced-motion support,
+  explicit install consent, restart recovery, and a direct handoff into the
+  first request. This version publishes Desktop installers for macOS, Windows,
+  and Linux; mobile store builds are unchanged. Agentlas OS v1.1.50 remains pinned at
   `5fc22464c1db33dabc0d4de2170053d1584b5682`. This source does not prove a
   Desktop tag, public installer, or update-feed release.
 

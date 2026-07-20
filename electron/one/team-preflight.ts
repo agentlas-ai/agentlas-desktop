@@ -13,6 +13,7 @@ import {
 } from "../store/tasks";
 import { hasInvocationRunReceipt } from "../store/run-events";
 import { tryRecordOneDomainEvent } from "./domain-events";
+import { isCompletedOneOnboardingStarterGroup } from "./onboarding";
 import type {
   CanonicalTask,
   Chat,
@@ -587,6 +588,13 @@ export async function prepareOneTeamPreflight(
   const findTask = deps.findTaskForChat ?? findCanonicalTaskForChat;
   const existingTask = findTask(chat.id);
   validateTaskInput(input, existingTask);
+  // The user already assembled and explicitly confirmed this exact immutable
+  // Hub roster during onboarding. Do not replace that saved team with an
+  // unrelated automatic local-roster proposal; the invocation layer will
+  // re-resolve every pinned release and fail closed before execution.
+  if (chat.agentGroupId && isCompletedOneOnboardingStarterGroup(chat.agentGroupId)) {
+    return { kind: "not_required" };
+  }
 
   const promptDigest = sha256(input.userPrompt);
   const existing = readStore().state.proposals.find((record) =>
