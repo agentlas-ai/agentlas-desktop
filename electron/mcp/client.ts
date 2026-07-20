@@ -110,7 +110,7 @@ import { listInstalledServers as listInstalledMcpServers } from "../mcp-tools/re
 import { getAgentApp } from "../store/agent-apps";
 import { autoSelectMcpTools, buildMcpAutoSelectionPrompt } from "../mcp-tools/auto-select";
 import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
-import { buildAgentAppRunnerEnv, buildRunnerEnv } from "../runtime/env-resolver";
+import { buildAgentAppRunnerEnv, buildRunnerEnv, restrictedRunnerEnv } from "../runtime/env-resolver";
 import { agentRunCwd } from "../runtime/exec";
 import {
   normalizeRemoteInvocationPermission,
@@ -1307,11 +1307,13 @@ export async function runMcpInvocation(
   // Persist it at the first safe point after the exact local chat is resolved;
   // later orchestration branches keep calling this idempotent helper.
   persistUserMessage();
-  // Mobile, Desktop, and scheduled work all use the same runtime contract.
-  // Pairing, canonical workspace binding, and each Desktop tool's own
-  // confirmation remain the authority checks; there is no second reduced
-  // runtime or no-tool execution mode for a remote invocation.
+  // A paired phone and a direct scheduled run use the normal Desktop runtime
+  // contract. Multi-hop unattended orchestration has a narrower Main-authored
+  // boundary below so planner/worker/synthesis output cannot smuggle memory
+  // control events across hops without reducing direct Mobile/scheduled runs.
   const restrictedReadBoundary = false;
+  const restrictedOrchestrationBoundary =
+    executionContext?.source === "automation" && !canWrite;
   // An unattended read automation may work in its selected folder, but it must
   // not silently inherit mutable Desktop-only project notes, activated memory,
   // ontology, or project-scoped Experience. This is deliberately narrower than
@@ -1995,6 +1997,9 @@ export async function runMcpInvocation(
     : await buildRunnerEnv(agent, workingFolder ?? undefined, {
         restrictedReadBoundary,
       });
+  const orchestrationRunnerEnv = restrictedOrchestrationBoundary
+    ? restrictedRunnerEnv()
+    : runnerEnv.env;
   throwIfInvocationAborted(signal, locale);
   if (mcpRuntimeEnv && !req.agentAppMode) Object.assign(runnerEnv.env, mcpRuntimeEnv);
   // Runtime detection/routing can take time. Check the capability again at the
@@ -2082,8 +2087,8 @@ export async function runMcpInvocation(
               effort: active.effort ?? undefined,
               signal,
               permission: "read",
-              restrictedReadBoundary: restrictedReadBoundary || undefined,
-              env: runnerEnv.env,
+              restrictedReadBoundary: restrictedOrchestrationBoundary || undefined,
+              env: orchestrationRunnerEnv,
               untrustedNoTools: true,
               cwd: undefined,
               chatId: turn.invocationId,
@@ -2168,13 +2173,13 @@ export async function runMcpInvocation(
         runtimeOverride: runtimeChoice.override,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
-        ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
+        ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
         mcpConfigPath,
         mcpAllowedTools,
         mcpCodexConfigArgs,
         agentAppMcpRuntimeEnv: mcpRuntimeEnv,
         onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
-        runnerEnv: runnerEnv.env,
+        runnerEnv: orchestrationRunnerEnv,
         locale,
         sink,
         signal,
@@ -2251,13 +2256,13 @@ export async function runMcpInvocation(
         runtimeOverride: runtimeChoice.override,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
-        ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
+        ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
         mcpConfigPath,
         mcpAllowedTools,
         mcpCodexConfigArgs,
         agentAppMcpRuntimeEnv: mcpRuntimeEnv,
         onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
-        runnerEnv: runnerEnv.env,
+        runnerEnv: orchestrationRunnerEnv,
         locale,
         sink,
         signal,
@@ -2310,13 +2315,13 @@ export async function runMcpInvocation(
           runtimeOverride: runtimeChoice.override,
           workingFolder,
           ...(workspaceBinding ? { workspaceBinding } : {}),
-          ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
+          ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
           mcpConfigPath,
           mcpAllowedTools,
           mcpCodexConfigArgs,
           agentAppMcpRuntimeEnv: mcpRuntimeEnv,
           onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
-          runnerEnv: runnerEnv.env,
+          runnerEnv: orchestrationRunnerEnv,
           locale,
           sink,
           signal,
@@ -2347,13 +2352,13 @@ export async function runMcpInvocation(
         runtimeOverride: runtimeChoice.override,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
-        ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
+        ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
         mcpConfigPath,
         mcpAllowedTools,
         mcpCodexConfigArgs,
         agentAppMcpRuntimeEnv: mcpRuntimeEnv,
         onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
-        runnerEnv: runnerEnv.env,
+        runnerEnv: orchestrationRunnerEnv,
         locale,
         sink,
         signal,
@@ -2402,11 +2407,11 @@ export async function runMcpInvocation(
         runtimeOverride: runtimeChoice.override,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
-        ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
+        ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
         mcpConfigPath,
         mcpAllowedTools,
         mcpCodexConfigArgs,
-        runnerEnv: runnerEnv.env,
+        runnerEnv: orchestrationRunnerEnv,
         locale,
         sink,
         signal,
@@ -2443,13 +2448,13 @@ export async function runMcpInvocation(
             picked,
             workingFolder,
             ...(workspaceBinding ? { workspaceBinding } : {}),
-            ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
+            ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
             mcpConfigPath,
             mcpAllowedTools,
             mcpCodexConfigArgs,
             agentAppMcpRuntimeEnv: mcpRuntimeEnv,
             onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
-            runnerEnv: runnerEnv.env,
+            runnerEnv: orchestrationRunnerEnv,
             locale,
             sink,
             signal,
