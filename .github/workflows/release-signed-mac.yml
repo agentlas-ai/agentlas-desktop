@@ -157,6 +157,23 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "::notice::Releasing tag=$tag version=$version draft=$draft apply_web_env=$apply_web_env"
 
+      - name: Require successful common CI for the exact release source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source_sha="$(git rev-parse HEAD)"
+          run_id="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/cross-platform-harness.yml/runs?event=push&status=success&per_page=100" \
+              --jq ".workflow_runs[] | select(.head_sha == \"${source_sha}\") | .id" \
+              | head -n 1
+          )"
+          if [ -z "$run_id" ]; then
+            echo "::error::No successful Cross-platform Core harness run exists for release source $source_sha."
+            exit 1
+          fi
+          echo "::notice::Exact-source common CI passed: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+
       - name: Assert required release secrets
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -197,130 +214,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Dependency security audit
-        run: npm audit --audit-level=high
+      # Feature, migration, browser, and renderer regressions run once in the
+      # exact-source common CI above. Dependency audit and typecheck run once in
+      # the reusable release security preflight. This Mac job owns only
+      # deterministic release contracts and native updater/install behavior.
+      - name: Verify deterministic release contracts
+        run: npm run release:preflight
 
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Verify workforce runtime orchestration
-        run: |
-          # Full Core/Desktop vector parity stays in the private pre-release proof;
-          # the public Core runtime intentionally excludes benchmark fixtures.
-          npm run test:borrowed-task-force
-          npm run test:workload-routing
-          npm run test:build-workload-routing
-          npm run test:hephaestus-settings-migration
-          npm run test:auto-router-gates
-
-      - name: Verify embedded Stormbreaker harness
-        run: |
-          npm run test:stormbreaker-core:embedded
-          npm run test:stormbreaker-swarm
-
-      - name: Verify signed-resource Python cache boundary
-        run: npm run test:python-cache-boundary
-
-      - name: Verify Project Foundation write and privacy boundary
-        run: npm run test:release-agent-foundation-gate
-
-      # 실제 장애가 난 Browser 소유권/스크롤, 자동화 파이프/watchdog와
-      # typecheck만으로 못 잡았던 Hub·Runtime Readiness UI 회귀를 함께 막는다.
-      - name: Runtime, browser, and renderer UI regression gates
-        run: |
-          # OpenCrab/Site/Browser UI gates launch Playwright. Fresh runners do
-          # not have a browser cache, so install before the first UI test.
-          npx playwright install chromium
-          npm run test:automation-scheduler-guards
-          npm run test:automation-trigger-safety
-          npm run test:question-answer-receipt
-          npm run test:v52-automation-run-recovery
-          npm run test:v64-automation-permission-migration
-          npm run test:v53-hub-bookmark-sync
-          npm run test:updater-production
-          npm run test:updater-ui
-          npm run test:automations-store
-          npm run test:automation-result-contract
-          npm run test:runtime-stdin-epipe
-          npm run test:cli-version-parser
-          npm run test:hephaestus-status-version
-          npm run test:marketplace-cache
-          if node -e "process.exit(require('./package.json').agentlasReleaseScope?.mobile === true ? 0 : 1)"; then
-            npm run test:mobile-bridge-contract
-          else
-            echo "Mobile app delivery is excluded from this Desktop release; keeping the Desktop remote-execution boundary gate below."
-          fi
-          npm run test:mobile-execution-boundary
-          npm run test:runtime-resume-contract
-          npm run test:cli-image-attachments
-          npm run test:owned-agent-runtime-prompts
-          npm run test:borrowed-task-force
-          npm run test:mcp-auto-select
-          npm run test:mcp-secret-isolation
-          npm run test:opencrab-core
-          npm run test:opencrab-product
-          npm run test:opencrab-recovery-scrub
-          npm run test:mock-bridge-parity
-          npm run test:opencrab-ui
-          npm run test:build-session-contracts
-          npm run test:build-cloud-save-choice
-          npm run test:hephaestus-sync
-          npm run test:local-import
-          npm run test:site-studio
-          npm run test:chat-session-reset
-          npm run test:trex-locale
-          npm run test:browser-approval-gate
-          npm run test:browser-approval-concurrency
-          npm run test:browser-legacy-credential-scrub
-          npm run test:browser-profile-isolation
-          npm run test:browser-password-boundary
-          npm run test:browser-ui
-          npm run smoke:renderer-ui
-          node scripts/qa-provider-health-dashboard.cjs
-          node scripts/test-desktop-feature-surfaces.cjs --build-roster-sync-only
-          npm run test:hub-bookmark-ux
-          node scripts/test-hub-bookmark-ui.cjs
-          node scripts/test-runtime-readiness-ui.cjs
-          npm run test:independent-terminal-boundary
-          npm run test:grok-runtime-contract
-          npm run test:provider-health
-          npm run test:grok-auth-source
-          npm run test:oberon-provider-routing
-          npm run test:telegram-connect-atomicity
-          npm run test:telegram-api-timeout
-          npm run test:telegram-automation-report-fanout
-          npm run test:document-studio-draft-persistence
-          npm run test:prompts-start-failure-ui
-          npm run test:settings-resilience-ui
-          npm run test:engine-auto-toggle-ui
-          npm run test:trex-ui
-          npm run test:trex-attachments-ui
-          node scripts/qa-chat-input-routing.cjs
-          AGENTLAS_QA_LOCALE=en node scripts/qa-chat-input-routing.cjs
-          npm run test:all-routes-ui
-
-      - name: Experience Ontology release gates
-        env:
-          AGENTLAS_E2E: "1"
-        run: |
-          npm run build:electron
-          npx --no-install electron scripts/test-memory-agent-isolation.cjs
-          npx --no-install electron scripts/test-legacy-experience-reconciliation.cjs
-          npx --no-install electron scripts/test-v58-memory-curation-migration.cjs
-          npx --no-install electron scripts/test-v59-ontology-binding-migration.cjs
-          npm run test:terminal-ontology-loadout-feed
-          npx --no-install electron scripts/test-experience-p0.cjs
-          npx --no-install electron scripts/test-experience-taxonomy-parity.cjs
-          npx --no-install electron scripts/test-v55-experience-relations-migration.cjs
-          npx --no-install electron scripts/test-experience-relation-index.cjs
-          node scripts/test-portable-experience-hash-golden.cjs
-          npx --no-install electron scripts/test-v56-experience-cloud-migration.cjs
-          npx --no-install electron scripts/test-experience-cloud-exchange.cjs
-          npx --no-install electron scripts/test-mobile-ontology-bridge.cjs
-          npm run build:renderer
-          node scripts/test-desktop-feature-surfaces.cjs --memory-evolution-only
-          node scripts/test-desktop-feature-surfaces.cjs --experience-only
-          node scripts/test-ontology-feature-update.cjs
+      - name: Verify native macOS updater and install contracts
+        run: npm run test:updater-production
 
       - name: Record successful macOS release preflight
         run: echo "macOS release tests completed without publishing any release assets"

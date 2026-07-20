@@ -131,27 +131,20 @@ jobs:
           sudo chmod 4755 "$sandbox_path"
           echo "Configured Electron SUID sandbox helper: $sandbox_path"
           xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
-            npm run test:stormbreaker-core:embedded
-            npm run test:python-cache-boundary
-            npm run test:release-agent-foundation-gate
-            npm run test:v64-automation-permission-migration
-            npm run test:automations-store
-            npm run test:automation-result-contract
-            npm run test:automation-scheduler-guards
-            npm run test:mobile-execution-boundary
-            npm run test:runtime-resume-contract
-            npm run test:cli-image-attachments
-            npm run test:owned-agent-runtime-prompts
-            npm run test:borrowed-task-force
-            npm run test:workload-routing
-            npm run test:build-workload-routing
-            npm run test:hephaestus-settings-migration
-            npm run test:auto-router-gates
-            npm run test:opencrab-core
-            npm run test:opencrab-product
-            npm run test:opencrab-recovery-scrub
-            npm run test:mock-bridge-parity
-            npm run test:mcp-secret-isolation
+            # Build once. Historical feature and migration suites run in the
+            # exact-source common CI, not again in the release critical path.
+            npm run build:electron
+            HEPHAESTUS_RUNTIME_ROOT=Hephaestus npx --no-install electron scripts/test-stormbreaker-core-harness.cjs --installed
+            npx --no-install electron scripts/test-python-cache-boundary.cjs
+            npm run test:project-foundation-allocation:prepared
+            npm run test:mcp-resilience:prepared
+            npm run test:agent-app-runtime:prepared
+            npx --no-install electron scripts/test-mobile-execution-boundary.cjs
+            npx --no-install electron scripts/test-runtime-resume-contract.cjs
+            npx --no-install electron scripts/test-opencrab-core.cjs
+            node scripts/test-opencrab-product-contracts.cjs
+            npx --no-install electron scripts/test-opencrab-recovery-scrub.cjs
+            npx --no-install electron scripts/test-mcp-secret-isolation.cjs
           '
 
   build-cross-platform:
@@ -240,54 +233,21 @@ jobs:
       - name: Fetch SHA-256-pinned standalone Python for the package
         run: npm run fetch:python
 
-      - name: Dependency security audit
-        run: npm audit --audit-level=high
-
-      - name: Typecheck
-        if: runner.os == 'Linux'
-        run: npm run typecheck
-
-      - name: Build Cloud save choice contract
-        run: npm run test:build-cloud-save-choice
-
-      - name: Windows runtime and mobile contracts
+      - name: Verify portable Windows updater contracts
         if: runner.os == 'Windows'
-        timeout-minutes: 15
+        timeout-minutes: 10
         shell: bash
         run: |
-          # macOS trust, install-transaction, and update-lineage tests belong to
-          # mac-release-preflight. Non-Mac builders keep only the portable
-          # updater/source-asset contracts to avoid CRLF-sensitive Mac scripts.
           npm run test:ensure-engine
           npm run test:release-assets
           npm run build:electron
           npx --no-install electron scripts/test-updater-production-contract.cjs
-          npm run test:cli-version-parser
-          npm run test:stormbreaker-core:embedded
-          npm run test:stormbreaker-swarm
-          npm run test:python-cache-boundary
-          npm run test:release-agent-foundation-gate
-          npm run test:runtime-resume-contract
-          if node -e "process.exit(require('./package.json').agentlasReleaseScope?.mobile === true ? 0 : 1)"; then
-            npm run test:mobile-bridge-contract
-          else
-            echo "Mobile app delivery is excluded from this Desktop release; keeping the Desktop remote-execution boundary gate below."
-          fi
-          npm run test:mobile-execution-boundary
-          npm run test:v64-automation-permission-migration
-          npm run test:provider-health
 
-      - name: Linux migration and updater continuity gates
+      - name: Verify portable Linux updater contracts
         if: runner.os == 'Linux'
         env:
-          # Hosted Linux has no gnome-keyring/secret-service, so keytar-backed vault
-          # reads (mcp-auto-select) abort with "org.freedesktop.secrets was not
-          # provided". E2E mode uses an in-memory vault and skips keytar entirely.
           AGENTLAS_E2E: "1"
         run: |
-          # Electron 43 downloads its platform binary lazily. Install it before
-          # locating the Linux SUID helper, otherwise the first test downloads an
-          # unconfigured helper and Chromium aborts with SIGTRAP.
           node node_modules/electron/install.js
           sandbox_path="$(find node_modules/electron -maxdepth 4 -name chrome-sandbox -print -quit)"
           if [ -z "$sandbox_path" ]; then
@@ -297,71 +257,11 @@ jobs:
           sudo chown root:root "$sandbox_path"
           sudo chmod 4755 "$sandbox_path"
           echo "Configured Electron SUID sandbox helper: $sandbox_path"
-          # Run the electron gates inside a real X (xvfb) AND a session bus
-          # (dbus-run-session). Without a session bus, electron reads
-          # DBUS_SESSION_BUS_ADDRESS=disabled and aborts with
-          # "Unknown or unsupported transport 'disabled'". One session for all gates.
           xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
-            npm run test:v52-automation-run-recovery
-            npm run test:v64-automation-permission-migration
-            npm run test:automation-trigger-safety
-            npm run test:question-answer-receipt
-            npm run test:v53-hub-bookmark-sync
-            # The signed Mac preflight owns Mac trust/install/lineage. Linux
-            # checks only the portable updater and release-asset contracts.
             npm run test:ensure-engine
             npm run test:release-assets
             npm run build:electron
             npx --no-install electron scripts/test-updater-production-contract.cjs
-            npm run test:automations-store
-            npm run test:automation-result-contract
-            npm run test:cli-version-parser
-            npm run test:hephaestus-status-version
-            npm run test:python-cache-boundary
-            npm run test:release-agent-foundation-gate
-            npm run test:runtime-resume-contract
-            npm run test:marketplace-cache
-            npm run test:stormbreaker-core:embedded
-            npm run test:stormbreaker-swarm
-            npm run test:provider-health
-            if node -e "process.exit(require('./package.json').agentlasReleaseScope?.mobile === true ? 0 : 1)"; then
-              npm run test:mobile-bridge-contract
-            else
-              echo "Mobile app delivery is excluded from this Desktop release; keeping the Desktop remote-execution boundary gate below."
-            fi
-            npm run test:mobile-execution-boundary
-            npm run test:borrowed-task-force
-            npm run test:workload-routing
-            npm run test:build-workload-routing
-            npm run test:hephaestus-settings-migration
-            npm run test:auto-router-gates
-            npm run test:mcp-auto-select
-            npm run test:mcp-secret-isolation
-            # Experience Ontology: real Memory attribution, legacy recovery,
-            # privacy-safe candidate intake, exact Hub bindings, portable Cloud
-            # assets, and Desktop/Mobile/Terminal state boundaries.
-            npm run build:electron
-            npx --no-install electron scripts/test-memory-recall-injection.cjs
-            node scripts/test-ontology-ingest-wiring.cjs
-            npx --no-install electron scripts/test-sitemap-readable.cjs
-            npx --no-install electron scripts/test-memory-agent-isolation.cjs
-            npx --no-install electron scripts/test-legacy-experience-reconciliation.cjs
-            npx --no-install electron scripts/test-v58-memory-curation-migration.cjs
-            npx --no-install electron scripts/test-v59-ontology-binding-migration.cjs
-            npm run test:terminal-ontology-loadout-feed
-            npx --no-install electron scripts/test-experience-p0.cjs
-            npx --no-install electron scripts/test-experience-taxonomy-parity.cjs
-            npx --no-install electron scripts/test-v55-experience-relations-migration.cjs
-            npx --no-install electron scripts/test-experience-relation-index.cjs
-            node scripts/test-portable-experience-hash-golden.cjs
-            npx --no-install electron scripts/test-v56-experience-cloud-migration.cjs
-            npx --no-install electron scripts/test-experience-cloud-exchange.cjs
-            npx --no-install electron scripts/test-mobile-ontology-bridge.cjs
-            npm run test:opencrab-core
-            npm run test:opencrab-product
-            npm run test:mock-bridge-parity
-            npm run test:hephaestus-sync
-            npm run test:telegram-automation-report-fanout
           '
 
       - name: Build renderer + electron
