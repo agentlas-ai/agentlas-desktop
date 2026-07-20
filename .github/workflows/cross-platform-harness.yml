@@ -276,7 +276,7 @@ jobs:
       - name: Compile Desktop main process
         working-directory: agentlas-desktop
         run: npm run build:electron
-      - name: Verify Agentlas One contracts
+      - name: Verify public-source Agentlas One contracts
         if: runner.os == 'macOS'
         working-directory: agentlas-desktop
         shell: bash
@@ -287,7 +287,25 @@ jobs:
         # through). Windows adds no signal either — every platform-specific
         # assertion here is a 0600 permission check the scripts skip on win32,
         # so Windows runs a strict subset of what macOS already proves.
-        run: npm run test:one
+        # Four verifiers intentionally consume private sibling contract fixtures
+        # that are excluded from the public repository. The complete suite runs
+        # in the private release audit; public CI must never make those fixtures
+        # publishable merely to satisfy a checkout path.
+        run: |
+          node <<'NODE'
+          const { execSync } = require("node:child_process");
+          const scripts = require("./package.json").scripts;
+          const privateFixtureVerifiers = new Set([
+            "test:one-artifact-preview-ui",
+            "test:one-improvement-proof-runtime",
+            "test:one-surface-runtime-contract",
+            "test:one-value-closure-runtime",
+          ]);
+          const publicCommands = scripts["test:one"]
+            .split(" && ")
+            .filter((command) => ![...privateFixtureVerifiers].some((name) => command === `npm run ${name}`));
+          execSync(publicCommands.join(" && "), { stdio: "inherit", shell: true });
+          NODE
       - name: Verify workforce runtime orchestration on Linux
         if: runner.os == 'Linux'
         working-directory: agentlas-desktop
