@@ -113,8 +113,7 @@ import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
 import { buildAgentAppRunnerEnv, buildRunnerEnv } from "../runtime/env-resolver";
 import { agentRunCwd } from "../runtime/exec";
 import {
-  enforceMobileReadOnlyPermission,
-  isMobileReadRuntimeAllowed,
+  normalizeRemoteInvocationPermission,
   revalidateInvocationWorkspaceBinding,
   type InvocationWorkspaceBinding,
 } from "../invocation/workspace-binding";
@@ -1190,11 +1189,7 @@ export async function runMcpInvocation(
   }
   // Every caller, including legacy/direct integrations, crosses the same
   // fail-closed boundary. Unknown or omitted permission is read-only.
-  const normalizedPermission = workspaceBinding
-    ? enforceMobileReadOnlyPermission(req.permissions)
-    : req.permissions === "write" || req.permissions === "full"
-      ? req.permissions
-      : "read";
+  const normalizedPermission = normalizeRemoteInvocationPermission(req.permissions);
   if (req.permissions !== normalizedPermission) req = { ...req, permissions: normalizedPermission };
   const canWrite = normalizedPermission === "write" || normalizedPermission === "full";
   // A Mobile run consumes only the main-owned snapshot captured at the Bridge
@@ -1312,11 +1307,11 @@ export async function runMcpInvocation(
   // Persist it at the first safe point after the exact local chat is resolved;
   // later orchestration branches keep calling this idempotent helper.
   persistUserMessage();
-  // Mobile runs and unattended read automations cross a stronger boundary than
-  // an interactive Desktop read. Only Main derives this bit; it is never taken
-  // from the renderer request.
-  const restrictedReadBoundary =
-    Boolean(workspaceBinding) || (executionContext?.source === "automation" && !canWrite);
+  // Mobile, Desktop, and scheduled work all use the same runtime contract.
+  // Pairing, canonical workspace binding, and each Desktop tool's own
+  // confirmation remain the authority checks; there is no second reduced
+  // runtime or no-tool execution mode for a remote invocation.
+  const restrictedReadBoundary = false;
   // An unattended read automation may work in its selected folder, but it must
   // not silently inherit mutable Desktop-only project notes, activated memory,
   // ontology, or project-scoped Experience. This is deliberately narrower than
@@ -1765,53 +1760,6 @@ export async function runMcpInvocation(
 
   let active = runtimeChoice.active;
   let picked = runtimeChoice.picked;
-  if (restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
-    if (workspaceBinding) {
-      // Preserve the existing Mobile contract. If a verified read runtime is
-      // connected, switch visibly; otherwise stop at the Mobile boundary.
-      const readBoundaryFallback = runtimes
-        .filter((runtime) => isMobileReadRuntimeAllowed(runtime.kind))
-        .map((runtime) => ({ active: runtime, picked: pickRunner(runtime) }))
-        .find((candidate) => candidate.picked != null);
-      if (readBoundaryFallback?.picked) {
-        sink({
-          kind: "tool-use",
-          status:
-            locale === "ko"
-              ? `${active.kind} 런타임은 모바일 읽기 경계가 검증되지 않아 ${readBoundaryFallback.picked.label}(으)로 실행합니다.`
-              : `${active.kind} has no verified Mobile read boundary; running on ${readBoundaryFallback.picked.label} instead.`,
-        });
-        active = readBoundaryFallback.active;
-        picked = readBoundaryFallback.picked;
-      } else {
-        sink({
-          kind: "error",
-          error: {
-            code: "mobile-runtime-not-read-sandboxed",
-            message:
-              locale === "ko"
-                ? "이 런타임은 모바일 읽기 전용 경계가 검증되지 않았습니다. Desktop에서 BYOK 또는 Ollama를 연결하세요."
-                : "This runtime has no verified Mobile read-only boundary. Connect BYOK or Ollama on Desktop.",
-          },
-        });
-        return earlyResult();
-      }
-    } else {
-      // An unattended automation's pinned runtime is part of its authority
-      // contract. Never make it look successful by silently changing provider.
-      sink({
-        kind: "error",
-        error: {
-          code: "automation-runtime-not-read-sandboxed",
-          message:
-            locale === "ko"
-              ? `고정된 ${active.kind} 런타임은 무인 읽기 자동화의 격리 경계가 검증되지 않았습니다. 이 자동화의 런타임 또는 실행 권한을 변경하세요.`
-              : `The pinned ${active.kind} runtime has no verified boundary for unattended read automation. Change this automation's runtime or execution permission.`,
-        },
-      });
-      return earlyResult();
-    }
-  }
   if (boundOneTeamRuntime && oneTeamRuntimeBinding(active).digest !== boundOneTeamRuntime.digest) {
     sink({
       kind: "error",

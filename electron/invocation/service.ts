@@ -7,8 +7,8 @@ import {
 } from "../runtime/invocation-lifecycle";
 import { runMcpInvocation } from "../mcp/client";
 import {
-  enforceMobileReadOnlyPermission,
   invocationWorkspaceBindingsEqual,
+  normalizeRemoteInvocationPermission,
   type InvocationWorkspaceBinding,
 } from "./workspace-binding";
 import { pickLocale } from "../runtime/status-i18n";
@@ -622,7 +622,7 @@ export class InvocationService {
       ...requestWithoutMainContext,
       oneMode: requestedOneMode,
       ...(workspaceBinding
-        ? { permissions: enforceMobileReadOnlyPermission(req.permissions) }
+        ? { permissions: normalizeRemoteInvocationPermission(req.permissions) }
         : {}),
     };
     if (requestedOneMode) {
@@ -1510,7 +1510,7 @@ export class InvocationService {
       throw new Error("One attachments cannot be added through steering in v1; wait for the active run and send a new request");
     }
     const steerRequest = workspaceBinding
-      ? { ...req, permissions: enforceMobileReadOnlyPermission(req.permissions) }
+      ? { ...req, permissions: normalizeRemoteInvocationPermission(req.permissions) }
       : req;
     const active = [...this.activeRuns.entries()].find(([, record]) => record.chatId === req.chatId);
     if (expectedRunId && active?.[0] !== expectedRunId) {
