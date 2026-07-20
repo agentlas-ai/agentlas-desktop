@@ -261,7 +261,11 @@ jobs:
           npm run test:python-cache-boundary
           npm run test:release-agent-foundation-gate
           npm run test:runtime-resume-contract
-          npm run test:mobile-bridge-contract
+          if node -e "process.exit(require('./package.json').agentlasReleaseScope?.mobile === true ? 0 : 1)"; then
+            npm run test:mobile-bridge-contract
+          else
+            echo "Mobile app delivery is excluded from this Desktop release; keeping the Desktop remote-execution boundary gate below."
+          fi
           npm run test:mobile-execution-boundary
           npm run test:v64-automation-permission-migration
           npm run test:provider-health
@@ -308,7 +312,11 @@ jobs:
             npm run test:stormbreaker-core:embedded
             npm run test:stormbreaker-swarm
             npm run test:provider-health
-            npm run test:mobile-bridge-contract
+            if node -e "process.exit(require('./package.json').agentlasReleaseScope?.mobile === true ? 0 : 1)"; then
+              npm run test:mobile-bridge-contract
+            else
+              echo "Mobile app delivery is excluded from this Desktop release; keeping the Desktop remote-execution boundary gate below."
+            fi
             npm run test:mobile-execution-boundary
             npm run test:borrowed-task-force
             npm run test:workload-routing

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.57 — 2026-07-20
+## 0.8.58 — 2026-07-20
 
 ### Added
 
@@ -40,6 +40,8 @@
   space.
 - One keeps its automatic team policy while preserving the mobile read-boundary
   release check across saved agent-group routes.
+- Replies to ordinary in-progress questions remain valid without requiring the
+  Task-bound decision fields used only by One approval cards.
 
 Agentlas OS v1.1.50 remains pinned at
 5fc22464c1db33dabc0d4de2170053d1584b5682.

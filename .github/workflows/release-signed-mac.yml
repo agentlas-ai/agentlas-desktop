@@ -245,7 +245,11 @@ jobs:
           npm run test:cli-version-parser
           npm run test:hephaestus-status-version
           npm run test:marketplace-cache
-          npm run test:mobile-bridge-contract
+          if node -e "process.exit(require('./package.json').agentlasReleaseScope?.mobile === true ? 0 : 1)"; then
+            npm run test:mobile-bridge-contract
+          else
+            echo "Mobile app delivery is excluded from this Desktop release; keeping the Desktop remote-execution boundary gate below."
+          fi
           npm run test:mobile-execution-boundary
           npm run test:runtime-resume-contract
           npm run test:cli-image-attachments

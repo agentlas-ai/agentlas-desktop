@@ -1590,7 +1590,10 @@ function validateImageAttachments(images: unknown): string | null {
   return null;
 }
 
-function validateInvokeOptions(params: Record<string, unknown>): string | null {
+function validateInvokeOptions(
+  params: Record<string, unknown>,
+  allowObservedRunQuestion = false,
+): string | null {
   const borrowAgents = params.borrowAgents;
   if (
     borrowAgents !== undefined &&
@@ -1604,15 +1607,15 @@ function validateInvokeOptions(params: Record<string, unknown>): string | null {
   const hasDecisionTaskId = params.expectedTaskId !== undefined;
   const hasDecisionTaskVersion = params.expectedTaskVersion !== undefined;
   const hasDecisionContract = params.expectedDecisionContractVersion !== undefined;
-  const decisionBindingError = hasDecisionId
-    ? !hasDecisionTaskId || !hasDecisionTaskVersion || !hasDecisionContract
-      ? "Decision answers require expectedQuestionMessageId, expectedTaskId, expectedTaskVersion, and expectedDecisionContractVersion"
-      : params.expectedDecisionContractVersion !== ONE_DECISION_CONTRACT_VERSION
-        ? "expectedDecisionContractVersion is unsupported"
-        : null
-    : hasDecisionTaskId || hasDecisionTaskVersion || hasDecisionContract
-      ? "Decision Task preconditions require expectedQuestionMessageId"
-      : null;
+  const hasDecisionTaskBinding = hasDecisionTaskId || hasDecisionTaskVersion || hasDecisionContract;
+  let decisionBindingError: string | null = null;
+  if (hasDecisionTaskBinding || (hasDecisionId && !allowObservedRunQuestion)) {
+    if (!hasDecisionId || !hasDecisionTaskId || !hasDecisionTaskVersion || !hasDecisionContract) {
+      decisionBindingError = "Decision answers require expectedQuestionMessageId, expectedTaskId, expectedTaskVersion, and expectedDecisionContractVersion";
+    } else if (params.expectedDecisionContractVersion !== ONE_DECISION_CONTRACT_VERSION) {
+      decisionBindingError = "expectedDecisionContractVersion is unsupported";
+    }
+  }
   return firstError(
     validateImageAttachments(params.images),
     optionalString(params, "runId", 160),
@@ -1899,7 +1902,7 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents", "images", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
         return "invoke.steer contains unsupported fields";
       }
-      return firstError(validateInvokeOptions(params), requiredString(params, "expectedRunId", 160));
+      return firstError(validateInvokeOptions(params, true), requiredString(params, "expectedRunId", 160));
     case "invoke.cancel":
     case "invoke.receipt":
       return hasOnlyKeys(params, ["runId"]) ? requiredString(params, "runId", 160) : `${method} accepts only runId`;
