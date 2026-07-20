@@ -14,11 +14,12 @@ import { detectRuntimes } from "./detect";
 import { updateCli, type InstallableCli } from "./install-cli";
 import { tryAcquireRuntimeMaintenance } from "./run-slots";
 
-const CLI_KINDS: InstallableCli[] = ["claude-code", "codex", "gemini", "grok"];
+const CLI_KINDS: InstallableCli[] = ["claude-code", "codex", "gemini", "kimi", "grok"];
 const PACKAGE_BY_KIND: Record<InstallableCli, string> = {
   "claude-code": "@anthropic-ai/claude-code",
   codex: "@openai/codex",
   gemini: "@google/gemini-cli",
+  kimi: "@moonshot-ai/kimi-code",
   grok: "@xai-official/grok",
 };
 const CHECK_INTERVAL_MS = 24 * 60 * 60_000;

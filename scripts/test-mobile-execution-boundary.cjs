@@ -90,68 +90,17 @@ async function main() {
     canonicalPath: null,
     directoryIdentity: null,
   });
-  assert.equal(workspaceBoundary.isMobileReadRuntimeAllowed("codex"), false);
-  assert.equal(workspaceBoundary.isMobileReadRuntimeAllowed("claude-code"), false);
-  assert.equal(workspaceBoundary.isMobileReadRuntimeAllowed("gemini"), false);
-  assert.equal(workspaceBoundary.isMobileReadRuntimeAllowed("grok"), false);
-  assert.equal(workspaceBoundary.isMobileReadRuntimeAllowed("byok", "win32"), true);
-  assert.equal(workspaceBoundary.isMobileReadRuntimeAllowed("ollama", "win32"), true);
+  assert.equal(workspaceBoundary.normalizeRemoteInvocationPermission(undefined), "read");
+  assert.equal(workspaceBoundary.normalizeRemoteInvocationPermission("write"), "write");
+  assert.equal(workspaceBoundary.normalizeRemoteInvocationPermission("full"), "full");
 
-  // Multi-agent fan-out must not lose the main-authored boundary at a planner,
-  // worker, node, or synthesis hop. Keep this source-level invariant beside the
-  // execution test so a future orchestration refactor fails the release gate.
+  // There must be no reduced runtime path for a paired remote. This
+  // source-level check prevents the old mobile-only runtime refusal from
+  // silently returning during future orchestration work.
   const clientSource = fs.readFileSync(path.join(__dirname, "../electron/mcp/client.ts"), "utf8");
-  const borrowedSource = fs.readFileSync(path.join(__dirname, "../electron/mcp/borrowed-task-force.ts"), "utf8");
-  const swarmSource = fs.readFileSync(path.join(__dirname, "../electron/mcp/swarm-run.ts"), "utf8");
-  const firmSource = fs.readFileSync(path.join(__dirname, "../electron/mcp/firm-orchestrator.ts"), "utf8");
-
-  function assertClientBoundaryForwarded(startNeedle, endNeedle, label) {
-    const start = clientSource.indexOf(startNeedle);
-    const end = clientSource.indexOf(endNeedle, start + startNeedle.length);
-    assert.notEqual(start, -1, `${label} route must exist`);
-    assert.notEqual(end, -1, `${label} route boundary must remain identifiable`);
-    assert.match(
-      clientSource.slice(start, end),
-      /restrictedReadBoundary: true as const/,
-      `${label} must preserve the restricted read boundary`,
-    );
-  }
-
-  assertClientBoundaryForwarded("if (explicitWorkforceGoal) {", "if (req.taskForceTargets !== undefined) {", "workforce");
-  assertClientBoundaryForwarded("if (req.taskForceTargets !== undefined) {", "if (chat.agentGroupId) {", "task-force");
-  assertClientBoundaryForwarded("if (chat.agentGroupId) {", "if (borrowedAgentSlugs.length > 1", "group");
-  assertClientBoundaryForwarded("if (borrowedAgentSlugs.length > 1", "// ── 스웜 모드", "borrowed task-force");
-  assertClientBoundaryForwarded("// ── 스웜 모드", "// ── 멀티 에이전트 firm", "swarm");
-  assertClientBoundaryForwarded("// ── 멀티 에이전트 firm", "// 프로젝트 컨텍스트 노트", "firm");
-  assertClientBoundaryForwarded("const runnerReq = {", "const runnerEvents = {", "direct runner");
-  assert.equal(
-    (clientSource.match(/restrictedReadBoundary: true as const/g) || []).length,
-    7,
-    "client must pass the boundary into workforce, task-force, group, borrowed, swarm, firm, and direct runner paths",
-  );
-  assert.match(borrowedSource, /restrictedReadBoundary: p\.restrictedReadBoundary/);
-  assert.equal(
-    (borrowedSource.match(/\.\.\.taskForceRunnerBase\(p\)|\.\.\.runnerBase/g) || []).length >= 3,
-    true,
-    "borrowed planner, worker, and synthesis turns must share the restricted runner base",
-  );
-  assert.equal(
-    (swarmSource.match(/restrictedReadBoundary: p\.restrictedReadBoundary/g) || []).length,
-    2,
-    "swarm worker and synthesis turns must both preserve the boundary",
-  );
-  assert.match(firmSource, /restrictedReadBoundary: p\.restrictedReadBoundary/);
-  assert.equal(
-    (borrowedSource.match(/restrictedTaskForceText\(p,/g) || []).length >= 3,
-    true,
-    "borrowed planner, each worker result before synthesis, and final transcript must strip memory controls",
-  );
-  assert.equal(
-    (swarmSource.match(/restrictedSwarmText\(p,/g) || []).length >= 3,
-    true,
-    "swarm worker results before synthesis, synthesis output, and final transcript must strip memory controls",
-  );
-  assert.match(firmSource, /parseDelegations\(safeResultText\)/);
+  assert.match(clientSource, /normalizeRemoteInvocationPermission\(req\.permissions\)/);
+  assert.doesNotMatch(clientSource, /mobile-runtime-not-read-sandboxed/);
+  assert.doesNotMatch(clientSource, /automation-runtime-not-read-sandboxed/);
   assert.throws(
     () => workspaceBoundary.captureInvocationWorkspaceBinding(path.join(temp, "missing")),
     /unavailable/,
@@ -258,22 +207,24 @@ async function main() {
   assert.equal(serviceCalls[1].request.permissions, "read");
   serviceRuns[1].resolve({ stormbreakerContinueRequested: false });
   await waitUntil(() => service.activeChatIds().length === 0);
-  assert.throws(
-    () => service.start({
-      chatId: chat.id,
-      userPrompt: "Attempt a Mobile write",
-      permissions: "write",
-    }, activeBinding),
-    /read-only chats/,
-  );
-  assert.throws(
-    () => service.start({
-      chatId: chat.id,
-      userPrompt: "Attempt full Mobile access",
-      permissions: "full",
-    }, activeBinding),
-    /read-only chats/,
-  );
+  const mobileWrite = service.start({
+    chatId: chat.id,
+    userPrompt: "Edit through the paired Desktop",
+    permissions: "write",
+  }, activeBinding);
+  assert.equal(serviceCalls.at(-1).request.permissions, "write");
+  serviceRuns.at(-1).resolve({ stormbreakerContinueRequested: false });
+  await waitUntil(() => service.activeChatIds().length === 0);
+  const mobileFull = service.start({
+    chatId: chat.id,
+    userPrompt: "Run with the paired Desktop authority",
+    permissions: "full",
+  }, activeBinding);
+  assert.equal(serviceCalls.at(-1).request.permissions, "full");
+  serviceRuns.at(-1).resolve({ stormbreakerContinueRequested: false });
+  await waitUntil(() => service.activeChatIds().length === 0);
+  assert.ok(mobileWrite.runId);
+  assert.ok(mobileFull.runId);
   client.runMcpInvocation = actualRunMcpInvocation;
 
   // The actual client revalidates the captured directory and gates the runtime
@@ -432,91 +383,30 @@ async function main() {
   };
 
   chats.setChatWorkingFolder(chat.id, otherWorkspace);
-  for (const safeKind of ["byok", "ollama"]) {
-    runtimeKind = safeKind;
+  for (const remoteRuntime of ["byok", "ollama", "codex", "claude-code", "gemini", "grok"]) {
+    runtimeKind = remoteRuntime;
     const events = [];
     await client.runMcpInvocation({
       chatId: chat.id,
       userPrompt: `Inspect project folder: ${inferredWorkspace}`,
+      permissions: "full",
       locale: "en",
     }, (event) => events.push(event), undefined, activeBinding);
     assert.equal(events.some((event) => event.kind === "error"), false);
-    assert.equal(runnerRequests.at(-1).permission, "read");
-    assert.equal(runnerRequests.at(-1).restrictedReadBoundary, true);
+    assert.equal(runnerRequests.at(-1).permission, "full");
+    assert.equal(runnerRequests.at(-1).restrictedReadBoundary, undefined);
     assert.equal(
       runnerRequests.at(-1).cwd,
       canonicalWorkspace,
-      `${safeKind} must use the captured canonical workspace instead of the mutable chat row`,
+      `${remoteRuntime} must use the captured canonical workspace instead of the mutable chat row`,
     );
   }
   assert.equal(fs.existsSync(inferredWorkspace), false, "Mobile must never infer a workspace from prompt text");
-  assert.equal(envResolutionCalls.every((options) => options?.restrictedReadBoundary === true), true);
+  assert.equal(envResolutionCalls.every((options) => options?.restrictedReadBoundary !== true), true);
 
-  const countRows = (table) => store.getDb().prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
-  const memoryBefore = countRows("memory_entries");
-  const experienceBefore = countRows("experience_candidates");
-  const intakeBefore = countRows("experience_auto_intake_receipts");
-  const poisonEvents = [];
-  runtimeKind = "byok";
-  chats.setChatContinuousMode(chat.id, true);
-  const poisonRunnerStart = runnerRequests.length;
-  await client.runMcpInvocation({
-    chatId: chat.id,
-    userPrompt: "Attempt memory poison from Mobile read",
-    locale: "en",
-  }, (event) => poisonEvents.push(event), undefined, activeBinding);
-  chats.setChatContinuousMode(chat.id, false);
-  const poisonRunnerRequests = runnerRequests.slice(poisonRunnerStart);
-  assert.equal(poisonRunnerRequests.length, 2, "restricted Stormbreaker must sanitize between passes");
-  assert.doesNotMatch(
-    poisonRunnerRequests[1].userPrompt,
-    new RegExp(`${poisonSentinel}|${secondPoisonSentinel}|## Memory Events`),
-    "Memory blocks and dangling headings must never enter the next pass prompt",
-  );
-  assert.equal(countRows("memory_entries"), memoryBefore, "restricted read must not mutate Memory");
-  assert.equal(countRows("experience_candidates"), experienceBefore, "restricted read must not intake Experience");
-  assert.equal(countRows("experience_auto_intake_receipts"), intakeBefore, "restricted read must not write intake receipts");
-  assert.equal(fs.existsSync(path.join(workspace, ".agentlas")), false, "restricted read must not create project memory files");
-  assert.equal(
-    poisonEvents.some((event) => event.kind === "final" && /Visible restricted pass 2/.test(event.text ?? "")),
-    true,
-    "memory control blocks must be stripped from the visible reply",
-  );
-  assert.equal(
-    poisonEvents.some((event) => event.kind === "partial"),
-    false,
-    "restricted partials must never cross the wire before a complete fence can be sanitized",
-  );
-  assert.equal(
-    chats.listChatMessages(chat.id, 80).some(
-      (message) =>
-        message.text.includes(poisonSentinel) ||
-        message.text.includes(secondPoisonSentinel) ||
-        message.text.includes("## Memory Events"),
-    ),
-    false,
-    "poison must not persist in chat history",
-  );
-  assert.equal(restrictedHarnessCalls, 0, "restricted reads must not launch the local Stormbreaker harness");
-  assert.equal(restrictedSupervisorCalls, 0, "restricted reads must not launch the local Stormbreaker supervisor");
-  assert.doesNotMatch(poisonRunnerRequests.at(-1).systemPrompt, /## Memory Events/);
-
+  // A removed workspace must still fail closed before the Desktop runner gets
+  // it. Remote parity widens capabilities, never the Main-owned path binding.
   const allowedRunnerCalls = runnerRequests.length;
-  for (const unsafeKind of ["codex", "claude-code", "gemini", "grok"]) {
-    runtimeKind = unsafeKind;
-    const events = [];
-    await client.runMcpInvocation({
-      chatId: chat.id,
-      userPrompt: `Inspect with ${unsafeKind}`,
-      locale: "en",
-    }, (event) => events.push(event), undefined, activeBinding);
-    assert.equal(runnerRequests.length, allowedRunnerCalls, `${unsafeKind} must not reach its runner from Mobile`);
-    assert.equal(
-      events.some((event) => event.kind === "error" && event.error?.code === "mobile-runtime-not-read-sandboxed"),
-      true,
-    );
-  }
-
   const removedBeforeRunner = path.join(temp, "removed-before-runner");
   fs.mkdirSync(removedBeforeRunner);
   const removedBeforeRunnerBinding = workspaceBoundary.captureInvocationWorkspaceBinding(
@@ -549,8 +439,8 @@ async function main() {
   assert.equal(runnerRequests.at(-1).cwd, undefined, "a global Mobile chat must remain globally unbound");
   assert.equal(fs.existsSync(inferredWorkspace), false);
 
-  // Durable unattended read automations have the same restricted runtime
-  // contract even though they do not come through the Mobile workspace binding.
+  // Scheduled work uses the same Desktop runtime contract too; it is not
+  // silently substituted or reduced when it originated from Mobile.
   runtimeKind = "gemini";
   // A normal interactive division chat is not an unattended automation and
   // must retain the user's selected runtime.
@@ -563,24 +453,20 @@ async function main() {
   assert.equal(runnerRequests.at(-1).restrictedReadBoundary, undefined);
   const interactiveDivisionRunnerCalls = runnerRequests.length;
 
-  const unattendedUnsafeEvents = [];
+  const unattendedEvents = [];
   await client.runMcpInvocation({
     chatId: automationChat.id,
     userPrompt: "Unattended read-only audit",
     permissions: "read",
     locale: "en",
-  }, (event) => unattendedUnsafeEvents.push(event), undefined, undefined, { source: "automation" });
+  }, (event) => unattendedEvents.push(event), undefined, undefined, { source: "automation" });
   assert.equal(
     runnerRequests.length,
-    interactiveDivisionRunnerCalls,
-    "an unattended unsafe runtime must not reach its runner",
+    interactiveDivisionRunnerCalls + 1,
+    "scheduled work must reach the currently selected Desktop runtime",
   );
-  assert.equal(
-    unattendedUnsafeEvents.some(
-      (event) => event.kind === "error" && event.error?.code === "automation-runtime-not-read-sandboxed",
-    ),
-    true,
-  );
+  assert.equal(unattendedEvents.some((event) => event.kind === "error"), false);
+  assert.equal(runnerRequests.at(-1).restrictedReadBoundary, undefined);
   runtimeKind = "ollama";
   await client.runMcpInvocation({
     chatId: automationChat.id,
@@ -588,11 +474,11 @@ async function main() {
     permissions: "read",
     locale: "en",
   }, () => {}, undefined, undefined, { source: "automation" });
-  assert.equal(runnerRequests.at(-1).restrictedReadBoundary, true);
+  assert.equal(runnerRequests.at(-1).restrictedReadBoundary, undefined);
   assert.equal(runnerRequests.at(-1).permission, "read");
 
   console.log(
-    "Mobile execution boundary: PASS (canonical capture/revalidation, secret-free env, ephemeral read, runtime allowlist)",
+    "Mobile remote parity: PASS (canonical capture/revalidation and Desktop runtime/permission forwarding)",
   );
 }
 

@@ -169,6 +169,7 @@ export const CONTEXT_MANAGED_BY: Record<RuntimeKind, "runtime" | "agentlas"> = {
   "claude-code": "runtime",
   codex: "runtime",
   gemini: "runtime",
+  kimi: "runtime",
   grok: "runtime",
   cursor: "runtime",
   byok: "agentlas",
@@ -222,6 +223,9 @@ export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
   ],
   codex: [],
   gemini: [],
+  // Kimi Code membership chooses the live account model. Keep the model
+  // omitted unless the CLI itself exposes an authoritative inventory.
+  kimi: [],
   grok: [],
   cursor: [{ id: "auto", label: "Cursor Auto" }],
 };

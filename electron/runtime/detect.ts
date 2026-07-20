@@ -4,6 +4,7 @@ import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { probeCodex } from "./codex";
 import { readCodexModelInventory } from "./codex-models";
 import { probeGemini } from "./gemini";
+import { probeKimi } from "./kimi";
 import { probeGrok } from "./grok";
 import { probeCursor } from "./cursor";
 import { probeOllama } from "./ollama";
@@ -246,6 +247,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     cx,
     codexModelInventory,
     gm,
+    kimiCli,
     gr,
     cursor,
     ollama,
@@ -268,6 +270,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     probeCodex(),
     readCodexModelInventory(),
     probeGemini(),
+    probeKimi(),
     probeGrok(),
     probeCursor(),
     probeOllama(),
@@ -361,6 +364,15 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       backend: "google",
       source: gm.path,
       version: gm.version,
+      active: false,
+    });
+  }
+  if (kimiCli) {
+    list.push({
+      kind: "kimi",
+      backend: "kimi",
+      source: kimiCli.path,
+      version: kimiCli.version,
       active: false,
     });
   }

@@ -313,10 +313,13 @@ export interface BrowserApprovalRequest {
   summary: string; // 사람이 읽을 한 줄(무엇을 하려는지)
   target?: string;
 }
-export type BrowserApprovalResult = "approved" | "denied";
+export interface BrowserApprovalOptions {
+  signal?: AbortSignal;
+}
+export type BrowserApprovalResult = "approved" | "denied" | "cancelled";
 
 interface PendingApproval {
-  resolve: (v: BrowserPermissionDecision | "timeout") => void;
+  resolve: (v: BrowserPermissionDecision | "timeout" | "cancelled") => void;
   timer: NodeJS.Timeout;
   request: BrowserApprovalLifecycleRequest;
 }
@@ -336,7 +339,7 @@ export interface BrowserApprovalLifecycleRequest {
 export type BrowserApprovalLifecycleEvent =
   | ({ status: "pending" } & BrowserApprovalLifecycleRequest)
   | {
-      status: "resolved" | "expired";
+      status: "resolved" | "expired" | "cancelled";
       requestId: string;
       decision?: BrowserPermissionDecision;
     };
@@ -393,6 +396,7 @@ function emitToRenderer(channel: string, payload: unknown): void {
  */
 export async function browserRequestApproval(
   req: BrowserApprovalRequest,
+  options: BrowserApprovalOptions = {},
 ): Promise<BrowserApprovalResult> {
   const site = normalizeSite(req.site);
   if (!site) {
@@ -403,6 +407,16 @@ export async function browserRequestApproval(
       approval: "invalid-site",
     });
     return "denied";
+  }
+  if (options.signal?.aborted) {
+    logBrowserAction({
+      site,
+      action: req.actionType,
+      target: req.target,
+      result: "cancelled",
+      approval: "caller-cancelled",
+    });
+    return "cancelled";
   }
   const stored = getBrowserPermission(site, req.actionType);
   if (stored === "always") {
@@ -416,7 +430,8 @@ export async function browserRequestApproval(
 
   const requestId = randomUUID();
   const timeoutMs = approvalTimeoutMs();
-  const decision = await new Promise<BrowserPermissionDecision | "timeout">((resolve) => {
+  let abortListener: (() => void) | null = null;
+  const decision = await new Promise<BrowserPermissionDecision | "timeout" | "cancelled">((resolve) => {
     const createdAt = Date.now();
     const request: BrowserApprovalLifecycleRequest = {
       requestId,
@@ -428,6 +443,17 @@ export async function browserRequestApproval(
       expiresAt: createdAt + timeoutMs,
       allowAlways: req.actionType !== "payment" && req.actionType !== "unsafe-code",
     };
+    const cancel = () => {
+      const pending = pendingApprovals.get(requestId);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      pendingApprovals.delete(requestId);
+      // Reuse the existing renderer channel with an already-expired request so
+      // the sheet removes the matching queue item without widening preload IPC.
+      emitToRenderer(APPROVAL_CHANNEL, { ...request, expiresAt: 0 });
+      emitApprovalLifecycle({ status: "cancelled", requestId });
+      resolve("cancelled");
+    };
     const timer = setTimeout(() => {
       pendingApprovals.delete(requestId);
       emitApprovalLifecycle({ status: "expired", requestId });
@@ -436,7 +462,11 @@ export async function browserRequestApproval(
     pendingApprovals.set(requestId, { resolve, timer, request });
     emitToRenderer(APPROVAL_CHANNEL, request);
     emitApprovalLifecycle({ status: "pending", ...request });
+    abortListener = cancel;
+    options.signal?.addEventListener("abort", cancel, { once: true });
+    if (options.signal?.aborted) cancel();
   });
+  if (abortListener) options.signal?.removeEventListener("abort", abortListener);
 
   if (decision === "timeout") {
     logBrowserAction({
@@ -447,6 +477,16 @@ export async function browserRequestApproval(
       approval: "timeout",
     });
     return "denied";
+  }
+  if (decision === "cancelled") {
+    logBrowserAction({
+      site,
+      action: req.actionType,
+      target: req.target,
+      result: "cancelled",
+      approval: "caller-cancelled",
+    });
+    return "cancelled";
   }
 
   // 명시적 결정만 기억(once/payment는 저장 안 됨 — store에서 가드).

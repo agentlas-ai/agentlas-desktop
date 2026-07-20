@@ -229,11 +229,11 @@ const api: AgentlasIpc = {
     detect: (force?: boolean) => ipcRenderer.invoke("runtime:detect", force === true),
     setActive: (selection: RuntimeSelection) =>
       ipcRenderer.invoke("runtime:setActive", selection),
-    installCli: (kind: "claude-code" | "codex" | "gemini" | "grok") =>
+    installCli: (kind: "claude-code" | "codex" | "gemini" | "kimi" | "grok") =>
       ipcRenderer.invoke("runtime:installCli", kind),
-    openCliLogin: (kind: "claude-code" | "codex" | "gemini" | "grok") =>
+    openCliLogin: (kind: "claude-code" | "codex" | "gemini" | "kimi" | "grok") =>
       ipcRenderer.invoke("runtime:openCliLogin", kind),
-    updateCli: (kind: "claude-code" | "codex" | "gemini" | "grok") =>
+    updateCli: (kind: "claude-code" | "codex" | "gemini" | "kimi" | "grok") =>
       ipcRenderer.invoke("runtime:updateCli", kind),
     listCommands: () => ipcRenderer.invoke("runtime:listCommands"),
     listModels: (sel) => ipcRenderer.invoke("runtime:listModels", sel),

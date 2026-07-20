@@ -2752,11 +2752,11 @@ export async function runMcpInvocation(
     const runtimeUserPrompt = explicitBorrowUserPreamble
       ? `${explicitBorrowUserPreamble}\n\nRequest:\n${effectiveUserPrompt}`
       : effectiveUserPrompt;
-    // 세션 지원 러너(claude-code/codex/gemini)는 턴 컨텍스트를 분리 전달해 러너가
+    // 세션 지원 러너(claude-code/codex/gemini/kimi)는 턴 컨텍스트를 분리 전달해 러너가
     // 새 세션/resume에 맞게 배치한다. 그 외 stateless 러너는 기존처럼 시스템 프롬프트에 합친다.
     const turnContext = turnContextParts.filter((part) => part && part.trim()).join("\n\n");
     const sessionCapableRuntime =
-      active.kind === "claude-code" || active.kind === "codex" || active.kind === "gemini";
+      active.kind === "claude-code" || active.kind === "codex" || active.kind === "gemini" || active.kind === "kimi";
     const runnerReq = {
       systemPrompt: sessionCapableRuntime || !turnContext
         ? systemPrompt
@@ -2835,6 +2835,7 @@ export async function runMcpInvocation(
     const observedOneSourceUrls = new Set<string>();
     let observedOneToolEvidence = false;
     let observedOneToolFailure = false;
+    const oneToolFailureBlocksCompletion = () => Boolean(oneTeamExecutionPolicy && observedOneToolFailure);
     const collectObservedSourceUrls = (value?: string) => {
       if (!value || !oneTeamExecutionPolicy || observedOneSourceUrls.size >= 32) return;
       for (const match of value.matchAll(/https:\/\/[^\s"'<>\\)\]]+/g)) {
@@ -3176,7 +3177,10 @@ export async function runMcpInvocation(
         const usedDeterministicOneSurface = Boolean(
           deterministicOneSurface && oneSurface === deterministicOneSurface,
         );
-        if (oneSurface) {
+        // A pretty manifest cannot turn a failed required tool step into a
+        // successful One result. Keep the manifest out of the renderer and
+        // finish this invocation through the failure channel below.
+        if (oneSurface && !oneToolFailureBlocksCompletion()) {
           sink({
             kind: "surface",
             surfaceId: `surface:${req.runId ?? chat.id}:1`,
@@ -3188,10 +3192,10 @@ export async function runMcpInvocation(
             phase: "synthesize",
           });
         }
-        if (!oneSurface && observedOneToolFailure && oneTeamExecutionPolicy) {
+        if (oneToolFailureBlocksCompletion()) {
           displayText = locale === "ko"
-            ? "확인 과정 일부가 멈춰 결과를 확정하지 않았어요. 잠시 뒤 다시 맡겨주세요."
-            : "Part of the check stopped, so One did not finalize the result. Please try again shortly.";
+            ? "아직 끝내지 못했어요. 필요한 작업 하나가 멈췄습니다. 아래에서 다시 해달라고 말하면 이 대화에서 이어서 시도할게요."
+            : "This is not finished yet. One required step stopped. Ask me to try again below and I will continue in this conversation.";
         } else if (usedDeterministicOneSurface && deterministicOneSurface) {
           displayText = deterministicOneCompletionCopy(req.userPrompt, deterministicOneSurface, locale);
         } else if (surfaceParse.surfaces.length > 0 || surfaceParse.errors.length > 0) {
@@ -3332,6 +3336,24 @@ export async function runMcpInvocation(
       // 세션 워터마크 전진 — 이 kind의 세션은 방금 답변까지 봤다. 다음 resume 턴의
       // gap-replay가 자기 답변을 중복 주입하지 않고, 스웜/다른 러너 턴만 메우게 된다.
       if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind);
+    }
+    if (oneToolFailureBlocksCompletion()) {
+      sink({
+        kind: "error",
+        error: {
+          code: "one-required-step-failed",
+          message: locale === "ko"
+            ? "필요한 작업이 실패해 아직 완료하지 못했어요. 같은 대화에서 다시 시도할 수 있습니다."
+            : "A required step failed, so this is not complete yet. You can retry in the same conversation.",
+        },
+      });
+      return {
+        finalText: displayWithFloor,
+        tokens: result.tokens,
+        stormbreakerContinueRequested,
+        resultFolder: resolvedResultFolder,
+        workforcePrepareReceipt,
+      };
     }
     // 연속 패스에서 result.tokens는 마지막 패스만 반영 — 라이브 누적 최고치와 큰 쪽을 확정치로.
     sink({ kind: "final", text: displayWithFloor, tokens: Math.max(result.tokens ?? 0, liveUsageHigh) || undefined });

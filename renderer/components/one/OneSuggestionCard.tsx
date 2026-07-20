@@ -194,6 +194,11 @@ export function OneSuggestionCard({
         <div><dt>{ko ? "중지 방법" : "Stop control"}</dt><dd>{automation.preview.stopControl}</dd></div>
         <div><dt>{ko ? "외부 변경" : "External changes"}</dt><dd>{ko ? "매번 명시적 승인 필요" : "Explicit approval required every time"}</dd></div>
       </dl>}
+      {automation && <p className={styles.body}>
+        {ko
+          ? "이 제안을 보는 것만으로는 일정을 저장하거나 자동화를 켜거나 실행하지 않아요. 내가 직접 승인해야 시작됩니다."
+          : "Reviewing this proposal does not save a schedule, enable automation, or run it. Nothing starts until you approve it yourself."}
+      </p>}
       {hub && <div className={styles.boundaryBox}>
         <strong>{ko ? "내 파일과 기억은 공개 초안에 넣지 않아요" : "Your files and memories stay out of the public draft"}</strong>
         <span>{ko ? "공개 설명과 기본 구조만 새로 준비합니다. 고객 자료, 로그인 정보, 내부 문서, 대화 원문은 복사하지 않습니다." : "One creates only a new public description and basic structure. Customer data, sign-in information, internal documents, and conversations are not copied."}</span>

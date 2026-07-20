@@ -5,6 +5,7 @@ const vm = require("node:vm");
 const {
   BROWSER_APPROVAL_CLASSIFIER_SOURCE,
   BROWSER_APPROVAL_CONTEXT_SOURCE,
+  BROWSER_GATE_LIFECYCLE_SOURCE,
   BROWSER_CDP_OWNERSHIP_RUNTIME_SOURCE,
   browserCdpCommandFlag,
   browserCdpProcessMatches,
@@ -27,11 +28,46 @@ vm.runInNewContext(
 const extractCdpPageUrl = sandbox.__extractCdpPageUrl;
 const approvalContextUrl = sandbox.__approvalContextUrl;
 
+const lifecycleSandbox = { AbortController };
+vm.runInNewContext(
+  `${BROWSER_GATE_LIFECYCLE_SOURCE}\nglobalThis.__createGateLifecycle = createGateLifecycle; globalThis.__cancelledRequestId = cancelledRequestId;`,
+  lifecycleSandbox,
+);
+const lifecycle = lifecycleSandbox.__createGateLifecycle();
+const firstGate = lifecycle.begin("tool-1");
+assert.equal(lifecycle.size(), 1);
+assert.equal(
+  lifecycleSandbox.__cancelledRequestId({ method: "notifications/cancelled", params: { requestId: "tool-1" } }),
+  "tool-1",
+);
+assert.equal(lifecycle.cancel("tool-1"), true);
+assert.equal(firstGate.signal.aborted, true);
+assert.equal(lifecycle.settle("tool-1", firstGate), false, "a cancelled gate cannot later forward its action");
+const secondGate = lifecycle.begin("tool-2");
+assert.equal(lifecycle.settle("tool-2", secondGate), true);
+assert.equal(secondGate.signal.aborted, false);
+
 assert.equal(typeof classify, "function");
 assert.equal(classify("browser_click", { element: "Pay now" }), "payment");
 assert.equal(classify("browser_click", { element: "Publish post" }), "publish");
 assert.equal(classify("browser_click", { element: "Delete account" }), "delete");
 assert.equal(classify("browser_click", { element: "Send message" }), "send");
+assert.equal(classify("browser_click", { element: "New post" }), null);
+assert.equal(classify("browser_click", { element: "Create new post" }), null);
+assert.equal(classify("browser_click", { element: "Create a reel" }), null);
+assert.equal(classify("browser_click", { element: "새로운 게시물" }), null);
+assert.equal(classify("browser_click", { element: "컴퓨터에서 선택" }), null);
+assert.equal(
+  classify("browser_file_upload", { paths: ["/tmp/final-post.mp4"] }, "https://www.instagram.com/create/select/"),
+  null,
+  "staging a draft attachment must not be mistaken for final publishing",
+);
+assert.equal(
+  classify("browser_click", { element: "Like" }, "https://www.threads.com/@owner/post/example"),
+  null,
+  "a /post/ URL must not classify every click as publishing",
+);
+assert.equal(classify("browser_click", { element: "Share" }, "https://www.instagram.com/create/details/"), "send");
 assert.equal(
   classify("browser_click", { element: "Continue" }, "https://shop.test/checkout"),
   "payment",
@@ -92,6 +128,7 @@ assert.equal(
 const launcher = browserCdpLauncherSourceForTest();
 assert.ok(launcher.includes(BROWSER_APPROVAL_CLASSIFIER_SOURCE.trim()));
 assert.ok(launcher.includes(BROWSER_APPROVAL_CONTEXT_SOURCE.trim()));
+assert.ok(launcher.includes(BROWSER_GATE_LIFECYCLE_SOURCE.trim()));
 assert.ok(!launcher.includes("${BROWSER_APPROVAL_CLASSIFIER_SOURCE}"));
 assert.match(launcher, /path: '\/json\/list'/, "approval gate must re-read the live CDP page");
 assert.match(
@@ -139,6 +176,16 @@ assert.doesNotMatch(
   launcher,
   /child\.stdin\.write\(/,
   "browser launcher input forwarding must go through the guarded writer",
+);
+assert.match(
+  launcher,
+  /gateLifecycle\.cancel\(cancelledId\)/,
+  "MCP cancellation must abort an approval-gated request before forwarding",
+);
+assert.match(
+  launcher,
+  /gateLifecycle\.settle\(msg\.id, controller\)/,
+  "late approval results must be ignored after client cancellation",
 );
 
 const profile = "/Users/qa/Agentlas Profile";

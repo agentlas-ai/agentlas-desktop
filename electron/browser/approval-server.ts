@@ -40,6 +40,11 @@ export function startBrowserApprovalServer(): Promise<number> {
         res.writeHead(401).end("unauthorized");
         return;
       }
+      const controller = new AbortController();
+      req.once("aborted", () => controller.abort());
+      res.once("close", () => {
+        if (!res.writableEnded) controller.abort();
+      });
       void readBody(req).then(async (body) => {
         let parsed: { site?: string; actionType?: string; summary?: string; target?: string };
         try {
@@ -54,9 +59,11 @@ export function startBrowserApprovalServer(): Promise<number> {
             actionType: parsed.actionType ?? "action",
             summary: parsed.summary ?? "Approve browser action",
             target: parsed.target,
-          });
+          }, { signal: controller.signal });
+          if (controller.signal.aborted || res.destroyed) return;
           res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ decision }));
         } catch (err) {
+          if (controller.signal.aborted || res.destroyed) return;
           res
             .writeHead(500, { "content-type": "application/json" })
             .end(JSON.stringify({ decision: "denied", error: String(err) }));

@@ -15,6 +15,8 @@ const {
   MOBILE_BRIDGE_MAX_MESSAGE_BYTES,
   MOBILE_BRIDGE_PAIR_EXCHANGE_PATH,
   MOBILE_BRIDGE_WRITE_METHODS,
+  isMobileBridgeOneImprovementProofDto,
+  isMobileBridgeOneValueClosureDto,
   parseMobileBridgePairExchangeRequest,
   parseMobileBridgeRequest,
 } = require("../dist/shared/mobile-bridge.js");
@@ -50,18 +52,34 @@ const {
   projectMobileBridgeAutomation,
   projectMobileBridgeConfirmations,
   projectMobileBridgeHistory,
+  projectMobileBridgeOneBriefing,
+  projectMobileBridgeOneDecisions,
+  projectMobileBridgeOneDecisionsFromCurrent,
+  projectMobileBridgeOneImprovementProofsFromState,
+  projectMobileBridgeOneProfile,
+  projectMobileBridgeOneValueClosuresFromState,
+  projectMobileBridgeSnapshot,
+  isMobileBridgeOneDecisionDto,
 } = require("../dist/electron/mobile-bridge/projector.js");
+const {
+  isOneDecisionViewV1,
+  normalizeOneDecision,
+} = require("../dist/shared/one-decision.js");
 const {
   createMobileBridgeAuthority,
   enforceMobileInvocationPermissionBoundary,
   projectMobileBridgeInvocationEvent,
 } = require("../dist/electron/mobile-bridge/authority.js");
+const { adaptLegacySurfaceToOneV1 } = require("../dist/shared/one-surface.js");
 const {
   browserRequestApproval,
   browserResolveApproval,
   listPendingBrowserApprovals,
 } = require("../dist/electron/browser/connect.js");
-const { claimPendingConfirmationAnswer } = require("../dist/electron/confirm/index.js");
+const {
+  claimPendingConfirmationAnswer,
+  listPendingConfirmations,
+} = require("../dist/electron/confirm/index.js");
 const { initStore, getDb } = require("../dist/electron/store/db.js");
 const { createProject } = require("../dist/electron/store/projects.js");
 const {
@@ -70,6 +88,14 @@ const {
   getChat,
   getChatWorkingFolder,
 } = require("../dist/electron/store/chats.js");
+const {
+  findCanonicalTaskForChat,
+  getCanonicalTask,
+  setCanonicalTaskStatus,
+} = require("../dist/electron/store/tasks.js");
+const { invocationService } = require("../dist/electron/invocation/service.js");
+const oneValueClosureRuntime = require("../dist/electron/one/value-closure.js");
+const oneImprovementProofRuntime = require("../dist/electron/one/improvement-proof.js");
 const { createAgentGroup } = require("../dist/electron/store/agent-groups.js");
 const { upsertLocalTeamFirm } = require("../dist/electron/store/firms.js");
 const {
@@ -95,13 +121,49 @@ const {
 } = require("../dist/electron/mobile-bridge/runtime.js");
 const { WebSocket } = require("ws");
 
-function pairRequest(id, code, name = "Mason's iPhone") {
+const TEST_PAIRING_ATTEMPT_ID = "pairing_attempt_test_000000000001";
+const TEST_DEVICE_NONCE = "D".repeat(43);
+const TEST_PAIRING_ASSERTION = `${Buffer.from('{"t":"mobile_pair_assertion"}').toString("base64url")}.${"S".repeat(43)}`;
+const TEST_ACCOUNT_SUBJECT = `mps_${"A".repeat(43)}`;
+const TEST_RECEIPT_ID = `mpr_${"R".repeat(24)}`;
+const TEST_HOST_ID = "host_0123456789abcdef0123456789abcdef";
+
+function accountProof(hostId, pairingAttemptId = TEST_PAIRING_ATTEMPT_ID, overrides = {}) {
+  return {
+    hostId,
+    pairingAttemptId,
+    desktopAccountProof: `${Buffer.from('{"t":"mobile_pair_desktop_proof"}').toString("base64url")}.${"P".repeat(43)}`,
+    accountSubject: TEST_ACCOUNT_SUBJECT,
+    accountAuthorityOrigin: "https://agentlas.cloud",
+    expiresIn: 300,
+    ...overrides,
+  };
+}
+
+async function consumeSameAccountAssertion() {
+  return { accountSubject: TEST_ACCOUNT_SUBJECT, receiptId: TEST_RECEIPT_ID };
+}
+
+function pairingOptions(options = {}) {
+  return { consumePairingAssertion: consumeSameAccountAssertion, ...options };
+}
+
+function issueTestChallenge(manager, hostId = TEST_HOST_ID, pairingAttemptId = TEST_PAIRING_ATTEMPT_ID) {
+  return manager.issueChallenge(accountProof(hostId, pairingAttemptId));
+}
+
+function pairRequest(id, code, name = "Mason's iPhone", overrides = {}) {
   return {
     v: 1,
     type: "pair.exchange",
     id,
     code,
+    pairingAttemptId: TEST_PAIRING_ATTEMPT_ID,
+    deviceNonce: TEST_DEVICE_NONCE,
+    pairingAssertion: TEST_PAIRING_ASSERTION,
+    audience: "agentlas_desktop_mobile_pair",
     device: { name, platform: "ios", appVersion: "1.0.0" },
+    ...overrides,
   };
 }
 
@@ -192,6 +254,182 @@ function testAbsolutePathSanitization() {
   }
 }
 
+function testOneDeviceProjectionBoundary() {
+  const version = Date.parse("2026-07-18T09:00:00.000Z");
+  const projectedProfile = projectMobileBridgeOneProfile({
+    contractVersion: "1.0.0",
+    oneId: "one_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    version,
+    displayName: "Mason /Users/mason/private/profile.txt",
+    role: "Personal chief of staff",
+    profileContext: "Local-only context must never enter the device DTO.",
+    preferredLocale: "ko",
+    timeZone: "Asia/Seoul",
+    operatingPrinciples: [
+      {
+        id: "principle_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        content: "Show evidence before a recommendation.",
+        scope: "project",
+        scopeRef: "project_private_scope",
+        approvalSource: "explicit_user",
+        approvedAt: "2026-07-18T08:00:00.000Z",
+        enabled: true,
+        createdAt: "2026-07-18T08:00:00.000Z",
+        updatedAt: "2026-07-18T08:00:00.000Z",
+        disabledAt: null,
+      },
+      {
+        id: "principle_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        content: "Use token=supersecretvalue for every request.",
+        scope: "personal",
+        scopeRef: null,
+        approvalSource: "explicit_user",
+        approvedAt: "2026-07-18T08:30:00.000Z",
+        enabled: true,
+        createdAt: "2026-07-18T08:30:00.000Z",
+        updatedAt: "2026-07-18T08:30:00.000Z",
+        disabledAt: null,
+      },
+    ],
+    createdAt: "2026-07-18T08:00:00.000Z",
+    updatedAt: new Date(version).toISOString(),
+  });
+  assert.deepEqual(Object.keys(projectedProfile).sort(), [
+    "contractVersion",
+    "displayName",
+    "omittedOperatingPrincipleCount",
+    "oneId",
+    "operatingPrinciples",
+    "preferredLocale",
+    "role",
+    "timeZone",
+    "updatedAt",
+    "version",
+  ]);
+  assert.equal(projectedProfile.operatingPrinciples.length, 1);
+  assert.equal(projectedProfile.omittedOperatingPrincipleCount, 1);
+  assert.equal("scopeRef" in projectedProfile.operatingPrinciples[0], false);
+  const profileJson = JSON.stringify(projectedProfile);
+  assert.equal(profileJson.includes("profileContext"), false);
+  assert.equal(profileJson.includes("private_scope"), false);
+  assert.equal(profileJson.includes("/Users/mason"), false);
+  assert.equal(profileJson.includes("supersecretvalue"), false);
+
+  const projectedBriefing = projectMobileBridgeOneBriefing({
+    contractVersion: "1.0.0",
+    evaluatedAt: "2026-07-18T09:05:00.000Z",
+    preferences: {
+      cadence: "daily",
+      channels: ["in_app", "desktop_notification", "mobile_push"],
+      quietHours: { enabled: true, startHour: 22, endHour: 8 },
+      updatedAt: "2026-07-18T09:00:00.000Z",
+    },
+    candidate: {
+      contractVersion: "1.0.0",
+      candidateId: "briefing:project:test",
+      dedupeKey: "project-folder:test",
+      kind: "risk",
+      reasonCode: "project_folder_missing",
+      severity: 4,
+      source: {
+        kind: "project_folder",
+        refId: "project_test",
+        label: "Launch /Users/mason/private token=supersecretvalue",
+      },
+      detectedAt: "2026-07-18T09:00:00.000Z",
+      expiresAt: "2026-07-25T09:00:00.000Z",
+      confidence: { level: "high", basis: "A local boundary check ran." },
+      discovery: "Raw discovery prose is Main-only.",
+      impact: "Raw impact prose is Main-only.",
+      prepared: "Raw prepared prose is Main-only.",
+      decision: {
+        prompt: "Open it?",
+        acceptLabel: "Open project",
+        dismissLabel: "Later",
+      },
+      evidence: [{
+        label: "Connection check",
+        value: "/Users/mason/private/result.txt",
+        observedAt: "2026-07-18T09:00:00.000Z",
+        freshness: "fresh",
+      }],
+      preparedAction: {
+        kind: "open_project",
+        targetId: "project_test",
+        label: "Open token=supersecretvalue",
+        executionStarted: false,
+      },
+    },
+  });
+  assert.deepEqual(projectedBriefing.preferences.channels, ["in_app"]);
+  assert.deepEqual(Object.keys(projectedBriefing.candidate).sort(), [
+    "candidateId",
+    "confidence",
+    "contractVersion",
+    "detectedAt",
+    "expiresAt",
+    "kind",
+    "preparedAction",
+    "reasonCode",
+    "severity",
+    "source",
+  ]);
+  assert.equal(projectedBriefing.candidate.preparedAction.executionStarted, false);
+  const briefingJson = JSON.stringify(projectedBriefing);
+  for (const forbidden of [
+    "/Users/mason",
+    "supersecretvalue",
+    "discovery",
+    "impact",
+    "prepared\"",
+    "evidence",
+    "basis",
+    "prompt",
+    "mobile_push",
+    "desktop_notification",
+  ]) {
+    assert.equal(briefingJson.includes(forbidden), false, `One Briefing leaked ${forbidden}`);
+  }
+  assert.throws(() => projectMobileBridgeOneBriefing({
+    contractVersion: "1.0.0",
+    evaluatedAt: "2026-07-18T09:05:00.000Z",
+    preferences: {
+      cadence: "important_only",
+      channels: ["in_app"],
+      quietHours: { enabled: false, startHour: 22, endHour: 8 },
+      updatedAt: "2026-07-18T09:00:00.000Z",
+    },
+    candidate: {
+      contractVersion: "1.0.0",
+      candidateId: "briefing:project:swapped",
+      dedupeKey: "project-folder:swapped",
+      kind: "risk",
+      reasonCode: "project_folder_missing",
+      severity: 4,
+      source: { kind: "project_folder", refId: "project_test", label: "Launch Plan" },
+      detectedAt: "2026-07-18T09:00:00.000Z",
+      expiresAt: "2026-07-25T09:00:00.000Z",
+      confidence: { level: "high", basis: "Desktop boundary check" },
+      discovery: "Folder missing",
+      impact: "Context unavailable",
+      prepared: "Review only",
+      decision: { prompt: "Review?", acceptLabel: "Review", dismissLabel: "Later" },
+      evidence: [{
+        label: "Project",
+        value: "Launch Plan",
+        observedAt: "2026-07-18T09:00:00.000Z",
+        freshness: "fresh",
+      }],
+      preparedAction: {
+        kind: "open_project",
+        targetId: "project_other",
+        label: "Open project",
+        executionStarted: false,
+      },
+    },
+  }), /Invalid One Briefing snapshot/);
+}
+
 function testControlFenceProjection() {
   const fence = '<<agentlas-ask>>{"question":"Publish now?","options":[{"label":"Yes"},{"label":"No"}]}<</agentlas-ask>>';
   assert.equal(stripMobileBridgeControlFences(fence), "");
@@ -226,8 +464,8 @@ function testUtf16Sanitization() {
   );
 }
 
-function expectPairingError(fn, code) {
-  assert.throws(fn, (error) => error && error.code === code);
+async function expectPairingError(fn, code) {
+  await assert.rejects(fn, (error) => error && error.code === code);
 }
 
 function makeManifest(hostId, port = 43123) {
@@ -388,6 +626,60 @@ async function testWireParsers() {
   assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("workspace.clear"), true);
   assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("runtime.setActive"), true);
   assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("groups.create"), true);
+  assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("one.invoke.start"), true);
+  const validOneStart = {
+    v: 1,
+    type: "request",
+    id: "one_start_valid",
+    idempotencyKey: "one-start-valid",
+    method: "one.invoke.start",
+    params: {
+      schemaVersion: 1,
+      userPrompt: "Compare these two launch options.",
+      permissions: "full",
+      images: [{ mediaType: "image/png", name: "launch.png", data: "iVBORw0KGgo=" }],
+    },
+  };
+  assert.equal(parseMobileBridgeRequest(validOneStart).ok, true);
+  for (const [field, value] of Object.entries({
+    agentId: "agent_hostile",
+    firmId: "firm_hostile",
+    agentGroupId: "group_hostile",
+    projectId: "project_hostile",
+    sessionRouting: true,
+    hubMode: "auto",
+    borrowAgents: ["paid-hub-agent"],
+    oneMode: false,
+    taskIntent: "task",
+    taskId: "task_hostile",
+    expectedTaskId: "task_hostile",
+    oneProfileContext: "injected profile",
+    oneMemoryUseOnceRef: "memory_hostile",
+    runId: "run_hostile",
+  })) {
+    assert.equal(
+      parseMobileBridgeRequest({
+        ...validOneStart,
+        id: `one_start_hostile_${field}`,
+        idempotencyKey: `one-start-hostile-${field}`,
+        params: { ...validOneStart.params, [field]: value },
+      }).ok,
+      false,
+      `Mobile One must reject renderer-owned ${field}`,
+    );
+  }
+  assert.equal(parseMobileBridgeRequest({
+    ...validOneStart,
+    id: "one_start_wrong_schema",
+    idempotencyKey: "one-start-wrong-schema",
+    params: { schemaVersion: 2, userPrompt: "Hello" },
+  }).ok, false);
+  assert.equal(parseMobileBridgeRequest({
+    ...validOneStart,
+    id: "one_start_empty_prompt",
+    idempotencyKey: "one-start-empty-prompt",
+    params: { schemaVersion: 1, userPrompt: "   " },
+  }).ok, false);
   assert.equal(parseMobileBridgeRequest({
     v: 1,
     type: "request",
@@ -437,6 +729,50 @@ async function testWireParsers() {
     method: "workspace.setProject",
     params: { chatId: "chat_1", projectId: "project_1" },
   }).ok, true);
+  assert.equal(parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "task_accept_result",
+    idempotencyKey: "task-accept-stable",
+    method: "tasks.acceptResult",
+    params: {
+      taskId: "task_chat_1",
+      expectedVersion: 1,
+      expectedRunId: "run_1",
+    },
+  }).ok, true);
+  assert.equal(parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "task_accept_result_missing_version",
+    idempotencyKey: "task-accept-invalid",
+    method: "tasks.acceptResult",
+    params: { taskId: "task_chat_1", expectedRunId: "run_1" },
+  }).ok, false);
+  assert.equal(parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "task_latest_result",
+    method: "tasks.latestResult",
+    params: {
+      taskId: "task_chat_1",
+      chatId: "chat_1",
+      expectedVersion: 1,
+    },
+  }).ok, true);
+  assert.equal(MOBILE_BRIDGE_WRITE_METHODS.has("tasks.latestResult"), false);
+  assert.equal(parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "task_latest_result_extra",
+    method: "tasks.latestResult",
+    params: {
+      taskId: "task_chat_1",
+      chatId: "chat_1",
+      expectedVersion: 1,
+      runId: "client_must_not_choose_the_run",
+    },
+  }).ok, false);
   assert.equal(parseMobileBridgeRequest({
     v: 1,
     type: "request",
@@ -524,9 +860,42 @@ async function testWireParsers() {
       userPrompt: "Change direction",
       expectedRunId: "run_1",
       expectedQuestionMessageId: "message_question_1",
+      expectedTaskId: "task_question_1",
+      expectedTaskVersion: 1,
+      expectedDecisionContractVersion: "1.0.0",
     },
   });
   assert.equal(steerWithObservedRun.ok, true);
+
+  const decisionWithoutTaskPrecondition = parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "decision_without_task_precondition",
+    method: "invoke.start",
+    params: {
+      chatId: "chat_1",
+      userPrompt: "Approve",
+      expectedQuestionMessageId: "message_question_1",
+    },
+  });
+  assert.equal(decisionWithoutTaskPrecondition.ok, false);
+  assert.equal(decisionWithoutTaskPrecondition.error.error.code, "invalid_params");
+
+  const taskPreconditionWithoutDecision = parseMobileBridgeRequest({
+    v: 1,
+    type: "request",
+    id: "task_precondition_without_decision",
+    method: "invoke.start",
+    params: {
+      chatId: "chat_1",
+      userPrompt: "Hello",
+      expectedTaskId: "task_question_1",
+      expectedTaskVersion: 1,
+      expectedDecisionContractVersion: "1.0.0",
+    },
+  });
+  assert.equal(taskPreconditionWithoutDecision.ok, false);
+  assert.equal(taskPreconditionWithoutDecision.error.error.code, "invalid_params");
 
   const invocationWithComposerParity = parseMobileBridgeRequest({
     v: 1,
@@ -573,6 +942,14 @@ async function testWireParsers() {
   });
   assert.equal(malformedPair.ok, false);
   assert.equal(malformedPair.error.error.code, "invalid_pairing_request");
+  for (const invalid of [
+    { ...pairRequest("pair_no_assertion", "A".repeat(22)), pairingAssertion: undefined },
+    { ...pairRequest("pair_wrong_audience", "A".repeat(22)), audience: "other" },
+    { ...pairRequest("pair_short_nonce", "A".repeat(22)), deviceNonce: "short" },
+    { ...pairRequest("pair_unknown", "A".repeat(22)), accountSubject: TEST_ACCOUNT_SUBJECT },
+  ]) {
+    assert.equal(parseMobileBridgePairExchangeRequest(invalid).ok, false);
+  }
 }
 
 function testMobileInvocationPermissionBoundary() {
@@ -580,15 +957,22 @@ function testMobileInvocationPermissionBoundary() {
   assert.equal(
     enforceMobileInvocationPermissionBoundary(base).permissions,
     "read",
-    "omitted Mobile permission must fail closed to read-only",
+    "omitted remote permission must fail closed to read",
   );
-  assert.throws(
-    () => enforceMobileInvocationPermissionBoundary({ ...base, permissions: "write" }),
-    /read-only chats.*Desktop/,
+  assert.equal(
+    enforceMobileInvocationPermissionBoundary({ ...base, permissions: "write" }).permissions,
+    "write",
+    "a paired Mobile client must forward Desktop write authority",
   );
-  assert.throws(
-    () => enforceMobileInvocationPermissionBoundary({ ...base, permissions: "full" }),
-    /read-only chats.*Desktop/,
+  assert.equal(
+    enforceMobileInvocationPermissionBoundary({ ...base, permissions: "full" }).permissions,
+    "full",
+    "a paired Mobile client must forward Desktop full authority",
+  );
+  assert.equal(
+    enforceMobileInvocationPermissionBoundary({ ...base, permissions: "unexpected" }).permissions,
+    "read",
+    "malformed direct calls must remain fail-closed to read",
   );
 }
 
@@ -666,6 +1050,83 @@ function testInvocationEventProjection() {
   });
   assert.equal(JSON.stringify(dataUrl).includes("base64"), false);
   assert.match(dataUrl.text, /\[redacted-data-url\]/);
+
+  const rawSurface = {
+      version: "0.1",
+      kind: "surface",
+      title: "Competitor comparison",
+      domain: "research",
+      layout: "table",
+      data: {
+        comparison: {
+          type: "table",
+          columns: ["company", "finding"],
+          rows: [
+            { company: "A", finding: `Stored at /Users/mason/private/${secret}` },
+            { company: "B", finding: "Lower price" },
+          ],
+        },
+      },
+      widgets: [{ type: "table", data: "comparison", title: "Comparison" }],
+    };
+  const canonicalSurface = adaptLegacySurfaceToOneV1({
+    manifest: rawSurface,
+    surfaceId: "surface_comparison_1",
+    taskId: "task_chat_surface_1",
+    syncedAt: "2026-07-18T00:00:00.000Z",
+  });
+  const surfaceEvent = projectMobileBridgeInvocationEvent({
+    kind: "surface",
+    oneSurface: canonicalSurface,
+  }, {
+    taskId: "task_chat_surface_1",
+    syncedAt: "2026-07-18T00:00:00.000Z",
+  });
+  assert.equal(surfaceEvent.surface.contractVersion, "1.0.0");
+  assert.equal(surfaceEvent.surface.taskId, "task_chat_surface_1");
+  assert.equal(surfaceEvent.surface.blocks[0].type, "Table");
+  assert.deepEqual(
+    surfaceEvent.surface.recomposition.mobile.blockOrder,
+    surfaceEvent.surface.recomposition.desktop.blockOrder,
+  );
+  const surfaceEncoded = JSON.stringify(surfaceEvent.surface);
+  assert.equal(surfaceEncoded.includes(secret), false);
+  assert.equal(surfaceEncoded.includes("/Users/mason"), false);
+  assert.equal(surfaceEncoded.includes("javascript:"), false);
+
+  const rawLegacyOnly = projectMobileBridgeInvocationEvent({
+    kind: "surface",
+    surfaceId: "surface_legacy_only",
+    surface: rawSurface,
+  }, {
+    taskId: "task_chat_surface_1",
+    syncedAt: "2026-07-18T00:00:00.000Z",
+  });
+  assert.equal(
+    Object.hasOwn(rawLegacyOnly, "surface"),
+    false,
+    "Mobile must not reinterpret a raw legacy surface after Main's projection boundary",
+  );
+
+  const canonicalSurfaceEvent = projectMobileBridgeInvocationEvent({
+    kind: "surface",
+    oneSurface: surfaceEvent.surface,
+    // The raw Work payload may still be present for compatibility. Mobile must
+    // project Main's already-normalized manifest without reinterpreting it.
+    surface: {
+      version: "0.1",
+      kind: "surface",
+      title: "Different raw payload",
+      domain: "must-not-win",
+      layout: "report",
+      data: { raw: { type: "markdown", value: "This must not replace Main's semantic surface" } },
+      widgets: [],
+    },
+  }, {
+    taskId: "task_chat_surface_1",
+    syncedAt: "2026-07-18T00:01:00.000Z",
+  });
+  assert.deepEqual(canonicalSurfaceEvent.surface, surfaceEvent.surface);
 }
 
 function testTranscriptAndConfirmationProjection() {
@@ -702,11 +1163,583 @@ function testTranscriptAndConfirmationProjection() {
     createdAt: "2026-07-11T00:00:00.000Z",
   }]);
   assert.equal(confirmations[0].options.length, 2);
+  assert.equal(confirmations[0].taskId, "task_chat_question_1");
+  assert.equal(confirmations[0].decisionId, "message_question_1");
   assert.equal(confirmations[0].sourceMessageId, "message_question_1");
   assert.equal(confirmations[0].options[0].label, "Black and white");
   assert.match(confirmations[0].options[0].description, /\[local-path\]/);
   assert.match(confirmations[0].options[1].description, /\[redacted-secret\]/);
   assert.equal(confirmations[0].optionCount, 2);
+}
+
+async function testOneDecisionProjectionBoundary() {
+  await app.whenReady();
+  initStore();
+  const db = getDb();
+  const agentId = "agent-mobile-one-decision-fixture";
+  db.prepare(
+    `INSERT OR IGNORE INTO installed_agents
+     (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
+      env_requirements_json, preferred_backend, trust_grade, installed_at, tone, builtin, role,
+      visibility, entity_kind)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    agentId,
+    "mobile-one-decision-fixture",
+    "Mobile One Decision Fixture",
+    "Mobile One Decision Fixture",
+    "Closed Main-owned Decision fixture",
+    "Closed Main-owned Decision fixture",
+    "Private prompt must not cross the bridge.",
+    "[]",
+    "[]",
+    null,
+    "A",
+    "2026-07-18T00:00:00.000Z",
+    "blue",
+    0,
+    null,
+    "visible",
+    "agent",
+  );
+  const hostIdentity = {
+    version: 1,
+    hostId: "host_0dec15a10dec15a10dec15a10dec15a1",
+    createdAt: "2026-07-18T00:00:00.000Z",
+  };
+  const createDecision = (title, question, options = [
+    { label: "Approve", description: "Proceed with the bounded proposal." },
+    { label: "Reject", description: "Do not take the proposed action." },
+  ]) => {
+    const chat = createChat({ agentId, title, taskMode: "task" });
+    const message = appendChatMessage(
+      chat.id,
+      "assistant",
+      `<<agentlas-ask>>${JSON.stringify({ question, options })}<</agentlas-ask>>`,
+    );
+    const task = setCanonicalTaskStatus(chat.taskId, "waiting-decision");
+    return { chat, message, task };
+  };
+
+  const first = createDecision(
+    "Launch review",
+    `Review the prepared launch proposal containing sk-proj-${"s".repeat(24)}?`,
+  );
+  const second = createDecision(
+    "Research scope",
+    "Choose whether to continue the read-only competitor review.",
+    [
+      { label: "Continue review", description: "Read and compare the sources." },
+      { label: "Reject", description: "Stop this review." },
+    ],
+  );
+  const unsafe = createDecision(
+    "Unsafe local path",
+    "Approve publishing /Users/mason/private/launch-plan.md?",
+  );
+  const stale = createDecision("Stale source", "Continue the old review?");
+  appendChatMessage(stale.chat.id, "user", "This newer message makes the Decision stale.");
+
+  const wrongOrigin = createChat({ agentId, title: "Wrong origin anchor", taskMode: "task" });
+  const wrong = createDecision("Wrong Task binding", "Approve the wrongly bound proposal?");
+  const currentConfirmations = listPendingConfirmations();
+  db.prepare("UPDATE tasks SET origin_chat_id = ? WHERE id = ?").run(wrongOrigin.id, wrong.task.id);
+
+  const projected = projectMobileBridgeOneDecisionsFromCurrent(hostIdentity, currentConfirmations);
+  assert.equal(
+    projected.length,
+    2,
+    `only two current, safe, correctly bound Decisions may cross: ${JSON.stringify({
+      projected: projected.map((item) => item.view.taskId),
+      first: first.task.id,
+      second: second.task.id,
+      unsafe: unsafe.task.id,
+      stale: stale.task.id,
+      wrong: wrong.task.id,
+    })}`,
+  );
+  const projectedByTask = new Map(projected.map((item) => [item.view.taskId, item]));
+  for (const fixture of [first, second]) {
+    const row = projectedByTask.get(fixture.task.id);
+    assert.ok(row, `missing normalized Decision for ${fixture.task.id}`);
+    assert.equal(row.authoritativeHostRef, hostIdentity.hostId);
+    assert.equal(row.canonicalTaskVersion, fixture.task.version);
+    assert.equal(row.view.chatId, fixture.chat.id);
+    assert.equal(row.view.decisionId, fixture.message.id);
+    const source = listPendingConfirmations().find(
+      (item) => item.chatId === fixture.chat.id && item.sourceMessageId === fixture.message.id,
+    );
+    assert.ok(source);
+    assert.deepEqual(
+      row.view,
+      normalizeOneDecision(source, fixture.task.id),
+      "Mobile must receive Main's exact normalized value without recomposition",
+    );
+    assert.equal(isMobileBridgeOneDecisionDto(row), true);
+  }
+  assert.equal(projectedByTask.has(unsafe.task.id), false, "a path-bearing Decision must fail closed");
+  assert.equal(projectedByTask.has(stale.task.id), false, "a stale source Decision must fail closed");
+  assert.equal(projectedByTask.has(wrong.task.id), false, "a wrong-Task Decision must fail closed");
+  assert.equal(JSON.stringify(projected).includes("/Users/mason"), false);
+  assert.equal(JSON.stringify(projected).includes(`sk-proj-${"s".repeat(24)}`), false);
+
+  const valid = projected[0];
+  assert.equal(
+    isMobileBridgeOneDecisionDto({ ...valid, unexpectedAuthority: true }),
+    false,
+    "unknown wrapper fields must not become executable authority",
+  );
+  assert.equal(
+    isOneDecisionViewV1({ ...valid.view, unexpectedAuthority: true }),
+    false,
+    "unknown Decision fields must fail the closed OneDecisionViewV1 contract",
+  );
+  assert.deepEqual(
+    projectMobileBridgeOneDecisions(hostIdentity, { maxBytes: 1 }),
+    [],
+    "an insufficient Decision byte budget must omit rows, never truncate authority",
+  );
+
+  // Resolve the corrupt-race fixture before a fresh authoritative read. The
+  // public projector always reads current confirmations itself.
+  db.prepare("UPDATE tasks SET origin_chat_id = ? WHERE id = ?").run(wrong.chat.id, wrong.task.id);
+  appendChatMessage(wrong.chat.id, "user", "Resolve wrong-Task test-only Decision.");
+
+  const snapshot = await projectMobileBridgeSnapshot({
+    hostIdentity,
+    displayName: "One Decision Projection Desktop",
+    appVersion: "0.8.99",
+  });
+  assert.equal(snapshot.host.capabilities.includes("one-decisions-v1"), true);
+  assert.deepEqual(snapshot.oneDecisions, projected);
+
+  // Restore the intentionally corrupted fixture, then resolve all test-only
+  // questions so later bridge tests observe their own isolated confirmation set.
+  for (const fixture of [first, second, unsafe]) {
+    appendChatMessage(fixture.chat.id, "user", "Resolve test-only Decision.");
+  }
+}
+
+function measuredImprovementInput(options) {
+  const {
+    storeVersion,
+    baselineTaskId,
+    baselineTaskVersion,
+    currentTaskId,
+    currentTaskVersion,
+  } = options;
+  const suffix = "mobile-proof";
+  const taskKind = "product_comparison";
+  const assetId = `asset:${suffix}`;
+  const assetVersion = 3;
+  const comparisonRef = `comparison:${suffix}`;
+  const changeRef = `change:${suffix}`;
+  const controls = ["edit", "use_once", "disable", "delete"].map((control) => ({
+    control,
+    controlRef: `control:${suffix}:${control}`,
+  }));
+  const common = (kind, name) => ({
+    evidenceRef: `evidence:${suffix}:${name}`,
+    receiptRef: `receipt:${suffix}:${name}`,
+    kind,
+    taskKind,
+    observedAt: new Date().toISOString(),
+    sourceRef: `source:${suffix}:${name}`,
+  });
+  const verification = (kind, name, taskId, taskVersion) => ({
+    ...common(kind, name),
+    source: kind === "output_verification" ? "artifact_verifier" : "outcome_verifier",
+    taskId,
+    taskVersion,
+    verificationRef: `verification:${suffix}:${name}`,
+  });
+  const baselineOutput = verification("output_verification", "baseline-output", baselineTaskId, baselineTaskVersion);
+  const baselineOutcome = verification("outcome_verification", "baseline-outcome", baselineTaskId, baselineTaskVersion);
+  const currentOutput = verification("output_verification", "current-output", currentTaskId, currentTaskVersion);
+  const currentOutcome = verification("outcome_verification", "current-outcome", currentTaskId, currentTaskVersion);
+  const reuse = {
+    ...common("asset_reuse", "asset-reuse"),
+    source: "memory_runtime",
+    taskId: currentTaskId,
+    taskVersion: currentTaskVersion,
+    sourceTaskId: baselineTaskId,
+    sourceTaskVersion: baselineTaskVersion,
+    assetId,
+    assetVersion,
+    assetKind: "memory",
+    sourceControlRef: `control:${suffix}:source`,
+    controlRefs: controls,
+    rollbackRef: `rollback:${suffix}`,
+    removeRef: `remove:${suffix}`,
+  };
+  const measurement = (role, value) => ({
+    ...common("measurement", `measurement-${role}`),
+    source: "measurement_engine",
+    baselineTaskId,
+    baselineTaskVersion,
+    currentTaskId,
+    currentTaskVersion,
+    comparisonRef,
+    role,
+    valueType: "fact",
+    value,
+    unit: "question_count",
+    method: "Count the same observable interaction through the verified outcome.",
+    sampleSize: 1,
+    comparable: true,
+    comparabilityBasis: "Both Tasks use the same kind, unit, method, and completion boundary.",
+    comparisonDirection: "lower_is_better",
+  });
+  const baselineMeasurement = measurement("baseline", 5);
+  const currentMeasurement = measurement("current", 2);
+  const comparisonEvidence = {
+    ...common("comparison_verification", "comparison"),
+    source: "comparison_verifier",
+    baselineTaskId,
+    baselineTaskVersion,
+    currentTaskId,
+    currentTaskVersion,
+    comparisonRef,
+    evidenceType: "measured",
+    result: "improved",
+    baselineOutputVerificationRef: baselineOutput.verificationRef,
+    baselineOutcomeVerificationRef: baselineOutcome.verificationRef,
+    currentOutputVerificationRef: currentOutput.verificationRef,
+    currentOutcomeVerificationRef: currentOutcome.verificationRef,
+    reusedAssetVersions: [{ assetId, assetVersion }],
+  };
+  const trustedHostEvidence = [
+    baselineOutput,
+    baselineOutcome,
+    currentOutput,
+    currentOutcome,
+    reuse,
+    baselineMeasurement,
+    currentMeasurement,
+    comparisonEvidence,
+  ];
+  const evidenceRefs = [
+    baselineMeasurement.evidenceRef,
+    currentMeasurement.evidenceRef,
+    comparisonEvidence.evidenceRef,
+  ];
+  return {
+    expectedStoreVersion: storeVersion,
+    trustedHostAttested: true,
+    currentTaskId,
+    currentTaskVersion,
+    taskKind,
+    attributionStatus: "not_established",
+    reusedAssets: [{
+      assetRef: assetId,
+      assetType: "memory",
+      label: "Previously retained comparison memory",
+      sourceTaskRef: baselineTaskId,
+      receiptRefs: [reuse.receiptRef],
+      controls: controls.map((item) => item.control),
+    }],
+    changes: [{
+      changeRef,
+      kind: "instruction_reduction",
+      evidenceType: "measured",
+      statement: "Verified questions decreased on the same comparison basis.",
+      baseline: 5,
+      current: 2,
+      unit: "question_count",
+      comparisonDirection: "lower_is_better",
+      evidenceRefs,
+    }],
+    assetBindings: [{
+      assetId,
+      assetVersion,
+      assetKind: "memory",
+      sourceTaskId: baselineTaskId,
+      sourceTaskVersion: baselineTaskVersion,
+      currentTaskId,
+      currentTaskVersion,
+      taskKind,
+      reuseEvidenceRef: reuse.evidenceRef,
+      reuseReceiptRef: reuse.receiptRef,
+      sourceControlRef: reuse.sourceControlRef,
+      controlRefs: controls,
+      rollbackRef: reuse.rollbackRef,
+      removeRef: reuse.removeRef,
+    }],
+    comparisons: [{
+      comparisonRef,
+      changeRef,
+      taskKind,
+      baselineTaskId,
+      baselineTaskVersion,
+      currentTaskId,
+      currentTaskVersion,
+      evidenceType: "measured",
+      result: "improved",
+      baselineOutputVerificationRef: baselineOutput.verificationRef,
+      baselineOutcomeVerificationRef: baselineOutcome.verificationRef,
+      currentOutputVerificationRef: currentOutput.verificationRef,
+      currentOutcomeVerificationRef: currentOutcome.verificationRef,
+      reusedAssetVersions: [{ assetId, assetVersion }],
+      comparisonEvidenceRef: comparisonEvidence.evidenceRef,
+      measurementEvidenceRefs: [baselineMeasurement.evidenceRef, currentMeasurement.evidenceRef],
+      evidenceRefs,
+      receiptRefs: evidenceRefs.map((ref) => trustedHostEvidence.find((item) => item.evidenceRef === ref).receiptRef),
+    }],
+    receiptRefs: trustedHostEvidence.map((item) => item.receiptRef),
+    trustedHostEvidence,
+  };
+}
+
+async function testOneEvidenceProjectionBoundary() {
+  await app.whenReady();
+  initStore();
+  const db = getDb();
+  const agentId = "agent-mobile-one-evidence-fixture";
+  db.prepare(
+    `INSERT OR IGNORE INTO installed_agents
+     (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
+      env_requirements_json, preferred_backend, trust_grade, installed_at, tone, builtin, role,
+      visibility, entity_kind)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    agentId,
+    "mobile-one-evidence-fixture",
+    "Mobile One Evidence Fixture",
+    "Mobile One Evidence Fixture",
+    "Main-owned evidence projection fixture",
+    "Main-owned evidence projection fixture",
+    "Private prompt must not cross the bridge.",
+    "[]",
+    "[]",
+    null,
+    "A",
+    "2026-07-18T00:00:00.000Z",
+    "neutral",
+    0,
+    null,
+    "visible",
+    "agent",
+  );
+  const hostIdentity = {
+    version: 1,
+    hostId: "host_e11de11de11de11de11de11de11de11d",
+    createdAt: "2026-07-18T00:00:00.000Z",
+  };
+
+  const valueChat = createChat({ agentId, title: "Partial external verification", taskMode: "task" });
+  const valueTask = setCanonicalTaskStatus(valueChat.taskId, "running");
+  const valueInitial = oneValueClosureRuntime.getOneValueClosureState();
+  const outcomeRef = "outcome:mobile-partial";
+  const observation = {
+    evidenceRef: "evidence:mobile-partial:observation",
+    receiptRef: "receipt:mobile-partial:observation",
+    taskId: valueTask.id,
+    taskVersion: valueTask.version,
+    kind: "outcome_verification",
+    source: "explicit_user_observation",
+    verificationStatus: "partially_verified",
+    observedAt: new Date().toISOString(),
+    sourceRef: "source:mobile-partial:observation",
+    outcomeRef,
+  };
+  const baseline = {
+    evidenceRef: "evidence:mobile-partial:baseline",
+    receiptRef: "receipt:mobile-partial:baseline",
+    taskId: valueTask.id,
+    taskVersion: valueTask.version,
+    kind: "estimate_baseline",
+    source: "explicit_user_observation",
+    verificationStatus: "partially_verified",
+    observedAt: new Date().toISOString(),
+    sourceRef: "source:mobile-partial:baseline",
+  };
+  oneValueClosureRuntime.createOneValueClosure({
+    expectedStoreVersion: valueInitial.version,
+    trustedHostAttested: true,
+    taskId: valueTask.id,
+    expectedTaskVersion: valueTask.version,
+    outcomeStatus: "partially_verified",
+    outcomeRefs: [outcomeRef],
+    lifecycleClaims: [
+      { phase: "discovery", status: "not_started", summary: "Discovery was outside this check.", evidenceRefs: [] },
+      { phase: "preparation", status: "not_started", summary: "Preparation was outside this check.", evidenceRefs: [] },
+      { phase: "execution", status: "not_applicable", summary: "No external action was performed.", evidenceRefs: [] },
+      { phase: "verification", status: "in_progress", summary: "External verification is still pending.", evidenceRefs: [observation.evidenceRef] },
+    ],
+    valueItems: [{
+      valueItemId: "value:mobile-partial:estimate",
+      kind: "estimate",
+      statement: "The possible time reduction remains an estimate.",
+      estimate: {
+        lowerBound: 2,
+        upperBound: 4,
+        unit: "minutes",
+        basis: "The user supplied a rough prior range.",
+        method: "The current rough range was compared with that prior range.",
+        evidenceRefs: [baseline.evidenceRef],
+      },
+    }],
+    originalPreservation: { status: "not_applicable", artifactRefs: [], receiptRefs: [] },
+    remainingWork: [{
+      itemRef: "remaining:mobile-partial:external",
+      action: "A target-system check is still required.",
+      owner: "external",
+      status: "pending",
+    }],
+    receiptRefs: [observation.receiptRef, baseline.receiptRef],
+    reflectionEligible: false,
+    trustedHostEvidence: [observation, baseline],
+  });
+
+  const baselineChat = createChat({ agentId, title: "Improvement baseline", taskMode: "task" });
+  const currentChat = createChat({ agentId, title: "Improvement current", taskMode: "task" });
+  const baselineTask = setCanonicalTaskStatus(baselineChat.taskId, "completed");
+  const currentTask = setCanonicalTaskStatus(currentChat.taskId, "completed");
+  const improvementInitial = oneImprovementProofRuntime.getOneImprovementProofState();
+  oneImprovementProofRuntime.createOneImprovementProof(measuredImprovementInput({
+    storeVersion: improvementInitial.version,
+    baselineTaskId: baselineTask.id,
+    baselineTaskVersion: baselineTask.version,
+    currentTaskId: currentTask.id,
+    currentTaskVersion: currentTask.version,
+  }));
+
+  const valueState = oneValueClosureRuntime.getOneValueClosureState();
+  const improvementState = oneImprovementProofRuntime.getOneImprovementProofState();
+  const valueRows = projectMobileBridgeOneValueClosuresFromState(hostIdentity, valueState);
+  const proofRows = projectMobileBridgeOneImprovementProofsFromState(hostIdentity, improvementState);
+  assert.equal(valueRows.length, 1);
+  assert.equal(proofRows.length, 1);
+
+  const valueRow = valueRows[0];
+  assert.equal(isMobileBridgeOneValueClosureDto(valueRow), true);
+  assert.equal(valueRow.authoritativeHostRef, hostIdentity.hostId);
+  assert.equal(valueRow.taskId, valueTask.id);
+  assert.equal(valueRow.canonicalTaskVersion, valueTask.version);
+  assert.equal(valueRow.verification.outcomeStatus, "partially_verified");
+  assert.deepEqual(valueRow.verification.phases.map((item) => [item.phase, item.status]), [
+    ["discovery", "not_started"],
+    ["preparation", "not_started"],
+    ["execution", "not_applicable"],
+    ["verification", "in_progress"],
+  ]);
+  assert.equal(valueRow.remainingWork.pending, 1);
+  assert.equal(valueRow.remainingWork.externalOwned, 1);
+  assert.equal(JSON.stringify(valueRow).includes(outcomeRef), false, "opaque outcome refs must not become an external completion claim");
+  assert.equal(JSON.stringify(valueRow).includes("target-system"), false, "remaining-work prose must remain in Main");
+  assert.equal(isMobileBridgeOneValueClosureDto({ ...valueRow, externalOutcomeCompleted: true }), false);
+
+  const proofRow = proofRows[0];
+  const proofRecord = improvementState.proofs[0];
+  const comparison = proofRecord.comparisons[0];
+  assert.equal(isMobileBridgeOneImprovementProofDto(proofRow), true);
+  assert.equal(proofRow.authoritativeHostRef, hostIdentity.hostId);
+  assert.equal(proofRow.taskId, currentTask.id);
+  assert.equal(proofRow.canonicalTaskVersion, currentTask.version);
+  assert.equal(proofRow.attributionStatus, "not_established");
+  assert.equal(proofRow.compoundingStep, "reused", "an observed improvement without established attribution must not promote on Mobile");
+  assert.deepEqual(proofRow.reusedAssets, [{
+    assetId: proofRecord.assetBindings[0].assetId,
+    assetVersion: proofRecord.assetBindings[0].assetVersion,
+    assetKind: proofRecord.assetBindings[0].assetKind,
+    sourceTaskId: baselineTask.id,
+    sourceTaskVersion: baselineTask.version,
+  }]);
+  assert.equal(proofRow.comparisons[0].baselineTaskVersion, baselineTask.version);
+  assert.equal(proofRow.comparisons[0].currentTaskVersion, currentTask.version);
+  assert.deepEqual(proofRow.comparisons[0].receiptRefs, comparison.receiptRefs);
+  assert.equal(proofRow.comparisons[0].evidenceCount, comparison.evidenceRefs.length);
+  assert.deepEqual(proofRow.comparisons[0].metric, {
+    type: "measured",
+    changeKind: "instruction_reduction",
+    baseline: 5,
+    current: 2,
+    unit: "question_count",
+    comparisonDirection: "lower_is_better",
+  });
+  for (const forbidden of ["label", "statement", "method", "basis", "surface", "prompt"]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(proofRow, forbidden), false);
+  }
+  assert.equal(isMobileBridgeOneImprovementProofDto({ ...proofRow, sourceSurfaceRef: "surface_fake" }), false);
+  assert.equal(isMobileBridgeOneImprovementProofDto({ ...proofRow, attributionStatus: "correlated" }), false);
+  assert.equal(isMobileBridgeOneImprovementProofDto({ ...proofRow, attributionStatus: "not_established", compoundingStep: "improved_result" }), false);
+  const missingAttribution = { ...proofRow };
+  delete missingAttribution.attributionStatus;
+  assert.equal(isMobileBridgeOneImprovementProofDto(missingAttribution), false);
+  const unsafeMetric = structuredClone(proofRow);
+  unsafeMetric.comparisons[0].metric.unit = "/Users/mason/private";
+  assert.equal(isMobileBridgeOneImprovementProofDto(unsafeMetric), false);
+
+  const snapshot = await projectMobileBridgeSnapshot({
+    hostIdentity,
+    displayName: "One Evidence Projection Desktop",
+    appVersion: "0.8.99",
+  });
+  assert.equal(snapshot.host.capabilities.includes("one-value-closures-v1"), true);
+  assert.equal(snapshot.host.capabilities.includes("one-improvement-proofs-v1"), true);
+  assert.deepEqual(snapshot.oneValueClosures, valueRows);
+  assert.deepEqual(snapshot.oneImprovementProofs, proofRows);
+
+  assert.deepEqual(
+    projectMobileBridgeOneImprovementProofsFromState(hostIdentity, {
+      contractVersion: "1.0.0",
+      version: 1,
+      evidence: [],
+      proofs: [{ surfaceId: "surface_placeholder_only" }],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }),
+    [],
+    "a Surface or placeholder must never manufacture an Improvement Proof",
+  );
+
+  const wrongValue = structuredClone(valueState);
+  wrongValue.closures[0].closure.taskId = currentTask.id;
+  assert.deepEqual(projectMobileBridgeOneValueClosuresFromState(hostIdentity, wrongValue), []);
+  const wrongProof = structuredClone(improvementState);
+  wrongProof.proofs[0].proof.taskId = valueTask.id;
+  assert.deepEqual(projectMobileBridgeOneImprovementProofsFromState(hostIdentity, wrongProof), []);
+
+  const unsafeValue = structuredClone(valueState);
+  unsafeValue.closures[0].closure.remainingWork[0].action = "/Users/mason/private/result";
+  assert.deepEqual(projectMobileBridgeOneValueClosuresFromState(hostIdentity, unsafeValue), []);
+  const unsafeProof = structuredClone(improvementState);
+  unsafeProof.proofs[0].proof.changes[0].unit = "password=private-value";
+  assert.deepEqual(projectMobileBridgeOneImprovementProofsFromState(hostIdentity, unsafeProof), []);
+
+  const duplicateValue = structuredClone(valueState);
+  const duplicateValueRecord = structuredClone(duplicateValue.closures[0]);
+  duplicateValueRecord.closure.valueClosureId = "value_closure_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  duplicateValue.closures.push(duplicateValueRecord);
+  assert.deepEqual(projectMobileBridgeOneValueClosuresFromState(hostIdentity, duplicateValue), []);
+  const duplicateProof = structuredClone(improvementState);
+  const duplicateProofRecord = structuredClone(duplicateProof.proofs[0]);
+  duplicateProofRecord.proof.improvementProofId = "improvement_proof_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  duplicateProof.proofs.push(duplicateProofRecord);
+  assert.deepEqual(projectMobileBridgeOneImprovementProofsFromState(hostIdentity, duplicateProof), []);
+
+  assert.deepEqual(projectMobileBridgeOneValueClosuresFromState(hostIdentity, valueState, { maxBytes: 1 }), []);
+  assert.deepEqual(projectMobileBridgeOneImprovementProofsFromState(hostIdentity, improvementState, { maxBytes: 1 }), []);
+
+  db.prepare("UPDATE tasks SET status = 'archived', archived_at = ? WHERE id = ?")
+    .run(new Date().toISOString(), valueTask.id);
+  assert.deepEqual(projectMobileBridgeOneValueClosuresFromState(hostIdentity, valueState), []);
+  db.prepare("UPDATE tasks SET status = 'running', archived_at = NULL WHERE id = ?").run(valueTask.id);
+  db.prepare("UPDATE tasks SET status = 'archived', archived_at = ? WHERE id = ?")
+    .run(new Date().toISOString(), baselineTask.id);
+  assert.deepEqual(projectMobileBridgeOneImprovementProofsFromState(hostIdentity, improvementState), []);
+  db.prepare("UPDATE tasks SET status = 'completed', archived_at = NULL WHERE id = ?").run(baselineTask.id);
+
+  const valueUpdatedAt = valueTask.updatedAt;
+  db.prepare("UPDATE tasks SET updated_at = ? WHERE id = ?")
+    .run(new Date(valueTask.version + 1).toISOString(), valueTask.id);
+  assert.deepEqual(projectMobileBridgeOneValueClosuresFromState(hostIdentity, valueState), []);
+  db.prepare("UPDATE tasks SET updated_at = ? WHERE id = ?").run(valueUpdatedAt, valueTask.id);
+  const currentUpdatedAt = currentTask.updatedAt;
+  db.prepare("UPDATE tasks SET updated_at = ? WHERE id = ?")
+    .run(new Date(currentTask.version + 1).toISOString(), currentTask.id);
+  assert.deepEqual(projectMobileBridgeOneImprovementProofsFromState(hostIdentity, improvementState), []);
+  db.prepare("UPDATE tasks SET updated_at = ? WHERE id = ?").run(currentUpdatedAt, currentTask.id);
 }
 
 function testLanAddressSelection() {
@@ -878,7 +1911,7 @@ async function testAuthoritySteerGuard() {
           {
             v: 1,
             type: "request",
-            id: `authority_start_${permissions}_rejected`,
+            id: `authority_start_${permissions}_forwarded`,
             method: "invoke.start",
             params: {
               chatId: "chat_1",
@@ -888,7 +1921,7 @@ async function testAuthoritySteerGuard() {
           },
           context,
         ),
-        /read-only chats.*Desktop/,
+        /Chat not found/,
       );
     }
     await assert.rejects(
@@ -896,7 +1929,7 @@ async function testAuthoritySteerGuard() {
         {
           v: 1,
           type: "request",
-          id: "authority_steer_write_rejected",
+            id: "authority_steer_write_forwarded",
           method: "invoke.steer",
           params: {
             chatId: "chat_1",
@@ -907,7 +1940,7 @@ async function testAuthoritySteerGuard() {
         },
         context,
       ),
-      /read-only chats.*Desktop/,
+      /Steering target is stale/,
     );
     await assert.rejects(
       authority.request(
@@ -1077,7 +2110,30 @@ async function testReconnectSnapshotAndDesktopMutationInvalidation() {
   const offChanges = onDesktopStoreChange((change) => changes.push(change));
   let offAuthority = null;
   try {
+    const pairingSeed = await authority.pairingVerification(context);
+    assert.equal(pairingSeed.hostId, "host_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert.equal(
+      pairingSeed.sampleTaskId,
+      "task_pairing_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    assert.equal(pairingSeed.sampleTaskVersion, Date.parse(context.connectedAt));
     const reconnectSnapshot = await authority.snapshot(context);
+    assert.deepEqual(reconnectSnapshot.pairingVerificationTasks, [{
+      hostId: pairingSeed.hostId,
+      taskId: pairingSeed.sampleTaskId,
+      taskVersion: pairingSeed.sampleTaskVersion,
+      updatedAt: context.connectedAt,
+    }]);
+    assert.equal(
+      reconnectSnapshot.chats.some((item) => item.taskId === pairingSeed.sampleTaskId),
+      false,
+      "pairing verification Task must not pollute user Work chats",
+    );
+    assert.equal(
+      reconnectSnapshot.taskProjections.some((item) => item.taskId === pairingSeed.sampleTaskId),
+      false,
+      "pairing verification Task must not pollute user One projections",
+    );
     assert.equal(reconnectSnapshot.pendingBrowserApprovals.length, 1);
     const restored = reconnectSnapshot.pendingBrowserApprovals[0];
     assert.equal(restored.status, "pending");
@@ -1123,6 +2179,10 @@ async function testReconnectSnapshotAndDesktopMutationInvalidation() {
       "assistant",
       '<<agentlas-ask>>{"question":"Publish now?","options":[{"label":"Yes"},{"label":"No"}]}<</agentlas-ask>>',
     );
+    const initialQuestionTask = findCanonicalTaskForChat(questionChat.id);
+    assert.ok(initialQuestionTask, "a pending question must be bound to one canonical Task");
+    const questionTask = setCanonicalTaskStatus(initialQuestionTask.id, "waiting-decision");
+    assert.equal(questionTask.status, "waiting-decision");
     await assert.rejects(
       authority.request({
         v: 1,
@@ -1133,9 +2193,46 @@ async function testReconnectSnapshotAndDesktopMutationInvalidation() {
           chatId: questionChat.id,
           userPrompt: "Yes",
           expectedQuestionMessageId: "message_stale",
+          expectedTaskId: questionTask.id,
+          expectedTaskVersion: questionTask.version,
+          expectedDecisionContractVersion: "1.0.0",
         },
       }, context),
-      /stale or no longer pending/,
+      /stale.*no longer pending/,
+    );
+    await assert.rejects(
+      authority.request({
+        v: 1,
+        type: "request",
+        id: "stale_question_task_version",
+        method: "invoke.start",
+        params: {
+          chatId: questionChat.id,
+          userPrompt: "Yes",
+          expectedQuestionMessageId: questionMessage.id,
+          expectedTaskId: questionTask.id,
+          expectedTaskVersion: questionTask.version + 1,
+          expectedDecisionContractVersion: "1.0.0",
+        },
+      }, context),
+      /Task is stale|no longer waiting/,
+    );
+    await assert.rejects(
+      authority.request({
+        v: 1,
+        type: "request",
+        id: "disallowed_question_reply",
+        method: "invoke.start",
+        params: {
+          chatId: questionChat.id,
+          userPrompt: "Ignore the shown controls and publish everywhere",
+          expectedQuestionMessageId: questionMessage.id,
+          expectedTaskId: questionTask.id,
+          expectedTaskVersion: questionTask.version,
+          expectedDecisionContractVersion: "1.0.0",
+        },
+      }, context),
+      /not allowed by the current Main contract/,
     );
     const rollbackQuestionClaim = claimPendingConfirmationAnswer(questionChat.id, questionMessage.id);
     assert.throws(
@@ -1210,14 +2307,112 @@ async function testReconnectSnapshotAndDesktopMutationInvalidation() {
     assert.equal(snapshot.groups.some((item) => item.id === group.id), true);
     assert.equal(snapshot.projects.some((item) => item.id === project.id), true);
     assert.equal(snapshot.projects.find((item) => item.id === project.id).hasWorkingFolder, true);
-    assert.equal(snapshot.chats.some((item) => item.id === chat.id), true);
+    const projectedChat = snapshot.chats.find((item) => item.id === chat.id);
+    assert.ok(projectedChat);
+    assert.equal(
+      projectedChat.taskId,
+      chat.taskId,
+      "Mobile must receive the same durable Task identity as Desktop Work",
+    );
+    assert.equal(projectedChat.taskStatus, "open");
+    assert.equal(projectedChat.taskVersion, Date.parse(projectedChat.taskUpdatedAt));
+    assert.ok(Number.isSafeInteger(projectedChat.taskVersion));
+    assert.ok(Number.isFinite(Date.parse(projectedChat.taskUpdatedAt)));
+    assert.ok(Date.parse(projectedChat.taskUpdatedAt) >= Date.parse(chat.updatedAt));
+    const projectedTask = snapshot.taskProjections.find((item) => item.taskId === projectedChat.taskId);
+    assert.ok(projectedTask, "Mobile snapshot must include the Main-owned semantic Task projection");
+    assert.equal(projectedTask.contractVersion, "1.0.0");
+    assert.equal(projectedTask.projectionSurface, "mobile");
+    assert.equal(projectedTask.canonicalVersion, projectedChat.taskVersion);
+    assert.equal(projectedTask.status.value, "waiting");
+    assert.equal(projectedTask.sync.authoritativeHostRef, snapshot.host.id);
+    assert.equal(projectedTask.sync.connection, "online");
+    assert.equal(projectedTask.sync.executionAuthorityAvailable, true);
+    assert.equal(projectedTask.sync.mutationMode, "direct");
+    assert.equal(projectedTask.truth.mayClaimNewCompletion, true);
+
+    const partialTask = setCanonicalTaskStatus(chat.taskId, "partial");
+    const restoredSurface = adaptLegacySurfaceToOneV1({
+      manifest: {
+        version: "0.1",
+        kind: "surface",
+        title: "Restart-safe result",
+        domain: "research",
+        layout: "document",
+        data: { narrative: "The verified result survived restart." },
+        widgets: [{ type: "text", data: "narrative", title: "Summary" }],
+      },
+      surfaceId: "surface_mobile_restart",
+      taskId: partialTask.id,
+      syncedAt: partialTask.updatedAt,
+    });
+    const originalLatestReceipt = invocationService.latestReceipt;
+    const originalLatestOneSurface = invocationService.latestOneSurface;
+    invocationService.latestReceipt = (chatId) => chatId === chat.id
+      ? {
+          runId: "run_mobile_restart",
+          chatId: chat.id,
+          status: "completed",
+          startedAt: "2026-07-18T08:00:00.000Z",
+          updatedAt: "2026-07-18T08:01:00.000Z",
+          finishedAt: "2026-07-18T08:01:00.000Z",
+          eventCount: 5,
+          resultFolder: "/Users/mason/private/result",
+        }
+      : null;
+    invocationService.latestOneSurface = ({ runId, chatId, taskId }) =>
+      runId === "run_mobile_restart" && chatId === chat.id && taskId === partialTask.id
+        ? {
+            runId,
+            chatId,
+            taskId,
+            recordedAt: "2026-07-18T08:01:00.000Z",
+            manifest: restoredSurface,
+          }
+        : null;
+    try {
+      const restoredResult = await authority.request({
+        v: 1,
+        type: "request",
+        id: "task_latest_result_live",
+        method: "tasks.latestResult",
+        params: {
+          taskId: partialTask.id,
+          chatId: chat.id,
+          expectedVersion: partialTask.version,
+        },
+      }, context);
+      assert.equal(restoredResult.taskId, partialTask.id);
+      assert.equal(restoredResult.taskVersion, partialTask.version);
+      assert.equal(restoredResult.taskStatus, "partial");
+      assert.equal(restoredResult.chatId, chat.id);
+      assert.equal(restoredResult.runId, "run_mobile_restart");
+      assert.equal(restoredResult.receipt.status, "completed");
+      assert.equal(restoredResult.surface.taskId, partialTask.id);
+      assert.equal(JSON.stringify(restoredResult).includes("/Users/mason"), false);
+      assert.equal(await authority.request({
+        v: 1,
+        type: "request",
+        id: "task_latest_result_stale",
+        method: "tasks.latestResult",
+        params: {
+          taskId: partialTask.id,
+          chatId: chat.id,
+          expectedVersion: partialTask.version - 1,
+        },
+      }, context), null);
+      assert.equal(getCanonicalTask(partialTask.id).version, partialTask.version);
+    } finally {
+      invocationService.latestReceipt = originalLatestReceipt;
+      invocationService.latestOneSurface = originalLatestOneSurface;
+    }
     const projectedAutomation = snapshot.automations.find((item) => item.id === automation.id);
     assert.ok(projectedAutomation);
     assert.equal(projectedAutomation.runState, "unknown");
     assert.equal(projectedAutomation.lastError, null);
     assert.deepEqual(
       new Set(changes.map((change) => change.entity)),
-      new Set(["agent", "firm", "agent-group", "project", "chat", "automation"]),
+      new Set(["agent", "firm", "agent-group", "project", "chat", "automation", "task"]),
     );
 
     const workspaceSet = await authority.request({
@@ -1297,7 +2492,6 @@ async function testReconnectSnapshotAndDesktopMutationInvalidation() {
     assert.equal(getChatWorkingFolder(createdFromProject.id), canonicalProjectWorkspace);
     assert.equal(createdFromProject.workingFolderName, path.basename(canonicalProjectWorkspace));
 
-    const { invocationService } = require("../dist/electron/invocation/service.js");
     const originalInvocationStart = invocationService.start;
     const capturedStarts = [];
     invocationService.start = (invocation, workspaceBinding) => {
@@ -1343,6 +2537,47 @@ async function testReconnectSnapshotAndDesktopMutationInvalidation() {
         canonicalPath: null,
         directoryIdentity: null,
       });
+
+      const acknowledgedDecisionChat = createChat({
+        agentId,
+        title: "Exact Decision acknowledgement",
+      });
+      const acknowledgedDecisionMessage = appendChatMessage(
+        acknowledgedDecisionChat.id,
+        "assistant",
+        '<<agentlas-ask>>{"question":"Save the draft?","options":[{"label":"Approve"},{"label":"Reject"}]}<</agentlas-ask>>',
+      );
+      const acknowledgedDecisionTask = setCanonicalTaskStatus(
+        findCanonicalTaskForChat(acknowledgedDecisionChat.id).id,
+        "waiting-decision",
+      );
+      const acknowledgedDecisionView = normalizeOneDecision(
+        listPendingConfirmations().find((item) => item.sourceMessageId === acknowledgedDecisionMessage.id),
+        acknowledgedDecisionTask.id,
+      );
+      const decisionResult = await authority.request({
+        v: 1,
+        type: "request",
+        id: "invoke_exact_decision_answer",
+        method: "invoke.start",
+        params: {
+          chatId: acknowledgedDecisionChat.id,
+          userPrompt: acknowledgedDecisionView.controls.reject.reply,
+          expectedQuestionMessageId: acknowledgedDecisionView.decisionId,
+          expectedTaskId: acknowledgedDecisionTask.id,
+          expectedTaskVersion: acknowledgedDecisionTask.version,
+          expectedDecisionContractVersion: acknowledgedDecisionView.contractVersion,
+        },
+      }, context);
+      assert.equal(decisionResult.runId, "mobile-authority-run-3");
+      assert.deepEqual(decisionResult.decisionAcknowledgement, {
+        contractVersion: "1.0.0",
+        decisionId: acknowledgedDecisionMessage.id,
+        taskId: acknowledgedDecisionTask.id,
+        taskVersion: acknowledgedDecisionTask.version,
+        status: "answer_claimed",
+      });
+      assert.equal(capturedStarts[2].invocation.userPrompt, acknowledgedDecisionView.controls.reject.reply);
     } finally {
       invocationService.start = originalInvocationStart;
     }
@@ -1449,49 +2684,54 @@ async function testPairingLifecycle() {
     assert.equal(identityRaw.includes("token"), false);
     assert.equal(identityRaw.includes("code"), false);
 
-    const limited = new MobileBridgePairingManager(root, { now, ttlMs: 10_000, maxAttempts: 2 });
-    const limitedChallenge = limited.issueChallenge();
-    expectPairingError(() => limited.exchange(pairRequest("wrong_1", "B".repeat(22))), "pairing_denied");
-    expectPairingError(() => limited.exchange(pairRequest("wrong_2", "C".repeat(22))), "pairing_denied");
-    expectPairingError(
+    const limited = new MobileBridgePairingManager(root, pairingOptions({ now, ttlMs: 10_000, maxAttempts: 2 }));
+    const limitedChallenge = issueTestChallenge(limited, identity.hostId);
+    await expectPairingError(() => limited.exchange(pairRequest("wrong_1", "B".repeat(22))), "pairing_denied");
+    await expectPairingError(() => limited.exchange(pairRequest("wrong_2", "C".repeat(22))), "pairing_denied");
+    await expectPairingError(
       () => limited.exchange(pairRequest("blocked", limitedChallenge.code)),
       "pairing_unavailable",
     );
 
     const expiryReasons = [];
-    const expiring = new MobileBridgePairingManager(root, {
+    const expiring = new MobileBridgePairingManager(root, pairingOptions({
       now,
       ttlMs: 10_000,
       onChanged: (reason) => expiryReasons.push(reason),
-    });
-    const expiredChallenge = expiring.issueChallenge();
+    }));
+    const expiredChallenge = issueTestChallenge(expiring, identity.hostId);
     clockMs += 10_000;
-    expectPairingError(
+    await expectPairingError(
       () => expiring.exchange(pairRequest("expired", expiredChallenge.code)),
       "pairing_expired",
     );
     assert.deepEqual(expiryReasons, ["challenge-issued", "challenge-expired"]);
 
     const pairingReasons = [];
-    const manager = new MobileBridgePairingManager(root, {
+    const manager = new MobileBridgePairingManager(root, pairingOptions({
       now,
       onChanged: (reason) => pairingReasons.push(reason),
-    });
-    const challenge = manager.issueChallenge();
+    }));
+    const challenge = issueTestChallenge(manager, identity.hostId);
     assert.match(challenge.code, /^[A-Za-z0-9_-]{22}$/);
 
     const manifest = makeManifest(identity.hostId);
     writeMobileBridgeEndpointManifest(root, manifest);
     const payload = createMobileBridgePairingPayload(challenge, manifest);
     assert.equal(payload.code, challenge.code);
+    assert.equal(payload.pairingAttemptId, TEST_PAIRING_ATTEMPT_ID);
+    assert.equal(payload.desktopAccountProof, challenge.desktopAccountProof);
+    assert.equal(payload.accountAuthorityOrigin, "https://agentlas.cloud");
     assert.equal(payload.pairExchangeEndpoint, "http://127.0.0.1:43123/v1/mobile/pair/exchange");
     assert.equal(Object.hasOwn(payload, "token"), false);
+    assert.equal(Object.hasOwn(payload, "accountSubject"), false);
+    assert.equal(JSON.stringify(payload).includes("agentlas_session"), false);
     assert.equal(JSON.stringify(payload).includes("devBootstrap"), false);
 
-    const issued = manager.exchange(pairRequest("success", challenge.code));
+    const issued = await manager.exchange(pairRequest("success", challenge.code));
     assert.match(issued.deviceId, /^device_[a-f0-9]{32}$/);
     assert.match(issued.token, /^[A-Za-z0-9_-]{43}$/);
-    expectPairingError(
+    await expectPairingError(
       () => manager.exchange(pairRequest("reuse", challenge.code)),
       "pairing_unavailable",
     );
@@ -1562,12 +2802,9 @@ async function testPairingLifecycle() {
 }
 
 async function testPairingQrStaysScannable() {
-  // The pairing QR carried the whole DER certificate (796 of 1228 characters on
-  // a real host). At that length the code needs a dense version-25-ish symbol,
-  // which stops decoding as soon as the camera is slightly out of focus — the
-  // user simply could not pair. The fingerprint alone is a complete pin (Mobile
-  // hashes the certificate the TLS handshake presents and compares), so the
-  // certificate must never travel here again.
+  // The public certificate still stays out of the QR. Same-account pairing adds
+  // only a short-lived opaque Desktop proof and attempt binding; neither the
+  // Desktop session cookie nor the stable opaque account subject may appear.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mobile-bridge-qr-"));
   try {
     const tls = await loadOrCreateMobileBridgeTls(root);
@@ -1593,10 +2830,10 @@ async function testPairingQrStaysScannable() {
     // its certificate stays legal — only the QR sheds it.
     writeMobileBridgeEndpointManifest(root, manifest);
 
-    const manager = new MobileBridgePairingManager(root, {
+    const manager = new MobileBridgePairingManager(root, pairingOptions({
       now: () => new Date("2026-07-16T00:00:00.000Z"),
-    });
-    const payload = createMobileBridgePairingPayload(manager.issueChallenge(), manifest);
+    }));
+    const payload = createMobileBridgePairingPayload(issueTestChallenge(manager, identity.hostId), manifest);
     const encoded = JSON.stringify(payload);
 
     assert.equal(payload.certificateDer, null, "the QR must not carry the certificate");
@@ -1607,11 +2844,15 @@ async function testPairingQrStaysScannable() {
     );
     // The pin itself must still be there, or the phone has nothing to verify.
     assert.equal(payload.certificateFingerprint, tls.certificateFingerprint);
-    // Version 12 alphanumeric at quartile EC holds ~535 chars; staying under
-    // that keeps the symbol coarse enough to scan off a blurry camera.
+    assert.equal(encoded.includes("agentlas_session"), false);
+    assert.equal(encoded.includes(TEST_ACCOUNT_SUBJECT), false);
+    assert.equal(payload.pairingAttemptId, TEST_PAIRING_ATTEMPT_ID);
+    assert.equal(payload.accountAuthorityOrigin, "https://agentlas.cloud");
+    // Keep a hard upper bound so a future change cannot add certificates,
+    // cookies, or another unbounded authority document to the QR.
     assert.ok(
-      encoded.length < 535,
-      `pairing QR grew to ${encoded.length} chars — dense codes stop scanning`,
+      encoded.length < 1_500,
+      `pairing QR grew to ${encoded.length} chars — authority payload is unexpectedly large`,
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -1621,7 +2862,7 @@ async function testPairingQrStaysScannable() {
 async function testServerBoundary() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mobile-bridge-server-"));
   const hostId = "host_fedcba9876543210fedcba9876543210";
-  const pairing = new MobileBridgePairingManager(root);
+  const pairing = new MobileBridgePairingManager(root, pairingOptions());
   const replayStore = new MobileBridgeRequestReplayStore(root, {
     instanceId: "server-boundary-instance",
   });
@@ -1630,7 +2871,19 @@ async function testServerBoundary() {
   let eventListener = null;
   let nextSnapshotBlock = null;
   let nextRequestBlock = null;
+  let rejectNextPairingVerification = false;
   const authority = {
+    async pairingVerification() {
+      if (rejectNextPairingVerification) {
+        rejectNextPairingVerification = false;
+        throw new Error("simulated pairing verification failure");
+      }
+      return {
+        hostId,
+        sampleTaskId: "task_pairing_probe",
+        sampleTaskVersion: 1721289600000,
+      };
+    },
     async snapshot() {
       const block = nextSnapshotBlock;
       if (block) {
@@ -1693,7 +2946,7 @@ async function testServerBoundary() {
     assert.equal(address.host, "127.0.0.1");
     await expectUnauthorized(address.url);
 
-    const challenge = pairing.issueChallenge();
+    const challenge = issueTestChallenge(pairing, hostId);
     const exchangeUrl = `http://${address.host}:${address.port}${MOBILE_BRIDGE_PAIR_EXCHANGE_PATH}`;
     const wrongCode = "Q".repeat(22);
     const deniedResponse = await fetch(exchangeUrl, {
@@ -1706,15 +2959,32 @@ async function testServerBoundary() {
     assert.equal(deniedBody.includes(wrongCode), false);
     assert.equal(errors.join("\n").includes(wrongCode), false);
 
+    const failedChallenge = issueTestChallenge(pairing, hostId);
+    rejectNextPairingVerification = true;
+    const failedVerificationResponse = await fetch(exchangeUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(pairRequest("pair_verification_failure", failedChallenge.code)),
+    });
+    assert.equal(failedVerificationResponse.status, 503);
+    const rolledBackDevice = pairing.listDevices().at(-1);
+    assert.ok(rolledBackDevice?.revokedAt, "post-exchange failure must revoke the issued credential");
+
+    const successChallenge = issueTestChallenge(pairing, hostId);
     const exchangeResponse = await fetch(exchangeUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(pairRequest("pair_ok", challenge.code)),
+      body: JSON.stringify(pairRequest("pair_ok", successChallenge.code)),
     });
     assert.equal(exchangeResponse.status, 200);
     assert.equal(exchangeResponse.headers.get("cache-control"), "no-store");
     const exchange = await exchangeResponse.json();
     assert.equal(exchange.ok, true);
+    assert.equal(exchange.verification.hostId, hostId);
+    assert.equal(exchange.verification.issuedAt, exchange.credential.issuedAt);
+    assert.equal(exchange.verification.sampleTaskId, "task_pairing_probe");
+    assert.equal(exchange.verification.sampleTaskVersion, 1721289600000);
+    assert.match(exchange.verification.verificationId, /^pairing_[a-f0-9]{32}$/);
     assert.deepEqual(exchange.relay, {
       endpoint: "wss://agentlas.cloud/v1/mobile/relay",
       secret: "R".repeat(43),
@@ -1792,6 +3062,40 @@ async function testServerBoundary() {
     assert.equal(conflictedWrite.error.code, "idempotency_conflict");
     assert.equal(calls.length, 2);
 
+    const oneWriteEnvelope = {
+      v: 1,
+      type: "request",
+      id: "one_write_1",
+      idempotencyKey: "one-start-stable-key-1",
+      method: "one.invoke.start",
+      params: { schemaVersion: 1, userPrompt: "Prepare the launch brief." },
+    };
+    socket.send(JSON.stringify(oneWriteEnvelope));
+    const oneFirstWrite = await nextMessage(
+      (message) => message.type === "response" && message.id === oneWriteEnvelope.id,
+    );
+    assert.equal(oneFirstWrite.ok, true);
+    assert.equal(calls.length, 3);
+
+    socket.send(JSON.stringify({ ...oneWriteEnvelope, id: "one_write_retry" }));
+    const oneReplayedWrite = await nextMessage(
+      (message) => message.type === "response" && message.id === "one_write_retry",
+    );
+    assert.equal(oneReplayedWrite.ok, true);
+    assert.equal(calls.length, 3, "replayed One start must not create a second conversation");
+
+    socket.send(JSON.stringify({
+      ...oneWriteEnvelope,
+      id: "one_write_conflict",
+      params: { schemaVersion: 1, userPrompt: "A different launch brief." },
+    }));
+    const oneConflictedWrite = await nextMessage(
+      (message) => message.type === "response" && message.id === "one_write_conflict",
+    );
+    assert.equal(oneConflictedWrite.ok, false);
+    assert.equal(oneConflictedWrite.error.code, "idempotency_conflict");
+    assert.equal(calls.length, 3);
+
     socket.send(JSON.stringify({
       v: 1,
       type: "request",
@@ -1828,7 +3132,7 @@ async function testServerBoundary() {
     // behind ready + snapshot for the second client. Each client owns a
     // contiguous sequence, so one client's initial frames cannot create gaps
     // in another client's stream.
-    const challenge2 = pairing.issueChallenge();
+    const challenge2 = issueTestChallenge(pairing, hostId);
     const exchangeResponse2 = await fetch(exchangeUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2119,10 +3423,13 @@ async function main() {
   testMobileInvocationPermissionBoundary();
   await testTlsIdentity();
   testAbsolutePathSanitization();
+  testOneDeviceProjectionBoundary();
   testControlFenceProjection();
   testUtf16Sanitization();
   testInvocationEventProjection();
   testTranscriptAndConfirmationProjection();
+  await testOneDecisionProjectionBoundary();
+  await testOneEvidenceProjectionBoundary();
   testLanAddressSelection();
   testDurableReplayLedger();
   await testAuthoritySteerGuard();

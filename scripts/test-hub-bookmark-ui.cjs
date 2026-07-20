@@ -178,6 +178,14 @@ async function main() {
     await marketplaceTeam.getByRole("button", { name: /북마크|Bookmark/ }).click();
     await marketplaceTeam.getByText(/북마크됨|Bookmarked/).waitFor();
     await marketplaceAgent.getByText(/북마크됨|Bookmarked/).waitFor();
+    const sameSlugAgentCredit = marketplaceAgent.locator(".hub-credit-orb-wrap");
+    const sameSlugTeamCredit = marketplaceTeam.locator(".hub-credit-orb-wrap");
+    const sameSlugAgentTooltipId = await sameSlugAgentCredit.getAttribute("aria-describedby");
+    const sameSlugTeamTooltipId = await sameSlugTeamCredit.getAttribute("aria-describedby");
+    assert.ok(sameSlugAgentTooltipId && sameSlugTeamTooltipId, "same-slug credit chips need tooltip bindings");
+    assert.notEqual(sameSlugAgentTooltipId, sameSlugTeamTooltipId, "same-slug agents and teams need unique tooltip IDs");
+    assert.match(await marketplaceAgent.locator(`#${sameSlugAgentTooltipId}`).innerText(), /3 크레딧|3 credits/);
+    assert.match(await marketplaceTeam.locator(`#${sameSlugTeamTooltipId}`).innerText(), /10 크레딧|10 credits/);
     await dashboardPage.evaluate(() => {
       window.dispatchEvent(new CustomEvent("agentlas:hub-bookmarks-changed", {
         detail: { action: "removed", slug: "same-slug-bookmark", entityKind: "team" },
@@ -191,7 +199,71 @@ async function main() {
     const verifiedCard = dashboardPage.locator(".hub-entity-card").filter({ hasText: /허브 에이전트 002|Hub Agent 002/ });
     await verifiedCard.getByText(/보안 검사 A · 통과|Security scan A · passed/).waitFor();
     await verifiedCard.getByText(/최근 실패율 4%|Recent failure rate 4%/).waitFor();
+    const creditControl = verifiedCard.locator(".hub-credit-orb-wrap");
+    await creditControl.waitFor();
+    assert.match(
+      (await creditControl.locator(".hub-credit-orb").innerText()).trim(),
+      /^\d+(?:\.\d+)?$/,
+      "the callable Hub card header must show only the numeric credit amount",
+    );
+    const describedBy = await creditControl.getAttribute("aria-describedby");
+    assert.ok(describedBy, "credit chip needs an aria-describedby tooltip binding");
+    const creditTooltip = verifiedCard.locator(`#${describedBy}`);
+    assert.match(await creditTooltip.innerText(), /24시간 사용 · \d+ 크레딧|24-hour use · \d+ credits/);
+    await creditControl.hover();
+    await dashboardPage.waitForTimeout(180);
+    assert.equal(await creditTooltip.evaluate((node) => getComputedStyle(node).opacity), "1", "credit terms must appear on hover");
+    await creditControl.focus();
+    await dashboardPage.waitForTimeout(180);
+    assert.equal(await creditTooltip.evaluate((node) => getComputedStyle(node).opacity), "1", "credit terms must appear on keyboard focus");
+    const titleLayout = await verifiedCard.evaluate((card) => {
+      const title = card.querySelector(".hub-card-title");
+      if (!title) return null;
+      const style = getComputedStyle(title);
+      return {
+        lineClamp: style.getPropertyValue("-webkit-line-clamp"),
+        cardClientWidth: card.clientWidth,
+        cardScrollWidth: card.scrollWidth,
+      };
+    });
+    assert.ok(titleLayout, "verified Hub card title must exist");
+    assert.ok(!titleLayout.lineClamp || titleLayout.lineClamp === "none", "Hub titles must not be forcibly ellipsized");
+    assert.ok(titleLayout.cardScrollWidth <= titleLayout.cardClientWidth + 1, "compact credit chip must not create horizontal card overflow");
     await dashboardPage.screenshot({ path: path.join(outDir, "hub-autocomplete.png"), fullPage: true });
+    await verifiedCard.evaluate((card) => {
+      card.style.width = "280px";
+      card.style.minWidth = "280px";
+      card.style.maxWidth = "280px";
+    });
+    await dashboardPage.waitForTimeout(80);
+    await creditControl.hover();
+    await dashboardPage.waitForTimeout(180);
+    const narrowTooltipLayout = await verifiedCard.evaluate((card) => {
+      const tooltip = card.querySelector(".hub-credit-tooltip");
+      const orb = card.querySelector(".hub-credit-orb-wrap");
+      if (!tooltip || !orb) return null;
+      const cardRect = card.getBoundingClientRect();
+      const tooltipRect = tooltip.getBoundingClientRect();
+      const orbStyle = getComputedStyle(orb);
+      return {
+        cardWidth: cardRect.width,
+        gridColumnStart: orbStyle.gridColumnStart,
+        cardLeft: cardRect.left,
+        cardRight: cardRect.right,
+        tooltipLeft: tooltipRect.left,
+        tooltipRight: tooltipRect.right,
+      };
+    });
+    assert.ok(narrowTooltipLayout, "narrow Hub card tooltip layout must exist");
+    assert.ok(narrowTooltipLayout.cardWidth <= 310, "narrow Hub card fixture must activate its container query");
+    assert.equal(narrowTooltipLayout.gridColumnStart, "1", "narrow credit chip must move to its own full-width row");
+    assert.ok(narrowTooltipLayout.tooltipLeft >= narrowTooltipLayout.cardLeft - 1, "narrow credit tooltip must not be clipped on the left");
+    assert.ok(narrowTooltipLayout.tooltipRight <= narrowTooltipLayout.cardRight + 1, "narrow credit tooltip must not be clipped on the right");
+    await verifiedCard.evaluate((card) => {
+      card.style.width = "";
+      card.style.minWidth = "";
+      card.style.maxWidth = "";
+    });
 
     await dashboardPage.goto(`${baseUrl}/marketplace.html?q=install-only-agent`, { waitUntil: "domcontentloaded" });
     const installOnlyCard = dashboardPage.locator(".hub-entity-card").filter({ hasText: /설치 전용 에이전트|Install-only Agent/ });

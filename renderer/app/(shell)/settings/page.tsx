@@ -1987,11 +1987,12 @@ function Banner() {
 }
 
 // ── CLI 설치 패널 (요청 ⑤) ────────────────────────────────
-type CliKind = "claude-code" | "codex" | "gemini";
+type CliKind = "claude-code" | "codex" | "gemini" | "kimi";
 const CLI_DEFS: Array<{ kind: CliKind; name: string; sub: string }> = [
   { kind: "claude-code", name: "Claude Code", sub: "Claude Pro · Max" },
   { kind: "codex", name: "Codex", sub: "ChatGPT Plus · Pro" },
   { kind: "gemini", name: "Gemini", sub: "Google AI" },
+  { kind: "kimi", name: "Kimi Code", sub: "Kimi Code membership" },
 ];
 
 function CliInstallPanel({

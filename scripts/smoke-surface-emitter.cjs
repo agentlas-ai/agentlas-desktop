@@ -456,4 +456,24 @@ const executablePayload = parseSurfaces(
 assert.equal(executablePayload.surfaces.length, 0);
 assert.match(executablePayload.errors.join("\n"), /no-executable-payloads/);
 
+// Deep untrusted JSON used to throw a RangeError from recursive validation.
+// The central parser must convert that exception into a fixed diagnostic,
+// remove the entire protocol block, and continue cleaning the reply.
+const deepPrivatePath = "/private/tmp/agentlas-deep-surface-secret.png";
+const deepValue = `${'{"safe":'.repeat(12_000)}0${"}".repeat(12_000)}`;
+const deepSurface = parseSurfaces([
+  "Safe text before.",
+  "<<agentlas-surface>>",
+  `{"deep":${deepValue},"rawMediaPath":${JSON.stringify(deepPrivatePath)},"version":"0.1","kind":"surface","title":"Deep Surface","domain":"qa","layout":"report","data":{},"widgets":[]}`,
+  "<</agentlas-surface>>",
+  "Safe text after.",
+].join("\n"));
+assert.equal(deepSurface.surfaces.length, 0);
+assert.equal(deepSurface.cleanedText.includes("Safe text before."), true);
+assert.equal(deepSurface.cleanedText.includes("Safe text after."), true);
+assert.equal(deepSurface.cleanedText.includes(deepPrivatePath), false);
+assert.equal(deepSurface.cleanedText.includes("<<agentlas-surface>>"), false);
+assert.match(deepSurface.errors.join("\n"), /Surface manifest could not be safely validated/);
+assert.equal(deepSurface.diagnostics.some((diagnostic) => diagnostic.code === "surface-parse-failed"), true);
+
 console.log("surface-emitter smoke passed");

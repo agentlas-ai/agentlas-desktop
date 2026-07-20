@@ -9,7 +9,7 @@ import type {
   OneValueClosureRecord,
   OneValueClosureState,
 } from "@/lib/types";
-import { formatTimestamp, type OneTaskProjection } from "@/lib/one-task-adapter";
+import type { OneTaskProjection } from "@/lib/one-task-adapter";
 import {
   ONE_SURFACE_BLOCK_TYPES,
   type OneSurfaceArtifactSummary,
@@ -39,9 +39,6 @@ import {
 } from "@shared/one-artifacts";
 import { redactSecrets } from "@shared/secret-patterns";
 import { ipc } from "@/lib/ipc";
-import { OneValueClosureCard } from "./OneValueClosureCard";
-import { OneImprovementProofCard } from "./OneImprovementProofCard";
-import { OneExperienceReuseCard } from "./OneExperienceReuseCard";
 import styles from "./OneAdaptiveResult.module.css";
 
 const DESKTOP_NATIVE_BLOCK_TYPES = new Set<OneSurfaceBlockType>([
@@ -75,13 +72,6 @@ export function OneAdaptiveResult({
   onOpenWork,
   onAcceptResult,
   acceptingResult = false,
-  valueClosure,
-  experienceReuse,
-  onManageExperience,
-  valueClosureState,
-  onValueClosureStateChange,
-  improvementProof,
-  onManageImprovementAsset,
 }: {
   manifest: OneSurfaceManifestV1 | null;
   projection: OneTaskProjection;
@@ -178,8 +168,8 @@ export function OneAdaptiveResult({
           )}
         </article>
       )}
-      {receipt && isTerminal(receipt.status) && (
-        <RunClosure receipt={receipt} projection={projection} locale={locale} hasResult={hasManifest} />
+      {receipt && isTerminal(receipt.status) && receipt.status !== "completed" && (
+        <RunClosure receipt={receipt} locale={locale} />
       )}
       {canAcceptResult && !hasManifest && (
         <section className={styles.standaloneAcceptance} aria-label={ko ? "결과 확인" : "Confirm result"}>
@@ -189,25 +179,8 @@ export function OneAdaptiveResult({
           </button>
         </section>
       )}
-      {valueClosure && valueClosureState && onValueClosureStateChange && (
-        <OneValueClosureCard
-          record={valueClosure}
-          state={valueClosureState}
-          locale={locale}
-          onStateChange={onValueClosureStateChange}
-        />
-      )}
-      {valueClosure && experienceReuse && onManageExperience && (
-        <OneExperienceReuseCard record={experienceReuse} locale={locale} onManage={onManageExperience} />
-      )}
-      {valueClosure && improvementProof && onManageImprovementAsset && (
-        <OneImprovementProofCard
-          record={improvementProof}
-          locale={locale}
-          onManageAsset={onManageImprovementAsset}
-        />
-      )}
-      {/* There is no evidence yet, so One makes no improvement claim. Missing proof stays quiet in the user surface. */}
+      {/* Value/experience/proof records keep compounding internally. They are
+          deliberately absent from the ordinary One conversation surface. */}
     </section>
   );
 }
@@ -1211,36 +1184,21 @@ function safeFallbackText(value: unknown, maxLength: number): string | null {
   return sanitizeText(text);
 }
 
-function RunClosure({ receipt, projection, locale, hasResult }: { receipt: InvocationRunReceipt; projection: OneTaskProjection; locale: "ko" | "en"; hasResult: boolean }) {
+function RunClosure({ receipt, locale }: { receipt: InvocationRunReceipt; locale: "ko" | "en" }) {
   const ko = locale === "ko";
-  const completed = receipt.status === "completed";
   const stopped = receipt.status === "cancelled";
-  const statusLabel = completed
-    ? hasResult ? (ko ? "작업 기록" : "Work record") : (ko ? "결과가 준비됐어요" : "Your result is ready")
-    : stopped ? (ko ? "여기서 멈췄어요" : "Stopped here") : (ko ? "끝내지 못했어요" : "Couldn't finish");
-  const outcome = completed
-    ? (ko
-      ? "One이 답변 준비를 마쳤어요. 게시·구매·전송을 부탁했다면 마지막 완료 화면도 확인해 주세요."
-      : "One finished preparing the result. If you asked it to publish, buy, or send something, also check the final confirmation screen.")
-    : friendlyFailureMessage(receipt.errorMessage, locale, stopped);
+  const statusLabel = stopped
+    ? (ko ? "여기서 멈췄어요" : "Stopped here")
+    : (ko ? "아직 끝내지 못했어요" : "This is not finished yet");
+  const outcome = friendlyFailureMessage(receipt.errorMessage, locale, stopped);
   return (
-    <details className={styles.closure}>
-      <summary id={`${projection.taskId}-closure-title`}>
-        <span className={styles.closureCheck} data-tone={completed ? "good" : "bad"} aria-hidden="true">{completed ? "✓" : "!"}</span>
-        <span className={styles.closureSummaryCopy}>
-          <strong>{statusLabel}</strong>
-          <small>{completed ? hasResult ? (ko ? "필요할 때만 열어보세요" : "Open only if you need it") : (ko ? "결과를 확인하고 다음 행동을 골라주세요" : "Review it and choose what to do next") : (ko ? "눌러서 이유와 다음 방법을 확인하세요" : "Open this to see why and what to try next")}</small>
-        </span>
-        <time>{formatTimestamp(receipt.finishedAt ?? receipt.updatedAt, locale)}</time>
-      </summary>
-      <div className={styles.closureDetails}>
-        <p>{outcome}</p>
-        <dl>
-          <div><dt>{ko ? "다음 할 일" : "Next"}</dt><dd>{completed ? (ko ? "결과가 마음에 들면 아래에서 마무리하세요." : "If the result looks right, finish below.") : (ko ? "남아 있는 결과를 확인한 뒤 다시 부탁해 주세요." : "Check what was saved, then ask One to try again.")}</dd></div>
-          {receipt.resultFolder && <div><dt>{ko ? "저장 위치" : "Saved in"}</dt><dd>{localLocationLabel(receipt.resultFolder, locale)}</dd></div>}
-        </dl>
+    <section className={styles.failureClosure} role="status">
+      <span className={styles.closureCheck} data-tone="bad" aria-hidden="true">!</span>
+      <div className={styles.closureSummaryCopy}>
+        <strong>{statusLabel}</strong>
+        <small>{outcome}</small>
       </div>
-    </details>
+    </section>
   );
 }
 

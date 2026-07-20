@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { app } = require("electron");
 
 const selectedCase = process.argv[2] ?? "all";
-assert.ok(["all", "lease", "chain"].includes(selectedCase), `unknown case: ${selectedCase}`);
+assert.ok(["all", "lease", "chain", "reconciliation"].includes(selectedCase), `unknown case: ${selectedCase}`);
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-automation-safety-"));
 process.env.AGENTLAS_STORE_PATH = path.join(tmp, "agentlas.sqlite");
@@ -47,6 +48,163 @@ function automationInput(name) {
     targetId: "automation-safety-agent",
     promptTemplate: `Run ${name}`,
   };
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, child]) => [key, canonical(child)]));
+  }
+  return value;
+}
+
+function graphDigest(automation) {
+  const payload = {
+    graph: automation.graph,
+    targetType: automation.targetType,
+    targetId: automation.targetId,
+    targetVersion: automation.targetVersion ?? null,
+    promptTemplate: automation.promptTemplate,
+    executionPermission: automation.executionPermission ?? "write",
+    toolMode: automation.toolMode ?? "auto",
+    hubMode: automation.hubMode ?? "hub-allowed",
+    runtimeSelection: automation.runtimeSelection ?? null,
+  };
+  return `sha256:${createHash("sha256").update(JSON.stringify(canonical(payload))).digest("hex")}`;
+}
+
+function partialGraph(produces = null) {
+  return {
+    version: 1,
+    nodes: [
+      { id: "trigger", type: "trigger", position: { x: 0, y: 0 }, config: {} },
+      {
+        id: "publish",
+        type: "action",
+        label: "Publish post",
+        position: { x: 240, y: 0 },
+        config: produces ? { produces } : {},
+      },
+    ],
+    edges: [{ id: "edge", source: "trigger", target: "publish" }],
+  };
+}
+
+async function testPartialReconciliation(db, automations) {
+  const reconciliation = require("../dist/electron/store/graph-reconciliation.js");
+  let created = automations.createAutomation({
+    ...automationInput("Legacy partial publish"),
+    graphJson: partialGraph(),
+  });
+  created = automations.pinAutomationRuntimeIfUnset(created.id, { kind: "codex" });
+  const startedAt = "2026-07-20T01:00:00.000Z";
+  db.getDb().prepare(
+    `INSERT INTO automation_runs
+       (id, automation_id, started_at, last_activity_at, status, node_states_json,
+        occurrence_id, graph_digest, checkpoint_json)
+     VALUES (?, ?, ?, ?, 'error', ?, NULL, ?, NULL)`,
+  ).run(
+    "legacy-partial-run",
+    created.id,
+    startedAt,
+    startedAt,
+    JSON.stringify({ trigger: "done", publish: "done" }),
+    graphDigest(created),
+  );
+
+  const scheduler = require("../dist/electron/automation-scheduler.js");
+  const reconciliationErrors = [];
+  const originalError = console.error;
+  console.error = (...args) => {
+    const message = args.map(String).join(" ");
+    if (message.includes("automation_partial_reconciliation_required")) reconciliationErrors.push(message);
+    else originalError(...args);
+  };
+  try {
+    await scheduler.runAutomationNow(created.id);
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(reconciliationErrors.length, 1, "the legacy partial must enter the exact reconciliation block once");
+  const view = reconciliation.getAutomationGraphReconciliation(created.id);
+  assert.ok(view, "a same-graph legacy partial must become a reconciliation view");
+  assert.match(view.occurrenceId, /^legacy-occurrence:[0-9a-f]{64}$/);
+  assert.deepEqual(view.nodes.map((node) => ({
+    nodeId: node.nodeId,
+    uncertainty: node.uncertainty,
+    outputRequired: node.outputRequired,
+  })), [{ nodeId: "publish", uncertainty: "ambiguous", outputRequired: false }]);
+
+  let scheduled = db.getDb().prepare("SELECT enabled, next_run_at FROM automations WHERE id = ?").get(created.id);
+  assert.deepEqual(scheduled, { enabled: 1, next_run_at: null }, "suspension keeps enabled but removes blind replay");
+  const attention = db.getDb().prepare(
+    "SELECT text FROM chat_messages WHERE role = 'system' AND text LIKE '%자동 재실행을 멈췄습니다%' ORDER BY created_at DESC LIMIT 1",
+  ).get();
+  assert.ok(attention, "the scheduler must explain that reconciliation paused automatic replay");
+
+  const reconcileAt = new Date("2026-07-20T02:00:00.000Z");
+  const retry = reconciliation.reconcileAutomationGraph({
+    automationId: view.automationId,
+    runId: view.runId,
+    occurrenceId: view.occurrenceId,
+    graphDigest: view.graphDigest,
+    checkpointDigest: view.checkpointDigest,
+    expectedUpdatedAt: view.updatedAt,
+    eventId: null,
+    expectedEventUpdatedAt: null,
+    decisions: [{ nodeId: "publish", resolution: "retry" }],
+    now: reconcileAt,
+  });
+  assert.equal(retry.resumeRequired, true);
+  assert.deepEqual(retry.retryNodeIds, ["publish"]);
+  const migrated = db.getDb().prepare(
+    "SELECT occurrence_id, checkpoint_json, node_states_json FROM automation_runs WHERE id = 'legacy-partial-run'",
+  ).get();
+  assert.equal(migrated.occurrence_id, view.occurrenceId);
+  assert.equal(JSON.parse(migrated.checkpoint_json).schemaVersion, "agentlas.automation-graph-checkpoint.v3");
+  assert.equal(JSON.parse(migrated.node_states_json).publish, "failed");
+  scheduled = db.getDb().prepare("SELECT enabled, next_run_at FROM automations WHERE id = ?").get(created.id);
+  assert.equal(scheduled.enabled, 1);
+  assert.ok(Date.parse(scheduled.next_run_at) > reconcileAt.getTime(), "reconciliation restores the regular schedule");
+
+  const withOutput = automations.createAutomation({
+    ...automationInput("Legacy partial output"),
+    graphJson: partialGraph("postUrl"),
+  });
+  db.getDb().prepare(
+    `INSERT INTO automation_runs
+       (id, automation_id, started_at, last_activity_at, status, node_states_json,
+        occurrence_id, graph_digest, checkpoint_json)
+     VALUES (?, ?, ?, ?, 'error', ?, ?, ?, ?)`,
+  ).run(
+    "legacy-partial-output-run",
+    withOutput.id,
+    startedAt,
+    startedAt,
+    JSON.stringify({ trigger: "done", publish: "done" }),
+    "occurrence:legacy-output",
+    graphDigest(withOutput),
+    "{damaged",
+  );
+  const outputView = reconciliation.getAutomationGraphReconciliation(withOutput.id);
+  assert.ok(outputView?.nodes[0].outputRequired);
+  assert.throws(
+    () => reconciliation.reconcileAutomationGraph({
+      automationId: outputView.automationId,
+      runId: outputView.runId,
+      occurrenceId: outputView.occurrenceId,
+      graphDigest: outputView.graphDigest,
+      checkpointDigest: outputView.checkpointDigest,
+      expectedUpdatedAt: outputView.updatedAt,
+      eventId: null,
+      expectedEventUpdatedAt: null,
+      decisions: [{ nodeId: "publish", resolution: "completed" }],
+    }),
+    /output_required:publish/,
+    "completed producer nodes require externally verified output",
+  );
 }
 
 async function testLeaseOwnership(db, automations) {
@@ -252,6 +410,9 @@ async function main() {
   }
   if (selectedCase === "all" || selectedCase === "chain") {
     await testChainCycles(automations);
+  }
+  if (selectedCase === "all" || selectedCase === "reconciliation") {
+    await testPartialReconciliation(db, automations);
   }
   console.log(`automation trigger safety contract ok (${selectedCase})`);
 }

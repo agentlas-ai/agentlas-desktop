@@ -105,6 +105,26 @@ async function main() {
       0,
       "timeout must not become a durable site+action deny",
     );
+    const cancellationController = new AbortController();
+    const cancelledApproval = browser.browserRequestApproval({
+      site: "example.com",
+      actionType: "publish",
+      summary: "publish a post",
+    }, { signal: cancellationController.signal });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(browser.listPendingBrowserApprovals().length, 1);
+    cancellationController.abort();
+    assert.equal(await cancelledApproval, "cancelled");
+    assert.equal(
+      browser.listPendingBrowserApprovals().length,
+      0,
+      "caller cancellation must remove the approval instead of leaving a stale sheet",
+    );
+    assert.equal(
+      store.getDb().prepare("SELECT COUNT(*) AS n FROM browser_permissions").get().n,
+      0,
+      "caller cancellation must never become a durable permission decision",
+    );
     assert.ok(
       browser.browserLoginArgs("/tmp/profile", "https://example.com").includes(
         "--remote-debugging-port=9333",
@@ -244,6 +264,7 @@ async function main() {
     );
     assert.match(sheet, /const req = queue\[0\] \?\? null;/, "approval UI must render FIFO head");
     assert.match(sheet, /\[\.\.\.current, r\]/, "simultaneous approvals must queue, not overwrite");
+    assert.match(sheet, /r\.expiresAt <= Date\.now\(\)/, "caller cancellation must remove the stale approval sheet");
     assert.match(sheet, /req\.expiresAt - Date\.now\(\)/, "expired sheets must auto-close");
 
     const connect = fs.readFileSync(path.join(__dirname, "../electron/browser/connect.ts"), "utf8");

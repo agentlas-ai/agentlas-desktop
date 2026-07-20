@@ -32,9 +32,12 @@ export function BrowserActionApprovalSheet() {
     const events = ipcEvents();
     if (!events) return;
     return events.onBrowserApproval((r) => {
-      setQueue((current) =>
-        current.some((item) => item.requestId === r.requestId) ? current : [...current, r],
-      );
+      setQueue((current) => {
+        if (r.expiresAt <= Date.now()) {
+          return current.filter((item) => item.requestId !== r.requestId);
+        }
+        return current.some((item) => item.requestId === r.requestId) ? current : [...current, r];
+      });
     });
   }, []);
 

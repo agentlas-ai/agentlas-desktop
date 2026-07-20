@@ -19,8 +19,8 @@ const engine = read("electron/hephaestus/root.ts");
 before(engine, "candidates.push(process.env.HEPHAESTUS_RUNTIME_ROOT)", 'candidates.push(path.join(os.homedir(), ".agentlas", "runtime", "current"))', "Hephaestus override priority");
 before(engine, 'candidates.push(path.join(os.homedir(), ".agentlas", "runtime", "current"))', 'path.join(process.resourcesPath, "Hephaestus")', "Hephaestus global priority");
 
-// Runtime candidates: explicit login-shell PATH is tried first (bare command), while fallback
-// additions prefer user standalone over Agentlas npm and stale Homebrew/npm installs.
+// Runtime candidate arrays retain their portable fallbacks. The shared spawn environment below
+// makes an Agentlas-owned, verified install win over a stale bare shim from login-shell PATH.
 for (const [rel, bare, standalone, managed, system] of [
   ["electron/runtime/codex.ts", '"codex",', 'path.join(os.homedir(), ".local/bin/codex")', 'path.join(os.homedir(), ".agentlas/npm/bin/codex")', '"/opt/homebrew/bin/codex"'],
   ["electron/runtime/claude-code.ts", '"claude",', 'path.join(os.homedir(), ".local/bin/claude")', 'path.join(os.homedir(), ".agentlas/npm/bin/claude")', '"/opt/homebrew/bin/claude"'],
@@ -32,15 +32,19 @@ for (const [rel, bare, standalone, managed, system] of [
 }
 
 const execSource = read("electron/runtime/exec.ts");
-before(execSource, 'path.join(home, ".local/bin")', 'path.join(home, ".agentlas/npm/bin")', "GUI PATH standalone priority");
-before(execSource, 'path.join(home, ".agentlas/npm/bin")', '"/opt/homebrew/bin"', "GUI PATH managed-before-system priority");
+assert.match(execSource, /const merged = Array\.from\(new Set\(\[[\s\S]{0,120}\.\.\.\(managed \? \[managed\] : \[\]\),[\s\S]{0,80}\.\.\.existing/,
+  "GUI PATH must put the verified Agentlas-managed prefix before stale existing shims");
 
 // Exercise the compiled PATH merger as well as guarding source order.
 const { withCliPath } = require("../dist/electron/runtime/exec.js");
 const shellPath = ["/custom/login/bin", "/opt/homebrew/bin"].join(path.delimiter);
 const respected = withCliPath({ PATH: shellPath });
-assert.equal(respected.PATH.split(path.delimiter)[0], "/custom/login/bin");
-assert.equal(respected.PATH.split(path.delimiter)[1], "/opt/homebrew/bin");
+const managedDir = process.platform === "win32"
+  ? path.join(os.homedir(), ".agentlas", "npm")
+  : path.join(os.homedir(), ".agentlas", "npm", "bin");
+assert.equal(respected.PATH.split(path.delimiter)[0], managedDir);
+assert.equal(respected.PATH.split(path.delimiter)[1], "/custom/login/bin");
+assert.equal(respected.PATH.split(path.delimiter)[2], "/opt/homebrew/bin");
 
 const minimal = withCliPath({ PATH: ["/usr/bin", "/bin"].join(path.delimiter) });
 const dirs = minimal.PATH.split(path.delimiter);
@@ -123,6 +127,29 @@ assert.match(installer, /updateSelfManagedGemini\(gemini\)/);
 assert.match(installer, /@google\/gemini-cli/);
 assert.equal(installer.includes("function installAntigravityViaScript"), false);
 assert.match(installer, /kind === "codex".*runBinary\(existing, \["update"\]/s);
+assert.match(installer, /@anthropic-ai\/claude-code"\s*, version: "2\.1\.214"/);
+assert.match(installer, /@openai\/codex"\s*, version: "0\.144\.6"/);
+assert.match(installer, /@google\/gemini-cli"\s*, version: "0\.51\.0"/);
+assert.match(installer, /@xai-official\/grok"\s*, version: "0\.2\.103"/);
+assert.match(installer, /resolveManagedNodeRuntime\(\)/, "Windows no-Node installs must use the bundled verified runtime");
+assert.match(installer, /NPM_CONFIG_REGISTRY: OFFICIAL_NPM_REGISTRY/, "managed npm must use the official registry explicitly");
+assert.match(installer, /const installInFlight = new Map/, "multiple Connect clicks must coalesce into one install");
+assert.doesNotMatch(installer, /curl[^\n]*\|\s*bash|irm[^\n]*\|\s*iex/, "Connect must not execute mutable remote scripts");
+assert.doesNotMatch(installer, /shell:\s*true\s*[,}]/, "Windows login must not compose a cmd.exe shell string");
+assert.match(installer, /spawn\(powershell,[\s\S]{0,500}detached: true/, "Windows login must open the provider flow in PowerShell directly");
+
+const managedNode = read("electron/runtime/managed-node.ts");
+assert.match(managedNode, /MANAGED_NODE_VERSION = "24\.18\.0"/);
+assert.match(managedNode, /managed Node runtime checksum verification failed/);
+assert.match(managedNode, /AGENTLAS_CLI_BOOTSTRAP_TEST === "1"/, "runtime-root injection must stay test-gated");
+const nodeFetcher = read("scripts/fetch-node-runtime.mjs");
+assert.match(nodeFetcher, /node-v\$\{NODE_VERSION\}-win-x64\.zip/);
+assert.match(nodeFetcher, /0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821/);
+assert.match(nodeFetcher, /Expand-Archive/, "Windows packaging must use its built-in PowerShell extractor");
+const builderConfig = read("electron-builder.yml");
+assert.match(builderConfig, /win:[\s\S]*from: build-resources\/node-runtime[\s\S]*to: node-runtime/);
+const releaseWorkflow = read(".github/workflows/release.yml");
+assert.match(releaseWorkflow, /runner\.os == 'Windows'[\s\S]{0,180}npm run fetch:node/);
 
 const installRuntime = require("../dist/electron/runtime/install-cli.js");
 assert.deepEqual(
@@ -168,7 +195,7 @@ async function verifyGeminiBinaryFixtures() {
 }
 
 verifyGeminiBinaryFixtures()
-  .then(() => console.log(JSON.stringify({ ok: true, checks: 41 }, null, 2)))
+  .then(() => console.log(JSON.stringify({ ok: true, checks: 59 }, null, 2)))
   .catch((error) => {
     console.error(error);
     process.exitCode = 1;

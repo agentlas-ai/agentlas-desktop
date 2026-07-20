@@ -233,7 +233,9 @@ export function OneSuggestionReviewHandoffBanner({
     return <section className={styles.error} role="alert" data-one-review-state="blocked">
       <strong>{ko ? "초안을 열지 않았어요" : "Draft not opened"}</strong>
       <span>{error}</span>
-      <small>{ko ? "아무것도 저장하거나 시작하거나 공개하지 않았습니다." : "Nothing was saved, started, or published."}</small>
+      <small>{ko
+        ? "아무것도 저장하거나 시작하거나 공개하지 않았습니다. 일정도 프롬프트도 대상도 미리 채우지 않았고, 게시도 시작하지 않았어요."
+        : "Nothing was saved, started, or published: no schedule, prompt, or target prefilled, and publishing not started."}</small>
     </section>;
   }
   if (!handoff) {

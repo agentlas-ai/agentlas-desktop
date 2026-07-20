@@ -642,6 +642,7 @@ export default function SiteStudioPage() {
               setView("studio");
             }
           }}
+          onExit={() => navigate("/dashboard")}
           onDeleteProject={(nextProjectId) => void deleteProject(nextProjectId)}
           onLoadAgentAppThumbnail={async (nextProjectId) => {
             const result = await ipc()?.site?.agentAppThumbnail?.({ projectId: nextProjectId });
@@ -715,6 +716,14 @@ export default function SiteStudioPage() {
         <button
           type="button"
           style={backLink}
+          onClick={() => navigate("/dashboard")}
+        >
+          <span aria-hidden="true">←</span> Work
+        </button>
+        <span aria-hidden="true" style={{ color: "var(--paper-edge)" }}>·</span>
+        <button
+          type="button"
+          style={backLink}
           disabled={siteBusy}
           onClick={() => {
             if (operationRef.current) return;
@@ -722,7 +731,7 @@ export default function SiteStudioPage() {
             void refreshProjects();
           }}
         >
-          ← {ko ? "홈" : "Home"}
+          <span aria-hidden="true">←</span> Site
         </button>
         <span style={wordmark}>{project?.name ?? (ko ? "사이트" : "Site")}</span>
         {activeScreen && <span style={projectContext}>{ko ? `${screens.length}개 버전` : `${screens.length} versions`}</span>}

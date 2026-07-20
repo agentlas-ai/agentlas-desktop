@@ -4,15 +4,15 @@
 }
 
 .trigger {
-  min-height: 44px;
+  min-height: 36px;
   width: 100%;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   border: 0;
   border-radius: 10px;
-  padding: 6px 8px;
-  background: transparent;
+  padding: 0 10px;
+  background: #eff0f1;
   color: inherit;
   font: inherit;
   text-align: left;
@@ -21,8 +21,8 @@
 
 .trigger:hover,
 .trigger:focus-visible {
-  background: color-mix(in srgb, currentColor 6%, transparent);
-  outline: none;
+  background: #e7e9ea;
+  outline: 2px solid transparent;
 }
 
 .mark {
@@ -43,7 +43,6 @@
 .copy {
   min-width: 0;
   display: grid;
-  gap: 1px;
   flex: 1;
 }
 
@@ -80,8 +79,8 @@
   z-index: 220;
   top: calc(100% + 7px);
   left: 0;
-  width: 100%;
-  min-width: 0;
+  width: 238px;
+  min-width: min(238px, calc(100vw - 24px));
   max-width: calc(100vw - 24px);
   padding: 6px;
   border: 1px solid rgba(15, 23, 42, 0.1);
@@ -92,11 +91,12 @@
 }
 
 .option {
-  min-height: 54px;
+  min-height: 62px;
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 4px 12px;
-  padding: 9px 10px;
+  grid-template-columns: minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 11px;
   border-radius: 10px;
   color: inherit;
   overflow: hidden;
@@ -109,7 +109,13 @@
   outline: none;
 }
 
-.option strong {
+.optionCopy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.optionCopy strong {
   overflow: hidden;
   font-size: 14px;
   line-height: 20px;
@@ -117,8 +123,7 @@
   white-space: nowrap;
 }
 
-.option span {
-  grid-column: 1;
+.optionCopy small {
   min-width: 0;
   overflow: hidden;
   color: #6c7178;
@@ -130,8 +135,8 @@
 
 .check {
   grid-column: 2;
-  grid-row: 1 / span 2;
   align-self: center;
+  justify-self: center;
   color: #4f692d;
   font-size: 15px;
   font-weight: 800;

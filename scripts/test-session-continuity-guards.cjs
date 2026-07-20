@@ -15,8 +15,8 @@ assert.match(
 );
 assert.match(
   clientTs,
-  /const hasPriorContext = req\.agentAppMode \? false : hasPriorConversationContext\(chat\.id\);/,
-  "main invocation must evaluate prior chat context before routing while keeping stateless Agent App requests isolated",
+  /const hadPriorConversationContext = req\.agentAppMode\s*\? false\s*:\s*hasPriorConversationContext\(chat\.id\);[\s\S]*const hasPriorContext = hadPriorConversationContext;/,
+  "main invocation must freeze prior chat context before persisting the new turn while keeping stateless Agent App requests isolated",
 );
 assert.match(
   clientTs,
@@ -25,8 +25,8 @@ assert.match(
 );
 assert.match(
   clientTs,
-  /!hasPriorContext &&\s*isEscalationWorthyPrompt\(req\.userPrompt\)/,
-  "existing-chat follow-up turns must not trigger fresh dynamic router escalation",
+  /shouldAutoEngageNetworkWorkforce\(\{[\s\S]*?hasPriorContext,/,
+  "dynamic workforce routing must receive the frozen prior-context guard",
 );
 assert.match(
   clientTs,
@@ -40,9 +40,9 @@ assert.match(
 );
 
 const routeOnlyCalls = [...clientTs.matchAll(/routeOnly\(([^,]+),/g)].map((match) => match[1].trim());
-assert.ok(routeOnlyCalls.length >= 2, "expected main invocation routeOnly calls to be present");
+assert.ok(routeOnlyCalls.length >= 1, "expected the explicit network routeOnly call to be present");
 for (const arg of routeOnlyCalls) {
-  assert.equal(arg, "routingQuery", `main routeOnly call must use contextual routingQuery, got ${arg}`);
+  assert.equal(arg, "explicitNetworkGoal", `explicit network routing must use the redacted explicit goal, got ${arg}`);
 }
 
 assert.match(

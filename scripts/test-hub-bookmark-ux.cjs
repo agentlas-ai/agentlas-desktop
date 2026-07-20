@@ -26,6 +26,7 @@ const agentGroupsPage = read("renderer/app/(shell)/library/agent-groups/page.tsx
 const agentGroupsStore = read("electron/store/agent-groups.ts");
 const marketplaceSource = read("electron/marketplace/mcp-source.ts");
 const agentsPage = read("renderer/app/(shell)/library/agents/page.tsx");
+const globalCss = read("renderer/app/globals.css");
 
 assert.match(events, /agentlas:hub-bookmarks-changed/, "bookmark changes need one renderer event contract");
 assert.match(events, /listing\.callable === true/, "Hub call candidates must fail closed unless explicitly callable");
@@ -118,6 +119,13 @@ assert.match(hubVerification, /static security scan result, not a creator reputa
 assert.match(hubVerification, /listing\.callable === true[\s\S]*listing\.kind === "cloud-callable"/, "Hub command chips must fail closed on explicit callability");
 assert.match(market, /hubVerificationFacts\(listing, locale\)/, "Hub cards must render measured invocation facts");
 assert.match(market, /24시간 사용 · \$\{perCallCredits\} 크레딧/, "Hub cards must explain the paid 24-hour usage term, not show an unexplained credit number");
+assert.match(market, /className="hub-credit-orb"[^>]*aria-hidden="true">\{perCallCredits\}/, "callable Hub cards must show only the credit number in the compact header chip");
+assert.match(market, /className="hub-credit-orb-wrap"[\s\S]{0,180}tabIndex=\{0\}[\s\S]{0,260}aria-describedby=/, "the compact credit chip must expose its tooltip to keyboard users");
+assert.match(market, /className="hub-credit-tooltip" role="tooltip"/, "the full 24-hour price explanation must use an explicit tooltip");
+assert.match(market, /const creditTooltipId = `hub-credit-\$\{entityKind\}-\$\{listing\.slug\}`/, "credit tooltip IDs must distinguish same-slug agents and teams");
+assert.match(globalCss, /\.hub-card-head \{[\s\S]{0,120}grid-template-columns: auto minmax\(0, 1fr\) auto;/, "the compact credit column must not reserve a sentence-width max-content track");
+assert.match(globalCss, /\.hub-credit-orb-wrap:hover \.hub-credit-tooltip,[\s\S]{0,120}\.hub-credit-orb-wrap:focus-visible \.hub-credit-tooltip/, "credit terms must appear on hover and keyboard focus");
+assert.doesNotMatch(globalCss, /\.hub-card-title \{[\s\S]{0,420}-webkit-line-clamp/, "Hub agent titles must not be forcibly ellipsized to two lines");
 assert.match(market, /같은 이름의 로컬 에이전트 있음/, "a same-name local agent must not masquerade as owned Hub access");
 assert.doesNotMatch(market, /\{ko \? "보유" : "Owned"\}/, "Hub cards must not label a same-slug local agent as owned Hub access");
 assert.match(market, /채팅에 붙여넣기/, "callable Hub cards need a human action instead of exposing only an internal call command");

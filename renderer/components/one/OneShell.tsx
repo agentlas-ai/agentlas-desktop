@@ -195,8 +195,8 @@ function isResultContinuationMessage(message: UiMessage): boolean {
 function visibleOneMessageText(message: UiMessage): string {
   if (isResultContinuationMessage(message)) {
     return detectOneTextLocale(message.text) === "ko"
-      ? "이전 결과를 참고해 새 일로 시작했어요."
-      : "One started this as new work using the previous result for context.";
+      ? "이전 결과를 참고해 이 대화에서 이어서 진행해요."
+      : "One is continuing in this conversation with the earlier result in context.";
   }
   if (message.role !== "assistant") return message.text;
   const extracted = extractQuestions(message.text, message.id).text;
@@ -1246,10 +1246,10 @@ export function OneShell() {
       setError(ko ? "Agentlas Desktop에 연결되지 않았습니다." : "Agentlas Desktop is not connected.");
       return;
     }
-    const canContinueFromResult = Boolean(
-      selected?.chatId && (selected.canonicalStatus === "partial" || selected.canonicalStatus === "completed"),
+    const canContinueInPlace = Boolean(
+      selected?.chatId && ["partial", "completed", "failed"].includes(selected.canonicalStatus ?? ""),
     );
-    if (selected && (!selected.chatId || (!selected.truth.mayStartExecution && !canContinueFromResult))) {
+    if (selected && (!selected.chatId || (!selected.truth.mayStartExecution && !canContinueInPlace))) {
       setError(ko
         ? "이 일은 지금 One에서 이어갈 수 없습니다. Work에서 현재 상태와 권한을 확인해주세요."
         : "This work cannot continue in One right now. Open Work to review its current state and permissions.");
@@ -1334,28 +1334,8 @@ export function OneShell() {
     setTeamPreflightBusy(true);
     try {
       if (selected?.chatId) {
-        if (canContinueFromResult) {
-          const chat = await api.tasks.continueFromResult({
-            taskId: selected.taskId,
-            expectedVersion: selected.canonicalVersion,
-            userPrompt: value,
-          });
-          const history = await api.invoke.history(chat.id).catch(() => []);
-          selectedTaskIdRef.current = null;
-          selectedConversationIdRef.current = chat.id;
-          setSelected(null);
-          setConversation(chat);
-          setMessages(toUiMessages(history));
-          setSurface(null);
-          setReceipt(null);
-          setCommittedAnswers([]);
-          setTeamPreflight(null);
-          setPendingTeamPrompt(null);
-          router.replace(`/one?chat=${encodeURIComponent(chat.id)}`);
-          await resolveActivationConcern(chat.id);
-          await prepareOrRun(chat.id, null, null, "conversation");
-          return;
-        }
+        // A result is one turn in this conversation, not a reason to fork a new
+        // chat. Reusing the same chatId also reuses the provider CLI session.
         await prepareOrRun(selected.chatId, selected.taskId, selected.canonicalVersion, "task");
         return;
       }
@@ -1719,11 +1699,11 @@ export function OneShell() {
       setAcceptingResult(false);
     }
   }, [acceptingResult, receipt, refreshAll, selected]);
-  const selectedCanContinueFromResult = Boolean(
-    selected?.chatId && (selected.canonicalStatus === "partial" || selected.canonicalStatus === "completed"),
+  const selectedCanContinueInPlace = Boolean(
+    selected?.chatId && ["partial", "completed", "failed"].includes(selected.canonicalStatus ?? ""),
   );
   const selectedReadOnly = Boolean(
-    selected && (!selected.chatId || (!selected.truth.mayStartExecution && !selectedCanContinueFromResult)),
+    selected && (!selected.chatId || (!selected.truth.mayStartExecution && !selectedCanContinueInPlace)),
   );
   const teamDecisionPending = Boolean(
     teamPreflight
@@ -2455,7 +2435,6 @@ export function OneShell() {
                 aria-hidden="true"
                 onChange={(event) => { if (event.target.files?.length) void addAttachmentFiles(event.target.files); }}
               />
-              <span className={styles.composerLabel}>{ko ? "One에게 말하기" : "Message One"}</span>
               <textarea
                 ref={composerInputRef}
                 rows={1}
@@ -2508,10 +2487,8 @@ export function OneShell() {
                 </div>
               </div>
             </form>
-            {(selectedReadOnly || selectedCanContinueFromResult) && (
-              <p className={styles.composerNote}>{selectedReadOnly
-                ? (ko ? "이 일은 지금 보기만 할 수 있어요." : "This work is view-only right now.")
-                : (ko ? "다음 메시지는 새 일로 시작해요." : "Your next message starts new work.")}</p>
+            {selectedReadOnly && (
+              <p className={styles.composerNote}>{ko ? "이 일은 지금 보기만 할 수 있어요." : "This work is view-only right now."}</p>
             )}
           </div>
 
@@ -2571,6 +2548,12 @@ export function OneShell() {
         onClose={closeMemory}
         onStateChange={handleMemoryChange}
         onUseOnceReady={handleMemoryUseOnceReady}
+        valueClosure={selectedValueClosure}
+        experienceReuse={selectedExperienceReuse}
+        improvementProof={selectedImprovementProof}
+        valueClosureState={oneValueClosures}
+        onValueClosureStateChange={handleValueClosuresChange}
+        onManageImprovementAsset={manageImprovementAsset}
       />
       <OneFeatureIntro
         eligible={introEligible}
@@ -2580,6 +2563,8 @@ export function OneShell() {
         onResolve={acknowledgeOneIntro}
         onOpenOne={() => router.push("/one")}
         onKeepWork={() => undefined}
+        briefingAvailable={Boolean(briefingSnapshot?.candidate)}
+        onConnectMobile={() => router.push("/settings")}
       />
     </div>
   );

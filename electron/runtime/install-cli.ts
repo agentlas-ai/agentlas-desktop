@@ -12,7 +12,7 @@ import path from "node:path";
 import { spawnCli } from "./exec";
 import { resolveManagedNodeRuntime, type ManagedNodeRuntime } from "./managed-node";
 
-export type InstallableCli = "claude-code" | "codex" | "gemini" | "grok";
+export type InstallableCli = "claude-code" | "codex" | "gemini" | "kimi" | "grok";
 
 /**
  * 고정 공급망 화이트리스트. Desktop 릴리스가 검증한 정확한 공식 패키지만 설치하고,
@@ -29,6 +29,9 @@ const CLI_PLAN: Record<InstallableCli, {
   // 공식 Gemini CLI가 Google OAuth + 전역 extension/skills/MCP를 모두 지원한다.
   // 기존 Antigravity(agy)는 이미 설치된 머신의 호환 폴백으로만 감지한다.
   gemini: { pkg: "@google/gemini-cli", version: "0.51.0", loginArgs: [], bin: "gemini" },
+  // Official Moonshot Kimi Code CLI. `kimi login` opens the device-code OAuth
+  // flow and does not require the user to create an API key.
+  kimi: { pkg: "@moonshot-ai/kimi-code", version: "0.28.0", loginArgs: ["login"], bin: "kimi" },
   // Official xAI Grok Build CLI. Primary auth is browser OAuth; API key remains a headless fallback.
   grok: { pkg: "@xai-official/grok", version: "0.2.103", loginArgs: ["login"], bin: "grok" },
 };
@@ -55,6 +58,7 @@ const EXTRA_BIN_DIRS = [
   path.join(os.homedir(), ".claude", "local"),
   path.join(os.homedir(), ".codex", "bin"),
   path.join(os.homedir(), ".gemini", "bin"),
+  path.join(os.homedir(), ".kimi-code", "bin"),
   path.join(os.homedir(), ".grok", "bin"),
   path.join(os.homedir(), ".bun", "bin"),
   "/opt/homebrew/bin",
@@ -616,6 +620,8 @@ export function updateCli(kind: InstallableCli): Promise<CliActionResult> {
   if (kind === "claude-code") return runBinary(existing, ["update"], 2 * 60 * 1000);
   if (kind === "codex") return runBinary(existing, ["update"], 2 * 60 * 1000);
   if (kind === "grok") return runBinary(existing, ["update"], 2 * 60 * 1000);
+  // The official Kimi CLI has no stable self-update command. Agentlas-owned
+  // installs were handled above; external installs remain user-owned.
   return Promise.resolve({ ok: true, message: `self-managed install: ${existing} — update skipped` });
 }
 

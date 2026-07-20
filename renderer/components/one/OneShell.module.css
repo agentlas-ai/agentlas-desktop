@@ -1083,15 +1083,12 @@
 
 .composer {
   width: min(920px, 100%);
-  min-height: 82px;
+  min-height: 64px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-areas:
-    "label label label"
-    "tools input actions";
-  align-items: end;
+  grid-template-areas: "tools input actions";
+  align-items: center;
   column-gap: 4px;
-  row-gap: 3px;
   margin: 0 auto;
   padding: 10px;
   border: 1px solid #e0e2e3;
@@ -1111,21 +1108,13 @@
   white-space: nowrap;
 }
 
-.composerLabel {
-  grid-area: label;
-  padding: 0 2px;
-  color: #34383b;
-  font-size: 12px;
-  font-weight: 570;
-  line-height: 1.4;
-}
-
 .composerBar {
   display: contents;
 }
 
 .composerTools {
   grid-area: tools;
+  align-self: end;
   display: flex;
   align-items: center;
   gap: 1px;
@@ -1133,6 +1122,7 @@
 
 .composerActions {
   grid-area: actions;
+  align-self: end;
   display: flex;
   align-items: center;
   gap: 2px;
@@ -1165,7 +1155,8 @@
   max-height: 210px;
   min-height: 24px;
   height: 24px;
-  padding: 3px 2px 2px;
+  align-self: center;
+  padding: 2px 6px 1px;
   resize: none;
   border: 0;
   background: transparent;

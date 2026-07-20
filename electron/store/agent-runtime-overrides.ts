@@ -27,7 +27,7 @@ export interface RuntimeOverrideTarget {
 }
 
 const VALID_SCOPES = new Set<AgentRuntimeOverrideScope>(["agent", "firm", "division"]);
-const VALID_KINDS = new Set<RuntimeKind>(["claude-code", "codex", "gemini", "byok", "ollama"]);
+const VALID_KINDS = new Set<RuntimeKind>(["claude-code", "codex", "gemini", "kimi", "byok", "ollama"]);
 
 function cleanText(value: string | null | undefined): string | null {
   const trimmed = value?.trim();

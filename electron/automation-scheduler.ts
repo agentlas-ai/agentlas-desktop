@@ -54,6 +54,7 @@ import { recoverStaleAutomationRuns } from "./store/db";
 import { detectRuntimes } from "./runtime/detect";
 import { pickActive } from "./runtime/selection";
 import { synthesizeLegacyGraph } from "./automation-emitter";
+import { suspendAutomationForGraphReconciliation } from "./store/graph-reconciliation";
 import { getSource as getMarketSource } from "./marketplace";
 import type {
   TriggerDeliveryHooks,
@@ -401,12 +402,18 @@ function recordAutomationAttention(
       chat.id,
       "system",
       `${headline}: ${detail.slice(0, 500)}\n${persisted?.enabled
-        ? `🔁 오류 때문에 자동화를 끄지 않았습니다.${persisted.nextRunAt ? ` 다음 재시도: ${persisted.nextRunAt}` : ""}`
+        ? requiresGraphReconciliation(detail)
+          ? "⏸️ 자동화는 켜 둔 채 자동 재실행을 멈췄습니다. 실제 외부 상태를 확인해 완료 또는 재시도를 확정하면 이 occurrence만 안전하게 이어갑니다."
+          : `🔁 오류 때문에 자동화를 끄지 않았습니다.${persisted.nextRunAt ? ` 다음 재시도: ${persisted.nextRunAt}` : ""}`
         : "⏹️ 명시한 종료 시각 또는 완료 횟수 정책에 따라 예약이 종료됐습니다."}`,
     );
   } catch (error) {
     console.error("[automation] attention message failed:", error);
   }
+}
+
+function requiresGraphReconciliation(detail: string | null | undefined): boolean {
+  return /(?:partial_reconciliation_required|ambiguous_side_effect|automation_partial_graph_changed)/i.test(detail ?? "");
 }
 
 async function runOne(
@@ -861,6 +868,17 @@ async function runOne(
           console.error("[automation] markAutomationRun failed:", err);
           break;
         }
+      }
+    }
+    if (
+      !parentMissing && !leaseOwnershipLost &&
+      (runStatus === "blocked" || runStatus === "partial") &&
+      requiresGraphReconciliation(runError)
+    ) {
+      try {
+        suspendAutomationForGraphReconciliation(a.id);
+      } catch (error) {
+        console.error("[automation] graph reconciliation suspension failed:", error);
       }
     }
     // 실패 피드백·수리 — run_history 기록(markAutomationRun) 이후에 호출해야

@@ -24,6 +24,8 @@ export function OneFeatureIntro({
   onResolve,
   onOpenOne,
   onKeepWork,
+  briefingAvailable = false,
+  onConnectMobile,
 }: {
   eligible: boolean;
   needsAcknowledgement: boolean;
@@ -32,6 +34,13 @@ export function OneFeatureIntro({
   onResolve: (resolution: OneFeatureIntroResolution) => void | Promise<void>;
   onOpenOne: () => void;
   onKeepWork: () => void;
+  /**
+   * AC-022.4: the last slide must lead to a real One Briefing or to Mobile
+   * pairing, never to a generic "get started". The caller owns the truth about
+   * whether a briefing actually exists right now.
+   */
+  briefingAvailable?: boolean;
+  onConnectMobile?: () => void;
 }) {
   const ko = locale === "ko";
   const slides = useMemo<IntroSlide[]>(
@@ -172,9 +181,16 @@ export function OneFeatureIntro({
                 type="button"
                 className={styles.buttonPrimary}
                 disabled={resolving}
-                onClick={() => void finish("opened_one", onOpenOne)}
+                onClick={() => void finish(
+                  "opened_one",
+                  briefingAvailable || !onConnectMobile ? onOpenOne : onConnectMobile,
+                )}
               >
-                {ko ? "One 시작하기" : "Start with One"}
+                {briefingAvailable
+                  ? (ko ? "내 브리핑 열기" : "Open my briefing")
+                  : onConnectMobile
+                    ? (ko ? "Mobile 연결하기" : "Connect Mobile")
+                    : (ko ? "One 열기" : "Open One")}
               </button>
             )}
           </div>

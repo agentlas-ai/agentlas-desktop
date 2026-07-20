@@ -51,6 +51,7 @@ type SiteLandingProps = {
     agentAppTarget?: SiteAgentAppTargetRef;
   }) => void;
   onOpenProject: (project: SiteProjectPublicMeta) => void;
+  onExit: () => void;
   onDeleteProject: (projectId: string) => void;
   /** Main owns thumbnail validation and reading. Only visible cards request image data. */
   onLoadAgentAppThumbnail?: (projectId: string) => Promise<SiteAgentAppThumbnailResult>;
@@ -237,6 +238,7 @@ export function SiteLanding({
   agentAppMcpLiveStates,
   onCreate,
   onOpenProject,
+  onExit,
   onDeleteProject,
   onLoadAgentAppThumbnail,
   onPublishProject,
@@ -439,9 +441,14 @@ export function SiteLanding({
   return (
     <main className={styles.root}>
       <header className={styles.header}>
-        <div className={styles.brand}>
-          <span className={styles.brandMark} aria-hidden="true"><i /><i /><i /></span>
-          <span><strong>Agentlas Site</strong><small>Build interfaces around intelligence</small></span>
+        <div className={styles.headerStart}>
+          <button type="button" className={styles.exitButton} onClick={onExit}>
+            <span aria-hidden="true">←</span> Work
+          </button>
+          <div className={styles.brand}>
+            <span className={styles.brandMark} aria-hidden="true"><i /><i /><i /></span>
+            <span><strong>Agentlas Site</strong><small>Build interfaces around intelligence</small></span>
+          </div>
         </div>
         <div className={styles.headerActions}>
           {selectedAgentApp && <span className={styles.selectedProject}>{selectedAgentApp.agentAppTarget?.name || selectedAgentApp.name}</span>}

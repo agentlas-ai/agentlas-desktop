@@ -491,6 +491,11 @@ const SEND_RE = /(publish|\bpost\b|\bsend\b|submit|tweet|retweet|\bshare\b|reply
 const PUBLISH_RE = /(publish|\bpost\b|tweet|retweet|게시|공개)/i;
 const DELETE_RE = /(delete|remove|destroy|unsubscribe|삭제|제거|탈퇴)/i;
 const SUBMIT_KEY_RE = /(?:^|[+\s])(enter|return|numpadenter)(?:$|[+\s])/i;
+// Opening a composer or selecting draft media is reversible. Treating labels
+// such as "New post" as the final publish action stalls the file chooser behind
+// an approval sheet before the user can even prepare the draft.
+const DRAFT_STAGE_RE = /(?:\b(?:new|create|compose|start)\s+(?:a\s+)?(?:new\s+)?(?:post|reel|story)\b|\b(?:add|choose|select|upload)\s+(?:media|photo|video|file|from\s+computer)\b|(?:새로운?|새)\s*(?:게시물|릴스|스토리)|(?:게시물|릴스|스토리)\s*(?:만들기|작성|추가)|컴퓨터에서\s*선택|파일\s*(?:선택|첨부))/i;
+const EXPLICIT_FINALIZE_RE = /(?:\bpublish\b|\bshare\b|\bpost\s+now\b|\bsend\b|\bsubmit\b|게시하기|공유하기|전송하기|제출하기)/i;
 
 function actionFromIntent(text, fallback = null) {
   if (PAY_RE.test(text)) return 'payment';
@@ -512,6 +517,7 @@ function intentText(name, args, currentUrl = '') {
 function classifyAction(name, args, currentUrl = '') {
   const input = args && typeof args === 'object' ? args : {};
   const intent = intentText(name, input, currentUrl);
+  const controlIntent = intentText(name, input, '');
   let allText = '';
   try { allText = JSON.stringify(input).toLowerCase(); } catch (e) { allText = ''; }
 
@@ -534,8 +540,19 @@ function classifyAction(name, args, currentUrl = '') {
   if (name === 'browser_navigate' || name === 'browser_navigate_back') {
     return PAY_RE.test(allText) ? 'payment' : null;
   }
-  if (name === 'browser_click' || name === 'browser_file_upload') {
-    return actionFromIntent(intent + ' ' + allText);
+  if (name === 'browser_file_upload') {
+    // Playwright only stages the selected file in the page's draft flow. The
+    // irreversible Share/Publish click remains independently approval-gated.
+    // File names and parent directories may legitimately contain "post".
+    return null;
+  }
+  if (name === 'browser_click') {
+    // The page URL is trusted only for payment context. A Threads/Instagram URL
+    // containing /post/ must not turn every harmless click into a publish.
+    if (PAY_RE.test(intent)) return 'payment';
+    if (DELETE_RE.test(controlIntent)) return 'delete';
+    if (DRAFT_STAGE_RE.test(controlIntent) && !EXPLICIT_FINALIZE_RE.test(controlIntent)) return null;
+    return actionFromIntent(controlIntent + ' ' + allText);
   }
   return null;
 }
@@ -554,6 +571,47 @@ function approvalContextUrl(name, args, observedUrl) {
   const input = args && typeof args === 'object' ? args : {};
   if (name === 'browser_navigate' && typeof input.url === 'string' && input.url.trim()) return input.url.trim();
   return typeof observedUrl === 'string' ? observedUrl.trim() : '';
+}
+`;
+
+/**
+ * Request lifecycle shared by the materialized stdio proxy and regression
+ * tests. MCP clients can cancel a tools/call while the approval sheet is open;
+ * the original action must never be forwarded after that cancellation.
+ */
+export const BROWSER_GATE_LIFECYCLE_SOURCE = String.raw`
+function createGateLifecycle() {
+  const pending = new Map();
+  return {
+    begin(requestId) {
+      const previous = pending.get(requestId);
+      if (previous) previous.abort();
+      const controller = new AbortController();
+      pending.set(requestId, controller);
+      return controller;
+    },
+    settle(requestId, controller) {
+      if (pending.get(requestId) !== controller) return false;
+      pending.delete(requestId);
+      return !controller.signal.aborted;
+    },
+    cancel(requestId) {
+      const controller = pending.get(requestId);
+      if (!controller) return false;
+      pending.delete(requestId);
+      controller.abort();
+      return true;
+    },
+    cancelAll() {
+      for (const controller of pending.values()) controller.abort();
+      pending.clear();
+    },
+    size() { return pending.size; },
+  };
+}
+function cancelledRequestId(message) {
+  if (!message || message.method !== 'notifications/cancelled' || !message.params) return null;
+  return message.params.requestId ?? null;
 }
 `;
 
@@ -901,20 +959,34 @@ function readCdpPageUrl() {
 function readApprovalInfo() {
   try { if (!APPROVAL_FILE || !path.isAbsolute(APPROVAL_FILE) || !fs.existsSync(APPROVAL_FILE)) return null; return JSON.parse(fs.readFileSync(APPROVAL_FILE, 'utf8')); } catch (e) { return null; }
 }
-function requestApproval(site, actionType, summary) {
+function requestApproval(site, actionType, summary, signal) {
   return new Promise((resolve) => {
     const autonomy = process.env.AGENTLAS_BROWSER_AUTONOMY || 'gated';
     // trust는 일반 반복 작업만 무인 복구한다. 결제와 임의 코드는 환경값만으로
     // 승인할 수 없는 secure checkpoint이며 승인 UI/서버가 없으면 fail-closed다.
     const trustFallback = autonomy === 'trust' && actionType !== 'payment' && actionType !== 'unsafe-code';
+    let req = null;
+    let settled = false;
+    const finish = (decision) => {
+      if (settled) return;
+      settled = true;
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve(decision);
+    };
+    const onAbort = () => {
+      if (req && !req.destroyed) req.destroy();
+      finish('cancelled');
+    };
+    if (signal && signal.aborted) return finish('cancelled');
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
     const info = readApprovalInfo();
-    if (!info || !info.port) { log('no approver (app not running); autonomy=' + autonomy + ' action=' + actionType); return resolve(trustFallback ? 'approved' : 'denied'); }
+    if (!info || !info.port) { log('no approver (app not running); autonomy=' + autonomy + ' action=' + actionType); return finish(trustFallback ? 'approved' : 'denied'); }
     const payload = JSON.stringify({ site, actionType, summary });
-    const req = http.request({ host: '127.0.0.1', port: info.port, path: '/approve', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'authorization': 'Bearer ' + info.token }, timeout: 125000 }, (res) => {
-      let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { resolve(JSON.parse(b).decision === 'approved' ? 'approved' : 'denied'); } catch (e) { resolve('denied'); } });
+    req = http.request({ host: '127.0.0.1', port: info.port, path: '/approve', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'authorization': 'Bearer ' + info.token }, timeout: 125000 }, (res) => {
+      let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { finish(JSON.parse(b).decision === 'approved' ? 'approved' : 'denied'); } catch (e) { finish('denied'); } });
     });
-    req.on('error', () => resolve(trustFallback ? 'approved' : 'denied'));
-    req.on('timeout', () => { req.destroy(); resolve('denied'); });
+    req.on('error', () => finish(signal && signal.aborted ? 'cancelled' : (trustFallback ? 'approved' : 'denied')));
+    req.on('timeout', () => { req.destroy(); finish('denied'); });
     req.write(payload); req.end();
   });
 }
@@ -976,6 +1048,8 @@ async function main() {
   const recording = [];            // 이 세션에서 성공한 액션 시퀀스
   const pending = new Map();       // client 원본 tools/call: id -> {name, args}
   const waiters = new Map();       // 내부(replay) tools/call: id -> resolve
+  ${BROWSER_GATE_LIFECYCLE_SOURCE}
+  const gateLifecycle = createGateLifecycle();
   let currentUrl = '';
   let internalSeq = 0;
   const writeOutput = (line) => safeWrite(process.stdout, line + '\n', 'client stdout');
@@ -983,7 +1057,7 @@ async function main() {
   const forwardRaw = (line) => safeWrite(child.stdin, line + '\n', 'playwright stdin');
 
   // 승인 게이트 통과 여부 판정(공유). 통과=null, 거부=사유문자열.
-  const gate = async (name, args) => {
+  const gate = async (name, args, signal) => {
     const observedUrl = await readCdpPageUrl();
     const contextUrl = approvalContextUrl(name, args, observedUrl);
     const actionType = classifyAction(name, args, contextUrl);
@@ -996,8 +1070,8 @@ async function main() {
     const detail = actionType === 'unsafe-code'
       ? String(args.code || args.filename || name).slice(0, 240)
       : (args.element || args.url || args.key || name);
-    const decision = await requestApproval(site, actionType, actionType + ': ' + detail);
-    return decision === 'approved' ? null : actionType;
+    const decision = await requestApproval(site, actionType, actionType + ': ' + detail, signal);
+    return decision === 'approved' ? null : (decision === 'cancelled' ? 'cancelled' : actionType);
   };
 
   // 내부에서 child 에 tools/call 을 보내고 응답을 받는다(replay 용).
@@ -1027,6 +1101,11 @@ async function main() {
   const handleClientLine = (line) => {
     if (!line.trim()) { forwardRaw(line); return; }
     let msg; try { msg = JSON.parse(line); } catch (e) { forwardRaw(line); return; }
+    const cancelledId = cancelledRequestId(msg);
+    if (cancelledId != null && gateLifecycle.cancel(cancelledId)) {
+      log('cancelled approval-gated browser action before forwarding', String(cancelledId));
+      return;
+    }
     if (msg && msg.method === 'tools/call' && msg.params) {
       const name = msg.params.name || '';
       const args = msg.params.arguments || {};
@@ -1041,11 +1120,16 @@ async function main() {
       // 일반 액션: CDP의 실제 현재 페이지를 다시 읽은 뒤 승인 게이트 + 기록.
       const gateable = RECORDABLE.has(name) || name === 'browser_handle_dialog' || name === 'browser_run_code' || name === 'browser_run_code_unsafe';
       if (gateable) {
-        gate(name, args).then((denied) => {
+        const controller = gateLifecycle.begin(msg.id);
+        gate(name, args, controller.signal).then((denied) => {
+          if (!gateLifecycle.settle(msg.id, controller)) return;
           if (denied) { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'BLOCKED: The user did not approve this ' + denied + ' browser action.' }], isError: true } }); return; }
           if (name === 'browser_navigate' && args.url) currentUrl = String(args.url);
           if (RECORDABLE.has(name)) pending.set(msg.id, { name, arguments: args });
           forwardRaw(line);
+        }).catch((error) => {
+          if (!gateLifecycle.settle(msg.id, controller)) return;
+          writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'Browser approval gate failed safely: ' + String(error) }], isError: true } });
         });
         return;
       }
@@ -1085,7 +1169,7 @@ async function main() {
     buf += chunk.toString('utf8'); let idx;
     while ((idx = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, idx); buf = buf.slice(idx + 1); handleClientLine(line); }
   });
-  process.stdin.on('end', () => safeEnd(child.stdin, 'playwright stdin'));
+  process.stdin.on('end', () => { gateLifecycle.cancelAll(); safeEnd(child.stdin, 'playwright stdin'); });
 }
 main().catch((e) => { console.error('[agentlas-browser] fatal', e && e.stack || e); process.exit(1); });
 `;

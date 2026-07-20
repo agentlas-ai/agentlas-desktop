@@ -30,7 +30,7 @@ interface EngineDef {
   id: string; // usage provider id와 일치(구독형)
   label: string;
   auth: EngineAuth;
-  cliKind?: "claude-code" | "codex" | "gemini" | "grok";
+  cliKind?: "claude-code" | "codex" | "gemini" | "kimi" | "grok";
   retryProviderId?: UsageRetryProviderId;
   keyEnv?: string;
   logoSrc: string;
@@ -44,7 +44,7 @@ const ENGINES: EngineDef[] = [
   { id: "deepseek", label: "DeepSeek", auth: "apikey", keyEnv: "DEEPSEEK_API_KEY", logoSrc: "/brand/llm/deepseek.svg", logoAlt: "DeepSeek" },
   { id: "grok", label: "Grok", auth: "cli", cliKind: "grok", retryProviderId: "grok", keyEnv: "XAI_API_KEY", logoSrc: "/brand/llm/x.svg", logoAlt: "xAI" },
   { id: "glm", label: "GLM", auth: "apikey", keyEnv: "ZHIPU_API_KEY", logoSrc: "/brand/llm/zhipu.png", logoAlt: "Zhipu GLM" },
-  { id: "kimi", label: "Kimi", auth: "apikey", keyEnv: "MOONSHOT_API_KEY", logoSrc: "/brand/llm/kimi.svg", logoAlt: "Kimi (Moonshot)" },
+  { id: "kimi", label: "Kimi Code", auth: "cli", cliKind: "kimi", logoSrc: "/brand/llm/kimi.svg", logoAlt: "Kimi Code" },
   { id: "ollama", label: "Ollama", auth: "local", logoSrc: "/brand/llm/ollama.svg", logoAlt: "Ollama" },
 ];
 
@@ -225,6 +225,41 @@ export function EngineUsage() {
     [loadConnections],
   );
 
+  // Kimi has no usage adapter to use as a login receipt. Its runtime detector
+  // exposes it only after the official CLI has a usable default model, so poll
+  // that exact condition while the device-code terminal is open.
+  const watchKimiConnection = useCallback(async () => {
+    const api = ipc();
+    if (!api) return;
+    const gen = ++pollGen.current;
+    for (let i = 0; i < 60; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      if (pollGen.current !== gen) return;
+      try {
+        const detected = await api.runtime.detect(true);
+        if (pollGen.current !== gen) return;
+        setRuntimes(detected);
+        if (detected.some((runtime) => runtime.kind === "kimi")) {
+          setNotice({
+            id: "kimi",
+            text: ko ? "Kimi Code 연결을 확인했어요." : "Kimi Code is connected.",
+          });
+          return;
+        }
+      } catch {
+        // Device-code login may still be in progress.
+      }
+    }
+    if (pollGen.current === gen) {
+      setNotice({
+        id: "kimi",
+        text: ko
+          ? "로그인이 아직 끝나지 않았어요. 터미널에서 로그인을 마친 뒤 다시 연결을 눌러주세요."
+          : "Login is not finished yet. Complete it in the terminal, then choose Connect again.",
+      });
+    }
+  }, [ko]);
+
   function usageFor(id: string): ProviderUsage | undefined {
     return snap?.providers.find((p) => p.provider === id);
   }
@@ -305,6 +340,7 @@ export function EngineUsage() {
     }
     // 터미널 로그인 완료를 감지해 자동 갱신 — usage 어댑터가 있는 엔진만(그 외엔 성공 신호가 없어 헛폴링).
     if (opened && ["claude-code", "codex", "gemini"].includes(e.id)) void watchRecovery(e.id);
+    if (opened && e.cliKind === "kimi") void watchKimiConnection();
   }
 
   function busyLabel(): string {

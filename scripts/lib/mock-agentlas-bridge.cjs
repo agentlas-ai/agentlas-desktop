@@ -1110,7 +1110,10 @@ function setupMockAgentlasBridge(options) {
             window.setTimeout(() => emit(`invoke:${runId}`, { kind: "thinking", status: "Agentlas orchestrator started" }), 20);
             window.setTimeout(() => emit(`invoke:${runId}`, { kind: "tool-use", status: "Hub 에이전트 빌리는 중: qa-agent" }), 70);
           }
-          window.setTimeout(() => finish("QA final"), finalDelay);
+          const finalText = String(payload?.userPrompt || "").trim() === "그중 소음이 가장 낮은 건 뭐야?"
+            ? "세 제품 중에서는 위닉스 타워 프라임이 가장 조용한 편이에요. 다만 25평 거실 전체 정화 성능까지 함께 보면 LG가 더 안정적이고, 침실 중심이면 위닉스가 더 잘 맞습니다."
+            : "QA final";
+          window.setTimeout(() => finish(finalText), finalDelay);
         }
         return { runId };
       },

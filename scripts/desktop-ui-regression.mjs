@@ -142,12 +142,10 @@ async function checkCloudUpload(page) {
 }
 
 async function checkApps(page) {
-  await page.getByText("Agent Apps", { exact: true }).waitFor();
-  await page.getByText(/에이전트 앱 4개|4 agent apps/).waitFor();
-  await page.getByText(/Oberon 영화 스튜디오|Oberon Film Studio/).first().waitFor();
-  await page.getByText(/스타트업 창업자 스튜디오|Startup Founder Studio/).first().waitFor();
-  await page.getByRole("button", { name: /런타임 점검|Check runtime/ }).click();
-  await page.getByText(/런타임 준비됨|Runtime ready/).waitFor();
+  await page.getByRole("heading", { name: /아이디어를 실제 인터페이스로|Turn an idea into a working interface/ }).waitFor();
+  if ((await page.getByText(/Oberon|T-rex/).count()) > 0) {
+    throw new Error("Hidden experimental apps leaked into Sites.");
+  }
 }
 
 async function checkStartupStudio(page) {

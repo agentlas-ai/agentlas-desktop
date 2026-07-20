@@ -107,7 +107,7 @@ export function OneRecurrenceControl({
         </span>
       </label>
       {value && (
-        <div className={styles.sheet} role="group" aria-label={ko ? "반복 검토 조건" : "Repeat review conditions"}>
+        <div className={styles.sheet} role="group" aria-label={ko ? "반복 조건" : "Repeat conditions"}>
           <div className={styles.fields}>
             <label>
               <span>{ko ? "작업 종류" : "Work type"}</span>
@@ -174,8 +174,8 @@ export function OneRecurrenceControl({
           <p className={styles.stop}><strong>{ko ? "중지 조건" : "Stop condition"}</strong>{ko ? "항상 수동 중지 가능" : "Manual stop is always available"}</p>
           <p id="one-recurrence-explainer" className={styles.explainer}>
             {ko
-              ? "지금은 원하는 반복 방식만 알려주는 단계예요. 같은 일을 여러 번 잘 마친 뒤 One이 일정으로 만들지 물어봅니다. 내가 확인하기 전에는 저장하거나 실행하지 않아요."
-              : "For now, this only tells One how you may want the work repeated. After several successful results, One may ask whether to turn it into a schedule. Nothing is saved or run until you confirm."}
+              ? "이건 자동화가 아니에요. 지금은 원하는 반복 방식만 적어 둡니다. 서로 다른 결과 3개를 확인하고 나면 One이 일정으로 만들지 물어봐요. 내가 확인하기 전에는 어떤 일정도 저장되거나 켜지거나 실행되지 않아요."
+              : "This is not automation. It only records how you may want the work repeated. After you accept three separate results, One may ask whether to turn it into a schedule. No schedule is saved, enabled, or run until you confirm it."}
           </p>
         </div>
       )}

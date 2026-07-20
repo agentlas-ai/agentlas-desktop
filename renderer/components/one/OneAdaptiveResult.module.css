@@ -666,6 +666,25 @@
   background: #fff;
 }
 
+.failureClosure {
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 15px;
+  border: 1px solid #ead8d3;
+  border-radius: 15px;
+  background: #fffafa;
+}
+
+.failureClosure .closureSummaryCopy small {
+  max-width: 720px;
+  margin-top: 4px;
+  color: #6f625e;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 .closure > summary {
   display: flex;
   align-items: center;

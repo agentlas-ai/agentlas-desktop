@@ -68,6 +68,9 @@ const BUILD_RUNTIME_ENV_KEYS: Record<RuntimeKind, readonly string[]> = {
     "GOOGLE_CLOUD_LOCATION",
     "GOOGLE_APPLICATION_CREDENTIALS",
   ],
+  // Kimi Code keeps OAuth state in its own home directory. No unrelated host
+  // credential is copied into build workers.
+  kimi: ["KIMI_CODE_HOME", "AGENTLAS_KIMI_BIN"],
   grok: [
     "AGENTLAS_GROK_BIN",
     "AGENTLAS_GROK_SESSIONS_DIR",

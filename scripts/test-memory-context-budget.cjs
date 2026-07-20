@@ -45,6 +45,22 @@ const roundTrip = parseMemoryEvents(compactReply);
 assert.equal(roundTrip.events.length, 1);
 assert.equal(roundTrip.events[0].suggested_scope, "agent_repo");
 assert.equal(roundTrip.cleanedText, "Done.");
+const headinglessEnvelope = parseMemoryEvents([
+  "Hello Mason.",
+  "",
+  "```json",
+  JSON.stringify({
+    schema_version: "agentlas.memory-ticket.v1",
+    turn_summary: "Responded to a greeting.",
+    candidates: [],
+  }),
+  "```",
+].join("\n"));
+assert.equal(headinglessEnvelope.emitterStatus, "empty");
+assert.equal(headinglessEnvelope.cleanedText, "Hello Mason.");
+const ordinaryJson = parseMemoryEvents("Visible data:\n```json\n{\"ok\":true}\n```");
+assert.equal(ordinaryJson.emitterStatus, "missing");
+assert.match(ordinaryJson.cleanedText, /\"ok\":true/);
 const client = fs.readFileSync(path.join(__dirname, "../electron/mcp/client.ts"), "utf8");
 const firm = fs.readFileSync(path.join(__dirname, "../electron/mcp/firm-orchestrator.ts"), "utf8");
 assert.match(client, /memoryEmitterPromptFor\(effectiveUserPrompt\)/);

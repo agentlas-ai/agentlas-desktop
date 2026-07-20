@@ -24,6 +24,10 @@ const canonicalMacDriver = path.join(
   "macos",
   "agentlas-input-driver",
 );
+const canonicalNodeRoot = path.join(__dirname, "..", "build-resources", "node-runtime");
+const canonicalNodeManifest = path.join(canonicalNodeRoot, "agentlas-node-runtime.json");
+const hasPinnedNodeRuntime = fs.existsSync(canonicalNodeManifest);
+const hasCanonicalMacDriver = fs.existsSync(canonicalMacDriver);
 
 function sha256(payload) {
   return createHash("sha256").update(payload).digest("hex");
@@ -73,6 +77,21 @@ function writePythonRuntime(root, platform, triple = platform === "darwin" ? "x8
   return { root, executablePath, manifestPath: path.join(root, "agentlas-python-runtime.json"), manifest };
 }
 
+function writeNodeRuntime(root) {
+  if (!hasPinnedNodeRuntime) throw new Error("pinned Node runtime fixture was not fetched");
+  fs.cpSync(canonicalNodeRoot, root, {
+    recursive: true,
+    mode: fs.constants.COPYFILE_FICLONE,
+  });
+  const nodeRelativePath = "node.exe";
+  const npmCliRelativePath = "node_modules/npm/bin/npm-cli.js";
+  const nodePath = path.join(root, nodeRelativePath);
+  const npmPath = path.join(root, ...npmCliRelativePath.split("/"));
+  const manifestPath = path.join(root, "agentlas-node-runtime.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  return { root, nodePath, npmPath, manifestPath, manifest };
+}
+
 function modelContentIdentity(files, names) {
   const digest = createHash("sha256");
   for (const name of [...names].sort()) {
@@ -102,6 +121,12 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
   const packagedRoot = path.join(resourcesDir, "Hephaestus");
   const sourcePython = writePythonRuntime(path.join(projectDir, "build-resources", "python-runtime"), platform);
   const packagedPython = writePythonRuntime(path.join(resourcesDir, "python-runtime"), platform);
+  const sourceNode = platform === "win32"
+    ? writeNodeRuntime(path.join(projectDir, "build-resources", "node-runtime"))
+    : null;
+  const packagedNode = platform === "win32"
+    ? writeNodeRuntime(path.join(resourcesDir, "node-runtime"))
+    : null;
   fs.mkdirSync(path.join(sourceRoot, "agentlas_cloud"), { recursive: true });
   fs.mkdirSync(path.join(packagedRoot, "agentlas_cloud"), { recursive: true });
   fs.writeFileSync(path.join(sourceRoot, "manifest.json"), JSON.stringify({ version: "1.1.14" }));
@@ -133,25 +158,31 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
     packagedRoot,
     sourcePython,
     packagedPython,
+    sourceNode,
+    packagedNode,
   };
 }
 
 (async () => {
   try {
     process.env.HEPHAESTUS_REF = "v1.1.14";
-    for (const platform of ["darwin", "win32", "linux"]) {
+    for (const platform of [...(hasCanonicalMacDriver ? ["darwin"] : []), "linux"]) {
       await afterPack(fixture(platform, platform));
     }
+    const windowsNodeContract = hasPinnedNodeRuntime ? fixture("win32", "win32") : null;
+    if (windowsNodeContract) await afterPack(windowsNodeContract);
 
     const missingPythonManifest = fixture("linux", "missing-python-manifest");
     fs.rmSync(missingPythonManifest.packagedPython.manifestPath);
     await assert.rejects(afterPack(missingPythonManifest), /python-runtime.*agentlas-python-runtime\.json|Python runtime manifest/i);
 
-    const wrongPythonArch = fixture("darwin", "wrong-python-arch");
-    const armManifest = writePythonRuntime(wrongPythonArch.sourcePython.root, "darwin", "aarch64-apple-darwin").manifest;
-    writePythonRuntime(wrongPythonArch.packagedPython.root, "darwin", "aarch64-apple-darwin");
-    assert.equal(armManifest.triple, "aarch64-apple-darwin");
-    await assert.rejects(afterPack(wrongPythonArch), /pinned platform asset/);
+    if (hasCanonicalMacDriver) {
+      const wrongPythonArch = fixture("darwin", "wrong-python-arch");
+      const armManifest = writePythonRuntime(wrongPythonArch.sourcePython.root, "darwin", "aarch64-apple-darwin").manifest;
+      writePythonRuntime(wrongPythonArch.packagedPython.root, "darwin", "aarch64-apple-darwin");
+      assert.equal(armManifest.triple, "aarch64-apple-darwin");
+      await assert.rejects(afterPack(wrongPythonArch), /pinned platform asset/);
+    }
 
     const tamperedPythonExecutable = fixture("linux", "tampered-python-executable");
     fs.appendFileSync(tamperedPythonExecutable.packagedPython.executablePath, "tampered\n");
@@ -179,6 +210,44 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
       fs.writeFileSync(runtime.manifestPath, `${JSON.stringify(manifest)}\n`);
     }
     await assert.rejects(afterPack(extendedPythonManifest), /manifest shape is invalid/);
+
+    if (windowsNodeContract) {
+      const sourceManifestText = fs.readFileSync(windowsNodeContract.sourceNode.manifestPath, "utf8");
+      const packagedManifestText = fs.readFileSync(windowsNodeContract.packagedNode.manifestPath, "utf8");
+
+      fs.rmSync(windowsNodeContract.packagedNode.manifestPath);
+      await assert.rejects(afterPack(windowsNodeContract), /node-runtime.*agentlas-node-runtime\.json|Node runtime manifest/i);
+      fs.writeFileSync(windowsNodeContract.packagedNode.manifestPath, packagedManifestText);
+
+      fs.appendFileSync(windowsNodeContract.packagedNode.nodePath, "tampered\n");
+      await assert.rejects(afterPack(windowsNodeContract), /Node executable checksum mismatch/);
+      fs.copyFileSync(windowsNodeContract.sourceNode.nodePath, windowsNodeContract.packagedNode.nodePath);
+
+      const npmLibraryRelative = path.join("node_modules", "npm", "lib", "npm.js");
+      const sourceNpmLibrary = path.join(windowsNodeContract.sourceNode.root, npmLibraryRelative);
+      const packagedNpmLibrary = path.join(windowsNodeContract.packagedNode.root, npmLibraryRelative);
+      fs.appendFileSync(packagedNpmLibrary, "// tampered runtime dependency\n");
+      await assert.rejects(afterPack(windowsNodeContract), /Node runtime tree checksum mismatch/);
+      fs.copyFileSync(sourceNpmLibrary, packagedNpmLibrary);
+
+      for (const runtime of [windowsNodeContract.sourceNode, windowsNodeContract.packagedNode]) {
+        const manifest = JSON.parse(fs.readFileSync(runtime.manifestPath, "utf8"));
+        manifest.nodeSha256 = "0".repeat(64);
+        fs.writeFileSync(runtime.manifestPath, `${JSON.stringify(manifest)}\n`);
+      }
+      await assert.rejects(afterPack(windowsNodeContract), /pinned Windows asset/);
+      fs.writeFileSync(windowsNodeContract.sourceNode.manifestPath, sourceManifestText);
+      fs.writeFileSync(windowsNodeContract.packagedNode.manifestPath, packagedManifestText);
+
+      for (const runtime of [windowsNodeContract.sourceNode, windowsNodeContract.packagedNode]) {
+        const manifest = JSON.parse(fs.readFileSync(runtime.manifestPath, "utf8"));
+        manifest.unexpected = true;
+        fs.writeFileSync(runtime.manifestPath, `${JSON.stringify(manifest)}\n`);
+      }
+      await assert.rejects(afterPack(windowsNodeContract), /Node runtime manifest shape is invalid/);
+      fs.writeFileSync(windowsNodeContract.sourceNode.manifestPath, sourceManifestText);
+      fs.writeFileSync(windowsNodeContract.packagedNode.manifestPath, packagedManifestText);
+    }
 
     await assert.rejects(
       afterPack(fixture("linux", "bad-compat", "1.1.13")),
@@ -257,7 +326,7 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
     );
     console.log(
       "test-after-pack-runtime-contract: PASS "
-        + "(platform parity + version/ref + secret/model integrity fail-closed)",
+        + `(platform parity + version/ref + secret/model integrity fail-closed; Node=${hasPinnedNodeRuntime ? "full-tree" : "skipped until fetch:node"})`,
     );
   } finally {
     if (previousRef === undefined) delete process.env.HEPHAESTUS_REF;

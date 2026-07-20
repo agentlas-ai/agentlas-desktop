@@ -16,6 +16,7 @@ import {
 import { runClaudeCode } from "./claude-code";
 import { runCodex } from "./codex";
 import { isAgyBinaryPath, runGemini } from "./gemini";
+import { runKimi } from "./kimi";
 import { runGrok } from "./grok";
 import { runCursor } from "./cursor";
 import { runOllama } from "./ollama";
@@ -51,6 +52,7 @@ function withRunSlot(runner: Runner): Runner {
 const runClaudeCodeSlotted = withRunSlot(runClaudeCode);
 const runCodexSlotted = withRunSlot(runCodex);
 const runGeminiSlotted = withRunSlot(runGemini);
+const runKimiSlotted = withRunSlot(runKimi);
 const runGrokSlotted = withRunSlot(runGrok);
 const runCursorSlotted = withRunSlot(runCursor);
 
@@ -58,6 +60,7 @@ const RUNNER_LABEL: Record<string, string> = {
   "claude-code": "Claude Code CLI",
   codex: "Codex CLI",
   gemini: "Gemini CLI",
+  kimi: "Kimi Code CLI",
   grok: "Grok CLI",
   cursor: "Cursor Agent CLI",
   "byok:anthropic": "Anthropic API",
@@ -96,6 +99,8 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
       label: isAgyBinaryPath(active.source) ? "Antigravity CLI" : RUNNER_LABEL.gemini,
     };
   }
+  if (active.kind === "kimi")
+    return { runner: runKimiSlotted, label: RUNNER_LABEL.kimi };
   if (active.kind === "grok")
     return { runner: runGrokSlotted, label: `Grok CLI${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "cursor")

@@ -412,6 +412,20 @@ async function main() {
   assert.doesNotMatch(runnerRequests.at(-1).systemPrompt, new RegExp(activatedMemorySentinel),
     "Mobile/automation restricted reads must not receive mutable local project memory");
   assert.doesNotMatch(runnerRequests.at(-1).turnContext ?? "", new RegExp(activatedMemorySentinel));
+  assert.doesNotMatch(runnerRequests.at(-1).systemPrompt, new RegExp(projectContextSentinel),
+    "an unattended read automation must not inherit the Desktop project's context note");
+  assert.doesNotMatch(runnerRequests.at(-1).turnContext ?? "", new RegExp(projectContextSentinel));
+  assert.doesNotMatch(runnerRequests.at(-1).systemPrompt, new RegExp(projectExperienceSentinel),
+    "an unattended read automation must not inherit project-scoped Experience");
+  assert.doesNotMatch(runnerRequests.at(-1).turnContext ?? "", new RegExp(projectExperienceSentinel));
+  assert.deepEqual(
+    {
+      projectId: experienceContextInputs.at(-1)?.projectId ?? null,
+      projectPath: experienceContextInputs.at(-1)?.projectPath ?? null,
+    },
+    { projectId: null, projectPath: null },
+    "an unattended read automation may keep its working folder without using it as mutable project context",
+  );
   active.kind = "codex";
 
   console.log("Mobile read permission boundary: PASS");

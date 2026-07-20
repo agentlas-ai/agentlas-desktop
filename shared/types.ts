@@ -559,7 +559,7 @@ export type {
   MultimodalSettings,
 } from "./multimodal";
 
-export type RuntimeKind = "claude-code" | "codex" | "gemini" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx";
+export type RuntimeKind = "claude-code" | "codex" | "gemini" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx";
 
 /** LLM 제공자. "ollama"/"lmstudio"/"mlx"는 로컬 머신에서 도는 오픈 모델(gemma/deepseek/qwen 등). */
 export type RuntimeBackend =
@@ -3508,7 +3508,7 @@ export type UsageProviderErrorCode =
   | "local_estimate";
 
 /** 사용량을 기계 판독할 수 있고 명시 재시도를 지원하는 Provider allowlist. */
-export type UsageRetryProviderId = "claude-code" | "codex" | "gemini" | "grok";
+export type UsageRetryProviderId = "claude-code" | "codex" | "gemini" | "kimi" | "grok";
 
 /** 한 LLM 프로바이더의 사용량 스냅샷. */
 export interface ProviderUsage {
@@ -5008,15 +5008,15 @@ export interface AgentlasIpc {
     setActive: (selection: RuntimeSelection) => Promise<RuntimeStatus[]>;
     /** CLI 미설치 사용자용 — Windows는 앱에 동봉한 검증된 Node/npm으로 무관리자 설치. */
     installCli: (
-      kind: "claude-code" | "codex" | "gemini" | "grok",
+      kind: "claude-code" | "codex" | "gemini" | "kimi" | "grok",
     ) => Promise<{ ok: boolean; message: string; command?: string }>;
     /** 시스템 터미널을 열어 CLI 로그인 실행 — 사용자는 브라우저 로그인만 하면 됨. */
     openCliLogin: (
-      kind: "claude-code" | "codex" | "gemini" | "grok",
+      kind: "claude-code" | "codex" | "gemini" | "kimi" | "grok",
     ) => Promise<{ ok: boolean; message: string; command?: string }>;
     /** CLI를 최신으로 업데이트 — 미설치면 설치, npm 관리본은 재설치, claude는 self-updater. */
     updateCli: (
-      kind: "claude-code" | "codex" | "gemini" | "grok",
+      kind: "claude-code" | "codex" | "gemini" | "kimi" | "grok",
     ) => Promise<{ ok: boolean; message: string; command?: string }>;
     /** CLI(Claude/Codex/Gemini)의 커스텀 슬래시 명령을 스캔 — 매 호출마다 최신. */
     listCommands: () => Promise<RuntimeCommand[]>;

@@ -15,7 +15,7 @@ import {
   type GraphCheckpoint,
 } from "../workflow/run-graph";
 import { emitDesktopStoreChange } from "./change-bus";
-import { getAutomation } from "./automations";
+import { computeNextRun, getAutomation } from "./automations";
 import { getDb } from "./db";
 import { recordRunEvent } from "./run-events";
 
@@ -49,10 +49,46 @@ interface LoadedReconciliation {
   graph: WorkflowGraph;
   run: LatestRunRow;
   checkpoint: GraphCheckpoint;
-  checkpointJson: string;
+  checkpointJson: string | null;
   nodeStates: Record<string, WorkflowNodeRunState>;
   boundEvent: BoundEventRow | null;
   view: AutomationGraphReconciliation;
+}
+
+function legacyOccurrenceId(run: LatestRunRow): string {
+  return `legacy-occurrence:${sha256Value({
+    automationId: run.automation_id,
+    runId: run.id,
+  }).slice("sha256:".length)}`;
+}
+
+function durableTimestamp(run: LatestRunRow): string {
+  const candidate = run.last_activity_at ?? run.started_at;
+  if (!candidate || !Number.isFinite(Date.parse(candidate))) {
+    throw new Error("automation_graph_reconciliation_time_invalid");
+  }
+  return new Date(candidate).toISOString();
+}
+
+function occurrenceVars(automationId: string, occurrenceId: string): Record<string, unknown> {
+  if (!occurrenceId.startsWith(EVENT_OCCURRENCE_PREFIX)) return {};
+  const eventId = occurrenceId.slice(EVENT_OCCURRENCE_PREFIX.length);
+  if (!validId(eventId)) throw new Error("automation_graph_reconciliation_bound_event_malformed");
+  const row = getDb().prepare(
+    `SELECT payload_json
+     FROM automation_trigger_events
+     WHERE id = ? AND automation_id = ?`,
+  ).get(eventId, automationId) as { payload_json: string } | undefined;
+  if (!row) throw new Error("automation_graph_reconciliation_bound_event_missing");
+  try {
+    const value = JSON.parse(row.payload_json) as unknown;
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+  } catch {
+    // The bound event stays parked. A damaged payload can never authorize a retry.
+  }
+  throw new Error("automation_graph_reconciliation_bound_event_malformed");
 }
 
 function canonicalJsonValue(value: unknown): unknown {
@@ -135,6 +171,60 @@ function nodeProduces(node: WorkflowNode): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function synthesizeLegacyCheckpoint(
+  automationId: string,
+  graph: WorkflowGraph,
+  run: LatestRunRow,
+  graphDigest: string,
+  nodeStates: Record<string, WorkflowNodeRunState>,
+): GraphCheckpoint | null {
+  const effectNodeIds = graph.nodes
+    .filter((node) => node.type === "agent" || node.type === "action" || node.type === "output")
+    .map((node) => node.id)
+    .sort();
+  const effects = new Set(effectNodeIds);
+  if (!graph.nodes.some((node) => effects.has(node.id) && nodeStates[node.id] === "done")) {
+    return null;
+  }
+  const ambiguousNodeIds = graph.nodes
+    .filter((node) => effects.has(node.id) && (nodeStates[node.id] === "done" || nodeStates[node.id] === "failed"))
+    .map((node) => node.id)
+    .sort();
+  const inFlightNodeIds = graph.nodes
+    .filter((node) => effects.has(node.id) && nodeStates[node.id] === "running")
+    .map((node) => node.id)
+    .sort();
+  if (ambiguousNodeIds.length === 0 && inFlightNodeIds.length === 0) return null;
+
+  const occurrenceId = run.occurrence_id ?? legacyOccurrenceId(run);
+  const completedNodeIds = graph.nodes
+    .filter((node) => !effects.has(node.id) && nodeStates[node.id] === "done" && nodeProduces(node) === null)
+    .map((node) => node.id)
+    .sort();
+  const checkpoint: GraphCheckpoint = {
+    schemaVersion: GRAPH_CHECKPOINT_SCHEMA,
+    occurrenceId,
+    graphDigest,
+    effectNodeIds,
+    completedNodeIds,
+    skippedNodeIds: graph.nodes
+      .filter((node) => nodeStates[node.id] === "skipped")
+      .map((node) => node.id)
+      .sort(),
+    blockedEdgeIds: [],
+    inFlightNodeIds,
+    ambiguousNodeIds,
+    outputs: {},
+    vars: occurrenceVars(automationId, occurrenceId),
+    nodeInputDigests: {},
+    toolReceipts: {},
+    prepareReceipts: {},
+    updatedAt: durableTimestamp(run),
+    checkpointDigest: "sha256:" + "0".repeat(64),
+  };
+  return sealCheckpoint(checkpoint, checkpoint.updatedAt);
+}
+
 function boundEventForOccurrence(
   automationId: string,
   occurrenceId: string,
@@ -168,8 +258,8 @@ function loadReconciliation(
         `SELECT id, automation_id, started_at, last_activity_at, status, node_states_json,
                 occurrence_id, graph_digest, checkpoint_json
          FROM automation_runs
-         WHERE automation_id = ? AND id = ? AND occurrence_id = ?`,
-      ).get(automationId, exact.runId, exact.occurrenceId) as LatestRunRow | undefined
+         WHERE automation_id = ? AND id = ?`,
+      ).get(automationId, exact.runId) as LatestRunRow | undefined
     : getDb().prepare(
         `SELECT id, automation_id, started_at, last_activity_at, status, node_states_json,
                 occurrence_id, graph_digest, checkpoint_json
@@ -184,21 +274,6 @@ function loadReconciliation(
   if (!run.graph_digest || run.graph_digest !== currentGraphDigest) {
     throw new Error("automation_graph_reconciliation_graph_drift");
   }
-  if (!run.occurrence_id || !run.checkpoint_json) {
-    throw new Error("automation_graph_reconciliation_checkpoint_malformed");
-  }
-  let rawCheckpoint: unknown;
-  try {
-    rawCheckpoint = JSON.parse(run.checkpoint_json);
-  } catch {
-    throw new Error("automation_graph_reconciliation_checkpoint_malformed");
-  }
-  if (
-    !rawCheckpoint || typeof rawCheckpoint !== "object" || Array.isArray(rawCheckpoint) ||
-    (rawCheckpoint as { schemaVersion?: unknown }).schemaVersion !== GRAPH_CHECKPOINT_SCHEMA
-  ) {
-    throw new Error("automation_graph_reconciliation_checkpoint_not_v3");
-  }
   const nodeIds = new Set(graph.nodes.map((node) => node.id));
   const edgeIds = new Set(graph.edges.map((edge) => edge.id));
   const effectNodeIds = new Set(
@@ -206,7 +281,16 @@ function loadReconciliation(
       .filter((node) => node.type === "agent" || node.type === "action" || node.type === "output")
       .map((node) => node.id),
   );
-  const checkpoint = parseGraphCheckpoint(
+  const nodeStates = parseNodeStates(run.node_states_json, nodeIds);
+  let rawCheckpoint: unknown = null;
+  if (run.checkpoint_json) {
+    try {
+      rawCheckpoint = JSON.parse(run.checkpoint_json);
+    } catch {
+      rawCheckpoint = null;
+    }
+  }
+  const parsedCheckpoint = parseGraphCheckpoint(
     rawCheckpoint,
     currentGraphDigest,
     run.occurrence_id,
@@ -214,8 +298,17 @@ function loadReconciliation(
     edgeIds,
     effectNodeIds,
   );
+  const checkpoint = parsedCheckpoint ?? synthesizeLegacyCheckpoint(
+    automationId,
+    graph,
+    run,
+    currentGraphDigest,
+    nodeStates,
+  );
   if (!checkpoint) throw new Error("automation_graph_reconciliation_checkpoint_malformed");
-  const nodeStates = parseNodeStates(run.node_states_json, nodeIds);
+  if (exact && checkpoint.occurrenceId !== exact.occurrenceId) {
+    throw new Error("automation_graph_reconciliation_conflict");
+  }
   const ambiguous = new Set(checkpoint.ambiguousNodeIds);
   const inFlight = new Set(checkpoint.inFlightNodeIds);
   const unresolvedNodes = graph.nodes.filter((node) => ambiguous.has(node.id) || inFlight.has(node.id));
@@ -321,6 +414,23 @@ function exactDecisionMap(
     throw new Error("automation_graph_reconciliation_node_invalid");
   }
   return map;
+}
+
+/**
+ * A scheduled occurrence with unresolved side effects must not keep entering
+ * the runner on a timer. Keep the automation enabled, but remove its due time
+ * until the explicit reconciliation commit restores the regular schedule.
+ */
+export function suspendAutomationForGraphReconciliation(automationId: string): boolean {
+  if (!validId(automationId)) return false;
+  const result = getDb().prepare(
+    `UPDATE automations
+     SET next_run_at = NULL
+     WHERE id = ? AND enabled = 1 AND COALESCE(trigger_type, 'schedule') = 'schedule'
+       AND next_run_at IS NOT NULL`,
+  ).run(automationId);
+  if (result.changes > 0) emitDesktopStoreChange({ entity: "automation", id: automationId });
+  return result.changes > 0;
 }
 
 export function getAutomationGraphReconciliation(
@@ -482,16 +592,18 @@ export function reconcileAutomationGraph(
 
     const runUpdated = db.prepare(
       `UPDATE automation_runs
-       SET checkpoint_json = ?, node_states_json = ?, last_activity_at = ?
+       SET occurrence_id = ?, checkpoint_json = ?, node_states_json = ?, last_activity_at = ?
        WHERE id = ? AND automation_id = ? AND status = 'error'
-         AND graph_digest = ? AND checkpoint_json = ?`,
+         AND graph_digest = ? AND occurrence_id IS ? AND checkpoint_json IS ?`,
     ).run(
+      checkpoint.occurrenceId,
       checkpointJson,
       JSON.stringify(loaded.nodeStates),
       updatedAt,
       loaded.run.id,
       loaded.automation.id,
       loaded.view.graphDigest,
+      loaded.run.occurrence_id,
       loaded.checkpointJson,
     );
     if (runUpdated.changes !== 1) throw new Error("automation_graph_reconciliation_conflict");
@@ -535,6 +647,27 @@ export function reconcileAutomationGraph(
       }
     }
 
+    let restoredNextRunAt: string | null = null;
+    if (
+      (loaded.automation.triggerType ?? "schedule") === "schedule" &&
+      loaded.automation.enabled
+    ) {
+      restoredNextRunAt = computeNextRun(loaded.automation.scheduleHuman, now, {
+        scheduleJson: loaded.automation.scheduleSpec
+          ? JSON.stringify(loaded.automation.scheduleSpec)
+          : null,
+        timezone: loaded.automation.timezone ?? null,
+      });
+      const scheduleUpdated = db.prepare(
+        `UPDATE automations
+         SET next_run_at = ?
+         WHERE id = ? AND enabled = 1 AND COALESCE(trigger_type, 'schedule') = 'schedule'`,
+      ).run(restoredNextRunAt, loaded.automation.id);
+      if (scheduleUpdated.changes !== 1) {
+        throw new Error("automation_graph_reconciliation_schedule_conflict");
+      }
+    }
+
     recordRunEvent({
       runId: loaded.run.id,
       kind: "workflow_reconciliation_committed",
@@ -546,6 +679,7 @@ export function reconcileAutomationGraph(
         retryNodeIds: retryByUser,
         triggerEventId: loaded.boundEvent?.id ?? null,
         triggerEventStatus: eventStatus,
+        restoredNextRunAt,
       },
     });
 

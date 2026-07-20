@@ -9,13 +9,21 @@ import {
 } from "react";
 import { ipc } from "@/lib/ipc";
 import type {
+  OneExperienceReuseRecord,
+  OneImprovementProofRecord,
+  OneImprovementReusedAssetV1,
   OneMemoryAsset,
   OneMemoryCandidate,
   OneMemoryScope,
   OneMemoryState,
   OneMemoryUseOnceReceipt,
   OneMemoryUseOnceTarget,
+  OneValueClosureRecord,
+  OneValueClosureState,
 } from "@/lib/types";
+import { OneValueClosureCard } from "./OneValueClosureCard";
+import { OneExperienceReuseCard } from "./OneExperienceReuseCard";
+import { OneImprovementProofCard } from "./OneImprovementProofCard";
 import styles from "./OneMemorySheet.module.css";
 
 interface OneMemorySheetProps {
@@ -26,6 +34,17 @@ interface OneMemorySheetProps {
   onClose: () => void;
   onStateChange: (state: OneMemoryState) => void;
   onUseOnceReady: (receipt: OneMemoryUseOnceReceipt, target: OneMemoryUseOnceTarget) => void;
+  /**
+   * REQ-019 / REQ-023: compounding records stay out of the beginner-facing One
+   * result, but they must still be openable and manageable somewhere. This
+   * sheet is that place — it is already where `onManageExperience` points.
+   */
+  valueClosure?: OneValueClosureRecord | null;
+  experienceReuse?: OneExperienceReuseRecord | null;
+  improvementProof?: OneImprovementProofRecord | null;
+  valueClosureState?: OneValueClosureState | null;
+  onValueClosureStateChange?: (state: OneValueClosureState) => void;
+  onManageImprovementAsset?: (asset: OneImprovementReusedAssetV1) => void;
 }
 
 function scopeLabel(scope: OneMemoryScope, ko: boolean): string {
@@ -72,6 +91,12 @@ export function OneMemorySheet({
   onClose,
   onStateChange,
   onUseOnceReady,
+  valueClosure = null,
+  experienceReuse = null,
+  improvementProof = null,
+  valueClosureState = null,
+  onValueClosureStateChange,
+  onManageImprovementAsset,
 }: OneMemorySheetProps) {
   const ko = locale === "ko";
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -323,6 +348,39 @@ export function OneMemorySheet({
                 <small>{ko
                   ? "오래 기억하지 않습니다. 다음 요청에 한 번 쓰거나, 앱을 다시 켜거나, 시간이 지나면 사라집니다. 실패해도 자동으로 다시 쓰지 않습니다."
                   : "This is not saved long term. It disappears after one use, an app restart, or expiry, and is not reused automatically after a failure."}</small>
+              </section>
+            )}
+
+            {valueClosure && (
+              <section className={styles.section} aria-labelledby="memory-compounding-title">
+                <div className={styles.sectionHeading}>
+                  <div>
+                    <h3 id="memory-compounding-title">{ko ? "결과와 개선 근거" : "Results and improvement evidence"}</h3>
+                    <p>{ko
+                      ? "One이 어떤 결과를 검증했고 무엇을 다시 사용했는지 여기서 확인하고, 재사용 자산을 끄거나 지울 수 있습니다."
+                      : "Review what One verified and what it reused, and turn reused assets off or delete them here."}</p>
+                  </div>
+                </div>
+                <div className={styles.cardList}>
+                  {valueClosureState && onValueClosureStateChange && (
+                    <OneValueClosureCard
+                      record={valueClosure}
+                      state={valueClosureState}
+                      locale={locale}
+                      onStateChange={onValueClosureStateChange}
+                    />
+                  )}
+                  {experienceReuse && (
+                    <OneExperienceReuseCard record={experienceReuse} locale={locale} onManage={onClose} />
+                  )}
+                  {improvementProof && onManageImprovementAsset && (
+                    <OneImprovementProofCard
+                      record={improvementProof}
+                      locale={locale}
+                      onManageAsset={onManageImprovementAsset}
+                    />
+                  )}
+                </div>
               </section>
             )}
 
