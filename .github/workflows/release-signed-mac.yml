@@ -1,12 +1,9 @@
 name: Release Signed macOS
 
-# Two ways to trigger:
-#   1. Push a stable tag matching v*.*.*  -> automatic signed macOS release
-#   2. Manual via GitHub UI / `gh workflow run` with explicit version/tag
+# Production releases are deliberately manual. Creating a tag must not start a
+# 50+ minute multi-platform release before the exact source and common CI are
+# ready. Dispatch once with an explicit version/tag pair after those checks pass.
 on:
-  push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
     inputs:
       version:
@@ -35,6 +32,10 @@ on:
 permissions:
   contents: read
   actions: read
+
+concurrency:
+  group: desktop-production-release
+  cancel-in-progress: false
 
 jobs:
   cross-platform-release-build:

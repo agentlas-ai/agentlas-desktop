@@ -26,14 +26,6 @@ on:
         description: "Immutable workflow commit that supplies release-only verification code"
         required: true
         type: string
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Stable release tag (e.g. v0.8.21). Must match package.json version."
-        required: true
-      harness_ref:
-        description: "Optional immutable commit for release-only verification code (defaults to this workflow commit)"
-        required: false
 
 permissions:
   contents: read

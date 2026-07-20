@@ -220,6 +220,10 @@ on:
       - ".github/workflows/release.yml"
       - ".github/workflows/release-signed-mac.yml"
 
+concurrency:
+  group: desktop-core-harness-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
 permissions:
   contents: read
 
