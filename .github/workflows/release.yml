@@ -255,7 +255,13 @@ jobs:
         timeout-minutes: 15
         shell: bash
         run: |
-          npm run test:updater-production
+          # macOS trust, install-transaction, and update-lineage tests belong to
+          # mac-release-preflight. Non-Mac builders keep only the portable
+          # updater/source-asset contracts to avoid CRLF-sensitive Mac scripts.
+          npm run test:ensure-engine
+          npm run test:release-assets
+          npm run build:electron
+          npx --no-install electron scripts/test-updater-production-contract.cjs
           npm run test:cli-version-parser
           npm run test:stormbreaker-core:embedded
           npm run test:stormbreaker-swarm
@@ -301,7 +307,12 @@ jobs:
             npm run test:automation-trigger-safety
             npm run test:question-answer-receipt
             npm run test:v53-hub-bookmark-sync
-            npm run test:updater-production
+            # The signed Mac preflight owns Mac trust/install/lineage. Linux
+            # checks only the portable updater and release-asset contracts.
+            npm run test:ensure-engine
+            npm run test:release-assets
+            npm run build:electron
+            npx --no-install electron scripts/test-updater-production-contract.cjs
             npm run test:automations-store
             npm run test:automation-result-contract
             npm run test:cli-version-parser
