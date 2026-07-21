@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.8.64 — 2026-07-22
+
+### Fixed
+
+- A scheduled automation that failed before any external tool ran (e.g. a
+  transient LLM error) was misclassified as an ambiguous side effect and silently
+  suspended — its `next_run_at` was cleared instead of retrying. A failure with no
+  observed tool receipt and no prepared action never reached an external side
+  effect, so `electron/workflow/run-graph.ts` now treats it as replay-safe and it
+  retries on the next slot. This also unblocks the desktop release gate, which the
+  regression had been failing.
+- A scheduled run now records its run through the injected fire time
+  (`electron/automation-scheduler.ts`), so `last_run_at` and the schedule advance
+  share one clock and `next_run_at` never lands before `last_run_at`.
+
+### Included
+
+- Carries the previously unreleased v0.8.62 customer-safe One surface and v0.8.63
+  on-device semantic agent routing work.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.56, pinned at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.8.63 — 2026-07-21
 
 ### Fixed

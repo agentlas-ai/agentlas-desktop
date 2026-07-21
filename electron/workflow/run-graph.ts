@@ -1235,8 +1235,16 @@ export async function runGraph(
           ) && replaySafeObservedReceipts;
           const replaySafePreparedFailure = (checkpoint!.prepareReceipts[node.id]?.length ?? 0) > 0 &&
             replaySafeObservedReceipts;
+          // A failure with no observed tool receipt and no prepared action never
+          // reached an external side effect (e.g. the LLM call threw before any
+          // tool ran). With no checkpoint-persistence error and no unsafe tool
+          // observed — the other two independent side-effect signals below — such
+          // a failure is unambiguously replay-safe and must retry on the next
+          // slot, not silently suspend the whole automation for reconciliation.
+          const noObservedSideEffect = receipts.length === 0 &&
+            (checkpoint!.prepareReceipts[node.id]?.length ?? 0) === 0;
           const replaySafeFailure = automation.executionPermission === "read" ||
-            replaySafeTypedFailure || replaySafePreparedFailure;
+            replaySafeTypedFailure || replaySafePreparedFailure || noObservedSideEffect;
           const ambiguous = checkpointPersistenceError !== null || unsafeToolObserved || !replaySafeFailure;
           const message = ambiguous
             ? `automation_ambiguous_side_effect: ${node.id} may have committed an external action; ${rawMessage}`

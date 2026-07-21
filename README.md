@@ -69,6 +69,19 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-22 · v0.8.64 — automations retry cleanly after a pre-tool failure** —
+  A scheduled automation whose run threw before any external tool ran (for
+  example a transient LLM connection error) was being classified as an ambiguous
+  side effect and silently suspended, clearing its next run instead of retrying.
+  Such a failure has no observed tool receipt and no prepared action, so it is
+  unambiguously replay-safe: it now retries on the next slot rather than
+  suspending. The scheduled run also records its fire time consistently so the
+  next run never lands before the last run. This carries the unreleased v0.8.62
+  customer-safe One surface and v0.8.63 on-device semantic routing work. This
+  release binds Agentlas OS v1.1.56, pinned at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 - **2026-07-21 · v0.8.63 — on-device semantic agent routing** — One's local
   specialist routing no longer relies on a bag-of-words keyword scorer, which
   could pull an unrelated agent (a café restock note mis-routed to a meme-video

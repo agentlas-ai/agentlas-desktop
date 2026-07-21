@@ -424,6 +424,11 @@ async function runOne(
     allowDisabledLease?: boolean;
     triggerDelivery?: TriggerDeliveryHooks;
     triggerContext?: TriggerEventPayload;
+    /** The scheduled fire time. Recording the run and advancing the schedule
+     *  must use the same clock, or a run fired for a past-due slot stamps
+     *  last_run_at with wall-clock now while next_run_at advances from the slot,
+     *  leaving next_run_at < last_run_at. Defaults to now for run-now/triggers. */
+    fireTime?: Date;
   },
 ): Promise<TriggerDispatchResult> {
   if (installQuiescing) return { accepted: false };
@@ -849,7 +854,7 @@ async function runOne(
     if (!leaseOwnershipLost) {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
-          markAutomationRun(a.id, new Date(), {
+          markAutomationRun(a.id, opts?.fireTime ?? new Date(), {
             status: runStatus,
             error: runError,
             advanceSchedule: opts?.advanceSchedule ?? true,
@@ -957,7 +962,7 @@ export async function runDueAutomationsNow(now: Date = new Date()): Promise<void
   }
   // due-폴링 경로는 크로스프로세스 리스로 클레임(headless vs GUI 이중 실행 방지).
   await runWithConcurrency(due, MAX_CONCURRENT_AUTOMATIONS, async (a) => {
-    await runOne(a, { claim: true });
+    await runOne(a, { claim: true, fireTime: now });
   });
 }
 
