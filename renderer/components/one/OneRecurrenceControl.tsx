@@ -8,37 +8,38 @@ import {
   type OneRecurrenceSelectionV1,
 } from "@shared/one-recurrence";
 import type { OneAutomationPermissionPreview } from "@shared/one-suggestions";
+import { tFor } from "@/lib/i18n";
 import styles from "./OneRecurrenceControl.module.css";
 
-const INTENTS: Array<{ value: OneRecurrenceIntentKind; ko: string; en: string }> = [
-  { value: "briefing", ko: "브리핑", en: "Briefing" },
-  { value: "research", ko: "리서치", en: "Research" },
-  { value: "file_review", ko: "파일 검토", en: "File review" },
-  { value: "content_draft", ko: "콘텐츠 초안", en: "Content draft" },
-  { value: "status_check", ko: "상태 확인", en: "Status check" },
-];
+const INTENTS = [
+  { value: "briefing", labelKey: "one.rec.intent.briefing" },
+  { value: "research", labelKey: "one.rec.intent.research" },
+  { value: "file_review", labelKey: "one.rec.intent.file_review" },
+  { value: "content_draft", labelKey: "one.rec.intent.content_draft" },
+  { value: "status_check", labelKey: "one.rec.intent.status_check" },
+] as const satisfies ReadonlyArray<{ value: OneRecurrenceIntentKind; labelKey: string }>;
 
-const CADENCES: Array<{ value: OneRecurrenceCadence; ko: string; en: string }> = [
-  { value: "daily", ko: "매일", en: "Daily" },
-  { value: "weekdays", ko: "평일", en: "Weekdays" },
-  { value: "weekly", ko: "매주", en: "Weekly" },
-];
+const CADENCES = [
+  { value: "daily", labelKey: "one.rec.cadence.daily" },
+  { value: "weekdays", labelKey: "one.rec.cadence.weekdays" },
+  { value: "weekly", labelKey: "one.rec.cadence.weekly" },
+] as const satisfies ReadonlyArray<{ value: OneRecurrenceCadence; labelKey: string }>;
 
 const WEEKDAYS = [
-  [1, "월요일", "Monday"],
-  [2, "화요일", "Tuesday"],
-  [3, "수요일", "Wednesday"],
-  [4, "목요일", "Thursday"],
-  [5, "금요일", "Friday"],
-  [6, "토요일", "Saturday"],
-  [7, "일요일", "Sunday"],
+  [1, "one.rec.weekday.mon"],
+  [2, "one.rec.weekday.tue"],
+  [3, "one.rec.weekday.wed"],
+  [4, "one.rec.weekday.thu"],
+  [5, "one.rec.weekday.fri"],
+  [6, "one.rec.weekday.sat"],
+  [7, "one.rec.weekday.sun"],
 ] as const;
 
-const PERMISSIONS: Array<{ value: OneAutomationPermissionPreview; ko: string; en: string }> = [
-  { value: "read_only", ko: "살펴보기만", en: "Look only" },
-  { value: "draft_only", ko: "초안 만들기", en: "Make a draft" },
-  { value: "approval_before_external_change", ko: "밖으로 보내기 전에 묻기", en: "Ask before sending anything" },
-];
+const PERMISSIONS = [
+  { value: "read_only", labelKey: "one.rec.perm.read_only" },
+  { value: "draft_only", labelKey: "one.rec.perm.draft_only" },
+  { value: "approval_before_external_change", labelKey: "one.rec.perm.approval" },
+] as const satisfies ReadonlyArray<{ value: OneAutomationPermissionPreview; labelKey: string }>;
 
 function hostTimeZone(): string {
   const candidate = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -81,7 +82,6 @@ export function OneRecurrenceControl({
   value: OneRecurrenceSelectionV1 | null;
   onChange: (value: OneRecurrenceSelectionV1 | null) => void;
 }) {
-  const ko = locale === "ko";
   const active = value !== null;
   const set = (patch: Partial<OneRecurrenceSelectionV1>) => {
     const next = { ...(value ?? initialSelection()), ...patch };
@@ -96,31 +96,31 @@ export function OneRecurrenceControl({
           checked={active}
           disabled={disabled}
           onChange={(event) => onChange(event.target.checked ? initialSelection() : null)}
-          aria-label={ko ? "반복 조건 사용" : "Use repeat conditions"}
+          aria-label={tFor(locale, "one.rec.toggle.aria")}
           aria-describedby={active ? "one-recurrence-explainer" : undefined}
         />
         <span>
-          <strong>{ko ? "이 일을 반복하기" : "Repeat this work"}</strong>
+          <strong>{tFor(locale, "one.rec.toggle.title")}</strong>
           {active && (
-            <small>{ko ? "아직 일정은 저장되지 않았어요" : "No schedule has been saved yet"}</small>
+            <small>{tFor(locale, "one.rec.toggle.unsaved")}</small>
           )}
         </span>
       </label>
       {value && (
-        <div className={styles.sheet} role="group" aria-label={ko ? "반복 조건" : "Repeat conditions"}>
+        <div className={styles.sheet} role="group" aria-label={tFor(locale, "one.rec.sheet.aria")}>
           <div className={styles.fields}>
             <label>
-              <span>{ko ? "작업 종류" : "Work type"}</span>
+              <span>{tFor(locale, "one.rec.field.intent")}</span>
               <select
                 value={value.intentKind}
                 disabled={disabled}
                 onChange={(event) => set({ intentKind: event.target.value as OneRecurrenceIntentKind })}
               >
-                {INTENTS.map((item) => <option key={item.value} value={item.value}>{ko ? item.ko : item.en}</option>)}
+                {INTENTS.map((item) => <option key={item.value} value={item.value}>{tFor(locale, item.labelKey)}</option>)}
               </select>
             </label>
             <label>
-              <span>{ko ? "주기" : "Cadence"}</span>
+              <span>{tFor(locale, "one.rec.field.cadence")}</span>
               <select
                 value={value.cadence}
                 disabled={disabled}
@@ -129,25 +129,25 @@ export function OneRecurrenceControl({
                   set({ cadence, weekday: cadence === "weekly" ? 1 : null });
                 }}
               >
-                {CADENCES.map((item) => <option key={item.value} value={item.value}>{ko ? item.ko : item.en}</option>)}
+                {CADENCES.map((item) => <option key={item.value} value={item.value}>{tFor(locale, item.labelKey)}</option>)}
               </select>
             </label>
             {value.cadence === "weekly" && (
               <label>
-                <span>{ko ? "요일" : "Weekday"}</span>
+                <span>{tFor(locale, "one.rec.field.weekday")}</span>
                 <select
                   value={value.weekday ?? 1}
                   disabled={disabled}
                   onChange={(event) => set({ weekday: Number(event.target.value) })}
                 >
-                  {WEEKDAYS.map(([weekday, koLabel, enLabel]) => (
-                    <option key={weekday} value={weekday}>{ko ? koLabel : enLabel}</option>
+                  {WEEKDAYS.map(([weekday, labelKey]) => (
+                    <option key={weekday} value={weekday}>{tFor(locale, labelKey)}</option>
                   ))}
                 </select>
               </label>
             )}
             <label>
-              <span>{ko ? "현지 시각" : "Local time"}</span>
+              <span>{tFor(locale, "one.rec.field.local_time")}</span>
               <input
                 type="time"
                 step={60}
@@ -157,25 +157,23 @@ export function OneRecurrenceControl({
               />
             </label>
             <label>
-              <span>{ko ? "시간대" : "Time zone"}</span>
+              <span>{tFor(locale, "one.rec.field.time_zone")}</span>
               <input value={value.timeZone} readOnly aria-readonly="true" />
             </label>
             <label>
-              <span>{ko ? "One이 할 수 있는 일" : "What One may do"}</span>
+              <span>{tFor(locale, "one.rec.field.permission")}</span>
               <select
                 value={value.permission}
                 disabled={disabled}
                 onChange={(event) => set({ permission: event.target.value as OneAutomationPermissionPreview })}
               >
-                {PERMISSIONS.map((item) => <option key={item.value} value={item.value}>{ko ? item.ko : item.en}</option>)}
+                {PERMISSIONS.map((item) => <option key={item.value} value={item.value}>{tFor(locale, item.labelKey)}</option>)}
               </select>
             </label>
           </div>
-          <p className={styles.stop}><strong>{ko ? "중지 조건" : "Stop condition"}</strong>{ko ? "항상 수동 중지 가능" : "Manual stop is always available"}</p>
+          <p className={styles.stop}><strong>{tFor(locale, "one.rec.stop.title")}</strong>{tFor(locale, "one.rec.stop.body")}</p>
           <p id="one-recurrence-explainer" className={styles.explainer}>
-            {ko
-              ? "이건 자동화가 아니에요. 지금은 원하는 반복 방식만 적어 둡니다. 서로 다른 결과 3개를 확인하고 나면 One이 일정으로 만들지 물어봐요. 내가 확인하기 전에는 어떤 일정도 저장되거나 켜지거나 실행되지 않아요."
-              : "This is not automation. It only records how you may want the work repeated. After you accept three separate results, One may ask whether to turn it into a schedule. No schedule is saved, enabled, or run until you confirm it."}
+            {tFor(locale, "one.rec.explainer")}
           </p>
         </div>
       )}

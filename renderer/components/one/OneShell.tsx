@@ -13,7 +13,7 @@ import {
 import { Markdown, StreamingMarkdown } from "@/components/Markdown";
 import { IconArrowUp, IconPlus, IconRefresh } from "@/components/Icon";
 import { grantForDroppedFile, ipc, ipcEvents } from "@/lib/ipc";
-import { useT } from "@/lib/i18n";
+import { tFor, useT } from "@/lib/i18n";
 import { extractQuestions } from "@/lib/ask-question";
 import {
   detectOneTextLocale,
@@ -195,9 +195,7 @@ function isResultContinuationMessage(message: UiMessage): boolean {
  */
 function visibleOneMessageText(message: UiMessage): string {
   if (isResultContinuationMessage(message)) {
-    return detectOneTextLocale(message.text) === "ko"
-      ? "이전 결과를 참고해 이 대화에서 이어서 진행해요."
-      : "One is continuing in this conversation with the earlier result in context.";
+    return tFor(detectOneTextLocale(message.text) === "ko" ? "ko" : "en", "one.shell.continuation.body");
   }
   if (message.role !== "assistant") return message.text;
   const extracted = extractQuestions(message.text, message.id).text;
@@ -223,17 +221,16 @@ function statusLabel(
   locale: "ko" | "en",
   canonicalStatus?: OneTaskProjection["canonicalStatus"],
 ): string {
-  const ko = locale === "ko";
-  if (canonicalStatus === "partial") return ko ? "결과 확인" : "Review result";
-  const labels: Record<OneTaskProjection["status"]["value"], [string, string]> = {
-    waiting: ["대기", "Waiting"],
-    working: ["작업 중", "Working"],
-    decision_required: ["결정 필요", "Decision needed"],
-    completed: ["완료", "Completed"],
-    failed: ["실패", "Failed"],
-    stopped: ["중단", "Stopped"],
-  };
-  return labels[status][ko ? 0 : 1];
+  if (canonicalStatus === "partial") return tFor(locale, "one.shell.status.partial");
+  const labelKeys = {
+    waiting: "one.shell.status.waiting",
+    working: "one.shell.status.working",
+    decision_required: "one.shell.status.decision_required",
+    completed: "one.shell.status.completed",
+    failed: "one.shell.status.failed",
+    stopped: "one.shell.status.stopped",
+  } as const;
+  return tFor(locale, labelKeys[status]);
 }
 
 function briefingSignature(briefing: ReturnType<typeof chooseOneBriefing>): string {
@@ -247,107 +244,102 @@ function oneMemoryUseOnceTargetKey(target: OneMemoryUseOnceTarget): string {
 function proactiveBriefingView(candidate: OneProactiveBriefing, locale: "ko" | "en"): DisplayBriefing {
   const ko = locale === "ko";
   const source = candidate.source.label;
-  const copy: Record<OneProactiveBriefing["reasonCode"], {
-    eyebrow: [string, string];
-    title: [string, string];
-    body: [string, string];
-    prepared: [string, string];
-  }> = {
+  const copyKeys = {
     project_folder_missing: {
-      eyebrow: ["연결 확인", "Connection check"],
-      title: [`${source}의 연결 폴더를 찾을 수 없어요.`, `${source}'s connected folder is unavailable.`],
-      body: ["현재 파일을 확인할 수 없어 다음 결과가 오래된 맥락을 사용할 수 있습니다.", "The team cannot verify current files, so the next result could use stale context."],
-      prepared: ["프로젝트 연결 화면을 준비했습니다. 파일과 폴더는 변경하지 않았어요.", "The project connection screen is ready. No file or folder was changed."],
+      eyebrow: "one.shell.proactive.project_folder_missing.eyebrow",
+      title: "one.shell.proactive.project_folder_missing.title",
+      body: "one.shell.proactive.project_folder_missing.body",
+      prepared: "one.shell.proactive.project_folder_missing.prepared",
     },
     project_folder_unreadable: {
-      eyebrow: ["연결 확인", "Connection check"],
-      title: [`${source}의 연결 폴더를 확인할 수 없어요.`, `${source}'s connected folder could not be verified.`],
-      body: ["One이 이 폴더를 열 수 없어서 파일이 최신인지 확인하지 못했어요.", "One cannot open this folder, so it could not check whether the files are current."],
-      prepared: ["프로젝트 연결 화면을 준비했고 원본은 건드리지 않았어요.", "The project connection screen is ready and the source was not changed."],
+      eyebrow: "one.shell.proactive.project_folder_unreadable.eyebrow",
+      title: "one.shell.proactive.project_folder_unreadable.title",
+      body: "one.shell.proactive.project_folder_unreadable.body",
+      prepared: "one.shell.proactive.project_folder_unreadable.prepared",
     },
     project_folder_not_directory: {
-      eyebrow: ["연결 확인", "Connection check"],
-      title: [`${source}에 연결된 위치가 더 이상 폴더가 아니에요.`, `${source}'s connected location is no longer a folder.`],
-      body: ["올바른 폴더를 다시 고르면 One이 파일을 확인할 수 있어요.", "Choose the correct folder again so One can check the files."],
-      prepared: ["연결을 다시 선택할 수 있는 프로젝트 화면을 준비했습니다.", "The project screen is ready for you to select the connection again."],
+      eyebrow: "one.shell.proactive.project_folder_not_directory.eyebrow",
+      title: "one.shell.proactive.project_folder_not_directory.title",
+      body: "one.shell.proactive.project_folder_not_directory.body",
+      prepared: "one.shell.proactive.project_folder_not_directory.prepared",
     },
     project_deadline_conflict: {
-      eyebrow: ["마감 위험", "Deadline risk"],
-      title: [`${source}의 마감이 가까운데 필요한 파일이 보이지 않아요.`, `${source}'s deadline is close, but a needed file is missing.`],
-      body: ["내가 정한 마감이 가까워졌지만 One이 완성 파일을 찾지 못했어요.", "The deadline you set is close, but One could not find the finished file."],
-      prepared: ["변경 없이 프로젝트 화면을 열 준비만 했어요. 파일이나 일정은 바꾸지 않았습니다.", "One only prepared the project screen. No file or schedule was changed."],
+      eyebrow: "one.shell.proactive.project_deadline_conflict.eyebrow",
+      title: "one.shell.proactive.project_deadline_conflict.title",
+      body: "one.shell.proactive.project_deadline_conflict.body",
+      prepared: "one.shell.proactive.project_deadline_conflict.prepared",
     },
     automation_error: {
-      eyebrow: ["반복 작업 확인", "Repeated work check"],
-      title: [`${source}가 끝까지 완료되지 않았어요.`, `${source} did not finish.`],
-      body: ["같은 상태로 다시 시작하면 같은 문제가 생길 수 있어요.", "Starting again in the same state may cause the same problem."],
-      prepared: ["무엇이 잘못됐는지 확인할 수 있도록 당시 기록을 그대로 남겨뒀어요.", "One kept the earlier record unchanged so you can see what went wrong."],
+      eyebrow: "one.shell.proactive.automation_error.eyebrow",
+      title: "one.shell.proactive.automation_error.title",
+      body: "one.shell.proactive.automation_error.body",
+      prepared: "one.shell.proactive.automation_error.prepared",
     },
     automation_blocked: {
-      eyebrow: ["반복 작업 확인", "Repeated work check"],
-      title: [`${source}가 끝나기 전에 멈췄어요.`, `${source} stopped before it finished.`],
-      body: ["필요한 허용이나 정보가 무엇인지 먼저 확인해야 해요.", "First check which permission or information is missing."],
-      prepared: ["멈춘 시점과 다음 예정 시간을 함께 볼 수 있게 준비했어요.", "The stopped point and next planned time are ready to review together."],
+      eyebrow: "one.shell.proactive.automation_blocked.eyebrow",
+      title: "one.shell.proactive.automation_blocked.title",
+      body: "one.shell.proactive.automation_blocked.body",
+      prepared: "one.shell.proactive.automation_blocked.prepared",
     },
     automation_needs_input: {
-      eyebrow: ["결정 필요", "Decision needed"],
-      title: [`${source}가 내 답을 기다리고 있어요.`, `${source} is waiting for your answer.`],
-      body: ["내가 확인하기 전에는 다음 단계로 넘어가지 않아요.", "It will not continue until you review it."],
-      prepared: ["지금까지 한 일과 반복 설정을 함께 볼 수 있게 준비했어요.", "The work so far and its repeat settings are ready to review together."],
+      eyebrow: "one.shell.proactive.automation_needs_input.eyebrow",
+      title: "one.shell.proactive.automation_needs_input.title",
+      body: "one.shell.proactive.automation_needs_input.body",
+      prepared: "one.shell.proactive.automation_needs_input.prepared",
     },
     automation_partial: {
-      eyebrow: ["부분 완료", "Partial result"],
-      title: [`${source}가 일부만 마쳤어요.`, `${source} finished only part of the work.`],
-      body: ["남은 일을 확인하기 전에는 모두 끝났다고 표시하지 않아요.", "One will not say everything is done until the remaining work is checked."],
-      prepared: ["지금까지 나온 결과와 진행 기록을 그대로 남겨뒀어요.", "One kept the result so far and its progress record unchanged."],
+      eyebrow: "one.shell.proactive.automation_partial.eyebrow",
+      title: "one.shell.proactive.automation_partial.title",
+      body: "one.shell.proactive.automation_partial.body",
+      prepared: "one.shell.proactive.automation_partial.prepared",
     },
     task_waiting_decision_stale: {
-      eyebrow: ["결정 대기", "Decision waiting"],
-      title: [`${source}가 하루 넘게 결정을 기다리고 있어요.`, `${source} has been waiting for a decision for over a day.`],
-      body: ["답하지 않은 결정을 확인하기 전에는 이 일을 안전하게 진행할 수 없습니다.", "This work cannot safely advance until the unanswered decision is reviewed."],
-      prepared: ["바뀌지 않은 현재 상태를 열 준비만 했습니다.", "One prepared the exact current state for review only."],
+      eyebrow: "one.shell.proactive.task_waiting_decision_stale.eyebrow",
+      title: "one.shell.proactive.task_waiting_decision_stale.title",
+      body: "one.shell.proactive.task_waiting_decision_stale.body",
+      prepared: "one.shell.proactive.task_waiting_decision_stale.prepared",
     },
     task_running_without_active_run: {
-      eyebrow: ["진행 확인", "Progress check"],
-      title: [`${source}가 일하는 중으로 보이지만 실제로는 멈춰 있어요.`, `${source} looks busy, but it is no longer running.`],
-      body: ["다시 시작하기 전에 어디에서 멈췄는지 확인하는 것이 좋아요.", "Check where it stopped before starting again."],
-      prepared: ["다시 시작하지 않고 현재 상태와 기록만 볼 수 있게 준비했어요.", "The current state and record are ready to review without starting anything."],
+      eyebrow: "one.shell.proactive.task_running_without_active_run.eyebrow",
+      title: "one.shell.proactive.task_running_without_active_run.title",
+      body: "one.shell.proactive.task_running_without_active_run.body",
+      prepared: "one.shell.proactive.task_running_without_active_run.prepared",
     },
     task_failed_repeated: {
-      eyebrow: ["반복 실패", "Repeated failure"],
-      title: [`${source}에서 같은 문제가 여러 번 생겼어요.`, `${source} ran into the same problem more than once.`],
-      body: ["지금 그대로 다시 하면 같은 문제가 생길 가능성이 높아요.", "Trying again without changes may cause the same problem."],
-      prepared: ["복잡한 오류 문구 대신 문제가 난 일을 바로 확인할 수 있게 준비했어요.", "One prepared the affected work without showing a technical error message."],
+      eyebrow: "one.shell.proactive.task_failed_repeated.eyebrow",
+      title: "one.shell.proactive.task_failed_repeated.title",
+      body: "one.shell.proactive.task_failed_repeated.body",
+      prepared: "one.shell.proactive.task_failed_repeated.prepared",
     },
     task_failed_abandoned: {
-      eyebrow: ["미해결 실패", "Unresolved failure"],
-      title: [`${source} 실패가 3일 넘게 그대로예요.`, `${source} has remained failed for over three days.`],
-      body: ["실패 결과가 완료된 작업으로 오해되지 않도록 확인이 필요합니다.", "Review it so the failed outcome is not mistaken for completed work."],
-      prepared: ["문제가 난 시점의 상태를 변경 없이 볼 수 있게 준비했어요.", "The state from when the problem happened is ready to review without changes."],
+      eyebrow: "one.shell.proactive.task_failed_abandoned.eyebrow",
+      title: "one.shell.proactive.task_failed_abandoned.title",
+      body: "one.shell.proactive.task_failed_abandoned.body",
+      prepared: "one.shell.proactive.task_failed_abandoned.prepared",
     },
     task_partial_abandoned: {
-      eyebrow: ["부분 완료", "Partial result"],
-      title: [`${source}의 부분 완료 상태가 3일 넘게 그대로예요.`, `${source} has remained partially complete for over three days.`],
-      body: ["남은 일은 아직 끝났는지 확인되지 않았어요.", "The remaining work has not been confirmed as complete."],
-      prepared: ["현재 상태와 마지막 진행 기록을 변경 없이 확인할 수 있어요.", "The current state and latest progress record can be reviewed unchanged."],
+      eyebrow: "one.shell.proactive.task_partial_abandoned.eyebrow",
+      title: "one.shell.proactive.task_partial_abandoned.title",
+      body: "one.shell.proactive.task_partial_abandoned.body",
+      prepared: "one.shell.proactive.task_partial_abandoned.prepared",
     },
-  };
-  const selected = copy[candidate.reasonCode];
+  } as const;
+  const selected = copyKeys[candidate.reasonCode];
   const evidence = [
-    `${ko ? "출처" : "Source"}: ${source}`,
-    `${ko ? "확인 시각" : "Observed"}: ${formatTimestamp(candidate.detectedAt, locale)}`,
-    `${ko ? "확신도" : "Confidence"}: ${candidate.confidence.level === "high" ? (ko ? "높음" : "High") : candidate.confidence.level === "medium" ? (ko ? "중간" : "Medium") : (ko ? "낮음" : "Low")}`,
-    `${ko ? "확인 범위" : "Scope"}: ${candidate.reasonCode === "project_deadline_conflict" ? (ko ? "사용자가 직접 설정한 마감과 예상 파일의 존재 정보만 확인, 경로·파일 내용 미노출" : "Only the user-provided deadline and expected relative file presence metadata; path and file contents excluded") : candidate.source.kind === "project_folder" ? (ko ? "사용자가 연결한 폴더의 존재·접근 상태만 확인, 파일 내용 미열람" : "Only the user-connected folder's existence and access state; file contents were not read") : candidate.source.kind === "automation_run" ? (ko ? "확인된 자동 작업 기록만 사용, 자세한 오류 내용 제외" : "Only confirmed scheduled-work history; detailed error text excluded") : (ko ? "확인된 일의 상태, 현재 진행 여부, 완료·중단 기록" : "Confirmed work state, current activity, and completion or stop history")}`,
+    `${tFor(locale, "one.shell.proactive.evidence.source")}: ${source}`,
+    `${tFor(locale, "one.shell.proactive.evidence.observed")}: ${formatTimestamp(candidate.detectedAt, locale)}`,
+    `${tFor(locale, "one.shell.proactive.evidence.confidence")}: ${candidate.confidence.level === "high" ? tFor(locale, "one.shell.proactive.confidence.high") : candidate.confidence.level === "medium" ? tFor(locale, "one.shell.proactive.confidence.medium") : tFor(locale, "one.shell.proactive.confidence.low")}`,
+    `${tFor(locale, "one.shell.proactive.evidence.scope")}: ${candidate.reasonCode === "project_deadline_conflict" ? tFor(locale, "one.shell.proactive.scope.deadline") : candidate.source.kind === "project_folder" ? tFor(locale, "one.shell.proactive.scope.project_folder") : candidate.source.kind === "automation_run" ? tFor(locale, "one.shell.proactive.scope.automation_run") : tFor(locale, "one.shell.proactive.scope.default")}`,
   ];
   return {
     kind: candidate.reasonCode === "automation_needs_input" ? "decision" : "failed",
-    eyebrow: selected.eyebrow[ko ? 0 : 1],
-    title: selected.title[ko ? 0 : 1],
-    body: selected.body[ko ? 0 : 1],
-    prepared: selected.prepared[ko ? 0 : 1],
+    eyebrow: tFor(locale, selected.eyebrow),
+    title: tFor(locale, selected.title, { name: source }),
+    body: tFor(locale, selected.body),
+    prepared: tFor(locale, selected.prepared),
     evidence,
     primaryLabel: candidate.decision.acceptLabel && ko
-      ? candidate.preparedAction.kind === "open_project" ? "프로젝트 열기" : candidate.preparedAction.kind === "open_automation" ? "자동화 검토" : "일 열기"
+      ? candidate.preparedAction.kind === "open_project" ? tFor(locale, "one.shell.proactive.action.open_project") : candidate.preparedAction.kind === "open_automation" ? tFor(locale, "one.shell.proactive.action.open_automation") : tFor(locale, "one.shell.proactive.action.open_task")
       : candidate.decision.acceptLabel,
     proactive: candidate,
   };
@@ -461,7 +453,6 @@ export function OneShell() {
   );
   // Controls follow the explicit app language. Conversation content still
   // detects the language of the active request through normalizedLocale.
-  const ko = appLocale === "ko";
   const structuredResultMessageId = useMemo(() => {
     if (!surface) return null;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -853,7 +844,7 @@ export function OneShell() {
       return;
     }
     if (event.kind === "error") {
-      const message = event.error?.message || (ko ? "실행이 완료 전에 멈췄습니다." : "The run stopped before completion.");
+      const message = event.error?.message || tFor(appLocale, "one.shell.run.stopped_before_completion");
       setMessages((current) => [...current.filter((item) => item.id !== "one-live-response"), { id: uid(), role: "system", text: message }]);
       setBusy(false);
       setRunStatus("");
@@ -864,7 +855,7 @@ export function OneShell() {
       unsubscribeRunRef.current = null;
       void settleRun(chatId, taskId);
     }
-  }, [ko, reconcileConversationTask, scrollToLatest, settleRun]);
+  }, [appLocale, reconcileConversationTask, scrollToLatest, settleRun]);
 
   const consumeRunEventRef = useRef(consumeRunEvent);
   useEffect(() => {
@@ -930,7 +921,7 @@ export function OneShell() {
       if (attachment) {
         runIdRef.current = attachment.runId;
         setBusy(true);
-        setRunStatus(ko ? "실행 상태를 다시 연결했습니다." : "Reconnected to the active run.");
+        setRunStatus(tFor(appLocale, "one.shell.run.reconnected"));
         subscribeRun(attachment.runId);
         for (const event of attachment.events) consumeRunEventRef.current(event);
       }
@@ -942,7 +933,7 @@ export function OneShell() {
       unsubscribeRunRef.current?.();
       unsubscribeRunRef.current = null;
     };
-  }, [conversation?.id, ko, selected?.chatId, selected?.latestReceipt, selected?.taskId, subscribeRun]);
+  }, [conversation?.id, appLocale, selected?.chatId, selected?.latestReceipt, selected?.taskId, subscribeRun]);
 
   useEffect(() => {
     if (!selectedTaskId) {
@@ -1054,8 +1045,7 @@ export function OneShell() {
     const api = ipc();
     const events = ipcEvents();
     const runLocale = detectOneTextLocale(text) ?? normalizedLocale;
-    const runKo = runLocale === "ko";
-    if (!api || !events) throw new Error(runKo ? "Desktop 실행 연결을 찾을 수 없습니다." : "Desktop execution is unavailable.");
+    if (!api || !events) throw new Error(tFor(runLocale, "one.shell.run.desktop_unavailable"));
     const runId = options?.runId ?? uid();
     runIdRef.current = runId;
     runTaskIdRef.current = taskId;
@@ -1065,8 +1055,8 @@ export function OneShell() {
     setSurface(null);
     setError(null);
     setRunStatus(taskIntent === "conversation"
-      ? (runKo ? "답변을 준비하고 있어요." : "Preparing a response.")
-      : (runKo ? "요청을 이해하고 팀을 준비하고 있어요." : "Understanding the request and preparing the team."));
+      ? tFor(runLocale, "one.shell.run.preparing_response")
+      : tFor(runLocale, "one.shell.run.preparing_team"));
     setRunProgress(initialOneRunProgress());
     setMessages((current) => {
       const withoutLive = current.filter((item) => item.id !== "one-live-response");
@@ -1185,9 +1175,7 @@ export function OneShell() {
     } catch {
       const current = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => null);
       if (current) setTeamPreflight(current);
-      setError(detectOneTextLocale(prompt.text) === "ko"
-        ? "일을 시작하는 중 문제가 생겼어요. 같은 요청을 다시 한번 보내주세요."
-        : "Something went wrong while starting the work. Please send the same request once more.");
+      setError(tFor(detectOneTextLocale(prompt.text) === "ko" ? "ko" : "en", "one.shell.team.start_failed"));
     } finally {
       if (autoResolvingProposalRef.current === proposal.proposalId) autoResolvingProposalRef.current = null;
       setTeamPreflightBusy(false);
@@ -1240,12 +1228,10 @@ export function OneShell() {
     const recurrenceSnapshot = recurrenceSelection ? { ...recurrenceSelection } : null;
     const explicitValue = text.trim();
     if ((!explicitValue && attachmentSnapshot.length === 0) || busy || teamPreflightBusy) return;
-    const value = explicitValue || (ko
-      ? `첨부 파일 ${attachmentSnapshot.length}개를 검토하고 핵심 결과를 만들어주세요.`
-      : `Review the ${attachmentSnapshot.length} attached file${attachmentSnapshot.length === 1 ? "" : "s"} and produce the key result.`);
+    const value = explicitValue || tFor(appLocale, "one.shell.composer.attachment_prompt", { n: attachmentSnapshot.length, s: attachmentSnapshot.length === 1 ? "" : "s" });
     const api = ipc();
     if (!api) {
-      setError(ko ? "Agentlas Desktop에 연결되지 않았습니다." : "Agentlas Desktop is not connected.");
+      setError(tFor(appLocale, "one.shell.composer.not_connected"));
       return;
     }
     const onboardingState = await api.oneOnboarding.getState().catch(() => null);
@@ -1255,21 +1241,15 @@ export function OneShell() {
     if (onboardingState?.status === "completed" && !onboardingAuthorization?.allowed) {
       const teamChanged = onboardingAuthorization?.reason === "starter_team_changed";
       setError(teamChanged
-        ? (ko
-            ? "스타터 팀이 삭제되거나 바뀌었어요. 왼쪽 아래 Las 도움말에서 ‘스타터 팀 복구’를 눌러 주세요."
-            : "Your starter team was deleted or changed. Open Las help at lower left and choose Repair starter team.")
-        : (ko
-            ? "실제 팀을 실행할 AI 연결이 확인되지 않았어요. 설정에서 로그인하거나 왼쪽 아래 Las 도움말에서 ‘AI 연결 바꾸기’를 눌러 주세요."
-            : "An AI connection for live team execution is not verified. Sign in from Settings or choose Change AI connection in Las help."));
+        ? tFor(appLocale, "one.shell.submit.starter_team_changed")
+        : tFor(appLocale, "one.shell.submit.ai_connection_unverified"));
       return;
     }
     const canContinueInPlace = Boolean(
       selected?.chatId && ["partial", "completed", "failed"].includes(selected.canonicalStatus ?? ""),
     );
     if (selected && (!selected.chatId || (!selected.truth.mayStartExecution && !canContinueInPlace))) {
-      setError(ko
-        ? "이 일은 지금 One에서 이어갈 수 없습니다. Work에서 현재 상태와 권한을 확인해주세요."
-        : "This work cannot continue in One right now. Open Work to review its current state and permissions.");
+      setError(tFor(appLocale, "one.shell.submit.cannot_continue"));
       return;
     }
     if (teamPreflight && ["proposed", "blocked", "team_reserved", "workforce_reserved", "solo_reserved", "deferred"].includes(teamPreflight.status)) return;
@@ -1377,15 +1357,15 @@ export function OneShell() {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(message);
     }
-  }, [autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, ko, recurrenceSelection, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy]);
+  }, [autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, recurrenceSelection, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy]);
 
   const stopRun = useCallback(() => {
     const api = ipc();
     const runId = runIdRef.current;
     if (!api || !runId) return;
-    setRunStatus(ko ? "안전하게 중단하고 있어요." : "Stopping safely.");
+    setRunStatus(tFor(appLocale, "one.shell.run.stopping_safely"));
     void api.invoke.cancel(runId);
-  }, [ko]);
+  }, [appLocale]);
 
   const answerConfirmation = useCallback(async (confirmation: PendingConfirmation, label: string) => {
     const api = ipc();
@@ -1440,11 +1420,11 @@ export function OneShell() {
     setSearchError(null);
     try {
       const initialTask = await api.tasks.get(taskId);
-      if (!initialTask?.originChatId) throw new Error(ko ? "이 일의 원래 대화를 찾을 수 없습니다." : "The original conversation for this work is unavailable.");
+      if (!initialTask?.originChatId) throw new Error(tFor(appLocale, "one.shell.archive.original_conversation_unavailable"));
       const chat = await api.chats.get(initialTask.originChatId);
       const task = await api.tasks.get(taskId);
       if (!chat || !task || task.originChatId !== chat.id) {
-        throw new Error(ko ? "일과 대화의 연결이 바뀌었습니다. 현재 상태를 다시 확인해주세요." : "The work and conversation binding changed. Review the current state.");
+        throw new Error(tFor(appLocale, "one.shell.archive.binding_changed"));
       }
       await api.oneSearch.mutateArchive({
         contractVersion: ONE_SEARCH_CONTRACT_VERSION,
@@ -1473,7 +1453,7 @@ export function OneShell() {
     } finally {
       setArchiveMutationTaskId(null);
     }
-  }, [archiveMutationTaskId, ko, query, refreshAll, requestOneSearch, router, searchIncludeArchived, searchOpen]);
+  }, [archiveMutationTaskId, appLocale, query, refreshAll, requestOneSearch, router, searchIncludeArchived, searchOpen]);
 
   const loadMoreSearchResults = useCallback(() => {
     const value = query.replace(/\s+/g, " ").trim();
@@ -1582,10 +1562,10 @@ export function OneShell() {
   const executionAvailable = Boolean(ipc());
   const connectedMobile = mobileStatus?.running && mobileStatus.devices.some((device) => !device.revokedAt);
   const connectionLabel = !executionAvailable
-    ? (ko ? "연결 끊김" : "Disconnected")
+    ? tFor(appLocale, "one.shell.conn.disconnected")
     : connectedMobile
-      ? (ko ? "Mobile 연결됨" : "Mobile connected")
-      : (ko ? "Desktop 준비됨" : "Desktop ready");
+      ? tFor(appLocale, "one.shell.conn.mobile_connected")
+      : tFor(appLocale, "one.shell.conn.desktop_ready");
   const activationForeground = Boolean(
     oneActivationState
     && oneActivationState.eligibility === "eligible_first_use"
@@ -1743,17 +1723,13 @@ export function OneShell() {
   }, []);
   const addAttachmentFiles = useCallback(async (files: FileList | File[]) => {
     if (busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy) {
-      setAttachmentError(ko
-        ? "실행 또는 팀 검토가 끝난 뒤 새 요청에 파일을 첨부해주세요. 실행 중 지시에는 v1 첨부를 넣지 않습니다."
-        : "Attach files to a new request after the run or team review. v1 never adds attachments to in-flight steering.");
+      setAttachmentError(tFor(appLocale, "one.shell.attach.busy_error"));
       return;
     }
     const incoming = Array.from(files);
     const current = attachmentDraftsRef.current;
     if (current.length + incoming.length > ONE_ATTACHMENT_LIMITS.maxCount) {
-      setAttachmentError(ko
-        ? `한 요청에는 최대 ${ONE_ATTACHMENT_LIMITS.maxCount}개까지 첨부할 수 있습니다.`
-        : `A request can include at most ${ONE_ATTACHMENT_LIMITS.maxCount} attachments.`);
+      setAttachmentError(tFor(appLocale, "one.shell.attach.max_count", { max: ONE_ATTACHMENT_LIMITS.maxCount }));
       return;
     }
     const next: OneAttachmentDraft[] = [];
@@ -1763,18 +1739,16 @@ export function OneShell() {
       const kind = attachmentKind(file);
       const perFileLimit = kind === "image" ? ONE_ATTACHMENT_LIMITS.maxImageBytes : ONE_ATTACHMENT_LIMITS.maxFileBytes;
       if (file.size > perFileLimit) {
-        errors.push(ko
-          ? `${file.name}: ${kind === "image" ? "이미지 5 MB" : "파일 64 MB"} 한도를 넘습니다.`
-          : `${file.name}: exceeds the ${kind === "image" ? "5 MB image" : "64 MB file"} limit.`);
+        errors.push(tFor(appLocale, "one.shell.attach.file_limit", { name: file.name, limit: kind === "image" ? tFor(appLocale, "one.shell.attach.limit_image") : tFor(appLocale, "one.shell.attach.limit_file") }));
         continue;
       }
       if (totalBytes + file.size > ONE_ATTACHMENT_LIMITS.maxTotalBytes) {
-        errors.push(ko ? `${file.name}: 전체 96 MB 한도를 넘습니다.` : `${file.name}: exceeds the 96 MB total limit.`);
+        errors.push(tFor(appLocale, "one.shell.attach.total_limit", { name: file.name }));
         continue;
       }
       const grant = await grantForDroppedFile(file);
       if (!grant || grant.kind !== "file") {
-        errors.push(ko ? `${file.name}: 일반 파일로 확인할 수 없습니다.` : `${file.name}: could not be verified as a regular file.`);
+        errors.push(tFor(appLocale, "one.shell.attach.not_regular_file", { name: file.name }));
         continue;
       }
       const previewUrl = kind === "image" ? URL.createObjectURL(file) : null;
@@ -1796,7 +1770,7 @@ export function OneShell() {
     }
     setAttachmentError(errors.length ? errors.join(" ") : null);
     if (attachmentInputRef.current) attachmentInputRef.current.value = "";
-  }, [busy, ko, selectedReadOnly, teamDecisionPending, teamPreflightBusy]);
+  }, [busy, appLocale, selectedReadOnly, teamDecisionPending, teamPreflightBusy]);
 
   useEffect(() => {
     const nextThread = activeThreadChatId ?? "new";
@@ -1943,13 +1917,13 @@ export function OneShell() {
         return;
       }
       const copy: Record<string, string> = {
-        candidate_changed: ko ? "알림 내용이 바뀌었어요. 최신 내용을 다시 확인해주세요." : "This notice changed. Review the latest information before starting.",
-        source_mismatch: ko ? "확인할 정보가 바뀌어 시작하지 않았어요. 최신 내용을 다시 열어주세요." : "The information changed, so One did not start. Open the latest notice and try again.",
-        suppressed_or_resolved: ko ? "이미 해결됐거나 더 이상 필요하지 않아 시작하지 않았어요." : "This was already resolved or is no longer needed, so One did not start.",
-        expired: ko ? "준비 시간이 지났어요. 최신 알림을 다시 열어주세요." : "This preparation expired. Open the latest notice and try again.",
-        task_creation_failed: ko ? "일을 준비하는 중 문제가 생겼어요. 기존 진행 상황을 확인해주세요." : "One could not prepare the work. Check the existing progress before trying again.",
-        start_rejected: ko ? "살펴보기를 시작하지 못했어요. 같은 일에서 다시 시도할 수 있습니다." : "One could not start the review. You can try again on the same work.",
-        recovery_required: ko ? "중복 실행을 막기 위해 자동 재시도하지 않았습니다. Work에서 상태를 확인해주세요." : "One did not auto-retry, to prevent duplicate work. Review the state in Work.",
+        candidate_changed: tFor(appLocale, "one.shell.briefing_review.candidate_changed"),
+        source_mismatch: tFor(appLocale, "one.shell.briefing_review.source_mismatch"),
+        suppressed_or_resolved: tFor(appLocale, "one.shell.briefing_review.suppressed_or_resolved"),
+        expired: tFor(appLocale, "one.shell.briefing_review.expired"),
+        task_creation_failed: tFor(appLocale, "one.shell.briefing_review.task_creation_failed"),
+        start_rejected: tFor(appLocale, "one.shell.briefing_review.start_rejected"),
+        recovery_required: tFor(appLocale, "one.shell.briefing_review.recovery_required"),
       };
       const message = copy[result.errorCategory ?? "start_rejected"];
       await refreshAll();
@@ -1960,7 +1934,7 @@ export function OneShell() {
     } finally {
       setBriefingActionBusy(false);
     }
-  }, [briefingActionBusy, briefingActionPacket, ko, refreshAll, router]);
+  }, [briefingActionBusy, briefingActionPacket, appLocale, refreshAll, router]);
   const applyProactiveFeedback = useCallback(async (candidate: OneProactiveBriefing, feedback: "later" | "not_important" | "wrong") => {
     const api = ipc();
     if (!api) return;
@@ -2041,66 +2015,66 @@ export function OneShell() {
   }, [introBlockingCategory, oneIntroPending, oneIntroState]);
 
   if (!loaded) {
-    return <div className={styles.shell}><div className={styles.loading} role="status">{ko ? "One을 준비하고 있어요…" : "Preparing One…"}</div></div>;
+    return <div className={styles.shell}><div className={styles.loading} role="status">{tFor(appLocale, "one.shell.loading")}</div></div>;
   }
 
   return (
     <div className={styles.shell}>
       <div className={styles.body} data-rail-collapsed={railCollapsed ? "true" : "false"}>
-        {railOpen && <button type="button" className={styles.railScrim} aria-label={ko ? "최근 기록 닫기" : "Close recent history"} onClick={() => setRailOpen(false)} />}
-        <aside className={styles.rail} data-open={railOpen ? "true" : "false"} aria-label={ko ? "최근 대화와 맡긴 일" : "Recent conversations and work"}>
+        {railOpen && <button type="button" className={styles.railScrim} aria-label={tFor(appLocale, "one.shell.rail.close_history_aria")} onClick={() => setRailOpen(false)} />}
+        <aside className={styles.rail} data-open={railOpen ? "true" : "false"} aria-label={tFor(appLocale, "one.shell.rail.aria")}>
           <div className={`${styles.railProduct} titlebar-nodrag`}>
             <ProductModeMenu current="one" darkText locale={appLocale} />
             <button
               type="button"
               className={styles.railCollapseButton}
-              aria-label={ko ? "사이드바 접기" : "Collapse sidebar"}
+              aria-label={tFor(appLocale, "one.shell.rail.collapse_aria")}
               onClick={() => { setRailCollapsed(true); setRailOpen(false); }}
             >‹</button>
           </div>
           <div className={styles.railPrimaryActions}>
-            <button type="button" className={styles.railPrimaryButton} onClick={() => router.push("/one")}><span aria-hidden="true">＋</span>{ko ? "새 대화" : "New conversation"}</button>
-            <button ref={searchTriggerRef} type="button" className={styles.railPrimaryButton} onClick={() => setSearchOpen(true)}><span aria-hidden="true">⌕</span>{ko ? "전체 기록 찾기" : "Search all history"}</button>
+            <button type="button" className={styles.railPrimaryButton} onClick={() => router.push("/one")}><span aria-hidden="true">＋</span>{tFor(appLocale, "one.shell.rail.new_conversation")}</button>
+            <button ref={searchTriggerRef} type="button" className={styles.railPrimaryButton} onClick={() => setSearchOpen(true)}><span aria-hidden="true">⌕</span>{tFor(appLocale, "one.shell.rail.search_all")}</button>
             <button type="button" className={styles.railPrimaryButton} onClick={() => router.push("/one")}>
-              <span aria-hidden="true">◉</span>{ko ? "지금" : "Now"}
+              <span aria-hidden="true">◉</span>{tFor(appLocale, "one.shell.rail.now")}
               {actionableConfirmations.length > 0 && <span className={styles.railCount}>{actionableConfirmations.length}</span>}
             </button>
           </div>
-          <div className={styles.railTop}><strong>{ko ? "최근" : "Recent"}</strong></div>
+          <div className={styles.railTop}><strong>{tFor(appLocale, "one.shell.rail.recent")}</strong></div>
           <div className={styles.railList}>
-            {conversations.length > 0 && <p className={styles.railSectionLabel}>{ko ? "일반 대화" : "Conversations"}</p>}
+            {conversations.length > 0 && <p className={styles.railSectionLabel}>{tFor(appLocale, "one.shell.rail.section_conversations")}</p>}
             {conversations.map((item) => <ConversationListButton key={item.id} item={item} active={item.id === selectedConversationId} locale={appLocale} onOpen={openConversation} />)}
-            {projections.length > 0 && <p className={styles.railSectionLabel}>{ko ? "맡긴 일" : "Work"}</p>}
+            {projections.length > 0 && <p className={styles.railSectionLabel}>{tFor(appLocale, "one.shell.rail.section_work")}</p>}
             {projections.map((item) => <TaskListButton key={item.taskId} item={item} active={item.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />)}
-            {projections.length === 0 && conversations.length === 0 && <div className={styles.railEmpty}>{ko ? "아직 대화나 맡긴 일이 없습니다." : "No conversations or delegated work yet."}</div>}
+            {projections.length === 0 && conversations.length === 0 && <div className={styles.railEmpty}>{tFor(appLocale, "one.shell.rail.empty")}</div>}
           </div>
           <div className={styles.railFooter}>
-            {selected && <nav className={`${styles.railUtilities} ${styles.railTaskActions}`} aria-label={ko ? "현재 일 관리" : "Manage current task"}>
-              <button type="button" onClick={() => void openWork()}>{ko ? "이 일을 Work에서 보기" : "Open this work in Work"}<span aria-hidden="true">↗</span></button>
+            {selected && <nav className={`${styles.railUtilities} ${styles.railTaskActions}`} aria-label={tFor(appLocale, "one.shell.rail.manage_task_aria")}>
+              <button type="button" onClick={() => void openWork()}>{tFor(appLocale, "one.shell.rail.open_in_work")}<span aria-hidden="true">↗</span></button>
               <button
                 type="button"
                 disabled={archiveMutationTaskId === selected.taskId || Boolean(selected.chatId && activeChatIds.includes(selected.chatId))}
                 onClick={() => void mutateTaskArchive(selected.taskId, selected.canonicalStatus === "archived" ? "restore" : "archive")}
               >
                 {archiveMutationTaskId === selected.taskId
-                  ? (ko ? "상태 확인 중…" : "Checking…")
+                  ? tFor(appLocale, "one.shell.rail.archive_checking")
                   : selected.canonicalStatus === "archived"
-                    ? (ko ? "보관함에서 꺼내기" : "Restore from archive")
-                    : (ko ? "이 일 보관하기" : "Archive this work")}
+                    ? tFor(appLocale, "one.shell.rail.restore_from_archive")
+                    : tFor(appLocale, "one.shell.rail.archive_this_work")}
               </button>
             </nav>}
-            <nav className={styles.railUtilities} aria-label={ko ? "One 설정과 제품" : "One settings and products"}>
+            <nav className={styles.railUtilities} aria-label={tFor(appLocale, "one.shell.rail.settings_aria")}>
               <button type="button" onClick={() => { setMemoryOpen(false); setProfileOpen(true); }}>{oneDisplayName}</button>
               <button type="button" onClick={() => { setProfileOpen(false); setMemoryOpen(true); }}>
-                {ko ? "기억" : "Memory"}
+                {tFor(appLocale, "one.shell.rail.memory")}
                 {oneMemory && oneMemory.candidates.some((candidate) => candidate.status === "pending") && <span className={styles.railCount}>{oneMemory.candidates.filter((candidate) => candidate.status === "pending").length}</span>}
               </button>
               <button type="button" onClick={() => setPref(appLocale === "ko" ? "en" : "ko")}>
-                <span>{ko ? "언어" : "Language"}</span>
-                <span>{ko ? "English로 보기" : "한국어로 보기"}</span>
+                <span>{tFor(appLocale, "one.shell.rail.language")}</span>
+                <span>{tFor(appLocale, "one.shell.rail.language_switch")}</span>
               </button>
-              <button type="button" disabled={activationForeground} onClick={() => setIntroReplayToken((value) => value + 1)}>{ko ? "One 소개" : "About One"}</button>
-              <button type="button" onClick={() => void openWork()}>{ko ? "Work 열기" : "Open Work"}<span aria-hidden="true">↗</span></button>
+              <button type="button" disabled={activationForeground} onClick={() => setIntroReplayToken((value) => value + 1)}>{tFor(appLocale, "one.shell.rail.about_one")}</button>
+              <button type="button" onClick={() => void openWork()}>{tFor(appLocale, "one.shell.rail.open_work")}<span aria-hidden="true">↗</span></button>
             </nav>
             <span className={styles.connection} data-offline={!executionAvailable ? "true" : "false"} role="status">
               <span className={styles.connectionDot} aria-hidden="true" /><span>{connectionLabel}</span>
@@ -2113,7 +2087,7 @@ export function OneShell() {
             <button
               type="button"
               className={`${styles.sidebarRevealButton} titlebar-nodrag`}
-              aria-label={ko ? "사이드바 열기" : "Open sidebar"}
+              aria-label={tFor(appLocale, "one.shell.workspace.open_sidebar_aria")}
               onClick={() => { setRailCollapsed(false); setRailOpen(true); }}
             >☰</button>
           </div>
@@ -2132,8 +2106,8 @@ export function OneShell() {
                 {projections.length === 0 && !briefing.proactive ? (
                   activationForeground ? null : <section className={styles.newUser} aria-labelledby="one-first-run-title">
                     <OneBrandLockup className={styles.newUserMark} />
-                    <h1 id="one-first-run-title">{ko ? "신경 쓰이는데 미루고 있는 일 하나를 말해주세요." : "Tell One about one thing you keep putting off."}</h1>
-                    <p>{ko ? "생각나는 대로 말하세요. One이 필요한 기준을 정리하고, 일이 커지면 맞는 팀을 알아서 준비합니다." : "Say it however it comes to mind. One organizes the criteria and prepares the right team when the work grows."}</p>
+                    <h1 id="one-first-run-title">{tFor(appLocale, "one.shell.firstrun.title")}</h1>
+                    <p>{tFor(appLocale, "one.shell.firstrun.body")}</p>
                   </section>
                 ) : (
                   <section className={styles.briefing} aria-labelledby="one-briefing-title">
@@ -2145,44 +2119,44 @@ export function OneShell() {
                     <div className={styles.briefingActions}>
                       {briefing.proactive
                         ? briefing.proactive.preparedAction.kind === "open_task"
-                          ? <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void openProactiveTask(briefing.proactive!)}>{briefingActionBusy ? (ko ? "확인 중…" : "Checking…") : briefing.primaryLabel}</button>
+                          ? <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void openProactiveTask(briefing.proactive!)}>{briefingActionBusy ? tFor(appLocale, "one.shell.common.checking") : briefing.primaryLabel}</button>
                           : briefingActionPacket && ["prepared", "task_ready", "start_failed"].includes(briefingActionPacket.status)
-                          ? <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void startBriefingReview(briefing.proactive!)}>{briefingActionBusy ? (ko ? "확인 중…" : "Checking…") : (ko ? "변경 없이 살펴보기" : "Review without changes")}</button>
+                          ? <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void startBriefingReview(briefing.proactive!)}>{briefingActionBusy ? tFor(appLocale, "one.shell.common.checking") : tFor(appLocale, "one.shell.briefing.review_without_changes")}</button>
                           : briefingActionPacket?.status === "started" && briefingActionPacket.task
-                            ? <button type="button" className={styles.primaryButton} onClick={() => openTask(briefingActionPacket.task!.taskId)}>{ko ? "검토한 내용 열기" : "Open the review"}</button>
+                            ? <button type="button" className={styles.primaryButton} onClick={() => openTask(briefingActionPacket.task!.taskId)}>{tFor(appLocale, "one.shell.briefing.open_review")}</button>
                             : briefingActionPacket && ["task_reserved", "start_reserved"].includes(briefingActionPacket.status)
-                              ? <button type="button" className={styles.primaryButton} disabled>{briefingActionPacket.status === "task_reserved" ? (ko ? "현재 상태 확인 중…" : "Checking current state…") : (ko ? "검토 시작 중…" : "Starting review…")}</button>
+                              ? <button type="button" className={styles.primaryButton} disabled>{briefingActionPacket.status === "task_reserved" ? tFor(appLocale, "one.shell.briefing.checking_current_state") : tFor(appLocale, "one.shell.briefing.starting_review")}</button>
                             : briefingActionPacket?.status === "recovery_required"
-                              ? <button type="button" className={styles.primaryButton} disabled>{ko ? "이어가기 확인 필요" : "Check before continuing"}</button>
-                              : <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void prepareBriefingReview(briefing.proactive!)}>{briefingActionBusy ? (ko ? "준비 중…" : "Preparing…") : (ko ? "안전하게 살펴보기" : "Review safely")}</button>
+                              ? <button type="button" className={styles.primaryButton} disabled>{tFor(appLocale, "one.shell.briefing.check_before_continuing")}</button>
+                              : <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void prepareBriefingReview(briefing.proactive!)}>{briefingActionBusy ? tFor(appLocale, "one.shell.briefing.preparing") : tFor(appLocale, "one.shell.briefing.review_safely")}</button>
                         : briefing.taskId && <button type="button" className={styles.primaryButton} onClick={() => openTask(briefing.taskId!)}>{briefing.primaryLabel}</button>}
                       {briefing.proactive && briefing.proactive.preparedAction.kind !== "open_task" && <button type="button" className={styles.ghostButton} onClick={() => openPreparedFinding(briefing.proactive!)}>{briefing.primaryLabel}</button>}
-                      {briefing.evidence.length > 0 && <button type="button" className={styles.ghostButton} aria-expanded={evidenceOpen} onClick={() => setEvidenceOpen((value) => !value)}>{ko ? "확인한 이유" : "Why One noticed this"}</button>}
+                      {briefing.evidence.length > 0 && <button type="button" className={styles.ghostButton} aria-expanded={evidenceOpen} onClick={() => setEvidenceOpen((value) => !value)}>{tFor(appLocale, "one.shell.briefing.why_noticed")}</button>}
                       {briefing.kind !== "quiet" && (briefing.proactive
-                        ? <button type="button" className={styles.ghostButton} onClick={() => void applyProactiveFeedback(briefing.proactive!, "later")}>{ko ? "나중에" : "Later"}</button>
-                        : <button type="button" className={styles.ghostButton} onClick={() => { const signature = briefingSignature(briefing); setDismissedBriefing({ signature, expiresAt: writeBriefingDismissal(signature) }); setEvidenceOpen(false); }}>{ko ? "이번에는 넘기기" : "Dismiss for now"}</button>)}
+                        ? <button type="button" className={styles.ghostButton} onClick={() => void applyProactiveFeedback(briefing.proactive!, "later")}>{tFor(appLocale, "one.shell.common.later")}</button>
+                        : <button type="button" className={styles.ghostButton} onClick={() => { const signature = briefingSignature(briefing); setDismissedBriefing({ signature, expiresAt: writeBriefingDismissal(signature) }); setEvidenceOpen(false); }}>{tFor(appLocale, "one.shell.briefing.dismiss_for_now")}</button>)}
                     </div>
                     {briefing.proactive && briefingActionPacket && <div className={styles.briefingReviewPacket} data-status={briefingActionPacket.status}>
                       <div>
-                        <strong>{briefingActionPacket.status === "started" ? (ko ? "One이 살펴보고 있어요" : "One is reviewing this") : (ko ? "변경 없이 확인할 준비가 됐어요" : "Ready to review without changes")}</strong>
-                        <span>{ko ? "파일이나 설정은 바꾸지 않아요" : "Files and settings stay unchanged"}</span>
+                        <strong>{briefingActionPacket.status === "started" ? tFor(appLocale, "one.shell.briefing.reviewing_now") : tFor(appLocale, "one.shell.briefing.ready_no_changes")}</strong>
+                        <span>{tFor(appLocale, "one.shell.briefing.files_unchanged")}</span>
                       </div>
                       <p>{briefing.proactive?.source.kind === "canonical_task"
-                        ? (ko ? "현재 진행 상황을 보기만 합니다. 새로운 실행이나 수정은 시작하지 않아요." : "One only reviews the current progress. It does not start new work or make changes.")
+                        ? tFor(appLocale, "one.shell.briefing.packet_canonical")
                         : briefingActionPacket.status === "prepared"
-                        ? (ko ? "아직 일을 시작하지 않았어요. 확인을 누르면 최신 정보인지 한 번 더 살펴봅니다." : "No work has started. After you confirm, One checks that the information is still current.")
+                        ? tFor(appLocale, "one.shell.briefing.packet_prepared")
                         : briefingActionPacket.status === "recovery_required"
-                          ? (ko ? "중단 지점 이후 같은 일을 중복으로 만들지 않았습니다. Work에서 기존 상태를 확인해야 합니다." : "One did not duplicate the work after an interruption. Review the existing state in Work.")
-                          : (ko ? "원본 파일과 자동화 설정을 바꾸지 않고 검토합니다." : "This review does not change source files or automation settings.")}</p>
+                          ? tFor(appLocale, "one.shell.briefing.packet_recovery")
+                          : tFor(appLocale, "one.shell.briefing.packet_default")}</p>
                       <details className={styles.briefingPacketDetails}>
-                        <summary>{ko ? "무엇을 확인했나요?" : "What did One check?"}</summary>
+                        <summary>{tFor(appLocale, "one.shell.briefing.what_checked")}</summary>
                         <div className={styles.briefingPacketMeta}>
                           <span>{briefing.proactive?.source.kind === "canonical_task"
-                            ? (ko ? "현재 진행 상황" : "Current progress")
+                            ? tFor(appLocale, "one.shell.briefing.meta_current_progress")
                             : briefingActionPacket.source.kind === "project_folder"
-                              ? (ko ? "연결된 폴더 상태" : "Connected folder status")
-                              : (ko ? "최근 자동 실행 기록" : "Recent automatic-run record")}</span>
-                          <span>{briefingActionPacket.executionStarted ? (ko ? "살펴보기 시작됨" : "Review started") : (ko ? "아직 시작 안 함" : "Not started")}</span>
+                              ? tFor(appLocale, "one.shell.briefing.meta_folder_status")
+                              : tFor(appLocale, "one.shell.briefing.meta_run_record")}</span>
+                          <span>{briefingActionPacket.executionStarted ? tFor(appLocale, "one.shell.briefing.review_started") : tFor(appLocale, "one.shell.briefing.not_started")}</span>
                         </div>
                       </details>
                     </div>}
@@ -2190,33 +2164,33 @@ export function OneShell() {
                       {briefing.evidence.map((item) => <span key={item}>{item}</span>)}
                       {briefing.proactive && <div className={styles.briefingCorrections}>
                         <label>
-                          <span>{ko ? "알림 빈도" : "Notice frequency"}</span>
+                          <span>{tFor(appLocale, "one.shell.briefing.notice_frequency")}</span>
                           <select
                             value={briefingSnapshot?.preferences.cadence ?? "important_only"}
                             onChange={(event) => void updateBriefingCadence(event.target.value as OneBriefingCadence)}
-                            aria-label={ko ? "알림 빈도 선택" : "Select notice frequency"}
+                            aria-label={tFor(appLocale, "one.shell.briefing.notice_frequency_aria")}
                           >
-                            <option value="important_only">{ko ? "중요할 때만" : "Important only"}</option>
-                            <option value="daily">{ko ? "매일" : "Daily"}</option>
-                            <option value="weekdays">{ko ? "평일" : "Weekdays"}</option>
-                            <option value="weekly">{ko ? "주간" : "Weekly"}</option>
+                            <option value="important_only">{tFor(appLocale, "one.shell.briefing.cadence_important")}</option>
+                            <option value="daily">{tFor(appLocale, "one.shell.briefing.cadence_daily")}</option>
+                            <option value="weekdays">{tFor(appLocale, "one.shell.briefing.cadence_weekdays")}</option>
+                            <option value="weekly">{tFor(appLocale, "one.shell.briefing.cadence_weekly")}</option>
                           </select>
                         </label>
                         <label>
-                          <span>{ko ? "앱에서 알려주기" : "Show notices in the app"}</span>
-                          <input type="checkbox" checked disabled aria-label={ko ? "앱에서 알려주기 켜짐" : "In-app notices enabled"} />
+                          <span>{tFor(appLocale, "one.shell.briefing.channel_in_app")}</span>
+                          <input type="checkbox" checked disabled aria-label={tFor(appLocale, "one.shell.briefing.channel_in_app_aria")} />
                         </label>
                         <label>
-                          <span>{ko ? "데스크탑 알림" : "Desktop notification"}</span>
+                          <span>{tFor(appLocale, "one.shell.briefing.channel_desktop")}</span>
                           <input
                             type="checkbox"
                             checked={briefingSnapshot?.preferences.channels.includes("desktop_notification") ?? false}
                             onChange={(event) => void updateBriefingChannels(event.target.checked)}
-                            aria-label={ko ? "데스크탑 알림 사용" : "Enable desktop notifications"}
+                            aria-label={tFor(appLocale, "one.shell.briefing.channel_desktop_aria")}
                           />
                         </label>
                         <label>
-                          <span>{ko ? "조용한 시간" : "Quiet hours"}</span>
+                          <span>{tFor(appLocale, "one.shell.briefing.quiet_hours")}</span>
                           <input
                             type="checkbox"
                             checked={briefingSnapshot?.preferences.quietHours.enabled ?? false}
@@ -2224,37 +2198,37 @@ export function OneShell() {
                               const quiet = briefingSnapshot?.preferences.quietHours ?? { enabled: false, startHour: 22, endHour: 8 };
                               void updateBriefingQuietHours({ ...quiet, enabled: event.target.checked });
                             }}
-                            aria-label={ko ? "조용한 시간 사용" : "Enable quiet hours"}
+                            aria-label={tFor(appLocale, "one.shell.briefing.quiet_hours_aria")}
                           />
                         </label>
                         <label>
-                          <span>{ko ? "시작" : "Start"}</span>
+                          <span>{tFor(appLocale, "one.shell.briefing.quiet_start")}</span>
                           <select
                             value={briefingSnapshot?.preferences.quietHours.startHour ?? 22}
                             onChange={(event) => {
                               const quiet = briefingSnapshot?.preferences.quietHours ?? { enabled: false, startHour: 22, endHour: 8 };
                               void updateBriefingQuietHours({ ...quiet, startHour: Number(event.target.value) });
                             }}
-                            aria-label={ko ? "조용한 시간 시작" : "Quiet hours start"}
+                            aria-label={tFor(appLocale, "one.shell.briefing.quiet_start_aria")}
                           >{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{String(hour).padStart(2, "0")}:00</option>)}</select>
                         </label>
                         <label>
-                          <span>{ko ? "종료" : "End"}</span>
+                          <span>{tFor(appLocale, "one.shell.briefing.quiet_end")}</span>
                           <select
                             value={briefingSnapshot?.preferences.quietHours.endHour ?? 8}
                             onChange={(event) => {
                               const quiet = briefingSnapshot?.preferences.quietHours ?? { enabled: false, startHour: 22, endHour: 8 };
                               void updateBriefingQuietHours({ ...quiet, endHour: Number(event.target.value) });
                             }}
-                            aria-label={ko ? "조용한 시간 종료" : "Quiet hours end"}
+                            aria-label={tFor(appLocale, "one.shell.briefing.quiet_end_aria")}
                           >{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{String(hour).padStart(2, "0")}:00</option>)}</select>
                         </label>
-                        <label title={ko ? "휴대폰 알림은 아직 준비 중입니다." : "Phone notifications are still being prepared."}>
-                          <span>{ko ? "휴대폰 알림 · 준비 중" : "Phone notifications · Coming later"}</span>
-                          <input type="checkbox" checked={false} disabled aria-label={ko ? "휴대폰 알림 준비 중" : "Phone notifications coming later"} />
+                        <label title={tFor(appLocale, "one.shell.briefing.phone_title")}>
+                          <span>{tFor(appLocale, "one.shell.briefing.phone_label")}</span>
+                          <input type="checkbox" checked={false} disabled aria-label={tFor(appLocale, "one.shell.briefing.phone_aria")} />
                         </label>
-                        <button type="button" className={styles.textButton} onClick={() => void applyProactiveFeedback(briefing.proactive!, "not_important")}>{ko ? "이 유형은 덜 알려주세요" : "Show less like this"}</button>
-                        <button type="button" className={styles.textButton} onClick={() => void applyProactiveFeedback(briefing.proactive!, "wrong")}>{ko ? "이 판단은 틀렸어요" : "This judgment is wrong"}</button>
+                        <button type="button" className={styles.textButton} onClick={() => void applyProactiveFeedback(briefing.proactive!, "not_important")}>{tFor(appLocale, "one.shell.briefing.show_less")}</button>
+                        <button type="button" className={styles.textButton} onClick={() => void applyProactiveFeedback(briefing.proactive!, "wrong")}>{tFor(appLocale, "one.shell.briefing.judgment_wrong")}</button>
                       </div>}
                     </div>}
                   </section>
@@ -2270,12 +2244,12 @@ export function OneShell() {
             ) : (
               <div className={styles.threadContent}>
                 {selected?.chat?.hiredAgents?.length ? (
-                  <aside className={styles.prepared} aria-label={ko ? "이번 일에 참여한 전문가" : "Experts on this work"}>
-                    <span>{ko ? "이번 일의 팀" : "Team for this work"}</span>
+                  <aside className={styles.prepared} aria-label={tFor(appLocale, "one.shell.thread.experts_aria")}>
+                    <span>{tFor(appLocale, "one.shell.thread.team_for_work")}</span>
                     {selected.chat.hiredAgents.map((item) => <strong key={item.slug}>{item.name || item.slug}</strong>)}
                   </aside>
                 ) : null}
-                <section className={styles.messages} aria-label={selected ? (ko ? "맡긴 일의 대화" : "Work conversation") : (ko ? "일반 대화" : "General conversation")} aria-live="polite">
+                <section className={styles.messages} aria-label={selected ? tFor(appLocale, "one.shell.thread.work_conversation_aria") : tFor(appLocale, "one.shell.thread.general_conversation_aria")} aria-live="polite">
                   {messages.map((message) => {
                     // Once a structured result exists, it replaces the final
                     // long Markdown answer instead of repeating the same work
@@ -2300,25 +2274,25 @@ export function OneShell() {
                   {teamPreflightBusy && !busy && (
                     <div className={styles.preparingRequest} role="status">
                       <OneBrandMark size="thinking" thinking />
-                      <strong>{ko ? "이 일을 어떻게 맡을지 살펴보고 있어요." : "One is deciding how to handle this."}</strong>
-                      <span>{ko ? "필요한 준비는 One이 알아서 끝내고 바로 시작할게요." : "One will handle the preparation and start right away."}</span>
+                      <strong>{tFor(appLocale, "one.shell.thread.deciding")}</strong>
+                      <span>{tFor(appLocale, "one.shell.thread.deciding_body")}</span>
                     </div>
                   )}
-                  {messages.length === 0 && !teamPreflightBusy && !teamPreflight && <div className={styles.emptyThread}>{selected ? (ko ? "이 일에는 아직 대화가 없습니다." : "This work has no conversation yet.") : (ko ? "대화를 시작해주세요." : "Start the conversation.")}</div>}
+                  {messages.length === 0 && !teamPreflightBusy && !teamPreflight && <div className={styles.emptyThread}>{selected ? tFor(appLocale, "one.shell.thread.empty_work") : tFor(appLocale, "one.shell.thread.empty_conversation")}</div>}
                 </section>
                 {teamPreflight && ["workforce_reserved", "recovery_required"].includes(teamPreflight.status) && !teamPreflightBusy && !busy && (
                   <p className={styles.teamPreflightRecovery} role="status">
-                    {ko ? "이 요청은 안전하게 이어갈 수 없어서 멈췄어요. 같은 내용을 다시 보내주세요." : "This request could not continue safely. Please send the same request again."}
+                    {tFor(appLocale, "one.shell.thread.recovery")}
                   </p>
                 )}
                 {busy && (
-                  <section className={styles.runProgress} role="status" aria-live="polite" aria-label={ko ? "One 작업 진행" : "One work progress"}>
+                  <section className={styles.runProgress} role="status" aria-live="polite" aria-label={tFor(appLocale, "one.shell.thread.progress_aria")}>
                     <OneBrandMark size="thinking" thinking />
                     <strong>{oneRunStageLabel(runProgress.current, appLocale)}</strong>
                     <small>
                       {runProgress.participantNames.length > 0
-                        ? (ko ? `${runProgress.participantNames.join(" · ")}가 실제로 참여 중` : `${runProgress.participantNames.join(" · ")} actively participating`)
-                        : (ko ? "One이 직접 진행 중" : "One is working directly")}
+                        ? tFor(appLocale, "one.shell.thread.participants", { names: runProgress.participantNames.join(" · ") })
+                        : tFor(appLocale, "one.shell.thread.working_directly")}
                     </small>
                     {runStatus && <span className={styles.runStatusDetail}>{runStatus}</span>}
                   </section>
@@ -2407,22 +2381,22 @@ export function OneShell() {
           >
             {attachmentDragActive && (
               <div className={styles.attachmentDropOverlay} role="status" aria-live="polite">
-                {ko ? "여기에 파일 놓기" : "Drop files here"}
+                {tFor(appLocale, "one.shell.composer.drop_files")}
               </div>
             )}
             {armedOneMemoryUseOnce && (
               <div className={styles.oneMemoryUseOnceChip} role="status">
-                <span>{ko ? "Memory · 다음 요청에 1회 적용" : "Memory · applies once to the next request"}</span>
-                <small>{ko ? `만료 ${formatTimestamp(armedOneMemoryUseOnce.receipt.expiresAt, appLocale)}` : `Expires ${formatTimestamp(armedOneMemoryUseOnce.receipt.expiresAt, appLocale)}`}</small>
+                <span>{tFor(appLocale, "one.shell.composer.memory_once")}</span>
+                <small>{tFor(appLocale, "one.shell.composer.memory_expires", { time: formatTimestamp(armedOneMemoryUseOnce.receipt.expiresAt, appLocale) })}</small>
                 <button
                   type="button"
                   onClick={() => setArmedOneMemoryUseOnce(null)}
-                  aria-label={ko ? "다음 요청에서 한 번만 Memory 제외" : "Exclude one-time Memory from the next request"}
+                  aria-label={tFor(appLocale, "one.shell.composer.memory_exclude_aria")}
                 >×</button>
               </div>
             )}
             {attachmentDrafts.length > 0 && (
-              <div className={styles.attachmentTray} aria-label={ko ? "선택한 첨부" : "Selected attachments"}>
+              <div className={styles.attachmentTray} aria-label={tFor(appLocale, "one.shell.composer.selected_attachments_aria")}>
                 {attachmentDrafts.map((item) => (
                   <div key={item.id} className={styles.attachmentChip} data-kind={item.kind}>
                     {item.previewUrl
@@ -2432,7 +2406,7 @@ export function OneShell() {
                       <strong>{item.name}</strong>
                       <small>{attachmentTypeLabel(item.mediaType, item.name)} · {attachmentSize(item.size)}</small>
                     </span>
-                    <button type="button" onClick={() => removeAttachmentDraft(item.id)} aria-label={ko ? `${item.name} 첨부 제거` : `Remove ${item.name}`}>×</button>
+                    <button type="button" onClick={() => removeAttachmentDraft(item.id)} aria-label={tFor(appLocale, "one.shell.composer.remove_attachment", { name: item.name })}>×</button>
                   </div>
                 ))}
               </div>
@@ -2464,13 +2438,13 @@ export function OneShell() {
                 onChange={(event) => setComposer(event.target.value)}
                 onKeyDown={(event) => handleComposerKey(event, busy ? stopRun : () => void submit(composer))}
                 placeholder={oneActivationState?.status === "active" && oneActivationState.concern.status === "pending"
-                  ? (ko ? "지금 신경 쓰이는 일 한 가지" : "One thing that is on your mind")
+                  ? tFor(appLocale, "one.shell.composer.placeholder_activation")
                   : selected
-                  ? (ko ? "수정할 조건이나 다음 일을 말해주세요" : "Add a condition or the next step")
+                  ? tFor(appLocale, "one.shell.composer.placeholder_selected")
                   : conversation
-                    ? (ko ? "편하게 이어가세요. 실행이 필요하면 One이 알아서 일로 전환합니다" : "Keep talking naturally. One turns it into work when execution is needed")
-                    : (ko ? "무엇이 궁금하거나, 무엇을 맡기고 싶나요?" : "What are you wondering about, or what would you like to delegate?")}
-                aria-label={ko ? "One에게 요청" : "Request for One"}
+                    ? tFor(appLocale, "one.shell.composer.placeholder_conversation")
+                    : tFor(appLocale, "one.shell.composer.placeholder_default")}
+                aria-label={tFor(appLocale, "one.shell.composer.request_aria")}
                 disabled={selectedReadOnly || teamDecisionPending || teamPreflightBusy}
               />
               <div className={styles.composerBar}>
@@ -2480,8 +2454,8 @@ export function OneShell() {
                     className={styles.attachmentButton}
                     disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
                     onClick={() => attachmentInputRef.current?.click()}
-                    aria-label={ko ? "파일 첨부" : "Attach files"}
-                    title={ko ? "사진이나 파일 추가" : "Add photos or files"}
+                    aria-label={tFor(appLocale, "one.shell.composer.attach_aria")}
+                    title={tFor(appLocale, "one.shell.composer.attach_title")}
                   >
                     <IconPlus size={20} aria-hidden="true" />
                   </button>
@@ -2490,8 +2464,8 @@ export function OneShell() {
                     className={styles.attachmentButton}
                     disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
                     aria-expanded={recurrencePanelOpen || recurrenceSelection !== null}
-                    aria-label={ko ? "반복 작업 설정" : "Set repeat work"}
-                    title={ko ? "반복해서 맡기기" : "Repeat this work"}
+                    aria-label={tFor(appLocale, "one.shell.composer.repeat_aria")}
+                    title={tFor(appLocale, "one.shell.composer.repeat_title")}
                     onClick={() => setRecurrencePanelOpen((open) => !open)}
                   >
                     <IconRefresh size={17} aria-hidden="true" />
@@ -2503,30 +2477,30 @@ export function OneShell() {
                     composerRef={composerInputRef}
                     disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
                   />
-                  <button type="submit" className={styles.sendButton} disabled={!busy && ((!composer.trim() && attachmentDrafts.length === 0) || selectedReadOnly || teamDecisionPending || teamPreflightBusy)} aria-label={busy ? (ko ? "실행 중단" : "Stop run") : (ko ? "보내기" : "Send")}>
+                  <button type="submit" className={styles.sendButton} disabled={!busy && ((!composer.trim() && attachmentDrafts.length === 0) || selectedReadOnly || teamDecisionPending || teamPreflightBusy)} aria-label={busy ? tFor(appLocale, "one.shell.composer.stop_run_aria") : tFor(appLocale, "one.shell.composer.send_aria")}>
                     {busy ? <span className={styles.stopGlyph} aria-hidden="true" /> : <IconArrowUp size={20} strokeWidth={2} aria-hidden="true" />}
                   </button>
                 </div>
               </div>
             </form>
             {selectedReadOnly && (
-              <p className={styles.composerNote}>{ko ? "이 일은 지금 보기만 할 수 있어요." : "This work is view-only right now."}</p>
+              <p className={styles.composerNote}>{tFor(appLocale, "one.shell.composer.view_only")}</p>
             )}
           </div>
 
           {searchOpen && (
-            <section ref={searchSheetRef} className={styles.searchSheet} role="dialog" aria-modal="true" aria-label={ko ? "대화와 결과 찾기" : "Find conversations and results"} onKeyDown={trapSearchFocus}>
-              <div className={styles.searchHeader}><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder={ko ? "지난번 제주 여행, 경쟁사 표…" : "Last Jeju trip, competitor table…"} /><button type="button" className={styles.iconButton} aria-label={ko ? "찾기 닫기" : "Close search"} onClick={() => setSearchOpen(false)}>×</button></div>
+            <section ref={searchSheetRef} className={styles.searchSheet} role="dialog" aria-modal="true" aria-label={tFor(appLocale, "one.shell.search.dialog_aria")} onKeyDown={trapSearchFocus}>
+              <div className={styles.searchHeader}><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tFor(appLocale, "one.shell.search.placeholder")} /><button type="button" className={styles.iconButton} aria-label={tFor(appLocale, "one.shell.search.close_aria")} onClick={() => setSearchOpen(false)}>×</button></div>
               <div className={styles.searchScope}>
-                <span>{ko ? "맡긴 일 · 결과 · 파일 · 대화 · 참여 팀" : "Work · results · files · conversations · teams"}</span>
-                <label><input type="checkbox" checked={searchIncludeArchived} onChange={(event) => setSearchIncludeArchived(event.target.checked)} />{ko ? "보관함 포함" : "Include archived"}</label>
+                <span>{tFor(appLocale, "one.shell.search.scope")}</span>
+                <label><input type="checkbox" checked={searchIncludeArchived} onChange={(event) => setSearchIncludeArchived(event.target.checked)} />{tFor(appLocale, "one.shell.search.include_archived")}</label>
               </div>
               <div className={styles.searchResults} aria-live="polite" aria-busy={searchLoading || searchLoadingMore}>
                 {!query.trim() && (
                   <>
                     {filteredConversations.map((item) => <ConversationListButton key={item.id} item={item} active={item.id === selectedConversationId} locale={appLocale} onOpen={openConversation} />)}
                     {filtered.map((item) => <TaskListButton key={item.taskId} item={item} active={item.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />)}
-                    {filtered.length === 0 && filteredConversations.length === 0 && <div className={styles.railEmpty}>{ko ? "아직 검색할 기록이 없습니다." : "There is no history to search yet."}</div>}
+                    {filtered.length === 0 && filteredConversations.length === 0 && <div className={styles.railEmpty}>{tFor(appLocale, "one.shell.search.no_history")}</div>}
                   </>
                 )}
                 {query.trim() && searchHits.map((hit) => (
@@ -2541,12 +2515,12 @@ export function OneShell() {
                     onMutateArchive={mutateTaskArchive}
                   />
                 ))}
-                {query.trim() && searchLoading && searchHits.length === 0 && <div className={styles.searchState} role="status">{ko ? "전체 기록에서 찾고 있어요…" : "Searching all history…"}</div>}
-                {query.trim() && !searchLoading && !searchError && searchHits.length === 0 && <div className={styles.searchState}>{ko ? "전체 기록과 보관함에서 일치하는 항목을 찾지 못했습니다." : "No matching item was found in history or the archive."}</div>}
+                {query.trim() && searchLoading && searchHits.length === 0 && <div className={styles.searchState} role="status">{tFor(appLocale, "one.shell.search.searching")}</div>}
+                {query.trim() && !searchLoading && !searchError && searchHits.length === 0 && <div className={styles.searchState}>{tFor(appLocale, "one.shell.search.no_match")}</div>}
                 {searchError && <div className={styles.searchError} role="alert">{searchError}</div>}
                 {query.trim() && searchNextCursor && !searchError && (
                   <button type="button" className={styles.searchMore} disabled={searchLoadingMore} onClick={loadMoreSearchResults}>
-                    {searchLoadingMore ? (ko ? "더 찾는 중…" : "Finding more…") : (ko ? "이전 기록 더 보기" : "Show older matches")}
+                    {searchLoadingMore ? tFor(appLocale, "one.shell.search.finding_more") : tFor(appLocale, "one.shell.search.show_older")}
                   </button>
                 )}
               </div>
@@ -2611,11 +2585,10 @@ function TaskListButton({ item, active, locale, onOpen }: { item: OneTaskProject
 }
 
 function ConversationListButton({ item, active, locale, onOpen }: { item: Chat; active: boolean; locale: "ko" | "en"; onOpen: (chatId: string) => void }) {
-  const ko = locale === "ko";
   return (
     <button type="button" className={styles.taskButton} data-active={active ? "true" : "false"} onClick={() => onOpen(item.id)} aria-current={active ? "page" : undefined}>
       <strong>{item.title}</strong>
-      <small>{ko ? "일반 대화" : "Conversation"} · {formatTimestamp(item.updatedAt, locale)}</small>
+      <small>{tFor(locale, "one.shell.convlist.conversation")} · {formatTimestamp(item.updatedAt, locale)}</small>
       <span className={styles.conversationDot} aria-hidden="true" />
     </button>
   );
@@ -2630,39 +2603,38 @@ function SearchHitRow({ hit, active, locale, mutationBusy, onOpenTask, onOpenCon
   onOpenConversation: (chatId: string) => void;
   onMutateArchive: (taskId: string, operation: "archive" | "restore") => Promise<void>;
 }) {
-  const ko = locale === "ko";
-  const kindLabels: Record<OneSearchHitV1["kind"], [string, string]> = {
-    task: ["맡긴 일", "Work"],
-    result: ["결과", "Result"],
-    artifact: ["파일", "File"],
-    conversation: ["대화", "Conversation"],
-    team: ["참여 팀", "Team"],
-  };
-  const matchLabels: Record<OneSearchHitV1["matchedBy"][number], [string, string]> = {
-    task_title: ["일 제목", "Work title"],
-    conversation_title: ["대화 제목", "Conversation title"],
-    conversation_text: ["대화", "Conversation"],
-    result_content: ["결과", "Result"],
-    artifact_label: ["파일", "File"],
-    team_participant: ["참여 팀", "Team"],
-  };
-  const statusLabels: Record<OneSearchHitV1["status"], [string, string]> = {
-    open: ["준비됨", "Ready"],
-    running: ["진행 중", "In progress"],
-    "waiting-decision": ["확인 필요", "Needs a decision"],
-    partial: ["결과 확인", "Review result"],
-    completed: ["완료", "Completed"],
-    failed: ["멈춤", "Stopped"],
-    archived: ["보관됨", "Archived"],
-    conversation: ["대화", "Conversation"],
-  };
+  const kindKeys = {
+    task: "one.shell.searchhit.kind.task",
+    result: "one.shell.searchhit.kind.result",
+    artifact: "one.shell.searchhit.kind.artifact",
+    conversation: "one.shell.searchhit.kind.conversation",
+    team: "one.shell.searchhit.kind.team",
+  } as const;
+  const matchKeys = {
+    task_title: "one.shell.searchhit.match.task_title",
+    conversation_title: "one.shell.searchhit.match.conversation_title",
+    conversation_text: "one.shell.searchhit.match.conversation_text",
+    result_content: "one.shell.searchhit.match.result_content",
+    artifact_label: "one.shell.searchhit.match.artifact_label",
+    team_participant: "one.shell.searchhit.match.team_participant",
+  } as const;
+  const statusKeys = {
+    open: "one.shell.searchhit.status.open",
+    running: "one.shell.searchhit.status.running",
+    "waiting-decision": "one.shell.searchhit.status.waiting-decision",
+    partial: "one.shell.searchhit.status.partial",
+    completed: "one.shell.searchhit.status.completed",
+    failed: "one.shell.searchhit.status.failed",
+    archived: "one.shell.searchhit.status.archived",
+    conversation: "one.shell.searchhit.status.conversation",
+  } as const;
   const open = () => hit.taskId ? onOpenTask(hit.taskId) : onOpenConversation(hit.chatId);
   return (
     <article className={styles.searchHit} data-active={active ? "true" : "false"} data-archived={hit.archived ? "true" : "false"}>
       <button type="button" className={styles.searchHitOpen} onClick={open}>
-        <span className={styles.searchHitHeading}><span className={styles.searchKind}>{kindLabels[hit.kind][ko ? 0 : 1]}</span><strong>{hit.title}</strong></span>
+        <span className={styles.searchHitHeading}><span className={styles.searchKind}>{tFor(locale, kindKeys[hit.kind])}</span><strong>{hit.title}</strong></span>
         {hit.detail && <span className={styles.searchHitDetail}>{hit.detail}</span>}
-        <small>{hit.archived ? (ko ? "보관됨" : "Archived") : statusLabels[hit.status][ko ? 0 : 1]} · {formatTimestamp(hit.updatedAt, locale)} · {hit.matchedBy.map((kind) => matchLabels[kind][ko ? 0 : 1]).join(" · ")}</small>
+        <small>{hit.archived ? tFor(locale, "one.shell.searchhit.status.archived") : tFor(locale, statusKeys[hit.status])} · {formatTimestamp(hit.updatedAt, locale)} · {hit.matchedBy.map((kind) => tFor(locale, matchKeys[kind])).join(" · ")}</small>
       </button>
       {hit.taskId && (
         <button
@@ -2672,10 +2644,10 @@ function SearchHitRow({ hit, active, locale, mutationBusy, onOpenTask, onOpenCon
           onClick={() => void onMutateArchive(hit.taskId!, hit.archived ? "restore" : "archive")}
         >
           {mutationBusy
-            ? (ko ? "확인 중…" : "Checking…")
+            ? tFor(locale, "one.shell.common.checking")
             : hit.archived
-              ? (ko ? "복원" : "Restore")
-              : (ko ? "보관" : "Archive")}
+              ? tFor(locale, "one.shell.searchhit.restore")
+              : tFor(locale, "one.shell.searchhit.archive")}
         </button>
       )}
     </article>
@@ -2683,15 +2655,14 @@ function SearchHitRow({ hit, active, locale, mutationBusy, onOpenTask, onOpenCon
 }
 
 function decisionFieldValue(field: OneDecisionField, locale: "ko" | "en"): string {
-  const ko = locale === "ko";
-  if (field.value === "irreversible") return ko ? "되돌릴 수 없음" : "Not reversible";
-  if (field.value === "reversible") return ko ? "되돌릴 수 있음" : "Reversible";
+  if (field.value === "irreversible") return tFor(locale, "one.shell.decision.irreversible");
+  if (field.value === "reversible") return tFor(locale, "one.shell.decision.reversible");
   if (field.value) return field.status === "context_only"
-    ? `${field.value} · ${ko ? "맥락만 확인됨" : "context only"}`
+    ? `${field.value} · ${tFor(locale, "one.shell.decision.context_only")}`
     : field.value;
   return field.status === "not_applicable"
-    ? (ko ? "해당 없음" : "Not applicable")
-    : (ko ? "명시되지 않음" : "Not stated");
+    ? tFor(locale, "one.shell.decision.not_applicable")
+    : tFor(locale, "one.shell.decision.not_stated");
 }
 
 function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpenWork, onSnooze }: {
@@ -2703,7 +2674,6 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
   onOpenWork: () => void;
   onSnooze: (confirmation: PendingConfirmation) => void;
 }) {
-  const ko = locale === "ko";
   const decision: OneDecisionViewV1 = normalizeOneDecision(confirmation, taskId);
   const riskRank = Number(decision.risk.level.slice(1));
   const approvalBlocked = riskRank >= 2 && decision.risk.certainty === "ambiguous";
@@ -2711,14 +2681,14 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
   const blockedOptions = decision.options.filter((option) => option.blockedReason !== null);
   const rejectLabel = decision.controls.reject.source === "explicit_option"
     ? decision.controls.reject.reply
-    : (ko ? "거절 · 제안된 행동 실행 안 함" : "Reject · do not take the proposed action");
+    : tFor(locale, "one.shell.decision.reject_default");
   const fields: Array<[string, OneDecisionField]> = [
-    [ko ? "대상" : "Target", decision.target],
-    [ko ? "행동" : "Action", decision.action],
-    [ko ? "영향" : "Impact", decision.impact],
-    [ko ? "비용" : "Cost", decision.cost],
-    [ko ? "되돌리기" : "Reversibility", decision.reversibility],
-    [ko ? "마감" : "Deadline", decision.deadline],
+    [tFor(locale, "one.shell.decision.field.target"), decision.target],
+    [tFor(locale, "one.shell.decision.field.action"), decision.action],
+    [tFor(locale, "one.shell.decision.field.impact"), decision.impact],
+    [tFor(locale, "one.shell.decision.field.cost"), decision.cost],
+    [tFor(locale, "one.shell.decision.field.reversibility"), decision.reversibility],
+    [tFor(locale, "one.shell.decision.field.deadline"), decision.deadline],
   ];
   const lightweightChoice = riskRank === 0 && !approvalBlocked;
 
@@ -2732,9 +2702,9 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
       >
         <div className={styles.decisionHeading}>
           <div>
-            <p className={styles.decisionKicker}>{ko ? "One이 확인할 것" : "One needs one detail"}</p>
+            <p className={styles.decisionKicker}>{tFor(locale, "one.shell.decision.kicker_choice")}</p>
             <p id={`${confirmation.sourceMessageId}-decision-title`} className={styles.decisionTitle}>
-              {decision.action.value || decision.target.value || (ko ? "어느 쪽으로 이어갈까요?" : "Which direction should One take?")}
+              {decision.action.value || decision.target.value || tFor(locale, "one.shell.decision.direction_q")}
             </p>
           </div>
         </div>
@@ -2752,10 +2722,10 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
             </button>
           ))}
           <button type="button" className={styles.decisionButton} disabled={disabled} onClick={() => onSnooze(confirmation)}>
-            {ko ? "나중에" : "Later"}
+            {tFor(locale, "one.shell.common.later")}
           </button>
         </div>
-        <p className={styles.decisionHint}>{ko ? "선택하면 이 대화에서 바로 이어갑니다." : "Choose one and One will continue in this conversation."}</p>
+        <p className={styles.decisionHint}>{tFor(locale, "one.shell.decision.choice_hint")}</p>
       </section>
     );
   }
@@ -2763,10 +2733,10 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
     <section className={styles.decisionCard} aria-labelledby={`${confirmation.sourceMessageId}-decision-title`} data-risk={decision.risk.level}>
       <div className={styles.decisionHeading}>
         <div>
-          <p className={styles.decisionKicker}>{ko ? "결정 필요" : "Decision needed"}</p>
-          <p id={`${confirmation.sourceMessageId}-decision-title`} className={styles.decisionTitle}>{decision.target.source === "header" && decision.target.value ? decision.target.value : (ko ? "진행 조건 확인" : "Review the next action")}</p>
+          <p className={styles.decisionKicker}>{tFor(locale, "one.shell.decision.kicker_decision")}</p>
+          <p id={`${confirmation.sourceMessageId}-decision-title`} className={styles.decisionTitle}>{decision.target.source === "header" && decision.target.value ? decision.target.value : tFor(locale, "one.shell.decision.review_next_action")}</p>
         </div>
-        <span className={styles.riskBadge}>{ko ? "확인 후 진행" : "Review before continuing"}</span>
+        <span className={styles.riskBadge}>{tFor(locale, "one.shell.decision.review_before_continuing")}</span>
       </div>
 
       <dl className={styles.decisionFacts}>
@@ -2779,23 +2749,19 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
       </dl>
 
       <p className={styles.decisionEvidence}>
-        {ko
-          ? `방금 부탁한 내용과 현재 작업 상태를 기준으로 정리했어요. · ${formatTimestamp(decision.createdAt, locale)}`
-          : `Based on what you just asked and the current work status. · ${formatTimestamp(decision.createdAt, locale)}`}
+        {tFor(locale, "one.shell.decision.evidence", { time: formatTimestamp(decision.createdAt, locale) })}
       </p>
 
       {approvalBlocked && (
         <div className={styles.decisionGuard} role="status">
-          <strong>{ko ? "One에서 바로 승인할 수 없음" : "Approval is unavailable in One"}</strong>
-          <span>{ko
-            ? "바로 실행하기에는 대상, 비용, 또는 되돌리는 방법 중 아직 확인되지 않은 내용이 있어요. Work에서 한 번 확인하면 안전하게 이어갈 수 있어요."
-            : "One still needs to confirm the target, cost, or how to undo this. Review it once in Work to continue safely."}</span>
-          {blockedOptions.length > 0 && <small>{ko ? "검토가 필요한 선택" : "Choices requiring review"}: {blockedOptions.map((option) => option.label).join(" · ")}</small>}
+          <strong>{tFor(locale, "one.shell.decision.approval_unavailable")}</strong>
+          <span>{tFor(locale, "one.shell.decision.approval_unavailable_body")}</span>
+          {blockedOptions.length > 0 && <small>{tFor(locale, "one.shell.decision.choices_requiring_review")}: {blockedOptions.map((option) => option.label).join(" · ")}</small>}
         </div>
       )}
 
       {confirmation.multiSelect && !approvalBlocked && (
-        <p className={styles.decisionGuard}>{ko ? "여러 선택을 하나의 답으로 확정해야 하므로 Work에서 전체 범위를 검토해주세요." : "This decision requires multiple selections; review the full scope in Work before submitting."}</p>
+        <p className={styles.decisionGuard}>{tFor(locale, "one.shell.decision.multi_select")}</p>
       )}
 
       <div className={styles.decisionOptions}>
@@ -2812,16 +2778,15 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
           </button>
         ))}
         <button type="button" className={styles.decisionRejectButton} disabled={disabled} onClick={() => onAnswer(confirmation, decision.controls.reject.reply)}>{rejectLabel}</button>
-        <button type="button" className={styles.decisionButton} onClick={onOpenWork}>{ko ? "Work에서 범위 수정" : "Change scope in Work"}</button>
-        <button type="button" className={styles.decisionButton} disabled={disabled} onClick={() => onSnooze(confirmation)}>{ko ? "24시간 뒤 다시 알림" : "Remind me in 24 hours"}</button>
+        <button type="button" className={styles.decisionButton} onClick={onOpenWork}>{tFor(locale, "one.shell.decision.change_scope")}</button>
+        <button type="button" className={styles.decisionButton} disabled={disabled} onClick={() => onSnooze(confirmation)}>{tFor(locale, "one.shell.decision.remind_24h")}</button>
       </div>
-      <p className={styles.decisionHint}>{ko ? "거절과 나중에 결정은 승인이나 외부 실행을 시작하지 않습니다." : "Rejecting or deciding later does not approve or start an external action."}</p>
+      <p className={styles.decisionHint}>{tFor(locale, "one.shell.decision.reject_hint")}</p>
     </section>
   );
 }
 
 function ResolvedDecisionReceipt({ receipt, locale }: { receipt: CommittedQuestionAnswer; locale: "ko" | "en" }) {
-  const ko = locale === "ko";
   return (
     <details className={styles.resolvedDecision}>
       <summary>
@@ -2829,14 +2794,14 @@ function ResolvedDecisionReceipt({ receipt, locale }: { receipt: CommittedQuesti
           <span className={styles.resolvedDecisionCheck} aria-hidden="true">✓</span>
           <span>
             <strong>{receipt.reply}</strong>
-            <small>{ko ? "선택했어요" : "Selected"}</small>
+            <small>{tFor(locale, "one.shell.receipt.selected")}</small>
           </span>
         </span>
         <time dateTime={receipt.ts}>{formatTimestamp(receipt.ts, locale)}</time>
       </summary>
       <div>
-        <p>{ko ? "나중에 바꾸고 싶으면 One에게 그대로 말하면 돼요." : "If you change your mind, just tell One."}</p>
-        <small>{ko ? `선택한 시각 ${formatTimestamp(receipt.ts, locale)}` : `Selected ${formatTimestamp(receipt.ts, locale)}`}</small>
+        <p>{tFor(locale, "one.shell.receipt.change_mind")}</p>
+        <small>{tFor(locale, "one.shell.receipt.selected_at", { time: formatTimestamp(receipt.ts, locale) })}</small>
       </div>
     </details>
   );

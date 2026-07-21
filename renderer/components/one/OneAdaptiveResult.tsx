@@ -39,6 +39,7 @@ import {
 } from "@shared/one-artifacts";
 import { redactSecrets } from "@shared/secret-patterns";
 import { ipc } from "@/lib/ipc";
+import { tFor } from "@/lib/i18n";
 import styles from "./OneAdaptiveResult.module.css";
 
 const DESKTOP_NATIVE_BLOCK_TYPES = new Set<OneSurfaceBlockType>([
@@ -88,7 +89,6 @@ export function OneAdaptiveResult({
   improvementProof?: OneImprovementProofRecord | null;
   onManageImprovementAsset?: (asset: OneImprovementReusedAssetV1) => void;
 }) {
-  const ko = locale === "ko";
   const surface = useMemo(() => manifest && isOneSurfaceManifestV1(manifest) ? manifest : null, [manifest]);
   const renderDecision = useMemo(() => surface ? inspectSurfaceForDesktop(surface, projection.taskId) : null, [projection.taskId, surface]);
   const fallback = useMemo(() => readSafeFallback(manifest, projection.taskId), [manifest, projection.taskId]);
@@ -113,15 +113,15 @@ export function OneAdaptiveResult({
   ), [projection.canonicalVersion, projection.chatId, projection.taskId, receipt?.runId, surface]);
 
   return (
-    <section className={styles.root} aria-label={ko ? "일의 결과" : "Work result"}>
+    <section className={styles.root} aria-label={tFor(locale, "one.res.aria.work_result")}>
       {hasManifest && (
         <article className={styles.result} data-surface-contract={surface?.contractVersion ?? "invalid"}>
           <header className={styles.header}>
             <div className={styles.headerCopy}>
-              <h3>{showNative && surface ? displayValue(surface.title) : (ko ? "결과를 여기서 모두 보여주지 못했어요" : "This result needs a larger view")}</h3>
+              <h3>{showNative && surface ? displayValue(surface.title) : tFor(locale, "one.res.title.too_large")}</h3>
               <p className={styles.summary}>{showNative && surface
                 ? friendlySurfaceSummary(surface.summary, locale)
-                : (ko ? "자세한 내용은 Work에서 확인해주세요." : "Open Work to see the full result.")}</p>
+                : tFor(locale, "one.res.summary.open_work")}</p>
             </div>
           </header>
           <div className={styles.body}>
@@ -146,11 +146,11 @@ export function OneAdaptiveResult({
           <div className={styles.actions}>
             {canAcceptResult && (
               <button type="button" className={styles.actionPrimary} onClick={onAcceptResult} disabled={acceptingResult}>
-                {acceptingResult ? (ko ? "마무리 중…" : "Finishing…") : (ko ? "이대로 마무리" : "Finish here")}
+                {acceptingResult ? tFor(locale, "one.res.finishing") : tFor(locale, "one.res.finish_here")}
               </button>
             )}
             <button type="button" className={canAcceptResult ? styles.action : styles.actionPrimary} onClick={onOpenWork}>
-              {showNative && surface?.primaryAction?.label ? displayValue(surface.primaryAction.label) : (ko ? "자세히 보기" : "See details")}
+              {showNative && surface?.primaryAction?.label ? displayValue(surface.primaryAction.label) : tFor(locale, "one.res.see_details")}
             </button>
           </div>
           {canAcceptResult && (
@@ -158,7 +158,7 @@ export function OneAdaptiveResult({
           )}
           {showNative && surface && surface.evidence.length > 0 && !hasSourceListBlock && (
             <details className={styles.evidence}>
-              <summary>{ko ? `근거 ${surface.evidence.length}개` : `${surface.evidence.length} evidence entries`}</summary>
+              <summary>{tFor(locale, "one.res.evidence_count", { n: surface.evidence.length })}</summary>
               {surface.evidence.map((item) => (
                 <span key={item.evidenceRef}>
                   {displayValue(item.label ?? item.evidenceRef)} · {verificationLabel(item.verificationStatus, locale)}
@@ -172,10 +172,10 @@ export function OneAdaptiveResult({
         <RunClosure receipt={receipt} locale={locale} />
       )}
       {canAcceptResult && !hasManifest && (
-        <section className={styles.standaloneAcceptance} aria-label={ko ? "결과 확인" : "Confirm result"}>
+        <section className={styles.standaloneAcceptance} aria-label={tFor(locale, "one.res.aria.confirm_result")}>
           <AcceptanceBoundaryCopy locale={locale} className={styles.standaloneAcceptanceCopy} />
           <button type="button" className={styles.actionPrimary} onClick={onAcceptResult} disabled={acceptingResult}>
-            {acceptingResult ? (ko ? "마무리 중…" : "Finishing…") : (ko ? "이대로 마무리" : "Finish here")}
+            {acceptingResult ? tFor(locale, "one.res.finishing") : tFor(locale, "one.res.finish_here")}
           </button>
         </section>
       )}
@@ -188,9 +188,7 @@ export function OneAdaptiveResult({
 function AcceptanceBoundaryCopy({ locale, className }: { locale: "ko" | "en"; className: string }) {
   return (
     <p className={className}>
-      {locale === "ko"
-        ? "결과가 괜찮다면 마무리하세요. 다음에 더 잘 도울 방법이 있으면 One이 먼저 물어볼게요."
-        : "Happy with the result? Finish here. One will ask before reusing anything next time."}
+      {tFor(locale, "one.res.acceptance_boundary")}
     </p>
   );
 }
@@ -211,20 +209,17 @@ function FallbackResult({
   reasons: string[];
   locale: "ko" | "en";
 }) {
-  const ko = locale === "ko";
   const hasSafeContent = Boolean(fallback.markdown || fallback.artifacts.length > 0);
   return (
     <div className={styles.block} data-render-fallback="true">
       {fallback.markdown ? (
         <SafeFallbackMarkdown markdown={fallback.markdown} />
       ) : (
-        <p className={styles.summary}>{ko
-          ? "이 화면에서 바로 보여줄 수 없는 결과예요. 원본은 Work에서 확인할 수 있습니다."
-          : "This result cannot be shown directly here. You can open the original in Work."}</p>
+        <p className={styles.summary}>{tFor(locale, "one.res.fallback.cannot_show")}</p>
       )}
       {fallback.artifacts.length > 0 && (
-        <section className={styles.fallbackArtifacts} aria-label={ko ? "결과 파일" : "Result files"}>
-          <h4>{ko ? "확인된 파일" : "Checked files"}</h4>
+        <section className={styles.fallbackArtifacts} aria-label={tFor(locale, "one.res.aria.result_files")}>
+          <h4>{tFor(locale, "one.res.fallback.checked_files")}</h4>
           <div className={styles.cardGrid}>
             {fallback.artifacts.map((artifact) => (
               <div
@@ -244,12 +239,10 @@ function FallbackResult({
         </section>
       )}
       {!hasSafeContent && (
-        <p className={styles.fallbackNotice}>{ko
-          ? "안전하게 확인된 내용만 표시합니다."
-          : "Only content that passed the safety check is shown."}</p>
+        <p className={styles.fallbackNotice}>{tFor(locale, "one.res.fallback.only_safe")}</p>
       )}
       <details className={styles.evidence}>
-        <summary>{ko ? "표시하지 못한 이유" : "Why some content was not shown"}</summary>
+        <summary>{tFor(locale, "one.res.fallback.why_not_shown")}</summary>
         {reasons.map((reason) => <span key={reason}>{displayValue(reason)}</span>)}
       </details>
     </div>
@@ -339,12 +332,11 @@ function MetricBlock({ block, locale }: { block: OneSurfaceMetricBlock; locale: 
 }
 
 function TableBlock({ block, locale }: { block: OneSurfaceTableBlock; locale: "ko" | "en" }) {
-  const ko = locale === "ko";
   const columns = block.columns.filter((column) => !isInternalColumnLabel(column.label));
   const labels = new Map(columns.map((column) => [column.columnId, column.label]));
   if (isStepTable(columns)) return <StepTable block={block} columns={columns} locale={locale} />;
   const renderTable = () => (
-    <div className={styles.tableWrap} tabIndex={0} aria-label={ko ? `${block.title} 표` : `${block.title} table`}>
+    <div className={styles.tableWrap} tabIndex={0} aria-label={tFor(locale, "one.res.table.aria", { title: block.title })}>
       <table className={styles.table}>
         <thead><tr>{columns.map((column) => <th key={column.columnId} scope="col">{displayValue(column.label)}</th>)}</tr></thead>
         <tbody>{block.rows.map((row) => {
@@ -358,7 +350,7 @@ function TableBlock({ block, locale }: { block: OneSurfaceTableBlock; locale: "k
     <>
       <div className={styles.desktopTable}>{renderTable()}</div>
       <details className={styles.mobileTable}>
-        <summary>{ko ? "전체 비교 보기" : "See full comparison"}</summary>
+        <summary>{tFor(locale, "one.res.table.see_full")}</summary>
         {renderTable()}
       </details>
     </>
@@ -374,13 +366,12 @@ function isStepTable(columns: OneSurfaceTableBlock["columns"]): boolean {
 }
 
 function StepTable({ block, columns, locale }: { block: OneSurfaceTableBlock; columns: OneSurfaceTableBlock["columns"]; locale: "ko" | "en" }) {
-  const ko = locale === "ko";
   const orderColumn = columns.find((column) => /^(?:순서|단계|step|order)$/i.test(column.label.trim())) ?? columns[0];
   const purposeColumn = columns.find((column) => /(?:무엇|검사|내용|purpose|what)/i.test(column.label));
   const commandColumn = columns.find((column) => /(?:명령|command)/i.test(column.label));
   const reasonColumn = columns.find((column) => /(?:왜|이유|reason)/i.test(column.label));
   return (
-    <ol className={styles.workflowSteps} aria-label={ko ? `${block.title} 실행 순서` : `${block.title} steps`}>
+    <ol className={styles.workflowSteps} aria-label={tFor(locale, "one.res.steptable.aria", { title: block.title })}>
       {block.rows.map((row, index) => {
         const cells = new Map(row.cells.map((cell) => [cell.columnId, cell.value]));
         return <li key={row.rowId}>
@@ -401,16 +392,16 @@ function friendlyBlockTitle(block: OneSurfaceBlock, locale: "ko" | "en"): string
   const title = displayValue(block.title);
   if (!/^(?:items?|data|results?|rows?)$/i.test(title.trim())) return title;
   if (block.type === "Table" && isStepTable(block.columns.filter((column) => !isInternalColumnLabel(column.label)))) {
-    return locale === "ko" ? "순서대로 해보세요" : "Follow these steps";
+    return tFor(locale, "one.res.block.follow_steps");
   }
-  if (block.type === "Checklist") return locale === "ko" ? "할 일" : "To do";
-  return locale === "ko" ? "한눈에 보기" : "At a glance";
+  if (block.type === "Checklist") return tFor(locale, "one.res.block.to_do");
+  return tFor(locale, "one.res.block.at_a_glance");
 }
 
 function friendlySurfaceSummary(value: string, locale: "ko" | "en"): string {
   const summary = displayValue(value);
   if (/^(?:확인한 결과를 한눈에 볼 수 있게 정리했습니다\.|The result is organized for a quick review\.)$/i.test(summary)) {
-    return locale === "ko" ? "필요한 내용만 모았어요." : "Here are the parts you need.";
+    return tFor(locale, "one.res.summary.parts_you_need");
   }
   return summary;
 }
@@ -419,14 +410,14 @@ function provenanceLabel(
   value: OneSurfaceGalleryBlock["items"][number]["provenance"],
   locale: "ko" | "en",
 ): string {
-  const labels: Record<typeof value, [string, string]> = {
-    user_original: ["내가 올린 원본", "My original"],
-    generated: ["One이 만든 파일", "Created by One"],
-    edited: ["편집한 파일", "Edited file"],
-    licensed_source: ["사용 허가된 자료", "Licensed source"],
-    unknown_source: ["출처 확인 필요", "Source needs checking"],
-  };
-  return labels[value][locale === "ko" ? 0 : 1];
+  const keys = {
+    user_original: "one.res.prov.user_original",
+    generated: "one.res.prov.generated",
+    edited: "one.res.prov.edited",
+    licensed_source: "one.res.prov.licensed_source",
+    unknown_source: "one.res.prov.unknown_source",
+  } as const;
+  return tFor(locale, keys[value]);
 }
 
 function formatTimelineAt(value: string, locale: "ko" | "en"): string {
@@ -441,14 +432,15 @@ function formatTimelineAt(value: string, locale: "ko" | "en"): string {
 }
 
 function timelineStateLabel(value: string, locale: "ko" | "en"): string {
-  const labels: Record<string, [string, string]> = {
-    upcoming: ["예정", "Upcoming"],
-    in_progress: ["진행 중", "In progress"],
-    completed: ["완료", "Completed"],
-    failed: ["확인 필요", "Needs attention"],
-    cancelled: ["취소", "Cancelled"],
-  };
-  return labels[value]?.[locale === "ko" ? 0 : 1] ?? displayValue(value);
+  const keys = {
+    upcoming: "one.res.timeline.upcoming",
+    in_progress: "one.res.timeline.in_progress",
+    completed: "one.res.timeline.completed",
+    failed: "one.res.timeline.failed",
+    cancelled: "one.res.timeline.cancelled",
+  } as const;
+  const key = keys[value as keyof typeof keys];
+  return key ? tFor(locale, key) : displayValue(value);
 }
 
 function timelineTitleParts(value: string): { lead: string; body: string } | null {
@@ -474,7 +466,6 @@ function TimelineBlock({ block, locale }: { block: OneSurfaceTimelineBlock; loca
 }
 
 function ComparisonBlock({ block, locale }: { block: OneSurfaceComparisonBlock; locale: "ko" | "en" }) {
-  const ko = locale === "ko";
   return (
     <div className={styles.comparisonGrid}>
       {block.options.map((option) => {
@@ -482,11 +473,11 @@ function ComparisonBlock({ block, locale }: { block: OneSurfaceComparisonBlock; 
         return <article className={styles.comparisonCard} data-recommended={recommended ? "true" : "false"} key={option.optionRef}>
           <div className={styles.comparisonHeading}>
             <div><strong>{displayValue(option.title)}</strong>{option.subtitle && <span>{displayValue(option.subtitle)}</span>}</div>
-            {recommended && <b>{ko ? "추천" : "Recommended"}</b>}
+            {recommended && <b>{tFor(locale, "one.res.compare.recommended")}</b>}
           </div>
           <div className={styles.comparisonColumns}>
-            <section><span>{ko ? "강점" : "Strengths"}</span><ul>{option.strengths.map((item, index) => <li key={index}>{displayValue(item)}</li>)}</ul></section>
-            <section><span>{ko ? "한계" : "Limitations"}</span><ul>{option.limitations.map((item, index) => <li key={index}>{displayValue(item)}</li>)}</ul></section>
+            <section><span>{tFor(locale, "one.res.compare.strengths")}</span><ul>{option.strengths.map((item, index) => <li key={index}>{displayValue(item)}</li>)}</ul></section>
+            <section><span>{tFor(locale, "one.res.compare.limitations")}</span><ul>{option.limitations.map((item, index) => <li key={index}>{displayValue(item)}</li>)}</ul></section>
           </div>
         </article>;
       })}
@@ -495,7 +486,6 @@ function ComparisonBlock({ block, locale }: { block: OneSurfaceComparisonBlock; 
 }
 
 function MapBlock({ block, locale }: { block: OneSurfaceMapBlock; locale: "ko" | "en" }) {
-  const ko = locale === "ko";
   const ordered = [...block.locations].sort((left, right) => (left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER));
   const minLat = Math.min(...ordered.map((item) => item.latitude));
   const maxLat = Math.max(...ordered.map((item) => item.latitude));
@@ -508,7 +498,7 @@ function MapBlock({ block, locale }: { block: OneSurfaceMapBlock; locale: "ko" |
   });
   return (
     <div className={styles.mapLayout}>
-      <svg className={styles.mapPlot} role="img" aria-label={ko ? `${block.title} 위치 순서` : `${block.title} location sequence`} viewBox="0 0 100 100" preserveAspectRatio="none">
+      <svg className={styles.mapPlot} role="img" aria-label={tFor(locale, "one.res.map.aria", { title: block.title })} viewBox="0 0 100 100" preserveAspectRatio="none">
         <polyline points={points.map((item) => `${item.x},${item.y}`).join(" ")} fill="none" stroke="currentColor" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
         {points.map((item, index) => <g key={item.locationRef}><circle cx={item.x} cy={item.y} r="3.2" /><text x={item.x} y={item.y + 1.2} textAnchor="middle">{item.sequence ?? index + 1}</text></g>)}
       </svg>
@@ -614,14 +604,13 @@ function GalleryItem({
   artifactContext: OneArtifactBindingRequestV1 | null;
   onOpenWork: () => void;
 }) {
-  const ko = locale === "ko";
   const preview = useArtifactPreview(artifactContext, item.artifactRef);
   const [mediaFailed, setMediaFailed] = useState(false);
   const unavailable = preview.state.status === "unavailable" || mediaFailed;
   return (
     <article className={styles.galleryItem} role="listitem" aria-busy={preview.state.status === "loading"}>
       <div className={styles.galleryFrame}>
-        {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={ko ? "이미지 불러오는 중" : "Loading image"} />}
+        {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={tFor(locale, "one.res.gallery.loading_image")} />}
         {preview.state.status === "ready" && !mediaFailed && (
           // The source is a short-lived Main capability, never a file path or remote model URL.
           // eslint-disable-next-line @next/next/no-img-element
@@ -636,16 +625,16 @@ function GalleryItem({
         )}
         {unavailable && (
           <div className={styles.mediaUnavailable} role="status">
-            <span>{ko ? "미리보기를 안전하게 열 수 없어요." : "A safe preview is unavailable."}</span>
-            <button type="button" onClick={() => { setMediaFailed(false); preview.retry(); }}>{ko ? "다시 확인" : "Retry"}</button>
+            <span>{tFor(locale, "one.res.media.preview_unavailable")}</span>
+            <button type="button" onClick={() => { setMediaFailed(false); preview.retry(); }}>{tFor(locale, "one.res.retry")}</button>
           </div>
         )}
       </div>
       <div className={styles.mediaMeta}>
         <div><strong>{displayValue(item.label)}</strong><span>{provenanceLabel(item.provenance, locale)}</span></div>
-        <button type="button" aria-label={`${ko ? "파일 열기" : "Open file"}: ${displayValue(item.label)}`} onClick={() => void preview.open()}>{ko ? "파일 열기" : "Open file"}</button>
+        <button type="button" aria-label={`${tFor(locale, "one.res.open_file")}: ${displayValue(item.label)}`} onClick={() => void preview.open()}>{tFor(locale, "one.res.open_file")}</button>
       </div>
-      {unavailable && <button type="button" className={styles.workFallbackButton} onClick={onOpenWork}>{ko ? "Work에서 보기" : "View in Work"}</button>}
+      {unavailable && <button type="button" className={styles.workFallbackButton} onClick={onOpenWork}>{tFor(locale, "one.res.view_in_work")}</button>}
     </article>
   );
 }
@@ -661,7 +650,6 @@ function MediaBlock({
   artifactContext: OneArtifactBindingRequestV1 | null;
   onOpenWork: () => void;
 }) {
-  const ko = locale === "ko";
   const preview = useArtifactPreview(artifactContext, block.primaryArtifactRef);
   const [mediaFailed, setMediaFailed] = useState(false);
   const unavailable = preview.state.status === "unavailable" || mediaFailed;
@@ -669,17 +657,17 @@ function MediaBlock({
   return (
     <div className={styles.mediaLayout}>
       <div className={styles.primaryMedia} aria-busy={preview.state.status === "loading"}>
-        {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={ko ? "미디어 불러오는 중" : "Loading media"} />}
+        {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={tFor(locale, "one.res.media.loading")} />}
         {capabilityUrl && !mediaFailed && block.mediaType === "video" && (
           <video aria-label={displayValue(block.caption ?? block.title)} controls playsInline preload="metadata" src={capabilityUrl} onError={() => setMediaFailed(true)}>
-            {ko ? "이 영상은 현재 재생할 수 없습니다." : "This video cannot be played."}
+            {tFor(locale, "one.res.media.video_unplayable")}
           </video>
         )}
         {capabilityUrl && !mediaFailed && block.mediaType === "audio" && (
           <div className={styles.audioFrame}>
-            <span>{ko ? "오디오 결과" : "Audio result"}</span>
+            <span>{tFor(locale, "one.res.media.audio_result")}</span>
             <audio aria-label={displayValue(block.caption ?? block.title)} controls preload="metadata" src={capabilityUrl} onError={() => setMediaFailed(true)}>
-              {ko ? "이 오디오는 현재 재생할 수 없습니다." : "This audio cannot be played."}
+              {tFor(locale, "one.res.media.audio_unplayable")}
             </audio>
           </div>
         )}
@@ -689,16 +677,16 @@ function MediaBlock({
         )}
         {unavailable && (
           <div className={styles.mediaUnavailable} role="status">
-            <span>{ko ? "원본 참조는 보존됐지만 안전한 미리보기를 만들 수 없어요." : "The source reference is preserved, but a safe preview is unavailable."}</span>
+            <span>{tFor(locale, "one.res.media.source_preserved")}</span>
             <div>
-              <button type="button" onClick={() => { setMediaFailed(false); preview.retry(); }}>{ko ? "다시 확인" : "Retry"}</button>
-              <button type="button" onClick={onOpenWork}>{ko ? "Work에서 보기" : "View in Work"}</button>
+              <button type="button" onClick={() => { setMediaFailed(false); preview.retry(); }}>{tFor(locale, "one.res.retry")}</button>
+              <button type="button" onClick={onOpenWork}>{tFor(locale, "one.res.view_in_work")}</button>
             </div>
           </div>
         )}
       </div>
       {block.caption && <p className={styles.mediaCaption}>{displayValue(block.caption)}</p>}
-      <div className={styles.mediaOutputs} role="list" aria-label={ko ? "출력 파일" : "Output files"}>
+      <div className={styles.mediaOutputs} role="list" aria-label={tFor(locale, "one.res.aria.output_files")}>
         {block.outputs.map((output) => (
           <MediaOutput
             key={output.artifactRef}
@@ -729,7 +717,7 @@ function MediaOutput({
   return (
     <article className={styles.mediaOutput} role="listitem">
       <div><strong>{displayValue(output.label)}</strong><span>{artifactTypeLabel(output.type, locale)} · {verificationLabel(output.verificationStatus, locale)}{output.sizeBytes != null ? ` · ${formatBytes(output.sizeBytes)}` : ""}</span></div>
-      <button type="button" aria-label={`${locale === "ko" ? "파일 열기" : "Open file"}: ${displayValue(output.label)}`} onClick={() => void open()}>{locale === "ko" ? "열기" : "Open"}</button>
+      <button type="button" aria-label={`${tFor(locale, "one.res.open_file")}: ${displayValue(output.label)}`} onClick={() => void open()}>{tFor(locale, "one.res.open")}</button>
     </article>
   );
 }
@@ -743,7 +731,6 @@ function DocumentBlock({
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
 }) {
-  const ko = locale === "ko";
   const [openFailed, setOpenFailed] = useState(false);
   const open = useCallback(async () => {
     const api = ipc();
@@ -756,50 +743,46 @@ function DocumentBlock({
   }, [artifactContext, block.artifactRef]);
   return <article className={styles.documentPreview} data-artifact-ref={block.artifactRef}>
     <div>
-      <strong>{ko ? "문서 미리보기" : "Document preview"}</strong>
-      <span>{block.pageCount != null ? `${block.pageCount} ${ko ? "페이지" : "pages"}` : (ko ? "내용 확인됨" : "Content checked")}</span>
-      <button type="button" onClick={() => void open()}>{ko ? "파일 열기" : "Open file"}</button>
-      {openFailed && <small role="status">{ko ? "이 기기에서 파일을 찾을 수 없어요." : "This file is not available on this device."}</small>}
+      <strong>{tFor(locale, "one.res.doc.preview")}</strong>
+      <span>{block.pageCount != null ? tFor(locale, "one.res.doc.pages", { count: block.pageCount }) : tFor(locale, "one.res.doc.content_checked")}</span>
+      <button type="button" onClick={() => void open()}>{tFor(locale, "one.res.open_file")}</button>
+      {openFailed && <small role="status">{tFor(locale, "one.res.file_not_on_device")}</small>}
     </div>
     <p>{displayValue(block.excerpt)}</p>
   </article>;
 }
 
 function SourceListBlock({ block, locale }: { block: OneSurfaceSourceListBlock; locale: "ko" | "en" }) {
-  const ko = locale === "ko";
   return <details className={styles.sourceDisclosure}>
-    <summary>{ko ? `출처 ${block.sources.length}개 보기` : `View ${block.sources.length} sources`}</summary>
+    <summary>{tFor(locale, "one.res.source.view_count", { n: block.sources.length })}</summary>
     <ol className={styles.sourceList}>{block.sources.map((source, index) => <li key={source.sourceRef}>
-      <b>{index + 1}</b><div><strong>{displayValue(source.title)}</strong><span>{source.publisher ? `${displayValue(source.publisher)} · ` : ""}{verificationLabel(source.verificationStatus, locale)}{source.claimRefs?.length ? ` · ${ko ? "확인 항목" : "checked claims"} ${source.claimRefs.length}` : ""}</span></div>
+      <b>{index + 1}</b><div><strong>{displayValue(source.title)}</strong><span>{source.publisher ? `${displayValue(source.publisher)} · ` : ""}{verificationLabel(source.verificationStatus, locale)}{source.claimRefs?.length ? ` · ${tFor(locale, "one.res.source.checked_claims")} ${source.claimRefs.length}` : ""}</span></div>
     </li>)}</ol>
   </details>;
 }
 
 function DecisionBlock({ block, locale }: { block: OneSurfaceDecisionBlock; locale: "ko" | "en" }) {
-  const ko = locale === "ko";
   return <div className={styles.decisionPreview} data-risk={block.risk}>
-    <div><span>{ko ? "결정 필요" : "Decision required"} · {displayValue(block.risk)}</span>{block.deadline && <time>{displayValue(block.deadline)}</time>}</div>
+    <div><span>{tFor(locale, "one.res.decision.required")} · {displayValue(block.risk)}</span>{block.deadline && <time>{displayValue(block.deadline)}</time>}</div>
     <strong>{displayValue(block.prompt)}</strong>
     <div className={styles.decisionOptions}>{block.options.map((option) => <article key={option.optionRef}><b>{displayValue(option.label)}</b><span>{displayValue(option.consequence)}</span></article>)}</div>
-    <small>{ko ? "선택한 뒤 One에게 말하면 다음 단계로 넘어갑니다." : "Choose an option, then tell One to continue."}</small>
+    <small>{tFor(locale, "one.res.decision.choose_hint")}</small>
   </div>;
 }
 
 function StatusBlock({ block, locale }: { block: OneSurfaceStatusBlock; locale: "ko" | "en" }) {
-  const ko = locale === "ko";
   return <div className={styles.statusBlock}>
-    <p><span className={styles.statusPill} data-task-state={block.taskState}>{runStateLabel(block.taskState, locale)}</span>{ko ? "확인 가능한 단계만 표시합니다." : "Only verified steps are shown."}</p>
+    <p><span className={styles.statusPill} data-task-state={block.taskState}>{runStateLabel(block.taskState, locale)}</span>{tFor(locale, "one.res.status.verified_only")}</p>
     <ol>{block.steps.map((step) => <li key={step.stepRef} data-step-status={step.status}><i aria-hidden="true" /><div><strong>{displayValue(step.label)}</strong><span>{runStateLabel(step.status, locale)}</span></div></li>)}</ol>
   </div>;
 }
 
 function BudgetBlock({ block, locale }: { block: OneSurfaceBudgetBlock; locale: "ko" | "en" }) {
-  const ko = locale === "ko";
   const ratio = block.limit > 0 ? Math.min(1, Math.max(0, block.total / block.limit)) : 0;
   const meterMax = Math.max(block.limit, 1);
   const number = new Intl.NumberFormat(locale === "ko" ? "ko-KR" : "en-US", { maximumFractionDigits: 2 });
   return <div className={styles.budgetBlock}>
-    <div className={styles.budgetTotal}><div><span>{ko ? "합계" : "Total"}</span><strong>{number.format(block.total)} {displayValue(block.currency)}</strong></div><div><span>{ko ? "한도" : "Limit"}</span><strong>{number.format(block.limit)} {displayValue(block.currency)}</strong></div></div>
+    <div className={styles.budgetTotal}><div><span>{tFor(locale, "one.res.budget.total")}</span><strong>{number.format(block.total)} {displayValue(block.currency)}</strong></div><div><span>{tFor(locale, "one.res.budget.limit")}</span><strong>{number.format(block.limit)} {displayValue(block.currency)}</strong></div></div>
     <div className={styles.budgetTrack} role="meter" aria-valuemin={0} aria-valuemax={meterMax} aria-valuenow={Math.min(Math.max(block.total, 0), meterMax)}><span style={{ width: `${ratio * 100}%` }} /></div>
     <div className={styles.budgetLines}>{block.lines.map((line) => <div key={line.lineRef}><span>{displayValue(line.label)} · {verificationLabel(line.verificationStatus, locale)}</span><strong>{number.format(line.amount)} {displayValue(block.currency)}</strong></div>)}</div>
   </div>;
@@ -832,7 +815,6 @@ function ArtifactFileCard({
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
 }) {
-  const ko = locale === "ko";
   const [openFailed, setOpenFailed] = useState(false);
   const open = useCallback(async () => {
     const api = ipc();
@@ -848,9 +830,9 @@ function ArtifactFileCard({
       <div>
         <strong>{displayValue(item.label)}</strong>
         <span>{artifactTypeLabel(item.type, locale)} · {verificationLabel(item.verificationStatus, locale)}{item.sizeBytes != null ? ` · ${formatBytes(item.sizeBytes)}` : ""}</span>
-        {openFailed && <small role="status">{ko ? "이 기기에서 파일을 찾을 수 없어요." : "This file is not available on this device."}</small>}
+        {openFailed && <small role="status">{tFor(locale, "one.res.file_not_on_device")}</small>}
       </div>
-      <button type="button" onClick={() => void open()}>{ko ? "열기" : "Open"}</button>
+      <button type="button" onClick={() => void open()}>{tFor(locale, "one.res.open")}</button>
     </article>
   );
 }
@@ -1185,11 +1167,10 @@ function safeFallbackText(value: unknown, maxLength: number): string | null {
 }
 
 function RunClosure({ receipt, locale }: { receipt: InvocationRunReceipt; locale: "ko" | "en" }) {
-  const ko = locale === "ko";
   const stopped = receipt.status === "cancelled";
   const statusLabel = stopped
-    ? (ko ? "여기서 멈췄어요" : "Stopped here")
-    : (ko ? "아직 끝내지 못했어요" : "This is not finished yet");
+    ? tFor(locale, "one.res.closure.stopped_here")
+    : tFor(locale, "one.res.closure.not_finished");
   const outcome = friendlyFailureMessage(receipt.errorMessage, locale, stopped);
   return (
     <section className={styles.failureClosure} role="status">
@@ -1203,32 +1184,21 @@ function RunClosure({ receipt, locale }: { receipt: InvocationRunReceipt; locale
 }
 
 function friendlyFailureMessage(errorMessage: string | null | undefined, locale: "ko" | "en", stopped: boolean): string {
-  const ko = locale === "ko";
   if (stopped) {
-    return ko
-      ? "요청에 따라 여기서 멈췄어요. 지금까지 준비한 내용은 그대로 남아 있어요."
-      : "Stopped as requested. Everything prepared so far is still available.";
+    return tFor(locale, "one.res.fail.stopped");
   }
 
   const message = errorMessage?.toLowerCase() ?? "";
   if (/webfetch|web fetch|website|page|url|http|network|fetch/.test(message)) {
-    return ko
-      ? "웹페이지 하나를 확인하지 못해 작업을 끝내지 못했어요. 잠시 뒤 다시 부탁해 주세요."
-      : "One could not check one of the webpages. Please try again in a moment.";
+    return tFor(locale, "one.res.fail.webpage");
   }
   if (/permission|denied|unauthori[sz]ed|forbidden|access/.test(message)) {
-    return ko
-      ? "필요한 파일이나 서비스에 접근할 수 없었어요. 연결 상태를 확인한 뒤 다시 부탁해 주세요."
-      : "One could not access a required file or service. Check the connection, then try again.";
+    return tFor(locale, "one.res.fail.access");
   }
   if (/timeout|timed out|deadline/.test(message)) {
-    return ko
-      ? "확인 시간이 너무 길어져 이번 작업을 마치지 못했어요. 다시 부탁하면 이어서 시도할게요."
-      : "The check took too long to finish. Ask again and One will try once more.";
+    return tFor(locale, "one.res.fail.timeout");
   }
-  return ko
-    ? "확인 과정 일부가 멈춰 작업을 끝내지 못했어요. 다시 부탁해 주세요."
-    : "Part of the check stopped before the work was finished. Please try again.";
+  return tFor(locale, "one.res.fail.generic");
 }
 
 function isTerminal(status: InvocationRunReceipt["status"]): boolean {
@@ -1236,54 +1206,54 @@ function isTerminal(status: InvocationRunReceipt["status"]): boolean {
 }
 
 function verificationLabel(value: string, locale: "ko" | "en"): string {
-  const ko = locale === "ko";
-  const labels: Record<string, [string, string]> = {
-    verified: ["확인 완료", "Verified"],
-    partially_verified: ["일부 확인", "Partially verified"],
-    estimated: ["예상", "Estimated"],
-    unverified: ["확인 필요", "Needs verification"],
-  };
-  return labels[value]?.[ko ? 0 : 1] ?? displayValue(value);
+  const keys = {
+    verified: "one.res.verify.verified",
+    partially_verified: "one.res.verify.partially_verified",
+    estimated: "one.res.verify.estimated",
+    unverified: "one.res.verify.unverified",
+  } as const;
+  const key = keys[value as keyof typeof keys];
+  return key ? tFor(locale, key) : displayValue(value);
 }
 
 function artifactTypeLabel(value: string, locale: "ko" | "en"): string {
-  const ko = locale === "ko";
-  const labels: Record<string, [string, string]> = {
-    document: ["문서", "Document"],
-    spreadsheet: ["표", "Spreadsheet"],
-    image: ["이미지", "Image"],
-    video: ["영상", "Video"],
-    audio: ["오디오", "Audio"],
-    archive: ["압축 파일", "Archive"],
-    data: ["데이터", "Data"],
-    other: ["파일", "File"],
-  };
-  return labels[value]?.[ko ? 0 : 1] ?? displayValue(value);
+  const keys = {
+    document: "one.res.artifact.document",
+    spreadsheet: "one.res.artifact.spreadsheet",
+    image: "one.res.artifact.image",
+    video: "one.res.artifact.video",
+    audio: "one.res.artifact.audio",
+    archive: "one.res.artifact.archive",
+    data: "one.res.artifact.data",
+    other: "one.res.artifact.other",
+  } as const;
+  const key = keys[value as keyof typeof keys];
+  return key ? tFor(locale, key) : displayValue(value);
 }
 
 function runStateLabel(value: string, locale: "ko" | "en"): string {
-  const ko = locale === "ko";
-  const labels: Record<string, [string, string]> = {
-    waiting: ["대기", "Waiting"],
-    working: ["진행 중", "In progress"],
-    decision_required: ["결정 필요", "Decision needed"],
-    completed: ["완료", "Completed"],
-    failed: ["완료되지 않음", "Incomplete"],
-    stopped: ["중단", "Stopped"],
-  };
-  return labels[value]?.[ko ? 0 : 1] ?? displayValue(value);
+  const keys = {
+    waiting: "one.res.runstate.waiting",
+    working: "one.res.runstate.working",
+    decision_required: "one.res.runstate.decision_required",
+    completed: "one.res.runstate.completed",
+    failed: "one.res.runstate.failed",
+    stopped: "one.res.runstate.stopped",
+  } as const;
+  const key = keys[value as keyof typeof keys];
+  return key ? tFor(locale, key) : displayValue(value);
 }
 
 function checklistStateLabel(value: string, locale: "ko" | "en"): string {
-  const ko = locale === "ko";
-  const labels: Record<string, [string, string]> = {
-    not_started: ["시작 전", "Not started"],
-    in_progress: ["진행 중", "In progress"],
-    completed: ["완료", "Completed"],
-    failed: ["확인 필요", "Needs attention"],
-    not_applicable: ["해당 없음", "Not applicable"],
-  };
-  return labels[value]?.[ko ? 0 : 1] ?? displayValue(value);
+  const keys = {
+    not_started: "one.res.checklist.not_started",
+    in_progress: "one.res.checklist.in_progress",
+    completed: "one.res.checklist.completed",
+    failed: "one.res.checklist.failed",
+    not_applicable: "one.res.checklist.not_applicable",
+  } as const;
+  const key = keys[value as keyof typeof keys];
+  return key ? tFor(locale, key) : displayValue(value);
 }
 
 function displayValue(value: unknown): string {
@@ -1317,7 +1287,7 @@ function redactLocalPaths(value: string): string {
 
 function localLocationLabel(path: string, locale: "ko" | "en"): string {
   const basename = path.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).pop();
-  const prefix = locale === "ko" ? "[로컬 경로]" : "[local path]";
+  const prefix = tFor(locale, "one.res.local_path_prefix");
   return basename ? `${prefix} ${redactSecrets(basename)}` : prefix;
 }
 

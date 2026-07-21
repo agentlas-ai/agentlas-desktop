@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
+import { tFor, type Locale } from "@/lib/i18n";
 import type {
   OneSuggestionReviewHandoff,
   OneSuggestionReviewHandoffInput,
@@ -54,37 +55,31 @@ function parseHandoffQuery(query: string): ParsedHandoff {
   };
 }
 
-function reviewLabel(handoff: OneSuggestionReviewHandoff, ko: boolean): string {
-  if (handoff.type === "agent_build") return ko ? "내 전담 도우미 초안" : "personal helper draft";
-  if (handoff.type === "retain_team") return ko ? "내 팀 초안" : "saved team draft";
-  if (handoff.type === "automation") return ko ? "미리 해둘 일 초안" : "prepared routine draft";
-  return ko ? "공개용 초안" : "public draft";
+function reviewLabel(handoff: OneSuggestionReviewHandoff, locale: Locale): string {
+  if (handoff.type === "agent_build") return tFor(locale, "one.rev.label.agent");
+  if (handoff.type === "retain_team") return tFor(locale, "one.rev.label.team");
+  if (handoff.type === "automation") return tFor(locale, "one.rev.label.automation");
+  return tFor(locale, "one.rev.label.hub");
 }
 
-function permissionLabel(value: string, ko: boolean): string {
-  if (value === "read_only" || value === "read") return ko ? "보기만" : "View only";
-  if (value === "draft_only" || value === "write") return ko ? "초안 만들기" : "Create drafts";
-  return ko ? "밖으로 보내기 전에 꼭 묻기" : "Ask before anything leaves the app";
+function permissionLabel(value: string, locale: Locale): string {
+  if (value === "read_only" || value === "read") return tFor(locale, "one.rev.perm.view");
+  if (value === "draft_only" || value === "write") return tFor(locale, "one.rev.perm.draft");
+  return tFor(locale, "one.rev.perm.approval");
 }
 
-function seedPreview(seed: Exclude<OneSuggestionReviewSeed, { kind: "blocked" }>, ko: boolean): string {
+function seedPreview(seed: Exclude<OneSuggestionReviewSeed, { kind: "blocked" }>, locale: Locale): string {
   if (seed.kind === "agent_build") {
-    return ko
-      ? `${seed.candidate.name}의 이름과 맡을 일만 채워두었습니다. 아직 저장하지 않았어요.`
-      : `Only ${seed.candidate.name}'s name and job are filled in. It has not been saved.`;
+    return tFor(locale, "one.rev.seed.agent", { name: seed.candidate.name });
   }
   if (seed.kind === "retain_team") {
-    const names = seed.candidates.map((candidate) => ko ? candidate.name : candidate.nameEn).join(", ");
-    return ko ? `${names} ${seed.candidates.length}명이 함께할 팀 초안입니다. 아직 저장하지 않았어요.` : `This draft team has ${seed.candidates.length} member(s): ${names}. It has not been saved.`;
+    const names = seed.candidates.map((candidate) => locale === "ko" ? candidate.name : candidate.nameEn).join(", ");
+    return tFor(locale, "one.rev.seed.team", { names, count: seed.candidates.length });
   }
   if (seed.kind === "automation") {
-    return ko
-      ? `${seed.triggerPreview}일 때 준비합니다. 할 수 있는 일: ${permissionLabel(seed.permission, ko)}. 시간과 세부 내용은 아직 비어 있어요.`
-      : `Prepares when ${seed.triggerPreview}. What it can do: ${permissionLabel(seed.permission, ko)}. Timing and details are still empty.`;
+    return tFor(locale, "one.rev.seed.automation", { trigger: seed.triggerPreview, perm: permissionLabel(seed.permission, locale) });
   }
-  return ko
-    ? "공개 설명과 기본 구조만 새로 만들었습니다. 내 파일은 복사하지 않았고 게시도 시작하지 않았어요."
-    : "Only a new public description and basic structure were created. Your files were not copied and publishing has not started.";
+  return tFor(locale, "one.rev.seed.hub");
 }
 
 export function OneSuggestionReviewHandoffBanner({
@@ -104,7 +99,6 @@ export function OneSuggestionReviewHandoffBanner({
   const [hubDraft, setHubDraft] = useState<OneHubDerivativeDraft | null>(null);
   const [error, setError] = useState<string | null>(null);
   const materializedDraftRef = useRef<string | null>(null);
-  const ko = locale === "ko";
 
   useEffect(() => {
     setHandoff(null);
@@ -113,9 +107,7 @@ export function OneSuggestionReviewHandoffBanner({
     setError(null);
     if (parsed.kind === "absent") return;
     if (parsed.kind === "invalid") {
-      setError(ko
-        ? "이 초안은 더 이상 안전하게 열 수 없습니다. One으로 돌아가 최신 제안을 다시 열어주세요."
-        : "This draft can no longer be opened safely. Return to One and open the latest suggestion.");
+      setError(tFor(locale, "one.rev.err.unsafe"));
       return;
     }
     const currentParams = new URLSearchParams(query);
@@ -123,14 +115,12 @@ export function OneSuggestionReviewHandoffBanner({
       surface === "work"
       && (currentParams.getAll("task").length !== 1 || currentParams.get("task") !== parsed.input.originTaskId)
     ) {
-      setError(ko
-        ? "지금 연 일이 이 초안을 만든 일과 달라 열지 않았습니다. One으로 돌아가 다시 열어주세요."
-        : "This draft belongs to different work, so it was not opened. Return to One and try again.");
+      setError(tFor(locale, "one.rev.err.diff_work"));
       return;
     }
     const api = ipc();
     if (!api) {
-      setError(ko ? "Desktop에서 준비한 초안을 불러올 수 없습니다." : "The draft prepared on Desktop is unavailable.");
+      setError(tFor(locale, "one.rev.err.no_ipc"));
       return;
     }
     let cancelled = false;
@@ -151,9 +141,7 @@ export function OneSuggestionReviewHandoffBanner({
         || !["accepted_internal_results", "verified_outcomes"].includes(resolved.evidenceBasis)
         || resolved.externalOutcomeVerified !== (resolved.evidenceBasis === "verified_outcomes")
       ) {
-        setError(ko
-          ? "이 초안은 현재 화면이나 최신 상태와 달라 열지 않았습니다."
-          : "This draft no longer matches the current screen or latest state.");
+        setError(tFor(locale, "one.rev.err.mismatch"));
         return;
       }
       if (
@@ -167,15 +155,11 @@ export function OneSuggestionReviewHandoffBanner({
         || resolvedSeed.reviewOnly !== true
         || resolvedSeed.actionState !== "not_started"
       ) {
-        setError(ko
-          ? "초안 내용이 최신 상태와 달라 자동으로 채우지 않았습니다."
-          : "The draft content is no longer current, so it was not filled in.");
+        setError(tFor(locale, "one.rev.err.seed_stale"));
         return;
       }
       if (resolvedSeed.kind === "blocked") {
-        setError(ko
-          ? "안전하게 준비할 수 없는 내용이 있어 초안을 만들지 않았습니다."
-          : "The draft was not created because some content could not be prepared safely.");
+        setError(tFor(locale, "one.rev.err.blocked"));
         return;
       }
       if (resolvedSeed.kind === "hub_derivative") {
@@ -193,9 +177,7 @@ export function OneSuggestionReviewHandoffBanner({
           || resolvedDraft.gates.publishingStarted !== false
           || resolvedDraft.gates.revenueGuaranteed !== false
         ) {
-          setError(ko
-            ? "공개용 초안이 최신 상태와 달라 열지 않았습니다."
-            : "The public draft is no longer current, so it was not opened.");
+          setError(tFor(locale, "one.rev.err.hub_stale"));
           return;
         }
         setHubDraft(resolvedDraft);
@@ -208,7 +190,7 @@ export function OneSuggestionReviewHandoffBanner({
     return () => {
       cancelled = true;
     };
-  }, [ko, parsed, query, surface]);
+  }, [locale, parsed, query, surface]);
 
   useEffect(() => {
     if (!seed || !onReviewSeed || materializedDraftRef.current === seed.draftId) return;
@@ -220,94 +202,82 @@ export function OneSuggestionReviewHandoffBanner({
     }
     if (result === "defer") return;
     if (result === "blocked") {
-      setError(ko
-        ? "이미 작성 중인 내용이 있어 초안을 덮어쓰지 않았습니다."
-        : "The editor already contains work, so the draft did not overwrite it.");
+      setError(tFor(locale, "one.rev.err.editor_busy"));
       return;
     }
     materializedDraftRef.current = seed.draftId;
-  }, [ko, onReviewSeed, seed]);
+  }, [locale, onReviewSeed, seed]);
 
   if (parsed.kind === "absent") return null;
   if (error) {
     return <section className={styles.error} role="alert" data-one-review-state="blocked">
-      <strong>{ko ? "초안을 열지 않았어요" : "Draft not opened"}</strong>
+      <strong>{tFor(locale, "one.rev.error.title")}</strong>
       <span>{error}</span>
-      <small>{ko
-        ? "아무것도 저장하거나 시작하거나 공개하지 않았습니다. 일정도 프롬프트도 대상도 미리 채우지 않았고, 게시도 시작하지 않았어요."
-        : "Nothing was saved, started, or published: no schedule, prompt, or target prefilled, and publishing not started."}</small>
+      <small>{tFor(locale, "one.rev.error.detail")}</small>
     </section>;
   }
   if (!handoff) {
     return <section className={styles.loading} role="status" data-one-review-state="loading">
-      {ko ? "One이 준비한 초안을 확인하고 있어요…" : "Checking the draft One prepared…"}
+      {tFor(locale, "one.rev.loading")}
     </section>;
   }
 
   return <section className={styles.banner} role="status" data-one-review-state="verified">
     <div className={styles.copy}>
-      <span className={styles.eyebrow}>{ko ? "ONE이 준비한 초안" : "DRAFT PREPARED BY ONE"}</span>
-      <strong>{ko ? `${reviewLabel(handoff, ko)}을 확인해보세요.` : `Review your ${reviewLabel(handoff, ko)}.`}</strong>
+      <span className={styles.eyebrow}>{tFor(locale, "one.rev.banner.eyebrow")}</span>
+      <strong>{tFor(locale, "one.rev.review_cta", { label: reviewLabel(handoff, locale) })}</strong>
       <p>{hubDraft
-        ? (ko
-          ? "내 원본과 완전히 분리된 공개용 초안을 만들었습니다. 아직 게시하거나 가격을 정하지 않았고 원본도 바꾸지 않았어요."
-          : "One created a public draft completely separate from your original. It has not been published or priced, and your original is unchanged.")
+        ? tFor(locale, "one.rev.body.hub")
         : handoff.fallbackToOriginTaskWork
-          ? (ko
-            ? "이 초안을 만든 일로 돌아왔습니다. 직접 저장하기 전에는 아무것도 바뀌지 않아요."
-            : "You are back in the work that created this draft. Nothing changes until you save it.")
-          : (ko
-            ? "One이 시작점만 채워두었습니다. 아래에서 직접 저장하거나 시작하기 전에는 아무것도 바뀌지 않아요."
-            : "One filled in only the starting point. Nothing changes until you save or start it below.")}</p>
-      {seed ? <p data-one-review-seed-kind={seed.kind}>{seedPreview(seed, ko)}</p> : null}
+          ? tFor(locale, "one.rev.body.fallback")
+          : tFor(locale, "one.rev.body.starting_point")}</p>
+      {seed ? <p data-one-review-seed-kind={seed.kind}>{seedPreview(seed, locale)}</p> : null}
       {hubDraft ? <div className={styles.hubDraft} data-one-hub-derivative-state="local-review">
         <div className={styles.hubDraftHeading}>
-          <strong>{ko ? "공개용 초안 확인" : "Review public draft"}</strong>
-          <span>{ko ? "아직 게시 안 됨" : "Not published"}</span>
+          <strong>{tFor(locale, "one.rev.hub.review_heading")}</strong>
+          <span>{tFor(locale, "one.rev.hub.not_published")}</span>
         </div>
-        <dl className={styles.gates} aria-label={ko ? "Hub 공개 선행 조건" : "Hub publish prerequisites"}>
+        <dl className={styles.gates} aria-label={tFor(locale, "one.rev.hub.gates_aria")}>
           {(["entitlement", "rights", "economy", "fee"] as const).map((gate) => <div key={gate}>
-            <dt>{gate === "entitlement" ? (ko ? "게시 권한" : "Publishing access")
-              : gate === "rights" ? (ko ? "내가 올릴 권리" : "Your right to publish")
-                : gate === "economy" ? (ko ? "크레딧 기능" : "Credit availability")
-                  : (ko ? "수수료 안내" : "Fee information")}</dt>
-            <dd>{ko ? "확인 필요" : "Needs review"}</dd>
+            <dt>{gate === "entitlement" ? tFor(locale, "one.rev.gate.entitlement")
+              : gate === "rights" ? tFor(locale, "one.rev.gate.rights")
+                : gate === "economy" ? tFor(locale, "one.rev.gate.economy")
+                  : tFor(locale, "one.rev.gate.fee")}</dt>
+            <dd>{tFor(locale, "one.rev.gate.needs_review")}</dd>
           </div>)}
         </dl>
         <div className={styles.diffGrid}>
-          <section aria-label={ko ? "공개 초안 포함 파일" : "Included public draft files"}>
-            <strong>{ko ? `포함 ${hubDraft.includedFiles.length}` : `Included ${hubDraft.includedFiles.length}`}</strong>
+          <section aria-label={tFor(locale, "one.rev.hub.included_aria")}>
+            <strong>{tFor(locale, "one.rev.hub.included_count", { n: hubDraft.includedFiles.length })}</strong>
             <ul>{hubDraft.includedFiles.map((file) => <li key={file.path}>
-              <code>{file.path}</code><span>{file.bytes.toLocaleString()} B · {file.source === "generated" ? (ko ? "생성" : "generated") : (ko ? "허용 원본" : "allowlisted source")}</span>
+              <code>{file.path}</code><span>{file.bytes.toLocaleString()} B · {file.source === "generated" ? tFor(locale, "one.rev.hub.source_generated") : tFor(locale, "one.rev.hub.source_allowlisted")}</span>
             </li>)}</ul>
           </section>
-          <section aria-label={ko ? "공개 초안 제외 범위" : "Excluded private scope"}>
-            <strong>{ko ? "항상 제외" : "Always excluded"}</strong>
+          <section aria-label={tFor(locale, "one.rev.hub.excluded_aria")}>
+            <strong>{tFor(locale, "one.rev.hub.always_excluded")}</strong>
             <p>{hubDraft.alwaysExcludedCategories.join(" · ")}</p>
             {hubDraft.excluded.length > 0 ? <ul>{hubDraft.excluded.map((item) => <li key={item.category}>
-              <code>{item.category}</code><span>{item.count} {ko ? "항목" : "item(s)"}</span>
+              <code>{item.category}</code><span>{item.count} {tFor(locale, "one.rev.hub.items")}</span>
             </li>)}</ul> : null}
           </section>
         </div>
         <p className={styles.publishLock} role="note">
-          {ko
-            ? "위 네 가지와 최종 포함 내용을 모두 확인하고 다시 승인하기 전에는 게시할 수 없습니다. 수익은 보장되지 않습니다."
-            : "Publishing stays unavailable until all four items and the final contents are reviewed and approved again. Earnings are not guaranteed."}
+          {tFor(locale, "one.rev.hub.publish_lock")}
         </p>
       </div> : null}
     </div>
     <details className={styles.refs}>
-      <summary>{ko ? "확인 기록" : "Check record"}</summary>
+      <summary>{tFor(locale, "one.rev.refs.summary")}</summary>
       <dl>
-        <div><dt>{ko ? "초안 번호" : "Draft number"}</dt><dd>{handoff.draftId.slice(-8)}</dd></div>
-        <div><dt>{ko ? "시작한 일" : "Source work"}</dt><dd>{handoff.originTaskId.slice(-8)}</dd></div>
+        <div><dt>{tFor(locale, "one.rev.refs.draft_number")}</dt><dd>{handoff.draftId.slice(-8)}</dd></div>
+        <div><dt>{tFor(locale, "one.rev.refs.source_work")}</dt><dd>{handoff.originTaskId.slice(-8)}</dd></div>
         <div>
           <dt>{handoff.evidenceBasis === "accepted_internal_results"
-            ? (ko ? "직접 확인한 완료" : "Completions you accepted")
-            : (ko ? "결과까지 확인한 완료" : "Verified outcomes")}</dt>
+            ? tFor(locale, "one.rev.refs.accepted")
+            : tFor(locale, "one.rev.refs.verified")}</dt>
           <dd>{handoff.sourceTaskCount}</dd>
         </div>
-        {hubDraft ? <div><dt>{ko ? "초안 위치" : "Draft location"}</dt><dd>{hubDraft.draftPathRef}</dd></div> : null}
+        {hubDraft ? <div><dt>{tFor(locale, "one.rev.refs.draft_location")}</dt><dd>{hubDraft.draftPathRef}</dd></div> : null}
       </dl>
     </details>
   </section>;

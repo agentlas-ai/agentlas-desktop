@@ -2,17 +2,18 @@
 
 import { useState } from "react";
 import { ipc } from "@/lib/ipc";
+import { tFor, type Locale } from "@/lib/i18n";
 import type {
   OneMemoryCandidate,
   OneMemoryState,
 } from "@/lib/types";
 import styles from "./OneMemoryCandidateCard.module.css";
 
-function scopeLabel(candidate: OneMemoryCandidate, ko: boolean): string {
-  if (candidate.scope === "project") return ko ? "이 프로젝트" : "This project";
-  if (candidate.scope === "agent") return ko ? "이 에이전트" : "This agent";
-  if (candidate.scope === "team") return ko ? "이 팀" : "This team";
-  return ko ? "나에게만" : "Personal";
+function scopeLabel(candidate: OneMemoryCandidate, locale: Locale): string {
+  if (candidate.scope === "project") return tFor(locale, "one.memc.scope.project");
+  if (candidate.scope === "agent") return tFor(locale, "one.memc.scope.agent");
+  if (candidate.scope === "team") return tFor(locale, "one.memc.scope.team");
+  return tFor(locale, "one.memc.scope.personal");
 }
 
 export function OneMemoryCandidateCard({
@@ -28,13 +29,12 @@ export function OneMemoryCandidateCard({
   onStateChange: (state: OneMemoryState) => void;
   onReview: () => void;
 }) {
-  const ko = locale === "ko";
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = async () => {
     const api = ipc();
-    if (!api) throw new Error(ko ? "Desktop Memory 저장소에 연결되지 않았습니다." : "Desktop Memory storage is unavailable.");
+    if (!api) throw new Error(tFor(locale, "one.memc.err.store"));
     const latest = await api.oneMemory.getState();
     onStateChange(latest);
     return latest;
@@ -85,21 +85,21 @@ export function OneMemoryCandidateCard({
   return (
     <article className={styles.card} aria-labelledby={`${candidate.id}-title`}>
       <div className={styles.copy}>
-        <p className={styles.eyebrow}>{ko ? "다음에는 덜 설명하도록" : "Less explaining next time"}</p>
-        <h3 id={`${candidate.id}-title`}>{ko ? "이 기준을 기억해둘까요?" : "Should One remember this?"}</h3>
+        <p className={styles.eyebrow}>{tFor(locale, "one.memc.eyebrow")}</p>
+        <h3 id={`${candidate.id}-title`}>{tFor(locale, "one.memc.title")}</h3>
         <blockquote>{candidate.normalizedPreview}</blockquote>
-        <small>{scopeLabel(candidate, ko)} · {ko ? "확인 전에는 재사용하지 않아요" : "Not reused until you approve"}</small>
+        <small>{scopeLabel(candidate, locale)} · {tFor(locale, "one.memc.not_reused")}</small>
       </div>
       {error && <p className={styles.error} role="alert">{error}</p>}
       <div className={styles.actions}>
         <button type="button" className={styles.primary} disabled={busy} onClick={() => void save()}>
-          {busy ? (ko ? "확인 중…" : "Saving…") : (ko ? "기억해두기" : "Remember this")}
+          {busy ? tFor(locale, "one.memc.saving") : tFor(locale, "one.memc.remember")}
         </button>
         <button type="button" className={styles.secondary} disabled={busy} onClick={onReview}>
-          {ko ? "내용·범위 수정" : "Edit content or scope"}
+          {tFor(locale, "one.memc.edit")}
         </button>
         <button type="button" className={styles.textButton} disabled={busy} onClick={() => void reject()}>
-          {ko ? "아니요" : "No"}
+          {tFor(locale, "one.memc.no")}
         </button>
       </div>
     </article>

@@ -8,6 +8,7 @@ import {
   type FormEvent,
 } from "react";
 import { ipc } from "@/lib/ipc";
+import { tFor, type Locale } from "@/lib/i18n";
 import type {
   OneExperienceReuseRecord,
   OneImprovementProofRecord,
@@ -47,27 +48,24 @@ interface OneMemorySheetProps {
   onManageImprovementAsset?: (asset: OneImprovementReusedAssetV1) => void;
 }
 
-function scopeLabel(scope: OneMemoryScope, ko: boolean): string {
-  const labels: Record<OneMemoryScope, [string, string]> = {
-    personal: ["개인", "Personal"],
-    project: ["프로젝트", "Project"],
-    agent: ["에이전트", "Agent"],
-    team: ["팀", "Team"],
-  };
-  return labels[scope][ko ? 0 : 1];
+function scopeLabel(scope: OneMemoryScope, locale: Locale): string {
+  if (scope === "personal") return tFor(locale, "one.mem.scope.personal");
+  if (scope === "project") return tFor(locale, "one.mem.scope.project");
+  if (scope === "agent") return tFor(locale, "one.mem.scope.agent");
+  return tFor(locale, "one.mem.scope.team");
 }
 
-function basisLabel(candidate: OneMemoryCandidate, ko: boolean): string {
-  if (candidate.source.basis === "explicit_user_statement") return ko ? "내가 직접 말함" : "I stated this";
-  if (candidate.source.basis === "user_correction") return ko ? "내 수정에서 제안됨" : "Suggested from my correction";
-  return ko ? "One의 제안 · 아직 미승인" : "Suggested by One · not approved";
+function basisLabel(candidate: OneMemoryCandidate, locale: Locale): string {
+  if (candidate.source.basis === "explicit_user_statement") return tFor(locale, "one.mem.basis.explicit");
+  if (candidate.source.basis === "user_correction") return tFor(locale, "one.mem.basis.correction");
+  return tFor(locale, "one.mem.basis.suggested");
 }
 
-function resolutionLabel(candidate: OneMemoryCandidate, ko: boolean): string {
-  if (candidate.status === "saved") return ko ? "기억에 저장됨" : "Saved to memory";
-  if (candidate.status === "used_once") return ko ? "한 번만 사용 · 오래 기억하지 않음" : "Used once · not saved long term";
-  if (candidate.status === "rejected") return ko ? "거절됨" : "Rejected";
-  return ko ? "검토 대기" : "Pending review";
+function resolutionLabel(candidate: OneMemoryCandidate, locale: Locale): string {
+  if (candidate.status === "saved") return tFor(locale, "one.mem.resolution.saved");
+  if (candidate.status === "used_once") return tFor(locale, "one.mem.resolution.used_once");
+  if (candidate.status === "rejected") return tFor(locale, "one.mem.resolution.rejected");
+  return tFor(locale, "one.mem.resolution.pending");
 }
 
 function formatDate(value: string, locale: "ko" | "en"): string {
@@ -98,7 +96,6 @@ export function OneMemorySheet({
   onValueClosureStateChange,
   onManageImprovementAsset,
 }: OneMemorySheetProps) {
-  const ko = locale === "ko";
   const dialogRef = useRef<HTMLDivElement>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const busyIdRef = useRef<string | null>(null);
@@ -173,7 +170,7 @@ export function OneMemorySheet({
 
   const refresh = async () => {
     const api = ipc();
-    if (!api) throw new Error(ko ? "이 컴퓨터의 One 기억을 불러올 수 없습니다." : "One's memory on this computer is unavailable.");
+    if (!api) throw new Error(tFor(locale, "one.mem.err.unavailable"));
     const latest = await api.oneMemory.getState();
     onStateChange(latest);
     return latest;
@@ -212,7 +209,7 @@ export function OneMemorySheet({
       candidateId: candidate.id,
       expectedCandidateVersion: candidate.version,
       approvedByUser: true,
-    }), ko ? "내가 확인한 내용으로 기억에 저장했습니다." : "Saved to memory with your approval.");
+    }), tFor(locale, "one.mem.msg.saved_approved"));
     if (result) setEditingCandidateId(null);
   };
 
@@ -228,7 +225,7 @@ export function OneMemorySheet({
       content: candidateContent,
       scope: candidate.scope,
       scopeRef: candidate.scopeRef,
-    }), ko ? "수정한 내용으로 기억에 저장했습니다." : "Saved the edited version to memory.");
+    }), tFor(locale, "one.mem.msg.saved_edited"));
     if (result) setEditingCandidateId(null);
   };
 
@@ -241,7 +238,7 @@ export function OneMemorySheet({
       expectedCandidateVersion: candidate.version,
       target: useOnceTarget,
       confirmedByUser: true,
-    }), ko ? "현재 대화의 다음 요청 1회에만 적용할 준비를 했습니다." : "Ready for the next request in this conversation only.");
+    }), tFor(locale, "one.mem.msg.use_once_ready"));
     const receipt = result && typeof result === "object" && "value" in result
       ? (result as { value: OneMemoryUseOnceReceipt }).value
       : null;
@@ -257,7 +254,7 @@ export function OneMemorySheet({
       candidateId: candidate.id,
       expectedCandidateVersion: candidate.version,
       rejectedByUser: true,
-    }), ko ? "거절했습니다. 같은 제안을 당분간 줄입니다." : "Rejected. Equivalent suggestions will be reduced for a while.");
+    }), tFor(locale, "one.mem.msg.rejected"));
   };
 
   const beginMemoryEdit = (memory: OneMemoryAsset) => {
@@ -279,7 +276,7 @@ export function OneMemorySheet({
       scope: memory.scope,
       scopeRef: memory.scopeRef,
       approvedByUser: true,
-    }), ko ? "수정 내용을 다시 승인해 저장했습니다." : "Changes re-approved and saved.");
+    }), tFor(locale, "one.mem.msg.reapproved"));
     if (result) setEditingMemoryId(null);
   };
 
@@ -293,61 +290,57 @@ export function OneMemorySheet({
       enabled: !memory.enabled,
       confirmedByUser: true,
     }), memory.enabled
-      ? (ko ? "앞으로 이 기억을 사용하지 않습니다." : "One will stop using this memory.")
-      : (ko ? "알맞은 다음 일에 이 기억을 다시 사용할 수 있습니다." : "One can use this memory again when it fits."));
+      ? tFor(locale, "one.mem.msg.disabled")
+      : tFor(locale, "one.mem.msg.enabled"));
   };
 
   const deleteMemory = async (memory: OneMemoryAsset) => {
     const api = ipc();
     if (!api || !state) return;
-    if (!window.confirm(ko ? "이 기억을 One에서 영구 삭제할까요?" : "Permanently delete this memory from One?")) return;
+    if (!window.confirm(tFor(locale, "one.mem.confirm.delete_memory"))) return;
     await mutate(memory.id, () => api.oneMemory.deleteAsset({
       expectedStoreVersion: state.version,
       memoryId: memory.id,
       expectedMemoryVersion: memory.version,
       confirmedByUser: true,
-    }), ko ? "기억을 영구 삭제했습니다." : "Memory permanently deleted.");
+    }), tFor(locale, "one.mem.msg.memory_deleted"));
   };
 
   const deleteResolvedCandidate = async (candidate: OneMemoryCandidate) => {
     const api = ipc();
     if (!api || !state) return;
-    if (!window.confirm(ko ? "이 검토 기록을 영구 삭제할까요?" : "Permanently delete this review record?")) return;
+    if (!window.confirm(tFor(locale, "one.mem.confirm.delete_record"))) return;
     await mutate(candidate.id, () => api.oneMemory.deleteCandidate({
       expectedStoreVersion: state.version,
       candidateId: candidate.id,
       expectedCandidateVersion: candidate.version,
       confirmedByUser: true,
-    }), ko ? "검토 기록을 삭제했습니다." : "Review record deleted.");
+    }), tFor(locale, "one.mem.msg.record_deleted"));
   };
 
   return (
     <div className={styles.layer}>
-      <button type="button" className={styles.scrim} aria-label={ko ? "One의 기억 닫기" : "Close One's memory"} onClick={() => !busyId && onClose()} />
+      <button type="button" className={styles.scrim} aria-label={tFor(locale, "one.mem.aria.close_memory")} onClick={() => !busyId && onClose()} />
       <div ref={dialogRef} className={styles.sheet} role="dialog" aria-modal="true" aria-labelledby="one-memory-title">
         <header className={styles.header}>
           <div>
-            <p className={styles.eyebrow}>{ko ? "내가 정하는 기억" : "You stay in control"}</p>
-            <h2 id="one-memory-title">{ko ? "One의 기억" : "What One remembers"}</h2>
-            <p>{ko
-              ? "One은 마음대로 기억하지 않아요. 내가 저장한 내용만 알맞은 다음 일에 사용합니다."
-              : "One does not remember things on its own. It only uses items you choose to save, when they fit the next task."}</p>
+            <p className={styles.eyebrow}>{tFor(locale, "one.mem.header.eyebrow")}</p>
+            <h2 id="one-memory-title">{tFor(locale, "one.mem.header.title")}</h2>
+            <p>{tFor(locale, "one.mem.header.body")}</p>
           </div>
-          <button type="button" className={styles.closeButton} onClick={onClose} disabled={Boolean(busyId)} aria-label={ko ? "닫기" : "Close"}>×</button>
+          <button type="button" className={styles.closeButton} onClick={onClose} disabled={Boolean(busyId)} aria-label={tFor(locale, "one.mem.aria.close")}>×</button>
         </header>
 
         {!state ? (
-          <div className={styles.loading} role="status">{ko ? "기억을 불러오고 있어요…" : "Loading memory…"}</div>
+          <div className={styles.loading} role="status">{tFor(locale, "one.mem.loading")}</div>
         ) : (
           <div className={styles.content}>
             {(message || error) && <p className={error ? styles.error : styles.message} role={error ? "alert" : "status"}>{error ?? message}</p>}
             {useOnceReceipt && (
-              <section className={styles.onceReceipt} aria-label={ko ? "한 번만 사용할 내용" : "One-time memory"}>
-                <strong>{ko ? "다음 요청에 1회 적용" : "Applies to the next request once"}</strong>
-                <p>{ko ? `만료: ${formatDate(useOnceReceipt.expiresAt, locale)}` : `Expires: ${formatDate(useOnceReceipt.expiresAt, locale)}`}</p>
-                <small>{ko
-                  ? "오래 기억하지 않습니다. 다음 요청에 한 번 쓰거나, 앱을 다시 켜거나, 시간이 지나면 사라집니다. 실패해도 자동으로 다시 쓰지 않습니다."
-                  : "This is not saved long term. It disappears after one use, an app restart, or expiry, and is not reused automatically after a failure."}</small>
+              <section className={styles.onceReceipt} aria-label={tFor(locale, "one.mem.once.aria")}>
+                <strong>{tFor(locale, "one.mem.once.title")}</strong>
+                <p>{tFor(locale, "one.mem.once.expires", { date: formatDate(useOnceReceipt.expiresAt, locale) })}</p>
+                <small>{tFor(locale, "one.mem.once.note")}</small>
               </section>
             )}
 
@@ -355,10 +348,8 @@ export function OneMemorySheet({
               <section className={styles.section} aria-labelledby="memory-compounding-title">
                 <div className={styles.sectionHeading}>
                   <div>
-                    <h3 id="memory-compounding-title">{ko ? "결과와 개선 근거" : "Results and improvement evidence"}</h3>
-                    <p>{ko
-                      ? "One이 어떤 결과를 검증했고 무엇을 다시 사용했는지 여기서 확인하고, 재사용 자산을 끄거나 지울 수 있습니다."
-                      : "Review what One verified and what it reused, and turn reused assets off or delete them here."}</p>
+                    <h3 id="memory-compounding-title">{tFor(locale, "one.mem.compounding.title")}</h3>
+                    <p>{tFor(locale, "one.mem.compounding.body")}</p>
                   </div>
                 </div>
                 <div className={styles.cardList}>
@@ -387,53 +378,53 @@ export function OneMemorySheet({
             <section className={styles.section} aria-labelledby="memory-candidates-title">
               <div className={styles.sectionHeading}>
                 <div>
-                  <h3 id="memory-candidates-title">{ko ? `검토할 제안 ${pending.length}` : `Suggestions to review ${pending.length}`}</h3>
-                  <p>{ko ? "저장, 수정 후 저장, 한 번만 사용, 거절 중 직접 고르기 전에는 재사용되지 않습니다." : "Nothing is reused until you choose Save, Edit and save, Use once, or Reject."}</p>
+                  <h3 id="memory-candidates-title">{tFor(locale, "one.mem.candidates.title", { n: pending.length })}</h3>
+                  <p>{tFor(locale, "one.mem.candidates.body")}</p>
                 </div>
               </div>
               <div className={styles.cardList}>
-                {pending.length === 0 && <p className={styles.empty}>{ko ? "지금 확인할 기억 제안이 없습니다." : "There are no memory suggestions to review."}</p>}
+                {pending.length === 0 && <p className={styles.empty}>{tFor(locale, "one.mem.candidates.empty")}</p>}
                 {pending.map((candidate) => (
                   <article key={candidate.id} className={styles.card}>
                     {editingCandidateId === candidate.id ? (
                       <form className={styles.editForm} onSubmit={(event) => void editAndSaveCandidate(event, candidate)}>
                         <label className={styles.wideField}>
-                          <span>{ko ? "저장할 내용" : "Content to save"}</span>
+                          <span>{tFor(locale, "one.mem.field.content_to_save")}</span>
                           <textarea value={candidateContent} onChange={(event) => setCandidateContent(event.target.value)} maxLength={500} rows={4} required disabled={Boolean(busyId)} />
                         </label>
                         <div className={styles.cardActions}>
-                          <button type="submit" className={styles.primaryButton} disabled={Boolean(busyId) || !candidateContent.trim()}>{ko ? "수정 승인 후 저장" : "Approve edits and save"}</button>
-                          <button type="button" className={styles.secondaryButton} onClick={() => setEditingCandidateId(null)} disabled={Boolean(busyId)}>{ko ? "취소" : "Cancel"}</button>
+                          <button type="submit" className={styles.primaryButton} disabled={Boolean(busyId) || !candidateContent.trim()}>{tFor(locale, "one.mem.action.approve_edits_save")}</button>
+                          <button type="button" className={styles.secondaryButton} onClick={() => setEditingCandidateId(null)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.cancel")}</button>
                         </div>
                       </form>
                     ) : (
                       <>
                         <div className={styles.cardTop}>
-                          <span className={styles.scopeBadge}>{ko ? `${scopeLabel(candidate.scope, ko)}에서 사용할 기억` : `For ${scopeLabel(candidate.scope, ko).toLowerCase()} use`}</span>
-                          <span className={styles.pendingBadge}>{basisLabel(candidate, ko)}</span>
+                          <span className={styles.scopeBadge}>{tFor(locale, "one.mem.scope.for_use", { scope: locale === "ko" ? scopeLabel(candidate.scope, locale) : scopeLabel(candidate.scope, locale).toLowerCase() })}</span>
+                          <span className={styles.pendingBadge}>{basisLabel(candidate, locale)}</span>
                         </div>
                         <p className={styles.cardContent}>{candidate.normalizedPreview}</p>
                         <details className={styles.sourceBox}>
-                          <summary>{ko ? "왜 기억하자고 했는지 보기" : "Why One suggested this"}</summary>
-                          <span>{ko ? "원래 일" : "Original work"} · {shortRef(candidate.source.sourceTaskId)}</span>
-                          <span>{ko ? "확인한 곳" : "Source"} · {shortRef(candidate.source.sourceRef)}</span>
-                          <span>{ko ? "확인 기록" : "Check records"} · {candidate.source.evidenceRefs.length}</span>
+                          <summary>{tFor(locale, "one.mem.candidate.why_summary")}</summary>
+                          <span>{tFor(locale, "one.mem.label.original_work")} · {shortRef(candidate.source.sourceTaskId)}</span>
+                          <span>{tFor(locale, "one.mem.label.source")} · {shortRef(candidate.source.sourceRef)}</span>
+                          <span>{tFor(locale, "one.mem.label.check_records")} · {candidate.source.evidenceRefs.length}</span>
                           <span>{candidate.source.provenanceStatus === "verified"
-                            ? (ko ? "수락 결과와 출처 확인됨" : "Bound to an accepted result")
-                            : (ko ? "결과 수락 후 저장 가능" : "Accept the result before saving")}</span>
-                          <span>{ko ? "다시 확인 권장" : "Review again after"} · {formatDate(candidate.reviewAfter, locale)}</span>
+                            ? tFor(locale, "one.mem.provenance.verified")
+                            : tFor(locale, "one.mem.provenance.unverified")}</span>
+                          <span>{tFor(locale, "one.mem.label.review_again")} · {formatDate(candidate.reviewAfter, locale)}</span>
                         </details>
                         <div className={styles.cardActions}>
-                          <button type="button" className={styles.primaryButton} onClick={() => void saveCandidate(candidate)} disabled={Boolean(busyId) || candidate.source.provenanceStatus !== "verified"}>{ko ? "기억에 저장" : "Save to memory"}</button>
-                          <button type="button" className={styles.secondaryButton} onClick={() => beginCandidateEdit(candidate)} disabled={Boolean(busyId) || candidate.source.provenanceStatus !== "verified"}>{ko ? "수정 후 저장" : "Edit and save"}</button>
+                          <button type="button" className={styles.primaryButton} onClick={() => void saveCandidate(candidate)} disabled={Boolean(busyId) || candidate.source.provenanceStatus !== "verified"}>{tFor(locale, "one.mem.action.save_to_memory")}</button>
+                          <button type="button" className={styles.secondaryButton} onClick={() => beginCandidateEdit(candidate)} disabled={Boolean(busyId) || candidate.source.provenanceStatus !== "verified"}>{tFor(locale, "one.mem.action.edit_and_save")}</button>
                           <button
                             type="button"
                             className={styles.secondaryButton}
                             onClick={() => void useCandidateOnce(candidate)}
                             disabled={Boolean(busyId) || !useOnceTarget}
-                            title={!useOnceTarget ? (ko ? "먼저 대화나 맡긴 일을 열어주세요." : "Open a conversation or delegated task first.") : undefined}
-                          >{ko ? "한 번만 사용" : "Use once"}</button>
-                          <button type="button" className={styles.dangerButton} onClick={() => void rejectCandidate(candidate)} disabled={Boolean(busyId)}>{ko ? "거절" : "Reject"}</button>
+                            title={!useOnceTarget ? tFor(locale, "one.mem.use_once_title") : undefined}
+                          >{tFor(locale, "one.mem.action.use_once")}</button>
+                          <button type="button" className={styles.dangerButton} onClick={() => void rejectCandidate(candidate)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.reject")}</button>
                         </div>
                       </>
                     )}
@@ -445,42 +436,42 @@ export function OneMemorySheet({
             <section className={styles.section} aria-labelledby="saved-memory-title">
               <div className={styles.sectionHeading}>
                 <div>
-                  <h3 id="saved-memory-title">{ko ? `내가 저장한 기억 ${state.memories.length}` : `Memory I saved ${state.memories.length}`}</h3>
-                  <p>{ko ? "One은 알맞은 일에서만 이 내용을 참고합니다. 기억을 썼다고 결과가 더 좋아졌다고 단정하지 않습니다." : "One uses these only when they fit. Using a memory does not automatically mean the result improved."}</p>
+                  <h3 id="saved-memory-title">{tFor(locale, "one.mem.saved.title", { n: state.memories.length })}</h3>
+                  <p>{tFor(locale, "one.mem.saved.body")}</p>
                 </div>
               </div>
               <div className={styles.cardList}>
-                {state.memories.length === 0 && <p className={styles.empty}>{ko ? "아직 내가 저장한 기억이 없습니다." : "You have not saved any memory yet."}</p>}
+                {state.memories.length === 0 && <p className={styles.empty}>{tFor(locale, "one.mem.saved.empty")}</p>}
                 {state.memories.map((memory) => (
                   <article key={memory.id} className={styles.card} data-enabled={memory.enabled ? "true" : "false"}>
                     {editingMemoryId === memory.id ? (
                       <form className={styles.editForm} onSubmit={(event) => void saveMemory(event, memory)}>
                         <label className={styles.wideField}>
-                          <span>{ko ? "기억할 내용" : "What to remember"}</span>
+                          <span>{tFor(locale, "one.mem.field.what_to_remember")}</span>
                           <textarea value={memoryContent} onChange={(event) => setMemoryContent(event.target.value)} maxLength={500} rows={4} required disabled={Boolean(busyId)} />
                         </label>
                         <div className={styles.cardActions}>
-                          <button type="submit" className={styles.primaryButton} disabled={Boolean(busyId) || !memoryContent.trim()}>{ko ? "다시 승인하고 저장" : "Re-approve and save"}</button>
-                          <button type="button" className={styles.secondaryButton} onClick={() => setEditingMemoryId(null)} disabled={Boolean(busyId)}>{ko ? "취소" : "Cancel"}</button>
+                          <button type="submit" className={styles.primaryButton} disabled={Boolean(busyId) || !memoryContent.trim()}>{tFor(locale, "one.mem.action.reapprove_save")}</button>
+                          <button type="button" className={styles.secondaryButton} onClick={() => setEditingMemoryId(null)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.cancel")}</button>
                         </div>
                       </form>
                     ) : (
                       <>
                         <div className={styles.cardTop}>
-                          <span className={styles.scopeBadge}>{ko ? `${scopeLabel(memory.scope, ko)}에서 사용할 기억` : `For ${scopeLabel(memory.scope, ko).toLowerCase()} use`}</span>
-                          <span className={memory.enabled ? styles.enabledBadge : styles.disabledBadge}>{memory.enabled ? (ko ? "필요할 때 사용" : "Available when useful") : (ko ? "사용 안 함" : "Not in use")}</span>
+                          <span className={styles.scopeBadge}>{tFor(locale, "one.mem.scope.for_use", { scope: locale === "ko" ? scopeLabel(memory.scope, locale) : scopeLabel(memory.scope, locale).toLowerCase() })}</span>
+                          <span className={memory.enabled ? styles.enabledBadge : styles.disabledBadge}>{memory.enabled ? tFor(locale, "one.mem.status.available") : tFor(locale, "one.mem.status.not_in_use")}</span>
                         </div>
                         <p className={styles.cardContent}>{memory.content}</p>
                         <details className={styles.sourceBox}>
-                          <summary>{ko ? "기억의 출처 보기" : "View where this came from"}</summary>
-                          <span>{ko ? "내가 승인함" : "Approved by me"} · {formatDate(memory.approvedAt, locale)}</span>
-                          <span>{ko ? "원래 일" : "Original work"} · {shortRef(memory.sourceTaskId)}</span>
-                          <span>{ko ? "확인 기록" : "Check records"} · {memory.evidenceRefs.length}</span>
+                          <summary>{tFor(locale, "one.mem.memory.source_summary")}</summary>
+                          <span>{tFor(locale, "one.mem.label.approved_by_me")} · {formatDate(memory.approvedAt, locale)}</span>
+                          <span>{tFor(locale, "one.mem.label.original_work")} · {shortRef(memory.sourceTaskId)}</span>
+                          <span>{tFor(locale, "one.mem.label.check_records")} · {memory.evidenceRefs.length}</span>
                         </details>
                         <div className={styles.cardActions}>
-                          <button type="button" className={styles.secondaryButton} onClick={() => beginMemoryEdit(memory)} disabled={Boolean(busyId)}>{ko ? "수정" : "Edit"}</button>
-                          <button type="button" className={styles.secondaryButton} onClick={() => void toggleMemory(memory)} disabled={Boolean(busyId)}>{memory.enabled ? (ko ? "비활성화" : "Disable") : (ko ? "활성화" : "Enable")}</button>
-                          <button type="button" className={styles.dangerButton} onClick={() => void deleteMemory(memory)} disabled={Boolean(busyId)}>{ko ? "삭제" : "Delete"}</button>
+                          <button type="button" className={styles.secondaryButton} onClick={() => beginMemoryEdit(memory)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.edit")}</button>
+                          <button type="button" className={styles.secondaryButton} onClick={() => void toggleMemory(memory)} disabled={Boolean(busyId)}>{memory.enabled ? tFor(locale, "one.mem.action.disable") : tFor(locale, "one.mem.action.enable")}</button>
+                          <button type="button" className={styles.dangerButton} onClick={() => void deleteMemory(memory)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.delete")}</button>
                         </div>
                       </>
                     )}
@@ -492,18 +483,18 @@ export function OneMemorySheet({
             {resolved.length > 0 && <section className={styles.section} aria-labelledby="memory-history-title">
               <div className={styles.sectionHeading}>
                 <div>
-                  <h3 id="memory-history-title">{ko ? "최근 검토 기록" : "Recent review history"}</h3>
-                  <p>{ko ? "저장 여부와 거절 상태를 추적하기 위한 기록입니다." : "A review ledger showing what was saved, used once, or rejected."}</p>
+                  <h3 id="memory-history-title">{tFor(locale, "one.mem.history.title")}</h3>
+                  <p>{tFor(locale, "one.mem.history.body")}</p>
                 </div>
               </div>
               <div className={styles.historyList}>
                 {resolved.map((candidate) => <article key={candidate.id} className={styles.historyRow}>
                   <div>
-                    <strong>{resolutionLabel(candidate, ko)}</strong>
+                    <strong>{resolutionLabel(candidate, locale)}</strong>
                     <span>{candidate.normalizedPreview}</span>
-                    <small>{formatDate(candidate.updatedAt, locale)} · {scopeLabel(candidate.scope, ko)}</small>
+                    <small>{formatDate(candidate.updatedAt, locale)} · {scopeLabel(candidate.scope, locale)}</small>
                   </div>
-                  <button type="button" className={styles.textDangerButton} onClick={() => void deleteResolvedCandidate(candidate)} disabled={Boolean(busyId)}>{ko ? "기록 삭제" : "Delete record"}</button>
+                  <button type="button" className={styles.textDangerButton} onClick={() => void deleteResolvedCandidate(candidate)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.delete_record")}</button>
                 </article>)}
               </div>
             </section>}

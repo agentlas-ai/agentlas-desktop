@@ -1,6 +1,7 @@
 "use client";
 
 import { useId, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { tFor } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import styles from "./OneVoiceInputHelp.module.css";
 
@@ -28,7 +29,6 @@ function dictationPlatform(): DictationPlatform {
  * explains the verified OS shortcut without claiming that One is listening.
  */
 export function OneVoiceInputHelp({ locale, composerRef, disabled = false }: OneVoiceInputHelpProps) {
-  const ko = locale === "ko";
   const platform = useMemo(dictationPlatform, []);
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -47,16 +47,10 @@ export function OneVoiceInputHelp({ locale, composerRef, disabled = false }: One
   });
 
   const instruction = platform === "mac"
-    ? (ko
-      ? "입력창을 선택한 상태에서 Fn 또는 지구본 키를 두 번 누르세요. Mac 받아쓰기 설정에 따라 단축키가 다를 수 있습니다."
-      : "With the composer focused, press Fn or the Globe key twice. Your Mac dictation shortcut may be configured differently.")
+    ? tFor(locale, "one.voice.instr_mac")
     : platform === "windows"
-      ? (ko
-        ? "입력창을 선택한 상태에서 Windows 키 + H를 누르세요."
-        : "With the composer focused, press Windows key + H.")
-      : (ko
-        ? "입력창을 선택한 뒤 운영체제의 받아쓰기 단축키를 사용하세요."
-        : "Focus the composer, then use your operating system's dictation shortcut.");
+      ? tFor(locale, "one.voice.instr_windows")
+      : tFor(locale, "one.voice.instr_other");
 
   const toggle = () => {
     if (disabled) return;
@@ -84,10 +78,10 @@ export function OneVoiceInputHelp({ locale, composerRef, disabled = false }: One
         className={styles.trigger}
         disabled={disabled}
         onClick={toggle}
-        aria-label={ko ? "시스템 받아쓰기로 입력" : "Enter with system dictation"}
+        aria-label={tFor(locale, "one.voice.trigger_aria")}
         aria-expanded={open}
         aria-controls={panelId}
-        title={ko ? "음성 입력" : "Voice input"}
+        title={tFor(locale, "one.voice.trigger_title")}
       >
         <svg aria-hidden="true" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
           <rect x="9" y="3" width="6" height="11" rx="3" />
@@ -106,15 +100,13 @@ export function OneVoiceInputHelp({ locale, composerRef, disabled = false }: One
           aria-live="polite"
           onKeyDown={handlePanelKeyDown}
         >
-          <strong id={titleId}>{ko ? "시스템 받아쓰기 사용" : "Use system dictation"}</strong>
+          <strong id={titleId}>{tFor(locale, "one.voice.panel_title")}</strong>
           <p id={instructionId}>{instruction}</p>
           <small id={privacyId}>
-            {ko
-              ? "One은 여기서 마이크를 켜거나 음성 파일을 저장하지 않습니다. 받아쓴 텍스트를 확인한 뒤 직접 보내세요."
-              : "One does not turn on the microphone or save audio here. Review the dictated text before sending it yourself."}
+            {tFor(locale, "one.voice.privacy")}
           </small>
           <button type="button" onClick={closeToComposer}>
-            {ko ? "입력창으로 돌아가기" : "Return to composer"}
+            {tFor(locale, "one.voice.return_composer")}
           </button>
         </div>
       )}

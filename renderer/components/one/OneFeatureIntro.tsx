@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OneFeatureIntroResolution } from "@shared/one-feature-intro";
+import { tFor } from "@/lib/i18n";
 import styles from "./OneFeatureIntro.module.css";
 
 type IntroSlide = {
@@ -42,22 +43,14 @@ export function OneFeatureIntro({
   briefingAvailable?: boolean;
   onConnectMobile?: () => void;
 }) {
-  const ko = locale === "ko";
   const slides = useMemo<IntroSlide[]>(
-    () => ko
-      ? [
-          { eyebrow: "ONE", title: "One이 먼저 챙깁니다.", body: "진행 중인 일에서 놓치기 쉬운 변화와 다음 결정을 미리 찾아 알려드립니다. 기존 대화와 설정은 그대로예요.", preview: "briefing" },
-          { eyebrow: "ONE + WORK", title: "말하면, 필요한 팀이 움직입니다.", body: "One에게 평소처럼 말하세요. 더 자세히 보고 싶을 때만 Work에서 팀·파일·도구를 확인할 수 있고, 다시 설명할 필요가 없습니다.", preview: "work" },
-          { eyebrow: "MOBILE", title: "결정은 어디서든 이어집니다.", body: "Mobile에서는 중요한 진행 상황과 결과를 확인합니다. Desktop 연결이 끊기면 진행된 것처럼 보여주지 않습니다.", preview: "mobile" },
-          { eyebrow: "NEXT TIME", title: "다음 일은 설명이 줄어듭니다.", body: "내가 저장한 취향과 자주 쓰는 팀을 One이 알맞은 때 다시 활용하고, 무엇이 달라졌는지 결과 뒤에 알려줍니다.", preview: "proof" },
-        ]
-      : [
-          { eyebrow: "ONE", title: "One looks out for the work first.", body: "It spots important changes and prepares the next decision. Your existing conversations and settings stay intact.", preview: "briefing" },
-          { eyebrow: "ONE + WORK", title: "Say it once. The right team gets moving.", body: "Talk to One normally. Open Work only when you want to inspect the team, files, and tools in detail. You do not need to explain the work again.", preview: "work" },
-          { eyebrow: "MOBILE", title: "Decisions continue anywhere.", body: "Mobile shows important progress and results. It never pretends work continued while Desktop was disconnected.", preview: "mobile" },
-          { eyebrow: "NEXT TIME", title: "The next task takes less explaining.", body: "One can reuse preferences and teams you saved, then show what changed after the result.", preview: "proof" },
-        ],
-    [ko],
+    () => [
+      { eyebrow: "ONE", title: tFor(locale, "one.feat.slide.briefing.title"), body: tFor(locale, "one.feat.slide.briefing.body"), preview: "briefing" },
+      { eyebrow: "ONE + WORK", title: tFor(locale, "one.feat.slide.work.title"), body: tFor(locale, "one.feat.slide.work.body"), preview: "work" },
+      { eyebrow: "MOBILE", title: tFor(locale, "one.feat.slide.mobile.title"), body: tFor(locale, "one.feat.slide.mobile.body"), preview: "mobile" },
+      { eyebrow: "NEXT TIME", title: tFor(locale, "one.feat.slide.proof.title"), body: tFor(locale, "one.feat.slide.proof.body"), preview: "proof" },
+    ],
+    [locale],
   );
   const [open, setOpen] = useState(false);
   const [index, setIndex] = useState(0);
@@ -165,16 +158,16 @@ export function OneFeatureIntro({
             <p id="one-intro-body">{slide.body}</p>
           </div>
           <div className={styles.preview} aria-hidden="true">
-            <IntroPreview kind={slide.preview} ko={ko} />
+            <IntroPreview kind={slide.preview} locale={locale} />
           </div>
         </div>
         <footer className={styles.footer}>
-          <button type="button" className={styles.button} onClick={close} disabled={resolving}>{ko ? "건너뛰기" : "Skip"}</button>
+          <button type="button" className={styles.button} onClick={close} disabled={resolving}>{tFor(locale, "one.feat.action.skip")}</button>
           <div className={styles.footerGroup}>
-            {index > 0 && <button type="button" className={styles.button} onClick={() => setIndex((value) => value - 1)} disabled={resolving}>{ko ? "이전" : "Back"}</button>}
+            {index > 0 && <button type="button" className={styles.button} onClick={() => setIndex((value) => value - 1)} disabled={resolving}>{tFor(locale, "one.feat.action.back")}</button>}
             {!last ? (
               <button type="button" className={styles.buttonPrimary} onClick={() => setIndex((value) => value + 1)} disabled={resolving}>
-                {index === 0 ? (ko ? "다음: Work 연결" : "Next: Work connection") : ko ? "다음" : "Next"}
+                {index === 0 ? tFor(locale, "one.feat.action.next_work") : tFor(locale, "one.feat.action.next")}
               </button>
             ) : (
               <button
@@ -187,10 +180,10 @@ export function OneFeatureIntro({
                 )}
               >
                 {briefingAvailable
-                  ? (ko ? "내 브리핑 열기" : "Open my briefing")
+                  ? tFor(locale, "one.feat.action.open_briefing")
                   : onConnectMobile
-                    ? (ko ? "Mobile 연결하기" : "Connect Mobile")
-                    : (ko ? "One 열기" : "Open One")}
+                    ? tFor(locale, "one.feat.action.connect_mobile")
+                    : tFor(locale, "one.feat.action.open_one")}
               </button>
             )}
           </div>
@@ -200,13 +193,13 @@ export function OneFeatureIntro({
   );
 }
 
-function IntroPreview({ kind, ko }: { kind: IntroSlide["preview"]; ko: boolean }) {
+function IntroPreview({ kind, locale }: { kind: IntroSlide["preview"]; locale: "ko" | "en" }) {
   if (kind === "work") {
     return (
       <div className={styles.splitPreview}>
-        <div className={styles.surfaceCard}><strong>One</strong><span>{ko ? "말하기·결정·결과" : "Talk, decide, result"}</span><span>{ko ? "같은 일" : "Same work"}</span></div>
+        <div className={styles.surfaceCard}><strong>One</strong><span>{tFor(locale, "one.feat.preview.work.one_desc")}</span><span>{tFor(locale, "one.feat.preview.work.same")}</span></div>
         <div className={styles.arrow}>→</div>
-        <div className={styles.surfaceCard}><strong>Work</strong><span>{ko ? "팀·파일·도구·진행 기록" : "Team, files, tools, history"}</span><span>{ko ? "자세히 보기" : "See details"}</span></div>
+        <div className={styles.surfaceCard}><strong>Work</strong><span>{tFor(locale, "one.feat.preview.work.work_desc")}</span><span>{tFor(locale, "one.feat.preview.work.details")}</span></div>
       </div>
     );
   }
@@ -214,17 +207,17 @@ function IntroPreview({ kind, ko }: { kind: IntroSlide["preview"]; ko: boolean }
     return (
       <div className={styles.phone}>
         <div className={styles.phoneTop}><span>One</span><span>•••</span></div>
-        <div className={styles.decision}><small>{ko ? "결정 필요" : "Decision needed"}</small><strong>{ko ? "외부 전문가에게 문서 2개를 전달할까요?" : "Share two documents with the external expert?"}</strong><span className={styles.miniLine} /><span className={styles.decisionAction}>{ko ? "이 범위로 검토" : "Review with this scope"}</span></div>
+        <div className={styles.decision}><small>{tFor(locale, "one.feat.preview.mobile.decision")}</small><strong>{tFor(locale, "one.feat.preview.mobile.question")}</strong><span className={styles.miniLine} /><span className={styles.decisionAction}>{tFor(locale, "one.feat.preview.mobile.action")}</span></div>
       </div>
     );
   }
   if (kind === "proof") {
     return (
       <div className={styles.miniWindow}>
-        <div className={styles.miniBar}><span>{ko ? "이번에 실제로 달라진 점" : "What actually improved"}</span><span>{ko ? "결과 뒤" : "After result"}</span></div>
+        <div className={styles.miniBar}><span>{tFor(locale, "one.feat.preview.proof.bar")}</span><span>{tFor(locale, "one.feat.preview.proof.after")}</span></div>
         <div className={`${styles.miniContent} ${styles.proof}`}>
-          <div className={styles.proofRow}><span className={styles.proofCheck}>✓</span><span>{ko ? "지난번 승인한 비교 기준을 다시 사용" : "Reused the comparison criteria you approved"}</span></div>
-          <div className={styles.proofRow}><span className={styles.proofCheck}>✓</span><span>{ko ? "검증된 출시 검토팀 역할을 다시 사용" : "Reused the verified launch review team roles"}</span></div>
+          <div className={styles.proofRow}><span className={styles.proofCheck}>✓</span><span>{tFor(locale, "one.feat.preview.proof.row1")}</span></div>
+          <div className={styles.proofRow}><span className={styles.proofCheck}>✓</span><span>{tFor(locale, "one.feat.preview.proof.row2")}</span></div>
         </div>
       </div>
     );
@@ -234,9 +227,9 @@ function IntroPreview({ kind, ko }: { kind: IntroSlide["preview"]; ko: boolean }
       <div className={styles.miniBar}><span>Agentlas One</span><span>Work</span></div>
       <div className={styles.miniContent}>
         <div className={styles.miniOne}>One</div>
-        <div className={styles.miniTitle}>{ko ? "이번 주 확인할 문제가 하나 있어요." : "There is one issue to review this week."}</div>
+        <div className={styles.miniTitle}>{tFor(locale, "one.feat.preview.briefing.title")}</div>
         <div className={styles.miniLine} /><div className={styles.miniLine} />
-        <div className={styles.miniAction}>{ko ? "검토 시작" : "Start review"}</div>
+        <div className={styles.miniAction}>{tFor(locale, "one.feat.preview.briefing.action")}</div>
       </div>
     </div>
   );

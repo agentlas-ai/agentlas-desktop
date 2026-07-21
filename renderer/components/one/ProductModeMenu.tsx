@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRef, useState } from "react";
-import { useT } from "@/lib/i18n";
+import { tFor, useT } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { OneBrandMark } from "./OneBrand";
 import styles from "./ProductModeMenu.module.css";
@@ -19,7 +19,7 @@ export function ProductModeMenu({
   locale?: "ko" | "en";
 }) {
   const { locale } = useT();
-  const ko = (localeOverride ?? locale) === "ko";
+  const activeLocale = localeOverride ?? locale;
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -40,7 +40,7 @@ export function ProductModeMenu({
         aria-expanded={open}
         aria-controls="agentlas-product-mode-menu"
         onClick={() => setOpen((value) => !value)}
-        title={ko ? "제품 전환" : "Switch product"}
+        title={tFor(activeLocale, "one.mode.switch_title")}
       >
         {compact && (current === "one" ? <OneBrandMark size="medium" /> : <span className={styles.mark} aria-hidden="true">W</span>)}
         <span className={styles.copy}>
@@ -49,20 +49,20 @@ export function ProductModeMenu({
         <span className={styles.chevron} aria-hidden="true">⌄</span>
       </button>
       {open && (
-        <div id="agentlas-product-mode-menu" ref={menuRef} className={styles.menu} role="menu" aria-label={ko ? "Agentlas 제품" : "Agentlas products"}>
+        <div id="agentlas-product-mode-menu" ref={menuRef} className={styles.menu} role="menu" aria-label={tFor(activeLocale, "one.mode.menu_aria")}>
           <Link className={styles.option} href="/one" role="menuitem" onClick={() => setOpen(false)}>
             <span className={styles.optionCopy}>
               <strong>One</strong>
-              <small>{ko ? "말하고 맡기면, 결과까지 준비해요" : "Talk, delegate, and get the result"}</small>
+              <small>{tFor(activeLocale, "one.mode.one_sub")}</small>
             </span>
-            {current === "one" && <span className={styles.check} aria-label={ko ? "현재 제품" : "Current product"}>✓</span>}
+            {current === "one" && <span className={styles.check} aria-label={tFor(activeLocale, "one.mode.current_aria")}>✓</span>}
           </Link>
           <Link className={styles.option} href="/dashboard" role="menuitem" onClick={() => setOpen(false)}>
             <span className={styles.optionCopy}>
               <strong>Work</strong>
-              <small>{ko ? "팀과 도구를 직접 다루는 작업공간" : "Workspace for teams and tools"}</small>
+              <small>{tFor(activeLocale, "one.mode.work_sub")}</small>
             </span>
-            {current === "work" && <span className={styles.check} aria-label={ko ? "현재 제품" : "Current product"}>✓</span>}
+            {current === "work" && <span className={styles.check} aria-label={tFor(activeLocale, "one.mode.current_aria")}>✓</span>}
           </Link>
         </div>
       )}
