@@ -5,7 +5,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const afterPack = require("../build-resources/after-pack-clean.cjs").default;
+const afterPackModule = require("../build-resources/after-pack-clean.cjs");
+const afterPack = afterPackModule.default;
+const { sealMacRuntimeResources } = afterPackModule;
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-after-pack-runtime-"));
 const previousRef = process.env.HEPHAESTUS_REF;
 const canonicalModelRoot = path.join(
@@ -31,6 +33,21 @@ const hasCanonicalMacDriver = fs.existsSync(canonicalMacDriver);
 
 function sha256(payload) {
   return createHash("sha256").update(payload).digest("hex");
+}
+
+function assertReadOnlyTree(root) {
+  const stat = fs.lstatSync(root);
+  assert.equal(stat.mode & 0o222, 0, `runtime path must be read-only: ${root}`);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return;
+  for (const entry of fs.readdirSync(root)) assertReadOnlyTree(path.join(root, entry));
+}
+
+function restoreWritableDirectories(root) {
+  if (!fs.existsSync(root)) return;
+  const stat = fs.lstatSync(root);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return;
+  fs.chmodSync(root, 0o755);
+  for (const entry of fs.readdirSync(root)) restoreWritableDirectories(path.join(root, entry));
 }
 
 function writePythonRuntime(root, platform, triple = platform === "darwin" ? "x86_64-apple-darwin" : platform === "win32" ? "x86_64-pc-windows-msvc" : "x86_64-unknown-linux-gnu") {
@@ -167,7 +184,18 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
   try {
     process.env.HEPHAESTUS_REF = "v1.1.14";
     for (const platform of [...(hasCanonicalMacDriver ? ["darwin"] : []), "linux"]) {
-      await afterPack(fixture(platform, platform));
+      const subject = fixture(platform, platform);
+      await afterPack(subject);
+      if (platform === "darwin") {
+        await sealMacRuntimeResources(subject, "test-afterSign");
+        assertReadOnlyTree(subject.packagedRoot);
+        assertReadOnlyTree(subject.packagedPython.root);
+        assert.throws(
+          () => fs.mkdirSync(path.join(subject.packagedRoot, "agentlas_cloud", "__pycache__")),
+          /EACCES|EPERM|permission denied/i,
+          "a direct Python-style cache write must fail inside signed Resources",
+        );
+      }
     }
     const windowsNodeContract = hasPinnedNodeRuntime ? fixture("win32", "win32") : null;
     if (windowsNodeContract) await afterPack(windowsNodeContract);
@@ -331,6 +359,7 @@ function fixture(platform, suffix, compatibilityVersion = "1.1.14") {
   } finally {
     if (previousRef === undefined) delete process.env.HEPHAESTUS_REF;
     else process.env.HEPHAESTUS_REF = previousRef;
+    restoreWritableDirectories(temp);
     fs.rmSync(temp, { recursive: true, force: true });
   }
 })().catch((error) => {

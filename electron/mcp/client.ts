@@ -3179,8 +3179,8 @@ export async function runMcpInvocation(
       const surfaceParse = parseSurfaces(displayText);
       if (surfaceParse.diagnostics.some((diagnostic) => diagnostic.code === "surface-parse-failed")) {
         displayText = locale === "ko"
-          ? "구조화 결과를 안전하게 검증할 수 없어 표시하지 않았습니다."
-          : "The structured result could not be safely validated, so it was not displayed.";
+          ? "결과를 안전하게 마무리하지 못했어요. 아래에서 다시 시도해 달라고 말해 주세요."
+          : "I couldn't finish preparing this result safely. Ask me to try again below and I'll continue.";
       } else {
         const parsedOneSurface = req.oneMode === true
           && surfaceParse.errors.length === 0
@@ -3234,11 +3234,11 @@ export async function runMcpInvocation(
             surfaceParse.cleanedText.trim() ||
             (parsedOneSurface
               ? locale === "ko"
-                ? "One이 구조화된 결과를 완성했습니다."
-                : "One completed a structured result."
+                ? "요청하신 결과를 정리했어요."
+                : "Here's your result."
               : locale === "ko"
-                ? "앱/패널 자동 생성은 꺼져 있습니다. 채팅 답변만 표시합니다."
-                : "Automatic App/workbench generation is disabled. Showing chat output only.");
+                ? "여기 채팅으로 답변을 정리해 드렸어요."
+                : "I've written the answer here in chat.");
         }
       }
     } catch {
@@ -3246,8 +3246,8 @@ export async function runMcpInvocation(
       // retain or log the rejected model body because it may contain a local
       // path or another Main-private Surface transport value.
       displayText = locale === "ko"
-        ? "구조화 결과를 안전하게 검증할 수 없어 표시하지 않았습니다."
-        : "The structured result could not be safely validated, so it was not displayed.";
+        ? "결과를 안전하게 마무리하지 못했어요. 아래에서 다시 시도해 달라고 말해 주세요."
+        : "I couldn't finish preparing this result safely. Ask me to try again below and I'll continue.";
       console.error("[surface] parseSurfaces failed");
     }
     if (!req.agentAppMode || projectReadOnlyBoundary) {

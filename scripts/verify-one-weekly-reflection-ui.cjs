@@ -14,6 +14,7 @@ const runtime = read("electron/one/weekly-reflection.ts");
 const ipc = read("electron/ipc.ts");
 const preload = read("electron/preload.ts");
 const compiledContract = require(path.join(root, "dist/shared/one-weekly-reflection.js"));
+const i18n = read("renderer/lib/i18n.tsx");
 
 assert.match(shell, /api\.oneWeeklyReflection\.get\(\)/, "One refreshes the Main-owned weekly projection");
 assert.match(shell, /oneWeeklyReflection\?\.reflection\?\.status === "open"/, "resolved weeks are not rendered");
@@ -46,19 +47,24 @@ for (const [label, override] of [
   );
 }
 
-assert.match(card, /이번 주 확인된 변화/);
-assert.match(card, /A verified change this week/);
+assert.match(card, /weeklyCopy\(locale, "one\.week\.title"\)/);
+assert.match(i18n, /이번 주 확인된 변화/);
+assert.match(i18n, /A verified change this week/);
 assert.doesNotMatch(card, /most useful|가장 유용/i, "no ranking is invented");
-assert.match(card, /내가 주간 요약에 넣은 결과/);
+assert.match(card, /weeklySummary\(locale, reflection\.outcomes\.length\)/);
+assert.match(i18n, /내가 주간 요약에 넣은 결과/);
 assert.doesNotMatch(card, /검증 Outcome|Verified Outcome/, "weekly reflection must not expose internal Outcome language");
 assert.match(card, /reflection\.outcomes\[0\]\.facts\[0\]\.statement/, "latest verified fact opens the conversation");
 assert.match(card, /estimate\.basis/);
 assert.match(card, /estimate\.method/);
-assert.match(card, /Detailed check records/);
+assert.match(card, /weeklyCopy\(locale, "one\.week\.evidence_summary"\)/);
+assert.match(i18n, /Detailed check records/);
 assert.match(card, /originalPreservation/);
 assert.match(card, /remainingWork/);
-assert.match(card, /확인했어요/);
-assert.match(card, /이번 주는 숨기기/);
+assert.match(card, /weeklyCopy\(locale, "one\.week\.action\.got_it"\)/);
+assert.match(card, /weeklyCopy\(locale, "one\.week\.action\.hide"\)/);
+assert.match(i18n, /확인했어요/);
+assert.match(i18n, /이번 주는 숨기기/);
 assert.match(card, /confirmedByUser:\s*true/);
 assert.match(card, /expectedContentDigest:\s*reflection\.contentDigest/);
 assert.match(card, /role="alert"/);

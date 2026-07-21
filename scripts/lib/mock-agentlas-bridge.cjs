@@ -499,7 +499,7 @@ function setupMockAgentlasBridge(options) {
       getState: async () => ({ status: "idle" }),
       check: async () => ({ status: "idle" }),
       install: async () => ({ accepted: false, state: { status: "idle" } }),
-      openManualDownload: async () => ({ accepted: true, state: { status: "idle" } }),
+      openManualDownload: async () => ({ accepted: false, state: { status: "idle" } }),
       revealRecoveryBackup: async () => ({ accepted: false, state: { status: "idle" } }),
     },
     usage: {

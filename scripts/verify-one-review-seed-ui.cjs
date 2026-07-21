@@ -21,6 +21,7 @@ const work = read("renderer/app/(shell)/chat/page.tsx");
 const preload = read("electron/preload.ts");
 const ipc = read("electron/ipc.ts");
 const shared = read("shared/types.ts");
+const i18n = read("renderer/lib/i18n.tsx");
 
 assert.match(preload, /getReviewSeed:\s*\(input\)\s*=>\s*ipcRenderer\.invoke\("oneSuggestions:getReviewSeed",\s*input\)/);
 assert.match(ipc, /ipcMain\.handle\("oneSuggestions:getReviewSeed"[\s\S]{0,180}getOneSuggestionReviewSeed\(input\)/);
@@ -32,8 +33,9 @@ assert.match(banner, /result === "defer"/);
 assert.match(banner, /result === "blocked"/);
 assert.doesNotMatch(banner, /replaceState|sessionStorage|localStorage/,
   "opaque review bindings must remain reloadable while same-mount hydration is guarded in memory");
-assert.match(banner, /no schedule, prompt, or target prefilled/);
-assert.match(banner, /publishing not started/);
+assert.match(banner, /reviewCopy\(locale, "one\.rev\.error\.detail"\)/);
+assert.match(i18n, /no schedule, prompt, or target prefilled/);
+assert.match(i18n, /publishing not started/);
 
 const buildApply = between(build, "const applyOneReviewSeed", "const addDroppedFiles");
 assert.match(buildApply, /seed\.kind !== "agent_build"/);

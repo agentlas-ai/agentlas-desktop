@@ -192,6 +192,7 @@ function verifyWiring() {
   const adapter = read("renderer/lib/one-task-adapter.ts");
   const shell = read("renderer/components/one/OneShell.tsx");
   const profileSheet = read("renderer/components/one/OneProfileSheet.tsx");
+  const i18n = read("renderer/lib/i18n.tsx");
   assert.match(ipc, /oneProfile:get/);
   assert.match(ipc, /oneProfile:addPrinciple/);
   assert.match(preload, /oneProfile:setPrincipleEnabled/);
@@ -200,12 +201,12 @@ function verifyWiring() {
   assert.match(shell, /<OneProfileSheet/);
   assert.match(profileSheet, /approvedByUser:\s*true/);
   assert.match(
-    profileSheet,
+    `${profileSheet}\n${i18n}`,
     /Only what you write and save here is used in future conversations/,
     "The profile boundary must be explained in plain user language",
   );
   assert.match(
-    profileSheet,
+    `${profileSheet}\n${i18n}`,
     /여기에 적고 저장한 내용만 다음 대화에도 사용합니다/,
     "The same plain-language profile boundary must be available in Korean",
   );

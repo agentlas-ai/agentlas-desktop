@@ -79,12 +79,12 @@ assert.equal(compatibility.minimumRuntimeVersion, "1.0.4", "v0.7.0 shipped Hepha
 assert.equal(compatibility.minimumSchemaVersion, 35, "v0.7.0 shipped SQLite schema 35");
 assert.equal(
   compatibility.bundledRuntimeVersion,
-  "1.1.50",
-  "Desktop 0.8.55 bundles Agentlas OS v1.1.50 (workforce durability: v5 plan, v4 bundle, v2 execution receipt)",
+  "1.1.56",
+  "Desktop 0.8.61 bundles Agentlas OS v1.1.56 (persistent in-app repair bridge for existing Desktop users)",
 );
 assert.equal(runtimeSource.ref, `v${compatibility.bundledRuntimeVersion}`, "runtime source ref must match compatibility");
 assert.match(runtimeSource.commit, /^[0-9a-f]{40}$/, "runtime source must pin an immutable full commit");
-assert.equal(runtimeSource.commit, "5fc22464c1db33dabc0d4de2170053d1584b5682", "Agentlas OS v1.1.50 commit drift");
+assert.equal(runtimeSource.commit, "3061292495b08d513dd5fcf2025a96d85813b627", "Agentlas OS v1.1.56 commit drift");
 assert.equal(compatibility.bundledRuntimeVersion, manifest.version, "feed runtime must match the bundled Hephaestus manifest");
 assert.equal(
   spawnSync("git", ["-C", embeddedRuntimeRoot, "rev-parse", "HEAD^{commit}"], { encoding: "utf8" }).stdout.trim(),
@@ -122,11 +122,17 @@ for (const configName of ["electron-builder.yml", "electron-builder.mac-stable.y
   assert.ok(embeddedRuntime, `${configName} must package the embedded Agentlas OS runtime`);
   assert.deepEqual(
     config.mac.extraResources,
-    [{
-      from: "build-resources/macos-release-signing-policy.json",
-      to: "macos-release-signing-policy.json",
-    }],
-    `${configName} must package the exact immutable updater trust policy into macOS Resources`,
+    [
+      {
+        from: "build-resources/macos-release-signing-policy.json",
+        to: "macos-release-signing-policy.json",
+      },
+      {
+        from: "build-resources/native/macos/agentlas-input-driver",
+        to: "native/macos/agentlas-input-driver",
+      },
+    ],
+    `${configName} must package only the immutable updater policy and verified native input driver as macOS-only Resources`,
   );
   for (const deniedPath of [
     "!**/.env",
@@ -296,7 +302,11 @@ assert.doesNotMatch(
 );
 const crossPlatformWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release.yml"), "utf8");
 const signedMacWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release-signed-mac.yml"), "utf8");
-const updaterE2eRecheckWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "updater-e2e-recheck.yml"), "utf8");
+assert.equal(
+  fs.existsSync(path.join(root, ".github", "workflows", "updater-e2e-recheck.yml")),
+  false,
+  "the retired standalone updater recheck must not return; canonical release.yml owns native updater E2E",
+);
 const webEnvRecoveryWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "apply-desktop-release-web-env.yml"), "utf8");
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 const changelog = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
@@ -335,15 +345,15 @@ assert.match(
 );
 assert.match(publishMacSource, /Requires macOS 12 Monterey or newer/);
 assert.match(publishMacSource, /macOS 11 Big Sur stays on the last compatible release/);
-assert.match(packageMacSource, /smoke-signed-mac-python-cache\.cjs/);
+assert.match(packageMacSource, /verify-packaged-workforce-runtime\.cjs/);
 assert.match(
   packageMacSource,
-  /env -i[\s\S]*\.\/node_modules\/\.bin\/electron scripts\/smoke-signed-mac-python-cache\.cjs/,
+  /env -i[\s\S]*\.\/node_modules\/\.bin\/electron scripts\/verify-packaged-workforce-runtime\.cjs/,
   "the signed-app Python smoke must not inherit signing, notarization, publish, or deployment secrets",
 );
 assert.match(
   packageMacSource,
-  /codesign --verify --deep --strict[\s\S]*smoke-signed-mac-python-cache\.cjs[\s\S]*codesign --verify --deep --strict/,
+  /codesign --verify --deep --strict[\s\S]*verify-packaged-workforce-runtime\.cjs[\s\S]*codesign --verify --deep --strict/,
   "the signed macOS app must retain its strict code seal after exercising packaged Agentlas OS Python",
 );
 assert.match(
@@ -371,7 +381,6 @@ const workflowEntries = [
   ["release.yml", parsedWorkflow(crossPlatformWorkflow, "release.yml")],
   ["release-signed-mac.yml", parsedWorkflow(signedMacWorkflow, "release-signed-mac.yml")],
 ];
-const parsedUpdaterE2eRecheckWorkflow = parsedWorkflow(updaterE2eRecheckWorkflow, "updater-e2e-recheck.yml");
 const parsedWebEnvRecoveryWorkflow = parsedWorkflow(webEnvRecoveryWorkflow, "apply-desktop-release-web-env.yml");
 const unsafeShellExpression = /\$\{\{[^}]*\b(?:inputs\.(?:tag|version|draft|apply_web_env)|github\.(?:ref_name|event\.inputs\.(?:tag|version)))\b[^}]*\}\}/;
 const secretEnvNames = new Set([
@@ -386,10 +395,6 @@ const secretEnvNames = new Set([
   "RAILWAY_PROJECT_ID",
 ]);
 for (const [name, workflow] of workflowEntries) {
-  assert.ok(
-    workflowSteps(workflow).some((step) => typeof step.run === "string" && step.run.includes("npm run test:python-cache-boundary")),
-    `${name} must execute the signed-resource Python cache boundary before packaging`,
-  );
   const runtimePinnedJobs = Object.entries(workflow.jobs).filter(([, job]) => job.env?.HEPHAESTUS_REF || job.env?.HEPHAESTUS_COMMIT);
   assert.ok(runtimePinnedJobs.length > 0, `${name} must expose at least one runtime-pinned packaging job`);
   for (const [jobName, job] of runtimePinnedJobs) {
@@ -438,14 +443,17 @@ const harnessWorkflow = parsedWorkflow(crossPlatformHarness, "cross-platform-har
 const updaterUiJob = harnessWorkflow.jobs["updater-ui"];
 assert.ok(updaterUiJob, "PR/main harness must run the updater renderer UI gate");
 assert.equal(updaterUiJob["runs-on"], "ubuntu-latest");
-const updaterUiStep = updaterUiJob.steps.find((step) => step.name === "Verify updater UI in a production renderer build");
-assert.ok(updaterUiStep, "updater UI job must expose a named production-renderer gate");
-assert.match(updaterUiStep.run, /npx --no-install playwright install --with-deps chromium/);
-assert.match(updaterUiStep.run, /npm run test:updater-ui/);
-const updaterE2eSelfTestStep = updaterUiJob.steps.find((step) => step.name === "Verify native updater E2E harness self-test");
-assert.ok(updaterE2eSelfTestStep, "PR/main harness must execute the native updater E2E harness self-test");
-assert.match(updaterE2eSelfTestStep.run, /node --check scripts\/test-packaged-updater-install-e2e\.cjs/);
-assert.match(updaterE2eSelfTestStep.run, /node scripts\/test-packaged-updater-install-e2e\.cjs --selftest/);
+const updaterUiStep = updaterUiJob.steps.find((step) => step.name === "Build updater UI and reject forced reinstall copy");
+assert.ok(updaterUiStep, "updater UI job must expose the exact-source production build gate");
+assert.match(updaterUiStep.run, /npm run build:renderer/);
+assert.match(updaterUiStep.run, /npm run build:electron/);
+assert.match(updaterUiStep.run, /npm run test:mac-install-transaction/);
+assert.match(updaterUiStep.run, /홈페이지[\s\S]*다시 설치[\s\S]*재설치[\s\S]*website[\s\S]*reinstall/);
+assert.doesNotMatch(
+  updaterUiStep.run,
+  /npm run test:updater-ui/,
+  "public exact-source CI must not depend on the private updater UI fixture revision",
+);
 const packagedUpdaterE2eSource = fs.readFileSync(path.join(root, "scripts", "test-packaged-updater-install-e2e.cjs"), "utf8");
 assert.match(packagedUpdaterE2eSource, /PUBLIC_BASELINE_RELEASE_REPOSITORY = "agentlas-ai\/agentlas-desktop-releases"/);
 assert.match(packagedUpdaterE2eSource, /Agentlas-0\.8\.32-Windows-x64-Setup\.exe[\s\S]*?10f17bf1172bbce56f6c54ece3f0edae86d97851d483a809f2d412e2091cb9e7/);
@@ -506,9 +514,14 @@ assert.doesNotMatch(
   "native lifecycle must not replace the public v0.8.32 baseline with a current-CI rebuild",
 );
 assert.match(
+  pkg.scripts["test:updater-production"],
+  /test-updater-production-contract\.cjs[\s\S]*?npm run test:updater-ui/,
+  "the private updater audit command must retain both production and UI interaction coverage",
+);
+assert.doesNotMatch(
   signedMacWorkflow,
-  /Runtime, browser, and renderer UI regression gates[\s\S]*?npm run test:updater-production[\s\S]*?npm run test:updater-ui/,
-  "the signed macOS preflight must run the updater UI gate after the updater production contract",
+  /npm run test:updater-production/,
+  "the public signed workflow must not depend on private updater fixture revisions",
 );
 assert.equal(
   crossPlatformWorkflow.includes('default: "v0.0.3"'),
@@ -530,8 +543,16 @@ const packageIndex = crossReleaseSteps.findIndex((step) => step.name === "Packag
 assert.ok(boundaryRecheckIndex >= 0, "cross-platform release must recheck ignored Core files after tests");
 assert.equal(crossReleaseSteps[boundaryRecheckIndex].run, "npm run ensure:engine");
 assert.ok(
-  packageIndex === boundaryRecheckIndex + 1,
-  "cross-platform release must recheck Core immediately before electron-builder packages build-only barrier artifacts",
+  boundaryRecheckIndex < packageIndex,
+  "cross-platform release must recheck Core before electron-builder packages build-only barrier artifacts",
+);
+assert.deepEqual(
+  crossReleaseSteps.slice(boundaryRecheckIndex + 1, packageIndex).map((step) => step.name),
+  [
+    "Reverify pinned standalone Python at package boundary",
+    "Materialize pinned private Node runtime for Windows CLI bootstrap",
+  ],
+  "only pinned runtime materialization may occur between the Core recheck and packaging",
 );
 assert.match(crossReleaseSteps[packageIndex].run, /--publish never/);
 assert.match(crossReleaseSteps[packageIndex].run, /stamp-update-feeds\.mjs --release-dir=release --require/);
@@ -575,11 +596,6 @@ assert.match(nativeUpdaterSandboxStep.run, /chown root:root/);
 assert.match(nativeUpdaterSandboxStep.run, /chmod 4755/);
 assert.match(nativeUpdaterSandboxStep.run, /stat -c '%U:%G:%a'/);
 assert.match(nativeUpdaterSandboxStep.run, /CHROME_DEVEL_SANDBOX=.*GITHUB_ENV/);
-const updaterRecheckSandboxStep = workflowSteps(parsedUpdaterE2eRecheckWorkflow)
-  .find((step) => step.name === "Configure Linux updater relaunch sandbox");
-assert.ok(updaterRecheckSandboxStep, "artifact-only updater recheck must reproduce the Linux relaunch sandbox boundary");
-assert.equal(updaterRecheckSandboxStep.if, "runner.os == 'Linux'");
-assert.equal(updaterRecheckSandboxStep.run, nativeUpdaterSandboxStep.run);
 assert.equal(nativeUpdaterRunStep.shell, "bash");
 assert.equal(nativeUpdaterRunStep.env.CI, "true");
 assert.match(
@@ -597,73 +613,72 @@ assert.match(
   /--timeout-ms=180000/,
   "native updater E2E needs a bounded lifecycle timeout",
 );
-const linuxContinuityStep = workflowSteps(crossWorkflow).find(
-  (step) => step.name === "Linux migration and updater continuity gates",
+const openCrabSecurityStep = workflowSteps(crossWorkflow).find(
+  (step) => step.name === "OpenCrab security regression gates",
 );
-assert.ok(linuxContinuityStep, "cross-platform release must retain the Linux continuity gates");
-const linuxElectronInstallIndex = linuxContinuityStep.run.indexOf("node node_modules/electron/install.js");
-const linuxSandboxFindIndex = linuxContinuityStep.run.indexOf("find node_modules/electron -maxdepth 4 -name chrome-sandbox");
+assert.ok(openCrabSecurityStep, "cross-platform release must retain the shared Linux security gate");
+const linuxElectronInstallIndex = openCrabSecurityStep.run.indexOf("node node_modules/electron/install.js");
+const linuxSandboxFindIndex = openCrabSecurityStep.run.indexOf("find node_modules/electron -maxdepth 4 -name chrome-sandbox");
 assert.ok(
   linuxElectronInstallIndex >= 0 && linuxSandboxFindIndex > linuxElectronInstallIndex,
   "Linux setup must install Electron's lazy platform binary before looking for its SUID helper",
 );
 assert.match(
-  linuxContinuityStep.run,
+  openCrabSecurityStep.run,
   /find node_modules\/electron -maxdepth 4 -name chrome-sandbox -print -quit/,
   "Linux setup must discover Electron's SUID helper across package layouts",
 );
 assert.match(
-  linuxContinuityStep.run,
+  openCrabSecurityStep.run,
   /if \[ -z "\$sandbox_path" \]; then[\s\S]*?exit 1[\s\S]*?chown root:root "\$sandbox_path"/,
   "Linux setup must fail closed when the installed binary lacks its helper, then configure the discovered helper",
 );
 assert.doesNotMatch(
-  linuxContinuityStep.run,
+  openCrabSecurityStep.run,
   /chown root:root node_modules\/electron\/dist\/chrome-sandbox/,
   "Linux setup must not assume the pre-Electron-43 sandbox path",
 );
 for (const requiredGate of [
-  "npm run test:cli-version-parser",
-  "npm run test:hephaestus-status-version",
-  "npm run test:hephaestus-settings-migration",
-  "npm run test:auto-router-gates",
-  "npm run test:marketplace-cache",
-  "npm run test:after-pack-runtime-contract",
-  "npm run test:stormbreaker-core:embedded",
-  "npm run test:stormbreaker-swarm",
-  "npm run test:mobile-bridge-contract",
+  "test-stormbreaker-core-harness.cjs --installed",
+  "test-python-cache-boundary.cjs",
+  "npm run test:project-foundation-allocation:prepared",
+  "npm run test:mcp-resilience:prepared",
+  "npm run test:agent-app-runtime:prepared",
+  "test-mobile-execution-boundary.cjs",
+  "test-opencrab-core.cjs",
+  "test-opencrab-product-contracts.cjs",
+  "test-opencrab-recovery-scrub.cjs",
+  "test-mcp-secret-isolation.cjs",
 ]) {
   assert.match(
-    linuxContinuityStep.run,
+    openCrabSecurityStep.run,
     new RegExp(requiredGate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
-    `Linux release must run ${requiredGate} before publishing`,
+    `Linux security preflight must run ${requiredGate} before packaging`,
   );
 }
-assert.match(
-  linuxContinuityStep.run,
-  /npm run test:terminal-ontology-loadout-feed/,
-  "Linux must run the terminal ontology DB contract through its Electron-backed package script",
+const linuxPortableUpdaterStep = workflowSteps(crossWorkflow).find(
+  (step) => step.name === "Verify portable Linux updater contracts",
 );
-assert.doesNotMatch(
-  linuxContinuityStep.run,
-  /(?:^|\n)\s*node scripts\/test-terminal-ontology-loadout-feed\.cjs/,
-  "Linux must not load Electron-rebuilt better-sqlite3 from plain Node",
+assert.ok(linuxPortableUpdaterStep, "Linux package must retain portable updater contracts");
+assert.equal(linuxPortableUpdaterStep.if, "runner.os == 'Linux'");
+assert.match(linuxPortableUpdaterStep.run, /node node_modules\/electron\/install\.js/);
+assert.match(linuxPortableUpdaterStep.run, /npm run test:ensure-engine/);
+assert.match(linuxPortableUpdaterStep.run, /npm run test:release-assets/);
+assert.match(linuxPortableUpdaterStep.run, /npm run build:electron/);
+assert.doesNotMatch(linuxPortableUpdaterStep.run, /test-updater-production-contract\.cjs/);
+const windowsSourceStep = workflowSteps(crossWorkflow).find(
+  (step) => step.name === "Verify Windows release source contracts",
 );
-const windowsParserStep = workflowSteps(crossWorkflow).find(
-  (step) => step.name === "Windows runtime and mobile contracts",
+assert.ok(windowsSourceStep, "Windows package must retain exact-source release contracts");
+assert.equal(windowsSourceStep.if, "runner.os == 'Windows'");
+assert.match(windowsSourceStep.run, /npm run test:ensure-engine/);
+assert.match(windowsSourceStep.run, /npm run test:release-assets/);
+const exactSourceHarnessStep = workflowSteps(signedWorkflow).find(
+  (step) => step.name === "Require successful common CI for the exact release source",
 );
-assert.ok(windowsParserStep, "Windows release must retain runtime and mobile contract gates");
-assert.equal(windowsParserStep.if, "runner.os == 'Windows'");
-assert.match(windowsParserStep.run, /npm run test:cli-version-parser/);
-assert.match(windowsParserStep.run, /npm run test:after-pack-runtime-contract/);
-assert.match(windowsParserStep.run, /npm run test:stormbreaker-core:embedded/);
-assert.match(windowsParserStep.run, /npm run test:stormbreaker-swarm/);
-assert.match(windowsParserStep.run, /npm run test:mobile-bridge-contract/);
-assert.match(
-  windowsParserStep.run,
-  /npm run test:updater-production/,
-  "Windows release artifacts must run the updater production contract before reaching the all-OS barrier",
-);
+assert.ok(exactSourceHarnessStep, "signed macOS release must require successful exact-source common CI");
+assert.match(exactSourceHarnessStep.run, /cross-platform-harness\.yml\/runs\?event=push&status=success/);
+assert.match(exactSourceHarnessStep.run, /select\(\.head_sha == \\\"\$\{source_sha\}\\\"\)/);
 const crossVerifyStep = workflowSteps(crossWorkflow).find((step) => step.name === "Verify tag matches package.json version");
 const signedResolveStep = workflowSteps(signedWorkflow).find((step) => step.name === "Resolve release inputs");
 for (const [name, step] of [["release.yml", crossVerifyStep], ["release-signed-mac.yml", signedResolveStep]]) {
@@ -713,39 +728,25 @@ for (const jobName of ["mac-release-preflight", "build-signed-mac-artifacts", "p
   assert.match(install.run, /cp \.release-tooling\/scripts\/package-mac\.sh scripts\/package-mac\.sh/);
   assert.match(install.run, /cp \.release-tooling\/scripts\/verify-mac-update-lineage\.mjs scripts\/verify-mac-update-lineage\.mjs/);
 }
-const ontologyReleaseStep = stepNamed("Experience Ontology release gates");
-assert.ok(ontologyReleaseStep, "signed release must retain the Experience Ontology release gates");
+const deterministicReleaseStep = stepNamed("Verify deterministic release contracts");
+const nativeMacUpdaterStep = stepNamed("Verify native macOS updater and install contracts");
+assert.ok(deterministicReleaseStep, "signed release must retain deterministic release preflight");
 assert.match(
-  ontologyReleaseStep.run,
-  /npm run test:terminal-ontology-loadout-feed/,
-  "signed macOS must run the terminal ontology DB contract through its Electron-backed package script",
+  deterministicReleaseStep.run,
+  /npm run release:preflight[\s\S]*npm run build:electron[\s\S]*npm run test:mac-install-transaction/,
 );
-assert.doesNotMatch(
-  ontologyReleaseStep.run,
-  /(?:^|\n)\s*node scripts\/test-terminal-ontology-loadout-feed\.cjs/,
-  "signed macOS must not load Electron-rebuilt better-sqlite3 from plain Node",
-);
-const embeddedStormbreakerStep = stepNamed("Verify embedded Stormbreaker harness");
-assert.ok(embeddedStormbreakerStep, "signed macOS release must verify the embedded Stormbreaker command before packaging");
-assert.equal(
-  embeddedStormbreakerStep.run,
-  "npm run test:stormbreaker-core:embedded\nnpm run test:stormbreaker-swarm\n",
-  "signed macOS must verify both the immutable Core harness and the Desktop host executor",
-);
+assert.equal(nativeMacUpdaterStep, undefined, "public signed CI must not call the private updater fixture revision");
 assert.ok(
-  signedSteps.indexOf(embeddedStormbreakerStep) < signedSteps.indexOf(stepNamed("Restore mac signing certificate")),
-  "the embedded runtime gate must pass before signing credentials are restored",
+  signedSteps.indexOf(deterministicReleaseStep) < signedSteps.indexOf(stepNamed("Restore mac signing certificate")),
+  "all macOS release contracts must pass before signing credentials are restored",
 );
-for (const [name, workflow] of workflowEntries) {
-  const auditStep = workflowSteps(workflow).find((step) => step.name === "Dependency security audit");
-  assert.ok(auditStep, `${name} must block high-severity dependency vulnerabilities before packaging`);
-  assert.equal(auditStep.run, "npm audit --audit-level=high");
-}
+const auditStep = workflowSteps(crossWorkflow).find((step) => step.name === "Dependency security audit");
+assert.ok(auditStep, "the reusable all-OS release workflow must block high-severity dependencies");
+assert.equal(auditStep.run, "npm audit --audit-level=high");
 for (const name of [
   "Ensure embedded engine (Hephaestus)",
   "Install dependencies",
-  "Typecheck",
-  "Runtime, browser, and renderer UI regression gates",
+  "Verify deterministic release contracts",
   "Install pinned Railway CLI",
 ]) {
   const step = stepNamed(name);
@@ -783,7 +784,7 @@ assert.ok(localAssetVerificationStep, "the sole writer must locally verify the f
 assert.ok(publicWriterStep, "the sole writer must be the only credential-bearing public mutation step");
 assert.ok(productionWebEnvStep, "the sole writer must apply production release metadata after stable promotion");
 assert.deepEqual(Object.keys(productionWebEnvStep.env).sort(), ["RAILWAY_PROJECT_ID", "RAILWAY_TOKEN"]);
-assert.match(productionWebEnvStep.run, /release:web-env -- --apply --restart[\s\S]*--verify-url=https:\/\/agentlas\.cloud\/api\/desktop\/latest/);
+assert.match(productionWebEnvStep.run, /release:web-env -- --apply --redeploy[\s\S]*--verify-url=https:\/\/agentlas\.cloud\/api\/desktop\/latest/);
 assert.ok(
   signedSteps.indexOf(publicWriterStep) < signedSteps.indexOf(productionWebEnvStep),
   "production web metadata must never lead the public release writer",
@@ -823,42 +824,16 @@ assert.deepEqual(
 );
 assert.ok(
   signedSteps.indexOf(stepNamed("Restore mac signing certificate")) >
-    signedSteps.indexOf(stepNamed("Runtime, browser, and renderer UI regression gates")),
-  "the signing certificate must not exist on disk during npm install or regression tests",
+    signedSteps.indexOf(nativeMacUpdaterStep),
+  "the signing certificate must not exist on disk during npm install or release preflight tests",
 );
-const signedRegressionRun = stepNamed("Runtime, browser, and renderer UI regression gates").run;
-for (const requiredGate of [
-  "npm run test:automations-store",
-  "npm run test:cli-version-parser",
-  "npm run test:hephaestus-status-version",
-  "npm run test:marketplace-cache",
-  "npm run test:after-pack-runtime-contract",
-  "npm run test:mobile-bridge-contract",
-  "npm run test:mobile-execution-boundary",
-  "npm run test:runtime-resume-contract",
-  "npm run test:cli-image-attachments",
-  "npm run test:owned-agent-runtime-prompts",
-  "npm run test:independent-terminal-boundary",
-  "npm run test:grok-runtime-contract",
-  "npm run test:grok-auth-source",
-  "npm run test:oberon-provider-routing",
-  "npm run test:telegram-connect-atomicity",
-  "npm run test:telegram-api-timeout",
-  "npm run test:document-studio-draft-persistence",
-  "npm run test:prompts-start-failure-ui",
-  "npm run test:settings-resilience-ui",
-  "npm run test:engine-auto-toggle-ui",
-  "npm run test:startup-founder-new-idea",
-  "npm run test:trex-ui",
-  "npm run test:trex-attachments-ui",
-  "node scripts/qa-chat-input-routing.cjs",
-  "AGENTLAS_QA_LOCALE=en node scripts/qa-chat-input-routing.cjs",
-  "npm run test:all-routes-ui",
-]) {
-  assert.match(signedRegressionRun, new RegExp(requiredGate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-}
 
 const afterPackSource = fs.readFileSync(path.join(root, "build-resources", "after-pack-clean.cjs"), "utf8");
+const afterSignSource = fs.readFileSync(path.join(root, "build-resources", "after-sign-trust.cjs"), "utf8");
+const signedMacPythonSmokeSource = fs.readFileSync(
+  path.join(root, "scripts", "smoke-signed-mac-python-cache.cjs"),
+  "utf8",
+);
 assert.match(afterPackSource, /packagedRoot[\s\S]*?Hephaestus/);
 assert.match(afterPackSource, /packagedManifest\.version !== sourceManifest\.version/);
 assert.match(afterPackSource, /compatibilityVersion !== sourceManifest\.version/);
@@ -866,12 +841,35 @@ assert.match(afterPackSource, /HEPHAESTUS_REF mismatch/);
 assert.match(afterPackSource, /agentlas_cloud[\s\S]*?__main__\.py/);
 assert.match(
   afterPackSource,
-  /MODEL2VEC_ASSET_PARTS = \["assets", "model2vec", "potion-base-8M-int8"\]/,
+  /sealReadOnlyTree[\s\S]*?chmod\(file\.absolute, file\.executable \? 0o555 : 0o444\)[\s\S]*?chmod\(directory, 0o555\)/,
+  "the shared lifecycle helper must physically seal signed Python/runtime files and directories read-only",
+);
+assert.match(
+  `${afterPackSource}\n${afterSignSource}`,
+  /sealMacRuntimeResources[\s\S]*?Hephaestus[\s\S]*?python-runtime[\s\S]*?require\("\.\/after-pack-clean\.cjs"\)[\s\S]*?developerId[\s\S]*?requirement[\s\S]*?await sealMacRuntimeResources\(context\)[\s\S]*?sealedRequirement/,
+  "official bundles must pass both runtime roots through the seal only after the pinned signing identity is verified, then reverify it",
+);
+assert.match(afterPackSource, /execFileAsync\("\/bin\/chmod", \["-RN", root\]\)/, "the runtime seal must strip inherited macOS ACLs");
+assert.match(packageMacSource, /smoke-signed-mac-python-cache\.cjs/, "the signed package path must run the direct unguarded Python cache smoke");
+assert.match(
+  packageMacSource,
+  /exercise_final_update_zip_boundary[\s\S]*?ditto -x -k[\s\S]*?-perm -u\+w[\s\S]*?\/bin\/ls -lde[\s\S]*?direct-import-ok[\s\S]*?codesign --verify --deep --strict/,
+  "the release packager must verify modes, ACLs, direct imports, and signature on the final updater ZIP bytes",
+);
+assert.match(
+  signedMacPythonSmokeSource,
+  /assertReadOnlyTree\(runtimeRoot\)[\s\S]*?assertReadOnlyTree\(pythonRoot\)[\s\S]*?spawnSync\([\s\S]*?direct-import-ok[\s\S]*?pythonArtifacts\(resourcesRoot\)/,
+  "the signed artifact smoke must survive a direct unguarded Python import without mutating Resources",
+);
+assert.match(
+  afterPackSource,
+  /MODEL2VEC_ASSET_PARTS = \["assets", "model2vec", "potion-multilingual-128M-int8"\]/,
   "afterPack must verify the exact packaged Model2Vec release directory",
 );
 for (const requiredModelFile of [
   "manifest.json",
-  "embeddings.i8",
+  "embeddings.i8.part-000",
+  "embeddings.i8.part-001",
   "scales.f32le",
   "tokenizer.json",
   "LICENSE.model.txt",

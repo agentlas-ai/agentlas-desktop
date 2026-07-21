@@ -80,7 +80,7 @@ function runtime() {
 const WEEKLY_TASK_PROMPT = "Prepare the weekly comparison report from the exact approved input snapshot.";
 const TEAM_TASK_PROMPT = "Ask one-improvement-researcher to research with my saved team, prepare the market report, and cross-check every source.";
 const SURFACE_INTENT_MARKER = "<<surface-intent>>";
-const PARSER_FAILURE_SAFE_FINAL = "The team run completed, but its structured result could not be safely validated, so it was not displayed.";
+const PARSER_FAILURE_SAFE_FINAL = "I couldn't finish preparing this result safely. Ask me to try again below and I'll continue.";
 
 function participantBindings(rt, agentIds) {
   const installedById = new Map(rt.registry.listInstalledAgentsReadOnly().map((agent) => [agent.id, agent]));
@@ -776,7 +776,10 @@ async function assertProjectionFailureKeepsRawSurfacePrivate(rt) {
   assert.ok(surface, "projection failure should remain observable as a content-free Surface event");
   assert.equal(surface.surface, undefined);
   assert.equal(surface.oneSurface, undefined);
-  assert.match(surface.status, /did not validate as a safe One Surface/);
+  // Customer-safe status (beta feedback #1): a validation failure shows plain
+  // retry copy, never the internal "safe One Surface" schema term.
+  assert.match(surface.status, /couldn't finish preparing this result safely/);
+  assert.doesNotMatch(surface.status, /safe One Surface|structured result|manifest/i);
   assert.equal(JSON.stringify(bufferedAfterSurface).includes(mediaPath), false, "active record.events must strip raw paths");
   assert.equal(JSON.stringify(wireEvents).includes(mediaPath), false, "renderer/Mobile envelopes must strip raw paths");
   assert.equal(JSON.stringify(rt.runs.listRunEvents(runId, 500)).includes(mediaPath), false, "run ledger must strip raw paths");
@@ -1547,8 +1550,10 @@ function orchestrate() {
     assert.match(taskForceRuntime, /emitFinal && p\.req\.oneMode !== true && !p\.req\.agentAppMode/,
       "ordinary Work synthesis partial streaming must remain unchanged");
     assert.match(taskForceRuntime, /parsed\.errors\.length === 0 && parsed\.surfaces\.length === 1/);
-    assert.match(taskForceRuntime, /diagnostic\.code === "surface-parse-failed"[\s\S]{0,500}could not be safely validated/);
-    assert.match(invocationClient, /diagnostic\.code === "surface-parse-failed"[\s\S]{0,500}could not be safely validated/);
+    // Customer-safe copy (beta feedback #1): the surface-parse-failed branch now
+    // replaces the raw body with plain retry copy, not the internal schema term.
+    assert.match(taskForceRuntime, /diagnostic\.code === "surface-parse-failed"[\s\S]{0,500}couldn't finish preparing this result safely/);
+    assert.match(invocationClient, /diagnostic\.code === "surface-parse-failed"[\s\S]{0,500}couldn't finish preparing this result safely/);
     assert.match(taskForceRuntime, /surfaceExecutionVerified = verifierIssues\.length === 0[\s\S]{0,180}results\.every/);
     assert.match(invocationService, /const surfaceTask = findCanonicalTaskForChat\(runReq\.chatId\);[\s\S]{0,80}canonicalTask = surfaceTask/);
     assert.match(invocationService, /\(requestedOneMode \|\| runWorkspaceBinding\) && event\.kind === "surface" && event\.surface/);

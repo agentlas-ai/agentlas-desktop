@@ -465,6 +465,7 @@ async function orchestrate() {
     const adaptive = fs.readFileSync(path.join(__dirname, "../renderer/components/one/OneAdaptiveResult.tsx"), "utf8");
     const memorySheet = fs.readFileSync(path.join(__dirname, "../renderer/components/one/OneMemorySheet.tsx"), "utf8");
     const card = fs.readFileSync(path.join(__dirname, "../renderer/components/one/OneExperienceReuseCard.tsx"), "utf8");
+    const i18n = fs.readFileSync(path.join(__dirname, "../renderer/lib/i18n.tsx"), "utf8");
     const assertAcceptanceReuseWiring = (source, startMarker, endMarker, label) => {
       const start = source.indexOf(startMarker);
       const end = source.indexOf(endMarker, start + startMarker.length);
@@ -505,9 +506,12 @@ async function orchestrate() {
       "internal compounding records must stay out of the beginner-facing One result",
     );
     assert.match(memorySheet, /<OneValueClosureCard[\s\S]*<OneExperienceReuseCard[\s\S]*<OneImprovementProofCard/);
-    assert.match(card, /One applied what worked well last time/);
-    assert.match(card, /Whether this result improved is verified separately/);
-    assert.match(card, /See what was applied/);
+    assert.match(card, /reuseCopy\(locale, "one\.reuse\.title"\)/);
+    assert.match(card, /reuseBody\(locale, sourceTasks, assets\)/);
+    assert.match(card, /reuseCopy\(locale, "one\.reuse\.manage"\)/);
+    assert.match(i18n, /One applied what worked well last time/);
+    assert.match(i18n, /Whether this result improved is verified separately/);
+    assert.match(i18n, /See what was applied/);
     assert.doesNotMatch(card, /assetId|rawMemory|source path/i);
 
     const corrupt = spawnSync(executable, [

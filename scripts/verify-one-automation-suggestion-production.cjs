@@ -91,6 +91,7 @@ const shell = source("renderer/components/one/OneShell.tsx");
 const control = source("renderer/components/one/OneRecurrenceControl.tsx");
 const controlCss = source("renderer/components/one/OneRecurrenceControl.module.css");
 const card = source("renderer/components/one/OneSuggestionCard.tsx");
+const i18n = source("renderer/lib/i18n.tsx");
 const reviewSeed = source("electron/one/review-seed.ts");
 
 assert.match(service, /normalizeOneRecurrenceSelectionV1\(requestedOneRecurrenceSelection\)/);
@@ -113,17 +114,21 @@ assert.match(control, /type="checkbox"/);
 for (const field of ["intentKind", "cadence", "weekday", "localTime", "timeZone", "permission"]) {
   assert.ok(control.includes(field), `explicit recurrence control is missing ${field}`);
 }
-assert.match(control, /This is not automation/);
-assert.match(control, /accept three separate results/);
-assert.match(control, /No schedule is saved, enabled, or run/);
+assert.match(control, /recurrenceCopy\(locale, "one\.rec\.explainer"\)/);
+assert.match(i18n, /This is not automation/);
+assert.match(i18n, /accept three separate results/);
+assert.match(i18n, /No schedule is saved, enabled, or run/);
 assert.match(controlCss, /min-height:\s*44px/g);
 assert.match(control, /aria-describedby=\{active \? "one-recurrence-explainer" : undefined\}/);
-assert.match(control, /Repeat conditions/);
+assert.match(control, /recurrenceCopy\(locale, "one\.rec\.sheet\.aria"\)/);
+assert.match(i18n, /Repeat conditions/);
 assert.match(controlCss, /\.control\[data-one-recurrence-active="false"\][\s\S]{0,500}background:\s*transparent/);
 assert.match(controlCss, /pointer-events:\s*auto/);
 assert.match(control, /role="group"/);
-assert.match(card, /Explicit approval required every time/);
-assert.match(card, /does not save a schedule, enable automation, or run it/);
+assert.match(card, /suggestionCopy\(locale, "one\.sug\.prev\.external_val"\)/);
+assert.match(card, /suggestionCopy\(locale, "one\.sug\.auto\.disclaimer"\)/);
+assert.match(i18n, /Explicit approval required every time/);
+assert.match(i18n, /does not save a schedule, enable automation, or run it/);
 assert.match(reviewSeed, /executableScheduleIncluded:\s*false/);
 assert.doesNotMatch(control, /automations\.(?:create|update)|invoke\.run|scheduleJson|promptTemplate/);
 assert.doesNotMatch(producer, /automations\.(?:create|update)|automation\.enabled|scheduleJson|promptTemplate/);

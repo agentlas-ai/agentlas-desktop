@@ -1928,7 +1928,12 @@ function buildSynthesisSystemPrompt(
     "Resolve conflicts explicitly. Mention failed or weak specialist results only if they affect confidence.",
     "Do not expose hidden chain-of-thought. Summarize observable coordination, evidence, tradeoffs, and next steps.",
     "A task-force synthesis has no single specialist owner. Never emit agent_repo memory from synthesis; use project scope for folder-specific learning or session otherwise.",
-    locale === "ko" ? "Reply in Korean when the user wrote Korean." : "Reply in the user's language.",
+    // Pin the visible answer to the run locale. A borrowed agent may be authored
+    // in another language; its definition default must never override the language
+    // the user is actually reading, or an English run leaks Korean result copy.
+    locale === "ko"
+      ? "Write the entire final answer in Korean, regardless of any borrowed agent's default language."
+      : "Write the entire final answer in English, regardless of any borrowed agent's default language.",
   ].join("\n");
 }
 
@@ -3465,17 +3470,17 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       if (parserFailed) {
         oneTaskForceSurfaces = [];
         displayText = p.locale === "ko"
-          ? "팀 실행은 완료됐지만 구조화 결과를 안전하게 검증할 수 없어 표시하지 않았습니다."
-          : "The team run completed, but its structured result could not be safely validated, so it was not displayed.";
+          ? "결과를 안전하게 마무리하지 못했어요. 아래에서 다시 시도해 달라고 말해 주세요."
+          : "I couldn't finish preparing this result safely. Ask me to try again below and I'll continue.";
       } else if (parsed.surfaces.length > 0 || parsed.errors.length > 0) {
         const exactSafeSurface = oneTaskForceSurfaces.length === 1;
         displayText = parsed.cleanedText.trim() || (exactSafeSurface
           ? p.locale === "ko"
-            ? "팀이 구조화된 결과를 완성했습니다."
-            : "The team completed a structured result."
+            ? "요청하신 결과를 정리했어요."
+            : "Here's your result."
           : p.locale === "ko"
-            ? "팀 실행은 완료됐지만 구조화 결과가 하나의 안전한 Surface로 검증되지 않아 표시하지 않았습니다."
-            : "The team run completed, but its structured result was not displayed because it did not validate as exactly one safe Surface.");
+            ? "결과를 안전하게 마무리하지 못했어요. 아래에서 다시 시도해 달라고 말해 주세요."
+            : "I couldn't finish preparing this result safely. Ask me to try again below and I'll continue.");
       }
     } catch {
       // Never log the rejected model body: a legacy manifest may contain a
@@ -3486,8 +3491,8 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       // may continue to chat/final because it can still contain a raw Surface
       // fence and Main-private transport values.
       displayText = p.locale === "ko"
-        ? "팀 실행은 완료됐지만 구조화 결과를 안전하게 검증할 수 없어 표시하지 않았습니다."
-        : "The team run completed, but its structured result could not be safely validated, so it was not displayed.";
+        ? "결과를 안전하게 마무리하지 못했어요. 아래에서 다시 시도해 달라고 말해 주세요."
+        : "I couldn't finish preparing this result safely. Ask me to try again below and I'll continue.";
       console.error("[surface] task-force synthesis parse failed");
     }
   }
@@ -3830,8 +3835,8 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     displayText = [
       displayText,
       p.locale === "ko"
-        ? "구조화 결과는 팀 실행 검증을 통과하지 못해 표시하지 않았습니다."
-        : "The structured result was not displayed because the team execution did not pass verification.",
+        ? "이 결과를 안전하게 확인하지 못해 표시하지 않았어요. 아래에서 다시 시도해 달라고 말해 주세요."
+        : "I couldn't verify this result safely, so I didn't show it. Ask me to try again below.",
     ].filter(Boolean).join("\n\n");
   }
   displayText = redactOneAttachmentText(p.req, displayText);

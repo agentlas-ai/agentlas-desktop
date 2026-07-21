@@ -19,6 +19,7 @@ const surface = read("shared/one-surface.ts");
 const durable = read("shared/one-surface-durable.ts");
 const mobileWire = read("shared/mobile-bridge.ts");
 const mobileProjector = read("electron/mobile-bridge/projector.ts");
+const i18n = read("renderer/lib/i18n.tsx");
 const schema = fs.readFileSync(path.resolve(root, "../Agentlas_One/contracts/schemas/one-surface-manifest.v1.schema.json"), "utf8");
 
 assert.match(component, /DESKTOP_NATIVE_BLOCK_TYPES[\s\S]*"Gallery"[\s\S]*"Media"/);
@@ -33,7 +34,8 @@ assert.match(component, /playsInline/);
 assert.match(component, /preload="metadata"/);
 assert.match(component, /mediaSkeleton/);
 assert.match(component, /mediaUnavailable/);
-assert.match(component, /Work에서 보기|View in Work/);
+assert.match(component, /tFor\(locale, "one\.res\.view_in_work"\)/);
+assert.match(i18n, /Work에서 보기|View in Work/);
 assert.match(component, /isOneArtifactPreviewCapabilityV1/);
 assert.match(component, /oneArtifacts\.issuePreview/);
 assert.match(component, /oneArtifacts\.revokePreview/);

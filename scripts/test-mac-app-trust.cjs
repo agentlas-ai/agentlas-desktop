@@ -4,7 +4,10 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const { inspectMacInstalledAppTrust } = require("../dist/electron/updater/mac-app-trust.js");
+const {
+  inspectMacInstalledAppTrust,
+  repairMacInstalledAppGeneratedPythonCaches,
+} = require("../dist/electron/updater/mac-app-trust.js");
 const { updaterDiagnostic } = require("../dist/electron/updater/controller.js");
 
 const policyPath = path.resolve(__dirname, "../build-resources/macos-release-signing-policy.json");
@@ -19,14 +22,23 @@ const officialMetadata = [
   "designated => identifier \"com.agentlas.desktop\" and anchor apple generic",
 ].join("\n");
 
-function runnerFor({ metadata = officialMetadata, verify = true, gatekeeper = true } = {}) {
+function runnerFor({ metadata = officialMetadata, seal = true, requirement = true, gatekeeper = true } = {}) {
   const calls = [];
   return {
     calls,
     run: async (command, args) => {
       calls.push([command, [...args]]);
       if (command === "codesign" && args[0] === "-d") return { ok: true, output: metadata };
-      if (command === "codesign") return { ok: verify, output: verify ? "valid" : "sensitive verify output" };
+      if (command === "codesign") {
+        const isRequirement = args.some((arg) => arg.startsWith("-R="));
+        const ok = isRequirement ? seal && requirement : seal;
+        const output = ok
+          ? "valid"
+          : !seal
+            ? "a sealed resource is missing or invalid"
+            : "sensitive requirement output";
+        return { ok, output };
+      }
       if (command === "spctl") return { ok: gatekeeper, output: gatekeeper ? "accepted" : "sensitive rejection output" };
       throw new Error(`unexpected command: ${command}`);
     },
@@ -54,13 +66,31 @@ function runnerFor({ metadata = officialMetadata, verify = true, gatekeeper = tr
   );
   assert.equal(appleDistribution.calls.length, 1);
 
+  const wrongDeveloperSameTeam = runnerFor({
+    metadata: officialMetadata.replace(
+      "Developer ID Application: Jeongmin Kim (F469CGM7T5)",
+      "Developer ID Application: Someone Else (F469CGM7T5)",
+    ),
+  });
+  assert.deepEqual(
+    await inspectMacInstalledAppTrust({ bundlePath, policyPath, runCommand: wrongDeveloperSameTeam.run }),
+    { ok: false, diagnostic: updaterDiagnostic("source-signature-class") },
+  );
+
   const wrongTeam = runnerFor({ metadata: officialMetadata.replaceAll("F469CGM7T5", "AAAAAAAAAA") });
   assert.deepEqual(
     await inspectMacInstalledAppTrust({ bundlePath, policyPath, runCommand: wrongTeam.run }),
     { ok: false, diagnostic: updaterDiagnostic("source-identity") },
   );
 
-  const requirementFailure = runnerFor({ verify: false });
+  const sealFailure = runnerFor({ seal: false });
+  assert.deepEqual(
+    await inspectMacInstalledAppTrust({ bundlePath, policyPath, runCommand: sealFailure.run }),
+    { ok: false, diagnostic: updaterDiagnostic("source-seal") },
+  );
+  assert.equal(sealFailure.calls.length, 2);
+
+  const requirementFailure = runnerFor({ requirement: false });
   assert.deepEqual(
     await inspectMacInstalledAppTrust({ bundlePath, policyPath, runCommand: requirementFailure.run }),
     { ok: false, diagnostic: updaterDiagnostic("source-designated-requirement") },
@@ -79,6 +109,91 @@ function runnerFor({ metadata = officialMetadata, verify = true, gatekeeper = tr
     }),
     { ok: false, diagnostic: updaterDiagnostic("source-verification-unavailable") },
   );
+
+  const repairFixture = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mac-cache-repair-"));
+  try {
+    const repairApp = path.join(repairFixture, "Agentlas.app");
+    const hephaestusCache = path.join(repairApp, "Contents", "Resources", "Hephaestus", "agentlas_cloud", "__pycache__");
+    const pythonCache = path.join(repairApp, "Contents", "Resources", "python-runtime", "lib", "python3.12", "__pycache__");
+    const outside = path.join(repairFixture, "outside");
+    fs.mkdirSync(hephaestusCache, { recursive: true });
+    fs.mkdirSync(pythonCache, { recursive: true });
+    fs.mkdirSync(outside, { recursive: true });
+    const codeResources = path.join(repairApp, "Contents", "_CodeSignature", "CodeResources");
+    fs.mkdirSync(path.dirname(codeResources), { recursive: true });
+    fs.writeFileSync(codeResources, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>files2</key><dict></dict></dict></plist>`);
+    fs.writeFileSync(path.join(hephaestusCache, "module.cpython-312.pyc"), "generated");
+    fs.writeFileSync(path.join(pythonCache, "stdlib.cpython-312.pyc"), "generated");
+    fs.writeFileSync(path.join(repairApp, "Contents", "Resources", "Hephaestus", "agentlas_cloud", "module.py"), "# signed source\n");
+    fs.writeFileSync(path.join(outside, "must-stay.pyc"), "outside");
+    fs.symlinkSync(outside, path.join(repairApp, "Contents", "Resources", "Hephaestus", "linked-cache"));
+    assert.equal(await repairMacInstalledAppGeneratedPythonCaches({
+      bundlePath: repairApp,
+      diagnostic: updaterDiagnostic("source-identity"),
+    }), false, "identity failures must never mutate the bundle");
+    assert.equal(await repairMacInstalledAppGeneratedPythonCaches({
+      bundlePath: repairApp,
+      diagnostic: updaterDiagnostic("source-seal"),
+    }), true, "a source-seal failure should remove generated Python bytecode");
+    assert.equal(fs.existsSync(path.join(hephaestusCache, "module.cpython-312.pyc")), false);
+    assert.equal(fs.existsSync(path.join(pythonCache, "stdlib.cpython-312.pyc")), false);
+    assert.equal(fs.existsSync(path.join(repairApp, "Contents", "Resources", "Hephaestus", "agentlas_cloud", "module.py")), true);
+    assert.equal(fs.existsSync(path.join(outside, "must-stay.pyc")), true, "repair must never follow symlinks outside Resources");
+
+    const sealedCache = path.join(repairApp, "Contents", "Resources", "Hephaestus", "sealed", "__pycache__");
+    const unsealedCache = path.join(repairApp, "Contents", "Resources", "Hephaestus", "unsealed", "__pycache__");
+    fs.mkdirSync(sealedCache, { recursive: true });
+    fs.mkdirSync(unsealedCache, { recursive: true });
+    const sealedBytecode = path.join(sealedCache, "sealed.cpython-312.pyc");
+    const unsealedBytecode = path.join(unsealedCache, "generated.cpython-312.pyc");
+    fs.writeFileSync(sealedBytecode, "signed");
+    fs.writeFileSync(unsealedBytecode, "generated");
+    fs.writeFileSync(codeResources, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>files2</key><dict><key>Resources/Hephaestus/sealed/__pycache__/sealed.cpython-312.pyc</key><dict/></dict></dict></plist>`);
+    assert.equal(await repairMacInstalledAppGeneratedPythonCaches({
+      bundlePath: repairApp,
+      diagnostic: updaterDiagnostic("source-seal"),
+    }), false, "a signed Python cache candidate must fail the entire repair closed");
+    assert.equal(fs.existsSync(sealedBytecode), true);
+    assert.equal(fs.existsSync(unsealedBytecode), true, "a sealed candidate must prevent partial deletion");
+    fs.rmSync(path.dirname(sealedCache), { recursive: true, force: true });
+    fs.rmSync(path.dirname(unsealedCache), { recursive: true, force: true });
+    fs.writeFileSync(codeResources, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>files2</key><dict></dict></dict></plist>`);
+
+    const linkedApp = path.join(repairFixture, "Linked.app");
+    const linkedResources = path.join(repairFixture, "linked-resources");
+    const linkedCache = path.join(linkedResources, "Hephaestus", "__pycache__");
+    fs.mkdirSync(path.join(linkedApp, "Contents"), { recursive: true });
+    fs.mkdirSync(linkedCache, { recursive: true });
+    const linkedBytecode = path.join(linkedCache, "outside.cpython-312.pyc");
+    fs.writeFileSync(linkedBytecode, "outside");
+    fs.symlinkSync(linkedResources, path.join(linkedApp, "Contents", "Resources"));
+    assert.equal(await repairMacInstalledAppGeneratedPythonCaches({
+      bundlePath: linkedApp,
+      diagnostic: updaterDiagnostic("source-seal"),
+    }), false, "a symlinked Resources root must fail closed");
+    assert.equal(fs.existsSync(linkedBytecode), true, "a symlinked Resources root must never be mutated");
+
+    const hardlinkCache = path.join(repairApp, "Contents", "Resources", "Hephaestus", "hardlink", "__pycache__");
+    fs.mkdirSync(hardlinkCache, { recursive: true });
+    const hardlinkBytecode = path.join(hardlinkCache, "linked.cpython-312.pyc");
+    const hardlinkTwin = path.join(repairFixture, "hardlink-twin.pyc");
+    fs.writeFileSync(hardlinkBytecode, "linked");
+    fs.linkSync(hardlinkBytecode, hardlinkTwin);
+    assert.equal(await repairMacInstalledAppGeneratedPythonCaches({
+      bundlePath: repairApp,
+      diagnostic: updaterDiagnostic("source-seal"),
+    }), false, "hard-linked bytecode must not be removed");
+    assert.equal(fs.existsSync(hardlinkBytecode), true);
+    assert.equal(fs.existsSync(hardlinkTwin), true);
+  } finally {
+    fs.rmSync(repairFixture, { recursive: true, force: true });
+  }
 
   const { inspectPackagedMacSigningPolicy, verifyMacAppBundle } = await import("./lib/mac-app-signature.mjs");
   const policyFixture = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-mac-policy-"));

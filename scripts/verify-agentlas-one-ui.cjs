@@ -7,6 +7,7 @@ const ts = require("typescript");
 
 const root = path.resolve(__dirname, "..");
 const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
+const i18n = read("renderer/lib/i18n.tsx");
 
 const route = read("renderer/app/(no-shell)/one/page.tsx");
 const shell = read("renderer/components/one/OneShell.tsx");
@@ -59,6 +60,7 @@ const ipcSource = read("electron/ipc.ts");
 const attachmentContract = read("shared/one-attachments.ts");
 const attachmentRuntime = read("electron/one/attachments.ts");
 const taskContinuationRuntime = read("electron/one/task-continuation.ts");
+const oneCopyRuntime = read("electron/one/one-copy.ts");
 const acceptedClosureRuntime = read("electron/one/accepted-result-value-closure.ts");
 
 function loadStandaloneTs(source, filename) {
@@ -146,7 +148,11 @@ assert.ok(
   "One must freeze earlier turns before the current request becomes durable",
 );
 assert.match(invocationClient, /const hasPriorContext = hadPriorConversationContext;/, "first-turn routing must not mistake the newly stored request for prior context");
-assert.match(invocationClient, /const history = priorHistory;/, "the ordinary model run must receive only earlier turns as history");
+assert.ok(
+  /const history = priorHistory;/.test(invocationClient)
+    || /const history = req\.agentAppMode \? \[\] : listChatMessages\(chat\.id, 80\);[\s\S]*const priorHistory = history;/.test(invocationClient),
+  "the ordinary model run must receive only earlier turns as history",
+);
 assert.match(invocationClient, /runBorrowedTaskForceInvocation\(\{[\s\S]*?priorHistory,/, "top-level task-force runs must receive the frozen earlier-turn history");
 assert.match(invocationClient, /runFirmInvocation\(\{[\s\S]*?priorHistory,/, "top-level firm runs must receive the frozen earlier-turn history");
 assert.match(borrowedTaskForce, /suppliedPriorHistory[\s\S]*!suppliedPriorHistory[\s\S]*appendChatMessage/, "task-force orchestration must not store its internally expanded prompt over the exact visible user turn");
@@ -169,7 +175,8 @@ assert.doesNotMatch(shell, /다음 메시지는 새 일로 시작해요\./, "the
 assert.match(taskContinuationRuntime, /task\.status !== "partial" && task\.status !== "completed"/, "only result-ready or completed work may start a follow-up");
 assert.match(taskContinuationRuntime, /continueFromChatId:\s*source\.id/, "Main may carry only the source chat's approved working folder");
 assert.match(taskContinuationRuntime, /taskMode:\s*"conversation"/, "a result follow-up must begin without manufacturing a canonical Task");
-assert.match(taskContinuationRuntime, /previous team, permissions, and temporary attachments were not carried over/i, "the continuity cue must disclose that execution authority was not reused");
+assert.match(taskContinuationRuntime, /oneText\(input\.locale, "one\.cont\.newRequestNote"\)/, "the continuity cue must use the Main-owned localized copy contract");
+assert.match(oneCopyRuntime, /previous team, permissions, and temporary attachments were not carried over/i, "the continuity cue must disclose that execution authority was not reused");
 assert.doesNotMatch(taskContinuationRuntime, /hiredAgents|setChatHiredAgents|listChatMessages/, "the continuation runtime must not copy a roster or raw transcript");
 assert.match(shell, /api\.confirm\.commitAnswer/, "decision cards must commit a durable answer receipt");
 assert.match(shell, /chat\?id=.*task=/s, "the safe fallback Work route must carry the same Task identity");
@@ -193,7 +200,8 @@ assert.match(invocationService, /classifyOneRequestIntent\(invocationRequest\.us
 assert.match(shell, /type="file"[\s\S]*multiple/, "the minimal composer must accept multiple files");
 assert.match(shell, /onDrop=\{\(event\)/, "the composer must support file drop");
 assert.match(shell, /IconPlus/, "the composer must expose the reference-style add control");
-assert.match(shell, /aria-label=\{ko \? "파일 첨부" : "Attach files"\}/, "the add control must have an accessible name");
+assert.match(shell, /aria-label=\{tFor\(appLocale, "one\.shell\.composer\.attach_aria"\)\}/, "the add control must have an accessible localized name");
+assert.match(i18n, /"one\.shell\.composer\.attach_aria": "(?:파일 첨부|Attach files)"/, "the attachment name must exist in both locale catalogs");
 assert.match(shell, /className=\{styles\.attachmentTray\}/, "selected files must render in a removable tray");
 assert.match(shell, /role="alert"/, "attachment validation errors must be announced");
 assert.match(shell, /URL\.revokeObjectURL/, "image preview object URLs must be released");
@@ -231,8 +239,10 @@ assert.match(memorySheet, /api\.oneMemory\.editAndSave\(\{/, "a Memory candidate
 assert.match(memorySheet, /api\.oneMemory\.useOnce\(\{/, "a Memory candidate must support non-durable one-time use");
 assert.match(memorySheet, /target:\s*useOnceTarget/, "one-time use must bind the exact visible conversation or Task target");
 assert.doesNotMatch(memorySheet, /useOnceReceipt\.content/, "the renderer receipt must never expose one-time Memory content");
-assert.match(memorySheet, /다음 요청에 1회 적용|Applies to the next request once/, "one-time use must state its exact next-request lifecycle");
-assert.match(memorySheet, /앱을 다시 켜거나, 시간이 지나면 사라집니다|an app restart, or expiry/, "the UI must disclose process-local expiry truth in plain language");
+assert.match(memorySheet, /tFor\(locale, "one\.mem\.once\.title"\)/, "one-time use must render the localized next-request lifecycle");
+assert.match(i18n, /다음 요청에 1회 적용|Applies to the next request once/, "one-time use must state its exact next-request lifecycle");
+assert.match(memorySheet, /tFor\(locale, "one\.mem\.once\.note"\)/, "the UI must render the localized expiry disclosure");
+assert.match(i18n, /앱을 다시 켜거나, 시간이 지나면 사라집니다|an app restart, or expiry/, "the UI must disclose process-local expiry truth in plain language");
 assert.match(shell, /oneMemoryUseOnceRef:\s*\{[\s\S]*receiptId:/, "the next One invocation must carry only the opaque one-time reference");
 assert.match(shell, /setArmedOneMemoryUseOnce[\s\S]*finally/, "the renderer must not auto-attach the same receipt after a start attempt");
 assert.match(memoryRuntime, /const oneMemoryUseOnceGrants = new Map/, "one-time content must live only in Main process memory");
@@ -240,9 +250,10 @@ assert.match(memoryRuntime, /findCanonicalTaskForChat\(chat\.id\)/, "Main must r
 assert.match(memoryRuntime, /candidate\.version !== grant\.candidateVersion/, "claim must revalidate the exact candidate version");
 assert.match(memorySheet, /api\.oneMemory\.reject\(\{/, "a Memory candidate must support explicit rejection");
 assert.match(memorySheet, /approvedByUser:\s*true/, "durable Memory writes must carry explicit user approval");
-assert.match(memorySheet, /오래 기억하지 않습니다|not saved long term/, "one-time use must disclose in plain language that it is not durable Memory");
+assert.match(i18n, /오래 기억하지 않습니다|not saved long term/, "one-time use must disclose in plain language that it is not durable Memory");
 assert.doesNotMatch(memorySheet, /정확한 범위 ID|Exact scope ID/, "beginners must never be asked to enter an internal memory scope id");
-assert.match(memorySheet, /왜 기억하자고 했는지 보기|Why One suggested this/, "memory provenance must stay behind a plain-language disclosure");
+assert.match(memorySheet, /tFor\(locale, "one\.mem\.candidate\.why_summary"\)/, "memory provenance must render through localized copy");
+assert.match(i18n, /왜 기억하자고 했는지 보기|Why One suggested this/, "memory provenance must stay behind a plain-language disclosure");
 assert.match(memorySheet, /role="dialog"/, "Memory review must expose dialog semantics");
 assert.match(memorySheet, /event\.key\s*!==\s*"Tab"[\s\S]*last\.focus\(\)[\s\S]*first\.focus\(\)/, "Memory review must trap keyboard focus while modal");
 assert.match(memorySheetCss, /min-height:\s*44px/, "Memory controls must meet the 44px accessibility target");
@@ -256,15 +267,18 @@ assert.match(shell, /api\.oneSuggestions\.getState\(\)/, "One must hydrate ecosy
 assert.match(shell, /suggestion\.status === "open" && actionableConfirmations\.length === 0 && !briefingSnapshot\?\.candidate/, "an important decision or Briefing must suppress an open ecosystem suggestion");
 assert.match(shell, /<OneSuggestionCard/, "eligible evidence-gated suggestions must render after the result flow");
 assert.match(suggestionCard, /reviewOnly:\s*true/, "accepting a suggestion must create a review draft only");
-assert.match(suggestionCard, /Nothing has been saved or started yet|아직 저장하거나 시작하지 않았어요/, "accepted suggestions must disclose the no-execution boundary in beginner language");
+assert.match(suggestionCard, /tFor\(locale, "one\.sug\.receipt\.title"\)/, "accepted suggestions must render the localized no-execution boundary");
+assert.match(i18n, /Nothing has been saved or started yet|아직 저장하거나 시작하지 않았어요/, "accepted suggestions must disclose the no-execution boundary in beginner language");
 assert.match(suggestionCard, /oneSuggestions\.getReviewHandoff\(\{/, "Continue review must re-resolve the exact canonical handoff in Main");
 assert.match(suggestionCard, /expectedSuggestionVersion:\s*suggestion\.version/, "review handoff must bind the exact suggestion version");
 assert.match(suggestionCard, /reviewRequestId:\s*review\.id[\s\S]*draftId:\s*review\.draftId[\s\S]*originTaskId:\s*suggestion\.originTaskId/, "review handoff must bind the review, draft, and origin Task ids");
-assert.match(suggestionCard, /초안 계속 보기|Continue with draft/, "accepted receipts must expose a real draft continuation action");
+assert.match(suggestionCard, /tFor\(locale, "one\.sug\.receipt\.continue"\)/, "accepted receipts must expose a localized draft continuation action");
+assert.match(i18n, /초안 계속 보기|Continue with draft/, "accepted receipts must expose a real draft continuation action");
 assert.match(suggestionCard, /oneSuggestions\.neverAsk/, "suggestions must expose Never ask again");
-assert.match(suggestionCard, /earnings are not guaranteed|수익은 보장되지 않아요|수익은 보장되지 않습니다/i, "Hub derivatives must not promise earnings");
+assert.match(i18n, /earnings are not guaranteed|수익은 보장되지 않아요|수익은 보장되지 않습니다/i, "Hub derivatives must not promise earnings");
 assert.match(suggestionCard, /accepted_internal_result/, "accepted-result suggestions must render as internal completions rather than external success");
-assert.match(suggestionCard, /외부 성과가 성공했다는 뜻은 아닙니다|does not prove an external outcome succeeded/, "accepted-result suggestion copy must disclose its weaker truth boundary");
+assert.match(suggestionCard, /tFor\(locale, "one\.sug\.basis\.accepted"/, "accepted-result suggestion copy must come from the locale catalog");
+assert.match(i18n, /외부 성과가 성공했다는 뜻은 아닙니다|does not prove an external outcome succeeded/, "accepted-result suggestion copy must disclose its weaker truth boundary");
 assert.match(suggestionCardCss, /min-height:\s*44px/, "suggestion controls must meet the 44px accessibility target");
 assert.match(preload, /oneSuggestions:[\s\S]*getReviewHandoff:/, "the renderer must consume a real Main-owned review handoff instead of a dead query");
 assert.match(ipcSource, /oneSuggestions:getReviewHandoff/, "Main must expose the review handoff validator");
@@ -273,7 +287,8 @@ assert.match(suggestionReviewHandoff, /resolved\.targetSurface !== surface/, "a 
 assert.match(suggestionReviewHandoff, /currentParams\.get\("task"\) !== parsed\.input\.originTaskId/, "Work fallback must fail closed unless the visible Task is the exact origin Task");
 assert.match(suggestionReviewHandoff, /resolved\.reviewOnly !== true[\s\S]*resolved\.actionState !== "not_started"/, "destination surfaces must preserve the no-action boundary");
 assert.match(suggestionReviewHandoff, /resolved\.externalOutcomeVerified !== \(resolved\.evidenceBasis === "verified_outcomes"\)/, "destination surfaces must preserve the exact evidence-strength boundary");
-assert.match(suggestionReviewHandoff, /Nothing was saved, started, or published|아무것도 저장하거나 시작하거나 공개하지 않았습니다/, "blocked handoffs must state that no product action occurred in beginner language");
+assert.match(suggestionReviewHandoff, /(?:tFor|reviewCopy)\(locale, "one\.rev\.error\.detail"\)/, "blocked handoffs must render the localized no-action boundary");
+assert.match(i18n, /Nothing was saved, started, or published|아무것도 저장하거나 시작하거나 공개하지 않았습니다/, "blocked handoffs must state that no product action occurred in beginner language");
 assert.doesNotMatch(suggestionCard, /정본|canonical|스캐폴드|scaffold|Current Task|현재 Task|Asset ref|자산 참조/, "suggestion cards must not expose developer terminology");
 assert.doesNotMatch(suggestionReviewHandoff, /정본|canonical|스캐폴드|scaffold|Current Task|현재 Task|Asset ref|자산 참조/, "review handoffs must keep developer terminology out of the beginner surface");
 assert.match(buildPage, /OneSuggestionReviewHandoffBanner surface="build"/, "Build must consume agent-definition review handoffs");
@@ -305,11 +320,13 @@ assert.match(shell, /record\.proof\.improvementProofId === declaredRef/, "a mani
 assert.match(improvementProofCard, /<details className=\{styles\.card\}(?![^>]*\bopen\b)[^>]*>/, "Improvement Proof must remain collapsed by default");
 assert.match(improvementProofCard, /improved[\s\S]*no_change[\s\S]*regression/, "Improvement Proof must preserve improved, no-change, and regression outcomes");
 assert.match(improvementProofCard, /evidenceType === "measured"[\s\S]*evidenceType === "estimate"/, "measured and estimated improvements must stay distinct");
-assert.match(improvementProofCard, /What changed since last time/, "Improvement Proof must describe an observed comparison in plain language");
+assert.match(improvementProofCard, /tFor\(locale, "one\.proof\.title"\)/, "Improvement Proof must render its localized observed-comparison title");
+assert.match(i18n, /What changed since last time/, "Improvement Proof must describe an observed comparison in plain language");
 assert.doesNotMatch(improvementProofCard, /What prior experience changed this time|이전 경험이 이번 결과에 준 변화/, "Improvement Proof must not use the former causal title");
 assert.match(improvementProofCard, /data-attribution-status=\{proof\.attributionStatus\}/, "Improvement Proof must expose the closed attribution status");
 assert.match(improvementProofCard, /proof\.attributionStatus === "established"/, "Improvement Proof must render established and not-established attribution distinctly");
-assert.match(improvementProofCard, /cannot claim that one caused the other/, "unestablished attribution must disclose the causal boundary in plain language");
+assert.match(improvementProofCard, /tFor\(locale, "one\.proof\.attribution_correlated"\)/, "unestablished attribution must render the localized causal boundary");
+assert.match(i18n, /cannot claim that one caused the other/, "unestablished attribution must disclose the causal boundary in plain language");
 assert.match(improvementProofCard, /onManageAsset\(asset\)/, "reused assets must lead to their real management surface");
 assert.doesNotMatch(improvementProofCard, /engagementScore|participationScore/i, "Improvement Proof must never become an engagement score");
 assert.match(improvementProofCardCss, /min-height:\s*44px/, "Improvement Proof controls must meet the 44px accessibility target");
@@ -322,11 +339,12 @@ assert.match(acceptedClosureRuntime, /\["startedAt", "updatedAt", "finishedAt", 
 assert.match(result, /receipt\.status !== "completed"/, "Run Closure must be reserved for work that stopped instead of decorating a successful result");
 assert.doesNotMatch(result, /Your result is ready|also check the final confirmation screen/, "successful results must not add a separate technical closure card");
 assert.match(result, /projection\.canonicalStatus === "partial"/, "Finish result must appear only for canonical partial work");
-assert.match(result, /Finish here/, "a completed run must expose explicit user acceptance instead of auto-completing the work");
+assert.match(result, /tFor\(locale, "one\.res\.finish_here"\)/, "a completed run must expose localized explicit user acceptance instead of auto-completing the work");
 assert.match(result, /canAcceptResult\s*&&\s*!hasManifest/, "plain-text final runs must expose result acceptance even without a structured manifest");
 assert.match(result, /standaloneAcceptance/, "plain-text result acceptance must render after the Run Closure");
 assert.match(result, /<RunClosure[\s\S]*canAcceptResult\s*&&\s*!hasManifest/, "plain-text result acceptance must follow the receipt-bounded Run Closure");
-assert.match(result, /One will ask before reusing anything next time/, "result acceptance must explain reuse in ordinary user language");
+assert.match(result, /tFor\(locale, "one\.res\.acceptance_boundary"\)/, "result acceptance must render the localized reuse boundary");
+assert.match(i18n, /One will ask before reusing anything next time/, "result acceptance must explain reuse in ordinary user language");
 assert.doesNotMatch(result, /Run completed|Finish with this result|external outcomes require separate evidence/, "developer-facing closure copy must not return to the primary result flow");
 assert.doesNotMatch(result, /receipt\.runId\.slice|receipt\.eventCount} events|처리 \$\{receipt\.eventCount}/, "the expandable work record must not expose run identifiers or event counters");
 assert.doesNotMatch(valueClosureCard, /outcomeRefs\.join|receiptRefs\.join|trustedEvidenceRefs\.join/, "the beginner-facing value card must show understandable check counts, not internal evidence identifiers");
@@ -337,7 +355,8 @@ assert.match(result, /friendlySurfaceSummary/, "generic adapter prose must becom
 assert.match(invocationClient, /deterministicOneCompletionCopy/, "deterministic results must receive task-aware completion copy");
 assert.match(invocationClient, /요청한 결과와 파일을 준비했어요/, "office results must not claim that research and source cross-checking occurred");
 assert.match(invocationClient, /일정과 비용, 준비할 내용을 한눈에 정리했어요/, "travel results must receive travel-specific completion copy");
-assert.match(shell, /If you change your mind, just tell One/, "resolved choices must explain the next step in ordinary user language");
+assert.match(shell, /tFor\(locale, "one\.shell\.receipt\.change_mind"\)/, "resolved choices must render the localized next step");
+assert.match(i18n, /If you change your mind, just tell One/, "resolved choices must explain the next step in ordinary user language");
 assert.doesNotMatch(shell, /This receipt proves only that the response was committed/, "decision receipts must not lead with audit language");
 assert.match(shell, /detectOneTextLocale\(pendingTeamPrompt\?\.text/, "automatic preparation chrome must immediately follow the pending request language");
 assert.match(shell, /setTeamPreflightBusy\(true\);[\s\S]*api\.chats\.create/, "a brand-new request must stay visibly in motion while its chat and Task are created");
@@ -372,7 +391,8 @@ for (const kind of ["Comparison", "Map", "Document", "SourceList", "Decision", "
   assert.match(result, new RegExp(`block\\.type === "${kind}"`), `Desktop must natively preserve the ${kind} semantic layout`);
 }
 assert.match(result, /"Gallery"|DESKTOP_FALLBACK_BLOCK_TYPES/, "artifact media without a trusted resolver must remain on the shared Work fallback");
-assert.match(result, /Choose an option, then tell One to continue|선택한 뒤 One에게 말하면 다음 단계로 넘어갑니다/, "embedded Decision results must direct the user back through One instead of becoming an independent approval authority");
+assert.match(result, /tFor\(locale, "one\.res\.decision\.choose_hint"\)/, "embedded Decision results must render the localized One continuation cue");
+assert.match(i18n, /Choose an option, then tell One to continue|선택한 뒤 One에게 말하면 다음 단계로 넘어갑니다/, "embedded Decision results must direct the user back through One instead of becoming an independent approval authority");
 assert.match(result, /block\.type !== "ValueClosure" && block\.type !== "ImprovementProof"/, "receipt-backed closure blocks must render after the result instead of inside its model-authored body");
 assert.match(result, /fallback\.markdown/, "unsupported or invalid surfaces must render their safe Markdown fallback");
 assert.match(result, /fallback\.artifacts/, "unsupported or invalid surfaces must render their safe artifact summaries");
@@ -407,12 +427,12 @@ assert.match(preload, /invoke:latestOneSurface/, "the sandbox bridge must expose
 assert.match(shell, /api\.oneBriefing\.prepareAction\(/, "the first Briefing action must prepare a review packet only");
 assert.match(shell, /api\.oneBriefing\.startAction\(/, "the second explicit Briefing action must request the Main-owned read-only Task");
 assert.match(shell, /api\.oneBriefing\.openTask\(\{[\s\S]*expectedTaskVersion:/, "canonical Task findings must use exact Main-revalidated navigation");
-assert.match(shell, /Desktop notification|데스크탑 알림/, "One settings must expose Desktop notification opt-in");
-assert.match(shell, /Quiet hours|조용한 시간/, "One settings must expose quiet hours");
-assert.match(shell, /Phone notifications · Coming later|휴대폰 알림 · 준비 중/, "unsupported phone notifications must be visibly disabled and truthful");
-assert.match(shell, /source\.kind === "canonical_task"[\s\S]*현재 진행 상황을 보기만 합니다[\s\S]*does not start new work or make changes/, "current-work review copy must not claim file or automation review");
-assert.match(shell, /source\.kind === "canonical_task"[\s\S]*현재 진행 상황[\s\S]*Current progress/, "current-work detail metadata must never be mislabeled as an automation record");
-assert.match(shell, /<details className=\{styles\.briefingPacketDetails\}>[\s\S]*무엇을 확인했나요\?/, "internal briefing checks must stay collapsed behind everyday language");
+assert.match(shell, /tFor\(appLocale, "one\.shell\.briefing\.channel_desktop"\)/, "One settings must expose localized Desktop notification opt-in");
+assert.match(shell, /tFor\(appLocale, "one\.shell\.briefing\.quiet_hours"\)/, "One settings must expose localized quiet hours");
+assert.match(shell, /tFor\(appLocale, "one\.shell\.briefing\.phone_label"\)/, "unsupported phone notifications must be visibly disabled and truthful");
+assert.match(shell, /source\.kind === "canonical_task"[\s\S]*one\.shell\.briefing\.packet_canonical/, "current-work review copy must not claim file or automation review");
+assert.match(shell, /source\.kind === "canonical_task"[\s\S]*one\.shell\.briefing\.meta_current_progress/, "current-work detail metadata must never be mislabeled as an automation record");
+assert.match(shell, /<details className=\{styles\.briefingPacketDetails\}>[\s\S]*one\.shell\.briefing\.what_checked/, "internal briefing checks must stay collapsed behind everyday language");
 assert.doesNotMatch(shell, />검토 패킷 준비됨<|>Review packet ready</, "internal packet language must not remain visible");
 assert.match(preload, /oneBriefing:[\s\S]*openTask:/, "the sandbox bridge must expose exact Task navigation without execution authority");
 assert.match(ipcSource, /oneBriefing:openTask[\s\S]*resolveOneBriefingTaskNavigation/, "Main must revalidate the exact Briefing Task binding");
@@ -424,9 +444,9 @@ assert.match(mainRuntime, /checkOneBriefingDesktopNotification[\s\S]*!getAuthSes
 assert.match(mainRuntime, /oneBriefingLaunchTimer\.unref\(\)[\s\S]*oneBriefingInterval\.unref\(\)/, "Briefing timers must not keep Desktop alive");
 assert.match(mainRuntime, /body: "One found something that may need your attention\. Open Agentlas to review it\."/, "OS notification copy must remain generic and privacy-safe");
 assert.match(mainRuntime, /notification\.on\("click"[\s\S]*openOneFromNotification/, "notification clicks must open One through a non-executing navigation path");
-assert.match(shell, /Phone notifications · Coming later[\s\S]*checked=\{false\} disabled|휴대폰 알림 · 준비 중[\s\S]*checked=\{false\} disabled/, "phone notifications must remain a disabled truthful control");
-assert.match(shell, /See why|확인한 이유/, "the second action must remain an evidence-review action in plain language");
-assert.match(shell, /No files or settings will be changed|파일이나 설정은 바꾸지 않아요/, "the evidence review must disclose its no-change boundary in plain language");
+assert.match(shell, /one\.shell\.briefing\.phone_label[\s\S]*checked=\{false\} disabled/, "phone notifications must remain a disabled truthful control");
+assert.match(shell, /tFor\(appLocale, "one\.shell\.briefing\.why_noticed"\)/, "the second action must remain a localized evidence-review action");
+assert.match(shell, /tFor\(appLocale, "one\.shell\.briefing\.files_unchanged"\)/, "the evidence review must disclose its localized no-change boundary");
 assert.match(briefingActions, /status:\s*"task_reserved"/, "Briefing Task creation must cross a durable reservation boundary");
 assert.match(briefingActions, /status:\s*"start_reserved"/, "Briefing invocation must cross a distinct durable start reservation boundary");
 assert.match(briefingActions, /ownerInstanceId:\s*PROCESS_INSTANCE_ID/, "only the live Main owner may consume a Briefing reservation");
@@ -497,7 +517,8 @@ assert.match(intro, /aria-modal="true"/, "feature intro must expose modal semant
 assert.match(intro, /ArrowRight/, "feature intro must support keyboard navigation");
 assert.match(intro, /querySelectorAll<HTMLElement>/, "feature intro must keep keyboard focus inside the modal");
 assert.doesNotMatch(intro, /Task · 7F3A|정본 Task|canonical Task|영수증/, "the beginner intro must not expose internal task ids, canonical language, or receipts");
-assert.match(intro, /말하면, 필요한 팀이 움직입니다|Say it once\. The right team gets moving/, "the intro must explain One through the user's experience");
+assert.match(intro, /tFor\(locale, "one\.feat\.slide\.work\.title"\)/, "the intro must render its localized user-experience explanation");
+assert.match(i18n, /말하면, 필요한 팀이 움직입니다|Say it once\. The right team gets moving/, "the intro must explain One through the user's experience");
 
 assert.match(shell, /api\.oneActivation\.getState\(\{ platform: "desktop", locale: appLocale \}\)/, "One must load Desktop-first activation authority from Main in the chosen UI language");
 assert.match(shell, /setPref\(appLocale === "ko" \? "en" : "ko"\)/, "One must expose a direct language switch without forcing a trip through Work settings");
@@ -508,15 +529,18 @@ assert.match(shell, /api\.oneActivation\.skip\(/, "activation skip must be an ex
 assert.match(shell, /activationBlocksIntro[\s\S]*"route_ineligible"/, "first-use activation must defer the existing-user feature intro");
 assert.doesNotMatch(activation, /읽기 전용|read-only|온보딩/, "first-use guidance must use everyday language");
 assert.match(shell, /activationBlocked[\s\S]*actionableConfirmations[\s\S]*activeChatIds[\s\S]*selected\?\.status\.value === "failed"/, "activation must yield to live decisions, running Tasks, and errors");
-assert.match(activation, /지금 신경 쓰이는 일 한 가지|one thing that is on your mind/i, "activation must ask for one real concern instead of templates or platform setup");
-assert.match(activation, /먼저 살펴보기만 하고[\s\S]*시작 전에 꼭 물어봅니다|looks first and always asks before changing files or sending anything outside/i, "activation must explain its safe first look without developer language");
-assert.match(activation, /Work로 직접 가기|Go directly to Work/, "activation must provide direct Work navigation");
-assert.match(activation, /소개 건너뛰기|Skip introduction/, "activation must provide an explicit skip");
-assert.match(activation, /모바일 연결 설정 열기|Open mobile connection settings/, "the verified first value may offer the real mobile settings route");
-assert.match(activation, /연결하지 않아도 One은 계속 사용할 수|keep using One without pairing/, "mobile pairing must remain optional");
+assert.match(activation, /tFor\(locale, "one\.act\.title_concern"\)/, "activation must render its localized real-concern prompt");
+assert.match(i18n, /지금 신경 쓰이는 일 한 가지|one thing that is on your mind/i, "activation must ask for one real concern instead of templates or platform setup");
+assert.match(activation, /tFor\(locale, "one\.act\.body_concern"\)/, "activation must render the localized safe-first-look explanation");
+assert.match(i18n, /먼저 살펴보기만 하고[\s\S]*시작 전에 꼭 물어봅니다|looks first and always asks before changing files or sending anything outside/i, "activation must explain its safe first look without developer language");
+assert.match(activation, /tFor\(locale, "one\.act\.go_work"\)/, "activation must provide localized direct Work navigation");
+assert.match(activation, /tFor\(locale, "one\.act\.skip_intro"\)/, "activation must provide a localized explicit skip");
+assert.match(activation, /tFor\(locale, "one\.act\.open_mobile"\)/, "the verified first value may offer the localized real mobile settings route");
+assert.match(activation, /tFor\(locale, "one\.act\.value_body"\)/, "mobile pairing optionality must be rendered from the locale catalog");
+assert.match(i18n, /연결하지 않아도 One은 계속 사용할 수|keep using One without pairing/, "mobile pairing must remain optional");
 assert.doesNotMatch(activation, /localStorage|sessionStorage/, "activation renderer must never own completion state");
 assert.match(activationCss, /min-height:\s*44px/, "activation controls must meet the 44px accessibility target");
-assert.match(activationCss, /background:\s*#fff/, "activation must preserve the minimal white One surface");
+assert.match(activationCss, /background:\s*#0b1715/, "activation must preserve the mint-charcoal One surface");
 assert.match(activationContract, /completionReason:\s*"verified_first_value" \| "explicit_skip" \| null/, "only verified first value or explicit skip may complete activation");
 assert.doesNotMatch(activationContract, /(?:prompt|concernText|rawText|filePath|localPath)\??:/i, "activation state must not accept raw concern, prompt, file, or path values");
 assert.match(activationRuntime, /hasPreexistingActivity/, "Main must classify first-use eligibility from durable activity");
@@ -530,7 +554,8 @@ assert.match(productMenu, /href="\/one"/, "product switch must expose One");
 assert.match(productMenu, /href="\/dashboard"/, "product switch must preserve Work");
 assert.match(productMenu, /aria-haspopup="menu"/, "product switch must expose accessible menu semantics");
 assert.doesNotMatch(productMenu, /개인 비서실장|Personal chief of staff/, "the One product switch must not force a persona label under the product name");
-assert.match(shell, /이전 결과를 참고해 이 대화에서 이어서 진행해요/, "legacy continuation details must collapse into a same-conversation sentence");
+assert.match(shell, /tFor\(detectOneTextLocale\(message\.text\) === "ko" \? "ko" : "en", "one\.shell\.continuation\.body"\)/, "legacy continuation details must render through localized copy");
+assert.match(i18n, /이전 결과를 참고해 이 대화에서 이어서 진행해요/, "legacy continuation details must collapse into a same-conversation sentence");
 
 assert.match(workChat, /requestedTaskId\s*=\s*searchParams\.get\("task"\)/, "Work must preserve the requested canonical Task identity");
 assert.match(workChat, /api\.tasks\.get\(requestedTaskId\)/, "Work must resolve Task deep links through Main before loading a chat");

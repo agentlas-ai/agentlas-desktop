@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const workforceProtocolContract = require("../electron/mcp-tools/workforce-protocol-contract.json");
 
 const appArgument = process.argv.slice(2).find((arg) => arg.startsWith("--app="));
@@ -29,6 +30,19 @@ function pythonArtifacts(directory) {
     if (entry.isDirectory()) return pythonArtifacts(absolute);
     return entry.name.endsWith(".pyc") ? [absolute] : [];
   });
+}
+
+function assertReadOnlyTree(directory) {
+  const entries = fs.readdirSync(directory, { withFileTypes: true });
+  const rootStat = fs.lstatSync(directory);
+  assert.equal(rootStat.mode & 0o222, 0, `signed runtime directory is writable: ${directory}`);
+  for (const entry of entries) {
+    const absolute = path.join(directory, entry.name);
+    const stat = fs.lstatSync(absolute);
+    if (stat.isSymbolicLink()) continue;
+    assert.equal(stat.mode & 0o222, 0, `signed runtime entry is writable: ${absolute}`);
+    if (stat.isDirectory()) assertReadOnlyTree(absolute);
+  }
 }
 
 async function withTimeout(promise, ms, label) {
@@ -156,6 +170,37 @@ async function probePackagedWorkforceMcp({ python, runtimeRoot, isolatedHome, ma
     // after all caller/process environment merging.
     process.env.PYTHONDONTWRITEBYTECODE = "";
     process.env.PYTHONPYCACHEPREFIX = path.join(runtimeRoot, "forbidden-cache");
+
+    if (signedApp && process.platform === "darwin") {
+      assertReadOnlyTree(runtimeRoot);
+      assertReadOnlyTree(pythonRoot);
+      // Exercise the exact bypass that corrupted v0.8.58: invoke packaged
+      // Python directly without either cache environment guard. Filesystem
+      // sealing must keep both the Core source and Python stdlib immutable.
+      const direct = spawnSync(
+        packagedPython,
+        ["-c", "import agentlas_cloud, ontology; print('direct-import-ok')"],
+        {
+          cwd: tempDir,
+          encoding: "utf8",
+          timeout: 30_000,
+          env: {
+            HOME: isolatedHome,
+            USERPROFILE: isolatedHome,
+            HEPHAESTUS_RUNTIME_ROOT: runtimeRoot,
+            PYTHONPATH: runtimeRoot,
+            PYTHONUTF8: "1",
+          },
+        },
+      );
+      assert.equal(direct.status, 0, direct.error?.message || direct.stderr);
+      assert.match(direct.stdout, /direct-import-ok/);
+      assert.deepEqual(
+        pythonArtifacts(resourcesRoot),
+        [],
+        "direct unguarded Python import mutated signed Resources",
+      );
+    }
 
     await probePackagedWorkforceMcp({
       python: packagedPython,

@@ -97,12 +97,12 @@ function setupUpdaterUiBridge(payload) {
   };
 }
 
-async function newUpdaterContext(browser, setupSource, initialState) {
+async function newUpdaterContext(browser, setupSource, initialState, locale = "ko") {
   const context = await browser.newContext({ viewport: { width: 1440, height: 980 } });
   await context.addInitScript(setupUpdaterUiBridge, {
     setupSource,
     baseOptions: { teamRoster: true },
-    locale: "ko",
+    locale,
     initialState,
   });
   return context;
@@ -132,15 +132,13 @@ async function main() {
       version: "0.7.29",
       code: "install-not-owned",
       canRetry: false,
-      manualDownloadUrl: "https://agentlas.cloud/desktop",
     });
     const manualPage = await manualContext.newPage();
     watch(manualPage);
     await manualPage.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
     const manualAlert = manualPage.locator('.sidenav-update-card[role="alert"]');
     await manualAlert.getByText("자동 업데이트를 안전하게 중단했습니다", { exact: true }).waitFor();
-    await manualAlert.getByRole("button", { name: "공식 설치" }).click();
-    assert.deepEqual(await manualPage.evaluate(() => window.__updaterUi.calls), ["openManualDownload"]);
+    assert.equal(await manualAlert.getByRole("button").count(), 0, "a blocked update must not force a website reinstall");
     await manualPage.screenshot({ path: path.join(outDir, "manual-required-banner.png"), fullPage: true });
     await manualPage.goto(`${baseUrl}/settings.html`, { waitUntil: "domcontentloaded" });
     await manualPage.waitForTimeout(800);
@@ -149,29 +147,66 @@ async function main() {
       throw new Error(`manual settings status missing; renderer errors=${JSON.stringify(errors)}; visible text: ${settingsBody.slice(0, 1200)}`);
     }
     await manualPage.getByText(/자동 설치를 안전하게 완료하지 않아 기존 앱과 로컬 데이터를 그대로 유지했습니다/).waitFor({ timeout: 5000 });
-    await manualPage.getByRole("button", { name: "공식 설치 파일" }).last().waitFor();
+    assert.equal(await manualPage.getByRole("button", { name: "공식 설치 파일" }).count(), 0);
     await manualPage.screenshot({ path: path.join(outDir, "manual-required-settings.png"), fullPage: true });
     await manualContext.close();
 
     const untrustedContext = await newUpdaterContext(browser, setupSource, {
       status: "manual-required",
-      version: "0.8.33",
+      version: "0.8.60",
       code: "install-source-untrusted",
-      canRetry: false,
-      manualDownloadUrl: "https://agentlas.cloud/desktop",
+      canRetry: true,
     });
     const untrustedPage = await untrustedContext.newPage();
     watch(untrustedPage);
     await untrustedPage.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
     const untrustedAlert = untrustedPage.locator('.sidenav-update-card[role="alert"]');
-    await untrustedAlert.getByText("자동 업데이트 복구가 필요합니다", { exact: true }).waitFor();
-    await untrustedAlert.getByRole("button", { name: "공식 앱 복구" }).click();
-    assert.deepEqual(await untrustedPage.evaluate(() => window.__updaterUi.calls), ["openManualDownload"]);
+    await untrustedAlert.getByText("앱 내부 복구가 필요합니다", { exact: true }).waitFor();
+    const visibleUpdateCopies = untrustedAlert.locator(".sidenav-update-copy strong, .sidenav-update-copy span");
+    for (let index = 0; index < await visibleUpdateCopies.count(); index += 1) {
+      const copy = visibleUpdateCopies.nth(index);
+      const layout = await copy.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          whiteSpace: style.whiteSpace,
+          textOverflow: style.textOverflow,
+          overflow: style.overflow,
+          scrollWidth: element.scrollWidth,
+          clientWidth: element.clientWidth,
+        };
+      });
+      assert.notEqual(layout.whiteSpace, "nowrap", `update copy ${index} must wrap instead of truncating`);
+      assert.notEqual(layout.textOverflow, "ellipsis", `update copy ${index} must not use ellipsis`);
+      assert.ok(layout.scrollWidth <= layout.clientWidth + 1, `update copy ${index} must fit its visible width`);
+    }
+    await untrustedAlert.getByRole("button", { name: "다시 시도" }).click();
+    assert.deepEqual(await untrustedPage.evaluate(() => window.__updaterUi.calls), ["check"]);
+    await untrustedPage.screenshot({ path: path.join(outDir, "important-reinstall-banner.png"), fullPage: true });
     await untrustedPage.goto(`${baseUrl}/settings.html`, { waitUntil: "domcontentloaded" });
-    await untrustedPage.getByText(/공식 Developer ID 계보가 아닌 앱에서 실행 중이라 자동 업데이트를 격리했습니다/).waitFor();
-    await untrustedPage.getByRole("button", { name: "공식 앱으로 복구" }).waitFor();
+    await untrustedPage
+      .getByRole("main")
+      .getByText("앱 내부 복구를 완료하지 못했습니다. 다시 시도하면 안전하게 복구한 뒤 업데이트를 이어갑니다.", { exact: true })
+      .waitFor();
+    await untrustedPage
+      .getByRole("main")
+      .getByRole("button", { name: "다시 시도" })
+      .waitFor();
     await untrustedPage.screenshot({ path: path.join(outDir, "untrusted-install-source.png"), fullPage: true });
     await untrustedContext.close();
+
+    const untrustedEnglishContext = await newUpdaterContext(browser, setupSource, {
+      status: "manual-required",
+      version: "0.8.60",
+      code: "install-source-untrusted",
+      canRetry: true,
+    }, "en");
+    const untrustedEnglishPage = await untrustedEnglishContext.newPage();
+    watch(untrustedEnglishPage);
+    await untrustedEnglishPage.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
+    const untrustedEnglishAlert = untrustedEnglishPage.locator('.sidenav-update-card[role="alert"]');
+    await untrustedEnglishAlert.getByText("In-app repair is required", { exact: true }).waitFor();
+    await untrustedEnglishAlert.getByRole("button", { name: "Retry" }).waitFor();
+    await untrustedEnglishContext.close();
 
     const lifecycleContext = await newUpdaterContext(browser, setupSource, {
       status: "downloading",
@@ -257,8 +292,7 @@ async function main() {
     const missingRecoveryPage = await missingRecoveryContext.newPage();
     watch(missingRecoveryPage);
     await missingRecoveryPage.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
-    await missingRecoveryPage.getByRole("button", { name: "공식 설치" }).click();
-    assert.deepEqual(await missingRecoveryPage.evaluate(() => window.__updaterUi.calls), ["openManualDownload"]);
+    assert.equal(await missingRecoveryPage.locator('.sidenav-update-card[role="alert"]').getByRole("button").count(), 0, "missing recovery data must not route users to a website reinstall");
     await missingRecoveryPage.screenshot({ path: path.join(outDir, "recovery-missing-fallback.png"), fullPage: true });
     await missingRecoveryContext.close();
 

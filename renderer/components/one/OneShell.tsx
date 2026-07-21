@@ -66,6 +66,7 @@ import type {
   OneActivationState,
 } from "@shared/one-activation";
 import type { OneSurfaceManifestV1 } from "@shared/one-surface";
+import { customerSafeProgressDetail, toCustomerSafeText } from "@shared/one-customer-safe";
 import { classifyOneRequestIntent } from "@shared/one-request-intent";
 import type { OneRecurrenceSelectionV1 } from "@shared/one-recurrence";
 import { shouldPresentOneWeeklyReflection } from "@shared/one-weekly-reflection";
@@ -215,9 +216,13 @@ function visibleOneMessageText(message: UiMessage): string {
   // Host/router worker banners are useful in operator logs, not in a personal
   // chief-of-staff conversation. Strip every standalone banner line because a
   // resumed provider turn can insert one after an introductory sentence.
-  return withoutFence
+  const banded = withoutFence
     .replace(/^\s*(?:\*\*)?(?:사용\s*(?:에이전트|스킬)|Agents used|Skills used)(?:\*\*)?\s*:\s*[^\n]*(?:\n[ \t]*)*/gim, "")
     .trim();
+  // Final customer-safe pass: a leaked result-schema line ("structured result",
+  // "safe One Surface", a CLI/session token) must never reach the reader even
+  // when it arrives through a model or legacy synthesis path.
+  return toCustomerSafeText(banded, detectOneTextLocale(banded) === "ko" ? "ko" : "en");
 }
 
 function upsertLiveMessage(messages: UiMessage[], text: string, streaming: boolean): UiMessage[] {
@@ -819,14 +824,14 @@ export function OneShell() {
     setRunProgress((current) => reduceOneRunProgress(current, event));
     if (event.agentId && event.phase !== "synthesize") {
       if (!taskId) void reconcileConversationTask(chatId);
-      if (event.status) setRunStatus(event.agentName ? `${event.agentName} · ${event.status}` : event.status);
+      // One presents as a single chief-of-staff. Never leak the borrowed agent
+      // name or its raw runtime status (CLI/session) onto the customer surface.
+      if (event.status) setRunStatus(customerSafeProgressDetail(event.status));
       return;
     }
     if (event.kind === "thinking" || event.kind === "tool-use") {
       if (!taskId && event.kind === "tool-use") void reconcileConversationTask(chatId);
-      if (event.status && !/scope-lock|stormbreaker loop|agentlas 오케스트레이터/i.test(event.status)) {
-        setRunStatus(event.status);
-      }
+      if (event.status) setRunStatus(customerSafeProgressDetail(event.status));
       return;
     }
     if (event.kind === "partial") {
@@ -855,7 +860,8 @@ export function OneShell() {
       return;
     }
     if (event.kind === "error") {
-      const message = event.error?.message || tFor(appLocale, "one.shell.run.stopped_before_completion");
+      const message = toCustomerSafeText(event.error?.message ?? "", appLocale)
+        || tFor(appLocale, "one.shell.run.stopped_before_completion");
       setMessages((current) => [...current.filter((item) => item.id !== "one-live-response"), { id: uid(), role: "system", text: message }]);
       setBusy(false);
       setRunStatus("");
@@ -2302,7 +2308,7 @@ export function OneShell() {
                     <strong>{oneRunStageLabel(runProgress.current, appLocale)}</strong>
                     <small>
                       {runProgress.participantNames.length > 0
-                        ? tFor(appLocale, "one.shell.thread.participants", { names: runProgress.participantNames.join(" · ") })
+                        ? tFor(appLocale, "one.shell.thread.coordinating", { count: String(runProgress.participantNames.length) })
                         : tFor(appLocale, "one.shell.thread.working_directly")}
                     </small>
                     {runStatus && <span className={styles.runStatusDetail}>{runStatus}</span>}

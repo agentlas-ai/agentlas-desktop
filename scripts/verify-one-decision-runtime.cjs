@@ -173,13 +173,15 @@ function verifyWiring() {
   const css = read("renderer/components/one/OneShell.module.css");
   const ipc = read("electron/ipc.ts");
   const preload = read("electron/preload.ts");
+  const i18n = read("renderer/lib/i18n.tsx");
   assert.match(shell, /normalizeOneDecision\(confirmation, taskId\)/, "One must render the closed normalized Decision view");
   assert.match(shell, /approvalBlocked/, "unstructured high-risk approvals need a visible fail-closed guard");
   assert.match(shell, /decision\.controls\.reject\.reply/, "every Decision must keep an explicit reject path");
   assert.match(shell, /onOpenWork/, "every Decision must keep a modification path into Work");
   assert.match(shell, /api\.confirm\.snooze/, "later must persist through Main instead of local component state");
   assert.match(shell, /api\.confirm\.committedAnswers/, "resolved Decisions must restore from the durable answer receipt");
-  assert.match(shell, /거절과 나중에 결정은 승인이나 외부 실행을 시작하지 않습니다|Rejecting or deciding later does not approve or start an external action/, "a resolved Decision must not claim the external action succeeded");
+  assert.match(shell, /decisionRejectCopy\(locale\)/, "resolved Decision copy must pass through the localized catalog fallback");
+  assert.match(i18n, /거절과 나중에 결정은 승인이나 외부 실행을 시작하지 않습니다|Rejecting or deciding later does not approve or start an external action/, "a resolved Decision must not claim the external action succeeded");
   assert.doesNotMatch(shell, /confirmation\.options\.map\(\(option\) => <button/, "raw model options must not bypass normalization");
   assert.match(css, /min-height:\s*44px/, "Decision controls must preserve a 44px target");
   assert.match(ipc, /confirm:snooze/);

@@ -23,6 +23,9 @@ const {
   captureUpdaterContinuity,
   verifyUpdaterContinuity,
 } = require("../dist/electron/updater/continuity.js");
+const {
+  createAutomaticQuitInstaller,
+} = require("../dist/electron/updater/automatic-quit-install.js");
 const { preflightUpdaterStartup } = require("../dist/electron/updater.js");
 
 for (const requiredOntologyContinuityTable of ["run_events", "failure_events", "installed_agent_hub_bindings", "taste_draft_candidates", "taste_chip_workflows"]) {
@@ -155,7 +158,6 @@ function installJournal(snapshot) {
 function makeController(layout, updater, options = {}) {
   const states = [];
   const revealed = [];
-  const opened = [];
   const continuity = mockContinuity(layout);
   const controller = new DesktopUpdaterController({
     updater,
@@ -169,11 +171,11 @@ function makeController(layout, updater, options = {}) {
     runtimeVersion: () => options.runtimeVersion === undefined ? "1.1.12" : options.runtimeVersion,
     databaseSchemaVersion: () => options.databaseSchemaVersion === undefined ? 51 : options.databaseSchemaVersion,
     inspectInstalledAppTrust: options.inspectInstalledAppTrust || (async () => ({ ok: true })),
+    repairInstalledAppTrust: options.repairInstalledAppTrust,
     quiesceWriters: options.quiesceWriters,
     captureContinuity: options.captureContinuity || continuity.capture,
     verifyContinuity: options.verifyContinuity || (async () => ({ ok: true, violations: [] })),
     broadcast: (state) => states.push(structuredClone(state)),
-    openExternal: async (url) => opened.push(url),
     revealPath: (filePath) => revealed.push(filePath),
     schedule: false,
     now: options.now || (() => 1_800_000_000_000),
@@ -186,7 +188,7 @@ function makeController(layout, updater, options = {}) {
     nativeInstallRetryBaseDelayMs: options.nativeInstallRetryBaseDelayMs,
     logger: { log() {}, warn() {}, error() {} },
   });
-  return { controller, states, revealed, opened, continuity };
+  return { controller, states, revealed, continuity };
 }
 
 function seedStaleMacInstallState(layout) {
@@ -195,10 +197,28 @@ function seedStaleMacInstallState(layout) {
   fs.mkdirSync(path.join(updaterCache, "pending"), { recursive: true });
   fs.writeFileSync(path.join(updaterCache, "pending", "update-info.json"), "{}");
   fs.writeFileSync(path.join(updaterCache, "update.zip"), "stale");
-  fs.mkdirSync(path.join(shipIt, "update.missing"), { recursive: true });
+  const sealedRuntime = path.join(shipIt, "update.missing", "Agentlas.app", "Contents", "Resources", "Hephaestus");
+  fs.mkdirSync(sealedRuntime, { recursive: true });
   fs.writeFileSync(path.join(shipIt, "ShipItState.plist"), "stale-update-path");
-  fs.writeFileSync(path.join(shipIt, "update.missing", "ghost"), "ghost");
+  const sealedFile = path.join(sealedRuntime, "module.py");
+  fs.writeFileSync(sealedFile, "# sealed staged runtime\n");
+  fs.chmodSync(sealedFile, 0o444);
+  for (const directory of [
+    sealedRuntime,
+    path.dirname(sealedRuntime),
+    path.dirname(path.dirname(sealedRuntime)),
+    path.dirname(path.dirname(path.dirname(sealedRuntime))),
+    path.join(shipIt, "update.missing"),
+  ]) fs.chmodSync(directory, 0o555);
   return { updaterCache, shipIt };
+}
+
+function restoreWritableTestTree(target) {
+  if (!fs.existsSync(target)) return;
+  const stat = fs.lstatSync(target);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) return;
+  fs.chmodSync(target, stat.mode | 0o700);
+  for (const entry of fs.readdirSync(target)) restoreWritableTestTree(path.join(target, entry));
 }
 
 async function rootOwnedOfficialBundleUsesNativeAuthorizationBoundary() {
@@ -236,13 +256,34 @@ async function untrustedMacSourceFailsClosedBeforeDownloadAndNonMacIsUnaffected(
   const blocked = await mac.controller.check();
   assert.equal(blocked.status, "manual-required");
   assert.equal(blocked.code, "install-source-untrusted");
-  assert.equal(blocked.canRetry, false);
-  assert.equal(blocked.manualDownloadUrl, "https://agentlas.cloud/desktop");
+  assert.equal(blocked.canRetry, true);
+  assert.equal(blocked.manualDownloadUrl, undefined);
   assert.deepEqual(blocked.diagnostic, diagnostic);
   assert.equal(macUpdater.downloadCount, 0, "Apple Distribution/ad-hoc/local source must fail before payload download");
   assert.doesNotMatch(JSON.stringify(blocked), /\/Applications\/|token|secret/i);
   mac.controller.dispose();
   fs.rmSync(macLayout.root, { recursive: true, force: true });
+
+  const repairLayout = makeLayout();
+  const repairUpdater = new FakeUpdater({ updateInfo: { version: "0.7.29", agentlasCompatibility: compatibility } });
+  let trustInspections = 0;
+  let repairs = 0;
+  const repaired = makeController(repairLayout, repairUpdater, {
+    inspectInstalledAppTrust: async () => {
+      trustInspections += 1;
+      return trustInspections === 1
+        ? { ok: false, diagnostic: { category: "source-seal", message: "The running app has the official identity, but its signed contents changed after packaging." } }
+        : { ok: true };
+    },
+    repairInstalledAppTrust: async () => { repairs += 1; return true; },
+  });
+  await repaired.controller.init();
+  assert.equal((await repaired.controller.check()).status, "downloaded");
+  assert.equal(repairs, 1, "known generated-cache seal damage must be repaired inside the app");
+  assert.equal(trustInspections, 2, "the official app seal must be reverified after repair");
+  assert.equal(repairUpdater.downloadCount, 1, "a successfully repaired source must continue the normal updater path");
+  repaired.controller.dispose();
+  fs.rmSync(repairLayout.root, { recursive: true, force: true });
 
   for (const platform of ["win32", "linux"]) {
     const layout = makeLayout();
@@ -437,6 +478,7 @@ async function undeletableLegacyStatePausesAutomaticUpdates() {
   assert.equal(updater.checkCount, 0);
   assert.equal(updater.downloadCount, 0);
   controller.dispose();
+  restoreWritableTestTree(layout.root);
   fs.rmSync(layout.root, { recursive: true, force: true });
 }
 
@@ -792,19 +834,14 @@ async function compatibilityBoundariesFailBeforeDownload() {
   for (const testCase of cases) {
     const layout = makeLayout();
     const updater = new FakeUpdater({ updateInfo: testCase.info });
-    const { controller, opened } = makeController(layout, updater, testCase.options);
+    const { controller } = makeController(layout, updater, testCase.options);
     await controller.init();
     const state = await controller.check();
     assert.equal(state.status, "incompatible", testCase.label);
     assert.equal(state.code, testCase.code, testCase.label);
     assert.equal(updater.downloadCount, 0, `${testCase.label}: incompatible releases must not download`);
-    if (testCase.code === "minimum-app-version" || testCase.code === "minimum-runtime-version") {
-      assert.equal(state.manualDownloadUrl, "https://agentlas.cloud/desktop");
-    } else {
-      assert.equal(state.manualDownloadUrl, undefined, `${testCase.label}: unsafe same-release installer must not be offered`);
-      assert.equal((await controller.openManualDownload()).accepted, false);
-      assert.deepEqual(opened, [], `${testCase.label}: main must reject a renderer attempt to bypass the compatibility gate`);
-    }
+    assert.equal(state.manualDownloadUrl, undefined, `${testCase.label}: update failures must never force a website reinstall`);
+    assert.equal((await controller.openManualDownload()).accepted, false);
     controller.dispose();
     fs.rmSync(layout.root, { recursive: true, force: true });
   }
@@ -1591,6 +1628,129 @@ async function v53HubBookmarkKeyMigrationIsNarrowlyApproved() {
   fs.rmSync(layout.root, { recursive: true, force: true });
 }
 
+async function downloadedUpdateInstallsAutomaticallyOnNormalQuit() {
+  let state = { status: "idle" };
+  let installCount = 0;
+  let prepareCount = 0;
+  let quitCount = 0;
+  let preventCount = 0;
+  const warnings = [];
+  const listeners = new Set();
+  const setState = (next) => {
+    state = next;
+    for (const listener of listeners) listener(state);
+  };
+  const event = { preventDefault: () => { preventCount += 1; } };
+  const installer = createAutomaticQuitInstaller({
+    getState: () => state,
+    prepare: async () => { prepareCount += 1; },
+    install: async () => {
+      installCount += 1;
+      setState({ status: "installing", version: "0.8.61" });
+      return { accepted: true, state };
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    quit: () => { quitCount += 1; },
+    logger: { warn: (message) => warnings.push(message) },
+  });
+
+  assert.equal(installer.handle(event), false, "normal quits must be untouched when no update is ready");
+  assert.equal(preventCount, 0);
+
+  state = { status: "downloaded", version: "0.8.61", progress: 100 };
+  assert.equal(installer.handle(event), true, "a downloaded update must defer the first normal quit");
+  assert.equal(preventCount, 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prepareCount, 1, "external writers must stop before continuity capture");
+  assert.equal(installCount, 1, "the deferred quit must invoke the continuity-protected installer once");
+  assert.equal(quitCount, 0, "an accepted native handoff owns the follow-up quit");
+  assert.equal(warnings.length, 0);
+  assert.equal(installer.handle(event), true, "a second user quit must remain blocked before native authorization");
+  assert.equal(installCount, 1, "rapid duplicate quit must coalesce into the original install");
+  installer.authorizeNativeQuit();
+  assert.equal(
+    installer.handle(event),
+    false,
+    "the explicitly authorized native updater quit must pass without recursion",
+  );
+
+  state = { status: "downloaded", version: "0.8.62", progress: 100 };
+  const failedInstaller = createAutomaticQuitInstaller({
+    getState: () => state,
+    install: async () => {
+      installCount += 1;
+      state = { status: "manual-required", version: "0.8.62", code: "continuity-backup-failed" };
+      return { accepted: false, state };
+    },
+    quit: () => { quitCount += 1; },
+    logger: { warn: (message) => warnings.push(message) },
+  });
+  assert.equal(failedInstaller.handle(event), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(quitCount, 1, "a failed safety preparation must resume the user's original quit");
+  state = { status: "downloaded", version: "0.8.62", progress: 100 };
+  assert.equal(
+    failedInstaller.handle(event),
+    false,
+    "the resumed quit must bypass one automatic retry instead of trapping the user",
+  );
+  assert.match(warnings.at(-1), /continuing normal quit/);
+
+  let lateState = { status: "downloaded", version: "0.8.64", progress: 100 };
+  let lateQuitCount = 0;
+  const lateListeners = new Set();
+  const lateInstaller = createAutomaticQuitInstaller({
+    getState: () => lateState,
+    install: async () => {
+      lateState = { status: "installing", version: "0.8.64", progress: 100 };
+      for (const listener of lateListeners) listener(lateState);
+      return { accepted: true, state: lateState };
+    },
+    subscribe: (listener) => {
+      lateListeners.add(listener);
+      return () => lateListeners.delete(listener);
+    },
+    quit: () => { lateQuitCount += 1; },
+    logger: { warn: (message) => warnings.push(message) },
+  });
+  assert.equal(lateInstaller.handle(event), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  lateState = { status: "manual-required", version: "0.8.64", code: "install-start-failed" };
+  for (const listener of lateListeners) listener(lateState);
+  assert.equal(lateQuitCount, 1, "a watchdog/native failure after accepted handoff must resume the original quit");
+  assert.equal(lateInstaller.handle(event), false, "the resumed quit must pass exactly once after a late failure");
+
+  let prepareQuitCount = 0;
+  state = { status: "downloaded", version: "0.8.65", progress: 100 };
+  const prepareFailedInstaller = createAutomaticQuitInstaller({
+    getState: () => state,
+    prepare: async () => { throw new Error("writer still active"); },
+    install: async () => { throw new Error("install must not run after prepare failure"); },
+    quit: () => { prepareQuitCount += 1; },
+  });
+  assert.equal(prepareFailedInstaller.handle(event), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prepareQuitCount, 1, "an undrained writer must skip update and preserve the normal quit");
+
+  state = { status: "downloaded", version: "0.8.63", progress: 100 };
+  const shutdownInstaller = createAutomaticQuitInstaller({
+    getState: () => state,
+    install: async () => {
+      throw new Error("must not run during OS shutdown");
+    },
+    quit: () => { quitCount += 1; },
+    shouldInstallOnQuit: () => false,
+  });
+  assert.equal(
+    shutdownInstaller.handle(event),
+    false,
+    "OS shutdown must bypass update installation and relaunch",
+  );
+}
+
 (async () => {
   await rootOwnedOfficialBundleUsesNativeAuthorizationBoundary();
   await untrustedMacSourceFailsClosedBeforeDownloadAndNonMacIsUnaffected();
@@ -1613,7 +1773,8 @@ async function v53HubBookmarkKeyMigrationIsNarrowlyApproved() {
   await nativeInstallWatchdogRestoresWritersAndSourceIsRecheckedBeforeHandoff();
   await realSqliteContinuityBackupIsVerifiedAndSecretSafe();
   await v53HubBookmarkKeyMigrationIsNarrowlyApproved();
-  console.log("test-updater-production-contract: PASS (source lineage, native retry/watchdog, nonMac parity, rollback continuity)");
+  await downloadedUpdateInstallsAutomaticallyOnNormalQuit();
+  console.log("test-updater-production-contract: PASS (source lineage, safe auto-install-on-quit, native retry/watchdog, nonMac parity, rollback continuity)");
   clearTimeout(watchdog);
   app.exit(0);
 })().catch((error) => {

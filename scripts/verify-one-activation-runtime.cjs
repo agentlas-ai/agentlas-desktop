@@ -390,6 +390,7 @@ function verifyWiring() {
   const preload = read("electron/preload.ts");
   const shell = read("renderer/components/one/OneShell.tsx");
   const component = read("renderer/components/one/OneActivation.tsx");
+  const i18n = read("renderer/lib/i18n.tsx");
   const css = read("renderer/components/one/OneActivation.module.css");
   const mobile = read("electron/mobile-bridge/authority.ts");
   assert.match(ipc, /oneActivation:getState/);
@@ -416,10 +417,18 @@ function verifyWiring() {
   assert.match(shell, /taskMode:\s*"conversation"/);
   assert.match(shell, /resolveActivationConcern\(chat\.id\)/);
   assert.doesNotMatch(shell, /oneActivation[\s\S]{0,160}(?:prompt|userPrompt|rawText|localPath)\s*:/i);
-  assert.match(component, /파일 변경이나 외부 전송은 시작 전에 꼭 물어봅니다|always asks before changing files or sending anything outside/);
-  assert.match(component, /Work로 직접 가기|Go directly to Work/);
-  assert.match(component, /소개 건너뛰기|Skip introduction/);
-  assert.match(component, /모바일 연결 설정 열기|Open mobile connection settings/);
+  assert.match(component, /tFor\(locale, "one\.act\.body_concern"\)/);
+  assert.match(component, /tFor\(locale, "one\.act\.go_work"\)/);
+  assert.match(component, /tFor\(locale, "one\.act\.skip_intro"\)/);
+  assert.match(component, /tFor\(locale, "one\.act\.open_mobile"\)/);
+  assert.match(i18n, /파일 변경이나 외부 전송은 시작 전에 꼭 물어봅니다/);
+  assert.match(i18n, /always asks before changing files or sending anything outside/);
+  assert.match(i18n, /Work로 직접 가기/);
+  assert.match(i18n, /Go directly to Work/);
+  assert.match(i18n, /소개 건너뛰기/);
+  assert.match(i18n, /Skip introduction/);
+  assert.match(i18n, /모바일 연결 설정 열기/);
+  assert.match(i18n, /Open mobile connection settings/);
   assert.match(css, /min-height:\s*44px/);
 }
 

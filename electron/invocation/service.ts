@@ -413,7 +413,7 @@ function recordObservableRunStep(
         : "A runtime tool step started.";
   } else if (event.kind === "surface") {
     status = "completed";
-    publicSafeSummary = "A structured result manifest was produced.";
+    publicSafeSummary = "Your result is ready.";
   } else if (event.agentId && event.phase) {
     status = event.done ? "completed" : "running";
     publicSafeSummary = event.done
@@ -1213,8 +1213,8 @@ export class InvocationService {
             ...(!event.oneSurface
               ? {
                   status: pickLocale(runReq) === "ko"
-                    ? "구조화 결과가 안전한 One Surface로 검증되지 않아 표시하지 않았습니다."
-                    : "The structured result was not displayed because it did not validate as a safe One Surface.",
+                    ? "결과를 안전하게 마무리하지 못했어요. 아래에서 다시 시도해 달라고 말해 주세요."
+                    : "I couldn't finish preparing this result safely. Ask me to try again below and I'll continue.",
                 }
               : {}),
           };
