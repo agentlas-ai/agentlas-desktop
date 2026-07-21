@@ -30,6 +30,12 @@
   beta cut with a source guard over the One display paths. The One suite is
   realigned to assert the new customer-safe copy.
 
+### Runtime
+
+- This release binds Agentlas OS v1.1.56, pinned at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.8.61 — 2026-07-21
 
 ### Changed

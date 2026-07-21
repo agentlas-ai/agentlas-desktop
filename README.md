@@ -82,8 +82,9 @@ authority for which version is actually public, stable, and downloadable.
   behavioral-plus-source regression (`verify-one-customer-safe-copy`) guards the
   exact leaks captured in the official v2 beta cut, and the One suite is realigned
   to the customer-safe copy. This addresses beta feedback items #1, #2, #3, and #7.
-  This source does not prove a Desktop Git tag, public installer, GitHub release,
-  or update feed.
+  This release binds Agentlas OS v1.1.56, pinned at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
 
 - **2026-07-21 · v0.8.61 — in-app update recovery and verified One onboarding** —
   The AI brain button now serializes its provider state before runtime detection,
