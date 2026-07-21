@@ -10,6 +10,35 @@ import type {
 } from "@/lib/types";
 import styles from "./OneSuggestionCard.module.css";
 
+type SuggestionFallbackKey =
+  | "one.sug.prev.external_val"
+  | "one.sug.auto.disclaimer"
+  | "one.sug.hub.box_strong"
+  | "one.sug.hub.box_span"
+  | "one.sug.hub.box_small";
+
+const SUGGESTION_FALLBACKS: Record<SuggestionFallbackKey, Record<Locale, string>> = {
+  "one.sug.prev.external_val": { ko: "매번 명시적 승인 필요", en: "Explicit approval required every time" },
+  "one.sug.auto.disclaimer": {
+    ko: "이 제안을 검토하는 것만으로 일정이 저장되거나 자동화가 켜지거나 실행되지는 않습니다. 직접 승인하기 전에는 아무것도 시작되지 않습니다.",
+    en: "Reviewing this proposal does not save a schedule, enable automation, or run it. Nothing starts until you approve it yourself.",
+  },
+  "one.sug.hub.box_strong": { ko: "내 파일과 기억은 공개 초안에 넣지 않아요", en: "Your files and memories stay out of the public draft" },
+  "one.sug.hub.box_span": {
+    ko: "공개 설명과 기본 구조만 새로 준비합니다. 고객 자료, 로그인 정보, 내부 문서, 대화 원문은 복사하지 않습니다.",
+    en: "One creates only a new public description and basic structure. Customer data, sign-in information, internal documents, and conversations are not copied.",
+  },
+  "one.sug.hub.box_small": {
+    ko: "게시 권한·내가 올릴 권리·크레딧 기능·수수료는 아직 확인이 필요합니다. 게시 직전에 포함 내용을 다시 보고 직접 승인하며, 수익은 보장되지 않습니다.",
+    en: "Publishing access, your right to publish, credit availability, and fees still need review. You see the included items and approve again before publishing; earnings are not guaranteed.",
+  },
+};
+
+function suggestionCopy(locale: Locale, key: SuggestionFallbackKey): string {
+  const value = tFor(locale, key);
+  return value === key ? SUGGESTION_FALLBACKS[key][locale] : value;
+}
+
 function typeCopy(suggestion: OneEcosystemSuggestion, locale: Locale): {
   eyebrow: string;
   title: string;
@@ -180,15 +209,15 @@ export function OneSuggestionCard({
         <div><dt>{tFor(locale, "one.sug.prev.next_run")}</dt><dd>{formatDate(automation.preview.nextRunAt, locale)}</dd></div>
         <div><dt>{tFor(locale, "one.sug.prev.can_do")}</dt><dd>{permissionLabel(automation.preview.permission, locale)}</dd></div>
         <div><dt>{tFor(locale, "one.sug.prev.stop")}</dt><dd>{automation.preview.stopControl}</dd></div>
-        <div><dt>{tFor(locale, "one.sug.prev.external")}</dt><dd>{tFor(locale, "one.sug.prev.external_val")}</dd></div>
+        <div><dt>{tFor(locale, "one.sug.prev.external")}</dt><dd>{suggestionCopy(locale, "one.sug.prev.external_val")}</dd></div>
       </dl>}
       {automation && <p className={styles.body}>
-        {tFor(locale, "one.sug.auto.disclaimer")}
+        {suggestionCopy(locale, "one.sug.auto.disclaimer")}
       </p>}
       {hub && <div className={styles.boundaryBox}>
-        <strong>{tFor(locale, "one.sug.hub.box_strong")}</strong>
-        <span>{tFor(locale, "one.sug.hub.box_span")}</span>
-        <small>{tFor(locale, "one.sug.hub.box_small")}</small>
+        <strong>{suggestionCopy(locale, "one.sug.hub.box_strong")}</strong>
+        <span>{suggestionCopy(locale, "one.sug.hub.box_span")}</span>
+        <small>{suggestionCopy(locale, "one.sug.hub.box_small")}</small>
       </div>}
 
       <details className={styles.evidence}>

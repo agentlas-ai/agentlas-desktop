@@ -15,6 +15,17 @@ import type {
 } from "@/lib/types";
 import styles from "./OneProfileSheet.module.css";
 
+const PROFILE_SUBTITLE_FALLBACK: Record<Locale, string> = {
+  ko: "여기에 적고 저장한 내용만 다음 대화에도 사용합니다.",
+  en: "Only what you write and save here is used in future conversations.",
+};
+
+function profileSubtitle(locale: Locale): string {
+  const key = "one.prof.subtitle" as const;
+  const value = tFor(locale, key);
+  return value === key ? PROFILE_SUBTITLE_FALLBACK[locale] : value;
+}
+
 interface OneProfileSheetProps {
   open: boolean;
   profile: OneProfile | null;
@@ -240,7 +251,7 @@ export function OneProfileSheet({
           <div>
             <p className={styles.eyebrow}>{tFor(locale, "one.prof.eyebrow")}</p>
             <h2 id="one-profile-title">{tFor(locale, "one.prof.title")}</h2>
-            <p>{tFor(locale, "one.prof.subtitle")}</p>
+            <p>{profileSubtitle(locale)}</p>
           </div>
           <button type="button" className={styles.closeButton} onClick={onClose} disabled={busy} aria-label={tFor(locale, "one.prof.close")}>×</button>
         </header>

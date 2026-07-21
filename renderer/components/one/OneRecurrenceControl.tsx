@@ -11,6 +11,21 @@ import type { OneAutomationPermissionPreview } from "@shared/one-suggestions";
 import { tFor } from "@/lib/i18n";
 import styles from "./OneRecurrenceControl.module.css";
 
+type RecurrenceFallbackKey = "one.rec.sheet.aria" | "one.rec.explainer";
+
+const RECURRENCE_FALLBACKS: Record<RecurrenceFallbackKey, Record<"ko" | "en", string>> = {
+  "one.rec.sheet.aria": { ko: "반복 조건", en: "Repeat conditions" },
+  "one.rec.explainer": {
+    ko: "이건 자동화가 아니에요. 지금은 원하는 반복 방식만 적어 둡니다. 서로 다른 결과 3개를 확인하고 나면 One이 일정으로 만들지 물어봐요. 내가 확인하기 전에는 어떤 일정도 저장되거나 켜지거나 실행되지 않아요.",
+    en: "This is not automation. It only records how you may want the work repeated. After you accept three separate results, One may ask whether to turn it into a schedule. No schedule is saved, enabled, or run until you confirm it.",
+  },
+};
+
+function recurrenceCopy(locale: "ko" | "en", key: RecurrenceFallbackKey): string {
+  const value = tFor(locale, key);
+  return value === key ? RECURRENCE_FALLBACKS[key][locale] : value;
+}
+
 const INTENTS = [
   { value: "briefing", labelKey: "one.rec.intent.briefing" },
   { value: "research", labelKey: "one.rec.intent.research" },
@@ -107,7 +122,7 @@ export function OneRecurrenceControl({
         </span>
       </label>
       {value && (
-        <div className={styles.sheet} role="group" aria-label={tFor(locale, "one.rec.sheet.aria")}>
+        <div className={styles.sheet} role="group" aria-label={recurrenceCopy(locale, "one.rec.sheet.aria")}>
           <div className={styles.fields}>
             <label>
               <span>{tFor(locale, "one.rec.field.intent")}</span>
@@ -173,7 +188,7 @@ export function OneRecurrenceControl({
           </div>
           <p className={styles.stop}><strong>{tFor(locale, "one.rec.stop.title")}</strong>{tFor(locale, "one.rec.stop.body")}</p>
           <p id="one-recurrence-explainer" className={styles.explainer}>
-            {tFor(locale, "one.rec.explainer")}
+            {recurrenceCopy(locale, "one.rec.explainer")}
           </p>
         </div>
       )}

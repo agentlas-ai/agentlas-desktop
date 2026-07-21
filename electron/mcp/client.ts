@@ -1288,7 +1288,8 @@ export async function runMcpInvocation(
   // Freeze conversation state before this turn becomes durable. Every routing
   // decision and model history below must see only earlier turns; otherwise the
   // current request is duplicated as both history and the active user prompt.
-  const priorHistory = req.agentAppMode ? [] : listChatMessages(chat.id, 80);
+  const history = req.agentAppMode ? [] : listChatMessages(chat.id, 80);
+  const priorHistory = history;
   const hadPriorConversationContext = req.agentAppMode
     ? false
     : hasPriorConversationContext(chat.id);
@@ -1904,7 +1905,7 @@ export async function runMcpInvocation(
   // Workforce capability choice belongs to the same top host LLM that owns the
   // roster. The ordinary lexical auto-selector may search/install broad tools,
   // so it is never an authority source for an explicit Workforce execution.
-  if (runtimeCanUseMcp && !oneTeamExecutionPolicy && !req.agentAppMode && canWrite && !explicitWorkforceGoal) {
+  if (runtimeCanUseMcp && !req.agentAppMode && !oneTeamExecutionPolicy && canWrite && !explicitWorkforceGoal) {
     try {
       const selectedContext = await autoSelectMcpTools({
         userPrompt: effectiveUserPrompt,
@@ -2753,8 +2754,6 @@ export async function runMcpInvocation(
   if (isUnattendedExecution(executionContext)) {
     systemPrompt = `${systemPrompt}\n\n${UNATTENDED_NO_ASK_DIRECTIVE}`;
   }
-
-  const history = priorHistory;
 
   // 사용자 메시지 영구화 + 첫 메시지면 제목 자동 생성
   persistUserMessage();

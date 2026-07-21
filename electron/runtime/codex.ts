@@ -371,7 +371,8 @@ export const runCodex: Runner = async (
         : "Codex CLI isolation is verified only with no external tools. This run's MCP grant cannot be admitted.",
     );
   }
-  // Measured on Codex CLI 0.144.4 and again on 0.144.5 (2026-07-17): even with
+  // Codex CLI 0.144.4 still exposes collaboration/delegation authority, and
+  // the same measured failure remained on 0.144.5 (2026-07-17): even with
   // `--disable multi_agent` and every other configurable tool feature disabled,
   // the runtime still emitted a collaboration tool call. Read-only filesystem
   // sandboxing does not revoke that delegation authority. Until Codex exposes a

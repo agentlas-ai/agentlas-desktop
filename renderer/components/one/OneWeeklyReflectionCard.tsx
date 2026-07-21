@@ -9,6 +9,33 @@ import { ipc } from "@/lib/ipc";
 import { tFor } from "@/lib/i18n";
 import styles from "./OneWeeklyReflectionCard.module.css";
 
+type WeeklyFallbackKey =
+  | "one.week.title"
+  | "one.week.evidence_summary"
+  | "one.week.action.got_it"
+  | "one.week.action.hide";
+
+const WEEKLY_FALLBACKS: Record<WeeklyFallbackKey, Record<"ko" | "en", string>> = {
+  "one.week.title": { ko: "이번 주 확인된 변화", en: "A verified change this week" },
+  "one.week.evidence_summary": { ko: "자세한 확인 기록", en: "Detailed check records" },
+  "one.week.action.got_it": { ko: "확인했어요", en: "Got it" },
+  "one.week.action.hide": { ko: "이번 주는 숨기기", en: "Hide for this week" },
+};
+
+function weeklyCopy(locale: "ko" | "en", key: WeeklyFallbackKey): string {
+  const value = tFor(locale, key);
+  return value === key ? WEEKLY_FALLBACKS[key][locale] : value;
+}
+
+function weeklySummary(locale: "ko" | "en", count: number): string {
+  const key = "one.week.summary_line" as const;
+  const value = tFor(locale, key, { count, s: count === 1 ? "" : "s" });
+  if (value !== key) return value;
+  return locale === "ko"
+    ? `내가 주간 요약에 넣은 결과 ${count}개를 최근 순서로 정리했어요.`
+    : `${count} result${count === 1 ? "" : "s"} you added to this summary, newest first.`;
+}
+
 interface OneWeeklyReflectionCardProps {
   snapshot: OneWeeklyReflectionSnapshotV1;
   locale: "ko" | "en";
@@ -75,7 +102,7 @@ export function OneWeeklyReflectionCard({ snapshot, locale, onChange }: OneWeekl
         <div>
           <p className={styles.eyebrow}>{tFor(locale, "one.week.eyebrow")}</p>
           <h2 id={`weekly-reflection-${reflection.reflectionId}`}>
-            {tFor(locale, "one.week.title")}
+            {weeklyCopy(locale, "one.week.title")}
           </h2>
         </div>
         <span className={styles.period}>
@@ -85,10 +112,7 @@ export function OneWeeklyReflectionCard({ snapshot, locale, onChange }: OneWeekl
 
       <p className={styles.lead}>{reflection.outcomes[0].facts[0].statement}</p>
       <p className={styles.basis}>
-        {tFor(locale, "one.week.summary_line", {
-          count: reflection.outcomes.length,
-          s: reflection.outcomes.length === 1 ? "" : "s",
-        })}
+        {weeklySummary(locale, reflection.outcomes.length)}
       </p>
 
       <div className={styles.outcomes}>
@@ -125,7 +149,7 @@ export function OneWeeklyReflectionCard({ snapshot, locale, onChange }: OneWeekl
               </div>
             </div>
             <details className={styles.evidence}>
-              <summary>{tFor(locale, "one.week.evidence_summary")}</summary>
+              <summary>{weeklyCopy(locale, "one.week.evidence_summary")}</summary>
               <div>
                 {outcome.evidenceRefs.map((ref) => <code key={ref}>{ref}</code>)}
               </div>
@@ -143,10 +167,10 @@ export function OneWeeklyReflectionCard({ snapshot, locale, onChange }: OneWeekl
       {error && <p className={styles.error} role="alert">{error}</p>}
       <div className={styles.actions}>
         <button type="button" className={styles.primary} disabled={Boolean(busy)} onClick={() => void resolve("acknowledge")}>
-          {busy === "acknowledge" ? tFor(locale, "one.week.action.confirming") : tFor(locale, "one.week.action.got_it")}
+          {busy === "acknowledge" ? tFor(locale, "one.week.action.confirming") : weeklyCopy(locale, "one.week.action.got_it")}
         </button>
         <button type="button" className={styles.secondary} disabled={Boolean(busy)} onClick={() => void resolve("hide_week")}>
-          {busy === "hide_week" ? tFor(locale, "one.week.action.hiding") : tFor(locale, "one.week.action.hide")}
+          {busy === "hide_week" ? tFor(locale, "one.week.action.hiding") : weeklyCopy(locale, "one.week.action.hide")}
         </button>
       </div>
     </section>

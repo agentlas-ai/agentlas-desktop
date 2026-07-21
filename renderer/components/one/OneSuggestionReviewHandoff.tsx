@@ -15,6 +15,30 @@ import { isOneSuggestionReviewSeed } from "@shared/one-review-seed";
 import { isOneHubDerivativeDraft } from "@shared/one-hub-derivative";
 import styles from "./OneSuggestionReviewHandoff.module.css";
 
+type ReviewFallbackKey =
+  | "one.rev.error.detail"
+  | "one.rev.hub.not_published"
+  | "one.rev.gate.needs_review"
+  | "one.rev.hub.publish_lock";
+
+const REVIEW_FALLBACKS: Record<ReviewFallbackKey, Record<Locale, string>> = {
+  "one.rev.error.detail": {
+    ko: "아무것도 저장하거나 시작하거나 공개하지 않았습니다. 일정도 프롬프트도 대상도 미리 채우지 않았고, 게시도 시작하지 않았어요.",
+    en: "Nothing was saved, started, or published: no schedule, prompt, or target prefilled, and publishing not started.",
+  },
+  "one.rev.hub.not_published": { ko: "아직 게시 안 됨", en: "Not published" },
+  "one.rev.gate.needs_review": { ko: "확인 필요", en: "Needs review" },
+  "one.rev.hub.publish_lock": {
+    ko: "위 네 가지와 최종 포함 내용을 모두 확인하고 다시 승인하기 전에는 게시할 수 없습니다. 수익은 보장되지 않습니다.",
+    en: "Publishing stays unavailable until all four items and the final contents are reviewed and approved again. Earnings are not guaranteed.",
+  },
+};
+
+function reviewCopy(locale: Locale, key: ReviewFallbackKey): string {
+  const value = tFor(locale, key);
+  return value === key ? REVIEW_FALLBACKS[key][locale] : value;
+}
+
 const SUGGESTION_ID_RE = /^one_suggestion_[a-f0-9]{32}$/;
 const REVIEW_ID_RE = /^one_suggestion_review_[a-f0-9]{32}$/;
 const DRAFT_ID_RE = /^one_(?:agent|team|automation|hub)_draft_[a-f0-9]{32}$/;
@@ -213,7 +237,7 @@ export function OneSuggestionReviewHandoffBanner({
     return <section className={styles.error} role="alert" data-one-review-state="blocked">
       <strong>{tFor(locale, "one.rev.error.title")}</strong>
       <span>{error}</span>
-      <small>{tFor(locale, "one.rev.error.detail")}</small>
+      <small>{reviewCopy(locale, "one.rev.error.detail")}</small>
     </section>;
   }
   if (!handoff) {
@@ -235,7 +259,7 @@ export function OneSuggestionReviewHandoffBanner({
       {hubDraft ? <div className={styles.hubDraft} data-one-hub-derivative-state="local-review">
         <div className={styles.hubDraftHeading}>
           <strong>{tFor(locale, "one.rev.hub.review_heading")}</strong>
-          <span>{tFor(locale, "one.rev.hub.not_published")}</span>
+          <span>{reviewCopy(locale, "one.rev.hub.not_published")}</span>
         </div>
         <dl className={styles.gates} aria-label={tFor(locale, "one.rev.hub.gates_aria")}>
           {(["entitlement", "rights", "economy", "fee"] as const).map((gate) => <div key={gate}>
@@ -243,7 +267,7 @@ export function OneSuggestionReviewHandoffBanner({
               : gate === "rights" ? tFor(locale, "one.rev.gate.rights")
                 : gate === "economy" ? tFor(locale, "one.rev.gate.economy")
                   : tFor(locale, "one.rev.gate.fee")}</dt>
-            <dd>{tFor(locale, "one.rev.gate.needs_review")}</dd>
+            <dd>{reviewCopy(locale, "one.rev.gate.needs_review")}</dd>
           </div>)}
         </dl>
         <div className={styles.diffGrid}>
@@ -262,7 +286,7 @@ export function OneSuggestionReviewHandoffBanner({
           </section>
         </div>
         <p className={styles.publishLock} role="note">
-          {tFor(locale, "one.rev.hub.publish_lock")}
+          {reviewCopy(locale, "one.rev.hub.publish_lock")}
         </p>
       </div> : null}
     </div>

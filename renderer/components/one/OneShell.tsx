@@ -107,6 +107,17 @@ import { OneVoiceInputHelp } from "./OneVoiceInputHelp";
 import { OneWeeklyReflectionCard } from "./OneWeeklyReflectionCard";
 import styles from "./OneShell.module.css";
 
+const DECISION_REJECT_FALLBACK = {
+  ko: "거절과 나중에 결정은 승인이나 외부 실행을 시작하지 않습니다.",
+  en: "Rejecting or deciding later does not approve or start an external action.",
+} as const;
+
+function decisionRejectCopy(locale: "ko" | "en"): string {
+  const key = "one.shell.decision.reject_hint" as const;
+  const value = tFor(locale, key);
+  return value === key ? DECISION_REJECT_FALLBACK[locale] : value;
+}
+
 type UiMessage = {
   id: string;
   role: "user" | "assistant" | "system";
@@ -2781,7 +2792,7 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
         <button type="button" className={styles.decisionButton} onClick={onOpenWork}>{tFor(locale, "one.shell.decision.change_scope")}</button>
         <button type="button" className={styles.decisionButton} disabled={disabled} onClick={() => onSnooze(confirmation)}>{tFor(locale, "one.shell.decision.remind_24h")}</button>
       </div>
-      <p className={styles.decisionHint}>{tFor(locale, "one.shell.decision.reject_hint")}</p>
+      <p className={styles.decisionHint}>{decisionRejectCopy(locale)}</p>
     </section>
   );
 }

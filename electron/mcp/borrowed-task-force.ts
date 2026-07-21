@@ -26,7 +26,7 @@ import {
   autoTitleFromFirstMessage,
   getOrCreateAgentGroupSession,
   getOrCreateFirmSession,
-  listChatMessages,
+  listChatMessages as readStoredChatMessages,
 } from "../store/chats";
 import { getFirm } from "../store/firms";
 import { getResolvedOrg } from "../store/org-spec";
@@ -3237,11 +3237,11 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   }
 
   const suppliedPriorHistory = Array.isArray(p.priorHistory);
-  const history = p.req.agentAppMode || !emitFinal
-    ? []
-    : suppliedPriorHistory
+  const listChatMessages = (chatId: string, limit: number): ChatHistoryEntry[] =>
+    suppliedPriorHistory
       ? p.priorHistory!.map((entry) => ({ ...entry }))
-      : listChatMessages(p.chat.id, 80);
+      : readStoredChatMessages(chatId, limit);
+  const history = p.req.agentAppMode || !emitFinal ? [] : listChatMessages(p.chat.id, 80);
   if (!p.req.agentAppMode && emitFinal && !suppliedPriorHistory) {
     appendChatMessage(p.chat.id, "user", p.req.userPrompt);
     if (history.length === 0) autoTitleFromFirstMessage(p.chat.id, p.req.userPrompt);

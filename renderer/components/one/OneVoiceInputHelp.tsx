@@ -5,6 +5,33 @@ import { tFor } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import styles from "./OneVoiceInputHelp.module.css";
 
+type VoiceFallbackKey =
+  | "one.voice.instr_mac"
+  | "one.voice.instr_windows"
+  | "one.voice.privacy"
+  | "one.voice.return_composer";
+
+const VOICE_FALLBACKS: Record<VoiceFallbackKey, Record<"ko" | "en", string>> = {
+  "one.voice.instr_mac": {
+    ko: "입력창을 선택한 상태에서 Fn 또는 지구본 키를 두 번 누르세요. Mac 받아쓰기 설정에 따라 단축키가 다를 수 있습니다.",
+    en: "With the composer focused, press Fn or the Globe key twice. Your Mac dictation shortcut may be configured differently.",
+  },
+  "one.voice.instr_windows": {
+    ko: "입력창을 선택한 상태에서 Windows 키 + H를 누르세요.",
+    en: "With the composer focused, press Windows key + H.",
+  },
+  "one.voice.privacy": {
+    ko: "One은 여기서 마이크를 켜거나 음성 파일을 저장하지 않습니다. 받아쓴 텍스트를 확인한 뒤 직접 보내세요.",
+    en: "One does not turn on the microphone or save audio here. Review the dictated text before sending it yourself.",
+  },
+  "one.voice.return_composer": { ko: "입력창으로 돌아가기", en: "Return to composer" },
+};
+
+function voiceCopy(locale: "ko" | "en", key: VoiceFallbackKey): string {
+  const value = tFor(locale, key);
+  return value === key ? VOICE_FALLBACKS[key][locale] : value;
+}
+
 type OneVoiceInputHelpProps = {
   locale: "ko" | "en";
   composerRef: RefObject<HTMLTextAreaElement | null>;
@@ -47,9 +74,9 @@ export function OneVoiceInputHelp({ locale, composerRef, disabled = false }: One
   });
 
   const instruction = platform === "mac"
-    ? tFor(locale, "one.voice.instr_mac")
+    ? voiceCopy(locale, "one.voice.instr_mac")
     : platform === "windows"
-      ? tFor(locale, "one.voice.instr_windows")
+      ? voiceCopy(locale, "one.voice.instr_windows")
       : tFor(locale, "one.voice.instr_other");
 
   const toggle = () => {
@@ -103,10 +130,10 @@ export function OneVoiceInputHelp({ locale, composerRef, disabled = false }: One
           <strong id={titleId}>{tFor(locale, "one.voice.panel_title")}</strong>
           <p id={instructionId}>{instruction}</p>
           <small id={privacyId}>
-            {tFor(locale, "one.voice.privacy")}
+            {voiceCopy(locale, "one.voice.privacy")}
           </small>
           <button type="button" onClick={closeToComposer}>
-            {tFor(locale, "one.voice.return_composer")}
+            {voiceCopy(locale, "one.voice.return_composer")}
           </button>
         </div>
       )}
