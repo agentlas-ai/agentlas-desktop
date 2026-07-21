@@ -8,6 +8,7 @@ import {
   SURFACE_OPEN_FENCE,
   parseSurfaces,
 } from "../surface-emitter";
+import { oneText } from "./one-copy";
 
 const MAX_SOURCE_COUNT = 12;
 const MAX_TABLE_ROWS = 40;
@@ -152,10 +153,10 @@ function addMissingRecommendationToTable(
   for (const column of table.columns) {
     const label = cleanText(column, 80);
     if (column === productColumn) row[column] = recommendation.product;
-    else if (/^(?:선택|choice)$/i.test(label)) row[column] = ko ? "추천" : "Recommended";
+    else if (/^(?:선택|choice)$/i.test(label)) row[column] = oneText(ko ? "ko" : "en", "one.md.recommended");
     else if (/(?:가격|최저가|price|cost)/i.test(label)) row[column] = price;
     else if (/(?:사용면적|면적|coverage|area)/i.test(label)) row[column] = area;
-    else if (/(?:비고|이유|설명|reason|notes?|why)/i.test(label)) row[column] = recommendation.detail || (ko ? "조건에 가장 잘 맞는 추천" : "Best match for the request");
+    else if (/(?:비고|이유|설명|reason|notes?|why)/i.test(label)) row[column] = recommendation.detail || oneText(ko ? "ko" : "en", "one.md.bestMatch");
     else row[column] = "—";
   }
   return { columns: table.columns, rows: [row, ...cleanedTable.rows].slice(0, MAX_TABLE_ROWS) };
@@ -385,7 +386,7 @@ function informativeHeading(markdown: string, fallbackTitle: string): string {
     && /(?:고르시면|선택하시면|\b(?:choose|pick)\b)/i.test(heading)
   ) {
     return cleanText(
-      /[가-힣]/.test(heading) ? `${recommendation.product} 추천` : `${recommendation.product} recommendation`,
+      oneText(/[가-힣]/.test(heading) ? "ko" : "en", "one.md.headingRec", { product: recommendation.product }),
       160,
     );
   }
@@ -856,17 +857,17 @@ export function buildOneSurfaceFromMarkdown(input: {
       } } : {}),
     },
     widgets: [
-      ...(narrative ? [{ type: "report", data: "summary", title: ko ? "핵심 요약" : "Summary" }] : []),
-      ...(timeline.length ? [{ type: "timeline", data: "schedule", title: ko ? "날짜별 일정" : "Schedule" }] : []),
-      ...(budget ? [{ type: "cost-summary", data: "costs", title: ko ? "예상 예산" : "Budget" }] : []),
+      ...(narrative ? [{ type: "report", data: "summary", title: oneText(ko ? "ko" : "en", "one.md.widgetSummary") }] : []),
+      ...(timeline.length ? [{ type: "timeline", data: "schedule", title: oneText(ko ? "ko" : "en", "one.md.widgetSchedule") }] : []),
+      ...(budget ? [{ type: "cost-summary", data: "costs", title: oneText(ko ? "ko" : "en", "one.md.widgetBudget") }] : []),
       ...(table ? [{
         type: "table",
         data: "comparison",
-        title: productComparison ? (ko ? "비교" : "Comparison") : (ko ? "확인한 내용" : "Details"),
+        title: productComparison ? oneText(ko ? "ko" : "en", "one.md.widgetComparison") : oneText(ko ? "ko" : "en", "one.md.widgetDetails"),
       }] : []),
-      ...(resolvedChecklist.length ? [{ type: "launch-checklist", data: "checklist", title: ko ? "출발 전 확인" : "Before you go" }] : []),
-      ...(artifacts.length ? [{ type: "report", data: "artifacts", title: ko ? "만든 파일" : "Files" }] : []),
-      ...(sources.length ? [{ type: "source-matrix", title: ko ? "확인한 출처" : "Sources" }] : []),
+      ...(resolvedChecklist.length ? [{ type: "launch-checklist", data: "checklist", title: oneText(ko ? "ko" : "en", "one.md.widgetBeforeYouGo") }] : []),
+      ...(artifacts.length ? [{ type: "report", data: "artifacts", title: oneText(ko ? "ko" : "en", "one.md.widgetFiles") }] : []),
+      ...(sources.length ? [{ type: "source-matrix", title: oneText(ko ? "ko" : "en", "one.md.widgetSources") }] : []),
     ],
     ...(sources.length ? {
       evidence: sources.map((source, index) => ({

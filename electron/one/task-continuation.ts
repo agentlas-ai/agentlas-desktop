@@ -2,6 +2,7 @@ import type { Chat } from "../../shared/types";
 import { sanitizeOneTaskProjectionDisplayText } from "../../shared/one-task-projection";
 import { appendChatMessage, createChat, getChat } from "../store/chats";
 import { getCanonicalTask } from "../store/tasks";
+import { oneText } from "./one-copy";
 
 export interface ContinueOneFromTaskResultInput {
   taskId: string;
@@ -34,17 +35,10 @@ function continuationMessage(input: {
   title: string;
   summary: string;
 }): string {
-  if (input.locale === "ko") {
-    return [
-      `${input.accepted ? "완료한" : "검토 중인"} 이전 일에서 이어갑니다 · ${input.title}`,
-      input.summary,
-      "새 요청은 별도의 일로 처리합니다. 이전 팀·권한·임시 첨부는 자동으로 이어받지 않았어요.",
-    ].join("\n\n");
-  }
   return [
-    `Continuing from the ${input.accepted ? "completed" : "result-ready"} work · ${input.title}`,
+    oneText(input.locale, input.accepted ? "one.cont.headerAccepted" : "one.cont.headerPending", { title: input.title }),
     input.summary,
-    "This request starts separate work. The previous team, permissions, and temporary attachments were not carried over automatically.",
+    oneText(input.locale, "one.cont.newRequestNote"),
   ].join("\n\n");
 }
 
@@ -69,15 +63,15 @@ export function continueOneFromTaskResult(input: ContinueOneFromTaskResultInput)
 
   const title = sanitizeOneTaskProjectionDisplayText(task.title, {
     maximum: 160,
-    fallback: input.locale === "ko" ? "이전 일" : "Previous work",
+    fallback: oneText(input.locale, "one.cont.fallbackPrevWork"),
   });
   const summary = sanitizeOneTaskProjectionDisplayText(input.summary.slice(0, 720), {
     maximum: 4_000,
-    fallback: input.locale === "ko" ? "이전 결과의 핵심 맥락을 이어받았습니다." : "The key context from the previous result was carried forward.",
+    fallback: oneText(input.locale, "one.cont.fallbackSummary"),
   });
   const nextTitle = sanitizeOneTaskProjectionDisplayText(followUpTitle(userPrompt), {
     maximum: 160,
-    fallback: input.locale === "ko" ? "이어지는 일" : "Follow-up work",
+    fallback: oneText(input.locale, "one.cont.fallbackFollowup"),
   });
   const next = createChat({
     agentId: source.agentId,

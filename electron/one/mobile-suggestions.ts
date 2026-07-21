@@ -27,6 +27,7 @@ import {
   snoozeOneSuggestion,
 } from "./suggestions";
 import { getOneValueClosureState } from "./value-closure";
+import { oneText } from "./one-copy";
 
 const HOST_REF_RE = /^host_[a-f0-9]{32}$/;
 const SUGGESTION_REF_RE = /^one_suggestion_[a-f0-9]{32}$/;
@@ -49,39 +50,39 @@ function safeDisplay(value: string | null | undefined, fallback: string): string
 function copy(type: OneEcosystemSuggestion["type"]): OneMobileEcosystemSuggestionV1["copy"] {
   if (type === "agent_build") {
     return {
-      titleKo: "이 역할을 내 에이전트로 정리할까요?",
-      titleEn: "Turn this role into your agent?",
-      bodyKo: "반복해서 확인된 작업 범위만 가져와 검토용 정의 초안을 준비합니다.",
-      bodyEn: "One can prepare a review-only definition draft from the repeatedly observed scope.",
+      titleKo: oneText("ko", "one.mob.agentBuildTitle"),
+      titleEn: oneText("en", "one.mob.agentBuildTitle"),
+      bodyKo: oneText("ko", "one.mob.agentBuildBody"),
+      bodyEn: oneText("en", "one.mob.agentBuildBody"),
       reviewOnly: true,
       executionStarted: false,
     };
   }
   if (type === "retain_team") {
     return {
-      titleKo: "이 조합을 내 팀으로 둘까요?",
-      titleEn: "Keep this combination as your team?",
-      bodyKo: "이번 작업에서만 다시 쓰거나, 검토 후 팀 초안으로 저장할 수 있습니다.",
-      bodyEn: "Reuse it for this task only, or review a team draft before saving anything.",
+      titleKo: oneText("ko", "one.mob.retainTeamTitle"),
+      titleEn: oneText("en", "one.mob.retainTeamTitle"),
+      bodyKo: oneText("ko", "one.mob.retainTeamBody"),
+      bodyEn: oneText("en", "one.mob.retainTeamBody"),
       reviewOnly: true,
       executionStarted: false,
     };
   }
   if (type === "automation") {
     return {
-      titleKo: "이 반복 작업을 자동화로 검토할까요?",
-      titleEn: "Review this repeated task as an automation?",
-      bodyKo: "트리거와 권한, 중지 조건을 먼저 검토합니다. 아직 예약되거나 실행되지 않았습니다.",
-      bodyEn: "Review the trigger, permission, and stop control first. Nothing is scheduled or running.",
+      titleKo: oneText("ko", "one.mob.automationTitle"),
+      titleEn: oneText("en", "one.mob.automationTitle"),
+      bodyKo: oneText("ko", "one.mob.automationBody"),
+      bodyEn: oneText("en", "one.mob.automationBody"),
       reviewOnly: true,
       executionStarted: false,
     };
   }
   return {
-    titleKo: "공개용 파생 에이전트를 검토할까요?",
-    titleEn: "Review a public derivative for Hub?",
-    bodyKo: "원본 파일을 복사하지 않는 생성형 검토 스캐폴드만 준비합니다. 권리·게시 자격·경제·수수료는 미확인이며 게시나 수익은 보장되지 않습니다.",
-    bodyEn: "Prepare only a generated review scaffold with no source files copied. Rights, entitlement, economy, and fees are unknown; publishing and earnings are not guaranteed.",
+    titleKo: oneText("ko", "one.mob.hubDerivativeTitle"),
+    titleEn: oneText("en", "one.mob.hubDerivativeTitle"),
+    bodyKo: oneText("ko", "one.mob.hubDerivativeBody"),
+    bodyEn: oneText("en", "one.mob.hubDerivativeBody"),
     reviewOnly: true,
     executionStarted: false,
   };
@@ -104,16 +105,13 @@ function teamMembers(suggestion: OneEcosystemSuggestion): OneMobileSuggestionMem
       : participant?.agentId
         ? "unavailable"
         : "external";
-    const fallbackKo = sourceStatus === "external"
-      ? "외부 전문가"
+    const memberKey = sourceStatus === "external"
+      ? "one.mob.memberExternal"
       : sourceStatus === "unavailable"
-        ? "확인이 필요한 구성원"
-        : "설치된 에이전트";
-    const fallbackEn = sourceStatus === "external"
-      ? "External specialist"
-      : sourceStatus === "unavailable"
-        ? "Unavailable member"
-        : "Installed agent";
+        ? "one.mob.memberUnavailable"
+        : "one.mob.memberInstalled";
+    const fallbackKo = oneText("ko", memberKey);
+    const fallbackEn = oneText("en", memberKey);
     const identity = participant?.agentId ?? participant?.agentSlug ?? `slot-${index + 1}`;
     const roleIdentity = participant?.role ?? `role-${index + 1}`;
     return {

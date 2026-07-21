@@ -31,6 +31,7 @@ import { getDb } from "../store/db";
 import { getOneProfile } from "../store/one-profile";
 import { tryRecordOneDomainEvent } from "./domain-events";
 import { acknowledgeOneFeatureIntro, getOneFeatureIntroState } from "./feature-intro";
+import { oneText } from "./one-copy";
 
 export const ONE_ONBOARDING_META_KEY = "agentlas.one.onboarding.v1";
 
@@ -423,15 +424,15 @@ export function updateOneOnboarding(input: UpdateOneOnboardingInput): OneOnboard
       next.currentScene = input.patch.currentScene;
     }
     if ("experience" in input.patch) {
-      if (!isOneOnboardingExperience(input.patch.experience)) throw new TypeError("Invalid onboarding experience");
+      if (input.patch.experience !== null && !isOneOnboardingExperience(input.patch.experience)) throw new TypeError("Invalid onboarding experience");
       next.experience = input.patch.experience;
     }
     if ("subscription" in input.patch) {
-      if (!isOneOnboardingSubscription(input.patch.subscription)) throw new TypeError("Invalid subscription state");
+      if (input.patch.subscription !== null && !isOneOnboardingSubscription(input.patch.subscription)) throw new TypeError("Invalid subscription state");
       next.subscription = input.patch.subscription;
     }
     if ("provider" in input.patch) {
-      if (!isOneOnboardingProvider(input.patch.provider)) throw new TypeError("Invalid runtime provider");
+      if (input.patch.provider !== null && !isOneOnboardingProvider(input.patch.provider)) throw new TypeError("Invalid runtime provider");
       if (state.provider !== input.patch.provider) {
         next.brainStatus = "unchecked";
         next.restrictedMode = false;
@@ -493,9 +494,16 @@ export function provisionOneOnboardingStarterTeam(
   input: ProvisionOneOnboardingStarterTeamInput,
 ): OneOnboardingState {
   if (!isRecord(input)) throw new TypeError("Invalid starter team request");
-  assertOnlyKeys(input, ["expectedVersion", "memberSlugs"], "Starter team request");
+  assertOnlyKeys(input, ["expectedVersion", "memberSlugs", "locale"], "Starter team request");
   assertExpectedVersion(input.expectedVersion);
+  if (input.locale !== undefined && input.locale !== "ko" && input.locale !== "en") {
+    throw new TypeError("Invalid starter team locale");
+  }
   const slugs = normalizedStarterSlugs(input.memberSlugs, 2);
+  const locale = input.locale === "ko" ? "ko" : "en";
+  const groupName = oneText(locale, "one.onbe.groupName");
+  const groupDescription = oneText(locale, "one.onbe.groupDescription");
+  const orchestratorName = oneText(locale, "one.onbe.orchestratorName");
 
   let changed = false;
   const next = getDb().transaction(() => {
@@ -519,15 +527,15 @@ export function provisionOneOnboardingStarterTeam(
     const existing = current.state.starterTeamGroupId ? getAgentGroup(current.state.starterTeamGroupId) : null;
     const group = existing
       ? updateAgentGroup(existing.id, {
-          name: "Starter team",
-          description: "One onboarding permanent starter team. Its exact pinned releases run at zero Hub credits for signed-in workspaces.",
-          orchestratorName: "Las Orchestrator",
+          name: groupName,
+          description: groupDescription,
+          orchestratorName,
           members,
         })
       : createAgentGroup({
-          name: "Starter team",
-          description: "One onboarding permanent starter team. Its exact pinned releases run at zero Hub credits for signed-in workspaces.",
-          orchestratorName: "Las Orchestrator",
+          name: groupName,
+          description: groupDescription,
+          orchestratorName,
           members,
         });
     const candidate: OneOnboardingState = {
