@@ -69,6 +69,22 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-21 · v0.8.62 — a customer-safe One surface** — One now presents a
+  single, calm chief-of-staff voice: a shared customer-safe boundary strips every
+  internal runtime, CLI, borrowed-agent, session, and result-schema term before it
+  can reach progress, result, or error copy, so a beginner never sees
+  `Calling Codex CLI...`, a cross-domain studio name, `runtime-session`, or
+  "structured result / exactly one safe One Surface". Progress shows the calm
+  five-stage label and a specialist count instead of internal names; failed or
+  unvalidated results now say so in plain, honest retry copy. The task-force
+  synthesis answer is pinned to the run locale, so an English run never ends in
+  Korean product copy regardless of a borrowed agent's default language. A new
+  behavioral-plus-source regression (`verify-one-customer-safe-copy`) guards the
+  exact leaks captured in the official v2 beta cut, and the One suite is realigned
+  to the customer-safe copy. This addresses beta feedback items #1, #2, #3, and #7.
+  This source does not prove a Desktop Git tag, public installer, GitHub release,
+  or update feed.
+
 - **2026-07-21 · v0.8.61 — in-app update recovery and verified One onboarding** —
   The AI brain button now serializes its provider state before runtime detection,
   eliminating the delayed-write click race. Closing works immediately even
