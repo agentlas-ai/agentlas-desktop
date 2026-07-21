@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.8.62 — 2026-07-21
+
+### Fixed
+
+- One now renders every progress, result, and error surface through a single
+  shared customer-safe boundary (`shared/one-customer-safe.ts`). Internal
+  runtime, CLI, borrowed-agent, session, and result-schema vocabulary — for
+  example `Calling Codex CLI...`, a cross-domain studio name, `runtime-session`,
+  or "structured result / exactly one safe One Surface" — is stripped before it
+  can reach a customer. Progress shows the calm five-stage label and a specialist
+  count instead of internal agent names.
+- Result and error copy that previously exposed developer-schema terms (disabled
+  "workbench", "structured result", "safe One Surface") in
+  `electron/mcp/client.ts`, `electron/mcp/borrowed-task-force.ts`, and
+  `electron/invocation/service.ts` now reads as plain, honest retry copy. A run
+  that could not finish or validate a result says so instead of claiming success.
+
+### Changed
+
+- The task-force synthesis answer is pinned to the run locale, so an English run
+  never ends in Korean product copy regardless of a borrowed agent's default
+  language.
+
+### Tests
+
+- New `verify-one-customer-safe-copy` regression combines a behavioral test of
+  the customer-safe boundary against the exact leaks captured in the official v2
+  beta cut with a source guard over the One display paths. The One suite is
+  realigned to assert the new customer-safe copy.
+
 ## 0.8.61 — 2026-07-21
 
 ### Changed
