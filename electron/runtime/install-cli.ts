@@ -676,12 +676,14 @@ export function openCliLogin(kind: InstallableCli): CliActionResult {
   try {
     if (process.platform === "darwin") {
       // Terminal.app에서 실행 + 활성화. 경로는 위에서 단일인용으로 고정.
-      spawn("osascript", [
+      const child = spawn("osascript", [
         "-e",
         `tell application "Terminal" to do script "${posixCmd.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`,
         "-e",
         `tell application "Terminal" to activate`,
-      ]);
+      ], { detached: true, stdio: "ignore" });
+      child.once("error", () => {});
+      child.unref();
     } else if (process.platform === "win32") {
       // PowerShell is built into supported Windows versions. Spawn it directly
       // (no shell:true/cmd string composition), keep the terminal visible, and
@@ -709,10 +711,30 @@ export function openCliLogin(kind: InstallableCli): CliActionResult {
         stdio: "ignore",
         windowsHide: false,
       });
+      child.once("error", () => {});
       child.unref();
     } else {
-      // Linux best-effort — 대표 터미널 에뮬레이터.
-      spawn("x-terminal-emulator", ["-e", [abs, ...loginArgs].join(" ")]);
+      // Never report success for a terminal that is not present. Pass the
+      // already-resolved CLI as argv so spaces cannot turn into a shell parse.
+      const terminal = [
+        { path: resolveBinary("x-terminal-emulator"), args: ["-e", abs, ...loginArgs] },
+        { path: resolveBinary("gnome-terminal"), args: ["--", abs, ...loginArgs] },
+        { path: resolveBinary("konsole"), args: ["-e", abs, ...loginArgs] },
+      ].find((candidate) => candidate.path);
+      if (!terminal?.path) {
+        return {
+          ok: false,
+          message: "No supported Linux terminal emulator was found",
+          command: `${plan.bin} ${loginArgs.join(" ")}`.trim(),
+        };
+      }
+      const child = spawn(terminal.path, terminal.args, {
+        detached: true,
+        env: augmentedEnv(),
+        stdio: "ignore",
+      });
+      child.once("error", () => {});
+      child.unref();
     }
     return { ok: true, message: [abs, ...loginArgs].join(" ") };
   } catch (e) {

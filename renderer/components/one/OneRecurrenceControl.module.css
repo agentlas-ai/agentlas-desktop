@@ -13,10 +13,10 @@
   align-items: center;
   gap: 10px;
   padding: 6px 11px;
-  border: 1px solid #e2e5de;
+  border: 1px solid #315b51;
   border-radius: 12px;
-  background: #fff;
-  color: #4f554b;
+  background: #0e1e1a;
+  color: #d9f3eb;
   cursor: pointer;
 }
 
@@ -30,25 +30,25 @@
   border-color: transparent;
   border-radius: 999px;
   background: transparent;
-  color: #777d81;
+  color: #9db7af;
 }
 
 .control[data-one-recurrence-active="false"] .toggle:hover,
 .control[data-one-recurrence-active="false"] .toggle:focus-within {
-  background: #f2f4f2;
+  background: #10231f;
 }
 
 .control[data-one-recurrence-active="true"] .toggle {
-  border-color: #d7e2cb;
-  background: #f7faf4;
-  color: #455438;
+  border-color: #d9f3eb;
+  background: #10231f;
+  color: #d9f3eb;
 }
 
 .toggle input {
   width: 18px;
   height: 18px;
   margin: 0;
-  accent-color: #607a3e;
+  accent-color: #9db7af;
 }
 
 .toggle span {
@@ -61,7 +61,7 @@
 }
 
 .toggle small {
-  color: #7a8075;
+  color: #9db7af;
   font-size: 10px;
 }
 
@@ -69,9 +69,9 @@
   display: grid;
   gap: 10px;
   padding: 14px;
-  border: 1px solid #dfe5d8;
+  border: 1px solid #315b51;
   border-radius: 14px;
-  background: #fbfcf9;
+  background: #10231f;
 }
 
 .fields {
@@ -84,7 +84,7 @@
   min-width: 0;
   display: grid;
   gap: 5px;
-  color: #70766b;
+  color: #9db7af;
   font-size: 10px;
   font-weight: 700;
 }
@@ -94,25 +94,25 @@
   width: 100%;
   min-height: 44px;
   box-sizing: border-box;
-  border: 1px solid #dfe3da;
+  border: 1px solid #315b51;
   border-radius: 10px;
   padding: 0 11px;
-  background: #fff;
-  color: #30342e;
+  background: #0e1e1a;
+  color: #d9f3eb;
   font: inherit;
   font-size: 12px;
   font-weight: 600;
 }
 
 .fields input[readonly] {
-  background: #f3f5f0;
-  color: #666d61;
+  background: #10231f;
+  color: #9db7af;
 }
 
 .stop,
 .explainer {
   margin: 0;
-  color: #666d61;
+  color: #9db7af;
   font-size: 11px;
   line-height: 1.5;
 }
@@ -123,7 +123,7 @@
 }
 
 .stop strong {
-  color: #4e5f3a;
+  color: #d9f3eb;
 }
 
 .toggle:focus-within,

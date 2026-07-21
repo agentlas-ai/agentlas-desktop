@@ -5,7 +5,7 @@
   padding: 14px 0;
   border-top: 1px solid var(--one-border, rgba(17, 24, 39, 0.1));
   border-bottom: 1px solid var(--one-border, rgba(17, 24, 39, 0.1));
-  background: #fff;
+  background: #0e1e1a;
   color: var(--one-ink, #171717);
 }
 
@@ -17,7 +17,7 @@
   place-items: center;
   border-radius: 999px;
   background: rgba(72, 92, 50, 0.1);
-  color: #4b612f;
+  color: #d9f3eb;
   font-size: 14px;
 }
 
@@ -39,7 +39,7 @@
   padding: 0;
   border: 0;
   background: transparent;
-  color: #4b612f;
+  color: #d9f3eb;
   font: inherit;
   font-size: 12px;
   font-weight: 650;

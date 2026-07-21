@@ -69,6 +69,20 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-21 · v0.8.60 — reliable One onboarding and sealed macOS updates** —
+  One now has a durable close-and-resume control, responsive AI subscription
+  and provider choices, visible connection progress, and an explicit limited
+  path instead of silent buttons. The One surface and all onboarding scenes use
+  charcoal and mint rather than paper, cream, or red, with a flat 2D Las and a
+  matching local-device illustration. macOS packages now seal bundled
+  Hephaestus and Python resources read-only immediately after app signing, then
+  re-verify the pinned designated requirement before packaging, preventing
+  runtime bytecode caches from mutating the installed app and triggering false update
+  recovery. The official `Developer ID Application: Jeongmin Kim
+  (F469CGM7T5)` lineage is unchanged. Agentlas OS v1.1.50 remains pinned at
+  `5fc22464c1db33dabc0d4de2170053d1584b5682`. This source does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 - **2026-07-20 · v0.8.59 — One first-run onboarding** — A seven-scene,
   keyboard-accessible tutorial now introduces One in everyday language,
   verifies or limits the selected AI provider through the Desktop main process,

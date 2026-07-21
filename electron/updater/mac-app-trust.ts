@@ -75,6 +75,14 @@ function authorities(output: string): string[] {
     .map((line) => line.slice("Authority=".length).trim());
 }
 
+function isSignedBundleSealFailure(output: string): boolean {
+  // `codesign --verify -R=...` checks the resource seal and requirement in one
+  // pass. Keep the successful path to one invocation, while classifying the
+  // stable macOS diagnostics emitted when signed bundle contents were added,
+  // removed, or changed after packaging. Raw output never leaves Main.
+  return /(?:a\s+sealed\s+resource\s+is\s+missing\s+or\s+invalid|code\s+or\s+signature\s+have\s+been\s+modified|invalid\s+signature|unsealed\s+contents\s+present|resource\s+envelope\s+is\s+obsolete|file\s+(?:added|modified|missing)|code\s+object\s+is\s+not\s+signed\s+at\s+all)/i.test(output);
+}
+
 /**
  * Main-only trust gate for the currently running macOS app. Runtime update
  * eligibility uses the exact production Developer ID policy plus Gatekeeper.
@@ -113,7 +121,14 @@ export async function inspectMacInstalledAppTrust(input: {
     input.bundlePath,
   ]);
   if (!verified.ok) {
-    return { ok: false, diagnostic: updaterDiagnostic("source-designated-requirement") };
+    return {
+      ok: false,
+      diagnostic: updaterDiagnostic(
+        isSignedBundleSealFailure(verified.output)
+          ? "source-seal"
+          : "source-designated-requirement",
+      ),
+    };
   }
   const gatekeeper = await run("spctl", [
     "-a",

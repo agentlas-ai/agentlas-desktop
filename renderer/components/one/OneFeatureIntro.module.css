@@ -15,8 +15,8 @@
   overflow: auto;
   border: 1px solid rgba(15, 23, 42, 0.1);
   border-radius: 24px;
-  background: #fff;
-  color: #17191b;
+  background: #0e1e1a;
+  color: #d9f3eb;
   box-shadow: 0 28px 90px rgba(15, 23, 42, 0.22);
 }
 
@@ -27,7 +27,7 @@
   justify-content: space-between;
   gap: 16px;
   padding: 12px 20px;
-  border-bottom: 1px solid #eceeef;
+  border-bottom: 1px solid #315b51;
 }
 
 .brand {
@@ -37,7 +37,7 @@
 }
 
 .count {
-  color: #73787e;
+  color: #9db7af;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
@@ -56,7 +56,7 @@
 
 .eyebrow {
   margin: 0 0 14px;
-  color: #607a36;
+  color: #9db7af;
   font-size: 12px;
   font-weight: 750;
   letter-spacing: 0.08em;
@@ -75,7 +75,7 @@
 .copy p {
   max-width: 430px;
   margin: 22px 0 0;
-  color: #60656b;
+  color: #9db7af;
   font-size: 15px;
   line-height: 1.7;
 }
@@ -87,16 +87,16 @@
   min-height: 330px;
   padding: 24px;
   overflow: hidden;
-  border: 1px solid #e8ebed;
+  border: 1px solid #315b51;
   border-radius: 22px;
-  background: #f5f7f8;
+  background: #10231f;
 }
 
 .miniWindow {
   overflow: hidden;
-  border: 1px solid #dde1e3;
+  border: 1px solid #315b51;
   border-radius: 16px;
-  background: #fff;
+  background: #0e1e1a;
   box-shadow: 0 16px 38px rgba(38, 45, 50, 0.08);
 }
 
@@ -106,8 +106,8 @@
   align-items: center;
   justify-content: space-between;
   padding: 0 13px;
-  border-bottom: 1px solid #eef0f1;
-  color: #777d82;
+  border-bottom: 1px solid #315b51;
+  color: #9db7af;
   font-size: 10px;
 }
 
@@ -149,7 +149,7 @@
 .miniLine {
   height: 7px;
   border-radius: 999px;
-  background: #e7eaec;
+  background: #10231f;
 }
 
 .miniLine:nth-of-type(2) { width: 86%; }
@@ -179,17 +179,17 @@
   align-content: start;
   gap: 12px;
   padding: 18px;
-  border: 1px solid #e1e4e6;
+  border: 1px solid #315b51;
   border-radius: 14px;
-  background: #fff;
+  background: #0e1e1a;
 }
 
 .surfaceCard strong { font-size: 13px; }
-.surfaceCard span { color: #72777c; font-size: 10px; line-height: 1.55; }
+.surfaceCard span { color: #9db7af; font-size: 10px; line-height: 1.55; }
 
 .arrow {
   text-align: center;
-  color: #697079;
+  color: #9db7af;
   font-size: 20px;
 }
 
@@ -198,9 +198,9 @@
   min-height: 270px;
   margin: auto;
   padding: 12px;
-  border: 1px solid #d9dddf;
+  border: 1px solid #315b51;
   border-radius: 26px;
-  background: #fff;
+  background: #0e1e1a;
   box-shadow: 0 15px 35px rgba(38, 45, 50, 0.09);
 }
 
@@ -217,11 +217,11 @@
   display: grid;
   gap: 12px;
   padding: 16px;
-  border: 1px solid #e3e6e8;
+  border: 1px solid #315b51;
   border-radius: 14px;
 }
 
-.decision small { color: #75805f; font-weight: 700; }
+.decision small { color: #9db7af; font-weight: 700; }
 .decision strong { font-size: 13px; line-height: 1.4; }
 .decisionAction { min-height: 34px; display: grid; place-items: center; border-radius: 9px; background: #607a36; color: #fff; font-size: 10px; }
 
@@ -236,13 +236,13 @@
   gap: 10px;
   align-items: start;
   padding: 12px 0;
-  border-bottom: 1px solid #e8ebed;
+  border-bottom: 1px solid #315b51;
   font-size: 12px;
   line-height: 1.55;
 }
 
 .proofRow:last-child { border-bottom: 0; }
-.proofCheck { color: #607a36; font-weight: 800; }
+.proofCheck { color: #9db7af; font-weight: 800; }
 
 .footer {
   min-height: 72px;
@@ -251,7 +251,7 @@
   justify-content: space-between;
   gap: 16px;
   padding: 12px 20px;
-  border-top: 1px solid #eceeef;
+  border-top: 1px solid #315b51;
 }
 
 .footerGroup {
@@ -264,10 +264,10 @@
 .buttonPrimary {
   min-height: 44px;
   padding: 0 17px;
-  border: 1px solid #dfe2e4;
+  border: 1px solid #315b51;
   border-radius: 11px;
-  background: #fff;
-  color: #1d2023;
+  background: #0e1e1a;
+  color: #d9f3eb;
   font: inherit;
   font-size: 13px;
   font-weight: 680;
@@ -275,10 +275,10 @@
 }
 
 .button:hover,
-.button:focus-visible { background: #f6f7f8; outline: 2px solid transparent; }
+.button:focus-visible { background: #10231f; outline: 2px solid transparent; }
 
 .buttonPrimary {
-  border-color: #607a36;
+  border-color: #9db7af;
   background: #607a36;
   color: #fff;
 }

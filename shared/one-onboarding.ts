@@ -2,7 +2,7 @@ export const ONE_ONBOARDING_CONTRACT_VERSION = "1.0.0" as const;
 export const ONE_ONBOARDING_CURRENT_VERSION = 1 as const;
 
 export type OneOnboardingScene = "s0" | "s1" | "s2" | "s3" | "s4" | "s5" | "s6";
-export type OneOnboardingStatus = "pending" | "in-progress" | "completed" | "migrated";
+export type OneOnboardingStatus = "pending" | "in-progress" | "dismissed" | "completed" | "migrated";
 export type OneOnboardingResolution = "completed" | "expert_skip" | "existing_user" | null;
 export type OneOnboardingExperience = "new" | "chat" | "cli" | "expert" | null;
 export type OneOnboardingSubscription = "paid" | "free" | "none" | null;
@@ -137,6 +137,14 @@ export interface ReopenOneOnboardingProviderInput {
   expectedVersion: number;
 }
 
+export interface DismissOneOnboardingInput {
+  expectedVersion: number;
+}
+
+export interface ResumeOneOnboardingInput {
+  expectedVersion: number;
+}
+
 export interface OneOnboardingExecutionAuthorization {
   allowed: boolean;
   groupId: string | null;
@@ -156,7 +164,7 @@ export interface CompleteOneOnboardingInput {
 }
 
 const SCENES = new Set<OneOnboardingScene>(["s0", "s1", "s2", "s3", "s4", "s5", "s6"]);
-const STATUSES = new Set<OneOnboardingStatus>(["pending", "in-progress", "completed", "migrated"]);
+const STATUSES = new Set<OneOnboardingStatus>(["pending", "in-progress", "dismissed", "completed", "migrated"]);
 const RESOLUTIONS = new Set<Exclude<OneOnboardingResolution, null>>(["completed", "expert_skip", "existing_user"]);
 const EXPERIENCES = new Set<Exclude<OneOnboardingExperience, null>>(["new", "chat", "cli", "expert"]);
 const SUBSCRIPTIONS = new Set<Exclude<OneOnboardingSubscription, null>>(["paid", "free", "none"]);

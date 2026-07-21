@@ -197,9 +197,11 @@ import type {
 } from "../shared/types";
 import type {
   CompleteOneOnboardingInput,
+  DismissOneOnboardingInput,
   LimitOneOnboardingProviderInput,
   ProvisionOneOnboardingStarterTeamInput,
   ReopenOneOnboardingProviderInput,
+  ResumeOneOnboardingInput,
   UpdateOneOnboardingInput,
   VerifyOneOnboardingProviderInput,
 } from "../shared/one-onboarding";
@@ -389,11 +391,13 @@ import {
 } from "./one/feature-intro";
 import {
   completeOneOnboarding,
+  dismissOneOnboarding,
   getOneOnboardingExecutionAuthorization,
   getOneOnboardingState,
   limitOneOnboardingProvider,
   provisionOneOnboardingStarterTeam,
   reopenOneOnboardingProvider,
+  resumeOneOnboarding,
   updateOneOnboarding,
   verifyOneOnboardingProvider,
 } from "./one/onboarding";
@@ -3007,6 +3011,10 @@ export function registerIpcHandlers(): void {
     verifyOneOnboardingProvider(input));
   ipcMain.handle("oneOnboarding:chooseLimited", (_e, input: LimitOneOnboardingProviderInput) =>
     limitOneOnboardingProvider(input));
+  ipcMain.handle("oneOnboarding:dismiss", (_e, input: DismissOneOnboardingInput) =>
+    dismissOneOnboarding(input));
+  ipcMain.handle("oneOnboarding:resume", (_e, input: ResumeOneOnboardingInput) =>
+    resumeOneOnboarding(input));
   ipcMain.handle("oneOnboarding:reopenProvider", (_e, input: ReopenOneOnboardingProviderInput) =>
     reopenOneOnboardingProvider(input));
   ipcMain.handle("oneOnboarding:getExecutionAuthorization", () =>

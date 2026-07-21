@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -45,6 +45,14 @@ function sha256(file) {
 
 function sha512(file) {
   return createHash("sha512").update(readFileSync(file)).digest("base64");
+}
+
+function makeTreeOwnerWritable(target) {
+  if (!existsSync(target)) return;
+  const stat = lstatSync(target);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) return;
+  chmodSync(target, stat.mode | 0o700);
+  for (const entry of readdirSync(target)) makeTreeOwnerWritable(join(target, entry));
 }
 
 function envLine(key, value) {
@@ -116,7 +124,11 @@ function inspectInnerApps({ file, arch }) {
     );
   } finally {
     if (result.attach?.ok) result.detach = run("hdiutil", ["detach", mountPoint]);
-    if (!result.attach?.ok || result.detach?.ok) rmSync(root, { recursive: true, force: true });
+    if (!result.attach?.ok || result.detach?.ok) {
+      makeTreeOwnerWritable(zipRoot);
+      makeTreeOwnerWritable(root);
+      rmSync(root, { recursive: true, force: true });
+    }
   }
   return result;
 }

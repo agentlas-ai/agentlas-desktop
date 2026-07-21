@@ -23,11 +23,13 @@ import type {
 } from "./one-feature-intro";
 import type {
   CompleteOneOnboardingInput,
+  DismissOneOnboardingInput,
   LimitOneOnboardingProviderInput,
   OneOnboardingExecutionAuthorization,
   OneOnboardingState,
   ProvisionOneOnboardingStarterTeamInput,
   ReopenOneOnboardingProviderInput,
+  ResumeOneOnboardingInput,
   UpdateOneOnboardingInput,
   VerifyOneOnboardingProviderInput,
 } from "./one-onboarding";
@@ -3636,6 +3638,7 @@ export type UpdaterErrorCode =
 export type UpdaterDiagnosticCategory =
   | "source-signature-class"
   | "source-identity"
+  | "source-seal"
   | "source-designated-requirement"
   | "source-gatekeeper"
   | "source-verification-unavailable"
@@ -5359,6 +5362,8 @@ export interface AgentlasIpc {
     update: (input: UpdateOneOnboardingInput) => Promise<OneOnboardingState>;
     verifyProvider: (input: VerifyOneOnboardingProviderInput) => Promise<OneOnboardingState>;
     chooseLimited: (input: LimitOneOnboardingProviderInput) => Promise<OneOnboardingState>;
+    dismiss: (input: DismissOneOnboardingInput) => Promise<OneOnboardingState>;
+    resume: (input: ResumeOneOnboardingInput) => Promise<OneOnboardingState>;
     reopenProvider: (input: ReopenOneOnboardingProviderInput) => Promise<OneOnboardingState>;
     getExecutionAuthorization: () => Promise<OneOnboardingExecutionAuthorization>;
     provisionStarterTeam: (input: ProvisionOneOnboardingStarterTeamInput) => Promise<OneOnboardingState>;

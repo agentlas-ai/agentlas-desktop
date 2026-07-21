@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.8.60 — 2026-07-21
+
+### Added
+
+- One onboarding can now be closed at any step without losing the current
+  scene, subscription choice, provider choice, starter-team selection, or
+  first request. The Las helper reopens a dismissed guide from the exact saved
+  point, while existing users keep the guide off until they opt in.
+- Added an explicit path to explore One before an AI provider is fully ready,
+  plus visible busy and connection-check states for every provider action.
+
+### Changed
+
+- One and its onboarding now use a charcoal-and-mint surface contract instead
+  of paper, cream, or red presentation. Las is a flat 2D mint sprite, and the
+  local-device explanation uses a matching flat illustration.
+- Subscription and provider cards respond during tutorial replay as well as
+  first run, so a migrated user can select a brain and advance instead of
+  hitting a silent no-op.
+- Agentlas OS v1.1.50 remains pinned at
+  `5fc22464c1db33dabc0d4de2170053d1584b5682`. Source readiness does not prove
+  that a public Desktop Git tag, installer, GitHub release, or update feed
+  exists.
+
+### Fixed
+
+- macOS packages make the bundled Hephaestus and Python runtime resources
+  read-only immediately after app signing and re-verify the pinned designated
+  requirement before packaging. Python can no longer write `__pycache__` bytecode
+  into `Agentlas.app` after installation and invalidate the signed bundle seal.
+- Updater recovery now distinguishes a mutated source-app seal from a genuine
+  Developer ID designated-requirement mismatch. The official `Developer ID
+  Application: Jeongmin Kim (F469CGM7T5)` lineage remains unchanged.
+- Closing, resuming, brain selection, brain connection, starter-team creation,
+  concept review, and first-request entry were rechecked through the live
+  Electron renderer and Main-process bridge.
+
 ## 0.8.59 — 2026-07-20
 
 ### Added

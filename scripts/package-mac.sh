@@ -60,6 +60,27 @@ cleanup_appledouble() {
   done
 }
 
+remove_sealed_tree() {
+  local target="$1"
+  [[ -e "$target" ]] || return 0
+  # Signed runtime directories intentionally arrive as 0555. Restore owner
+  # write permission only inside these verified build/output roots so retries
+  # and EXIT cleanup can remove a previously sealed candidate.
+  /bin/chmod -RN "$target" 2>/dev/null || true
+  /bin/chmod -R u+w "$target" 2>/dev/null || true
+  rm -rf -- "$target"
+}
+
+if [[ "${1:-}" == "--clean-local-output" ]]; then
+  local_candidate_output="$project_dir/release-local"
+  [[ "$local_candidate_output" == "$project_dir/release-local" ]] || {
+    echo "Refusing to clean an unexpected local candidate path." >&2
+    exit 1
+  }
+  remove_sealed_tree "$local_candidate_output"
+  exit 0
+fi
+
 cleanup() {
   if [[ -n "$cleaner_pid" ]]; then
     kill "$cleaner_pid" 2>/dev/null || true
@@ -71,7 +92,7 @@ cleanup() {
   if (( ${#original_keychains[@]} > 0 )); then
     security list-keychains -d user -s "${original_keychains[@]}" >/dev/null 2>&1 || true
   fi
-  rm -rf "$local_release"
+  remove_sealed_tree "$local_release"
 }
 trap cleanup EXIT
 
@@ -181,16 +202,119 @@ exercise_signed_app_python_boundary() {
     LANG="${LANG:-en_US.UTF-8}" \
     CI="${CI:-1}" \
     ./node_modules/.bin/electron scripts/verify-packaged-workforce-runtime.cjs "--app=$signed_app"
+  # Exercise an unguarded direct import too. This is the exact class of access
+  # that wrote __pycache__ into v0.8.58 and broke its signed source-app seal.
+  env -i \
+    PATH="$PATH" \
+    HOME="$HOME" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    LANG="${LANG:-en_US.UTF-8}" \
+    CI="${CI:-1}" \
+    ./node_modules/.bin/electron scripts/smoke-signed-mac-python-cache.cjs "--app=$signed_app"
   # The exercise imports the packaged bridge and real embedded Agentlas OS from
   # this exact signed app. Any new Resources/__pycache__ now invalidates the seal.
   codesign --verify --deep --strict --verbose=2 "$signed_app"
+}
+
+exercise_final_update_zip_boundary() {
+  local version designated_requirement zip_count
+  version="$(node -p "require('./package.json').version")"
+  designated_requirement="$(node -p "require('./build-resources/macos-release-signing-policy.json').designatedRequirement")"
+  zip_count=0
+
+  while IFS= read -r zip_path; do
+    [[ -n "$zip_path" ]] || continue
+    zip_count=$((zip_count + 1))
+    (
+      set -euo pipefail
+      local archive_tmp extracted_root archived_app resources_root runtime_root python_root
+      local forbidden writable acl_entry python_manifest python_relative python_path
+      local isolated_home candidate_arches host_arch
+      archive_tmp="$(mktemp -d "${TMPDIR:-/tmp}/agentlas-final-update-zip.XXXXXX")"
+      extracted_root="$archive_tmp/extracted"
+      mkdir -p "$extracted_root"
+      cleanup_final_update_zip() {
+        /bin/chmod -RN "$archive_tmp" 2>/dev/null || true
+        /bin/chmod -R u+w "$archive_tmp" 2>/dev/null || true
+        rm -rf -- "$archive_tmp"
+      }
+      trap cleanup_final_update_zip EXIT
+
+      COPYFILE_DISABLE=1 ditto -x -k "$zip_path" "$extracted_root"
+      archived_app="$extracted_root/Agentlas.app"
+      [[ -d "$archived_app" ]] || {
+        echo "Final updater ZIP does not contain Agentlas.app: $zip_path" >&2
+        exit 1
+      }
+      resources_root="$archived_app/Contents/Resources"
+      runtime_root="$resources_root/Hephaestus"
+      python_root="$resources_root/python-runtime"
+      [[ -d "$runtime_root" && -d "$python_root" ]] || {
+        echo "Final updater ZIP is missing its sealed runtime trees: $zip_path" >&2
+        exit 1
+      }
+
+      codesign --verify --deep --strict "-R=$designated_requirement" "$archived_app"
+      writable="$(find "$runtime_root" "$python_root" \( -type f -o -type d \) \( -perm -u+w -o -perm -g+w -o -perm -o+w \) -print -quit)"
+      [[ -z "$writable" ]] || {
+        echo "Final updater ZIP contains a user-writable signed runtime entry: $writable" >&2
+        exit 1
+      }
+      acl_entry="$(find "$runtime_root" "$python_root" -exec /bin/ls -lde {} + | awk '$1 ~ /\+$/ { print; exit }')"
+      [[ -z "$acl_entry" ]] || {
+        echo "Final updater ZIP contains an ACL-bearing signed runtime entry: $acl_entry" >&2
+        exit 1
+      }
+      forbidden="$(find "$runtime_root" "$python_root" \( -type d -name __pycache__ -o -type f \( -name '*.pyc' -o -name '*.pyo' \) \) -print -quit)"
+      [[ -z "$forbidden" ]] || {
+        echo "Final updater ZIP already contains Python bytecode: $forbidden" >&2
+        exit 1
+      }
+
+      case "$(uname -m)" in
+        arm64) host_arch="arm64" ;;
+        x86_64) host_arch="x86_64" ;;
+        *) host_arch="" ;;
+      esac
+      candidate_arches="$(lipo -archs "$archived_app/Contents/MacOS/Agentlas")"
+      if [[ -n "$host_arch" && " $candidate_arches " == *" $host_arch "* ]]; then
+        python_manifest="$python_root/agentlas-python-runtime.json"
+        python_relative="$(node -p "require(process.argv[1]).executableRelativePath" "$python_manifest")"
+        python_path="$python_root/$python_relative"
+        isolated_home="$archive_tmp/home"
+        mkdir -p "$isolated_home"
+        env -i \
+          HOME="$isolated_home" \
+          USERPROFILE="$isolated_home" \
+          HEPHAESTUS_RUNTIME_ROOT="$runtime_root" \
+          PYTHONPATH="$runtime_root" \
+          PYTHONUTF8=1 \
+          "$python_path" -c "import agentlas_cloud, ontology; print('direct-import-ok')" \
+          | grep -q '^direct-import-ok$'
+        forbidden="$(find "$runtime_root" "$python_root" \( -type d -name __pycache__ -o -type f \( -name '*.pyc' -o -name '*.pyo' \) \) -print -quit)"
+        [[ -z "$forbidden" ]] || {
+          echo "Direct Python import mutated the final updater ZIP app: $forbidden" >&2
+          exit 1
+        }
+        codesign --verify --deep --strict "-R=$designated_requirement" "$archived_app"
+      fi
+
+      echo "Final updater ZIP sealed-runtime verification: PASS ($(basename "$zip_path"))"
+    )
+  done < <(find "$project_dir/release" -maxdepth 1 -type f -name "Agentlas-${version}-*.zip" | sort)
+
+  if [[ "$zip_count" -ne 2 ]]; then
+    echo "Expected exactly two final macOS updater ZIPs for $version; found $zip_count." >&2
+    return 1
+  fi
 }
 
 cleanup_appledouble "$project_dir/dist" "$project_dir/release"
 load_local_signing_defaults
 prepare_app_notarization_authority
 npm run build
-rm -rf "$project_dir/release" "$local_release"
+remove_sealed_tree "$project_dir/release"
+remove_sealed_tree "$local_release"
 mkdir -p "$local_release"
 cleanup_appledouble "$project_dir/dist"
 
@@ -225,7 +349,7 @@ cleaner_pid=$!
 build_mac_arch arm64
 build_mac_arch x64
 
-rm -rf "$project_dir/release"
+remove_sealed_tree "$project_dir/release"
 mkdir -p "$project_dir/release"
 COPYFILE_DISABLE=1 ditto "$local_release" "$project_dir/release"
 cleanup_appledouble "$project_dir/release"
@@ -237,6 +361,10 @@ if [[ "${AGENTLAS_PUBLIC_RELEASE:-0}" == "1" ]]; then
     sign_dmg "$dmg_path"
     notarize_dmg "$dmg_path"
   done < <(find "$project_dir/release" -maxdepth 1 -type f -name 'Agentlas-*.dmg' | sort)
+  # Inspect the exact ZIP bytes consumed by Squirrel.Mac, after every builder
+  # and copy step. This closes the historical gap where the source .app was
+  # valid but the updater archive could still carry writable Python sources.
+  exercise_final_update_zip_boundary
   node scripts/verify-mac-release.mjs "--repo=${stable_repo}"
 else
   node scripts/verify-mac-release.mjs --write-env --allow-unnotarized "--repo=${stable_repo}"

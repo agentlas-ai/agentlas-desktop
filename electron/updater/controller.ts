@@ -253,6 +253,7 @@ const updaterErrorCodes = new Set<UpdaterErrorCode>([
 const updaterDiagnosticMessages = {
   "source-signature-class": "The running app is not signed with the official Developer ID application certificate.",
   "source-identity": "The running app does not match the pinned Agentlas application identity.",
+  "source-seal": "The running app has the official identity, but its signed contents changed after packaging.",
   "source-designated-requirement": "The running app does not satisfy the pinned Agentlas signing requirement.",
   "source-gatekeeper": "macOS Gatekeeper did not accept the running Agentlas app.",
   "source-verification-unavailable": "The running app signature could not be verified by macOS.",
@@ -334,7 +335,7 @@ function safeMessage(code: UpdaterErrorCode): string {
     case "install-not-owned":
       return "Automatic install is disabled because this app is owned by another macOS account. Use the official installer once; your local Agentlas data stays in place.";
     case "install-source-untrusted":
-      return "Automatic update repair is required because this copy is outside the official Developer ID lineage. The existing app and local Agentlas data were preserved.";
+      return "Automatic update repair is required because this installed copy did not pass the official app integrity check. The existing app and local Agentlas data were preserved.";
     case "install-not-applied":
       return "The previous update was not applied, so Agentlas will not repeat the same install. The existing app and local data were preserved.";
     case "install-state-corrupt":
@@ -556,6 +557,21 @@ function writeJsonAtomic(file: string, value: unknown): void {
   }
 }
 
+/**
+ * A correctly sealed update contains 0555 runtime directories. Make only an
+ * updater-owned stale tree removable before fs.rmSync. Symlinks are never
+ * traversed, and this helper must never be used on the installed application.
+ */
+function makeUpdaterTreeOwnerWritable(target: string): void {
+  if (!fs.existsSync(target)) return;
+  const stat = fs.lstatSync(target);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) return;
+  fs.chmodSync(target, stat.mode | 0o700);
+  for (const entry of fs.readdirSync(target)) {
+    makeUpdaterTreeOwnerWritable(path.join(target, entry));
+  }
+}
+
 function mergeCheckedAt(state: UpdaterState, checkedAt: number | undefined): UpdaterState {
   return checkedAt ? { ...state, lastCheckedAt: checkedAt } : state;
 }
@@ -761,6 +777,7 @@ export class DesktopUpdaterController {
     const updaterCache = this.updaterCachePath();
     for (const candidate of [path.join(updaterCache, "pending"), path.join(updaterCache, "update.zip")]) {
       try {
+        makeUpdaterTreeOwnerWritable(candidate);
         this.removePath(candidate, { recursive: true, force: true });
       } catch (error) {
         cleared = false;
@@ -776,7 +793,9 @@ export class DesktopUpdaterController {
       if (fs.existsSync(shipIt)) {
         for (const entry of fs.readdirSync(shipIt, { withFileTypes: true })) {
           if (entry.isDirectory() && entry.name.startsWith("update.")) {
-            this.removePath(path.join(shipIt, entry.name), { recursive: true, force: true });
+            const staleUpdate = path.join(shipIt, entry.name);
+            makeUpdaterTreeOwnerWritable(staleUpdate);
+            this.removePath(staleUpdate, { recursive: true, force: true });
           }
         }
       }

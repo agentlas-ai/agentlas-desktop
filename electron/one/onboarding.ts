@@ -12,12 +12,14 @@ import {
   isOneOnboardingState,
   isOneOnboardingSubscription,
   type CompleteOneOnboardingInput,
+  type DismissOneOnboardingInput,
   type LimitOneOnboardingProviderInput,
   type OneOnboardingExecutionAuthorization,
   type OneOnboardingProvider,
   type OneOnboardingState,
   type ProvisionOneOnboardingStarterTeamInput,
   type ReopenOneOnboardingProviderInput,
+  type ResumeOneOnboardingInput,
   type UpdateOneOnboardingInput,
   type VerifyOneOnboardingProviderInput,
 } from "../../shared/one-onboarding";
@@ -186,6 +188,9 @@ function mutate(
   if (current.state.version !== expectedVersion) {
     throw new Error(`One onboarding changed (expected ${expectedVersion}, current ${current.state.version})`);
   }
+  if (current.state.status === "dismissed") {
+    throw new Error("Resume dismissed onboarding before changing it");
+  }
   if (current.state.status === "completed" || current.state.status === "migrated") return current.state;
   const next = update(current.state, nextTimestamp(current.state.version));
   return next === current.state ? current.state : persist(current.raw, next);
@@ -335,6 +340,68 @@ export function reopenOneOnboardingProvider(input: ReopenOneOnboardingProviderIn
   });
 }
 
+/**
+ * Hides the tutorial without pretending it was completed. The current scene
+ * and every choice remain durable so closing the modal is always reversible.
+ */
+export function dismissOneOnboarding(input: DismissOneOnboardingInput): OneOnboardingState {
+  if (!isRecord(input)) throw new TypeError("Invalid onboarding dismissal request");
+  assertOnlyKeys(input, ["expectedVersion"], "Onboarding dismissal request");
+  assertExpectedVersion(input.expectedVersion);
+  const current = readOrCreateState();
+  if (current.state.version !== input.expectedVersion) {
+    throw new Error(`One onboarding changed (expected ${input.expectedVersion}, current ${current.state.version})`);
+  }
+  if (current.state.status === "completed" || current.state.status === "migrated" || current.state.status === "dismissed") {
+    return current.state;
+  }
+  const timestamp = nextTimestamp(current.state.version);
+  const next = persist(current.raw, {
+    ...current.state,
+    version: timestamp.version,
+    status: "dismissed",
+    updatedAt: timestamp.iso,
+  });
+  tryRecordOneDomainEvent({
+    eventType: "onboarding.step_resolved",
+    occurredAt: next.updatedAt,
+    actor: "user",
+    entityId: next.oneId,
+    version: next.version,
+    visibility: "personal",
+    entries: [
+      { name: "stepId", value: "tutorial" },
+      { name: "resolution", value: "dismissed" },
+    ],
+  });
+  return next;
+}
+
+/** Reopens a dismissed tutorial or lets a migrated existing user opt in. */
+export function resumeOneOnboarding(input: ResumeOneOnboardingInput): OneOnboardingState {
+  if (!isRecord(input)) throw new TypeError("Invalid onboarding resume request");
+  assertOnlyKeys(input, ["expectedVersion"], "Onboarding resume request");
+  assertExpectedVersion(input.expectedVersion);
+  const current = readOrCreateState();
+  if (current.state.version !== input.expectedVersion) {
+    throw new Error(`One onboarding changed (expected ${input.expectedVersion}, current ${current.state.version})`);
+  }
+  if (current.state.status !== "dismissed" && current.state.status !== "migrated") {
+    throw new Error("Only dismissed or migrated onboarding can be started from the Las helper");
+  }
+  const timestamp = nextTimestamp(current.state.version);
+  return persist(current.raw, {
+    ...current.state,
+    version: timestamp.version,
+    status: "in-progress",
+    resolution: null,
+    currentScene: current.state.status === "migrated" ? "s0" : current.state.currentScene,
+    startedAt: current.state.startedAt ?? timestamp.iso,
+    completedAt: null,
+    updatedAt: timestamp.iso,
+  });
+}
+
 export function updateOneOnboarding(input: UpdateOneOnboardingInput): OneOnboardingState {
   if (!isRecord(input)) throw new TypeError("Invalid One onboarding update");
   assertOnlyKeys(input, ["expectedVersion", "patch"], "One onboarding update");
@@ -437,6 +504,16 @@ export function provisionOneOnboardingStarterTeam(
       throw new Error(`One onboarding changed (expected ${input.expectedVersion}, current ${current.state.version})`);
     }
     if (current.state.status === "migrated") return current.state;
+    if (current.state.status === "dismissed") {
+      throw new Error("Resume dismissed onboarding before changing its starter team");
+    }
+    if (current.state.status === "completed") {
+      const stored = current.state.selectedStarterSlugs;
+      const exactRepair = slugs.length === stored.length && slugs.every((slug) => stored.includes(slug));
+      if (!exactRepair) {
+        throw new Error("Completed onboarding can only repair its exact saved starter team");
+      }
+    }
     const timestamp = nextTimestamp(current.state.version);
     const members = starterGroupMembers(slugs, timestamp.iso);
     const existing = current.state.starterTeamGroupId ? getAgentGroup(current.state.starterTeamGroupId) : null;
@@ -496,6 +573,9 @@ export async function completeOneOnboarding(input: CompleteOneOnboardingInput): 
   if (before.status === "completed" || before.status === "migrated") return before;
   if (before.version !== input.expectedVersion) {
     throw new Error(`One onboarding changed (expected ${input.expectedVersion}, current ${before.version})`);
+  }
+  if (before.status === "dismissed") {
+    throw new Error("Resume dismissed onboarding before completing it");
   }
   if (before.brainStatus === "connected") {
     if (!before.provider || !await mainOwnedProviderReady(before.provider).catch(() => false)) {

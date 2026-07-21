@@ -49,7 +49,7 @@ const PROVIDERS: Array<{
 }> = [
   { id: "openai", runtime: "codex", name: "OpenAI · Codex", logo: "/brand/llm/openai.svg", page: "https://chatgpt.com/", hint: { ko: "가장 익숙해요 · Codex 지원 플랜", en: "Most familiar · a Codex-enabled plan" } },
   { id: "anthropic", runtime: "claude-code", name: "Claude", logo: "/brand/llm/claude.svg", page: "https://claude.ai/", hint: { ko: "코딩에 강해요 · Pro/Max 또는 API", en: "Strong at coding · Pro/Max or API" } },
-  { id: "kimi", runtime: "kimi", name: "Kimi", logo: "/brand/llm/kimi.svg", page: "https://www.kimi.com/", hint: { ko: "가볍게 시작하기 좋아요", en: "A lightweight place to begin" } },
+  { id: "kimi", runtime: "kimi", name: "Kimi", logo: "/brand/llm/kimi.svg", page: "https://www.kimi.com/", hint: { ko: "자동 로그인 확인 미지원 · 제한 모드", en: "No automatic sign-in check · limited mode" } },
   { id: "google", runtime: "gemini", name: "Gemini", logo: "/brand/llm/googlegemini.svg", page: "https://gemini.google.com/", hint: { ko: "구글 계정으로 연결해요", en: "Connect with your Google account" } },
 ];
 
@@ -61,19 +61,19 @@ const EXAMPLE_SEEDS: Copy[] = [
 
 const CONCEPTS = [
   {
-    icon: "🗂",
+    icon: "DB",
     title: { ko: "정보 창고 (DB)", en: "Information store (DB)" },
     body: { ko: "가게의 장부처럼 정보를 오래 보관해요.", en: "Like a shop ledger, it keeps information safe." },
     examples: "MongoDB · PostgreSQL · Firebase",
   },
   {
-    icon: "🧑‍🍳",
+    icon: "API",
     title: { ko: "24시간 엔진 (서버)", en: "Always-on engine (server)" },
     body: { ko: "주방처럼 요청을 받아 실제 일을 처리해요.", en: "Like a kitchen, it receives orders and does the work." },
     examples: "Railway · API",
   },
   {
-    icon: "🪟",
+    icon: "UI",
     title: { ko: "보이는 매장 (프론트엔드)", en: "Visible storefront (frontend)" },
     body: { ko: "손님이 보는 매장처럼 화면과 버튼을 보여줘요.", en: "Like the storefront, it is the screen people touch." },
     examples: "Web · App · Vercel",
@@ -157,12 +157,25 @@ function Las({
   reduced?: boolean;
   label: string;
 }) {
+  const animation = small || reduced
+    ? false
+    : mood === "talking"
+      ? { y: [0, -3, 0], scale: [1, 1.035, 1] }
+      : mood === "thinking"
+        ? { x: [-3, 3, -3], rotate: [-2, 2, -2] }
+        : mood === "cheer" || mood === "happy"
+          ? { y: [0, -16, 0], scale: [1, 1.08, 1] }
+          : mood === "point"
+            ? { x: [0, 8, 0], rotate: [0, 5, 0] }
+            : mood === "gentle"
+              ? { y: [0, 2, 0], rotate: [0, -3, 0] }
+              : { y: [0, -5, 0], rotate: [0, -0.7, 0.7, 0] };
   return (
     <motion.div
       className={`${styles.las} ${small ? styles.lasSmall : ""}`}
       style={{ backgroundPosition: MOOD_POSITION[mood] }}
-      animate={small || reduced ? false : { y: [0, -5, 0], rotate: [0, -0.7, 0.7, 0] }}
-      transition={reduced ? { duration: 0 } : { duration: 3.2, repeat: Infinity, ease: "easeInOut" }}
+      animate={animation}
+      transition={reduced ? { duration: 0 } : { duration: mood === "cheer" || mood === "happy" ? 1.3 : 3.2, repeat: Infinity, ease: "easeInOut" }}
       role="img"
       aria-label={label}
     />
@@ -273,6 +286,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
   const [teamCreated, setTeamCreated] = useState(false);
   const [seed, setSeed] = useState("");
   const [pendingInstall, setPendingInstall] = useState<Exclude<OneOnboardingProvider, null> | null>(null);
+  const [previewSubscription, setPreviewSubscription] = useState<Exclude<OneOnboardingSubscription, null> | null>(null);
   const [previewProvider, setPreviewProvider] = useState<Exclude<OneOnboardingProvider, null> | null>(null);
   const [agentHint, setAgentHint] = useState<string | null>(null);
   const [talking, setTalking] = useState(false);
@@ -284,8 +298,16 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
   const originFocusRef = useRef<HTMLElement | null>(null);
 
   const t = useCallback((copy: Copy) => ko ? copy.ko : copy.en, [ko]);
-  const visible = Boolean(state && (finishing || replay || (state.status !== "completed" && state.status !== "migrated")));
+  const visible = Boolean(state && (
+    finishing
+    || replay
+    || !["completed", "dismissed", "migrated"].includes(state.status)
+  ));
   const scene = replay ? replayScene : state?.currentScene ?? "s0";
+  // Preview state also provides immediate visual acknowledgement while the
+  // Main-process CAS write is in flight; persisted state remains authoritative.
+  const selectedSubscription = previewSubscription ?? state?.subscription ?? null;
+  const selectedProvider = previewProvider ?? state?.provider ?? null;
   const beginnerPath = (state?.experience ?? "new") !== "expert";
   const path = beginnerPath
     ? (["s1", "s2", "s3", "s4", "s5", "s6"] as OneOnboardingScene[])
@@ -300,6 +322,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       setState(next);
       setSelectedSlugs(next.selectedStarterSlugs);
       setSeed(next.projectSeed);
+      setPreviewSubscription(next.subscription);
       setPreviewProvider(next.provider);
       setShowResume(next.status === "in-progress");
     }).catch((cause) => setError(errorMessage(cause, ko ? "온보딩을 불러오지 못했어요." : "Could not load onboarding.")));
@@ -456,12 +479,18 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
   }, [applyPatch, ko, play, replay]);
 
   const chooseSubscription = async (subscription: Exclude<OneOnboardingSubscription, null>) => {
-    if (replay) return;
+    setPreviewSubscription(subscription);
+    if (replay) {
+      play("tap");
+      return;
+    }
     setError(null);
     try {
-      await applyPatch({ subscription });
+      const next = await applyPatch({ subscription });
+      setPreviewSubscription(next?.subscription ?? subscription);
       play("tap");
     } catch (cause) {
+      setPreviewSubscription(state?.subscription ?? null);
       setError(errorMessage(cause, ko ? "선택을 저장하지 못했어요." : "Could not save the selection."));
     }
   };
@@ -475,8 +504,9 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
   }, []);
 
   const selectProvider = async (provider: Exclude<OneOnboardingProvider, null>) => {
+    setPreviewProvider(provider);
     if (replay) {
-      setPreviewProvider(provider);
+      play("tap");
       return;
     }
     if (busy) return;
@@ -487,6 +517,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       setPreviewProvider(next?.provider ?? provider);
       play("tap");
     } catch (cause) {
+      setPreviewProvider(state?.provider ?? null);
       setError(errorMessage(cause, ko ? "제공자 선택을 저장하지 못했어요." : "Could not save the provider selection."));
     } finally {
       setBusy(false);
@@ -517,8 +548,8 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       if (!installed) {
         setPendingInstall(provider);
         setRuntimeMessage(ko
-          ? `${entry.name} CLI가 필요해요. 아래 ‘설치 승인’ 버튼을 눌러야만 Mac에 설치합니다.`
-          : `${entry.name} CLI is required. It is installed on this Mac only after you press Approve install below.`);
+          ? `${entry.name} CLI가 필요해요. 아래 ‘설치 승인’ 버튼을 눌러야만 이 컴퓨터에 설치합니다.`
+          : `${entry.name} CLI is required. It is installed on this computer only after you press Approve install below.`);
         return;
       }
       current = await api.oneOnboarding.verifyProvider({ expectedVersion: current.version, provider });
@@ -776,9 +807,56 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
     setHelperOpen(false);
     setSelectedSlugs(state?.selectedStarterSlugs ?? []);
     setTeamCreated(false);
+    setPreviewSubscription(state?.subscription ?? "paid");
     setPreviewProvider(state?.provider ?? null);
+    setRuntimeFacts([]);
+    setRuntimeMessage(null);
     setReplayScene("s0");
     setReplay(true);
+  };
+
+  const dismissTutorial = async (event?: ReactMouseEvent) => {
+    event?.stopPropagation();
+    if (replay) {
+      setReplay(false);
+      setHelperOpen(false);
+      return;
+    }
+    const api = ipc();
+    if (!api?.oneOnboarding || !state || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await api.oneOnboarding.dismiss({ expectedVersion: state.version });
+      setState(next);
+      setShowResume(false);
+      setHelperOpen(false);
+    } catch (cause) {
+      setError(errorMessage(cause, ko ? "온보딩을 닫지 못했어요." : "Could not close onboarding."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resumeTutorial = async () => {
+    const api = ipc();
+    if (!api?.oneOnboarding || !state || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await api.oneOnboarding.resume({ expectedVersion: state.version });
+      setState(next);
+      setSelectedSlugs(next.selectedStarterSlugs);
+      setPreviewSubscription(next.subscription);
+      setPreviewProvider(next.provider);
+      setShowResume(false);
+      setReplay(false);
+      setHelperOpen(false);
+    } catch (cause) {
+      setError(errorMessage(cause, ko ? "온보딩을 다시 열지 못했어요." : "Could not reopen onboarding."));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const reopenProviderSetup = async () => {
@@ -859,11 +937,17 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
             {helperOpen && (
               <motion.div className={styles.helperBubble} initial={reduced ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduced ? undefined : { opacity: 0, y: 8 }} transition={{ duration: reduced ? 0 : 0.18 }}>
                 <strong>{ko ? "Las가 여기 있어요" : "Las is right here"}</strong>
-                <span>{starterTeamPresent
+                <span>{state.status === "dismissed"
+                  ? (ko ? "고른 내용은 그대로 보관했어요. 준비되면 하던 단계부터 이어갈 수 있어요." : "Your choices are saved. Continue from the same step whenever you are ready.")
+                  : state.status === "migrated"
+                    ? (ko ? "기존 사용자는 자동으로 가이드가 꺼져 있어요. 원하면 새 온보딩을 직접 시작할 수 있어요." : "The guide stays off for existing users. Start the new onboarding only when you want it.")
+                  : starterTeamPresent
                   ? (ko ? "One 사용법을 언제든 다시 볼 수 있어요." : "You can revisit the One guide anytime.")
                   : (ko ? "스타터 팀이 바뀌었어요. 아래 복구 버튼으로 정확한 팀을 다시 만들 수 있어요." : "Your starter team changed. Use the repair button below to restore the exact team.")}</span>
                 {error && <span role="alert">{error}</span>}
-                <button type="button" onClick={openReplay}>{ko ? "튜토리얼 다시 보기" : "Replay tutorial"}</button>
+                {(state.status === "dismissed" || state.status === "migrated")
+                  ? <button type="button" disabled={busy} onClick={() => void resumeTutorial()}>{state.status === "dismissed" ? (ko ? "하던 곳부터 이어하기" : "Continue onboarding") : (ko ? "새 온보딩 시작" : "Start onboarding")}</button>
+                  : <button type="button" onClick={openReplay}>{ko ? "튜토리얼 다시 보기" : "Replay tutorial"}</button>}
                 {state.status === "completed" && <button type="button" disabled={busy} onClick={() => void reopenProviderSetup()}>{ko ? "AI 연결 바꾸기" : "Change AI connection"}</button>}
                 {!starterTeamPresent && state.status === "completed" && <button type="button" disabled={busy} onClick={() => void repairStarterTeam()}>{ko ? "스타터 팀 복구" : "Repair starter team"}</button>}
               </motion.div>
@@ -887,9 +971,10 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
     return (
       <div className={styles.overlay} data-one-onboarding-dialog onClick={() => window.dispatchEvent(new Event("one-onboarding-flush"))}>
         <section ref={(node) => { dialogRef.current = node; }} className={styles.resumeCard} role="dialog" aria-modal="true" aria-labelledby="one-resume-title">
+          <button type="button" className={styles.close} disabled={busy} onClick={(event) => void dismissTutorial(event)} aria-label={ko ? "온보딩 닫기" : "Close onboarding"}>×</button>
           <Las mood="gentle" reduced={reduced} label={ko ? "민트색 Agentlas 가이드 Las" : "Las, the mint Agentlas guide"} />
           <h1 id="one-resume-title" tabIndex={-1}>{ko ? "하던 곳부터 이어갈까요?" : "Continue where you left off?"}</h1>
-          <p>{ko ? "선택한 내용은 이 Mac에 안전하게 남아 있어요." : "Your choices are safely stored on this Mac."}</p>
+          <p>{ko ? "선택한 내용은 이 컴퓨터에 안전하게 남아 있어요." : "Your choices are safely stored on this computer."}</p>
           <div className={styles.actions}>
             <button type="button" className={styles.secondary} onClick={() => { setShowResume(false); void go("s0"); }}>
               {ko ? "처음부터 다시" : "Start over"}
@@ -920,9 +1005,14 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
           >
             {path.map((item) => <span key={item} data-current={item === scene ? "true" : "false"} data-done={path.indexOf(item) < path.indexOf(scene) ? "true" : "false"} />)}
           </div>
-          <button type="button" className={styles.sound} onClick={toggleSound} aria-label={state.soundEnabled ? (ko ? "소리 끄기" : "Mute sound") : (ko ? "소리 켜기" : "Turn sound on")}>
-            {state.soundEnabled ? "♪" : "♪̸"}
-          </button>
+          <div className={styles.topActions}>
+            <button type="button" className={styles.sound} onClick={toggleSound} aria-label={state.soundEnabled ? (ko ? "소리 끄기" : "Mute sound") : (ko ? "소리 켜기" : "Turn sound on")}>
+              {state.soundEnabled ? "♪" : "♪̸"}
+            </button>
+            <button type="button" className={styles.close} disabled={busy} onClick={(event) => void dismissTutorial(event)} aria-label={replay ? (ko ? "다시 보기 닫기" : "Close replay") : (ko ? "온보딩 닫기" : "Close onboarding")}>
+              ×
+            </button>
+          </div>
         </header>
 
         <div className={styles.stage}>
@@ -953,10 +1043,10 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                   />
                   <div className={styles.choiceGrid}>
                     <button type="button" onClick={() => void go("s1", { experience: "new" })}>
-                      <span>🌱</span><strong>{ko ? "차근차근 알려줘" : "Guide me step by step"}</strong><small>{ko ? "처음이어도 괜찮아요" : "Perfect if this is new"}</small>
+                      <span aria-hidden="true">GUIDE</span><strong>{ko ? "차근차근 알려줘" : "Guide me step by step"}</strong><small>{ko ? "처음이어도 괜찮아요" : "Perfect if this is new"}</small>
                     </button>
                     <button type="button" disabled={busy} onClick={() => void chooseExpert()}>
-                      <span>⚡</span><strong>{ko ? "핵심만 빠르게" : "Just the essentials"}</strong><small>{ko ? "연결부터 바로 확인해요" : "Jump straight to connection"}</small>
+                      <span aria-hidden="true">FAST</span><strong>{ko ? "핵심만 빠르게" : "Just the essentials"}</strong><small>{ko ? "연결부터 바로 확인해요" : "Jump straight to connection"}</small>
                     </button>
                   </div>
                 </>
@@ -967,9 +1057,9 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                   <Dialogue reduced={reduced} onType={() => play("tap")} text={t({ ko: "좋아요, 천천히 가요. 하나도 안 급해요. 지금 나와 가장 가까운 경험을 골라 주세요. 어떤 답이든 완벽해요.", en: "Great — we'll go slowly. There is no rush. Choose the experience closest to yours; every answer is perfectly fine." })} />
                   <div className={styles.choiceGridThree}>
                     {[
-                      ["new", "🌿", { ko: "완전히 처음이에요", en: "I'm completely new" }],
-                      ["chat", "💬", { ko: "ChatGPT는 써봤어요", en: "I've used ChatGPT" }],
-                      ["cli", "⌨️", { ko: "코딩 도구도 써봤어요", en: "I've used coding tools" }],
+                      ["new", "NEW", { ko: "완전히 처음이에요", en: "I'm completely new" }],
+                      ["chat", "CHAT", { ko: "ChatGPT는 써봤어요", en: "I've used ChatGPT" }],
+                      ["cli", "CLI", { ko: "코딩 도구도 써봤어요", en: "I've used coding tools" }],
                     ].map(([id, icon, copy]) => (
                       <button key={String(id)} type="button" onClick={() => void go("s2", { experience: id })}>
                         <span>{String(icon)}</span><strong>{t(copy as Copy)}</strong>
@@ -988,21 +1078,28 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                     text={state.experience === "cli"
                       ? t({ ko: "Codex나 Claude Code를 들어보셨다면 이미 감을 잡으셨을 거예요. 이런 도구는 내 컴퓨터에서 허락받은 파일을 직접 고칠 수 있고, One은 그 과정을 더 쉽게 묶어줘요.", en: "If you've heard of Codex or Claude Code, you already know the idea: these tools can edit allowed files on your computer, and One makes that workflow easier." })
                       : state.rephraseUsed
-                      ? t({ ko: "ChatGPT는 인터넷 건너편 친구예요. One은 내 Mac 안에 있어서, 내가 허락한 파일과 앱을 직접 도울 수 있어요.", en: "ChatGPT is a friend across the internet. One lives on your Mac, so it can help with files and apps you allow." })
-                      : t({ ko: "이게 헷갈리는 건 정말 정상이에요. 일반 웹 챗은 구름 너머 회사 컴퓨터에 있어서 내 Mac 파일에 손을 넣지 못해요. 그래서 앱을 부탁해도 코드 글만 줄 때가 많죠. One은 내 Mac에서, 내가 허락한 파일과 도구로 실제 작업을 이어갑니다.", en: "It is completely normal for this to feel confusing. A web chat runs on a company computer beyond the cloud, so it cannot reach into files on your Mac and often stops at giving you code as text. One works here, using only the files and tools you allow." })}
+                      ? t({ ko: "ChatGPT는 인터넷 건너편 친구예요. One은 내 컴퓨터 안에 있어서, 내가 허락한 파일과 앱을 직접 도울 수 있어요.", en: "ChatGPT is a friend across the internet. One lives on your computer, so it can help with files and apps you allow." })
+                      : t({ ko: "이게 헷갈리는 건 정말 정상이에요. 일반 웹 챗은 구름 너머 회사 컴퓨터에 있어서 내 파일에 손을 넣지 못해요. 그래서 앱을 부탁해도 코드 글만 줄 때가 많죠. One은 내 컴퓨터에서, 내가 허락한 파일과 도구로 실제 작업을 이어갑니다.", en: "It is completely normal for this to feel confusing. A web chat runs on a company computer beyond the cloud, so it cannot reach into files on your computer and often stops at giving you code as text. One works here, using only the files and tools you allow." })}
                     onNext={() => void go("s3")}
                   />
-                  <div className={styles.wallVisual} role="group" aria-label={ko ? "웹 챗과 One의 차이" : "Difference between web chat and One"}>
+                  <motion.div
+                    className={styles.wallVisual}
+                    role="group"
+                    aria-label={ko ? "웹 챗과 One의 차이" : "Difference between web chat and One"}
+                    initial={reduced ? false : { opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: reduced ? 0 : 0.35 }}
+                  >
                     <img
                       src="/brand/one-local-firewall-mint.png"
-                      alt={ko ? "멀리 있는 클라우드 AI는 투명 방화벽 너머의 내 Mac 파일에 닿지 못하고, 민트색 Las는 Mac 안에서 허락한 파일을 돕는 장면" : "A distant cloud AI cannot reach local Mac files through a transparent firewall, while mint Las helps with allowed files on the Mac"}
+                      alt={ko ? "멀리 있는 클라우드 AI는 투명 방화벽 너머의 내 컴퓨터 파일에 닿지 못하고, 민트색 Las는 컴퓨터 안에서 허락한 파일을 돕는 장면" : "A distant cloud AI cannot reach local files through a transparent firewall, while mint Las helps with allowed files on this computer"}
                     />
                     <div className={styles.wallLegend}>
                       <span><strong>Web chat</strong><small>{ko ? "인터넷 건너편" : "Across the internet"}</small></span>
                       <span><strong>{ko ? "투명 방화벽" : "Transparent firewall"}</strong><small>{ko ? "내 파일 보호" : "Protects local files"}</small></span>
-                      <span><strong>One · My Mac</strong><small>{ko ? "허락한 도구와 파일" : "Allowed tools and files"}</small></span>
+                      <span><strong>{ko ? "One · 내 컴퓨터" : "One · My computer"}</strong><small>{ko ? "허락한 도구와 파일" : "Allowed tools and files"}</small></span>
                     </div>
-                  </div>
+                  </motion.div>
                   <div className={styles.actionsBetween}>
                     <button type="button" className={styles.back} onClick={() => void go("s1")}>← {ko ? "뒤로" : "Back"}</button>
                     <div className={styles.actions}>
@@ -1026,10 +1123,10 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                         key={String(id)}
                         type="button"
                         role="radio"
-                        aria-checked={state.subscription === id}
-                        tabIndex={state.subscription === id || (!state.subscription && id === "paid") ? 0 : -1}
-                        data-selected={state.subscription === id ? "true" : "false"}
-                        onKeyDown={(event) => moveRadio(event, ["paid", "free", "none"] as const, state.subscription, (value) => void chooseSubscription(value))}
+                        aria-checked={selectedSubscription === id}
+                        tabIndex={selectedSubscription === id || (!selectedSubscription && id === "paid") ? 0 : -1}
+                        data-selected={selectedSubscription === id ? "true" : "false"}
+                        onKeyDown={(event) => moveRadio(event, ["paid", "free", "none"] as const, selectedSubscription, (value) => void chooseSubscription(value))}
                         onClick={() => void chooseSubscription(id as Exclude<OneOnboardingSubscription, null>)}
                       >
                         <span>{String(icon)}</span>{t(copy as Copy)}
@@ -1042,11 +1139,11 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                         key={provider.id}
                         type="button"
                         role="radio"
-                        aria-checked={(replay ? previewProvider : state.provider) === provider.id}
-                        tabIndex={(replay ? previewProvider : state.provider) === provider.id || (!(replay ? previewProvider : state.provider) && provider.id === "openai") ? 0 : -1}
-                        disabled={!state.subscription || busy}
-                        data-selected={(replay ? previewProvider : state.provider) === provider.id ? "true" : "false"}
-                        onKeyDown={(event) => moveRadio(event, PROVIDERS.map((item) => item.id), replay ? previewProvider : state.provider, (value) => void selectProvider(value))}
+                        aria-checked={selectedProvider === provider.id}
+                        tabIndex={selectedProvider === provider.id || (!selectedProvider && provider.id === "openai") ? 0 : -1}
+                        disabled={!selectedSubscription || busy}
+                        data-selected={selectedProvider === provider.id ? "true" : "false"}
+                        onKeyDown={(event) => moveRadio(event, PROVIDERS.map((item) => item.id), selectedProvider, (value) => void selectProvider(value))}
                         onClick={() => void selectProvider(provider.id)}
                       >
                         <img src={provider.logo} alt="" /><strong>{provider.name}</strong>
@@ -1058,16 +1155,30 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                     <button
                       type="button"
                       className={styles.primary}
-                      disabled={busy || !(replay ? previewProvider : state.provider)}
+                      disabled={busy || !selectedProvider}
                       onClick={() => {
-                        const provider = replay ? previewProvider : state.provider;
-                        if (provider) void connectProvider(provider);
+                        if (selectedProvider) void connectProvider(selectedProvider);
                       }}
                     >
-                      {ko ? "이 제공자로 연결" : "Connect this provider"}
+                      {busy
+                        ? (ko ? "연결 상태 확인 중…" : "Checking connection…")
+                        : replay
+                          ? (ko ? "선택 확인하고 다음" : "Confirm choice and continue")
+                          : (ko ? "이 AI 두뇌 연결" : "Connect this AI brain")}
                     </button>
+                    {!replay && (
+                      <button type="button" className={styles.secondary} disabled={busy || !selectedProvider} onClick={() => void chooseLimited()}>
+                        {ko ? "지금은 연결하지 않고 One 둘러보기" : "Explore One without connecting yet"}
+                      </button>
+                    )}
                   </div>
-                  {state.subscription === "free" && (
+                  {selectedProvider === "kimi" && (
+                    <div className={styles.accountGuide} role="note">
+                      <strong>{ko ? "Kimi는 지금 제한 모드로만 시작해요" : "Kimi currently starts in limited mode"}</strong>
+                      <small>{ko ? "Kimi CLI는 로그인 상태를 One이 안전하게 자동 확인할 수 있는 수단을 제공하지 않아요. 설치와 브라우저 로그인은 열어 드리지만, 연결 완료라고 표시하지 않고 제한 모드로 계속합니다." : "Kimi CLI does not expose a safe automatic sign-in check to One. We can open installation and browser login, but we do not claim it is connected; continue in limited mode."}</small>
+                    </div>
+                  )}
+                  {selectedSubscription === "free" && (
                     <div className={styles.accountGuide}>
                       <strong>{ko ? "계정은 있으니 한 발만 더 가면 돼요" : "You already have an account — just one more step"}</strong>
                       <ol>
@@ -1076,7 +1187,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                       </ol>
                     </div>
                   )}
-                  {state.subscription === "none" && (
+                  {selectedSubscription === "none" && (
                     <div className={styles.accountGuide}>
                       <strong>{ko ? "완전 처음이어도 3단계면 돼요" : "Completely new? It only takes three steps"}</strong>
                       <ol>
@@ -1114,7 +1225,6 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                     <AnimatePresence>
                       {teamCreated && (
                         <motion.div className={styles.teamCelebration} role="status" aria-live="polite" initial={reduced ? false : { opacity: 0, scale: 0.82 }} animate={{ opacity: 1, scale: 1 }} exit={reduced ? undefined : { opacity: 0 }} transition={{ duration: reduced ? 0 : 0.26 }}>
-                          <div className={styles.confetti} aria-hidden="true">✦ · ✧ · ✦</div>
                           <div className={styles.teamBirth} aria-hidden="true">
                             {selectedSlugs.map((slug) => {
                               const member = ONE_ONBOARDING_STARTER_AGENTS.find((agent) => agent.slug === slug);

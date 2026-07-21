@@ -1,4 +1,4 @@
-const { access, lstat, readFile, readdir, readlink, realpath, rm } = require("node:fs/promises");
+const { access, chmod, lstat, readFile, readdir, readlink, realpath, rm } = require("node:fs/promises");
 const { createHash } = require("node:crypto");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
@@ -613,6 +613,78 @@ async function verifyMacComputerUseDriver(context) {
   console.log(`[afterPack] verified Agentlas Computer Use driver ${sourceDigest} (${architectures.join("+")})`);
 }
 
+async function sealReadOnlyTree(root) {
+  // Strip inherited ACLs before mode sealing. Otherwise a writable macOS ACL
+  // can survive chmod 0444/0555 and make the signed Resources tree mutable.
+  await execFileAsync("/bin/chmod", ["-RN", root]);
+  const directories = [root];
+  const files = [];
+  const queue = [root];
+  while (queue.length > 0) {
+    const current = queue.pop();
+    const entries = await readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const absolute = path.join(current, entry.name);
+      const stat = await lstat(absolute);
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) {
+        directories.push(absolute);
+        queue.push(absolute);
+      } else if (stat.isFile()) {
+        files.push({ absolute, executable: (stat.mode & 0o111) !== 0 });
+      } else {
+        throw new Error(`[afterPack] unsupported signed runtime entry: ${absolute}`);
+      }
+    }
+  }
+
+  for (const file of files) {
+    await chmod(file.absolute, file.executable ? 0o555 : 0o444);
+  }
+  // Seal children before their parents so traversal remains available until
+  // every payload file has reached its final post-signing mode.
+  for (const directory of directories.sort((left, right) => right.length - left.length)) {
+    await chmod(directory, 0o555);
+  }
+
+  for (const file of files) {
+    const stat = await lstat(file.absolute);
+    if ((stat.mode & 0o222) !== 0 || (file.executable && (stat.mode & 0o111) === 0)) {
+      throw new Error(`[afterPack] signed runtime file was not sealed read-only: ${file.absolute}`);
+    }
+  }
+  for (const directory of directories) {
+    const stat = await lstat(directory);
+    if ((stat.mode & 0o222) !== 0 || (stat.mode & 0o111) === 0) {
+      throw new Error(`[afterPack] signed runtime directory was not sealed read-only: ${directory}`);
+    }
+  }
+  return { directories: directories.length, files: files.length };
+}
+
+async function sealMacRuntimeResources(context, phase = "afterSign") {
+  if (context.electronPlatformName !== "darwin") return;
+  const productFilename = context.packager?.appInfo?.productFilename || "Agentlas";
+  const resourcesDir = path.join(context.appOutDir, `${productFilename}.app`, "Contents", "Resources");
+  const roots = [
+    path.join(resourcesDir, "Hephaestus"),
+    path.join(resourcesDir, "python-runtime"),
+  ];
+  let directoryCount = 0;
+  let fileCount = 0;
+  for (const root of roots) {
+    const sealed = await sealReadOnlyTree(root);
+    directoryCount += sealed.directories;
+    fileCount += sealed.files;
+  }
+  console.log(
+    `[${phase}] sealed signed Python/runtime resources read-only `
+      + `(${directoryCount} directories, ${fileCount} files)`,
+  );
+}
+
+exports.sealMacRuntimeResources = sealMacRuntimeResources;
+
 exports.default = async function afterPackClean(context) {
   if (process.platform === "darwin" && context.electronPlatformName === "darwin") {
     try {
@@ -629,4 +701,14 @@ exports.default = async function afterPackClean(context) {
 
   await verifyEmbeddedAgentlasOs(context);
   await verifyMacComputerUseDriver(context);
+  // electron-builder skips afterSign when identity=null. The explicitly
+  // isolated local candidate is never signed or published, so afterPack is its
+  // terminal lifecycle boundary and may be sealed here without blocking a
+  // later signer. Official Agentlas.app remains sealed only by afterSign.
+  if (
+    context.electronPlatformName === "darwin" &&
+    context.packager?.appInfo?.productFilename === "Agentlas-Local-Candidate"
+  ) {
+    await sealMacRuntimeResources(context, "afterPack-local");
+  }
 };
