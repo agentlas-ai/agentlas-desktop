@@ -7163,9 +7163,10 @@ button[data-toggle-state="on"] {
   grid-template-columns: auto minmax(0, 1fr);
 }
 .sidenav-update-card[data-action-required="true"] {
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  border-color: color-mix(in oklch, var(--red-deep) 34%, var(--paper-edge));
-  background: color-mix(in oklch, var(--red-deep) 6%, var(--paper));
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  border-color: color-mix(in oklch, var(--accent) 42%, var(--paper-edge));
+  background: color-mix(in oklch, var(--accent) 9%, var(--paper));
 }
 .sidenav-update-card[data-collapsed="true"] {
   grid-template-columns: 1fr;
@@ -7192,9 +7193,10 @@ button[data-toggle-state="on"] {
 .sidenav-update-copy strong,
 .sidenav-update-copy span {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .sidenav-update-copy strong {
   font-weight: 850;
@@ -7222,6 +7224,21 @@ button[data-toggle-state="on"] {
   background: #fff;
   color: var(--accent);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
+}
+.sidenav-update-card[data-action-required="true"] .sidenav-update-action {
+  grid-column: 2;
+  justify-self: start;
+  width: 100%;
+  min-height: 32px;
+  height: auto;
+  padding: 7px 10px;
+  white-space: normal;
+  line-height: 1.3;
+  text-align: center;
+}
+.sidenav-update-card[data-collapsed="true"] .sidenav-update-action {
+  grid-column: auto;
+  width: auto;
 }
 .sidenav-update-dismiss {
   padding: 0;

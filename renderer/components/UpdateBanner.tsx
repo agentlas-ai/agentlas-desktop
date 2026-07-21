@@ -2,7 +2,7 @@
 //   - available:   새 버전 발견 (자동 다운로드 시작) 알림
 //   - downloading: 진행률 표시
 //   - downloaded:  "재시작 업데이트" 강조 버튼 (dismissed 전까지)
-//   - manual-required / incompatible: 공식 설치 파일 경로를 노출(자동 재시도 금지)
+//   - manual-required / incompatible: 앱 내부의 안전한 재시도만 노출
 //   - recovery-required: 보존한 SQLite 복구본을 여는 경로 노출
 //   - checking / not-available / routine error: 노출하지 않음 — 백그라운드로 조용히.
 //
@@ -57,6 +57,7 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
   const isInstalling = state.status === "installing";
   const isManual = state.status === "manual-required" || state.status === "incompatible";
   const isRecovery = state.status === "recovery-required";
+  const isInternalRepair = state.code === "install-source-untrusted";
   const canRevealRecovery = isRecovery && state.recoveryBackupAvailable === true;
   // "available"도 즉시 노출 — 새 버전 발견 순간 알림(자동 다운로드 중).
   const isDownloading = state.status === "downloading" || state.status === "available";
@@ -72,10 +73,6 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
     await api.updater.install();
   }
 
-  async function openManualDownload() {
-    await ipc()?.updater.openManualDownload();
-  }
-
   async function revealRecoveryBackup() {
     await ipc()?.updater.revealRecoveryBackup();
   }
@@ -89,7 +86,7 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
 
   const attentionCopy = isRecovery
     ? t("update.recovery_required")
-    : state.code === "install-source-untrusted"
+    : isInternalRepair
       ? t("update.repair_required")
     : state.code === "continuity-backup-failed"
       ? t("update.safety_backup_failed")
@@ -148,14 +145,14 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
             <strong>{collapsed ? `v${state.version ?? "?"}` : attentionCopy}</strong>
           </span>
           {!isInstalling && (
-            (isRecovery || state.manualDownloadUrl || state.canRetry) && (
+            (canRevealRecovery || state.canRetry) && (
               <button
                 onClick={() => void (
                   canRevealRecovery
                     ? revealRecoveryBackup()
                     : state.canRetry
                       ? retrySafetyAction()
-                      : openManualDownload()
+                      : retrySafetyAction()
                 )}
                 className="sidenav-update-action"
                 title={
@@ -163,9 +160,7 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
                     ? t("update.reveal_recovery")
                     : state.canRetry
                       ? t("update.retry")
-                      : state.code === "install-source-untrusted"
-                        ? t("update.repair_with_official")
-                        : t("update.open_download")
+                      : t("update.retry")
                 }
               >
                 {collapsed
@@ -174,9 +169,7 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
                     ? t("update.reveal_recovery")
                     : state.canRetry
                       ? t("update.retry")
-                      : state.code === "install-source-untrusted"
-                        ? t("update.repair_with_official")
-                        : t("update.open_download")}
+                    : t("update.retry")}
               </button>
             )
           )}

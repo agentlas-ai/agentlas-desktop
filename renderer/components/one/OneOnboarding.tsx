@@ -46,13 +46,20 @@ const PROVIDERS: Array<{
   logo: string;
   page: string;
 }> = [
-  { id: "openai", runtime: "codex", name: "OpenAI · Codex", logo: "/brand/llm/openai.svg", page: "https://chatgpt.com/" },
-  { id: "anthropic", runtime: "claude-code", name: "Claude", logo: "/brand/llm/claude.svg", page: "https://claude.ai/" },
-  { id: "kimi", runtime: "kimi", name: "Kimi", logo: "/brand/llm/kimi.svg", page: "https://www.kimi.com/" },
-  { id: "google", runtime: "gemini", name: "Gemini", logo: "/brand/llm/googlegemini.svg", page: "https://gemini.google.com/" },
+  { id: "openai", runtime: "codex", name: "OpenAI · Codex", logo: "/brand/llm/openai.svg", page: "https://openai.com/chatgpt/pricing/" },
+  { id: "anthropic", runtime: "claude-code", name: "Claude", logo: "/brand/llm/claude.svg", page: "https://claude.com/pricing" },
+  { id: "kimi", runtime: "kimi", name: "Kimi", logo: "/brand/llm/kimi.svg", page: "https://www.kimi.com/help/membership/membership-overview" },
+  { id: "google", runtime: "gemini", name: "Gemini", logo: "/brand/llm/googlegemini.svg", page: "https://one.google.com/about/google-ai-plans/" },
 ];
 
 const EXAMPLE_SEEDS = ["one.onb.seed.cafe", "one.onb.seed.sales", "one.onb.seed.name"] as const;
+const PLACEHOLDER_KEYS = [
+  "one.onb.s6.placeholder",
+  "one.onb.s6.placeholder_walk",
+  "one.onb.s6.placeholder_budget",
+] as const;
+
+const HIGHLIGHT_PATTERN = /(바이브 코딩|바이브코딩|뇌|구독|공짜|무료|팀|데이터|서버|화면|vibe coding|brain|subscription|free|team|data|server|screen)/gi;
 
 const CONCEPTS = [
   {
@@ -85,8 +92,8 @@ const MOOD_POSITION: Record<MascotMood, string> = {
   point: "66.667% 100%",
 };
 
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
+function errorMessage(_error: unknown, fallback: string): string {
+  return fallback;
 }
 
 function BrandMark({ icon }: { icon: SimpleIcon }) {
@@ -141,6 +148,15 @@ function useTypewriter(text: string, immediate: boolean) {
   };
 }
 
+function HighlightedText({ text }: { text: string }) {
+  return text.split(HIGHLIGHT_PATTERN).map((part, index) => {
+    if (!part) return null;
+    return index % 2 === 1
+      ? <mark key={`${part}-${index}`} className={styles.keyword}>{part}</mark>
+      : <span key={`${part}-${index}`}>{part}</span>;
+  });
+}
+
 function Las({
   mood,
   small = false,
@@ -182,11 +198,13 @@ function Dialogue({
   reduced,
   onNext,
   onType,
+  nextLabel,
 }: {
   text: string;
   reduced: boolean;
   onNext?: () => void;
   onType?: () => void;
+  nextLabel: string;
 }) {
   const typed = useTypewriter(text, reduced);
   const ref = useRef<HTMLDivElement>(null);
@@ -215,25 +233,42 @@ function Dialogue({
       window.dispatchEvent(new CustomEvent("one-onboarding-talking", { detail: false }));
     };
   }, [typed.complete]);
+  const focusNextControl = useCallback(() => {
+    const scene = ref.current?.closest<HTMLElement>("[data-onboarding-scene]");
+    const next = scene?.querySelector<HTMLElement>(
+      `button:not(.${styles.dialogueAction}):not([disabled]), textarea:not([disabled]), [href]`,
+    );
+    next?.focus();
+  }, []);
+  const activate = useCallback(() => {
+    if (!typed.complete) {
+      typed.flush();
+      return;
+    }
+    if (onNext) onNext();
+    else focusNextControl();
+  }, [focusNextControl, onNext, typed]);
   useEffect(() => {
     const flush = () => {
       if (!typed.complete) typed.flush();
     };
+    const advance = () => {
+      if (typed.complete) activate();
+    };
     window.addEventListener("one-onboarding-flush", flush);
-    return () => window.removeEventListener("one-onboarding-flush", flush);
-  }, [typed.complete, typed.flush]);
-  const activate = () => typed.complete ? onNext?.() : typed.flush();
-  const content = (
-    <>
-      <span className={styles.srOnly}>{text}</span>
-      <span aria-hidden="true">{typed.visible}{!typed.complete && <span className={styles.caret}>▌</span>}</span>
-    </>
-  );
+    window.addEventListener("one-onboarding-advance", advance);
+    return () => {
+      window.removeEventListener("one-onboarding-flush", flush);
+      window.removeEventListener("one-onboarding-advance", advance);
+    };
+  }, [activate, typed.complete, typed.flush]);
   return (
     <div ref={ref} className={styles.dialogue} role="status">
-      {typed.complete && !onNext
-        ? content
-        : <button ref={retainFocus} type="button" className={styles.dialogueAction} onClick={activate} aria-label={text}>{content}</button>}
+      <button ref={retainFocus} type="button" className={styles.dialogueAction} onClick={activate} aria-label={text}>
+        <span className={styles.srOnly}>{text}</span>
+        <span aria-hidden="true"><HighlightedText text={typed.visible} />{!typed.complete && <span className={styles.caret}>▌</span>}</span>
+        {typed.complete && <span className={styles.dialogueNext}>{nextLabel}</span>}
+      </button>
     </div>
   );
 }
@@ -278,21 +313,34 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
   const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
   const [selectedSlugs, setSelectedSlugs] = useState<string[]>([]);
   const [teamHint, setTeamHint] = useState(false);
+  const [teamAssist, setTeamAssist] = useState(false);
   const [teamCreated, setTeamCreated] = useState(false);
   const [seed, setSeed] = useState("");
   const [pendingInstall, setPendingInstall] = useState<Exclude<OneOnboardingProvider, null> | null>(null);
   const [previewSubscription, setPreviewSubscription] = useState<Exclude<OneOnboardingSubscription, null> | null>(null);
   const [previewProvider, setPreviewProvider] = useState<Exclude<OneOnboardingProvider, null> | null>(null);
   const [agentHint, setAgentHint] = useState<string | null>(null);
+  const [brandTip, setBrandTip] = useState<string | null>(null);
+  const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const [talking, setTalking] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [starterTeamPresent, setStarterTeamPresent] = useState(true);
   const [loadNonce, setLoadNonce] = useState(0);
+  const [dismissRequested, setDismissRequested] = useState(false);
+  const [dismissRetryNonce, setDismissRetryNonce] = useState(0);
   const audioRef = useRef<AudioContext | null>(null);
   const dialogRef = useRef<HTMLElement | null>(null);
   const originFocusRef = useRef<HTMLElement | null>(null);
+  const teamZoneRef = useRef<HTMLDivElement | null>(null);
+  const pendingProviderReturnRef = useRef<{ provider: Exclude<OneOnboardingProvider, null>; openedAt: number } | null>(null);
+  const pendingProviderReturnTimerRef = useRef<number | null>(null);
+  const dismissPersistingRef = useRef(false);
+  const dismissRequestedRef = useRef(false);
+  const selectionQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const selectionPendingRef = useRef(0);
+  const providerActionRef = useRef(false);
 
-  const visible = Boolean(state && (
+  const visible = Boolean(state && !dismissRequested && (
     finishing
     || replay
     || !["completed", "dismissed", "migrated"].includes(state.status)
@@ -304,8 +352,8 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
   const selectedProvider = previewProvider ?? state?.provider ?? null;
   const beginnerPath = (state?.experience ?? "new") !== "expert";
   const path = beginnerPath
-    ? (["s1", "s2", "s3", "s4", "s5", "s6"] as OneOnboardingScene[])
-    : (["s0", "s3", "s4", "s6"] as OneOnboardingScene[]);
+    ? (["s0", "s1", "s2", "s3", "s4", "s5", "s6"] as OneOnboardingScene[])
+    : (["s0", "s3", "s6"] as OneOnboardingScene[]);
 
   useEffect(() => {
     const api = ipc();
@@ -326,10 +374,25 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
   useEffect(() => onVisibilityChange?.(visible), [onVisibilityChange, visible]);
 
   useEffect(() => {
-    if (!visible || scene !== "s4") return;
-    const timer = window.setTimeout(() => setTeamHint(true), 30_000);
-    return () => window.clearTimeout(timer);
-  }, [scene, visible]);
+    setTeamHint(false);
+    setTeamAssist(false);
+    if (!visible || scene !== "s4" || selectedSlugs.length > 0) return;
+    const hintTimer = window.setTimeout(() => setTeamHint(true), 30_000);
+    const assistTimer = window.setTimeout(() => setTeamAssist(true), 36_000);
+    return () => {
+      window.clearTimeout(hintTimer);
+      window.clearTimeout(assistTimer);
+    };
+  }, [scene, selectedSlugs.length, visible]);
+
+  useEffect(() => {
+    if (!visible || scene !== "s6" || seed) return;
+    setPlaceholderIndex(0);
+    const timer = window.setInterval(() => {
+      setPlaceholderIndex((current) => (current + 1) % PLACEHOLDER_KEYS.length);
+    }, 2_600);
+    return () => window.clearInterval(timer);
+  }, [scene, seed, visible]);
 
   useEffect(() => {
     const onTalking = (event: Event) => setTalking(Boolean((event as CustomEvent<boolean>).detail));
@@ -349,9 +412,16 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       ?? dialog?.querySelector<HTMLElement>("h1");
     const focusTimer = window.setTimeout(() => initial?.focus(), 0);
     const trap = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && replay) {
+      if (event.key === "Escape") {
         event.preventDefault();
-        setReplay(false);
+        if (replay) {
+          setReplay(false);
+          return;
+        }
+        setDismissRequested(true);
+        dismissRequestedRef.current = true;
+        setShowResume(false);
+        setHelperOpen(false);
         return;
       }
       if (event.key !== "Tab" || !dialog) return;
@@ -472,6 +542,25 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
     }
   }, [applyPatch, locale, play, replay]);
 
+  const enqueueSelectionPatch = useCallback((patch: UpdateOneOnboardingInput["patch"]) => {
+    const api = ipc();
+    if (!api?.oneOnboarding) return Promise.resolve<OneOnboardingState | null>(null);
+    selectionPendingRef.current += 1;
+    setBusy(true);
+    const task = selectionQueueRef.current.then(async () => {
+      const latest = await api.oneOnboarding.getState();
+      if (dismissRequestedRef.current || latest.status === "dismissed") return latest;
+      const next = await api.oneOnboarding.update({ expectedVersion: latest.version, patch });
+      setState(next);
+      return next;
+    });
+    selectionQueueRef.current = task.then(() => undefined, () => undefined);
+    return task.finally(() => {
+      selectionPendingRef.current = Math.max(0, selectionPendingRef.current - 1);
+      if (selectionPendingRef.current === 0 && !providerActionRef.current) setBusy(false);
+    });
+  }, []);
+
   const chooseSubscription = async (subscription: Exclude<OneOnboardingSubscription, null>) => {
     setPreviewSubscription(subscription);
     if (replay) {
@@ -480,7 +569,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
     }
     setError(null);
     try {
-      const next = await applyPatch({ subscription });
+      const next = await enqueueSelectionPatch({ subscription });
       setPreviewSubscription(next?.subscription ?? subscription);
       play("tap");
     } catch (cause) {
@@ -503,38 +592,63 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       play("tap");
       return;
     }
-    if (busy) return;
-    setBusy(true);
     setError(null);
     try {
-      const next = await applyPatch({ provider });
+      const next = await enqueueSelectionPatch({ provider });
       setPreviewProvider(next?.provider ?? provider);
       play("tap");
     } catch (cause) {
       setPreviewProvider(state?.provider ?? null);
       setError(errorMessage(cause, tFor(locale, "one.onb.err.save_provider")));
-    } finally {
-      setBusy(false);
     }
   };
 
+  const advanceAfterProviderSetup = useCallback(async (current: OneOnboardingState) => {
+    const api = ipc();
+    if (!api?.oneOnboarding) return current;
+    if (current.experience !== "expert") {
+      const next = await api.oneOnboarding.update({ expectedVersion: current.version, patch: { currentScene: "s4" } });
+      setState(next);
+      return next;
+    }
+    const all = ONE_ONBOARDING_STARTER_AGENTS.map((agent) => agent.slug);
+    let next = await api.oneOnboarding.provisionStarterTeam({
+      expectedVersion: current.version,
+      memberSlugs: all,
+      locale,
+    });
+    next = await api.oneOnboarding.update({ expectedVersion: next.version, patch: { currentScene: "s6" } });
+    setSelectedSlugs(all);
+    setState(next);
+    setSeed(next.projectSeed);
+    return next;
+  }, [locale]);
+
   const connectProvider = async (provider: Exclude<OneOnboardingProvider, null>) => {
     if (replay) return go("s4");
-    if (busy) return;
+    if (providerActionRef.current) return;
     const api = ipc();
     const entry = PROVIDERS.find((item) => item.id === provider);
     if (!api || !entry) return;
+    providerActionRef.current = true;
     setBusy(true);
     setError(null);
     setRuntimeMessage(tFor(locale, "one.onb.rt.checking"));
     try {
-      let current = state?.provider === provider ? state : await applyPatch({ provider });
-      if (!current) return;
+      await selectionQueueRef.current;
+      setBusy(true);
+      let current = await api.oneOnboarding.getState();
+      if (dismissRequestedRef.current || current.status === "dismissed") return;
+      if (current.provider !== provider) {
+        current = await api.oneOnboarding.update({ expectedVersion: current.version, patch: { provider } });
+        setState(current);
+      }
       const installed = await detectProvider(provider);
-      if (state?.subscription !== "paid") {
+      if (current.subscription !== "paid") {
         const opened = await api.fs.openPath(entry.page);
         if (!opened.ok) throw new Error(opened.message || tFor(locale, "one.onb.err.open_page"));
-        setRuntimeMessage(state?.subscription === "none"
+        pendingProviderReturnRef.current = { provider, openedAt: Date.now() };
+        setRuntimeMessage(current.subscription === "none"
           ? tFor(locale, "one.onb.rt.opened_signup")
           : tFor(locale, "one.onb.rt.opened_service"));
         return;
@@ -547,8 +661,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       current = await api.oneOnboarding.verifyProvider({ expectedVersion: current.version, provider });
       setState(current);
       if (current.brainStatus === "connected") {
-        current = await api.oneOnboarding.update({ expectedVersion: current.version, patch: { currentScene: "s4" } });
-        setState(current);
+        current = await advanceAfterProviderSetup(current);
         setRuntimeMessage(tFor(locale, "one.onb.rt.connected"));
         play("success");
         return;
@@ -560,6 +673,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
     } catch (cause) {
       setError(errorMessage(cause, tFor(locale, "one.onb.err.start_connection")));
     } finally {
+      providerActionRef.current = false;
       setBusy(false);
     }
   };
@@ -584,16 +698,21 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
     }
   };
 
-  const recheckProvider = async () => {
+  const recheckProvider = useCallback(async () => {
     if (!state?.provider || replay) return;
     setBusy(true);
     setError(null);
     try {
       const installed = await detectProvider(state.provider);
       if (!installed) {
-        setRuntimeMessage(tFor(locale, "one.onb.rt.not_detected"));
+        const entry = PROVIDERS.find((item) => item.id === state.provider);
+        setPendingInstall(state.provider);
+        setRuntimeMessage(entry
+          ? tFor(locale, "one.onb.rt.install_required", { name: entry.name })
+          : tFor(locale, "one.onb.rt.not_detected"));
         return;
       }
+      setPendingInstall(null);
       let next = await ipc()!.oneOnboarding.verifyProvider({ expectedVersion: state.version, provider: state.provider });
       setState(next);
       if (next.brainStatus !== "connected") {
@@ -602,15 +721,44 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
           : tFor(locale, "one.onb.rt.tool_found_unverified"));
         return;
       }
-      next = await ipc()!.oneOnboarding.update({ expectedVersion: next.version, patch: { currentScene: "s4" } });
-      setState(next);
+      next = await advanceAfterProviderSetup(next);
       play("success");
     } catch (cause) {
       setError(errorMessage(cause, tFor(locale, "one.onb.err.verify_status")));
     } finally {
       setBusy(false);
     }
-  };
+  }, [advanceAfterProviderSetup, detectProvider, locale, play, replay, state]);
+
+  useEffect(() => {
+    const recheckAfterProviderReturn = () => {
+      const pending = pendingProviderReturnRef.current;
+      if (!pending || replay || busy || state?.provider !== pending.provider) return;
+      if (pendingProviderReturnTimerRef.current !== null) {
+        window.clearTimeout(pendingProviderReturnTimerRef.current);
+      }
+      const delay = Math.max(0, 750 - (Date.now() - pending.openedAt));
+      pendingProviderReturnTimerRef.current = window.setTimeout(() => {
+        pendingProviderReturnTimerRef.current = null;
+        if (pendingProviderReturnRef.current !== pending) return;
+        pendingProviderReturnRef.current = null;
+        void recheckProvider();
+      }, delay);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") recheckAfterProviderReturn();
+    };
+    window.addEventListener("focus", recheckAfterProviderReturn);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", recheckAfterProviderReturn);
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (pendingProviderReturnTimerRef.current !== null) {
+        window.clearTimeout(pendingProviderReturnTimerRef.current);
+        pendingProviderReturnTimerRef.current = null;
+      }
+    };
+  }, [busy, recheckProvider, replay, state?.provider]);
 
   const chooseLimited = async () => {
     if (replay) return go("s4");
@@ -625,8 +773,8 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       const api = ipc();
       if (!api) return;
       let next = await api.oneOnboarding.chooseLimited({ expectedVersion: state.version, provider: state.provider });
-      next = await api.oneOnboarding.update({ expectedVersion: next.version, patch: { currentScene: "s4" } });
       setState(next);
+      next = await advanceAfterProviderSetup(next);
     } catch (cause) {
       setError(errorMessage(cause, tFor(locale, "one.onb.err.save_limited")));
     } finally {
@@ -655,7 +803,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       if (readyProvider) current = await api.oneOnboarding.verifyProvider({ expectedVersion: current.version, provider: readyProvider });
       if (current.brainStatus === "connected") {
         const all = ONE_ONBOARDING_STARTER_AGENTS.map((agent) => agent.slug);
-        current = await api.oneOnboarding.provisionStarterTeam({ expectedVersion: current.version, memberSlugs: all });
+        current = await api.oneOnboarding.provisionStarterTeam({ expectedVersion: current.version, memberSlugs: all, locale });
         current = await api.oneOnboarding.update({ expectedVersion: current.version, patch: { currentScene: "s6" } });
         setSelectedSlugs(all);
         setState(current);
@@ -724,6 +872,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       const next = await api.oneOnboarding.provisionStarterTeam({
         expectedVersion: state.version,
         memberSlugs: selectedSlugs,
+        locale,
       });
       setState(next);
       setTeamCreated(true);
@@ -814,17 +963,55 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       setHelperOpen(false);
       return;
     }
+    setError(null);
+    dismissRequestedRef.current = true;
+    setDismissRequested(true);
+    setShowResume(false);
+    setHelperOpen(false);
+  };
+
+  useEffect(() => {
+    if (!dismissRequested || replay || dismissPersistingRef.current) return;
+    const api = ipc();
+    if (!api?.oneOnboarding) return;
+    dismissPersistingRef.current = true;
+    void (async () => {
+      try {
+        const latest = await api.oneOnboarding.getState();
+        const next = latest.status === "dismissed"
+          ? latest
+          : await api.oneOnboarding.dismiss({ expectedVersion: latest.version });
+        setState(next);
+        dismissRequestedRef.current = false;
+        setDismissRequested(false);
+      } catch (cause) {
+        setError(errorMessage(cause, tFor(locale, "one.onb.err.close")));
+        window.setTimeout(() => setDismissRetryNonce((value) => value + 1), 250);
+      } finally {
+        dismissPersistingRef.current = false;
+      }
+    })();
+  }, [dismissRequested, dismissRetryNonce, locale, replay]);
+
+  const startOver = async () => {
     const api = ipc();
     if (!api?.oneOnboarding || !state || busy) return;
     setBusy(true);
     setError(null);
     try {
-      const next = await api.oneOnboarding.dismiss({ expectedVersion: state.version });
+      const next = await api.oneOnboarding.reset({ expectedVersion: state.version });
       setState(next);
+      setSelectedSlugs([]);
+      setSeed("");
+      setPreviewSubscription(null);
+      setPreviewProvider(null);
+      setRuntimeFacts([]);
+      setRuntimeMessage(null);
+      setPendingInstall(null);
+      setTeamCreated(false);
       setShowResume(false);
-      setHelperOpen(false);
     } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.close")));
+      setError(errorMessage(cause, tFor(locale, "one.onb.err.save_progress")));
     } finally {
       setBusy(false);
     }
@@ -879,6 +1066,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       const next = await api.oneOnboarding.provisionStarterTeam({
         expectedVersion: state.version,
         memberSlugs: state.selectedStarterSlugs,
+        locale,
       });
       setState(next);
       setStarterTeamPresent(true);
@@ -899,6 +1087,15 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
     s5: "one.onb.scene.s5.title",
     s6: "one.onb.scene.s6.title",
   } as const)[scene]), [locale, scene]);
+
+  const handleOverlayClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const target = event.target as Element;
+    if (target.closest("button, textarea, input, select, a, label")) return;
+    const activeScene = dialogRef.current?.querySelector<HTMLElement>("[data-onboarding-scene]");
+    window.dispatchEvent(new Event(activeScene?.dataset.dialogueDone === "true"
+      ? "one-onboarding-advance"
+      : "one-onboarding-flush"));
+  };
 
   if (!state) return error ? (
     <div className={styles.loadError} role="alert">
@@ -961,14 +1158,14 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
 
   if (showResume && !replay) {
     return (
-      <div className={styles.overlay} data-one-onboarding-dialog onClick={() => window.dispatchEvent(new Event("one-onboarding-flush"))}>
+      <div className={styles.overlay} data-one-onboarding-dialog onClick={handleOverlayClick}>
         <section ref={(node) => { dialogRef.current = node; }} className={styles.resumeCard} role="dialog" aria-modal="true" aria-labelledby="one-resume-title">
-          <button type="button" className={styles.close} disabled={busy} onClick={(event) => void dismissTutorial(event)} aria-label={tFor(locale, "one.onb.action.close")}>×</button>
+          <button type="button" className={styles.close} onClick={(event) => void dismissTutorial(event)} aria-label={tFor(locale, "one.onb.action.close")}>×</button>
           <Las mood="gentle" reduced={reduced} label={tFor(locale, "one.onb.las.label")} />
           <h1 id="one-resume-title" tabIndex={-1}>{tFor(locale, "one.onb.resume.title")}</h1>
           <p>{tFor(locale, "one.onb.resume.body")}</p>
           <div className={styles.actions}>
-            <button type="button" className={styles.secondary} onClick={() => { setShowResume(false); void go("s0"); }}>
+            <button type="button" className={styles.secondary} disabled={busy} onClick={() => void startOver()}>
               {tFor(locale, "one.onb.resume.start_over")}
             </button>
             <button type="button" className={styles.primary} onClick={() => setShowResume(false)}>
@@ -983,7 +1180,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
   const mood: MascotMood = talking ? "talking" : scene === "s3" && busy ? "thinking" : scene === "s4" ? "point" : scene === "s6" ? "cheer" : scene === "s2" ? "gentle" : "idle";
 
   return (
-    <div className={styles.overlay} data-one-onboarding-dialog data-finishing={finishing ? "true" : "false"} onClick={() => window.dispatchEvent(new Event("one-onboarding-flush"))}>
+    <div className={styles.overlay} data-one-onboarding-dialog data-finishing={finishing ? "true" : "false"} onClick={handleOverlayClick}>
       <section ref={(node) => { dialogRef.current = node; }} className={styles.panel} role="dialog" aria-modal="true" aria-labelledby="one-onboarding-title">
         <header className={styles.topbar}>
           <div
@@ -1001,7 +1198,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
             <button type="button" className={styles.sound} onClick={toggleSound} aria-label={state.soundEnabled ? tFor(locale, "one.onb.sound.mute") : tFor(locale, "one.onb.sound.on")}>
               {state.soundEnabled ? "♪" : "♪̸"}
             </button>
-            <button type="button" className={styles.close} disabled={busy} onClick={(event) => void dismissTutorial(event)} aria-label={replay ? tFor(locale, "one.onb.action.close_replay") : tFor(locale, "one.onb.action.close")}>
+            <button type="button" className={styles.close} onClick={(event) => void dismissTutorial(event)} aria-label={replay ? tFor(locale, "one.onb.action.close_replay") : tFor(locale, "one.onb.action.close")}>
               ×
             </button>
           </div>
@@ -1032,6 +1229,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                     reduced={reduced}
                     onType={() => play("tap")}
                     text={tFor(locale, "one.onb.s0.dialogue")}
+                    nextLabel={tFor(locale, "one.onb.action.next")}
                   />
                   <div className={styles.choiceGrid}>
                     <button type="button" onClick={() => void go("s1", { experience: "new" })}>
@@ -1046,7 +1244,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
 
               {scene === "s1" && (
                 <>
-                  <Dialogue reduced={reduced} onType={() => play("tap")} text={tFor(locale, "one.onb.s1.dialogue")} />
+                  <Dialogue reduced={reduced} onType={() => play("tap")} text={tFor(locale, "one.onb.s1.dialogue")} nextLabel={tFor(locale, "one.onb.action.next")} />
                   <div className={styles.choiceGridThree}>
                     {([
                       ["new", "NEW", "one.onb.exp.new"],
@@ -1073,6 +1271,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                       ? tFor(locale, "one.onb.s2.dialogue_rephrase")
                       : tFor(locale, "one.onb.s2.dialogue_default")}
                     onNext={() => void go("s3")}
+                    nextLabel={tFor(locale, "one.onb.action.next")}
                   />
                   <motion.div
                     className={styles.wallVisual}
@@ -1104,7 +1303,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
 
               {scene === "s3" && (
                 <>
-                  <Dialogue reduced={reduced} onType={() => play("tap")} text={tFor(locale, "one.onb.s3.dialogue")} />
+                  <Dialogue reduced={reduced} onType={() => play("tap")} text={tFor(locale, "one.onb.s3.dialogue")} nextLabel={tFor(locale, "one.onb.action.next")} />
                   <div className={styles.subscriptionRow} role="radiogroup" aria-label={tFor(locale, "one.onb.s3.sub_aria")}>
                     {([
                       ["paid", "✓", "one.onb.sub.paid"],
@@ -1216,7 +1415,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
 
               {scene === "s4" && (
                 <>
-                  <Dialogue reduced={reduced} onType={() => play("tap")} text={tFor(locale, "one.onb.s4.dialogue")} />
+                  <Dialogue reduced={reduced} onType={() => play("tap")} text={tFor(locale, "one.onb.s4.dialogue")} nextLabel={tFor(locale, "one.onb.action.next")} />
                   <div className={styles.teamBuilder}>
                     <AnimatePresence>
                       {teamCreated && (
@@ -1235,7 +1434,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                       )}
                     </AnimatePresence>
                     <div className={styles.agentShelf} role="group" aria-label={tFor(locale, "one.onb.s4.shelf_aria")}>
-                      {ONE_ONBOARDING_STARTER_AGENTS.map((agent) => {
+                      {ONE_ONBOARDING_STARTER_AGENTS.map((agent, index) => {
                         const selected = selectedSlugs.includes(agent.slug);
                         return (
                           <motion.button
@@ -1247,7 +1446,18 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                             whileDrag={{ scale: 1.04, zIndex: 3 }}
                             data-tone={agent.tone}
                             data-selected={selected ? "true" : "false"}
-                            onDragEnd={(_event, info) => { if (!selected && info.offset.y > 55) void toggleStarter(agent.slug); }}
+                            data-assist={index === 0 && teamHint && !selected ? "true" : "false"}
+                            onDragEnd={(_event, info) => {
+                              const zone = teamZoneRef.current?.getBoundingClientRect();
+                              if (
+                                !selected
+                                && zone
+                                && info.point.x >= zone.left
+                                && info.point.x <= zone.right
+                                && info.point.y >= zone.top
+                                && info.point.y <= zone.bottom
+                              ) void toggleStarter(agent.slug);
+                            }}
                             onClick={() => void toggleStarter(agent.slug)}
                             onMouseEnter={() => setAgentHint(ko ? `${agent.nameKo}: ${agent.roleKo}` : `${agent.nameEn}: ${agent.roleEn}`)}
                             onFocus={() => setAgentHint(ko ? `${agent.nameKo}: ${agent.roleKo}` : `${agent.nameEn}: ${agent.roleEn}`)}
@@ -1262,7 +1472,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                       })}
                     </div>
                     {agentHint && <div className={styles.agentHint} role="status" aria-live="polite">{agentHint}</div>}
-                    <div className={styles.teamZone} role="status" aria-live="polite" aria-busy={busy} data-filled={selectedSlugs.length > 0 ? "true" : "false"}>
+                    <div ref={teamZoneRef} className={styles.teamZone} role="status" aria-live="polite" aria-busy={busy} data-filled={selectedSlugs.length > 0 ? "true" : "false"}>
                       <strong>{tFor(locale, "one.onb.team.count", { count: selectedSlugs.length })}</strong>
                       <span>{selectedSlugs.length === 0 ? tFor(locale, "one.onb.s4.drop_hint") : selectedSlugs.map((slug) => ko ? ONE_ONBOARDING_STARTER_AGENTS.find((agent) => agent.slug === slug)?.nameKo : ONE_ONBOARDING_STARTER_AGENTS.find((agent) => agent.slug === slug)?.nameEn).join(" · ")}</span>
                       <small>{tFor(locale, "one.onb.s4.pinned_note")}</small>
@@ -1271,7 +1481,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                   {teamHint && (
                     <div className={styles.hint}>
                       <span>{tFor(locale, "one.onb.s4.stuck_hint")}</span>
-                      <button type="button" disabled={busy} onClick={() => void addAllStarters()}>{tFor(locale, "one.onb.s4.add_all")}</button>
+                      {teamAssist && <button type="button" disabled={busy} onClick={() => void addAllStarters()}>{tFor(locale, "one.onb.s4.add_all")}</button>}
                     </div>
                   )}
                   <div className={styles.actionsBetween}>
@@ -1283,22 +1493,43 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
 
               {scene === "s5" && (
                 <>
-                  <Dialogue reduced={reduced} onType={() => play("tap")} text={tFor(locale, "one.onb.s5.dialogue")} />
+                  <Dialogue reduced={reduced} onType={() => play("tap")} text={tFor(locale, "one.onb.s5.dialogue")} nextLabel={tFor(locale, "one.onb.action.next")} />
                   <div className={styles.conceptGrid}>
-                    {CONCEPTS.map((concept) => (
-                      <article key={concept.examples}>
+                    {CONCEPTS.map((concept, index) => (
+                      <motion.article
+                        key={concept.examples}
+                        initial={reduced ? false : { opacity: 0, x: -12 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ duration: reduced ? 0 : 0.22, delay: reduced ? 0 : index * 0.16 }}
+                      >
                         <span>{concept.icon}</span><strong>{tFor(locale, concept.titleKey)}</strong><p>{tFor(locale, concept.bodyKey)}</p><small>{concept.examples}</small>
-                      </article>
+                        {index < CONCEPTS.length - 1 && <i className={styles.conceptArrow} aria-hidden="true">→</i>}
+                      </motion.article>
                     ))}
                   </div>
                   <div className={styles.brandBadges} role="group" aria-label={tFor(locale, "one.onb.s5.brands_aria")}>
-                    <span title={tFor(locale, "one.onb.s5.brand_store")}><BrandMark icon={siMongodb} />MongoDB</span>
-                    <span title={tFor(locale, "one.onb.s5.brand_store")}><BrandMark icon={siPostgresql} />PostgreSQL</span>
-                    <span title={tFor(locale, "one.onb.s5.brand_server_store")}><BrandMark icon={siFirebase} />Firebase</span>
-                    <span title={tFor(locale, "one.onb.s5.brand_deploy")}><BrandMark icon={siRailway} />Railway</span>
-                    <span title={tFor(locale, "one.onb.s5.brand_web_deploy")}><BrandMark icon={siVercel} />Vercel</span>
-                    <span title={tFor(locale, "one.onb.s5.brand_screen")}>Web · App</span>
+                    {([
+                      ["MongoDB", siMongodb, "one.onb.s5.brand_store"],
+                      ["PostgreSQL", siPostgresql, "one.onb.s5.brand_store"],
+                      ["Firebase", siFirebase, "one.onb.s5.brand_server_store"],
+                      ["Railway", siRailway, "one.onb.s5.brand_deploy"],
+                      ["Vercel", siVercel, "one.onb.s5.brand_web_deploy"],
+                    ] as const).map(([name, icon, tipKey]) => {
+                      const tip = tFor(locale, tipKey);
+                      return (
+                        <button key={name} type="button" aria-label={`${name} — ${tip}`} onClick={() => setBrandTip(`${name} · ${tip}`)} onFocus={() => setBrandTip(`${name} · ${tip}`)}>
+                          <BrandMark icon={icon} />{name}
+                        </button>
+                      );
+                    })}
+                    <button
+                      type="button"
+                      aria-label={`Web · App — ${tFor(locale, "one.onb.s5.brand_screen")}`}
+                      onClick={() => setBrandTip(`Web · App · ${tFor(locale, "one.onb.s5.brand_screen")}`)}
+                      onFocus={() => setBrandTip(`Web · App · ${tFor(locale, "one.onb.s5.brand_screen")}`)}
+                    >Web · App</button>
                   </div>
+                  {brandTip && <div className={styles.brandTip} role="status" aria-live="polite">{brandTip}</div>}
                   <p className={styles.costNote}>{tFor(locale, "one.onb.s5.cost_note")}</p>
                   <div className={styles.actionsBetween}>
                     <button type="button" className={styles.back} onClick={() => void go("s4")}>← {tFor(locale, "one.onb.action.back")}</button>
@@ -1309,10 +1540,10 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
 
               {scene === "s6" && (
                 <>
-                  <Dialogue reduced={reduced} onType={() => play("tap")} text={tFor(locale, "one.onb.s6.dialogue")} />
+                  <Dialogue reduced={reduced} onType={() => play("tap")} text={tFor(locale, "one.onb.s6.dialogue")} nextLabel={tFor(locale, "one.onb.action.next")} />
                   <label className={styles.seedBox}>
                     <span>{tFor(locale, "one.onb.s6.label")}</span>
-                    <textarea value={seed} maxLength={500} onChange={(event) => setSeed(event.target.value)} placeholder={tFor(locale, "one.onb.s6.placeholder")} />
+                    <textarea value={seed} maxLength={500} onChange={(event) => setSeed(event.target.value)} placeholder={tFor(locale, PLACEHOLDER_KEYS[placeholderIndex])} />
                     <small>{seed.length}/500</small>
                   </label>
                   <div className={styles.examples}>
@@ -1323,7 +1554,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                     <p><strong>{tFor(locale, "one.onb.s6.ready")}</strong>{tFor(locale, "one.onb.s6.ready_note")}</p>
                   </div>
                   <div className={styles.actionsBetween}>
-                    <button type="button" className={styles.back} onClick={() => void go(beginnerPath ? "s5" : "s4")}>← {tFor(locale, "one.onb.action.back")}</button>
+                    <button type="button" className={styles.back} onClick={() => void go(beginnerPath ? "s5" : "s3")}>← {tFor(locale, "one.onb.action.back")}</button>
                     <button type="button" className={styles.primary} disabled={busy || !seed.trim()} onClick={() => void finish()}>{busy ? tFor(locale, "one.onb.s6.finishing") : replay ? tFor(locale, "one.onb.s6.finish_replay") : tFor(locale, "one.onb.s6.start")}</button>
                   </div>
                 </>

@@ -1,5 +1,7 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
+import type { UpdaterDiagnostic } from "../../shared/types";
 import type { InstalledAppTrustResult } from "./controller";
 import { updaterDiagnostic } from "./controller";
 
@@ -8,6 +10,7 @@ export interface MacReleaseSigningPolicy {
   bundleIdentifier: string;
   teamIdentifier: string;
   leafAuthorityPrefix: string;
+  leafAuthority: string;
   designatedRequirement: string;
 }
 export interface MacTrustCommandResult {
@@ -20,6 +23,144 @@ export type MacTrustCommandRunner = (
   args: readonly string[],
 ) => Promise<MacTrustCommandResult>;
 
+type CacheCandidate = {
+  filePath: string;
+  dev: number;
+  ino: number;
+  parents: Array<{ directoryPath: string; dev: number; ino: number }>;
+};
+
+function sealedResourcePaths(bundleRoot: string, contentsRoot: string): Set<string> | null {
+  const signatureRoot = path.join(contentsRoot, "_CodeSignature");
+  const codeResources = path.join(signatureRoot, "CodeResources");
+  try {
+    for (const directory of [bundleRoot, contentsRoot, signatureRoot]) {
+      const stat = fs.lstatSync(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return null;
+    }
+    const leaf = fs.lstatSync(codeResources);
+    if (!leaf.isFile() || leaf.isSymbolicLink() || leaf.nlink !== 1) return null;
+    const parsed = JSON.parse(execFileSync(
+      "/usr/bin/plutil",
+      ["-convert", "json", "-o", "-", codeResources],
+      { encoding: "utf8", timeout: 5_000, maxBuffer: 16 * 1024 * 1024 },
+    )) as { files?: unknown; files2?: unknown };
+    const sealed = new Set<string>();
+    for (const entries of [parsed.files, parsed.files2]) {
+      if (!entries || typeof entries !== "object" || Array.isArray(entries)) continue;
+      for (const name of Object.keys(entries)) sealed.add(name.replaceAll("\\", "/"));
+    }
+    return sealed;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Removes only generated Python bytecode from the two signed runtime roots.
+ * This is intentionally narrower than a generic bundle repair: the official
+ * identity is checked before this function is called, symlinks are never
+ * followed, and every file inode is rechecked immediately before deletion.
+ */
+export async function repairMacInstalledAppGeneratedPythonCaches(input: {
+  bundlePath: string;
+  diagnostic: UpdaterDiagnostic;
+}): Promise<boolean> {
+  if (input.diagnostic.category !== "source-seal") return false;
+  const bundleRoot = path.resolve(input.bundlePath);
+  const contentsRoot = path.join(bundleRoot, "Contents");
+  const resourcesRoot = path.join(contentsRoot, "Resources");
+  try {
+    for (const directory of [bundleRoot, contentsRoot, resourcesRoot]) {
+      const stat = fs.lstatSync(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+    }
+  } catch {
+    return false;
+  }
+  const sealed = sealedResourcePaths(bundleRoot, contentsRoot);
+  if (!sealed) return false;
+  const files: CacheCandidate[] = [];
+  const cacheDirectories: string[] = [];
+  let visited = 0;
+  const visit = (candidate: string): void => {
+    if (visited >= 100_000) throw new Error("Python cache repair scan limit exceeded");
+    visited += 1;
+    const stat = fs.lstatSync(candidate);
+    if (stat.isSymbolicLink()) return;
+    const relative = path.relative(resourcesRoot, candidate);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) return;
+    if (stat.isDirectory()) {
+      for (const entry of fs.readdirSync(candidate)) visit(path.join(candidate, entry));
+      if (path.basename(candidate) === "__pycache__") cacheDirectories.push(candidate);
+      return;
+    }
+    if (
+      stat.isFile()
+      && /\.py[co]$/i.test(path.basename(candidate))
+      && relative.split(path.sep).includes("__pycache__")
+    ) {
+      if (stat.nlink !== 1) throw new Error("Python cache repair candidate is hard-linked");
+      const contentsRelative = path.relative(contentsRoot, candidate).split(path.sep).join("/");
+      if (sealed.has(contentsRelative)) throw new Error("Python cache repair candidate is a signed resource");
+      const parents: CacheCandidate["parents"] = [];
+      let directoryPath = path.dirname(candidate);
+      while (directoryPath.length >= resourcesRoot.length) {
+        const parentStat = fs.lstatSync(directoryPath);
+        if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) return;
+        parents.push({ directoryPath, dev: parentStat.dev, ino: parentStat.ino });
+        if (directoryPath === resourcesRoot) break;
+        directoryPath = path.dirname(directoryPath);
+      }
+      files.push({ filePath: candidate, dev: stat.dev, ino: stat.ino, parents });
+    }
+  };
+
+  try {
+    for (const name of ["Hephaestus", "python-runtime"]) {
+      const root = path.join(resourcesRoot, name);
+      if (!fs.existsSync(root)) continue;
+      const rootStat = fs.lstatSync(root);
+      if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) continue;
+      visit(root);
+    }
+    let removed = 0;
+    for (const candidate of files) {
+      const parentsStable = candidate.parents.every((parent) => {
+        const current = fs.lstatSync(parent.directoryPath);
+        return current.isDirectory()
+          && !current.isSymbolicLink()
+          && current.dev === parent.dev
+          && current.ino === parent.ino;
+      });
+      if (!parentsStable) continue;
+      const current = fs.lstatSync(candidate.filePath);
+      if (
+        !current.isFile()
+        || current.isSymbolicLink()
+        || current.nlink !== 1
+        || current.dev !== candidate.dev
+        || current.ino !== candidate.ino
+      ) {
+        continue;
+      }
+      fs.unlinkSync(candidate.filePath);
+      removed += 1;
+    }
+    for (const directory of cacheDirectories.sort((left, right) => right.length - left.length)) {
+      try {
+        const stat = fs.lstatSync(directory);
+        if (stat.isDirectory() && !stat.isSymbolicLink() && fs.readdirSync(directory).length === 0) fs.rmdirSync(directory);
+      } catch {
+        // A non-empty or concurrently changed directory is left untouched.
+      }
+    }
+    return removed > 0;
+  } catch {
+    return false;
+  }
+}
+
 function readSigningPolicy(file: string): MacReleaseSigningPolicy | null {
   try {
     const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<MacReleaseSigningPolicy>;
@@ -30,6 +171,7 @@ function readSigningPolicy(file: string): MacReleaseSigningPolicy | null {
       typeof raw.teamIdentifier !== "string" ||
       !/^[A-Z0-9]{10}$/.test(raw.teamIdentifier) ||
       raw.leafAuthorityPrefix !== "Developer ID Application:" ||
+      raw.leafAuthority !== `Developer ID Application: Jeongmin Kim (${raw.teamIdentifier})` ||
       typeof raw.designatedRequirement !== "string" ||
       !raw.designatedRequirement.includes(`identifier \"${raw.bundleIdentifier}\"`) ||
       !raw.designatedRequirement.includes("anchor apple generic") ||
@@ -109,7 +251,7 @@ export async function inspectMacInstalledAppTrust(input: {
     return { ok: false, diagnostic: updaterDiagnostic("source-identity") };
   }
   const actualAuthorities = authorities(displayed.output);
-  if (!actualAuthorities[0]?.startsWith(policy.leafAuthorityPrefix)) {
+  if (actualAuthorities[0] !== policy.leafAuthority) {
     return { ok: false, diagnostic: updaterDiagnostic("source-signature-class") };
   }
 

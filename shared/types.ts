@@ -29,6 +29,7 @@ import type {
   OneOnboardingState,
   ProvisionOneOnboardingStarterTeamInput,
   ReopenOneOnboardingProviderInput,
+  ResetOneOnboardingInput,
   ResumeOneOnboardingInput,
   UpdateOneOnboardingInput,
   VerifyOneOnboardingProviderInput,
@@ -3689,8 +3690,6 @@ export interface UpdaterState {
   diagnostic?: UpdaterDiagnostic;
   /** 네트워크 등 일시 실패일 때만 true. 권한/호환성/연속성 실패는 false다. */
   canRetry?: boolean;
-  /** 고정된 공식 다운로드 경로. renderer 입력으로 URL을 받지 않는다. */
-  manualDownloadUrl?: string;
   /** 복구본이 있을 때만 true. 실제 경로는 main이 보관하고 reveal IPC로만 연다. */
   recoveryBackupAvailable?: boolean;
   /** 릴리스가 선언한 최소 호환 경계. */
@@ -5013,7 +5012,7 @@ export interface AgentlasIpc {
     check: () => Promise<UpdaterState>;
     /** "재시작 업데이트" 클릭. 백업·권한·버전 가드를 모두 통과해야 종료/설치를 시작한다. */
     install: () => Promise<UpdaterActionResult>;
-    /** 권한/호환성 때문에 자동 적용하지 않은 경우 고정된 공식 다운로드 페이지를 연다. */
+    /** 구 renderer ABI 호환용 no-op. 업데이트 복구는 앱 안에서만 수행한다. */
     openManualDownload: () => Promise<UpdaterActionResult>;
     /** 연속성 검증 실패 때 main이 보관한 복구본을 Finder/Explorer에서 연다. */
     revealRecoveryBackup: () => Promise<UpdaterActionResult>;
@@ -5364,6 +5363,7 @@ export interface AgentlasIpc {
     chooseLimited: (input: LimitOneOnboardingProviderInput) => Promise<OneOnboardingState>;
     dismiss: (input: DismissOneOnboardingInput) => Promise<OneOnboardingState>;
     resume: (input: ResumeOneOnboardingInput) => Promise<OneOnboardingState>;
+    reset: (input: ResetOneOnboardingInput) => Promise<OneOnboardingState>;
     reopenProvider: (input: ReopenOneOnboardingProviderInput) => Promise<OneOnboardingState>;
     getExecutionAuthorization: () => Promise<OneOnboardingExecutionAuthorization>;
     provisionStarterTeam: (input: ProvisionOneOnboardingStarterTeamInput) => Promise<OneOnboardingState>;

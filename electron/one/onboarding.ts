@@ -19,6 +19,7 @@ import {
   type OneOnboardingState,
   type ProvisionOneOnboardingStarterTeamInput,
   type ReopenOneOnboardingProviderInput,
+  type ResetOneOnboardingInput,
   type ResumeOneOnboardingInput,
   type UpdateOneOnboardingInput,
   type VerifyOneOnboardingProviderInput,
@@ -26,7 +27,7 @@ import {
 import type { AgentGroup, AgentGroupMember, RuntimeStatus } from "../../shared/types";
 import { detectRuntimes } from "../runtime/detect";
 import { getUsageSnapshot } from "../usage";
-import { createAgentGroup, getAgentGroup, updateAgentGroup } from "../store/agent-groups";
+import { createAgentGroup, getAgentGroup, removeAgentGroup, updateAgentGroup } from "../store/agent-groups";
 import { getDb } from "../store/db";
 import { getOneProfile } from "../store/one-profile";
 import { tryRecordOneDomainEvent } from "./domain-events";
@@ -403,6 +404,49 @@ export function resumeOneOnboarding(input: ResumeOneOnboardingInput): OneOnboard
   });
 }
 
+/** Atomically clears every tutorial choice while preserving the durable One identity. */
+export function resetOneOnboarding(input: ResetOneOnboardingInput): OneOnboardingState {
+  if (!isRecord(input)) throw new TypeError("Invalid onboarding reset request");
+  assertOnlyKeys(input, ["expectedVersion"], "Onboarding reset request");
+  assertExpectedVersion(input.expectedVersion);
+  const current = readOrCreateState();
+  if (current.state.version !== input.expectedVersion) {
+    throw new Error(`One onboarding changed (expected ${input.expectedVersion}, current ${current.state.version})`);
+  }
+  const timestamp = nextTimestamp(current.state.version);
+  const next: OneOnboardingState = {
+    ...current.state,
+    version: timestamp.version,
+    status: "in-progress",
+    resolution: null,
+    currentScene: "s0",
+    experience: null,
+    subscription: null,
+    provider: null,
+    brainStatus: "unchecked",
+    restrictedMode: false,
+    rephraseUsed: false,
+    selectedStarterSlugs: [],
+    starterTeamGroupId: null,
+    projectSeed: "",
+    startedAt: timestamp.iso,
+    completedAt: null,
+    updatedAt: timestamp.iso,
+  };
+  if (!isOneOnboardingState(next)) throw new Error("One onboarding reset violated the storage contract");
+  const removableGroupId = current.state.starterTeamGroupId
+    && exactStarterGroupMatchesState(current.state, getAgentGroup(current.state.starterTeamGroupId))
+    ? current.state.starterTeamGroupId
+    : null;
+  getDb().transaction(() => {
+    const result = getDb().prepare("UPDATE meta SET value = ? WHERE key = ? AND value = ?")
+      .run(JSON.stringify(next), ONE_ONBOARDING_META_KEY, current.raw);
+    if (result.changes !== 1) throw new Error("One onboarding changed concurrently; reload and try again");
+    if (removableGroupId) removeAgentGroup(removableGroupId);
+  })();
+  return next;
+}
+
 export function updateOneOnboarding(input: UpdateOneOnboardingInput): OneOnboardingState {
   if (!isRecord(input)) throw new TypeError("Invalid One onboarding update");
   assertOnlyKeys(input, ["expectedVersion", "patch"], "One onboarding update");
@@ -444,8 +488,9 @@ export function updateOneOnboarding(input: UpdateOneOnboardingInput): OneOnboard
       next.soundEnabled = input.patch.soundEnabled;
     }
     if ("rephraseUsed" in input.patch) {
-      if (input.patch.rephraseUsed !== true || state.rephraseUsed) throw new Error("The simpler explanation can be used once");
-      next.rephraseUsed = true;
+      if (typeof input.patch.rephraseUsed !== "boolean") throw new TypeError("rephraseUsed must be boolean");
+      if (input.patch.rephraseUsed && state.rephraseUsed) throw new Error("The simpler explanation can be used once");
+      next.rephraseUsed = input.patch.rephraseUsed;
     }
     if ("selectedStarterSlugs" in input.patch) {
       next.selectedStarterSlugs = normalizedStarterSlugs(input.patch.selectedStarterSlugs);

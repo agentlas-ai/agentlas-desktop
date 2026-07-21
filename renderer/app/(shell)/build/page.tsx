@@ -468,8 +468,8 @@ export default function BuildPage() {
                 </strong>
                 <span>
                   {ko
-                    ? "엔진은 앱에 번들된 오픈소스입니다. 복구하려면 앱을 재설치하거나 Python 런타임을 확인하세요 (npm run ensure:engine)."
-                    : "The engine ships bundled with the app. To recover, reinstall the app or check the Python runtime (npm run ensure:engine)."}
+                    ? "엔진은 앱에 번들된 오픈소스입니다. 앱 내부 복구를 다시 시도하거나 Python 런타임을 확인하세요 (npm run ensure:engine)."
+                    : "The engine ships bundled with the app. Retry the in-app repair or check the Python runtime (npm run ensure:engine)."}
                 </span>
               </div>
             </div>

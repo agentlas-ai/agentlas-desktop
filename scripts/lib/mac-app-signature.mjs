@@ -24,6 +24,7 @@ export function readMacReleaseSigningPolicy(file) {
     typeof raw.teamIdentifier !== "string" ||
     !/^[A-Z0-9]{10}$/.test(raw.teamIdentifier) ||
     raw.leafAuthorityPrefix !== "Developer ID Application:" ||
+    raw.leafAuthority !== `Developer ID Application: Jeongmin Kim (${raw.teamIdentifier})` ||
     typeof raw.designatedRequirement !== "string" ||
     !raw.designatedRequirement.includes(`identifier \"${raw.bundleIdentifier}\"`) ||
     !raw.designatedRequirement.includes("anchor apple generic") ||
@@ -141,7 +142,7 @@ export function verifyMacAppBundle({
     display.ok &&
     identifier === policy.bundleIdentifier &&
     teamIdentifier === policy.teamIdentifier &&
-    authorities[0]?.startsWith(policy.leafAuthorityPrefix),
+    authorities[0] === policy.leafAuthority,
   );
   const codesign = developerId
     ? runCommand("codesign", [

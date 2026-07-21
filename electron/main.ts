@@ -7,7 +7,20 @@
 // - nodeIntegration: false
 // - sandbox: true (renderer는 sandboxed)
 // - 모든 Node API는 preload → ipc 경로로만 노출
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, net, Notification, protocol, session, shell } from "electron";
+import {
+  app,
+  autoUpdater as electronAutoUpdater,
+  BrowserWindow,
+  ipcMain,
+  Menu,
+  nativeImage,
+  net,
+  Notification,
+  powerMonitor,
+  protocol,
+  session,
+  shell,
+} from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -27,8 +40,11 @@ import {
   getUpdaterState,
   handleUpdaterBootstrapFailure,
   initAutoUpdater,
+  onUpdaterStateChange,
   preflightUpdaterStartup,
+  quitAndInstall as installDownloadedUpdate,
 } from "./updater";
+import { createAutomaticQuitInstaller } from "./updater/automatic-quit-install";
 import { scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls } from "./updater/continuity";
 import { disposeAppFactoryLaunches } from "./app-factory/operations";
 import { disposeSiteAgentAppRuntimes } from "./site/agent-app-runtime";
@@ -407,28 +423,75 @@ app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) void createWindow();
 });
 
-// 앱 종료 정리 — 백그라운드 타이머/자식 프로세스를 누수 없이 거둔다(중복 등록 방지 플래그).
+// 앱 종료 정리 — 백그라운드 타이머/자식 프로세스를 누수 없이 거둔다.
+// 자동 업데이트는 renderer 창이 모두 닫힌 will-quit에서만 연기하므로, continuity
+// 캡처 뒤 renderer IPC write가 새로 들어올 수 없다.
 let quitCleanupDone = false;
-app.on("before-quit", () => {
-  if (quitCleanupDone) return;
-  quitCleanupDone = true;
+let quitServicesStopPromise: Promise<void> | null = null;
+let systemShutdownInProgress = false;
+let systemShutdownResetTimer: NodeJS.Timeout | null = null;
+
+function stopQuitServices(): Promise<void> {
+  if (quitServicesStopPromise) return quitServicesStopPromise;
+  shellReadyForWindows = false;
   try { stopAutomationScheduler(); } catch {}
   try { stopOneBriefingScheduler(); } catch {}
-  // 트리거 매니저 정지 — webhook 소켓/폴 상태/fs watcher 정리(설계 §3, P2). 동적 import라
-  // 미기동(헤드리스)이면 조용히 스킵.
-  void import("./triggers/manager").then((m) => {
-    try { m.stopTriggerManager(); } catch {}
-  }).catch(() => {});
-  try { disposeAutoUpdater(); } catch {}
+  try { stopBrowserApprovalServer(); } catch {}
+  try { stopComputerUseControlServer(); } catch {}
   try { disposeAppFactoryLaunches(); } catch {}
   try { disposeSiteAgentAppRuntimes(); } catch {}
   try { disposeAuthSessionInvalidation?.(); } catch {}
   disposeAuthSessionInvalidation = null;
   try { disposeMobileBridgeStateChange?.(); } catch {}
   disposeMobileBridgeStateChange = null;
-  void stopAgentlasMobileBridge().catch((error) => {
-    console.error("[mobile-bridge] shutdown failed", error);
-  });
+
+  quitServicesStopPromise = Promise.all([
+    import("./triggers/manager").then((module) => { module.stopTriggerManager(); }).catch(() => {}),
+    import("./telegram/connect").then((module) => { module.stopTelegramWorkers(); }).catch(() => {}),
+    import("./agents/hephaestus-sync").then((module) => { module.stopHephaestusSync(); }).catch(() => {}),
+    stopAgentlasMobileBridge().catch((error) => {
+      console.error("[mobile-bridge] shutdown failed", error);
+    }),
+  ]).then(() => undefined);
+  return quitServicesStopPromise;
+}
+
+async function prepareAutomaticUpdateQuit(): Promise<void> {
+  await stopQuitServices();
+  // An active invocation can still write its terminal receipt after renderer
+  // windows close. In that case preserve normal quit semantics and defer the
+  // update until a later idle quit instead of snapshotting a moving database.
+  if (invocationService.activeChatIds().length > 0) {
+    throw new Error("Active invocation prevented update continuity capture");
+  }
+}
+
+function finishQuitCleanup(): void {
+  if (quitCleanupDone) return;
+  quitCleanupDone = true;
+  void stopQuitServices().catch(() => {});
+  try { disposeAutoUpdater(); } catch {}
+}
+
+const automaticQuitInstaller = createAutomaticQuitInstaller({
+  getState: getUpdaterState,
+  prepare: prepareAutomaticUpdateQuit,
+  install: installDownloadedUpdate,
+  quit: () => app.quit(),
+  subscribe: onUpdaterStateChange,
+  shouldInstallOnQuit: () => !systemShutdownInProgress && invocationService.activeChatIds().length === 0,
+  logger: console,
+});
+electronAutoUpdater.on("before-quit-for-update", () => {
+  automaticQuitInstaller.authorizeNativeQuit();
+});
+app.on("will-quit", (event) => {
+  // electron-updater's raw auto-install-on-quit path is intentionally disabled:
+  // it cannot capture Agentlas continuity first. Defer this first quit, run the
+  // controller's full verified transaction, then allow the native updater's
+  // second quit through after state advances to `installing`.
+  if (automaticQuitInstaller.handle(event)) return;
+  finishQuitCleanup();
 });
 
 app.whenReady().then(async () => {
@@ -436,6 +499,20 @@ app.whenReady().then(async () => {
   // mirroring it to the platform log directory first. Updater and mobile-bridge
   // diagnostics are worthless if the only copy dies with the process.
   initFileLogging();
+  if (process.platform !== "win32") {
+    powerMonitor.on("shutdown", () => {
+      // Never turn an operating-system shutdown into an application relaunch.
+      systemShutdownInProgress = true;
+      if (systemShutdownResetTimer) clearTimeout(systemShutdownResetTimer);
+      // macOS can cancel shutdown because another app refuses it. If Agentlas
+      // remains alive, do not permanently disable later normal-quit installs.
+      systemShutdownResetTimer = setTimeout(() => {
+        systemShutdownInProgress = false;
+        systemShutdownResetTimer = null;
+      }, 120_000);
+      systemShutdownResetTimer.unref();
+    });
+  }
   // Stage 1 (pre-mutation): a pending install must already have a valid,
   // contained SQLite/agent/route recovery set before initStore can migrate.
   const updatePreflight = installIdentity.updatesEnabled
@@ -706,25 +783,6 @@ app.whenReady().then(async () => {
   }
   if (!handled) console.error("[main] startup failed", error);
   app.exit(1);
-});
-
-app.on("before-quit", async () => {
-  try {
-    stopBrowserApprovalServer();
-  } catch {
-    // ignore shutdown cleanup errors
-  }
-  try {
-    stopComputerUseControlServer();
-  } catch {
-    // ignore shutdown cleanup errors
-  }
-  try {
-    const { stopTelegramWorkers } = await import("./telegram/connect");
-    stopTelegramWorkers();
-  } catch {
-    // ignore shutdown cleanup errors
-  }
 });
 
 /** OS 로케일 또는 렌더러가 통지한 표시 언어를 ko/en으로 정규화. */

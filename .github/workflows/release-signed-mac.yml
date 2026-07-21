@@ -23,7 +23,7 @@ on:
       apply_web_env:
         description: "Apply verified desktop release env vars to Railway production"
         required: true
-        default: "false"
+        default: "true"
         type: choice
         options:
           - "false"
@@ -52,9 +52,10 @@ jobs:
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
+      AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.50
-      HEPHAESTUS_COMMIT: 5fc22464c1db33dabc0d4de2170053d1584b5682
+      HEPHAESTUS_REF: v1.1.56
+      HEPHAESTUS_COMMIT: 3061292495b08d513dd5fcf2025a96d85813b627
 
     steps:
       - uses: actions/checkout@v4
@@ -123,6 +124,10 @@ jobs:
             echo "::error::apply_web_env must be true or false."
             exit 1
           fi
+          if [ "$draft" = "false" ] && [ "$apply_web_env" != "true" ]; then
+            echo "::error::A stable release must atomically update and verify the production web feed."
+            exit 1
+          fi
           tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}")" || {
             echo "::error::Release tag $tag does not exist in refs/tags."
             exit 1
@@ -187,6 +192,10 @@ jobs:
           test -n "$APPLE_ID"
           test -n "$APPLE_APP_SPECIFIC_PASSWORD"
           test -n "$APPLE_TEAM_ID"
+          if [ "$APPLE_TEAM_ID" != "F469CGM7T5" ]; then
+            echo "::error::APPLE_TEAM_ID must be the official Agentlas team F469CGM7T5."
+            exit 1
+          fi
           test -n "$MAC_DEVELOPER_ID_CERTIFICATE"
           test -n "$CSC_KEY_PASSWORD"
           test -n "$GH_TOKEN"
@@ -201,12 +210,10 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
         run: |
-          if [ -n "$RAILWAY_TOKEN" ] && [ -n "$RAILWAY_PROJECT_ID" ] && npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web; then
-            echo "AGENTLAS_RAILWAY_RELEASE_READY=1" >> "$GITHUB_ENV"
-          else
-            echo "::warning::Railway release env credentials are missing or invalid. macOS release will still publish; apply desktop web env manually after release."
-            echo "AGENTLAS_RAILWAY_RELEASE_READY=0" >> "$GITHUB_ENV"
-          fi
+          test -n "$RAILWAY_TOKEN" || { echo "::error::RAILWAY_TOKEN is required when apply_web_env=true."; exit 1; }
+          test -n "$RAILWAY_PROJECT_ID" || { echo "::error::RAILWAY_PROJECT_ID is required when apply_web_env=true."; exit 1; }
+          npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web
+          echo "AGENTLAS_RAILWAY_RELEASE_READY=1" >> "$GITHUB_ENV"
 
       # Clone the git-ignored Hephaestus engine so the signed .app embeds it.
       - name: Ensure embedded engine (Hephaestus)
@@ -215,15 +222,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Feature, migration, browser, and renderer regressions run once in the
-      # exact-source common CI above. Dependency audit and typecheck run once in
-      # the reusable release security preflight. This Mac job owns only
-      # deterministic release contracts and native updater/install behavior.
+      # Private/local release audits own UI fixtures and native updater mutation
+      # scenarios. Public CI builds the exact production sources and enforces
+      # the end-user no-reinstall boundary without publishing those fixtures.
       - name: Verify deterministic release contracts
-        run: npm run release:preflight
+        run: |
+          npm run release:preflight
+          npm run build:electron
+          npm run test:mac-install-transaction
 
-      - name: Verify native macOS updater and install contracts
-        run: npm run test:updater-production
+      - name: Build production updater surfaces and reject forced reinstall copy
+        run: |
+          npm run build:renderer
+          if rg -n -i '홈페이지|다시 설치|재설치|website|reinstall|re-download|redownload|공식 설치' \
+            renderer/components/UpdateBanner.tsx \
+            renderer/components/VersionChip.tsx \
+            'renderer/app/(shell)/settings/page.tsx'; then
+            echo "::error::Updater surfaces must recover in app and must not force a website reinstall."
+            exit 1
+          fi
 
       - name: Record successful macOS release preflight
         run: echo "macOS release tests completed without publishing any release assets"
@@ -254,9 +271,10 @@ jobs:
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
+      AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.50
-      HEPHAESTUS_COMMIT: 5fc22464c1db33dabc0d4de2170053d1584b5682
+      HEPHAESTUS_REF: v1.1.56
+      HEPHAESTUS_COMMIT: 3061292495b08d513dd5fcf2025a96d85813b627
 
     steps:
       - uses: actions/checkout@v4
@@ -346,6 +364,10 @@ jobs:
           test -n "$APPLE_ID"
           test -n "$APPLE_APP_SPECIFIC_PASSWORD"
           test -n "$APPLE_TEAM_ID"
+          if [ "$APPLE_TEAM_ID" != "F469CGM7T5" ]; then
+            echo "::error::APPLE_TEAM_ID must be the official Agentlas team F469CGM7T5."
+            exit 1
+          fi
           test -n "$MAC_DEVELOPER_ID_CERTIFICATE"
           test -n "$CSC_KEY_PASSWORD"
           test -n "$GH_TOKEN"
@@ -408,9 +430,10 @@ jobs:
     env:
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
+      AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.50
-      HEPHAESTUS_COMMIT: 5fc22464c1db33dabc0d4de2170053d1584b5682
+      HEPHAESTUS_REF: v1.1.56
+      HEPHAESTUS_COMMIT: 3061292495b08d513dd5fcf2025a96d85813b627
 
     steps:
       - uses: actions/checkout@v4
@@ -460,6 +483,10 @@ jobs:
           if [[ ! "$tag" =~ $semver_tag_re ]] || [ "$version" != "${tag#v}" ]; then exit 1; fi
           if [ "$RAW_DRAFT" != "true" ] && [ "$RAW_DRAFT" != "false" ]; then exit 1; fi
           if [ "$RAW_APPLY_WEB_ENV" != "true" ] && [ "$RAW_APPLY_WEB_ENV" != "false" ]; then exit 1; fi
+          if [ "$RAW_DRAFT" = "false" ] && [ "$RAW_APPLY_WEB_ENV" != "true" ]; then
+            echo "::error::A stable release must atomically update and verify the production web feed."
+            exit 1
+          fi
           tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}")"
           head_commit="$(git rev-parse HEAD)"
           pkgver="$(node -p "require('./package.json').version")"
@@ -490,6 +517,22 @@ jobs:
           --version="$RESOLVED_VERSION"
           --public-allowlist
 
+      - name: Install pinned Railway CLI before stable publication
+        if: env.RESOLVED_DRAFT != 'true'
+        run: npm install -g @railway/cli@5.26.0
+
+      - name: Gate stable writer on exact production Railway access
+        if: env.RESOLVED_DRAFT != 'true'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+        run: |
+          test -n "$RAILWAY_TOKEN"
+          test -n "$RAILWAY_PROJECT_ID"
+          npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web
+          echo "AGENTLAS_RAILWAY_RELEASE_READY=1" >> "$GITHUB_ENV"
+          echo "AGENTLAS_RAILWAY_PROJECT_VERIFIED=$RAILWAY_PROJECT_ID" >> "$GITHUB_ENV"
+
       - name: Single releases-repository writer and stable promotion
         env:
           GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
@@ -498,10 +541,6 @@ jobs:
           args=(--tag="$RESOLVED_TAG" --version="$RESOLVED_VERSION")
           if [ "$RESOLVED_DRAFT" = "true" ]; then args+=(--draft); fi
           npm run release:mac:publish -- "${args[@]}"
-
-      - name: Install pinned Railway CLI for production release metadata
-        if: env.RESOLVED_APPLY_WEB_ENV == 'true' && env.RESOLVED_DRAFT != 'true'
-        run: npm install -g @railway/cli@5.26.0
 
       - name: Apply and verify production desktop release metadata
         if: env.RESOLVED_APPLY_WEB_ENV == 'true' && env.RESOLVED_DRAFT != 'true'
@@ -512,7 +551,7 @@ jobs:
           test -n "$RAILWAY_TOKEN"
           test -n "$RAILWAY_PROJECT_ID"
           npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web
-          npm run release:web-env -- --apply --restart --verification-file=release/desktop-release-verification.json --expected-version="$RESOLVED_VERSION" --expected-tag="$RESOLVED_TAG" --environment=production --service=agentlas-web --verify-url=https://agentlas.cloud/api/desktop/latest
+          npm run release:web-env -- --apply --redeploy --verification-file=release/desktop-release-verification.json --expected-version="$RESOLVED_VERSION" --expected-tag="$RESOLVED_TAG" --environment=production --service=agentlas-web --verify-url=https://agentlas.cloud/api/desktop/latest
 
       - name: Upload complete release evidence
         if: always()

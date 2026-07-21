@@ -201,6 +201,7 @@ import type {
   LimitOneOnboardingProviderInput,
   ProvisionOneOnboardingStarterTeamInput,
   ReopenOneOnboardingProviderInput,
+  ResetOneOnboardingInput,
   ResumeOneOnboardingInput,
   UpdateOneOnboardingInput,
   VerifyOneOnboardingProviderInput,
@@ -397,6 +398,7 @@ import {
   limitOneOnboardingProvider,
   provisionOneOnboardingStarterTeam,
   reopenOneOnboardingProvider,
+  resetOneOnboarding,
   resumeOneOnboarding,
   updateOneOnboarding,
   verifyOneOnboardingProvider,
@@ -3015,6 +3017,8 @@ export function registerIpcHandlers(): void {
     dismissOneOnboarding(input));
   ipcMain.handle("oneOnboarding:resume", (_e, input: ResumeOneOnboardingInput) =>
     resumeOneOnboarding(input));
+  ipcMain.handle("oneOnboarding:reset", (_e, input: ResetOneOnboardingInput) =>
+    resetOneOnboarding(input));
   ipcMain.handle("oneOnboarding:reopenProvider", (_e, input: ReopenOneOnboardingProviderInput) =>
     reopenOneOnboardingProvider(input));
   ipcMain.handle("oneOnboarding:getExecutionAuthorization", () =>

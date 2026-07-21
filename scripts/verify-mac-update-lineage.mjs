@@ -108,6 +108,22 @@ export function selectPreviousStableRelease(releases, candidateVersion) {
   return selectPreviousStableReleases(releases, candidateVersion, 1)[0];
 }
 
+export function selectRequiredHistoricalReleases(releases, candidateVersion, rawTags = "") {
+  const tags = String(rawTags || "").split(",").map((value) => value.trim()).filter(Boolean);
+  if (new Set(tags).size !== tags.length) fail("required-history-tag-duplicate", "previous-release-history");
+  return tags.map((tag) => {
+    const parsed = parseStableVersion(tag);
+    const matches = Array.isArray(releases) ? releases.filter((release) => release?.tagName === tag) : [];
+    if (!parsed || tag !== `v${parsed.version}` || matches.length !== 1) {
+      fail("required-history-tag-unavailable", "previous-release-history");
+    }
+    if (compareStableVersions(parsed.version, candidateVersion) >= 0) {
+      fail("required-history-tag-not-older", "previous-release-history");
+    }
+    return { tag, version: parsed.version };
+  });
+}
+
 export function historyVerificationPlan(history) {
   if (!Array.isArray(history) || history.length === 0) {
     fail("previous-stable-history-incomplete", "previous-release-history");
@@ -549,7 +565,9 @@ async function main() {
     String(args.get("--evidence") || join("release", "update-lineage-verification.json")),
   );
   const rawHistoryCount = args.get("--history-count") || process.env.AGENTLAS_MAC_UPDATE_HISTORY_COUNT || DEFAULT_HISTORY_COUNT;
+  const requiredHistoryTags = args.get("--required-history-tags") || process.env.AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS || "";
   let historyCount = DEFAULT_HISTORY_COUNT;
+  let historyCountRequested = DEFAULT_HISTORY_COUNT;
   const candidate = { tag: candidateTag, version: candidateVersion };
   let history = [];
   let feedEvidence = null;
@@ -569,7 +587,13 @@ async function main() {
       fail("candidate-version-tag-invalid", "candidate-release");
     }
 
-    history = selectPreviousStableReleases(readReleaseList(repo), candidateVersion, historyCount);
+    const releaseList = readReleaseList(repo);
+    history = selectPreviousStableReleases(releaseList, candidateVersion, historyCount);
+    for (const required of selectRequiredHistoricalReleases(releaseList, candidateVersion, requiredHistoryTags)) {
+      if (!history.some((release) => release.tag === required.tag)) history.push(required);
+    }
+    history.sort((left, right) => compareStableVersions(right.version, left.version));
+    historyCountRequested = history.length;
 
     const policyPath = join(desktopRoot, "build-resources", "macos-release-signing-policy.json");
     const {
@@ -731,7 +755,7 @@ async function main() {
       ready: true,
       repo,
       history,
-      historyCountRequested: historyCount,
+      historyCountRequested,
       candidate,
       artifacts: artifactEvidence,
       feed: feedEvidence,
@@ -750,7 +774,7 @@ async function main() {
         ready: false,
         repo,
         history,
-        historyCountRequested: historyCount,
+        historyCountRequested,
         candidate,
         artifacts: artifactEvidence,
         feed: feedEvidence,

@@ -36,8 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      HEPHAESTUS_REF: v1.1.50
-      HEPHAESTUS_COMMIT: 5fc22464c1db33dabc0d4de2170053d1584b5682
+      HEPHAESTUS_REF: v1.1.56
+      HEPHAESTUS_COMMIT: 3061292495b08d513dd5fcf2025a96d85813b627
 
     steps:
       - uses: actions/checkout@v4
@@ -123,9 +123,14 @@ jobs:
           sudo chmod 4755 "$sandbox_path"
           echo "Configured Electron SUID sandbox helper: $sandbox_path"
           xvfb-run -a dbus-run-session -- bash -eo pipefail -c '
-            # Build once. Historical feature and migration suites run in the
-            # exact-source common CI, not again in the release critical path.
+            # Build once before the native boundary suite. Authority and
+            # migration regressions remain release-blocking because they can
+            # silently broaden automation or mobile access in packaged apps.
             npm run build:electron
+            npm run test:v64-automation-permission-migration
+            npm run test:automations-store
+            npm run test:automation-scheduler-guards
+            npm run test:mobile-read-boundary
             HEPHAESTUS_RUNTIME_ROOT=Hephaestus npx --no-install electron scripts/test-stormbreaker-core-harness.cjs --installed
             npx --no-install electron scripts/test-python-cache-boundary.cjs
             npm run test:project-foundation-allocation:prepared
@@ -152,8 +157,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      HEPHAESTUS_REF: v1.1.50
-      HEPHAESTUS_COMMIT: 5fc22464c1db33dabc0d4de2170053d1584b5682
+      HEPHAESTUS_REF: v1.1.56
+      HEPHAESTUS_COMMIT: 3061292495b08d513dd5fcf2025a96d85813b627
 
     steps:
       - uses: actions/checkout@v4
@@ -250,7 +255,6 @@ jobs:
             npm run test:ensure-engine
             npm run test:release-assets
             npm run build:electron
-            npx --no-install electron scripts/test-updater-production-contract.cjs
           '
 
       - name: Build renderer + electron

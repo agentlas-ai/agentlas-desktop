@@ -4,8 +4,10 @@
 import { useEffect, useState } from "react";
 import { ipc, updaterEvents } from "@/lib/ipc";
 import type { UpdaterState } from "@/lib/types";
+import { useT } from "@/lib/i18n";
 
 export function VersionChip() {
+  const { t } = useT();
   const [version, setVersion] = useState<string>("");
   const [state, setState] = useState<UpdaterState>({ status: "idle" });
   const [checking, setChecking] = useState(false);
@@ -36,25 +38,25 @@ export function VersionChip() {
   const subText = (() => {
     switch (state.status) {
       case "checking":
-        return "checking…";
+        return t("update.status.checking");
       case "downloading":
         return `${state.progress ?? 0}%`;
       case "downloaded":
-        return "ready";
+        return t("update.status.ready");
       case "installing":
-        return "installing";
+        return t("update.status.installing");
       case "updated":
-        return "updated";
+        return t("update.status.updated");
       case "available":
-        return "available";
+        return t("update.status.available");
       case "manual-required":
-        return state.canRetry ? "retry" : state.manualDownloadUrl ? "manual update" : "paused";
+        return state.canRetry ? t("update.status.retry") : t("update.status.paused");
       case "incompatible":
-        return state.manualDownloadUrl ? "manual update" : state.canRetry ? "retry" : "compatibility";
+        return state.canRetry ? t("update.status.retry") : t("update.status.compatibility");
       case "recovery-required":
-        return "recovery";
+        return t("update.status.recovery");
       case "error":
-        return "check failed";
+        return t("update.status.check_failed");
       case "not-available":
         return null;
       default:
@@ -68,8 +70,8 @@ export function VersionChip() {
       disabled={checking}
       title={
         checking
-          ? "Checking for updates…"
-          : "Click to check for updates"
+          ? t("update.checking")
+          : t("update.action.check")
       }
       style={{
         display: "inline-flex",
@@ -79,7 +81,10 @@ export function VersionChip() {
         fontSize: 10,
         fontFamily: "var(--font-mono)",
         color: "var(--muted-deep)",
-        whiteSpace: "nowrap",
+        whiteSpace: "normal",
+        flexWrap: "wrap",
+        overflowWrap: "anywhere",
+        maxWidth: "100%",
         background: "transparent",
         border: "none",
         padding: 0,
@@ -91,15 +96,9 @@ export function VersionChip() {
       {subText && (
         <span
           style={{
-            color:
-              state.status === "error" ||
-              state.status === "manual-required" ||
-              state.status === "incompatible" ||
-              state.status === "recovery-required"
-                ? "var(--red-deep)"
-                : state.status === "downloaded" || state.status === "available"
-                  ? "var(--accent)"
-                  : "var(--muted-deep)",
+            color: state.status === "idle" ? "var(--muted-deep)" : "var(--accent)",
+            whiteSpace: "normal",
+            overflowWrap: "anywhere",
           }}
         >
           · {subText}

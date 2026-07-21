@@ -62,7 +62,7 @@ module.exports = async function afterSignTrust(context) {
     display.ok &&
     metadataValue(display.output, "Identifier") === policy.bundleIdentifier &&
     metadataValue(display.output, "TeamIdentifier") === policy.teamIdentifier &&
-    firstAuthority(display.output)?.startsWith(policy.leafAuthorityPrefix);
+    firstAuthority(display.output) === policy.leafAuthority;
   const requirement = developerId
     ? run("codesign", ["--verify", "--deep", "--strict", `-R=${policy.designatedRequirement}`, appPath])
     : { ok: false };

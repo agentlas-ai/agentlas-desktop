@@ -71,8 +71,8 @@
 
 .sound,
 .close {
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   color: var(--onboarding-mint-soft);
   background: #10231f;
   border: 1px solid #285147;
@@ -100,7 +100,7 @@
 .guideColumn > .las {
   position: absolute;
   left: 30px;
-  top: 108px;
+  bottom: 36px;
 }
 
 .las {
@@ -169,6 +169,26 @@
   cursor: pointer;
 }
 
+.keyword {
+  color: var(--onboarding-mint);
+  background: transparent;
+  font-weight: 850;
+  animation: keywordPop 180ms ease both;
+}
+@keyframes keywordPop { from { opacity: 0.6; transform: scale(0.94); } to { opacity: 1; transform: scale(1); } }
+
+.dialogueNext {
+  display: block;
+  width: fit-content;
+  margin-top: 8px;
+  margin-left: auto;
+  color: var(--onboarding-mint);
+  font-size: 12px;
+  font-weight: 850;
+  animation: nextIn 180ms ease both;
+}
+@keyframes nextIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
 .caret { color: var(--onboarding-mint); animation: blink 0.85s step-end infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
@@ -194,7 +214,7 @@
 }
 
 .choiceGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.choiceGridThree { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.choiceGridThree { grid-template-columns: 1fr; }
 .providerGrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .conceptGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 
@@ -239,6 +259,7 @@
 }
 .choiceGrid strong, .choiceGridThree strong { font-size: 15px; }
 .choiceGrid small, .providerGrid small { color: var(--onboarding-muted); line-height: 1.4; }
+.choiceGridThree button { min-height: 72px; }
 
 .back,
 .secondary,
@@ -299,6 +320,7 @@
 .wallVisual > img { display: block; width: 100%; border-radius: 14px; }
 .wallLegend { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 9px; }
 .wallLegend > span { display: flex; flex-direction: column; align-items: center; gap: 2px; text-align: center; }
+.wallLegend i { color: var(--onboarding-mint); font-size: 10px; font-style: normal; font-weight: 850; letter-spacing: 0.1em; }
 .wallVisual small { color: var(--onboarding-muted); }
 .cloud, .mac { display: grid; place-items: center; width: 65px; height: 65px; border-radius: 22px; font-size: 32px; }
 .cloud { color: #7b9a94; background: #12231f; }
@@ -432,6 +454,8 @@
   cursor: grab;
 }
 .agentShelf button[data-selected="true"] { background: #12342c; border-color: var(--onboarding-mint); cursor: pointer; }
+.agentShelf button[data-assist="true"] { animation: cardAssist 700ms ease-in-out 3; }
+@keyframes cardAssist { 0%, 100% { transform: translateX(0) rotate(0); } 30% { transform: translateX(-5px) rotate(-1deg); } 70% { transform: translateX(5px) rotate(1deg); } }
 .agentShelf button[data-tone="purple"] { border-top-color: #ad9bd7; }
 .agentShelf button[data-tone="green"] { border-top-color: #76c79a; }
 .agentShelf button[data-tone="yellow"] { border-top-color: #e0c46d; }
@@ -480,11 +504,28 @@
 .hint button { min-height: 34px; padding: 0 12px; color: var(--onboarding-mint-soft); background: #10201c; border: 1px solid #315b51; }
 
 .conceptGrid article {
+  position: relative;
   min-height: 180px;
   padding: 20px;
   background: var(--onboarding-surface);
   border: 1px solid var(--onboarding-line);
   border-radius: 18px;
+}
+.conceptArrow {
+  position: absolute;
+  top: 50%;
+  right: -12px;
+  z-index: 2;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  color: #06120f;
+  background: var(--onboarding-mint);
+  border: 2px solid var(--onboarding-panel);
+  border-radius: 50%;
+  font-size: 13px;
+  transform: translateY(-50%);
 }
 .conceptGrid article > span {
   display: grid;
@@ -506,7 +547,7 @@
 .conceptGrid article small { color: var(--onboarding-mint); font-weight: 700; }
 
 .brandBadges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-.brandBadges > span {
+.brandBadges > button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -516,11 +557,24 @@
   background: #10201c;
   border: 1px solid #315b51;
   border-radius: 999px;
+  font: inherit;
   font-size: 11px;
   font-weight: 750;
-  cursor: help;
+  cursor: pointer;
 }
 .brandBadges svg { width: 15px; height: 15px; flex: 0 0 auto; }
+.brandBadges > button:hover { color: var(--onboarding-mint-soft); border-color: var(--onboarding-mint); }
+.brandBadges > button:focus-visible { outline: 2px solid var(--onboarding-mint); outline-offset: 2px; }
+.brandTip {
+  width: fit-content;
+  margin-top: 8px;
+  padding: 8px 11px;
+  color: var(--onboarding-mint-soft);
+  background: #102b25;
+  border: 1px solid #315b51;
+  border-radius: 10px;
+  font-size: 11px;
+}
 .costNote { margin: 11px 0 0; color: var(--onboarding-muted); font-size: 12px; line-height: 1.55; }
 
 .seedBox { position: relative; display: block; margin-top: 20px; }
@@ -551,7 +605,7 @@
 .finishNote strong { display: block; color: var(--onboarding-mint-soft); }
 
 .error,
-.loadError { color: #ffe0a3; background: #2b2415; border: 1px solid #8a6a2d; border-radius: 12px; }
+.loadError { color: var(--onboarding-mint-soft, #c7fff1); background: #102b25; border: 1px solid #397f70; border-radius: 12px; }
 .error { margin-top: 13px; padding: 10px 13px; font-size: 12px; }
 .loadError { position: fixed; right: 24px; bottom: 24px; z-index: 1201; display: flex; align-items: center; gap: 10px; padding: 12px 15px; }
 .loadError button { min-height: 36px; color: #06120f; background: #59e3c1; border: 0; border-radius: 9px; font: inherit; font-weight: 700; }
@@ -644,6 +698,7 @@
   .agentShelf { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .conceptGrid { grid-template-columns: 1fr; }
   .conceptGrid article { min-height: auto; }
+  .conceptArrow { top: auto; right: 50%; bottom: -20px; transform: translateX(50%) rotate(90deg); }
   .starterDock { bottom: 88px; }
 }
 
@@ -659,6 +714,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .caret { animation: none; }
+  .keyword, .dialogueNext, .agentShelf button[data-assist="true"] { animation: none; }
   .scene[data-dialogue-done="true"] > :not(.dialogue) { animation: none; }
   .overlay { transition: none; }
   .progress span,

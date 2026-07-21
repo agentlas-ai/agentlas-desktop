@@ -510,6 +510,7 @@ const api: AgentlasIpc = {
     chooseLimited: (input) => ipcRenderer.invoke("oneOnboarding:chooseLimited", input),
     dismiss: (input) => ipcRenderer.invoke("oneOnboarding:dismiss", input),
     resume: (input) => ipcRenderer.invoke("oneOnboarding:resume", input),
+    reset: (input) => ipcRenderer.invoke("oneOnboarding:reset", input),
     reopenProvider: (input) => ipcRenderer.invoke("oneOnboarding:reopenProvider", input),
     getExecutionAuthorization: () => ipcRenderer.invoke("oneOnboarding:getExecutionAuthorization"),
     provisionStarterTeam: (input) => ipcRenderer.invoke("oneOnboarding:provisionStarterTeam", input),

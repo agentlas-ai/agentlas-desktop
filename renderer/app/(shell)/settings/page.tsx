@@ -1551,10 +1551,6 @@ function UpdatePanel() {
     await api.updater.install();
   }
 
-  async function openManualDownload() {
-    await ipc()?.updater.openManualDownload();
-  }
-
   async function revealRecoveryBackup() {
     await ipc()?.updater.revealRecoveryBackup();
   }
@@ -1614,7 +1610,7 @@ function UpdatePanel() {
           padding: 14,
           borderRadius: "var(--radius-md)",
           display: "flex",
-          alignItems: "center",
+          alignItems: "flex-start",
           gap: 12,
         }}
       >
@@ -1625,7 +1621,7 @@ function UpdatePanel() {
           <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 700 }}>
             v{version || "?"}
           </div>
-          <div style={{ fontSize: 12, color: "var(--muted-deep)", marginTop: 6 }}>
+          <div style={{ fontSize: 12, color: "var(--muted-deep)", marginTop: 6, lineHeight: 1.55, whiteSpace: "normal", overflowWrap: "anywhere" }}>
             {statusText}
           </div>
         </div>
@@ -1639,6 +1635,10 @@ function UpdatePanel() {
               color: "var(--ink)",
               fontWeight: 700,
               fontSize: 12,
+              flexShrink: 0,
+              maxWidth: 180,
+              whiteSpace: "normal",
+              lineHeight: 1.35,
               border: "1px solid var(--paper-edge)",
               boxShadow: "var(--neu-raised)",
             }}
@@ -1655,34 +1655,20 @@ function UpdatePanel() {
               color: "var(--ink)",
               fontWeight: 700,
               fontSize: 12,
+              flexShrink: 0,
+              maxWidth: 180,
+              whiteSpace: "normal",
+              lineHeight: 1.35,
               border: "1px solid var(--paper-edge)",
               boxShadow: "var(--neu-raised)",
             }}
           >
             {t("settings.update.retry")}
           </button>
-        ) : (state.status === "manual-required" || state.status === "incompatible") && state.manualDownloadUrl ? (
-          <button
-            onClick={() => void openManualDownload()}
-            style={{
-              padding: "8px 14px",
-              borderRadius: "var(--radius-md)",
-              background: "var(--paper)",
-              color: "var(--ink)",
-              fontWeight: 700,
-              fontSize: 12,
-              border: "1px solid var(--paper-edge)",
-              boxShadow: "var(--neu-raised)",
-            }}
-          >
-            {state.code === "install-source-untrusted"
-              ? t("settings.update.repair_with_official")
-              : t("settings.update.open_download")}
-          </button>
         ) : state.status === "manual-required" || state.status === "incompatible" ? null
-        : state.status === "recovery-required" ? (
+        : state.status === "recovery-required" && state.recoveryBackupAvailable ? (
           <button
-            onClick={() => void (state.recoveryBackupAvailable ? revealRecoveryBackup() : openManualDownload())}
+            onClick={() => void revealRecoveryBackup()}
             style={{
               padding: "8px 14px",
               borderRadius: "var(--radius-md)",
@@ -1690,13 +1676,15 @@ function UpdatePanel() {
               color: "var(--ink)",
               fontWeight: 700,
               fontSize: 12,
+              flexShrink: 0,
+              maxWidth: 180,
+              whiteSpace: "normal",
+              lineHeight: 1.35,
               border: "1px solid var(--paper-edge)",
               boxShadow: "var(--neu-raised)",
             }}
           >
-            {state.recoveryBackupAvailable
-              ? t("settings.update.reveal_recovery")
-              : t("settings.update.open_download")}
+            {t("settings.update.reveal_recovery")}
           </button>
         ) : (
           <button

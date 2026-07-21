@@ -15,6 +15,8 @@ const railwayCwd = process.env.AGENTLAS_RAILWAY_CWD
 
 const desktopPkg = JSON.parse(readFileSync(join(desktopRoot, "package.json"), "utf8"));
 const currentVersion = String(desktopPkg.version || "0.0.0");
+const signingPolicy = JSON.parse(readFileSync(join(desktopRoot, "build-resources", "macos-release-signing-policy.json"), "utf8"));
+const officialSigningIdentity = String(signingPolicy.leafAuthority || "");
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -53,7 +55,7 @@ function ghSecrets(repo) {
 const identities = run("security", ["find-identity", "-v", "-p", "codesigning"]);
 const developerIdIdentities = identities.output
   .split(/\r?\n/)
-  .filter((line) => /Developer ID Application:/i.test(line));
+  .filter((line) => line.includes(`"${officialSigningIdentity}"`));
 const ghAuth = run("gh", ["auth", "status", "-h", "github.com"], { cwd: repoRoot });
 const notaryProfileName = process.env.AGENTLAS_NOTARY_PROFILE || "agentlas-notary";
 const notaryProfile = run("xcrun", ["notarytool", "history", "--keychain-profile", notaryProfileName]);
@@ -143,6 +145,7 @@ console.log(JSON.stringify({
     macPublishReady: localMacPublishReady,
     webEnvReady: localWebEnvReady,
     developerIdApplicationIdentities: developerIdIdentities.map((line) => line.replace(/^\s*\d+\)\s*/, "")),
+    requiredDeveloperIdApplicationIdentity: officialSigningIdentity,
     localSigningFiles,
     notaryProfile: {
       name: notaryProfileName,
@@ -155,10 +158,8 @@ console.log(JSON.stringify({
       output: railwayAccess.output,
     },
     nextCommand: localMacPublishReady
-      ? localWebEnvReady
-        ? "AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac && npm run release:mac:publish && npm run release:web-env -- --apply --restart --verify-url=https://agentlas.cloud/api/desktop/latest"
-        : "AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac && npm run release:mac:publish # Railway web env is a separate optional follow-up"
-      : "Put Developer ID files in signing/, configure notarization credentials, and authenticate GitHub. Verify Railway separately only when applying web release env.",
+      ? "AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac && npm run release:mac:publish -- --draft # local publishing is private-draft only; use the exact-source Actions writer for stable + production web verification"
+      : "Put Developer ID files in signing/, configure notarization credentials, and authenticate GitHub. Local publishing remains private-draft only.",
   },
   githubActions: {
     ready: workflowReady,
@@ -169,9 +170,9 @@ console.log(JSON.stringify({
     optionalWebEnv: {
       ready: agentlasSecrets.ok && missingOptionalWebEnvSecrets?.length === 0,
       missingSecrets: missingOptionalWebEnvSecrets,
-      note: "Railway credentials are optional for publishing the signed Mac app; they only control the separate web-env apply step.",
+      note: "Railway credentials are mandatory when apply_web_env=true; missing or invalid access blocks every public write.",
     },
-    credentialValidity: "gh secret list verifies secret names only; release-signed-mac.yml checks Railway access with release:railway:check and skips only web env publishing if it is invalid.",
+    credentialValidity: "gh secret list verifies secret names only; release-signed-mac.yml validates exact Apple Team and Railway access before every public write.",
     nextCommand: workflowReady
       ? `gh workflow run release-signed-mac.yml -R agentlas-ai/agentlas-desktop -f version=${currentVersion} -f tag=v${currentVersion} -f draft=false -f apply_web_env=true`
       : agentlasSecrets.ok

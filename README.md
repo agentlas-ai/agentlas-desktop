@@ -69,6 +69,23 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-21 · v0.8.61 — in-app update recovery and verified One onboarding** —
+  The AI brain button now serializes its provider state before runtime detection,
+  eliminating the delayed-write click race. Closing works immediately even
+  during detection, reset clears the full tutorial state, locale reaches real
+  starter-team provisioning, and the production renderer test covers the
+  Korean flow, official provider return, delayed compare-and-swap writes,
+  persistent dismissal, reset, and a narrow English viewport. One uses charcoal
+  and mint with a clearly dog-shaped flat 2D mascot and flat artwork only. The
+  macOS updater repairs only the known
+  generated Python-cache seal mutation in app, rechecks the exact official
+  `Developer ID Application: Jeongmin Kim (F469CGM7T5)` identity, and resumes
+  normal updating without a website download or reinstall. Agentlas OS v1.1.56
+  supplies the digest-verified bridge for affected installed v0.8.58/v0.8.59
+  clients; runtime caches may take up to 24 hours to refresh. It is pinned at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 - **2026-07-21 · v0.8.60 — reliable One onboarding and sealed macOS updates** —
   One now has a durable close-and-resume control, responsive AI subscription
   and provider choices, visible connection progress, and an explicit limited
@@ -86,9 +103,9 @@ authority for which version is actually public, stable, and downloadable.
 - **2026-07-20 · v0.8.59 — One first-run onboarding** — A seven-scene,
   keyboard-accessible tutorial now introduces One in everyday language,
   verifies or limits the selected AI provider through the Desktop main process,
-  and provisions a pinned five-agent starter team. The exact starter releases
-  are reusable at zero Hub credits for the workspace, while provider and team
-  integrity are checked again before execution. The tutorial uses a calm mint
+  and provisions a pinned five-agent starter team. Availability is checked
+  against the signed-in account and local library before execution; onboarding
+  does not present a GitHub payment or invented credit grant. The tutorial uses a calm mint
   visual system, a new local-firewall illustration, reduced-motion support,
   explicit install consent, restart recovery, and a direct handoff into the
   first request. This version publishes Desktop installers for macOS, Windows,

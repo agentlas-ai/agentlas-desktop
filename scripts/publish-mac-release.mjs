@@ -278,6 +278,17 @@ async function main() {
   const tag = String(args.get("--tag") || process.env.AGENTLAS_DESKTOP_RELEASE_TAG || `v${version}`);
   const releaseDir = resolve(desktopRoot, String(args.get("--release-dir") || "release"));
   const keepDraft = args.has("--draft");
+  const stableWriterAuthorized =
+    process.env.GITHUB_ACTIONS === "true" &&
+    process.env.RESOLVED_APPLY_WEB_ENV === "true" &&
+    process.env.AGENTLAS_RAILWAY_RELEASE_READY === "1" &&
+    process.env.AGENTLAS_RAILWAY_PROJECT_VERIFIED === "38a28b33-b637-414f-a355-8cb9a7e01a35";
+  if (!keepDraft && !stableWriterAuthorized) {
+    throw new Error(
+      "Local stable/latest publication is disabled. Publish a private draft with --draft; " +
+      "stable promotion is owned by the exact-source GitHub Actions writer after the production Railway gate passes.",
+    );
+  }
   assertStableReleaseIdentity(version, tag);
   const waitMs = boundedMilliseconds(
     process.env.AGENTLAS_RELEASE_ASSET_WAIT_MS,
@@ -336,7 +347,7 @@ async function main() {
   // Fetch every staged asset from GitHub and compare its bytes with the local
   // manifest before any stable/latest mutation.  Listing names alone is not
   // release provenance and does not prove users receive the intended feeds.
-  run("node", [
+  const remoteVerifyArgs = [
     "scripts/verify-release-assets.mjs",
     `--release-dir=${releaseDir}`,
     `--tag=${tag}`,
@@ -344,7 +355,9 @@ async function main() {
     `--repo=${repo}`,
     "--verify-remote",
     "--public-allowlist",
-  ]);
+  ];
+  if (keepDraft) remoteVerifyArgs.push("--allow-draft");
+  run("node", remoteVerifyArgs);
 
   // Verify the bytes that the staged release actually serves, not merely the
   // local artifacts we intended to upload. This gate runs before the release

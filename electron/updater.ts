@@ -22,7 +22,10 @@ import {
   verifyUpdaterContinuity,
   verifyUpdaterRecoveryCopies,
 } from "./updater/continuity";
-import { inspectMacInstalledAppTrust } from "./updater/mac-app-trust";
+import {
+  inspectMacInstalledAppTrust,
+  repairMacInstalledAppGeneratedPythonCaches,
+} from "./updater/mac-app-trust";
 
 // electron-updater is CommonJS in the main process bundle.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -31,6 +34,7 @@ const { autoUpdater } = require("electron-updater") as typeof import("electron-u
 let controller: DesktopUpdaterController | null = null;
 let fallbackState: UpdaterState = { status: "idle" };
 let startupRecovery: { targetVersion?: string; backupPath?: string } | null = null;
+const stateListeners = new Set<(state: UpdaterState) => void>();
 
 function updateConfigPath(): string {
   return path.join(process.resourcesPath, "app-update.yml");
@@ -46,6 +50,13 @@ function hasBundledUpdateConfig(): boolean {
 
 function broadcast(state: UpdaterState): void {
   fallbackState = state;
+  for (const listener of stateListeners) {
+    try {
+      listener(state);
+    } catch {
+      // A lifecycle observer must never interfere with the updater authority.
+    }
+  }
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.webContents.isDestroyed()) win.webContents.send("updater:state", state);
   }
@@ -140,14 +151,14 @@ export async function handleUpdaterBootstrapFailure(error: unknown): Promise<boo
   };
   const korean = app.getLocale().toLowerCase().startsWith("ko");
   const buttons = backupAvailable
-    ? [korean ? "복구본 보기" : "Show recovery copy", korean ? "공식 설치 파일" : "Official installer", korean ? "종료" : "Quit"]
-    : [korean ? "공식 설치 파일" : "Official installer", korean ? "종료" : "Quit"];
+    ? [korean ? "복구본 보기" : "Show recovery copy", korean ? "종료" : "Quit"]
+    : [korean ? "종료" : "Quit"];
   const result = await dialog.showMessageBox({
     type: "error",
     title: korean ? "업데이트 복구가 필요합니다" : "Update recovery required",
     message: korean
-      ? "업데이트 후 로컬 상태를 확인하기 전에 시작을 중단했습니다. 기존 복구본이나 공식 설치 파일을 사용하세요."
-      : "Startup stopped before post-update local state could be verified. Use the preserved recovery copy or official installer.",
+      ? "업데이트 후 로컬 상태를 확인하기 전에 시작을 중단했습니다. 보존된 복구본은 앱 안에서 확인할 수 있습니다."
+      : "Startup stopped before post-update local state could be verified. The preserved recovery copy remains available in the app.",
     buttons,
     defaultId: 0,
     cancelId: buttons.length - 1,
@@ -155,14 +166,18 @@ export async function handleUpdaterBootstrapFailure(error: unknown): Promise<boo
   });
   if (backupAvailable && result.response === 0 && startupRecovery.backupPath) {
     shell.showItemInFolder(startupRecovery.backupPath);
-  } else if ((!backupAvailable && result.response === 0) || (backupAvailable && result.response === 1)) {
-    await shell.openExternal("https://agentlas.cloud/desktop");
   }
   return true;
 }
 
 export function getUpdaterState(): UpdaterState {
   return controller?.getState() ?? fallbackState;
+}
+
+/** Main-process lifecycle observer for native handoff failures after install(). */
+export function onUpdaterStateChange(listener: (state: UpdaterState) => void): () => void {
+  stateListeners.add(listener);
+  return () => stateListeners.delete(listener);
 }
 
 /** Called only after initStore() and auth restoration have completed. */
@@ -199,6 +214,10 @@ export async function initAutoUpdater(): Promise<void> {
     inspectInstalledAppTrust: (bundlePath) => inspectMacInstalledAppTrust({
       bundlePath,
       policyPath: path.join(process.resourcesPath, "macos-release-signing-policy.json"),
+    }),
+    repairInstalledAppTrust: (bundlePath, diagnostic) => repairMacInstalledAppGeneratedPythonCaches({
+      bundlePath,
+      diagnostic,
     }),
     quiesceWriters: async () => {
       // Set both gates immediately, then wait for their current writes to
@@ -242,7 +261,6 @@ export async function initAutoUpdater(): Promise<void> {
       }),
     refreshSessionForRecovery: bootAuthFromKeychain,
     broadcast,
-    openExternal: (url) => shell.openExternal(url),
     revealPath: (filePath) => shell.showItemInFolder(filePath),
     schedule: hasUpdateConfig,
   });

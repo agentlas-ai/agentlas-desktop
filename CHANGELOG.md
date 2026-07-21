@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.8.61 — 2026-07-21
+
+### Changed
+
+- One onboarding now uses only charcoal and mint surfaces, a clearly dog-shaped
+  flat 2D mascot, and a flat local-device illustration. Paper, cream, red, and pseudo-3D Pac-Man
+  styling are excluded from the One tutorial.
+- Subscription, provider, starter-team, concept, and first-request selections
+  are saved with serialized compare-and-swap writes. The AI brain connection
+  action now waits for the latest saved provider state instead of racing a
+  pending selection write.
+- Provider membership links use the providers' official pricing or membership
+  pages, and starter-team provisioning receives the active Korean or English
+  locale.
+
+### Fixed
+
+- The tutorial can be closed immediately with its close control or Escape,
+  including while provider detection is still running. Dismissal persists and
+  reset clears every onboarding choice before starting again.
+- macOS updater recovery repairs the narrowly scoped generated Python cache
+  mutation inside the signed app, re-verifies the exact official identity
+  `Developer ID Application: Jeongmin Kim (F469CGM7T5)`, Team ID
+  `F469CGM7T5`, and bundle ID `com.agentlas.desktop`, then continues the normal
+  automatic update. It never sends the user to a website to redownload or
+  reinstall the app.
+- Agentlas OS v1.1.56 provides the digest-verified in-app recovery bridge for
+  affected installed Desktop v0.8.58 and v0.8.59 clients and retries that bridge
+  even when the OS runtime is already current. Runtime update caches may take
+  up to 24 hours to refresh; no installer download is required.
+
+Agentlas OS v1.1.56 is pinned at
+`3061292495b08d513dd5fcf2025a96d85813b627`. Source readiness does not prove
+that a public Desktop Git tag, installer, GitHub release, or update feed exists.
+
 ## 0.8.60 — 2026-07-21
 
 ### Added
@@ -54,8 +89,9 @@
   Desktop main process instead of renderer state.
 - Starter-team execution fails closed if a slug, package hash, provider, or
   saved group no longer matches the completed onboarding state.
-- The exact onboarding starter releases use a non-expiring workspace grant and
-  zero Hub credits while remaining subject to runtime safety and availability.
+- The exact onboarding starter releases are checked against the signed-in
+  account and local library before execution. The tutorial does not claim an
+  invented credit grant or route the user through GitHub payment.
 - Keyboard focus, screen-reader status, contrast, localization, sound controls,
   and reduced-motion behavior now cover the complete tutorial flow.
 - Agentlas OS v1.1.50 remains pinned at

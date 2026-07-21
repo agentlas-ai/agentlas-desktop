@@ -145,6 +145,10 @@ export interface ResumeOneOnboardingInput {
   expectedVersion: number;
 }
 
+export interface ResetOneOnboardingInput {
+  expectedVersion: number;
+}
+
 export interface OneOnboardingExecutionAuthorization {
   allowed: boolean;
   groupId: string | null;
@@ -154,6 +158,7 @@ export interface OneOnboardingExecutionAuthorization {
 export interface ProvisionOneOnboardingStarterTeamInput {
   expectedVersion: number;
   memberSlugs: string[];
+  locale?: "ko" | "en";
 }
 
 export interface CompleteOneOnboardingInput {

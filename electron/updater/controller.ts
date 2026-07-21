@@ -11,7 +11,6 @@ import type {
 } from "../../shared/types";
 
 const JOURNAL_SCHEMA_VERSION = 1;
-const OFFICIAL_DOWNLOAD_URL = "https://agentlas.cloud/desktop";
 const RECOVERY_SESSION_RETRY_DELAY_MS = 500;
 const RECOVERY_SESSION_RETRY_ATTEMPTS = 4;
 const NATIVE_INSTALL_WATCHDOG_MS = 20_000;
@@ -194,19 +193,19 @@ export interface UpdaterControllerDependencies {
   databaseSchemaVersion: () => number | null;
   /** Value-free macOS source identity check owned by main process. */
   inspectInstalledAppTrust: (bundlePath: string) => Promise<InstalledAppTrustResult>;
+  /** Narrow repair for generated Python cache files inside an otherwise official bundle. */
+  repairInstalledAppTrust?: (bundlePath: string, diagnostic: UpdaterDiagnostic) => Promise<boolean>;
   /** Stop mutable background writers and resolve only after their current work drains. */
   quiesceWriters?: () => Promise<void | (() => void)>;
   captureContinuity: (targetVersion: string) => Promise<ContinuitySnapshot>;
   verifyContinuity: (snapshot: ContinuitySnapshot) => Promise<ContinuityVerification>;
   broadcast: (state: UpdaterState) => void;
-  openExternal: (url: string) => Promise<void>;
   revealPath: (filePath: string) => void;
   logger?: Pick<Console, "log" | "warn" | "error">;
   now?: () => number;
   initialDelayMs?: number;
   checkIntervalMs?: number;
   schedule?: boolean;
-  manualDownloadUrl?: string;
   removePath?: (target: string, options: { recursive?: boolean; force?: boolean }) => void;
   recoverySessionRetryDelayMs?: number;
   recoverySessionRetryAttempts?: number;
@@ -333,27 +332,27 @@ function safeMessage(code: UpdaterErrorCode): string {
     case "download-failed":
       return "The update could not be downloaded. The installed app was left unchanged.";
     case "install-not-owned":
-      return "Automatic install is disabled because this app is owned by another macOS account. Use the official installer once; your local Agentlas data stays in place.";
+      return "The macOS updater could not obtain replacement access. The existing app and local Agentlas data were preserved; retry from this app.";
     case "install-source-untrusted":
-      return "Automatic update repair is required because this installed copy did not pass the official app integrity check. The existing app and local Agentlas data were preserved.";
+      return "Agentlas could not finish its internal app repair. The existing app and local data were preserved; retry from this app.";
     case "install-not-applied":
       return "The previous update was not applied, so Agentlas will not repeat the same install. The existing app and local data were preserved.";
     case "install-state-corrupt":
-      return "The previous update state could not be verified. Automatic install is paused and the existing app and local data were left unchanged; use the official installer.";
+      return "The previous update state could not be verified. Automatic install is paused and the existing app and local data were left unchanged.";
     case "legacy-cleanup-failed":
       return "A previous macOS update instruction could not be removed. Automatic updates are paused to prevent another install loop.";
     case "install-start-failed":
-      return "The update could not start safely. The existing app and local data were preserved; use the official installer.";
+      return "The update could not start safely. The existing app and local data were preserved; retry from this app.";
     case "continuity-backup-failed":
       return "Agentlas could not create the local-state recovery copy, so the update was not applied.";
     case "continuity-violation":
-      return "Some local Agentlas state could not be verified after the update. Use the recovery copy if available; otherwise use the official installer.";
+      return "Some local Agentlas state could not be verified after the update. Use the preserved recovery copy in this app.";
     case "compatibility-metadata-missing":
       return "This release does not declare the required Agentlas compatibility boundary. Automatic install was not attempted.";
     case "minimum-app-version":
-      return "This release needs a newer Agentlas base app. Use the official installer; local data will stay in the same user folder.";
+      return "This release needs an automatic bridge update before it can be applied. The current app and local data remain unchanged.";
     case "minimum-runtime-version":
-      return "This release is not compatible with the installed Agentlas runtime. Use the official installer to replace both together.";
+      return "This release needs an automatic Agentlas runtime bridge before it can be applied. The current app and local data remain unchanged.";
     case "minimum-schema-version":
       return "This release cannot safely migrate the installed Agentlas data schema. Do not install the same release manually; use a supported bridge version or recovery guidance.";
   }
@@ -579,7 +578,6 @@ function mergeCheckedAt(state: UpdaterState, checkedAt: number | undefined): Upd
 export class DesktopUpdaterController {
   private readonly logger: Pick<Console, "log" | "warn" | "error">;
   private readonly now: () => number;
-  private readonly manualDownloadUrl: string;
   private readonly removePath: (target: string, options: { recursive?: boolean; force?: boolean }) => void;
   private state: UpdaterState = { status: "idle" };
   private timer: NodeJS.Timeout | null = null;
@@ -607,7 +605,6 @@ export class DesktopUpdaterController {
   constructor(private readonly deps: UpdaterControllerDependencies) {
     this.logger = deps.logger ?? console;
     this.now = deps.now ?? Date.now;
-    this.manualDownloadUrl = deps.manualDownloadUrl ?? OFFICIAL_DOWNLOAD_URL;
     this.removePath = deps.removePath ?? ((target, options) => fs.rmSync(target, options));
   }
 
@@ -839,16 +836,7 @@ export class DesktopUpdaterController {
     const nativeRetryable =
       code === "install-start-failed" &&
       isRetryableNativeDiagnostic(diagnostic);
-    const canRetry = code === "continuity-backup-failed" || code === "legacy-cleanup-failed" || nativeRetryable;
-    const offersInstaller = new Set<UpdaterErrorCode>([
-      "install-not-owned",
-      "install-source-untrusted",
-      "install-not-applied",
-      "install-state-corrupt",
-      "install-start-failed",
-      "minimum-app-version",
-      "minimum-runtime-version",
-    ]).has(code);
+    const canRetry = code === "continuity-backup-failed" || code === "legacy-cleanup-failed" || code === "install-source-untrusted" || nativeRetryable;
     return {
       status: "manual-required",
       version,
@@ -856,7 +844,6 @@ export class DesktopUpdaterController {
       error: safeMessage(code),
       ...(diagnostic ? { diagnostic } : {}),
       canRetry,
-      ...(offersInstaller ? { manualDownloadUrl: this.manualDownloadUrl } : {}),
       ...(nativeRetryable && retryAfter !== undefined ? { retryAfter } : {}),
     };
   }
@@ -866,14 +853,12 @@ export class DesktopUpdaterController {
     code: UpdaterErrorCode,
     compatibility?: UpdaterCompatibility,
   ): UpdaterState {
-    const offersInstaller = code === "minimum-app-version" || code === "minimum-runtime-version";
     return {
       status: "incompatible",
       version,
       code,
       error: safeMessage(code),
       canRetry: code === "compatibility-metadata-missing",
-      ...(offersInstaller ? { manualDownloadUrl: this.manualDownloadUrl } : {}),
       compatibility,
     };
   }
@@ -921,6 +906,25 @@ export class DesktopUpdaterController {
       trust = { ok: false, diagnostic: updaterDiagnostic("source-verification-unavailable") };
     }
     if (trust.ok) return true;
+    if (
+      access.bundlePath &&
+      trust.diagnostic.category === "source-seal" &&
+      this.deps.repairInstalledAppTrust
+    ) {
+      try {
+        const repaired = await this.deps.repairInstalledAppTrust(access.bundlePath, trust.diagnostic);
+        if (repaired) {
+          const verified = await this.deps.inspectInstalledAppTrust(access.bundlePath);
+          if (verified.ok) {
+            this.logger.log("[updater] repaired generated Python cache files and restored the official app seal");
+            return true;
+          }
+          trust = verified;
+        }
+      } catch {
+        // Fall through to a retryable in-app repair state. Raw paths/errors stay Main-only.
+      }
+    }
     if (!this.cleanupOrBlock(version)) return false;
     this.blockedTargetVersion = version;
     this.blockedReasonCode = "install-source-untrusted";
@@ -1258,6 +1262,10 @@ export class DesktopUpdaterController {
       this.state.status === "manual-required" &&
       this.state.code === "install-start-failed" &&
       this.state.canRetry === true;
+    const isSourceRepairRetry =
+      this.state.status === "manual-required" &&
+      this.state.code === "install-source-untrusted" &&
+      this.state.canRetry === true;
     if (isNativeRetry) {
       if (this.state.retryAfter !== undefined && this.now() < this.state.retryAfter) {
         return Promise.resolve(this.state);
@@ -1266,6 +1274,17 @@ export class DesktopUpdaterController {
       // Preserve the recovery copy and durable retry counter in the journal,
       // while the stale native payload/state is cleared. The next check obtains
       // fresh bytes; handoff still requires a new explicit install action.
+      this.blockedTargetVersion = null;
+      this.blockedReasonCode = "install-not-applied";
+      this.blockedDiagnostic = undefined;
+      this.blockedNativeInstallFailures = 0;
+      this.blockedRetryAfter = undefined;
+      this.availableVersion = null;
+      this.publish({ status: "idle" });
+    }
+    if (isSourceRepairRetry) {
+      if (!this.cleanupOrBlock(this.state.version)) return Promise.resolve(this.state);
+      this.automaticInstallPaused = false;
       this.blockedTargetVersion = null;
       this.blockedReasonCode = "install-not-applied";
       this.blockedDiagnostic = undefined;
@@ -1411,17 +1430,9 @@ export class DesktopUpdaterController {
   }
 
   async openManualDownload(): Promise<UpdaterActionResult> {
-    const allowed =
-      this.state.manualDownloadUrl === this.manualDownloadUrl ||
-      (this.state.status === "recovery-required" && !this.state.recoveryBackupAvailable);
-    if (!allowed) return { accepted: false, state: this.state };
-    try {
-      await this.deps.openExternal(this.manualDownloadUrl);
-      return { accepted: true, state: this.state };
-    } catch (error) {
-      this.logger.warn("[updater] failed to open official download page", error);
-      return { accepted: false, state: this.state };
-    }
+    // Kept for preload ABI compatibility with older renderer bundles. Update
+    // recovery is now exclusively in-app and this method never opens a URL.
+    return { accepted: false, state: this.state };
   }
 
   revealRecoveryBackup(): UpdaterActionResult {

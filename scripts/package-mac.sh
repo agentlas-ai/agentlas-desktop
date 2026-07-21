@@ -9,6 +9,8 @@ dmg_signing_keychain=""
 dmg_signing_identity=""
 original_keychains=()
 stable_repo="${AGENTLAS_DESKTOP_GITHUB_REPO:-agentlas-ai/agentlas-desktop-releases}"
+official_signing_identity="$(node -p "require('./build-resources/macos-release-signing-policy.json').leafAuthority")"
+official_team_id="$(node -p "require('./build-resources/macos-release-signing-policy.json').teamIdentifier")"
 
 load_local_signing_defaults() {
   local p12_path="$signing_dir/agentlas-developer-id.p12"
@@ -103,11 +105,13 @@ read_keychains() {
 prepare_dmg_signing_identity() {
   if [[ -n "${AGENTLAS_DMG_SIGN_IDENTITY:-}" ]]; then
     dmg_signing_identity="$AGENTLAS_DMG_SIGN_IDENTITY"
-    return 0
+    validate_dmg_signing_identity
+    return
   fi
 
-  dmg_signing_identity="$(security find-identity -v -p codesigning | awk '/Developer ID Application/ {print $2; exit}')"
+  dmg_signing_identity="$(security find-identity -v -p codesigning | awk -v expected="$official_signing_identity" 'index($0, "\"" expected "\"") {print $2; exit}')"
   if [[ -n "$dmg_signing_identity" ]]; then
+    validate_dmg_signing_identity
     return 0
   fi
 
@@ -132,17 +136,42 @@ prepare_dmg_signing_identity() {
   done < <(read_keychains)
   security list-keychains -d user -s "$dmg_signing_keychain" "${original_keychains[@]}"
 
-  dmg_signing_identity="$(security find-identity -p codesigning "$dmg_signing_keychain" | awk '/Developer ID Application/ {print $2; exit}')"
+  dmg_signing_identity="$(security find-identity -p codesigning "$dmg_signing_keychain" | awk -v expected="$official_signing_identity" 'index($0, "\"" expected "\"") {print $2; exit}')"
   if [[ -z "$dmg_signing_identity" ]]; then
-    echo "Could not find Developer ID Application identity in CSC_LINK." >&2
+    echo "Could not find official identity '$official_signing_identity' in CSC_LINK." >&2
+    return 1
+  fi
+  validate_dmg_signing_identity "$dmg_signing_keychain"
+}
+
+validate_dmg_signing_identity() {
+  local keychain="${1:-}"
+  local identity_list selected_line
+  if [[ -n "$keychain" ]]; then
+    identity_list="$(security find-identity -v -p codesigning "$keychain")"
+  else
+    identity_list="$(security find-identity -v -p codesigning)"
+  fi
+  selected_line="$(printf '%s\n' "$identity_list" | awk -v selected="$dmg_signing_identity" '$2 == selected || index($0, "\"" selected "\"") {print; exit}')"
+  if [[ -z "$selected_line" || "$selected_line" != *"\"$official_signing_identity\""* ]]; then
+    echo "Refusing non-official signing identity. Required: $official_signing_identity" >&2
     return 1
   fi
 }
 
 sign_dmg() {
-  local dmg_path="$1"
+  local dmg_path="$1" signature_metadata
   codesign --force --timestamp --sign "$dmg_signing_identity" "$dmg_path"
   codesign --verify --verbose=4 "$dmg_path"
+  signature_metadata="$(codesign -d --verbose=4 "$dmg_path" 2>&1)"
+  grep -Fx "Authority=$official_signing_identity" <<<"$signature_metadata" >/dev/null || {
+    echo "Signed DMG authority is not the official Agentlas Developer ID." >&2
+    return 1
+  }
+  grep -Fx "TeamIdentifier=$official_team_id" <<<"$signature_metadata" >/dev/null || {
+    echo "Signed DMG TeamIdentifier is not $official_team_id." >&2
+    return 1
+  }
 }
 
 notarize_dmg() {

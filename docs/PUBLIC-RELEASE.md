@@ -1,10 +1,13 @@
 # Agentlas Desktop Public macOS Release
 
-Public downloads stay closed until both DMGs are Developer ID signed, Apple notarized, and Gatekeeper accepted.
+Public downloads stay closed until both DMGs are signed by the exact official
+identity `Developer ID Application: Jeongmin Kim (F469CGM7T5)`, Apple
+notarized, and Gatekeeper accepted.
 
 ## 1. Create The Apple Certificate
 
-Required certificate type: **Developer ID Application**.
+Required certificate identity: **Developer ID Application: Jeongmin Kim
+(F469CGM7T5)**. Team ID: **F469CGM7T5**.
 
 Current local certificates like `Apple Development`, `Apple Distribution`, or `iPhone Developer` are not enough for public `.dmg` distribution outside the Mac App Store.
 
@@ -45,7 +48,7 @@ If you prefer Keychain Access:
 6. Confirm the identity exists:
 
 ```bash
-security find-identity -v -p codesigning | grep "Developer ID Application"
+security find-identity -v -p codesigning | grep -F "Developer ID Application: Jeongmin Kim (F469CGM7T5)"
 ```
 
 ## 2. Create Notarization Credentials
@@ -66,7 +69,7 @@ The release scripts automatically read local certificate defaults from
 
 ## 3. Local End-To-End Release
 
-For the v0.8.34 source candidate, verify the local hybrid-memory, executable
+For the current source candidate, verify the local hybrid-memory, executable
 Storm, updater-trust, and packaged-install contracts before creating a tag. The
 three focused tests exercise the bundled Model2Vec asset, Desktop/Core vector
 parity, per-turn adaptive retrieval, per-agent nest projection, and the real
@@ -94,11 +97,13 @@ npm run release:readiness
 npm run release:railway:check -- --environment=production --service=agentlas-web
 AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac
 npm run release:mac:verify
-npm run release:mac:publish
-npm run release:web-env -- --apply --restart --verify-url=https://agentlas.cloud/api/desktop/latest
+npm run release:mac:publish -- --draft
 ```
 
-The last command writes the verified release metadata to Railway production so:
+The local publisher is deliberately private-draft only. Stable/latest promotion
+and the production Railway update are owned by the exact-source GitHub Actions
+writer, which refuses stable publication unless exact production Railway access
+has already passed. After that writer applies the verified metadata:
 
 - `GET /api/desktop/latest` returns `ready:true`.
 - `GET /api/desktop/download?arch=arm64|x64` redirects to GitHub Release DMGs.
@@ -139,8 +144,8 @@ commit; never bypass the moved-tag check or package an ambient checkout.
    ```bash
    # after version, runtime pins, focused tests, and release notes agree:
    git push origin main
-   git tag -a v0.8.34 -m "Agentlas Desktop v0.8.34"
-   git push origin v0.8.34
+   git tag -a v0.8.61 -m "Agentlas Desktop v0.8.61"
+   git push origin v0.8.61
    ```
 
    The workflows enforce tag/checkout identity but do not prove that the tagged
@@ -160,15 +165,17 @@ commit; never bypass the moved-tag check or package an ambient checkout.
    downloads every staged public asset again, compares bytes and the
    source-bound macOS verification record, and only then may clear draft and
    prerelease state and assert stable/latest. Missing, renamed, partial, or
-   byte-different artifacts fail closed. With draft=true, the complete release
-   remains a draft and is not public. Manual runs require explicit version and
-   tag; draft and apply_web_env both default to false. A tag push defaults
-   apply_web_env to true.
+   byte-different artifacts fail closed. With `draft=true`, authenticated
+   remote byte verification still runs but the complete release remains private
+   and cannot become `latest`. Manual runs require explicit version and tag;
+   `draft` defaults to false and `apply_web_env` defaults to true. Tag pushes do
+   not publish; the release workflow is manual-only.
 
    docs/release.workflow.yml is only a pointer to this active file and must not
-   be copied over it. The local equivalent uses the signing folder with
-   AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac, followed by
-   npm run release:mac:publish.
+   be copied over it. Local signing can prepare and remotely verify a private
+   draft with AGENTLAS_PUBLIC_RELEASE=1 npm run package:mac followed by
+   npm run release:mac:publish -- --draft, but cannot create stable/latest or
+   mutate the production web feed.
 
 Required for the **signed macOS workflow and its single public writer** on
 `agentlas-ai/agentlas-desktop`:
@@ -184,18 +191,23 @@ Additional secrets required for the **signed macOS** workflow:
 - `MAC_DEVELOPER_ID_CERTIFICATE`
 - `MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD`
 
-Optional secrets for applying verified release metadata to Web production:
+Required whenever `apply_web_env=true`:
 
 - `RAILWAY_TOKEN`
 - `RAILWAY_PROJECT_ID`
 
-`MAC_DEVELOPER_ID_CERTIFICATE` must be a base64-encoded `.p12` containing the `Developer ID Application` certificate and its private key.
+`MAC_DEVELOPER_ID_CERTIFICATE` must be a base64-encoded `.p12` containing the
+exact `Developer ID Application: Jeongmin Kim (F469CGM7T5)` certificate and its
+private key. A different Developer ID certificate, including one from the same
+Apple team, is rejected.
 
 `RAILWAY_TOKEN` must be valid for the Railway project that contains
 `agentlas-web` in the `production` environment. A secret with the right name is
-not enough. The release workflow checks access before signing starts; if
-Railway access is missing or invalid, the macOS release still publishes and only
-the web env publishing step is skipped.
+not enough. When `apply_web_env=true`, the release workflow checks access before
+signing starts and fails before any public release write if Railway access is
+missing or invalid. `apply_web_env=false` is allowed only for a private
+`draft=true` run; stable/latest publication always requires the production web
+write and full served-DMG verification.
 
 Do not copy the local Railway CLI `user.token` from `~/.railway/config.json`
 into GitHub Actions. That token can support an interactive local CLI login while
@@ -223,7 +235,7 @@ security export \
   -f pkcs12 \
   -o /tmp/agentlas-developer-id.p12 \
   -P "$P12_PASSWORD" \
-  -c "Developer ID Application"
+  -c "Developer ID Application: Jeongmin Kim (F469CGM7T5)"
 base64 -i /tmp/agentlas-developer-id.p12 | gh secret set MAC_DEVELOPER_ID_CERTIFICATE -R agentlas-ai/agentlas-desktop -b-
 printf "%s" "$P12_PASSWORD" | gh secret set MAC_DEVELOPER_ID_CERTIFICATE_PASSWORD -R agentlas-ai/agentlas-desktop -b-
 rm -f /tmp/agentlas-developer-id.p12
@@ -234,8 +246,8 @@ Then set the remaining secrets and run:
 ```bash
 gh workflow run release-signed-mac.yml \
   -R agentlas-ai/agentlas-desktop \
-  -f version=0.8.34 \
-  -f tag=v0.8.34 \
+  -f version=0.8.61 \
+  -f tag=v0.8.61 \
   -f draft=false \
   -f apply_web_env=true
 ```

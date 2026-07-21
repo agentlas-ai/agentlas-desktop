@@ -64,6 +64,15 @@ jobs:
               exit 1
             }
           done < <(jq -r '.artifacts[].fileName' release/desktop-release-verification.json)
+          while IFS=$'\t' read -r asset_name expected_size expected_sha; do
+            gh release download "$RESOLVED_TAG" --repo agentlas-ai/agentlas-desktop-releases --pattern "$asset_name" --dir release --clobber
+            actual_size="$(stat -c '%s' "release/$asset_name")"
+            actual_sha="$(sha256sum "release/$asset_name" | awk '{print $1}')"
+            if [ "$actual_size" != "$expected_size" ] || [ "$actual_sha" != "$expected_sha" ]; then
+              echo "::error::Stable recovery asset bytes do not match desktop-release-verification.json: $asset_name"
+              exit 1
+            fi
+          done < <(jq -r '.artifacts[] | [.fileName, (.sizeBytes | tostring), .sha256] | @tsv' release/desktop-release-verification.json)
 
       - name: Install pinned Railway CLI
         run: npm install -g @railway/cli@5.26.0
@@ -76,4 +85,4 @@ jobs:
           test -n "$RAILWAY_TOKEN"
           test -n "$RAILWAY_PROJECT_ID"
           npm run release:railway:check -- --project="$RAILWAY_PROJECT_ID" --environment=production --service=agentlas-web
-          npm run release:web-env -- --apply --restart --verification-file=release/desktop-release-verification.json --expected-version="$RESOLVED_VERSION" --expected-tag="$RESOLVED_TAG" --environment=production --service=agentlas-web --verify-url=https://agentlas.cloud/api/desktop/latest
+          npm run release:web-env -- --apply --redeploy --verification-file=release/desktop-release-verification.json --expected-version="$RESOLVED_VERSION" --expected-tag="$RESOLVED_TAG" --environment=production --service=agentlas-web --verify-url=https://agentlas.cloud/api/desktop/latest

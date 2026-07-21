@@ -331,10 +331,10 @@ function readRemoteRelease(repo, tag) {
   }
 }
 
-export function assertRemoteReleaseHeader({ remote, manifest }) {
+export function assertRemoteReleaseHeader({ remote, manifest, allowDraft = false }) {
   if (
     remote?.tagName !== manifest.tag ||
-    remote?.isDraft === true
+    (remote?.isDraft === true && !allowDraft)
   ) {
     throw new Error("Staged public release does not bind the exact release tag.");
   }
@@ -363,9 +363,9 @@ export function compareRemoteAsset({ expected, actual }) {
   }
 }
 
-function verifyRemoteReleaseBytes({ repo, tag, manifest }) {
+function verifyRemoteReleaseBytes({ repo, tag, manifest, allowDraft = false }) {
   const remote = readRemoteRelease(repo, tag);
-  assertRemoteReleaseHeader({ remote, manifest });
+  assertRemoteReleaseHeader({ remote, manifest, allowDraft });
   const temp = mkdtempSync(join(tmpdir(), "agentlas-release-remote-"));
   try {
     const assets = [];
@@ -421,7 +421,12 @@ async function main() {
   if (args.get("--verify-remote") === "true") {
     const repo = args.get("--repo") || process.env.AGENTLAS_DESKTOP_GITHUB_REPO;
     if (!repo) throw new Error("--verify-remote requires --repo or AGENTLAS_DESKTOP_GITHUB_REPO.");
-    manifest.remote = verifyRemoteReleaseBytes({ repo: String(repo), tag, manifest });
+    manifest.remote = verifyRemoteReleaseBytes({
+      repo: String(repo),
+      tag,
+      manifest,
+      allowDraft: args.get("--allow-draft") === "true",
+    });
   }
   const manifestPath = join(releaseDir, MANIFEST_FILE);
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });

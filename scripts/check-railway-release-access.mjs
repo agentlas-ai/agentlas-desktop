@@ -12,8 +12,14 @@ const args = new Map(
 
 const service = String(args.get("--service") || "agentlas-web");
 const environment = String(args.get("--environment") || "production");
-const project = String(args.get("--project") || process.env.RAILWAY_PROJECT_ID || "");
+const expectedProject = "38a28b33-b637-414f-a355-8cb9a7e01a35";
+const project = String(args.get("--project") || process.env.RAILWAY_PROJECT_ID || expectedProject);
 const railwayCwd = resolve(desktopRoot, String(args.get("--railway-cwd") || process.env.AGENTLAS_RAILWAY_CWD || "."));
+
+if (project !== expectedProject) {
+  console.error(`Refusing non-production Railway project ${project}; expected ${expectedProject}.`);
+  process.exit(1);
+}
 
 function run(command, commandArgs, options = {}) {
   const result = spawnSync(command, commandArgs, {
@@ -39,7 +45,7 @@ function fail(message, result) {
 const version = run("railway", ["--version"]);
 if (!version.ok) fail("Railway CLI is not available for release credential validation.", version);
 
-if (project && !process.env.RAILWAY_TOKEN) {
+if (!process.env.RAILWAY_TOKEN) {
   const link = run("railway", [
     "link",
     "--project",
@@ -55,15 +61,12 @@ if (project && !process.env.RAILWAY_TOKEN) {
       link,
     );
   }
-} else if (project) {
-  console.log("Using RAILWAY_TOKEN for project-scoped Railway access; skipping local railway link.");
 } else {
-  const status = run("railway", ["status"]);
-  if (!status.ok) fail("Railway is not linked locally and RAILWAY_PROJECT_ID is not set.", status);
+  console.log("Using RAILWAY_TOKEN for project-scoped Railway access; skipping local railway link.");
 }
 
 const envCheckArgs = ["run", "--service", service, "--environment", environment];
-if (project) envCheckArgs.push("--project", project);
+envCheckArgs.push("--project", project);
 envCheckArgs.push("printenv", "AGENTLAS_DESKTOP_VERSION");
 
 const envCheck = run("railway", envCheckArgs);
