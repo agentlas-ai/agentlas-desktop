@@ -26,6 +26,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Resolve recovery inputs
         env:
@@ -47,8 +49,21 @@ jobs:
           GH_TOKEN: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
         run: |
           mkdir -p release
+          gh api "repos/agentlas-ai/agentlas-desktop-releases/releases/tags/$RESOLVED_TAG" > release/recovery-release.json
+          jq -e --arg tag "$RESOLVED_TAG" '
+            .tag_name == $tag and .draft == false and .prerelease == false
+          ' release/recovery-release.json >/dev/null || {
+            echo "::error::Recovery source must be an already-published stable release."
+            exit 1
+          }
           gh release download "$RESOLVED_TAG" --repo agentlas-ai/agentlas-desktop-releases --pattern desktop-release-verification.json --dir release --clobber
           npm run release:web-env -- --verification-file=release/desktop-release-verification.json --expected-version="$RESOLVED_VERSION" --expected-tag="$RESOLVED_TAG"
+          while IFS= read -r asset_name; do
+            jq -e --arg name "$asset_name" '.assets | any(.name == $name and .state == "uploaded")' release/recovery-release.json >/dev/null || {
+              echo "::error::Stable recovery release is missing verified asset: $asset_name"
+              exit 1
+            }
+          done < <(jq -r '.artifacts[].fileName' release/desktop-release-verification.json)
 
       - name: Install pinned Railway CLI
         run: npm install -g @railway/cli@5.26.0

@@ -20,6 +20,7 @@ const restart = args.has("--restart");
 const verifyUrl = String(args.get("--verify-url") || "");
 const service = String(args.get("--service") || "agentlas-web");
 const environment = String(args.get("--environment") || "production");
+const project = String(args.get("--project") || process.env.RAILWAY_PROJECT_ID || "");
 const expectedRepo = String(
   args.get("--expected-repo") ||
   process.env.AGENTLAS_DESKTOP_GITHUB_REPO ||
@@ -80,8 +81,9 @@ const command = [
   service,
   "--environment",
   environment,
-  ...pairs,
 ];
+if (project) command.push("--project", project);
+command.push(...pairs);
 
 if (!apply) {
   console.log(`(cd ${shellQuote(railwayCwd)} && ${command.map(shellQuote).join(" ")})`);
@@ -96,8 +98,36 @@ const result = spawnSync(command[0], command.slice(1), {
 });
 if (result.status !== 0) process.exit(result.status || 1);
 
+const auditKeys = [
+  "AGENTLAS_DESKTOP_VERSION",
+  "AGENTLAS_DESKTOP_RELEASE_TAG",
+  "AGENTLAS_DESKTOP_GITHUB_REPO",
+  "AGENTLAS_DESKTOP_RELEASE_VERIFIED",
+  "AGENTLAS_DESKTOP_RELEASE_NOTARIZED",
+  "AGENTLAS_DESKTOP_MAC_ARM64_SHA256",
+  "AGENTLAS_DESKTOP_MAC_X64_SHA256",
+];
+const auditArgs = ["run", "--service", service, "--environment", environment];
+if (project) auditArgs.push("--project", project);
+auditArgs.push("printenv", ...auditKeys);
+const auditResult = spawnSync("railway", auditArgs, {
+  cwd: railwayCwd,
+  encoding: "utf8",
+  env: process.env,
+});
+const actualAuditValues = String(auditResult.stdout || "").trim().split(/\r?\n/);
+const expectedAuditValues = auditKeys.map((key) => values[key]);
+if (auditResult.status !== 0 ||
+    actualAuditValues.length !== expectedAuditValues.length ||
+    actualAuditValues.some((value, index) => value !== expectedAuditValues[index])) {
+  throw new Error("Railway did not persist the exact verified Desktop release metadata in the requested project/service/environment.");
+}
+
 if (restart) {
-  const restartResult = spawnSync("railway", ["restart", "--service", service, "--yes"], {
+  const restartArgs = ["restart", "--service", service, "--environment", environment];
+  if (project) restartArgs.push("--project", project);
+  restartArgs.push("--yes");
+  const restartResult = spawnSync("railway", restartArgs, {
     cwd: railwayCwd,
     stdio: "inherit",
     env: process.env,
