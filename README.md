@@ -69,6 +69,16 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-22 · v0.8.65 — patched image/URI dependency advisories** — Pinned
+  `sharp` to a libvips-patched build and `fast-uri` to a non-vulnerable release
+  through `overrides`, without changing the pinned Next.js major, clearing the
+  high-severity `npm audit` advisories that were failing the release security
+  gate. This carries the unreleased v0.8.62 customer-safe One surface, v0.8.63
+  on-device semantic routing, and v0.8.64 automation retry fix. This release
+  binds Agentlas OS v1.1.56, pinned at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 - **2026-07-22 · v0.8.64 — automations retry cleanly after a pre-tool failure** —
   A scheduled automation whose run threw before any external tool ran (for
   example a transient LLM connection error) was being classified as an ambiguous

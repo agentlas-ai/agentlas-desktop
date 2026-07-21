@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.8.65 — 2026-07-22
+
+### Security
+
+- Pinned `sharp` to `>=0.35.0` (libvips CVE-2026-33327/33328/35590/35591) and
+  `fast-uri` to `>=3.1.4` (GHSA-v2hh-gcrm-f6hx) via `overrides`, without changing
+  the pinned Next.js major. This clears the high-severity `npm audit` advisories
+  that were failing the release security preflight. Three moderate advisories
+  remain and do not gate the release.
+
+### Included
+
+- Carries the previously unreleased v0.8.62 customer-safe One surface, v0.8.63
+  on-device semantic agent routing, and v0.8.64 automation retry fix.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.56, pinned at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.8.64 — 2026-07-22
 
 ### Fixed

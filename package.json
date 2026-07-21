@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.8.64",
+  "version": "0.8.65",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -347,6 +347,8 @@
     "node": ">=22.12.0"
   },
   "overrides": {
-    "postcss": "8.5.16"
+    "postcss": "8.5.16",
+    "sharp": ">=0.35.0",
+    "fast-uri": ">=3.1.4"
   }
 }
