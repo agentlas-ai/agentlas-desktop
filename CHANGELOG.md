@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.8.63 — 2026-07-21
+
+### Fixed
+
+- One's local specialist routing (`electron/agents/auto-router.ts`) no longer
+  mis-routes on incidental keyword overlap — the cause of a café restock note
+  being pulled into a "Meme Shorts Studio" team run. `selectAutoRoutedAgent` now
+  applies the verified on-device multilingual model (potion-multilingual-128M) as
+  a precision veto: a lexically-matched candidate is recruited only if the local
+  model is semantically confident it fits the request; otherwise One stays solo.
+
+### Changed
+
+- Local agent routing gains the same semantic-vs-incidental discrimination the
+  Hub/Cloud ontology provides, computed fully on-device (no prompt leaves the
+  machine). Explicitly named agents, curated route hints, and machines without
+  the embedding asset keep their existing behavior. `scoreAgent` now reports a
+  `highPrecision` signal so explicit intent overrides the semantic gate.
+
+### Tests
+
+- New `verify-agent-route-semantic-gate` injects a deterministic semantic verdict
+  to prove the café mis-route is vetoed, an eligible specialist still routes, an
+  explicitly named agent overrides the veto, and machines without the model fall
+  back to the legacy lexical path.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.56, pinned at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.8.62 — 2026-07-21
 
 ### Fixed

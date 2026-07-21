@@ -1,8 +1,59 @@
+import { createHash } from "node:crypto";
 import type { AutomationHubMode, InstalledAgent } from "../../shared/types";
 import { APP_BUILDER_SLUG, GLOBAL_ORCHESTRATOR_SLUG } from "../architecture/manifest";
 import { cardScoreAdjustment, findCardForAgent } from "./routing-cards";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import { buildEffectiveAgentSystemPrompt } from "./files";
+import { autoLocalEmbedding, rankHybridLocal, MODEL2VEC_HYBRID_NAME } from "../memory/local-embedding";
+
+/**
+ * On-device semantic verdict for a set of candidate agents. `activeModel` is
+ * true only when the verified multilingual local model produced the judgment;
+ * `eligibleIds` are the candidates it is semantically confident about. When the
+ * model asset is absent this stays inactive and routing falls back to lexical.
+ */
+export interface SemanticRouteSignal {
+  activeModel: boolean;
+  eligibleIds: ReadonlySet<string>;
+}
+
+// Routing embeddings are pure functions of an agent's identity text, so cache
+// them by id + content hash. The int8 model2vec vectors are cheap to compute,
+// but agents rarely change, so we avoid re-embedding on every keystroke-driven
+// route probe.
+const routeEmbeddingCache = new Map<string, { hash: string; vector: readonly number[] }>();
+
+function agentRouteVector(agentId: string, haystack: string): readonly number[] {
+  const hash = createHash("sha256").update(haystack).digest("hex");
+  const cached = routeEmbeddingCache.get(agentId);
+  if (cached && cached.hash === hash) return cached.vector;
+  const vector = autoLocalEmbedding(haystack).vector;
+  routeEmbeddingCache.set(agentId, { hash, vector });
+  return vector;
+}
+
+/**
+ * Default local semantic judgment. Uses the verified on-device multilingual
+ * model (potion-multilingual-128M) so local agent routing gets the same
+ * semantic-vs-incidental discrimination the Hub/Cloud ontology gives, without
+ * ever sending the prompt off-device. Falls back to inactive (lexical-only)
+ * when the model asset is unavailable.
+ */
+export function defaultSemanticRoute(prompt: string, candidates: readonly InstalledAgent[]): SemanticRouteSignal {
+  const query = autoLocalEmbedding(prompt);
+  if (query.degraded || query.model !== MODEL2VEC_HYBRID_NAME) {
+    return { activeModel: false, eligibleIds: new Set() };
+  }
+  const items = candidates.map((agent) => {
+    const haystack = agentHaystack(agent);
+    return { id: agent.id, text: haystack, embedding: agentRouteVector(agent.id, haystack) };
+  });
+  const ranked = rankHybridLocal(prompt, items);
+  return {
+    activeModel: true,
+    eligibleIds: new Set(ranked.filter((entry) => entry.semanticEligible).map((entry) => entry.item.id)),
+  };
+}
 
 export interface AutoRouteChoice {
   agent: InstalledAgent;
@@ -401,7 +452,7 @@ function scoreAgent(
   agent: InstalledAgent,
   locale: RuntimeLocale,
   experiencePrior?: AutoRouteExperiencePrior,
-): { score: number; reason: string; terms: string[] } {
+): { score: number; reason: string; terms: string[]; highPrecision: boolean } {
   const promptText = normalize(prompt);
   if (agent.slug === APP_BUILDER_SLUG && !isAppBuilderWorthyPrompt(promptText)) {
     return {
@@ -411,6 +462,7 @@ function scoreAgent(
           ? "전용 App을 만들 만큼 반복·상태·편집·자동화가 뚜렷하지 않아 App Builder 라우트를 보류했습니다"
           : "the request does not clearly need a dedicated App with durable workflow, state, editing, or automation",
       terms: [],
+      highPrecision: false,
     };
   }
   const haystack = agentHaystack(agent);
@@ -418,11 +470,13 @@ function scoreAgent(
   const matchedTerms: string[] = [];
 
   const directNames = [agent.slug, agent.name, agent.nameEn].filter(Boolean);
+  let directNameMatched = false;
   for (const name of directNames) {
     const n = normalize(name);
     if (n && promptText.includes(n)) {
       score += 20;
       matchedTerms.push(name);
+      directNameMatched = true;
     }
   }
 
@@ -447,6 +501,10 @@ function scoreAgent(
     matchedTerms.push(...experiencePrior.matchedTerms);
   }
 
+  // High-precision = an explicit routing signal, not incidental term overlap:
+  // the person named the agent, a curated route hint fired, or the user's own
+  // reviewed experience matched. These override the semantic gate below.
+  const highPrecision = directNameMatched || hint.score > 0 || (experiencePrior?.score ?? 0) > 0;
   const uniqueTerms = [...new Set(matchedTerms)].slice(0, 6);
   const experienceReason = experiencePrior
     ? locale === "ko"
@@ -463,7 +521,7 @@ function scoreAgent(
         ? `request terms ${uniqueTerms.map((term) => `"${term}"`).join(", ")} best match this agent's role/triggers`
         : "no specialist matched clearly, so the default project coordinator is safest");
 
-  return { score, reason, terms: uniqueTerms };
+  return { score, reason, terms: uniqueTerms, highPrecision };
 }
 
 // 전문 에이전트로 위임하려면 이 점수 이상이어야 한다. 근거: 직접 이름 언급 +20,
@@ -482,6 +540,8 @@ export function selectAutoRoutedAgent(
     allowFallback?: boolean;
     /** Reviewed exact-base Experience evidence, keyed by installed agent id. */
     experiencePriors?: ReadonlyMap<string, AutoRouteExperiencePrior>;
+    /** Injectable on-device semantic judgment (default uses the local model). */
+    semanticRoute?: (prompt: string, candidates: readonly InstalledAgent[]) => SemanticRouteSignal;
   },
 ): AutoRouteChoice | null {
   const candidates = agents.filter((agent) => !isGlobalOrchestrator(agent));
@@ -498,13 +558,56 @@ export function selectAutoRoutedAgent(
       a.agent.slug.localeCompare(b.agent.slug) ||
       a.agent.id.localeCompare(b.agent.id));
 
-  const best = ranked[0];
-  if (best && best.score >= MIN_SPECIALIST_SCORE) {
-    return { agent: best.agent, reason: best.reason, matchedTerms: best.terms };
+  const toChoice = (entry: (typeof ranked)[number], reason = entry.reason): AutoRouteChoice => ({
+    agent: entry.agent,
+    reason,
+    matchedTerms: entry.terms,
+  });
+
+  // 1) Explicit intent always wins: the person named the agent, a curated hint
+  //    fired, or their own reviewed experience matched. Honor it regardless of
+  //    the semantic verdict — they told us which specialist to use.
+  const explicit = ranked.find((entry) => entry.highPrecision && entry.score >= MIN_SPECIALIST_SCORE);
+  if (explicit) return toChoice(explicit);
+
+  // Lexical recruitment: the strongest agent that clears the specialist bar.
+  const eligibleByLexical = ranked.filter((entry) => entry.score >= MIN_SPECIALIST_SCORE);
+  const lexicalBest = eligibleByLexical[0] ?? null;
+
+  // 2) On-device semantic precision filter. The lexical scorer is a bag of
+  //    words: a café restock note and a meme-video studio can share enough
+  //    incidental terms ("make", "local", "draft") to cross the bar. When the
+  //    verified multilingual local model is loaded, it VETOES a recruitment it
+  //    is not semantically confident about, and we fall through to the next
+  //    lexically-eligible agent it IS confident about — or stay solo. This gives
+  //    local routing the same semantic-vs-incidental discrimination the
+  //    Hub/Cloud ontology provides, without sending the prompt off-device. A
+  //    machine without the model asset keeps the plain lexical behavior.
+  const semantic = (opts?.semanticRoute ?? defaultSemanticRoute)(userPrompt, candidates);
+  if (semantic.activeModel && lexicalBest) {
+    const semanticPick = eligibleByLexical.find((entry) => semantic.eligibleIds.has(entry.agent.id));
+    if (semanticPick) {
+      return toChoice(
+        semanticPick,
+        locale === "ko"
+          ? `${semanticPick.reason} — 요청과 의미가 맞는지 기기 내 모델로 확인했습니다`
+          : `${semanticPick.reason} — confirmed on-device as a meaningful match`,
+      );
+    }
+    // Lexical had a candidate, but the local model rejected every one as an
+    // incidental keyword match. Do not recruit a mis-matched specialist.
+    if (!opts?.allowFallback) return null;
+    return defaultCoordinationChoice(candidates, locale);
   }
 
-  if (!opts?.allowFallback) return null;
+  // 3) No verified local model (asset absent) — preserve the legacy lexical bar.
+  if (lexicalBest) return toChoice(lexicalBest);
 
+  if (!opts?.allowFallback) return null;
+  return defaultCoordinationChoice(candidates, locale);
+}
+
+function defaultCoordinationChoice(candidates: readonly InstalledAgent[], locale: RuntimeLocale): AutoRouteChoice {
   const fallback =
     candidates.find((agent) => agent.slug === "agentlas-pm-soul") ??
     candidates[0];

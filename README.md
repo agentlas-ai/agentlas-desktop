@@ -69,6 +69,21 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-21 · v0.8.63 — on-device semantic agent routing** — One's local
+  specialist routing no longer relies on a bag-of-words keyword scorer, which
+  could pull an unrelated agent (a café restock note mis-routed to a meme-video
+  studio) into a task on incidental term overlap. The verified on-device
+  multilingual model (potion-multilingual-128M) now acts as a precision veto over
+  local recruitment: a lexical candidate is dropped unless the model is
+  semantically confident it fits the request, and One stays solo rather than
+  mis-route. This brings the same semantic-vs-incidental discrimination the
+  Hub/Cloud ontology gives to fully on-device, privacy-preserving local routing;
+  explicitly named agents and machines without the model asset keep working
+  unchanged. Covered by a new injected-verdict regression. This release binds
+  Agentlas OS v1.1.56, pinned at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 - **2026-07-21 · v0.8.62 — a customer-safe One surface** — One now presents a
   single, calm chief-of-staff voice: a shared customer-safe boundary strips every
   internal runtime, CLI, borrowed-agent, session, and result-schema term before it
