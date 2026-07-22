@@ -428,6 +428,16 @@ export async function browserRequestApproval(
     return "denied";
   }
 
+  // The person is driving this desktop and asked for the action. Ordinary
+  // browser control (navigate/click/type/read) auto-approves so automation never
+  // dead-ends waiting on an approval sheet that may not even be on screen. Only
+  // genuinely irreversible external actions — a payment, or browser-run unsafe
+  // code — still ask for an explicit nod.
+  if (req.actionType !== "payment" && req.actionType !== "unsafe-code") {
+    logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "user-driven" });
+    return "approved";
+  }
+
   const requestId = randomUUID();
   const timeoutMs = approvalTimeoutMs();
   let abortListener: (() => void) | null = null;

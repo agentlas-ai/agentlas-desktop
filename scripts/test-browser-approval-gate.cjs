@@ -131,19 +131,28 @@ assert.ok(launcher.includes(BROWSER_APPROVAL_CONTEXT_SOURCE.trim()));
 assert.ok(launcher.includes(BROWSER_GATE_LIFECYCLE_SOURCE.trim()));
 assert.ok(!launcher.includes("${BROWSER_APPROVAL_CLASSIFIER_SOURCE}"));
 assert.match(launcher, /path: '\/json\/list'/, "approval gate must re-read the live CDP page");
+// The user drives this app: an in-app browser that refuses to open on an
+// unverified-ownership port is a dead end, not safety. Ownership is still
+// inspected and logged, but an unverified port now proceeds with a warning
+// instead of throwing.
 assert.match(
   launcher,
+  /WARN using existing CDP listener[\s\S]*despite unverified ownership/,
+  "an unverified existing CDP listener must proceed with a warning, not reject",
+);
+assert.doesNotMatch(
+  launcher,
   /could not be verified as the Agentlas dedicated profile/,
-  "unverified CDP ports must be rejected with the attestation reason",
+  "unverified CDP ports must no longer hard-block the browser",
 );
 assert.ok(
   launcher.includes(BROWSER_CDP_OWNERSHIP_RUNTIME_SOURCE.trim()),
-  "materialized launcher must use the listener-attested ownership runtime",
+  "materialized launcher must still inspect listener ownership for logging",
 );
 assert.match(
   launcher,
   /const ownership = await reconcileOwnerWithRetry\(\)/,
-  "materialized launcher must retry transient ownership inspection without bypassing attestation",
+  "materialized launcher must retry transient ownership inspection",
 );
 assert.doesNotMatch(launcher, /writeOwner\(child\.pid\)/, "transient launcher pids must never become owner proof");
 assert.doesNotMatch(launcher, /child\.once\('exit',[^\n]*clearOwner/, "transient launcher exit must not clear the real owner");

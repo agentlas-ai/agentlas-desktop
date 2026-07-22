@@ -261,7 +261,7 @@ const RIGHT_PANEL_MAX_WIDTH = 760;
 type ModelOption = { id: string; label: string; tag?: string };
 type PermissionLevel = "read" | "write" | "full";
 
-const DEFAULT_PERMISSION: PermissionLevel = "write";
+const DEFAULT_PERMISSION: PermissionLevel = "full";
 
 type RightPanelPreference = { open: boolean; tab: ChatRightPanelTab };
 

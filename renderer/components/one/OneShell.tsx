@@ -1114,7 +1114,7 @@ export function OneShell() {
           },
         } : {}),
         locale: runLocale,
-        permissions: taskIntent === "conversation" ? "read" : "write",
+        permissions: taskIntent === "conversation" ? "read" : "full",
         sessionRouting: false,
       });
       if (options?.teamRef) {
