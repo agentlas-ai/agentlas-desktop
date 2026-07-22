@@ -159,6 +159,13 @@ export function browserLoginArgs(profile: string, url: string): string[] {
     "--no-default-browser-check",
     "--restore-last-session=false",
     "--disable-session-crashed-bubble",
+    // Same stability flags as the CDP launcher so a login window opened on the
+    // shared dedicated profile does not later crash the automation's browser.
+    "--disable-component-update",
+    "--disable-background-networking",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
     "--new-window",
     url,
   ];

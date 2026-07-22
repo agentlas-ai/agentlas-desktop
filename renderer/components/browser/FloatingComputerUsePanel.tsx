@@ -46,10 +46,19 @@ export default function FloatingComputerUsePanel() {
     busy.current = true;
     try {
       if (mode === "browser") {
-        setBrowserFrame(await api.browser.captureLiveFrame());
+        const next = await api.browser.captureLiveFrame();
+        // Keep showing the last good screen through a transient CDP hiccup
+        // (busy socket, mid-navigation, a slow screenshot). Blanking on every
+        // failed poll made the panel flicker to "Waiting for screen" between
+        // good frames. Only replace the image when a new one actually arrives.
+        setBrowserFrame((prev) => next.dataUrl || !prev?.dataUrl
+          ? next
+          : { ...next, dataUrl: prev.dataUrl, title: prev.title, url: prev.url, width: prev.width, height: prev.height });
       } else {
         const next = await api.computerUse.capturePreview(sourceId);
-        setComputerFrame(next);
+        setComputerFrame((prev) => next.dataUrl || !prev?.dataUrl
+          ? next
+          : { ...next, dataUrl: prev.dataUrl });
         if (!sourceId && next.selectedSourceId) setSourceId(next.selectedSourceId);
       }
     } catch {

@@ -933,6 +933,13 @@ async function ensureChrome() {
     '--remote-debugging-address=127.0.0.1',
     '--no-first-run', '--no-default-browser-check', '--restore-last-session=false',
     '--disable-session-crashed-bubble', '--disable-features=Translate',
+    // Stability for a long-lived automation profile: stop Chrome from crashing
+    // "unexpectedly" out from under the agent. Background component/self-updates
+    // swap the binary under a running instance; occluded/backgrounded renderers
+    // get throttled or reaped when the window is hidden during headless-ish runs.
+    '--disable-component-update', '--disable-background-networking',
+    '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding',
+    '--disable-background-timer-throttling',
   ];
   if (HEADLESS) args.push('--headless=new');
   args.push('about:blank');
