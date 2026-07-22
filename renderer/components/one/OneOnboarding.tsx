@@ -1124,7 +1124,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
         <div className={styles.helperWrap}>
           <AnimatePresence>
             {helperOpen && (
-              <motion.div className={styles.helperBubble} initial={reduced ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduced ? undefined : { opacity: 0, y: 8 }} transition={{ duration: reduced ? 0 : 0.18 }}>
+              <motion.div className={styles.helperBubble} initial={reduced ? false : { opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={reduced ? undefined : { opacity: 0, y: -8 }} transition={{ duration: reduced ? 0 : 0.18 }}>
                 <strong>{tFor(locale, "one.onb.helper.here")}</strong>
                 <span>{state.status === "dismissed"
                   ? tFor(locale, "one.onb.helper.dismissed")

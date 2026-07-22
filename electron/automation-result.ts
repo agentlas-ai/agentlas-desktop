@@ -17,6 +17,12 @@ const NEEDS_INPUT_PATTERNS: Array<{ re: RegExp; code: string; reason: string }> 
   { re: /##\s*Automation\s+Intervention|type:\s*(tool-choice|login-required|permission-required|credential-required|hub-approval|human-review|workflow-patch)/i, code: "intervention_required", reason: "automation requires user intervention" },
   { re: /\bautomation_hub_version_pin_required\b/i, code: "hub_version_pin_required", reason: "an exact Hub package version must be selected before this automation can run" },
   { re: /\bpinned_runtime_contract_invalid\b/i, code: "pinned_runtime_contract_invalid", reason: "the saved runtime pin is malformed and must be selected again" },
+  // 자동화에 핀된 AI 런타임(Claude Code/Codex 등)이 로그아웃됨 — Hub 인증(hub_auth_required)과 구분한다.
+  // 스케줄러가 이 코드를 보면 살아있는 다른 런타임으로 한 번 자동 재실행하고, 대체 런타임이 없을 때만
+  // 이 needs_input이 최종 표면화된다. 로케일 무관하게 실제 런타임 사인아웃 문구를 잡는다.
+  // 오탐 방지: 실제 도달 메시지는 항상 구조화된 사인아웃 문구다(claude-code.ts가 원인을 이 문구로 정규화).
+  // 성공 출력 본문에서 우연히 나올 수 있는 제네릭 "not logged in" 같은 토큰은 넣지 않는다.
+  { re: /(?:Claude Code|Codex)\s+is signed out|Reconnect\s+Claude\s+in\s+Settings|(?:Claude Code|Codex).{0,24}로그인이?\s*만료|Claude를?\s*다시\s*연결한?/i, code: "runtime_auth_required", reason: "the automation's saved AI runtime is signed out; sign it in or switch this automation's runtime" },
   { re: /\bautomation_hub_mode_contract_invalid\b/i, code: "hub_mode_contract_invalid", reason: "the saved Hub routing policy is unknown and must be selected again" },
 ];
 

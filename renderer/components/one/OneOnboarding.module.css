@@ -639,18 +639,21 @@
 .resumeCard p { color: #4f675f; }
 .resumeCard .actions { justify-content: center; margin-top: 22px; }
 
-.helperWrap { position: fixed; left: 18px; bottom: 18px; z-index: 80; }
+/* 강아지 헬퍼 — 좌하단은 본문/작업 영역을 가려서(2026-07-23 Mason) 우상단으로 이동.
+   top은 One 탑바 아래로 내려 창 컨트롤·탑바 액션과 겹치지 않게 한다. */
+.helperWrap { position: fixed; right: 18px; top: 84px; z-index: 80; }
 .helperButton { display: block; padding: 0; overflow: hidden; background: transparent; border: 0; border-radius: 20px; cursor: pointer; box-shadow: 0 11px 30px rgba(27, 86, 70, 0.18); }
 .helperBubble {
   position: absolute;
-  left: 0;
-  bottom: 82px;
+  right: 0;
+  top: 82px;
   width: 240px;
   padding: 15px;
   color: #244b40;
   background: #fffdf6;
   border: 1px solid #cfe4dc;
-  border-radius: 16px 16px 16px 5px;
+  /* 꼬리를 우상단(강아지 쪽)으로 — 버튼이 위에 있으니 아래로 펼쳐진다 */
+  border-radius: 16px 5px 16px 16px;
   box-shadow: 0 16px 40px rgba(18, 64, 52, 0.18);
 }
 .helperBubble strong, .helperBubble span { display: block; }

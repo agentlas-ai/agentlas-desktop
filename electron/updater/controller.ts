@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { compareSemVer, parseSemVer } from "../../shared/semver";
@@ -592,6 +593,8 @@ export class DesktopUpdaterController {
   private downloadPromise: Promise<void> | null = null;
   private availablePromise: Promise<void> | null = null;
   private installPromise: Promise<UpdaterActionResult> | null = null;
+  /** True from native quitAndInstall handoff until its terminal resolution. */
+  private nativeInstallHandedOff = false;
   private availableVersion: string | null = null;
   private blockedTargetVersion: string | null = null;
   private blockedReasonCode: UpdaterErrorCode = "install-not-applied";
@@ -774,7 +777,28 @@ export class DesktopUpdaterController {
     return cleared;
   }
 
+  /**
+   * A native install is in flight the moment installOnce() runs until its journal
+   * leaves `install-requested`. While in flight, the pending payload, update.zip,
+   * ShipItState.plist, and the ShipIt staging tree are LIVE install material —
+   * deleting any of them mid-install is what bricked v0.8.65 on macOS
+   * (2026-07-23): cleanup removed ShipItState.plist while launchd still had the
+   * ShipIt job scheduled, so ShipIt crash-looped every 2s on "no such file" and
+   * the update could never complete on that machine again.
+   */
+  private installInFlight(): boolean {
+    // In-memory only, on purpose: after a process restart a journaled
+    // `install-requested` is a DEAD install (reconcile must be able to clean it
+    // up; the pre-delete launchd bootout below makes that safe). Within this
+    // process, `nativeInstallHandedOff` covers the window after installOnce()
+    // resolves but while Squirrel is still staging natively.
+    return this.installPromise !== null || this.nativeInstallHandedOff;
+  }
+
   private clearStaleInstallArtifacts(): boolean {
+    // Never touch live install material. Report success so callers do not
+    // convert an in-flight install into a blocked/manual state.
+    if (this.installInFlight()) return true;
     let cleared = true;
     const updaterCache = this.updaterCachePath();
     for (const candidate of [path.join(updaterCache, "pending"), path.join(updaterCache, "update.zip")]) {
@@ -791,6 +815,20 @@ export class DesktopUpdaterController {
     const shipIt = this.shipItPath();
     const shipItState = path.join(shipIt, "ShipItState.plist");
     try {
+      // Remove any lingering launchd ShipIt job BEFORE its request file. A
+      // spawn-scheduled job that outlives ShipItState.plist respawns ShipIt
+      // every ~2s with "Could not read update request" forever (observed on
+      // v0.8.65, 2026-07-23). Best-effort: an absent job exits non-zero.
+      if (this.deps.uid !== null) {
+        try {
+          execFileSync("launchctl", ["bootout", `gui/${this.deps.uid}/com.agentlas.desktop.ShipIt`], {
+            stdio: "ignore",
+            timeout: 5_000,
+          });
+        } catch {
+          // No lingering job (the common case) or launchctl unavailable.
+        }
+      }
       this.removePath(shipItState, { force: true });
       if (fs.existsSync(shipIt)) {
         for (const entry of fs.readdirSync(shipIt, { withFileTypes: true })) {
@@ -941,6 +979,9 @@ export class DesktopUpdaterController {
   }
 
   private blockInstallStart(error: unknown, knownJournal?: InstallJournal): UpdaterState {
+    // The native handoff has terminally failed; cleanup below may run (the
+    // pre-delete launchd bootout keeps a lingering ShipIt job from crash-looping).
+    this.nativeInstallHandedOff = false;
     const diagnostic = redactNativeUpdaterDiagnostic(error);
     this.logger.warn(`[updater] native install start failed (${diagnostic.category})`);
     this.resumeInstallWriters();
@@ -1193,6 +1234,7 @@ export class DesktopUpdaterController {
   }
 
   dispose(): void {
+    this.nativeInstallHandedOff = false;
     if (this.initialTimer) clearTimeout(this.initialTimer);
     if (this.timer) clearInterval(this.timer);
     this.initialTimer = null;
@@ -1419,6 +1461,7 @@ export class DesktopUpdaterController {
       try {
         // Windows updates must reuse the existing installation without opening
         // the NSIS setup wizard. The second flag relaunches Agentlas afterward.
+        this.nativeInstallHandedOff = true;
         this.deps.updater.quitAndInstall(true, true);
         if (this.state.status !== "installing") {
           return { accepted: false, state: this.state };
