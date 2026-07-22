@@ -261,6 +261,9 @@ portable:
 # Linux — unsigned. AppImage runs on any x64 distro (chmod +x then run);
 # .deb for Debian/Ubuntu.
 linux:
+  # Keep the public Linux package contact separate from package.json so app.asar
+  # never embeds a developer's private email or source-repository metadata.
+  maintainer: "Agentlas <support@agentlas.cloud>"
   target:
     - target: AppImage
       arch:

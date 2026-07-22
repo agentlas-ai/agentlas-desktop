@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.1 — 2026-07-22
+
+### Fixed
+
+- Linux `.deb` packaging now uses the public Agentlas support contact instead of
+  depending on private developer metadata in the packaged application manifest.
+
 ## 0.9.0 — 2026-07-22
 
 ### Changed
