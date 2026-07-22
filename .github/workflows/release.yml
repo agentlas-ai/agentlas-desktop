@@ -33,22 +33,22 @@ permissions:
 jobs:
   opencrab-security-preflight:
     name: OpenCrab security preflight
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
       HEPHAESTUS_REF: v1.1.56
       HEPHAESTUS_COMMIT: 3061292495b08d513dd5fcf2025a96d85813b627
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22"
+          node-version: "22.12.0"
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -95,14 +95,14 @@ jobs:
           fi
           echo "Preflight source verified: $tag ($head_commit), Agentlas OS $HEPHAESTUS_REF"
 
+      - name: Dependency security audit
+        run: npm audit --package-lock-only --audit-level=high
+
       - name: Ensure embedded engine (Hephaestus)
         run: npm run ensure:engine
 
       - name: Install dependencies
-        run: npm ci
-
-      - name: Dependency security audit
-        run: npm audit --audit-level=high
+        run: npm ci --no-audit
 
       - name: Typecheck
         run: npm run typecheck
@@ -150,9 +150,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          - os: windows-2025
             builder_args: --win
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             builder_args: --linux
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -161,15 +161,15 @@ jobs:
       HEPHAESTUS_COMMIT: 3061292495b08d513dd5fcf2025a96d85813b627
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22"
+          node-version: "22.12.0"
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -225,7 +225,7 @@ jobs:
         run: npm run ensure:engine
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --no-audit
 
       - name: Fetch SHA-256-pinned standalone Python for the package
         run: npm run fetch:python
@@ -292,7 +292,7 @@ jobs:
         run: node scripts/verify-packaged-workforce-runtime.cjs --resources=release/linux-unpacked/resources
 
       - name: Upload Windows/Linux package set for the release barrier
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: agentlas-release-${{ runner.os }}
           path: |
@@ -317,11 +317,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          - os: windows-2025
             platform: win32
             artifact_os: Windows
             label: Windows NSIS
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             platform: linux
             artifact_os: Linux
             label: Linux AppImage
@@ -329,15 +329,15 @@ jobs:
     timeout-minutes: 55
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22"
+          node-version: "22.12.0"
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -348,7 +348,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev xvfb xauth dbus-x11
 
       - name: Install updater E2E dependencies
-        run: npm ci
+        run: npm ci --no-audit
 
       - name: Configure Linux updater relaunch sandbox
         if: runner.os == 'Linux'
@@ -392,7 +392,7 @@ jobs:
           echo "RESOLVED_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Download exact native release artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: agentlas-release-${{ matrix.artifact_os }}
           path: release
@@ -403,7 +403,7 @@ jobs:
       # release verifier from the immutable workflow commit that requested the
       # run. This cannot modify or rebuild the tagged application.
       - name: Checkout immutable release verifier
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.harness_ref || github.sha }}
           path: .release-harness

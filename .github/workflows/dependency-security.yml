@@ -1,0 +1,35 @@
+name: Dependency Security Audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 05:17 KST. Avoid the top of the hour, when scheduled Actions are busiest.
+    - cron: "17 20 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/dependency-security.yml"
+
+concurrency:
+  group: desktop-dependency-security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: High-severity dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.12.0"
+      - name: Audit the immutable lockfile without installing native dependencies
+        run: npm audit --package-lock-only --audit-level=high

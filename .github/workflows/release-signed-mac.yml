@@ -38,13 +38,70 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  common-ci-gate:
+    name: Exact-source common CI gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Wait for successful common CI before starting release builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RAW_TAG: ${{ inputs.tag }}
+          RAW_VERSION: ${{ inputs.version }}
+        run: |
+          semver_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if [[ ! "$RAW_TAG" =~ $semver_tag_re ]] || [ "$RAW_VERSION" != "${RAW_TAG#v}" ]; then
+            echo "::error::Release version/tag is not an exact stable SemVer pair."
+            exit 1
+          fi
+          source_sha="$(git rev-parse HEAD)"
+          deadline=$((SECONDS + 900))
+          endpoint="repos/${GITHUB_REPOSITORY}/actions/workflows/cross-platform-harness.yml/runs?event=push&head_sha=${source_sha}&per_page=20"
+          while true; do
+            if runs_json="$(gh api "$endpoint")"; then
+              run_id="$(jq -r '.workflow_runs[] | select(.conclusion == "success") | .id' <<<"$runs_json" | head -n 1)"
+              if [ -n "$run_id" ]; then
+                echo "::notice::Exact-source common CI passed: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+                break
+              fi
+
+              active_id="$(jq -r '.workflow_runs[] | select(.status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "pending") | .id' <<<"$runs_json" | head -n 1)"
+              terminal="$(jq -r '.workflow_runs[] | select(.status == "completed") | [.id, .conclusion] | @tsv' <<<"$runs_json" | head -n 1)"
+              if [ -z "$active_id" ] && [ -n "$terminal" ]; then
+                echo "::error::Exact-source common CI already completed without success: $terminal"
+                exit 1
+              fi
+              if [ -n "$active_id" ]; then
+                echo "Waiting for exact-source common CI run $active_id..."
+              else
+                echo "Waiting for the exact-source common CI run to appear..."
+              fi
+            else
+              echo "::warning::Could not query common CI yet; retrying."
+            fi
+
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::Timed out after 15 minutes waiting for successful common CI on $source_sha."
+              exit 1
+            fi
+            sleep 15
+          done
+
   cross-platform-release-build:
+    needs: common-ci-gate
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       harness_ref: ${{ github.sha }}
 
   mac-release-preflight:
+    needs: common-ci-gate
     runs-on: macos-15
     timeout-minutes: 90
     env:
@@ -58,14 +115,14 @@ jobs:
       HEPHAESTUS_COMMIT: 3061292495b08d513dd5fcf2025a96d85813b627
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout immutable Mac release tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           path: .release-tooling
@@ -86,9 +143,9 @@ jobs:
           cp .release-tooling/scripts/verify-mac-update-lineage.mjs scripts/verify-mac-update-lineage.mjs
           chmod +x scripts/package-mac.sh scripts/verify-mac-update-lineage.mjs
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22"
+          node-version: "22.12.0"
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -163,23 +220,6 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "::notice::Releasing tag=$tag version=$version draft=$draft apply_web_env=$apply_web_env"
 
-      - name: Require successful common CI for the exact release source
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          source_sha="$(git rev-parse HEAD)"
-          run_id="$(
-            gh api \
-              "repos/${GITHUB_REPOSITORY}/actions/workflows/cross-platform-harness.yml/runs?event=push&status=success&per_page=100" \
-              --jq ".workflow_runs[] | select(.head_sha == \"${source_sha}\") | .id" \
-              | head -n 1
-          )"
-          if [ -z "$run_id" ]; then
-            echo "::error::No successful Cross-platform Core harness run exists for release source $source_sha."
-            exit 1
-          fi
-          echo "::notice::Exact-source common CI passed: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
-
       - name: Assert required release secrets
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -220,7 +260,7 @@ jobs:
         run: npm run ensure:engine
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --no-audit
 
       # Private/local release audits own UI fixtures and native updater mutation
       # scenarios. Public CI builds the exact production sources and enforces
@@ -251,7 +291,7 @@ jobs:
     needs:
       - cross-platform-release-build
       - mac-release-preflight
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Require every OS gate and package job
         env:
@@ -277,14 +317,14 @@ jobs:
       HEPHAESTUS_COMMIT: 3061292495b08d513dd5fcf2025a96d85813b627
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout immutable Mac release tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           path: .release-tooling
@@ -305,9 +345,9 @@ jobs:
           cp .release-tooling/scripts/verify-mac-update-lineage.mjs scripts/verify-mac-update-lineage.mjs
           chmod +x scripts/package-mac.sh scripts/verify-mac-update-lineage.mjs
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22"
+          node-version: "22.12.0"
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -375,7 +415,7 @@ jobs:
       - name: Ensure embedded engine and dependencies
         run: |
           npm run ensure:engine
-          npm ci
+          npm ci --no-audit
 
       - name: Restore mac signing certificate
         env:
@@ -406,7 +446,7 @@ jobs:
           --skip-remote-candidate
 
       - name: Upload signed Mac package set for the release barrier
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: agentlas-release-macOS
           path: |
@@ -436,14 +476,14 @@ jobs:
       HEPHAESTUS_COMMIT: 3061292495b08d513dd5fcf2025a96d85813b627
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout immutable Mac release tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           path: .release-tooling
@@ -464,9 +504,9 @@ jobs:
           cp .release-tooling/scripts/verify-mac-update-lineage.mjs scripts/verify-mac-update-lineage.mjs
           chmod +x scripts/package-mac.sh scripts/verify-mac-update-lineage.mjs
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22"
+          node-version: "22.12.0"
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -500,10 +540,10 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Install publisher dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts --no-audit
 
       - name: Download every barrier-approved OS artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: agentlas-release-*
           path: release
@@ -555,7 +595,7 @@ jobs:
 
       - name: Upload complete release evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: agentlas-desktop-release-evidence
           path: |

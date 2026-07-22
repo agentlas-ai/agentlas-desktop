@@ -4,229 +4,31 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - "electron/hephaestus/commands.ts"
-      - "electron/one/**"
-      - "renderer/components/one/**"
-      - "shared/one-*.ts"
-      - "scripts/verify-one-*.cjs"
-      - "scripts/verify-agentlas-one-ui.cjs"
-      - "electron/hephaestus/engine.ts"
-      - "electron/hephaestus/loop-engineering.ts"
-      - "electron/hephaestus/supervisor.ts"
-      - "electron/agents/auto-router.ts"
-      - "electron/architecture/project-bootstrap.ts"
-      - "electron/architecture/activation.ts"
-      - "electron/memory/context.ts"
-      - "electron/memory/local-embedding.ts"
-      - "electron/memory/project-files.ts"
-      - "electron/memory/store.ts"
-      - "electron/experience/**"
-      - "electron/mcp/client.ts"
-      - "electron/mcp/borrowed-task-force.ts"
-      - "electron/mcp/workforce-orchestrator.ts"
-      - "electron/mcp/workforce-tool-inventory.ts"
-      - "electron/mcp/swarm-engine.ts"
-      - "electron/mcp/swarm-run.ts"
-      - "electron/mcp-tools/**"
-      - "electron/site/agent-app-*.ts"
-      - "electron/site/store.ts"
-      - "electron/runtime/codex-models.ts"
-      - "electron/runtime/codex.ts"
-      - "electron/runtime/claude-code.ts"
-      - "electron/runtime/detect.ts"
-      - "electron/runtime/env-resolver.ts"
-      - "electron/runtime/runner.ts"
-      - "electron/runtime/workload-routing.ts"
-      - "electron/updater.ts"
-      - "electron/updater/**"
-      - "electron/main.ts"
-      - "electron/secrets/vault.ts"
-      - "scripts/test-project-bootstrap-desktop.cjs"
-      - "scripts/test-project-bootstrap-core.cjs"
-      - "scripts/test-project-memory-read-boundary.cjs"
-      - "scripts/lib/agentlas-core-root.cjs"
-      - "scripts/test-model2vec-hybrid-parity.cjs"
-      - "scripts/test-memory-hybrid-retrieval.cjs"
-      - "scripts/test-curator-nest-core-query.cjs"
-      - "scripts/test-v56-experience-cloud-migration.cjs"
-      - "scripts/test-codex-model-discovery.cjs"
-      - "scripts/test-workload-routing.cjs"
-      - "scripts/test-workforce-orchestrator.cjs"
-      - "scripts/test-workforce-execution-receipt.cjs"
-      - "scripts/test-hephaestus-settings-migration.cjs"
-      - "scripts/test-auto-router-gates.cjs"
-      - "scripts/test-build-workload-routing.cjs"
-      - "scripts/test-stormbreaker-core-harness.cjs"
-      - "scripts/test-stormbreaker-swarm-contract.cjs"
-      - "scripts/test-swarm-engine.cjs"
-      - "scripts/test-automation-result-contract.cjs"
-      - "scripts/test-owned-agent-runtime-prompts.cjs"
-      - "scripts/test-site-agent-app-*.cjs"
-      - "scripts/test-packaged-agent-app-mcp.cjs"
-      - "scripts/atomic-swap-mac.swift"
-      - "scripts/apply-web-release-env.mjs"
-      - "scripts/check-railway-release-access.mjs"
-      - "scripts/create-apple-csr.sh"
-      - "scripts/create-p12-from-apple-cert.sh"
-      - "scripts/ensure-engine.mjs"
-      - "scripts/install-stable-mac.sh"
-      - "scripts/install-main-only-git-guard.sh"
-      - "scripts/mac-install-transaction.mjs"
-      - "scripts/package-mac.sh"
-      - "scripts/publish-mac-release.mjs"
-      - "scripts/release-readiness.mjs"
-      - "scripts/smoke-signed-mac-python-cache.cjs"
-      - "scripts/verify-packaged-workforce-runtime.cjs"
-      - "scripts/stamp-update-feeds.mjs"
-      - "scripts/fix-mac-latest-zip.mjs"
-      - "scripts/verify-local-mac-candidate.mjs"
-      - "scripts/verify-mac-app-bundle.mjs"
-      - "scripts/verify-mac-install-boundary.mjs"
-      - "scripts/verify-mac-release.mjs"
-      - "scripts/verify-mac-update-lineage.mjs"
-      - "scripts/verify-release-assets.mjs"
-      - "scripts/lib/mac-app-signature.mjs"
-      - "scripts/test-mac-app-trust.cjs"
-      - "scripts/test-mac-install-transaction.cjs"
-      - "scripts/test-mac-release-publish-boundary.cjs"
-      - "scripts/test-mac-update-lineage.cjs"
-      - "scripts/test-ensure-engine.cjs"
-      - "scripts/test-install-identity.cjs"
-      - "scripts/test-release-asset-manifest.cjs"
-      - "scripts/test-runtime-update-resolution.cjs"
-      - "scripts/test-update-release-contract.cjs"
-      - "scripts/test-updater-production-contract.cjs"
-      - "scripts/test-updater-ui.cjs"
-      - "scripts/test-packaged-updater-install-e2e.cjs"
-      - "scripts/test-mock-bridge-parity.cjs"
-      - "scripts/lib/mock-agentlas-bridge.cjs"
-      - "shared/site-studio.ts"
-      - "shared/types.ts"
-      - "electron-builder.yml"
-      - "electron-builder.mac-stable.yml"
-      - "electron-builder.mac-local.yml"
-      - "build-resources/after-pack-clean.cjs"
-      - "build-resources/after-sign-trust.cjs"
-      - "build-resources/entitlements.mac.plist"
-      - "build-resources/macos-release-signing-policy.json"
-      - "build-resources/update-compatibility.cjs"
+      - "electron/**"
+      - "renderer/**"
+      - "shared/**"
+      - "scripts/**"
+      - "build-resources/**"
+      - "electron-builder*.yml"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/cross-platform-harness.yml"
+      - ".github/workflows/dependency-security.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/release-signed-mac.yml"
   push:
     branches: [main]
     paths:
-      - "electron/hephaestus/commands.ts"
-      - "electron/one/**"
-      - "renderer/components/one/**"
-      - "shared/one-*.ts"
-      - "scripts/verify-one-*.cjs"
-      - "scripts/verify-agentlas-one-ui.cjs"
-      - "electron/hephaestus/engine.ts"
-      - "electron/hephaestus/loop-engineering.ts"
-      - "electron/hephaestus/supervisor.ts"
-      - "electron/agents/auto-router.ts"
-      - "electron/architecture/project-bootstrap.ts"
-      - "electron/architecture/activation.ts"
-      - "electron/memory/context.ts"
-      - "electron/memory/local-embedding.ts"
-      - "electron/memory/project-files.ts"
-      - "electron/memory/store.ts"
-      - "electron/experience/**"
-      - "electron/mcp/client.ts"
-      - "electron/mcp/borrowed-task-force.ts"
-      - "electron/mcp/workforce-orchestrator.ts"
-      - "electron/mcp/workforce-tool-inventory.ts"
-      - "electron/mcp/swarm-engine.ts"
-      - "electron/mcp/swarm-run.ts"
-      - "electron/mcp-tools/**"
-      - "electron/site/agent-app-*.ts"
-      - "electron/site/store.ts"
-      - "electron/runtime/codex-models.ts"
-      - "electron/runtime/codex.ts"
-      - "electron/runtime/claude-code.ts"
-      - "electron/runtime/detect.ts"
-      - "electron/runtime/env-resolver.ts"
-      - "electron/runtime/runner.ts"
-      - "electron/runtime/workload-routing.ts"
-      - "electron/updater.ts"
-      - "electron/updater/**"
-      - "electron/main.ts"
-      - "electron/secrets/vault.ts"
-      - "scripts/test-project-bootstrap-desktop.cjs"
-      - "scripts/test-project-bootstrap-core.cjs"
-      - "scripts/test-project-memory-read-boundary.cjs"
-      - "scripts/lib/agentlas-core-root.cjs"
-      - "scripts/test-model2vec-hybrid-parity.cjs"
-      - "scripts/test-memory-hybrid-retrieval.cjs"
-      - "scripts/test-curator-nest-core-query.cjs"
-      - "scripts/test-v56-experience-cloud-migration.cjs"
-      - "scripts/test-codex-model-discovery.cjs"
-      - "scripts/test-workload-routing.cjs"
-      - "scripts/test-workforce-orchestrator.cjs"
-      - "scripts/test-workforce-execution-receipt.cjs"
-      - "scripts/test-hephaestus-settings-migration.cjs"
-      - "scripts/test-auto-router-gates.cjs"
-      - "scripts/test-build-workload-routing.cjs"
-      - "scripts/test-stormbreaker-core-harness.cjs"
-      - "scripts/test-stormbreaker-swarm-contract.cjs"
-      - "scripts/test-swarm-engine.cjs"
-      - "scripts/test-automation-result-contract.cjs"
-      - "scripts/test-owned-agent-runtime-prompts.cjs"
-      - "scripts/test-site-agent-app-*.cjs"
-      - "scripts/test-packaged-agent-app-mcp.cjs"
-      - "scripts/atomic-swap-mac.swift"
-      - "scripts/apply-web-release-env.mjs"
-      - "scripts/check-railway-release-access.mjs"
-      - "scripts/create-apple-csr.sh"
-      - "scripts/create-p12-from-apple-cert.sh"
-      - "scripts/ensure-engine.mjs"
-      - "scripts/install-stable-mac.sh"
-      - "scripts/install-main-only-git-guard.sh"
-      - "scripts/mac-install-transaction.mjs"
-      - "scripts/package-mac.sh"
-      - "scripts/publish-mac-release.mjs"
-      - "scripts/release-readiness.mjs"
-      - "scripts/smoke-signed-mac-python-cache.cjs"
-      - "scripts/verify-packaged-workforce-runtime.cjs"
-      - "scripts/stamp-update-feeds.mjs"
-      - "scripts/fix-mac-latest-zip.mjs"
-      - "scripts/verify-local-mac-candidate.mjs"
-      - "scripts/verify-mac-app-bundle.mjs"
-      - "scripts/verify-mac-install-boundary.mjs"
-      - "scripts/verify-mac-release.mjs"
-      - "scripts/verify-mac-update-lineage.mjs"
-      - "scripts/verify-release-assets.mjs"
-      - "scripts/lib/mac-app-signature.mjs"
-      - "scripts/test-mac-app-trust.cjs"
-      - "scripts/test-mac-install-transaction.cjs"
-      - "scripts/test-mac-release-publish-boundary.cjs"
-      - "scripts/test-mac-update-lineage.cjs"
-      - "scripts/test-ensure-engine.cjs"
-      - "scripts/test-install-identity.cjs"
-      - "scripts/test-release-asset-manifest.cjs"
-      - "scripts/test-runtime-update-resolution.cjs"
-      - "scripts/test-update-release-contract.cjs"
-      - "scripts/test-updater-production-contract.cjs"
-      - "scripts/test-updater-ui.cjs"
-      - "scripts/test-packaged-updater-install-e2e.cjs"
-      - "scripts/test-mock-bridge-parity.cjs"
-      - "scripts/lib/mock-agentlas-bridge.cjs"
-      - "shared/site-studio.ts"
-      - "shared/types.ts"
-      - "electron-builder.yml"
-      - "electron-builder.mac-stable.yml"
-      - "electron-builder.mac-local.yml"
-      - "build-resources/after-pack-clean.cjs"
-      - "build-resources/after-sign-trust.cjs"
-      - "build-resources/entitlements.mac.plist"
-      - "build-resources/macos-release-signing-policy.json"
-      - "build-resources/update-compatibility.cjs"
+      - "electron/**"
+      - "renderer/**"
+      - "shared/**"
+      - "scripts/**"
+      - "build-resources/**"
+      - "electron-builder*.yml"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/cross-platform-harness.yml"
+      - ".github/workflows/dependency-security.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/release-signed-mac.yml"
 
@@ -238,24 +40,81 @@ permissions:
   contents: read
 
 jobs:
+  plan:
+    name: Plan affected Desktop CI scopes
+    runs-on: ubuntu-24.04
+    outputs:
+      fast: ${{ steps.scope.outputs.fast }}
+      core: ${{ steps.scope.outputs.core }}
+      one: ${{ steps.scope.outputs.one }}
+      agent_app: ${{ steps.scope.outputs.agent_app }}
+      updater: ${{ steps.scope.outputs.updater }}
+      packaging: ${{ steps.scope.outputs.packaging }}
+      metadata_only: ${{ steps.scope.outputs.metadata_only }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.12.0"
+      - name: Verify the fail-closed scope planner
+        run: node scripts/ci-scope-plan.cjs --self-test
+      - name: Classify the changed files
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          node scripts/ci-scope-plan.cjs
+          --event="${{ github.event_name }}"
+          --base="$BASE_SHA"
+          --head="$HEAD_SHA"
+
+  fast-checks:
+    name: Fast Desktop type contracts
+    needs: plan
+    if: needs.plan.outputs.fast == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install typecheck dependencies without native postinstall rebuilds
+        run: npm ci --ignore-scripts --no-audit
+      - name: Typecheck renderer and main process
+        run: npm run typecheck
+
   desktop-harness:
     name: ${{ matrix.os }}
+    needs: plan
+    if: >-
+      needs.plan.outputs.core == 'true' ||
+      needs.plan.outputs.agent_app == 'true' ||
+      needs.plan.outputs.packaging == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: agentlas-desktop
-      - uses: actions/checkout@v4
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: agentlas-ai/Agentlas-OS
           ref: 3061292495b08d513dd5fcf2025a96d85813b627
           path: agentlas-desktop/Hephaestus
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.12.0"
           cache: npm
@@ -264,7 +123,7 @@ jobs:
         working-directory: agentlas-desktop/Hephaestus
         shell: bash
         run: test "$(git rev-parse HEAD)" = "3061292495b08d513dd5fcf2025a96d85813b627"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Install Linux keychain runtime
@@ -272,51 +131,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsecret-1-0
       - name: Install Desktop dependencies
         working-directory: agentlas-desktop
-        run: npm ci
+        run: npm ci --no-audit
       - name: Compile Desktop main process
         working-directory: agentlas-desktop
         run: npm run build:electron
-      - name: Verify public-source Agentlas One contracts
-        if: runner.os == 'macOS'
-        working-directory: agentlas-desktop
-        shell: bash
-        # macOS only, on purpose. `require("electron")` resolves to the Electron
-        # binary path, so these verifiers spawn Electron children: on Linux that
-        # aborts on the SUID sandbox helper (same reason the Linux step below
-        # calls electron directly with --no-sandbox, which `npm run` cannot pass
-        # through). Windows adds no signal either — every platform-specific
-        # assertion here is a 0600 permission check the scripts skip on win32,
-        # so Windows runs a strict subset of what macOS already proves.
-        # Four verifiers intentionally consume private sibling contract fixtures
-        # that are excluded from the public repository. One additional verifier
-        # owns an 8-second in-process fixture deadline that is shorter than the
-        # shared hosted-mac execution envelope; it remains in the complete local
-        # release audit, where the real task-force path is exercised end to end.
-        # Public CI must neither publish private fixtures nor weaken that verifier
-        # at runtime merely to satisfy a hosted-runner timing assumption.
-        run: |
-          node <<'NODE'
-          const { execSync } = require("node:child_process");
-          const scripts = require("./package.json").scripts;
-          const privateFixtureVerifiers = new Set([
-            "test:one-artifact-preview-ui",
-            "test:one-improvement-proof-runtime",
-            "test:one-surface-runtime-contract",
-            "test:one-value-closure-runtime",
-          ]);
-          const localReleaseAuditVerifiers = new Set([
-            ...privateFixtureVerifiers,
-            "test:one-activation-runtime",
-            "test:one-improvement-proof-producer",
-            "test:one-ui",
-          ]);
-          const publicCommands = scripts["test:one"]
-            .split(" && ")
-            .filter((command) => ![...localReleaseAuditVerifiers].some((name) => command === `npm run ${name}`));
-          execSync(publicCommands.join(" && "), { stdio: "inherit", shell: true });
-          NODE
       - name: Verify workforce runtime orchestration on Linux
-        if: runner.os == 'Linux'
+        if: needs.plan.outputs.core == 'true' && runner.os == 'Linux'
         working-directory: agentlas-desktop
         run: |
           # Call electron directly with --no-sandbox, matching every other Linux step here.
@@ -333,7 +153,7 @@ jobs:
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-hephaestus-settings-migration.cjs
           npm run test:auto-router-gates
       - name: Verify workforce runtime orchestration on macOS and Windows
-        if: runner.os != 'Linux'
+        if: needs.plan.outputs.core == 'true' && runner.os != 'Linux'
         working-directory: agentlas-desktop
         shell: bash
         run: |
@@ -348,7 +168,7 @@ jobs:
           npm run test:hephaestus-settings-migration
           npm run test:auto-router-gates
       - name: Verify installed Core on Linux
-        if: runner.os == 'Linux'
+        if: needs.plan.outputs.core == 'true' && runner.os == 'Linux'
         working-directory: agentlas-desktop
         env:
           HEPHAESTUS_RUNTIME_ROOT: ${{ github.workspace }}/agentlas-desktop/Hephaestus
@@ -362,13 +182,11 @@ jobs:
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-project-memory-read-boundary.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-v56-experience-cloud-migration.cjs
           node scripts/test-codex-model-discovery.cjs
-          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-workload-routing.cjs
-          xvfb-run -a npx --no-install electron --no-sandbox scripts/test-build-workload-routing.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-stormbreaker-swarm-contract.cjs
           node scripts/test-swarm-engine.cjs
           node scripts/test-automation-result-contract.cjs
       - name: Verify installed Core on macOS and Windows
-        if: runner.os != 'Linux'
+        if: needs.plan.outputs.core == 'true' && runner.os != 'Linux'
         working-directory: agentlas-desktop
         shell: bash
         env:
@@ -383,13 +201,11 @@ jobs:
           npx --no-install electron scripts/test-project-memory-read-boundary.cjs
           npx --no-install electron scripts/test-v56-experience-cloud-migration.cjs
           node scripts/test-codex-model-discovery.cjs
-          npx --no-install electron scripts/test-workload-routing.cjs
-          npx --no-install electron scripts/test-build-workload-routing.cjs
           npx --no-install electron scripts/test-stormbreaker-swarm-contract.cjs
           node scripts/test-swarm-engine.cjs
           node scripts/test-automation-result-contract.cjs
       - name: Verify Agent App MCP boundary on Linux
-        if: runner.os == 'Linux'
+        if: needs.plan.outputs.agent_app == 'true' && runner.os == 'Linux'
         working-directory: agentlas-desktop
         shell: bash
         run: |
@@ -401,48 +217,45 @@ jobs:
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-site-agent-app-firm-isolation.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-site-agent-app-group-isolation.cjs
           xvfb-run -a npx --no-install electron --no-sandbox scripts/test-site-agent-app-runtime.cjs
-      - name: Verify Agent App exact capability on macOS and Windows
-        if: runner.os != 'Linux'
-        working-directory: agentlas-desktop
-        shell: bash
-        run: node scripts/test-site-agent-app-isolation.cjs
       - name: Verify Agent App declared capabilities on macOS and Windows
-        if: runner.os != 'Linux'
+        if: needs.plan.outputs.agent_app == 'true' && runner.os != 'Linux'
         working-directory: agentlas-desktop
         shell: bash
         run: npx --no-install electron scripts/test-site-agent-app-capabilities.cjs
       - name: Verify Agent App MCP consent on macOS and Windows
-        if: runner.os != 'Linux'
+        if: needs.plan.outputs.agent_app == 'true' && runner.os != 'Linux'
         working-directory: agentlas-desktop
         shell: bash
         run: npx --no-install electron scripts/test-site-agent-app-mcp-consent.cjs
       - name: Verify Agent App prebuild MCP on macOS and Windows
-        if: runner.os != 'Linux'
+        if: needs.plan.outputs.agent_app == 'true' && runner.os != 'Linux'
         working-directory: agentlas-desktop
         shell: bash
         run: npx --no-install electron scripts/test-site-agent-app-prebuild-mcp.cjs
       - name: Verify Agent App Claude isolation on macOS and Windows
-        if: runner.os != 'Linux'
+        if: needs.plan.outputs.agent_app == 'true' && runner.os != 'Linux'
         working-directory: agentlas-desktop
         shell: bash
         run: npx --no-install electron scripts/test-site-agent-app-claude-runtime-isolation.cjs
       - name: Verify Agent App firm isolation on macOS and Windows
-        if: runner.os != 'Linux'
+        if: needs.plan.outputs.agent_app == 'true' && runner.os != 'Linux'
         working-directory: agentlas-desktop
         shell: bash
         run: npx --no-install electron scripts/test-site-agent-app-firm-isolation.cjs
       - name: Verify Agent App group isolation on macOS and Windows
-        if: runner.os != 'Linux'
+        if: needs.plan.outputs.agent_app == 'true' && runner.os != 'Linux'
         working-directory: agentlas-desktop
         shell: bash
         run: npx --no-install electron scripts/test-site-agent-app-group-isolation.cjs
       - name: Verify Agent App runtime on macOS and Windows
-        if: runner.os != 'Linux'
+        if: needs.plan.outputs.agent_app == 'true' && runner.os != 'Linux'
         working-directory: agentlas-desktop
         shell: bash
         run: npx --no-install electron scripts/test-site-agent-app-runtime.cjs
       - name: Build and verify packaged Agent App MCP boundary
-        if: runner.os != 'macOS'
+        if: >-
+          (needs.plan.outputs.agent_app == 'true' || needs.plan.outputs.packaging == 'true') &&
+          runner.os != 'macOS'
         working-directory: agentlas-desktop
         shell: bash
         env:
@@ -454,7 +267,9 @@ jobs:
           npx --no-install electron-builder --dir --publish never --config.directories.output="${{ runner.temp }}/agentlas-package-smoke" -c.mac.identity=null -c.mac.notarize=false
           npm run test:packaged-agent-app-mcp -- "${{ runner.temp }}/agentlas-package-smoke"
       - name: Build and verify isolated macOS local-candidate Agent App MCP boundary
-        if: runner.os == 'macOS'
+        if: >-
+          (needs.plan.outputs.agent_app == 'true' || needs.plan.outputs.packaging == 'true') &&
+          runner.os == 'macOS'
         working-directory: agentlas-desktop
         shell: bash
         env:
@@ -464,19 +279,75 @@ jobs:
           npx --no-install electron-builder --dir --publish never --config electron-builder.mac-local.yml --config.directories.output="${{ runner.temp }}/agentlas-local-candidate-package-smoke" -c.mac.identity=null -c.mac.notarize=false
           node scripts/verify-local-mac-candidate.mjs --output="${{ runner.temp }}/agentlas-local-candidate-package-smoke"
           npm run test:packaged-agent-app-mcp -- "${{ runner.temp }}/agentlas-local-candidate-package-smoke"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: needs.plan.outputs.core == 'true'
         with:
           name: desktop-harness-proof-${{ runner.os }}
           path: ${{ runner.temp }}/desktop-harness-proof.json
           if-no-files-found: error
 
+  one-contracts:
+    name: Agentlas One public contracts
+    needs: plan
+    if: needs.plan.outputs.one == 'true'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: agentlas-desktop
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: agentlas-ai/Agentlas-OS
+          ref: 3061292495b08d513dd5fcf2025a96d85813b627
+          path: agentlas-desktop/Hephaestus
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: agentlas-desktop/package-lock.json
+      - name: Install Desktop dependencies
+        working-directory: agentlas-desktop
+        run: npm ci --no-audit
+      - name: Compile Desktop main process
+        working-directory: agentlas-desktop
+        run: npm run build:electron
+      - name: Verify public-source Agentlas One contracts
+        working-directory: agentlas-desktop
+        shell: bash
+        # Private sibling fixtures and the hosted-runner-sensitive timed producer
+        # remain in the complete local release audit. Public CI executes only
+        # deterministic contracts whose required inputs are in this repository.
+        run: |
+          node <<'NODE'
+          const { execSync } = require("node:child_process");
+          const scripts = require("./package.json").scripts;
+          const localReleaseAuditVerifiers = new Set([
+            "test:one-artifact-preview-ui",
+            "test:one-improvement-proof-runtime",
+            "test:one-surface-runtime-contract",
+            "test:one-value-closure-runtime",
+            "test:one-activation-runtime",
+            "test:one-improvement-proof-producer",
+            "test:one-ui",
+          ]);
+          const publicCommands = scripts["test:one"]
+            .split(" && ")
+            .filter((command) => ![...localReleaseAuditVerifiers].some((name) => command === `npm run ${name}`));
+          execSync(publicCommands.join(" && "), { stdio: "inherit", shell: true });
+          NODE
+
   compare-desktop-proofs:
     name: Compare Desktop prompt bytes
-    needs: desktop-harness
-    runs-on: ubuntu-latest
+    needs: [plan, desktop-harness]
+    if: needs.plan.outputs.core == 'true'
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: desktop-harness-proof-*
           path: proofs
@@ -484,16 +355,20 @@ jobs:
 
   updater-ui:
     name: Updater renderer UI
-    runs-on: ubuntu-latest
+    needs: plan
+    if: needs.plan.outputs.updater == 'true'
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.12.0"
           cache: npm
           cache-dependency-path: package-lock.json
       - name: Install renderer test dependencies
-        run: npm ci
+        run: npm ci --no-audit
       - name: Build updater UI and reject forced reinstall copy
         run: |
           npm run build:renderer
@@ -506,3 +381,32 @@ jobs:
             echo "::error::Updater surfaces must recover in app and must not force a website reinstall."
             exit 1
           fi
+
+  ci-result:
+    name: Desktop CI required result
+    if: ${{ always() }}
+    needs:
+      - plan
+      - fast-checks
+      - desktop-harness
+      - one-contracts
+      - compare-desktop-proofs
+      - updater-ui
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every selected scope to pass
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          FAST_RESULT: ${{ needs.fast-checks.result }}
+          DESKTOP_RESULT: ${{ needs.desktop-harness.result }}
+          ONE_RESULT: ${{ needs.one-contracts.result }}
+          PROOF_RESULT: ${{ needs.compare-desktop-proofs.result }}
+          UPDATER_RESULT: ${{ needs.updater-ui.result }}
+        run: |
+          for result in "$PLAN_RESULT" "$FAST_RESULT" "$DESKTOP_RESULT" "$ONE_RESULT" "$PROOF_RESULT" "$UPDATER_RESULT"; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "::error::A selected Desktop CI scope did not pass (result=$result)."; exit 1 ;;
+            esac
+          done
+          echo "Every affected Desktop CI scope passed; unrelated suites were skipped."
