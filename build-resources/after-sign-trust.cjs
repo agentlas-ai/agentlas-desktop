@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { sealMacRuntimeResources } = require("./after-pack-clean.cjs");
+const { prepareMacRuntimeResourcesForInstall } = require("./after-pack-clean.cjs");
 
 const policy = JSON.parse(fs.readFileSync(path.join(__dirname, "macos-release-signing-policy.json"), "utf8"));
 const localBundleIdentifier = "com.agentlas.desktop.candidate";
@@ -50,7 +50,7 @@ module.exports = async function afterSignTrust(context) {
     if (apps[0] !== `${localProductName}.app` || productName !== localProductName) {
       throw new Error("local macOS candidate identity is not isolated");
     }
-    await sealMacRuntimeResources(context);
+    await prepareMacRuntimeResourcesForInstall(context);
     return;
   }
   if (bundleIdentifier !== policy.bundleIdentifier || apps[0] !== "Agentlas.app") {
@@ -71,13 +71,12 @@ module.exports = async function afterSignTrust(context) {
     throw new Error("official macOS bundle requires the pinned Developer ID signing identity");
   }
 
-  // osx-sign must be able to rewrite every nested Mach-O before it seals the
-  // outer app. Remove write bits only after that complete signing pass, then
-  // re-check the exact designated requirement so a mode-only hardening change
-  // can never leave an invalid official bundle.
-  await sealMacRuntimeResources(context);
-  const sealedRequirement = run("codesign", ["--verify", "--deep", "--strict", `-R=${policy.designatedRequirement}`, appPath]);
-  if (!sealedRequirement.ok) {
-    throw new Error("read-only runtime sealing invalidated the official macOS code signature");
+  // Squirrel.Mac clears quarantine xattrs before taking ownership of an update.
+  // Normalize the signed runtime trees to owner-writable archive modes only
+  // after the complete signing pass, then re-check the exact requirement.
+  await prepareMacRuntimeResourcesForInstall(context);
+  const installableRequirement = run("codesign", ["--verify", "--deep", "--strict", `-R=${policy.designatedRequirement}`, appPath]);
+  if (!installableRequirement.ok) {
+    throw new Error("Squirrel-installable runtime permissions invalidated the official macOS code signature");
   }
 };

@@ -69,6 +69,19 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-23 · v0.9.3 — restored macOS automatic updates without reinstalling** —
+  macOS update ZIPs now stay owner-writable while Squirrel clears quarantine,
+  while every embedded Python launch keeps bytecode caches outside signed
+  Resources. The release path rejects read-only updater bytes and rechecks
+  extended-attribute removal and the exact signing requirement.
+  Agentlas OS v1.1.57 also carries the narrowly scoped recovery bridge for
+  v0.8.65/v0.8.66: it preserves the installed app and local data, quarantines
+  only the stale ShipIt payload tied to the known cleanup failure, and lets
+  Retry or the next restart resume the signed channel once this corrected
+  Desktop release is present on the feed. This release binds Agentlas OS v1.1.57 at
+  `db4b8a2a788f885b51962c5274bf625da2526ff9`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 - **2026-07-22 · v0.9.2 — updater recovery and release metadata repair** —
   macOS updater recovery no longer traverses Electron's virtual `app.asar`
   filesystem while clearing a stale ShipIt payload, so a failed native handoff

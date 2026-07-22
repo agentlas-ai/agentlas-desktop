@@ -68,6 +68,11 @@ const NODE_RUNTIME_ASSETS = {
   },
 };
 
+function isPathInside(parent, candidate) {
+  const relative = path.relative(parent, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
 function model2VecContentIdentity(files, names) {
   const digest = createHash("sha256");
   for (const name of [...names].sort()) {
@@ -613,9 +618,17 @@ async function verifyMacComputerUseDriver(context) {
   console.log(`[afterPack] verified Agentlas Computer Use driver ${sourceDigest} (${architectures.join("+")})`);
 }
 
-async function sealReadOnlyTree(root) {
-  // Strip inherited ACLs before mode sealing. Otherwise a writable macOS ACL
-  // can survive chmod 0444/0555 and make the signed Resources tree mutable.
+async function prepareSquirrelInstallableTree(root) {
+  // Squirrel.Mac recursively clears quarantine xattrs before it takes ownership
+  // of the candidate bundle. Every entry therefore needs owner-write permission
+  // in the updater ZIP. Strip inherited ACLs, preserve executable files, and
+  // keep group/other write disabled. Every production Python launch separately
+  // forces bytecode caches outside signed Resources.
+  const rootStat = await lstat(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error(`[afterPack] signed runtime root is not a regular directory: ${root}`);
+  }
+  const resolvedRoot = await realpath(root);
   await execFileAsync("/bin/chmod", ["-RN", root]);
   const directories = [root];
   const files = [];
@@ -626,7 +639,21 @@ async function sealReadOnlyTree(root) {
     for (const entry of entries) {
       const absolute = path.join(current, entry.name);
       const stat = await lstat(absolute);
-      if (stat.isSymbolicLink()) continue;
+      if (stat.isSymbolicLink()) {
+        const linkTarget = await readlink(absolute);
+        if (path.isAbsolute(linkTarget)) {
+          throw new Error(`[afterPack] signed runtime symlink must be relative: ${absolute}`);
+        }
+        const lexicalTarget = path.resolve(path.dirname(absolute), linkTarget);
+        if (!isPathInside(root, lexicalTarget)) {
+          throw new Error(`[afterPack] signed runtime symlink escapes its root: ${absolute}`);
+        }
+        const resolvedTarget = await realpath(absolute);
+        if (!isPathInside(resolvedRoot, resolvedTarget)) {
+          throw new Error(`[afterPack] signed runtime symlink resolves outside its root: ${absolute}`);
+        }
+        continue;
+      }
       if (stat.isDirectory()) {
         directories.push(absolute);
         queue.push(absolute);
@@ -639,30 +666,30 @@ async function sealReadOnlyTree(root) {
   }
 
   for (const file of files) {
-    await chmod(file.absolute, file.executable ? 0o555 : 0o444);
+    await chmod(file.absolute, file.executable ? 0o755 : 0o644);
   }
-  // Seal children before their parents so traversal remains available until
-  // every payload file has reached its final post-signing mode.
+  // Normalize children before parents so a previously sealed tree remains
+  // traversable throughout the conversion.
   for (const directory of directories.sort((left, right) => right.length - left.length)) {
-    await chmod(directory, 0o555);
+    await chmod(directory, 0o755);
   }
 
   for (const file of files) {
     const stat = await lstat(file.absolute);
-    if ((stat.mode & 0o222) !== 0 || (file.executable && (stat.mode & 0o111) === 0)) {
-      throw new Error(`[afterPack] signed runtime file was not sealed read-only: ${file.absolute}`);
+    if ((stat.mode & 0o200) === 0 || (stat.mode & 0o022) !== 0 || (file.executable && (stat.mode & 0o111) === 0)) {
+      throw new Error(`[afterPack] signed runtime file is not Squirrel-installable: ${file.absolute}`);
     }
   }
   for (const directory of directories) {
     const stat = await lstat(directory);
-    if ((stat.mode & 0o222) !== 0 || (stat.mode & 0o111) === 0) {
-      throw new Error(`[afterPack] signed runtime directory was not sealed read-only: ${directory}`);
+    if ((stat.mode & 0o200) === 0 || (stat.mode & 0o022) !== 0 || (stat.mode & 0o111) === 0) {
+      throw new Error(`[afterPack] signed runtime directory is not Squirrel-installable: ${directory}`);
     }
   }
   return { directories: directories.length, files: files.length };
 }
 
-async function sealMacRuntimeResources(context, phase = "afterSign") {
+async function prepareMacRuntimeResourcesForInstall(context, phase = "afterSign") {
   if (context.electronPlatformName !== "darwin") return;
   const productFilename = context.packager?.appInfo?.productFilename || "Agentlas";
   const resourcesDir = path.join(context.appOutDir, `${productFilename}.app`, "Contents", "Resources");
@@ -673,17 +700,17 @@ async function sealMacRuntimeResources(context, phase = "afterSign") {
   let directoryCount = 0;
   let fileCount = 0;
   for (const root of roots) {
-    const sealed = await sealReadOnlyTree(root);
-    directoryCount += sealed.directories;
-    fileCount += sealed.files;
+    const prepared = await prepareSquirrelInstallableTree(root);
+    directoryCount += prepared.directories;
+    fileCount += prepared.files;
   }
   console.log(
-    `[${phase}] sealed signed Python/runtime resources read-only `
+    `[${phase}] prepared signed Python/runtime resources for Squirrel install `
       + `(${directoryCount} directories, ${fileCount} files)`,
   );
 }
 
-exports.sealMacRuntimeResources = sealMacRuntimeResources;
+exports.prepareMacRuntimeResourcesForInstall = prepareMacRuntimeResourcesForInstall;
 
 exports.default = async function afterPackClean(context) {
   if (process.platform === "darwin" && context.electronPlatformName === "darwin") {
@@ -701,14 +728,13 @@ exports.default = async function afterPackClean(context) {
 
   await verifyEmbeddedAgentlasOs(context);
   await verifyMacComputerUseDriver(context);
-  // electron-builder skips afterSign when identity=null. The explicitly
-  // isolated local candidate is never signed or published, so afterPack is its
-  // terminal lifecycle boundary and may be sealed here without blocking a
-  // later signer. Official Agentlas.app remains sealed only by afterSign.
+  // electron-builder skips afterSign when identity=null. Normalize the
+  // explicitly isolated local candidate here; the official app is normalized
+  // only after its pinned signing identity has been verified by afterSign.
   if (
     context.electronPlatformName === "darwin" &&
     context.packager?.appInfo?.productFilename === "Agentlas-Local-Candidate"
   ) {
-    await sealMacRuntimeResources(context, "afterPack-local");
+    await prepareMacRuntimeResourcesForInstall(context, "afterPack-local");
   }
 };

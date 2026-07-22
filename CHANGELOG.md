@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.9.3 — 2026-07-23
+
+### Fixed
+
+- macOS automatic updates once again install through Squirrel. The final update
+  ZIP keeps both `Hephaestus` and `python-runtime` owner-writable while ShipIt
+  clears quarantine, without granting group or other users write access.
+  Embedded Python still forces bytecode caches outside signed Resources, so
+  installability no longer weakens the existing cache boundary.
+- The release packager now rejects a macOS updater ZIP whose runtime entries
+  cannot accept and remove extended attributes. It also verifies the exact
+  signed ZIP bytes, protected Python cache routing, and code-signing requirement
+  after packaging, preventing the read-only archive regression from returning.
+- Existing v0.8.65/v0.8.66 installations can recover without downloading a
+  replacement installer. Agentlas OS v1.1.57 quarantines only the exact stale
+  ShipIt payload tied to the known `app.asar/dist` cleanup failure; the existing
+  app and local Agentlas data remain in place so, once this corrected Desktop
+  release is present on the feed, Retry or the next restart can resume the
+  signed update channel.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.57, pinned at
+  `db4b8a2a788f885b51962c5274bf625da2526ff9`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.9.2 — 2026-07-22
 
 ### Fixed

@@ -65,9 +65,9 @@ cleanup_appledouble() {
 remove_sealed_tree() {
   local target="$1"
   [[ -e "$target" ]] || return 0
-  # Signed runtime directories intentionally arrive as 0555. Restore owner
-  # write permission only inside these verified build/output roots so retries
-  # and EXIT cleanup can remove a previously sealed candidate.
+  # Older build outputs and post-smoke copies can contain 0555 runtime trees.
+  # Restore owner write permission only inside these verified build/output
+  # roots so retries and EXIT cleanup can remove them.
   /bin/chmod -RN "$target" 2>/dev/null || true
   /bin/chmod -R u+w "$target" 2>/dev/null || true
   rm -rf -- "$target"
@@ -196,6 +196,30 @@ notarize_dmg() {
   xcrun stapler validate "$dmg_path"
 }
 
+seal_packaged_runtime_copy_for_execution() {
+  local app_path="$1"
+  local runtime_root entry
+  for runtime_root in \
+    "$app_path/Contents/Resources/Hephaestus" \
+    "$app_path/Contents/Resources/python-runtime"; do
+    [[ -d "$runtime_root" && ! -L "$runtime_root" ]] || {
+      echo "Packaged runtime root is missing or linked: $runtime_root" >&2
+      return 1
+    }
+    /bin/chmod -RN "$runtime_root"
+    while IFS= read -r -d '' entry; do
+      if [[ -x "$entry" ]]; then
+        /bin/chmod 0555 "$entry"
+      else
+        /bin/chmod 0444 "$entry"
+      fi
+    done < <(find "$runtime_root" -type f -print0)
+    while IFS= read -r -d '' entry; do
+      /bin/chmod 0555 "$entry"
+    done < <(find "$runtime_root" -depth -type d -print0)
+  done
+}
+
 exercise_signed_app_python_boundary() {
   local host_arch signed_app candidate_arches
   case "$(uname -m)" in
@@ -231,6 +255,11 @@ exercise_signed_app_python_boundary() {
     LANG="${LANG:-en_US.UTF-8}" \
     CI="${CI:-1}" \
     ./node_modules/.bin/electron scripts/verify-packaged-workforce-runtime.cjs "--app=$signed_app"
+  # The updater ZIP must stay owner-writable. The legacy signed-cache smoke
+  # expects a read-only tree, so seal only this disposable local_release copy
+  # after the public ZIP/DMG inputs were copied. Production Python launches are
+  # protected by their external cache boundary instead.
+  seal_packaged_runtime_copy_for_execution "$signed_app"
   # Exercise an unguarded direct import too. This is the exact class of access
   # that wrote __pycache__ into v0.8.58 and broke its signed source-app seal.
   env -i \
@@ -257,7 +286,7 @@ exercise_final_update_zip_boundary() {
     (
       set -euo pipefail
       local archive_tmp extracted_root archived_app resources_root runtime_root python_root
-      local forbidden writable acl_entry python_manifest python_relative python_path
+      local forbidden owner_unwritable unsafe_writable acl_entry xattr_probe python_manifest python_relative python_path
       local isolated_home candidate_arches host_arch
       archive_tmp="$(mktemp -d "${TMPDIR:-/tmp}/agentlas-final-update-zip.XXXXXX")"
       extracted_root="$archive_tmp/extracted"
@@ -278,15 +307,21 @@ exercise_final_update_zip_boundary() {
       resources_root="$archived_app/Contents/Resources"
       runtime_root="$resources_root/Hephaestus"
       python_root="$resources_root/python-runtime"
+      python_manifest="$python_root/agentlas-python-runtime.json"
       [[ -d "$runtime_root" && -d "$python_root" ]] || {
-        echo "Final updater ZIP is missing its sealed runtime trees: $zip_path" >&2
+        echo "Final updater ZIP is missing its packaged runtime trees: $zip_path" >&2
         exit 1
       }
 
       codesign --verify --deep --strict "-R=$designated_requirement" "$archived_app"
-      writable="$(find "$runtime_root" "$python_root" \( -type f -o -type d \) \( -perm -u+w -o -perm -g+w -o -perm -o+w \) -print -quit)"
-      [[ -z "$writable" ]] || {
-        echo "Final updater ZIP contains a user-writable signed runtime entry: $writable" >&2
+      owner_unwritable="$(find "$runtime_root" "$python_root" \( -type f -o -type d \) ! -perm -u+w -print -quit)"
+      [[ -z "$owner_unwritable" ]] || {
+        echo "Final updater ZIP contains an entry that blocks Squirrel quarantine cleanup: $owner_unwritable" >&2
+        exit 1
+      }
+      unsafe_writable="$(find "$runtime_root" "$python_root" \( -type f -o -type d \) \( -perm -g+w -o -perm -o+w \) -print -quit)"
+      [[ -z "$unsafe_writable" ]] || {
+        echo "Final updater ZIP contains a group/other-writable signed runtime entry: $unsafe_writable" >&2
         exit 1
       }
       acl_entry="$(find "$runtime_root" "$python_root" -exec /bin/ls -lde {} + | awk '$1 ~ /\+$/ { print; exit }')"
@@ -299,6 +334,14 @@ exercise_final_update_zip_boundary() {
         echo "Final updater ZIP already contains Python bytecode: $forbidden" >&2
         exit 1
       }
+      for xattr_probe in "$runtime_root" "$python_root" "$runtime_root/manifest.json" "$python_manifest"; do
+        [[ -e "$xattr_probe" ]] || {
+          echo "Final updater ZIP is missing an xattr probe target: $xattr_probe" >&2
+          exit 1
+        }
+        /usr/bin/xattr -w com.agentlas.squirrel-install-probe 1 "$xattr_probe"
+        /usr/bin/xattr -d com.agentlas.squirrel-install-probe "$xattr_probe"
+      done
 
       case "$(uname -m)" in
         arm64) host_arch="arm64" ;;
@@ -307,7 +350,6 @@ exercise_final_update_zip_boundary() {
       esac
       candidate_arches="$(lipo -archs "$archived_app/Contents/MacOS/Agentlas")"
       if [[ -n "$host_arch" && " $candidate_arches " == *" $host_arch "* ]]; then
-        python_manifest="$python_root/agentlas-python-runtime.json"
         python_relative="$(node -p "require(process.argv[1]).executableRelativePath" "$python_manifest")"
         python_path="$python_root/$python_relative"
         isolated_home="$archive_tmp/home"
@@ -318,6 +360,8 @@ exercise_final_update_zip_boundary() {
           HEPHAESTUS_RUNTIME_ROOT="$runtime_root" \
           PYTHONPATH="$runtime_root" \
           PYTHONUTF8=1 \
+          PYTHONDONTWRITEBYTECODE=1 \
+          PYTHONPYCACHEPREFIX="$isolated_home/python-bytecode" \
           "$python_path" -c "import agentlas_cloud, ontology; print('direct-import-ok')" \
           | grep -q '^direct-import-ok$'
         forbidden="$(find "$runtime_root" "$python_root" \( -type d -name __pycache__ -o -type f \( -name '*.pyc' -o -name '*.pyo' \) \) -print -quit)"
@@ -328,7 +372,7 @@ exercise_final_update_zip_boundary() {
         codesign --verify --deep --strict "-R=$designated_requirement" "$archived_app"
       fi
 
-      echo "Final updater ZIP sealed-runtime verification: PASS ($(basename "$zip_path"))"
+      echo "Final updater ZIP Squirrel-install/runtime-boundary verification: PASS ($(basename "$zip_path"))"
     )
   done < <(find "$project_dir/release" -maxdepth 1 -type f -name "Agentlas-${version}-*.zip" | sort)
 
