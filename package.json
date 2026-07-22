@@ -5,17 +5,7 @@
   "private": true,
   "license": "Apache-2.0",
   "main": "dist/electron/main.js",
-  "author": {
-    "name": "Agentlas",
-    "email": "appbridge@appbridge.co.kr"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/agentlas-ai/agentlas-desktop.git"
-  },
-  "bugs": {
-    "url": "https://github.com/agentlas-ai/agentlas-desktop/issues"
-  },
+  "author": "Agentlas",
   "homepage": "https://agentlas.cloud/desktop",
   "agentlasReleaseScope": {
     "desktop": true,
