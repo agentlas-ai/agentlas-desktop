@@ -409,9 +409,16 @@ export function wrapSystemPrompt(
   // unrelated chat/surface/connection protocols.
   if (agentSystemPrompt.startsWith(BUILD_PROMPT_SENTINEL)) return agentSystemPrompt;
   // write/full 권한이면 도구 사용 허용 안내(Claude Code식 tool-use). read/기본이면 도구 끔.
+  // 완수 규범(2026-07-22): 같은 모델이 CLI에서는 진단→수정→검증까지 완주하는데, 챗
+  // 프레이밍 위에서는 "원인은 ~~ 때문입니다"로 멈추는 상담사 응답이 반복됐다(사용자
+  // 실신고). 원인 설명만 하고 끝내는 것을 명시적 실패 모드로 규정한다.
   const toolsLine =
     permission === "write" || permission === "full"
-      ? "You have tools available (file read/write, shell, web search, MCP). Use them when they help complete the task, and say what you're doing."
+      ? [
+          "You have tools available (file read/write, shell, web search, MCP). Use them, and say what you're doing.",
+          "Finish the loop. When the user reports something broken or asks for a change, do not stop at explaining the cause: investigate with your tools, apply the fix, verify it actually works, then report what changed and how you verified it.",
+          "A cause-only answer is a failure mode. Stop short only when you genuinely cannot act from here — then name exactly what is missing (for example: attach the project folder, connect a tool, or grant an access) and propose the concrete next step, instead of ending with the explanation.",
+        ].join("\n")
       : tStatus(locale, "sysToolsOff");
 
   // SURFACE_PROTOCOL(~16KB)은 (1) 모델이 마커로 요청했거나(forceSurface, 2차 패스),

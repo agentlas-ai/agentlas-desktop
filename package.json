@@ -84,6 +84,7 @@
     "test:hephaestus-status-version": "npm run build:electron && electron scripts/test-hephaestus-status-version.cjs",
     "test:hephaestus-settings-migration": "npm run build:electron && electron scripts/test-hephaestus-settings-migration.cjs",
     "test:auto-router-gates": "npm run build:electron && node scripts/test-auto-router-gates.cjs",
+    "test:runtime-completion-norm": "node scripts/verify-runtime-completion-norm.cjs",
     "test:agent-route-semantic-gate": "npm run build:electron && node scripts/verify-agent-route-semantic-gate.cjs",
     "test:python-cache-boundary": "npm run build:electron && electron scripts/test-python-cache-boundary.cjs",
     "test:project-bootstrap:desktop": "npm run build:electron && electron scripts/test-project-bootstrap-desktop.cjs",
