@@ -111,10 +111,19 @@ function permissionArgs(permission?: RunnerRequest["permission"]): string[] {
   if (permission === "full") {
     return ["--dangerously-bypass-approvals-and-sandbox"];
   }
-  if (permission === "write") return ["--sandbox", "workspace-write"];
+  if (permission === "write") {
+    // Root cause of "the agent can never reach the browser": codex's
+    // workspace-write Seatbelt sandbox DENIES ALL network by default, so a
+    // write-mode run (every automation, every acting chat) cannot even curl
+    // 127.0.0.1:9222 — the local browser it is supposed to drive. Empirically
+    // confirmed: workspace-write curl to CDP exits 7, adding network_access=true
+    // reaches Chrome. Keep the filesystem sandbox; open network. The user drives
+    // their own machine — a network-blind agent is a dead automation, not safety.
+    return ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"];
+  }
   // `codex exec`는 비대화형이라 approval loop가 없다 — 승인 플래그를 받지 않는다.
   // (`--ask-for-approval`은 대화형 `codex` 전용. exec에 넘기면 0.133+에서
-  //  `unexpected argument` 로 exit 2.) read 권한은 read-only 샌드박스로 충분.
+  //  `unexpected argument` 로 exit 2.) read 권한은 도구를 안 쓰는 대화 모드라 read-only.
   return ["--sandbox", "read-only"];
 }
 
@@ -123,10 +132,12 @@ function resumePermissionArgs(permission?: RunnerRequest["permission"]): string[
     return ["--dangerously-bypass-approvals-and-sandbox"];
   }
   // `codex exec resume` has no `--sandbox` flag, but accepts the same validated
-  // config override. Reassert the boundary instead of inheriting a broader
-  // user default when a provider session is resumed.
-  const sandboxMode = permission === "write" ? "workspace-write" : "read-only";
-  return ["-c", `sandbox_mode="${sandboxMode}"`];
+  // config override. Reassert the boundary — and, for write, keep network open so
+  // a resumed automation can still reach the local browser and HTTP.
+  if (permission === "write") {
+    return ["-c", `sandbox_mode="workspace-write"`, "-c", "sandbox_workspace_write.network_access=true"];
+  }
+  return ["-c", `sandbox_mode="read-only"`];
 }
 
 /**

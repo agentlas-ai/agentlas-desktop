@@ -86,6 +86,7 @@
     "test:auto-router-gates": "npm run build:electron && node scripts/test-auto-router-gates.cjs",
     "test:runtime-completion-norm": "node scripts/verify-runtime-completion-norm.cjs",
     "test:agent-route-semantic-gate": "npm run build:electron && node scripts/verify-agent-route-semantic-gate.cjs",
+    "test:codex-sandbox-network": "node scripts/verify-codex-sandbox-network.cjs",
     "test:python-cache-boundary": "npm run build:electron && electron scripts/test-python-cache-boundary.cjs",
     "test:project-bootstrap:desktop": "npm run build:electron && electron scripts/test-project-bootstrap-desktop.cjs",
     "test:project-bootstrap:core": "npm run build:electron && cross-env HEPHAESTUS_RUNTIME_ROOT=Hephaestus electron scripts/test-project-bootstrap-core.cjs",
