@@ -385,6 +385,29 @@ function handleAutomationFailure(a: Automation, error: string): void {
 
 }
 
+// A run's raw reason string is developer telemetry — codes like
+// `[ambiguous_side_effect] ... durable provider receipt`. Never show it to the
+// person; it read as gibberish spamming their automation chat. Map to plain,
+// honest copy the reader can act on.
+function customerSafeAutomationDetail(
+  status: Extract<AutomationResultStatus, "partial" | "blocked" | "needs_input">,
+  detail: string,
+): string {
+  const raw = (detail ?? "").toLowerCase();
+  if (/ambiguous_side_effect|durable provider receipt|reconciliation|checkpoint/.test(raw)) {
+    return "외부 작업(게시·전송 등)이 실제로 완료됐는지 확실하지 않아 안전하게 잠시 멈췄어요. 결과를 확인하면 이어서 진행합니다.";
+  }
+  if (/permission|not granted|browser tools?\s+unavailable|권한/.test(raw)) {
+    return "필요한 접근 권한이나 브라우저 연결이 아직 준비되지 않아 멈췄어요.";
+  }
+  if (/insufficient_credits|owner_only|sign[ -]?in|auth|로그인/.test(raw)) {
+    return "연결/로그인이 만료되어 이어가지 못했어요. 다시 연결하면 계속됩니다.";
+  }
+  if (status === "needs_input") return "이어가려면 확인이나 입력이 필요해요.";
+  if (status === "partial") return "일부만 완료됐어요. 나머지는 다음 실행에서 이어서 시도합니다.";
+  return "이번 실행을 완료하지 못했어요. 다음 예약에서 다시 시도합니다.";
+}
+
 function recordAutomationAttention(
   a: Automation,
   status: Extract<AutomationResultStatus, "partial" | "blocked" | "needs_input">,
@@ -394,14 +417,14 @@ function recordAutomationAttention(
     const persisted = getAutomation(a.id);
     const chat = getOrCreateAutomationSession(automationSessionInput(a));
     const headline = status === "partial"
-      ? "⚠️ Automation partially completed"
+      ? "⚠️ 자동화가 일부만 완료됐어요"
       : status === "needs_input"
-        ? "👤 Automation needs user input"
-        : "⛔ Automation is blocked";
+        ? "👤 자동화에 확인이 필요해요"
+        : "⏸️ 자동화를 잠시 멈췄어요";
     appendChatMessage(
       chat.id,
       "system",
-      `${headline}: ${detail.slice(0, 500)}\n${persisted?.enabled
+      `${headline}: ${customerSafeAutomationDetail(status, detail)}\n${persisted?.enabled
         ? requiresGraphReconciliation(detail)
           ? "⏸️ 자동화는 켜 둔 채 자동 재실행을 멈췄습니다. 실제 외부 상태를 확인해 완료 또는 재시도를 확정하면 이 occurrence만 안전하게 이어갑니다."
           : `🔁 오류 때문에 자동화를 끄지 않았습니다.${persisted.nextRunAt ? ` 다음 재시도: ${persisted.nextRunAt}` : ""}`
