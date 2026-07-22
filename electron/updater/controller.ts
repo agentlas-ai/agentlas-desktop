@@ -562,6 +562,11 @@ function writeJsonAtomic(file: string, value: unknown): void {
  * traversed, and this helper must never be used on the installed application.
  */
 function makeUpdaterTreeOwnerWritable(target: string): void {
+  // Electron's patched fs treats a valid *.asar file as a virtual directory.
+  // Walking into it makes chmodSync receive paths such as app.asar/dist, which
+  // are not real filesystem entries and fail with ENOTDIR. The archive itself
+  // is removed with its containing stale update tree, so never traverse it.
+  if (path.extname(target).toLowerCase() === ".asar") return;
   if (!fs.existsSync(target)) return;
   const stat = fs.lstatSync(target);
   if (stat.isSymbolicLink() || !stat.isDirectory()) return;

@@ -18,6 +18,10 @@
 
 ### Fixed
 
+- macOS updater recovery no longer walks into Electron's virtual `app.asar`
+  filesystem while removing a stale ShipIt payload. A failed native handoff can
+  now clear the old payload and resume the signed update channel instead of
+  pausing indefinitely with `legacy-cleanup-failed`.
 - Codex write-mode and resumed write-mode runs now enable workspace-sandbox
   network access, allowing automations and acting chats to reach the dedicated
   loopback browser/CDP port and HTTP services while preserving the filesystem
