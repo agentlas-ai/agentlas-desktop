@@ -69,6 +69,16 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-22 · v0.9.2 — updater recovery and release metadata repair** —
+  macOS updater recovery no longer traverses Electron's virtual `app.asar`
+  filesystem while clearing a stale ShipIt payload, so a failed native handoff
+  can resume the signed update channel instead of remaining paused. Linux `.deb`
+  packaging uses the public Agentlas support contact without embedding private
+  developer or source-repository metadata in the application manifest. This
+  release binds Agentlas OS v1.1.56 at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 - **2026-07-22 · v0.9.0 — browser-capable agents that finish the requested work** —
   Work and One now act with full local execution by default, ordinary browser
   navigation no longer stalls behind a hidden approval sheet, and write-mode

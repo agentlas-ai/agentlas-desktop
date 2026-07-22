@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.2 — 2026-07-22
+
+### Fixed
+
+- Release metadata now keeps the public README, package version, and Linux
+  package maintainer contract aligned without restoring private developer
+  metadata to the packaged application.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.56, pinned at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.9.1 — 2026-07-22
 
 ### Fixed
