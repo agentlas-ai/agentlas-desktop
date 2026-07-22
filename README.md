@@ -69,6 +69,22 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-22 · v0.9.0 — browser-capable agents that finish the requested work** —
+  Work and One now act with full local execution by default, ordinary browser
+  navigation no longer stalls behind a hidden approval sheet, and write-mode
+  Codex runs can reach the local browser and HTTP while retaining their
+  filesystem sandbox. The runtime now treats cause-only diagnosis as incomplete:
+  it must investigate, apply the fix, verify it, and report the result unless a
+  concrete missing permission or connection makes action impossible. Automation
+  attention messages use customer-facing language instead of raw reconciliation
+  telemetry. Payment, unsafe browser code, explicit site denials, remote-mobile
+  normalization, and read-only mode retain their stricter boundaries. This also
+  carries v0.8.66's restored light One surface, supplied orange pixel-dog assets,
+  bundled Playwright MCP host, and atomic ambiguous-action pause. This release
+  binds Agentlas OS v1.1.56 at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 - **2026-07-22 · v0.8.66 — restored One and repaired bundled browser automation** —
   Restored One's original light surface and visible Work / One switch, replaced
   generated mascot art with exact integer-scaled poses from the supplied orange

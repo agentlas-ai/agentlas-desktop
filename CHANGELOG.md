@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.9.0 — 2026-07-22
+
+### Changed
+
+- Work and One task runs now start with full local execution permission so an
+  agent can complete the requested shell and browser work without inventing a
+  second approval boundary. The mobile-facing permission normalizer remains
+  fail-closed, and read-only conversations keep tools disabled.
+- Write/full runs now carry an explicit completion contract: investigate the
+  cause, apply the fix, verify the result, and then report it. When execution is
+  genuinely impossible, the runtime must name the exact missing permission,
+  folder, tool, or connection and give the concrete next step.
+- Ordinary browser navigation, clicking, typing, and reading can proceed without
+  a hidden approval sheet. Payments, unsafe browser code, and an explicitly
+  stored per-site denial still require or enforce the existing user boundary.
+
+### Fixed
+
+- Codex write-mode and resumed write-mode runs now enable workspace-sandbox
+  network access, allowing automations and acting chats to reach the dedicated
+  loopback browser/CDP port and HTTP services while preserving the filesystem
+  sandbox. Full mode remains the explicit sandbox bypass.
+- A ready dedicated browser port no longer hard-fails only because its listener
+  ownership cannot be re-verified; the launcher records a warning and continues.
+- Dedicated automation and login Chrome processes disable background component
+  updates and renderer/timer throttling so a long-running browser is not replaced,
+  suspended, or killed underneath an active agent.
+- The floating browser/computer-use panel retains its last good image through a
+  transient capture failure instead of flickering back to an empty waiting state.
+- Automation attention messages no longer expose internal reason codes such as
+  `ambiguous_side_effect` or `partial_reconciliation_required`. Users receive
+  plain completion, connection, input, retry, or safety-pause guidance while the
+  raw reason remains internal to scheduling logic.
+
+### Included
+
+- Includes v0.8.66's restored light One interface and visible Work / One switch,
+  seven exact integer-scaled poses from the supplied orange pixel-dog sheet,
+  bundled pinned Playwright MCP runtime, and atomic pause for ambiguous external
+  actions.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.56, pinned at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.8.66 — 2026-07-22
 
 ### Fixed

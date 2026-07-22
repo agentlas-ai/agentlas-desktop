@@ -1097,6 +1097,8 @@ export function OneShell() {
     const attachedOneMemoryUseOnce = !options?.teamRef && armedOneMemoryUseOnce?.targetKey === targetKey
       ? armedOneMemoryUseOnce.receipt
       : null;
+    const intentPermission = taskIntent === "conversation" ? "read" : "write";
+    const executionPermission = intentPermission === "write" ? "full" : intentPermission;
     try {
       await api.invoke.run({
         runId,
@@ -1114,7 +1116,7 @@ export function OneShell() {
           },
         } : {}),
         locale: runLocale,
-        permissions: taskIntent === "conversation" ? "read" : "full",
+        permissions: executionPermission,
         sessionRouting: false,
       });
       if (options?.teamRef) {
