@@ -459,7 +459,12 @@ async function createTransport(
     const stdioEnv = Object.fromEntries(
       Object.entries(baseEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
     );
-    if (isCanonicalSystemTimeMcpServer(server) || isCanonicalComputerUseMcpServer(server)) {
+    if (
+      server.catalogId === "agentlas-browser" ||
+      server.catalogId === "playwright" ||
+      isCanonicalSystemTimeMcpServer(server) ||
+      isCanonicalComputerUseMcpServer(server)
+    ) {
       stdioEnv.ELECTRON_RUN_AS_NODE = "1";
     }
     if (isCanonicalComputerUseMcpServer(server)) {

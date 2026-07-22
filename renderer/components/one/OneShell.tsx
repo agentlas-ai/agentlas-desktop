@@ -448,7 +448,7 @@ export function OneShell() {
   const [searchIncludeArchived, setSearchIncludeArchived] = useState(true);
   const [archiveMutationTaskId, setArchiveMutationTaskId] = useState<string | null>(null);
   const [railOpen, setRailOpen] = useState(false);
-  const [railCollapsed, setRailCollapsed] = useState(true);
+  const [railCollapsed, setRailCollapsed] = useState(false);
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [dismissedBriefing, setDismissedBriefing] = useState<{ signature: string; expiresAt: number } | null>(null);
   const [introReplayToken, setIntroReplayToken] = useState(0);

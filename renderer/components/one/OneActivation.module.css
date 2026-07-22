@@ -2,17 +2,16 @@
   width: min(720px, calc(100% - 40px));
   margin: 28px auto 18px;
   padding: 28px 30px;
-  border: 1px solid #264840;
+  border: 1px solid #ececeb;
   border-radius: 20px;
-  color: #effffb;
-  background: #fff0;
-  background: #0b1715;
-  box-shadow: 0 16px 44px rgb(0 0 0 / 22%);
+  color: #20201e;
+  background: #fff;
+  box-shadow: 0 12px 40px rgb(20 20 18 / 4%);
 }
 
 .eyebrow {
   margin: 0 0 12px;
-  color: #59e3c1;
+  color: #72726d;
   font-size: 10px;
   font-weight: 760;
   letter-spacing: .12em;
@@ -21,7 +20,7 @@
 .card h2 {
   max-width: 620px;
   margin: 0;
-  color: #effffb;
+  color: #1e1e1c;
   font-size: clamp(24px, 3vw, 36px);
   font-weight: 620;
   letter-spacing: -.035em;
@@ -31,7 +30,7 @@
 .body {
   max-width: 620px;
   margin: 16px 0 0;
-  color: #9db7af;
+  color: #5f5f5a;
   font-size: 14px;
   line-height: 1.75;
 }
@@ -40,8 +39,8 @@
   max-width: 620px;
   margin: 14px 0 0;
   padding-top: 14px;
-  border-top: 1px solid #264840;
-  color: #d9f3eb;
+  border-top: 1px solid #f0f0ee;
+  color: #373733;
   font-size: 12px;
   line-height: 1.65;
 }
@@ -66,31 +65,31 @@
 
 .primary {
   padding: 0 16px;
-  border: 1px solid #59e3c1;
-  color: #06120f;
-  background: #59e3c1;
+  border: 1px solid #0b1715;
+  color: #fff;
+  background: #0b1715;
 }
 
 .secondary {
   padding: 0 15px;
-  border: 1px solid #315b51;
-  color: #c7fff1;
-  background: #10231f;
+  border: 1px solid #dededb;
+  color: #30302d;
+  background: #fff;
 }
 
 .textButton {
   padding: 0 10px;
   border: 0;
-  color: #9db7af;
+  color: #777772;
   background: transparent;
 }
 
 .primary:hover,
-.primary:focus-visible { background: #73ebce; }
+.primary:focus-visible { background: #050505; }
 .secondary:hover,
-.secondary:focus-visible { border-color: #59e3c1; background: #12342c; }
+.secondary:focus-visible { border-color: #bdbdb8; background: #fafaf9; }
 .textButton:hover,
-.textButton:focus-visible { color: #c7fff1; }
+.textButton:focus-visible { color: #272724; }
 .primary:focus-visible,
 .secondary:focus-visible,
 .textButton:focus-visible { outline: 2px solid #7a9870; outline-offset: 2px; }
@@ -100,7 +99,7 @@
 
 .error {
   margin: 12px 0 0;
-  color: #f2cf8f;
+  color: #943f38;
   font-size: 11px;
   line-height: 1.5;
 }

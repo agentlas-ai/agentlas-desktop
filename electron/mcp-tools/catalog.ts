@@ -12,7 +12,7 @@ import {
   OPENCRAB_MCP_URL_SENTINEL,
 } from "../opencrab/constants";
 import { systemTimeMcpLaunchArgs } from "./system-time-server";
-import { PLAYWRIGHT_MCP_PACKAGE } from "./playwright-mcp-version";
+import { playwrightMcpCliPath } from "./browser-cdp-launcher";
 import { computerUseMcpLaunchArgs } from "../computer-use/mcp-server";
 
 export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
@@ -280,10 +280,12 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     descriptionEn: "Drive a real browser — navigate, click, type, screenshot (computer use, no key)",
     category: "web",
     transport: "stdio",
-    command: "npx",
+    command: process.execPath,
+    // The exact MCP host ships inside Desktop. Do not assume a public user's
+    // machine has Node/npm or resolve `latest` during an unattended run.
     // --user-data-dir: 영속 프로파일(persistent context). 매번 새 임시 브라우저(쿠키·로그인 날아감)
     // 대신 디스크의 프로파일로 띄워, 한 번 로그인하면 다음 실행에도 세션이 유지된다(expandHome가 ~ 확장).
-    args: ["-y", PLAYWRIGHT_MCP_PACKAGE, "--user-data-dir", "~/.agentlas/browser-profile"],
+    args: [playwrightMcpCliPath(), "--user-data-dir", "~/.agentlas/browser-profile"],
     trust: "official",
     docsUrl: "https://github.com/microsoft/playwright-mcp",
     brandColor: "#2EAD33",
@@ -303,7 +305,7 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     transport: "stdio",
     // ~/.agentlas/agentlas-browser-cdp.mjs 는 부팅 시 materializeBrowserCdpLauncher() 가 씀.
     // 전용 로그인 프로필을 원격 디버깅 포트로 띄우고 @playwright/mcp 를 CDP attach 한다.
-    command: "node",
+    command: process.execPath,
     args: ["~/.agentlas/agentlas-browser-cdp.mjs"],
     trust: "official",
     docsUrl: "https://github.com/microsoft/playwright-mcp",

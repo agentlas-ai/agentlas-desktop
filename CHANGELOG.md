@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.8.66 — 2026-07-22
+
+### Fixed
+
+- Restored Agentlas One's original light background and high-contrast card,
+  menu, onboarding, and result surfaces after a dark palette made the product
+  logo and navigation difficult to see.
+- The One desktop sidebar now starts expanded, keeping the Agentlas One / Work
+  product switch visible at the top left. Narrow windows retain the existing
+  hamburger-controlled sidebar.
+- Replaced the generated mint and orange mascot artwork with seven exact
+  pixel-art dog poses cut from the supplied source sheet. The onboarding now
+  uses those original pixels at integer scale and removes the generated
+  firewall composite.
+- Agentlas Browser now ships its exact Playwright MCP host inside Desktop and
+  starts it with the signed app runtime. Clean installs no longer depend on a
+  system Node/npm installation or an `npx` download, and the first-run browser
+  readiness window now allows Chrome/CDP startup to complete.
+- An ambiguous browser or external-action occurrence now clears its next due
+  slot in the same database transaction that records the failed run. The
+  automation stays enabled for explicit reconciliation without repeating the
+  uncertain action every 15 minutes.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.56, pinned at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.8.65 — 2026-07-22
 
 ### Security

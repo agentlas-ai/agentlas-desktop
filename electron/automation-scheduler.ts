@@ -859,6 +859,9 @@ async function runOne(
             error: runError,
             advanceSchedule: opts?.advanceSchedule ?? true,
             executionConsumed: runStatus === "ok" || runStatus === "skipped",
+            suspendForReconciliation:
+              (runStatus === "blocked" || runStatus === "partial") &&
+              requiresGraphReconciliation(runError),
             sourceRunId: currentRunId,
             output,
           });

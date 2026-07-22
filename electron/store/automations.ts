@@ -1216,6 +1216,9 @@ export function markAutomationRun(
     sourceRunId?: string | null;
     /** Final source output carried into chain trigger variables. */
     output?: string;
+    /** Keep the automation enabled but atomically remove its next due slot
+     * when this occurrence needs explicit side-effect reconciliation. */
+    suspendForReconciliation?: boolean;
   },
 ): void {
   const db = getDb();
@@ -1277,9 +1280,14 @@ export function markAutomationRun(
   // chain occurrence are one commit. A crash can expose all of them or none of
   // them, never a successful source receipt without its fan-out.
   const commit = db.transaction(() => {
+    const persistedNextRunAt = opts?.suspendForReconciliation === true
+      ? null
+      : shouldDisable
+        ? null
+        : nextRunAt;
     const updated = db.prepare(
       "UPDATE automations SET last_run_at = ?, next_run_at = ?, run_count = ?, enabled = ? WHERE id = ?",
-    ).run(atIso, shouldDisable ? null : nextRunAt, runCount, shouldDisable ? 0 : row.enabled, id);
+    ).run(atIso, persistedNextRunAt, runCount, shouldDisable ? 0 : row.enabled, id);
     if (updated.changes !== 1) throw new AutomationRunParentMissingError(id);
     db.prepare(
       `INSERT INTO run_history (id, automation_id, scheduled_for, ran_at, status, skipped_count, error)

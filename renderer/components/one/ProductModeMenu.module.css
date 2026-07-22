@@ -12,7 +12,7 @@
   border: 0;
   border-radius: 10px;
   padding: 0 10px;
-  background: #10231f;
+  background: #eff0f1;
   color: inherit;
   font: inherit;
   text-align: left;
@@ -21,7 +21,7 @@
 
 .trigger:hover,
 .trigger:focus-visible {
-  background: #10231f;
+  background: #e7e9ea;
   outline: 2px solid transparent;
 }
 
@@ -33,7 +33,7 @@
   place-items: center;
   border-radius: 50%;
   border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
-  background: #0e1e1a;
+  background: #fff;
   color: #111;
   font-size: 17px;
   line-height: 1;
@@ -83,11 +83,11 @@
   min-width: min(238px, calc(100vw - 24px));
   max-width: calc(100vw - 24px);
   padding: 6px;
-  border: 1px solid #315b51;
+  border: 1px solid rgba(15, 23, 42, 0.1);
   border-radius: 14px;
-  background: rgba(10, 21, 19, 0.98);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.34), 0 2px 10px rgba(0, 0, 0, 0.2);
-  color: #d9f3eb;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.13), 0 2px 10px rgba(15, 23, 42, 0.06);
+  color: #151719;
 }
 
 .option {
@@ -105,7 +105,7 @@
 
 .option:hover,
 .option:focus-visible {
-  background: #10231f;
+  background: #f5f6f7;
   outline: none;
 }
 
@@ -126,7 +126,7 @@
 .optionCopy small {
   min-width: 0;
   overflow: hidden;
-  color: #9db7af;
+  color: #6c7178;
   font-size: 12px;
   line-height: 17px;
   text-overflow: ellipsis;
@@ -137,7 +137,7 @@
   grid-column: 2;
   align-self: center;
   justify-self: center;
-  color: #d9f3eb;
+  color: #4f692d;
   font-size: 15px;
   font-weight: 800;
 }
@@ -160,7 +160,7 @@
 }
 
 .dark .trigger {
-  color: #d9f3eb;
+  color: #17191b;
 }
 
 @media (prefers-reduced-motion: reduce) {

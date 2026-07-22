@@ -24,10 +24,10 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  background: #0e1e1a;
-  border-left: 1px solid #315b51;
+  background: #fff;
+  border-left: 1px solid #e4e7df;
   box-shadow: -20px 0 48px rgba(31, 36, 28, 0.09);
-  color: #d9f3eb;
+  color: #171915;
 }
 
 .header {
@@ -35,7 +35,7 @@
   justify-content: space-between;
   gap: 24px;
   padding: 32px 34px 24px;
-  border-bottom: 1px solid #315b51;
+  border-bottom: 1px solid #eceee9;
 }
 
 .header h2 {
@@ -48,14 +48,14 @@
 .header p:not(.eyebrow) {
   max-width: 470px;
   margin: 0;
-  color: #9db7af;
+  color: #686d63;
   font-size: 14px;
   line-height: 1.55;
 }
 
 .eyebrow {
   margin: 0;
-  color: #d9f3eb;
+  color: #536938;
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -66,10 +66,10 @@
   width: 44px;
   height: 44px;
   flex: 0 0 44px;
-  border: 1px solid #315b51;
+  border: 1px solid #e3e6df;
   border-radius: 50%;
-  background: #0e1e1a;
-  color: #d9f3eb;
+  background: #fff;
+  color: #33372f;
   font-size: 25px;
   line-height: 1;
   cursor: pointer;
@@ -84,7 +84,7 @@
   display: grid;
   min-height: 240px;
   place-items: center;
-  color: #9db7af;
+  color: #6e7469;
 }
 
 .message,
@@ -94,23 +94,23 @@
   z-index: 2;
   margin: 0 -34px;
   padding: 12px 34px;
-  border-bottom: 1px solid #315b51;
-  background: #10231f;
-  color: #d9f3eb;
+  border-bottom: 1px solid #dfe6d7;
+  background: #f4f8ef;
+  color: #40522d;
   font-size: 13px;
 }
 
 .error {
-  border-color: #d9f3eb;
-  background: #10231f;
-  color: #9db7af;
+  border-color: #f0d0ca;
+  background: #fff3f1;
+  color: #8b3327;
 }
 
 .section {
   display: grid;
   gap: 16px;
   padding: 28px 0;
-  border-bottom: 1px solid #315b51;
+  border-bottom: 1px solid #eceee9;
 }
 
 .section:last-child {
@@ -132,7 +132,7 @@
 
 .sectionHeading p {
   margin: 0;
-  color: #9db7af;
+  color: #747a70;
   font-size: 13px;
   line-height: 1.5;
 }
@@ -141,8 +141,8 @@
   flex: 0 0 auto;
   padding: 5px 8px;
   border-radius: 999px;
-  background: #10231f;
-  color: #9db7af;
+  background: #f2f4ef;
+  color: #777d72;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
 }
@@ -152,7 +152,7 @@
 .editForm label {
   display: grid;
   gap: 7px;
-  color: #d9f3eb;
+  color: #444940;
   font-size: 13px;
   font-weight: 650;
 }
@@ -169,10 +169,10 @@
   width: 100%;
   min-height: 44px;
   box-sizing: border-box;
-  border: 1px solid #315b51;
+  border: 1px solid #dfe3da;
   border-radius: 11px;
-  background: #0e1e1a;
-  color: #d9f3eb;
+  background: #fff;
+  color: #1d201b;
   padding: 11px 12px;
   font: inherit;
   font-size: 14px;
@@ -200,7 +200,7 @@
 .primaryButton:focus-visible,
 .secondaryButton:focus-visible,
 .dangerButton:focus-visible {
-  border-color: #9db7af;
+  border-color: #607c3f;
   box-shadow: 0 0 0 3px rgba(96, 124, 63, 0.16);
 }
 
@@ -232,13 +232,13 @@
 
 .secondaryButton,
 .dangerButton {
-  border: 1px solid #315b51;
-  background: #0e1e1a;
-  color: #d9f3eb;
+  border: 1px solid #dfe3da;
+  background: #fff;
+  color: #42473e;
 }
 
 .dangerButton {
-  color: #9db7af;
+  color: #9b3b2e;
 }
 
 .primaryButton:disabled,
@@ -254,9 +254,9 @@
   grid-template-columns: 1fr 1fr;
   gap: 13px;
   padding: 17px;
-  border: 1px solid #315b51;
+  border: 1px solid #e2e6dc;
   border-radius: 15px;
-  background: #10231f;
+  background: #fafbf8;
 }
 
 .wideField,
@@ -273,14 +273,14 @@
   display: grid;
   gap: 12px;
   padding: 17px;
-  border: 1px solid #315b51;
+  border: 1px solid #e2e5de;
   border-radius: 15px;
-  background: #0e1e1a;
+  background: #fff;
 }
 
 .principleCard[data-enabled="false"] {
-  background: #10231f;
-  color: #9db7af;
+  background: #f8f9f6;
+  color: #777c73;
 }
 
 .principleTop {
@@ -298,20 +298,20 @@
   min-height: 26px;
   padding: 0 9px;
   border-radius: 999px;
-  background: #10231f;
-  color: #d9f3eb;
+  background: #f0f3eb;
+  color: #53613f;
   font-size: 11px;
   font-weight: 700;
 }
 
 .enabledBadge {
-  background: #10231f;
-  color: #d9f3eb;
+  background: #edf5e5;
+  color: #4b672f;
 }
 
 .disabledBadge {
-  background: #10231f;
-  color: #9db7af;
+  background: #eeefec;
+  color: #777c73;
 }
 
 .principleContent {
@@ -324,7 +324,7 @@
 
 .approvalMeta {
   margin: 0;
-  color: #9db7af;
+  color: #777d72;
   font-size: 11px;
   line-height: 1.4;
 }
@@ -342,9 +342,9 @@
 .empty {
   margin: 0;
   padding: 25px 18px;
-  border: 1px dashed #315b51;
+  border: 1px dashed #dfe3da;
   border-radius: 13px;
-  color: #9db7af;
+  color: #747a70;
   text-align: center;
   font-size: 13px;
 }

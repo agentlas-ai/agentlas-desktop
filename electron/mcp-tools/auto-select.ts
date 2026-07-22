@@ -65,7 +65,14 @@ const DEFAULT_AUTO_SELECT_DEPS: AutoSelectMcpDependencies = {
   listInstalledServers,
   installFromCatalog,
   readEnvVar,
-  testServerConnection: (server) => testServerConnection(server, { timeoutMs: 3_000 }),
+  // The browser host may need to open Chrome and attach over CDP on its first
+  // run. Three seconds was shorter than a warm local probe and made clean
+  // installs look unavailable before the bundled host could answer tools/list.
+  testServerConnection: (server) => testServerConnection(server, {
+    timeoutMs: server.catalogId === "agentlas-browser" || server.catalogId === "playwright"
+      ? 20_000
+      : 3_000,
+  }),
 };
 
 const KEYWORD_HINTS: Record<string, string[]> = {

@@ -13,14 +13,14 @@
   border: 0;
   border-radius: 50%;
   background: transparent;
-  color: #d9f3eb;
+  color: #5f666b;
   font-size: 20px;
   cursor: pointer;
 }
 
 .trigger:hover,
 .trigger:focus-visible {
-  background: #10231f;
+  background: #f0f2f1;
   outline: 3px solid rgba(96, 122, 54, 0.13);
 }
 
@@ -40,11 +40,11 @@
   overscroll-behavior: contain;
   overflow-wrap: anywhere;
   padding: 16px;
-  border: 1px solid #315b51;
+  border: 1px solid #dfe2e4;
   border-radius: 16px;
-  background: #0e1e1a;
+  background: #fff;
   box-shadow: 0 16px 48px rgba(25, 31, 36, 0.14);
-  color: #d9f3eb;
+  color: #202326;
 }
 
 .panel strong {
@@ -61,7 +61,7 @@
 
 .panel small {
   display: block;
-  color: #9db7af;
+  color: #73797d;
   font-size: 11px;
   line-height: 1.5;
 }
@@ -71,10 +71,10 @@
   min-height: 44px;
   margin: 12px 0 0;
   padding: 0 14px;
-  border: 1px solid #315b51;
+  border: 1px solid #d8ddda;
   border-radius: 12px;
-  background: #10231f;
-  color: #d9f3eb;
+  background: #f8f9f8;
+  color: #202326;
 }
 
 .panel button:hover,

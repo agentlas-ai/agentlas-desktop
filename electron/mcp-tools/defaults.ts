@@ -43,6 +43,8 @@ export function ensureDefaultMcpPluginsInstalled(): void {
         installFromCatalog(catalogId);
         installed.add(catalogId);
       } else if (
+        catalogId === "agentlas-browser" ||
+        catalogId === "playwright" ||
         catalogId === AGENTLAS_SYSTEM_TIME_CATALOG_ID ||
         catalogId === AGENTLAS_COMPUTER_USE_CATALOG_ID
       ) {

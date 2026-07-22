@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.8.65",
+  "version": "0.8.66",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -309,6 +309,7 @@
   "dependencies": {
     "@google/genai": "^2.8.0",
     "@modelcontextprotocol/sdk": "^1.0.4",
+    "@playwright/mcp": "0.0.78",
     "@xyflow/react": "^12.11.1",
     "better-sqlite3": "^12.11.1",
     "croner": "^9.1.0",

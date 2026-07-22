@@ -69,6 +69,17 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-22 · v0.8.66 — restored One and repaired bundled browser automation** —
+  Restored One's original light surface and visible Work / One switch, replaced
+  generated mascot art with exact integer-scaled poses from the supplied orange
+  pixel-dog sheet, and removed the generated firewall composite. Agentlas
+  Browser now ships its pinned Playwright MCP host inside Desktop instead of
+  depending on system Node/npm and a run-time `npx` download. Ambiguous external
+  actions are also parked atomically after the first uncertain occurrence rather
+  than being scheduled again. This release binds Agentlas OS v1.1.56 at
+  `3061292495b08d513dd5fcf2025a96d85813b627`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 - **2026-07-22 · v0.8.65 — patched image/URI dependency advisories** — Pinned
   `sharp` to a libvips-patched build and `fast-uri` to a non-vulnerable release
   through `overrides`, without changing the pinned Next.js major, clearing the

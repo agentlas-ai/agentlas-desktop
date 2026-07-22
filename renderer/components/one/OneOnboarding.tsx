@@ -39,6 +39,16 @@ type Props = {
 
 type MascotMood = "idle" | "talking" | "happy" | "thinking" | "cheer" | "gentle" | "point";
 
+const PUPPY_IMAGE: Record<MascotMood, string> = {
+  idle: "/brand/one-puppy/idle.png",
+  talking: "/brand/one-puppy/talking.png",
+  happy: "/brand/one-puppy/happy.png",
+  thinking: "/brand/one-puppy/thinking.png",
+  cheer: "/brand/one-puppy/cheer.png",
+  gentle: "/brand/one-puppy/gentle.png",
+  point: "/brand/one-puppy/point.png",
+};
+
 const PROVIDERS: Array<{
   id: Exclude<OneOnboardingProvider, null>;
   runtime: RuntimeKind;
@@ -81,16 +91,6 @@ const CONCEPTS = [
     examples: "Web · App · Vercel",
   },
 ] as const;
-
-const MOOD_POSITION: Record<MascotMood, string> = {
-  idle: "0% 0%",
-  talking: "33.333% 0%",
-  happy: "66.667% 0%",
-  thinking: "100% 0%",
-  cheer: "0% 100%",
-  gentle: "33.333% 100%",
-  point: "66.667% 100%",
-};
 
 function errorMessage(_error: unknown, fallback: string): string {
   return fallback;
@@ -157,7 +157,7 @@ function HighlightedText({ text }: { text: string }) {
   });
 }
 
-function Las({
+function OnePuppy({
   mood,
   small = false,
   reduced = false,
@@ -182,13 +182,13 @@ function Las({
               ? { y: [0, 2, 0], rotate: [0, -3, 0] }
               : { y: [0, -5, 0], rotate: [0, -0.7, 0.7, 0] };
   return (
-    <motion.div
-      className={`${styles.las} ${small ? styles.lasSmall : ""}`}
-      style={{ backgroundPosition: MOOD_POSITION[mood] }}
+    <motion.img
+      className={`${styles.puppy} ${small ? styles.puppySmall : ""}`}
+      src={PUPPY_IMAGE[mood]}
+      alt={label}
       animate={animation}
       transition={reduced ? { duration: 0 } : { duration: mood === "cheer" || mood === "happy" ? 1.3 : 3.2, repeat: Infinity, ease: "easeInOut" }}
-      role="img"
-      aria-label={label}
+      draggable={false}
     />
   );
 }
@@ -1149,7 +1149,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
             aria-expanded={helperOpen}
             onClick={() => setHelperOpen((open) => !open)}
           >
-            <Las mood="happy" small reduced={reduced} label={tFor(locale, "one.onb.las.label")} />
+            <OnePuppy mood="happy" small reduced={reduced} label={tFor(locale, "one.onb.puppy.label")} />
           </button>
         </div>
       </>
@@ -1161,7 +1161,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       <div className={styles.overlay} data-one-onboarding-dialog onClick={handleOverlayClick}>
         <section ref={(node) => { dialogRef.current = node; }} className={styles.resumeCard} role="dialog" aria-modal="true" aria-labelledby="one-resume-title">
           <button type="button" className={styles.close} onClick={(event) => void dismissTutorial(event)} aria-label={tFor(locale, "one.onb.action.close")}>×</button>
-          <Las mood="gentle" reduced={reduced} label={tFor(locale, "one.onb.las.label")} />
+          <OnePuppy mood="gentle" reduced={reduced} label={tFor(locale, "one.onb.puppy.label")} />
           <h1 id="one-resume-title" tabIndex={-1}>{tFor(locale, "one.onb.resume.title")}</h1>
           <p>{tFor(locale, "one.onb.resume.body")}</p>
           <div className={styles.actions}>
@@ -1206,7 +1206,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
 
         <div className={styles.stage}>
           <div className={styles.guideColumn}>
-            <Las mood={mood} reduced={reduced} label={tFor(locale, "one.onb.las.label")} />
+            <OnePuppy mood={mood} reduced={reduced} label={tFor(locale, "one.onb.puppy.label")} />
             <div>
               <p className={styles.eyebrow}>AGENTLAS ONE · {scene.toUpperCase()}</p>
               <h1 id="one-onboarding-title" tabIndex={-1}>{sceneTitle}</h1>
@@ -1281,10 +1281,11 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: reduced ? 0 : 0.35 }}
                   >
-                    <img
-                      src="/brand/one-local-firewall-mint.png"
-                      alt={tFor(locale, "one.onb.s2.wall_alt")}
-                    />
+                    <div className={styles.wallFlow} aria-hidden="true">
+                      <span className={styles.cloud}>☁</span>
+                      <span className={styles.wall}><b>{tFor(locale, "one.onb.s2.legend_firewall")}</b><i /></span>
+                      <span className={styles.mac}>▣</span>
+                    </div>
                     <div className={styles.wallLegend}>
                       <span><strong>Web chat</strong><small>{tFor(locale, "one.onb.s2.legend_web")}</small></span>
                       <span><strong>{tFor(locale, "one.onb.s2.legend_firewall")}</strong><small>{tFor(locale, "one.onb.s2.legend_firewall_sub")}</small></span>
@@ -1424,9 +1425,9 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                             {selectedSlugs.map((slug) => {
                               const member = ONE_ONBOARDING_STARTER_AGENTS.find((agent) => agent.slug === slug);
                               return <span key={slug}>{member?.nameEn.slice(0, 2).toUpperCase()}</span>;
-                            })}<b>Las</b>
+                            })}<b>One</b>
                           </div>
-                          <Las mood="cheer" small reduced={reduced} label={tFor(locale, "one.onb.s4.las_label")} />
+                          <OnePuppy mood="cheer" small reduced={reduced} label={tFor(locale, "one.onb.s4.puppy_label")} />
                           <strong>{replay ? tFor(locale, "one.onb.s4.preview_title") : tFor(locale, "one.onb.s4.ready_title")}</strong>
                           <span>{replay ? tFor(locale, "one.onb.s4.preview_body") : tFor(locale, "one.onb.s4.ready_body")}</span>
                           <button type="button" className={styles.primary} onClick={() => void continueAfterTeam()}>{tFor(locale, "one.onb.s4.see_org")}</button>
