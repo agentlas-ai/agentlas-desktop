@@ -190,7 +190,7 @@
     "test:runtime-recovery-ui": "npm run build:renderer && node scripts/test-runtime-recovery-ui.cjs",
     "test:mac-release-publish-boundary": "node scripts/test-mac-release-publish-boundary.cjs",
     "test:mac-app-trust": "npm run build:electron && node scripts/test-mac-app-trust.cjs",
-    "test:mac-install-transaction": "node scripts/test-mac-install-transaction.cjs",
+    "test:mac-install-transaction": "node scripts/verify-mac-install-boundary.mjs --self-test",
     "test:mac-update-lineage": "node scripts/test-mac-update-lineage.cjs",
     "test:release-assets": "node scripts/test-release-asset-manifest.cjs",
     "test:semver-precedence": "npm run build:electron && node scripts/test-semver-precedence.cjs",
