@@ -1025,6 +1025,7 @@ type PrivateCandidateGraphRow = {
 
 type TasteDraftGraphRow = {
   id: string;
+  statement: string;
   axis_candidates_json: string;
   task_signatures_json: string;
 };
@@ -1121,6 +1122,23 @@ function relationGraphNode(row: RelationGraphNodeRow): ExperienceOntologyGraphNo
   };
 }
 
+/**
+ * Owner-only readable title for the local Experience Map. The map is a local
+ * render surface (never exported), so real local titles are allowed here —
+ * but secret-looking values are still dropped as defense in depth, and the
+ * label is flattened to one short line.
+ */
+function localGraphLabel(value: string | null | undefined): string | undefined {
+  const flat = String(value ?? "")
+    .normalize("NFC")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!flat) return undefined;
+  if (SECRET_VALUE_RE.test(flat)) return undefined;
+  const chars = Array.from(flat);
+  return chars.length > 80 ? `${chars.slice(0, 79).join("")}…` : flat;
+}
+
 function graphRefIsSafe(node: ExperienceOntologyGraphNode): boolean {
   if (!node.ref) return true;
   if (node.kind === "task") return isCanonicalTaskId(node.ref);
@@ -1170,6 +1188,36 @@ export function getExperienceOntologyGraphSnapshot(agentIdValue: string): Experi
     source: "synthetic",
   });
 
+  // Owner-only readable titles for the local Experience Map render surface.
+  // These labels never leave this snapshot: portable bundles, lineage ledgers,
+  // and Hub projections are built from separate queries that do not read them.
+  const packNames = new Map<string, string>();
+  const candidateTitles = new Map<string, string>();
+  for (const row of getDb().prepare(
+    "SELECT id, name FROM experience_packs WHERE agent_id = ? AND status = 'active'",
+  ).all(agentId) as Array<{ id: string; name: string }>) {
+    const label = localGraphLabel(row.name);
+    if (label) packNames.set(row.id, label);
+  }
+  for (const row of getDb().prepare(
+    `SELECT candidate.id, candidate.summary
+       FROM experience_candidates candidate
+       JOIN experience_packs pack ON pack.id = candidate.pack_id
+      WHERE candidate.agent_id = ? AND pack.status = 'active'`,
+  ).all(agentId) as Array<{ id: string; summary: string }>) {
+    const label = localGraphLabel(row.summary);
+    if (label) candidateTitles.set(row.id, label);
+  }
+  const withLocalLabel = (node: ExperienceOntologyGraphNode): ExperienceOntologyGraphNode => {
+    if (node.kind === "pack" && node.packId && packNames.has(node.packId)) {
+      return { ...node, localLabel: packNames.get(node.packId) };
+    }
+    if (node.kind === "experience-item" && node.ref && candidateTitles.has(node.ref)) {
+      return { ...node, localLabel: candidateTitles.get(node.ref) };
+    }
+    return node;
+  };
+
   const relationNodes = getDb().prepare(
     `SELECT node.node_id, node.pack_id, node.node_type, node.entity_ref, node.payload_json
        FROM experience_relation_nodes node
@@ -1180,7 +1228,7 @@ export function getExperienceOntologyGraphSnapshot(agentIdValue: string): Experi
   const packNodeByPackId = new Map<string, string>();
   for (const row of relationNodes) {
     const node = relationGraphNode(row);
-    if (!node || !addNode(node)) continue;
+    if (!node || !addNode(withLocalLabel(node))) continue;
     if (node.kind === "pack" && node.packId) packNodeByPackId.set(node.packId, node.id);
   }
 
@@ -1216,7 +1264,7 @@ export function getExperienceOntologyGraphSnapshot(agentIdValue: string): Experi
     let packNodeId = packNodeByPackId.get(packId);
     if (!packNodeId) {
       packNodeId = stableId("experience-pack-node", packId);
-      if (!addNode({
+      if (!addNode(withLocalLabel({
         id: packNodeId,
         kind: "pack",
         packId,
@@ -1224,11 +1272,11 @@ export function getExperienceOntologyGraphSnapshot(agentIdValue: string): Experi
         safeLabel: "Experience pack",
         status: "active",
         source: "private-candidate",
-      })) continue;
+      }))) continue;
       packNodeByPackId.set(packId, packNodeId);
     }
     const candidateNodeId = stableId("experience-item-node", packId, candidateRef);
-    if (!addNode({
+    if (!addNode(withLocalLabel({
       id: candidateNodeId,
       kind: "experience-item",
       packId,
@@ -1236,7 +1284,7 @@ export function getExperienceOntologyGraphSnapshot(agentIdValue: string): Experi
       safeLabel: "Private candidate",
       status: "candidate",
       source: "private-candidate",
-    })) continue;
+    }))) continue;
     addEdge({
       id: stableId("experience-edge", packId, packNodeId, candidateNodeId, "contains_candidate"),
       from: packNodeId,
@@ -1276,7 +1324,7 @@ export function getExperienceOntologyGraphSnapshot(agentIdValue: string): Experi
   }
 
   const tasteDrafts = getDb().prepare(
-    `SELECT draft.id, draft.axis_candidates_json, draft.task_signatures_json
+    `SELECT draft.id, draft.statement, draft.axis_candidates_json, draft.task_signatures_json
        FROM taste_draft_candidates draft
        JOIN memory_entries memory
          ON memory.id = draft.source_memory_id AND memory.agent_id = draft.agent_id
@@ -1288,11 +1336,13 @@ export function getExperienceOntologyGraphSnapshot(agentIdValue: string): Experi
     const draftRef = valueFreeGraphId(row.id);
     if (!draftRef) continue;
     const draftNodeId = stableId("experience-taste-draft-node", agentId, draftRef);
+    const statementLabel = localGraphLabel(row.statement);
     if (!addNode({
       id: draftNodeId,
       kind: "taste-draft",
       ref: draftRef,
       safeLabel: "Taste draft",
+      ...(statementLabel ? { localLabel: statementLabel } : {}),
       status: "pending-evidence",
       source: "taste-draft",
     })) continue;

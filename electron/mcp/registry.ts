@@ -57,6 +57,7 @@ function toAgent(row: AgentRow): InstalledAgent {
     trustGrade: row.trust_grade,
     installedAt: row.installed_at,
     tone: row.tone as InstalledAgent["tone"],
+    bookmarkedAt: (row as { bookmarked_at?: string | null }).bookmarked_at ?? null,
     visibility: publicAgentVisibility(row),
     ...(route
       ? {

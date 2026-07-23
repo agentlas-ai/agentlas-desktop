@@ -151,7 +151,7 @@ export function OntologyChipFeatureUpdateModal({
         <div className="feature-update-body">
           <div className="feature-update-copy">
             <span className="feature-update-kicker">
-              {ko ? "새 기능 · 온톨로지 칩" : "NEW · ONTOLOGY CHIPS"}
+              {ko ? "새 기능 · 경험 칩" : "NEW · EXPERIENCE CHIPS"}
             </span>
             <h2 id="ontology-chip-feature-title" ref={titleRef} tabIndex={-1}>
               {ko ? "좋은 경험을, 에이전트의 판단으로" : "Turn good experience into better agent judgment"}

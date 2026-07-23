@@ -286,6 +286,16 @@ async function assertOntologyGraphPaint(graph, theme) {
   const drawCalls = await readFiniteSceneNumber(scene, "data-draw-calls", `${theme} ontology scene`);
   assert(nodeCount > 0, `${theme} ontology scene must render at least one spherical node`);
   assert(edgeCount >= 0, `${theme} ontology edge count must not be negative`);
+  // Clustered experience map contract: deterministic clusters, zoom-dependent
+  // label density, and a stable per-agent coordinate cache.
+  const clusterCount = await readFiniteSceneNumber(scene, "data-cluster-count", `${theme} experience map`);
+  assert(clusterCount >= 0, `${theme} experience map must report its cluster count`);
+  if (nodeCount > 1) assert(clusterCount >= 1, `${theme} multi-node experience map must form at least one cluster`);
+  const labelMode = await scene.getAttribute("data-label-mode");
+  assert(["cluster", "major", "all"].includes(labelMode), `${theme} experience map must expose a zoom label mode, got ${labelMode}`);
+  const layoutCache = await scene.getAttribute("data-layout-cache");
+  assert(["hit", "miss"].includes(layoutCache), `${theme} experience map must report coordinate-cache state, got ${layoutCache}`);
+  assert.equal(await graph.getByTestId("experience-map-labels").count(), 1, `${theme} experience map must own one label overlay`);
   if (nodeCount > 1) assert(depthSpan > sceneRadius * 0.15, `${theme} ontology layout must have meaningful Z depth`);
   assert.equal(await graph.locator('canvas[data-ontology-webgl="true"]').count(), 1, `${theme} ontology scene must own one WebGL canvas`);
   assert(drawCalls > 0 && drawCalls <= 10, `${theme} ontology scene must remain within its draw-call budget`);
@@ -678,7 +688,9 @@ async function runBuildCancelSurface(browser, baseUrl, evidence) {
 }
 
 async function runLibrarySurface(browser, baseUrl, evidence) {
-  const { context, page, errors } = await newPage(browser);
+  // The governed tab-order assertion checks exact Korean copy, so the locale
+  // must be pinned instead of depending on the host/product default (en).
+  const { context, page, errors } = await newPage(browser, { locale: "ko" });
   await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
   try {
     await page.getByText(/My Agents Library|에이전트 라이브러리/).waitFor();
@@ -699,7 +711,7 @@ async function runLibrarySurface(browser, baseUrl, evidence) {
   assert.equal(await page.getByRole("button", { name: /프롬프트 편집|Edit prompt|프롬프트 복사|Copy prompt|기본값 재설정|Reset to default/ }).count(), 0, "raw prompt controls must not be rendered");
   assert.deepEqual(
     (await page.getByTestId("agent-detail-tabs").getByRole("button").allTextContents()).map((text) => text.trim()),
-    ["정체성 & 페르소나", "큐레이팅된 메모리", "플레이북 & 워크플로우", "활동과 개선", "온톨로지 칩"],
+    ["정체성 & 페르소나", "큐레이팅된 메모리", "플레이북 & 워크플로우", "활동과 개선", "경험"],
     "agent tabs must preserve the governed order",
   );
   await page.getByText(/실행 모델 지정|Runtime Model Assignment/).waitFor();
@@ -742,7 +754,7 @@ async function runLibrarySurface(browser, baseUrl, evidence) {
 }
 
 async function runFirmAgentSurface(browser, baseUrl, evidence) {
-  const { context, page, errors } = await newPage(browser, { experienceScenario: true, viewportHeight: 1100 });
+  const { context, page, errors } = await newPage(browser, { experienceScenario: true, viewportHeight: 1100, locale: "ko" });
   await page.goto(`${baseUrl}/firm/detail.html?id=firm-1`, { waitUntil: "domcontentloaded" });
   await page.getByText(/빌더 에이전트|Builder Agent/).first().click();
   await page.getByTestId("governed-agent-identity").waitFor();
@@ -750,7 +762,7 @@ async function runFirmAgentSurface(browser, baseUrl, evidence) {
   assert.equal(await page.getByRole("button", { name: /프롬프트 편집|Edit prompt|프롬프트 복사|Copy prompt|기본값 재설정|Reset to default/ }).count(), 0, "firm detail must not render raw prompt controls");
   assert.deepEqual(
     (await page.getByTestId("agent-detail-tabs").getByRole("button").allTextContents()).map((text) => text.trim()),
-    ["정체성 & 페르소나", "큐레이팅된 메모리", "플레이북 & 워크플로우", "활동과 개선", "온톨로지 칩"],
+    ["정체성 & 페르소나", "큐레이팅된 메모리", "플레이북 & 워크플로우", "활동과 개선", "경험"],
     "firm agent tabs must match the library order",
   );
   await page.getByRole("button", { name: /로컬 표시 이름 편집|Edit local display name/ }).waitFor();
@@ -764,12 +776,11 @@ async function runFirmAgentSurface(browser, baseUrl, evidence) {
   await page.getByTestId("agent-learning-activity").waitFor();
   await page.getByText(/담당 에이전트 미확인|Agent not identified/).waitFor();
 
-  await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
+  await page.getByRole("button", { name: /^경험$|^Experience$/ }).click();
   const ontology = page.getByTestId("experience-ontology-summary");
   await ontology.waitFor();
   await ontology.locator("summary").click();
   await ontology.getByText(/privacy_sensitive/).waitFor();
-  await page.getByTestId("ontology-advanced-relations").locator("summary").click();
   const graph = page.getByTestId("agent-ontology-graph");
   await graph.waitFor();
   await graph.locator('[data-engine-state="ready"]').waitFor();
@@ -797,13 +808,11 @@ async function runCompactAgentSurface(browser, baseUrl, evidence) {
   const tabs = page.getByTestId("agent-detail-tabs");
   await tabs.waitFor();
   assert.equal(await tabs.evaluate((nav) => getComputedStyle(nav).overflowX === "auto"), true, "compact agent tabs should scroll horizontally instead of clipping");
-  await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
+  await page.getByRole("button", { name: /^경험$|^Experience$/ }).click();
   await page.getByTestId("experience-ontology-summary").waitFor();
   assert.equal(await page.getByTestId("ontology-chip-management").getAttribute("open"), null, "compact ontology creation controls must stay collapsed until requested");
-  await page.getByTestId("ontology-human-guide").getByText(/구매한 경험칩 쓰기|Use a purchased chip/).waitFor();
-  assert.equal(await page.getByTestId("ontology-advanced-relations").getAttribute("open"), null, "advanced relations must stay collapsed by default");
-  assert.equal(await page.getByTestId("agent-ontology-graph").count(), 0, "the relation graph must not load before the user opens advanced relations");
-  await page.getByTestId("ontology-advanced-relations").locator("summary").click();
+  await page.getByTestId("ontology-human-guide").getByText(/구매한 경험 칩 쓰기|Use a purchased chip/).waitFor();
+  await page.getByTestId("experience-profile-card").waitFor();
   const compactGraph = page.getByTestId("agent-ontology-graph");
   await compactGraph.waitFor();
   await compactGraph.locator('[data-engine-state="ready"], [data-engine-state="fallback"]').waitFor();
@@ -827,13 +836,14 @@ async function runExperienceSurface(browser, baseUrl, evidence) {
   page.on("dialog", (dialog) => dialog.accept());
   await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
   await page.getByText(/Builder Agent|빌더 에이전트/).first().click();
-  await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
+  await page.getByRole("button", { name: /^경험$|^Experience$/ }).click();
   const management = page.getByTestId("ontology-chip-management");
   await management.waitFor();
   assert.equal(await management.getAttribute("open"), null, "creation and selling controls must stay collapsed behind the primary attachment status");
-  await page.getByTestId("ontology-human-guide").getByText(/구매한 경험칩 쓰기|Use a purchased chip/).waitFor();
-  assert.equal(await page.getByTestId("ontology-advanced-relations").getAttribute("open"), null, "advanced relations must be closed by default");
-  assert.equal(await page.getByTestId("agent-ontology-graph").count(), 0, "the relation graph must not load on the default Experience screen");
+  await page.getByTestId("ontology-human-guide").getByText(/구매한 경험 칩 쓰기|Use a purchased chip/).waitFor();
+  // The experience profile card and map are now front-positioned in the tab.
+  await page.getByTestId("experience-profile-card").waitFor();
+  await page.getByTestId("agent-ontology-graph").waitFor();
   const ontologySummary = page.getByTestId("experience-ontology-summary");
   await ontologySummary.waitFor();
   assert.equal(await page.getByText(/privacy_sensitive/).isVisible().catch(() => false), false, "internal privacy codes must stay hidden on the default screen");
@@ -841,10 +851,10 @@ async function runExperienceSurface(browser, baseUrl, evidence) {
   await page.screenshot({ path: simpleDefaultScreenshot, fullPage: true, animations: "disabled" });
   evidence.push(simpleDefaultScreenshot);
   await management.locator("summary").first().click();
-  await page.getByText(/새 경험 묶음 만들기|Create a new experience collection/).click();
+  await page.getByText(/새 경험 칩 만들기|Create a new experience chip/).click();
   await page.getByText(/^경험 칩$|^Experience Chips$/).first().waitFor();
 
-  await page.getByPlaceholder(/경험 칩 묶음 이름|Experience Chips name/).fill("브라우저 운영 경험");
+  await page.getByPlaceholder(/경험 칩 이름|Experience Chip name/).fill("브라우저 운영 경험");
   await page.getByRole("button", { name: /프로젝트 폴더 선택|Choose project folder/ }).click();
   await page.getByRole("button", { name: /경험 칩 만들기|Create Experience Chips/ }).click();
   await page.getByText("브라우저 운영 경험", { exact: true }).first().waitFor();
@@ -894,18 +904,15 @@ async function runHubOntologyProjectionSurface(browser, baseUrl, evidence) {
   });
   await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
   await page.getByText(/Research Analyst Agent|리서치 분석 에이전트/).first().click();
-  await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
+  await page.getByRole("button", { name: /^경험$|^Experience$/ }).click();
 
   const hub = page.getByTestId("agent-hub-ontology-projection");
   await hub.waitFor();
   await hub.getByText(/현재 1개 사용 중|1 in use now/).waitFor();
-  assert.equal(await page.getByTestId("ontology-advanced-relations").getAttribute("open"), null, "advanced relations must be closed until explicitly opened");
-  assert.equal(await page.getByTestId("agent-ontology-graph").count(), 0, "the Hub status card must not eagerly load the relation graph");
-  await page.getByTestId("ontology-advanced-relations").locator("summary").click();
   const graph = page.getByTestId("agent-ontology-graph");
   await graph.waitFor();
   await graph.locator('[data-engine-state="ready"]').waitFor();
-  await graph.getByText(/Ontology Atlas|온톨로지 아틀라스/).waitFor();
+  await graph.getByText(/Experience Map|경험 지도/).waitFor();
   await graph.getByText(/THREE · 3D/).waitFor();
   await graph.getByLabel(/관계선 범례|Relation legend/).waitFor();
   await assertOntologyGraphPaint(graph, "initial");
@@ -914,6 +921,17 @@ async function runHubOntologyProjectionSurface(browser, baseUrl, evidence) {
   await graph.getByRole("button", { name: /전체 맞춤|Fit graph/ }).click();
   await waitForOntologyCameraSettled(page, graph);
   const nodePicker = graph.locator('select[aria-label="노드 찾기"], select[aria-label="Find node"]');
+  await nodePicker.selectOption({ label: "Agentlas Browser" });
+  await graph.getByTestId("ontology-node-inspector").getByText("Agentlas Browser", { exact: true }).waitFor();
+  // Local-source nodes must show their real owner-only titles on this local map.
+  await nodePicker.selectOption({ label: "게시 전 렌더링 화면 확인" });
+  await graph.getByTestId("ontology-node-inspector").getByText("게시 전 렌더링 화면 확인", { exact: true }).waitFor();
+  // The fixed task taxonomy renders as a readable task-type name, not a slug.
+  const taskOption = nodePicker.locator("option", { hasText: /^리서치$|^Research$/ }).first();
+  await taskOption.waitFor({ state: "attached" });
+  const taskOptionLabel = (await taskOption.textContent()).trim();
+  await nodePicker.selectOption({ label: taskOptionLabel });
+  await graph.getByTestId("ontology-node-inspector").getByText(taskOptionLabel, { exact: true }).waitFor();
   await nodePicker.selectOption({ label: "Agentlas Browser" });
   await graph.getByTestId("ontology-node-inspector").getByText("Agentlas Browser", { exact: true }).waitFor();
   await page.waitForTimeout(350);
@@ -1012,7 +1030,7 @@ async function runActualExperienceAttachmentSurface(browser, baseUrl, evidence) 
   });
   await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
   await page.getByText(/리서치 분석 에이전트|Research Analyst Agent/).first().click();
-  await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
+  await page.getByRole("button", { name: /^경험$|^Experience$/ }).click();
   const hub = page.getByTestId("agent-hub-ontology-projection");
   await hub.getByText(/현재 0개 사용 중 · 내 확인 필요 1개|0 in use now · 1 awaiting your review/).waitFor();
   await page.getByTestId("ontology-hub-details").locator("summary").click();
@@ -1044,8 +1062,7 @@ async function runOntologyWebglFallbackSurface(browser, baseUrl, evidence) {
   });
   await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
   await page.getByText(/Research Analyst Agent|리서치 분석 에이전트/).first().click();
-  await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
-  await page.getByTestId("ontology-advanced-relations").locator("summary").click();
+  await page.getByRole("button", { name: /^경험$|^Experience$/ }).click();
   const graph = page.getByTestId("agent-ontology-graph");
   await graph.locator('[data-engine-state="ready"]').waitFor();
   await graph.evaluate((root) => {
@@ -1117,13 +1134,12 @@ async function runOntologyScaleSurface(browser, baseUrl) {
     };
   });
   await page.getByText(/Builder Agent|빌더 에이전트/).first().click();
-  await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
+  await page.getByRole("button", { name: /^경험$|^Experience$/ }).click();
   const startedAt = Date.now();
-  await page.getByTestId("ontology-advanced-relations").locator("summary").click();
   const graph = page.getByTestId("agent-ontology-graph");
   await graph.locator('[data-engine-state="ready"]').waitFor({ timeout: 5000 });
   assert(Date.now() - startedAt < 5000, "capped scale graph must become interactive within five seconds");
-  await graph.getByText(/400 NODE · \d+ RELATION · CAPPED/).waitFor();
+  await graph.getByText(/400 NODE · \d+ RELATION · \d+ CLUSTER · CAPPED/).waitFor();
   await assertOntologyGraphPaint(graph, "400-node scale");
   const scene = graph.getByTestId("ontology-3d-scene");
   assert.equal(await scene.getAttribute("data-node-count"), "400", "3D renderer must honor the 400-node cap");
@@ -1150,11 +1166,10 @@ async function runOntologyErrorSurface(browser, baseUrl) {
     };
   });
   await page.getByText(/Builder Agent|빌더 에이전트/).first().click();
-  await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
-  await page.getByTestId("ontology-advanced-relations").locator("summary").click();
+  await page.getByRole("button", { name: /^경험$|^Experience$/ }).click();
   const graph = page.getByTestId("agent-ontology-graph");
   await graph.locator('[data-data-state="error"]').waitFor();
-  await graph.getByText(/관계지도를 불러오지 못했습니다|relation map could not be loaded/).waitFor();
+  await graph.getByText(/경험 지도를 불러오지 못했습니다|experience map could not be loaded/).waitFor();
   assert.doesNotMatch(await graph.innerText(), /\/Users\/private|secret/i, "relation error UI must not expose raw host details");
   assert.equal(errors.length, 0, "handled ontology read failure must not emit page errors");
   await context.close();
@@ -1165,10 +1180,10 @@ async function runExperienceCloudStateSurface(browser, baseUrl, evidence, state)
   page.on("dialog", (dialog) => dialog.accept());
   await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
   await page.getByText(/Builder Agent|빌더 에이전트/).first().click();
-  await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).click();
+  await page.getByRole("button", { name: /^경험$|^Experience$/ }).click();
   await page.getByTestId("ontology-chip-management").locator("summary").first().click();
-  await page.getByText(/새 경험 묶음 만들기|Create a new experience collection/).click();
-  await page.getByPlaceholder(/경험 칩 묶음 이름|Experience Chips name/).fill(`state-${state}`);
+  await page.getByText(/새 경험 칩 만들기|Create a new experience chip/).click();
+  await page.getByPlaceholder(/경험 칩 이름|Experience Chip name/).fill(`state-${state}`);
   await page.getByRole("button", { name: /프로젝트 폴더 선택|Choose project folder/ }).click();
   await page.getByRole("button", { name: /경험 칩 만들기|Create Experience Chips/ }).click();
   await page.locator('[data-testid="experience-panel"] select').first().selectOption("memory-browser-workflow");
@@ -1882,7 +1897,7 @@ async function runHubLiveSurface(browser, baseUrl, evidence) {
   await page.getByRole("tab", { name: /경험칩 사고팔기|Buy & sell Experience Chips/ }).click();
   await page.getByRole("button", { name: /구매한 칩 장착하기|Attach a purchased chip/ }).click();
   await page.waitForURL(/\/library\/agents(?:\.html)?\?tab=ontology/);
-  await page.getByRole("button", { name: /온톨로지 칩|Ontology Chips/ }).first().waitFor();
+  await page.getByRole("button", { name: /^경험$|^Experience$/ }).first().waitFor();
   assert.deepEqual(errors, [], "Hub Experience Chip flow should not emit page errors");
   evidence.push({ name: "hub-live-surface", status: "pass", url: page.url() });
   await context.close();

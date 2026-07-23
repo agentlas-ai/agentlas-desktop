@@ -155,7 +155,7 @@ async function main() {
     await reopened.waitFor({ timeout: 8_000 });
     await reopened.getByRole("button", { name: "새 기능 살펴보기" }).click();
     await page.waitForURL(/\/library\/agents(?:\.html)?\?tab=ontology/);
-    const ontologyTab = page.getByRole("button", { name: "온톨로지 칩", exact: true });
+    const ontologyTab = page.getByRole("button", { name: /^경험$|^Experience$/ });
     await ontologyTab.waitFor({ timeout: 8_000 });
     assert.equal(await ontologyTab.getAttribute("aria-current"), "page");
     await page.locator('[data-testid="experience-ontology-summary"]').waitFor({ timeout: 8_000 });

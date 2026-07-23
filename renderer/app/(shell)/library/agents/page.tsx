@@ -32,6 +32,7 @@ import type {
   AgentRuntimeOverride,
   AgentRuntimeOverrideScope,
   AgentGroupResolved,
+  AgentUsageSummaryRow,
   Chat,
   ExperienceCandidateRecord,
   ExperienceCloudUploadRecord,
@@ -57,6 +58,7 @@ import {
   ExperienceOntologySummaryView,
   agentDisplayName,
 } from "@/components/AgentExperienceInsights";
+import { ExperienceProfileCard } from "@/components/ExperienceProfileCard";
 import {
   AgentLearningHistory,
   confidenceLabel,
@@ -93,6 +95,34 @@ const rosterNameStyle: CSSProperties = {
   WebkitLineClamp: 2,
   lineHeight: 1.22,
 };
+
+/** v74 사용 원장 배지 — 사용함 / 자주 씀. 사용 이력이 없으면 아무것도 그리지 않는다. */
+function RosterUsageBadge({ usage, frequent, locale }: {
+  usage: AgentUsageSummaryRow | undefined;
+  frequent: boolean;
+  locale: "ko" | "en";
+}) {
+  if (!usage || usage.useCount <= 0) return null;
+  return (
+    <span
+      data-usage-badge={frequent ? "frequent" : "used"}
+      title={locale === "ko" ? `사용 ${usage.useCount}회` : `Used ${usage.useCount} times`}
+      style={{
+        flexShrink: 0,
+        padding: "1px 6px",
+        borderRadius: 999,
+        fontSize: 9,
+        fontWeight: 750,
+        color: frequent ? "var(--accent)" : "var(--muted-deep)",
+        background: frequent ? "var(--accent-soft)" : "var(--fill-1)",
+      }}
+    >
+      {frequent
+        ? (locale === "ko" ? "자주 씀" : "Frequent")
+        : (locale === "ko" ? "사용함" : "Used")}
+    </span>
+  );
+}
 
 function readableRoleLabel(role: string | undefined, displayName: string, agentSlug?: string): string | null {
   const label = role?.trim();
@@ -133,6 +163,10 @@ function LibraryAgentsView() {
   const [agentGroups, setAgentGroups] = useState<AgentGroupResolved[]>([]);
   const [runtimeStatuses, setRuntimeStatuses] = useState<RuntimeStatus[]>([]);
   const [runtimeOverrides, setRuntimeOverrides] = useState<AgentRuntimeOverride[]>([]);
+  // v74 사용 원장(run 귀속 집계) — 로스터 섹션/배지의 데이터 소스.
+  const [usageRows, setUsageRows] = useState<AgentUsageSummaryRow[]>([]);
+  // 북마크 토글의 낙관적 오버라이드(진실은 refresh로 재수렴).
+  const [bookmarkOverrides, setBookmarkOverrides] = useState<Record<string, boolean>>({});
 
   // 왼쪽 조직도 패널 너비 & 접기 상태 (localStorage 영속)
   const [orgWidth, setOrgWidth] = useState(300);
@@ -261,6 +295,14 @@ function LibraryAgentsView() {
     setAgentGroups(groupRows);
     setRuntimeStatuses(runtimes);
     setRuntimeOverrides(overrides);
+    setBookmarkOverrides({});
+    if (api.agents?.usageSummary) {
+      void api.agents.usageSummary()
+        .then((rows) => {
+          if (rosterRefreshGenerationRef.current === generation && Array.isArray(rows)) setUsageRows(rows);
+        })
+        .catch(() => {});
+    }
 
     // 순차 for-await(20개면 ~4s 프리즈) → 동시성 3 병렬. 실패/null firm 은 기존처럼 누락(worker 내부 try/catch 로 null 반환). 순서 보존.
     const orgs: Record<string, ResolvedOrg> = {};
@@ -762,6 +804,40 @@ function LibraryAgentsView() {
 
   const roster = useMemo(() => buildAgentRoster(agents, firms), [agents, firms]);
   const agentMap = roster.agentById;
+
+  // ── v74 사용/북마크 파생 — 로스터 섹션·배지 ─────────────────────────────
+  const usageByAgentId = useMemo(() => new Map(usageRows.map((row) => [row.agentId, row])), [usageRows]);
+  const isBookmarked = useCallback((a: InstalledAgent): boolean => {
+    if (a.id in bookmarkOverrides) return bookmarkOverrides[a.id];
+    return Boolean(a.bookmarkedAt ?? usageByAgentId.get(a.id)?.bookmarkedAt);
+  }, [bookmarkOverrides, usageByAgentId]);
+  // "자주 씀" = 최근 30일 안에 마지막으로 쓰였고 누적 사용이 5회 이상인 에이전트.
+  const isFrequentlyUsed = useCallback((agentId: string): boolean => {
+    const usage = usageByAgentId.get(agentId);
+    if (!usage || usage.useCount < 5) return false;
+    const last = Date.parse(usage.lastUsedAt);
+    return Number.isFinite(last) && Date.now() - last <= 30 * 86_400_000;
+  }, [usageByAgentId]);
+  const toggleBookmark = useCallback(async (agentId: string, next: boolean) => {
+    const api = ipc();
+    if (!api?.agents?.setBookmark) return;
+    setBookmarkOverrides((current) => ({ ...current, [agentId]: next }));
+    try {
+      await api.agents.setBookmark(agentId, next);
+    } catch {
+      setBookmarkOverrides((current) => ({ ...current, [agentId]: !next }));
+    }
+  }, []);
+  // 자주 쓰지만 로컬에 설치되지 않은(빌려 쓰는) 에이전트 — 정직하게 따로 표시.
+  const borrowedFrequentRows = useMemo(
+    () => usageRows.filter((row) => !row.installed && row.useCount >= 5),
+    [usageRows],
+  );
+  const firmUsageRollup = useCallback((firm: InstalledFirm): number => {
+    let total = 0;
+    for (const node of firm.orgChart) total += usageByAgentId.get(node.agentId)?.useCount ?? 0;
+    return total;
+  }, [usageByAgentId]);
   const selectedFirm = selectedFirmId ? firms.find((firm) => firm.id === selectedFirmId) ?? null : null;
 
   // 팀 에이전트 펼치기 — 하위 서브에이전트를 백엔드(즉시 결정적 + 백그라운드 LLM)로 해석.
@@ -1017,6 +1093,19 @@ function LibraryAgentsView() {
                       <button type="button" onClick={() => { setSelectedFirmId(firm.id); setSelectedNode(null); }} style={{ border: 0, background: "transparent", padding: 0, cursor: "pointer", textAlign: "left", minWidth: 0, flex: 1, color: "inherit" }}>
                         <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--font-head)", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{fLoc.name}</span>
                       </button>
+                      {(() => {
+                        // 파생 롤업: 팀 멤버들의 run 참여 합계(사용 원장 집계). 성공 점수가 아니다.
+                        const totalUses = firmUsageRollup(firm);
+                        return totalUses > 0 ? (
+                          <span
+                            data-firm-usage-rollup={totalUses}
+                            title={locale === "ko" ? `팀 멤버 사용 합계 ${totalUses}회` : `Team members used ${totalUses} times in total`}
+                            style={{ flexShrink: 0, fontSize: 9, fontWeight: 750, padding: "2px 6px", borderRadius: 999, background: "var(--fill-1)", color: "var(--muted-deep)" }}
+                          >
+                            {locale === "ko" ? `멤버 사용 ${totalUses}` : `Member uses ${totalUses}`}
+                          </span>
+                        ) : null;
+                      })()}
                     </div>
                   )}
                   {(!isCollapsed || sidebarCollapsed) && (
@@ -1118,7 +1207,10 @@ function LibraryAgentsView() {
                           >
                             <AgentAvatar name={displayName} tone={a.tone} size={28} />
                             <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                              <span style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{displayName}</span>
+                              <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                                <span style={{ minWidth: 0, fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{displayName}</span>
+                                <RosterUsageBadge usage={usageByAgentId.get(a.id)} frequent={isFrequentlyUsed(a.id)} locale={locale} />
+                              </span>
                               <span style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.tagline}</span>
                             </div>
                           </div>
@@ -1154,52 +1246,107 @@ function LibraryAgentsView() {
               </div>
             )}
 
-            {/* Independent Agents (싱글 탭) */}
+            {/* Independent Agents (싱글 탭) — 북마크 → 자주 씀 → 전체 섹션 */}
             {(sidebarCollapsed || rosterTab === "single") && (
-            <div style={{ marginTop: 8 }}>
+            <div style={{ marginTop: 8 }} data-testid="single-roster-sections">
               {!sidebarCollapsed && roster.singleModeAgents.length === 0 && (
                 <div style={{ fontSize: 12, color: "var(--muted-deep)", padding: "8px 12px" }}>
                   {t("library.agents.single_empty")}
                 </div>
               )}
-              {!sidebarCollapsed && roster.singleModeAgents.length > 0 && (
-                <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-deep)", textTransform: "uppercase", padding: "0 12px", marginBottom: 8 }}>
-                  {t("library.agents.single_section")}
-                </div>
-              )}
-              <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingLeft: sidebarCollapsed ? 0 : 12, alignItems: sidebarCollapsed ? "center" : "stretch" }}>
-                {roster.singleModeAgents.map(a => {
-                  const loc = pickLocalized(a, locale);
-                  const displayName = agentDisplayName(a, locale);
-                  const isAct = selectedNode?.agentId === a.id;
-                  if (sidebarCollapsed) {
-                    return <MiniNodeAvatar key={a.id} node={{ name: displayName, role: loc.tagline }} active={isAct} onClick={() => {
+              {sidebarCollapsed ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "center" }}>
+                  {roster.singleModeAgents.map(a => {
+                    const loc = pickLocalized(a, locale);
+                    const displayName = agentDisplayName(a, locale);
+                    return <MiniNodeAvatar key={a.id} node={{ name: displayName, role: loc.tagline }} active={selectedNode?.agentId === a.id} onClick={() => {
                       setSelectedNode({ id: a.id, name: displayName, role: loc.tagline, agentId: a.id });
                       setActiveTab("identity");
                     }} />;
-                  }
-                  return (
-                    <div
-                      key={a.id}
-                      onClick={() => {
-                        setSelectedNode({ id: a.id, name: displayName, role: loc.tagline, agentId: a.id });
-                        setActiveTab("identity");
-                      }}
-                      style={{
-                        display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", cursor: "pointer",
-                        borderRadius: "var(--radius-md)", background: isAct ? "var(--fill-1)" : "transparent",
-                        border: isAct ? "1px solid var(--accent)" : "1px solid transparent"
-                      }}
-                    >
-                      <AgentAvatar name={displayName} tone={a.tone} size={28} />
-                      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                        <span style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{displayName}</span>
-                        <span style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.tagline}</span>
-                      </div>
+                  })}
+                </div>
+              ) : (() => {
+                const bookmarked = roster.singleModeAgents.filter((a) => isBookmarked(a));
+                const frequent = roster.singleModeAgents.filter((a) => !isBookmarked(a) && isFrequentlyUsed(a.id));
+                const rest = roster.singleModeAgents.filter((a) => !isBookmarked(a) && !isFrequentlyUsed(a.id));
+                const sections = [
+                  { key: "bookmarked", title: locale === "ko" ? "북마크" : "Bookmarked", agents: bookmarked },
+                  { key: "frequent", title: locale === "ko" ? "자주 씀" : "Frequently used", agents: frequent },
+                  { key: "all", title: t("library.agents.single_section"), agents: rest },
+                ].filter((section) => section.agents.length > 0);
+                return sections.map((section) => (
+                  <div key={section.key} data-roster-section={section.key} style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-deep)", textTransform: "uppercase", padding: "0 12px", marginBottom: 6 }}>
+                      {section.title}
                     </div>
-                  );
-                })}
-              </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingLeft: 12 }}>
+                      {section.agents.map(a => {
+                        const loc = pickLocalized(a, locale);
+                        const displayName = agentDisplayName(a, locale);
+                        const isAct = selectedNode?.agentId === a.id;
+                        const usage = usageByAgentId.get(a.id);
+                        const frequentAgent = isFrequentlyUsed(a.id);
+                        const bookmarkedAgent = isBookmarked(a);
+                        return (
+                          <div
+                            key={a.id}
+                            onClick={() => {
+                              setSelectedNode({ id: a.id, name: displayName, role: loc.tagline, agentId: a.id });
+                              setActiveTab("identity");
+                            }}
+                            style={{
+                              display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", cursor: "pointer",
+                              borderRadius: "var(--radius-md)", background: isAct ? "var(--fill-1)" : "transparent",
+                              border: isAct ? "1px solid var(--accent)" : "1px solid transparent"
+                            }}
+                          >
+                            <AgentAvatar name={displayName} tone={a.tone} size={28} />
+                            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                              <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                                <span style={{ minWidth: 0, fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{displayName}</span>
+                                <RosterUsageBadge usage={usage} frequent={frequentAgent} locale={locale} />
+                              </span>
+                              <span style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.tagline}</span>
+                            </div>
+                            <button
+                              type="button"
+                              aria-pressed={bookmarkedAgent}
+                              aria-label={bookmarkedAgent
+                                ? (locale === "ko" ? `${displayName} 북마크 해제` : `Remove bookmark for ${displayName}`)
+                                : (locale === "ko" ? `${displayName} 북마크` : `Bookmark ${displayName}`)}
+                              title={locale === "ko" ? "북마크" : "Bookmark"}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void toggleBookmark(a.id, !bookmarkedAgent);
+                              }}
+                              style={{ flexShrink: 0, border: "none", background: "transparent", cursor: "pointer", padding: 2, fontSize: 14, lineHeight: 1, color: bookmarkedAgent ? "var(--amber-deep)" : "var(--muted-deep)" }}
+                            >
+                              {bookmarkedAgent ? "\u2605" : "\u2606"}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ));
+              })()}
+              {!sidebarCollapsed && borrowedFrequentRows.length > 0 && (
+                <div data-roster-section="borrowed" style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-deep)", textTransform: "uppercase", padding: "0 12px", marginBottom: 6 }}>
+                    {locale === "ko" ? "자주 빌려 씀" : "Frequently borrowed"}
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingLeft: 12 }}>
+                    {borrowedFrequentRows.map((row) => (
+                      <div key={row.agentId} title={row.agentId} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderRadius: "var(--radius-md)", color: "var(--muted-deep)" }}>
+                        <span style={{ minWidth: 0, fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{row.agentId}</span>
+                        <span style={{ flexShrink: 0, fontSize: 9.5, fontWeight: 750, padding: "2px 6px", borderRadius: 999, border: "1px solid var(--paper-edge)", background: "var(--paper)" }}>
+                          {locale === "ko" ? "빌림" : "Borrowed"} · {row.useCount}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
             )}
           </div>
@@ -2678,7 +2825,7 @@ function ExperiencePanel({
       await loadPacks();
       setSelectedPackId(created.id);
       onChanged();
-      showToast(ko ? "로컬 경험 칩 묶음을 만들었습니다." : "Created a local Experience Chips collection.");
+      showToast(ko ? "로컬 경험 칩을 만들었습니다." : "Created a local Experience Chip.");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -3041,7 +3188,7 @@ function ExperiencePanel({
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", marginTop: 14, borderTop: "1px solid var(--paper-edge)", borderBottom: "1px solid var(--paper-edge)" }}>
           {[
-            [ko ? "경험 묶음" : "Collections", packs.length],
+            [ko ? "경험 칩" : "Chips", packs.length],
             [ko ? "검토한 경험" : "Reviewed", receipts.length],
             [ko ? "공개 준비" : "Public-ready", operationalPublicReady ? (ko ? "완료" : "Ready") : (ko ? "필요" : "Needed")],
           ].map(([label, value], index) => (
@@ -3161,7 +3308,7 @@ function ExperiencePanel({
 
       <details style={{ borderBottom: "1px solid var(--paper-edge)", paddingBottom: 12 }}>
         <summary style={{ minHeight: 42, display: "flex", alignItems: "center", cursor: "pointer", fontSize: 12.5, fontWeight: 750 }}>
-          {ko ? "새 경험 묶음 만들기" : "Create a new experience collection"}
+          {ko ? "새 경험 칩 만들기" : "Create a new experience chip"}
         </summary>
       <section style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
@@ -3181,7 +3328,7 @@ function ExperiencePanel({
           </div>
         )}
         <div style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1fr) auto auto", gap: 8, marginTop: 12 }}>
-          <input value={packName} onChange={(event) => setPackName(event.target.value)} placeholder={ko ? "경험 칩 묶음 이름" : "Experience Chips name"} style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, padding: "9px 10px", background: "var(--paper-2)", color: "var(--ink)" }} />
+          <input value={packName} onChange={(event) => setPackName(event.target.value)} placeholder={ko ? "경험 칩 이름" : "Experience Chip name"} style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, padding: "9px 10px", background: "var(--paper-2)", color: "var(--ink)" }} />
           <button type="button" onClick={() => void chooseProject()} style={runtimeButtonStyle}>
             {projectPath ? projectPath.split(/[\\/]/).filter(Boolean).at(-1) : (ko ? "프로젝트 폴더 선택" : "Choose project folder")}
           </button>
@@ -3198,7 +3345,7 @@ function ExperiencePanel({
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(210px, 0.7fr) minmax(0, 1.8fr)", gap: 14 }}>
         <section style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 12 }}>
-          <strong style={{ fontSize: 12.5 }}>{ko ? `내 경험 칩 묶음 ${packs.length}개` : `${packs.length} Experience Chips collections`}</strong>
+          <strong style={{ fontSize: 12.5 }}>{ko ? `내 경험 칩 ${packs.length}개` : `${packs.length} Experience Chips`}</strong>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
             {packs.length === 0 && <span style={{ color: "var(--muted-deep)", fontSize: 12 }}>{ko ? "아직 경험 칩이 없습니다." : "No Experience Chips yet."}</span>}
             {packs.map((pack) => (
@@ -3212,7 +3359,7 @@ function ExperiencePanel({
 
         <section style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 14 }}>
           {!selectedPack ? (
-            <span style={{ color: "var(--muted-deep)", fontSize: 12 }}>{ko ? "경험 칩 묶음을 선택하세요." : "Select an Experience Chips collection."}</span>
+            <span style={{ color: "var(--muted-deep)", fontSize: 12 }}>{ko ? "경험 칩을 선택하세요." : "Select an Experience Chip."}</span>
           ) : (
             <>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginBottom: 12 }}>
@@ -3479,7 +3626,6 @@ function AgentDetailView({
   const [ontologyGraph, setOntologyGraph] = useState<ExperienceOntologyGraphSnapshot | null>(null);
   const [ontologyGraphLoading, setOntologyGraphLoading] = useState(false);
   const [ontologyGraphError, setOntologyGraphError] = useState(false);
-  const [ontologyAdvancedOpen, setOntologyAdvancedOpen] = useState(false);
   const [ontologyRevision, setOntologyRevision] = useState(0);
   const [hubOntology, setHubOntology] = useState<AgentOntologyHubProjection | null>(null);
   const [hubOntologyLoading, setHubOntologyLoading] = useState(false);
@@ -3487,7 +3633,6 @@ function AgentDetailView({
   const [hubOntologyRefresh, setHubOntologyRefresh] = useState(0);
 
   useEffect(() => {
-    setOntologyAdvancedOpen(false);
     setOntologyGraph(null);
     setOntologyGraphLoading(false);
     setOntologyGraphError(false);
@@ -3525,7 +3670,7 @@ function AgentDetailView({
     if (!api || !agent?.id) {
       setOntologySummary(null);
       setOntologySummaryLoading(false);
-      setOntologySummaryError(locale === "ko" ? "설치된 에이전트만 온톨로지를 조회할 수 있습니다." : "Only installed agents have an ontology summary.");
+      setOntologySummaryError(locale === "ko" ? "설치된 에이전트만 경험 요약을 조회할 수 있습니다." : "Only installed agents have an experience summary.");
       return;
     }
     let cancelled = false;
@@ -3548,7 +3693,7 @@ function AgentDetailView({
   }, [agent?.id, locale, ontologyRevision]);
 
   useEffect(() => {
-    if (activeTab !== "ontology" || !ontologyAdvancedOpen) return;
+    if (activeTab !== "ontology") return;
     const api = ipc();
     if (!api || !agent?.id) {
       setOntologyGraph(null);
@@ -3576,7 +3721,7 @@ function AgentDetailView({
       })
       .finally(() => { if (!cancelled) setOntologyGraphLoading(false); });
     return () => { cancelled = true; };
-  }, [activeTab, agent?.id, ontologyAdvancedOpen, ontologyRevision]);
+  }, [activeTab, agent?.id, ontologyRevision]);
 
   useEffect(() => {
     if (activeTab !== "ontology") return;
@@ -3584,7 +3729,7 @@ function AgentDetailView({
     if (!api || !agent?.id) {
       setHubOntology(null);
       setHubOntologyLoading(false);
-      setHubOntologyError(locale === "ko" ? "설치된 에이전트만 Hub 장착 상태를 조회할 수 있습니다." : "Only installed agents have a Hub loadout.");
+      setHubOntologyError(locale === "ko" ? "설치된 에이전트만 Hub 장착 상태를 조회할 수 있습니다." : "Only installed agents have equipped-chip status.");
       return;
     }
     let cancelled = false;
@@ -3600,7 +3745,7 @@ function AgentDetailView({
           setHubOntology(null);
           // Never surface a raw Main/network error: it may include a host path
           // or endpoint detail outside the renderer-safe projection contract.
-          setHubOntologyError(locale === "ko" ? "Hub 장착 상태를 안전하게 확인하지 못했습니다." : "The Hub loadout could not be verified safely.");
+          setHubOntologyError(locale === "ko" ? "Hub 장착 상태를 안전하게 확인하지 못했습니다." : "Equipped-chip status could not be verified safely.");
         }
       })
       .finally(() => {
@@ -3906,7 +4051,7 @@ function AgentDetailView({
           ? (locale === "ko" ? "허브 공유 지식 풀(Pull)" : "Pulled shared knowledge from Hub")
           : (locale === "ko" ? "로컬 자동 학습 병합" : "Merged local auto-learning"),
         desc: locale === "ko"
-          ? `'${target.title}' 온톨로지 추천 피드백을 에이전트 지식베이스에 승인 및 결합 완료했습니다.`
+          ? `'${target.title}' 경험 추천 피드백을 에이전트 지식베이스에 승인 및 결합 완료했습니다.`
           : `Approved and merged the ontology suggestion '${target.title}' into the agent's knowledge base.`,
         type: "resolve"
       },
@@ -4076,7 +4221,7 @@ function AgentDetailView({
               memory: locale === "ko" ? "큐레이팅된 메모리" : "Curated Memory",
               playbook: locale === "ko" ? "플레이북 & 워크플로우" : "Playbook & Workflow",
               activity: locale === "ko" ? "활동과 개선" : "Activity & Improvements",
-              ontology: locale === "ko" ? "온톨로지 칩" : "Ontology Chips",
+              ontology: locale === "ko" ? "경험" : "Experience",
             };
             return (
               <button
@@ -4210,7 +4355,7 @@ function AgentDetailView({
                   <div style={{ background: "var(--fill-1)", padding: "10px 16px", display: "flex", alignItems: "center", justifyItems: "space-between", borderBottom: "1px solid var(--accent-soft)" }}>
                     <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 700, color: "var(--accent)" }}>
                       <IconBrain size={14} />
-                      {locale === "ko" ? "온톨로지 인박스 (학습된 정보 추천)" : "Ontology inbox (learned-info suggestions)"}
+                      {locale === "ko" ? "경험 인박스 (학습된 정보 추천)" : "Experience inbox (learned-info suggestions)"}
                     </div>
                     <span style={{ fontSize: 10, background: "var(--accent)", color: "#fff", padding: "1px 6px", borderRadius: 999 }}>{ontologyInbox.length}</span>
                   </div>
@@ -4456,13 +4601,28 @@ function AgentDetailView({
             </div>
           )}
 
-          {/* 목록 우선 온톨로지 요약 + Memory와 분리된 Experience Chips 관리 표면. */}
+          {/* 경험 탭 — 프로필 카드와 경험 지도가 정면, 관리 도구는 그 아래. */}
           {activeTab === "ontology" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 1180 }}>
               <section data-testid="agent-local-experience" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <ExperienceProfileCard
+                  agent={agent}
+                  summary={ontologySummary}
+                  hub={hubOntology}
+                  locale={locale}
+                />
+                <AgentOntologyGraphView
+                  summary={ontologySummary}
+                  graphSnapshot={ontologyGraph}
+                  hub={hubOntology}
+                  agentName={agent ? agentDisplayName(agent, locale) : (locale === "ko" ? "에이전트" : "Agent")}
+                  locale={locale}
+                  graphLoading={ontologyGraphLoading}
+                  graphError={ontologyGraphError}
+                />
                 <div data-testid="ontology-human-guide" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 9 }}>
                   <div style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
-                    <strong style={{ display: "block", fontSize: 12.5 }}>{locale === "ko" ? "구매한 경험칩 쓰기" : "Use a purchased chip"}</strong>
+                    <strong style={{ display: "block", fontSize: 12.5 }}>{locale === "ko" ? "구매한 경험 칩 쓰기" : "Use a purchased chip"}</strong>
                     <span style={{ display: "block", marginTop: 4, color: "var(--ink-soft)", fontSize: 11, lineHeight: 1.5 }}>
                       {locale === "ko" ? "아래에서 이 에이전트에 장착된 칩과 새 대화 적용 상태를 확인합니다." : "See what is attached to this agent and what will apply to new conversations below."}
                     </span>
@@ -4471,7 +4631,7 @@ function AgentDetailView({
                     </Link>
                   </div>
                   <div style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
-                    <strong style={{ display: "block", fontSize: 12.5 }}>{locale === "ko" ? "내 경험칩 만들고 팔기" : "Create and sell my chip"}</strong>
+                    <strong style={{ display: "block", fontSize: 12.5 }}>{locale === "ko" ? "내 경험 칩 만들고 팔기" : "Create and sell my chip"}</strong>
                     <span style={{ display: "block", marginTop: 4, color: "var(--ink-soft)", fontSize: 11, lineHeight: 1.5 }}>
                       {locale === "ko" ? "실제 작업에서 배운 해결법을 고르고, 개인정보를 뺀 소개와 가격을 정합니다." : "Choose a method learned from real work, then set privacy-safe buyer copy and a price."}
                     </span>
@@ -4531,41 +4691,6 @@ function AgentDetailView({
                       ? "에이전트가 실제 작업에서 배운 해결법을 이 Mac에 비공개로 모아 둔 것입니다. 내가 고른 항목만 개인정보 검사를 거쳐 Hub에 등록할 수 있으며, 자동 업로드·구매·장착되지 않습니다."
                       : "These are solutions the agent learned from real work and kept privately on this Mac. Only items you select can be privacy-checked and listed on Hub; nothing is uploaded, purchased, or attached automatically."}
                   </p>
-                </details>
-                <details
-                  data-testid="ontology-advanced-relations"
-                  onToggle={(event) => {
-                    const open = event.currentTarget.open;
-                    setOntologyAdvancedOpen(open);
-                    if (!open) {
-                      setOntologyGraph(null);
-                      setOntologyGraphLoading(false);
-                      setOntologyGraphError(false);
-                    }
-                  }}
-                  style={{ border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper-2)", overflow: "hidden" }}
-                >
-                  <summary style={{ listStyle: "none", cursor: "pointer", minHeight: 52, padding: "9px 12px", display: "flex", alignItems: "center", gap: 9 }}>
-                    <span aria-hidden="true" style={{ width: 30, height: 30, borderRadius: 10, display: "grid", placeItems: "center", background: "var(--paper)", color: "var(--muted-deep)" }}><IconRoute size={14} /></span>
-                    <div>
-                      <h3 style={{ margin: 0, fontSize: 13 }}>{locale === "ko" ? "고급 관계 보기" : "Advanced relationships"}</h3>
-                      <p style={{ margin: "2px 0 0", color: "var(--muted-deep)", fontSize: 10.5 }}>{locale === "ko" ? "개발·문제 진단용이며 평소에는 열 필요가 없습니다." : "For development and troubleshooting; you normally do not need this."}</p>
-                    </div>
-                    <span aria-hidden="true" style={{ marginLeft: "auto", width: 7, height: 7, borderRight: "1.5px solid currentColor", borderBottom: "1.5px solid currentColor", transform: "rotate(45deg) translateY(-2px)", color: "var(--muted-deep)" }} />
-                  </summary>
-                  {ontologyAdvancedOpen && (
-                    <div style={{ padding: "12px", borderTop: "1px solid var(--paper-edge)" }}>
-                      <AgentOntologyGraphView
-                        summary={ontologySummary}
-                        graphSnapshot={ontologyGraph}
-                        hub={hubOntology}
-                        agentName={agent ? agentDisplayName(agent, locale) : (locale === "ko" ? "에이전트" : "Agent")}
-                        locale={locale}
-                        graphLoading={ontologyGraphLoading}
-                        graphError={ontologyGraphError}
-                      />
-                    </div>
-                  )}
                 </details>
               </section>
             </div>

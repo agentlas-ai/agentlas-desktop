@@ -12,6 +12,7 @@ export type {
   AgentGroupResolvedMember,
   AgentGroupUpdateInput,
   AgentlasIpc,
+  AgentUsageSummaryRow,
   BrowserStatus,
   BrowserSite,
   BrowserSiteInput,

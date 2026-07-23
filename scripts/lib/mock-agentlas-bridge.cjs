@@ -1338,7 +1338,60 @@ function setupMockAgentlasBridge(options) {
         };
       },
     },
+    // v74 사용 원장 + 북마크 — 로스터 섹션/배지 표면의 fixture.
+    agents: {
+      usageSummary: async () => {
+        record("agents.usageSummary");
+        if (!options?.experienceScenario) return [];
+        return [
+          {
+            agentId: "agent-2",
+            kind: "agent",
+            firstUsedAt: new Date(Date.now() - 20 * 86_400_000).toISOString(),
+            lastUsedAt: now,
+            useCount: 9,
+            bookmarkedAt: null,
+            installed: true,
+          },
+          {
+            agentId: "hub-borrowed-researcher",
+            kind: "agent",
+            firstUsedAt: new Date(Date.now() - 12 * 86_400_000).toISOString(),
+            lastUsedAt: now,
+            useCount: 6,
+            bookmarkedAt: null,
+            installed: false,
+          },
+        ];
+      },
+      setBookmark: async (agentId, bookmarked) => {
+        record("agents.setBookmark", { agentId, bookmarked });
+        return { agentId, bookmarkedAt: bookmarked ? now : null };
+      },
+    },
     experience: {
+      intakeDiagnostics: async (agentId) => {
+        record("experience.intakeDiagnostics", agentId);
+        if (!options?.experienceScenario) {
+          return {
+            agentId,
+            totals: { candidateCreated: 0, blocked: 0, skipped: 0 },
+            redactedAdmits: { receipts: 0, redactedSpans: 0 },
+            reasons: [],
+          };
+        }
+        return {
+          agentId,
+          totals: { candidateCreated: 4, blocked: 2, skipped: 1 },
+          redactedAdmits: { receipts: 2, redactedSpans: 5 },
+          reasons: [
+            { status: "candidate-created", code: "redacted-admit", count: 2 },
+            { status: "blocked", code: "secret-value", count: 1 },
+            { status: "blocked", code: "local-path-or-url", count: 1 },
+            { status: "skipped", code: "non-operational-memory-kind", count: 1 },
+          ],
+        };
+      },
       hubCatalog: async () => {
         record("experience.hubCatalog");
         if (options?.experienceCatalogUnavailable) {
@@ -1416,14 +1469,14 @@ function setupMockAgentlasBridge(options) {
         const edge = (id, from, to, kind, status = "active") => ({ id, from, to, kind, status });
         const nodes = [
           node(rootId, "agent", "active", "synthetic", { ref: agentId }),
-          node("pack:research-ops", "pack", "active", "relation-index", { ref: "research-ops", packId: "research-ops" }),
+          node("pack:research-ops", "pack", "active", "relation-index", { ref: "research-ops", packId: "research-ops", localLabel: "리서치 운영 경험" }),
           node("release:research-ops:r3", "release", "active", "relation-index", { ref: "research-ops-r3", packId: "research-ops" }),
           node("release:research-ops:base", "release", "active", "relation-index", { ref: "sha256:8ab31e", packId: "research-ops" }),
-          node("item:source-triangulation", "experience-item", "promoted", "relation-index", { ref: "source-triangulation", packId: "research-ops" }),
-          node("item:claim-ledger", "experience-item", "promoted", "relation-index", { ref: "claim-ledger", packId: "research-ops" }),
+          node("item:source-triangulation", "experience-item", "promoted", "relation-index", { ref: "source-triangulation", packId: "research-ops", localLabel: "출처 3곳 교차검증 후 결론 확정" }),
+          node("item:claim-ledger", "experience-item", "promoted", "relation-index", { ref: "claim-ledger", packId: "research-ops", localLabel: "주장-근거 원장으로 검증 관리" }),
           node("item:failure-recovery", "experience-item", "promoted", "relation-index", { ref: "failure-recovery", packId: "research-ops" }),
-          node("candidate:browser-proof", "experience-item", "candidate", "private-candidate", { ref: "browser-proof", packId: "research-ops" }),
-          node("task:research", "task", "active", "relation-index", { ref: "research", safeLabel: "research", packId: "research-ops" }),
+          node("candidate:browser-proof", "experience-item", "candidate", "private-candidate", { ref: "browser-proof", packId: "research-ops", localLabel: "게시 전 렌더링 화면 확인" }),
+          node("task:research", "task", "active", "relation-index", { ref: "agentlas.task.v1/research", safeLabel: "research", packId: "research-ops" }),
           node("task:browser-verification", "task", "active", "relation-index", { ref: "browser-verification", safeLabel: "browser verification", packId: "research-ops" }),
           node("task:source-audit", "task", "active", "relation-index", { ref: "source-audit", safeLabel: "source audit", packId: "research-ops" }),
           node("mcp:browser", "mcp", "active", "relation-index", { ref: "agentlas-browser", safeLabel: "Agentlas Browser", packId: "research-ops" }),

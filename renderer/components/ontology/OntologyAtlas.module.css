@@ -54,6 +54,62 @@
   cursor: grabbing;
 }
 
+/* Zoom-dependent DOM label overlay: cluster + node labels projected from 3D. */
+.labelLayer3d {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.nodeLabel3d {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: 168px;
+  overflow: hidden;
+  color: #dfe9e3;
+  font-size: 9.5px;
+  font-weight: 680;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 3px rgb(0 0 0 / 0.85);
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 160ms ease;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+.clusterLabel3d {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: 220px;
+  overflow: hidden;
+  padding: 4px 9px;
+  border: 1px solid rgb(213 238 226 / 0.28);
+  border-radius: 999px;
+  background: rgb(7 12 14 / 0.82);
+  color: #eef6f1;
+  font-size: 10.5px;
+  font-weight: 780;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 160ms ease;
+  cursor: pointer;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+.clusterLabel3d:hover {
+  border-color: rgb(213 238 226 / 0.6);
+  background: rgb(14 24 27 / 0.94);
+}
+
 .hoverLabel3d {
   position: absolute;
   top: 0;

@@ -4,6 +4,14 @@ import { useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
+import {
+  computeExperienceClusters,
+  computeExperienceMapLayout,
+  graphContentHash,
+  labelModeForDistance,
+  fnv1a,
+  type ExperienceMapLabelMode,
+} from "./experience-map-core.cjs";
 import styles from "./OntologyAtlas.module.css";
 
 export type OntologySceneNode = {
@@ -12,25 +20,28 @@ export type OntologySceneNode = {
   color: string;
   size: number;
   source: "agent" | "local" | "hub";
+  kind: string;
 };
 
 export type OntologySceneEdge = {
   id: string;
   from: string;
   to: string;
+  kind: string;
   status: "active" | "historical" | "pending";
+};
+
+export type OntologySceneCluster = {
+  id: string;
+  label: string;
+  count: number;
 };
 
 export type OntologyCameraCommand = {
   revision: number;
-  type: "reset" | "zoom-in" | "zoom-out" | "focus";
+  type: "reset" | "zoom-in" | "zoom-out" | "focus" | "focus-cluster";
   nodeId?: string;
-};
-
-type SceneLayout = {
-  positions: Map<string, THREE.Vector3>;
-  extent: number;
-  depthSpan: number;
+  clusterId?: string;
 };
 
 type SceneRuntime = {
@@ -44,6 +55,8 @@ type SceneProps = {
   nodes: OntologySceneNode[];
   edges: OntologySceneEdge[];
   rootId: string;
+  /** Localized cluster summary labels, computed once per graph snapshot upstream. */
+  clusterLabels: Map<string, string>;
   selectedId: string;
   focusedId: string | null;
   reducedMotion: boolean;
@@ -54,17 +67,11 @@ type SceneProps = {
   onFallback: () => void;
 };
 
-const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 const DARK_NODE = new THREE.Color("#26302d");
-
-function hashUnit(value: string): number {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0) / 0xffffffff;
-}
+const LAYOUT_CACHE_PREFIX = "agentlas.experience-map-layout:";
+/** Label caps keep the DOM overlay cheap even at the 400-node transport cap. */
+const MAX_ALL_LABELS = 140;
+const MAX_MAJOR_LABELS = 32;
 
 function nodeRadius(size: number): number {
   return 0.24 + Math.min(30, Math.max(5, size)) / 30 * 0.58;
@@ -75,7 +82,7 @@ function createSoftMatcap(): THREE.CanvasTexture {
   canvas.width = 128;
   canvas.height = 128;
   const context = canvas.getContext("2d");
-  if (!context) throw new Error("2D canvas unavailable for ontology sphere material");
+  if (!context) throw new Error("2D canvas unavailable for experience-map sphere material");
   const gradient = context.createRadialGradient(43, 34, 3, 66, 68, 82);
   gradient.addColorStop(0, "#ffffff");
   gradient.addColorStop(0.2, "#eef6f2");
@@ -89,93 +96,153 @@ function createSoftMatcap(): THREE.CanvasTexture {
   return texture;
 }
 
-function buildSphericalLayout(nodes: OntologySceneNode[], edges: OntologySceneEdge[], rootId: string): SceneLayout {
-  const ids = new Set(nodes.map((node) => node.id));
-  const adjacency = new Map<string, Set<string>>(nodes.map((node) => [node.id, new Set<string>()]));
-  for (const edge of edges) {
-    if (!ids.has(edge.from) || !ids.has(edge.to)) continue;
-    adjacency.get(edge.from)?.add(edge.to);
-    adjacency.get(edge.to)?.add(edge.from);
-  }
+type SceneLayout = {
+  positions: Map<string, THREE.Vector3>;
+  clusters: Array<{ id: string; label: string; count: number; centroid: THREE.Vector3; radius: number }>;
+  clusterByNode: Map<string, string>;
+  extent: number;
+  depthSpan: number;
+  cacheState: "hit" | "miss";
+  clusterCount: number;
+};
 
-  const depth = new Map<string, number>();
-  const queue: string[] = [];
-  if (ids.has(rootId)) {
-    depth.set(rootId, 0);
-    queue.push(rootId);
-  }
-  for (let cursor = 0; cursor < queue.length; cursor += 1) {
-    const current = queue[cursor];
-    const currentDepth = depth.get(current) ?? 0;
-    for (const neighbor of adjacency.get(current) ?? []) {
-      if (depth.has(neighbor)) continue;
-      depth.set(neighbor, currentDepth + 1);
-      queue.push(neighbor);
+type StoredLayout = {
+  hash: string;
+  positions: Record<string, [number, number, number]>;
+  clusterGeometry: Record<string, { centroid: [number, number, number]; radius: number }>;
+  extent: number;
+  depthSpan: number;
+};
+
+/**
+ * Deterministic clustered layout with a per-agent coordinate cache: the same
+ * graph snapshot always yields the same coordinates, and a revisit reuses the
+ * previously converged coordinates from localStorage (keyed by content hash)
+ * instead of recomputing the relaxation.
+ */
+function buildClusteredLayout(
+  nodes: OntologySceneNode[],
+  edges: OntologySceneEdge[],
+  rootId: string,
+  clusterLabels: Map<string, string>,
+): SceneLayout {
+  const coreNodes = nodes.map((node) => ({ id: node.id, kind: node.kind, label: node.label }));
+  const coreEdges = edges.map((edge) => ({ id: edge.id, from: edge.from, to: edge.to, kind: edge.kind, status: edge.status }));
+  const clustering = computeExperienceClusters(coreNodes, coreEdges, rootId);
+  const hash = graphContentHash(coreNodes, coreEdges);
+  const cacheKey = `${LAYOUT_CACHE_PREFIX}${fnv1a(rootId).toString(16)}`;
+
+  let cacheState: "hit" | "miss" = "miss";
+  let positionsById: Map<string, [number, number, number]> | null = null;
+  let clusterGeometry: Map<string, { centroid: [number, number, number]; radius: number }> | null = null;
+  let extent = 1;
+  let depthSpan = 0;
+  try {
+    const raw = window.localStorage.getItem(cacheKey);
+    if (raw) {
+      const stored = JSON.parse(raw) as StoredLayout;
+      if (stored.hash === hash && stored.positions && nodes.every((node) => Array.isArray(stored.positions[node.id]))) {
+        positionsById = new Map(Object.entries(stored.positions) as Array<[string, [number, number, number]]>);
+        clusterGeometry = new Map(Object.entries(stored.clusterGeometry ?? {}));
+        extent = stored.extent;
+        depthSpan = stored.depthSpan;
+        cacheState = "hit";
+      }
     }
+  } catch {
+    positionsById = null;
   }
 
-  const deepestConnected = Math.max(1, ...depth.values());
-  const orphanDepth = deepestConnected + 1;
-  const shells = new Map<number, OntologySceneNode[]>();
-  for (const node of nodes) {
-    if (node.id === rootId) continue;
-    const shellDepth = depth.get(node.id) ?? orphanDepth;
-    const shell = shells.get(shellDepth) ?? [];
-    shell.push(node);
-    shells.set(shellDepth, shell);
+  if (!positionsById || !clusterGeometry) {
+    const layout = computeExperienceMapLayout(coreNodes, coreEdges, clustering, rootId);
+    positionsById = layout.positions as Map<string, [number, number, number]>;
+    clusterGeometry = layout.clusterGeometry as Map<string, { centroid: [number, number, number]; radius: number }>;
+    extent = layout.extent;
+    depthSpan = layout.depthSpan;
+    cacheState = "miss";
+    try {
+      const stored: StoredLayout = {
+        hash,
+        positions: Object.fromEntries(positionsById),
+        clusterGeometry: Object.fromEntries(clusterGeometry),
+        extent,
+        depthSpan,
+      };
+      window.localStorage.setItem(cacheKey, JSON.stringify(stored));
+    } catch {
+      // Cache persistence is best-effort; the layout stays deterministic anyway.
+    }
   }
 
   const positions = new Map<string, THREE.Vector3>();
-  if (ids.has(rootId)) positions.set(rootId, new THREE.Vector3());
-  let extent = 1;
-  for (const [shellDepth, unsorted] of [...shells.entries()].sort(([left], [right]) => left - right)) {
-    const shell = [...unsorted].sort((left, right) => left.id.localeCompare(right.id));
-    const radius = 2.7 + shellDepth * 2.25 + Math.min(3.7, Math.sqrt(shell.length) * 0.19);
-    shell.forEach((node, index) => {
-      const vertical = 1 - 2 * ((index + 0.5) / shell.length);
-      const radial = Math.sqrt(Math.max(0, 1 - vertical * vertical));
-      const theta = GOLDEN_ANGLE * index + hashUnit(node.id) * 1.4;
-      let x = Math.cos(theta) * radial * radius;
-      const y = vertical * radius * 0.8;
-      const z = Math.sin(theta) * radial * radius;
-      if (node.source === "hub") x = Math.abs(x) + shellDepth * 0.45;
-      if (node.source === "local") x = -Math.abs(x) - shellDepth * 0.3;
-      const point = new THREE.Vector3(x, y, z);
-      positions.set(node.id, point);
-      extent = Math.max(extent, point.length() + nodeRadius(node.size));
-    });
+  for (const node of nodes) {
+    const point = positionsById.get(node.id) ?? [0, 0, 0];
+    positions.set(node.id, new THREE.Vector3(point[0], point[1], point[2]));
   }
-  if (nodes.length === 1 && !positions.has(nodes[0].id)) positions.set(nodes[0].id, new THREE.Vector3());
-  const zCoordinates = [...positions.values()].map((position) => position.z);
-  const depthSpan = zCoordinates.length > 1 ? Math.max(...zCoordinates) - Math.min(...zCoordinates) : 0;
-  return { positions, extent, depthSpan };
+  for (const node of nodes) {
+    extent = Math.max(extent, (positions.get(node.id)?.length() ?? 0) + nodeRadius(node.size));
+  }
+
+  const clusters = clustering.clusters
+    .filter((cluster) => !cluster.isRoot)
+    .map((cluster) => {
+      const geometry = clusterGeometry!.get(cluster.id);
+      const centroid = geometry
+        ? new THREE.Vector3(geometry.centroid[0], geometry.centroid[1], geometry.centroid[2])
+        : new THREE.Vector3();
+      return {
+        id: cluster.id,
+        label: clusterLabels.get(cluster.id) ?? "",
+        count: cluster.count,
+        centroid,
+        radius: geometry?.radius ?? 1.4,
+      };
+    });
+
+  return {
+    positions,
+    clusters,
+    clusterByNode: clustering.assignment as Map<string, string>,
+    extent,
+    depthSpan,
+    cacheState,
+    clusterCount: clusters.length,
+  };
 }
 
-function createEdgeGeometry(edges: OntologySceneEdge[], positions: Map<string, THREE.Vector3>, active: boolean) {
+function appendEdgeCurve(coordinates: number[], start: THREE.Vector3, end: THREE.Vector3, edgeId: string) {
+  const middle = start.clone().add(end).multiplyScalar(0.5);
+  const direction = end.clone().sub(start);
+  const perpendicular = direction.clone().cross(new THREE.Vector3(0, 1, 0));
+  if (perpendicular.lengthSq() < 0.001) perpendicular.cross(new THREE.Vector3(1, 0, 0));
+  const bend = (0.12 + Math.min(0.48, direction.length() * 0.028)) * ((fnv1a(edgeId) % 2 === 0) ? 1 : -1);
+  middle.add(perpendicular.normalize().multiplyScalar(bend));
+  let previous = start;
+  for (let step = 1; step <= 6; step += 1) {
+    const t = step / 6;
+    const inverse = 1 - t;
+    const current = new THREE.Vector3(
+      inverse * inverse * start.x + 2 * inverse * t * middle.x + t * t * end.x,
+      inverse * inverse * start.y + 2 * inverse * t * middle.y + t * t * end.y,
+      inverse * inverse * start.z + 2 * inverse * t * middle.z + t * t * end.z,
+    );
+    coordinates.push(previous.x, previous.y, previous.z, current.x, current.y, current.z);
+    previous = current;
+  }
+}
+
+function createEdgeGeometry(
+  edges: OntologySceneEdge[],
+  positions: Map<string, THREE.Vector3>,
+  include: (edge: OntologySceneEdge) => boolean,
+) {
   const coordinates: number[] = [];
   for (const edge of edges) {
-    if ((edge.status === "active") !== active) continue;
+    if (!include(edge)) continue;
     const start = positions.get(edge.from);
     const end = positions.get(edge.to);
     if (!start || !end) continue;
-    const middle = start.clone().add(end).multiplyScalar(0.5);
-    const direction = end.clone().sub(start);
-    const perpendicular = direction.clone().cross(new THREE.Vector3(0, 1, 0));
-    if (perpendicular.lengthSq() < 0.001) perpendicular.cross(new THREE.Vector3(1, 0, 0));
-    const bend = (0.12 + Math.min(0.48, direction.length() * 0.028)) * (hashUnit(edge.id) > 0.5 ? 1 : -1);
-    middle.add(perpendicular.normalize().multiplyScalar(bend));
-    let previous = start;
-    for (let step = 1; step <= 6; step += 1) {
-      const t = step / 6;
-      const inverse = 1 - t;
-      const current = new THREE.Vector3(
-        inverse * inverse * start.x + 2 * inverse * t * middle.x + t * t * end.x,
-        inverse * inverse * start.y + 2 * inverse * t * middle.y + t * t * end.y,
-        inverse * inverse * start.z + 2 * inverse * t * middle.z + t * t * end.z,
-      );
-      coordinates.push(previous.x, previous.y, previous.z, current.x, current.y, current.z);
-      previous = current;
-    }
+    appendEdgeCurve(coordinates, start, end, edge.id);
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(coordinates, 3));
@@ -191,13 +258,18 @@ function parseInstance(intersections: THREE.Intersection[]): number | null {
 export function OntologyAtlasScene3D(props: SceneProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
+  const labelLayerRef = useRef<HTMLDivElement | null>(null);
   const runtimeRef = useRef<SceneRuntime | null>(null);
-  const layout = useMemo(() => buildSphericalLayout(props.nodes, props.edges, props.rootId), [props.edges, props.nodes, props.rootId]);
+  const layout = useMemo(
+    () => buildClusteredLayout(props.nodes, props.edges, props.rootId, props.clusterLabels),
+    [props.clusterLabels, props.edges, props.nodes, props.rootId],
+  );
 
   useEffect(() => {
     const root = rootRef.current;
     const tooltip = tooltipRef.current;
-    if (!root || !tooltip || props.nodes.length === 0) {
+    const labelLayer = labelLayerRef.current;
+    if (!root || !tooltip || !labelLayer || props.nodes.length === 0) {
       props.onFallback();
       return;
     }
@@ -209,9 +281,27 @@ export function OntologyAtlasScene3D(props: SceneProps) {
     let reducedMotion = props.reducedMotion;
     let cameraGoal: { position: THREE.Vector3; target: THREE.Vector3 } | null = null;
     let pointerDown: { x: number; y: number } | null = null;
+    let currentLabelMode: ExperienceMapLabelMode | "" = "";
+    let currentFocusedId: string | null = props.focusedId;
     const nodeIndex = new Map(props.nodes.map((node, index) => [node.id, index]));
     const initialRadius = Math.max(3.6, layout.extent);
     const largestNodeRadius = props.nodes.reduce((largest, node) => Math.max(largest, nodeRadius(node.size)), 0);
+
+    const degreeById = new Map<string, number>();
+    for (const edge of props.edges) {
+      degreeById.set(edge.from, (degreeById.get(edge.from) ?? 0) + 1);
+      degreeById.set(edge.to, (degreeById.get(edge.to) ?? 0) + 1);
+    }
+    const byLabelPriority = [...props.nodes]
+      .sort((left, right) =>
+        (degreeById.get(right.id) ?? 0) - (degreeById.get(left.id) ?? 0) || (left.id < right.id ? -1 : 1));
+    const allLabelIds = new Set(byLabelPriority.slice(0, MAX_ALL_LABELS).map((node) => node.id));
+    const majorLabelIds = new Set(
+      byLabelPriority
+        .filter((node) => node.id === props.rootId || (degreeById.get(node.id) ?? 0) >= 2)
+        .slice(0, MAX_MAJOR_LABELS)
+        .map((node) => node.id),
+    );
 
     let renderer: THREE.WebGLRenderer;
     try {
@@ -247,19 +337,50 @@ export function OntologyAtlasScene3D(props: SceneProps) {
     fillLight.position.set(-10, -5, -8);
     scene.add(fillLight);
 
-    const activeEdgeGeometry = createEdgeGeometry(props.edges, layout.positions, true);
-    const secondaryEdgeGeometry = createEdgeGeometry(props.edges, layout.positions, false);
-    const activeEdgeMaterial = new THREE.LineBasicMaterial({ color: "#9bc8b3", transparent: true, opacity: 0.48, depthWrite: false });
-    const secondaryEdgeMaterial = new THREE.LineBasicMaterial({ color: "#52615b", transparent: true, opacity: 0.2, depthWrite: false });
-    scene.add(new THREE.LineSegments(secondaryEdgeGeometry, secondaryEdgeMaterial));
-    scene.add(new THREE.LineSegments(activeEdgeGeometry, activeEdgeMaterial));
+    // Hairball avoidance: edges rest at a low opacity; only the hovered or
+    // selected node's 1-hop edges are drawn bright, and cluster-crossing
+    // edges always stay dimmer than intra-cluster ones.
+    const intraCluster = (edge: OntologySceneEdge) =>
+      layout.clusterByNode.get(edge.from) === layout.clusterByNode.get(edge.to);
+    const intraEdgeGeometry = createEdgeGeometry(props.edges, layout.positions, (edge) => intraCluster(edge));
+    const interEdgeGeometry = createEdgeGeometry(props.edges, layout.positions, (edge) => !intraCluster(edge));
+    const intraEdgeMaterial = new THREE.LineBasicMaterial({ color: "#9bc8b3", transparent: true, opacity: 0.14, depthWrite: false });
+    const interEdgeMaterial = new THREE.LineBasicMaterial({ color: "#52615b", transparent: true, opacity: 0.07, depthWrite: false });
+    const highlightEdgeMaterial = new THREE.LineBasicMaterial({ color: "#cdeedd", transparent: true, opacity: 0.92, depthWrite: false });
+    const highlightEdgeGeometry = new THREE.BufferGeometry();
+    scene.add(new THREE.LineSegments(interEdgeGeometry, interEdgeMaterial));
+    scene.add(new THREE.LineSegments(intraEdgeGeometry, intraEdgeMaterial));
+    const highlightEdges = new THREE.LineSegments(highlightEdgeGeometry, highlightEdgeMaterial);
+    highlightEdges.frustumCulled = false;
+    scene.add(highlightEdges);
+
+    // Translucent cluster hulls give each cluster a readable region tint.
+    const hullGeometry = new THREE.SphereGeometry(1, 18, 12);
+    const hullMaterial = new THREE.MeshBasicMaterial({
+      color: "#3f5a50",
+      transparent: true,
+      opacity: 0.07,
+      depthWrite: false,
+      side: THREE.BackSide,
+    });
+    const hullMesh = new THREE.InstancedMesh(hullGeometry, hullMaterial, Math.max(1, layout.clusters.length));
+    hullMesh.count = layout.clusters.length;
+    hullMesh.frustumCulled = false;
+    {
+      const dummyHull = new THREE.Object3D();
+      layout.clusters.forEach((cluster, index) => {
+        dummyHull.position.copy(cluster.centroid);
+        dummyHull.scale.setScalar(cluster.radius);
+        dummyHull.updateMatrix();
+        hullMesh.setMatrixAt(index, dummyHull.matrix);
+      });
+      hullMesh.instanceMatrix.needsUpdate = true;
+    }
+    scene.add(hullMesh);
 
     const nodeGeometry = new THREE.SphereGeometry(1, 24, 18);
     const nodeMatcap = createSoftMatcap();
-    const nodeMaterial = new THREE.MeshMatcapMaterial({
-      color: "#ffffff",
-      matcap: nodeMatcap,
-    });
+    const nodeMaterial = new THREE.MeshMatcapMaterial({ color: "#ffffff", matcap: nodeMatcap });
     const nodeMesh = new THREE.InstancedMesh(nodeGeometry, nodeMaterial, props.nodes.length);
     nodeMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
     nodeMesh.frustumCulled = false;
@@ -280,7 +401,7 @@ export function OntologyAtlasScene3D(props: SceneProps) {
     controls.enablePan = false;
     controls.rotateSpeed = 0.48;
     controls.zoomSpeed = 0.62;
-    controls.minDistance = 4.2;
+    controls.minDistance = 3.2;
     controls.maxDistance = Math.max(34, layout.extent * 4.2);
     controls.target.set(0, 0, 0);
     controls.update();
@@ -288,6 +409,91 @@ export function OntologyAtlasScene3D(props: SceneProps) {
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     const dummy = new THREE.Object3D();
+
+    // ── DOM label overlay (Obsidian-style zoom-dependent density) ──────────
+    const nodeLabelElements = new Map<string, HTMLDivElement>();
+    for (const node of props.nodes) {
+      if (!allLabelIds.has(node.id)) continue;
+      const element = document.createElement("div");
+      element.className = styles.nodeLabel3d;
+      element.textContent = node.label;
+      element.dataset.nodeId = node.id;
+      element.style.opacity = "0";
+      labelLayer.appendChild(element);
+      nodeLabelElements.set(node.id, element);
+    }
+    const clusterLabelElements = new Map<string, HTMLButtonElement>();
+    for (const cluster of layout.clusters) {
+      if (!cluster.label) continue;
+      const element = document.createElement("button");
+      element.type = "button";
+      element.className = styles.clusterLabel3d;
+      element.dataset.clusterLabel = cluster.id;
+      element.textContent = cluster.label;
+      element.addEventListener("click", () => focusCluster(cluster.id));
+      labelLayer.appendChild(element);
+      clusterLabelElements.set(cluster.id, element);
+    }
+
+    const projected = new THREE.Vector3();
+    const projectToScreen = (position: THREE.Vector3, width: number, height: number): { x: number; y: number; visible: boolean } => {
+      projected.copy(position).project(camera);
+      return {
+        x: (projected.x * 0.5 + 0.5) * width,
+        y: (-projected.y * 0.5 + 0.5) * height,
+        visible: projected.z < 1 && projected.x > -1.15 && projected.x < 1.15 && projected.y > -1.15 && projected.y < 1.15,
+      };
+    };
+
+    const updateLabels = () => {
+      const width = Math.max(1, root.clientWidth);
+      const height = Math.max(1, root.clientHeight);
+      const distance = camera.position.distanceTo(controls.target);
+      const mode = labelModeForDistance(distance, layout.extent) as ExperienceMapLabelMode;
+      if (mode !== currentLabelMode) {
+        currentLabelMode = mode;
+        root.dataset.labelMode = mode;
+      }
+      for (const [nodeId, element] of nodeLabelElements) {
+        const show = mode === "all" ? true : mode === "major" ? majorLabelIds.has(nodeId) : false;
+        const position = layout.positions.get(nodeId);
+        if (!show || !position) {
+          element.style.opacity = "0";
+          continue;
+        }
+        const screen = projectToScreen(position, width, height);
+        if (!screen.visible) {
+          element.style.opacity = "0";
+          continue;
+        }
+        const dimmed = currentFocusedId && nodeId !== currentFocusedId && !focusNeighborIds.has(nodeId);
+        element.style.opacity = dimmed ? "0.22" : "1";
+        element.style.transform = `translate3d(${screen.x.toFixed(1)}px, ${(screen.y + 9).toFixed(1)}px, 0) translateX(-50%)`;
+      }
+      const showClusters = mode !== "all";
+      for (const cluster of layout.clusters) {
+        const element = clusterLabelElements.get(cluster.id);
+        if (!element) continue;
+        if (!showClusters) {
+          element.style.opacity = "0";
+          element.style.pointerEvents = "none";
+          continue;
+        }
+        const top = cluster.centroid.clone();
+        top.y += cluster.radius * 0.92;
+        const screen = projectToScreen(top, width, height);
+        if (!screen.visible) {
+          element.style.opacity = "0";
+          element.style.pointerEvents = "none";
+          continue;
+        }
+        element.style.opacity = "1";
+        element.style.pointerEvents = "auto";
+        element.style.transform = `translate3d(${screen.x.toFixed(1)}px, ${screen.y.toFixed(1)}px, 0) translate(-50%, -100%)`;
+      }
+    };
+
+    let focusNeighborIds = new Set<string>();
 
     const reportCamera = () => {
       root.dataset.cameraPosition = camera.position.toArray().map((value) => value.toFixed(4)).join(",");
@@ -317,6 +523,7 @@ export function OntologyAtlasScene3D(props: SceneProps) {
       }
       if (controls.update()) keepRendering = true;
       renderer.render(scene, camera);
+      updateLabels();
       root.dataset.drawCalls = String(renderer.info.render.calls);
       reportCamera();
       if (keepRendering) frameId = window.requestAnimationFrame(renderFrame);
@@ -428,7 +635,24 @@ export function OntologyAtlasScene3D(props: SceneProps) {
     resizeObserver.observe(root);
     resize();
 
+    const rebuildHighlightEdges = (focusedId: string | null) => {
+      const coordinates: number[] = [];
+      if (focusedId) {
+        for (const edge of props.edges) {
+          if (edge.from !== focusedId && edge.to !== focusedId) continue;
+          const start = layout.positions.get(edge.from);
+          const end = layout.positions.get(edge.to);
+          if (!start || !end) continue;
+          appendEdgeCurve(coordinates, start, end, edge.id);
+        }
+      }
+      highlightEdgeGeometry.setAttribute("position", new THREE.Float32BufferAttribute(coordinates, 3));
+      highlightEdgeGeometry.computeBoundingSphere();
+      highlightEdges.visible = coordinates.length > 0;
+    };
+
     const updateAppearance = (selectedId: string, focusedId: string | null) => {
+      currentFocusedId = focusedId;
       const neighbors = new Set<string>();
       if (focusedId) {
         neighbors.add(focusedId);
@@ -437,6 +661,7 @@ export function OntologyAtlasScene3D(props: SceneProps) {
           if (edge.to === focusedId) neighbors.add(edge.from);
         }
       }
+      focusNeighborIds = neighbors;
       props.nodes.forEach((node, index) => {
         const position = layout.positions.get(node.id) ?? new THREE.Vector3();
         const focusScale = node.id === focusedId ? 1.18 : node.id === selectedId ? 1.08 : 1;
@@ -453,6 +678,10 @@ export function OntologyAtlasScene3D(props: SceneProps) {
       if (!nodeMesh.boundingSphere) {
         nodeMesh.boundingSphere = new THREE.Sphere(new THREE.Vector3(), layout.extent + largestNodeRadius * 0.2);
       }
+      // Focused view: rest edges recede further so the 1-hop highlight reads.
+      intraEdgeMaterial.opacity = focusedId ? 0.06 : 0.14;
+      interEdgeMaterial.opacity = focusedId ? 0.03 : 0.07;
+      rebuildHighlightEdges(focusedId);
       const selectedNode = props.nodes[nodeIndex.get(selectedId) ?? -1];
       const selectedPosition = selectedNode ? layout.positions.get(selectedNode.id) : null;
       selectedHalo.visible = Boolean(selectedNode && selectedPosition);
@@ -479,6 +708,18 @@ export function OntologyAtlasScene3D(props: SceneProps) {
       scheduleRender();
     };
 
+    const focusCluster = (clusterId: string) => {
+      const cluster = layout.clusters.find((entry) => entry.id === clusterId);
+      if (!cluster) return;
+      const offset = camera.position.clone().sub(controls.target);
+      const distance = Math.max(4.6, cluster.radius * 2.7);
+      setCamera(
+        cluster.centroid.clone().add(offset.normalize().multiplyScalar(distance)),
+        cluster.centroid.clone(),
+      );
+      root.dataset.focusedCluster = clusterId;
+    };
+
     const runCommand = (command: OntologyCameraCommand) => {
       const offset = camera.position.clone().sub(controls.target);
       if (command.type === "reset") {
@@ -486,6 +727,7 @@ export function OntologyAtlasScene3D(props: SceneProps) {
           new THREE.Vector3(initialRadius * 1.12, initialRadius * 0.58, initialRadius * 2.38),
           new THREE.Vector3(),
         );
+        delete root.dataset.focusedCluster;
       } else if (command.type === "zoom-in") {
         setCamera(controls.target.clone().add(offset.multiplyScalar(0.76)), controls.target.clone());
       } else if (command.type === "zoom-out") {
@@ -497,6 +739,8 @@ export function OntologyAtlasScene3D(props: SceneProps) {
           target.clone().add(offset.normalize().multiplyScalar(Math.max(5.2, Math.min(11, layout.extent * 0.72)))),
           target.clone(),
         );
+      } else if (command.type === "focus-cluster" && command.clusterId) {
+        focusCluster(command.clusterId);
       }
     };
 
@@ -516,16 +760,24 @@ export function OntologyAtlasScene3D(props: SceneProps) {
       renderer.domElement.removeEventListener("pointerleave", hideHover);
       renderer.domElement.removeEventListener("dblclick", handleDoubleClick);
       renderer.domElement.removeEventListener("webglcontextlost", handleContextLost);
-      activeEdgeGeometry.dispose();
-      secondaryEdgeGeometry.dispose();
-      activeEdgeMaterial.dispose();
-      secondaryEdgeMaterial.dispose();
+      intraEdgeGeometry.dispose();
+      interEdgeGeometry.dispose();
+      highlightEdgeGeometry.dispose();
+      intraEdgeMaterial.dispose();
+      interEdgeMaterial.dispose();
+      highlightEdgeMaterial.dispose();
+      hullGeometry.dispose();
+      hullMaterial.dispose();
       nodeGeometry.dispose();
       nodeMatcap.dispose();
       nodeMaterial.dispose();
       haloGeometry.dispose();
       selectedHaloMaterial.dispose();
       hoverHaloMaterial.dispose();
+      for (const element of nodeLabelElements.values()) element.remove();
+      for (const element of clusterLabelElements.values()) element.remove();
+      nodeLabelElements.clear();
+      clusterLabelElements.clear();
       if (hoveredIndex !== null) props.onHover(null);
       renderer.forceContextLoss();
       renderer.dispose();
@@ -582,9 +834,13 @@ export function OntologyAtlasScene3D(props: SceneProps) {
       data-spherical-node-instances={props.nodes.length}
       data-non-spherical-node-instances="0"
       data-edge-count={props.edges.length}
+      data-cluster-count={layout.clusterCount}
+      data-label-mode="cluster"
+      data-layout-cache={layout.cacheState}
       data-depth-span={layout.depthSpan.toFixed(4)}
       data-scene-radius={layout.extent.toFixed(4)}
     >
+      <div ref={labelLayerRef} className={styles.labelLayer3d} data-testid="experience-map-labels" />
       <div ref={tooltipRef} className={styles.hoverLabel3d} data-testid="ontology-node-hover-label" hidden aria-hidden="true" />
     </div>
   );

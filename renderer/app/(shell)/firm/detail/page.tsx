@@ -12,6 +12,7 @@ import { classifyAgent } from "@/lib/ownership";
 import type { Chat, InstalledAgent, InstalledFirm, ResolvedOrg, ResolvedNode, WorkspaceNode } from "@/lib/types";
 import type { AgentEvolutionProposalUi, AgentLearningSummary, AgentMemoryEntryUi, ExperienceOntologyGraphSnapshot, ExperienceOntologySummary } from "@shared/types";
 import { AgentAvatar } from "@/components/AgentAvatar";
+import { ExperienceProfileCard } from "@/components/ExperienceProfileCard";
 import {
   AgentLearningMetricGrid,
   AgentNameEditor,
@@ -1386,11 +1387,12 @@ function AgentDetailView({
   }, [activeTab, agent?.id]);
 
   useEffect(() => {
+    if (activeTab !== "ontology") return;
     const api = ipc();
     if (!api || !agent?.id) {
       setOntologySummary(null);
       setOntologySummaryLoading(false);
-      setOntologySummaryError(locale === "ko" ? "설치된 에이전트만 온톨로지를 조회할 수 있습니다." : "Only installed agents have an ontology summary.");
+      setOntologySummaryError(locale === "ko" ? "설치된 에이전트만 경험 요약을 조회할 수 있습니다." : "Only installed agents have an experience summary.");
       return;
     }
     let cancelled = false;
@@ -1406,7 +1408,7 @@ function AgentDetailView({
       })
       .finally(() => { if (!cancelled) setOntologySummaryLoading(false); });
     return () => { cancelled = true; };
-  }, [agent?.id, locale]);
+  }, [activeTab, agent?.id, locale]);
 
   // 메모리 진화 타임라인 관리 상태
   const [timelineEvents, setTimelineEvents] = useState<AgentLearningEvent[]>([
@@ -1579,7 +1581,7 @@ function AgentDetailView({
         id: `timeline-${Date.now()}`,
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         title: target.source === "cloud" ? (locale === "ko" ? "허브 공유 지식 풀(Pull)" : "Pulled shared hub knowledge") : (locale === "ko" ? "로컬 자동 학습 병합" : "Merged local auto-learning"),
-        desc: locale === "ko" ? `'${target.title}' 온톨로지 추천 피드백을 에이전트 지식베이스에 승인 및 결합 완료했습니다.` : `Approved and merged the ontology recommendation '${target.title}' into the agent's knowledge base.`,
+        desc: locale === "ko" ? `'${target.title}' 경험 추천 피드백을 에이전트 지식베이스에 승인 및 결합 완료했습니다.` : `Approved and merged the experience recommendation '${target.title}' into the agent's knowledge base.`,
         type: "resolve"
       },
       ...prev
@@ -1697,7 +1699,7 @@ function AgentDetailView({
               memory: locale === "ko" ? "큐레이팅된 메모리" : "Curated Memory",
               playbook: locale === "ko" ? "플레이북 & 워크플로우" : "Playbook & Workflow",
               activity: locale === "ko" ? "활동과 개선" : "Activity & Improvements",
-              ontology: locale === "ko" ? "온톨로지 칩" : "Ontology Chips",
+              ontology: locale === "ko" ? "경험" : "Experience",
             };
             return (
               <button
@@ -1791,7 +1793,7 @@ function AgentDetailView({
                   <div style={{ background: "var(--fill-1)", padding: "10px 16px", display: "flex", alignItems: "center", justifyItems: "space-between", borderBottom: "1px solid var(--accent-soft)" }}>
                     <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 700, color: "var(--accent)" }}>
                       <IconBrain size={14} />
-                      {locale === "ko" ? "온톨로지 인박스 (학습된 정보 추천)" : "Ontology Inbox (learned suggestions)"}
+                      {locale === "ko" ? "경험 인박스 (학습된 정보 추천)" : "Experience inbox (learned suggestions)"}
                     </div>
                     <span style={{ fontSize: 10, background: "var(--accent)", color: "#fff", padding: "1px 6px", borderRadius: 999 }}>{ontologyInbox.length}</span>
                   </div>
@@ -2473,6 +2475,12 @@ function AgentDetailView({
 
           {activeTab === "ontology" && (
             <div style={{ maxWidth: 1180, display: "flex", flexDirection: "column", gap: 14 }}>
+              <ExperienceProfileCard
+                agent={agent}
+                summary={ontologySummary}
+                hub={null}
+                locale={locale}
+              />
               <AgentOntologyGraphView
                 summary={ontologySummary}
                 graphSnapshot={ontologyGraph}

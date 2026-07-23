@@ -732,6 +732,8 @@ export interface InstalledAgent {
   kind?: "agent" | "team";
   /** UI/routing contract: visible user agent, background control agent, or private web-only agent. */
   visibility?: AgentVisibility;
+  /** v74 소유자 북마크 시각(없으면 북마크 안 됨). 로스터 섹션/별 토글이 읽는다. */
+  bookmarkedAt?: string | null;
 }
 
 /**

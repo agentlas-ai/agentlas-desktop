@@ -325,6 +325,13 @@ export interface ExperienceOntologyGraphNode {
   ref?: string;
   /** Fixed/allowlisted product vocabulary only; never source-authored text. */
   safeLabel?: string;
+  /**
+   * Owner-only readable title for local-source nodes (candidate summary title,
+   * pack name, taste statement). This exists solely for the local Experience
+   * Map render surface: it must never enter Hub projections, portable
+   * Experience bundles, or any export payload. Hub-source nodes never set it.
+   */
+  localLabel?: string;
   status: ExperienceOntologyGraphNodeStatus;
   source: ExperienceOntologyGraphNodeSource;
 }

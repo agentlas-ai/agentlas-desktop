@@ -934,7 +934,7 @@ function ExperienceChipHubIntro({
         <ol style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 8 }}>
           {(
             ko
-              ? [["1", "Hub에서 가격 선택", "7일·30일·90일·영구 사용 중 선택"], ["2", "내 에이전트에서 장착", "내 에이전트 › 온톨로지 칩 › 새 대화부터 적용"], ["3", "새 대화 시작", "지금 대화는 그대로 두고 다음 대화부터 사용"]]
+              ? [["1", "Hub에서 가격 선택", "7일·30일·90일·영구 사용 중 선택"], ["2", "내 에이전트에서 장착", "내 에이전트 › 경험 › 새 대화부터 적용"], ["3", "새 대화 시작", "지금 대화는 그대로 두고 다음 대화부터 사용"]]
               : [["1", "Choose a price on Hub", "Pick 7, 30, 90 days, or keep it"], ["2", "Attach in My Agents", "My Agents › Ontology Chips › Apply to new conversations"], ["3", "Start a new conversation", "The current chat stays unchanged"]]
           ).map(([number, title, body]) => (
             <li key={number} style={{ padding: 12, border: "1px solid var(--rd-hair)", borderRadius: 10, background: "var(--rd-surface-2)", display: "grid", gridTemplateColumns: "24px 1fr", columnGap: 8, alignItems: "start" }}>

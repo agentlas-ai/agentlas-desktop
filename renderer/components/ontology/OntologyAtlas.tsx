@@ -11,6 +11,7 @@ import type {
   ExperienceOntologySummary,
 } from "@shared/types";
 
+import { computeExperienceClusters } from "./experience-map-core.cjs";
 import styles from "./OntologyAtlas.module.css";
 import type { OntologyCameraCommand, OntologySceneEdge, OntologySceneNode } from "./OntologyAtlasScene3D";
 
@@ -68,6 +69,77 @@ function shortRef(value: string | null | undefined): string {
   if (!clean) return "";
   if (clean.length <= 18) return clean;
   return `${clean.slice(0, 8)}…${clean.slice(-6)}`;
+}
+
+const TASK_PREFIX = "agentlas.task.v1/";
+
+/** Localized names for the fixed task taxonomy (electron/experience/taxonomy.ts). */
+const TASK_LABELS: Record<string, [string, string]> = {
+  research: ["리서치", "Research"],
+  writing: ["글쓰기", "Writing"],
+  coding: ["코딩", "Coding"],
+  debugging: ["디버깅", "Debugging"],
+  design: ["디자인", "Design"],
+  "image-generation": ["이미지 생성", "Image generation"],
+  "video-production": ["영상 제작", "Video production"],
+  presentation: ["발표자료", "Presentation"],
+  document: ["문서 작업", "Documents"],
+  "data-analysis": ["데이터 분석", "Data analysis"],
+  "browser-automation": ["브라우저 자동화", "Browser automation"],
+  "social-publishing": ["소셜 게시", "Social publishing"],
+  marketing: ["마케팅", "Marketing"],
+  sales: ["영업", "Sales"],
+  "customer-support": ["고객 지원", "Customer support"],
+  ecommerce: ["이커머스", "E-commerce"],
+  "legal-review": ["법률 검토", "Legal review"],
+  finance: ["금융", "Finance"],
+  "project-planning": ["프로젝트 기획", "Project planning"],
+  "agent-building": ["에이전트 빌드", "Agent building"],
+  "workflow-automation": ["워크플로 자동화", "Workflow automation"],
+  "file-operations": ["파일 작업", "File operations"],
+  translation: ["번역", "Translation"],
+};
+
+function taskDisplayLabel(ref: string | null | undefined, locale: Locale): string | null {
+  const clean = ref?.trim() ?? "";
+  if (!clean) return null;
+  const slug = clean.startsWith(TASK_PREFIX) ? clean.slice(TASK_PREFIX.length) : clean;
+  const pair = TASK_LABELS[slug];
+  return pair ? pair[locale === "ko" ? 0 : 1] : null;
+}
+
+function atlasKindLabel(kind: AtlasNodeKind, locale: Locale): string {
+  const ko = locale === "ko";
+  const labels: Record<AtlasNodeKind, [string, string]> = {
+    agent: ["에이전트", "Agent"],
+    pack: ["경험 칩", "Experience chips"],
+    release: ["릴리스", "Releases"],
+    "experience-item": ["경험", "Experience"],
+    task: ["작업 유형", "Task types"],
+    environment: ["실행 환경", "Environments"],
+    mcp: ["도구", "Tools"],
+    evidence: ["검증 근거", "Evidence"],
+    "taste-draft": ["취향", "Taste"],
+    "taste-axis": ["취향 축", "Taste axes"],
+    "hub-release": ["Hub 릴리스", "Hub releases"],
+    "hub-operational": ["Hub 경험 칩", "Hub experience chips"],
+    "hub-taste": ["Hub 취향 칩", "Hub taste chips"],
+  };
+  return labels[kind][ko ? 0 : 1];
+}
+
+function atlasNodeLabel(node: ExperienceOntologyGraphNode, locale: Locale): string {
+  // The Experience Map is a local, owner-only render surface: local-source
+  // nodes show their real titles (candidate title, chip name, task-type name).
+  // Nothing rendered here is ever exported; Hub-source nodes keep the safe
+  // buyer-facing labels they arrived with.
+  const local = node.localLabel?.trim();
+  if (local) return local;
+  if (node.kind === "task") {
+    const task = taskDisplayLabel(node.ref, locale);
+    if (task) return task;
+  }
+  return safeNodeLabel(node, locale);
 }
 
 function safeNodeLabel(node: ExperienceOntologyGraphNode, locale: Locale): string {
@@ -181,7 +253,7 @@ function mergeAtlas(
   const nodes: AtlasNode[] = (snapshot?.nodes ?? []).map((node) => ({
     id: node.id,
     kind: node.kind,
-    label: node.kind === "agent" ? agentName : safeNodeLabel(node, locale),
+    label: node.kind === "agent" ? agentName : atlasNodeLabel(node, locale),
     detail: nodeDetail(node, locale),
     ref: node.ref ?? null,
     status: node.status,
@@ -335,13 +407,39 @@ export function OntologyAtlas({
     color: atlasTone(node).color,
     size: nodeSize(node, degreeById.get(node.id) ?? 0),
     source: node.source,
+    kind: node.kind,
   })), [degreeById, visible.nodes]);
   const sceneEdges = useMemo<OntologySceneEdge[]>(() => visible.edges.map((edge) => ({
     id: edge.id,
     from: edge.from,
     to: edge.to,
+    kind: edge.kind,
     status: edge.status,
   })), [visible.edges]);
+  // Deterministic clustering + cluster summary labels. This is recomputed only
+  // when the graph snapshot (or scope filter/locale) changes — never per frame.
+  const clustering = useMemo(
+    () => computeExperienceClusters(
+      visible.nodes.map((node) => ({ id: node.id, kind: node.kind, label: node.label })),
+      visible.edges.map((edge) => ({ id: edge.id, from: edge.from, to: edge.to, kind: edge.kind, status: edge.status })),
+      atlas.rootId,
+    ),
+    [atlas.rootId, visible],
+  );
+  const clusterLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    const labelByNodeId = new Map(visible.nodes.map((node) => [node.id, node.label]));
+    for (const cluster of clustering.clusters) {
+      if (cluster.isRoot) continue;
+      let name = cluster.anchorTaskNodeId ? labelByNodeId.get(cluster.anchorTaskNodeId) ?? "" : "";
+      if (!name && cluster.keywords.length > 0) name = cluster.keywords.join(" · ");
+      if (!name && cluster.kindKey) name = atlasKindLabel(cluster.kindKey as AtlasNodeKind, locale);
+      if (!name) name = ko ? "경험" : "Experience";
+      labels.set(cluster.id, `${name} · ${cluster.count}`);
+    }
+    return labels;
+  }, [clustering, ko, locale, visible.nodes]);
+  const clusterCount = clusterLabels.size;
   const focusedId = hoveredId ?? (selectedId === atlas.rootId ? null : selectedId);
 
   useEffect(() => {
@@ -380,18 +478,19 @@ export function OntologyAtlas({
   const nodeCount = visible.nodes.length;
 
   return (
-    <section className={styles.atlas} data-testid="agent-ontology-graph" aria-label={ko ? "에이전트 온톨로지 관계지도" : "Agent ontology relation map"}>
+    <section className={styles.atlas} data-testid="agent-ontology-graph" aria-label={ko ? "에이전트 경험 지도" : "Agent experience map"}>
       <div className={styles.shell} data-engine-state={engineState} data-scope={scope} data-empty={relationCount === 0} data-data-state={graphLoading ? "loading" : graphError ? "error" : "ready"}>
         <div
           className={styles.engine}
           role="img"
-          aria-label={ko ? "회전·확대할 수 있는 3D 온톨로지 관계지도. 노드 찾기 메뉴와 관계 목록으로 키보드 탐색할 수 있습니다." : "Rotatable and zoomable 3D ontology map. Use the node picker and relation list for keyboard navigation."}
+          aria-label={ko ? "회전·확대할 수 있는 3D 경험 지도. 멀리서는 묶인 경험의 요약 라벨이, 가까이서는 노드 이름이 보입니다. 노드 찾기 메뉴와 관계 목록으로 키보드 탐색할 수 있습니다." : "Rotatable and zoomable 3D experience map. Cluster summaries appear when zoomed out, node names when zoomed in. Use the node picker and relation list for keyboard navigation."}
         >
           {engineState !== "fallback" && (
             <OntologyScene3D
               key={`${engineRevision}:${scope}`}
               nodes={sceneNodes}
               edges={sceneEdges}
+              clusterLabels={clusterLabels}
               rootId={atlas.rootId}
               selectedId={selectedId}
               focusedId={focusedId}
@@ -409,11 +508,11 @@ export function OntologyAtlas({
           <div className={styles.brandPlate}>
             <span className={styles.pulse} aria-hidden="true" />
             <div style={{ minWidth: 0 }}>
-              <div className={styles.eyebrow}>{ko ? "온톨로지 아틀라스" : "Ontology Atlas"}</div>
-              <div className={styles.metric}>{nodeCount} NODE · {relationCount} RELATION{graphSnapshot?.truncated || atlas.capped ? " · CAPPED" : ""}</div>
+              <div className={styles.eyebrow}>{ko ? "경험 지도" : "Experience Map"}</div>
+              <div className={styles.metric}>{nodeCount} NODE · {relationCount} RELATION · {clusterCount} CLUSTER{graphSnapshot?.truncated || atlas.capped ? " · CAPPED" : ""}</div>
             </div>
           </div>
-          <div className={styles.toolPlate} role="toolbar" aria-label={ko ? "관계지도 도구" : "Relation map tools"}>
+          <div className={styles.toolPlate} role="toolbar" aria-label={ko ? "경험 지도 도구" : "Experience map tools"}>
             <button type="button" className={styles.toolButton} onClick={() => zoom("out")} aria-label={ko ? "축소" : "Zoom out"} title={ko ? "축소" : "Zoom out"}>−</button>
             <button type="button" className={styles.toolButton} onClick={resetCamera} aria-label={ko ? "전체 맞춤" : "Fit graph"} title={ko ? "전체 맞춤" : "Fit graph"}>◎</button>
             <button type="button" className={styles.toolButton} onClick={() => zoom("in")} aria-label={ko ? "확대" : "Zoom in"} title={ko ? "확대" : "Zoom in"}>+</button>
@@ -503,8 +602,8 @@ export function OntologyAtlas({
           <div className={styles.dataState} role="status" data-kind={graphError ? "error" : "loading"}>
             <span className={styles.dataStateMark} aria-hidden="true" />
             <strong>{graphError
-              ? (ko ? "관계지도를 불러오지 못했습니다." : "The relation map could not be loaded.")
-              : (ko ? "관계 원장을 불러오는 중" : "Loading relation ledger")}</strong>
+              ? (ko ? "경험 지도를 불러오지 못했습니다." : "The experience map could not be loaded.")
+              : (ko ? "경험 기록을 불러오는 중" : "Loading experience records")}</strong>
             <span>{graphError
               ? (ko ? "에이전트 통계와 로컬 경험은 아래에서 계속 볼 수 있습니다." : "Agent stats and local experience remain available below.")
               : (ko ? "로컬 원문은 지도에 복사하지 않습니다." : "Local source text is never copied into the map.")}</span>
