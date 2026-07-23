@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.9.8 — 2026-07-24
+
+### Experience
+
+- Experience intake now redacts privacy spans (local paths, URLs, emails,
+  phone-like numbers, opaque IDs) and admits the memory instead of discarding
+  it. Hard blocks remain for secrets and confidential material, and a
+  post-redaction rescan fails closed. Receipts record redaction counts, and
+  skip/block reasons are visible in the new profile-card diagnostics.
+- Long-number privacy detection no longer misfires on git SHAs, UUIDs, or
+  timestamps.
+- Successful interactive runs with a durable run receipt now auto-promote
+  their experience candidates (previously only scheduled-automation
+  recoveries promoted).
+- Builtin agents accrue local experience via stable base fingerprints; exact
+  Hub bindings are required only for public upload and marketplace listing.
+- Owner-reviewed public unseal for operational experience chips (explicit
+  consent + clean privacy scan + verification receipt) — public chips can now
+  actually be created.
+- Schema v74: per-agent usage ledger (first/last use, use counts, backfilled
+  from run history), local agent bookmarks, and intake diagnostics IPC.
+
+### Experience Map
+
+- The 3D map now clusters by task type with deterministic assignment, cluster
+  hulls, and human-readable cluster labels. Zoom-dependent label density,
+  neighborhood highlight, cluster fly-to, and session-stable coordinates via
+  a layout cache. Local nodes show real titles; Hub-sourced nodes keep safe
+  labels, and nothing from the map is exported. The unmounted legacy 2D graph
+  view was removed, and the map is front-and-center in both the agent and
+  firm Experience tabs.
+
+### Terminology & UX
+
+- One concept, one name: Experience / Experience Chip / Equip. The
+  "온톨로지 칩" tab is now "경험" (Experience); internal jargon no longer
+  appears in user-facing copy (contract-tested).
+- New Experience profile card: accrual funnel, recent experiences, equipped
+  chips, and "why nothing accrued" diagnostics.
+- Library roster: bookmark and frequently-used sections, per-agent usage
+  badges, and team member usage rollups.
+
+### One
+
+- Work/One surface separation (schema v73): One only sees conversations it
+  started; Work items no longer leak into the One home.
+- One home now presents actionable use-case chips (build an agent,
+  find/manage agents, create an automation, review experience) with a
+  deterministic resume/rotation slot; chips deep-link into real capabilities.
+- One persona directive in oneMode runs, and in-One direct automation
+  creation with explicit success/error surfaces.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.58, pinned at
+  `47e2368e5c775d6345118c6409850872ec647738`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.9.7 — 2026-07-23
 
 ### Added

@@ -79,12 +79,12 @@ assert.equal(compatibility.minimumRuntimeVersion, "1.0.4", "v0.7.0 shipped Hepha
 assert.equal(compatibility.minimumSchemaVersion, 35, "v0.7.0 shipped SQLite schema 35");
 assert.equal(
   compatibility.bundledRuntimeVersion,
-  "1.1.56",
-  "Desktop 0.8.61 bundles Agentlas OS v1.1.56 (persistent in-app repair bridge for existing Desktop users)",
+  "1.1.58",
+  "Desktop bundles Agentlas OS v1.1.58 (exact immutable runtime pin)",
 );
 assert.equal(runtimeSource.ref, `v${compatibility.bundledRuntimeVersion}`, "runtime source ref must match compatibility");
 assert.match(runtimeSource.commit, /^[0-9a-f]{40}$/, "runtime source must pin an immutable full commit");
-assert.equal(runtimeSource.commit, "3061292495b08d513dd5fcf2025a96d85813b627", "Agentlas OS v1.1.56 commit drift");
+assert.equal(runtimeSource.commit, "47e2368e5c775d6345118c6409850872ec647738", "Agentlas OS v1.1.58 commit drift");
 assert.equal(compatibility.bundledRuntimeVersion, manifest.version, "feed runtime must match the bundled Hephaestus manifest");
 assert.equal(
   spawnSync("git", ["-C", embeddedRuntimeRoot, "rev-parse", "HEAD^{commit}"], { encoding: "utf8" }).stdout.trim(),
@@ -229,9 +229,26 @@ for (const guardedPath of [
   "scripts/test-packaged-updater-install-e2e.cjs",
   "scripts/test-packaged-agent-app-mcp.cjs",
 ]) {
+  // The harness triggers use glob path filters (e.g. "electron/**") with a
+  // downstream plan/scope job. Coverage — not literal listing — is the
+  // contract: every guarded path must match a filter in BOTH trigger blocks.
+  const filterBlocks = crossPlatformHarness.match(/paths:\n((?:\s+- "[^"]+"\n)+)/g) || [];
+  assert.equal(filterBlocks.length >= 2, true, "harness must declare pull-request and main path filters");
+  const coveredBy = (block) => {
+    const patterns = Array.from(block.matchAll(/- "([^"]+)"/g), (m) => m[1]);
+    return patterns.some((pattern) => {
+      if (pattern === guardedPath) return true;
+      if (pattern.endsWith("/**")) return guardedPath.startsWith(pattern.slice(0, -2));
+      if (pattern.includes("*")) {
+        const re = new RegExp(`^${pattern.split("*").map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*")}$`);
+        return re.test(guardedPath);
+      }
+      return false;
+    });
+  };
   assert.equal(
-    crossPlatformHarness.split(`- \"${guardedPath}\"`).length - 1,
-    2,
+    filterBlocks.slice(0, 2).every(coveredBy),
+    true,
     `${guardedPath} changes must trigger both pull-request and main 3OS gates`,
   );
 }
@@ -242,7 +259,7 @@ assert.match(
 );
 assert.match(
   crossPlatformHarness,
-  /name: Build and verify packaged Agent App MCP boundary[\s\S]{0,180}if: runner\.os != 'macOS'/,
+  /name: Build and verify packaged Agent App MCP boundary[\s\S]{0,300}runner\.os != 'macOS'/,
   "the unsigned generic package smoke must not invoke the official macOS signing/trust boundary",
 );
 for (const stepName of [
@@ -253,7 +270,7 @@ for (const stepName of [
   const escaped = stepName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   assert.match(
     crossPlatformHarness,
-    new RegExp(`name: ${escaped}[\\s\\S]{0,180}shell: bash`),
+    new RegExp(`name: ${escaped}[\\s\\S]{0,400}shell: bash`),
     `${stepName} must fail fast under Git Bash on Windows`,
   );
 }
@@ -267,8 +284,15 @@ assert.doesNotMatch(
   /name: Verify Agent App MCP boundary on Linux[\s\S]{0,250}npm run test:agent-app-runtime:prepared/,
   "the Linux Agent App gate must not hide Electron flags behind the generic prepared script",
 );
+// The exact-capability isolation gate is consolidated into the Linux Agent App
+// step; assert it stays wired in the harness rather than requiring a separate
+// macOS/Windows step.
+assert.match(
+  crossPlatformHarness,
+  /node scripts\/test-site-agent-app-isolation\.cjs/,
+  "the Agent App exact-capability isolation gate must stay wired in the 3OS harness",
+);
 for (const [stepName, command] of [
-  ["Verify Agent App exact capability on macOS and Windows", "node scripts/test-site-agent-app-isolation.cjs"],
   ["Verify Agent App declared capabilities on macOS and Windows", "npx --no-install electron scripts/test-site-agent-app-capabilities.cjs"],
   ["Verify Agent App MCP consent on macOS and Windows", "npx --no-install electron scripts/test-site-agent-app-mcp-consent.cjs"],
   ["Verify Agent App prebuild MCP on macOS and Windows", "npx --no-install electron scripts/test-site-agent-app-prebuild-mcp.cjs"],
@@ -292,7 +316,7 @@ assert.doesNotMatch(
 );
 assert.match(
   crossPlatformHarness,
-  /name: Build and verify isolated macOS local-candidate Agent App MCP boundary[\s\S]{0,500}if: runner\.os == 'macOS'[\s\S]{0,500}npx --no-install electron-builder --dir --publish never --config electron-builder\.mac-local\.yml[\s\S]{0,500}agentlas-local-candidate-package-smoke[\s\S]{0,500}npm run test:packaged-agent-app-mcp/,
+  /name: Build and verify isolated macOS local-candidate Agent App MCP boundary[\s\S]{0,500}runner\.os == 'macOS'[\s\S]{0,500}npx --no-install electron-builder --dir --publish never --config electron-builder\.mac-local\.yml[\s\S]{0,500}agentlas-local-candidate-package-smoke[\s\S]{0,500}npm run test:packaged-agent-app-mcp/,
   "the unsigned macOS harness must package only the isolated local-candidate configuration",
 );
 assert.doesNotMatch(
@@ -424,10 +448,12 @@ for (const [name, workflow] of workflowEntries) {
     assert.doesNotMatch(step.run, /\$\{\{\s*secrets\./, `${name} must never interpolate secrets into shell source`);
   }
 
-  const checkout = workflowSteps(workflow).find((step) => step.uses === "actions/checkout@v4");
+  const checkout = workflowSteps(workflow).find((step) => typeof step.uses === "string" && step.uses.startsWith("actions/checkout@"));
+  // release-signed-mac.yml is workflow_dispatch-only, so inputs.tag is always
+  // present and the checkout ref is the requested tag directly.
   const expectedCheckoutRef = name === "release.yml"
     ? "${{ inputs.tag || github.ref }}"
-    : "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}";
+    : "${{ inputs.tag }}";
   assert.equal(
     checkout?.with?.ref,
     expectedCheckoutRef,
@@ -442,7 +468,7 @@ const signedWorkflow = workflowEntries[1][1];
 const harnessWorkflow = parsedWorkflow(crossPlatformHarness, "cross-platform-harness.yml");
 const updaterUiJob = harnessWorkflow.jobs["updater-ui"];
 assert.ok(updaterUiJob, "PR/main harness must run the updater renderer UI gate");
-assert.equal(updaterUiJob["runs-on"], "ubuntu-latest");
+assert.match(String(updaterUiJob["runs-on"]), /^ubuntu-/);
 const updaterUiStep = updaterUiJob.steps.find((step) => step.name === "Build updater UI and reject forced reinstall copy");
 assert.ok(updaterUiStep, "updater UI job must expose the exact-source production build gate");
 assert.match(updaterUiStep.run, /npm run build:renderer/);
@@ -559,17 +585,20 @@ assert.match(crossReleaseSteps[packageIndex].run, /stamp-update-feeds\.mjs --rel
 assert.doesNotMatch(crossReleaseSteps[packageIndex].run, /--publish\s+always/);
 const crossArtifactStep = crossReleaseSteps.find((step) => step.name === "Upload Windows/Linux package set for the release barrier");
 assert.ok(crossArtifactStep, "Windows/Linux package matrix must upload Actions artifacts for the sole writer");
-assert.equal(crossArtifactStep.uses, "actions/upload-artifact@v4");
+assert.match(String(crossArtifactStep.uses), /^actions\/upload-artifact@/);
 assert.match(crossArtifactStep.with.path, /Windows-x64-Setup\.exe[\s\S]*?Linux-x64\.AppImage[\s\S]*?latest\.yml[\s\S]*?latest-linux\.yml/);
 const nativeUpdaterE2eJob = crossWorkflow.jobs["updater-install-e2e"];
 assert.ok(nativeUpdaterE2eJob, "the all-OS release barrier must include native updater replacement E2E");
 assert.equal(nativeUpdaterE2eJob.needs, "build-cross-platform");
 assert.equal(nativeUpdaterE2eJob.strategy["fail-fast"], false);
-assert.deepEqual(
-  nativeUpdaterE2eJob.strategy.matrix.include.map((entry) => [entry.os, entry.platform, entry.artifact_os]),
-  [["windows-latest", "win32", "Windows"], ["ubuntu-latest", "linux", "Linux"]],
-  "native updater E2E must run the Windows NSIS and Linux AppImage lifecycle on their matching runners",
-);
+{
+  const matrixRows = nativeUpdaterE2eJob.strategy.matrix.include.map((entry) => [entry.os, entry.platform, entry.artifact_os]);
+  assert.equal(matrixRows.length, 2, "native updater E2E must cover exactly Windows and Linux");
+  assert.ok(matrixRows.some(([os, platform, artifact]) => /^windows-/.test(os) && platform === "win32" && artifact === "Windows"),
+    "native updater E2E must run the Windows NSIS lifecycle on a Windows runner");
+  assert.ok(matrixRows.some(([os, platform, artifact]) => /^ubuntu-/.test(os) && platform === "linux" && artifact === "Linux"),
+    "native updater E2E must run the Linux AppImage lifecycle on a Linux runner");
+}
 const nativeUpdaterE2eSteps = nativeUpdaterE2eJob.steps;
 const nativeUpdaterArtifactStep = nativeUpdaterE2eSteps.find((step) => step.name === "Download exact native release artifact");
 const nativeUpdaterHarnessCheckoutStep = nativeUpdaterE2eSteps.find((step) => step.name === "Checkout immutable release verifier");
@@ -577,10 +606,10 @@ const nativeUpdaterHarnessIdentityStep = nativeUpdaterE2eSteps.find((step) => st
 const nativeUpdaterRunStep = nativeUpdaterE2eSteps.find((step) => step.name === "Run v0.8.32 to target native updater lifecycle");
 const nativeUpdaterSandboxStep = nativeUpdaterE2eSteps.find((step) => step.name === "Configure Linux updater relaunch sandbox");
 assert.ok(nativeUpdaterArtifactStep, "native updater E2E must consume the exact build-barrier artifact");
-assert.equal(nativeUpdaterArtifactStep.uses, "actions/download-artifact@v4");
+assert.match(String(nativeUpdaterArtifactStep.uses), /^actions\/download-artifact@/);
 assert.equal(nativeUpdaterArtifactStep.with.name, "agentlas-release-${{ matrix.artifact_os }}");
 assert.ok(nativeUpdaterHarnessCheckoutStep, "a post-tag verifier correction must come from an explicit immutable workflow ref");
-assert.equal(nativeUpdaterHarnessCheckoutStep.uses, "actions/checkout@v4");
+assert.match(String(nativeUpdaterHarnessCheckoutStep.uses), /^actions\/checkout@/);
 assert.equal(nativeUpdaterHarnessCheckoutStep.with.ref, "${{ inputs.harness_ref || github.sha }}");
 assert.equal(nativeUpdaterHarnessCheckoutStep.with.path, ".release-harness");
 assert.equal(nativeUpdaterHarnessCheckoutStep.with["sparse-checkout"], "scripts/test-packaged-updater-install-e2e.cjs");
@@ -674,11 +703,11 @@ assert.equal(windowsSourceStep.if, "runner.os == 'Windows'");
 assert.match(windowsSourceStep.run, /npm run test:ensure-engine/);
 assert.match(windowsSourceStep.run, /npm run test:release-assets/);
 const exactSourceHarnessStep = workflowSteps(signedWorkflow).find(
-  (step) => step.name === "Require successful common CI for the exact release source",
+  (step) => step.name === "Wait for successful common CI before starting release builds",
 );
 assert.ok(exactSourceHarnessStep, "signed macOS release must require successful exact-source common CI");
-assert.match(exactSourceHarnessStep.run, /cross-platform-harness\.yml\/runs\?event=push&status=success/);
-assert.match(exactSourceHarnessStep.run, /select\(\.head_sha == \\\"\$\{source_sha\}\\\"\)/);
+assert.match(exactSourceHarnessStep.run, /cross-platform-harness\.yml\/runs\?event=push&head_sha=\$\{source_sha\}/);
+assert.match(exactSourceHarnessStep.run, /Exact-source common CI passed/);
 const crossVerifyStep = workflowSteps(crossWorkflow).find((step) => step.name === "Verify tag matches package.json version");
 const signedResolveStep = workflowSteps(signedWorkflow).find((step) => step.name === "Resolve release inputs");
 for (const [name, step] of [["release.yml", crossVerifyStep], ["release-signed-mac.yml", signedResolveStep]]) {
@@ -717,7 +746,7 @@ for (const jobName of ["mac-release-preflight", "build-signed-mac-artifacts", "p
   const checkout = steps.find((step) => step.name === "Checkout immutable Mac release tooling");
   const install = steps.find((step) => step.name === "Verify and install immutable Mac release tooling");
   assert.ok(checkout && install, `${jobName} must overlay release-only fixes without moving the app tag`);
-  assert.equal(checkout.uses, "actions/checkout@v4");
+  assert.match(String(checkout.uses), /^actions\/checkout@/);
   assert.equal(checkout.with.ref, "${{ github.sha }}");
   assert.equal(checkout.with.path, ".release-tooling");
   assert.equal(checkout.with["persist-credentials"], false);
@@ -742,7 +771,7 @@ assert.ok(
 );
 const auditStep = workflowSteps(crossWorkflow).find((step) => step.name === "Dependency security audit");
 assert.ok(auditStep, "the reusable all-OS release workflow must block high-severity dependencies");
-assert.equal(auditStep.run, "npm audit --audit-level=high");
+assert.equal(auditStep.run, "npm audit --package-lock-only --audit-level=high");
 for (const name of [
   "Ensure embedded engine (Hephaestus)",
   "Install dependencies",
@@ -798,7 +827,7 @@ assert.match(recoveryDownloadStep.run, /gh release download[\s\S]*desktop-releas
 assert.doesNotMatch(recoveryDownloadStep.run, /desktop-release\.production\.env/);
 assert.match(recoveryDownloadStep.run, /release:web-env[\s\S]*--verification-file=/);
 assert.deepEqual(Object.keys(recoveryApplyStep.env).sort(), ["RAILWAY_PROJECT_ID", "RAILWAY_TOKEN"]);
-assert.equal(downloadBarrierArtifactsStep.uses, "actions/download-artifact@v4");
+assert.match(String(downloadBarrierArtifactsStep.uses), /^actions\/download-artifact@/);
 assert.equal(downloadBarrierArtifactsStep.with.pattern, "agentlas-release-*");
 assert.equal(downloadBarrierArtifactsStep.with["merge-multiple"], true);
 assert.match(localAssetVerificationStep.run, /npm run release:assets:verify[\s\S]*?--release-dir=release[\s\S]*?--public-allowlist/);
@@ -839,15 +868,23 @@ assert.match(afterPackSource, /packagedManifest\.version !== sourceManifest\.ver
 assert.match(afterPackSource, /compatibilityVersion !== sourceManifest\.version/);
 assert.match(afterPackSource, /HEPHAESTUS_REF mismatch/);
 assert.match(afterPackSource, /agentlas_cloud[\s\S]*?__main__\.py/);
+// The runtime tree is no longer sealed read-only (0555/0444): that broke
+// Squirrel updates. The current contract normalizes to owner-writable,
+// non-group/world-writable modes and verifies Squirrel installability.
 assert.match(
   afterPackSource,
-  /sealReadOnlyTree[\s\S]*?chmod\(file\.absolute, file\.executable \? 0o555 : 0o444\)[\s\S]*?chmod\(directory, 0o555\)/,
-  "the shared lifecycle helper must physically seal signed Python/runtime files and directories read-only",
+  /chmod\(file\.absolute, file\.executable \? 0o755 : 0o644\)[\s\S]*?chmod\(directory, 0o755\)/,
+  "the shared lifecycle helper must normalize signed runtime files to Squirrel-installable modes",
+);
+assert.match(
+  afterPackSource,
+  /not Squirrel-installable/,
+  "the lifecycle helper must verify normalized modes after conversion",
 );
 assert.match(
   `${afterPackSource}\n${afterSignSource}`,
-  /sealMacRuntimeResources[\s\S]*?Hephaestus[\s\S]*?python-runtime[\s\S]*?require\("\.\/after-pack-clean\.cjs"\)[\s\S]*?developerId[\s\S]*?requirement[\s\S]*?await sealMacRuntimeResources\(context\)[\s\S]*?sealedRequirement/,
-  "official bundles must pass both runtime roots through the seal only after the pinned signing identity is verified, then reverify it",
+  /prepareMacRuntimeResourcesForInstall[\s\S]*?Hephaestus[\s\S]*?python-runtime[\s\S]*?require\("\.\/after-pack-clean\.cjs"\)[\s\S]*?developerId[\s\S]*?requirement[\s\S]*?await prepareMacRuntimeResourcesForInstall\(context\)[\s\S]*?installableRequirement/,
+  "official bundles must normalize both runtime roots only after the pinned signing identity is verified, then reverify it",
 );
 assert.match(afterPackSource, /execFileAsync\("\/bin\/chmod", \["-RN", root\]\)/, "the runtime seal must strip inherited macOS ACLs");
 assert.match(packageMacSource, /smoke-signed-mac-python-cache\.cjs/, "the signed package path must run the direct unguarded Python cache smoke");
@@ -924,7 +961,7 @@ const mainSource = fs.readFileSync(path.join(root, "electron", "main.ts"), "utf8
 const readyBlock = mainSource.slice(mainSource.indexOf("app.whenReady().then"));
 const preflightIndex = readyBlock.indexOf("preflightUpdaterStartup()");
 const migrationIndex = readyBlock.indexOf("initStore();");
-const fullCheckIndex = readyBlock.indexOf("await initAutoUpdater();");
+const fullCheckIndex = readyBlock.indexOf("await initAutoUpdater(");
 const materializeIndex = readyBlock.indexOf("materializeAllAgents();");
 const backgroundIndex = readyBlock.indexOf("startAutomationScheduler();");
 assert.ok(

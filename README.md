@@ -69,6 +69,19 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-24 · v0.9.8 — experience system rework, clustered Experience Map, One home launcher** —
+  experience intake now redacts privacy spans instead of discarding memories
+  (secrets stay hard-blocked), successful interactive runs auto-promote
+  candidates with durable run receipts, builtin agents accrue local
+  experience, and owner-reviewed public unseal makes sellable chips real. The
+  3D map clusters by task type with readable cluster labels and stable
+  coordinates; terminology is unified (Experience / Experience Chip / Equip);
+  the library roster gains usage and bookmark badges (schema v74). One home
+  now offers actionable use-case chips with a resume-first rotation slot and
+  in-One automation creation, on top of the Work/One surface separation
+  (schema v73). This release binds Agentlas OS v1.1.58 at
+  `47e2368e5c775d6345118c6409850872ec647738`. This source note does not prove
+  a Desktop Git tag, public installer, GitHub release, or update feed.
 - **2026-07-23 · v0.9.7 — in-app API-key prompts with honest fallback** —
   when an interactive chat run's matched tool needs a credential that isn't in
   the vault yet, Desktop now shows a key-entry sheet in-app: per-tool grouped
