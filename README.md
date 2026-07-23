@@ -69,6 +69,23 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-23 · v0.9.6 — automation recovery restored with redaction, not removal** —
+  v0.9.5 closed a real gap by deleting the automation recovery/evolution
+  feature outright instead of fixing it narrowly. v0.9.6 restores the
+  feature and keeps both v0.9.5 protections: failure text is redacted (API
+  keys, tokens, passwords, bearer headers, private-key blocks, and full URLs
+  reduced to host-only) before it can reach a model prompt, agent memory, or
+  an Experience record, and the Hub plug-in bridge still only registers
+  connection metadata — it never reads or writes a credential value, so a
+  remote MCP still needs a person to enter the key in MCP settings. A failed
+  automation again forbids repeating the same approach after two consecutive
+  failures, demands an auditable "Strategy change" declaration, and applies
+  a verified recovery playbook automatically with notification and one-click
+  rollback. This release carries forward the signed updater protections from
+  v0.9.4 and binds Agentlas OS v1.1.58 at
+  `47e2368e5c775d6345118c6409850872ec647738`. This source note does not prove
+  a Desktop Git tag, public installer, GitHub release, or update feed.
+
 - **2026-07-23 · v0.9.5 — safe automation recovery and explicit MCP setup** —
   Hub plug-in discovery remains advisory: a matching Hub listing cannot fetch a
   manifest, register or enable an MCP server, or map a Keychain value into a

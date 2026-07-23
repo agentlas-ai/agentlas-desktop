@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.6 — 2026-07-23
+
+### Fixed
+
+- Restored the autonomous automation recovery/evolution pipeline that 0.9.5
+  removed outright, closing the two gaps 0.9.5 named instead of deleting the
+  feature: failure text is redacted (API keys, tokens, passwords, bearer
+  headers, private-key blocks, and full URLs reduced to host-only) before it
+  can reach a model prompt, agent memory, or an Experience record, and the
+  Hub plug-in bridge only ever registers connection metadata — it never
+  reads or writes a credential value, so remote MCP connections still need a
+  person to enter the key in MCP settings before the vault is populated.
+- A failed automation still forbids repeating the same approach after two
+  consecutive failures, demands an auditable "Strategy change" declaration,
+  and reports BLOCKED honestly when every alternative is exhausted — approved
+  as auto-apply + notify + one-click rollback, unchanged from what shipped
+  before 0.9.5's revert.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.58, pinned at
+  `47e2368e5c775d6345118c6409850872ec647738`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.9.5 — 2026-07-23
 
 ### Security
