@@ -343,6 +343,9 @@ const api: AgentlasIpc = {
     test: (id: string) => ipcRenderer.invoke("mcpTools:test", id),
     status: () => ipcRenderer.invoke("mcpTools:status"),
     recommendForBuild: (input) => ipcRenderer.invoke("mcpTools:recommendForBuild", input),
+    // 실행 전 키 요청 시트 완료 신호 — outcome만 전달, 비밀 값은 env.set 경유(vault).
+    supplyRunKeys: (runId: string, outcome: "provided" | "declined") =>
+      ipcRenderer.invoke("mcp:supplyRunKeys", runId, outcome),
   },
   openCrab: {
     readiness: () => ipcRenderer.invoke("openCrab:readiness"),

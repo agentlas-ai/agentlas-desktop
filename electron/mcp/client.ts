@@ -109,6 +109,7 @@ import {
 import { listInstalledServers as listInstalledMcpServers } from "../mcp-tools/registry";
 import { getAgentApp } from "../store/agent-apps";
 import { autoSelectMcpTools, buildMcpAutoSelectionPrompt } from "../mcp-tools/auto-select";
+import { runMcpKeyElicitationGate } from "./run-key-elicitation";
 import { bridgeHubPluginCandidates } from "../mcp-tools/hub-plugin-bridge";
 import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
 import { buildAgentAppRunnerEnv, buildRunnerEnv, restrictedRunnerEnv } from "../runtime/env-resolver";
@@ -1908,18 +1909,53 @@ export async function runMcpInvocation(
   // so it is never an authority source for an explicit Workforce execution.
   if (runtimeCanUseMcp && !req.agentAppMode && !oneTeamExecutionPolicy && canWrite && !explicitWorkforceGoal) {
     try {
-      const selectedContext = await autoSelectMcpTools({
+      const autoSelectInput = {
         userPrompt: effectiveUserPrompt,
         systemPrompt: buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt),
         agentName: agent.nameEn || agent.name,
         workingFolder,
         toolMode: req.toolMode,
         hubMode: req.hubMode,
+      };
+      let selectedContext = await autoSelectMcpTools(autoSelectInput);
+      // ── 실행 전 API 키 요청 게이트 (대화형 렌더러 런 전용) ──────────────
+      // matched 도구가 missing-key면 렌더러 시트(mcp-key-request 이벤트)로 키를
+      // 요청하고 제한 시간만큼만 기다린다. 값은 렌더러가 기존 env:set으로 vault에
+      // 직접 저장하고, 여기로는 완료 신호만 돌아온다(mcp:supplyRunKeys).
+      // 무인 실행(automation/site-studio/trex/telegram/agent-app)은 사람에게 절대
+      // 블록되지 않는다 — interactive:false로 게이트 전체가 no-op.
+      const keyGate = await runMcpKeyElicitationGate({
+        runId: req.runId,
+        // 데스크탑 렌더러 대화형 런만. workspaceBinding(모바일)은 시트를 렌더링할
+        // 화면이 없으므로 제외 — 모바일 런이 120초 헛대기하는 일이 없어야 한다.
+        interactive: !executionContext && !req.agentAppMode && !workspaceBinding,
+        context: selectedContext,
+        sink,
+        signal,
+        reselect: () => autoSelectMcpTools(autoSelectInput),
       });
+      selectedContext = keyGate.context;
+      if (keyGate.outcome !== "skipped") {
+        sink({
+          kind: "tool-use",
+          tool: {
+            name: "Agentlas Plugins · credential request",
+            // Value-free receipt: tool ids + outcome only, never key values.
+            result: `${keyGate.outcome}: ${selectedContext.tools
+              .filter((tool) => tool.state === "missing-key")
+              .map((tool) => tool.id)
+              .join(", ") || "all requested tools unlocked"}`,
+          },
+        });
+      }
       mcpAutoSelectionPrompt = buildMcpAutoSelectionPrompt(selectedContext, {
         toolMode: req.toolMode,
         hubMode: req.hubMode,
       });
+      if (keyGate.fallbackPrompt) {
+        // 거절/시간초과 폴백 — 남은 도구들로 대안을 찾으라는 정직한 지시 블록.
+        mcpAutoSelectionPrompt = `${mcpAutoSelectionPrompt}\n${keyGate.fallbackPrompt}`.trim();
+      }
       if (selectedContext.hubPluginCount > 0 || selectedContext.localPluginCount > 0) {
         const hubCandidates =
           selectedContext.hubPlugins.length > 0

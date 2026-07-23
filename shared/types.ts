@@ -3364,8 +3364,45 @@ export interface MobileBridgeRuntimeStatus {
   error: string | null;
 }
 
+/** 실행 전 API 키 요청 — 값이 아니라 "어떤 키가 필요한가"만 담는다(value-free).
+ *  값 저장은 렌더러가 기존 env:set으로 직접 하고, 완료 신호만 mcp:supplyRunKeys로 돌아온다. */
+export interface McpRunKeyRequestEnvKey {
+  key: string;
+  label?: string;
+  labelEn?: string;
+  hint?: string;
+  hintEn?: string;
+}
+
+export interface McpRunKeyRequestTool {
+  /** catalogId(카탈로그 출신) 또는 installed server id(커스텀). */
+  id: string;
+  name: string;
+  /** 키 발급 페이지 (카탈로그 setupUrl) — 시트에서 "키 발급 →" 링크. */
+  setupUrl?: string;
+  envKeys: McpRunKeyRequestEnvKey[];
+}
+
+export interface McpRunKeyRequest {
+  /** runId와 동일 — 같은 실행의 중복 요청은 멱등 처리된다. */
+  requestId: string;
+  runId: string;
+  /** epoch ms — 지나면 메인이 declined로 자동 진행(런은 절대 여기 걸려 멈추지 않는다). */
+  expiresAt: number;
+  tools: McpRunKeyRequestTool[];
+}
+
 export interface McpInvocationEvent {
-  kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface" | "usage" | "reasoning";
+  kind:
+    | "thinking"
+    | "tool-use"
+    | "partial"
+    | "final"
+    | "error"
+    | "surface"
+    | "usage"
+    | "reasoning"
+    | "mcp-key-request";
   status?: string;
   text?: string;
   /** partial 델타 스트리밍(무-agentId 메인 스트림 한정) — text(누적 전문) 대신 직전 partial
@@ -3382,6 +3419,8 @@ export interface McpInvocationEvent {
   oneSurface?: OneSurfaceManifestV1;
   /** 도구 호출/결과 이벤트 — Claude Code식 접기/펴기 블록용 (이름 + 인자 JSON + 결과) */
   tool?: { name: string; args?: string; result?: string; id?: string; isError?: boolean };
+  /** kind:"mcp-key-request" 전용 — 렌더러 McpKeyRequestSheet가 소비한다. 값 없음(키 이름만). */
+  keyRequest?: McpRunKeyRequest;
   /** 생성 토큰 수 — final에 동봉. kind:"usage"면 실행 중 라이브 누적치(단조 증가, 추정 포함). */
   tokens?: number;
   /** reasoning(thinking) 구간 신호(kind:"reasoning") — 상태줄 "생각 중…" 회전과
@@ -5169,6 +5208,9 @@ export interface AgentlasIpc {
     status: () => Promise<McpServerStatus[]>;
     /** Build 시작 전 읽기 전용 추천. 설치·연결 테스트·외부 호출을 하지 않는다. */
     recommendForBuild: (input: McpBuildRecommendationInput) => Promise<McpBuildPlan>;
+    /** 실행 전 키 요청 시트의 완료 신호. 비밀 값은 절대 싣지 않는다 — 값은 env.set으로
+     *  이미 vault에 저장된 뒤다. 만료/중복 runId면 { ok:false } 안전 무시. */
+    supplyRunKeys: (runId: string, outcome: "provided" | "declined") => Promise<{ ok: boolean }>;
   };
   /** Optional ontology context. Endpoint and returned context remain in Electron main. */
   openCrab: {

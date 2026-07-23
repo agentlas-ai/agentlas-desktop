@@ -18,6 +18,7 @@ import type {
   InstalledMcpServer,
   ResolvedOrg,
   McpInvocationEvent,
+  McpRunKeyRequest,
   Project,
   RuntimeCommand,
   RuntimeStatus,
@@ -27,6 +28,7 @@ import type {
 import type { HiredAgentCard, InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
+import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
 import { extractQuestions } from "@/lib/ask-question";
 import { stripMultimodalSetup } from "@/lib/multimodal-setup";
 import { dropChatViewSnapshot, readChatViewSnapshot, saveChatViewSnapshot } from "@/lib/chat-view-cache";
@@ -853,6 +855,8 @@ function ChatPage() {
   const [queuedSteers, setQueuedSteers] = useState<string[]>([]);
   const [artifact, setArtifact] = useState<CodeArtifact | null>(null);
   const [surface, setSurface] = useState<WorkbenchSurface | null>(null);
+  // 실행 전 API 키 요청 시트 — mcp-key-request 이벤트가 채우고, 응답/만료/런 종료가 비운다.
+  const [keyRequestSheet, setKeyRequestSheet] = useState<McpRunKeyRequest | null>(null);
   const [mediaPreview, setMediaPreview] = useState<WorkspaceFilePreview | null>(null);
   const [scaffoldedApps, setScaffoldedApps] = useState<Record<string, AppFactoryScaffoldResult>>({});
   const [scaffoldedTools, setScaffoldedTools] = useState<Record<string, ToolFactoryScaffoldResult>>({});
@@ -974,6 +978,15 @@ function ChatPage() {
   // send()의 인라인 핸들러를 추출해 재접속 경로와 공유 — lastStatusRef는 중복 status 억제용(공유).
   const consumeEvent = useCallback(
     (ev: McpInvocationEvent, placeholderId: string, lastStatusRef: { text: string }) => {
+      // 실행 전 API 키 요청 — 만료 전 요청만 시트로 올린다(재접속 리플레이의 낡은
+      // 요청은 무시). 값 입력/저장은 McpKeyRequestSheet가 env.set으로만 처리한다.
+      if (ev.kind === "mcp-key-request") {
+        if (ev.keyRequest && ev.keyRequest.expiresAt > Date.now()) {
+          setKeyRequestSheet(ev.keyRequest);
+        }
+        return;
+      }
+      if (ev.kind === "final" || ev.kind === "error") setKeyRequestSheet(null);
       const computerUseMode = ev.tool ? computerUseModeForTool(ev.tool.name) : null;
       if (computerUseMode) {
         computerUseActiveRef.current = true;
@@ -3465,6 +3478,13 @@ function ChatPage() {
           mediaBasePaths={mediaBasePaths}
         />
       </div>
+      {/* 실행 전 API 키 요청 바텀 시트 — 값은 vault(env.set)로만, IPC는 완료 신호만 */}
+      {keyRequestSheet && (
+        <McpKeyRequestSheet
+          request={keyRequestSheet}
+          onResolved={() => setKeyRequestSheet(null)}
+        />
+      )}
       {/* 에이전트 질문 바텀 시트 — 인라인 카드 대신 여기 모아 전부 답하고 1회 전송 */}
       {pendingQuestionSheet && (
         <ChatQuestionSheet

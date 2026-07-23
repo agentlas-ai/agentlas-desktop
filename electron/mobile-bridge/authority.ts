@@ -839,7 +839,12 @@ export function projectMobileBridgeInvocationEvent(
   event: McpInvocationEvent,
   context?: { taskId?: string | null; syncedAt?: string },
 ): MobileBridgeInvocationEventDto {
-  const projected: MobileBridgeInvocationEventDto = { kind: event.kind };
+  // "mcp-key-request" is a desktop-renderer-only elicitation signal — the
+  // mobile client has no key sheet and its DTO union stays closed. Project it
+  // as a harmless value-free "thinking" beat (keyRequest itself is never sent).
+  const projected: MobileBridgeInvocationEventDto = {
+    kind: event.kind === "mcp-key-request" ? "thinking" : event.kind,
+  };
   if (typeof event.status === "string") {
     projected.status = boundedRedactedText(event.status, 1_000);
   }

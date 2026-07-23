@@ -117,6 +117,7 @@ import { getDb } from "./store/db";
 import { getResolvedOrg } from "./store/org-spec";
 import { resolveTeamOrg, resolveAgentTeam } from "./agents/org-resolver";
 import { runMcpInvocation } from "./mcp/client";
+import { resolveRunKeyElicitation } from "./mcp/run-key-elicitation";
 import { invocationService } from "./invocation/service";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
 import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot } from "./hephaestus/engine";
@@ -2545,6 +2546,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("mcpTools:test", (_e, id: string) => testServerById(id));
   ipcMain.handle("mcpTools:status", () => statusAllServers());
   ipcMain.handle("mcpTools:recommendForBuild", (_e, input) => recommendMcpBuildPlan(input));
+  // 실행 전 키 요청 시트의 완료 신호 — 비밀 값은 절대 이 채널로 오지 않는다(값은 env:set).
+  // 만료/미지의 runId는 { ok:false } 멱등 무시라 렌더러 재시도가 안전하다.
+  ipcMain.handle("mcp:supplyRunKeys", (_e, runId: string, outcome: unknown) =>
+    resolveRunKeyElicitation(String(runId), outcome),
+  );
   ipcMain.handle("openCrab:readiness", async () => {
     const readiness = await getOpenCrabReadiness();
     switch (readiness.reason) {

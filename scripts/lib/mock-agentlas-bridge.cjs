@@ -675,6 +675,11 @@ function setupMockAgentlasBridge(options) {
       remove: async () => {},
       setEnabled: async () => ({}),
       test: async () => ({ ok: true }),
+      // 실행 전 키 요청 시트 완료 신호 — 스모크에선 활성 요청이 없으므로 멱등 no-op.
+      supplyRunKeys: async (runId, outcome) => {
+        record("mcpTools.supplyRunKeys", { runId, outcome });
+        return { ok: false };
+      },
       recommendForBuild: async (input) => {
         record("mcpTools.recommendForBuild", input);
         if (options?.mcpBuildScenario === "recommendation-failure") {
