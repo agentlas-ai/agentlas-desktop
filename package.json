@@ -14,7 +14,7 @@
   "agentlasUpdateCompatibility": {
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
-    "minimumSchemaVersion": 0,
+    "minimumSchemaVersion": 35,
     "targetSchemaVersion": 72,
     "bundledRuntimeVersion": "1.1.57"
   },

@@ -17,6 +17,7 @@ const RECOVERY_SESSION_RETRY_ATTEMPTS = 4;
 const NATIVE_INSTALL_WATCHDOG_MS = 20_000;
 const NATIVE_INSTALL_RETRY_BASE_DELAY_MS = 1_000;
 const NATIVE_INSTALL_RETRY_MAX_DELAY_MS = 5 * 60_000;
+const LAUNCHCTL_SERVICE_ABSENT = 113;
 
 export const CONTINUITY_CORE_TABLES = [
   "installed_agents",
@@ -214,6 +215,8 @@ export interface UpdaterControllerDependencies {
   refreshSessionForRecovery?: () => Promise<void>;
   nativeInstallWatchdogMs?: number;
   nativeInstallRetryBaseDelayMs?: number;
+  /** Test seam for fail-closed launchd inspection/bootout before stale macOS cleanup. */
+  runLaunchctl?: (args: string[]) => number;
 }
 
 interface InstallAccessResult {
@@ -585,6 +588,7 @@ export class DesktopUpdaterController {
   private readonly logger: Pick<Console, "log" | "warn" | "error">;
   private readonly now: () => number;
   private readonly removePath: (target: string, options: { recursive?: boolean; force?: boolean }) => void;
+  private readonly runLaunchctl: (args: string[]) => number;
   private state: UpdaterState = { status: "idle" };
   private timer: NodeJS.Timeout | null = null;
   private initialTimer: NodeJS.Timeout | null = null;
@@ -608,12 +612,25 @@ export class DesktopUpdaterController {
   private initPromise: Promise<void> | null = null;
   private resumeWritersAfterInstallAttempt: (() => void) | null = null;
   private nativeInstallWatchdog: NodeJS.Timeout | null = null;
+  private nativeInstallReconcileTimer: NodeJS.Timeout | null = null;
   private readonly listeners: Array<{ event: UpdaterEvent; listener: (...args: any[]) => void }> = [];
 
   constructor(private readonly deps: UpdaterControllerDependencies) {
     this.logger = deps.logger ?? console;
     this.now = deps.now ?? Date.now;
     this.removePath = deps.removePath ?? ((target, options) => fs.rmSync(target, options));
+    this.runLaunchctl = deps.runLaunchctl ?? ((args) => {
+      // Cross-platform contract tests may model `deps.platform = darwin` on a
+      // non-macOS host. Production always passes the real process platform.
+      if (process.platform !== "darwin") return LAUNCHCTL_SERVICE_ABSENT;
+      try {
+        execFileSync("launchctl", args, { stdio: "ignore", timeout: 5_000 });
+        return 0;
+      } catch (error) {
+        const exitStatus = (error as { status?: unknown }).status;
+        return typeof exitStatus === "number" ? exitStatus : -1;
+      }
+    });
   }
 
   getState(): UpdaterState {
@@ -786,19 +803,100 @@ export class DesktopUpdaterController {
    * ShipIt job scheduled, so ShipIt crash-looped every 2s on "no such file" and
    * the update could never complete on that machine again.
    */
-  private installInFlight(): boolean {
-    // In-memory only, on purpose: after a process restart a journaled
-    // `install-requested` is a DEAD install (reconcile must be able to clean it
-    // up; the pre-delete launchd bootout below makes that safe). Within this
-    // process, `nativeInstallHandedOff` covers the window after installOnce()
-    // resolves but while Squirrel is still staging natively.
-    return this.installPromise !== null || this.nativeInstallHandedOff;
+  private nativeInstallGraceMs(): number {
+    return asNonNegativeInteger(this.deps.nativeInstallWatchdogMs) ?? NATIVE_INSTALL_WATCHDOG_MS;
   }
 
-  private clearStaleInstallArtifacts(): boolean {
+  private installInFlight(journal?: InstallJournal): boolean {
+    // The in-memory flags cover the originating process. A recent durable
+    // install-requested journal covers the cross-process window where ShipIt
+    // may have relaunched Agentlas between native retry attempts. In the
+    // incident, the replacement process returned and removed the request less
+    // than one second after ShipIt's first native failure; treating every
+    // restart as a dead install recreates that exact race.
+    if (this.installPromise !== null || this.nativeInstallHandedOff) return true;
+    if (!journal || journal.phase !== "install-requested") return false;
+    const requestedAt = Date.parse(journal.requestedAt);
+    if (!Number.isFinite(requestedAt)) return false;
+    const graceMs = this.nativeInstallGraceMs();
+    const elapsedMs = this.now() - requestedAt;
+    if (elapsedMs < -graceMs || elapsedMs >= graceMs) return false;
+    if (this.deps.platform !== "darwin") return true;
+    // A recent journal alone is not proof: a failed helper may already be gone.
+    // The cross-process guard is active only while launchd still owns ShipIt.
+    // Unknown launchd state fails safe for the bounded grace window.
+    return this.shipItServiceStatus() !== LAUNCHCTL_SERVICE_ABSENT;
+  }
+
+  private scheduleNativeInstallReconcile(journal: InstallJournal): void {
+    if (this.nativeInstallReconcileTimer) return;
+    const requestedAt = Date.parse(journal.requestedAt);
+    const graceMs = this.nativeInstallGraceMs();
+    const remainingMs = Number.isFinite(requestedAt)
+      ? Math.max(0, Math.min(graceMs * 2, requestedAt + graceMs - this.now()))
+      : graceMs;
+    this.nativeInstallReconcileTimer = setTimeout(() => {
+      this.nativeInstallReconcileTimer = null;
+      void this.reconcileJournal();
+    }, remainingMs + 50);
+    this.nativeInstallReconcileTimer.unref?.();
+  }
+
+  private stopShipItServiceBeforeCleanup(): boolean {
+    if (this.deps.platform !== "darwin") return true;
+    const service = this.shipItServiceTarget();
+    if (!service) return false;
+    const initialStatus = this.shipItServiceStatus();
+    if (initialStatus === LAUNCHCTL_SERVICE_ABSENT) return true;
+    if (initialStatus !== 0) {
+      this.logger.warn(`[updater] could not verify ShipIt launchd state (status ${initialStatus})`);
+      return false;
+    }
+
+    // A service that was present must be proven absent after bootout. Never
+    // treat a swallowed launchctl error as permission to remove its request.
+    this.runLaunchctl(["bootout", service]);
+    const finalStatus = this.runLaunchctl(["print", service]);
+    if (finalStatus !== LAUNCHCTL_SERVICE_ABSENT) {
+      this.logger.warn(`[updater] ShipIt launchd job is still present after bootout (status ${finalStatus})`);
+      return false;
+    }
+    return true;
+  }
+
+  private shipItServiceTarget(): string | null {
+    if (this.deps.uid === null) {
+      this.logger.warn("[updater] cannot verify ShipIt launchd state without a user id");
+      return null;
+    }
+    return `gui/${this.deps.uid}/com.agentlas.desktop.ShipIt`;
+  }
+
+  private shipItServiceStatus(): number {
+    const service = this.shipItServiceTarget();
+    return service ? this.runLaunchctl(["print", service]) : -1;
+  }
+
+  private clearStaleInstallArtifacts(knownJournal?: InstallJournal): boolean {
     // Never touch live install material. Report success so callers do not
     // convert an in-flight install into a blocked/manual state.
-    if (this.installInFlight()) return true;
+    if (this.installInFlight(knownJournal)) return true;
+    // On macOS the launchd job owns ShipItState.plist, the staging tree and the
+    // proxied updater payload as one transaction. Stop and verify the owner
+    // before deleting any member of that transaction.
+    const shipIt = this.shipItPath();
+    const shipItState = path.join(shipIt, "ShipItState.plist");
+    if (this.deps.platform === "darwin") {
+      let hasNativeInstallMaterial = fs.existsSync(shipItState);
+      try {
+        hasNativeInstallMaterial ||= fs.existsSync(shipIt) && fs.readdirSync(shipIt, { withFileTypes: true })
+          .some((entry) => entry.isDirectory() && entry.name.startsWith("update."));
+      } catch (error) {
+        this.logger.warn("[updater] could not inspect stale ShipIt state", error);
+        return false;
+      }
+      if (hasNativeInstallMaterial && !this.stopShipItServiceBeforeCleanup()) return false;
+    }
     let cleared = true;
     const updaterCache = this.updaterCachePath();
     for (const candidate of [path.join(updaterCache, "pending"), path.join(updaterCache, "update.zip")]) {
@@ -812,23 +910,7 @@ export class DesktopUpdaterController {
       if (fs.existsSync(candidate)) cleared = false;
     }
     if (this.deps.platform !== "darwin") return cleared;
-    const shipIt = this.shipItPath();
-    const shipItState = path.join(shipIt, "ShipItState.plist");
     try {
-      // Remove any lingering launchd ShipIt job BEFORE its request file. A
-      // spawn-scheduled job that outlives ShipItState.plist respawns ShipIt
-      // every ~2s with "Could not read update request" forever (observed on
-      // v0.8.65, 2026-07-23). Best-effort: an absent job exits non-zero.
-      if (this.deps.uid !== null) {
-        try {
-          execFileSync("launchctl", ["bootout", `gui/${this.deps.uid}/com.agentlas.desktop.ShipIt`], {
-            stdio: "ignore",
-            timeout: 5_000,
-          });
-        } catch {
-          // No lingering job (the common case) or launchctl unavailable.
-        }
-      }
       this.removePath(shipItState, { force: true });
       if (fs.existsSync(shipIt)) {
         for (const entry of fs.readdirSync(shipIt, { withFileTypes: true })) {
@@ -857,8 +939,8 @@ export class DesktopUpdaterController {
     return cleared;
   }
 
-  private cleanupOrBlock(version?: string): boolean {
-    if (this.clearStaleInstallArtifacts()) return true;
+  private cleanupOrBlock(version?: string, knownJournal?: InstallJournal): boolean {
+    if (this.clearStaleInstallArtifacts(knownJournal)) return true;
     this.automaticInstallPaused = true;
     this.blockedTargetVersion = version ?? null;
     this.blockedReasonCode = "legacy-cleanup-failed";
@@ -1096,6 +1178,16 @@ export class DesktopUpdaterController {
     this.blockedRetryAfter = journal.retryAfter;
     this.recoveryBackupPath = journal.continuity.backupPath;
     const comparison = compareSemVer(this.deps.currentVersion(), journal.targetVersion);
+    if (this.installInFlight(journal)) {
+      this.publish({
+        status: "installing",
+        version: journal.targetVersion,
+        progress: 100,
+        recoveryBackupAvailable: fs.existsSync(journal.continuity.backupPath),
+      });
+      this.scheduleNativeInstallReconcile(journal);
+      return;
+    }
     if (comparison !== null && comparison >= 0) {
       const verification = await this.verifyJournalContinuity(journal.continuity);
       if (!verification.ok) {
@@ -1110,7 +1202,7 @@ export class DesktopUpdaterController {
         });
         return;
       }
-      if (!this.cleanupOrBlock(journal.targetVersion)) {
+      if (!this.cleanupOrBlock(journal.targetVersion, journal)) {
         this.writeJournal({ ...journal, phase: "blocked", reasonCode: "legacy-cleanup-failed" });
         return;
       }
@@ -1139,7 +1231,7 @@ export class DesktopUpdaterController {
       this.publish({ status: "updated", version: journal.targetVersion });
       return;
     }
-    if (!this.cleanupOrBlock(journal.targetVersion)) {
+    if (!this.cleanupOrBlock(journal.targetVersion, journal)) {
       this.writeJournal({ ...journal, phase: "blocked", reasonCode: "legacy-cleanup-failed" });
       return;
     }
@@ -1241,6 +1333,8 @@ export class DesktopUpdaterController {
     this.timer = null;
     if (this.nativeInstallWatchdog) clearTimeout(this.nativeInstallWatchdog);
     this.nativeInstallWatchdog = null;
+    if (this.nativeInstallReconcileTimer) clearTimeout(this.nativeInstallReconcileTimer);
+    this.nativeInstallReconcileTimer = null;
     for (const { event, listener } of this.listeners) this.deps.updater.removeListener?.(event, listener);
     this.listeners.length = 0;
     this.initialized = false;
