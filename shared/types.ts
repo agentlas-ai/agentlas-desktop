@@ -907,6 +907,12 @@ export interface McpServerStatus {
   /** 아직 값이 없는 필수 env 키 — 연결 막힘 원인 */
   missingEnv: string[];
   checkedAt: string;
+  /**
+   * A configured server whose health check would visibly launch a user-facing
+   * application is intentionally not spawned by passive status surfaces.
+   * An explicit per-server test still performs the real connection check.
+   */
+  deferred?: "interactive";
 }
 
 // ── Firm = 위계 조직을 가진 에이전트 회사 풀패키지 ──────────

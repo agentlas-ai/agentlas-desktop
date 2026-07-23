@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.9.4 — 2026-07-23
+
+### Fixed
+
+- Official macOS installs now repair only unsigned generated Python bytecode,
+  re-verify the exact Developer ID requirement and Gatekeeper assessment, and
+  seal the embedded Hephaestus and Python runtime trees read-only before any
+  Python process can start. Clean installs take the same idempotent seal path;
+  any unrelated signature or containment failure stops startup instead of
+  weakening trust.
+- The updater ZIP remains owner-writable for Squirrel's quarantine handoff,
+  while the installed copy becomes immutable on first launch. Native ShipIt
+  replacement is verified from a sealed old app to a writable new candidate.
+- A background update relaunch now restores the existing encrypted account via
+  Electron's asynchronous safeStorage path. Only temporary Keychain startup
+  delay is retried without a recovery card; missing, expired, or invalid auth
+  and every database, agent, and route violation remain fail-closed.
+- Deferred account recovery now resynchronizes the mounted account and Hub
+  state in the same process. Mobile Bridge waits during temporary auth recovery
+  and no longer deletes paired-device credentials because Keychain was briefly
+  unavailable.
+- Opening Dashboard no longer performs a real connection probe for on-demand
+  browser MCPs. On Windows this had launched a detached Chrome or Edge window
+  at `about:blank` on every Dashboard visit; browser sessions now start only
+  for an explicit browser test or a real browser task.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.58, pinned at
+  `47e2368e5c775d6345118c6409850872ec647738`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.9.3 — 2026-07-23
 
 ### Fixed

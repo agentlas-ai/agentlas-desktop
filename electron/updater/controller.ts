@@ -156,6 +156,10 @@ export interface ContinuityVerification {
   violations: string[];
 }
 
+export type RecoverySessionRefreshResult =
+  | { status: "restored"; signedIn: true }
+  | { status: "missing" | "expired" | "invalid" | "temporarily-unavailable"; signedIn: false };
+
 export interface InstallJournal {
   schemaVersion: 1;
   phase: "install-requested" | "blocked" | "recovery-required";
@@ -212,7 +216,8 @@ export interface UpdaterControllerDependencies {
   recoverySessionRetryDelayMs?: number;
   recoverySessionRetryAttempts?: number;
   waitForRecoveryRetry?: (delayMs: number) => Promise<void>;
-  refreshSessionForRecovery?: () => Promise<void>;
+  initialSessionRestore?: RecoverySessionRefreshResult;
+  refreshSessionForRecovery?: () => Promise<void | RecoverySessionRefreshResult>;
   nativeInstallWatchdogMs?: number;
   nativeInstallRetryBaseDelayMs?: number;
   /** Test seam for fail-closed launchd inspection/bootout before stale macOS cleanup. */
@@ -610,6 +615,7 @@ export class DesktopUpdaterController {
   private lastCheckedAt: number | undefined;
   private initialized = false;
   private initPromise: Promise<void> | null = null;
+  private deferredSessionRestoreRequested = false;
   private resumeWritersAfterInstallAttempt: (() => void) | null = null;
   private nativeInstallWatchdog: NodeJS.Timeout | null = null;
   private nativeInstallReconcileTimer: NodeJS.Timeout | null = null;
@@ -635,6 +641,18 @@ export class DesktopUpdaterController {
 
   getState(): UpdaterState {
     return this.state;
+  }
+
+  /** Lets the Electron adapter defer consumption until it can actually dispatch. */
+  hasDeferredSessionRestoreRequest(): boolean {
+    return this.deferredSessionRestoreRequested;
+  }
+
+  /** Consumed by the Electron adapter only after a restore was actually dispatched. */
+  consumeDeferredSessionRestoreRequest(): boolean {
+    const requested = this.deferredSessionRestoreRequested;
+    this.deferredSessionRestoreRequested = false;
+    return requested;
   }
 
   private publish(next: UpdaterState): UpdaterState {
@@ -1139,6 +1157,11 @@ export class DesktopUpdaterController {
     }));
 
     let verification = await verifyOnce();
+    let lastSessionRefresh: void | RecoverySessionRefreshResult = this.deps.initialSessionRestore;
+    let sawPermanentSessionRestoreFailure =
+      lastSessionRefresh?.status === "missing"
+      || lastSessionRefresh?.status === "expired"
+      || lastSessionRefresh?.status === "invalid";
     for (let attempt = 0; attempt < retryAttempts; attempt += 1) {
       const onlyAuthRestoreIsPending =
         !verification.ok &&
@@ -1147,11 +1170,34 @@ export class DesktopUpdaterController {
       if (!onlyAuthRestoreIsPending) break;
       await wait(retryDelay);
       try {
-        await this.deps.refreshSessionForRecovery?.();
+        lastSessionRefresh = await this.deps.refreshSessionForRecovery?.();
+        if (
+          lastSessionRefresh?.status === "missing"
+          || lastSessionRefresh?.status === "expired"
+          || lastSessionRefresh?.status === "invalid"
+        ) {
+          sawPermanentSessionRestoreFailure = true;
+        }
       } catch (error) {
         this.logger.warn("[updater] account session recovery refresh failed", error);
       }
       verification = await verifyOnce();
+    }
+    const onlyTemporaryAuthRestoreIsPending =
+      !verification.ok &&
+      verification.violations.length === 1 &&
+      verification.violations[0] === "account-session-not-restored" &&
+      lastSessionRefresh?.status === "temporarily-unavailable" &&
+      !sawPermanentSessionRestoreFailure;
+    if (onlyTemporaryAuthRestoreIsPending) {
+      // The encrypted cookie still exists and every durable local-state check
+      // passed. A background relaunch can temporarily lack Keychain access;
+      // that is an auth bootstrap delay, not a reason to send the user into
+      // data recovery. Missing/corrupt auth and every DB/agent/route violation
+      // remain fail-closed through the ordinary verification result.
+      this.logger.warn("[updater] deferred temporary account-session restore after local continuity passed");
+      this.deferredSessionRestoreRequested = true;
+      return { ok: true, violations: [] };
     }
     return verification;
   }
@@ -1332,6 +1378,7 @@ export class DesktopUpdaterController {
 
   dispose(): void {
     this.nativeInstallHandedOff = false;
+    this.deferredSessionRestoreRequested = false;
     if (this.initialTimer) clearTimeout(this.initialTimer);
     if (this.timer) clearInterval(this.timer);
     this.initialTimer = null;

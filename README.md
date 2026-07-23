@@ -69,6 +69,19 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-23 · v0.9.4 — sealed macOS runtime and reliable first relaunch** —
+  official macOS installs remove only verified unsigned Python caches, recheck
+  the exact Developer ID and Gatekeeper boundary, and make embedded runtime
+  files read-only before Python starts. A temporary Keychain delay after an
+  update now restores the existing encrypted session in-process without being
+  misreported as data recovery or deleting Mobile Bridge pairings; permanent
+  auth and local-data violations remain fail-closed. Dashboard readiness also
+  no longer opens an empty external Chrome/Edge window just to inspect an
+  on-demand browser MCP. This release binds
+  Agentlas OS v1.1.58 at
+  `47e2368e5c775d6345118c6409850872ec647738`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 - **2026-07-23 · v0.9.3 — restored macOS automatic updates without reinstalling** —
   macOS update ZIPs now stay owner-writable while Squirrel clears quarantine,
   while every embedded Python launch keeps bytecode caches outside signed

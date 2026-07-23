@@ -177,7 +177,8 @@ export function RuntimeReadiness() {
     const pluginStates = (fulfilled(pluginResult) ?? []) as McpServerStatus[];
     const enabledPlugins = installed.filter((plugin) => plugin.enabled);
     const connectedPlugins = pluginStates.filter((plugin) => plugin.connected).length;
-    const pluginProblems = pluginStates.filter((plugin) => !plugin.connected);
+    const deferredPlugins = pluginStates.filter((plugin) => plugin.deferred === "interactive");
+    const pluginProblems = pluginStates.filter((plugin) => !plugin.connected && plugin.deferred !== "interactive");
 
     const items: ReadinessItem[] = [
       {
@@ -224,7 +225,11 @@ export function RuntimeReadiness() {
         detail: enabledPlugins.length === 0
           ? (ko ? "활성 플러그인이 없습니다. 필요한 작업에서만 추가하세요." : "No active plugins. Add them only when a task needs one.")
           : pluginProblems.length === 0
-            ? (ko ? `${connectedPlugins}개 활성 연결 확인` : `${connectedPlugins} active connection${connectedPlugins === 1 ? "" : "s"} verified`)
+            ? (deferredPlugins.length > 0
+              ? (ko
+                ? `${connectedPlugins}개 연결 확인 · ${deferredPlugins.length}개는 필요할 때만 브라우저를 엽니다.`
+                : `${connectedPlugins} connection${connectedPlugins === 1 ? "" : "s"} verified · ${deferredPlugins.length} opens only when needed.`)
+              : (ko ? `${connectedPlugins}개 활성 연결 확인` : `${connectedPlugins} active connection${connectedPlugins === 1 ? "" : "s"} verified`))
             : (ko ? `${pluginProblems.length}개 연결에 자격증명 또는 서버 확인이 필요합니다.` : `${pluginProblems.length} connection${pluginProblems.length === 1 ? "" : "s"} need credentials or a server check.`),
         status: enabledPlugins.length === 0 ? "optional" : pluginProblems.length === 0 ? "ready" : "attention",
       },

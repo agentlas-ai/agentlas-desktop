@@ -27,8 +27,109 @@ type CacheCandidate = {
   filePath: string;
   dev: number;
   ino: number;
-  parents: Array<{ directoryPath: string; dev: number; ino: number }>;
+  parents: Array<{ directoryPath: string; dev: number; ino: number; mode: number }>;
 };
+
+function decodeXmlText(value: string): string | null {
+  // `plutil` owns plist decoding and `xmllint` owns XPath selection. This tiny
+  // decoder handles only the XML text representation emitted by those tools;
+  // raw markup or an unknown entity fails closed instead of becoming a path.
+  if (
+    /[<>]/.test(value)
+    || /&(?!(?:amp|lt|gt|quot|apos);|#(?:[0-9]+|x[0-9a-fA-F]+);)/.test(value)
+  ) return null;
+  let valid = true;
+  const decoded = value.replace(
+    /&(?:amp|lt|gt|quot|apos);|&#(?:[0-9]+|x[0-9a-fA-F]+);/g,
+    (entity) => {
+      switch (entity) {
+        case "&amp;": return "&";
+        case "&lt;": return "<";
+        case "&gt;": return ">";
+        case "&quot;": return '"';
+        case "&apos;": return "'";
+        default: {
+          const hexadecimal = entity.startsWith("&#x");
+          const digits = entity.slice(hexadecimal ? 3 : 2, -1);
+          const codePoint = Number.parseInt(digits, hexadecimal ? 16 : 10);
+          if (
+            !Number.isInteger(codePoint)
+            || codePoint < 0
+            || codePoint > 0x10ffff
+            || (codePoint >= 0xd800 && codePoint <= 0xdfff)
+          ) {
+            valid = false;
+            return "";
+          }
+          try {
+            return String.fromCodePoint(codePoint);
+          } catch {
+            valid = false;
+            return "";
+          }
+        }
+      }
+    },
+  );
+  return valid ? decoded : null;
+}
+
+function topLevelPlistDictionaryKeys(
+  plist: string,
+  key: "files" | "files2",
+  optional = false,
+): string[] | null {
+  if (optional) {
+    try {
+      const type = execFileSync("/usr/bin/plutil", ["-type", key, plist], {
+        encoding: "utf8",
+        timeout: 5_000,
+        maxBuffer: 1024 * 1024,
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+      if (type !== "dictionary") return null;
+    } catch {
+      // `files` is absent in some otherwise valid CodeResources versions.
+      return [];
+    }
+  }
+  try {
+    const extracted = execFileSync(
+      "/usr/bin/plutil",
+      ["-extract", key, "xml1", "-expect", "dictionary", "-o", "-", plist],
+      { encoding: "utf8", timeout: 5_000, maxBuffer: 16 * 1024 * 1024 },
+    );
+    const countText = execFileSync(
+      "/usr/bin/xmllint",
+      ["--nonet", "--xpath", "count(/plist/dict/key)", "-"],
+      { input: extracted, encoding: "utf8", timeout: 5_000, maxBuffer: 1024 * 1024 },
+    ).trim();
+    const count = Number(countText);
+    if (!Number.isSafeInteger(count) || count < 0) return null;
+    if (count === 0) return [];
+    // Select only direct keys of the extracted dictionary. Nested `hash2`,
+    // `cdhash`, and `requirement` keys are deliberately outside this XPath.
+    const selected = execFileSync(
+      "/usr/bin/xmllint",
+      ["--nonet", "--xpath", "/plist/dict/key", "-"],
+      { input: extracted, encoding: "utf8", timeout: 5_000, maxBuffer: 16 * 1024 * 1024 },
+    );
+    const keys: string[] = [];
+    const matcher = /<key>([\s\S]*?)<\/key>/g;
+    let cursor = 0;
+    for (const match of selected.matchAll(matcher)) {
+      if (match.index === undefined || selected.slice(cursor, match.index).trim() !== "") return null;
+      const decoded = decodeXmlText(match[1]);
+      if (decoded === null || decoded.length === 0 || decoded.includes("\0")) return null;
+      keys.push(decoded);
+      cursor = match.index + match[0].length;
+    }
+    if (keys.length !== count || selected.slice(cursor).trim() !== "") return null;
+    return keys;
+  } catch {
+    return null;
+  }
+}
 
 function sealedResourcePaths(bundleRoot: string, contentsRoot: string): Set<string> | null {
   const signatureRoot = path.join(contentsRoot, "_CodeSignature");
@@ -40,15 +141,19 @@ function sealedResourcePaths(bundleRoot: string, contentsRoot: string): Set<stri
     }
     const leaf = fs.lstatSync(codeResources);
     if (!leaf.isFile() || leaf.isSymbolicLink() || leaf.nlink !== 1) return null;
-    const parsed = JSON.parse(execFileSync(
-      "/usr/bin/plutil",
-      ["-convert", "json", "-o", "-", codeResources],
-      { encoding: "utf8", timeout: 5_000, maxBuffer: 16 * 1024 * 1024 },
-    )) as { files?: unknown; files2?: unknown };
+    execFileSync("/usr/bin/plutil", ["-lint", codeResources], {
+      encoding: "utf8",
+      timeout: 5_000,
+      maxBuffer: 1024 * 1024,
+    });
+    // CodeResources contains plist `data` values which JSON cannot represent.
+    // Extract each dictionary as XML, then ask xmllint for direct keys only.
+    const files = topLevelPlistDictionaryKeys(codeResources, "files", true);
+    const files2 = topLevelPlistDictionaryKeys(codeResources, "files2");
+    if (!files || !files2) return null;
     const sealed = new Set<string>();
-    for (const entries of [parsed.files, parsed.files2]) {
-      if (!entries || typeof entries !== "object" || Array.isArray(entries)) continue;
-      for (const name of Object.keys(entries)) sealed.add(name.replaceAll("\\", "/"));
+    for (const entries of [files, files2]) {
+      for (const name of entries) sealed.add(name.replaceAll("\\", "/"));
     }
     return sealed;
   } catch {
@@ -81,7 +186,6 @@ export async function repairMacInstalledAppGeneratedPythonCaches(input: {
   const sealed = sealedResourcePaths(bundleRoot, contentsRoot);
   if (!sealed) return false;
   const files: CacheCandidate[] = [];
-  const cacheDirectories: string[] = [];
   let visited = 0;
   const visit = (candidate: string): void => {
     if (visited >= 100_000) throw new Error("Python cache repair scan limit exceeded");
@@ -92,14 +196,9 @@ export async function repairMacInstalledAppGeneratedPythonCaches(input: {
     if (relative.startsWith("..") || path.isAbsolute(relative)) return;
     if (stat.isDirectory()) {
       for (const entry of fs.readdirSync(candidate)) visit(path.join(candidate, entry));
-      if (path.basename(candidate) === "__pycache__") cacheDirectories.push(candidate);
       return;
     }
-    if (
-      stat.isFile()
-      && /\.py[co]$/i.test(path.basename(candidate))
-      && relative.split(path.sep).includes("__pycache__")
-    ) {
+    if (stat.isFile() && /\.py[co]$/i.test(path.basename(candidate))) {
       if (stat.nlink !== 1) throw new Error("Python cache repair candidate is hard-linked");
       const contentsRelative = path.relative(contentsRoot, candidate).split(path.sep).join("/");
       if (sealed.has(contentsRelative)) throw new Error("Python cache repair candidate is a signed resource");
@@ -108,7 +207,12 @@ export async function repairMacInstalledAppGeneratedPythonCaches(input: {
       while (directoryPath.length >= resourcesRoot.length) {
         const parentStat = fs.lstatSync(directoryPath);
         if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) return;
-        parents.push({ directoryPath, dev: parentStat.dev, ino: parentStat.ino });
+        parents.push({
+          directoryPath,
+          dev: parentStat.dev,
+          ino: parentStat.ino,
+          mode: parentStat.mode & 0o777,
+        });
         if (directoryPath === resourcesRoot) break;
         directoryPath = path.dirname(directoryPath);
       }
@@ -134,27 +238,63 @@ export async function repairMacInstalledAppGeneratedPythonCaches(input: {
           && current.ino === parent.ino;
       });
       if (!parentsStable) continue;
-      const current = fs.lstatSync(candidate.filePath);
-      if (
-        !current.isFile()
-        || current.isSymbolicLink()
-        || current.nlink !== 1
-        || current.dev !== candidate.dev
-        || current.ino !== candidate.ino
-      ) {
-        continue;
-      }
-      fs.unlinkSync(candidate.filePath);
-      removed += 1;
-    }
-    for (const directory of cacheDirectories.sort((left, right) => right.length - left.length)) {
+      const immediateParent = candidate.parents[0];
+      if (!immediateParent) continue;
+      const temporaryParentMode = immediateParent.mode | 0o300;
+      const restoreParentMode = temporaryParentMode !== immediateParent.mode;
+      let parentFd: number | null = null;
+      let parentModeChanged = false;
       try {
-        const stat = fs.lstatSync(directory);
-        if (stat.isDirectory() && !stat.isSymbolicLink() && fs.readdirSync(directory).length === 0) fs.rmdirSync(directory);
-      } catch {
-        // A non-empty or concurrently changed directory is left untouched.
+        parentFd = fs.openSync(
+          immediateParent.directoryPath,
+          fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+        );
+        const openedParent = fs.fstatSync(parentFd);
+        if (
+          !openedParent.isDirectory()
+          || openedParent.dev !== immediateParent.dev
+          || openedParent.ino !== immediateParent.ino
+        ) {
+          continue;
+        }
+        if (restoreParentMode) {
+          fs.fchmodSync(parentFd, temporaryParentMode);
+          parentModeChanged = true;
+        }
+        const currentParent = fs.lstatSync(immediateParent.directoryPath);
+        if (
+          !currentParent.isDirectory()
+          || currentParent.isSymbolicLink()
+          || currentParent.dev !== immediateParent.dev
+          || currentParent.ino !== immediateParent.ino
+        ) {
+          continue;
+        }
+        const current = fs.lstatSync(candidate.filePath);
+        if (
+          !current.isFile()
+          || current.isSymbolicLink()
+          || current.nlink !== 1
+          || current.dev !== candidate.dev
+          || current.ino !== candidate.ino
+        ) {
+          continue;
+        }
+        fs.unlinkSync(candidate.filePath);
+        removed += 1;
+      } finally {
+        if (parentFd !== null) {
+          try {
+            if (parentModeChanged) fs.fchmodSync(parentFd, immediateParent.mode);
+          } finally {
+            fs.closeSync(parentFd);
+          }
+        }
       }
     }
+    // Empty generated-cache directories do not participate in the code seal.
+    // Leave them in place so repairing a previously read-only install never
+    // requires widening a signed ancestor merely to remove an empty entry.
     return removed > 0;
   } catch {
     return false;

@@ -7,7 +7,7 @@ import { app, BrowserWindow, dialog, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import type { UpdaterActionResult, UpdaterState } from "../shared/types";
-import { bootAuthFromKeychain, getAuthSession } from "./auth";
+import { bootAuthFromKeychain, getAuthSession, type AuthRestoreResult } from "./auth";
 import { quiesceAutomationSchedulerForUpdate } from "./automation-scheduler";
 import { quiesceHubBookmarkSyncForUpdate } from "./hub-bookmark-sync";
 import {
@@ -180,8 +180,13 @@ export function onUpdaterStateChange(listener: (state: UpdaterState) => void): (
   return () => stateListeners.delete(listener);
 }
 
+export interface AutoUpdaterInitOptions {
+  initialAuthRestore?: AuthRestoreResult;
+  onDeferredAuthRestore?: () => void;
+}
+
 /** Called only after initStore() and auth restoration have completed. */
-export async function initAutoUpdater(): Promise<void> {
+export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Promise<void> {
   if (process.env.NODE_ENV === "development") {
     console.log("[updater] dev mode — skipping auto-update");
     return;
@@ -192,8 +197,36 @@ export async function initAutoUpdater(): Promise<void> {
   }
   const hasUpdateConfig = hasBundledUpdateConfig();
   if (!hasUpdateConfig) console.warn(`[updater] app-update.yml missing — automatic checks are disabled (${updateConfigPath()})`);
+  const dispatchDeferredAuthRestore = () => {
+    if (!controller || !options.onDeferredAuthRestore) return;
+    const state = controller.getState().status;
+    if (state === "recovery-required") return;
+    const controllerRequested = controller.hasDeferredSessionRestoreRequest();
+    const initialRestoreWasTemporary =
+      options.initialAuthRestore?.status === "temporarily-unavailable";
+    // A controller request came from a verified journal and is safe to dispatch
+    // only after that journal was deleted. Initial-only temporary auth also
+    // covers ordinary startup where no continuity journal exists.
+    if (controllerRequested && state !== "updated") return;
+    if (!controllerRequested && !initialRestoreWasTemporary) return;
+    // Controller-owned retries can restore the account while reconciling. In
+    // that case no deferred loop is needed, but leave the request intact: only
+    // the successful scheduling path below is allowed to consume it.
+    if (getAuthSession().signedIn) return;
+    try {
+      options.onDeferredAuthRestore();
+      // Never consume a journal request merely because init returned. It stays
+      // durable in the controller until the main-process retry was scheduled.
+      if (controllerRequested) controller.consumeDeferredSessionRestoreRequest();
+    } catch (error) {
+      // Auth UI reconciliation is best-effort and happens only after the
+      // authoritative journal transaction has completed.
+      console.warn("[updater] deferred account-session restore scheduling failed", error);
+    }
+  };
   if (controller) {
     await controller.init();
+    dispatchDeferredAuthRestore();
     return;
   }
 
@@ -259,12 +292,14 @@ export async function initAutoUpdater(): Promise<void> {
         currentDatabasePath: dbPath,
         currentAccountSignedIn: getAuthSession().signedIn,
       }),
+    initialSessionRestore: options.initialAuthRestore,
     refreshSessionForRecovery: bootAuthFromKeychain,
     broadcast,
     revealPath: (filePath) => shell.showItemInFolder(filePath),
     schedule: hasUpdateConfig,
   });
   await controller.init();
+  dispatchDeferredAuthRestore();
   // Keep the native fallback armed until a recovery-required renderer can be
   // created. All other authoritative states have closed the preflight window.
   if (controller.getState().status !== "recovery-required") startupRecovery = null;

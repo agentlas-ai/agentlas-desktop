@@ -31,6 +31,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     const timeout = window.setTimeout(() => {
       if (alive) setSession({ signedIn: false });
     }, 10_000);
+    const unsubscribeSession = api.auth.onSessionChanged?.((next) => {
+      window.clearTimeout(timeout);
+      if (alive) setSession(next);
+    });
     api.auth
       .getSession()
       .then((s) => {
@@ -44,6 +48,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     return () => {
       alive = false;
       window.clearTimeout(timeout);
+      unsubscribeSession?.();
     };
   }, []);
 

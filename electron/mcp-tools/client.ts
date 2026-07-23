@@ -849,9 +849,52 @@ export async function testServerById(id: string): Promise<McpServerStatus> {
   return testServerConnection(server);
 }
 
-/** 활성화된 모든 서버를 병렬로 점검. env 부족분만 빠르게 표시(연결 안 함). */
-export async function statusAllServers(): Promise<McpServerStatus[]> {
-  const servers = listInstalledServers().filter((s) => s.enabled);
+/**
+ * Passive health surfaces (Dashboard, startup readiness) must never launch a
+ * visible browser merely to ask whether an on-demand browser MCP is usable.
+ * `testServerById` remains the explicit path that starts and probes it.
+ */
+function deferredInteractiveStatus(server: InstalledMcpServer, checkedAt: string): McpServerStatus {
+  return {
+    id: server.id,
+    connected: false,
+    tools: [],
+    error: null,
+    missingEnv: [],
+    checkedAt,
+    deferred: "interactive",
+  };
+}
+
+function needsInteractiveLaunchForHealthCheck(server: InstalledMcpServer): boolean {
+  // Browser MCPs may boot a dedicated visible browser/profile on their first
+  // stdio connection. Treat both built-in browser variants as on-demand;
+  // probing Agentlas Browser from Dashboard used to open a blank Chrome tab on
+  // every Dashboard visit.
+  return server.catalogId === "agentlas-browser" || server.catalogId === "playwright";
+}
+
+export interface McpStatusAllDependencies {
+  listServers?: () => InstalledMcpServer[];
+  probe?: (server: InstalledMcpServer) => Promise<McpServerStatus>;
+  now?: () => Date;
+}
+
+/**
+ * 활성화된 서버를 병렬 점검한다. 사용자에게 보이는 앱을 여는 서버는 설정됨으로만
+ * 표시하고, 사용자가 해당 서버의 "테스트" 또는 실제 브라우저 작업을 요청할 때만
+ * 연결한다.
+ */
+export async function statusAllServers(
+  deps: McpStatusAllDependencies = {},
+): Promise<McpServerStatus[]> {
+  const servers = (deps.listServers ?? listInstalledServers)().filter((s) => s.enabled);
+  const checkedAt = (deps.now ?? (() => new Date()))().toISOString();
+  const probe = deps.probe ?? testServerConnection;
   // 전부 동시에 spawn하면 무거우니 env 누락은 즉시, 나머지는 연결 점검.
-  return Promise.all(servers.map((s) => testServerConnection(s)));
+  return Promise.all(servers.map((server) =>
+    needsInteractiveLaunchForHealthCheck(server)
+      ? deferredInteractiveStatus(server, checkedAt)
+      : probe(server),
+  ));
 }

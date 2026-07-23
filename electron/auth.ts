@@ -59,9 +59,9 @@ export interface AuthSessionInvalidationEvent {
 
 const sessionInvalidationListeners = new Set<(event: AuthSessionInvalidationEvent) => void>();
 
-function queueCookieMutation(mutation: () => Promise<void>): Promise<void> {
+function queueCookieMutation<T>(mutation: () => Promise<T>): Promise<T> {
   const next = _cookieMutationChain.then(mutation, mutation);
-  _cookieMutationChain = next.catch(() => {});
+  _cookieMutationChain = next.then(() => undefined, () => undefined);
   return next;
 }
 
@@ -84,26 +84,124 @@ interface StoredAuthCookie {
   updatedAt: string;
 }
 
+export type AuthRestoreResult =
+  | { status: "restored"; signedIn: true }
+  | { status: "missing" | "expired" | "invalid" | "temporarily-unavailable"; signedIn: false };
+
+type StoredSessionCookieReadResult =
+  | { status: "restored"; value: string; durableIdentity: string }
+  | { status: "missing" | "invalid" | "temporarily-unavailable" };
+
+const TEMPORARY_AUTH_FILE_ERROR_CODES = new Set([
+  "EAGAIN",
+  "EBUSY",
+  "EINTR",
+  "EMFILE",
+  "ENFILE",
+  "ETIMEDOUT",
+]);
+
+// A Keychain helper can be permanently parked while macOS/Windows is waking
+// from an updater handoff. Each async safeStorage hop has its own deadline so
+// startup can preserve the durable cookie and retry later instead of hanging
+// the whole application. The late promise is observed but never receives a
+// callback that could mutate auth state.
+const SAFE_STORAGE_ASYNC_ATTEMPT_TIMEOUT_MS = 5_000;
+
+export type AuthRestoreAttemptResult<T> =
+  | { status: "fulfilled"; value: T }
+  | { status: "rejected"; error: unknown }
+  | { status: "timed-out" };
+
+export async function settleAuthRestoreAttempt<T>(
+  attempt: () => Promise<T> | T,
+  timeoutMs = SAFE_STORAGE_ASYNC_ATTEMPT_TIMEOUT_MS,
+): Promise<AuthRestoreAttemptResult<T>> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const settled = Promise.resolve()
+    .then(attempt)
+    .then(
+      (value): AuthRestoreAttemptResult<T> => ({ status: "fulfilled", value }),
+      (error): AuthRestoreAttemptResult<T> => ({ status: "rejected", error }),
+    );
+  const deadline = new Promise<AuthRestoreAttemptResult<T>>((resolve) => {
+    timeout = setTimeout(() => resolve({ status: "timed-out" }), Math.max(0, timeoutMs));
+    timeout.unref?.();
+  });
+  try {
+    return await Promise.race([settled, deadline]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 function authCookiePath(): string {
   return path.join(app.getPath("userData"), "auth", "session-cookie.v1.json");
 }
 
-async function readStoredSessionCookie(): Promise<string | null> {
-  if (USE_MEMORY_AUTH) return memoryAuthCookie;
+function parseStoredAuthCookie(raw: string): { ciphertext: Buffer; durableIdentity: string } | null {
+  let parsed: Partial<StoredAuthCookie>;
   try {
-    const raw = await fs.readFile(authCookiePath(), "utf8");
-    const parsed = JSON.parse(raw) as Partial<StoredAuthCookie>;
-    if (parsed.version !== 1 || parsed.encoding !== "safeStorage/base64" || typeof parsed.value !== "string") {
-      return null;
-    }
-    if (!safeStorage.isEncryptionAvailable()) return null;
-    return safeStorage.decryptString(Buffer.from(parsed.value, "base64"));
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      console.warn("[auth] local session read failed", err);
-    }
+    parsed = JSON.parse(raw) as Partial<StoredAuthCookie>;
+  } catch {
     return null;
   }
+  if (parsed.version !== 1 || parsed.encoding !== "safeStorage/base64" || typeof parsed.value !== "string") {
+    return null;
+  }
+  const ciphertext = Buffer.from(parsed.value, "base64");
+  if (!parsed.value || ciphertext.length === 0 || ciphertext.toString("base64") !== parsed.value) {
+    return null;
+  }
+  return { ciphertext, durableIdentity: parsed.value };
+}
+
+async function readStoredSessionCookie(): Promise<StoredSessionCookieReadResult> {
+  if (USE_MEMORY_AUTH) {
+    return memoryAuthCookie
+      ? { status: "restored", value: memoryAuthCookie, durableIdentity: memoryAuthCookie }
+      : { status: "missing" };
+  }
+  let raw: string;
+  try {
+    raw = await fs.readFile(authCookiePath(), "utf8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { status: "missing" };
+    if (typeof code === "string" && TEMPORARY_AUTH_FILE_ERROR_CODES.has(code)) {
+      console.warn("[auth] local session read temporarily unavailable", err);
+      return { status: "temporarily-unavailable" };
+    }
+    console.warn("[auth] local session file is invalid or inaccessible", err);
+    return { status: "invalid" };
+  }
+  const envelope = parseStoredAuthCookie(raw);
+  if (!envelope) return { status: "invalid" };
+  // Electron 43 initializes its asynchronous safeStorage backend lazily.
+  // The synchronous availability/decrypt pair can report a signed-in user's
+  // Keychain as unavailable during Squirrel's background relaunch. Async
+  // decrypt reads the exact same v1/base64 ciphertext and waits for that
+  // initialization without changing the durable file.
+  const availability = await settleAuthRestoreAttempt(() => safeStorage.isAsyncEncryptionAvailable());
+  if (availability.status === "timed-out") {
+    console.warn("[auth] async local session encryption availability timed out");
+    return { status: "temporarily-unavailable" };
+  }
+  if (availability.status === "rejected") {
+    console.warn("[auth] async local session encryption backend temporarily unavailable", availability.error);
+    return { status: "temporarily-unavailable" };
+  }
+  if (!availability.value) return { status: "temporarily-unavailable" };
+  const decrypted = await settleAuthRestoreAttempt(() => safeStorage.decryptStringAsync(envelope.ciphertext));
+  if (decrypted.status === "timed-out") {
+    console.warn("[auth] async local session decryption timed out");
+    return { status: "temporarily-unavailable" };
+  }
+  if (decrypted.status === "rejected" || typeof decrypted.value.result !== "string") {
+    console.warn("[auth] local session ciphertext is invalid", decrypted.status === "rejected" ? decrypted.error : undefined);
+    return { status: "invalid" };
+  }
+  return { status: "restored", value: decrypted.value.result, durableIdentity: envelope.durableIdentity };
 }
 
 async function writeStoredSessionCookie(value: string): Promise<void> {
@@ -138,25 +236,89 @@ async function deleteStoredSessionCookie(): Promise<void> {
   }
 }
 
-/** cookie value의 body 부분만 base64url decode — signature 검증 안 함 (서버 신뢰). */
-function decodeSessionCookie(value: string): {
-  userId?: string;
-  workspaceId?: string;
-  expiresAt?: number;
-} {
-  const dot = value.indexOf(".");
-  if (dot < 0) return {};
-  const body = value.slice(0, dot);
+async function deleteStoredSessionCookieIfUnchanged(
+  durableIdentity: string,
+  restoreGeneration: number,
+): Promise<boolean> {
+  return queueCookieMutation(async () => {
+    // A login/logout begun after this boot attempt owns both in-memory and
+    // durable state. Never let an old expiry cleanup remove its cookie.
+    if (restoreGeneration !== _sessionGeneration) return false;
+    if (USE_MEMORY_AUTH) {
+      if (memoryAuthCookie !== durableIdentity) return false;
+      memoryAuthCookie = null;
+      return true;
+    }
+    let raw: string;
+    try {
+      raw = await fs.readFile(authCookiePath(), "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.warn("[auth] local session conditional delete read failed", err);
+      }
+      return false;
+    }
+    const current = parseStoredAuthCookie(raw);
+    if (!current || current.durableIdentity !== durableIdentity || restoreGeneration !== _sessionGeneration) {
+      return false;
+    }
+    try {
+      await fs.rm(authCookiePath(), { force: true });
+      return true;
+    } catch (err) {
+      console.warn("[auth] local session conditional delete failed", err);
+      return false;
+    }
+  });
+}
+
+interface DecodedSessionCookie {
+  userId: string;
+  workspaceId: string;
+  expiresAt: number;
+}
+
+type DecodedSessionCookieResult =
+  | { status: "valid"; value: DecodedSessionCookie }
+  | { status: "expired" }
+  | { status: "invalid" };
+
+/** Parse only the signed-cookie shape. Signature verification belongs to the server. */
+function decodeSessionCookie(value: string): DecodedSessionCookieResult {
+  const parts = value.split(".");
+  if (
+    parts.length !== 2
+    || !/^[A-Za-z0-9_-]+$/.test(parts[0])
+    || !/^[A-Za-z0-9_-]+$/.test(parts[1])
+  ) {
+    return { status: "invalid" };
+  }
+  const [body] = parts;
   try {
     const json = Buffer.from(body, "base64url").toString("utf8");
-    const obj = JSON.parse(json) as { userId?: string; workspaceId?: string; exp?: number };
-    return {
-      userId: obj.userId,
-      workspaceId: obj.workspaceId,
-      expiresAt: typeof obj.exp === "number" ? obj.exp * 1000 : undefined,
-    };
+    if (Buffer.from(json, "utf8").toString("base64url") !== body) return { status: "invalid" };
+    const obj = JSON.parse(json) as { userId?: unknown; workspaceId?: unknown; exp?: unknown };
+    if (
+      !obj
+      || typeof obj !== "object"
+      || Array.isArray(obj)
+      || typeof obj.userId !== "string"
+      || !obj.userId.trim()
+      || obj.userId.trim() !== obj.userId
+      || typeof obj.workspaceId !== "string"
+      || !obj.workspaceId.trim()
+      || obj.workspaceId.trim() !== obj.workspaceId
+      || typeof obj.exp !== "number"
+      || !Number.isFinite(obj.exp)
+    ) {
+      return { status: "invalid" };
+    }
+    const expiresAt = obj.exp * 1_000;
+    if (!Number.isFinite(expiresAt)) return { status: "invalid" };
+    if (expiresAt <= Date.now()) return { status: "expired" };
+    return { status: "valid", value: { userId: obj.userId, workspaceId: obj.workspaceId, expiresAt } };
   } catch {
-    return {};
+    return { status: "invalid" };
   }
 }
 
@@ -238,29 +400,72 @@ function scheduleMetaRefresh(): void {
   });
 }
 
-/** 부팅 시 로컬 암호화 저장소에서 cookie를 복원 — TTL이 만료됐으면 null.
+/** 부팅 시 로컬 암호화 저장소에서 cookie를 복원하고 결과를 구조적으로 반환한다.
  *  함수명은 기존 호출부 호환을 위해 유지한다. */
-export async function bootAuthFromKeychain(): Promise<void> {
+export async function bootAuthFromKeychain(): Promise<AuthRestoreResult> {
+  // This read/decrypt crosses asynchronous OS storage. A sign-in/sign-out can
+  // legitimately happen while it is pending; that newer intent must win over
+  // this boot snapshot in both memory and the durable cookie file.
+  const restoreGeneration = _sessionGeneration;
+  const currentGenerationResult = (): AuthRestoreResult => (
+    getAuthSession().signedIn
+      ? { status: "restored", signedIn: true }
+      : { status: "missing", signedIn: false }
+  );
   try {
     const stored = await readStoredSessionCookie();
-    if (!stored) return;
-    const decoded = decodeSessionCookie(stored);
-    if (decoded.expiresAt && decoded.expiresAt < Date.now()) {
-      // 만료 — 정리하고 끝.
-      await deleteStoredSessionCookie();
-      return;
+    if (restoreGeneration !== _sessionGeneration) return currentGenerationResult();
+    if (stored.status !== "restored") return { status: stored.status, signedIn: false };
+    const decoded = decodeSessionCookie(stored.value);
+    if (decoded.status === "invalid") return { status: "invalid", signedIn: false };
+    if (decoded.status === "expired") {
+      // Expiry cleanup is conditional on the exact ciphertext observed by this
+      // generation, so it cannot erase a cookie saved by a new login.
+      await deleteStoredSessionCookieIfUnchanged(stored.durableIdentity, restoreGeneration);
+      if (restoreGeneration !== _sessionGeneration) return currentGenerationResult();
+      return { status: "expired", signedIn: false };
     }
+    if (restoreGeneration !== _sessionGeneration) return currentGenerationResult();
     _cache = {
-      cookieValue: stored,
-      userId: decoded.userId,
-      workspaceId: decoded.workspaceId,
-      expiresAt: decoded.expiresAt,
+      cookieValue: stored.value,
+      userId: decoded.value.userId,
+      workspaceId: decoded.value.workspaceId,
+      expiresAt: decoded.value.expiresAt,
     };
     // 이메일/이름은 백그라운드로 fetch (실패해도 무방; 실패 시 getAuthSession 폴링이 재시도)
     scheduleMetaRefresh();
+    return { status: "restored", signedIn: true };
   } catch (err) {
     console.warn("[auth] boot from keychain failed", err);
+    return { status: "temporarily-unavailable", signedIn: false };
   }
+}
+
+const DEFERRED_AUTH_RESTORE_DELAYS_MS = [0, 1_000, 2_000, 5_000, 10_000] as const;
+
+/**
+ * Bounded, non-blocking caller-owned recovery for a temporary startup miss.
+ * Permanent states stop immediately; a temporary result is never converted
+ * into a signed-out mutation and the encrypted file is left untouched.
+ */
+export async function retryTemporaryAuthRestore(options: {
+  restore?: () => Promise<AuthRestoreResult>;
+  wait?: (delayMs: number) => Promise<void>;
+  delaysMs?: readonly number[];
+} = {}): Promise<AuthRestoreResult> {
+  const restore = options.restore ?? bootAuthFromKeychain;
+  const wait = options.wait ?? ((delayMs: number) => new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, delayMs);
+    timer.unref?.();
+  }));
+  const delays = options.delaysMs ?? DEFERRED_AUTH_RESTORE_DELAYS_MS;
+  let result: AuthRestoreResult = { status: "temporarily-unavailable", signedIn: false };
+  for (const delayMs of delays) {
+    if (delayMs > 0) await wait(delayMs);
+    result = await restore();
+    if (result.status !== "temporarily-unavailable") return result;
+  }
+  return result;
 }
 
 export function getAuthSession(): AuthSession {
@@ -289,6 +494,13 @@ export function getAuthSession(): AuthSession {
 
 /** cookie value를 로컬 암호화 저장소 + 메모리 캐시에 영구화하고 메타를 채운다. 두 로그인 경로(창/브라우저)가 공유. */
 async function persistSession(value: string): Promise<AuthSession> {
+  const decoded = decodeSessionCookie(value);
+  if (decoded.status !== "valid") {
+    // A browser callback never gets to overwrite a known-good local session
+    // unless it carries the minimally valid signed cookie shape.
+    console.warn("[auth] rejected malformed or expired sign-in cookie");
+    return getAuthSession();
+  }
   const generation = ++_sessionGeneration;
   try {
     await queueCookieMutation(() => writeStoredSessionCookie(value));
@@ -298,12 +510,11 @@ async function persistSession(value: string): Promise<AuthSession> {
   // A newer login or logout owns both memory and durable state. Because cookie
   // writes are serialized, its queued mutation will also be the final disk one.
   if (generation !== _sessionGeneration) return getAuthSession();
-  const decoded = decodeSessionCookie(value);
   _cache = {
     cookieValue: value,
-    userId: decoded.userId,
-    workspaceId: decoded.workspaceId,
-    expiresAt: decoded.expiresAt,
+    userId: decoded.value.userId,
+    workspaceId: decoded.value.workspaceId,
+    expiresAt: decoded.value.expiresAt,
   };
   const meta = await fetchAccountMeta(value);
   if (generation !== _sessionGeneration || !_cache || _cache.cookieValue !== value) {

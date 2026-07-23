@@ -46,9 +46,16 @@ import {
 } from "./updater";
 import { createAutomaticQuitInstaller } from "./updater/automatic-quit-install";
 import { scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls } from "./updater/continuity";
+import { resolveMacAppBundle } from "./updater/controller";
 import { disposeAppFactoryLaunches } from "./app-factory/operations";
 import { disposeSiteAgentAppRuntimes } from "./site/agent-app-runtime";
-import { bootAuthFromKeychain, getAuthSession, onAuthSessionInvalidated } from "./auth";
+import {
+  bootAuthFromKeychain,
+  getAuthSession,
+  onAuthSessionInvalidated,
+  retryTemporaryAuthRestore,
+  type AuthRestoreResult,
+} from "./auth";
 import {
   broadcastHubBookmarkSnapshot,
   failCloseActiveHubBookmarks,
@@ -70,6 +77,7 @@ import { serveOneArtifactProtocolRequest } from "./one/artifact-preview";
 import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
 import { initFileLogging, mainLogFilePath } from "./logging";
 import { setCurrentUiLocale } from "./ui-locale";
+import { prepareMacRuntimeResourcesForExecution } from "./runtime/mac-resource-seal";
 import {
   issueMobileBridgePairing,
   listMobileBridgeDevices,
@@ -88,17 +96,49 @@ const isDev = process.env.NODE_ENV === "development";
 const AUTH_SESSION_CHANGED_CHANNEL = "auth:sessionChanged";
 let disposeAuthSessionInvalidation: (() => void) | null = null;
 let disposeMobileBridgeStateChange: (() => void) | null = null;
+let deferredAuthRestorePromise: Promise<AuthRestoreResult> | null = null;
 
-function broadcastSignedOutSession(): void {
+function broadcastAuthSession(sessionSnapshot: ReturnType<typeof getAuthSession>): void {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
       try {
-        window.webContents.send(AUTH_SESSION_CHANGED_CHANNEL, { signedIn: false });
+        window.webContents.send(AUTH_SESSION_CHANGED_CHANNEL, sessionSnapshot);
       } catch {
         // A renderer may disappear while the main-process auth boundary runs.
       }
     }
   }
+}
+
+function broadcastSignedOutSession(): void {
+  broadcastAuthSession({ signedIn: false });
+}
+
+function scheduleDeferredAuthRestore(): void {
+  if (deferredAuthRestorePromise) return;
+  deferredAuthRestorePromise = retryTemporaryAuthRestore()
+    .then((result): AuthRestoreResult => {
+      if (result.status !== "restored") {
+        console.warn(`[auth] deferred startup restore stopped (${result.status})`);
+        return result;
+      }
+      const sessionSnapshot = getAuthSession();
+      if (!sessionSnapshot.signedIn) {
+        return { status: "temporarily-unavailable", signedIn: false };
+      }
+      // Startup may already have mounted the signed-out/device bookmark slice.
+      // Switch authority before notifying renderers, then reconcile the exact
+      // restored workspace in the background.
+      failCloseActiveHubBookmarks();
+      broadcastAuthSession(sessionSnapshot);
+      broadcastHubBookmarkSnapshot();
+      void syncHubBookmarks({ rerunIfBusy: true });
+      return result;
+    })
+    .catch((error): AuthRestoreResult => {
+      console.warn("[auth] deferred startup restore failed", error);
+      return { status: "temporarily-unavailable", signedIn: false };
+    });
 }
 
 // 앱이 이미 ready면 스킵 — electron 스토어 테스트(scripts/test-*.cjs)가 whenReady 후에
@@ -499,6 +539,30 @@ app.whenReady().then(async () => {
   // mirroring it to the platform log directory first. Updater and mobile-bridge
   // diagnostics are worthless if the only copy dies with the process.
   initFileLogging();
+  if (app.isPackaged && process.platform === "darwin" && installIdentity.channel === "official") {
+    try {
+      const bundlePath = resolveMacAppBundle(process.execPath);
+      if (!bundlePath) throw new Error("Official macOS application bundle could not be resolved");
+      const sealed = await prepareMacRuntimeResourcesForExecution({
+        bundlePath,
+        resourcesPath: process.resourcesPath,
+        policyPath: path.join(process.resourcesPath, "macos-release-signing-policy.json"),
+      });
+      console.info(
+        `[runtime-seal] packaged Python/runtime resources ready `
+          + `(${sealed.directories} directories, ${sealed.files} files, `
+          + `${sealed.alreadySealed ? "already sealed" : `${sealed.changedEntries} sealed`}, `
+          + `${sealed.repairedGeneratedCaches ? "generated caches repaired" : "clean seal"})`,
+      );
+    } catch (error) {
+      console.error(
+        "[runtime-seal] official packaged runtime boundary failed; refusing to start",
+        error instanceof Error ? error.message : "unknown error",
+      );
+      app.exit(78);
+      return;
+    }
+  }
   if (process.platform !== "win32") {
     powerMonitor.on("shutdown", () => {
       // Never turn an operating-system shutdown into an application relaunch.
@@ -586,11 +650,17 @@ app.whenReady().then(async () => {
     console.error("[one-hub-derivative] startup reconciliation blocked:", error);
   }
   // Restore/decrypt the account before the post-migration continuity check.
-  await bootAuthFromKeychain();
+  const initialAuthRestore = await bootAuthFromKeychain();
+  const initialAuthRestoreWasTemporary = initialAuthRestore.status === "temporarily-unavailable";
   // Stage 2 (post-migration, pre-bootstrap-writers): compare the live DB and
   // managed assets against the recovery copies. Recovery-required stops here.
   if (installIdentity.updatesEnabled) {
-    await initAutoUpdater();
+    await initAutoUpdater({
+      initialAuthRestore,
+      onDeferredAuthRestore: scheduleDeferredAuthRestore,
+    });
+  } else if (initialAuthRestoreWasTemporary) {
+    scheduleDeferredAuthRestore();
   }
   if (getUpdaterState().status !== "recovery-required") {
     try {
@@ -722,13 +792,33 @@ app.whenReady().then(async () => {
   // Start only after update continuity and store bootstrap have passed. A
   // bridge failure must not make Desktop unusable; Settings exposes the exact
   // failure and can retry on the next launch.
-  try {
-    await startAgentlasMobileBridge({
-      userDataPath: app.getPath("userData"),
-      appVersion: app.getVersion(),
+  const startMobileBridgeAfterAuth = async () => {
+    try {
+      await startAgentlasMobileBridge({
+        userDataPath: app.getPath("userData"),
+        appVersion: app.getVersion(),
+      });
+    } catch (err) {
+      console.error("[mobile-bridge] start failed:", err);
+    }
+  };
+  if (initialAuthRestoreWasTemporary && !deferredAuthRestorePromise) {
+    // A recovery-required state intentionally owns the next action. Never let
+    // an unknown initial Keychain state start the bridge, which would treat it
+    // as a logout and revoke every stored device pairing.
+    console.warn("[mobile-bridge] start skipped; initial account restore is temporarily unavailable");
+  } else if (deferredAuthRestorePromise) {
+    void deferredAuthRestorePromise.then((result) => {
+      if (result.status === "temporarily-unavailable") {
+        // Starting while auth is unknown would make Mobile Bridge interpret a
+        // temporary Keychain miss as logout and revoke every paired device.
+        console.warn("[mobile-bridge] start deferred; account restore is still temporarily unavailable");
+        return;
+      }
+      return startMobileBridgeAfterAuth();
     });
-  } catch (err) {
-    console.error("[mobile-bridge] start failed:", err);
+  } else {
+    await startMobileBridgeAfterAuth();
   }
   // Browser 승인 서버 — continuity gate가 닫힌 뒤에만 로컬 작업 서버를 연다.
   void startBrowserApprovalServer().catch((err) =>
