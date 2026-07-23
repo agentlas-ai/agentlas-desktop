@@ -56,6 +56,12 @@ import { pickActive } from "./runtime/selection";
 import { synthesizeLegacyGraph } from "./automation-emitter";
 import { suspendAutomationForGraphReconciliation } from "./store/graph-reconciliation";
 import { getSource as getMarketSource } from "./marketplace";
+import {
+  buildStrategyDirective,
+  collectAutomationFailureContext,
+  type AutomationFailureContext,
+} from "./automation-strategy";
+import { recordAutomationRecovery } from "./automation-recovery";
 import type {
   TriggerDeliveryHooks,
   TriggerDispatchResult,
@@ -150,19 +156,22 @@ function notifyDone(a: Automation, status: AutomationResultStatus, error?: strin
 
 /** Provider resume is an optimization, not the continuity authority. Every run receives a
  * bounded durable capsule so a backend switch or expired CLI session cannot erase the prior run. */
-function buildAutomationContinuityPrompt(chatId: string, prompt: string): string {
+function buildAutomationContinuityPrompt(chatId: string, prompt: string, strategyDirective = ""): string {
+  // 전략 진화 지시문(실패 스트릭이 있을 때만 비어 있지 않음)은 프롬프트 바로 앞에 붙는다 —
+  // 재시도가 동일 방법을 그대로 반복하는 구조적 결함의 수리(run-graph 경로와 동일 계약).
+  const effectivePrompt = strategyDirective ? `${strategyDirective}\n\n${prompt}` : prompt;
   const prior = listChatMessages(chatId, 12)
     .filter((message) => message.role === "assistant" || message.role === "system")
     .slice(-4)
     .map((message) => `[${message.role} ${message.createdAt}] ${message.text.replace(/\s+/g, " ").trim().slice(0, 1_200)}`);
-  if (prior.length === 0) return prompt;
+  if (prior.length === 0) return effectivePrompt;
   return [
     "[Agentlas automation continuity capsule]",
     "This is the same durable automation session. Continue from these prior outcomes; do not restart setup or create a new CLI/session unless an explicit lifecycle error requires it.",
     ...prior,
     "[/Agentlas automation continuity capsule]",
     "",
-    prompt,
+    effectivePrompt,
   ].join("\n");
 }
 
@@ -482,6 +491,14 @@ async function runOne(
   let runError: string | null = null;
   let output: string | undefined;
   let currentRunId: string | null = null;
+  // 이번 실행 "이전"의 실패 스트릭 — 성공 시 복구 학습(recordAutomationRecovery) 판정에 쓴다.
+  // markAutomationRun 이후에는 이번 결과가 이력에 섞여 사전 상태를 복원할 수 없다.
+  let priorFailureContext: AutomationFailureContext = { streak: 0, recentErrors: [] };
+  try {
+    priorFailureContext = collectAutomationFailureContext(a.id);
+  } catch {
+    /* 이력 조회 실패는 복구 학습만 건너뛴다 */
+  }
   let parentMissing = false;
   let leaseOwnershipLost = false;
   let leaseHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -746,7 +763,11 @@ async function runOne(
         const req = {
           runId,
           chatId: chat.id,
-          userPrompt: buildAutomationContinuityPrompt(chat.id, a.promptTemplate),
+          userPrompt: buildAutomationContinuityPrompt(
+            chat.id,
+            a.promptTemplate,
+            buildStrategyDirective(priorFailureContext),
+          ),
           permissions: schedulerExecutionPermission(a),
           borrowAgents: a.targetType === "hub" ? [a.targetId] : undefined,
           // Hub 자동화는 위 preflight에서 exact package pin을 강제한다.
@@ -910,6 +931,24 @@ async function runOne(
         suspendAutomationForGraphReconciliation(a.id);
       } catch (error) {
         console.error("[automation] graph reconciliation suspension failed:", error);
+      }
+    }
+    // 복구 학습 — 실패 스트릭 후의 성공은 "다른 방법이 통했다"는 증거다. durable 복구
+    // 이벤트 + 메모리/경험 자동 승격 + (동일 실패 2회 복구 시) 프롬프트 진화 자동 적용.
+    // 어떤 실패도 런 결과에 영향을 주지 않는다(모듈 내부에서 전부 격리).
+    if (
+      runStatus === "ok" && !parentMissing && !leaseOwnershipLost &&
+      priorFailureContext.streak >= 1 && currentRunId
+    ) {
+      try {
+        recordAutomationRecovery({
+          automation: a,
+          runId: currentRunId,
+          prior: priorFailureContext,
+          output,
+        });
+      } catch (err) {
+        console.error("[automation] recovery learning failed:", err);
       }
     }
     // 실패 피드백·수리 — run_history 기록(markAutomationRun) 이후에 호출해야

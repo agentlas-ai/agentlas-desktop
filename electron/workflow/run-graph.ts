@@ -30,6 +30,7 @@ import { getAgentGroup } from "../store/agent-groups";
 import { getAgentConcurrency } from "../store/concurrency";
 import { listRunEvents, tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
 import { awaitAutomationRunnerWithAbortGrace } from "../automation-watchdog";
+import { buildStrategyDirective, collectAutomationFailureContext } from "../automation-strategy";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -567,21 +568,24 @@ function str(config: Record<string, unknown>, key: string): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
-function buildNodeContinuityPrompt(chatId: string, prompt: string): string {
+function buildNodeContinuityPrompt(chatId: string, prompt: string, strategyDirective = ""): string {
+  // 전략 진화 지시문은 실패 스트릭이 있을 때만 비어 있지 않다. 프롬프트 바로 앞에 붙여
+  // 재시도가 동일 방법을 반복하지 못하게 한다(continuity capsule보다 뒤 = 더 지배적 위치).
+  const effectivePrompt = strategyDirective ? `${strategyDirective}\n\n${prompt}` : prompt;
   const prior = listChatMessages(chatId, 12)
     .filter((message) => message.role === "assistant" || message.role === "system")
     .slice(-4)
     .map((message) => (
       `[${message.role} ${message.createdAt}] ${message.text.replace(/\s+/g, " ").trim().slice(0, 1_200)}`
     ));
-  if (prior.length === 0) return prompt;
+  if (prior.length === 0) return effectivePrompt;
   return [
     "[Agentlas automation continuity capsule]",
     "This is the same durable automation session and occurrence. Continue from prior outcomes; do not restart setup or repeat an external action already recorded as complete.",
     ...prior,
     "[/Agentlas automation continuity capsule]",
     "",
-    prompt,
+    effectivePrompt,
   ].join("\n");
 }
 
@@ -713,6 +717,14 @@ export async function runGraph(
     throw new Error("automation_occurrence_id_invalid");
   }
   const initialVars = durableInitialVars(opts.initialVars);
+  // 자율 전략 진화 — 이 자동화의 현재 실패 스트릭을 1회 수집해, 실패가 이어지는 동안
+  // 모든 agent/action/output 노드 프롬프트에 "다른 방법 강제" 지시문을 주입한다.
+  let strategyDirective = "";
+  try {
+    strategyDirective = buildStrategyDirective(collectAutomationFailureContext(automation.id));
+  } catch (error) {
+    console.warn("[run-graph] strategy directive unavailable:", error);
+  }
   const unpinnedHubTargets = graph.nodes
     .map((node) => ({ nodeId: node.id, target: hubTargetForNode(automation, node) }))
     .filter((row) => row.target && !/^[0-9a-f]{64}$/.test(row.target.version ?? ""));
@@ -1087,7 +1099,7 @@ export async function runGraph(
           return;
         }
         const nodeChat = node.type === "agent" ? chatForNode(node) : chat;
-        const executionPrompt = buildNodeContinuityPrompt(nodeChat.id, prompt);
+        const executionPrompt = buildNodeContinuityPrompt(nodeChat.id, prompt, strategyDirective);
         beginNode(node, executionPrompt);
         let checkpointPersistenceError: Error | null = null;
         let unsafeToolObserved = false;

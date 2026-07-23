@@ -323,6 +323,42 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
   }
 }
 
+export const AUTOMATION_RECOVERY_EVENT_KIND = "automation_recovery";
+
+/**
+ * 런 시작이 append-only 원장에 남았는지 — 채팅 인보크는 'invoke_started',
+ * 자동화 그래프 런은 'workflow_graph_started', 레거시 자동화는 'automation_legacy_started'.
+ * outcome-attested 경험 승격의 증거 게이트로 쓴다(어느 실행 표면이든 durable 시작 영수증 필수).
+ */
+export function hasDurableRunStartReceipt(runId: string): boolean {
+  if (!runId) return false;
+  const row = getDb()
+    .prepare(
+      `SELECT 1 AS found FROM run_events
+        WHERE run_id = ? AND kind IN ('invoke_started','workflow_graph_started','automation_legacy_started')
+        LIMIT 1`,
+    )
+    .get(runId) as { found?: number } | undefined;
+  return row?.found === 1;
+}
+
+/**
+ * 같은 실패 서명(fsig)이 방법 전환으로 복구된 횟수 — 자율 진화 임계(N회 독립 성공 시
+ * 프롬프트 진화 자동 적용) 판정에 쓴다. payload는 safePayload로 직렬화된 JSON이므로
+ * json_extract로 서명을 정확 일치시킨다(LIKE 부분일치 오탐 방지).
+ */
+export function countAutomationRecoveryEvents(automationId: string, signature: string): number {
+  if (!automationId || !signature) return 0;
+  const row = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM run_events
+        WHERE automation_id = ? AND kind = ?
+          AND json_extract(payload_json, '$.signature') = ?`,
+    )
+    .get(automationId, AUTOMATION_RECOVERY_EVENT_KIND, signature) as { n?: number } | undefined;
+  return row?.n ?? 0;
+}
+
 export function listRunEvents(runId: string, limit?: number): RunEventUi[] {
   if (!runId) return [];
   const capped = normalizeLimit(limit, 200);
