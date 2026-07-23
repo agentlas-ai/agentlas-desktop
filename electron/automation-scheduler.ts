@@ -52,12 +52,7 @@ import {
 } from "./automation-watchdog";
 import { recoverStaleAutomationRuns } from "./store/db";
 import { detectRuntimes } from "./runtime/detect";
-import {
-  healthyAlternativeRuntime,
-  pickActive,
-  resolvePinnedRuntimeHeal,
-  selectionFromRuntime,
-} from "./runtime/selection";
+import { pickActive } from "./runtime/selection";
 import { synthesizeLegacyGraph } from "./automation-emitter";
 import { suspendAutomationForGraphReconciliation } from "./store/graph-reconciliation";
 import { getSource as getMarketSource } from "./marketplace";
@@ -272,50 +267,6 @@ function automationSessionInput(a: Automation): {
 /** Scheduler authority is capped at read/write even for malformed legacy objects. */
 function schedulerExecutionPermission(a: Automation): "read" | "write" {
   return a.executionPermission === "read" ? "read" : "write";
-}
-
-/**
- * 자동화에 저장된(핀된) 런타임이 이 머신에서 더 이상 존재하지 않으면(미설치/미감지) 실행을 하드페일하는
- * 대신, 살아있는 다른 런타임으로 이번 실행에 한해 in-memory로 대체한다. 사용자의 저장된 핀은 건드리지
- * 않는다(영속 변경 아님) — 다음에 원래 런타임이 돌아오면 그대로 다시 그걸 쓴다. 대체 사실은 감사 가능한
- * run 이벤트로 남긴다. 아무 런타임도 없으면 그대로 두어 다운스트림이 no-runtime로 정직히 표면화하게 한다.
- */
-async function healPinnedRuntimeIfAbsent(a: Automation, runId: string | null): Promise<Automation> {
-  if (!a.runtimeSelection) return a;
-  const runtimes = await detectRuntimes();
-  const heal = resolvePinnedRuntimeHeal(runtimes, a.runtimeSelection);
-  if (!heal) return a; // 정확히 감지됨(치유 불필요) 또는 아무 런타임도 없음(다운스트림이 no-runtime 표면화)
-  const from = a.runtimeSelection.kind;
-  tryRecordRunEvent({
-    runId: runId ?? `automation-runtime-heal-${a.id}-${Date.now()}`,
-    kind: "automation_runtime_substituted",
-    automationId: a.id,
-    payload: { from, to: heal.runtime.kind, reason: heal.reason === "source_drift" ? "pinned_runtime_source_drift" : "pinned_runtime_absent" },
-  });
-  console.warn(`[automation] pinned runtime '${from}' unavailable (${heal.reason}); healing to '${heal.runtime.kind}' for this run (${a.name})`);
-  return { ...a, runtimeSelection: selectionFromRuntime(heal.runtime) };
-}
-
-/**
- * 핀된 런타임이 로그아웃(signed-out)이라 첫 실행이 auth 실패로 죽었을 때, 살아있는 다른 런타임으로 이번
- * 실행에 한해 대체해 한 번만 재실행할 수 있게 한다. auth 실패는 첫 노드에서 나므로(외부 부작용 전) 재실행이
- * 안전하고, 그래프 occurrence/noObservedSideEffect 가드가 커밋된 노드의 재생을 별도로 막는다. 대체 가능한
- * 런타임이 없으면 null을 반환해 원래 signed-out 실패가 정직히 표면화(needs_input)되게 한다.
- */
-async function healPinnedRuntimeForAuthRetry(a: Automation, runId: string | null): Promise<Automation | null> {
-  if (!a.runtimeSelection) return null;
-  const runtimes = await detectRuntimes();
-  const alternative = healthyAlternativeRuntime(runtimes, a.runtimeSelection.kind);
-  if (!alternative) return null;
-  const from = a.runtimeSelection.kind;
-  tryRecordRunEvent({
-    runId: runId ?? `automation-runtime-heal-${a.id}-${Date.now()}`,
-    kind: "automation_runtime_substituted",
-    automationId: a.id,
-    payload: { from, to: alternative.kind, reason: "pinned_runtime_signed_out" },
-  });
-  console.warn(`[automation] pinned runtime '${from}' is signed out; retrying once on '${alternative.kind}' (${a.name})`);
-  return { ...a, runtimeSelection: selectionFromRuntime(alternative) };
 }
 
 /** 실패 원인을 표출하고 아는 원인은 수리한다. 반복 실패도 자동화를 끄지는 않는다. */
@@ -601,9 +552,6 @@ async function runOne(
         );
       }
     }
-    // 저장된 런타임이 이 머신에서 사라졌으면(미설치/미감지) 살아있는 런타임으로 치유해 자동화를 살린다.
-    // (로그아웃 케이스는 감지가 안 되므로 아래 그래프 실행의 auth-retry가 담당한다.)
-    a = await healPinnedRuntimeIfAbsent(a, currentRunId);
     const missingHubSlugs = new Set<string>();
     if (a.targetType === "hub" && !a.targetVersion) missingHubSlugs.add(a.targetId);
     for (const node of a.graph?.nodes ?? []) {
@@ -663,10 +611,6 @@ async function runOne(
         "[hub_version_pin_required] automation_hub_version_pin_required: " +
         "정확한 Hub 패키지 버전을 선택해야 자동화를 실행할 수 있습니다. 자동화 편집 화면에서 Hub 대상을 다시 선택하세요.";
     } else if (a.graph && a.graph.nodes.length > 0) {
-      // 핀된 런타임이 로그아웃이면 살아있는 다른 런타임으로 딱 한 번 재실행하기 위한 루프.
-      // (indent는 JS 의미에 영향 없음 — 기존 본문을 재들여쓰기하지 않고 그대로 감싼다.)
-      let runtimeAuthHealed = false;
-      graphRuntimeRetry: for (;;) {
       // 그래프 경로 — 위상 러너로 실행. per-node 상태를 라이브 채널로 방송해 캔버스가 애니메이션.
       const runId = `run-${a.id}-${Date.now()}`;
       currentRunId = runId;
@@ -747,23 +691,6 @@ async function runOne(
         runError = classified.reasonCode
           ? `[${classified.reasonCode}] ${classified.reason ?? graphError ?? "automation failed"}`
           : classified.reason ?? graphError;
-        // 핀된 런타임 로그아웃으로 실패 + 아직 외부 부작용 없음(첫 노드 auth 실패) + 살아있는 대체 런타임 존재
-        // → 그 런타임으로 딱 한 번 재실행해 자동화가 조용히 죽지 않게 한다. 대체 런타임이 없으면
-        //   원래 signed-out 실패(runtime_auth_required)가 needs_input으로 정직히 표면화된다.
-        if (
-          !runtimeAuthHealed &&
-          outVals.length === 0 &&
-          classified.reasonCode === "runtime_auth_required"
-        ) {
-          const healedAutomation = await healPinnedRuntimeForAuthRetry(a, currentRunId);
-          if (healedAutomation) {
-            a = healedAutomation;
-            runtimeAuthHealed = true;
-            continue graphRuntimeRetry;
-          }
-        }
-      }
-      break graphRuntimeRetry;
       }
     } else {
       // 레거시 단일 프롬프트 경로(완전 backward-compat).

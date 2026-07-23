@@ -142,66 +142,6 @@ export function pickActive(list: RuntimeStatus[]): RuntimeStatus | null {
   return list.find((r) => r.active) ?? list[0] ?? null;
 }
 
-/**
- * 핀된 자동화 런타임이 지금 이 머신에서 실제로 존재(감지)하는지.
- * (사인인 여부는 detect가 모르므로 여기서는 판단하지 않는다 — 그건 실행 중 auth 실패로만 드러난다.)
- */
-export function pinnedRuntimeAvailable(
-  runtimes: RuntimeStatus[],
-  selection: import("../../shared/types").RuntimeSelection,
-): boolean {
-  return selectExactRuntime(runtimes, selection) !== null;
-}
-
-/**
- * 핀된 런타임이 없거나(미설치/미감지) 로그아웃일 때 자동화를 죽이지 않기 위한 대체 런타임.
- * `avoidKind`(실패한 런타임 종류)는 제외하고, 실제 실행 가능한 러너가 붙는 런타임만 고른다.
- * 활성 런타임을 우선하되, 그게 제외 대상이면 실행 가능한 다른 런타임을 반환한다.
- */
-export function healthyAlternativeRuntime(
-  runtimes: RuntimeStatus[],
-  avoidKind: RuntimeStatus["kind"] | null,
-): RuntimeStatus | null {
-  const usable = runtimes.filter(
-    (runtime) => (!avoidKind || runtime.kind !== avoidKind) && Boolean(pickRunner({ ...runtime, active: true })),
-  );
-  return usable.find((runtime) => runtime.active) ?? usable[0] ?? null;
-}
-
-/**
- * 핀된 런타임이 정확히 감지되지 않을 때의 치유 대상.
- * 1) 같은 종류가 (경로/모델만 달라진 채) 존재하면 종류를 바꾸지 않고 그 인스턴스로만 재정렬(source_drift).
- * 2) 그 종류가 완전히 없으면(미설치) 실행 가능한 다른 종류로 대체(kind_substituted).
- * 정확히 감지되면 null(치유 불필요). 아무 런타임도 없으면 null(정직히 no-runtime 표면화).
- */
-export function resolvePinnedRuntimeHeal(
-  runtimes: RuntimeStatus[],
-  selection: import("../../shared/types").RuntimeSelection,
-): { runtime: RuntimeStatus; reason: "source_drift" | "kind_substituted" } | null {
-  if (selectExactRuntime(runtimes, selection)) return null;
-  const sameKind = runtimes.find(
-    (runtime) => runtime.kind === selection.kind && Boolean(pickRunner({ ...runtime, active: true })),
-  );
-  if (sameKind) return { runtime: sameKind, reason: "source_drift" };
-  const alternative = healthyAlternativeRuntime(runtimes, selection.kind);
-  if (alternative) return { runtime: alternative, reason: "kind_substituted" };
-  return null;
-}
-
-/** 감지된 런타임을 그대로 다시 핀 가능한 RuntimeSelection으로 변환(치유된 이번 실행에만 in-memory 적용). */
-export function selectionFromRuntime(
-  runtime: RuntimeStatus,
-): import("../../shared/types").RuntimeSelection {
-  return {
-    kind: runtime.kind,
-    ...(runtime.backend ? { backend: runtime.backend } : {}),
-    ...(runtime.source ? { source: runtime.source } : {}),
-    ...(runtime.model ? { model: runtime.model } : {}),
-    ...(runtime.longContextEnabled != null ? { longContext: runtime.longContextEnabled } : {}),
-    ...(runtime.effort ? { effort: runtime.effort } : {}),
-  };
-}
-
 function runtimeMatchesOverride(runtime: RuntimeStatus, override: AgentRuntimeOverride): boolean {
   const selection = override.selection;
   if (runtime.kind !== selection.kind) return false;
