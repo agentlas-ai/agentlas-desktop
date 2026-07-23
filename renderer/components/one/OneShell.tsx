@@ -17,8 +17,6 @@ import { tFor, useT } from "@/lib/i18n";
 import { extractQuestions } from "@/lib/ask-question";
 import {
   detectOneTextLocale,
-  inferOneConversationLocale,
-  inferOneRecentContextLocale,
   type OneConversationLocale,
 } from "@/lib/one-conversation-locale";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
@@ -36,8 +34,6 @@ import type {
   InvocationRunReceipt,
   McpInvocationEvent,
   MobileBridgeRuntimeStatus,
-  OneBriefingCadence,
-  OneBriefingActionPacket,
   OneBriefingSnapshot,
   OneMemoryState,
   OneMemoryUseOnceReceipt,
@@ -257,9 +253,16 @@ function oneMemoryUseOnceTargetKey(target: OneMemoryUseOnceTarget): string {
   return [target.chatId, target.expectedTaskId ?? "conversation", target.expectedTaskVersion ?? "none"].join(":");
 }
 
+/** 카드 제목에 들어가는 이름 — 원문 프롬프트가 통째로 박히지 않게 마크다운을 걷어내고 짧게 자른다. */
+function briefingSourceName(raw: string): string {
+  const cleaned = raw.replace(/[*_`#>|]/g, "").replace(/\s+/g, " ").trim();
+  if (!cleaned) return raw.slice(0, 40);
+  return cleaned.length > 44 ? `${cleaned.slice(0, 43).trimEnd()}…` : cleaned;
+}
+
 function proactiveBriefingView(candidate: OneProactiveBriefing, locale: "ko" | "en"): DisplayBriefing {
   const ko = locale === "ko";
-  const source = candidate.source.label;
+  const source = briefingSourceName(candidate.source.label);
   const copyKeys = {
     project_folder_missing: {
       eyebrow: "one.shell.proactive.project_folder_missing.eyebrow",
@@ -354,9 +357,11 @@ function proactiveBriefingView(candidate: OneProactiveBriefing, locale: "ko" | "
     body: tFor(locale, selected.body),
     prepared: tFor(locale, selected.prepared),
     evidence,
-    primaryLabel: candidate.decision.acceptLabel && ko
-      ? candidate.preparedAction.kind === "open_project" ? tFor(locale, "one.shell.proactive.action.open_project") : candidate.preparedAction.kind === "open_automation" ? tFor(locale, "one.shell.proactive.action.open_automation") : tFor(locale, "one.shell.proactive.action.open_task")
-      : candidate.decision.acceptLabel,
+    primaryLabel: candidate.preparedAction.kind === "open_project"
+      ? tFor(locale, "one.shell.proactive.action.open_project")
+      : candidate.preparedAction.kind === "open_automation"
+        ? tFor(locale, "one.shell.proactive.action.open_automation")
+        : tFor(locale, "one.shell.proactive.action.open_task"),
     proactive: candidate,
   };
 }
@@ -419,7 +424,6 @@ export function OneShell() {
   const [oneOnboardingVisible, setOneOnboardingVisible] = useState(true);
   const [oneActivationState, setOneActivationState] = useState<OneActivationState | null>(null);
   const [briefingSnapshot, setBriefingSnapshot] = useState<OneBriefingSnapshot | null>(null);
-  const [briefingActionPacket, setBriefingActionPacket] = useState<OneBriefingActionPacket | null>(null);
   const [briefingActionBusy, setBriefingActionBusy] = useState(false);
   const [teamPreflight, setTeamPreflight] = useState<OneTeamPreflightProposal | null>(null);
   const [teamPreflightBusy, setTeamPreflightBusy] = useState(false);
@@ -449,7 +453,6 @@ export function OneShell() {
   const [archiveMutationTaskId, setArchiveMutationTaskId] = useState<string | null>(null);
   const [railOpen, setRailOpen] = useState(false);
   const [railCollapsed, setRailCollapsed] = useState(false);
-  const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [dismissedBriefing, setDismissedBriefing] = useState<{ signature: string; expiresAt: number } | null>(null);
   const [introReplayToken, setIntroReplayToken] = useState(0);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -457,18 +460,11 @@ export function OneShell() {
   const configuredOneLocale = oneProfile?.preferredLocale === "ko" || oneProfile?.preferredLocale === "en"
     ? oneProfile.preferredLocale
     : appLocale;
-  const recentLocaleFallback = useMemo(() => inferOneRecentContextLocale([
-    ...conversations.map((item) => ({ text: item.title, updatedAt: item.updatedAt })),
-    ...projections.map((item) => ({ text: item.display.title, updatedAt: item.status.asOf })),
-  ], configuredOneLocale), [configuredOneLocale, conversations, projections]);
-  const activeContextLocale = detectOneTextLocale(selected?.display.title ?? conversation?.title ?? "")
-    ?? recentLocaleFallback;
-  const normalizedLocale = useMemo(
-    () => detectOneTextLocale(pendingTeamPrompt?.text ?? "") ?? inferOneConversationLocale(messages, activeContextLocale),
-    [activeContextLocale, messages, pendingTeamPrompt?.text],
-  );
-  // Controls follow the explicit app language. Conversation content still
-  // detects the language of the active request through normalizedLocale.
+  // Every piece of One chrome follows the explicit app language (or the
+  // explicit One profile override). Titles of old conversations or tasks must
+  // never flip the UI language; only the model's reply mirrors the language
+  // the user actually typed, which the runner detects from the prompt itself.
+  const normalizedLocale = configuredOneLocale;
   const structuredResultMessageId = useMemo(() => {
     if (!surface) return null;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -669,7 +665,6 @@ export function OneShell() {
       setOneIntroState(null);
       setOneActivationState(null);
       setBriefingSnapshot(null);
-      setBriefingActionPacket(null);
       return;
     }
     try {
@@ -728,17 +723,10 @@ export function OneShell() {
       setOneImprovementProofs(improvementProofs);
       setOneIntroState(resolvedIntro);
       setOneActivationState(activation);
-      const safeProactiveBriefing = safeBriefingSnapshot(proactiveBriefing);
-      setBriefingSnapshot(safeProactiveBriefing);
-      const currentBriefingAction = safeProactiveBriefing?.candidate
-        ? await api.oneBriefing.getAction({
-            candidateId: safeProactiveBriefing.candidate.candidateId,
-            expectedDetectedAt: safeProactiveBriefing.candidate.detectedAt,
-          }).catch(() => null)
-        : null;
-      setBriefingActionPacket(currentBriefingAction);
+      setBriefingSnapshot(safeBriefingSnapshot(proactiveBriefing));
       setProjections(items);
-      setConversations(recentChats.filter((chat) => !chat.taskId));
+      // One 홈은 One이 시작한 대화만 보여준다 — 전역 Work 대화는 Work에 남는다.
+      setConversations(recentChats.filter((chat) => !chat.taskId && chat.originSurface === "one"));
       const wanted = selectedTaskIdRef.current;
       if (wanted) {
         const detail = items.find((item) => item.taskId === wanted)
@@ -1364,6 +1352,7 @@ export function OneShell() {
       const chat = await api.chats.create({
         title: value.split(/\r?\n/)[0].slice(0, 72),
         taskMode: "conversation",
+        originSurface: "one",
         ...(starterGroupId ? { agentGroupId: starterGroupId } : {}),
       });
       setConversation(chat);
@@ -1385,6 +1374,24 @@ export function OneShell() {
     setRunStatus(tFor(appLocale, "one.shell.run.stopping_safely"));
     void api.invoke.cancel(runId);
   }, [appLocale]);
+
+  // "이어서 진행" 한 번의 클릭 — 끝까지 확인되지 않은 실행을 같은 대화에서
+  // 조용히 이어간다. 사용자에게 오류 문구를 다시 입력하라고 요구하지 않는다.
+  const retryUnfinished = useCallback(() => {
+    if (busy) return;
+    const chatId = selected?.chatId ?? conversation?.id;
+    if (!chatId) return;
+    void startRun(
+      chatId,
+      selected?.taskId ?? null,
+      selected?.canonicalVersion ?? null,
+      appLocale === "ko"
+        ? "직전 실행에서 끝까지 확인되지 않은 단계를 이어서 완료하고, 완성된 결과만 보여줘."
+        : "Continue the previous run: finish the step that was not completed, and show only the finished result.",
+      selected ? "task" : "conversation",
+      { displayUserMessage: false },
+    );
+  }, [appLocale, busy, conversation?.id, selected, startRun]);
 
   const answerConfirmation = useCallback(async (confirmation: PendingConfirmation, label: string) => {
     const api = ipc();
@@ -1421,14 +1428,12 @@ export function OneShell() {
   const openTask = useCallback((taskId: string) => {
     setRailOpen(false);
     setSearchOpen(false);
-    setEvidenceOpen(false);
     router.push(`/one?task=${encodeURIComponent(taskId)}`);
   }, [router]);
 
   const openConversation = useCallback((chatId: string) => {
     setRailOpen(false);
     setSearchOpen(false);
-    setEvidenceOpen(false);
     router.push(`/one?chat=${encodeURIComponent(chatId)}`);
   }, [router]);
 
@@ -1860,7 +1865,6 @@ export function OneShell() {
     void openWork();
   }, [openWork, router]);
   const openPreparedFinding = useCallback((candidate: OneProactiveBriefing) => {
-    setEvidenceOpen(false);
     if (candidate.preparedAction.kind === "open_project") {
       router.push(`/project/detail?id=${encodeURIComponent(candidate.preparedAction.targetId)}`);
       return;
@@ -1888,72 +1892,6 @@ export function OneShell() {
       setBriefingActionBusy(false);
     }
   }, [openTask, refreshAll]);
-  const prepareBriefingReview = useCallback(async (candidate: OneProactiveBriefing) => {
-    const api = ipc();
-    if (!api || briefingActionBusy) return;
-    if (briefingActionPacket?.status === "started" && briefingActionPacket.task) {
-      router.push(`/one?task=${encodeURIComponent(briefingActionPacket.task.taskId)}`);
-      return;
-    }
-    setBriefingActionBusy(true);
-    setError(null);
-    try {
-      const packet = await api.oneBriefing.prepareAction({
-        candidateId: candidate.candidateId,
-        expectedDetectedAt: candidate.detectedAt,
-      });
-      setBriefingActionPacket(packet);
-      setEvidenceOpen(true);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-      await refreshAll();
-    } finally {
-      setBriefingActionBusy(false);
-    }
-  }, [briefingActionBusy, briefingActionPacket, refreshAll, router]);
-  const startBriefingReview = useCallback(async (candidate: OneProactiveBriefing) => {
-    const api = ipc();
-    const packet = briefingActionPacket;
-    if (!api || !packet || briefingActionBusy) return;
-    if (packet.status === "started" && packet.task) {
-      router.push(`/one?task=${encodeURIComponent(packet.task.taskId)}`);
-      return;
-    }
-    setBriefingActionBusy(true);
-    setError(null);
-    try {
-      const result = await api.oneBriefing.startAction({
-        packetId: packet.packetId,
-        expectedPacketVersion: packet.version,
-        candidateId: candidate.candidateId,
-        expectedDetectedAt: candidate.detectedAt,
-        confirmedByUser: true,
-      });
-      setBriefingActionPacket(result.packet);
-      if (result.ok && result.packet.task) {
-        router.push(`/one?task=${encodeURIComponent(result.packet.task.taskId)}`);
-        await refreshAll();
-        return;
-      }
-      const copy: Record<string, string> = {
-        candidate_changed: tFor(appLocale, "one.shell.briefing_review.candidate_changed"),
-        source_mismatch: tFor(appLocale, "one.shell.briefing_review.source_mismatch"),
-        suppressed_or_resolved: tFor(appLocale, "one.shell.briefing_review.suppressed_or_resolved"),
-        expired: tFor(appLocale, "one.shell.briefing_review.expired"),
-        task_creation_failed: tFor(appLocale, "one.shell.briefing_review.task_creation_failed"),
-        start_rejected: tFor(appLocale, "one.shell.briefing_review.start_rejected"),
-        recovery_required: tFor(appLocale, "one.shell.briefing_review.recovery_required"),
-      };
-      const message = copy[result.errorCategory ?? "start_rejected"];
-      await refreshAll();
-      setError(message);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-      await refreshAll();
-    } finally {
-      setBriefingActionBusy(false);
-    }
-  }, [briefingActionBusy, briefingActionPacket, appLocale, refreshAll, router]);
   const applyProactiveFeedback = useCallback(async (candidate: OneProactiveBriefing, feedback: "later" | "not_important" | "wrong") => {
     const api = ipc();
     if (!api) return;
@@ -1965,48 +1903,11 @@ export function OneShell() {
         feedback,
       });
       setBriefingSnapshot(safeBriefingSnapshot(next));
-      setEvidenceOpen(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
       await refreshAll();
     }
   }, [refreshAll]);
-  const updateBriefingCadence = useCallback(async (cadence: OneBriefingCadence) => {
-    const api = ipc();
-    if (!api) return;
-    setError(null);
-    try {
-      const preferences = await api.oneBriefing.setPreferences({ cadence });
-      setBriefingSnapshot((current) => current ? { ...current, preferences } : current);
-      await refreshAll();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }, [refreshAll]);
-  const updateBriefingChannels = useCallback(async (desktopEnabled: boolean) => {
-    const api = ipc();
-    if (!api) return;
-    setError(null);
-    try {
-      const preferences = await api.oneBriefing.setPreferences({
-        channels: desktopEnabled ? ["in_app", "desktop_notification"] : ["in_app"],
-      });
-      setBriefingSnapshot((current) => current ? { ...current, preferences } : current);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }, []);
-  const updateBriefingQuietHours = useCallback(async (quietHours: OneBriefingSnapshot["preferences"]["quietHours"]) => {
-    const api = ipc();
-    if (!api) return;
-    setError(null);
-    try {
-      const preferences = await api.oneBriefing.setPreferences({ quietHours });
-      setBriefingSnapshot((current) => current ? { ...current, preferences } : current);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }, []);
 
   useEffect(() => {
     const api = ipc();
@@ -2134,122 +2035,16 @@ export function OneShell() {
                     <p className={styles.briefingEyebrow}>{briefing.eyebrow}</p>
                     <h1 id="one-briefing-title">{briefing.title}</h1>
                     <p className={styles.briefingBody}>{briefing.body}</p>
-                    {briefing.prepared && <p className={styles.prepared}>{briefing.prepared}</p>}
                     <div className={styles.briefingActions}>
                       {briefing.proactive
                         ? briefing.proactive.preparedAction.kind === "open_task"
                           ? <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void openProactiveTask(briefing.proactive!)}>{briefingActionBusy ? tFor(appLocale, "one.shell.common.checking") : briefing.primaryLabel}</button>
-                          : briefingActionPacket && ["prepared", "task_ready", "start_failed"].includes(briefingActionPacket.status)
-                          ? <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void startBriefingReview(briefing.proactive!)}>{briefingActionBusy ? tFor(appLocale, "one.shell.common.checking") : tFor(appLocale, "one.shell.briefing.review_without_changes")}</button>
-                          : briefingActionPacket?.status === "started" && briefingActionPacket.task
-                            ? <button type="button" className={styles.primaryButton} onClick={() => openTask(briefingActionPacket.task!.taskId)}>{tFor(appLocale, "one.shell.briefing.open_review")}</button>
-                            : briefingActionPacket && ["task_reserved", "start_reserved"].includes(briefingActionPacket.status)
-                              ? <button type="button" className={styles.primaryButton} disabled>{briefingActionPacket.status === "task_reserved" ? tFor(appLocale, "one.shell.briefing.checking_current_state") : tFor(appLocale, "one.shell.briefing.starting_review")}</button>
-                            : briefingActionPacket?.status === "recovery_required"
-                              ? <button type="button" className={styles.primaryButton} disabled>{tFor(appLocale, "one.shell.briefing.check_before_continuing")}</button>
-                              : <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void prepareBriefingReview(briefing.proactive!)}>{briefingActionBusy ? tFor(appLocale, "one.shell.briefing.preparing") : tFor(appLocale, "one.shell.briefing.review_safely")}</button>
+                          : <button type="button" className={styles.primaryButton} onClick={() => openPreparedFinding(briefing.proactive!)}>{briefing.primaryLabel}</button>
                         : briefing.taskId && <button type="button" className={styles.primaryButton} onClick={() => openTask(briefing.taskId!)}>{briefing.primaryLabel}</button>}
-                      {briefing.proactive && briefing.proactive.preparedAction.kind !== "open_task" && <button type="button" className={styles.ghostButton} onClick={() => openPreparedFinding(briefing.proactive!)}>{briefing.primaryLabel}</button>}
-                      {briefing.evidence.length > 0 && <button type="button" className={styles.ghostButton} aria-expanded={evidenceOpen} onClick={() => setEvidenceOpen((value) => !value)}>{tFor(appLocale, "one.shell.briefing.why_noticed")}</button>}
                       {briefing.kind !== "quiet" && (briefing.proactive
                         ? <button type="button" className={styles.ghostButton} onClick={() => void applyProactiveFeedback(briefing.proactive!, "later")}>{tFor(appLocale, "one.shell.common.later")}</button>
-                        : <button type="button" className={styles.ghostButton} onClick={() => { const signature = briefingSignature(briefing); setDismissedBriefing({ signature, expiresAt: writeBriefingDismissal(signature) }); setEvidenceOpen(false); }}>{tFor(appLocale, "one.shell.briefing.dismiss_for_now")}</button>)}
+                        : <button type="button" className={styles.ghostButton} onClick={() => { const signature = briefingSignature(briefing); setDismissedBriefing({ signature, expiresAt: writeBriefingDismissal(signature) }); }}>{tFor(appLocale, "one.shell.common.later")}</button>)}
                     </div>
-                    {briefing.proactive && briefingActionPacket && <div className={styles.briefingReviewPacket} data-status={briefingActionPacket.status}>
-                      <div>
-                        <strong>{briefingActionPacket.status === "started" ? tFor(appLocale, "one.shell.briefing.reviewing_now") : tFor(appLocale, "one.shell.briefing.ready_no_changes")}</strong>
-                        <span>{tFor(appLocale, "one.shell.briefing.files_unchanged")}</span>
-                      </div>
-                      <p>{briefing.proactive?.source.kind === "canonical_task"
-                        ? tFor(appLocale, "one.shell.briefing.packet_canonical")
-                        : briefingActionPacket.status === "prepared"
-                        ? tFor(appLocale, "one.shell.briefing.packet_prepared")
-                        : briefingActionPacket.status === "recovery_required"
-                          ? tFor(appLocale, "one.shell.briefing.packet_recovery")
-                          : tFor(appLocale, "one.shell.briefing.packet_default")}</p>
-                      <details className={styles.briefingPacketDetails}>
-                        <summary>{tFor(appLocale, "one.shell.briefing.what_checked")}</summary>
-                        <div className={styles.briefingPacketMeta}>
-                          <span>{briefing.proactive?.source.kind === "canonical_task"
-                            ? tFor(appLocale, "one.shell.briefing.meta_current_progress")
-                            : briefingActionPacket.source.kind === "project_folder"
-                              ? tFor(appLocale, "one.shell.briefing.meta_folder_status")
-                              : tFor(appLocale, "one.shell.briefing.meta_run_record")}</span>
-                          <span>{briefingActionPacket.executionStarted ? tFor(appLocale, "one.shell.briefing.review_started") : tFor(appLocale, "one.shell.briefing.not_started")}</span>
-                        </div>
-                      </details>
-                    </div>}
-                    {evidenceOpen && <div className={styles.evidenceList}>
-                      {briefing.evidence.map((item) => <span key={item}>{item}</span>)}
-                      {briefing.proactive && <div className={styles.briefingCorrections}>
-                        <label>
-                          <span>{tFor(appLocale, "one.shell.briefing.notice_frequency")}</span>
-                          <select
-                            value={briefingSnapshot?.preferences.cadence ?? "important_only"}
-                            onChange={(event) => void updateBriefingCadence(event.target.value as OneBriefingCadence)}
-                            aria-label={tFor(appLocale, "one.shell.briefing.notice_frequency_aria")}
-                          >
-                            <option value="important_only">{tFor(appLocale, "one.shell.briefing.cadence_important")}</option>
-                            <option value="daily">{tFor(appLocale, "one.shell.briefing.cadence_daily")}</option>
-                            <option value="weekdays">{tFor(appLocale, "one.shell.briefing.cadence_weekdays")}</option>
-                            <option value="weekly">{tFor(appLocale, "one.shell.briefing.cadence_weekly")}</option>
-                          </select>
-                        </label>
-                        <label>
-                          <span>{tFor(appLocale, "one.shell.briefing.channel_in_app")}</span>
-                          <input type="checkbox" checked disabled aria-label={tFor(appLocale, "one.shell.briefing.channel_in_app_aria")} />
-                        </label>
-                        <label>
-                          <span>{tFor(appLocale, "one.shell.briefing.channel_desktop")}</span>
-                          <input
-                            type="checkbox"
-                            checked={briefingSnapshot?.preferences.channels.includes("desktop_notification") ?? false}
-                            onChange={(event) => void updateBriefingChannels(event.target.checked)}
-                            aria-label={tFor(appLocale, "one.shell.briefing.channel_desktop_aria")}
-                          />
-                        </label>
-                        <label>
-                          <span>{tFor(appLocale, "one.shell.briefing.quiet_hours")}</span>
-                          <input
-                            type="checkbox"
-                            checked={briefingSnapshot?.preferences.quietHours.enabled ?? false}
-                            onChange={(event) => {
-                              const quiet = briefingSnapshot?.preferences.quietHours ?? { enabled: false, startHour: 22, endHour: 8 };
-                              void updateBriefingQuietHours({ ...quiet, enabled: event.target.checked });
-                            }}
-                            aria-label={tFor(appLocale, "one.shell.briefing.quiet_hours_aria")}
-                          />
-                        </label>
-                        <label>
-                          <span>{tFor(appLocale, "one.shell.briefing.quiet_start")}</span>
-                          <select
-                            value={briefingSnapshot?.preferences.quietHours.startHour ?? 22}
-                            onChange={(event) => {
-                              const quiet = briefingSnapshot?.preferences.quietHours ?? { enabled: false, startHour: 22, endHour: 8 };
-                              void updateBriefingQuietHours({ ...quiet, startHour: Number(event.target.value) });
-                            }}
-                            aria-label={tFor(appLocale, "one.shell.briefing.quiet_start_aria")}
-                          >{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{String(hour).padStart(2, "0")}:00</option>)}</select>
-                        </label>
-                        <label>
-                          <span>{tFor(appLocale, "one.shell.briefing.quiet_end")}</span>
-                          <select
-                            value={briefingSnapshot?.preferences.quietHours.endHour ?? 8}
-                            onChange={(event) => {
-                              const quiet = briefingSnapshot?.preferences.quietHours ?? { enabled: false, startHour: 22, endHour: 8 };
-                              void updateBriefingQuietHours({ ...quiet, endHour: Number(event.target.value) });
-                            }}
-                            aria-label={tFor(appLocale, "one.shell.briefing.quiet_end_aria")}
-                          >{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{String(hour).padStart(2, "0")}:00</option>)}</select>
-                        </label>
-                        <label title={tFor(appLocale, "one.shell.briefing.phone_title")}>
-                          <span>{tFor(appLocale, "one.shell.briefing.phone_label")}</span>
-                          <input type="checkbox" checked={false} disabled aria-label={tFor(appLocale, "one.shell.briefing.phone_aria")} />
-                        </label>
-                        <button type="button" className={styles.textButton} onClick={() => void applyProactiveFeedback(briefing.proactive!, "not_important")}>{tFor(appLocale, "one.shell.briefing.show_less")}</button>
-                        <button type="button" className={styles.textButton} onClick={() => void applyProactiveFeedback(briefing.proactive!, "wrong")}>{tFor(appLocale, "one.shell.briefing.judgment_wrong")}</button>
-                      </div>}
-                    </div>}
                   </section>
                 )}
                 {showWeeklyReflection && oneWeeklyReflection && (
@@ -2338,6 +2133,7 @@ export function OneShell() {
                       receipt={receipt}
                       locale={appLocale}
                       onOpenWork={() => void openWork()}
+                      onRetryUnfinished={retryUnfinished}
                       onAcceptResult={() => void acceptResult()}
                       acceptingResult={acceptingResult}
                       valueClosure={selectedValueClosure}

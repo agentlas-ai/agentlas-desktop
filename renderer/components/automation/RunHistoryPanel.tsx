@@ -144,7 +144,7 @@ function summarizeSnapshot(snap: WorkflowRunSnapshot | null, ko: boolean): { tit
     return { title: ko ? "작업하고 있어요" : "Working on it", detail: ko ? "필요한 단계를 순서대로 진행하고 있어요." : "The required steps are running in order." };
   }
   if (snap.status === "error" || failed > 0) {
-    return { title: ko ? "아직 끝내지 못했어요" : "This is not finished yet", detail: ko ? "완료로 처리하지 않았어요. One이 이어서 확인할 수 있습니다." : "It was not marked complete. One can continue checking it." };
+    return { title: ko ? "끝까지 완료되지 않았어요" : "Not fully completed", detail: ko ? "완료로 처리하지 않았어요. One이 이어서 확인할 수 있습니다." : "It was not marked complete. One can continue checking it." };
   }
   return {
     title: ko ? "완료했어요" : "Completed",

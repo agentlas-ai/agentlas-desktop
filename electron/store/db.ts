@@ -13,7 +13,7 @@ import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 72;
+const SCHEMA_VERSION = 73;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -3160,6 +3160,16 @@ export function initStore(): void {
       CREATE INDEX IF NOT EXISTS idx_task_participants_agent ON task_agent_participants(agent_id);
     `);
     backfillTaskParticipantsV72(_db);
+  }
+
+  // v73: One(초개인화 개인 비서 표면)과 Work(전역 작업 표면)의 durable 분리.
+  // 어느 표면이 이 대화를 시작했는지 기록한다. 기존 대화는 전부 'work'로 남아
+  // One 홈이 전역 Work 작업으로 오염되지 않는다.
+  if (userVersion < 73 && tableExists(_db, "chats")) {
+    const chatColumnNamesV73 = new Set(schemaColumns(_db, "chats").map((column) => column.name));
+    if (!chatColumnNamesV73.has("origin_surface")) {
+      _db.exec("ALTER TABLE chats ADD COLUMN origin_surface TEXT NOT NULL DEFAULT 'work'");
+    }
   }
 
   // Run on every boot as well as the v52 upgrade. A hard process exit can

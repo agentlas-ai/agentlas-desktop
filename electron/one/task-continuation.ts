@@ -82,6 +82,9 @@ export function continueOneFromTaskResult(input: ContinueOneFromTaskResultInput)
     continueFromChatId: source.id,
     kind: "user",
     taskMode: "conversation",
+    // 이어지는 대화는 원 대화의 표면을 그대로 상속한다 — One에서 이어가면
+    // 계속 One 홈에만, Work에서 이어가면 계속 Work에만 보인다.
+    originSurface: source.originSurface === "one" ? "one" : "work",
   });
   appendChatMessage(next.id, "system", continuationMessage({
     locale: input.locale,

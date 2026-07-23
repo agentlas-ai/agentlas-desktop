@@ -1149,7 +1149,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
             aria-expanded={helperOpen}
             onClick={() => setHelperOpen((open) => !open)}
           >
-            <OnePuppy mood="happy" small reduced={reduced} label={tFor(locale, "one.onb.puppy.label")} />
+            ?
           </button>
         </div>
       </>

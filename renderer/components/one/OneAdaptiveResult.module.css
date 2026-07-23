@@ -677,6 +677,11 @@
   background: #fffafa;
 }
 
+.failureClosure .actionPrimary {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
 .failureClosure .closureSummaryCopy small {
   max-width: 720px;
   margin-top: 4px;

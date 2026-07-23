@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { app } from "electron";
 import { listAutomations, listRunHistory } from "../store/automations";
+import { chatOriginSurface } from "../store/chats";
 import { listProjects } from "../store/projects";
 import { listCanonicalTasks } from "../store/tasks";
 import {
@@ -79,6 +80,8 @@ export interface OneBriefingDetectorDependencies {
   activeChatIds?: string[];
   latestRunReceipt?: (chatId: string) => InvocationRunReceipt | null;
   failureEvents?: (chatId: string, limit?: number) => FailureEventUi[];
+  /** 대화의 origin 표면 — One 브리핑은 One이 시작한 Task만 다룬다. */
+  chatSurface?: (chatId: string) => "one" | "work" | null;
 }
 
 let activeChatIdsProvider: () => string[] = () => [];
@@ -504,7 +507,13 @@ export function detectOneProactiveBriefings(deps: OneBriefingDetectorDependencie
   const activeChatIds = new Set(deps.activeChatIds ?? activeChatIdsProvider());
   const latestReceipt = deps.latestRunReceipt ?? safeLatestRunReceipt;
   const failuresFor = deps.failureEvents ?? safeFailureEvents;
+  const chatSurface = deps.chatSurface ?? ((chatId: string) => {
+    try { return chatOriginSurface(chatId); } catch { return null; }
+  });
   for (const task of tasks) {
+    // One은 초개인화 표면 — One이 직접 시작한 대화의 Task만 브리핑한다.
+    // 전역 Work 작업의 실패/정지 상태는 Work 표면의 일이다.
+    if (!task.originChatId || chatSurface(task.originChatId) !== "one") continue;
     const candidate = taskCandidate(task, now, activeChatIds, latestReceipt, failuresFor);
     if (candidate && isOneProactiveBriefing(candidate)) candidates.push(candidate);
   }

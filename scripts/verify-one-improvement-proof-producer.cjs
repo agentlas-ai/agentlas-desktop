@@ -80,7 +80,7 @@ function runtime() {
 const WEEKLY_TASK_PROMPT = "Prepare the weekly comparison report from the exact approved input snapshot.";
 const TEAM_TASK_PROMPT = "Ask one-improvement-researcher to research with my saved team, prepare the market report, and cross-check every source.";
 const SURFACE_INTENT_MARKER = "<<surface-intent>>";
-const PARSER_FAILURE_SAFE_FINAL = "I couldn't finish preparing this result safely. Ask me to try again below and I'll continue.";
+const PARSER_FAILURE_SAFE_FINAL = "Something went wrong while preparing this result, so it is not complete.";
 
 function participantBindings(rt, agentIds) {
   const installedById = new Map(rt.registry.listInstalledAgentsReadOnly().map((agent) => [agent.id, agent]));
@@ -460,7 +460,12 @@ async function finishAcceptedTeamChat(
       if (scenario === "failed-worker") throw new Error("fixture worker failure");
       return { text: "Verified researcher output.", tokens: 3 };
     }
-    if (modelCall === 3) {
+    // 완주 규범: 실패한 워커는 같은 입력으로 1회 자동 재실행된다. 이 시나리오는
+    // 재시도까지 지속 실패하는 경로를 검증하므로 재시도 호출도 실패시킨다.
+    if (modelCall === 3 && scenario === "failed-worker") {
+      throw new Error("fixture worker failure");
+    }
+    if (modelCall === (scenario === "failed-worker" ? 4 : 3)) {
       const synthesisText = scenario === "parser-throw"
         ? parserThrowSurfaceText(mediaPath)
         : scenario === "marker-only"
@@ -521,8 +526,18 @@ async function finishAcceptedTeamChat(
     fs.rmSync(path.dirname(mediaPath), { recursive: true, force: true });
     assert.equal(fs.existsSync(mediaPath), false);
   }
-  assert.equal(modelCall, 3, "planner, installed worker, and synthesis must each execute once");
-  assert.equal(runnerRequests[2].forceSurface, true, "top-level One synthesis must receive the full Surface protocol");
+  assert.equal(
+    modelCall,
+    scenario === "failed-worker" ? 4 : 3,
+    scenario === "failed-worker"
+      ? "planner, worker, its single automatic retry, and synthesis must each execute once"
+      : "planner, installed worker, and synthesis must each execute once",
+  );
+  assert.equal(
+    runnerRequests[scenario === "failed-worker" ? 3 : 2].forceSurface,
+    true,
+    "top-level One synthesis must receive the full Surface protocol",
+  );
   assert.ok(wireEvents.some((event) =>
     event.phase === "delegate"
     && event.runtimeAgentId === "one-improvement-researcher"),
@@ -778,7 +793,7 @@ async function assertProjectionFailureKeepsRawSurfacePrivate(rt) {
   assert.equal(surface.oneSurface, undefined);
   // Customer-safe status (beta feedback #1): a validation failure shows plain
   // retry copy, never the internal "safe One Surface" schema term.
-  assert.match(surface.status, /couldn't finish preparing this result safely/);
+  assert.match(surface.status, /Something went wrong while preparing this result/);
   assert.doesNotMatch(surface.status, /safe One Surface|structured result|manifest/i);
   assert.equal(JSON.stringify(bufferedAfterSurface).includes(mediaPath), false, "active record.events must strip raw paths");
   assert.equal(JSON.stringify(wireEvents).includes(mediaPath), false, "renderer/Mobile envelopes must strip raw paths");
@@ -1552,8 +1567,8 @@ function orchestrate() {
     assert.match(taskForceRuntime, /parsed\.errors\.length === 0 && parsed\.surfaces\.length === 1/);
     // Customer-safe copy (beta feedback #1): the surface-parse-failed branch now
     // replaces the raw body with plain retry copy, not the internal schema term.
-    assert.match(taskForceRuntime, /diagnostic\.code === "surface-parse-failed"[\s\S]{0,500}couldn't finish preparing this result safely/);
-    assert.match(invocationClient, /diagnostic\.code === "surface-parse-failed"[\s\S]{0,500}couldn't finish preparing this result safely/);
+    assert.match(taskForceRuntime, /diagnostic\.code === "surface-parse-failed"[\s\S]{0,500}Something went wrong while preparing this result/);
+    assert.match(invocationClient, /diagnostic\.code === "surface-parse-failed"[\s\S]{0,500}Something went wrong while preparing this result/);
     assert.match(taskForceRuntime, /surfaceExecutionVerified = verifierIssues\.length === 0[\s\S]{0,180}results\.every/);
     assert.match(invocationService, /const surfaceTask = findCanonicalTaskForChat\(runReq\.chatId\);[\s\S]{0,80}canonicalTask = surfaceTask/);
     assert.match(invocationService, /\(requestedOneMode \|\| runWorkspaceBinding\) && event\.kind === "surface" && event\.surface/);

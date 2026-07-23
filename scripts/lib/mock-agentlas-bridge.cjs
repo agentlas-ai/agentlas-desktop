@@ -1034,7 +1034,7 @@ function setupMockAgentlasBridge(options) {
         record("chats.create", input);
         createdChatId += 1;
         const id = `chat-created-${createdChatId}`;
-        return { id, projectId: input.projectId || null, firmId: input.firmId || null, agentId: input.agentId || "agent-2", kind: "user", title: "QA Chat", archivedAt: null, createdAt: now, updatedAt: now };
+        return { id, projectId: input.projectId || null, firmId: input.firmId || null, agentId: input.agentId || "agent-2", kind: "user", title: "QA Chat", archivedAt: null, createdAt: now, updatedAt: now, originSurface: input.originSurface === "one" ? "one" : "work" };
       },
       switchAgent: async (chatId, agentId) => {
         record("chats.switchAgent", { chatId, agentId });

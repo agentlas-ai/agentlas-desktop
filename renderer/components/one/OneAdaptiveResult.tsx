@@ -73,6 +73,7 @@ export function OneAdaptiveResult({
   onOpenWork,
   onAcceptResult,
   acceptingResult = false,
+  onRetryUnfinished,
 }: {
   manifest: OneSurfaceManifestV1 | null;
   projection: OneTaskProjection;
@@ -88,6 +89,8 @@ export function OneAdaptiveResult({
   onValueClosureStateChange?: (state: OneValueClosureState) => void;
   improvementProof?: OneImprovementProofRecord | null;
   onManageImprovementAsset?: (asset: OneImprovementReusedAssetV1) => void;
+  /** 끝까지 완료되지 않은 실행을 한 번의 클릭으로 이어서 진행한다. */
+  onRetryUnfinished?: () => void;
 }) {
   const surface = useMemo(() => manifest && isOneSurfaceManifestV1(manifest) ? manifest : null, [manifest]);
   const renderDecision = useMemo(() => surface ? inspectSurfaceForDesktop(surface, projection.taskId) : null, [projection.taskId, surface]);
@@ -169,7 +172,7 @@ export function OneAdaptiveResult({
         </article>
       )}
       {receipt && isTerminal(receipt.status) && receipt.status !== "completed" && (
-        <RunClosure receipt={receipt} locale={locale} />
+        <RunClosure receipt={receipt} locale={locale} onRetryUnfinished={onRetryUnfinished} />
       )}
       {canAcceptResult && !hasManifest && (
         <section className={styles.standaloneAcceptance} aria-label={tFor(locale, "one.res.aria.confirm_result")}>
@@ -1166,7 +1169,11 @@ function safeFallbackText(value: unknown, maxLength: number): string | null {
   return sanitizeText(text);
 }
 
-function RunClosure({ receipt, locale }: { receipt: InvocationRunReceipt; locale: "ko" | "en" }) {
+function RunClosure({ receipt, locale, onRetryUnfinished }: {
+  receipt: InvocationRunReceipt;
+  locale: "ko" | "en";
+  onRetryUnfinished?: () => void;
+}) {
   const stopped = receipt.status === "cancelled";
   const statusLabel = stopped
     ? tFor(locale, "one.res.closure.stopped_here")
@@ -1179,6 +1186,11 @@ function RunClosure({ receipt, locale }: { receipt: InvocationRunReceipt; locale
         <strong>{statusLabel}</strong>
         <small>{outcome}</small>
       </div>
+      {!stopped && onRetryUnfinished && (
+        <button type="button" className={styles.actionPrimary} onClick={onRetryUnfinished}>
+          {tFor(locale, "one.res.closure.continue")}
+        </button>
+      )}
     </section>
   );
 }

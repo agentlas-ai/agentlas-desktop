@@ -283,6 +283,23 @@ const careerGraphRefreshTriggered = new Set<string>();
  * One and Work. Bare closing fences and every complete code block are left
  * untouched.
  */
+/** One 복구 패스 프롬프트 — 실패한 필수 단계를 모델이 직접 재실행해 스스로 완주하게 한다. */
+function buildOneRecoveryPrompt(previousText: string, attempt: number): string {
+  const clipped = previousText.length > 6_000 ? previousText.slice(-6_000) : previousText;
+  return [
+    `Recovery pass ${attempt}: at least one required tool step failed earlier in this run, so the work is not finished yet.`,
+    "Continue the same task in this conversation and finish it completely:",
+    "1. Identify which step failed.",
+    "2. Re-execute that step now with your tools, or take a working alternative path to the same outcome.",
+    "3. Verify the outcome with tool evidence, then write the complete final result for the user.",
+    "Never apologize, never describe internal errors, and never ask the user to retry — deliver the finished result.",
+    "Your previous visible output was:",
+    "<previous-output>",
+    clipped,
+    "</previous-output>",
+  ].join("\n");
+}
+
 function stripDanglingLanguageFence(text: string): string {
   return text.replace(/\n[ \t]*```[A-Za-z0-9_+.-]+[ \t]*$/u, "").trim();
 }
@@ -2927,6 +2944,10 @@ export async function runMcpInvocation(
     const observedOneSourceUrls = new Set<string>();
     let observedOneToolEvidence = false;
     let observedOneToolFailure = false;
+    // 복구 패스 판정용 패스 단위 계수 — 복구 패스가 "도구 성공 증거 있음 + 무오류"로
+    // 끝났을 때에만 실패 흔적을 지운다(도구 없이 말로만 끝내는 가짜 성공 방지).
+    let passToolFailures = 0;
+    let passToolSuccesses = 0;
     const oneToolFailureBlocksCompletion = () => Boolean(oneTeamExecutionPolicy && observedOneToolFailure);
     const collectObservedSourceUrls = (value?: string) => {
       if (!value || !oneTeamExecutionPolicy || observedOneSourceUrls.size >= 32) return;
@@ -2951,8 +2972,12 @@ export async function runMcpInvocation(
       },
       // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
       onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean) => {
-        if (isError) observedOneToolFailure = true;
+        if (isError) {
+          observedOneToolFailure = true;
+          passToolFailures += 1;
+        }
         if (!isError) {
+          passToolSuccesses += 1;
           collectObservedSourceUrls(args);
           collectObservedSourceUrls(result);
           // Some provider runners emit a successful tool completion without
@@ -3038,6 +3063,37 @@ export async function runMcpInvocation(
       result = await picked.runner(activeRunnerReq, runnerEvents);
       result = sanitizeRestrictedPass(result);
       advanceUsageFloor();
+    }
+    // ── One 완주 규범 ─────────────────────────────────────────────
+    // 도구 한 번의 실패 흔적이 남은 채로 턴을 "다시 해달라"로 끝내지 않는다.
+    // 같은 대화 안에서 스스로 복구 패스를 돌려 막힌 단계를 재실행하고 결과까지
+    // 완주한다. 복구 패스가 도구 성공 증거를 남기고 무오류로 끝났을 때에만
+    // 실패 흔적을 지운다 — 말로만 "됐다"고 하는 가짜 성공은 통과하지 못한다.
+    if (oneTeamExecutionPolicy && !req.agentAppMode) {
+      const ONE_RECOVERY_MAX_PASSES = 2;
+      for (let attempt = 1; attempt <= ONE_RECOVERY_MAX_PASSES && observedOneToolFailure && !signal?.aborted; attempt += 1) {
+        sink({
+          kind: "tool-use",
+          status: locale === "ko" ? "막힌 단계를 다시 진행하는 중…" : "Retrying a blocked step…",
+        });
+        if (!continuousMode && result.text.trim()) {
+          partialFloor = partialFloor ? `${partialFloor}\n${result.text}` : result.text;
+        }
+        passToolFailures = 0;
+        passToolSuccesses = 0;
+        const recoveryPrompt = buildOneRecoveryPrompt(result.text, attempt);
+        activeRunnerReq = {
+          ...runnerReq,
+          userPrompt: explicitBorrowUserPreamble
+            ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${recoveryPrompt}`
+            : recoveryPrompt,
+          images: undefined,
+        };
+        result = await picked.runner(activeRunnerReq, runnerEvents);
+        result = sanitizeRestrictedPass(result);
+        advanceUsageFloor();
+        if (passToolFailures === 0 && passToolSuccesses > 0) observedOneToolFailure = false;
+      }
     }
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
     const stormbreakerContinueRequested = !req.agentAppMode && finalContinuation.shouldContinue;
@@ -3240,8 +3296,8 @@ export async function runMcpInvocation(
       const surfaceParse = parseSurfaces(displayText);
       if (surfaceParse.diagnostics.some((diagnostic) => diagnostic.code === "surface-parse-failed")) {
         displayText = locale === "ko"
-          ? "결과를 안전하게 마무리하지 못했어요. 아래에서 다시 시도해 달라고 말해 주세요."
-          : "I couldn't finish preparing this result safely. Ask me to try again below and I'll continue.";
+          ? "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요."
+          : "Something went wrong while preparing this result, so it is not complete.";
       } else {
         const parsedOneSurface = req.oneMode === true
           && surfaceParse.errors.length === 0
@@ -3285,9 +3341,11 @@ export async function runMcpInvocation(
           });
         }
         if (oneToolFailureBlocksCompletion()) {
+          // 복구 패스를 이미 스스로 돌린 뒤에도 남은 실패 — 사용자에게 재시도를
+          // 지시하지 않고, 사실만 조용히 말한다. 다음 메시지는 자동으로 이어진다.
           displayText = locale === "ko"
-            ? "아직 끝내지 못했어요. 필요한 작업 하나가 멈췄습니다. 아래에서 다시 해달라고 말하면 이 대화에서 이어서 시도할게요."
-            : "This is not finished yet. One required step stopped. Ask me to try again below and I will continue in this conversation.";
+            ? "여러 번 다시 시도했지만 한 단계가 끝까지 확인되지 않았어요. 지금까지 진행한 내용은 위에 남겨뒀어요."
+            : "I retried this several times, but one step could not be fully completed. Everything done so far is shown above.";
         } else if (usedDeterministicOneSurface && deterministicOneSurface) {
           displayText = deterministicOneCompletionCopy(req.userPrompt, deterministicOneSurface, locale);
         } else if (surfaceParse.surfaces.length > 0 || surfaceParse.errors.length > 0) {
@@ -3307,8 +3365,8 @@ export async function runMcpInvocation(
       // retain or log the rejected model body because it may contain a local
       // path or another Main-private Surface transport value.
       displayText = locale === "ko"
-        ? "결과를 안전하게 마무리하지 못했어요. 아래에서 다시 시도해 달라고 말해 주세요."
-        : "I couldn't finish preparing this result safely. Ask me to try again below and I'll continue.";
+        ? "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요."
+        : "Something went wrong while preparing this result, so it is not complete.";
       console.error("[surface] parseSurfaces failed");
     }
     if (!req.agentAppMode || projectReadOnlyBoundary) {
@@ -3435,8 +3493,8 @@ export async function runMcpInvocation(
         error: {
           code: "one-required-step-failed",
           message: locale === "ko"
-            ? "필요한 작업이 실패해 아직 완료하지 못했어요. 같은 대화에서 다시 시도할 수 있습니다."
-            : "A required step failed, so this is not complete yet. You can retry in the same conversation.",
+            ? "한 단계가 끝까지 확인되지 않아 완료로 표시하지 않았습니다."
+            : "One step was not fully verified, so this is not marked complete.",
         },
       });
       return {

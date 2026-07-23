@@ -99,6 +99,6 @@ export function toCustomerSafeText(
     .trim();
   if (out) return out;
   return locale === "ko"
-    ? "여기서는 이 결과를 완성하지 못했어요. 아래에서 다시 시도해 달라고 말해 주세요."
-    : "I couldn't finish this here. Ask me to try again below and I'll continue.";
+    ? "이 결과는 여기서 완성되지 않았어요. 지금까지 확인된 내용만 남겨뒀어요."
+    : "This result was not completed here. Only what was verified so far is kept.";
 }

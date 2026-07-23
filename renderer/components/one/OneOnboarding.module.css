@@ -641,12 +641,27 @@
 
 /* 강아지 헬퍼 — 좌하단은 본문/작업 영역을 가려서(2026-07-23 Mason) 우상단으로 이동.
    top은 One 탑바 아래로 내려 창 컨트롤·탑바 액션과 겹치지 않게 한다. */
-.helperWrap { position: fixed; right: 18px; top: 84px; z-index: 80; }
-.helperButton { display: block; padding: 0; overflow: hidden; background: transparent; border: 0; border-radius: 20px; cursor: pointer; box-shadow: 0 11px 30px rgba(27, 86, 70, 0.18); }
+.helperWrap { position: fixed; right: 16px; top: 12px; z-index: 80; }
+.helperButton {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
+  color: #46615a;
+  background: rgba(255, 253, 246, 0.92);
+  border: 1px solid #cfe3dc;
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+.helperButton:hover { color: #176f59; border-color: #9cc4b8; }
 .helperBubble {
   position: absolute;
   right: 0;
-  top: 82px;
+  top: 32px;
   width: 240px;
   padding: 15px;
   color: #244b40;

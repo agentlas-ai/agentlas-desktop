@@ -195,8 +195,9 @@ async function seedWorker() {
   const runtimeModule = require("../dist/electron/one/task-projection.js");
   const contract = require("../dist/shared/one-task-projection.js");
 
-  const alphaChat = chats.createChat({ agentId: "projection-agent", title: "Alpha launch review" });
-  const betaChat = chats.createChat({ agentId: "projection-agent", title: "Beta pricing review" });
+  // One 표면 멤버십 계약 — One 홈에 투영되려면 대화가 One에서 시작됐어야 한다.
+  const alphaChat = chats.createChat({ agentId: "projection-agent", title: "Alpha launch review", originSurface: "one" });
+  const betaChat = chats.createChat({ agentId: "projection-agent", title: "Beta pricing review", originSurface: "one" });
   const alphaTask = tasks.getCanonicalTaskForChat(alphaChat.id);
   const betaTask = tasks.getCanonicalTaskForChat(betaChat.id);
   assert.ok(alphaTask && betaTask);
@@ -252,6 +253,20 @@ async function seedWorker() {
   const alphaMobile = runtime.getProjection(alphaTask.id, { surface: "mobile", mode: "approval_focused" });
   const betaOne = runtime.getProjection(betaTask.id, { surface: "one" });
   assert.ok(alphaOne && alphaWork && alphaMobile && betaOne);
+
+  // 전역 Work 대화의 Task는 One에 절대 투영되지 않는다(표면 분리 계약).
+  const workOnlyChat = chats.createChat({ agentId: "projection-agent", title: "Global Work task" });
+  const workOnlyTask = tasks.getCanonicalTaskForChat(workOnlyChat.id);
+  assert.ok(workOnlyTask);
+  assert.equal(
+    runtime.getProjection(workOnlyTask.id, { surface: "one", mode: "summary" }),
+    null,
+    "a global Work task must never project into One",
+  );
+  assert.ok(
+    runtime.getProjection(workOnlyTask.id, { surface: "work", mode: "summary" }),
+    "the same task stays visible on the Work surface",
+  );
 
   assert.deepEqual(canonicalParity(alphaWork), canonicalParity(alphaOne));
   assert.deepEqual(canonicalParity(alphaMobile), canonicalParity(alphaOne));

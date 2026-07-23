@@ -2812,8 +2812,12 @@ export function registerIpcHandlers(): void {
         title?: string;
         continueFromChatId?: string | null;
         taskMode?: "task" | "conversation";
+        originSurface?: "one" | "work";
       },
-    ) => createChat(input),
+    ) => createChat({
+      ...input,
+      originSurface: input?.originSurface === "one" ? "one" : "work",
+    }),
   );
   ipcMain.handle("chats:rename", (_e, id: string, title: string) => renameChat(id, title));
   ipcMain.handle("chats:switchAgent", (_e, id: string, agentId: string) =>

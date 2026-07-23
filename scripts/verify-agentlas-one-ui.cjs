@@ -82,21 +82,16 @@ assert.match(route, /<OneShell\s*\/>/, "the /one route must mount the isolated O
 assert.match(route, /Suspense/, "useSearchParams route must be behind Suspense for static export");
 assert.match(authGate, /DEV_QA_ROUTES\s*=\s*\[[^\]]*"\/one"/, "dev visual QA must be able to render the real One shell without a preload bridge");
 assert.match(authGate, /process\.env\.NODE_ENV\s*!==\s*"production"[\s\S]*DEV_QA_ROUTES/, "the /one QA auth bypass must remain impossible in production");
-assert.equal(conversationLocale.detectOneTextLocale("오늘 우선할 일을 정해줘"), "ko", "Korean user turns must localize One system chrome to Korean");
-assert.equal(conversationLocale.detectOneTextLocale("Choose today's priority"), "en", "English user turns must localize One system chrome to English");
-assert.equal(conversationLocale.detectOneTextLocale("ok"), null, "a short acknowledgement must not unexpectedly flip an established thread language");
-assert.equal(conversationLocale.inferOneConversationLocale([
-  { role: "user", text: "Please compare these options" },
-  { role: "assistant", text: "어떤 기준이 중요한가요?" },
-  { role: "user", text: "가격과 성능이 중요해" },
-], "en"), "ko", "the latest user-authored language must own One system chrome");
-assert.equal(conversationLocale.inferOneRecentContextLocale([
-  { text: "Compare two launch plans", updatedAt: "2026-07-18T03:00:00.000Z" },
-  { text: "오늘 출시 전에 확인할 일", updatedAt: "2026-07-19T03:00:00.000Z" },
-], "en"), "ko", "the One home must follow the newest recent user language before app fallback");
-assert.match(shell, /const runLocale = detectOneTextLocale\(text\) \?\? normalizedLocale;/, "the first submitted turn must set the invocation locale before React state catches up");
-assert.match(shell, /inferOneRecentContextLocale\(\[/, "the empty One home must infer system chrome from recent user context");
-assert.match(shell, /const activeContextLocale = detectOneTextLocale\(selected\?\.display\.title \?\? conversation\?\.title \?\? ""\)/, "the active request language must outrank a stale profile or app locale");
+// 2026-07-23 로케일 계약: One 크롬(버튼·상태·브리핑)은 명시적 앱 언어 설정만 따른다.
+// 과거 대화·작업 제목의 한글이 UI 언어를 뒤집으면 안 된다. 모델 답변 언어만
+// 사용자가 실제로 입력한 텍스트를 따른다(runLocale).
+assert.equal(conversationLocale.detectOneTextLocale("오늘 우선할 일을 정해줘"), "ko", "Korean typed turns must let the model reply in Korean");
+assert.equal(conversationLocale.detectOneTextLocale("Choose today's priority"), "en", "English typed turns must let the model reply in English");
+assert.equal(conversationLocale.detectOneTextLocale("ok"), null, "a short acknowledgement must not unexpectedly flip the reply language");
+assert.match(shell, /const runLocale = detectOneTextLocale\(text\) \?\? normalizedLocale;/, "the reply language must follow the text the user actually typed");
+assert.match(shell, /const normalizedLocale = configuredOneLocale;/, "One chrome must follow only the explicit app or profile language");
+assert.doesNotMatch(shell, /inferOneRecentContextLocale\(/, "recent conversation titles must never flip One chrome language");
+assert.doesNotMatch(shell, /inferOneConversationLocale\(/, "thread history must never flip One chrome language");
 
 assert.match(adapter, /api\.tasks\.list\(/, "One must read the canonical Task store first");
 assert.match(adapter, /api\.tasks\.get\(/, "One must open canonical Task detail by Task id");
@@ -358,7 +353,7 @@ assert.match(invocationClient, /일정과 비용, 준비할 내용을 한눈에 
 assert.match(shell, /tFor\(locale, "one\.shell\.receipt\.change_mind"\)/, "resolved choices must render the localized next step");
 assert.match(i18n, /If you change your mind, just tell One/, "resolved choices must explain the next step in ordinary user language");
 assert.doesNotMatch(shell, /This receipt proves only that the response was committed/, "decision receipts must not lead with audit language");
-assert.match(shell, /detectOneTextLocale\(pendingTeamPrompt\?\.text/, "automatic preparation chrome must immediately follow the pending request language");
+assert.doesNotMatch(shell, /detectOneTextLocale\(pendingTeamPrompt\?\.text/, "preparation chrome must follow the explicit app language, not the pending request text");
 assert.match(shell, /setTeamPreflightBusy\(true\);[\s\S]*api\.chats\.create/, "a brand-new request must stay visibly in motion while its chat and Task are created");
 assert.match(shell, /teamPreflightBusy && !busy/, "the first request transition must show a plain-language preparing state instead of an empty chat");
 assert.match(shell, /activeThreadPromptFallback \|\| proposal\.goalSummary/, "a reloaded preparation must keep the user's active request visible instead of showing an internal summary");
@@ -424,15 +419,15 @@ assert.match(oneSurfaceStore, /run_id = \? AND chat_id = \? AND kind = \?/, "res
 assert.match(oneSurfaceStore, /input\.manifest\.taskId !== task\.id/, "durable writes must fail closed on Task/chat mismatch");
 assert.match(runLedger, /delete payload\.oneSurfaceJson/, "the generic run ledger must not leak exact structured results");
 assert.match(preload, /invoke:latestOneSurface/, "the sandbox bridge must expose only the dedicated restore API");
-assert.match(shell, /api\.oneBriefing\.prepareAction\(/, "the first Briefing action must prepare a review packet only");
-assert.match(shell, /api\.oneBriefing\.startAction\(/, "the second explicit Briefing action must request the Main-owned read-only Task");
+// 2026-07-23 단순화 계약: 브리핑 카드는 사람이 이해할 수 있는 두 버튼(열어보기·나중에)만
+// 노출한다. 검토 패킷 상태기계·증거 토글·알림 설정 폼은 카드에서 제거됐다(엔진은 유지).
+assert.doesNotMatch(shell, /api\.oneBriefing\.prepareAction\(/, "the multi-step review packet flow must not return to the Briefing card");
+assert.doesNotMatch(shell, /api\.oneBriefing\.startAction\(/, "the multi-step review packet flow must not return to the Briefing card");
 assert.match(shell, /api\.oneBriefing\.openTask\(\{[\s\S]*expectedTaskVersion:/, "canonical Task findings must use exact Main-revalidated navigation");
-assert.match(shell, /tFor\(appLocale, "one\.shell\.briefing\.channel_desktop"\)/, "One settings must expose localized Desktop notification opt-in");
-assert.match(shell, /tFor\(appLocale, "one\.shell\.briefing\.quiet_hours"\)/, "One settings must expose localized quiet hours");
-assert.match(shell, /tFor\(appLocale, "one\.shell\.briefing\.phone_label"\)/, "unsupported phone notifications must be visibly disabled and truthful");
-assert.match(shell, /source\.kind === "canonical_task"[\s\S]*one\.shell\.briefing\.packet_canonical/, "current-work review copy must not claim file or automation review");
-assert.match(shell, /source\.kind === "canonical_task"[\s\S]*one\.shell\.briefing\.meta_current_progress/, "current-work detail metadata must never be mislabeled as an automation record");
-assert.match(shell, /<details className=\{styles\.briefingPacketDetails\}>[\s\S]*one\.shell\.briefing\.what_checked/, "internal briefing checks must stay collapsed behind everyday language");
+assert.doesNotMatch(shell, /one\.shell\.briefing\.notice_frequency|one\.shell\.briefing\.quiet_hours|one\.shell\.briefing\.phone_label/, "notification preference controls must not clutter the Briefing card");
+assert.match(shell, /applyProactiveFeedback\(briefing\.proactive!, "later"\)/, "the only secondary Briefing action is a plain localized Later");
+assert.match(shell, /tFor\(appLocale, "one\.shell\.common\.later"\)/, "the Later action must stay localized");
+assert.match(shell, /function briefingSourceName\(/, "raw prompt text must be clamped before it becomes a Briefing title");
 assert.doesNotMatch(shell, />검토 패킷 준비됨<|>Review packet ready</, "internal packet language must not remain visible");
 assert.match(preload, /oneBriefing:[\s\S]*openTask:/, "the sandbox bridge must expose exact Task navigation without execution authority");
 assert.match(ipcSource, /oneBriefing:openTask[\s\S]*resolveOneBriefingTaskNavigation/, "Main must revalidate the exact Briefing Task binding");
@@ -444,9 +439,8 @@ assert.match(mainRuntime, /checkOneBriefingDesktopNotification[\s\S]*!getAuthSes
 assert.match(mainRuntime, /oneBriefingLaunchTimer\.unref\(\)[\s\S]*oneBriefingInterval\.unref\(\)/, "Briefing timers must not keep Desktop alive");
 assert.match(mainRuntime, /body: "One found something that may need your attention\. Open Agentlas to review it\."/, "OS notification copy must remain generic and privacy-safe");
 assert.match(mainRuntime, /notification\.on\("click"[\s\S]*openOneFromNotification/, "notification clicks must open One through a non-executing navigation path");
-assert.match(shell, /one\.shell\.briefing\.phone_label[\s\S]*checked=\{false\} disabled/, "phone notifications must remain a disabled truthful control");
-assert.match(shell, /tFor\(appLocale, "one\.shell\.briefing\.why_noticed"\)/, "the second action must remain a localized evidence-review action");
-assert.match(shell, /tFor\(appLocale, "one\.shell\.briefing\.files_unchanged"\)/, "the evidence review must disclose its localized no-change boundary");
+assert.doesNotMatch(shell, /one\.shell\.briefing\.why_noticed/, "the confusing evidence-review toggle must not return to the Briefing card");
+assert.match(briefingRuntime, /chatSurface\(task\.originChatId\) !== "one"/, "One Briefings must only cover Tasks whose conversation One itself started");
 assert.match(briefingActions, /status:\s*"task_reserved"/, "Briefing Task creation must cross a durable reservation boundary");
 assert.match(briefingActions, /status:\s*"start_reserved"/, "Briefing invocation must cross a distinct durable start reservation boundary");
 assert.match(briefingActions, /ownerInstanceId:\s*PROCESS_INSTANCE_ID/, "only the live Main owner may consume a Briefing reservation");

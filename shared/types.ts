@@ -1191,6 +1191,9 @@ export interface Chat {
   continuousMode: boolean;
   /** 스웜 모드 — 목표를 작업 그래프로 분해해 여러 워커가 병렬로 협업(emergent A2A). */
   swarmMode: boolean;
+  /** 어느 표면이 시작한 대화인지 — 'one'(초개인화 One 홈) | 'work'(전역 Work).
+   *  One 홈과 Work 사이드바는 이 값으로 서로를 오염하지 않는다. 구버전 row는 'work'. */
+  originSurface?: "one" | "work";
   /** 이 채팅에 고용(빌림)된 허브 에이전트 카드 — 메타데이터만(패키지 내용 없음, 복사 방지).
    *  있으면 매 send에 borrowAgents로 자동 재주입된다. 해고(clear) 전까지 유지. */
   hiredAgents: HiredAgentCard[];
@@ -5334,6 +5337,8 @@ export interface AgentlasIpc {
       continueFromChatId?: string | null;
       /** Keep a One general conversation Task-free until runtime promotion. */
       taskMode?: "task" | "conversation";
+      /** 'one'이면 One 홈 전용 대화 — Work 사이드바에 나타나지 않는다. */
+      originSurface?: "one" | "work";
     }) => Promise<Chat>;
     rename: (id: string, title: string) => Promise<Chat>;
     /** 채팅의 에이전트 변경. firm 채팅이면 firm 해제 후 개별 에이전트 모드로 전환 */

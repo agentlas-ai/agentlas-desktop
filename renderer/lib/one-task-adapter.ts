@@ -343,19 +343,22 @@ export async function listOneTaskProjections(
     }
   }
 
+  // Transitional fallbacks must respect the same membership rule as Main:
+  // One shows only work that One itself started, never the global Work list.
   const canonicalTasks = await api.tasks.list({ limit: 40 }).catch(() => []);
   if (canonicalTasks.length > 0) {
     const confirmations = new Map(pendingConfirmations.map((item) => [item.chatId, item]));
     const details = await Promise.all(
       canonicalTasks.map(async (task) => {
         const chat = task.originChatId ? await api.chats.get(task.originChatId).catch(() => null) : null;
+        if (chat?.originSurface !== "one") return null;
         return canonicalProjection(task, chat, confirmations, null, oneId);
       }),
     );
-    return details;
+    return details.filter((item): item is OneTaskProjection => Boolean(item));
   }
 
-  const chats = await api.chats.listRecent(40);
+  const chats = (await api.chats.listRecent(40)).filter((chat) => chat.originSurface === "one");
   const linkedTasks = await Promise.all(chats.map((chat) => api.tasks.findForChat(chat.id).catch(() => null)));
   const taskPairs = chats.flatMap((chat, index) => {
     const task = linkedTasks[index];
@@ -411,6 +414,8 @@ export async function getOneTaskProjection(
   const canonical = await api.tasks.get(taskId).catch(() => null);
   if (canonical) {
     const chat = canonical.originChatId ? await api.chats.get(canonical.originChatId).catch(() => null) : null;
+    // Same membership rule as Main: a global Work task never renders inside One.
+    if (chat?.originSurface !== "one") return null;
     return canonicalProjection(
       canonical,
       chat,

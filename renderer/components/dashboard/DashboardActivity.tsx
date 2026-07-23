@@ -53,7 +53,8 @@ export function DashboardActivity() {
     }
     try {
       const c = await api.chats.listRecent(25);
-      setRecent(c);
+      // One 홈 전용 대화는 Work 대시보드에 섞지 않는다 — 표면 분리.
+      setRecent(c.filter((chat) => chat.originSurface !== "one"));
       setError("");
     } catch {
       // 폴링 중 일시 오류는 기존 목록을 비우지 않는다(깜빡임 방지).

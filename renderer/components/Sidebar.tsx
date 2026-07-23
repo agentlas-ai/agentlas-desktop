@@ -306,7 +306,8 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
     ]).then(([chats, projects, automations, agents, agentGroups, runtimes]) => {
       if (cancelled) return;
       const active = runtimes.find((r) => r.active) ?? runtimes[0] ?? null;
-      setData({ chats, projects, automations, agents, agentGroups, runtime: active });
+      // One 홈 전용 대화는 Work 사이드바에 섞지 않는다 — 표면 분리.
+      setData({ chats: chats.filter((chat) => chat.originSurface !== "one"), projects, automations, agents, agentGroups, runtime: active });
     }).catch(() => {
       if (!cancelled) setData((prev) => ({ ...prev, projects: [], automations: [] }));
     }).finally(() => {

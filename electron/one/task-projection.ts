@@ -34,6 +34,7 @@ import type {
   PendingConfirmation,
 } from "../../shared/types";
 import { listPendingConfirmations } from "../confirm";
+import { chatOriginSurface } from "../store/chats";
 import { getOneProfile } from "../store/one-profile";
 import { getDurableOneSurfaceResult } from "../store/one-surface-results";
 import { getLatestInvocationRunReceipt } from "../store/run-events";
@@ -63,6 +64,8 @@ export interface OneTaskProjectionReadSources {
   }): unknown;
   getLatestOneValueClosure(taskId: string): unknown;
   listPendingOperations(taskId: string): unknown;
+  /** 대화의 origin 표면 — One 목록이 전역 Work 작업으로 오염되지 않게 하는 멤버십 판별. */
+  chatOriginSurface(chatId: string): "one" | "work" | null;
 }
 
 export interface CreateOneTaskProjectionRuntimeOptions {
@@ -111,6 +114,7 @@ const DEFAULT_SOURCES: OneTaskProjectionReadSources = {
   getDurableOneSurfaceResult,
   getLatestOneValueClosure,
   listPendingOperations: () => [],
+  chatOriginSurface,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -657,6 +661,14 @@ export function createOneTaskProjectionRuntime(
     if (!isSafeIdentifier(taskId) || !validRequest(request)) return null;
     const task = canonicalTask(safeRead(() => sources.getCanonicalTask(taskId)));
     if (!task || task.id !== taskId) return null;
+    // One은 초개인화 표면이다. One이 직접 시작한 대화의 Task만 One에 투영하고,
+    // 전역 Work 작업은 절대 One 홈으로 새지 않는다. Work/Mobile 표면은 전체를 본다.
+    if (request.surface === "one") {
+      const origin = task.originChatId
+        ? safeRead(() => sources.chatOriginSurface(task.originChatId as string))
+        : null;
+      if (origin !== "one") return null;
+    }
     const authority = authoritySnapshot(safeRead(() => options.getAuthoritySnapshot({
       taskId,
       surface: request.surface,

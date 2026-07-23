@@ -1213,8 +1213,8 @@ export class InvocationService {
             ...(!event.oneSurface
               ? {
                   status: pickLocale(runReq) === "ko"
-                    ? "결과를 안전하게 마무리하지 못했어요. 아래에서 다시 시도해 달라고 말해 주세요."
-                    : "I couldn't finish preparing this result safely. Ask me to try again below and I'll continue.",
+                    ? "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요."
+                    : "Something went wrong while preparing this result, so it is not complete.",
                 }
               : {}),
           };

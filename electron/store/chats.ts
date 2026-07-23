@@ -30,6 +30,7 @@ interface ChatRow {
   continuous_mode: number | null;
   swarm_mode: number | null;
   hired_agents: string | null;
+  origin_surface: string | null;
 }
 
 function parseHiredAgents(raw: string | null): HiredAgentCard[] {
@@ -72,6 +73,7 @@ function toChat(row: ChatRow): Chat {
     continuousMode: row.continuous_mode === 1,
     swarmMode: row.swarm_mode === 1,
     hiredAgents: parseHiredAgents(row.hired_agents),
+    originSurface: row.origin_surface === "one" ? "one" : "work",
   };
 }
 
@@ -125,6 +127,15 @@ export function listChatsByFirm(firmId: string): Chat[] {
   return rows.map(toChat);
 }
 
+/** 가벼운 표면 판별 — Task 재조정(toChat) 없이 origin_surface만 읽는다. */
+export function chatOriginSurface(chatId: string): "one" | "work" | null {
+  const row = getDb()
+    .prepare("SELECT origin_surface FROM chats WHERE id = ?")
+    .get(chatId) as { origin_surface: string | null } | undefined;
+  if (!row) return null;
+  return row.origin_surface === "one" ? "one" : "work";
+}
+
 export function getChat(id: string): Chat | null {
   const row = getDb()
     .prepare("SELECT * FROM chats WHERE id = ?")
@@ -146,6 +157,8 @@ export function createChat(input: {
   parentChatId?: string | null;
   /** One general conversation stays Task-free until explicit promotion. */
   taskMode?: "task" | "conversation";
+  /** 어느 표면이 시작한 대화인지 — One 홈과 Work 사이드바를 durable하게 분리한다. */
+  originSurface?: "one" | "work";
 }): Chat {
   const ko = currentUiLocale() === "ko";
   let resolvedAgentId = input.agentId;
@@ -187,8 +200,8 @@ export function createChat(input: {
   // 첫 user 메시지 도착 시 autoTitleFromFirstMessage가 채움.
   getDb()
     .prepare(
-      `INSERT INTO chats (id, project_id, firm_id, agent_group_id, agent_id, title, kind, parent_chat_id, working_folder, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO chats (id, project_id, firm_id, agent_group_id, agent_id, title, kind, parent_chat_id, working_folder, created_at, updated_at, origin_surface)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -202,6 +215,7 @@ export function createChat(input: {
       continuedWorkingFolder,
       now,
       now,
+      input.originSurface === "one" ? "one" : "work",
     );
   if (input.projectId) touchProject(input.projectId);
   if (input.taskMode !== "conversation") ensureCanonicalTaskForChat(id);

@@ -35,14 +35,15 @@ for (const leak of [
   assert.equal(isInternalProgressStatus(leak), true, `not flagged internal: ${leak}`);
 }
 
-// Result/error schema copy must never read as product copy; it collapses to the
-// neutral, locale-correct retry copy.
+// Result/error schema copy must never read as product copy; it collapses to
+// neutral, locale-correct copy that states facts without commanding a retry.
 const enSchema = toCustomerSafeText(
   "The team run completed, but its structured result was not displayed because it did not validate as exactly one safe Surface.",
   "en",
 );
 assert.doesNotMatch(enSchema, /structured result|safe Surface|safe One Surface|manifest/i, "en schema leak survived");
-assert.match(enSchema, /try again/i, "en schema leak did not fall back to retry copy");
+assert.match(enSchema, /not completed here/i, "en schema leak did not fall back to neutral copy");
+assert.doesNotMatch(enSchema, /try again|ask me/i, "fallback copy must not command the user to retry");
 
 const enWorkbench = toCustomerSafeText("Automatic App/workbench generation is disabled. Showing chat output only.", "en");
 assert.doesNotMatch(enWorkbench, /workbench|Automatic App/i, "workbench copy survived");

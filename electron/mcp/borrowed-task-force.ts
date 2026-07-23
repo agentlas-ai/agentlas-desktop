@@ -3282,20 +3282,31 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   }
   try {
   const specBySlug = new Map(specs.map((spec) => [spec.slug, spec]));
-  const results = await parallelCap(
-    plan.packets,
-    getAgentConcurrency(),
-    async (packet) => {
-      const spec = specBySlug.get(packet.agent) ?? specs[0];
-      const slotId = spec.routeLabel?.startsWith("workforce:")
-        ? spec.routeLabel.slice("workforce:".length)
-        : "";
-      const grant = slotId && spec.agentReleaseId
-        ? plan.capabilityBinding?.grantsByPair.get(workforcePairKey(slotId, spec.agentReleaseId))
-        : undefined;
-      return runBorrowedAgentTurn(p, spec, packet, grant);
-    },
-  );
+  const runPacket = async (packet: (typeof plan.packets)[number]) => {
+    const spec = specBySlug.get(packet.agent) ?? specs[0];
+    const slotId = spec.routeLabel?.startsWith("workforce:")
+      ? spec.routeLabel.slice("workforce:".length)
+      : "";
+    const grant = slotId && spec.agentReleaseId
+      ? plan.capabilityBinding?.grantsByPair.get(workforcePairKey(slotId, spec.agentReleaseId))
+      : undefined;
+    return runBorrowedAgentTurn(p, spec, packet, grant);
+  };
+  const results = await parallelCap(plan.packets, getAgentConcurrency(), runPacket);
+  // 완주 규범: 워커 한 명의 일시 실패가 태스크포스 전체를 "다시 시도해 달라" 종결로
+  // 만들지 않는다. 실패한 워커만 같은 입력으로 1회 자동 재실행해 스스로 복구한다.
+  for (let index = 0; index < plan.packets.length; index += 1) {
+    if (results[index]?.ok !== false || p.signal?.aborted) continue;
+    const failedSlug = results[index].spec.slug;
+    p.sink({
+      kind: "tool-use",
+      status: p.locale === "ko"
+        ? `한 단계가 막혀 다시 진행하는 중… (${failedSlug})`
+        : `Retrying a blocked step… (${failedSlug})`,
+    });
+    const retried = await runPacket(plan.packets[index]);
+    if (retried.ok) results[index] = retried;
+  }
 
   const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
   const orchestratorName = p.orchestratorAgent.nameEn || p.orchestratorAgent.name || "Agentlas Orchestrator";
@@ -3470,8 +3481,8 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       if (parserFailed) {
         oneTaskForceSurfaces = [];
         displayText = p.locale === "ko"
-          ? "결과를 안전하게 마무리하지 못했어요. 아래에서 다시 시도해 달라고 말해 주세요."
-          : "I couldn't finish preparing this result safely. Ask me to try again below and I'll continue.";
+          ? "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요."
+          : "Something went wrong while preparing this result, so it is not complete.";
       } else if (parsed.surfaces.length > 0 || parsed.errors.length > 0) {
         const exactSafeSurface = oneTaskForceSurfaces.length === 1;
         displayText = parsed.cleanedText.trim() || (exactSafeSurface
@@ -3479,8 +3490,8 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
             ? "요청하신 결과를 정리했어요."
             : "Here's your result."
           : p.locale === "ko"
-            ? "결과를 안전하게 마무리하지 못했어요. 아래에서 다시 시도해 달라고 말해 주세요."
-            : "I couldn't finish preparing this result safely. Ask me to try again below and I'll continue.");
+            ? "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요."
+            : "Something went wrong while preparing this result, so it is not complete.");
       }
     } catch {
       // Never log the rejected model body: a legacy manifest may contain a
@@ -3491,8 +3502,8 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       // may continue to chat/final because it can still contain a raw Surface
       // fence and Main-private transport values.
       displayText = p.locale === "ko"
-        ? "결과를 안전하게 마무리하지 못했어요. 아래에서 다시 시도해 달라고 말해 주세요."
-        : "I couldn't finish preparing this result safely. Ask me to try again below and I'll continue.";
+        ? "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요."
+        : "Something went wrong while preparing this result, so it is not complete.";
       console.error("[surface] task-force synthesis parse failed");
     }
   }
@@ -3835,8 +3846,8 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     displayText = [
       displayText,
       p.locale === "ko"
-        ? "이 결과를 안전하게 확인하지 못해 표시하지 않았어요. 아래에서 다시 시도해 달라고 말해 주세요."
-        : "I couldn't verify this result safely, so I didn't show it. Ask me to try again below.",
+        ? "일부 단계가 끝까지 확인되지 않아 완성된 결과로 확정하지 않았어요. 지금까지 확인된 내용은 위에 남아 있어요."
+        : "Some steps were not fully verified, so this is not confirmed as a finished result. What was verified so far is shown above.",
     ].filter(Boolean).join("\n\n");
   }
   displayText = redactOneAttachmentText(p.req, displayText);
