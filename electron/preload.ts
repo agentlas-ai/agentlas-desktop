@@ -167,6 +167,11 @@ const api: AgentlasIpc = {
   agentLearning: {
     summary: (agentId: string) => ipcRenderer.invoke("agentLearning:summary", agentId),
   },
+  agents: {
+    usageSummary: () => ipcRenderer.invoke("agents:usage-summary"),
+    setBookmark: (agentId: string, bookmarked: boolean) =>
+      ipcRenderer.invoke("agents:set-bookmark", agentId, bookmarked),
+  },
   experience: {
     hubCatalog: () => ipcRenderer.invoke("experience:hubCatalog"),
     createPack: (input) => ipcRenderer.invoke("experience:createPack", input),
@@ -193,6 +198,8 @@ const api: AgentlasIpc = {
     prepareTastePreviews: (input) => ipcRenderer.invoke("experience:prepareTastePreviews", input),
     uploadTasteDraft: (input) => ipcRenderer.invoke("experience:uploadTasteDraft", input),
     promote: (input) => ipcRenderer.invoke("experience:promote", input),
+    unsealPublic: (input) => ipcRenderer.invoke("experience:unsealPublic", input),
+    intakeDiagnostics: (agentId: string) => ipcRenderer.invoke("experience:intake-diagnostics", agentId),
     listPromotionReceipts: (packId: string) => ipcRenderer.invoke("experience:listPromotionReceipts", packId),
     createExportIntent: (input) => ipcRenderer.invoke("experience:createExportIntent", input),
     listExportIntents: (packId: string) => ipcRenderer.invoke("experience:listExportIntents", packId),

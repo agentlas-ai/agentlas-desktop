@@ -80,6 +80,7 @@ import {
   buildExperienceRoutingPrior,
   type ExperienceRoutingPrior,
 } from "../experience/context";
+import { promoteExperienceCandidatesForRun } from "../experience/store";
 import { resolveDesktopOperationalRuntimeSession } from "../ontology/operational-runtime-session";
 import { operationalRuntimeOverlayMatchesTask } from "../ontology/operational-runtime-contract";
 import { resolveDesktopTasteRuntimeSession } from "../ontology/taste-runtime-session";
@@ -3436,6 +3437,22 @@ export async function runMcpInvocation(
         displayText = stripped || (locale === "ko"
           ? "응답은 완료됐지만 메모리 제어 블록을 안전하게 정리하지 못해 본문을 숨겼습니다."
           : "The response completed, but its memory control block could not be safely finalized, so the body was withheld.");
+      }
+    }
+
+    // 인터랙티브 성공 턴의 outcome-attested 자동 승격 — 이 턴의 큐레이션이 방금
+    // 만든 경험 후보(영수증에 run_id로 연결됨)를, durable 시작 영수증이 있는
+    // 성공 런에 한해 'local-run-receipt' 방식으로 승격한다. 실패/차단 턴
+    // (oneToolFailureBlocksCompletion)과 read-only 경계 턴은 승격하지 않으며,
+    // 승격 실패는 경고로만 남기고 사용자 턴을 깨지 않는다(후보는 보존됨).
+    if (!req.agentAppMode && !projectReadOnlyBoundary && req.runId && !oneToolFailureBlocksCompletion()) {
+      try {
+        const outcome = promoteExperienceCandidatesForRun({ agentId: agent.id, runId: req.runId });
+        if (outcome.promoted > 0) {
+          console.log(`[experience] interactive run promoted ${outcome.promoted}/${outcome.eligible} candidate(s)`);
+        }
+      } catch (err) {
+        console.warn("[experience] interactive outcome promotion deferred:", err);
       }
     }
 

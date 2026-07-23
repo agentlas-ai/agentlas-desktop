@@ -125,7 +125,10 @@ async function main() {
         }
       });
     });
-    const started = invocationService.start({ chatId: chat.id, userPrompt: "Debug the API retry failure", locale: "en", permissions: "read" });
+    // 00768a3 governed-memory boundary: read-permission turns are memory
+    // read-only (no durable curation). Interactive learning is asserted under
+    // write authority; the read/restricted boundaries keep their own asserts.
+    const started = invocationService.start({ chatId: chat.id, userPrompt: "Debug the API retry failure", locale: "en", permissions: "write" });
     const finalEvent = await terminal;
     assert.equal(finalEvent.runtimeAgentId, "agent-worker");
     assert.equal(compactionCtx?.agentId, "agent-worker", "compaction must use the actual auto-routed executor");
@@ -142,15 +145,30 @@ async function main() {
     const experience = require("../dist/electron/experience/store.js");
     let ontology = experience.getExperienceOntologySummary("agent-worker");
     assert.equal(ontology.autoIntake.candidateCreated, 1);
-    assert.equal(ontology.promotedCount, 0, "auto intake must never promote");
+    // v74: a successful interactive turn with a durable invoke_started receipt
+    // outcome-promotes its own candidates via 'local-run-receipt'. Intake alone
+    // still never promotes — the promotion evidence must be the run ledger.
+    assert.equal(ontology.promotedCount, 1, "durable-receipt interactive run must outcome-promote");
     const autoPack = db.prepare("SELECT * FROM experience_packs WHERE agent_id = ? AND auto_managed = 1").get("agent-worker");
     assert.ok(autoPack);
     const autoCandidate = db.prepare("SELECT * FROM experience_candidates WHERE pack_id = ?").get(autoPack.id);
-    assert.equal(autoCandidate.status, "candidate");
+    assert.equal(autoCandidate.status, "promoted");
+    assert.equal(autoCandidate.public_safe, 0, "outcome promotion must never mark public-safe");
     const candidateTasks = JSON.parse(autoCandidate.task_terms_json);
     assert.ok(candidateTasks.includes("agentlas.task.v1/debugging"));
     assert.ok(candidateTasks.every((task) => /^agentlas\.task\.v1\/[a-z0-9-]+$/.test(task)));
-    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM experience_promotion_receipts").get().n, 0);
+    const autoPromotionReceipts = db.prepare("SELECT * FROM experience_promotion_receipts").all();
+    assert.equal(autoPromotionReceipts.length, 1);
+    assert.equal(autoPromotionReceipts[0].verification_method, "local-run-receipt");
+    assert.equal(autoPromotionReceipts[0].verification_status, "attested");
+    assert.equal(autoPromotionReceipts[0].public_safe, 0);
+    assert.equal(
+      db.prepare(
+        "SELECT run_id FROM experience_auto_intake_receipts WHERE candidate_id = ?",
+      ).get(autoCandidate.id).run_id,
+      started.runId,
+      "intake receipts must link candidates to the durable run that created them",
+    );
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM experience_export_intents").get().n, 0);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM experience_cloud_uploads").get().n, 0);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM agent_evolution_proposals").get().n, 0);
@@ -204,7 +222,7 @@ async function main() {
     const firmChat = chats.createChat({ agentId: "agent-worker", title: "Firm attribution" });
     const firmEvents = [];
     await firm.runFirmInvocation({
-      req: { runId: "firm-learning-v57", chatId: firmChat.id, userPrompt: "Debug the firm API", locale: "en", permissions: "read" },
+      req: { runId: "firm-learning-v57", chatId: firmChat.id, userPrompt: "Debug the firm API", locale: "en", permissions: "write" },
       chat: { id: firmChat.id, projectId: null, firmId: null },
       org: {
         source: "resolver",

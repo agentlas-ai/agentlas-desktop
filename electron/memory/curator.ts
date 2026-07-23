@@ -534,6 +534,9 @@ export function curateEvents(
           },
           basePackageHash: ctx.experienceIntake.basePackageHash,
           taskHint: ctx.experienceIntake.taskHint,
+          // 인터랙티브 런의 durable 식별자 — 성공 턴 완료 시 이 런이 만든 후보를
+          // run-receipt 기반으로 자동 승격할 수 있게 영수증에 남긴다.
+          runId: ctx.runId ?? null,
         });
       } catch (error) {
         console.warn(`[experience] automatic intake deferred: ${error instanceof Error ? error.message : "unknown"}`);

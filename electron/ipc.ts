@@ -247,6 +247,7 @@ import {
   captureExperienceCandidate,
   createExperienceExportIntent,
   createExperiencePack,
+  getExperienceIntakeDiagnostics,
   getExperienceOntologySummary,
   listExperienceCandidates,
   listExperienceExportIntents,
@@ -254,7 +255,9 @@ import {
   listExperiencePromotionReceipts,
   listLocalTasteDrafts,
   promoteExperienceCandidate,
+  unsealExperienceCandidatePublic,
 } from "./experience/store";
+import { listAgentUsageSummary, setAgentBookmark } from "./agents/usage";
 import { getExperienceOntologyGraphSnapshot } from "./experience/relation-index";
 import {
   confirmTasteGeneralization,
@@ -2203,9 +2206,17 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("experience:prepareTastePreviews", (_e, input) => prepareTastePreviews(input));
   ipcMain.handle("experience:uploadTasteDraft", (_e, input) => uploadTasteDraft(input));
   ipcMain.handle("experience:promote", (_e, input) => promoteExperienceCandidate(input));
+  ipcMain.handle("experience:unsealPublic", (_e, input) => unsealExperienceCandidatePublic(input));
+  ipcMain.handle("experience:intake-diagnostics", (_e, agentId: string) =>
+    getExperienceIntakeDiagnostics(agentId));
   ipcMain.handle("experience:listPromotionReceipts", (_e, packId: string) =>
     listExperiencePromotionReceipts(packId),
   );
+
+  // ── v74 에이전트 사용 원장 + 북마크 ─────────────────────────────────────────
+  ipcMain.handle("agents:usage-summary", () => listAgentUsageSummary());
+  ipcMain.handle("agents:set-bookmark", (_e, agentId: string, bookmarked: boolean) =>
+    setAgentBookmark(agentId, bookmarked === true));
   ipcMain.handle("experience:createExportIntent", (_e, input) => createExperienceExportIntent(input));
   ipcMain.handle("experience:listExportIntents", (_e, packId: string) => listExperienceExportIntents(packId));
   ipcMain.handle("experience:cloudSave", (_e, input: ExperienceCloudSaveInput) => saveExperienceToCloud(input));

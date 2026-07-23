@@ -455,7 +455,9 @@ import type {
 import type {
   ExperienceCandidateCaptureInput,
   ExperienceCandidateRecord,
+  ExperienceIntakeDiagnostics,
   ExperienceOntologyGraphSnapshot,
+  ExperiencePublicUnsealInput,
   LocalTasteDraftRecord,
   ExperienceOntologySummary,
   ExperienceExportIntentInput,
@@ -505,6 +507,8 @@ export type {
 export type {
   ExperienceCandidateCaptureInput,
   ExperienceCandidateRecord,
+  ExperienceIntakeDiagnostics,
+  ExperiencePublicUnsealInput,
   ExperienceOntologyGraphEdge,
   ExperienceOntologyGraphEdgeKind,
   ExperienceOntologyGraphNode,
@@ -728,6 +732,20 @@ export interface InstalledAgent {
   kind?: "agent" | "team";
   /** UI/routing contract: visible user agent, background control agent, or private web-only agent. */
   visibility?: AgentVisibility;
+}
+
+/**
+ * v74 에이전트 사용 원장(run_events 귀속 집계) 행. useCount는 이 에이전트가
+ * 참여한 서로 다른 런 수. 삭제된 에이전트 이력도 installed=false로 남는다.
+ */
+export interface AgentUsageSummaryRow {
+  agentId: string;
+  kind: string;
+  firstUsedAt: string;
+  lastUsedAt: string;
+  useCount: number;
+  bookmarkedAt: string | null;
+  installed: boolean;
 }
 
 /**
@@ -4975,6 +4993,11 @@ export interface AgentlasIpc {
   agentLearning: {
     summary: (agentId: string) => Promise<AgentLearningSummary>;
   };
+  /** v74 사용 원장 + 북마크 — run 귀속 시 자동 축적되는 agent_usage 조회/북마크 토글. */
+  agents: {
+    usageSummary: () => Promise<AgentUsageSummaryRow[]>;
+    setBookmark: (agentId: string, bookmarked: boolean) => Promise<{ agentId: string; bookmarkedAt: string | null }>;
+  };
   /** Local Experience ownership and explicit owner-authorized Cloud exchange. */
   experience: {
     /** Public, buyer-safe Hub catalog. Internal chip/release IDs never cross IPC. */
@@ -4995,6 +5018,10 @@ export interface AgentlasIpc {
     prepareTastePreviews: (input: TastePreviewPrepareInput) => Promise<TasteChipWorkflowRecord>;
     uploadTasteDraft: (input: TasteHubUploadInput) => Promise<TasteChipWorkflowRecord>;
     promote: (input: ExperiencePromotionInput) => Promise<ExperiencePromotionReceipt>;
+    /** Explicit owner-consented public unseal of one promoted candidate (post-redaction clean + existing receipt required). */
+    unsealPublic: (input: ExperiencePublicUnsealInput) => Promise<ExperiencePromotionReceipt>;
+    /** Value-free intake funnel counts (blocked/skipped reason codes, redacted admits). */
+    intakeDiagnostics: (agentId: string) => Promise<ExperienceIntakeDiagnostics>;
     listPromotionReceipts: (packId: string) => Promise<ExperiencePromotionReceipt[]>;
     createExportIntent: (input: ExperienceExportIntentInput) => Promise<ExperienceExportIntentRecord>;
     listExportIntents: (packId: string) => Promise<ExperienceExportIntentRecord[]>;

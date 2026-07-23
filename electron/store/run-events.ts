@@ -170,6 +170,26 @@ function failureRowToUi(row: FailureEventRow): FailureEventUi {
   };
 }
 
+/**
+ * v74 agent usage ledger — live upsert on run attribution. use_count counts
+ * distinct runs an agent participated in (first attributed event of the run
+ * increments; later events only advance last_used_at), matching the v74
+ * migration backfill (`COUNT(DISTINCT run_id)` over run_events).
+ */
+function bumpAgentUsage(agentId: string, runId: string, ts: string): void {
+  const attributed = getDb()
+    .prepare("SELECT COUNT(*) AS n FROM run_events WHERE run_id = ? AND agent_id = ?")
+    .get(runId, agentId) as { n?: number } | undefined;
+  const isFirstForRun = Number(attributed?.n ?? 0) <= 1 ? 1 : 0;
+  getDb().prepare(
+    `INSERT INTO agent_usage (agent_key, kind, first_used_at, last_used_at, use_count)
+     VALUES (?, 'agent', ?, ?, 1)
+     ON CONFLICT(agent_key) DO UPDATE SET
+       last_used_at = MAX(agent_usage.last_used_at, excluded.last_used_at),
+       use_count = agent_usage.use_count + ?`,
+  ).run(agentId, ts, ts, isFirstForRun);
+}
+
 export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
   const seq = nextSeq(input.runId);
   const row = {
@@ -202,6 +222,7 @@ export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
       row.agent_id,
       row.payload_json,
     );
+  if (row.agent_id) bumpAgentUsage(row.agent_id, row.run_id, row.ts);
   return runRowToUi(row);
 }
 

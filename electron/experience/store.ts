@@ -4,6 +4,7 @@ import path from "node:path";
 import type {
   ExperienceCandidateCaptureInput,
   ExperienceCandidateRecord,
+  ExperienceIntakeDiagnostics,
   ExperienceOntologySummary,
   ExperienceExportIntentInput,
   ExperienceExportIntentRecord,
@@ -71,12 +72,47 @@ const PUBLIC_UNSAFE_PATTERNS: Array<{ code: string; pattern: RegExp }> = [
   { code: "secret-value", pattern: SECRET_VALUE_RE },
   { code: "raw-prompt-or-transcript", pattern: /\b(?:raw[_ -]?prompt|system[_ -]?prompt|user[_ -]?prompt|transcript|conversation dump)\b|(?:^|\n)\s*(?:system|assistant|user|tool)\s*:/i },
   { code: "email", pattern: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i },
-  { code: "phone-or-long-number", pattern: /(?:^|\D)\+?\d[\d ()-]{7,}\d(?:\D|$)/ },
   { code: "local-path-or-url", pattern: /https?:\/\//i },
   { code: "local-path-or-url", pattern: PRIVATE_LOCATION_RE },
   { code: "account-identifier", pattern: /\b(?:account|user|workspace|customer|tenant|organization|org)[ _-]?id\s*[:=]\s*[A-Za-z0-9._:-]+/i },
   { code: "opaque-identifier", pattern: /\b(?:[a-f0-9]{32,}|[A-Za-z0-9+/]{40,}={0,2}|[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})\b/i },
 ];
+
+// ── Phone-shaped number precision detector ───────────────────────────────────
+// The legacy `(?:^|\D)\+?\d[\d ()-]{7,}\d` rule blocked git SHAs, UUID digit
+// groups, and epoch timestamps as "phone-or-long-number". A span now counts as
+// phone-shaped only when it is not embedded in a longer hex/base64/path token,
+// carries 9-15 digits, and is either +country-prefixed or split into separated
+// digit groups. Bare long digit runs (timestamps, counters) no longer match.
+const PHONE_SEGMENT_RE = /\+?\d[\d\s().-]{7,24}\d/g;
+const ISO_DATE_PREFIX_RE = /^\d{4}[.\s-]\d{1,2}[.\s-]\d{1,2}(?:$|[^\d])/;
+
+function phoneLikeSpans(text: string): Array<{ start: number; end: number }> {
+  const spans: Array<{ start: number; end: number }> = [];
+  PHONE_SEGMENT_RE.lastIndex = 0;
+  for (const match of text.matchAll(PHONE_SEGMENT_RE)) {
+    const value = match[0];
+    const start = match.index ?? 0;
+    const end = start + value.length;
+    const before = start > 0 ? text[start - 1] : "";
+    const after = end < text.length ? text[end] : "";
+    // Embedded in a longer opaque token (SHA/UUID/base64/path/version) — not a phone.
+    if (/[0-9A-Za-z_+]/.test(before) || /[0-9A-Za-z_]/.test(after)) continue;
+    if (["-", ".", "/", "\\", ":"].includes(before) || ["-", ".", "/", "\\"].includes(after)) continue;
+    const digits = value.replace(/\D/g, "");
+    if (digits.length < 9 || digits.length > 15) continue;
+    const hasCountryPrefix = value.startsWith("+");
+    const hasSeparatedGroups = /\d[\s().-]+\d/.test(value);
+    if (!hasCountryPrefix && !hasSeparatedGroups) continue;
+    if (ISO_DATE_PREFIX_RE.test(value.replace(/^\+/, ""))) continue;
+    spans.push({ start, end });
+  }
+  return spans;
+}
+
+function containsPhoneLikeNumber(text: string): boolean {
+  return phoneLikeSpans(text).length > 0;
+}
 
 type PackRow = {
   id: string;
@@ -208,9 +244,64 @@ export function publicExperienceSafetyIssues(text: string): string[] {
     ...variants.flatMap((value) => PUBLIC_UNSAFE_PATTERNS
       .filter(({ pattern }) => pattern.test(value))
       .map(({ code }) => code)),
+    ...(variants.some(containsPhoneLikeNumber) ? ["phone-or-long-number"] : []),
     ...(variants.some((value) => LABELED_IDENTIFIER_RE.test(value)) ? ["account-identifier"] : []),
     ...(ipAddress ? ["ip-address"] : []),
   ])];
+}
+
+// ── Redact-and-admit (auto-intake only) ──────────────────────────────────────
+// Privacy classes that are span-redactable at intake. Everything else on the
+// scanner (secrets, prompt/transcript material, labeled account identifiers,
+// IP addresses, base64 blobs ≥80, sensitive memory) stays a hard block.
+const REDACTABLE_PRIVACY_CODES: ReadonlySet<string> = new Set([
+  "local-path-or-url",
+  "email",
+  "phone-or-long-number",
+  "opaque-identifier",
+]);
+
+const REDACT_URL_RE = /https?:\/\/[^\s"'`<>\])}]+/gi;
+const REDACT_EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+const REDACT_UUID_RE = /\b[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}\b/gi;
+const REDACT_HEX_RE = /\b[a-f0-9]{32,}\b/gi;
+const REDACT_B64_RE = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])/g;
+const REDACT_LOCATION_RE = new RegExp(PRIVATE_LOCATION_RE.source, "gi");
+const LOCATION_PREFIX_CHAR_RE = /^[\s"'`()\[\]{}=:,;]/;
+
+export interface ExperienceRedactionResult {
+  text: string;
+  redactions: number;
+}
+
+/**
+ * Replaces privacy spans with value-free placeholders: local paths → `<경로>`,
+ * URLs → `<URL>`, emails → `<이메일>`, opaque/phone-shaped numbers → `<ID>`.
+ * The caller MUST re-run publicExperienceSafetyIssues on the result and treat
+ * any residue as a hard block; this function never claims completeness.
+ */
+export function redactExperiencePrivacySpans(raw: string): ExperienceRedactionResult {
+  let redactions = 0;
+  const count = (replacement: string) => {
+    redactions += 1;
+    return replacement;
+  };
+  let text = raw.replace(REDACT_URL_RE, () => count("<URL>"));
+  text = text.replace(REDACT_EMAIL_RE, () => count("<이메일>"));
+  text = text.replace(REDACT_UUID_RE, () => count("<ID>"));
+  text = text.replace(REDACT_HEX_RE, () => count("<ID>"));
+  text = text.replace(REDACT_B64_RE, () => count("<ID>"));
+  text = text.replace(REDACT_LOCATION_RE, (match) => {
+    const prefix = LOCATION_PREFIX_CHAR_RE.test(match[0] ?? "") ? match[0] : "";
+    return count(`${prefix}<경로>`);
+  });
+  // Phone-shaped spans are located on the current text so indices stay valid.
+  for (let guard = 0; guard < 64; guard += 1) {
+    const span = phoneLikeSpans(text)[0];
+    if (!span) break;
+    text = `${text.slice(0, span.start)}${count("<ID>")}${text.slice(span.end)}`;
+  }
+  return { text, redactions };
 }
 
 function decodedTextVariants(value: string): string[] {
@@ -430,8 +521,36 @@ function getCandidateRow(id: string): CandidateRow {
   return row;
 }
 
+// ── Builtin base fingerprint ─────────────────────────────────────────────────
+// Builtin agents ship inside the app and have no imported package archive, so
+// they can never present a real packageHash. Local Experience accrual derives a
+// deterministic, app-version-independent fingerprint from the builtin slug so
+// candidates and packs bind to a stable local base. Public upload / market
+// listing paths keep their own exact Hub release binding requirements
+// (base_agent_definition_id / base_agent_release_id) and are NOT weakened by
+// this local fingerprint.
+const BUILTIN_BASE_FINGERPRINT_DOMAIN = "agentlas-builtin-experience-base-v1";
+
+export function builtinExperienceBasePackageHash(slug: string): string {
+  return hash(BUILTIN_BASE_FINGERPRINT_DOMAIN, String(slug ?? "").trim());
+}
+
+function isBuiltinInstalledAgent(agentId: string): boolean {
+  const row = getDb().prepare("SELECT builtin FROM installed_agents WHERE id = ?")
+    .get(agentId) as { builtin?: number } | undefined;
+  return row?.builtin === 1;
+}
+
+/** Verified package hash for imported agents; deterministic local fingerprint for builtins; null otherwise. */
+function effectiveExperienceBaseHash(agent: { id: string; slug: string; packageHash?: string }): string | null {
+  if (agent.packageHash && /^[a-f0-9]{64}$/.test(agent.packageHash)) return agent.packageHash;
+  if (agent.packageHash) return null;
+  return isBuiltinInstalledAgent(agent.id) ? builtinExperienceBasePackageHash(agent.slug) : null;
+}
+
 function assertPackBaseCurrent(pack: PackRow): void {
-  const current = getAgentById(pack.agent_id)?.packageHash ?? null;
+  const agent = getAgentById(pack.agent_id);
+  const current = agent ? effectiveExperienceBaseHash(agent) : null;
   if (!pack.base_package_hash || !/^[a-f0-9]{64}$/.test(pack.base_package_hash) || current !== pack.base_package_hash) {
     throw new Error("Experience Pack base package is missing or no longer matches the installed agent.");
   }
@@ -630,10 +749,30 @@ export interface AutoExperienceIntakeInput {
   environment: { platform: string; arch?: string; runtimeKind: string };
   basePackageHash?: string | null;
   taskHint?: string | null;
+  /** Durable invocation identity — recorded on the intake receipt so a successful interactive run can outcome-promote its own candidates. */
+  runId?: string | null;
 }
 
 const AUTO_INTAKE_POLICY_VERSION = "experience-auto-intake-operational-v2";
 const TASTE_DRAFT_POLICY_VERSION = "taste-draft-auto-intake-v1";
+
+/**
+ * The exact base identity this intake binds to: the supplied verified package
+ * hash when it matches the installed agent, or the deterministic builtin
+ * fingerprint when the installed agent is builtin (no package archive exists).
+ * Null means no exact base is available and operational intake must skip.
+ */
+function resolveEffectiveIntakeBase(input: Pick<AutoExperienceIntakeInput, "agentId" | "basePackageHash">): string | null {
+  const agent = getAgentById(input.agentId);
+  if (!agent) return null;
+  const effective = effectiveExperienceBaseHash(agent);
+  if (!effective) return null;
+  const supplied = input.basePackageHash ?? null;
+  if (supplied === effective) return effective;
+  // Builtin lane: callers pass null because no package hash exists on disk.
+  if (supplied === null && !agent.packageHash) return effective;
+  return null;
+}
 
 function autoIntakeSourceMemoryHash(input: AutoExperienceIntakeInput): string {
   let environmentKey = "environment-unavailable";
@@ -646,7 +785,7 @@ function autoIntakeSourceMemoryHash(input: AutoExperienceIntakeInput): string {
     AUTO_INTAKE_POLICY_VERSION,
     input.agentId,
     input.memory.id,
-    input.basePackageHash ?? "base-unavailable",
+    resolveEffectiveIntakeBase(input) ?? input.basePackageHash ?? "base-unavailable",
     environmentKey,
   );
 }
@@ -678,10 +817,8 @@ function inferTasteAxes(text: string): TasteAxis[] {
  */
 function autoIntakeTasteDraft(input: AutoExperienceIntakeInput): "created" | "existing" | "deferred" {
   const agent = getAgentById(input.agentId);
-  const basePackageHash = input.basePackageHash ?? null;
-  if (!agent || !basePackageHash || !/^[a-f0-9]{64}$/.test(basePackageHash) || agent.packageHash !== basePackageHash) {
-    return "deferred";
-  }
+  const basePackageHash = resolveEffectiveIntakeBase(input);
+  if (!agent || !basePackageHash) return "deferred";
   const profile = canonicalEnvironmentProfile(input.environment);
   if (!isRuntimeEligibleExperienceEnvironmentProfile(profile)) return "deferred";
   const environmentKey = experienceEnvironmentKey(input.environment);
@@ -747,12 +884,17 @@ function recordAutoIntakeReceipt(input: {
   reasons: string[];
   packId?: string | null;
   candidateId?: string | null;
+  runId?: string | null;
+  redactionCount?: number;
 }): void {
+  const runId = typeof input.runId === "string" && SAFE_EVIDENCE_REF_RE.test(input.runId.trim())
+    ? input.runId.trim()
+    : null;
   getDb().prepare(
     `INSERT OR IGNORE INTO experience_auto_intake_receipts (
        id, agent_id, pack_id, candidate_id, source_memory_hash, status,
-       memory_kind, reason_codes_json, created_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       memory_kind, reason_codes_json, run_id, redaction_count, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     randomUUID(),
     input.agentId,
@@ -762,6 +904,8 @@ function recordAutoIntakeReceipt(input: {
     input.status,
     input.memoryKind,
     JSON.stringify([...new Set(input.reasons)].sort()),
+    runId,
+    Math.max(0, Math.trunc(input.redactionCount ?? 0)),
     new Date().toISOString(),
   );
 }
@@ -814,13 +958,8 @@ function ensureAutoExperiencePack(input: AutoExperienceIntakeInput): PackRow {
  */
 export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void {
   const sourceMemoryHash = autoIntakeSourceMemoryHash(input);
-  const privacyIssues = publicExperienceSafetyIssues(input.memory.content);
-  if (input.memory.sensitivity === "secret" || input.memory.sensitivity === "confidential") {
-    privacyIssues.push("sensitive-memory");
-  } else if (!["public", "internal", "private"].includes(input.memory.sensitivity)) {
-    privacyIssues.push("unsupported-sensitivity");
-  }
-  if (privacyIssues.length > 0) {
+  const runId = input.runId ?? null;
+  const recordBlocked = (reasons: string[], redactionCount = 0): void => {
     const duplicate = getDb().prepare(
       "SELECT 1 FROM experience_auto_intake_receipts WHERE agent_id = ? AND source_memory_hash = ? LIMIT 1",
     ).get(input.agentId, sourceMemoryHash);
@@ -830,9 +969,43 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
       sourceMemoryHash,
       memoryKind: input.memory.kind,
       status: "blocked",
-      reasons: privacyIssues,
+      reasons,
+      runId,
+      redactionCount,
     });
+  };
+
+  // Hard blocks stay hard: secrets/credentials, prompt/transcript/source
+  // material, labeled account identifiers, IP addresses, and sensitive memory
+  // are never redact-admitted.
+  const hardIssues: string[] = [];
+  if (input.memory.sensitivity === "secret" || input.memory.sensitivity === "confidential") {
+    hardIssues.push("sensitive-memory");
+  } else if (!["public", "internal", "private"].includes(input.memory.sensitivity)) {
+    hardIssues.push("unsupported-sensitivity");
+  }
+  const rawIssues = publicExperienceSafetyIssues(input.memory.content);
+  hardIssues.push(...rawIssues.filter((code) => !REDACTABLE_PRIVACY_CODES.has(code)));
+  if (hardIssues.length > 0) {
+    recordBlocked(hardIssues);
     return;
+  }
+
+  // Redact-and-admit: span-redact paths/URLs (<경로>/<URL>), emails (<이메일>)
+  // and opaque or phone-shaped numbers (<ID>), then re-scan. Any residue after
+  // redaction is a hard block — never a partial admit. Raw redacted-out text
+  // must not reach the candidate body, relation index, or any receipt.
+  let operationalContent = input.memory.content;
+  let redactionCount = 0;
+  if (rawIssues.length > 0) {
+    const redaction = redactExperiencePrivacySpans(input.memory.content);
+    const residualIssues = publicExperienceSafetyIssues(redaction.text);
+    if (residualIssues.length > 0) {
+      recordBlocked([...residualIssues, "redaction-insufficient"], redaction.redactions);
+      return;
+    }
+    operationalContent = redaction.text;
+    redactionCount = redaction.redactions;
   }
 
   // Preference memories take a separate lane. The local row is merely a
@@ -859,19 +1032,20 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
           ? "preference-captured-as-private-taste-draft"
           : "preference-requires-taste-evidence"
         : "non-operational-memory-kind"],
+      runId,
     });
     return;
   }
 
-  const agent = getAgentById(input.agentId);
-  const basePackageHash = input.basePackageHash ?? null;
-  if (!agent || !basePackageHash || !/^[a-f0-9]{64}$/.test(basePackageHash) || agent.packageHash !== basePackageHash) {
+  const basePackageHash = resolveEffectiveIntakeBase(input);
+  if (!basePackageHash) {
     recordAutoIntakeReceipt({
       agentId: input.agentId,
       sourceMemoryHash,
       memoryKind: input.memory.kind,
       status: "skipped",
       reasons: ["exact-base-unavailable"],
+      runId,
     });
     return;
   }
@@ -884,13 +1058,14 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
       memoryKind: input.memory.kind,
       status: "skipped",
       reasons: ["environment-taxonomy-unavailable"],
+      runId,
     });
     return;
   }
 
   const tasks = classifyCanonicalTaskIds(
     input.taskHint,
-    input.memory.content,
+    operationalContent,
     input.memory.requestContext?.userIntent,
     ...(input.memory.requestContext?.triggerTerms ?? []),
   );
@@ -901,6 +1076,7 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
       memoryKind: input.memory.kind,
       status: "skipped",
       reasons: ["task-taxonomy-unavailable"],
+      runId,
     });
     return;
   }
@@ -915,16 +1091,18 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
       sourceMemoryHash,
       memoryKind: input.memory.kind,
       status: "candidate-created",
-      reasons: [],
+      reasons: redactionCount > 0 ? ["redacted-admit"] : [],
       packId: pack.id,
       candidateId: existingCandidate.id,
+      runId,
+      redactionCount,
     });
     return;
   }
 
   const candidateId = randomUUID();
   const now = new Date().toISOString();
-  const summary = cleanText(input.memory.content, "Auto Experience candidate", 1_200);
+  const summary = cleanText(operationalContent, "Auto Experience candidate", 1_200);
   const embedding = autoLocalEmbedding(summary);
   const transaction = getDb().transaction(() => {
     getDb().prepare(
@@ -960,9 +1138,11 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
       sourceMemoryHash,
       memoryKind: input.memory.kind,
       status: "candidate-created",
-      reasons: [],
+      reasons: redactionCount > 0 ? ["redacted-admit"] : [],
       packId: pack.id,
       candidateId,
+      runId,
+      redactionCount,
     });
   });
   transaction();
@@ -1088,10 +1268,11 @@ export function promoteExperienceCandidate(input: ExperiencePromotionInput): Exp
   if (input.publicSafe === true && candidate.sensitivity !== "public") {
     throw new Error("Only public-sensitivity candidates can be marked public-safe.");
   }
-  if (input.publicSafe === true) {
-    assertPublicExperienceText(candidate.summary);
-    throw new Error("Public-safe promotion requires an authoritative local verifier, which is not available in P0.");
-  }
+  // Public-safe direct promotion: explicit owner consent (asserted above) plus
+  // a fully privacy-clean summary mints a verified public receipt in one flow.
+  // Any scanner residue keeps throwing via assertPublicExperienceText.
+  const publicSafe = input.publicSafe === true;
+  if (publicSafe) assertPublicExperienceText(candidate.summary);
   const id = randomUUID();
   const now = new Date().toISOString();
   const evidenceHash = hash("experience-evidence-v1", ...refs);
@@ -1100,21 +1281,23 @@ export function promoteExperienceCandidate(input: ExperiencePromotionInput): Exp
       `INSERT INTO experience_promotion_receipts (
          id, pack_id, candidate_id, agent_id, action, explicit_consent,
          verification_status, verification_method, evidence_hash, public_safe, created_at
-       ) VALUES (?, ?, ?, ?, 'promote', 1, 'attested', 'user-attested', ?, 0, ?)`,
+       ) VALUES (?, ?, ?, ?, 'promote', 1, ?, 'user-attested', ?, ?, ?)`,
     ).run(
       id,
       candidate.pack_id,
       candidate.id,
       candidate.agent_id,
+      publicSafe ? "verified" : "attested",
       evidenceHash,
+      publicSafe ? 1 : 0,
       now,
     );
     getDb().prepare(
       `UPDATE experience_candidates
-          SET status = 'promoted', outcome_status = 'attested', public_safe = 0,
+          SET status = 'promoted', outcome_status = ?, public_safe = ?,
               updated_at = ?, promoted_at = ?
         WHERE id = ? AND status = 'candidate'`,
-    ).run(now, now, candidate.id);
+    ).run(publicSafe ? "verified" : "attested", publicSafe ? 1 : 0, now, now, candidate.id);
     getDb().prepare("UPDATE experience_packs SET updated_at = ? WHERE id = ?")
       .run(now, candidate.pack_id);
     recordExperienceLineageEvent(candidate.pack_id, "promotion");
@@ -1197,6 +1380,158 @@ export function promoteExperienceCandidateFromRunReceipt(input: {
   return receiptFromRow(
     getDb().prepare("SELECT * FROM experience_promotion_receipts WHERE id = ?").get(id) as PromotionReceiptRow,
   );
+}
+
+/**
+ * Interactive-run auto-promotion — after a chat turn completes successfully
+ * with a durable run start receipt, promote exactly the candidates this run's
+ * intake created (receipt-linked by run_id). Uses the same outcome-attested
+ * machinery as automation recovery (`local-run-receipt`), stays idempotent via
+ * the UNIQUE promote receipt, and promotes nothing without a durable receipt.
+ */
+export function promoteExperienceCandidatesForRun(input: {
+  agentId: string;
+  runId: string;
+}): { eligible: number; promoted: number } {
+  const agentId = cleanText(input.agentId, "agentId", 120);
+  const runId = cleanText(input.runId, "runId", 120);
+  if (!SAFE_EVIDENCE_REF_RE.test(runId)) {
+    throw new Error("Run receipt evidence must be a value-free run id.");
+  }
+  const rows = getDb().prepare(
+    `SELECT r.candidate_id
+       FROM experience_auto_intake_receipts r
+       JOIN experience_candidates c ON c.id = r.candidate_id AND c.agent_id = r.agent_id
+      WHERE r.agent_id = ? AND r.run_id = ? AND r.status = 'candidate-created'
+        AND r.candidate_id IS NOT NULL AND c.status = 'candidate'
+      ORDER BY r.created_at ASC`,
+  ).all(agentId, runId) as Array<{ candidate_id: string }>;
+  if (rows.length === 0) return { eligible: 0, promoted: 0 };
+  // Failed/cancelled turns never reach this call site, and even a mistaken
+  // call cannot promote: the durable start receipt is re-checked here and
+  // inside the promotion itself.
+  if (!hasDurableRunStartReceipt(runId)) return { eligible: rows.length, promoted: 0 };
+  let promoted = 0;
+  for (const row of rows) {
+    promoteExperienceCandidateFromRunReceipt({ candidateId: row.candidate_id, runId });
+    promoted += 1;
+  }
+  return { eligible: rows.length, promoted };
+}
+
+/**
+ * Explicit owner-consented public unseal of one already-promoted candidate.
+ * ALL of the following must hold, otherwise this throws:
+ *  1. explicitConsent === true (owner action, renderer-invoked),
+ *  2. the candidate is promoted with a receipt whose method is
+ *     'user-attested' or 'local-run-receipt',
+ *  3. the stored (post-redaction) summary passes the full public privacy scan,
+ *  4. the candidate sensitivity is 'public' or 'internal' — private,
+ *     confidential, and secret sources can never be unsealed,
+ *  5. the pack base still matches the installed agent.
+ * The existing promote receipt is upgraded to verified + public_safe, which is
+ * exactly what the public export-intent branch requires.
+ */
+export function unsealExperienceCandidatePublic(input: {
+  candidateId: string;
+  explicitConsent: true;
+}): ExperiencePromotionReceipt {
+  assertExactKeys(input, ["candidateId", "explicitConsent"], "Experience public unseal input");
+  if (input.explicitConsent !== true) throw new Error("Public unseal requires explicit owner consent.");
+  const candidate = getCandidateRow(cleanText(input.candidateId, "candidateId", 120));
+  const pack = getPackRow(candidate.pack_id);
+  assertPackBaseCurrent(pack);
+  const receipt = getDb().prepare(
+    "SELECT * FROM experience_promotion_receipts WHERE candidate_id = ? AND action = 'promote'",
+  ).get(candidate.id) as PromotionReceiptRow | undefined;
+  if (!receipt) {
+    throw new Error("Public unseal requires an existing promotion receipt (user-attested or local-run-receipt).");
+  }
+  if (receipt.verification_method !== "user-attested" && receipt.verification_method !== "local-run-receipt") {
+    throw new Error("Public unseal accepts only user-attested or local-run-receipt promotions.");
+  }
+  if (candidate.status !== "promoted") throw new Error("Only promoted Experience candidates can be unsealed.");
+  if (candidate.sensitivity !== "public" && candidate.sensitivity !== "internal") {
+    throw new Error("Private, confidential, or secret candidates can never be unsealed publicly.");
+  }
+  assertPublicExperienceText(candidate.summary);
+  if (receipt.public_safe === 1 && receipt.verification_status === "verified") {
+    return receiptFromRow(receipt);
+  }
+  const now = new Date().toISOString();
+  const transaction = getDb().transaction(() => {
+    getDb().prepare(
+      `UPDATE experience_promotion_receipts
+          SET verification_status = 'verified', public_safe = 1
+        WHERE id = ?`,
+    ).run(receipt.id);
+    getDb().prepare(
+      `UPDATE experience_candidates
+          SET outcome_status = 'verified', public_safe = 1, updated_at = ?
+        WHERE id = ? AND status = 'promoted'`,
+    ).run(now, candidate.id);
+    getDb().prepare("UPDATE experience_packs SET updated_at = ? WHERE id = ?")
+      .run(now, candidate.pack_id);
+    recordExperienceLineageEvent(candidate.pack_id, "promotion");
+  });
+  transaction();
+  try {
+    refreshExperienceRelationArtifacts(candidate.pack_id);
+  } catch (error) {
+    console.warn(`[experience-relations] public unseal projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
+  }
+  return receiptFromRow(
+    getDb().prepare("SELECT * FROM experience_promotion_receipts WHERE id = ?").get(receipt.id) as PromotionReceiptRow,
+  );
+}
+
+/** Value-free intake funnel diagnostics for one agent (counts + reason codes only). */
+export function getExperienceIntakeDiagnostics(agentIdValue: string): ExperienceIntakeDiagnostics {
+  const agentId = cleanText(agentIdValue, "agentId", 120);
+  const rows = getDb().prepare(
+    `SELECT status, reason_codes_json, redaction_count
+       FROM experience_auto_intake_receipts WHERE agent_id = ?`,
+  ).all(agentId) as Array<{
+    status: "candidate-created" | "blocked" | "skipped";
+    reason_codes_json: string;
+    redaction_count: number | null;
+  }>;
+  const totals = { candidateCreated: 0, blocked: 0, skipped: 0 };
+  const redactedAdmits = { receipts: 0, redactedSpans: 0 };
+  const reasonCounts = new Map<string, number>();
+  for (const row of rows) {
+    if (row.status === "candidate-created") totals.candidateCreated += 1;
+    else if (row.status === "blocked") totals.blocked += 1;
+    else totals.skipped += 1;
+    let reasons: string[] = [];
+    try {
+      const parsed = JSON.parse(row.reason_codes_json) as unknown;
+      reasons = Array.isArray(parsed)
+        ? parsed.filter((item): item is string => typeof item === "string")
+        : ["invalid-local-receipt"];
+    } catch {
+      reasons = ["invalid-local-receipt"];
+    }
+    for (const code of reasons) {
+      const key = `${row.status} ${code}`;
+      reasonCounts.set(key, (reasonCounts.get(key) ?? 0) + 1);
+    }
+    if (row.status === "candidate-created" && Number(row.redaction_count ?? 0) > 0) {
+      redactedAdmits.receipts += 1;
+      redactedAdmits.redactedSpans += Number(row.redaction_count ?? 0);
+    }
+  }
+  return {
+    agentId,
+    totals,
+    redactedAdmits,
+    reasons: [...reasonCounts.entries()]
+      .map(([key, count]) => {
+        const [status, code] = key.split(" ");
+        return { status: status as "candidate-created" | "blocked" | "skipped", code, count };
+      })
+      .sort((left, right) => right.count - left.count || left.code.localeCompare(right.code)),
+  };
 }
 
 export function listExperiencePromotionReceipts(packId: string): ExperiencePromotionReceipt[] {

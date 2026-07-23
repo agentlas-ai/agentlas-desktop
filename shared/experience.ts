@@ -379,15 +379,20 @@ export type OntologyRelationGraphV1Node = ExperienceOntologyGraphNode;
 export type OntologyRelationGraphV1Edge = ExperienceOntologyGraphEdge;
 export type OntologyRelationGraphV1Snapshot = ExperienceOntologyGraphSnapshot;
 
-/** P0 has no authoritative run/test verifier yet; user review is an attestation, not verification. */
-export type ExperienceVerificationMethod = "user-attested";
+/**
+ * Receipt-side verification methods. `user-attested` is a human review,
+ * `local-run-receipt` is an outcome-attested successful run (durable start
+ * receipt in the append-only run ledger), `local-test-receipt` is reserved.
+ */
+export type ExperienceVerificationMethod = "user-attested" | "local-run-receipt" | "local-test-receipt";
 
 export interface ExperiencePromotionInput {
   candidateId: string;
   explicitConsent: true;
   verification: {
     status: "attested";
-    method: ExperienceVerificationMethod;
+    /** Renderer-initiated promotion stays user-attested; run-receipt promotion is Main-only. */
+    method: "user-attested";
     /** Value-free IDs only. Raw outputs, paths, URLs, and transcripts are rejected. */
     evidenceRefs: string[];
   };
@@ -401,11 +406,42 @@ export interface ExperiencePromotionReceipt {
   agentId: string;
   action: "promote";
   explicitConsent: true;
-  verificationStatus: "attested";
+  verificationStatus: "attested" | "verified";
   verificationMethod: ExperienceVerificationMethod;
   evidenceHash: string;
   publicSafe: boolean;
   createdAt: string;
+}
+
+/**
+ * Explicit owner action that publicly unseals one already-promoted candidate.
+ * Requires an existing promotion receipt (`user-attested` or
+ * `local-run-receipt`) and a post-redaction privacy-clean summary; the
+ * promotion receipt is upgraded to `verified` + `public_safe`.
+ */
+export interface ExperiencePublicUnsealInput {
+  candidateId: string;
+  explicitConsent: true;
+}
+
+/** Value-free aggregate of local auto-intake receipts for one agent. */
+export interface ExperienceIntakeDiagnostics {
+  agentId: string;
+  totals: {
+    candidateCreated: number;
+    blocked: number;
+    skipped: number;
+  };
+  /** Redacted-and-admitted subset of candidateCreated, with total redacted spans. */
+  redactedAdmits: {
+    receipts: number;
+    redactedSpans: number;
+  };
+  reasons: Array<{
+    status: "candidate-created" | "blocked" | "skipped";
+    code: string;
+    count: number;
+  }>;
 }
 
 export interface ExperienceExportIntentInput {

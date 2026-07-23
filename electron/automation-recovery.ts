@@ -253,6 +253,7 @@ export function recordAutomationRecovery(input: AutomationRecoveryInput): Automa
           environment: { platform: process.platform, arch: process.arch, runtimeKind: "agentlas-desktop" },
           basePackageHash,
           taskHint: input.automation.promptTemplate?.slice(0, 400) ?? input.automation.name,
+          runId: input.runId,
         });
         const candidate = findExperienceCandidateBySourceMemory(agentId, memoryId);
         if (candidate && candidate.status === "candidate") {

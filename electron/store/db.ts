@@ -13,7 +13,7 @@ import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 73;
+const SCHEMA_VERSION = 74;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -3169,6 +3169,65 @@ export function initStore(): void {
     const chatColumnNamesV73 = new Set(schemaColumns(_db, "chats").map((column) => column.name));
     if (!chatColumnNamesV73.has("origin_surface")) {
       _db.exec("ALTER TABLE chats ADD COLUMN origin_surface TEXT NOT NULL DEFAULT 'work'");
+    }
+  }
+
+  // ── v73 → v74: agent usage ledger + bookmark + intake receipt run linkage ──
+  //   agent_usage                : per-agent run participation aggregate,
+  //                                backfilled from run_events and kept live by
+  //                                recordRunEvent.
+  //   installed_agents.bookmarked_at : owner bookmark timestamp.
+  //   experience_auto_intake_receipts.run_id / redaction_count :
+  //                                links auto-intake receipts to the durable
+  //                                run that created them (interactive
+  //                                outcome promotion) and records how many
+  //                                privacy spans were redacted on admit.
+  if (userVersion < 74) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_usage (
+        agent_key TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        first_used_at TEXT NOT NULL,
+        last_used_at TEXT NOT NULL,
+        use_count INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    if (tableExists(_db, "installed_agents")) {
+      const agentColumns = new Set(schemaColumns(_db, "installed_agents").map((column) => column.name));
+      if (!agentColumns.has("bookmarked_at")) {
+        _db.exec("ALTER TABLE installed_agents ADD COLUMN bookmarked_at TEXT NULL");
+      }
+    }
+    if (tableExists(_db, "experience_auto_intake_receipts")) {
+      const receiptColumns = new Set(
+        schemaColumns(_db, "experience_auto_intake_receipts").map((column) => column.name),
+      );
+      if (!receiptColumns.has("run_id")) {
+        _db.exec("ALTER TABLE experience_auto_intake_receipts ADD COLUMN run_id TEXT NULL");
+      }
+      if (!receiptColumns.has("redaction_count")) {
+        _db.exec("ALTER TABLE experience_auto_intake_receipts ADD COLUMN redaction_count INTEGER NOT NULL DEFAULT 0");
+      }
+      _db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_experience_auto_intake_run
+          ON experience_auto_intake_receipts(agent_id, run_id)
+          WHERE run_id IS NOT NULL;
+      `);
+    }
+    if (tableExists(_db, "run_events")) {
+      // Deterministic backfill: one use per distinct run an agent appeared in.
+      _db.exec(`
+        INSERT INTO agent_usage (agent_key, kind, first_used_at, last_used_at, use_count)
+        SELECT agent_id, 'agent', MIN(ts), MAX(ts), COUNT(DISTINCT run_id)
+          FROM run_events
+         WHERE agent_id IS NOT NULL
+         GROUP BY agent_id
+        ON CONFLICT(agent_key) DO UPDATE SET
+          first_used_at = MIN(agent_usage.first_used_at, excluded.first_used_at),
+          last_used_at = MAX(agent_usage.last_used_at, excluded.last_used_at),
+          use_count = excluded.use_count;
+      `);
+
     }
   }
 
