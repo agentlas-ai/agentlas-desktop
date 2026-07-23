@@ -61,7 +61,6 @@ import {
   collectAutomationFailureContext,
   type AutomationFailureContext,
 } from "./automation-strategy";
-import { recordAutomationRecovery } from "./automation-recovery";
 import type {
   TriggerDeliveryHooks,
   TriggerDispatchResult,
@@ -491,13 +490,13 @@ async function runOne(
   let runError: string | null = null;
   let output: string | undefined;
   let currentRunId: string | null = null;
-  // 이번 실행 "이전"의 실패 스트릭 — 성공 시 복구 학습(recordAutomationRecovery) 판정에 쓴다.
-  // markAutomationRun 이후에는 이번 결과가 이력에 섞여 사전 상태를 복원할 수 없다.
+  // 이번 실행 이전의 실패 횟수만 다음 프롬프트의 전략 전환 지시문에 쓴다.
+  // 오류 원문은 재배포하지 않는다.
   let priorFailureContext: AutomationFailureContext = { streak: 0, recentErrors: [] };
   try {
     priorFailureContext = collectAutomationFailureContext(a.id);
   } catch {
-    /* 이력 조회 실패는 복구 학습만 건너뛴다 */
+    /* 조회 실패면 전략 전환 지시문만 생략한다 */
   }
   let parentMissing = false;
   let leaseOwnershipLost = false;
@@ -931,24 +930,6 @@ async function runOne(
         suspendAutomationForGraphReconciliation(a.id);
       } catch (error) {
         console.error("[automation] graph reconciliation suspension failed:", error);
-      }
-    }
-    // 복구 학습 — 실패 스트릭 후의 성공은 "다른 방법이 통했다"는 증거다. durable 복구
-    // 이벤트 + 메모리/경험 자동 승격 + (동일 실패 2회 복구 시) 프롬프트 진화 자동 적용.
-    // 어떤 실패도 런 결과에 영향을 주지 않는다(모듈 내부에서 전부 격리).
-    if (
-      runStatus === "ok" && !parentMissing && !leaseOwnershipLost &&
-      priorFailureContext.streak >= 1 && currentRunId
-    ) {
-      try {
-        recordAutomationRecovery({
-          automation: a,
-          runId: currentRunId,
-          prior: priorFailureContext,
-          output,
-        });
-      } catch (err) {
-        console.error("[automation] recovery learning failed:", err);
       }
     }
     // 실패 피드백·수리 — run_history 기록(markAutomationRun) 이후에 호출해야

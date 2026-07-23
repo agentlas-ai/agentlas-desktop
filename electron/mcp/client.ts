@@ -109,7 +109,6 @@ import {
 import { listInstalledServers as listInstalledMcpServers } from "../mcp-tools/registry";
 import { getAgentApp } from "../store/agent-apps";
 import { autoSelectMcpTools, buildMcpAutoSelectionPrompt } from "../mcp-tools/auto-select";
-import { bridgeHubPluginCandidates } from "../mcp-tools/hub-plugin-bridge";
 import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
 import { buildAgentAppRunnerEnv, buildRunnerEnv, restrictedRunnerEnv } from "../runtime/env-resolver";
 import { agentRunCwd } from "../runtime/exec";
@@ -1979,33 +1978,9 @@ export async function runMcpInvocation(
           },
         });
       }
-      // Hub 후보 브리지 — resolve된 후보를 프롬프트 텍스트로 끝내지 않고 실제 서버로
-      // 연결한다(원격 http/sse는 자동, stdio는 승인 대기로 등록). 실패는 런에 영향 없음.
-      let hubBridgedServerIds: string[] = [];
-      if (selectedContext.hubPlugins.length > 0) {
-        try {
-          const bridged = await bridgeHubPluginCandidates(selectedContext.hubPlugins);
-          hubBridgedServerIds = bridged.liveServerIds;
-          if (bridged.receipts.length > 0) {
-            sink({
-              kind: "tool-use",
-              tool: {
-                name: "Agentlas Plugins · Hub bridge",
-                result: bridged.receipts
-                  .map((receipt) =>
-                    `${receipt.slug} → ${receipt.serverName} [${receipt.transport}] ${receipt.action}` +
-                    (receipt.reason ? ` (${receipt.reason})` : ""))
-                  .join("\n"),
-              },
-            });
-          }
-        } catch (bridgeError) {
-          console.warn("[mcp] hub plugin bridge failed:", bridgeError);
-        }
-      }
       const cfg = await buildMcpConfigFile({
         ...(req.mcpBrowserProfileKey ? { browserProfileKey: req.mcpBrowserProfileKey } : {}),
-        catalogIds: [...installedTools.map((tool) => tool.id), ...hubBridgedServerIds],
+        catalogIds: installedTools.map((tool) => tool.id),
       });
       if (cfg) {
         mcpConfigPath = cfg.configPath;

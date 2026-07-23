@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.5 — 2026-07-23
+
+### Security
+
+- Hub plug-in discovery is advisory only. A Hub listing cannot fetch a manifest,
+  register or enable an MCP server, or attach Keychain values to a remote
+  request. Remote MCP connections remain an explicit Settings action.
+- Automation retries can require a changed approach after repeated failures,
+  but pass only the failure count to the next run. Failure bodies are not
+  copied into model prompts, agent prompts, memories, or Experience records,
+  and no recovery path can autonomously mutate an agent prompt.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.58, pinned at
+  `47e2368e5c775d6345118c6409850872ec647738`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.9.4 — 2026-07-23
 
 ### Fixed

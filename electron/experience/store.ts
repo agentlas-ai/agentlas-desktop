@@ -16,7 +16,6 @@ import type {
 } from "../../shared/types";
 import { getAgentById } from "../mcp/registry";
 import { getDb } from "../store/db";
-import { hasDurableRunStartReceipt } from "../store/run-events";
 import {
   normalizeExperienceMcpRequirements,
   rankExperienceCandidatesByRelations,
@@ -1124,75 +1123,6 @@ export function promoteExperienceCandidate(input: ExperiencePromotionInput): Exp
     refreshExperienceRelationArtifacts(candidate.pack_id);
   } catch (error) {
     console.warn(`[experience-relations] promotion projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
-  }
-  return receiptFromRow(
-    getDb().prepare("SELECT * FROM experience_promotion_receipts WHERE id = ?").get(id) as PromotionReceiptRow,
-  );
-}
-
-/** 복구 파이프라인이 방금 만든 후보를 소스 메모리로 되찾는다(자율 승격 경로 전용). */
-export function findExperienceCandidateBySourceMemory(
-  agentId: string,
-  sourceMemoryId: string,
-): { id: string; status: string } | null {
-  const row = getDb().prepare(
-    "SELECT id, status FROM experience_candidates WHERE agent_id = ? AND source_memory_id = ? LIMIT 1",
-  ).get(agentId, sourceMemoryId) as { id: string; status: string } | undefined;
-  return row ?? null;
-}
-
-/**
- * Outcome-attested 자율 승격 — 사람 검토(user-attested) 대신 "실제 성공 런 영수증"이
- * 증거인 승격 경로. 스키마의 verification_method 'local-run-receipt' 슬롯을 사용한다.
- * 자율 진화 정책(자동 적용+사후통보+롤백)에 따라 explicit consent는 정책 수준에서
- * 부여된 것으로 간주하되, user-attested와 method로 구분돼 감사 가능하다.
- * 실패 후 방법 전환 → 성공이 확인된 런(runId에 invoke_started 영수증 존재)만 허용된다.
- */
-export function promoteExperienceCandidateFromRunReceipt(input: {
-  candidateId: string;
-  runId: string;
-}): ExperiencePromotionReceipt {
-  const candidateId = cleanText(input.candidateId, "candidateId", 120);
-  const runId = cleanText(input.runId, "runId", 120);
-  if (!SAFE_EVIDENCE_REF_RE.test(runId)) {
-    throw new Error("Run receipt evidence must be a value-free run id.");
-  }
-  if (!hasDurableRunStartReceipt(runId)) {
-    throw new Error("Outcome promotion requires a durable run receipt for the successful run.");
-  }
-  const candidate = getCandidateRow(candidateId);
-  const pack = getPackRow(candidate.pack_id);
-  assertPackBaseCurrent(pack);
-  const existing = getDb().prepare(
-    "SELECT * FROM experience_promotion_receipts WHERE candidate_id = ? AND action = 'promote'",
-  ).get(candidate.id) as PromotionReceiptRow | undefined;
-  if (existing) return receiptFromRow(existing);
-  if (candidate.status !== "candidate") throw new Error("Only pending Experience candidates can be promoted.");
-  const id = randomUUID();
-  const now = new Date().toISOString();
-  const evidenceHash = hash("experience-evidence-v1", runId);
-  const transaction = getDb().transaction(() => {
-    getDb().prepare(
-      `INSERT INTO experience_promotion_receipts (
-         id, pack_id, candidate_id, agent_id, action, explicit_consent,
-         verification_status, verification_method, evidence_hash, public_safe, created_at
-       ) VALUES (?, ?, ?, ?, 'promote', 1, 'attested', 'local-run-receipt', ?, 0, ?)`,
-    ).run(id, candidate.pack_id, candidate.id, candidate.agent_id, evidenceHash, now);
-    getDb().prepare(
-      `UPDATE experience_candidates
-          SET status = 'promoted', outcome_status = 'attested', public_safe = 0,
-              updated_at = ?, promoted_at = ?
-        WHERE id = ? AND status = 'candidate'`,
-    ).run(now, now, candidate.id);
-    getDb().prepare("UPDATE experience_packs SET updated_at = ? WHERE id = ?")
-      .run(now, candidate.pack_id);
-    recordExperienceLineageEvent(candidate.pack_id, "promotion");
-  });
-  transaction();
-  try {
-    refreshExperienceRelationArtifacts(candidate.pack_id);
-  } catch (error) {
-    console.warn(`[experience-relations] outcome promotion projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
   }
   return receiptFromRow(
     getDb().prepare("SELECT * FROM experience_promotion_receipts WHERE id = ?").get(id) as PromotionReceiptRow,
