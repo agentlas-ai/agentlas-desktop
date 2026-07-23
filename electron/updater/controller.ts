@@ -815,13 +815,18 @@ export class DesktopUpdaterController {
     // than one second after ShipIt's first native failure; treating every
     // restart as a dead install recreates that exact race.
     if (this.installPromise !== null || this.nativeInstallHandedOff) return true;
+    // The durable cross-process grace exists only for macOS ShipIt, whose
+    // launchd-owned request can outlive the originating Electron process.
+    // AppImage/NSIS target relaunches must reconcile their completed journal
+    // immediately; delaying them behind the ShipIt grace leaves the new app in
+    // a false "installing" state and breaks native updater continuity.
+    if (this.deps.platform !== "darwin") return false;
     if (!journal || journal.phase !== "install-requested") return false;
     const requestedAt = Date.parse(journal.requestedAt);
     if (!Number.isFinite(requestedAt)) return false;
     const graceMs = this.nativeInstallGraceMs();
     const elapsedMs = this.now() - requestedAt;
     if (elapsedMs < -graceMs || elapsedMs >= graceMs) return false;
-    if (this.deps.platform !== "darwin") return true;
     // A recent journal alone is not proof: a failed helper may already be gone.
     // The cross-process guard is active only while launchd still owns ShipIt.
     // Unknown launchd state fails safe for the bounded grace window.
