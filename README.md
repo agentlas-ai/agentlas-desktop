@@ -69,6 +69,20 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-23 · v0.9.7 — in-app API-key prompts with honest fallback** —
+  when an interactive chat run's matched tool needs a credential that isn't in
+  the vault yet, Desktop now shows a key-entry sheet in-app: per-tool grouped
+  password inputs with catalog labels, hints, and a setup link. Saving stores
+  the value through the existing Keychain env vault and the run reconnects the
+  tool right away; declining or timing out continues without it and tells the
+  model plainly to use an available alternative or say nothing can substitute.
+  Unattended surfaces (automations, agent apps, site studio, Telegram, mobile)
+  never pause on this gate, and the event/IPC contract carries key names and
+  an outcome only — secret values never leave the vault channel. This release
+  binds Agentlas OS v1.1.58 at
+  `47e2368e5c775d6345118c6409850872ec647738`. This source note does not prove
+  a Desktop Git tag, public installer, GitHub release, or update feed.
+
 - **2026-07-23 · v0.9.6 — automation recovery restored with redaction, not removal** —
   v0.9.5 closed a real gap by deleting the automation recovery/evolution
   feature outright instead of fixing it narrowly. v0.9.6 restores the

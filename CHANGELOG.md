@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.7 — 2026-07-23
+
+### Added
+
+- Runtime API-key elicitation: when an interactive chat run's matched tool is
+  blocked on a missing credential, a bottom sheet now asks for the key in-app
+  (password inputs with catalog labels and a setup link). Saving stores the
+  value in the existing Keychain env vault and the run reconnects the tool
+  immediately; declining or timing out proceeds without it plus an honest
+  instruction to substitute an available alternative. Automations, agent
+  apps, site studio, Telegram, and mobile runs never pause on this gate.
+  The event and IPC carry key names and an outcome only — secret values
+  travel exclusively through the pre-existing vault channel.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.58, pinned at
+  `47e2368e5c775d6345118c6409850872ec647738`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.9.6 — 2026-07-23
 
 ### Fixed
