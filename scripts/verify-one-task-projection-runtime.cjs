@@ -156,7 +156,7 @@ function verifyClosedContract(contract, projection) {
   assert.equal(contract.isAgentlasOneTaskProjectionV1({ ...projection, unexpected: true }), false);
   assert.equal(contract.isAgentlasOneTaskProjectionV1({
     ...projection,
-    display: { ...projection.display, title: "/Users/mason/private/result.txt" },
+    display: { ...projection.display, title: "/Users/operator/private/result.txt" },
   }), false, "local paths must fail the closed transport contract");
   assert.equal(contract.isAgentlasOneTaskProjectionV1({
     ...projection,
@@ -298,7 +298,7 @@ async function seedWorker() {
   verifyClosedContract(contract, alphaOne);
 
   const currentAlpha = tasks.getCanonicalTask(alphaTask.id);
-  const unsafeTitle = `Review /Users/mason/private token=sk-${"A".repeat(32)}`;
+  const unsafeTitle = `Review /Users/operator/private token=sk-${"A".repeat(32)}`;
   const sanitizedRuntime = makeRuntime(runtimeModule, tasks, {
     sources: {
       getCanonicalTask: (taskId) => taskId === currentAlpha.id
@@ -308,7 +308,7 @@ async function seedWorker() {
   });
   const sanitized = sanitizedRuntime.getProjection(alphaTask.id, { surface: "one" });
   assert.ok(sanitized);
-  assert.equal(JSON.stringify(sanitized).includes("/Users/mason"), false);
+  assert.equal(JSON.stringify(sanitized).includes("/Users/operator"), false);
   assert.equal(JSON.stringify(sanitized).includes("sk-"), false);
   assert.equal(contract.isAgentlasOneTaskProjectionV1(sanitized), true);
 

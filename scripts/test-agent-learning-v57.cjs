@@ -189,7 +189,7 @@ async function main() {
     };
     const privateLocationReport = curator.curateEvents([{
       memory_kind: "risk",
-      content: "Debug by reading /Users/mason/private/customer@example.com before retrying.",
+      content: "Debug by reading /Users/operator/private/customer@example.com before retrying.",
       suggested_scope: "agent_repo",
       confidence: "high",
       sensitivity: "internal",
