@@ -62,6 +62,12 @@ const attachmentRuntime = read("electron/one/attachments.ts");
 const taskContinuationRuntime = read("electron/one/task-continuation.ts");
 const oneCopyRuntime = read("electron/one/one-copy.ts");
 const acceptedClosureRuntime = read("electron/one/accepted-result-value-closure.ts");
+const useCaseChips = read("renderer/components/one/OneUseCaseChips.tsx");
+const useCaseChipsCss = read("renderer/components/one/OneUseCaseChips.module.css");
+const automationSheet = read("renderer/components/one/OneAutomationSheet.tsx");
+const automationSheetCss = read("renderer/components/one/OneAutomationSheet.module.css");
+const homeSignalsRuntime = read("electron/one/home-signals.ts");
+const personaRuntime = read("electron/one/persona.ts");
 
 function loadStandaloneTs(source, filename) {
   const output = ts.transpileModule(source, {
@@ -558,6 +564,59 @@ assert.match(workChat, /originChatId\s*!==\s*queryChatId[\s\S]*router\.replace\(
 assert.match(shellCss, /@media \(max-width: 760px\)/, "One must have a narrow responsive layout");
 assert.match(shellCss, /@media \(prefers-reduced-motion: reduce\)/, "One must preserve meaning with reduced motion");
 assert.match(shellCss, /min-height:\s*44px/, "primary controls must meet the 44px accessibility target");
+
+// ── 2026-07-24 E1/E2/E3: 홈 use-case 칩 + One 페르소나 + One 내 자동화 직접 생성 ──
+// E1: 칩은 새 대화 시작 전 홈에서만 살고, 첫 입력과 동시에 사라진다.
+assert.match(shell, /const useCaseChipsVisible = composer\.trim\(\)\.length === 0/, "use-case chips must disappear on first typed input");
+assert.equal((shell.match(/<OneUseCaseChips/g) ?? []).length, 2, "chips must render in both the new-user hero and the briefing case");
+assert.match(shell, /<OneUseCaseChips[\s\S]{0,200}compact/, "the briefing case must use the compact chip row");
+assert.match(useCaseChips, /data-chip-id=\{chip\.id\}/, "each fixed chip must be individually addressable for tests");
+for (const chipId of ["build", "library", "automation", "experience"]) {
+  assert.match(useCaseChips, new RegExp(`id: "${chipId}"`), `the fixed chip set must include ${chipId}`);
+}
+// 칩은 실 기능 경로로 직행한다 — 빌드/라이브러리/경험은 딥링크, 자동화는 One 내 시트.
+assert.match(shell, /activateUseCaseChip[\s\S]{0,400}setAutomationSheetOpen\(true\)/, "the automation chip must open the in-One creation sheet instead of a deep link");
+assert.match(shell, /router\.push\("\/library\/agents\?tab=ontology"\)/, "the experience chip must deep-link to the agents experience tab");
+assert.match(shell, /router\.push\("\/library\/agents"\)/, "the library chip must deep-link to the agent library");
+assert.match(shell, /router\.push\("\/build"\)/, "the build chip must deep-link to the Build surface");
+// 로테이션 우선순위는 결정적: 이어하기(빌드) > 실패 자동화 고치기 > 7일 미사용 소개.
+assert.ok(
+  useCaseChips.indexOf('return { id: "resume_build" }') < useCaseChips.indexOf('id: "fix_automation"')
+    && useCaseChips.indexOf('id: "fix_automation"') < useCaseChips.indexOf('return { id: "try_automation" }'),
+  "rotation priority must stay resume-build over fix-automation over stale-capability",
+);
+assert.match(useCaseChips, /signals\.firstRun\) return null/, "first-run users must not receive a stale-capability introduction chip");
+assert.match(useCaseChips, /showRecommendedBadge = signals\?\.firstRun === true/, "the recommended badge must appear only for first-run users");
+assert.match(useCaseChips, /chip\.id === "build" && showRecommendedBadge/, "only the build chip may carry the recommended badge");
+assert.match(i18n, /"one\.chips\.build": "(?:에이전트 만들기|Create an agent)[^"]*"/, "chip copy must exist in both locale catalogs");
+assert.match(i18n, /"one\.chips\.recommended": "(?:권장|Recommended)"/, "the recommended badge must be localized");
+assert.match(useCaseChipsCss, /min-height:\s*44px/, "use-case chips must meet the 44px accessibility target");
+assert.match(preload, /oneHomeSignals:[\s\S]{0,120}get: \(\) => ipcRenderer\.invoke\("oneHomeSignals:get"\)/, "the sandbox bridge must expose the read-only home signal query");
+assert.match(ipcSource, /oneHomeSignals:get[\s\S]{0,80}getOneHomeSignals/, "Main must own the deterministic home signal computation");
+assert.doesNotMatch(homeSignalsRuntime, /INSERT|UPDATE|DELETE|CREATE TABLE/i, "home signals must stay read-only");
+assert.match(homeSignalsRuntime, /error", "blocked", "needs_input/, "only failure-class run statuses may become a fix target");
+// E2: One 페르소나는 Main이 oneProfileContext 맨 앞에 붙인다 — 실행 경계는 그대로.
+assert.match(invocationService, /ONE_PERSONA_DIRECTIVE,\s*\n\s*buildApprovedOneProfileContext/, "the One persona overlay must lead the Main-assembled One context");
+assert.match(personaRuntime, /single interface that moves Agentlas/, "the persona must state One's real product identity");
+assert.match(personaRuntime, /only through an approved preparation step/, "the persona must stay honest about the team execution boundary");
+assert.match(personaRuntime, /Never claim abilities beyond these/, "the persona must forbid invented capabilities");
+assert.doesNotMatch(personaRuntime, /hubMode|borrowAgents|solo_locked/, "the persona overlay must not restate or weaken execution policy fields");
+// E3: 자동화는 One 안에서 직접 생성한다 — 결정적 파라미터, 폴백 없는 오류 표면.
+assert.match(automationSheet, /api\.automations\.create\(input\)/, "the sheet must call the real automations:create IPC directly");
+assert.match(automationSheet, /targetType: "agent",\s*\n\s*targetId: runner\.id/, "the automation target must be the exact resolved local runner");
+assert.match(automationSheet, /hubMode: "local-only"/, "One-created automations must stay local-only");
+assert.match(automationSheet, /triggerType: "schedule",\s*\n\s*trigger: \{ kind: "schedule" \}/, "the sheet must create only explicit schedule triggers");
+assert.match(automationSheet, /oneAutomationScheduleToken/, "the schedule must be compiled from explicit sheet inputs only");
+assert.doesNotMatch(automationSheet, /router\.push|navigate\(|\/automation\/new/, "a failed creation must surface the error instead of falling back to a deep link");
+assert.match(automationSheet, /tFor\(locale, "one\.autosheet\.retry"\)/, "a failed creation must offer an explicit retry");
+assert.match(automationSheet, /created\.nextRunAt/, "the success card must show the real next run time");
+assert.match(automationSheet, /role="dialog"/, "the automation sheet must expose dialog semantics");
+assert.match(automationSheet, /event\.key !== "Tab"[\s\S]*last\.focus\(\)[\s\S]*first\.focus\(\)/, "the automation sheet must trap keyboard focus while modal");
+assert.match(automationSheet, /ONE_DEFAULT_RUNNER_SLUG = "agentlas-orchestrator"/, "the runner slug must stay the exact chats-fallback constant");
+assert.match(automationSheet, /tFor\(locale, "one\.autosheet\.error_target"\)/, "a missing runner must surface localized beginner copy, not the internal slug");
+assert.doesNotMatch(i18n, /"one\.autosheet\.[^"]*": "[^"]*(?:[Oo]rchestrator|정본|canonical)[^"]*"/, "automation sheet copy must not leak internal component names");
+assert.match(automationSheetCss, /min-height:\s*44px/, "automation sheet controls must meet the 44px accessibility target");
+assert.match(i18n, /"one\.autosheet\.title": "(?:자동화 만들기|Create an automation)"/, "automation sheet copy must exist in both locale catalogs");
 
 if (process.argv.includes("--built")) {
   const exportedRoute = path.join(root, "dist/renderer/one.html");

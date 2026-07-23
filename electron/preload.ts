@@ -570,6 +570,9 @@ const api: AgentlasIpc = {
     getState: () => ipcRenderer.invoke("oneExperienceReuse:getState"),
     latestForTask: (taskId) => ipcRenderer.invoke("oneExperienceReuse:latestForTask", taskId),
   },
+  oneHomeSignals: {
+    get: () => ipcRenderer.invoke("oneHomeSignals:get"),
+  },
   oneImprovementProof: {
     getState: () => ipcRenderer.invoke("oneImprovementProof:getState"),
     list: (input) => ipcRenderer.invoke("oneImprovementProof:list", input),

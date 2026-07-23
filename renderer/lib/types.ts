@@ -184,6 +184,7 @@ export type {
   OneExperienceReuseRecord,
   OneExperienceReuseScope,
   OneExperienceReuseState,
+  OneHomeSignalsV1,
   OneImprovementAssetBinding,
   OneImprovementAssetControl,
   OneImprovementAssetType,

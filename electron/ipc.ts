@@ -429,6 +429,7 @@ import {
   snoozeOneSuggestion,
 } from "./one/suggestions";
 import { getOneSuggestionReviewSeed } from "./one/review-seed";
+import { getOneHomeSignals } from "./one/home-signals";
 import { getOneHubDerivativeDraft } from "./one/hub-derivative";
 import {
   getLatestOneValueClosure,
@@ -3097,6 +3098,7 @@ export function registerIpcHandlers(): void {
     getLatestOneValueClosure(taskId));
   ipcMain.handle("oneValueClosure:setReflection", (_e, input: SetOneValueClosureReflectionInput) =>
     setOneValueClosureReflection(input));
+  ipcMain.handle("oneHomeSignals:get", () => getOneHomeSignals());
   ipcMain.handle("oneWeeklyReflection:get", () => getOneWeeklyReflectionSnapshot());
   ipcMain.handle("oneWeeklyReflection:resolve", (_e, input: ResolveOneWeeklyReflectionInputV1) =>
     resolveOneWeeklyReflection(input));

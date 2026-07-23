@@ -79,6 +79,35 @@ for (const file of [
   }
 }
 
+// ---- (B2) 2026-07-24 E1/E3 surfaces: home chips and the in-One automation sheet
+// must never render internal component/runtime vocabulary to customers.
+const bannedInNewOneSurfaces = [
+  /Agentlas Orchestrator/,
+  /Codex CLI/,
+  /runtime-session/,
+  /scope-lock/,
+  /정본 Task/,
+  /canonical Task/,
+];
+for (const file of [
+  "renderer/components/one/OneUseCaseChips.tsx",
+  "renderer/components/one/OneAutomationSheet.tsx",
+]) {
+  const source = fs.readFileSync(file, "utf8");
+  for (const pattern of bannedInNewOneSurfaces) {
+    assert.doesNotMatch(source, pattern, `internal vocabulary in customer surface ${file}: ${pattern}`);
+  }
+}
+// The chip and sheet locale catalogs must stay free of internal vocabulary too.
+const i18nSource = fs.readFileSync("renderer/lib/i18n.tsx", "utf8");
+const oneChipCopy = i18nSource.match(/"one\.(?:chips|autosheet)\.[^"]*": "[^"]*"/g) ?? [];
+assert.ok(oneChipCopy.length >= 60, `expected the full ko+en chip/sheet catalogs, found ${oneChipCopy.length}`);
+for (const entry of oneChipCopy) {
+  for (const pattern of bannedInNewOneSurfaces) {
+    assert.doesNotMatch(entry, pattern, `internal vocabulary in chip/sheet copy: ${entry}`);
+  }
+}
+
 // OneShell must route progress and message text through the customer-safe boundary
 // and must not rebuild the agent-name-prefixed raw status that leaked before.
 const shell = fs.readFileSync("renderer/components/one/OneShell.tsx", "utf8");

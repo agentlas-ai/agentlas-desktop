@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
@@ -41,6 +42,7 @@ import type {
   OneExperienceReuseState,
   OneImprovementProofReadState,
   OneImprovementReusedAssetV1,
+  OneHomeSignalsV1,
   OneProfile,
   OneProactiveBriefing,
   OneSearchHitV1,
@@ -89,7 +91,13 @@ import {
   openOneTaskInWork,
   type OneTaskProjection,
 } from "@/lib/one-task-adapter";
+import {
+  subscribe as buildSessionSubscribe,
+  getSnapshot as getBuildSessionSnapshot,
+} from "@/lib/build-session";
 import { ProductModeMenu } from "./ProductModeMenu";
+import { OneAutomationSheet } from "./OneAutomationSheet";
+import { OneUseCaseChips, type OneUseCaseChipAction } from "./OneUseCaseChips";
 import { OneBrandLockup, OneBrandMark } from "./OneBrand";
 import { OneAdaptiveResult } from "./OneAdaptiveResult";
 import { OneActivation } from "./OneActivation";
@@ -421,6 +429,8 @@ export function OneShell() {
   const [oneExperienceReuse, setOneExperienceReuse] = useState<OneExperienceReuseState | null>(null);
   const [oneImprovementProofs, setOneImprovementProofs] = useState<OneImprovementProofReadState | null>(null);
   const [oneIntroState, setOneIntroState] = useState<OneFeatureIntroState | null>(null);
+  const [oneHomeSignals, setOneHomeSignals] = useState<OneHomeSignalsV1 | null>(null);
+  const [automationSheetOpen, setAutomationSheetOpen] = useState(false);
   const [oneOnboardingVisible, setOneOnboardingVisible] = useState(true);
   const [oneActivationState, setOneActivationState] = useState<OneActivationState | null>(null);
   const [briefingSnapshot, setBriefingSnapshot] = useState<OneBriefingSnapshot | null>(null);
@@ -665,10 +675,11 @@ export function OneShell() {
       setOneIntroState(null);
       setOneActivationState(null);
       setBriefingSnapshot(null);
+      setOneHomeSignals(null);
       return;
     }
     try {
-      const [active, pending, update, mobile, recentChats, profile, memory, suggestions, valueClosures, weeklyReflection, experienceReuse, improvementProofs, proactiveBriefing, intro, activation] = await Promise.all([
+      const [active, pending, update, mobile, recentChats, profile, memory, suggestions, valueClosures, weeklyReflection, experienceReuse, improvementProofs, proactiveBriefing, intro, activation, homeSignals] = await Promise.all([
         api.invoke.activeChats().catch(() => []),
         api.confirm.listPending().catch(() => []),
         api.updater.getState().catch(() => null),
@@ -684,6 +695,7 @@ export function OneShell() {
         api.oneBriefing.get().catch(() => null),
         api.oneFeatureIntro.getState().catch(() => null),
         api.oneActivation.getState({ platform: "desktop", locale: appLocale }).catch(() => null),
+        api.oneHomeSignals.get().catch(() => null),
       ]);
       let resolvedIntro = intro;
       if (resolvedIntro && resolvedIntro.acknowledgedIntroVersion < resolvedIntro.currentIntroVersion) {
@@ -723,6 +735,7 @@ export function OneShell() {
       setOneImprovementProofs(improvementProofs);
       setOneIntroState(resolvedIntro);
       setOneActivationState(activation);
+      setOneHomeSignals(homeSignals);
       setBriefingSnapshot(safeBriefingSnapshot(proactiveBriefing));
       setProjections(items);
       // One 홈은 One이 시작한 대화만 보여준다 — 전역 Work 대화는 Work에 남는다.
@@ -1864,6 +1877,45 @@ export function OneShell() {
     }
     void openWork();
   }, [openWork, router]);
+  // ── E1 use-case 칩 ────────────────────────────────────────────────
+  // 같은 렌더러 창에서 진행 중이던 빌드(인터뷰 대기·승인 대기·실행 중·오류)는
+  // "이어하기" 로테이션 칩의 로컬 신호가 된다. Main 신호(oneHomeSignals)와 함께
+  // OneUseCaseChips가 결정적으로 슬롯을 고른다.
+  const buildSessionSnapshot = useSyncExternalStore(
+    buildSessionSubscribe,
+    getBuildSessionSnapshot,
+    getBuildSessionSnapshot,
+  );
+  const hasUnfinishedBuild = ["running", "interview", "mcp-review", "runtime-approval", "error"]
+    .includes(buildSessionSnapshot.phase);
+  // 칩은 새 대화가 시작되기 전(홈)에서만 살고, 첫 입력과 동시에 사라진다.
+  const useCaseChipsVisible = composer.trim().length === 0 && !busy && !teamPreflightBusy;
+  const activateUseCaseChip = useCallback((action: OneUseCaseChipAction) => {
+    if (action.id === "automation" || action.id === "try_automation") {
+      // E3: 딥링크 폴백이 아니라 One 안에서 직접 생성한다.
+      setAutomationSheetOpen(true);
+      return;
+    }
+    if (action.id === "fix_automation" && action.targetId) {
+      router.push(`/automation/detail?id=${encodeURIComponent(action.targetId)}`);
+      return;
+    }
+    if (action.id === "library" || action.id === "try_library") {
+      router.push("/library/agents");
+      return;
+    }
+    if (action.id === "experience" || action.id === "try_experience") {
+      router.push("/library/agents?tab=ontology");
+      return;
+    }
+    // build · resume_build · try_build — 빌드 표면으로 직행(세션이 있으면 그대로 이어짐).
+    router.push("/build");
+  }, [router]);
+  const closeAutomationSheet = useCallback(() => setAutomationSheetOpen(false), []);
+  const openCreatedAutomation = useCallback((automationId: string) => {
+    setAutomationSheetOpen(false);
+    router.push(`/automation/detail?id=${encodeURIComponent(automationId)}`);
+  }, [router]);
   const openPreparedFinding = useCallback((candidate: OneProactiveBriefing) => {
     if (candidate.preparedAction.kind === "open_project") {
       router.push(`/project/detail?id=${encodeURIComponent(candidate.preparedAction.targetId)}`);
@@ -2028,6 +2080,14 @@ export function OneShell() {
                     <OneBrandLockup className={styles.newUserMark} />
                     <h1 id="one-first-run-title">{tFor(appLocale, "one.shell.firstrun.title")}</h1>
                     <p>{tFor(appLocale, "one.shell.firstrun.body")}</p>
+                    {useCaseChipsVisible && (
+                      <OneUseCaseChips
+                        locale={appLocale}
+                        hasUnfinishedBuild={hasUnfinishedBuild}
+                        signals={oneHomeSignals}
+                        onActivate={activateUseCaseChip}
+                      />
+                    )}
                   </section>
                 ) : (
                   <section className={styles.briefing} aria-labelledby="one-briefing-title">
@@ -2045,6 +2105,15 @@ export function OneShell() {
                         ? <button type="button" className={styles.ghostButton} onClick={() => void applyProactiveFeedback(briefing.proactive!, "later")}>{tFor(appLocale, "one.shell.common.later")}</button>
                         : <button type="button" className={styles.ghostButton} onClick={() => { const signature = briefingSignature(briefing); setDismissedBriefing({ signature, expiresAt: writeBriefingDismissal(signature) }); }}>{tFor(appLocale, "one.shell.common.later")}</button>)}
                     </div>
+                    {useCaseChipsVisible && (
+                      <OneUseCaseChips
+                        locale={appLocale}
+                        hasUnfinishedBuild={hasUnfinishedBuild}
+                        signals={oneHomeSignals}
+                        compact
+                        onActivate={activateUseCaseChip}
+                      />
+                    )}
                   </section>
                 )}
                 {showWeeklyReflection && oneWeeklyReflection && (
@@ -2365,6 +2434,12 @@ export function OneShell() {
         valueClosureState={oneValueClosures}
         onValueClosureStateChange={handleValueClosuresChange}
         onManageImprovementAsset={manageImprovementAsset}
+      />
+      <OneAutomationSheet
+        open={automationSheetOpen}
+        locale={appLocale}
+        onClose={closeAutomationSheet}
+        onOpenAutomation={openCreatedAutomation}
       />
       <OneOnboarding
         locale={appLocale}

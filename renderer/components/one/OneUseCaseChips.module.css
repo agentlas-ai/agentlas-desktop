@@ -1,0 +1,68 @@
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  max-width: 640px;
+  margin: 28px auto 0;
+}
+
+.compact {
+  justify-content: flex-start;
+  margin: 20px 0 0;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid #e7e9ea;
+  border-radius: 22px;
+  background: #fff;
+  color: #17191b;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chip:hover,
+.chip:focus-visible {
+  border-color: #c8cdcf;
+  background: #f6f7f7;
+  outline: 2px solid transparent;
+}
+
+.rotation {
+  border-style: dashed;
+  color: #45514f;
+}
+
+.badge {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 9px;
+  background: #607a36;
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+}
+
+.chipLabel {
+  display: inline-block;
+}
+
+@media (max-width: 760px) {
+  .chips {
+    gap: 8px;
+  }
+  .chip {
+    font-size: 12px;
+    padding: 0 13px;
+  }
+}

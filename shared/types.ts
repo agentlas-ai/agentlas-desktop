@@ -1746,6 +1746,20 @@ export interface AutomationUpdatePatch {
   trigger?: Trigger | null;
 }
 
+/**
+ * One 홈 use-case 칩 로테이션 신호 — Main이 로컬 저장소에서 결정적으로 계산한
+ * 읽기 전용 요약. 실행 권한이나 개인 원문은 절대 싣지 않는다.
+ */
+export interface OneHomeSignalsV1 {
+  contractVersion: 1;
+  /** 에이전트 실행 이력이 전무한 첫 사용자인지(권장 배지 노출 기준). */
+  firstRun: boolean;
+  /** 최신 실행이 실패 계열로 끝난 자동화 — "고치기" 칩의 정확한 딥링크 대상. */
+  fixTarget: { kind: "failed_automation"; automationId: string; name: string } | null;
+  /** 최근 7일간 사용 흔적이 없는 기능(고정 우선순위에서 첫 번째). */
+  staleCapability: "automation" | "experience" | "build" | "library" | null;
+}
+
 /** launchd LaunchAgent 상태(설계 §2.6). macOS 전용. */
 export interface LaunchdStatus {
   /** 이 플랫폼에서 지원되는지(현재 macOS(darwin)만). */
@@ -5491,6 +5505,10 @@ export interface AgentlasIpc {
     getState: () => Promise<OneValueClosureState>;
     latestForTask: (taskId: string) => Promise<OneValueClosureRecord | null>;
     setReflection: (input: SetOneValueClosureReflectionInput) => Promise<OneValueClosureMutationResult<OneValueClosureRecord>>;
+  };
+  /** Read-only deterministic home chip rotation signals. Never grants execution authority. */
+  oneHomeSignals: {
+    get: () => Promise<OneHomeSignalsV1>;
   };
   /** Optional current-week reflection derived only from explicitly included, verified Value Closures. */
   oneWeeklyReflection: {

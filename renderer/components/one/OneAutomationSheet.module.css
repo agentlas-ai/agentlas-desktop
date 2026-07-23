@@ -1,0 +1,147 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 20, 19, 0.44);
+}
+
+.sheet {
+  width: min(440px, 100%);
+  max-height: min(640px, calc(100vh - 48px));
+  overflow-y: auto;
+  padding: 26px 26px 22px;
+  border-radius: 16px;
+  background: #fff;
+  color: #17191b;
+  box-shadow: 0 22px 60px rgba(10, 14, 13, 0.24);
+}
+
+.sheet h2 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.body {
+  margin: 8px 0 18px;
+  color: #6e7479;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.field {
+  display: block;
+  margin-bottom: 14px;
+}
+
+.field span {
+  display: block;
+  margin-bottom: 6px;
+  color: #45514f;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.field input,
+.field select,
+.field textarea {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid #e7e9ea;
+  border-radius: 10px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+
+.field textarea {
+  resize: vertical;
+  line-height: 1.55;
+}
+
+.row {
+  display: flex;
+  gap: 12px;
+}
+
+.row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.error {
+  margin: 4px 0 12px;
+  color: #a63b2b;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.primary,
+.ghost {
+  min-height: 44px;
+  padding: 0 18px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.primary {
+  background: #17191b;
+  color: #fff;
+}
+
+.primary:disabled,
+.ghost:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ghost {
+  background: transparent;
+  color: #17191b;
+  border-color: #e7e9ea;
+}
+
+.ghost:hover:not(:disabled),
+.ghost:focus-visible {
+  background: #f4f5f6;
+}
+
+.success h2 {
+  margin-bottom: 8px;
+}
+
+.successName {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.successNext {
+  margin: 0 0 18px;
+  color: #45514f;
+  font-size: 13px;
+}
+
+@media (max-width: 760px) {
+  .row {
+    flex-direction: column;
+    gap: 0;
+  }
+}

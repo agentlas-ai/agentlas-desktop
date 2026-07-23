@@ -60,6 +60,7 @@ import {
   type OneTeamRuntimeBinding,
 } from "../one/team-preflight";
 import { detectExplicitOneMemoryIntent } from "../one/memory-detector";
+import { ONE_PERSONA_DIRECTIVE } from "../one/persona";
 import {
   deriveOneTaskKindRef,
   snapshotOneParticipantExecution,
@@ -754,7 +755,10 @@ export class InvocationService {
       const appliedPrinciples = selectApprovedOneOperatingPrinciples(profile, invocationScope);
       const memoryState = getOneMemoryState();
       const appliedMemories = selectApprovedOneMemoryAssets(invocationScope, memoryState);
+      // One 페르소나 오버레이 — Main만 붙인다. 실행 경계(solo_locked·preflight)는
+      // 위에서 이미 고정됐고, 이 블록은 정체성/능력 서술만 더한다.
       oneProfileContext = [
+        ONE_PERSONA_DIRECTIVE,
         buildApprovedOneProfileContext(profile, invocationScope),
         buildApprovedOneMemoryContext(invocationScope, memoryState),
         ...(preparedOneMemoryUseOnce ? [preparedOneMemoryUseOnce.context] : []),
