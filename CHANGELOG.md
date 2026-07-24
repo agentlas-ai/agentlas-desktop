@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.10 — 2026-07-24
+
+### Changed
+
+- Dashboard LLM connections/usage is now a responsive grid of provider cards
+  grouped into collapsible sections (Subscription/CLI, API key, Local). Each
+  card keeps its logo, shows a connected chip, two-line status, usage bars, and
+  a bottom action row — the number of cards per row adapts to width.
+- Hub agent cards dropped the meaningless first-letter identity tile; cards are
+  text- and button-focused.
+
+### Fixed
+
+- Experience intake no longer throws a FOREIGN KEY constraint when a memory's
+  owner is a team org-chart member (bound by slug, with no installed_agents
+  row); it now skips accrual for non-installed owners instead of aborting the
+  caller's curation.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.58, pinned at
+  `47e2368e5c775d6345118c6409850872ec647738`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.9.9 — 2026-07-24
 
 ### Fixed
