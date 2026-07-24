@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.9.9 — 2026-07-24
+
+### Fixed
+
+- Experience map: the map failed to load for every agent because the graph
+  snapshot query referenced a `taste_draft_candidates.statement` column that
+  does not exist, throwing a SqliteError. The map now renders its clustered
+  nodes for all agents.
+- Agent library: the roster (left) and detail (right) panes now scroll
+  independently instead of scrolling the whole page as one unit.
+- My Agents now surfaces bookmarked and recently-borrowed Hub agents and teams
+  that are not yet installed, in a "Hub bookmarks · recently used" shelf
+  (previously only agents borrowed 5+ times appeared).
+- LLM connections/usage: provider status text (connected · usage · version)
+  clamps to two lines instead of breaking the card; connect actions moved below
+  the name row; a connected provider shows a green connected chip.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.58, pinned at
+  `47e2368e5c775d6345118c6409850872ec647738`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.9.8 — 2026-07-24
 
 ### Experience

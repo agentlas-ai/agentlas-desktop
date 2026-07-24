@@ -69,6 +69,15 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-24 · v0.9.9 — experience map load fix, independent library panes, Hub shelf** —
+  fixes the Experience map failing to load for every agent (a stale
+  `taste_draft_candidates.statement` column threw a SqliteError), makes the
+  agent roster and detail panes scroll independently, surfaces bookmarked and
+  recently-borrowed Hub agents/teams in My Agents, and tidies the LLM
+  connections/usage box so version text no longer wraps. This release binds
+  Agentlas OS v1.1.58 at `47e2368e5c775d6345118c6409850872ec647738`. This
+  source note does not prove a Desktop Git tag, public installer, GitHub
+  release, or update feed.
 - **2026-07-24 · v0.9.8 — experience system rework, clustered Experience Map, One home launcher** —
   experience intake now redacts privacy spans instead of discarding memories
   (secrets stay hard-blocked), successful interactive runs auto-promote
