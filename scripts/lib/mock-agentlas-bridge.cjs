@@ -243,7 +243,9 @@ function setupMockAgentlasBridge(options) {
     id: "agent-2",
     slug: neutralOntologyFixture ? "research-analyst-agent" : "builder-agent",
     name: neutralOntologyFixture ? "리서치 분석 에이전트" : "빌더 에이전트",
-    nameEn: neutralOntologyFixture ? "Research Analyst Agent" : "Builder Agent",
+    nameEn: options?.badEnglishAgentMetadata
+      ? (neutralOntologyFixture ? "리서치 분석 에이전트" : "빌더 에이전트")
+      : neutralOntologyFixture ? "Research Analyst Agent" : "Builder Agent",
     tagline: neutralOntologyFixture ? "근거 조사와 분석을 수행합니다." : "빌드 실행 에이전트",
     taglineEn: neutralOntologyFixture ? "Researches and analyzes evidence." : "Build execution agent",
     kind: "agent",
@@ -1395,6 +1397,53 @@ function setupMockAgentlasBridge(options) {
           },
         ];
       },
+      borrowedProfiles: async () => {
+        record("agents.borrowedProfiles");
+        if (!options?.experienceScenario) return [];
+        return [{
+          profileId: "borrowed-profile:qa-researcher",
+          slug: "hub-borrowed-researcher",
+          entityKind: "agent",
+          name: "허브 리서처",
+          nameEn: "Hub Borrowed Researcher",
+          tagline: "사용자별 대여 실행 경험",
+          taglineEn: "Owner-scoped borrowed execution experience",
+          bookmarkedAt: now,
+          firstUsedAt: new Date(Date.now() - 12 * 86_400_000).toISOString(),
+          lastUsedAt: now,
+          useCount: 6,
+          latestRuntime: {
+            provider: "openai",
+            modelId: "gpt-5.6-sol",
+            effort: "high",
+            source: "manual-override",
+            recordedAt: now,
+          },
+          memoryCount: options?.borrowedEmptyGraph ? 0 : 1,
+          relationCount: options?.borrowedEmptyGraph ? 0 : 1,
+          hasQuarantinedDeviceHistory: false,
+        }];
+      },
+      borrowedOntologyGraph: async (profileId) => ({
+        schema: "agentlas.ontology-relation-graph.v1",
+        agentId: profileId,
+        generatedAt: now,
+        nodes: options?.borrowedEmptyGraph ? [
+          { id: "borrowed-root", kind: "agent", ref: profileId, safeLabel: "Agent", status: "active", source: "synthetic" },
+        ] : [
+          { id: "borrowed-root", kind: "agent", ref: profileId, safeLabel: "Agent", status: "active", source: "synthetic" },
+          { id: "borrowed-memory", kind: "experience-item", ref: "memory-ref", safeLabel: "Experience", localLabel: "Verify sources before synthesis", status: "active", source: "relation-index" },
+        ],
+        edges: options?.borrowedEmptyGraph
+          ? []
+          : [{ id: "borrowed-edge", from: "borrowed-root", to: "borrowed-memory", kind: "contains", status: "active" }],
+        totalNodeCount: options?.borrowedEmptyGraph ? 1 : 2,
+        totalEdgeCount: options?.borrowedEmptyGraph ? 0 : 1,
+        omittedNodeCount: 0,
+        omittedEdgeCount: 0,
+        truncated: false,
+        limits: { nodes: 400, edges: 800 },
+      }),
       setBookmark: async (agentId, bookmarked) => {
         record("agents.setBookmark", { agentId, bookmarked });
         return { agentId, bookmarkedAt: bookmarked ? now : null };
@@ -1481,7 +1530,7 @@ function setupMockAgentlasBridge(options) {
       ontologyGraph: async (agentId) => {
         record("experience.ontologyGraph", agentId);
         const rootId = `ontology-agent:${agentId}`;
-        if (!options?.experienceScenario) {
+        if (!options?.experienceScenario || options?.emptyOntologyGraph) {
           return {
             schema: "agentlas.ontology-relation-graph.v1",
             agentId,

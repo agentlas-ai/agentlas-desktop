@@ -16,6 +16,8 @@ export type {
   GrowthProposalCardCopy,
   GrowthProposalInbox,
   AgentUsageSummaryRow,
+  BorrowedAgentProfile,
+  BorrowedAgentRuntimeSnapshot,
   BrowserStatus,
   BrowserSite,
   BrowserSiteInput,

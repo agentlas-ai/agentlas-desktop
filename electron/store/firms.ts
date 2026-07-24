@@ -5,6 +5,7 @@ import { emitDesktopStoreChange } from "./change-bus";
 import { installAgent, getAgentById } from "../mcp/registry";
 import { getSource as getMarketSource } from "../marketplace";
 import type { FirmOrgNode, InstalledFirm } from "../../shared/types";
+import { materializeTeamMemberCells } from "./team-member-cells";
 
 interface FirmRow {
   id: string;
@@ -161,15 +162,44 @@ export function upsertLocalTeamFirm(input: {
   ceoAgentId: string;
   orgChart: Array<FirmOrgNode & { agentId: string }>;
 }): InstalledFirm {
+  const db = getDb();
   const existing = getFirmBySlug(input.slug);
-  const chartJson = JSON.stringify(input.orgChart);
-  if (existing) {
-    getDb()
-      .prepare(
+  const id = existing?.id ?? randomUUID();
+  const installedAt = existing?.installedAt ?? new Date().toISOString();
+  const commit = db.transaction(() => {
+    const orgChart = materializeTeamMemberCells(db, {
+      firmId: id,
+      firmSlug: input.slug,
+      ceoAgentId: input.ceoAgentId,
+      installedAt,
+      orgChart: input.orgChart,
+    });
+    const chartJson = JSON.stringify(orgChart);
+    if (existing) {
+      db.prepare(
         `UPDATE firms SET name = ?, name_en = ?, tagline = ?, tagline_en = ?, persona = ?,
                           ceo_agent_id = ?, org_chart_json = ? WHERE id = ?`,
       )
+        .run(
+          input.name,
+          input.nameEn ?? input.name,
+          input.tagline,
+          input.tagline,
+          input.persona ?? "",
+          input.ceoAgentId,
+          chartJson,
+          existing.id,
+        );
+      return;
+    }
+    db.prepare(
+      `INSERT INTO firms (id, slug, name, name_en, tagline, tagline_en, persona,
+                          ceo_agent_id, org_chart_json, installed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
       .run(
+        id,
+        input.slug,
         input.name,
         input.nameEn ?? input.name,
         input.tagline,
@@ -177,31 +207,15 @@ export function upsertLocalTeamFirm(input: {
         input.persona ?? "",
         input.ceoAgentId,
         chartJson,
-        existing.id,
+        installedAt,
       );
+  });
+  commit();
+  if (existing) {
     const firm = getFirm(existing.id) as InstalledFirm;
     emitDesktopStoreChange({ entity: "firm", id: existing.id });
     return firm;
   }
-  const id = randomUUID();
-  getDb()
-    .prepare(
-      `INSERT INTO firms (id, slug, name, name_en, tagline, tagline_en, persona,
-                          ceo_agent_id, org_chart_json, installed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      id,
-      input.slug,
-      input.name,
-      input.nameEn ?? input.name,
-      input.tagline,
-      input.tagline,
-      input.persona ?? "",
-      input.ceoAgentId,
-      chartJson,
-      new Date().toISOString(),
-    );
   const firm = getFirm(id) as InstalledFirm;
   emitDesktopStoreChange({ entity: "firm", id });
   return firm;

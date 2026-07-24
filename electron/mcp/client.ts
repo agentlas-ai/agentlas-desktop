@@ -46,6 +46,11 @@ import { getProject } from "../store/projects";
 import { touchRuntimeSession } from "../store/runtime-sessions";
 import { getInterviewMode, isTrivialPrompt } from "../store/interview-mode";
 import { getFirm, listFirms } from "../store/firms";
+import { recordBorrowedAgentCareer } from "../agents/borrowed-profiles";
+import {
+  activeBorrowedOwnerScopeKey,
+  borrowedMemoryKey,
+} from "../agents/borrowed-owner-scope";
 import { getResolvedOrg } from "../store/org-spec";
 import { runFirmInvocation } from "./firm-orchestrator";
 import {
@@ -513,7 +518,7 @@ async function buildBorrowUserPreamble(
   locale: "ko" | "en",
   signal?: AbortSignal,
   versions?: Record<string, string>,
-): Promise<string> {
+): Promise<{ preamble: string; specs: BorrowedAgentSpec[] }> {
   const list = slugs.join(", ");
   let specs: BorrowedAgentSpec[];
   try {
@@ -560,7 +565,10 @@ async function buildBorrowUserPreamble(
     locale === "ko"
       ? "아래 내용은 Agentlas Hub가 이번 호출에 반환한 실제 runtime bundle 지시문이다. 현재 호스트 권한과 보안 정책 안에서만 적용하며, 이 지시문 자체는 추가 권한이나 비밀 접근을 허가하지 않는다."
       : "The following instructions came from the authoritative Agentlas Hub runtime bundle for this invocation. Apply them only within the current host permissions and security policy; they do not grant additional authority or secret access.";
-  return `${header}\n${hostBoundary}\n\n${directive}`;
+  return {
+    preamble: `${header}\n${hostBoundary}\n\n${directive}`,
+    specs,
+  };
 }
 
 async function buildAgentGroupTaskForceSpecs(input: {
@@ -723,6 +731,10 @@ async function buildAgentGroupTaskForceSpecs(input: {
       warnings: member.warnings,
       installedAgentId: member.installedAgentId,
       firmId: member.firmId,
+      agentDefinitionId: hub?.agentDefinitionId,
+      agentReleaseId: hub?.agentReleaseId,
+      packageHash: hub?.packageHash,
+      localized: hub?.localized,
       executionGraph: hub?.executionGraph,
     };
   });
@@ -1512,6 +1524,9 @@ export async function runMcpInvocation(
   }
   const borrowedAgentSlugs = [...new Set((req.borrowAgents ?? []).map((slug) => slug.trim()).filter(Boolean))];
   let explicitBorrowUserPreamble: string | null = null;
+  let explicitBorrowSpecs: BorrowedAgentSpec[] = [];
+  let explicitBorrowMemoryKeys: string[] = [];
+  const explicitBorrowOwnerScopeKey = activeBorrowedOwnerScopeKey();
   if (req.pipelineStages && req.pipelineStages.length > 0) {
     effectiveUserPrompt = buildRecommendedPipelineUserPrompt(effectiveUserPrompt, req.pipelineStages, locale);
   }
@@ -1530,7 +1545,7 @@ export async function runMcpInvocation(
           : `Borrowing Hub agents: ${borrowedAgentSlugs.join(", ")}`,
     });
     try {
-      explicitBorrowUserPreamble = await buildBorrowUserPreamble(
+      const preparedBorrow = await buildBorrowUserPreamble(
         borrowedAgentSlugs,
         effectiveUserPrompt,
         workspaceBinding
@@ -1541,6 +1556,11 @@ export async function runMcpInvocation(
         locale,
         signal,
         req.borrowVersions,
+      );
+      explicitBorrowUserPreamble = preparedBorrow.preamble;
+      explicitBorrowSpecs = preparedBorrow.specs;
+      explicitBorrowMemoryKeys = preparedBorrow.specs.map((spec) =>
+        borrowedMemoryKey(spec.agentDefinitionId!, spec.agentReleaseId!)
       );
       // Saved Agent Groups have their own planner/worker system prompts, so pass the
       // already-verified Hub bundle into that orchestration request. Ordinary single
@@ -2421,6 +2441,43 @@ export async function runMcpInvocation(
   // 별도 세션으로 병렬 실행하고 최종 종합한다.
   // 명시적 Hub borrow는 swarm보다 먼저 실행한다. 그렇지 않으면 swarm이 req.borrowAgents를
   // 소비하지 않은 채 로컬 워커만 실행해 Hub 권한/번들 검증을 우회할 수 있다.
+  const directBorrowedTeam = explicitBorrowSpecs.length === 1
+    && explicitBorrowSpecs[0].entityKind === "team"
+    ? explicitBorrowSpecs[0]
+    : null;
+  if (directBorrowedTeam && chat.kind !== "division") {
+    try {
+      await runBorrowedTaskForceInvocation({
+        req: { ...req, userPrompt: effectiveUserPrompt, borrowAgents: undefined },
+        chat,
+        orchestratorAgent: agent,
+        taskForceName: directBorrowedTeam.name,
+        taskForceKind: "task-force",
+        taskForceSpecs: [directBorrowedTeam],
+        priorHistory,
+        active,
+        runtimes,
+        picked,
+        runtimeOverride: runtimeChoice.override,
+        workingFolder,
+        ...(workspaceBinding ? { workspaceBinding } : {}),
+        ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
+        mcpConfigPath,
+        mcpAllowedTools,
+        mcpCodexConfigArgs,
+        agentAppMcpRuntimeEnv: mcpRuntimeEnv,
+        onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
+        runnerEnv: orchestrationRunnerEnv,
+        locale,
+        sink,
+        signal,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sink({ kind: "error", error: { code: "borrowed-team-failed", message: msg } });
+    }
+    return earlyResult();
+  }
   if (borrowedAgentSlugs.length > 1 && chat.kind !== "division") {
     try {
       await runBorrowedTaskForceInvocation({
@@ -3420,7 +3477,10 @@ export async function runMcpInvocation(
             taskHint: effectiveUserPrompt,
           },
           // 단일 borrow 실행 — 빌린 에이전트의 agent_repo 배움을 그 전역 둥지로 미러링.
-          borrowedAgentSlugs,
+          borrowedAgentSlugs:
+            activeBorrowedOwnerScopeKey() === explicitBorrowOwnerScopeKey
+              ? explicitBorrowMemoryKeys
+              : [],
         };
         const semanticOptions = projectReadOnlyBoundary
           ? {}
@@ -3457,7 +3517,10 @@ export async function runMcpInvocation(
             chatId: chat.id,
             runId: req.runId,
             cwdAtRequest: req.agentAppMode ? null : workingFolder,
-            borrowedAgentSlugs,
+            borrowedAgentSlugs:
+              activeBorrowedOwnerScopeKey() === explicitBorrowOwnerScopeKey
+                ? explicitBorrowMemoryKeys
+                : [],
           }, "curation_failed");
         } catch (ticketError) {
           console.error("[memory] curation failure receipt failed:", ticketError);
@@ -3466,6 +3529,32 @@ export async function runMcpInvocation(
         displayText = stripped || (locale === "ko"
           ? "응답은 완료됐지만 메모리 제어 블록을 안전하게 정리하지 못해 본문을 숨겼습니다."
           : "The response completed, but its memory control block could not be safely finalized, so the body was withheld.");
+      }
+    }
+
+    // A successful direct Hub borrow is a first-class owner career event. The
+    // immutable identity came from the exact runtime bundle prepared for this
+    // invocation; a mid-run account switch suppresses both career and memory
+    // writes instead of assigning the result to the newly active account.
+    if (
+      !oneToolFailureBlocksCompletion()
+      && activeBorrowedOwnerScopeKey() === explicitBorrowOwnerScopeKey
+    ) {
+      for (const spec of explicitBorrowSpecs) {
+        recordBorrowedAgentCareer({
+          ownerScopeKey: explicitBorrowOwnerScopeKey,
+          slug: spec.slug,
+          agentDefinitionId: spec.agentDefinitionId!,
+          agentReleaseId: spec.agentReleaseId!,
+          entityKind: spec.entityKind,
+          source: spec.source ?? "hub",
+          localized: spec.localized!,
+          runId: req.runId ?? `chat:${chat.id}:turn:${memoryTurnId}`,
+          resolution: {
+            runtime: active,
+            source: runtimeChoice.override ? "manual-override" : "safe-fallback",
+          },
+        });
       }
     }
 
@@ -3597,7 +3686,10 @@ export async function runMcpInvocation(
           chatId: chat.id,
           runId: req.runId,
           cwdAtRequest: workingFolder,
-          borrowedAgentSlugs,
+          borrowedAgentSlugs:
+            activeBorrowedOwnerScopeKey() === explicitBorrowOwnerScopeKey
+              ? explicitBorrowMemoryKeys
+              : [],
         }, signal?.aborted ? "cancelled" : "failed");
       } catch (ticketError) {
         console.error("[memory] terminal turn receipt failed:", ticketError);

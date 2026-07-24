@@ -52,6 +52,7 @@ async function main() {
     );
     insertAgent.run("agent-orchestrator", "agentlas-orchestrator", "Orchestrator", "Orchestrator", "Routes", "Routes", "Route work.", now);
     insertAgent.run("agent-worker", "debug-worker", "Debug Worker", "Debug Worker", "Debugs", "Debugs", "Debug safely.", now);
+    insertAgent.run("agent-child", "api-specialist", "API Specialist", "API Specialist", "Specializes", "Specializes", "Handle API work.", now);
 
     const routes = require("../dist/electron/agents/routes.js");
     const files = require("../dist/electron/agents/files.js");
@@ -245,6 +246,57 @@ async function main() {
     assert.ok(
       db.prepare("SELECT COUNT(*) AS n FROM memory_entries WHERE agent_id = 'agent-worker'").get().n >= 3,
       "portable procedure, preference, and firm learning must persist while the machine-specific item remains session-only",
+    );
+    const hybridTeamContext = {
+      projectPath: null,
+      projectId: null,
+      agentId: "agent-child",
+      chatId: firmChat.id,
+      teamRun: {
+        orchestratorAgentId: "agent-orchestrator",
+        memberAgentId: "agent-child",
+      },
+    };
+    curator.curateEvents([
+      {
+        memory_kind: "procedure",
+        content: "Use bounded exponential retry for the specialist API workflow.",
+        suggested_scope: "agent_repo",
+        confidence: "high",
+        sensitivity: "internal",
+        evidence_refs: ["run:hybrid-team"],
+      },
+      {
+        memory_kind: "decision",
+        content: "The orchestrator assigns API retry incidents to the specialist cell.",
+        suggested_scope: "agent_repo",
+        confidence: "high",
+        sensitivity: "internal",
+        evidence_refs: ["run:hybrid-team"],
+      },
+      {
+        memory_kind: "fact",
+        content: "The team uses idempotency keys for retried external requests.",
+        suggested_scope: "agent_repo",
+        confidence: "high",
+        sensitivity: "internal",
+        evidence_refs: ["run:hybrid-team"],
+      },
+    ], hybridTeamContext);
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS n FROM memory_entries WHERE agent_id = 'agent-child' AND content LIKE '%bounded exponential retry%'").get().n,
+      1,
+      "domain learning must belong to the persistent child-agent cell",
+    );
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS n FROM memory_entries WHERE agent_id = 'agent-orchestrator' AND content LIKE '%assigns API retry incidents%'").get().n,
+      1,
+      "coordination learning must belong to the orchestrator",
+    );
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS n FROM memory_entries WHERE scope = 'team_memory' AND agent_id IS NULL AND content LIKE '%idempotency keys%'").get().n,
+      1,
+      "shared norms must belong to team memory instead of either agent cell",
     );
 
     const memoryAfterInteractiveFirmRead = db.prepare(

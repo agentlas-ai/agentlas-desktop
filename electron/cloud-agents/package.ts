@@ -10,6 +10,7 @@ import type {
   CloudAgentCloudScope,
   CloudAgentPackageFile,
   CloudAgentPackageManifest,
+  CloudAgentLocalizedListing,
   CloudAgentPublicCareerGraph,
   CloudAgentPackageResult,
   CloudAgentPackageRequest,
@@ -187,6 +188,24 @@ export async function packageAndReviewCloudAgent(
   const finalSnapshot = packageSnapshot(scan.included);
   const name = readName(finalSnapshot, path.basename(rootPath));
   const tagline = readTagline(finalSnapshot);
+  let localized = readLocalizedListing(finalSnapshot);
+  if (isPublicHubPublish && localizedListingProblems(localized).length > 0 && input.reviewMode === "local-runtime") {
+    localized = await generateLocalizedListingWithSubmitterRuntime(rootPath, name, tagline);
+  }
+  if (isPublicHubPublish) {
+    const problems = localizedListingProblems(localized);
+    if (problems.length > 0) {
+      scan.findings.push({
+        id: "localized-metadata-required",
+        severity: "blocker",
+        category: "structure",
+        file: ".agentlas/agent-card.json",
+        message: `Public Hub metadata needs verified English and Korean fields: ${problems.join(", ")}.`,
+        remediation:
+          "Add localized.titleEn, titleKo, descriptionEn, and descriptionKo to .agentlas/agent-card.json, or use local-runtime review so Agentlas can translate them with your connected model.",
+      });
+    }
+  }
   const slug = sanitizeSlug(input.slug || readStableSlug(finalSnapshot) || name || path.basename(rootPath));
   const cloudScope = scopeForVisibility(visibility);
   const markerRegistration = restoreMarker?.registrations?.[cloudScope];
@@ -223,6 +242,7 @@ export async function packageAndReviewCloudAgent(
     createdAt: new Date().toISOString(),
     billingMode: isPublicHubPublish && input.reviewMode === "local-runtime" ? "submitter-local-runtime" : "static-only",
     costOwner: isPublicHubPublish && input.reviewMode === "local-runtime" ? "submitter" : "none",
+    ...(localized ? { localized } : {}),
     security: summarizeSecurity(packageFindings),
     ...(routingCard.card ? { routingCard: routingCard.card } : {}),
     ...(careerGraphCard ? { careerGraph: careerGraphCard } : {}),
@@ -1482,6 +1502,96 @@ function readTagline(snapshot: PackageSnapshot): string {
     return trimmed.slice(0, 160);
   }
   return "Portable Agentlas cloud agent package.";
+}
+
+function cleanLocalizedField(value: unknown, max: number): string {
+  return typeof value === "string"
+    ? value.normalize("NFKC").replace(/\s+/g, " ").trim().slice(0, max).trim()
+    : "";
+}
+
+function normalizeLocalizedListing(value: unknown): CloudAgentLocalizedListing | undefined {
+  if (!isRecord(value)) return undefined;
+  const localized = {
+    titleEn: cleanLocalizedField(value.titleEn, 96),
+    titleKo: cleanLocalizedField(value.titleKo, 96),
+    descriptionEn: cleanLocalizedField(value.descriptionEn, 640),
+    descriptionKo: cleanLocalizedField(value.descriptionKo, 640),
+  };
+  return Object.values(localized).some(Boolean) ? localized : undefined;
+}
+
+function readLocalizedListing(snapshot: PackageSnapshot): CloudAgentLocalizedListing | undefined {
+  const manifest = readPackageJson(snapshot);
+  for (const source of [manifest.agentCard, manifest.agentlas, manifest.manifest, manifest.routingCard]) {
+    const nested = normalizeLocalizedListing(source.localized);
+    if (nested) return nested;
+    const flat = normalizeLocalizedListing(source);
+    if (flat) return flat;
+  }
+  return undefined;
+}
+
+function localizedListingProblems(value: CloudAgentLocalizedListing | undefined): string[] {
+  if (!value) return ["localized object missing"];
+  const issues: string[] = [];
+  if (!value.titleEn) issues.push("titleEn missing");
+  if (!value.titleKo) issues.push("titleKo missing");
+  if (!value.descriptionEn) issues.push("descriptionEn missing");
+  if (!value.descriptionKo) issues.push("descriptionKo missing");
+  if (/[가-힣]/.test(value.titleEn)) issues.push("titleEn contains Hangul");
+  if (/[가-힣]/.test(value.descriptionEn)) issues.push("descriptionEn contains Hangul");
+  if (
+    value.descriptionEn
+    && value.descriptionEn === value.descriptionKo
+    && /[가-힣]/.test(value.descriptionKo)
+  ) {
+    issues.push("English description is not translated");
+  }
+  return issues;
+}
+
+async function generateLocalizedListingWithSubmitterRuntime(
+  rootPath: string,
+  name: string,
+  tagline: string,
+): Promise<CloudAgentLocalizedListing | undefined> {
+  try {
+    const { pickActiveRunner } = await import("../mcp/client");
+    const picked = await pickActiveRunner();
+    if (!picked) return undefined;
+    const result = await picked.runner(
+      {
+        systemPrompt: [
+          "Translate public Agentlas Hub listing metadata.",
+          "Return one strict JSON object with exactly titleEn, titleKo, descriptionEn, descriptionKo.",
+          "Translate only the supplied name and description. Do not invent features, claims, prices, or setup details.",
+          "English fields must contain natural English and no Hangul. Korean fields must be natural Korean.",
+        ].join("\n"),
+        history: [],
+        userPrompt: JSON.stringify({ sourceTitle: name, sourceDescription: tagline }),
+        backendLabel: picked.label,
+        model: picked.active.model ?? undefined,
+        longContext: picked.active.longContextEnabled,
+        effort: picked.active.effort ?? undefined,
+        permission: "read",
+        cwd: rootPath,
+        locale: "en",
+      },
+      {
+        onPartial: () => {},
+        onStatus: () => {},
+        onTool: () => {},
+      },
+    );
+    const candidate = result.text.match(/\{[\s\S]*\}/)?.[0];
+    const localized = candidate
+      ? normalizeLocalizedListing(JSON.parse(candidate) as unknown)
+      : undefined;
+    return localizedListingProblems(localized).length === 0 ? localized : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function readStableSlug(snapshot: PackageSnapshot): string {

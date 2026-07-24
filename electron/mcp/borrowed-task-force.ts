@@ -94,6 +94,14 @@ import {
   oneAttachmentExecutionPrompt,
   redactOneAttachmentText,
 } from "../one/attachments";
+import {
+  activeBorrowedOwnerScopeKey,
+  borrowedMemoryKey,
+} from "../agents/borrowed-owner-scope";
+import {
+  buildBorrowedAgentMemoryContext,
+  recordBorrowedAgentCareer,
+} from "../agents/borrowed-profiles";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -136,6 +144,12 @@ export interface BorrowedAgentSpec {
   agentDefinitionId?: string;
   agentReleaseId?: string;
   packageHash?: string;
+  localized?: {
+    titleEn: string;
+    titleKo: string;
+    descriptionEn: string;
+    descriptionKo: string;
+  };
   contentDigest?: string;
   releaseVersion?: string;
   bundleDigest?: string;
@@ -264,6 +278,8 @@ export interface BorrowedTaskForceParams {
   auditWorkforcePlannerAttempt?: (attempt: WorkforcePlannerBenchmarkAttemptEvidence) => void;
   /** Workforce executions keep the exact accepted roster; failed children are not replaced. */
   requireAllWorkers?: boolean;
+  /** Frozen opaque Agentlas owner partition; main-only and never sent to a model. */
+  borrowedCareerOwnerScopeKey?: string;
 }
 
 export interface WorkforceLeaderRunnerEvidence {
@@ -737,10 +753,14 @@ async function curateOwnedTaskForceResult(input: {
   signal?: AbortSignal;
   phase: string;
   attempt?: number;
+  borrowedComponentId?: string;
 }): Promise<string> {
   const { p, spec, text, installedAgent, nodeId, task, runtimeKind } = input;
   try {
     const readOnly = taskForceProjectReadOnly(p);
+    const borrowedOwnerStillActive =
+      !p.borrowedCareerOwnerScopeKey
+      || p.borrowedCareerOwnerScopeKey === activeBorrowedOwnerScopeKey();
     const context = {
       turnId: taskForceMemoryTurnId(p, nodeId, input.phase, input.attempt),
       projectPath: p.memoryReadPath ?? null,
@@ -761,8 +781,19 @@ async function curateOwnedTaskForceResult(input: {
             },
           }
         : {}),
-      ...((spec.source === "hub" || spec.source === "cloud" || !spec.source)
-        ? { borrowedAgentSlugs: [spec.slug] }
+      ...(borrowedOwnerStillActive
+        && spec.agentDefinitionId
+        && spec.agentReleaseId
+        && (spec.source === "hub" || spec.source === "cloud" || !spec.source)
+        ? {
+            borrowedAgentSlugs: [
+              borrowedMemoryKey(
+                spec.agentDefinitionId,
+                spec.agentReleaseId,
+                input.borrowedComponentId,
+              ),
+            ],
+          }
         : {}),
     };
     const semanticOptions = readOnly
@@ -991,6 +1022,54 @@ function agentRecordExecutionGraph(raw: Record<string, unknown>): BorrowedAgentS
   return { schemaVersion: "1.0", manager: { path: managerPath, content: managerContent }, workers };
 }
 
+function agentRecordImmutableIdentity(raw: Record<string, unknown>): Pick<
+  BorrowedAgentSpec,
+  "agentDefinitionId" | "agentReleaseId" | "packageHash" | "localized"
+> {
+  const output = asObject(raw.output);
+  const runtimeBundle = asObject(output.runtime_bundle || output.runtimeBundle || raw.runtime_bundle || raw.runtimeBundle);
+  const version = asObject(raw.version || output.version);
+  const localizedRaw = asObject(
+    runtimeBundle.localized || output.localized || raw.localized,
+  );
+  const localized = {
+    titleEn: cleanString(localizedRaw.titleEn),
+    titleKo: cleanString(localizedRaw.titleKo),
+    descriptionEn: cleanString(localizedRaw.descriptionEn),
+    descriptionKo: cleanString(localizedRaw.descriptionKo),
+  };
+  return {
+    agentDefinitionId: cleanString(
+      raw.agentDefinitionId
+      || raw.agent_definition_id
+      || output.agentDefinitionId
+      || output.agent_definition_id
+      || runtimeBundle.agentDefinitionId
+      || runtimeBundle.agent_definition_id
+      || version.agentDefinitionId
+    ) || undefined,
+    agentReleaseId: cleanString(
+      raw.agentReleaseId
+      || raw.agent_release_id
+      || output.agentReleaseId
+      || output.agent_release_id
+      || runtimeBundle.agentReleaseId
+      || runtimeBundle.agent_release_id
+      || version.agentReleaseId
+    ) || undefined,
+    packageHash: cleanString(
+      raw.packageHash
+      || raw.package_hash
+      || output.packageHash
+      || output.package_hash
+      || runtimeBundle.packageHash
+      || runtimeBundle.package_hash
+      || version.current
+    ) || undefined,
+    localized: Object.values(localized).every(Boolean) ? localized : undefined,
+  };
+}
+
 function hasAuthoritativeAgentInstructions(raw: Record<string, unknown>): boolean {
   return Boolean(
     cleanString(raw.directive) ||
@@ -1062,6 +1141,7 @@ export function normalizeBorrowedAgentSpecs(slugs: string[], payload: unknown): 
       entityKind: agentRecordEntityKind(raw),
       executionGraph: agentRecordExecutionGraph(raw),
       toolPermissions: agentRecordToolPermissions(raw),
+      ...agentRecordImmutableIdentity(raw),
     }];
   });
 }
@@ -1102,6 +1182,16 @@ export function requireBorrowedAgentSpecs(
   const resolved = new Set(specs.map((spec) => canonicalBorrowSlug(spec.slug)));
   const missing = requested.filter((slug) => !resolved.has(canonicalBorrowSlug(slug)));
   const reasons = borrowedFailureReasons(payload);
+  for (const spec of specs) {
+    if (!spec.agentDefinitionId) reasons.push(`missing_agent_definition_id:${spec.slug}`);
+    if (!spec.agentReleaseId) reasons.push(`missing_agent_release_id:${spec.slug}`);
+    if (!spec.packageHash) reasons.push(`missing_package_hash:${spec.slug}`);
+    if (
+      !spec.localized
+      || /[\uac00-\ud7af]/.test(spec.localized.titleEn)
+      || /[\uac00-\ud7af]/.test(spec.localized.descriptionEn)
+    ) reasons.push(`missing_valid_localized_metadata:${spec.slug}`);
+  }
   if (options.transportOk === false || missing.length > 0 || reasons.length > 0) {
     if (options.transportOk === false) reasons.unshift(cleanString(options.transportError) || "hub_call_failed");
     reasons.push(...missing.map((slug) => `missing_directive:${slug}`));
@@ -2114,7 +2204,19 @@ async function runBorrowedAgentTurn(
     model: modelLabel(active),
   }));
   const nodeTask = packet.brief || oneAttachmentExecutionPrompt(p.req);
-  const nodeMemory = await taskForceMemoryContext(p, installedAgent?.id ?? null, nodeTask);
+  const localNodeMemory = await taskForceMemoryContext(p, installedAgent?.id ?? null, nodeTask);
+  const borrowedNodeMemory =
+    !p.req.agentAppMode
+    && (!p.borrowedCareerOwnerScopeKey || p.borrowedCareerOwnerScopeKey === activeBorrowedOwnerScopeKey())
+    && Boolean(spec.agentDefinitionId)
+    && Boolean(spec.agentReleaseId)
+    && (spec.source === "hub" || spec.source === "cloud" || !spec.source)
+      ? buildBorrowedAgentMemoryContext(
+          borrowedMemoryKey(spec.agentDefinitionId!, spec.agentReleaseId!),
+          nodeTask,
+        )
+      : "";
+  const nodeMemory = [localNodeMemory, borrowedNodeMemory].filter(Boolean).join("\n\n");
   const nodeMemoryEmitter = !p.req.agentAppMode && !p.restrictedReadBoundary
     ? memoryEmitterPromptFor(nodeTask)
     : "";
@@ -2446,6 +2548,7 @@ async function runBorrowedAgentTurn(
             env: p.runnerEnv,
             signal: link.signal,
             phase: "worker",
+            borrowedComponentId: worker.id,
           });
           const workerResolution = reconcileWorkloadRunnerResult(workloadResolution, result);
           if (p.workforceSelectionReceipt) {
@@ -2454,6 +2557,20 @@ async function runBorrowedAgentTurn(
               workerResolution,
               `executed nested-worker allocation for ${packet.agent}:${worker.id}`,
             );
+          }
+          if (spec.agentDefinitionId && spec.agentReleaseId) {
+            recordBorrowedAgentCareer({
+              ownerScopeKey: p.borrowedCareerOwnerScopeKey ?? activeBorrowedOwnerScopeKey(),
+              slug: spec.slug,
+              agentDefinitionId: spec.agentDefinitionId,
+              agentReleaseId: spec.agentReleaseId,
+              componentId: worker.id,
+              entityKind: "agent",
+              source: spec.source,
+              localized: spec.localized!,
+              runId: p.req.runId ?? nestedExecutionId,
+              resolution: workerResolution,
+            });
           }
           return {
             worker,
@@ -2559,6 +2676,23 @@ async function runBorrowedAgentTurn(
           managerSynthesisResolution,
           `executed manager-synthesis allocation for ${packet.agent}`,
         );
+      }
+      if (
+        workerResults.every((item) => item.ok)
+        && spec.agentDefinitionId
+        && spec.agentReleaseId
+      ) {
+        recordBorrowedAgentCareer({
+          ownerScopeKey: p.borrowedCareerOwnerScopeKey ?? activeBorrowedOwnerScopeKey(),
+          slug: spec.slug,
+          agentDefinitionId: spec.agentDefinitionId,
+          agentReleaseId: spec.agentReleaseId,
+          entityKind: "team",
+          source: spec.source,
+          localized: spec.localized!,
+          runId: p.req.runId ?? nestedExecutionId,
+          resolution: managerSynthesisResolution,
+        });
       }
       const tokens = (managerPlan.tokens ?? 0) + workerResults.reduce((sum, item) => sum + item.tokens, 0) + (managerSynthesis.tokens ?? 0);
       p.sink(tag({
@@ -2688,6 +2822,19 @@ async function runBorrowedAgentTurn(
       agentId: spec.slug,
       payload: workloadAllocationReceipt(executedResolution),
     });
+    if (spec.agentDefinitionId && spec.agentReleaseId) {
+      recordBorrowedAgentCareer({
+        ownerScopeKey: p.borrowedCareerOwnerScopeKey ?? activeBorrowedOwnerScopeKey(),
+        slug: spec.slug,
+        agentDefinitionId: spec.agentDefinitionId,
+        agentReleaseId: spec.agentReleaseId,
+        entityKind: spec.entityKind,
+        source: spec.source,
+        localized: spec.localized!,
+        runId: p.req.runId ?? `task-force:${p.chat.id}`,
+        resolution: executedResolution,
+      });
+    }
     p.sink(tag({
       kind: "tool-use",
       done: true,
@@ -3894,10 +4041,14 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
 }
 
 export async function runBorrowedTaskForceInvocation(p: BorrowedTaskForceParams): Promise<BorrowedTaskForceResult> {
+  const ownerBoundParams: BorrowedTaskForceParams = {
+    ...p,
+    borrowedCareerOwnerScopeKey: p.borrowedCareerOwnerScopeKey ?? activeBorrowedOwnerScopeKey(),
+  };
   try {
-    return await runBorrowedTaskForceInvocationInternal(p);
+    return await runBorrowedTaskForceInvocationInternal(ownerBoundParams);
   } catch (error) {
-    if (!p.req.agentAppMode) throw error;
+    if (!ownerBoundParams.req.agentAppMode) throw error;
     // Planner/synthesis CLI errors can contain stderr, local paths, or runtime
     // details. Agent Apps receive one fixed failure without preserving `cause`.
     throw createUntrustedRuntimeFailure();

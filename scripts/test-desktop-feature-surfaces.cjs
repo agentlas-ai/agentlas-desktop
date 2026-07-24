@@ -134,6 +134,14 @@ async function main() {
       console.log("desktop Experience surface smoke passed");
       return;
     }
+    if (process.argv.includes("--borrowed-profile-only")) {
+      await runBorrowedAgentProfileSurface(browser, baseUrl, evidence, false);
+      await runBorrowedAgentProfileSurface(browser, baseUrl, evidence, true);
+      await runChildAgentEmptyOntologySurface(browser, baseUrl, evidence);
+      await runEnglishAgentNameFallbackSurface(browser, baseUrl, evidence);
+      console.log("desktop owner-scoped borrowed-agent profile surfaces passed");
+      return;
+    }
     if (process.argv.includes("--hub-ontology-only")) {
       await runHubOntologyProjectionSurface(browser, baseUrl, evidence);
       await runActualExperienceAttachmentSurface(browser, baseUrl, evidence);
@@ -751,6 +759,82 @@ async function runLibrarySurface(browser, baseUrl, evidence) {
   await page.waitForFunction(() => window.__qa.calls.some((call) => call.name === "agentRuntime.remove"));
 
   await finishPage(context, page, errors, evidence, "library-agents-surface");
+}
+
+async function runBorrowedAgentProfileSurface(browser, baseUrl, evidence, emptyGraph) {
+  const { context, page, errors } = await newPage(browser, {
+    experienceScenario: true,
+    borrowedEmptyGraph: emptyGraph,
+    locale: "en",
+    viewportHeight: 1100,
+  });
+  await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
+  const shelf = page.locator('[data-roster-section="hub-shelf"]');
+  await shelf.waitFor();
+  const profileButton = shelf.getByTitle("hub-borrowed-researcher");
+  await profileButton.waitFor();
+  await profileButton.click();
+  await page.getByTestId("borrowed-agent-detail").waitFor();
+  await page.getByTestId("borrowed-agent-detail").locator("h1").getByText("Hub Borrowed Researcher", { exact: true }).waitFor();
+  assert.equal(await page.getByText("허브 리서처", { exact: true }).count(), 0, "English borrowed profile must not leak the Korean-only name");
+  await page.getByText("gpt-5.6-sol", { exact: true }).waitFor();
+  assert.equal(new URL(page.url()).pathname.includes("marketplace"), false, "borrowed profile click must stay in My Agents");
+  assert.equal(await page.getByText(/Self-evolution|자가진화|System Prompt|시스템 프롬프트/).count(), 0, "borrowed profile must not expose origin-owned controls");
+  const graph = page.getByTestId("agent-ontology-graph");
+  await graph.waitFor();
+  if (emptyGraph) {
+    await graph.getByTestId("ontology-empty-state").waitFor();
+    assert.equal(await graph.locator('canvas[data-ontology-webgl="true"]').count(), 0, "zero relations must not mount a blank 3D canvas");
+  } else {
+    await graph.locator('[data-engine-state="ready"]').waitFor();
+    await graph.locator("option", { hasText: "Verify sources before synthesis" }).waitFor({ state: "attached" });
+  }
+  const calls = await page.evaluate(() => window.__qa.calls);
+  assert.ok(calls.some((call) => call.name === "agents.borrowedProfiles"));
+  assert.deepEqual(errors, [], "borrowed-agent detail should not emit page errors");
+  const name = emptyGraph ? "library-borrowed-agent-empty-state" : "library-borrowed-agent-profile";
+  await page.screenshot({ path: path.join(outDir, `${name}.png`), fullPage: true });
+  evidence.push({ name, status: "pass", url: page.url() });
+  await context.close();
+}
+
+async function runChildAgentEmptyOntologySurface(browser, baseUrl, evidence) {
+  const { context, page, errors } = await newPage(browser, {
+    experienceScenario: true,
+    emptyOntologyGraph: true,
+    hubOntologyAgentId: "no-empty-fixture-binding",
+    locale: "ko",
+    viewportHeight: 1100,
+  });
+  await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
+  await page.getByText(/빌더 에이전트|Builder Agent/).first().click();
+  await page.getByRole("button", { name: /^경험$|^Experience$/ }).click();
+  const graph = page.getByTestId("agent-ontology-graph");
+  await graph.getByTestId("ontology-empty-state").waitFor();
+  assert.equal(await graph.locator('canvas[data-ontology-webgl="true"]').count(), 0, "a child agent with zero real relations must not mount the 3D engine");
+  await graph.getByText("아직 지도에 그릴 관계가 없습니다.", { exact: true }).waitFor();
+  assert.deepEqual(errors, [], "empty child-agent ontology should not emit page errors");
+  const name = "library-child-agent-empty-ontology";
+  await page.screenshot({ path: path.join(outDir, `${name}.png`), fullPage: true });
+  evidence.push({ name, status: "pass", url: page.url() });
+  await context.close();
+}
+
+async function runEnglishAgentNameFallbackSurface(browser, baseUrl, evidence) {
+  const { context, page, errors } = await newPage(browser, {
+    badEnglishAgentMetadata: true,
+    locale: "en",
+    viewportHeight: 900,
+  });
+  await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
+  const roster = page.locator('[data-tour-id="agents.roster"]');
+  await roster.getByText("Builder Agent", { exact: true }).waitFor();
+  assert.equal(await roster.getByText("빌더 에이전트", { exact: true }).count(), 0, "English roster must not show a Korean value copied into nameEn");
+  assert.deepEqual(errors, [], "English agent-name fallback should not emit page errors");
+  const name = "library-english-agent-name-fallback";
+  await page.screenshot({ path: path.join(outDir, `${name}.png`), fullPage: true });
+  evidence.push({ name, status: "pass", url: page.url() });
+  await context.close();
 }
 
 async function runFirmAgentSurface(browser, baseUrl, evidence) {

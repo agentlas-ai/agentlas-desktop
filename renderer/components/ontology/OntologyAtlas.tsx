@@ -476,16 +476,17 @@ export function OntologyAtlas({
   const tone = inspected ? atlasTone(inspected) : GRAPH_COLORS.agent;
   const relationCount = visible.edges.length;
   const nodeCount = visible.nodes.length;
+  const isEmpty = !graphLoading && !graphError && relationCount === 0;
 
   return (
     <section className={styles.atlas} data-testid="agent-ontology-graph" aria-label={ko ? "에이전트 경험 지도" : "Agent experience map"}>
-      <div className={styles.shell} data-engine-state={engineState} data-scope={scope} data-empty={relationCount === 0} data-data-state={graphLoading ? "loading" : graphError ? "error" : "ready"}>
+      <div className={styles.shell} data-engine-state={engineState} data-scope={scope} data-empty={isEmpty} data-data-state={graphLoading ? "loading" : graphError ? "error" : isEmpty ? "empty" : "ready"}>
         <div
           className={styles.engine}
           role="img"
           aria-label={ko ? "회전·확대할 수 있는 3D 경험 지도. 멀리서는 묶인 경험의 요약 라벨이, 가까이서는 노드 이름이 보입니다. 노드 찾기 메뉴와 관계 목록으로 키보드 탐색할 수 있습니다." : "Rotatable and zoomable 3D experience map. Cluster summaries appear when zoomed out, node names when zoomed in. Use the node picker and relation list for keyboard navigation."}
         >
-          {engineState !== "fallback" && (
+          {!isEmpty && engineState !== "fallback" && (
             <OntologyScene3D
               key={`${engineRevision}:${scope}`}
               nodes={sceneNodes}
@@ -512,7 +513,7 @@ export function OntologyAtlas({
               <div className={styles.metric}>{nodeCount} NODE · {relationCount} RELATION · {clusterCount} CLUSTER{graphSnapshot?.truncated || atlas.capped ? " · CAPPED" : ""}</div>
             </div>
           </div>
-          <div className={styles.toolPlate} role="toolbar" aria-label={ko ? "경험 지도 도구" : "Experience map tools"}>
+          {!isEmpty && <div className={styles.toolPlate} role="toolbar" aria-label={ko ? "경험 지도 도구" : "Experience map tools"}>
             <button type="button" className={styles.toolButton} onClick={() => zoom("out")} aria-label={ko ? "축소" : "Zoom out"} title={ko ? "축소" : "Zoom out"}>−</button>
             <button type="button" className={styles.toolButton} onClick={resetCamera} aria-label={ko ? "전체 맞춤" : "Fit graph"} title={ko ? "전체 맞춤" : "Fit graph"}>◎</button>
             <button type="button" className={styles.toolButton} onClick={() => zoom("in")} aria-label={ko ? "확대" : "Zoom in"} title={ko ? "확대" : "Zoom in"}>+</button>
@@ -542,10 +543,10 @@ export function OntologyAtlas({
                 {visible.nodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}
               </select>
             </label>
-          </div>
+          </div>}
         </div>
 
-        {inspected && (
+        {!isEmpty && inspected && (
           <aside
             className={styles.inspector}
             data-testid="ontology-node-inspector"
@@ -570,16 +571,16 @@ export function OntologyAtlas({
           </aside>
         )}
 
-        <div className={styles.bottomRail} aria-label={ko ? "관계선 범례" : "Relation legend"}>
+        {!isEmpty && <div className={styles.bottomRail} aria-label={ko ? "관계선 범례" : "Relation legend"}>
           <div className={styles.legend}>
             <span className={styles.legendItem}><i className={styles.legendLine} aria-hidden="true" />{ko ? "현재 관계" : "active"}</span>
             <span className={styles.legendItem}><i className={styles.legendLinePending} aria-hidden="true" />{ko ? "대기·이전" : "pending / prior"}</span>
             <span className={styles.legendItem}><i className={styles.nodeMark} aria-hidden="true" style={{ "--node-color": GRAPH_COLORS.pack.color, "--node-border": GRAPH_COLORS.pack.border, "--node-radius": "999px", marginTop: 0 } as React.CSSProperties} />{ko ? "모든 노드" : "all nodes"}</span>
           </div>
           <span className={styles.engineBadge}>{engineState === "ready" ? "THREE · 3D" : engineState.toUpperCase()}</span>
-        </div>
+        </div>}
 
-        {engineState === "fallback" && (
+        {!isEmpty && engineState === "fallback" && (
           <div className={styles.fallback} role="status">
             <div className={styles.fallbackHead}>
               <strong>{ko ? "GPU 지도를 사용할 수 없어 관계 목록으로 표시합니다." : "GPU map unavailable; showing the relation list."}</strong>
@@ -598,6 +599,16 @@ export function OntologyAtlas({
           </div>
         )}
 
+        {isEmpty && (
+          <div className={styles.emptyState} role="status" data-testid="ontology-empty-state">
+            <span className={styles.emptyStateMark} aria-hidden="true" />
+            <strong>{ko ? "아직 지도에 그릴 관계가 없습니다." : "There are no relationships to map yet."}</strong>
+            <span>{ko
+              ? "경험이나 메모리가 저장된 뒤 실제 연결이 생기면 3D 지도가 나타납니다. 빈 3D 화면은 표시하지 않습니다."
+              : "The 3D map will appear after saved memory or experience creates real links. An empty 3D canvas is not shown."}</span>
+          </div>
+        )}
+
         {(graphLoading || graphError) && (
           <div className={styles.dataState} role="status" data-kind={graphError ? "error" : "loading"}>
             <span className={styles.dataStateMark} aria-hidden="true" />
@@ -611,7 +622,7 @@ export function OntologyAtlas({
         )}
       </div>
 
-      <details className={styles.relationList} data-testid="ontology-relation-list" open={relationsOpen} onToggle={(event) => setRelationsOpen(event.currentTarget.open)}>
+      {!isEmpty && <details className={styles.relationList} data-testid="ontology-relation-list" open={relationsOpen} onToggle={(event) => setRelationsOpen(event.currentTarget.open)}>
         <summary className={styles.relationSummary}>{ko ? `관계 원장 ${relationCount}개` : `${relationCount} ledger relations`}</summary>
         {relationsOpen && <div className={styles.relationRows}>
           {visible.edges.map((edge) => (
@@ -622,7 +633,7 @@ export function OntologyAtlas({
             </div>
           ))}
         </div>}
-      </details>
+      </details>}
     </section>
   );
 }

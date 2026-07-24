@@ -71,6 +71,22 @@ function writeFile(filePath, body) {
     const distinct = await importLocalFolder(distinctRoot);
     assert.notEqual(distinct.agent.id, origin.agent.id, "a different definition must not collapse into an existing agent");
 
+    const localizedRoot = path.join(tempDir, "localized-agent");
+    writeFile(path.join(localizedRoot, "AGENTS.md"), "# 증거 분석가\n\n증거를 분석합니다.\n");
+    writeFile(path.join(localizedRoot, "agentlas.json"), JSON.stringify({
+      name: "증거 분석가",
+      localized: {
+        titleEn: "Evidence Analyst",
+        titleKo: "증거 분석가",
+        descriptionEn: "Analyzes evidence with explicit source boundaries.",
+        descriptionKo: "출처 경계를 명확히 하며 증거를 분석합니다.",
+      },
+    }, null, 2));
+    const localizedImport = await importLocalFolder(localizedRoot);
+    assert.equal(localizedImport.agent.name, "증거 분석가");
+    assert.equal(localizedImport.agent.nameEn, "Evidence Analyst", "packaged bilingual metadata must survive local import");
+    assert.equal(localizedImport.agent.taglineEn, "Analyzes evidence with explicit source boundaries.");
+
     const updatedSystemPrompt = "# Updated System Prompt\n\nDB-backed prompt update proof.\n";
     writeAgentFile(single.agent.id, "system-prompt.md", updatedSystemPrompt);
     const promptRow = getDb().prepare("SELECT system_prompt FROM installed_agents WHERE id = ?").get(single.agent.id);

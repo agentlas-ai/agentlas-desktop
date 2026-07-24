@@ -35,6 +35,7 @@ import type {
   AgentRuntimeOverrideScope,
   AgentGroupResolved,
   AgentUsageSummaryRow,
+  BorrowedAgentProfile,
   Chat,
   ExperienceCandidateRecord,
   ExperienceCloudUploadRecord,
@@ -44,7 +45,6 @@ import type {
   FsPathGrant,
   InstalledAgent,
   InstalledFirm,
-  HubAgentBookmark,
   MarketplaceListing,
   ResolvedOrg,
   ResolvedNode,
@@ -304,9 +304,7 @@ function LibraryAgentsView() {
   const [runtimeOverrides, setRuntimeOverrides] = useState<AgentRuntimeOverride[]>([]);
   // v74 사용 원장(run 귀속 집계) — 로스터 섹션/배지의 데이터 소스.
   const [usageRows, setUsageRows] = useState<AgentUsageSummaryRow[]>([]);
-  // 북마크한 Hub 에이전트/팀(실행 0회여도 노출). 사용 원장과 합쳐 "Hub 북마크·최근
-  // 사용" 선반을 만든다 — 설치 전이라 로컬 로스터에서 사라지지 않게 한다.
-  const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
+  const [borrowedProfiles, setBorrowedProfiles] = useState<BorrowedAgentProfile[]>([]);
   // 북마크 토글의 낙관적 오버라이드(진실은 refresh로 재수렴).
   const [bookmarkOverrides, setBookmarkOverrides] = useState<Record<string, boolean>>({});
 
@@ -319,9 +317,15 @@ function LibraryAgentsView() {
   // 선택된 에이전트 노드 (null 이면 회사 오버뷰 노출)
   const [selectedNode, setSelectedNode] = useState<ResolvedNode | null>(null);
   const [selectedFirmId, setSelectedFirmId] = useState<string | null>(null);
+  const [selectedBorrowedProfileId, setSelectedBorrowedProfileId] = useState<string | null>(null);
   useEffect(() => {
-    if (selectedNode) setSelectedFirmId(null);
-  }, [selectedNode]);
+    if (selectedNode) {
+      setSelectedFirmId(null);
+      setSelectedBorrowedProfileId(null);
+    } else if (selectedFirmId) {
+      setSelectedBorrowedProfileId(null);
+    }
+  }, [selectedFirmId, selectedNode]);
   const [activeTab, setActiveTab] = useState<"identity" | "memory" | "playbook" | "activity" | "ontology">("identity");
   const targetDetailTab = searchParams.get("tab") === "ontology" ? "ontology" as const : null;
   const targetAgentId = searchParams.get("agentId") ?? "";
@@ -445,10 +449,10 @@ function LibraryAgentsView() {
         })
         .catch(() => {});
     }
-    if (api.marketplace?.bookmarks) {
-      void api.marketplace.bookmarks()
+    if (api.agents?.borrowedProfiles) {
+      void api.agents.borrowedProfiles()
         .then((rows) => {
-          if (rosterRefreshGenerationRef.current === generation && Array.isArray(rows)) setHubBookmarks(rows);
+          if (rosterRefreshGenerationRef.current === generation && Array.isArray(rows)) setBorrowedProfiles(rows);
         })
         .catch(() => {});
     }
@@ -555,6 +559,7 @@ function LibraryAgentsView() {
       role: loc.tagline || agent.slug,
       agentId: agent.id,
     });
+    setSelectedBorrowedProfileId(null);
     setActiveTab(targetDetailTab ?? "identity");
   }
 
@@ -981,37 +986,22 @@ function LibraryAgentsView() {
   // 한 번이라도 빌려 쓴 Hub 에이전트/팀은 설치 전이라도 내 에이전트 목록에 남는다.
   // 이미 설치된 것은 정식 로스터에 이미 있으므로 제외한다.
   const installedSlugSet = useMemo(() => new Set(agents.map((a) => a.slug)), [agents]);
-  const hubShelfRows = useMemo(() => {
-    const byKey = new Map<string, { key: string; name: string; entityKind: string; useCount: number; bookmarked: boolean }>();
-    for (const bm of hubBookmarks) {
-      const slug = (bm.slug || bm.listing?.slug || "").trim();
-      if (!slug || installedSlugSet.has(slug)) continue;
-      byKey.set(slug, {
-        key: slug,
-        name: bm.listing?.name || slug,
-        entityKind: bm.listing?.entityKind || "agent",
-        useCount: 0,
-        bookmarked: true,
-      });
-    }
-    for (const row of usageRows) {
-      if (row.installed || row.useCount < 1) continue;
-      const key = row.agentId;
-      if (installedSlugSet.has(key)) continue;
-      const existing = byKey.get(key);
-      if (existing) existing.useCount = Math.max(existing.useCount, row.useCount);
-      else byKey.set(key, { key, name: key, entityKind: row.kind === "team" ? "team" : "agent", useCount: row.useCount, bookmarked: Boolean(row.bookmarkedAt) });
-    }
-    return [...byKey.values()].sort((a, b) =>
-      Number(b.bookmarked) - Number(a.bookmarked) || b.useCount - a.useCount || a.name.localeCompare(b.name),
-    );
-  }, [hubBookmarks, usageRows, installedSlugSet]);
+  const hubShelfRows = useMemo(() => borrowedProfiles
+    .filter((profile) => !installedSlugSet.has(profile.slug))
+    .map((profile) => ({
+      ...profile,
+      name: locale === "en" ? profile.nameEn : profile.name,
+      bookmarked: Boolean(profile.bookmarkedAt),
+    })), [borrowedProfiles, installedSlugSet, locale]);
   const firmUsageRollup = useCallback((firm: InstalledFirm): number => {
     let total = 0;
     for (const node of firm.orgChart) total += usageByAgentId.get(node.agentId)?.useCount ?? 0;
     return total;
   }, [usageByAgentId]);
   const selectedFirm = selectedFirmId ? firms.find((firm) => firm.id === selectedFirmId) ?? null : null;
+  const selectedBorrowedProfile = selectedBorrowedProfileId
+    ? borrowedProfiles.find((profile) => profile.profileId === selectedBorrowedProfileId) ?? null
+    : null;
 
   // 팀 에이전트 펼치기 — 하위 서브에이전트를 백엔드(즉시 결정적 + 백그라운드 LLM)로 해석.
   const toggleTeam = useCallback(
@@ -1508,8 +1498,8 @@ function LibraryAgentsView() {
           </div>
           )}
 
-          {/* Hub 북마크·최근 사용 — 탭과 무관하게 항상 노출. 설치 전 Hub 에이전트/팀도
-              내 목록에서 사라지지 않게 한다. 클릭하면 Hub 카드로 이동해 설치·대여한다. */}
+          {/* Hub 북마크·최근 사용 — 설치 자산이 아닌 사용자별 read-only 경력 프로필.
+              클릭은 Marketplace 검색이 아니라 이 사용자의 실행·메모리 상세를 연다. */}
           {!sidebarCollapsed && hubShelfRows.length > 0 && (
             <div data-roster-section="hub-shelf" style={{ marginTop: 8, borderTop: "1px solid var(--glass-border)", paddingTop: 8 }}>
               <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-deep)", textTransform: "uppercase", padding: "0 12px", marginBottom: 6 }}>
@@ -1517,10 +1507,15 @@ function LibraryAgentsView() {
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingLeft: 12, paddingRight: 6 }}>
                 {hubShelfRows.map((row) => (
-                  <Link
-                    key={row.key}
-                    href={`/marketplace?q=${encodeURIComponent(row.key)}`}
-                    title={row.key}
+                  <button
+                    type="button"
+                    key={row.profileId}
+                    title={row.slug}
+                    onClick={() => {
+                      setSelectedFirmId(null);
+                      setSelectedNode(null);
+                      setSelectedBorrowedProfileId(row.profileId);
+                    }}
                     style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderRadius: "var(--radius-md)", color: "var(--muted-deep)", border: "1px solid transparent", background: "transparent", cursor: "pointer", textAlign: "left", textDecoration: "none" }}
                   >
                     <IconLayers size={13} style={{ flexShrink: 0, color: "var(--accent)", opacity: row.entityKind === "team" ? 1 : 0.6 }} />
@@ -1535,7 +1530,7 @@ function LibraryAgentsView() {
                         {locale === "ko" ? `빌림 · ${row.useCount}` : `Borrowed · ${row.useCount}`}
                       </span>
                     )}
-                  </Link>
+                  </button>
                 ))}
               </div>
             </div>
@@ -1601,7 +1596,12 @@ function LibraryAgentsView() {
           </div>
         )}
 
-        {selectedFirm ? (
+        {selectedBorrowedProfile ? (
+          <BorrowedAgentDetailView
+            profile={selectedBorrowedProfile}
+            onBack={() => setSelectedBorrowedProfileId(null)}
+          />
+        ) : selectedFirm ? (
           <div style={{ flex: 1, overflowY: "auto" }} data-tour-id="agents.detail">
             <header className="titlebar-drag" style={{ padding: "16px 32px", minHeight: 56, borderBottom: "var(--hairline)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 12 }}>
               <span style={{ width: 36, height: 36, borderRadius: 10, background: "var(--fill-1)", color: "var(--accent)", display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
@@ -3726,6 +3726,135 @@ function ExperiencePanel({
           )}
         </section>
       </div>
+    </div>
+  );
+}
+
+function BorrowedAgentDetailView({
+  profile,
+  onBack,
+}: {
+  profile: BorrowedAgentProfile;
+  onBack: () => void;
+}) {
+  const { locale } = useT();
+  const [graph, setGraph] = useState<ExperienceOntologyGraphSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const name = locale === "en" ? profile.nameEn : profile.name;
+  const tagline = locale === "en" ? profile.taglineEn : profile.tagline;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setFailed(false);
+    setGraph(null);
+    ipc()?.agents.borrowedOntologyGraph(profile.profileId)
+      .then((snapshot) => {
+        if (!cancelled) setGraph(snapshot);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [profile.profileId]);
+
+  const formatDate = (value: string | null) => value
+    ? new Date(value).toLocaleString(locale === "ko" ? "ko-KR" : "en-US", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : (locale === "ko" ? "아직 실행 안 함" : "Not run yet");
+
+  return (
+    <div style={{ flex: 1, overflowY: "auto" }} data-testid="borrowed-agent-detail" data-profile-id={profile.profileId}>
+      <header className="titlebar-drag" style={{ minHeight: 64, padding: "12px 24px", borderBottom: "var(--hairline)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 12 }}>
+        <button type="button" className="titlebar-nodrag" onClick={onBack} aria-label={locale === "ko" ? "목록으로" : "Back to list"} style={{ width: 32, height: 32, borderRadius: 8, border: "1px solid var(--paper-edge)", background: "var(--paper-2)", cursor: "pointer", color: "var(--ink)" }}>
+          ‹
+        </button>
+        <span style={{ width: 38, height: 38, borderRadius: 11, background: "var(--accent-soft)", color: "var(--accent)", display: "grid", placeItems: "center" }}>
+          <IconLayers size={18} />
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 18 }}>{name}</h1>
+          <p style={{ margin: "3px 0 0", color: "var(--muted-deep)", fontSize: 11.5 }}>
+            {locale === "ko" ? "Hub 원본과 분리된 이 사용자의 경력 프로필" : "This user's career profile, separate from the Hub original"}
+          </p>
+        </div>
+        <span style={{ padding: "4px 8px", borderRadius: 999, border: "1px solid var(--accent)", color: "var(--accent)", fontSize: 10, fontWeight: 750 }}>
+          {profile.entityKind === "team" ? (locale === "ko" ? "대여 팀" : "Borrowed team") : (locale === "ko" ? "대여 에이전트" : "Borrowed agent")}
+        </span>
+      </header>
+
+      <section style={{ maxWidth: 980, margin: "22px auto 48px", padding: "0 24px", display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ padding: 18, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)" }}>
+          <h2 style={{ margin: 0, fontSize: 14 }}>{locale === "ko" ? "이 사용자에게 속하는 정보" : "Information owned by this user"}</h2>
+          {tagline && <p style={{ margin: "8px 0 0", color: "var(--ink-soft)", fontSize: 12.5, lineHeight: 1.6 }}>{tagline}</p>}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginTop: 14 }}>
+            {[
+              [locale === "ko" ? "실행 횟수" : "Runs", String(profile.useCount)],
+              [locale === "ko" ? "저장된 경험" : "Saved experience", String(profile.memoryCount)],
+              [locale === "ko" ? "지도 관계" : "Map relations", String(profile.relationCount)],
+              [locale === "ko" ? "마지막 실행" : "Last run", formatDate(profile.lastUsedAt)],
+            ].map(([label, value]) => (
+              <div key={label} style={{ padding: 12, borderRadius: 10, background: "var(--paper-2)", border: "1px solid var(--paper-edge)" }}>
+                <div style={{ color: "var(--muted-deep)", fontSize: 10.5 }}>{label}</div>
+                <strong style={{ display: "block", marginTop: 5, fontSize: 12.5 }}>{value}</strong>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ padding: 18, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)" }}>
+          <h2 style={{ margin: 0, fontSize: 14 }}>{locale === "ko" ? "실제 실행 설정" : "Actual runtime settings"}</h2>
+          {profile.latestRuntime ? (
+            <dl style={{ margin: "14px 0 0", display: "grid", gridTemplateColumns: "110px 1fr", gap: "8px 12px", fontSize: 12 }}>
+              <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "실행기" : "Provider"}</dt><dd style={{ margin: 0 }}>{profile.latestRuntime.provider}</dd>
+              <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "모델" : "Model"}</dt><dd style={{ margin: 0 }}>{profile.latestRuntime.modelId}</dd>
+              <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "추론 강도" : "Effort"}</dt><dd style={{ margin: 0 }}>{profile.latestRuntime.effort}</dd>
+              <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "선택 방식" : "Selection"}</dt><dd style={{ margin: 0 }}>{profile.latestRuntime.source}</dd>
+            </dl>
+          ) : (
+            <p style={{ margin: "10px 0 0", color: "var(--muted-deep)", fontSize: 12 }}>
+              {locale === "ko" ? "이 사용자 범위에서 확인된 실행 설정이 아직 없습니다." : "No runtime setting has been observed in this user's scope yet."}
+            </p>
+          )}
+        </div>
+
+        {profile.hasQuarantinedDeviceHistory && (
+          <div role="status" style={{ padding: 14, border: "1px solid var(--amber-deep)", borderRadius: "var(--radius-md)", background: "var(--paper)", color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.55 }}>
+            {locale === "ko"
+              ? "로그인 전에 이 기기에 쌓인 기록이 있지만, 현재 계정의 소유물로 자동 귀속하지 않았습니다."
+              : "This device has pre-login history, but it was not automatically claimed by the current account."}
+          </div>
+        )}
+
+        <div>
+          <div style={{ marginBottom: 10 }}>
+            <h2 style={{ margin: 0, fontSize: 14 }}>{locale === "ko" ? "메모리 · 경험 지도" : "Memory · experience map"}</h2>
+            <p style={{ margin: "5px 0 0", color: "var(--muted-deep)", fontSize: 11.5 }}>
+              {locale === "ko"
+                ? "원 제작자의 프롬프트·매니페스트가 아니라, 이 사용자가 실행하며 만든 개인 경험만 표시합니다."
+                : "This shows only experience created by this user's runs, never the origin author's prompt or manifest."}
+            </p>
+          </div>
+          <AgentOntologyGraphView
+            summary={null}
+            graphSnapshot={graph}
+            hub={null}
+            agentName={name}
+            locale={locale}
+            graphLoading={loading}
+            graphError={failed}
+          />
+        </div>
+      </section>
     </div>
   );
 }

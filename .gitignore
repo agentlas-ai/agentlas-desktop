@@ -138,6 +138,7 @@ test-results/
 **/test-*.ts
 **/test-*.mjs
 **/test-*.cjs
+!scripts/test-borrowed-agent-careers-v76.cjs
 **/test_*.sh
 **/*-smoke.ts
 **/*-smoke.mjs

@@ -10,10 +10,11 @@ import path from "node:path";
 import { app } from "electron";
 import { publicAgentVisibility } from "../agents/policy";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
+import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-member-cells";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 75;
+const SCHEMA_VERSION = 78;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -82,13 +83,6 @@ function tableExists(db: Database.Database, table: string): boolean {
   );
 }
 
-interface FirmOrgNodeMigrationShape {
-  agentSlug?: string | null;
-  agentId?: string | null;
-  role?: string | null;
-  reportsTo?: string | null;
-}
-
 /**
  * Read the persisted agent-route source map (userData/agent-routes.json) without
  * importing the routes module — the migration must stay self-contained and must
@@ -114,21 +108,19 @@ function readAgentRouteSourcesForMigration(): Map<string, string> {
 }
 
 /**
- * v75 · Member-cell materialization (unified, no opt-in).
+ * Reconcile durable member cells for every locally owned team.
  *
- * Team org-chart members are display-only nodes (empty agentId, no
- * installed_agents row), so Experience/chips — which FK installed_agents(id) —
- * cannot attach to them. Promote every LOCAL-OWNED team's empty-agentId org
- * members into first-class installed_agents rows, KEY-PRESERVED (id = the
- * node's agentSlug) so pre-existing slug-keyed member memories link
- * automatically. Additive, idempotent, rollback-safe, fail-closed on a missing
- * slug (never orphan). Hub-borrowed teams are excluded (ownership boundary);
- * existing orchestrator/team-UUID experience is never retroactively moved.
+ * v75 originally ran this only during one schema transition. That left every
+ * team imported after the transition with display-only children. The writer
+ * now materializes members transactionally, and this boot projection repairs
+ * rows produced by older binaries or interrupted restores. Hub-borrowed teams
+ * remain excluded because their workers need Hub asset/release identities, not
+ * locally minted installed-agent ownership.
  */
-function materializeTeamMemberCellsV75(db: Database.Database): void {
+function reconcileLocalTeamMemberCells(db: Database.Database): void {
   if (!tableExists(db, "firms") || !tableExists(db, "installed_agents")) return;
   const agentColumns = new Set(schemaColumns(db, "installed_agents").map((column) => column.name));
-  if (!agentColumns.has("parent_team_id")) return; // column add failed → do nothing
+  if (!agentColumns.has("parent_team_id")) return;
 
   const routeSources = readAgentRouteSourcesForMigration();
   const isBorrowedCeo = (ceoAgentId: string): boolean => {
@@ -137,77 +129,40 @@ function materializeTeamMemberCellsV75(db: Database.Database): void {
   };
 
   const firms = db
-    .prepare("SELECT id, ceo_agent_id, org_chart_json FROM firms")
-    .all() as Array<{ id: string; ceo_agent_id: string; org_chart_json: string }>;
+    .prepare("SELECT id, slug, ceo_agent_id, org_chart_json, installed_at FROM firms")
+    .all() as Array<{
+      id: string;
+      slug: string;
+      ceo_agent_id: string;
+      org_chart_json: string;
+      installed_at: string;
+    }>;
   if (firms.length === 0) return;
 
-  const findRow = db.prepare("SELECT id, parent_team_id FROM installed_agents WHERE id = ? LIMIT 1");
-  const findBySlug = db.prepare("SELECT id FROM installed_agents WHERE slug = ? LIMIT 1");
-  const insertMember = db.prepare(
-    `INSERT INTO installed_agents
-       (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
-        env_requirements_json, preferred_backend, trust_grade, installed_at, tone,
-        builtin, role, visibility, entity_kind, parent_team_id)
-     VALUES
-       (@id, @slug, @name, @name_en, @tagline, @tagline_en, '', '[]',
-        '[]', NULL, 'unknown', @installed_at, 'blue',
-        0, @role, 'visible', 'agent', @parent_team_id)`,
-  );
-  const markMembership = db.prepare(
-    "UPDATE installed_agents SET parent_team_id = ? WHERE id = ? AND parent_team_id IS NULL",
-  );
   const updateFirmChart = db.prepare("UPDATE firms SET org_chart_json = ? WHERE id = ?");
-  const now = new Date().toISOString();
 
   for (const firm of firms) {
-    if (isBorrowedCeo(firm.ceo_agent_id)) continue; // C4: borrowed teams are never materialized.
+    if (isBorrowedCeo(firm.ceo_agent_id)) continue;
 
-    let chart: FirmOrgNodeMigrationShape[];
+    let chart: MaterializableFirmNode[];
     try {
       const parsed = JSON.parse(firm.org_chart_json);
       if (!Array.isArray(parsed)) continue;
-      chart = parsed as FirmOrgNodeMigrationShape[];
+      chart = parsed as MaterializableFirmNode[];
     } catch {
-      continue; // Unparseable chart — fail closed, never touch this firm.
+      continue;
     }
 
-    let changed = false;
-    for (const node of chart) {
-      const existingAgentId = typeof node.agentId === "string" ? node.agentId.trim() : "";
-      if (existingAgentId) continue; // Already resolved (e.g. marketplace-installed member).
-      const slug = typeof node.agentSlug === "string" ? node.agentSlug.trim() : "";
-      if (!slug) continue; // C1 fail-closed: no key → cannot materialize, never orphan.
-
-      const existing = findRow.get(slug) as { id: string; parent_team_id: string | null } | undefined;
-      if (existing) {
-        // A row already owns this id (prior run, or a standalone that shares the
-        // slug). Link the node to it and mark membership only if unclaimed.
-        if (existing.parent_team_id == null) markMembership.run(firm.id, slug);
-        node.agentId = slug;
-        changed = true;
-        continue;
-      }
-      // Guard the UNIQUE(slug) constraint: another agent already holds this slug
-      // under a different id. Linking to a foreign id would orphan the member's
-      // slug-keyed memory, so skip (fail-closed) rather than mint a mismatch.
-      if (findBySlug.get(slug)) continue;
-
-      insertMember.run({
-        id: slug,
-        slug,
-        name: (node.role && String(node.role).trim()) || slug,
-        name_en: (node.role && String(node.role).trim()) || slug,
-        tagline: "",
-        tagline_en: "",
-        installed_at: now,
-        role: node.role ? String(node.role) : null,
-        parent_team_id: firm.id,
-      });
-      node.agentId = slug;
-      changed = true;
-    }
-
-    if (changed) updateFirmChart.run(JSON.stringify(chart), firm.id);
+    const repaired = materializeTeamMemberCells(db, {
+      firmId: firm.id,
+      firmSlug: firm.slug,
+      ceoAgentId: firm.ceo_agent_id,
+      installedAt: firm.installed_at,
+      orgChart: chart,
+      preserveLegacySlugIds: true,
+    });
+    const serialized = JSON.stringify(repaired);
+    if (serialized !== firm.org_chart_json) updateFirmChart.run(serialized, firm.id);
   }
 }
 
@@ -3378,16 +3333,152 @@ export function initStore(): void {
         "CREATE INDEX IF NOT EXISTS idx_installed_agents_parent_team ON installed_agents(parent_team_id) WHERE parent_team_id IS NOT NULL",
       );
     }
-    try {
-      materializeTeamMemberCellsV75(_db);
-    } catch (error) {
-      // Materialization is a repair projection over additive rows; a failure
-      // must never abort the whole schema bootstrap. The column + index are the
-      // durable contract, and the next boot retries the row promotion.
-      console.warn(
-        `[migration] v75 member-cell materialization deferred: ${error instanceof Error ? error.message : "unknown"}`,
+  }
+
+  // v76: Hub-borrowed agents are not installed assets. Keep only the current
+  // Agentlas owner's private career facts (usage + last actual runtime) in a
+  // separate owner partition. Pre-owner v74 usage is quarantined as
+  // device-local and is never silently claimed by a later login.
+  if (userVersion < 76) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS borrowed_agent_careers (
+        owner_scope_key TEXT NOT NULL,
+        entity_kind TEXT NOT NULL CHECK(entity_kind IN ('agent','team')),
+        slug TEXT NOT NULL,
+        first_used_at TEXT NOT NULL,
+        last_used_at TEXT NOT NULL,
+        use_count INTEGER NOT NULL DEFAULT 0 CHECK(use_count >= 0),
+        latest_runtime_json TEXT,
+        name_en TEXT,
+        name_ko TEXT,
+        tagline_en TEXT,
+        tagline_ko TEXT,
+        PRIMARY KEY(owner_scope_key, entity_kind, slug)
       );
+      CREATE INDEX IF NOT EXISTS idx_borrowed_agent_careers_owner_recent
+        ON borrowed_agent_careers(owner_scope_key, last_used_at DESC);
+
+      CREATE TABLE IF NOT EXISTS borrowed_agent_career_runs (
+        owner_scope_key TEXT NOT NULL,
+        entity_kind TEXT NOT NULL CHECK(entity_kind IN ('agent','team')),
+        slug TEXT NOT NULL,
+        run_id_hash TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        PRIMARY KEY(owner_scope_key, entity_kind, slug, run_id_hash),
+        FOREIGN KEY(owner_scope_key, entity_kind, slug)
+          REFERENCES borrowed_agent_careers(owner_scope_key, entity_kind, slug)
+          ON DELETE CASCADE
+      );
+    `);
+
+    if (tableExists(_db, "agent_usage") && tableExists(_db, "installed_agents")) {
+      _db.exec(`
+        INSERT OR IGNORE INTO borrowed_agent_careers (
+          owner_scope_key, entity_kind, slug, first_used_at, last_used_at,
+          use_count, latest_runtime_json
+        )
+        SELECT 'borrowed-owner:device-local', 'agent', usage.agent_key,
+               usage.first_used_at, usage.last_used_at, usage.use_count, NULL
+          FROM agent_usage usage
+          LEFT JOIN installed_agents installed ON installed.id = usage.agent_key
+         WHERE installed.id IS NULL
+           AND usage.agent_key <> ''
+           AND length(usage.agent_key) <= 120;
+      `);
     }
+  }
+
+  // v77: borrowed careers are keyed by immutable Hub definition + release, not
+  // a mutable slug. v76 rows cannot prove either identity, so preserve them in
+  // explicitly quarantined legacy tables instead of silently assigning them to
+  // a current package release.
+  if (userVersion < 77) {
+    const careerColumns = tableExists(_db, "borrowed_agent_careers")
+      ? new Set(schemaColumns(_db, "borrowed_agent_careers").map((column) => column.name))
+      : new Set<string>();
+    if (careerColumns.size > 0 && !careerColumns.has("agent_definition_id")) {
+      _db.exec(`
+        DROP INDEX IF EXISTS idx_borrowed_agent_careers_owner_recent;
+        DROP TABLE IF EXISTS borrowed_agent_career_runs_v76_legacy;
+        DROP TABLE IF EXISTS borrowed_agent_careers_v76_legacy;
+        ALTER TABLE borrowed_agent_careers RENAME TO borrowed_agent_careers_v76_legacy;
+        ALTER TABLE borrowed_agent_career_runs RENAME TO borrowed_agent_career_runs_v76_legacy;
+      `);
+    }
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS borrowed_agent_careers (
+        owner_scope_key TEXT NOT NULL,
+        entity_kind TEXT NOT NULL CHECK(entity_kind IN ('agent','team')),
+        agent_definition_id TEXT NOT NULL,
+        agent_release_id TEXT NOT NULL,
+        component_id TEXT NOT NULL DEFAULT '',
+        slug TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        first_used_at TEXT NOT NULL,
+        last_used_at TEXT NOT NULL,
+        use_count INTEGER NOT NULL DEFAULT 0 CHECK(use_count >= 0),
+        latest_runtime_json TEXT,
+        name_en TEXT,
+        name_ko TEXT,
+        tagline_en TEXT,
+        tagline_ko TEXT,
+        PRIMARY KEY(
+          owner_scope_key, entity_kind, agent_definition_id,
+          agent_release_id, component_id
+        )
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_borrowed_agent_careers_owner_memory
+        ON borrowed_agent_careers(owner_scope_key, memory_key);
+      CREATE INDEX IF NOT EXISTS idx_borrowed_agent_careers_owner_recent
+        ON borrowed_agent_careers(owner_scope_key, last_used_at DESC);
+
+      CREATE TABLE IF NOT EXISTS borrowed_agent_career_runs (
+        owner_scope_key TEXT NOT NULL,
+        entity_kind TEXT NOT NULL CHECK(entity_kind IN ('agent','team')),
+        agent_definition_id TEXT NOT NULL,
+        agent_release_id TEXT NOT NULL,
+        component_id TEXT NOT NULL DEFAULT '',
+        run_id_hash TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        PRIMARY KEY(
+          owner_scope_key, entity_kind, agent_definition_id,
+          agent_release_id, component_id, run_id_hash
+        ),
+        FOREIGN KEY(
+          owner_scope_key, entity_kind, agent_definition_id,
+          agent_release_id, component_id
+        )
+          REFERENCES borrowed_agent_careers(
+            owner_scope_key, entity_kind, agent_definition_id,
+            agent_release_id, component_id
+          )
+          ON DELETE CASCADE
+      );
+    `);
+  }
+
+  // v78: exact Hub runtime bundles carry their validated bilingual display
+  // snapshot into the owner-scoped career row. A just-completed run therefore
+  // has a real name immediately, without inventing one from the slug or waiting
+  // for the next bookmark synchronization.
+  if (userVersion < 78 && tableExists(_db, "borrowed_agent_careers")) {
+    const columns = new Set(schemaColumns(_db, "borrowed_agent_careers").map((column) => column.name));
+    if (!columns.has("name_en")) _db.exec("ALTER TABLE borrowed_agent_careers ADD COLUMN name_en TEXT");
+    if (!columns.has("name_ko")) _db.exec("ALTER TABLE borrowed_agent_careers ADD COLUMN name_ko TEXT");
+    if (!columns.has("tagline_en")) _db.exec("ALTER TABLE borrowed_agent_careers ADD COLUMN tagline_en TEXT");
+    if (!columns.has("tagline_ko")) _db.exec("ALTER TABLE borrowed_agent_careers ADD COLUMN tagline_ko TEXT");
+  }
+
+  // The local-team writer now materializes members in the same transaction as
+  // the firm. Reconcile on every boot as a repair projection so teams created
+  // by older binaries, restores, or interrupted imports cannot remain
+  // display-only forever.
+  try {
+    _db.transaction(() => reconcileLocalTeamMemberCells(_db!))();
+  } catch (error) {
+    console.warn(
+      `[migration] v77 member-cell reconciliation deferred: ${error instanceof Error ? error.message : "unknown"}`,
+    );
   }
 
   // Run on every boot as well as the v52 upgrade. A hard process exit can

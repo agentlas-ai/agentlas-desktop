@@ -55,6 +55,11 @@ process.env.AGENTLAS_E2E = "1";
     source.pragma("query_only = ON");
     const beforeVersion = Number(source.pragma("user_version", { simple: true }));
     const before = snapshotCounts(source);
+    const beforeUserActionCounts = {
+      promotions: countIfPresent(source, "experience_promotion_receipts"),
+      exports: countIfPresent(source, "experience_export_intents"),
+      cloudUploads: countIfPresent(source, "experience_cloud_uploads"),
+    };
     await source.backup(storePath);
     source.close();
     source = null;
@@ -71,8 +76,13 @@ process.env.AGENTLAS_E2E = "1";
     const after = snapshotCounts(migrated);
 
     assert.ok(beforeVersion < afterVersion, `expected an upgrade, got v${beforeVersion} -> v${afterVersion}`);
-    assert.equal(afterVersion, 60, "the current Desktop store target must be v60");
-    assert.deepEqual(after, before, "existing agent, memory, and run ledgers must survive the copy-only migration");
+    assert.equal(afterVersion, 78, "the current Desktop store target must be v78");
+    assert.ok(
+      after.installedAgents >= before.installedAgents,
+      "the migration must preserve existing agents and may only add deterministic local-team member cells",
+    );
+    assert.equal(after.memoryEntries, before.memoryEntries, "existing memory rows must survive the copy-only migration");
+    assert.equal(after.runEvents, before.runEvents, "existing run-event rows must survive the copy-only migration");
 
     const requiredTables = [
       "experience_packs",
@@ -80,12 +90,29 @@ process.env.AGENTLAS_E2E = "1";
       "experience_auto_intake_receipts",
       "taste_draft_candidates",
       "installed_agent_hub_bindings",
+      "borrowed_agent_careers",
+      "borrowed_agent_career_runs",
     ];
     for (const table of requiredTables) {
       assert.ok(
         migrated.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table),
         `missing v60 table ${table}`,
       );
+    }
+    const careerColumns = new Set(
+      migrated.prepare("PRAGMA table_info(borrowed_agent_careers)").all().map((column) => String(column.name)),
+    );
+    for (const column of [
+      "agent_definition_id",
+      "agent_release_id",
+      "component_id",
+      "memory_key",
+      "name_en",
+      "name_ko",
+      "tagline_en",
+      "tagline_ko",
+    ]) {
+      assert.ok(careerColumns.has(column), `missing v78 borrowed career column ${column}`);
     }
 
     const routes = require("../dist/electron/agents/routes.js");
@@ -101,9 +128,9 @@ process.env.AGENTLAS_E2E = "1";
       exports: countIfPresent(migrated, "experience_export_intents"),
       cloudUploads: countIfPresent(migrated, "experience_cloud_uploads"),
     };
-    assert.equal(experienceCounts.promotions, 0, "legacy reconciliation must not auto-promote");
-    assert.equal(experienceCounts.exports, 0, "legacy reconciliation must not auto-export");
-    assert.equal(experienceCounts.cloudUploads, 0, "legacy reconciliation must not auto-upload");
+    assert.equal(experienceCounts.promotions, beforeUserActionCounts.promotions, "legacy reconciliation must not auto-promote");
+    assert.equal(experienceCounts.exports, beforeUserActionCounts.exports, "legacy reconciliation must not auto-export");
+    assert.equal(experienceCounts.cloudUploads, beforeUserActionCounts.cloudUploads, "legacy reconciliation must not auto-upload");
 
     const agentWithMemory = migrated.prepare(`
       SELECT memory.agent_id, COUNT(*) AS count
@@ -138,6 +165,7 @@ process.env.AGENTLAS_E2E = "1";
       beforeVersion,
       afterVersion,
       preservedCounts: after,
+      materializedLocalTeamMemberCells: after.installedAgents - before.installedAgents,
       learningSummary,
       definitionReconciliation,
       experienceReconciliation,

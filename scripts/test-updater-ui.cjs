@@ -218,8 +218,10 @@ async function main() {
     await lifecyclePage.goto(`${baseUrl}/dashboard.html`, { waitUntil: "domcontentloaded" });
     await lifecyclePage.getByText("업데이트 다운로드 중 · 42%", { exact: true }).waitFor();
     await lifecyclePage.evaluate(() => window.__updaterUi.emit({ status: "downloaded", version: "0.7.29", progress: 100 }));
-    await lifecyclePage.getByText("새 버전 준비됨 · v0.7.29", { exact: true }).waitFor();
-    await lifecyclePage.getByRole("button", { name: "재시작 업데이트" }).click();
+    // The downloaded update card is intentionally compact: a short CTA with no
+    // version string, so the sidebar box never grows tall or breaks.
+    await lifecyclePage.getByText("업데이트 준비됨", { exact: true }).waitFor();
+    await lifecyclePage.getByRole("button", { name: "재시작" }).click();
     await lifecyclePage.getByText("안전한 업데이트 적용 중 · v0.7.29", { exact: true }).waitFor();
     assert.deepEqual(await lifecyclePage.evaluate(() => window.__updaterUi.calls), ["install"]);
     await lifecyclePage.screenshot({ path: path.join(outDir, "installing-after-explicit-click.png"), fullPage: true });

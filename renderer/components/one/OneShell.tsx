@@ -763,6 +763,19 @@ export function OneShell() {
           setConversation(null);
           setReceipt(detail?.latestReceipt ?? null);
           router.replace(`/one?task=${encodeURIComponent(promotedTask.id)}`);
+        } else if (chat && chat.originSurface !== "one") {
+          // One's home only ever renders One-surface conversations. A deep link
+          // to a Work chat — e.g. an automation run session, which is always
+          // stored with origin_surface 'work' — must open in the Work chat
+          // surface instead of leaking Work history into One. The recent-chat
+          // list above already filters by originSurface; this closes the
+          // asymmetric single-chat deep-link path that let "보기" surface a Work
+          // automation transcript inside One.
+          selectedConversationIdRef.current = null;
+          setSelected(null);
+          setConversation(null);
+          setReceipt(null);
+          router.replace(`/chat?id=${encodeURIComponent(chat.id)}`);
         } else {
           setSelected(null);
           setConversation(chat);

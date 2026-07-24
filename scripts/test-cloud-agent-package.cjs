@@ -43,6 +43,12 @@ function writeAgent(root, extra = {}) {
         type: "agent",
         name: "Test Agent",
         summary: "Routes test package requests to the test agent.",
+        localized: {
+          titleEn: "Test Agent",
+          titleKo: "테스트 에이전트",
+          descriptionEn: "Routes test package requests to the test agent.",
+          descriptionKo: "테스트 패키지 요청을 테스트 에이전트로 전달합니다.",
+        },
         capabilities: ["test_package"],
         routing_status: "routing_ready",
       },
@@ -543,6 +549,25 @@ function packageHash(files) {
     assert.equal(clean.manifest.routingCard.schemaVersion, "routing-card/2.0");
     assert.ok(clean.manifest.packageHash.length >= 32);
     assert.ok(fs.existsSync(clean.bundlePath));
+
+    const koreanOnlyPublicRoot = path.join(tempDir, "korean-only-public-agent");
+    writeAgent(koreanOnlyPublicRoot);
+    const koreanOnlyCardPath = path.join(koreanOnlyPublicRoot, ".agentlas", "routing-card.json");
+    const koreanOnlyCard = JSON.parse(fs.readFileSync(koreanOnlyCardPath, "utf8"));
+    koreanOnlyCard.localized.titleEn = "한국어 이름";
+    koreanOnlyCard.localized.descriptionEn = "영어 화면에 노출되면 안 되는 한국어 설명";
+    fs.writeFileSync(koreanOnlyCardPath, JSON.stringify(koreanOnlyCard, null, 2) + "\n", "utf8");
+    const koreanOnlyPublic = await packageAndReviewCloudAgent({
+      rootPath: koreanOnlyPublicRoot,
+      dryRun: true,
+      reviewMode: "static-only",
+      visibility: "marketplace",
+    });
+    assert.equal(koreanOnlyPublic.status, "blocked");
+    assert.ok(
+      koreanOnlyPublic.review.findings.some((finding) => finding.id === "localized-metadata-required"),
+      "a Korean-only public package must be blocked before upload instead of relying on an English UI fallback",
+    );
 
     const stableRoot = path.join(tempDir, "stable-agent-folder");
     writeAgent(stableRoot, {

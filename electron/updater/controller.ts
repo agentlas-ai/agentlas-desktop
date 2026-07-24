@@ -1240,6 +1240,42 @@ export class DesktopUpdaterController {
       return;
     }
     if (comparison !== null && comparison >= 0) {
+      // The post-install continuity gate is one-shot: it is only meaningful on
+      // the first boot after the swap, before normal use mutates the database.
+      // A journal that already carries the `recovery-required` verdict means a
+      // previous boot ran that gate, surfaced recovery to the user, and left the
+      // SQLite recovery copy on disk. Re-verifying the now-drifted live database
+      // against the frozen pre-install snapshot can only fail — ordinary use
+      // legitimately changes row counts and per-row identities — which would pin
+      // recovery-required forever and permanently block every future update
+      // (init() never arms the scheduled feed check while recovery-required).
+      // The target release is installed and the app has relaunched successfully,
+      // so resolve the stale hold instead of re-deriving it: keep the recovery
+      // copy on disk, clear the journal, and let the feed check resume. A newer
+      // clean release then supersedes it through the ordinary install path.
+      if (journal.phase === "recovery-required") {
+        this.logger.warn("[updater] resolved a stale post-install recovery hold on a successful target relaunch");
+        if (!this.clearJournal()) {
+          // Never claim resolution we could not durably persist; a surviving
+          // journal must keep surfacing recovery until it can be cleared.
+          this.publish({
+            status: "recovery-required",
+            version: journal.targetVersion,
+            code: "continuity-violation",
+            error: safeMessage("continuity-violation"),
+            canRetry: false,
+            recoveryBackupAvailable: fs.existsSync(journal.continuity.backupPath),
+          });
+          return;
+        }
+        this.blockedTargetVersion = null;
+        this.blockedReasonCode = "install-not-applied";
+        this.blockedDiagnostic = undefined;
+        this.blockedNativeInstallFailures = 0;
+        this.blockedRetryAfter = undefined;
+        this.publish({ status: "updated", version: journal.targetVersion });
+        return;
+      }
       const verification = await this.verifyJournalContinuity(journal.continuity);
       if (!verification.ok) {
         this.writeJournal({ ...journal, phase: "recovery-required", reasonCode: "continuity-violation" });

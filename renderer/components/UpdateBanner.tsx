@@ -117,15 +117,14 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
         <>
           <span className="sidenav-update-dot" aria-hidden />
           <span className="sidenav-update-copy">
-            <strong>{collapsed ? `v${state.version ?? "?"}` : t("update.ready", { version: state.version ?? "?" })}</strong>
-            {!collapsed && <span>{t("update.restart_now")}</span>}
+            <strong>{collapsed ? "↑" : t("update.ready_compact")}</strong>
           </span>
           <button
             onClick={() => void install()}
             className="sidenav-update-action"
             title={t("update.restart_now")}
           >
-            {collapsed ? "↻" : t("update.restart_now")}
+            {collapsed ? "↻" : t("update.restart_compact")}
           </button>
           {!collapsed && (
             <button
@@ -142,7 +141,7 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
         <>
           <span className="sidenav-update-dot" aria-hidden />
           <span className="sidenav-update-copy">
-            <strong>{collapsed ? `v${state.version ?? "?"}` : attentionCopy}</strong>
+            <strong>{collapsed ? "↑" : attentionCopy}</strong>
           </span>
           {!isInstalling && (
             (canRevealRecovery || state.canRetry) && (

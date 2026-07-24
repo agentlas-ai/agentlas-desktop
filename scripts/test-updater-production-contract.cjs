@@ -823,6 +823,58 @@ async function continuityViolationSurfacesRecovery() {
   fs.rmSync(layout.root, { recursive: true, force: true });
 }
 
+async function staleRecoveryHoldResolvesOnRelaunchWithoutReverifying() {
+  // Regression for the permanent-brick class: the post-install continuity gate is
+  // one-shot (valid only on the first boot, before normal use mutates the DB). A
+  // journal already marked recovery-required must NOT be re-verified against the
+  // drifted live database on later boots — that always fails, pins the app in
+  // recovery-required, and blocks every future update because init() never arms
+  // the feed check while recovery-required. It must instead self-resolve.
+  const layout = makeLayout();
+  const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
+  const first = makeController(layout, new FakeUpdater({ updateInfo }));
+  await first.controller.init();
+  await first.controller.check();
+  await first.controller.install();
+  const backupPath = first.continuity.snapshot().backupPath;
+  first.controller.dispose();
+
+  const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
+
+  // First relaunch on the freshly installed target: the one-shot gate fails and
+  // surfaces recovery once, persisting phase "recovery-required" to disk.
+  const surfaced = makeController(layout, new FakeUpdater(), {
+    currentVersion: "0.7.29",
+    verifyContinuity: async () => ({ ok: false, violations: ["table-identity-changed:projects"] }),
+  });
+  await surfaced.controller.init();
+  assert.equal(surfaced.controller.getState().status, "recovery-required");
+  assert.equal(JSON.parse(fs.readFileSync(journalPath, "utf8")).phase, "recovery-required");
+  surfaced.controller.dispose();
+  assert.equal(fs.existsSync(backupPath), true, "the SQLite recovery copy is preserved on disk");
+
+  // Second relaunch: the target is installed and the app boots again. Re-verifying
+  // the drifted DB would fail forever; the stale hold must resolve WITHOUT calling
+  // the continuity verifier, clear the journal, and unblock updates.
+  let reverifications = 0;
+  const feed = new FakeUpdater();
+  const resumed = makeController(layout, feed, {
+    currentVersion: "0.7.29",
+    verifyContinuity: async () => {
+      reverifications += 1;
+      return { ok: false, violations: ["row-count-regressed:chats"] };
+    },
+  });
+  await resumed.controller.init();
+  assert.equal(reverifications, 0, "a stale recovery hold must not re-verify the drifted live database");
+  assert.equal(resumed.controller.getState().status, "updated", "the stale hold resolves so future updates can resume");
+  assert.equal(fs.existsSync(journalPath), false, "resolving the stale hold clears the durable install journal");
+  assert.equal(fs.existsSync(backupPath), true, "the recovery copy is not deleted when auto-resolving");
+  assert.equal(feed.checkCount, 0, "startup reconciliation must not contact the update feed");
+  resumed.controller.dispose();
+  fs.rmSync(layout.root, { recursive: true, force: true });
+}
+
 async function compatibilityBoundariesFailBeforeDownload() {
   const cases = [
     { label: "missing metadata", info: { version: "0.7.29" }, options: {}, code: "compatibility-metadata-missing" },
@@ -1766,6 +1818,7 @@ async function downloadedUpdateInstallsAutomaticallyOnNormalQuit() {
   await realViolationSurvivesAccountRestoreAndEveryRetry();
   await accountRestoreRetryIsStrictlyBounded();
   await continuityViolationSurfacesRecovery();
+  await staleRecoveryHoldResolvesOnRelaunchWithoutReverifying();
   await compatibilityBoundariesFailBeforeDownload();
   await continuityBackupFailureRemainsVisibleAndRetryable();
   await transientFailuresAndConcurrencyPreserveTruth();

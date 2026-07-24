@@ -186,6 +186,16 @@ function firmMemoryTurnId(p: FirmRunParams, nodeId: string, phase: NodeTurn["pha
   return `firm:run:${p.req.runId ?? "direct"}:chat:${p.chat.id}:node:${nodeId}:phase:${phase}`;
 }
 
+function firmTeamMemoryRoute(
+  p: FirmRunParams,
+  memberAgentId: string,
+): NonNullable<Parameters<typeof curateReply>[1]["teamRun"]> {
+  return {
+    orchestratorAgentId: p.ceoAgent.id,
+    memberAgentId: memberAgentId === p.ceoAgent.id ? null : memberAgentId,
+  };
+}
+
 /** 간단한 동시성 풀 — items를 cap개씩 병렬 실행. */
 async function parallelCap<I, O>(
   items: I[],
@@ -572,6 +582,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         runId: p.req.runId,
         nodeId: node.id,
         cwdAtRequest: workingFolder,
+        teamRun: firmTeamMemoryRoute(p, memoryOwnerId),
         ...(node.agentId
           ? {
               experienceIntake: {

@@ -121,6 +121,11 @@ function cleanString(value: unknown, fallback = ""): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
+function englishListingText(value: unknown, fallback: string): string {
+  const clean = cleanString(value);
+  return clean && !/[\uac00-\ud7af]/.test(clean) ? clean : fallback;
+}
+
 function cleanNumber(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
@@ -668,10 +673,13 @@ function marketPublicAgentToListing(raw: Record<string, unknown>): MarketplaceLi
   const slug = cleanString(raw.slug);
   if (!slug) return null;
   const entityKind = cleanString(raw.kind, "agent") === "team" ? "team" : "agent";
-  const titleEn = cleanString(raw.titleEn, cleanString(raw.title, slug));
+  const titleEn = englishListingText(raw.titleEn, englishListingText(raw.title, slug));
   const titleKo = cleanString(raw.titleKo, titleEn);
   const name = titleKo || titleEn || slug;
-  const taglineEn = cleanString(raw.taglineEn, cleanString(raw.tagline, entityKind === "team" ? "Callable Hub team" : "Callable Hub agent"));
+  const taglineEn = englishListingText(
+    raw.taglineEn,
+    englishListingText(raw.tagline, entityKind === "team" ? "Callable Hub team" : "Callable Hub agent"),
+  );
   const taglineKo = cleanString(raw.taglineKo, taglineEn);
   const totalBorrows = cleanNumber(raw.totalBorrows);
   const perCallCredits = cleanNumber(raw.perCallCredits, entityKind === "team" ? 10 : 3);

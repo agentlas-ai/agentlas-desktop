@@ -22,6 +22,12 @@ import {
 } from "./project-artifacts";
 import { getDb } from "../store/db";
 import {
+  activeHubMemoryNestPaths,
+  ensureActiveHubMemoryNest,
+  normalizeHubMemorySlug,
+  readableActiveHubMemoryNestRoots,
+} from "../agents/hub-memory-nest";
+import {
   CAREER_GRAPH_CONFIG_FILE,
   CAREER_GRAPH_DB_FILE,
   CAREER_GRAPH_INBOX_DIR,
@@ -5221,16 +5227,12 @@ export function appendSoulMemory(
 //   ~/.agentlas/networking/hub-agents/<slug>/memory/project-soul-memory.md
 // 프로젝트 격리 유지: 이 레거시 helper도 agent_repo 용도 외에는 호출하면 안 된다.
 function hubAgentNestSoulPath(slug: string): string | null {
-  // Hephaestus 대여 엔진의 _norm_slug와 반드시 동일한 정규화.
-  // (engine: re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-"))
-  const norm = slug.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  if (!norm) return null;
-  return path.join(os.homedir(), ".agentlas", "networking", "hub-agents", norm, "memory", PROJECT_SOUL_FILE);
+  const memoryRoot = ensureActiveHubMemoryNest(slug);
+  return memoryRoot ? path.join(memoryRoot, PROJECT_SOUL_FILE) : null;
 }
 
 function normalizedHubAgentSlug(slug: string): string | null {
-  const normalized = slug.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  return normalized || null;
+  return normalizeHubMemorySlug(slug);
 }
 
 function stableNestHash(...parts: string[]): string {
@@ -5399,14 +5401,8 @@ export function appendAgentNestExperienceMemory(
   if (items.length === 0) return false;
   const normalizedSlug = normalizedHubAgentSlug(slug);
   if (!normalizedSlug) return false;
-  const memoryDir = path.join(
-    os.homedir(),
-    ".agentlas",
-    "networking",
-    "hub-agents",
-    normalizedSlug,
-    "memory",
-  );
+  const memoryDir = ensureActiveHubMemoryNest(normalizedSlug);
+  if (!memoryDir) return false;
   const dbPath = path.join(memoryDir, "experience.sqlite");
   let db: Database.Database | null = null;
   try {
@@ -5678,15 +5674,9 @@ export function supersedeAgentNestExperienceMemory(
   const normalizedSlug = normalizedHubAgentSlug(slug);
   const sourceIds = [...new Set(sourceMemoryIds.map((id) => id.trim()).filter(Boolean))];
   if (!normalizedSlug || sourceIds.length === 0) return false;
-  const dbPath = path.join(
-    os.homedir(),
-    ".agentlas",
-    "networking",
-    "hub-agents",
-    normalizedSlug,
-    "memory",
-    "experience.sqlite",
-  );
+  const paths = activeHubMemoryNestPaths(normalizedSlug);
+  if (!paths) return false;
+  const dbPath = path.join(paths.writableMemoryRoot, "experience.sqlite");
   let db: Database.Database | null = null;
   try {
     if (!fs.existsSync(dbPath)) return false;
@@ -5772,25 +5762,31 @@ export function agentNestExperienceOwnership(
     if (!entry.isDirectory()) continue;
     const slug = normalizedHubAgentSlug(entry.name);
     if (!slug || slug !== entry.name) continue;
-    const dbPath = path.join(root, entry.name, "memory", "experience.sqlite");
-    let db: Database.Database | null = null;
-    try {
-      const stat = fs.lstatSync(dbPath);
-      if (stat.isSymbolicLink() || !stat.isFile()) continue;
-      db = new Database(dbPath, { readonly: true, fileMustExist: true });
-      const table = db.prepare(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_candidates'",
-      ).get();
-      if (!table) continue;
-      const matches = db.prepare(
-        `SELECT DISTINCT source_memory_id FROM memory_candidates
-          WHERE agent_id = ? AND source_memory_id IN (${placeholders})`,
-      ).all(`hub:${slug}`, ...sourceIds) as Array<{ source_memory_id: string }>;
-      for (const match of matches) ownership[match.source_memory_id]?.push(slug);
-    } catch {
-      // One corrupt/unreadable private cache must not block other agents.
-    } finally {
-      try { db?.close(); } catch { /* best-effort scan */ }
+    for (const memoryRoot of readableActiveHubMemoryNestRoots(slug)) {
+      const dbPath = path.join(memoryRoot, "experience.sqlite");
+      let db: Database.Database | null = null;
+      try {
+        const stat = fs.lstatSync(dbPath);
+        if (stat.isSymbolicLink() || !stat.isFile()) continue;
+        db = new Database(dbPath, { readonly: true, fileMustExist: true });
+        const table = db.prepare(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_candidates'",
+        ).get();
+        if (!table) continue;
+        const matches = db.prepare(
+          `SELECT DISTINCT source_memory_id FROM memory_candidates
+            WHERE agent_id = ? AND source_memory_id IN (${placeholders})`,
+        ).all(`hub:${slug}`, ...sourceIds) as Array<{ source_memory_id: string }>;
+        for (const match of matches) {
+          if (!ownership[match.source_memory_id]?.includes(slug)) {
+            ownership[match.source_memory_id]?.push(slug);
+          }
+        }
+      } catch {
+        // One corrupt/unreadable private cache must not block other agents.
+      } finally {
+        try { db?.close(); } catch { /* best-effort scan */ }
+      }
     }
   }
   for (const sourceId of sourceIds) ownership[sourceId].sort();
@@ -5851,15 +5847,9 @@ export function recordAgentNestExperienceGovernanceRelation(input: {
     .filter((slug) => toOwners.has(slug));
   const written: string[] = [];
   for (const slug of sharedSlugs) {
-    const dbPath = path.join(
-      os.homedir(),
-      ".agentlas",
-      "networking",
-      "hub-agents",
-      slug,
-      "memory",
-      "experience.sqlite",
-    );
+    const paths = activeHubMemoryNestPaths(slug);
+    if (!paths) continue;
+    const dbPath = path.join(paths.writableMemoryRoot, "experience.sqlite");
     let db: Database.Database | null = null;
     try {
       const stat = fs.lstatSync(dbPath);

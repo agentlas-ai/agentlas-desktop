@@ -35,7 +35,14 @@ import { OntologyAtlas } from "@/components/ontology/OntologyAtlas";
 type Locale = "ko" | "en";
 
 export function agentOriginalName(agent: InstalledAgent, locale: Locale): string {
-  return locale === "en" ? agent.nameEn?.trim() || agent.name : agent.name?.trim() || agent.nameEn;
+  if (locale !== "en") return agent.name?.trim() || agent.nameEn?.trim() || agent.slug;
+  const translated = agent.nameEn?.trim();
+  if (translated && !/[\uac00-\ud7af]/.test(translated)) return translated;
+  const slug = agent.slug?.trim();
+  if (!slug || /[\uac00-\ud7af]/.test(slug)) return "Agent";
+  return slug
+    .replace(/[-_]+/g, " ")
+    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
 }
 
 export function agentDisplayName(agent: InstalledAgent, locale: Locale): string {

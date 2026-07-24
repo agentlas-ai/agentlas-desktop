@@ -260,6 +260,10 @@ import {
   unsealExperienceCandidatePublic,
 } from "./experience/store";
 import { listAgentUsageSummary, setAgentBookmark } from "./agents/usage";
+import {
+  getBorrowedAgentOntologyGraph,
+  listBorrowedAgentProfiles,
+} from "./agents/borrowed-profiles";
 import { getExperienceOntologyGraphSnapshot } from "./experience/relation-index";
 import {
   confirmTasteGeneralization,
@@ -2196,6 +2200,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("experience:ontologySummary", (_e, agentId: string) => getExperienceOntologySummary(agentId));
   ipcMain.handle("experience:ontologyGraph", (_e, agentId: string) =>
     getExperienceOntologyGraphSnapshot(agentId));
+  ipcMain.handle("agents:borrowed-profiles", () => listBorrowedAgentProfiles());
+  ipcMain.handle("agents:borrowed-ontology-graph", (_e, profileId: string) =>
+    getBorrowedAgentOntologyGraph(profileId));
   ipcMain.handle("experience:hubProjection", (_e, agentId: string, force?: boolean) =>
     getAgentOntologyHubProjection(agentId, { force: force === true }));
   ipcMain.handle("experience:hubResolveAttach", (_e, agentId: string, approvalId: string, decision: "approve" | "deny") =>

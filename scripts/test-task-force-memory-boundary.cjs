@@ -26,15 +26,18 @@ function event(content, scope = "agent_repo") {
 }
 
 function nestExperienceText(slug) {
-  const file = path.join(
+  const ownerRoot = path.join(
     sandboxHome,
     ".agentlas",
     "networking",
     "hub-agents",
     slug,
-    "memory",
-    "experience.sqlite",
+    "owners",
   );
+  const ownerDirs = fs.existsSync(ownerRoot)
+    ? fs.readdirSync(ownerRoot).filter((entry) => /^owner-[0-9a-f]{64}$/.test(entry))
+    : [];
+  const file = path.join(ownerRoot, ownerDirs[0] ?? "__missing__", "memory", "experience.sqlite");
   let db;
   try {
     db = new Database(file, { readonly: true, fileMustExist: true });

@@ -24,7 +24,11 @@ process.env.HOME = sandboxHome;
 process.env.USERPROFILE = sandboxHome;
 
 function nestDbPath(normSlug) {
-  return path.join(sandboxHome, ".agentlas", "networking", "hub-agents", normSlug, "memory", "experience.sqlite");
+  const ownersRoot = path.join(sandboxHome, ".agentlas", "networking", "hub-agents", normSlug, "owners");
+  if (!fs.existsSync(ownersRoot)) return path.join(ownersRoot, "__missing__", "memory", "experience.sqlite");
+  const ownerDirs = fs.readdirSync(ownersRoot).filter((entry) => /^owner-[0-9a-f]{64}$/.test(entry));
+  assert.ok(ownerDirs.length <= 1, "one active owner partition expected in this isolated test");
+  return path.join(ownersRoot, ownerDirs[0] ?? "__missing__", "memory", "experience.sqlite");
 }
 function readNest(normSlug) {
   const target = nestDbPath(normSlug);
@@ -136,7 +140,7 @@ async function main() {
     curateEvents(
       [
         ev("procedure", "agent_repo", "Client_Confidential_Merger 배포는 테스트 전에 돌려야 한다."),
-        ev("procedure", "agent_repo", "설정은 /Users/mason/Documents/private-client/secrets.yml 에 있다."),
+        ev("procedure", "agent_repo", "설정은 /home/acme/private-client/secrets.yml 에 있다."),
       ],
       leakCtx,
     );

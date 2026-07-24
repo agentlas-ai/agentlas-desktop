@@ -69,7 +69,10 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     setOpening(true);
     try {
       const chat = await api.automations.getSession(automation.id);
-      navigate(`/one?chat=${encodeURIComponent(chat.id)}`);
+      // Automation run sessions live on the Work surface. Open the transcript
+      // in Work, never inside One — One and Work are separate surfaces, so a
+      // Work automation history must not be routed into One's home.
+      navigate(`/chat?id=${encodeURIComponent(chat.id)}`);
     } catch (err) {
       setMessage(ko ? `결과 대화를 열지 못했습니다. ${String(err)}` : `Could not open the result chat. ${String(err)}`);
     } finally {
@@ -85,7 +88,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
           <strong>{current.title}</strong>
         </div>
         <button type="button" onClick={() => void openResultChat()} disabled={opening}>
-          {opening ? (ko ? "여는 중..." : "Opening...") : needsHelp ? (ko ? "One과 해결하기" : "Fix with One") : (ko ? "One에서 보기" : "Open in One")}
+          {opening ? (ko ? "여는 중..." : "Opening...") : needsHelp ? (ko ? "결과 확인" : "Review result") : (ko ? "결과 보기" : "View result")}
         </button>
       </div>
 

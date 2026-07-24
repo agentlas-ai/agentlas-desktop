@@ -757,6 +757,40 @@ export interface AgentUsageSummaryRow {
   installed: boolean;
 }
 
+export interface BorrowedAgentRuntimeSnapshot {
+  provider: string;
+  modelId: string;
+  effort: string;
+  source: "ai-assigned" | "manual-override" | "safe-fallback";
+  recordedAt: string;
+}
+
+/**
+ * Read-only, owner-scoped career for a Hub asset. This deliberately excludes
+ * the origin author's prompt, manifest, package files, and evolution controls.
+ */
+export interface BorrowedAgentProfile {
+  profileId: string;
+  agentDefinitionId: string;
+  agentReleaseId: string;
+  /** Stable package-internal worker id. Empty for the top-level Hub asset. */
+  componentId: string;
+  slug: string;
+  entityKind: "agent" | "team";
+  name: string;
+  nameEn: string;
+  tagline: string;
+  taglineEn: string;
+  bookmarkedAt: string | null;
+  firstUsedAt: string | null;
+  lastUsedAt: string | null;
+  useCount: number;
+  latestRuntime: BorrowedAgentRuntimeSnapshot | null;
+  memoryCount: number;
+  relationCount: number;
+  hasQuarantinedDeviceHistory: boolean;
+}
+
 /**
  * UI용 env 메타 — 값 자체는 main에만, renderer는 hasValue boolean만 받는다.
  */
@@ -829,12 +863,16 @@ export interface MarketplaceListing {
   /** Exact immutable Hub identity. Both values must be present to enable Ontology projection. */
   agentDefinitionId?: string;
   agentReleaseId?: string;
+  /** Account shelf provenance; never invocation authority. */
+  bookmarkState?: "bookmarked" | "used";
 }
 
 export interface HubAgentBookmark {
   slug: string;
   listing: MarketplaceListing;
   bookmarkedAt: string;
+  /** False means server-observed Hub use, not an explicit user bookmark. */
+  bookmarked?: boolean;
 }
 
 export interface HubBookmarkSnapshotEvent {
@@ -3031,6 +3069,13 @@ export interface CloudAgentPackageDownloadFile {
 export type CloudAgentPackageHashVersion = "path-sha256-v1" | "path-sha256-executable-v2";
 export type CloudAgentCloudScope = "owner-private" | "hub-public";
 
+export interface CloudAgentLocalizedListing {
+  titleEn: string;
+  titleKo: string;
+  descriptionEn: string;
+  descriptionKo: string;
+}
+
 /** Opaque optimistic-concurrency identity returned by Agent Cloud. Revisions
  * are equality tokens only; clients must never infer ordering from them. */
 export interface CloudAgentRevisionIdentity {
@@ -3098,6 +3143,8 @@ export interface CloudAgentPackageManifest {
   createdAt: string;
   billingMode: "submitter-local-runtime" | "static-only";
   costOwner: "submitter" | "none";
+  /** Required for public Hub publication; optional for owner-private storage. */
+  localized?: CloudAgentLocalizedListing;
   security: {
     verdict: "pass" | "fail" | "needs-review";
     blockerCount: number;
@@ -5075,6 +5122,8 @@ export interface AgentlasIpc {
   /** v74 사용 원장 + 북마크 — run 귀속 시 자동 축적되는 agent_usage 조회/북마크 토글. */
   agents: {
     usageSummary: () => Promise<AgentUsageSummaryRow[]>;
+    borrowedProfiles: () => Promise<BorrowedAgentProfile[]>;
+    borrowedOntologyGraph: (profileId: string) => Promise<ExperienceOntologyGraphSnapshot>;
     setBookmark: (agentId: string, bookmarked: boolean) => Promise<{ agentId: string; bookmarkedAt: string | null }>;
   };
   /** Local Experience ownership and explicit owner-authorized Cloud exchange. */

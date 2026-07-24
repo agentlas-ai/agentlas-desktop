@@ -20,6 +20,42 @@
   min-height: 410px;
 }
 
+.emptyState {
+  position: absolute;
+  inset: 88px 24px 24px;
+  z-index: 6;
+  display: flex;
+  max-width: 520px;
+  margin: auto;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  padding: 28px;
+  color: #dfe8e2;
+  text-align: center;
+}
+
+.emptyState strong {
+  font-size: 15px;
+}
+
+.emptyState span:last-child {
+  max-width: 460px;
+  color: #8e9c97;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.emptyStateMark {
+  width: 48px;
+  height: 48px;
+  border: 1px dashed rgb(166 214 192 / 0.5);
+  border-radius: 999px;
+  background: radial-gradient(circle, rgb(122 183 157 / 0.26) 0 4px, transparent 5px);
+  box-shadow: 0 0 0 10px rgb(122 183 157 / 0.05);
+}
+
 .shell::before {
   position: absolute;
   inset: 0;

@@ -464,6 +464,10 @@ export function EngineUsage() {
     const terminalError = connected && isTerminalProviderError(u);
     const retryableError = connected && u?.status === "error" && !isRateLimited(u);
     const showConnectedChip = connected && !terminalError && !retryableError;
+    // The default-engine status and the "use as default" action belong at the
+    // top-right of the card (compact), not in the action foot.
+    const isActiveDefault = connected && !!rt?.active;
+    const canUseDefault = connected && !!rt && !rt.active && !terminalError && !retryableError;
     const statusLine = (connected
       ? statusText(e, u)
       : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected")
@@ -485,10 +489,6 @@ export function EngineUsage() {
           </button>
         )}
       </>
-    ) : connected && !rt?.active && rt ? (
-      <button onClick={() => void activateEngine(e, rt)} disabled={busy === e.id} className="titlebar-nodrag" title={ko ? "이 엔진을 기본 실행 엔진으로" : "Make this the default run engine"}>
-        {ko ? "기본으로" : "Use default"}
-      </button>
     ) : !connected ? (
       <button onClick={() => (e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))} disabled={busy === e.id} className="titlebar-nodrag">
         {busy === e.id ? busyLabel() : ko ? "연결" : "Connect"}
@@ -500,9 +500,23 @@ export function EngineUsage() {
           <span className="dashboard-engine-logo" aria-hidden="true"><img src={e.logoSrc} alt="" /></span>
           <span className="sr-only">{e.logoAlt}</span>
           <span className="dashboard-engine-card-name">{e.label}</span>
-          {showConnectedChip && (
-            <span className="dashboard-engine-connected" style={{ marginLeft: "auto" }}>{ko ? "연결됨" : "Connected"}</span>
-          )}
+          <span className="dashboard-engine-head-right" style={{ marginLeft: "auto" }}>
+            {isActiveDefault ? (
+              <span className="dashboard-engine-default" title={ko ? "기본 실행 엔진" : "Default run engine"}>{ko ? "기본" : "Default"}</span>
+            ) : canUseDefault ? (
+              <button
+                type="button"
+                className="dashboard-engine-usedefault titlebar-nodrag"
+                onClick={() => { if (rt) void activateEngine(e, rt); }}
+                disabled={busy === e.id}
+                title={ko ? "이 엔진을 기본 실행 엔진으로" : "Make this the default run engine"}
+              >
+                {busy === e.id ? busyLabel() : ko ? "기본으로" : "Use default"}
+              </button>
+            ) : showConnectedChip ? (
+              <span className="dashboard-engine-connected">{ko ? "연결됨" : "Connected"}</span>
+            ) : null}
+          </span>
         </div>
         <div
           className="dashboard-engine-card-status"
@@ -512,13 +526,11 @@ export function EngineUsage() {
         >
           {statusLine}
         </div>
-        <div className="dashboard-engine-card-body">
-          {hasBars
-            ? u!.windows.slice(0, 3).map((w) => <UsageBar key={w.id} w={w} ko={ko} />)
-            : rt?.active
-              ? <span className="dashboard-engine-default" style={{ alignSelf: "flex-start" }} title={ko ? "기본 실행 엔진" : "Default run engine"}>{ko ? "기본 실행 엔진" : "Default engine"}</span>
-              : null}
-        </div>
+        {hasBars && (
+          <div className="dashboard-engine-card-body">
+            {u!.windows.slice(0, 3).map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
+          </div>
+        )}
         {(actions || (keyFor === e.id && !connected)) && (
           <div className="dashboard-engine-card-foot">
             {actions ? <div className="dashboard-engine-actions" style={{ padding: 0 }}>{actions}</div> : <span />}

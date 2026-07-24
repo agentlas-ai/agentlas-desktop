@@ -30,7 +30,19 @@ function preparedAgent(slug, entry = `AUTHORITATIVE_${slug.toUpperCase().replace
     status: "prepared",
     slug,
     execution_id: `exec-${slug}`,
+    agentDefinitionId: `definition-${slug}`,
+    agentReleaseId: `release-${slug}-v1`,
+    packageHash: "a".repeat(64),
     output: {
+      agent_definition_id: `definition-${slug}`,
+      agent_release_id: `release-${slug}-v1`,
+      package_hash: "a".repeat(64),
+      localized: {
+        titleEn: `Prepared ${slug}`,
+        titleKo: `준비된 ${slug}`,
+        descriptionEn: "A validated Hub runtime fixture.",
+        descriptionKo: "검증된 Hub 런타임 테스트입니다.",
+      },
       entry_excerpt: entry,
       grounding: { directive: "Attach to the current project first." },
       next_step: "Execute this returned bundle with the user's local model.",
@@ -53,6 +65,12 @@ function preparedTeam(slug, { graph = true } = {}) {
     runtime_bundle: {
       entity_kind: "team",
       entry: { path: "AGENTS.md", content: `AUTHORITATIVE_TEAM_${slug}` },
+      localized: {
+        titleEn: `Prepared ${slug} Team`,
+        titleKo: `준비된 ${slug} 팀`,
+        descriptionEn: "A validated Hub team runtime fixture.",
+        descriptionKo: "검증된 Hub 팀 런타임 테스트입니다.",
+      },
     },
   };
   if (graph) {
@@ -65,7 +83,21 @@ function preparedTeam(slug, { graph = true } = {}) {
       ],
     };
   }
-  return { action: "hub_invoke", status: "prepared", slug, entityKind: "team", output };
+  return {
+    action: "hub_invoke",
+    status: "prepared",
+    slug,
+    entityKind: "team",
+    agentDefinitionId: `definition-${slug}`,
+    agentReleaseId: `release-${slug}-v1`,
+    packageHash: "b".repeat(64),
+    output: {
+      ...output,
+      agent_definition_id: `definition-${slug}`,
+      agent_release_id: `release-${slug}-v1`,
+      package_hash: "b".repeat(64),
+    },
+  };
 }
 
 function exactTeamManagerPlan() {
@@ -399,6 +431,53 @@ async function main() {
     "Hub team workers, team synthesis, and outer synthesis must receive the Memory Curator emitter contract",
   );
   assert.equal(executableTeam.events.filter((event) => event.kind === "final").length, 1);
+  const executableTeamCareers = store.getDb().prepare(`
+    SELECT entity_kind, component_id
+      FROM borrowed_agent_careers
+     WHERE agent_definition_id = ?
+       AND agent_release_id = ?
+     ORDER BY entity_kind DESC, component_id ASC
+  `).all("definition-executable-team", "release-executable-team-v1");
+  assert.deepEqual(
+    executableTeamCareers,
+    [
+      { entity_kind: "team", component_id: "" },
+      { entity_kind: "agent", component_id: "worker-one" },
+      { entity_kind: "agent", component_id: "worker-two" },
+    ],
+    "a successful Hub team must persist one exact team receipt and one exact receipt per worker",
+  );
+
+  const directExecutableTeam = await invoke({
+    title: "Direct single borrowed Hub team",
+    borrowAgents: ["direct-executable-team"],
+    hubResult: result({
+      schema: "hephaestus.call.v1",
+      status: "prepared",
+      agents: [preparedTeam("direct-executable-team")],
+    }),
+    runnerTexts: [
+      "outer plan",
+      exactTeamManagerPlan(),
+      "direct worker one result",
+      "direct worker two result",
+      "direct team manager synthesis",
+      "direct outer synthesis",
+    ],
+  });
+  assert.equal(
+    directExecutableTeam.runnerDelta,
+    6,
+    "a single borrowed Team must execute its manager/worker graph, not flatten into one primary prompt",
+  );
+  assert.equal(
+    store.getDb().prepare(`
+      SELECT COUNT(*) AS n FROM borrowed_agent_careers
+       WHERE agent_definition_id = ? AND agent_release_id = ?
+    `).get("definition-direct-executable-team", "release-direct-executable-team-v1").n,
+    3,
+    "the direct Team path must persist the team and both worker careers",
+  );
   assert.equal(
     swarmRealRequests.filter((request) => request.systemPrompt.includes("## Agentlas Task-Force Agent Host Policy")).length,
     2,
@@ -742,6 +821,17 @@ async function main() {
   assert.doesNotMatch(successfulRequest.systemPrompt, /REAL_HUB_DIRECTIVE_7C21/);
   assert.doesNotMatch(successfulRequest.userPrompt, /Apply the borrowed specialist agent/);
   assert.ok(successfulSingle.events.some((event) => event.kind === "final"));
+  const successfulSingleCareer = store.getDb().prepare(`
+    SELECT agent_definition_id, agent_release_id, component_id, use_count
+      FROM borrowed_agent_careers
+     WHERE agent_definition_id = ? AND agent_release_id = ?
+  `).get("definition-real-agent", "release-real-agent-v1");
+  assert.deepEqual(successfulSingleCareer, {
+    agent_definition_id: "definition-real-agent",
+    agent_release_id: "release-real-agent-v1",
+    component_id: "",
+    use_count: 1,
+  }, "the ordinary single-borrow completion path must persist an immutable career receipt");
 
   const swarmSingleReal = await invoke({
     title: "Swarm yields to real single borrow",
@@ -829,7 +919,7 @@ async function main() {
     /You are the borrowed Hub specialist|Apply the borrowed specialist agent|actual expertise and synthesize/,
     "failure paths must not emit a fake specialist persona or directive",
   );
-  assert.equal(hubCalls.length, 19, "every executable explicit path must make exactly one authoritative hep-call attempt");
+  assert.equal(hubCalls.length, 20, "every executable explicit path must make exactly one authoritative hep-call attempt");
 
   const ragProject = path.join(tmp, "task-force-rag-project");
   const ragMemoryDir = path.join(ragProject, ".agentlas");

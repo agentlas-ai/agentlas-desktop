@@ -14,7 +14,13 @@ import { getFirmBySlug, upsertLocalTeamFirm } from "../store/firms";
 import { scanAgentFolder, type FolderScan, type ScanMember } from "./folder-scan";
 import { clearResolvedOrg, saveResolvedOrg } from "../store/org-spec";
 import { detectEnvRequirementsFromFolder } from "./env-detect";
-import type { FirmOrgNode, InstalledAgent, InstalledFirm, ResolvedOrg } from "../../shared/types";
+import type {
+  CloudAgentLocalizedListing,
+  FirmOrgNode,
+  InstalledAgent,
+  InstalledFirm,
+  ResolvedOrg,
+} from "../../shared/types";
 import { currentUiLocale } from "../ui-locale";
 import { readCanonicalPromptFromDirectory } from "./prompt-authority";
 import { detectRuntimeLabels } from "./runtime-labels";
@@ -23,6 +29,44 @@ import { computeLocalAgentDefinitionHash } from "./definition-hash";
 export { detectRuntimeLabels } from "./runtime-labels";
 
 const TONES: InstalledAgent["tone"][] = ["blue", "green", "purple", "amber", "peach"];
+
+function localPackageLocalizedMetadata(root: string): CloudAgentLocalizedListing | null {
+  const candidates = [
+    ".agentlas/agent-card.json",
+    "agentlas.json",
+    "manifest.json",
+    ".agentlas/routing-card.json",
+  ];
+  const clean = (value: unknown, max: number) => typeof value === "string"
+    ? value.normalize("NFKC").replace(/\s+/g, " ").trim().slice(0, max).trim()
+    : "";
+  for (const relative of candidates) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(root, relative), "utf8")) as Record<string, unknown>;
+      const source = parsed.localized && typeof parsed.localized === "object" && !Array.isArray(parsed.localized)
+        ? parsed.localized as Record<string, unknown>
+        : parsed;
+      const localized = {
+        titleEn: clean(source.titleEn, 96),
+        titleKo: clean(source.titleKo, 96),
+        descriptionEn: clean(source.descriptionEn, 640),
+        descriptionKo: clean(source.descriptionKo, 640),
+      };
+      if (
+        localized.titleEn
+        && localized.titleKo
+        && localized.descriptionEn
+        && localized.descriptionKo
+        && !/[\uac00-\ud7af]/.test(localized.titleEn)
+        && !/[\uac00-\ud7af]/.test(localized.descriptionEn)
+      ) return localized;
+    } catch {
+      // A local raw folder is allowed to have no package metadata. Public Hub
+      // publication applies the strict blocker in cloud-agents/package.ts.
+    }
+  }
+  return null;
+}
 
 function exists(p: string): boolean {
   try {
@@ -506,6 +550,7 @@ async function importLocalFolderOnce(
   const scan: FolderScan = scanAgentFolder(dir);
   // 팀 이름: manifest name → 정체성 파일 헤딩 → 폴더명 (CLAUDE.md 어댑터 헤딩은 최후순위로 걸러짐)
   const name = scan.manifestName || readName(dir);
+  const localized = localPackageLocalizedMetadata(dir);
   // 등록은 로컬 DB 반영의 일부다. 여기서 활성 LLM을 다시 호출하면 Build가 이미 끝난
   // 뒤에도 수분간 조직도 등록이 멈출 수 있다. 결정적 스캐너가 즉시 권위 판정을 내리고,
   // 사용자가 명시적으로 조직 정밀 분석을 요청할 때만 org-resolver가 LLM으로 보강한다.
@@ -539,6 +584,10 @@ async function importLocalFolderOnce(
     }
   }
   const tagline = readTagline(dir) || (kind === "team" ? "Imported local team" : "Imported local agent");
+  const nameEn = localized?.titleEn || name;
+  const nameKo = localized?.titleKo || name;
+  const taglineEn = localized?.descriptionEn || tagline;
+  const taglineKo = localized?.descriptionKo || tagline;
   const systemPrompt =
     kind === "team"
       ? buildTeamSystemPrompt(dir, name)
@@ -622,14 +671,14 @@ async function importLocalFolderOnce(
       if (existing && row) {
         db.prepare(
           "UPDATE installed_agents SET name = ?, name_en = ?, tagline = ?, tagline_en = ?, system_prompt = ?, env_requirements_json = ?, visibility = 'visible', entity_kind = ? WHERE id = ?",
-        ).run(name, name, tagline, tagline, systemPrompt, envReqsJson, kind, id);
+        ).run(nameKo, nameEn, taglineKo, taglineEn, systemPrompt, envReqsJson, kind, id);
       } else {
         db.prepare(
           `INSERT INTO installed_agents
            (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
             env_requirements_json, preferred_backend, trust_grade, installed_at, tone, visibility, entity_kind)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'visible', ?)`,
-        ).run(id, slug, name, name, tagline, tagline, systemPrompt, "[]", envReqsJson, null, "A", now, tone, kind);
+        ).run(id, slug, nameKo, nameEn, taglineKo, taglineEn, systemPrompt, "[]", envReqsJson, null, "A", now, tone, kind);
       }
 
       // 팀이면 대표 agent + firm + resolved org가 하나의 SQLite commit이다. 어느 한
@@ -684,10 +733,10 @@ async function importLocalFolderOnce(
   const agent: InstalledAgent = {
     id,
     slug,
-    name,
-    nameEn: name,
-    tagline,
-    taglineEn: tagline,
+    name: nameKo,
+    nameEn,
+    tagline: taglineKo,
+    taglineEn,
     systemPrompt,
     mcpServers: [],
     envRequirements,

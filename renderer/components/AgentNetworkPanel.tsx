@@ -256,6 +256,8 @@ export function AgentNetworkPanel({
             timeline={timeline}
             latestUserPrompt={promptPreview}
             locale={locale}
+            agentName={agent ? pickLocalized(agent, locale).name : undefined}
+            liveAgents={liveAgents}
           />
         )}
       </div>
@@ -294,21 +296,90 @@ function LiveBadge({ label }: { label: string }) {
   );
 }
 
+type SoloRosterEntry = { key: string; name: string; role?: string; active: boolean; borrowed: boolean; primary: boolean };
+
+/**
+ * Solo-view roster: the primary (main) agent plus any additional/borrowed
+ * agents, derived from the live agent map. Borrowed Hub agents arrive under a
+ * `borrow:<slug>` key; everything else is treated as native. Falls back to the
+ * bound agent name when no live agent has streamed an event yet.
+ */
+function soloAgentRoster(liveAgents: Record<string, LiveAgent>, agentName?: string): SoloRosterEntry[] {
+  const entries: SoloRosterEntry[] = [];
+  const seen = new Set<string>();
+  for (const [key, agent] of Object.entries(liveAgents)) {
+    const name = agent.name?.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const borrowed = key.startsWith("borrow:");
+    entries.push({
+      key,
+      name,
+      role: agent.role?.trim() || undefined,
+      active: agent.active,
+      borrowed,
+      primary: !borrowed && (agent.tier ?? 1) === 1,
+    });
+  }
+  const boundName = agentName?.trim();
+  if (boundName && !entries.some((entry) => entry.primary)) {
+    const match = entries.find((entry) => entry.name === boundName);
+    if (match) match.primary = true;
+    else entries.unshift({ key: "__primary__", name: boundName, active: false, borrowed: false, primary: true });
+  }
+  entries.sort((a, b) => Number(b.primary) - Number(a.primary));
+  return entries;
+}
+
 function SoloAgentSummary({
   busy,
   timeline,
   latestUserPrompt,
   locale,
+  agentName,
+  liveAgents,
 }: {
   busy: boolean;
   timeline: NetTimelineItem[];
   latestUserPrompt: string;
   locale: "ko" | "en";
+  agentName?: string;
+  liveAgents: Record<string, LiveAgent>;
 }) {
   const latest = latestSoloTimelineText(timeline, locale, busy);
   const waterfall = soloWaterfallItems(timeline, locale);
+  const roster = soloAgentRoster(liveAgents, agentName);
+  const primary = roster.find((entry) => entry.primary) ?? roster[0];
+  const additional = roster.filter((entry) => entry !== primary);
+  // Tool/work cards collapse so the panel foregrounds the agent + live status,
+  // not a stack of bash cards. Default open while running (live feedback),
+  // collapsed once idle so the history stays a compact list.
+  const [stepsOpen, setStepsOpen] = useState(true);
   return (
     <section style={soloWrapStyle}>
+      {primary && (
+        <div style={soloRosterStyle}>
+          <div style={soloPrimaryAgentStyle}>
+            <span aria-hidden style={soloDotStyle(primary.active || busy)} />
+            <span style={soloPrimaryNameStyle}>{primary.name}</span>
+            {primary.role && <span style={soloPrimaryRoleStyle}>{primary.role}</span>}
+            <span style={{ marginLeft: "auto", ...soloAgentStateWordStyle(primary.active || busy) }}>
+              {primary.active || busy ? (locale === "ko" ? "실행 중" : "Running") : (locale === "ko" ? "대기" : "Idle")}
+            </span>
+          </div>
+          {additional.length > 0 && (
+            <div style={soloAdditionalWrapStyle}>
+              <span style={soloAdditionalLabelStyle}>{locale === "ko" ? "함께" : "With"}</span>
+              {additional.map((entry) => (
+                <span key={entry.key} style={soloAgentChipStyle(entry.active)} title={entry.role}>
+                  {entry.borrowed && <span aria-hidden style={soloBorrowMarkStyle}>↗</span>}
+                  {entry.name}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       <div style={soloLineStyle}>
         <span aria-hidden style={soloDotStyle(busy)} />
         <span style={soloStateStyle(busy)}>
@@ -322,11 +393,19 @@ function SoloAgentSummary({
         </p>
       )}
       <div style={soloWaterfallStyle}>
-        <div style={soloWaterfallHeaderStyle}>
+        <button
+          type="button"
+          onClick={() => setStepsOpen((open) => !open)}
+          aria-expanded={stepsOpen}
+          style={soloWaterfallToggleStyle}
+        >
           <span>{locale === "ko" ? "작업 단계" : "Work steps"}</span>
-          <span>{waterfall.length}</span>
-        </div>
-        {waterfall.length === 0 ? (
+          <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <span>{waterfall.length}</span>
+            <span aria-hidden style={{ transform: stepsOpen ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform .15s ease" }}>▾</span>
+          </span>
+        </button>
+        {!stepsOpen ? null : waterfall.length === 0 ? (
           <div style={soloWaterfallEmptyStyle}>
             {locale === "ko" ? "툴 요청, 스킬 사용, 실행 상태가 여기에 시간순으로 표시됩니다." : "Tool requests, skill use, and execution states appear here in order."}
           </div>
@@ -940,6 +1019,99 @@ const soloWaterfallHeaderStyle: CSSProperties = {
   textTransform: "uppercase",
   letterSpacing: 0.6,
   padding: "2px 1px",
+};
+
+const soloWaterfallToggleStyle: CSSProperties = {
+  ...soloWaterfallHeaderStyle,
+  width: "100%",
+  border: "none",
+  background: "transparent",
+  cursor: "pointer",
+};
+
+const soloRosterStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 7,
+  padding: "9px 10px",
+  borderRadius: 11,
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+};
+
+const soloPrimaryAgentStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 7,
+  minWidth: 0,
+};
+
+const soloPrimaryNameStyle: CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontSize: 12.5,
+  fontWeight: 800,
+  color: "var(--ink)",
+};
+
+const soloPrimaryRoleStyle: CSSProperties = {
+  flexShrink: 0,
+  fontSize: 10,
+  fontFamily: "var(--font-mono)",
+  color: "var(--muted-deep)",
+  textTransform: "uppercase",
+  letterSpacing: 0.4,
+};
+
+function soloAgentStateWordStyle(active: boolean): CSSProperties {
+  return {
+    flexShrink: 0,
+    fontSize: 10,
+    fontWeight: 750,
+    color: active ? "var(--green-deep)" : "var(--muted)",
+  };
+}
+
+const soloAdditionalWrapStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: 6,
+};
+
+const soloAdditionalLabelStyle: CSSProperties = {
+  fontSize: 10,
+  fontFamily: "var(--font-mono)",
+  color: "var(--muted-deep)",
+  textTransform: "uppercase",
+  letterSpacing: 0.4,
+};
+
+function soloAgentChipStyle(active: boolean): CSSProperties {
+  return {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    maxWidth: "100%",
+    padding: "2px 8px",
+    borderRadius: 999,
+    border: "1px solid var(--paper-edge)",
+    background: "var(--paper)",
+    fontSize: 11,
+    fontWeight: 650,
+    color: active ? "var(--ink)" : "var(--ink-soft)",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  };
+}
+
+const soloBorrowMarkStyle: CSSProperties = {
+  fontSize: 9,
+  color: "var(--accent)",
+  fontWeight: 800,
 };
 
 const soloWaterfallEmptyStyle: CSSProperties = {

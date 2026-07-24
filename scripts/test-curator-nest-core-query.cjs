@@ -6,7 +6,6 @@ const os = require("node:os");
 const path = require("node:path");
 const Database = require("better-sqlite3");
 const { resolveAgentlasCoreRoot, resolveModel2VecAsset } = require("./lib/agentlas-core-root.cjs");
-const { MODEL2VEC_HYBRID_DIMENSIONS } = require("../dist/electron/memory/local-embedding.js");
 
 const coreRoot = resolveAgentlasCoreRoot();
 const modelPath = resolveModel2VecAsset();
@@ -19,6 +18,11 @@ fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.AGENTLAS_STORE_PATH = path.join(temp, "desktop.sqlite");
 process.env.AGENTLAS_MODEL2VEC_PATH = modelPath;
 process.env.AGENTLAS_E2E = "1";
+const {
+  autoLocalEmbedding,
+  MODEL2VEC_HYBRID_DIMENSIONS,
+  MODEL2VEC_HYBRID_NAME,
+} = require("../dist/electron/memory/local-embedding.js");
 
 const { app } = require("electron");
 // Electron resolves its Windows profile paths while the app is starting. An
@@ -60,15 +64,17 @@ async function main() {
   );
   assert.equal(report.written, 2);
 
-  const nestDbPath = path.join(
+  const ownerRoot = path.join(
     sandboxHome,
     ".agentlas",
     "networking",
     "hub-agents",
     "semantic-reviewer",
-    "memory",
-    "experience.sqlite",
+    "owners",
   );
+  const ownerDirs = fs.readdirSync(ownerRoot).filter((entry) => /^owner-[0-9a-f]{64}$/.test(entry));
+  assert.equal(ownerDirs.length, 1, "one device-local owner partition expected");
+  const nestDbPath = path.join(ownerRoot, ownerDirs[0], "memory", "experience.sqlite");
   const nestDb = new Database(nestDbPath, { readonly: true });
   const rows = nestDb.prepare(
     `SELECT candidate_text, status, agent_id, embedding_adapter,
@@ -82,14 +88,14 @@ async function main() {
   assert.equal(rows.length, 2);
   assert.ok(rows.every((row) => row.status === "active"));
   assert.ok(rows.every((row) => row.agent_id === "hub:semantic-reviewer"));
-  assert.ok(rows.every((row) => row.embedding_adapter === "model2vec_potion_base_8m_int8_hybrid"));
+  assert.ok(rows.every((row) => row.embedding_adapter === MODEL2VEC_HYBRID_NAME));
   assert.ok(rows.every((row) => row.embedding_dimensions === MODEL2VEC_HYBRID_DIMENSIONS));
   assert.ok(rows.every((row) => JSON.parse(row.embedding_json).length === MODEL2VEC_HYBRID_DIMENSIONS));
-  assert.equal(registeredAdapter.name, "model2vec_potion_base_8m_int8_hybrid");
+  assert.equal(registeredAdapter.name, MODEL2VEC_HYBRID_NAME);
   assert.equal(registeredAdapter.status, "available");
   const adapterConfig = JSON.parse(registeredAdapter.config_json);
   assert.equal(adapterConfig.dimensions, MODEL2VEC_HYBRID_DIMENSIONS);
-  assert.equal(adapterConfig.model_sha256, "fe492f69607b750142aa48d47d579b53252b3288547c27d4d0e473d6af485e1e");
+  assert.equal(adapterConfig.model_sha256, autoLocalEmbedding("adapter identity fixture").modelSha256);
   assert.match(adapterConfig.identity, new RegExp(`:semantic-v1:${MODEL2VEC_HYBRID_DIMENSIONS}$`));
 
   desktopStore.getDb().close();
@@ -129,7 +135,7 @@ async function main() {
   const relevant = payload.items.find((item) => item.candidate_text === "database migration rollback checklist");
   assert.ok(relevant, "Core query must return the paraphrased Desktop learning");
   assert.ok(relevant.vector_score > 0.69, `expected compatible semantic vector, got ${relevant.vector_score}`);
-  assert.equal(relevant.embedding.adapter, "model2vec_potion_base_8m_int8_hybrid");
+  assert.equal(relevant.embedding.adapter, MODEL2VEC_HYBRID_NAME);
 
   console.log(JSON.stringify({
     ok: true,

@@ -2101,6 +2101,38 @@ button[data-dashboard-chevron="open"] {
   background: var(--dash-teal-2);
 }
 
+/* 카드 우측 상단 정렬: 기본 pill / "기본으로" 소형 버튼 / 연결됨 칩 중 하나. */
+.dashboard-engine-head-right {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* "기본으로"(Use default): 우측 상단, 칩과 같은 크기의 소형 버튼. */
+.dashboard-engine-usedefault {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklch, var(--dash-teal-2) 55%, var(--dash-line));
+  color: var(--dash-teal-2);
+  background: #ffffff;
+  font-family: var(--rd-f-mono);
+  font-size: 10px;
+  font-weight: 760;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.dashboard-engine-usedefault:hover {
+  background: color-mix(in oklch, var(--dash-teal-2) 10%, #ffffff);
+}
+.dashboard-engine-usedefault:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* 액션 버튼은 이름/상태 줄 아래 전용 행에서 왼쪽 정렬(로고 폭만큼 들여쓰기). */
 .dashboard-engine-actions {
   display: flex;

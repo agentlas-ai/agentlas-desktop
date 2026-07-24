@@ -173,6 +173,9 @@ const api: AgentlasIpc = {
   },
   agents: {
     usageSummary: () => ipcRenderer.invoke("agents:usage-summary"),
+    borrowedProfiles: () => ipcRenderer.invoke("agents:borrowed-profiles"),
+    borrowedOntologyGraph: (profileId: string) =>
+      ipcRenderer.invoke("agents:borrowed-ontology-graph", profileId),
     setBookmark: (agentId: string, bookmarked: boolean) =>
       ipcRenderer.invoke("agents:set-bookmark", agentId, bookmarked),
   },

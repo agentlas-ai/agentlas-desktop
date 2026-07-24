@@ -15,8 +15,12 @@ export interface HubBookmarkServerRecord {
   taglineKo?: string;
   ownerName?: string;
   perCallCredits?: number;
+  agentDefinitionId?: string;
+  agentReleaseId?: string;
   bookmarkedAt: string;
   updatedAt: string;
+  lastUsedAt?: string;
+  bookmarked?: boolean;
 }
 
 export interface HubBookmarkStoreRow {
@@ -101,9 +105,9 @@ export function failClosedHubBookmarkListing(input: MarketplaceListing): Marketp
 }
 
 function serverRecordToListing(record: HubBookmarkServerRecord): MarketplaceListing {
-  const nameEn = record.title || record.titleKo || record.slug;
+  const nameEn = record.title || record.slug;
   const name = record.titleKo || record.title || record.slug;
-  const taglineEn = record.tagline || record.taglineKo || "Saved Hub reference";
+  const taglineEn = record.tagline || "Saved Hub reference";
   const tagline = record.taglineKo || record.tagline || taglineEn;
   return failClosedHubBookmarkListing({
     slug: record.slug,
@@ -122,6 +126,9 @@ function serverRecordToListing(record: HubBookmarkServerRecord): MarketplaceList
     source: "bookmark",
     entityKind: record.entityKind,
     perCallCredits: record.perCallCredits,
+    agentDefinitionId: record.agentDefinitionId,
+    agentReleaseId: record.agentReleaseId,
+    bookmarkState: record.bookmarked === false ? "used" : "bookmarked",
   });
 }
 
@@ -154,6 +161,7 @@ function rowToBookmark(row: HubBookmarkStoreRow): HubAgentBookmark {
     slug: row.slug,
     listing,
     bookmarkedAt: row.bookmarked_at,
+    bookmarked: listing.bookmarkState !== "used",
   };
 }
 

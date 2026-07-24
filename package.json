@@ -15,7 +15,7 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 75,
+    "targetSchemaVersion": 78,
     "bundledRuntimeVersion": "1.1.58"
   },
   "agentlasBundledRuntimeSource": {
@@ -107,6 +107,8 @@
     "test:hired-agents": "npm run build:electron && electron scripts/test-hired-agents.cjs",
     "test:curator-nest-wiring": "npm run build:electron && electron scripts/test-curator-nest-wiring.cjs",
     "test:curator-nest-core-query": "npm run build:electron && electron scripts/test-curator-nest-core-query.cjs",
+    "test:borrowed-agent-careers-v77": "npm run build:electron && electron scripts/test-borrowed-agent-careers-v77.cjs",
+    "test:team-member-cells-v77": "npm run build:electron && electron scripts/test-team-member-cells-v77.cjs",
     "test:task-force-memory-boundary": "npm run build:electron && electron scripts/test-task-force-memory-boundary.cjs",
     "test:memory-agent-isolation": "npm run build:electron && electron scripts/test-memory-agent-isolation.cjs",
     "test:memory-context-budget": "npm run build:electron && node scripts/test-memory-context-budget.cjs",
@@ -229,6 +231,7 @@
     "watch:automation": "node scripts/audit-automation-health.mjs",
     "test:cli-image-attachments": "npm run build:electron && node scripts/test-cli-image-attachments.cjs",
     "test:desktop-feature-surfaces": "npm run build:renderer && node scripts/test-desktop-feature-surfaces.cjs",
+    "test:borrowed-agent-profile-ui": "npm run build:renderer && node scripts/test-desktop-feature-surfaces.cjs --borrowed-profile-only",
     "test:engine-auto-toggle-ui": "npm run build:renderer && node scripts/test-desktop-feature-surfaces.cjs --engine-toggles-only",
     "test:ontology-feature-update": "npm run build:renderer && node scripts/test-ontology-feature-update.cjs",
     "proof:existing-user-ontology-ui": "npm run build && node scripts/proof-existing-user-ontology-ui.cjs",

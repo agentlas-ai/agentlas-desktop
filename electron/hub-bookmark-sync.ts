@@ -75,6 +75,11 @@ function entityKind(value: unknown): "agent" | "team" {
   return cleanString(value).toLowerCase() === "team" ? "team" : "agent";
 }
 
+function englishHubText(value: unknown, fallback: string): string {
+  const clean = cleanString(value);
+  return clean && !/[\uac00-\ud7af]/.test(clean) ? clean : fallback;
+}
+
 function serverBookmarkRecord(value: unknown): HubBookmarkServerRecord | null {
   const row = asRecord(value);
   if (!row) return null;
@@ -104,9 +109,9 @@ function publicHubRecordToListing(value: unknown): MarketplaceListing | null {
   const slug = cleanString(row.slug);
   if (!slug) return null;
   const kind = entityKind(row.entityKind ?? row.kind);
-  const nameEn = cleanString(row.titleEn) || cleanString(row.title) || slug;
+  const nameEn = englishHubText(row.titleEn, englishHubText(row.title, slug));
   const name = cleanString(row.titleKo) || cleanString(row.title) || nameEn;
-  const taglineEn = cleanString(row.taglineEn) || cleanString(row.tagline) || "Hub profile";
+  const taglineEn = englishHubText(row.taglineEn, englishHubText(row.tagline, "Hub profile"));
   const tagline = cleanString(row.taglineKo) || cleanString(row.tagline) || taglineEn;
   // The public profile's explicit callable bit is the only authority used here.
   // Presence in an index, a bookmark, or a previous local listing is not proof.
@@ -155,13 +160,15 @@ function premiumTeamRecordToListing(value: unknown): MarketplaceListing | null {
     row.invokable === true &&
     (callTool === "agentlas.teams.invoke" || callTool === "agentlas.get_runtime_bundle");
   const name = cleanString(row.name) || slug;
+  const nameEn = englishHubText(row.nameEn, englishHubText(row.name, slug));
   const tagline = cleanString(row.tagline) || "Callable Hub team";
+  const taglineEn = englishHubText(row.taglineEn, englishHubText(row.tagline, "Callable Hub team"));
   return {
     slug,
     name,
-    nameEn: name,
+    nameEn,
     tagline,
-    taglineEn: tagline,
+    taglineEn,
     trustGrade: "unknown",
     installCount: 0,
     manifestUrl: `${webBaseUrl()}/mcp/${slug}`,
