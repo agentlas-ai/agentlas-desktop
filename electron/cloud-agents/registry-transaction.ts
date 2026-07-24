@@ -44,6 +44,8 @@ export interface CloudRegistryAgentRow {
   entity_kind: "agent" | "team" | null;
   /** Desktop-only metadata; older transaction journals legitimately omit it. */
   local_display_name?: string | null;
+  /** v75 team-member cell: owning firm id, NULL/absent for standalone agents. */
+  parent_team_id?: string | null;
 }
 
 interface CloudRegistryJournal {

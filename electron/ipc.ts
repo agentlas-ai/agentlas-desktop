@@ -243,6 +243,7 @@ import {
 } from "./hub-bookmark-sync";
 import { claimQuest, listQuests } from "./quests";
 import { listMemoryEntriesForAgentUi } from "./memory/store";
+import { importMemoryPreview, importMemoryApply } from "./memory/import";
 import {
   captureExperienceCandidate,
   createExperienceExportIntent,
@@ -2152,6 +2153,26 @@ export function registerIpcHandlers(): void {
     listMemoryEntriesForAgentUi(agentId, Math.min(Math.max(Number(limit) || 100, 1), 300)),
   );
   ipcMain.handle("agentLearning:summary", (_e, agentId: string) => getAgentLearningSummary(agentId));
+
+  // ── 기존 메모리 가져오기 (Phase 1b) — 레거시 마크다운 폴더 → 멤버/팀/공유 메모리 ──
+  //   dry-run 미리보기(어느 멤버·kind로 들어갈지) + 적용. 미리보기는 경로 미지정 시
+  //   폴더 선택 대화상자를 연다. 원본 경로/자격증명은 렌더러로 반환하지 않는다.
+  ipcMain.handle("memory:import-preview", async (event, agentId: string, sourcePath?: string) => {
+    let resolvedPath = typeof sourcePath === "string" ? sourcePath.trim() : "";
+    if (!resolvedPath) {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      const picked = await dialog.showOpenDialog(win ?? undefined!, {
+        title: "Choose a folder or markdown file to import memory from",
+        properties: ["openDirectory", "openFile"],
+        filters: [{ name: "Markdown", extensions: ["md", "markdown", "mdx", "txt"] }],
+      });
+      if (picked.canceled || picked.filePaths.length !== 1) return null;
+      resolvedPath = picked.filePaths[0];
+    }
+    return importMemoryPreview({ agentId, sourcePath: resolvedPath });
+  });
+  ipcMain.handle("memory:import-apply", (_e, agentId: string, sourcePath: string) =>
+    importMemoryApply({ agentId, sourcePath: String(sourcePath ?? "").trim() }));
 
   // ── Experience assets — local ownership + explicit, separate Cloud exchange ─
   // Pack creation still resolves project roots only through FsPathGrant. Cloud

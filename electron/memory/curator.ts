@@ -64,6 +64,54 @@ export interface CurationContext {
     basePackageHash: string | null;
     taskHint?: string | null;
   };
+  /**
+   * v75 · Team-run identities for deterministic 3-layer scope routing. Present
+   * only when the run is a materialized team run. When set, durable agent_repo
+   * learning is routed by kind (see classifyTeamLearningRoute): team
+   * coordination → orchestrator, shared norms → team_memory, domain skill/taste
+   * → the member cell. Absent (single-agent run) → behavior is unchanged.
+   */
+  teamRun?: {
+    orchestratorAgentId: string;
+    /** The member cell that owns domain learning this turn (org node slug = id). */
+    memberAgentId?: string | null;
+  };
+}
+
+/** Deterministic 3-layer team routing target for a durable agent_repo learning. */
+export type TeamLearningLayer = "coordination" | "shared" | "domain";
+
+/**
+ * Kind → team layer, deterministic (no LLM). Coordination/role/handoff-style
+ * records (decision/conflict/deprecation) belong to the orchestrator; portable
+ * facts are shared team_memory; everything else (procedure/risk/preference/…)
+ * is the member's own domain skill/taste cell.
+ */
+export function classifyTeamLearningRoute(kind: MemoryKind): TeamLearningLayer {
+  if (kind === "decision" || kind === "conflict" || kind === "deprecation") return "coordination";
+  if (kind === "fact") return "shared";
+  return "domain";
+}
+
+/**
+ * Apply the team layer routing to a resolved durable learning. Only rewrites
+ * agent_repo learning (the scope the 3 layers live on); every other scope is
+ * returned unchanged. Deterministic and side-effect free.
+ */
+function routeTeamLearning(
+  scope: MemoryScope,
+  kind: MemoryKind,
+  ownerAgentId: string | null,
+  teamRun: NonNullable<CurationContext["teamRun"]>,
+): { scope: MemoryScope; agentId: string | null } {
+  if (scope !== "agent_repo") return { scope, agentId: ownerAgentId };
+  const layer = classifyTeamLearningRoute(kind);
+  if (layer === "shared") return { scope: "team_memory", agentId: null };
+  if (layer === "coordination") return { scope: "agent_repo", agentId: teamRun.orchestratorAgentId };
+  return {
+    scope: "agent_repo",
+    agentId: teamRun.memberAgentId || teamRun.orchestratorAgentId,
+  };
 }
 
 export interface CurationReport {
@@ -475,15 +523,25 @@ export function curateEvents(
       continue;
     }
 
-    const projectPath = scope === "project" ? ctx.projectPath : null;
+    // v75: deterministic 3-layer team routing (member cell / orchestrator /
+    // shared). Inert for single-agent runs (teamRun absent). Only agent_repo
+    // learning is rewritten; the owner/scope decided here drive dedup, insert,
+    // and Experience intake so a member's domain skill accrues to its own cell.
+    const routed = ctx.teamRun
+      ? routeTeamLearning(scope, ev.memory_kind, ctx.agentId, ctx.teamRun)
+      : { scope, agentId: ctx.agentId };
+    const effectiveScope = routed.scope;
+    const effectiveAgentId = routed.agentId;
+
+    const projectPath = effectiveScope === "project" ? ctx.projectPath : null;
     const requestContext = buildRequestContext(ev, ctx, projectPath);
-    if (hasEquivalentMemory(scope, ev.memory_kind, ev.content, projectPath, ctx.agentId)) {
+    if (hasEquivalentMemory(effectiveScope, ev.memory_kind, ev.content, projectPath, effectiveAgentId)) {
       report.deduped += 1;
       recordCandidateDecision({
         options,
         index,
         event: ev,
-        scope,
+        scope: effectiveScope,
         action: "deduped",
         reason: "policy-exact-duplicate",
       });
@@ -491,12 +549,12 @@ export function curateEvents(
     }
 
     const entry = insertMemoryEntry({
-      scope,
+      scope: effectiveScope,
       kind: ev.memory_kind,
       content: ev.content,
       projectId: ctx.projectId,
       projectPath,
-      agentId: ctx.agentId,
+      agentId: effectiveAgentId,
       chatId: ctx.chatId,
       confidence: ev.confidence,
       sensitivity: ev.sensitivity,
@@ -508,7 +566,7 @@ export function curateEvents(
       options,
       index,
       event: ev,
-      scope,
+      scope: effectiveScope,
       action: "written",
       reason: resolved.reason,
       targetMemoryId: entry.id,
@@ -520,11 +578,11 @@ export function curateEvents(
       // admitted memory or its ticket/decision receipt.
       console.warn(`[memory] relation projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
     }
-    if (ctx.agentId && ctx.experienceIntake) {
+    if (effectiveAgentId && ctx.experienceIntake) {
       try {
         autoIntakeCuratedMemory({
           memory: entry,
-          agentId: ctx.agentId,
+          agentId: effectiveAgentId,
           projectId: ctx.projectId,
           projectPath: ctx.projectPath,
           environment: {
@@ -546,21 +604,21 @@ export function curateEvents(
     if (ctx.projectPath) {
       appendMemoryLog(ctx.projectPath, {
         action: "written",
-        scope,
+        scope: effectiveScope,
         kind: ev.memory_kind,
         content: ev.content,
         source_provenance: ctx.sourceProvenance ?? "assistant-turn",
         request_context: requestContextForLog(requestContext),
         at: new Date().toISOString(),
       });
-      if (SOUL_KINDS.has(ev.memory_kind) && scope === "project") {
+      if (SOUL_KINDS.has(ev.memory_kind) && effectiveScope === "project") {
         soulLines.push(`(${ev.memory_kind}) ${ev.content}`);
       }
     }
     // 에이전트 기술·경험(agent_repo) — 프로젝트 폴더 유무와 무관하게 빌린 에이전트의
     // 전역 experience.sqlite로 미러링한다(크로스 프로젝트 축적). project 스코프와 달리 프로젝트 고유
     // 정보가 아니므로 격리를 깨지 않는다.
-    if (scope === "agent_repo" && SOUL_KINDS.has(ev.memory_kind)) {
+    if (effectiveScope === "agent_repo" && SOUL_KINDS.has(ev.memory_kind)) {
       nestExperienceItems.push({
         id: entry.id,
         kind: ev.memory_kind,

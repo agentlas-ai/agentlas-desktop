@@ -58,6 +58,7 @@ function toAgent(row: AgentRow): InstalledAgent {
     installedAt: row.installed_at,
     tone: row.tone as InstalledAgent["tone"],
     bookmarkedAt: (row as { bookmarked_at?: string | null }).bookmarked_at ?? null,
+    parentTeamId: (row as { parent_team_id?: string | null }).parent_team_id ?? null,
     visibility: publicAgentVisibility(row),
     ...(route
       ? {

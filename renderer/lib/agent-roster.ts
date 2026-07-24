@@ -24,6 +24,10 @@ export function dedupeAgentsById(list: InstalledAgent[]): InstalledAgent[] {
 
 export function isRosterVisibleAgent(agent: InstalledAgent): boolean {
   if (agent.visibility === "background" || agent.visibility === "private") return false;
+  // v75: materialized team members are first-class agents (they accrue their own
+  // Experience) but must never surface as a top-level single/multi roster row —
+  // they belong to a team org chart. parent_team_id is the authority for that.
+  if (agent.parentTeamId) return false;
   // The DB visibility flag is the authority for installed assets. Text-based
   // filtering is reserved for generated org nodes that have no such metadata.
   return true;

@@ -163,6 +163,10 @@ const api: AgentlasIpc = {
   },
   agentMemory: {
     entries: (agentId: string, limit?: number) => ipcRenderer.invoke("agentMemory:entries", agentId, limit),
+    importPreview: (agentId: string, sourcePath?: string) =>
+      ipcRenderer.invoke("memory:import-preview", agentId, sourcePath),
+    importApply: (agentId: string, sourcePath: string) =>
+      ipcRenderer.invoke("memory:import-apply", agentId, sourcePath),
   },
   agentLearning: {
     summary: (agentId: string) => ipcRenderer.invoke("agentLearning:summary", agentId),

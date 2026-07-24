@@ -23,6 +23,8 @@ import type {
   ExperienceOntologyGraphSnapshot,
   ExperienceOntologySummary,
   LocalTasteDraftRecord,
+  MemoryImportPreviewUi,
+  MemoryImportResultUi,
   OperationalPublicProjectionRecord,
   TasteChipWorkflowRecord,
   TasteAxis,
@@ -137,6 +139,142 @@ function readableRoleLabel(role: string | undefined, displayName: string, agentS
 
 // 프롬프트 진화 후보로 승격 가능한 DB kind — 규칙성 있는 학습만(사실/가설 제외).
 const EVOLUTION_CANDIDATE_KINDS = new Set(["decision", "gotcha", "procedure"]);
+
+/**
+ * Phase 1b · "기존 메모리 가져오기 / Import existing memory".
+ * 레거시 마크다운 폴더/파일을 골라 어느 멤버·kind로 들어갈지 미리보기(dry-run) 후
+ * 적용한다. 원본 경로는 main에서만 다루고, 결과는 N건 이관·임베딩 카드로 보인다.
+ */
+function MemoryImportPanel({
+  agentId,
+  locale,
+  showToast,
+}: {
+  agentId: string;
+  locale: Locale;
+  showToast: (msg: string) => void;
+}) {
+  const ko = locale === "ko";
+  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<MemoryImportPreviewUi | null>(null);
+  const [result, setResult] = useState<MemoryImportResultUi | null>(null);
+
+  const runPreview = useCallback(async () => {
+    const api = ipc();
+    if (!api?.agentMemory?.importPreview) return;
+    setBusy(true);
+    setResult(null);
+    try {
+      const next = await api.agentMemory.importPreview(agentId);
+      setPreview(next ?? null);
+      if (!next) showToast(ko ? "가져오기를 취소했습니다." : "Import cancelled.");
+      else if (next.summary.total === 0) {
+        showToast(ko ? "가져올 메모리를 찾지 못했습니다." : "No importable memory found in that folder.");
+      }
+    } catch (error) {
+      showToast((ko ? "미리보기 실패: " : "Preview failed: ") + String(error));
+    } finally {
+      setBusy(false);
+    }
+  }, [agentId, ko, showToast]);
+
+  const runApply = useCallback(async () => {
+    const api = ipc();
+    if (!api?.agentMemory?.importApply || !preview) return;
+    setBusy(true);
+    try {
+      const applied = await api.agentMemory.importApply(agentId, preview.sourcePath);
+      setResult(applied);
+      setPreview(null);
+      showToast(
+        ko
+          ? `메모리 ${applied.imported}건을 가져왔습니다 (임베딩 ${applied.embedded}건).`
+          : `Imported ${applied.imported} memories (${applied.embedded} embedded).`,
+      );
+    } catch (error) {
+      showToast((ko ? "가져오기 실패: " : "Import failed: ") + String(error));
+    } finally {
+      setBusy(false);
+    }
+  }, [agentId, ko, preview, showToast]);
+
+  return (
+    <div style={{ border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 14, background: "var(--paper)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <IconFileUp size={15} style={{ color: "var(--accent)" }} />
+        <strong style={{ fontSize: 13 }}>{ko ? "기존 메모리 가져오기" : "Import existing memory"}</strong>
+      </div>
+      <p style={{ margin: "0 0 10px", fontSize: 12, color: "var(--ink-soft)" }}>
+        {ko
+          ? "레거시 마크다운(폴더/파일)을 골라 이 에이전트·팀의 메모리 구조로 옮깁니다. 먼저 어디로 들어갈지 미리 보여주고, 확인 후에만 저장합니다. 같은 내용은 다시 넣어도 중복되지 않습니다."
+          : "Pick legacy markdown (folder/file) to move into this agent/team's memory. You preview where each section lands, then apply — re-running never duplicates."}
+      </p>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          onClick={runPreview}
+          disabled={busy}
+          style={{ padding: "6px 12px", background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+        >
+          {ko ? "폴더 선택 & 미리보기" : "Choose folder & preview"}
+        </button>
+        {preview && preview.summary.newCount > 0 && (
+          <button
+            onClick={runApply}
+            disabled={busy}
+            style={{ padding: "6px 12px", background: "var(--green-deep)", color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+          >
+            {ko ? `${preview.summary.newCount}건 가져오기` : `Import ${preview.summary.newCount}`}
+          </button>
+        )}
+      </div>
+
+      {preview && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 11.5, color: "var(--muted-deep)", marginBottom: 6 }}>
+            {ko
+              ? `총 ${preview.summary.total} · 새로 ${preview.summary.newCount} · 중복 ${preview.summary.duplicateCount} · 민감정보 제외 ${preview.summary.redactedCount}`
+              : `Total ${preview.summary.total} · new ${preview.summary.newCount} · duplicate ${preview.summary.duplicateCount} · redacted ${preview.summary.redactedCount}`}
+          </div>
+          <div style={{ maxHeight: 240, overflowY: "auto", border: "1px solid var(--paper-edge)", borderRadius: 6 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+              <thead>
+                <tr style={{ textAlign: "left", color: "var(--muted-deep)" }}>
+                  <th style={{ padding: "5px 8px" }}>{ko ? "대상" : "Owner"}</th>
+                  <th style={{ padding: "5px 8px" }}>{ko ? "종류" : "Kind"}</th>
+                  <th style={{ padding: "5px 8px" }}>{ko ? "섹션" : "Section"}</th>
+                  <th style={{ padding: "5px 8px" }}>{ko ? "상태" : "Status"}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.rows.slice(0, 200).map((row, index) => (
+                  <tr key={`${row.file}-${index}`} style={{ borderTop: "1px solid var(--paper-edge)" }}>
+                    <td style={{ padding: "5px 8px", whiteSpace: "nowrap" }}>{row.ownerLabel}</td>
+                    <td style={{ padding: "5px 8px", color: "var(--accent)" }}>{row.kind}</td>
+                    <td style={{ padding: "5px 8px", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={row.section}>{row.section}</td>
+                    <td style={{ padding: "5px 8px", color: row.status === "new" ? "var(--green-deep)" : "var(--muted)" }}>
+                      {row.status === "new" ? (ko ? "새로" : "new") : row.status === "duplicate" ? (ko ? "중복" : "dup") : (ko ? "제외" : "skip")}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {result && (
+        <div style={{ marginTop: 12, padding: 10, background: "var(--fill-1)", borderRadius: 6, fontSize: 12 }}>
+          <strong>{ko ? "가져오기 완료" : "Import complete"}</strong>
+          <div style={{ marginTop: 4, color: "var(--ink-soft)" }}>
+            {ko
+              ? `${result.imported}건 저장 · 임베딩 ${result.embedded} · 경험 반영 ${result.intakeAttempted} · 중복 건너뜀 ${result.skippedDuplicate}`
+              : `${result.imported} stored · ${result.embedded} embedded · ${result.intakeAttempted} to experience · ${result.skippedDuplicate} duplicates skipped`}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function LibraryAgentsPage() {
   return (
@@ -4399,6 +4537,11 @@ function AgentDetailView({
                     : "Memory is stored as markdown files on my disk — the on/off state is saved with the file too, so it persists across refreshes."}
                 </div>
               </div>
+
+              {/* Phase 1b: 기존 메모리 가져오기 — 폴더 선택 → 미리보기 → 적용 */}
+              {agent?.id && (
+                <MemoryImportPanel agentId={agent.id} locale={locale} showToast={showToast} />
+              )}
 
               {/* 온톨로지 인박스 알림 영역 */}
               {ontologyInbox.length > 0 && (

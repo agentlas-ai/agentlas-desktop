@@ -1307,6 +1307,29 @@ function setupMockAgentlasBridge(options) {
             createdAt: now,
           }]
           : [],
+      importPreview: async (agentId, sourcePath) => {
+        record("agentMemory.importPreview", agentId, sourcePath);
+        return {
+          sourcePath: sourcePath || "/tmp/legacy-memory",
+          targetAgentId: agentId,
+          targetKind: "agent",
+          rows: [],
+          summary: { total: 0, newCount: 0, duplicateCount: 0, redactedCount: 0, byOwner: {}, byKind: {} },
+        };
+      },
+      importApply: async (agentId, sourcePath) => {
+        record("agentMemory.importApply", agentId, sourcePath);
+        return {
+          sourcePath: sourcePath || "/tmp/legacy-memory",
+          targetAgentId: agentId,
+          imported: 0,
+          skippedDuplicate: 0,
+          redacted: 0,
+          embedded: 0,
+          intakeAttempted: 0,
+          byOwner: {},
+        };
+      },
     },
     agentLearning: {
       summary: async (agentId) => {

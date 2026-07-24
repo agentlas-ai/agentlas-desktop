@@ -13,7 +13,7 @@ import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 
 let _db: Database.Database | null = null;
 
-const SCHEMA_VERSION = 74;
+const SCHEMA_VERSION = 75;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -80,6 +80,135 @@ function tableExists(db: Database.Database, table: string): boolean {
   return Boolean(
     db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1").get(table),
   );
+}
+
+interface FirmOrgNodeMigrationShape {
+  agentSlug?: string | null;
+  agentId?: string | null;
+  role?: string | null;
+  reportsTo?: string | null;
+}
+
+/**
+ * Read the persisted agent-route source map (userData/agent-routes.json) without
+ * importing the routes module — the migration must stay self-contained and must
+ * not pull the full agent registry into the schema-bootstrap path. A missing or
+ * unreadable file means "no cloud/hub provenance recorded" → treated as local.
+ */
+function readAgentRouteSourcesForMigration(): Map<string, string> {
+  const out = new Map<string, string>();
+  try {
+    const file = path.join(app.getPath("userData"), "agent-routes.json");
+    const raw = fs.readFileSync(file, "utf8");
+    const parsed = JSON.parse(raw) as Record<string, { source?: unknown }>;
+    if (parsed && typeof parsed === "object") {
+      for (const [agentId, route] of Object.entries(parsed)) {
+        const source = route && typeof route === "object" ? (route as { source?: unknown }).source : undefined;
+        if (typeof source === "string") out.set(agentId, source);
+      }
+    }
+  } catch {
+    // No routes file (fresh install / test fixture) → every firm is local-owned.
+  }
+  return out;
+}
+
+/**
+ * v75 · Member-cell materialization (unified, no opt-in).
+ *
+ * Team org-chart members are display-only nodes (empty agentId, no
+ * installed_agents row), so Experience/chips — which FK installed_agents(id) —
+ * cannot attach to them. Promote every LOCAL-OWNED team's empty-agentId org
+ * members into first-class installed_agents rows, KEY-PRESERVED (id = the
+ * node's agentSlug) so pre-existing slug-keyed member memories link
+ * automatically. Additive, idempotent, rollback-safe, fail-closed on a missing
+ * slug (never orphan). Hub-borrowed teams are excluded (ownership boundary);
+ * existing orchestrator/team-UUID experience is never retroactively moved.
+ */
+function materializeTeamMemberCellsV75(db: Database.Database): void {
+  if (!tableExists(db, "firms") || !tableExists(db, "installed_agents")) return;
+  const agentColumns = new Set(schemaColumns(db, "installed_agents").map((column) => column.name));
+  if (!agentColumns.has("parent_team_id")) return; // column add failed → do nothing
+
+  const routeSources = readAgentRouteSourcesForMigration();
+  const isBorrowedCeo = (ceoAgentId: string): boolean => {
+    const source = routeSources.get(ceoAgentId);
+    return source === "hub" || source === "agent-cloud";
+  };
+
+  const firms = db
+    .prepare("SELECT id, ceo_agent_id, org_chart_json FROM firms")
+    .all() as Array<{ id: string; ceo_agent_id: string; org_chart_json: string }>;
+  if (firms.length === 0) return;
+
+  const findRow = db.prepare("SELECT id, parent_team_id FROM installed_agents WHERE id = ? LIMIT 1");
+  const findBySlug = db.prepare("SELECT id FROM installed_agents WHERE slug = ? LIMIT 1");
+  const insertMember = db.prepare(
+    `INSERT INTO installed_agents
+       (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
+        env_requirements_json, preferred_backend, trust_grade, installed_at, tone,
+        builtin, role, visibility, entity_kind, parent_team_id)
+     VALUES
+       (@id, @slug, @name, @name_en, @tagline, @tagline_en, '', '[]',
+        '[]', NULL, 'unknown', @installed_at, 'blue',
+        0, @role, 'visible', 'agent', @parent_team_id)`,
+  );
+  const markMembership = db.prepare(
+    "UPDATE installed_agents SET parent_team_id = ? WHERE id = ? AND parent_team_id IS NULL",
+  );
+  const updateFirmChart = db.prepare("UPDATE firms SET org_chart_json = ? WHERE id = ?");
+  const now = new Date().toISOString();
+
+  for (const firm of firms) {
+    if (isBorrowedCeo(firm.ceo_agent_id)) continue; // C4: borrowed teams are never materialized.
+
+    let chart: FirmOrgNodeMigrationShape[];
+    try {
+      const parsed = JSON.parse(firm.org_chart_json);
+      if (!Array.isArray(parsed)) continue;
+      chart = parsed as FirmOrgNodeMigrationShape[];
+    } catch {
+      continue; // Unparseable chart — fail closed, never touch this firm.
+    }
+
+    let changed = false;
+    for (const node of chart) {
+      const existingAgentId = typeof node.agentId === "string" ? node.agentId.trim() : "";
+      if (existingAgentId) continue; // Already resolved (e.g. marketplace-installed member).
+      const slug = typeof node.agentSlug === "string" ? node.agentSlug.trim() : "";
+      if (!slug) continue; // C1 fail-closed: no key → cannot materialize, never orphan.
+
+      const existing = findRow.get(slug) as { id: string; parent_team_id: string | null } | undefined;
+      if (existing) {
+        // A row already owns this id (prior run, or a standalone that shares the
+        // slug). Link the node to it and mark membership only if unclaimed.
+        if (existing.parent_team_id == null) markMembership.run(firm.id, slug);
+        node.agentId = slug;
+        changed = true;
+        continue;
+      }
+      // Guard the UNIQUE(slug) constraint: another agent already holds this slug
+      // under a different id. Linking to a foreign id would orphan the member's
+      // slug-keyed memory, so skip (fail-closed) rather than mint a mismatch.
+      if (findBySlug.get(slug)) continue;
+
+      insertMember.run({
+        id: slug,
+        slug,
+        name: (node.role && String(node.role).trim()) || slug,
+        name_en: (node.role && String(node.role).trim()) || slug,
+        tagline: "",
+        tagline_en: "",
+        installed_at: now,
+        role: node.role ? String(node.role) : null,
+        parent_team_id: firm.id,
+      });
+      node.agentId = slug;
+      changed = true;
+    }
+
+    if (changed) updateFirmChart.run(JSON.stringify(chart), firm.id);
+  }
 }
 
 type RecoverableAutomationRunRow = {
@@ -3228,6 +3357,36 @@ export function initStore(): void {
           use_count = excluded.use_count;
       `);
 
+    }
+  }
+
+  // ── v74 → v75: unified team-member cell materialization ──────────────────
+  //   installed_agents.parent_team_id : the firm/team a materialized member
+  //     belongs to (NULL for standalone agents). Roster hides members from the
+  //     top-level single/multi lists; they surface only inside their org chart.
+  //   Materialization: every LOCAL-OWNED team's empty-agentId org members become
+  //     first-class installed_agents rows (id = agentSlug, key-preserved) so
+  //     Experience/chips can attach per member. Additive · idempotent · fail-
+  //     closed · borrowed teams excluded · no retroactive experience move.
+  if (userVersion < 75) {
+    if (tableExists(_db, "installed_agents")) {
+      const agentColumns = new Set(schemaColumns(_db, "installed_agents").map((column) => column.name));
+      if (!agentColumns.has("parent_team_id")) {
+        _db.exec("ALTER TABLE installed_agents ADD COLUMN parent_team_id TEXT NULL");
+      }
+      _db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_installed_agents_parent_team ON installed_agents(parent_team_id) WHERE parent_team_id IS NOT NULL",
+      );
+    }
+    try {
+      materializeTeamMemberCellsV75(_db);
+    } catch (error) {
+      // Materialization is a repair projection over additive rows; a failure
+      // must never abort the whole schema bootstrap. The column + index are the
+      // durable contract, and the next boot retries the row promotion.
+      console.warn(
+        `[migration] v75 member-cell materialization deferred: ${error instanceof Error ? error.message : "unknown"}`,
+      );
     }
   }
 

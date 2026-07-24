@@ -734,6 +734,12 @@ export interface InstalledAgent {
   visibility?: AgentVisibility;
   /** v74 소유자 북마크 시각(없으면 북마크 안 됨). 로스터 섹션/별 토글이 읽는다. */
   bookmarkedAt?: string | null;
+  /**
+   * v75 팀 멤버 세포: 이 에이전트가 소속된 팀(firm)의 id. NULL이면 독립(standalone)
+   * 에이전트다. 값이 있으면 조직도 안의 멤버이므로 최상위 로스터(single/multi)에서
+   * 숨기고 팀 조직도 안에서만 노출한다(중복 방지).
+   */
+  parentTeamId?: string | null;
 }
 
 /**
@@ -4535,6 +4541,43 @@ export interface AgentMemoryEntryUi {
   createdAt: string;
 }
 
+/** Phase 1b: one mapped section in an "import existing memory" preview. */
+export interface MemoryImportRowUi {
+  file: string;
+  section: string;
+  ownerLabel: string;
+  ownerAgentId: string | null;
+  scope: string;
+  kind: string;
+  status: "new" | "duplicate" | "redacted";
+}
+
+export interface MemoryImportPreviewUi {
+  sourcePath: string;
+  targetAgentId: string;
+  targetKind: "agent" | "team";
+  rows: MemoryImportRowUi[];
+  summary: {
+    total: number;
+    newCount: number;
+    duplicateCount: number;
+    redactedCount: number;
+    byOwner: Record<string, number>;
+    byKind: Record<string, number>;
+  };
+}
+
+export interface MemoryImportResultUi {
+  sourcePath: string;
+  targetAgentId: string;
+  imported: number;
+  skippedDuplicate: number;
+  redacted: number;
+  embedded: number;
+  intakeAttempted: number;
+  byOwner: Record<string, number>;
+}
+
 export interface AgentLearningSummary {
   agentId: string;
   /** Runs whose executor was recorded directly on the append-only run ledger. */
@@ -5005,6 +5048,10 @@ export interface AgentlasIpc {
   /** 에이전트 durable 메모리(런타임 큐레이터가 쌓는 DB) — 자가진화/타임라인 UI 소스. */
   agentMemory: {
     entries: (agentId: string, limit?: number) => Promise<AgentMemoryEntryUi[]>;
+    /** Phase 1b: 레거시 마크다운 폴더/파일 → 멤버·팀·공유 메모리 dry-run 미리보기. 경로 미지정 시 폴더 선택. */
+    importPreview: (agentId: string, sourcePath?: string) => Promise<MemoryImportPreviewUi | null>;
+    /** Phase 1b: 미리보기 그대로 적용(멱등). */
+    importApply: (agentId: string, sourcePath: string) => Promise<MemoryImportResultUi>;
   };
   agentLearning: {
     summary: (agentId: string) => Promise<AgentLearningSummary>;
