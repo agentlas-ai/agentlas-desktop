@@ -1151,6 +1151,14 @@ function setupMockAgentlasBridge(options) {
     projects: {
       list: async () => [project],
       get: async (id) => (id === project.id ? project : null),
+      memoryStatus: async () => ({
+        projectPath: project.folderPath ?? "/tmp/agentlas-qa-project",
+        identityVerified: true,
+        pmSoul: { present: true, recentlyInjected: true, reason: null, canGenerate: false },
+        codeMap: { present: true, recentlyInjected: true, reason: null, canGenerate: true },
+        sitemap: { present: false, recentlyInjected: false, reason: "no AI sitemap for this project", canGenerate: true },
+      }),
+      generateMemory: async (_projectId, source) => ({ started: source === "code_map", reason: source === "code_map" ? null : "sitemap generation is not available locally yet" }),
     },
     workspace: {
       get: async (chatId) => workspaceFolders[chatId] ?? null,

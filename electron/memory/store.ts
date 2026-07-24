@@ -183,7 +183,7 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
       JSON.stringify(embedding.vector),
       now,
     );
-  return {
+  const entry: MemoryEntry = {
     id,
     scope: e.scope,
     kind: e.kind,
@@ -200,6 +200,18 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
     supersededAt: null,
     createdAt: now,
   };
+  // Densify the memory relation graph on EVERY insert path (curated turns,
+  // imports, terminal, mobile) — not only the curator write path — so
+  // `similar_to` edges accrue as memory grows. The graph is a rebuildable
+  // projection: an edge failure must never undo the admitted memory. Lazy
+  // require avoids a store↔graph module cycle at load time.
+  try {
+    const { linkMemoryEntryBySimilarity } = require("./graph") as typeof import("./graph");
+    linkMemoryEntryBySimilarity(entry);
+  } catch (error) {
+    console.warn(`[memory] relation projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
+  }
+  return entry;
 }
 
 /** Live (non-superseded) memory for a project folder, newest first. */

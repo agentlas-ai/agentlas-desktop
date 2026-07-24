@@ -315,6 +315,8 @@ import {
   removeProject,
   updateProject,
 } from "./store/projects";
+import { generateProjectMemorySource, getProjectMemoryStatus } from "./memory/context";
+import type { ProjectMemoryGenerateResult, ProjectMemoryStatus } from "../shared/project-memory";
 import {
   archiveChat,
   clearChatContext,
@@ -2798,6 +2800,23 @@ export function registerIpcHandlers(): void {
     }),
   );
   ipcMain.handle("projects:remove", (_e, id: string) => removeProject(id));
+  // Project memory status (fix-if-unused surfacing): reports whether pm_soul /
+  // code_map / sitemap are present and recently injected, so a missing/unused
+  // source is visible on the Dashboard with a generate action.
+  ipcMain.handle("projects:memory-status", (_e, projectId: string): ProjectMemoryStatus | null => {
+    const project = getProject(projectId);
+    if (!project?.folderPath) return null;
+    return getProjectMemoryStatus(project.folderPath, project.id);
+  });
+  ipcMain.handle(
+    "projects:generate-memory",
+    (_e, projectId: string, source: "code_map" | "sitemap"): ProjectMemoryGenerateResult => {
+      const project = getProject(projectId);
+      if (!project?.folderPath) return { started: false, reason: "The project does not have a working folder." };
+      if (source !== "code_map" && source !== "sitemap") return { started: false, reason: "Unknown memory source." };
+      return generateProjectMemorySource(project.folderPath, source);
+    },
+  );
 
   // ── ontology activation (project-local, inbox + explicit sources only) ──
   ipcMain.handle("ontology:getProject", (_e, projectId: string) =>

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { getDb } from "./db";
 import type {
   FailureEventUi,
@@ -345,6 +345,95 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
 }
 
 export const AUTOMATION_RECOVERY_EVENT_KIND = "automation_recovery";
+
+/**
+ * Content-free recall observability marker. Records ONLY which recall source
+ * actually entered a turn's prompt and its approximate injected token size —
+ * never any value/content. Lets us prove after the fact that a given run read
+ * pm_soul / code_map / sitemap / experience / memory, and lets the Dashboard
+ * surface a per-project "was this source ever used" status. `projectKey` is a
+ * value-free identity (`id:<uuid>` or `path:<hash>`), safe to persist.
+ */
+export const CONTEXT_SOURCE_EVENT_KIND = "context_source";
+
+export type ContextSourceName =
+  | "pm_soul"
+  | "code_map"
+  | "sitemap"
+  | "experience"
+  | "memory";
+
+const CONTEXT_SOURCE_NAMES: ReadonlySet<string> = new Set([
+  "pm_soul",
+  "code_map",
+  "sitemap",
+  "experience",
+  "memory",
+]);
+
+/** Stable, value-free project identity for context-source markers. */
+export function projectContextKey(
+  projectId: string | null | undefined,
+  projectPath: string | null | undefined,
+): string | null {
+  if (typeof projectId === "string" && projectId.trim()) return `id:${projectId.trim()}`;
+  if (typeof projectPath === "string" && projectPath.trim()) {
+    const hash = createHash("sha256").update(projectPath.trim(), "utf8").digest("hex").slice(0, 24);
+    return `path:${hash}`;
+  }
+  return null;
+}
+
+/** Record one content-free recall marker. Ledger failures never break the run. */
+export function recordContextSourceMarker(input: {
+  runId: string;
+  chatId?: string | null;
+  agentId?: string | null;
+  source: ContextSourceName;
+  approxTokens: number;
+  projectKey?: string | null;
+}): void {
+  if (!input.runId || !CONTEXT_SOURCE_NAMES.has(input.source)) return;
+  tryRecordRunEvent({
+    runId: input.runId,
+    kind: CONTEXT_SOURCE_EVENT_KIND,
+    chatId: input.chatId ?? null,
+    agentId: input.agentId ?? null,
+    payload: {
+      source: input.source,
+      approxTokens: Math.max(0, Math.trunc(input.approxTokens)),
+      ...(input.projectKey ? { projectKey: input.projectKey } : {}),
+    },
+  });
+}
+
+/**
+ * Distinct recall sources injected for one project since `sinceIso` (inclusive),
+ * derived from content-free `context_source` markers. Powers the Dashboard
+ * "project memory status" panel without touching any project content.
+ */
+export function listRecentContextSourcesForProject(
+  projectKey: string,
+  sinceIso: string,
+): Set<ContextSourceName> {
+  const used = new Set<ContextSourceName>();
+  if (!projectKey) return used;
+  const rows = getDb()
+    .prepare(
+      `SELECT DISTINCT json_extract(payload_json, '$.source') AS source
+         FROM run_events
+        WHERE kind = ?
+          AND json_extract(payload_json, '$.projectKey') = ?
+          AND ts >= ?`,
+    )
+    .all(CONTEXT_SOURCE_EVENT_KIND, projectKey, sinceIso) as Array<{ source: string | null }>;
+  for (const row of rows) {
+    if (row.source && CONTEXT_SOURCE_NAMES.has(row.source)) {
+      used.add(row.source as ContextSourceName);
+    }
+  }
+  return used;
+}
 
 /**
  * 런 시작이 append-only 원장에 남았는지 — 채팅 인보크는 'invoke_started',

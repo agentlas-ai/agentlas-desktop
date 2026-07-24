@@ -444,6 +444,17 @@ export interface ExperienceIntakeDiagnostics {
     receipts: number;
     redactedSpans: number;
   };
+  /**
+   * Promotion outcomes by verification method. `runReceipt` (local-run-receipt)
+   * is the autonomous interactive/automation path; `userAttested` is manual. A
+   * live `runReceipt` of 0 while candidates exist means auto-promotion never
+   * fired — this makes that measurable per agent.
+   */
+  promotions: {
+    userAttested: number;
+    runReceipt: number;
+    testReceipt: number;
+  };
   reasons: Array<{
     status: "candidate-created" | "blocked" | "skipped";
     code: string;

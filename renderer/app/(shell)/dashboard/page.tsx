@@ -16,6 +16,7 @@ import { ConfirmRequests } from "@/components/dashboard/ConfirmRequests";
 import { GrowthProposals } from "@/components/dashboard/GrowthProposals";
 import { DashboardActivity } from "@/components/dashboard/DashboardActivity";
 import { DashboardAutomations } from "@/components/dashboard/DashboardAutomations";
+import { ProjectMemoryStatus } from "@/components/dashboard/ProjectMemoryStatus";
 
 export default function DashboardPage() {
   const { locale } = useT();
@@ -49,6 +50,8 @@ export default function DashboardPage() {
               {/* 에이전트 성장 제안 — 승인 인박스 바로 아래(사람이 늘 보는 자리). */}
               <div className="dashboard-panel" data-tour-id="dashboard.growth"><GrowthProposals /></div>
               <div className="dashboard-panel" data-tour-id="dashboard.readiness"><RuntimeReadiness /></div>
+              {/* 프로젝트 기억 상태 — PM소울/코드맵/사이트맵 실활용 현황 + 없으면 생성. */}
+              <div className="dashboard-panel" data-tour-id="dashboard.project-memory"><ProjectMemoryStatus /></div>
               <div className="dashboard-panel" data-tour-id="dashboard.activity">
                 <DashboardActivity />
               </div>

@@ -5,7 +5,7 @@ import { getDb } from "../store/db";
 import { rankHybridLocal } from "./local-embedding";
 import { listMemoryRelationCandidates, type MemoryEntry } from "./store";
 
-const MAX_SIMILAR_EDGES = 6;
+const MAX_SIMILAR_EDGES = 5;
 const MIN_VECTOR_SCORE = 0.55;
 
 function pathHash(value: string): string {

@@ -104,7 +104,7 @@ import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
 import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, parseSurfaces } from "../surface-emitter";
 import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay } from "../one/markdown-surface";
 import { createAutomation, listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
-import { tryRecordRunEvent } from "../store/run-events";
+import { projectContextKey, recordContextSourceMarker, tryRecordRunEvent } from "../store/run-events";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import {
   resolveSiteAgentAppInlineMcpConfigForDispatch,
@@ -2683,6 +2683,10 @@ export async function runMcpInvocation(
         materializeCodeMap: Boolean(activePath && canWrite),
         taskPrompt: effectiveUserPrompt,
         projectId: invocationProjectId,
+        // Content-free recall observability — records which sources (pm_soul /
+        // code_map / sitemap / memory) actually entered this turn's prompt.
+        runId: req.runId ?? null,
+        chatId: chat.id,
       });
       if (memoryContext) turnContextParts.push(memoryContext);
       // hep 발화 표면 — 프로젝트 작업 폴더에 대기 중 성장 제안 요약 파일을 쓰고(호스트가
@@ -2767,7 +2771,19 @@ export async function runMcpInvocation(
           task: effectiveUserPrompt,
           reservedApproxTokens: applicableTasteSnapshot?.overlay.estimatedTokens ?? 0,
         });
-        if (experienceContext.prompt) turnContextParts.push(experienceContext.prompt);
+        if (experienceContext.prompt) {
+          turnContextParts.push(experienceContext.prompt);
+          if (req.runId) {
+            recordContextSourceMarker({
+              runId: req.runId,
+              chatId: chat.id,
+              agentId: agent.id,
+              source: "experience",
+              approxTokens: Math.ceil(Buffer.byteLength(experienceContext.prompt, "utf8") / 3),
+              projectKey: projectContextKey(invocationProjectId, suppressMutableProjectContext ? null : workingFolder),
+            });
+          }
+        }
       } catch (err) {
         // Experience is an optional host-local projection. A damaged/missing
         // projection can never block the base agent or Memory architecture.
@@ -3461,8 +3477,20 @@ export async function runMcpInvocation(
     if (!req.agentAppMode && !projectReadOnlyBoundary && req.runId && !oneToolFailureBlocksCompletion()) {
       try {
         const outcome = promoteExperienceCandidatesForRun({ agentId: agent.id, runId: req.runId });
-        if (outcome.promoted > 0) {
-          console.log(`[experience] interactive run promoted ${outcome.promoted}/${outcome.eligible} candidate(s)`);
+        if (outcome.eligible > 0) {
+          console.log(
+            `[experience] interactive run promoted ${outcome.promoted}/${outcome.eligible} candidate(s) ` +
+              `(agent ${agent.id}, run ${req.runId})`,
+          );
+          // Content-free ledger marker so live run-receipt promotion is queryable
+          // (the live "0 run-receipt promotions" symptom was unmeasurable before).
+          tryRecordRunEvent({
+            runId: req.runId,
+            kind: "experience_auto_promotion",
+            chatId: chat.id,
+            agentId: agent.id,
+            payload: { eligible: outcome.eligible, promoted: outcome.promoted, method: "local-run-receipt" },
+          });
         }
       } catch (err) {
         console.warn("[experience] interactive outcome promotion deferred:", err);

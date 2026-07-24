@@ -1532,10 +1532,26 @@ export function getExperienceIntakeDiagnostics(agentIdValue: string): Experience
       redactedAdmits.redactedSpans += Number(row.redaction_count ?? 0);
     }
   }
+  // Promotion outcomes by verification method — the measurable evidence that
+  // interactive/automation auto-promotion (`local-run-receipt`) actually fires
+  // versus manual `user-attested`. Joined through this agent's packs.
+  const promotionRows = getDb().prepare(
+    `SELECT r.verification_method AS method, COUNT(*) AS n
+       FROM experience_promotion_receipts r
+      WHERE r.agent_id = ? AND r.action = 'promote'
+      GROUP BY r.verification_method`,
+  ).all(agentId) as Array<{ method: string; n: number }>;
+  const promotions = { userAttested: 0, runReceipt: 0, testReceipt: 0 };
+  for (const row of promotionRows) {
+    if (row.method === "user-attested") promotions.userAttested += Number(row.n ?? 0);
+    else if (row.method === "local-run-receipt") promotions.runReceipt += Number(row.n ?? 0);
+    else if (row.method === "local-test-receipt") promotions.testReceipt += Number(row.n ?? 0);
+  }
   return {
     agentId,
     totals,
     redactedAdmits,
+    promotions,
     reasons: [...reasonCounts.entries()]
       .map(([key, count]) => {
         const [status, code] = key.split(" ");

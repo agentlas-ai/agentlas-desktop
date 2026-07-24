@@ -32,6 +32,17 @@ import { autoLocalEmbedding, localEmbeddingTokens, rankHybridLocal } from "./loc
 import { listMemoryEpisodesForContext } from "./tickets";
 import { readDiscoveredProjectPmTextFiles } from "./project-artifacts";
 import { looksSecret } from "../../shared/secret-patterns";
+import type {
+  ProjectMemoryGenerateResult,
+  ProjectMemorySourceStatus,
+  ProjectMemoryStatus,
+} from "../../shared/project-memory";
+import {
+  type ContextSourceName,
+  listRecentContextSourcesForProject,
+  projectContextKey,
+  recordContextSourceMarker,
+} from "../store/run-events";
 
 // 1800 was small enough that a 31k-char soul contributed 5.8% of itself, and
 // because the cut was positional the 94% it dropped included rules that would
@@ -526,12 +537,38 @@ function projectPmSection(projectPath: string, taskPrompt?: string): string | nu
 export function buildMemoryContext(
   projectPath: string | null,
   agentId?: string | null,
-  options: { materializeCodeMap?: boolean; taskPrompt?: string; projectId?: string | null } = {},
+  options: {
+    materializeCodeMap?: boolean;
+    taskPrompt?: string;
+    projectId?: string | null;
+    /** When set, records content-free `context_source` markers for each source that entered the prompt. */
+    runId?: string | null;
+    chatId?: string | null;
+  } = {},
 ): string {
   const sections: string[] = [];
   // agentId가 주어지면 per-agent 스코프(공유 + 본인 agent_repo만)로 읽어, 각 본부/전문가
   // 세션이 자기 메모리만 보게 한다. 미지정이면 기존 동작(전체) 유지(단일 에이전트 경로).
   const perAgent = agentId !== undefined;
+
+  // Content-free observability: track which recall sources actually entered this
+  // turn's prompt and their approximate injected token size. Emitted only when a
+  // runId is supplied; the marker carries source name + size, never any value.
+  const injected: Array<{ source: ContextSourceName; text: string }> = [];
+  const flushMarkers = (): void => {
+    if (!options.runId || injected.length === 0) return;
+    const projectKey = projectContextKey(options.projectId ?? null, projectPath);
+    for (const item of injected) {
+      recordContextSourceMarker({
+        runId: options.runId,
+        chatId: options.chatId ?? null,
+        agentId: agentId ?? null,
+        source: item.source,
+        approxTokens: approximateMemoryTokens(item.text),
+        projectKey,
+      });
+    }
+  };
 
   if (projectPath) {
     // The caller's boolean authorization is not a durable capability. Verify
@@ -542,12 +579,17 @@ export function buildMemoryContext(
     }
     const soul = readActivatedProjectMemoryText(projectPath, PROJECT_SOUL_FILE);
     if (soul && soul.trim()) {
-      sections.push(`### Project memory (${projectPath})\n${selectSoulText(soul, options.taskPrompt, projectPath)}`);
+      const soulSection = `### Project memory (${projectPath})\n${selectSoulText(soul, options.taskPrompt, projectPath)}`;
+      sections.push(soulSection);
+      injected.push({ source: "pm_soul", text: soulSection });
     } else {
       warnProjectMemoryGap(projectPath, "project-soul", "missing or empty");
     }
     const sitemap = summarizeSitemap(projectPath);
-    if (sitemap) sections.push(sitemap);
+    if (sitemap) {
+      sections.push(sitemap);
+      injected.push({ source: "sitemap", text: sitemap });
+    }
     const pmNotes = projectPmSection(projectPath, options.taskPrompt);
     if (pmNotes) sections.push(pmNotes);
     const careerGraph = summarizeCareerGraph(projectPath);
@@ -556,7 +598,10 @@ export function buildMemoryContext(
     // generator or create project-local state merely by asking a question.
     if (options.materializeCodeMap !== false) ensureCodeMap(projectPath);
     const codeMap = summarizeCodeMap(projectPath);
-    if (codeMap) sections.push(codeMap);
+    if (codeMap) {
+      sections.push(codeMap);
+      injected.push({ source: "code_map", text: codeMap });
+    }
     const entries = (
       perAgent
         ? listMemoryByPathForAgent(projectPath, agentId ?? null, MEMORY_CANDIDATE_LIMIT)
@@ -564,7 +609,9 @@ export function buildMemoryContext(
     ).filter((e) => e.scope !== "session");
     const selectedEntries = selectMemoryEntries(entries, options.taskPrompt);
     if (selectedEntries.length > 0) {
-      sections.push(`### Relevant curated memory\n${entryLines(selectedEntries)}`);
+      const memorySection = `### Relevant curated memory\n${entryLines(selectedEntries)}`;
+      sections.push(memorySection);
+      injected.push({ source: "memory", text: memorySection });
     }
     const timeline = timelineSection(options.projectId, projectPath, options.taskPrompt);
     if (timeline) sections.push(timeline);
@@ -572,10 +619,95 @@ export function buildMemoryContext(
       return formatMemorySections(globalMemorySections(perAgent, agentId, options.taskPrompt));
     }
   } else {
-    sections.push(...globalMemorySections(perAgent, agentId, options.taskPrompt));
+    const globalSections = globalMemorySections(perAgent, agentId, options.taskPrompt);
+    sections.push(...globalSections);
+    if (globalSections.length > 0) injected.push({ source: "memory", text: globalSections.join("\n\n") });
     const timeline = timelineSection(null, null, options.taskPrompt);
     if (timeline) sections.push(timeline);
   }
 
+  flushMarkers();
   return formatMemorySections(sections);
+}
+
+const MEMORY_STATUS_RECENT_DAYS = 30;
+
+/**
+ * Fix-if-unused surfacing: report whether pm_soul / code_map / sitemap are
+ * present for a project and whether they were recently injected (from
+ * content-free markers). Powers the Dashboard "project memory status" panel so
+ * a missing/unused source becomes visible with a generate action instead of a
+ * silent warnProjectMemoryGap.
+ */
+export function getProjectMemoryStatus(
+  projectPath: string,
+  projectId?: string | null,
+): ProjectMemoryStatus {
+  const identityVerified = verifyActivatedFolderIdentity(projectPath);
+  const sinceIso = new Date(Date.now() - MEMORY_STATUS_RECENT_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const projectKey = projectContextKey(projectId ?? null, projectPath);
+  const recent = projectKey ? listRecentContextSourcesForProject(projectKey, sinceIso) : new Set<ContextSourceName>();
+
+  if (!identityVerified) {
+    const blocked = (): ProjectMemorySourceStatus => ({
+      present: false,
+      recentlyInjected: false,
+      reason: "project folder access is not currently authorized",
+      canGenerate: false,
+    });
+    return { projectPath, identityVerified, pmSoul: blocked(), codeMap: blocked(), sitemap: blocked() };
+  }
+
+  const soulText = readActivatedProjectMemoryText(projectPath, PROJECT_SOUL_FILE);
+  const soulPresent = Boolean(soulText && soulText.trim());
+  const codeMapPresent = Boolean(readCodeMapSeed(projectPath));
+  const sitemapPresent = Boolean(summarizeSitemap(projectPath));
+
+  return {
+    projectPath,
+    identityVerified,
+    pmSoul: {
+      present: soulPresent,
+      recentlyInjected: recent.has("pm_soul"),
+      reason: soulPresent ? null : "no PM soul document (.agentlas soul file missing or empty)",
+      canGenerate: false,
+    },
+    codeMap: {
+      present: codeMapPresent,
+      recentlyInjected: recent.has("code_map"),
+      reason: codeMapPresent ? null : "no readable code map — generate one so agents can locate code without scanning",
+      canGenerate: true,
+    },
+    sitemap: {
+      present: sitemapPresent,
+      recentlyInjected: recent.has("sitemap"),
+      reason: sitemapPresent ? null : "no AI sitemap for this project",
+      canGenerate: true,
+    },
+  };
+}
+
+/**
+ * Wire the Dashboard "generate" action to existing generators. Code map spawns
+ * the background code-map generator (same path buildMemoryContext uses); sitemap
+ * has no local generator yet, so it reports that honestly rather than pretending.
+ */
+export function generateProjectMemorySource(
+  projectPath: string,
+  source: "code_map" | "sitemap",
+): ProjectMemoryGenerateResult {
+  if (!verifyActivatedFolderIdentity(projectPath)) {
+    return { started: false, reason: "project folder access is not currently authorized" };
+  }
+  if (source === "code_map") {
+    if (readCodeMapSeed(projectPath)) return { started: false, reason: "code map already present" };
+    const gen = codeMapGenPath();
+    if (!gen) return { started: false, reason: "code map generator is unavailable in this build" };
+    // Reset the per-session trigger guard so an explicit user request always
+    // (re)spawns generation even if an earlier auto-attempt marked it triggered.
+    codeMapTriggered.delete(projectPath);
+    ensureCodeMap(projectPath);
+    return { started: true, reason: null };
+  }
+  return { started: false, reason: "sitemap generation is not available locally yet" };
 }

@@ -23,7 +23,6 @@ import { tryRecordRunEvent } from "../store/run-events";
 // looksSecret is the single chokepoint before memory writes, including the agent_repo nest
 // mirroring that crosses projects — a miss here reaches the widest surface in the product.
 import { looksSecret } from "../../shared/secret-patterns";
-import { linkMemoryEntryBySimilarity } from "./graph";
 import type { SemanticMemoryDecision } from "./semantic-curator";
 import {
   beginMemoryTicket,
@@ -571,13 +570,9 @@ export function curateEvents(
       reason: resolved.reason,
       targetMemoryId: entry.id,
     });
-    try {
-      linkMemoryEntryBySimilarity(entry);
-    } catch (error) {
-      // Graph is a rebuildable projection; an edge failure can never undo the
-      // admitted memory or its ticket/decision receipt.
-      console.warn(`[memory] relation projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
-    }
+    // similar_to graph edges are now projected inside insertMemoryEntry on every
+    // insert path (curated turns, imports, terminal, mobile), so the curator no
+    // longer links a second time — the projection is idempotent regardless.
     if (effectiveAgentId && ctx.experienceIntake) {
       try {
         autoIntakeCuratedMemory({

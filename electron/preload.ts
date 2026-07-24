@@ -449,6 +449,9 @@ const api: AgentlasIpc = {
     update: (id: string, patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId">> & { folderGrant?: FsPathGrant | null }) =>
       ipcRenderer.invoke("projects:update", id, patch),
     remove: (id: string) => ipcRenderer.invoke("projects:remove", id),
+    memoryStatus: (projectId: string) => ipcRenderer.invoke("projects:memory-status", projectId),
+    generateMemory: (projectId: string, source: "code_map" | "sitemap") =>
+      ipcRenderer.invoke("projects:generate-memory", projectId, source),
   },
   ontology: {
     getProject: (projectId: string) => ipcRenderer.invoke("ontology:getProject", projectId),
