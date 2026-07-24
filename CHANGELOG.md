@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.9.11 — 2026-07-24
+
+### Added
+
+- Memory architecture rework. Team members are now first-class memory/experience
+  owners: on upgrade (schema v75), every local team's org-chart members become
+  first-class agents (id preserved from their slug, so existing member memory
+  links automatically). Experience and chips can now accrue per member, not only
+  to the team orchestrator. Existing orchestrator experience is not moved.
+- Import existing memory: an "Import existing memory" action in the agent/team
+  detail (My Agents) and an `agentlas memory import <path>` terminal command turn
+  legacy markdown notes into Agentlas memory (embedded, idempotent, secret-redacted).
+- Self-evolution now fires on normal runs (repeated failure, accumulated
+  experience, repeated steering), not only scheduled-automation recovery.
+  Trust-tiered: low-risk proposals auto-apply with an undo entry; high-risk
+  proposals ask for approval — surfaced on the Dashboard, One, and the terminal
+  (`agentlas evolve`).
+- Memory relation graph densifies with deterministic `similar_to` edges on every
+  memory insert path.
+- Project memory status: the Dashboard shows whether PM soul, code map, and
+  sitemap are present and were recently used, with a generate action when missing;
+  content-free source-usage markers make "did this run use the code map?"
+  answerable.
+
+### Runtime
+
+- This release binds Agentlas OS v1.1.58, pinned at
+  `47e2368e5c775d6345118c6409850872ec647738`. This source note does not prove a
+  Desktop Git tag, public installer, GitHub release, or update feed.
+
 ## 0.9.10 — 2026-07-24
 
 ### Changed

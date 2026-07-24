@@ -69,6 +69,15 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-24 · v0.9.11 — memory architecture rework: team-member cells, memory import, self-evolution firing** —
+  team members become first-class memory/experience owners (schema v75, slug-preserving
+  migration so existing member memory links); an "Import existing memory" action (My Agents
+  + `agentlas memory import`) turns legacy markdown into Agentlas memory; self-evolution now
+  fires on normal runs with trust tiers (low-risk auto-apply + undo, high-risk approval) shown
+  on Dashboard, One, and the terminal; the memory relation graph densifies with `similar_to`
+  edges; and a Project memory status panel makes PM-soul/code-map/sitemap usage visible. This
+  release binds Agentlas OS v1.1.58 at `47e2368e5c775d6345118c6409850872ec647738`. This source
+  note does not prove a Desktop Git tag, public installer, GitHub release, or update feed.
 - **2026-07-24 · v0.9.10 — provider cards, Hub card cleanup, team-member intake fix** —
   the dashboard LLM connections/usage becomes a responsive grid of collapsible
   provider cards, Hub agent cards drop the first-letter tile for a text- and
