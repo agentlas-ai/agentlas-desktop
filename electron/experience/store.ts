@@ -957,6 +957,17 @@ function ensureAutoExperiencePack(input: AutoExperienceIntakeInput): PackRow {
  * explicit owner actions.
  */
 export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void {
+  // experience_auto_intake_receipts and experience_candidates both FK
+  // agent_id → installed_agents(id). Org-chart team members bind their memory
+  // by agentSlug and have no installed_agents row, so any intake write here
+  // would throw a FOREIGN KEY constraint and abort the caller's curation.
+  // Skip intake for a non-installed owner (its memory still drives runtime
+  // prompts); experience accrual requires a first-class installed agent.
+  const ownerInstalled = getDb()
+    .prepare("SELECT 1 FROM installed_agents WHERE id = ? LIMIT 1")
+    .get(input.agentId);
+  if (!ownerInstalled) return;
+
   const sourceMemoryHash = autoIntakeSourceMemoryHash(input);
   const runId = input.runId ?? null;
   const recordBlocked = (reasons: string[], redactionCount = 0): void => {
