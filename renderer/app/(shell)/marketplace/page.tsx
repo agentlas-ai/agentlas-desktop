@@ -1001,21 +1001,8 @@ function RdTag({
 }
 
 // 카드 아바타 타일 — 슬러그에서 결정적으로 색을 뽑아 텍스트뿐인 카드에 시각 정체성을 준다.
-// (채용 플랫폼 카드 문법: 정체성 타일 + 이름 + 한 줄 소개 + 실적 한 줄 + 배지 + CTA.)
-function identityHue(slug: string): number {
-  let hash = 0;
-  for (let i = 0; i < slug.length; i += 1) hash = (hash * 31 + slug.charCodeAt(i)) >>> 0;
-  return hash % 360;
-}
-
-function identityGradient(slug: string): string {
-  const hue = identityHue(slug);
-  return `linear-gradient(135deg, oklch(0.9 0.055 ${hue}), oklch(0.79 0.095 ${(hue + 42) % 360}))`;
-}
-
-function identityInitial(name: string): string {
-  return Array.from(name.trim())[0]?.toUpperCase() ?? "?";
-}
+// 카드 문법: 이름 + 한 줄 소개 + 실적 한 줄 + 배지 + CTA(텍스트·버튼 위주,
+// 의미 없는 첫글자 로고 타일은 제거).
 
 function AgentCard({
   listing,
@@ -1073,13 +1060,6 @@ function AgentCard({
         </span>
       </div>
       <div className="hub-card-head">
-        <div
-          className="hub-card-avatar"
-          aria-hidden="true"
-          style={{ background: identityGradient(listing.slug) }}
-        >
-          {identityInitial(loc.name)}
-        </div>
         <div className="hub-card-main">
           <div className="hub-card-kicker">
             {plugin

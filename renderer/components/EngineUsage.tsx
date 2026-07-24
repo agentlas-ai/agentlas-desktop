@@ -122,6 +122,8 @@ export function EngineUsage() {
   const [notice, setNotice] = useState<{ id: string; text: string; command?: string } | null>(null);
   const [keyFor, setKeyFor] = useState<string | null>(null);
   const [keyVal, setKeyVal] = useState("");
+  // 접이식 그룹(구독형·CLI / API 키 / 로컬). 기본 펼침.
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const usageRequestGen = useRef(0);
 
   const loadUsage = useCallback(async (force = false) => {
@@ -453,6 +455,97 @@ export function EngineUsage() {
     return ko ? "연결됨" : "connected";
   }
 
+  const renderEngineCard = (e: EngineDef) => {
+    const u = usageFor(e.id);
+    const connected = isConnected(e);
+    const rt = runtimeFor(e);
+    const runtimeVersionLabel = runtimeVersionText(runtimeVersionFor(e));
+    const hasBars = connected && (u?.windows.length ?? 0) > 0;
+    const terminalError = connected && isTerminalProviderError(u);
+    const retryableError = connected && u?.status === "error" && !isRateLimited(u);
+    const showConnectedChip = connected && !terminalError && !retryableError;
+    const statusLine = (connected
+      ? statusText(e, u)
+      : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected")
+      : e.auth === "apikey" ? (ko ? "API 키 · 미연결" : "API key · not connected")
+      : ko ? "미설치" : "not installed")
+      + (connected && runtimeVersionLabel ? ` · ${runtimeVersionLabel}` : "");
+    const actions = terminalError ? (
+      <button onClick={() => openProviderHelp(e)} className="titlebar-nodrag" title={e.id === "grok" ? (ko ? "Grok Settings에서 사용량 확인" : "Open Grok usage settings") : (ko ? "Antigravity 안내 열기" : "Open Antigravity")}>
+        {e.id === "grok" ? (ko ? "Usage 열기" : "Open usage") : (ko ? "Antigravity" : "Antigravity")}
+      </button>
+    ) : retryableError ? (
+      <>
+        <button onClick={() => { if (e.retryProviderId) void retryProviderUsage(e.retryProviderId); }} disabled={busy === e.id} className="titlebar-nodrag" title={ko ? "사용량 조회 다시 시도" : "Retry usage fetch"}>
+          {ko ? "다시 시도" : "Retry"}
+        </button>
+        {e.auth === "cli" && (
+          <button onClick={() => void connectCli(e)} disabled={busy === e.id} className="titlebar-nodrag" title={ko ? "CLI 재로그인" : "Re-login CLI"}>
+            {busy === e.id ? busyLabel() : ko ? "재로그인" : "Re-login"}
+          </button>
+        )}
+      </>
+    ) : connected && !rt?.active && rt ? (
+      <button onClick={() => void activateEngine(e, rt)} disabled={busy === e.id} className="titlebar-nodrag" title={ko ? "이 엔진을 기본 실행 엔진으로" : "Make this the default run engine"}>
+        {ko ? "기본으로" : "Use default"}
+      </button>
+    ) : !connected ? (
+      <button onClick={() => (e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))} disabled={busy === e.id} className="titlebar-nodrag">
+        {busy === e.id ? busyLabel() : ko ? "연결" : "Connect"}
+      </button>
+    ) : null;
+    return (
+      <div key={e.id} className="dashboard-engine-card" data-connected={connected ? "true" : "false"}>
+        <div className="dashboard-engine-card-head">
+          <span className="dashboard-engine-logo" aria-hidden="true"><img src={e.logoSrc} alt="" /></span>
+          <span className="sr-only">{e.logoAlt}</span>
+          <span className="dashboard-engine-card-name">{e.label}</span>
+          {showConnectedChip && (
+            <span className="dashboard-engine-connected" style={{ marginLeft: "auto" }}>{ko ? "연결됨" : "Connected"}</span>
+          )}
+        </div>
+        <div
+          className="dashboard-engine-card-status"
+          data-terminal-state={terminalError ? "true" : undefined}
+          style={connected && u?.status === "error" ? { color: "var(--dash-red)" } : undefined}
+          title={statusLine}
+        >
+          {statusLine}
+        </div>
+        <div className="dashboard-engine-card-body">
+          {hasBars
+            ? u!.windows.slice(0, 3).map((w) => <UsageBar key={w.id} w={w} ko={ko} />)
+            : rt?.active
+              ? <span className="dashboard-engine-default" style={{ alignSelf: "flex-start" }} title={ko ? "기본 실행 엔진" : "Default run engine"}>{ko ? "기본 실행 엔진" : "Default engine"}</span>
+              : null}
+        </div>
+        {(actions || (keyFor === e.id && !connected)) && (
+          <div className="dashboard-engine-card-foot">
+            {actions ? <div className="dashboard-engine-actions" style={{ padding: 0 }}>{actions}</div> : <span />}
+          </div>
+        )}
+        {keyFor === e.id && !connected && (
+          <div className="dashboard-key-editor">
+            <input type="password" autoFocus value={keyVal} onChange={(ev) => setKeyVal(ev.target.value)} onKeyDown={(ev) => ev.key === "Enter" && void saveKey(e)} placeholder={e.keyEnv} className="titlebar-nodrag" />
+            <button onClick={() => void saveKey(e)} disabled={busy === e.id || !keyVal.trim()} className="titlebar-nodrag">{ko ? "저장" : "Save"}</button>
+          </div>
+        )}
+        {notice?.id === e.id && (
+          <div role="alert" style={{ fontSize: 11, lineHeight: 1.5, color: "var(--dash-red)", background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: 8, padding: "6px 9px", overflowWrap: "anywhere" }}>
+            {notice.text}
+            {notice.command && (<> {ko ? "터미널에서 직접 실행:" : "Run manually:"} <code>{notice.command}</code></>)}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const engineGroups = [
+    { key: "cli", label: ko ? "구독형 · CLI" : "Subscription · CLI", engines: ENGINES.filter((e) => e.auth === "cli") },
+    { key: "apikey", label: ko ? "API 키" : "API key", engines: ENGINES.filter((e) => e.auth === "apikey") },
+    { key: "local", label: ko ? "로컬" : "Local", engines: ENGINES.filter((e) => e.auth === "local") },
+  ].filter((g) => g.engines.length > 0);
+
   return (
     <div className="dashboard-engine-usage">
       <div className="dashboard-module-head" data-collapsed="false">
@@ -464,182 +557,35 @@ export function EngineUsage() {
         <div className="dashboard-usage-load-error" role="alert">
           <span>{ko ? "사용량 상태를 읽지 못함" : "Could not load usage status"}</span>
           <span aria-hidden="true">·</span>
-          <button
-            type="button"
-            className="titlebar-nodrag"
-            onClick={() => void loadUsage(true)}
-          >
-            {ko ? "다시 시도" : "Retry"}
-          </button>
+          <button type="button" className="titlebar-nodrag" onClick={() => void loadUsage(true)}>{ko ? "다시 시도" : "Retry"}</button>
         </div>
       )}
 
-      {ENGINES.map((e, index) => {
-          const u = usageFor(e.id);
-          const connected = isConnected(e);
-          const rt = runtimeFor(e);
-          const runtimeVersion = runtimeVersionFor(e);
-          const runtimeVersionLabel = runtimeVersionText(runtimeVersion);
-          const hasBars = connected && (u?.windows.length ?? 0) > 0;
-          const terminalError = connected && isTerminalProviderError(u);
-          const retryableError = connected && u?.status === "error" && !isRateLimited(u);
-          // 초록 "연결됨" 피드백은 정상 연결(에러 없음)일 때만. 상태 문장/버튼과 겹치지
-          // 않도록 topline 오른쪽에는 짧은 칩만 두고, 실제 버튼은 이름줄 아래로 내린다.
-          const showConnectedChip = connected && !terminalError && !retryableError;
-          // 액션 버튼(있으면)은 topline이 아니라 전용 아래 행에 둔다 — 이름/상태 문장이
-          // 좁은 2열 셀에서 잘리거나 줄바꿈으로 깨지지 않도록 가로폭을 온전히 준다.
-          const actions = terminalError ? (
-            <button
-              onClick={() => openProviderHelp(e)}
-              className="titlebar-nodrag"
-              title={
-                e.id === "grok"
-                  ? ko ? "Grok Settings에서 사용량 확인" : "Open Grok usage settings"
-                  : ko ? "Antigravity 안내 열기" : "Open Antigravity"
-              }
-            >
-              {e.id === "grok" ? (ko ? "Usage 열기" : "Open usage") : (ko ? "Antigravity" : "Antigravity")}
-            </button>
-          ) : retryableError ? (
-            // 조회 실패 — 막다른 골목 금지: 재시도 + (CLI) 재로그인 액션을 준다.
-            // (429는 제외 — 로그인 문제가 아니고, 누를수록 제한이 길어진다. 백오프가 자동 재시도.)
-            <>
-              <button
-                onClick={() => {
-                  if (e.retryProviderId) void retryProviderUsage(e.retryProviderId);
-                }}
-                disabled={busy === e.id}
-                className="titlebar-nodrag"
-                title={ko ? "사용량 조회 다시 시도" : "Retry usage fetch"}
-              >
-                {ko ? "다시 시도" : "Retry"}
-              </button>
-              {e.auth === "cli" && (
-                <button
-                  onClick={() => void connectCli(e)}
-                  disabled={busy === e.id}
-                  className="titlebar-nodrag"
-                  title={ko ? "CLI 재로그인" : "Re-login CLI"}
-                >
-                  {busy === e.id ? busyLabel() : ko ? "재로그인" : "Re-login"}
-                </button>
-              )}
-            </>
-          ) : connected && !rt?.active && rt ? (
-            <button
-              onClick={() => void activateEngine(e, rt)}
-              disabled={busy === e.id}
-              className="titlebar-nodrag"
-              title={ko ? "이 엔진을 기본 실행 엔진으로" : "Make this the default run engine"}
-            >
-              {ko ? "기본으로" : "Use default"}
-            </button>
-          ) : !connected ? (
-            <button
-              onClick={() => (e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))}
-              disabled={busy === e.id}
-              className="titlebar-nodrag"
-            >
-              {busy === e.id ? busyLabel() : ko ? "연결" : "Connect"}
-            </button>
-          ) : null;
+      <div className="dashboard-engine-groups">
+        {engineGroups.map((group) => {
+          const collapsed = !!collapsedGroups[group.key];
+          const connectedCount = group.engines.filter((e) => isConnected(e)).length;
           return (
-            <div
-              key={e.id}
-              className="dashboard-engine-row"
-              data-column={index % 2 === 0 ? "left" : "right"}
-              data-connected={connected ? "true" : "false"}
-            >
-              <div className="dashboard-engine-topline">
-                <span className="dashboard-engine-logo" aria-hidden="true">
-                  <img src={e.logoSrc} alt="" />
-                </span>
-                <span className="sr-only">{e.logoAlt}</span>
-                <div className="dashboard-engine-copy">
-                  <div>{e.label}</div>
-                  <div
-                    style={connected && u?.status === "error" ? { color: "var(--red-deep, #c0392b)" } : undefined}
-                    data-terminal-state={terminalError ? "true" : undefined}
-                    data-runtime-version={connected && runtimeVersionLabel ? "true" : undefined}
-                    title={
-                      (connected
-                        ? statusText(e, u)
-                        : e.auth === "cli"
-                        ? (ko ? "구독 · 미연결" : "subscription · not connected")
-                        : e.auth === "apikey"
-                        ? (ko ? "API 키 · 미연결" : "API key · not connected")
-                        : ko ? "미설치" : "not installed")
-                      + (connected && runtimeVersionLabel ? ` · ${runtimeVersionLabel}` : "")
-                    }
-                  >
-                    {connected ? statusText(e, u) : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected") : e.auth === "apikey" ? (ko ? "API 키 · 미연결" : "API key · not connected") : ko ? "미설치" : "not installed"}
-                    {connected && runtimeVersionLabel ? ` · ${runtimeVersionLabel}` : ""}
-                  </div>
-                </div>
-                {showConnectedChip ? (
-                  <span className="dashboard-engine-status-chips">
-                    <span className="dashboard-engine-connected">
-                      {ko ? "연결됨" : "Connected"}
-                    </span>
-                    {rt?.active ? (
-                      <span className="dashboard-engine-default" title={ko ? "기본 실행 엔진" : "Default run engine"}>
-                        {ko ? "기본" : "Default"}
-                      </span>
-                    ) : null}
-                  </span>
-                ) : null}
-              </div>
-
-              {actions ? (
-                <div className="dashboard-engine-actions">{actions}</div>
-              ) : null}
-
-              {notice?.id === e.id && (
-                <div
-                  role="alert"
-                  style={{
-                    fontSize: 11,
-                    lineHeight: 1.5,
-                    color: "var(--red-deep, #c0392b)",
-                    background: "var(--paper)",
-                    border: "1px solid var(--paper-edge)",
-                    borderRadius: 8,
-                    padding: "6px 9px",
-                    marginTop: 6,
-                    overflowWrap: "anywhere",
-                  }}
-                >
-                  {notice.text}
-                  {notice.command && (
-                    <>
-                      {" "}
-                      {ko ? "터미널에서 직접 실행:" : "Run manually:"} <code>{notice.command}</code>
-                    </>
-                  )}
+            <section key={group.key} className="dashboard-engine-group" data-collapsed={collapsed ? "true" : "false"}>
+              <button
+                type="button"
+                className="dashboard-engine-group-head titlebar-nodrag"
+                aria-expanded={!collapsed}
+                onClick={() => setCollapsedGroups((prev) => ({ ...prev, [group.key]: !collapsed }))}
+              >
+                <span className="dashboard-engine-group-chevron" data-collapsed={collapsed ? "true" : "false"} aria-hidden="true">▾</span>
+                <span className="dashboard-engine-group-label">{group.label}</span>
+                <span className="dashboard-engine-group-count">{connectedCount}/{group.engines.length}</span>
+              </button>
+              {!collapsed && (
+                <div className="dashboard-engine-grid">
+                  {group.engines.map((e) => renderEngineCard(e))}
                 </div>
               )}
-
-              {hasBars && u!.windows.map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
-
-              {keyFor === e.id && !connected && (
-                <div className="dashboard-key-editor">
-                  <input
-                    type="password"
-                    autoFocus
-                    value={keyVal}
-                    onChange={(ev) => setKeyVal(ev.target.value)}
-                    onKeyDown={(ev) => ev.key === "Enter" && void saveKey(e)}
-                    placeholder={e.keyEnv}
-                    className="titlebar-nodrag"
-                  />
-                  <button onClick={() => void saveKey(e)} disabled={busy === e.id || !keyVal.trim()} className="titlebar-nodrag">
-                    {ko ? "저장" : "Save"}
-                  </button>
-                </div>
-              )}
-            </div>
+            </section>
           );
         })}
+      </div>
     </div>
   );
 }
