@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.12 — 2026-07-25
+
+### Changed
+
+- Borrowed agents now keep an owner-scoped memory nest. Genuinely portable
+  skills a borrowed agent learns (for example a retry-with-backoff habit) carry
+  between your projects, while project-identifying details stay quarantined to
+  the project they came from — a borrowed agent never leaks one project's
+  specifics into another.
+- Schema upgrade to v78, extending the team-member and borrowed-agent memory
+  partitioning introduced in v0.9.11. The upgrade is additive and idempotent;
+  existing memory is preserved in place.
+
+This release binds Agentlas OS v1.1.58 at 47e2368e5c775d6345118c6409850872ec647738.
+This changelog entry describes source readiness and does not prove a published
+Desktop release, installer, or update feed.
+
 ## 0.9.11 — 2026-07-24
 
 ### Added

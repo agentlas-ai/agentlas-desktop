@@ -69,6 +69,13 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-25 · v0.9.12 — owner-scoped borrowed-agent memory nests (schema v78)** —
+  borrowed agents keep an owner-scoped memory nest so portable skills carry between your
+  projects while project-identifying details stay quarantined to their origin project; schema
+  upgrades to v78 (additive, idempotent, existing memory preserved).
+  This release binds Agentlas OS v1.1.58 at 47e2368e5c775d6345118c6409850872ec647738.
+  This source note does not prove a Desktop Git tag, public installer, GitHub release, or
+  update feed.
 - **2026-07-24 · v0.9.11 — memory architecture rework: team-member cells, memory import, self-evolution firing** —
   team members become first-class memory/experience owners (schema v75, slug-preserving
   migration so existing member memory links); an "Import existing memory" action (My Agents
