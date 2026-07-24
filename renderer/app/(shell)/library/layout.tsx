@@ -8,6 +8,12 @@ export default function LibraryLayout({ children }: { children: React.ReactNode 
   const { t } = useT();
 
   let title = t("sidebar.library");
+  // The agents page owns a two-pane layout (roster + detail) that scrolls each
+  // pane independently. It must receive a height-bounded flex container, not an
+  // outer scroll wrapper — otherwise the whole page scrolls as one unit and the
+  // two panes move together. Every other library page has no inner scroll and
+  // relies on this layout's outer scroll, so keep that for them.
+  const ownsInnerScroll = pathname.startsWith("/library/agents");
   if (pathname.startsWith("/library/agents")) title = t("nav.agent");
   else if (pathname.startsWith("/library/agent-groups")) title = t("nav.agent_group");
   else if (pathname.startsWith("/library/env")) title = t("nav.env_keys");
@@ -29,7 +35,15 @@ export default function LibraryLayout({ children }: { children: React.ReactNode 
           {title}
         </h1>
       </header>
-      <div style={{ flex: 1, overflowY: "auto" }}>{children}</div>
+      <div
+        style={
+          ownsInnerScroll
+            ? { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }
+            : { flex: 1, overflowY: "auto" }
+        }
+      >
+        {children}
+      </div>
     </div>
   );
 }

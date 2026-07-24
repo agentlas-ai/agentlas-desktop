@@ -481,6 +481,68 @@ export function EngineUsage() {
           const runtimeVersion = runtimeVersionFor(e);
           const runtimeVersionLabel = runtimeVersionText(runtimeVersion);
           const hasBars = connected && (u?.windows.length ?? 0) > 0;
+          const terminalError = connected && isTerminalProviderError(u);
+          const retryableError = connected && u?.status === "error" && !isRateLimited(u);
+          // 초록 "연결됨" 피드백은 정상 연결(에러 없음)일 때만. 상태 문장/버튼과 겹치지
+          // 않도록 topline 오른쪽에는 짧은 칩만 두고, 실제 버튼은 이름줄 아래로 내린다.
+          const showConnectedChip = connected && !terminalError && !retryableError;
+          // 액션 버튼(있으면)은 topline이 아니라 전용 아래 행에 둔다 — 이름/상태 문장이
+          // 좁은 2열 셀에서 잘리거나 줄바꿈으로 깨지지 않도록 가로폭을 온전히 준다.
+          const actions = terminalError ? (
+            <button
+              onClick={() => openProviderHelp(e)}
+              className="titlebar-nodrag"
+              title={
+                e.id === "grok"
+                  ? ko ? "Grok Settings에서 사용량 확인" : "Open Grok usage settings"
+                  : ko ? "Antigravity 안내 열기" : "Open Antigravity"
+              }
+            >
+              {e.id === "grok" ? (ko ? "Usage 열기" : "Open usage") : (ko ? "Antigravity" : "Antigravity")}
+            </button>
+          ) : retryableError ? (
+            // 조회 실패 — 막다른 골목 금지: 재시도 + (CLI) 재로그인 액션을 준다.
+            // (429는 제외 — 로그인 문제가 아니고, 누를수록 제한이 길어진다. 백오프가 자동 재시도.)
+            <>
+              <button
+                onClick={() => {
+                  if (e.retryProviderId) void retryProviderUsage(e.retryProviderId);
+                }}
+                disabled={busy === e.id}
+                className="titlebar-nodrag"
+                title={ko ? "사용량 조회 다시 시도" : "Retry usage fetch"}
+              >
+                {ko ? "다시 시도" : "Retry"}
+              </button>
+              {e.auth === "cli" && (
+                <button
+                  onClick={() => void connectCli(e)}
+                  disabled={busy === e.id}
+                  className="titlebar-nodrag"
+                  title={ko ? "CLI 재로그인" : "Re-login CLI"}
+                >
+                  {busy === e.id ? busyLabel() : ko ? "재로그인" : "Re-login"}
+                </button>
+              )}
+            </>
+          ) : connected && !rt?.active && rt ? (
+            <button
+              onClick={() => void activateEngine(e, rt)}
+              disabled={busy === e.id}
+              className="titlebar-nodrag"
+              title={ko ? "이 엔진을 기본 실행 엔진으로" : "Make this the default run engine"}
+            >
+              {ko ? "기본으로" : "Use default"}
+            </button>
+          ) : !connected ? (
+            <button
+              onClick={() => (e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))}
+              disabled={busy === e.id}
+              className="titlebar-nodrag"
+            >
+              {busy === e.id ? busyLabel() : ko ? "연결" : "Connect"}
+            </button>
+          ) : null;
           return (
             <div
               key={e.id}
@@ -497,53 +559,25 @@ export function EngineUsage() {
                   <div>{e.label}</div>
                   <div
                     style={connected && u?.status === "error" ? { color: "var(--red-deep, #c0392b)" } : undefined}
-                    data-terminal-state={connected && isTerminalProviderError(u) ? "true" : undefined}
+                    data-terminal-state={terminalError ? "true" : undefined}
                     data-runtime-version={connected && runtimeVersionLabel ? "true" : undefined}
-                    title={runtimeVersionLabel || undefined}
+                    title={
+                      (connected
+                        ? statusText(e, u)
+                        : e.auth === "cli"
+                        ? (ko ? "구독 · 미연결" : "subscription · not connected")
+                        : e.auth === "apikey"
+                        ? (ko ? "API 키 · 미연결" : "API key · not connected")
+                        : ko ? "미설치" : "not installed")
+                      + (connected && runtimeVersionLabel ? ` · ${runtimeVersionLabel}` : "")
+                    }
                   >
                     {connected ? statusText(e, u) : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected") : e.auth === "apikey" ? (ko ? "API 키 · 미연결" : "API key · not connected") : ko ? "미설치" : "not installed"}
                     {connected && runtimeVersionLabel ? ` · ${runtimeVersionLabel}` : ""}
                   </div>
                 </div>
-                {connected && isTerminalProviderError(u) ? (
-                  <button
-                    onClick={() => openProviderHelp(e)}
-                    className="titlebar-nodrag"
-                    title={
-                      e.id === "grok"
-                        ? ko ? "Grok Settings에서 사용량 확인" : "Open Grok usage settings"
-                        : ko ? "Antigravity 안내 열기" : "Open Antigravity"
-                    }
-                  >
-                    {e.id === "grok" ? (ko ? "Usage 열기" : "Open usage") : (ko ? "Antigravity" : "Antigravity")}
-                  </button>
-                ) : connected && u?.status === "error" && !isRateLimited(u) ? (
-                  // 조회 실패 — 막다른 골목 금지: 재시도 + (CLI) 재로그인 액션을 준다.
-                  // (429는 제외 — 로그인 문제가 아니고, 누를수록 제한이 길어진다. 백오프가 자동 재시도.)
-                  <span style={{ display: "inline-flex", gap: 6, flexShrink: 0 }}>
-                    <button
-                      onClick={() => {
-                        if (e.retryProviderId) void retryProviderUsage(e.retryProviderId);
-                      }}
-                      disabled={busy === e.id}
-                      className="titlebar-nodrag"
-                      title={ko ? "사용량 조회 다시 시도" : "Retry usage fetch"}
-                    >
-                      {ko ? "다시 시도" : "Retry"}
-                    </button>
-                    {e.auth === "cli" && (
-                      <button
-                        onClick={() => void connectCli(e)}
-                        disabled={busy === e.id}
-                        className="titlebar-nodrag"
-                        title={ko ? "CLI 재로그인" : "Re-login CLI"}
-                      >
-                        {busy === e.id ? busyLabel() : ko ? "재로그인" : "Re-login"}
-                      </button>
-                    )}
-                  </span>
-                ) : connected ? (
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                {showConnectedChip ? (
+                  <span className="dashboard-engine-status-chips">
                     <span className="dashboard-engine-connected">
                       {ko ? "연결됨" : "Connected"}
                     </span>
@@ -551,27 +585,14 @@ export function EngineUsage() {
                       <span className="dashboard-engine-default" title={ko ? "기본 실행 엔진" : "Default run engine"}>
                         {ko ? "기본" : "Default"}
                       </span>
-                    ) : rt ? (
-                      <button
-                        onClick={() => void activateEngine(e, rt)}
-                        disabled={busy === e.id}
-                        className="titlebar-nodrag"
-                        title={ko ? "이 엔진을 기본 실행 엔진으로" : "Make this the default run engine"}
-                      >
-                        {ko ? "기본으로" : "Use default"}
-                      </button>
                     ) : null}
                   </span>
-                ) : (
-                  <button
-                    onClick={() => (e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))}
-                    disabled={busy === e.id}
-                    className="titlebar-nodrag"
-                  >
-                    {busy === e.id ? busyLabel() : ko ? "연결" : "Connect"}
-                  </button>
-                )}
+                ) : null}
               </div>
+
+              {actions ? (
+                <div className="dashboard-engine-actions">{actions}</div>
+              ) : null}
 
               {notice?.id === e.id && (
                 <div

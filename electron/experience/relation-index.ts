@@ -1025,7 +1025,6 @@ type PrivateCandidateGraphRow = {
 
 type TasteDraftGraphRow = {
   id: string;
-  statement: string;
   axis_candidates_json: string;
   task_signatures_json: string;
 };
@@ -1324,7 +1323,7 @@ export function getExperienceOntologyGraphSnapshot(agentIdValue: string): Experi
   }
 
   const tasteDrafts = getDb().prepare(
-    `SELECT draft.id, draft.statement, draft.axis_candidates_json, draft.task_signatures_json
+    `SELECT draft.id, draft.axis_candidates_json, draft.task_signatures_json
        FROM taste_draft_candidates draft
        JOIN memory_entries memory
          ON memory.id = draft.source_memory_id AND memory.agent_id = draft.agent_id
@@ -1336,13 +1335,14 @@ export function getExperienceOntologyGraphSnapshot(agentIdValue: string): Experi
     const draftRef = valueFreeGraphId(row.id);
     if (!draftRef) continue;
     const draftNodeId = stableId("experience-taste-draft-node", agentId, draftRef);
-    const statementLabel = localGraphLabel(row.statement);
+    // Taste drafts store no free-text statement column — the node keeps its
+    // generic privacy-safe label (private preference observations carry no
+    // owner-readable title to surface on the map).
     if (!addNode({
       id: draftNodeId,
       kind: "taste-draft",
       ref: draftRef,
       safeLabel: "Taste draft",
-      ...(statementLabel ? { localLabel: statementLabel } : {}),
       status: "pending-evidence",
       source: "taste-draft",
     })) continue;

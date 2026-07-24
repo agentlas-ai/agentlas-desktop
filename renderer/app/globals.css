@@ -1914,29 +1914,36 @@ button[data-dashboard-chevron="open"] {
   font-weight: 720;
 }
 
+/* 상태 문장(예: "connected · usage soon · v0.52.0 · current")은 좁은 2열 셀에서
+   한 줄로는 잘리고 무제한 줄바꿈으로는 카드를 밀어낸다. 이름 오른쪽 아래에서
+   최대 2줄까지만 흐르게 고정하고, 넘치면 말줄임 — UI가 깨지지 않는다. */
 .dashboard-engine-copy div:last-child {
   color: var(--dash-muted);
   font-family: var(--rd-f-mono);
   font-size: 10.5px;
-  white-space: nowrap;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
+/* 종단(막다른) 에러 문구는 전체를 보여준다. */
 .dashboard-engine-copy div:last-child[data-terminal-state="true"] {
-  white-space: normal;
-  overflow: visible;
-  text-overflow: clip;
-  overflow-wrap: anywhere;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
   line-height: 1.3;
 }
 
-.dashboard-engine-copy div:last-child[data-runtime-version="true"] {
-  white-space: normal;
-  overflow: visible;
-  text-overflow: clip;
-  overflow-wrap: anywhere;
-  line-height: 1.35;
+.dashboard-engine-status-chips {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  margin-top: 1px;
 }
 
 .dashboard-engine-connected,
@@ -1944,8 +1951,9 @@ button[data-dashboard-chevron="open"] {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  min-height: 24px;
-  padding: 0 8px;
+  gap: 5px;
+  min-height: 22px;
+  padding: 0 9px;
   border-radius: 999px;
   font-family: var(--rd-f-mono);
   font-size: 10px;
@@ -1953,10 +1961,20 @@ button[data-dashboard-chevron="open"] {
   white-space: nowrap;
 }
 
+/* 연결됨 = 초록 피드백(usage 유무와 무관). 작은 점 + 라벨. */
 .dashboard-engine-connected {
-  border: 1px solid var(--dash-line);
-  color: var(--dash-muted);
-  background: #ffffff;
+  border: 1px solid color-mix(in oklch, var(--dash-teal-2) 42%, var(--dash-line));
+  color: var(--dash-teal-2);
+  background: color-mix(in oklch, var(--dash-teal-2) 12%, #ffffff);
+}
+
+.dashboard-engine-connected::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--dash-teal-2);
+  flex-shrink: 0;
 }
 
 .dashboard-engine-default {
@@ -1964,7 +1982,16 @@ button[data-dashboard-chevron="open"] {
   background: var(--dash-teal-2);
 }
 
-.dashboard-engine-topline button.titlebar-nodrag:not(.dashboard-refresh-button) {
+/* 액션 버튼은 이름/상태 줄 아래 전용 행에서 왼쪽 정렬(로고 폭만큼 들여쓰기). */
+.dashboard-engine-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-left: 38px;
+}
+
+.dashboard-engine-topline button.titlebar-nodrag:not(.dashboard-refresh-button),
+.dashboard-engine-actions button.titlebar-nodrag:not(.dashboard-refresh-button) {
   flex-shrink: 0;
   min-height: 28px;
   padding: 0 12px;
@@ -2851,9 +2878,13 @@ button[data-dashboard-import="true"] {
 }
 
 .dashboard-engine-connected {
-  border-color: var(--rd-hair);
-  color: var(--rd-ink-3);
-  background: var(--rd-surface);
+  border-color: color-mix(in oklch, var(--rd-accent) 42%, var(--rd-hair));
+  color: var(--rd-accent);
+  background: color-mix(in oklch, var(--rd-accent) 12%, var(--rd-surface));
+}
+
+.dashboard-engine-connected::before {
+  background: var(--rd-accent);
 }
 
 .dashboard-engine-default {
@@ -2866,6 +2897,7 @@ button[data-dashboard-import="true"] {
 }
 
 .dashboard-engine-topline button.titlebar-nodrag:not(.dashboard-refresh-button),
+.dashboard-engine-actions button.titlebar-nodrag:not(.dashboard-refresh-button),
 button[data-dashboard-action="true"] {
   border-color: var(--rd-accent);
   color: var(--rd-accent);

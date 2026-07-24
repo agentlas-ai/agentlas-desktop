@@ -42,6 +42,7 @@ import type {
   FsPathGrant,
   InstalledAgent,
   InstalledFirm,
+  HubAgentBookmark,
   MarketplaceListing,
   ResolvedOrg,
   ResolvedNode,
@@ -165,6 +166,9 @@ function LibraryAgentsView() {
   const [runtimeOverrides, setRuntimeOverrides] = useState<AgentRuntimeOverride[]>([]);
   // v74 사용 원장(run 귀속 집계) — 로스터 섹션/배지의 데이터 소스.
   const [usageRows, setUsageRows] = useState<AgentUsageSummaryRow[]>([]);
+  // 북마크한 Hub 에이전트/팀(실행 0회여도 노출). 사용 원장과 합쳐 "Hub 북마크·최근
+  // 사용" 선반을 만든다 — 설치 전이라 로컬 로스터에서 사라지지 않게 한다.
+  const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
   // 북마크 토글의 낙관적 오버라이드(진실은 refresh로 재수렴).
   const [bookmarkOverrides, setBookmarkOverrides] = useState<Record<string, boolean>>({});
 
@@ -300,6 +304,13 @@ function LibraryAgentsView() {
       void api.agents.usageSummary()
         .then((rows) => {
           if (rosterRefreshGenerationRef.current === generation && Array.isArray(rows)) setUsageRows(rows);
+        })
+        .catch(() => {});
+    }
+    if (api.marketplace?.bookmarks) {
+      void api.marketplace.bookmarks()
+        .then((rows) => {
+          if (rosterRefreshGenerationRef.current === generation && Array.isArray(rows)) setHubBookmarks(rows);
         })
         .catch(() => {});
     }
@@ -828,11 +839,35 @@ function LibraryAgentsView() {
       setBookmarkOverrides((current) => ({ ...current, [agentId]: !next }));
     }
   }, []);
-  // 자주 쓰지만 로컬에 설치되지 않은(빌려 쓰는) 에이전트 — 정직하게 따로 표시.
-  const borrowedFrequentRows = useMemo(
-    () => usageRows.filter((row) => !row.installed && row.useCount >= 5),
-    [usageRows],
-  );
+  // Hub 북마크 + 로컬 미설치 사용 이력을 합친 "Hub 선반". 북마크했거나(실행 0회여도)
+  // 한 번이라도 빌려 쓴 Hub 에이전트/팀은 설치 전이라도 내 에이전트 목록에 남는다.
+  // 이미 설치된 것은 정식 로스터에 이미 있으므로 제외한다.
+  const installedSlugSet = useMemo(() => new Set(agents.map((a) => a.slug)), [agents]);
+  const hubShelfRows = useMemo(() => {
+    const byKey = new Map<string, { key: string; name: string; entityKind: string; useCount: number; bookmarked: boolean }>();
+    for (const bm of hubBookmarks) {
+      const slug = (bm.slug || bm.listing?.slug || "").trim();
+      if (!slug || installedSlugSet.has(slug)) continue;
+      byKey.set(slug, {
+        key: slug,
+        name: bm.listing?.name || slug,
+        entityKind: bm.listing?.entityKind || "agent",
+        useCount: 0,
+        bookmarked: true,
+      });
+    }
+    for (const row of usageRows) {
+      if (row.installed || row.useCount < 1) continue;
+      const key = row.agentId;
+      if (installedSlugSet.has(key)) continue;
+      const existing = byKey.get(key);
+      if (existing) existing.useCount = Math.max(existing.useCount, row.useCount);
+      else byKey.set(key, { key, name: key, entityKind: row.kind === "team" ? "team" : "agent", useCount: row.useCount, bookmarked: Boolean(row.bookmarkedAt) });
+    }
+    return [...byKey.values()].sort((a, b) =>
+      Number(b.bookmarked) - Number(a.bookmarked) || b.useCount - a.useCount || a.name.localeCompare(b.name),
+    );
+  }, [hubBookmarks, usageRows, installedSlugSet]);
   const firmUsageRollup = useCallback((firm: InstalledFirm): number => {
     let total = 0;
     for (const node of firm.orgChart) total += usageByAgentId.get(node.agentId)?.useCount ?? 0;
@@ -1330,26 +1365,42 @@ function LibraryAgentsView() {
                   </div>
                 ));
               })()}
-              {!sidebarCollapsed && borrowedFrequentRows.length > 0 && (
-                <div data-roster-section="borrowed" style={{ marginBottom: 8 }}>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-deep)", textTransform: "uppercase", padding: "0 12px", marginBottom: 6 }}>
-                    {locale === "ko" ? "자주 빌려 씀" : "Frequently borrowed"}
-                  </div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingLeft: 12 }}>
-                    {borrowedFrequentRows.map((row) => (
-                      <div key={row.agentId} title={row.agentId} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderRadius: "var(--radius-md)", color: "var(--muted-deep)" }}>
-                        <span style={{ minWidth: 0, fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{row.agentId}</span>
-                        <span style={{ flexShrink: 0, fontSize: 9.5, fontWeight: 750, padding: "2px 6px", borderRadius: 999, border: "1px solid var(--paper-edge)", background: "var(--paper)" }}>
-                          {locale === "ko" ? "빌림" : "Borrowed"} · {row.useCount}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
             )}
           </div>
+          )}
+
+          {/* Hub 북마크·최근 사용 — 탭과 무관하게 항상 노출. 설치 전 Hub 에이전트/팀도
+              내 목록에서 사라지지 않게 한다. 클릭하면 Hub 카드로 이동해 설치·대여한다. */}
+          {!sidebarCollapsed && hubShelfRows.length > 0 && (
+            <div data-roster-section="hub-shelf" style={{ marginTop: 8, borderTop: "1px solid var(--glass-border)", paddingTop: 8 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-deep)", textTransform: "uppercase", padding: "0 12px", marginBottom: 6 }}>
+                {locale === "ko" ? "Hub 북마크 · 최근 사용" : "Hub bookmarks · recently used"}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingLeft: 12, paddingRight: 6 }}>
+                {hubShelfRows.map((row) => (
+                  <Link
+                    key={row.key}
+                    href={`/marketplace?q=${encodeURIComponent(row.key)}`}
+                    title={row.key}
+                    style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderRadius: "var(--radius-md)", color: "var(--muted-deep)", border: "1px solid transparent", background: "transparent", cursor: "pointer", textAlign: "left", textDecoration: "none" }}
+                  >
+                    <IconLayers size={13} style={{ flexShrink: 0, color: "var(--accent)", opacity: row.entityKind === "team" ? 1 : 0.6 }} />
+                    <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{row.name}</span>
+                    {row.bookmarked && (
+                      <span style={{ flexShrink: 0, fontSize: 9.5, fontWeight: 750, padding: "2px 6px", borderRadius: 999, border: "1px solid var(--accent)", color: "var(--accent)", background: "var(--paper)" }}>
+                        {locale === "ko" ? "북마크" : "Bookmarked"}
+                      </span>
+                    )}
+                    {row.useCount > 0 && (
+                      <span style={{ flexShrink: 0, fontSize: 9.5, fontWeight: 750, padding: "2px 6px", borderRadius: 999, border: "1px solid var(--paper-edge)", background: "var(--paper)" }}>
+                        {locale === "ko" ? `빌림 · ${row.useCount}` : `Borrowed · ${row.useCount}`}
+                      </span>
+                    )}
+                  </Link>
+                ))}
+              </div>
+            </div>
           )}
         </div>
 

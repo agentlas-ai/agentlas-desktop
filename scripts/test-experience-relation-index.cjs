@@ -440,6 +440,21 @@ async function main() {
     });
     assert.equal(wrongBaseScores.size, 0, "relation retrieval must bind the exact base release");
 
+    // Regression: the full ontology graph snapshot (the Experience Map IPC
+    // source) must build for EVERY agent without a stale-column SqliteError.
+    // Production v0.9.8 threw `no such column: draft.statement` here because the
+    // taste-draft query selected a column taste_draft_candidates never had, so
+    // the whole map failed for every agent. better-sqlite3 validates columns at
+    // prepare time, so a bare call reproduces it even with zero taste drafts.
+    const graphSnapshot = relations.getExperienceOntologyGraphSnapshot("agent-rel");
+    assert.ok(Array.isArray(graphSnapshot.nodes) && graphSnapshot.nodes.length >= 1,
+      "ontology graph snapshot must include at least the synthetic agent node");
+    assert.ok(graphSnapshot.nodes.some((node) => node.kind === "agent"),
+      "ontology graph snapshot must include the agent node");
+    const emptyAgentGraph = relations.getExperienceOntologyGraphSnapshot("agent-with-no-experience");
+    assert.ok(Array.isArray(emptyAgentGraph.nodes) && emptyAgentGraph.nodes.length >= 1,
+      "ontology graph snapshot must resolve for an agent with no experience");
+
     const lineageBeforeArchive = db.prepare("SELECT count(*) AS count FROM experience_lineage_events WHERE pack_id = ?").get(pack.id).count;
     db.prepare("UPDATE experience_packs SET status = 'archived', updated_at = ? WHERE id = ?").run(new Date().toISOString(), pack.id);
     relations.rebuildExperienceRelationIndex();
