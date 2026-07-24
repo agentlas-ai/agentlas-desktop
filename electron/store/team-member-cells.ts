@@ -96,7 +96,15 @@ export function materializeTeamMemberCells(
       const current = findById.get(currentId) as
         | { id: string; slug: string; parent_team_id: string | null }
         | undefined;
-      if (current?.parent_team_id === input.firmId) {
+      // The node already references a real first-class installed agent (an
+      // explicitly wired agent, not a pure org role). Preserve that binding —
+      // materializing a shadow member cell here would discard the agent's
+      // canonical package prompt. Attach it to this firm so member memory can
+      // route, but never overwrite its identity.
+      if (current) {
+        if (current.parent_team_id !== input.firmId) {
+          attachMember.run(input.firmId, current.id);
+        }
         continue;
       }
     }
