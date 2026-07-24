@@ -142,11 +142,26 @@ if (redeploy) {
   redeployArgs.push("--yes");
   const redeployResult = spawnSync("railway", redeployArgs, {
     cwd: railwayCwd,
-    stdio: "inherit",
+    encoding: "utf8",
     env: process.env,
     timeout: Number(process.env.AGENTLAS_RAILWAY_REDEPLOY_TIMEOUT_MS || process.env.AGENTLAS_RAILWAY_RESTART_TIMEOUT_MS || 120_000),
   });
-  if (redeployResult.status !== 0) process.exit(redeployResult.status || 1);
+  const redeployOutput = `${redeployResult.stdout || ""}${redeployResult.stderr || ""}`.trim();
+  if (redeployOutput) console.log(redeployOutput);
+  if (redeployResult.status !== 0) {
+    // The audited `variable set` above already queues a fresh deployment carrying the
+    // new vars. When the explicit redeploy then reports the deployment is mid-flight
+    // ("cannot be redeployed … currently building, deploying") or not restartable, that
+    // in-flight deployment IS the one applying our verified metadata — it is not a
+    // release failure. Defer to the release-API gate below, which is the real proof the
+    // new version is served (it polls version+tag+ready for 20 min AND re-downloads both
+    // DMGs to match sha256/size). This exact race turned v0.7.21/0.7.22/0.9.9/0.9.10 red
+    // AFTER the GitHub release, feed, and web API had all published correctly. Any other
+    // redeploy failure, or the same race with no verify gate to fall back on, still fails.
+    const benignInFlight = /cannot be redeployed|currently building|deploying|was removed|not restartable/i.test(redeployOutput);
+    if (!verifyUrl || !benignInFlight) process.exit(redeployResult.status || 1);
+    console.log("Redeploy reported an in-flight deployment; deferring to the release-API verification gate.");
+  }
 }
 
 if (verifyUrl) {
