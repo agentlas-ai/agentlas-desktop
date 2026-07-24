@@ -81,6 +81,8 @@ import {
   type ExperienceRoutingPrior,
 } from "../experience/context";
 import { promoteExperienceCandidatesForRun } from "../experience/store";
+import { maybeProposeEvolutionFromRun } from "../agents/evolution-triggers";
+import { writeEvolutionProposalsForProject, evolutionSessionContextLine } from "../agents/evolution-hep";
 import { resolveDesktopOperationalRuntimeSession } from "../ontology/operational-runtime-session";
 import { operationalRuntimeOverlayMatchesTask } from "../ontology/operational-runtime-contract";
 import { resolveDesktopTasteRuntimeSession } from "../ontology/taste-runtime-session";
@@ -2683,6 +2685,17 @@ export async function runMcpInvocation(
         projectId: invocationProjectId,
       });
       if (memoryContext) turnContextParts.push(memoryContext);
+      // hep 발화 표면 — 프로젝트 작업 폴더에 대기 중 성장 제안 요약 파일을 쓰고(호스트가
+      // 읽게), 고위험 대기분이 있으면 세션 컨텍스트에 한 줄 주입. 실패-무해.
+      if (workingFolder && canWrite && !projectReadOnlyBoundary) {
+        try {
+          const growth = writeEvolutionProposalsForProject(workingFolder);
+          const line = evolutionSessionContextLine(growth.pending, locale === "ko" ? "ko" : "en");
+          if (line) turnContextParts.push(line);
+        } catch (err) {
+          console.warn("[evolution-hep] proposals file/context deferred:", err);
+        }
+      }
       if (memoryReadPath) {
         const ontologyContext = await queryWorkingFolderOntologyContext(memoryReadPath, effectiveUserPrompt, {
           readOnly: projectReadOnlyBoundary,
@@ -3453,6 +3466,20 @@ export async function runMcpInvocation(
         }
       } catch (err) {
         console.warn("[experience] interactive outcome promotion deferred:", err);
+      }
+      // Phase 2 — 일반 실행 증거(반복 실패 / 승격 누적 / 반복 교정)에서 자가진화 제안 트리거.
+      // 결정적 카운터라 저비용(임베딩/LLM 없음). 저위험은 자동 적용+undo, 고위험은 4표면 승인.
+      // 어떤 예외도 사용자 턴을 깨지 않는다(모듈 내부에서 삼킴).
+      try {
+        const growth = maybeProposeEvolutionFromRun({ agentId: agent.id, chatId: chat.id });
+        if (growth) {
+          console.log(
+            `[evolution-triggers] ${growth.kind} proposal ${growth.proposalId} ` +
+              `(${growth.riskTier}${growth.autoApplied ? ", auto-applied" : ", pending approval"})`,
+          );
+        }
+      } catch (err) {
+        console.warn("[evolution-triggers] normal-run trigger deferred:", err);
       }
     }
 

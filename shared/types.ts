@@ -4764,6 +4764,21 @@ export interface AgentEvolutionProposalUi {
   rolledBackAt?: string;
 }
 
+/** 사람이 읽는 성장 제안 카드 문구 — 원시 diff 대신 "배운 것 → 바뀌는 것 → 되돌리기". */
+export interface GrowthProposalCardCopy {
+  learned: string;
+  change: string;
+  reversible: string;
+}
+
+/** 4표면 발화 UX용 전역 성장 제안 인박스. */
+export interface GrowthProposalInbox {
+  /** 사람이 결정해야 하는 고위험 후보(candidate) — [적용][나중에][안 함]. */
+  pending: AgentEvolutionProposalUi[];
+  /** 저위험 자동적용분 — 수동태 "적용됨 · 되돌리기" 표기. */
+  autoApplied: AgentEvolutionProposalUi[];
+}
+
 export interface CreateAgentEvolutionProposalInput {
   agentId: string;
   targetPath: string;
@@ -5121,6 +5136,8 @@ export interface AgentlasIpc {
     reject: (proposalId: string, note?: string) => Promise<AgentEvolutionProposalUi>;
     markMeasured: (proposalId: string, note?: string) => Promise<AgentEvolutionProposalUi>;
     rollback: (proposalId: string) => Promise<AgentEvolutionProposalUi>;
+    /** 4표면 발화 UX — 전역 성장 제안(고위험 pending + 저위험 자동적용분). */
+    listGrowth: (limit?: number) => Promise<GrowthProposalInbox>;
   };
   /** 유휴 드리밍 큐레이션 — 옵트인(기본 OFF). 유휴+슬롯 완전 유휴+쿨다운 가드로 메모리 통합. */
   memoryDreaming: {

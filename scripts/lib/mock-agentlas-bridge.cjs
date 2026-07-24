@@ -2108,6 +2108,16 @@ function setupMockAgentlasBridge(options) {
         });
         return proposal;
       },
+      listGrowth: async (_limit) => {
+        record("agentEvolution.listGrowth", { limit: _limit });
+        const growth = evolutionProposals.filter((item) => item.source && item.source._growth === true);
+        return {
+          pending: growth.filter((item) => item.status === "candidate"),
+          autoApplied: growth.filter(
+            (item) => item.source._autoApplied === true && (item.status === "applied" || item.status === "measured"),
+          ),
+        };
+      },
     },
     agentRuntime: {
       list: async () => runtimeOverrides,

@@ -108,6 +108,7 @@ import { OneMemoryCandidateCard } from "./OneMemoryCandidateCard";
 import { OneProfileSheet } from "./OneProfileSheet";
 import { OneRecurrenceControl } from "./OneRecurrenceControl";
 import { OneSuggestionCard } from "./OneSuggestionCard";
+import { OneGrowthCard } from "./OneGrowthCard";
 import { OneVoiceInputHelp } from "./OneVoiceInputHelp";
 import { OneWeeklyReflectionCard } from "./OneWeeklyReflectionCard";
 import styles from "./OneShell.module.css";
@@ -2116,6 +2117,8 @@ export function OneShell() {
                     )}
                   </section>
                 )}
+                {/* 에이전트 성장 제안 — "배운 걸 반영할까요?" 홈 슬롯(고위험 1건). */}
+                <OneGrowthCard locale={appLocale} />
                 {showWeeklyReflection && oneWeeklyReflection && (
                   <OneWeeklyReflectionCard
                     snapshot={oneWeeklyReflection}

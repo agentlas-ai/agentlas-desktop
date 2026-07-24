@@ -380,6 +380,53 @@ export function countAutomationRecoveryEvents(automationId: string, signature: s
   return row?.n ?? 0;
 }
 
+/**
+ * 사용자 스티어링(실행 중 방향 수정) 신호 — 같은 에이전트를 반복 교정하면 진화 제안
+ * 트리거의 근거가 된다. content-free: 원문 없이 chat/agent/run 귀속만 남긴다.
+ */
+export const USER_STEERING_EVENT_KIND = "user_steering";
+
+/**
+ * 이 에이전트의 최근 실패 원문(정규화 전) — 진화 트리거가 실패 서명별로 그룹핑한다.
+ * failure_events는 이미 secret/URL이 스크럽된 truncate 문자열이다. run_id가 있는
+ * 행만 반환해 "서로 다른 런에서 같은 실패가 반복"을 셀 수 있게 한다.
+ */
+export function listRecentAgentFailures(
+  agentId: string,
+  limit = 200,
+): Array<{ runId: string; errorMessage: string }> {
+  if (!agentId) return [];
+  const capped = Math.max(1, Math.min(1000, Math.floor(limit)));
+  const rows = getDb()
+    .prepare(
+      `SELECT run_id, error_message FROM failure_events
+        WHERE agent_id = ? AND run_id IS NOT NULL
+        ORDER BY datetime(ts) DESC LIMIT ?`,
+    )
+    .all(agentId, capped) as Array<{ run_id: string | null; error_message: string }>;
+  return rows
+    .filter((row): row is { run_id: string; error_message: string } => Boolean(row.run_id))
+    .map((row) => ({ runId: row.run_id, errorMessage: row.error_message }));
+}
+
+/**
+ * 이 에이전트를 대상으로 최근 관측된 사용자 스티어링(교정) 횟수 — content-free 카운터.
+ * chatId를 주면 그 대화 창 안으로 한정한다(대화별 반복 교정 트리거).
+ */
+export function countAgentSteeringEvents(agentId: string, chatId?: string | null): number {
+  if (!agentId) return 0;
+  const clauses = ["agent_id = ?", "kind = ?"];
+  const params: unknown[] = [agentId, USER_STEERING_EVENT_KIND];
+  if (chatId) {
+    clauses.push("chat_id = ?");
+    params.push(chatId);
+  }
+  const row = getDb()
+    .prepare(`SELECT COUNT(*) AS n FROM run_events WHERE ${clauses.join(" AND ")}`)
+    .get(...params) as { n?: number } | undefined;
+  return Number(row?.n ?? 0);
+}
+
 export function listRunEvents(runId: string, limit?: number): RunEventUi[] {
   if (!runId) return [];
   const capped = normalizeLimit(limit, 200);

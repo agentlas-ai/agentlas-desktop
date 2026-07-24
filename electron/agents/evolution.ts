@@ -442,6 +442,67 @@ export function listAgentEvolutionProposals(agentId: string, limit?: number): Ag
   return rows.map(toUi);
 }
 
+/**
+ * 진화 트리거 멱등성 — 같은 증거 키(_triggerEvidenceKey)로 이미 만든 제안이 있으면
+ * (승인/적용/롤백/거절 어느 상태든) 다시 만들지 않는다. 사용자가 "안 함"으로 거절했거나
+ * 이미 되돌린 근거를 반복 제안하지 않기 위해 status 무관하게 정확 일치로 조회한다.
+ */
+export function findGrowthProposalByEvidenceKey(
+  agentId: string,
+  evidenceKey: string,
+): AgentEvolutionProposalUi | null {
+  if (!agentId || !evidenceKey) return null;
+  const row = getDb()
+    .prepare(
+      `SELECT * FROM agent_evolution_proposals
+        WHERE agent_id = ?
+          AND json_extract(source_json, '$._triggerEvidenceKey') = ?
+        ORDER BY datetime(created_at) DESC LIMIT 1`,
+    )
+    .get(agentId, evidenceKey) as AgentEvolutionProposalRow | undefined;
+  return row ? toUi(row) : null;
+}
+
+/**
+ * 4표면 발화 UX용 — 트리거가 만든 "성장 제안"을 에이전트 무관 전역으로 모은다.
+ * pending = 사람이 결정해야 하는 고위험 후보(candidate). applied = 저위험 자동적용분
+ * (수동태 "적용됨 · 되돌리기" 표기용, 최근 것만). content-free 카드 문구는 source.humanCard.
+ */
+export function listPendingGrowthProposals(limit?: number): {
+  pending: AgentEvolutionProposalUi[];
+  autoApplied: AgentEvolutionProposalUi[];
+} {
+  const capped = normalizeLimit(limit);
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM agent_evolution_proposals
+        WHERE json_extract(source_json, '$._growth') = 1
+          AND status IN ('candidate', 'applied', 'measured')
+        ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
+        LIMIT ?`,
+    )
+    .all(capped) as AgentEvolutionProposalRow[];
+  const pending: AgentEvolutionProposalUi[] = [];
+  const autoApplied: AgentEvolutionProposalUi[] = [];
+  for (const row of rows) {
+    const ui = toUi(row);
+    if (row.status === "candidate") pending.push(ui);
+    else if ((ui.source as Record<string, unknown>)._autoApplied === true) autoApplied.push(ui);
+  }
+  return { pending, autoApplied };
+}
+
+/** 발화 배지용 — 사람이 결정해야 하는 고위험 성장 제안(candidate) 개수. */
+export function countPendingGrowthProposals(): number {
+  const row = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM agent_evolution_proposals
+        WHERE json_extract(source_json, '$._growth') = 1 AND status = 'candidate'`,
+    )
+    .get() as { n?: number } | undefined;
+  return Number(row?.n ?? 0);
+}
+
 /** Candidate collection only. No approval timestamp and no package file write. */
 export function createAgentEvolutionProposal(
   input: CreateAgentEvolutionProposalInput,

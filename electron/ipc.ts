@@ -108,6 +108,7 @@ import {
   approveAndApplyAgentEvolutionProposal,
   createAgentEvolutionProposal,
   listAgentEvolutionProposals,
+  listPendingGrowthProposals,
   markAgentEvolutionProposalMeasured,
   rejectAgentEvolutionProposal,
   rollbackAgentEvolutionProposal,
@@ -2546,6 +2547,10 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle("agentEvolution:rollback", (_e, proposalId: string) =>
     rollbackAgentEvolutionProposal(proposalId),
+  );
+  // 4표면 발화 UX — 에이전트 무관 전역 "성장 제안"(고위험 pending + 저위험 자동적용분).
+  ipcMain.handle("agentEvolution:listGrowth", (_e, limit?: number) =>
+    listPendingGrowthProposals(limit),
   );
 
   // ── skills (주입 가능한 스킬 카탈로그 — 엔진 skills/ 디렉토리 실측) ──

@@ -1545,6 +1545,38 @@ export function getExperienceIntakeDiagnostics(agentIdValue: string): Experience
   };
 }
 
+/**
+ * 진화 트리거용 — 이 에이전트의 승격(promoted) 경험 요약들(최신순).
+ * "승격 M건 누적 → 프롬프트에 접기" 제안의 결정적 근거이자 카드 문구 소재.
+ * agent_repo 배움만 대상(project-scoped 세션 배움은 프롬프트로 접지 않는다).
+ */
+export function listPromotedExperienceSummariesForAgent(
+  agentIdValue: string,
+  limit = 20,
+): Array<{ id: string; summary: string; promotedAt: string | null }> {
+  const agentId = cleanText(agentIdValue, "agentId", 120);
+  const capped = Math.max(1, Math.min(200, Math.floor(limit)));
+  const rows = getDb()
+    .prepare(
+      `SELECT id, summary, promoted_at
+         FROM experience_candidates
+        WHERE agent_id = ? AND status = 'promoted'
+        ORDER BY datetime(COALESCE(promoted_at, updated_at)) DESC
+        LIMIT ?`,
+    )
+    .all(agentId, capped) as Array<{ id: string; summary: string; promoted_at: string | null }>;
+  return rows.map((row) => ({ id: row.id, summary: row.summary, promotedAt: row.promoted_at }));
+}
+
+/** 이 에이전트의 승격 경험 총 개수 — 진화 "접기" 임계 버킷 판정에 쓴다(content-free 카운트). */
+export function countPromotedExperiencesForAgent(agentIdValue: string): number {
+  const agentId = cleanText(agentIdValue, "agentId", 120);
+  const row = getDb()
+    .prepare("SELECT COUNT(*) AS n FROM experience_candidates WHERE agent_id = ? AND status = 'promoted'")
+    .get(agentId) as { n?: number } | undefined;
+  return Number(row?.n ?? 0);
+}
+
 export function listExperiencePromotionReceipts(packId: string): ExperiencePromotionReceipt[] {
   const pack = getPackRow(cleanText(packId, "packId", 120));
   const rows = getDb().prepare(

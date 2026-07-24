@@ -63,6 +63,7 @@ const taskContinuationRuntime = read("electron/one/task-continuation.ts");
 const oneCopyRuntime = read("electron/one/one-copy.ts");
 const acceptedClosureRuntime = read("electron/one/accepted-result-value-closure.ts");
 const useCaseChips = read("renderer/components/one/OneUseCaseChips.tsx");
+const growthCard = read("renderer/components/one/OneGrowthCard.tsx");
 const useCaseChipsCss = read("renderer/components/one/OneUseCaseChips.module.css");
 const automationSheet = read("renderer/components/one/OneAutomationSheet.tsx");
 const automationSheetCss = read("renderer/components/one/OneAutomationSheet.module.css");
@@ -626,10 +627,20 @@ if (process.argv.includes("--built")) {
   assert.match(html, /app\/\(no-shell\)\/one\/page-/, "built One route must load its exported route chunk");
 }
 
+// ── Phase 2+ 자가진화 발화 UX: One 홈 성장 제안 카드 ──
+assert.match(shell, /<OneGrowthCard locale=\{appLocale\}/, "One home must surface the agent growth proposal card");
+assert.match(growthCard, /api\.agentEvolution\.listGrowth/, "growth card must read real Main-owned growth proposals");
+assert.match(growthCard, /humanCard/, "growth card must render the plain-language 'learned → change → reversible' copy, not a raw prompt diff");
+assert.match(growthCard, /api\.agentEvolution\.approveAndApply/, "growth card apply must go through the explicit approval path");
+assert.match(i18n, /"one\.growth\.title": "에이전트가 배운 걸 반영할까요\?"/, "growth card title must exist in the Korean catalog");
+assert.match(i18n, /"one\.growth\.title": "Apply what your agent learned\?"/, "growth card title must exist in the English catalog");
+assert.doesNotMatch(growthCard, /prompt diff|시스템 프롬프트|risk_tier|beforeContent|afterContent/, "growth card must keep developer terminology and raw diffs out of the beginner surface");
+
 console.log(JSON.stringify({
   ok: true,
   route: "/one",
   contracts: [
+    "growth-proposal-firing-ux",
     "canonical-task-first",
     "truthful-briefing",
     "durable-decision",

@@ -19,6 +19,7 @@ import {
   hasInvocationRunReceipt,
   recordMcpInvocationEvent,
   recordRunEvent,
+  USER_STEERING_EVENT_KIND,
   tryRecordFailureEvent,
   tryRecordRunEvent,
 } from "../store/run-events";
@@ -1543,6 +1544,14 @@ export class InvocationService {
         : {}),
     });
     this.steerQueues.set(req.chatId, queue);
+    // 진화 트리거 근거 — 사용자가 실행 중 방향을 바꾸면(스티어링) content-free 신호를
+    // 원장에 남긴다. 같은 에이전트를 반복 교정하면 "행동/역할 조정" 진화 제안이 뜬다.
+    tryRecordRunEvent({
+      runId: active[0],
+      kind: USER_STEERING_EVENT_KIND,
+      chatId: req.chatId,
+      agentId: active[1].actualAgentId,
+    });
     this.cancel(active[0]);
     return {
       accepted: true,

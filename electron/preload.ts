@@ -338,6 +338,8 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("agentEvolution:markMeasured", proposalId, note),
     rollback: (proposalId: string) =>
       ipcRenderer.invoke("agentEvolution:rollback", proposalId),
+    listGrowth: (limit?: number) =>
+      ipcRenderer.invoke("agentEvolution:listGrowth", limit),
   },
   skills: {
     listCatalog: () => ipcRenderer.invoke("skills:listCatalog"),
