@@ -78,6 +78,42 @@ assert.deepEqual(
   "desktop and mobile must receive portable travel blocks",
 );
 
+// ── Judged surface intent decides; travel/product regexes = labeled fallback ──
+const arabicTravelPrompt = "خطط لي رحلة عائلية ليومين في جيجو مع ميزانية وجدول يومي وقائمة تحضير";
+// (a) A judged travel verdict FIRES on a prompt every wordlist misses (Arabic).
+const judgedTravel = buildOneSurfaceFromMarkdown({
+  markdown: travelMarkdown,
+  fallbackTitle: "family trip",
+  taskPrompt: arabicTravelPrompt,
+  judgedIntent: { intent: "travel", source: "llm" },
+});
+assert.ok(judgedTravel, "the judged travel intent must produce the travel surface");
+assert.equal(judgedTravel.data.schedule.type, "timeline", "a judged travel verdict must win over the regex miss");
+assert.equal(judgedTravel.data.costs.type, "pricing");
+// (b) source:"fallback" is NOT a decision — the deterministic regex verdict stands.
+const fallbackTravel = buildOneSurfaceFromMarkdown({
+  markdown: travelMarkdown,
+  fallbackTitle: "family trip",
+  taskPrompt: arabicTravelPrompt,
+  judgedIntent: { intent: "travel", source: "fallback" },
+});
+assert.ok(fallbackTravel);
+assert.equal(fallbackTravel.data.schedule, undefined, "an unanswered judge must keep today's deterministic layout");
+// (c) A judged product-comparison verdict decides the comparison presentation.
+const judgedProduct = buildOneSurfaceFromMarkdown({
+  markdown,
+  fallbackTitle: "비교",
+  judgedIntent: { intent: "product-comparison", source: "llm" },
+});
+const judgedGeneric = buildOneSurfaceFromMarkdown({
+  markdown,
+  fallbackTitle: "비교",
+  judgedIntent: { intent: "generic", source: "llm" },
+});
+const comparisonTitle = (manifest) => manifest.widgets.find((widget) => widget.data === "comparison").title;
+assert.notEqual(comparisonTitle(judgedProduct), comparisonTitle(judgedGeneric),
+  "the judged intent must pick the comparison presentation");
+
 const recommendationMarkdown = `## 최종 추천: LG Example — 약 34만원
 
 조건에 가장 균형 잡힌 선택입니다.

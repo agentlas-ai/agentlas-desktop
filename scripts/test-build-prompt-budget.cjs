@@ -45,6 +45,26 @@ async function main() {
     assert.equal(builder.classifyHephaestusBuildMode("Repair and package this existing agent"), "package");
     assert.equal(builder.classifyHephaestusBuildMode("Build one analyst", { hasAttachments: true }), "single", "a team word inside attachment contents/names must not classify the request");
     assert.equal(builder.classifyHephaestusBuildMode("Repair the attached agent", { hasAttachments: true }), "package");
+
+    // ── The judged verdict decides the auto mode; regexes are hints + labeled fallback ──
+    const arabicTeamRequest = "أنشئ فريقاً من ثلاثة أدوار: باحث، وكاتب، ومدقق حقائق يتعاونون على النشرة الأسبوعية";
+    assert.equal(builder.classifyHephaestusBuildMode(arabicTeamRequest), "single", "documented wordlist miss: the regexes cannot read Arabic role structure");
+    const judgedTeam = await builder.resolveHephaestusBuildMode(arabicTeamRequest, {
+      judgeFn: async (spec) => {
+        assert.equal(spec.kind, "hephaestus-build-mode");
+        assert.equal(spec.fallback, "single", "the deterministic verdict must be offered as the fallback prior");
+        return { verdict: "team", source: "llm", confidence: 0.9, reason: "three cooperating roles" };
+      },
+    });
+    assert.deepEqual(judgedTeam, { mode: "team", source: "llm" }, "a judged team verdict must win over the wordlist miss");
+    const judgedVeto = await builder.resolveHephaestusBuildMode("Build a multi-agent marketing team name generator (single naming assistant)", {
+      judgeFn: async () => ({ verdict: "single", source: "llm", confidence: 0.8, reason: "one assistant" }),
+    });
+    assert.equal(judgedVeto.mode, "single", "a judged single verdict must override an incidental team wordlist hit");
+    const judgedFallback = await builder.resolveHephaestusBuildMode("Build a multi-agent marketing team", {
+      judgeFn: async (spec) => ({ verdict: spec.fallback, source: "fallback", confidence: 0, reason: "no model" }),
+    });
+    assert.deepEqual(judgedFallback, { mode: "team", source: "fallback" }, "no model = today's deterministic verdict, labeled");
     const runtimeStatuses = [
       { kind: "claude-code", backend: "anthropic", source: "claude", version: "1", active: true },
       { kind: "codex", backend: "openai", source: "codex", version: "1", active: false },

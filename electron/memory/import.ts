@@ -165,8 +165,12 @@ function resolveTarget(agentId: string): TargetShape {
   return { agentId: firm.ceoAgentId, kind: "team", firm, members };
 }
 
-/** Match a source file to a team member by role/slug token overlap. */
-function matchMember(fileTokens: string, target: TargetShape): { agentId: string; role: string } | null {
+export interface MemoryImportMemberTarget {
+  members: Array<{ agentId: string; role: string; slug: string }>;
+}
+
+/** Match a source file to a team member by role/slug token overlap — fallback only. */
+function matchMember(fileTokens: string, target: MemoryImportMemberTarget): { agentId: string; role: string } | null {
   if (target.members.length === 0) return null;
   let best: { agentId: string; role: string; score: number } | null = null;
   for (const member of target.members) {
@@ -180,6 +184,85 @@ function matchMember(fileTokens: string, target: TargetShape): { agentId: string
   return best ? { agentId: best.agentId, role: best.role } : null;
 }
 
+export type MemoryImportOwnerJudge = (spec: {
+  kind: string;
+  question: string;
+  labels: readonly string[];
+  input: string;
+  hints?: Array<{ label: string; words: string[] }>;
+  guidance?: string;
+  fallback: string;
+  timeoutMs?: number;
+}) => Promise<{ verdict: string; source: "llm" | "fallback"; confidence: number; reason: string }>;
+
+const MAX_MEMBER_LABELS = 40;
+
+/**
+ * Route an imported memory file to the team member who should own it. The
+ * connected model decides over the member-slug inventory (role/slug tokens are
+ * hints); when no model answers, the verdict is today's token-overlap pick,
+ * labeled as fallback. "orchestrator" = team-coordination knowledge / no clear
+ * member owner.
+ */
+export async function resolveMemoryImportOwner(
+  relFile: string,
+  content: string,
+  target: MemoryImportMemberTarget,
+  opts: { judgeFn?: MemoryImportOwnerJudge; timeoutMs?: number } = {},
+): Promise<{ owner: { agentId: string; role: string } | null; source: "llm" | "fallback" }> {
+  const lexical = matchMember(normalizeToken(relFile), target);
+  if (target.members.length === 0) return { owner: null, source: "fallback" };
+  const members = target.members.slice(0, MAX_MEMBER_LABELS);
+  const bySlug = new Map(members.map((member) => [member.slug, member]));
+  const labels = [...bySlug.keys(), "orchestrator"];
+  const lexicalLabel = lexical
+    ? members.find((member) => member.agentId === lexical.agentId)?.slug ?? "orchestrator"
+    : "orchestrator";
+  let judgeFn = opts.judgeFn;
+  if (!judgeFn) {
+    const { judge } = await import("../system-agents/judgment");
+    judgeFn = judge as unknown as MemoryImportOwnerJudge;
+  }
+  let verdict: Awaited<ReturnType<MemoryImportOwnerJudge>>;
+  try {
+    verdict = await judgeFn({
+      kind: "memory-import-member-owner",
+      question:
+        "Which team member should own the knowledge in this imported memory file? Answer 'orchestrator' when it is team-wide coordination knowledge or no listed member clearly owns it.",
+      labels,
+      input: [
+        `FILE: ${relFile}`,
+        "",
+        "CONTENT:",
+        content.slice(0, 2_000),
+        "",
+        "TEAM MEMBERS:",
+        ...members.map((member) => `- ${member.slug}: ${member.role}`),
+      ].join("\n"),
+      hints: members.map((member) => ({
+        label: member.slug,
+        words: [...new Set([
+          ...normalizeToken(member.role).split(" ").filter((t) => t.length >= 3),
+          ...normalizeToken(member.slug).split(" ").filter((t) => t.length >= 3),
+        ])],
+      })),
+      guidance:
+        `A deterministic token-overlap pre-pass suggested "${lexicalLabel}". Treat that as a prior, not a fact. ` +
+        "Judge who the knowledge is FOR by meaning, in any language — a filename token overlap is not ownership.",
+      fallback: lexicalLabel,
+      timeoutMs: opts.timeoutMs,
+    });
+  } catch {
+    return { owner: lexical, source: "fallback" };
+  }
+  if (verdict.source !== "llm") return { owner: lexical, source: "fallback" };
+  if (verdict.verdict === "orchestrator") return { owner: null, source: "llm" };
+  const member = bySlug.get(verdict.verdict);
+  return member
+    ? { owner: { agentId: member.agentId, role: member.role }, source: "llm" }
+    : { owner: lexical, source: "fallback" };
+}
+
 interface OwnerDecision {
   scope: MemoryScope;
   ownerAgentId: string | null;
@@ -188,9 +271,13 @@ interface OwnerDecision {
   alwaysKeep: boolean;
 }
 
-function decideOwner(relFile: string, target: TargetShape): OwnerDecision {
+async function decideOwner(
+  relFile: string,
+  content: string,
+  target: TargetShape,
+  opts: { judgeFn?: MemoryImportOwnerJudge } = {},
+): Promise<OwnerDecision> {
   const lower = relFile.toLowerCase();
-  const fileTokens = normalizeToken(relFile);
   const alwaysKeep = ALWAYS_KEEP_HINT.test(lower);
   if (SHARED_HINT.test(lower)) {
     return {
@@ -202,17 +289,17 @@ function decideOwner(relFile: string, target: TargetShape): OwnerDecision {
     };
   }
   if (target.kind === "team") {
-    const member = matchMember(fileTokens, target);
-    if (member) {
+    const routed = await resolveMemoryImportOwner(relFile, content, target, opts);
+    if (routed.owner) {
       return {
         scope: "agent_repo",
-        ownerAgentId: member.agentId,
-        ownerLabel: member.role,
+        ownerAgentId: routed.owner.agentId,
+        ownerLabel: routed.owner.role,
         fallbackKind: RISK_HINT.test(lower) ? "risk" : "procedure",
         alwaysKeep,
       };
     }
-    // No member match on a team → the orchestrator (team coordination context).
+    // No member owner on a team → the orchestrator (team coordination context).
     return {
       scope: "agent_repo",
       ownerAgentId: target.agentId,
@@ -276,7 +363,11 @@ interface BuiltEntry {
   redacted: boolean;
 }
 
-function buildEntries(req: MemoryImportRequest, target: TargetShape): BuiltEntry[] {
+async function buildEntries(
+  req: MemoryImportRequest,
+  target: TargetShape,
+  opts: { judgeFn?: MemoryImportOwnerJudge } = {},
+): Promise<BuiltEntry[]> {
   const files = collectMarkdown(req.sourcePath);
   const built: BuiltEntry[] = [];
   for (const { abs, rel } of files) {
@@ -286,7 +377,7 @@ function buildEntries(req: MemoryImportRequest, target: TargetShape): BuiltEntry
     } catch {
       continue;
     }
-    const owner = decideOwner(rel, target);
+    const owner = await decideOwner(rel, md, target, opts);
     const sections = /decisions\.md$/i.test(rel) ? splitDatedBullets(md) : splitSections(md);
     for (const sec of sections) {
       if (!keepSection(sec.heading, sec.body, owner.alwaysKeep)) continue;
@@ -326,9 +417,12 @@ function existsByToken(token: string): boolean {
   );
 }
 
-export function importMemoryPreview(req: MemoryImportRequest): MemoryImportPreview {
+export async function importMemoryPreview(
+  req: MemoryImportRequest,
+  opts: { judgeFn?: MemoryImportOwnerJudge } = {},
+): Promise<MemoryImportPreview> {
   const target = validateRequest(req);
-  const entries = buildEntries(req, target);
+  const entries = await buildEntries(req, target, opts);
   const rows: MemoryImportRow[] = [];
   const byOwner: Record<string, number> = {};
   const byKind: Record<string, number> = {};
@@ -366,9 +460,12 @@ export function importMemoryPreview(req: MemoryImportRequest): MemoryImportPrevi
   };
 }
 
-export function importMemoryApply(req: MemoryImportRequest): MemoryImportResult {
+export async function importMemoryApply(
+  req: MemoryImportRequest,
+  opts: { judgeFn?: MemoryImportOwnerJudge } = {},
+): Promise<MemoryImportResult> {
   const target = validateRequest(req);
-  const entries = buildEntries(req, target);
+  const entries = await buildEntries(req, target, opts);
   const result: MemoryImportResult = {
     sourcePath: req.sourcePath,
     targetAgentId: target.agentId,

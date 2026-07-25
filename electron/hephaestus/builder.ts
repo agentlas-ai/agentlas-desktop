@@ -376,7 +376,7 @@ const ATTACHMENT_PACKAGE_RE = /\b(?:attached|existing|this agent|import|handoff)
 const TEAM_MODE_RE =
   /\b(?:multi[- ]?agent|organization|division|department|workers?|hq)\b|\b(?:build|create|make|design|assemble|need|want)\s+(?:an?\s+)?(?:[a-z-]+\s+){0,2}team\b|\bteam\b(?=[^\n.!?]{0,80}\b(?:agents?|roles?|workers?|delegat(?:e|ion)|handoff|orchestrat(?:e|ion))\b)|멀티\s*에이전트|(?:만들|구성|설계|필요)[^\n.!?]{0,30}팀|팀[^\n.!?]{0,40}(?:만들|구성|설계|에이전트|역할|워커|위임|핸드오프|오케스트레이션)|(?:역할|에이전트|워커)[^\n.!?]{0,60}(?:나뉘|분리|협업|위임)[^\n.!?]{0,40}팀|조직|부서|본부|여러\s*역할/i;
 
-/** Compact, deterministic auto mode. It replaces mode-map + all three builder prompts. */
+/** Compact, deterministic auto mode — reference/fallback only; the judge decides. */
 export function classifyHephaestusBuildMode(
   request: string,
   options?: { hasAttachments?: boolean },
@@ -385,6 +385,50 @@ export function classifyHephaestusBuildMode(
   if (options?.hasAttachments && ATTACHMENT_PACKAGE_RE.test(request)) return "package";
   if (TEAM_MODE_RE.test(request)) return "team";
   return "single";
+}
+
+const BUILD_MODE_LABELS = ["single", "team", "package"] as const;
+
+export type HephaestusBuildModeJudge = (
+  spec: import("../system-agents/judgment").JudgeSpec<NonNullable<HephaestusBuildRequest["mode"]>>,
+) => Promise<import("../system-agents/judgment").Verdict<NonNullable<HephaestusBuildRequest["mode"]>>>;
+
+/**
+ * The resident judge decides the auto build mode by meaning; the PACKAGE/ATTACHMENT/
+ * TEAM regexes are demoted to hints and remain only the labeled fallback (today's
+ * deterministic verdict) when no model answers. An explicit Main-selected req.mode
+ * is closed-form and never reaches this resolver.
+ */
+export async function resolveHephaestusBuildMode(
+  request: string,
+  options?: { hasAttachments?: boolean; signal?: AbortSignal; timeoutMs?: number; judgeFn?: HephaestusBuildModeJudge },
+): Promise<{ mode: NonNullable<HephaestusBuildRequest["mode"]>; source: "llm" | "fallback" }> {
+  const lexical = classifyHephaestusBuildMode(request, options);
+  if (!request.trim()) return { mode: lexical, source: "fallback" };
+  const { judge } = await import("../system-agents/judgment");
+  const run = options?.judgeFn ?? judge;
+  const verdict = await run({
+    kind: "hephaestus-build-mode",
+    question:
+      "For this agent-build request, should the builder create ONE single agent, a MULTI-ROLE team of agents, or PACKAGE/convert/repair an agent that already exists?",
+    labels: BUILD_MODE_LABELS,
+    input:
+      `${request.slice(0, 4_000)}` +
+      (options?.hasAttachments ? "\n\n[context: the request includes file attachments]" : ""),
+    guidance:
+      `A deterministic pre-pass classified this as "${lexical}". Treat that as a prior, not a fact. ` +
+      "\"package\" only when the request converts, repairs, migrates, or imports something that already exists. " +
+      "\"team\" only when the request genuinely describes multiple cooperating roles — a single expert who serves " +
+      "a team of people is still \"single\". Judge the meaning in any language.",
+    hints: [
+      { label: "package", words: ["package", "convert", "repair", "migrate", "existing agent", "패키징", "변환", "복구", "이식", "기존 에이전트"] },
+      { label: "team", words: ["multi-agent", "organization", "division", "roles", "handoff", "orchestration", "멀티 에이전트", "팀", "역할 분담", "조직", "부서"] },
+    ],
+    fallback: lexical,
+    signal: options?.signal,
+    timeoutMs: options?.timeoutMs,
+  });
+  return { mode: verdict.verdict, source: verdict.source };
 }
 
 /**
@@ -432,20 +476,26 @@ export function contractRequirementLines(
 }
 
 /** 캐논 AGENTS.md + 정확히 한 개의 선택된 빌더 + 출력 지침. */
-export function composeBuilderPrompt(root: string, req: ResolvedHephaestusBuildRequest, locale: RuntimeLocale): string {
+export function composeBuilderPrompt(
+  root: string,
+  req: ResolvedHephaestusBuildRequest,
+  locale: RuntimeLocale,
+  /** Judged auto mode resolved by the async build flow; wordlists are fallback only. */
+  resolvedAutoMode?: NonNullable<HephaestusBuildRequest["mode"]>,
+): string {
   const ko = locale === "ko";
   const uiLang = ko ? "Korean" : "English";
   const parts: string[] = [];
   const canonical = readIf(root, "AGENTS.md");
   if (canonical) parts.push(projectBuilderCanonicalCore(canonical), "\n");
 
-  const selectedMode = req.mode ?? classifyHephaestusBuildMode(req.request, {
+  const selectedMode = req.mode ?? resolvedAutoMode ?? classifyHephaestusBuildMode(req.request, {
     hasAttachments: Boolean(req.attachments?.length),
   });
   parts.push(
     req.mode
       ? `# Main-selected Build mode\nmode=${selectedMode}\n`
-      : `# Compact deterministic mode classification\nmode=${selectedMode}\nRule: package/repair/convert signals > team/organization signals > single default. Load no other builder.\n`,
+      : `# Compact auto mode classification\nmode=${selectedMode}\nRule: judged by meaning, with package/repair/convert signals > team/organization signals > single default as the deterministic fallback. Load no other builder.\n`,
   );
   const agent = readIf(root, MODE_AGENT[selectedMode]);
   if (agent) parts.push(`# Active Builder (${selectedMode})\n`, projectActiveBuilderForDesktop(agent), "\n");
@@ -693,9 +743,12 @@ export async function runHephaestusBuild(
     }
   }
 
-  const buildMode = req.mode ?? classifyHephaestusBuildMode(req.request, {
+  // The resident judge decides the auto build mode by meaning (regexes = hints);
+  // a Main-selected req.mode is closed-form and skips the judge entirely.
+  const buildMode = req.mode ?? (await resolveHephaestusBuildMode(req.request, {
     hasAttachments: Boolean(req.attachments?.length),
-  });
+    signal,
+  })).mode;
   // 완결성은 모델 기억력이 아니라 호스트가 보장한다: 첫 턴 전에 계약 템플릿을
   // 워크스페이스에 스캐폴드(기존 파일 무손상). 모델은 빈칸만 채우면 되고, 자율
   // 루프 런타임(claude-code 등)은 스캐폴드 위에 자유롭게 덧쓴다. 구버전 엔진
@@ -714,7 +767,7 @@ export async function runHephaestusBuild(
     }
   }
 
-  const agentPrompt = composeBuilderPrompt(root, req, locale);
+  const agentPrompt = composeBuilderPrompt(root, req, locale, req.mode ? undefined : buildMode);
   // Build-only wrapper: no general Surface protocol or connection skill, and no
   // second wrapping inside the selected runtime (sentinel-enforced in runner.ts).
   const systemPrompt = wrapBuildSystemPrompt(agentPrompt, locale);

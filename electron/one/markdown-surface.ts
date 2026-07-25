@@ -16,6 +16,72 @@ const MAX_TABLE_ROWS = 40;
 const MAX_TABLE_COLUMNS = 10;
 const MAX_CELL_LENGTH = 1_000;
 
+// ── Judged fallback-surface intent ───────────────────────────────────────────
+// The travel/product regexes below stop deciding the deterministic One surface
+// layout: the resident judge classifies the task by meaning in the async flow
+// that calls buildOneSurfaceFromMarkdown, and the regexes are demoted to hints +
+// labeled fallback (today's verdict) when no model answers.
+
+export type OneMarkdownSurfaceIntent = "travel" | "product-comparison" | "generic";
+
+export interface JudgedOneMarkdownSurfaceIntent {
+  intent: OneMarkdownSurfaceIntent;
+  source: "llm" | "fallback";
+}
+
+function lexicalTravelRequest(taskPrompt: string): boolean {
+  return /(?:여행|trip|itinerary)/i.test(taskPrompt)
+    && /(?:일정|동선|예산|schedule|route|budget)/i.test(taskPrompt);
+}
+
+export type OneMarkdownSurfaceJudge = (spec: {
+  kind: string;
+  question: string;
+  labels: readonly OneMarkdownSurfaceIntent[];
+  input: string;
+  hints?: Array<{ label: OneMarkdownSurfaceIntent; words: string[] }>;
+  guidance?: string;
+  fallback: OneMarkdownSurfaceIntent;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}) => Promise<{ verdict: OneMarkdownSurfaceIntent; source: "llm" | "fallback"; confidence: number; reason: string }>;
+
+/** Judge the fallback surface intent for a One task prompt (async electron flow). */
+export async function resolveOneMarkdownSurfaceIntent(
+  taskPrompt: string,
+  opts: { signal?: AbortSignal; timeoutMs?: number; judgeFn?: OneMarkdownSurfaceJudge } = {},
+): Promise<JudgedOneMarkdownSurfaceIntent> {
+  const lexical: OneMarkdownSurfaceIntent = lexicalTravelRequest(taskPrompt) ? "travel" : "generic";
+  if (!taskPrompt.trim()) return { intent: lexical, source: "fallback" };
+  let judgeFn = opts.judgeFn;
+  if (!judgeFn) {
+    const { judge } = await import("../system-agents/judgment");
+    judgeFn = judge as unknown as OneMarkdownSurfaceJudge;
+  }
+  try {
+    const verdict = await judgeFn({
+      kind: "one-markdown-surface-intent",
+      question:
+        "What kind of result surface does this user task call for: a TRAVEL plan (itinerary/schedule/budget for a trip), a PRODUCT COMPARISON (choosing between purchasable products/models), or a GENERIC report?",
+      labels: ["travel", "product-comparison", "generic"] as const,
+      input: taskPrompt.slice(0, 4_000),
+      hints: [
+        { label: "travel", words: ["여행", "일정", "동선", "trip", "itinerary", "schedule", "route", "budget"] },
+        { label: "product-comparison", words: ["제품", "상품", "모델", "비교", "product", "item", "model", "compare"] },
+      ],
+      guidance:
+        `A deterministic pre-pass classified this as "${lexical}". Treat that as a prior, not a fact. ` +
+        "Judge the request's meaning in any language; mentioning a trip in passing is not a travel plan.",
+      fallback: lexical,
+      signal: opts.signal,
+      timeoutMs: opts.timeoutMs ?? 6_000,
+    });
+    return { intent: verdict.verdict, source: verdict.source };
+  } catch {
+    return { intent: lexical, source: "fallback" };
+  }
+}
+
 function cleanText(value: string, maximum = MAX_CELL_LENGTH): string {
   return value
     .replace(/<[^>]*>/g, "")
@@ -780,11 +846,19 @@ export function buildOneSurfaceFromMarkdown(input: {
    * boundary; ordinary prose never receives this exception.
    */
   allowUncitedStructured?: boolean;
+  /**
+   * Judged surface intent resolved by the async caller (resolveOneMarkdownSurfaceIntent).
+   * A source:"llm" verdict decides; otherwise the deterministic regex verdicts below
+   * remain the labeled fallback.
+   */
+  judgedIntent?: JudgedOneMarkdownSurfaceIntent;
 }): AgentlasSurfaceManifest | null {
   const sources = markdownSources(input.markdown, input.observedSourceUrls);
   const markdownTable = addMissingRecommendationToTable(input.markdown, firstMarkdownTable(input.markdown));
-  const travelRequest = /(?:여행|trip|itinerary)/i.test(input.taskPrompt ?? "")
-    && /(?:일정|동선|예산|schedule|route|budget)/i.test(input.taskPrompt ?? "");
+  const judgedIntent = input.judgedIntent?.source === "llm" ? input.judgedIntent.intent : null;
+  const travelRequest = judgedIntent !== null
+    ? judgedIntent === "travel"
+    : lexicalTravelRequest(input.taskPrompt ?? "");
   const budget = travelRequest ? travelBudget(markdownTable, input.taskPrompt ?? "") : null;
   const timeline = travelRequest ? travelTimeline(input.markdown) : [];
   const table = budget ? null : markdownTable ?? recommendationComparison(input.markdown);
@@ -808,7 +882,9 @@ export function buildOneSurfaceFromMarkdown(input: {
   const title = informativeHeading(input.markdown, input.fallbackTitle);
   const hangulCount = input.markdown.match(/[가-힣]/g)?.length ?? 0;
   const ko = hangulCount >= 12 || /[가-힣]/.test(title);
-  const productComparison = table?.columns.some((column) => /^(?:제품|상품|모델|product|item|model)$/i.test(cleanText(column, 80))) ?? false;
+  const productComparison = judgedIntent !== null
+    ? judgedIntent === "product-comparison"
+    : table?.columns.some((column) => /^(?:제품|상품|모델|product|item|model)$/i.test(cleanText(column, 80))) ?? false;
   const narrative = summaryMarkdown(input.markdown);
   if (!table && !narrative && timeline.length === 0 && !budget && resolvedChecklist.length === 0) return null;
   const candidate: AgentlasSurfaceManifest = {

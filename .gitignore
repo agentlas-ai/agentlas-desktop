@@ -139,6 +139,9 @@ test-results/
 **/test-*.mjs
 **/test-*.cjs
 !scripts/test-borrowed-agent-careers-v76.cjs
+!scripts/test-telegram-judged-intents.cjs
+!scripts/test-memory-import-owner-judged.cjs
+!scripts/test-mcp-need-resolver.cjs
 **/test_*.sh
 **/*-smoke.ts
 **/*-smoke.mjs

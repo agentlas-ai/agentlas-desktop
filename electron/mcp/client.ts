@@ -107,7 +107,7 @@ import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
 import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, parseSurfaces } from "../surface-emitter";
-import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay } from "../one/markdown-surface";
+import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMarkdownSurfaceIntent } from "../one/markdown-surface";
 import { createAutomation, listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { projectContextKey, recordContextSourceMarker, tryRecordRunEvent } from "../store/run-events";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
@@ -3403,6 +3403,11 @@ export async function runMcpInvocation(
               taskPrompt: req.userPrompt,
               observedSourceUrls: [...observedOneSourceUrls],
               allowUncitedStructured: observedOneToolEvidence,
+              // The resident judge picks the fallback surface layout by meaning;
+              // the travel/product regexes stay as the labeled fallback.
+              judgedIntent: await resolveOneMarkdownSurfaceIntent(req.userPrompt ?? "").catch(
+                () => undefined,
+              ),
             })
           : null;
         const deterministicOneSurface = rawDeterministicOneSurface

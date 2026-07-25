@@ -69,6 +69,8 @@ export async function resolveMcpNeeds(input: {
   task: string;
   candidates: McpNeedCandidate[];
   signal?: AbortSignal;
+  /** Injectable judge (tests). Defaults to the resident judgment service. */
+  judgeSubsetFn?: typeof judgeSubset;
 }): Promise<ResolvedMcpNeeds> {
   const ordered = preferHub(input.candidates);
   const candidates = ordered.slice(0, MAX_CANDIDATES);
@@ -84,7 +86,7 @@ export async function resolveMcpNeeds(input: {
     )
     .join("\n");
 
-  const verdict = await judgeSubset({
+  const verdict = await (input.judgeSubsetFn ?? judgeSubset)({
     kind: MCP_NEED_JUDGMENT_KIND,
     question: MCP_NEED_JUDGMENT_QUESTION,
     labels: candidates.map((candidate) => candidate.id),
@@ -146,6 +148,8 @@ export async function resolveMcpBuildRecommendations(input: {
   /** Old catalog wordlists, demoted to model reference only. */
   hints?: JudgeHint<string>[];
   signal?: AbortSignal;
+  /** Injectable judge (tests). Defaults to the resident judgment service. */
+  judgeSubsetFn?: typeof judgeSubset;
 }): Promise<ResolvedMcpBuildRecommendations> {
   const candidates = input.candidates.slice(0, MAX_CANDIDATES);
   const omitted = input.candidates.slice(MAX_CANDIDATES).map((candidate) => candidate.id);
@@ -160,7 +164,7 @@ export async function resolveMcpBuildRecommendations(input: {
     )
     .join("\n");
 
-  const verdict = await judgeSubset({
+  const verdict = await (input.judgeSubsetFn ?? judgeSubset)({
     kind: MCP_BUILD_RECOMMEND_JUDGMENT_KIND,
     question: MCP_BUILD_RECOMMEND_QUESTION,
     labels: candidates.map((candidate) => candidate.id),

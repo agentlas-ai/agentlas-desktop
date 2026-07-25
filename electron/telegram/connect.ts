@@ -4,6 +4,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { BrowserWindow, session as electronSession, shell } from "electron";
 import { currentUiLocale } from "../ui-locale";
+import {
+  lexicalAutomationReportIntent,
+  resolveTelegramAutomationReportIntent,
+  resolveTelegramGoalIntent,
+  lexicalTelegramWriteIntent,
+} from "./judged-intents";
 import { runMcpInvocation } from "../mcp/client";
 import { getAgentById, listInstalledAgents } from "../mcp/registry";
 import { getAgentGroup } from "../store/agent-groups";
@@ -1094,14 +1100,21 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
 
   const clean = cleanTelegramPrompt(binding, text) || tg("attachment.default_prompt");
   if (!clean) return;
-  if (isAutomationReportStatusRequest(clean)) {
+  // The resident judge decides whether this is an automation-report control
+  // command (enable/disable/status) by meaning, in any language. The old
+  // wordlist predicates are hints; without a model the verdict falls back to
+  // today's regex result, labeled by source.
+  const reportIntent = await resolveTelegramAutomationReportIntent(clean).catch(
+    () => ({ intent: lexicalAutomationReportIntent(clean), source: "fallback" as const }),
+  );
+  if (reportIntent.intent === "status") {
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
       text: automationReportStatusText(binding),
     }).catch(() => undefined);
     return;
   }
-  if (isAutomationReportDisableRequest(clean)) {
+  if (reportIntent.intent === "disable") {
     setAutomationReportEnabled(binding.id, false);
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
@@ -1109,7 +1122,7 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     }).catch(() => undefined);
     return;
   }
-  if (isAutomationReportEnableRequest(clean)) {
+  if (reportIntent.intent === "enable") {
     setAutomationReportEnabled(binding.id, true);
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
@@ -1131,7 +1144,11 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     return;
   }
   const cleanWithAttachments = appendTelegramAttachmentGuide(clean, attachments);
-  const mode = telegramInvocationMode(cleanWithAttachments);
+  // Read-vs-write is a meaning decision: the judge rules; the make-verb wordlist
+  // is only the labeled fallback when no model answers.
+  const mode = await resolveTelegramInvocationMode(cleanWithAttachments).catch(
+    () => telegramInvocationMode(cleanWithAttachments),
+  );
   // 응답 언어는 사용자가 보낸 메시지의 언어를 따른다(앱 UI 로케일 무시).
   const replyLocale = detectReplyLocale(clean);
   getDb()
@@ -1464,28 +1481,6 @@ function cleanTelegramPrompt(binding: TelegramBindingRow, text: string): string 
   return out.replace(/^\/start\b/i, "테스트").trim();
 }
 
-function isAutomationReportEnableRequest(text: string): boolean {
-  const lower = text.toLowerCase();
-  const mentionsAutomation = /자동화|automation|scheduled job|background job/i.test(text);
-  const wantsNotification =
-    /보고|알림|알려|말해|보내|띄워|전달|브리핑|notify|notification|report|tell|send|post|brief/i.test(text);
-  const completion =
-    /끝나|끝났|끝날|끝나고|끝나면|완료|마치|complete|completed|done|finish|finished|after/i.test(text);
-  const future =
-    /앞으로|이제부터|계속|마다|될 때|할 때|whenever|from now|future|every time/i.test(text);
-  const thisChat =
-    /여기|이 방|이방|이 채팅|텔레|telegram|dm|나한테|this chat|here|to me/i.test(lower);
-  return mentionsAutomation && wantsNotification && (completion || future || thisChat);
-}
-
-function isAutomationReportDisableRequest(text: string): boolean {
-  return /자동화|automation/i.test(text) && /보고|알림|notify|notification|report/i.test(text) && /꺼|끄|중지|그만|stop|off|disable/i.test(text);
-}
-
-function isAutomationReportStatusRequest(text: string): boolean {
-  return /자동화|automation/i.test(text) && /보고|알림|notify|notification|report/i.test(text) && /상태|켜져|켜짐|꺼져|확인|status|on|off/i.test(text);
-}
-
 function automationReportStatusText(binding: TelegramBindingRow): string {
   if (binding.automation_report_enabled === 1) {
     return tg("automation.status_on");
@@ -1499,14 +1494,24 @@ function setAutomationReportEnabled(bindingId: string, enabled: boolean): void {
     .run(enabled ? 1 : 0, nowIso(), bindingId);
 }
 
+/** Deterministic wordlist mode — reference/fallback only; the judge decides above. */
 function telegramInvocationMode(userText: string): TelegramInvocationMode {
-  const asksToMakeSomething =
-    /만들|제작|구현|개발|코딩|빌드|생성|작성|수정|고쳐|고치|배포|웹|웹사이트|사이트|랜딩|페이지|앱|대시보드|프로토타입|자동화|create|make|build|implement|code|write|edit|fix|deploy|website|web\s*app|site|landing|page|dashboard|prototype|automation/i.test(
-      userText,
-    );
-  if (!asksToMakeSomething) {
+  if (!lexicalTelegramWriteIntent(userText)) {
     return { permissions: "read", goalMode: false, instruction: "" };
   }
+  return telegramWriteMode();
+}
+
+/** Judged read-vs-write mode; falls back to today's wordlist verdict, labeled. */
+async function resolveTelegramInvocationMode(userText: string): Promise<TelegramInvocationMode> {
+  const judged = await resolveTelegramGoalIntent(userText);
+  if (judged.source !== "llm") return telegramInvocationMode(userText);
+  return judged.write
+    ? telegramWriteMode()
+    : { permissions: "read", goalMode: false, instruction: "" };
+}
+
+function telegramWriteMode(): TelegramInvocationMode {
   const ko = currentUiLocale() === "ko";
   return {
     permissions: "write",
