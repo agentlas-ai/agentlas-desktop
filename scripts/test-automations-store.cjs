@@ -433,14 +433,31 @@ function assertLocalTime(iso, expected) {
     assert.equal(enabled.enabled, true);
     assert.ok(enabled.nextRunAt, "nextRunAt should be recomputed when re-enabled");
 
+    // The connected model decides the tool mode at creation (the create IPC handler warms
+    // it; see prejudgeAutomationComputerUse). Inject the model's "yes" verdict here — a job
+    // that must drive a signed-in Reddit page needs the real browser / computer-use path.
     const redditAutomation = createAutomation({
       name: "Reddit daily comments",
       scheduleHuman: "daily-09:00",
       targetType: "agent",
       targetId: "agent-1",
       promptTemplate: "Search Reddit, pick relevant threads, and post comments",
+      judged: () => true,
     });
-    assert.equal(redditAutomation.toolMode, "computer-use", "social/web action automations should default to computer-use");
+    assert.equal(redditAutomation.toolMode, "computer-use", "a model-judged human-web automation uses computer-use");
+
+    // No connected model verdict → the neutral "auto" default, NEVER a keyword guess. The
+    // old English/Korean wordlist that forced computer-use from words like "Reddit/post" is
+    // gone; auto still keeps the browser reachable when the task genuinely needs it.
+    const unjudgedSocial = createAutomation({
+      name: "Reddit daily comments",
+      scheduleHuman: "daily-09:00",
+      targetType: "agent",
+      targetId: "agent-1",
+      promptTemplate: "Search Reddit, pick relevant threads, and post comments",
+      judged: () => null,
+    });
+    assert.equal(unjudgedSocial.toolMode, "auto", "no model verdict must default to auto, not a keyword-forced computer-use");
 
     const explicitBrowserAutomation = createAutomation({
       name: "Explicit browser smoke",

@@ -354,6 +354,7 @@ import { prejudgeOneRequestIntent } from "./one/judged-request-intent";
 import { judge, judgeSubset } from "./system-agents/judgment";
 import { prejudgeOneMemoryIntent } from "./one/memory-detector";
 import { prejudgeCompletionClaims } from "./one/judged-completion-claim";
+import { prejudgeAutomationComputerUse } from "./system-agents/judged-tool-mode";
 import { continueOneFromTaskResult } from "./one/task-continuation";
 import {
   bindOneAttachmentsToTeam,
@@ -3392,6 +3393,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     "automations:create",
     async (_e, input: AutomationCreateInput) => {
+      // The connected model decides the tool mode at creation; warm it before the
+      // synchronous store write peeks the verdict (see prejudgeAutomationComputerUse).
+      await prejudgeAutomationComputerUse(
+        { toolMode: input.toolMode, name: input.name, promptTemplate: input.promptTemplate, targetLabel: input.targetType },
+        { timeoutMs: 6_000 },
+      );
       const created = createAutomation(input);
       await resyncTriggers();
       return created;
@@ -3403,6 +3410,10 @@ export function registerIpcHandlers(): void {
     return next;
   });
   ipcMain.handle("automations:update", async (_e, id: string, patch: AutomationUpdatePatch) => {
+    await prejudgeAutomationComputerUse(
+      { toolMode: patch.toolMode, name: patch.name, promptTemplate: patch.promptTemplate, targetLabel: patch.targetType },
+      { timeoutMs: 6_000 },
+    );
     const next = updateAutomation(id, patch);
     await resyncTriggers();
     return next;

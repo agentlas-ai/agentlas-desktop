@@ -350,6 +350,9 @@ export function createAutomation(input: {
   targetVersion?: string;
   runtimeSelection?: RuntimeSelection;
   executionPermission?: AutomationExecutionPermission;
+  /** Synchronous judged verdict reader; defaults to the resident computer-use peek.
+   *  Injectable so tests can supply a deterministic verdict without a live model. */
+  judged?: (text: string) => boolean | null;
 }): Automation {
   const id = randomUUID();
   const now = new Date();
@@ -395,7 +398,7 @@ export function createAutomation(input: {
       triggerType,
       triggerJson,
       resolveAutomationToolMode({
-        judged: judgedComputerUse,
+        judged: input.judged ?? judgedComputerUse,
         toolMode: normalizeToolMode(input.toolMode),
         name: input.name,
         promptTemplate: input.promptTemplate,
