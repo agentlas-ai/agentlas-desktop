@@ -16,6 +16,12 @@ on:
       - ".github/workflows/dependency-security.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/release-signed-mac.yml"
+      # The signed-release gate requires a successful push-event harness run for
+      # the exact release commit. Release commits routinely touch only these two
+      # files, which previously matched no path and so never triggered CI —
+      # making such a commit impossible to release. Keep them in the trigger.
+      - "README.md"
+      - "CHANGELOG.md"
   push:
     branches: [main]
     paths:
@@ -31,6 +37,12 @@ on:
       - ".github/workflows/dependency-security.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/release-signed-mac.yml"
+      # The signed-release gate requires a successful push-event harness run for
+      # the exact release commit. Release commits routinely touch only these two
+      # files, which previously matched no path and so never triggered CI —
+      # making such a commit impossible to release. Keep them in the trigger.
+      - "README.md"
+      - "CHANGELOG.md"
 
 concurrency:
   group: desktop-core-harness-${{ github.event.pull_request.number || github.ref }}
