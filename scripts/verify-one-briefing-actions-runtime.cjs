@@ -186,9 +186,14 @@ async function runtimeWorker() {
     executionPermission: "write",
     hubMode: "hub-first",
   });
+  // These two runs are read back through real-clock getOneBriefingSnapshot()
+  // calls, so their timestamps must stay inside CANDIDATE_TTL_MS relative to
+  // the wall clock — hardcoded dates rot past the TTL and null the candidate.
+  const failedRunAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const swappedRunAt = new Date(Date.now() - 59 * 60 * 1000).toISOString();
   automations.recordRun({
     automationId: automation.id,
-    ranAt: "2026-07-18T07:00:00.000Z",
+    ranAt: failedRunAt,
     status: "error",
     error: `ENOENT ${rawProjectPath} password=should-never-leak`,
   });
@@ -206,7 +211,7 @@ async function runtimeWorker() {
   const beforeSwapTasks = db.prepare("SELECT COUNT(*) AS count FROM tasks").get().count;
   automations.recordRun({
     automationId: automation.id,
-    ranAt: "2026-07-18T07:01:00.000Z",
+    ranAt: swappedRunAt,
     status: "blocked",
     error: "newer private scheduler transcript",
   });
