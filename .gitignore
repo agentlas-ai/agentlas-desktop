@@ -142,6 +142,7 @@ test-results/
 !scripts/test-telegram-judged-intents.cjs
 !scripts/test-memory-import-owner-judged.cjs
 !scripts/test-mcp-need-resolver.cjs
+!scripts/test-pack-intents.cjs
 **/test_*.sh
 **/*-smoke.ts
 **/*-smoke.mjs

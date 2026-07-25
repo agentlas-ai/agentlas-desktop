@@ -24,24 +24,19 @@ export function shouldSeedEcommerceOps(prompt: string): boolean {
 export async function prepareEcommerceOpsManifest(input: {
   prompt: string;
   now?: string;
+  judgeSubsetFn?: import("../pack-intents").OnePackIntentJudge;
 }): Promise<AgentlasSurfaceManifest | null> {
-  // Keyword prefilter, then meaning confirmation by the resident judge: "make the font
-  // small", "restore my backup", and "this borders on absurd" all hit the commerce
-  // wordlist ("mall", "store", "orders") and used to seed an e-commerce ops surface.
-  if (!shouldSeedEcommerceOps(input.prompt)) return null;
-  const { judgeBoolean } = await import("../system-agents/judgment");
-  const confirmed = await judgeBoolean({
-    kind: "ecommerce-ops-intent",
-    question:
-      "Is the user asking for online-store / e-commerce operations work — managing products, orders, inventory, storefront, or sales for a shop?",
-    input: input.prompt.slice(0, 2000),
-    guidance:
-      "Only 'yes' for actual commerce operations. Words that merely contain a commerce term as a " +
-      "substring (small, restore, borders) or unrelated uses of 'store'/'order' are NOT commerce intent.",
-    hints: "words that may hint: store, shop, mall, order, inventory, product, checkout, 쇼핑몰, 주문, 재고, 상품",
-    fallback: true,
+  // ONE judged pack-intent decision shared with the creative seed (subset cache):
+  // "make the font small", "restore my backup" hit the commerce wordlist and used
+  // to seed an e-commerce ops surface, while a genuine store request phrased
+  // without the listed words could never seed. The prefilter is a hint, not a
+  // gate; no model = today's prefilter verdict, labeled fallback.
+  const { resolveOnePackIntents } = await import("../pack-intents");
+  const intents = await resolveOnePackIntents({
+    prompt: input.prompt,
+    judgeSubsetFn: input.judgeSubsetFn,
   });
-  if (!confirmed.value) return null;
+  if (!intents.selected.includes("ecommerce-ops")) return null;
   return buildEcommerceOpsManifest({
     prompt: input.prompt,
     now: input.now,

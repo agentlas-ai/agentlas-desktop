@@ -85,6 +85,7 @@ import {
   buildExperienceRoutingPrior,
   type ExperienceRoutingPrior,
 } from "../experience/context";
+import { prejudgeCanonicalTaskIds } from "../experience/taxonomy";
 import { promoteExperienceCandidatesForRun } from "../experience/store";
 import { maybeProposeEvolutionFromRun } from "../agents/evolution-triggers";
 import { writeEvolutionProposalsForProject, evolutionSessionContextLine } from "../agents/evolution-hep";
@@ -1624,6 +1625,12 @@ export async function runMcpInvocation(
       : getChatWorkingFolder(chat.id) ?? (
         invocationProjectId ? getProject(invocationProjectId)?.folderPath ?? null : null
       );
+  // Warm the judged canonical task classification the synchronous experience
+  // prior + taste/operational overlay matchers peek below. Best-effort with a
+  // tight budget: a miss keeps the labeled deterministic wordlist fallback.
+  if (!req.agentAppMode && !plainConversation) {
+    await prejudgeCanonicalTaskIds(effectiveUserPrompt, { timeoutMs: 4_000 }).catch(() => undefined);
+  }
   const experiencePriors = new Map<string, ExperienceRoutingPrior>();
   if (!req.agentAppMode && !hasPriorContext && !plainConversation && isGlobalOrchestrator(agent)) {
     for (const candidate of installedAgents) {

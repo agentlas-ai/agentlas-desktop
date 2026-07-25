@@ -1,4 +1,5 @@
 import type { CanonicalExperienceEnvironmentProfile } from "../../shared/experience";
+import { judgeSubset, peekSubsetJudgment } from "../system-agents/judgment";
 
 export const EXPERIENCE_TASK_PREFIX = "agentlas.task.v1/";
 export const EXPERIENCE_ENV_PREFIX = "agentlas.env.v1/";
@@ -79,17 +80,131 @@ export function isCanonicalTaskId(value: unknown): value is string {
   return TASK_SLUG_SET.has(value.slice(EXPERIENCE_TASK_PREFIX.length));
 }
 
-export function classifyCanonicalTaskIds(...values: Array<string | null | undefined>): string[] {
-  const text = values.filter((value): value is string => typeof value === "string")
+/** Judgment-cache kind (mirrors the terminal engine's experience-task-class contract). */
+export const EXPERIENCE_TASK_JUDGMENT_KIND = "experience-task-class";
+
+/** The exact judgment input the resolver warms and the synchronous classifier peeks. */
+export function taskClassJudgmentInput(...values: Array<string | null | undefined>): string {
+  return values.filter((value): value is string => typeof value === "string")
     .join("\n")
     .normalize("NFKC")
     .toLowerCase();
+}
+
+function explicitDeclaredTaskIds(text: string): string[] {
   const explicit = text.match(/agentlas\.task\.v1\/[a-z0-9-]+/g) ?? [];
   const found = new Set(explicit.filter(isCanonicalTaskId));
+  return EXPERIENCE_TASK_SLUGS.map(canonicalTaskId).filter((id) => found.has(id));
+}
+
+function lexicalCanonicalTaskIds(text: string): string[] {
+  const found = new Set(explicitDeclaredTaskIds(text));
   for (const rule of TASK_RULES) {
     if (rule.pattern.test(text)) found.add(canonicalTaskId(rule.slug));
   }
   return EXPERIENCE_TASK_SLUGS.map(canonicalTaskId).filter((id) => found.has(id));
+}
+
+/**
+ * TASK_RULES no longer make the final classification: the resident judge decides
+ * which kinds of work the text genuinely involves, and the wordlists are hints +
+ * the labeled fallback. Synchronous overlay/prior paths call this after an async
+ * pre-pass warmed the same subset judgment (see resolveCanonicalTaskIds); a cache
+ * miss keeps today's deterministic verdict. Explicit `agentlas.task.v1/*` ids in
+ * the text are closed-form and always win outright, mirroring the terminal
+ * engine's resolveCanonicalTaskClasses contract (declared ids win; the prefilter
+ * never invents; a model verdict replaces the prefilter, never pads it).
+ */
+export function classifyCanonicalTaskIds(...values: Array<string | null | undefined>): string[] {
+  const text = taskClassJudgmentInput(...values);
+  const declared = explicitDeclaredTaskIds(text);
+  if (declared.length > 0) return lexicalCanonicalTaskIds(text);
+  const peeked = peekSubsetJudgment<ExperienceTaskSlug>(EXPERIENCE_TASK_JUDGMENT_KIND, EXPERIENCE_TASK_SLUGS, text);
+  if (peeked && peeked.source === "llm") {
+    const selected = new Set(peeked.selected);
+    return EXPERIENCE_TASK_SLUGS.filter((slug) => selected.has(slug)).map(canonicalTaskId);
+  }
+  return lexicalCanonicalTaskIds(text);
+}
+
+export interface ResolvedCanonicalTaskIds {
+  taskIds: string[];
+  /** "llm" = the model decided; "fallback" = today's wordlist verdict, labeled. */
+  source: "llm" | "fallback";
+  reason: string;
+}
+
+const TASK_CLASS_HINTS: Array<{ label: ExperienceTaskSlug; words: string[] }> = TASK_RULES.map((rule) => ({
+  label: rule.slug,
+  words: [...new Set(rule.pattern.source
+    .split(/[|()]/)
+    .map((part) => part.replace(/\\b|\?:|\\s\+|[\\^$*+?.{}[\]]/g, " ").replace(/\s+/g, " ").trim())
+    .filter((word) => word.length >= 2 && /^[a-z0-9가-힣][a-z0-9가-힣 -]*$/i.test(word)))]
+    .slice(0, 12),
+}));
+
+/**
+ * Async resolver: judge the canonical task classes by meaning (kind
+ * "experience-task-class", labels = canonical slugs, TASK_RULES as hints), warming
+ * the subset cache that `classifyCanonicalTaskIds` peeks. Declared explicit ids
+ * stay closed-form and skip the judge entirely.
+ */
+export async function resolveCanonicalTaskIds(
+  values: Array<string | null | undefined>,
+  opts: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    judgeSubsetFn?: typeof judgeSubset;
+  } = {},
+): Promise<ResolvedCanonicalTaskIds> {
+  const text = taskClassJudgmentInput(...values);
+  const lexical = lexicalCanonicalTaskIds(text);
+  const declared = explicitDeclaredTaskIds(text);
+  if (declared.length > 0) {
+    return { taskIds: lexical, source: "fallback", reason: "explicit canonical ids declared" };
+  }
+  if (!text.trim()) return { taskIds: lexical, source: "fallback", reason: "empty text" };
+  const run = opts.judgeSubsetFn ?? judgeSubset;
+  let verdict: Awaited<ReturnType<typeof judgeSubset>>;
+  try {
+    verdict = await run({
+      kind: EXPERIENCE_TASK_JUDGMENT_KIND,
+      question:
+        "Which kinds of work does this request actually involve? Judge the user's real task, not words that merely appear.",
+      labels: EXPERIENCE_TASK_SLUGS,
+      input: text,
+      guidance:
+        "Return a label only when that kind of work is genuinely part of the request. A word inside an " +
+        "unrelated compound or a different sense of the word does not count. Return an empty list for " +
+        "content with no identifiable task (hashes, ids, random strings).",
+      hints: TASK_CLASS_HINTS,
+      signal: opts.signal,
+      timeoutMs: opts.timeoutMs,
+    });
+  } catch {
+    return { taskIds: lexical, source: "fallback", reason: "judge failed" };
+  }
+  if (verdict.source !== "llm") {
+    return { taskIds: lexical, source: "fallback", reason: verdict.reason };
+  }
+  const selected = new Set(verdict.selected);
+  return {
+    taskIds: EXPERIENCE_TASK_SLUGS.filter((slug) => selected.has(slug)).map(canonicalTaskId),
+    source: "llm",
+    reason: verdict.reason,
+  };
+}
+
+/** Warm the task-class judgment the synchronous classifier peeks. Best-effort. */
+export async function prejudgeCanonicalTaskIds(
+  text: string,
+  opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<void> {
+  try {
+    await resolveCanonicalTaskIds([text], opts);
+  } catch {
+    // Sync sites keep the labeled wordlist fallback.
+  }
 }
 
 function canonicalOs(value: string): string {

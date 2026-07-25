@@ -56,7 +56,7 @@ function seedAgent() {
     });
     setChatWorkingFolder(chat.id, baseDir);
 
-    const manifest = prepareEcommerceOpsManifest({
+    const manifest = await prepareEcommerceOpsManifest({
       prompt: "비개발자가 쇼핑몰 사업을 시작하려고 한다. 결제, 디비, 이미지, 주문 운영까지 에이전트가 대행해줘.",
       now: "2026-05-31T00:00:00.000Z",
     });

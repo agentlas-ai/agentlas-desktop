@@ -8,7 +8,7 @@ import type {
   JsonObject,
 } from "../../shared/types";
 import { AGENTLAS_OS_FALLBACK_LADDER } from "../../shared/surface-delegation";
-import { judgeBoolean } from "../system-agents/judgment";
+import { resolveOnePackIntents, type OnePackIntentJudge } from "../pack-intents";
 
 export interface ProductMetadata {
   url?: string;
@@ -47,25 +47,20 @@ export async function prepareCreativeAdPackManifest(input: {
   prompt: string;
   images?: ImageAttachment[];
   now?: string;
+  judgeSubsetFn?: OnePackIntentJudge;
 }): Promise<AgentlasSurfaceManifest | null> {
-  // Cheap keyword prefilter first: if nothing even hints at creative/ad work, don't
-  // seed and don't spend a model call. When it does hint, the resident judge confirms
-  // by meaning so a coincidental substring ("add a task", "read the report", an
-  // uploaded headshot for a bug repro) can't force the Creative Ad surface. Wordlist =
-  // reference; the model decides. Falls back to the prefilter verdict with no model.
-  if (!shouldSeedCreativeAdPack(input.prompt, input.images)) return null;
-  const confirmed = await judgeBoolean({
-    kind: "creative-ad-intent",
-    question:
-      "Is the user asking to CREATE an advertising or creative-marketing asset — an ad, promotional image/video, banner, product visual, or ad copy?",
-    input: input.prompt.slice(0, 2000),
-    guidance:
-      "Only 'yes' when producing a creative/advertising deliverable is the actual request. " +
-      "Incidental words like 'add', 'read', 'download', or merely attaching an image are NOT creative-ad intent.",
-    hints: "words that may hint: ad, advertisement, banner, poster, campaign, creative, 광고, 배너, 포스터, 이미지, 영상",
-    fallback: true,
+  // ONE judged pack-intent decision (shared with the ecommerce seed via the
+  // subset cache). The keyword prefilter is a hint, never a gate: a lexical
+  // MISS can still seed when the model recognizes creative intent, and a
+  // coincidental substring ("add a task", an uploaded bug-repro screenshot)
+  // can't force the Creative Ad surface. No model = today's prefilter verdict,
+  // labeled fallback.
+  const intents = await resolveOnePackIntents({
+    prompt: input.prompt,
+    images: input.images,
+    judgeSubsetFn: input.judgeSubsetFn,
   });
-  if (!confirmed.value) return null;
+  if (!intents.selected.includes("creative-ad-pack")) return null;
   const url = extractUrls(input.prompt)[0];
   const metadata = url ? await fetchProductMetadata(url, input.now) : undefined;
   return buildCreativeAdPackManifest({

@@ -249,6 +249,7 @@
     "proof:electron-chat-agent-os": "npm run build && node scripts/proof-electron-chat-agent-os.cjs",
     "smoke:tool-factory": "npm run build:electron && electron scripts/smoke-tool-factory.cjs",
     "smoke:surface-assets": "npm run build:electron && node scripts/smoke-surface-assets.cjs",
+    "test:pack-intents": "npm run build:electron && electron scripts/test-pack-intents.cjs",
     "smoke:creative-pack": "npm run build:electron && node scripts/smoke-creative-pack.cjs",
     "smoke:creative-durable": "npm run build:electron && electron scripts/smoke-creative-durable.cjs",
     "proof:creative-agent-os": "npm run build:electron && electron scripts/proof-creative-agent-os.cjs",

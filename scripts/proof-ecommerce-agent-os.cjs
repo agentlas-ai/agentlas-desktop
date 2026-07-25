@@ -82,7 +82,7 @@ function seedMetaAgent() {
   setChatWorkingFolder(chat.id, PROOF_ROOT);
   appendChatMessage(chat.id, "user", PROMPT);
 
-  const manifest = prepareEcommerceOpsManifest({
+  const manifest = await prepareEcommerceOpsManifest({
     prompt: PROMPT,
     now: new Date().toISOString(),
   });

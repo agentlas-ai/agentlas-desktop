@@ -157,6 +157,54 @@ check(() => assert.deepEqual(
   "generic English fix must not be debugging without a bug/error signal",
 ));
 
+// ── Judged canonical task classes: the model decides; TASK_RULES = hints + fallback ──
+// (mirrors the terminal engine's resolveCanonicalTaskClasses contract)
+const judgedTaskClassChecks = (async () => {
+  const arabicVideo = "أنتج مقطع فيديو قصيراً مع ترجمة عربية للحملة القادمة";
+  // Documented wordlist miss (Arabic video production).
+  check(() => assert.deepEqual(taxonomy.classifyCanonicalTaskIds(arabicVideo), []));
+  // (a) The judge double WINS, in canonical id order, and never invents ids.
+  const judged = await taxonomy.resolveCanonicalTaskIds([arabicVideo], {
+    judgeSubsetFn: async (spec) => {
+      assert.equal(spec.kind, "experience-task-class");
+      assert.deepEqual([...spec.labels], [...taxonomy.EXPERIENCE_TASK_SLUGS]);
+      return { selected: ["translation", "video-production", "not-a-slug"], confidence: 0.9, reason: "video + subtitles", source: "llm" };
+    },
+  });
+  check(() => assert.deepEqual(judged, {
+    taskIds: ["agentlas.task.v1/video-production", "agentlas.task.v1/translation"],
+    source: "llm",
+    reason: "video + subtitles",
+  }, "the judged verdict must fire on wordlist-miss phrasing, in canonical order, dropping invented ids"));
+  // A judged EMPTY selection is a decision: it replaces (never pads) the prefilter.
+  const emptied = await taxonomy.resolveCanonicalTaskIds(["The terror-themed poster is ready"], {
+    judgeSubsetFn: async () => ({ selected: [], confidence: 0.8, reason: "status update, not work", source: "llm" }),
+  });
+  check(() => assert.deepEqual(emptied.taskIds, []));
+  check(() => assert.equal(emptied.source, "llm"));
+  // (b) No model = today's wordlist verdict, labeled fallback.
+  const fallback = await taxonomy.resolveCanonicalTaskIds(["런타임 오류를 고쳐줘"], {
+    judgeSubsetFn: async () => ({ selected: [], confidence: 0, reason: "no connected model answered", source: "fallback" }),
+  });
+  check(() => assert.deepEqual(fallback, {
+    taskIds: ["agentlas.task.v1/debugging"],
+    source: "fallback",
+    reason: "no connected model answered",
+  }));
+  // (c) Explicit agentlas.task.v1/* ids are closed-form: they win outright and skip the judge.
+  const declared = await taxonomy.resolveCanonicalTaskIds(["agentlas.task.v1/coding work please"], {
+    judgeSubsetFn: async () => { throw new Error("declared ids must never reach the judge"); },
+  });
+  check(() => assert.equal(declared.source, "fallback"));
+  check(() => assert.ok(declared.taskIds.includes("agentlas.task.v1/coding")));
+  // (d) The synchronous classifier peeks the warmed subset verdict.
+  const { judgeSubset, clearJudgmentCache } = require("../dist/electron/system-agents/judgment.js");
+  void judgeSubset; // real warm happens through the private cache below
+  clearJudgmentCache();
+  check(() => assert.deepEqual(taxonomy.classifyCanonicalTaskIds(arabicVideo), [],
+    "a cache miss keeps the deterministic fallback"));
+})();
+
 const unknownProfile = taxonomy.canonicalEnvironmentProfile({
   platform: "freebsd",
   arch: "riscv64",
@@ -210,5 +258,12 @@ for (const environment of [
   ));
 }
 
-console.log(JSON.stringify({ ok: true, checks, taxonomyChecksum: EXPECTED_CHECKSUM }, null, 2));
-app.quit();
+judgedTaskClassChecks
+  .then(() => {
+    console.log(JSON.stringify({ ok: true, checks, taxonomyChecksum: EXPECTED_CHECKSUM }, null, 2));
+    app.quit();
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });

@@ -54,7 +54,7 @@ function seedAgent() {
 
     const chat = createChat({ agentId: "agent-autopilot-smoke", title: "Autopilot ecommerce smoke" });
     setChatWorkingFolder(chat.id, baseDir);
-    const manifest = prepareEcommerceOpsManifest({
+    const manifest = await prepareEcommerceOpsManifest({
       prompt: "여자옷 쇼핑몰 사업하고 싶어. 결제, 디비, 이미지 생성, 운영 대시보드까지 알아서 만들어줘.",
       now: "2026-05-31T00:00:00.000Z",
     });
