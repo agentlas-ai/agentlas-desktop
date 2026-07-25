@@ -214,6 +214,16 @@ function exactAcceptedTask(input: EnsureAcceptedResultValueClosureInput): Canoni
   return task;
 }
 
+/**
+ * The exact fact statements these Main-authored closures write. The async accept
+ * paths pre-judge them (see judged-completion-claim) so the synchronous trust
+ * validator can peek a model verdict instead of relying on the wordlist alone.
+ */
+export const ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS = [
+  "The completed internal run result was explicitly accepted for this Task.",
+  "Every declared media artifact in the accepted internal result matched its sealed filesystem binding.",
+] as const;
+
 function buildCreateInput(
   state: OneValueClosureState,
   task: CanonicalTask,
@@ -285,7 +295,7 @@ function buildCreateInput(
       {
         valueItemId: binding.valueItemRef,
         kind: "fact",
-        statement: "The completed internal run result was explicitly accepted for this Task.",
+        statement: ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS[0],
         evidenceRefs: [binding.runEvidenceRef, binding.acceptanceEvidenceRef],
       },
     ],
@@ -406,7 +416,7 @@ function buildVerifiedArtifactCreateInput(
       {
         valueItemId: binding.valueItemRef,
         kind: "fact",
-        statement: "Every declared media artifact in the accepted internal result matched its sealed filesystem binding.",
+        statement: ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS[1],
         evidenceRefs: [acceptance.evidenceRef, ...verificationRefs],
       },
     ],

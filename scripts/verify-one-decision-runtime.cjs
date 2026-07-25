@@ -77,6 +77,42 @@ function verifyProjectionContract() {
   }), "task_secret");
   assert.equal(JSON.stringify(secret).includes("sk-proj-"), false);
   assert.equal(decision.isOneDecisionViewV1({ ...payment, unexpected: true }), false, "expanded contracts fail closed");
+
+  // ── Judged readers decide risk/disposition; wordlists stay the labeled fallback ──
+  const arabicCard = {
+    question: "هل أقوم بتحويل المبلغ كاملاً إلى الحساب الخارجي الآن؟",
+    header: "تحويل الأموال",
+    options: [
+      { label: "حوّل الآن", description: "ينفّذ التحويل المصرفي فوراً" },
+      { label: "لا تنفّذ أي تحويل", description: "يرفض العملية بالكامل" },
+    ],
+  };
+  // (a) Judged verdicts FIRE on a wire-transfer card phrased in a language no wordlist covers.
+  const judgedWire = decision.normalizeOneDecision(pending("chat_ar", "message_ar", arabicCard), "task_ar", {
+    risk: () => "R4",
+    disposition: (text) => (text.includes("حوّل الآن") ? "approve" : "reject"),
+  });
+  assert.equal(judgedWire.risk.level, "R4", "a judged critical risk must win over a wordlist miss");
+  assert.ok(judgedWire.risk.reasons.includes("critical_effect"));
+  assert.equal(judgedWire.options[0].disposition, "approve");
+  assert.equal(judgedWire.options[0].enabled, false, "judged high-risk unstructured authority fails closed");
+  assert.equal(judgedWire.options[1].disposition, "reject");
+  assert.equal(decision.isOneDecisionViewV1(judgedWire), true);
+  // (b) No judged verdict = today's deterministic verdict (documented under-warning), labeled fallback.
+  const fallbackWire = decision.normalizeOneDecision(pending("chat_ar2", "message_ar2", arabicCard), "task_ar2");
+  assert.equal(fallbackWire.risk.level, "R0", "without a judged verdict the regex fallback stands unchanged");
+  // (c) A judged reader that abstains (null) also keeps the deterministic verdict.
+  const abstained = decision.normalizeOneDecision(pending("chat_ar3", "message_ar3", arabicCard), "task_ar3", {
+    risk: () => null,
+    disposition: () => null,
+  });
+  assert.equal(abstained.risk.level, fallbackWire.risk.level);
+  // (d) Exact judgment kinds are the shared contract the electron warm pass uses.
+  assert.equal(decision.ONE_DECISION_RISK_JUDGMENT_KIND, "one-decision-risk");
+  assert.equal(decision.ONE_DECISION_DISPOSITION_JUDGMENT_KIND, "one-decision-disposition");
+  const judgmentTexts = decision.oneDecisionJudgmentTexts(arabicCard);
+  assert.equal(judgmentTexts.options.length, 2);
+  assert.ok(judgmentTexts.combined.includes(arabicCard.header));
 }
 
 async function openStore() {

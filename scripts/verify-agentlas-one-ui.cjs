@@ -78,7 +78,9 @@ function loadStandaloneTs(source, filename) {
   const mod = { exports: {} };
   const localRequire = (specifier) => specifier === "./secret-patterns"
     ? { redactSecrets: (value) => value }
-    : require(specifier);
+    : specifier === "./detect-language"
+      ? require("../dist/shared/detect-language.js")
+      : require(specifier);
   Function("exports", "module", "require", output)(mod.exports, mod, localRequire);
   return mod.exports;
 }
@@ -198,7 +200,7 @@ assert.match(shell, /grantForDroppedFile\(file\)/, "One picker and drop input mu
 assert.match(shell, /api\.oneAttachments\.prepare\(\{ chatId, userPrompt: value, attachments \}\)/, "Main must prepare the exact attachment set only when the user submits");
 assert.match(shell, /api\.oneAttachments\.bindToTeam\(\{/, "team review must freeze the same prepared attachment capability");
 assert.match(shell, /const resolvedIntent = preparedAttachments[\s\S]*classifyOneRequestIntent\(value\)[\s\S]*resolvedIntent,/, "attachments and ordinary user work must resolve to a Task before invocation");
-assert.match(invocationService, /classifyOneRequestIntent\(invocationRequest\.userPrompt\)[\s\S]*permissions: "write"/, "Main must revalidate a work-shaped One request instead of trusting renderer intent");
+assert.match(invocationService, /classifyOneRequestIntent\(invocationRequest\.userPrompt, judgedOneRequestIntent\)[\s\S]*permissions: "write"/, "Main must revalidate a work-shaped One request with the judged verdict deciding and the wordlist as labeled fallback");
 assert.match(shell, /type="file"[\s\S]*multiple/, "the minimal composer must accept multiple files");
 assert.match(shell, /onDrop=\{\(event\)/, "the composer must support file drop");
 assert.match(shell, /IconPlus/, "the composer must expose the reference-style add control");

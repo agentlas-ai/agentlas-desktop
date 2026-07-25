@@ -61,6 +61,7 @@ import {
   type OneTeamRuntimeBinding,
 } from "../one/team-preflight";
 import { detectExplicitOneMemoryIntent } from "../one/memory-detector";
+import { judgedOneRequestIntent } from "../one/judged-request-intent";
 import { ONE_PERSONA_DIRECTIVE } from "../one/persona";
 import {
   deriveOneTaskKindRef,
@@ -809,9 +810,13 @@ export class InvocationService {
     const runReq: OneInvocationRequest = {
       ...invocationRequest,
       runId,
+      // The resident judge decides "conversation vs task" by meaning: the async
+      // invoke paths warm the judgment cache (prejudgeOneRequestIntent) and this
+      // sync site peeks it; without a judged verdict the wordlist classifier is
+      // only the labeled deterministic fallback.
       ...(requestedOneMode
         && invocationRequest.taskIntent === "conversation"
-        && classifyOneRequestIntent(invocationRequest.userPrompt) === "task"
+        && classifyOneRequestIntent(invocationRequest.userPrompt, judgedOneRequestIntent) === "task"
         ? { taskIntent: "task" as const, permissions: "write" as const }
         : {}),
       ...(oneProfileContext ? { oneProfileContext } : {}),

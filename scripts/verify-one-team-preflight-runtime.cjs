@@ -118,6 +118,50 @@ async function runtimeWorker() {
     "product-researcher",
   ]);
 
+  // ── Resident judge decides team need; complexity wordlists are hints only ──
+  // (a) A judged "yes" fires on phrasing every regex misses (Arabic), and the
+  //     proposal records the model-assessed reason.
+  const judgedYesChat = chats.createChat({ agentId: "one-coordinator", title: "Judged yes", taskMode: "conversation" });
+  const judgedYesResult = await preflight.prepareOneTeamPreflight({
+    chatId: judgedYesChat.id,
+    userPrompt: "قارن ثلاث شركات شحن دولية من مصادر مستقلة وجهّز تقريراً مفصلاً مع جدول مقارنة",
+    expectedTaskId: null,
+    expectedTaskVersion: null,
+  }, deps({ judgeTeamNeed: async () => ({ needed: true, source: "llm", reason: "parallel multi-deliverable research" }) }));
+  assert.equal(judgedYesResult.kind, "proposal", "a judged team need must fire even when every complexity regex misses");
+  assert.deepEqual(judgedYesResult.proposal.complexityReasons, ["model_assessed_team_benefit"]);
+
+  // (b) A judged "no" vetoes a wordlist false positive.
+  const judgedNoChat = chats.createChat({ agentId: "one-coordinator", title: "Judged no", taskMode: "conversation" });
+  const judgedNoResult = await preflight.prepareOneTeamPreflight({
+    chatId: judgedNoChat.id,
+    userPrompt: "Ask installed-researcher to research the market in parallel, write a report and table, then cross-check every source.",
+    expectedTaskId: null,
+    expectedTaskVersion: null,
+  }, deps({ judgeTeamNeed: async () => ({ needed: false, source: "llm", reason: "one simple deliverable" }) }));
+  assert.deepEqual(judgedNoResult, { kind: "not_required" }, "a judged 'no team' verdict must override the wordlist reasons");
+
+  // (c) Structured /workforce·/hep-network commands stay closed-form: never judged away.
+  const commandChat = chats.createChat({ agentId: "one-coordinator", title: "Command", taskMode: "conversation" });
+  const commandResult = await preflight.prepareOneTeamPreflight({
+    chatId: commandChat.id,
+    userPrompt: "/workforce 50만원 이하 공기청정기를 조사하고 비교해줘",
+    expectedTaskId: null,
+    expectedTaskVersion: null,
+  }, deps({ judgeTeamNeed: async () => ({ needed: false, source: "llm", reason: "should not be consulted" }) }));
+  assert.equal(commandResult.kind, "proposal", "an explicit structured team command must never be vetoed by the judge");
+
+  // (d) No model (source fallback) keeps today's wordlist verdict, labeled.
+  const fallbackChat = chats.createChat({ agentId: "one-coordinator", title: "Fallback", taskMode: "conversation" });
+  const fallbackResult = await preflight.prepareOneTeamPreflight({
+    chatId: fallbackChat.id,
+    userPrompt: "Research three vendors in parallel, write a report and a table, then cross-check the sources.",
+    expectedTaskId: null,
+    expectedTaskVersion: null,
+  }, deps({ judgeTeamNeed: async () => ({ needed: false, source: "fallback", reason: "no connected model answered" }) }));
+  assert.equal(fallbackResult.kind, "proposal", "no model = previous deterministic behavior");
+  assert.ok(fallbackResult.proposal.complexityReasons.includes("parallel_work_requested"));
+
   const adaptiveLocal = chats.createChat({ agentId: "one-coordinator", title: "Adaptive local", taskMode: "conversation" });
   const adaptiveLocalResult = await preflight.prepareOneTeamPreflight({
     chatId: adaptiveLocal.id,
@@ -615,6 +659,9 @@ function orchestrate() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-one-team-preflight-"));
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
+  // Hermetic: the un-injected judge path must deterministically fall back to the
+  // wordlist verdict instead of reaching a live model on the host machine.
+  env.AGENTLAS_DISABLE_RUNTIME_PROBES = "1";
   try {
     env.AGENTLAS_STORE_PATH = path.join(temp, "runtime.sqlite");
     const runtime = runWorker(["--runtime", `--user-data=${path.join(temp, "runtime-user")}`], env);

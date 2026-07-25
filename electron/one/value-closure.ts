@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { judgedCompletionClaim } from "./judged-completion-claim";
 import {
   ONE_VALUE_CLOSURE_CONTRACT_VERSION,
   isOneTrustedOutcomeEvidence,
@@ -369,7 +370,7 @@ function assertEvidenceSemantics(input: {
       if (matches.some((evidence) => evidence.verificationStatus !== "verified" || evidence.source === "explicit_user_observation")) {
         throw new Error(`Fact ${item.valueItemId} requires verified non-observational evidence`);
       }
-      if (oneValueClosureContainsCompletionClaim(item.statement) && !matches.some((evidence) =>
+      if (oneValueClosureContainsCompletionClaim(item.statement, judgedCompletionClaim) && !matches.some((evidence) =>
         evidence.verificationStatus === "verified" && ["execution_receipt", "outcome_verification"].includes(evidence.kind),
       )) {
         throw new Error(`Fact ${item.valueItemId} makes an execution/outcome claim without matching evidence`);

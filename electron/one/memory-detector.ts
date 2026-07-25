@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isSafeOneMemoryText, type OneMemoryProposalBasis } from "../../shared/one-memory";
+import { judgeBoolean, peekJudgment } from "../system-agents/judgment";
 
 export interface ExplicitOneMemoryIntent {
   normalizedPreview: string;
@@ -13,6 +14,21 @@ const KOREAN_PREFIX_RE = /^(?:(?:아니(?:요)?[,.!]?\s*)?)(?:이(?:걸|건|것�
 const KOREAN_SUFFIX_RE = /^([\s\S]+?)(?:라는?\s*(?:걸|것을)?\s*)?(?:꼭\s*)?기억해(?:\s*줘)?[.!]?$/i;
 const ENGLISH_PREFIX_RE = /^(?:(?:no[,!.]?\s*)?)(?:please\s+)?(?:remember\s+that|from\s+now\s+on|going\s+forward)(?:\s*[:;,–—-]\s*|\s+)([\s\S]+)$/i;
 
+/** Judgment-cache kind shared by the async warm pass and the synchronous peek. */
+export const ONE_MEMORY_INTENT_JUDGMENT_KIND = "one-memory-explicit-intent";
+
+const ONE_MEMORY_INTENT_QUESTION =
+  "Did the user EXPLICITLY instruct the assistant to remember something for the future (a durable preference, rule, or fact), in any language or phrasing?";
+
+const ONE_MEMORY_INTENT_GUIDANCE =
+  "Answer yes ONLY for an explicit instruction to remember/keep in mind going forward. " +
+  "An ordinary preference statement, a one-off request, or a question is NOT an instruction to remember. " +
+  "The instruction may be phrased in any language, without any of the reference words.";
+
+function memoryIntentJudgmentInput(prompt: string): string {
+  return prompt.trim().slice(0, 2_000);
+}
+
 function normalizeCandidateText(value: string): string {
   return value
     .replace(/^[\s:：,;–—-]+/, "")
@@ -21,19 +37,8 @@ function normalizeCandidateText(value: string): string {
     .trim();
 }
 
-/**
- * This deliberately detects only an explicit user instruction to remember.
- * Ordinary preferences, model inferences, and long transcripts fail quiet.
- */
-export function detectExplicitOneMemoryIntent(userPrompt: unknown): ExplicitOneMemoryIntent | null {
-  if (typeof userPrompt !== "string" || userPrompt.length < 4 || userPrompt.length > 2_000) return null;
-  if (CONTROL_RE.test(userPrompt)) return null;
-  const prompt = userPrompt.trim();
-  const match = KOREAN_PREFIX_RE.exec(prompt)
-    ?? ENGLISH_PREFIX_RE.exec(prompt)
-    ?? KOREAN_SUFFIX_RE.exec(prompt);
-  if (!match) return null;
-  const normalizedPreview = normalizeCandidateText(match[1]);
+function intentFromPreview(prompt: string, preview: string): ExplicitOneMemoryIntent | null {
+  const normalizedPreview = normalizeCandidateText(preview);
   if (!isSafeOneMemoryText(normalizedPreview)) return null;
   const basis = LEADING_CORRECTION_RE.test(prompt)
     ? "user_correction" as const
@@ -44,4 +49,75 @@ export function detectExplicitOneMemoryIntent(userPrompt: unknown): ExplicitOneM
     suppressionKey: `memory-key:${digest}`,
     basis,
   };
+}
+
+/**
+ * This deliberately detects only an explicit user instruction to remember.
+ * Ordinary preferences, model inferences, and long transcripts fail quiet.
+ *
+ * The connected model decides by meaning when a judged verdict exists: `judged`
+ * is a synchronous reader (electron passes the peek warmed by
+ * `prejudgeOneMemoryIntent`). A judged "yes" fires even when the prefix/suffix
+ * wordlists miss (non-English phrasing); a judged "no" vetoes a wordlist false
+ * positive. No verdict = today's regex result, the labeled fallback. The
+ * safety line stays deterministic: every preview must pass isSafeOneMemoryText.
+ */
+export function detectExplicitOneMemoryIntent(
+  userPrompt: unknown,
+  judged: (prompt: string) => boolean | null = judgedOneMemoryIntent,
+): ExplicitOneMemoryIntent | null {
+  if (typeof userPrompt !== "string" || userPrompt.length < 4 || userPrompt.length > 2_000) return null;
+  if (CONTROL_RE.test(userPrompt)) return null;
+  const prompt = userPrompt.trim();
+  const match = KOREAN_PREFIX_RE.exec(prompt)
+    ?? ENGLISH_PREFIX_RE.exec(prompt)
+    ?? KOREAN_SUFFIX_RE.exec(prompt);
+  const judgedVerdict = judged?.(prompt) ?? null;
+  if (judgedVerdict === false) return null;
+  if (judgedVerdict === true && !match) {
+    // The model recognized an explicit remember instruction the wordlists missed.
+    // The whole normalized prompt becomes the preview; the closed-form safety
+    // check still decides whether it may be stored.
+    return intentFromPreview(prompt, prompt);
+  }
+  if (!match) return null;
+  return intentFromPreview(prompt, match[1]);
+}
+
+/** Synchronous read of an already-judged explicit-memory verdict. */
+export function judgedOneMemoryIntent(prompt: string): boolean | null {
+  const verdict = peekJudgment<"yes" | "no">(
+    ONE_MEMORY_INTENT_JUDGMENT_KIND,
+    memoryIntentJudgmentInput(prompt),
+  );
+  return verdict && verdict.source === "llm" ? verdict.verdict === "yes" : null;
+}
+
+/** Warm the judgment cache before the synchronous invocation start path peeks it. */
+export async function prejudgeOneMemoryIntent(
+  request: { oneMode?: boolean; userPrompt?: string },
+  opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<void> {
+  if (request.oneMode !== true) return;
+  const prompt = typeof request.userPrompt === "string" ? request.userPrompt.trim() : "";
+  if (prompt.length < 4 || prompt.length > 2_000 || CONTROL_RE.test(prompt)) return;
+  const lexical = Boolean(
+    KOREAN_PREFIX_RE.exec(prompt) ?? ENGLISH_PREFIX_RE.exec(prompt) ?? KOREAN_SUFFIX_RE.exec(prompt),
+  );
+  try {
+    await judgeBoolean({
+      kind: ONE_MEMORY_INTENT_JUDGMENT_KIND,
+      question: ONE_MEMORY_INTENT_QUESTION,
+      input: memoryIntentJudgmentInput(prompt),
+      guidance:
+        `A deterministic pre-pass ${lexical ? "matched" : "did not match"} the remember-instruction wordlists. ` +
+        "Treat that as a prior, not a fact. " + ONE_MEMORY_INTENT_GUIDANCE,
+      hints: "words that may hint an explicit remember instruction: 기억해, 기억해줘, 앞으로는, 다음부터는, remember that, from now on, going forward",
+      fallback: lexical,
+      signal: opts.signal,
+      timeoutMs: opts.timeoutMs,
+    });
+  } catch {
+    // Best-effort warm; the sync site keeps the deterministic fallback.
+  }
 }

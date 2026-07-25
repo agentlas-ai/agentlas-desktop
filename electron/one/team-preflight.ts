@@ -105,6 +105,8 @@ export interface OneTeamPreflightDependencies {
   hasRunReceipt?: typeof hasInvocationRunReceipt;
   /** Test-only crash seam after the durable reservation CAS. */
   afterReservation?: (proposal: OneTeamPreflightProposal) => void;
+  /** Injectable resident judge for "does this genuinely need a team?" (tests). */
+  judgeTeamNeed?: OneTeamNeedJudge;
 }
 
 export interface PreparedOneTeamPreflightClaim {
@@ -202,6 +204,9 @@ export function oneTeamRuntimeBindingMatches(
   return Boolean(active && oneTeamRuntimeBinding(active).digest === binding.digest);
 }
 
+/** Structured multi-agent commands are format signals — closed-form, never judged away. */
+const EXPLICIT_TEAM_COMMAND_RE = /^\s*(?:\/?workforce\b|\/?hep-network\b)/i;
+
 function complexityReasons(prompt: string): OneTeamPreflightComplexityReason[] {
   if (isPlainConversationalPrompt(prompt)) return [];
   const reasons: OneTeamPreflightComplexityReason[] = [];
@@ -242,8 +247,84 @@ function goalSummary(reasons: OneTeamPreflightComplexityReason[]): string {
     independent_verification_requested: "independent verification",
     multiple_distinct_deliverables: "multiple deliverables",
     constrained_research_decision: "research with decision constraints",
+    model_assessed_team_benefit: "model-assessed team benefit",
   };
   return `Adaptive team review: ${reasons.map((reason) => labels[reason]).join(", ")}.`;
+}
+
+export interface OneTeamNeedResolution {
+  needed: boolean;
+  reasons: OneTeamPreflightComplexityReason[];
+  /** "llm" = the resident judge decided; "fallback" = today's wordlist verdict, labeled. */
+  source: "llm" | "fallback";
+}
+
+export type OneTeamNeedJudge = (input: {
+  prompt: string;
+  lexicalReasons: OneTeamPreflightComplexityReason[];
+}) => Promise<{ needed: boolean; source: "llm" | "fallback"; reason: string }>;
+
+async function defaultJudgeTeamNeed(input: {
+  prompt: string;
+  lexicalReasons: OneTeamPreflightComplexityReason[];
+}): Promise<{ needed: boolean; source: "llm" | "fallback"; reason: string }> {
+  const { judgeBoolean } = await import("../system-agents/judgment");
+  const { value, verdict } = await judgeBoolean({
+    kind: "one-team-preflight-need",
+    question:
+      "Would completing this request genuinely benefit from a small team of multiple specialist agents (parallel work, independent verification, or multiple distinct deliverables) instead of one agent?",
+    input: input.prompt.slice(0, 4_000),
+    guidance:
+      `A deterministic pre-pass found ${input.lexicalReasons.length} complexity signal(s)` +
+      `${input.lexicalReasons.length ? ` (${input.lexicalReasons.join(", ")})` : ""}. Treat that as a prior, not a fact. ` +
+      "Judge the actual work, in any language: a short single-deliverable request is not team work even when it " +
+      "mentions comparison words, and a genuinely parallel/multi-deliverable request needs a team even when no " +
+      "reference word appears. Say yes only when a team adds real value.",
+    hints: [
+      { label: "yes", words: ["팀으로", "여러 에이전트", "역할 분담", "병렬", "동시에", "교차 검증", "as a team", "in parallel", "split the work", "cross-check", "fact-check"] },
+    ],
+    fallback: input.lexicalReasons.length > 0,
+  });
+  return { needed: value, source: verdict.source, reason: verdict.reason };
+}
+
+/**
+ * The resident judge decides whether a team preflight is worth proposing; the
+ * complexity regexes above are demoted to hints/prior and remain only the
+ * labeled fallback when no model answers. Structured `/workforce`·`/hep-network`
+ * commands are closed-form and are never vetoed by the judge.
+ */
+async function resolveOneTeamNeed(
+  prompt: string,
+  deps: OneTeamPreflightDependencies,
+): Promise<OneTeamNeedResolution> {
+  const lexicalReasons = complexityReasons(prompt);
+  if (EXPLICIT_TEAM_COMMAND_RE.test(prompt)) {
+    return {
+      needed: true,
+      reasons: lexicalReasons.length > 0 ? lexicalReasons : ["explicit_team_request"],
+      source: "fallback",
+    };
+  }
+  if (isPlainConversationalPrompt(prompt)) {
+    return { needed: false, reasons: [], source: "fallback" };
+  }
+  const judgeTeamNeed = deps.judgeTeamNeed ?? defaultJudgeTeamNeed;
+  let judged: Awaited<ReturnType<OneTeamNeedJudge>>;
+  try {
+    judged = await judgeTeamNeed({ prompt, lexicalReasons });
+  } catch {
+    judged = { needed: lexicalReasons.length > 0, source: "fallback", reason: "judge failed" };
+  }
+  if (judged.source !== "llm") {
+    return { needed: lexicalReasons.length > 0, reasons: lexicalReasons, source: "fallback" };
+  }
+  if (!judged.needed) return { needed: false, reasons: [], source: "llm" };
+  return {
+    needed: true,
+    reasons: lexicalReasons.length > 0 ? lexicalReasons : ["model_assessed_team_benefit"],
+    source: "llm",
+  };
 }
 
 function inputScopes(chat: Chat): OneTeamPreflightRole["inputScopes"] {
@@ -580,8 +661,12 @@ export async function prepareOneTeamPreflight(
     || (input.expectedTaskId !== null && !ID_RE.test(input.expectedTaskId))
     || (input.expectedTaskVersion !== null && (!Number.isSafeInteger(input.expectedTaskVersion) || input.expectedTaskVersion < 1))
   ) throw new OneTeamPreflightError("invalid_request", "Invalid One team preflight request");
-  const reasons = complexityReasons(input.userPrompt);
-  if (reasons.length === 0) return { kind: "not_required" };
+  // The resident judge decides whether multi-agent preflight is genuinely needed;
+  // the complexity regexes are hints, and without a model the wordlist verdict is
+  // only the labeled fallback (today's behavior).
+  const teamNeed = await resolveOneTeamNeed(input.userPrompt, deps);
+  if (!teamNeed.needed) return { kind: "not_required" };
+  const reasons = teamNeed.reasons;
   recoverReservations(deps);
   const readChat = deps.getChat ?? getChat;
   const chat = readChat(input.chatId);

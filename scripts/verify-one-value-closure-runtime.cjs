@@ -242,6 +242,24 @@ async function seedWorker() {
   assert.equal(contract.isOneValueClosureV1({ ...validFixture, extraPrivatePayload: "forbidden" }), false);
   assert.equal(contract.isOneValueClosureV1(invalidFixture), false, "completed execution/verification without evidence must fail closed");
 
+  // ── Completion-claim detection: the judged verdict decides; regex = labeled fallback ──
+  assert.equal(contract.ONE_COMPLETION_CLAIM_JUDGMENT_KIND, "one-completion-claim");
+  const arabicClaim = "تم إرسال البريد الإلكتروني إلى العميل بالفعل";
+  // (a) A judged "yes" FIRES on a non-English completion claim the regex misses.
+  assert.equal(contract.oneValueClosureContainsCompletionClaim(arabicClaim, () => true), true,
+    "the model verdict must be able to fire on claims the wordlist misses");
+  assert.equal(contract.oneValueClosureContainsCompletionClaim(arabicClaim), false,
+    "documented wordlist under-fire: no verdict keeps today's regex fallback");
+  // (b) A judged "no" vetoes a wordlist false positive ('completed' used descriptively).
+  assert.equal(contract.oneValueClosureContainsCompletionClaim(
+    "Draft describing the completed-state checklist for later", () => false), false);
+  // (c) An abstaining reader (null) keeps today's regex verdict.
+  assert.equal(contract.oneValueClosureContainsCompletionClaim("The report was sent to the client", () => null), true);
+  // (d) The electron peek reader stays quiet with no warmed verdict, so the
+  //     synchronous validator keeps the deterministic fallback.
+  const judgedClaims = require("../dist/electron/one/judged-completion-claim.js");
+  assert.equal(judgedClaims.judgedCompletionClaim(arabicClaim), null);
+
   const verifiedTaskVersion = insertTask(db, "task_value_verified", "completed");
   assert.equal(closureRuntime.listOneValueClosures("task_value_verified").length, 0, "Task completion alone must not create a Value Closure");
   assert.equal(domainEvents.listOneDomainEvents("task_value_verified", 100).some((event) => event.eventType === "outcome.verified"), false);

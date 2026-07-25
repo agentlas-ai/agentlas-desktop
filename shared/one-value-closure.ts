@@ -442,6 +442,23 @@ export function isOneValueClosureState(value: unknown): value is OneValueClosure
   }));
 }
 
-export function oneValueClosureContainsCompletionClaim(value: string): boolean {
+/** Judgment-cache kind shared by the async electron warm pass and synchronous peeks. */
+export const ONE_COMPLETION_CLAIM_JUDGMENT_KIND = "one-completion-claim";
+
+/**
+ * Does this value statement claim an external/irreversible action already happened?
+ * This gates a trust invariant (a completion claim needs execution/outcome evidence),
+ * so under-firing is the dangerous direction: the English/Korean regex misses the
+ * same claim in any other language. The connected model decides when a judged
+ * verdict exists — `judged` is a synchronous reader of the resident judgment cache
+ * (electron passes a peek warmed by prejudgeCompletionClaim). No verdict = today's
+ * regex result, the labeled fallback.
+ */
+export function oneValueClosureContainsCompletionClaim(
+  value: string,
+  judged?: (text: string) => boolean | null,
+): boolean {
+  const judgedVerdict = judged?.(value) ?? null;
+  if (judgedVerdict !== null) return judgedVerdict;
   return COMPLETION_CLAIM_RE.test(value);
 }

@@ -62,6 +62,21 @@ export interface OneDecisionViewV1 {
 }
 
 const RISK_ORDER: Record<OneDecisionRiskLevel, number> = { R0: 0, R1: 1, R2: 2, R3: 3, R4: 4 };
+
+/** Judgment-cache kinds shared by the async electron warm pass and synchronous peeks. */
+export const ONE_DECISION_RISK_JUDGMENT_KIND = "one-decision-risk";
+export const ONE_DECISION_DISPOSITION_JUDGMENT_KIND = "one-decision-disposition";
+
+/**
+ * Synchronous readers of already-judged verdicts. Electron passes peeks into the
+ * resident judgment cache (warmed by prejudgeOneDecision on the async paths that
+ * precede projection/authority). The renderer render pass passes nothing and keeps
+ * the deterministic wordlist verdicts as the labeled fallback.
+ */
+export interface OneDecisionJudgedReaders {
+  risk?: (combinedText: string) => OneDecisionRiskLevel | null;
+  disposition?: (optionText: string) => OneDecisionOptionDisposition | null;
+}
 const RISK_REASONS = new Set<OneDecisionViewV1["risk"]["reasons"][number]>([
   "read_only", "preparation_only", "limited_change", "external_effect", "critical_effect",
   "unstructured_authority_request", "conflicting_signals",
@@ -106,25 +121,70 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boo
   return Object.keys(value).length === keys.length && Object.keys(value).every((key) => allowed.has(key));
 }
 
-function classifyOption(label: string, description: string): OneDecisionOptionDisposition {
-  const text = `${label} ${description}`;
+/** The exact per-option text the disposition judgment reads (and electron pre-judges). */
+export function oneDecisionOptionJudgmentInput(label: string, description: string): string {
+  return `${label} ${description}`;
+}
+
+/** Deterministic wordlist disposition — the labeled fallback, never the final authority. */
+export function lexicalOneDecisionDisposition(text: string): OneDecisionOptionDisposition {
   if (REJECT_RE.test(text)) return "reject";
   if (MODIFY_RE.test(text)) return "modify";
   if (APPROVE_RE.test(text)) return "approve";
   return "choice";
 }
 
-function inferRisk(text: string, optionDispositions: readonly OneDecisionOptionDisposition[]): OneDecisionViewV1["risk"] {
+function classifyOption(
+  label: string,
+  description: string,
+  judged?: OneDecisionJudgedReaders["disposition"],
+): OneDecisionOptionDisposition {
+  const text = oneDecisionOptionJudgmentInput(label, description);
+  // The judged verdict decides; the wordlists remain the labeled fallback.
+  const judgedDisposition = judged?.(text) ?? null;
+  if (judgedDisposition !== null) return judgedDisposition;
+  return lexicalOneDecisionDisposition(text);
+}
+
+/** Deterministic wordlist risk level — the labeled fallback prior for the judge. */
+export function lexicalOneDecisionRiskLevel(
+  text: string,
+  optionDispositions: readonly OneDecisionOptionDisposition[],
+): OneDecisionRiskLevel {
   const matches = RISK_PATTERNS.filter((pattern) => pattern.re.test(text));
   let level: OneDecisionRiskLevel = "R0";
   for (const match of matches) {
     if (RISK_ORDER[match.level] > RISK_ORDER[level]) level = match.level;
   }
+  if (optionDispositions.includes("approve") && matches.length === 0) level = "R2";
+  return level;
+}
+
+const CANONICAL_LEVEL_REASON: Record<OneDecisionRiskLevel, OneDecisionViewV1["risk"]["reasons"][number]> = {
+  R0: "read_only",
+  R1: "preparation_only",
+  R2: "limited_change",
+  R3: "external_effect",
+  R4: "critical_effect",
+};
+
+function inferRisk(
+  text: string,
+  optionDispositions: readonly OneDecisionOptionDisposition[],
+  judged?: OneDecisionJudgedReaders["risk"],
+): OneDecisionViewV1["risk"] {
+  const matches = RISK_PATTERNS.filter((pattern) => pattern.re.test(text));
+  let level = lexicalOneDecisionRiskLevel(text, optionDispositions);
   const hasUnstructuredAuthority = optionDispositions.includes("approve");
-  if (hasUnstructuredAuthority && matches.length === 0) level = "R2";
+  // The judged verdict decides the level; the wordlist verdict above is only the
+  // labeled fallback. This is how a payment/send phrased in a language the
+  // wordlists never covered still reaches R3/R4.
+  const judgedLevel = judged?.(text) ?? null;
+  if (judgedLevel !== null) level = judgedLevel;
   const reasons = [...new Set(matches
     .filter((match) => match.level === level)
     .map((match) => match.reason))];
+  if (reasons.length === 0 && judgedLevel !== null) reasons.push(CANONICAL_LEVEL_REASON[judgedLevel]);
   if (hasUnstructuredAuthority && RISK_ORDER[level] >= RISK_ORDER.R2) reasons.push("unstructured_authority_request");
   if (matches.some((match) => RISK_ORDER[match.level] <= 1) && matches.some((match) => RISK_ORDER[match.level] >= 2)) {
     reasons.push("conflicting_signals");
@@ -142,9 +202,30 @@ function matchedField(text: string, re: RegExp, source: OneDecisionField["source
   return match ? { status: "stated", value: safeText(match, 160), source } : null;
 }
 
+/**
+ * The exact judgment inputs for one pending Decision: the combined risk text and
+ * every option's disposition text. The async electron pre-pass judges these exact
+ * strings so the synchronous peeks inside normalizeOneDecision hit the cache.
+ */
+export function oneDecisionJudgmentTexts(
+  confirmation: Pick<PendingConfirmation, "question" | "header" | "options">,
+): { combined: string; options: string[] } {
+  const question = safeText(confirmation.question, 4_000);
+  const header = safeText(confirmation.header ?? "", 200);
+  const rawOptions = confirmation.options.slice(0, 8).map((option) => ({
+    label: safeText(option.label, 200),
+    description: safeText(option.description ?? "", 1_000),
+  }));
+  return {
+    combined: [question, header, ...rawOptions.flatMap((option) => [option.label, option.description])].join(" "),
+    options: rawOptions.map((option) => oneDecisionOptionJudgmentInput(option.label, option.description)),
+  };
+}
+
 export function normalizeOneDecision(
   confirmation: PendingConfirmation,
   taskId: string | null = null,
+  judged?: OneDecisionJudgedReaders,
 ): OneDecisionViewV1 {
   const question = safeText(confirmation.question, 4_000);
   const header = safeText(confirmation.header ?? "", 200);
@@ -153,9 +234,9 @@ export function normalizeOneDecision(
     label: safeText(option.label, 200),
     description: safeText(option.description ?? "", 1_000),
   }));
-  const dispositions = rawOptions.map((option) => classifyOption(option.label, option.description));
+  const dispositions = rawOptions.map((option) => classifyOption(option.label, option.description, judged?.disposition));
   const combined = [question, header, ...rawOptions.flatMap((option) => [option.label, option.description])].join(" ");
-  const risk = inferRisk(combined, dispositions);
+  const risk = inferRisk(combined, dispositions, judged?.risk);
   const unstructuredHighRisk = RISK_ORDER[risk.level] >= RISK_ORDER.R2 && risk.certainty === "ambiguous";
   const impactText = rawOptions.map((option) => option.description).filter(Boolean).join(" · ");
   const explicitRejectIndex = dispositions.findIndex((item) => item === "reject");

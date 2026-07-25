@@ -158,6 +158,28 @@ async function seedWorker() {
   assert.equal(detector.detectExplicitOneMemoryIntent("기억해줘: /Users/mason/private/customer.csv를 먼저 읽어"), null, "local paths must fail quiet");
   assert.equal(detector.detectExplicitOneMemoryIntent("Remember that password=secret-value"), null, "secret-like text must fail quiet");
 
+  // ── Judged verdict decides; the prefix/suffix wordlists are hints + labeled fallback ──
+  const arabicRemember = "تذكّر دائماً أنني أفضل الملخص قبل التفاصيل";
+  // (a) A judged "yes" fires on an explicit remember instruction the wordlists miss.
+  const judgedArabic = detector.detectExplicitOneMemoryIntent(arabicRemember, () => true);
+  assert.ok(judgedArabic, "the model verdict must fire on non-English remember instructions");
+  assert.equal(judgedArabic.basis, "explicit_user_statement");
+  // (b) A judged "no" vetoes a wordlist false positive.
+  assert.equal(
+    detector.detectExplicitOneMemoryIntent("앞으로는 결론과 근거를 먼저 보여줘.", () => false),
+    null,
+    "a judged 'not an instruction' verdict must override the wordlist match",
+  );
+  // (c) The safety floor stays closed-form even when the judge says yes.
+  assert.equal(
+    detector.detectExplicitOneMemoryIntent("password=secret-value must be reused", () => true),
+    null,
+    "a judged yes can never bypass the deterministic safety check",
+  );
+  // (d) No verdict (peek miss) keeps the deterministic behavior exactly.
+  assert.equal(detector.detectExplicitOneMemoryIntent(arabicRemember), null);
+  assert.equal(detector.judgedOneMemoryIntent(arabicRemember), null, "no warmed verdict = abstain");
+
   const initial = memory.getOneMemoryState();
   assert.equal(initial.candidates.length, 0);
   assert.equal(initial.memories.length, 0);

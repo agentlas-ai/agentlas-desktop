@@ -352,6 +352,9 @@ import {
   listCanonicalTasks,
 } from "./store/tasks";
 import { mutateOneTaskArchive, searchOneHistory } from "./one/search";
+import { prejudgeOneRequestIntent } from "./one/judged-request-intent";
+import { prejudgeOneMemoryIntent } from "./one/memory-detector";
+import { prejudgeCompletionClaims } from "./one/judged-completion-claim";
 import { continueOneFromTaskResult } from "./one/task-continuation";
 import {
   bindOneAttachmentsToTeam,
@@ -450,6 +453,7 @@ import {
   resolveOneWeeklyReflection,
 } from "./one/weekly-reflection";
 import {
+  ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS,
   ensureAcceptedResultValueClosure,
   ensureVerifiedAcceptedResultValueClosure,
 } from "./one/accepted-result-value-closure";
@@ -2916,7 +2920,7 @@ export function registerIpcHandlers(): void {
     oneTaskProjectionRuntime.getProjection(id, input));
   ipcMain.handle("tasks:findForChat", (_e, chatId: string) => findCanonicalTaskForChat(chatId));
   ipcMain.handle("tasks:forChat", (_e, chatId: string) => getCanonicalTaskForChat(chatId));
-  ipcMain.handle("tasks:acceptResult", (_e, input: CanonicalTaskResultAcceptance) => {
+  ipcMain.handle("tasks:acceptResult", async (_e, input: CanonicalTaskResultAcceptance) => {
     if (
       !input ||
       typeof input !== "object" ||
@@ -2926,6 +2930,9 @@ export function registerIpcHandlers(): void {
     ) {
       throw new TypeError("Invalid Task result acceptance request");
     }
+    // Async pre-pass: warm the completion-claim judgments the synchronous
+    // Value Closure trust validator peeks. Miss = deterministic regex verdict.
+    await prejudgeCompletionClaims(ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS, { timeoutMs: 6_000 }).catch(() => undefined);
     const task = getCanonicalTask(input.taskId);
     const receipt = task?.originChatId
       ? invocationService.latestReceipt(task.originChatId)
@@ -3152,7 +3159,17 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("oneValueClosure:setReflection", (_e, input: SetOneValueClosureReflectionInput) =>
     setOneValueClosureReflection(input));
   ipcMain.handle("oneHomeSignals:get", () => getOneHomeSignals());
-  ipcMain.handle("oneWeeklyReflection:get", () => getOneWeeklyReflectionSnapshot());
+  ipcMain.handle("oneWeeklyReflection:get", async () => {
+    // Async pre-pass: warm completion-claim judgments for the stored closure
+    // statements the synchronous reflection builder peeks (miss = regex fallback).
+    const statements = getOneValueClosureState().closures
+      .flatMap((record) => record.closure.valueItems
+        .filter((item): item is Extract<typeof item, { kind: "fact" }> => item.kind === "fact")
+        .map((item) => item.statement))
+      .slice(0, 24);
+    await prejudgeCompletionClaims(statements, { timeoutMs: 4_000 }).catch(() => undefined);
+    return getOneWeeklyReflectionSnapshot();
+  });
   ipcMain.handle("oneWeeklyReflection:resolve", (_e, input: ResolveOneWeeklyReflectionInputV1) =>
     resolveOneWeeklyReflection(input));
   ipcMain.handle("oneExperienceReuse:getState", () => getOneExperienceReuseState());
@@ -3766,7 +3783,17 @@ export function registerIpcHandlers(): void {
       }
     }
   });
-  ipcMain.handle("invoke:run", (_event, req: McpInvocationRequest) => invocationService.start(rendererInvocationRequest(req)));
+  ipcMain.handle("invoke:run", async (_event, req: McpInvocationRequest) => {
+    const request = rendererInvocationRequest(req);
+    // Warm the resident judgments the synchronous start path peeks (request
+    // intent, explicit memory intent). Best-effort with a tight budget: a miss
+    // keeps the labeled deterministic fallback instead of delaying the run.
+    await Promise.all([
+      prejudgeOneRequestIntent(request, { timeoutMs: 4_000 }),
+      prejudgeOneMemoryIntent(request, { timeoutMs: 4_000 }),
+    ]).catch(() => undefined);
+    return invocationService.start(request);
+  });
   ipcMain.handle("invoke:steer", (_event, req: McpInvocationRequest) => invocationService.steer(rendererInvocationRequest(req)));
   ipcMain.handle("invoke:cancel", (_event, runId: string) => invocationService.cancel(runId));
   ipcMain.handle("invoke:activeChats", () => invocationService.activeChatIds());

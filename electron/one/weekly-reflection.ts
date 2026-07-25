@@ -19,6 +19,7 @@ import type {
   OneValueClosureState,
 } from "../../shared/one-value-closure";
 import { oneValueClosureContainsCompletionClaim } from "../../shared/one-value-closure";
+import { judgedCompletionClaim } from "./judged-completion-claim";
 import type { OneDomainEventV1 } from "../../shared/one-domain-events";
 import type { OneProfile } from "../../shared/one-profile";
 import { getDb } from "../store/db";
@@ -281,7 +282,9 @@ function projectOutcome(
     if (item.kind !== "fact") return [];
     const evidence = exactEvidence(item.evidenceRefs, trusted);
     if (!evidence) return [];
-    if (oneValueClosureContainsCompletionClaim(item.statement) && !evidence.some((entry) =>
+    // The judged verdict (warmed on the async snapshot path) decides; a cache
+    // miss keeps the deterministic regex verdict as the labeled fallback.
+    if (oneValueClosureContainsCompletionClaim(item.statement, judgedCompletionClaim) && !evidence.some((entry) =>
       entry.kind === "execution_receipt" || entry.kind === "outcome_verification",
     )) return [];
     return [{ valueItemRef: item.valueItemId, statement: item.statement, evidenceRefs: item.evidenceRefs }];

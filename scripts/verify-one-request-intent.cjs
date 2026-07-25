@@ -31,4 +31,23 @@ for (const prompt of tasks) {
   assert.equal(classifyOneRequestIntent(prompt), "task", prompt);
 }
 
-console.log(JSON.stringify({ ok: true, conversations: conversations.length, tasks: tasks.length }));
+// ── The judged verdict decides; the wordlists are only the labeled fallback ──
+const {
+  ONE_REQUEST_INTENT_JUDGMENT_KIND,
+  oneRequestIntentJudgmentInput,
+} = require("../dist/shared/one-request-intent.js");
+assert.equal(ONE_REQUEST_INTENT_JUDGMENT_KIND, "one-request-intent");
+assert.equal(oneRequestIntentJudgmentInput("  a\n b  "), "a b");
+
+// (a) A judged "task" fires on phrasing every wordlist misses (Arabic work request).
+const arabicWork = "رتّب لي خطة سفر ليومين مع ميزانية وقائمة تحقق";
+assert.equal(classifyOneRequestIntent(arabicWork, () => "task"), "task",
+  "a judged task verdict must win over a wordlist miss");
+// (b) A judged "conversation" vetoes a wordlist false positive.
+assert.equal(classifyOneRequestIntent("최저가격 검색이 뭐야?", () => "conversation"), "conversation",
+  "a judged conversation verdict must override an incidental wordlist hit");
+// (c) No judged verdict (null) = today's deterministic verdict, the labeled fallback.
+assert.equal(classifyOneRequestIntent(arabicWork, () => null), "conversation",
+  "without a judged verdict the deterministic fallback stands");
+
+console.log(JSON.stringify({ ok: true, conversations: conversations.length, tasks: tasks.length, judged: 3 }));

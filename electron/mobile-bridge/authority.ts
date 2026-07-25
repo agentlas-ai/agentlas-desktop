@@ -20,9 +20,11 @@ import {
   getCanonicalTask,
 } from "../store/tasks";
 import {
+  ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS,
   ensureAcceptedResultValueClosure,
   ensureVerifiedAcceptedResultValueClosure,
 } from "../one/accepted-result-value-closure";
+import { prejudgeCompletionClaims } from "../one/judged-completion-claim";
 import { tryCompleteOneActivationFirstValue } from "../one/activation";
 import { ensureOneExperienceReuseReceipt } from "../one/experience-reuse";
 import { sealOneMemoryCandidateProvenance } from "../one/memory-candidates";
@@ -45,6 +47,9 @@ import {
   isPendingConfirmationSnoozed,
   normalizeOneDecision,
 } from "../../shared/one-decision";
+import { oneDecisionJudgedReaders, prejudgeOneDecision } from "../one/judged-decision";
+import { prejudgeOneRequestIntent } from "../one/judged-request-intent";
+import { prejudgeOneMemoryIntent } from "../one/memory-detector";
 import { detectRuntimes, setActiveRuntime } from "../runtime/detect";
 import { listRuntimeCommands } from "../runtime/commands";
 import { listInstalledAgents } from "../mcp/registry";
@@ -525,6 +530,13 @@ function mobileDecisionAnswerAcknowledgement(expected: MobileDecisionAnswerPreco
   };
 }
 
+/** Warm the judged decision verdicts the synchronous validator peeks. Best-effort. */
+async function prejudgePendingDecisionAnswer(chatId: string, decisionId: string): Promise<void> {
+  const pending = listPendingConfirmations().find((candidate) =>
+    candidate.chatId === chatId && candidate.sourceMessageId === decisionId);
+  if (pending) await prejudgeOneDecision(pending).catch(() => undefined);
+}
+
 function validateCurrentMobileDecisionAnswer(
   invocation: McpInvocationRequest,
   expected: MobileDecisionAnswerPrecondition,
@@ -547,7 +559,9 @@ function validateCurrentMobileDecisionAnswer(
   if (!pending || isPendingConfirmationSnoozed(pending, Date.now())) {
     throw new Error("Decision is stale, snoozed, or no longer pending");
   }
-  const view = normalizeOneDecision(pending, currentTask.id);
+  // The async invoke paths warm the judged risk/disposition verdicts before this
+  // synchronous validation; a cache miss keeps the deterministic fallback.
+  const view = normalizeOneDecision(pending, currentTask.id, oneDecisionJudgedReaders);
   if (
     view.contractVersion !== expected.contractVersion
     || view.decisionId !== expected.decisionId
@@ -1269,6 +1283,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           { taskId, expectedVersion, expectedRunId },
           receipt,
         );
+        // Async pre-pass: warm the completion-claim judgments the synchronous
+        // Value Closure trust validator peeks. Miss = deterministic regex verdict.
+        await prejudgeCompletionClaims(ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS, { timeoutMs: 6_000 }).catch(() => undefined);
         const closure = ensureAcceptedResultValueClosure({
           priorTaskVersion: expectedVersion,
           acceptedTask: accepted,
@@ -1510,7 +1527,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "invoke.start": {
         const { invocation, decisionAnswer } = invocationParams(request, false);
+        if (decisionAnswer) await prejudgePendingDecisionAnswer(invocation.chatId, decisionAnswer.decisionId);
         if (decisionAnswer) validateCurrentMobileDecisionAnswer(invocation, decisionAnswer);
+        // Warm the judgments the synchronous invocation start path peeks.
+        await Promise.all([
+          prejudgeOneRequestIntent(invocation, { timeoutMs: 4_000 }),
+          prejudgeOneMemoryIntent(invocation, { timeoutMs: 4_000 }),
+        ]).catch(() => undefined);
         const workspaceBinding = captureInvocationWorkspaceBinding(
           getChatWorkingFolder(invocation.chatId),
         );
@@ -1537,6 +1560,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "invoke.steer": {
         const { invocation, expectedRunId, decisionAnswer } = invocationParams(request, true);
+        if (decisionAnswer) await prejudgePendingDecisionAnswer(invocation.chatId, decisionAnswer.decisionId);
         if (decisionAnswer) validateCurrentMobileDecisionAnswer(invocation, decisionAnswer);
         const workspaceBinding = captureInvocationWorkspaceBinding(
           getChatWorkingFolder(invocation.chatId),

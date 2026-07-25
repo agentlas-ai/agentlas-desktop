@@ -20,7 +20,10 @@ export type OneTeamPreflightComplexityReason =
   | "parallel_work_requested"
   | "independent_verification_requested"
   | "multiple_distinct_deliverables"
-  | "constrained_research_decision";
+  | "constrained_research_decision"
+  // The resident judge concluded the request genuinely benefits from a team
+  // even though none of the deterministic complexity wordlists fired.
+  | "model_assessed_team_benefit";
 
 export type OneTeamPreflightInputScope =
   | "current_user_request"
@@ -197,7 +200,7 @@ const STATUSES = new Set<OneTeamPreflightStatus>([
 ]);
 const COMPLEXITY_REASONS = new Set<OneTeamPreflightComplexityReason>([
   "explicit_team_request", "parallel_work_requested", "independent_verification_requested",
-  "multiple_distinct_deliverables", "constrained_research_decision",
+  "multiple_distinct_deliverables", "constrained_research_decision", "model_assessed_team_benefit",
 ]);
 const INPUT_SCOPES = new Set<OneTeamPreflightInputScope>([
   "current_user_request", "approved_one_profile_memory", "bound_project_workspace",
@@ -241,7 +244,7 @@ export function isOneTeamPreflightProposal(value: unknown): value is OneTeamPref
   if (!Number.isSafeInteger(proposal.version) || Number(proposal.version) < 1 || !STATUSES.has(proposal.status as OneTeamPreflightStatus)) return false;
   if (!safeText(proposal.goalSummary, 240) || !safeIso(proposal.createdAt) || !safeIso(proposal.updatedAt) || !safeIso(proposal.expiresAt)) return false;
   if (Date.parse(proposal.expiresAt as string) <= Date.parse(proposal.createdAt as string)) return false;
-  if (!stringEnumArray<OneTeamPreflightComplexityReason>(proposal.complexityReasons, COMPLEXITY_REASONS, 5)) return false;
+  if (!stringEnumArray<OneTeamPreflightComplexityReason>(proposal.complexityReasons, COMPLEXITY_REASONS, 6)) return false;
   if (!Array.isArray(proposal.roles) || proposal.roles.length > 16 || !proposal.roles.every(isOneTeamPreflightRole)) return false;
   const roleIds = (proposal.roles as OneTeamPreflightRole[]).map((role) => role.roleId);
   if (new Set(roleIds).size !== roleIds.length) return false;

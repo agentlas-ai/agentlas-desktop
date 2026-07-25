@@ -52,6 +52,7 @@ import {
   isPendingConfirmationSnoozed,
   normalizeOneDecision,
 } from "../../shared/one-decision";
+import { oneDecisionJudgedReaders, prejudgeOneDecisions } from "../one/judged-decision";
 import {
   isOneValueClosureState,
   type OneValueClosureState,
@@ -684,7 +685,9 @@ export function projectMobileBridgeOneDecisionsFromCurrent(
       continue;
     }
 
-    const view = normalizeOneDecision(confirmation, task.id);
+    // Main-side projection reads the resident judge's verdicts (warmed on the
+    // async snapshot path); a cache miss keeps the deterministic fallback.
+    const view = normalizeOneDecision(confirmation, task.id, oneDecisionJudgedReaders);
     const row: MobileBridgeOneDecisionDto = {
       authoritativeHostRef: hostIdentity.hostId,
       canonicalTaskVersion: task.version,
@@ -1193,6 +1196,9 @@ export async function projectMobileBridgeSnapshot(
   // Read once so the legacy DTO and Main-normalized Decision projection cannot
   // describe different pending-message generations inside one snapshot.
   const pendingConfirmations = listPendingConfirmations();
+  // Async pre-pass: warm the resident judge's risk/disposition verdicts so the
+  // synchronous projection below can peek them (miss = deterministic fallback).
+  await prejudgeOneDecisions(pendingConfirmations.slice(0, MOBILE_BRIDGE_ONE_DECISION_LIMIT)).catch(() => undefined);
   const oneDecisions = projectMobileBridgeOneDecisionsFromCurrent(
     options.hostIdentity,
     pendingConfirmations,
