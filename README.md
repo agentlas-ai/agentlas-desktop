@@ -80,6 +80,7 @@ authority for which version is actually public, stable, and downloadable.
   by a directory listing. The Dashboard "project memory status" panel is removed with its IPC
   surface: its sitemap "Generate" button could never do anything, and an auto-maintained
   sitemap needs no button.
+  This release binds Agentlas OS v1.1.62 at 19b75025e5e252e90d93015a839c55d08fcb8061.
   This source note does not prove a Desktop Git tag, public installer, GitHub release, or
   update feed.
 - **2026-07-25 · v0.9.15 — the connected model decides; no silent keyword fallback** —

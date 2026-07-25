@@ -23,6 +23,7 @@
   sitemap "Generate" button could never do anything — the handler returned a
   constant failure — and an auto-maintained sitemap should not need a button.
 
+This release binds Agentlas OS v1.1.62 at 19b75025e5e252e90d93015a839c55d08fcb8061.
 This changelog entry describes source readiness and does not prove a published
 Desktop release, installer, or update feed.
 
