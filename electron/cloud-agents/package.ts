@@ -5,7 +5,9 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { detectRuntimeLabelsFromPaths } from "../agents/runtime-labels";
 import { detectRuntimes } from "../runtime/detect";
-import { autofixForPublish } from "../hephaestus/publish-autofix";
+import { autofixForPublish, remediateBlockers } from "../hephaestus/publish-autofix";
+import type { RemediationAction } from "../hephaestus/publish-autofix";
+import type { RuntimeStatus } from "../../shared/types";
 import { getSessionCookieHeader } from "../auth";
 import { readCloudAgentRestoreMarker, writeCloudAgentRegistrationMarker } from "./restore";
 import type {
@@ -160,8 +162,184 @@ function resolveCloudAgentRoot(inputPath: string): string {
   }
 }
 
+interface RemediationOutcome {
+  actions: RemediationAction[];
+  passes: number;
+  clearedFiles: string[];
+}
+
+/**
+ * Generic publish-gate convergence loop. Re-scans the throwaway package copy
+ * with the REAL gate (scanAgentFolder) and hands every file-level blocker to the
+ * connected model to fix, escalating to deterministic secret redaction and then
+ * file-exclude, until zero file blockers remain. A blocker never dead-ends a
+ * publish: the end state is always an uploadable package. The user's folder is
+ * never touched — all edits happen inside the temp copy at `scanRoot`.
+ */
+async function remediateUntilClean(
+  scanRoot: string,
+  restoredExecutablePaths: ReadonlySet<string>,
+  active: RuntimeStatus | null,
+  locale: "ko" | "en",
+  onStage?: (stage: string, detail?: string) => void,
+): Promise<RemediationOutcome> {
+  const MAX_PASSES = 5;
+  const actions: RemediationAction[] = [];
+  const clearedFiles: string[] = [];
+  let passes = 0;
+  const root = path.resolve(scanRoot);
+  const fileBlockers = (): Array<{ id: string; file: string; category: string; message: string }> => {
+    let probe: StaticScanResult;
+    try {
+      probe = scanAgentFolder(root, restoredExecutablePaths);
+    } catch {
+      return [];
+    }
+    return probe.findings
+      .filter((f) => f.severity === "blocker" && !!f.file)
+      .map((f) => ({ id: f.id, file: f.file as string, category: f.category, message: f.message }))
+      .filter((b) => {
+        const abs = path.resolve(root, b.file);
+        try {
+          return abs.startsWith(root + path.sep) && fs.statSync(abs).isFile();
+        } catch {
+          return false;
+        }
+      });
+  };
+  for (let pass = 1; pass <= MAX_PASSES; pass++) {
+    passes = pass;
+    const blockers = fileBlockers();
+    if (blockers.length === 0) {
+      onStage?.("scan-clean");
+      break;
+    }
+    onStage?.("blockers", String(blockers.length));
+    if (pass <= 3) {
+      const r = await remediateBlockers({
+        folder: root,
+        blockers,
+        active,
+        locale,
+        deterministicOnly: pass === 3,
+        onStage,
+      });
+      actions.push(...r.actions);
+      if (r.changed) continue; // re-scan the now-changed copy
+    }
+    // Last resort — exclude every remaining blocker file so the package always
+    // reaches zero blockers and uploads. (Reached on pass ≥ 4, or earlier when a
+    // pass could change nothing.)
+    for (const rel of new Set(blockers.map((b) => b.file))) {
+      const abs = path.resolve(root, rel);
+      try {
+        fs.rmSync(abs, { force: true });
+        clearedFiles.push(rel);
+        actions.push({ file: rel, action: "excluded", detail: "last resort — unremediable blocker" });
+        onStage?.("excluded", rel);
+      } catch {
+        /* ignore; next scan will re-surface it and eventually exhaust passes */
+      }
+    }
+  }
+  return { actions, passes, clearedFiles };
+}
+
+const ROUTING_CAP_STOPWORDS = new Set([
+  "the", "and", "for", "with", "your", "you", "that", "this", "are", "not", "can",
+  "agent", "agentlas", "assistant", "bot", "app", "tool", "using", "use", "into",
+]);
+
+function deriveRoutingCapabilities(text: string): string[] {
+  const words = (text.toLowerCase().match(/[a-z][a-z0-9]{2,}/g) ?? []).filter((w) => !ROUTING_CAP_STOPWORDS.has(w));
+  const caps: string[] = [];
+  for (let i = 0; i + 1 < words.length && caps.length < 3; i += 2) {
+    const cap = `${words[i]}_${words[i + 1]}`;
+    if (ROUTING_CARD_CAPABILITY_RE.test(cap)) caps.push(cap);
+  }
+  const unique = Array.from(new Set(caps));
+  return unique.length > 0 ? unique : ["general_assistance"];
+}
+
+/**
+ * Public Hub requires a valid routing-card/2.0. A missing or invalid one is a
+ * hard blocker that lives OUTSIDE scanAgentFolder (so the remediation loop can't
+ * reach it) — auto-generate a valid card from the agent's own identity so no
+ * agent dead-ends on it. Only writes into the throwaway copy at scanRoot.
+ */
+function ensureRoutingCard(scanRoot: string): boolean {
+  const cardPath = path.join(scanRoot, ROUTING_CARD_PATH);
+  try {
+    const existing = JSON.parse(fs.readFileSync(cardPath, "utf8")) as unknown;
+    if (isRecord(existing) && routingCardProblem(existing) === null) return false;
+  } catch {
+    /* missing/invalid → generate */
+  }
+  let name = path.basename(scanRoot);
+  let tagline = "";
+  let localizedEn = "";
+  for (const rel of [".agentlas/agent-card.json", "agentlas.json"]) {
+    try {
+      const data = JSON.parse(fs.readFileSync(path.join(scanRoot, rel), "utf8")) as unknown;
+      if (isRecord(data)) {
+        if (typeof data.name === "string" && data.name.trim()) name = data.name.trim();
+        if (typeof data.tagline === "string") tagline = data.tagline.trim();
+        const loc = isRecord(data.localized) ? data.localized : undefined;
+        if (loc) {
+          if (typeof loc.descriptionEn === "string") localizedEn = loc.descriptionEn;
+          else if (typeof loc.titleEn === "string") localizedEn = loc.titleEn;
+        }
+      }
+      break;
+    } catch {
+      /* try next candidate */
+    }
+  }
+  const summary = (tagline || localizedEn || name).slice(0, 280);
+  const card = {
+    schemaVersion: "routing-card/2.0",
+    id: sanitizeSlug(name) || "agent",
+    type: "agent",
+    name,
+    summary,
+    capabilities: deriveRoutingCapabilities(`${name} ${tagline} ${localizedEn}`),
+    routing_status: "searchable",
+    generated_by: "agentlas-desktop-publish-autofix",
+  };
+  try {
+    fs.mkdirSync(path.dirname(cardPath), { recursive: true });
+    fs.writeFileSync(cardPath, JSON.stringify(card, null, 2) + "\n", "utf8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Friendly one-line breakdown of what the publish auto-fix did, for the user. */
+function summarizeRemediation(actions: RemediationAction[], locale: "ko" | "en"): string {
+  if (actions.length === 0) return "";
+  const redacted = actions.filter((a) => a.action === "redacted").length;
+  const excluded = actions.filter((a) => a.action === "excluded").length;
+  const rewritten = actions.filter((a) => a.action === "rewritten" && !a.detail.includes("routing card")).length;
+  const routingCard = actions.some((a) => a.detail.includes("routing card"));
+  const parts: string[] = [];
+  const ko = locale === "ko";
+  if (routingCard) parts.push(ko ? "라우팅 카드 생성" : "generated routing card");
+  if (redacted) parts.push(ko ? `시크릿 ${redacted}건 리댁트` : `redacted ${redacted}`);
+  if (rewritten) parts.push(ko ? `${rewritten}건 재작성` : `rewrote ${rewritten}`);
+  if (excluded) parts.push(ko ? `${excluded}건 제외` : `excluded ${excluded}`);
+  if (parts.length === 0) return "";
+  return ko ? ` 자동수정: ${parts.join(", ")}.` : ` Auto-fixed: ${parts.join(", ")}.`;
+}
+
 export async function packageAndReviewCloudAgent(
   input: CloudAgentPackageRequest,
+  opts?: {
+    onStage?: (stage: string, detail?: string) => void;
+    locale?: "ko" | "en";
+    /** Override the runtime used for auto-fix. Omit to auto-detect; pass null to force the deterministic path. */
+    activeRuntime?: RuntimeStatus | null;
+  },
 ): Promise<CloudAgentPackageResult> {
   const rootPath = resolveCloudAgentRoot(input.rootPath);
 
@@ -185,14 +363,46 @@ export async function packageAndReviewCloudAgent(
   // the user's folder is never mutated.
   let scanRoot = rootPath;
   let autofixCleanup: (() => void) | null = null;
+  let remediationActions: RemediationAction[] = [];
   if (isPublicHubPublish) {
     try {
-      const runtimes = await detectRuntimes().catch(() => [] as Awaited<ReturnType<typeof detectRuntimes>>);
-      const active = runtimes.find((runtime) => runtime.active) ?? runtimes[0] ?? null;
-      const autofix = await autofixForPublish({ folder: rootPath, active });
-      if (autofix.ready && autofix.packageFolder) {
-        scanRoot = autofix.packageFolder;
+      let active: RuntimeStatus | null;
+      if (opts && Object.prototype.hasOwnProperty.call(opts, "activeRuntime")) {
+        active = opts.activeRuntime ?? null;
+      } else {
+        const runtimes = await detectRuntimes().catch(() => [] as Awaited<ReturnType<typeof detectRuntimes>>);
+        active = runtimes.find((runtime) => runtime.active) ?? runtimes[0] ?? null;
+      }
+      opts?.onStage?.("cleaning");
+      const autofix = await autofixForPublish({ folder: rootPath, active, locale: opts?.locale });
+      if (autofix.packageFolder) {
+        // scanAgentFolder compares realpath'd children against this root, so the
+        // temp copy path must be canonical (e.g. macOS /var → /private/var), or
+        // every child resolves "outside the approved root".
+        try {
+          scanRoot = fs.realpathSync.native(autofix.packageFolder);
+        } catch {
+          scanRoot = autofix.packageFolder;
+        }
         autofixCleanup = autofix.cleanup;
+        // A missing/invalid routing card is a hard blocker added outside the scan
+        // (the loop can't reach it) — auto-generate one so no agent dead-ends on it.
+        if (ensureRoutingCard(scanRoot)) {
+          opts?.onStage?.("routing-card");
+          remediationActions.push({ file: ROUTING_CARD_PATH, action: "rewritten", detail: "auto-generated routing card" });
+        }
+        // Generic convergence loop against the real publish gate — the model fixes
+        // each offending file (redact secrets to placeholders, defang installers,
+        // rewrite), escalating to deterministic redaction then exclude, so ANY
+        // agent ends in an uploadable package instead of a dead-end blocker.
+        const outcome = await remediateUntilClean(
+          scanRoot,
+          restoredExecutablePaths,
+          active,
+          opts?.locale ?? "ko",
+          opts?.onStage,
+        );
+        remediationActions.push(...outcome.actions);
       } else {
         autofix.cleanup();
       }
@@ -380,11 +590,12 @@ export async function packageAndReviewCloudAgent(
     files: scan.files,
     review,
     registration,
+    ...(remediationActions.length ? { remediation: remediationActions } : {}),
     summary:
       status === "registered"
-        ? isPublicHubPublish
-          ? `Published ${slug} publicly to Agentlas Hub.`
-          : `Saved ${slug} privately in Agent Cloud.`
+        ? (isPublicHubPublish
+            ? `Published ${slug} publicly to Agentlas Hub.`
+            : `Saved ${slug} privately in Agent Cloud.`) + summarizeRemediation(remediationActions, opts?.locale ?? "en")
         : status === "blocked"
           ? isPublicHubPublish
             ? `Hub publish blocked: ${review.summary}`

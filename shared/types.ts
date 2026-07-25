@@ -3216,6 +3216,13 @@ export interface CloudAgentDeleteResult {
   deletedAt: string;
 }
 
+/** One auto-fix applied so a package could publish, surfaced to the user. */
+export interface CloudAgentRemediationAction {
+  file: string;
+  action: "redacted" | "rewritten" | "excluded" | "kept";
+  detail: string;
+}
+
 export interface CloudAgentPackageResult {
   status: CloudAgentPackageStatus;
   rootPath: string;
@@ -3226,6 +3233,8 @@ export interface CloudAgentPackageResult {
   files: CloudAgentPackageFile[];
   review: CloudAgentReviewResult;
   registration?: CloudAgentRegistrationResult;
+  /** Auto-fixes the publish pipeline applied to reach an uploadable package. */
+  remediation?: CloudAgentRemediationAction[];
   summary: string;
 }
 

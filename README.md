@@ -69,6 +69,18 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-25 · v0.9.14 — publish auto-fix converges to an uploadable package** —
+  publishing to the public Hub now runs a generic remediation loop against the real gate: every
+  blocking finding is fixed by your connected model in a throwaway copy (a real secret value is
+  redacted to a placeholder, a doc example that only looks like a key is neutralised, a
+  remote-shell installer is defanged), escalating to deterministic secret redaction and, as a
+  last resort, excluding a file, until zero blockers remain; a missing routing card is
+  auto-generated. The result lists what was auto-fixed. Your folder is never modified and a real
+  secret is redacted, never shipped — closing the dead-end where a keyword scanner blocked
+  publish on a placeholder like `sk-ant-...` in a reference doc.
+  This release binds Agentlas OS v1.1.60 at 2430d2806782576177002a96f5e792e0439962e5.
+  This source note does not prove a Desktop Git tag, public installer, GitHub release, or
+  update feed.
 - **2026-07-25 · v0.9.13 — publish auto-fix + resident LLM judgment** —
   publishing an agent to the public Hub runs a cleanup pass first: virtualenvs, caches, build
   artifacts, and secret files (`.env`, private keys) are excluded — `.example` siblings kept —

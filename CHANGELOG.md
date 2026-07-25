@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.14 — 2026-07-25
+
+### Changed
+
+- Publish auto-fix now converges to an uploadable package instead of dead-ending
+  on a blocker. Publishing to the public Hub runs a generic remediation loop
+  against the real gate: every blocking finding is handed to your connected model
+  to fix in a throwaway copy — a real secret value is redacted to a placeholder,
+  a documentation example that merely looks like a key is neutralised, a
+  remote-shell installer is defanged — escalating to deterministic secret
+  redaction and, only as a last resort, excluding a file, until zero blockers
+  remain. A missing routing card is auto-generated from the agent's own identity.
+  The result summary lists exactly what was auto-fixed. Your original folder is
+  never modified; a real secret is never published — it is redacted, not shipped.
+  This closes the case where a keyword scanner blocked publish on a placeholder
+  like `sk-ant-...` inside a reference document with no way to proceed.
+
+This release binds Agentlas OS v1.1.60 at 2430d2806782576177002a96f5e792e0439962e5.
+This changelog entry describes source readiness and does not prove a published
+Desktop release, installer, or update feed.
+
 ## 0.9.13 — 2026-07-25
 
 ### Added

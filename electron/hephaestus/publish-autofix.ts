@@ -18,6 +18,7 @@ import type { Runner, RunnerRequest } from "../runtime/runner";
 import { pickRunner } from "../runtime/selection";
 import { detectRuntimes } from "../runtime/detect";
 import { securityScan } from "./commands";
+import { looksSecret, redactSecrets } from "../../shared/secret-patterns";
 
 // Deterministic safety backstop — a secret/artifact match here is ALWAYS
 // excluded, even if the model omitted it. This is the never-publish-a-secret
@@ -334,7 +335,6 @@ export async function autofixForPublish(input: {
 }): Promise<PublishAutofixResult> {
   const base = path.resolve(input.folder);
   const locale = input.locale ?? "ko";
-  const noop: PublishAutofixResult["cleanup"] = () => {};
 
   const initialScan = await securityScan(base, { strict: true, signal: input.signal }).catch(() => null);
   const scanText = initialScan ? `${initialScan.stdout ?? ""}\n${initialScan.stderr ?? ""}`.trim() : "";
@@ -359,29 +359,221 @@ export async function autofixForPublish(input: {
   const localizedFilled = writeLocalized(dest, plan.localized);
   writeLlmJudgment(dest, plan, modelName);
 
-  // Re-scan the cleaned copy against the model's acknowledgment. Anything still
-  // BLOCK-level (real secret value, exfiltration) survives and blocks publish.
-  const judgmentPath = path.join(dest, ".agentlas", "security-llm-judgment.json");
-  const hasJudgment = fs.existsSync(judgmentPath);
-  const finalScan = await securityScan(dest, {
-    strict: true,
-    signal: input.signal,
-    ...(hasJudgment ? { llmJudgmentPath: judgmentPath, acknowledgeWarn: true } : {}),
-  }).catch(() => null);
-  const finalOut = finalScan ? `${finalScan.stdout ?? ""}`.trim() : "";
-  const ready = Boolean(finalScan?.ok) && !/BLOCK|blocker/i.test(finalOut);
-
-  const remainingBlockers = ready
-    ? []
-    : finalOut
-        .split("\n")
-        .filter((line) => /BLOCK|blocker/i.test(line))
-        .slice(0, 12)
-        .map((line) => ({ message: line.trim() }));
-
-  if (!ready) {
-    cleanup();
-    return { ready: false, packageFolder: null, excluded, localizedFilled, remainingBlockers, model: modelName, cleanup: noop };
-  }
+  // The cleaned copy is the publish INPUT, not the final verdict. autofix never
+  // dead-ends a publish on its own: it always hands back a throwaway copy for the
+  // caller's generic remediation loop (remediateBlockers, driven by the real
+  // publish gate scanAgentFolder) to take to zero blockers and upload.
   return { ready: true, packageFolder: dest, excluded, localizedFilled, remainingBlockers: [], model: modelName, cleanup };
+}
+
+/** A publish-gate blocker to remediate. `file` is relative to the package folder. */
+export interface RemediationBlocker {
+  id: string;
+  file: string;
+  category: string;
+  message: string;
+}
+
+/** What the remediation did to one file — surfaced to the user as stage feedback. */
+export interface RemediationAction {
+  file: string;
+  action: "redacted" | "rewritten" | "excluded" | "kept";
+  detail: string;
+}
+
+const MAX_REMEDIABLE_BYTES = 512 * 1024;
+const TEXT_EXT = /\.(?:md|markdown|txt|json|jsonc|ya?ml|toml|ini|cfg|conf|env|sh|bash|zsh|ps1|py|js|mjs|cjs|ts|tsx|jsx|rb|go|rs|java|kt|c|h|cpp|php|pl|sql|html?|css|xml|csv|tsv|properties|dockerfile|gitignore|editorconfig)$/i;
+
+function isTextFile(abs: string, rel: string): boolean {
+  if (/(?:^|\/)dockerfile$/i.test(rel) || /(?:^|\/)makefile$/i.test(rel)) return true;
+  if (!TEXT_EXT.test(rel)) {
+    // Sniff: treat as text if the first bytes have no NUL.
+    try {
+      const fd = fs.openSync(abs, "r");
+      const buf = Buffer.alloc(512);
+      const read = fs.readSync(fd, buf, 0, 512, 0);
+      fs.closeSync(fd);
+      return !buf.subarray(0, read).includes(0);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+interface FileFix {
+  action: "rewrite" | "exclude" | "keep";
+  content?: string;
+  reason: string;
+}
+
+function safeFixJson(text: string): FileFix {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return { action: "keep", reason: "no plan" };
+  let obj: Record<string, unknown> = {};
+  try {
+    obj = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
+  } catch {
+    return { action: "keep", reason: "unparseable plan" };
+  }
+  const action = obj.action === "rewrite" || obj.action === "exclude" ? obj.action : "keep";
+  return {
+    action,
+    content: typeof obj.content === "string" ? obj.content : undefined,
+    reason: typeof obj.reason === "string" ? obj.reason.slice(0, 300) : "",
+  };
+}
+
+async function llmFixFile(
+  runner: Runner,
+  runtime: RuntimeStatus,
+  label: string,
+  rel: string,
+  content: string,
+  messages: string[],
+  signal: AbortSignal | undefined,
+  locale: "ko" | "en",
+): Promise<FileFix> {
+  const system = [
+    "You remediate ONE file in an Agentlas agent package so it passes a public-Hub security scan and can be uploaded.",
+    "The goal is ALWAYS a successful upload — fix the file, do not give up.",
+    "Return JSON only: {\"action\":\"rewrite\"|\"exclude\",\"content\":\"<full fixed file when rewriting>\",\"reason\":\"...\"}.",
+    "Rules:",
+    "- Real secret VALUES (API keys, tokens, passwords, private keys): replace ONLY the value with a clear placeholder like <YOUR_API_KEY> or ${API_KEY}. Keep the surrounding docs/code intact.",
+    "- Documentation examples / format specs / field names that merely LOOK like keys (e.g. `sk-ant-...`, `x-api-key` header names): make them unambiguous placeholders (e.g. `sk-ant-<YOUR_KEY>`) so the scanner is satisfied, preserving the explanation.",
+    "- Remote-shell-install patterns (curl … | sh): rewrite into explicit, reviewable steps (download, verify, run) or an inert fenced example.",
+    "- If and only if the file is pure local junk / a real credential file with nothing reusable, return action \"exclude\".",
+    "- Prefer rewrite over exclude. When rewriting, return the COMPLETE file content, changed minimally.",
+  ].join("\n");
+  const user = JSON.stringify({ file: rel, blockers: messages.slice(0, 8), content: content.slice(0, 24000) });
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(), 90_000);
+  if (signal) {
+    if (signal.aborted) timeout.abort();
+    else signal.addEventListener("abort", () => timeout.abort(), { once: true });
+  }
+  const req: RunnerRequest = {
+    systemPrompt: system,
+    history: [],
+    userPrompt: user,
+    backendLabel: label,
+    model: runtime.model ?? undefined,
+    longContext: false,
+    effort: runtime.effort ?? "medium",
+    permission: "read",
+    cwd: process.cwd(),
+    env: {},
+    signal: timeout.signal,
+    locale,
+  } as RunnerRequest;
+  try {
+    const result = await runner(req, { onPartial: () => {}, onStatus: () => {}, onTool: () => {} });
+    return safeFixJson(result.text ?? "");
+  } catch {
+    return { action: "keep", reason: "model unavailable" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Remediate an arbitrary set of publish-gate blockers in-place inside the
+ * throwaway package folder. GENERIC: it does not care what the blocker is — it
+ * asks the connected model to fix each offending file (redact secrets to
+ * placeholders, defang installers, rewrite), and if the model can't or the
+ * blocker is a secret, a deterministic redaction guarantees the value is gone.
+ * The loop that calls this owns escalation to file-exclude as a last resort, so
+ * the package always converges to zero blockers and uploads.
+ */
+export async function remediateBlockers(input: {
+  folder: string;
+  blockers: RemediationBlocker[];
+  active: RuntimeStatus | null;
+  locale?: "ko" | "en";
+  signal?: AbortSignal;
+  deterministicOnly?: boolean;
+  onStage?: (stage: string, detail?: string) => void;
+}): Promise<{ changed: boolean; actions: RemediationAction[] }> {
+  const folder = path.resolve(input.folder);
+  const locale = input.locale ?? "ko";
+  const actions: RemediationAction[] = [];
+  let changed = false;
+
+  // Group blockers by real, in-folder file.
+  const byFile = new Map<string, RemediationBlocker[]>();
+  for (const b of input.blockers) {
+    if (!b.file) continue;
+    const abs = path.resolve(folder, b.file);
+    if (!abs.startsWith(folder + path.sep)) continue;
+    let stat: fs.Stats | null = null;
+    try {
+      stat = fs.statSync(abs);
+    } catch {
+      stat = null;
+    }
+    if (!stat || !stat.isFile()) continue;
+    const list = byFile.get(b.file) ?? [];
+    list.push(b);
+    byFile.set(b.file, list);
+  }
+
+  const picked = input.deterministicOnly ? null : await pickStrongestRunner(input.active);
+
+  for (const [rel, group] of byFile) {
+    const abs = path.resolve(folder, rel);
+    let content = "";
+    let readable = true;
+    try {
+      const stat = fs.statSync(abs);
+      if (stat.size > MAX_REMEDIABLE_BYTES || !isTextFile(abs, rel)) readable = false;
+      else content = fs.readFileSync(abs, "utf8");
+    } catch {
+      readable = false;
+    }
+    const isSecret = group.some((b) => b.category === "secret");
+    const messages = group.map((b) => b.message);
+
+    // 1) Model remediation (skipped for a binary/oversized file or deterministic pass).
+    if (readable && picked) {
+      input.onStage?.("remediating", rel);
+      const fix = await llmFixFile(picked.runner, picked.runtime, picked.label, rel, content, messages, input.signal, locale);
+      if (fix.action === "exclude") {
+        try {
+          fs.rmSync(abs, { force: true });
+          actions.push({ file: rel, action: "excluded", detail: fix.reason || "model excluded" });
+          changed = true;
+          continue;
+        } catch {
+          /* fall through to deterministic net */
+        }
+      } else if (fix.action === "rewrite" && typeof fix.content === "string" && fix.content.trim() && fix.content !== content) {
+        content = fix.content;
+        try {
+          fs.writeFileSync(abs, content, "utf8");
+          actions.push({ file: rel, action: "rewritten", detail: fix.reason || "model rewrite" });
+          changed = true;
+        } catch {
+          /* fall through */
+        }
+      }
+    }
+
+    // 2) Deterministic secret net — a secret VALUE must be gone regardless of the
+    //    model. Applied whenever the file still looks like it carries a credential.
+    if (readable && isSecret && looksSecret(content)) {
+      const redacted = redactSecrets(content, "<REDACTED>");
+      if (redacted !== content) {
+        try {
+          fs.writeFileSync(abs, redacted, "utf8");
+          actions.push({ file: rel, action: "redacted", detail: "deterministic secret redaction" });
+          changed = true;
+        } catch {
+          /* keep going; the loop escalates to exclude */
+        }
+      }
+    }
+  }
+
+  return { changed, actions };
 }
