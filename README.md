@@ -69,6 +69,17 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-26 · v0.9.17 — private project state stays out of git** —
+  the sitemap, code map, project soul memory, memory log, curator decisions, skill trials,
+  and the local credential index are per-machine outputs of features you run against your
+  own files: they describe your working tree and nobody else ever consumes your copy. They
+  are now added to the project .gitignore alongside the runtime databases that were already
+  covered, so a routine `git add` no longer publishes the shape of your project. Projects
+  provisioned before this release pick the entries up automatically without losing existing
+  .gitignore content; a file already committed keeps being tracked until you untrack it.
+  This release binds Agentlas OS v1.1.62 at 19b75025e5e252e90d93015a839c55d08fcb8061.
+  This source note does not prove a Desktop Git tag, public installer, GitHub release, or
+  update feed.
 - **2026-07-25 · v0.9.16 — the AI sitemap refreshes itself and keeps operator nodes** —
   the sitemap generator worked all along, but nothing outside ontology provisioning ever
   called it, so a project could sit on an empty skeleton or a months-stale map indefinitely

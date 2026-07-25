@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.17 — 2026-07-26
+
+### Fixed
+
+- Agentlas no longer leaves its private per-project state exposed to git. The
+  sitemap, code map, project soul memory, memory log, curator decisions, skill
+  trials, and the local credential index are outputs of features each user runs
+  against their own files — they describe that machine's working tree and are
+  never consumed by anyone else — so they are now added to the project
+  .gitignore alongside the runtime databases that were already there. Projects
+  provisioned before this release pick the entries up automatically without
+  losing existing .gitignore content. A project that already committed one of
+  these files keeps tracking it until its owner untracks it.
+
+This release binds Agentlas OS v1.1.62 at 19b75025e5e252e90d93015a839c55d08fcb8061.
+This changelog entry describes source readiness and does not prove a published
+Desktop release, installer, or update feed.
+
 ## 0.9.16 — 2026-07-25
 
 ### Fixed

@@ -847,6 +847,23 @@ Do not commit files from this folder.
 `;
 }
 
+// Everything Agentlas writes into a user's project that describes THEM rather
+// than the product: their directory layout, their code index, their project
+// memory, their work log. These are per-machine outputs of features each user
+// runs on their own files — nobody else consumes another person's copy — and
+// publishing one leaks the shape of a private working tree. Keep them out of
+// git by default. Listed separately so the migration path below can add them to
+// projects provisioned before this existed.
+const AGENTLAS_PRIVATE_PROJECT_STATE_IGNORE: readonly string[] = [
+  `.agentlas/${SITEMAP_FILE}`,
+  ".agentlas/code-map/",
+  `.agentlas/${PROJECT_SOUL_FILE}`,
+  `.agentlas/${MEMORY_LOG_FILE}`,
+  `.agentlas/${CURATOR_DECISIONS_FILE}`,
+  `.agentlas/${SKILL_TRIALS_FILE}`,
+  `.agentlas/${LOCAL_CREDENTIALS_MAP_FILE}`,
+];
+
 function ensureAgentlasCredentialIgnore(identity: ProjectFsIdentity): void {
   const gitignorePath = path.join(identity.root, ".gitignore");
   const marker = "# Agentlas local credentials";
@@ -865,6 +882,7 @@ ${PROJECT_CREDENTIALS_DIR}/*
 .agentlas/${CAREER_GRAPH_DB_FILE}*
 .agentlas/${EXPERIENCE_RELATION_LEDGER_FILE}*
 .agentlas/.${EXPERIENCE_RELATION_LEDGER_FILE}.*
+${AGENTLAS_PRIVATE_PROJECT_STATE_IGNORE.join("\n")}
 `;
   const existingRead = readStableProjectText(identity, gitignorePath, "The project .gitignore");
   const existing = existingRead?.content ?? "";
@@ -875,6 +893,7 @@ ${PROJECT_CREDENTIALS_DIR}/*
       `.agentlas/${CAREER_GRAPH_DB_FILE}*`,
       `.agentlas/${EXPERIENCE_RELATION_LEDGER_FILE}*`,
       `.agentlas/.${EXPERIENCE_RELATION_LEDGER_FILE}.*`,
+      ...AGENTLAS_PRIVATE_PROJECT_STATE_IGNORE,
     ];
     let next = existing.trimEnd();
     for (const line of requiredLines) {
