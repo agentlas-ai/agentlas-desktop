@@ -1,3 +1,4 @@
+import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
@@ -93,7 +94,7 @@ async function stageImages(req: StageRequest, images: ImageAttachment[]): Promis
 }
 
 function attachmentGuideLocale(prompt: string, fallback: RuntimeLocale): RuntimeLocale {
-  if (/[가-힣]/.test(prompt)) return "ko";
+  if (isPrimarilyKorean(prompt)) return "ko";
   if (/[A-Za-z]{3,}/.test(prompt)) return "en";
   return fallback;
 }

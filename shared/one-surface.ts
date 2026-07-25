@@ -1,3 +1,4 @@
+import { isPrimarilyKorean } from "./detect-language";
 import { redactSecrets } from "./secret-patterns";
 import type {
   AgentlasSurfaceDataSet,
@@ -633,7 +634,7 @@ function datasetBlock(dataset: AgentlasSurfaceDataSet, blockId: string, title: s
     const currencyValue = String(dataset.currency ?? value?.currency ?? "").toUpperCase();
     const currency = /^[A-Z]{3}$/.test(currencyValue)
       ? currencyValue
-      : /[가-힣]/.test(safeSerialize(dataset)) ? "KRW" : "USD";
+      : isPrimarilyKorean(safeSerialize(dataset)) ? "KRW" : "USD";
     return { blockId, type: "Budget", title, currency, total, limit, lines };
   }
   if (dataset.type === "media") {

@@ -1,3 +1,4 @@
+import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
 // Business/ecommerce OS seed: vague commerce intent -> declarative service-app.
 // This keeps the same Agentlas Surface contract as model-emitted manifests:
 // no executable UI code, explicit capabilities, delegation, budget, evidence,
@@ -450,7 +451,7 @@ export function buildEcommerceOpsManifest(input: { prompt: string; now?: string 
 }
 
 function inferCommerceProfile(prompt: string): CommerceProfile {
-  const isKorean = /[가-힣]/.test(prompt);
+  const isKorean = isPrimarilyKorean(prompt);
   const category =
     /여자옷|여성복/i.test(prompt)
       ? "women's clothing"

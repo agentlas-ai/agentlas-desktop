@@ -1,3 +1,4 @@
+import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
 import { createHash, randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
 import { pickActive } from "../runtime/selection";
@@ -348,7 +349,7 @@ function exactInstalledRoster(
       && !installed.sourceMissingSince
       && installed.visibility !== "background"
       && installed.visibility !== "private");
-    const locale = /[가-힣]/.test(prompt) ? "ko" as const : "en" as const;
+    const locale = preferredLocaleFromText(prompt);
     const selected = selectAutoRoutedAgent(prompt, eligible, locale, { allowFallback: false });
     if (selected) {
       const snapshot = candidateSnapshot(selected.agent, "installed");

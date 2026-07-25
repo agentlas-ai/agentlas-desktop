@@ -1,3 +1,4 @@
+import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
 // 모든 런타임(CLI 3종 + BYOK 3종)이 구현해야 하는 통합 인터페이스.
 // mcp/client.ts가 활성 런타임 → 적절한 러너로 라우팅한다.
 import type { ChatHistoryEntry, ImageAttachment } from "../../shared/types";
@@ -328,7 +329,7 @@ You will then be handed the full surface spec to fill in. For one-off questions 
 
 function responseLanguageGuide(locale: RuntimeLocale, userPrompt?: string): string {
   const prompt = userPrompt ?? "";
-  if (/[가-힣]/.test(prompt)) {
+  if (isPrimarilyKorean(prompt)) {
     return [
       "The user's current message is Korean. Reply in Korean, including brief progress updates and the final answer.",
       "Do not expose hidden chain-of-thought. If you need to narrate progress, summarize only observable actions and results.",

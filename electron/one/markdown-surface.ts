@@ -1,3 +1,4 @@
+import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
 import type {
   AgentlasSurfaceManifest,
   JsonObject,
@@ -146,7 +147,7 @@ function addMissingRecommendationToTable(
     || /(?:고르시면|선택하시면|추천(?:합니다|해요|드립니다)|(?:입|됩|없|있)니다)(?:[.!?]|$)/i.test(recommendation.product)
   ) return cleanedTable;
 
-  const ko = /[가-힣]/.test(markdown);
+  const ko = isPrimarilyKorean(markdown);
   const price = `${recommendation.product} ${recommendation.detail}`.match(/(?:약[ \t]*)?\d[\d,.]*(?:[ \t]*만)?[ \t]*원/i)?.[0] ?? "—";
   const area = markdown.match(/(?:표준)?사용면적[^\d\r\n]{0,24}(\d[\d,.]*[ \t]*㎡(?:[ \t]*\([^\r\n)]{1,30}평\))?)/i)?.[1] ?? "—";
   const row: JsonObject = {};
@@ -386,7 +387,7 @@ function informativeHeading(markdown: string, fallbackTitle: string): string {
     && /(?:고르시면|선택하시면|\b(?:choose|pick)\b)/i.test(heading)
   ) {
     return cleanText(
-      oneText(/[가-힣]/.test(heading) ? "ko" : "en", "one.md.headingRec", { product: recommendation.product }),
+      oneText(preferredLocaleFromText(heading), "one.md.headingRec", { product: recommendation.product }),
       160,
     );
   }

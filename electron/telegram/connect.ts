@@ -1,3 +1,4 @@
+import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -293,7 +294,7 @@ function tg(key: TelegramCopyKey, vars: Record<string, string | number> = {}, lo
 // 한글이 있으면 ko, 아니면 en(스캐폴딩·안내문 기준). 실제 응답 언어는 LLM에
 // "메시지와 같은 언어로 답하라" 지시로 임의 외국어까지 맞춘다.
 function detectReplyLocale(text: string): "ko" | "en" {
-  return /[가-힣]/.test(text) ? "ko" : "en";
+  return preferredLocaleFromText(text);
 }
 
 function nowIso(): string {
