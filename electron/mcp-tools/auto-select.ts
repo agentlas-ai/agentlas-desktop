@@ -6,7 +6,8 @@ import { installFromCatalog, listInstalledServers } from "./registry";
 import { testServerConnection } from "./client";
 import { readEnvVar } from "../secrets/vault";
 import { getSource as getMarketSource } from "../marketplace";
-import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
+import { COMPUTER_USE_JUDGMENT_GUIDANCE, COMPUTER_USE_JUDGMENT_KIND, COMPUTER_USE_JUDGMENT_QUESTION, computerUseKeywordCandidate, resolveAutomationToolMode } from "../../shared/automation-tool-policy";
+import { judgedComputerUse } from "../system-agents/judged-tool-mode";
 import type {
   AutomationHubMode,
   AutomationToolMode,
@@ -444,11 +445,33 @@ export async function autoSelectMcpTools(input: {
   const haystack = normalize(
     [input.userPrompt, input.systemPrompt, input.agentName, input.workingFolder ?? ""].join("\n"),
   );
+  // Keyword lists say this automation *might* need a human-driven browser; ask the resident
+  // judge whether it really does before forcing the slow computer-use path. The verdict is
+  // cached, so the synchronous store writes that resolve the same automation later read the
+  // model's answer instead of the keywords (see peekJudgment / judgedComputerUse).
+  const toolModeText = [input.agentName ?? "", input.userPrompt ?? "", input.workingFolder ?? ""].join("\n");
+  if (computerUseKeywordCandidate(toolModeText)) {
+    try {
+      const { prejudge } = await import("../system-agents/judgment");
+      await prejudge<"yes" | "no">({
+        kind: COMPUTER_USE_JUDGMENT_KIND,
+        question: COMPUTER_USE_JUDGMENT_QUESTION,
+        labels: ["yes", "no"] as const,
+        input: toolModeText,
+        guidance: COMPUTER_USE_JUDGMENT_GUIDANCE,
+        hints: "the candidate came from broad keywords (web, search, account, post, a site name)",
+        fallback: "yes",
+      });
+    } catch {
+      // Judgment is best-effort; the keyword answer remains the fallback.
+    }
+  }
   const effectiveToolMode = resolveAutomationToolMode({
     toolMode: input.toolMode,
     name: input.agentName,
     promptTemplate: input.userPrompt,
     targetLabel: input.workingFolder,
+    judged: judgedComputerUse,
   });
   let initialInstalledServers: InstalledMcpServer[] = [];
   try {

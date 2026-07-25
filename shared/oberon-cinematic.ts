@@ -255,6 +255,11 @@ export const COLOR_PALETTE_BORROW_PROMPT = "첫 번째 이미지를 유지하고
 export const REFERENCE_ATTACH_ORDER_RULE = "변경할 이미지를 첫 번째로, 참조할 이미지를 두 번째로 첨부한다. 순서가 바뀌면 프롬프트도 그에 맞춰 조정한다.";
 
 // ── 프롬프트 린트 — 흔한 실수 감지(차단 아닌 경고) ──────────────────────────
+//
+// 판정 위임 대상이 아니다: 이 린트는 아무것도 막지 않고 "이렇게 쓰면 더 좋다"는 조언만
+// 붙인다. 결정 권한이 없으므로 오탐의 비용이 조언 한 줄이고, 사용자의 프롬프트는 그대로
+// 실행된다. 판정을 LLM에 넘겨야 하는 곳은 "사용자의 결과를 바꾸거나 막는" 지점뿐이다.
+// (실제로 막는 지점들은 electron/system-agents/judgment.ts 를 통해 모델이 판정한다.)
 
 export const QUALITY_KEYWORD_BLACKLIST = [
   "8K",

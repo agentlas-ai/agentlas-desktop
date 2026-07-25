@@ -5,6 +5,7 @@
 // v33: next-run 계산을 schedule.ts(croner)에 위임한다. computeNextRun은 이제 string|null을
 // 반환하며(null=미래 발생 없음 → 종료), markAutomationRun은 misfire coalesce 정책 + run_history
 // 기록 + max_runs/end_at 종료를 적용한다. graph_json/schedule_json/timezone은 additive.
+import { judgedComputerUse } from "../system-agents/judged-tool-mode";
 import { createHash, randomUUID } from "node:crypto";
 import { emitDesktopStoreChange } from "./change-bus";
 import { AUTOMATION_RUN_STALE_AFTER_MS, getDb } from "./db";
@@ -394,6 +395,7 @@ export function createAutomation(input: {
       triggerType,
       triggerJson,
       resolveAutomationToolMode({
+        judged: judgedComputerUse,
         toolMode: normalizeToolMode(input.toolMode),
         name: input.name,
         promptTemplate: input.promptTemplate,
@@ -425,6 +427,7 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
   const targetId = patch.targetId ?? row.target_id;
   const promptTemplate = patch.promptTemplate ?? row.prompt_template;
   const toolMode = resolveAutomationToolMode({
+        judged: judgedComputerUse,
     toolMode: normalizeToolMode(patch.toolMode ?? row.tool_mode),
     name,
     promptTemplate,
