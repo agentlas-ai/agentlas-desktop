@@ -89,10 +89,24 @@ server.listen(0, "127.0.0.1", async () => {
     const { buildMcpConfigFile } = require("../dist/electron/mcp-tools/mcp-config.js");
 
     initStore();
+    // The resident judge is the ONLY thing that selects an optional tool, so the test pins
+    // its verdict instead of relying on a connected model. `seenCandidates` captures the
+    // inventory it was offered.
+    let seenCandidates = [];
+    const judgeSays = (ids) => async ({ candidates }) => {
+      seenCandidates = candidates;
+      return { needed: ids, decided: true, reason: "pinned by test", omitted: [] };
+    };
+    // No model reachable: nothing optional may be attached and nothing may be asked for.
+    const judgeUnavailable = async ({ candidates }) => {
+      seenCandidates = candidates;
+      return { needed: [], decided: false, reason: "no connected model answered", omitted: [] };
+    };
     const healthyProbe = {
       // Catalog/routing behavior is the subject of this smoke. Runtime probe
       // failure isolation has a separate deterministic test.
       testServerConnection: async () => ({ connected: true, missingEnv: [] }),
+      resolveNeeds: judgeSays(["cua-driver", "reddit"]),
     };
 
     const selected = await autoSelectMcpTools({
@@ -105,11 +119,20 @@ server.listen(0, "127.0.0.1", async () => {
 
     assert.ok(selected.localPluginCount >= 13, "local MCP/plugin inventory should include catalog entries");
     assert.equal(selected.hubPluginCount, 4, "Hub plugin catalog should be counted");
-    assert.ok(selected.tools.some((tool) => tool.id === "cua-driver" && tool.installed), "CUA should be installed for social/web action automation");
+    assert.equal(selected.needsDecided, true, "a judged run should report a decided tool set");
+    assert.ok(selected.tools.some((tool) => tool.id === "cua-driver" && tool.installed), "CUA should be installed when the judge names it");
     assert.ok(selected.tools.some((tool) => tool.id === "hephaestus-network" && tool.installed), "Hub resolver should be installed when Hub is allowed");
     assert.ok(selected.hubPlugins.some((plugin) => plugin.slug === "reddit"), "Reddit Hub plugin should be a candidate");
-    assert.ok(selected.hubPlugins.some((plugin) => plugin.slug === "computer-use"), "Computer Use Hub plugin should be a candidate");
-    assert.ok(selected.hubPlugins.some((plugin) => plugin.slug === "browser"), "Browser Hub plugin should be a candidate");
+    // Hub inventory is offered to the judge FIRST, and every candidate carries a description.
+    assert.equal(seenCandidates[0].origin, "hub", "Hub entries must be offered before local ones");
+    assert.ok(
+      seenCandidates.some((candidate) => candidate.id === "brave-search" && candidate.needsCredential === true),
+      "credential-requiring tools must be flagged to the judge",
+    );
+    assert.ok(
+      !selected.hubPlugins.some((plugin) => plugin.slug === "notion"),
+      "an unnamed Hub plugin must not be surfaced as a candidate",
+    );
 
     const selectedCatalogIds = selected.tools.filter((tool) => tool.installed).map((tool) => tool.id);
     const cfg = await buildMcpConfigFile({ catalogIds: selectedCatalogIds });
@@ -138,6 +161,56 @@ server.listen(0, "127.0.0.1", async () => {
     assert.ok(browserCfg.allowedTools.some((tool) => tool.includes("agentlas-browser")), "browser allowed tools should include Agentlas Browser only");
     assert.ok(!browserCfg.allowedTools.some((tool) => tool.includes("playwright")), "browser allowed tools must exclude fresh Playwright fallback");
     assert.ok(!browserCfg.allowedTools.some((tool) => tool.includes("cua-driver")), "browser allowed tools should not include CUA");
+
+    // ── REGRESSION: the incident this selector was rewritten for ────────────────
+    // A Reddit posting automation whose text merely said "조사" was scored onto brave-search,
+    // came back missing-key, and opened a blocking API-key sheet before the run — every
+    // working automation stalled on a Brave Search key nobody had asked for.
+    const wordBaitPrompt = "레딧에 올릴 글을 조사해서 정리하고 검색 결과를 댓글로 게시해줘";
+    const noModel = await autoSelectMcpTools({
+      userPrompt: wordBaitPrompt,
+      systemPrompt: "You are a no-slop community seeding automation.",
+      agentName: "No Slop Seeder",
+      toolMode: "auto",
+      hubMode: "hub-allowed",
+    }, { ...healthyProbe, resolveNeeds: judgeUnavailable });
+
+    assert.equal(noModel.needsDecided, false, "an unreachable model must report an undecided tool set");
+    assert.ok(noModel.needsNote, "an undecided run must say so instead of looking like a full selection");
+    assert.ok(
+      !noModel.tools.some((tool) => tool.id === "brave-search"),
+      'the word "조사"/"검색" must never attach a web-search tool',
+    );
+    assert.equal(
+      noModel.tools.filter((tool) => tool.state === "missing-key").length,
+      0,
+      "an undecided run must never produce a credential prompt",
+    );
+    assert.ok(
+      noModel.tools.some((tool) => tool.id === "hephaestus-network" && tool.installed),
+      "removing the keyword scorer must not remove a capability the user already has",
+    );
+    assert.ok(
+      !noModel.tools.some((tool) => tool.required),
+      "no tool may be marked required by selection",
+    );
+
+    // The same text in a language no wordlist ever covered must behave identically, and a
+    // credential prompt is legitimate ONLY for a tool the judge actually named.
+    const arabic = await autoSelectMcpTools({
+      userPrompt: "ابحث في الويب عن آخر الأخبار ولخّصها",
+      systemPrompt: "Research automation",
+      agentName: "Research",
+      toolMode: "auto",
+      hubMode: "hub-allowed",
+    }, { ...healthyProbe, resolveNeeds: judgeSays(["brave-search"]) });
+    const brave = arabic.tools.find((tool) => tool.id === "brave-search");
+    assert.ok(brave, "a tool the judge names must be selected regardless of the language used");
+    assert.ok(
+      brave.state === "missing-key" || brave.installed,
+      "a judged tool may legitimately ask for its key",
+    );
+    assert.equal(brave.required, false, "even a judged tool is not a host binding");
 
     const prompt = buildMcpAutoSelectionPrompt(selected, { toolMode: "auto", hubMode: "hub-allowed" });
     assert.match(prompt, /Agentlas plugin universe is active/);

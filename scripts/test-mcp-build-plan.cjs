@@ -20,6 +20,38 @@ async function main() {
   store.initStore();
   plans.clearMcpBuildPlansForTest();
 
+  // Deterministic double for the connected model: exact fixture request → picked tool ids.
+  // Production never keyword-scores; the test emulates the judge's verdicts, not its method.
+  const MODEL_PICKS = new Map([
+    ["Open Chrome, log in, inspect a GitHub repo, and write files", ["agentlas-browser", "github", "filesystem"]],
+    ["Inspect a GitHub repo", ["github"]],
+    ["Open a browser and log in", ["agentlas-browser"]],
+    ["Post a message to Slack", ["slack"]],
+    ["Open Chrome in a browser and click", ["agentlas-browser"]],
+    ["Open a browser and click", ["agentlas-browser"]],
+    ["Open a browser", ["agentlas-browser"]],
+    ["Open a browser and inspect a GitHub repo", ["agentlas-browser", "github"]],
+  ]);
+  const fakeRecommend = async ({ request, candidates }) => {
+    if (request === "Use the mason custom MCP") {
+      return {
+        recommended: candidates.filter((item) => item.origin === "custom").map((item) => item.id),
+        decided: true,
+        reason: "test model",
+        omitted: [],
+      };
+    }
+    const picks = MODEL_PICKS.get(request);
+    if (!picks) return { recommended: [], decided: false, reason: "test: unmapped request", omitted: [] };
+    return {
+      recommended: picks.filter((id) => candidates.some((item) => item.id === id)),
+      decided: true,
+      reason: "test model",
+      omitted: [],
+    };
+  };
+  const judgedDeps = { ...plans.defaultMcpBuildPlanDeps, resolveRecommendations: fakeRecommend };
+
   try {
     registry.installFromCatalog("github");
     await vault.setEnvVar("GITHUB_PERSONAL_ACCESS_TOKEN", "ghp_super_secret_plan_value");
@@ -28,7 +60,7 @@ async function main() {
       request: "Open Chrome, log in, inspect a GitHub repo, and write files",
       mode: "single",
       runtime: { kind: "codex", backend: "openai", source: "codex" },
-    });
+    }, judgedDeps);
     const afterRecommendation = store.getDb().prepare("SELECT COUNT(*) AS n FROM mcp_servers").get().n;
     assert.equal(afterRecommendation, beforeRecommendation, "recommendation must not install or mutate registry rows");
     assert.ok(plan.candidates.some((item) => item.catalogId === "github" && item.keyState === "present"));
@@ -185,7 +217,7 @@ async function main() {
     const singleFlightPlan = await plans.recommendMcpBuildPlan({
       request: "Inspect a GitHub repo",
       runtime: { kind: "codex", backend: "openai", source: "codex" },
-    });
+    }, judgedDeps);
     const singleFlightGithub = singleFlightPlan.candidates.find((item) => item.catalogId === "github");
     assert.ok(singleFlightGithub);
     let releaseProbe;
@@ -240,7 +272,7 @@ async function main() {
     const allFailPlan = await plans.recommendMcpBuildPlan({
       request: "Open a browser and log in",
       runtime: { kind: "codex", backend: "openai", source: "codex" },
-    });
+    }, judgedDeps);
     let configCalls = 0;
     const allFail = await plans.applyMcpBuildConsent({
       request: "Open a browser and log in",
@@ -259,7 +291,7 @@ async function main() {
     const slackPlan = await plans.recommendMcpBuildPlan({
       request: "Post a message to Slack",
       runtime: { kind: "codex", backend: "openai", source: "codex" },
-    });
+    }, judgedDeps);
     const slack = slackPlan.candidates.find((item) => item.catalogId === "slack");
     assert.ok(slack && slack.keyState === "missing" && !slack.defaultSelected);
     let missingKeyInstallCalls = 0;
@@ -278,7 +310,7 @@ async function main() {
     const primaryPlan = await plans.recommendMcpBuildPlan({
       request: "Open Chrome in a browser and click",
       runtime: { kind: "codex", backend: "openai", source: "codex" },
-    });
+    }, judgedDeps);
     const browserIds = primaryPlan.candidates.filter((item) => item.fallbackGroup === "browser" && item.defaultSelected).map((item) => item.id);
     const primaryCalls = [];
     const primary = await plans.applyMcpBuildConsent({
@@ -301,6 +333,7 @@ async function main() {
         hasEnv: vault.hasEnvVar,
         now: () => new Date(),
         resolveRuntime: async () => ({ kind: "codex", backend: "openai", source: "codex" }),
+        resolveRecommendations: fakeRecommend,
       },
     );
     assert.equal(noRuntimePlan.runtimeKind, "codex");
@@ -320,6 +353,7 @@ async function main() {
         hasEnv: async () => false,
         now: () => new Date(),
         resolveRuntime: async () => { throw new Error("runtime detection unavailable"); },
+        resolveRecommendations: async () => ({ recommended: [], decided: false, reason: "outage", omitted: [] }),
       },
     );
     assert.equal(recommendationOutagePlan.status, "degraded");
@@ -354,7 +388,7 @@ async function main() {
     const rejectionPlan = await plans.recommendMcpBuildPlan({
       request: "Open a browser",
       runtime: { kind: "codex", backend: "openai", source: "codex" },
-    });
+    }, judgedDeps);
     const rejectionSelected = rejectionPlan.candidates.filter((item) => item.fallbackGroup === "browser" && item.defaultSelected).map((item) => item.id);
     const rejectedGroup = await plans.applyMcpBuildConsent({
       request: "Open a browser",
@@ -368,7 +402,7 @@ async function main() {
     const configRejectPlan = await plans.recommendMcpBuildPlan({
       request: "Open a browser",
       runtime: { kind: "codex", backend: "openai", source: "codex" },
-    });
+    }, judgedDeps);
     const configRejectIds = configRejectPlan.candidates.filter((item) => item.fallbackGroup === "browser" && item.defaultSelected).map((item) => item.id);
     let finalConfigCalls = 0;
     const configRejected = await plans.applyMcpBuildConsent({
@@ -395,7 +429,7 @@ async function main() {
     const partialConfigPlan = await plans.recommendMcpBuildPlan({
       request: "Open a browser and inspect a GitHub repo",
       runtime: { kind: "codex", backend: "openai", source: "codex" },
-    });
+    }, judgedDeps);
     const partialSelected = partialConfigPlan.candidates.filter((item) => item.defaultSelected).map((item) => item.id);
     const partialConfig = await plans.applyMcpBuildConsent({
       request: "Open a browser and inspect a GitHub repo",
@@ -418,7 +452,7 @@ async function main() {
     const persistencePlan = await plans.recommendMcpBuildPlan({
       request: "Inspect a GitHub repo",
       runtime: { kind: "codex", backend: "openai", source: "codex" },
-    });
+    }, judgedDeps);
     let persistenceCalls = 0;
     const persistenceInput = {
       request: "Inspect a GitHub repo",
@@ -444,7 +478,7 @@ async function main() {
     const customPlan = await plans.recommendMcpBuildPlan({
       request: "Use the mason custom MCP",
       runtime: { kind: "codex", backend: "openai", source: "codex" },
-    });
+    }, judgedDeps);
     const customJson = JSON.stringify(customPlan);
     assert.doesNotMatch(customJson, new RegExp(custom.id));
     assert.doesNotMatch(customJson, /mason@example\.com|private\.example|private-command|account-123|--secret/i);

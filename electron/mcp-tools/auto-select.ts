@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { resolveMcpNeeds, type McpNeedCandidate, type ResolvedMcpNeeds } from "./need-resolver";
 import os from "node:os";
 import path from "node:path";
 import { MCP_TOOL_CATALOG } from "./catalog";
@@ -6,7 +7,7 @@ import { installFromCatalog, listInstalledServers } from "./registry";
 import { testServerConnection } from "./client";
 import { readEnvVar } from "../secrets/vault";
 import { getSource as getMarketSource } from "../marketplace";
-import { COMPUTER_USE_JUDGMENT_GUIDANCE, COMPUTER_USE_JUDGMENT_KIND, COMPUTER_USE_JUDGMENT_QUESTION, computerUseKeywordCandidate, resolveAutomationToolMode } from "../../shared/automation-tool-policy";
+import { COMPUTER_USE_JUDGMENT_GUIDANCE, COMPUTER_USE_JUDGMENT_KIND, COMPUTER_USE_JUDGMENT_QUESTION, resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { judgedComputerUse } from "../system-agents/judged-tool-mode";
 import type {
   AutomationHubMode,
@@ -50,6 +51,10 @@ export interface AutoSelectedMcpContext {
   hubPluginCount: number;
   hubPlugins: HubPluginCandidate[];
   hubPluginError?: string;
+  /** True when the resident judge actually decided this run's optional tool set. */
+  needsDecided: boolean;
+  /** Value-free note: nothing was decided, or the candidate inventory was capped. */
+  needsNote?: string;
 }
 
 export interface AutoSelectMcpDependencies {
@@ -60,6 +65,8 @@ export interface AutoSelectMcpDependencies {
     connected: boolean;
     missingEnv: string[];
   }>;
+  /** The only thing allowed to pick an optional tool. Injectable so tests can pin a verdict. */
+  resolveNeeds: (input: { task: string; candidates: McpNeedCandidate[] }) => Promise<ResolvedMcpNeeds>;
 }
 
 const DEFAULT_AUTO_SELECT_DEPS: AutoSelectMcpDependencies = {
@@ -74,166 +81,21 @@ const DEFAULT_AUTO_SELECT_DEPS: AutoSelectMcpDependencies = {
       ? 20_000
       : 3_000,
   }),
+  resolveNeeds: resolveMcpNeeds,
 };
 
-const KEYWORD_HINTS: Record<string, string[]> = {
-  "hephaestus-network": [
-    "agent",
-    "agents",
-    "agentlas",
-    "hephaestus",
-    "hub",
-    "cloud",
-    "plugin",
-    "plugins",
-    "team",
-    "route",
-    "routing",
-    "subagent",
-    "sub-agent",
-    "에이전트",
-    "허브",
-    "클라우드",
-    "플러그인",
-    "팀",
-    "라우팅",
-    "서브에이전트",
-  ],
-  playwright: [
-    "browser",
-    "chrome",
-    "web",
-    "click",
-    "login",
-    "instagram",
-    "upload",
-    "post",
-    "screenshot",
-    "브라우저",
-    "크롬",
-    "클릭",
-    "로그인",
-    "인스타",
-    "업로드",
-    "게시",
-    "스크린샷",
-  ],
-  "agentlas-browser": [
-    "browser", "chrome", "web", "login", "click", "upload", "post", "comment", "reply",
-    "instagram", "threads", "reddit", "x.com", "linkedin", "youtube",
-    "브라우저", "크롬", "웹", "로그인", "클릭", "업로드", "게시", "댓글", "답글",
-    "인스타", "스레드", "레딧", "링크드인", "유튜브",
-  ],
-  "cua-driver": [
-    "computer use", "desktop", "app", "screen", "ui", "electron", "mac", "blocked", "captcha",
-    "컴퓨터 유즈", "데스크탑", "앱", "화면", "검증", "차단", "캡차",
-  ],
-  "brave-search": ["latest", "recent", "news", "research", "search", "오늘", "최신", "뉴스", "검색", "리서치", "조사"],
-  github: ["github", "repo", "repository", "pull request", "pr", "issue", "commit", "깃허브", "리포", "이슈"],
-  filesystem: ["file", "folder", "repo", "workspace", "write", "edit", "파일", "폴더", "워크스페이스", "수정"],
-  postgres: ["postgres", "postgresql", "database", "sql", "db", "데이터베이스"],
-  notion: ["notion", "docs", "database", "page", "노션"],
-  linear: ["linear", "issue", "project", "sprint", "리니어"],
-  slack: ["slack", "channel", "message", "슬랙"],
-  discord: ["discord", "server", "message", "디스코드"],
-  shadcn: ["shadcn", "ui component", "component library"],
-};
-
+// Tool selection is decided by resolveMcpNeeds() (electron/mcp-tools/need-resolver.ts),
+// which asks the connected model what the task actually needs. The keyword tables that used
+// to live here are GONE on purpose: a word in a prompt must never attach a tool or raise a
+// credential prompt — that is what handed users a Brave Search key request (and a stalled
+// run) for a Reddit posting job whose text merely said "조사".
+//
+// What may still pin a tool without the model: an EXPLICIT user choice (toolMode) and the
+// credential-free Hub routing resolver. Those are settings, not word matches.
 const HUB_PLUGIN_LOOKUP_TIMEOUT_MS = 8_000;
 const HUB_PLUGIN_CANDIDATE_LIMIT = 8;
-
-const HUB_PLUGIN_NEEDS: Array<{
-  need: string;
-  requestHints: string[];
-  pluginHints: string[];
-}> = [
-  {
-    need: "computer-use",
-    requestHints: [
-      "computer use",
-      "cua",
-      "screen",
-      "desktop",
-      "mac",
-      "blocked",
-      "permission",
-      "컴퓨터 유즈",
-      "화면",
-      "데스크탑",
-      "권한",
-    ],
-    pluginHints: ["computer-use", "computer use", "cua"],
-  },
-  {
-    need: "browser automation",
-    requestHints: [
-      "browser",
-      "chrome",
-      "web",
-      "click",
-      "login",
-      "upload",
-      "post",
-      "comment",
-      "브라우저",
-      "크롬",
-      "클릭",
-      "로그인",
-      "업로드",
-      "게시",
-      "댓글",
-    ],
-    pluginHints: ["browser", "chrome", "browserbase", "playwright", "computer-use"],
-  },
-  {
-    need: "reddit",
-    requestHints: ["reddit", "subreddit", "레딧"],
-    pluginHints: ["reddit"],
-  },
-  {
-    need: "social posting",
-    requestHints: [
-      "instagram",
-      "twitter",
-      "x.com",
-      "facebook",
-      "linkedin",
-      "social",
-      "post",
-      "comment",
-      "인스타",
-      "소셜",
-      "게시",
-      "댓글",
-    ],
-    pluginHints: ["instagram", "twitter", "linkedin", "reddit", "social", "canva"],
-  },
-  {
-    need: "github",
-    requestHints: ["github", "pull request", "repo", "repository", "issue", "깃허브", "리포", "이슈"],
-    pluginHints: ["github"],
-  },
-  {
-    need: "notion",
-    requestHints: ["notion", "노션"],
-    pluginHints: ["notion"],
-  },
-  {
-    need: "slack",
-    requestHints: ["slack", "channel", "message", "슬랙"],
-    pluginHints: ["slack"],
-  },
-  {
-    need: "image generation",
-    requestHints: ["image", "generate", "photo", "creative", "이미지", "사진", "생성"],
-    pluginHints: ["image", "fal", "creative", "product-design"],
-  },
-  {
-    need: "analytics",
-    requestHints: ["analytics", "metric", "dashboard", "report", "분석", "지표", "리포트"],
-    pluginHints: ["analytics", "google-analytics", "axiom", "honeycomb", "new-relic"],
-  },
-];
+/** Hub inventory offered to the resident judge in one call. */
+const HUB_PLUGIN_INVENTORY_LIMIT = 60;
 
 const LOCAL_PLUGIN_SCAN_DIRS = [
   path.join(os.homedir(), ".codex", "plugins", "cache"),
@@ -246,17 +108,6 @@ function normalize(text: string): string {
   return text.toLowerCase();
 }
 
-function splitTokens(text: string): string[] {
-  return normalize(text)
-    .split(/[^a-z0-9가-힣_+-]+/i)
-    .map((part) => part.trim())
-    .filter((part) => part.length >= 4);
-}
-
-function includesAny(haystack: string, needles: string[]): boolean {
-  return needles.some((needle) => haystack.includes(normalize(needle)));
-}
-
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   return Promise.race([
@@ -267,42 +118,6 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   ]).finally(() => {
     if (timer) clearTimeout(timer);
   });
-}
-
-function scoreEntry(entry: McpToolCatalogEntry, haystack: string): number {
-  if (entry.id === "lazyweb") return 0;
-  let score = 0;
-  const localHints = KEYWORD_HINTS[entry.id] ?? [];
-  const catalogText = normalize(
-    [entry.id, entry.name, entry.nameEn, entry.category, entry.description, entry.descriptionEn].join(" "),
-  );
-  for (const hint of localHints) {
-    if (haystack.includes(normalize(hint))) score += 3;
-  }
-  for (const token of catalogText.split(/[^a-z0-9가-힣_+-]+/i).filter((part) => part.length >= 4)) {
-    if (haystack.includes(token)) score += 1;
-  }
-  if (entry.id === "hephaestus-network") score += 2;
-  return score;
-}
-
-function scoreWithAutomationPolicy(
-  entry: McpToolCatalogEntry,
-  score: number,
-  toolMode: AutomationToolMode | undefined,
-): number {
-  if (toolMode === "browser") {
-    // 브라우저 조작은 무조건 agentlas-browser(실로그인 CDP)로 — 신선 프로필 playwright는
-    // 봇/네트워크 보안에 차단되므로 최우선은 agentlas-browser, playwright는 폴백으로만.
-    if (entry.id === "agentlas-browser") return Math.max(score, 100);
-    if (entry.id === "playwright") return Math.max(score, 40);
-    if (entry.id === "cua-driver") return 0;
-  }
-  if (toolMode === "computer-use") {
-    if (entry.id === "cua-driver") return Math.max(score, 100);
-    if (entry.id === "playwright") return 0;
-  }
-  return score;
 }
 
 async function missingRequiredEnv(
@@ -344,90 +159,32 @@ function isHubPluginListing(listing: MarketplaceListing): boolean {
   return listing.entityKind === "plugin" || listing.source === "hub-plugin" || listing.kind === "hub-plugin";
 }
 
-function hubListingText(listing: MarketplaceListing): string {
-  return normalize(
-    [
-      listing.slug,
-      listing.name,
-      listing.nameEn,
-      listing.tagline,
-      listing.taglineEn,
-      listing.ownerName,
-      listing.category,
-      listing.developer,
-      listing.installCli,
-    ]
+/** One line of inventory text for the resident judge — what this plugin does, in words. */
+function hubListingDescription(listing: MarketplaceListing): string {
+  return (
+    [listing.taglineEn, listing.tagline, listing.category, listing.developer]
       .filter(Boolean)
-      .join(" "),
+      .join(" · ") || "Agentlas Hub plugin"
   );
 }
 
-function scoreHubPlugin(listing: MarketplaceListing, haystack: string): { score: number; reasons: string[] } {
-  const listingText = hubListingText(listing);
-  const reasons = new Set<string>();
-  let score = 0;
-
-  for (const token of splitTokens(listingText)) {
-    if (haystack.includes(token)) {
-      score += 2;
-      if (reasons.size < 2) reasons.add(`matched "${token}"`);
-    }
-  }
-
-  for (const need of HUB_PLUGIN_NEEDS) {
-    if (includesAny(haystack, need.requestHints) && includesAny(listingText, need.pluginHints)) {
-      score += 12;
-      reasons.add(`matched ${need.need} need`);
-    }
-  }
-
-  if (haystack.includes("plugin") || haystack.includes("플러그인") || haystack.includes("hub") || haystack.includes("허브")) {
-    score += 1;
-  }
-
-  return { score, reasons: Array.from(reasons) };
-}
-
-async function resolveHubPluginCandidates(input: {
-  haystack: string;
-  hubAllowed: boolean;
-}): Promise<Pick<AutoSelectedMcpContext, "hubPluginCount" | "hubPlugins" | "hubPluginError">> {
-  if (!input.hubAllowed) {
-    return { hubPluginCount: 0, hubPlugins: [] };
-  }
-
+/** Fetch the Hub plugin inventory. NOTHING is scored or filtered by words here — the
+ *  listings are handed to the resident judge as candidates and it names the ones the
+ *  task actually needs. */
+async function fetchHubPluginInventory(hubAllowed: boolean): Promise<{
+  listings: MarketplaceListing[];
+  hubPluginCount: number;
+  hubPluginError?: string;
+}> {
+  if (!hubAllowed) return { listings: [], hubPluginCount: 0 };
   try {
     const listings = await withTimeout(getMarketSource().searchAgents(""), HUB_PLUGIN_LOOKUP_TIMEOUT_MS);
     const plugins = listings.filter(isHubPluginListing);
-    const candidates = plugins
-      .map((listing) => {
-        const scored = scoreHubPlugin(listing, input.haystack);
-        return { listing, ...scored };
-      })
-      .filter((item) => item.score > 0)
-      .sort((a, b) => {
-        if (b.score !== a.score) return b.score - a.score;
-        return a.listing.slug.localeCompare(b.listing.slug);
-      })
-      .slice(0, HUB_PLUGIN_CANDIDATE_LIMIT)
-      .map(({ listing, score, reasons }): HubPluginCandidate => ({
-        slug: listing.slug,
-        name: listing.nameEn || listing.name || listing.slug,
-        reason: reasons.length > 0 ? reasons.join("; ") : "matched Hub plugin catalog",
-        installCli: listing.installCli,
-        manifestUrl: listing.manifestUrl || listing.detailUrl,
-        category: listing.category,
-        score,
-      }));
-
-    return {
-      hubPluginCount: plugins.length,
-      hubPlugins: candidates,
-    };
+    return { listings: plugins, hubPluginCount: plugins.length };
   } catch (err) {
     return {
+      listings: [],
       hubPluginCount: 0,
-      hubPlugins: [],
       hubPluginError: err instanceof Error ? err.message : String(err),
     };
   }
@@ -442,15 +199,18 @@ export async function autoSelectMcpTools(input: {
   hubMode?: AutomationHubMode;
 }, injectedDeps: Partial<AutoSelectMcpDependencies> = {}): Promise<AutoSelectedMcpContext> {
   const deps: AutoSelectMcpDependencies = { ...DEFAULT_AUTO_SELECT_DEPS, ...injectedDeps };
-  const haystack = normalize(
-    [input.userPrompt, input.systemPrompt, input.agentName, input.workingFolder ?? ""].join("\n"),
-  );
-  // Keyword lists say this automation *might* need a human-driven browser; ask the resident
-  // judge whether it really does before forcing the slow computer-use path. The verdict is
-  // cached, so the synchronous store writes that resolve the same automation later read the
-  // model's answer instead of the keywords (see peekJudgment / judgedComputerUse).
+  // The task as written, not lowercased and not tokenized — the resident judge reads it.
+  // Agent name and user prompt come first because the resolver truncates the tail.
+  const taskText = [input.agentName, input.userPrompt, input.workingFolder ?? "", input.systemPrompt]
+    .filter(Boolean)
+    .join("\n");
+  // Does this automation actually have to drive a human-facing web UI? The resident judge is
+  // the only answer — there is no keyword pre-filter, so a task written in ANY language gets
+  // judged, not silently skipped. The verdict is cached, so the synchronous store writes that
+  // resolve the same automation later read it too (see peekJudgment / judgedComputerUse).
+  // Skipped only when the user already chose the mode by hand — nothing left to decide.
   const toolModeText = [input.agentName ?? "", input.userPrompt ?? "", input.workingFolder ?? ""].join("\n");
-  if (computerUseKeywordCandidate(toolModeText)) {
+  if (input.toolMode !== "browser" && input.toolMode !== "computer-use" && toolModeText.trim()) {
     try {
       const { prejudge } = await import("../system-agents/judgment");
       await prejudge<"yes" | "no">({
@@ -459,11 +219,12 @@ export async function autoSelectMcpTools(input: {
         labels: ["yes", "no"] as const,
         input: toolModeText,
         guidance: COMPUTER_USE_JUDGMENT_GUIDANCE,
-        hints: "the candidate came from broad keywords (web, search, account, post, a site name)",
-        fallback: "yes",
+        // Conservative default is "no": an unreachable model must not force the brittle
+        // screen-driving path. peekJudgment only reads llm-sourced verdicts anyway.
+        fallback: "no",
       });
     } catch {
-      // Judgment is best-effort; the keyword answer remains the fallback.
+      // Judgment is best-effort; an unjudged run stays on the neutral "auto" path.
     }
   }
   const effectiveToolMode = resolveAutomationToolMode({
@@ -491,39 +252,126 @@ export async function autoSelectMcpTools(input: {
   // Agentlas Browser can safely complete. Explicit Computer Use selections
   // remain strict and never receive this browser fallback.
   const allowAutomaticBrowserFallback = input.toolMode == null && effectiveToolMode === "computer-use";
-  const picked = MCP_TOOL_CATALOG.map((entry) => ({
-    entry,
-    score: allowAutomaticBrowserFallback && entry.id === "agentlas-browser"
-      ? Math.max(90, scoreEntry(entry, haystack))
-      : scoreWithAutomationPolicy(entry, scoreEntry(entry, haystack), effectiveToolMode),
-  }))
-    .filter((item) => {
-      if (item.entry.id === "hephaestus-network") return hubAllowed;
-      // Browser mode is an exact real-login Agentlas Browser binding. Never add a
-      // fresh Playwright profile as a quiet fallback; missing host authority must fail closed.
-      if (effectiveToolMode === "browser" && item.entry.id === "playwright") return false;
-      return item.score >= 3;
-    })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 8);
 
-  const resolved = await Promise.allSettled(picked.map(async ({ entry, score }): Promise<AutoSelectedMcpTool> => {
-    const required = score >= 6 ||
+  const hubInventory = await fetchHubPluginInventory(hubAllowed);
+
+  // ── Pins: settings and explicit user choices. These are the ONLY tools that may be
+  // attached without the resident judge, and none of them can raise a key prompt on its
+  // own (the browser/CUA hosts are local, the Hub resolver has no env requirement).
+  // Browser and Computer Use are EXACT host bindings. The competing host is never added —
+  // not as a pin, not as a candidate, not as a quiet fallback. Missing host authority must
+  // fail closed rather than silently drive a different surface.
+  const blockedByHostBinding = (id: string): boolean => {
+    if (effectiveToolMode === "browser") return id === "playwright" || id === "cua-driver";
+    if (effectiveToolMode === "computer-use") return id === "playwright";
+    return false;
+  };
+
+  const pinnedReasons = new Map<string, string>();
+  if (hubAllowed) {
+    pinnedReasons.set("hephaestus-network", "always available routing/plugin resolver");
+  }
+  if (effectiveToolMode === "browser") {
+    pinnedReasons.set("agentlas-browser", "Browser plugin (real-login CDP) for this automation");
+  }
+  if (effectiveToolMode === "computer-use") {
+    pinnedReasons.set(
+      "cua-driver",
+      input.toolMode === "computer-use"
+        ? "user-selected Computer Use for this automation"
+        : "Agentlas policy selected Computer Use for human web/social automation",
+    );
+  }
+  if (allowAutomaticBrowserFallback) {
+    pinnedReasons.set("agentlas-browser", "authenticated browser fallback for policy-selected Computer Use");
+  }
+  // Everything pinned so far is a host binding or the routing resolver — these outrank both
+  // the judge's picks and the installed-convenience pins added next.
+  const hostBindingPins = new Set(pinnedReasons.keys());
+  // Anything the user already installed and enabled stays available every run. Dropping the
+  // keyword scorer must never REMOVE a capability the user set up — it only stops unconfigured
+  // tools from being force-attached. A pin here can still be dropped below if it turns out to
+  // need a credential, so this can never produce a key prompt on its own.
+  for (const server of initialInstalledServers) {
+    if (!server.catalogId || !server.enabled) continue;
+    if (pinnedReasons.has(server.catalogId) || blockedByHostBinding(server.catalogId)) continue;
+    pinnedReasons.set(server.catalogId, "already installed and enabled by the user");
+  }
+
+  const localCandidates: McpNeedCandidate[] = MCP_TOOL_CATALOG.filter((entry) => {
+    if (pinnedReasons.has(entry.id) || blockedByHostBinding(entry.id)) return false;
+    if (entry.id === "lazyweb") return false;
+    if (entry.id === "hephaestus-network") return hubAllowed;
+    return true;
+  }).map((entry) => ({
+    id: entry.id,
+    name: entry.nameEn || entry.name,
+    description: entry.descriptionEn || entry.description,
+    origin: "local" as const,
+    needsCredential: entry.envRequirements.some((requirement) => requirement.required),
+  }));
+
+  const hubOffered = hubInventory.listings.slice(0, HUB_PLUGIN_INVENTORY_LIMIT);
+  const hubCandidates: McpNeedCandidate[] = hubOffered.map((listing) => ({
+    id: listing.slug,
+    name: listing.nameEn || listing.name || listing.slug,
+    description: hubListingDescription(listing),
+    origin: "hub" as const,
+  }));
+
+  // User-registered custom servers are inventory too, so an unconfigured one can be named by
+  // the judge instead of prompting for its key on every unrelated run.
+  const customCandidates: McpNeedCandidate[] = initialInstalledServers
+    .filter((server) => !server.catalogId)
+    .map((server) => ({
+      id: server.id,
+      name: server.nameEn || server.name,
+      description: "user-registered custom MCP server",
+      origin: "local" as const,
+      needsCredential: server.envKeys.length > 0,
+    }));
+
+  // ONE judgment call decides the whole optional tool set — Hub entries offered first.
+  const needs = await deps.resolveNeeds({
+    task: taskText,
+    candidates: [...hubCandidates, ...localCandidates, ...customCandidates],
+  });
+  const neededIds = new Set(needs.needed);
+  const cappedHub = Math.max(0, hubInventory.listings.length - hubOffered.length);
+  const needsNote = [
+    needs.decided
+      ? ""
+      : "No connected model was available to decide which optional tools this task needs, so only explicitly configured tools were attached.",
+    cappedHub > 0 ? `${cappedHub} further Hub plugins were not offered to the selector this run.` : "",
+    needs.omitted.length > 0 ? `${needs.omitted.length} candidates exceeded the selector inventory cap.` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  // Rank before the probe cap so a convenience pin can never crowd out a host binding or a
+  // capability the judge said the task actually needs.
+  const pickRank = (id: string): number => {
+    if (hostBindingPins.has(id)) return 0;
+    if (neededIds.has(id)) return 1;
+    return 2;
+  };
+  const picked = MCP_TOOL_CATALOG.filter(
+    (entry) => (pinnedReasons.has(entry.id) || neededIds.has(entry.id)) && !blockedByHostBinding(entry.id),
+  )
+    .sort((a, b) => pickRank(a.id) - pickRank(b.id))
+    .slice(0, 10);
+
+  const resolved = await Promise.allSettled(picked.map(async (entry): Promise<AutoSelectedMcpTool> => {
+    // `required` is a host binding, never a selection outcome.
+    const required =
       effectiveToolMode === "browser" && entry.id === "agentlas-browser" ||
       effectiveToolMode === "computer-use" && entry.id === "cua-driver";
     const base = {
       id: entry.id,
       name: entry.nameEn || entry.name,
       reason:
-        effectiveToolMode === "browser" && entry.id === "agentlas-browser"
-          ? "Browser plugin (real-login CDP) for this automation"
-          : effectiveToolMode === "computer-use" && entry.id === "cua-driver"
-            ? input.toolMode === "computer-use"
-              ? "user-selected Computer Use for this automation"
-              : "Agentlas policy selected Computer Use for human web/social automation"
-            : score > 0
-              ? `matched request/tool need score ${score}`
-              : "always available routing/plugin resolver",
+        pinnedReasons.get(entry.id) ??
+        `resident judgment: ${needs.reason || "the task needs this capability"}`,
       required,
     };
     const missingEnv = await missingRequiredEnv(entry, deps.readEnvVar);
@@ -554,17 +402,31 @@ export async function autoSelectMcpTools(input: {
   }));
   const result: AutoSelectedMcpTool[] = resolved.map((item, index) => {
     if (item.status === "fulfilled") return item.value;
-    const { entry, score } = picked[index];
+    const entry = picked[index];
     return {
       id: entry.id,
       name: entry.nameEn || entry.name,
-      reason: `matched request/tool need score ${score}`,
+      reason: pinnedReasons.get(entry.id) ?? "resident judgment: the task needs this capability",
       installed: false,
       missingEnv: [],
-      required: score >= 6,
+      required: false,
       state: "host-failure",
     };
   });
+
+  // ── THE INVARIANT ────────────────────────────────────────────────────────────
+  // A credential prompt may exist ONLY for a tool the resident judge named, or one the user
+  // bound to this automation by hand. Nothing else may ever reach "missing-key": that state
+  // is what opens the pre-launch key sheet and stalls the run. A convenience pin that turns
+  // out to need a key is dropped silently — the run continues without it.
+  const mayRequestCredentials = (toolId: string): boolean =>
+    neededIds.has(toolId) ||
+    (input.toolMode === "browser" && toolId === "agentlas-browser") ||
+    (input.toolMode === "computer-use" && toolId === "cua-driver");
+  for (let index = result.length - 1; index >= 0; index -= 1) {
+    const tool = result[index];
+    if (tool.state === "missing-key" && !mayRequestCredentials(tool.id)) result.splice(index, 1);
+  }
 
   // 사용자가 손수 등록한 커스텀 MCP(카탈로그에 없는 catalogId=null)는 위 MCP_TOOL_CATALOG
   // 스캔에 잡히지 않아 채팅 런타임(.mcp.json)에서 늘 누락됐다 — 명시적으로 추가한 서버이므로
@@ -599,6 +461,9 @@ export async function autoSelectMcpTools(input: {
         state = "probe-failed";
       }
     }
+    // Same invariant as the catalog pins: a custom server that is ready stays available, but
+    // an unconfigured one only surfaces (and only asks for its key) when the task needs it.
+    if (state === "missing-key" && !neededIds.has(server.id)) continue;
     result.push({
       id: server.id,
       name: server.nameEn || server.name,
@@ -610,12 +475,31 @@ export async function autoSelectMcpTools(input: {
     });
   }
 
-  const hub = await resolveHubPluginCandidates({ haystack, hubAllowed });
+  // Hub candidates are the plugins the resident judge named — never a word-scored guess.
+  // Undecided runs surface none and let the model resolve plugins live through
+  // agentlas_resolve_plugins / hephaestus-network instead.
+  const hubPlugins: HubPluginCandidate[] = hubOffered
+    .filter((listing) => neededIds.has(listing.slug))
+    .slice(0, HUB_PLUGIN_CANDIDATE_LIMIT)
+    .map((listing) => ({
+      slug: listing.slug,
+      name: listing.nameEn || listing.name || listing.slug,
+      reason: `resident judgment: ${needs.reason || "the task needs this plugin"}`,
+      installCli: listing.installCli,
+      manifestUrl: listing.manifestUrl || listing.detailUrl,
+      category: listing.category,
+      score: 100,
+    }));
+
   return {
     tools: result,
     localInventory,
     localPluginCount: localInventory.length,
-    ...hub,
+    hubPluginCount: hubInventory.hubPluginCount,
+    hubPlugins,
+    needsDecided: needs.decided,
+    ...(needsNote ? { needsNote } : {}),
+    ...(hubInventory.hubPluginError ? { hubPluginError: hubInventory.hubPluginError } : {}),
   };
 }
 
@@ -673,6 +557,7 @@ export function buildMcpAutoSelectionPrompt(
     selected.localInventory.length > 0
       ? `Local inventory for Hub plugin resolution: ${inventoryPreview}${inventoryMore}.`
       : "",
+    selected.needsNote ? `Tool selection note: ${selected.needsNote}` : "",
     installed.length > 0
       ? `Installed/enabled tools available this run: ${installed.map((tool) => `${tool.id} (${tool.name})`).join(", ")}.`
       : "No additional installable local tools were available for this run.",

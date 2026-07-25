@@ -25,7 +25,6 @@ import type {
 import { ScheduleBuilder, type ScheduleBuilderValue } from "@/components/automation/ScheduleBuilder";
 import { IconBuilding, IconSparkles } from "@/components/Icon";
 import { OneSuggestionReviewHandoffBanner, type OneReviewSeedApplyResult } from "@/components/one/OneSuggestionReviewHandoff";
-import { shouldPreferComputerUseForAutomation } from "@shared/automation-tool-policy";
 
 type TargetType = "agent" | "firm" | "hub";
 
@@ -137,12 +136,10 @@ function NewAutomationPage() {
     })();
   }, [editId]);
 
-  useEffect(() => {
-    if (editId || toolModeTouched || toolMode !== "auto") return;
-    if (shouldPreferComputerUseForAutomation(`${name}\n${prompt}`)) {
-      setToolMode("computer-use");
-    }
-  }, [editId, name, prompt, toolMode, toolModeTouched]);
+  // NOTE: this form no longer flips the tool mode while the user types. It used to run a
+  // keyword test over the name/prompt and silently switch to Computer Use — which fired on
+  // unrelated jobs in English/Korean and never fired at all in any other language. The mode
+  // the user picks stays put; "auto" is resolved at run time by the resident judge.
 
   // targetType 바뀌면 그 타입의 첫 항목 자동 선택(편집 로드 이후엔 사용자 선택 우선).
   useEffect(() => {

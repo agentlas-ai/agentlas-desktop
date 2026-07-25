@@ -1,56 +1,17 @@
 import type { AutomationToolMode } from "./types";
 
-const HUMAN_WEB_SURFACE_PATTERNS = [
-  /\breddit\b/i,
-  /\binstagram\b/i,
-  /\bthreads\b/i,
-  /\bx\.com\b/i,
-  /\btwitter\b/i,
-  /\blinkedin\b/i,
-  /\bfacebook\b/i,
-  /\btiktok\b/i,
-  /\byoutube\b/i,
-  /\bgmail\b/i,
-  /\bchrome\b/i,
-  /\bbrowser\b/i,
-  /\bwebsite?\b/i,
-  /\bweb\s*(page|site|app)?\b/i,
-  /레딧|인스타|스레드|트위터|링크드인|페이스북|틱톡|유튜브|지메일|크롬|브라우저|웹|사이트/i,
-];
-
-const HUMAN_WEB_ACTION_PATTERNS = [
-  /\blog\s*in\b/i,
-  /\bsign\s*in\b/i,
-  /\bpost\b/i,
-  /\bcomment\b/i,
-  /\breply\b/i,
-  /\bupload\b/i,
-  /\bclick\b/i,
-  /\btype\b/i,
-  /\bsubmit\b/i,
-  /\bform\b/i,
-  /\bsearch\b/i,
-  /\bscroll\b/i,
-  /\bcheckout\b/i,
-  /\baccount\b/i,
-  /\bcaptcha\b/i,
-  /\bblocked?\b/i,
-  /\bnetwork[- ]security\b/i,
-  /로그인|게시|댓글|답글|업로드|클릭|입력|제출|폼|검색|스크롤|결제|계정|캡차|차단|보안/i,
-];
-
-const SOCIAL_SURFACE_PATTERNS = [
-  /\breddit\b/i,
-  /\binstagram\b/i,
-  /\bthreads\b/i,
-  /\bx\.com\b/i,
-  /\btwitter\b/i,
-  /\blinkedin\b/i,
-  /\bfacebook\b/i,
-  /\btiktok\b/i,
-  /레딧|인스타|스레드|트위터|링크드인|페이스북|틱톡/i,
-];
-
+// The English+Korean wordlists that used to live here are GONE.
+//
+// They decided whether an automation was forced onto the slow screen-driving path, so the
+// same job written in Arabic, Tagalog, or any other language simply fell through — and the
+// broad words it did know ("web", "search", "account", "post") pushed unrelated jobs onto
+// the brittle path. No hand-maintained list can enumerate every language, so no list decides
+// here anymore: the resident judge rules by meaning, and an unjudged run keeps the neutral
+// "auto" mode instead of guessing from words.
+//
+// What survives is FORMAT detection, not meaning: a literal product name, the CDP port, the
+// remote-debugging flag. Those are identifiers — finite, language-independent, and correct
+// to match exactly.
 const EXACT_AGENTLAS_BROWSER_PATTERNS = [
   /\bAgentlas\s+Browser\b/i,
   /\b(?:CDP|remote[- ]debugging)\b/i,
@@ -64,32 +25,21 @@ function hasAny(text: string, patterns: RegExp[]): boolean {
 
 export const COMPUTER_USE_JUDGMENT_KIND = "automation-needs-human-web";
 
-/** Keyword evidence that this automation *might* need a human-driven browser. */
-export function computerUseKeywordCandidate(text: string): boolean {
-  const haystack = text.trim();
-  if (!haystack) return false;
-  if (hasAny(haystack, SOCIAL_SURFACE_PATTERNS)) return true;
-  return hasAny(haystack, HUMAN_WEB_SURFACE_PATTERNS) && hasAny(haystack, HUMAN_WEB_ACTION_PATTERNS);
-}
-
 /**
  * Whether this automation should be forced onto the slow computer-use path.
  *
- * The word lists above are broad on purpose (`web`, `search`, `account`, `post`), so an
- * automation that merely MENTIONS YouTube while posting a summary to a file was pushed onto
- * the brittle screen-driving path. The keywords are now only a candidate signal: when the
- * resident judge has already ruled on this text (warmed from the async path that precedes
- * every automation run), its verdict decides. A judgment miss keeps the keyword answer, so
- * this stays synchronous and never regresses when no model is reachable.
+ * ONLY the resident judge decides. No verdict (no model reachable, or nothing warmed the
+ * cache yet) means NO forcing: the run stays on the neutral "auto" path, where the browser
+ * and Computer Use hosts are still reachable if the task or the user asks for them. Guessing
+ * "yes" from words was what diverted file/API jobs into brittle screen driving, and guessing
+ * from an English/Korean list silently skipped every other language.
  */
 export function shouldPreferComputerUseForAutomation(
   text: string,
   judged?: (text: string) => boolean | null,
 ): boolean {
-  const candidate = computerUseKeywordCandidate(text);
-  if (!candidate) return false;
-  const verdict = judged?.(text);
-  return verdict === null || verdict === undefined ? candidate : verdict;
+  if (!text.trim()) return false;
+  return judged?.(text) === true;
 }
 
 export function resolveAutomationToolMode(input: {

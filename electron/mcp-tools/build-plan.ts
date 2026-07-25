@@ -22,11 +22,20 @@ import {
   type McpAttachmentResolverDependencies,
   type ResolvedMcpBuildAttachment,
 } from "./attachment-resolver";
+import {
+  resolveMcpBuildRecommendations,
+  type McpBuildRecommendCandidate,
+  type ResolvedMcpBuildRecommendations,
+} from "./need-resolver";
 
 const PLAN_TTL_MS = 20 * 60 * 1_000;
 const APPLIED_PLAN_TTL_MS = 6 * 60 * 60 * 1_000;
 const MAX_CANDIDATES = 10;
 
+// Which tools get OFFERED is decided by the connected model (resolveMcpBuildRecommendations).
+// The `hints` wordlists below no longer score anything: they ride along as reference material
+// in the judgment prompt ("these words *may* suggest this tool"), because a hand-maintained
+// list can never enumerate every language a build request arrives in.
 interface CatalogRule {
   capability: string;
   fallbackGroup: string;
@@ -141,6 +150,12 @@ export interface McpBuildPlanDependencies {
   hasEnv: (key: string) => Promise<boolean>;
   now: () => Date;
   resolveRuntime: () => Promise<RuntimeSelection | null>;
+  /** The connected model decides which tools to offer. Tests inject a deterministic double. */
+  resolveRecommendations: (input: {
+    request: string;
+    candidates: McpBuildRecommendCandidate[];
+    hints?: Array<{ label: string; words: string[] }>;
+  }) => Promise<ResolvedMcpBuildRecommendations>;
 }
 
 const DEFAULT_DEPS: McpBuildPlanDependencies = {
@@ -160,7 +175,11 @@ const DEFAULT_DEPS: McpBuildPlanDependencies = {
         }
       : null;
   },
+  resolveRecommendations: resolveMcpBuildRecommendations,
 };
+
+/** Exposed so tests can spread the real defaults and replace only the judge. */
+export const defaultMcpBuildPlanDeps: McpBuildPlanDependencies = DEFAULT_DEPS;
 
 interface StoredBuildPlan {
   publicPlan: McpBuildPlan;
@@ -255,36 +274,11 @@ function recommendationReasonCode(capability: string): McpBuildRecommendationRea
   return code[capability] ?? "task-match";
 }
 
-function normalized(text: string): string {
-  return text.toLowerCase();
-}
+// Lazyweb/opencrab are never silently recommended in Agentlas product flows. They remain
+// available in the global MCP manager for explicit user choice.
+const NEVER_AUTO_RECOMMENDED = new Set(["lazyweb", "opencrab"]);
 
-function scoreCatalog(entry: McpToolCatalogEntry, request: string): number {
-  // Lazyweb is never silently recommended in Agentlas product flows. It remains
-  // available in the global MCP manager for explicit user choice.
-  if (entry.id === "lazyweb" || entry.id === "opencrab") return 0;
-  const rule = CATALOG_RULES[entry.id];
-  if (!rule) return 0;
-  const haystack = normalized(request);
-  let score = 0;
-  for (const hint of rule.hints) {
-    if (haystack.includes(normalized(hint))) score += hint.length >= 6 ? 4 : 3;
-  }
-  if (score === 0) return 0;
-  const catalogText = normalized([entry.id, entry.name, entry.nameEn, entry.description, entry.descriptionEn].join(" "));
-  for (const token of haystack.split(/[^a-z0-9가-힣_-]+/i).filter((part) => part.length >= 4)) {
-    if (catalogText.includes(token)) score += 1;
-  }
-  return score;
-}
-
-function scoreCustom(server: InstalledMcpServer, request: string): number {
-  const haystack = normalized(request);
-  const tokens = normalized(`${server.name} ${server.nameEn}`)
-    .split(/[^a-z0-9가-힣_-]+/i)
-    .filter((part) => part.length >= 3);
-  return tokens.reduce((score, token) => score + (haystack.includes(token) ? 4 : 0), 0);
-}
+const CUSTOM_ID_PREFIX = "custom:";
 
 async function keyState(
   keys: string[],
@@ -342,19 +336,69 @@ export async function recommendMcpBuildPlan(
       .map((server) => [server.catalogId, server]),
   );
 
-  const directScores = new Map(MCP_TOOL_CATALOG.map((entry) => [entry.id, scoreCatalog(entry, request)]));
-  const matchedFallbackGroups = new Set(
-    MCP_TOOL_CATALOG
-      .filter((entry) => (directScores.get(entry.id) ?? 0) > 0)
-      .map((entry) => ruleFor(entry).fallbackGroup),
+  const offerableCatalog = MCP_TOOL_CATALOG.filter((entry) => !NEVER_AUTO_RECOMMENDED.has(entry.id));
+  const customServers = installed.filter((item) => !item.catalogId);
+  const judgeInventory: McpBuildRecommendCandidate[] = [
+    ...offerableCatalog.map((entry) => ({
+      id: entry.id,
+      name: entry.nameEn || entry.name,
+      description: entry.descriptionEn || entry.description,
+      origin: "catalog" as const,
+      needsCredential: entry.envRequirements.some((requirement) => requirement.required),
+    })),
+    ...customServers.map((server) => ({
+      id: `${CUSTOM_ID_PREFIX}${server.id}`,
+      name: server.nameEn || server.name,
+      description: "User-installed custom MCP server.",
+      origin: "custom" as const,
+      needsCredential: server.envKeys.length > 0,
+    })),
+  ];
+  const referenceHints = offerableCatalog
+    .map((entry) => ({ label: entry.id, words: CATALOG_RULES[entry.id]?.hints ?? [] }))
+    .filter((hint) => hint.words.length > 0);
+
+  let recommendation: ResolvedMcpBuildRecommendations;
+  try {
+    recommendation = await deps.resolveRecommendations({
+      request,
+      candidates: judgeInventory,
+      hints: referenceHints,
+    });
+  } catch {
+    recommendation = { recommended: [], decided: false, reason: "recommendation judge failed", omitted: [] };
+  }
+  if (!recommendation.decided) {
+    // No connected model reached a verdict. An undecided plan offers nothing —
+    // it never falls back to keyword scores — and the renderer's existing
+    // recommendation_unavailable path lets the build proceed without MCP.
+    const planId = randomUUID();
+    const publicPlan: McpBuildPlan = {
+      id: planId,
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + PLAN_TTL_MS).toISOString(),
+      runtimeKind: runtime?.kind ?? null,
+      status: "degraded",
+      warningCode: "recommendation_unavailable",
+      candidates: [],
+    };
+    plans.set(planId, { publicPlan, requestHash: requestHash(input), runtime, candidates: [] });
+    return publicPlan;
+  }
+
+  const directRank = new Map(recommendation.recommended.map((id, index) => [id, index]));
+  const pickedGroups = new Set(
+    offerableCatalog.filter((entry) => directRank.has(entry.id)).map((entry) => ruleFor(entry).fallbackGroup),
   );
 
   const scored: Array<{ score: number; installedRank: number; candidate: InternalMcpBuildCandidate }> = [];
-  for (const entry of MCP_TOOL_CATALOG) {
-    const directScore = directScores.get(entry.id) ?? 0;
-    const score = directScore > 0
-      ? directScore
-      : matchedFallbackGroups.has(ruleFor(entry).fallbackGroup)
+  for (const entry of offerableCatalog) {
+    // Direct model picks rank first; the rest of a picked capability group rides
+    // along as failover alternates (the attachment resolver attaches one per group).
+    const rank = directRank.get(entry.id);
+    const score = rank !== undefined
+      ? 1_000 - rank
+      : pickedGroups.has(ruleFor(entry).fallbackGroup)
         ? 1
         : 0;
     const server = installedByCatalog.get(entry.id) ?? null;
@@ -406,9 +450,10 @@ export async function recommendMcpBuildPlan(
     });
   }
 
-  for (const server of installed.filter((item) => !item.catalogId)) {
-    const score = scoreCustom(server, request);
-    if (score <= 0) continue;
+  for (const server of customServers) {
+    const rank = directRank.get(`${CUSTOM_ID_PREFIX}${server.id}`);
+    if (rank === undefined) continue;
+    const score = 1_000 - rank;
     const keys = await keyState(server.envKeys, deps);
     const compatible = isRuntimeMcpCompatible(runtime, server.transport);
     const readiness = !compatible
