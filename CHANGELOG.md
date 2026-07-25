@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.9.16 — 2026-07-25
+
+### Fixed
+
+- The AI sitemap is refreshed on the run path again. The generator worked all
+  along, but nothing outside ontology provisioning ever called it, so a project
+  could sit on an empty skeleton — or a months-stale map — indefinitely while
+  every turn quietly logged that the sitemap was missing or unreadable. The code
+  map already repaired itself this way; the sitemap now does too, once per
+  project per session and off the turn's critical path.
+- A sitemap refresh no longer discards operator-maintained nodes. One map holds
+  two kinds of node by design: the walker owns the file tree, while ui-route,
+  interaction-surface, runtime-flow and release-gate nodes are maintained by
+  hand under the same schema. Those carry no relative_path, so the annotation
+  merge could not match them and a refresh replaced them with a directory
+  listing. They are now carried through untouched and lead the map.
+
+### Removed
+
+- The Dashboard "project memory status" panel, along with its IPC surface. Its
+  sitemap "Generate" button could never do anything — the handler returned a
+  constant failure — and an auto-maintained sitemap should not need a button.
+
+This changelog entry describes source readiness and does not prove a published
+Desktop release, installer, or update feed.
+
 ## 0.9.15 — 2026-07-25
 
 ### Changed

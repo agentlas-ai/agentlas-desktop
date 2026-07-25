@@ -576,6 +576,10 @@ function ensureSoulCredentialIndex(identity: ProjectFsIdentity, soulPath: string
   );
 }
 
+// The sitemap walker owns exactly these node kinds. Every other kind belongs to
+// whoever maintains the map by hand and survives a refresh untouched.
+const GENERATOR_OWNED_SITEMAP_KINDS: ReadonlySet<string> = new Set(["directory", "file"]);
+
 function sitemapSkeleton(projectName: string, now: string): string {
   return JSON.stringify(
     {
@@ -617,21 +621,18 @@ export function refreshProjectSitemap(projectPath: string): ProjectSitemap | nul
       previous = null;
     }
 
-    // A sitemap this generator did not write is NOT a stale copy of the file
-    // tree — it is a different artifact that happens to share the filename.
-    // The maps operators keep here list ui-route / interaction-surface /
-    // release-gate nodes: hand-maintained governance, not a directory listing.
-    // Regenerating over one destroys work no walker can reconstruct, so leave
-    // it strictly alone. Only a map we produced (state "generated"), an empty
-    // skeleton, or a missing file is ours to refresh.
-    if (
-      previous &&
-      previous.state !== "generated" &&
-      Array.isArray(previous.nodes) &&
-      previous.nodes.length > 0
-    ) {
-      return null;
-    }
+    // One sitemap holds two kinds of node by design. The walker owns the file
+    // tree (kind "directory"/"file"); an operator owns surface nodes — ui-route,
+    // interaction-surface, runtime-flow, release-gate — under the same schema
+    // the Task Bias role definition in ../architecture/manifest.ts describes.
+    // No directory walk can reconstruct those, and the kind+relative_path merge
+    // below cannot match them (they have no relative_path), so carry them
+    // through untouched instead of regenerating over them.
+    const curatedNodes = (Array.isArray(previous?.nodes) ? previous.nodes : [])
+      .map((candidate) => sitemapRecord(candidate))
+      .filter((node): node is Record<string, unknown> =>
+        Boolean(node) && typeof node!.kind === "string" &&
+        !GENERATOR_OWNED_SITEMAP_KINDS.has(node!.kind as string));
 
     let generated: ProjectSitemap;
     try {
@@ -675,6 +676,12 @@ export function refreshProjectSitemap(projectPath: string): ProjectSitemap | nul
         provisional: typeof old.provisional === "boolean" ? old.provisional : node.provisional,
       } as typeof node;
     });
+    // Operator-owned nodes lead: they carry the real priority signal, and they
+    // cannot join the walker's relative_path ordering anyway.
+    generated.nodes = [
+      ...(curatedNodes as unknown as typeof generated.nodes),
+      ...generated.nodes,
+    ];
     writePrivateProjectTextIfChanged(
       identity,
       outputPath,

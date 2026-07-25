@@ -69,6 +69,19 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-25 · v0.9.16 — the AI sitemap refreshes itself and keeps operator nodes** —
+  the sitemap generator worked all along, but nothing outside ontology provisioning ever
+  called it, so a project could sit on an empty skeleton or a months-stale map indefinitely
+  while every turn quietly logged it as missing. It now refreshes once per project per
+  session, off the turn's critical path, the same way the code map already repaired itself.
+  One map holds two kinds of node by design — the walker owns the file tree, while ui-route,
+  interaction-surface, runtime-flow and release-gate nodes are maintained by hand — and those
+  hand-maintained nodes are now carried through a refresh untouched instead of being replaced
+  by a directory listing. The Dashboard "project memory status" panel is removed with its IPC
+  surface: its sitemap "Generate" button could never do anything, and an auto-maintained
+  sitemap needs no button.
+  This source note does not prove a Desktop Git tag, public installer, GitHub release, or
+  update feed.
 - **2026-07-25 · v0.9.15 — the connected model decides; no silent keyword fallback** —
   every judged decision (approval/risk, chat-vs-task, which agent to route to, which tools a
   task needs, task class, surface and design-style inference, completion-claim gating) is made
