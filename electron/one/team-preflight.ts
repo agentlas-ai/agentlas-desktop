@@ -2,7 +2,7 @@ import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-
 import { createHash, randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
 import { pickActive } from "../runtime/selection";
-import { isPlainConversationalPrompt, selectAutoRoutedAgent } from "../agents/auto-router";
+import { isPlainConversationalPrompt, selectAutoRoutedAgent, selectAutoRoutedAgentJudged } from "../agents/auto-router";
 import { getAgentById, listInstalledAgents } from "../mcp/registry";
 import { getDb } from "../store/db";
 import { getChat, retitleAutoTitledChatForTask } from "../store/chats";
@@ -381,6 +381,42 @@ function roleFromCandidate(
   };
 }
 
+function eligibleRosterSpecialists(all: InstalledAgent[], coordinatorId: string): InstalledAgent[] {
+  return all.filter((installed) =>
+    installed.id !== coordinatorId
+    && installed.kind !== "team"
+    && !installed.sourceMissingSince
+    && installed.visibility !== "background"
+    && installed.visibility !== "private");
+}
+
+/**
+ * Async warm pass for the roster auto-route judgment. The roster itself is
+ * assembled synchronously (and re-assembled at claim time for the digest check),
+ * so the async prepare path warms the judged verdict here and both sync passes
+ * peek the same cached decision.
+ */
+async function prejudgeRosterAutoRoute(
+  chat: Chat,
+  prompt: string,
+  deps: OneTeamPreflightDependencies,
+): Promise<void> {
+  try {
+    const byId = deps.getAgentById ?? getAgentById;
+    const all = deps.listInstalledAgents ?? listInstalledAgents;
+    const coordinator = byId(chat.agentId);
+    if (!coordinator) return;
+    const eligible = eligibleRosterSpecialists(all(), coordinator.id);
+    if (eligible.length === 0) return;
+    await selectAutoRoutedAgentJudged(prompt, eligible, preferredLocaleFromText(prompt), {
+      allowFallback: false,
+      timeoutMs: 8_000,
+    });
+  } catch {
+    // Best-effort warm; the sync roster path keeps the labeled lexical fallback.
+  }
+}
+
 function exactInstalledRoster(
   chat: Chat,
   deps: OneTeamPreflightDependencies,
@@ -424,13 +460,12 @@ function exactInstalledRoster(
     && roles.length === 1
     && !unresolvedExternal
   ) {
-    const eligible = all().filter((installed) =>
-      installed.id !== coordinator.id
-      && installed.kind !== "team"
-      && !installed.sourceMissingSince
-      && installed.visibility !== "background"
-      && installed.visibility !== "private");
+    const eligible = eligibleRosterSpecialists(all(), coordinator.id);
     const locale = preferredLocaleFromText(prompt);
+    // Synchronous site: reads the judged routing verdict warmed by the async
+    // prepare path (prejudgeRosterAutoRoute); a cache miss keeps the labeled
+    // lexical fallback, and propose/revalidate stay digest-consistent because
+    // both read the same session cache.
     const selected = selectAutoRoutedAgent(prompt, eligible, locale, { allowFallback: false });
     if (selected) {
       const snapshot = candidateSnapshot(selected.agent, "installed");
@@ -695,6 +730,7 @@ export async function prepareOneTeamPreflight(
 
   const explicitExternalSelection = /^\s*(?:\/?workforce\b|\/?hep-network\b)/i.test(input.userPrompt);
   const runtime = await liveRuntime(deps);
+  if (!explicitExternalSelection) await prejudgeRosterAutoRoute(chat, input.userPrompt, deps);
   const roster = exactInstalledRoster(chat, deps, input.userPrompt, !explicitExternalSelection);
   const canConfirmTeam = roster.roles.length >= 2 && !roster.unresolvedExternal && !explicitExternalSelection;
   const ensureTask = deps.ensureTaskForChat ?? ensureCanonicalTaskForChat;

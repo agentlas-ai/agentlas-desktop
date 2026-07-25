@@ -26,7 +26,7 @@ import {
   autoRouteSystemPreamble,
   isGlobalOrchestrator,
   isPlainConversationalPrompt,
-  selectAutoRoutedAgent,
+  selectAutoRoutedAgentJudged,
   shouldAutoEngageNetworkWorkforce,
   shouldForceHubFirstWorkforce,
   type AutoRouteChoice,
@@ -1664,12 +1664,14 @@ export async function runMcpInvocation(
     : hasPriorContext
       ? null
     : !plainConversation && isGlobalOrchestrator(agent)
-      ? // 앱 생성 모드만 무매치 폴백 허용 — 일반 챗은 확신(이름/힌트급 매치) 없으면 위임하지 않고
+      ? // 앱 생성 모드만 무매치 폴백 허용 — 일반 챗은 확신 없으면 위임하지 않고
         // 오케스트레이터가 그냥 답한다("사용 에이전트: PM Soul" 소음/오배정 반복 제거).
-        selectAutoRoutedAgent(effectiveUserPrompt, installedAgents, locale, {
+        // 최종 배정은 상주 판정 모델이 내린다(어휘 점수 0인 전문가도 뽑을 수 있다);
+        // 모델이 없으면 기존 어휘+임베딩 동작이 라벨된 폴백으로 그대로 남는다.
+        (await selectAutoRoutedAgentJudged(effectiveUserPrompt, installedAgents, locale, {
           allowFallback: false,
           experiencePriors,
-        })
+        })).choice
       : null;
   if (autoRoute) {
     agent = autoRoute.agent;

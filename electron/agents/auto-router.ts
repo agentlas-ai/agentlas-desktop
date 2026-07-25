@@ -5,6 +5,7 @@ import { cardScoreAdjustment, findCardForAgent } from "./routing-cards";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import { buildEffectiveAgentSystemPrompt } from "./files";
 import { autoLocalEmbedding, rankHybridLocal, MODEL2VEC_HYBRID_NAME } from "../memory/local-embedding";
+import { judge, peekJudgment, type JudgeSpec, type Verdict } from "../system-agents/judgment";
 
 /**
  * On-device semantic verdict for a set of candidate agents. `activeModel` is
@@ -545,25 +546,51 @@ function scoreAgent(
 // 큐레이션된 ROUTE_HINT 매치 +12부터 — 즉 이름/힌트급 증거가 있어야 위임한다.
 // 설명문 단어 몇 개가 스치는 정도(+2~3/개)로는 위임하지 않는다 — "사진 프롬프트가
 // 댓글 시더로 라우팅"되던 저신뢰 오배정과, 일상 대화가 매번 에이전트를 부르던 소음의 근원.
+// 이 문턱은 이제 "채용(recruitment)" 기준일 뿐 최종 결정이 아니다 — 최종 배정은
+// 상주 판정 모델이 내리고(selectAutoRoutedAgentJudged), 여기 어휘 파이프라인은
+// 후보 모집과 모델 부재 시의 라벨된 폴백으로 강등됐다.
 const MIN_SPECIALIST_SCORE = 10;
 
-export function selectAutoRoutedAgent(
+export const AUTO_ROUTE_JUDGMENT_KIND = "agent-auto-route";
+
+/** Candidate ceiling for one routing judgment call. */
+const MAX_JUDGED_ROUTE_CANDIDATES = 30;
+
+export interface AutoRouteOptions {
+  /** true면(앱 생성 모드 등) 무매치여도 기본 조율 에이전트로 폴백한다. 기본 false —
+   *  확신 없는 라우팅 대신 null을 돌려주고, 호출부가 현재(오케스트레이터) 경로로 즉답한다. */
+  allowFallback?: boolean;
+  /** Reviewed exact-base Experience evidence, keyed by installed agent id. */
+  experiencePriors?: ReadonlyMap<string, AutoRouteExperiencePrior>;
+  /** Injectable on-device semantic judgment (default uses the local model). */
+  semanticRoute?: (prompt: string, candidates: readonly InstalledAgent[]) => SemanticRouteSignal;
+  /** When false, the sync path skips the judged-verdict peek (digest-stable callers). */
+  judgedPeek?: boolean;
+}
+
+interface RankedRouteEntry {
+  agent: InstalledAgent;
+  score: number;
+  reason: string;
+  terms: string[];
+  highPrecision: boolean;
+}
+
+interface RoutePipeline {
+  candidates: InstalledAgent[];
+  ranked: RankedRouteEntry[];
+  semantic: SemanticRouteSignal;
+  pool: InstalledAgent[];
+}
+
+function buildRoutePipeline(
   userPrompt: string,
   agents: InstalledAgent[],
   locale: RuntimeLocale,
-  opts?: {
-    /** true면(앱 생성 모드 등) 무매치여도 기본 조율 에이전트로 폴백한다. 기본 false —
-     *  확신 없는 라우팅 대신 null을 돌려주고, 호출부가 현재(오케스트레이터) 경로로 즉답한다. */
-    allowFallback?: boolean;
-    /** Reviewed exact-base Experience evidence, keyed by installed agent id. */
-    experiencePriors?: ReadonlyMap<string, AutoRouteExperiencePrior>;
-    /** Injectable on-device semantic judgment (default uses the local model). */
-    semanticRoute?: (prompt: string, candidates: readonly InstalledAgent[]) => SemanticRouteSignal;
-  },
-): AutoRouteChoice | null {
+  opts?: AutoRouteOptions,
+): RoutePipeline | null {
   const candidates = agents.filter((agent) => !isGlobalOrchestrator(agent));
   if (!candidates.length) return null;
-
   const promptTerms = tokenize(userPrompt);
   const ranked = candidates
     .map((agent) => ({
@@ -574,8 +601,163 @@ export function selectAutoRoutedAgent(
       b.score - a.score ||
       a.agent.slug.localeCompare(b.agent.slug) ||
       a.agent.id.localeCompare(b.agent.id));
+  const semantic = (opts?.semanticRoute ?? defaultSemanticRoute)(userPrompt, candidates);
+  return { candidates, ranked, semantic, pool: judgedRoutePool(ranked, semantic) };
+}
 
-  const toChoice = (entry: (typeof ranked)[number], reason = entry.reason): AutoRouteChoice => ({
+/**
+ * The candidate pool the resident judge selects from: union of lexical hits,
+ * embedding hits, and — when the install base is small enough — every installed
+ * agent, capped. Lexical/embedding are RECRUITMENT here, never the final word:
+ * the judge can pick an agent with lexical score 0 as long as it fits the pool.
+ */
+function judgedRoutePool(ranked: RankedRouteEntry[], semantic: SemanticRouteSignal): InstalledAgent[] {
+  if (ranked.length <= MAX_JUDGED_ROUTE_CANDIDATES) return ranked.map((entry) => entry.agent);
+  const pool: InstalledAgent[] = [];
+  const seen = new Set<string>();
+  const push = (agent: InstalledAgent) => {
+    if (pool.length >= MAX_JUDGED_ROUTE_CANDIDATES || seen.has(agent.id)) return;
+    seen.add(agent.id);
+    pool.push(agent);
+  };
+  for (const entry of ranked) if (entry.score > 0) push(entry.agent);
+  for (const entry of ranked) if (semantic.eligibleIds.has(entry.agent.id)) push(entry.agent);
+  for (const entry of ranked) push(entry.agent);
+  return pool;
+}
+
+/** The exact judgment input for a routing decision (async warm + sync peek share it). */
+export function autoRouteJudgmentInput(userPrompt: string, pool: readonly InstalledAgent[]): string {
+  const inventory = pool.map((agent) =>
+    `- ${agent.slug}: ${agent.nameEn || agent.name} — ${(agent.taglineEn || agent.tagline || "").slice(0, 160)}`,
+  );
+  return `REQUEST:\n${userPrompt.slice(0, 3_000)}\n\nINSTALLED SPECIALISTS:\n${inventory.join("\n")}`;
+}
+
+const AUTO_ROUTE_QUESTION =
+  "Which installed specialist agent should handle this request, or 'none' when no listed specialist is a genuine fit and the default coordinator should answer directly?";
+
+const AUTO_ROUTE_GUIDANCE =
+  "Judge by meaning in any language. Sharing a few incidental words with an agent's description is NOT a fit, " +
+  "and a specialist whose profession matches the request is a fit even when no keyword overlaps. " +
+  "When the user explicitly names an installed agent, select it. 'none' is a valid and common answer.";
+
+function judgedRouteHints(pool: readonly InstalledAgent[]): Array<{ label: string; words: string[] }> {
+  return ROUTE_HINTS
+    .filter((hint) => pool.some((agent) => agent.slug === hint.slug))
+    .map((hint) => ({ label: hint.slug, words: hint.terms.slice(0, 20) }));
+}
+
+function judgedRouteReason(locale: RuntimeLocale): string {
+  return locale === "ko"
+    ? "요청의 의미가 이 에이전트의 전문 분야와 일치한다고 상주 판정 모델이 결정했습니다"
+    : "the resident judgment model decided the request's meaning matches this agent's specialty";
+}
+
+export type AutoRouteJudge = (spec: JudgeSpec<string>) => Promise<Verdict<string>>;
+
+export interface JudgedAutoRouteResult {
+  choice: AutoRouteChoice | null;
+  /** "llm" = the model decided; "fallback" = today's lexical+embedding behavior, labeled. */
+  source: "llm" | "fallback";
+}
+
+/**
+ * THE final specialist pick. The resident judge selects from the recruited pool
+ * (or answers "none"); the lexical scorer and the on-device embedding are demoted
+ * to recruitment/ranking and remain only the labeled fallback when no model
+ * answers. Also warms the judgment cache so the synchronous
+ * `selectAutoRoutedAgent` peek sees the same verdict.
+ */
+export async function selectAutoRoutedAgentJudged(
+  userPrompt: string,
+  agents: InstalledAgent[],
+  locale: RuntimeLocale,
+  opts?: AutoRouteOptions & { judgeFn?: AutoRouteJudge; signal?: AbortSignal; timeoutMs?: number },
+): Promise<JudgedAutoRouteResult> {
+  const pipeline = buildRoutePipeline(userPrompt, agents, locale, opts);
+  if (!pipeline) return { choice: null, source: "fallback" };
+  const lexicalChoice = selectAutoRoutedAgent(userPrompt, agents, locale, { ...opts, judgedPeek: false });
+  if (!userPrompt.trim() || pipeline.pool.length === 0) {
+    return { choice: lexicalChoice, source: "fallback" };
+  }
+  const labels: string[] = [];
+  const bySlug = new Map<string, InstalledAgent>();
+  for (const agent of pipeline.pool) {
+    if (bySlug.has(agent.slug)) continue;
+    bySlug.set(agent.slug, agent);
+    labels.push(agent.slug);
+  }
+  labels.push("none");
+  const fallbackLabel = lexicalChoice && bySlug.get(lexicalChoice.agent.slug)?.id === lexicalChoice.agent.id
+    ? lexicalChoice.agent.slug
+    : "none";
+  let verdict: Verdict<string>;
+  try {
+    verdict = await (opts?.judgeFn ?? judge)({
+      kind: AUTO_ROUTE_JUDGMENT_KIND,
+      question: AUTO_ROUTE_QUESTION,
+      labels,
+      input: autoRouteJudgmentInput(userPrompt, pipeline.pool),
+      guidance:
+        `A deterministic lexical+embedding pre-pass picked "${fallbackLabel}". Treat that as a prior, not a fact. ` +
+        AUTO_ROUTE_GUIDANCE,
+      hints: judgedRouteHints(pipeline.pool),
+      fallback: fallbackLabel,
+      signal: opts?.signal,
+      timeoutMs: opts?.timeoutMs,
+    });
+  } catch {
+    return { choice: lexicalChoice, source: "fallback" };
+  }
+  if (verdict.source !== "llm") return { choice: lexicalChoice, source: "fallback" };
+  if (verdict.verdict === "none") {
+    return {
+      choice: opts?.allowFallback ? defaultCoordinationChoice(pipeline.candidates, locale) : null,
+      source: "llm",
+    };
+  }
+  const selected = bySlug.get(verdict.verdict);
+  if (!selected) return { choice: lexicalChoice, source: "fallback" };
+  const rankedEntry = pipeline.ranked.find((entry) => entry.agent.id === selected.id);
+  return {
+    choice: {
+      agent: selected,
+      reason: judgedRouteReason(locale),
+      matchedTerms: rankedEntry?.terms ?? [],
+    },
+    source: "llm",
+  };
+}
+
+export function selectAutoRoutedAgent(
+  userPrompt: string,
+  agents: InstalledAgent[],
+  locale: RuntimeLocale,
+  opts?: AutoRouteOptions,
+): AutoRouteChoice | null {
+  const pipeline = buildRoutePipeline(userPrompt, agents, locale, opts);
+  if (!pipeline) return null;
+  const { candidates, ranked, semantic, pool } = pipeline;
+
+  // 1) Judged verdict first. Synchronous callers (team preflight roster) peek the
+  //    verdict the async path warmed; a cache miss keeps the labeled lexical
+  //    fallback below, so behaviour never blocks on a model.
+  if (opts?.judgedPeek !== false) {
+    const peeked = peekJudgment<string>(AUTO_ROUTE_JUDGMENT_KIND, autoRouteJudgmentInput(userPrompt, pool));
+    if (peeked && peeked.source === "llm") {
+      if (peeked.verdict === "none") {
+        return opts?.allowFallback ? defaultCoordinationChoice(candidates, locale) : null;
+      }
+      const selected = pool.find((agent) => agent.slug === peeked.verdict);
+      if (selected) {
+        const rankedEntry = ranked.find((entry) => entry.agent.id === selected.id);
+        return { agent: selected, reason: judgedRouteReason(locale), matchedTerms: rankedEntry?.terms ?? [] };
+      }
+    }
+  }
+
+  const toChoice = (entry: RankedRouteEntry, reason = entry.reason): AutoRouteChoice => ({
     agent: entry.agent,
     reason,
     matchedTerms: entry.terms,
@@ -586,7 +768,12 @@ export function selectAutoRoutedAgent(
   const lexicalBest = eligibleByLexical[0] ?? null;
   const explicit = ranked.find((entry) => entry.highPrecision && entry.score >= MIN_SPECIALIST_SCORE);
 
-  // 2) On-device semantic precision filter. The lexical scorer is a bag of
+  // 2) An explicit routing signal — the user named the agent, a curated route
+  //    hint fired, or reviewed Experience matched — is honored before the
+  //    semantic veto (see the highPrecision contract above).
+  if (explicit) return toChoice(explicit);
+
+  // 3) On-device semantic precision filter. The lexical scorer is a bag of
   //    words: a café restock note and a meme-video studio can share enough
   //    incidental terms ("make", "local", "draft") to cross the bar. When the
   //    verified multilingual local model is loaded, it VETOES a recruitment it
@@ -595,7 +782,6 @@ export function selectAutoRoutedAgent(
   //    local routing the same semantic-vs-incidental discrimination the
   //    Hub/Cloud ontology provides, without sending the prompt off-device. A
   //    machine without the model asset keeps the plain lexical behavior.
-  const semantic = (opts?.semanticRoute ?? defaultSemanticRoute)(userPrompt, candidates);
   if (semantic.activeModel && lexicalBest) {
     const semanticPick = eligibleByLexical.find((entry) => semantic.eligibleIds.has(entry.agent.id));
     if (semanticPick) {
@@ -612,12 +798,10 @@ export function selectAutoRoutedAgent(
     return defaultCoordinationChoice(candidates, locale);
   }
 
-  // 3) No verified local model (asset absent) — fall back to lexical intent. Here the
-  //    keyword layer is all we have, so an explicit name/hint match is honored first,
-  //    then the strongest lexically-eligible agent. (With the model loaded, path 2 above
-  //    already subjected these same matches to the semantic veto, so a coincidental short
-  //    name can no longer hijack the route.)
-  if (explicit) return toChoice(explicit);
+  // 4) No verified local model (asset absent) — fall back to lexical intent:
+  //    the strongest lexically-eligible agent. (With the model loaded, path 3
+  //    above already subjected these matches to the semantic veto, so a
+  //    coincidental short name can no longer hijack the route.)
   if (lexicalBest) return toChoice(lexicalBest);
 
   if (!opts?.allowFallback) return null;

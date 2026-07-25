@@ -6,6 +6,8 @@ const {
   isPlainConversationalPrompt,
   isEscalationWorthyPrompt,
   shouldAutoEngageNetworkWorkforce,
+  selectAutoRoutedAgent,
+  selectAutoRoutedAgentJudged,
 } = require("../dist/electron/agents/auto-router.js");
 
 // plain으로 판정되어야 하는 것들 — 라우팅/에스컬레이션 전부 스킵, 즉답
@@ -57,4 +59,78 @@ assert.equal(shouldAutoEngageNetworkWorkforce({ ...eligible, globalOrchestrator:
 assert.equal(shouldAutoEngageNetworkWorkforce({ ...eligible, agentAppMode: true }), false, "Agent Apps remain isolated");
 assert.equal(shouldAutoEngageNetworkWorkforce({ ...eligible, prompt: "fix typo in README" }), false, "short single tasks stay local");
 
-console.log("test-auto-router-gates: PASS");
+// ── Judged final assignment: the model decides; lexical+embedding = recruitment/fallback ──
+(async () => {
+  const agent = (id, name, systemPrompt, tagline = "") => ({
+    id, slug: id, name, nameEn: name, tagline, taglineEn: tagline, systemPrompt,
+    mcpServers: [], envRequirements: [], kind: "single", visibility: "normal",
+  });
+  const inactive = () => ({ activeModel: false, eligibleIds: new Set() });
+  const translator = agent("legal-translator", "Legal Translator", "Translates contracts.", "Contract translation specialist");
+  const seeder = agent("comment-seeder", "Comment Seeder", "Posts community comments.", "Community comment automation");
+
+  // (a) The judge can pick an agent with lexical score ZERO — an Arabic request no
+  //     wordlist or name overlap could ever recruit.
+  const arabicPrompt = "ترجم هذا العقد إلى الإنجليزية مع الحفاظ على الصياغة القانونية";
+  assert.equal(
+    selectAutoRoutedAgent(arabicPrompt, [translator, seeder], "en", { allowFallback: false, semanticRoute: inactive }),
+    null,
+    "documented lexical miss: the scorer sees nothing in the Arabic request",
+  );
+  const judged = await selectAutoRoutedAgentJudged(arabicPrompt, [translator, seeder], "en", {
+    allowFallback: false,
+    semanticRoute: inactive,
+    judgeFn: async (spec) => {
+      assert.equal(spec.kind, "agent-auto-route");
+      assert.ok(spec.labels.includes("none"), "the judge must be allowed to answer none");
+      assert.equal(spec.fallback, "none", "the lexical miss must be offered as the fallback prior");
+      assert.ok(spec.labels.includes("legal-translator"), "a zero-score agent must still be in the judged pool");
+      return { verdict: "legal-translator", source: "llm", confidence: 0.9, reason: "contract translation" };
+    },
+  });
+  assert.equal(judged.source, "llm");
+  assert.equal(judged.choice.agent.id, "legal-translator", "the judged verdict must pick an agent with lexical score 0");
+
+  // (b) A judged "none" vetoes a lexically-recruited mis-route.
+  const baity = "Post a translated legal note as a community comment draft"; // overlaps seeder terms
+  const vetoed = await selectAutoRoutedAgentJudged(baity, [translator, seeder], "en", {
+    allowFallback: false,
+    semanticRoute: inactive,
+    judgeFn: async () => ({ verdict: "none", source: "llm", confidence: 0.8, reason: "coordinator should answer" }),
+  });
+  assert.equal(vetoed.source, "llm");
+  assert.equal(vetoed.choice, null, "a judged none must override lexical recruitment");
+
+  // (c) No model = today's lexical+embedding behavior, labeled fallback.
+  const namedPrompt = "Use Comment Seeder to post the weekly thread";
+  const fallback = await selectAutoRoutedAgentJudged(namedPrompt, [translator, seeder], "en", {
+    allowFallback: false,
+    semanticRoute: inactive,
+    judgeFn: async (spec) => ({ verdict: spec.fallback, source: "fallback", confidence: 0, reason: "no model" }),
+  });
+  assert.equal(fallback.source, "fallback");
+  assert.equal(fallback.choice.agent.id, "comment-seeder", "no model keeps the previous lexical route");
+
+  // (d) A hallucinated slug never routes: fall back to the lexical choice.
+  const hallucinated = await selectAutoRoutedAgentJudged(namedPrompt, [translator, seeder], "en", {
+    allowFallback: false,
+    semanticRoute: inactive,
+    judgeFn: async () => ({ verdict: "made-up-agent", source: "llm", confidence: 0.9, reason: "?" }),
+  });
+  assert.equal(hallucinated.source, "fallback");
+  assert.equal(hallucinated.choice.agent.id, "comment-seeder");
+
+  // (e) allowFallback + judged none = the default coordinator, never a mis-route.
+  const pmSoul = agent("agentlas-pm-soul", "Project Coordinator", "Coordinate work.");
+  const coordinated = await selectAutoRoutedAgentJudged(baity, [translator, seeder, pmSoul], "en", {
+    allowFallback: true,
+    semanticRoute: inactive,
+    judgeFn: async () => ({ verdict: "none", source: "llm", confidence: 0.8, reason: "no specialist" }),
+  });
+  assert.equal(coordinated.choice.agent.id, "agentlas-pm-soul");
+
+  console.log("test-auto-router-gates: PASS");
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
