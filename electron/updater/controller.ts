@@ -12,6 +12,7 @@ import type {
 } from "../../shared/types";
 
 const JOURNAL_SCHEMA_VERSION = 1;
+const CONTINUITY_GATE_VERSION = 2;
 const RECOVERY_SESSION_RETRY_DELAY_MS = 500;
 const RECOVERY_SESSION_RETRY_ATTEMPTS = 4;
 const NATIVE_INSTALL_WATCHDOG_MS = 20_000;
@@ -162,6 +163,12 @@ export type RecoverySessionRefreshResult =
 
 export interface InstallJournal {
   schemaVersion: 1;
+  /**
+   * Version 2 defers boot repair projections until continuity passes. Journals
+   * without this field came from the legacy ordering that could create a false
+   * recovery hold and are eligible for one-time stale-hold recovery.
+   */
+  continuityGateVersion?: 2;
   phase: "install-requested" | "blocked" | "recovery-required";
   sourceVersion: string;
   targetVersion: string;
@@ -508,6 +515,7 @@ function isValidJournal(value: unknown): value is InstallJournal {
   const raw = value as Record<string, unknown>;
   return (
     raw.schemaVersion === JOURNAL_SCHEMA_VERSION &&
+    (raw.continuityGateVersion === undefined || raw.continuityGateVersion === CONTINUITY_GATE_VERSION) &&
     (raw.phase === "install-requested" || raw.phase === "blocked" || raw.phase === "recovery-required") &&
     typeof raw.sourceVersion === "string" &&
     Boolean(parseSemVer(raw.sourceVersion)) &&
@@ -1240,20 +1248,13 @@ export class DesktopUpdaterController {
       return;
     }
     if (comparison !== null && comparison >= 0) {
-      // The post-install continuity gate is one-shot: it is only meaningful on
-      // the first boot after the swap, before normal use mutates the database.
-      // A journal that already carries the `recovery-required` verdict means a
-      // previous boot ran that gate, surfaced recovery to the user, and left the
-      // SQLite recovery copy on disk. Re-verifying the now-drifted live database
-      // against the frozen pre-install snapshot can only fail — ordinary use
-      // legitimately changes row counts and per-row identities — which would pin
-      // recovery-required forever and permanently block every future update
-      // (init() never arms the scheduled feed check while recovery-required).
-      // The target release is installed and the app has relaunched successfully,
-      // so resolve the stale hold instead of re-deriving it: keep the recovery
-      // copy on disk, clear the journal, and let the feed check resume. A newer
-      // clean release then supersedes it through the ordinary install path.
-      if (journal.phase === "recovery-required") {
+      // The post-install continuity verdict is one-shot: later boots must never
+      // re-derive it from a live database that ordinary use has already changed.
+      // Legacy journals predate the boot-writer ordering contract and can carry
+      // a false hold created by normal repair projections, so those are resolved
+      // once while their recovery copy remains preserved. Versioned journals ran
+      // with protected writers deferred; their recovery verdict remains durable.
+      if (journal.phase === "recovery-required" && journal.continuityGateVersion !== CONTINUITY_GATE_VERSION) {
         this.logger.warn("[updater] resolved a stale post-install recovery hold on a successful target relaunch");
         if (!this.clearJournal()) {
           // Never claim resolution we could not durably persist; a surviving
@@ -1276,8 +1277,29 @@ export class DesktopUpdaterController {
         this.publish({ status: "updated", version: journal.targetVersion });
         return;
       }
+      if (journal.phase === "recovery-required") {
+        // Versioned gates have already run after all protected boot writers
+        // were deferred. Their verdict represents a real unresolved continuity
+        // failure, so keep the recovery copy and warning durable across boots.
+        this.publish({
+          status: "recovery-required",
+          version: journal.targetVersion,
+          code: "continuity-violation",
+          error: safeMessage("continuity-violation"),
+          canRetry: false,
+          recoveryBackupAvailable: fs.existsSync(journal.continuity.backupPath),
+        });
+        return;
+      }
       const verification = await this.verifyJournalContinuity(journal.continuity);
       if (!verification.ok) {
+        const categories = [...new Set(
+          verification.violations.map((violation) => violation.split(":", 1)[0]).filter(Boolean),
+        )].sort();
+        this.logger.warn(
+          `[updater] post-install continuity gate blocked startup `
+            + `(${verification.violations.length} violation(s); ${categories.join(",") || "unknown"})`,
+        );
         this.writeJournal({ ...journal, phase: "recovery-required", reasonCode: "continuity-violation" });
         this.publish({
           status: "recovery-required",
@@ -1611,6 +1633,7 @@ export class DesktopUpdaterController {
 
       const journal: InstallJournal = {
         schemaVersion: JOURNAL_SCHEMA_VERSION,
+        continuityGateVersion: CONTINUITY_GATE_VERSION,
         phase: "install-requested",
         sourceVersion: this.deps.currentVersion(),
         targetVersion: version,

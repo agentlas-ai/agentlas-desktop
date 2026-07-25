@@ -960,17 +960,27 @@ assert.match(
 const mainSource = fs.readFileSync(path.join(root, "electron", "main.ts"), "utf8");
 const readyBlock = mainSource.slice(mainSource.indexOf("app.whenReady().then"));
 const preflightIndex = readyBlock.indexOf("preflightUpdaterStartup()");
-const migrationIndex = readyBlock.indexOf("initStore();");
+const migrationIndex = readyBlock.indexOf(
+  "initStore({ deferPostContinuityRepairs: updatePreflight.pendingInstall });",
+);
 const fullCheckIndex = readyBlock.indexOf("await initAutoUpdater(");
+const postContinuityRepairIndex = readyBlock.indexOf("runPostContinuityStoreRepairs();");
 const materializeIndex = readyBlock.indexOf("materializeAllAgents();");
 const backgroundIndex = readyBlock.indexOf("startAutomationScheduler();");
 assert.ok(
   preflightIndex >= 0 &&
     migrationIndex > preflightIndex &&
     fullCheckIndex > migrationIndex &&
+    postContinuityRepairIndex > fullCheckIndex &&
+    materializeIndex > postContinuityRepairIndex &&
     materializeIndex > fullCheckIndex &&
     backgroundIndex > fullCheckIndex,
-  "startup must gate recovery before migration, then verify continuity before materialization/background writers",
+  "startup must gate recovery before migration, then verify continuity before repair/materialization/background writers",
+);
+assert.match(
+  readyBlock,
+  /if \(updatePreflight\.pendingInstall && getUpdaterState\(\)\.status !== "recovery-required"\) \{[\s\S]*?runPostContinuityStoreRepairs\(\);[\s\S]*?\}/,
+  "deferred store repairs may resume only after a pending update passes the continuity gate",
 );
 const headlessBlock = readyBlock.slice(
   readyBlock.indexOf('if (process.argv.includes("--headless-automations"))'),

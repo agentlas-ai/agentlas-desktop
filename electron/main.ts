@@ -31,7 +31,7 @@ import {
 } from "./install-identity";
 import { registerIpcHandlers } from "./ipc";
 import { buildAppMenu } from "./menu";
-import { initStore } from "./store/db";
+import { initStore, runPostContinuityStoreRepairs } from "./store/db";
 import { startAutomationScheduler, stopAutomationScheduler } from "./automation-scheduler";
 import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime } from "./one/briefing";
 import { invocationService } from "./invocation/service";
@@ -641,7 +641,7 @@ app.whenReady().then(async () => {
   });
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => !DENIED_PERMISSIONS.has(permission));
   applyDockIcon();
-  initStore();
+  initStore({ deferPostContinuityRepairs: updatePreflight.pendingInstall });
   try {
     reconcileOneHubDerivativeDraftStorage();
   } catch (error) {
@@ -661,6 +661,12 @@ app.whenReady().then(async () => {
     });
   } else if (initialAuthRestoreWasTemporary) {
     scheduleDeferredAuthRestore();
+  }
+  if (updatePreflight.pendingInstall && getUpdaterState().status !== "recovery-required") {
+    // The update transaction now owns the startup boundary. Only after the
+    // pre-update snapshot has passed continuity verification may ordinary boot
+    // repair projections mutate protected local rows.
+    runPostContinuityStoreRepairs();
   }
   if (getUpdaterState().status !== "recovery-required") {
     try {

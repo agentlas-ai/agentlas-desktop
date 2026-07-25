@@ -13,6 +13,7 @@ import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-member-cells";
 
 let _db: Database.Database | null = null;
+let _postContinuityRepairsDeferred = false;
 
 const SCHEMA_VERSION = 78;
 
@@ -836,7 +837,54 @@ function backfillTaskParticipantsV72(db: Database.Database): void {
   run();
 }
 
-export function initStore(): void {
+export interface StoreInitOptions {
+  /**
+   * A just-installed binary must verify the pre-update recovery snapshot before
+   * any boot repair mutates protected rows. Schema migrations still run here;
+   * repair projections resume only after the updater continuity gate passes.
+   */
+  deferPostContinuityRepairs?: boolean;
+}
+
+function runStoreRepairProjections(db: Database.Database): void {
+  // The local-team writer now materializes members in the same transaction as
+  // the firm. Reconcile on ordinary boots as a repair projection so teams
+  // created by older binaries, restores, or interrupted imports cannot remain
+  // display-only forever. A pending update defers this until continuity passes.
+  try {
+    db.transaction(() => reconcileLocalTeamMemberCells(db))();
+  } catch (error) {
+    console.warn(
+      `[migration] v77 member-cell reconciliation deferred: ${error instanceof Error ? error.message : "unknown"}`,
+    );
+  }
+
+  // Run on every ordinary boot as well as the v52 upgrade. During a pending
+  // update this is deferred because terminalizing a stale run is a legitimate
+  // write that must not race the pre-update continuity snapshot.
+  try {
+    const recoveredAutomationRuns = recoverStaleAutomationRunsInDb(db, new Date());
+    if (recoveredAutomationRuns > 0) {
+      console.warn(`[automation] recovered ${recoveredAutomationRuns} abandoned run snapshot(s)`);
+    }
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error
+      ? String((error as { code?: unknown }).code ?? "busy")
+      : "busy";
+    console.warn(`[automation] boot run recovery deferred (${code})`);
+  }
+}
+
+export function runPostContinuityStoreRepairs(): void {
+  if (!_db) {
+    throw new Error("Store not initialized. Call initStore() before post-continuity repairs.");
+  }
+  if (!_postContinuityRepairsDeferred) return;
+  runStoreRepairProjections(_db);
+  _postContinuityRepairsDeferred = false;
+}
+
+export function initStore(options: StoreInitOptions = {}): void {
   if (_db) return;
   const dbPath = process.env.AGENTLAS_STORE_PATH || path.join(app.getPath("userData"), "agentlas.sqlite");
   preparePrivateStorePath(dbPath);
@@ -3469,35 +3517,10 @@ export function initStore(): void {
     if (!columns.has("tagline_ko")) _db.exec("ALTER TABLE borrowed_agent_careers ADD COLUMN tagline_ko TEXT");
   }
 
-  // The local-team writer now materializes members in the same transaction as
-  // the firm. Reconcile on every boot as a repair projection so teams created
-  // by older binaries, restores, or interrupted imports cannot remain
-  // display-only forever.
-  try {
-    _db.transaction(() => reconcileLocalTeamMemberCells(_db!))();
-  } catch (error) {
-    console.warn(
-      `[migration] v77 member-cell reconciliation deferred: ${error instanceof Error ? error.message : "unknown"}`,
-    );
-  }
-
-  // Run on every boot as well as the v52 upgrade. A hard process exit can
-  // happen on any future schema version; only rows silent beyond the absolute
-  // watchdog ceiling are terminalized, so a recent GUI/headless peer remains
-  // authoritative.
-  try {
-    const recoveredAutomationRuns = recoverStaleAutomationRunsInDb(_db, new Date());
-    if (recoveredAutomationRuns > 0) {
-      console.warn(`[automation] recovered ${recoveredAutomationRuns} abandoned run snapshot(s)`);
-    }
-  } catch (error) {
-    // Another GUI/headless writer may own the WAL during boot. Recovery is a
-    // repair projection, never a reason to block the whole application launch;
-    // the scheduler retries it on the next minute tick.
-    const code = typeof error === "object" && error !== null && "code" in error
-      ? String((error as { code?: unknown }).code ?? "busy")
-      : "busy";
-    console.warn(`[automation] boot run recovery deferred (${code})`);
+  if (options.deferPostContinuityRepairs) {
+    _postContinuityRepairsDeferred = true;
+  } else {
+    runStoreRepairProjections(_db);
   }
 
   // Never rewrite the version marker on an ordinary boot (avoids taking a WAL

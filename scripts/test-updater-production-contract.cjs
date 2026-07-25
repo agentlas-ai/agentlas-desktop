@@ -186,7 +186,7 @@ function makeController(layout, updater, options = {}) {
     refreshSessionForRecovery: options.refreshSessionForRecovery,
     nativeInstallWatchdogMs: options.nativeInstallWatchdogMs,
     nativeInstallRetryBaseDelayMs: options.nativeInstallRetryBaseDelayMs,
-    logger: { log() {}, warn() {}, error() {} },
+    logger: options.logger || { log() {}, warn() {}, error() {} },
   });
   return { controller, states, revealed, continuity };
 }
@@ -824,12 +824,10 @@ async function continuityViolationSurfacesRecovery() {
 }
 
 async function staleRecoveryHoldResolvesOnRelaunchWithoutReverifying() {
-  // Regression for the permanent-brick class: the post-install continuity gate is
-  // one-shot (valid only on the first boot, before normal use mutates the DB). A
-  // journal already marked recovery-required must NOT be re-verified against the
-  // drifted live database on later boots — that always fails, pins the app in
-  // recovery-required, and blocks every future update because init() never arms
-  // the feed check while recovery-required. It must instead self-resolve.
+  // Regression for the legacy permanent-brick class. Old journals did not
+  // version the boot-writer ordering, so a normal repair projection could create
+  // a false recovery hold. A new binary must self-resolve that legacy hold
+  // without deleting the preserved recovery copy.
   const layout = makeLayout();
   const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
   const first = makeController(layout, new FakeUpdater({ updateInfo }));
@@ -840,6 +838,9 @@ async function staleRecoveryHoldResolvesOnRelaunchWithoutReverifying() {
   first.controller.dispose();
 
   const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
+  const legacyJournal = JSON.parse(fs.readFileSync(journalPath, "utf8"));
+  delete legacyJournal.continuityGateVersion;
+  fs.writeFileSync(journalPath, `${JSON.stringify(legacyJournal, null, 2)}\n`);
 
   // First relaunch on the freshly installed target: the one-shot gate fails and
   // surfaces recovery once, persisting phase "recovery-required" to disk.
@@ -872,6 +873,60 @@ async function staleRecoveryHoldResolvesOnRelaunchWithoutReverifying() {
   assert.equal(fs.existsSync(backupPath), true, "the recovery copy is not deleted when auto-resolving");
   assert.equal(feed.checkCount, 0, "startup reconciliation must not contact the update feed");
   resumed.controller.dispose();
+  fs.rmSync(layout.root, { recursive: true, force: true });
+}
+
+async function versionedRecoveryHoldRemainsDurableWithoutReverifying() {
+  const layout = makeLayout();
+  const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
+  const first = makeController(layout, new FakeUpdater({ updateInfo }));
+  await first.controller.init();
+  await first.controller.check();
+  await first.controller.install();
+  first.controller.dispose();
+
+  const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
+  assert.equal(
+    JSON.parse(fs.readFileSync(journalPath, "utf8")).continuityGateVersion,
+    2,
+    "new installs must bind the boot-writer ordering contract",
+  );
+
+  const warnings = [];
+  const surfaced = makeController(layout, new FakeUpdater(), {
+    currentVersion: "0.7.29",
+    verifyContinuity: async () => ({ ok: false, violations: ["protected-row-missing:projects:hash"] }),
+    logger: { log() {}, warn: (message) => warnings.push(String(message)), error() {} },
+  });
+  await surfaced.controller.init();
+  assert.equal(surfaced.controller.getState().status, "recovery-required");
+  assert.ok(
+    warnings.some((message) => message.includes("protected-row-missing")),
+    "operator diagnostics must include a bounded continuity violation category",
+  );
+  assert.ok(
+    warnings.every((message) => !message.includes("projects") && !message.includes("hash")),
+    "continuity diagnostics must not leak row, table, or local identifier details",
+  );
+  surfaced.controller.dispose();
+
+  let reverifications = 0;
+  const preserved = makeController(layout, new FakeUpdater(), {
+    currentVersion: "0.7.29",
+    verifyContinuity: async () => {
+      reverifications += 1;
+      return { ok: true, violations: [] };
+    },
+  });
+  await preserved.controller.init();
+  assert.equal(reverifications, 0, "a durable recovery verdict must not be re-derived from a drifted live database");
+  assert.equal(
+    preserved.controller.getState().status,
+    "recovery-required",
+    "a versioned real continuity failure must not be silently cleared on a later boot",
+  );
+  assert.equal(fs.existsSync(journalPath), true, "the versioned recovery journal must remain durable");
+  preserved.controller.dispose();
   fs.rmSync(layout.root, { recursive: true, force: true });
 }
 
@@ -1819,6 +1874,7 @@ async function downloadedUpdateInstallsAutomaticallyOnNormalQuit() {
   await accountRestoreRetryIsStrictlyBounded();
   await continuityViolationSurfacesRecovery();
   await staleRecoveryHoldResolvesOnRelaunchWithoutReverifying();
+  await versionedRecoveryHoldRemainsDurableWithoutReverifying();
   await compatibilityBoundariesFailBeforeDownload();
   await continuityBackupFailureRemainsVisibleAndRetryable();
   await transientFailuresAndConcurrencyPreserveTruth();
