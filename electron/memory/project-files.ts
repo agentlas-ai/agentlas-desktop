@@ -576,11 +576,6 @@ function ensureSoulCredentialIndex(identity: ProjectFsIdentity, soulPath: string
   );
 }
 
-// One-time safety net for sitemaps this generator did not write (hand-curated
-// or pre-generator files). Their node shape does not survive the annotation
-// merge below, so the first automatic refresh would drop them silently.
-const SITEMAP_PRE_GENERATED_BACKUP_FILE = "sitemap.pre-generated-backup.json";
-
 function sitemapSkeleton(projectName: string, now: string): string {
   return JSON.stringify(
     {
@@ -602,13 +597,42 @@ function sitemapRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-/** Refresh the deterministic file tree while preserving user-maintained node annotations. */
+/**
+ * Refresh the deterministic file tree while preserving user-maintained node
+ * annotations. Returns null without writing when the existing sitemap is a
+ * hand-maintained artifact this generator did not produce.
+ */
 export function refreshProjectSitemap(projectPath: string): ProjectSitemap | null {
   try {
     const identity = resolveProjectFsIdentity(projectPath);
     const dir = path.join(identity.root, PROJECT_MEMORY_DIR);
     ensureRealProjectDirectory(identity, dir, "The project memory directory");
     const outputPath = path.join(dir, SITEMAP_FILE);
+
+    let previous: Record<string, unknown> | null = null;
+    try {
+      const existing = readStableProjectText(identity, outputPath, "The project sitemap");
+      previous = existing ? sitemapRecord(JSON.parse(existing.content)) : null;
+    } catch {
+      previous = null;
+    }
+
+    // A sitemap this generator did not write is NOT a stale copy of the file
+    // tree — it is a different artifact that happens to share the filename.
+    // The maps operators keep here list ui-route / interaction-surface /
+    // release-gate nodes: hand-maintained governance, not a directory listing.
+    // Regenerating over one destroys work no walker can reconstruct, so leave
+    // it strictly alone. Only a map we produced (state "generated"), an empty
+    // skeleton, or a missing file is ours to refresh.
+    if (
+      previous &&
+      previous.state !== "generated" &&
+      Array.isArray(previous.nodes) &&
+      previous.nodes.length > 0
+    ) {
+      return null;
+    }
+
     let generated: ProjectSitemap;
     try {
       generated = generateProjectSitemap(projectPath, {
@@ -621,33 +645,6 @@ export function refreshProjectSitemap(projectPath: string): ProjectSitemap | nul
       generated = generateProjectSitemap(projectPath, {
         maxEntries: PROJECT_SITEMAP_MAX_ENTRIES,
       });
-    }
-    let previous: Record<string, unknown> | null = null;
-    let previousRaw: string | null = null;
-    try {
-      const existing = readStableProjectText(identity, outputPath, "The project sitemap");
-      previousRaw = existing?.content ?? null;
-      previous = existing ? sitemapRecord(JSON.parse(existing.content)) : null;
-    } catch {
-      previous = null;
-    }
-
-    // Annotations carry over by kind+relative_path below, which only matches
-    // maps this generator produced. Anything else — a hand-curated sitemap, an
-    // older schema, unparseable content — would be lost on the first automatic
-    // refresh, so keep exactly one backup before overwriting it. An empty
-    // skeleton has nothing to preserve, and later refreshes find the backup
-    // already present and skip it.
-    const preservable = previous
-      ? previous.state !== "generated" && Array.isArray(previous.nodes) && previous.nodes.length > 0
-      : Boolean(previousRaw && previousRaw.trim());
-    if (previousRaw && preservable) {
-      createPrivateProjectFileIfMissing(
-        identity,
-        path.join(dir, SITEMAP_PRE_GENERATED_BACKUP_FILE),
-        previousRaw,
-        "The pre-generation sitemap backup",
-      );
     }
 
     const previousNodes = new Map<string, Record<string, unknown>>();
