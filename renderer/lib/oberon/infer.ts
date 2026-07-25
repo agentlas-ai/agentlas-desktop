@@ -133,15 +133,40 @@ function hintWords(source: RegExp): string[] {
 }
 
 /**
+ * A NON-keyword neutral brief: the explicit user-picked format (closed-form) is
+ * kept, everything else falls to a plain default that does NOT scan the prompt
+ * for style keywords. Used when no connected model can infer the style, so a
+ * disconnected judge never silently returns the wordlist guess. Structural
+ * fields (title, logline, synopsis, characters, references) stay.
+ */
+export function neutralBriefFromPrompt(input: BriefInferenceInput): FilmBrief {
+  const base = inferBriefFromPrompt(input);
+  const format = input.format || "commercial_30";
+  const genre = pickGenre("", format);
+  return {
+    ...base,
+    format,
+    genre,
+    aspect: aspectForFormat(format),
+    durationSec: FORMAT_DEFAULT_DURATION[format],
+    tone: ["cinematic"],
+    setting: "",
+  };
+}
+
+/**
  * Judged brief inference: the resident model decides format/genre/tone/setting by
- * meaning via the narrow judgment bridge; the keyword tables are hints and remain
- * only the labeled fallback (inferBriefFromPrompt) when the bridge or model is
- * unavailable. An explicitly chosen format is closed-form and never judged.
+ * meaning via the narrow judgment bridge; the keyword tables survive only as the
+ * judge's hint/prior. When the bridge or model is unavailable we return the
+ * NON-keyword neutral brief (explicit format kept) — never the wordlist guess —
+ * so the wizard shows a connect-a-model state instead of an inferred style. An
+ * explicitly chosen format is closed-form and never judged.
  */
 export async function judgeBriefFromPrompt(input: BriefInferenceInput): Promise<FilmBrief> {
   const base = inferBriefFromPrompt(input);
+  const neutral = neutralBriefFromPrompt(input);
   const text = `${input.title}\n${input.prompt}`.trim();
-  if (!text) return base;
+  if (!text) return neutral;
   const timeoutMs = 5_000;
   const [format, genre, tones, setting] = await Promise.all([
     input.format
@@ -179,12 +204,14 @@ export async function judgeBriefFromPrompt(input: BriefInferenceInput): Promise<
       timeoutMs,
     }).catch(() => null),
   ]);
-  const judgedFormat = format && format.source === "llm" ? format.verdict : base.format;
-  const judgedGenre = genre.source === "llm" ? genre.verdict : base.genre;
+  // Per field: the model's verdict when it answered (source:"llm"), else the
+  // NON-keyword neutral value — never base's keyword pick.
+  const judgedFormat = format && format.source === "llm" ? format.verdict : neutral.format;
+  const judgedGenre = genre.source === "llm" ? genre.verdict : neutral.genre;
   const judgedTone = tones.source === "llm"
     ? Array.from(new Set([...tones.selected, "cinematic"])).slice(0, 4)
-    : base.tone;
-  let judgedSetting = base.setting;
+    : neutral.tone;
+  let judgedSetting = neutral.setting;
   if (setting && setting.source === "llm") {
     if (setting.verdict === "none") judgedSetting = "";
     else {

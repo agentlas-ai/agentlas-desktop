@@ -220,13 +220,14 @@ export function routeMode(prompt: string): ArtMode {
 
 /**
  * Judged art-direction mode via the renderer judgment bridge. The judged verdict
- * decides; the MODE_HINTS wordlists are hints + the labeled fallback (routeMode)
- * when no bridge/model is available.
+ * decides; the MODE_HINTS wordlists survive only as the judge's prior. With NO
+ * bridge/model verdict we return the neutral base mode ("editorial") rather than
+ * keyword-inferring a mode from the topic.
  */
 export async function routeModeJudged(prompt: string): Promise<ArtMode> {
-  const lexical = routeMode(prompt);
   const trimmed = prompt.trim();
-  if (!trimmed) return lexical;
+  if (!trimmed) return "editorial";
+  const lexical = routeMode(prompt);
   const { judgeLabelViaBridge } = await import("@/lib/judgment");
   const judged = await judgeLabelViaBridge<ArtMode>({
     kind: "trex-mode-route",
@@ -242,7 +243,7 @@ export async function routeModeJudged(prompt: string): Promise<ArtMode> {
     })),
     timeoutMs: 5_000,
   });
-  return judged.source === "llm" ? judged.verdict : lexical;
+  return judged.source === "llm" ? judged.verdict : "editorial";
 }
 
 export const MIN_SLIDES = 3;

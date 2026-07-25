@@ -567,13 +567,16 @@ const STYLE_JUDGE_HINTS: Array<{ label: StyleId | "none"; words: string[] }> = S
 
 /**
  * Judged style routing via the renderer judgment bridge. Explicit user choice
- * always wins upstream (closed-form); the judged verdict decides here; the
- * keyword router above stays as the labeled fallback when no model answers.
+ * always wins upstream (closed-form); the judged verdict decides here. With NO
+ * bridge/model verdict we return null (the neutral default/legacy look) rather
+ * than keyword-inferring a style — the keyword router survives only as the
+ * judge's prior. The trex flow already surfaces a connect-a-model state when the
+ * subsequent content generation finds no model.
  */
 export async function routeStyleJudged(prompt: string): Promise<StyleId | null> {
-  const lexical = routeStyle(prompt);
   const trimmed = prompt.trim();
-  if (!trimmed) return lexical;
+  if (!trimmed) return null;
+  const lexical = routeStyle(prompt);
   const { judgeLabelViaBridge } = await import("@/lib/judgment");
   const judged = await judgeLabelViaBridge<StyleId | "none">({
     kind: "trex-style-route",
@@ -583,6 +586,6 @@ export async function routeStyleJudged(prompt: string): Promise<StyleId | null> 
     hints: STYLE_JUDGE_HINTS,
     timeoutMs: 5_000,
   });
-  if (judged.source !== "llm") return lexical;
+  if (judged.source !== "llm") return null;
   return judged.verdict === "none" ? null : judged.verdict;
 }

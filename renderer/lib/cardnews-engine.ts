@@ -99,9 +99,9 @@ export function isCardnewsApp(app: AppFactoryAppRecord): boolean {
  * before the flow starts or update async, never inside a render pass.
  */
 export async function isCardnewsAppJudged(app: AppFactoryAppRecord): Promise<boolean> {
-  const lexical = isCardnewsApp(app);
   const haystack = cardnewsHaystack(app);
-  if (!haystack.trim()) return lexical;
+  if (!haystack.trim()) return false;
+  const lexical = isCardnewsApp(app);
   const { judgeLabelViaBridge } = await import("./judgment");
   const judged = await judgeLabelViaBridge<"yes" | "no">({
     kind: "cardnews-app-detect",
@@ -111,7 +111,9 @@ export async function isCardnewsAppJudged(app: AppFactoryAppRecord): Promise<boo
     hints: [{ label: "yes", words: ["cardnews", "card news", "carousel", "instagram", "카드뉴스", "캐러셀", "인스타"] }],
     timeoutMs: 5_000,
   });
-  return judged.source === "llm" ? judged.verdict === "yes" : lexical;
+  // No connected-model verdict → neutral "not card-news" (false), never the
+  // keyword guess. The wordlist survives only as the judge's prior above.
+  return judged.source === "llm" ? judged.verdict === "yes" : false;
 }
 
 export function initialCardnewsTopic(app: AppFactoryAppRecord, locale: CardnewsLanguage): string {

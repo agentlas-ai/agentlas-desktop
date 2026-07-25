@@ -86,9 +86,9 @@ export function lexicalGeneratedAppVisualOutput(app: AppFactoryAppRecord): boole
  * `isVisualOutputOverride` once the async verdict lands — never in a render pass.
  */
 export async function resolveGeneratedAppVisualOutput(app: AppFactoryAppRecord): Promise<boolean> {
-  const lexical = lexicalGeneratedAppVisualOutput(app);
   const haystack = generatedAppHaystack(app);
-  if (!haystack.trim()) return lexical;
+  if (!haystack.trim()) return false;
+  const lexical = lexicalGeneratedAppVisualOutput(app);
   const { judgeLabelViaBridge } = await import("./judgment");
   const judged = await judgeLabelViaBridge<"yes" | "no">({
     kind: "generated-app-visual-output",
@@ -98,7 +98,9 @@ export async function resolveGeneratedAppVisualOutput(app: AppFactoryAppRecord):
     hints: [{ label: "yes", words: ["card", "carousel", "image", "poster", "storyboard", "video", "design", "카드", "이미지", "디자인"] }],
     timeoutMs: 5_000,
   });
-  return judged.source === "llm" ? judged.verdict === "yes" : lexical;
+  // No connected-model verdict → neutral non-visual "workbench" output (false),
+  // never the keyword guess. The wordlist survives only as the judge's prior.
+  return judged.source === "llm" ? judged.verdict === "yes" : false;
 }
 
 export function buildGeneratedAppBlueprint(
@@ -113,7 +115,11 @@ export function buildGeneratedAppBlueprint(
   const appSpec = manifest.app;
   const title = safeStringValue(app.appName || appSpec?.name || manifest.title, "Generated App");
   const appType = safeStringValue(appSpec?.appType || manifest.layout, "service-app");
-  const isVisualOutput = opts.isVisualOutputOverride ?? lexicalGeneratedAppVisualOutput(app);
+  // The judged verdict is passed as isVisualOutputOverride (closed-form here).
+  // Without it (initial render before the async verdict) we default to the
+  // neutral non-visual output rather than the keyword guess; the caller rebuilds
+  // with the override once resolveGeneratedAppVisualOutput lands.
+  const isVisualOutput = opts.isVisualOutputOverride ?? false;
   const routes = routesOf(manifest);
   const fields = dedupeFields([
     ...domainFields(manifest, locale, isVisualOutput),

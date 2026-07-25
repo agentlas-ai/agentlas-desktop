@@ -5,7 +5,7 @@ import { useState, type ReactNode } from "react";
 import {
   GENRE_TEMPLATES,
   getBriefPresets,
-  inferBriefFromPrompt,
+  neutralBriefFromPrompt,
   judgeBriefFromPrompt,
   taxonomyText,
   type FilmBrief,
@@ -80,10 +80,11 @@ export function BriefWizard({
 
   async function generate() {
     // The judged inference decides format/genre/tone/setting before the flow
-    // starts; an explicit user-picked format is closed-form, and the keyword
-    // tables remain the labeled fallback when no bridge/model is available.
+    // starts; an explicit user-picked format is closed-form. With no connected
+    // model the brief falls to NON-keyword neutral defaults (never the wordlist
+    // guess) — the user reviews and fills the style on the next step.
     const base = await judgeBriefFromPrompt({ title, prompt, references: refs, format, locale })
-      .catch(() => inferBriefFromPrompt({ title, prompt, references: refs, format, locale }));
+      .catch(() => neutralBriefFromPrompt({ title, prompt, references: refs, format, locale }));
     const brief =
       isMotionFormat
         ? { ...base, brandOrProduct: brandName.trim() || base.brandOrProduct, logoSource: logoSrc.trim() || undefined }

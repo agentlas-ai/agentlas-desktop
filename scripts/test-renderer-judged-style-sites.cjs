@@ -5,8 +5,9 @@
 //   - generated-app resolveGeneratedAppVisualOutput (+ blueprint override)
 //   - the judgeLabelViaBridge helper's bridge/no-bridge contract
 // Pattern under test: explicit user choice wins upstream (closed-form); the
-// judged verdict decides; the keyword tables are hints + the labeled fallback
-// when the bridge or model is unavailable.
+// judged verdict decides; with NO bridge/model verdict the site returns the
+// NEUTRAL non-keyword default (never the wordlist guess). The keyword tables
+// survive only as the judge's prior.
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -64,8 +65,10 @@ function loadTs(relPath, extraMap = {}) {
   assert.equal(await styles.routeStyleJudged("리뷰 정리해줘 (보고 아님)"), null,
     "a judged none must veto an incidental wordlist hit");
   judgmentDouble.judgeLabelViaBridge = async (spec) => ({ verdict: spec.fallback, source: "fallback", reason: "no model" });
-  assert.equal(await styles.routeStyleJudged("분기 실적 보고 자료"), "consulting",
-    "no model = the previous keyword route, labeled fallback");
+  // NO model → null (neutral legacy look), NOT the keyword style the router would give.
+  assert.equal(styles.routeStyle("분기 실적 보고 자료"), "consulting", "the keyword router alone WOULD pick a style");
+  assert.equal(await styles.routeStyleJudged("분기 실적 보고 자료"), null,
+    "no model must not keyword-infer a style — it keeps the neutral default");
 
   // ── trex mode routing ──
   const model = loadTs("renderer/lib/trex/model.ts");
@@ -76,7 +79,10 @@ function loadTs(relPath, extraMap = {}) {
   assert.equal(await model.routeModeJudged("شرح آلية التفاعل الكيميائي للندوة الأكاديمية"), "diagrammatic",
     "the judged mode must fire on wordlist-miss phrasing");
   judgmentDouble.judgeLabelViaBridge = async (spec) => ({ verdict: spec.fallback, source: "fallback", reason: "no model" });
-  assert.equal(await model.routeModeJudged("월드컵 순위 정리"), "hybrid", "no model keeps the keyword mode");
+  // NO model → the neutral base mode "editorial", NOT the keyword mode.
+  assert.equal(model.routeMode("월드컵 순위 정리"), "hybrid", "the keyword router alone WOULD pick hybrid");
+  assert.equal(await model.routeModeJudged("월드컵 순위 정리"), "editorial",
+    "no model must not keyword-infer a mode — it keeps the neutral editorial base");
   assert.equal(model.routeMode("random topic"), "editorial", "deterministic default unchanged");
 
   // ── cardnews detection ──
@@ -94,8 +100,10 @@ function loadTs(relPath, extraMap = {}) {
   assert.equal(await cardnews.isCardnewsAppJudged(appRecord({ name: "Insta-cart order helper" })), false,
     "a judged no must veto the insta substring false positive");
   judgmentDouble.judgeLabelViaBridge = async (spec) => ({ verdict: spec.fallback, source: "fallback", reason: "no model" });
-  assert.equal(await cardnews.isCardnewsAppJudged(appRecord({ name: "카드뉴스 메이커" })), true,
-    "no model = the previous wordlist verdict");
+  const cardKeywordApp = appRecord({ name: "카드뉴스 메이커" });
+  assert.equal(cardnews.isCardnewsApp(cardKeywordApp), true, "the wordlist alone WOULD flag this as card-news");
+  assert.equal(await cardnews.isCardnewsAppJudged(cardKeywordApp), false,
+    "no model → neutral 'not card-news', never the keyword verdict");
 
   // ── generated-app visual output ──
   const generated = loadTs("renderer/lib/generated-app-engine.ts");
@@ -110,11 +118,15 @@ function loadTs(relPath, extraMap = {}) {
   const overridden = generated.buildGeneratedAppBlueprint(visualApp, "en", { isVisualOutputOverride: true });
   assert.equal(overridden.isVisualOutput, true);
   assert.deepEqual(overridden.exportFormats, ["png", "jpg", "json", "markdown"]);
-  const fallbackBlueprint = generated.buildGeneratedAppBlueprint(visualApp, "en");
-  assert.equal(fallbackBlueprint.isVisualOutput, false, "without the judged override the wordlist fallback stands");
+  // A keyword-visual app: the wordlist WOULD say visual, but no override / no model
+  // must NOT keyword-infer it.
+  const koreanVisualApp = { appName: "카드 디자인 스튜디오", id: "app2", manifest: { title: "카드 이미지 메이커", domain: "creative", layout: "creative-studio", app: { tagline: "인스타 카드 이미지 디자인" } } };
+  assert.equal(generated.lexicalGeneratedAppVisualOutput(koreanVisualApp), true, "the wordlist alone WOULD flag this app visual");
+  const fallbackBlueprint = generated.buildGeneratedAppBlueprint(koreanVisualApp, "en");
+  assert.equal(fallbackBlueprint.isVisualOutput, false, "no judged override → neutral non-visual, never the keyword verdict");
   judgmentDouble.judgeLabelViaBridge = async (spec) => ({ verdict: spec.fallback, source: "fallback", reason: "no model" });
-  assert.equal(await generated.resolveGeneratedAppVisualOutput(visualApp), false,
-    "no model = the previous wordlist verdict, labeled");
+  assert.equal(await generated.resolveGeneratedAppVisualOutput(koreanVisualApp), false,
+    "no model → neutral non-visual, never the keyword verdict");
 
   // ── oberon judged brief (format/genre/tone/setting) ──
   const infer = loadTs("renderer/lib/oberon/infer.ts");
@@ -149,11 +161,20 @@ function loadTs(relPath, extraMap = {}) {
   const explicitFormat = await infer.judgeBriefFromPrompt({ ...arabicBrief, format: "trailer" });
   assert.equal(explicitFormat.format, "trailer");
   assert.equal(explicitFormat.aspect, "2.39:1");
-  // No model = today's deterministic inference, unchanged.
+  // NO model → the NEUTRAL non-keyword brief (explicit format kept), never the
+  // wordlist inference.
   judgmentDouble.judgeLabelViaBridge = async (spec) => ({ verdict: spec.fallback, source: "fallback", reason: "no model" });
-  const fallbackBrief = await infer.judgeBriefFromPrompt(arabicBrief);
-  assert.deepEqual(fallbackBrief, infer.inferBriefFromPrompt(arabicBrief),
-    "no model must reproduce the deterministic brief exactly");
+  judgmentDouble.judgeSubsetViaBridge = async () => ({ selected: [], source: "fallback", reason: "no model" });
+  const keywordBrief = { title: "우주 전투", prompt: "우주에서 벌어지는 로봇 액션 예고편, 네온 톤, 우주 기지 배경", references: [], locale: "ko" };
+  const keywordInferred = infer.inferBriefFromPrompt(keywordBrief);
+  assert.equal(keywordInferred.genre, "scifi", "the wordlist inference alone WOULD pick a keyword genre");
+  assert.equal(keywordInferred.format, "trailer", "the wordlist inference alone WOULD pick a keyword format");
+  const fallbackBrief = await infer.judgeBriefFromPrompt(keywordBrief);
+  assert.deepEqual(fallbackBrief, infer.neutralBriefFromPrompt(keywordBrief),
+    "no model must produce the NON-keyword neutral brief");
+  assert.notEqual(fallbackBrief.genre, keywordInferred.genre, "the no-model brief must not equal the keyword genre");
+  assert.equal(fallbackBrief.genre, "commercial", "neutral genre follows the base format, not keywords");
+  assert.equal(fallbackBrief.setting, "", "no-model setting is empty, never keyword-extracted");
 
   // ── judgeLabelViaBridge contract ──
   let bridgeApi = null;
