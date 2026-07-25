@@ -31,12 +31,17 @@ const INTERNAL_TOKEN_PATTERNS: RegExp[] = [
   /\bagentlas\s*오케스트레이터\b/g,
   /\bstormbreaker(?:\s+loop)?\b/gi,
   /\bscope[-\s]?lock\b/gi,
-  // Result-transport schema terms that must never read as product copy.
+  // Result-transport schema terms that must never read as product copy. These stay
+  // narrow on purpose: "one surface" and "structured result" are ordinary English
+  // ("let's consolidate this into one surface", "here is a structured result of your
+  // data"), and stripping them from a good answer used to empty the string, which
+  // replaced the whole reply with "this result was not completed here". Only strip the
+  // internal schema spellings, not the plain-language ones.
   /\bsafe\s+one\s+surface\b/gi,
-  /\bone\s+surface\b/gi,
   /(?:exactly\s+)?one\s+safe\s+surface/gi,
+  /\bone[-\s]surface\s+(?:manifest|schema|contract|envelope|transport|payload)\b/gi,
   /\bsurface\s+manifest\b/gi,
-  /\bstructured\s+result\b/gi,
+  /\bstructured\s+result\s+(?:manifest|schema|contract|envelope|transport|payload)\b/gi,
   /\bworkbench\s+generation\b/gi,
 ];
 

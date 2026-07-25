@@ -21,8 +21,11 @@ const PUBLIC_COPY_REPLACEMENTS: Array<[RegExp, string]> = [
   [/(?:라이너|젠스파크)\s*(?:같은|처럼|스타일|방식)/g, "익숙한 작업 방식"],
   [/\bLiner\b/g, "research workspace"],
   [/\bGenspark\b/g, "report workspace"],
-  [/라이너/g, "리서치 워크스페이스"],
-  [/젠스파크/g, "리포트 워크스페이스"],
+  // Korean has no \b, so a bare replace also rewrote 아이라이너 (eyeliner), 팬티라이너,
+  // 컵라이너 — real product words in beauty/e-commerce copy. Require that the brand name
+  // is not glued to another Hangul syllable on either side.
+  [/(?<![가-힣])라이너(?![가-힣])/g, "리서치 워크스페이스"],
+  [/(?<![가-힣])젠스파크(?![가-힣])/g, "리포트 워크스페이스"],
 ];
 
 export function sanitizePublicAppCopy(value: unknown, fallback = ""): string {
