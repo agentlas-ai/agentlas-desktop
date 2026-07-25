@@ -41,7 +41,13 @@ export function buildScanSeverityBucket(severity: unknown): BuildScanSeverityBuc
   const value = String(severity ?? "").trim();
   if (/^(block|blocked|blocker|critical|high|fail|failed)$/i.test(value)) return "blocked";
   if (/^(warning|warn|medium|needs-review|review)$/i.test(value)) return "warning";
-  return "passed";
+  // Known-benign levels only. Two producers already disagree on vocabulary (Agentlas OS
+  // emits verdict=BLOCK|WARN, Cloud review emits severity=blocker|high|medium), so a third
+  // label must never mean "safe": an unrecognized severity like "error"/"severe"/"P0"/
+  // "malware" used to fall through to passed and silently unlock install + Cloud save +
+  // Hub publish. Unknown = review it, never ship it.
+  if (/^(info|informational|note|notice|low|debug|trace|ok|pass|passed|none)$/i.test(value)) return "passed";
+  return value ? "warning" : "passed";
 }
 
 function normalizeFinding(value: unknown): BuildScanFinding {
