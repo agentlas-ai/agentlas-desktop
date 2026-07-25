@@ -163,7 +163,7 @@ async function seedWorker() {
   // rework — NO verdict (no model warmed) also never keyword-decides.
   assert.equal(detector.detectExplicitOneMemoryIntent("I prefer concise reports.", no), null, "an ordinary preference the model rejects is not a Memory");
   assert.equal(detector.detectExplicitOneMemoryIntent("앞으로는 결론과 근거를 먼저 보여줘."), null, "no connected model verdict → never a keyword-inferred Memory");
-  assert.equal(detector.detectExplicitOneMemoryIntent("기억해줘: /Users/mason/private/customer.csv를 먼저 읽어", yes), null, "local paths must fail quiet even on a judged yes");
+  assert.equal(detector.detectExplicitOneMemoryIntent("기억해줘: /Users/operator/private/customer.csv를 먼저 읽어", yes), null, "local paths must fail quiet even on a judged yes");
   assert.equal(detector.detectExplicitOneMemoryIntent("Remember that password=secret-value", yes), null, "secret-like text must fail quiet even on a judged yes");
 
   // ── Judged verdict decides; the prefix/suffix wordlists are hints + labeled fallback ──
@@ -300,7 +300,7 @@ async function seedWorker() {
   );
   for (const [text, reason] of [
     ["Use password=secret-value on the next run.", "secret"],
-    ["Read /Users/mason/private/customer.csv before answering.", "local_path"],
+    ["Read /Users/operator/private/customer.csv before answering.", "local_path"],
     ["https://private.example.test/customer-record", "transport_or_markup"],
     ["user: private transcript\nassistant: copied answer", "raw_transcript"],
   ]) {
