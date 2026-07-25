@@ -469,7 +469,10 @@ async function runBuildSurface(browser, baseUrl, evidence) {
 }
 
 async function runBuildMcpSurface(browser, baseUrl, evidence, scenario) {
-  const { context, page, errors } = await newPage(browser, { mcpBuildScenario: scenario });
+  // This surface asserts the Korean plan carries no mixed English reason prose,
+  // so it must render in Korean — otherwise candidateLabel() correctly returns
+  // English and the no-mixing assertion contradicts itself.
+  const { context, page, errors } = await newPage(browser, { mcpBuildScenario: scenario, locale: "ko" });
   await page.goto(`${baseUrl}/build.html`, { waitUntil: "domcontentloaded" });
   await page.getByRole("button", { name: /생성 폴더 선택|Choose output folder/ }).click();
   await page.getByRole("button", { name: /단일 에이전트|Single agent/ }).click();
@@ -880,7 +883,11 @@ async function runFirmAgentSurface(browser, baseUrl, evidence) {
 }
 
 async function runCompactAgentSurface(browser, baseUrl, evidence) {
-  const { context, page, errors } = await newPage(browser, { viewportWidth: 920, viewportHeight: 900 });
+  // Seed the experience scenario so the opened Builder Agent has ontology
+  // relations and the compact Atlas graph renders. Without it the agent has no
+  // experience and now (correctly) shows the empty-state instead of a graph, so
+  // the compact-layout assertions below would never find a rendered surface.
+  const { context, page, errors } = await newPage(browser, { experienceScenario: true, viewportWidth: 920, viewportHeight: 900 });
   await page.goto(`${baseUrl}/library/agents.html`, { waitUntil: "domcontentloaded" });
   const roster = page.locator('[data-tour-id="agents.roster"]');
   await roster.waitFor();
