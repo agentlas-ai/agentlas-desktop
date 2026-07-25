@@ -39,46 +39,67 @@ function pending(chatId, sourceMessageId, overrides = {}) {
 
 function verifyProjectionContract() {
   const decision = require("../dist/shared/one-decision.js");
-  const ordinary = decision.normalizeOneDecision(pending("chat_alpha", "message_alpha"), "task_alpha");
-  assert.equal(decision.isOneDecisionViewV1(ordinary), true);
-  assert.equal(ordinary.risk.level, "R1");
-  assert.ok(ordinary.options.every((option) => option.enabled), "reversible preparation choices stay usable");
-  assert.equal(ordinary.controls.reject.source, "product_safe_default", "a safe product-owned reject path always exists");
 
-  const payment = decision.normalizeOneDecision(pending("chat_payment", "message_payment", {
+  // (a) A stub judged verdict decides. The wordlists survive only as the prior.
+  const judgedR1 = decision.normalizeOneDecision(pending("chat_alpha", "message_alpha"), "task_alpha", {
+    risk: () => "R1",
+    disposition: () => "choice",
+  });
+  assert.equal(decision.isOneDecisionViewV1(judgedR1), true);
+  assert.equal(judgedR1.risk.level, "R1");
+  assert.ok(judgedR1.options.every((option) => option.enabled), "a judged reversible R1 keeps choices usable");
+  assert.equal(judgedR1.controls.reject.source, "product_safe_default", "a safe product-owned reject path always exists");
+
+  // (c-approval) NO connected-model verdict (no reader) FAILS CLOSED to the
+  // highest risk — never the R0/R1 keyword verdict the prompt text would yield.
+  const noModel = decision.normalizeOneDecision(pending("chat_alpha", "message_alpha"), "task_alpha");
+  assert.equal(decision.isOneDecisionViewV1(noModel), true);
+  assert.equal(noModel.risk.level, "R4", "no connected-model verdict fails closed to the highest risk");
+  assert.equal(noModel.risk.certainty, "ambiguous");
+  assert.ok(noModel.options.every((option) => !option.enabled), "fail-closed options require explicit review");
+  assert.equal(noModel.controls.reject.enabled, true, "the safe reject control always works, even failing closed");
+  assert.equal(noModel.controls.modify.enabled, true, "the modify-into-Work path stays available when failing closed");
+
+  const paymentPending = pending("chat_payment", "message_payment", {
     question: "Pay for the annual subscription and publish the result?",
     header: "Subscription",
     options: [
       { label: "Pay $99 and publish", description: "Charges the card and publishes externally" },
       { label: "Cancel", description: "Do not pay or publish" },
     ],
-  }), "task_payment");
+  });
+  // A judged R3 external effect with judged dispositions produces the intended
+  // structured decision.
+  const payment = decision.normalizeOneDecision(paymentPending, "task_payment", {
+    risk: () => "R3",
+    disposition: (text) => (text.includes("Cancel") ? "reject" : "approve"),
+  });
   assert.equal(payment.risk.level, "R3");
   assert.equal(payment.risk.certainty, "ambiguous");
-  assert.equal(payment.cost.value, "$99");
+  assert.equal(payment.cost.value, "$99", "cost detection is closed-form and unaffected");
   assert.equal(payment.options[0].grantsAuthority, true);
   assert.equal(payment.options[0].enabled, false, "unstructured R2+ authority must fail closed");
-  assert.equal(payment.options[1].enabled, true, "the exact rejection remains available");
+  assert.equal(payment.options[1].enabled, true, "the exact judged rejection remains available");
   assert.equal(payment.controls.reject.reply, "Cancel");
   assert.equal(decision.isOneDecisionViewV1(payment), true);
+  // With NO model verdict the same payment card fails closed to R4.
+  const paymentNoModel = decision.normalizeOneDecision(paymentPending, "task_payment");
+  assert.equal(paymentNoModel.risk.level, "R4", "an un-judged payment card fails closed, never keyword R3");
+  assert.ok(paymentNoModel.options.every((option) => !option.enabled), "no option is one-click when the risk can't be verified");
 
-  const unknown = decision.normalizeOneDecision(pending("chat_unknown", "message_unknown", {
-    question: "Should I proceed?",
-    options: [{ label: "Proceed" }, { label: "Not now" }],
-  }), "task_unknown");
-  assert.equal(unknown.risk.level, "R2");
-  assert.equal(unknown.options[0].enabled, false, "ambiguous mutation-shaped approval never appears enabled");
-
-  const multi = decision.normalizeOneDecision(pending("chat_multi", "message_multi", { multiSelect: true }), "task_multi");
+  const multi = decision.normalizeOneDecision(pending("chat_multi", "message_multi", { multiSelect: true }), "task_multi", {
+    risk: () => "R1",
+    disposition: () => "choice",
+  });
   assert.ok(multi.options.every((option) => !option.enabled), "multi-select must be resolved in Work as one exact answer");
 
   const secret = decision.normalizeOneDecision(pending("chat_secret", "message_secret", {
     question: `Review api_key=sk-proj-${"A".repeat(32)}?`,
-  }), "task_secret");
-  assert.equal(JSON.stringify(secret).includes("sk-proj-"), false);
+  }), "task_secret", { risk: () => "R0", disposition: () => "choice" });
+  assert.equal(JSON.stringify(secret).includes("sk-proj-"), false, "the secret-value floor is closed-form and unaffected");
   assert.equal(decision.isOneDecisionViewV1({ ...payment, unexpected: true }), false, "expanded contracts fail closed");
 
-  // ── Judged readers decide risk/disposition; wordlists stay the labeled fallback ──
+  // ── Judged readers decide; NO verdict fails CLOSED (never the keyword verdict) ──
   const arabicCard = {
     question: "هل أقوم بتحويل المبلغ كاملاً إلى الحساب الخارجي الآن؟",
     header: "تحويل الأموال",
@@ -98,15 +119,18 @@ function verifyProjectionContract() {
   assert.equal(judgedWire.options[0].enabled, false, "judged high-risk unstructured authority fails closed");
   assert.equal(judgedWire.options[1].disposition, "reject");
   assert.equal(decision.isOneDecisionViewV1(judgedWire), true);
-  // (b) No judged verdict = today's deterministic verdict (documented under-warning), labeled fallback.
+  // (b) NO judged verdict FAILS CLOSED — the arabic card's regex would say R0
+  // (no wordlist match), but the un-judged decision must NOT return that keyword
+  // verdict; it fails closed to R4.
   const fallbackWire = decision.normalizeOneDecision(pending("chat_ar2", "message_ar2", arabicCard), "task_ar2");
-  assert.equal(fallbackWire.risk.level, "R0", "without a judged verdict the regex fallback stands unchanged");
-  // (c) A judged reader that abstains (null) also keeps the deterministic verdict.
+  assert.equal(fallbackWire.risk.level, "R4", "no model verdict fails closed, never the R0 wordlist verdict");
+  assert.notEqual(fallbackWire.risk.level, "R0", "the fail-closed outcome must not equal the keyword verdict");
+  // (c) A judged reader that abstains (returns null) also fails closed.
   const abstained = decision.normalizeOneDecision(pending("chat_ar3", "message_ar3", arabicCard), "task_ar3", {
     risk: () => null,
     disposition: () => null,
   });
-  assert.equal(abstained.risk.level, fallbackWire.risk.level);
+  assert.equal(abstained.risk.level, "R4", "a reader that abstains fails closed to the highest risk");
   // (d) Exact judgment kinds are the shared contract the electron warm pass uses.
   assert.equal(decision.ONE_DECISION_RISK_JUDGMENT_KIND, "one-decision-risk");
   assert.equal(decision.ONE_DECISION_DISPOSITION_JUDGMENT_KIND, "one-decision-disposition");
@@ -210,7 +234,9 @@ function verifyWiring() {
   const ipc = read("electron/ipc.ts");
   const preload = read("electron/preload.ts");
   const i18n = read("renderer/lib/i18n.tsx");
-  assert.match(shell, /normalizeOneDecision\(confirmation, taskId\)/, "One must render the closed normalized Decision view");
+  assert.match(shell, /normalizeOneDecision\(confirmation, taskId, judgedReaders\)/, "One must render the closed normalized Decision view with judged (bridge-warmed) readers");
+  assert.match(shell, /useJudgedOneDecision\(confirmation\)/, "the DecisionCard must warm risk/disposition through the judgment bridge");
+  assert.match(shell, /modelUnavailable/, "the DecisionCard must surface a connect-a-model state when no model answers");
   assert.match(shell, /approvalBlocked/, "unstructured high-risk approvals need a visible fail-closed guard");
   assert.match(shell, /decision\.controls\.reject\.reply/, "every Decision must keep an explicit reject path");
   assert.match(shell, /onOpenWork/, "every Decision must keep a modification path into Work");

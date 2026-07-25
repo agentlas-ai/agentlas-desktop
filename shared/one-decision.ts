@@ -140,10 +140,12 @@ function classifyOption(
   judged?: OneDecisionJudgedReaders["disposition"],
 ): OneDecisionOptionDisposition {
   const text = oneDecisionOptionJudgmentInput(label, description);
-  // The judged verdict decides; the wordlists remain the labeled fallback.
-  const judgedDisposition = judged?.(text) ?? null;
-  if (judgedDisposition !== null) return judgedDisposition;
-  return lexicalOneDecisionDisposition(text);
+  // The connected-model verdict decides. With NO verdict we FAIL CLOSED to a
+  // neutral "choice" (which, under the fail-closed R4 level below, cannot grant
+  // authority without explicit approval) — never a keyword disposition. The
+  // reject/modify CONTROLS still work, so the user can always decline. The
+  // disposition wordlists survive only as the judge's prior.
+  return (judged?.(text) ?? null) ?? "choice";
 }
 
 /** Deterministic wordlist risk level — the labeled fallback prior for the judge. */
@@ -173,18 +175,25 @@ function inferRisk(
   optionDispositions: readonly OneDecisionOptionDisposition[],
   judged?: OneDecisionJudgedReaders["risk"],
 ): OneDecisionViewV1["risk"] {
-  const matches = RISK_PATTERNS.filter((pattern) => pattern.re.test(text));
-  let level = lexicalOneDecisionRiskLevel(text, optionDispositions);
-  const hasUnstructuredAuthority = optionDispositions.includes("approve");
-  // The judged verdict decides the level; the wordlist verdict above is only the
-  // labeled fallback. This is how a payment/send phrased in a language the
-  // wordlists never covered still reaches R3/R4.
+  // The connected model decides the risk level (a payment/send phrased in a
+  // language the wordlists never covered still reaches R3/R4). With NO verdict —
+  // no reader (renderer render pass) or a reader that returns null (no model /
+  // not warmed) — we FAIL CLOSED to the highest risk and require explicit
+  // approval. This is a safe stop, not a keyword decision; the RISK_PATTERNS
+  // wordlists survive only as the judge's prior.
   const judgedLevel = judged?.(text) ?? null;
-  if (judgedLevel !== null) level = judgedLevel;
+  if (judgedLevel === null) {
+    return { level: "R4", certainty: "ambiguous", reasons: ["critical_effect", "unstructured_authority_request"] };
+  }
+  const level = judgedLevel;
+  // RISK_PATTERNS matches are used ONLY to attribute descriptive reasons to the
+  // model-decided level, never to decide it.
+  const matches = RISK_PATTERNS.filter((pattern) => pattern.re.test(text));
+  const hasUnstructuredAuthority = optionDispositions.includes("approve");
   const reasons = [...new Set(matches
     .filter((match) => match.level === level)
     .map((match) => match.reason))];
-  if (reasons.length === 0 && judgedLevel !== null) reasons.push(CANONICAL_LEVEL_REASON[judgedLevel]);
+  if (reasons.length === 0) reasons.push(CANONICAL_LEVEL_REASON[level]);
   if (hasUnstructuredAuthority && RISK_ORDER[level] >= RISK_ORDER.R2) reasons.push("unstructured_authority_request");
   if (matches.some((match) => RISK_ORDER[match.level] <= 1) && matches.some((match) => RISK_ORDER[match.level] >= 2)) {
     reasons.push("conflicting_signals");

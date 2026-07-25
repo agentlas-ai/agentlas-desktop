@@ -448,17 +448,25 @@ export const ONE_COMPLETION_CLAIM_JUDGMENT_KIND = "one-completion-claim";
 /**
  * Does this value statement claim an external/irreversible action already happened?
  * This gates a trust invariant (a completion claim needs execution/outcome evidence),
- * so under-firing is the dangerous direction: the English/Korean regex misses the
- * same claim in any other language. The connected model decides when a judged
- * verdict exists — `judged` is a synchronous reader of the resident judgment cache
- * (electron passes a peek warmed by prejudgeCompletionClaim). No verdict = today's
- * regex result, the labeled fallback.
+ * so under-firing is the dangerous direction.
+ *
+ * When a judged reader is supplied (the trust gate / weekly reflection), the
+ * connected model is the sole decider: `judged` is a synchronous reader of the
+ * resident judgment cache (electron passes a peek warmed by prejudgeCompletionClaim).
+ * A missing verdict (no connected model / not warmed) FAILS CLOSED — we treat the
+ * statement AS a completion claim so it still requires execution/outcome evidence,
+ * rather than silently passing on a wordlist miss. The regex survives only as the
+ * judge's prior: called WITHOUT a reader (prior computation) it returns the regex
+ * verdict, never the fail-closed default.
  */
 export function oneValueClosureContainsCompletionClaim(
   value: string,
   judged?: (text: string) => boolean | null,
 ): boolean {
-  const judgedVerdict = judged?.(value) ?? null;
+  if (!judged) return COMPLETION_CLAIM_RE.test(value);
+  const judgedVerdict = judged(value);
   if (judgedVerdict !== null) return judgedVerdict;
-  return COMPLETION_CLAIM_RE.test(value);
+  // Gate with a reader but NO connected-model verdict → fail closed (assume a
+  // completion claim; keep the conservative, unverified stance).
+  return true;
 }

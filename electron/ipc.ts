@@ -320,8 +320,6 @@ import {
   removeProject,
   updateProject,
 } from "./store/projects";
-import { generateProjectMemorySource, getProjectMemoryStatus } from "./memory/context";
-import type { ProjectMemoryGenerateResult, ProjectMemoryStatus } from "../shared/project-memory";
 import {
   archiveChat,
   clearChatContext,
@@ -1370,6 +1368,28 @@ export function registerIpcHandlers(): void {
     "generated-app-visual-output": {
       question: "Does this generated app primarily produce visual media outputs (images, cards, posters, storyboards, video) rather than text or data results? Answer yes or no.",
       guidance: "Judge the app's actual purpose from its metadata, in any language.",
+    },
+    // One DecisionCard risk/disposition — the Desktop render pass warms these
+    // through the bridge and FAILS CLOSED (highest risk / approval required) when
+    // no model answers; it never keyword-decides.
+    "one-decision-risk": {
+      question:
+        "How risky is the action this assistant decision request asks the user to authorize? " +
+        "R0 read-only; R1 preparation/draft only; R2 limited reversible change (save, upload, install); " +
+        "R3 external effect (send, publish, book, pay, delete); R4 critical/irreversible effect " +
+        "(legal filing, wiring money, security/permission change, mass destruction of data).",
+      guidance:
+        "Under-warning is the dangerous direction: when the action genuinely sends, pays, publishes, or " +
+        "destroys, say R3/R4 even in a language no wordlist covers. Negated/hypothetical phrasing lowers it.",
+    },
+    "one-decision-disposition": {
+      question:
+        "For this ONE decision option, does choosing it approve/execute the proposed action (approve), " +
+        "refuse it (reject), ask to modify or narrow it first (modify), or merely pick among neutral " +
+        "alternatives (choice)?",
+      guidance:
+        "\"without X\" is usually a qualifier on an action option, not a refusal. Only a phrase that negates " +
+        "the action itself is a rejection.",
     },
   };
   const RENDERER_SUBSET_KINDS: Record<string, { question: string; guidance: string }> = {
@@ -2910,23 +2930,6 @@ export function registerIpcHandlers(): void {
     }),
   );
   ipcMain.handle("projects:remove", (_e, id: string) => removeProject(id));
-  // Project memory status (fix-if-unused surfacing): reports whether pm_soul /
-  // code_map / sitemap are present and recently injected, so a missing/unused
-  // source is visible on the Dashboard with a generate action.
-  ipcMain.handle("projects:memory-status", (_e, projectId: string): ProjectMemoryStatus | null => {
-    const project = getProject(projectId);
-    if (!project?.folderPath) return null;
-    return getProjectMemoryStatus(project.folderPath, project.id);
-  });
-  ipcMain.handle(
-    "projects:generate-memory",
-    (_e, projectId: string, source: "code_map" | "sitemap"): ProjectMemoryGenerateResult => {
-      const project = getProject(projectId);
-      if (!project?.folderPath) return { started: false, reason: "The project does not have a working folder." };
-      if (source !== "code_map" && source !== "sitemap") return { started: false, reason: "Unknown memory source." };
-      return generateProjectMemorySource(project.folderPath, source);
-    },
-  );
 
   // ── ontology activation (project-local, inbox + explicit sources only) ──
   ipcMain.handle("ontology:getProject", (_e, projectId: string) =>

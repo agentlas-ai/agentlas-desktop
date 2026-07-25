@@ -66,6 +66,8 @@ import type {
 import type { OneSurfaceManifestV1 } from "@shared/one-surface";
 import { customerSafeProgressDetail, toCustomerSafeText } from "@shared/one-customer-safe";
 import { classifyOneRequestIntent } from "@shared/one-request-intent";
+import { judgmentUnavailableMessage } from "@shared/judgment-fallback";
+import { useJudgedOneDecision } from "@/lib/one-decision-judged";
 import type { OneRecurrenceSelectionV1 } from "@shared/one-recurrence";
 import { shouldPresentOneWeeklyReflection } from "@shared/one-weekly-reflection";
 import {
@@ -2580,7 +2582,11 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
   onOpenWork: () => void;
   onSnooze: (confirmation: PendingConfirmation) => void;
 }) {
-  const decision: OneDecisionViewV1 = normalizeOneDecision(confirmation, taskId);
+  // The render pass has no synchronous model: warm the judge via the bridge and
+  // pass its verdicts. Until/unless a model verdict lands, normalizeOneDecision
+  // FAILS CLOSED (highest risk, approval required) — it never keyword-decides.
+  const { readers: judgedReaders, modelUnavailable } = useJudgedOneDecision(confirmation);
+  const decision: OneDecisionViewV1 = normalizeOneDecision(confirmation, taskId, judgedReaders);
   const riskRank = Number(decision.risk.level.slice(1));
   const approvalBlocked = riskRank >= 2 && decision.risk.certainty === "ambiguous";
   const directOptions = decision.options.filter((option) => option.enabled && option.disposition !== "reject" && option.disposition !== "modify");
@@ -2657,6 +2663,12 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
       <p className={styles.decisionEvidence}>
         {tFor(locale, "one.shell.decision.evidence", { time: formatTimestamp(decision.createdAt, locale) })}
       </p>
+
+      {modelUnavailable && (
+        <div className={styles.decisionGuard} role="status">
+          <span>{judgmentUnavailableMessage(locale)}</span>
+        </div>
+      )}
 
       {approvalBlocked && (
         <div className={styles.decisionGuard} role="status">
