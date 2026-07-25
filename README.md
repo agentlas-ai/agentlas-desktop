@@ -69,6 +69,18 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-25 · v0.9.15 — the connected model decides; no silent keyword fallback** —
+  every judged decision (approval/risk, chat-vs-task, which agent to route to, which tools a
+  task needs, task class, surface and design-style inference, completion-claim gating) is made
+  by your connected model reading the whole request, with wordlists demoted to reference hints
+  only. When no model can reach a verdict, classification and routing halt as undecided and say
+  so instead of guessing by keyword, and approval/risk gates fail closed — a transient timeout
+  is distinguished from a genuinely missing model. The embedded Agentlas OS runtime's own judge
+  (content-guard, pipeline, research, privacy) now uses your connected model too, so provider,
+  CLI, and local-model users alike get real judgment there with no model hardcoded.
+  This release binds Agentlas OS v1.1.62 at 19b75025e5e252e90d93015a839c55d08fcb8061.
+  This source note does not prove a Desktop Git tag, public installer, GitHub release, or
+  update feed.
 - **2026-07-25 · v0.9.14 — publish auto-fix converges to an uploadable package** —
   publishing to the public Hub now runs a generic remediation loop against the real gate: every
   blocking finding is fixed by your connected model in a throwaway copy (a real secret value is

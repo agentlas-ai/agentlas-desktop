@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.9.15 — 2026-07-25
+
+### Changed
+
+- The connected model, not a keyword list, makes every judged decision: approval
+  and risk classification, chat-vs-task intent, which agent to route to, which
+  tools a task needs, task class, surface and design-style inference, and
+  completion-claim gating. Wordlists are demoted to reference hints handed to the
+  model — they no longer decide anything on their own, so a request in any
+  language, dialect, or phrasing is judged by meaning.
+- No more silent keyword fallback. When no connected model can reach a verdict,
+  classification and routing return an explicit "undecided" and say a model is
+  needed instead of guessing by keyword, and approval/risk/completion gates fail
+  closed. A model that timed out or errored is distinguished from a genuinely
+  missing model, so a transient hiccup isn't reported as "no model connected".
+- The embedded Agentlas OS runtime's own resident judge (content-guard, pipeline
+  stages, research loadout, privacy adjudication) now decides by meaning using
+  this app's connected model through a universal host bridge — previously it was
+  wired to nothing and silently fell back to keywords in every case. No model is
+  hardcoded; provider, CLI, and local-model runtimes are all supported.
+
+This release binds Agentlas OS v1.1.62 at 19b75025e5e252e90d93015a839c55d08fcb8061.
+This changelog entry describes source readiness and does not prove a published
+Desktop release, installer, or update feed.
+
 ## 0.9.14 — 2026-07-25
 
 ### Changed
