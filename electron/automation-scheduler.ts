@@ -33,6 +33,7 @@ import { emitAutomationDone } from "./triggers/chain-bus";
 import {
   classifyAutomationFailure,
   classifyAutomationOutput,
+  classifyAutomationOutcome,
   type AutomationResultStatus,
 } from "./automation-result";
 import {
@@ -697,7 +698,7 @@ async function runOne(
       const outVals = Object.values(result.outputs ?? {});
       output = outVals.length ? outVals[outVals.length - 1] : undefined;
       if (runStatus === "ok") {
-        const classified = classifyAutomationOutput(output);
+        const classified = await classifyAutomationOutcome(output);
         runStatus = classified.outcome;
         runError = classified.reasonCode && classified.reason
           ? `[${classified.reasonCode}] ${classified.reason}`
@@ -833,7 +834,7 @@ async function runOne(
         output = result.finalText;
         if (runnerError) throw new Error(runnerError);
         if (!output?.trim()) throw new Error("Automation finished without an assistant result");
-        const classified = classifyAutomationOutput(output);
+        const classified = await classifyAutomationOutcome(output);
         runStatus = classified.outcome;
         runError = classified.reasonCode && classified.reason
           ? `[${classified.reasonCode}] ${classified.reason}`

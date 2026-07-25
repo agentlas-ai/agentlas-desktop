@@ -81,6 +81,86 @@ export function classifyAutomationOutput(text: string | null | undefined): Autom
   return { status: "ok", outcome: "ok", reasonCode: null, reason: null, evidence: null };
 }
 
+/** Reason codes that come from a literal, structured marker (an exact error code or fence),
+ *  not from prose. These are format signals — high-precision and language-independent — so the
+ *  resident judge is not allowed to override them. Everything else is prose the judge adjudicates. */
+const STRUCTURED_REASON_CODES = new Set<string>([
+  "unattended_question", "missing_input", "intervention_required",
+  "hub_version_pin_required", "pinned_runtime_contract_invalid", "hub_mode_contract_invalid",
+  "insufficient_credits", "owner_only", "no_cloud_package", "agent_not_found",
+  "hub_source_temporarily_unavailable", "hub_bundle_temporarily_unavailable",
+  "hub_version_pin_temporarily_unavailable", "hub_version_pin_invalid", "hub_source_not_configured",
+  "hub_bundle_fetch_not_supported", "hub_source_forbidden", "workforce_bundle_contract_invalid",
+  "workforce_hub_source_contract_invalid", "workforce_session_unavailable",
+  "workforce_runtime_incompatible", "partial_reconciliation_required", "ambiguous_side_effect",
+  "workspace_permission_denied", "insufficient_credits",
+]);
+
+/**
+ * Meaning-aware automation outcome. The regex patterns above stop being the decider for the
+ * prose cases that misfire (e.g. "the run completed and nothing was blocked" wrongly read as
+ * blocked); the resident judge decides by intent, with the deterministic result as a strong
+ * prior and the reason strings demoted to hints. Structured error-code markers stay
+ * authoritative. Safety invariant preserved: a detected failure/blocked/needs_input is only
+ * downgraded to "ok" when the judge is highly confident it was a false positive, and a clean
+ * "ok" is upgraded to a failure when the judge is confident the run actually failed — an
+ * unknown result is never turned into success.
+ *
+ * Falls back to the pure deterministic classification when no model is reachable.
+ */
+export async function classifyAutomationOutcome(
+  text: string | null | undefined,
+  opts: { signal?: AbortSignal } = {},
+): Promise<AutomationResultClassification> {
+  const det = classifyAutomationOutput(text);
+  const normalized = (text ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return det;
+  // Structured marker → format signal, authoritative. No model call.
+  if (det.reasonCode && STRUCTURED_REASON_CODES.has(det.reasonCode)) return det;
+
+  const { judge } = await import("./system-agents/judgment");
+  const verdict = await judge<AutomationResultStatus>({
+    kind: "automation-outcome",
+    question:
+      "Given an AI automation run's own final result text, did the run actually complete its work, or did it fail, get blocked, need user input, have nothing eligible to do, or only partially finish?",
+    labels: ["ok", "error", "blocked", "needs_input", "skipped", "partial"] as const,
+    input: normalized.slice(0, 4000),
+    guidance:
+      `A deterministic pre-pass classified this as "${det.status}"` +
+      (det.reason ? ` (${det.reason})` : "") +
+      `. Treat that as a prior, not a fact. Judge the actual outcome the text describes. ` +
+      `"ok" = the intended work was done. Negated phrases like "nothing was blocked" or ` +
+      `"no permission errors" describe SUCCESS, not a block. Only say blocked/error/needs_input ` +
+      `if the run genuinely did not finish its work.`,
+    hints: [
+      { label: "blocked", words: ["blocked", "halted", "중단", "차단", "not granted", "permission", "authentication required", "sign-in required"] },
+      { label: "needs_input", words: ["needs input", "question", "intervention", "user input"] },
+      { label: "skipped", words: ["nothing to do", "no approved", "nothing eligible"] },
+      { label: "error", words: ["failed", "aborted", "무산", "실패"] },
+    ],
+    fallback: det.status,
+    signal: opts.signal,
+  });
+
+  if (verdict.source === "fallback") return det;
+
+  const detFailed = det.status !== "ok";
+  const judgeOk = verdict.verdict === "ok";
+  // Safety invariant: only downgrade a detected failure to ok on high confidence.
+  if (detFailed && judgeOk && verdict.confidence < 0.7) return det;
+  // Upgrade a clean ok to a failure only when the judge is reasonably confident.
+  if (!detFailed && !judgeOk && verdict.confidence < 0.6) return det;
+
+  if (verdict.verdict === det.status) return det; // agree — keep richer evidence/reasonCode
+  return {
+    status: verdict.verdict,
+    outcome: verdict.verdict,
+    reasonCode: judgeOk ? null : det.reasonCode ?? "judged_" + verdict.verdict,
+    reason: verdict.reason || det.reason,
+    evidence: det.evidence,
+  };
+}
+
 /** Classify an exception/error event without ever turning an unknown failure into success. */
 export function classifyAutomationFailure(text: string | null | undefined): AutomationResultClassification {
   const classified = classifyAutomationOutput(text);

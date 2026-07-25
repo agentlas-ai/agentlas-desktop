@@ -235,6 +235,23 @@ function normalize(value: string): string {
   return value.toLowerCase().replace(/[_/]+/g, "-");
 }
 
+/**
+ * A direct agent-name hit only counts when it is a real reference, not an incidental
+ * substring. A short name like "go"/"one"/"id" appears inside ordinary prose
+ * ("where should I go", "someone", "video") and used to hijack routing. Long names
+ * (>= 5 chars) keep the fast substring test; short ones require a word/token boundary.
+ * When the on-device semantic model is loaded it is the real authority (see below); this
+ * guard protects the no-model fallback path where lexical intent is honored directly.
+ */
+function nameMatchesPrompt(promptText: string, normalizedName: string): boolean {
+  if (!normalizedName) return false;
+  if (normalizedName.length >= 5) return promptText.includes(normalizedName);
+  const escaped = normalizedName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Boundary = start/end or any non-alphanumeric (covers spaces, punctuation, and
+  // Hangul/Latin transitions) on both sides of the short name.
+  return new RegExp(`(?:^|[^a-z0-9가-힣])${escaped}(?:$|[^a-z0-9가-힣])`, "i").test(promptText);
+}
+
 function tokenize(value: string): string[] {
   const normalized = normalize(value);
   const matches = normalized.match(/[a-z0-9][a-z0-9-]{1,}|[가-힣]{2,}/g) ?? [];
@@ -473,7 +490,7 @@ function scoreAgent(
   let directNameMatched = false;
   for (const name of directNames) {
     const n = normalize(name);
-    if (n && promptText.includes(n)) {
+    if (n && nameMatchesPrompt(promptText, n)) {
       score += 20;
       matchedTerms.push(name);
       directNameMatched = true;
@@ -564,15 +581,10 @@ export function selectAutoRoutedAgent(
     matchedTerms: entry.terms,
   });
 
-  // 1) Explicit intent always wins: the person named the agent, a curated hint
-  //    fired, or their own reviewed experience matched. Honor it regardless of
-  //    the semantic verdict — they told us which specialist to use.
-  const explicit = ranked.find((entry) => entry.highPrecision && entry.score >= MIN_SPECIALIST_SCORE);
-  if (explicit) return toChoice(explicit);
-
   // Lexical recruitment: the strongest agent that clears the specialist bar.
   const eligibleByLexical = ranked.filter((entry) => entry.score >= MIN_SPECIALIST_SCORE);
   const lexicalBest = eligibleByLexical[0] ?? null;
+  const explicit = ranked.find((entry) => entry.highPrecision && entry.score >= MIN_SPECIALIST_SCORE);
 
   // 2) On-device semantic precision filter. The lexical scorer is a bag of
   //    words: a café restock note and a meme-video studio can share enough
@@ -600,7 +612,12 @@ export function selectAutoRoutedAgent(
     return defaultCoordinationChoice(candidates, locale);
   }
 
-  // 3) No verified local model (asset absent) — preserve the legacy lexical bar.
+  // 3) No verified local model (asset absent) — fall back to lexical intent. Here the
+  //    keyword layer is all we have, so an explicit name/hint match is honored first,
+  //    then the strongest lexically-eligible agent. (With the model loaded, path 2 above
+  //    already subjected these same matches to the semantic veto, so a coincidental short
+  //    name can no longer hijack the route.)
+  if (explicit) return toChoice(explicit);
   if (lexicalBest) return toChoice(lexicalBest);
 
   if (!opts?.allowFallback) return null;
