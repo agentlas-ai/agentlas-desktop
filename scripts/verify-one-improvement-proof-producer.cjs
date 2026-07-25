@@ -103,7 +103,12 @@ const ACTIVE_RUNTIME = Object.freeze({
 });
 
 function preflightDeps() {
-  return { detectRuntimes: async () => [{ ...ACTIVE_RUNTIME }] };
+  // The connected model is the team-need decider now (wordlists are only hints).
+  // This fixture exercises the confirmed-team path, so inject a judged "yes".
+  return {
+    detectRuntimes: async () => [{ ...ACTIVE_RUNTIME }],
+    judgeTeamNeed: async () => ({ needed: true, source: "llm", reason: "seeded team-improvement fixture" }),
+  };
 }
 
 function waitFor(predicate, timeoutMs = 8_000) {

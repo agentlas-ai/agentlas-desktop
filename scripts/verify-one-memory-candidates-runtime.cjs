@@ -147,16 +147,24 @@ async function seedWorker() {
     "2026-07-18T00:00:00.000Z",
   );
 
-  assert.deepEqual(detector.detectExplicitOneMemoryIntent("앞으로는 결론과 근거를 먼저 보여줘."), {
+  // The connected model is the sole decider: pass a judged verdict (the electron
+  // path warms it via prejudgeOneMemoryIntent). A judged "yes" fires; the closed-form
+  // safety line still vetoes local paths and secrets even on a "yes".
+  const yes = () => true;
+  const no = () => false;
+  assert.deepEqual(detector.detectExplicitOneMemoryIntent("앞으로는 결론과 근거를 먼저 보여줘.", yes), {
     normalizedPreview: "결론과 근거를 먼저 보여줘",
-    suppressionKey: detector.detectExplicitOneMemoryIntent("앞으로는 결론과 근거를 먼저 보여줘.").suppressionKey,
+    suppressionKey: detector.detectExplicitOneMemoryIntent("앞으로는 결론과 근거를 먼저 보여줘.", yes).suppressionKey,
     basis: "explicit_user_statement",
   });
-  assert.equal(detector.detectExplicitOneMemoryIntent("아니, 앞으로는 표보다 결론을 먼저 보여줘.").basis, "user_correction");
-  assert.equal(detector.detectExplicitOneMemoryIntent("Please remember that I prefer the decision before detail.").normalizedPreview, "I prefer the decision before detail");
-  assert.equal(detector.detectExplicitOneMemoryIntent("I prefer concise reports."), null, "ordinary preference text must not be inferred as Memory");
-  assert.equal(detector.detectExplicitOneMemoryIntent("기억해줘: /Users/mason/private/customer.csv를 먼저 읽어"), null, "local paths must fail quiet");
-  assert.equal(detector.detectExplicitOneMemoryIntent("Remember that password=secret-value"), null, "secret-like text must fail quiet");
+  assert.equal(detector.detectExplicitOneMemoryIntent("아니, 앞으로는 표보다 결론을 먼저 보여줘.", yes).basis, "user_correction");
+  assert.equal(detector.detectExplicitOneMemoryIntent("Please remember that I prefer the decision before detail.", yes).normalizedPreview, "I prefer the decision before detail");
+  // A judged "no" (ordinary preference) never becomes a Memory, and — the point of the
+  // rework — NO verdict (no model warmed) also never keyword-decides.
+  assert.equal(detector.detectExplicitOneMemoryIntent("I prefer concise reports.", no), null, "an ordinary preference the model rejects is not a Memory");
+  assert.equal(detector.detectExplicitOneMemoryIntent("앞으로는 결론과 근거를 먼저 보여줘."), null, "no connected model verdict → never a keyword-inferred Memory");
+  assert.equal(detector.detectExplicitOneMemoryIntent("기억해줘: /Users/mason/private/customer.csv를 먼저 읽어", yes), null, "local paths must fail quiet even on a judged yes");
+  assert.equal(detector.detectExplicitOneMemoryIntent("Remember that password=secret-value", yes), null, "secret-like text must fail quiet even on a judged yes");
 
   // ── Judged verdict decides; the prefix/suffix wordlists are hints + labeled fallback ──
   const arabicRemember = "تذكّر دائماً أنني أفضل الملخص قبل التفاصيل";
