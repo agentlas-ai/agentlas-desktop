@@ -31,15 +31,10 @@ import {
 import { autoLocalEmbedding, localEmbeddingTokens, rankHybridLocal } from "./local-embedding";
 import { listMemoryEpisodesForContext } from "./tickets";
 import { readDiscoveredProjectPmTextFiles } from "./project-artifacts";
+import { refreshProjectSitemap } from "./project-files";
 import { looksSecret } from "../../shared/secret-patterns";
-import type {
-  ProjectMemoryGenerateResult,
-  ProjectMemorySourceStatus,
-  ProjectMemoryStatus,
-} from "../../shared/project-memory";
 import {
   type ContextSourceName,
-  listRecentContextSourcesForProject,
   projectContextKey,
   recordContextSourceMarker,
 } from "../store/run-events";
@@ -191,6 +186,30 @@ function summarizeCodeMap(projectPath: string): string | null {
   } catch {
     return null;
   }
+}
+
+// ── AI sitemap (RECALL layer) ──────────────────────────────────────────────
+// The sitemap is auto-maintained; it is not something a user should have to
+// press a button for. The generator existed and worked all along, but nothing
+// on the run path ever called it: refreshProjectSitemap was reachable only from
+// ontology provisioning. So projects sat on an empty 139-byte skeleton — or a
+// months-stale file — indefinitely while every turn quietly logged "missing or
+// too large to read". Refresh once per project per process, like the code map.
+const sitemapTriggered = new Set<string>();
+
+function ensureSitemap(projectPath: string): void {
+  if (sitemapTriggered.has(projectPath)) return;
+  sitemapTriggered.add(projectPath);
+  // The refresh walks the project tree synchronously (~200ms on a large repo).
+  // Never make a turn wait for it; this turn reads whatever is on disk now and
+  // the next one picks up the fresh map.
+  setImmediate(() => {
+    try {
+      refreshProjectSitemap(projectPath);
+    } catch {
+      /* never block a turn on sitemap generation */
+    }
+  });
 }
 
 function summarizeSitemap(projectPath: string): string | null {
@@ -585,6 +604,9 @@ export function buildMemoryContext(
     } else {
       warnProjectMemoryGap(projectPath, "project-soul", "missing or empty");
     }
+    // Read-only turns must not materialize project-local state; the same gate
+    // that guards code-map generation guards the sitemap refresh.
+    if (options.materializeCodeMap !== false) ensureSitemap(projectPath);
     const sitemap = summarizeSitemap(projectPath);
     if (sitemap) {
       sections.push(sitemap);
@@ -628,86 +650,4 @@ export function buildMemoryContext(
 
   flushMarkers();
   return formatMemorySections(sections);
-}
-
-const MEMORY_STATUS_RECENT_DAYS = 30;
-
-/**
- * Fix-if-unused surfacing: report whether pm_soul / code_map / sitemap are
- * present for a project and whether they were recently injected (from
- * content-free markers). Powers the Dashboard "project memory status" panel so
- * a missing/unused source becomes visible with a generate action instead of a
- * silent warnProjectMemoryGap.
- */
-export function getProjectMemoryStatus(
-  projectPath: string,
-  projectId?: string | null,
-): ProjectMemoryStatus {
-  const identityVerified = verifyActivatedFolderIdentity(projectPath);
-  const sinceIso = new Date(Date.now() - MEMORY_STATUS_RECENT_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  const projectKey = projectContextKey(projectId ?? null, projectPath);
-  const recent = projectKey ? listRecentContextSourcesForProject(projectKey, sinceIso) : new Set<ContextSourceName>();
-
-  if (!identityVerified) {
-    const blocked = (): ProjectMemorySourceStatus => ({
-      present: false,
-      recentlyInjected: false,
-      reason: "project folder access is not currently authorized",
-      canGenerate: false,
-    });
-    return { projectPath, identityVerified, pmSoul: blocked(), codeMap: blocked(), sitemap: blocked() };
-  }
-
-  const soulText = readActivatedProjectMemoryText(projectPath, PROJECT_SOUL_FILE);
-  const soulPresent = Boolean(soulText && soulText.trim());
-  const codeMapPresent = Boolean(readCodeMapSeed(projectPath));
-  const sitemapPresent = Boolean(summarizeSitemap(projectPath));
-
-  return {
-    projectPath,
-    identityVerified,
-    pmSoul: {
-      present: soulPresent,
-      recentlyInjected: recent.has("pm_soul"),
-      reason: soulPresent ? null : "no PM soul document (.agentlas soul file missing or empty)",
-      canGenerate: false,
-    },
-    codeMap: {
-      present: codeMapPresent,
-      recentlyInjected: recent.has("code_map"),
-      reason: codeMapPresent ? null : "no readable code map — generate one so agents can locate code without scanning",
-      canGenerate: true,
-    },
-    sitemap: {
-      present: sitemapPresent,
-      recentlyInjected: recent.has("sitemap"),
-      reason: sitemapPresent ? null : "no AI sitemap for this project",
-      canGenerate: true,
-    },
-  };
-}
-
-/**
- * Wire the Dashboard "generate" action to existing generators. Code map spawns
- * the background code-map generator (same path buildMemoryContext uses); sitemap
- * has no local generator yet, so it reports that honestly rather than pretending.
- */
-export function generateProjectMemorySource(
-  projectPath: string,
-  source: "code_map" | "sitemap",
-): ProjectMemoryGenerateResult {
-  if (!verifyActivatedFolderIdentity(projectPath)) {
-    return { started: false, reason: "project folder access is not currently authorized" };
-  }
-  if (source === "code_map") {
-    if (readCodeMapSeed(projectPath)) return { started: false, reason: "code map already present" };
-    const gen = codeMapGenPath();
-    if (!gen) return { started: false, reason: "code map generator is unavailable in this build" };
-    // Reset the per-session trigger guard so an explicit user request always
-    // (re)spawns generation even if an earlier auto-attempt marked it triggered.
-    codeMapTriggered.delete(projectPath);
-    ensureCodeMap(projectPath);
-    return { started: true, reason: null };
-  }
-  return { started: false, reason: "sitemap generation is not available locally yet" };
 }

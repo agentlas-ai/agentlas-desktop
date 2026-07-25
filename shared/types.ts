@@ -6,7 +6,6 @@ import type {
   MultimodalSettings,
 } from "./multimodal";
 import type { OberonTitleSpec } from "./oberon-titles";
-import type { ProjectMemoryGenerateResult, ProjectMemoryStatus } from "./project-memory";
 import type { OneSurfaceManifestV1 } from "./one-surface";
 import type { DurableOneSurfaceResult } from "./one-surface-durable";
 import type {
@@ -5516,8 +5515,6 @@ export interface AgentlasIpc {
       patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId">> & { folderGrant?: FsPathGrant | null },
     ) => Promise<Project>;
     remove: (id: string) => Promise<void>;
-    memoryStatus: (projectId: string) => Promise<ProjectMemoryStatus | null>;
-    generateMemory: (projectId: string, source: "code_map" | "sitemap") => Promise<ProjectMemoryGenerateResult>;
   };
   ontology: {
     getProject: (projectId: string) => Promise<OntologyProjectStatus>;
