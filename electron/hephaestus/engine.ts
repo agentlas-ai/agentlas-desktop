@@ -222,6 +222,18 @@ export async function resolveHephaestusStdioLaunch(
   const pythonArgs = py.python === "py"
     ? ["-3", "-c", PY_BOOTSTRAP, module, ...args]
     : ["-c", PY_BOOTSTRAP, module, ...args];
+  // Let the embedded OS runtime's resident judge use this desktop's connected
+  // local model (Ollama / LM Studio / MLX). Absent for CLI / networked BYOK — the
+  // OS side then reports the honest "connect a model" outcome, never a keyword.
+  let judgeRuntime: string | undefined;
+  try {
+    const { pickActive } = await import("../runtime/selection");
+    const { detectRuntimes } = await import("../runtime/detect");
+    const { osJudgeRuntimeEnvValue } = await import("../runtime/os-judge-runtime");
+    judgeRuntime = osJudgeRuntimeEnvValue(pickActive(await detectRuntimes()));
+  } catch {
+    judgeRuntime = undefined;
+  }
   return {
     command: py.python,
     args: pythonArgs,
@@ -231,6 +243,7 @@ export async function resolveHephaestusStdioLaunch(
       PYTHONPATH: runtimeRoot,
       PYTHONUTF8: "1",
       PYTHONIOENCODING: "utf-8",
+      ...(judgeRuntime ? { AGENTLAS_JUDGE_RUNTIME: judgeRuntime } : {}),
     }),
   };
 }
