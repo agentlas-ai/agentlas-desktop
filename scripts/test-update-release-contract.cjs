@@ -79,12 +79,12 @@ assert.equal(compatibility.minimumRuntimeVersion, "1.0.4", "v0.7.0 shipped Hepha
 assert.equal(compatibility.minimumSchemaVersion, 35, "v0.7.0 shipped SQLite schema 35");
 assert.equal(
   compatibility.bundledRuntimeVersion,
-  "1.1.58",
-  "Desktop bundles Agentlas OS v1.1.58 (exact immutable runtime pin)",
+  "1.1.60",
+  "Desktop bundles Agentlas OS v1.1.60 (exact immutable runtime pin)",
 );
 assert.equal(runtimeSource.ref, `v${compatibility.bundledRuntimeVersion}`, "runtime source ref must match compatibility");
 assert.match(runtimeSource.commit, /^[0-9a-f]{40}$/, "runtime source must pin an immutable full commit");
-assert.equal(runtimeSource.commit, "47e2368e5c775d6345118c6409850872ec647738", "Agentlas OS v1.1.58 commit drift");
+assert.equal(runtimeSource.commit, "2430d2806782576177002a96f5e792e0439962e5", "Agentlas OS v1.1.60 commit drift");
 assert.equal(compatibility.bundledRuntimeVersion, manifest.version, "feed runtime must match the bundled Hephaestus manifest");
 assert.equal(
   spawnSync("git", ["-C", embeddedRuntimeRoot, "rev-parse", "HEAD^{commit}"], { encoding: "utf8" }).stdout.trim(),

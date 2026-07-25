@@ -69,6 +69,19 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-25 · v0.9.13 — publish auto-fix + resident LLM judgment** —
+  publishing an agent to the public Hub runs a cleanup pass first: virtualenvs, caches, build
+  artifacts, and secret files (`.env`, private keys) are excluded — `.example` siblings kept —
+  symlinks stripped, and missing bilingual listing metadata is translated by your connected
+  model grounded in the agent's real name/tagline/definition, so any locally-built agent
+  publishes cleanly; a deterministic backstop still catches never-publish files and inline
+  secrets with no model connected. Security and language judgment move from keyword lists to a
+  resident LLM judgment service (wordlists demoted to hints), clearing false positives on
+  declarative Korean security copy, ordinary words, and qualified money/destruction phrasing;
+  an unrecognized scan severity is now unsafe, not safe.
+  This release binds Agentlas OS v1.1.60 at 2430d2806782576177002a96f5e792e0439962e5.
+  This source note does not prove a Desktop Git tag, public installer, GitHub release, or
+  update feed.
 - **2026-07-25 · v0.9.12 — owner-scoped borrowed-agent memory nests (schema v78)** —
   borrowed agents keep an owner-scoped memory nest so portable skills carry between your
   projects while project-identifying details stay quarantined to their origin project; schema

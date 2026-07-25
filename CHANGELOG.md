@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.9.13 — 2026-07-25
+
+### Added
+
+- Publish auto-fix. Publishing an agent to the public Hub now runs a cleanup
+  pass first, so a locally-built agent publishes cleanly without hand-editing
+  files: virtualenvs, caches, and build artifacts are excluded; secret files
+  (`.env`, private keys) are dropped while their `.example`/`.sample` siblings
+  are kept; symlinks are stripped; and missing bilingual listing metadata is
+  translated by your connected model, grounded in the agent's real name,
+  tagline, and definition so the listing stays faithful rather than generic. A
+  deterministic safety backstop still catches never-publish files and inline
+  secrets even when no model is connected — and a real secret embedded inside a
+  kept file blocks the publish rather than being silently shipped.
+
+### Changed
+
+- Security and language judgment moved from keyword lists to a resident LLM
+  judgment service; the wordlists are now hints, not verdicts, and the judged
+  verdict decides even for synchronous callers. This removes the false
+  positives where declarative Korean security copy, ordinary words (for example
+  "eyeliner" or "one surface"), or a money/destruction phrase with a qualifier
+  ("without deleting…") were mis-flagged. Language detection now uses
+  dominant-script analysis instead of flipping on a single Hangul character.
+- An unrecognized scan severity is now treated as unsafe rather than "safe".
+- Org-node team members preserve their real agent binding during member-cell
+  materialization.
+
+This release binds Agentlas OS v1.1.60 at 2430d2806782576177002a96f5e792e0439962e5.
+This changelog entry describes source readiness and does not prove a published
+Desktop release, installer, or update feed.
+
 ## 0.9.12 — 2026-07-25
 
 ### Changed
