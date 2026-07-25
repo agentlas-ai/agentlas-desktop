@@ -21,11 +21,27 @@ export function shouldSeedEcommerceOps(prompt: string): boolean {
   return COMMERCE_TERMS.test(prompt);
 }
 
-export function prepareEcommerceOpsManifest(input: {
+export async function prepareEcommerceOpsManifest(input: {
   prompt: string;
   now?: string;
-}): AgentlasSurfaceManifest | null {
+}): Promise<AgentlasSurfaceManifest | null> {
+  // Keyword prefilter, then meaning confirmation by the resident judge: "make the font
+  // small", "restore my backup", and "this borders on absurd" all hit the commerce
+  // wordlist ("mall", "store", "orders") and used to seed an e-commerce ops surface.
   if (!shouldSeedEcommerceOps(input.prompt)) return null;
+  const { judgeBoolean } = await import("../system-agents/judgment");
+  const confirmed = await judgeBoolean({
+    kind: "ecommerce-ops-intent",
+    question:
+      "Is the user asking for online-store / e-commerce operations work — managing products, orders, inventory, storefront, or sales for a shop?",
+    input: input.prompt.slice(0, 2000),
+    guidance:
+      "Only 'yes' for actual commerce operations. Words that merely contain a commerce term as a " +
+      "substring (small, restore, borders) or unrelated uses of 'store'/'order' are NOT commerce intent.",
+    hints: "words that may hint: store, shop, mall, order, inventory, product, checkout, 쇼핑몰, 주문, 재고, 상품",
+    fallback: true,
+  });
+  if (!confirmed.value) return null;
   return buildEcommerceOpsManifest({
     prompt: input.prompt,
     now: input.now,
