@@ -207,7 +207,14 @@ assert.doesNotMatch(
 // runtime can pass the ephemeral grant into invocationService.
 matches(ipc, /agentAppMode: _agentAppMode/, "Renderer Agent App mode stripping");
 matches(ipc, /agentAppRuntimeToolGrant: _agentAppRuntimeToolGrant/, "Renderer capability grant stripping");
-matches(ipc, /invocationService\.start\(rendererInvocationRequest\(req\)\)/, "Renderer run sanitization");
+// The renderer request must be sanitized through rendererInvocationRequest before
+// invocationService.start. The handler now warms the resident judgments between the
+// two, so accept the sanitized-then-started form as well as the inline call.
+matches(
+  ipc,
+  /invocationService\.start\(rendererInvocationRequest\(req\)\)|const request = rendererInvocationRequest\(req\);[\s\S]{0,600}invocationService\.start\(request\)/,
+  "Renderer run sanitization",
+);
 
 // A DB catalog row is insufficient: Agent Apps reject package-manager download
 // commands before verification and expose only exact, currently verified tools.
