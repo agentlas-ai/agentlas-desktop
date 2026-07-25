@@ -101,7 +101,9 @@ assert.equal(shouldAutoEngageNetworkWorkforce({ ...eligible, prompt: "fix typo i
   assert.equal(vetoed.source, "llm");
   assert.equal(vetoed.choice, null, "a judged none must override lexical recruitment");
 
-  // (c) No model = today's lexical+embedding behavior, labeled fallback.
+  // (c) NO connected model must NOT route to the lexically/embedding-scored
+  //     specialist. With allowFallback:false the caller falls to the plain
+  //     assistant (null), never a keyword route.
   const namedPrompt = "Use Comment Seeder to post the weekly thread";
   const fallback = await selectAutoRoutedAgentJudged(namedPrompt, [translator, seeder], "en", {
     allowFallback: false,
@@ -109,16 +111,23 @@ assert.equal(shouldAutoEngageNetworkWorkforce({ ...eligible, prompt: "fix typo i
     judgeFn: async (spec) => ({ verdict: spec.fallback, source: "fallback", confidence: 0, reason: "no model" }),
   });
   assert.equal(fallback.source, "fallback");
-  assert.equal(fallback.choice.agent.id, "comment-seeder", "no model keeps the previous lexical route");
+  assert.equal(fallback.choice, null, "no connected model must not route to a lexically-scored specialist");
+  // Prove the no-model outcome is NOT the keyword route the lexical scorer alone gives.
+  const lexicalWouldPick = selectAutoRoutedAgent(namedPrompt, [translator, seeder], "en", {
+    allowFallback: false,
+    semanticRoute: inactive,
+  });
+  assert.equal(lexicalWouldPick && lexicalWouldPick.agent.id, "comment-seeder",
+    "the lexical scorer alone WOULD keyword-route to the named agent (the path removed for no-model)");
 
-  // (d) A hallucinated slug never routes: fall back to the lexical choice.
+  // (d) A hallucinated slug never routes: plain assistant (null), never lexical.
   const hallucinated = await selectAutoRoutedAgentJudged(namedPrompt, [translator, seeder], "en", {
     allowFallback: false,
     semanticRoute: inactive,
     judgeFn: async () => ({ verdict: "made-up-agent", source: "llm", confidence: 0.9, reason: "?" }),
   });
   assert.equal(hallucinated.source, "fallback");
-  assert.equal(hallucinated.choice.agent.id, "comment-seeder");
+  assert.equal(hallucinated.choice, null, "a hallucinated slug must not fall back to a lexical specialist");
 
   // (e) allowFallback + judged none = the default coordinator, never a mis-route.
   const pmSoul = agent("agentlas-pm-soul", "Project Coordinator", "Coordinate work.");
@@ -128,6 +137,16 @@ assert.equal(shouldAutoEngageNetworkWorkforce({ ...eligible, prompt: "fix typo i
     judgeFn: async () => ({ verdict: "none", source: "llm", confidence: 0.8, reason: "no specialist" }),
   });
   assert.equal(coordinated.choice.agent.id, "agentlas-pm-soul");
+
+  // (f) allowFallback + NO model = the plain coordinator, never the lexical specialist.
+  const noModelCoordinated = await selectAutoRoutedAgentJudged(namedPrompt, [translator, seeder, pmSoul], "en", {
+    allowFallback: true,
+    semanticRoute: inactive,
+    judgeFn: async (spec) => ({ verdict: spec.fallback, source: "fallback", confidence: 0, reason: "no model" }),
+  });
+  assert.equal(noModelCoordinated.source, "fallback");
+  assert.equal(noModelCoordinated.choice.agent.id, "agentlas-pm-soul",
+    "no model with allowFallback goes to the plain coordinator, not the lexical specialist");
 
   console.log("test-auto-router-gates: PASS");
 })().catch((error) => {

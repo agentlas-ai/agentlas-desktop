@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 
 const assert = require("node:assert/strict");
-const { classifyOneRequestIntent } = require("../dist/shared/one-request-intent.js");
+const {
+  classifyOneRequestIntent,
+  lexicalOneRequestIntent,
+  ONE_REQUEST_INTENT_JUDGMENT_KIND,
+  oneRequestIntentJudgmentInput,
+} = require("../dist/shared/one-request-intent.js");
 
 const conversations = [
   "안녕하세요",
@@ -24,30 +29,33 @@ const tasks = [
   "Create an Excel spreadsheet comparing the five products.",
 ];
 
+// The wordlists survive ONLY as the judge's prior — lexicalOneRequestIntent.
 for (const prompt of conversations) {
-  assert.equal(classifyOneRequestIntent(prompt), "conversation", prompt);
+  assert.equal(lexicalOneRequestIntent(prompt), "conversation", prompt);
 }
 for (const prompt of tasks) {
-  assert.equal(classifyOneRequestIntent(prompt), "task", prompt);
+  assert.equal(lexicalOneRequestIntent(prompt), "task", prompt);
 }
 
-// ── The judged verdict decides; the wordlists are only the labeled fallback ──
-const {
-  ONE_REQUEST_INTENT_JUDGMENT_KIND,
-  oneRequestIntentJudgmentInput,
-} = require("../dist/shared/one-request-intent.js");
 assert.equal(ONE_REQUEST_INTENT_JUDGMENT_KIND, "one-request-intent");
 assert.equal(oneRequestIntentJudgmentInput("  a\n b  "), "a b");
 
-// (a) A judged "task" fires on phrasing every wordlist misses (Arabic work request).
+// (a) A stub judge verdict decides — task fires on phrasing every wordlist misses.
 const arabicWork = "رتّب لي خطة سفر ليومين مع ميزانية وقائمة تحقق";
 assert.equal(classifyOneRequestIntent(arabicWork, () => "task"), "task",
   "a judged task verdict must win over a wordlist miss");
-// (b) A judged "conversation" vetoes a wordlist false positive.
+// A judged "conversation" vetoes a wordlist false positive.
 assert.equal(classifyOneRequestIntent("최저가격 검색이 뭐야?", () => "conversation"), "conversation",
   "a judged conversation verdict must override an incidental wordlist hit");
-// (c) No judged verdict (null) = today's deterministic verdict, the labeled fallback.
-assert.equal(classifyOneRequestIntent(arabicWork, () => null), "conversation",
-  "without a judged verdict the deterministic fallback stands");
 
-console.log(JSON.stringify({ ok: true, conversations: conversations.length, tasks: tasks.length, judged: 3 }));
+// (b) NO connected-model verdict → UNDECIDED, never the keyword/lexical verdict.
+assert.equal(classifyOneRequestIntent(arabicWork, () => null), "undecided",
+  "no model → undecided, not the wordlist verdict");
+assert.equal(classifyOneRequestIntent(tasks[0]), "undecided",
+  "no judged reader (renderer / no model) → undecided");
+assert.notEqual(classifyOneRequestIntent(tasks[0], () => null), "task",
+  "a no-model turn must NOT be keyword-classified as task");
+assert.notEqual(classifyOneRequestIntent(tasks[0], () => null), lexicalOneRequestIntent(tasks[0]),
+  "the no-model outcome must not equal the wordlist verdict");
+
+console.log(JSON.stringify({ ok: true, conversations: conversations.length, tasks: tasks.length, undecided: true }));

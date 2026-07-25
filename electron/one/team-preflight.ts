@@ -314,10 +314,13 @@ async function resolveOneTeamNeed(
   try {
     judged = await judgeTeamNeed({ prompt, lexicalReasons });
   } catch {
-    judged = { needed: lexicalReasons.length > 0, source: "fallback", reason: "judge failed" };
+    judged = { needed: false, source: "fallback", reason: "judge failed" };
   }
   if (judged.source !== "llm") {
-    return { needed: lexicalReasons.length > 0, reasons: lexicalReasons, source: "fallback" };
+    // No connected model → do NOT auto-propose a team from the complexity
+    // wordlists. Only an explicit /workforce·/hep-network command (closed-form,
+    // handled above) staffs a team without a model verdict.
+    return { needed: false, reasons: [], source: "fallback" };
   }
   if (!judged.needed) return { needed: false, reasons: [], source: "llm" };
   return {

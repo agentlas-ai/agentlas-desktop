@@ -58,6 +58,11 @@ function insertAgent(db, id, slug, name, tagline) {
 function deps(overrides = {}) {
   return {
     detectRuntimes: async () => [{ ...ACTIVE_RUNTIME }],
+    // Default: a connected model judged the team genuinely needed. The real
+    // judgment model is unreachable in this hermetic worker (no runtime probe),
+    // so tests that exercise the proposal/roster flow inject this llm verdict;
+    // the no-model path (source:"fallback") is asserted explicitly in case (d).
+    judgeTeamNeed: async () => ({ needed: true, source: "llm", reason: "default test model verdict" }),
     ...overrides,
   };
 }
@@ -103,12 +108,13 @@ async function runtimeWorker() {
   assert.match(tasks.findCanonicalTaskForChat(promotedConversation.id).title, /^50만원 이하 공기청정기/);
 
   const naturalDecision = chats.createChat({ agentId: "one-coordinator", title: "Natural decision", taskMode: "conversation" });
+  // A connected model judged this a genuine team need (no explicit command).
   const naturalDecisionResult = await preflight.prepareOneTeamPreflight({
     chatId: naturalDecision.id,
     userPrompt: "50만원 이하 공기청정기 중 25평 거실에 맞는 제품을 골라줘.",
     expectedTaskId: null,
     expectedTaskVersion: null,
-  }, deps());
+  }, deps({ judgeTeamNeed: async () => ({ needed: true, source: "llm", reason: "constrained research decision" }) }));
   assert.equal(naturalDecisionResult.kind, "proposal");
   assert.equal(naturalDecisionResult.proposal.status, "proposed");
   assert.equal(naturalDecisionResult.proposal.canConfirmTeam, true, "a constrained real-world decision should propose a clearly matched installed specialist without team jargon");
@@ -151,7 +157,9 @@ async function runtimeWorker() {
   }, deps({ judgeTeamNeed: async () => ({ needed: false, source: "llm", reason: "should not be consulted" }) }));
   assert.equal(commandResult.kind, "proposal", "an explicit structured team command must never be vetoed by the judge");
 
-  // (d) No model (source fallback) keeps today's wordlist verdict, labeled.
+  // (d) NO connected model (source fallback) does NOT propose a team from the
+  //     complexity wordlists — it returns not_required. Only an explicit command
+  //     (case c) staffs a team without a model verdict.
   const fallbackChat = chats.createChat({ agentId: "one-coordinator", title: "Fallback", taskMode: "conversation" });
   const fallbackResult = await preflight.prepareOneTeamPreflight({
     chatId: fallbackChat.id,
@@ -159,8 +167,7 @@ async function runtimeWorker() {
     expectedTaskId: null,
     expectedTaskVersion: null,
   }, deps({ judgeTeamNeed: async () => ({ needed: false, source: "fallback", reason: "no connected model answered" }) }));
-  assert.equal(fallbackResult.kind, "proposal", "no model = previous deterministic behavior");
-  assert.ok(fallbackResult.proposal.complexityReasons.includes("parallel_work_requested"));
+  assert.deepEqual(fallbackResult, { kind: "not_required" }, "no model must not propose a team from the complexity wordlists");
 
   const adaptiveLocal = chats.createChat({ agentId: "one-coordinator", title: "Adaptive local", taskMode: "conversation" });
   const adaptiveLocalResult = await preflight.prepareOneTeamPreflight({
@@ -168,7 +175,7 @@ async function runtimeWorker() {
     userPrompt: "Ask installed-researcher to research the market in parallel, write a report and table, then cross-check every source.",
     expectedTaskId: null,
     expectedTaskVersion: null,
-  }, deps());
+  }, deps({ judgeTeamNeed: async () => ({ needed: true, source: "llm", reason: "parallel multi-deliverable research" }) }));
   assert.equal(adaptiveLocalResult.kind, "proposal");
   assert.equal(adaptiveLocalResult.proposal.status, "proposed");
   assert.equal(adaptiveLocalResult.proposal.canConfirmTeam, true, "a clearly matched exact local specialist should be previewable without a pre-hired card");
@@ -200,7 +207,7 @@ async function runtimeWorker() {
     userPrompt: "Split a vacation itinerary and grocery budget into a presentation and spreadsheet, then cross-check it.",
     expectedTaskId: null,
     expectedTaskVersion: null,
-  }, deps());
+  }, deps({ judgeTeamNeed: async () => ({ needed: true, source: "llm", reason: "multiple distinct deliverables" }) }));
   assert.equal(unrelatedLocalResult.kind, "proposal");
   assert.equal(unrelatedLocalResult.proposal.status, "blocked");
   assert.equal(unrelatedLocalResult.proposal.canConfirmTeam, false, "unrelated installed agents must not be guessed into a team");

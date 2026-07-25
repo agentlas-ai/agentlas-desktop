@@ -83,6 +83,23 @@ export function isCanonicalTaskId(value: unknown): value is string {
 /** Judgment-cache kind (mirrors the terminal engine's experience-task-class contract). */
 export const EXPERIENCE_TASK_JUDGMENT_KIND = "experience-task-class";
 
+// Inputs whose async warm found NO connected model. Only successful llm verdicts
+// enter the judgment cache, so a no-model warm would otherwise leave the sync
+// classifier on a plain cache miss. We record it here so the sync classifier
+// returns UNDECIDED ([]) for a genuinely un-judgeable input — never the wordlist
+// verdict — while a NOT-warmed call (tests, cross-surface parity) still gets the
+// lexical prefilter it always did.
+const noModelTaskClassInputs = new Set<string>();
+const NO_MODEL_TASK_CLASS_MAX = 500;
+
+function markTaskClassNoModel(text: string): void {
+  noModelTaskClassInputs.add(text);
+  if (noModelTaskClassInputs.size > NO_MODEL_TASK_CLASS_MAX) {
+    const oldest = noModelTaskClassInputs.values().next().value;
+    if (oldest !== undefined) noModelTaskClassInputs.delete(oldest);
+  }
+}
+
 /** The exact judgment input the resolver warms and the synchronous classifier peeks. */
 export function taskClassJudgmentInput(...values: Array<string | null | undefined>): string {
   return values.filter((value): value is string => typeof value === "string")
@@ -124,6 +141,11 @@ export function classifyCanonicalTaskIds(...values: Array<string | null | undefi
     const selected = new Set(peeked.selected);
     return EXPERIENCE_TASK_SLUGS.filter((slug) => selected.has(slug)).map(canonicalTaskId);
   }
+  // The async warm recorded NO connected model for this exact input → return NO
+  // task classes rather than the TASK_RULES wordlist guess (the safe non-acting
+  // default: no experience prior/overlay is applied). A NOT-warmed call keeps the
+  // lexical prefilter — the warmed-peek optimization and cross-surface parity.
+  if (noModelTaskClassInputs.has(text)) return [];
   return lexicalCanonicalTaskIds(text);
 }
 
@@ -158,12 +180,12 @@ export async function resolveCanonicalTaskIds(
   } = {},
 ): Promise<ResolvedCanonicalTaskIds> {
   const text = taskClassJudgmentInput(...values);
-  const lexical = lexicalCanonicalTaskIds(text);
   const declared = explicitDeclaredTaskIds(text);
   if (declared.length > 0) {
-    return { taskIds: lexical, source: "fallback", reason: "explicit canonical ids declared" };
+    // Declared canonical ids are closed-form and win outright (never judged).
+    return { taskIds: lexicalCanonicalTaskIds(text), source: "fallback", reason: "explicit canonical ids declared" };
   }
-  if (!text.trim()) return { taskIds: lexical, source: "fallback", reason: "empty text" };
+  if (!text.trim()) return { taskIds: [], source: "fallback", reason: "empty text" };
   const run = opts.judgeSubsetFn ?? judgeSubset;
   let verdict: Awaited<ReturnType<typeof judgeSubset>>;
   try {
@@ -182,11 +204,17 @@ export async function resolveCanonicalTaskIds(
       timeoutMs: opts.timeoutMs,
     });
   } catch {
-    return { taskIds: lexical, source: "fallback", reason: "judge failed" };
+    // No connected model reached a verdict. Record it so the SYNC classifier
+    // returns UNDECIDED ([]) for this input instead of the wordlist verdict.
+    markTaskClassNoModel(text);
+    return { taskIds: lexicalCanonicalTaskIds(text), source: "fallback", reason: "judge failed" };
   }
   if (verdict.source !== "llm") {
-    return { taskIds: lexical, source: "fallback", reason: verdict.reason };
+    markTaskClassNoModel(text);
+    return { taskIds: lexicalCanonicalTaskIds(text), source: "fallback", reason: verdict.reason };
   }
+  // A real verdict — the model is reachable again for this input.
+  noModelTaskClassInputs.delete(text);
   const selected = new Set(verdict.selected);
   return {
     taskIds: EXPERIENCE_TASK_SLUGS.filter((slug) => selected.has(slug)).map(canonicalTaskId),

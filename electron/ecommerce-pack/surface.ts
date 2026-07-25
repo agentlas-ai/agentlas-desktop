@@ -30,13 +30,14 @@ export async function prepareEcommerceOpsManifest(input: {
   // "make the font small", "restore my backup" hit the commerce wordlist and used
   // to seed an e-commerce ops surface, while a genuine store request phrased
   // without the listed words could never seed. The prefilter is a hint, not a
-  // gate; no model = today's prefilter verdict, labeled fallback.
+  // gate; with NO connected model we do NOT seed from the keyword prefilter — the
+  // pack simply does not appear (undecided).
   const { resolveOnePackIntents } = await import("../pack-intents");
   const intents = await resolveOnePackIntents({
     prompt: input.prompt,
     judgeSubsetFn: input.judgeSubsetFn,
   });
-  if (!intents.selected.includes("ecommerce-ops")) return null;
+  if (intents.source !== "llm" || !intents.selected.includes("ecommerce-ops")) return null;
   return buildEcommerceOpsManifest({
     prompt: input.prompt,
     now: input.now,

@@ -1,5 +1,13 @@
 export type OneRequestIntent = "conversation" | "task";
 
+/**
+ * The sync decision is three-valued now: the connected model's verdict, or an
+ * explicit "undecided" when NO model verdict exists. "undecided" is NOT a
+ * keyword guess — callers treat it as "no decision" (keep the safe conversational
+ * default; surface the connect-a-model line where user-visible).
+ */
+export type OneRequestIntentDecision = OneRequestIntent | "undecided";
+
 /** Judgment-cache kind shared by the async resolver and the synchronous peek reader. */
 export const ONE_REQUEST_INTENT_JUDGMENT_KIND = "one-request-intent";
 
@@ -26,23 +34,12 @@ const ENGLISH_WORK_RE = /(?:\b(?:plan|itinerary|route|budget|checklist|guide|wor
 const KOREAN_REQUEST_ENDING_RE = /(?:해\s*줘|해주세요|해\s*주세요|해봐|해\s*봐|만들어\s*줘|짜\s*줘|찾아\s*줘|알아봐\s*줘|부탁해)(?:요)?[.!?\s]*$/i;
 
 /**
- * Product intent only: decide whether One should preserve the turn as durable
- * work or answer it as an ordinary conversation. This does not choose agents,
- * authorize tools, or infer that a result is complete.
- *
- * The connected model decides when a judged verdict is available: `judged` is a
- * synchronous reader of an already-judged verdict (electron passes a peek into the
- * resident judgment cache warmed by `resolveOneRequestIntent`). When no verdict
- * exists — renderer call, no model, cache miss — the wordlist below is only the
- * labeled conservative fallback, never a final authority.
+ * Deterministic wordlist prior — the labeled reference the resident judge treats
+ * as a hint, NEVER the decider. `resolveOneRequestIntent` passes this as the
+ * judge's conservative default; it is not surfaced as a verdict on its own.
  */
-export function classifyOneRequestIntent(
-  prompt: string,
-  judged?: (prompt: string) => OneRequestIntent | null,
-): OneRequestIntent {
+export function lexicalOneRequestIntent(prompt: string): OneRequestIntent {
   if (typeof prompt !== "string") return "conversation";
-  const judgedIntent = judged?.(prompt) ?? null;
-  if (judgedIntent !== null) return judgedIntent;
   const normalized = prompt.normalize("NFKC").replace(/\s+/gu, " ").trim();
   if (!normalized || PLAIN_SOCIAL_RE.test(normalized)) return "conversation";
 
@@ -53,4 +50,27 @@ export function classifyOneRequestIntent(
   // nouns. Short factual or conversational questions remain conversations.
   const hasConstraint = /(?:\d[\d,.]*\s*(?:원|만원|달러|usd|krw|%|일|주|개월|년|명|개)|예산|기한|마감|조건|기준|between|under|over|budget|deadline|criteria)/i.test(normalized);
   return normalized.length >= 100 && hasConstraint ? "task" : "conversation";
+}
+
+/**
+ * Product intent only: decide whether One should preserve the turn as durable
+ * work or answer it as an ordinary conversation. This does not choose agents,
+ * authorize tools, or infer that a result is complete.
+ *
+ * The connected model decides: `judged` is a synchronous reader of an
+ * already-judged verdict (electron passes a peek into the resident judgment cache
+ * warmed by `resolveOneRequestIntent`). When NO model verdict exists — renderer
+ * call, no model, cache miss — this returns "undecided". It NEVER falls back to
+ * the wordlist: an undecided turn keeps the safe conversational default and the
+ * surface shows the connect-a-model line. The wordlists above survive only as the
+ * judge's hint/prior via `lexicalOneRequestIntent`.
+ */
+export function classifyOneRequestIntent(
+  prompt: string,
+  judged?: (prompt: string) => OneRequestIntent | null,
+): OneRequestIntentDecision {
+  if (typeof prompt !== "string") return "conversation";
+  const judgedIntent = judged?.(prompt) ?? null;
+  if (judgedIntent !== null) return judgedIntent;
+  return "undecided";
 }

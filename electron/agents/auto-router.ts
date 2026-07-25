@@ -677,9 +677,16 @@ export async function selectAutoRoutedAgentJudged(
 ): Promise<JudgedAutoRouteResult> {
   const pipeline = buildRoutePipeline(userPrompt, agents, locale, opts);
   if (!pipeline) return { choice: null, source: "fallback" };
-  const lexicalChoice = selectAutoRoutedAgent(userPrompt, agents, locale, { ...opts, judgedPeek: false });
+  // The lexical+embedding scorer produces only the judge's PRIOR here — never the
+  // no-model result. When no connected model reaches a verdict we do NOT route to
+  // a lexically/embedding-scored specialist: we fall to the plain coordinator
+  // (allowFallback) or to the plain assistant (null), so the caller can surface
+  // the connect-a-model state instead of acting on a keyword guess.
+  const lexicalPrior = selectAutoRoutedAgent(userPrompt, agents, locale, { ...opts, judgedPeek: false, allowFallback: false });
+  const noModelChoice = (): AutoRouteChoice | null =>
+    opts?.allowFallback ? defaultCoordinationChoice(pipeline.candidates, locale) : null;
   if (!userPrompt.trim() || pipeline.pool.length === 0) {
-    return { choice: lexicalChoice, source: "fallback" };
+    return { choice: noModelChoice(), source: "fallback" };
   }
   const labels: string[] = [];
   const bySlug = new Map<string, InstalledAgent>();
@@ -689,8 +696,8 @@ export async function selectAutoRoutedAgentJudged(
     labels.push(agent.slug);
   }
   labels.push("none");
-  const fallbackLabel = lexicalChoice && bySlug.get(lexicalChoice.agent.slug)?.id === lexicalChoice.agent.id
-    ? lexicalChoice.agent.slug
+  const fallbackLabel = lexicalPrior && bySlug.get(lexicalPrior.agent.slug)?.id === lexicalPrior.agent.id
+    ? lexicalPrior.agent.slug
     : "none";
   let verdict: Verdict<string>;
   try {
@@ -708,9 +715,9 @@ export async function selectAutoRoutedAgentJudged(
       timeoutMs: opts?.timeoutMs,
     });
   } catch {
-    return { choice: lexicalChoice, source: "fallback" };
+    return { choice: noModelChoice(), source: "fallback" };
   }
-  if (verdict.source !== "llm") return { choice: lexicalChoice, source: "fallback" };
+  if (verdict.source !== "llm") return { choice: noModelChoice(), source: "fallback" };
   if (verdict.verdict === "none") {
     return {
       choice: opts?.allowFallback ? defaultCoordinationChoice(pipeline.candidates, locale) : null,
@@ -718,7 +725,8 @@ export async function selectAutoRoutedAgentJudged(
     };
   }
   const selected = bySlug.get(verdict.verdict);
-  if (!selected) return { choice: lexicalChoice, source: "fallback" };
+  // A hallucinated slug never routes: treat it as "no confident model pick".
+  if (!selected) return { choice: noModelChoice(), source: "fallback" };
   const rankedEntry = pipeline.ranked.find((entry) => entry.agent.id === selected.id);
   return {
     choice: {

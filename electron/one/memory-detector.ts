@@ -55,12 +55,14 @@ function intentFromPreview(prompt: string, preview: string): ExplicitOneMemoryIn
  * This deliberately detects only an explicit user instruction to remember.
  * Ordinary preferences, model inferences, and long transcripts fail quiet.
  *
- * The connected model decides by meaning when a judged verdict exists: `judged`
- * is a synchronous reader (electron passes the peek warmed by
- * `prejudgeOneMemoryIntent`). A judged "yes" fires even when the prefix/suffix
- * wordlists miss (non-English phrasing); a judged "no" vetoes a wordlist false
- * positive. No verdict = today's regex result, the labeled fallback. The
- * safety line stays deterministic: every preview must pass isSafeOneMemoryText.
+ * The connected model is the SOLE decider: `judged` is a synchronous reader
+ * (electron passes the peek warmed by `prejudgeOneMemoryIntent`). It fires ONLY
+ * on a judged "yes" — a judged "no" or NO verdict (no model / cache miss) never
+ * creates a memory proposal from the wordlists. Not creating a proposal is the
+ * safe non-acting default when no model is connected; the prefix/suffix
+ * wordlists survive only as the judge's hint and as preview extraction once the
+ * model has said yes. The safety line stays deterministic: every preview must
+ * pass isSafeOneMemoryText.
  */
 export function detectExplicitOneMemoryIntent(
   userPrompt: unknown,
@@ -69,19 +71,18 @@ export function detectExplicitOneMemoryIntent(
   if (typeof userPrompt !== "string" || userPrompt.length < 4 || userPrompt.length > 2_000) return null;
   if (CONTROL_RE.test(userPrompt)) return null;
   const prompt = userPrompt.trim();
+  // Only the connected model decides intent. A missing verdict (no model / not
+  // warmed) is treated as "no explicit remember instruction", never a keyword
+  // decision.
+  if (judged?.(prompt) !== true) return null;
+  // The model recognized an explicit remember instruction. Use the wordlist
+  // match (if any) only to extract the durable preview; otherwise the whole
+  // normalized prompt is the preview. The closed-form safety check still
+  // decides whether it may be stored.
   const match = KOREAN_PREFIX_RE.exec(prompt)
     ?? ENGLISH_PREFIX_RE.exec(prompt)
     ?? KOREAN_SUFFIX_RE.exec(prompt);
-  const judgedVerdict = judged?.(prompt) ?? null;
-  if (judgedVerdict === false) return null;
-  if (judgedVerdict === true && !match) {
-    // The model recognized an explicit remember instruction the wordlists missed.
-    // The whole normalized prompt becomes the preview; the closed-form safety
-    // check still decides whether it may be stored.
-    return intentFromPreview(prompt, prompt);
-  }
-  if (!match) return null;
-  return intentFromPreview(prompt, match[1]);
+  return intentFromPreview(prompt, match ? match[1] : prompt);
 }
 
 /** Synchronous read of an already-judged explicit-memory verdict. */

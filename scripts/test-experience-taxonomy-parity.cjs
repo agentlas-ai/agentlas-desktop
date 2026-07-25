@@ -182,15 +182,20 @@ const judgedTaskClassChecks = (async () => {
   });
   check(() => assert.deepEqual(emptied.taskIds, []));
   check(() => assert.equal(emptied.source, "llm"));
-  // (b) No model = today's wordlist verdict, labeled fallback.
+  // (b) No connected model: the async resolve returns the labeled lexical
+  //     prefilter, but it also RECORDS that this input is un-judgeable so the
+  //     SYNC classifier returns UNDECIDED ([]) for it — never the keyword verdict.
   const fallback = await taxonomy.resolveCanonicalTaskIds(["런타임 오류를 고쳐줘"], {
     judgeSubsetFn: async () => ({ selected: [], confidence: 0, reason: "no connected model answered", source: "fallback" }),
   });
-  check(() => assert.deepEqual(fallback, {
-    taskIds: ["agentlas.task.v1/debugging"],
-    source: "fallback",
-    reason: "no connected model answered",
-  }));
+  check(() => assert.equal(fallback.source, "fallback"));
+  check(() => assert.deepEqual(taxonomy.classifyCanonicalTaskIds("런타임 오류를 고쳐줘"), [],
+    "a warmed-no-model input makes the sync classifier undecided, never the keyword verdict"));
+  // A NOT-warmed prompt still gets the lexical prefilter — the warmed-peek
+  // optimization and cross-surface parity are preserved.
+  check(() => assert.deepEqual(taxonomy.classifyCanonicalTaskIds("The runtime returned an error"),
+    ["agentlas.task.v1/debugging"],
+    "a not-warmed prompt keeps the lexical prefilter (cross-surface parity)"));
   // (c) Explicit agentlas.task.v1/* ids are closed-form: they win outright and skip the judge.
   const declared = await taxonomy.resolveCanonicalTaskIds(["agentlas.task.v1/coding work please"], {
     judgeSubsetFn: async () => { throw new Error("declared ids must never reach the judge"); },

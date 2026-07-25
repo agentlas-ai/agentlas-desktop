@@ -8,7 +8,7 @@
 // `judgedOneRequestIntent` (peek). A cache miss keeps today's deterministic verdict.
 
 import {
-  classifyOneRequestIntent,
+  lexicalOneRequestIntent,
   ONE_REQUEST_INTENT_JUDGMENT_GUIDANCE,
   ONE_REQUEST_INTENT_JUDGMENT_KIND,
   ONE_REQUEST_INTENT_JUDGMENT_QUESTION,
@@ -55,7 +55,7 @@ export async function resolveOneRequestIntent(
   opts: { signal?: AbortSignal; timeoutMs?: number; judgeFn?: OneRequestIntentJudge } = {},
 ): Promise<ResolvedOneRequestIntent> {
   const input = oneRequestIntentJudgmentInput(prompt);
-  const lexical = classifyOneRequestIntent(prompt);
+  const lexical = lexicalOneRequestIntent(prompt);
   if (!input) return { intent: lexical, source: "fallback", reason: "empty prompt" };
   const run = opts.judgeFn ?? judge;
   const verdict = await run({

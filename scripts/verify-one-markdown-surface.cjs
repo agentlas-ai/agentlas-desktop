@@ -53,12 +53,16 @@ const travelMarkdown = `## 날짜별 일정
 예약 3건(항공 — 아이 운임 확인 포함, 숙소 — 얼리체크인 문의, 렌터카 — 카시트 포함)과 짐 준비(물놀이용품·방수기저귀, 자외선 차단, 아이 상비약, 낮잠용품·유모차), 그리고 **출발 2~3일 전 태풍·날씨 예보 확인**이 필수입니다.
 
 출처: [공식 관광](https://example.com/travel), [공식 요금](https://example.org/price)`;
+const travelPrompt = "아이와 제주 2박 3일 여행 계획을 짜줘. 총예산 120만원, 날짜별 일정과 동선, 예상 비용, 체크리스트가 필요해.";
+// A judged travel verdict (source:"llm") is required for the travel layout — the
+// travel/product regexes no longer decide it.
 const travelLegacy = buildOneSurfaceFromMarkdown({
   markdown: travelMarkdown,
   fallbackTitle: "제주 가족 여행",
-  taskPrompt: "아이와 제주 2박 3일 여행 계획을 짜줘. 총예산 120만원, 날짜별 일정과 동선, 예상 비용, 체크리스트가 필요해.",
+  taskPrompt: travelPrompt,
+  judgedIntent: { intent: "travel", source: "llm" },
 });
-assert.ok(travelLegacy, "a travel fallback must preserve travel semantics instead of flattening everything into a table");
+assert.ok(travelLegacy, "a judged travel verdict must preserve travel semantics instead of flattening everything into a table");
 assert.equal(travelLegacy.data.schedule.type, "timeline");
 assert.equal(travelLegacy.data.schedule.items.length, 3);
 assert.equal(travelLegacy.data.costs.type, "pricing");
@@ -78,7 +82,7 @@ assert.deepEqual(
   "desktop and mobile must receive portable travel blocks",
 );
 
-// ── Judged surface intent decides; travel/product regexes = labeled fallback ──
+// ── The judged surface intent decides; no model → GENERIC, never keyword ──
 const arabicTravelPrompt = "خطط لي رحلة عائلية ليومين في جيجو مع ميزانية وجدول يومي وقائمة تحضير";
 // (a) A judged travel verdict FIRES on a prompt every wordlist misses (Arabic).
 const judgedTravel = buildOneSurfaceFromMarkdown({
@@ -90,7 +94,9 @@ const judgedTravel = buildOneSurfaceFromMarkdown({
 assert.ok(judgedTravel, "the judged travel intent must produce the travel surface");
 assert.equal(judgedTravel.data.schedule.type, "timeline", "a judged travel verdict must win over the regex miss");
 assert.equal(judgedTravel.data.costs.type, "pricing");
-// (b) source:"fallback" is NOT a decision — the deterministic regex verdict stands.
+// (b) NO model verdict is NOT a decision. source:"fallback" AND an absent
+// judgedIntent both fall to the neutral GENERIC layout — never the keyword travel
+// guess from the (Korean, travel-shaped) taskPrompt.
 const fallbackTravel = buildOneSurfaceFromMarkdown({
   markdown: travelMarkdown,
   fallbackTitle: "family trip",
@@ -98,7 +104,16 @@ const fallbackTravel = buildOneSurfaceFromMarkdown({
   judgedIntent: { intent: "travel", source: "fallback" },
 });
 assert.ok(fallbackTravel);
-assert.equal(fallbackTravel.data.schedule, undefined, "an unanswered judge must keep today's deterministic layout");
+assert.equal(fallbackTravel.data.schedule, undefined, "source:fallback must keep the neutral generic layout, not keyword travel");
+const noModelTravel = buildOneSurfaceFromMarkdown({
+  markdown: travelMarkdown,
+  fallbackTitle: "family trip",
+  taskPrompt: travelPrompt,
+});
+assert.ok(noModelTravel);
+assert.equal(noModelTravel.data.schedule, undefined,
+  "no judgedIntent (no connected model) must not keyword-infer a travel plan from the prompt");
+assert.equal(noModelTravel.data.costs, undefined, "no-model travel prompt must not build a travel budget from keywords");
 // (c) A judged product-comparison verdict decides the comparison presentation.
 const judgedProduct = buildOneSurfaceFromMarkdown({
   markdown,

@@ -50,16 +50,18 @@ app.setPath("userData", tempDir);
       "a judged empty selection must suppress the ecommerce seed");
     assert.equal(await prepareCreativeAdPackManifest({ prompt: bait, judgeSubsetFn: judgeNone }), null);
 
-    // (c) No model = today's prefilter verdicts, labeled fallback.
+    // (c) NO connected model: the resolver still REPORTS the labeled prefilter
+    //     selection (source:"fallback"), but the pack CONSUMERS do NOT seed from
+    //     it — a pack surface never appears on a keyword guess (undecided).
     const judgeDown = async () => ({ selected: [], confidence: 0, reason: "no connected model answered", source: "fallback" });
     const commercePrompt = "여성복 쇼핑몰 재고와 주문을 관리하고 싶어";
     const fallbackIntents = await resolveOnePackIntents({ prompt: commercePrompt, judgeSubsetFn: judgeDown });
     assert.equal(fallbackIntents.source, "fallback");
-    assert.deepEqual(fallbackIntents.selected, ["ecommerce-ops"], "no model keeps the previous prefilter behavior");
-    assert.ok(await prepareEcommerceOpsManifest({ prompt: commercePrompt, judgeSubsetFn: judgeDown }),
-      "the prefilter fallback must still seed a genuine commerce request when no model answers");
+    assert.deepEqual(fallbackIntents.selected, ["ecommerce-ops"], "the resolver still reports the labeled prefilter selection");
+    assert.equal(await prepareEcommerceOpsManifest({ prompt: commercePrompt, judgeSubsetFn: judgeDown }), null,
+      "no connected model must NOT seed the ecommerce pack from the prefilter — undecided, not the keyword surface");
     assert.equal(await prepareCreativeAdPackManifest({ prompt: "read the report and summarize it", judgeSubsetFn: judgeDown }), null,
-      "a prefilter miss with no model stays unseeded (today's behavior)");
+      "a prefilter miss with no model stays unseeded");
 
     // (d) Hermetic un-injected path (no runtime probes): deterministic fallback.
     const hermetic = await resolveOnePackIntents({ prompt: commercePrompt, timeoutMs: 2000 });

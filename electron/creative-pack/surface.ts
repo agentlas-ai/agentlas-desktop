@@ -53,14 +53,14 @@ export async function prepareCreativeAdPackManifest(input: {
   // subset cache). The keyword prefilter is a hint, never a gate: a lexical
   // MISS can still seed when the model recognizes creative intent, and a
   // coincidental substring ("add a task", an uploaded bug-repro screenshot)
-  // can't force the Creative Ad surface. No model = today's prefilter verdict,
-  // labeled fallback.
+  // can't force the Creative Ad surface. With NO connected model we do NOT seed
+  // from the keyword prefilter — the pack simply does not appear (undecided).
   const intents = await resolveOnePackIntents({
     prompt: input.prompt,
     images: input.images,
     judgeSubsetFn: input.judgeSubsetFn,
   });
-  if (!intents.selected.includes("creative-ad-pack")) return null;
+  if (intents.source !== "llm" || !intents.selected.includes("creative-ad-pack")) return null;
   const url = extractUrls(input.prompt)[0];
   const metadata = url ? await fetchProductMetadata(url, input.now) : undefined;
   return buildCreativeAdPackManifest({

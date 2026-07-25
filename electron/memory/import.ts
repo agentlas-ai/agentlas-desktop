@@ -200,9 +200,10 @@ const MAX_MEMBER_LABELS = 40;
 /**
  * Route an imported memory file to the team member who should own it. The
  * connected model decides over the member-slug inventory (role/slug tokens are
- * hints); when no model answers, the verdict is today's token-overlap pick,
- * labeled as fallback. "orchestrator" = team-coordination knowledge / no clear
- * member owner.
+ * hints only). With NO connected model we do NOT route to a token-overlap member
+ * pick — the file falls to the orchestrator (owner null) as team-coordination
+ * knowledge, the safe non-acting default. "orchestrator" = team-coordination
+ * knowledge / no clear member owner.
  */
 export async function resolveMemoryImportOwner(
   relFile: string,
@@ -253,14 +254,16 @@ export async function resolveMemoryImportOwner(
       timeoutMs: opts.timeoutMs,
     });
   } catch {
-    return { owner: lexical, source: "fallback" };
+    // No connected model → orchestrator (owner null), never a token-overlap pick.
+    return { owner: null, source: "fallback" };
   }
-  if (verdict.source !== "llm") return { owner: lexical, source: "fallback" };
+  if (verdict.source !== "llm") return { owner: null, source: "fallback" };
   if (verdict.verdict === "orchestrator") return { owner: null, source: "llm" };
   const member = bySlug.get(verdict.verdict);
+  // A hallucinated member slug never routes: fall to the orchestrator.
   return member
     ? { owner: { agentId: member.agentId, role: member.role }, source: "llm" }
-    : { owner: lexical, source: "fallback" };
+    : { owner: null, source: "fallback" };
 }
 
 interface OwnerDecision {

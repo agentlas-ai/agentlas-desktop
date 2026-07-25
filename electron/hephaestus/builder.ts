@@ -395,16 +395,18 @@ export type HephaestusBuildModeJudge = (
 
 /**
  * The resident judge decides the auto build mode by meaning; the PACKAGE/ATTACHMENT/
- * TEAM regexes are demoted to hints and remain only the labeled fallback (today's
- * deterministic verdict) when no model answers. An explicit Main-selected req.mode
- * is closed-form and never reaches this resolver.
+ * TEAM regexes are demoted to the judge's hint/prior only. With NO connected model
+ * we do NOT keyword-classify package/team — we default to the neutral "single"
+ * builder (source:"fallback"), so a keyword match never silently picks a
+ * multi-role/packager build. An explicit Main-selected req.mode is closed-form and
+ * never reaches this resolver.
  */
 export async function resolveHephaestusBuildMode(
   request: string,
   options?: { hasAttachments?: boolean; signal?: AbortSignal; timeoutMs?: number; judgeFn?: HephaestusBuildModeJudge },
 ): Promise<{ mode: NonNullable<HephaestusBuildRequest["mode"]>; source: "llm" | "fallback" }> {
   const lexical = classifyHephaestusBuildMode(request, options);
-  if (!request.trim()) return { mode: lexical, source: "fallback" };
+  if (!request.trim()) return { mode: "single", source: "fallback" };
   const { judge } = await import("../system-agents/judgment");
   const run = options?.judgeFn ?? judge;
   const verdict = await run({
@@ -428,7 +430,9 @@ export async function resolveHephaestusBuildMode(
     signal: options?.signal,
     timeoutMs: options?.timeoutMs,
   });
-  return { mode: verdict.verdict, source: verdict.source };
+  // No connected-model verdict → neutral "single", never the keyword class.
+  if (verdict.source !== "llm") return { mode: "single", source: "fallback" };
+  return { mode: verdict.verdict, source: "llm" };
 }
 
 /**

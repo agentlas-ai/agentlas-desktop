@@ -59,31 +59,29 @@ app.setPath("userData", path.join(tempDir, "user-data"));
     assert.deepEqual(vetoed, { owner: null, source: "llm" },
       "a judged orchestrator verdict must override the filename token overlap");
 
-    // (b) No model = today's token-overlap pick, labeled fallback.
+    // (b) NO connected model must NOT route to the token-overlap member — the
+    //     file falls to the orchestrator (owner null), never the keyword pick.
     const fallback = await resolveMemoryImportOwner(
       "copywriter-notes.md",
       "Voice and tone rules.",
       target,
       { judgeFn: async (spec) => ({ verdict: spec.fallback, source: "fallback", confidence: 0, reason: "no model" }) },
     );
-    assert.deepEqual(fallback, {
-      owner: { agentId: "agent-writer", role: "Copywriter" },
-      source: "fallback",
-    }, "no model = the previous overlap behavior, labeled");
+    assert.deepEqual(fallback, { owner: null, source: "fallback" },
+      "no connected model must not route to a token-overlap member (orchestrator, not keyword)");
 
-    // Un-injected + no runtime probes: deterministic fallback, never a throw.
+    // Un-injected + no runtime probes (genuinely no model): the token overlap
+    // ("market-researcher") is NOT used — the import falls to the orchestrator.
     const hermetic = await resolveMemoryImportOwner("market-researcher-findings.md", "content", target, { timeoutMs: 2000 });
     assert.equal(hermetic.source, "fallback");
-    assert.deepEqual(hermetic.owner, { agentId: "agent-research", role: "Market Researcher" });
+    assert.equal(hermetic.owner, null, "no model must not keyword-route the import to a member");
 
-    // An unknown judged label falls back to the overlap pick instead of inventing an owner.
+    // An unknown judged label routes to the orchestrator instead of inventing an owner.
     const unknownLabel = await resolveMemoryImportOwner("copywriter-notes.md", "tone", target, {
       judgeFn: async () => ({ verdict: "someone-else", source: "llm", confidence: 0.9, reason: "hallucinated" }),
     });
-    assert.deepEqual(unknownLabel, {
-      owner: { agentId: "agent-writer", role: "Copywriter" },
-      source: "fallback",
-    }, "a hallucinated member slug must never route an import");
+    assert.deepEqual(unknownLabel, { owner: null, source: "fallback" },
+      "a hallucinated member slug must never route an import — orchestrator, not the lexical member");
 
     console.log(JSON.stringify({ ok: true }));
   } catch (error) {

@@ -855,10 +855,12 @@ export function buildOneSurfaceFromMarkdown(input: {
 }): AgentlasSurfaceManifest | null {
   const sources = markdownSources(input.markdown, input.observedSourceUrls);
   const markdownTable = addMissingRecommendationToTable(input.markdown, firstMarkdownTable(input.markdown));
+  // Only a connected-model verdict routes the travel/product surface. Without one
+  // (judgedIntent absent or source:"fallback") we keep the neutral GENERIC layout
+  // rather than keyword-inferring a travel plan from the prompt — the
+  // travel/product regexes survive only as the judge's hint/prior upstream.
   const judgedIntent = input.judgedIntent?.source === "llm" ? input.judgedIntent.intent : null;
-  const travelRequest = judgedIntent !== null
-    ? judgedIntent === "travel"
-    : lexicalTravelRequest(input.taskPrompt ?? "");
+  const travelRequest = judgedIntent === "travel";
   const budget = travelRequest ? travelBudget(markdownTable, input.taskPrompt ?? "") : null;
   const timeline = travelRequest ? travelTimeline(input.markdown) : [];
   const table = budget ? null : markdownTable ?? recommendationComparison(input.markdown);
@@ -882,6 +884,9 @@ export function buildOneSurfaceFromMarkdown(input: {
   const title = informativeHeading(input.markdown, input.fallbackTitle);
   const hangulCount = input.markdown.match(/[가-힣]/g)?.length ?? 0;
   const ko = hangulCount >= 12 || /[가-힣]/.test(title);
+  // The judged verdict labels the comparison widget; without a model verdict we
+  // fall to the STRUCTURAL check of the built table's own columns (closed-form
+  // table shape, not prompt-keyword inference) — never a lexical intent guess.
   const productComparison = judgedIntent !== null
     ? judgedIntent === "product-comparison"
     : table?.columns.some((column) => /^(?:제품|상품|모델|product|item|model)$/i.test(cleanText(column, 80))) ?? false;

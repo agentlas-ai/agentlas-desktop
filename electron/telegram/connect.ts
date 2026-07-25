@@ -5,10 +5,8 @@ import path from "node:path";
 import { BrowserWindow, session as electronSession, shell } from "electron";
 import { currentUiLocale } from "../ui-locale";
 import {
-  lexicalAutomationReportIntent,
   resolveTelegramAutomationReportIntent,
   resolveTelegramGoalIntent,
-  lexicalTelegramWriteIntent,
 } from "./judged-intents";
 import { runMcpInvocation } from "../mcp/client";
 import { getAgentById, listInstalledAgents } from "../mcp/registry";
@@ -1101,20 +1099,20 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
   const clean = cleanTelegramPrompt(binding, text) || tg("attachment.default_prompt");
   if (!clean) return;
   // The resident judge decides whether this is an automation-report control
-  // command (enable/disable/status) by meaning, in any language. The old
-  // wordlist predicates are hints; without a model the verdict falls back to
-  // today's regex result, labeled by source.
+  // command (enable/disable/status) by meaning, in any language. The wordlist
+  // predicates are only the judge's hint: with NO connected model we never
+  // auto-act on a keyword guess — the message flows on as an ordinary request.
   const reportIntent = await resolveTelegramAutomationReportIntent(clean).catch(
-    () => ({ intent: lexicalAutomationReportIntent(clean), source: "fallback" as const }),
+    () => ({ intent: "none" as const, source: "fallback" as const }),
   );
-  if (reportIntent.intent === "status") {
+  if (reportIntent.source === "llm" && reportIntent.intent === "status") {
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
       text: automationReportStatusText(binding),
     }).catch(() => undefined);
     return;
   }
-  if (reportIntent.intent === "disable") {
+  if (reportIntent.source === "llm" && reportIntent.intent === "disable") {
     setAutomationReportEnabled(binding.id, false);
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
@@ -1122,7 +1120,7 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     }).catch(() => undefined);
     return;
   }
-  if (reportIntent.intent === "enable") {
+  if (reportIntent.source === "llm" && reportIntent.intent === "enable") {
     setAutomationReportEnabled(binding.id, true);
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
@@ -1144,10 +1142,11 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
     return;
   }
   const cleanWithAttachments = appendTelegramAttachmentGuide(clean, attachments);
-  // Read-vs-write is a meaning decision: the judge rules; the make-verb wordlist
-  // is only the labeled fallback when no model answers.
+  // Read-vs-write is a meaning decision: the judge rules. With no connected model
+  // (or on error) we default to the safe read-only mode, never a keyword-inferred
+  // write; the make-verb wordlist survives only as the judge's hint.
   const mode = await resolveTelegramInvocationMode(cleanWithAttachments).catch(
-    () => telegramInvocationMode(cleanWithAttachments),
+    () => TELEGRAM_READ_ONLY_MODE,
   );
   // 응답 언어는 사용자가 보낸 메시지의 언어를 따른다(앱 UI 로케일 무시).
   const replyLocale = detectReplyLocale(clean);
@@ -1494,21 +1493,18 @@ function setAutomationReportEnabled(bindingId: string, enabled: boolean): void {
     .run(enabled ? 1 : 0, nowIso(), bindingId);
 }
 
-/** Deterministic wordlist mode — reference/fallback only; the judge decides above. */
-function telegramInvocationMode(userText: string): TelegramInvocationMode {
-  if (!lexicalTelegramWriteIntent(userText)) {
-    return { permissions: "read", goalMode: false, instruction: "" };
-  }
-  return telegramWriteMode();
-}
+const TELEGRAM_READ_ONLY_MODE: TelegramInvocationMode = { permissions: "read", goalMode: false, instruction: "" };
 
-/** Judged read-vs-write mode; falls back to today's wordlist verdict, labeled. */
+/**
+ * Judged read-vs-write mode. The connected model decides; with NO model we do
+ * NOT keyword-infer a make/build request — we default to the safe read-only mode
+ * (the write wordlist survives only as the judge's hint inside
+ * resolveTelegramGoalIntent).
+ */
 async function resolveTelegramInvocationMode(userText: string): Promise<TelegramInvocationMode> {
   const judged = await resolveTelegramGoalIntent(userText);
-  if (judged.source !== "llm") return telegramInvocationMode(userText);
-  return judged.write
-    ? telegramWriteMode()
-    : { permissions: "read", goalMode: false, instruction: "" };
+  if (judged.source !== "llm") return TELEGRAM_READ_ONLY_MODE;
+  return judged.write ? telegramWriteMode() : TELEGRAM_READ_ONLY_MODE;
 }
 
 function telegramWriteMode(): TelegramInvocationMode {
@@ -1540,7 +1536,7 @@ async function runBindingInvocation(
   binding: TelegramBindingRow,
   message: TelegramMessage,
   userText: string,
-  mode = telegramInvocationMode(userText),
+  mode: TelegramInvocationMode = TELEGRAM_READ_ONLY_MODE,
   attachments: TelegramRuntimeAttachment[] = [],
   replyLocale: "ko" | "en" = detectReplyLocale(userText),
 ): Promise<string> {
