@@ -1,8 +1,12 @@
 // Oberon — 브리프 추론. 사용자는 "제목 + 자유 프롬프트 + 참고자료"만 넣고,
 // 에이전트가 장르·톤·설정·캐릭터·길이를 추론해 기획안 단계에서 채워둔다(거기서 수정/승인).
-// 실제 LLM 라우팅 시 이 휴리스틱을 대체하면 된다.
+//
+// 최종 추론은 상주 판정 모델이 내린다(judgeBriefFromPrompt): 아래 키워드 표는
+// 힌트이자, 브리지/모델이 없을 때의 라벨된 폴백일 뿐이다. 사용자가 명시한
+// format은 닫힌 형태의 선택으로 판정 대상이 아니다.
 
 import type { Locale } from "@/lib/i18n";
+import { judgeLabelViaBridge, judgeSubsetViaBridge } from "@/lib/judgment";
 import { FORMAT_DEFAULT_DURATION } from "./taxonomy";
 import { emptyBrief } from "./presets";
 import type { AspectRatio, FilmBrief, FilmFormat, Genre } from "./types";
@@ -102,7 +106,7 @@ function extractCharacters(text: string, locale: Locale = "en"): FilmBrief["char
   return caps.slice(0, 3).map((name, i) => ({ name, role: i === 0 ? leadRole : supportRole, description: "" }));
 }
 
-export function inferBriefFromPrompt(input: {
+export interface BriefInferenceInput {
   title: string;
   prompt: string;
   references: string[];
@@ -110,14 +114,104 @@ export function inferBriefFromPrompt(input: {
   format?: FilmFormat | "";
   /** 생성되는 라벨 텍스트 및 기본 대사 언어의 로케일 (기본 "ko" — 기존 호출부 호환). */
   locale?: Locale;
-}): FilmBrief {
+}
+
+const FORMAT_LABELS = Object.keys(FORMAT_DEFAULT_DURATION) as FilmFormat[];
+const GENRE_LABELS: Genre[] = [
+  "commercial", "drama", "action", "thriller", "romance", "scifi", "documentary", "fantasy", "horror", "comedy",
+];
+const TONE_LABELS = TONE_KEYWORDS.map(([, tone]) => tone);
+
+function aspectForFormat(format: FilmFormat): AspectRatio {
+  return format === "social_short" ? "9:16" : format === "cinematic_short" || format === "trailer" ? "2.39:1" : "16:9";
+}
+
+function hintWords(source: RegExp): string[] {
+  return source.source.split("|").map((word) => word.replace(/\\b|\\s\*|[\\^$*+?.{}[\]()]/g, "").trim())
+    .filter((word) => word.length >= 2)
+    .slice(0, 10);
+}
+
+/**
+ * Judged brief inference: the resident model decides format/genre/tone/setting by
+ * meaning via the narrow judgment bridge; the keyword tables are hints and remain
+ * only the labeled fallback (inferBriefFromPrompt) when the bridge or model is
+ * unavailable. An explicitly chosen format is closed-form and never judged.
+ */
+export async function judgeBriefFromPrompt(input: BriefInferenceInput): Promise<FilmBrief> {
+  const base = inferBriefFromPrompt(input);
+  const text = `${input.title}\n${input.prompt}`.trim();
+  if (!text) return base;
+  const timeoutMs = 5_000;
+  const [format, genre, tones, setting] = await Promise.all([
+    input.format
+      ? Promise.resolve(null)
+      : judgeLabelViaBridge<FilmFormat>({
+          kind: "oberon-brief-format",
+          labels: FORMAT_LABELS,
+          input: text,
+          fallback: base.format,
+          hints: FORMAT_KEYWORDS.map(([re, id]) => ({ label: id, words: hintWords(re) })),
+          timeoutMs,
+        }),
+    judgeLabelViaBridge<Genre>({
+      kind: "oberon-brief-genre",
+      labels: GENRE_LABELS,
+      input: text,
+      fallback: base.genre,
+      hints: GENRE_KEYWORDS.map(([re, id]) => ({ label: id, words: hintWords(re) })),
+      timeoutMs,
+    }),
+    judgeSubsetViaBridge<string>({
+      kind: "oberon-brief-tone",
+      labels: TONE_LABELS,
+      input: text,
+      hints: TONE_KEYWORDS.map(([re, tone]) => ({ label: tone, words: hintWords(re) })),
+      timeoutMs,
+    }),
+    judgeLabelViaBridge<string>({
+      kind: "oberon-brief-setting",
+      labels: [...LOCATION_LEXICON, "none"],
+      input: text,
+      // Only a source:"llm" verdict is used below, so the conservative label is
+      // simply "none" — the lexical phrase extraction stays the real fallback.
+      fallback: "none",
+      timeoutMs,
+    }).catch(() => null),
+  ]);
+  const judgedFormat = format && format.source === "llm" ? format.verdict : base.format;
+  const judgedGenre = genre.source === "llm" ? genre.verdict : base.genre;
+  const judgedTone = tones.source === "llm"
+    ? Array.from(new Set([...tones.selected, "cinematic"])).slice(0, 4)
+    : base.tone;
+  let judgedSetting = base.setting;
+  if (setting && setting.source === "llm") {
+    if (setting.verdict === "none") judgedSetting = "";
+    else {
+      // Keep the phrase-extraction behavior when the judged location word is in
+      // the prompt; otherwise the judged location itself becomes the setting.
+      const extracted = input.prompt.includes(setting.verdict) ? pickSetting(input.prompt.trim()) : "";
+      judgedSetting = extracted || setting.verdict;
+    }
+  }
+  return {
+    ...base,
+    format: judgedFormat,
+    genre: judgedGenre,
+    aspect: aspectForFormat(judgedFormat),
+    durationSec: FORMAT_DEFAULT_DURATION[judgedFormat],
+    tone: judgedTone,
+    setting: judgedSetting,
+  };
+}
+
+export function inferBriefFromPrompt(input: BriefInferenceInput): FilmBrief {
   const locale = input.locale ?? "en";
   const prompt = input.prompt.trim();
   const text = `${input.title}\n${prompt}`;
   const format = input.format || pickFormat(text);
   const genre = pickGenre(text, format);
-  const aspect: AspectRatio =
-    format === "social_short" ? "9:16" : format === "cinematic_short" || format === "trailer" ? "2.39:1" : "16:9";
+  const aspect: AspectRatio = aspectForFormat(format);
   return {
     ...emptyBrief(locale),
     title: input.title.trim() || "Untitled",

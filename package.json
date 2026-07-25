@@ -158,6 +158,7 @@
     "test:provider-health-ui": "npm run build:renderer && node scripts/qa-provider-health-dashboard.cjs",
     "test:grok-auth-source": "npm run build:electron && electron scripts/test-grok-auth-source.cjs",
     "test:oberon-provider-routing": "npm run build:electron && node scripts/test-oberon-provider-routing.cjs",
+    "test:renderer-judged-style-sites": "npm run build:electron && node scripts/test-renderer-judged-style-sites.cjs",
     "test:multimodal-status": "npm run build:electron && electron scripts/test-multimodal-status-catalog.cjs",
     "test:build-session-resilience": "node scripts/test-build-session-resilience.cjs",
     "test:build-cloud-save-choice": "node scripts/test-build-cloud-save-choice.cjs",

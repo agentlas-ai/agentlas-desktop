@@ -212,10 +212,37 @@ const MODE_HINTS: Array<{ mode: ArtMode; rx: RegExp }> = [
   { mode: "cinematic", rx: /공룡|역사|자연|우주|여행|브랜드|런칭|이야기|다큐|감성|story|history|nature|space|travel|brand|launch|cinema|journey|documentary/i },
 ];
 
-/** 프롬프트 → 아트디렉션 모드 (하이브리드 엔진 1단계; Phase 2에서 LLM 라우팅으로 교체 가능) */
+/** 프롬프트 → 아트디렉션 모드 — 결정적 폴백. 최종 결정은 routeModeJudged가 내린다. */
 export function routeMode(prompt: string): ArtMode {
   for (const h of MODE_HINTS) if (h.rx.test(prompt)) return h.mode;
   return "editorial";
+}
+
+/**
+ * Judged art-direction mode via the renderer judgment bridge. The judged verdict
+ * decides; the MODE_HINTS wordlists are hints + the labeled fallback (routeMode)
+ * when no bridge/model is available.
+ */
+export async function routeModeJudged(prompt: string): Promise<ArtMode> {
+  const lexical = routeMode(prompt);
+  const trimmed = prompt.trim();
+  if (!trimmed) return lexical;
+  const { judgeLabelViaBridge } = await import("@/lib/judgment");
+  const judged = await judgeLabelViaBridge<ArtMode>({
+    kind: "trex-mode-route",
+    labels: ["editorial", "diagrammatic", "hybrid", "cinematic"],
+    input: trimmed.slice(0, 2_000),
+    fallback: lexical,
+    hints: MODE_HINTS.map((hint) => ({
+      label: hint.mode,
+      words: hint.rx.source.split("|")
+        .map((word) => word.replace(/\\b|\\s\*|[\\^$*+?.{}[\]()?]/g, "").trim())
+        .filter((word) => word.length >= 2)
+        .slice(0, 10),
+    })),
+    timeoutMs: 5_000,
+  });
+  return judged.source === "llm" ? judged.verdict : lexical;
 }
 
 export const MIN_SLIDES = 3;

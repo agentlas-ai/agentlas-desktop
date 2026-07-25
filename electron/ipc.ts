@@ -353,6 +353,7 @@ import {
 } from "./store/tasks";
 import { mutateOneTaskArchive, searchOneHistory } from "./one/search";
 import { prejudgeOneRequestIntent } from "./one/judged-request-intent";
+import { judge, judgeSubset } from "./system-agents/judgment";
 import { prejudgeOneMemoryIntent } from "./one/memory-detector";
 import { prejudgeCompletionClaims } from "./one/judged-completion-claim";
 import { continueOneFromTaskResult } from "./one/task-continuation";
@@ -1335,6 +1336,103 @@ export function registerIpcHandlers(): void {
   // macOS "시스템 설정 > 언어 및 지역"의 1순위 언어. Electron이 BCP47 형태로 반환.
   // ex) "ko-KR", "en-US", "ja-JP". 첫 실행 시 i18n 자동 감지에 사용.
   ipcMain.handle("app:getLocale", () => app.getLocale());
+
+  // ── Renderer judgment bridge — style/format inference only ─────────────────
+  // Narrow, kind-allowlisted surface: Main owns the question/guidance per kind;
+  // the renderer supplies only labels, input, hint wordlists (reference only),
+  // and its own deterministic fallback. No model → the fallback verdict comes
+  // back labeled source:"fallback", never silently lexical.
+  const RENDERER_JUDGE_KINDS: Record<string, { question: string; guidance: string }> = {
+    "oberon-brief-format": {
+      question: "Which film/video FORMAT does this production brief ask for? Pick exactly one listed format id.",
+      guidance: "Judge the meaning in any language. A passing mention of a platform is not a format request.",
+    },
+    "oberon-brief-genre": {
+      question: "Which GENRE best fits this film/video brief? Pick exactly one listed genre id.",
+      guidance: "Judge the story/content the brief describes, not incidental words.",
+    },
+    "oberon-brief-setting": {
+      question: "Which of the listed settings/locations does this brief primarily take place in? Answer 'none' when none fits.",
+      guidance: "Only pick a location the brief genuinely uses as its setting.",
+    },
+    "trex-style-route": {
+      question: "Which slide-deck visual style family best fits this presentation topic? Answer 'none' to keep the default look.",
+      guidance: "Judge the audience and subject matter in any language; 'none' is a common correct answer.",
+    },
+    "trex-mode-route": {
+      question: "Which art-direction mode best fits this slide-deck topic? Pick exactly one listed mode id.",
+      guidance: "Judge the subject matter in any language.",
+    },
+    "cardnews-app-detect": {
+      question: "Is this generated app a card-news / social-carousel image maker? Answer yes or no.",
+      guidance: "Judge what the app actually does from its metadata, in any language.",
+    },
+    "generated-app-visual-output": {
+      question: "Does this generated app primarily produce visual media outputs (images, cards, posters, storyboards, video) rather than text or data results? Answer yes or no.",
+      guidance: "Judge the app's actual purpose from its metadata, in any language.",
+    },
+  };
+  const RENDERER_SUBSET_KINDS: Record<string, { question: string; guidance: string }> = {
+    "oberon-brief-tone": {
+      question: "Which of the listed tone/mood attributes genuinely fit this film/video brief? Choose zero or more.",
+      guidance: "Never pad the list; an empty selection is valid.",
+    },
+  };
+  const RENDERER_JUDGMENT_LABEL_RE = /^[a-z0-9가-힣][a-z0-9가-힣 :._-]{0,63}$/i;
+  const sanitizeRendererJudgmentSpec = (raw: unknown, allowlist: Record<string, { question: string; guidance: string }>) => {
+    if (!raw || typeof raw !== "object") throw new TypeError("Invalid judgment request");
+    const spec = raw as Record<string, unknown>;
+    const kind = String(spec.kind ?? "");
+    const meta = allowlist[kind];
+    if (!meta) throw new TypeError(`Judgment kind not allowed for renderer: ${kind}`);
+    const labels = Array.isArray(spec.labels)
+      ? spec.labels.map((label) => String(label)).filter((label) => RENDERER_JUDGMENT_LABEL_RE.test(label)).slice(0, 64)
+      : [];
+    if (labels.length < 1) throw new TypeError("Judgment labels are required");
+    const input = String(spec.input ?? "").slice(0, 6_000);
+    const hints = Array.isArray(spec.hints)
+      ? spec.hints
+          .filter((hint): hint is { label: unknown; words: unknown } => Boolean(hint) && typeof hint === "object")
+          .map((hint) => ({
+            label: String(hint.label),
+            words: Array.isArray(hint.words) ? hint.words.map((word) => String(word).slice(0, 64)).slice(0, 24) : [],
+          }))
+          .filter((hint) => labels.includes(hint.label) && hint.words.length > 0)
+          .slice(0, 32)
+      : undefined;
+    const timeoutRaw = Number(spec.timeoutMs);
+    const timeoutMs = Number.isFinite(timeoutRaw) ? Math.max(1_000, Math.min(10_000, Math.floor(timeoutRaw))) : 6_000;
+    return { kind, meta, labels, input, hints, timeoutMs, fallback: String(spec.fallback ?? "") };
+  };
+  ipcMain.handle("judgment:judge", async (_e, raw: unknown) => {
+    const spec = sanitizeRendererJudgmentSpec(raw, RENDERER_JUDGE_KINDS);
+    if (!spec.labels.includes(spec.fallback)) throw new TypeError("Judgment fallback must be one of the labels");
+    const verdict = await judge<string>({
+      kind: spec.kind,
+      question: spec.meta.question,
+      labels: spec.labels,
+      input: spec.input,
+      guidance:
+        `A deterministic pre-pass picked "${spec.fallback}". Treat that as a prior, not a fact. ` + spec.meta.guidance,
+      hints: spec.hints,
+      fallback: spec.fallback,
+      timeoutMs: spec.timeoutMs,
+    });
+    return { verdict: verdict.verdict, source: verdict.source, confidence: verdict.confidence, reason: verdict.reason };
+  });
+  ipcMain.handle("judgment:judgeSubset", async (_e, raw: unknown) => {
+    const spec = sanitizeRendererJudgmentSpec(raw, RENDERER_SUBSET_KINDS);
+    const verdict = await judgeSubset<string>({
+      kind: spec.kind,
+      question: spec.meta.question,
+      labels: spec.labels,
+      input: spec.input,
+      guidance: spec.meta.guidance,
+      hints: spec.hints,
+      timeoutMs: spec.timeoutMs,
+    });
+    return { selected: verdict.selected, source: verdict.source, confidence: verdict.confidence, reason: verdict.reason };
+  });
   /** package.json의 version — 사이드바 푸터 표기/디버그 용 */
   ipcMain.handle("app:getVersion", () => app.getVersion());
 

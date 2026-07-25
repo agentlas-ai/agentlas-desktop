@@ -70,9 +70,9 @@ export const CARDNEWS_TEMPLATES: CardnewsTemplateSpec[] = [
   },
 ];
 
-export function isCardnewsApp(app: AppFactoryAppRecord): boolean {
+function cardnewsHaystack(app: AppFactoryAppRecord): string {
   const manifest = app.manifest;
-  const haystack = [
+  return [
     app.appName,
     manifest.title,
     manifest.domain,
@@ -85,8 +85,33 @@ export function isCardnewsApp(app: AppFactoryAppRecord): boolean {
     ...(manifest.app?.routes ?? []).flatMap((route) => [route.label, route.path, route.purpose]),
     ...(manifest.widgets ?? []).map((widget) => widget.title),
   ].filter(Boolean).join(" ").toLowerCase();
+}
 
-  return /cardnews|card news|carousel|instagram|insta|카드뉴스|카로셀|캐러셀|인스타/.test(haystack);
+/** Deterministic wordlist verdict — reference/fallback only; isCardnewsAppJudged decides. */
+export function isCardnewsApp(app: AppFactoryAppRecord): boolean {
+  return /cardnews|card news|carousel|instagram|insta|카드뉴스|카로셀|캐러셀|인스타/.test(cardnewsHaystack(app));
+}
+
+/**
+ * Judged card-news detection via the renderer judgment bridge. The judged
+ * verdict decides; the wordlist above is a hint and remains the labeled
+ * fallback when no bridge/model is available. Prefill/routing only — judge
+ * before the flow starts or update async, never inside a render pass.
+ */
+export async function isCardnewsAppJudged(app: AppFactoryAppRecord): Promise<boolean> {
+  const lexical = isCardnewsApp(app);
+  const haystack = cardnewsHaystack(app);
+  if (!haystack.trim()) return lexical;
+  const { judgeLabelViaBridge } = await import("./judgment");
+  const judged = await judgeLabelViaBridge<"yes" | "no">({
+    kind: "cardnews-app-detect",
+    labels: ["yes", "no"],
+    input: haystack.slice(0, 2_000),
+    fallback: lexical ? "yes" : "no",
+    hints: [{ label: "yes", words: ["cardnews", "card news", "carousel", "instagram", "카드뉴스", "캐러셀", "인스타"] }],
+    timeoutMs: 5_000,
+  });
+  return judged.source === "llm" ? judged.verdict === "yes" : lexical;
 }
 
 export function initialCardnewsTopic(app: AppFactoryAppRecord, locale: CardnewsLanguage): string {

@@ -460,6 +460,23 @@ function setupMockAgentlasBridge(options) {
       getLocale: async () => "ko-KR",
       getVersion: async () => options?.appVersion || "0.0.0",
     },
+    // Renderer judgment bridge: the mock never has a model, so it returns the
+    // caller's deterministic fallback labeled source:"fallback" — the exact
+    // no-model contract of the real Main handler.
+    judgment: {
+      judge: async (spec) => ({
+        verdict: String(spec?.fallback ?? ""),
+        source: "fallback",
+        confidence: 0,
+        reason: "mock bridge has no connected model",
+      }),
+      judgeSubset: async () => ({
+        selected: [],
+        source: "fallback",
+        confidence: 0,
+        reason: "mock bridge has no connected model",
+      }),
+    },
     mobileBridge: {
       status: async () => mobileBridgeStatus(),
       issuePairing: async () => {

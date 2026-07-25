@@ -11,6 +11,7 @@ import {
   buildDeckFromContent,
   parseDeckContent,
   routeMode,
+  routeModeJudged,
   newBlock,
   clampCount,
   MIN_SLIDES,
@@ -32,7 +33,7 @@ import {
 } from "@/lib/trex/model";
 import { IconApps, IconSparkles, IconFileUp, IconEdit, IconChevronRight, IconCheck } from "@/components/Icon";
 import { DeckStage, GlobalStyle, bgStyle } from "@/components/trex/DeckStage";
-import { STYLES, STYLE_IDS, styleById, routeStyle, PALETTES, type StyleId } from "@/lib/trex/styles";
+import { STYLES, STYLE_IDS, styleById, routeStyle, routeStyleJudged, PALETTES, type StyleId } from "@/lib/trex/styles";
 import type { OpenCrabReadiness } from "@/lib/types";
 
 type ViewState = "home" | "generating" | "view" | "edit";
@@ -299,8 +300,10 @@ export default function TrexPage() {
       const sourcesText = buildSourcesText();
       // 소스 파일이 있으면 주제가 비어도 생성(소스가 재료). 둘 다 없으면 예시로 폴백.
       const p = text.trim() || (sourcesText ? "" : ko ? EXAMPLE : EXAMPLE_EN);
-      // 스타일 결정 — 명시 선택 > 자동(주제/소스 라우팅) > LLM 위임(undefined) > "legacy"=명시적 기본 룩(null).
-      const styleId = styleOverride === "legacy" ? null : styleOverride ?? routeStyle(p || sourcesText) ?? undefined;
+      // 스타일/모드 결정 — 명시 선택(닫힌 형태) > 상주 판정 모델(의미 기반) >
+      // 키워드 라우터(라벨된 폴백) > "legacy"=명시적 기본 룩(null).
+      const styleId = styleOverride === "legacy" ? null : styleOverride ?? (await routeStyleJudged(p || sourcesText)) ?? undefined;
+      const judgedMode = modeOverride ?? (await routeModeJudged(p || sourcesText));
       // 장르가 카드뉴스/advertise면 판형을 자동 지정(4:5 / 9:16) — 그 외엔 사용자 선택 판형 유지.
       const gFmt = genre === "cardnews" ? "ig-portrait" : genre === "advertise" ? "story" : formatId;
       const gArg = genre ?? undefined;
@@ -324,7 +327,7 @@ export default function TrexPage() {
           const r = await gc({
             topic: p,
             count: n,
-            mode: modeOverride ?? undefined,
+            mode: judgedMode,
             sources: sourcesText || undefined,
             locale: ko ? "ko" : "en",
             useOpenCrab: openCrabEnabled,
@@ -345,7 +348,7 @@ export default function TrexPage() {
           }
           contentOk = !!parsed;
           if (!parsed) failReason = r?.reason || "parse-failed";
-          d = parsed ? buildDeckFromContent({ ...parsed, genre: gArg ?? parsed.genre }, gFmt, locale, styleId, withImages) : generateDeck(p, modeOverride ?? undefined, n, gFmt, locale, styleId, withImages, gArg);
+          d = parsed ? buildDeckFromContent({ ...parsed, genre: gArg ?? parsed.genre }, gFmt, locale, styleId, withImages) : generateDeck(p, judgedMode, n, gFmt, locale, styleId, withImages, gArg);
         } catch {
           if (openCrabEnabled) {
             patchJob({
@@ -356,7 +359,7 @@ export default function TrexPage() {
             });
           }
           failReason = "exception";
-          d = generateDeck(p, modeOverride ?? undefined, n, gFmt, locale, styleId, withImages, gArg);
+          d = generateDeck(p, judgedMode, n, gFmt, locale, styleId, withImages, gArg);
         }
         patchJob({ key: "content", label: ko ? "콘텐츠 에이전트 — 카피·수치 작성" : "Content agent — writing copy & figures", status: contentOk ? "done" : "failed", engine: contentOk ? "agy/codex" : undefined });
         setAiWriting(false);
@@ -367,7 +370,7 @@ export default function TrexPage() {
         }
         revealDeck(d);
       } else {
-        revealDeck(generateDeck(p, modeOverride ?? undefined, n, gFmt, locale, styleId, imageModel !== "none", gArg));
+        revealDeck(generateDeck(p, judgedMode, n, gFmt, locale, styleId, imageModel !== "none", gArg));
       }
     },
     [aiContent, modeOverride, styleOverride, formatId, genre, revealDeck, locale, imageModel, ko, patchJob, buildSourcesText, useOpenCrab, openCrabReadiness],

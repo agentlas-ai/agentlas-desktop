@@ -547,10 +547,42 @@ const STYLE_HINTS: Array<{ id: StyleId; rx: RegExp }> = [
 ];
 
 /**
- * 프롬프트 → 스타일. 매치 없으면 null(레거시 모드 룩 유지) — 기존 덱/기존 동작 보존이
- * 기본값이고, 스타일은 명시 선택 또는 주제 매치로만 켜진다.
+ * 프롬프트 → 스타일 (결정적 폴백). 매치 없으면 null(레거시 모드 룩 유지) — 기존
+ * 덱/기존 동작 보존이 기본값이고, 스타일은 명시 선택 또는 주제 매치로만 켜진다.
+ * 최종 결정은 routeStyleJudged가 상주 판정 모델로 내린다; 이 함수는 힌트이자
+ * 라벨된 폴백일 뿐이다.
  */
 export function routeStyle(prompt: string): StyleId | null {
   for (const h of STYLE_HINTS) if (h.rx.test(prompt)) return h.id;
   return null;
+}
+
+const STYLE_JUDGE_HINTS: Array<{ label: StyleId | "none"; words: string[] }> = STYLE_HINTS.map((hint) => ({
+  label: hint.id,
+  words: hint.rx.source.split("|")
+    .map((word) => word.replace(/\\b|\\s\*|[\\^$*+?.{}[\]()]/g, "").trim())
+    .filter((word) => word.length >= 2)
+    .slice(0, 10),
+}));
+
+/**
+ * Judged style routing via the renderer judgment bridge. Explicit user choice
+ * always wins upstream (closed-form); the judged verdict decides here; the
+ * keyword router above stays as the labeled fallback when no model answers.
+ */
+export async function routeStyleJudged(prompt: string): Promise<StyleId | null> {
+  const lexical = routeStyle(prompt);
+  const trimmed = prompt.trim();
+  if (!trimmed) return lexical;
+  const { judgeLabelViaBridge } = await import("@/lib/judgment");
+  const judged = await judgeLabelViaBridge<StyleId | "none">({
+    kind: "trex-style-route",
+    labels: [...STYLE_HINTS.map((hint) => hint.id), "none"],
+    input: trimmed.slice(0, 2_000),
+    fallback: lexical ?? "none",
+    hints: STYLE_JUDGE_HINTS,
+    timeoutMs: 5_000,
+  });
+  if (judged.source !== "llm") return lexical;
+  return judged.verdict === "none" ? null : judged.verdict;
 }

@@ -3,6 +3,8 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AgentlasIpc,
+  RendererJudgmentSpec,
+  RendererSubsetJudgmentSpec,
   BrowserApprovalRequestEvent,
   BugReportInput,
   Automation,
@@ -44,6 +46,10 @@ const api: AgentlasIpc = {
     retry: () => ipcRenderer.invoke("mobileBridge:retry"),
     revokeDevice: (deviceId: string) => ipcRenderer.invoke("mobileBridge:revokeDevice", deviceId),
     revealLog: () => ipcRenderer.invoke("mobileBridge:revealLog"),
+  },
+  judgment: {
+    judge: (spec: RendererJudgmentSpec) => ipcRenderer.invoke("judgment:judge", spec),
+    judgeSubset: (spec: RendererSubsetJudgmentSpec) => ipcRenderer.invoke("judgment:judgeSubset", spec),
   },
   trex: {
     generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => ipcRenderer.invoke("trex:generateImage", payload),

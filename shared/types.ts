@@ -4895,6 +4895,42 @@ export type ExperienceHubCatalogResult = {
   message?: string;
 };
 
+/**
+ * Renderer judgment bridge — style/format inference only. Main owns the
+ * question/guidance per allowlisted kind; the renderer supplies only labels,
+ * input, hint wordlists (reference only), and its deterministic fallback.
+ */
+export interface RendererJudgmentSpec {
+  kind: string;
+  labels: string[];
+  input: string;
+  fallback: string;
+  hints?: Array<{ label: string; words: string[] }>;
+  timeoutMs?: number;
+}
+
+export interface RendererJudgmentVerdict {
+  verdict: string;
+  source: "llm" | "fallback";
+  confidence: number;
+  reason: string;
+}
+
+export interface RendererSubsetJudgmentSpec {
+  kind: string;
+  labels: string[];
+  input: string;
+  hints?: Array<{ label: string; words: string[] }>;
+  timeoutMs?: number;
+}
+
+export interface RendererSubsetJudgmentVerdict {
+  selected: string[];
+  source: "llm" | "fallback";
+  confidence: number;
+  reason: string;
+}
+
 export interface AgentlasIpc {
   /** Electron 메인이 알려주는 OS 환경 정보 (Apple/Codex/Claude 데스크톱과 동일 패턴) */
   app: {
@@ -4912,6 +4948,15 @@ export interface AgentlasIpc {
     revokeDevice: (deviceId: string) => Promise<{ ok: boolean }>;
     /** Reveals the main-process log file. Log contents never cross IPC. */
     revealLog: () => Promise<{ ok: boolean }>;
+  };
+  /**
+   * Resident judgment bridge for renderer style/format inference. Narrow and
+   * kind-allowlisted in Main; a missing model returns the caller's fallback
+   * verdict labeled source:"fallback" — never silently lexical.
+   */
+  judgment: {
+    judge: (spec: RendererJudgmentSpec) => Promise<RendererJudgmentVerdict>;
+    judgeSubset: (spec: RendererSubsetJudgmentSpec) => Promise<RendererSubsetJudgmentVerdict>;
   };
   /** T-rex 슬라이드 스튜디오 — 키리스 CLI 이미지 생성(codex image_gen / gemini). */
   trex: {

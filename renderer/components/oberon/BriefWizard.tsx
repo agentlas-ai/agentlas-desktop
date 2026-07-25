@@ -6,6 +6,7 @@ import {
   GENRE_TEMPLATES,
   getBriefPresets,
   inferBriefFromPrompt,
+  judgeBriefFromPrompt,
   taxonomyText,
   type FilmBrief,
   type FilmFormat,
@@ -77,8 +78,12 @@ export function BriefWizard({
   const tpl = format ? GENRE_TEMPLATES[format] : null;
   const isMotionFormat = format === "motion_graphics_30" || format === "motion_graphics_60";
 
-  function generate() {
-    const base = inferBriefFromPrompt({ title, prompt, references: refs, format, locale });
+  async function generate() {
+    // The judged inference decides format/genre/tone/setting before the flow
+    // starts; an explicit user-picked format is closed-form, and the keyword
+    // tables remain the labeled fallback when no bridge/model is available.
+    const base = await judgeBriefFromPrompt({ title, prompt, references: refs, format, locale })
+      .catch(() => inferBriefFromPrompt({ title, prompt, references: refs, format, locale }));
     const brief =
       isMotionFormat
         ? { ...base, brandOrProduct: brandName.trim() || base.brandOrProduct, logoSource: logoSrc.trim() || undefined }

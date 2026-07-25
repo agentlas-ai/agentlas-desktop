@@ -57,22 +57,63 @@ export interface GeneratedAppBlueprint {
 
 export type GeneratedAppFieldValues = Record<string, string>;
 
-export function buildGeneratedAppBlueprint(app: AppFactoryAppRecord, locale: GeneratedAppLocale): GeneratedAppBlueprint {
+function generatedAppHaystack(app: AppFactoryAppRecord): string {
   const manifest = app.manifest;
   const appSpec = manifest.app;
-  const title = safeStringValue(app.appName || appSpec?.name || manifest.title, "Generated App");
-  const appType = safeStringValue(appSpec?.appType || manifest.layout, "service-app");
-  const haystack = [
-    title,
+  return [
+    safeStringValue(app.appName || appSpec?.name || manifest.title, "Generated App"),
     manifest.title,
     manifest.domain,
     manifest.layout,
-    appType,
+    safeStringValue(appSpec?.appType || manifest.layout, "service-app"),
     safeStringValue(appSpec?.tagline),
     safeStringValue(appSpec?.valueProp),
     safeStringValue(appSpec?.audience),
   ].filter(Boolean).join(" ").toLowerCase();
-  const isVisualOutput = /card|carousel|instagram|image|creative|asset|poster|storyboard|video|design|카드|인스타|이미지|디자인|스토리/.test(haystack);
+}
+
+/** Deterministic wordlist verdict — reference/fallback only. */
+export function lexicalGeneratedAppVisualOutput(app: AppFactoryAppRecord): boolean {
+  return /card|carousel|instagram|image|creative|asset|poster|storyboard|video|design|카드|인스타|이미지|디자인|스토리/.test(
+    generatedAppHaystack(app),
+  );
+}
+
+/**
+ * Judged visual-output detection via the renderer judgment bridge. The judged
+ * verdict decides which output/export surface the generated app gets; the
+ * wordlist stays as the labeled fallback. Callers rebuild the blueprint with
+ * `isVisualOutputOverride` once the async verdict lands — never in a render pass.
+ */
+export async function resolveGeneratedAppVisualOutput(app: AppFactoryAppRecord): Promise<boolean> {
+  const lexical = lexicalGeneratedAppVisualOutput(app);
+  const haystack = generatedAppHaystack(app);
+  if (!haystack.trim()) return lexical;
+  const { judgeLabelViaBridge } = await import("./judgment");
+  const judged = await judgeLabelViaBridge<"yes" | "no">({
+    kind: "generated-app-visual-output",
+    labels: ["yes", "no"],
+    input: haystack.slice(0, 2_000),
+    fallback: lexical ? "yes" : "no",
+    hints: [{ label: "yes", words: ["card", "carousel", "image", "poster", "storyboard", "video", "design", "카드", "이미지", "디자인"] }],
+    timeoutMs: 5_000,
+  });
+  return judged.source === "llm" ? judged.verdict === "yes" : lexical;
+}
+
+export function buildGeneratedAppBlueprint(
+  app: AppFactoryAppRecord,
+  locale: GeneratedAppLocale,
+  opts: {
+    /** Judged verdict from resolveGeneratedAppVisualOutput; explicit and closed-form here. */
+    isVisualOutputOverride?: boolean;
+  } = {},
+): GeneratedAppBlueprint {
+  const manifest = app.manifest;
+  const appSpec = manifest.app;
+  const title = safeStringValue(app.appName || appSpec?.name || manifest.title, "Generated App");
+  const appType = safeStringValue(appSpec?.appType || manifest.layout, "service-app");
+  const isVisualOutput = opts.isVisualOutputOverride ?? lexicalGeneratedAppVisualOutput(app);
   const routes = routesOf(manifest);
   const fields = dedupeFields([
     ...domainFields(manifest, locale, isVisualOutput),
