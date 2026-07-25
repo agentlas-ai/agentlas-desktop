@@ -268,10 +268,12 @@ export function contractVerify(
 /** security scan: 정적 보안 규칙(+ 선택적 LLM 판단). 업로드/빌드 게이트. */
 export function securityScan(
   folder: string,
-  opts: { strict?: boolean } & HephaestusRunOptions = {},
+  opts: { strict?: boolean; llmJudgmentPath?: string; acknowledgeWarn?: boolean } & HephaestusRunOptions = {},
 ): Promise<HephaestusResult> {
   const args = ["security", "scan", assertPositional(folder, "folder")];
   if (opts.strict) args.push("--strict");
+  if (opts.llmJudgmentPath) args.push("--llm-judgment", assertPositional(opts.llmJudgmentPath, "directory"));
+  if (opts.acknowledgeWarn) args.push("--acknowledge-warn");
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 180_000, ...opts });
 }
 

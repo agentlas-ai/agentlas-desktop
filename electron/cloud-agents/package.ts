@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { detectRuntimeLabelsFromPaths } from "../agents/runtime-labels";
+import { detectRuntimes } from "../runtime/detect";
+import { autofixForPublish } from "../hephaestus/publish-autofix";
 import { getSessionCookieHeader } from "../auth";
 import { readCloudAgentRestoreMarker, writeCloudAgentRegistrationMarker } from "./restore";
 import type {
@@ -174,7 +176,31 @@ export async function packageAndReviewCloudAgent(
       ? restoreMarker.executablePaths ?? []
       : [],
   );
-  const scan = scanAgentFolder(rootPath, restoredExecutablePaths);
+  // Public publish auto-fix: the strongest connected model reviews the package
+  // into a throwaway clean copy (excludes local build artifacts, secret files,
+  // and symlinks, plus anything the model marks; a deterministic backstop always
+  // strips secrets/symlinks regardless of the model), so an ordinary agent folder
+  // publishes without hand-editing. Only the scan/package INPUT is the clean copy;
+  // the original rootPath still owns the restore marker and the returned path, and
+  // the user's folder is never mutated.
+  let scanRoot = rootPath;
+  let autofixCleanup: (() => void) | null = null;
+  if (isPublicHubPublish) {
+    try {
+      const runtimes = await detectRuntimes().catch(() => [] as Awaited<ReturnType<typeof detectRuntimes>>);
+      const active = runtimes.find((runtime) => runtime.active) ?? runtimes[0] ?? null;
+      const autofix = await autofixForPublish({ folder: rootPath, active });
+      if (autofix.ready && autofix.packageFolder) {
+        scanRoot = autofix.packageFolder;
+        autofixCleanup = autofix.cleanup;
+      } else {
+        autofix.cleanup();
+      }
+    } catch {
+      /* fall back to publishing the original folder unchanged */
+    }
+  }
+  const scan = scanAgentFolder(scanRoot, restoredExecutablePaths);
   const snapshot = packageSnapshot(scan.included);
   let routingCard: ReturnType<typeof readRoutingCard> = {};
   let careerGraphCard: CloudAgentPublicCareerGraph | undefined;
@@ -189,7 +215,11 @@ export async function packageAndReviewCloudAgent(
   const name = readName(finalSnapshot, path.basename(rootPath));
   const tagline = readTagline(finalSnapshot);
   let localized = readLocalizedListing(finalSnapshot);
-  if (isPublicHubPublish && localizedListingProblems(localized).length > 0 && input.reviewMode === "local-runtime") {
+  // Public publish auto-translates missing bilingual metadata with the user's
+  // connected model by default — never a dead-end that demands hand-editing
+  // agent-card.json. (Was gated behind reviewMode "local-runtime", which the
+  // publish path never set, so the localized blocker was unavoidable.)
+  if (isPublicHubPublish && localizedListingProblems(localized).length > 0) {
     localized = await generateLocalizedListingWithSubmitterRuntime(rootPath, name, tagline);
   }
   if (isPublicHubPublish) {
@@ -339,6 +369,7 @@ export async function packageAndReviewCloudAgent(
     status = "registered";
   }
 
+  if (autofixCleanup) autofixCleanup();
   return {
     status,
     rootPath,

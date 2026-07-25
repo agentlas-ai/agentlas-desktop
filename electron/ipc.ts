@@ -135,6 +135,7 @@ import {
   stormbreakerJournal,
   stormbreakerRun,
 } from "./hephaestus/commands";
+import { autofixForPublish } from "./hephaestus/publish-autofix";
 import { normalizeRecommendation } from "./hephaestus/recommendation";
 import { confirmUpload, PathGuardError, resolveFolderArg } from "./hephaestus/path-guard";
 import { getEngineToggles, isSupervisorEnabled, setEngineToggle, setSupervisorEnabled } from "./hephaestus/supervisor";
@@ -3882,6 +3883,36 @@ export function registerIpcHandlers(): void {
             stderr: "",
             error: locale === "ko" ? "사용자가 업로드를 취소했습니다." : "Upload cancelled by user.",
           };
+        }
+        // Auto-fix before publish: the strongest connected model reviews the
+        // package and remediates it into a throwaway clean copy (excludes build
+        // artifacts and secret files, translates missing bilingual metadata), so
+        // an ordinary agent folder publishes without hand-editing. A deterministic
+        // backstop still strips secrets/symlinks regardless of the model. The
+        // user's original folder is never mutated.
+        const runtimes = await detectRuntimes().catch(() => [] as Awaited<ReturnType<typeof detectRuntimes>>);
+        const active = runtimes.find((runtime) => runtime.active) ?? runtimes[0] ?? null;
+        const autofix = await autofixForPublish({ folder, locale, active });
+        if (!autofix.ready || !autofix.packageFolder) {
+          autofix.cleanup();
+          const blockerText = autofix.remainingBlockers.map((finding) => finding.message).join("\n");
+          return {
+            ok: false,
+            exitCode: null,
+            json: null,
+            stdout: blockerText,
+            stderr: "",
+            error:
+              (locale === "ko"
+                ? `자동 수정 후에도 남은 차단 항목이 있어요${autofix.model ? ` (검토 모델: ${autofix.model})` : ""}: `
+                : `Blockers remain after auto-fix${autofix.model ? ` (reviewed by ${autofix.model})` : ""}: `) +
+              (blockerText || (locale === "ko" ? "알 수 없음" : "unknown")),
+          };
+        }
+        try {
+          return await hepPublish(autofix.packageFolder, input.visibility, { dryRun: input.dryRun });
+        } finally {
+          autofix.cleanup();
         }
       }
       return hepPublish(folder, input.visibility, { dryRun: input.dryRun });
