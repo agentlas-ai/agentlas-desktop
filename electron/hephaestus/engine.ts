@@ -13,7 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
-import type { ChildProcess } from "node:child_process";
+import { spawnSync, type ChildProcess } from "node:child_process";
 import { detachedSpawnOpts, killCliTree, trackRunChild, withCliPath } from "../runtime/exec";
 import { withPythonCacheBoundary } from "../runtime/python-cache";
 import { currentUiLocale } from "../ui-locale";
@@ -194,6 +194,77 @@ export interface HephaestusStdioLaunch {
   args: string[];
   env: NodeJS.ProcessEnv;
   runtimeRoot: string;
+}
+
+function pythonInvocation(candidate: string): { command: string; prefix: string[] } {
+  const base = path.basename(candidate).toLowerCase();
+  return {
+    command: candidate,
+    prefix: base === "py" || base === "py.exe" ? ["-3"] : [],
+  };
+}
+
+/**
+ * Resolve the same immutable Core root and cross-platform Python bridge without
+ * yielding the Electron main loop. Project-context refresh is deliberately
+ * synchronous so a map is never reported as ready merely because a background
+ * process was started.
+ */
+export function resolveHephaestusSyncLaunch(
+  module: string,
+  args: string[],
+  runtimeRootOverride?: string,
+): HephaestusStdioLaunch | null {
+  const selectedRoot = runtimeRootOverride?.trim() || hephaestusRoot();
+  if (!selectedRoot) return null;
+  let runtimeRoot: string;
+  try {
+    runtimeRoot = fs.realpathSync(selectedRoot);
+    if (!fs.existsSync(path.join(runtimeRoot, "agentlas_cloud", "__main__.py"))) return null;
+  } catch {
+    return null;
+  }
+
+  const env = withPythonCacheBoundary(withCliPath({
+    ...process.env,
+    HEPHAESTUS_RUNTIME_ROOT: runtimeRoot,
+    PYTHONPATH: runtimeRoot,
+    PYTHONUTF8: "1",
+    PYTHONIOENCODING: "utf-8",
+  }));
+  const probe = "import sys; raise SystemExit(0 if sys.version_info >= (3,9) else 1)";
+  for (const candidate of pythonCandidates(runtimeRoot)) {
+    if (path.isAbsolute(candidate)) {
+      try {
+        if (!fs.existsSync(candidate)) continue;
+      } catch {
+        continue;
+      }
+    }
+    const invocation = pythonInvocation(candidate);
+    try {
+      const checked = spawnSync(
+        invocation.command,
+        [...invocation.prefix, "-c", probe],
+        {
+          env,
+          stdio: "ignore",
+          timeout: path.isAbsolute(candidate) ? 10_000 : 2_500,
+          windowsHide: true,
+        },
+      );
+      if (checked.status !== 0) continue;
+      return {
+        command: invocation.command,
+        args: [...invocation.prefix, "-c", PY_BOOTSTRAP, module, ...args],
+        env,
+        runtimeRoot,
+      };
+    } catch {
+      // Continue to the next packaged or host Python candidate.
+    }
+  }
+  return null;
 }
 
 /**

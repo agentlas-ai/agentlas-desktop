@@ -1,8 +1,8 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { verifyActivatedFolderIdentity } from "../architecture/activation";
+import { resolveHephaestusSyncLaunch } from "../hephaestus/engine";
 
 const MAX_TASK_CHARS = 12_000;
 const MAX_RESULT_BYTES = 1_500_000;
@@ -22,22 +22,25 @@ type CodeMapResult = {
   refIndex?: unknown;
 };
 
-function hephaestusBin(): string | null {
-  const candidates = [
-    process.env.HEPHAESTUS_BIN,
-    path.join(os.homedir(), ".agentlas", "runtime", "current", "bin", "hephaestus"),
-  ];
-  for (const candidate of candidates) {
+function contextLaunch(args: string[]): {
+  command: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+} | null {
+  const explicitBin = process.env.HEPHAESTUS_BIN?.trim();
+  if (explicitBin) {
     try {
-      if (candidate && fs.existsSync(candidate)) {
-        fs.accessSync(candidate, fs.constants.X_OK);
-        return candidate;
-      }
+      fs.accessSync(explicitBin, fs.constants.X_OK);
+      return {
+        command: explicitBin,
+        args: ["context", ...args],
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+      };
     } catch {
-      // Try the next locally installed runtime.
+      // Invalid explicit shell bridge falls through to the canonical runtime.
     }
   }
-  return null;
+  return resolveHephaestusSyncLaunch("agentlas_cloud", ["context", ...args]);
 }
 
 function hasCanonicalCodeMap(projectPath: string): boolean {
@@ -67,18 +70,18 @@ function hasCanonicalCodeMap(projectPath: string): boolean {
 export function triggerProjectContextMapRefresh(projectPath: string): boolean {
   if (!verifyActivatedFolderIdentity(projectPath)) return false;
   if (refreshTriggered.has(projectPath) && hasCanonicalCodeMap(projectPath)) return true;
-  const binary = hephaestusBin();
-  if (!binary) return false;
+  const launch = contextLaunch(["refresh", "--project", projectPath]);
+  if (!launch) return false;
   try {
     const result = spawnSync(
-      binary,
-      ["context", "refresh", "--project", projectPath],
+      launch.command,
+      launch.args,
       {
         encoding: "utf8",
         timeout: REFRESH_TIMEOUT_MS,
         maxBuffer: MAX_RESULT_BYTES,
         windowsHide: true,
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        env: launch.env,
       },
     );
     if (result.status !== 0 || !hasCanonicalCodeMap(projectPath)) {
@@ -110,27 +113,26 @@ export function buildProjectContextSlice(
   const task = String(taskPrompt ?? "").slice(0, MAX_TASK_CHARS);
   if (!task.trim()) return null;
   triggerProjectContextMapRefresh(projectPath);
-  const binary = hephaestusBin();
-  if (!binary) return null;
+  const launch = contextLaunch([
+    "slice",
+    "--project",
+    projectPath,
+    "--task-stdin",
+    "--no-refresh",
+    "--render",
+  ]);
+  if (!launch) return null;
   try {
     const result = spawnSync(
-      binary,
-      [
-        "context",
-        "slice",
-        "--project",
-        projectPath,
-        "--task-stdin",
-        "--no-refresh",
-        "--render",
-      ],
+      launch.command,
+      launch.args,
       {
         input: task,
         encoding: "utf8",
         timeout: SLICE_TIMEOUT_MS,
         maxBuffer: MAX_RESULT_BYTES,
         windowsHide: true,
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        env: launch.env,
       },
     );
     if (result.status !== 0 || !result.stdout) return null;
