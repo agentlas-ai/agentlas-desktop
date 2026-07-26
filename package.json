@@ -67,6 +67,7 @@
     "test:cloud-agent-actions": "node scripts/test-cloud-agent-save-publish-contract.cjs",
     "test:cloud-agent-restore": "npm run build:electron && node scripts/test-cloud-agent-restore.cjs && electron scripts/test-cloud-agent-registry-restore.cjs",
     "test:marketplace-hub-only": "npm run build:electron && electron scripts/test-marketplace-hub-only.cjs",
+    "test:hub-listing-honesty": "npm run build:electron && node scripts/test-hub-listing-honesty.cjs",
     "test:marketplace-cache": "npm run build:electron && electron scripts/test-marketplace-cache.cjs",
     "test:after-pack-runtime-contract": "node scripts/test-after-pack-runtime-contract.cjs",
     "test:packaged-agent-app-mcp": "node scripts/test-packaged-agent-app-mcp.cjs",

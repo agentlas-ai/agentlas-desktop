@@ -92,6 +92,14 @@ export const WORKFORCE_CORE_COVERAGE_GAP_CODES = [
   "gap:excluded:missing-required-community",
   "gap:excluded:required-skill-evidence-below-minimum",
   "gap:excluded:required-tool-evidence-below-minimum",
+  // A required term in a dimension no live profile populates cannot
+  // discriminate — it can only empty the menu. Such a requirement is demoted to
+  // a ranking signal and reported here, so a stated contract is never silently
+  // unenforced.
+  "gap:requirement-vocabulary-unsupported:role",
+  "gap:requirement-vocabulary-unsupported:skill",
+  "gap:requirement-vocabulary-unsupported:knowledge",
+  "gap:requirement-vocabulary-unsupported:tool",
 ] as const;
 const CORE_COVERAGE_GAP_CODES = new Set<string>(WORKFORCE_CORE_COVERAGE_GAP_CODES);
 const HUB_BOUND_LOCAL_PATH_RE = /(?:file:\/\/|(?:^|[\s"'`()\[\]{}=:,;])(?:~[/\\]|\\\\[^\\/\s]+[\\/][^\\/\s]+)|(?<![A-Za-z0-9$])\/(?:Users|home|root|Volumes|private|tmp|var\/folders|workspace|mnt)(?:\/[^/\s"'`<>]+)+|(?<![A-Za-z0-9])[A-Za-z]:[/\\](?=\S))/i;

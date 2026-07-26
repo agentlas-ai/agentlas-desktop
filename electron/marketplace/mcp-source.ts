@@ -669,7 +669,7 @@ function enrichRankedListing(
   };
 }
 
-function marketPublicAgentToListing(raw: Record<string, unknown>): MarketplaceListing | null {
+export function marketPublicAgentToListing(raw: Record<string, unknown>): MarketplaceListing | null {
   const slug = cleanString(raw.slug);
   if (!slug) return null;
   const entityKind = cleanString(raw.kind, "agent") === "team" ? "team" : "agent";
@@ -683,6 +683,9 @@ function marketPublicAgentToListing(raw: Record<string, unknown>): MarketplaceLi
   const taglineKo = cleanString(raw.taglineKo, taglineEn);
   const totalBorrows = cleanNumber(raw.totalBorrows);
   const perCallCredits = cleanNumber(raw.perCallCredits, entityKind === "team" ? 10 : 3);
+  // REST `kind` carries the entity shape (agent/team); delivery state lives in
+  // deliveryKind. Anything other than an explicit cloud-callable is install-only.
+  const deliveryKind = cleanString(raw.deliveryKind) === "cloud-callable" ? "cloud-callable" : "install-only";
 
   return {
     slug,
@@ -690,23 +693,35 @@ function marketPublicAgentToListing(raw: Record<string, unknown>): MarketplaceLi
     nameEn: titleEn || name,
     tagline: taglineKo || taglineEn,
     taglineEn,
-    trustGrade: "A",
+    // Delivery state, security grade, and invocation counts are the server's to
+    // state. Hardcoding kind/callable/trustGrade here made every public-catalog
+    // row render "Hub callable · Security scan A" even while the same slug was
+    // uncallable (cloud_runtime_invalid) — the client badge became the reason a
+    // 15-day Hub outage stayed invisible. Read the fields; fail closed when the
+    // response omits them.
+    trustGrade: trustGrade(raw.trustGrade),
     installCount: totalBorrows,
     manifestUrl: `https://agentlas.cloud/p/${slug}`,
     ownerName: cleanString(raw.ownerName),
     publishedAt: cleanIsoString(raw.publishedAt),
-    kind: "cloud-callable",
-    callable: true,
-    routingReady: true,
+    kind: deliveryKind,
+    callable: deliveryKind === "cloud-callable" && raw.callable === true,
+    ...(typeof raw.routingReady === "boolean" ? { routingReady: raw.routingReady } : {}),
+    ...(cleanString(raw.availabilityReason) ? { availabilityReason: cleanString(raw.availabilityReason) } : {}),
     routingStatus: "public-profile",
     source: "hub-profile",
     entityKind,
     perCallCredits,
-    verifiedInvocations: totalBorrows,
+    // verifiedInvocations is the invocation trust ledger, not borrow volume.
+    ...(Number.isFinite(Number(raw.verifiedInvocations))
+      ? { verifiedInvocations: cleanNumber(raw.verifiedInvocations) }
+      : {}),
     totalBorrows,
     todayBorrows: cleanNumber(raw.todayBorrows),
     assetCount: cleanNumber(raw.assetCount),
-    agentCount: cleanNumber(raw.agentCount, entityKind === "team" ? 1 : 0),
+    // Absent agentCount means UNKNOWN. Substituting 1 for a team under-quotes
+    // credit estimates, so leave it unset instead.
+    ...(Number.isFinite(Number(raw.agentCount)) ? { agentCount: cleanNumber(raw.agentCount) } : {}),
     lastRoutingSuccessAt: cleanIsoString(raw.lastBorrowedAt),
   };
 }
