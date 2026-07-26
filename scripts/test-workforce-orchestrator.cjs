@@ -458,8 +458,8 @@ function nestedNameEnvelope(toolName, argumentKey, value) {
   assert.deepEqual(parseWorkforceCommand("/workforce hidden", true), { kind: "none" });
   assert.deepEqual(parseLeaderJson(fenced("## Workforce Work Order", workOrder), "## Workforce Work Order"), workOrder);
   for (const privateBrief of [
-    "Inspect /Users/mason/private-project",
-    "Inspect /home/mason/private-project with api_key=sk-test_12345678901234567890",
+    "Inspect /Users/operator/private-project",
+    "Inspect /home/operator/private-project with api_key=sk-test_12345678901234567890",
     "Contact owner@example.com for workspace id=private-acme-1234",
     "Use Bearer eyJhbGciOiJIUzI1NiJ9.private.signature",
   ]) {
@@ -718,7 +718,7 @@ function nestedNameEnvelope(toolName, argumentKey, value) {
     /"message":"selection\.edges\[0\] must contain exactly these required keys: fromSlot, toSlot, relation, artifactKinds/,
     "selection repair must preserve the exact host-authored missing-field diagnostic",
   );
-  assert.doesNotMatch(repairLeaderTurns[1].systemPrompt, /\/Users\/mason|sk-test/);
+  assert.doesNotMatch(repairLeaderTurns[1].systemPrompt, /\/Users\/operator|sk-test/);
   assert.deepEqual(repaired.receipt.schemaAttempts.map(({ stage, attempt, status }) => ({ stage, attempt, status })), [
     { stage: "work-order", attempt: 1, status: "rejected" },
     { stage: "work-order", attempt: 2, status: "accepted" },
@@ -758,7 +758,7 @@ function nestedNameEnvelope(toolName, argumentKey, value) {
         const invalid = structuredClone(workOrder);
         invalid.workOrderId = assignedId;
         invalid.taskBrief = privacyRepairAttempts === 1
-          ? "Inspect /home/mason/private-project with api_key=sk-test_12345678901234567890"
+          ? "Inspect /home/operator/private-project with api_key=sk-test_12345678901234567890"
           : "Contact owner@example.com for workspace id=private-acme-1234";
         return fenced("## Workforce Work Order", invalid);
       },
@@ -768,7 +768,7 @@ function nestedNameEnvelope(toolName, argumentKey, value) {
   assert.equal(privacyRepairAttempts, 2, "privacy rejection receives at most one same-model repair");
   assert.equal(privacyHubCalls, 0, "no schema-valid but private WorkOrder may cross the Hub boundary");
   assert.equal(privacyTurns[1].schemaRepair, true);
-  assert.doesNotMatch(privacyTurns[1].systemPrompt, /\/home\/mason|sk-test_12345678901234567890/);
+  assert.doesNotMatch(privacyTurns[1].systemPrompt, /\/home\/operator|sk-test_12345678901234567890/);
   assert.ok(repairAudit.every((attempt) => attempt.outputBytes > 0));
   assert.equal(repairEvents.filter((event) => event.tool?.name === "agentlas.workforce.schema_attempt").length, 4);
 
