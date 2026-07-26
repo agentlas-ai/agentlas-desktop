@@ -266,3 +266,7 @@ scripts/fixtures/
 # the cross-platform build run them against the built artifact, so CI must have
 # them or packaging fails with file-not-found.
 !scripts/verify-packaged-workforce-runtime.cjs
+# The Windows/Linux updater E2E is the one check that cannot run on this Mac, so
+# it stays in CI and the runner sparse-checks this exact file out of the release
+# commit. It drives the built installer, not product internals.
+!scripts/verify-packaged-updater-install-e2e.cjs
