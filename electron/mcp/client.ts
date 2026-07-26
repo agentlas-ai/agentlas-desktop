@@ -43,6 +43,7 @@ import {
   setChatWorkingFolder,
 } from "../store/chats";
 import { getProject } from "../store/projects";
+import { getCanonicalTaskForChat } from "../store/tasks";
 import { touchRuntimeSession } from "../store/runtime-sessions";
 import { getInterviewMode, isTrivialPrompt } from "../store/interview-mode";
 import { getFirm, listFirms } from "../store/firms";
@@ -66,8 +67,16 @@ import {
   parseWorkforceCommand,
   runWorkforceSelection,
   type WorkforcePrepareCheckpointReceipt,
+  type WorkforceSelectionReceipt,
   workforceFailureCode,
 } from "./workforce-orchestrator";
+import {
+  bindDesktopWorkforceGoal,
+  desktopWorkforceGoalId,
+  loadDesktopWorkforceGoal,
+  recordDesktopWorkforceTurn,
+  type DesktopWorkforceRuntimePlan,
+} from "./workforce-goal-continuity";
 import { runSwarmInvocation } from "./swarm-run";
 import { getAgentGroup, listAgentGroups, resolveAgentGroupForRuntime } from "../store/agent-groups";
 import {
@@ -1116,6 +1125,38 @@ export interface McpInvocationResult {
   workforcePrepareReceipt?: WorkforcePrepareCheckpointReceipt;
 }
 
+type DesktopWorkforceTurnDecision =
+  | { decision: "reuse"; planRevision: number; reasonCode: string }
+  | { decision: "recruit" | "local-only" | "blocked"; planRevision: null; reasonCode: string };
+
+function parseDesktopWorkforceTurnDecision(
+  text: string,
+  plans: DesktopWorkforceRuntimePlan[],
+): DesktopWorkforceTurnDecision {
+  const match = String(text || "").match(/\{[\s\S]*\}/);
+  if (!match) throw new Error("workforce_goal_turn_decision_invalid");
+  let value: Record<string, unknown>;
+  try {
+    value = JSON.parse(match[0]) as Record<string, unknown>;
+  } catch {
+    throw new Error("workforce_goal_turn_decision_invalid");
+  }
+  const decision = String(value.decision || "");
+  const reasonCode = String(value.reasonCode || "").trim().slice(0, 160);
+  const planRevision = value.planRevision;
+  if (!["reuse", "recruit", "local-only", "blocked"].includes(decision) || !reasonCode) {
+    throw new Error("workforce_goal_turn_decision_invalid");
+  }
+  if (decision === "reuse") {
+    if (!Number.isInteger(planRevision) || !plans.some((plan) => plan.revision === planRevision && plan.status === "ready")) {
+      throw new Error("workforce_goal_turn_plan_invalid");
+    }
+    return { decision, planRevision: planRevision as number, reasonCode };
+  }
+  if (planRevision !== null) throw new Error("workforce_goal_turn_plan_invalid");
+  return { decision: decision as "recruit" | "local-only" | "blocked", planRevision: null, reasonCode };
+}
+
 /** 질문에 답할 사람이 없는 실행인가 — UNATTENDED_NO_ASK_DIRECTIVE 부착 기준. */
 function isUnattendedExecution(executionContext?: InvocationExecutionContext): boolean {
   return (
@@ -2126,6 +2167,160 @@ export async function runMcpInvocation(
     return coreStormbreakerHarnessPromise;
   };
 
+  const canonicalTask = getCanonicalTaskForChat(chat.id);
+  const workforceProjectDir = workingFolder ?? process.cwd();
+  const durableWorkforceGoalId = desktopWorkforceGoalId(canonicalTask?.id ?? chat.id);
+  let durableTurnDecision: DesktopWorkforceTurnDecision | null = null;
+  let durableRuntimePlan: DesktopWorkforceRuntimePlan | null = null;
+  try {
+    const durableContext = await loadDesktopWorkforceGoal(workforceProjectDir, durableWorkforceGoalId);
+    const goal = durableContext.goals[0];
+    if (goal) {
+      const readyPlans = goal.plans.filter((plan) => plan.status === "ready" && plan.preparation);
+      if (durableContext.status === "refresh-required" || !goal.executionAllowed || !readyPlans.length) {
+        durableTurnDecision = {
+          decision: "recruit",
+          planRevision: null,
+          reasonCode: "lease-refresh-or-plan-unavailable",
+        };
+      } else {
+        const decisionResult = await picked.runner(
+          {
+            systemPrompt: [
+              "You are the active Agentlas Desktop host deciding one turn of a durable Workforce goal.",
+              "Choose reuse when one exact incumbent plan can perform this turn.",
+              "Choose local-only when the host and local skills can perform it without a borrowed worker.",
+              "Choose recruit only for a real capability, tool, or modality gap. Choose blocked only when safe progress is impossible.",
+              "Never complete or dismiss the goal.",
+              'Return exactly one JSON object: {"decision":"reuse|recruit|local-only|blocked","planRevision":1|null,"reasonCode":"short-code"}.',
+            ].join("\n"),
+            history: [],
+            userPrompt: JSON.stringify({
+              currentTurnTask: req.userPrompt,
+              goalId: durableWorkforceGoalId,
+              incumbentPlans: readyPlans.map((plan) => ({
+                revision: plan.revision,
+                agentReleaseIds: plan.agentReleaseIds,
+                leaseExpiresAt: plan.leaseExpiresAt,
+              })),
+            }),
+            backendLabel: picked.label,
+            model: active.model ?? undefined,
+            longContext: active.longContextEnabled ?? false,
+            effort: active.effort ?? undefined,
+            signal,
+            permission: "read",
+            restrictedReadBoundary: restrictedOrchestrationBoundary || undefined,
+            env: orchestrationRunnerEnv,
+            untrustedNoTools: true,
+            cwd: undefined,
+            chatId: `workforce-goal-turn:${req.runId}`,
+            locale,
+          },
+          { onStatus: () => {}, onPartial: () => {}, onTool: () => {} },
+        );
+        durableTurnDecision = parseDesktopWorkforceTurnDecision(decisionResult.text, readyPlans);
+        if (durableTurnDecision.decision === "reuse") {
+          durableRuntimePlan = readyPlans.find((plan) => plan.revision === durableTurnDecision?.planRevision) ?? null;
+        }
+      }
+    }
+  } catch (error) {
+    if (explicitWorkforceGoal) throw error;
+    // A chat with no binding or no signed-in account remains an ordinary local
+    // turn. Once the user explicitly invokes Workforce, the same failure is
+    // surfaced instead of silently falling back.
+  }
+
+  if (durableTurnDecision?.decision === "blocked") {
+    await recordDesktopWorkforceTurn({
+      projectDir: workforceProjectDir,
+      goalId: durableWorkforceGoalId,
+      decision: "blocked",
+      gapCodes: [durableTurnDecision.reasonCode],
+      turnId: req.runId,
+    });
+    sink({
+      kind: "error",
+      error: {
+        code: "workforce-goal-turn-blocked",
+        message: locale === "ko"
+          ? "기존 팀·로컬 처리·추가 영입 중 안전하게 진행할 수 있는 경로가 없어 이 턴을 중단했습니다."
+          : "No safe incumbent, local, or recruitment path can progress this turn.",
+      },
+    });
+    return earlyResult();
+  }
+  if (durableTurnDecision?.decision === "local-only") {
+    explicitWorkforceGoal = null;
+    await recordDesktopWorkforceTurn({
+      projectDir: workforceProjectDir,
+      goalId: durableWorkforceGoalId,
+      decision: "local-only",
+      gapCodes: [durableTurnDecision.reasonCode],
+      turnId: req.runId,
+    });
+  } else if (durableTurnDecision?.decision === "recruit") {
+    explicitWorkforceGoal = req.userPrompt;
+  }
+
+  if (durableTurnDecision?.decision === "reuse" && durableRuntimePlan?.preparation) {
+    const continuation = durableRuntimePlan.preparation;
+    const specs = continuation.specs as BorrowedAgentSpec[];
+    const receipt = continuation.receipt as unknown as WorkforceSelectionReceipt;
+    if (!Array.isArray(specs) || !specs.length || receipt.schemaVersion !== "agentlas.desktop-workforce-selection-receipt.v1") {
+      throw new Error("workforce_goal_runtime_invalid");
+    }
+    const execution = await runBorrowedTaskForceInvocation({
+      req: { ...req, borrowAgents: undefined, taskForceTargets: undefined },
+      chat,
+      orchestratorAgent: agent,
+      taskForceName: locale === "ko" ? "Agent Workforce TF" : "Agent Workforce task force",
+      taskForceKind: "task-force",
+      taskForceSpecs: specs,
+      priorHistory,
+      active,
+      runtimes,
+      picked,
+      runtimeOverride: runtimeChoice.override,
+      workingFolder,
+      ...(workspaceBinding ? { workspaceBinding } : {}),
+      ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
+      mcpConfigPath,
+      mcpAllowedTools,
+      mcpCodexConfigArgs,
+      agentAppMcpRuntimeEnv: mcpRuntimeEnv,
+      onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
+      runnerEnv: orchestrationRunnerEnv,
+      locale,
+      sink,
+      signal,
+      workforceSelectionReceipt: receipt,
+      workforceLeaderRunnerEvidence: [],
+      benchmarkMode: false,
+      requireAllWorkers: true,
+    });
+    if (!execution.ok) {
+      sink({
+        kind: "error",
+        error: {
+          code: "workforce-verification-failed",
+          message: execution.verifierIssues?.join(", ") || "Workforce structural verification failed.",
+        },
+      });
+      return earlyResult();
+    }
+    await recordDesktopWorkforceTurn({
+      projectDir: workforceProjectDir,
+      goalId: durableWorkforceGoalId,
+      decision: "reuse",
+      rosterKeys: durableRuntimePlan.rosterKeys,
+      gapCodes: [durableTurnDecision.reasonCode],
+      turnId: req.runId,
+    });
+    return earlyResult();
+  }
+
   // ── Agent Workforce Ontology ────────────────────────────────
   // The active host model owns both the job-analysis work order and the final
   // semantic roster decision. Main calls Hub MCP only for content-only search,
@@ -2135,6 +2330,8 @@ export async function runMcpInvocation(
       const workforceLeaderRunnerEvidence: WorkforceLeaderRunnerEvidence[] = [];
       const workforce = await runWorkforceSelection({
         goal: explicitWorkforceGoal,
+        projectDir: workforceProjectDir,
+        goalId: durableWorkforceGoalId,
         occurrenceId: executionContext?.occurrenceId ?? req.runId,
         inputModalities: req.images?.length ? ["modality:image"] : [],
         active,
@@ -2237,6 +2434,28 @@ export async function runMcpInvocation(
       });
       workforcePrepareReceipt = workforce.prepareCheckpointReceipt;
       executionContext?.onWorkforcePrepareReceipt?.(workforcePrepareReceipt);
+      const workforceGoalBinding = await bindDesktopWorkforceGoal({
+        goalId: durableWorkforceGoalId,
+        projectDir: workforceProjectDir,
+        workforce,
+      });
+      const boundGoals = Array.isArray(workforceGoalBinding.goals)
+        ? workforceGoalBinding.goals as Array<Record<string, unknown>>
+        : [];
+      const boundRoster = Array.isArray(boundGoals[0]?.roster)
+        ? boundGoals[0].roster as Array<Record<string, unknown>>
+        : [];
+      const usedRosterKeys = workforce.receipt.preparedReleases.map((preparedRelease) => {
+        const row = boundRoster.find((candidate) =>
+          candidate.slotId === preparedRelease.slotId
+          && candidate.agentReleaseId === preparedRelease.agentReleaseId
+          && candidate.state !== "released");
+        const rosterKey = String(row?.rosterKey || "");
+        if (!/^sha256:[a-f0-9]{64}$/.test(rosterKey)) {
+          throw new Error("workforce_goal_roster_mismatch");
+        }
+        return rosterKey;
+      });
       emitWorkforceBenchmarkSelectionArtifacts(sink, workforceBenchmarkMode, workforce);
       tryRecordRunEvent({
         runId: req.runId ?? `task-force:${chat.id}`,
@@ -2306,6 +2525,15 @@ export async function runMcpInvocation(
             code: "workforce-verification-failed",
             message: execution.verifierIssues?.join(", ") || "Workforce structural verification failed.",
           },
+        });
+      } else {
+        await recordDesktopWorkforceTurn({
+          projectDir: workforceProjectDir,
+          goalId: durableWorkforceGoalId,
+          decision: "recruit",
+          rosterKeys: usedRosterKeys,
+          gapCodes: durableTurnDecision?.reasonCode ? [durableTurnDecision.reasonCode] : [],
+          turnId: req.runId,
         });
       }
     } catch (error) {

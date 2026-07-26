@@ -408,6 +408,7 @@ export interface WorkforceExecutionBundle {
   permissionPolicyDigest: string;
   executionGraph: NonNullable<BorrowedAgentSpec["executionGraph"]> | null;
   executionGraphDigest: string | null;
+  leaseExpiresAt: string | null;
 }
 
 export interface WorkforcePermissionPolicy {
@@ -794,6 +795,7 @@ export interface WorkforceSelectionResult {
   specs: BorrowedAgentSpec[];
   receipt: WorkforceSelectionReceipt;
   prepareCheckpointReceipt: WorkforcePrepareCheckpointReceipt;
+  leaseExpiresAt: string | null;
 }
 
 export interface WorkforceBenchmarkSelectionArtifacts {
@@ -817,6 +819,10 @@ export interface WorkforceBenchmarkSelectionSnapshot {
 
 export interface RunWorkforceSelectionParams {
   goal: string;
+  /** Stable local project partition used by mandatory Core goal binding. */
+  projectDir?: string;
+  /** Host-owned durable Task id projection; the user need not name a goal. */
+  goalId?: string;
   /** Main-owned logical occurrence; retries of the same occurrence reuse this exact value. */
   occurrenceId?: string;
   /** Main-observed local inputs. Values guide the host LLM only; bytes never cross Hub MCP. */
@@ -2379,8 +2385,19 @@ export function validateExecutionPreparation(
   federatedSelection: JsonObject,
   expectedContext?: WorkforceExecutionContext,
   sourcePolicy: WorkforceSourcePolicy = "network",
-): { preparation: JsonObject; bundles: WorkforceExecutionBundle[]; executionContext: WorkforceExecutionContext } {
-  const wrapper = objectValue(value, "federated execution preparation");
+): {
+  preparation: JsonObject;
+  bundles: WorkforceExecutionBundle[];
+  executionContext: WorkforceExecutionContext;
+  goalBinding: JsonObject | null;
+} {
+  const receivedWrapper = objectValue(value, "federated execution preparation");
+  const goalBinding = receivedWrapper.goalBinding && typeof receivedWrapper.goalBinding === "object"
+    ? receivedWrapper.goalBinding as JsonObject
+    : null;
+  const wrapper = Object.fromEntries(
+    Object.entries(receivedWrapper).filter(([key]) => key !== "goalBinding"),
+  ) as JsonObject;
   assertExactHubKeys(wrapper, FEDERATED_PREPARATION_KEYS, "federated execution preparation");
   if (wrapper.schemaVersion !== FEDERATED_PREPARATION_SCHEMA) {
     throw new Error("Hub returned an unsupported federated-preparation schema.");
@@ -2497,6 +2514,20 @@ export function validateExecutionPreparation(
       throw new Error("Prepared entityKind is not executable; workforce runtime supports only agent and team.");
     }
     const directiveBundle = objectValue(bundle.directiveBundle, "directiveBundle");
+    const runtimeEnvelope = directiveBundle.runtimeEnvelope && typeof directiveBundle.runtimeEnvelope === "object"
+      ? directiveBundle.runtimeEnvelope as JsonObject
+      : {};
+    const lease = runtimeEnvelope.lease && typeof runtimeEnvelope.lease === "object"
+      ? runtimeEnvelope.lease as JsonObject
+      : {};
+    const rawLeaseExpiry = typeof lease.leasedUntil === "string"
+      ? lease.leasedUntil
+      : typeof lease.expiresAt === "string"
+        ? lease.expiresAt
+        : null;
+    const leaseExpiresAt = rawLeaseExpiry && Number.isFinite(Date.parse(rawLeaseExpiry))
+      ? new Date(rawLeaseExpiry).toISOString()
+      : null;
     if (bundle.bundleDigestSchema !== WORKFORCE_RUNTIME_BUNDLE_DIGEST_SCHEMA) {
       throw new Error("Prepared workforce used an unsupported runtime bundle digest schema.");
     }
@@ -2565,6 +2596,7 @@ export function validateExecutionPreparation(
       permissionPolicyDigest,
       executionGraph,
       executionGraphDigest,
+      leaseExpiresAt,
     });
     if (!bundles[bundles.length - 1].releaseVersion) throw new Error(`Prepared releaseVersion is missing: ${agentReleaseId}`);
     if (entityKind === "agent" && bundles[bundles.length - 1].executionGraph) {
@@ -2585,7 +2617,7 @@ export function validateExecutionPreparation(
   ) {
     throw new Error("Prepared executionContext roster does not match the execution bundles.");
   }
-  return { preparation, bundles, executionContext };
+  return { preparation, bundles, executionContext, goalBinding };
 }
 
 function mcpJson(value: string | null, toolName: string): unknown {
@@ -3811,6 +3843,8 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
         federationResult,
         federatedSelection,
         prepareAttempt,
+        projectDir: p.projectDir || process.cwd(),
+        ...(p.goalId ? { goalId: p.goalId } : {}),
       };
       const prepareResult = await hubStage("workforce.prepare_execution", prepareArgs);
       prepared = validateExecutionPreparation(
@@ -3950,6 +3984,10 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
     ...prepareReceiptPayload,
     receiptDigest: sha256Json(prepareReceiptPayload),
   };
+  const leaseExpirations = prepared.bundles
+    .map((bundle) => bundle.leaseExpiresAt)
+    .filter((value): value is string => Boolean(value))
+    .sort((left, right) => Date.parse(left) - Date.parse(right));
   return {
     workOrder,
     candidateSet,
@@ -3959,5 +3997,6 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
     specs,
     receipt,
     prepareCheckpointReceipt,
+    leaseExpiresAt: leaseExpirations[0] ?? null,
   };
 }

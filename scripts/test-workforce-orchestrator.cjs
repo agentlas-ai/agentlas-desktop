@@ -35,8 +35,25 @@ const {
 const { ErrorCode, McpError } = require("@modelcontextprotocol/sdk/types.js");
 
 const hash = (char) => `sha256:${char.repeat(64)}`;
+const bundledCoverageGapVectors = path.join(
+  __dirname,
+  "..",
+  "Hephaestus",
+  "benchmarks",
+  "workforce-ontology",
+  "coverage-gap-codes-v1-vectors.json",
+);
+const sourceCoverageGapVectors = path.join(
+  __dirname,
+  "..",
+  "..",
+  "Agentlas-OS",
+  "benchmarks",
+  "workforce-ontology",
+  "coverage-gap-codes-v1-vectors.json",
+);
 const coreCoverageGapVectors = JSON.parse(fs.readFileSync(
-  path.join(__dirname, "..", "Hephaestus", "benchmarks", "workforce-ontology", "coverage-gap-codes-v1-vectors.json"),
+  fs.existsSync(bundledCoverageGapVectors) ? bundledCoverageGapVectors : sourceCoverageGapVectors,
   "utf8",
 ));
 assert.equal(
@@ -308,7 +325,7 @@ function nestedNameEnvelope(toolName, argumentKey, value) {
   for (const kind of ["gemini", "grok", "cursor"]) {
     assert.equal(isWorkforceLeaderRuntimeAllowed(kind), false, `${kind} must fail closed without a hidden leader fallback`);
   }
-  const vectorPath = path.join(
+  const bundledVectorPath = path.join(
     __dirname,
     "..",
     "Hephaestus",
@@ -316,6 +333,16 @@ function nestedNameEnvelope(toolName, argumentKey, value) {
     "workforce-ontology",
     "runtime-bundle-digest-v4-vectors.json",
   );
+  const sourceVectorPath = path.join(
+    __dirname,
+    "..",
+    "..",
+    "Agentlas-OS",
+    "benchmarks",
+    "workforce-ontology",
+    "runtime-bundle-digest-v4-vectors.json",
+  );
+  const vectorPath = fs.existsSync(bundledVectorPath) ? bundledVectorPath : sourceVectorPath;
   const digestVectors = JSON.parse(fs.readFileSync(vectorPath, "utf8"));
   assert.equal(digestVectors.digestSchemaVersion, "agentlas.workforce-runtime-bundle-digest.v4");
   assert.equal(digestVectors.executionPlanSchemaVersion, "agentlas.workforce-execution-plan.v5");

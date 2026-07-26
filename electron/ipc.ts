@@ -118,6 +118,11 @@ import { getDb } from "./store/db";
 import { getResolvedOrg } from "./store/org-spec";
 import { resolveTeamOrg, resolveAgentTeam } from "./agents/org-resolver";
 import { runMcpInvocation } from "./mcp/client";
+import {
+  completeDesktopWorkforceGoal,
+  desktopWorkforceGoalId,
+  loadDesktopWorkforceGoal,
+} from "./mcp/workforce-goal-continuity";
 import { resolveRunKeyElicitation } from "./mcp/run-key-elicitation";
 import { invocationService } from "./invocation/service";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
@@ -220,7 +225,13 @@ import {
 } from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
 import { grantDroppedPath, grantPath, pathFromGrant, resolveFsReadPath } from "./fs/access";
-import { getAuthSession, signInWithBrowser, signInWithGoogle, signOut } from "./auth";
+import {
+  getAuthSession,
+  getSessionCookieHeader,
+  signInWithBrowser,
+  signInWithGoogle,
+  signOut,
+} from "./auth";
 import { revokeAllMobileBridgeDevicesForAuthChange } from "./mobile-bridge/runtime";
 import { getBillingCredits, transferEarnings } from "./billing";
 import {
@@ -3039,6 +3050,18 @@ export function registerIpcHandlers(): void {
     const receipt = task?.originChatId
       ? invocationService.latestReceipt(task.originChatId)
       : null;
+    if (task?.originChatId && getSessionCookieHeader()) {
+      const projectDir = getChatWorkingFolder(task.originChatId) ?? process.cwd();
+      const goalId = desktopWorkforceGoalId(task.id);
+      const context = await loadDesktopWorkforceGoal(projectDir, goalId);
+      if (context.goals.length) {
+        await completeDesktopWorkforceGoal({
+          projectDir,
+          goalId,
+          status: "completed",
+        });
+      }
+    }
     const accepted = acceptCanonicalTaskResult(input, receipt);
     const closure = ensureAcceptedResultValueClosure({
       priorTaskVersion: input.expectedVersion,
