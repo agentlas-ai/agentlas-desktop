@@ -16,13 +16,19 @@ const VALIDATION_SCHEMA = "agentlas.workforce-selection-validation.v1";
 const FEDERATION_RESULT_SCHEMA = workforceProtocolContract.protocolMetadata.federationResultSchemaVersion;
 const FEDERATED_SELECTION_SCHEMA = workforceProtocolContract.protocolMetadata.federatedSelectionSchemaVersion;
 const FEDERATED_PREPARATION_SCHEMA = workforceProtocolContract.protocolMetadata.federatedPreparationSchemaVersion;
-const SOURCE_PIN_SCHEMA = "agentlas.workforce-source-pin.v1";
+export const WORKFORCE_SOURCE_PIN_SCHEMA = "agentlas.workforce-source-pin.v1";
+const SOURCE_PIN_SCHEMA = WORKFORCE_SOURCE_PIN_SCHEMA;
 const PREPARE_ATTEMPT_SCHEMA = workforceProtocolContract.protocolMetadata.prepareAttemptSchemaVersion;
 const PREPARATION_SCHEMA = workforceProtocolContract.protocolMetadata.executionPlanSchemaVersion;
-const WORKFORCE_SOURCE_SCOPE = "network";
+export const WORKFORCE_SOURCE_SCOPE = "network";
 const WORKFORCE_HUB_SOURCE_SCOPE = "hub";
-const WORKFORCE_NETWORK_SOURCES = ["local", "cloud", "hub"] as const;
+export const WORKFORCE_NETWORK_SOURCES = ["local", "cloud", "hub"] as const;
 const WORKFORCE_HUB_SOURCES = ["hub"] as const;
+/** Federation never reranks; Core pins this and the host must not widen it. */
+export const WORKFORCE_FEDERATION_ORDERING_POLICY = "canonical_identity_no_rerank";
+export const WORKFORCE_FEDERATION_RESULT_SCHEMA = FEDERATION_RESULT_SCHEMA;
+export const WORKFORCE_FEDERATED_SELECTION_SCHEMA = FEDERATED_SELECTION_SCHEMA;
+export const WORKFORCE_FEDERATED_PREPARATION_SCHEMA = FEDERATED_PREPARATION_SCHEMA;
 const WORKFORCE_SOURCE_FAILURE_CODES = new Set<string>([
   "source_not_configured",
   "source_not_supported",
@@ -913,7 +919,7 @@ function stableJsonValue(value: unknown): unknown {
   return result;
 }
 
-function sha256Json(value: unknown): string {
+export function sha256Json(value: unknown): string {
   const bytes = typeof value === "string" ? value : (JSON.stringify(stableJsonValue(value)) ?? "null");
   return `sha256:${createHash("sha256").update(bytes, "utf8").digest("hex")}`;
 }
@@ -1748,7 +1754,7 @@ export function validateFederationSearchResult(
       "Hub workforce federation result has an invalid status.",
     );
   }
-  if (federationResult.orderingPolicy !== "canonical_identity_no_rerank") {
+  if (federationResult.orderingPolicy !== WORKFORCE_FEDERATION_ORDERING_POLICY) {
     throw new Error("Hub workforce federation result changed the pinned ordering policy.");
   }
   const candidateProvenance = requireArray(
