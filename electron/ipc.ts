@@ -177,8 +177,6 @@ import type {
   OneBriefingChannel,
   OneBriefingFeedback,
   OneBriefingPreferences,
-  ConnectOneProjectDeadlineInput,
-  RemoveOneProjectDeadlineInput,
   AutoResolveOneTeamPreflightInput,
   OneTeamPreflightRef,
   PrepareOneTeamPreflightInput,
@@ -324,6 +322,7 @@ import {
   syncProjectOntology,
 } from "./ontology/project-runtime";
 import { getAgentOntologyHubProjection, resolveAgentOntologyHubAttach } from "./ontology/agent-hub-projection";
+import { getProjectTimelineSnapshot } from "./memory/project-timeline";
 import {
   createProject,
   getProject,
@@ -400,11 +399,6 @@ import {
   prepareOneBriefingActionPacket,
   reserveOneBriefingActionExecution,
 } from "./one/briefing-actions";
-import {
-  connectOneProjectDeadline,
-  getOneProjectDeadlineState,
-  removeOneProjectDeadline,
-} from "./store/one-project-deadlines";
 import {
   autoResolveOneTeamPreflight,
   failOneTeamPreflightStart,
@@ -2916,6 +2910,9 @@ export function registerIpcHandlers(): void {
   // ── projects ───────────────────────────────────────────
   ipcMain.handle("projects:list", () => listProjects());
   ipcMain.handle("projects:get", (_e, id: string) => getProject(id));
+  ipcMain.handle("projects:timeline", (_e, id: string, limit?: number) =>
+    getProjectTimelineSnapshot(id, limit),
+  );
   ipcMain.handle(
     "projects:create",
     (_e, input: { name: string; defaultAgentId?: string | null; contextNote?: string | null; folderGrant?: FsPathGrant | null }) =>
@@ -3393,12 +3390,6 @@ export function registerIpcHandlers(): void {
     if (!input || typeof input !== "object") throw new TypeError("Invalid One Briefing feedback request");
     return recordOneBriefingFeedback(input);
   });
-  ipcMain.handle("oneProjectDeadlines:getState", (_e, projectId: string) =>
-    getOneProjectDeadlineState(projectId));
-  ipcMain.handle("oneProjectDeadlines:connect", (_e, input: ConnectOneProjectDeadlineInput) =>
-    connectOneProjectDeadline(input));
-  ipcMain.handle("oneProjectDeadlines:remove", (_e, input: RemoveOneProjectDeadlineInput) =>
-    removeOneProjectDeadline(input));
   // 사이드바 "고용 중" 로스터 — 리스 캐시 + 기억 둥지(~/.agentlas/networking) 스캔.
   ipcMain.handle("hired:list", () => listHiredAgents());
 

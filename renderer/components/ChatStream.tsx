@@ -109,6 +109,10 @@ export interface ChatEmptyDirectory {
   plugins: InstalledMcpServer[];
 }
 
+function messageDomId(messageId: string): string {
+  return `chat-message-${encodeURIComponent(messageId)}`;
+}
+
 export function ChatStream({
   messages,
   agentName,
@@ -124,6 +128,7 @@ export function ChatStream({
   interactionBusy = false,
   stopRequested = false,
   mediaBasePaths = [],
+  focusMessageId,
 }: {
   messages: StreamMessage[];
   agentName: string;
@@ -142,6 +147,8 @@ export function ChatStream({
   interactionBusy?: boolean;
   stopRequested?: boolean;
   mediaBasePaths?: string[];
+  /** Project timeline deep link target. The id is local history metadata only. */
+  focusMessageId?: string | null;
 }) {
   const { t } = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -154,6 +161,9 @@ export function ChatStream({
     ? `${messages.length}:${last.id}:${last.text.length}:${last.busy ? 1 : 0}:${last.streaming ? 1 : 0}:${last.steps?.length ?? 0}`
     : "empty";
   const previousScrollSignalRef = useRef(scrollSignal);
+  const hasFocusMessage = Boolean(
+    focusMessageId && messages.some((message) => message.id === focusMessageId),
+  );
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -182,6 +192,26 @@ export function ChatStream({
     });
     return () => window.cancelAnimationFrame(handle);
   }, [messages.length, scrollSignal]);
+
+  useEffect(() => {
+    if (!focusMessageId || !hasFocusMessage) return;
+    stickToBottomRef.current = false;
+    scrollingToBottomRef.current = false;
+    setHasNewContent(false);
+    const handle = window.requestAnimationFrame(() => {
+      const target = document.getElementById(messageDomId(focusMessageId));
+      if (!target) return;
+      target.scrollIntoView({
+        block: "center",
+        behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+      });
+      target.focus({ preventScroll: true });
+      setAwayFromBottom(true);
+    });
+    return () => window.cancelAnimationFrame(handle);
+  }, [focusMessageId, hasFocusMessage]);
 
   function handleScroll() {
     const el = scrollRef.current;
@@ -255,22 +285,30 @@ export function ChatStream({
           <EmptyChatState agentName={agentName} directory={emptyDirectory} />
         )}
         {messages.map((m) => (
-          <Bubble
+          <div
             key={m.id}
-            message={m}
-            agentName={agentName}
-            agentTone={agentTone}
-            onOpenArtifact={onOpenArtifact}
-            onOpenMedia={onOpenMedia}
-            onOpenLinkedFile={onOpenLinkedFile}
-            onOpenWorkflow={onOpenWorkflow}
-            onStop={onStop}
-            onAnswerQuestion={onAnswerQuestion}
-            onOpenMultimodalSetup={onOpenMultimodalSetup}
-            interactionBusy={interactionBusy}
-            stopRequested={stopRequested}
-            mediaBasePaths={mediaBasePaths}
-          />
+            id={messageDomId(m.id)}
+            tabIndex={-1}
+            data-chat-message-id={m.id}
+            data-timeline-focus={focusMessageId === m.id ? "true" : "false"}
+            className="agentlas-chat-message-anchor"
+          >
+            <Bubble
+              message={m}
+              agentName={agentName}
+              agentTone={agentTone}
+              onOpenArtifact={onOpenArtifact}
+              onOpenMedia={onOpenMedia}
+              onOpenLinkedFile={onOpenLinkedFile}
+              onOpenWorkflow={onOpenWorkflow}
+              onStop={onStop}
+              onAnswerQuestion={onAnswerQuestion}
+              onOpenMultimodalSetup={onOpenMultimodalSetup}
+              interactionBusy={interactionBusy}
+              stopRequested={stopRequested}
+              mediaBasePaths={mediaBasePaths}
+            />
+          </div>
         ))}
       </div>
 
@@ -461,6 +499,19 @@ export function ChatStream({
           border-color: color-mix(in srgb, var(--red-deep) 32%, var(--paper-edge));
           background: color-mix(in srgb, var(--red-deep) 7%, var(--paper));
           color: var(--red-deep);
+        }
+        .agentlas-chat-message-anchor {
+          border-radius: 14px;
+          outline: 0 solid transparent;
+          outline-offset: 5px;
+          transition: background 180ms ease, outline-color 180ms ease;
+        }
+        .agentlas-chat-message-anchor[data-timeline-focus="true"] {
+          background: color-mix(in srgb, var(--accent) 7%, transparent);
+          outline: 2px solid color-mix(in srgb, var(--accent) 52%, transparent);
+        }
+        .agentlas-chat-message-anchor:focus-visible {
+          outline: 2px solid var(--accent);
         }
         .agentlas-chat-streaming-cursor {
           display: inline-block;

@@ -454,6 +454,7 @@ const api: AgentlasIpc = {
   projects: {
     list: () => ipcRenderer.invoke("projects:list"),
     get: (id: string) => ipcRenderer.invoke("projects:get", id),
+    timeline: (id: string, limit?: number) => ipcRenderer.invoke("projects:timeline", id, limit),
     create: (input) => ipcRenderer.invoke("projects:create", input),
     update: (id: string, patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId">> & { folderGrant?: FsPathGrant | null }) =>
       ipcRenderer.invoke("projects:update", id, patch),
@@ -601,11 +602,6 @@ const api: AgentlasIpc = {
     startAction: (input) => ipcRenderer.invoke("oneBriefing:startAction", input),
     setPreferences: (input) => ipcRenderer.invoke("oneBriefing:setPreferences", input),
     feedback: (input) => ipcRenderer.invoke("oneBriefing:feedback", input),
-  },
-  oneProjectDeadlines: {
-    getState: (projectId) => ipcRenderer.invoke("oneProjectDeadlines:getState", projectId),
-    connect: (input) => ipcRenderer.invoke("oneProjectDeadlines:connect", input),
-    remove: (input) => ipcRenderer.invoke("oneProjectDeadlines:remove", input),
   },
   oneTeamPreflight: {
     prepare: (input) => ipcRenderer.invoke("oneTeamPreflight:prepare", input),

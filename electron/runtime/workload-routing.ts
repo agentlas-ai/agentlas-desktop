@@ -144,7 +144,7 @@ function normalizeReasonCodes(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const out: string[] = [];
   for (const item of value) {
-    const code = cleanText(item, 48).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+    const code = cleanText(item, 120).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
     if (code && !out.includes(code)) out.push(code);
     if (out.length >= MAX_REASON_CODES) break;
   }
@@ -711,22 +711,30 @@ export function workloadAllocationReceipt(resolution: WorkloadResolution): Recor
   });
   const featureHash = createHash("sha256").update(featurePayload).digest("hex");
   const fallback = resolution.source === "safe-fallback";
+  const resolvedModelId = resolution.runtime.model ?? null;
+  const hasResolvedCurrent = Boolean(resolvedModelId && resolution.resolvedRuntimeId);
+  const status = resolution.source === "manual-override" && hasResolvedCurrent
+    ? "user-pin"
+    : fallback && hasResolvedCurrent
+      ? "fallback-current"
+      : !fallback && hasResolvedCurrent
+        ? "resolved"
+        : "unresolved";
   return {
     schemaVersion: "agentlas.model-allocation-receipt.v1",
     decisionId: `desktop:model-allocation:${featureHash.slice(0, 24)}`,
     packetId: null,
-    status: resolution.source === "manual-override" ? "user-pin" : fallback ? "fallback-current" : "resolved",
+    status,
     requested: {
       tier: resolution.allocation.tier,
       modelClass: resolution.allocation.modelClass ?? null,
-      sessionId: resolution.allocation.runtimeId ?? null,
       modelId: resolution.allocation.modelId ?? null,
       effort: resolution.allocation.effort,
     },
     resolved: {
       tier: resolution.resolvedTier,
       provider: resolution.runtime.backend ?? resolution.runtime.kind,
-      modelId: resolution.runtime.model ?? resolution.runtime.kind,
+      modelId: resolvedModelId,
       sessionId: resolution.resolvedRuntimeId,
       effort: resolution.runtime.effort ?? "none",
     },

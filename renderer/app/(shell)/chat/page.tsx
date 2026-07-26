@@ -697,6 +697,7 @@ export default function ChatPageWrapper() {
 function ChatPage() {
   const searchParams = useSearchParams();
   const queryChatId = searchParams.get("id") ?? "";
+  const requestedFocusMessageId = searchParams.get("focus")?.trim() || null;
   const requestedTaskId = searchParams.get("task") ?? "";
   const [validatedTaskTarget, setValidatedTaskTarget] = useState<{
     taskId: string;
@@ -1618,6 +1619,16 @@ function ChatPage() {
       void Promise.all([api.invoke.history(chatId), fetchCommittedReplies(api, chatId)])
         .then(([history, committedReplies]) => {
           if (cancelled) return;
+          if (
+            requestedFocusMessageId
+            && !history.some((entry) => entry.id === requestedFocusMessageId)
+          ) {
+            setSessionNotice(
+              locale === "ko"
+                ? "이 작업 기록의 원문 메시지는 삭제되었습니다. 세션의 현재 위치를 열었습니다."
+                : "The original message for this work record was deleted. The current session is open.",
+            );
+          }
           const historyMessages: StreamMessage[] = restoreAnsweredQuestions(
             history.map(historyEntryToStreamMessage),
             committedReplies,
@@ -1626,7 +1637,15 @@ function ChatPage() {
             const hasLiveDraft = current.some((msg) => msg.busy || msg.streaming);
             return hasLiveDraft ? current : historyMessages;
           });
-        }).catch(() => undefined);
+        }).catch(() => {
+          if (!cancelled && requestedFocusMessageId) {
+            setSessionNotice(
+              locale === "ko"
+                ? "이 작업 기록의 원문 위치를 확인하지 못했습니다. 세션의 현재 위치를 열었습니다."
+                : "The original position could not be verified. The current session is open.",
+            );
+          }
+        });
       // CLI 슬래시 명령 스캔 (매 진입 시 최신) — 느려도 채팅 표시를 막지 않게 후속 로드.
       void api.runtime.listCommands().then((cmds) => {
         if (!cancelled) setCliCommands(cmds);
@@ -1728,7 +1747,7 @@ function ChatPage() {
     };
     // consumeEvent를 deps에서 제외(ref로 접근) — agent/agentGroup 세팅이 이 effect를 재실행시켜
     // attach가 중복 placeholder를 만들고 구독을 갈아치우던 churn을 없앤다. subscribeRun은 이제 안정적.
-  }, [applyHiredRoster, chatId, router, subscribeRun, t]);
+  }, [applyHiredRoster, chatId, locale, requestedFocusMessageId, router, subscribeRun, t]);
 
   useEffect(
     () =>
@@ -3476,6 +3495,7 @@ function ChatPage() {
           interactionBusy={busy}
           stopRequested={cancelPending}
           mediaBasePaths={mediaBasePaths}
+          focusMessageId={requestedFocusMessageId}
         />
       </div>
       {/* 실행 전 API 키 요청 바텀 시트 — 값은 vault(env.set)로만, IPC는 완료 신호만 */}

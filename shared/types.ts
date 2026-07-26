@@ -1164,6 +1164,43 @@ export interface Project {
   updatedAt: string;
 }
 
+export type ProjectKnowledgeSourceKind = "pm_soul" | "sitemap" | "code_map";
+export type ProjectKnowledgeSourceStatus = "ready" | "missing" | "invalid" | "unavailable";
+
+export interface ProjectKnowledgeSourceState {
+  kind: ProjectKnowledgeSourceKind;
+  status: ProjectKnowledgeSourceStatus;
+  /** Content-free health detail only. Raw project memory never crosses this IPC. */
+  detail: string | null;
+}
+
+export type ProjectTimelineEntrySource = "memory_episode" | "chat_fallback";
+export type ProjectTimelineNavigationStatus =
+  | "exact"
+  | "chat_only"
+  | "chat_deleted"
+  | "unlinked";
+
+export interface ProjectTimelineEntry {
+  id: string;
+  occurredAt: string;
+  summary: string;
+  source: ProjectTimelineEntrySource;
+  chatId: string | null;
+  messageId: string | null;
+  taskId: string | null;
+  archived: boolean;
+  navigationStatus: ProjectTimelineNavigationStatus;
+}
+
+export interface ProjectTimelineSnapshot {
+  projectId: string;
+  generatedAt: string;
+  sources: ProjectKnowledgeSourceState[];
+  entries: ProjectTimelineEntry[];
+  truncated: boolean;
+}
+
 export type OntologySourceScope = "public" | "internal" | "private";
 export type OntologySourceKind = "project" | "company" | "personal";
 
@@ -5510,6 +5547,7 @@ export interface AgentlasIpc {
     list: () => Promise<Project[]>;
     create: (input: { name: string; defaultAgentId?: string | null; contextNote?: string | null; folderGrant?: FsPathGrant | null }) => Promise<Project>;
     get: (id: string) => Promise<Project | null>;
+    timeline: (id: string, limit?: number) => Promise<ProjectTimelineSnapshot>;
     update: (
       id: string,
       patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId">> & { folderGrant?: FsPathGrant | null },
@@ -5714,16 +5752,6 @@ export interface AgentlasIpc {
       expectedDetectedAt: string;
       feedback: OneBriefingFeedback;
     }) => Promise<OneBriefingSnapshot>;
-  };
-  /**
-   * Explicit, local, read-only project deadline checks. Main keeps the
-   * expected relative path private; read projections expose only schedule and
-   * opaque check metadata.
-   */
-  oneProjectDeadlines: {
-    getState: (projectId: string) => Promise<OneProjectDeadlineState>;
-    connect: (input: ConnectOneProjectDeadlineInput) => Promise<OneProjectDeadlineState>;
-    remove: (input: RemoveOneProjectDeadlineInput) => Promise<OneProjectDeadlineState>;
   };
   /** Read-only adaptive-team proposal plus explicit, exact resolution. */
   oneTeamPreflight: {

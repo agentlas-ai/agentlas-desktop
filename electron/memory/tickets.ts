@@ -412,6 +412,37 @@ export function listMemoryEpisodesForContext(
   return rows.map(toEpisode).filter((episode): episode is MemoryEpisode => episode !== null);
 }
 
+/**
+ * Project-detail timeline read. Unlike recall context, this never includes
+ * global observations: a project panel may show only episodes bound to the
+ * exact project id and, when available, the same canonical folder identity.
+ */
+export function listProjectMemoryEpisodes(
+  projectId: string,
+  projectPath: string | null | undefined,
+  limit = 160,
+): MemoryEpisode[] {
+  const id = String(projectId ?? "").trim();
+  if (!id) return [];
+  const capped = Math.max(1, Math.min(500, Math.floor(limit)));
+  const canonicalPathHash = projectPathHash(projectPath);
+  const rows = canonicalPathHash
+    ? getDb().prepare(
+        `SELECT * FROM memory_episodes
+          WHERE summary IS NOT NULL AND (
+            (project_id = ? AND project_path_hash = ?) OR
+            (project_id IS NULL AND project_path_hash = ?)
+          )
+          ORDER BY created_at DESC LIMIT ?`,
+      ).all(id, canonicalPathHash, canonicalPathHash, capped) as EpisodeRow[]
+    : getDb().prepare(
+        `SELECT * FROM memory_episodes
+          WHERE summary IS NOT NULL AND project_id = ?
+          ORDER BY created_at DESC LIMIT ?`,
+      ).all(id, capped) as EpisodeRow[];
+  return rows.map(toEpisode).filter((episode): episode is MemoryEpisode => episode !== null);
+}
+
 export function countMemoryTickets(): number {
   return Number((getDb().prepare("SELECT COUNT(*) AS n FROM memory_tickets").get() as { n: number }).n);
 }

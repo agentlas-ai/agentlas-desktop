@@ -11,6 +11,7 @@ import { getDb } from "../store/db";
 import { getMeta, setMeta } from "../store/meta";
 import { materializeAgentFiles } from "../agents/files";
 import { publicAgentVisibility } from "../agents/policy";
+import { compareSemVer, parseSemVer } from "../../shared/semver";
 import {
   ARCHITECTURE_VERSION,
   BUILTIN_AGENTS,
@@ -19,6 +20,24 @@ import {
 } from "./manifest";
 
 const META_KEY = "architecture_version";
+
+export function shouldApplyBuiltinArchitectureSeed(
+  installedVersion: string | null,
+  bundleVersion: string,
+  installedCount: number,
+  bundleCount: number,
+): boolean {
+  if (!parseSemVer(bundleVersion)) return false;
+  if (installedVersion == null || installedVersion === "") return true;
+  const precedence = compareSemVer(installedVersion, bundleVersion);
+  // Unknown/newer shared-store versions belong to another compatible runtime.
+  // Never rewrite them with this Desktop build.
+  if (precedence == null || precedence > 0) return false;
+  if (precedence < 0) return true;
+  const have = Number.isSafeInteger(installedCount) ? installedCount : 0;
+  const expected = Number.isSafeInteger(bundleCount) ? bundleCount : 0;
+  return have < expected;
+}
 
 function upsertBuiltin(def: BuiltinAgentDef, now: string): void {
   const db = getDb();
@@ -77,21 +96,21 @@ function upsertBuiltin(def: BuiltinAgentDef, now: string): void {
  */
 export function seedBuiltinAgents(): boolean {
   const db = getDb();
-  const installedVersion = getMeta(META_KEY);
-
-  // Cheap fast-path: version matches AND all built-ins are present → nothing to do.
-  if (installedVersion === ARCHITECTURE_VERSION) {
+  const now = new Date().toISOString();
+  const tx = db.transaction(() => {
+    const installedVersion = getMeta(META_KEY);
     const have = db
       .prepare("SELECT COUNT(*) AS n FROM installed_agents WHERE builtin = 1")
       .get() as { n: number };
-    if (have.n >= BUILTIN_AGENTS.length) return false;
-  }
-
-  const now = new Date().toISOString();
-  const tx = db.transaction(() => {
+    if (!shouldApplyBuiltinArchitectureSeed(
+      installedVersion,
+      ARCHITECTURE_VERSION,
+      have.n,
+      BUILTIN_AGENTS.length,
+    )) return false;
     for (const def of BUILTIN_AGENTS) upsertBuiltin(def, now);
     setMeta(META_KEY, ARCHITECTURE_VERSION);
+    return true;
   });
-  tx();
-  return true;
+  return tx();
 }

@@ -6,10 +6,7 @@ import { listAutomations, listRunHistory } from "../store/automations";
 import { chatOriginSurface } from "../store/chats";
 import { listProjects } from "../store/projects";
 import { listCanonicalTasks } from "../store/tasks";
-import {
-  listOneProjectDeadlineChecksMain,
-  type MainOnlyOneProjectDeadlineCheck,
-} from "../store/one-project-deadlines";
+import type { MainOnlyOneProjectDeadlineCheck } from "../store/one-project-deadlines";
 import { getLatestInvocationRunReceipt, listFailureEvents } from "../store/run-events";
 import {
   ONE_BRIEFING_CONTRACT_VERSION,
@@ -356,7 +353,10 @@ function safeFailureEvents(chatId: string, limit = 10): FailureEventUi[] {
 }
 
 function safeProjectDeadlines(): MainOnlyOneProjectDeadlineCheck[] {
-  try { return listOneProjectDeadlineChecksMain(); } catch { return []; }
+  // Retired product surface: preserve the old detector contract only for
+  // explicit migration/test inputs, but never publish persisted deadline
+  // checks into the live One briefing feed.
+  return [];
 }
 
 function taskCandidate(
