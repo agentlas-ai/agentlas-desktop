@@ -31,6 +31,7 @@ import {
   revalidateInvocationWorkspaceBinding,
 } from "../invocation/workspace-binding";
 import { stripReplyMemoryEventsReadOnly } from "../memory/curator";
+import { buildProjectContextSlice } from "../memory/context-map";
 import { STORMBREAKER_LOOP_PROTOCOL } from "../hephaestus/loop-engineering";
 import type { CoreStormbreakerHarness } from "../hephaestus/commands";
 
@@ -467,6 +468,10 @@ export async function runSwarmInvocation(
       task: task.brief || task.title,
       includeOperational: false,
     });
+    const projectContextSlice = buildProjectContextSlice(
+      p.workingFolder ?? null,
+      task.brief || task.title,
+    );
     if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
       throw new MobileReadRuntimeBoundaryError(
         "This swarm worker runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
@@ -487,6 +492,7 @@ export async function runSwarmInvocation(
           coreHarnessPrompt,
           swarmProtocol(goal, board, task, runtimeInventory, conversationContext),
           p.stormbreakerMode ? STORMBREAKER_LOOP_PROTOCOL : "",
+          projectContextSlice ?? "",
           ontology.prompt,
         ].filter(Boolean).join("\n\n"),
         history: [],
@@ -582,6 +588,10 @@ export async function runSwarmInvocation(
       task: goal,
       includeOperational: false,
     });
+    const projectContextSlice = buildProjectContextSlice(
+      p.workingFolder ?? null,
+      goal,
+    );
     if (p.restrictedReadBoundary && !isMobileReadRuntimeAllowed(active.kind)) {
       throw new MobileReadRuntimeBoundaryError(
         "This swarm synthesis runtime has no verified restricted read-only boundary. Select BYOK or Ollama on Desktop.",
@@ -605,6 +615,7 @@ export async function runSwarmInvocation(
           conversationContext
             ? `ONGOING CONVERSATION (this swarm continues the user's chat — answer as its natural next reply, and never call it a previous session):\n${conversationContext}`
             : "",
+          projectContextSlice ?? "",
           ontology.prompt,
         ].join("\n"),
         history: [],

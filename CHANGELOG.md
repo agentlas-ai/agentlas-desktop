@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.20 — 2026-07-26
+
+### Fixed
+
+- Normal chat, Stormbreaker workers, and final synthesis now receive the same
+  bounded, dependency-selected Context Slice after a task is concrete. A local
+  Core fingerprint refresh keeps definitions and reverse references current;
+  Desktop no longer reduces the AI sitemap to one file-count sentence or lets a
+  Storm run bypass project structure.
+- Context Map source and paths stay local. Desktop calls the installed Core
+  through stdin with a bounded timeout, and Hub/Cloud discovery receives no
+  project map payload. If the new Core is unavailable, a turn fails open and
+  the existing Desktop memory path remains usable.
+
+This release binds Agentlas OS v1.1.66 at e76d8cd729c8c7f4a7d69be02c9e2c82ff5a97c5.
+This changelog entry describes source readiness and does not prove a published
+Desktop release, installer, or update feed.
+
 ## 0.9.19 — 2026-07-26
 
 ### Fixed

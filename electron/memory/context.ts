@@ -38,6 +38,10 @@ import {
   projectContextKey,
   recordContextSourceMarker,
 } from "../store/run-events";
+import {
+  buildProjectContextSlice,
+  triggerProjectContextMapRefresh,
+} from "./context-map";
 
 // 1800 was small enough that a 31k-char soul contributed 5.8% of itself, and
 // because the cut was positional the 94% it dropped included rules that would
@@ -108,7 +112,7 @@ const CODE_MAP_FULL_FILE = "code-map/project-map.json";
 type CodeMapSeed = {
   project?: string;
   stats?: { codeFiles?: number; symbols?: number };
-  modules?: { id: string; role: string }[];
+  modules?: { id?: string; path?: string; role?: string; codeFiles?: number }[];
   entryPoints?: { path: string }[];
   topSymbols?: { name: string; defAt: string }[];
 };
@@ -140,8 +144,14 @@ function readCodeMapSeed(projectPath: string): CodeMapSeed | null {
 // means an unusable map repairs itself on the next attach.
 function ensureCodeMap(projectPath: string): void {
   try {
-    if (readCodeMapSeed(projectPath)) return;
     if (codeMapTriggered.has(projectPath)) return;
+    // Core owns the canonical v2 map and fingerprint refresh. A readable seed
+    // is not proof of freshness, so trigger Core before accepting it.
+    if (triggerProjectContextMapRefresh(projectPath)) {
+      codeMapTriggered.add(projectPath);
+      return;
+    }
+    if (readCodeMapSeed(projectPath)) return;
     const gen = codeMapGenPath();
     if (!gen) return;
     codeMapTriggered.add(projectPath);
@@ -165,7 +175,7 @@ function summarizeCodeMap(projectPath: string): string | null {
     }
     const mods = (m.modules ?? [])
       .slice(0, CODEMAP_MODULES)
-      .map((x) => `${x.id}(${x.role})`)
+      .map((x) => `${x.id ?? x.path ?? "module"}(${x.role ?? `${x.codeFiles ?? "?"} code files`})`)
       .join(", ");
     const eps = (m.entryPoints ?? [])
       .slice(0, CODEMAP_ENTRIES)
@@ -213,7 +223,7 @@ function ensureSitemap(projectPath: string): void {
 }
 
 function summarizeSitemap(projectPath: string): string | null {
-  const sm = readActivatedProjectMemoryJson<{ nodes?: unknown[] }>(
+  const sm = readActivatedProjectMemoryJson<{ nodes?: unknown[]; edges?: unknown[] }>(
     projectPath,
     SITEMAP_FILE,
     PROJECT_SITEMAP_MAX_BYTES,
@@ -225,12 +235,45 @@ function summarizeSitemap(projectPath: string): string | null {
   const nodes = sm.nodes;
   if (!Array.isArray(nodes) || nodes.length === 0) return null;
   const byStatus: Record<string, number> = {};
+  const functional: Array<{ kind: string; title: string }> = [];
+  let nodeDependencyCount = 0;
   for (const n of nodes) {
-    const status = (n as { status?: string }).status ?? "unknown";
+    const node = n as {
+      status?: string;
+      kind?: string;
+      type?: string;
+      title?: string;
+      name?: string;
+      id?: string;
+      dependencies?: unknown[];
+    };
+    const status = node.status ?? "unknown";
     byStatus[status] = (byStatus[status] ?? 0) + 1;
+    const kind = String(node.type ?? node.kind ?? "").toLowerCase();
+    if (kind && kind !== "file" && kind !== "directory" && functional.length < 12) {
+      functional.push({
+        kind,
+        title: String(node.title ?? node.name ?? node.id ?? "").slice(0, 160),
+      });
+    }
+    if (Array.isArray(node.dependencies)) nodeDependencyCount += node.dependencies.length;
   }
   const parts = Object.entries(byStatus).map(([s, n]) => `${s}:${n}`);
-  return `AI Sitemap: ${nodes.length} nodes (${parts.join(", ")}).`;
+  const explicitEdges = Array.isArray(sm.edges) ? sm.edges.length : 0;
+  const lines = [
+    `### Project sitemap (${nodes.length} nodes · ${explicitEdges + nodeDependencyCount} dependency links · ${parts.join(", ")})`,
+  ];
+  if (functional.length > 0) {
+    lines.push(
+      "Functional/project nodes:",
+      ...functional.map((node) => `- [${node.kind}] ${node.title}`),
+    );
+  } else {
+    lines.push(
+      "No functional nodes are declared yet; file inventory alone is not project intent.",
+    );
+  }
+  return lines.join("\n");
 }
 
 function summarizeCareerGraph(projectPath: string): string | null {
@@ -623,6 +666,11 @@ export function buildMemoryContext(
     if (codeMap) {
       sections.push(codeMap);
       injected.push({ source: "code_map", text: codeMap });
+    }
+    const contextSlice = buildProjectContextSlice(projectPath, options.taskPrompt);
+    if (contextSlice) {
+      sections.push(contextSlice);
+      injected.push({ source: "code_map", text: contextSlice });
     }
     const entries = (
       perAgent

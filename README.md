@@ -69,6 +69,16 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-26 · v0.9.20 — every worker sees the part of the project it must fit** —
+  normal chat, Stormbreaker workers, and final synthesis now receive the same
+  local Context Slice after the task is concrete: inherited goals and
+  constraints, definitions, backlinks, interfaces, and structurally related
+  files. A source fingerprint refreshes stale maps automatically, and the AI
+  sitemap contributes typed project relationships instead of only a file count.
+  Hub and Cloud discovery never receive local map or source paths.
+  This release binds Agentlas OS v1.1.66 at e76d8cd729c8c7f4a7d69be02c9e2c82ff5a97c5.
+  This source note does not prove a Desktop Git tag, public installer, GitHub release, or
+  update feed.
 - **2026-07-26 · v0.9.19 — the window always appears, even if the screen was asleep** —
   the main window is created hidden and shown on its first painted frame, so launching
   while the display slept or the machine was locked (a login item, the relaunch after an

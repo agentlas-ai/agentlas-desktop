@@ -18,7 +18,12 @@
     "goalBindingSchemaVersion": "agentlas.workforce-goal-binding.v1",
     "goalContextSchemaVersion": "agentlas.workforce-goal-context.v1",
     "goalTurnSchemaVersion": "agentlas.workforce-goal-turn.v1",
-    "goalRosterLifetime": "until-explicit-completion"
+    "goalRosterLifetime": "until-explicit-completion",
+    "codeMapSchemaVersion": "agentlas.code-map.v2",
+    "contextSliceSchemaVersion": "agentlas.context-slice.v1",
+    "contextImpactReceiptSchemaVersion": "agentlas.context-impact-receipt.v1",
+    "contextVerificationReceiptSchemaVersion": "agentlas.context-verification-receipt.v1",
+    "localContextNetworkTransfer": "denied"
   },
   "tools": {
     "requiredNames": [
