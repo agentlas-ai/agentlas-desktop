@@ -679,6 +679,60 @@ async function continuityGateDisabledAcceptsInstallDespiteViolations() {
   fs.rmSync(layout.root, { recursive: true, force: true });
 }
 
+async function recoveryNoticeCanNeverBeRaised() {
+  // The owner's hard requirement: the "some local Agentlas state could not be
+  // verified after the update" notice must not come back. Guard it at the
+  // source — no code path may publish a recovery-required state — so a future
+  // edit that reintroduces one fails here instead of on a user's machine.
+  const controllerSource = fs.readFileSync(
+    path.join(__dirname, "..", "electron", "updater", "controller.ts"),
+    "utf8",
+  );
+  const publishes = controllerSource.match(/status:\s*"recovery-required"/g) || [];
+  assert.equal(
+    publishes.length,
+    0,
+    `no updater path may publish a recovery-required state (found ${publishes.length})`,
+  );
+
+  // And prove it end to end: an undeletable journal on a released hold still
+  // must not surface the notice.
+  const layout = makeLayout();
+  const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
+  const first = makeController(layout, new FakeUpdater({ updateInfo }));
+  await first.controller.init();
+  await first.controller.check();
+  await first.controller.install();
+  first.controller.dispose();
+
+  const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
+  const held = JSON.parse(fs.readFileSync(journalPath, "utf8"));
+  held.phase = "recovery-required";
+  held.reasonCode = "continuity-violation";
+  fs.writeFileSync(journalPath, `${JSON.stringify(held, null, 2)}\n`);
+
+  const stubborn = makeController(layout, new FakeUpdater(), {
+    currentVersion: "0.7.29",
+    removePath: (target, options) => {
+      if (target === journalPath) {
+        const error = new Error("simulated EACCES");
+        error.code = "EACCES";
+        throw error;
+      }
+      fs.rmSync(target, options);
+    },
+  });
+  await stubborn.controller.init();
+  assert.notEqual(
+    stubborn.controller.getState().status,
+    "recovery-required",
+    "an undeletable journal is a disk problem, not a continuity verdict",
+  );
+  assert.equal(stubborn.controller.getState().status, "updated");
+  stubborn.controller.dispose();
+  fs.rmSync(layout.root, { recursive: true, force: true });
+}
+
 async function anyRecoveryHoldIsReleasedOnRelaunch() {
   // Machines that were already stuck carry a durable recovery-required journal.
   // With the gate off, that verdict must not outlive it: the hold is released on
@@ -1660,6 +1714,7 @@ async function downloadedUpdateInstallsAutomaticallyOnNormalQuit() {
   await installQuiescesWritersBeforeContinuityCapture();
   await continuityGateDisabledAcceptsInstallDespiteViolations();
   await anyRecoveryHoldIsReleasedOnRelaunch();
+  await recoveryNoticeCanNeverBeRaised();
   await compatibilityBoundariesFailBeforeDownload();
   await continuityBackupFailureRemainsVisibleAndRetryable();
   await transientFailuresAndConcurrencyPreserveTruth();

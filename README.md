@@ -77,8 +77,9 @@ authority for which version is actually public, stable, and downloadable.
   timestamps written minutes after the snapshot, and one was a built-in agent prompt
   reseeded by the release being installed, with row counts and schema version matching
   exactly. That post-install check no longer runs and can no longer hold an update, and a
-  hold left by an earlier version is released on the next launch. The recovery copy is
-  still written at install time and kept on disk for manual restore.
+  hold left by an earlier version is released on the next launch, and no remaining code
+  path can raise that notice again. The recovery copy is still written at install time and
+  kept on disk for manual restore.
   This release binds Agentlas OS v1.1.62 at 19b75025e5e252e90d93015a839c55d08fcb8061.
   This source note does not prove a Desktop Git tag, public installer, GitHub release, or
   update feed.

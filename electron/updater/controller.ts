@@ -1260,16 +1260,14 @@ export class DesktopUpdaterController {
             + `(target ${journal.targetVersion}; recovery copy preserved)`,
         );
         if (!this.clearJournal()) {
-          // Never claim a resolution we could not durably persist.
-          this.publish({
-            status: "recovery-required",
-            version: journal.targetVersion,
-            code: "continuity-violation",
-            error: safeMessage("continuity-violation"),
-            canRetry: false,
-            recoveryBackupAvailable: fs.existsSync(journal.continuity.backupPath),
-          });
-          return;
+          // The hold is released either way. A journal we could not delete is a
+          // disk problem, not a continuity verdict, and re-raising the recovery
+          // notice for it is exactly the permanent-brick behaviour this change
+          // removes. The next launch retries the delete.
+          this.logger.warn(
+            "[updater] could not delete the install journal while releasing a "
+              + "recovery hold; the hold stays released and the next launch retries",
+          );
         }
         this.blockedTargetVersion = null;
         this.blockedReasonCode = "install-not-applied";
