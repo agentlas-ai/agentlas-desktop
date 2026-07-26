@@ -643,293 +643,82 @@ async function snapshotTableSetsTolerateProtectionListGrowth() {
   fs.rmSync(layout.root, { recursive: true, force: true });
 }
 
-async function transientAccountRestoreReconcilesOnceAndClearsOnlyAfterFullSuccess() {
+async function continuityGateDisabledAcceptsInstallDespiteViolations() {
+  // The continuity gate is off (owner decision, 2026-07-26). It used to compare
+  // every protected row against a pre-install snapshot, so ordinary app
+  // activity — Hub sync timestamps, a reseeded built-in prompt — failed it and
+  // held healthy updates forever. The install must now be accepted without the
+  // verifier running at all, while the recovery copy stays on disk.
   const layout = makeLayout();
   const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
   const first = makeController(layout, new FakeUpdater({ updateInfo }));
   await first.controller.init();
   await first.controller.check();
   await first.controller.install();
+  const backupPath = first.continuity.snapshot().backupPath;
   first.controller.dispose();
 
   const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
-  let accountRestored = false;
-  let verificationCalls = 0;
-  let retryWaitCalls = 0;
-  let refreshCalls = 0;
-  let releaseRetryWait;
-  let markRetryWaitStarted;
-  const retryWaitGate = new Promise((resolve) => { releaseRetryWait = resolve; });
-  const retryWaitStarted = new Promise((resolve) => { markRetryWaitStarted = resolve; });
-  const updater = new FakeUpdater();
-  const relaunched = makeController(layout, updater, {
+  let verifications = 0;
+  const feed = new FakeUpdater();
+  const relaunched = makeController(layout, feed, {
     currentVersion: "0.7.29",
     verifyContinuity: async () => {
-      verificationCalls += 1;
-      return accountRestored
-        ? { ok: true, violations: [] }
-        : { ok: false, violations: ["account-session-not-restored"] };
+      verifications += 1;
+      return { ok: false, violations: ["protected-value-changed:hub_agent_bookmarks:server_updated_at:hash"] };
     },
-    waitForRecoveryRetry: async () => {
-      retryWaitCalls += 1;
-      markRetryWaitStarted();
-      await retryWaitGate;
-    },
-    refreshSessionForRecovery: async () => {
-      refreshCalls += 1;
-      accountRestored = true;
-    },
-  });
-  const firstInit = relaunched.controller.init();
-  const duplicateInit = relaunched.controller.init();
-  assert.equal(firstInit, duplicateInit, "concurrent init callers must share the same continuity safety gate");
-  let duplicateInitSettled = false;
-  void duplicateInit.then(() => { duplicateInitSettled = true; });
-  await retryWaitStarted;
-  await Promise.resolve();
-  assert.equal(duplicateInitSettled, false, "no init caller may resolve before startup reconciliation finishes");
-  assert.equal(verificationCalls, 1);
-  assert.equal(retryWaitCalls, 1, "concurrent initialization must not start duplicate reconciliation waits");
-  assert.equal(fs.existsSync(journalPath), true, "an in-flight verification must not clear durable recovery truth");
-  releaseRetryWait();
-
-  await Promise.all([firstInit, duplicateInit]);
-  assert.equal(duplicateInitSettled, true);
-  assert.equal(relaunched.controller.getState().status, "updated");
-  assert.equal(verificationCalls, 2, "the bounded auth-settle path must run exactly one full retry before success");
-  assert.equal(refreshCalls, 1, "the retry must re-read the durable auth session before full verification");
-  assert.equal(fs.existsSync(journalPath), false, "the journal clears only after every continuity check succeeds");
-  assert.equal(updater.checkCount, 0, "startup reconciliation must not contact the update feed");
-  relaunched.controller.dispose();
-  fs.rmSync(layout.root, { recursive: true, force: true });
-}
-
-async function realViolationSurvivesAccountRestoreAndEveryRetry() {
-  const layout = makeLayout();
-  const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
-  const first = makeController(layout, new FakeUpdater({ updateInfo }));
-  await first.controller.init();
-  await first.controller.check();
-  await first.controller.install();
-  first.controller.dispose();
-
-  const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
-  let verificationCalls = 0;
-  let retryWaitCalls = 0;
-  const updater = new FakeUpdater();
-  const relaunched = makeController(layout, updater, {
-    currentVersion: "0.7.29",
-    verifyContinuity: async () => {
-      verificationCalls += 1;
-      return {
-        ok: false,
-        violations: ["account-session-not-restored", "row-count-regressed:installed_agents"],
-      };
-    },
-    waitForRecoveryRetry: async () => { retryWaitCalls += 1; },
   });
   await relaunched.controller.init();
-  assert.equal(relaunched.controller.getState().status, "recovery-required");
-  assert.equal(fs.existsSync(journalPath), true);
-  const retried = await relaunched.controller.check();
-  assert.equal(retried.status, "recovery-required", "runtime checks must not unlock a partially bootstrapped app");
-  assert.equal(verificationCalls, 1, "a real violation alongside auth delay must bypass the transient retry path");
-  assert.equal(retryWaitCalls, 0);
-  assert.equal(fs.existsSync(journalPath), true, "a real continuity violation must never delete the journal");
-  assert.equal(JSON.parse(fs.readFileSync(journalPath, "utf8")).phase, "recovery-required");
-  assert.equal(updater.checkCount, 0);
+
+  assert.equal(verifications, 0, "the disabled gate must not run the continuity verifier");
+  assert.equal(relaunched.controller.getState().status, "updated", "a benign drift must not hold the install");
+  assert.equal(fs.existsSync(journalPath), false, "accepting the install clears the durable journal");
+  assert.equal(fs.existsSync(backupPath), true, "the recovery copy stays on disk for manual use");
+  assert.equal(feed.checkCount, 0, "startup reconciliation must not contact the update feed");
   relaunched.controller.dispose();
   fs.rmSync(layout.root, { recursive: true, force: true });
-
-  const emergedLayout = makeLayout();
-  const emergedFirst = makeController(emergedLayout, new FakeUpdater({ updateInfo }));
-  await emergedFirst.controller.init();
-  await emergedFirst.controller.check();
-  await emergedFirst.controller.install();
-  emergedFirst.controller.dispose();
-  const emergedJournalPath = path.join(emergedLayout.userDataPath, "updater", "install-journal.v1.json");
-  let emergedCalls = 0;
-  const emergedViolation = makeController(emergedLayout, new FakeUpdater(), {
-    currentVersion: "0.7.29",
-    verifyContinuity: async () => {
-      emergedCalls += 1;
-      return emergedCalls === 1
-        ? { ok: false, violations: ["account-session-not-restored"] }
-        : { ok: false, violations: ["row-count-regressed:installed_agents"] };
-    },
-    waitForRecoveryRetry: async () => {},
-  });
-  await emergedViolation.controller.init();
-  assert.equal(emergedCalls, 2, "the auth retry must re-run the complete continuity verifier");
-  assert.equal(emergedViolation.controller.getState().status, "recovery-required");
-  assert.equal(fs.existsSync(emergedJournalPath), true, "a real violation discovered on retry must preserve the journal");
-  emergedViolation.controller.dispose();
-  fs.rmSync(emergedLayout.root, { recursive: true, force: true });
 }
 
-async function accountRestoreRetryIsStrictlyBounded() {
-  const layout = makeLayout();
-  const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
-  const first = makeController(layout, new FakeUpdater({ updateInfo }));
-  await first.controller.init();
-  await first.controller.check();
-  await first.controller.install();
-  first.controller.dispose();
+async function anyRecoveryHoldIsReleasedOnRelaunch() {
+  // Machines that were already stuck carry a durable recovery-required journal.
+  // With the gate off, that verdict must not outlive it: the hold is released on
+  // the next launch, from any journal generation, without deleting the copy.
+  for (const gateVersion of [undefined, 2]) {
+    const layout = makeLayout();
+    const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
+    const first = makeController(layout, new FakeUpdater({ updateInfo }));
+    await first.controller.init();
+    await first.controller.check();
+    await first.controller.install();
+    const backupPath = first.continuity.snapshot().backupPath;
+    first.controller.dispose();
 
-  let verificationCalls = 0;
-  let refreshCalls = 0;
-  const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
-  const unresolved = makeController(layout, new FakeUpdater(), {
-    currentVersion: "0.7.29",
-    verifyContinuity: async () => {
-      verificationCalls += 1;
-      return { ok: false, violations: ["account-session-not-restored"] };
-    },
-    recoverySessionRetryAttempts: 2,
-    waitForRecoveryRetry: async () => {},
-    refreshSessionForRecovery: async () => { refreshCalls += 1; },
-  });
-  await unresolved.controller.init();
-  assert.equal(verificationCalls, 3, "two bounded retries mean one initial verification plus exactly two retries");
-  assert.equal(refreshCalls, 2);
-  assert.equal(unresolved.controller.getState().status, "recovery-required");
-  assert.equal(fs.existsSync(journalPath), true, "an exhausted auth retry must retain the durable journal");
-  unresolved.controller.dispose();
-  fs.rmSync(layout.root, { recursive: true, force: true });
+    const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
+    const held = JSON.parse(fs.readFileSync(journalPath, "utf8"));
+    held.phase = "recovery-required";
+    held.reasonCode = "continuity-violation";
+    if (gateVersion === undefined) delete held.continuityGateVersion;
+    else held.continuityGateVersion = gateVersion;
+    fs.writeFileSync(journalPath, `${JSON.stringify(held, null, 2)}\n`);
+
+    let verifications = 0;
+    const resumed = makeController(layout, new FakeUpdater(), {
+      currentVersion: "0.7.29",
+      verifyContinuity: async () => {
+        verifications += 1;
+        return { ok: false, violations: ["row-count-regressed:chats"] };
+      },
+    });
+    await resumed.controller.init();
+
+    assert.equal(verifications, 0, "releasing a hold must not re-verify the drifted live database");
+    assert.equal(resumed.controller.getState().status, "updated", `hold must release for gateVersion=${gateVersion}`);
+    assert.equal(fs.existsSync(journalPath), false, "releasing the hold clears the durable install journal");
+    assert.equal(fs.existsSync(backupPath), true, "the recovery copy is never deleted when releasing a hold");
+    resumed.controller.dispose();
+    fs.rmSync(layout.root, { recursive: true, force: true });
+  }
 }
-
-async function continuityViolationSurfacesRecovery() {
-  const layout = makeLayout();
-  const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
-  const first = makeController(layout, new FakeUpdater({ updateInfo }));
-  await first.controller.init();
-  await first.controller.check();
-  await first.controller.install();
-  const backupPath = first.continuity.snapshot().backupPath;
-  first.controller.dispose();
-
-  const failed = makeController(layout, new FakeUpdater(), {
-    currentVersion: "0.7.29",
-    verifyContinuity: async () => ({ ok: false, violations: ["agent-directory-missing:alpha"] }),
-  });
-  await failed.controller.init();
-  assert.equal(failed.controller.getState().status, "recovery-required");
-  assert.equal(failed.controller.getState().code, "continuity-violation");
-  assert.equal(failed.controller.getState().recoveryBackupAvailable, true);
-  assert.equal(failed.controller.revealRecoveryBackup().accepted, true);
-  assert.deepEqual(failed.revealed, [backupPath]);
-  assert.equal((await failed.controller.check()).status, "recovery-required", "recovery state must not be overwritten by checks");
-  failed.controller.dispose();
-  fs.rmSync(layout.root, { recursive: true, force: true });
-}
-
-async function staleRecoveryHoldResolvesOnRelaunchWithoutReverifying() {
-  // Regression for the legacy permanent-brick class. Old journals did not
-  // version the boot-writer ordering, so a normal repair projection could create
-  // a false recovery hold. A new binary must self-resolve that legacy hold
-  // without deleting the preserved recovery copy.
-  const layout = makeLayout();
-  const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
-  const first = makeController(layout, new FakeUpdater({ updateInfo }));
-  await first.controller.init();
-  await first.controller.check();
-  await first.controller.install();
-  const backupPath = first.continuity.snapshot().backupPath;
-  first.controller.dispose();
-
-  const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
-  const legacyJournal = JSON.parse(fs.readFileSync(journalPath, "utf8"));
-  delete legacyJournal.continuityGateVersion;
-  fs.writeFileSync(journalPath, `${JSON.stringify(legacyJournal, null, 2)}\n`);
-
-  // First relaunch on the freshly installed target: the one-shot gate fails and
-  // surfaces recovery once, persisting phase "recovery-required" to disk.
-  const surfaced = makeController(layout, new FakeUpdater(), {
-    currentVersion: "0.7.29",
-    verifyContinuity: async () => ({ ok: false, violations: ["table-identity-changed:projects"] }),
-  });
-  await surfaced.controller.init();
-  assert.equal(surfaced.controller.getState().status, "recovery-required");
-  assert.equal(JSON.parse(fs.readFileSync(journalPath, "utf8")).phase, "recovery-required");
-  surfaced.controller.dispose();
-  assert.equal(fs.existsSync(backupPath), true, "the SQLite recovery copy is preserved on disk");
-
-  // Second relaunch: the target is installed and the app boots again. Re-verifying
-  // the drifted DB would fail forever; the stale hold must resolve WITHOUT calling
-  // the continuity verifier, clear the journal, and unblock updates.
-  let reverifications = 0;
-  const feed = new FakeUpdater();
-  const resumed = makeController(layout, feed, {
-    currentVersion: "0.7.29",
-    verifyContinuity: async () => {
-      reverifications += 1;
-      return { ok: false, violations: ["row-count-regressed:chats"] };
-    },
-  });
-  await resumed.controller.init();
-  assert.equal(reverifications, 0, "a stale recovery hold must not re-verify the drifted live database");
-  assert.equal(resumed.controller.getState().status, "updated", "the stale hold resolves so future updates can resume");
-  assert.equal(fs.existsSync(journalPath), false, "resolving the stale hold clears the durable install journal");
-  assert.equal(fs.existsSync(backupPath), true, "the recovery copy is not deleted when auto-resolving");
-  assert.equal(feed.checkCount, 0, "startup reconciliation must not contact the update feed");
-  resumed.controller.dispose();
-  fs.rmSync(layout.root, { recursive: true, force: true });
-}
-
-async function versionedRecoveryHoldRemainsDurableWithoutReverifying() {
-  const layout = makeLayout();
-  const updateInfo = { version: "0.7.29", agentlasCompatibility: compatibility };
-  const first = makeController(layout, new FakeUpdater({ updateInfo }));
-  await first.controller.init();
-  await first.controller.check();
-  await first.controller.install();
-  first.controller.dispose();
-
-  const journalPath = path.join(layout.userDataPath, "updater", "install-journal.v1.json");
-  assert.equal(
-    JSON.parse(fs.readFileSync(journalPath, "utf8")).continuityGateVersion,
-    2,
-    "new installs must bind the boot-writer ordering contract",
-  );
-
-  const warnings = [];
-  const surfaced = makeController(layout, new FakeUpdater(), {
-    currentVersion: "0.7.29",
-    verifyContinuity: async () => ({ ok: false, violations: ["protected-row-missing:projects:hash"] }),
-    logger: { log() {}, warn: (message) => warnings.push(String(message)), error() {} },
-  });
-  await surfaced.controller.init();
-  assert.equal(surfaced.controller.getState().status, "recovery-required");
-  assert.ok(
-    warnings.some((message) => message.includes("protected-row-missing")),
-    "operator diagnostics must include a bounded continuity violation category",
-  );
-  assert.ok(
-    warnings.every((message) => !message.includes("projects") && !message.includes("hash")),
-    "continuity diagnostics must not leak row, table, or local identifier details",
-  );
-  surfaced.controller.dispose();
-
-  let reverifications = 0;
-  const preserved = makeController(layout, new FakeUpdater(), {
-    currentVersion: "0.7.29",
-    verifyContinuity: async () => {
-      reverifications += 1;
-      return { ok: true, violations: [] };
-    },
-  });
-  await preserved.controller.init();
-  assert.equal(reverifications, 0, "a durable recovery verdict must not be re-derived from a drifted live database");
-  assert.equal(
-    preserved.controller.getState().status,
-    "recovery-required",
-    "a versioned real continuity failure must not be silently cleared on a later boot",
-  );
-  assert.equal(fs.existsSync(journalPath), true, "the versioned recovery journal must remain durable");
-  preserved.controller.dispose();
-  fs.rmSync(layout.root, { recursive: true, force: true });
-}
-
 async function compatibilityBoundariesFailBeforeDownload() {
   const cases = [
     { label: "missing metadata", info: { version: "0.7.29" }, options: {}, code: "compatibility-metadata-missing" },
@@ -1869,12 +1658,8 @@ async function downloadedUpdateInstallsAutomaticallyOnNormalQuit() {
   await installJournalStopsFailedApplyLoopAndReconcilesSuccess();
   await verifiedContinuityFailsClosedWhenJournalCannotBeDeleted();
   await installQuiescesWritersBeforeContinuityCapture();
-  await transientAccountRestoreReconcilesOnceAndClearsOnlyAfterFullSuccess();
-  await realViolationSurvivesAccountRestoreAndEveryRetry();
-  await accountRestoreRetryIsStrictlyBounded();
-  await continuityViolationSurfacesRecovery();
-  await staleRecoveryHoldResolvesOnRelaunchWithoutReverifying();
-  await versionedRecoveryHoldRemainsDurableWithoutReverifying();
+  await continuityGateDisabledAcceptsInstallDespiteViolations();
+  await anyRecoveryHoldIsReleasedOnRelaunch();
   await compatibilityBoundariesFailBeforeDownload();
   await continuityBackupFailureRemainsVisibleAndRetryable();
   await transientFailuresAndConcurrencyPreserveTruth();

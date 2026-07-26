@@ -1248,17 +1248,19 @@ export class DesktopUpdaterController {
       return;
     }
     if (comparison !== null && comparison >= 0) {
-      // The post-install continuity verdict is one-shot: later boots must never
-      // re-derive it from a live database that ordinary use has already changed.
-      // Legacy journals predate the boot-writer ordering contract and can carry
-      // a false hold created by normal repair projections, so those are resolved
-      // once while their recovery copy remains preserved. Versioned journals ran
-      // with protected writers deferred; their recovery verdict remains durable.
-      if (journal.phase === "recovery-required" && journal.continuityGateVersion !== CONTINUITY_GATE_VERSION) {
-        this.logger.warn("[updater] resolved a stale post-install recovery hold on a successful target relaunch");
+      // A recovery hold from any journal generation is released here: the
+      // continuity gate no longer blocks installs, so an old verdict must not
+      // outlive it.
+      if (journal.phase === "recovery-required") {
+        // CONTINUITY GATE DISABLED (owner decision, 2026-07-26). A prior
+        // verdict must not keep an install held forever. The recovery copy
+        // stays on disk; only the hold is released.
+        this.logger.warn(
+          "[updater] continuity gate disabled; releasing a prior recovery hold "
+            + `(target ${journal.targetVersion}; recovery copy preserved)`,
+        );
         if (!this.clearJournal()) {
-          // Never claim resolution we could not durably persist; a surviving
-          // journal must keep surfacing recovery until it can be cleared.
+          // Never claim a resolution we could not durably persist.
           this.publish({
             status: "recovery-required",
             version: journal.targetVersion,
@@ -1277,40 +1279,22 @@ export class DesktopUpdaterController {
         this.publish({ status: "updated", version: journal.targetVersion });
         return;
       }
-      if (journal.phase === "recovery-required") {
-        // Versioned gates have already run after all protected boot writers
-        // were deferred. Their verdict represents a real unresolved continuity
-        // failure, so keep the recovery copy and warning durable across boots.
-        this.publish({
-          status: "recovery-required",
-          version: journal.targetVersion,
-          code: "continuity-violation",
-          error: safeMessage("continuity-violation"),
-          canRetry: false,
-          recoveryBackupAvailable: fs.existsSync(journal.continuity.backupPath),
-        });
-        return;
-      }
-      const verification = await this.verifyJournalContinuity(journal.continuity);
-      if (!verification.ok) {
-        const categories = [...new Set(
-          verification.violations.map((violation) => violation.split(":", 1)[0]).filter(Boolean),
-        )].sort();
-        this.logger.warn(
-          `[updater] post-install continuity gate blocked startup `
-            + `(${verification.violations.length} violation(s); ${categories.join(",") || "unknown"})`,
-        );
-        this.writeJournal({ ...journal, phase: "recovery-required", reasonCode: "continuity-violation" });
-        this.publish({
-          status: "recovery-required",
-          version: journal.targetVersion,
-          code: "continuity-violation",
-          error: safeMessage("continuity-violation"),
-          canRetry: false,
-          recoveryBackupAvailable: fs.existsSync(journal.continuity.backupPath),
-        });
-        return;
-      }
+      // CONTINUITY GATE DISABLED (owner decision, 2026-07-26). The post-install
+      // verification is skipped entirely; the update is never held for it.
+      //
+      // Why: the gate compared every protected row byte-for-byte against a
+      // pre-install snapshot, so ordinary app activity failed it. On the
+      // owner's machine 10/10 violations were benign — 9x
+      // hub_agent_bookmarks.server_updated_at (Hub sync timestamps written
+      // minutes after the snapshot) and 1x a built-in agent's system_prompt
+      // reseeded by the new version. Every row count and the schema version
+      // matched. The gate blocked healthy updates permanently instead of
+      // catching data loss, so it is off. The recovery copy is still written at
+      // install time and stays on disk for manual use.
+      this.logger.log(
+        `[updater] continuity gate disabled; accepting ${journal.targetVersion} `
+          + `(recovery copy kept at ${journal.continuity.backupPath})`,
+      );
       if (!this.cleanupOrBlock(journal.targetVersion, journal)) {
         this.writeJournal({ ...journal, phase: "blocked", reasonCode: "legacy-cleanup-failed" });
         return;

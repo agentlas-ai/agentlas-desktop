@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.18 — 2026-07-26
+
+### Fixed
+
+- Updates no longer stall behind a false "some local Agentlas state could not be
+  verified" recovery notice. After installing, Agentlas compared every protected
+  database row against a snapshot taken before the install, so ordinary activity
+  failed the check: on a real machine all ten violations were benign — nine were
+  Hub bookmark sync timestamps written minutes after the snapshot, and one was a
+  built-in agent prompt reseeded by the very release being installed. Row counts
+  and the schema version matched exactly. The check now no longer runs after an
+  install and can no longer hold one, and a recovery hold left by an earlier
+  version is released on the next launch. The preserved recovery copy is still
+  written at install time and stays on disk, so restoring it by hand remains
+  possible.
+
+This release binds Agentlas OS v1.1.62 at 19b75025e5e252e90d93015a839c55d08fcb8061.
+This changelog entry describes source readiness and does not prove a published
+Desktop release, installer, or update feed.
+
 ## 0.9.17 — 2026-07-26
 
 ### Fixed

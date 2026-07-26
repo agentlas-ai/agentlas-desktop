@@ -69,6 +69,19 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-26 · v0.9.18 — updates stop being blocked by a false recovery notice** —
+  after an install Agentlas compared every protected database row against a snapshot taken
+  before that install, so normal use failed the check and the app kept showing "some local
+  Agentlas state could not be verified after the update" while refusing to move forward. On
+  a real machine every one of the ten violations was benign: nine were Hub bookmark sync
+  timestamps written minutes after the snapshot, and one was a built-in agent prompt
+  reseeded by the release being installed, with row counts and schema version matching
+  exactly. That post-install check no longer runs and can no longer hold an update, and a
+  hold left by an earlier version is released on the next launch. The recovery copy is
+  still written at install time and kept on disk for manual restore.
+  This release binds Agentlas OS v1.1.62 at 19b75025e5e252e90d93015a839c55d08fcb8061.
+  This source note does not prove a Desktop Git tag, public installer, GitHub release, or
+  update feed.
 - **2026-07-26 · v0.9.17 — private project state stays out of git** —
   the sitemap, code map, project soul memory, memory log, curator decisions, skill trials,
   and the local credential index are per-machine outputs of features you run against your
