@@ -6,7 +6,6 @@ import {
   listChatMessages,
   listChatsByProject,
 } from "../store/chats";
-import { redactSecrets } from "../../shared/secret-patterns";
 import type {
   ChatHistoryEntry,
   ProjectKnowledgeSourceState,
@@ -23,6 +22,7 @@ import {
   readActivatedProjectMemoryText,
 } from "./safe-project-read";
 import { listProjectMemoryEpisodes } from "./tickets";
+import { summarizeCompletedWork } from "./work-summary";
 
 const CODE_MAP_SEED_FILE = "code-map/project-seed.json";
 const CODE_MAP_FULL_FILE = "code-map/project-map.json";
@@ -143,26 +143,14 @@ function nearestAssistantMessage(
   return best?.message ?? null;
 }
 
-function compactSummary(raw: string, fallback: string): string {
-  const withoutCode = String(raw ?? "")
-    .replace(/```[\s\S]*?```/g, " [code omitted] ")
-    .replace(/`([^`\n]{1,160})`/g, "$1")
-    .replace(/!\[[^\]]*]\([^)]*\)/g, " ")
-    .replace(/\[([^\]]+)]\([^)]*\)/g, "$1")
-    .replace(/(?:file:\/\/)?(?:\/(?:Users|home|Volumes|private|var|tmp|opt|usr|etc)\/[^\s"'`)\]}>,;]+)/gi, "[local path]")
-    .replace(/[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*/g, "[local path]")
-    .replace(/^[#>*+\-\d.)\s]+/gm, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  const redacted = redactSecrets(withoutCode).trim();
-  const value = redacted || fallback;
-  return value.length > 220 ? `${value.slice(0, 217).trimEnd()}…` : value;
-}
-
 function lastTimelineMessage(messages: ChatHistoryEntry[]): ChatHistoryEntry | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message.role === "assistant" || message.role === "user") return message;
+    if (message.role === "assistant") return message;
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === "user") return message;
   }
   return null;
 }
@@ -182,7 +170,7 @@ export function getProjectTimelineSnapshot(
 
   for (const episode of episodes) {
     const fallback = "작업 기록";
-    const summary = compactSummary(episode.summary, fallback);
+    const summary = summarizeCompletedWork(episode.summary, fallback);
     if (!episode.chatId) {
       entries.push({
         id: episode.id,
@@ -242,7 +230,7 @@ export function getProjectTimelineSnapshot(
     entries.push({
       id: `chat-fallback:${chat.id}`,
       occurredAt: anchor?.createdAt ?? chat.updatedAt,
-      summary: compactSummary(anchor?.text ?? chat.title, chat.title.trim() || "작업 기록"),
+      summary: summarizeCompletedWork(anchor?.text ?? chat.title, chat.title.trim() || "작업 기록"),
       source: "chat_fallback",
       chatId: chat.id,
       messageId: anchor?.id ?? null,

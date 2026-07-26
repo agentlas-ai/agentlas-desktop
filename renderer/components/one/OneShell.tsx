@@ -126,6 +126,21 @@ function decisionRejectCopy(locale: "ko" | "en"): string {
   return value === key ? DECISION_REJECT_FALLBACK[locale] : value;
 }
 
+function OneFirstRunTitle({ locale }: { locale: "ko" | "en" }) {
+  const title = tFor(locale, "one.shell.firstrun.title");
+  if (locale !== "ko") return <>{title}</>;
+
+  const clauseBreak = title.indexOf(",");
+  if (clauseBreak < 0) return <>{title}</>;
+
+  return (
+    <>
+      <span className={styles.newUserTitleLine}>{title.slice(0, clauseBreak + 1)}</span>
+      <span className={styles.newUserTitleLine}>{title.slice(clauseBreak + 1).trim()}</span>
+    </>
+  );
+}
+
 type UiMessage = {
   id: string;
   role: "user" | "assistant" | "system";
@@ -2094,8 +2109,7 @@ export function OneShell() {
                 {projections.length === 0 && !briefing.proactive ? (
                   activationForeground ? null : <section className={styles.newUser} aria-labelledby="one-first-run-title">
                     <OneBrandLockup className={styles.newUserMark} />
-                    <h1 id="one-first-run-title">{tFor(appLocale, "one.shell.firstrun.title")}</h1>
-                    <p>{tFor(appLocale, "one.shell.firstrun.body")}</p>
+                    <h1 id="one-first-run-title"><OneFirstRunTitle locale={appLocale} /></h1>
                     {useCaseChipsVisible && (
                       <OneUseCaseChips
                         locale={appLocale}

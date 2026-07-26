@@ -69,6 +69,15 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-27 · v0.9.23 — project work stays readable without rewriting memory** —
+  the project detail sidebar now shows each completed task as no more than two
+  short outcome sentences, keeps exact-session navigation and deleted-chat
+  handling, and compacts old verbose rows only when the timeline is read. PM
+  Soul, Sitemap, Code Map, stored memory, and memory embeddings are not rewritten.
+  One's first-run headline now uses two deliberate Korean clauses without an
+  orphaned final word, and the unsolicited explanatory paragraph is gone.
+  This release binds Agentlas OS v1.1.67 at 04258b7541f604479dc04279146a506e363ad85e.
+  This source note does not prove a Desktop installer or update feed.
 - **2026-07-26 · v0.9.22 — project maps are verified before use** —
   a map refresh now counts only when Core exits successfully and a canonical
   Code Map v2 with definition and backlink indexes is present. The first

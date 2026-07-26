@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.23 — 2026-07-27
+
+### Fixed
+
+- The project detail timeline now projects each completed task as at most two
+  short outcome sentences instead of rendering a stored turn summary or chat
+  reply nearly verbatim. Existing rows are compacted at the timeline read
+  boundary, so PM Soul, Sitemap, Code Map, memory storage, and memory embeddings
+  remain unchanged. Deleted chats retain their unavailable state, while live
+  entries continue to open the exact conversation position.
+- One's first-run screen now shows the Korean headline as two deliberate clauses
+  without orphaning the final word, and the unsolicited explanatory paragraph
+  below the headline has been removed.
+
+This release binds Agentlas OS v1.1.67 at 04258b7541f604479dc04279146a506e363ad85e.
+This changelog entry describes source readiness and does not prove a published
+Desktop installer or update feed.
+
 ## 0.9.22 — 2026-07-26
 
 ### Fixed
