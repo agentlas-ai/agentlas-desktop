@@ -74,8 +74,10 @@ authority for which version is actually public, stable, and downloadable.
   while the display slept or the machine was locked (a login item, the relaunch after an
   update) produced a running app with no window at all, and waking the screen later could
   not recover it. The window is now revealed on first paint, again when the interface
-  finishes loading, and finally after a bounded wait.
-  This release binds Agentlas OS v1.1.62 at 19b75025e5e252e90d93015a839c55d08fcb8061.
+  finishes loading, and finally after a bounded wait. Agents staffed for a goal
+  also stay on it across later turns instead of being re-discovered every
+  message, until the goal is explicitly completed.
+  This release binds Agentlas OS v1.1.65 at 89a1a770b46e19e77b291d6af78c884f827671ec.
   This source note does not prove a Desktop Git tag, public installer, GitHub release, or
   update feed.
 - **2026-07-26 · v0.9.18 — updates stop being blocked by a false recovery notice** —

@@ -14,7 +14,13 @@
   interface finishes loading, and finally after a bounded wait, so it always
   becomes reachable.
 
-This release binds Agentlas OS v1.1.62 at 19b75025e5e252e90d93015a839c55d08fcb8061.
+- Agents staffed for a goal now stay on it across later turns. Staffing a task
+  force ran per turn, so the next message re-ran discovery and could return a
+  different roster — or none — while the same goal was still open. Desktop now
+  binds a durable goal, reuses the bound roster while its lease holds, and only
+  releases it when the goal is explicitly completed.
+
+This release binds Agentlas OS v1.1.65 at 89a1a770b46e19e77b291d6af78c884f827671ec.
 This changelog entry describes source readiness and does not prove a published
 Desktop release, installer, or update feed.
 
