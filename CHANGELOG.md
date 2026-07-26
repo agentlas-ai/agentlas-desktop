@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.9.21 — 2026-07-26
+
+### Fixed
+
+- Public Hub cards no longer claim more than the server said. The public-catalog
+  mapper hardcoded `cloud-callable`, `callable: true`, `routingReady: true` and
+  `Security scan A` for every row, so a package the server had marked
+  unrunnable still rendered as callable with a passing scan. Delivery state,
+  security grade, and invocation counts now come from the response and fail
+  closed when absent; borrow volume is no longer reported as verified
+  invocations, and an absent team member count stays unknown instead of
+  defaulting to 1 and under-quoting credits.
+- Local Workforce teams can be prepared again. Locally registered team bundles
+  shipped without an execution graph, so preparation rejected them with
+  `team_execution_graph_missing` while the surface reported a goal-binding
+  problem instead. Team packages now project their own organization (entrypoint
+  as manager, member directives as workers) and a rejected preparation returns
+  its real issues rather than `preparedButUnbound`.
+- Routing's semantic signal is actually semantic. The card router used a token
+  hashing adapter that scored equivalent Korean and English requests at 0.0;
+  it now uses the verified local sentence model, with hashing kept only as an
+  explicitly degraded fallback.
+
+### Added
+
+- Project timeline snapshot: a project's chats, soul, and sitemap project into
+  a redacted timeline surfaced on the project detail page and in chat.
+
+This release binds Agentlas OS v1.1.66 at e76d8cd729c8c7f4a7d69be02c9e2c82ff5a97c5.
+
+This changelog entry describes source readiness and does not prove a published
+release, a signed installer, or a live automatic update.
+
 ## 0.9.20 — 2026-07-26
 
 ### Fixed
