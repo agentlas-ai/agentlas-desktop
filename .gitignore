@@ -138,12 +138,6 @@ test-results/
 **/test-*.ts
 **/test-*.mjs
 **/test-*.cjs
-!scripts/test-borrowed-agent-careers-v76.cjs
-!scripts/test-telegram-judged-intents.cjs
-!scripts/test-memory-import-owner-judged.cjs
-!scripts/test-mcp-need-resolver.cjs
-!scripts/test-pack-intents.cjs
-!scripts/test-renderer-judged-style-sites.cjs
 **/test_*.sh
 **/*-smoke.ts
 **/*-smoke.mjs
@@ -259,3 +253,16 @@ credentials/
 
 # Local visual QA evidence is never source or release material.
 /.artifacts/
+
+# Tests are local-only (owner decision, 2026-07-26). CI builds, signs, and
+# publishes; it never runs a suite. Run them here before pushing:
+#   npm run test:<name>   /   electron scripts/test-<name>.cjs
+# Release machinery stays tracked: scripts/*.mjs, scripts/release-*.mjs.
+scripts/test-*.cjs
+scripts/verify-*.cjs
+scripts/lib/mock-*.cjs
+scripts/fixtures/
+# Exceptions: these two are packaging machinery, not suites. package-mac.sh and
+# the cross-platform build run them against the built artifact, so CI must have
+# them or packaging fails with file-not-found.
+!scripts/verify-packaged-workforce-runtime.cjs
