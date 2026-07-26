@@ -1,18 +1,25 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { verifyActivatedFolderIdentity } from "../architecture/activation";
 
 const MAX_TASK_CHARS = 12_000;
 const MAX_RESULT_BYTES = 1_500_000;
 const SLICE_TIMEOUT_MS = 4_000;
+const REFRESH_TIMEOUT_MS = 15_000;
 const refreshTriggered = new Set<string>();
 
 type ContextSliceResult = {
   schemaVersion?: string;
   rendered?: string;
   receipt?: { receiptDigest?: string };
+};
+
+type CodeMapResult = {
+  schemaVersion?: string;
+  defIndex?: unknown;
+  refIndex?: unknown;
 };
 
 function hephaestusBin(): string | null {
@@ -33,24 +40,56 @@ function hephaestusBin(): string | null {
   return null;
 }
 
-/** Refresh in the background. The current turn may consume the last valid map. */
+function hasCanonicalCodeMap(projectPath: string): boolean {
+  try {
+    const payload = JSON.parse(
+      fs.readFileSync(
+        path.join(projectPath, ".agentlas", "code-map", "project-map.json"),
+        "utf8",
+      ),
+    ) as CodeMapResult;
+    return (
+      payload.schemaVersion === "agentlas.code-map.v2"
+      && payload.defIndex !== null
+      && typeof payload.defIndex === "object"
+      && payload.refIndex !== null
+      && typeof payload.refIndex === "object"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Refresh through the public Core command and return true only after the
+ * canonical v2 map is present. Process creation is not a refresh receipt.
+ */
 export function triggerProjectContextMapRefresh(projectPath: string): boolean {
   if (!verifyActivatedFolderIdentity(projectPath)) return false;
-  if (refreshTriggered.has(projectPath)) return true;
+  if (refreshTriggered.has(projectPath) && hasCanonicalCodeMap(projectPath)) return true;
   const binary = hephaestusBin();
   if (!binary) return false;
-  refreshTriggered.add(projectPath);
   try {
-    const child = spawn(
+    const result = spawnSync(
       binary,
       ["context", "refresh", "--project", projectPath],
       {
-        detached: true,
-        stdio: "ignore",
+        encoding: "utf8",
+        timeout: REFRESH_TIMEOUT_MS,
+        maxBuffer: MAX_RESULT_BYTES,
+        windowsHide: true,
         env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
       },
     );
-    child.unref();
+    if (result.status !== 0 || !hasCanonicalCodeMap(projectPath)) {
+      refreshTriggered.delete(projectPath);
+      console.warn(
+        `[memory] context-map refresh failed (${projectPath}): `
+        + `${String(result.stderr || result.error?.message || "invalid canonical map").trim().slice(0, 500)}`,
+      );
+      return false;
+    }
+    refreshTriggered.add(projectPath);
     return true;
   } catch {
     refreshTriggered.delete(projectPath);

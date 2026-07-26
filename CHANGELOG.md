@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.22 — 2026-07-26
+
+### Fixed
+
+- Project refresh now succeeds only after the installed Core command exits
+  successfully and a canonical Code Map v2 with definition and reverse-reference
+  indexes exists. Starting a background process is no longer treated as proof.
+- The first writable turn refreshes Code Map and functional Sitemap together
+  before either is summarized. Legacy fallback output is normalized to Code Map
+  v2, while read-only turns continue to avoid creating project-local state.
+- Runtime injection is receipted independently for Context Slice, Code Map, and
+  Sitemap, so product telemetry can distinguish an artifact on disk from
+  context actually supplied to a runner.
+
+This release binds Agentlas OS v1.1.67 at 04258b7541f604479dc04279146a506e363ad85e.
+This changelog entry describes source readiness and does not prove a published
+Desktop installer or update feed.
+
 ## 0.9.21 — 2026-07-26
 
 ### Fixed

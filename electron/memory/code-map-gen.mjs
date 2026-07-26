@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const ROOT = process.argv[2] ? path.resolve(process.argv[2]) : process.cwd();
 // 프로젝트 1개당 1개 — 프로젝트의 .agentlas/code-map/ 에 저장(설계와 일치). 환경변수로 덮어쓰기 가능.
@@ -205,8 +206,13 @@ for (const [r, syms] of Object.entries(fileSymbols)) {
 }
 orphanCandidates.sort((a, b) => a.path.localeCompare(b.path));
 
+const cacheJson = JSON.stringify(nextCache);
+const fingerprintHash = `sha256:${createHash("sha256").update(cacheJson).digest("hex")}`;
+const projectRootHash = `sha256:${createHash("sha256").update(ROOT).digest("hex")}`;
+
 const map = {
-  schemaVersion: "5.0", project: path.basename(ROOT), generatedAt: new Date(Date.now()).toISOString(),
+  schemaVersion: "agentlas.code-map.v2", project: path.basename(ROOT),
+  projectRootHash, fingerprintHash, generatedAt: new Date(Date.now()).toISOString(),
   stats: { totalFiles: allFiles.length, codeFiles: Object.keys(codeData).length, docs: docs.length, symbols: Object.keys(defIndex).length, rankable: rankSet.size, refsEdges: Object.values(refCount).reduce((a, b) => a + b, 0), entryPoints: entryPoints.length, junk: junk.length, orphans: orphanCandidates.length, reread, reused, genMs: Date.now() - t0 },
   modules, entryPoints, moduleEdges, byExt: Object.fromEntries(Object.entries(byExt).sort((a, b) => b[1] - a[1]).slice(0, 20)),
   hygiene: { junk, orphanCandidates: orphanCandidates.slice(0, 100) },
@@ -220,14 +226,14 @@ fs.writeFileSync(path.join(OUT_DIR, "project-map.json"), JSON.stringify(map, nul
 // 턴에 주입되는 건 사실 아래 몇 필드뿐이므로(모듈/진입점/최다참조), 큰 인덱스는
 // find 도구 몫으로 남기고 주입은 이 작은 파일만 읽는다.
 const seed = {
-  schemaVersion: map.schemaVersion, project: map.project, generatedAt: map.generatedAt,
+  schemaVersion: map.schemaVersion, project: map.project, projectRootHash, fingerprintHash, generatedAt: map.generatedAt,
   stats: map.stats, modules, entryPoints, moduleEdges, byExt: map.byExt, topSymbols, dirs,
 };
 fs.writeFileSync(path.join(OUT_DIR, "project-seed.json"), JSON.stringify(seed, null, 2));
-fs.writeFileSync(CACHE, JSON.stringify(nextCache));
+fs.writeFileSync(CACHE, cacheJson);
 
 const md = [
-  `# ${map.project} — 프로젝트 지도 (자동 생성 v5)`, ``,
+  `# ${map.project} — 프로젝트 지도 (agentlas.code-map.v2)`, ``,
   `생성 ${map.generatedAt} · ${map.stats.genMs}ms · 파일 ${map.stats.totalFiles} · 코드 ${map.stats.codeFiles} · 문서 ${map.stats.docs} · 심볼 ${map.stats.symbols} · 참조 ${map.stats.refsEdges}`,
   `증분: 다시읽음 ${reread} / 재사용 ${reused}`, ``,
   `## 모듈`, ...modules.map((m) => `- **${m.id}** — ${m.role}`), ``,

@@ -69,6 +69,14 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-26 · v0.9.22 — project maps are verified before use** —
+  a map refresh now counts only when Core exits successfully and a canonical
+  Code Map v2 with definition and backlink indexes is present. The first
+  writable turn refreshes Code Map and functional Sitemap before either is
+  summarized, and runtime receipts separately record Context Slice, Code Map,
+  and Sitemap injection.
+  This release binds Agentlas OS v1.1.67 at 04258b7541f604479dc04279146a506e363ad85e.
+  This source note does not prove a Desktop installer or update feed.
 - **2026-07-26 · v0.9.21 — the Hub card stops claiming more than the server said** —
   the public-catalog mapper hardcoded callable/cloud-callable/Security-scan-A for
   every row, so a package the server had marked unrunnable still rendered as
@@ -79,6 +87,13 @@ authority for which version is actually public, stable, and downloadable.
   cause), and the card router's semantic signal now uses the verified local
   sentence model instead of a token hashing adapter that scored equivalent
   Korean and English requests at 0.0.
+- **2026-07-26 · v0.9.20 — every worker sees the part of the project it must fit** —
+  normal chat, Stormbreaker workers, and final synthesis now receive the same
+  local Context Slice after the task is concrete: inherited goals and
+  constraints, definitions, backlinks, interfaces, and structurally related
+  files. A source fingerprint refreshes stale maps automatically, and the AI
+  sitemap contributes typed project relationships instead of only a file count.
+  Hub and Cloud discovery never receive local map or source paths.
   This release binds Agentlas OS v1.1.66 at e76d8cd729c8c7f4a7d69be02c9e2c82ff5a97c5.
   This source note does not prove a Desktop Git tag, public installer, GitHub release, or
   update feed.

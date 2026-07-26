@@ -42,6 +42,7 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      source_ref: ${{ github.sha }}
       harness_ref: ${{ github.sha }}
 
   mac-release-preflight:
@@ -54,13 +55,13 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.66
-      HEPHAESTUS_COMMIT: e76d8cd729c8c7f4a7d69be02c9e2c82ff5a97c5
+      HEPHAESTUS_REF: v1.1.67
+      HEPHAESTUS_COMMIT: 04258b7541f604479dc04279146a506e363ad85e
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -128,13 +129,9 @@ jobs:
             echo "::error::A stable release must atomically update and verify the production web feed."
             exit 1
           fi
-          tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}")" || {
-            echo "::error::Release tag $tag does not exist in refs/tags."
-            exit 1
-          }
           head_commit="$(git rev-parse HEAD)"
-          if [ "$head_commit" != "$tagged_commit" ]; then
-            echo "::error::Checked-out HEAD $head_commit does not match $tag ($tagged_commit)."
+          if [ "$head_commit" != "$GITHUB_SHA" ]; then
+            echo "::error::Checked-out HEAD $head_commit does not match immutable workflow source $GITHUB_SHA."
             exit 1
           fi
           pkgver=$(node -p "require('./package.json').version")
@@ -259,13 +256,13 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.66
-      HEPHAESTUS_COMMIT: e76d8cd729c8c7f4a7d69be02c9e2c82ff5a97c5
+      HEPHAESTUS_REF: v1.1.67
+      HEPHAESTUS_COMMIT: 04258b7541f604479dc04279146a506e363ad85e
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -315,15 +312,14 @@ jobs:
           fi
           if [ "$draft" != "true" ] && [ "$draft" != "false" ]; then exit 1; fi
           if [ "$apply_web_env" != "true" ] && [ "$apply_web_env" != "false" ]; then exit 1; fi
-          tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}")"
           head_commit="$(git rev-parse HEAD)"
           pkgver="$(node -p "require('./package.json').version")"
           lockver="$(node -p "require('./package-lock.json').version")"
           lockrootver="$(node -p "require('./package-lock.json').packages[''].version")"
           runtimever="$(node -p "require('./package.json').agentlasUpdateCompatibility.bundledRuntimeVersion")"
           runtimecommit="$(node -p "require('./package.json').agentlasBundledRuntimeSource.commit")"
-          if [ "$head_commit" != "$tagged_commit" ] || [ "$pkgver" != "$version" ] || [ "$lockver" != "$version" ] || [ "$lockrootver" != "$version" ]; then
-            echo "::error::Release source/tag/package identity mismatch."
+          if [ "$head_commit" != "$GITHUB_SHA" ] || [ "$pkgver" != "$version" ] || [ "$lockver" != "$version" ] || [ "$lockrootver" != "$version" ]; then
+            echo "::error::Release source commit/package identity mismatch."
             exit 1
           fi
           if [ "${HEPHAESTUS_REF#v}" != "$runtimever" ] || [ "$HEPHAESTUS_COMMIT" != "$runtimecommit" ]; then
@@ -418,13 +414,13 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.66
-      HEPHAESTUS_COMMIT: e76d8cd729c8c7f4a7d69be02c9e2c82ff5a97c5
+      HEPHAESTUS_REF: v1.1.67
+      HEPHAESTUS_COMMIT: 04258b7541f604479dc04279146a506e363ad85e
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -473,10 +469,9 @@ jobs:
             echo "::error::A stable release must atomically update and verify the production web feed."
             exit 1
           fi
-          tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}")"
           head_commit="$(git rev-parse HEAD)"
           pkgver="$(node -p "require('./package.json').version")"
-          if [ "$head_commit" != "$tagged_commit" ] || [ "$pkgver" != "$version" ]; then exit 1; fi
+          if [ "$head_commit" != "$GITHUB_SHA" ] || [ "$pkgver" != "$version" ]; then exit 1; fi
           {
             echo "RESOLVED_TAG=$tag"
             echo "RESOLVED_VERSION=$version"

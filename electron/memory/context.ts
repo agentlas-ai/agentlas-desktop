@@ -110,6 +110,7 @@ const CODE_MAP_SEED_FILE = "code-map/project-seed.json";
 const CODE_MAP_FULL_FILE = "code-map/project-map.json";
 
 type CodeMapSeed = {
+  schemaVersion?: string;
   project?: string;
   stats?: { codeFiles?: number; symbols?: number };
   modules?: { id?: string; path?: string; role?: string; codeFiles?: number }[];
@@ -151,7 +152,7 @@ function ensureCodeMap(projectPath: string): void {
       codeMapTriggered.add(projectPath);
       return;
     }
-    if (readCodeMapSeed(projectPath)) return;
+    if (readCodeMapSeed(projectPath)?.schemaVersion === "agentlas.code-map.v2") return;
     const gen = codeMapGenPath();
     if (!gen) return;
     codeMapTriggered.add(projectPath);
@@ -647,9 +648,13 @@ export function buildMemoryContext(
     } else {
       warnProjectMemoryGap(projectPath, "project-soul", "missing or empty");
     }
-    // Read-only turns must not materialize project-local state; the same gate
-    // that guards code-map generation guards the sitemap refresh.
-    if (options.materializeCodeMap !== false) ensureSitemap(projectPath);
+    // Core refreshes the canonical Code Map and projects its functional
+    // surfaces/dependencies into the Sitemap. Do this before reading either
+    // layer so the first writable turn consumes one coherent snapshot.
+    if (options.materializeCodeMap !== false) {
+      ensureCodeMap(projectPath);
+      ensureSitemap(projectPath);
+    }
     const sitemap = summarizeSitemap(projectPath);
     if (sitemap) {
       sections.push(sitemap);
@@ -661,7 +666,6 @@ export function buildMemoryContext(
     if (careerGraph) sections.push(careerGraph);
     // Read-only Desktop turns may consume an existing map but must not spawn a
     // generator or create project-local state merely by asking a question.
-    if (options.materializeCodeMap !== false) ensureCodeMap(projectPath);
     const codeMap = summarizeCodeMap(projectPath);
     if (codeMap) {
       sections.push(codeMap);
