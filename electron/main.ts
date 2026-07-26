@@ -232,6 +232,11 @@ function applyDockIcon(): void {
   }
 }
 
+// A hidden window must never outlive its reveal path. If the display is asleep
+// the first-paint event never arrives, so this bounds the wait before showing
+// the window anyway.
+const MAIN_WINDOW_REVEAL_FALLBACK_MS = 8_000;
+
 let mainWindow: BrowserWindow | null = null;
 let shellReadyForWindows = false;
 let oneBriefingLaunchTimer: NodeJS.Timeout | null = null;
@@ -382,7 +387,22 @@ async function createWindow(): Promise<void> {
     },
   });
 
-  mainWindow.once("ready-to-show", () => mainWindow?.show());
+  // The window is created hidden and revealed on first paint. When Agentlas
+  // starts while the display is asleep — a login item, an update relaunch, a
+  // machine that locked mid-install — no frame is ever painted, "ready-to-show"
+  // never fires, and the app stays running with no window at all. Waking the
+  // screen afterwards does not recover it because the one-shot event is gone.
+  // So: reveal on first paint, on a finished load, and finally on a timeout.
+  // show() is idempotent, and an early reveal is strictly better than a
+  // headless app the user cannot reach.
+  const revealMainWindow = (): void => {
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return;
+    mainWindow.show();
+  };
+  mainWindow.once("ready-to-show", revealMainWindow);
+  mainWindow.webContents.once("did-finish-load", revealMainWindow);
+  const revealFallback = setTimeout(revealMainWindow, MAIN_WINDOW_REVEAL_FALLBACK_MS);
+  mainWindow.once("closed", () => clearTimeout(revealFallback));
 
   // 우클릭 컨텍스트 메뉴 — 잘라내기/복사/붙여넣기/전체선택. Electron은 기본 제공하지 않아
   // 입력창에서 우클릭 복붙이 안 되던 문제를 해결한다(키보드 단축키는 앱 메뉴 role로 이미 동작).

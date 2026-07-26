@@ -69,6 +69,15 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-26 · v0.9.19 — the window always appears, even if the screen was asleep** —
+  the main window is created hidden and shown on its first painted frame, so launching
+  while the display slept or the machine was locked (a login item, the relaunch after an
+  update) produced a running app with no window at all, and waking the screen later could
+  not recover it. The window is now revealed on first paint, again when the interface
+  finishes loading, and finally after a bounded wait.
+  This release binds Agentlas OS v1.1.62 at 19b75025e5e252e90d93015a839c55d08fcb8061.
+  This source note does not prove a Desktop Git tag, public installer, GitHub release, or
+  update feed.
 - **2026-07-26 · v0.9.18 — updates stop being blocked by a false recovery notice** —
   after an install Agentlas compared every protected database row against a snapshot taken
   before that install, so normal use failed the check and the app kept showing "some local

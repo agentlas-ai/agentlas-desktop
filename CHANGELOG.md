@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.19 — 2026-07-26
+
+### Fixed
+
+- Agentlas no longer starts with no window when the display is asleep. The main
+  window is created hidden and revealed on its first painted frame, but a
+  machine that is asleep or locked at launch — a login item, the relaunch after
+  an update, a lid closed mid-install — never paints that frame, so the reveal
+  event never arrived and the app kept running with no window to click. Waking
+  the screen afterwards did not help, because the one-shot event was already
+  gone. The window is now revealed on first paint as before, again when the
+  interface finishes loading, and finally after a bounded wait, so it always
+  becomes reachable.
+
+This release binds Agentlas OS v1.1.62 at 19b75025e5e252e90d93015a839c55d08fcb8061.
+This changelog entry describes source readiness and does not prove a published
+Desktop release, installer, or update feed.
+
 ## 0.9.18 — 2026-07-26
 
 ### Fixed
