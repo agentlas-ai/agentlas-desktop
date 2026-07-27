@@ -261,6 +261,7 @@
     "test:oberon-cinematic": "npm run build:electron && node scripts/test-oberon-cinematic.cjs",
     "typecheck": "tsc -p electron/tsconfig.json --noEmit && cd renderer && tsc --noEmit",
     "parity:doctor": "bash -c '[ -f ../scripts/sync-runtime-doctor.sh ] && exec bash ../scripts/sync-runtime-doctor.sh; echo \"parity:doctor skipped (sibling scripts/ not present — CI checkout)\"'",
+    "parity:bundle-contract": "bash -c '[ -f ../scripts/sync-runtime-bundle-contract.sh ] && exec bash ../scripts/sync-runtime-bundle-contract.sh; echo \"parity:bundle-contract skipped (sibling scripts/ not present — CI checkout)\"'",
     "lint": "next lint --dir renderer",
     "clean": "node -e \"['dist','out','release','renderer/.next','renderer/out'].forEach(d=>require('fs').rmSync(d,{recursive:true,force:true}))\"",
     "test:one-accepted-result-value-closure": "node scripts/verify-one-accepted-result-value-closure.cjs",
