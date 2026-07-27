@@ -2,6 +2,10 @@
 
 ## 0.9.25 — 2026-07-27
 
+This release binds Agentlas OS v1.1.72 at aaadb2267e25b0fecb77d9d8c7f358c2b7aaeecf.
+This changelog entry describes source readiness and does not prove a published
+release.
+
 ### Changed
 
 - One's English first-run headline now reads "Build a version of you that
