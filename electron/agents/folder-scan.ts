@@ -57,7 +57,7 @@ const AGENT_DEF_FILES = [
   "persona.md",
   "manifest.md",
 ];
-const TEAM_CONTAINER_DIRS = [
+export const TEAM_CONTAINER_DIRS = [
   "agents",
   "team",
   "teams",

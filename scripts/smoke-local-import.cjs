@@ -71,6 +71,84 @@ function writeFile(filePath, body) {
     const distinct = await importLocalFolder(distinctRoot);
     assert.notEqual(distinct.agent.id, origin.agent.id, "a different definition must not collapse into an existing agent");
 
+    // Two unrelated teams that share a boilerplate README must stay two teams.
+    // The identity fingerprint used to walk only 8 of the 12 roster containers and
+    // never entered `.claude`, so both of these hashed their README and nothing
+    // else, collided, and the second import overwrote the first — one team
+    // vanished from the library while its chats stayed attached to the other.
+    const writerTeamRoot = path.join(tempDir, "writer-team");
+    writeFile(path.join(writerTeamRoot, "README.md"), "# Team\n");
+    writeFile(path.join(writerTeamRoot, ".claude", "agents", "writer.md"), "You are a writer.\n");
+    const lawyerTeamRoot = path.join(tempDir, "lawyer-team");
+    writeFile(path.join(lawyerTeamRoot, "README.md"), "# Team\n");
+    writeFile(path.join(lawyerTeamRoot, ".claude", "agents", "lawyer.md"), "You are a lawyer.\n");
+    const writerTeam = await importLocalFolder(writerTeamRoot);
+    const lawyerTeam = await importLocalFolder(lawyerTeamRoot);
+    assert.notEqual(
+      lawyerTeam.agent.id,
+      writerTeam.agent.id,
+      "teams sharing only a boilerplate README must not collapse into one agent",
+    );
+
+    // A roster container the scanner accepts must not make the import throw.
+    // `crew/` (and members/roles/squad/staff/subagents/sub-agents) reached the
+    // fingerprint's traversal set as "not a definition directory", so a team the
+    // Agentlas-OS gate certifies with PASS(team) never entered the library.
+    const crewTeamRoot = path.join(tempDir, "crew-team");
+    writeFile(path.join(crewTeamRoot, "crew", "00-orchestrator", "agent.md"), "Orchestrate the crew.\n");
+    writeFile(path.join(crewTeamRoot, "crew", "researcher", "agent.md"), "Research things.\n");
+    const crewTeam = await importLocalFolder(crewTeamRoot);
+    assert.ok(crewTeam.agent.id, "a crew/ roster team must import");
+
+    // The declared manager wins over the guessed one. verify-team-package.sh and
+    // the Hub runtime both read these two declarations; reading neither here is
+    // how a certified team ran on its README instead of its orchestrator.
+    const declaredTeamRoot = path.join(tempDir, "declared-team");
+    writeFile(path.join(declaredTeamRoot, "README.md"), "# Ignore me, I am documentation.\n");
+    writeFile(path.join(declaredTeamRoot, "AGENTS.md"), "Run /example-team. See agents/ for roles.\n");
+    writeFile(
+      path.join(declaredTeamRoot, "agents", "00-orchestrator", "agent.md"),
+      "DECLARED-ORCHESTRATOR-BODY: adjudicate between the workers.\n",
+    );
+    writeFile(path.join(declaredTeamRoot, "agents", "10-researcher", "agent.md"), "Research.\n");
+    writeFile(path.join(declaredTeamRoot, "manifest.json"), JSON.stringify({
+      entrypoints: { orchestrator: "agents/00-orchestrator/agent.md" },
+      roster: ["agents/10-researcher/agent.md"],
+    }, null, 2));
+    const declaredTeam = await importLocalFolder(declaredTeamRoot);
+    const declaredPrompt = getDb()
+      .prepare("SELECT system_prompt FROM installed_agents WHERE id = ?")
+      .get(declaredTeam.agent.id).system_prompt;
+    assert.ok(
+      declaredPrompt.includes("DECLARED-ORCHESTRATOR-BODY"),
+      "the manager declared in manifest.json must become the team brain",
+    );
+
+    // Same, declared in the blueprint the team builder is told to emit.
+    const blueprintTeamRoot = path.join(tempDir, "blueprint-team");
+    writeFile(path.join(blueprintTeamRoot, "AGENTS.md"), "Adapter doc, not a brain.\n");
+    writeFile(
+      path.join(blueprintTeamRoot, "agents", "00-orchestrator", "agent.md"),
+      "BLUEPRINT-ORCHESTRATOR-BODY: run the room.\n",
+    );
+    writeFile(path.join(blueprintTeamRoot, "agents", "20-analyst", "agent.md"), "Analyze.\n");
+    writeFile(path.join(blueprintTeamRoot, ".agentlas", "company-blueprint.json"), JSON.stringify({
+      topology: "hub-and-spoke",
+      orchestrator: "00-orchestrator",
+      nodes: [
+        { id: "00-orchestrator", path: "agents/00-orchestrator/agent.md" },
+        { id: "20-analyst", path: "agents/20-analyst/agent.md" },
+      ],
+    }, null, 2));
+    const blueprintTeam = await importLocalFolder(blueprintTeamRoot);
+    const blueprintPrompt = getDb()
+      .prepare("SELECT system_prompt FROM installed_agents WHERE id = ?")
+      .get(blueprintTeam.agent.id).system_prompt;
+    assert.ok(
+      blueprintPrompt.includes("BLUEPRINT-ORCHESTRATOR-BODY"),
+      "the manager declared in company-blueprint.json must become the team brain",
+    );
+
     const localizedRoot = path.join(tempDir, "localized-agent");
     writeFile(path.join(localizedRoot, "AGENTS.md"), "# 증거 분석가\n\n증거를 분석합니다.\n");
     writeFile(path.join(localizedRoot, "agentlas.json"), JSON.stringify({

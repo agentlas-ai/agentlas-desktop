@@ -2,21 +2,43 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-export const LOCAL_AGENT_DEFINITION_HASH_VERSION = "agentlas-local-definition-v1" as const;
+import { TEAM_CONTAINER_DIRS } from "./folder-scan";
+
+// v2: the fingerprint now covers the member bodies. Under v1 it walked only 8 of
+// the 12 roster containers the scanner accepts and never entered `.claude` or
+// `.agents`, so a team whose members live in `.claude/agents/*.md` hashed its
+// README and nothing else — two unrelated teams sharing a boilerplate README
+// produced the SAME fingerprint and the second import overwrote the first. The
+// version string is hashed in, so a stored v1 value can never false-match a v2
+// one; re-import is unaffected because identity resolves by real path first and
+// only falls back to the fingerprint (import-local.ts).
+export const LOCAL_AGENT_DEFINITION_HASH_VERSION = "agentlas-local-definition-v2" as const;
 
 const MAX_FILES = 2_000;
 const MAX_BYTES = 50 * 1024 * 1024;
 const ROOT_DEFINITION_FILE_RE = /^(?:agent|agents|team|system-prompt|soul|persona|manifest|playbook|workflow|prompt|claude|gemini|readme)(?:\.[^.]+)?$/i;
-const DEFINITION_DIRS = new Set([
-  "agents",
+/**
+ * Root files that describe a package but do not identify it.
+ *
+ * They stay in the hash — a README edit IS a change to the definition — but a
+ * folder where they are the ONLY thing hashed has no content-derived identity,
+ * and treating one as an identity is what let two teams collide.
+ */
+const DOCUMENTATION_ONLY_ROOT_RE = /^(?:readme|manifest)(?:\.[^.]+)?$/i;
+/**
+ * Every container the scanner treats as holding roster members, plus the
+ * containers only the fingerprint cares about. Imported from folder-scan so the
+ * two readers of one folder layout cannot drift again — they already had, by 7
+ * containers, and a team the Agentlas-OS gate certifies was uncallable here.
+ */
+const DEFINITION_DIRS = new Set<string>([
+  ...TEAM_CONTAINER_DIRS,
   "skills",
   "playbooks",
   "workflows",
-  "team",
-  "teams",
-  "departments",
-  "hr-departments",
 ]);
+/** Dot-directories that hold real definitions rather than local state. */
+const DEFINITION_DOT_DIRS = new Set([".claude", ".agents"]);
 const EXCLUDED_DIRS = new Set([".git", "node_modules", "dist", ".next", "output", "ledgers", "memory"]);
 
 function normalizedRelative(root: string, absolute: string): string {
@@ -27,13 +49,21 @@ function isDefinitionPath(relative: string): boolean {
   const parts = relative.split("/");
   if (parts.length === 1) return ROOT_DEFINITION_FILE_RE.test(parts[0]);
   if (DEFINITION_DIRS.has(parts[0])) return true;
+  if (DEFINITION_DOT_DIRS.has(parts[0])) return true;
   return parts[0] === ".agentlas" && parts[1] === "skills";
+}
+
+/** A hashed file that describes the package without identifying it. */
+function isDocumentationOnlyPath(relative: string): boolean {
+  const parts = relative.split("/");
+  return parts.length === 1 && DOCUMENTATION_ONLY_ROOT_RE.test(parts[0]);
 }
 
 function shouldEnterDirectory(relative: string): boolean {
   const parts = relative.split("/");
   if (EXCLUDED_DIRS.has(parts.at(-1) ?? "")) return false;
   if (parts[0] === ".agentlas") return parts.length === 1 || parts[1] === "skills";
+  if (DEFINITION_DOT_DIRS.has(parts[0])) return true;
   return DEFINITION_DIRS.has(parts[0]);
 }
 
@@ -75,6 +105,13 @@ export function computeLocalAgentDefinitionHash(rootPath: string): string {
 
   walk(root);
   if (files.length === 0) throw new Error("No local AgentDefinition files were found.");
+  // A README is not an identity. Refusing here rather than returning a weak
+  // fingerprint is what stops the collision: the caller treats a thrown hash as
+  // "no content identity" and falls back to the real path, so two teams that
+  // share a boilerplate README stay two teams.
+  if (files.every((file) => isDocumentationOnlyPath(file.relative))) {
+    throw new Error("No local AgentDefinition files were found beyond documentation.");
+  }
   files.sort((left, right) => left.relative < right.relative ? -1 : left.relative > right.relative ? 1 : 0);
 
   const definition = createHash("sha256");

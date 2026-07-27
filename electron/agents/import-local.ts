@@ -265,25 +265,98 @@ function hasTeamMarkers(dir: string): boolean {
 }
 
 /**
+ * 패키지가 스스로 선언한 매니저 경로. 추측이 아니라 낭독이다.
+ *
+ * 읽는 순서와 키는 Agentlas-OS `scripts/verify-team-package.sh`의
+ * runtime_execution_graph_declared() 및 허브 런타임 compileTeamExecutionGraph()와
+ * 동일하게 유지한다 — 셋 중 하나만 다른 걸 읽으면 "여기선 유효, 저기선 호출 불가"가
+ * 다시 생긴다. 선언이 없으면 빈 배열을 돌려주고 호출부가 기존 관습 목록으로 내려간다.
+ */
+function declaredTeamManagerPaths(dir: string): string[] {
+  const candidates: string[] = [];
+  const readJson = (relative: string): Record<string, unknown> | null => {
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(path.join(dir, relative), "utf8"));
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  const push = (value: unknown): void => {
+    if (typeof value !== "string") return;
+    const trimmed = value.trim();
+    // 패키지 밖을 가리키는 선언은 신뢰하지 않는다.
+    if (!trimmed || path.isAbsolute(trimmed) || trimmed.split("/").includes("..")) return;
+    if (!candidates.includes(trimmed)) candidates.push(trimmed);
+  };
+
+  const teamManifest = readJson("manifest.json");
+  const packageManifest = readJson("agentlas.json");
+  for (const [manifest, allowEntry] of [[teamManifest, true], [packageManifest, false]] as const) {
+    if (!manifest) continue;
+    const entrypoints = manifest.entrypoints;
+    if (entrypoints && typeof entrypoints === "object" && !Array.isArray(entrypoints)) {
+      push((entrypoints as Record<string, unknown>).orchestrator);
+    }
+    push(manifest.entrypoint);
+    push(manifest.orchestrator);
+    // `entry`는 agentlas.json에선 패키지 진입점(대개 CLAUDE.md)이고 팀 manifest.json에서만
+    // 매니저를 뜻한다. 구분하지 않으면 README가 오케스트레이터가 된다.
+    if (allowEntry) push(manifest.entry);
+  }
+
+  const blueprint = readJson(path.join(".agentlas", "company-blueprint.json"));
+  if (blueprint) {
+    const declared = ["orchestrator", "router", "manager", "entrypoint"]
+      .map((key) => blueprint[key])
+      .find((value) => typeof value === "string" && value.trim().length > 0);
+    if (typeof declared === "string") {
+      const nodes = Array.isArray(blueprint.nodes) ? blueprint.nodes : [];
+      let resolved = false;
+      for (const node of nodes) {
+        if (!node || typeof node !== "object" || Array.isArray(node)) continue;
+        const row = node as Record<string, unknown>;
+        if (row.id !== declared) continue;
+        for (const key of ["path", "file", "promptFileRef"]) push(row[key]);
+        resolved = true;
+      }
+      // 노드 id가 아니라 경로를 바로 적은 blueprint.
+      if (!resolved && declared.includes("/")) push(declared);
+    }
+  }
+  return candidates;
+}
+
+/**
  * 팀이면 CEO 두뇌(.claude/ceo/AGENT.md 등)를 시스템 프롬프트로 삼고, 임의의 작업 폴더(cwd)에서
  * 실행돼도 동작하도록 팀 루트 절대경로 오리엔테이션 헤더를 붙인다.
  * (CEO 브레인은 ./playbook.md, ../orgspec.yaml 같은 상대경로를 쓰므로 그냥 쓰면 다른 cwd에서 깨진다.)
  */
 function buildTeamSystemPrompt(dir: string, name: string): string {
-  const ceoBrain = readFirst(
-    dir,
-    [
-      path.join(".claude", "ceo", "AGENT.md"),
-      path.join("ceo", "AGENT.md"),
-      path.join("ceo", "CLAUDE.md"),
-      path.join("ceo", "system-prompt.md"),
-      "ceo.md",
-      "orchestrator.md",
-      "lead.md",
-      "TEAM.md",
-    ],
-    12000,
-  );
+  const ceoBrain =
+    // 선언이 있으면 추측보다 먼저다. 패키지 빌더는 manifest.json의
+    // `entrypoints.orchestrator` 또는 `.agentlas/company-blueprint.json`에 매니저를
+    // 그대로 적어 내보내고, Agentlas-OS의 verify-team-package.sh와 허브 런타임은
+    // 정확히 그 두 선언을 읽는다. 여기만 그 선언을 안 봐서, 게이트가 PASS(team)을
+    // 찍은 패키지가 데스크탑에서는 오케스트레이터 본문 대신 README나 어댑터 문서를
+    // 두뇌로 삼아 실행됐다 — 허브에서 팀 26개가 호출 불가였던 것과 같은 계열이다.
+    readFirst(dir, declaredTeamManagerPaths(dir), 12000) ||
+    readFirst(
+      dir,
+      [
+        path.join(".claude", "ceo", "AGENT.md"),
+        path.join("ceo", "AGENT.md"),
+        path.join("ceo", "CLAUDE.md"),
+        path.join("ceo", "system-prompt.md"),
+        "ceo.md",
+        "orchestrator.md",
+        "lead.md",
+        "TEAM.md",
+      ],
+      12000,
+    );
   const brain =
     ceoBrain ||
     readFirst(
@@ -608,7 +681,18 @@ async function importLocalFolderOnce(
   // 달라 중복 등록됐다. definitionHash는 내용에서 유도되고 로컬 경로·메모리·산출물을
   // 의도적으로 제외하므로, "같은 에이전트인가"의 권위는 경로가 아니라 이 지문이다.
   // 지문은 멱등성 판별의 권위이므로 라우트 조회보다 먼저 계산한다.
-  const definitionHash = computeLocalAgentDefinitionHash(dir);
+  // 지문은 신원의 "권위"이지 전제조건이 아니다. 이 호출이 던지면 스캐너가 이미
+  // 관용 등급으로 받아들인 폴더(최상위 마크다운만 있는 경우, crew/·squad/ 등의
+  // 로스터 컨테이너, README만 있어 내용 신원이 없는 경우)의 임포트가 통째로
+  // 죽었다 — 아래 최후 폴백 분기와 folder-scan의 관용 등급이 전부 죽은 코드였다.
+  // 지문이 없으면 신원 권위는 실제 경로로 내려간다(sameFolder). AgentRoute의
+  // definitionHash는 이미 optional이고 조회부도 Boolean()으로 막고 있다.
+  let definitionHash: string | undefined;
+  try {
+    definitionHash = computeLocalAgentDefinitionHash(dir);
+  } catch {
+    definitionHash = undefined;
+  }
   const routes = listRoutes();
   const sameFolder = routes.find((r) => {
     try {
@@ -619,7 +703,7 @@ async function importLocalFolderOnce(
   });
   // 지문 매칭은 폴더가 사라졌거나 옮겨진 라우트까지 회수한다. 폴더 일치가 있으면
   // 그쪽이 우선 — 사용자가 방금 가리킨 그 폴더가 가장 구체적인 의도다.
-  const sameDefinition = sameFolder
+  const sameDefinition = sameFolder || !definitionHash
     ? undefined
     : routes.find((r) => Boolean(r.definitionHash) && r.definitionHash === definitionHash);
   const existing = sameFolder ?? sameDefinition;
