@@ -8,7 +8,14 @@ import { getAgentGroup } from "./agent-groups";
 import { getFirm } from "./firms";
 import { evictRuntimeSessionsForChat } from "./runtime-sessions";
 import { touchProject } from "./projects";
-import type { Chat, ChatHistoryEntry, HiredAgentCard } from "../../shared/types";
+import type {
+  Chat,
+  ChatHistoryEntry,
+  HiredAgentCard,
+  RuntimeBackend,
+  RuntimeKind,
+  RuntimeSelection,
+} from "../../shared/types";
 import { currentUiLocale } from "../ui-locale";
 import {
   ensureCanonicalTaskForChat,
@@ -31,6 +38,104 @@ interface ChatRow {
   swarm_mode: number | null;
   hired_agents: string | null;
   origin_surface: string | null;
+  runtime_selection_json: string | null;
+}
+
+const CHAT_RUNTIME_KINDS = new Set<RuntimeKind>([
+  "claude-code",
+  "codex",
+  "gemini",
+  "kimi",
+  "grok",
+  "cursor",
+  "byok",
+  "ollama",
+  "lmstudio",
+  "mlx",
+]);
+
+const CHAT_RUNTIME_BACKENDS = new Set<RuntimeBackend>([
+  "anthropic",
+  "openai",
+  "google",
+  "ollama",
+  "lmstudio",
+  "mlx",
+  "upstage",
+  "custom",
+  "glm",
+  "kimi",
+  "deepseek",
+  "minimax",
+  "xai",
+  "openrouter",
+  "cursor",
+]);
+
+function boundedOptionalText(
+  value: unknown,
+  field: string,
+  maxLength: number,
+): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string" || value.length > maxLength) {
+    throw new TypeError(`Invalid chat runtime ${field}`);
+  }
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function normalizeChatRuntimeSelection(value: unknown): RuntimeSelection | null {
+  if (value === null || value === undefined) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Invalid chat runtime selection");
+  }
+  const input = value as Record<string, unknown>;
+  if (typeof input.kind !== "string" || !CHAT_RUNTIME_KINDS.has(input.kind as RuntimeKind)) {
+    throw new TypeError("Invalid chat runtime kind");
+  }
+  if (
+    input.backend !== undefined &&
+    input.backend !== null &&
+    (typeof input.backend !== "string" ||
+      !CHAT_RUNTIME_BACKENDS.has(input.backend as RuntimeBackend))
+  ) {
+    throw new TypeError("Invalid chat runtime backend");
+  }
+  if (
+    input.role !== undefined &&
+    input.role !== "orchestrator"
+  ) {
+    throw new TypeError("A chat runtime pin must use the orchestrator role");
+  }
+  if (input.inherit !== undefined && input.inherit !== false) {
+    throw new TypeError("A chat runtime pin cannot inherit");
+  }
+  if (
+    input.longContext !== undefined &&
+    typeof input.longContext !== "boolean"
+  ) {
+    throw new TypeError("Invalid chat runtime longContext");
+  }
+  return {
+    kind: input.kind as RuntimeKind,
+    backend: input.backend as RuntimeBackend | undefined,
+    source: boundedOptionalText(input.source, "source", 2_048),
+    model: boundedOptionalText(input.model, "model", 512),
+    effort: boundedOptionalText(input.effort, "effort", 80),
+    longContext: input.longContext === true,
+    role: "orchestrator",
+    inherit: false,
+  };
+}
+
+function parseChatRuntimeSelection(raw: string | null): RuntimeSelection | null {
+  if (!raw) return null;
+  try {
+    return normalizeChatRuntimeSelection(JSON.parse(raw));
+  } catch {
+    return null;
+  }
 }
 
 function parseHiredAgents(raw: string | null): HiredAgentCard[] {
@@ -74,6 +179,7 @@ function toChat(row: ChatRow): Chat {
     swarmMode: row.swarm_mode === 1,
     hiredAgents: parseHiredAgents(row.hired_agents),
     originSurface: row.origin_surface === "one" ? "one" : "work",
+    runtimeSelection: parseChatRuntimeSelection(row.runtime_selection_json),
   };
 }
 
@@ -463,6 +569,27 @@ export function setChatSwarmMode(chatId: string, enabled: boolean): void {
     .prepare("UPDATE chats SET swarm_mode = ?, updated_at = ? WHERE id = ?")
     .run(enabled ? 1 : 0, new Date().toISOString(), chatId);
   emitDesktopStoreChange({ entity: "chat", id: chatId });
+}
+
+/** Exact chat-scoped orchestrator pin. It never mutates the role defaults. */
+export function setChatRuntimeSelection(
+  chatId: string,
+  selection: RuntimeSelection | null,
+): Chat {
+  const normalized = normalizeChatRuntimeSelection(selection);
+  getDb()
+    .prepare(
+      "UPDATE chats SET runtime_selection_json = ?, updated_at = ? WHERE id = ?",
+    )
+    .run(
+      normalized ? JSON.stringify(normalized) : null,
+      new Date().toISOString(),
+      chatId,
+  );
+  emitDesktopStoreChange({ entity: "chat", id: chatId });
+  const chat = getChat(chatId);
+  if (!chat) throw new Error(`Chat not found: ${chatId}`);
+  return chat;
 }
 
 /** 고용(빌림) 카드 저장 — 빈 배열이면 해고(컬럼 비움). 메타데이터 카드만 저장한다. */

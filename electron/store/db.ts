@@ -15,7 +15,7 @@ import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 78;
+const SCHEMA_VERSION = 79;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -3515,6 +3515,94 @@ export function initStore(options: StoreInitOptions = {}): void {
     if (!columns.has("name_ko")) _db.exec("ALTER TABLE borrowed_agent_careers ADD COLUMN name_ko TEXT");
     if (!columns.has("tagline_en")) _db.exec("ALTER TABLE borrowed_agent_careers ADD COLUMN tagline_en TEXT");
     if (!columns.has("tagline_ko")) _db.exec("ALTER TABLE borrowed_agent_careers ADD COLUMN tagline_ko TEXT");
+  }
+
+  // v79: a chat picker owns an exact chat-scoped orchestrator pin. Keep this
+  // idempotent outside the version branch so an interim v79 development DB
+  // created before this column landed repairs itself on the next boot.
+  if (tableExists(_db, "chats")) {
+    const chatColumnsV79 = new Set(schemaColumns(_db, "chats").map((column) => column.name));
+    if (!chatColumnsV79.has("runtime_selection_json")) {
+      _db.exec("ALTER TABLE chats ADD COLUMN runtime_selection_json TEXT");
+    }
+  }
+
+  // v79: replace the single global runtime default with two role defaults.
+  // active_runtime remains the orchestrator compatibility mirror for older
+  // Desktop, Mobile, and Terminal builds. A missing worker always inherits the
+  // orchestrator so an upgrade cannot silently lower quality. Keep the table
+  // and two seed rows self-repairing for interim v79 development databases,
+  // but avoid an ordinary-boot write when the complete contract already exists.
+  if (!tableExists(_db, "model_roles")) {
+    _db.exec(`
+      CREATE TABLE model_roles (
+        role TEXT PRIMARY KEY CHECK(role IN ('orchestrator','worker')),
+        kind TEXT NOT NULL,
+        backend TEXT,
+        source TEXT,
+        model TEXT,
+        effort TEXT,
+        long_context INTEGER NOT NULL DEFAULT 0 CHECK(long_context IN (0,1)),
+        inherit INTEGER NOT NULL DEFAULT 0 CHECK(inherit IN (0,1)),
+        updated_at TEXT NOT NULL,
+        CHECK(role = 'worker' OR inherit = 0)
+      );
+    `);
+  }
+  const storedModelRoles = new Set(
+    (_db.prepare("SELECT role FROM model_roles").all() as Array<{ role: string }>).map(
+      (row) => row.role,
+    ),
+  );
+  if (
+    userVersion < 79 ||
+    !storedModelRoles.has("orchestrator") ||
+    !storedModelRoles.has("worker")
+  ) {
+    const active = _db
+      .prepare("SELECT kind, backend, source, model, long_context FROM active_runtime WHERE id = 1")
+      .get() as {
+        kind: string;
+        backend: string | null;
+        source: string | null;
+        model: string | null;
+        long_context: number;
+      } | undefined;
+    if (active) {
+      const effort = tableExists(_db, "meta")
+        ? (_db.prepare("SELECT value FROM meta WHERE key = 'claude_effort'").get() as
+            | { value: string }
+            | undefined)?.value ?? null
+        : null;
+      const updatedAt = new Date().toISOString();
+      const insert = _db.prepare(
+        `INSERT OR IGNORE INTO model_roles
+         (role, kind, backend, source, model, effort, long_context, inherit, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      insert.run(
+        "orchestrator",
+        active.kind,
+        active.backend,
+        active.source,
+        active.model,
+        effort,
+        active.long_context ? 1 : 0,
+        0,
+        updatedAt,
+      );
+      insert.run(
+        "worker",
+        active.kind,
+        active.backend,
+        active.source,
+        active.model,
+        effort,
+        active.long_context ? 1 : 0,
+        1,
+        updatedAt,
+      );
+    }
   }
 
   if (options.deferPostContinuityRepairs) {

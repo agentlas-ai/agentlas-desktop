@@ -64,7 +64,7 @@ import {
   type WorkloadAllocation,
   type WorkloadResolution,
 } from "../runtime/workload-routing";
-import { pickRunner } from "../runtime/selection";
+import { pickActive, pickRunner } from "../runtime/selection";
 import { getAgentById } from "./registry";
 import { runFirmInvocation } from "./firm-orchestrator";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
@@ -116,8 +116,114 @@ const TEAM_MANAGER_PLAN_HEADING = "## Workforce Team Manager Plan";
 const MAX_WORKFORCE_PLANNER_SCHEMA_ATTEMPTS = 2;
 const MAX_TEAM_MANAGER_SCHEMA_ATTEMPTS = 2;
 const TASK_FORCE_MODEL_CALL_RECEIPT_SCHEMA = "agentlas.one-model-call-receipt.v1";
+// Zero-tool workers sometimes emit tool-call markup as their "answer". Keep
+// this narrow enough that prose mentioning tools is not rejected.
+const HANDOFF_TOOL_MARKUP_RE =
+  /<(?:antml:)?invoke\s+name=|<(?:antml:)?parameter\s+name=|<\/(?:antml:)?(?:invoke|parameter)>|<(?:antml:)?function_calls>/i;
 const BORROWED_SECRET_FILE_GUARD =
   "Do not read, request, quote, or summarize secret-like files or credentials (.env*, signing/, keychains, private keys, tokens, cookies, API keys, billing/payment data). If a task appears to require them, report that the host must review them locally instead.";
+
+export type WorkerHandoffRole = "worker" | "orchestrator";
+export type WorkerHandoffViolation = "tool_markup" | "empty_deliverable";
+
+export interface WorkerHandoffOutcome<T> {
+  result: T;
+  role: WorkerHandoffRole;
+  attempt: number;
+  reasonCodes: string[];
+  escalatedFromRole?: "worker";
+  failureCount?: 2;
+  escalationAttempt?: 1;
+}
+
+export class WorkerHandoffContractError extends Error {
+  readonly code = "worker_output_contract_violation";
+  readonly details: {
+    violation: WorkerHandoffViolation;
+    firstViolation: WorkerHandoffViolation;
+    secondViolation: WorkerHandoffViolation;
+    reasonCode: "escalated-after-failure";
+    escalationAttempted: true;
+    escalationCount: 1;
+  };
+
+  constructor(input: {
+    violation: WorkerHandoffViolation;
+    firstViolation: WorkerHandoffViolation;
+    secondViolation: WorkerHandoffViolation;
+  }) {
+    super(`worker still violated the handoff contract (${input.violation}) after its single orchestrator escalation`);
+    this.name = "WorkerHandoffContractError";
+    this.details = {
+      ...input,
+      reasonCode: "escalated-after-failure",
+      escalationAttempted: true,
+      escalationCount: 1,
+    };
+  }
+}
+
+export function workerHandoffContractViolation(text: unknown): WorkerHandoffViolation | null {
+  const value = String(text ?? "");
+  if (HANDOFF_TOOL_MARKUP_RE.test(value)) return "tool_markup";
+  if (value.replace(/[\s`#*_>\-|:.~]+/g, "").length < 12) return "empty_deliverable";
+  return null;
+}
+
+function workerHandoffRepairDirective(violation: WorkerHandoffViolation): string {
+  return violation === "tool_markup"
+    ? "HANDOFF REPAIR MODE: your previous reply contained raw tool-call markup. Rewrite the complete deliverable as plain text or markdown only, with zero tool-call syntax."
+    : "HANDOFF REPAIR MODE: your previous reply contained no usable deliverable. Author the complete concrete handoff artifact now, directly in this reply.";
+}
+
+/**
+ * Same task, finite policy: worker call + one same-worker correction, then one
+ * orchestrator escalation. The caller owns the actual runtime invocation so
+ * every attempt is still observed and receipted under its real provider/model.
+ */
+export async function runWorkerHandoffWithEscalation<T extends { text: string }>(
+  invoke: (
+    role: WorkerHandoffRole,
+    attempt: number,
+    directive: string | null,
+  ) => Promise<T>,
+): Promise<WorkerHandoffOutcome<T>> {
+  const first = await invoke("worker", 1, null);
+  const firstViolation = workerHandoffContractViolation(first.text);
+  if (!firstViolation) {
+    return { result: first, role: "worker", attempt: 1, reasonCodes: [] };
+  }
+
+  const second = await invoke("worker", 2, workerHandoffRepairDirective(firstViolation));
+  const secondViolation = workerHandoffContractViolation(second.text);
+  if (!secondViolation) {
+    return { result: second, role: "worker", attempt: 2, reasonCodes: [] };
+  }
+
+  const reasonCode = "escalated-after-failure";
+  const escalated = await invoke(
+    "orchestrator",
+    1,
+    "ESCALATED HANDOFF MODE: the worker role failed the output contract twice for this exact task. You are the single allowed orchestrator retry. Produce the complete handoff directly, preserve the packet scope, and do not delegate or retry again.",
+  );
+  const escalationViolation = workerHandoffContractViolation(escalated.text);
+  if (escalationViolation) {
+    throw new WorkerHandoffContractError({
+      violation: escalationViolation,
+      firstViolation,
+      secondViolation,
+    });
+  }
+  return {
+    result: escalated,
+    role: "orchestrator",
+    attempt: 1,
+    reasonCodes: [reasonCode],
+    escalatedFromRole: "worker",
+    failureCount: 2,
+    escalationAttempt: 1,
+  };
+}
 
 export interface BorrowedAgentSpec {
   slug: string;
@@ -295,10 +401,15 @@ interface WorkforceReceiptInvocation {
   modelId: string;
   runtimeId: string;
   provider: string;
+  role: WorkerHandoffRole;
   requestedEffort: WorkforceReceiptEffort;
   appliedEffort: WorkforceReceiptEffort;
   effortEvidence: "runner-reported" | "runtime-fixed" | "not-observable";
   status: "completed" | "failed" | "blocked";
+  reasonCodes?: string[];
+  escalatedFromRole?: "worker";
+  failureCount?: 2;
+  escalationAttempt?: 1;
 }
 
 interface WorkforceReceiptPermissionInvocation extends WorkforceReceiptInvocation {
@@ -527,9 +638,14 @@ function invocationReceipt(input: {
   runtime: RuntimeStatus;
   runtimeId?: string;
   modelId?: string;
+  role: WorkerHandoffRole;
   requestedEffort?: unknown;
   result?: Pick<RunnerResult, "appliedEffort">;
   status: "completed" | "failed" | "blocked";
+  reasonCodes?: string[];
+  escalatedFromRole?: "worker";
+  failureCount?: 2;
+  escalationAttempt?: 1;
 }): WorkforceReceiptInvocation {
   const requestedEffort = receiptEffort(input.requestedEffort);
   const appliedEffort = receiptEffort(input.result?.appliedEffort);
@@ -538,10 +654,15 @@ function invocationReceipt(input: {
     modelId: canonicalReceiptId(input.modelId ?? modelLabel(input.runtime), "model:unknown"),
     runtimeId: canonicalReceiptId(input.runtimeId ?? receiptRuntimeId(input.runtime), "runtime:unknown"),
     provider: String(providerLabel(input.runtime)).slice(0, 100) || "unknown",
+    role: input.role,
     requestedEffort,
     appliedEffort,
     effortEvidence: appliedEffort === null ? "not-observable" : "runner-reported",
     status: input.status,
+    ...(input.reasonCodes?.length ? { reasonCodes: [...new Set(input.reasonCodes)] } : {}),
+    ...(input.escalatedFromRole ? { escalatedFromRole: input.escalatedFromRole } : {}),
+    ...(input.failureCount ? { failureCount: input.failureCount } : {}),
+    ...(input.escalationAttempt ? { escalationAttempt: input.escalationAttempt } : {}),
   };
 }
 
@@ -557,9 +678,14 @@ function permissionInvocationReceipt(
       invocationId: evidence.invocationId,
       runtime: evidence.runtime,
       runtimeId: evidence.runtimeId,
+      role: evidence.role,
       requestedEffort: evidence.requestedEffort,
       result: evidence.result,
       status: evidence.status,
+      reasonCodes: evidence.reasonCodes,
+      escalatedFromRole: evidence.escalatedFromRole,
+      failureCount: evidence.failureCount,
+      escalationAttempt: evidence.escalationAttempt,
     }),
     permissionEnforcement,
   };
@@ -621,6 +747,7 @@ async function observeTaskForceModelCall<T>(
     phase: string;
     attempt?: number;
     agentId?: string | null;
+    runtime: RuntimeStatus;
   },
   call: () => Promise<T>,
 ): Promise<T> {
@@ -651,6 +778,26 @@ async function observeTaskForceModelCall<T>(
   });
   try {
     const result = await call();
+    const outputTokens = Number((result as { tokens?: unknown })?.tokens);
+    if (Number.isInteger(outputTokens) && outputTokens > 0) {
+      const modelRole = input.phase === "worker" ? "worker" : "orchestrator";
+      tryRecordRunEvent({
+        runId: p.req.runId ?? `task-force:${p.chat.id}`,
+        kind: "invoke_result",
+        chatId: p.chat.id,
+        nodeId: input.nodeId,
+        agentId: canonicalAgentId,
+        payload: {
+          invocationId: callRef,
+          modelRole,
+          provider: input.runtime.backend ?? input.runtime.kind,
+          model: input.runtime.model ?? null,
+          tokens: outputTokens,
+          measurement: "output-only",
+          phase: input.phase,
+        },
+      });
+    }
     tryRecordRunEvent({
       runId: p.req.runId ?? `task-force:${p.chat.id}`,
       kind: "task_force_model_call_completed",
@@ -2108,9 +2255,14 @@ interface WorkforceInvocationEvidence {
   /** Exact `runtime-N` identity from the planner-visible live inventory. */
   runtimeId: string;
   runtime: RuntimeStatus;
+  role: WorkerHandoffRole;
   requestedEffort: string | null;
   result: Pick<RunnerResult, "appliedEffort" | "workforcePermissionEnforcement">;
   status: "completed" | "failed" | "blocked";
+  reasonCodes?: string[];
+  escalatedFromRole?: "worker";
+  failureCount?: 2;
+  escalationAttempt?: 1;
 }
 
 interface WorkforceNestedExecutionEvidence {
@@ -2155,10 +2307,29 @@ async function runBorrowedAgentTurn(
   });
   const runnerBase = taskForceRunnerBase(p);
   const candidateRuntimes = taskForceCandidateRuntimes(p);
+  const workerDefault = pickActive(candidateRuntimes, "worker") ?? p.active;
+  const workerDefaultRunner = sameRuntime(workerDefault, p.active)
+    ? p.picked
+    : pickRunner(workerDefault) ?? p.picked;
+  const orchestratorRuntimes = [...(p.runtimes ?? [p.active])];
+  if (!orchestratorRuntimes.some((runtime) => sameRuntime(runtime, p.active))) {
+    orchestratorRuntimes.unshift(p.active);
+  }
+  const orchestratorDefault = pickActive(orchestratorRuntimes, "orchestrator") ?? p.active;
+  const orchestratorDefaultRunner = sameRuntime(orchestratorDefault, p.active)
+    ? p.picked
+    : pickRunner(orchestratorDefault) ?? p.picked;
+  const escalationBaseResolution = resolveWorkloadAllocationAcrossRuntimes({
+    allocation: defaultWorkloadAllocation("synthesize", "escalated-after-failure"),
+    runtimes: orchestratorRuntimes,
+    fallbackRuntime: orchestratorDefault,
+    phase: "synthesize",
+    manualOverride: p.runtimeOverride,
+  });
   const workloadResolution = resolveWorkloadAllocationAcrossRuntimes({
     allocation: packet.allocation,
     runtimes: candidateRuntimes,
-    fallbackRuntime: p.active,
+    fallbackRuntime: workerDefault,
     phase: "delegate",
     manualOverride: p.runtimeOverride,
     requirementsVerified: p.workforceSelectionReceipt ? true : undefined,
@@ -2189,7 +2360,9 @@ async function runBorrowedAgentTurn(
     provider: providerLabel(active),
     workforceResponsibility,
   };
-  const picked = sameRuntime(active, p.active) ? p.picked : pickRunner(active) ?? p.picked;
+  const picked = sameRuntime(active, workerDefault)
+    ? workerDefaultRunner
+    : pickRunner(active) ?? workerDefaultRunner;
   if (workloadResolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
     p.sink(tag({
       kind: "tool-use",
@@ -2221,6 +2394,15 @@ async function runBorrowedAgentTurn(
     ? memoryEmitterPromptFor(nodeTask)
     : "";
   let observedDirectResult: RunnerResult | undefined;
+  let observedDirectRole: WorkerHandoffRole = "worker";
+  let observedDirectRuntime = active;
+  let observedDirectPicked = picked;
+  let observedDirectInvocationId = `${invocationId}:worker:1`;
+  let observedDirectResolution = workloadResolution;
+  let observedDirectReasonCodes: string[] = [];
+  let observedDirectEscalatedFromRole: "worker" | undefined;
+  let observedDirectFailureCount: 2 | undefined;
+  let observedDirectEscalationAttempt: 1 | undefined;
   try {
     if (spec.source === "group" && spec.groupId) {
       const depth = p.orchestrationDepth ?? 1;
@@ -2377,6 +2559,25 @@ async function runBorrowedAgentTurn(
     if ((spec.source === "hub" || spec.source === "cloud" || !spec.source) && spec.entityKind === "team") {
       const graph = spec.executionGraph;
       if (!graph) throw new Error(`team_execution_graph_unavailable:${spec.slug}`);
+      // A direct borrowed team has two model classes inside one package:
+      // manager plan/synthesis use the orchestrator default, while declared
+      // workers use the packet's worker allocation. An exact prepared
+      // Workforce allocation remains a higher-precedence per-call pin.
+      const managerPlanAllocation = p.workforceSelectionReceipt
+        ? packet.allocation
+        : defaultWorkloadAllocation("plan");
+      const managerPlanBaseResolution = resolveWorkloadAllocationAcrossRuntimes({
+        allocation: managerPlanAllocation,
+        runtimes: candidateRuntimes,
+        fallbackRuntime: p.active,
+        phase: "plan",
+        manualOverride: p.runtimeOverride,
+        requirementsVerified: p.workforceSelectionReceipt ? true : undefined,
+      });
+      const managerPlanActive = managerPlanBaseResolution.runtime;
+      const managerPlanPicked = sameRuntime(managerPlanActive, p.active)
+        ? p.picked
+        : pickRunner(managerPlanActive) ?? p.picked;
       const teamEvent = (node: string, name: string, event: McpInvocationEvent): McpInvocationEvent => ({
         ...event,
         agentId: `${id}:hub-team:${node}`,
@@ -2407,7 +2608,8 @@ async function runBorrowedAgentTurn(
           phase: "manager-plan",
           attempt,
           agentId: null,
-        }, () => picked.runner(
+          runtime: managerPlanActive,
+        }, () => managerPlanPicked.runner(
           {
             systemPrompt: [
               buildBorrowedAgentSystemPrompt(managerSpec, packagePermission),
@@ -2429,10 +2631,10 @@ async function runBorrowedAgentTurn(
               "Create the exact declared-worker delegation plan now.",
             ].filter(Boolean).join("\n\n"),
             images: workforceImages,
-            backendLabel: picked.label,
-            model: active.model ?? undefined,
-            longContext: active.longContextEnabled ?? false,
-            effort: active.effort ?? undefined,
+            backendLabel: managerPlanPicked.label,
+            model: managerPlanActive.model ?? undefined,
+            longContext: managerPlanActive.longContextEnabled ?? false,
+            effort: managerPlanActive.effort ?? undefined,
             signal: link.signal,
             ...runnerBase,
             ...packageBoundary,
@@ -2471,10 +2673,13 @@ async function runBorrowedAgentTurn(
       if (!managerPlan || !parsedManagerPlan) {
         throw new Error("workforce_team_manager_plan_parse_failed");
       }
-      const managerPlanResolution = reconcileWorkloadRunnerResult(workloadResolution, managerPlan);
+      const managerPlanResolution = reconcileWorkloadRunnerResult(
+        managerPlanBaseResolution,
+        managerPlan,
+      );
       if (p.workforceSelectionReceipt) {
         assertStrictPlannerResolution(
-          packet.allocation,
+          managerPlanAllocation,
           managerPlanResolution,
           `executed manager-plan allocation for ${packet.agent}`,
         );
@@ -2491,48 +2696,75 @@ async function runBorrowedAgentTurn(
           ].join("\n\n"),
         };
         let observedWorkerResult: RunnerResult | undefined;
+        let observedWorkerRole: WorkerHandoffRole = "worker";
+        let observedWorkerRuntime = active;
+        let observedWorkerPicked = picked;
+        let observedWorkerInvocationId = `${workerInvocationId}:worker:1`;
+        let observedWorkerResolution = workloadResolution;
+        let observedWorkerReasonCodes: string[] = [];
+        let observedWorkerEscalatedFromRole: "worker" | undefined;
+        let observedWorkerFailureCount: 2 | undefined;
+        let observedWorkerEscalationAttempt: 1 | undefined;
         try {
-          const result = await observeTaskForceModelCall(p, {
-            nodeId: `${id}:hub-team:${worker.id}`,
-            phase: "worker",
-            agentId: null,
-          }, () => picked.runner(
-            {
-              systemPrompt: [
-                buildBorrowedAgentSystemPrompt(workerSpec, packagePermission),
-                !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
-                nodeMemory,
-                nodeMemoryEmitter,
-              ].filter(Boolean).join("\n\n"),
-              history: [],
-              userPrompt: [
-                authoritativePacketPrompt,
-                "Team manager plan:",
-                JSON.stringify(parsedManagerPlan),
-                `Your declared worker identity: ${worker.id}`,
-              ].join("\n\n"),
-              images: workforceImages,
-              backendLabel: picked.label,
-              model: active.model ?? undefined,
-              longContext: active.longContextEnabled ?? false,
-              effort: active.effort ?? undefined,
-              signal: link.signal,
-              ...runnerBase,
-              ...packageBoundary,
-              cwd: p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
-              chatId: workerInvocationId,
-              locale: p.locale,
-            },
-            {
-              onStatus: (status) => p.sink(teamEvent(worker.id, worker.id, { kind: "tool-use", status: redactSensitiveText(status) })),
-              onPartial: () => {},
-              onTool: (name, args, toolResult, toolId, isError) => p.sink(teamEvent(worker.id, worker.id, {
-                kind: "tool-use",
-                tool: { name, args: redactEventValue(args), result: redactEventValue(toolResult), id: toolId, isError },
-              })),
-            },
-          ));
-          observedWorkerResult = result;
+          const outcome = await runWorkerHandoffWithEscalation(async (role, attempt, directive) => {
+            observedWorkerRole = role;
+            observedWorkerRuntime = role === "worker" ? active : orchestratorDefault;
+            observedWorkerPicked = role === "worker" ? picked : orchestratorDefaultRunner;
+            observedWorkerResolution = role === "worker" ? workloadResolution : escalationBaseResolution;
+            observedWorkerInvocationId = `${workerInvocationId}:${role}:${attempt}`;
+            if (role === "orchestrator") {
+              observedWorkerReasonCodes = ["escalated-after-failure"];
+              observedWorkerEscalatedFromRole = "worker";
+              observedWorkerFailureCount = 2;
+              observedWorkerEscalationAttempt = 1;
+            }
+            const attemptResult = await observeTaskForceModelCall(p, {
+              nodeId: `${id}:hub-team:${worker.id}`,
+              phase: role === "worker" ? "worker" : "worker-escalation",
+              attempt,
+              agentId: null,
+              runtime: observedWorkerRuntime,
+            }, () => observedWorkerPicked.runner(
+              {
+                systemPrompt: [
+                  buildBorrowedAgentSystemPrompt(workerSpec, packagePermission),
+                  !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
+                  nodeMemory,
+                  nodeMemoryEmitter,
+                  directive,
+                ].filter(Boolean).join("\n\n"),
+                history: [],
+                userPrompt: [
+                  authoritativePacketPrompt,
+                  "Team manager plan:",
+                  JSON.stringify(parsedManagerPlan),
+                  `Your declared worker identity: ${worker.id}`,
+                ].join("\n\n"),
+                images: workforceImages,
+                backendLabel: observedWorkerPicked.label,
+                model: observedWorkerRuntime.model ?? undefined,
+                longContext: observedWorkerRuntime.longContextEnabled ?? false,
+                effort: observedWorkerRuntime.effort ?? undefined,
+                signal: link.signal,
+                ...runnerBase,
+                ...packageBoundary,
+                cwd: p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
+                chatId: observedWorkerInvocationId,
+                locale: p.locale,
+              },
+              {
+                onStatus: (status) => p.sink(teamEvent(worker.id, worker.id, { kind: "tool-use", status: redactSensitiveText(status) })),
+                onPartial: () => {},
+                onTool: (name, args, toolResult, toolId, isError) => p.sink(teamEvent(worker.id, worker.id, {
+                  kind: "tool-use",
+                  tool: { name, args: redactEventValue(args), result: redactEventValue(toolResult), id: toolId, isError },
+                })),
+              },
+            ));
+            observedWorkerResult = attemptResult;
+            return attemptResult;
+          });
+          const result = outcome.result;
           const workerText = await curateOwnedTaskForceResult({
             p,
             spec,
@@ -2540,18 +2772,18 @@ async function runBorrowedAgentTurn(
             installedAgent: null,
             nodeId: `${id}:hub-team:${worker.id}`,
             task: nodeTask,
-            runtimeKind: active.kind,
-            runner: picked.runner,
-            backendLabel: picked.label,
-            model: active.model ?? undefined,
-            effort: active.effort ?? undefined,
+            runtimeKind: observedWorkerRuntime.kind,
+            runner: observedWorkerPicked.runner,
+            backendLabel: observedWorkerPicked.label,
+            model: observedWorkerRuntime.model ?? undefined,
+            effort: observedWorkerRuntime.effort ?? undefined,
             env: p.runnerEnv,
             signal: link.signal,
-            phase: "worker",
+            phase: outcome.role === "worker" ? "worker" : "worker-escalation",
             borrowedComponentId: worker.id,
           });
-          const workerResolution = reconcileWorkloadRunnerResult(workloadResolution, result);
-          if (p.workforceSelectionReceipt) {
+          const workerResolution = reconcileWorkloadRunnerResult(observedWorkerResolution, result);
+          if (p.workforceSelectionReceipt && outcome.role === "worker") {
             assertStrictPlannerResolution(
               packet.allocation,
               workerResolution,
@@ -2578,15 +2810,24 @@ async function runBorrowedAgentTurn(
             text: workerText,
             tokens: result.tokens ?? 0,
             invocationEvidence: {
-              invocationId: workerInvocationId,
-              runtimeId: workerResolution.resolvedRuntimeId ?? packet.allocation.runtimeId ?? "runtime-unknown",
-              runtime: { ...active },
-              requestedEffort: packet.allocation.effort ?? null,
+              invocationId: observedWorkerInvocationId,
+              runtimeId: workerResolution.resolvedRuntimeId
+                ?? (outcome.role === "worker" ? packet.allocation.runtimeId : null)
+                ?? "runtime-unknown",
+              runtime: { ...observedWorkerRuntime },
+              role: outcome.role,
+              requestedEffort: outcome.role === "worker"
+                ? packet.allocation.effort ?? null
+                : escalationBaseResolution.allocation.effort ?? null,
               result: {
                 appliedEffort: result.appliedEffort,
                 workforcePermissionEnforcement: result.workforcePermissionEnforcement,
               },
               status: "completed" as const,
+              reasonCodes: outcome.reasonCodes,
+              escalatedFromRole: outcome.escalatedFromRole,
+              failureCount: outcome.failureCount,
+              escalationAttempt: outcome.escalationAttempt,
             },
           };
         } catch (error) {
@@ -2596,25 +2837,50 @@ async function runBorrowedAgentTurn(
             text: redactSensitiveText(error instanceof Error ? error.message : String(error)),
             tokens: 0,
             invocationEvidence: {
-              invocationId: workerInvocationId,
-              runtimeId: workloadResolution.resolvedRuntimeId ?? packet.allocation.runtimeId ?? "runtime-unknown",
-              runtime: { ...active },
-              requestedEffort: packet.allocation.effort ?? null,
+              invocationId: observedWorkerInvocationId,
+              runtimeId: observedWorkerResolution.resolvedRuntimeId
+                ?? (observedWorkerRole === "worker" ? packet.allocation.runtimeId : null)
+                ?? "runtime-unknown",
+              runtime: { ...observedWorkerRuntime },
+              role: observedWorkerRole,
+              requestedEffort: observedWorkerRole === "worker"
+                ? packet.allocation.effort ?? null
+                : escalationBaseResolution.allocation.effort ?? null,
               result: {
                 appliedEffort: observedWorkerResult?.appliedEffort,
                 workforcePermissionEnforcement: observedWorkerResult?.workforcePermissionEnforcement,
               },
               status: "failed" as const,
+              reasonCodes: observedWorkerReasonCodes,
+              escalatedFromRole: observedWorkerEscalatedFromRole,
+              failureCount: observedWorkerFailureCount,
+              escalationAttempt: observedWorkerEscalationAttempt,
             },
           };
         }
       });
       const managerSynthesisInvocationId = `${nestedExecutionId}:manager-synthesis`;
+      const managerSynthesisAllocation = p.workforceSelectionReceipt
+        ? packet.allocation
+        : defaultWorkloadAllocation("synthesize");
+      const managerSynthesisBaseResolution = resolveWorkloadAllocationAcrossRuntimes({
+        allocation: managerSynthesisAllocation,
+        runtimes: candidateRuntimes,
+        fallbackRuntime: p.active,
+        phase: "synthesize",
+        manualOverride: p.runtimeOverride,
+        requirementsVerified: p.workforceSelectionReceipt ? true : undefined,
+      });
+      const managerSynthesisActive = managerSynthesisBaseResolution.runtime;
+      const managerSynthesisPicked = sameRuntime(managerSynthesisActive, p.active)
+        ? p.picked
+        : pickRunner(managerSynthesisActive) ?? p.picked;
       const managerSynthesis = await observeTaskForceModelCall(p, {
         nodeId: `${id}:hub-team:manager`,
         phase: "manager-synthesis",
         agentId: null,
-      }, () => picked.runner(
+        runtime: managerSynthesisActive,
+      }, () => managerSynthesisPicked.runner(
         {
           systemPrompt: [
             buildBorrowedAgentSystemPrompt(managerSpec, packagePermission),
@@ -2633,10 +2899,10 @@ async function runBorrowedAgentTurn(
             "Synthesize one attributable team result. State any failed worker explicitly.",
           ].join("\n\n"),
           images: workforceImages,
-          backendLabel: picked.label,
-          model: active.model ?? undefined,
-          longContext: active.longContextEnabled ?? false,
-          effort: active.effort ?? undefined,
+          backendLabel: managerSynthesisPicked.label,
+          model: managerSynthesisActive.model ?? undefined,
+          longContext: managerSynthesisActive.longContextEnabled ?? false,
+          effort: managerSynthesisActive.effort ?? undefined,
           signal: link.signal,
           ...runnerBase,
           ...packageBoundary,
@@ -2660,19 +2926,22 @@ async function runBorrowedAgentTurn(
         installedAgent: null,
         nodeId: `${id}:hub-team:manager`,
         task: nodeTask,
-        runtimeKind: active.kind,
-        runner: picked.runner,
-        backendLabel: picked.label,
-        model: active.model ?? undefined,
-        effort: active.effort ?? undefined,
+        runtimeKind: managerSynthesisActive.kind,
+        runner: managerSynthesisPicked.runner,
+        backendLabel: managerSynthesisPicked.label,
+        model: managerSynthesisActive.model ?? undefined,
+        effort: managerSynthesisActive.effort ?? undefined,
         env: p.runnerEnv,
         signal: link.signal,
         phase: "manager-synthesis",
       });
-      const managerSynthesisResolution = reconcileWorkloadRunnerResult(workloadResolution, managerSynthesis);
+      const managerSynthesisResolution = reconcileWorkloadRunnerResult(
+        managerSynthesisBaseResolution,
+        managerSynthesis,
+      );
       if (p.workforceSelectionReceipt) {
         assertStrictPlannerResolution(
-          packet.allocation,
+          managerSynthesisAllocation,
           managerSynthesisResolution,
           `executed manager-synthesis allocation for ${packet.agent}`,
         );
@@ -2715,8 +2984,9 @@ async function runBorrowedAgentTurn(
           managerPlan: {
             invocationId: managerPlanInvocationId,
             runtimeId: managerPlanResolution.resolvedRuntimeId ?? packet.allocation.runtimeId ?? "runtime-unknown",
-            runtime: { ...active },
-            requestedEffort: packet.allocation.effort ?? null,
+            runtime: { ...managerPlanActive },
+            role: "orchestrator",
+            requestedEffort: managerPlanAllocation.effort ?? null,
             result: {
               appliedEffort: managerPlan.appliedEffort,
               workforcePermissionEnforcement: managerPlan.workforcePermissionEnforcement,
@@ -2733,8 +3003,9 @@ async function runBorrowedAgentTurn(
           managerSynthesis: {
             invocationId: managerSynthesisInvocationId,
             runtimeId: managerSynthesisResolution.resolvedRuntimeId ?? packet.allocation.runtimeId ?? "runtime-unknown",
-            runtime: { ...active },
-            requestedEffort: packet.allocation.effort ?? null,
+            runtime: { ...managerSynthesisActive },
+            role: "orchestrator",
+            requestedEffort: managerSynthesisAllocation.effort ?? null,
             result: {
               appliedEffort: managerSynthesis.appliedEffort,
               workforcePermissionEnforcement: managerSynthesis.workforcePermissionEnforcement,
@@ -2754,46 +3025,64 @@ async function runBorrowedAgentTurn(
       task: nodeTask,
     }) : null;
     if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
-    const result = await observeTaskForceModelCall(p, {
-      nodeId: id,
-      phase: "worker",
-      agentId: installedAgent?.id ?? p.chat.agentId,
-    }, () => picked.runner(
-      {
-        systemPrompt: [
-          buildBorrowedAgentSystemPrompt(spec, packagePermission),
-          !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
-          nodeMemory,
-          ontology?.prompt,
-          nodeMemoryEmitter,
-        ].filter(Boolean).join("\n\n"),
-        history: [],
-        userPrompt: authoritativePacketPrompt,
-        images: workforceImages,
-        backendLabel: picked.label,
-        model: active.model ?? undefined,
-        longContext: active.longContextEnabled ?? false,
-        effort: active.effort ?? undefined,
-        signal: link.signal,
-        ...runnerBase,
-        ...packageBoundary,
-        // The package's declared ceiling narrows the host grant (never widens it). Spread after
-        // runnerBase so this wins for this borrowed agent's own turn.
-        cwd: p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
-        chatId: taskForceSessionId(p, `borrow:${spec.slug}`),
-        locale: p.locale,
-      },
-      {
-        onStatus: (status) => p.sink(tag({ kind: "tool-use", status: redactSensitiveText(status) })),
-        onPartial: () => {},
-        onTool: (name, args, result, toolId, isError) =>
-          p.sink(tag({
-            kind: "tool-use",
-            tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError },
-          })),
-      },
-    ));
-    observedDirectResult = result;
+    const outcome = await runWorkerHandoffWithEscalation(async (role, attempt, directive) => {
+      observedDirectRole = role;
+      observedDirectRuntime = role === "worker" ? active : orchestratorDefault;
+      observedDirectPicked = role === "worker" ? picked : orchestratorDefaultRunner;
+      observedDirectResolution = role === "worker" ? workloadResolution : escalationBaseResolution;
+      observedDirectInvocationId = `${invocationId}:${role}:${attempt}`;
+      if (role === "orchestrator") {
+        observedDirectReasonCodes = ["escalated-after-failure"];
+        observedDirectEscalatedFromRole = "worker";
+        observedDirectFailureCount = 2;
+        observedDirectEscalationAttempt = 1;
+      }
+      const attemptResult = await observeTaskForceModelCall(p, {
+        nodeId: id,
+        phase: role === "worker" ? "worker" : "worker-escalation",
+        attempt,
+        agentId: installedAgent?.id ?? p.chat.agentId,
+        runtime: observedDirectRuntime,
+      }, () => observedDirectPicked.runner(
+        {
+          systemPrompt: [
+            buildBorrowedAgentSystemPrompt(spec, packagePermission),
+            !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
+            nodeMemory,
+            ontology?.prompt,
+            nodeMemoryEmitter,
+            directive,
+          ].filter(Boolean).join("\n\n"),
+          history: [],
+          userPrompt: authoritativePacketPrompt,
+          images: workforceImages,
+          backendLabel: observedDirectPicked.label,
+          model: observedDirectRuntime.model ?? undefined,
+          longContext: observedDirectRuntime.longContextEnabled ?? false,
+          effort: observedDirectRuntime.effort ?? undefined,
+          signal: link.signal,
+          ...runnerBase,
+          ...packageBoundary,
+          // The package's declared ceiling narrows the host grant (never widens it). Spread after
+          // runnerBase so this wins for this borrowed agent's own turn.
+          cwd: p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
+          chatId: `${taskForceSessionId(p, `borrow:${spec.slug}`)}:${role}:${attempt}`,
+          locale: p.locale,
+        },
+        {
+          onStatus: (status) => p.sink(tag({ kind: "tool-use", status: redactSensitiveText(status) })),
+          onPartial: () => {},
+          onTool: (name, args, result, toolId, isError) =>
+            p.sink(tag({
+              kind: "tool-use",
+              tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError },
+            })),
+        },
+      ));
+      observedDirectResult = attemptResult;
+      return attemptResult;
+    });
+    const result = outcome.result;
     const workerText = await curateOwnedTaskForceResult({
       p,
       spec,
@@ -2801,17 +3090,17 @@ async function runBorrowedAgentTurn(
       installedAgent,
       nodeId: id,
       task: nodeTask,
-      runtimeKind: active.kind,
-      runner: picked.runner,
-      backendLabel: picked.label,
-      model: active.model ?? undefined,
-      effort: active.effort ?? undefined,
+      runtimeKind: observedDirectRuntime.kind,
+      runner: observedDirectPicked.runner,
+      backendLabel: observedDirectPicked.label,
+      model: observedDirectRuntime.model ?? undefined,
+      effort: observedDirectRuntime.effort ?? undefined,
       env: p.runnerEnv,
       signal: link.signal,
-      phase: "worker",
+      phase: outcome.role === "worker" ? "worker" : "worker-escalation",
     });
-    const executedResolution = reconcileWorkloadRunnerResult(workloadResolution, result);
-    if (p.workforceSelectionReceipt) {
+    const executedResolution = reconcileWorkloadRunnerResult(observedDirectResolution, result);
+    if (p.workforceSelectionReceipt && outcome.role === "worker") {
       assertStrictPlannerResolution(packet.allocation, executedResolution, `executed allocation for ${packet.agent}`);
     }
     tryRecordRunEvent({
@@ -2820,7 +3109,17 @@ async function runBorrowedAgentTurn(
       chatId: p.chat.id,
       nodeId: id,
       agentId: spec.slug,
-      payload: workloadAllocationReceipt(executedResolution),
+      payload: {
+        ...workloadAllocationReceipt(executedResolution),
+        role: outcome.role,
+        reasonCodes: [...new Set([
+          ...executedResolution.resolutionCodes,
+          ...outcome.reasonCodes,
+        ])],
+        ...(outcome.escalatedFromRole ? { escalatedFromRole: outcome.escalatedFromRole } : {}),
+        ...(outcome.failureCount ? { failureCount: outcome.failureCount } : {}),
+        ...(outcome.escalationAttempt ? { escalationAttempt: outcome.escalationAttempt } : {}),
+      },
     });
     if (spec.agentDefinitionId && spec.agentReleaseId) {
       recordBorrowedAgentCareer({
@@ -2843,21 +3142,32 @@ async function runBorrowedAgentTurn(
     }));
     return {
       ...resultMeta,
+      model: modelLabel(observedDirectRuntime),
+      provider: providerLabel(observedDirectRuntime),
       spec,
       packet,
       text: workerText,
       ok: true,
       tokens: result.tokens,
       invocationEvidence: {
-        invocationId,
-        runtimeId: executedResolution.resolvedRuntimeId ?? packet.allocation.runtimeId ?? "runtime-unknown",
-        runtime: { ...active },
-        requestedEffort: packet.allocation.effort ?? null,
+        invocationId: observedDirectInvocationId,
+        runtimeId: executedResolution.resolvedRuntimeId
+          ?? (outcome.role === "worker" ? packet.allocation.runtimeId : null)
+          ?? "runtime-unknown",
+        runtime: { ...observedDirectRuntime },
+        role: outcome.role,
+        requestedEffort: outcome.role === "worker"
+          ? packet.allocation.effort ?? null
+          : escalationBaseResolution.allocation.effort ?? null,
         result: {
           appliedEffort: result.appliedEffort,
           workforcePermissionEnforcement: result.workforcePermissionEnforcement,
         },
         status: "completed",
+        reasonCodes: outcome.reasonCodes,
+        escalatedFromRole: outcome.escalatedFromRole,
+        failureCount: outcome.failureCount,
+        escalationAttempt: outcome.escalationAttempt,
       },
     };
   } catch (err) {
@@ -2895,15 +3205,24 @@ async function runBorrowedAgentTurn(
       text: redactSensitiveText(`[${spec.slug} ${timedOut ? "timeout" : "error"}] ${message}`),
       ok: false,
       invocationEvidence: {
-        invocationId,
-        runtimeId: workloadResolution.resolvedRuntimeId ?? packet.allocation.runtimeId ?? "runtime-unknown",
-        runtime: { ...active },
-        requestedEffort: packet.allocation.effort ?? null,
+        invocationId: observedDirectInvocationId,
+        runtimeId: observedDirectResolution.resolvedRuntimeId
+          ?? (observedDirectRole === "worker" ? packet.allocation.runtimeId : null)
+          ?? "runtime-unknown",
+        runtime: { ...observedDirectRuntime },
+        role: observedDirectRole,
+        requestedEffort: observedDirectRole === "worker"
+          ? packet.allocation.effort ?? null
+          : escalationBaseResolution.allocation.effort ?? null,
         result: {
           appliedEffort: observedDirectResult?.appliedEffort,
           workforcePermissionEnforcement: observedDirectResult?.workforcePermissionEnforcement,
         },
         status: timedOut ? "blocked" : "failed",
+        reasonCodes: observedDirectReasonCodes,
+        escalatedFromRole: observedDirectEscalatedFromRole,
+        failureCount: observedDirectFailureCount,
+        escalationAttempt: observedDirectEscalationAttempt,
       },
     };
   } finally {
@@ -3113,6 +3432,7 @@ async function runPlanner(
         phase: "planner",
         attempt,
         agentId: p.orchestratorAgent.id,
+        runtime: p.active,
       }, () => invokePlanner(
         plannerInvocationId,
         schemaRepair
@@ -3287,6 +3607,7 @@ async function runPlanner(
       phase: "planner",
       attempt: 1,
       agentId: p.orchestratorAgent.id,
+      runtime: p.active,
     }, () => invokePlanner(plannerInvocationId, baseSystemPrompt));
     plannerText = restrictedTaskForceText(p, result.text, {
       nodeId: orchestratorId,
@@ -3537,6 +3858,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     nodeId: orchestratorId,
     phase: "synthesis",
     agentId: p.orchestratorAgent.id,
+    runtime: synthesisActive,
   }, () => synthesisPicked.runner(
     {
       systemPrompt: [
@@ -3905,6 +4227,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         runtime: leaderEvidence!.runtime,
         runtimeId: leaderInvocation!.runtimeId,
         modelId: leaderInvocation!.modelId,
+        role: "orchestrator",
         requestedEffort: leaderEvidence!.runtime.effort,
         result: leaderEvidence!.result,
         status: "completed",
@@ -3913,6 +4236,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         ...invocationReceipt({
           invocationId: plan.invocationId,
           runtime: p.active,
+          role: "orchestrator",
           requestedEffort: p.active.effort,
           result: plan.result,
           status: "completed",
@@ -3929,6 +4253,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         invocationId: synthesisInvocationId,
         runtime: synthesisActive,
         runtimeId: executedSynthesisResolution.resolvedRuntimeId ?? undefined,
+        role: "orchestrator",
         requestedEffort: plan.synthesisAllocation.effort,
         result: final,
         status: displayText.trim() ? "completed" : "failed",
@@ -3938,6 +4263,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         modelId: "agentlas:structural-verifier-v2",
         runtimeId: "agentlas-desktop:structural-verifier-v2",
         provider: "agentlas-desktop",
+        role: "orchestrator",
         requestedEffort: null,
         appliedEffort: "none",
         effortEvidence: "runtime-fixed",

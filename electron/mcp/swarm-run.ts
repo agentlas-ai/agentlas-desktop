@@ -23,7 +23,7 @@ import {
   workloadRuntimeInventory,
   type WorkloadAllocation,
 } from "../runtime/workload-routing";
-import { pickRunner } from "../runtime/selection";
+import { pickActive, pickRunner } from "../runtime/selection";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
 import {
   isMobileReadRuntimeAllowed,
@@ -268,6 +268,10 @@ export async function runSwarmInvocation(
     );
   }
   if (candidateRuntimes.length === 0) candidateRuntimes.push(p.active);
+  const workerDefault = pickActive(candidateRuntimes, "worker") ?? p.active;
+  const workerDefaultRunner = sameRuntime(workerDefault, p.active)
+    ? p.picked
+    : pickRunner(workerDefault) ?? p.picked;
   const runtimeInventory = workloadRuntimeInventory(candidateRuntimes);
   const runId = p.req.runId ?? `swarm-${Date.now()}`;
   const stormStatus = (
@@ -412,15 +416,17 @@ export async function runSwarmInvocation(
   const runOneTask = async (task: SwarmTask, board: SwarmBoard, signal?: AbortSignal) => {
     const resolution = task.allocation
       ? resolveWorkloadAllocationAcrossRuntimes({
-          allocation: task.allocation,
-          runtimes: candidateRuntimes,
-          fallbackRuntime: p.active,
-          phase: "delegate",
-          manualOverride: p.runtimeOverride,
-        })
-      : null;
-    const active = resolution?.runtime ?? p.active;
-    const taskRunner = sameRuntime(active, p.active) ? p.picked : pickRunner(active) ?? p.picked;
+        allocation: task.allocation,
+        runtimes: candidateRuntimes,
+        fallbackRuntime: workerDefault,
+        phase: "delegate",
+        manualOverride: p.runtimeOverride,
+      })
+    : null;
+    const active = resolution?.runtime ?? workerDefault;
+    const taskRunner = sameRuntime(active, workerDefault)
+      ? workerDefaultRunner
+      : pickRunner(active) ?? workerDefaultRunner;
     if (resolution) {
       task.resolvedAllocation = {
         runtimeId: resolution.resolvedRuntimeId,

@@ -15,7 +15,7 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 78,
+    "targetSchemaVersion": 79,
     "bundledRuntimeVersion": "1.1.72"
   },
   "agentlasBundledRuntimeSource": {
@@ -146,6 +146,7 @@
     "test:byok-model-roundtrip": "npm run build:electron && electron scripts/test-byok-model-roundtrip.cjs",
     "test:codex-model-discovery": "npm run build:electron && node scripts/test-codex-model-discovery.cjs",
     "test:runtime-selection-memory": "npm run build:electron && electron scripts/test-runtime-selection-memory.cjs",
+    "test:model-role-defaults": "npm run build:electron && electron scripts/test-model-role-defaults-v79.cjs && electron scripts/test-chat-runtime-pin-v79.cjs",
     "test:workload-routing": "npm run build:electron && electron scripts/test-workload-routing.cjs",
     "test:stormbreaker-core": "npm run build:electron && electron scripts/test-stormbreaker-core-harness.cjs",
     "test:stormbreaker-core:embedded": "npm run build:electron && cross-env HEPHAESTUS_RUNTIME_ROOT=Hephaestus electron scripts/test-stormbreaker-core-harness.cjs --installed",

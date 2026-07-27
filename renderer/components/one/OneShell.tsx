@@ -463,6 +463,12 @@ export function OneShell() {
   const [acceptingResult, setAcceptingResult] = useState(false);
   const [runStatus, setRunStatus] = useState("");
   const [runProgress, setRunProgress] = useState<OneRunProgressState>(() => initialOneRunProgress());
+  // Host-owned liveness for a running turn. The stage label and status detail
+  // only move when the runtime emits an event, and a long research turn can emit
+  // nothing for minutes — leaving an identical card on screen that is
+  // indistinguishable from a hang. This clock never depends on the runtime.
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [runElapsedTick, setRunElapsedTick] = useState(0);
   const [composer, setComposer] = useState("");
   const [recurrenceSelection, setRecurrenceSelection] = useState<OneRecurrenceSelectionV1 | null>(null);
   const [recurrencePanelOpen, setRecurrencePanelOpen] = useState(false);
@@ -523,6 +529,19 @@ export function OneShell() {
   selectedTaskIdRef.current = selectedTaskId;
   selectedConversationIdRef.current = selectedConversationId;
   attachmentDraftsRef.current = attachmentDrafts;
+
+  // The run clock starts when the turn starts and is cleared when it ends, so a
+  // stale duration can never be shown next to a run that is no longer going.
+  useEffect(() => {
+    setRunStartedAt(busy ? Date.now() : null);
+  }, [busy]);
+  useEffect(() => {
+    if (!busy) return;
+    const id = window.setInterval(() => setRunElapsedTick((tick) => tick + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [busy]);
+  // runElapsedTick exists purely to re-render the clock each second.
+  void runElapsedTick;
 
   useEffect(() => {
     const input = composerInputRef.current;
@@ -2210,6 +2229,9 @@ export function OneShell() {
                         : tFor(appLocale, "one.shell.thread.working_directly")}
                     </small>
                     {runStatus && <span className={styles.runStatusDetail}>{runStatus}</span>}
+                    {runStartedAt !== null && (
+                      <span className={styles.runElapsed}>{formatRunElapsed(Date.now() - runStartedAt)}</span>
+                    )}
                   </section>
                 )}
                 {selected && selectedConfirmation && (
@@ -2574,6 +2596,14 @@ function SearchHitRow({ hit, active, locale, mutationBusy, onOpenTask, onOpenCon
       )}
     </article>
   );
+}
+
+/** Wall-clock duration of the current run, in the same shape Work/Build use. */
+function formatRunElapsed(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes > 0 ? `${minutes}:${String(seconds).padStart(2, "0")}` : `0:${String(seconds).padStart(2, "0")}`;
 }
 
 function decisionFieldValue(field: OneDecisionField, locale: "ko" | "en"): string {

@@ -346,6 +346,7 @@ import {
   renameChat,
   setChatContinuousMode,
   setChatHiredAgents,
+  setChatRuntimeSelection,
   setChatSwarmMode,
   setChatWorkingFolder,
   switchChatAgent,
@@ -3052,6 +3053,11 @@ export function registerIpcHandlers(): void {
     setChatSwarmMode(id, enabled);
     return getChat(id);
   });
+  ipcMain.handle(
+    "chats:setRuntimeSelection",
+    (_e, id: string, selection: RuntimeSelection | null) =>
+      setChatRuntimeSelection(id, selection),
+  );
   // 고용(빌림) 카드 채팅 바인딩 — 빈 배열이면 해고. 매 send에 자동 재주입되는 원본.
   ipcMain.handle("chats:setHiredAgents", (_e, id: string, cards: HiredAgentCard[]) =>
     setChatHiredAgents(id, Array.isArray(cards) ? cards : []),

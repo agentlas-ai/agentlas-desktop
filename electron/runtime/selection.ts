@@ -1,4 +1,8 @@
-import type { AgentRuntimeOverride, RuntimeStatus } from "../../shared/types";
+import type {
+  AgentRuntimeOverride,
+  RuntimeRole,
+  RuntimeStatus,
+} from "../../shared/types";
 import { findAgentRuntimeOverride, type RuntimeOverrideTarget } from "../store/agent-runtime-overrides";
 import {
   runAnthropicByok,
@@ -138,8 +142,36 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
   return null;
 }
 
-export function pickActive(list: RuntimeStatus[]): RuntimeStatus | null {
-  return list.find((r) => r.active) ?? list[0] ?? null;
+function applyRoleSelection(runtime: RuntimeStatus, role: RuntimeRole): RuntimeStatus {
+  const selection = runtime.roleSelections?.[role];
+  if (!selection) return { ...runtime, active: true };
+  return {
+    ...runtime,
+    active: true,
+    model: selection.model ?? runtime.model,
+    effort: selection.effort ?? runtime.effort,
+    longContextEnabled: selection.longContext ?? runtime.longContextEnabled,
+  };
+}
+
+export function pickActive(
+  list: RuntimeStatus[],
+  role: RuntimeRole = "orchestrator",
+): RuntimeStatus | null {
+  const matched = list.find(
+    (runtime) =>
+      runtime.activeRoles?.includes(role) ||
+      (role === "orchestrator" && runtime.active),
+  );
+  if (matched) return applyRoleSelection(matched, role);
+  if (role === "worker") {
+    const orchestrator = list.find(
+      (runtime) =>
+        runtime.activeRoles?.includes("orchestrator") || runtime.active,
+    );
+    if (orchestrator) return applyRoleSelection(orchestrator, "orchestrator");
+  }
+  return list[0] ? { ...list[0], active: true } : null;
 }
 
 function runtimeMatchesOverride(runtime: RuntimeStatus, override: AgentRuntimeOverride): boolean {
@@ -196,6 +228,7 @@ export function applyRuntimeOverride(
 export function selectRuntimeForTargets(
   runtimes: RuntimeStatus[],
   targets: RuntimeOverrideTarget[],
+  role: RuntimeRole = "orchestrator",
 ): RuntimeChoice | null {
   const override = findAgentRuntimeOverride(targets);
   if (override) {
@@ -206,7 +239,7 @@ export function selectRuntimeForTargets(
     }
   }
 
-  const active = pickActive(runtimes);
+  const active = pickActive(runtimes, role);
   if (!active) return null;
   return {
     active,

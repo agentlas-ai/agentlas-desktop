@@ -12,6 +12,7 @@ import { probeLMStudio } from "./lmstudio";
 import { probeMLX } from "./mlx";
 import { hasApiKey } from "../secrets/vault";
 import { getDb } from "../store/db";
+import { listResolvedModelRoles, setModelRole } from "../store/model-roles";
 import type {
   RuntimeBackend,
   RuntimeKind,
@@ -52,6 +53,15 @@ function cloneRuntimeStatuses(list: RuntimeStatus[]): RuntimeStatus[] {
         },
       ]))
       : runtime.allocationModelProfiles,
+    activeRoles: runtime.activeRoles ? [...runtime.activeRoles] : runtime.activeRoles,
+    roleSelections: runtime.roleSelections
+      ? Object.fromEntries(
+          Object.entries(runtime.roleSelections).map(([role, selection]) => [
+            role,
+            selection ? { ...selection } : selection,
+          ]),
+        )
+      : runtime.roleSelections,
     efforts: runtime.efforts ? runtime.efforts.map((effort) => ({ ...effort })) : runtime.efforts,
   }));
 }
@@ -168,6 +178,19 @@ function isActiveRuntime(status: RuntimeStatus, active: ActiveRuntimeRow | null)
     return status.kind === active.kind && status.backend === active.backend;
   }
   return status.kind === active.kind;
+}
+
+function runtimeMatchesSelection(
+  status: RuntimeStatus,
+  selection: RuntimeSelection,
+): boolean {
+  return isActiveRuntime(status, {
+    kind: selection.kind,
+    backend: selection.backend ?? null,
+    source: selection.source ?? null,
+    model: selection.model ?? null,
+    long_context: selection.longContext ? 1 : 0,
+  });
 }
 
 function saveActiveRuntime(status: RuntimeStatus | RuntimeSelection): void {
@@ -555,15 +578,50 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   if (!list.some((runtime) => runtime.active) && list.length > 0) {
     list[0].active = true;
     saveActiveRuntime(list[0]);
+    setModelRole({
+      kind: list[0].kind,
+      backend: list[0].backend,
+      source: list[0].source,
+      model: list[0].model ?? undefined,
+      longContext: list[0].longContextEnabled,
+      effort: list[0].effort ?? undefined,
+      role: "orchestrator",
+    });
+  }
+
+  const roleAssignments = listResolvedModelRoles();
+  for (const runtime of list) {
+    const activeRoles = (["orchestrator", "worker"] as const).filter((role) => {
+      const selection = roleAssignments[role]?.selection;
+      return selection ? runtimeMatchesSelection(runtime, selection) : false;
+    });
+    runtime.activeRoles = activeRoles;
+    runtime.roleSelections = Object.fromEntries(
+      activeRoles.map((role) => [role, { ...roleAssignments[role]!.selection }]),
+    );
+    // Legacy `active` remains the orchestrator alias.
+    runtime.active = activeRoles.includes("orchestrator");
   }
 
   return list;
 }
 
 export async function setActiveRuntime(selection: RuntimeSelection): Promise<RuntimeStatus[]> {
-  saveActiveRuntime(selection);
-  // effort가 명시된 경우에만 갱신 — 모델만 바꾸는 호출은 기존 작업량을 유지.
-  if (selection.effort !== undefined) setStoredEffort(selection.effort);
+  const role = selection.role ?? "orchestrator";
+  setModelRole({ ...selection, role });
+  if (role === "orchestrator") {
+    // active_runtime is the orchestrator compatibility mirror.
+    saveActiveRuntime(selection);
+    // effort가 명시된 경우에만 갱신 — 모델만 바꾸는 호출은 기존 작업량을 유지.
+    if (selection.effort !== undefined) setStoredEffort(selection.effort);
+  } else if (!selection.inherit) {
+    rememberRuntimeSelection(
+      selection.kind,
+      selection.backend,
+      selection.model,
+      Boolean(selection.longContext),
+    );
+  }
   clearDetectCache();
   return detectRuntimes();
 }

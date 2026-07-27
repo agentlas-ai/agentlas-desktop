@@ -110,6 +110,47 @@ function UsageBar({ w, ko }: { w: UsageWindow; ko: boolean }) {
   );
 }
 
+function ModelRoleUsage({ value, ko }: {
+  value: UsageSnapshot["modelRoleUsage"];
+  ko: boolean;
+}) {
+  if (!value) return null;
+  const workerPct = value.workerSharePercent;
+  const orchestratorPct = value.totalObservedTokens > 0 ? 100 - workerPct : 0;
+  const measurementLabel = value.measurement === "output-only"
+    ? ko ? "관측 출력 토큰" : "observed output tokens"
+    : ko ? "관측 전체 토큰" : "observed total tokens";
+  return (
+    <section className="dashboard-role-usage" aria-label={ko ? "모델 역할별 사용량" : "Model usage by role"}>
+      <div className="dashboard-role-usage-head">
+        <span>{ko ? "모델 역할 사용량 · 7일" : "Model role usage · 7d"}</span>
+        <strong>{value.totalObservedTokens > 0
+          ? ko ? `워커 ${workerPct}%` : `${workerPct}% worker`
+          : ko ? "관측 데이터 없음" : "No observed usage"}</strong>
+      </div>
+      <div
+        className="dashboard-role-usage-track"
+        role="img"
+        aria-label={
+          value.totalObservedTokens > 0
+            ? ko
+              ? `오케스트레이터 ${orchestratorPct}%, 워커 ${workerPct}%`
+              : `${orchestratorPct}% orchestrator, ${workerPct}% worker`
+            : ko ? "관측된 모델 사용량 없음" : "No observed model usage"
+        }
+      >
+        <span data-role="orchestrator" style={{ width: `${orchestratorPct}%` }} />
+        <span data-role="worker" style={{ width: `${workerPct}%` }} />
+      </div>
+      <div className="dashboard-role-usage-legend">
+        <span><i data-role="orchestrator" />Orch {formatTokens(value.orchestrator.observedTokens)} · {value.orchestrator.invocationCount}</span>
+        <span><i data-role="worker" />Worker {formatTokens(value.worker.observedTokens)} · {value.worker.invocationCount}</span>
+        <small>{measurementLabel}</small>
+      </div>
+    </section>
+  );
+}
+
 export function EngineUsage() {
   const { locale } = useT();
   const ko = locale === "ko";
@@ -466,8 +507,15 @@ export function EngineUsage() {
     const showConnectedChip = connected && !terminalError && !retryableError;
     // The default-engine status and the "use as default" action belong at the
     // top-right of the card (compact), not in the action foot.
-    const isActiveDefault = connected && !!rt?.active;
-    const canUseDefault = connected && !!rt && !rt.active && !terminalError && !retryableError;
+    const activeRoles = connected
+      ? rt?.activeRoles ?? (rt?.active ? ["orchestrator"] : [])
+      : [];
+    const canUseDefault =
+      connected &&
+      !!rt &&
+      !activeRoles.includes("orchestrator") &&
+      !terminalError &&
+      !retryableError;
     const statusLine = (connected
       ? statusText(e, u)
       : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected")
@@ -501,17 +549,35 @@ export function EngineUsage() {
           <span className="sr-only">{e.logoAlt}</span>
           <span className="dashboard-engine-card-name">{e.label}</span>
           <span className="dashboard-engine-head-right" style={{ marginLeft: "auto" }}>
-            {isActiveDefault ? (
-              <span className="dashboard-engine-default" title={ko ? "기본 실행 엔진" : "Default run engine"}>{ko ? "기본" : "Default"}</span>
+            {activeRoles.length > 0 ? (
+              <>
+                {activeRoles.map((role) => (
+                  <span
+                    className="dashboard-engine-default"
+                    key={role}
+                    title={
+                      role === "orchestrator"
+                        ? ko
+                          ? "오케스트레이터 기본 엔진"
+                          : "Orchestrator default engine"
+                        : ko
+                          ? "워커 기본 엔진"
+                          : "Worker default engine"
+                    }
+                  >
+                    {role === "orchestrator" ? "Orch" : "Worker"}
+                  </span>
+                ))}
+              </>
             ) : canUseDefault ? (
               <button
                 type="button"
                 className="dashboard-engine-usedefault titlebar-nodrag"
                 onClick={() => { if (rt) void activateEngine(e, rt); }}
                 disabled={busy === e.id}
-                title={ko ? "이 엔진을 기본 실행 엔진으로" : "Make this the default run engine"}
+                title={ko ? "이 엔진을 오케스트레이터 기본값으로" : "Make this the orchestrator default"}
               >
-                {busy === e.id ? busyLabel() : ko ? "기본으로" : "Use default"}
+                {busy === e.id ? busyLabel() : ko ? "Orch 기본" : "Use for Orch"}
               </button>
             ) : showConnectedChip ? (
               <span className="dashboard-engine-connected">{ko ? "연결됨" : "Connected"}</span>
@@ -572,6 +638,8 @@ export function EngineUsage() {
           <button type="button" className="titlebar-nodrag" onClick={() => void loadUsage(true)}>{ko ? "다시 시도" : "Retry"}</button>
         </div>
       )}
+
+      <ModelRoleUsage value={snap?.modelRoleUsage} ko={ko} />
 
       <div className="dashboard-engine-groups">
         {engineGroups.map((group) => {

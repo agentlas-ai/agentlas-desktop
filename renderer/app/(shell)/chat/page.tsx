@@ -25,7 +25,7 @@ import type {
   ToolFactoryScaffoldResult,
   ToolFactoryToolRecord,
 } from "@/lib/types";
-import type { HiredAgentCard, InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage } from "@shared/types";
+import type { HiredAgentCard, InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage, RuntimeSelection } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
@@ -1650,9 +1650,30 @@ function ChatPage() {
       void api.runtime.listCommands().then((cmds) => {
         if (!cancelled) setCliCommands(cmds);
       });
-      // 활성 런타임/모델 — 헤더 칩 표시용.
+      // 역할 기본값 또는 이 채팅의 exact pin — 헤더 칩 표시용.
       void api.runtime.detect().then((list) => {
-        if (!cancelled) setActiveRuntime(list.find((r) => r.active) ?? null);
+        if (cancelled) return;
+        const selection = c.runtimeSelection;
+        const matched = selection
+          ? list.find(
+              (runtime) =>
+                runtime.kind === selection.kind &&
+                (!selection.backend || runtime.backend === selection.backend) &&
+                (!selection.source || runtime.source === selection.source),
+            )
+          : list.find((runtime) => runtime.active);
+        setActiveRuntime(
+          matched
+            ? {
+                ...matched,
+                active: true,
+                model: selection?.model ?? matched.model,
+                effort: selection?.effort ?? matched.effort,
+                longContextEnabled:
+                  selection?.longContext ?? matched.longContextEnabled,
+              }
+            : null,
+        );
       });
       if (c.agentGroupId) {
         void api.agentGroups.getResolved(c.agentGroupId).then((group) => {
@@ -2138,6 +2159,7 @@ function ChatPage() {
           pipelineStages: opts?.pipelineStages,
           routerAgent: opts?.routerAgent,
           sessionRouting: opts?.sessionRouting,
+          runtimeSelection: chat.runtimeSelection ?? undefined,
         });
         window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chat.id } }));
         // runId 도착 전에 Stop을 눌렀다면(레이스) 구독을 건 직후 즉시 취소 — abort 종료 이벤트를 수신해 busy 해제.
@@ -2235,22 +2257,33 @@ function ChatPage() {
     if (next) void send(next.text, next.opts);
   }, [busy, send]);
 
-  // 활성 모델/작업량을 입력창 picker에서 바로 변경 — BYOK 및 CLI 공통.
-  // model === "" 이면 모델 미지정(구독 기본). effort는 명시할 때만 갱신.
+  // 이 채팅의 모델/작업량만 변경한다. 역할 기본값과 다른 채팅은 건드리지 않는다.
+  // model === "" 이면 모델 미지정(구독 기본).
   async function applySelection(patch: { model?: string; effort?: string }) {
     const api = ipc();
-    if (!api || !activeRuntime) return;
-    await api.runtime.setActive({
+    if (!api || !activeRuntime || !chat) return;
+    const selection: RuntimeSelection = {
       kind: activeRuntime.kind,
       backend: activeRuntime.backend,
       source: activeRuntime.source,
       model: patch.model !== undefined ? patch.model || undefined : activeRuntime.model ?? undefined,
       longContext:
         activeRuntime.kind === "byok" ? (activeRuntime.longContextEnabled ?? false) : undefined,
-      effort: patch.effort,
+      effort:
+        patch.effort !== undefined
+          ? patch.effort || undefined
+          : activeRuntime.effort ?? undefined,
+      role: "orchestrator",
+      inherit: false,
+    };
+    const updated = await api.chats.setRuntimeSelection(chat.id, selection);
+    setChat(updated);
+    setActiveRuntime({
+      ...activeRuntime,
+      model: selection.model ?? null,
+      effort: selection.effort ?? null,
+      longContextEnabled: selection.longContext,
     });
-    const list = await api.runtime.detect();
-    setActiveRuntime(list.find((r) => r.active) ?? null);
   }
   const switchModel = (model: string) => void applySelection({ model });
   const switchEffort = (effort: string) => void applySelection({ effort });

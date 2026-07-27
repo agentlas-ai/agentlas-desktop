@@ -1930,16 +1930,32 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["force"])
         ? optionalBoolean(params, "force")
         : "usage.snapshot accepts only force";
-    case "runtime.setActive":
-      return hasOnlyKeys(params, ["kind", "backend", "model", "effort", "longContext"])
-        ? firstError(
-            requiredString(params, "kind", 80),
-            optionalString(params, "backend", 80),
-            optionalString(params, "model", 200),
-            optionalString(params, "effort", 80),
-            optionalBoolean(params, "longContext"),
-          )
-        : "runtime.setActive contains unsupported fields";
+    case "runtime.setActive": {
+      if (!hasOnlyKeys(params, [
+        "kind",
+        "backend",
+        "model",
+        "effort",
+        "longContext",
+        "role",
+        "inherit",
+      ])) {
+        return "runtime.setActive contains unsupported fields";
+      }
+      const error = firstError(
+        requiredString(params, "kind", 80),
+        optionalString(params, "backend", 80),
+        optionalString(params, "model", 200),
+        optionalString(params, "effort", 80),
+        optionalBoolean(params, "longContext"),
+        validateEnum(params, "role", ["orchestrator", "worker"]),
+        optionalBoolean(params, "inherit"),
+      );
+      if (error) return error;
+      return params.inherit === true && params.role !== "worker"
+        ? "inherit is allowed only for the worker runtime role"
+        : null;
+    }
     case "hephaestus.routePreview":
       return hasOnlyKeys(params, ["query", "scope", "allowLocal", "offline"])
         ? firstError(

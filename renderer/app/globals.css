@@ -1591,6 +1591,83 @@ button[data-dashboard-import="true"]:disabled {
   flex-direction: column;
 }
 
+.dashboard-role-usage {
+  display: grid;
+  gap: 8px;
+  margin: 12px 12px 0;
+  padding: 11px 12px;
+  border: 1px solid var(--dash-line);
+  border-radius: 10px;
+  background: color-mix(in oklch, var(--dash-teal-2) 4%, #ffffff);
+}
+
+.dashboard-role-usage-head,
+.dashboard-role-usage-legend {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dashboard-role-usage-head span {
+  color: var(--dash-ink);
+  font-size: 11.5px;
+  font-weight: 760;
+}
+
+.dashboard-role-usage-head strong {
+  margin-left: auto;
+  color: var(--dash-teal-2);
+  font-family: var(--rd-f-mono);
+  font-size: 10.5px;
+}
+
+.dashboard-role-usage-track {
+  display: flex;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e5ebe9;
+}
+
+.dashboard-role-usage-track > span {
+  min-width: 0;
+  transition: width 180ms ease;
+}
+
+.dashboard-role-usage-track > span[data-role="orchestrator"],
+.dashboard-role-usage-legend i[data-role="orchestrator"] {
+  background: #495563;
+}
+
+.dashboard-role-usage-track > span[data-role="worker"],
+.dashboard-role-usage-legend i[data-role="worker"] {
+  background: var(--dash-teal-2);
+}
+
+.dashboard-role-usage-legend {
+  color: var(--dash-muted);
+  font-family: var(--rd-f-mono);
+  font-size: 9.5px;
+}
+
+.dashboard-role-usage-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.dashboard-role-usage-legend i {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+
+.dashboard-role-usage-legend small {
+  margin-left: auto;
+  color: var(--dash-muted);
+  font-size: 9px;
+}
+
 /* 프로바이더 카드 — 잡카드형(로고 좌상단, 상태칩 우상단, 사용량 본문, 하단 액션). */
 .dashboard-engine-groups {
   display: flex;
@@ -1718,6 +1795,47 @@ button[data-dashboard-import="true"]:disabled {
 
 .dashboard-runtime-control {
   overflow: hidden;
+}
+
+.dashboard-runtime-role + .dashboard-runtime-role {
+  border-top: 1px solid var(--dash-line);
+}
+
+.dashboard-runtime-role-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px 0;
+}
+
+.dashboard-runtime-role-head strong {
+  color: var(--dash-ink);
+  font-size: 13px;
+  letter-spacing: -0.01em;
+}
+
+.dashboard-runtime-inherit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 10px 14px 0;
+  color: var(--dash-muted);
+  font-size: 12px;
+}
+
+.dashboard-runtime-inherit label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.dashboard-runtime-message {
+  border-top: 1px solid var(--dash-line);
+  padding: 10px 14px 12px;
+  color: var(--dash-teal-2);
+  font-size: 12px;
 }
 
 .dashboard-runtime-row {

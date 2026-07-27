@@ -1709,7 +1709,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         return asJsonValue(projectMobileBridgeRuntimes(await detectRuntimes()), request.method);
       }
       case "runtime.setActive": {
-        const params = guardedParams(request, ["kind", "backend", "model", "effort", "longContext"]);
+        const params = guardedParams(request, [
+          "kind",
+          "backend",
+          "model",
+          "effort",
+          "longContext",
+          "role",
+          "inherit",
+        ]);
         const kind = requiredEnum(params, "kind", [
           "claude-code",
           "codex",
@@ -1719,6 +1727,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           "byok",
           "ollama",
         ] as const) as RuntimeKind;
+        const role =
+          optionalEnum(params, "role", ["orchestrator", "worker"] as const) ??
+          "orchestrator";
+        const inherit = optionalBoolean(params, "inherit") ?? false;
+        if (inherit && role !== "worker") {
+          throw new Error("Only the worker runtime role can inherit");
+        }
         const backend = optionalIdentifier(params, "backend", 80) as RuntimeBackend | undefined;
         const candidates = await detectRuntimes();
         const runtime = candidates.find((candidate) =>
@@ -1744,6 +1759,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           ...(model !== undefined ? { model } : runtime.model ? { model: runtime.model } : {}),
           ...(effort !== undefined ? { effort } : runtime.effort ? { effort: runtime.effort } : {}),
           ...(longContext !== undefined ? { longContext } : { longContext: runtime.longContextEnabled === true }),
+          role,
+          inherit,
         });
         this.scheduleSnapshotUpdated();
         return asJsonValue(projectMobileBridgeRuntimes(list), request.method);

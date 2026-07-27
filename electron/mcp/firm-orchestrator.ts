@@ -435,11 +435,26 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       // ignore memory failures
     }
   }
-  const runtimeChoice = p.req.agentAppMode ? null : selectRuntimeForTargets(p.runtimes, [
-    { scope: "agent", targetId: node.agentId },
-    { scope: "division", targetId: turn.divisionId && p.chat.firmId ? `${p.chat.firmId}:${turn.divisionId}` : null },
-    { scope: "firm", targetId: p.chat.firmId },
-  ]);
+  const runtimeChoice = p.req.agentAppMode
+    ? null
+    : selectRuntimeForTargets(
+        p.runtimes,
+        [
+          { scope: "agent", targetId: node.agentId },
+          {
+            scope: "division",
+            targetId:
+              turn.divisionId && p.chat.firmId
+                ? `${p.chat.firmId}:${turn.divisionId}`
+                : null,
+          },
+          { scope: "firm", targetId: p.chat.firmId },
+        ],
+        // A firm's CEO is the quality-bearing orchestrator. Every delegated
+        // division/specialist turn uses the worker role, including a division
+        // manager's own plan/synthesis inside that delegated branch.
+        turn.tier === 1 ? "orchestrator" : "worker",
+      );
   const baseActive = runtimeChoice?.picked ? runtimeChoice.active : p.active;
   const basePicked = runtimeChoice?.picked ?? p.picked;
   const candidateRuntimes = firmCandidateRuntimes(p, baseActive, Boolean(runtimeChoice?.override));

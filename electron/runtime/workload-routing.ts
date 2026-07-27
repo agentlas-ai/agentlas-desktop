@@ -694,8 +694,15 @@ export function reconcileWorkloadRunnerResult(
   };
 }
 
+export function modelRoleForWorkloadPhase(phase: WorkloadPhase): "orchestrator" | "worker" {
+  return phase === "delegate" ? "worker" : "orchestrator";
+}
+
 /** Receipt deliberately excludes user prompts, briefs, history, and tool data. */
-export function workloadAllocationReceipt(resolution: WorkloadResolution): Record<string, unknown> {
+export function workloadAllocationReceipt(
+  resolution: WorkloadResolution,
+  observedUsage?: { inputTokens: number; outputTokens: number } | null,
+): Record<string, unknown> {
   const requestedReasonCodes = normalizeReasonCodes(resolution.allocation.reasonCodes);
   const resolutionReasonCodes = normalizeReasonCodes(resolution.resolutionCodes);
   const receiptReasonCodes = [...new Set([...requestedReasonCodes, ...resolutionReasonCodes])];
@@ -724,6 +731,7 @@ export function workloadAllocationReceipt(resolution: WorkloadResolution): Recor
     schemaVersion: "agentlas.model-allocation-receipt.v1",
     decisionId: `desktop:model-allocation:${featureHash.slice(0, 24)}`,
     packetId: null,
+    role: modelRoleForWorkloadPhase(resolution.allocation.phase),
     status,
     requested: {
       tier: resolution.allocation.tier,
@@ -744,6 +752,16 @@ export function workloadAllocationReceipt(resolution: WorkloadResolution): Recor
     independentVerificationRequired: requestedReasonCodes.some((code) =>
       code === "high-risk" || code === "critical-risk" || code === "independent-verification",
     ),
+    usage: observedUsage
+      && Number.isInteger(observedUsage.inputTokens)
+      && observedUsage.inputTokens >= 0
+      && Number.isInteger(observedUsage.outputTokens)
+      && observedUsage.outputTokens >= 0
+      ? {
+          inputTokens: observedUsage.inputTokens,
+          outputTokens: observedUsage.outputTokens,
+        }
+      : null,
     validationIssues: fallback ? requestedReasonCodes : [],
     privacy: { rawPromptIncluded: false, rawTranscriptIncluded: false },
   };

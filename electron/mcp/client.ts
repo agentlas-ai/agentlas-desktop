@@ -3890,6 +3890,24 @@ export async function runMcpInvocation(
       // gap-replay가 자기 답변을 중복 주입하지 않고, 스웜/다른 러너 턴만 메우게 된다.
       if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind);
     }
+    const finalObservedTokens = Math.max(result.tokens ?? 0, liveUsageHigh);
+    if (finalObservedTokens > 0) {
+      tryRecordRunEvent({
+        runId: req.runId ?? `chat:${chat.id}`,
+        kind: "invoke_result",
+        chatId: chat.id,
+        agentId: agent.id,
+        payload: {
+          invocationId: memoryTurnId,
+          modelRole: "orchestrator",
+          provider: active.backend ?? active.kind,
+          model: active.model ?? null,
+          tokens: finalObservedTokens,
+          measurement: "output-only",
+          phase: "chat",
+        },
+      });
+    }
     if (oneToolFailureBlocksCompletion()) {
       sink({
         kind: "error",
@@ -3909,7 +3927,13 @@ export async function runMcpInvocation(
       };
     }
     // 연속 패스에서 result.tokens는 마지막 패스만 반영 — 라이브 누적 최고치와 큰 쪽을 확정치로.
-    sink({ kind: "final", text: displayWithFloor, tokens: Math.max(result.tokens ?? 0, liveUsageHigh) || undefined });
+    sink({
+      kind: "final",
+      text: displayWithFloor,
+      tokens: finalObservedTokens || undefined,
+      model: active.model ?? active.kind,
+      modelRole: "orchestrator",
+    });
     return {
       finalText: displayWithFloor,
       tokens: result.tokens,

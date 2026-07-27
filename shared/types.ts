@@ -577,6 +577,7 @@ export type {
 } from "./multimodal";
 
 export type RuntimeKind = "claude-code" | "codex" | "gemini" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx";
+export type RuntimeRole = "orchestrator" | "worker";
 
 /** LLM 제공자. "ollama"/"lmstudio"/"mlx"는 로컬 머신에서 도는 오픈 모델(gemma/deepseek/qwen 등). */
 export type RuntimeBackend =
@@ -601,6 +602,10 @@ export interface RuntimeSelection {
   kind: RuntimeKind;
   backend?: RuntimeBackend;
   source?: string;
+  /** Persistent role default. Omitted means orchestrator for backward compatibility. */
+  role?: RuntimeRole;
+  /** Worker-only quality-first inheritance. true means use the orchestrator selection. */
+  inherit?: boolean;
   /** ollama·BYOK 등 모델을 골라야 하는 LLM에서 활성 모델 이름 (예: "llama3.1", "claude-opus-4-8") */
   model?: string;
   /** BYOK 긴 컨텍스트(1M) opt-in 토글. beta-header 모델에만 의미. (auto 모델은 항상 ON 취급) */
@@ -645,6 +650,10 @@ export interface RuntimeStatus {
   version: string | null;
   /** 사용자가 현재 이 LLM을 활성으로 선택했는지 */
   active: boolean;
+  /** Persistent role defaults that currently resolve to this runtime. */
+  activeRoles?: RuntimeRole[];
+  /** Exact per-role model/effort selection, including worker inheritance. */
+  roleSelections?: Partial<Record<RuntimeRole, RuntimeSelection>>;
   /** ollama·BYOK 활성 모델 이름. 모델 개념 없는 LLM은 미설정 */
   model?: string | null;
   /** ollama가 로컬에 받아둔 모델 목록 (설정 화면의 모델 선택용). 그 외 LLM은 미설정 */
@@ -1298,6 +1307,8 @@ export interface Chat {
   /** 이 채팅에 고용(빌림)된 허브 에이전트 카드 — 메타데이터만(패키지 내용 없음, 복사 방지).
    *  있으면 매 send에 borrowAgents로 자동 재주입된다. 해고(clear) 전까지 유지. */
   hiredAgents: HiredAgentCard[];
+  /** Exact chat-scoped orchestrator pin. null means follow the role default. */
+  runtimeSelection?: RuntimeSelection | null;
 }
 
 export type CanonicalTaskStatus =
@@ -3608,6 +3619,8 @@ export interface McpInvocationEvent {
   agentName?: string;
   /** 회사 내 역할 ("CEO" / "마케팅 본부장" / ...) */
   role?: string;
+  /** Model-economy role; kept separate from the human/firm role above. */
+  modelRole?: RuntimeRole;
   /** 계층: 1=CEO, 2=본부, 3=전문가 */
   tier?: 1 | 2 | 3;
   /** 오케스트레이션 단계 — plan(위임 결정) / delegate(하위 실행) / synthesize(종합) */
@@ -3783,10 +3796,31 @@ export interface CliRuntimeVersionStatus {
   checkedAt: number | null;
 }
 
+export interface ModelRoleUsageBucket {
+  role: RuntimeRole;
+  /** Provider-observed tokens. Current runners expose output tokens consistently. */
+  observedTokens: number;
+  invocationCount: number;
+}
+
+export interface ModelRoleUsageSnapshot {
+  /** Inclusive UTC window used by Main's append-only run-event query. */
+  since: string;
+  until: string;
+  /** No input-token zeroes are fabricated while runner coverage is output-only. */
+  measurement: "output-only" | "total";
+  orchestrator: ModelRoleUsageBucket;
+  worker: ModelRoleUsageBucket;
+  totalObservedTokens: number;
+  workerSharePercent: number;
+}
+
 /** 전체 엔진 사용량 스냅샷 — 대시보드 "엔진 연결·사용량" 모듈이 소비. */
 export interface UsageSnapshot {
   providers: ProviderUsage[];
   fetchedAt: number;
+  /** Seven-day role split derived from real model-call completion receipts. */
+  modelRoleUsage?: ModelRoleUsageSnapshot;
   /** Main이 runtime.detect와 결합한 설치 버전 + 무중단 자동 업데이트 상태. */
   runtimeVersions?: CliRuntimeVersionStatus[];
 }
@@ -5650,6 +5684,11 @@ export interface AgentlasIpc {
     setContinuousMode: (id: string, enabled: boolean) => Promise<Chat>;
     /** 스웜 모드 on/off — 여러 워커가 목표를 분해해 병렬 협업. */
     setSwarmMode: (id: string, enabled: boolean) => Promise<Chat>;
+    /** Set or clear this chat's exact orchestrator runtime without changing role defaults. */
+    setRuntimeSelection: (
+      id: string,
+      selection: RuntimeSelection | null,
+    ) => Promise<Chat>;
     /** 고용(빌림) 카드 채팅 바인딩 — 빈 배열이면 해고. 매 send에 자동 재주입되는 원본. */
     setHiredAgents: (id: string, cards: HiredAgentCard[]) => Promise<Chat>;
     /** 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(없으면 null). */

@@ -58,6 +58,14 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
     return () => window.removeEventListener("agentlas:auth-changed", onAuthChanged);
   }, [refresh]);
 
+  // 퀘스트 보상 수령 직후(QuestBoard 브로드캐스트) 즉시 동기화 — 60초 폴링을
+  // 기다리는 동안 "+50 지급 완료"라는데 잔액이 그대로인 불신을 없앤다.
+  useEffect(() => {
+    const onCreditsRefresh = () => void refresh();
+    window.addEventListener("agentlas:credits-refresh", onCreditsRefresh);
+    return () => window.removeEventListener("agentlas:credits-refresh", onCreditsRefresh);
+  }, [refresh]);
+
   useDismissibleLayer({
     open,
     roots: [rootRef],

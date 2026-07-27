@@ -2571,7 +2571,7 @@ function runtimeDisplayName(runtime: Pick<RuntimeStatus, "kind" | "backend" | "m
 }
 
 function selectionSummary(selection?: RuntimeSelection | null, locale: Locale = "ko"): string {
-  if (!selection) return locale === "ko" ? "전역 활성 런타임" : "Global active runtime";
+  if (!selection) return locale === "ko" ? "역할별 기본값" : "Role defaults";
   const base = selection.kind === "byok" ? `BYOK · ${selection.backend ?? "provider"}` : selection.kind;
   return [base, selection.model, selection.effort ? `effort ${selection.effort}` : ""].filter(Boolean).join(" · ");
 }
@@ -2754,7 +2754,7 @@ function RuntimeAssignmentPanel({
           </p>
         </div>
         <span style={{ fontSize: 10.5, padding: "2px 7px", borderRadius: 999, background: selectedOverride ? "rgba(12,166,120,0.12)" : "var(--fill-2)", color: selectedOverride ? "var(--green-deep)" : "var(--muted-deep)", fontWeight: 700 }}>
-          {selectedOverride ? (locale === "ko" ? "고정됨" : "Pinned") : (locale === "ko" ? "전역 기본" : "Global default")}
+          {selectedOverride ? (locale === "ko" ? "고정됨" : "Pinned") : (locale === "ko" ? "역할 기본" : "Role defaults")}
         </span>
       </div>
 
@@ -2785,7 +2785,7 @@ function RuntimeAssignmentPanel({
         <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, color: "var(--muted-deep)", fontWeight: 600 }}>
           {locale === "ko" ? "모델" : "Model"}
           <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} style={runtimeSelectStyle}>
-            <option value="">{locale === "ko" ? "구독/전역 기본" : "Subscription / global default"}</option>
+            <option value="">{locale === "ko" ? "구독/역할 기본" : "Subscription / role default"}</option>
             {modelOptions.map((model) => (
               <option key={model.id} value={model.id}>
                 {model.label}{model.tag ? ` · ${cliModelTagLabel(model.tag, locale)}` : ""}
@@ -2820,7 +2820,7 @@ function RuntimeAssignmentPanel({
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
         <button onClick={clearOverride} disabled={saving || !selectedOverride} style={{ ...runtimeButtonStyle, opacity: selectedOverride ? 1 : 0.45 }}>
-          {locale === "ko" ? "전역 기본" : "Global default"}
+          {locale === "ko" ? "역할 기본 사용" : "Use role defaults"}
         </button>
         <button onClick={saveOverride} disabled={saving || !selectedRuntime} style={{ ...runtimeButtonStyle, background: "var(--accent)", color: "#fff", border: "1px solid var(--accent)" }}>
           {saving ? (locale === "ko" ? "저장 중..." : "Saving...") : (locale === "ko" ? "저장" : "Save")}
@@ -4597,7 +4597,7 @@ function AgentDetailView({
                   <h4 style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 700 }}>{locale === "ko" ? "런타임 정보" : "Runtime info"}</h4>
                   <div style={{ fontSize: 12.5, lineHeight: 1.8, color: "var(--ink-soft)" }}>
                     <div><strong>{locale === "ko" ? "에이전트 ID:" : "Agent ID:"}</strong> {node.agentId ?? (locale === "ko" ? "미설치(임시)" : "Not installed (temporary)")}</div>
-                    <div><strong>{locale === "ko" ? "적용 런타임:" : "Active runtime:"}</strong> {effectiveRuntimeOverride ? selectionSummary(effectiveRuntimeOverride.selection, locale) : (locale === "ko" ? "전역 자동 라우팅" : "Global auto-routing")}</div>
+                    <div><strong>{locale === "ko" ? "적용 런타임:" : "Active runtime:"}</strong> {effectiveRuntimeOverride ? selectionSummary(effectiveRuntimeOverride.selection, locale) : (locale === "ko" ? "역할별 자동 라우팅" : "Role-based auto-routing")}</div>
                     <div><strong>{locale === "ko" ? "신뢰 등급:" : "Trust grade:"}</strong> Trust {agent?.trustGrade ?? "B"}</div>
                     {agent && (() => {
                       const own = classifyAgent(agent, locale);

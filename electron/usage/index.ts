@@ -12,12 +12,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import type {
+  ModelRoleUsageSnapshot,
   ProviderUsage,
   UsageRetryProviderId,
   UsageRetryResult,
   UsageSnapshot,
   UsageWindow,
 } from "../../shared/types";
+import { getDb } from "../store/db";
 import { getClaudeUsage } from "./claude";
 import { getCodexUsage } from "./codex";
 import { getGeminiUsage } from "./gemini";
@@ -46,6 +48,68 @@ const backoffUntil = new Map<string, number>();
 const providerFetchInFlight = new Map<string, Promise<ProviderUsage | null>>();
 const explicitRetryGate = new UsageRetryGate(FORCE_MIN_MS);
 const explicitRetryInFlight = new Map<UsageRetryProviderId, Promise<UsageRetryResult>>();
+const MODEL_ROLE_USAGE_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
+export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
+  const sinceMs = now - MODEL_ROLE_USAGE_WINDOW_MS;
+  const empty = (role: "orchestrator" | "worker") => ({
+    role,
+    observedTokens: 0,
+    invocationCount: 0,
+  });
+  const buckets = {
+    orchestrator: empty("orchestrator"),
+    worker: empty("worker"),
+  };
+  let outputOnlyRows = 0;
+  try {
+    const rows = getDb().prepare(
+      `SELECT
+         json_extract(payload_json, '$.modelRole') AS role,
+         COUNT(*) AS invocation_count,
+         COALESCE(SUM(CASE
+           WHEN json_type(payload_json, '$.tokens') = 'integer'
+             THEN json_extract(payload_json, '$.tokens')
+           ELSE 0
+         END), 0) AS observed_tokens,
+         COALESCE(SUM(CASE
+           WHEN json_extract(payload_json, '$.measurement') = 'output-only' THEN 1
+           ELSE 0
+         END), 0) AS output_only_rows
+       FROM run_events
+       WHERE kind = 'invoke_result'
+         AND ts >= ?
+         AND json_extract(payload_json, '$.modelRole') IN ('orchestrator', 'worker')
+       GROUP BY json_extract(payload_json, '$.modelRole')`,
+    ).all(new Date(sinceMs).toISOString()) as Array<{
+      role: "orchestrator" | "worker";
+      invocation_count: number;
+      observed_tokens: number;
+      output_only_rows: number;
+    }>;
+    for (const row of rows) {
+      const bucket = buckets[row.role];
+      bucket.invocationCount = Math.max(0, Math.trunc(Number(row.invocation_count) || 0));
+      bucket.observedTokens = Math.max(0, Math.trunc(Number(row.observed_tokens) || 0));
+      outputOnlyRows += Math.max(0, Math.trunc(Number(row.output_only_rows) || 0));
+    }
+  } catch {
+    // Older or partially migrated profiles get an explicit zero snapshot.
+  }
+  const totalObservedTokens =
+    buckets.orchestrator.observedTokens + buckets.worker.observedTokens;
+  return {
+    since: new Date(sinceMs).toISOString(),
+    until: new Date(now).toISOString(),
+    measurement: outputOnlyRows > 0 ? "output-only" : "total",
+    orchestrator: buckets.orchestrator,
+    worker: buckets.worker,
+    totalObservedTokens,
+    workerSharePercent: totalObservedTokens > 0
+      ? Math.round((buckets.worker.observedTokens / totalObservedTokens) * 100)
+      : 0,
+  };
+}
 
 // ── last-good 디스크 영속화 ────────────────────────────────────────────────
 // 메모리 전용이면 앱 재시작 직후 첫 조회가 429/네트워크 장애를 맞을 때 보여줄 게 없어
@@ -231,7 +295,11 @@ async function buildUsageSnapshot(options?: {
   for (const r of results) {
     if (r.status === "fulfilled" && r.value) providers.push(r.value);
   }
-  const snapshot: UsageSnapshot = { providers, fetchedAt: now };
+  const snapshot: UsageSnapshot = {
+    providers,
+    fetchedAt: now,
+    modelRoleUsage: modelRoleUsageSnapshot(now),
+  };
   cache = { snapshot, at: now };
   return snapshot;
 }

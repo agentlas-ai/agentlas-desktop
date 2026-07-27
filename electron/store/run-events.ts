@@ -286,6 +286,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     status: ev.status,
     phase: ev.phase,
     role: ev.role,
+    modelRole: ev.modelRole,
     agentName: ev.agentName,
     model: ev.model,
     nodeState: ev.nodeState,

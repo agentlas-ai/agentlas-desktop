@@ -770,6 +770,17 @@
 .runProgress small { color: #7b8185; font-size: 10px; }
 .runStatusDetail { overflow: hidden; color: #9a9fa2; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 
+/* The stage label only moves when the runtime emits an event, and a long
+   research turn can emit nothing for minutes. This clock is host-owned, so it
+   keeps advancing and the run never reads as frozen. */
+.runElapsed {
+  grid-column: 2;
+  color: #9a9fa2;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
 .decisionCard {
   display: grid;
   gap: 16px;
