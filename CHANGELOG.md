@@ -1,6 +1,37 @@
 # Changelog
 
-## 0.9.25 — 2026-07-27
+## 0.9.26 — 2026-07-27
+
+This release binds Agentlas OS v1.1.72 at aaadb2267e25b0fecb77d9d8c7f358c2b7aaeecf.
+This changelog entry describes source readiness and does not prove a published
+release.
+
+### Fixed
+
+- Build no longer goes silent for minutes at a time. Liveness is now owned by
+  the host instead of the model: while a builder turn is in flight, Desktop
+  emits its own heartbeat carrying the elapsed time, the last thing the engine
+  actually did, and how long the engine itself has been quiet. Previously the
+  Build Log stopped dead at "Calling Codex CLI…" and a healthy build was
+  indistinguishable from a hang.
+- Codex reasoning is reported again. codex 0.145 emits no `reasoning` item
+  events at all, so the "Thinking…" signal and its 20-second heartbeat never
+  started on that runtime. The turn's own start now opens the reasoning span,
+  and the first message or tool call closes it.
+- Codex warnings and errors reach the user. `error` items (hook trust, skills
+  context budget, tool failures) were dropped on the floor by the event router
+  and never appeared anywhere in the app.
+- A running Build now has a status bar that stays on screen. It is pinned above
+  the scroll, so scrolling to the log no longer hides the only proof the build
+  is alive, and it says whose turn it is — the engine's or yours.
+- The Build stage clock no longer counts from when the page was opened. It was
+  seeded at mount, so a build started later claimed however many minutes the
+  window had been sitting idle.
+- Uploading to Agent Cloud or the public Hub shows what it is doing. The
+  packager already computed every phase — cleaning, routing card, auto-fixing
+  blockers, scanning, packaging, review, upload, receipt — and offered them
+  through an `onStage` callback that had no callers at all. Those phases are now
+  wired to the upload screen as a live timeline with an elapsed clock.
 
 This release binds Agentlas OS v1.1.72 at aaadb2267e25b0fecb77d9d8c7f358c2b7aaeecf.
 This changelog entry describes source readiness and does not prove a published

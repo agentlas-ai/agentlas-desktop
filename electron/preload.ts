@@ -7,6 +7,7 @@ import type {
   RendererSubsetJudgmentSpec,
   BrowserApprovalRequestEvent,
   BugReportInput,
+  CloudAgentPublishProgressEvent,
   Automation,
   AutomationCreateInput,
   AutomationGraphReconcileInput,
@@ -398,6 +399,11 @@ const api: AgentlasIpc = {
     saveBuiltPrivate: (input) => ipcRenderer.invoke("cloudAgents:saveBuiltPrivate", input),
     publishPublic: (input) => ipcRenderer.invoke("cloudAgents:publishPublic", input),
     publish: (input) => ipcRenderer.invoke("cloudAgents:publish", input),
+    onProgress: (handler) => {
+      const listener = (_event: unknown, payload: CloudAgentPublishProgressEvent) => handler(payload);
+      ipcRenderer.on("cloudAgents:progress", listener);
+      return () => ipcRenderer.removeListener("cloudAgents:progress", listener);
+    },
   },
   firms: {
     list: () => ipcRenderer.invoke("firms:list"),

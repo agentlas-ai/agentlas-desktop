@@ -2264,6 +2264,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private handleBuildEvent(runId: string, event: HephaestusBuildEvent): void {
     const run = this.buildRuns.get(runId);
     if (!run) return;
+    // Heartbeats are Desktop-local liveness for one live status row; they carry
+    // no build content. The v1 bridge DTO has no such kind and already exposes
+    // `run.status`, so forwarding them would be a silent wire-contract change.
+    if (event.kind === "heartbeat") return;
     let projectedKind: MobileBridgeBuildEventDto["kind"] = event.kind;
     let text = typeof event.text === "string"
       ? boundedRedactedText(stripMobileBridgeControlFences(event.text), BUILD_EVENT_TEXT_MAX_BYTES)

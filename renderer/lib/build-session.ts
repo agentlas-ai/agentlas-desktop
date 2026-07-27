@@ -36,6 +36,23 @@ export interface LogLine {
   at: number;
 }
 
+/**
+ * Host-owned liveness for the current turn. This is a SINGLE live row that gets
+ * replaced, never appended to `log` — a heartbeat every couple of seconds would
+ * otherwise bury the real build output. It is the layer that proves "still
+ * running" while the engine itself streams nothing at all.
+ */
+export interface BuildLiveness {
+  /** Last thing the engine actually did, in the app's language. */
+  activity: string;
+  /** ms since the current runner turn started. */
+  elapsedMs: number;
+  /** ms since the engine last produced anything. */
+  silentMs: number;
+  /** epoch ms this heartbeat arrived — used to keep counting between ticks. */
+  at: number;
+}
+
 export interface BuildResult {
   workspace: string;
   securityScan: unknown;
@@ -105,6 +122,8 @@ export interface BuildState {
   mcpReceipt: McpBuildAttachmentReceipt | null;
   /** Explicit owner-private Agent Cloud vs local-only decision for this Build. */
   cloudSaveChoice: BuildCloudSaveChoice | null;
+  /** Main-emitted liveness for the current turn. null when no turn is running. */
+  liveness: BuildLiveness | null;
 }
 
 // 빌드 파이프라인 단계 수 — 화면의 STAGES 배열과 일치(모드분류·인터뷰/리서치·생성·검증·배포).
@@ -186,6 +205,7 @@ const state: BuildState = {
   mcpSelectedCandidateIds: [],
   mcpReceipt: null,
   cloudSaveChoice: null,
+  liveness: null,
 };
 
 let snapshot: BuildState = { ...state };
@@ -519,6 +539,9 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
   detach();
   lastAcc = "";
   state.phase = "running";
+  // A new turn owns its own liveness; a stale row from the previous turn would
+  // assert that something is running when nothing is yet.
+  state.liveness = null;
   state.errored = false;
   state.awaitingReply = false;
   state.pendingQuestions = [];
@@ -582,6 +605,18 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
   unsub = ev.on(channel, (raw) => {
     if (!isCurrentBuild(generation) || state.runId !== runId) return;
     const e = raw as unknown as HephaestusBuildEvent;
+    // A heartbeat is liveness, not build content: it must not advance a stage
+    // and must not be appended to the log (one every 2s would bury the run).
+    if (e.kind === "heartbeat") {
+      state.liveness = {
+        activity: e.text ?? "",
+        elapsedMs: e.elapsedMs ?? 0,
+        silentMs: e.silentMs ?? 0,
+        at: Date.now(),
+      };
+      commit();
+      return;
+    }
     if (e.kind !== "done") state.reached = stageFromEvent(e, state.reached);
 
     if (e.kind === "partial") {
@@ -604,6 +639,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
     } else if (e.kind === "log") {
       pushLog("log", e.text ?? "");
     } else if (e.kind === "done") {
+      state.liveness = null;
       const assistantText = e.text ?? "";
       const result = e.result as HephaestusBuildResult | undefined;
       state.mcpReceipt = result?.mcpReceipt ?? state.mcpReceipt;
@@ -667,6 +703,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
       void resolveTurnWithoutSignal(workspace, scanFromEvent, readScope, generation);
       return;
     } else if (e.kind === "error") {
+      state.liveness = null;
       state.errored = true;
       pushLog("error", e.text ?? (ko ? "오류" : "Error"));
       state.phase = "error";
@@ -716,11 +753,40 @@ export async function startBuild(activeRuntime?: RuntimeSelection): Promise<void
   const reqLen = state.request.trim().length;
   const mode = state.mode || (ko ? "자동 분류" : "auto-classify");
   state.phase = "running";
-  pushLog("stage", ko ? "MCP 연결 계획 확인 중" : "Checking the MCP attachment plan");
+  pushLog("stage", ko ? "빌드 엔진 확인 중" : "Resolving the build engine");
   pushLog("log", ko ? `요청 길이 ${reqLen}자 · 모드 ${mode}` : `Request length ${reqLen} chars · mode ${mode}`);
   pushLog("log", ko ? `생성 폴더 ${state.workspace}` : `Output folder ${state.workspace}`);
   if (state.attachments.length > 0) pushLog("log", ko ? `첨부 ${state.attachments.length}개: ${state.attachments.map((a) => a.name).join(", ").slice(0, 200)}` : `Attachments ${state.attachments.length}: ${state.attachments.map((a) => a.name).join(", ").slice(0, 200)}`);
   if (resolvedBuildRuntime) pushLog("log", `${ko ? "엔진" : "Engine"} ${resolvedBuildRuntime.kind}${resolvedBuildRuntime.model ? ` · ${resolvedBuildRuntime.model}` : ""}`);
+  commit();
+
+  // The MCP plan is bound to the runtime it was built for, so the runtime has to
+  // be FINAL before the plan exists. Resolving the allocator afterwards changed
+  // the runtime under a plan that was already signed and made every escalated
+  // build fail its own plan check — on both the accept and the decline path.
+  if (!resolvedBuildRuntimePinned) {
+    const preview = await previewBuildAllocation();
+    if (!isCurrentBuild(generation)) return;
+    if (preview?.escalated) {
+      state.pendingAllocation = preview;
+      state.phase = "runtime-approval";
+      pushLog("log", ko
+        ? `상위 AI가 ${describeAllocationRuntime(preview.allocated)} 사용을 제안했습니다 (내 선택: ${describeAllocationRuntime(preview.current)}).`
+        : `The allocator proposes ${describeAllocationRuntime(preview.allocated)} (your choice: ${describeAllocationRuntime(preview.current)}).`);
+      commit();
+      return;
+    }
+  }
+  await loadBuildMcpPlan(generation);
+}
+
+/**
+ * Ask Main for the MCP attachment plan and park the build in `mcp-review`.
+ * Only ever called once the runtime is final — the plan is hashed against it.
+ */
+async function loadBuildMcpPlan(generation: number): Promise<void> {
+  const ko = currentLocale() === "ko";
+  pushLog("stage", ko ? "MCP 연결 계획 확인 중" : "Checking the MCP attachment plan");
   commit();
   try {
     const bridge = ipc();
@@ -770,23 +836,8 @@ export async function approveBuildMcpPlan(selectedCandidateIds: string[]): Promi
   const allowed = new Set(state.mcpPlan.candidates.map((candidate) => candidate.id));
   state.mcpSelectedCandidateIds = [...new Set(selectedCandidateIds)].filter((id) => allowed.has(id));
   const ko = currentLocale() === "ko";
-  // The user's selected model is only a starting point for an unpinned build:
-  // the parent allocator may move the work onto a different (costlier) engine.
-  // Resolve that BEFORE any billable turn so the swap is a decision, not a
-  // surprise discovered in the log afterwards.
-  if (!resolvedBuildRuntimePinned) {
-    const preview = await previewBuildAllocation();
-    if (!isCurrentBuild(buildGeneration)) return;
-    if (preview?.escalated) {
-      state.pendingAllocation = preview;
-      state.phase = "runtime-approval";
-      pushLog("log", ko
-        ? `상위 AI가 ${describeAllocationRuntime(preview.allocated)} 사용을 제안했습니다 (내 선택: ${describeAllocationRuntime(preview.current)}).`
-        : `The allocator proposes ${describeAllocationRuntime(preview.allocated)} (your choice: ${describeAllocationRuntime(preview.current)}).`);
-      commit();
-      return;
-    }
-  }
+  // The runtime was already settled before this plan was created (startBuild),
+  // so nothing may move it between the plan and the run.
   pushLog("stage", ko ? "MCP 선택 승인 — 딥인터뷰 시작" : "MCP selection approved — starting deep interview");
   commit();
   await runTurn(state.request.trim(), buildGeneration);
@@ -824,12 +875,19 @@ export async function resolveRuntimeEscalation(accept: boolean): Promise<void> {
   const preview = state.pendingAllocation;
   const ko = currentLocale() === "ko";
   const chosen = accept ? preview.allocated : preview.current;
-  resolvedBuildRuntime = {
-    kind: chosen.kind as RuntimeSelection["kind"],
-    ...(chosen.backend ? { backend: chosen.backend as RuntimeSelection["backend"] } : {}),
-    ...(chosen.model ? { model: chosen.model } : {}),
-    ...(chosen.effort ? { effort: chosen.effort } : {}),
-  } as RuntimeSelection;
+  // Declining must leave the user's own runtime object untouched. Rebuilding it
+  // from the preview drops fields the preview does not carry (longContext) and
+  // fills in ones the user never set, which is a different runtime identity.
+  if (accept) {
+    resolvedBuildRuntime = {
+      ...(resolvedBuildRuntime ?? {}),
+      kind: chosen.kind as RuntimeSelection["kind"],
+      ...(chosen.backend ? { backend: chosen.backend as RuntimeSelection["backend"] } : {}),
+      ...(chosen.model ? { model: chosen.model } : {}),
+      ...(chosen.effort ? { effort: chosen.effort } : {}),
+      ...(chosen.source ? { source: chosen.source } : {}),
+    } as RuntimeSelection;
+  }
   resolvedBuildRuntimePinned = true;
   runtimeEscalationAccepted = accept;
   state.pendingAllocation = null;
@@ -837,9 +895,9 @@ export async function resolveRuntimeEscalation(accept: boolean): Promise<void> {
   pushLog("log", accept
     ? (ko ? `승인 — ${describeAllocationRuntime(chosen)}(으)로 빌드합니다.` : `Approved — building on ${describeAllocationRuntime(chosen)}.`)
     : (ko ? `내 선택 유지 — ${describeAllocationRuntime(chosen)}(으)로 빌드합니다.` : `Keeping your choice — building on ${describeAllocationRuntime(chosen)}.`));
-  pushLog("stage", ko ? "딥인터뷰 시작" : "Starting deep interview");
   commit();
-  await runTurn(state.request.trim(), buildGeneration);
+  // The runtime is only final now, so the MCP plan is created against it here.
+  await loadBuildMcpPlan(buildGeneration);
 }
 
 /** 인터뷰 답변 제출 — 다음 턴 실행. */
@@ -874,6 +932,7 @@ export function cancelBuild() {
   state.mcpSelectedCandidateIds = [];
   state.mcpReceipt = null;
   state.cloudSaveChoice = null;
+  state.liveness = null;
   detach();
   commit();
 }
@@ -901,6 +960,7 @@ export function resetBuild() {
   state.mcpSelectedCandidateIds = [];
   state.mcpReceipt = null;
   state.cloudSaveChoice = null;
+  state.liveness = null;
   commit();
 }
 

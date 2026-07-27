@@ -56,6 +56,21 @@ export type BuildSink = (ev: HephaestusBuildEvent) => void;
 
 const buildWorkloadCache = new Map<string, WorkloadResolution>();
 
+/** How often a long reasoning span reports that it is still alive in the Build log. */
+const THINKING_HEARTBEAT_MS = 20_000;
+
+/**
+ * How often Main proves the Build is alive, independently of the runtime.
+ *
+ * Liveness must be HOST-owned, never model-owned. codex 0.145 emits no
+ * `reasoning` item events at all (verified against the live CLI), so the
+ * `onThinking` heartbeat never started and the Build Log went dead right after
+ * "Calling Codex CLI…" for the entire reasoning span — a healthy build was
+ * indistinguishable from a hang. This ticker runs for the whole runner turn no
+ * matter what (or whether) the engine streams.
+ */
+const BUILD_LIVENESS_TICK_MS = 2_000;
+
 function buildWorkloadCacheKey(
   req: ResolvedHephaestusBuildRequest,
   active: RuntimeStatus,
@@ -802,6 +817,10 @@ export async function runHephaestusBuild(
     createdAt: nowIso,
   }));
 
+  // Declared out here so the outer `finally` can always stop the ticker, no
+  // matter where inside the turn control leaves.
+  let stopBuildLiveness: (() => void) | null = null;
+
   try {
     const makeRunnerRequest = (attachment = req.mcpAttachment): Parameters<typeof buildPicked.runner>[0] => ({
         systemPrompt,
@@ -826,10 +845,80 @@ export async function runHephaestusBuild(
         signal,
         locale,
       });
+    // ── Host-owned liveness ────────────────────────────────────────────────
+    // This ticker starts with the runner turn and runs until the turn settles,
+    // regardless of whether the runtime streams anything. It is the only
+    // liveness signal that cannot be defeated by a provider that emits no
+    // intermediate events (codex 0.145 emits no reasoning items whatsoever).
+    // `activity` carries the last thing the engine actually did, so the live row
+    // reports WHAT is running rather than a bare spinner.
+    const turnStartedAt = Date.now();
+    let lastActivityAt = turnStartedAt;
+    let lastActivity = ko ? "엔진 시작" : "Engine starting";
+    const markActivity = (label: string): void => {
+      const trimmed = label.trim();
+      lastActivityAt = Date.now();
+      if (trimmed) lastActivity = trimmed.length > 140 ? `${trimmed.slice(0, 140)}…` : trimmed;
+    };
+    const livenessTimer: NodeJS.Timeout = setInterval(() => {
+      sink({
+        runId,
+        kind: "heartbeat",
+        text: lastActivity,
+        elapsedMs: Date.now() - turnStartedAt,
+        silentMs: Date.now() - lastActivityAt,
+      });
+    }, BUILD_LIVENESS_TICK_MS);
+    if (typeof livenessTimer.unref === "function") livenessTimer.unref();
+    stopBuildLiveness = () => clearInterval(livenessTimer);
+
+    // A high-effort reasoning turn can run for minutes with NO runner event at
+    // all: codex only emits agent_message on item.completed, and a turn that
+    // reasons before touching a tool produces nothing in between. The log then
+    // stops dead after "Calling Codex CLI…" and a healthy build is
+    // indistinguishable from a hang. Heartbeat the reasoning span so the log
+    // keeps proving liveness.
+    let thinkingTimer: NodeJS.Timeout | null = null;
+    const stopThinkingHeartbeat = () => {
+      if (thinkingTimer) {
+        clearInterval(thinkingTimer);
+        thinkingTimer = null;
+      }
+    };
     const runnerEvents: Parameters<typeof buildPicked.runner>[1] = {
-        onPartial: (chunk) => sink({ runId, kind: "partial", text: chunk }),
-        onStatus: (status) => sink({ runId, kind: "log", text: status }),
+        onPartial: (chunk) => {
+          markActivity(ko ? "빌더가 답변을 쓰는 중" : "Builder is writing");
+          sink({ runId, kind: "partial", text: chunk });
+        },
+        onStatus: (status) => {
+          markActivity(status);
+          sink({ runId, kind: "log", text: status });
+        },
+        onThinking: (phase, durationMs) => {
+          if (phase === "start") {
+            stopThinkingHeartbeat();
+            const startedAt = Date.now();
+            markActivity(ko ? "생각 중" : "Thinking");
+            sink({ runId, kind: "log", text: ko ? "생각 중…" : "Thinking…" });
+            thinkingTimer = setInterval(() => {
+              const seconds = Math.round((Date.now() - startedAt) / 1000);
+              sink({
+                runId,
+                kind: "log",
+                text: ko ? `아직 생각 중 · ${seconds}초 경과` : `Still thinking · ${seconds}s elapsed`,
+              });
+            }, THINKING_HEARTBEAT_MS);
+            if (typeof thinkingTimer.unref === "function") thinkingTimer.unref();
+            return;
+          }
+          stopThinkingHeartbeat();
+          const seconds = Math.round((durationMs ?? 0) / 1000);
+          if (seconds >= 5) {
+            sink({ runId, kind: "log", text: ko ? `생각 정리 완료 · ${seconds}초` : `Finished thinking · ${seconds}s` });
+          }
+        },
         onTool: (name, args, toolResult, _id, isError) => {
+          markActivity(`${name} ${(args ?? "").slice(0, 90)}`.trim());
           // 도구 호출(args 있음)만 한 줄로 표시. 도구 결과(args 없음)는 에러일 때만 표시한다.
           // — 안 그러면 tool_use/tool_result 양쪽에서 발화돼 "Bash" 같은 줄이 중복된다.
           if (args !== undefined) {
@@ -840,7 +929,9 @@ export async function runHephaestusBuild(
           }
         },
       };
-    const runnerOutcome = await runBuildRunnerWithMcpRecovery({
+    let runnerOutcome;
+    try {
+      runnerOutcome = await runBuildRunnerWithMcpRecovery({
       runner: buildPicked.runner,
       attachment: req.mcpAttachment,
       makeRequest: makeRunnerRequest,
@@ -871,7 +962,12 @@ export async function runHephaestusBuild(
                 : "Isolated one MCP startup failure; retrying once with healthy MCPs only. The failed capability is unavailable.",
         });
       },
-    });
+      });
+    } finally {
+      // A turn that ends mid-reasoning (error, abort, cancel) must not leave the
+      // heartbeat ticking into the next turn's log.
+      stopThinkingHeartbeat();
+    }
     const result = runnerOutcome.result;
     const finalMcpAttachment = runnerOutcome.attachment;
     const executedWorkload = reconcileWorkloadRunnerResult(workload, result);
@@ -903,6 +999,7 @@ export async function runHephaestusBuild(
     const completedPackageRoot = completedPackage.root;
     const mcpReceipt = finalMcpAttachment?.receipt ?? emptyMcpBuildReceipt("legacy-empty-build");
     if (!signal.aborted && isCompletedBuildTurn(resultText)) {
+      markActivity(ko ? "정적 보안 스캔" : "Static security scan");
       sink({ runId, kind: "stage", stage: "security", text: ko ? "정적 보안 스캔" : "Static security scan" });
       if (completedPackage.error) {
         scan = { status: "unverified", reason: completedPackage.error };
@@ -946,6 +1043,7 @@ export async function runHephaestusBuild(
         return Array.isArray(blockers) ? blockers.map(String) : null;
       };
       const runContractVerify = async (): Promise<unknown> => {
+        markActivity(ko ? "패키지 계약 검증" : "Verifying package contract");
         const res = await contractVerify(completedPackageRoot, { mode: buildMode, signal });
         if (res.json && readBlockers(res.json) !== null) return res.json;
         // 구버전 엔진(contract 커맨드 없음)/무결과 — 클린처럼 보이지 않게 명시.
@@ -957,6 +1055,7 @@ export async function runHephaestusBuild(
         const blockers = readBlockers(contractReport);
         if (!blockers || blockers.length === 0 || blockers.length >= previousCount) break;
         previousCount = blockers.length;
+        markActivity(ko ? `계약 표적 수리 ${round}/2` : `Targeted contract repair ${round}/2`);
         sink({
           runId,
           kind: "stage",
@@ -1029,5 +1128,10 @@ export async function runHephaestusBuild(
     } else {
       sink({ runId, kind: "error", text: ko ? `빌드 실패: ${(e as Error).message}` : `Build failed: ${(e as Error).message}` });
     }
+  } finally {
+    // The turn is over on every path (done, interview, error, cancel). A ticker
+    // that outlives its turn would keep asserting liveness for a build that has
+    // already stopped — the exact lie this whole mechanism exists to prevent.
+    stopBuildLiveness?.();
   }
 }

@@ -214,9 +214,25 @@ function runCodexProcess(
     let stderr = "";
     let lastEmit = 0;
     // reasoning 구간/라이브 토큰 추정 상태 — 상태줄 실시간 표시용.
-    let reasoningDepth = 0;
+    // 단일 open/close 플래그다(깊이 카운터가 아니다): 이 구간은 진짜 `reasoning`
+    // 아이템으로도 열리고, reasoning 아이템을 전혀 내보내지 않는 codex 빌드에서는
+    // `turn.started`로 합성 개시된다. 둘을 한 카운터에 섞으면 깊이가 0으로 못 내려와
+    // 구간이 영구히 열린 채 남는다.
+    let thinkingOpen = false;
     let reasoningStartedAt = 0;
     let estChars = 0;
+
+    const openThinking = (): void => {
+      if (thinkingOpen) return;
+      thinkingOpen = true;
+      reasoningStartedAt = Date.now();
+      events.onThinking?.("start");
+    };
+    const closeThinking = (): void => {
+      if (!thinkingOpen) return;
+      thinkingOpen = false;
+      events.onThinking?.("end", Date.now() - reasoningStartedAt);
+    };
 
     const truncateUi = (s: string, max = 12000): string =>
       s.length > max ? `${s.slice(0, max)}…` : s;
@@ -256,25 +272,32 @@ function runCodexProcess(
     }): void => {
       if (ev.type === "thread.started" && typeof ev.thread_id === "string") {
         threadId = ev.thread_id;
+      } else if (ev.type === "turn.started") {
+        // codex 0.145 emits NO `reasoning` item events (verified against the
+        // live CLI), so `item.started/reasoning` below never fires and nothing
+        // marks the start of the model's think time. turn.started is the only
+        // event that reliably precedes it — treat it as the opening of a
+        // reasoning span so callers get a "thinking" signal instead of silence.
+        openThinking();
+      } else if (ev.type === "item.completed" && ev.item?.type === "error") {
+        // Was dropped on the floor: `isToolItem("error")` is false, so codex's
+        // own warnings/errors (hook trust, skill budget, tool failures) never
+        // reached the user at all.
+        const message = (ev.item as { message?: unknown }).message;
+        if (typeof message === "string" && message.trim()) {
+          events.onStatus(`codex: ${truncateUi(message, 400)}`);
+        }
       } else if (ev.type === "item.started" && ev.item?.type === "reasoning") {
         // reasoning 구간 신호 — 상태줄 "생각 중…" 회전의 근거 (Claude 경로와 동일 계약).
-        if (reasoningDepth === 0) {
-          reasoningStartedAt = Date.now();
-          events.onThinking?.("start");
-        }
-        reasoningDepth += 1;
+        openThinking();
       } else if (ev.type === "item.completed" && ev.item?.type === "reasoning") {
-        if (reasoningDepth > 0) {
-          reasoningDepth -= 1;
-          if (reasoningDepth === 0) {
-            events.onThinking?.("end", Date.now() - reasoningStartedAt);
-          }
-        }
+        closeThinking();
       } else if (
         ev.type === "item.completed" &&
         ev.item?.type === "agent_message" &&
         typeof ev.item.text === "string"
       ) {
+        closeThinking();
         text += (text ? "\n" : "") + ev.item.text;
         // 라이브 토큰 추정 — codex는 중간 usage가 없어 스트리밍 문자 수/4로 추정(단조 증가).
         estChars += ev.item.text.length;
@@ -285,6 +308,7 @@ function runCodexProcess(
           lastEmit = now;
         }
       } else if ((ev.type === "item.started" || ev.type === "item.completed") && isToolItem(ev.item?.type)) {
+        closeThinking();
         const item = ev.item!;
         const name =
           item.name ??
@@ -324,9 +348,12 @@ function runCodexProcess(
           item.id,
           isError,
         );
-      } else if (ev.type === "turn.completed" && ev.usage?.output_tokens != null) {
-        tokens = ev.usage.output_tokens;
-        events.onUsage?.(tokens);
+      } else if (ev.type === "turn.completed") {
+        closeThinking();
+        if (ev.usage?.output_tokens != null) {
+          tokens = ev.usage.output_tokens;
+          events.onUsage?.(tokens);
+        }
       }
     };
 

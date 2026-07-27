@@ -1,13 +1,51 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { IconCheck, IconFileUp } from "@/components/Icon";
-import type { CloudAgentRegisteredUploadOption, FsPathGrant } from "@shared/types";
+import type {
+  CloudAgentPublishProgressEvent,
+  CloudAgentPublishStage,
+  CloudAgentRegisteredUploadOption,
+  FsPathGrant,
+} from "@shared/types";
 import { useSearchParams } from "next/navigation";
 
 type Visibility = "private-link" | "marketplace";
+
+/**
+ * The visible phase timeline. Research on long-running agent UIs is consistent:
+ * for multi-minute work a phase timeline beats a percentage bar, because the
+ * remaining time is genuinely unknown but the current phase never is. Main emits
+ * every one of these; before this they existed only as an unused callback.
+ */
+const UPLOAD_PHASES: { key: CloudAgentPublishStage; ko: string; en: string; publicOnly?: boolean }[] = [
+  { key: "starting", ko: "시작", en: "Starting" },
+  { key: "cleaning", ko: "공개용 사본 정리", en: "Cleaning a publish copy", publicOnly: true },
+  { key: "scanning", ko: "파일 안전 검사", en: "Scanning files" },
+  { key: "packaging", ko: "패키지 생성", en: "Building the package" },
+  { key: "reviewing", ko: "검토", en: "Reviewing" },
+  { key: "uploading", ko: "업로드", en: "Uploading" },
+  { key: "receipt", ko: "영수증 저장", en: "Saving the receipt" },
+];
+
+/** Sub-phases that report inside another phase rather than advancing the list. */
+const UPLOAD_DETAIL_STAGES: Partial<Record<CloudAgentPublishStage, { ko: string; en: string }>> = {
+  "routing-card": { ko: "라우팅 카드 생성", en: "Generating the routing card" },
+  remediating: { ko: "차단 항목 자동 수정", en: "Auto-fixing a blocker" },
+  blockers: { ko: "차단 항목 확인", en: "Blockers found" },
+  excluded: { ko: "파일 제외", en: "Excluded a file" },
+  "scan-clean": { ko: "차단 항목 없음", en: "No blockers left" },
+  metadata: { ko: "다국어 메타데이터 생성", en: "Generating bilingual metadata" },
+};
+
+function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `0:${String(s).padStart(2, "0")}`;
+}
 
 type UploadIssue = {
   severity: string;
@@ -51,6 +89,30 @@ export default function CloudAgentPublishPage() {
   const [registeredKey, setRegisteredKey] = useState("");
   const [running, setRunning] = useState<Visibility | null>(null);
   const [result, setResult] = useState<UploadResult | null>(null);
+  // Live upload progress. `progressId` correlates Main's events to THIS upload,
+  // so a stale event from an abandoned run can never drive the current bar.
+  const progressIdRef = useRef<string>("");
+  const [progressStage, setProgressStage] = useState<CloudAgentPublishStage | null>(null);
+  const [progressDetail, setProgressDetail] = useState<string>("");
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [nowTick, setNowTick] = useState(0);
+
+  useEffect(() => {
+    const off = ipc()?.cloudAgents.onProgress((event: CloudAgentPublishProgressEvent) => {
+      if (!progressIdRef.current || event.progressId !== progressIdRef.current) return;
+      setProgressStage(event.stage);
+      setProgressDetail(event.detail ?? "");
+    });
+    return () => off?.();
+  }, []);
+
+  // The host owns the clock. It keeps advancing even while a single phase runs
+  // silently for a minute, which is exactly when a static label reads as frozen.
+  useEffect(() => {
+    if (startedAt === null) return;
+    const id = window.setInterval(() => setNowTick((t) => t + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [startedAt]);
 
   useEffect(() => {
     let cancelled = false;
@@ -90,16 +152,21 @@ export default function CloudAgentPublishPage() {
       });
       return;
     }
+    const progressId = globalThis.crypto?.randomUUID?.() ?? `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    progressIdRef.current = progressId;
+    setProgressStage("starting");
+    setProgressDetail("");
+    setStartedAt(Date.now());
     setRunning(visibility);
     setResult(null);
     try {
       const res = selectedRegistered
         ? visibility === "marketplace"
-          ? await api.cloudAgents.publishRegisteredPublic({ target: selectedRegistered.target })
-          : await api.cloudAgents.saveRegisteredPrivate({ target: selectedRegistered.target })
+          ? await api.cloudAgents.publishRegisteredPublic({ target: selectedRegistered.target, progressId })
+          : await api.cloudAgents.saveRegisteredPrivate({ target: selectedRegistered.target, progressId })
         : visibility === "marketplace"
-          ? await api.cloudAgents.publishPublic({ rootGrant: rootGrant! })
-          : await api.cloudAgents.savePrivate({ rootGrant: rootGrant! });
+          ? await api.cloudAgents.publishPublic({ rootGrant: rootGrant!, progressId })
+          : await api.cloudAgents.savePrivate({ rootGrant: rootGrant!, progressId });
       const json = res as unknown as Record<string, unknown>;
       const issues = extractIssues(res);
       const careerGraph = extractCareerGraph(json);
@@ -140,7 +207,12 @@ export default function CloudAgentPublishPage() {
         detail,
       });
     } finally {
+      // The run is over on every path — stop asserting that a phase is live.
+      progressIdRef.current = "";
       setRunning(null);
+      setProgressStage(null);
+      setProgressDetail("");
+      setStartedAt(null);
     }
   }
 
@@ -237,6 +309,18 @@ export default function CloudAgentPublishPage() {
           </div>
         </div>
 
+        {running && (
+          <UploadProgressPanel
+            ko={ko}
+            visibility={running}
+            stage={progressStage}
+            detail={progressDetail}
+            elapsedMs={startedAt === null ? 0 : Date.now() - startedAt}
+            // nowTick only exists to re-render this panel every second.
+            tick={nowTick}
+          />
+        )}
+
         {result && (
           <section className="glass-thin" style={panel}>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -324,6 +408,126 @@ function CareerGraphProofBox({ proof, ko }: { proof: CareerGraphProof; ko: boole
       <div style={careerGraphPolicy}>
         {proof.policy || "redacted_aggregate_projection"}
       </div>
+    </section>
+  );
+}
+
+/**
+ * Live upload timeline. Four layers, in the order a stuck user asks for them:
+ * (1) an always-advancing elapsed clock, (2) the current phase by name,
+ * (3) the phases already done and still to come, (4) the last low-level detail
+ * Main reported (file being fixed, blocker count, slug being uploaded).
+ */
+function UploadProgressPanel({
+  ko,
+  visibility,
+  stage,
+  detail,
+  elapsedMs,
+  tick,
+}: {
+  ko: boolean;
+  visibility: Visibility;
+  stage: CloudAgentPublishStage | null;
+  detail: string;
+  elapsedMs: number;
+  tick: number;
+}) {
+  void tick;
+  const isPublic = visibility === "marketplace";
+  const phases = UPLOAD_PHASES.filter((phase) => isPublic || !phase.publicOnly);
+  const subPhase = stage ? UPLOAD_DETAIL_STAGES[stage] : undefined;
+  // A sub-phase reports inside whichever phase is already active, so the
+  // timeline must not rewind to "starting" when one arrives.
+  const activeIndex = (() => {
+    const direct = phases.findIndex((phase) => phase.key === stage);
+    if (direct >= 0) return direct;
+    if (stage === "routing-card" || stage === "remediating" || stage === "blockers" || stage === "excluded" || stage === "scan-clean") {
+      return Math.max(0, phases.findIndex((phase) => phase.key === "cleaning"));
+    }
+    if (stage === "metadata") return Math.max(0, phases.findIndex((phase) => phase.key === "packaging") - 1);
+    return 0;
+  })();
+
+  return (
+    <section className="glass-thin" style={panel}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
+          <span className="forge-pulse" />
+          <strong style={{ fontSize: 13.5, color: "var(--ink)" }}>
+            {ko
+              ? isPublic ? "Hub에 공개 발행 중" : "Agent Cloud에 저장 중"
+              : isPublic ? "Publishing to Hub" : "Saving to Agent Cloud"}
+          </strong>
+        </div>
+        <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--muted-deep)", fontVariantNumeric: "tabular-nums" }}>
+          {formatElapsed(elapsedMs)}
+        </span>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 4 }}>
+        {phases.map((phase, index) => {
+          const state = index < activeIndex ? "done" : index === activeIndex ? "active" : "pending";
+          return (
+            <div
+              key={phase.key}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 9,
+                padding: "5px 0",
+                opacity: state === "pending" ? 0.42 : 1,
+              }}
+            >
+              <span
+                style={{
+                  width: 16,
+                  height: 16,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderRadius: 999,
+                  border: state === "pending" ? "1px solid var(--paper-edge)" : "none",
+                  background: state === "done" ? "var(--green-deep)" : state === "active" ? "var(--ink)" : "transparent",
+                  color: "var(--paper)",
+                  flexShrink: 0,
+                }}
+              >
+                {state === "done" ? <IconCheck size={10} /> : state === "active" ? <span className="forge-pulse" style={{ background: "var(--paper)" }} /> : null}
+              </span>
+              <span style={{ fontSize: 12.5, color: state === "active" ? "var(--ink)" : "var(--ink-soft)", fontWeight: state === "active" ? 750 : 500 }}>
+                {ko ? phase.ko : phase.en}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      <div
+        style={{
+          marginTop: 4,
+          padding: "8px 10px",
+          borderRadius: "var(--radius-md)",
+          background: "var(--paper-2, var(--paper))",
+          border: "1px solid var(--paper-edge)",
+          fontFamily: "var(--font-mono)",
+          fontSize: 11.5,
+          color: "var(--muted-deep)",
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {subPhase ? (ko ? subPhase.ko : subPhase.en) : ko ? "진행 중" : "Working"}
+        {detail ? ` · ${detail}` : ""}
+      </div>
+
+      <p style={{ margin: 0, fontSize: 11.5, color: "var(--muted-deep)", lineHeight: 1.5 }}>
+        {ko
+          ? "이 창을 닫지 마세요. 실패해도 원본 폴더는 수정되지 않습니다."
+          : "Keep this window open. Your original folder is never modified, even on failure."}
+      </p>
     </section>
   );
 }

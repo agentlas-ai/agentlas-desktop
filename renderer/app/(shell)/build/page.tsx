@@ -174,7 +174,7 @@ export default function BuildPage() {
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
-  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, result, registered, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpReceipt, cloudSaveChoice } = s;
+  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, result, registered, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpReceipt, cloudSaveChoice, liveness } = s;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const applyOneReviewSeed = useCallback((seed: OneSuggestionReviewSeed): OneReviewSeedApplyResult => {
@@ -270,7 +270,9 @@ export default function BuildPage() {
   }, [locale]);
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [log]);
+    // The live tail row sits below the last log line, so a heartbeat that does
+    // not touch `log` would otherwise render off the bottom of the box.
+  }, [log, liveness]);
   useEffect(() => {
     setSelectedOptions({});
     setQuestionNotes({});
@@ -295,6 +297,39 @@ export default function BuildPage() {
       return "pending";
     });
   }, [reached, phase, errored]);
+
+  // 실행 경과 표시 — 텍스트 한 줄 없이도 "죽지 않았다"를 증명하는 유일한 신호.
+  // 단계(reached)가 바뀔 때만 리셋한다: 같은 단계 안에서 여러 인터뷰 턴이 오가도
+  // (phase가 running↔interview로 왕복해도) 그 단계에 들어간 뒤 누적 시간을 보여준다.
+  const stageStartedAtRef = useRef<number>(Date.now());
+  const [elapsedTick, setElapsedTick] = useState(0);
+  useEffect(() => {
+    stageStartedAtRef.current = Date.now();
+  }, [reached]);
+  // The ref is seeded at MOUNT, but a build usually starts long after the page
+  // was opened — without this the very first stage claimed however many minutes
+  // the page had been sitting idle. A liveness element that overstates the clock
+  // is worse than none, so re-seed the moment the build actually becomes active.
+  const wasActiveRef = useRef(false);
+  useEffect(() => {
+    const active = phase === "running" || phase === "interview" || phase === "mcp-review" || phase === "runtime-approval";
+    if (active && !wasActiveRef.current) stageStartedAtRef.current = Date.now();
+    wasActiveRef.current = active;
+  }, [phase]);
+  useEffect(() => {
+    if (phase !== "running" && phase !== "interview" && phase !== "mcp-review" && phase !== "runtime-approval") return;
+    const id = window.setInterval(() => setElapsedTick((t) => t + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [phase]);
+  const stageElapsedLabel = useMemo(() => {
+    const seconds = Math.max(0, Math.round((Date.now() - stageStartedAtRef.current) / 1000));
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `0:${String(s).padStart(2, "0")}`;
+    // elapsedTick is intentionally unused in the body — it exists only to force
+    // this memo to recompute every second while the ref-backed start time itself
+    // does not change.
+  }, [reached, phase, elapsedTick]);
 
   const pickWorkspace = async () => {
     const api = ipc();
@@ -453,6 +488,43 @@ export default function BuildPage() {
           </header>
 
           <KeyStatusBanner mode="banner" />
+
+          {/* Ambient status layer — pinned so it is on screen no matter how far
+              the log has scrolled. This is the one element that must never go
+              quiet: the pipeline card scrolls away, and the Build Log genuinely
+              has nothing to print while a runtime reasons for minutes. */}
+          {busy && (
+            <div className="build-livebar" role="status" aria-live="polite">
+              <span className="forge-pulse" />
+              <strong className="build-livebar-stage">
+                {phase === "interview"
+                  ? ko ? "딥인터뷰 — 답변 대기" : "Deep interview — awaiting your answer"
+                  : phase === "mcp-review"
+                    ? ko ? "MCP 연결 계획 확인" : "Confirm the MCP plan"
+                    : ko
+                      ? STAGES[Math.min(reached, STAGES.length - 1)].label
+                      : STAGES[Math.min(reached, STAGES.length - 1)].labelEn}
+              </strong>
+              <span className="build-livebar-activity" title={liveness?.activity || undefined}>
+                {/* While the build is waiting on the PERSON, the engine is idle
+                    by design. Reporting engine activity there would describe
+                    work that is not happening. */}
+                {phase === "interview"
+                  ? ko ? "당신 차례입니다 — 아래 질문에 답해 주세요" : "Your turn — answer the questions below"
+                  : phase === "mcp-review"
+                    ? ko ? "당신 차례입니다 — MCP 선택을 확인하세요" : "Your turn — confirm the MCP selection"
+                    : liveness?.activity || (ko ? "엔진 준비 중" : "Preparing the engine")}
+              </span>
+              <span className="build-livebar-time">{stageElapsedLabel}</span>
+              {phase === "running" && liveness && liveness.silentMs >= 15_000 && (
+                <span className="build-livebar-silent">
+                  {ko
+                    ? `엔진 응답 대기 ${Math.round(liveness.silentMs / 1000)}초`
+                    : `engine quiet ${Math.round(liveness.silentMs / 1000)}s`}
+                </span>
+              )}
+            </div>
+          )}
 
           <Suspense fallback={null}>
             <OneSuggestionReviewHandoffBanner surface="build" locale={locale} onReviewSeed={applyOneReviewSeed} />
@@ -652,11 +724,13 @@ export default function BuildPage() {
                     <span className="build-live">
                       <span className="forge-pulse" />
                       {ko ? STAGES[Math.min(reached, STAGES.length - 1)].label : STAGES[Math.min(reached, STAGES.length - 1)].labelEn}
+                      <em className="build-live-elapsed">{stageElapsedLabel}</em>
                     </span>
                   ) : phase === "interview" ? (
                     <span className="build-live">
                       <span className="forge-pulse" />
                       {ko ? "딥인터뷰 진행 중" : "deep interview"}
+                      <em className="build-live-elapsed">{stageElapsedLabel}</em>
                     </span>
                   ) : (
                     <span>{phase}</span>
@@ -664,7 +738,14 @@ export default function BuildPage() {
                 </div>
                 <div className="build-pipeline-list">
                   {STAGES.map((s, i) => (
-                    <StageRow key={s.key} stage={s} state={stageStates[i]} isLast={i === STAGES.length - 1} ko={ko} />
+                    <StageRow
+                      key={s.key}
+                      stage={s}
+                      state={stageStates[i]}
+                      isLast={i === STAGES.length - 1}
+                      ko={ko}
+                      elapsedLabel={stageStates[i] === "active" ? stageElapsedLabel : undefined}
+                    />
                   ))}
                 </div>
               </div>
@@ -850,6 +931,20 @@ export default function BuildPage() {
                     {l.kind === "stage" ? `> ${l.text}` : l.text}
                   </div>
                 ))}
+                {/* One replaceable tail row, never appended history. It is the
+                    only thing in this box while a runtime streams nothing. */}
+                {liveness && (
+                  <div data-kind="heartbeat" className="build-log-tail">
+                    <span className="build-log-time">{fmtLogTime(liveness.at)}</span>
+                    <span className="build-log-tail-dot" />
+                    {liveness.activity}
+                    {liveness.silentMs >= 15_000
+                      ? ko
+                        ? ` · 엔진 응답 대기 ${Math.round(liveness.silentMs / 1000)}초`
+                        : ` · engine quiet ${Math.round(liveness.silentMs / 1000)}s`
+                      : ""}
+                  </div>
+                )}
                 <div ref={logEndRef} />
               </div>
             </section>
@@ -902,11 +997,14 @@ function StageRow({
   state,
   isLast,
   ko,
+  elapsedLabel,
 }: {
   stage: (typeof STAGES)[number];
   state: StageState;
   isLast: boolean;
   ko: boolean;
+  /** Wall-clock time spent on this stage so far. Only meaningful while state === "active". */
+  elapsedLabel?: string;
 }) {
   const Icon = stage.icon;
   const c = stage.color;
@@ -925,7 +1023,7 @@ function StageRow({
       <div className="build-stage-copy">
         <div>
           <span>{ko ? stage.label : stage.labelEn}</span>
-          {active && <em>{ko ? "진행 중" : "running"}</em>}
+          {active && <em>{ko ? "진행 중" : "running"}{elapsedLabel ? ` · ${elapsedLabel}` : ""}</em>}
           {done && <em>{ko ? "완료" : "done"}</em>}
           {error && <em>{ko ? "중단" : "stopped"}</em>}
         </div>

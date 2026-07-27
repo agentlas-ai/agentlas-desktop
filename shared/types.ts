@@ -3025,6 +3025,8 @@ export interface CloudAgentPackageRequest {
   reviewMode?: CloudAgentReviewMode;
   /** Optional operator note stored with the registration request. */
   notes?: string;
+  /** Opaque renderer-generated correlation id for live upload progress. Not authority. */
+  progressId?: string;
 }
 
 /** Renderer-to-main request. The native picker capability, not a renderer path,
@@ -3047,6 +3049,8 @@ export type CloudAgentPrivateSaveRequest = Omit<
 export interface CloudAgentBuiltPrivateSaveRequest {
   folder: string;
   scope: FsReadScope;
+  /** Opaque renderer-generated correlation id for live upload progress. Not authority. */
+  progressId?: string;
 }
 
 /** Explicit public Agentlas Hub publish. Public routing and review gates apply. */
@@ -3067,11 +3071,44 @@ export interface CloudAgentRegisteredUploadOption {
 
 export interface CloudAgentRegisteredSaveRequest {
   target: CloudAgentRegisteredTarget;
+  /** Opaque renderer-generated correlation id for live upload progress. Not authority. */
+  progressId?: string;
 }
 
 export interface CloudAgentRegisteredPublishRequest extends CloudAgentRegisteredSaveRequest {
   reviewMode?: CloudAgentReviewMode;
   notes?: string;
+}
+
+/** Ordered, machine-readable phases of one Agent Cloud / Hub upload. */
+export type CloudAgentPublishStage =
+  | "starting"
+  | "cleaning"
+  | "routing-card"
+  | "remediating"
+  | "blockers"
+  | "excluded"
+  | "scan-clean"
+  | "scanning"
+  | "metadata"
+  | "packaging"
+  | "reviewing"
+  | "uploading"
+  | "receipt"
+  | "done"
+  | "error";
+
+/**
+ * Live upload progress. Main already computed these phases internally; before
+ * this event they were only ever passed to an `onStage` callback that had zero
+ * callers, so every upload looked frozen from the renderer's side.
+ */
+export interface CloudAgentPublishProgressEvent {
+  progressId: string;
+  stage: CloudAgentPublishStage;
+  detail?: string;
+  /** ms since the upload started — always advances, even while a phase is silent. */
+  elapsedMs: number;
 }
 
 export interface CloudAgentSecurityFinding {
@@ -4333,12 +4370,21 @@ export type HephaestusUploadVisibility = "private-link" | "marketplace";
 /** hep-build(빌더) 스트리밍 이벤트 — 데스크탑 런타임으로 Hephaestus 빌더 에이전트 구동. */
 export interface HephaestusBuildEvent {
   runId: string;
-  kind: "log" | "stage" | "partial" | "done" | "error";
+  kind: "log" | "stage" | "partial" | "done" | "error" | "heartbeat";
   text?: string;
   stage?: string;
   /** CLI 런타임이 반환한 재개 가능한 세션 id. 다음 인터뷰 턴에서 그대로 이어간다. */
   sessionId?: string;
   result?: unknown;
+  /**
+   * heartbeat only — host-owned liveness. Emitted on a timer by Main while a
+   * runner turn is in flight, so a runtime that streams NOTHING for minutes
+   * (codex emits no reasoning items at all) can never look like a hang.
+   * Heartbeats replace one live status row; they are never appended to the log.
+   */
+  elapsedMs?: number;
+  /** heartbeat only — how long the engine stream itself has been silent. */
+  silentMs?: number;
 }
 
 /** Main-authored supplemental question. It never comes from model text. */
@@ -5491,6 +5537,8 @@ export interface AgentlasIpc {
     publishPublic: (input: CloudAgentHubPublishRequest) => Promise<CloudAgentPackageResult>;
     /** Compatibility surface. Omitted visibility now means private-link; marketplace remains an explicit flag. */
     publish: (input: CloudAgentPublishRequest) => Promise<CloudAgentPackageResult>;
+    /** Live upload phases for the in-flight `progressId`. Returns an unsubscribe. */
+    onProgress: (handler: (event: CloudAgentPublishProgressEvent) => void) => () => void;
   };
   firms: {
     list: () => Promise<InstalledFirm[]>;

@@ -13,7 +13,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { RuntimeStatus } from "../../shared/types";
+import type { CloudAgentPublishStage, RuntimeStatus } from "../../shared/types";
 import type { Runner, RunnerRequest } from "../runtime/runner";
 import { pickRunner } from "../runtime/selection";
 import { detectRuntimes } from "../runtime/detect";
@@ -493,7 +493,7 @@ export async function remediateBlockers(input: {
   locale?: "ko" | "en";
   signal?: AbortSignal;
   deterministicOnly?: boolean;
-  onStage?: (stage: string, detail?: string) => void;
+  onStage?: (stage: CloudAgentPublishStage, detail?: string) => void;
 }): Promise<{ changed: boolean; actions: RemediationAction[] }> {
   const folder = path.resolve(input.folder);
   const locale = input.locale ?? "ko";

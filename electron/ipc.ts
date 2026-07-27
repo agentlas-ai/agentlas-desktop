@@ -145,7 +145,7 @@ import { normalizeRecommendation } from "./hephaestus/recommendation";
 import { confirmUpload, PathGuardError, resolveFolderArg } from "./hephaestus/path-guard";
 import { getEngineToggles, isSupervisorEnabled, setEngineToggle, setSupervisorEnabled } from "./hephaestus/supervisor";
 import { previewBuildAllocation, runHephaestusBuild } from "./hephaestus/builder";
-import { resolveHephaestusBuildRequestForRun } from "./hephaestus/build-access";
+import { resolveHephaestusBuildRequest, resolveHephaestusBuildRequestForRun } from "./hephaestus/build-access";
 import { pickLocale } from "./runtime/status-i18n";
 import { currentUiLocale } from "./ui-locale";
 import { buildChatRecap, markChatRecapViewed } from "./chat/recap";
@@ -644,6 +644,8 @@ import type {
   CloudAgentBuiltPrivateSaveRequest,
   CloudAgentHubPublishRequest,
   CloudAgentPrivateSaveRequest,
+  CloudAgentPublishProgressEvent,
+  CloudAgentPublishStage,
   CloudAgentPublishRequest,
   CloudAgentRegisteredPublishRequest,
   CloudAgentRegisteredSaveRequest,
@@ -2775,32 +2777,66 @@ export function registerIpcHandlers(): void {
   });
 
   // ── cloud agents ────────────────────────────────────────────
+  //
+  // Upload progress. `packageAndReviewCloudAgent` has always computed its phases
+  // and offered them through `opts.onStage`, but no caller ever passed one — so
+  // every upload surface showed a static "…중" label for the whole run and a
+  // user could not tell a working upload from a dead one. These options bind
+  // that existing callback to a renderer event channel, correlated by an opaque
+  // renderer-generated `progressId`. The id carries no authority: it only routes
+  // progress back to the window that started the upload.
+  const cloudPublishProgressOptions = (
+    event: IpcMainInvokeEvent,
+    progressId: string | undefined,
+    locale?: "ko" | "en",
+  ): { onStage?: (stage: CloudAgentPublishStage, detail?: string) => void; locale?: "ko" | "en" } => {
+    if (!progressId) return locale ? { locale } : {};
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const startedAt = Date.now();
+    return {
+      ...(locale ? { locale } : {}),
+      onStage: (stageName, detail) => {
+        if (!win || win.isDestroyed()) return;
+        try {
+          win.webContents.send("cloudAgents:progress", {
+            progressId,
+            stage: stageName,
+            ...(detail ? { detail } : {}),
+            elapsedMs: Date.now() - startedAt,
+          } satisfies CloudAgentPublishProgressEvent);
+        } catch {
+          /* window went away mid-upload; the invoke result still resolves */
+        }
+      },
+    };
+  };
+
   ipcMain.handle("cloudAgents:listRegisteredUploadOptions", () => registeredUploadOptions());
-  ipcMain.handle("cloudAgents:saveRegisteredPrivate", async (_e, input: CloudAgentRegisteredSaveRequest) => {
+  ipcMain.handle("cloudAgents:saveRegisteredPrivate", async (event, input: CloudAgentRegisteredSaveRequest) => {
     const source = registeredUploadRoot(input.target);
     return packageAndReviewCloudAgent({
       ...source,
       visibility: "private-link",
       reviewMode: "static-only",
-    });
+    }, cloudPublishProgressOptions(event, input.progressId));
   });
-  ipcMain.handle("cloudAgents:publishRegisteredPublic", async (_e, input: CloudAgentRegisteredPublishRequest) => {
+  ipcMain.handle("cloudAgents:publishRegisteredPublic", async (event, input: CloudAgentRegisteredPublishRequest) => {
     const source = registeredUploadRoot(input.target);
     return packageAndReviewCloudAgent({
       ...source,
       visibility: "marketplace",
       reviewMode: input.reviewMode,
       notes: input.notes,
-    });
+    }, cloudPublishProgressOptions(event, input.progressId));
   });
   // Owner-private save is the default product action. It keeps local
   // secret/path/hash safety checks but never opts into public Hub review.
-  ipcMain.handle("cloudAgents:savePrivate", async (_e, input: CloudAgentPrivateSaveRequest) =>
+  ipcMain.handle("cloudAgents:savePrivate", async (event, input: CloudAgentPrivateSaveRequest) =>
     packageAndReviewCloudAgent({
       ...resolveCloudAgentPackageRequest(input),
       visibility: "private-link",
       reviewMode: "static-only",
-    }),
+    }, cloudPublishProgressOptions(event, input.progressId)),
   );
   // Build already received an explicit renderer choice. Do not open another
   // native confirmation here. Main still owns the filesystem authority and the
@@ -2813,14 +2849,14 @@ export function registerIpcHandlers(): void {
       rootPath,
       visibility: "private-link",
       reviewMode: "static-only",
-    });
+    }, cloudPublishProgressOptions(event, input.progressId));
   });
   // Public Hub publication is intentionally a separate, explicit action.
-  ipcMain.handle("cloudAgents:publishPublic", async (_e, input: CloudAgentHubPublishRequest) =>
+  ipcMain.handle("cloudAgents:publishPublic", async (event, input: CloudAgentHubPublishRequest) =>
     packageAndReviewCloudAgent({
       ...resolveCloudAgentPackageRequest(input),
       visibility: "marketplace",
-    }),
+    }, cloudPublishProgressOptions(event, input.progressId)),
   );
   // Compatibility surface for existing callers/flags. The packager defaults
   // omitted visibility to private-link; explicit marketplace remains public.
@@ -4124,7 +4160,11 @@ export function registerIpcHandlers(): void {
   // starting it, so the renderer can confirm an escalation off the user's own
   // choice before any billable work happens.
   ipcMain.handle("hephaestus:previewAllocation", async (_event, req: HephaestusBuildRequest) => {
-    const resolvedRequest = await resolveHephaestusBuildRequestForRun(req);
+    // A preview must have NO side effects. previewBuildAllocation never reads
+    // mcpAttachment, so applying the MCP consent here only installed/probed
+    // servers and froze plan.application before the user had even decided the
+    // runtime — which then made the real build fail its own plan check.
+    const resolvedRequest = resolveHephaestusBuildRequest(req);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 60_000);
     try {

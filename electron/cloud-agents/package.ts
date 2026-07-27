@@ -18,6 +18,7 @@ import type {
   CloudAgentPublicCareerGraph,
   CloudAgentPackageResult,
   CloudAgentPackageRequest,
+  CloudAgentPublishStage,
   CloudAgentRegistrationResult,
   CloudAgentReviewResult,
   CloudAgentRevisionIdentity,
@@ -181,7 +182,7 @@ async function remediateUntilClean(
   restoredExecutablePaths: ReadonlySet<string>,
   active: RuntimeStatus | null,
   locale: "ko" | "en",
-  onStage?: (stage: string, detail?: string) => void,
+  onStage?: (stage: CloudAgentPublishStage, detail?: string) => void,
 ): Promise<RemediationOutcome> {
   const MAX_PASSES = 5;
   const actions: RemediationAction[] = [];
@@ -335,12 +336,17 @@ function summarizeRemediation(actions: RemediationAction[], locale: "ko" | "en")
 export async function packageAndReviewCloudAgent(
   input: CloudAgentPackageRequest,
   opts?: {
-    onStage?: (stage: string, detail?: string) => void;
+    onStage?: (stage: CloudAgentPublishStage, detail?: string) => void;
     locale?: "ko" | "en";
     /** Override the runtime used for auto-fix. Omit to auto-detect; pass null to force the deterministic path. */
     activeRuntime?: RuntimeStatus | null;
   },
 ): Promise<CloudAgentPackageResult> {
+  // Every phase below already existed; none of it was ever reported. `onStage`
+  // had zero callers, so an upload that spends a minute cleaning, scanning,
+  // reviewing, and registering looked identical to a frozen button.
+  const stage = (name: CloudAgentPublishStage, detail?: string): void => opts?.onStage?.(name, detail);
+  stage("starting");
   const rootPath = resolveCloudAgentRoot(input.rootPath);
 
   const visibility = input.visibility ?? "private-link";
@@ -410,7 +416,9 @@ export async function packageAndReviewCloudAgent(
       /* fall back to publishing the original folder unchanged */
     }
   }
+  stage("scanning");
   const scan = scanAgentFolder(scanRoot, restoredExecutablePaths);
+  stage("scanning", String(scan.files.length));
   const snapshot = packageSnapshot(scan.included);
   let routingCard: ReturnType<typeof readRoutingCard> = {};
   let careerGraphCard: CloudAgentPublicCareerGraph | undefined;
@@ -430,6 +438,7 @@ export async function packageAndReviewCloudAgent(
   // agent-card.json. (Was gated behind reviewMode "local-runtime", which the
   // publish path never set, so the localized blocker was unavoidable.)
   if (isPublicHubPublish && localizedListingProblems(localized).length > 0) {
+    stage("metadata");
     localized = await generateLocalizedListingWithSubmitterRuntime(rootPath, name, tagline);
   }
   if (isPublicHubPublish) {
@@ -488,6 +497,7 @@ export async function packageAndReviewCloudAgent(
     ...(careerGraphCard ? { careerGraph: careerGraphCard } : {}),
   };
 
+  stage("packaging", String(scan.included.length));
   const packageDir = packageOutputDir(slug);
   fs.mkdirSync(packageDir, { recursive: true });
   const manifestPath = path.join(packageDir, "package.manifest.json");
@@ -513,6 +523,7 @@ export async function packageAndReviewCloudAgent(
     "utf8",
   );
 
+  stage("reviewing");
   const review =
     isPublicHubPublish && input.reviewMode === "local-runtime"
       ? await runSubmitterRuntimeReview(rootPath, manifest, packageFindings)
@@ -543,6 +554,7 @@ export async function packageAndReviewCloudAgent(
   let registration: CloudAgentRegistrationResult | undefined;
   let status: CloudAgentPackageResult["status"] = blocked ? "blocked" : dryRun ? "dry-run" : "ready";
   if (!blocked && !dryRun) {
+    stage("uploading", slug);
     registration = await registerCloudAgent({
       manifest,
       bundlePath,
@@ -551,6 +563,7 @@ export async function packageAndReviewCloudAgent(
       notes: input.notes,
       baseRegistration,
     });
+    stage("receipt");
     try {
       writeCloudAgentRegistrationMarker({
         rootPath,
@@ -580,6 +593,7 @@ export async function packageAndReviewCloudAgent(
   }
 
   if (autofixCleanup) autofixCleanup();
+  stage(status === "registered" ? "done" : "error", status);
   return {
     status,
     rootPath,

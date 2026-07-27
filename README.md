@@ -69,6 +69,16 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-27 · v0.9.26 — Build and upload stop going silent** — liveness is
+  now owned by the host, not the model: a running build heartbeats its elapsed
+  time, its last real engine activity, and how long the engine has been quiet,
+  under a status bar pinned above the scroll. codex 0.145 emits no reasoning
+  events at all, so "Thinking…" and its heartbeat never fired there and codex's
+  own warnings were dropped entirely — both are fixed. Uploads to Agent Cloud
+  and the Hub now show the phases the packager was already computing but never
+  reporting.
+  This release binds Agentlas OS v1.1.72 at aaadb2267e25b0fecb77d9d8c7f358c2b7aaeecf.
+  This source note does not prove a Desktop installer or update feed.
 - **2026-07-27 · v0.9.25 — One's first-run headline, and refusals that say what
   they actually are** — One's English first-run screen now reads "Build a
   version of you that works. Then you rest." An automation stopped by
