@@ -32,6 +32,13 @@ release.
   blockers, scanning, packaging, review, upload, receipt — and offered them
   through an `onStage` callback that had no callers at all. Those phases are now
   wired to the upload screen as a live timeline with an elapsed clock.
+- A pending update whose recovery copies cannot be verified no longer bricks the
+  app. Startup threw at the same line on every launch, so the app could not be
+  opened again without deleting a file by hand; the blocked install is now
+  abandoned and quarantined, and startup continues. Journal validity also no
+  longer depends on user-facing wording — editing or translating any of the
+  thirteen display strings used to invalidate every journal the previous release
+  had written, making a pending install read as corrupt.
 
 This release binds Agentlas OS v1.1.72 at aaadb2267e25b0fecb77d9d8c7f358c2b7aaeecf.
 This changelog entry describes source readiness and does not prove a published
