@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.24 — 2026-07-27
+
+This release binds Agentlas OS v1.1.72 at aaadb2267e25b0fecb77d9d8c7f358c2b7aaeecf.
+This changelog entry describes source readiness and does not prove a published
+release.
+
+### Changed
+
+- Binds Agentlas OS v1.1.72: the workforce résumé (workforce card block)
+  standard arrives across build, packaging, and upload. Card lint derives a
+  deterministic minimal block for auto-built agents and warns instead of
+  blocking; hub registration enforces the standard with a repair guide the
+  submitter's own model uses to fix and resubmit. The upload flow surfaces
+  that guide verbatim.
+
 ## 0.9.23 — 2026-07-27
 
 ### Fixed

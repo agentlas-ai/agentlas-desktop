@@ -69,6 +69,12 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-27 · v0.9.24 — the workforce résumé standard ships end to end** —
+  card lint auto-derives a minimal workforce block for auto-built agents, hub
+  registration returns a repair guide on mismatch, and the uploader surfaces
+  it verbatim for the submitter's own model to act on.
+  This release binds Agentlas OS v1.1.72 at aaadb2267e25b0fecb77d9d8c7f358c2b7aaeecf.
+  This source note does not prove a Desktop installer or update feed.
 - **2026-07-27 · v0.9.23 — project work stays readable without rewriting memory** —
   the project detail sidebar now shows each completed task as no more than two
   short outcome sentences, keeps exact-session navigation and deleted-chat
