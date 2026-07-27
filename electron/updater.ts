@@ -128,7 +128,22 @@ export function preflightUpdaterStartup(userDataPath = app.getPath("userData")):
     backupPath: snapshot.backupPath,
   };
   const recovery = verifyUpdaterRecoveryCopies({ snapshot, currentUserDataPath: userDataPath });
-  if (!recovery.ok) throw new Error("Updater recovery copies failed the pre-migration safety gate");
+  if (!recovery.ok) {
+    // 이 게이트의 계약은 "폴백 없이 마이그레이션 금지"이지 "폴백 없이 부팅 금지"가
+    // 아니다. 던지면 저널은 남고 복구 사본은 여전히 없으므로 다음 실행도, 그 다음도
+    // 같은 자리에서 죽는다 — 파일을 손으로 지우기 전엔 앱이 열리지 않는다. 실제로
+    // 실패한 네이티브 설치는 blocked 저널을 무기한 남기고, 앱 자신이
+    // shell.showItemInFolder로 사용자를 그 폴더에 보내므로 사본이 사라지는 경로는
+    // 평범하다. 대기 중인 설치를 포기하고 부팅을 계속하는 쪽이 엄격히 더 안전하다:
+    // 마이그레이션은 시작되지 않고, 사용자는 앱을 되찾는다.
+    console.error(
+      `[updater] pre-migration recovery copies unusable (${recovery.violations.join(", ") || "unknown"}); ` +
+        "abandoning the pending install and continuing startup",
+    );
+    persistCorruptJournalHold(userDataPath);
+    startupRecovery = null;
+    return { pendingInstall: false, recoveryBackupAvailable: false };
+  }
   return {
     pendingInstall: true,
     targetVersion: inspection.journal.targetVersion,

@@ -285,12 +285,22 @@ export function updaterDiagnostic(category: UpdaterDiagnosticCategory): UpdaterD
   return { category, message: updaterDiagnosticMessages[category] };
 }
 
+/**
+ * `category` is the durable fact; `message` is this release's wording of it.
+ *
+ * Requiring the persisted message to equal the current English sentence tied
+ * journal validity to display copy: release N writes a journal carrying the
+ * sentence it shipped, release N+1 edits any of the thirteen strings above —
+ * ordinary copy work, including translation — and every journal written by N
+ * becomes invalid on read. A pending install then reads as corrupt for a reason
+ * no one would connect to the edit that caused it. Validate the closed enum and
+ * re-derive the wording, so the record survives the words.
+ */
 export function isValidUpdaterDiagnostic(value: unknown): value is UpdaterDiagnostic {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const raw = value as Record<string, unknown>;
   if (typeof raw.category !== "string" || !(raw.category in updaterDiagnosticMessages)) return false;
-  const category = raw.category as UpdaterDiagnosticCategory;
-  return raw.message === updaterDiagnosticMessages[category];
+  return raw.message === undefined || typeof raw.message === "string";
 }
 
 function nativeErrorClassifierText(error: unknown): string {
@@ -535,7 +545,15 @@ export function inspectInstallJournalFile(file: string): InstallJournalInspectio
   if (!fs.existsSync(file)) return { status: "none" };
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-    return isValidJournal(parsed) ? { status: "valid", journal: parsed } : { status: "corrupt" };
+    if (!isValidJournal(parsed)) return { status: "corrupt" };
+    // Show this release's wording, not the sentence the journal was written
+    // with. The category is what was persisted; the copy is presentation, and a
+    // user reading a diagnostic from two versions ago is reading a string the
+    // product no longer uses.
+    const journal = parsed.diagnostic
+      ? { ...parsed, diagnostic: updaterDiagnostic(parsed.diagnostic.category) }
+      : parsed;
+    return { status: "valid", journal };
   } catch {
     return { status: "corrupt" };
   }
