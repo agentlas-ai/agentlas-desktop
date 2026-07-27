@@ -7,6 +7,7 @@
 // 기록 + max_runs/end_at 종료를 적용한다. graph_json/schedule_json/timezone은 additive.
 import { judgedComputerUse } from "../system-agents/judged-tool-mode";
 import { createHash, randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 import { emitDesktopStoreChange } from "./change-bus";
 import { AUTOMATION_RUN_STALE_AFTER_MS, getDb } from "./db";
 import { nextRun, specFromStored, defaultTz } from "./schedule";
@@ -1335,11 +1336,30 @@ export const AUTOMATION_LEASE_TTL_MS = 15 * 60 * 1000;
 // hard ceiling prevents PID reuse from creating a permanent lock.
 export const AUTOMATION_LIVE_OWNER_GUARD_MS = MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS + 2 * 60 * 1000;
 
+/**
+ * The pid inside a lease owner string, when this machine can vouch for it.
+ *
+ * The desktop writes `<pid>:gui|headless`; the terminal CLI, which shares this
+ * SQLite file, writes `cli:<hostname>:<pid>` (agentlas_terminal
+ * engine/automation/store.cjs). Only the desktop form was recognised, so a live
+ * CLI owner always fell through to "no trusted owner" and its automation was
+ * reclaimed the moment the 15-minute TTL passed — routine for an agent session,
+ * and the CLI run keeps going while a second executor starts on top of it.
+ *
+ * A pid is only meaningful on the machine that minted it, so the CLI form is
+ * trusted only when the recorded hostname is this host. Both products write
+ * their owner string here; keep the two formats in step.
+ */
 function trustedAutomationLeasePid(owner: string | null): number | null {
-  const match = owner?.match(/^([1-9][0-9]*):(gui|headless)$/);
-  if (!match) return null;
-  const pid = Number(match[1]);
-  return Number.isSafeInteger(pid) && pid <= 2_147_483_647 ? pid : null;
+  const asPid = (value: string): number | null => {
+    const pid = Number(value);
+    return Number.isSafeInteger(pid) && pid > 0 && pid <= 2_147_483_647 ? pid : null;
+  };
+  const desktop = owner?.match(/^([1-9][0-9]*):(gui|headless)$/);
+  if (desktop) return asPid(desktop[1]);
+  const cli = owner?.match(/^cli:(.+):([1-9][0-9]*)$/);
+  if (cli && cli[1] === hostname()) return asPid(cli[2]);
+  return null;
 }
 
 function isProcessAlive(pid: number): boolean {
