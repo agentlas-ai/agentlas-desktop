@@ -69,6 +69,15 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-27 · v0.9.25 — One's first-run headline, and refusals that say what
+  they actually are** — One's English first-run screen now reads "Build a
+  version of you that works. Then you rest." An automation stopped by
+  `owner_only` or `insufficient_credits` no longer claims the sign-in expired:
+  neither refusal clears by reconnecting, so the copy now names the real cause
+  and `owner_only` stops promising an automatic retry that cannot succeed for
+  this account.
+  This release binds Agentlas OS v1.1.72 at aaadb2267e25b0fecb77d9d8c7f358c2b7aaeecf.
+  This source note does not prove a Desktop installer or update feed.
 - **2026-07-27 · v0.9.24 — the workforce résumé standard ships end to end** —
   card lint auto-derives a minimal workforce block for auto-built agents, hub
   registration returns a repair guide on mismatch, and the uploader surfaces
