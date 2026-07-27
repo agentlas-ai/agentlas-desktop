@@ -28,7 +28,8 @@ const BLOCKED_PATTERNS: Array<{ re: RegExp; code: string; reason: string }> = [
   { re: /blocked\s+by\s+network\s+security|network\s+security|you['’]?ve\s+been\s+blocked/i, reason: "network security blocked the run" },
   { re: /waiting-for-secure-input|secure-provider-input|credential-vault-input|one-time\s+code|card\s+details/i, reason: "waiting for secure user input" },
   { re: /\binsufficient_credits\b/i, code: "insufficient_credits", reason: "Hub credits are insufficient for this exact Workforce request" },
-  { re: /\bowner_only\b/i, code: "owner_only", reason: "the selected Hub capability is restricted to its owner" },
+  // owner_only는 Hub가 아니라 개인 Cloud 자산의 소유자 확인 거절이다 — Hub는 공개 장터라 소유자 잠금이 없다.
+  { re: /\bowner_only\b/i, code: "owner_only", reason: "the selected Cloud capability is restricted to its owner account" },
   { re: /\bno_cloud_package\b/i, code: "no_cloud_package", reason: "the exact requested Cloud package is unavailable" },
   { re: /\bagent_not_found\b/i, code: "agent_not_found", reason: "the exact requested Hub agent release was not found" },
   { re: /\bsource_unauthorized\b|authentication\s+required|sign[ -]?in\s+required|로그인.{0,20}(필요|만료)/i, code: "hub_auth_required", reason: "Agentlas Hub authentication is required" },
@@ -93,7 +94,7 @@ const STRUCTURED_REASON_CODES = new Set<string>([
   "hub_bundle_fetch_not_supported", "hub_source_forbidden", "workforce_bundle_contract_invalid",
   "workforce_hub_source_contract_invalid", "workforce_session_unavailable",
   "workforce_runtime_incompatible", "partial_reconciliation_required", "ambiguous_side_effect",
-  "workspace_permission_denied", "insufficient_credits",
+  "workspace_permission_denied",
 ]);
 
 /**
@@ -159,6 +160,43 @@ export async function classifyAutomationOutcome(
     reason: verdict.reason || det.reason,
     evidence: det.evidence,
   };
+}
+
+// A run's raw reason string is developer telemetry — codes like
+// `[ambiguous_side_effect] ... durable provider receipt`. Never show it to the
+// person; it read as gibberish spamming their automation chat. Map to plain,
+// honest copy the reader can act on.
+export function customerSafeAutomationDetail(
+  status: Extract<AutomationResultStatus, "partial" | "blocked" | "needs_input">,
+  detail: string,
+): string {
+  const raw = (detail ?? "").toLowerCase();
+  if (/ambiguous_side_effect|durable provider receipt|reconciliation|checkpoint/.test(raw)) {
+    return "외부 작업(게시·전송 등)이 실제로 완료됐는지 확실하지 않아 안전하게 잠시 멈췄어요. 결과를 확인하면 이어서 진행합니다.";
+  }
+  if (/permission|not granted|browser tools?\s+unavailable|권한/.test(raw)) {
+    return "필요한 접근 권한이나 브라우저 연결이 아직 준비되지 않아 멈췄어요.";
+  }
+  // insufficient_credits/owner_only는 로그인 문제가 아니다. 재연결로는 절대 풀리지
+  // 않는 거절이라 로그인 카피에 섞으면 사용자가 헛된 재연결만 반복하게 된다.
+  if (/insufficient_credits|credits?\s+are\s+insufficient|크레딧/.test(raw)) {
+    return "Hub 크레딧이 부족해서 이어가지 못했어요. 크레딧을 충전하면 다음 실행에서 이어집니다. (Hub credits are insufficient — top up to continue.)";
+  }
+  if (/owner_only|restricted\s+to\s+its\s+owner|소유자\s*전용/.test(raw)) {
+    return "이 기능은 다른 계정의 클라우드에 있는 소유자 전용 자산이라 지금 계정으로는 사용할 수 없어요. 자동화 대상을 바꾸거나 소유자 계정으로 전환해야 합니다. (This Cloud capability is owner-only and unavailable to this account.)";
+  }
+  if (/sign[ -]?in|auth|로그인/.test(raw)) {
+    return "연결/로그인이 만료되어 이어가지 못했어요. 다시 연결하면 계속됩니다.";
+  }
+  if (status === "needs_input") return "이어가려면 확인이나 입력이 필요해요.";
+  if (status === "partial") return "일부만 완료됐어요. 나머지는 다음 실행에서 이어서 시도합니다.";
+  return "이번 실행을 완료하지 못했어요. 다음 예약에서 다시 시도합니다.";
+}
+
+/** owner_only는 이 계정에 대한 영구 거절이다 — 같은 자동화를 재시도해도 절대
+ *  성공할 수 없으므로, 후속 안내 카피가 자동 재시도로 회복된다고 약속하면 안 된다. */
+export function isOwnerRestrictedRefusal(detail: string | null | undefined): boolean {
+  return /\bowner_only\b|restricted\s+to\s+its\s+owner/i.test(detail ?? "");
 }
 
 /** Classify an exception/error event without ever turning an unknown failure into success. */

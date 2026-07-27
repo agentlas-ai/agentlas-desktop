@@ -4376,7 +4376,7 @@ const dict = {
     "one.shell.rail.about_one": "About One",
     "one.shell.rail.open_work": "Open Work",
     "one.shell.workspace.open_sidebar_aria": "Open sidebar",
-    "one.shell.firstrun.title": "Build the version of you that works. Then rest.",
+    "one.shell.firstrun.title": "Build a version of you that works. Then you rest.",
     "one.shell.firstrun.body": "Say it however it comes to mind. One organizes the criteria and prepares the right team when the work grows.",
     "one.chips.aria": "Things you can start right away",
     "one.chips.recommended": "Recommended",

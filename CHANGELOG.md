@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.25 — 2026-07-27
+
+### Changed
+
+- One's English first-run headline now reads "Build a version of you that
+  works. Then you rest." The Korean headline is unchanged.
+
+### Fixed
+
+- An automation stopped by `owner_only` or `insufficient_credits` no longer
+  tells the person their sign-in expired. Neither refusal is recoverable by
+  reconnecting, so the previous copy sent readers into repeated pointless
+  reconnect attempts. Each now states its actual cause: a Cloud capability
+  restricted to another owner's account, or exhausted Hub credits that need a
+  top-up.
+- An `owner_only` refusal no longer promises an automatic retry. It is a
+  permanent refusal for this account, so the follow-up line now says the
+  automation target or the signed-in account has to change instead.
+- `owner_only` is described as a Cloud owner-account restriction rather than a
+  Hub one; the public Hub has no per-owner lock.
+
 ## 0.9.24 — 2026-07-27
 
 This release binds Agentlas OS v1.1.72 at aaadb2267e25b0fecb77d9d8c7f358c2b7aaeecf.
