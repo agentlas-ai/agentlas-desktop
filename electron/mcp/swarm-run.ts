@@ -541,7 +541,7 @@ export async function runSwarmInvocation(
         chatId: p.chat.id,
         nodeId: task.id,
         agentId: task.id,
-        payload: workloadAllocationReceipt(executedResolution),
+        payload: workloadAllocationReceipt(executedResolution, result.observedUsage),
       });
     }
     emit(task, { kind: "tool-use", done: true, status: p.locale === "ko" ? `${task.title} 완료` : `${task.title} done` });
@@ -652,7 +652,7 @@ export async function runSwarmInvocation(
       chatId: p.chat.id,
       nodeId: "swarm-synthesizer",
       agentId: p.orchestratorAgent.id,
-      payload: workloadAllocationReceipt(executedResolution),
+      payload: workloadAllocationReceipt(executedResolution, result.observedUsage),
     });
     stormStatus(
       p.locale === "ko"

@@ -1555,6 +1555,84 @@ function MultimodalFallbackPanel({
  * managed runtime this is one quiet monospace line, because a settings panel
  * that explains itself every time trains people to stop reading it.
  */
+/*
+ * 엔진 계정 — 데스크탑 로그인과 **별개**라는 사실을 사용자에게 처음으로 보여준다.
+ *
+ * 두 자격증명이 다르다: 데스크탑은 `agentlas_session` 쿠키를 OS 키체인으로 감싸 두고,
+ * 엔진은 OAuth access token 을 `~/.agentlas/auth/<host>.json` 에 둔다. 엔진은 쿠키를
+ * 받지 않으므로 데스크탑 세션을 그대로 넘겨줄 수 없다(엔진은 수정 범위 밖).
+ *
+ * 예전에는 이 차이가 **Publish 도중에** 드러났다 — 난데없이 브라우저 로그인 창이 뜨거나
+ * 무응답 후 타임아웃. 오늘 그 습격은 막았고(`--no-open`), 대신 여기서 상태를 보여주고
+ * 사용자가 원할 때 **한 번** 끝내게 한다. 토큰 값은 데스크탑이 보지도 저장하지도 않는다.
+ */
+function CoreAccountLine({ attached }: { attached: boolean }) {
+  const { t } = useT();
+  const [state, setState] = useState<"unknown" | "authenticated" | "signed_out">("unknown");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!attached) return;
+    try {
+      const result = await ipc()?.hephaestus.coreAuthStatus();
+      const status = (result?.json as { status?: string } | null)?.status;
+      setState(status === "authenticated" ? "authenticated" : status ? "signed_out" : "unknown");
+    } catch {
+      setState("unknown");
+    }
+  }, [attached]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  if (!attached || state === "unknown") return null;
+
+  async function signIn() {
+    if (busy) return;
+    setBusy(true);
+    setNote(t("settings.update.core_account_opening"));
+    try {
+      const result = await ipc()?.hephaestus.coreAuthLogin();
+      const status = (result?.json as { status?: string } | null)?.status;
+      setNote(status === "authenticated" ? null : t("settings.update.core_account_failed"));
+      await refresh();
+    } catch {
+      setNote(t("settings.update.core_account_failed"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 6, lineHeight: 1.55 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+        <span>
+          {state === "authenticated"
+            ? t("settings.update.core_account_in")
+            : t("settings.update.core_account_out")}
+        </span>
+        {state !== "authenticated" && (
+          <button
+            type="button"
+            onClick={() => void signIn()}
+            disabled={busy}
+            style={{
+              fontSize: 11, padding: "2px 8px", borderRadius: 6,
+              border: "1px solid var(--border)", background: "transparent",
+              color: "var(--muted-deep)", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1,
+            }}
+          >
+            {busy ? t("settings.update.core_account_opening") : t("settings.update.core_account_signin")}
+          </button>
+        )}
+      </div>
+      {note && <div style={{ marginTop: 3 }}>{note}</div>}
+    </div>
+  );
+}
+
 function CoreEngineLine({
   core,
   onUpdated,
@@ -1678,6 +1756,7 @@ function CoreEngineLine({
           {warning}
         </div>
       )}
+      <CoreAccountLine attached={Boolean(core.root)} />
       {(outcome || lastChecked) && (
         <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 3, lineHeight: 1.5 }}>
           {outcome ?? t("settings.update.core_last_checked", { when: lastChecked ?? "" })}

@@ -236,8 +236,16 @@ export interface RunnerResult {
   text: string;
   /** Claude/Codex 같은 CLI 런타임이 반환한 재개 가능한 세션 id. */
   sessionId?: string;
-  /** 생성 토큰 수 (가능한 런타임만) */
+  /** 생성 토큰 수 (가능한 런타임만) — 상태줄 표시용. */
   tokens?: number;
+  /**
+   * 이번 실행에 실제로 든 토큰. 모델 할당 영수증의 `usage` 칸을 채운다.
+   *
+   * 영수증 스키마는 non-null 일 때 입력·출력을 **둘 다** 요구한다. 그래서 출력만 아는
+   * 런타임은 이 값을 아예 두지 않는다 — 입력을 0 으로 채우면 비용 판단이 망가진다.
+   * 없는 것과 0 은 다르고, 없으면 `usage: null` 이 정직한 답이다(스키마도 허용한다).
+   */
+  observedUsage?: { inputTokens: number; outputTokens: number };
   /** Exact effort explicitly applied by the runner; null means no explicit effort was sent. */
   appliedEffort?: string | null;
   /** Present only when a Workforce runtime has verified and enforced its main-minted grant. */

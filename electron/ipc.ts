@@ -136,6 +136,7 @@ import {
 import { resolveRunKeyElicitation } from "./mcp/run-key-elicitation";
 import { invocationService } from "./invocation/service";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
+import { hepAuthLogin, hepAuthStatus } from "./hephaestus/commands";
 import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot, readHephaestusUpdateJournal, runHephaestusRuntimeUpdate } from "./hephaestus/engine";
 import { listSkillCatalog, readSkillCatalogAsset } from "./hephaestus/skill-catalog";
 import {
@@ -2843,6 +2844,50 @@ export function registerIpcHandlers(): void {
     }
   });
 
+  /*
+   * Core CLI 를 부르는 오래 걸리는 작업에 붙이는 옵션 두 가지.
+   *
+   * 1) `noOpen: true` — Core `publish` 는 `--no-open` 없이는 `interactive=True` 로 돌고
+   *    (`agentlas_cloud/cli.py:801`), 자기 토큰(`~/.agentlas/auth/<host>.json`)이 없으면
+   *    브라우저 PKCE 로그인을 띄워 최대 180초 블록한다. 데스크탑은 이미 자기 세션으로
+   *    로그인돼 있는데(safeStorage), 그 신원이 Core 로 전달되지 않는다. 그래서
+   *    "데스크탑에서만 로그인한" 기계에서 Publish 를 누르면 난데없이 브라우저 OAuth 창이
+   *    뜨거나 무응답 후 타임아웃했다(2026-07-28 확인). GUI 앱 안에서 CLI 가 제 브라우저를
+   *    여는 것은 어느 쪽이든 옳지 않다 — 막고, 인증이 없으면 Core 가 정직하게 실패하게 한다.
+   *
+   * 2) `onStdout`/`onStderr` — `runHephaestus` 는 이 콜백을 옵션으로 갖고 있었는데
+   *    **넘기는 호출부가 저장소 전체에 0곳**이었다. publish(300s)·securityScan(180s) 가
+   *    종료 전까지 아무 신호도 안 줘서, 사용자는 도는 작업과 죽은 작업을 구분할 수 없었다.
+   *    바로 위 업로드 진행(`cloudPublishProgressOptions`)이 같은 결함을 이미 한 번 겪었고
+   *    같은 방식으로 고쳤다. 여기도 같은 채널 규약을 쓴다.
+   */
+  const coreProgressOptions = (event: IpcMainInvokeEvent, progressId: string | undefined) => {
+    if (!progressId) return {};
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const startedAt = Date.now();
+    const emit = (stream: "stdout" | "stderr") => (line: string) => {
+      if (!win || win.isDestroyed()) return;
+      const text = line.trim();
+      if (!text) return;
+      try {
+        win.webContents.send("hephaestus:progress", {
+          progressId,
+          stream,
+          line: text.slice(0, 500),
+          elapsedMs: Date.now() - startedAt,
+        });
+      } catch {
+        /* window went away mid-run; the invoke result still resolves */
+      }
+    };
+    return { onStdout: emit("stdout"), onStderr: emit("stderr") };
+  };
+
+  const corePublishOptions = (event: IpcMainInvokeEvent, progressId: string | undefined) => ({
+    noOpen: true,
+    ...coreProgressOptions(event, progressId),
+  });
+
   // ── cloud agents ────────────────────────────────────────────
   //
   // Upload progress. `packageAndReviewCloudAgent` has always computed its phases
@@ -4073,10 +4118,20 @@ export function registerIpcHandlers(): void {
   });
 
   let hephaestusUpdateInFlight: ReturnType<typeof runHephaestusRuntimeUpdate> | null = null;
+  let coreAuthLoginInFlight: ReturnType<typeof hepAuthLogin> | null = null;
   // ── Hephaestus 엔진 브리지 ──────────────────────────────────────────────
   // 임베딩된 오픈소스 엔진(Hephaestus)을 범용 CLI/JSON 으로 호출한다. 엔진 측에는 데스크탑
   // 흔적이 없고, 모든 연결 코드는 electron/hephaestus/* + 아래 핸들러에만 존재한다.
   ipcMain.handle("hephaestus:status", (_e, locale?: "ko" | "en") => hephaestusAvailable(locale));
+  ipcMain.handle("hephaestus:coreAuthStatus", () => hepAuthStatus());
+  // 로그인은 브라우저를 띄우고 최대 3분 기다린다. 두 번 겹치면 Core 의 콜백 서버가
+  // 포트를 두고 다투므로 하나로 직렬화한다.
+  ipcMain.handle("hephaestus:coreAuthLogin", () => {
+    if (!coreAuthLoginInFlight) {
+      coreAuthLoginInFlight = hepAuthLogin().finally(() => { coreAuthLoginInFlight = null; });
+    }
+    return coreAuthLoginInFlight;
+  });
   ipcMain.handle("hephaestus:updateJournal", () => readHephaestusUpdateJournal());
   // Serialised: two concurrent updaters would race Core's lock and the second
   // would report a misleading outcome for work the first is still doing.
@@ -4148,7 +4203,7 @@ export function registerIpcHandlers(): void {
     "hephaestus:publish",
     async (
       event,
-      input: { folder: string; scope: FsReadScope; visibility: "private-link" | "marketplace"; dryRun?: boolean; locale?: "ko" | "en" },
+      input: { folder: string; scope: FsReadScope; visibility: "private-link" | "marketplace"; dryRun?: boolean; locale?: "ko" | "en"; progressId?: string },
     ) => {
       const locale = input.locale ?? "en";
       let folder: string;
@@ -4197,12 +4252,18 @@ export function registerIpcHandlers(): void {
           };
         }
         try {
-          return await hepPublish(autofix.packageFolder, input.visibility, { dryRun: input.dryRun });
+          return await hepPublish(autofix.packageFolder, input.visibility, {
+            dryRun: input.dryRun,
+            ...corePublishOptions(event, input.progressId),
+          });
         } finally {
           autofix.cleanup();
         }
       }
-      return hepPublish(folder, input.visibility, { dryRun: input.dryRun });
+      return hepPublish(folder, input.visibility, {
+        dryRun: input.dryRun,
+        ...corePublishOptions(event, input.progressId),
+      });
     },
   );
   ipcMain.handle(
@@ -4231,14 +4292,14 @@ export function registerIpcHandlers(): void {
       return hepPackage(folder, { visibility: input.visibility });
     },
   );
-  ipcMain.handle("hephaestus:securityScan", (_e, input: { folder: string; scope: FsReadScope; strict?: boolean; locale?: "ko" | "en" }) => {
+  ipcMain.handle("hephaestus:securityScan", (event, input: { folder: string; scope: FsReadScope; strict?: boolean; locale?: "ko" | "en"; progressId?: string }) => {
     let folder: string;
     try {
       folder = resolveFsReadPath(input.folder, input.scope);
     } catch (e) {
       return { ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as PathGuardError).message };
     }
-    return securityScan(folder, { strict: input.strict });
+    return securityScan(folder, { strict: input.strict, ...coreProgressOptions(event, input.progressId) });
   });
   ipcMain.handle("hephaestus:aoGraph", (_e, input?: { agent?: string; dir?: string; locale?: "ko" | "en" }) => {
     const inp = input ?? {};

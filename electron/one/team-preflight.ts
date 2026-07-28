@@ -235,8 +235,46 @@ function complexityReasons(prompt: string): OneTeamPreflightComplexityReason[] {
   return [...new Set(reasons)];
 }
 
+/**
+ * 표시용 목표 문장. 명령어와 그 플래그를 걷어낸다.
+ *
+ * `--stormbreaker` 가 목록에서 빠져 있어서, 그 플래그가 목표 문장에 눌러앉은 채
+ * 복원 단계를 지나면 **목표가 리터럴 `"--stormbreaker X"` 가 되어 그대로 검색에
+ * 전달됐다**(2026-07-28 확인). 이건 표시용 문자열이므로 알려진 플래그는 전부 걷는다.
+ */
+/** 원문이 워크포스 명령으로 시작하는가. 복원과 외부선택 판정이 같은 기준을 써야 한다. */
+const WORKFORCE_COMMAND_RE = /^\s*(?:\/?workforce\b|\/?hep-network\b)/i;
+
+/**
+ * 실행 단계로 넘길 프롬프트를 되돌린다. **순수 함수로 내보내는 이유**: 이 규칙이 깨지면
+ * 플래그가 사라지거나 목표 문자열로 새어 들어가는데, 소스 문자열 검사로는 그걸 못 잡는다.
+ * 테스트가 진짜 이 함수를 불러야 규칙 복제본이 아니라 실제 동작을 검사하게 된다.
+ */
+export function restoreWorkforcePrompt(
+  // `solo` 도 온다. 워크포스가 아닌 모드는 전부 표시용 문장을 그대로 쓴다.
+  mode: "workforce" | "team" | "solo",
+  original: string,
+  execution: string,
+): string {
+  if (mode !== "workforce") return execution;
+  // 원문을 그대로 돌려준다. 재조립(`/workforce ${execution}`)은 두 가지를 잃었다:
+  //   · `--benchmark` / `--legacy` 가 사라져 One 경로에서는 도달 불가였고,
+  //   · `/hep-network --stormbreaker` 가 `/workforce --stormbreaker` 로 바뀌어
+  //     파서의 escape 를 비껴가 목표가 리터럴 `"--stormbreaker …"` 가 됐다.
+  // 원문은 호출부에서 `promptDigest` 로 검증된다. 명령어가 없는 원문(One 이 스스로
+  // 워크포스를 고른 경우)만 접두어를 붙인다 — 그때는 재조립이 아니라 유일한 표현이다.
+  return WORKFORCE_COMMAND_RE.test(original) ? original.trim() : `/workforce ${execution}`;
+}
+
+/** 테스트 전용 별칭. 표시용 정규화 규칙을 테스트가 복제하지 않게 한다. */
+export function stripWorkforceCommandForTest(prompt: string): string {
+  return stripWorkforceCommand(prompt);
+}
+
 function stripWorkforceCommand(prompt: string): string {
-  const stripped = prompt.replace(/^\s*(?:\/?workforce\b|\/?hep-network\b)(?:\s+--(?:benchmark|legacy))?\s*/i, "").trim();
+  const stripped = prompt
+    .replace(/^\s*(?:\/?workforce\b|\/?hep-network\b)(?:\s+--(?:benchmark|legacy|stormbreaker)\b)*\s*/i, "")
+    .trim();
   return stripped || prompt.trim();
 }
 
@@ -897,7 +935,7 @@ function exactRosterBinding(
 ): boolean {
   const prompt = PROCESS_PROMPTS.get(record.proposal.proposalId);
   if (!prompt) return false;
-  const explicitExternalSelection = /^\s*(?:\/?workforce\b|\/?hep-network\b)/i.test(prompt.original);
+  const explicitExternalSelection = WORKFORCE_COMMAND_RE.test(prompt.original);
   const current = exactInstalledRoster(chat, deps, prompt.original, !explicitExternalSelection);
   return sha256({
     candidates: current.candidates,
@@ -1225,7 +1263,14 @@ export function prepareOneTeamPreflightClaim(
     taskId: ref.expectedTaskId,
     taskVersion: ref.expectedTaskVersion,
     mode: ref.mode,
-    userPrompt: ref.mode === "workforce" ? `/workforce ${prompt.execution}` : prompt.execution,
+    // 원문을 그대로 돌려준다. 재조립(`/workforce ${execution}`)은 두 가지를 잃었다:
+    //   · `--benchmark` / `--legacy` 가 사라져 One 경로에서는 도달 불가였고,
+    //   · `/hep-network --stormbreaker` 가 `/workforce --stormbreaker` 로 바뀌어
+    //     파서의 escape 를 비껴가 목표가 리터럴 `"--stormbreaker …"` 가 됐다.
+    // 원문은 바로 위에서 `promptDigest` 로 검증되므로 신뢰할 수 있다. 명령어가 없는
+    // 원문(One 이 스스로 워크포스를 고른 경우)만 접두어를 붙인다 — 그때는 재조립이
+    // 아니라 유일한 표현이다.
+    userPrompt: restoreWorkforcePrompt(ref.mode, prompt.original, prompt.execution),
     permission: record.proposal.binding.permission,
     runtime: record.main.runtime,
     taskForceTargets: ref.mode === "team" ? record.main.taskForceTargets.map((target) => ({ ...target })) : [],

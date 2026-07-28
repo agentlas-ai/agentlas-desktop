@@ -79,7 +79,7 @@ authority for which version is actually public, stable, and downloadable.
   reporting. A pending update whose recovery copies cannot be verified also stops
   bricking the app: the blocked install is abandoned and quarantined instead of
   failing startup on every launch.
-  This release binds Agentlas OS v1.1.72 at aaadb2267e25b0fecb77d9d8c7f358c2b7aaeecf.
+  This release binds Agentlas OS v1.1.73 at e36f4829f908e15dd64286cf5808d8941c0f54ef.
   This source note does not prove a Desktop installer or update feed.
 - **2026-07-27 · v0.9.25 — One's first-run headline, and refusals that say what
   they actually are** — One's English first-run screen now reads "Build a

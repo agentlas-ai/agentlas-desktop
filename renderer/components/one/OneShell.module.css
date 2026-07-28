@@ -504,6 +504,33 @@
   margin-top: 28px;
 }
 
+/* 브리핑이 찾은 것을 One 이 실제로 살펴보기 전에 받는 확인. 계약이
+   `confirmedByUser: true` 를 리터럴로 요구하므로 UI 도 명시적으로 물어야 한다. */
+.briefingConfirm {
+  margin-top: 20px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-muted, transparent);
+}
+
+.briefingConfirmTitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.briefingConfirmBody {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted-deep);
+}
+
+.briefingConfirm .briefingActions {
+  margin-top: 14px;
+}
+
 .primaryButton,
 .ghostButton {
   min-height: 44px;

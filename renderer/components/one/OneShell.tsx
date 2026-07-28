@@ -44,6 +44,7 @@ import type {
   OneImprovementReusedAssetV1,
   OneHomeSignalsV1,
   OneProfile,
+  OneBriefingActionPacket,
   OneProactiveBriefing,
   OneSearchHitV1,
   OneSuggestionState,
@@ -2042,6 +2043,71 @@ export function OneShell() {
     setAutomationSheetOpen(false);
     router.push(`/automation/detail?id=${encodeURIComponent(automationId)}`);
   }, [router]);
+  /*
+   * 브리핑이 찾아낸 것을 One 이 **실제로 살펴보게** 한다.
+   *
+   * main 쪽에는 준비·예약·클레임·실패 라이프사이클이 완성돼 있었는데
+   * (`electron/one/briefing-actions.ts`), 그 파이프라인의 유일한 열쇠인
+   * `oneBriefingActionRef` 를 만드는 `oneBriefing:startAction` 을 렌더러가 **한 번도
+   * 부르지 않았다**(2026-07-28 실측: `startAction` 문자열이 렌더러에 0건). 그래서
+   * 브리핑 버튼은 항상 화면 이동만 했고, 800줄짜리 실행 경로는 어떤 조작으로도
+   * 도달할 수 없었다.
+   *
+   * 계약이 `confirmedByUser: true` 를 리터럴로 요구한다 — 준비된 것을 보여주고 사용자가
+   * 승낙해야 시작한다는 뜻이다. 그래서 준비(prepare) 와 시작(start) 을 두 단계로 둔다.
+   * 실행은 `permission: "read"` 로 고정돼 있어 살펴보기만 하고 아무것도 바꾸지 않는다.
+   */
+  const [pendingBriefingAction, setPendingBriefingAction] = useState<OneBriefingActionPacket | null>(null);
+  const reviewPreparedFinding = useCallback(async (candidate: OneProactiveBriefing) => {
+    const api = ipc();
+    if (!api) return;
+    setBriefingActionBusy(true);
+    setError(null);
+    try {
+      const packet = await api.oneBriefing.prepareAction({
+        candidateId: candidate.candidateId,
+        expectedDetectedAt: candidate.detectedAt,
+      });
+      setPendingBriefingAction(packet);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      await refreshAll();
+    } finally {
+      setBriefingActionBusy(false);
+    }
+  }, [refreshAll]);
+
+  const confirmBriefingAction = useCallback(async () => {
+    const api = ipc();
+    const packet = pendingBriefingAction;
+    if (!api || !packet) return;
+    setBriefingActionBusy(true);
+    setError(null);
+    try {
+      const result = await api.oneBriefing.startAction({
+        packetId: packet.packetId,
+        expectedPacketVersion: packet.version,
+        candidateId: packet.candidateId,
+        expectedDetectedAt: packet.expectedDetectedAt,
+        confirmedByUser: true,
+      });
+      setPendingBriefingAction(null);
+      if (!result.ok) {
+        // main 이 분류한 실패 사유를 그대로 전한다. "시작했다"고 말한 뒤 아무 일도
+        // 안 일어나는 것이 이 결함의 원래 증상이었다.
+        setError(tFor(appLocale, result.errorCategory === "recovery_required"
+          ? "one.shell.briefing.action_recovery"
+          : "one.shell.briefing.action_rejected"));
+      }
+      await refreshAll();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      await refreshAll();
+    } finally {
+      setBriefingActionBusy(false);
+    }
+  }, [pendingBriefingAction, refreshAll, appLocale]);
+
   const openPreparedFinding = useCallback((candidate: OneProactiveBriefing) => {
     if (candidate.preparedAction.kind === "open_project") {
       router.push(`/project/detail?id=${encodeURIComponent(candidate.preparedAction.targetId)}`);
@@ -2224,12 +2290,29 @@ export function OneShell() {
                       {briefing.proactive
                         ? briefing.proactive.preparedAction.kind === "open_task"
                           ? <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void openProactiveTask(briefing.proactive!)}>{briefingActionBusy ? tFor(appLocale, "one.shell.common.checking") : briefing.primaryLabel}</button>
-                          : <button type="button" className={styles.primaryButton} onClick={() => openPreparedFinding(briefing.proactive!)}>{briefing.primaryLabel}</button>
+                          : <>
+                              <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void reviewPreparedFinding(briefing.proactive!)}>{briefingActionBusy ? tFor(appLocale, "one.shell.common.checking") : tFor(appLocale, "one.shell.briefing.review")}</button>
+                              <button type="button" className={styles.ghostButton} onClick={() => openPreparedFinding(briefing.proactive!)}>{briefing.primaryLabel}</button>
+                            </>
                         : briefing.taskId && <button type="button" className={styles.primaryButton} onClick={() => openTask(briefing.taskId!)}>{briefing.primaryLabel}</button>}
                       {briefing.kind !== "quiet" && (briefing.proactive
                         ? <button type="button" className={styles.ghostButton} onClick={() => void applyProactiveFeedback(briefing.proactive!, "later")}>{tFor(appLocale, "one.shell.common.later")}</button>
                         : <button type="button" className={styles.ghostButton} onClick={() => { const signature = briefingSignature(briefing); setDismissedBriefing({ signature, expiresAt: writeBriefingDismissal(signature) }); }}>{tFor(appLocale, "one.shell.common.later")}</button>)}
                     </div>
+                    {pendingBriefingAction && (
+                      <div className={styles.briefingConfirm} role="group" aria-label={tFor(appLocale, "one.shell.briefing.confirm_title")}>
+                        <p className={styles.briefingConfirmTitle}>{tFor(appLocale, "one.shell.briefing.confirm_title")}</p>
+                        <p className={styles.briefingConfirmBody}>{tFor(appLocale, "one.shell.briefing.confirm_body")}</p>
+                        <div className={styles.briefingActions}>
+                          <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void confirmBriefingAction()}>
+                            {briefingActionBusy ? tFor(appLocale, "one.shell.common.checking") : tFor(appLocale, "one.shell.briefing.confirm_accept")}
+                          </button>
+                          <button type="button" className={styles.ghostButton} disabled={briefingActionBusy} onClick={() => setPendingBriefingAction(null)}>
+                            {tFor(appLocale, "one.shell.briefing.confirm_decline")}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                     {useCaseChipsVisible && (
                       <OneUseCaseChips
                         locale={appLocale}

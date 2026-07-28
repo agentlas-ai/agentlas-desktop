@@ -650,7 +650,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       chatId: p.chat.id,
       nodeId: node.id,
       agentId: memoryOwnerId,
-      payload: workloadAllocationReceipt(executedResolution),
+      payload: workloadAllocationReceipt(executedResolution, result.observedUsage),
     });
   }
   // per-node 완료 신호 — 이 노드의 한 턴이 끝났다. UI(오케스트레이션 트리)가 이 노드만 ▶→✓ 로 정리한다.

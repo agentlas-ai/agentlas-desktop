@@ -761,6 +761,18 @@ const api: AgentlasIpc = {
     updateJournal: () => ipcRenderer.invoke("hephaestus:updateJournal"),
     runUpdate: () => ipcRenderer.invoke("hephaestus:runUpdate"),
     doctor: () => ipcRenderer.invoke("hephaestus:doctor"),
+    coreAuthStatus: () => ipcRenderer.invoke("hephaestus:coreAuthStatus"),
+    coreAuthLogin: () => ipcRenderer.invoke("hephaestus:coreAuthLogin"),
+    /**
+     * Core CLI 진행 스트림. publish·securityScan 처럼 수 분이 걸리는 호출이 끝날 때까지
+     * 침묵하던 문제(호출부 0곳)를 메운다. `progressId` 는 권한이 아니라 라우팅 키다 —
+     * 그 실행을 시작한 창으로 줄을 되돌려 보내는 용도뿐이다.
+     */
+    onProgress: (listener: (event: { progressId: string; stream: "stdout" | "stderr"; line: string; elapsedMs: number }) => void) => {
+      const handler = (_e: unknown, payload: { progressId: string; stream: "stdout" | "stderr"; line: string; elapsedMs: number }) => listener(payload);
+      ipcRenderer.on("hephaestus:progress", handler);
+      return () => ipcRenderer.removeListener("hephaestus:progress", handler);
+    },
     stormbreaker: (input) => ipcRenderer.invoke("hephaestus:stormbreaker", input),
     getSupervisor: () => ipcRenderer.invoke("hephaestus:getSupervisor"),
     setSupervisor: (enabled: boolean) => ipcRenderer.invoke("hephaestus:setSupervisor", enabled),

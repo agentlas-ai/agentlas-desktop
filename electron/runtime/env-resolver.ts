@@ -50,6 +50,62 @@ const PROTECTED_RUNNER_ENV_KEYS = new Set([
   "LD_PRELOAD",
   "DYLD_INSERT_LIBRARIES",
   "DYLD_LIBRARY_PATH",
+  // ── 데이터 목적지 ────────────────────────────────────────────────────────
+  // 위 키들이 "무엇이 실행되는가"를 지킨다면 아래는 "대화가 어디로 가는가"를
+  // 지킨다. cwd 의 `.env` 는 overwrite=true 로 병합되므로(아래 buildRunnerEnv),
+  // 사용자가 클론한 남의 저장소에 `ANTHROPIC_BASE_URL=https://…` 한 줄만 있어도
+  // 자식 CLI 의 모든 프롬프트와 토큰이 그쪽으로 간다. 터미널 워크포스 경로에는
+  // 2026-07-27 에 같은 차단이 들어갔는데 데스크탑 러너 경로에는 이식되지 않아
+  // 있었다(2026-07-28 확인).
+  //
+  // 막는 것은 목적지뿐이다. BYOK 키(ANTHROPIC_API_KEY 등)는 계속 허용한다 —
+  // 사용자가 자기 키를 프로젝트에 두는 것은 정상적인 사용이다.
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_API_URL",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_CUSTOM_HEADERS",
+  "ANTHROPIC_BEDROCK_BASE_URL",
+  "ANTHROPIC_VERTEX_BASE_URL",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+  "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+  "AWS_ENDPOINT_URL",
+  "AWS_ENDPOINT_URL_BEDROCK",
+  "OPENAI_BASE_URL",
+  "OPENAI_API_BASE",
+  "OPENAI_ORGANIZATION",
+  "OPENAI_PROXY",
+  "AZURE_OPENAI_ENDPOINT",
+  "CODEX_BASE_URL",
+  "CODEX_API_URL",
+  "GOOGLE_GEMINI_BASE_URL",
+  "GOOGLE_VERTEX_BASE_URL",
+  "GEMINI_API_BASE_URL",
+  "GOOGLE_CLOUD_PROJECT",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "OLLAMA_HOST",
+  // 신뢰 경계를 우회하는 전송 계층 — 엔드포인트를 안 바꾸고도 같은 결과를 낸다.
+  "NODE_TLS_REJECT_UNAUTHORIZED",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "OPENSSL_CONF",
+  "REQUESTS_CA_BUNDLE",
+  "CURL_CA_BUNDLE",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "GRPC_PROXY",
+  "NPM_CONFIG_PROXY",
+  // Agentlas 자체 백엔드 — 세션 쿠키가 남의 서버로 가는 경로.
+  "AGENTLAS_SESSION",
+  "AGENTLAS_MCP_BASE_URL",
+  "AGENTLAS_WEB_BASE_URL",
+  "AGENTLAS_API_BASE_URL",
+  "AGENTLAS_HUB_BASE_URL",
+  "AGENTLAS_CLOUD_BASE_URL",
 ]);
 
 export function isProtectedRunnerEnvKey(key: string): boolean {

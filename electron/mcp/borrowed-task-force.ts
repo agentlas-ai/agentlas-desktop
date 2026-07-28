@@ -2986,7 +2986,10 @@ async function runBorrowedAgentTurn(
             JSON.stringify(parsedManagerPlan),
             "Worker results:",
             JSON.stringify(workerResults.map((item) => ({ worker: item.worker.id, ok: item.ok, text: item.text }))),
-            "Synthesize one attributable team result. State any failed worker explicitly.",
+            // 팀 합성물이 이 패킷의 최종 핸드오프다 — 직접 워커와 동일한 반환 계약을
+            // 명시해야 오케스트레이터가 판정 근거를 얻는다(2026-07-28 터미널 라이브
+            // A/B에서 팀 로스터일 때 반환 계약 적용 0건이던 커버리지 갭의 데스크탑 판).
+            "Synthesize one attributable team result. State any failed worker explicitly. End with two labeled sections: LIMITATIONS (what the team could not verify or complete — write 'none' only if truly none) and STATUS (COMPLETED, PARTIAL, or FAILED; for PARTIAL/FAILED name each unmet done-when condition from the packet).",
           ].join("\n\n"),
           images: workforceImages,
           backendLabel: managerSynthesisPicked.label,
@@ -3200,7 +3203,7 @@ async function runBorrowedAgentTurn(
       nodeId: id,
       agentId: spec.slug,
       payload: {
-        ...workloadAllocationReceipt(executedResolution),
+        ...workloadAllocationReceipt(executedResolution, result.observedUsage),
         role: outcome.role,
         reasonCodes: [...new Set([
           ...executedResolution.resolutionCodes,
@@ -4130,7 +4133,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     chatId: p.chat.id,
     nodeId: orchestratorId,
     agentId: p.orchestratorAgent.id,
-    payload: workloadAllocationReceipt(executedSynthesisResolution),
+    payload: workloadAllocationReceipt(executedSynthesisResolution, final.observedUsage),
   });
   const workforce = p.workforceSelectionReceipt;
   const verifierIssues: string[] = [];

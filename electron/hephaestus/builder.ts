@@ -976,7 +976,7 @@ export async function runHephaestusBuild(
       kind: "workload_allocation",
       nodeId: "hephaestus-builder",
       agentId: "system:hephaestus-builder",
-      payload: workloadAllocationReceipt(executedWorkload),
+      payload: workloadAllocationReceipt(executedWorkload, result.observedUsage),
     });
 
     // 인터뷰 turn은 질문만 반환하고 파일을 만들지 않는다. 완료 신호가 있는 실제 생성 턴에만

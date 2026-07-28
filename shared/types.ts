@@ -6149,6 +6149,19 @@ export interface AgentlasIpc {
     runUpdate: () => Promise<HephaestusUpdateResult>;
     /** 엔진 자가진단(JSON). */
     doctor: () => Promise<HephaestusCommandResult>;
+    /** 엔진 계정 상태(JSON). 데스크탑 로그인과 **별개의 자격증명**이다 — 데스크탑은
+     *  세션 쿠키를, 엔진은 OAuth access token 을 쓴다. */
+    coreAuthStatus: () => Promise<HephaestusCommandResult>;
+    /** 엔진 로그인을 한 번 끝낸다. 브라우저 PKCE 라 최대 3분. */
+    coreAuthLogin: () => Promise<HephaestusCommandResult>;
+    /**
+     * Core CLI 진행 스트림 구독. 반환값은 해제 함수다.
+     * publish·securityScan 이 수 분간 침묵하던 문제를 메운다 — `runHephaestus` 는
+     * `onStdout`/`onStderr` 를 늘 갖고 있었지만 넘기는 호출부가 0곳이었다.
+     */
+    onProgress: (
+      listener: (event: { progressId: string; stream: "stdout" | "stderr"; line: string; elapsedMs: number }) => void,
+    ) => () => void;
     /** Stormbreaker 견고-실행: 쿼리 라우팅 후 가능한 pipeline execution_fabric 실행. */
     stormbreaker: (input: {
       query: string;

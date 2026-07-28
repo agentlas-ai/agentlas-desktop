@@ -163,22 +163,54 @@ export function hepSearch(
  *  지원했는데 이 함수만 인자를 안 넘겨서, 데스크탑 경로 전체가 latest에 묶여 있었다.
  *  주의: 핀은 exact-match-or-fail이다(서버가 version_mismatch로 거절). 옛 버전을 서빙하는
  *  게 아니라 "내가 아는 그 버전이 맞나"를 단언하는 것 — 재게시 시 조용한 drift 대신 명시적 실패. */
-export function hepCall(
+/**
+ * `hepCall` 의 인자 조립. 순수 함수로 분리해 **실제로 검사할 수 있게** 한다.
+ *
+ * 이 계열의 결함(하이픈으로 시작하는 프롬프트가 호출을 죽임)은 소스 문자열 검사로는
+ * 안 잡힌다 — 코드가 존재하는지가 아니라 **어떤 argv 가 나오는지**가 계약이기 때문이다.
+ */
+export function buildHepCallArgs(
   agents: string,
   context: string[],
-  opts: { project?: string; runtime?: string; version?: string } & HephaestusRunOptions = {},
-): Promise<HephaestusResult> {
+  opts: { project?: string; runtime?: string; version?: string } = {},
+): string[] {
+  /*
+   * 사용자 프롬프트는 위치 인자로 넘기지 않는다.
+   *
+   * `assertPositional` 이 `-` 로 시작하는 값을 거부하는 것 자체는 옳다 — argparse 가
+   * 그걸 플래그로 읽고 exit 2 로 죽기 때문이다. 문제는 **거부 대상이 사용자가 친
+   * 문장**이었다는 것이다. 채팅에 `- 이거 요약해줘` 라고 쓰면 Hub/Cloud 에이전트
+   * 호출이 통째로 예외를 던졌다(2026-07-28 확인). 목록 항목을 하이픈으로 시작하는 것은
+   * 흔한 글쓰기이지 잘못된 입력이 아니다.
+   *
+   * Core 는 이 목적의 경로를 이미 갖고 있다 — `call --context <text>`
+   * (`agentlas_cloud/cli.py:496`, "alternative to positional context"). 플래그 값이라
+   * argparse 가 내용을 해석하지 않는다. 여러 조각은 Core 가 위치 인자들을 합치던 것과
+   * 같게 줄바꿈으로 잇는다.
+   */
+  const contextText = context.join("\n");
   const args = [
     "call",
     assertPositional(agents, "agent"),
-    ...context.map((c, i) => assertPositional(c, "context", i)),
     "--project",
     opts.project ?? ".",
     "--runtime",
     opts.runtime ?? "terminal",
   ];
+  if (contextText) args.push("--context", contextText);
   if (opts.version) args.push("--version", assertPositional(opts.version, "version"));
-  return runHephaestus("agentlas_cloud", args, { timeoutMs: 180_000, ...opts });
+  return args;
+}
+
+export function hepCall(
+  agents: string,
+  context: string[],
+  opts: { project?: string; runtime?: string; version?: string } & HephaestusRunOptions = {},
+): Promise<HephaestusResult> {
+  return runHephaestus("agentlas_cloud", buildHepCallArgs(agents, context, opts), {
+    timeoutMs: 180_000,
+    ...opts,
+  });
 }
 
 /** hep-cloud: 소유자 본인 Cloud 패키지(보관함)만 라우팅. */
@@ -220,6 +252,33 @@ export function localGui(
 }
 
 /** publish: 검토된 에이전트 폴더를 Cloud(private-link) 또는 Hub(marketplace)에 등록. */
+/*
+ * 엔진 계정 상태 / 엔진 로그인.
+ *
+ * 데스크탑과 엔진은 **서로 다른 자격증명**을 쓴다. 데스크탑은 `agentlas_session` 쿠키를
+ * OS 키체인으로 감싸 보관하고(`electron/auth.ts`), 엔진은 OAuth **access token** 을
+ * `~/.agentlas/auth/<host>.json` 에 둔다(`agentlas_cloud/auth.py`). 엔진은 쿠키를 받지
+ * 않고 `Authorization: Bearer` 만 쓴다 — 그래서 데스크탑 세션을 그대로 넘겨줄 수 없다.
+ *
+ * 엔진은 수정 대상이 아니므로, 합칠 수 있는 지점은 **사용자 경험**이다. 예전에는 Publish
+ * 도중 엔진이 제멋대로 브라우저를 띄웠다(오늘 `--no-open` 으로 차단). 대신 데스크탑이
+ * 엔진 로그인 상태를 알고, 필요할 때 사용자가 **한 번 의도적으로** 끝내게 한다.
+ *
+ * 로그인은 브라우저 PKCE 라 시간이 걸린다. 이미 브라우저에 로그인돼 있으면 한 번 눌러
+ * 끝난다. 토큰은 엔진이 자기 파일에 쓰고, 데스크탑은 값을 보지도 저장하지도 않는다.
+ */
+export function hepAuthStatus(opts: HephaestusRunOptions = {}): Promise<HephaestusResult> {
+  return runHephaestus("agentlas_cloud", ["auth", "status"], { timeoutMs: 20_000, ...opts });
+}
+
+export function hepAuthLogin(opts: HephaestusRunOptions = {}): Promise<HephaestusResult> {
+  // 200초: Core 기본 대기 180초 + 여유. 사용자가 브라우저에서 승인할 시간이다.
+  return runHephaestus("agentlas_cloud", ["auth", "login", "--timeout", "180"], {
+    timeoutMs: 200_000,
+    ...opts,
+  });
+}
+
 export function hepPublish(
   folder: string,
   visibility: UploadVisibility,

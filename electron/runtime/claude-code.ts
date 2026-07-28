@@ -598,6 +598,7 @@ export const runClaudeCode: Runner = async (
     let cur = "";
     let finalText = "";
     let tokens: number | undefined;
+    let observedUsage: { inputTokens: number; outputTokens: number } | undefined;
     let stderr = "";
     let structuredRuntimeError: Error | null = null;
     let lastEmit = 0;
@@ -709,7 +710,15 @@ export const runClaudeCode: Runner = async (
         }>;
       };
       result?: unknown;
-      usage?: { output_tokens?: number };
+      // `result` 이벤트는 입력·출력·캐시 토큰을 **전부** 싣는다(실측 확인 2026-07-28).
+      // 예전에는 output 만 읽고 나머지를 버려서, 할당 영수증의 `usage` 를 채울 수
+      // 없었다 — 스키마가 non-null 일 때 입력·출력 둘 다를 요구하기 때문이다.
+      usage?: {
+        output_tokens?: number;
+        input_tokens?: number;
+        cache_read_input_tokens?: number;
+        cache_creation_input_tokens?: number;
+      };
       error?: unknown;
       is_error?: boolean;
       terminal_reason?: string;
@@ -871,6 +880,24 @@ export const runClaudeCode: Runner = async (
       } else if (ev.type === "result") {
         if (typeof ev.result === "string") finalText = ev.result;
         if (ev.usage?.output_tokens != null) tokens = ev.usage.output_tokens;
+        if (ev.usage) {
+          // `inputTokens` 는 **모델에 실제로 들어간 토큰 전부**로 센다:
+          // 새 입력 + 캐시에서 읽은 것 + 캐시에 쓴 것. 새 입력만 세면 실측상
+          // 2 vs 52,518 처럼 실제 문맥 크기를 크게 과소보고한다. 청구 단가는
+          // 셋이 다르지만 영수증 칸은 정수 하나뿐이므로, 과소보고보다 실제
+          // 문맥 크기를 싣는 쪽을 택했다.
+          const usage = ev.usage;
+          const inputTotal =
+            (usage.input_tokens ?? 0)
+            + (usage.cache_read_input_tokens ?? 0)
+            + (usage.cache_creation_input_tokens ?? 0);
+          if (inputTotal > 0 || usage.output_tokens != null) {
+            observedUsage = {
+              inputTokens: inputTotal,
+              outputTokens: usage.output_tokens ?? 0,
+            };
+          }
+        }
         if (
           ev.is_error === true
           && (ev.terminal_reason === "api_error" || /not logged in|please run \/login/i.test(finalText))
@@ -965,6 +992,7 @@ export const runClaudeCode: Runner = async (
           text: display.trim(),
           sessionId,
           tokens,
+          observedUsage,
           workforcePermissionEnforcement: hasExactWorkforceMcpGrant
             ? workforceNativeToolEnforcement(
                 runReq,

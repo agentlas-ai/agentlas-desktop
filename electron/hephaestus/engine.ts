@@ -277,8 +277,16 @@ export async function resolveHephaestusStdioLaunch(
   module: string,
   args: string[],
   runtimeRootOverride?: string,
+  /**
+   * Only the Workforce preflight sets this. It skips engines that preflight
+   * itself rejected, so its retry lands on a different one. Every other Core
+   * feature ignores those rejections — see `hephaestusRootDetail`.
+   */
+  options?: { excludeRejected?: boolean },
 ): Promise<HephaestusStdioLaunch | null> {
-  const selectedRoot = runtimeRootOverride?.trim() || hephaestusRoot();
+  const selectedRoot = runtimeRootOverride?.trim()
+    || hephaestusRootDetail({ excludeRejected: options?.excludeRejected })?.root
+    || null;
   if (!selectedRoot) return null;
   let runtimeRoot: string;
   try {
@@ -465,14 +473,12 @@ export async function runHephaestusRuntimeUpdate(
   error?: string;
   journal: HephaestusUpdateJournal | null;
 }> {
-  // Deliberately `includeRejected`. A runtime is rejected when it failed the
-  // Workforce capability preflight — which is exactly the condition an update
-  // repairs. Measured 2026-07-28: on a machine with no managed runtime yet, one
-  // Workforce call rejects the bundled Core (it lacks 5 of the 8 required tools)
-  // and `hephaestusRoot()` then returns null. Without this the update button
-  // reported "reinstall the app" at the one moment updating was the fix, and
-  // reinstalling would have restored the same rejected bundle.
-  const runtimeRoot = hephaestusRootDetail({ includeRejected: true })?.root ?? null;
+  // Plain resolution: rejection no longer hides an engine from anything except
+  // the Workforce preflight retry that recorded it. The updater in particular
+  // must see the files it is meant to replace — an update is the cure for a
+  // failed capability preflight, and reporting "reinstall the app" at that
+  // moment would have sent the user to fetch the same rejected bundle again.
+  const runtimeRoot = hephaestusRoot();
   if (!runtimeRoot) return { ok: false, outcome: "no_engine", error: "engine_not_attached", journal: null };
   // Pass the resolved root explicitly: the launcher would otherwise call
   // hephaestusRoot() again, hit the same rejection, and undo the repair path.
@@ -647,11 +653,30 @@ export async function runHephaestus<T = unknown>(
     };
   }
 
+  // Pin the engine for the lifetime of THIS call.
+  //
+  // `hephaestusRoot()` may return the mutable `~/.agentlas/runtime/current`
+  // symlink. Python resolves imports lazily, so a long run (a build, a
+  // Stormbreaker sweep, an ontology pass) that starts before an update and
+  // continues after it would load some modules from the old release and some
+  // from the new one — a mixture that was never tested and cannot be
+  // reproduced from a version number. The two stdio launchers already realpath
+  // for exactly this reason; this path did not (audit D3).
+  //
+  // Resolving here does not undo live version selection: the NEXT call resolves
+  // again and gets the new release. Only mid-run substitution is removed.
+  let pinnedRoot = root;
+  try {
+    pinnedRoot = fs.realpathSync(root);
+  } catch {
+    // An unreadable link is not a reason to refuse to run — fall back to the
+    // path as given, which is what this code did before.
+  }
   const env = withPythonCacheBoundary(withCliPath({
     ...process.env,
     ...opts.env,
-    HEPHAESTUS_RUNTIME_ROOT: root,
-    PYTHONPATH: root + (process.env.PYTHONPATH ? path.delimiter + process.env.PYTHONPATH : ""),
+    HEPHAESTUS_RUNTIME_ROOT: pinnedRoot,
+    PYTHONPATH: pinnedRoot + (process.env.PYTHONPATH ? path.delimiter + process.env.PYTHONPATH : ""),
     PYTHONUTF8: "1",
     PYTHONIOENCODING: "utf-8",
   }));

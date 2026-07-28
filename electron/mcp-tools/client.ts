@@ -106,17 +106,44 @@ function workforceToolProtocolMetadata(
  * is not compatibility: all tools must advertise the exact canonical metadata and
  * digest shipped with this Desktop generation.
  */
-export function workforceMcpContractIssues(tools: WorkforceMcpInventoryTool[]): string[] {
+/**
+ * 워크포스 계약 대조 결과. **차단(blocking)과 경고(warning)를 가른다.**
+ *
+ * 오너 결정 2026-07-28: 예전에는 이 함수가 낸 항목이 **전부 차단**이었다. 그래서 Core 가
+ * 프로토콜 값 하나(예: `ontologyVersion`)만 올려도 이미 배포된 모든 데스크탑에서
+ * 워크포스가 멈췄다 — "엔진은 따로 오픈소스로 굴리고 셸은 최신을 문다"는 설계와 정면으로
+ * 부딪치는 성질이었다.
+ *
+ * 이제 **능력(도구가 있는가)만 차단**하고, 값 드리프트(입력 필드 집합, enum, 메타데이터,
+ * 다이제스트)는 경고로 내린다. 도구 이름도 **완전 일치가 아니라 부분집합**으로 본다 —
+ * Core 가 도구를 추가하는 것은 미노출일 뿐 결함이 아니라는 오너 규칙과 일치한다.
+ *
+ * ★경고는 조용히 버리지 않는다. 값 계약이 실제로 달라졌으면 나중에 런타임 오류로
+ *   나타나는데, 그때 이 경고가 로그에 없으면 원인을 찾을 수 없다.
+ */
+export interface WorkforceContractVerdict {
+  blocking: string[];
+  warnings: string[];
+}
+
+export function workforceMcpContractIssues(tools: WorkforceMcpInventoryTool[]): WorkforceContractVerdict {
   const issues: string[] = [];
+  const blocking: string[] = [];
   const workforceNames = tools
     .filter((tool) => tool.name.startsWith("workforce."))
     .map((tool) => tool.name);
-  const workforceNamesIssue = exactStringSetIssue(
-    workforceNames,
-    workforceProtocolContract.tools.requiredNames,
-    "Workforce tool inventory",
-  );
-  if (workforceNamesIssue) issues.push(workforceNamesIssue);
+  // 능력 검사: 필요한 도구가 **있는가**. 추가된 도구는 문제가 아니다.
+  const advertised = new Set(workforceNames);
+  const missingNames = workforceProtocolContract.tools.requiredNames
+    .filter((name) => !advertised.has(name));
+  if (missingNames.length) {
+    blocking.push(`Workforce tool inventory is missing: ${missingNames.join(", ")}`);
+  }
+  const extraNames = workforceNames
+    .filter((name) => !workforceProtocolContract.tools.requiredNames.includes(name));
+  if (extraNames.length) {
+    issues.push(`Workforce runtime advertises tools this Desktop does not use: ${extraNames.join(", ")}`);
+  }
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
   const searchContract = workforceProtocolContract.tools.searchCandidates;
   const validateContract = workforceProtocolContract.tools.validateSelection;
@@ -124,7 +151,10 @@ export function workforceMcpContractIssues(tools: WorkforceMcpInventoryTool[]): 
   const search = byName.get(searchContract.name);
   const validate = byName.get(validateContract.name);
   const prepare = byName.get(prepareContract.name);
-  if (!search || !validate || !prepare) return ["required Workforce tools are missing"];
+  if (!search || !validate || !prepare) {
+    blocking.push("required Workforce tools are missing");
+    return { blocking, warnings: issues };
+  }
   const searchSchema = recordValue(search.inputSchema);
   const searchRequiredIssue = exactStringSetIssue(
     searchSchema?.required,
@@ -216,7 +246,7 @@ export function workforceMcpContractIssues(tools: WorkforceMcpInventoryTool[]): 
     const digests = new Set(metadataRows.map((row) => String(row?.protocolDigest)));
     if (digests.size !== 1) issues.push("Workforce tools advertise different protocol digests");
   }
-  return [...new Set(issues)];
+  return { blocking: [...new Set(blocking)], warnings: [...new Set(issues)] };
 }
 
 export class McpToolCallError extends Error {
@@ -474,10 +504,14 @@ async function createTransport(
     let args = (server.args ?? []).map(expandHome);
     let runtimeRoot: string | null = null;
     if (server.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID) {
+      // Workforce is the one caller that acts on its own rejections: when a
+      // preflight finds an engine missing required Workforce tools, its retry
+      // must land somewhere else. Nothing outside this path is affected.
       const launch = await resolveHephaestusStdioLaunch(
         "agentlas_cloud",
         ["mcp", "serve"],
         runtimeRootOverride ?? undefined,
+        { excludeRejected: true },
       );
       if (!launch) throw new Error("Agentlas OS runtime or Python 3.9+ is unavailable");
       command = launch.command;
@@ -700,9 +734,15 @@ async function callServerToolContentInternal(
               ? WORKFORCE_MCP_CAPABILITIES
               : [toolName];
             const missing = required.filter((name) => !available.has(name));
-            const contractIssues = toolName.startsWith("workforce.")
+            const verdict = toolName.startsWith("workforce.")
               ? workforceMcpContractIssues(inventory.tools as WorkforceMcpInventoryTool[])
-              : [];
+              : { blocking: [], warnings: [] };
+            // 값 드리프트는 실행을 막지 않지만 **반드시 남긴다**. 계약이 실제로 달라졌다면
+            // 나중에 런타임 오류로 나타나는데, 이 줄이 없으면 원인을 찾을 수 없다.
+            for (const warning of verdict.warnings) {
+              console.warn(`[workforce] contract drift (non-blocking): ${warning}`);
+            }
+            const contractIssues = [...verdict.blocking];
             if (workforceCall) {
               const runtimeVersion = readHephaestusVersion(created.runtimeRoot);
               const serverVersion = (

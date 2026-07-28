@@ -204,7 +204,15 @@ function verifyExactWorkforceContract(tools) {
 
   const require = createRequire(import.meta.url);
   const desktopContract = require(join(root, "dist", "electron", "mcp-tools", "client.js"));
-  const contractIssues = desktopContract.workforceMcpContractIssues(tools);
+  // 릴리스 시점은 런타임보다 **엄격하다**. 의도된 비대칭이다.
+  //
+  // 런타임(`electron/mcp-tools/client.ts`)은 오너 결정에 따라 능력(도구 존재)만 막고
+  // 값 드리프트는 경고로 내린다 — 엔진 릴리스 하나가 이미 배포된 데스크탑을 멈추지
+  // 않게 하기 위해서다. 반면 여기는 **지금 굽고 있는 데스크탑에 핀으로 박을 Core** 를
+  // 보는 자리다. 그 둘이 어긋난 채로 나가면 사용자가 아니라 우리가 먼저 알아야 하고,
+  // 고치는 비용도 여기가 가장 싸다(`workforce-protocol-contract.json` 갱신).
+  const verdict = desktopContract.workforceMcpContractIssues(tools);
+  const contractIssues = [...verdict.blocking, ...verdict.warnings];
   if (contractIssues.length) {
     throw new Error(`pinned Core is incompatible with Desktop: ${contractIssues.join("; ")}`);
   }
