@@ -22,6 +22,7 @@ import {
   saveDocumentDraft,
   saveReferences,
   saveStyle,
+  takeDocumentHandoff,
   type DocumentDraftSaveResult,
   type DocumentStudioDraftInput,
 } from "@/lib/document-store";
@@ -79,6 +80,11 @@ export default function DocumentStudioPage() {
   const [statusMsg, setStatusMsg] = useState<{ kind: "ok" | "error" | "info"; text: string } | null>(null);
   const [aiAvailable, setAiAvailable] = useState<boolean | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
+  const [exportBusy, setExportBusy] = useState(false);
+  // Which PDF path this computer actually has. Shown before the click so the
+  // user is never surprised by a browser-rendered page when they wanted LaTeX.
+  const [pdfLatex, setPdfLatex] = useState(false);
+  const [handoffSource, setHandoffSource] = useState<string>("");
   const [draftHydrated, setDraftHydrated] = useState(false);
   const [draftSaving, setDraftSaving] = useState(false);
   const [draftSaveResult, setDraftSaveResult] = useState<DocumentDraftSaveResult | null>(null);
@@ -123,8 +129,36 @@ export default function DocumentStudioPage() {
     draftSnapshotRef.current = { title, body: documentText, figureSrc, figureCaption };
   }
 
-  // 초기 로드: 작성 중인 초안 + 저장된 소스/스타일 + LLM 가용 여부.
+  // 초기 로드: 인계된 답변(있으면 우선) → 작성 중인 초안 + 저장된 소스/스타일 + LLM 가용 여부.
   useEffect(() => {
+    // 채팅/One 에서 넘어온 답변이 있으면 초안보다 먼저다. 사용자가 방금 "문서로
+    // 열기"를 눌렀는데 예전 초안이 뜨면 누른 행동이 무시된 것으로 읽힌다.
+    const handoff = takeDocumentHandoff();
+    if (handoff) {
+      setTitle(handoff.title);
+      setDocumentText(handoff.body);
+      draftSnapshotRef.current = {
+        title: handoff.title,
+        body: handoff.body,
+        figureSrc: "",
+        figureCaption: "",
+      };
+      setHandoffSource(handoff.sourceLabel);
+      draftHydratedRef.current = true;
+      setDraftHydrated(true);
+      setReferences(loadReferences());
+      const styleFromStore = loadStyle();
+      if (styleFromStore && (CITATION_STYLES as string[]).includes(styleFromStore)) setCitationStyle(styleFromStore);
+      void ipc()
+        ?.document?.available()
+        .then((st) => setAiAvailable(Boolean(st?.agy || st?.codex)))
+        .catch(() => setAiAvailable(false));
+      void ipc()
+        ?.document?.pdfCapability()
+        .then((cap) => setPdfLatex(Boolean(cap?.latex)))
+        .catch(() => setPdfLatex(false));
+      return;
+    }
     const restored = loadDocumentDraft();
     if (restored) {
       setTitle(restored.title);
@@ -160,6 +194,10 @@ export default function DocumentStudioPage() {
       ?.document?.available()
       .then((st) => setAiAvailable(Boolean(st?.agy || st?.codex)))
       .catch(() => setAiAvailable(false));
+    void ipc()
+      ?.document?.pdfCapability()
+      .then((cap) => setPdfLatex(Boolean(cap?.latex)))
+      .catch(() => setPdfLatex(false));
   }, []);
 
   // Synchronous localStorage writes are debounced while typing. The unmount
@@ -408,6 +446,58 @@ export default function DocumentStudioPage() {
     setExportOpen(false);
   }
 
+  // PDF는 저장 위치를 네이티브 다이얼로그가 정하므로 download() 경로를 쓰지 않는다.
+  // 결과에는 어떤 엔진이 만들었는지가 담겨 오고, 그대로 사용자에게 보여준다 —
+  // Chromium 으로 만든 PDF를 LaTeX 조판인 것처럼 말하지 않기 위해서다.
+  async function exportPdf() {
+    const body = documentText.trim();
+    if (!body) {
+      setExportStatus(locale === "en" ? "Nothing to export yet" : "내보낼 내용이 없습니다");
+      setExportOpen(false);
+      return;
+    }
+    setExportOpen(false);
+    setExportBusy(true);
+    setExportStatus(locale === "en" ? "Building PDF…" : "PDF 만드는 중…");
+    try {
+      const withBibliography = bibliography.trim()
+        ? `${body}\n\n## ${locale === "en" ? "References" : "참고문헌"}\n\n${bibliography.trim()}`
+        : body;
+      const res = await ipc()?.document?.exportPdf({
+        title: title || goal,
+        markdown: withBibliography,
+        figureCaption: figureCaption.trim() || undefined,
+        suggestedName: `${fileSlug(title || goal)}.pdf`,
+      });
+      if (!res || res.canceled) {
+        setExportStatus(null);
+        return;
+      }
+      if (!res.ok) {
+        setExportStatus((locale === "en" ? "PDF failed: " : "PDF 실패: ") + (res.reason ?? "unknown"));
+        return;
+      }
+      const how =
+        res.engine === "tectonic"
+          ? locale === "en" ? "LaTeX typeset" : "LaTeX 조판"
+          : locale === "en" ? "browser-rendered" : "브라우저 렌더";
+      // "설치가 없다" 와 "조판이 실패했다" 는 사용자가 할 일이 다르다. 툴체인이
+      // 깔린 사람에게 "없다"고 말하면 그건 그냥 거짓말이다.
+      const note =
+        res.degraded === "toolchain-missing"
+          ? locale === "en" ? " · no LaTeX toolchain here" : " · 이 컴퓨터에 LaTeX 툴체인 없음"
+          : res.degraded === "typeset-failed"
+            ? (locale === "en" ? " · LaTeX typesetting failed: " : " · LaTeX 조판 실패: ")
+              + (res.degradedReason?.split("\n")[0]?.slice(0, 120) ?? "unknown")
+            : "";
+      setExportStatus(`${locale === "en" ? "PDF exported" : "PDF 내보냄"} · ${how}${note}`);
+    } catch (error) {
+      setExportStatus((locale === "en" ? "PDF failed: " : "PDF 실패: ") + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
   return (
     <div
       style={shell}
@@ -464,10 +554,25 @@ export default function DocumentStudioPage() {
                 <button type="button" onClick={exportHtml} style={citationOption}>
                   <span>HTML (.html)</span>
                 </button>
+                <button type="button" onClick={() => void exportPdf()} disabled={exportBusy} style={citationOption}>
+                  <span>
+                    PDF (.pdf)
+                    <em style={{ fontStyle: "normal", color: "var(--muted-deep)", marginLeft: 6, fontSize: 11 }}>
+                      {pdfLatex
+                        ? locale === "en" ? "LaTeX" : "LaTeX 조판"
+                        : locale === "en" ? "browser" : "브라우저 렌더"}
+                    </em>
+                  </span>
+                </button>
               </div>
             </div>
           )}
         </div>
+        {handoffSource && (
+          <span style={{ ...exportStatusStyle, color: "var(--muted-deep)" }}>
+            {locale === "en" ? `From ${handoffSource}` : `${handoffSource}에서 가져옴`}
+          </span>
+        )}
         {exportStatus && <span role="status" style={exportStatusStyle}>{exportStatus}</span>}
       </header>
 

@@ -17,7 +17,17 @@ import type {
   SitePublishProviderPage,
   SiteSurface,
 } from "../shared/site-studio";
-import { clearDetectCache, detectRuntimes, setActiveRuntime } from "./runtime/detect";
+import {
+  clearDetectCache,
+  detectRuntimes,
+  resolveRolePoolPicks,
+  setActiveRuntime,
+} from "./runtime/detect";
+import {
+  listModelRoleMembers,
+  setModelRoleMembers as setModelRoleMembersStore,
+} from "./store/model-roles";
+import type { RuntimeRole } from "../shared/types";
 import { runtimeVersionsWithAutoUpdate } from "./runtime/auto-update";
 import { agentRunCwd } from "./runtime/exec";
 import { tryAcquireRuntimeMaintenance } from "./runtime/run-slots";
@@ -645,6 +655,7 @@ import type {
   CloudAgentBuiltPrivateSaveRequest,
   CloudAgentHubPublishRequest,
   CloudAgentPrivateSaveRequest,
+  CanonicalTaskWorkTarget,
   CloudAgentPublishProgressEvent,
   CloudAgentPublishStage,
   CloudAgentPublishRequest,
@@ -2073,6 +2084,38 @@ export function registerIpcHandlers(): void {
     const { documentContentAvailable } = await import("./document/generate");
     return documentContentAvailable();
   });
+  // PDF 내보내기. 저장 위치는 네이티브 다이얼로그가 정한다 — 렌더러가 보낸 경로는
+  // 권한이 아니므로 targetPath 는 Main 이 다이얼로그 결과로만 채운다.
+  ipcMain.handle(
+    "document:exportPdf",
+    async (
+      event,
+      payload: { title?: string; markdown?: string; figureCaption?: string; suggestedName?: string },
+    ) => {
+      const markdown = typeof payload?.markdown === "string" ? payload.markdown : "";
+      if (!markdown.trim()) return { ok: false, reason: "empty document" };
+      const win = BrowserWindow.fromWebContents(event.sender);
+      const title = typeof payload?.title === "string" ? payload.title : "";
+      const suggested = (payload?.suggestedName || `${title || "document"}.pdf`).replace(/[/\\]/g, "-");
+      const chosen = await dialog.showSaveDialog(win ?? undefined!, {
+        defaultPath: suggested.endsWith(".pdf") ? suggested : `${suggested}.pdf`,
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+      });
+      if (chosen.canceled || !chosen.filePath) return { ok: false, canceled: true };
+      const { renderDocumentPdf } = await import("./document/export-pdf");
+      const result = await renderDocumentPdf({
+        title,
+        markdown,
+        figureCaption: typeof payload?.figureCaption === "string" ? payload.figureCaption : undefined,
+        targetPath: chosen.filePath,
+      });
+      return result.ok ? { ...result, path: chosen.filePath } : result;
+    },
+  );
+  ipcMain.handle("document:pdfCapability", async () => {
+    const { documentPdfCapability } = await import("./document/export-pdf");
+    return documentPdfCapability();
+  });
 
   // ── 버그 신고 ────────────────────────────────────────────
   // 우측 하단 도움말(?) 메뉴 → 신고 폼 → 웹 API(agentlas.cloud) → MongoDB 적재.
@@ -2424,6 +2467,29 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("runtime:detect", (_e, force?: boolean) => detectRuntimes(force === true));
   ipcMain.handle("runtime:setActive", (_e, selection: RuntimeSelection) =>
     setActiveRuntime(selection),
+  );
+  // 역할 풀: 순서 있는 후보 목록 + 현재 선택/스킵 사유. set은 전체 교체(순서=우선순위).
+  ipcMain.handle("runtime:listRoleMembers", async () => ({
+    members: {
+      orchestrator: listModelRoleMembers("orchestrator"),
+      worker: listModelRoleMembers("worker"),
+    },
+    picks: await resolveRolePoolPicks(),
+  }));
+  ipcMain.handle(
+    "runtime:setRoleMembers",
+    async (_e, role: RuntimeRole, selections: RuntimeSelection[]) => {
+      setModelRoleMembersStore(role, selections);
+      clearDetectCache();
+      await detectRuntimes();
+      return {
+        members: {
+          orchestrator: listModelRoleMembers("orchestrator"),
+          worker: listModelRoleMembers("worker"),
+        },
+        picks: await resolveRolePoolPicks(),
+      };
+    },
   );
   ipcMain.handle("runtime:installCli", (_e, kind: InstallableCli) => installCli(kind));
   ipcMain.handle("runtime:openCliLogin", (_e, kind: InstallableCli) => {
@@ -3070,6 +3136,20 @@ export function registerIpcHandlers(): void {
     oneTaskProjectionRuntime.listProjections(input));
   ipcMain.handle("tasks:getProjection", (_e, id: string, input) =>
     oneTaskProjectionRuntime.getProjection(id, input));
+  // One 의 "Work 에서 열기" 는 지금까지 렌더러가 projection 에서 조립한 URL 로만
+  // 이동했다. openInWork 브리지는 인터페이스에 선언만 되어 있고 IPC·preload·main
+  // 어디에도 구현이 없어 분기가 항상 false 였다(=죽은 코드). Main 이 Task 와 그
+  // 대화가 실제로 존재하는지 확인한 목적지를 돌려주고, 렌더러는 그걸로만 이동한다.
+  ipcMain.handle("tasks:openInWork", (_e, taskId: string): CanonicalTaskWorkTarget | null => {
+    if (typeof taskId !== "string" || !taskId.trim()) return null;
+    const task = getCanonicalTask(taskId);
+    if (!task?.originChatId) return null;
+    const chat = getChat(task.originChatId);
+    // 대화가 지워졌으면 목적지가 없다. null 을 돌려 렌더러가 조용히 죽은 링크로
+    // 보내지 않게 한다 — 없는 곳으로 이동시키는 것보다 못 여는 게 정직하다.
+    if (!chat) return null;
+    return { taskId: task.id, chatId: chat.id, title: chat.title ?? task.title ?? "" };
+  });
   ipcMain.handle("tasks:findForChat", (_e, chatId: string) => findCanonicalTaskForChat(chatId));
   ipcMain.handle("tasks:forChat", (_e, chatId: string) => getCanonicalTaskForChat(chatId));
   ipcMain.handle("tasks:acceptResult", async (_e, input: CanonicalTaskResultAcceptance) => {

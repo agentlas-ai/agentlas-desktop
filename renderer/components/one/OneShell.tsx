@@ -90,7 +90,7 @@ import {
   getOneTaskProjection,
   listOneTaskProjections,
   ONE_INTRO_ACK_KEY,
-  openOneTaskInWork,
+  resolveOneTaskWorkTarget,
   type OneTaskProjection,
 } from "@/lib/one-task-adapter";
 import {
@@ -1252,16 +1252,83 @@ export function OneShell() {
     }
   }, [router, startRun]);
 
+  /*
+   * Bringing in outside help can borrow paid Hub agents, so it is the one
+   * decision One must not make for the user. Everything behind it already
+   * exists — Main runs `confirmed_external_workforce` end to end — but nothing
+   * ever asked, so the automatic path quietly continued alone instead and an
+   * explicit request dead-ended as `one-team-preflight-required`.
+   *
+   * Hold the automatic start here and let the user answer in plain language.
+   * Every other case keeps its existing behavior.
+   */
+  const answerWorkforceConsent = useCallback(async (accepted: boolean) => {
+    const api = ipc();
+    const proposal = teamPreflight;
+    const prompt = pendingTeamPrompt;
+    if (!api || !proposal || !prompt || runIdRef.current) return;
+    setTeamPreflightBusy(true);
+    setError(null);
+    try {
+      const runId = uid();
+      const result = await api.oneTeamPreflight.resolve({
+        proposalId: proposal.proposalId,
+        expectedProposalVersion: proposal.version,
+        resolution: accepted ? "confirm_workforce" : "continue_solo",
+        requestedRunId: runId,
+        confirmedByUser: true,
+      });
+      setTeamPreflight(result.proposal);
+      if (result.kind !== "reserved") throw new Error("One could not reserve the work safely");
+      selectedTaskIdRef.current = proposal.binding.taskId;
+      selectedConversationIdRef.current = null;
+      router.replace(`/one?task=${encodeURIComponent(proposal.binding.taskId)}`);
+      await startRun(
+        proposal.binding.chatId,
+        proposal.binding.taskId,
+        proposal.binding.taskVersion,
+        // Main requires the explicit marker on a confirmed external run; without
+        // it the confirmed binding is rejected as invalid.
+        accepted && !/^\s*\/?workforce\b/i.test(prompt.text) ? `/workforce ${prompt.text}` : prompt.text,
+        "task",
+        {
+          runId: result.ref.reservedRunId,
+          teamRef: result.ref,
+          attachments: prompt.attachments,
+          recurrence: prompt.recurrence,
+          userAlreadyShown: true,
+          displayUserMessage: true,
+        },
+      );
+      setTeamPreflight(await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => result.proposal));
+    } catch {
+      const current = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => null);
+      if (current) setTeamPreflight(current);
+      setError(tFor(detectOneTextLocale(prompt.text) === "ko" ? "ko" : "en", "one.shell.team.start_failed"));
+    } finally {
+      setTeamPreflightBusy(false);
+    }
+  }, [pendingTeamPrompt, router, startRun, teamPreflight]);
+
+  const awaitingWorkforceConsent = Boolean(
+    teamPreflight
+    && pendingTeamPrompt
+    && pendingTeamPrompt.proposalId === teamPreflight.proposalId
+    && teamPreflight.canConfirmWorkforce
+    && ["proposed", "blocked", "deferred"].includes(teamPreflight.status),
+  );
+
   useEffect(() => {
     if (
       !teamPreflight
       || !pendingTeamPrompt
       || pendingTeamPrompt.proposalId !== teamPreflight.proposalId
-      || !["proposed", "blocked", "deferred", "team_reserved", "solo_reserved"].includes(teamPreflight.status)
+      || !["proposed", "blocked", "deferred", "team_reserved", "workforce_reserved", "solo_reserved"].includes(teamPreflight.status)
       || busy
+      || awaitingWorkforceConsent
     ) return;
     void autoStartTeamPreflight(teamPreflight, pendingTeamPrompt, true);
-  }, [autoStartTeamPreflight, busy, pendingTeamPrompt, teamPreflight]);
+  }, [autoStartTeamPreflight, awaitingWorkforceConsent, busy, pendingTeamPrompt, teamPreflight]);
 
   const resolveActivationConcern = useCallback(async (chatId: string) => {
     const api = ipc();
@@ -1707,7 +1774,16 @@ export function OneShell() {
     : "/dashboard";
   const openWork = useCallback(async () => {
     const api = ipc();
-    if (api && selected && await openOneTaskInWork(api, selected.taskId)) return;
+    // Ask Main which conversation this Task really lives in. The href below is
+    // assembled from a projection that can lag behind the store, so the verified
+    // target wins whenever Main can produce one.
+    if (api && selected) {
+      const target = await resolveOneTaskWorkTarget(api, selected.taskId);
+      if (target) {
+        router.push(`/chat?id=${encodeURIComponent(target.chatId)}&task=${encodeURIComponent(target.taskId)}`);
+        return;
+      }
+    }
     router.push(workHref);
   }, [router, selected, workHref]);
   const openActivationWork = useCallback(async () => {
@@ -2214,7 +2290,21 @@ export function OneShell() {
                   )}
                   {messages.length === 0 && !teamPreflightBusy && !teamPreflight && <div className={styles.emptyThread}>{selected ? tFor(appLocale, "one.shell.thread.empty_work") : tFor(appLocale, "one.shell.thread.empty_conversation")}</div>}
                 </section>
-                {teamPreflight && ["workforce_reserved", "recovery_required"].includes(teamPreflight.status) && !teamPreflightBusy && !busy && (
+                {awaitingWorkforceConsent && !teamPreflightBusy && !busy && (
+                  <section className={styles.teamPreflightConsent} role="group" aria-live="polite">
+                    <strong>{tFor(appLocale, "one.shell.team.outside_title")}</strong>
+                    <p>{tFor(appLocale, "one.shell.team.outside_body")}</p>
+                    <div className={styles.teamPreflightConsentActions}>
+                      <button type="button" onClick={() => { void answerWorkforceConsent(true); }}>
+                        {tFor(appLocale, "one.shell.team.outside_accept")}
+                      </button>
+                      <button type="button" onClick={() => { void answerWorkforceConsent(false); }}>
+                        {tFor(appLocale, "one.shell.team.outside_decline")}
+                      </button>
+                    </div>
+                  </section>
+                )}
+                {teamPreflight && ["workforce_reserved", "recovery_required"].includes(teamPreflight.status) && !teamPreflightBusy && !busy && !awaitingWorkforceConsent && (
                   <p className={styles.teamPreflightRecovery} role="status">
                     {tFor(appLocale, "one.shell.thread.recovery")}
                   </p>

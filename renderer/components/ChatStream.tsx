@@ -7,6 +7,8 @@ import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
 import { AgentAvatar } from "./AgentAvatar";
 import { Markdown, MarkdownSegment, StreamingMarkdown, type CodeArtifact, type LinkedFileArtifact, type MediaArtifact } from "./Markdown";
 import { useT } from "@/lib/i18n";
+import { useRouter } from "next/navigation";
+import { stageDocumentHandoff } from "@/lib/document-store";
 
 /** 작업 중 패널에 누적되는 단일 단계. 새 이벤트마다 push (replace 아님). */
 export interface StreamStep {
@@ -887,6 +889,7 @@ const Bubble = memo(function Bubble({
           <div className="agentlas-msg-actions" style={{ display: "flex", gap: 4, marginTop: 6 }}>
             <CopyMessageButton text={message.text} />
             <SpeakMessageButton text={message.text} />
+            <OpenAsDocumentButton text={message.text} />
           </div>
         )}
       </div>
@@ -894,6 +897,47 @@ const Bubble = memo(function Bubble({
   );
 });
 Bubble.displayName = "Bubble";
+
+/**
+ * Hand a finished answer to Document Studio.
+ *
+ * A long-form answer used to dead-end in the transcript: Document Studio had no
+ * inbound path, so a paper could be produced and then never reach an editor,
+ * a citation list, or any export. Short replies are not documents, so the
+ * action only appears once the answer is substantial.
+ */
+function OpenAsDocumentButton({ text }: { text: string }) {
+  const { locale } = useT();
+  const router = useRouter();
+  if (text.trim().length < 400) return null;
+  const label = locale === "ko" ? "문서로 열기" : "Open as document";
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={() => {
+        // The first markdown heading is the document's own title; otherwise
+        // leave it empty rather than inventing one from the first sentence.
+        const heading = text.match(/^#{1,3}\s+(.+)$/m)?.[1]?.trim() ?? "";
+        if (!stageDocumentHandoff({
+          title: heading,
+          body: text,
+          sourceLabel: locale === "ko" ? "채팅" : "Chat",
+        })) return;
+        router.push("/apps/document-studio");
+      }}
+      className="agentlas-chat-copy-button"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        <path d="M14 2v6h6" />
+        <path d="M8 13h8" />
+        <path d="M8 17h5" />
+      </svg>
+    </button>
+  );
+}
 
 function CopyMessageButton({ text }: { text: string }) {
   const { t } = useT();

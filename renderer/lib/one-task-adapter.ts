@@ -1,6 +1,7 @@
 import type {
   AgentlasIpc,
   CanonicalTask,
+  CanonicalTaskWorkTarget,
   Chat,
   InvocationRunReceipt,
   OneProfile,
@@ -139,7 +140,7 @@ function localizedFailureBriefingBody(errorMessage: string | null | undefined, l
 type ProjectionTasksBridge = {
   listProjections?: (input?: unknown) => Promise<unknown>;
   getProjection?: (taskId: string, input?: unknown) => Promise<unknown>;
-  openInWork?: (taskId: string) => Promise<unknown>;
+  openInWork?: (taskId: string) => Promise<CanonicalTaskWorkTarget | null>;
 };
 
 function optionalTasksBridge(api: AgentlasIpc): ProjectionTasksBridge | null {
@@ -427,14 +428,25 @@ export async function getOneTaskProjection(
   return null;
 }
 
-export async function openOneTaskInWork(api: AgentlasIpc, taskId: string): Promise<boolean> {
+/**
+ * Ask Main where this Task actually lives in Work.
+ *
+ * Returns the verified destination, or null when Main cannot confirm one — the
+ * caller must then keep the user where they are rather than navigating to a
+ * conversation that may no longer exist.
+ */
+export async function resolveOneTaskWorkTarget(
+  api: AgentlasIpc,
+  taskId: string,
+): Promise<CanonicalTaskWorkTarget | null> {
   const bridge = optionalTasksBridge(api);
-  if (!bridge?.openInWork) return false;
+  if (!bridge?.openInWork) return null;
   try {
-    await bridge.openInWork(taskId);
-    return true;
+    const target = await bridge.openInWork(taskId);
+    if (!target || typeof target.chatId !== "string" || !target.chatId) return null;
+    return target;
   } catch {
-    return false;
+    return null;
   }
 }
 

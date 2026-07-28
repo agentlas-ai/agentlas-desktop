@@ -678,6 +678,43 @@ export interface RuntimeStatus {
   efforts?: Array<{ id: string; label: string }>;
 }
 
+/** 역할 풀의 후보 1명 — position이 곧 우선순위(1이 최우선). */
+export interface RuntimeRoleMember {
+  role: RuntimeRole;
+  position: number;
+  selection: RuntimeSelection;
+  updatedAt: string;
+}
+
+/** 풀 해석에서 건너뛴 멤버와 사유 — 조용한 폴백 금지, UI/영수증에 그대로 노출. */
+export interface RuntimeRolePoolSkip {
+  position: number;
+  kind: RuntimeKind;
+  model: string | null;
+  /**
+   * runtime-unavailable: 그 CLI/백엔드가 이 컴퓨터에 없다.
+   * model-unavailable: CLI는 있는데 그 모델이 카탈로그에 없다(호출하면 실패한다).
+   * quota-exceeded: 마지막 정상 사용량 스냅샷의 창 사용률이 임계 이상.
+   */
+  reason: "runtime-unavailable" | "model-unavailable" | "quota-exceeded";
+}
+
+/** 역할 풀의 현재 해석 결과 — 어느 멤버가 선택됐고 누가 왜 스킵됐는가. */
+export interface RuntimeRolePoolPick {
+  role: RuntimeRole;
+  selection: RuntimeSelection;
+  /** null = 풀이 아니라 단일 행/레거시 해석에서 나온 선택. */
+  position: number | null;
+  /** worker 풀이 비어 오케스트레이터 풀을 상속했는가. */
+  inherited: boolean;
+  skipped: RuntimeRolePoolSkip[];
+}
+
+export interface RuntimeRolePoolState {
+  members: Record<RuntimeRole, RuntimeRoleMember[]>;
+  picks: Partial<Record<RuntimeRole, RuntimeRolePoolPick>>;
+}
+
 /**
  * 에이전트가 동작하려면 필요한 환경변수 1개.
  * 예: Notion 통합 에이전트는 NOTION_API_KEY 필요.
@@ -1342,6 +1379,13 @@ export interface CanonicalTask {
   updatedAt: string;
   archivedAt: string | null;
   participants: CanonicalTaskParticipant[];
+}
+
+/** Main-verified Work destination for one Task. Never derived in the renderer. */
+export interface CanonicalTaskWorkTarget {
+  taskId: string;
+  chatId: string;
+  title: string;
 }
 
 export interface CanonicalTaskResultAcceptance {
@@ -4540,6 +4584,10 @@ export interface Recommendation {
   /** 전체 예상 크레딧(점추정). */
   totalEstCredits: number | null;
   totalEstCreditsRange?: [number, number];
+  /** true 면 totalEstCredits 는 총액이 아니라 하한이다 — 단가 미상(perCallCredits 없음) Hub 행이
+   *  섞여 합산에서 빠졌다는 뜻. 부분합을 총액으로 표기·비교하면 사용자에게 보여준 숫자보다
+   *  서버가 더 청구한다. 결제/페이월 소비자는 반드시 이 플래그를 함께 읽어야 한다. */
+  totalEstCreditsPartial?: boolean;
   /** 항상 추정치임을 UI 가 명시하도록 하는 리터럴 플래그. */
   estimate: true;
   receiptId?: string;
@@ -5183,6 +5231,29 @@ export interface AgentlasIpc {
   };
   /** 문서 스튜디오 내용 생성/개정 — 연결된 LLM(agy/codex), no-fallback. */
   document: {
+    /**
+     * Render a document to PDF through the strongest path this computer has.
+     * The result always names the engine that actually produced the file, and
+     * flags `degraded` when LaTeX typesetting was wanted but unavailable — a
+     * Chromium page must never be presented as a typeset manuscript.
+     */
+    exportPdf: (payload: {
+      title: string;
+      markdown: string;
+      figureCaption?: string;
+      suggestedName?: string;
+    }) => Promise<{
+      ok: boolean;
+      canceled?: boolean;
+      path?: string;
+      engine?: "tectonic" | "chromium";
+      degraded?: "toolchain-missing" | "typeset-failed";
+      degradedReason?: string;
+      bytes?: number;
+      reason?: string;
+    }>;
+    /** Which PDF paths exist here, so the UI can say so before the user clicks. */
+    pdfCapability: () => Promise<{ latex: boolean; chromium: boolean }>;
     generate: (payload: {
       goal: string;
       mode?: "report" | "paper" | "brief";
@@ -5416,6 +5487,13 @@ export interface AgentlasIpc {
       backend?: RuntimeBackend | null;
       availableModels?: string[] | null;
     }) => Promise<Array<{ id: string; label: string; tag?: string }>>;
+    /** 역할 풀(순서=우선순위) 조회 — 멤버 목록 + 현재 선택/스킵 사유. */
+    listRoleMembers: () => Promise<RuntimeRolePoolState>;
+    /** 역할 풀 전체 교체. 빈 worker 배열 = 오케스트레이터 풀 상속. */
+    setRoleMembers: (
+      role: RuntimeRole,
+      selections: RuntimeSelection[],
+    ) => Promise<RuntimeRolePoolState>;
   };
   agentRuntime: {
     list: () => Promise<AgentRuntimeOverride[]>;
@@ -5710,6 +5788,13 @@ export interface AgentlasIpc {
     acceptResult: (input: CanonicalTaskResultAcceptance) => Promise<CanonicalTask>;
     /** Start separate follow-up work with only a bounded Main-owned result summary. */
     continueFromResult: (input: CanonicalTaskResultContinuation) => Promise<Chat>;
+    /**
+     * Resolve where this Task actually lives in Work. Main verifies the Task and
+     * that its conversation still exists, so the renderer navigates to a
+     * confirmed target instead of a URL built from a possibly-stale projection.
+     * Returns null when the Task or its conversation is gone.
+     */
+    openInWork: (taskId: string) => Promise<CanonicalTaskWorkTarget | null>;
   };
   /** Main-owned full-history search and atomic Task/conversation re-entry controls. */
   oneSearch: {

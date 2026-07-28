@@ -100,6 +100,8 @@ const api: AgentlasIpc = {
     contentAvailable: () => ipcRenderer.invoke("site:contentAvailable"),
   },
   document: {
+    exportPdf: (payload) => ipcRenderer.invoke("document:exportPdf", payload),
+    pdfCapability: () => ipcRenderer.invoke("document:pdfCapability"),
     generate: (payload: {
       goal: string;
       mode?: "report" | "paper" | "brief";
@@ -258,6 +260,9 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("runtime:updateCli", kind),
     listCommands: () => ipcRenderer.invoke("runtime:listCommands"),
     listModels: (sel) => ipcRenderer.invoke("runtime:listModels", sel),
+    listRoleMembers: () => ipcRenderer.invoke("runtime:listRoleMembers"),
+    setRoleMembers: (role, selections) =>
+      ipcRenderer.invoke("runtime:setRoleMembers", role, selections),
   },
   agentRuntime: {
     list: () => ipcRenderer.invoke("agentRuntime:list"),
@@ -508,6 +513,7 @@ const api: AgentlasIpc = {
     forChat: (chatId: string) => ipcRenderer.invoke("tasks:forChat", chatId),
     acceptResult: (input) => ipcRenderer.invoke("tasks:acceptResult", input),
     continueFromResult: (input) => ipcRenderer.invoke("tasks:continueFromResult", input),
+    openInWork: (taskId: string) => ipcRenderer.invoke("tasks:openInWork", taskId),
   },
   oneSearch: {
     search: (input) => ipcRenderer.invoke("oneSearch:search", input),

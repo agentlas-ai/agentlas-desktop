@@ -87,6 +87,58 @@ function saveResultForDraft(draft: DocumentStudioDraftV1): DocumentDraftSaveResu
   };
 }
 
+// ── Chat/One → Document Studio handoff ──────────────────────────────────────
+// A finished answer used to dead-end in the chat transcript: Document Studio
+// had no way to receive it, so a paper could never reach the editor or any
+// export. This is a one-shot seed — Document Studio consumes it on mount and
+// clears it, so re-opening the editor later never resurrects an old answer.
+const DOCUMENT_HANDOFF_KEY = "agentlas.document.handoff.v1";
+
+export interface DocumentStudioHandoffV1 {
+  title: string;
+  body: string;
+  /** Where it came from, shown to the user so the editor never looks like magic. */
+  sourceLabel: string;
+  createdAt: string;
+}
+
+export function stageDocumentHandoff(input: { title: string; body: string; sourceLabel: string }): boolean {
+  const body = input.body.trim();
+  if (!body) return false;
+  try {
+    const payload: DocumentStudioHandoffV1 = {
+      title: input.title.trim().slice(0, 200),
+      body,
+      sourceLabel: input.sourceLabel.slice(0, 120),
+      createdAt: new Date().toISOString(),
+    };
+    localStorage.setItem(DOCUMENT_HANDOFF_KEY, JSON.stringify(payload));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Reads and clears the seed. Returns null when there is nothing pending. */
+export function takeDocumentHandoff(): DocumentStudioHandoffV1 | null {
+  try {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(DOCUMENT_HANDOFF_KEY) : null;
+    if (!raw) return null;
+    localStorage.removeItem(DOCUMENT_HANDOFF_KEY);
+    const parsed = JSON.parse(raw) as Partial<DocumentStudioHandoffV1> | null;
+    const body = cleanDraftString(parsed?.body).trim();
+    if (!body) return null;
+    return {
+      title: cleanDraftString(parsed?.title),
+      body,
+      sourceLabel: cleanDraftString(parsed?.sourceLabel),
+      createdAt: cleanDraftString(parsed?.createdAt),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function loadDocumentDraft(): DocumentStudioDraftV1 | null {
   try {
     const raw = typeof localStorage !== "undefined" ? localStorage.getItem(DOCUMENT_DRAFT_KEY) : null;
