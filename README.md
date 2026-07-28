@@ -69,6 +69,18 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-28 · v0.9.27 — A failed Workforce check stops taking the rest of the
+  engine with it** — one capability preflight used to remove the engine from
+  runtime resolution entirely, so Build, security scan, publish, context slice,
+  career graph, project bootstrap, the ontology runtime and doctor all failed for
+  the rest of the session. An engine release no longer stops a deployed Desktop
+  either: the protocol check blocks on missing capability, not on changed values.
+  One's briefing buttons now actually start the work they offer, Publish and
+  security scan report progress instead of running silent for minutes, and a
+  cloned repository's `.env` can no longer redirect a child CLI to another
+  provider endpoint.
+  This release binds Agentlas OS v1.1.73 at e36f4829f908e15dd64286cf5808d8941c0f54ef.
+  This source note does not prove a Desktop installer or update feed.
 - **2026-07-27 · v0.9.26 — Build and upload stop going silent** — liveness is
   now owned by the host, not the model: a running build heartbeats its elapsed
   time, its last real engine activity, and how long the engine has been quiet,

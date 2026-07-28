@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.9.27 — 2026-07-28
+
+This release binds Agentlas OS v1.1.73 at e36f4829f908e15dd64286cf5808d8941c0f54ef.
+This changelog entry describes source readiness and does not prove a published
+release.
+
+- **A Workforce preflight failure no longer takes every other engine feature
+  with it.** A rejected engine disappeared from runtime resolution itself, so
+  one capability check killed Build, security scan, publish, context slice,
+  career graph, project bootstrap, the ontology runtime and doctor for the rest
+  of the process, with no way back. Rejection is opt-in now and only the check
+  that recorded it acts on it — an engine missing five Workforce tools builds
+  and scans perfectly well.
+- **An engine release no longer stops a deployed Desktop.** The protocol check
+  blocks on capability only: missing required tools still refuse, value drift is
+  logged and allowed, added tools are fine. Release preflight stays strict, so
+  a real contract change is found at build time instead of on a user's machine.
+- **One's briefing actions do something.** The reserve/claim/fail lifecycle was
+  complete but the renderer never called `startAction`, so the button only
+  navigated. It now prepares, asks, then starts — reading only, and asking
+  first, because the contract requires explicit confirmation.
+- **Hub agent calls survive a prompt that starts with `-`.** The prompt went as
+  a positional argument and argparse ate it; it goes through the engine's own
+  `--context` now.
+- **Publish and security scan stop going silent.** Both could run for minutes
+  with no signal at all — the progress callbacks existed with zero callers.
+  Publish also no longer opens its own browser mid-run; Settings shows the
+  engine account state and signs in once, deliberately.
+- **Workforce flags survive One's prompt round-trip.** `--benchmark` and
+  `--legacy` were dropped and `--stormbreaker` leaked into the goal string and
+  reached search literally.
+- **Allocation receipts carry real token usage.** The adapter read output tokens
+  and discarded input and cache tokens, so cost telemetry was always empty.
+- **A cloned repository's `.env` can no longer redirect a child CLI's provider
+  endpoint.** The Terminal fix from 2026-07-27 had never been ported here.
+- Settings shows which Agentlas OS is attached and can update it; the bundled
+  engine advances to v1.1.73 and `npm run bump:engine` keeps its five hand-copied
+  pins in step.
+- `targetSchemaVersion` catches up to migration target 81. Shipping 81 while
+  declaring 79 would have blocked every update after first launch.
+
 ## 0.9.26 — 2026-07-27
 
 This release binds Agentlas OS v1.1.73 at e36f4829f908e15dd64286cf5808d8941c0f54ef.
