@@ -2,7 +2,7 @@
 
 ## 0.9.27 — 2026-07-28
 
-This release binds Agentlas OS v1.1.73 at e36f4829f908e15dd64286cf5808d8941c0f54ef.
+This release binds Agentlas OS v1.1.74 at 590c0b76adf638059ea2f1f919054a54fa6b01a1.
 This changelog entry describes source readiness and does not prove a published
 release.
 

@@ -79,7 +79,7 @@ authority for which version is actually public, stable, and downloadable.
   security scan report progress instead of running silent for minutes, and a
   cloned repository's `.env` can no longer redirect a child CLI to another
   provider endpoint.
-  This release binds Agentlas OS v1.1.73 at e36f4829f908e15dd64286cf5808d8941c0f54ef.
+  This release binds Agentlas OS v1.1.74 at 590c0b76adf638059ea2f1f919054a54fa6b01a1.
   This source note does not prove a Desktop installer or update feed.
 - **2026-07-27 · v0.9.26 — Build and upload stop going silent** — liveness is
   now owned by the host, not the model: a running build heartbeats its elapsed

@@ -53,9 +53,7 @@
       "name": "workforce.validate_selection",
       "requiredInputFields": [
         "workOrder",
-        "candidateSet",
-        "selection",
-        "federationResult"
+        "selection"
       ]
     },
     "prepareExecution": {
