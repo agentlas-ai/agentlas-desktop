@@ -23,7 +23,7 @@ import { navigate } from "@/lib/navigation";
 import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconRefresh, IconWand } from "@/components/Icon";
 import { MigrationPanel } from "@/components/MigrationPanel";
 import QRCode from "qrcode";
-import type { MobileBridgeDeviceSummary, MobileBridgeRuntimeStatus } from "@shared/types";
+import type { HephaestusUpdateJournal, MobileBridgeDeviceSummary, MobileBridgeRuntimeStatus } from "@shared/types";
 import type { MobileBridgePairingPayload } from "@shared/mobile-bridge";
 
 // BYOK 백엔드 목록은 shared/models.ts의 ByokBackend(단일 출처)를 그대로 쓴다.
@@ -267,16 +267,37 @@ export default function SettingsPage() {
     }
   }
 
+  // custom 백엔드는 "키"와 "Base URL"이라는 서로 독립적인 두 값을 한 저장 버튼으로 다룬다.
+  // 키는 저장 후 다시 표시하지 않으므로(아래 안내 문구), Base URL만 고치려는 사용자의
+  // 키 입력칸은 항상 비어 있다. 이때 빈 문자열을 saveApiKey로 넘기면 vault가 기존 키를
+  // 삭제해버리므로(electron/secrets/vault.ts saveApiKey), 값이 실제로 입력된 항목만 저장한다.
+  function isSaveable(backend: ByokBackend): boolean {
+    if (draftKey[backend].trim()) return true;
+    // 키를 다시 입력하지 않아도 Base URL 변경만으로 저장할 수 있어야 한다.
+    return backend === "custom" && draftCustomBaseUrl.trim() !== customBaseUrl.trim();
+  }
+
   async function saveKey(backend: ByokBackend) {
     const api = ipc();
     if (!api) return;
+    const key = draftKey[backend].trim();
     try {
-      await api.secrets.saveApiKey(backend, draftKey[backend]);
+      if (key) {
+        await api.secrets.saveApiKey(backend, draftKey[backend]);
+      }
       if (backend === "custom") {
         await api.config.setCustomBaseUrl(draftCustomBaseUrl);
       }
       setDraftKey((d) => ({ ...d, [backend]: "" }));
-      setRuntimeMessage(locale === "ko" ? "키를 저장했습니다. 값은 화면에 다시 표시하지 않습니다." : "Key saved. The value will not be shown again.");
+      setRuntimeMessage(
+        key
+          ? locale === "ko"
+            ? "키를 저장했습니다. 값은 화면에 다시 표시하지 않습니다."
+            : "Key saved. The value will not be shown again."
+          : locale === "ko"
+          ? "Base URL을 저장했습니다. 저장된 키는 그대로입니다."
+          : "Base URL saved. The stored key was kept.",
+      );
       await refresh();
     } catch (err) {
       setRuntimeMessage(locale === "ko" ? `키를 저장하지 못했습니다. 이전 값은 그대로입니다. ${String(err)}` : `Key was not saved. The previous value was kept. ${String(err)}`);
@@ -793,16 +814,16 @@ export default function SettingsPage() {
               />
               <button
                 onClick={() => void saveKey(b)}
-                disabled={!draftKey[b].trim()}
+                disabled={!isSaveable(b)}
                 style={{
                   padding: "8px 14px",
                   borderRadius: "var(--radius-md)",
-                  background: draftKey[b].trim() ? "var(--paper)" : "var(--paper-2)",
-                  color: draftKey[b].trim() ? "var(--ink)" : "var(--muted-deep)",
+                  background: isSaveable(b) ? "var(--paper)" : "var(--paper-2)",
+                  color: isSaveable(b) ? "var(--ink)" : "var(--muted-deep)",
                   fontWeight: 600,
                   fontSize: 12,
                   border: "1px solid var(--paper-edge)",
-                  boxShadow: draftKey[b].trim() ? "var(--neu-raised)" : "none",
+                  boxShadow: isSaveable(b) ? "var(--neu-raised)" : "none",
                 }}
               >
                 {t("settings.save")}
@@ -1508,11 +1529,207 @@ function MultimodalFallbackPanel({
   );
 }
 
+/*
+ * The attached Agentlas-OS engine, shown under the app version.
+ *
+ * Two things this deliberately does that a bare version string does not:
+ *
+ *  1. It names the SOURCE. `managed` follows its own release train; `bundled`
+ *     is the frozen copy inside this app and never advances; `override` is a
+ *     developer path. They are functionally different — the bundled fallback
+ *     ships without the Workforce goal-continuity tools, so "keep working on
+ *     this goal" silently stops persisting while the version still looks fine
+ *     and the engine still passes its self-check. A number cannot say that.
+ *
+ *  2. It says the engine updates separately. This sits directly above a
+ *     "check for updates" button that only ever touches the app — the engine
+ *     is refreshed by a detached worker at launch. Without the suffix the
+ *     button reads as covering both, which is a promise it cannot keep.
+ *
+ *  3. It can be acted on. Telling someone their engine is stale and giving them
+ *     nothing to press is worse than saying nothing — it converts a silent
+ *     problem into a visible dead end. The button runs Core's own updater
+ *     attached and reports what the journal says it did.
+ *
+ * The warning line appears only when something is actually off. On a healthy
+ * managed runtime this is one quiet monospace line, because a settings panel
+ * that explains itself every time trains people to stop reading it.
+ */
+function CoreEngineLine({
+  core,
+  onUpdated,
+}: {
+  core: {
+    version: string | null;
+    root: string | null;
+    source: "managed" | "bundled" | "override" | null;
+    available: boolean;
+    reason: string | null;
+  };
+  onUpdated: () => void;
+}) {
+  const { t, locale } = useT();
+  const [journal, setJournal] = useState<HephaestusUpdateJournal | null>(null);
+  const [running, setRunning] = useState(false);
+  const [outcome, setOutcome] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void ipc()?.hephaestus.updateJournal()
+      .then((j) => {
+        if (!cancelled) setJournal(j);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const sourceLabel =
+    core.source === "managed" ? t("settings.update.core_source_managed")
+      : core.source === "bundled" ? t("settings.update.core_source_bundled")
+      : core.source === "override" ? t("settings.update.core_source_override")
+      : null;
+  const warning =
+    !core.root ? t("settings.update.core_warn_missing")
+      // Files present but unusable — most often no Python 3.9+. This must win
+      // over the source note: an engine that cannot run is not a nuance.
+      : !core.available ? (core.reason || t("settings.update.core_warn_unusable"))
+      : core.source === "bundled" ? t("settings.update.core_warn_bundled")
+      : core.source === "override" ? t("settings.update.core_warn_override")
+      : null;
+
+  // An explicit override is the user's own pin. Offering to update it would
+  // fight the thing they deliberately set.
+  const canUpdate = core.source !== "override";
+
+  async function runUpdate() {
+    const api = ipc();
+    if (!api || running) return;
+    setRunning(true);
+    setOutcome(null);
+    try {
+      const result = await api.hephaestus.runUpdate();
+      setJournal(result.journal);
+      // Every branch here is a state the user can understand and, where it
+      // matters, keep waiting on. None of them is a dead end: a long download
+      // continues on its own, and no network resolves itself once there is one.
+      setOutcome(
+        result.outcome === "applied" ? t("settings.update.core_update_applied")
+          : result.outcome === "current" ? t("settings.update.core_update_already_current")
+          : result.outcome === "working" ? t("settings.update.core_update_working")
+          : result.outcome === "busy" ? t("settings.update.core_update_busy")
+          : result.outcome === "unknown" ? t("settings.update.core_update_unknown")
+          : result.outcome === "offline" ? t("settings.update.core_update_offline")
+          : result.outcome === "no_python" ? t("settings.update.core_update_no_python")
+          : t("settings.update.core_update_no_engine"),
+      );
+      if (result.outcome === "applied") onUpdated();
+    } catch {
+      setOutcome(t("settings.update.core_update_offline"));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  const lastChecked = journal?.lastCheckedEpoch
+    ? new Date(journal.lastCheckedEpoch * 1000).toLocaleString(locale === "ko" ? "ko-KR" : "en-US")
+    : null;
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+        <div
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            color: "var(--muted-deep)",
+            overflowWrap: "anywhere",
+            // Support asks people to read this back. Let them select it.
+            userSelect: "text",
+          }}
+          title={core.root ?? undefined}
+        >
+          {core.version ? `agentlas-os v${core.version}` : t("settings.update.core_missing")}
+          {sourceLabel ? ` · ${sourceLabel}` : ""}
+        </div>
+        {canUpdate && (
+          <button
+            type="button"
+            onClick={() => void runUpdate()}
+            disabled={running}
+            style={{
+              fontSize: 11,
+              padding: "2px 8px",
+              borderRadius: 6,
+              border: "1px solid var(--border)",
+              background: "transparent",
+              color: "var(--muted-deep)",
+              cursor: running ? "default" : "pointer",
+              opacity: running ? 0.6 : 1,
+            }}
+          >
+            {running ? t("settings.update.core_update_running") : t("settings.update.core_update_now")}
+          </button>
+        )}
+      </div>
+      {warning && (
+        <div style={{ fontSize: 11, color: "var(--warn, var(--muted-deep))", marginTop: 3, lineHeight: 1.5 }}>
+          {warning}
+        </div>
+      )}
+      {(outcome || lastChecked) && (
+        <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 3, lineHeight: 1.5 }}>
+          {outcome ?? t("settings.update.core_last_checked", { when: lastChecked ?? "" })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UpdatePanel() {
   const { t } = useT();
   const [version, setVersion] = useState("");
   const [checking, setChecking] = useState(false);
   const [state, setState] = useState<UpdaterState>({ status: "idle" });
+  /*
+   * Desktop's own version is not the whole answer. Build, upload, routing and
+   * the Workforce contract all belong to the attached Agentlas-OS Core, which
+   * updates on its own release train and is resolved at runtime — managed
+   * `~/.agentlas/runtime/current` when healthy, the bundled copy otherwise.
+   * Measured 2026-07-28: managed 1.1.73 vs bundled 1.1.62, and the bundled
+   * fallback is missing five workforce goal-continuity tools outright. Showing
+   * only the app version left no surface anywhere telling the user (or support)
+   * which Core they are actually on.
+   */
+  const [core, setCore] = useState<{
+    version: string | null;
+    root: string | null;
+    source: "managed" | "bundled" | "override" | null;
+    // Kept, not dropped. `hephaestusAvailable` still fills root/version/source
+    // when Python is missing, so a status line built from those three alone
+    // rendered a broken engine as perfectly healthy — while the dashboard, from
+    // the same call, said "blocked". Two screens, one moment, opposite answers.
+    available: boolean;
+    reason: string | null;
+  } | null>(null);
+
+  // Shared by first paint and the update button: after an engine update the
+  // version on screen must be the new one, not the one we read at mount.
+  const refreshCore = useCallback(async () => {
+    try {
+      const s = await ipc()?.hephaestus.status();
+      setCore({
+        version: s?.version ?? null,
+        root: s?.root ?? null,
+        source: s?.source ?? null,
+        available: s?.available ?? false,
+        reason: s?.reason ?? null,
+      });
+    } catch {
+      setCore({ version: null, root: null, source: null, available: false, reason: null });
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1524,6 +1741,9 @@ function UpdatePanel() {
       void api.updater.getState().then((s) => {
         if (!cancelled) setState(s);
       });
+      // Core absence is a real state, not an error: most of Desktop works
+      // without it. Report it plainly rather than hiding the row.
+      void refreshCore();
     }
     const off = updaterEvents()?.onState((next) => {
       if (!cancelled) setState(next);
@@ -1621,6 +1841,7 @@ function UpdatePanel() {
           <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 700 }}>
             v{version || "?"}
           </div>
+          {core && <CoreEngineLine core={core} onUpdated={refreshCore} />}
           <div style={{ fontSize: 12, color: "var(--muted-deep)", marginTop: 6, lineHeight: 1.55, whiteSpace: "normal", overflowWrap: "anywhere" }}>
             {statusText}
           </div>

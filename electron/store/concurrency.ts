@@ -80,3 +80,60 @@ export function getAgentConcurrencyInfo(): AgentConcurrencyInfo {
     userSet,
   };
 }
+
+// 로컬 추론(Ollama/LM Studio/MLX) 동시성 — 위 agent_concurrency와 별개의 예산이다.
+// CLI 자식 프로세스는 주로 원격 API를 기다리며 로컬 자원을 거의 안 쓰지만, 로컬
+// 추론은 정확히 반대다: 요청 1건이 이미 코어 대부분/GPU·통합메모리 대역폭을 쓴다.
+// 그래서 "코어-2, RAM/2"였던 CLI 공식을 그대로 재사용하면 과다 산정된다 — 훨씬
+// 보수적인 별도 공식과 훨씬 낮은 상한을 둔다.
+const LOCAL_INFERENCE_META_KEY = "local_inference_concurrency";
+export const LOCAL_INFERENCE_CONCURRENCY_HARD_MAX = 4;
+
+/** 로컬 추론 추천 동시성 — 코어 8개당, 여유 RAM 8GB당 겨우 1건씩만 추가로 허용. */
+export function recommendedLocalInferenceConcurrency(specs: SystemSpecs = getSystemSpecs()): number {
+  const coreBound = Math.max(1, Math.floor(specs.cores / 8));
+  const memBound = Math.max(1, Math.floor((specs.totalMemGB - 8) / 8) + 1);
+  return Math.max(1, Math.min(coreBound, memBound, LOCAL_INFERENCE_CONCURRENCY_HARD_MAX));
+}
+
+function clampLocalInference(n: number): number {
+  if (!Number.isFinite(n)) return recommendedLocalInferenceConcurrency();
+  return Math.max(1, Math.min(Math.floor(n), LOCAL_INFERENCE_CONCURRENCY_HARD_MAX));
+}
+
+export function getLocalInferenceConcurrency(): number {
+  const raw = getMeta(LOCAL_INFERENCE_META_KEY);
+  if (raw === null || raw === "") return recommendedLocalInferenceConcurrency();
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return recommendedLocalInferenceConcurrency();
+  return clampLocalInference(parsed);
+}
+
+export function setLocalInferenceConcurrency(value: number): number {
+  const clamped = clampLocalInference(value);
+  setMeta(LOCAL_INFERENCE_META_KEY, String(clamped));
+  return clamped;
+}
+
+export interface LocalInferenceConcurrencyInfo {
+  cores: number;
+  totalMemGB: number;
+  recommended: number;
+  current: number;
+  hardMax: number;
+  userSet: boolean;
+}
+
+export function getLocalInferenceConcurrencyInfo(): LocalInferenceConcurrencyInfo {
+  const specs = getSystemSpecs();
+  const raw = getMeta(LOCAL_INFERENCE_META_KEY);
+  const userSet = raw !== null && raw !== "";
+  return {
+    cores: specs.cores,
+    totalMemGB: Math.round(specs.totalMemGB * 10) / 10,
+    recommended: recommendedLocalInferenceConcurrency(specs),
+    current: getLocalInferenceConcurrency(),
+    hardMax: LOCAL_INFERENCE_CONCURRENCY_HARD_MAX,
+    userSet,
+  };
+}

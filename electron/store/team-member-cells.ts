@@ -77,7 +77,7 @@ export function materializeTeamMemberCells(
     VALUES
       (@id, @slug, @name, @nameEn, '', '', '', '[]',
        '[]', NULL, 'unknown', @installedAt, 'blue',
-       0, @role, 'visible', 'agent', @parentTeamId)
+       0, @role, 'background', 'agent', @parentTeamId)
   `);
   const attachMember = db.prepare(`
     UPDATE installed_agents

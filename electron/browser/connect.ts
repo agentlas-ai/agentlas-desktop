@@ -397,7 +397,7 @@ function emitToRenderer(channel: string, payload: unknown): void {
 /**
  * 되돌릴 수 없는 브라우저 행동 전에 호출. 저장된 권한을 먼저 보고, 없으면 경량 바텀시트를
  * renderer 로 띄워 사용자 결정을 기다린다.
- *  - 결제(payment): 저장 무시, 항상 물어봄.
+ *  - 결제(payment)/임의코드(unsafe-code): 승인은 절대 기억하지 않고 항상 물어봄. 단 명시 "거부"는 기억.
  *  - always: 즉시 approved(스킵). deny: 즉시 denied.
  *  - once/신규: 바텀시트 → 결과. always/deny면 기억.
  */
@@ -458,7 +458,11 @@ export async function browserRequestApproval(
       target: req.target ?? null,
       createdAt,
       expiresAt: createdAt + timeoutMs,
-      allowAlways: req.actionType !== "payment" && req.actionType !== "unsafe-code",
+      // 위 자동승인 가드를 통과해 여기 오는 건 payment/unsafe-code 뿐이다. 그래서 예전의
+      // `actionType !== "payment" && !== "unsafe-code"` 식은 항상 false인 죽은 조건이었다.
+      // 이 둘은 승인을 기억해선 안 되므로(결제는 매번 확인) "항상 승인"을 제공하지 않는다 —
+      // 시트에는 [한 번만]/[거부]만 뜬다. 거부는 store에 남아 다음부터 존중된다.
+      allowAlways: false,
     };
     const cancel = () => {
       const pending = pendingApprovals.get(requestId);
@@ -506,7 +510,9 @@ export async function browserRequestApproval(
     return "cancelled";
   }
 
-  // 명시적 결정만 기억(once/payment는 저장 안 됨 — store에서 가드).
+  // 명시적 결정만 기억(once는 저장 안 됨 — store에서 가드).
+  // payment/unsafe-code는 "거부"만 영속된다: 승인 캐시는 금지지만, 사용자가 막은 사이트를
+  // 매번 다시 묻지 않기 위해 deny는 남긴다. 취소는 browser:revokePermission.
   setBrowserPermission(site, req.actionType, decision);
   const approved = decision === "always" || decision === "once";
   logBrowserAction({

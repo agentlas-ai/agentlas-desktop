@@ -281,6 +281,18 @@ export function registerDiscoveredCliModels(kind: string, modelIds: readonly str
   DISCOVERED_CLI_MODELS.set(kind, models);
 }
 
+/**
+ * 이 CLI의 모델 목록이 런타임이 실제로 광고한 인벤토리인가.
+ *
+ * `CLI_MODELS`는 발견이 없을 때의 하드코딩 폴백이라 계정이 새 모델을 받으면
+ * 곧바로 낡는다(실측 2026-07-28: claude-code 폴백은 opus/sonnet/haiku뿐인데
+ * `claude --model fable` 호출이 정상 완료). 그래서 "이 모델은 없다"는 판단은
+ * 발견된 인벤토리에서만 내려야 한다 — 폴백으로 유효 모델을 차단하면 안 된다.
+ */
+export function cliModelsAreDiscovered(kind: string): boolean {
+  return DISCOVERED_CLI_MODELS.has(kind);
+}
+
 export function cliModels(kind: string): CliModelOption[] {
   return DISCOVERED_CLI_MODELS.get(kind) ??
     (CLI_MODELS as Record<string, CliModelOption[] | undefined>)[kind] ??

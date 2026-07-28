@@ -200,6 +200,24 @@ export function invalidateUsage(providerId?: string): void {
   }
 }
 
+/**
+ * 역할 풀 선택용 동기 peek — 네트워크를 절대 치지 않는다. 마지막 정상
+ * 스냅샷(메모리 → 디스크 last-good)에서 해당 프로바이더의 최대 사용률(%)을
+ * 돌려주고, 자료가 없거나 너무 오래됐으면 null(= 판단 보류, 스킵 금지).
+ */
+export function peekProviderUsedPercent(providerId: string, now = Date.now()): number | null {
+  loadLastGood();
+  const entry = lastResult.get(providerId) ?? lastGood.get(providerId);
+  if (!entry || now - entry.at > LAST_GOOD_MAX_MS) return null;
+  const windows = entry.usage?.windows ?? [];
+  let max: number | null = null;
+  for (const window of windows) {
+    if (typeof window.usedPercent !== "number") continue;
+    max = max === null ? window.usedPercent : Math.max(max, window.usedPercent);
+  }
+  return max;
+}
+
 async function fetchProvider(
   id: UsageRetryProviderId,
   fn: () => Promise<ProviderUsage | null>,

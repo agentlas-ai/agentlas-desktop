@@ -4427,12 +4427,58 @@ export interface OberonSheetRequest {
 
 // ── Hephaestus 엔진 브리지 ──────────────────────────────────────────────────
 /** 임베딩된 Hephaestus 엔진의 가용성. */
+/**
+ * What the Agentlas OS updater last did. Written by Core to
+ * `runtime/auto-update.json`; Desktop only reads it. A null journal means the
+ * updater has not run yet on this machine — distinct from having failed.
+ */
+export interface HephaestusUpdateJournal {
+  status: string | null;
+  reason: string | null;
+  current: string | null;
+  latest: string | null;
+  lastCheckedEpoch: number | null;
+  lastAppliedTag: string | null;
+  lastAppliedEpoch: number | null;
+}
+export interface HephaestusUpdateResult {
+  ok: boolean;
+  /**
+   * `applied` new engine installed · `current` already newest · `unknown` the
+   * updater ran but reported a state this build cannot interpret · `working`
+   * still downloading (the worker continues without the app waiting) · `busy`
+   * another updater holds the lock · `offline` could not reach the release feed
+   * · `no_engine` nothing to update · `no_python` no interpreter to run it.
+   *
+   * `current` must never absorb the others: each one needs different words, and
+   * three of them previously read as "already up to date".
+   */
+  outcome:
+    | "applied"
+    | "current"
+    | "unknown"
+    | "working"
+    | "busy"
+    | "offline"
+    | "no_engine"
+    | "no_python";
+  error?: string;
+  journal: HephaestusUpdateJournal | null;
+}
 export interface HephaestusStatus {
   available: boolean;
   reason?: string;
   root: string | null;
   python: string | null;
   version: string | null;
+  /**
+   * Where the attached engine came from. `managed` follows its own release
+   * train, `bundled` is the frozen copy inside this app, `override` is an
+   * explicit HEPHAESTUS_RUNTIME_ROOT. Functionally distinct, not cosmetic: the
+   * bundled fallback lacks the Workforce goal-continuity tools, so the UI must
+   * be able to say which one is attached rather than only its version number.
+   */
+  source: "managed" | "bundled" | "override" | null;
   pythonVersion: string | null;
 }
 /** 엔진 CLI 명령 결과(JSON 출력 + 원시 stdout/stderr). */
@@ -6097,6 +6143,10 @@ export interface AgentlasIpc {
   hephaestus: {
     /** 엔진 가용성(번들 + Python). UI 게이트에 사용. */
     status: (locale?: "ko" | "en") => Promise<HephaestusStatus>;
+    /** Engine updater journal (read-only; null when it has never run). */
+    updateJournal: () => Promise<HephaestusUpdateJournal | null>;
+    /** Run the engine updater now and report what it actually did. */
+    runUpdate: () => Promise<HephaestusUpdateResult>;
     /** 엔진 자가진단(JSON). */
     doctor: () => Promise<HephaestusCommandResult>;
     /** Stormbreaker 견고-실행: 쿼리 라우팅 후 가능한 pipeline execution_fabric 실행. */

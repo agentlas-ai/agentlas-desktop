@@ -2,8 +2,9 @@
 
 // 경량 승인 바텀시트 — 되돌릴 수 없는 브라우저 행동(전송·게시·삭제·결제) 전에 뜬다.
 // 기존 ChatQuestionSheet 대비 최소 UI: 한 줄 설명 + [한 번만] [항상 승인] [거부].
-//  - 결제(payment)는 allowAlways=false → "항상 승인" 버튼을 숨겨 매번 확인.
-//  - "항상 승인"은 electron이 site+action 으로 기억 → 다음부터 스킵(동적 권한).
+//  - 현재 이 시트에 도달하는 건 결제(payment)/임의코드(unsafe-code)뿐이고 둘 다 allowAlways=false라
+//    "항상 승인" 버튼은 뜨지 않는다(승인 캐시 금지 = 매번 확인). 버튼은 플래그로만 살아난다.
+//  - "거부"는 electron이 site+action 으로 기억 → 다음부터 시트 없이 차단(browser:revokePermission으로 해제).
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { ipc, ipcEvents } from "@/lib/ipc";

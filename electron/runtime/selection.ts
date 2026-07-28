@@ -27,13 +27,15 @@ import { runOllama } from "./ollama";
 import { runLMStudio } from "./lmstudio";
 import { runMLX } from "./mlx";
 import { acquireRunSlot } from "./run-slots";
+import { acquireLocalInferenceSlot } from "./local-inference-run-slots";
 import type { Runner } from "./runner";
 
 /**
  * CLI 러너를 전역 실행 슬롯으로 래핑 — 챗·firm·swarm·워크플로우·자동화가 각자 캡으로
  * 곱셈 스폰해도 동시 CLI 자식 수가 사용자 슬라이더(getAgentConcurrency)를 못 넘는다.
- * 슬롯이 차면 FIFO 대기(+상태 줄 표시), abort 시 즉시 이탈. HTTP 런타임(BYOK/Ollama)은
- * 로컬 CPU를 거의 안 쓰므로 래핑하지 않는다.
+ * 슬롯이 차면 FIFO 대기(+상태 줄 표시), abort 시 즉시 이탈. 진짜 원격 API인 BYOK는
+ * 로컬 자원을 거의 안 쓰므로 래핑하지 않는다 — 로컬 추론(Ollama/LM Studio/MLX)은
+ * HTTP로 호출하지만 로컬 CPU/GPU를 쓰므로 아래 withLocalInferenceSlot으로 별도 래핑한다.
  * 주의: 러너 내부 재시도(runClaudeCode의 세션 복구 재귀)는 래핑 밖이라 이중 획득이 없다.
  */
 function withRunSlot(runner: Runner): Runner {
@@ -53,12 +55,38 @@ function withRunSlot(runner: Runner): Runner {
   };
 }
 
+/**
+ * 로컬 추론(Ollama/LM Studio/MLX) 전용 실행 슬롯 래퍼. CLI 자식 프로세스 예산과는
+ * 별개의(보통 훨씬 낮은) 한도를 쓴다 — 로컬 추론 요청 1건이 이미 코어 대부분/GPU를
+ * 쓰므로 CLI와 같은 예산으로 게이트하면 과다 산정되고, 아예 안 걸면 여러 에이전트가
+ * 동시에 로컬 모델을 때려 컴퓨터를 못 쓰게 만들 수 있다.
+ */
+function withLocalInferenceSlot(runner: Runner): Runner {
+  return async (req, events) => {
+    const release = await acquireLocalInferenceSlot(req.signal, () => {
+      events.onStatus(
+        req.locale === "ko"
+          ? "다른 로컬 추론이 끝나기를 기다리는 중... (동시 실행 한도)"
+          : "Waiting for a free local inference slot... (concurrency limit)",
+      );
+    });
+    try {
+      return await runner(req, events);
+    } finally {
+      release();
+    }
+  };
+}
+
 const runClaudeCodeSlotted = withRunSlot(runClaudeCode);
 const runCodexSlotted = withRunSlot(runCodex);
 const runGeminiSlotted = withRunSlot(runGemini);
 const runKimiSlotted = withRunSlot(runKimi);
 const runGrokSlotted = withRunSlot(runGrok);
 const runCursorSlotted = withRunSlot(runCursor);
+const runOllamaSlotted = withLocalInferenceSlot(runOllama);
+const runLMStudioSlotted = withLocalInferenceSlot(runLMStudio);
+const runMLXSlotted = withLocalInferenceSlot(runMLX);
 
 const RUNNER_LABEL: Record<string, string> = {
   "claude-code": "Claude Code CLI",
@@ -110,11 +138,11 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
   if (active.kind === "cursor")
     return { runner: runCursorSlotted, label: `Cursor Agent${active.model && active.model !== "auto" ? ` · ${active.model}` : " · Auto"}` };
   if (active.kind === "ollama")
-    return { runner: runOllama, label: `Ollama${active.model ? ` · ${active.model}` : ""}` };
+    return { runner: runOllamaSlotted, label: `Ollama${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "lmstudio")
-    return { runner: runLMStudio, label: `LM Studio${active.model ? ` · ${active.model}` : ""}` };
+    return { runner: runLMStudioSlotted, label: `LM Studio${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "mlx")
-    return { runner: runMLX, label: `MLX${active.model ? ` · ${active.model}` : ""}` };
+    return { runner: runMLXSlotted, label: `MLX${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "byok") {
     if (active.backend === "anthropic")
       return { runner: runAnthropicByok, label: RUNNER_LABEL["byok:anthropic"] };
@@ -247,6 +275,51 @@ export function selectRuntimeForTargets(
     override: null,
     unavailableOverride: override ?? null,
   };
+}
+
+export interface InvocationRuntimeResolution {
+  choice: RuntimeChoice | AgentAppRuntimeChoice | null;
+  /** true = the invocation pin was used verbatim (fail-closed when unavailable). */
+  pinHonored: boolean;
+  /** Non-null when a chat-surface pin stepped aside for a Library assignment. */
+  pinYieldedToOverride: AgentRuntimeOverride | null;
+}
+
+/**
+ * Single decision point for "which runtime runs this invocation".
+ *
+ * WHY: a chat runtime pin and a Library per-agent/per-firm assignment are two
+ * settings surfaces claiming the same decision. The pin used to short-circuit
+ * the whole override path, so the narrower agent-scoped assignment was dropped
+ * without a word — and the "assigned runtime unavailable" notice was skipped
+ * too. The chat pin is only a conversation default, so it now yields to an
+ * explicit assignment and reports that it did. An unattended Main-owned
+ * automation pin stays authoritative: it is a fail-closed contract that also
+ * pins the CLI session namespace.
+ */
+export function selectInvocationRuntime(
+  runtimes: RuntimeStatus[],
+  targets: RuntimeOverrideTarget[],
+  options: {
+    pin?: import("../../shared/types").RuntimeSelection | null;
+    /** true = Main-owned unattended automation pin, false = chat-surface pin. */
+    pinIsAuthoritative: boolean;
+    agentAppMode?: boolean;
+  },
+): InvocationRuntimeResolution {
+  const assigned =
+    options.pin && !options.pinIsAuthoritative ? findAgentRuntimeOverride(targets) : null;
+  if (options.pin && !assigned) {
+    return {
+      choice: selectExactRuntime(runtimes, options.pin),
+      pinHonored: true,
+      pinYieldedToOverride: null,
+    };
+  }
+  const choice = options.agentAppMode
+    ? selectAgentAppRuntimeForTargets(runtimes, targets)
+    : selectRuntimeForTargets(runtimes, targets);
+  return { choice, pinHonored: false, pinYieldedToOverride: assigned };
 }
 
 function agentAppStatelessSafe(runtime: RuntimeStatus): boolean {

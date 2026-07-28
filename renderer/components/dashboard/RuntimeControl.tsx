@@ -4,6 +4,7 @@ import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type {
   RuntimeRole,
+  RuntimeRolePoolState,
   RuntimeSelection,
   RuntimeStatus,
 } from "@/lib/types";
@@ -137,6 +138,21 @@ export function RuntimeControl() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [pool, setPool] = useState<RuntimeRolePoolState | null>(null);
+
+  const loadPool = useCallback(async () => {
+    const api = ipc();
+    if (!api?.runtime.listRoleMembers) return;
+    try {
+      setPool(await api.runtime.listRoleMembers());
+    } catch {
+      /* 풀 미지원 빌드 — 단일 선택 UI만 표시 */
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPool();
+  }, [loadPool]);
 
   const views = useMemo(
     () => ({
@@ -236,6 +252,8 @@ export function RuntimeControl() {
       });
       setRuntimes(updated);
       setMessage(success);
+      // 단일 설정은 풀 헤드 교체이므로 풀 표시도 함께 갱신한다.
+      void loadPool();
     } catch (err) {
       setMessage(
         ko
@@ -346,6 +364,197 @@ export function RuntimeControl() {
         : ko
           ? "워커 모델을 직접 지정할 수 있습니다."
           : "Worker model can now be selected directly.",
+    );
+  }
+
+  async function writePool(role: RuntimeRole, selections: RuntimeSelection[]) {
+    const api = ipc();
+    if (!api?.runtime.setRoleMembers || busy) return;
+    setBusy(true);
+    try {
+      setPool(await api.runtime.setRoleMembers(role, selections));
+      const detected = await api.runtime.detect();
+      setRuntimes(detected);
+      setMessage(ko ? "후보 풀을 저장했습니다." : "Candidate pool saved.");
+    } catch (err) {
+      setMessage(
+        ko
+          ? `풀을 저장하지 못했습니다. ${String(err)}`
+          : `Could not save the pool. ${String(err)}`,
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function poolSelections(role: RuntimeRole): RuntimeSelection[] {
+    return (pool?.members[role] ?? []).map((member) => member.selection);
+  }
+
+  async function moveMember(role: RuntimeRole, index: number, delta: number) {
+    const selections = poolSelections(role);
+    const target = index + delta;
+    if (target < 0 || target >= selections.length) return;
+    const next = [...selections];
+    [next[index], next[target]] = [next[target], next[index]];
+    await writePool(role, next);
+  }
+
+  async function removeMember(role: RuntimeRole, index: number) {
+    const selections = poolSelections(role);
+    const next = selections.filter((_, i) => i !== index);
+    await writePool(role, next);
+  }
+
+  async function addCurrentAsMember(role: RuntimeRole) {
+    const active = views[role].runtime;
+    if (!active) return;
+    const selections = poolSelections(role);
+    const candidate: RuntimeSelection = {
+      kind: active.kind,
+      backend: active.backend,
+      source: active.source,
+      model: active.model ?? undefined,
+      longContext: active.longContextEnabled,
+      effort: active.effort ?? undefined,
+      role,
+      inherit: false,
+    };
+    const duplicate = selections.some(
+      (selection) =>
+        selection.kind === candidate.kind &&
+        (selection.backend ?? null) === (candidate.backend ?? null) &&
+        (selection.model ?? null) === (candidate.model ?? null),
+    );
+    if (duplicate) {
+      setMessage(ko ? "이미 풀에 있는 후보입니다." : "Already in the pool.");
+      return;
+    }
+    await writePool(
+      role,
+      selections.length === 0 ? [candidate] : [...selections, candidate],
+    );
+  }
+
+  function memberBadge(role: RuntimeRole, position: number): {
+    label: string;
+    tone: "active" | "skip" | "idle";
+  } {
+    const pick = pool?.picks[role];
+    if (pick?.position === position && !pick.inherited) {
+      return { label: ko ? "사용 중" : "In use", tone: "active" };
+    }
+    const skip = pick?.skipped.find((entry) => entry.position === position);
+    if (skip) {
+      const label =
+        skip.reason === "quota-exceeded"
+          ? ko
+            ? "쿼터 초과 · 건너뜀"
+            : "Quota exceeded · skipped"
+          : skip.reason === "model-unavailable"
+            ? ko
+              ? "이 엔진에 없는 모델 · 건너뜀"
+              : "Model not in this engine · skipped"
+            : ko
+              ? "미설치 · 건너뜀"
+              : "Not installed · skipped";
+      return { label, tone: "skip" };
+    }
+    return { label: ko ? "대기" : "Standby", tone: "idle" };
+  }
+
+  function renderPool(role: RuntimeRole) {
+    const members = pool?.members[role] ?? [];
+    const inheritedPick = role === "worker" && (pool?.picks.worker?.inherited ?? false);
+    return (
+      <div className="dashboard-runtime-pool">
+        <div className="dashboard-runtime-pool-head">
+          <span>
+            {role === "orchestrator"
+              ? ko
+                ? "오케스트레이터 후보 풀"
+                : "Orchestrator pool"
+              : ko
+                ? "워커 후보 풀"
+                : "Worker pool"}
+          </span>
+          <span className="dashboard-module-meta">
+            {ko
+              ? "순서가 우선순위 — 미설치·쿼터 초과는 자동으로 다음 후보"
+              : "Order is priority — unavailable or quota-hit members are skipped"}
+          </span>
+        </div>
+        {members.length === 0 ? (
+          <div className="dashboard-runtime-pool-empty">
+            {role === "worker"
+              ? ko
+                ? "비어 있음 — 오케스트레이터 풀을 따릅니다."
+                : "Empty — follows the orchestrator pool."
+              : ko
+                ? "비어 있음 — 아래 선택을 추가하세요."
+                : "Empty — add the selection below."}
+          </div>
+        ) : (
+          <ol className="dashboard-runtime-pool-list">
+            {members.map((member, index) => {
+              const badge = memberBadge(role, member.position);
+              const kindLabel = RUNTIME_LABEL[member.selection.kind] ?? member.selection.kind;
+              return (
+                <li key={`${member.selection.kind}:${member.selection.model ?? ""}:${member.position}`}>
+                  <span className="dashboard-runtime-pool-order">{index + 1}</span>
+                  <span className="dashboard-runtime-pool-name">
+                    {kindLabel}
+                    {member.selection.model ? ` · ${member.selection.model}` : ""}
+                    {member.selection.effort ? ` · ${member.selection.effort}` : ""}
+                  </span>
+                  <span
+                    className="dashboard-runtime-pool-badge"
+                    data-tone={badge.tone}
+                  >
+                    {badge.label}
+                  </span>
+                  <span className="dashboard-runtime-pool-actions">
+                    <button
+                      type="button"
+                      onClick={() => void moveMember(role, index, -1)}
+                      disabled={busy || index === 0}
+                      aria-label={ko ? "위로" : "Move up"}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void moveMember(role, index, 1)}
+                      disabled={busy || index === members.length - 1}
+                      aria-label={ko ? "아래로" : "Move down"}
+                    >
+                      ↓
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void removeMember(role, index)}
+                      disabled={
+                        busy || (role === "orchestrator" && members.length === 1)
+                      }
+                      aria-label={ko ? "제거" : "Remove"}
+                    >
+                      ×
+                    </button>
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+        <button
+          type="button"
+          className="dashboard-runtime-pool-add"
+          onClick={() => void addCurrentAsMember(role)}
+          disabled={busy || !views[role].runtime}
+        >
+          {ko ? "+ 현재 선택을 풀에 추가" : "+ Add current selection to pool"}
+        </button>
+      </div>
     );
   }
 
@@ -474,6 +683,7 @@ export function RuntimeControl() {
             )}
           </div>
         )}
+        {renderPool(role)}
         <div className="dashboard-runtime-note">{note}</div>
       </section>
     );

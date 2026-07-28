@@ -21,9 +21,14 @@ import { IconClose } from "@/components/Icon";
 
 /**
  * 레거시 스케줄 토큰("cron:…", "daily-HH:MM", "weekday-HH:MM", "weekly-<dow>-HH:MM",
- * "monthly-<D>-HH:MM", "hourly") → ScheduleSpec 복원. 챗 생성/레거시 그래프의 트리거는
- * scheduleSpec 없이 토큰만 갖는데, 복원 없이는 빌더가 daily-09:00 기본값으로 마운트되며
- * 즉시 onChange를 방출해 — 트리거 노드를 클릭만 해도 기존 cron 스케줄이 덮어써졌다.
+ * "monthly-<D>-HH:MM", "hourly", "every-Nm"/"every-Nh") → ScheduleSpec 복원. 챗 생성/레거시
+ * 그래프의 트리거는 scheduleSpec 없이 토큰만 갖는데, 복원 없이는 빌더가 daily-09:00 기본값으로
+ * 마운트되며 즉시 onChange를 방출해 — 트리거 노드를 클릭만 해도 기존 스케줄이 덮어써졌다.
+ *
+ * 문법은 백엔드 store/schedule.ts parseLegacyToken의 미러여야 한다. every-Nm이 빠져 있어
+ * Stormbreaker 장기 실행 continuation("every-30m", scheduleSpec 없음)이 트리거 노드 클릭만으로
+ * 하루 1회 09:00으로 바뀌었다. hourly도 백엔드와 같이 interval 1h(lastRun 기준)로 복원한다 —
+ * cron "0 * * * *"로 복원하면 발사 기준이 조용히 정시 고정으로 바뀐다.
  */
 const LEGACY_DOW = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 function specFromLegacyToken(token: string, tz: string): ScheduleSpec | null {
@@ -33,7 +38,14 @@ function specFromLegacyToken(token: string, tz: string): ScheduleSpec | null {
     const expr = s.slice(5).trim();
     return expr ? { kind: "cron", expr, tz } : null;
   }
-  if (s === "hourly") return { kind: "cron", expr: "0 * * * *", tz };
+  if (s === "hourly") return { kind: "interval", everyMs: 60 * 60 * 1000, anchor: "lastRun" };
+  const every = s.match(/^every-(\d+)(m|h)$/);
+  if (every) {
+    const amount = parseInt(every[1], 10);
+    if (!(amount > 0)) return null;
+    const minutes = every[2] === "h" ? amount * 60 : amount;
+    return { kind: "interval", everyMs: minutes * 60 * 1000, anchor: "lastRun" };
+  }
   const hm = (v: string): { h: number; m: number } | null => {
     const m = v.match(/^(\d{1,2}):(\d{2})$/);
     return m ? { h: parseInt(m[1], 10), m: parseInt(m[2], 10) } : null;

@@ -52,12 +52,15 @@ export function QuestBoard() {
     }
     try {
       const res = await api.quests.list();
+      // authenticated는 실패 응답에도 항상 실려 온다. ok일 때만 반영하면 미로그인 응답
+      // (ok:false, authenticated:false)에서 기본값 true가 남아 로그인 CTA가 영영 안 뜬다.
+      setAuthenticated(res.authenticated);
       if (res.ok) {
         setQuests(res.quests);
-        setAuthenticated(res.authenticated);
         setError("");
       } else {
-        setError(ko ? "퀘스트를 불러오지 못했습니다." : "Could not load quests.");
+        // 미로그인은 "불러오기 실패"가 아니다 — 에러 문구 대신 UnauthedBody가 나가야 한다.
+        setError(res.authenticated ? (ko ? "퀘스트를 불러오지 못했습니다." : "Could not load quests.") : "");
       }
     } catch {
       setError(ko ? "퀘스트를 불러오지 못했습니다." : "Could not load quests.");
@@ -295,10 +298,12 @@ export function QuestBoard() {
         <div style={{ padding: "12px 14px", fontSize: 12, color: "var(--dash-muted)" }}>
           {ko ? "퀘스트를 불러오는 중…" : "Loading quests…"}
         </div>
+      ) : !authenticated ? (
+        // 미로그인 판정이 에러 문구보다 우선한다 — 어느 경로(load 실패/claim 401/예외 후)로
+        // 들어와도 남아 있는 error 문자열이 로그인 CTA를 가리지 않게.
+        <UnauthedBody ko={ko} quests={quests} signingIn={signingIn} onSignIn={() => void onSignIn()} />
       ) : error ? (
         <div style={{ padding: "12px 14px", fontSize: 12, color: "var(--dash-muted)" }}>{error}</div>
-      ) : !authenticated ? (
-        <UnauthedBody ko={ko} quests={quests} signingIn={signingIn} onSignIn={() => void onSignIn()} />
       ) : total === 0 ? (
         <div style={{ padding: "12px 14px", fontSize: 12, color: "var(--dash-muted)" }}>
           {ko ? "표시할 퀘스트가 없어요." : "No quests to show."}

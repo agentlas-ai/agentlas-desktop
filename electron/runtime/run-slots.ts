@@ -2,8 +2,10 @@
 // 자동화)가 공유하는 단일 예산. 이전에는 서브시스템별 캡만 있어 (챗 무제한) × (자동화 2 ×
 // 그래프 동시성) × (firm/swarm 동시성)이 곱셈으로 쌓여 CPU/RAM 폭주를 막는 게이트가 없었다.
 // 예산 = 사용자 슬라이더(getAgentConcurrency, 사양 기반 추천값). 초과분은 거절이 아니라
-// FIFO 큐잉 — abort 시 큐에서 즉시 이탈한다. HTTP 런타임(BYOK/Ollama)은 로컬 CPU를 거의
-// 안 쓰므로 게이트하지 않는다(selection.ts에서 CLI 러너만 래핑).
+// FIFO 큐잉 — abort 시 큐에서 즉시 이탈한다. 진짜 원격 API인 BYOK는 로컬 자원을 거의 안
+// 쓰므로 이 예산에 안 걸린다. 로컬 추론(Ollama/LM Studio/MLX)은 HTTP로 호출하지만 로컬
+// CPU/GPU를 쓰므로 이 풀이 아니라 local-inference-run-slots.ts의 별도 예산으로 게이트한다
+// (selection.ts의 withRunSlot/withLocalInferenceSlot 참고).
 import { getAgentConcurrency } from "../store/concurrency";
 
 let inUse = 0;

@@ -172,9 +172,11 @@ async function fetchUsageWith(
       });
     }
 
-    // 5시간 → 주간 → 모델별 7일 → 월 크레딧
+    // 5시간 → 주간 → 월 크레딧(유료 초과분) → 모델별 7일.
+    // monthly를 꼴찌(9)로 두면 Max 계정(창 5개)에서 표시 상한에 항상 먼저 잘려
+    // "실제로 청구되는 돈"이 앱 어디에도 안 뜬다 — 무료 한도 다음 순위로 올린다.
     const rank = (w: UsageWindow) =>
-      w.id === "five_hour" ? 0 : w.id === "seven_day" ? 1 : w.kind === "monthly" ? 9 : 5;
+      w.id === "five_hour" ? 0 : w.id === "seven_day" ? 1 : w.kind === "monthly" ? 2 : 5;
     windows.sort((a, b) => rank(a) - rank(b));
 
     return { ...base, status: windows.length ? "ok" : "no_quota", windows };

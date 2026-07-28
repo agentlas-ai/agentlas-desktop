@@ -136,7 +136,7 @@ import {
 import { resolveRunKeyElicitation } from "./mcp/run-key-elicitation";
 import { invocationService } from "./invocation/service";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
-import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot } from "./hephaestus/engine";
+import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot, readHephaestusUpdateJournal, runHephaestusRuntimeUpdate } from "./hephaestus/engine";
 import { listSkillCatalog, readSkillCatalogAsset } from "./hephaestus/skill-catalog";
 import {
   aoGraph,
@@ -4072,10 +4072,22 @@ export function registerIpcHandlers(): void {
     clearChatContext(chatId);
   });
 
+  let hephaestusUpdateInFlight: ReturnType<typeof runHephaestusRuntimeUpdate> | null = null;
   // ── Hephaestus 엔진 브리지 ──────────────────────────────────────────────
   // 임베딩된 오픈소스 엔진(Hephaestus)을 범용 CLI/JSON 으로 호출한다. 엔진 측에는 데스크탑
   // 흔적이 없고, 모든 연결 코드는 electron/hephaestus/* + 아래 핸들러에만 존재한다.
   ipcMain.handle("hephaestus:status", (_e, locale?: "ko" | "en") => hephaestusAvailable(locale));
+  ipcMain.handle("hephaestus:updateJournal", () => readHephaestusUpdateJournal());
+  // Serialised: two concurrent updaters would race Core's lock and the second
+  // would report a misleading outcome for work the first is still doing.
+  ipcMain.handle("hephaestus:runUpdate", () => {
+    if (!hephaestusUpdateInFlight) {
+      hephaestusUpdateInFlight = runHephaestusRuntimeUpdate().finally(() => {
+        hephaestusUpdateInFlight = null;
+      });
+    }
+    return hephaestusUpdateInFlight;
+  });
   ipcMain.handle("hephaestus:doctor", () => hephaestusDoctor());
   ipcMain.handle(
     "hephaestus:stormbreaker",

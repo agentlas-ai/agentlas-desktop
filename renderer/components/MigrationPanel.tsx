@@ -17,6 +17,10 @@ export function MigrationPanel() {
   const [overwrite, setOverwrite] = useState(false);
   const [busy, setBusy] = useState<MigrationSourceKind | null>(null);
   const [results, setResults] = useState<Record<string, MigrationResult>>({});
+  // scan/import IPC가 거부되면(디렉터리 읽기 실패·키체인 거부 등) 아무 상태도 안 바뀌어
+  // 실패가 성공(또는 "설치 없음")과 똑같이 보였다. 실패 사유를 따로 담아 화면에 남긴다.
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [importErrors, setImportErrors] = useState<Record<string, string>>({});
 
   const scan = useCallback(async () => {
     const api = ipc();
@@ -27,6 +31,10 @@ export function MigrationPanel() {
     setLoading(true);
     try {
       setSources(await api.migration.scan());
+      setScanError(null);
+    } catch (e) {
+      // 스캔이 실패한 것을 "설치 없음"으로 단정하면 거짓말이 된다 — sources는 건드리지 않는다.
+      setScanError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -40,10 +48,21 @@ export function MigrationPanel() {
     const api = ipc();
     if (!api) return;
     setBusy(kind);
+    setImportErrors((m) => {
+      const { [kind]: _drop, ...rest } = m;
+      return rest;
+    });
     try {
       const res = await api.migration.import({ source: kind, overwrite, importKeys: true, locale });
       setResults((r) => ({ ...r, [kind]: res }));
       await scan();
+    } catch (e) {
+      // catch가 없으면 setResults에 도달하지 못해 패널이 조용히 원래 상태로 돌아갔다.
+      setResults((r) => {
+        const { [kind]: _drop, ...rest } = r;
+        return rest;
+      });
+      setImportErrors((m) => ({ ...m, [kind]: e instanceof Error ? e.message : String(e) }));
     } finally {
       setBusy(null);
     }
@@ -62,6 +81,8 @@ export function MigrationPanel() {
 
       {loading ? (
         <div style={{ fontSize: 13, color: "var(--muted-deep)" }}>{t("migration.scanning")}</div>
+      ) : scanError ? (
+        <ErrorNote title={t("migration.scan_failed")} detail={scanError} onRetry={() => void scan()} retryLabel={t("migration.retry")} />
       ) : available.length === 0 ? (
         <div
           style={{
@@ -176,12 +197,64 @@ export function MigrationPanel() {
                   : t("migration.import_from", { label: s.label })}
               </button>
 
+              {importErrors[s.kind] && (
+                <ErrorNote title={t("migration.import_failed")} detail={importErrors[s.kind]} />
+              )}
               {results[s.kind] && <ResultNote result={results[s.kind]} />}
             </div>
           ))}
         </>
       )}
     </>
+  );
+}
+
+// 실패는 성공과 구분되게 보여야 한다 — 조용히 idle로 돌아가지 않도록 사유를 그대로 노출.
+function ErrorNote({
+  title,
+  detail,
+  onRetry,
+  retryLabel,
+}: {
+  title: string;
+  detail: string;
+  onRetry?: () => void;
+  retryLabel?: string;
+}) {
+  return (
+    <div
+      role="alert"
+      style={{
+        marginTop: 12,
+        padding: "10px 12px",
+        border: "1px solid var(--paper-edge)",
+        borderRadius: "var(--radius-md)",
+        background: "rgba(217,120,120,0.14)",
+        fontSize: 12,
+        color: "var(--ink-soft)",
+        lineHeight: 1.55,
+      }}
+    >
+      <div style={{ fontWeight: 600 }}>⚠ {title}</div>
+      <div style={{ color: "var(--muted-deep)", marginTop: 2, wordBreak: "break-word" }}>{detail}</div>
+      {onRetry && (
+        <button
+          onClick={onRetry}
+          style={{
+            marginTop: 8,
+            padding: "6px 12px",
+            borderRadius: "var(--radius-md)",
+            background: "var(--paper)",
+            color: "var(--ink)",
+            fontWeight: 600,
+            fontSize: 12,
+            border: "1px solid var(--paper-edge)",
+          }}
+        >
+          {retryLabel}
+        </button>
+      )}
+    </div>
   );
 }
 

@@ -758,6 +758,8 @@ const api: AgentlasIpc = {
   },
   hephaestus: {
     status: (locale) => ipcRenderer.invoke("hephaestus:status", locale),
+    updateJournal: () => ipcRenderer.invoke("hephaestus:updateJournal"),
+    runUpdate: () => ipcRenderer.invoke("hephaestus:runUpdate"),
     doctor: () => ipcRenderer.invoke("hephaestus:doctor"),
     stormbreaker: (input) => ipcRenderer.invoke("hephaestus:stormbreaker", input),
     getSupervisor: () => ipcRenderer.invoke("hephaestus:getSupervisor"),

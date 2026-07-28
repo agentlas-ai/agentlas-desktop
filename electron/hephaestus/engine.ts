@@ -17,9 +17,10 @@ import { spawnSync, type ChildProcess } from "node:child_process";
 import { detachedSpawnOpts, killCliTree, trackRunChild, withCliPath } from "../runtime/exec";
 import { withPythonCacheBoundary } from "../runtime/python-cache";
 import { currentUiLocale } from "../ui-locale";
-import { hephaestusRoot, readHephaestusVersion, resetHephaestusRootCache } from "./root";
+import { hephaestusRoot, hephaestusRootDetail, readHephaestusVersion, resetHephaestusRootCache } from "./root";
+import type { HephaestusStatus, HephaestusUpdateJournal } from "../../shared/types";
 
-export { hephaestusRoot, readHephaestusVersion } from "./root";
+export { hephaestusRoot, hephaestusRootDetail, readHephaestusVersion } from "./root";
 
 // bin/hephaestus 의 `run_python_module` 과 바이트 동일한 부트스트랩.
 // `python -c <BOOTSTRAP> <module> <args...>` 형태로 호출하면 sys.argv[0] 이 모듈명이 되고,
@@ -359,6 +360,199 @@ export async function startHephaestusRuntimeAutoUpdate(): Promise<boolean> {
   }
 }
 
+/**
+ * Read the engine updater's own journal.
+ *
+ * The launch-time auto-update worker runs detached with `stdio: "ignore"`, so
+ * Desktop never learns what it did — a stuck engine looked identical to a
+ * current one. Core already records every attempt to `runtime/auto-update.json`
+ * (status, current, latest, when it last checked, when it last applied), so the
+ * outcome was on disk the whole time with nothing reading it. Reading that file
+ * needs no change to Agentlas OS, which is deliberate: the engine is a separate
+ * open-source repo and Desktop must not grow a private contract inside it.
+ *
+ * `HEPHAESTUS_RUNTIME_BASE` is honoured because Core honours it — resolving the
+ * journal anywhere else would report on a different installation than the one
+ * that actually runs.
+ */
+export function readHephaestusUpdateJournal(): HephaestusUpdateJournal | null {
+  const base = process.env.HEPHAESTUS_RUNTIME_BASE?.trim() || path.join(os.homedir(), ".agentlas", "runtime");
+  try {
+    const raw = fs.readFileSync(path.join(base, "auto-update.json"), "utf8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const str = (key: string) => (typeof parsed[key] === "string" ? (parsed[key] as string) : null);
+    const num = (key: string) => (typeof parsed[key] === "number" ? (parsed[key] as number) : null);
+    return {
+      status: str("status"),
+      reason: str("reason"),
+      current: str("current"),
+      latest: str("latest"),
+      lastCheckedEpoch: num("last_checked_epoch"),
+      lastAppliedTag: str("last_applied_tag"),
+      lastAppliedEpoch: num("last_applied_epoch"),
+    };
+  } catch {
+    // No journal yet (fresh install, bundled-only, or an updater that never
+    // got to run). Absent is a distinct answer from failed — return null and
+    // let the caller say "not checked yet" rather than inventing a status.
+    return null;
+  }
+}
+
+function hephaestusRuntimeBase(): string {
+  return process.env.HEPHAESTUS_RUNTIME_BASE?.trim() || path.join(os.homedir(), ".agentlas", "runtime");
+}
+
+/** Journal file mtime in ms, or null when it does not exist yet. */
+function updateJournalStamp(): number | null {
+  try {
+    return fs.statSync(path.join(hephaestusRuntimeBase(), "auto-update.json")).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is another updater holding Core's lock right now?
+ *
+ * Core takes `.update.lock` for the whole download and releases it on success,
+ * and it records nothing to the journal when it cannot get the lock. Desktop
+ * spawns a launch-time updater and one more on every Workforce preflight
+ * rejection, so a user pressing the button during a download is not rare. Read
+ * the lock (never write it) so that case can be named instead of being folded
+ * into "no connection" — which was wrong precisely when an update did exist.
+ */
+function updaterLockHeld(): boolean {
+  try {
+    return fs.existsSync(path.join(hephaestusRuntimeBase(), ".update.lock"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Run the engine updater and report what it did.
+ *
+ * Written twice. The first version reported three failure modes cleanly, and two
+ * of them were manufactured by this function rather than by anything going
+ * wrong:
+ *
+ *   - It killed the worker at a fixed timeout. A large runtime download on a
+ *     slow link is not a failure; killing it and saying "timeout" destroyed
+ *     work that was about to succeed. The worker holds its own lock and can
+ *     finish alone, so waiting stops here while the work continues — the result
+ *     lands in the journal and is picked up on the next read.
+ *   - It proved liveness with `last_checked_epoch`, which Core records in whole
+ *     SECONDS. A run finishing inside the same second as the previous one (this
+ *     takes ~1.2s when already current) produced an identical value and was
+ *     reported as "nothing happened". The journal file's millisecond mtime is
+ *     the same proof without the collision.
+ *
+ * What remains genuinely cannot be fixed here: the machine has no network. That
+ * is not reported as a dead end either — the launch-time worker retries, so the
+ * truthful and useful thing to say is that it will be picked up once there is a
+ * connection. One short retry first, because the common case is a blip rather
+ * than a real outage.
+ *
+ * Core swallows its own exceptions and always exits 0, so the exit code proves
+ * nothing; the journal is the only evidence.
+ */
+export async function runHephaestusRuntimeUpdate(
+  waitMs = 600_000,
+): Promise<{
+  ok: boolean;
+  outcome: "applied" | "current" | "unknown" | "working" | "busy" | "offline" | "no_engine" | "no_python";
+  error?: string;
+  journal: HephaestusUpdateJournal | null;
+}> {
+  // Deliberately `includeRejected`. A runtime is rejected when it failed the
+  // Workforce capability preflight — which is exactly the condition an update
+  // repairs. Measured 2026-07-28: on a machine with no managed runtime yet, one
+  // Workforce call rejects the bundled Core (it lacks 5 of the 8 required tools)
+  // and `hephaestusRoot()` then returns null. Without this the update button
+  // reported "reinstall the app" at the one moment updating was the fix, and
+  // reinstalling would have restored the same rejected bundle.
+  const runtimeRoot = hephaestusRootDetail({ includeRejected: true })?.root ?? null;
+  if (!runtimeRoot) return { ok: false, outcome: "no_engine", error: "engine_not_attached", journal: null };
+  // Pass the resolved root explicitly: the launcher would otherwise call
+  // hephaestusRoot() again, hit the same rejection, and undo the repair path.
+  const launch = await resolveHephaestusStdioLaunch(
+    "agentlas_cloud.update",
+    ["--auto-update-worker", runtimeRoot],
+    runtimeRoot,
+  );
+  if (!launch) {
+    // Reinstalling does not install a Python interpreter. Keep this distinct.
+    return { ok: false, outcome: "no_python", error: "python_not_found", journal: readHephaestusUpdateJournal() };
+  }
+
+  // Waiting stops after `waitMs`; the worker is never killed. `finished` tells
+  // the two apart so a long download is reported as in-progress, not as failure.
+  const spawnOnce = () =>
+    new Promise<{ finished: boolean; error?: string }>((resolve) => {
+      let settled = false;
+      const done = (value: { finished: boolean; error?: string }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const child = crossSpawn(launch.command, launch.args, {
+        cwd: safeCwd(),
+        env: withCliPath({ ...process.env, ...launch.env }),
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      const timer = setTimeout(() => {
+        child.unref();
+        done({ finished: false });
+      }, waitMs);
+      child.once("error", (error) => done({ finished: true, error: error.message }));
+      child.once("close", () => done({ finished: true }));
+    });
+
+  const APPLIED_STATUSES = new Set(["updated", "repaired_current", "recovered_missing_release_marker"]);
+  const CURRENT_STATUSES = new Set(["current"]);
+  const verdict = (journal: HephaestusUpdateJournal | null) => {
+    const status = journal?.status ?? null;
+    // "not applied" is not the same as "already newest". Core also reports
+    // `skipped` (e.g. a non-SemVer RELEASE it cannot compare) and statuses this
+    // build has never seen. Calling those "already up to date" told the user
+    // the one thing that had not been established.
+    if (status && !APPLIED_STATUSES.has(status) && !CURRENT_STATUSES.has(status)) {
+      return { ok: true, outcome: "unknown" as const, journal };
+    }
+    const applied = status !== null && APPLIED_STATUSES.has(status);
+    // Deliberately NOT clearing the rejection set. Rejections are keyed by
+    // realpath, so a genuine new release lands in a new directory and is not
+    // rejected to begin with — the clear was a no-op there. Where it was not a
+    // no-op it was harmful: `repaired_current` reinstalls the SAME tag into the
+    // same directory, so clearing re-admitted the exact runtime a capability
+    // preflight had just rejected, and clearing is global so it also released
+    // unrelated targets. Verified 2026-07-28.
+    if (applied) resetHephaestusCache();
+    return { ok: true, outcome: applied ? ("applied" as const) : ("current" as const), journal };
+  };
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const before = updateJournalStamp();
+    const run = await spawnOnce();
+    if (!run.finished) {
+      return { ok: true, outcome: "working", journal: readHephaestusUpdateJournal() };
+    }
+    const after = updateJournalStamp();
+    if (after !== null && after !== before) return verdict(readHephaestusUpdateJournal());
+    // Core writes the journal on every branch it completes, so an untouched
+    // file means it threw before getting there. That has three causes and Core
+    // reports none of them: lock contention, a failed install, or no network.
+    // The lock is observable, so check it rather than guessing.
+    if (updaterLockHeld()) return { ok: true, outcome: "busy", journal: readHephaestusUpdateJournal() };
+    // Retry once: a transient blip is far more common than a real outage.
+    if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 1_500));
+  }
+  return { ok: false, outcome: "offline", journal: readHephaestusUpdateJournal() };
+}
+
 function safeCwd(cwd?: string): string {
   if (cwd) {
     try {
@@ -593,30 +787,30 @@ export async function runHephaestus<T = unknown>(
   });
 }
 
-export interface HephaestusAvailability {
-  available: boolean;
-  reason?: string;
-  root: string | null;
-  python: string | null;
-  /** Agentlas OS / Hephaestus package version from active runtime metadata. */
-  version: string | null;
-  /** Interpreter version is diagnostic metadata, not the Agentlas OS version. */
-  pythonVersion: string | null;
-}
+/*
+ * The IPC wire shape for `hephaestus:status`. This used to be a second,
+ * hand-maintained copy of `HephaestusStatus` in shared/types.ts — adding one
+ * field here broke the renderer at compile time because the two had silently
+ * become the same contract in two places. Alias it instead, so the duplicate
+ * cannot come back.
+ */
+export type HephaestusAvailability = HephaestusStatus;
 
 /** 엔진 가용성(번들 존재 + python) 확인. UI 게이트/설정 표시에 사용. */
 export async function hephaestusAvailable(locale: "ko" | "en" = "en"): Promise<HephaestusAvailability> {
   const ko = locale === "ko";
-  const root = hephaestusRoot();
+  const detail = hephaestusRootDetail();
+  const root = detail?.root ?? null;
+  const source = detail?.kind ?? null;
   if (!root) {
-    return { available: false, reason: ko ? "Agentlas OS 엔진 없음" : "Agentlas OS engine not found", root: null, python: null, version: null, pythonVersion: null };
+    return { available: false, reason: ko ? "Agentlas OS 엔진 없음" : "Agentlas OS engine not found", root: null, python: null, version: null, source: null, pythonVersion: null };
   }
   const version = readHephaestusVersion(root);
   const py = await resolveHephaestusPython();
   if (!py) {
-    return { available: false, reason: ko ? "Python 3.9+ 없음" : "Python 3.9+ not found", root, python: null, version, pythonVersion: null };
+    return { available: false, reason: ko ? "Python 3.9+ 없음" : "Python 3.9+ not found", root, python: null, version, source, pythonVersion: null };
   }
-  return { available: true, root, python: py.python, version, pythonVersion: py.version };
+  return { available: true, root, python: py.python, version, source, pythonVersion: py.version };
 }
 
 /** `doctor` — 엔진 자가진단(JSON). warn 상태도 동작 가능으로 본다. */

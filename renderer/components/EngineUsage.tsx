@@ -73,6 +73,21 @@ function formatReset(resetAt: number | null | undefined, ko: boolean): string {
   return `${pre}${Math.round(hrs / 24)}${ko ? "일" : "d"}`;
 }
 
+// "12.4 / 50" 대신 통화코드가 오면 실제 통화로 — 청구액은 단위 없이 쓰면 안 된다.
+function formatCredits(used: number, limit: number, unit?: string | null): string {
+  const code = typeof unit === "string" && /^[A-Za-z]{3}$/.test(unit) ? unit.toUpperCase() : null;
+  if (code) {
+    try {
+      const fmt = new Intl.NumberFormat(undefined, { style: "currency", currency: code, maximumFractionDigits: 2 });
+      return `${fmt.format(used)} / ${fmt.format(limit)}`;
+    } catch {
+      // 알 수 없는 코드 — 아래 일반 표기로 폴백
+    }
+  }
+  const n = (v: number) => String(Math.round(v * 100) / 100);
+  return `${n(used)} / ${n(limit)} ${unit || "credits"}`;
+}
+
 function formatTokens(n: number): string {
   if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
   if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
@@ -98,6 +113,12 @@ function UsageBar({ w, ko }: { w: UsageWindow; ko: boolean }) {
   }
   const warn = pct >= WARN_PCT;
   const fill = warn ? "var(--red-deep, #c0392b)" : "var(--accent)";
+  // 월 크레딧(유료 초과분)엔 resets_at이 없어 마지막 칸이 늘 비어 있었다 —
+  // %만 남으면 "얼마가 청구되는지"가 사라지므로, 어댑터가 계산해 둔
+  // used/limit/통화를 그 칸에 그대로 보여준다.
+  const money = w.kind === "monthly" && w.used != null && w.limit != null
+    ? formatCredits(w.used, w.limit, w.unit)
+    : null;
   return (
     <div className="dashboard-usage-bar">
       <span>{windowLabel(w, ko)}</span>
@@ -105,7 +126,7 @@ function UsageBar({ w, ko }: { w: UsageWindow; ko: boolean }) {
         <div style={{ width: `${pct}%`, background: fill }} />
       </div>
       <span data-warn={warn ? "true" : "false"}>{pct}%</span>
-      <span>{formatReset(w.resetAt, ko)}</span>
+      <span title={money ?? undefined}>{money ?? formatReset(w.resetAt, ko)}</span>
     </div>
   );
 }
@@ -397,25 +418,6 @@ export function EngineUsage() {
     if (e.auth === "local") return runtimes.find((r) => r.kind === "ollama");
     return undefined; // API키형(BYOK)은 모델 선택이 필요해 세팅의 BYOK 패널이 담당
   }
-  async function activateEngine(e: EngineDef, rt: RuntimeStatus) {
-    const api = ipc();
-    if (!api || busy) return;
-    setBusy(e.id);
-    try {
-      const updated = await api.runtime.setActive({
-        kind: rt.kind,
-        backend: rt.backend,
-        source: rt.source,
-        model: rt.model ?? undefined,
-      });
-      setRuntimes(updated);
-    } catch {
-      // 실패 시 이전 활성 유지
-    } finally {
-      setBusy(null);
-    }
-  }
-
   async function saveKey(e: EngineDef) {
     const api = ipc();
     if (!api || !e.keyEnv || !keyVal.trim() || busy) return;
@@ -510,12 +512,6 @@ export function EngineUsage() {
     const activeRoles = connected
       ? rt?.activeRoles ?? (rt?.active ? ["orchestrator"] : [])
       : [];
-    const canUseDefault =
-      connected &&
-      !!rt &&
-      !activeRoles.includes("orchestrator") &&
-      !terminalError &&
-      !retryableError;
     const statusLine = (connected
       ? statusText(e, u)
       : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected")
@@ -569,17 +565,10 @@ export function EngineUsage() {
                   </span>
                 ))}
               </>
-            ) : canUseDefault ? (
-              <button
-                type="button"
-                className="dashboard-engine-usedefault titlebar-nodrag"
-                onClick={() => { if (rt) void activateEngine(e, rt); }}
-                disabled={busy === e.id}
-                title={ko ? "이 엔진을 오케스트레이터 기본값으로" : "Make this the orchestrator default"}
-              >
-                {busy === e.id ? busyLabel() : ko ? "Orch 기본" : "Use for Orch"}
-              </button>
             ) : showConnectedChip ? (
+              // 오너 결정(2026-07-28): 연결 카드는 '연결' CTA만 남긴다. 역할 풀
+              // 편집(추가·순서·제거)은 역할 카드의 풀 편집기가 단일 창구다 —
+              // 전역 기본값·Use default 계열 버튼은 여기서 완전히 제거.
               <span className="dashboard-engine-connected">{ko ? "연결됨" : "Connected"}</span>
             ) : null}
           </span>
@@ -594,7 +583,11 @@ export function EngineUsage() {
         </div>
         {hasBars && (
           <div className="dashboard-engine-card-body">
-            {u!.windows.slice(0, 3).map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
+            {/* 어댑터가 만든 창은 전부 그린다. 예전 slice(0, 3) 상한은 창이 5개인
+                Claude Max에서 유료 초과분(extra_usage)과 Sonnet 7일을 조용히
+                잘라내, 실제로 청구되는 금액을 앱에서 볼 방법이 없게 만들었다.
+                카드는 flex column이라 창 수만큼 자연히 늘어난다. */}
+            {u!.windows.map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
           </div>
         )}
         {(actions || (keyFor === e.id && !connected)) && (

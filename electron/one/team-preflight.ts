@@ -736,6 +736,11 @@ export async function prepareOneTeamPreflight(
   if (!explicitExternalSelection) await prejudgeRosterAutoRoute(chat, input.userPrompt, deps);
   const roster = exactInstalledRoster(chat, deps, input.userPrompt, !explicitExternalSelection);
   const canConfirmTeam = roster.roles.length >= 2 && !roster.unresolvedExternal && !explicitExternalSelection;
+  // When the installed roster cannot cover the work, external staffing is the
+  // remaining route — not a dead end. Main already implements that run end to
+  // end (`confirmed_external_workforce` + `hub-first`); this is the door that
+  // lets One offer it in plain language instead of silently continuing solo.
+  const canConfirmWorkforce = !canConfirmTeam;
   const ensureTask = deps.ensureTaskForChat ?? ensureCanonicalTaskForChat;
   if (!existingTask && !deps.ensureTaskForChat) retitleAutoTitledChatForTask(chat.id, input.userPrompt);
   const task = existingTask ?? ensureTask(chat.id);
@@ -771,6 +776,7 @@ export async function prepareOneTeamPreflight(
       : "external_selection_requires_work_review",
     limitation: canConfirmTeam ? "none" : "external_candidates_not_prepared_before_execution",
     canConfirmTeam,
+    canConfirmWorkforce,
     reservedRun: null,
     startedRun: null,
     createdAt: now.toISOString(),
@@ -1132,7 +1138,9 @@ export async function autoResolveOneTeamPreflight(
     throw new OneTeamPreflightError("recovery_required", "The reserved team run requires recovery review");
   }
 
-  if (record.reservation && ["team_reserved", "solo_reserved"].includes(record.proposal.status)) {
+  // A workforce reservation is as real as a team or solo one; omitting it here
+  // made an already-reserved external run look unresolved on the next turn.
+  if (record.reservation && ["team_reserved", "workforce_reserved", "solo_reserved"].includes(record.proposal.status)) {
     const proposal = record.proposal;
     return {
       kind: "reserved",
@@ -1143,11 +1151,14 @@ export async function autoResolveOneTeamPreflight(
         reservedRunId: record.reservation.runId,
         expectedTaskId: proposal.binding.taskId,
         expectedTaskVersion: proposal.binding.taskVersion,
-        mode: record.reservation.mode as "team" | "solo",
+        mode: record.reservation.mode,
       },
     };
   }
 
+  // autoResolve is the no-user-approval path. External staffing can borrow paid
+  // Hub agents, so it must never be entered automatically — One asks in plain
+  // language first and the answer arrives through resolveOneTeamPreflight.
   const resolution: ResolveOneTeamPreflightInput["resolution"] = record.proposal.canConfirmTeam
     ? "confirm_team"
     : "continue_solo";

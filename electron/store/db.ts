@@ -15,7 +15,7 @@ import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 79;
+const SCHEMA_VERSION = 81;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -3602,6 +3602,89 @@ export function initStore(options: StoreInitOptions = {}): void {
         1,
         updatedAt,
       );
+    }
+  }
+
+  // v80: role pools. Each role holds an ordered candidate list; resolution
+  // picks the first member that is installed/signed-in and under its usage
+  // window, so one exhausted subscription no longer stalls every call. The
+  // v79 single-row model_roles table stays as the resolved-head mirror for
+  // older Desktop, Mobile, and Terminal readers — pools never replace it.
+  // An EMPTY worker pool means "inherit the orchestrator pool" (v79 inherit).
+  if (!tableExists(_db, "model_role_members")) {
+    _db.exec(`
+      CREATE TABLE model_role_members (
+        role TEXT NOT NULL CHECK(role IN ('orchestrator','worker')),
+        position INTEGER NOT NULL CHECK(position >= 1),
+        kind TEXT NOT NULL,
+        backend TEXT,
+        source TEXT,
+        model TEXT,
+        effort TEXT,
+        long_context INTEGER NOT NULL DEFAULT 0 CHECK(long_context IN (0,1)),
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(role, position)
+      );
+    `);
+  }
+  if (userVersion < 80) {
+    const memberCount = (
+      _db.prepare("SELECT COUNT(*) AS n FROM model_role_members").get() as { n: number }
+    ).n;
+    if (memberCount === 0) {
+      const seed = _db.prepare(
+        `INSERT OR IGNORE INTO model_role_members
+         (role, position, kind, backend, source, model, effort, long_context, updated_at)
+         VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      const roleRows = _db
+        .prepare("SELECT * FROM model_roles")
+        .all() as Array<{
+          role: string;
+          kind: string;
+          backend: string | null;
+          source: string | null;
+          model: string | null;
+          effort: string | null;
+          long_context: number;
+          inherit: number;
+        }>;
+      const seededAt = new Date().toISOString();
+      for (const row of roleRows) {
+        // v79 inherit-worker stays an empty pool — same "follow the
+        // orchestrator" meaning, no duplicated member row to drift.
+        if (row.role === "worker" && row.inherit) continue;
+        seed.run(
+          row.role,
+          row.kind,
+          row.backend,
+          row.source,
+          row.model,
+          row.effort,
+          row.long_context ? 1 : 0,
+          seededAt,
+        );
+      }
+    }
+  }
+
+  // v81: 팀 내부 워커는 선택기에서 팀으로만 보인다. 팀 설치가 멤버 에이전트를
+  // visible로 넣어 작업공간 드롭다운이 조직도를 워커 단위로 분해 노출했다
+  // (실측: visible 싱글 98명 중 90명이 팀 멤버). 앞으로는 background로 생성하고,
+  // 이미 설치된 멤버도 여기서 한 번 소급 정리한다. 팀 엔티티 행은 그대로 보이고,
+  // 멤버는 팀 상세에서 계속 단독 호출할 수 있다 — 목록 노출만 바뀐다.
+  if (userVersion < 81 && tableExists(_db, "installed_agents")) {
+    try {
+      _db
+        .prepare(
+          `UPDATE installed_agents SET visibility = 'background'
+            WHERE parent_team_id IS NOT NULL
+              AND visibility = 'visible'
+              AND (entity_kind IS NULL OR entity_kind != 'team')`,
+        )
+        .run();
+    } catch {
+      /* parent_team_id 이전 스키마 — 멤버 개념이 없으므로 정리할 것도 없다 */
     }
   }
 

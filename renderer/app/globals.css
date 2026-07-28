@@ -1881,6 +1881,116 @@ button[data-dashboard-import="true"]:disabled {
   line-height: 1.45;
 }
 
+.dashboard-runtime-pool {
+  margin: 0 14px 10px;
+  border: 1px solid var(--dash-line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.dashboard-runtime-pool-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dashboard-runtime-pool-empty {
+  color: var(--dash-muted);
+  font-size: 12px;
+  padding: 2px 0 4px;
+}
+
+.dashboard-runtime-pool-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dashboard-runtime-pool-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 4px 6px;
+  border: 1px solid var(--dash-line);
+  border-radius: 6px;
+}
+
+.dashboard-runtime-pool-order {
+  font-weight: 600;
+  min-width: 14px;
+  text-align: center;
+}
+
+.dashboard-runtime-pool-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-runtime-pool-badge {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--dash-line);
+  color: var(--dash-muted);
+  white-space: nowrap;
+}
+
+.dashboard-runtime-pool-badge[data-tone="active"] {
+  color: var(--dash-teal-9, #0f6e56);
+  border-color: currentColor;
+}
+
+.dashboard-runtime-pool-badge[data-tone="skip"] {
+  color: var(--dash-amber-9, #854f0b);
+  border-color: currentColor;
+}
+
+.dashboard-runtime-pool-actions {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.dashboard-runtime-pool-actions button {
+  border: 1px solid var(--dash-line);
+  background: transparent;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  cursor: pointer;
+}
+
+.dashboard-runtime-pool-actions button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.dashboard-runtime-pool-add {
+  margin-top: 6px;
+  border: 1px dashed var(--dash-line);
+  background: transparent;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 4px 8px;
+  cursor: pointer;
+  color: var(--dash-muted);
+}
+
+.dashboard-runtime-pool-add:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .dashboard-readiness-summary {
   display: flex;
   align-items: baseline;

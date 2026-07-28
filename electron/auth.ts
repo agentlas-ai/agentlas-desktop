@@ -384,6 +384,33 @@ export function invalidateAuthSessionFromServer(expectedCookieHeader?: string): 
   return true;
 }
 
+/** 세션 쿠키로 Hub를 호출하는 표준 경로 — 쿠키 첨부·타임아웃·확정 401 처리를 한 곳에 묶는다.
+ *  호출부가 401을 "자기 화면에서만 미인증"으로 강등하고 auth 캐시는 그대로 두면,
+ *  크레딧/퀘스트는 사라졌는데 계정 칩은 계속 로그인(이메일·로그아웃) 상태로 남는 불일치가 생긴다.
+ *  강등 판단과 세션 폐기를 분리하지 말 것. 폐기는 항상 그 응답을 부른 쿠키 기준(exact-current)이라
+ *  이미 교체된 옛 쿠키의 늦은 401은 새 계정을 건드리지 않는다.
+ *  401만 폐기한다 — 403은 same-origin 변형 가드처럼 세션과 무관한 거절일 수 있다. */
+export async function fetchWithHubSession(
+  cookieHeader: string,
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = 8000,
+): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      ...init,
+      headers: { ...(init.headers as Record<string, string> | undefined), cookie: cookieHeader },
+      signal: ctrl.signal,
+    });
+    if (res.status === 401) invalidateAuthSessionFromServer(cookieHeader);
+    return res;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function scheduleMetaRefresh(): void {
   const cache = _cache;
   if (!cache || cache.email) return;

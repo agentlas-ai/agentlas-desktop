@@ -12,14 +12,25 @@ import { probeLMStudio } from "./lmstudio";
 import { probeMLX } from "./mlx";
 import { hasApiKey } from "../secrets/vault";
 import { getDb } from "../store/db";
-import { listResolvedModelRoles, setModelRole } from "../store/model-roles";
+import {
+  listResolvedModelRoles,
+  pickModelRoleFromPool,
+  setModelRole,
+  type ModelRolePoolPick,
+} from "../store/model-roles";
+import { peekProviderUsedPercent } from "../usage";
 import type {
   RuntimeBackend,
   RuntimeKind,
   RuntimeSelection,
   RuntimeStatus,
 } from "../../shared/types";
-import { byokModels, cliModels, defaultByokModel } from "../../shared/models";
+import {
+  byokModels,
+  cliModels,
+  cliModelsAreDiscovered,
+  defaultByokModel,
+} from "../../shared/models";
 import { recallRuntimeSelection, rememberRuntimeSelection } from "./selection-memory";
 import { clearCliVersionProbeCache } from "./exec";
 
@@ -589,7 +600,23 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     });
   }
 
+  // 역할 풀 해석: 순서(=우선순위)대로 첫 가용 멤버를 고른다.
+  //  - runtime-unavailable: 그 kind/backend가 지금 이 컴퓨터에 감지되지 않음
+  //  - quota-exceeded: 마지막 정상 사용량 스냅샷에서 창 사용률 ≥ 90%
+  // 전원 스킵이면 1순위를 그대로 쓴다(조용한 하향 대체 금지, 스킵 내역은 유지).
+  const gates = rolePoolGates(list);
   const roleAssignments = listResolvedModelRoles();
+  for (const role of ["orchestrator", "worker"] as const) {
+    const pick = pickModelRoleFromPool(role, gates);
+    if (pick) {
+      roleAssignments[role] = {
+        role,
+        selection: pick.selection,
+        inherited: pick.inherited,
+        updatedAt: roleAssignments[role]?.updatedAt ?? null,
+      };
+    }
+  }
   for (const runtime of list) {
     const activeRoles = (["orchestrator", "worker"] as const).filter((role) => {
       const selection = roleAssignments[role]?.selection;
@@ -604,6 +631,69 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   }
 
   return list;
+}
+
+/**
+ * 역할 풀 선택 게이트 — detect 본체와 UI 조회가 같은 규칙을 쓰게 한 곳에 둔다.
+ * 두 벌로 두면 한쪽만 고쳐져 "설정 화면과 실제 실행이 다른 모델"이 된다.
+ */
+const QUOTA_SKIP_PERCENT = 90;
+/** 로컬 서버가 실제 보유 목록을 돌려주는 런타임 — 모델 부재를 증명할 수 있다. */
+const LOCAL_MODEL_INVENTORY_KINDS = new Set(["ollama", "lmstudio", "mlx"]);
+function rolePoolGates(list: RuntimeStatus[]): {
+  isRuntimeAvailable: (selection: RuntimeSelection) => boolean;
+  isModelUnavailable: (selection: RuntimeSelection) => boolean;
+  isQuotaExceeded: (selection: RuntimeSelection) => boolean;
+} {
+  const runtimeFor = (selection: RuntimeSelection): RuntimeStatus | undefined =>
+    list.find(
+      (runtime) =>
+        runtime.kind === selection.kind &&
+        (selection.backend == null || runtime.backend === selection.backend),
+    );
+  return {
+    isRuntimeAvailable: (selection) => Boolean(runtimeFor(selection)),
+    /**
+     * 이 런타임이 실제로 가진 모델인가. **런타임이 광고한 인벤토리가 있을 때만**
+     * 부재를 판정한다(CLI는 발견된 목록, BYOK/로컬은 provider 조회 결과).
+     * 하드코딩 폴백 카탈로그로는 판정하지 않는다 — 계정이 새 모델을 받으면
+     * 폴백이 곧바로 낡아 유효 모델을 차단하게 된다(실측: claude-code 폴백에
+     * 없는 `fable`이 실제로는 정상 실행됨). 증명 못 하면 통과시키고 실패는
+     * 호출 지점에서 정직하게 드러낸다. 모델 미지정(구독 기본)도 항상 통과.
+     */
+    isModelUnavailable: (selection) => {
+      const model = selection.model?.trim();
+      if (!model) return false;
+      const runtime = runtimeFor(selection);
+      if (!runtime) return false;
+      const authoritative =
+        runtime.kind === "byok" ||
+        LOCAL_MODEL_INVENTORY_KINDS.has(runtime.kind) ||
+        cliModelsAreDiscovered(runtime.kind);
+      if (!authoritative) return false;
+      const catalog = runtime.availableModels ?? [];
+      if (catalog.length === 0) return false;
+      return !catalog.includes(model);
+    },
+    isQuotaExceeded: (selection) => {
+      const used = peekProviderUsedPercent(selection.kind);
+      return used !== null && used >= QUOTA_SKIP_PERCENT;
+    },
+  };
+}
+
+/** UI/영수증용 — 마지막 detect와 동일한 규칙으로 풀 선택과 스킵 사유를 계산한다. */
+export async function resolveRolePoolPicks(): Promise<
+  Partial<Record<"orchestrator" | "worker", ModelRolePoolPick>>
+> {
+  const list = await detectRuntimes();
+  const gates = rolePoolGates(list);
+  const picks: Partial<Record<"orchestrator" | "worker", ModelRolePoolPick>> = {};
+  for (const role of ["orchestrator", "worker"] as const) {
+    const pick = pickModelRoleFromPool(role, gates);
+    if (pick) picks[role] = pick;
+  }
+  return picks;
 }
 
 export async function setActiveRuntime(selection: RuntimeSelection): Promise<RuntimeStatus[]> {

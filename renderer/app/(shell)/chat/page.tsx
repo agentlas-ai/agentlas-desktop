@@ -1662,6 +1662,24 @@ function ChatPage() {
                 (!selection.source || runtime.source === selection.source),
             )
           : list.find((runtime) => runtime.active);
+        // 고정된 런타임이 사라졌을 때(CLI 삭제/경로 변경, BYOK 키 제거) 예전에는 칩이 통째로
+        // 사라지고 applySelection이 activeRuntime null로 즉시 return → 핀을 지울 방법이 전혀
+        // 없어 채팅이 영구히 벽돌이 됐다(매 전송 pinned-runtime-unavailable). 죽은 핀은 여기서
+        // 스스로 풀고 현재 활성 런타임으로 되돌린다 — 모델 선택은 채팅을 못 쓰게 만드는
+        // 되돌릴 수 없는 결박이어서는 안 된다.
+        // 단, list가 비면 "설치된 게 없음"과 "탐지 실패"를 구분할 수 없으므로 핀을 건드리지 않는다.
+        if (selection && !matched && list.length > 0) {
+          const fallback = list.find((runtime) => runtime.active) ?? null;
+          void api.chats.setRuntimeSelection(chatId, null).catch(() => undefined);
+          setChat((prev) => (prev && prev.id === chatId ? { ...prev, runtimeSelection: null } : prev));
+          setActiveRuntime(fallback ? { ...fallback, active: true } : null);
+          setSessionNotice(
+            locale === "ko"
+              ? `이 채팅에 고정돼 있던 실행 엔진(${selection.kind}${selection.model ? ` · ${selection.model}` : ""})을 더 이상 찾을 수 없어 고정을 해제했습니다. 현재 활성 엔진으로 계속 대화할 수 있습니다.`
+              : `The engine pinned to this chat (${selection.kind}${selection.model ? ` · ${selection.model}` : ""}) is no longer available, so the pin was released. This chat now uses the active engine.`,
+          );
+          return;
+        }
         setActiveRuntime(
           matched
             ? {
@@ -2265,7 +2283,11 @@ function ChatPage() {
     const selection: RuntimeSelection = {
       kind: activeRuntime.kind,
       backend: activeRuntime.backend,
-      source: activeRuntime.source,
+      // source(=CLI 실행 파일의 절대경로)는 일부러 저장하지 않는다. detect()는 (kind, backend)
+      // 조합마다 런타임을 최대 1개만 만들므로 source는 식별에 아무 것도 더해주지 않는 반면,
+      // CLI를 업그레이드/재설치하면 경로가 바뀌어 exact pin이 영구히 안 맞게 된다
+      // (→ 매 전송 "Pinned automation runtime is unavailable", 칩도 사라져 되돌릴 수 없음).
+      // 이 제스처의 의도는 "이 채팅에서 이 모델을 쓴다"이지 "이 바이너리 경로에 영구 결박"이 아니다.
       model: patch.model !== undefined ? patch.model || undefined : activeRuntime.model ?? undefined,
       longContext:
         activeRuntime.kind === "byok" ? (activeRuntime.longContextEnabled ?? false) : undefined,
@@ -3030,8 +3052,16 @@ function ChatPage() {
     );
   }
   // 에이전트 선택기에는 팀(멀티에이전트)도 노출한다 — 팀 자체를 골라 대화할 수 있어야 한다.
-  const displayAgents = visibleAgents(allAgents, { includeTeams: true });
-  const displayAgent = agent?.visibility === "background" ? null : agent;
+  // v81부터 팀 내부 워커는 background라 목록에 없지만, 이 대화가 이미 그 워커에
+  // 바인딩돼 있으면 표시·전환은 계속돼야 한다 — 현재 에이전트만 예외로 목록에 얹는다.
+  const pickerAgents = visibleAgents(allAgents, { includeTeams: true });
+  const boundTeamMember =
+    agent && agent.visibility === "background" && agent.parentTeamId ? agent : null;
+  const displayAgents = boundTeamMember
+    ? [boundTeamMember, ...pickerAgents.filter((row) => row.id !== boundTeamMember.id)]
+    : pickerAgents;
+  const displayAgent =
+    agent?.visibility === "background" && !boundTeamMember ? null : agent;
   const latestUserPrompt = [...messages].reverse().find((message) => message.role === "user")?.text ?? "";
   // 현재(가장 최근) 에이전트 실행이 다단계 파이프라인(2+ stage)이면, 단일 에이전트라도 카드/네트워크 뷰를 켠다.
   const hasPipeline =

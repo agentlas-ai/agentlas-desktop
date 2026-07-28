@@ -9,11 +9,18 @@ const MAX_MODEL_COUNT = 512;
 const MAX_CONTEXT_WINDOW = 10_000_000;
 const MODEL_ID_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const SAFE_TOKEN_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-const CODEX_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+// 알려진 값은 "정책 상한과 비교할 랭크"로만 쓴다 — "이 값이 유효한가" 게이트로 쓰지 않는다.
+// 2026-07-28 라이브 실측: codex debug models가 gpt-5.6-sol에 supported_reasoning_levels로
+// "ultra"(자동 위임)를 광고했는데, 이 배열로 게이트를 걸면 provider가 이미 지원을 시작한
+// 값을 우리가 조용히 버린다. 새 값이 나올 때마다 이 배열을 고치는 게 아니라, provider가
+// 보내는 순서(=능력 랭크, Codex 계약)를 신뢰하는 쪽으로 뒤집는다.
+const KNOWN_CODEX_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const EFFORT_TOKEN_RE = /^[a-z][a-z0-9-]{0,23}$/;
 const ACTIVE_APPLY_PATCH_TYPES = new Set(["freeform"]);
 const ACTIVE_SHELL_TYPES = new Set(["shell_command"]);
 
-export type CodexModelEffort = typeof CODEX_EFFORTS[number];
+/** 열린 어휘 — provider가 새 리즌 레벨을 추가해도 여기서 다시 코드를 고치지 않는다. */
+export type CodexModelEffort = string;
 
 export type CodexModelInventoryEntry = {
   id: string;
@@ -180,16 +187,21 @@ function modelEfforts(model: NonNullable<CodexModelCache["models"]>[number]): Co
     // Codex capability list in the allocator.
     return [];
   }
-  const allowed = new Set<string>(CODEX_EFFORTS);
-  const found = new Set<CodexModelEffort>();
+  // 순서를 그대로 보존한다 — Codex 계약상 이 배열의 순서 자체가 능력 랭크다
+  // (실측: low, medium, high, xhigh, max, ultra 오름차순). 신택스만 검증하고
+  // 값의 "화이트리스트 존재"는 더 이상 게이트로 쓰지 않는다.
+  const found: CodexModelEffort[] = [];
+  const seen = new Set<string>();
   for (const raw of model.supported_reasoning_levels) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const effort = (raw as { effort?: unknown }).effort;
     if (typeof effort !== "string") continue;
     const normalized = effort.trim().toLowerCase();
-    if (allowed.has(normalized)) found.add(normalized as CodexModelEffort);
+    if (!EFFORT_TOKEN_RE.test(normalized) || seen.has(normalized)) continue;
+    seen.add(normalized);
+    found.push(normalized);
   }
-  return CODEX_EFFORTS.filter((effort) => found.has(effort));
+  return found;
 }
 
 /**
@@ -204,19 +216,28 @@ export function resolveCodexModelEffort(
 ): CodexModelEffort | null {
   if (typeof requested !== "string") return null;
   const normalized = requested.trim().toLowerCase();
-  if (!(CODEX_EFFORTS as readonly string[]).includes(normalized)) return null;
-  const effort = normalized as CodexModelEffort;
+  if (!EFFORT_TOKEN_RE.test(normalized)) return null;
   const profile = modelId ? inventory.find((candidate) => candidate.id === modelId) : undefined;
   if (profile?.efforts !== null && profile?.efforts !== undefined) {
-    if (profile.efforts.includes(effort)) return effort;
-    const requestedRank = CODEX_EFFORTS.indexOf(effort);
-    const supported = new Set(profile.efforts);
-    const below = CODEX_EFFORTS
-      .filter((candidate, rank) => rank <= requestedRank && supported.has(candidate))
-      .at(-1);
-    return below ?? null;
+    // 라이브 인벤토리가 있으면 그 모델이 광고한 목록이 유일한 진실이다.
+    // 정확히 지원하면(예: 이 모델이 진짜 "ultra"를 안다) 그대로 통과.
+    if (profile.efforts.includes(normalized)) return normalized;
+    // 정확히 없으면 "이 모델이 지원하는 것 중 요청보다 낮거나 같은 랭크의 최고값"으로
+    // 내린다. 랭크는 알려진 7단계 표에서만 구할 수 있다 — 요청값도 모델 목록의 값도
+    // 그 표에 없으면(둘 다 미지의 새 어휘) 비교 근거가 없으므로 값을 지어내지 않고
+    // null을 돌려 호출부가 effort 지정 없이 그 모델의 자체 기본값을 쓰게 한다.
+    const requestedRank = KNOWN_CODEX_EFFORTS.indexOf(normalized as typeof KNOWN_CODEX_EFFORTS[number]);
+    if (requestedRank === -1) return null;
+    const below = profile.efforts.filter((candidate) => {
+      const rank = KNOWN_CODEX_EFFORTS.indexOf(candidate as typeof KNOWN_CODEX_EFFORTS[number]);
+      return rank !== -1 && rank <= requestedRank;
+    });
+    return below.at(-1) ?? null;
   }
-  return effort === "max" ? "xhigh" : effort;
+  // 라이브 인벤토리 없음(계정 카탈로그 미조회) — 알려진 값만 안전하게 통과시키고,
+  // 미지의 값은 이 모델이 실제로 지원하는지 증명할 방법이 없으므로 거절한다.
+  if (!(KNOWN_CODEX_EFFORTS as readonly string[]).includes(normalized)) return null;
+  return normalized === "max" ? "xhigh" : normalized;
 }
 
 /**

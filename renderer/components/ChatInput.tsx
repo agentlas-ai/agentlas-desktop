@@ -207,9 +207,10 @@ interface AutoRouteGate {
   text: string;
   opts: SendOptions;
   routerAgent?: RecRouterAgent;
-  /** paywall: 필요/보유 크레딧. */
+  /** paywall: 필요/보유 크레딧. partialCost=true 면 needed 는 확정액이 아니라 하한이다. */
   needed?: number;
   have?: number | null;
+  partialCost?: boolean;
   /** build: 엔진이 준 사유. */
   reason?: string;
 }
@@ -338,11 +339,12 @@ export function ChatInput({
   const [autoRouting, setAutoRouting] = useState(false);
   // 호출 전 비용 고지 — 허브 에이전트 유료 자동 고용 직전에만 잠깐 뜬다.
   // 크레딧 = 대여(리스) 비용이지 최종 성공 보장이 아니라는 걸 숨기지 않는다.
-  const [costNotice, setCostNotice] = useState<{ credits: number } | null>(null);
+  // partial=true 면 credits 는 알려진 단가만 더한 하한 — 총액인 척 표기하면 안 된다.
+  const [costNotice, setCostNotice] = useState<{ credits: number; partial: boolean } | null>(null);
   const costNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  function flashCostNotice(credits: number) {
+  function flashCostNotice(credits: number, partial = false) {
     if (costNoticeTimerRef.current) clearTimeout(costNoticeTimerRef.current);
-    setCostNotice({ credits });
+    setCostNotice({ credits, partial });
     costNoticeTimerRef.current = setTimeout(() => setCostNotice(null), 8_000);
   }
   useEffect(() => () => {
@@ -753,17 +755,21 @@ export function ChatInput({
     }
     // 4) 크레딧 게이트 — 허브 고용 비용이 잔액을 넘을 때만 페이월. 잔액 조회 실패 시 서버 과금이 최종 심판.
     //    hep-network 자동 개입 OFF면 자동 고용 자체가 없으므로 페이월도 건너뛴다.
-    const cost = preview.totalEstCredits ?? 0;
-    if (engineToggles?.networkAuto === true && hubAgents.length > 0 && cost > 0) {
+    //    totalEstCreditsPartial=true 면 totalEstCredits 는 총액이 아니라 하한이다(단가 미상 Hub 행).
+    //    그때 하한을 "필요 Ncr" 로 확정 표기하면 고지액보다 서버가 더 청구한다 —
+    //    숫자는 하한임을 붙여 고지하고, 미상(null)도 0(무료)으로 삼키지 않는다.
+    const costFloor = preview.totalEstCredits ?? 0;
+    const costPartial = preview.totalEstCreditsPartial === true;
+    if (engineToggles?.networkAuto === true && hubAgents.length > 0 && (costFloor > 0 || costPartial)) {
       const balance = await ipc()?.billing.getCredits().catch(() => null);
       if (activeChatIdRef.current !== chatIdAtStart) return;
       const have = balance?.remainingCredits;
-      if (typeof have === "number" && have < cost) {
-        setGateSheet({ kind: "paywall", text, opts, needed: cost, have, routerAgent: preview.routerAgent });
+      if (typeof have === "number" && have < costFloor) {
+        setGateSheet({ kind: "paywall", text, opts, needed: costFloor, have, partialCost: costPartial, routerAgent: preview.routerAgent });
         return;
       }
       // 유료 자동 고용이 실제로 나가는 경로 — 차감 전 예상 비용·리스 조건을 사용자에게 고지한다.
-      flashCostNotice(cost);
+      flashCostNotice(costFloor, costPartial);
     }
     execAutoChoice(preview, text, opts, engineToggles);
   }
@@ -1171,7 +1177,9 @@ export function ChatInput({
           }}
         >
           <span aria-hidden style={{ flexShrink: 0 }}>🤝</span>
-          {t("chatinput.autoroute.cost_notice", { credits: costNotice.credits })}
+          {costNotice.partial
+            ? `${t("chatinput.autoroute.cost_notice", { credits: costNotice.credits })} · ${t("chatinput.autoroute.cost_partial")}`
+            : t("chatinput.autoroute.cost_notice", { credits: costNotice.credits })}
         </div>
       )}
       {/* 게이트 시트 — 크레딧 부족(paywall)·적합 에이전트 없음(build 제안)일 때만 */}
@@ -2032,8 +2040,10 @@ function AutoRouteGateSheet({
 }) {
   const isPaywall = gate.kind === "paywall";
   const title = isPaywall ? t("chatinput.autoroute.paywall_title") : t("chatinput.autoroute.build_title");
+  // 단가 미상 Hub 행이 섞이면 needed 는 확정 필요액이 아니라 하한 — "필요 Ncr" 로 못 박지 않고
+  // "최소 필요" 로 표기하고 실청구가 더 클 수 있음을 같이 알린다(고지액 < 실청구액 방지).
   const desc = isPaywall
-    ? `${t("chatinput.autoroute.paywall_desc")} — ${t("chatinput.autoroute.paywall_needed")} ${gate.needed ?? 0}cr · ${t("chatinput.autoroute.paywall_have")} ${gate.have ?? 0}cr`
+    ? `${t("chatinput.autoroute.paywall_desc")} — ${t(gate.partialCost ? "chatinput.autoroute.paywall_needed_min" : "chatinput.autoroute.paywall_needed")} ${gate.needed ?? 0}cr · ${t("chatinput.autoroute.paywall_have")} ${gate.have ?? 0}cr${gate.partialCost ? ` · ${t("chatinput.autoroute.cost_partial")}` : ""}`
     : gate.reason || t("chatinput.autoroute.build_desc");
   const buttonBase: React.CSSProperties = {
     padding: "6px 12px",

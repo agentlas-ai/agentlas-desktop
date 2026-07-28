@@ -60,11 +60,16 @@ function hubCreditIndex(decision: Record<string, unknown>): Map<string, number> 
   return idx;
 }
 
-/** Hub 에이전트 비용 합 — null(미정) 은 합산에서 제외, 하나라도 알면 부분합을 보여준다. */
-function sumHubCredits(agents: RecAgent[]): number | null {
-  const known = agents.filter((a) => a.source === "hub" && a.estCredits != null);
-  if (!known.length) return null;
-  return known.reduce((s, a) => s + (a.estCredits ?? 0), 0);
+/** Hub 에이전트 비용 합 — null(미정) 은 합산에서 제외한다. 단, 제외가 일어나면 그 합은
+ *  총액이 아니라 하한이므로 partial 로 반드시 같이 알린다: 부분합을 총액으로 넘기면
+ *  페이월이 "필요 Ncr" 라고 안심시킨 뒤 서버가 그보다 더 청구한다(고지액 < 실청구액).
+ *  단가를 하나도 모를 때도 total=null·partial=true — "미상"은 "무료(0)" 가 아니다. */
+function sumHubCredits(agents: RecAgent[]): { total: number | null; partial: boolean } {
+  const hub = agents.filter((a) => a.source === "hub");
+  const known = hub.filter((a) => a.estCredits != null);
+  const partial = known.length < hub.length;
+  if (!known.length) return { total: null, partial };
+  return { total: known.reduce((s, a) => s + (a.estCredits ?? 0), 0), partial };
 }
 
 /**
@@ -191,10 +196,12 @@ export function normalizeRecommendation(json: unknown, query: string): Recommend
       });
     }
     if (!agents.length) return base({ mode: "none" });
+    const hubCost = sumHubCredits(agents);
     return base({
       mode: agents.length > 1 ? "network" : "single",
       agents,
-      totalEstCredits: sumHubCredits(agents),
+      totalEstCredits: hubCost.total,
+      ...(hubCost.partial ? { totalEstCreditsPartial: true } : {}),
     });
   }
 
@@ -225,10 +232,15 @@ export function normalizeRecommendation(json: unknown, query: string): Recommend
       });
       if (clarifyAgents.length >= 5) break;
     }
+    // clarify 후보도 그대로 자동 고용 경로로 흘러간다(execAutoChoice). hub_candidates 와 똑같이
+    // 단가 미상이면 총액이 아님을 알려야 한다 — 안 그러면 null 이 "0cr = 무료" 로 소비된다.
+    const clarifyCost = sumHubCredits(clarifyAgents);
     return base({
       mode: "clarify",
       clarifyQuestion: str(decision.clarify_question),
       agents: clarifyAgents,
+      totalEstCredits: clarifyCost.total,
+      ...(clarifyCost.partial ? { totalEstCreditsPartial: true } : {}),
     });
   }
 

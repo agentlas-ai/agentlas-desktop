@@ -478,6 +478,9 @@ function projectRouteRecommendation(recommendation: Recommendation) {
       estCredits: stage.estCredits ?? null,
     })),
     totalEstCredits: recommendation.totalEstCredits,
+    // 단가 미상 Hub 행이 빠진 합계는 하한이다 — 플래그를 같이 보내지 않으면
+    // 모바일도 부분합을 총액으로 표시한다(데스크탑과 같은 고지액 < 실청구액).
+    totalEstCreditsPartial: recommendation.totalEstCreditsPartial === true,
     rawAction: boundedRedactedText(recommendation.rawAction, 160),
     clarifyQuestion:
       typeof recommendation.clarifyQuestion === "string"

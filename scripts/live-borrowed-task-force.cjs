@@ -12,6 +12,18 @@ const userDataDir = path.join(tempDir, "user-data");
 process.env.AGENTLAS_STORE_PATH = path.join(tempDir, "agentlas.sqlite");
 app.setPath("userData", userDataDir);
 
+// 라이브 테스트는 실제 Hub를 상대한다 — 격리 프로필에 실 로그인 세션만 복사해
+// 재사용한다(store/캐시는 계속 격리). 세션이 없으면 기존처럼 sign-in 오류로
+// 정직하게 실패한다.
+try {
+  const realAuthDir = path.join(app.getPath("appData"), "Agentlas", "auth");
+  if (fs.existsSync(realAuthDir)) {
+    fs.cpSync(realAuthDir, path.join(userDataDir, "auth"), { recursive: true });
+  }
+} catch {
+  /* 세션 복사 실패 = 로그인 필요 오류로 드러난다 */
+}
+
 const DEFAULT_SLUGS = [
   "researcher-046-agent-repo-security-reviewer",
   "researcher-017-agent-repo-security-regression-suite",
@@ -40,6 +52,13 @@ async function main() {
 
   initStore();
   seedBuiltinAgents();
+
+  // Workforce 경로는 웹 세션 필수 — 앱 부트와 동일하게 Keychain/쿠키 파일에서
+  // 실 로그인 세션을 복원한다(위에서 auth/를 격리 프로필로 복사해 둠).
+  const auth = require("../dist/electron/auth.js");
+  if (typeof auth.bootAuthFromKeychain === "function") {
+    await auth.bootAuthFromKeychain();
+  }
 
   const runtimes = await detectRuntimes();
   const active = pickActive(runtimes);

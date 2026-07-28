@@ -86,7 +86,12 @@ function NewAutomationPage() {
 
   useEffect(() => {
     const api = ipc();
-    if (!api) return;
+    // 브릿지가 없으면 로드할 것도 없다 — loaded를 열어 두지 않으면 편집 진입 시
+    // 스케줄 필드가 영영 렌더되지 않는다.
+    if (!api) {
+      setLoaded(true);
+      return;
+    }
     void (async () => {
       const [ag, fm, autos, hub] = await Promise.all([
         api.team.list(),
@@ -290,7 +295,11 @@ function NewAutomationPage() {
 
         {triggerType === "schedule" && (
           <Field label={t("auto.field.schedule")}>
-            <ScheduleBuilder value={initialSpec} onChange={setSched} />
+            {/* 로드가 끝나기 전에는 마운트하지 않는다. ScheduleBuilder의 하이드레이트는
+                마운트 시 1회뿐이라(ScheduleBuilder.tsx의 최초 1회 useEffect), initialSpec이
+                아직 null인 첫 렌더에 마운트되면 저장된 스케줄을 영영 못 읽고 기본값
+                (daily 09:00)을 그대로 emit → 이름만 고쳐 저장해도 실행 시각이 조용히 바뀐다. */}
+            {loaded && <ScheduleBuilder value={initialSpec} onChange={setSched} />}
           </Field>
         )}
 

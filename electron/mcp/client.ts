@@ -138,7 +138,7 @@ import {
   type InvocationWorkspaceBinding,
 } from "../invocation/workspace-binding";
 import { type Runner, SURFACE_INTENT_MARKER, UNATTENDED_NO_ASK_DIRECTIVE } from "../runtime/runner";
-import { pickActive, pickRunner, selectAgentAppRuntimeForTargets, selectExactRuntime, selectRuntimeForTargets } from "../runtime/selection";
+import { pickActive, pickRunner, selectInvocationRuntime } from "../runtime/selection";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
 import {
@@ -1676,9 +1676,16 @@ export async function runMcpInvocation(
   if (!req.agentAppMode && !hasPriorContext && !plainConversation && isGlobalOrchestrator(agent)) {
     for (const candidate of installedAgents) {
       if (isGlobalOrchestrator(candidate)) continue;
-      const candidateRuntime = req.runtimeSelection
-        ? selectExactRuntime(runtimes, req.runtimeSelection)
-        : selectRuntimeForTargets(runtimes, [{ scope: "agent", targetId: candidate.id }]);
+      // The prior must be keyed to the runtime this candidate would actually run
+      // on, so it follows the same pin-vs-assignment precedence as execution.
+      const candidateRuntime = selectInvocationRuntime(
+        runtimes,
+        [{ scope: "agent", targetId: candidate.id }],
+        {
+          pin: req.runtimeSelection,
+          pinIsAuthoritative: isUnattendedExecution(executionContext),
+        },
+      ).choice;
       if (!candidateRuntime) continue;
       try {
         const prior = buildExperienceRoutingPrior({
@@ -1816,22 +1823,40 @@ export async function runMcpInvocation(
     { scope: "agent" as const, targetId: agent.id },
     { scope: "firm" as const, targetId: chat.firmId },
   ];
-  const runtimeChoice = req.runtimeSelection
-    ? selectExactRuntime(runtimes, req.runtimeSelection)
-    : req.agentAppMode
-    ? selectAgentAppRuntimeForTargets(runtimes, runtimeTargets)
-    : selectRuntimeForTargets(runtimes, runtimeTargets);
+  // A chat runtime pin is a conversation default and must not silently discard
+  // the narrower per-agent/per-firm runtime assigned in Library; selectInvocationRuntime
+  // owns that precedence and reports which surface won. Only the unattended
+  // Main-owned automation pin stays authoritative (fail-closed contract).
+  const runtimeResolution = selectInvocationRuntime(runtimes, runtimeTargets, {
+    pin: req.runtimeSelection,
+    pinIsAuthoritative: isUnattendedExecution(executionContext),
+    agentAppMode: req.agentAppMode === true,
+  });
+  const runtimeChoice = runtimeResolution.choice;
   if (!runtimeChoice) {
     sink({
       kind: "error",
       error: {
-        code: req.runtimeSelection ? "pinned-runtime-unavailable" : "no-runtime",
-        message: req.runtimeSelection
+        code: runtimeResolution.pinHonored ? "pinned-runtime-unavailable" : "no-runtime",
+        message: runtimeResolution.pinHonored && req.runtimeSelection
           ? `Pinned automation runtime is unavailable: ${req.runtimeSelection.kind}${req.runtimeSelection.model ? ` · ${req.runtimeSelection.model}` : ""}`
           : tStatus(locale, "errNoRuntime"),
       },
     });
     return earlyResult();
+  }
+
+  // 두 설정 표면이 같은 결정을 주장할 때, 어느 쪽이 이겼는지 반드시 사용자에게 알린다.
+  if (runtimeResolution.pinYieldedToOverride) {
+    const assigned = runtimeResolution.pinYieldedToOverride.selection;
+    const assignedLabel = `${assigned.kind}${assigned.model ? ` · ${assigned.model}` : ""}`;
+    sink({
+      kind: "tool-use",
+      status:
+        locale === "ko"
+          ? `이 채팅의 런타임 고정 대신 Library에서 이 에이전트에 배정한 런타임(${assignedLabel})으로 실행합니다.`
+          : `Using the runtime assigned to this agent in Library (${assignedLabel}) instead of this chat's pinned runtime.`,
+    });
   }
 
   if (runtimeChoice.unavailableOverride) {
@@ -1997,7 +2022,17 @@ export async function runMcpInvocation(
   // Workforce capability choice belongs to the same top host LLM that owns the
   // roster. The ordinary lexical auto-selector may search/install broad tools,
   // so it is never an authority source for an explicit Workforce execution.
-  if (runtimeCanUseMcp && !req.agentAppMode && !oneTeamExecutionPolicy && canWrite && !explicitWorkforceGoal) {
+  //
+  // That rule is about *Workforce* rosters, but `oneTeamExecutionPolicy` is set
+  // on every One turn — including an ordinary solo one. Excluding all of them
+  // left One with no MCP config at all: no browser, no file access, nothing to
+  // operate. One exists to run Agentlas for a non-expert, so a solo One turn
+  // gets the same tools an ordinary chat turn would. Confirmed external
+  // staffing keeps the exclusion, because there the roster's own host LLM owns
+  // the capability decision.
+  const oneSoloTurn = oneTeamExecutionPolicy === "solo_locked";
+  const workforceOwnsCapabilityChoice = Boolean(oneTeamExecutionPolicy) && !oneSoloTurn;
+  if (runtimeCanUseMcp && !req.agentAppMode && !workforceOwnsCapabilityChoice && canWrite && !explicitWorkforceGoal) {
     try {
       const autoSelectInput = {
         userPrompt: effectiveUserPrompt,

@@ -83,6 +83,16 @@ export interface OneTeamPreflightProposal {
     | "external_selection_requires_work_review";
   limitation: "none" | "external_candidates_not_prepared_before_execution";
   canConfirmTeam: boolean;
+  /*
+   * One is meant to operate Agentlas for a non-expert: ask in plain language,
+   * then run it. External staffing was the one capability with no door — Main
+   * implements `confirm_workforce` end to end, but nothing could ever produce
+   * that resolution, so asking for a workforce dead-ended in `continue_solo`.
+   * This flag is that door. It is a separate decision from `canConfirmTeam`:
+   * a local roster of two is not a precondition for recruiting externally, and
+   * needing external help is exactly the case where the local roster is short.
+   */
+  canConfirmWorkforce: boolean;
   reservedRun: {
     mode: "team" | "workforce" | "solo";
     runId: string;
@@ -238,7 +248,7 @@ export function isOneTeamPreflightProposal(value: unknown): value is OneTeamPref
   if (!proposal || !exactKeys(proposal, [
     "contractVersion", "proposalId", "version", "status", "goalSummary", "binding",
     "complexityReasons", "roles", "cost", "selectionBoundary", "limitation", "canConfirmTeam",
-    "reservedRun", "startedRun", "createdAt", "updatedAt", "expiresAt",
+    "canConfirmWorkforce", "reservedRun", "startedRun", "createdAt", "updatedAt", "expiresAt",
   ])) return false;
   if (proposal.contractVersion !== ONE_TEAM_PREFLIGHT_CONTRACT_VERSION || !safeId(proposal.proposalId)) return false;
   if (!Number.isSafeInteger(proposal.version) || Number(proposal.version) < 1 || !STATUSES.has(proposal.status as OneTeamPreflightStatus)) return false;
@@ -269,6 +279,14 @@ export function isOneTeamPreflightProposal(value: unknown): value is OneTeamPref
     proposal.selectionBoundary === "existing_exact_installed_roster_only"
     && proposal.limitation === "none"
     && proposal.roles.length >= 2
+  )) return false;
+  if (typeof proposal.canConfirmWorkforce !== "boolean") return false;
+  // The two doors are mutually exclusive by construction: either the installed
+  // roster already covers the work, or it does not and external staffing is the
+  // remaining route. `resolveOneTeamPreflight` enforces the same boundary, so a
+  // proposal that disagrees with it would advertise a door that cannot open.
+  if (proposal.canConfirmWorkforce !== (
+    proposal.selectionBoundary === "external_selection_requires_work_review"
   )) return false;
 
   const validateRun = (valueToCheck: unknown, expectedMode?: "team" | "workforce" | "solo"): boolean => {

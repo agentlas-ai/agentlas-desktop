@@ -198,14 +198,36 @@ export function RuntimeReadiness() {
       {
         id: "agentlas-os",
         label: "Agentlas OS",
-        detail: engine?.available
-          ? (deep
-            ? (doctor?.ok
-              ? (ko ? `자가진단 통과${engine.version ? ` · v${engine.version}` : ""}` : `Self-check passed${engine.version ? ` · v${engine.version}` : ""}`)
-              : (ko ? "엔진은 있지만 자가진단을 통과하지 못했습니다." : "The engine exists but did not pass its self-check."))
-            : (ko ? `Agentlas OS 엔진 사용 가능${engine.version ? ` · v${engine.version}` : ""}` : `Agentlas OS engine available${engine.version ? ` · v${engine.version}` : ""}`))
-          : (engine?.reason || (ko ? "Agentlas OS 엔진을 찾지 못했습니다." : "Agentlas OS engine was not found.")),
-        status: engine?.available && (!deep || doctor?.ok) ? "ready" : "blocked",
+        detail: !engine?.available
+          ? (engine?.reason || (ko ? "Agentlas OS 엔진을 찾지 못했습니다." : "Agentlas OS engine was not found."))
+          : deep && !doctor?.ok
+            ? (ko ? "엔진은 있지만 자가진단을 통과하지 못했습니다." : "The engine exists but did not pass its self-check.")
+            // A frozen bundled engine outranks "self-check passed" as the thing
+            // worth telling the user, because the self-check cannot detect it.
+            : engine.source === "bundled"
+              ? (ko
+                ? `앱에 들어 있는 고정 엔진으로 돌고 있습니다${engine.version ? ` · v${engine.version}` : ""} — 최신을 받지 못해 일부 기능이 빠질 수 있어요.`
+                : `Running the frozen engine bundled with this app${engine.version ? ` · v${engine.version}` : ""} — it cannot update, so some features may be missing.`)
+              // Settings warns about a manually pinned engine; this row used to
+              // call the same state "ready". One situation must not get two
+              // answers depending on which screen you opened.
+              : engine.source === "override"
+                ? (ko
+                  ? `직접 지정한 경로의 엔진입니다${engine.version ? ` · v${engine.version}` : ""} — 자동으로 업데이트되지 않습니다.`
+                  : `Using an engine at a path you set yourself${engine.version ? ` · v${engine.version}` : ""} — it will not update automatically.`)
+              : deep
+                ? (ko ? `자가진단 통과${engine.version ? ` · v${engine.version}` : ""}` : `Self-check passed${engine.version ? ` · v${engine.version}` : ""}`)
+                : (ko ? `Agentlas OS 엔진 사용 가능${engine.version ? ` · v${engine.version}` : ""}` : `Agentlas OS engine available${engine.version ? ` · v${engine.version}` : ""}`),
+        // The bundled fallback passes its own self-check while missing the
+        // Workforce goal-continuity tools, so "doctor ok" is not enough to call
+        // this ready. Surface it as attention: the app runs, but a capability
+        // the user was promised is quietly absent. Settings carries the
+        // explanation; this row only has to stop saying everything is fine.
+        status: !engine?.available || (deep && !doctor?.ok)
+          ? "blocked"
+          : engine.source === "bundled" || engine.source === "override"
+            ? "attention"
+            : "ready",
       },
       {
         id: "hub",

@@ -105,7 +105,7 @@ function runtimeTarget(root: string): string {
   }
 }
 
-function isRejected(root: string): boolean {
+function isRejectedTarget(root: string): boolean {
   return rejectedRuntimeTargets.has(runtimeTarget(root));
 }
 
@@ -126,8 +126,38 @@ function preferCandidate(left: RuntimeCandidate, right: RuntimeCandidate): Runti
  * equal, unversioned, or rejected managed runtime cannot shadow the bundle.
  */
 export function hephaestusRoot(): string | null {
+  return hephaestusRootDetail()?.root ?? null;
+}
+
+/**
+ * Same selection as `hephaestusRoot`, but keeps **where the engine came from**.
+ *
+ * The kind was always computed here and then discarded at the return statement,
+ * so every caller — including the UI — saw a bare path and could not tell a
+ * self-updating managed runtime from the frozen bundled copy. Those are not
+ * cosmetically different: the bundled fallback ships without the Workforce
+ * goal-continuity tools (audit D2), so goal binding silently degrades while the
+ * engine still reports a healthy version and passes its self-check. A version
+ * number alone cannot express that, which is exactly why it must not be the
+ * only thing the user is shown.
+ */
+export function hephaestusRootDetail(
+  /**
+   * Ignore the in-memory rejection set. Rejection means "this engine failed a
+   * capability preflight", which the updater is the cure for — so the updater
+   * must still be able to find the files it is meant to replace. Everything
+   * else keeps honouring rejection.
+   */
+  options?: { includeRejected?: boolean },
+): { root: string; kind: "managed" | "bundled" | "override" } | null {
+  const isRejected = options?.includeRejected ? () => false : isRejectedTarget;
   const explicit = process.env.HEPHAESTUS_RUNTIME_ROOT?.trim();
-  if (explicit && isRuntimeRoot(explicit) && !isRejected(explicit)) return path.resolve(explicit);
+  // An explicit override is neither managed nor bundled: nothing updates it and
+  // no packaging guarantees its contents. Say so rather than picking whichever
+  // label looks closest.
+  if (explicit && isRuntimeRoot(explicit) && !isRejected(explicit)) {
+    return { root: path.resolve(explicit), kind: "override" };
+  }
 
   const paths: Array<{ root: string; kind: RuntimeCandidate["kind"] }> = [
     { root: path.join(os.homedir(), ".agentlas", "runtime", "current"), kind: "managed" },
@@ -159,8 +189,8 @@ export function hephaestusRoot(): string | null {
   // a caller-controlled cwd/Hephaestus directory must never outrank packaged
   // process.resourcesPath merely by claiming a larger version.
   const bundled = candidates.find((candidate) => candidate.kind === "bundled") ?? null;
-  if (managed && bundled) return preferCandidate(managed, bundled).root;
-  return (bundled ?? managed)!.root;
+  const winner = managed && bundled ? preferCandidate(managed, bundled) : (bundled ?? managed)!;
+  return { root: winner.root, kind: winner.kind };
 }
 
 export function resetHephaestusRootCache(): void {

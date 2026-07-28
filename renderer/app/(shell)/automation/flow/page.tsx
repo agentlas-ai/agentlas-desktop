@@ -50,7 +50,18 @@ function synthesizeLegacyGraph(a: Automation): WorkflowGraph {
   return {
     version: 1,
     nodes: [
-      { id: "n0", type: "trigger", position: { x: 0, y: 120 }, config: { schedule: a.scheduleHuman }, label: "Trigger" },
+      {
+        id: "n0",
+        type: "trigger",
+        position: { x: 0, y: 120 },
+        // scheduleSpec을 반드시 같이 실어야 한다. 폼으로 만든 자동화는 graph_json이 null이라
+        // 여기서 시드되는데, cron/once/manual/interval 스케줄의 scheduleHuman 토큰은 "spec"이라
+        // specFromLegacyToken이 복원하지 못한다(NodeConfigPanel §112). 그러면 ScheduleBuilder가
+        // value=null로 마운트해 daily-09:00 기본값을 즉시 방출하고, 트리거 노드를 클릭만 해도
+        // "*/30 9-18 * * 1-5" 같은 스케줄이 저장 시 하루 1회 09:00으로 조용히 덮어써졌다.
+        config: { schedule: a.scheduleHuman, ...(a.scheduleSpec ? { scheduleSpec: a.scheduleSpec } : {}) },
+        label: "Trigger",
+      },
       {
         id: "n1",
         type: "agent",

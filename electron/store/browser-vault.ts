@@ -316,27 +316,43 @@ export function setBrowserSession(site: string, status: BrowserSessionStatus): v
 }
 
 // ── 권한(승인 기억) ────────────────────────────────────────────
-/** 저장된 결정을 조회. 결제/임의코드는 절대 캐시하지 않는다(항상 null → 매번 확인). */
+/**
+ * 저장된 결정을 조회. 결제/임의코드는 **승인**을 절대 캐시하지 않는다(always여도 무시 → 매번 확인).
+ * 다만 명시 "거부"는 돌려준다.
+ *
+ * WHY(2026-07-28 수리): browserRequestApproval이 payment/unsafe-code 외 전부 자동승인으로 바뀐 뒤
+ * 시트에 도달하는 요청은 payment/unsafe-code뿐인데, 여기서 그 둘을 통째로 null 처리해 버려
+ * "저장 가능한 액션"과 "시트에 도달하는 액션"의 교집합이 공집합이 됐다. 그 결과 browser_permissions는
+ * 단 한 줄도 생길 수 없는 죽은 테이블이 되고, 오너 지시의 "사이트별 명시 deny는 존중"이 실행 불가였다.
+ * 승인 캐시 금지(결제는 매번 확인)는 그대로 두고, deny만 살려 dead store를 되살린다.
+ */
 export function getBrowserPermission(
   site: string,
   actionType: string,
 ): BrowserPermissionDecision | null {
-  if (actionType === "payment" || actionType === "unsafe-code") return null;
+  const approvalCacheForbidden = actionType === "payment" || actionType === "unsafe-code";
   const norm = normalizeSite(site);
   if (!norm) return null;
   const row = getDb()
     .prepare("SELECT decision FROM browser_permissions WHERE site = ? AND action_type = ?")
     .get(norm, actionType) as { decision: string } | undefined;
-  return (row?.decision as BrowserPermissionDecision | undefined) ?? null;
+  const stored = (row?.decision as BrowserPermissionDecision | undefined) ?? null;
+  if (approvalCacheForbidden && stored !== "deny") return null;
+  return stored;
 }
 
-/** "항상 승인" / "거부"만 영속. "한 번만"(once)과 결제/임의코드는 저장하지 않는다. */
+/**
+ * "항상 승인" / "거부"만 영속. "한 번만"(once)은 저장하지 않는다.
+ * 결제/임의코드는 "거부"만 영속 — 승인(always)을 기억하면 결제가 조용히 통과하므로 금지하되,
+ * 사용자가 명시적으로 막은 사이트를 매번 다시 묻는 일도 없앤다(getBrowserPermission의 WHY 참고).
+ */
 export function setBrowserPermission(
   site: string,
   actionType: string,
   decision: BrowserPermissionDecision,
 ): void {
-  if (actionType === "payment" || actionType === "unsafe-code" || decision === "once") return;
+  if (decision === "once") return;
+  if ((actionType === "payment" || actionType === "unsafe-code") && decision !== "deny") return;
   const norm = normalizeSite(site);
   if (!norm) return;
   getDb()

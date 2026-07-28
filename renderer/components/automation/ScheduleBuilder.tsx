@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { describeSchedule } from "@shared/schedule-describe";
 import type { ScheduleSpec } from "@/lib/types";
 
 type Mode = "preset" | "cron" | "once" | "manual";
@@ -17,9 +18,27 @@ export interface ScheduleBuilderValue {
   legacyToken: string;
 }
 
-/** ScheduleSpec + UI 힌트로부터 레거시 미러 토큰을 만든다(가능한 경우). */
-function toLegacyToken(mode: Mode, preset: Preset, time: string, dow: number, day: number): string {
-  if (mode !== "preset") return `spec`; // cron/once/manual은 토큰 표현이 없어 schedule_json에 의존
+/**
+ * ScheduleSpec + UI 힌트로부터 레거시 미러 토큰을 만든다(가능한 경우).
+ *
+ * cron/once/manual/interval은 하이픈 토큰 문법이 없다. 예전에는 자리표시자 `spec`을 돌려줬는데,
+ * 이 값이 scheduleHuman으로 그대로 automations.schedule 컬럼에 저장돼 목록·상세·플로우 헤더·
+ * 대시보드·모바일 투영에 "spec"이라는 내부 토큰이 노출됐다("spec · MyAgent"). scheduleHuman은
+ * 계약상 사용자 친화 텍스트(shared/types.ts)이므로, 토큰 문법이 없을 때는 요약줄과 똑같은
+ * describeSchedule 문구를 미러링한다. 발사 진실은 schedule_json이라 표시 문자열로 바꿔도
+ * 스케줄러 동작은 그대로다(computeNextRun은 schedule_json을 우선 파싱하고, 파싱 불가 토큰의
+ * 24h 폴백 경로는 `spec`일 때와 동일).
+ */
+function toLegacyToken(
+  mode: Mode,
+  preset: Preset,
+  time: string,
+  dow: number,
+  day: number,
+  spec: ScheduleSpec,
+  locale: "ko" | "en",
+): string {
+  if (mode !== "preset") return describeSchedule(spec, locale);
   switch (preset) {
     case "hourly":
       return "hourly";
@@ -32,7 +51,8 @@ function toLegacyToken(mode: Mode, preset: Preset, time: string, dow: number, da
     case "monthly":
       return `monthly-${day}-${time}`;
     case "interval":
-      return `spec`;
+      // interval 프리셋도 토큰 문법이 없다 — 위와 같은 이유로 사람이 읽을 문구를 저장한다.
+      return describeSchedule(spec, locale);
     default:
       return `daily-${time}`;
   }
@@ -196,12 +216,13 @@ export function ScheduleBuilder({
   onChangeRef.current = onChange;
   const lastEmitted = useRef<string>("");
   useEffect(() => {
-    const token = toLegacyToken(mode, preset, time, dow, day);
+    const token = toLegacyToken(mode, preset, time, dow, day, spec, locale === "ko" ? "ko" : "en");
     const serialized = JSON.stringify({ spec, token });
     if (serialized === lastEmitted.current) return;
     lastEmitted.current = serialized;
     onChangeRef.current({ spec, legacyToken: token });
-  }, [spec, mode, preset, time, dow, day]);
+    // locale은 토큰 문구(describeSchedule)에 들어가므로 의존성에 포함한다.
+  }, [spec, mode, preset, time, dow, day, locale]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>

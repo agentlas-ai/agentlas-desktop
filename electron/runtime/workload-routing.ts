@@ -7,7 +7,12 @@ import { createHash } from "node:crypto";
  * It never infers difficulty from task words or manufactures provider model IDs.
  */
 export type WorkloadModelTier = "economy" | "balanced" | "frontier";
-export type WorkloadEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+/**
+ * 열린 어휘 — provider가 새 리즌 레벨을 추가해도 이 타입을 고치지 않는다.
+ * 2026-07-28 실측: codex debug models가 gpt-5.6-sol에서 "ultra"(자동 위임)를 광고했다.
+ * 알려진 7단계는 KNOWN_EFFORTS로 남겨 랭크 폴백에만 쓴다(아래 effortRank).
+ */
+export type WorkloadEffort = string;
 export type WorkloadPhase = "plan" | "delegate" | "synthesize";
 export type WorkloadModelClass =
   | "auto"
@@ -90,7 +95,12 @@ const TIER_ALIASES: Record<WorkloadModelTier, string[]> = {
   balanced: ["sonnet", "terra", "tera", "composer"],
   frontier: ["opus", "sol", "grok"],
 };
+/**
+ * 랭크 폴백 전용 — 모델이 스스로 광고한 목록에 없는 값의 상대 순서를 추정할 때만 쓴다.
+ * 유효성 검사에는 절대 쓰지 않는다(EFFORT_TOKEN_RE가 그 역할). effortRank() 참고.
+ */
 const EFFORTS: WorkloadEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const EFFORT_TOKEN_RE = /^[a-z][a-z0-9-]{0,23}$/;
 const PHASES: WorkloadPhase[] = ["plan", "delegate", "synthesize"];
 const MAX_REASON_CODES = 8;
 
@@ -130,9 +140,38 @@ function normalizeModelId(value: unknown): string | null {
   return raw ? raw : null;
 }
 
-function normalizeEffort(value: unknown): WorkloadEffort | null {
-  const raw = cleanText(value, 20).toLowerCase() as WorkloadEffort;
-  return EFFORTS.includes(raw) ? raw : null;
+export function normalizeEffort(value: unknown): WorkloadEffort | null {
+  const raw = cleanText(value, 24).toLowerCase();
+  return EFFORT_TOKEN_RE.test(raw) ? raw : null;
+}
+
+/**
+ * 랭크 산정 — supported(모델이 스스로 광고한 순서)가 뼈대다. value가 거기 있으면
+ * own-index를 그대로 쓴다. 없지만 알려진 7단계 표(EFFORTS)의 값이면, supported
+ * 안에서 "이 값보다 known-rank가 낮거나 같은" 마지막 항목 바로 뒤(소수 위치)에
+ * 끼워 넣는다 — 항상 "목록 끝"으로 미는 옛 방식은 known 값이 실제로는 supported의
+ * 상위권 항목보다 낮은 능력인데도 전부 통과시켜 버리는 역전을 낳았다(예: supported가
+ * low/xhigh/max만 광고할 때 "medium"이 xhigh·max보다 낮다는 사실이 사라짐).
+ * 알려진 표에도 없는 완전 미지의 값은 +Infinity로 둬 상한 비교에서 항상 밀린다.
+ */
+function effortRank(value: string, supported: readonly string[]): number {
+  const own = supported.indexOf(value);
+  if (own !== -1) return own;
+  const known = EFFORTS.indexOf(value);
+  if (known === -1) return Number.POSITIVE_INFINITY;
+  let insertAfter = -1;
+  supported.forEach((item, index) => {
+    const itemKnown = EFFORTS.indexOf(item);
+    if (itemKnown !== -1 && itemKnown <= known) insertAfter = index;
+  });
+  return insertAfter + 0.5;
+}
+
+/** 특정 모델 목록과 무관한 순수 전역 랭크 — admin 정책 상한처럼 한 모델의 서브셋에
+ * 묶이면 안 되는 비교에 쓴다. 알려진 7단계 밖의 값은 +Infinity(=항상 상한 이상). */
+function knownEffortRank(value: string): number {
+  const known = EFFORTS.indexOf(value);
+  return known !== -1 ? known : Number.POSITIVE_INFINITY;
 }
 
 function normalizePhase(value: unknown): WorkloadPhase | null {
@@ -284,6 +323,19 @@ function liveModelInventory(runtime: RuntimeStatus): string[] {
   return [...new Set(safe)];
 }
 
+/** raw.efforts의 발견 순서를 그대로 보존한다 — 고정 EFFORTS로 재정렬/재클램프하지 않는다. */
+function dedupedEfforts(values: unknown[]): WorkloadEffort[] {
+  const seen = new Set<string>();
+  const found: WorkloadEffort[] = [];
+  for (const entry of values) {
+    const effort = normalizeEffort(entry);
+    if (!effort || seen.has(effort)) continue;
+    seen.add(effort);
+    found.push(effort);
+  }
+  return found;
+}
+
 function safeModelProfile(runtime: RuntimeStatus, modelId: string) {
   const raw = runtime.allocationModelProfiles?.[modelId];
   if (!raw) return null;
@@ -291,8 +343,8 @@ function safeModelProfile(runtime: RuntimeStatus, modelId: string) {
   const capabilities = normalizeCapabilityList(raw.capabilities) ?? [];
   const efforts = raw.efforts === undefined
     ? null
-    : Array.isArray(raw.efforts) && raw.efforts.length <= EFFORTS.length
-      ? EFFORTS.filter((effort) => raw.efforts?.some((entry) => normalizeEffort(entry) === effort))
+    : Array.isArray(raw.efforts) && raw.efforts.length <= 32
+      ? dedupedEfforts(raw.efforts)
       : null;
   const contextWindow = typeof raw.contextWindow === "number" && Number.isFinite(raw.contextWindow)
     ? Math.max(0, Math.floor(raw.contextWindow))
@@ -360,6 +412,8 @@ function supportedEfforts(runtime: RuntimeStatus, modelId?: string): WorkloadEff
       .filter((effort): effort is WorkloadEffort => Boolean(effort));
   }
   if (!modelId) {
+    // union은 Set 삽입 순서를 보존한다 — 첫 모델의 발견 순서가 앞서고, 이후 모델이
+    // 추가로 광고하는 값만 뒤에 덧붙는다. 고정 EFFORTS로 재정렬/재클램프하지 않는다.
     const union = new Set<WorkloadEffort>();
     let foundHostProfile = false;
     for (const candidate of liveModelInventory(runtime)) {
@@ -368,10 +422,11 @@ function supportedEfforts(runtime: RuntimeStatus, modelId?: string): WorkloadEff
       foundHostProfile = true;
       for (const effort of modelEfforts) union.add(effort);
     }
-    if (foundHostProfile) return EFFORTS.filter((effort) => union.has(effort));
+    if (foundHostProfile) return [...union];
   }
-  // Codex exposes this as a stable config capability rather than a discovery API.
-  if (runtime.kind === "codex") return ["none", "minimal", "low", "medium", "high", "xhigh"];
+  // 모델별 실측 프로필이 전혀 없을 때만 쓰는 최후 폴백 — 발견 데이터가 아니므로
+  // "ultra" 같은 새 값은 여기서 절대 나타날 수 없다. 최소한 알려진 7단계는 갖춘다.
+  if (runtime.kind === "codex") return [...EFFORTS];
   return [];
 }
 
@@ -385,9 +440,9 @@ function resolveEffort(
     return { effort: runtime.effort ?? undefined, code: "effort-capability-unavailable" };
   }
   if (supported.includes(requested)) return { effort: requested };
-  const requestedRank = EFFORTS.indexOf(requested);
-  const ranked = supported.slice().sort((a, b) => EFFORTS.indexOf(a) - EFFORTS.indexOf(b));
-  const below = ranked.filter((effort) => EFFORTS.indexOf(effort) <= requestedRank).at(-1);
+  const requestedRank = effortRank(requested, supported);
+  const ranked = supported.slice().sort((a, b) => effortRank(a, supported) - effortRank(b, supported));
+  const below = ranked.filter((effort) => effortRank(effort, supported) <= requestedRank).at(-1);
   return below
     ? { effort: below, code: "effort-clamped-to-capability" }
     : { effort: null, code: "effort-below-capability-unavailable" };
@@ -399,9 +454,14 @@ function resolvePolicyBoundedEffort(
   policy: WorkloadHostPolicy,
   modelId?: string,
 ): { effort?: string | null; codes: string[] } {
-  let bounded = requested;
   const codes: string[] = [];
-  if (policy.maxEffort && EFFORTS.indexOf(bounded) > EFFORTS.indexOf(policy.maxEffort)) {
+  // policy.maxEffort는 admin이 Agentlas 자체 어휘(EFFORTS)로 지정한 상한이지 특정
+  // 모델의 광고 목록이 아니다 — knownEffortRank로만 비교한다. 모델별 서브셋 인덱스를
+  // 쓰면(effortRank) supported=["max"] 같은 좁은 목록에서 "high"가 "max"보다 높게
+  // 랭크되는 역전이 생긴다. 알려진 표에 없는 값(예: 신규 "ultra")은 +Infinity로 둬
+  // 상한 비교에서 항상 안전하게(더 낮은 쪽으로) 밀리게 한다.
+  let bounded = requested;
+  if (policy.maxEffort && knownEffortRank(bounded) > knownEffortRank(policy.maxEffort)) {
     bounded = policy.maxEffort;
     codes.push("effort-clamped-to-host-policy");
   }
@@ -410,18 +470,18 @@ function resolvePolicyBoundedEffort(
     codes.push("effort-capability-unavailable");
     return { effort: null, codes };
   }
-  const supported = resolveEffort(runtime, bounded, modelId);
-  if (supported.code) codes.push(supported.code);
-  const resolved = normalizeEffort(supported.effort);
+  const resolvedResult = resolveEffort(runtime, bounded, modelId);
+  if (resolvedResult.code) codes.push(resolvedResult.code);
+  const resolved = normalizeEffort(resolvedResult.effort);
   if (
     policy.maxEffort &&
     resolved &&
-    EFFORTS.indexOf(resolved) > EFFORTS.indexOf(policy.maxEffort)
+    knownEffortRank(resolved) > knownEffortRank(policy.maxEffort)
   ) {
     codes.push("effort-below-capability-unavailable");
     return { effort: null, codes: [...new Set(codes)] };
   }
-  return { effort: supported.effort, codes };
+  return { effort: resolvedResult.effort, codes };
 }
 
 function resolvedEffortOrCurrent(
