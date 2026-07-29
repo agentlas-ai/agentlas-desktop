@@ -60,11 +60,8 @@
       "name": "workforce.prepare_execution",
       "requiredInputFields": [
         "workOrder",
-        "candidateSet",
         "selection",
-        "federationResult",
         "federatedSelection",
-        "prepareAttempt",
         "projectDir"
       ],
       "inputPropertyFields": [

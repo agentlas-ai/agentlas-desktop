@@ -4,6 +4,8 @@
 
 This release binds Agentlas OS v1.1.80 at
 3074c347fb837c8c5f5999bdb859302765b54d57.
+Passing the source gates does not prove a published release; the Releases page
+stays the authority for what is actually downloadable.
 
 - **Agent Cloud conflicts now explain the real next step.** A first save from a
   folder with no local receipt is distinguished from a genuinely stale saved
