@@ -1845,19 +1845,22 @@ button[data-dashboard-import="true"]:disabled {
   padding: 12px 14px 10px;
 }
 
-.dashboard-runtime-row label {
+.dashboard-runtime-row label,
+.dashboard-runtime-pool-fields label {
   min-width: 0;
   display: grid;
   gap: 5px;
 }
 
-.dashboard-runtime-row label > span {
+.dashboard-runtime-row label > span,
+.dashboard-runtime-pool-fields label > span {
   color: var(--dash-muted);
   font-family: var(--rd-f-mono);
   font-size: 10px;
 }
 
-.dashboard-runtime-row select {
+.dashboard-runtime-row select,
+.dashboard-runtime-pool-fields select {
   width: 100%;
   min-width: 0;
   height: 34px;
@@ -1869,7 +1872,8 @@ button[data-dashboard-import="true"]:disabled {
   font-size: 12px;
 }
 
-.dashboard-runtime-row select:disabled {
+.dashboard-runtime-row select:disabled,
+.dashboard-runtime-pool-fields select:disabled {
   opacity: 0.56;
   cursor: default;
 }
@@ -1915,10 +1919,10 @@ button[data-dashboard-import="true"]:disabled {
 
 .dashboard-runtime-pool-list li {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 8px;
   font-size: 12px;
-  padding: 4px 6px;
+  padding: 8px;
   border: 1px solid var(--dash-line);
   border-radius: 6px;
 }
@@ -1927,13 +1931,18 @@ button[data-dashboard-import="true"]:disabled {
   font-weight: 600;
   min-width: 14px;
   text-align: center;
+  align-self: center;
 }
 
-.dashboard-runtime-pool-name {
+.dashboard-runtime-pool-fields {
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 8px;
 }
 
 .dashboard-runtime-pool-badge {
@@ -1943,6 +1952,7 @@ button[data-dashboard-import="true"]:disabled {
   border: 1px solid var(--dash-line);
   color: var(--dash-muted);
   white-space: nowrap;
+  margin-bottom: 8px;
 }
 
 .dashboard-runtime-pool-badge[data-tone="active"] {
@@ -1958,6 +1968,7 @@ button[data-dashboard-import="true"]:disabled {
 .dashboard-runtime-pool-actions {
   display: inline-flex;
   gap: 2px;
+  margin-bottom: 7px;
 }
 
 .dashboard-runtime-pool-actions button {
@@ -1981,7 +1992,8 @@ button[data-dashboard-import="true"]:disabled {
   background: transparent;
   border-radius: 6px;
   font-size: 12px;
-  padding: 4px 8px;
+  min-height: 32px;
+  padding: 5px 9px;
   cursor: pointer;
   color: var(--dash-muted);
 }
@@ -3058,6 +3070,24 @@ button[data-toggle-state="off"] {
 
   .dashboard-runtime-row {
     grid-template-columns: 1fr;
+  }
+
+  .dashboard-runtime-pool-list li {
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .dashboard-runtime-pool-fields {
+    flex-basis: calc(100% - 30px);
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-runtime-pool-badge {
+    margin: 0 0 0 22px;
+  }
+
+  .dashboard-runtime-pool-actions {
+    margin: 0;
   }
 
   .dashboard-readiness-summary {

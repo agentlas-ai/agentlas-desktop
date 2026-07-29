@@ -203,7 +203,7 @@ function positionCallout(rect: DOMRect | null): { left: number; top: number } {
   if (left + CALLOUT_WIDTH > vw - 12) left = rect.left - CALLOUT_WIDTH - gap;
   if (left < 12) left = Math.min(maxLeft, Math.max(12, rect.left));
 
-  let top = rect.top;
+  let top = Math.max(16, rect.top);
   if (rect.height < 120 && rect.bottom + 230 < vh) top = rect.bottom + gap;
   if (top + 230 > vh - 12) top = Math.max(16, vh - 242);
   return { left, top };
@@ -229,6 +229,13 @@ function tourConfigForPath(pathname: string): TourConfig | null {
           bodyKo: "Claude·Codex·Gemini가 연결됐는지, 한도가 얼마 남았는지 한눈에 봅니다. 최종 청구서가 아니라 연결과 한도 감시용입니다.",
           titleEn: "Engine connections",
           bodyEn: "See at a glance which engines are connected and how much headroom is left. This tracks access and limits, not final billing.",
+        },
+        {
+          target: "dashboard.worker-model",
+          titleKo: "오케스트레이터와 워커",
+          bodyKo: "오케스트레이터는 요청을 판단하고 일을 나눈 뒤 결과를 합칩니다. 워커는 나눠 받은 일을 실행합니다. 워커 풀을 비워 두면 오케스트레이터 모델을 따르고, 직접 지정하면 워커 전용 후보 행을 사용합니다.",
+          titleEn: "Orchestrator and workers",
+          bodyEn: "The orchestrator decides, delegates, and combines the result. Workers execute the delegated parts. An empty worker pool follows the orchestrator model; direct selection uses worker-specific candidate rows.",
         },
         {
           target: "dashboard.activity",
