@@ -3309,6 +3309,15 @@ function candidateSearchArgs(
     sourceScope: sourcePolicy === "hub-required"
       ? WORKFORCE_HUB_SOURCE_SCOPE
       : WORKFORCE_SOURCE_SCOPE,
+    // The MCP surface answers with a decision menu by default: it drops
+    // audit-weight fields and collapses semanticSnapshot.produces/consumes to
+    // counts, which this orchestrator rejects (CANDIDATE_SEMANTIC_KEYS requires
+    // both as ID arrays) and which validate/prepare cannot take back as an
+    // attached candidateSet. That projection exists to spare a host LLM's
+    // context; the desktop parses the set programmatically and already
+    // compresses it into desktop-workforce-tool-menu.v1 before any model sees
+    // it, so ask for the exact original instead.
+    fullDossier: true,
   };
 }
 
