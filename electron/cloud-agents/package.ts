@@ -1627,7 +1627,7 @@ async function registerCloudAgent(input: {
   });
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw cloudRegistrationError(response.status, body);
+    throw cloudRegistrationError(response.status, body, !input.baseRegistration);
   }
   return validateCloudRegistrationReceipt(
     await response.json(),
@@ -1701,7 +1701,7 @@ function scopeForVisibility(visibility: CloudAgentVisibility): CloudAgentCloudSc
   return visibility === "marketplace" ? "hub-public" : "owner-private";
 }
 
-function cloudRegistrationError(status: number, body: string): Error {
+function cloudRegistrationError(status: number, body: string, sentAsCreate = false): Error {
   let parsed: Record<string, unknown> | null = null;
   try {
     const value = JSON.parse(body) as unknown;
@@ -1712,10 +1712,21 @@ function cloudRegistrationError(status: number, body: string): Error {
   const code = typeof parsed?.code === "string" ? parsed.code : "";
   if (status === 412 && code === "cloud_agent_revision_conflict") {
     const current = isRecord(parsed?.current) ? parsed.current : null;
-    const updatedAt = typeof current?.updatedAt === "string" ? ` Latest update: ${current.updatedAt}.` : "";
+    const cloudId = typeof current?.cloudId === "string" ? current.cloudId : "unknown";
+    const revision = typeof current?.revision === "string" ? current.revision : "unknown";
+    const updatedAt = typeof current?.updatedAt === "string" ? current.updatedAt : "unknown";
+    // A folder with no saved revision receipt sends "create". When the asset
+    // already exists the server refuses, and blaming "another machine" sends the
+    // user to restore — which binds the receipt to the restored copy, never to
+    // this folder, so the refusal never clears. Name the real precondition.
+    // Keep the wording ownership-centric: the user's only question is whether
+    // this name belongs to their account, not how folders and receipts relate.
+    const guidance = sentAsCreate
+      ? "This name already exists in Agent Cloud. If it is yours, restore it once on this machine, then save again."
+      : "A newer version of this asset was saved elsewhere. Restore it to compare, then save again.";
     return new Error(
-      `cloud_agent_revision_conflict: This Agent Cloud asset changed on another machine.${updatedAt} ` +
-      "Your local files were not uploaded. Restore the latest Cloud copy, review the differences, then save again.",
+      `cloud_agent_revision_conflict: Nothing was uploaded. ${guidance} `
+      + `(server: cloudId ${cloudId}, revision ${revision}, last saved ${updatedAt})`,
     );
   }
   if (status === 428 && code === "cloud_precondition_required") {

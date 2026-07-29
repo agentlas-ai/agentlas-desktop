@@ -69,6 +69,11 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-29 · v0.9.29 — Cloud conflicts say whether to restore or compare** —
+  a first save without a local receipt is no longer described as a change from
+  another machine, and conflict details now identify the exact server revision.
+  This release binds Agentlas OS v1.1.80 at
+  3074c347fb837c8c5f5999bdb859302765b54d57.
 - **2026-07-29 · v0.9.28 — A credential is where it lives, not a word in its
   filename** — the publish scan matched `token` and `secret` as filename
   substrings, so a package was blocked for shipping its own design tokens and the

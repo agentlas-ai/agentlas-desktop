@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.29 — 2026-07-29
+
+This release binds Agentlas OS v1.1.80 at
+3074c347fb837c8c5f5999bdb859302765b54d57.
+
+- **Agent Cloud conflicts now explain the real next step.** A first save from a
+  folder with no local receipt is distinguished from a genuinely stale saved
+  revision, so the app no longer blames another machine for every `412`.
+  Conflict messages include the server asset identity and tell the owner
+  whether to restore once or compare a newer copy.
+- **The bundled engine moves to v1.1.80.** Project recall can regenerate a stale
+  local corpus from every supported Agentlas surface while keeping the
+  immutable runtime pin aligned across macOS, Windows, and Linux release jobs.
+
 ## 0.9.28 — 2026-07-29
 
 This release binds Agentlas OS v1.1.76 at e3d3a9085d087af504964fb5e11f09652e582161.
