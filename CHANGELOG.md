@@ -1,8 +1,24 @@
 # Changelog
 
+## 0.9.28 — 2026-07-29
+
+This release binds Agentlas OS v1.1.76 at e3d3a9085d087af504964fb5e11f09652e582161.
+
+Passing the source gates does not prove a published release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **Bundled engine moves to v1.1.76.** A credential is now identified by where it
+  lives rather than by a word in its filename, so a package stops being blocked
+  for shipping its own design tokens, and upload widens `allowRead` to the
+  context its agent cards declare as required — measured across 143 live
+  packages, 82 card-declared files had been unreachable.
+- **Carries v1.1.75 as well:** upload corrects an entity type its package
+  contradicts, so a team is no longer published and billed as a single agent, and
+  Codex regains an upload entrypoint through the `hephaestus-upload` skill.
+
 ## 0.9.27 — 2026-07-28
 
-This release binds Agentlas OS v1.1.75 at 95846bb71fcab716ec34a56c84c7cc18bd6f0b12.
+This release binds Agentlas OS v1.1.76 at e3d3a9085d087af504964fb5e11f09652e582161.
 This changelog entry describes source readiness and does not prove a published
 release.
 

@@ -69,6 +69,16 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-29 · v0.9.28 — A credential is where it lives, not a word in its
+  filename** — the publish scan matched `token` and `secret` as filename
+  substrings, so a package was blocked for shipping its own design tokens and the
+  matching read policy then hid those files from the runtime. Detection now keys
+  on a path segment, which also closes a hole where a store at the package root
+  matched nothing at all, and upload widens `allowRead` to the context its agent
+  cards declare as required. This release binds Agentlas OS v1.1.76 at
+  e3d3a9085d087af504964fb5e11f09652e582161.
+  Passing these source gates does not prove a published release: the Releases page stays the authority for what is actually downloadable.
+
 - **2026-07-28 · v0.9.27 — A failed Workforce check stops taking the rest of the
   engine with it** — one capability preflight used to remove the engine from
   runtime resolution entirely, so Build, security scan, publish, context slice,
@@ -79,7 +89,7 @@ authority for which version is actually public, stable, and downloadable.
   security scan report progress instead of running silent for minutes, and a
   cloned repository's `.env` can no longer redirect a child CLI to another
   provider endpoint.
-  This release binds Agentlas OS v1.1.75 at 95846bb71fcab716ec34a56c84c7cc18bd6f0b12.
+  This release binds Agentlas OS v1.1.76 at e3d3a9085d087af504964fb5e11f09652e582161.
   This source note does not prove a Desktop installer or update feed.
 - **2026-07-27 · v0.9.26 — Build and upload stop going silent** — liveness is
   now owned by the host, not the model: a running build heartbeats its elapsed
