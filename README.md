@@ -69,6 +69,16 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-31 · v0.9.31 — One and Build explain the work, then put the result
+  where it belongs** — One names the local agents selected for a task and keeps
+  “selected” separate from evidence that they actually participated. Customer
+  views suppress raw JSON, tool, terminal, and runtime envelopes. Agent Build
+  asks four plain-language questions before starting, registers a completed
+  agent or team automatically, and opens the exact My Agents or organization
+  destination without importing it twice. This release binds Agentlas OS v1.1.84
+  at 0ed5dcd7bd4ac411c42aff64a7fb7ac7d16c6389.
+  Passing these source gates does not prove a published installer: the Releases
+  page stays the authority for what is actually downloadable.
 - **2026-07-30 · v0.9.30 — One and Agent Build become product-complete flows** —
   One hides raw system payloads, distinguishes stopped work from success, and
   rejects meaningless Hub matches. Agent Build asks for the missing product

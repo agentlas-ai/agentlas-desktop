@@ -53,10 +53,29 @@ const INTERNAL_SENTENCE_PATTERNS: RegExp[] = [
   /구조화(?:된)? 결과[^.\n]*(?:않았습니다|검증되지 않아 표시하지 않았습니다)\.?/g,
 ];
 
+/** Runtime diagnostics that are internal only when used as progress details. */
+const INTERNAL_PROGRESS_PATTERNS: RegExp[] = [
+  // Provider-prefixed diagnostics such as:
+  // "codex: Skill descriptions were shortened to fit the 2% skills context budget."
+  /^\s*(?:codex|claude(?:\s+code)?|gemini|grok|ollama|kimi|glm)\s*:/i,
+  // Model/runtime transport envelopes are never progress copy. Keep this in the
+  // progress-only boundary so a final answer can still contain JSON when the
+  // user explicitly asked for JSON.
+  /^\s*[\[{]/,
+  /"(?:type|role|arguments|command|tool|schemaVersion|event|payload)"\s*:/i,
+  /(?:^|\s)(?:tool_call|function_call|exec_command|write_stdin|apply_patch|mcp__)(?:\s|$)/i,
+  /<\|(?:system|assistant|tool|end)[^>]*\|>/i,
+  /^\s*(?:\$|>|#)\s*(?:bash|zsh|sh|python\d*|node|npm|npx|pnpm|yarn|git)\b/im,
+  /\bskills?\s+context\s+budget\b/i,
+  /\bskill descriptions?\s+(?:were\s+)?shortened\b/i,
+  /\bsession hooks?\b/i,
+  /\bruntime[-\s]?session\b/i,
+];
+
 /** True when a progress status is purely internal and should not be shown at all. */
 export function isInternalProgressStatus(status: string | null | undefined): boolean {
   if (!status) return false;
-  return INTERNAL_TOKEN_PATTERNS.some((pattern) => {
+  return [...INTERNAL_TOKEN_PATTERNS, ...INTERNAL_PROGRESS_PATTERNS].some((pattern) => {
     pattern.lastIndex = 0;
     return pattern.test(status);
   });

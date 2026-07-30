@@ -617,6 +617,9 @@ const api: AgentlasIpc = {
     setPreferences: (input) => ipcRenderer.invoke("oneBriefing:setPreferences", input),
     feedback: (input) => ipcRenderer.invoke("oneBriefing:feedback", input),
   },
+  oneRequestIntent: {
+    resolve: (prompt) => ipcRenderer.invoke("oneRequestIntent:resolve", prompt),
+  },
   oneTeamPreflight: {
     prepare: (input) => ipcRenderer.invoke("oneTeamPreflight:prepare", input),
     getForChat: (chatId) => ipcRenderer.invoke("oneTeamPreflight:getForChat", chatId),

@@ -841,19 +841,39 @@ export class InvocationService {
       resultFolder,
       ...(runWorkspaceBinding ? { workspaceBinding: runWorkspaceBinding } : {}),
     };
+    const oneParticipantPresentation = new Map<string, { name: string; role: string }>();
 
     try {
       let oneParticipantVersionBindings: OneParticipantVersionBinding[] | undefined;
       if (runReq.oneMode) {
         const participants = exactOneInvocationParticipants(chat.agentId, preparedOneTeamPreflight);
-        const executionSnapshot = participants ? snapshotOneParticipantExecution(participants) : null;
+        if (!participants) {
+          throw new Error("One participant version bindings could not be derived from the exact execution roster");
+        }
+        const executionSnapshot = snapshotOneParticipantExecution(participants);
         if (!executionSnapshot) {
           throw new Error("One participant version bindings could not be derived from the exact execution roster");
         }
-        oneParticipantVersionBindings = executionSnapshot.bindings;
         // Never persist these bytes. runMcpInvocation consumes this exact
         // in-memory snapshot for owner and local team execution.
         runReq.oneParticipantExecutionSnapshot = executionSnapshot;
+        oneParticipantVersionBindings = executionSnapshot.bindings;
+        const locale = pickLocale(runReq);
+        for (const participant of participants) {
+          const name = (
+            participant.localDisplayName
+            || (locale === "ko" ? participant.name : participant.nameEn)
+            || participant.name
+            || participant.nameEn
+            || participant.slug
+          ).trim();
+          oneParticipantPresentation.set(participant.id, {
+            name,
+            role: participant.id === chat.agentId
+              ? locale === "ko" ? "오케스트레이터" : "Orchestrator"
+              : locale === "ko" ? "전문 에이전트" : "Specialist agent",
+          });
+        }
       }
       let oneTaskKindRef: string | null = null;
       if (runReq.oneMode && runReq.taskIntent === "task") {
@@ -1131,6 +1151,16 @@ export class InvocationService {
             : boundedEvent;
         const attributedAgentId = event.runtimeAgentId ?? event.agentId;
         if (attributedAgentId) record.actualAgentId = attributedAgentId;
+        const participantPresentation = attributedAgentId
+          ? oneParticipantPresentation.get(attributedAgentId)
+          : undefined;
+        if (requestedOneMode && participantPresentation) {
+          event = {
+            ...event,
+            agentName: event.agentName?.trim() || participantPresentation.name,
+            role: event.role?.trim() || participantPresentation.role,
+          };
+        }
 
         const terminalRequestsDecision = event.kind === "final" &&
           (event.text ?? record.partialText).includes("<<agentlas-ask");

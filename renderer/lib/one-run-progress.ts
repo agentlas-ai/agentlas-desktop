@@ -5,7 +5,13 @@ export type OneRunStageId = "understand" | "discover" | "verify" | "synthesize" 
 export type OneRunProgressState = {
   current: OneRunStageId;
   reached: OneRunStageId[];
-  participantNames: string[];
+  participants: OneRunParticipant[];
+};
+
+export type OneRunParticipant = {
+  id: string;
+  name: string;
+  role?: string;
 };
 
 export const ONE_RUN_STAGE_ORDER: OneRunStageId[] = [
@@ -17,7 +23,7 @@ export const ONE_RUN_STAGE_ORDER: OneRunStageId[] = [
 ];
 
 export function initialOneRunProgress(): OneRunProgressState {
-  return { current: "understand", reached: ["understand"], participantNames: [] };
+  return { current: "understand", reached: ["understand"], participants: [] };
 }
 
 function stageRank(stage: OneRunStageId): number {
@@ -48,16 +54,36 @@ function inferredStage(event: McpInvocationEvent): OneRunStageId | null {
 
 export function reduceOneRunProgress(
   state: OneRunProgressState,
-  event: McpInvocationEvent,
+  input: McpInvocationEvent,
 ): OneRunProgressState {
+  // Main can attribute an installed agent through runtimeAgentId even when the
+  // underlying runtime omitted its transient agentId. Normalize that verified
+  // identity before updating the visible participant list.
+  const event = input.runtimeAgentId && !input.agentId
+    ? { ...input, agentId: input.runtimeAgentId }
+    : input;
   const nextStage = inferredStage(event);
   const current = nextStage && stageRank(nextStage) > stageRank(state.current) ? nextStage : state.current;
   const reached = ONE_RUN_STAGE_ORDER.slice(0, stageRank(current) + 1);
-  const participantNames = event.agentName && event.agentId
-    ? [...new Set([...state.participantNames, event.agentName])].slice(0, 5)
-    : state.participantNames;
-  if (current === state.current && participantNames === state.participantNames) return state;
-  return { current, reached, participantNames };
+  let participants = state.participants;
+  if (event.agentName && event.agentId) {
+    const next = {
+      id: event.agentId,
+      name: event.agentName,
+      ...(event.role?.trim() ? { role: event.role.trim() } : {}),
+    };
+    const existingIndex = participants.findIndex((item) => item.id === next.id);
+    if (existingIndex < 0) {
+      participants = [...participants, next].slice(0, 5);
+    } else if (
+      participants[existingIndex].name !== next.name
+      || participants[existingIndex].role !== next.role
+    ) {
+      participants = participants.map((item, index) => index === existingIndex ? next : item);
+    }
+  }
+  if (current === state.current && participants === state.participants) return state;
+  return { current, reached, participants };
 }
 
 export function oneRunStageLabel(stage: OneRunStageId, locale: "ko" | "en"): string {

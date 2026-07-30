@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.31 — 2026-07-31
+
+This release binds Agentlas OS v1.1.84 at
+0ed5dcd7bd4ac411c42aff64a7fb7ac7d16c6389.
+Passing the source gates does not prove a GitHub release or installer; the
+Releases page stays the authority for what is actually downloadable.
+
+- **One says who was selected without pretending they already worked.** The
+  prepared state names the selected local agents and roles; participation is
+  claimed only after an attributed runtime event proves it.
+- **Internal envelopes stay internal.** Raw JSON, tool, terminal, MCP, runtime,
+  and partial-system output is filtered from customer-facing One and Build
+  progress.
+- **Agent Build asks before it acts.** Four plain-language questions establish
+  the outcome, available input, intended use, and authority boundary before the
+  first model turn.
+- **A successful build registers once and opens the exact result.** Completed
+  agents and teams are added automatically, the registration receipt identifies
+  the created entity, and the final action opens My Agents or the organization
+  chart without a duplicate import.
+- **Failures give a next step.** Build errors are classified into actionable,
+  customer-safe recovery guidance instead of exposing an internal engine
+  message.
+
 ## 0.9.30 — 2026-07-30
 
 This release binds Agentlas OS v1.1.83 at

@@ -372,7 +372,10 @@ import {
   listCanonicalTasks,
 } from "./store/tasks";
 import { mutateOneTaskArchive, searchOneHistory } from "./one/search";
-import { prejudgeOneRequestIntent } from "./one/judged-request-intent";
+import {
+  prejudgeOneRequestIntent,
+  resolveOneRequestIntent,
+} from "./one/judged-request-intent";
 import { judge, judgeSubset } from "./system-agents/judgment";
 import { prejudgeOneMemoryIntent } from "./one/memory-detector";
 import { prejudgeCompletionClaims } from "./one/judged-completion-claim";
@@ -3484,6 +3487,13 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("oneBriefing:get", () => getOneBriefingSnapshot());
   ipcMain.handle("oneBriefing:openTask", (_e, input: OpenOneBriefingTaskInput) =>
     resolveOneBriefingTaskNavigation(input));
+  ipcMain.handle("oneRequestIntent:resolve", async (_e, prompt: unknown) => {
+    if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 4_000) {
+      throw new TypeError("Invalid One request-intent prompt");
+    }
+    const resolved = await resolveOneRequestIntent(prompt, { timeoutMs: 4_000 });
+    return { intent: resolved.intent, source: resolved.source };
+  });
   ipcMain.handle("oneTeamPreflight:prepare", (_e, input: PrepareOneTeamPreflightInput) =>
     prepareOneTeamPreflight(input));
   ipcMain.handle("oneTeamPreflight:getForChat", (_e, chatId: string) =>

@@ -28,6 +28,18 @@ import type {
 
 export type Mode = "single" | "team" | "package";
 export type Phase = "idle" | "running" | "mcp-review" | "runtime-approval" | "interview" | "done" | "error";
+export type BuildErrorKind = "workspace-unavailable" | "runtime-unavailable" | "mcp-expired" | "build-failed";
+
+export interface BuildError {
+  kind: BuildErrorKind;
+  message: string;
+}
+
+export interface BuildRegisteredEntity {
+  id: string;
+  kind: "agent" | "team";
+  name: string;
+}
 
 export interface LogLine {
   kind: HephaestusBuildEvent["kind"];
@@ -106,10 +118,14 @@ export interface BuildState {
   errored: boolean;
   /** A stopped/failed run left its workspace intact and can continue in place. */
   recoverable: boolean;
+  /** Renderer-safe, actionable failure copy. Raw IPC/runtime exceptions never become primary UI. */
+  error: BuildError | null;
   result: BuildResult | null;
   runId: string | null;
   /** 빌드 결과가 조직도(라이브러리)에 자동 등록됐는지. */
   registered: boolean;
+  /** Auto-registration receipt used to open the exact saved agent/team without importing twice. */
+  registeredEntity: BuildRegisteredEntity | null;
   /** 인터뷰 중 어시스턴트가 던진 선택형 질문(있으면 옵션 버튼으로 렌더). */
   pendingQuestions: ChatQuestion[];
   /** Set only while phase === "runtime-approval": the escalation awaiting a decision. */
@@ -208,6 +224,28 @@ function mainOwnedBuildBriefQuestions(mode: Mode | "", ko: boolean): ChatQuestio
       ],
     },
     {
+      id: "build-brief-operator",
+      header: ko ? "사용 맥락" : "Operating context",
+      question: ko
+        ? `${subject}를 주로 누가, 어떤 상황에서 사용하나요?`
+        : `Who will usually use ${subject}, and in what situation?`,
+      multiSelect: false,
+      options: [
+        {
+          label: ko ? "내가 필요할 때 직접" : "Me, on demand",
+          description: ko ? "필요할 때 대화로 요청해 한 번씩 실행합니다." : "I will ask for each run in conversation.",
+        },
+        {
+          label: ko ? "팀이 반복 사용" : "A team, repeatedly",
+          description: ko ? "여러 사람이 같은 입력·출력 기준으로 반복 사용합니다." : "Several people reuse the same input and output contract.",
+        },
+        {
+          label: ko ? "정기·자동 실행" : "Scheduled or automatic",
+          description: ko ? "정해진 시각이나 이벤트에 맞춰 반복 실행합니다." : "It runs on a schedule or a defined event.",
+        },
+      ],
+    },
+    {
       id: "build-brief-authority",
       header: ko ? "권한" : "Authority",
       question: ko
@@ -264,9 +302,11 @@ const state: BuildState = {
   reached: 0,
   errored: false,
   recoverable: false,
+  error: null,
   result: null,
   runId: null,
   registered: false,
+  registeredEntity: null,
   pendingQuestions: [],
   pendingAllocation: null,
   awaitingReply: false,
@@ -395,6 +435,73 @@ function pushLog(kind: HephaestusBuildEvent["kind"], text: string) {
   state.log = [...state.log, { kind, text, at: Date.now() }];
 }
 
+function safeBuildProgressText(raw: string, ko: boolean): string | null {
+  const clean = raw
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .trim();
+  if (!clean) return null;
+  const machineEnvelope = (
+    /^[{[]/.test(clean)
+    || /(?:^|\s)(?:tool_call|function_call|exec_command|write_stdin|apply_patch|mcp__|BUILD_COMPLETE:)(?:\s|$)/i.test(clean)
+    || /<\|(?:system|assistant|tool|end)[^>]*\|>/i.test(clean)
+    || /"(?:type|role|content|message|arguments|command|tool|schemaVersion|event|payload|status|delta)"\s*:/i.test(clean)
+    || /^\s*(?:\$|>|#)\s*(?:bash|zsh|sh|python\d*|node|npm|npx|pnpm|yarn|git|mkdir|cp|mv|rm)\b/im
+  );
+  if (machineEnvelope) return null;
+  const oneLine = clean.replace(/\s+/g, " ");
+  if (oneLine.length > 360) {
+    return ko
+      ? "에이전트가 패키지 내용을 정리하고 있습니다. 원시 모델 출력은 사용자 진행 기록에 표시하지 않습니다."
+      : "The agent is preparing the package. Raw model output is hidden from user-facing progress.";
+  }
+  return oneLine;
+}
+
+function classifyBuildError(raw: string, ko: boolean): BuildError {
+  const lower = raw.toLowerCase();
+  if (
+    lower.includes("approved path is no longer available")
+    || lower.includes("filesystem capability is unknown")
+    || lower.includes("valid filesystem capability is required")
+  ) {
+    return {
+      kind: "workspace-unavailable",
+      message: ko
+        ? "선택한 생성 폴더를 더 이상 사용할 수 없습니다. 폴더가 이동·삭제됐거나 권한이 만료됐습니다. 폴더를 다시 선택하면 요청과 설정을 유지한 채 재시도할 수 있습니다."
+        : "The selected output folder is no longer available. It may have moved, been deleted, or lost permission. Choose the folder again to retry with the same request and settings.",
+    };
+  }
+  if (
+    lower.includes("quota")
+    || lower.includes("usage limit")
+    || lower.includes("balance exhausted")
+    || lower.includes("payment required")
+    || /\b402\b/.test(lower)
+  ) {
+    return {
+      kind: "runtime-unavailable",
+      message: ko
+        ? "선택한 AI 엔진의 사용량이 소진되어 빌드를 시작하지 못했습니다. 사용 가능한 다른 엔진을 선택한 뒤 다시 시작하세요."
+        : "The selected AI engine has no usage remaining. Choose another available engine and start again.",
+    };
+  }
+  if (lower.includes("mcp build plan") && (lower.includes("expired") || lower.includes("missing") || lower.includes("no longer matches"))) {
+    return {
+      kind: "mcp-expired",
+      message: ko
+        ? "MCP 연결 검토가 만료되었거나 현재 설정과 달라졌습니다. 새 빌드를 눌러 연결 계획을 다시 확인하세요."
+        : "The MCP review expired or no longer matches the current settings. Start a new build to review the connection plan again.",
+    };
+  }
+  return {
+    kind: "build-failed",
+    message: ko
+      ? "빌드를 계속하지 못했습니다. 만든 파일은 그대로 보존했습니다. 세부 진행 기록을 확인한 뒤 같은 폴더에서 재시도할 수 있습니다."
+      : "The build could not continue. Existing files were preserved. Review the detailed progress, then retry in the same folder.",
+  };
+}
+
 // 워크스페이스 basename이 정크/공유 폴더면 부모 폴더 전체를 회사로 등록하면 안 된다(예: trash).
 const JUNK_WS = /^(trash|tmp|temp|downloads|desktop|documents|untitled|new folder|cache)$/i;
 function wsBasename(p: string): string {
@@ -482,8 +589,13 @@ async function performAutoRegister(workspace: string, readScope: FsReadScope, ge
     announceAgentRosterChange({ action: "upserted", agent: imported, source: "build" });
     if (!isCurrentRegistration(generation, workspace)) return;
     state.registered = true;
+    state.registeredEntity = {
+      id: imported.id,
+      kind: imported.kind === "team" ? "team" : "agent",
+      name: imported.name || imported.slug || (ko ? "에이전트" : "agent"),
+    };
     queueBuildCloudSaveChoice(workspace, readScope, generation);
-    const who = imported?.name || imported?.slug || (ko ? "에이전트" : "agent");
+    const who = state.registeredEntity.name;
     pushLog("done", ko ? `조직도에 추가됨: ${who}` : `Added to org chart: ${who}`);
   } catch (e) {
     if (!isCurrentRegistration(generation, workspace)) return;
@@ -628,6 +740,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
   state.liveness = null;
   state.errored = false;
   state.recoverable = false;
+  state.error = null;
   state.awaitingReply = false;
   state.pendingQuestions = [];
   state.reached = Math.max(state.reached, 2);
@@ -671,15 +784,13 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
     runId = started.runId;
   } catch (error) {
     if (!isCurrentBuild(generation)) return;
+    const classified = classifyBuildError(error instanceof Error ? error.message : String(error), ko);
     state.errored = true;
     state.phase = "error";
     state.runId = null;
-    pushLog(
-      "error",
-      ko
-        ? `빌드를 시작하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`
-        : `Could not start build: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    state.recoverable = classified.kind === "workspace-unavailable";
+    state.error = classified;
+    pushLog("error", classified.message);
     commit();
     return;
   }
@@ -694,7 +805,8 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
     // and must not be appended to the log (one every 2s would bury the run).
     if (e.kind === "heartbeat") {
       state.liveness = {
-        activity: e.text ?? "",
+        activity: safeBuildProgressText(e.text ?? "", ko)
+          ?? (ko ? "에이전트가 패키지를 준비하고 있습니다." : "The agent is preparing the package."),
         elapsedMs: e.elapsedMs ?? 0,
         silentMs: e.silentMs ?? 0,
         at: Date.now(),
@@ -706,23 +818,26 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
 
     if (e.kind === "partial") {
       const full = e.text ?? "";
-      const delta = full.startsWith(lastAcc) ? full.slice(lastAcc.length) : full;
       lastAcc = full;
-      if (delta) {
-        const last = state.log[state.log.length - 1];
-        if (last && last.kind === "partial") {
-          state.log = [
-            ...state.log.slice(0, -1),
-            { kind: "partial", text: (last.text + delta).slice(-4000), at: last.at },
-          ];
-        } else {
-          pushLog("partial", delta);
-        }
-      }
+      // Partial output is a model/runtime transport stream and frequently
+      // contains JSON envelopes, shell fragments, or protocol markers. The
+      // user gets host-owned stage/liveness copy here; the final structured
+      // artifact and security receipt remain the source of truth.
+      state.liveness = {
+        activity: ko ? "에이전트가 결과물을 만들고 있습니다." : "The agent is creating the deliverable.",
+        elapsedMs: state.liveness?.elapsedMs ?? 0,
+        silentMs: 0,
+        at: Date.now(),
+      };
     } else if (e.kind === "stage") {
-      pushLog("stage", e.text ?? e.stage ?? "");
+      pushLog(
+        "stage",
+        safeBuildProgressText(e.text ?? e.stage ?? "", ko)
+          ?? (ko ? "다음 빌드 단계를 진행합니다." : "Continuing to the next build stage."),
+      );
     } else if (e.kind === "log") {
-      pushLog("log", e.text ?? "");
+      const visible = safeBuildProgressText(e.text ?? "", ko);
+      if (visible) pushLog("log", visible);
     } else if (e.kind === "done") {
       state.liveness = null;
       const assistantText = e.text ?? "";
@@ -790,9 +905,11 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
       return;
     } else if (e.kind === "error") {
       state.liveness = null;
+      const classified = classifyBuildError(e.text ?? "", ko);
       state.errored = true;
       state.recoverable = true;
-      pushLog("error", e.text ?? (ko ? "오류" : "Error"));
+      state.error = classified;
+      pushLog("error", classified.message);
       state.phase = "error";
       detach();
     }
@@ -803,12 +920,13 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
     state.errored = true;
     state.recoverable = true;
     state.phase = "error";
-    pushLog(
-      "error",
-      ko
-        ? `빌드 이벤트 연결에 실패했습니다: ${error instanceof Error ? error.message : String(error)}`
-        : `Could not attach to build events: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    state.error = {
+      kind: "build-failed",
+      message: ko
+        ? "빌드 진행 상태 연결이 끊겼습니다. 생성된 파일은 보존했습니다. 같은 폴더에서 이어서 시도하세요."
+        : "The build progress connection was lost. Generated files were preserved. Resume in the same folder.",
+    };
+    pushLog("error", state.error.message);
     detach();
     void api.hephaestus.cancelBuild(runId);
     commit();
@@ -832,6 +950,8 @@ export async function startBuild(activeRuntime?: RuntimeSelection): Promise<void
   state.reached = 0;
   state.result = null;
   state.registered = false;
+  state.registeredEntity = null;
+  state.error = null;
   state.log = [];
   state.mcpPlan = null;
   state.mcpSelectedCandidateIds = [];
@@ -926,9 +1046,22 @@ export async function approveBuildMcpPlan(selectedCandidateIds: string[]): Promi
   const ko = currentLocale() === "ko";
   // The runtime was already settled before this plan was created (startBuild),
   // so nothing may move it between the plan and the run.
-  pushLog("stage", ko ? "MCP 선택 승인 — 딥인터뷰 시작" : "MCP selection approved — starting deep interview");
+  const questions = mainOwnedBuildBriefQuestions(state.mode, ko);
+  state.pendingQuestions = questions;
+  state.awaitingReply = true;
+  state.phase = "interview";
+  state.turn = 1;
+  state.reached = Math.max(state.reached, 2);
+  history.push({ role: "user", text: state.request.trim() });
+  history.push({
+    role: "assistant",
+    text: ko
+      ? "빌드 전 확인: 완료 기준, 입력, 사용 맥락, 권한 경계를 먼저 확인합니다."
+      : "Pre-build check: confirm the outcome, inputs, operating context, and authority boundary first.",
+  });
+  pushLog("stage", ko ? "MCP 선택 승인 — 빌드 요구사항 확인" : "MCP selection approved — confirming the build brief");
+  pushLog("log", ko ? "실제 AI 엔진을 호출하기 전에 질문 묶음에 한 번만 답해 주세요." : "Answer this one question batch before the AI engine is called.");
   commit();
-  await runTurn(state.request.trim(), buildGeneration);
 }
 
 async function previewBuildAllocation(): Promise<BuildAllocationPreview | null> {
@@ -1009,6 +1142,12 @@ export function cancelBuild() {
     state.phase = "error";
     state.errored = true;
     state.recoverable = true;
+    state.error = {
+      kind: "build-failed",
+      message: currentLocale() === "ko"
+        ? "빌드를 중단했습니다. 지금까지 만든 파일은 그대로 보존했습니다."
+        : "The build was stopped. Files created so far were preserved.",
+    };
     pushLog(
       "error",
       currentLocale() === "ko"
@@ -1020,6 +1159,7 @@ export function cancelBuild() {
     state.reached = 0;
     state.errored = false;
     state.recoverable = false;
+    state.error = null;
   }
   state.awaitingReply = false;
   state.pendingQuestions = [];
@@ -1054,6 +1194,7 @@ export async function resumeBuild(): Promise<void> {
   buildGeneration += 1;
   state.errored = false;
   state.recoverable = false;
+  state.error = null;
   pushLog(
     "log",
     currentLocale() === "ko"
@@ -1061,10 +1202,13 @@ export async function resumeBuild(): Promise<void> {
       : "Checking the preserved files first, then resuming from the unfinished step.",
   );
   commit();
+  const neverStarted = history.length === 0;
   await runTurn(
-    currentLocale() === "ko"
-      ? "이전 실행이 중단되었습니다. 현재 작업 폴더의 파일을 먼저 검사하고, 이미 완성된 작업은 덮어쓰지 말고 미완성 단계만 이어서 패키지를 완성하세요. 마지막 줄에 'BUILD_COMPLETE: <패키지 폴더명>'을 출력하세요."
-      : "The previous run was stopped. Inspect the current workspace first, preserve completed work, resume only the unfinished steps, and finish the package. End with 'BUILD_COMPLETE: <package folder name>'.",
+    neverStarted
+      ? state.request.trim()
+      : currentLocale() === "ko"
+        ? "이전 실행이 중단되었습니다. 현재 작업 폴더의 파일을 먼저 검사하고, 이미 완성된 작업은 덮어쓰지 말고 미완성 단계만 이어서 패키지를 완성하세요. 마지막 줄에 'BUILD_COMPLETE: <패키지 폴더명>'을 출력하세요."
+        : "The previous run was stopped. Inspect the current workspace first, preserve completed work, resume only the unfinished steps, and finish the package. End with 'BUILD_COMPLETE: <package folder name>'.",
     buildGeneration,
   );
 }
@@ -1075,10 +1219,12 @@ export function resetBuild() {
   state.reached = 0;
   state.errored = false;
   state.recoverable = false;
+  state.error = null;
   state.log = [];
   state.result = null;
   state.runId = null;
   state.registered = false;
+  state.registeredEntity = null;
   state.awaitingReply = false;
   state.pendingQuestions = [];
   state.turn = 0;

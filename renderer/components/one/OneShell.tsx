@@ -69,8 +69,8 @@ import type {
   OneSurfaceSemanticAction,
 } from "@shared/one-surface";
 import { customerSafeProgressDetail, toCustomerSafeText } from "@shared/one-customer-safe";
-import { classifyOneRequestIntent } from "@shared/one-request-intent";
 import { judgmentUnavailableMessage } from "@shared/judgment-fallback";
+import { classifyOneRequestIntent } from "@shared/one-request-intent";
 import {
   classifyOneRuntimeFailure,
   type OneRuntimeRecoveryCode,
@@ -955,8 +955,9 @@ export function OneShell() {
     setRunProgress((current) => reduceOneRunProgress(current, event));
     if (event.agentId && event.phase !== "synthesize") {
       if (!taskId) void reconcileConversationTask(chatId);
-      // One presents as a single chief-of-staff. Never leak the borrowed agent
-      // name or its raw runtime status (CLI/session) onto the customer surface.
+      // Keep raw runtime/session status out of the customer surface, but retain
+      // the verified display name and role in runProgress. Users need to know
+      // who One actually brought into the work, not only an anonymous count.
       if (event.status) setRunStatus(customerSafeProgressDetail(event.status));
       return;
     }
@@ -1098,7 +1099,15 @@ export function OneShell() {
       unsubscribeRunRef.current?.();
       unsubscribeRunRef.current = null;
     };
-  }, [conversation?.id, appLocale, selected?.chatId, selected?.latestReceipt, selected?.taskId, subscribeRun]);
+  }, [
+    conversation?.id,
+    appLocale,
+    selected?.chatId,
+    selected?.latestReceipt?.runId,
+    selected?.latestReceipt?.status,
+    selected?.taskId,
+    subscribeRun,
+  ]);
 
   useEffect(() => {
     if (!selectedTaskId) {
@@ -1475,6 +1484,11 @@ export function OneShell() {
     && teamPreflight.canConfirmWorkforce
     && ["proposed", "blocked", "deferred"].includes(teamPreflight.status),
   );
+  const preparedLocalTeam = teamPreflight
+    && teamPreflight.canConfirmTeam
+    && ["proposed", "team_reserved", "team_started"].includes(teamPreflight.status)
+    ? teamPreflight.roles
+    : [];
 
   useEffect(() => {
     if (
@@ -1557,6 +1571,13 @@ export function OneShell() {
       setTeamPreflightBusy(true);
       setError(null);
       let preparedAttachments: PreparedOneAttachments | null = null;
+      // Resolve new-chat intent in Main while team preflight runs. A cold model
+      // can miss the fast judgment budget, in which case Main returns its
+      // explicitly labeled conservative fallback instead of silently forcing a
+      // work request into read-only conversation mode.
+      const requestIntentPromise = taskIntent === "conversation" && attachmentSnapshot.length === 0
+        ? api.oneRequestIntent.resolve(value).catch(() => null)
+        : Promise.resolve(null);
       try {
         if (attachmentSnapshot.length > 0) {
           const attachments: OneAttachmentPrepareItem[] = attachmentSnapshot.map((item) => ({
@@ -1574,9 +1595,16 @@ export function OneShell() {
           expectedTaskVersion: taskVersion,
         });
         if (prepared.kind === "not_required") {
+          const mainIntent = await requestIntentPromise;
           const resolvedIntent = preparedAttachments
             ? "task"
-            : taskIntent === "task" || classifyOneRequestIntent(value) === "task"
+            : taskIntent === "task"
+              || mainIntent?.intent === "task"
+              // The renderer-only classifier is intentionally three-valued:
+              // without a judged reader this can only remain "undecided". Keep
+              // the shared safety boundary explicit while Main owns the actual
+              // semantic decision above.
+              || classifyOneRequestIntent(value) === "task"
               ? "task"
               : "conversation";
           await startRun(
@@ -2601,6 +2629,27 @@ export function OneShell() {
                       <OneBrandMark size="thinking" thinking />
                       <strong>{tFor(appLocale, "one.shell.thread.deciding")}</strong>
                       <span>{tFor(appLocale, "one.shell.thread.deciding_body")}</span>
+                      {preparedLocalTeam.length > 1 && (
+                        <div
+                          className={styles.preparedTeam}
+                          aria-label={tFor(appLocale, "one.shell.thread.prepared_team_aria")}
+                        >
+                          <small>
+                            {tFor(appLocale, "one.shell.thread.team_found", {
+                              count: String(preparedLocalTeam.length - 1),
+                            })}
+                          </small>
+                          <div>
+                            {preparedLocalTeam.map((role) => (
+                              <span key={role.roleId}>
+                                <strong>{role.candidate.displayName}</strong>
+                                {role.label.trim().toLocaleLowerCase() !== role.candidate.displayName.trim().toLocaleLowerCase()
+                                  && <small>{role.label}</small>}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                   {messages.length === 0 && !teamPreflightBusy && !teamPreflight && <div className={styles.emptyThread}>{selected ? tFor(appLocale, "one.shell.thread.empty_work") : tFor(appLocale, "one.shell.thread.empty_conversation")}</div>}
@@ -2629,10 +2678,39 @@ export function OneShell() {
                     <OneBrandMark size="thinking" thinking />
                     <strong>{oneRunStageLabel(runProgress.current, appLocale)}</strong>
                     <small>
-                      {runProgress.participantNames.length > 0
-                        ? tFor(appLocale, "one.shell.thread.coordinating", { count: String(runProgress.participantNames.length) })
+                      {runProgress.participants.length > 0
+                        ? `${tFor(appLocale, "one.shell.thread.agents_called", { count: String(runProgress.participants.length) })} · ${runProgress.participants.map((participant) => participant.name).join(" · ")}`
+                        : preparedLocalTeam.length > 1
+                          ? tFor(appLocale, "one.shell.thread.team_ready", { count: String(preparedLocalTeam.length - 1) })
                         : tFor(appLocale, "one.shell.thread.working_directly")}
                     </small>
+                    {(runProgress.participants.length > 0 || preparedLocalTeam.length > 1) && (
+                      <div
+                        className={styles.runParticipants}
+                        data-state={runProgress.participants.length > 0 ? "active" : "prepared"}
+                        aria-label={tFor(
+                          appLocale,
+                          runProgress.participants.length > 0
+                            ? "one.shell.thread.agents_called_aria"
+                            : "one.shell.thread.prepared_team_aria",
+                        )}
+                      >
+                        {runProgress.participants.length > 0
+                          ? runProgress.participants.map((participant) => (
+                              <span key={participant.id}>
+                                <strong>{participant.name}</strong>
+                                {participant.role && <small>{participant.role}</small>}
+                              </span>
+                            ))
+                          : preparedLocalTeam.map((role) => (
+                              <span key={role.roleId}>
+                                <strong>{role.candidate.displayName}</strong>
+                                {role.label.trim().toLocaleLowerCase() !== role.candidate.displayName.trim().toLocaleLowerCase()
+                                  && <small>{role.label}</small>}
+                              </span>
+                            ))}
+                      </div>
+                    )}
                     {runStatus && <span className={styles.runStatusDetail}>{runStatus}</span>}
                     {runStartedAt !== null && (
                       <span className={styles.runElapsed}>{formatRunElapsed(Date.now() - runStartedAt)}</span>

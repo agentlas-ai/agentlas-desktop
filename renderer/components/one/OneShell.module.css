@@ -791,10 +791,47 @@
 }
 
 .runProgress > :first-child {
-  grid-row: 1 / span 3;
+  grid-row: 1 / span 4;
 }
 .runProgress strong { color: #303436; font-size: 12px; font-weight: 690; }
 .runProgress small { color: #7b8185; font-size: 10px; }
+.runParticipants {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 3px;
+}
+
+.runParticipants > span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid #e0e6dc;
+  border-radius: 999px;
+  background: #f4f7f1;
+  color: #526047;
+}
+
+.runParticipants strong {
+  overflow: hidden;
+  max-width: 190px;
+  color: #46533d;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runParticipants small {
+  color: #7b8673;
+  font-size: 9px;
+}
+.runParticipants[data-state="prepared"] > span {
+  border-style: dashed;
+  background: #fafbf8;
+}
 .runStatusDetail { overflow: hidden; color: #9a9fa2; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 
 /* The stage label only moves when the runtime emits an event, and a long
@@ -985,6 +1022,48 @@
 .preparingRequest span {
   color: #7d8387;
   font-size: 12px;
+}
+
+.preparedTeam {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  width: min(100%, 520px);
+  margin-top: 10px;
+}
+
+.preparedTeam > small {
+  color: #596451;
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.preparedTeam > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 7px;
+}
+
+.preparedTeam > div > span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 6px 9px;
+  border: 1px solid #dfe6d9;
+  border-radius: 999px;
+  background: #f5f8f2;
+}
+
+.preparedTeam strong {
+  color: #46533d;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.preparedTeam > div small {
+  color: #7b8673;
+  font-size: 9px;
 }
 
 .composerDock {

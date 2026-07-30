@@ -23,7 +23,7 @@ import { McpBuildInterviewCard } from "@/components/build/McpBuildInterviewCard"
 import { McpAttachmentReceiptCard } from "@/components/build/McpAttachmentReceiptCard";
 import { CloudSaveChoiceDialog } from "@/components/build/CloudSaveChoiceDialog";
 import { OneSuggestionReviewHandoffBanner, type OneReviewSeedApplyResult } from "@/components/one/OneSuggestionReviewHandoff";
-import type { DirListing, FsReadScope, HephaestusStatus, OneSuggestionReviewSeed, RuntimeSelection, RuntimeStatus } from "@/lib/types";
+import type { DirListing, FsReadScope, HephaestusStatus, OneSuggestionReviewSeed, RuntimeSelection, RuntimeStatus, UsageSnapshot } from "@/lib/types";
 import {
   subscribe as buildSubscribe,
   getSnapshot as getBuildSnapshot,
@@ -94,8 +94,25 @@ function engineLabel(r: RuntimeStatus, ko: boolean): string {
   }
 }
 
-function runtimeKey(sel: RuntimeSelection | null): string {
+function runtimeKey(sel: Pick<RuntimeSelection, "kind" | "source"> | null): string {
   return sel ? `${sel.kind}:${sel.source ?? ""}` : "";
+}
+
+const BUILD_BLOCKING_USAGE_ERRORS = new Set(["auth_expired", "credentials_corrupt", "keychain_blocked", "quota_exhausted"]);
+
+function runtimeUsageProvider(runtime: RuntimeStatus, usage: UsageSnapshot | null) {
+  if (!usage) return null;
+  const directIds = new Set([runtime.kind, runtime.source]);
+  const direct = usage.providers.find((provider) => directIds.has(provider.provider));
+  if (direct) return direct;
+  return usage.providers.find((provider) => provider.backend === runtime.backend) ?? null;
+}
+
+function runtimeUsageBlocked(runtime: RuntimeStatus, usage: UsageSnapshot | null): boolean {
+  const provider = runtimeUsageProvider(runtime, usage);
+  if (!provider) return false;
+  if (provider.status === "error" && provider.error && BUILD_BLOCKING_USAGE_ERRORS.has(provider.error)) return true;
+  return provider.status === "ok" && provider.windows.some((window) => window.usedPercent >= 100);
 }
 
 function fmtLogTime(at: number): string {
@@ -165,6 +182,7 @@ export default function BuildPage() {
   const ko = locale === "ko";
   const [status, setStatus] = useState<HephaestusStatus | null>(null);
   const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
+  const [usage, setUsage] = useState<UsageSnapshot | null>(null);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [folderMsg, setFolderMsg] = useState<string | null>(null);
   const [reply, setReply] = useState("");
@@ -176,7 +194,7 @@ export default function BuildPage() {
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
-  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, recoverable, result, registered, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpReceipt, cloudSaveChoice, liveness } = s;
+  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, recoverable, error: buildError, result, registered, registeredEntity, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpReceipt, cloudSaveChoice, liveness } = s;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const applyOneReviewSeed = useCallback((seed: OneSuggestionReviewSeed): OneReviewSeedApplyResult => {
@@ -269,6 +287,7 @@ export default function BuildPage() {
   useEffect(() => {
     ipc()?.hephaestus.status(locale).then(setStatus).catch(() => setStatus(null));
     ipc()?.runtime.detect().then(setRuntimes).catch(() => setRuntimes([]));
+    ipc()?.usage.snapshot().then((snapshot) => setUsage(snapshot ?? null)).catch(() => setUsage(null));
   }, [locale]);
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -353,6 +372,24 @@ export default function BuildPage() {
     }
   };
 
+  const reauthorizeWorkspace = async () => {
+    const api = ipc();
+    if (!api) return;
+    setFolderMsg(ko ? "생성 폴더 권한을 다시 요청하는 중..." : "Requesting output-folder access again...");
+    try {
+      const dir = await api.fs.pickDirectory();
+      if (!dir) {
+        setFolderMsg(ko ? "폴더 다시 선택을 취소했습니다." : "Folder re-selection was cancelled.");
+        return;
+      }
+      setBuildWorkspace(dir);
+      resetBuild();
+      setFolderMsg(ko ? "폴더 권한을 갱신했습니다. 요청과 설정은 유지됐습니다. 다시 시작을 눌러 확인하세요." : "Folder access was refreshed. Your request and settings were kept. Start again when ready.");
+    } catch {
+      setFolderMsg(ko ? "폴더 권한을 갱신하지 못했습니다. Finder에서 폴더가 실제로 있는지 확인하세요." : "Could not refresh folder access. Check that the folder still exists in Finder.");
+    }
+  };
+
   const onSelectRuntime = (key: string) => {
     if (!key) {
       setBuildRuntime(null);
@@ -363,6 +400,12 @@ export default function BuildPage() {
   };
 
   const installToLibrary = async () => {
+    if (registeredEntity?.id) {
+      navigate(registeredEntity.kind === "team"
+        ? `/library/agent-groups?edit=${encodeURIComponent(registeredEntity.id)}`
+        : `/library/agents?agentId=${encodeURIComponent(registeredEntity.id)}`);
+      return;
+    }
     const target = result?.workspace ?? workspace;
     const scope = result?.readScope ?? workspaceGrant?.scope;
     if (!target || !scope) return;
@@ -457,6 +500,10 @@ export default function BuildPage() {
   };
 
   const engineMissing = status ? !status.available : false;
+  const selectedRuntimeStatus = runtime
+    ? runtimes.find((item) => runtimeKey(item) === runtimeKey(runtime)) ?? null
+    : runtimes.find((item) => item.active) ?? runtimes[0] ?? null;
+  const selectedRuntimeBlocked = selectedRuntimeStatus ? runtimeUsageBlocked(selectedRuntimeStatus, usage) : false;
   const running = phase === "running";
   // 대화형 빌드가 진행 중(엔진 실행 중이거나 인터뷰 답변 대기 중)이면 컴포저 입력을 잠근다.
   const busy = phase === "running" || phase === "mcp-review" || phase === "interview";
@@ -466,6 +513,8 @@ export default function BuildPage() {
       ? (ko ? "생성 폴더를 선택하세요." : "Choose an output folder.")
       : engineMissing
         ? (ko ? "Hephaestus 엔진을 사용할 수 없습니다." : "Hephaestus engine is unavailable.")
+        : selectedRuntimeBlocked
+          ? (ko ? "선택된 AI 엔진의 사용량이 소진됐습니다. 위에서 사용 가능한 다른 엔진을 선택하세요." : "The selected AI engine has no usage remaining. Choose another available engine above.")
         : null;
   // 파이프라인은 항상 표시 — idle 에선 딤된 프리뷰로 무엇을 할지 보여준다.
   const showPipeline = true;
@@ -676,10 +725,11 @@ export default function BuildPage() {
                 >
                   <option value="">{ko ? "자동 선택 (활성 엔진)" : "Auto (active engine)"}</option>
                   {runtimes.map((r) => (
-                    <option key={`${r.kind}:${r.source}`} value={`${r.kind}:${r.source}`}>
+                    <option key={`${r.kind}:${r.source}`} value={`${r.kind}:${r.source}`} disabled={runtimeUsageBlocked(r, usage)}>
                       {engineLabel(r, ko)}
                       {r.model ? ` · ${r.model}` : ""}
                       {r.active ? (ko ? " · 활성" : " · active") : ""}
+                      {runtimeUsageBlocked(r, usage) ? (ko ? " · 사용량 소진" : " · usage exhausted") : ""}
                     </option>
                   ))}
                 </select>
@@ -696,7 +746,7 @@ export default function BuildPage() {
                   <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "MCP 검토 취소" : "Cancel MCP review"}</button>
                 ) : phase === "interview" ? (
                   <button onClick={resetBuild} className="build-secondary-button titlebar-nodrag">{ko ? "인터뷰 취소" : "Cancel interview"}</button>
-                ) : phase === "error" && recoverable ? (
+                ) : phase === "error" && recoverable && buildError?.kind !== "workspace-unavailable" ? (
                   <>
                     <button onClick={() => void resumeBuild()} className="build-primary-button titlebar-nodrag">
                       {ko ? "보존된 파일에서 이어서 빌드" : "Resume from saved files"}
@@ -809,6 +859,25 @@ export default function BuildPage() {
             </section>
           )}
 
+          {phase === "error" && buildError && (
+            <section className="build-card" role="alert">
+              <div className="build-card-head">
+                <strong>{ko ? "빌드가 멈춘 이유" : "Why the build stopped"}</strong>
+              </div>
+              <p className="build-card-note">{buildError.message}</p>
+              <div className="build-card-actions">
+                {buildError.kind === "workspace-unavailable" && (
+                  <button className="build-primary-button titlebar-nodrag" onClick={() => void reauthorizeWorkspace()}>
+                    {ko ? "생성 폴더 다시 선택" : "Choose output folder again"}
+                  </button>
+                )}
+                <button className="build-secondary-button titlebar-nodrag" onClick={resetBuild}>
+                  {ko ? "요청 유지하고 다시 준비" : "Keep request and prepare again"}
+                </button>
+              </div>
+            </section>
+          )}
+
           {mcpReceipt && phase !== "mcp-review" && (
             <McpAttachmentReceiptCard receipt={mcpReceipt} ko={ko} />
           )}
@@ -912,7 +981,11 @@ export default function BuildPage() {
                       ? ko ? "패키지 생성됨 · 검증 필요" : "Package created · verification required"
                       : ko ? "패키지 준비됨" : "Package ready"}
                 </span>
-                <button disabled={resultDeliveryBlocked} onClick={installToLibrary} className="build-primary-button titlebar-nodrag">{ko ? "조직도에서 열기" : "Open in org chart"}</button>
+                <button disabled={resultDeliveryBlocked} onClick={installToLibrary} className="build-primary-button titlebar-nodrag">
+                  {registeredEntity?.kind === "agent"
+                    ? ko ? "내 에이전트에서 열기" : "Open in My Agents"
+                    : ko ? "조직도에서 열기" : "Open org chart"}
+                </button>
               </div>
               <div className="build-upload-choice">
                 <div className="build-upload-choice-label">{ko ? "공개 배포는 별도 선택" : "Public distribution is a separate choice"}</div>

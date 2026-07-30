@@ -5985,6 +5985,13 @@ export interface AgentlasIpc {
       feedback: OneBriefingFeedback;
     }) => Promise<OneBriefingSnapshot>;
   };
+  /** Main-owned semantic decision used before a new One conversation starts. */
+  oneRequestIntent: {
+    resolve: (prompt: string) => Promise<{
+      intent: "conversation" | "task";
+      source: "llm" | "fallback";
+    }>;
+  };
   /** Read-only adaptive-team proposal plus explicit, exact resolution. */
   oneTeamPreflight: {
     prepare: (input: PrepareOneTeamPreflightInput) => Promise<PrepareOneTeamPreflightResult>;
