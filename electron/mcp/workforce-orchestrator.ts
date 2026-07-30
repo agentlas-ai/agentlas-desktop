@@ -100,6 +100,24 @@ export const WORKFORCE_CORE_COVERAGE_GAP_CODES = [
   "gap:requirement-vocabulary-unsupported:skill",
   "gap:requirement-vocabulary-unsupported:knowledge",
   "gap:requirement-vocabulary-unsupported:tool",
+  // Core declares its full gap vocabulary to Hub/Cloud and forwards whatever
+  // they emit, so this list must stay a superset of Core's — an unknown code
+  // here throws away the ENTIRE candidate set (requireCoreCoverageGapCodes),
+  // which reads as "the source is down" when the source answered fine. These
+  // seven had already joined Core's vocabulary (community 2026-07-28; artifact/
+  // runtime/language/modality with the rank-not-exclude repair; contract-
+  // invalid reporting) and this list silently fell behind. `authority` joined
+  // on 2026-07-30 when its always-hard gate was measured inverted (it excluded
+  // every relevant candidate; prepare-time permission pins are the real
+  // enforcement).
+  "gap:requirement-vocabulary-unsupported:community",
+  "gap:candidate-contract-invalid",
+  "gap:requirement-vocabulary-unsupported:consumed-artifact",
+  "gap:requirement-vocabulary-unsupported:produced-artifact",
+  "gap:requirement-vocabulary-unsupported:runtime",
+  "gap:requirement-vocabulary-unsupported:language",
+  "gap:requirement-vocabulary-unsupported:modality",
+  "gap:requirement-vocabulary-unsupported:authority",
 ] as const;
 const CORE_COVERAGE_GAP_CODES = new Set<string>(WORKFORCE_CORE_COVERAGE_GAP_CODES);
 const HUB_BOUND_LOCAL_PATH_RE = /(?:file:\/\/|(?:^|[\s"'`()\[\]{}=:,;])(?:~[/\\]|\\\\[^\\/\s]+[\\/][^\\/\s]+)|(?<![A-Za-z0-9$])\/(?:Users|home|root|Volumes|private|tmp|var\/folders|workspace|mnt)(?:\/[^/\s"'`<>]+)+|(?<![A-Za-z0-9])[A-Za-z]:[/\\](?=\S))/i;
