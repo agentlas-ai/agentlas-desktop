@@ -69,6 +69,12 @@ type SoloWaterfallItem = {
   toolName?: string;
 };
 
+function timelineHasFailureSignal(timeline: NetTimelineItem[]): boolean {
+  return timeline.some((item) =>
+    /실패|failed|cancel|취소|blocked|차단|interrupted|중단/i.test(item.text),
+  );
+}
+
 export function AgentNetworkPanel({
   firm,
   org,
@@ -129,6 +135,8 @@ export function AgentNetworkPanel({
 
   const anyActive = Object.values(liveAgents).some((a) => a.active);
   const activeCount = Object.values(liveAgents).filter((a) => a.active).length;
+  const hasHistoricalActivity = !busy && !anyActive && timeline.length > 0;
+  const hasFailureSignal = timelineHasFailureSignal(timeline);
   // 진짜 멀티에이전트(팀/조직) 컨텍스트일 때만 "오케스트레이션/병렬" 프레이밍을 쓴다.
   const hasRoster = Boolean(roster && (roster.ceo || roster.divisions.length > 0));
   const activeTitle =
@@ -236,7 +244,11 @@ export function AgentNetworkPanel({
                     ? (locale === "ko" ? "웹 확인됨" : "Web checked")
                     : busy || anyActive
                       ? (locale === "ko" ? "실행 중" : "Running")
-                      : (locale === "ko" ? "대기 중" : "Idle")}
+                      : hasFailureSignal
+                        ? (locale === "ko" ? "검토 필요" : "Needs review")
+                        : hasHistoricalActivity
+                          ? (locale === "ko" ? "완료" : "Completed")
+                          : (locale === "ko" ? "대기 중" : "Idle")}
                 </span>
               </div>
             </div>
@@ -351,6 +363,16 @@ function SoloAgentSummary({
   const roster = soloAgentRoster(liveAgents, agentName);
   const primary = roster.find((entry) => entry.primary) ?? roster[0];
   const additional = roster.filter((entry) => entry !== primary);
+  const isRunning = Boolean(primary?.active || busy);
+  const hasHistory = timeline.length > 0;
+  const hasFailureSignal = timelineHasFailureSignal(timeline);
+  const stateWord = isRunning
+    ? (locale === "ko" ? "실행 중" : "Running")
+    : hasFailureSignal
+      ? (locale === "ko" ? "검토 필요" : "Needs review")
+      : hasHistory
+        ? (locale === "ko" ? "완료" : "Completed")
+        : (locale === "ko" ? "대기" : "Idle");
   // Tool/work cards collapse so the panel foregrounds the agent + live status,
   // not a stack of bash cards. Default open while running (live feedback),
   // collapsed once idle so the history stays a compact list.
@@ -363,8 +385,8 @@ function SoloAgentSummary({
             <span aria-hidden style={soloDotStyle(primary.active || busy)} />
             <span style={soloPrimaryNameStyle}>{primary.name}</span>
             {primary.role && <span style={soloPrimaryRoleStyle}>{primary.role}</span>}
-            <span style={{ marginLeft: "auto", ...soloAgentStateWordStyle(primary.active || busy) }}>
-              {primary.active || busy ? (locale === "ko" ? "실행 중" : "Running") : (locale === "ko" ? "대기" : "Idle")}
+            <span style={{ marginLeft: "auto", ...soloAgentStateWordStyle(isRunning) }}>
+              {stateWord}
             </span>
           </div>
           {additional.length > 0 && (
@@ -381,9 +403,9 @@ function SoloAgentSummary({
         </div>
       )}
       <div style={soloLineStyle}>
-        <span aria-hidden style={soloDotStyle(busy)} />
-        <span style={soloStateStyle(busy)}>
-          {busy ? (locale === "ko" ? "실행 중" : "Running") : (locale === "ko" ? "대기 중" : "Idle")}
+        <span aria-hidden style={soloDotStyle(isRunning)} />
+        <span style={soloStateStyle(isRunning)}>
+          {stateWord}
         </span>
         <span style={soloDetailStyle}>{latest}</span>
       </div>
@@ -567,13 +589,19 @@ function OrchestrationTree({
     ? []
     : Object.entries(liveAgents).map(([key, a]) => ({ key, name: a.name, role: a.role, tier: a.tier ?? 1 }));
   const isEmpty = !hasRoster && flatNodes.length === 0 && !busy;
+  const hasHistoricalActivity = !busy && activeCount === 0 && timeline.length > 0;
+  const hasFailureSignal = timelineHasFailureSignal(timeline);
 
   const statusWord =
     activeCount > 0
       ? ko ? "실행 중" : "running"
       : busy
         ? ko ? "위임 중…" : "delegating…"
-        : ko ? "대기" : "idle";
+        : hasFailureSignal
+          ? ko ? "검토 필요" : "needs review"
+          : hasHistoricalActivity
+            ? ko ? "완료" : "completed"
+            : ko ? "대기" : "idle";
 
   return (
     <section style={orchWrapStyle}>

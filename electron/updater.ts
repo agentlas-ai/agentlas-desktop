@@ -35,6 +35,7 @@ let controller: DesktopUpdaterController | null = null;
 let fallbackState: UpdaterState = { status: "idle" };
 let startupRecovery: { targetVersion?: string; backupPath?: string } | null = null;
 const stateListeners = new Set<(state: UpdaterState) => void>();
+const OFFICIAL_DESKTOP_INSTALL_URL = "https://agentlas.cloud/desktop";
 
 function updateConfigPath(): string {
   return path.join(process.resourcesPath, "app-update.yml");
@@ -356,8 +357,25 @@ export async function quitAndInstall(): Promise<UpdaterActionResult> {
 }
 
 export async function openManualDownload(): Promise<UpdaterActionResult> {
-  if (!controller) return { accepted: false, state: fallbackState };
-  return controller.openManualDownload();
+  const state = controller?.getState() ?? fallbackState;
+  // The official installer is a safe escape hatch when native replacement
+  // itself could not start or apply. It replaces app bytes while preserving
+  // userData. Compatibility/backup/schema failures stay fail-closed because
+  // replacing the bundle cannot repair those boundaries.
+  const canUseOfficialInstaller = state.status === "manual-required" && (
+    state.code === "install-source-untrusted"
+    || state.code === "install-not-applied"
+    || state.code === "install-start-failed"
+  );
+  if (!canUseOfficialInstaller) {
+    return { accepted: false, state };
+  }
+  try {
+    await shell.openExternal(OFFICIAL_DESKTOP_INSTALL_URL);
+    return { accepted: true, state };
+  } catch {
+    return { accepted: false, state };
+  }
 }
 
 export async function revealRecoveryBackup(): Promise<UpdaterActionResult> {

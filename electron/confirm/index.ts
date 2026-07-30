@@ -11,6 +11,9 @@ import { getDb } from "../store/db";
 import { recordRunEvent, tryRecordRunEvent } from "../store/run-events";
 import { ensureCanonicalTaskForChat } from "../store/tasks";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
+import { getAgentById } from "../mcp/registry";
+import { getFirm } from "../store/firms";
+import { getAgentGroup } from "../store/agent-groups";
 
 const OPEN = "<<agentlas-ask>>";
 const CLOSE = "<</agentlas-ask>>";
@@ -254,6 +257,11 @@ export function listPendingConfirmations(): PendingConfirmation[] {
     // 안 쌓였어도 대기 목록/배지에 다시 올리지 않는다.
     if (listCommittedQuestionAnswers(c.id).some((r) => r.sourceMessageId === last.id)) continue;
     const snoozedUntil = latestDecisionSnooze(c.id, last.id);
+    const firm = c.firmId ? getFirm(c.firmId) : null;
+    const group = c.agentGroupId ? getAgentGroup(c.agentGroupId) : null;
+    const agent = getAgentById(c.agentId);
+    const requesterLabel = firm?.name || group?.name || agent?.name || c.title;
+    const requesterKind = firm ? "firm" : group ? "agent-group" : "agent";
     out.push({
       chatId: c.id,
       sourceMessageId: last.id,
@@ -265,6 +273,8 @@ export function listPendingConfirmations(): PendingConfirmation[] {
       multiSelect: q.multiSelect,
       agentId: c.agentId,
       firmId: c.firmId,
+      requesterLabel,
+      requesterKind,
       createdAt: last.createdAt,
       ...(snoozedUntil && Date.parse(snoozedUntil) > Date.now() ? { snoozedUntil } : {}),
     });

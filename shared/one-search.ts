@@ -32,7 +32,7 @@ export interface OneSearchHitV1 {
   chatId: string;
   title: string;
   detail: string | null;
-  status: "open" | "running" | "waiting-decision" | "partial" | "completed" | "failed" | "archived" | "conversation";
+  status: "open" | "running" | "waiting-decision" | "partial" | "completed" | "failed" | "cancelled" | "archived" | "conversation";
   updatedAt: string;
   archived: boolean;
   matchedBy: OneSearchMatchKind[];

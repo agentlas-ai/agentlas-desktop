@@ -97,12 +97,14 @@ export default function LibraryMcpsPage() {
   const refresh = useCallback(async () => {
     const api = ipc();
     if (!api) return;
-    const [c, i] = await Promise.all([
+    const [c, i, s] = await Promise.all([
       api.mcpTools.listCatalog(),
       api.mcpTools.listInstalled(),
+      api.mcpTools.status(),
     ]);
     setCatalog(c);
     setInstalled(i);
+    setStatuses(Object.fromEntries(s.map((status) => [status.id, status])));
   }, []);
 
   useEffect(() => {

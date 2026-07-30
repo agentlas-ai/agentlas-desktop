@@ -95,6 +95,7 @@ import type {
   InstalledAgent,
 } from "../../shared/types";
 import { adaptLegacySurfaceToOneV1 } from "../../shared/one-surface";
+import { applyOneFriendlyFollowups } from "../../shared/one-friendly-followups";
 import {
   buildApprovedOneProfileContext,
   selectApprovedOneOperatingPrinciples,
@@ -506,12 +507,15 @@ export function attachOneSurfaceProjection(
   try {
     return {
       ...event,
-      oneSurface: adaptLegacySurfaceToOneV1({
-        manifest: event.surface,
-        surfaceId: event.surfaceId ?? `surface:${task.id}`,
-        taskId: task.id,
-        syncedAt,
-      }),
+      oneSurface: applyOneFriendlyFollowups(
+        adaptLegacySurfaceToOneV1({
+          manifest: event.surface,
+          surfaceId: event.surfaceId ?? `surface:${task.id}`,
+          taskId: task.id,
+          syncedAt,
+        }),
+        event.oneFriendlyFollowups,
+      ),
     };
   } catch {
     // The raw legacy event remains available to Work. One and Mobile receive no
@@ -532,7 +536,7 @@ export function terminalTaskStatus(input: {
     // or explicit user acceptance; it must never be inferred from final text.
     return input.requestsDecision ? "waiting-decision" : "partial";
   }
-  if (input.cancelled) return input.hasPartialText ? "partial" : "open";
+  if (input.cancelled) return "cancelled";
   return "failed";
 }
 
@@ -1152,6 +1156,11 @@ export class InvocationService {
         // consume this same closed semantic manifest; neither platform gets to
         // reinterpret the raw payload independently.
         event = attachOneSurfaceProjection(event, runReq.chatId);
+        if (event.oneFriendlyFollowups) {
+          // The plan is an untrusted model proposal used only by the Main
+          // projection boundary. One and Mobile receive semantic actions only.
+          event = { ...event, oneFriendlyFollowups: undefined };
+        }
         if (event.kind === "surface" && event.oneSurface) {
           const durableSurfaceRecorded = tryRecordDurableOneSurfaceResult({
             runId,
@@ -1409,11 +1418,7 @@ export class InvocationService {
           terminalObserved = true;
           canonicalTask = trySetTaskStatus(
             runReq.chatId,
-            controller.signal.aborted
-              ? record.partialText.trim()
-                ? "partial"
-                : "open"
-              : "failed",
+            controller.signal.aborted ? "cancelled" : "failed",
             taskMaterialized,
             invocationOrigin,
           );
@@ -1458,11 +1463,7 @@ export class InvocationService {
         if (!terminalObserved) {
           canonicalTask = trySetTaskStatus(
             runReq.chatId,
-            controller.signal.aborted
-              ? record.partialText.trim()
-                ? "partial"
-                : "open"
-              : "failed",
+            controller.signal.aborted ? "cancelled" : "failed",
             taskMaterialized,
             invocationOrigin,
           );

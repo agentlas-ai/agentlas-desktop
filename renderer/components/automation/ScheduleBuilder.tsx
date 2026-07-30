@@ -92,6 +92,8 @@ export function ScheduleBuilder({
   onChange: (v: ScheduleBuilderValue) => void;
 }) {
   const { t, locale } = useT();
+  const initialValueRef = useRef(value);
+  const [hydrated, setHydrated] = useState(!value);
   const [tz, setTz] = useState("UTC");
   const [mode, setMode] = useState<Mode>("preset");
   const [preset, setPreset] = useState<Preset>("daily");
@@ -108,6 +110,7 @@ export function ScheduleBuilder({
 
   // 초기 tz 기본값(host).
   useEffect(() => {
+    if (initialValueRef.current) return;
     const api = ipc();
     if (!api) {
       setTz(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
@@ -118,7 +121,10 @@ export function ScheduleBuilder({
 
   // 기존 spec에서 UI 상태 하이드레이트(편집 모드).
   useEffect(() => {
-    if (!value) return;
+    if (!value) {
+      setHydrated(true);
+      return;
+    }
     if (value.kind === "manual") setMode("manual");
     else if (value.kind === "once") {
       setMode("once");
@@ -155,6 +161,7 @@ export function ScheduleBuilder({
         setCronExpr(value.expr);
       }
     }
+    setHydrated(true);
     // 최초 1회만 하이드레이트.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -215,14 +222,21 @@ export function ScheduleBuilder({
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const lastEmitted = useRef<string>("");
+  const suppressHydratedValue = useRef(Boolean(value));
   useEffect(() => {
+    if (!hydrated) return;
     const token = toLegacyToken(mode, preset, time, dow, day, spec, locale === "ko" ? "ko" : "en");
     const serialized = JSON.stringify({ spec, token });
+    if (suppressHydratedValue.current) {
+      suppressHydratedValue.current = false;
+      lastEmitted.current = serialized;
+      return;
+    }
     if (serialized === lastEmitted.current) return;
     lastEmitted.current = serialized;
     onChangeRef.current({ spec, legacyToken: token });
     // locale은 토큰 문구(describeSchedule)에 들어가므로 의존성에 포함한다.
-  }, [spec, mode, preset, time, dow, day, locale]);
+  }, [hydrated, spec, mode, preset, time, dow, day, locale]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>

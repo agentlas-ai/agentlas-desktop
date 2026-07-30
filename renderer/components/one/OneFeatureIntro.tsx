@@ -55,6 +55,7 @@ export function OneFeatureIntro({
   const [open, setOpen] = useState(false);
   const [index, setIndex] = useState(0);
   const [resolving, setResolving] = useState(false);
+  const [mobileConfirmationOpen, setMobileConfirmationOpen] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousReplayRef = useRef(replayToken);
 
@@ -82,11 +83,13 @@ export function OneFeatureIntro({
     if (replayToken !== previousReplayRef.current) {
       previousReplayRef.current = replayToken;
       setIndex(0);
+      setMobileConfirmationOpen(false);
       setOpen(true);
       return;
     }
     if (eligible && needsAcknowledgement) {
       setIndex(0);
+      setMobileConfirmationOpen(false);
       setOpen(true);
     }
   }, [eligible, needsAcknowledgement, replayToken]);
@@ -148,8 +151,18 @@ export function OneFeatureIntro({
         tabIndex={-1}
       >
         <header className={styles.top}>
-          <span className={styles.brand}>Agentlas</span>
-          <span className={styles.count} aria-label={`${index + 1} / ${slides.length}`}>{index + 1} / {slides.length}</span>
+          <span className={styles.brand}>
+            Agentlas · {tFor(locale, "one.feat.guide.name")}
+          </span>
+          <span
+            className={styles.count}
+            aria-label={tFor(locale, "one.feat.guide.progress", {
+              current: index + 1,
+              total: slides.length,
+            })}
+          >
+            {index + 1} / {slides.length}
+          </span>
         </header>
         <div className={styles.body}>
           <div className={styles.copy}>
@@ -161,6 +174,37 @@ export function OneFeatureIntro({
             <IntroPreview kind={slide.preview} locale={locale} />
           </div>
         </div>
+        {last && mobileConfirmationOpen && onConnectMobile && (
+          <section
+            className={styles.mobileConfirmation}
+            aria-labelledby="one-intro-mobile-confirm-title"
+          >
+            <div>
+              <strong id="one-intro-mobile-confirm-title">
+                {tFor(locale, "one.feat.mobile_confirm.title")}
+              </strong>
+              <p>{tFor(locale, "one.feat.mobile_confirm.body")}</p>
+            </div>
+            <div className={styles.footerGroup}>
+              <button
+                type="button"
+                className={styles.button}
+                onClick={() => setMobileConfirmationOpen(false)}
+                disabled={resolving}
+              >
+                {tFor(locale, "one.feat.mobile_confirm.cancel")}
+              </button>
+              <button
+                type="button"
+                className={styles.buttonPrimary}
+                onClick={() => void finish("opened_one", onConnectMobile)}
+                disabled={resolving}
+              >
+                {tFor(locale, "one.feat.mobile_confirm.continue")}
+              </button>
+            </div>
+          </section>
+        )}
         <footer className={styles.footer}>
           <button type="button" className={styles.button} onClick={close} disabled={resolving}>{tFor(locale, "one.feat.action.skip")}</button>
           <div className={styles.footerGroup}>
@@ -170,21 +214,28 @@ export function OneFeatureIntro({
                 {index === 0 ? tFor(locale, "one.feat.action.next_work") : tFor(locale, "one.feat.action.next")}
               </button>
             ) : (
-              <button
-                type="button"
-                className={styles.buttonPrimary}
-                disabled={resolving}
-                onClick={() => void finish(
-                  "opened_one",
-                  briefingAvailable || !onConnectMobile ? onOpenOne : onConnectMobile,
+              <>
+                {onConnectMobile && (
+                  <button
+                    type="button"
+                    className={styles.button}
+                    disabled={resolving}
+                    onClick={() => setMobileConfirmationOpen(true)}
+                  >
+                    {tFor(locale, "one.feat.action.review_mobile")}
+                  </button>
                 )}
-              >
-                {briefingAvailable
-                  ? tFor(locale, "one.feat.action.open_briefing")
-                  : onConnectMobile
-                    ? tFor(locale, "one.feat.action.connect_mobile")
-                    : tFor(locale, "one.feat.action.open_one")}
-              </button>
+                <button
+                  type="button"
+                  className={styles.buttonPrimary}
+                  disabled={resolving}
+                  onClick={() => void finish("opened_one", onOpenOne)}
+                >
+                  {briefingAvailable
+                    ? tFor(locale, "one.feat.action.finish_briefing")
+                    : tFor(locale, "one.feat.action.finish")}
+                </button>
+              </>
             )}
           </div>
         </footer>

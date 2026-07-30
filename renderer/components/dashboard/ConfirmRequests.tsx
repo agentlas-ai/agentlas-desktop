@@ -103,6 +103,26 @@ export function ConfirmRequests() {
                 {it.optionCount > 0 ? ` · ${it.optionCount}${ko ? "개 선택지" : " options"}` : ""}
                 {it.createdAt ? ` · ${stallLabel(it.createdAt, ko)}` : ""}
               </div>
+              <div style={{ display: "grid", gap: 2, marginTop: 6, fontSize: 11 }}>
+                <span>
+                  {ko ? "요청자" : "Requester"}: {it.requesterLabel}
+                  {" · "}
+                  {ko ? "권한 상태: 아직 승인되지 않음" : "Authority: not authorized yet"}
+                </span>
+                <span>
+                  {ko ? "예정 작업" : "Intended action"}: {it.header || it.question}
+                </span>
+                <span>
+                  {ko
+                    ? "데이터 범위와 크레딧 영향은 요청에 명시되지 않았습니다. 선택 전에 채팅에서 확인하세요."
+                    : "Data scope and credit impact were not declared. Review the chat before choosing."}
+                </span>
+                {it.createdAt && (
+                  <time dateTime={it.createdAt}>
+                    {ko ? "요청 시각" : "Requested"}: {new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(new Date(it.createdAt))}
+                  </time>
+                )}
+              </div>
             </div>
             <button
               onClick={() => navigate(`/chat?id=${it.chatId}`)}

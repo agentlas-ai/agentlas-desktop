@@ -24,6 +24,7 @@ const ACTION_INTENTS = new Set<OneSurfaceSemanticActionIntent>([
   "open_artifact", "open_sources", "open_receipt", "retry_failed_step", "cancel_task",
   "resume_task", "save_result", "change_conditions", "view_details", "edit_asset",
   "disable_asset", "use_once", "delete_asset", "reopen_intro", "connect_desktop",
+  "try_result", "open_asset", "refine_result", "reuse_result", "prepare_share",
 ]);
 const EXECUTABLE_OR_TRANSPORT_RE = /(?:<|javascript\s*:|data\s*:|\b(?:https?|file):\/\/|dangerouslySetInnerHTML|\bon(?:error|load|click)\s*=)/i;
 const POSIX_ABSOLUTE_PATH_RE = /(^|[\s("'=:\[{])\/[^\s,;:"'`<>|}\]]+/m;
@@ -69,11 +70,15 @@ function isArtifact(value: unknown): boolean {
 }
 
 function isAction(value: unknown): boolean {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["actionId", "intent", "label", "targetRef", "enabled", "blockedReason"])) return false;
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    "actionId", "intent", "label", "description", "instruction", "targetRef", "enabled", "blockedReason",
+  ])) return false;
   return isSafeId(value.actionId)
     && typeof value.intent === "string"
     && ACTION_INTENTS.has(value.intent as OneSurfaceSemanticActionIntent)
     && typeof value.label === "string"
+    && (value.description == null || (typeof value.description === "string" && value.description.length <= 220))
+    && (value.instruction == null || (typeof value.instruction === "string" && value.instruction.length <= 800))
     && (value.targetRef == null || isSafeId(value.targetRef))
     && typeof value.enabled === "boolean"
     && (value.blockedReason == null || typeof value.blockedReason === "string");

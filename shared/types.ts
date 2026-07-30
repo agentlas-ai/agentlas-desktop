@@ -8,6 +8,7 @@ import type {
 import type { OberonTitleSpec } from "./oberon-titles";
 import type { OneSurfaceManifestV1 } from "./one-surface";
 import type { DurableOneSurfaceResult } from "./one-surface-durable";
+import type { OneFriendlyFollowupPlanV1 } from "./one-friendly-followups";
 import type {
   OneOperatingPrincipleCreateInput,
   OneOperatingPrincipleDeleteInput,
@@ -1355,6 +1356,7 @@ export type CanonicalTaskStatus =
   | "partial"
   | "completed"
   | "failed"
+  | "cancelled"
   | "archived";
 
 export interface CanonicalTaskParticipant {
@@ -3652,6 +3654,8 @@ export interface McpInvocationEvent {
   surface?: AgentlasSurfaceManifest;
   /** Main-authoritative, non-executable semantic projection consumed unchanged by One and Mobile. */
   oneSurface?: OneSurfaceManifestV1;
+  /** Model suggestion only; Main validates and converts it to bounded semantic actions. */
+  oneFriendlyFollowups?: OneFriendlyFollowupPlanV1;
   /** 도구 호출/결과 이벤트 — Claude Code식 접기/펴기 블록용 (이름 + 인자 JSON + 결과) */
   tool?: { name: string; args?: string; result?: string; id?: string; isError?: boolean };
   /** kind:"mcp-key-request" 전용 — 렌더러 McpKeyRequestSheet가 소비한다. 값 없음(키 이름만). */
@@ -3902,6 +3906,9 @@ export interface PendingConfirmation {
   multiSelect: boolean;
   agentId: string;
   firmId: string | null;
+  /** 사용자에게 보여 줄 실제 요청 주체 이름. ID만 노출하지 않는다. */
+  requesterLabel: string;
+  requesterKind: "agent" | "firm" | "agent-group";
   /** 질문 메시지 시각(ISO) */
   createdAt: string;
   /** One에서 사용자가 미룬 시각. 질문은 Work의 정본 승인 목록에서는 계속 pending이다. */
@@ -5511,7 +5518,7 @@ export interface AgentlasIpc {
     check: () => Promise<UpdaterState>;
     /** "재시작 업데이트" 클릭. 백업·권한·버전 가드를 모두 통과해야 종료/설치를 시작한다. */
     install: () => Promise<UpdaterActionResult>;
-    /** 구 renderer ABI 호환용 no-op. 업데이트 복구는 앱 안에서만 수행한다. */
+    /** macOS 네이티브 교체가 시작·적용되지 않았거나 서명 계보가 다를 때 공식 설치 페이지를 연다. */
     openManualDownload: () => Promise<UpdaterActionResult>;
     /** 연속성 검증 실패 때 main이 보관한 복구본을 Finder/Explorer에서 연다. */
     revealRecoveryBackup: () => Promise<UpdaterActionResult>;

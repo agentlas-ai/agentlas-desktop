@@ -27,10 +27,11 @@ export function composeQuestionReply(
     const picks = selected[q.id] ?? [];
     const note = (notes[q.id] ?? "").trim();
     if (!picks.length && !note) continue;
-    const combined = [...picks, ...(note ? [note] : [])];
+    const canonicalPicks = !q.multiSelect && note ? [] : picks;
+    const combined = [...canonicalPicks, ...(note ? [note] : [])];
     perQuestion.push({ questionId: q.id, answers: combined });
     const lines = [`${ko ? "질문" : "Question"}: ${q.question}`];
-    if (picks.length) lines.push(`${ko ? "선택" : "Selected"}: ${picks.join(", ")}`);
+    if (canonicalPicks.length) lines.push(`${ko ? "선택" : "Selected"}: ${canonicalPicks.join(", ")}`);
     if (note) lines.push(`${ko ? "답변" : "Answer"}: ${note}`);
     chunks.push(lines.join("\n"));
   }
@@ -100,6 +101,9 @@ export function ChatQuestionSheet({
   };
 
   const pick = (label: string) => {
+    if (!q.multiSelect) {
+      setNotes((prev) => ({ ...prev, [q.id]: "" }));
+    }
     setSelected((prev) => {
       const cur = prev[q.id] ?? [];
       if (q.multiSelect) {
@@ -190,7 +194,13 @@ export function ChatQuestionSheet({
             <input
               ref={otherInputRef}
               value={notes[q.id] ?? ""}
-              onChange={(e) => setNotes((prev) => ({ ...prev, [q.id]: e.target.value }))}
+              onChange={(e) => {
+                const nextValue = e.target.value;
+                setNotes((prev) => ({ ...prev, [q.id]: nextValue }));
+                if (!q.multiSelect && nextValue.trim()) {
+                  setSelected((prev) => ({ ...prev, [q.id]: [] }));
+                }
+              }}
               placeholder={ko ? "여기에 답변을 입력하세요" : "Type your answer here"}
               className="chat-qsheet-other-input"
             />

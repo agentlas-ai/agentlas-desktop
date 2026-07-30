@@ -4,7 +4,7 @@
 import type { CSSProperties, ReactNode } from "react";
 import { Handle, Position } from "@xyflow/react";
 
-export const NODE_WIDTH = 200;
+export const NODE_WIDTH = 216;
 
 /** 노드 라이브 실행 상태별 테두리/글로우 색(설계 §5 P2 캔버스 오버레이). */
 export const RUN_STATE_COLOR: Record<string, string> = {
@@ -55,17 +55,21 @@ export function NodeCard(props: {
   const isRunning = props.runState === "running";
   return (
     <div
+      className="automation-flow-node-card"
+      data-node-type={props.type}
+      data-selected={props.selected ? "true" : "false"}
+      data-running={isRunning ? "true" : "false"}
       style={{
         width: NODE_WIDTH,
         background: "var(--paper)",
         border: `${runColor && props.runState !== "pending" ? 1.6 : 1}px solid ${borderColor}`,
-        borderRadius: "var(--radius-md)",
+        borderRadius: 12,
         boxShadow: isRunning
           ? `0 0 0 3px color-mix(in srgb, ${runColor} 30%, transparent)`
           : props.selected
             ? "var(--neu-raised)"
             : "none",
-        padding: "10px 12px",
+        padding: "14px 14px 13px",
         fontFamily: "var(--font-body)",
         position: "relative",
         opacity: props.runState === "skipped" ? 0.55 : 1,
@@ -75,6 +79,12 @@ export function NodeCard(props: {
       {props.hasIn !== false ? (
         <Handle type="target" position={Position.Left} style={handleStyle} isConnectable={connectable} />
       ) : null}
+      <span
+        className="automation-flow-node-type"
+        style={{ color: accent }}
+      >
+        {props.type}
+      </span>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span
           style={{
@@ -84,7 +94,7 @@ export function NodeCard(props: {
             width: 22,
             height: 22,
             borderRadius: "var(--radius-sm)",
-            background: "var(--fill-1)",
+            background: "color-mix(in oklch, var(--fill-1) 76%, var(--paper))",
             color: accent,
             flexShrink: 0,
           }}
@@ -94,8 +104,8 @@ export function NodeCard(props: {
         <div style={{ minWidth: 0, flex: 1 }}>
           <div
             style={{
-              fontSize: 12.5,
-              fontWeight: 600,
+              fontSize: 13,
+              fontWeight: 700,
               color: "var(--ink)",
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -104,23 +114,12 @@ export function NodeCard(props: {
           >
             {props.title}
           </div>
-          <div
-            style={{
-              fontSize: 9.5,
-              fontFamily: "var(--font-mono)",
-              letterSpacing: 0.5,
-              textTransform: "uppercase",
-              color: "var(--muted-deep)",
-            }}
-          >
-            {props.type}
-          </div>
         </div>
       </div>
       {props.subtitle ? (
         <div
           style={{
-            marginTop: 8,
+            marginTop: 10,
             fontSize: 11,
             color: "var(--ink-soft)",
             lineHeight: 1.4,
@@ -177,8 +176,8 @@ function branchLabelStyle(top: string, color: string): CSSProperties {
 }
 
 const handleStyle = {
-  width: 7,
-  height: 7,
+  width: 8,
+  height: 8,
   background: "var(--muted-deep)",
   border: "1px solid var(--paper)",
 } as const;

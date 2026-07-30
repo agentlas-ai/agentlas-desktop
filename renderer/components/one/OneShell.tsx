@@ -64,10 +64,17 @@ import type {
   OneActivationMobileResolution,
   OneActivationState,
 } from "@shared/one-activation";
-import type { OneSurfaceManifestV1 } from "@shared/one-surface";
+import type {
+  OneSurfaceManifestV1,
+  OneSurfaceSemanticAction,
+} from "@shared/one-surface";
 import { customerSafeProgressDetail, toCustomerSafeText } from "@shared/one-customer-safe";
 import { classifyOneRequestIntent } from "@shared/one-request-intent";
 import { judgmentUnavailableMessage } from "@shared/judgment-fallback";
+import {
+  classifyOneRuntimeFailure,
+  type OneRuntimeRecoveryCode,
+} from "@shared/one-runtime-recovery";
 import { useJudgedOneDecision } from "@/lib/one-decision-judged";
 import type { OneRecurrenceSelectionV1 } from "@shared/one-recurrence";
 import { shouldPresentOneWeeklyReflection } from "@shared/one-weekly-reflection";
@@ -158,6 +165,12 @@ type ArmedOneMemoryUseOnce = {
   targetKey: string;
 };
 
+type OneRuntimeRecoveryState = {
+  code: OneRuntimeRecoveryCode;
+  chatId: string;
+  taskId: string | null;
+};
+
 type PendingTeamPrompt = {
   proposalId: string;
   text: string;
@@ -222,6 +235,64 @@ function isResultContinuationMessage(message: UiMessage): boolean {
   return message.role === "system" && /^(?:완료한|검토 중인) 이전 일에서 이어갑니다|^Continuing from the (?:completed|result-ready) work/.test(message.text);
 }
 
+function readableJsonLabel(value: string): string {
+  const spaced = value
+    .replace(/[_-]+/g, " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .trim();
+  return spaced ? spaced[0].toUpperCase() + spaced.slice(1) : value;
+}
+
+function readableJsonScalar(value: unknown): string {
+  if (value === null) return "—";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  return String(value);
+}
+
+function readableJsonValue(value: unknown, depth = 0): string[] {
+  if (depth > 4) return [];
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => {
+      if (item === null || typeof item !== "object") return [`- ${readableJsonScalar(item)}`];
+      const object = item as Record<string, unknown>;
+      const title = ["title", "name", "place", "label", "claim"]
+        .map((key) => object[key])
+        .find((candidate) => typeof candidate === "string" && candidate.trim());
+      return [
+        `### ${typeof title === "string" ? title : `Item ${index + 1}`}`,
+        ...readableJsonValue(object, depth + 1),
+      ];
+    });
+  }
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>).flatMap(([key, item]) => {
+      const label = readableJsonLabel(key);
+      if (item === null || typeof item !== "object") return [`- **${label}:** ${readableJsonScalar(item)}`];
+      const nested = readableJsonValue(item, depth + 1);
+      return nested.length > 0 ? [`## ${label}`, ...nested] : [];
+    });
+  }
+  return [readableJsonScalar(value)];
+}
+
+/**
+ * A model can return a useful result as a raw JSON envelope when Surface
+ * projection is unavailable. One keeps the information but translates the
+ * machine envelope into ordinary headings and bullets.
+ */
+function readableOneJson(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) return null;
+  try {
+    const value: unknown = JSON.parse(trimmed);
+    if (!value || typeof value !== "object") return null;
+    const lines = readableJsonValue(value);
+    return lines.length > 0 ? lines.join("\n") : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * One owns its decision/question UI. Model-authored ask fences are an internal
  * transport protocol and must never be rendered beside the resulting card.
@@ -242,6 +313,11 @@ function visibleOneMessageText(message: UiMessage): string {
   const banded = withoutFence
     .replace(/^\s*(?:\*\*)?(?:사용\s*(?:에이전트|스킬)|Agents used|Skills used)(?:\*\*)?\s*:\s*[^\n]*(?:\n[ \t]*)*/gim, "")
     .trim();
+  const readableJson = readableOneJson(banded);
+  if (readableJson) {
+    return toCustomerSafeText(readableJson, detectOneTextLocale(readableJson) === "ko" ? "ko" : "en");
+  }
+  if (message.streaming && /^[{[]/.test(banded)) return "";
   // Final customer-safe pass: a leaked result-schema line ("structured result",
   // "safe One Surface", a CLI/session token) must never reach the reader even
   // when it arrives through a model or legacy synthesis path.
@@ -477,6 +553,7 @@ export function OneShell() {
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [runtimeRecovery, setRuntimeRecovery] = useState<OneRuntimeRecoveryState | null>(null);
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchHits, setSearchHits] = useState<OneSearchHitV1[]>([]);
@@ -512,6 +589,8 @@ export function OneShell() {
   const searchSheetRef = useRef<HTMLElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const composerInputRef = useRef<HTMLTextAreaElement>(null);
+  const railRevealButtonRef = useRef<HTMLButtonElement>(null);
+  const composerComposingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const resultTopRef = useRef<HTMLDivElement>(null);
   const attachmentDragDepthRef = useRef(0);
@@ -902,6 +981,7 @@ export function OneShell() {
       const text = event.text ?? streamTextRef.current;
       setMessages((current) => upsertLiveMessage(current, text, false));
       setBusy(false);
+      setRuntimeRecovery(null);
       setRunStatus("");
       runIdRef.current = null;
       streamTextRef.current = "";
@@ -912,6 +992,22 @@ export function OneShell() {
       return;
     }
     if (event.kind === "error") {
+      const recoveryCode = event.error?.code === "one-runtime-auth-required"
+        || event.error?.code === "one-runtime-unavailable"
+        ? event.error.code
+        : classifyOneRuntimeFailure(event.error?.message ?? "");
+      if (recoveryCode) {
+        setRuntimeRecovery({ code: recoveryCode, chatId, taskId });
+        setBusy(false);
+        setRunStatus("");
+        setError(null);
+        runIdRef.current = null;
+        streamTextRef.current = "";
+        unsubscribeRunRef.current?.();
+        unsubscribeRunRef.current = null;
+        void settleRun(chatId, taskId);
+        return;
+      }
       const message = toCustomerSafeText(event.error?.message ?? "", appLocale)
         || tFor(appLocale, "one.shell.run.stopped_before_completion");
       setMessages((current) => [...current.filter((item) => item.id !== "one-live-response"), { id: uid(), role: "system", text: message }]);
@@ -1050,8 +1146,14 @@ export function OneShell() {
             : [{ id: `team-request:${proposal.proposalId}`, role: "user", text: visiblePrompt }]);
         }
       })
-      .catch((cause) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+      .catch(() => {
+        if (!cancelled) {
+          setTeamPreflight(null);
+          setPendingTeamPrompt(null);
+          setError(appLocale === "ko"
+            ? "이 작업의 팀 준비 상태를 확인할 수 없어 실행을 멈췄어요. 다른 작업은 안전하며, 이 작업은 새 대화로 다시 시작해 주세요."
+            : "One could not verify this work's team preparation, so execution is paused. Other work is safe; start this work again in a new conversation.");
+        }
       });
     return () => { cancelled = true; };
   }, [activeThreadChatId, activeThreadPromptFallback]);
@@ -1123,6 +1225,7 @@ export function OneShell() {
     setBusy(true);
     setSurface(null);
     setError(null);
+    setRuntimeRecovery(null);
     setRunStatus(taskIntent === "conversation"
       ? tFor(runLocale, "one.shell.run.preparing_response")
       : tFor(runLocale, "one.shell.run.preparing_team"));
@@ -1187,6 +1290,16 @@ export function OneShell() {
       setBusy(false);
       setRunStatus("");
       const message = cause instanceof Error ? cause.message : String(cause);
+      const recoveryCode = classifyOneRuntimeFailure(cause);
+      if (recoveryCode) {
+        setRuntimeRecovery({ code: recoveryCode, chatId, taskId });
+        setError(null);
+        if (options?.attachments) {
+          await api.oneAttachments.discard({ ref: options.attachments.ref }).catch(() => ({ discarded: false }));
+        }
+        await refreshAll();
+        return;
+      }
       setMessages((current) => [...current.filter((item) => item.id !== "one-live-response"), { id: uid(), role: "system", text: message }]);
       setError(message);
       if (options?.attachments) {
@@ -1203,6 +1316,50 @@ export function OneShell() {
       }
     }
   }, [armedOneMemoryUseOnce, normalizedLocale, refreshAll, scrollToLatest, subscribeRun]);
+
+  const openRuntimeRecovery = useCallback(async () => {
+    const api = ipc();
+    if (!api || !runtimeRecovery) return;
+    if (runtimeRecovery.code === "one-runtime-unavailable") {
+      router.push("/settings");
+      return;
+    }
+    const runtimes = await api.runtime.detect(true).catch(() => []);
+    const supported = runtimes.find((runtime) => (
+      runtime.active
+      && ["claude-code", "codex", "gemini", "kimi", "grok"].includes(runtime.kind)
+    ));
+    if (!supported || !["claude-code", "codex", "gemini", "kimi", "grok"].includes(supported.kind)) {
+      router.push("/settings");
+      return;
+    }
+    const result = await api.runtime.openCliLogin(
+      supported.kind as "claude-code" | "codex" | "gemini" | "kimi" | "grok",
+    );
+    if (!result.ok) setError(result.message);
+  }, [router, runtimeRecovery]);
+
+  const resumeAfterRuntimeRecovery = useCallback(async () => {
+    const api = ipc();
+    if (!api || !runtimeRecovery || busy) return;
+    const runtimes = await api.runtime.detect(true).catch(() => []);
+    if (!runtimes.some((runtime) => runtime.active)) {
+      router.push("/settings");
+      return;
+    }
+    const recovery = runtimeRecovery;
+    setRuntimeRecovery(null);
+    await startRun(
+      recovery.chatId,
+      recovery.taskId,
+      recovery.taskId === selected?.taskId ? selected.canonicalVersion : null,
+      appLocale === "ko"
+        ? "LLM 연결이 복구되었습니다. 직전 작업의 완료되지 않은 단계부터 이어서 끝까지 실행해줘."
+        : "The LLM connection is restored. Continue from the unfinished step of the previous task and complete it.",
+      recovery.taskId ? "task" : "conversation",
+      { displayUserMessage: false },
+    );
+  }, [appLocale, busy, router, runtimeRecovery, selected, startRun]);
 
   const autoStartTeamPreflight = useCallback(async (
     proposal: OneTeamPreflightProposal,
@@ -1524,15 +1681,21 @@ export function OneShell() {
     );
   }, [appLocale, busy, conversation?.id, selected, startRun]);
 
-  const answerConfirmation = useCallback(async (confirmation: PendingConfirmation, label: string) => {
+  const answerConfirmation = useCallback(async (
+    confirmation: PendingConfirmation,
+    label: string,
+    shouldStart = true,
+  ) => {
     const api = ipc();
     const task = projections.find((item) => item.chatId === confirmation.chatId);
-    if (!api || !task || busy || !task.truth.mayStartExecution) return;
+    if (!api || !task || busy || (shouldStart && !task.truth.mayStartExecution)) return;
     try {
       await api.confirm.commitAnswer({ chatId: confirmation.chatId, reply: label });
       setCommittedAnswers(await api.confirm.committedAnswers(confirmation.chatId).catch(() => []));
       setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
-      await startRun(confirmation.chatId, task.taskId, task.canonicalVersion, label, "task");
+      if (shouldStart) {
+        await startRun(confirmation.chatId, task.taskId, task.canonicalVersion, label, "task");
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -1787,6 +1950,37 @@ export function OneShell() {
     }
     router.push(workHref);
   }, [router, selected, workHref]);
+  const handleOneSemanticAction = useCallback((action: OneSurfaceSemanticAction) => {
+    if (!action.enabled || busy) return;
+    if (action.intent === "open_work") {
+      void openWork();
+      return;
+    }
+    if (action.intent === "open_asset") {
+      const kind = action.targetRef?.split(":", 1)[0];
+      if (kind === "agent") router.push("/library/agents");
+      else if (kind === "team") router.push("/library/agent-groups");
+      else if (kind === "automation") router.push("/automation");
+      else if (kind === "project") void openWork();
+      else if (kind === "site") router.push("/site");
+      else void openWork();
+      return;
+    }
+    if (!["try_result", "refine_result", "reuse_result", "prepare_share"].includes(action.intent)) {
+      void openWork();
+      return;
+    }
+    const chatId = selected?.chatId ?? conversation?.id;
+    if (!chatId || !action.instruction) return;
+    void startRun(
+      chatId,
+      selected?.taskId ?? null,
+      selected?.canonicalVersion ?? null,
+      action.instruction,
+      selected ? "task" : "conversation",
+      { displayUserMessage: false },
+    );
+  }, [busy, conversation?.id, openWork, router, selected, startRun]);
   const openActivationWork = useCallback(async () => {
     const api = ipc();
     let current = oneActivationState;
@@ -2186,14 +2380,24 @@ export function OneShell() {
     <div className={styles.shell}>
       <div className={styles.body} data-rail-collapsed={railCollapsed ? "true" : "false"}>
         {railOpen && <button type="button" className={styles.railScrim} aria-label={tFor(appLocale, "one.shell.rail.close_history_aria")} onClick={() => setRailOpen(false)} />}
-        <aside className={styles.rail} data-open={railOpen ? "true" : "false"} aria-label={tFor(appLocale, "one.shell.rail.aria")}>
+        <aside
+          className={styles.rail}
+          data-open={railOpen ? "true" : "false"}
+          aria-label={tFor(appLocale, "one.shell.rail.aria")}
+          aria-hidden={railCollapsed && !railOpen ? "true" : undefined}
+          inert={railCollapsed && !railOpen ? true : undefined}
+        >
           <div className={`${styles.railProduct} titlebar-nodrag`}>
             <ProductModeMenu current="one" darkText locale={appLocale} />
             <button
               type="button"
               className={styles.railCollapseButton}
               aria-label={tFor(appLocale, "one.shell.rail.collapse_aria")}
-              onClick={() => { setRailCollapsed(true); setRailOpen(false); }}
+              onClick={() => {
+                setRailCollapsed(true);
+                setRailOpen(false);
+                window.requestAnimationFrame(() => railRevealButtonRef.current?.focus());
+              }}
             >‹</button>
           </div>
           <div className={styles.railPrimaryActions}>
@@ -2228,7 +2432,12 @@ export function OneShell() {
               </button>
             </nav>}
             <nav className={styles.railUtilities} aria-label={tFor(appLocale, "one.shell.rail.settings_aria")}>
-              <button type="button" onClick={() => { setMemoryOpen(false); setProfileOpen(true); }}>{oneDisplayName}</button>
+              <button type="button" onClick={() => router.push("/one")}>
+                {appLocale === "ko" ? "One 홈" : "One home"}
+              </button>
+              <button type="button" onClick={() => { setMemoryOpen(false); setProfileOpen(true); }}>
+                {appLocale === "ko" ? `프로필 · ${oneDisplayName}` : `Profile · ${oneDisplayName}`}
+              </button>
               <button type="button" onClick={() => { setProfileOpen(false); setMemoryOpen(true); }}>
                 {tFor(appLocale, "one.shell.rail.memory")}
                 {oneMemory && oneMemory.candidates.some((candidate) => candidate.status === "pending") && <span className={styles.railCount}>{oneMemory.candidates.filter((candidate) => candidate.status === "pending").length}</span>}
@@ -2249,12 +2458,35 @@ export function OneShell() {
         <main className={styles.workspace}>
           <div className={`${styles.windowBar} titlebar-drag`}>
             <button
+              ref={railRevealButtonRef}
               type="button"
               className={`${styles.sidebarRevealButton} titlebar-nodrag`}
               aria-label={tFor(appLocale, "one.shell.workspace.open_sidebar_aria")}
               onClick={() => { setRailCollapsed(false); setRailOpen(true); }}
             >☰</button>
           </div>
+          {runtimeRecovery && (
+            <section className={styles.runtimeRecovery} role="alert">
+              <div>
+                <strong>{tFor(appLocale, runtimeRecovery.code === "one-runtime-auth-required"
+                  ? "one.shell.runtime_recovery.auth_title"
+                  : "one.shell.runtime_recovery.connection_title")}</strong>
+                <p>{tFor(appLocale, runtimeRecovery.code === "one-runtime-auth-required"
+                  ? "one.shell.runtime_recovery.auth_body"
+                  : "one.shell.runtime_recovery.connection_body")}</p>
+              </div>
+              <div className={styles.runtimeRecoveryActions}>
+                <button type="button" className={styles.ghostButton} onClick={() => void openRuntimeRecovery()}>
+                  {tFor(appLocale, runtimeRecovery.code === "one-runtime-auth-required"
+                    ? "one.shell.runtime_recovery.open_login"
+                    : "one.shell.runtime_recovery.open_settings")}
+                </button>
+                <button type="button" className={styles.primaryButton} onClick={() => void resumeAfterRuntimeRecovery()}>
+                  {tFor(appLocale, "one.shell.runtime_recovery.resume")}
+                </button>
+              </div>
+            </section>
+          )}
           {error && <div className={styles.errorBanner} role="alert">{error}</div>}
           <div ref={scrollRef} className={styles.scroll}>
             <OneActivation
@@ -2429,6 +2661,7 @@ export function OneShell() {
                       receipt={receipt}
                       locale={appLocale}
                       onOpenWork={() => void openWork()}
+                      onSemanticAction={handleOneSemanticAction}
                       onRetryUnfinished={retryUnfinished}
                       onAcceptResult={() => void acceptResult()}
                       acceptingResult={acceptingResult}
@@ -2547,7 +2780,16 @@ export function OneShell() {
                 rows={1}
                 value={composer}
                 onChange={(event) => setComposer(event.target.value)}
-                onKeyDown={(event) => handleComposerKey(event, busy ? stopRun : () => void submit(composer))}
+                onCompositionStart={() => { composerComposingRef.current = true; }}
+                onCompositionEnd={() => {
+                  window.setTimeout(() => { composerComposingRef.current = false; }, 0);
+                }}
+                onBlur={() => { composerComposingRef.current = false; }}
+                onKeyDown={(event) => handleComposerKey(
+                  event,
+                  busy ? stopRun : () => void submit(composer),
+                  composerComposingRef.current,
+                )}
                 placeholder={oneActivationState?.status === "active" && oneActivationState.concern.status === "pending"
                   ? tFor(appLocale, "one.shell.composer.placeholder_activation")
                   : selected
@@ -2742,6 +2984,7 @@ function SearchHitRow({ hit, active, locale, mutationBusy, onOpenTask, onOpenCon
     partial: "one.shell.searchhit.status.partial",
     completed: "one.shell.searchhit.status.completed",
     failed: "one.shell.searchhit.status.failed",
+    cancelled: "one.shell.searchhit.status.cancelled",
     archived: "one.shell.searchhit.status.archived",
     conversation: "one.shell.searchhit.status.conversation",
   } as const;
@@ -2795,7 +3038,7 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
   taskId: string;
   locale: "ko" | "en";
   disabled: boolean;
-  onAnswer: (confirmation: PendingConfirmation, label: string) => void;
+  onAnswer: (confirmation: PendingConfirmation, label: string, shouldStart?: boolean) => void;
   onOpenWork: () => void;
   onSnooze: (confirmation: PendingConfirmation) => void;
 }) {
@@ -2912,7 +3155,7 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
             {option.label}
           </button>
         ))}
-        <button type="button" className={styles.decisionRejectButton} disabled={disabled} onClick={() => onAnswer(confirmation, decision.controls.reject.reply)}>{rejectLabel}</button>
+        <button type="button" className={styles.decisionRejectButton} disabled={disabled} onClick={() => onAnswer(confirmation, decision.controls.reject.reply, false)}>{rejectLabel}</button>
         <button type="button" className={styles.decisionButton} onClick={onOpenWork}>{tFor(locale, "one.shell.decision.change_scope")}</button>
         <button type="button" className={styles.decisionButton} disabled={disabled} onClick={() => onSnooze(confirmation)}>{tFor(locale, "one.shell.decision.remind_24h")}</button>
       </div>
@@ -2942,8 +3185,12 @@ function ResolvedDecisionReceipt({ receipt, locale }: { receipt: CommittedQuesti
   );
 }
 
-function handleComposerKey(event: ReactKeyboardEvent<HTMLTextAreaElement>, action: () => void) {
-  if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+function handleComposerKey(
+  event: ReactKeyboardEvent<HTMLTextAreaElement>,
+  action: () => void,
+  composing = false,
+) {
+  if (composing || event.nativeEvent.isComposing || event.keyCode === 229) return;
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     action();

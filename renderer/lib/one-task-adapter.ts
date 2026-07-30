@@ -198,6 +198,7 @@ function statusForCanonicalTask(task: CanonicalTask): OneProjectionStatus {
   if (task.status === "waiting-decision") return "decision_required";
   if (task.status === "completed") return "completed";
   if (task.status === "failed") return "failed";
+  if (task.status === "cancelled") return "stopped";
   if (task.status === "archived") return "stopped";
   return "waiting";
 }
@@ -220,6 +221,8 @@ function canonicalProjection(
           ? "completed"
           : task.status === "failed"
             ? "failed"
+            : task.status === "cancelled"
+              ? "stopped"
             : task.status === "archived"
               ? "stopped"
               : "waiting";

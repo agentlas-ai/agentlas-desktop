@@ -38,6 +38,7 @@ import {
 } from "../../shared/one-team-preflight";
 
 export const ONE_TEAM_PREFLIGHT_META_KEY = "one.team-preflight.v1";
+export const ONE_TEAM_PREFLIGHT_REPAIR_META_KEY = "one.team-preflight.repair.v1";
 
 const STORE_VERSION = 1 as const;
 const MAX_PROPOSALS = 100;
@@ -582,7 +583,45 @@ function isInternalProposal(value: unknown): value is InternalOneTeamPreflight {
     && typeof reservation.reservedAt === "string" && Number.isFinite(Date.parse(reservation.reservedAt));
 }
 
-function parseStore(raw: string): OneTeamPreflightStoreV1 {
+const LEGACY_PROPOSAL_KEYS_WITHOUT_WORKFORCE_CONFIRMATION = [
+  "binding",
+  "canConfirmTeam",
+  "complexityReasons",
+  "contractVersion",
+  "cost",
+  "createdAt",
+  "expiresAt",
+  "goalSummary",
+  "limitation",
+  "proposalId",
+  "reservedRun",
+  "roles",
+  "selectionBoundary",
+  "startedRun",
+  "status",
+  "updatedAt",
+  "version",
+].join(",");
+
+function migrateKnownLegacyProposal(value: unknown): { proposal: unknown; migrated: boolean } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { proposal: value, migrated: false };
+  const proposal = value as Record<string, unknown>;
+  if (Object.keys(proposal).sort().join(",") !== LEGACY_PROPOSAL_KEYS_WITHOUT_WORKFORCE_CONFIRMATION) {
+    return { proposal: value, migrated: false };
+  }
+  if (!["existing_exact_installed_roster_only", "external_selection_requires_work_review"].includes(String(proposal.selectionBoundary))) {
+    return { proposal: value, migrated: false };
+  }
+  const migrated = {
+    ...proposal,
+    canConfirmWorkforce: proposal.selectionBoundary === "external_selection_requires_work_review",
+  };
+  return isOneTeamPreflightProposal(migrated)
+    ? { proposal: migrated, migrated: true }
+    : { proposal: value, migrated: false };
+}
+
+function parseStore(raw: string): { state: OneTeamPreflightStoreV1; migratedProposalCount: number } {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -597,16 +636,51 @@ function parseStore(raw: string): OneTeamPreflightStoreV1 {
     || Number(item.version) < 1
     || !Array.isArray(item.proposals)
     || item.proposals.length > MAX_PROPOSALS
-    || !item.proposals.every(isInternalProposal)
   ) throw new Error("One team preflight store is corrupt; it was not overwritten");
-  return value as OneTeamPreflightStoreV1;
+
+  let migratedProposalCount = 0;
+  const proposals = item.proposals.map((record) => {
+    if (!record || typeof record !== "object" || Array.isArray(record)) return record;
+    const internal = record as Record<string, unknown>;
+    if (Object.keys(internal).sort().join(",") !== "main,proposal,reservation") return record;
+    const migration = migrateKnownLegacyProposal(internal.proposal);
+    if (!migration.migrated) return record;
+    migratedProposalCount += 1;
+    return { ...internal, proposal: migration.proposal };
+  });
+  if (
+    !proposals.every(isInternalProposal)
+  ) throw new Error("One team preflight store is corrupt; it was not overwritten");
+  return {
+    state: { ...item, proposals } as unknown as OneTeamPreflightStoreV1,
+    migratedProposalCount,
+  };
 }
 
 function readStore(db = getDb()): { state: OneTeamPreflightStoreV1; raw: string | null } {
   const row = db.prepare("SELECT value FROM meta WHERE key = ? LIMIT 1").get(ONE_TEAM_PREFLIGHT_META_KEY) as { value: string } | undefined;
-  return row
-    ? { state: parseStore(row.value), raw: row.value }
-    : { state: { schemaVersion: STORE_VERSION, version: 1, proposals: [] }, raw: null };
+  if (!row) return { state: { schemaVersion: STORE_VERSION, version: 1, proposals: [] }, raw: null };
+  const parsed = parseStore(row.value);
+  if (parsed.migratedProposalCount < 1) return { state: parsed.state, raw: row.value };
+
+  const migratedRaw = JSON.stringify(parsed.state);
+  const persistKnownMigration = () => {
+    const result = db.prepare("UPDATE meta SET value = ? WHERE key = ? AND value = ?")
+      .run(migratedRaw, ONE_TEAM_PREFLIGHT_META_KEY, row.value);
+    if (result.changes !== 1) throw new Error("One team preflight store changed concurrently");
+    db.prepare(
+      `INSERT INTO meta (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).run(ONE_TEAM_PREFLIGHT_REPAIR_META_KEY, JSON.stringify({
+      repair: "add-derived-can-confirm-workforce",
+      repairedAt: new Date().toISOString(),
+      migratedProposalCount: parsed.migratedProposalCount,
+      schemaVersion: STORE_VERSION,
+    }));
+  };
+  if (db.inTransaction) persistKnownMigration();
+  else db.transaction(persistKnownMigration).immediate();
+  return { state: parsed.state, raw: migratedRaw };
 }
 
 function persistStore(state: OneTeamPreflightStoreV1, raw: string | null, db = getDb()): void {

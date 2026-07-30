@@ -5,9 +5,9 @@
   --soft: #f5f8f6;
   --teal: #0f7b65;
   --teal-dark: #075b4c;
-  position: fixed;
+  position: absolute;
   inset: 0;
-  z-index: 240;
+  z-index: 20;
   min-width: 320px;
   overflow-x: hidden;
   overflow-y: auto;

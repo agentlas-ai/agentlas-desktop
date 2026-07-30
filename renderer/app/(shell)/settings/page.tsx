@@ -1861,8 +1861,14 @@ function UpdatePanel() {
     else await api.updater.check();
   }
 
+  async function openOfficialInstaller() {
+    await ipc()?.updater.openManualDownload();
+  }
+
   const statusText = (() => {
     if (state.code === "install-source-untrusted") return t("settings.update.repair_required");
+    if (state.code === "install-not-applied") return t("settings.update.install_not_applied");
+    if (state.code === "install-start-failed") return t("settings.update.install_start_failed");
     if (state.code === "continuity-backup-failed") return t("settings.update.safety_backup_failed");
     if (state.code === "legacy-cleanup-failed") return t("settings.update.cleanup_failed");
     if (state.code === "compatibility-metadata-missing") return t("settings.update.metadata_missing");
@@ -1944,6 +1950,30 @@ function UpdatePanel() {
             }}
           >
             {t("settings.update.install")}
+          </button>
+        ) : state.status === "manual-required" && (
+          state.code === "install-source-untrusted"
+          || state.code === "install-not-applied"
+          || state.code === "install-start-failed"
+        ) ? (
+          <button
+            onClick={() => void openOfficialInstaller()}
+            style={{
+              padding: "8px 14px",
+              borderRadius: "var(--radius-md)",
+              background: "var(--paper)",
+              color: "var(--ink)",
+              fontWeight: 700,
+              fontSize: 12,
+              flexShrink: 0,
+              maxWidth: 180,
+              whiteSpace: "normal",
+              lineHeight: 1.35,
+              border: "1px solid var(--paper-edge)",
+              boxShadow: "var(--neu-raised)",
+            }}
+          >
+            {t("settings.update.open_download")}
           </button>
         ) : (state.status === "manual-required" || state.status === "incompatible") && state.canRetry ? (
           <button

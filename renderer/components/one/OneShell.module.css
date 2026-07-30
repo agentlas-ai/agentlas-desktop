@@ -1317,6 +1317,54 @@
   line-height: 1.55;
 }
 
+.runtimeRecovery {
+  width: min(920px, calc(100% - 48px));
+  margin: 18px auto 0;
+  padding: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid #d9dfcb;
+  border-radius: 12px;
+  background: #f8faF3;
+  color: #374126;
+}
+
+.runtimeRecovery strong {
+  display: block;
+  font-size: 13px;
+}
+
+.runtimeRecovery p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #66704f;
+}
+
+.runtimeRecoveryActions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.runtimeRecoveryActions button {
+  min-height: 38px;
+}
+
+@media (max-width: 720px) {
+  .runtimeRecovery {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .runtimeRecoveryActions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+}
+
 .searchSheet {
   position: absolute;
   z-index: 70;

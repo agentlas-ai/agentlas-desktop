@@ -28,6 +28,7 @@ import {
   type OneSurfaceNarrativeBlock,
   type OneSurfaceSourceListBlock,
   type OneSurfaceStatusBlock,
+  type OneSurfaceSemanticAction,
   type OneSurfaceTableBlock,
   type OneSurfaceTimelineBlock,
   type OneSurfaceBlockType,
@@ -74,12 +75,14 @@ export function OneAdaptiveResult({
   onAcceptResult,
   acceptingResult = false,
   onRetryUnfinished,
+  onSemanticAction,
 }: {
   manifest: OneSurfaceManifestV1 | null;
   projection: OneTaskProjection;
   receipt: InvocationRunReceipt | null;
   locale: "ko" | "en";
   onOpenWork: () => void;
+  onSemanticAction?: (action: OneSurfaceSemanticAction) => void;
   onAcceptResult?: () => void;
   acceptingResult?: boolean;
   valueClosure?: OneValueClosureRecord | null;
@@ -102,6 +105,11 @@ export function OneAdaptiveResult({
     && receipt?.status === "completed"
     && projection.sync.mutationMode === "direct"
     && Boolean(onAcceptResult);
+  const semanticActions = showNative && surface
+    ? [surface.primaryAction, ...surface.secondaryActions].filter(
+        (action): action is OneSurfaceSemanticAction => Boolean(action?.enabled),
+      )
+    : [];
   const artifactContext = useMemo<OneArtifactBindingRequestV1 | null>(() => (
     surface && projection.chatId && receipt?.runId
       ? {
@@ -152,9 +160,22 @@ export function OneAdaptiveResult({
                 {acceptingResult ? tFor(locale, "one.res.finishing") : tFor(locale, "one.res.finish_here")}
               </button>
             )}
-            <button type="button" className={canAcceptResult ? styles.action : styles.actionPrimary} onClick={onOpenWork}>
-              {showNative && surface?.primaryAction?.label ? displayValue(surface.primaryAction.label) : tFor(locale, "one.res.see_details")}
-            </button>
+            {semanticActions.length > 0 ? semanticActions.map((action, index) => (
+              <button
+                key={action.actionId}
+                type="button"
+                className={!canAcceptResult && index === 0 ? styles.actionPrimary : styles.action}
+                onClick={() => onSemanticAction?.(action)}
+                disabled={!onSemanticAction}
+              >
+                <span>{displayValue(action.label)}</span>
+                {action.description && <small>{displayValue(action.description)}</small>}
+              </button>
+            )) : (
+              <button type="button" className={canAcceptResult ? styles.action : styles.actionPrimary} onClick={onOpenWork}>
+                {tFor(locale, "one.res.see_details")}
+              </button>
+            )}
           </div>
           {canAcceptResult && (
             <AcceptanceBoundaryCopy locale={locale} className={styles.acceptanceNote} />
@@ -911,11 +932,12 @@ function isOneSurfaceManifestV1(value: unknown): value is OneSurfaceManifestV1 {
     && typeof item.layoutProfile === "string"
     && Array.isArray(item.blocks)
     && Array.isArray(item.secondaryActions)
-    && item.secondaryActions.length === 0
+    && item.secondaryActions.length <= 2
+    && item.secondaryActions.every(isSafeSemanticAction)
     && Array.isArray(item.evidence)
     && item.evidence.every(isSafeEvidence)
     && isSafeSurfaceState(item.surfaceState)
-    && isSafePrimaryAction(item.primaryAction)
+    && isSafeSemanticAction(item.primaryAction)
     && isSafeFallbackShape(item.fallback)
     && isSafeRecomposition(item.recomposition);
 }
@@ -1097,13 +1119,18 @@ function isSafeSurfaceState(value: unknown): boolean {
     && typeof value.readOnly === "boolean";
 }
 
-function isSafePrimaryAction(value: unknown): boolean {
+function isSafeSemanticAction(value: unknown): boolean {
   return value === null || (isPlainRecord(value)
-    && value.intent === "open_work"
+    && [
+      "open_work", "try_result", "open_asset", "refine_result", "reuse_result", "prepare_share",
+    ].includes(String(value.intent))
     && typeof value.actionId === "string"
     && typeof value.label === "string"
-    && typeof value.targetRef === "string"
-    && value.enabled === true);
+    && (value.description == null || (typeof value.description === "string" && value.description.length <= 220))
+    && (value.instruction == null || (typeof value.instruction === "string" && value.instruction.length <= 800))
+    && (value.targetRef == null || (typeof value.targetRef === "string" && SAFE_IDENTIFIER_RE.test(value.targetRef)))
+    && typeof value.enabled === "boolean"
+    && (value.blockedReason == null || typeof value.blockedReason === "string"));
 }
 
 function isSafeFallbackShape(value: unknown): boolean {

@@ -254,6 +254,32 @@
   border-top: 1px solid #eceeef;
 }
 
+.mobileConfirmation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin: 0 20px;
+  padding: 16px 18px;
+  border: 1px solid #dfe5d4;
+  border-radius: 14px;
+  background: #f7f9f3;
+}
+
+.mobileConfirmation strong {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 13px;
+}
+
+.mobileConfirmation p {
+  max-width: 610px;
+  margin: 0;
+  color: #5f6660;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .footerGroup {
   display: flex;
   align-items: center;
@@ -297,6 +323,7 @@
   .preview { min-height: 280px; }
   .footer { align-items: stretch; flex-direction: column-reverse; }
   .footerGroup { justify-content: flex-end; }
+  .mobileConfirmation { align-items: stretch; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {

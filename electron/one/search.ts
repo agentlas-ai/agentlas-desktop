@@ -21,9 +21,9 @@ const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 const CURSOR_RE = /^[A-Za-z0-9_-]{1,512}$/;
 const TASK_STATUS = new Set([
-  "open", "running", "waiting-decision", "partial", "completed", "failed", "archived",
+  "open", "running", "waiting-decision", "partial", "completed", "failed", "cancelled", "archived",
 ]);
-const RESTORABLE_TASK_STATUS = new Set(["open", "waiting-decision", "partial", "completed", "failed"]);
+const RESTORABLE_TASK_STATUS = new Set(["open", "waiting-decision", "partial", "completed", "failed", "cancelled"]);
 const ARCHIVE_STATE_EVENT_KIND = "one_task_archive_state";
 
 interface TaskCandidateRow {

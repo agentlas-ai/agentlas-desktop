@@ -91,7 +91,7 @@ export interface OneTaskProjectionRuntime {
 const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
 const ISO_DATE_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const TASK_STATUSES = new Set<CanonicalTask["status"]>([
-  "open", "running", "waiting-decision", "partial", "completed", "failed", "archived",
+  "open", "running", "waiting-decision", "partial", "completed", "failed", "cancelled", "archived",
 ]);
 const INVOCATION_STATUSES = new Set<InvocationRunReceipt["status"]>([
   "running", "cancelling", "completed", "failed", "cancelled", "interrupted",
@@ -333,6 +333,7 @@ function statusValue(status: CanonicalTask["status"]): OneTaskProjectionStatusVa
     case "waiting-decision": return "decision_required";
     case "completed": return "completed";
     case "failed": return "failed";
+    case "cancelled": return "stopped";
     case "archived": return "stopped";
     case "open":
     case "partial":
@@ -348,6 +349,7 @@ function defaultSummary(task: CanonicalTask): string {
     case "partial": return "A result is ready for review before Task completion is accepted.";
     case "completed": return "The canonical Task is complete.";
     case "failed": return "The latest authoritative Task step failed and needs review.";
+    case "cancelled": return "The user stopped this Task. Its prior progress remains available to review or resume.";
     case "archived": return "This Task is stopped and archived.";
   }
 }

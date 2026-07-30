@@ -25,7 +25,7 @@ import type {
   ToolFactoryScaffoldResult,
   ToolFactoryToolRecord,
 } from "@/lib/types";
-import type { HiredAgentCard, InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage, RuntimeSelection } from "@shared/types";
+import type { HiredAgentCard, InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage, RunEventUi, RuntimeSelection } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
@@ -351,6 +351,73 @@ function appendTimeline(
   item: NetTimelineItem,
 ) {
   setNetTimeline((tl) => [...tl, item].slice(-80));
+}
+
+const DURABLE_WORKFLOW_EVENT_RE =
+  /^(?:task_force_model_call_(?:started|completed|failed)|workload_allocation|workforce_planner_(?:schema_attempt|blocked)|workflow_node_state|invoke_(?:result|completed|failed|cancelled|interrupted))$/;
+
+function durableWorkflowLabel(event: RunEventUi, locale: "ko" | "en"): string {
+  const ko = locale === "ko";
+  const status = typeof event.payload.status === "string" ? event.payload.status.trim() : "";
+  const state = typeof event.payload.state === "string" ? event.payload.state.trim() : "";
+  if (status) return status;
+  if (state) return state;
+  const labels: Record<string, [string, string]> = {
+    task_force_model_call_started: ["모델 호출 시작", "Model call started"],
+    task_force_model_call_completed: ["모델 호출 완료", "Model call completed"],
+    task_force_model_call_failed: ["모델 호출 실패", "Model call failed"],
+    workload_allocation: ["작업 배분 기록", "Workload allocation recorded"],
+    workforce_planner_schema_attempt: ["워크포스 계획 검증", "Workforce plan validation"],
+    workforce_planner_blocked: ["워크포스 계획 차단", "Workforce planning blocked"],
+    workflow_node_state: ["워크플로 노드 상태 기록", "Workflow node state recorded"],
+    invoke_result: ["실행 결과 기록", "Run result recorded"],
+    invoke_completed: ["실행 완료", "Run completed"],
+    invoke_failed: ["실행 실패", "Run failed"],
+    invoke_cancelled: ["실행 취소", "Run cancelled"],
+    invoke_interrupted: ["실행 중단", "Run interrupted"],
+  };
+  const label = labels[event.kind];
+  return label ? label[ko ? 0 : 1] : event.kind;
+}
+
+function workflowSnapshotFromLedger(
+  events: RunEventUi[],
+  locale: "ko" | "en",
+): { liveAgents: Record<string, LiveAgent>; timeline: NetTimelineItem[] } {
+  const liveAgents: Record<string, LiveAgent> = {};
+  const timeline: NetTimelineItem[] = [];
+  for (const event of events) {
+    if (!DURABLE_WORKFLOW_EVENT_RE.test(event.kind)) continue;
+    const agentId = event.nodeId || event.agentId;
+    if (!agentId) continue;
+    const role =
+      typeof event.payload.phase === "string"
+        ? event.payload.phase
+        : typeof event.payload.modelRole === "string"
+          ? event.payload.modelRole
+          : "";
+    const model = typeof event.payload.model === "string" ? event.payload.model : undefined;
+    const tokensValue = Number(event.payload.tokens);
+    const tokens = Number.isFinite(tokensValue) && tokensValue > 0 ? tokensValue : undefined;
+    const text = durableWorkflowLabel(event, locale);
+    liveAgents[agentId] = {
+      name: event.agentId || event.nodeId || agentId,
+      role,
+      active: false,
+      status: text,
+      model,
+    };
+    timeline.push({
+      key: `ledger:${event.id}`,
+      agentId,
+      name: event.agentId || event.nodeId || agentId,
+      role,
+      kind: event.kind === "workload_allocation" ? "tool" : "status",
+      text,
+      tokens,
+    });
+  }
+  return { liveAgents, timeline: timeline.slice(-80) };
 }
 
 type ToolEvent = NonNullable<McpInvocationEvent["tool"]>;
@@ -1568,6 +1635,38 @@ function ChatPage() {
       subRef.current = null;
     };
   }, [applyHiredRoster, chatId]);
+
+  // The transcript is durable, so the Agent work panel must be durable too.
+  // Rebuild terminal run activity from Main's redacted run ledger after a
+  // reload instead of showing "Idle / 0 steps" beside a completed team reply.
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !chatId) return;
+    let cancelled = false;
+    void api.invoke.latestReceipt(chatId)
+      .then(async (receipt) => {
+        if (
+          !receipt ||
+          receipt.status === "running" ||
+          receipt.status === "cancelling"
+        ) return null;
+        const events = await api.runLedger.events(receipt.runId, 500);
+        return workflowSnapshotFromLedger(events, locale);
+      })
+      .then((snapshot) => {
+        if (cancelled || !snapshot || snapshot.timeline.length === 0) return;
+        setLiveAgents((current) =>
+          Object.keys(current).length > 0 ? current : snapshot.liveAgents,
+        );
+        setNetTimeline((current) => current.length > 0 ? current : snapshot.timeline);
+      })
+      .catch(() => {
+        // A missing historical ledger must not block the transcript itself.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [chatId, locale]);
 
   // 메타데이터 로드
   useEffect(() => {

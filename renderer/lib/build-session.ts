@@ -104,6 +104,8 @@ export interface BuildState {
   log: LogLine[];
   reached: number;
   errored: boolean;
+  /** A stopped/failed run left its workspace intact and can continue in place. */
+  recoverable: boolean;
   result: BuildResult | null;
   runId: string | null;
   /** 빌드 결과가 조직도(라이브러리)에 자동 등록됐는지. */
@@ -163,6 +165,73 @@ function questionHistorySuffix(question: ChatQuestion | null): string {
     .join("\n")}`;
 }
 
+function mainOwnedBuildBriefQuestions(mode: Mode | "", ko: boolean): ChatQuestion[] {
+  const subject = mode === "team"
+    ? (ko ? "이 팀" : "this team")
+    : mode === "package"
+      ? (ko ? "이 패키지" : "this package")
+      : (ko ? "이 에이전트" : "this agent");
+  return [
+    {
+      id: "build-brief-outcome",
+      header: ko ? "완료 기준" : "Outcome",
+      question: ko
+        ? `${subject}가 어떤 결과를 만들면 “잘 만들었다”고 판단할까요?`
+        : `What result would make ${subject} successful?`,
+      multiSelect: false,
+      options: [
+        {
+          label: ko ? "정확한 결과물" : "Accurate deliverable",
+          description: ko ? "형식과 품질 기준을 지키는 결과물을 만듭니다." : "Produce an output that follows explicit format and quality criteria.",
+        },
+        {
+          label: ko ? "반복 업무 완료" : "Repeatable workflow",
+          description: ko ? "같은 유형의 일을 안정적으로 반복 완료합니다." : "Reliably complete the same kind of work again.",
+        },
+        {
+          label: ko ? "판단과 추천" : "Decision support",
+          description: ko ? "근거를 검토하고 다음 행동을 추천합니다." : "Review evidence and recommend a next action.",
+        },
+      ],
+    },
+    {
+      id: "build-brief-input",
+      header: ko ? "입력" : "Inputs",
+      question: ko
+        ? `${subject}가 주로 무엇을 받아서 일해야 하나요?`
+        : `What should ${subject} usually receive as input?`,
+      multiSelect: true,
+      options: [
+        { label: ko ? "사용자 메시지" : "User messages", description: ko ? "대화로 받은 요청과 조건" : "Requests and constraints from conversation" },
+        { label: ko ? "파일·문서" : "Files and documents", description: ko ? "첨부하거나 지정한 로컬 자료" : "Attached or selected local material" },
+        { label: ko ? "웹·연결 서비스" : "Web and connected services", description: ko ? "검색 결과나 승인된 연결 데이터" : "Search results or approved connected data" },
+      ],
+    },
+    {
+      id: "build-brief-authority",
+      header: ko ? "권한" : "Authority",
+      question: ko
+        ? `${subject}가 사용자 확인 없이 할 수 있는 범위를 어디까지로 둘까요?`
+        : `What may ${subject} do without asking for confirmation?`,
+      multiSelect: false,
+      options: [
+        {
+          label: ko ? "읽기·초안까지만" : "Read and draft only",
+          description: ko ? "조회와 초안 작성만 하고 변경 전에는 확인합니다." : "Read and draft, then ask before making changes.",
+        },
+        {
+          label: ko ? "로컬 저장까지" : "Allow local saves",
+          description: ko ? "지정 폴더의 되돌릴 수 있는 저장까지 허용합니다." : "Allow reversible saves inside selected folders.",
+        },
+        {
+          label: ko ? "행동마다 확인" : "Confirm every action",
+          description: ko ? "외부 전송·설치·게시 등은 항상 먼저 확인합니다." : "Always ask before sending, installing, publishing, or other external actions.",
+        },
+      ],
+    },
+  ];
+}
+
 function restoreWorkspace(): FsPathGrant | null {
   try {
     const raw = window.localStorage.getItem(WS_KEY);
@@ -194,6 +263,7 @@ const state: BuildState = {
   log: [],
   reached: 0,
   errored: false,
+  recoverable: false,
   result: null,
   runId: null,
   registered: false,
@@ -511,6 +581,20 @@ async function resolveTurnWithoutSignal(
     );
     return;
   }
+  if (state.turn === 1) {
+    state.pendingQuestions = mainOwnedBuildBriefQuestions(state.mode, ko);
+    state.awaitingReply = true;
+    state.phase = "interview";
+    state.reached = Math.max(state.reached, 1);
+    pushLog(
+      "log",
+      ko
+        ? "빌더의 질문이 누락되어 Agentlas가 완료 기준·입력·권한을 먼저 확인합니다."
+        : "The builder omitted its interview, so Agentlas is confirming outcome, inputs, and authority first.",
+    );
+    commit();
+    return;
+  }
   if (autoContinues < AUTO_CONTINUE_MAX) {
     autoContinues += 1;
     pushLog("stage", ko ? `자동 진행 ${autoContinues}/${AUTO_CONTINUE_MAX} — 추가 질문 없이 빌드 계속` : `Auto-continue ${autoContinues}/${AUTO_CONTINUE_MAX} — building without further questions`);
@@ -543,6 +627,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
   // assert that something is running when nothing is yet.
   state.liveness = null;
   state.errored = false;
+  state.recoverable = false;
   state.awaitingReply = false;
   state.pendingQuestions = [];
   state.reached = Math.max(state.reached, 2);
@@ -661,6 +746,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
         state.result = { workspace: packageRoot, securityScan: result?.securityScan ?? null, readScope, mcpReceipt: state.mcpReceipt };
         pushLog("done", ko ? "빌드 완료 — 패키지 생성됨" : "Build complete — package created");
         state.phase = "done";
+        state.recoverable = false;
         commit();
         if (registerPath && buildScanDisposition(result?.securityScan ?? null) === "passed") {
           void autoRegister(registerPath, readScope, generation);
@@ -705,6 +791,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
     } else if (e.kind === "error") {
       state.liveness = null;
       state.errored = true;
+      state.recoverable = true;
       pushLog("error", e.text ?? (ko ? "오류" : "Error"));
       state.phase = "error";
       detach();
@@ -714,6 +801,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
   void api.hephaestus.buildReady(runId).catch((error) => {
     if (!isCurrentBuild(generation) || state.runId !== runId) return;
     state.errored = true;
+    state.recoverable = true;
     state.phase = "error";
     pushLog(
       "error",
@@ -917,24 +1005,68 @@ export function cancelBuild() {
   const cancelledRunId = state.runId;
   buildGeneration += 1;
   if (cancelledRunId) ipc()?.hephaestus.cancelBuild(cancelledRunId);
-  state.phase = "idle";
-  state.reached = 0;
+  if (cancelledRunId) {
+    state.phase = "error";
+    state.errored = true;
+    state.recoverable = true;
+    pushLog(
+      "error",
+      currentLocale() === "ko"
+        ? "빌드를 중단했습니다. 지금까지 만든 파일은 그대로 보존했습니다. 같은 폴더에서 이어서 빌드하거나 새 빌드를 시작할 수 있습니다."
+        : "Build stopped. Files created so far were preserved. You can resume in the same folder or start a new build.",
+    );
+  } else {
+    state.phase = "idle";
+    state.reached = 0;
+    state.errored = false;
+    state.recoverable = false;
+  }
   state.awaitingReply = false;
   state.pendingQuestions = [];
   state.runId = null;
   runtimeSessionId = null;
-  resolvedBuildRuntime = null;
-  resolvedBuildRuntimePinned = false;
+  if (!cancelledRunId) {
+    resolvedBuildRuntime = null;
+    resolvedBuildRuntimePinned = false;
+  }
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
-  autoContinues = 0;
-  state.mcpPlan = null;
-  state.mcpSelectedCandidateIds = [];
-  state.mcpReceipt = null;
-  state.cloudSaveChoice = null;
+  if (!cancelledRunId) {
+    autoContinues = 0;
+    state.mcpPlan = null;
+    state.mcpSelectedCandidateIds = [];
+    state.mcpReceipt = null;
+    state.cloudSaveChoice = null;
+  }
   state.liveness = null;
   detach();
   commit();
+}
+
+export async function resumeBuild(): Promise<void> {
+  if (
+    !state.recoverable
+    || !state.workspace
+    || !state.workspaceGrant
+    || !state.mcpPlan
+    || state.phase === "running"
+  ) return;
+  buildGeneration += 1;
+  state.errored = false;
+  state.recoverable = false;
+  pushLog(
+    "log",
+    currentLocale() === "ko"
+      ? "보존된 파일을 먼저 확인한 뒤, 완료되지 않은 단계부터 이어서 빌드합니다."
+      : "Checking the preserved files first, then resuming from the unfinished step.",
+  );
+  commit();
+  await runTurn(
+    currentLocale() === "ko"
+      ? "이전 실행이 중단되었습니다. 현재 작업 폴더의 파일을 먼저 검사하고, 이미 완성된 작업은 덮어쓰지 말고 미완성 단계만 이어서 패키지를 완성하세요. 마지막 줄에 'BUILD_COMPLETE: <패키지 폴더명>'을 출력하세요."
+      : "The previous run was stopped. Inspect the current workspace first, preserve completed work, resume only the unfinished steps, and finish the package. End with 'BUILD_COMPLETE: <package folder name>'.",
+    buildGeneration,
+  );
 }
 
 export function resetBuild() {
@@ -942,6 +1074,7 @@ export function resetBuild() {
   state.phase = "idle";
   state.reached = 0;
   state.errored = false;
+  state.recoverable = false;
   state.log = [];
   state.result = null;
   state.runId = null;

@@ -367,6 +367,16 @@ function SidebarInner({ refreshKey: refreshKeyProp = 0 }: { refreshKey?: number 
   async function openHiredAgentChat(item: HiredRosterItem) {
     const api = ipc();
     if (!api) return;
+    if (!item.leaseActive) {
+      const name = (locale === "ko" ? item.nameKo : item.name) || item.name || item.slug;
+      const proceed = window.confirm(
+        locale === "ko"
+          ? `${name}의 이전 리스는 만료되었습니다.\n\n기억 둥지는 로컬에 남아 있지만 아직 재고용되거나 실행 권한이 생긴 것은 아닙니다. Hub에서 현재 공개 상태, 정확한 릴리스, 가격·크레딧 조건을 확인한 뒤 다시 고용할까요?`
+          : `${name}'s previous lease has expired.\n\nIts local memory nest remains, but the agent is not rehired or authorized to run. Open Hub to review current availability, exact release, and price or credit terms before rehiring?`,
+      );
+      if (proceed) navigate(`/marketplace?q=${encodeURIComponent(item.slug)}`);
+      return;
+    }
     try {
       const agentId = defaultAgentIdFor(null);
       const chat = await api.chats.create(agentId ? { agentId } : {});
@@ -1097,7 +1107,7 @@ function HiredAgentRow({
     const hoursLeft = Math.max(1, Math.round((Date.parse(item.leasedUntil) - Date.now()) / 3_600_000));
     statusLine = locale === "ko" ? `리스 ${hoursLeft}시간 남음 · 무료 재호출` : `Lease ${hoursLeft}h left · free calls`;
   } else if (item.hasMemory) {
-    statusLine = locale === "ko" ? "만료 — 재고용하면 기억 그대로" : "Expired — rehire resumes its memory";
+    statusLine = locale === "ko" ? "만료 · Hub 조건 확인 후 재고용" : "Expired · review Hub terms to rehire";
   } else {
     statusLine = locale === "ko" ? "만료" : "Expired";
   }
@@ -1105,7 +1115,9 @@ function HiredAgentRow({
     <button
       type="button"
       onClick={onOpen}
-      title={locale === "ko" ? `${name}을(를) 고용한 새 채팅 열기` : `Open a new chat with ${name} hired`}
+      title={item.leaseActive
+        ? (locale === "ko" ? `${name}을(를) 고용한 새 채팅 열기` : `Open a new chat with ${name} hired`)
+        : (locale === "ko" ? `${name} 재고용 조건 확인` : `Review rehire terms for ${name}`)}
       style={{
         display: "block",
         width: "calc(100% - 8px)",

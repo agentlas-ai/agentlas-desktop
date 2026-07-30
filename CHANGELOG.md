@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.9.30 — 2026-07-30
+
+This release binds Agentlas OS v1.1.83 at
+3defe45b137fea36e7b04ae3087fd7e56990a365.
+Passing the source gates does not prove a published release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **One speaks like a product, not a terminal.** Raw JSON and internal system
+  text are rendered as customer-safe results, Hub search refuses opaque
+  low-confidence matches, and stopped work is shown as stopped rather than
+  completed.
+- **Agent Build asks before it builds and keeps the work.** The first turn
+  gathers three product decisions, progress stays visible without exposing an
+  internal shell, and a stopped or failed build can resume from its preserved
+  workspace instead of starting over.
+- **Built agents land where people expect.** Successful builds register into My
+  Agents and the selected organization path, with an explicit recovery action
+  when registration needs attention.
+- **Navigation and confirmation flows are complete.** One task routes survive
+  Work round-trips, collapsed navigation is keyboard-safe, ambiguous
+  confirmations expose real choices, and the optional mobile guide explains
+  its data boundary before opening Settings.
+
 ## 0.9.29 — 2026-07-29
 
 This release binds Agentlas OS v1.1.83 at

@@ -699,7 +699,7 @@ export interface MobileBridgeChatDto {
   taskId: string | null;
   taskVersion: number | null;
   /** Main-owned Task state. Mobile must not infer completion from message text. */
-  taskStatus: "open" | "running" | "waiting-decision" | "partial" | "completed" | "failed" | "archived" | null;
+  taskStatus: "open" | "running" | "waiting-decision" | "partial" | "completed" | "failed" | "cancelled" | "archived" | null;
   taskUpdatedAt: string | null;
   projectId: string | null;
   /** Basename only. Absolute Desktop paths never cross the bridge. */

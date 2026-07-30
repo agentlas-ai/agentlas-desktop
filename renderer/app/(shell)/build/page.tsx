@@ -17,6 +17,7 @@ import {
 import { grantForDroppedFile, ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
+import { announceAgentRosterChange } from "@/lib/agent-roster-events";
 import { KeyStatusBanner } from "@/components/KeyStatusBanner";
 import { McpBuildInterviewCard } from "@/components/build/McpBuildInterviewCard";
 import { McpAttachmentReceiptCard } from "@/components/build/McpAttachmentReceiptCard";
@@ -36,6 +37,7 @@ import {
   resolveRuntimeEscalation,
   answerBuild,
   cancelBuild,
+  resumeBuild,
   resetBuild,
   addAttachments,
   removeAttachment,
@@ -174,7 +176,7 @@ export default function BuildPage() {
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
-  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, result, registered, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpReceipt, cloudSaveChoice, liveness } = s;
+  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, recoverable, result, registered, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpReceipt, cloudSaveChoice, liveness } = s;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const applyOneReviewSeed = useCallback((seed: OneSuggestionReviewSeed): OneReviewSeedApplyResult => {
@@ -366,7 +368,12 @@ export default function BuildPage() {
     if (!target || !scope) return;
     try {
       const imported = await ipc()?.team.importLocalFolder({ path: target, scope });
-      if (imported?.id) navigate(`/library/agents?agentId=${imported.id}`);
+      if (imported?.id) {
+        announceAgentRosterChange({ action: "upserted", agent: imported, source: "build" });
+        navigate(imported.kind === "team"
+          ? `/library/agent-groups?edit=${encodeURIComponent(imported.id)}`
+          : `/library/agents?agentId=${encodeURIComponent(imported.id)}`);
+      }
     } catch (e) {
       setActionMsg((ko ? "설치 실패: " : "Install failed: ") + friendlyHephaestusMessage((e as Error).message, ko));
     }
@@ -479,7 +486,7 @@ export default function BuildPage() {
               <div className="build-title-mark"><IconBuilding size={18} /></div>
               <div>
                 <h1>{ko ? "빌드" : "Build"}</h1>
-                <div className="build-subtitle">hep-build</div>
+                <div className="build-subtitle">{ko ? "에이전트 제작 도우미" : "Agent creation assistant"}</div>
               </div>
             </div>
             <div className="build-header-status titlebar-nodrag">
@@ -689,6 +696,15 @@ export default function BuildPage() {
                   <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "MCP 검토 취소" : "Cancel MCP review"}</button>
                 ) : phase === "interview" ? (
                   <button onClick={resetBuild} className="build-secondary-button titlebar-nodrag">{ko ? "인터뷰 취소" : "Cancel interview"}</button>
+                ) : phase === "error" && recoverable ? (
+                  <>
+                    <button onClick={() => void resumeBuild()} className="build-primary-button titlebar-nodrag">
+                      {ko ? "보존된 파일에서 이어서 빌드" : "Resume from saved files"}
+                    </button>
+                    <button onClick={resetBuild} className="build-secondary-button titlebar-nodrag">
+                      {ko ? "새 빌드" : "New build"}
+                    </button>
+                  </>
                 ) : phase === "done" || phase === "error" ? (
                   <button onClick={resetBuild} className="build-secondary-button titlebar-nodrag">{ko ? "새 빌드" : "New build"}</button>
                 ) : (
@@ -919,11 +935,11 @@ export default function BuildPage() {
           )}
 
           {log.length > 0 && (
-            <section className="build-card build-log-card" data-tour-id="build.log">
-              <div className="build-card-head">
-                <span>Build Log</span>
+            <details className="build-card build-log-card" data-tour-id="build.log">
+              <summary className="build-card-head">
+                <span>{ko ? "세부 진행 기록" : "Detailed progress"}</span>
                 {running ? <span className="build-live"><span className="forge-pulse" />live</span> : phase === "done" && <span>ready</span>}
-              </div>
+              </summary>
               <div className="build-log-body">
                 {log.map((l, i) => (
                   <div key={i} data-kind={l.kind}>
@@ -947,7 +963,7 @@ export default function BuildPage() {
                 )}
                 <div ref={logEndRef} />
               </div>
-            </section>
+            </details>
           )}
         </div>
       </main>

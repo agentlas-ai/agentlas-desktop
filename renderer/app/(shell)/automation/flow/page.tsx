@@ -585,27 +585,17 @@ function AutomationFlowPage() {
         </div>
       ) : null}
 
-      <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
-        <div style={{ flex: 1, minWidth: 0, position: "relative" }}>
+      <div className="automation-flow-workspace">
+        <div className="automation-flow-canvas">
           {isSynthesized && !editing ? (
             <div
-              style={{
-                position: "absolute",
-                top: 12,
-                left: 12,
-                zIndex: 5,
-                padding: "5px 10px",
-                borderRadius: 999,
-                fontSize: 11,
-                background: "var(--paper)",
-                border: "1px dashed var(--paper-edge)",
-                color: "var(--muted-deep)",
-              }}
+              className="automation-flow-origin-note"
             >
               {t("auto.flow.synthesized")}
             </div>
           ) : null}
           <ReactFlow
+            className="automation-flow-react"
             nodes={rfNodes}
             edges={rfEdges}
             nodeTypes={workflowNodeTypes}
@@ -624,7 +614,7 @@ function AutomationFlowPage() {
             onNodeClick={(_, node) => setSelectedNodeId(node.id)}
             onPaneClick={() => setSelectedNodeId(null)}
           >
-            <Background color="var(--paper-edge)" gap={20} />
+            <Background color="var(--paper-edge)" gap={24} size={1} />
             <Controls showInteractive={false} />
             <MiniMap
               pannable

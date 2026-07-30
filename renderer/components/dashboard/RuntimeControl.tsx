@@ -19,8 +19,6 @@ type RoleView = {
   inherited: boolean;
 };
 
-const ROLES: RuntimeRole[] = ["orchestrator", "worker"];
-
 const RUNTIME_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
@@ -107,25 +105,6 @@ function runtimeWithSelection(
   };
 }
 
-function runtimeSubLabel(runtime: RuntimeStatus, ko: boolean): string {
-  const model = runtime.model?.trim();
-  const effort = runtime.effort?.trim();
-  const version =
-    runtime.version && runtime.version !== "unknown" ? runtime.version : "";
-  return [
-    version ? `v${version}` : runtime.source,
-    model ||
-      (runtime.kind === "byok" || LOCAL_MODEL_KINDS.has(runtime.kind)
-        ? ""
-        : ko
-          ? "구독 기본"
-          : "subscription default"),
-    effort ? `effort ${effort}` : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
-}
-
 function roleView(runtimes: RuntimeStatus[], role: RuntimeRole): RoleView {
   const index = runtimes.findIndex(
     (runtime) =>
@@ -162,6 +141,11 @@ export function RuntimeControl() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [pool, setPool] = useState<RuntimeRolePoolState | null>(null);
+  const [dragState, setDragState] = useState<{
+    role: RuntimeRole;
+    from: number;
+    over: number;
+  } | null>(null);
 
   const loadPool = useCallback(async () => {
     const api = ipc();
@@ -374,38 +358,85 @@ export function RuntimeControl() {
     });
   }
 
-  async function setWorkerInheritance(inherit: boolean) {
-    if (inherit) {
-      await writePool(
-        "worker",
-        [],
+  function autoSelections(role: RuntimeRole): RuntimeSelection[] {
+    const direct = runtimes.find((runtime) =>
+      runtime.activeRoles?.includes(role),
+    );
+    const inheritedOrchestrator =
+      role === "worker"
+        ? runtimes.find(
+            (runtime) =>
+              runtime.activeRoles?.includes("orchestrator") || runtime.active,
+          )
+        : null;
+    const primary = direct ?? inheritedOrchestrator ?? runtimes[0] ?? null;
+    const ordered = primary
+      ? [primary, ...runtimes.filter((runtime) => runtime !== primary)]
+      : [];
+    const seen = new Set<string>();
+    return ordered.flatMap((runtime) => {
+      const key = runtimeKey(runtime);
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [selectionFromRuntime(runtime, role)];
+    });
+  }
+
+  async function autoConfigureRoles() {
+    const api = ipc();
+    if (!api?.runtime.setRoleMembers || !api.runtime.detect || busy) return;
+    const orchestrator = autoSelections("orchestrator");
+    const worker = autoSelections("worker");
+    if (orchestrator.length === 0 || worker.length === 0) return;
+    setBusy(true);
+    try {
+      await api.runtime.setRoleMembers("orchestrator", orchestrator);
+      setPool(await api.runtime.setRoleMembers("worker", worker));
+      setRuntimes(await api.runtime.detect());
+      setMessage(
         ko
-          ? "워커가 오케스트레이터 후보 풀을 따릅니다."
-          : "Worker now follows the orchestrator pool.",
+          ? "연결된 런타임과 현재 역할을 기준으로 우선순위를 자동 설정했습니다."
+          : "Priority tables were configured from connected runtimes and current roles.",
       );
+    } catch (err) {
+      setMessage(
+        ko
+          ? `자동 설정을 완료하지 못했습니다. ${String(err)}`
+          : `Could not complete automatic setup. ${String(err)}`,
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reorderMember(
+    role: RuntimeRole,
+    from: number,
+    to: number,
+  ) {
+    const selections = poolSelections(role);
+    if (
+      from === to ||
+      from < 0 ||
+      to < 0 ||
+      from >= selections.length ||
+      to >= selections.length
+    ) {
       return;
     }
-    if (poolSelections("worker").length > 0) return;
-    const inheritedHead =
-      poolSelections("orchestrator")[0] ??
-      (runtimes[0] ? selectionFromRuntime(runtimes[0], "worker") : null);
-    if (!inheritedHead) return;
+    const next = [...selections];
+    const [moved] = next.splice(from, 1);
+    if (!moved) return;
+    next.splice(to, 0, moved);
     await writePool(
-      "worker",
-      [{ ...inheritedHead, role: "worker", inherit: false }],
-      ko
-        ? "워커 후보 행을 만들었습니다."
-        : "Worker candidate row added.",
+      role,
+      next,
+      ko ? "우선순위를 변경했습니다." : "Priority updated.",
     );
   }
 
   async function moveMember(role: RuntimeRole, index: number, delta: number) {
-    const selections = poolSelections(role);
-    const target = index + delta;
-    if (target < 0 || target >= selections.length) return;
-    const next = [...selections];
-    [next[index], next[target]] = [next[target], next[index]];
-    await writePool(role, next);
+    await reorderMember(role, index, index + delta);
   }
 
   async function removeMember(role: RuntimeRole, index: number) {
@@ -491,25 +522,8 @@ export function RuntimeControl() {
 
   function renderPool(role: RuntimeRole) {
     const members = pool?.members[role] ?? [];
-    const inheritedPick = role === "worker" && (pool?.picks.worker?.inherited ?? false);
     return (
       <div className="dashboard-runtime-pool">
-        <div className="dashboard-runtime-pool-head">
-          <span>
-            {role === "orchestrator"
-              ? ko
-                ? "오케스트레이터 후보 풀"
-                : "Orchestrator pool"
-              : ko
-                ? "워커 후보 풀"
-                : "Worker pool"}
-          </span>
-          <span className="dashboard-module-meta">
-            {ko
-              ? "순서가 우선순위 — 미설치·쿼터 초과는 자동으로 다음 후보"
-              : "Order is priority — unavailable or quota-hit members are skipped"}
-          </span>
-        </div>
         {members.length === 0 ? (
           <div className="dashboard-runtime-pool-empty">
             {role === "worker"
@@ -521,8 +535,17 @@ export function RuntimeControl() {
                 : "Empty — add a candidate row."}
           </div>
         ) : (
-          <ol className="dashboard-runtime-pool-list">
-            {members.map((member, index) => {
+          <>
+            <div className="dashboard-runtime-pool-columns" aria-hidden="true">
+              <span>{ko ? "순위" : "Priority"}</span>
+              <span>{ko ? "엔진" : "Engine"}</span>
+              <span>{ko ? "모델" : "Model"}</span>
+              <span>{ko ? "작업량" : "Effort"}</span>
+              <span>{ko ? "상태" : "Status"}</span>
+              <span>{ko ? "관리" : "Manage"}</span>
+            </div>
+            <ol className="dashboard-runtime-pool-list">
+              {members.map((member, index) => {
               const badge = memberBadge(role, member.position);
               const selection = member.selection;
               const runtimeIndex = runtimeIndexForSelection(selection);
@@ -542,8 +565,68 @@ export function RuntimeControl() {
                 <li
                   key={`${member.position}:${selectionKey(selection)}`}
                   data-pool-position={member.position}
+                  data-primary={index === 0 ? "true" : "false"}
+                  data-dragging={
+                    dragState?.role === role && dragState.from === index
+                      ? "true"
+                      : "false"
+                  }
+                  data-drop-target={
+                    dragState?.role === role && dragState.over === index
+                      ? "true"
+                      : "false"
+                  }
+                  onDragOver={(event) => {
+                    if (busy || dragState?.role !== role) return;
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                    if (dragState.over !== index) {
+                      setDragState({ ...dragState, over: index });
+                    }
+                  }}
+                  onDrop={(event) => {
+                    if (busy || dragState?.role !== role) return;
+                    event.preventDefault();
+                    const from = dragState.from;
+                    setDragState(null);
+                    void reorderMember(role, from, index);
+                  }}
                 >
-                  <span className="dashboard-runtime-pool-order">{index + 1}</span>
+                  <button
+                    type="button"
+                    className="dashboard-runtime-pool-order"
+                    draggable={!busy}
+                    disabled={busy}
+                    aria-label={
+                      ko
+                        ? `${rowLabel} 순위 ${index + 1}. 드래그하거나 방향키로 순위 변경`
+                        : `${rowLabel}, priority ${index + 1}. Drag or use arrow keys to reorder`
+                    }
+                    title={
+                      ko
+                        ? "드래그해서 순위 변경"
+                        : "Drag to change priority"
+                    }
+                    onDragStart={(event) => {
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData(
+                        "text/plain",
+                        `${role}:${index}`,
+                      );
+                      setDragState({ role, from: index, over: index });
+                    }}
+                    onDragEnd={() => setDragState(null)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+                        return;
+                      }
+                      event.preventDefault();
+                      const delta = event.key === "ArrowUp" ? -1 : 1;
+                      void moveMember(role, index, delta);
+                    }}
+                  >
+                    {index + 1}
+                  </button>
                   <fieldset className="dashboard-runtime-pool-fields">
                     <legend className="sr-only">{rowLabel}</legend>
                     <label>
@@ -608,9 +691,9 @@ export function RuntimeControl() {
                         ))}
                       </select>
                     </label>
-                    {(efforts.length > 0 || selection.effort) && (
-                      <label>
-                        <span>{ko ? "작업량" : "Effort"}</span>
+                    <label>
+                      <span>{ko ? "작업량" : "Effort"}</span>
+                      {efforts.length > 0 || selection.effort ? (
                         <select
                           aria-label={`${rowLabel} ${ko ? "작업량" : "effort"}`}
                           value={selection.effort ?? ""}
@@ -630,8 +713,12 @@ export function RuntimeControl() {
                             </option>
                           ))}
                         </select>
-                      </label>
-                    )}
+                      ) : (
+                        <span className="dashboard-runtime-field-value">
+                          {ko ? "기본" : "Default"}
+                        </span>
+                      )}
+                    </label>
                   </fieldset>
                   <span
                     className="dashboard-runtime-pool-badge"
@@ -644,30 +731,6 @@ export function RuntimeControl() {
                       : badge.label}
                   </span>
                   <span className="dashboard-runtime-pool-actions">
-                    <button
-                      type="button"
-                      onClick={() => void moveMember(role, index, -1)}
-                      disabled={busy || index === 0}
-                      aria-label={
-                        ko
-                          ? `${rowLabel} 위로 이동`
-                          : `Move ${rowLabel.toLowerCase()} up`
-                      }
-                    >
-                      ↑
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void moveMember(role, index, 1)}
-                      disabled={busy || index === members.length - 1}
-                      aria-label={
-                        ko
-                          ? `${rowLabel} 아래로 이동`
-                          : `Move ${rowLabel.toLowerCase()} down`
-                      }
-                    >
-                      ↓
-                    </button>
                     <button
                       type="button"
                       onClick={() => void removeMember(role, index)}
@@ -692,8 +755,9 @@ export function RuntimeControl() {
                   </span>
                 </li>
               );
-            })}
-          </ol>
+              })}
+            </ol>
+          </>
         )}
         <button
           type="button"
@@ -710,22 +774,12 @@ export function RuntimeControl() {
   function renderRole(role: RuntimeRole) {
     const view = views[role];
     const active = view.runtime;
-    const inherited =
-      role === "worker" && (pool?.picks.worker?.inherited ?? view.inherited);
     const title =
       role === "orchestrator"
         ? "Orchestrator"
         : ko
           ? "Worker"
           : "Worker";
-    const note =
-      role === "orchestrator"
-        ? ko
-          ? "채팅, 팀 계획·합성, 검증 판단이 이 모델을 사용합니다."
-          : "Chats, team planning, synthesis, and verification use this model."
-        : ko
-          ? "팀 워커, 백그라운드 작업, 빌려온 에이전트 실행이 사용합니다."
-          : "Team workers, background jobs, and borrowed agents use this model.";
     return (
       <section
         className="dashboard-runtime-role"
@@ -736,37 +790,32 @@ export function RuntimeControl() {
         key={role}
       >
         <div className="dashboard-runtime-role-head">
-          <strong>{title}</strong>
-          {active && (
-            <span className="dashboard-module-meta">
-              {runtimeSubLabel(active, ko)}
+          <div>
+            <strong>{title}</strong>
+            <span className="dashboard-runtime-role-kicker">
+              {role === "orchestrator"
+                ? ko
+                  ? "의사결정 · 위임 · 결과 통합 — 1순위부터 순서대로 실행"
+                  : "Decide · delegate · synthesize — evaluated from priority 1"
+                : ko
+                  ? "위임된 작업 실행 — 순위 숫자를 드래그해 순서 변경"
+                  : "Execute delegated work — drag a rank number to reorder"}
             </span>
-          )}
-        </div>
-        {role === "worker" && (
-          <div className="dashboard-runtime-inherit">
-            <label>
-              <input
-                type="radio"
-                checked={inherited}
-                onChange={() => void setWorkerInheritance(true)}
-                disabled={busy}
-              />
-              {ko ? "오케스트레이터와 동일" : "Same as orchestrator"}
-            </label>
-            <label>
-              <input
-                type="radio"
-                checked={!inherited}
-                onChange={() => void setWorkerInheritance(false)}
-                disabled={busy}
-              />
-              {ko ? "직접 지정" : "Choose directly"}
-            </label>
           </div>
-        )}
+          <span
+            className="dashboard-runtime-pool-badge"
+            data-tone={active ? "active" : "idle"}
+          >
+            {active
+              ? ko
+                ? "연결됨"
+                : "Connected"
+              : ko
+                ? "연결 대기"
+                : "Waiting"}
+          </span>
+        </div>
         {renderPool(role)}
-        <div className="dashboard-runtime-note">{note}</div>
       </section>
     );
   }
@@ -777,8 +826,26 @@ export function RuntimeControl() {
       className="dashboard-module dashboard-runtime-control"
       data-busy={busy ? "true" : "false"}
     >
-      <div className="dashboard-module-head">
+      <div className="dashboard-module-head dashboard-runtime-module-head">
         <span>{ko ? "역할별 기본 모델" : "Role model defaults"}</span>
+        <small>
+          {ko
+            ? "연결 상태를 기준으로 두 표를 자동 구성"
+            : "Build both tables from connected runtimes"}
+        </small>
+        <button
+          type="button"
+          className="dashboard-runtime-auto"
+          onClick={() => void autoConfigureRoles()}
+          disabled={busy || runtimes.length === 0}
+          title={
+            ko
+              ? "현재 역할 모델을 1순위로 두고 연결된 런타임을 후순위에 배치합니다."
+              : "Keeps current role models first and adds connected runtimes as fallbacks."
+          }
+        >
+          {busy ? (ko ? "설정 중…" : "Setting…") : "Auto"}
+        </button>
       </div>
       {loading ? (
         <div className="dashboard-module-empty">
@@ -790,7 +857,10 @@ export function RuntimeControl() {
         </div>
       ) : (
         <>
-          {ROLES.map(renderRole)}
+          <div className="dashboard-runtime-library">
+            {renderRole("orchestrator")}
+            {renderRole("worker")}
+          </div>
           {message && (
             <div className="dashboard-runtime-message">{message}</div>
           )}

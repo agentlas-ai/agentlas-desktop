@@ -117,6 +117,11 @@ import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
 import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, parseSurfaces } from "../surface-emitter";
+import {
+  oneFriendlyFollowupProtocol,
+  parseOneFriendlyFollowups,
+  type OneFriendlyFollowupPlanV1,
+} from "../../shared/one-friendly-followups";
 import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMarkdownSurfaceIntent } from "../one/markdown-surface";
 import { createAutomation, listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { projectContextKey, recordContextSourceMarker, tryRecordRunEvent } from "../store/run-events";
@@ -141,6 +146,8 @@ import { type Runner, SURFACE_INTENT_MARKER, UNATTENDED_NO_ASK_DIRECTIVE } from 
 import { pickActive, pickRunner, selectInvocationRuntime } from "../runtime/selection";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
+import { extractBuildInterviewQuestions } from "../../shared/build-turn";
+import { classifyOneRuntimeFailure } from "../../shared/one-runtime-recovery";
 import {
   oneTeamRuntimeBinding,
   oneTeamRuntimeBindingMatches,
@@ -302,7 +309,13 @@ const careerGraphRefreshTriggered = new Set<string>();
  * untouched.
  */
 /** One 복구 패스 프롬프트 — 실패한 필수 단계를 모델이 직접 재실행해 스스로 완주하게 한다. */
-function buildOneRecoveryPrompt(previousText: string, attempt: number): string {
+function oneRecoveryApprovalExample(locale: "ko" | "en"): string {
+  return locale === "ko"
+    ? '<<agentlas-ask>>{"header":"해결안","question":"제가 [구체적인 해결 조치]를 실행해서 이 작업을 계속할까요?","options":[{"label":"해결하고 계속","description":"제안한 조치를 승인하고 같은 작업을 이어서 완료합니다."},{"label":"다른 방법 선택","description":"실행하지 않고 다른 해결 방법을 정합니다."}],"multiSelect":false}<</agentlas-ask>>'
+    : '<<agentlas-ask>>{"header":"Solution","question":"Should I carry out [specific repair] and continue this task?","options":[{"label":"Fix and continue","description":"Approve the proposed action and continue the same task."},{"label":"Choose another way","description":"Do not execute it and choose a different solution."}],"multiSelect":false}<</agentlas-ask>>';
+}
+
+function buildOneRecoveryPrompt(previousText: string, attempt: number, locale: "ko" | "en"): string {
   const clipped = previousText.length > 6_000 ? previousText.slice(-6_000) : previousText;
   return [
     `Recovery pass ${attempt}: at least one required tool step failed earlier in this run, so the work is not finished yet.`,
@@ -310,12 +323,63 @@ function buildOneRecoveryPrompt(previousText: string, attempt: number): string {
     "1. Identify which step failed.",
     "2. Re-execute that step now with your tools, or take a working alternative path to the same outcome.",
     "3. Verify the outcome with tool evidence, then write the complete final result for the user.",
-    "Never apologize, never describe internal errors, and never ask the user to retry — deliver the finished result.",
+    "If and only if the next safe action requires user authority, credentials, money, or a consequential choice, do not emit a failure notice. Propose the exact repair and emit one valid confirmation:",
+    oneRecoveryApprovalExample(locale),
+    "Never apologize, expose internal errors, or tell the user to retry. Finish the result, or leave one executable approval choice.",
     "Your previous visible output was:",
     "<previous-output>",
     clipped,
     "</previous-output>",
   ].join("\n");
+}
+
+function buildOneRecoveryDecisionPrompt(previousText: string, locale: "ko" | "en"): string {
+  const clipped = previousText.length > 6_000 ? previousText.slice(-6_000) : previousText;
+  return [
+    "A required step still needs intervention after safe automatic repair attempts.",
+    "Do not call tools in this pass and do not end with a failure notice.",
+    "Choose the most practical concrete repair that One can execute after approval.",
+    "Explain it in one short sentence, then emit exactly one valid confirmation fence.",
+    `Use this shape: ${oneRecoveryApprovalExample(locale)}`,
+    "The first option must approve the exact proposed action. The second must preserve user control without claiming completion.",
+    "Do not ask the user to retry and do not mention internal tool names or raw errors.",
+    "Latest task context:",
+    "<previous-output>",
+    clipped,
+    "</previous-output>",
+  ].join("\n");
+}
+
+function hasOneRecoveryDecision(text: unknown): boolean {
+  return extractBuildInterviewQuestions(text).length > 0;
+}
+
+function wrapOneRecoveryProposal(text: string, locale: "ko" | "en"): string {
+  const proposal = text
+    .replace(/<<agentlas-ask>>[\s\S]*?(?:<<\/agentlas-ask>>|$)/gu, "")
+    .trim()
+    .slice(0, 2_000)
+    || (locale === "ko"
+      ? "One이 막힌 단계의 조건을 다시 점검하고 안전한 대체 실행 경로를 적용하겠습니다."
+      : "One will re-check the blocked step and apply a safe alternative execution path.");
+  const question = locale === "ko"
+    ? "제가 위 해결안을 실행해서 이 작업을 계속할까요?"
+    : "Should I carry out the solution above and continue this task?";
+  const options = locale === "ko"
+    ? [
+        { label: "해결하고 계속", description: "제안한 조치를 승인하고 같은 작업을 이어서 완료합니다." },
+        { label: "다른 방법 선택", description: "실행하지 않고 다른 해결 방법을 정합니다." },
+      ]
+    : [
+        { label: "Fix and continue", description: "Approve the proposed action and continue the same task." },
+        { label: "Choose another way", description: "Do not execute it and choose a different solution." },
+      ];
+  return `${proposal}\n\n<<agentlas-ask>>${JSON.stringify({
+    header: locale === "ko" ? "해결안" : "Solution",
+    question,
+    options,
+    multiSelect: false,
+  })}<</agentlas-ask>>`;
 }
 
 function stripDanglingLanguageFence(text: string): string {
@@ -328,6 +392,15 @@ function invocationFailure(
   error: unknown,
 ): { code: string; message: string } {
   if (req.agentAppMode) return untrustedRuntimeFailurePayload();
+  if (req.oneMode) {
+    const runtimeFailure = classifyOneRuntimeFailure(error);
+    if (runtimeFailure) {
+      return {
+        code: runtimeFailure,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
   return {
     code: fallbackCode,
     message: error instanceof Error ? error.message : String(error),
@@ -1497,6 +1570,7 @@ export async function runMcpInvocation(
           "이 경계를 넓혀야 한다면 실행하지 말고 One에서 새 팀 검토가 필요하다고 알리세요.",
           `조사·비교·일정·문서·미디어처럼 구조화할 수 있는 최종 결과는 긴 평문으로 끝내지 말고, 검증한 사실과 출처를 담은 정확히 하나의 기계 판독 Surface를 답변 맨 끝에 ${SURFACE_OPEN_FENCE} JSON ${SURFACE_CLOSE_FENCE} 형식으로 반환하세요. "Agentlas Surface"라는 Markdown 제목이나 가짜 표로 대신하지 마세요. 비교는 data.table·widgets.table/source-matrix, 날짜별 일정은 data.timeline·widgets.timeline, 좌표가 확인된 이동 경로는 data.routes·widgets.map, 예산은 data.pricing의 currency·limit·items(label, amount, verificationStatus), 실제로 만든 파일만 data.artifacts를 사용하세요. 좌표·금액·파일을 추측해 채우지 마세요.`,
           "Surface의 제목·요약·data.summary에는 사용자가 받을 완성된 결론만 쓰세요. '이제 검색하겠습니다', 도구 호출 계획, 진행 상황, 메모리나 작업 폴더를 확인한 과정은 넣지 마세요. 반환 전에 추천 제목·설명·표의 제품명과 숫자가 서로 모순되지 않는지 다시 확인하세요.",
+          oneFriendlyFollowupProtocol("ko"),
           "비교 표에는 choice 열을 두고 정확히 한 행만 recommended로 표시하세요. 추천 행을 포함한 모든 행은 사용자가 결정할 핵심 열을 구체적인 값이나 '확인하지 못함' 같은 정직한 상태로 채우세요. 대시(—), 빈칸, 임시 문구로 채우지 말고, 근거가 부족하면 추천을 단정하지 마세요. Surface 문자열 안에는 URL이나 Markdown 링크 문법을 넣지 말고 출처는 evidence에만 넣으세요.",
           ...(taskSurfaceRecipe ? [taskSurfaceRecipe] : []),
           "[/Agentlas One 실행 경계]",
@@ -1512,6 +1586,7 @@ export async function runMcpInvocation(
           "If the boundary is insufficient, stop and say that a new One team review is required.",
           `For a structured final result such as research, comparison, schedule, document, or media work, do not end with a long plain-text answer. Return exactly one machine-readable Surface at the very end in the form ${SURFACE_OPEN_FENCE} JSON ${SURFACE_CLOSE_FENCE}. Do not substitute a Markdown heading named "Agentlas Surface" or a fake text table. Use data.table with widgets.table/source-matrix for comparisons, data.timeline with widgets.timeline for dated plans, data.routes with widgets.map only for verified coordinates, data.pricing with currency, limit, and items(label, amount, verificationStatus) for budgets, and data.artifacts only for files that were actually created. Never invent coordinates, prices, or files to fill a Surface.`,
           "Write only the finished user-facing conclusion in the Surface title, summary, and data.summary. Never include future tool plans, progress narration, or checks of memory and work folders. Before returning, verify that the recommendation title, explanation, product names, and numbers in every table do not contradict one another.",
+          oneFriendlyFollowupProtocol("en"),
           "For a comparison table, include a choice column and mark exactly one row recommended. Fill every decision-critical cell in every row, including the recommended row, with a concrete value or an honest state such as 'not verified'. Never use dashes, blanks, or placeholder copy. If the evidence is insufficient, do not make a definitive recommendation. Put no URL or Markdown link syntax inside Surface strings; keep sources only in evidence.",
           ...(taskSurfaceRecipe ? [taskSurfaceRecipe] : []),
           "[/Agentlas One execution boundary]",
@@ -1837,7 +1912,11 @@ export async function runMcpInvocation(
     sink({
       kind: "error",
       error: {
-        code: runtimeResolution.pinHonored ? "pinned-runtime-unavailable" : "no-runtime",
+        code: req.oneMode
+          ? "one-runtime-unavailable"
+          : runtimeResolution.pinHonored
+            ? "pinned-runtime-unavailable"
+            : "no-runtime",
         message: runtimeResolution.pinHonored && req.runtimeSelection
           ? `Pinned automation runtime is unavailable: ${req.runtimeSelection.kind}${req.runtimeSelection.model ? ` · ${req.runtimeSelection.model}` : ""}`
           : tStatus(locale, "errNoRuntime"),
@@ -3303,6 +3382,7 @@ export async function runMcpInvocation(
     const observedOneSourceUrls = new Set<string>();
     let observedOneToolEvidence = false;
     let observedOneToolFailure = false;
+    let oneRecoveryDecisionPending = false;
     // 복구 패스 판정용 패스 단위 계수 — 복구 패스가 "도구 성공 증거 있음 + 무오류"로
     // 끝났을 때에만 실패 흔적을 지운다(도구 없이 말로만 끝내는 가짜 성공 방지).
     let passToolFailures = 0;
@@ -3440,7 +3520,7 @@ export async function runMcpInvocation(
         }
         passToolFailures = 0;
         passToolSuccesses = 0;
-        const recoveryPrompt = buildOneRecoveryPrompt(result.text, attempt);
+        const recoveryPrompt = buildOneRecoveryPrompt(result.text, attempt, locale);
         activeRunnerReq = {
           ...runnerReq,
           userPrompt: explicitBorrowUserPreamble
@@ -3451,7 +3531,33 @@ export async function runMcpInvocation(
         result = await picked.runner(activeRunnerReq, runnerEvents);
         result = sanitizeRestrictedPass(result);
         advanceUsageFloor();
+        if (hasOneRecoveryDecision(result.text)) {
+          oneRecoveryDecisionPending = true;
+          break;
+        }
         if (passToolFailures === 0 && passToolSuccesses > 0) observedOneToolFailure = false;
+      }
+      if (observedOneToolFailure && !oneRecoveryDecisionPending && !signal?.aborted) {
+        sink({
+          kind: "tool-use",
+          status: locale === "ko" ? "실행 가능한 해결안을 준비하는 중…" : "Preparing an actionable solution…",
+        });
+        activeRunnerReq = {
+          ...runnerReq,
+          userPrompt: explicitBorrowUserPreamble
+            ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${buildOneRecoveryDecisionPrompt(result.text, locale)}`
+            : buildOneRecoveryDecisionPrompt(result.text, locale),
+          images: undefined,
+        };
+        result = await picked.runner(activeRunnerReq, runnerEvents);
+        result = sanitizeRestrictedPass(result);
+        advanceUsageFloor();
+        oneRecoveryDecisionPending = hasOneRecoveryDecision(result.text);
+        if (!oneRecoveryDecisionPending) {
+          result = { ...result, text: wrapOneRecoveryProposal(result.text, locale) };
+          oneRecoveryDecisionPending = true;
+        }
+        if (oneRecoveryDecisionPending) partialFloor = "";
       }
     }
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
@@ -3512,6 +3618,15 @@ export async function runMcpInvocation(
     // 항상-켜진 큐레이터: 답변 끝의 "## Memory Events" 블록을 파싱해 안전·스코프·중복 처리 후
     // 내구 메모리에 기록하고, 사용자에게 보이는 텍스트에서는 그 블록을 제거한다(추가 LLM 호출 없음).
     let displayText = result.text.split(SURFACE_INTENT_MARKER).join("").trim();
+    let oneFriendlyFollowups: OneFriendlyFollowupPlanV1 | null = null;
+    if (req.oneMode === true) {
+      const followupParse = parseOneFriendlyFollowups(displayText);
+      displayText = followupParse.cleanedText;
+      oneFriendlyFollowups = followupParse.plan;
+      if (followupParse.error) {
+        console.warn(`[one-followups] rejected ${followupParse.error}`);
+      }
+    }
     // 에이전트가 "## Automation" 블록을 넣었으면 → 현재 chat의 타깃(firm/agent)으로 자동화 등록 + 블록 제거.
     // (백그라운드 automation 실행 세션은 제외 → 자동화가 자동화를 만드는 재귀 방지)
     const automationRegistrations: AutomationRegistrationResult[] = [];
@@ -3702,14 +3817,15 @@ export async function runMcpInvocation(
             role: "orchestrator",
             tier: 1,
             phase: "synthesize",
+            ...(oneFriendlyFollowups ? { oneFriendlyFollowups } : {}),
           });
         }
-        if (oneToolFailureBlocksCompletion()) {
-          // 복구 패스를 이미 스스로 돌린 뒤에도 남은 실패 — 사용자에게 재시도를
-          // 지시하지 않고, 사실만 조용히 말한다. 다음 메시지는 자동으로 이어진다.
+        if (oneToolFailureBlocksCompletion() && !oneRecoveryDecisionPending) {
+          // The model did not produce a valid executable confirmation even
+          // after the dedicated decision pass. Keep the run fail-closed.
           displayText = locale === "ko"
-            ? "여러 번 다시 시도했지만 한 단계가 끝까지 확인되지 않았어요. 지금까지 진행한 내용은 위에 남겨뒀어요."
-            : "I retried this several times, but one step could not be fully completed. Everything done so far is shown above.";
+            ? "실행 가능한 해결안을 안전하게 구성하지 못해 이 실행은 완료로 표시하지 않았습니다."
+            : "This run is not marked complete because an executable solution could not be formed safely.";
         } else if (usedDeterministicOneSurface && deterministicOneSurface) {
           displayText = deterministicOneCompletionCopy(req.userPrompt, deterministicOneSurface, locale);
         } else if (surfaceParse.surfaces.length > 0 || surfaceParse.errors.length > 0) {
@@ -3943,7 +4059,7 @@ export async function runMcpInvocation(
         },
       });
     }
-    if (oneToolFailureBlocksCompletion()) {
+    if (oneToolFailureBlocksCompletion() && !oneRecoveryDecisionPending) {
       sink({
         kind: "error",
         error: {

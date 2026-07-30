@@ -51,6 +51,7 @@ const TASK_STATUSES = new Set<CanonicalTaskStatus>([
   "partial",
   "completed",
   "failed",
+  "cancelled",
   "archived",
 ]);
 

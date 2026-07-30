@@ -579,6 +579,9 @@
 
 .action,
 .actionPrimary {
+  display: grid;
+  align-content: center;
+  gap: 2px;
   min-height: 44px;
   padding: 0 14px;
   border: 1px solid #dfe2e4;
@@ -589,6 +592,16 @@
   font-size: 12px;
   font-weight: 680;
   cursor: pointer;
+  text-align: left;
+}
+
+.action small,
+.actionPrimary small {
+  color: inherit;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.35;
+  opacity: 0.76;
 }
 
 .actionPrimary {

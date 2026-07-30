@@ -60,12 +60,19 @@ export type OneSurfaceSemanticActionIntent =
   | "use_once"
   | "delete_asset"
   | "reopen_intro"
-  | "connect_desktop";
+  | "connect_desktop"
+  | "try_result"
+  | "open_asset"
+  | "refine_result"
+  | "reuse_result"
+  | "prepare_share";
 
 export interface OneSurfaceSemanticAction {
   actionId: string;
   intent: OneSurfaceSemanticActionIntent;
   label: string;
+  description?: string;
+  instruction?: string;
   targetRef?: string;
   enabled: boolean;
   blockedReason?: string;
