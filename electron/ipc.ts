@@ -2939,6 +2939,7 @@ export function registerIpcHandlers(): void {
       visibility: "marketplace",
       reviewMode: input.reviewMode,
       notes: input.notes,
+      purposeAnswer: input.purposeAnswer,
     }, cloudPublishProgressOptions(event, input.progressId));
   });
   // Owner-private save is the default product action. It keeps local

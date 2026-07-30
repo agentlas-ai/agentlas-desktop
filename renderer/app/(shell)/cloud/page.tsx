@@ -72,6 +72,7 @@ type UploadResult = {
   detail?: string;
   link?: string;
   careerGraph?: CareerGraphProof;
+  needsPurpose?: boolean;
 };
 
 function registeredOptionKey(option: CloudAgentRegisteredUploadOption): string {
@@ -89,6 +90,7 @@ export default function CloudAgentPublishPage() {
   const [registeredKey, setRegisteredKey] = useState("");
   const [running, setRunning] = useState<Visibility | null>(null);
   const [result, setResult] = useState<UploadResult | null>(null);
+  const [purposeAnswer, setPurposeAnswer] = useState("");
   // Live upload progress. `progressId` correlates Main's events to THIS upload,
   // so a stale event from an abandoned run can never drive the current bar.
   const progressIdRef = useRef<string>("");
@@ -138,10 +140,11 @@ export default function CloudAgentPublishPage() {
       setRootGrant(dir);
       setRegisteredKey("");
       setResult(null);
+      setPurposeAnswer("");
     }
   }
 
-  async function upload(visibility: Visibility) {
+  async function upload(visibility: Visibility, answer?: string) {
     const api = ipc();
     if (!api) return;
     if (!rootGrant && !selectedRegistered) {
@@ -162,13 +165,27 @@ export default function CloudAgentPublishPage() {
     try {
       const res = selectedRegistered
         ? visibility === "marketplace"
-          ? await api.cloudAgents.publishRegisteredPublic({ target: selectedRegistered.target, progressId })
+          ? await api.cloudAgents.publishRegisteredPublic({
+              target: selectedRegistered.target,
+              progressId,
+              ...(answer?.trim() ? { purposeAnswer: answer.trim() } : {}),
+            })
           : await api.cloudAgents.saveRegisteredPrivate({ target: selectedRegistered.target, progressId })
         : visibility === "marketplace"
-          ? await api.cloudAgents.publishPublic({ rootGrant: rootGrant!, progressId })
+          ? await api.cloudAgents.publishPublic({
+              rootGrant: rootGrant!,
+              progressId,
+              ...(answer?.trim() ? { purposeAnswer: answer.trim() } : {}),
+            })
           : await api.cloudAgents.savePrivate({ rootGrant: rootGrant!, progressId });
       const json = res as unknown as Record<string, unknown>;
       const issues = extractIssues(res);
+      const findings = isRecord(json.review) && Array.isArray(json.review.findings)
+        ? json.review.findings
+        : [];
+      const needsPurpose = findings.some(
+        (finding) => isRecord(finding) && finding.id === "agent-purpose-missing",
+      );
       const careerGraph = extractCareerGraph(json);
       if (res.status === "registered") {
         const link = visibility === "marketplace"
@@ -195,6 +212,7 @@ export default function CloudAgentPublishPage() {
         visibility,
         detail: buildFailureDetail(json, undefined, "", ""),
         careerGraph,
+        needsPurpose,
       });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -357,6 +375,53 @@ export default function CloudAgentPublishPage() {
                 </div>
               )}
             </div>
+
+            {result.needsPurpose && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+                <label htmlFor="agent-purpose-answer" style={{ fontSize: 12.5, fontWeight: 800, color: "var(--ink)" }}>
+                  {ko
+                    ? "이 에이전트가 끝내야 할 일과 완성된 결과를 평소 말로 적어주세요."
+                    : "In ordinary words, what should this agent finish and what should the result look like?"}
+                </label>
+                <textarea
+                  id="agent-purpose-answer"
+                  value={purposeAnswer}
+                  onChange={(event) => setPurposeAnswer(event.target.value)}
+                  maxLength={1200}
+                  rows={4}
+                  placeholder={ko
+                    ? "예: 고객 인터뷰 메모를 읽고 핵심 문제, 반복되는 요구, 다음 제품 실험을 한 장짜리 보고서로 정리해줘."
+                    : "Example: Read customer interview notes and produce a one-page report of key problems, repeated needs, and the next product experiment."}
+                  style={{
+                    width: "100%",
+                    resize: "vertical",
+                    borderRadius: "var(--radius-md)",
+                    border: "1px solid var(--paper-edge)",
+                    background: "var(--paper)",
+                    color: "var(--ink)",
+                    padding: 11,
+                    font: "inherit",
+                    lineHeight: 1.5,
+                  }}
+                />
+                <button
+                  type="button"
+                  disabled={Boolean(running) || purposeAnswer.trim().length < 12}
+                  onClick={() => void upload("marketplace", purposeAnswer)}
+                  style={{
+                    ...actionButton,
+                    border: "none",
+                    background: "var(--ink)",
+                    color: "var(--paper)",
+                    opacity: Boolean(running) || purposeAnswer.trim().length < 12 ? 0.55 : 1,
+                  }}
+                >
+                  {running
+                    ? ko ? "카드를 채우고 다시 발행 중..." : "Filling the card and retrying..."
+                    : ko ? "Agentlas가 채운 뒤 다시 발행" : "Let Agentlas fill it and retry"}
+                </button>
+              </div>
+            )}
 
             {result.careerGraph && <CareerGraphProofBox proof={result.careerGraph} ko={ko} />}
 

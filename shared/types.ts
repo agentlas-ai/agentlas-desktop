@@ -3080,6 +3080,12 @@ export interface CloudAgentPackageRequest {
   reviewMode?: CloudAgentReviewMode;
   /** Optional operator note stored with the registration request. */
   notes?: string;
+  /**
+   * Plain-language answer collected only when the package does not explain
+   * what work the agent completes. Main turns it into routing metadata; users
+   * never have to know Agentlas card field names.
+   */
+  purposeAnswer?: string;
   /** Opaque renderer-generated correlation id for live upload progress. Not authority. */
   progressId?: string;
 }
@@ -3133,6 +3139,7 @@ export interface CloudAgentRegisteredSaveRequest {
 export interface CloudAgentRegisteredPublishRequest extends CloudAgentRegisteredSaveRequest {
   reviewMode?: CloudAgentReviewMode;
   notes?: string;
+  purposeAnswer?: string;
 }
 
 /** Ordered, machine-readable phases of one Agent Cloud / Hub upload. */

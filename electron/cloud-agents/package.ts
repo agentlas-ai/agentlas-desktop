@@ -334,16 +334,40 @@ function completeWorkforceResume(card: Record<string, unknown>, scanRoot: string
  * reach it) — auto-generate a valid card from the agent's own identity so no
  * agent dead-ends on it. Only writes into the throwaway copy at scanRoot.
  */
-function ensureRoutingCard(scanRoot: string): boolean {
+function ensureRoutingCard(
+  scanRoot: string,
+  purposeInput?: { summary: string; capabilities: string[] },
+): boolean {
   const cardPath = path.join(scanRoot, ROUTING_CARD_PATH);
   let existingCard: Record<string, unknown> | null = null;
   try {
     const existing = JSON.parse(fs.readFileSync(cardPath, "utf8")) as unknown;
-    if (isRecord(existing) && routingCardProblem(existing) === null) existingCard = existing;
+    if (isRecord(existing)) existingCard = existing;
   } catch {
     /* missing/invalid → generate */
   }
-  if (existingCard) {
+  const purpose = String(purposeInput?.summary ?? "").trim().slice(0, 1_200);
+  const purposeCapabilities = purposeInput?.capabilities ?? [];
+  if (existingCard && purpose && purposeCapabilities.length > 0) {
+    const name = typeof existingCard.name === "string" && existingCard.name.trim()
+      ? existingCard.name.trim()
+      : path.basename(scanRoot);
+    existingCard.schemaVersion = "routing-card/2.0";
+    existingCard.id = typeof existingCard.id === "string" && existingCard.id.trim()
+      ? existingCard.id
+      : sanitizeSlug(name) || "agent";
+    existingCard.type = existingCard.type === "team" || existingCard.type === "plugin"
+      ? existingCard.type
+      : "agent";
+    existingCard.name = name;
+    existingCard.summary = purpose.slice(0, 280);
+    existingCard.capabilities = purposeCapabilities;
+    completeWorkforceResume(existingCard, scanRoot);
+    fs.mkdirSync(path.dirname(cardPath), { recursive: true });
+    fs.writeFileSync(cardPath, JSON.stringify(existingCard, null, 2) + "\n", "utf8");
+    return true;
+  }
+  if (existingCard && routingCardProblem(existingCard) === null) {
     if (!completeWorkforceResume(existingCard, scanRoot)) return false;
     fs.writeFileSync(cardPath, JSON.stringify(existingCard, null, 2) + "\n", "utf8");
     return true;
@@ -368,14 +392,16 @@ function ensureRoutingCard(scanRoot: string): boolean {
       /* try next candidate */
     }
   }
-  const summary = (tagline || localizedEn || name).slice(0, 280);
+  const summary = (purpose || tagline || localizedEn || name).slice(0, 280);
   const card = {
     schemaVersion: "routing-card/2.0",
     id: sanitizeSlug(name) || "agent",
     type: "agent",
     name,
     summary,
-    capabilities: deriveRoutingCapabilities(`${name} ${tagline} ${localizedEn}`),
+    capabilities: purposeCapabilities.length > 0
+      ? purposeCapabilities
+      : deriveRoutingCapabilities(`${name} ${tagline} ${localizedEn}`),
     routing_status: "searchable",
     generated_by: "agentlas-desktop-publish-autofix",
   };
@@ -466,7 +492,10 @@ export async function packageAndReviewCloudAgent(
         autofixCleanup = autofix.cleanup;
         // A missing/invalid routing card is a hard blocker added outside the scan
         // (the loop can't reach it) — auto-generate one so no agent dead-ends on it.
-        if (ensureRoutingCard(scanRoot)) {
+        const purposeInput = input.purposeAnswer
+          ? await normalizePurposeAnswerWithSubmitterRuntime(scanRoot, input.purposeAnswer)
+          : undefined;
+        if (ensureRoutingCard(scanRoot, purposeInput)) {
           opts?.onStage?.("routing-card");
           remediationActions.push({ file: ROUTING_CARD_PATH, action: "rewritten", detail: "auto-generated routing card" });
         }
@@ -1936,6 +1965,64 @@ async function generateLocalizedListingWithSubmitterRuntime(
     return localizedListingProblems(localized).length === 0 ? localized : undefined;
   } catch {
     return undefined;
+  }
+}
+
+async function normalizePurposeAnswerWithSubmitterRuntime(
+  rootPath: string,
+  answer: string,
+): Promise<{ summary: string; capabilities: string[] }> {
+  const source = answer.trim().slice(0, 1_200);
+  const deterministic = {
+    summary: source.slice(0, 280),
+    capabilities: deriveRoutingCapabilities(source),
+  };
+  if (!source) return deterministic;
+  try {
+    const { pickActiveRunner } = await import("../mcp/client");
+    const picked = await pickActiveRunner();
+    if (!picked) return deterministic;
+    const result = await picked.runner(
+      {
+        systemPrompt: [
+          "Convert one ordinary-language answer into internal Agentlas routing metadata.",
+          "Return strict JSON only: {\"summary\":\"one factual English sentence\",\"capabilities\":[\"english_verb_object\"]}.",
+          "Use 2-8 concrete English verb_object capabilities in snake_case, each with at least two words.",
+          "Preserve the user's meaning. Do not invent tools, permissions, runtimes, languages, modalities, or claims.",
+        ].join("\n"),
+        history: [],
+        userPrompt: source,
+        backendLabel: picked.label,
+        model: picked.active.model ?? undefined,
+        longContext: picked.active.longContextEnabled,
+        effort: picked.active.effort ?? undefined,
+        permission: "read",
+        cwd: rootPath,
+        locale: "en",
+      },
+      {
+        onPartial: () => {},
+        onStatus: () => {},
+        onTool: () => {},
+      },
+    );
+    const candidate = result.text.match(/\{[\s\S]*\}/)?.[0];
+    const parsed = candidate ? JSON.parse(candidate) as unknown : null;
+    if (!isRecord(parsed)) return deterministic;
+    const summary = typeof parsed.summary === "string"
+      ? parsed.summary.trim().slice(0, 280)
+      : "";
+    const capabilities = Array.isArray(parsed.capabilities)
+      ? Array.from(new Set(
+          parsed.capabilities
+            .map((value) => String(value).trim().toLowerCase())
+            .filter((value) => ROUTING_CARD_CAPABILITY_RE.test(value)),
+        )).slice(0, 8)
+      : [];
+    if (!summary || /[가-힣]/.test(summary) || capabilities.length === 0) return deterministic;
+    return { summary, capabilities };
+  } catch {
+    return deterministic;
   }
 }
 
