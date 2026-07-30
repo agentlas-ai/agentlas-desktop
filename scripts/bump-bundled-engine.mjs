@@ -132,7 +132,9 @@ if (leftovers.length) {
 // 릴리스 문서에도 같은 핀 문장이 박혀 있다("This release binds Agentlas OS vX at Y.").
 // `release-preflight` 가 **현재 릴리스 섹션에만** 그 문장을 요구하므로, 과거 기록은
 // 절대 건드리지 않는다 — 옛 릴리스가 옛 엔진을 물었다는 것은 사실이고 지워선 안 된다.
-const bindingLine = (version, sha) => `This release binds Agentlas OS v${version} at ${sha}.`;
+const bindingLinePattern = (version, sha) => new RegExp(
+  `This release binds Agentlas OS v${version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} at(\\s+)${sha}\\.`,
+);
 const currentSection = (body, header, next) => {
   const start = body.indexOf(header);
   if (start === -1) return null;
@@ -160,15 +162,18 @@ for (const target of docTargets) {
   const region = currentSection(body.slice(from), body.slice(from, from + 4), target.next);
   const sectionEnd = region ? from + region.end : body.length;
   const section = body.slice(from, sectionEnd);
-  const oldLine = bindingLine(currentVersion, previousCommit);
-  if (!section.includes(oldLine)) {
+  const oldLine = bindingLinePattern(currentVersion, previousCommit);
+  if (!oldLine.test(section)) {
     fail(`${target.file} 현재 릴리스 섹션에 옛 바인딩 문장이 없다 — 손으로 확인하라`);
   }
   // 섹션 안에 같은 문장이 여러 번 있을 수 있다(같은 블록에 이전 항목이 섞인 경우).
   // **첫 번째**만 바꾼다. 그게 이 릴리스 자신의 바인딩이다.
   writeFileSync(
     file,
-    body.slice(0, from) + section.replace(oldLine, bindingLine(latestVersion, commit)) + body.slice(sectionEnd),
+    body.slice(0, from) + section.replace(
+      oldLine,
+      (_match, whitespace) => `This release binds Agentlas OS v${latestVersion} at${whitespace}${commit}.`,
+    ) + body.slice(sectionEnd),
   );
 }
 

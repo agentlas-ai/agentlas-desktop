@@ -2,8 +2,8 @@
 
 ## 0.9.29 — 2026-07-29
 
-This release binds Agentlas OS v1.1.80 at
-3074c347fb837c8c5f5999bdb859302765b54d57.
+This release binds Agentlas OS v1.1.83 at
+3defe45b137fea36e7b04ae3087fd7e56990a365.
 Passing the source gates does not prove a published release; the Releases page
 stays the authority for what is actually downloadable.
 
@@ -12,9 +12,11 @@ stays the authority for what is actually downloadable.
   revision, so the app no longer blames another machine for every `412`.
   Conflict messages include the server asset identity and tell the owner
   whether to restore once or compare a newer copy.
-- **The bundled engine moves to v1.1.80.** Project recall can regenerate a stale
+- **The bundled engine moves to v1.1.83.** Project recall can regenerate a stale
   local corpus from every supported Agentlas surface while keeping the
   immutable runtime pin aligned across macOS, Windows, and Linux release jobs.
+  Build, upload, and Workforce fallback paths now use the same routing-card and
+  normalized WorkOrder contract as the current Agentlas OS release.
 
 ## 0.9.28 — 2026-07-29
 

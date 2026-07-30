@@ -72,8 +72,8 @@ authority for which version is actually public, stable, and downloadable.
 - **2026-07-29 · v0.9.29 — Cloud conflicts say whether to restore or compare** —
   a first save without a local receipt is no longer described as a change from
   another machine, and conflict details now identify the exact server revision.
-  This release binds Agentlas OS v1.1.80 at
-  3074c347fb837c8c5f5999bdb859302765b54d57.
+  This release binds Agentlas OS v1.1.83 at
+  3defe45b137fea36e7b04ae3087fd7e56990a365.
   Passing these source gates does not prove a published release: the Releases
   page stays the authority for what is actually downloadable.
 - **2026-07-29 · v0.9.28 — A credential is where it lives, not a word in its

@@ -317,11 +317,16 @@ function completeWorkforceResume(card: Record<string, unknown>, scanRoot: string
     roles: ids(existing.roles, "role", 4),
     communities: ids(existing.communities, "community", 5).length
       ? ids(existing.communities, "community", 5)
-      : ids(domains, "community", 5),
+      : ids(domains, "community", 5).length
+        ? ids(domains, "community", 5)
+        : ids(capabilities, "community", 1),
     skills: ids(existing.skills, "skill", 12).length
       ? ids(existing.skills, "skill", 12)
       : ids(capabilities, "skill", 12),
     knowledge,
+    ...(Array.isArray(existing.tools) ? { tools: existing.tools } : {}),
+    ...(Array.isArray(existing.authorities) ? { authorities: existing.authorities } : {}),
+    ...(Array.isArray(existing.forbiddenAuthorities) ? { forbiddenAuthorities: existing.forbiddenAuthorities } : {}),
     modalities: Array.isArray(existing.modalities) ? existing.modalities : [],
     languages: Array.isArray(existing.languages) ? existing.languages : [],
   };
@@ -360,17 +365,20 @@ function ensureRoutingCard(
       ? existingCard.type
       : "agent";
     existingCard.name = name;
-    existingCard.summary = purpose.slice(0, 280);
+    existingCard.summary = purpose.slice(0, 240);
     existingCard.capabilities = purposeCapabilities;
     completeWorkforceResume(existingCard, scanRoot);
     fs.mkdirSync(path.dirname(cardPath), { recursive: true });
     fs.writeFileSync(cardPath, JSON.stringify(existingCard, null, 2) + "\n", "utf8");
     return true;
   }
-  if (existingCard && routingCardProblem(existingCard) === null) {
-    if (!completeWorkforceResume(existingCard, scanRoot)) return false;
-    fs.writeFileSync(cardPath, JSON.stringify(existingCard, null, 2) + "\n", "utf8");
-    return true;
+  if (existingCard) {
+    const changed = completeWorkforceResume(existingCard, scanRoot);
+    if (routingCardProblem(existingCard) === null) {
+      if (!changed) return false;
+      fs.writeFileSync(cardPath, JSON.stringify(existingCard, null, 2) + "\n", "utf8");
+      return true;
+    }
   }
   let name = path.basename(scanRoot);
   let tagline = "";
@@ -392,7 +400,7 @@ function ensureRoutingCard(
       /* try next candidate */
     }
   }
-  const summary = (purpose || tagline || localizedEn || name).slice(0, 280);
+  const summary = (purpose || tagline || localizedEn || name).slice(0, 240);
   const card = {
     schemaVersion: "routing-card/2.0",
     id: sanitizeSlug(name) || "agent",
@@ -1601,6 +1609,7 @@ function routingCardProblem(card: Record<string, unknown>): string | null {
   if (card.type !== "agent" && card.type !== "team" && card.type !== "plugin") return "type must be agent, team, or plugin";
   if (typeof card.name !== "string" || !card.name.trim()) return "name must be a non-empty string";
   if (typeof card.summary !== "string" || !card.summary.trim()) return "summary must be a non-empty string";
+  if (card.summary.length > 240) return "summary must be at most 240 characters";
   if (!Array.isArray(card.capabilities) || card.capabilities.length === 0) {
     return "capabilities must be a non-empty array";
   }
@@ -1611,6 +1620,31 @@ function routingCardProblem(card: Record<string, unknown>): string | null {
   }
   if (typeof card.routing_status !== "string" || !ROUTING_CARD_STATUSES.has(card.routing_status)) {
     return "routing_status must be draft, searchable, candidate, routing_ready, or trusted";
+  }
+  if (!isRecord(card.workforce)) return "workforce must be a complete semantic resume";
+  const workforce = card.workforce;
+  const semanticLists: Array<[string, RegExp, number, number]> = [
+    ["communities", /^community:[a-z0-9][a-z0-9-]*$/, 1, 5],
+    ["roles", /^role:[a-z0-9][a-z0-9-]*$/, 0, 4],
+    ["skills", /^skill:[a-z0-9][a-z0-9-]*$/, 1, 12],
+    ["knowledge", /^knowledge:[a-z0-9][a-z0-9-]*$/, 0, 256],
+  ];
+  for (const [field, pattern, minimum, maximum] of semanticLists) {
+    const values = workforce[field];
+    if (!Array.isArray(values) || values.length < minimum || values.length > maximum) {
+      return `workforce.${field} must contain ${minimum}-${maximum} English semantic IDs`;
+    }
+    if (new Set(values).size !== values.length ||
+        values.some((value) => typeof value !== "string" || !pattern.test(value))) {
+      return `workforce.${field} contains an invalid or duplicate semantic ID`;
+    }
+  }
+  for (const field of ["languages", "modalities"]) {
+    const values = workforce[field];
+    if (!Array.isArray(values) || new Set(values).size !== values.length ||
+        values.some((value) => typeof value !== "string")) {
+      return `workforce.${field} must be a unique string array`;
+    }
   }
   return null;
 }
@@ -1974,7 +2008,7 @@ async function normalizePurposeAnswerWithSubmitterRuntime(
 ): Promise<{ summary: string; capabilities: string[] }> {
   const source = answer.trim().slice(0, 1_200);
   const deterministic = {
-    summary: source.slice(0, 280),
+    summary: source.slice(0, 240),
     capabilities: deriveRoutingCapabilities(source),
   };
   if (!source) return deterministic;
@@ -2010,7 +2044,7 @@ async function normalizePurposeAnswerWithSubmitterRuntime(
     const parsed = candidate ? JSON.parse(candidate) as unknown : null;
     if (!isRecord(parsed)) return deterministic;
     const summary = typeof parsed.summary === "string"
-      ? parsed.summary.trim().slice(0, 280)
+      ? parsed.summary.trim().slice(0, 240)
       : "";
     const capabilities = Array.isArray(parsed.capabilities)
       ? Array.from(new Set(

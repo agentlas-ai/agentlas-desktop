@@ -16,12 +16,12 @@
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
     "targetSchemaVersion": 81,
-    "bundledRuntimeVersion": "1.1.80"
+    "bundledRuntimeVersion": "1.1.83"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.1.80",
-    "commit": "3074c347fb837c8c5f5999bdb859302765b54d57"
+    "ref": "v1.1.83",
+    "commit": "3defe45b137fea36e7b04ae3087fd7e56990a365"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
