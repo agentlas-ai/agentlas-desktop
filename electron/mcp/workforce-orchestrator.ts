@@ -1406,6 +1406,18 @@ export function validateWorkOrder(value: unknown): JsonObject {
   const positivelyScopedCommunities = new Set<string>();
   for (const [index, raw] of slots.entries()) {
     const slot = objectValue(raw, "role slot");
+    // An absent list-valued slot field IS the empty constraint (2026-07-30):
+    // normalize (absent -> []) BEFORE validation and before the order is
+    // digested or echoed downstream, so a lean-form author and a full-form
+    // author produce byte-identical canonical orders.
+    for (const field of [
+      "requiredCommunities", "optionalCommunities", "excludedCommunities",
+      "requiredRoles", "requiredSkills", "optionalSkills", "requiredKnowledge",
+      "requiredToolCapabilities", "consumes", "produces", "requiredAuthorities",
+      "forbiddenAuthorities", "runtimes", "languages", "modalities",
+    ]) {
+      if (!Object.prototype.hasOwnProperty.call(slot, field)) (slot as Record<string, unknown>)[field] = [];
+    }
     assertExactDecisionKeys(
       slot,
       WORK_ORDER_SLOT_KEYS,
@@ -2757,7 +2769,7 @@ export function installedWorkforceHubMcp(): WorkforceHubMcp {
 }
 
 function workOrderExactShape(workOrderId: string): string {
-  return `${WORK_ORDER_HEADING}\n\`\`\`json\n{"schemaVersion":"${WORK_ORDER_SCHEMA}","workOrderId":"${workOrderId}","taskBrief":"<redacted goal>","redacted":true,"ontologyVersion":"${WORKFORCE_ONTOLOGY_VERSION}","roleSlots":[{"slotId":"slot:<id>","title":"<job title>","task":"<bounded responsibility>","cardinality":1,"criticality":"required","requiredCommunities":[],"optionalCommunities":[],"excludedCommunities":[],"requiredRoles":[],"requiredSkills":[],"optionalSkills":[],"requiredKnowledge":[],"requiredToolCapabilities":[],"consumes":[],"produces":[],"requiredAuthorities":[],"forbiddenAuthorities":[],"runtimes":[],"languages":[],"modalities":[],"allowedEntityKinds":["agent","team"]}],"edges":[],"forbiddenCommunities":[],"selectionPolicy":{"minimumCandidatesPerSlot":5,"maximumCandidatesPerSlot":20,"allowHistoryEvidence":false}}\n\`\`\``;
+  return `${WORK_ORDER_HEADING}\n\`\`\`json\n{"schemaVersion":"${WORK_ORDER_SCHEMA}","workOrderId":"${workOrderId}","taskBrief":"<redacted goal>","redacted":true,"ontologyVersion":"${WORKFORCE_ONTOLOGY_VERSION}","roleSlots":[{"slotId":"slot:<id>","title":"<job title>","task":"<bounded responsibility>","cardinality":1,"criticality":"required","requiredCommunities":[],"requiredSkills":[],"languages":[],"allowedEntityKinds":["agent","team"]}],"edges":[],"forbiddenCommunities":[],"selectionPolicy":{"minimumCandidatesPerSlot":5,"maximumCandidatesPerSlot":20,"allowHistoryEvidence":false}}\n\`\`\``;
 }
 
 function selectionExactShape(modelId: string, runtimeId: string): string {
@@ -2771,7 +2783,7 @@ function workOrderSchemaRequirements(workOrderId: string): string[] {
     `The pinned Core ontology raw JSON sha256 is ${WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256}.`,
     `workOrderId must be exactly ${workOrderId}`,
     "workOrderId and every concept/reference ID must match [A-Za-z0-9][A-Za-z0-9._:/@-]{1,255}. taskBrief is limited to 4000 characters; every role slot title to 160 and task to 2000 characters. Each ID array is limited to 256 unique items.",
-    "roleSlots must contain 1 through 32 items. Every role slot must include slotId, title, task, cardinality, criticality, requiredCommunities, optionalCommunities, excludedCommunities, requiredRoles, requiredSkills, optionalSkills, requiredKnowledge, requiredToolCapabilities, consumes, produces, requiredAuthorities, forbiddenAuthorities, runtimes, languages, modalities, and allowedEntityKinds. Empty arrays must still be authored; the host will not default them.",
+    "roleSlots must contain 1 through 32 items. Every role slot must include slotId, title, task, cardinality, criticality, and allowedEntityKinds. Constrain the hire only through requiredCommunities, optionalCommunities, excludedCommunities, requiredSkills, optionalSkills, requiredKnowledge, runtimes, and languages, and only when the constraint is genuine; any list field you leave out is the empty constraint (the host normalizes absent to []). Never author requiredToolCapabilities, requiredAuthorities, forbiddenAuthorities, consumes, produces, requiredRoles, or modalities — tools, authorities, and modalities attach to the executing runtime, not the agent card; describe ordinary inputs/outputs in the task text and inter-slot handoffs in edges.",
     "roleSlots.cardinality must be an integer from 1 through 16. criticality must be exactly required or optional.",
     "minimumEvidenceLevel, when present, must be exactly declared, checked, demonstrated, or attested.",
     "allowedEntityKinds must be a nonempty unique subset of agent and team. group is an ontology/discovery classification only and is not executable in this Workforce runtime.",
