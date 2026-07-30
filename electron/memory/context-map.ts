@@ -20,6 +20,10 @@ type CodeMapResult = {
   schemaVersion?: string;
   defIndex?: unknown;
   refIndex?: unknown;
+  verificationGraph?: {
+    schemaVersion?: string;
+    graphDigest?: string;
+  };
 };
 
 function contextLaunch(args: string[]): {
@@ -57,6 +61,8 @@ function hasCanonicalCodeMap(projectPath: string): boolean {
       && typeof payload.defIndex === "object"
       && payload.refIndex !== null
       && typeof payload.refIndex === "object"
+      && payload.verificationGraph?.schemaVersion === "agentlas.verification-map.v1"
+      && /^sha256:[0-9a-f]{64}$/.test(payload.verificationGraph.graphDigest ?? "")
     );
   } catch {
     return false;
@@ -65,7 +71,8 @@ function hasCanonicalCodeMap(projectPath: string): boolean {
 
 /**
  * Refresh through the public Core command and return true only after the
- * canonical v2 map is present. Process creation is not a refresh receipt.
+ * canonical v2 map with the verification graph is present. Process creation
+ * is not a refresh receipt.
  */
 export function triggerProjectContextMapRefresh(projectPath: string): boolean {
   if (!verifyActivatedFolderIdentity(projectPath)) return false;
