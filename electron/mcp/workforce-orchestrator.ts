@@ -96,6 +96,7 @@ export const WORKFORCE_CORE_COVERAGE_GAP_CODES = [
   // discriminate — it can only empty the menu. Such a requirement is demoted to
   // a ranking signal and reported here, so a stated contract is never silently
   // unenforced.
+  "gap:requirement-vocabulary-unsupported:community",
   "gap:requirement-vocabulary-unsupported:role",
   "gap:requirement-vocabulary-unsupported:skill",
   "gap:requirement-vocabulary-unsupported:knowledge",
@@ -110,7 +111,6 @@ export const WORKFORCE_CORE_COVERAGE_GAP_CODES = [
   // on 2026-07-30 when its always-hard gate was measured inverted (it excluded
   // every relevant candidate; prepare-time permission pins are the real
   // enforcement).
-  "gap:requirement-vocabulary-unsupported:community",
   "gap:candidate-contract-invalid",
   "gap:requirement-vocabulary-unsupported:consumed-artifact",
   "gap:requirement-vocabulary-unsupported:produced-artifact",
@@ -242,11 +242,12 @@ const WORKFORCE_LEADER_SAFE_RUNTIME_KINDS = new Set<RuntimeKind>([
 export function isWorkforceLeaderRuntimeAllowed(kind: RuntimeKind): boolean {
   return WORKFORCE_LEADER_SAFE_RUNTIME_KINDS.has(kind);
 }
-const WORKFORCE_ONTOLOGY_MENU = [
-  "Controlled communities: community:software-engineering, community:backend-engineering, community:frontend-engineering, community:database-engineering, community:payments-engineering, community:quality-engineering, community:security-engineering, community:data-engineering, community:ai-engineering, community:devops, community:product-design, community:research, community:marketing, community:finance, community:corporate-development, community:insurance, community:insurance-actuarial, community:insurance-claims, community:insurance-underwriting, community:human-resources, community:information-technology, community:legal, community:travel, community:operations, community:agent-systems.",
-  "Controlled roles: role:software-architect, role:backend-engineer, role:frontend-engineer, role:database-engineer, role:payments-engineer, role:quality-engineer, role:security-engineer, role:ontology-architect, role:agent-runtime-engineer, role:researcher, role:ma-diligence-lead, role:insurance-actuary, role:claims-diligence-specialist, role:underwriting-diligence-specialist, role:travel-planner.",
-  "Canonical skills: skill:software-architecture, skill:api-design, skill:server-implementation, skill:frontend-implementation, skill:data-modeling, skill:database-querying, skill:billing-integration, skill:transaction-integrity, skill:test-design, skill:verification, skill:security-review, skill:ontology-modeling, skill:knowledge-graph-design, skill:multi-agent-orchestration, skill:runtime-integration, skill:evidence-synthesis, skill:deal-diligence, skill:valuation, skill:actuarial-reserving, skill:solvency-analysis, skill:claims-liability-assessment, skill:underwriting-portfolio-analysis, skill:travel-planning.",
-  "Canonical tool capabilities: tool:file-system, tool:file-read, tool:file-write, tool:shell, tool:web-search, tool:browser, tool:mongodb, tool:database, tool:github, tool:payments.",
+const WORKFORCE_ONTOLOGY_GUIDE = [
+  "Roles, communities, skills and knowledge are open-world English semantic IDs. The following values are seed aliases and graph anchors, never allowlists. Author a new faithful namespaced ID when no seed expresses the work.",
+  "Community seed examples: community:software-engineering, community:backend-engineering, community:frontend-engineering, community:database-engineering, community:payments-engineering, community:quality-engineering, community:security-engineering, community:data-engineering, community:ai-engineering, community:devops, community:product-design, community:research, community:marketing, community:finance, community:corporate-development, community:insurance, community:human-resources, community:information-technology, community:legal, community:travel, community:operations, community:agent-systems.",
+  "Role seed examples: role:software-architect, role:backend-engineer, role:frontend-engineer, role:database-engineer, role:payments-engineer, role:quality-engineer, role:security-engineer, role:ontology-architect, role:agent-runtime-engineer, role:researcher, role:travel-planner.",
+  "Skill seed examples: skill:software-architecture, skill:api-design, skill:server-implementation, skill:frontend-implementation, skill:data-modeling, skill:test-design, skill:verification, skill:ontology-modeling, skill:knowledge-graph-design, skill:evidence-synthesis, skill:travel-planning.",
+  "Tool capability seed examples: tool:file-system, tool:file-read, tool:file-write, tool:shell, tool:web-search, tool:browser, tool:mongodb, tool:database, tool:github, tool:payments. Tool binding remains a prepare-time runtime concern.",
   "Canonical input modalities: modality:text, modality:image, modality:audio, modality:video. An attached image that a slot must inspect requires modality:image.",
   "Canonical community aliases in this snapshot: payment maps to community:payments-engineering; security maps to community:security-engineering.",
   "Legacy Hub profiles may legitimately have empty roles, skills or toolCapabilities. Every required* field is a non-negotiable hard eligibility gate: use it only when a matching catalog declaration is mandatory, never merely because that expertise would be useful for the work.",
@@ -2779,10 +2780,10 @@ function selectionExactShape(modelId: string, runtimeId: string): string {
 function workOrderSchemaRequirements(workOrderId: string): string[] {
   return [
     "Return the direct agentlas.workforce-work-order.v1 object. Do not emit schemaVersion=agentlas.workforce-leader-call.v1 and do not emit toolCall, name, or arguments wrappers. The host invokes workforce.search_candidates with your exact validated WorkOrder.",
-    `ontologyVersion must be exactly ${WORKFORCE_ONTOLOGY_VERSION}.`,
-    `The pinned Core ontology raw JSON sha256 is ${WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256}.`,
+    `ontologyVersion must be exactly ${WORKFORCE_ONTOLOGY_VERSION}; this pins graph relation/normalization semantics, not a finite vocabulary.`,
+    `The Core ontology seed/alias snapshot raw JSON sha256 is ${WORKFORCE_ONTOLOGY_SNAPSHOT_SHA256}.`,
     `workOrderId must be exactly ${workOrderId}`,
-    "workOrderId and every concept/reference ID must match [A-Za-z0-9][A-Za-z0-9._:/@-]{1,255}. taskBrief is limited to 4000 characters; every role slot title to 160 and task to 2000 characters. Each ID array is limited to 256 unique items.",
+    "Write taskBrief, slot title/task and all discovery-facing semantic IDs in English, faithfully translating a non-English user request before transmission. workOrderId and every concept/reference ID must match [A-Za-z0-9][A-Za-z0-9._:/@-]{1,255}. taskBrief is limited to 4000 characters; every role slot title to 160 and task to 2000 characters. Each ID array is limited to 256 unique items.",
     "roleSlots must contain 1 through 32 items. Every role slot must include slotId, title, task, cardinality, criticality, and allowedEntityKinds. Constrain the hire only through requiredCommunities, optionalCommunities, excludedCommunities, requiredSkills, optionalSkills, requiredKnowledge, runtimes, and languages, and only when the constraint is genuine; any list field you leave out is the empty constraint (the host normalizes absent to []). Never author requiredAuthorities, forbiddenAuthorities, consumes, produces, requiredRoles, or modalities — authorities and modalities attach to the executing runtime, not the agent card; describe ordinary inputs/outputs in the task text and inter-slot handoffs in edges. requiredToolCapabilities is different on this host: it is the execution tool-binding request (capabilityBindings covers exactly these entries with scoped host tools), so author it only when the worker itself must invoke that exact host tool — matching demotes it, so it can no longer empty a menu.",
     "roleSlots.cardinality must be an integer from 1 through 16. criticality must be exactly required or optional.",
     "minimumEvidenceLevel, when present, must be exactly declared, checked, demonstrated, or attested.",
@@ -2803,16 +2804,16 @@ function workOrderSystemPrompt(modelId: string, runtimeId: string, benchmarkMode
     "This is a semantic HR/job-analysis decision: express roles, skills, knowledge, tool capabilities, artifacts, authority and handoffs.",
     "forbiddenCommunities is not the inverse of selected communities and not an exhaustive list of unused professions. Add a global or slot exclusion only when the user explicitly prohibited that community or when participation is inherently incompatible with the assignment. Empty exclusion arrays are correct when no such negative constraint exists.",
     "Never forbid or exclude a broad ancestor, descendant, adjacent, or legitimately co-occurring community merely because a narrower job family was selected. Check every exclusion against all requiredCommunities and optionalCommunities before returning JSON.",
-    "Do not turn important-but-negotiable expertise into requiredRoles, requiredSkills, requiredKnowledge or requiredToolCapabilities; those fields demand matching catalog evidence and hard-reject profiles without it. requiredRoles must default to []; there is no optionalRoles field, so express desired role fit through title, task, optionalCommunities, and optionalSkills unless the exact role declaration is truly execution-impossible to omit.",
+    "Do not turn important-but-negotiable expertise into requiredRoles, requiredSkills, requiredKnowledge or requiredToolCapabilities. Semantic fields guide graph retrieval and ranking; title/task carry the full meaning. requiredRoles must default to []; there is no optionalRoles field, so express desired role fit through title, task, optionalCommunities, and optionalSkills unless exact declared evidence is genuinely indispensable.",
     "A requiredToolCapabilities entry means the selected worker itself must invoke that exact host tool. Designing a database, writing tests, or discussing a tool does not by itself require tool:database, tool:shell, or another tool declaration.",
     "consumes and produces are hard candidate-profile evidence gates. Use them only when a candidate must already declare that exact artifact contract. Describe ordinary workflow handoffs in the slot task and WorkOrder edges/artifactKinds instead of hard-filtering candidates with consumes or produces.",
-    "languages and modalities are also exact candidate-profile evidence gates. Default both to []; add a language only when the user explicitly requires it, and add a modality only for an actual local input modality supplied by the host. Ordinary text reasoning does not require modality:text.",
+    "languages and modalities are delivery/runtime metadata, never agent identity. Default both to []; add a language only when the user explicitly requires that delivery language, and add a modality only for an actual local non-text input supplied by the host. They must not block an otherwise relevant agent call.",
     "Recall self-check: default requiredRoles, requiredSkills, requiredKnowledge, requiredToolCapabilities, consumes, produces, languages, and modalities to [] unless absence of that exact declared evidence makes execution impossible. Put negotiable fit in title/task, optionalCommunities, optionalSkills, and edge artifactKinds.",
     "A specialized named business, regulated, scientific, or operational domain accountability must keep its own accountable slot; never collapse it into a generic software, engineering, research, or review slot merely because implementation is involved.",
     "Encode independent assurance structurally: connect an independent verifier, auditor, challenger, or reviewer to the post it assures using a reviews edge. Do not use coordinatesWith for independence. A reviews edge requires distinct selected AgentRelease IDs across its two posts.",
     "Before returning JSON, self-check that every primary domain responsibility has an accountable slot, every exclusion is explicit or inherently incompatible and does not conflict with job-family lineage, requiredRoles is empty unless strictly indispensable, and every other hard field passes the execution-impossible test.",
     "Do not name or select agents. Do not use popularity, ratings, invocation history, revenue or prior success as fit evidence.",
-    WORKFORCE_ONTOLOGY_MENU,
+    WORKFORCE_ONTOLOGY_GUIDE,
     "The Hub receives this object, so taskBrief and role tasks must be redacted of local paths, secrets, account data and private memory.",
     benchmarkMode ? "Benchmark mode: create at least two genuinely distinct required role slots so delegation and synthesis are observable." : "",
     `Decision model identity for later selection: ${modelId}`,
@@ -2835,7 +2836,7 @@ function workOrderRefinementSystemPrompt(workOrderId: string): string {
     "Any independently accountable assurance, audit, challenge, verification, or review responsibility must be connected to the work it assures with a reviews edge, never coordinatesWith. reviews is an executable separation-of-duties constraint: its two posts must receive distinct AgentRelease IDs.",
     "Before returning JSON, self-check that each explicitly named specialized domain responsibility has an independent accountable slot and every hard gate still satisfies the execution-impossible or exact-profile-declaration test.",
     "The host will validate your model-authored semantic body exactly and will not add slots, defaults, constraints, candidates, or substitutions. It only rebinds the five immutable transaction-envelope fields from the prior validated WorkOrder. At most two total semantic WorkOrder refinements are allowed.",
-    WORKFORCE_ONTOLOGY_MENU,
+    WORKFORCE_ONTOLOGY_GUIDE,
     ...workOrderSchemaRequirements(workOrderId),
   ].join("\n\n");
 }

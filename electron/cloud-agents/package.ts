@@ -258,8 +258,74 @@ function deriveRoutingCapabilities(text: string): string[] {
     const cap = `${words[i]}_${words[i + 1]}`;
     if (ROUTING_CARD_CAPABILITY_RE.test(cap)) caps.push(cap);
   }
-  const unique = Array.from(new Set(caps));
-  return unique.length > 0 ? unique : ["general_assistance"];
+  return Array.from(new Set(caps));
+}
+
+function openSemanticId(value: unknown, prefix: "role" | "community" | "skill" | "knowledge"): string | null {
+  const raw = String(value ?? "").trim().toLowerCase();
+  const body = raw.startsWith(`${prefix}:`) ? raw.slice(prefix.length + 1) : raw;
+  const slug = body
+    .replace(/[_\s/]+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return slug ? `${prefix}:${slug}` : null;
+}
+
+function declaredKnowledgeIds(scanRoot: string): string[] {
+  const out: string[] = [];
+  const pending = [scanRoot];
+  let visited = 0;
+  while (pending.length > 0 && visited < MAX_FILES) {
+    const dir = pending.pop()!;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith(".") && entry.name !== ".agentlas") continue;
+      const absolute = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) pending.push(absolute);
+        continue;
+      }
+      visited += 1;
+      const relative = normalizeRelative(scanRoot, absolute);
+      if (!/(^|\/)knowledge\/[^/]+\.(?:md|markdown|txt)$/i.test(relative)) continue;
+      const concept = openSemanticId(path.basename(relative, path.extname(relative)), "knowledge");
+      if (concept && !out.includes(concept)) out.push(concept);
+      if (out.length >= 12) return out;
+    }
+  }
+  return out;
+}
+
+function completeWorkforceResume(card: Record<string, unknown>, scanRoot: string): boolean {
+  const before = JSON.stringify(card.workforce ?? null);
+  const existing = isRecord(card.workforce) ? card.workforce : {};
+  const ids = (
+    raw: unknown,
+    prefix: "role" | "community" | "skill" | "knowledge",
+    cap: number,
+  ): string[] => {
+    if (!Array.isArray(raw)) return [];
+    return Array.from(new Set(raw.map((value) => openSemanticId(value, prefix)).filter((value): value is string => Boolean(value)))).slice(0, cap);
+  };
+  const capabilities = Array.isArray(card.capabilities) ? card.capabilities : [];
+  const domains = Array.isArray(card.domains) ? card.domains : [];
+  const knowledge = Array.from(new Set([
+    ...ids(existing.knowledge, "knowledge", 12),
+    ...declaredKnowledgeIds(scanRoot),
+  ])).slice(0, 12);
+  card.workforce = {
+    roles: ids(existing.roles, "role", 4),
+    communities: ids(existing.communities, "community", 5).length
+      ? ids(existing.communities, "community", 5)
+      : ids(domains, "community", 5),
+    skills: ids(existing.skills, "skill", 12).length
+      ? ids(existing.skills, "skill", 12)
+      : ids(capabilities, "skill", 12),
+    knowledge,
+    modalities: Array.isArray(existing.modalities) ? existing.modalities : [],
+    languages: Array.isArray(existing.languages) ? existing.languages : [],
+  };
+  return JSON.stringify(card.workforce) !== before;
 }
 
 /**
@@ -270,11 +336,17 @@ function deriveRoutingCapabilities(text: string): string[] {
  */
 function ensureRoutingCard(scanRoot: string): boolean {
   const cardPath = path.join(scanRoot, ROUTING_CARD_PATH);
+  let existingCard: Record<string, unknown> | null = null;
   try {
     const existing = JSON.parse(fs.readFileSync(cardPath, "utf8")) as unknown;
-    if (isRecord(existing) && routingCardProblem(existing) === null) return false;
+    if (isRecord(existing) && routingCardProblem(existing) === null) existingCard = existing;
   } catch {
     /* missing/invalid → generate */
+  }
+  if (existingCard) {
+    if (!completeWorkforceResume(existingCard, scanRoot)) return false;
+    fs.writeFileSync(cardPath, JSON.stringify(existingCard, null, 2) + "\n", "utf8");
+    return true;
   }
   let name = path.basename(scanRoot);
   let tagline = "";
@@ -307,6 +379,7 @@ function ensureRoutingCard(scanRoot: string): boolean {
     routing_status: "searchable",
     generated_by: "agentlas-desktop-publish-autofix",
   };
+  completeWorkforceResume(card, scanRoot);
   try {
     fs.mkdirSync(path.dirname(cardPath), { recursive: true });
     fs.writeFileSync(cardPath, JSON.stringify(card, null, 2) + "\n", "utf8");
@@ -1462,14 +1535,19 @@ function readRoutingCard(snapshot: PackageSnapshot): {
     }
     const problem = routingCardProblem(parsed);
     if (problem) {
+      const needsPurpose = problem.startsWith("capabilities must");
       return {
         finding: {
-          id: "routing-card-invalid",
+          id: needsPurpose ? "agent-purpose-missing" : "routing-card-invalid",
           severity: "blocker",
           category: "structure",
           file: ROUTING_CARD_PATH,
-          message: `Routing card is invalid: ${problem}`,
-          remediation: "Fix .agentlas/routing-card.json before publishing.",
+          message: needsPurpose
+            ? "What concrete work should this agent complete, and what should the finished result look like?"
+            : `Routing card is invalid: ${problem}`,
+          remediation: needsPurpose
+            ? "Answer in ordinary words. Agentlas will turn the answer into the internal agent description and retry the upload."
+            : "Fix .agentlas/routing-card.json before publishing.",
         },
       };
     }

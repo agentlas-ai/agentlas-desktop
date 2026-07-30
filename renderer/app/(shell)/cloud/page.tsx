@@ -716,6 +716,25 @@ function classifyUploadFailure(
   }
   if (json && json.status === "blocked") {
     const findings = isRecord(json.review) && Array.isArray(json.review.findings) ? json.review.findings : [];
+    const purposeQuestion = findings.find(
+      (finding) => isRecord(finding) && finding.id === "agent-purpose-missing",
+    );
+    if (isRecord(purposeQuestion)) {
+      return {
+        title: ko ? "한 가지만 알려주세요" : "One quick question",
+        issue: {
+          severity: "warning",
+          message: typeof purposeQuestion.message === "string"
+            ? purposeQuestion.message
+            : ko
+              ? "이 에이전트가 구체적으로 어떤 일을 끝내야 하고, 완성된 결과는 어떤 모습이어야 하나요?"
+              : "What concrete work should this agent complete, and what should the finished result look like?",
+          remediation: ko
+            ? "일반적인 말로 답하면 Agentlas가 내부 설명을 자동으로 채우고 다시 업로드합니다."
+            : "Answer in ordinary words. Agentlas will fill its internal description and retry.",
+        },
+      };
+    }
     const onlyRoutingCard =
       findings.length > 0 &&
       findings.every((f) => isRecord(f) && typeof f.id === "string" && f.id.startsWith("routing-card"));
