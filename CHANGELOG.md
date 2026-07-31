@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.9.37 — 2026-07-31
+
+This release binds Agentlas OS v1.1.91 at
+791e69116ce58f867db47f2bb1bc896fcd46c62e.
+Passing the source gates does not prove a GitHub release or installer; the
+Releases page stays the authority for what is actually downloadable.
+
+0.9.36 built these changes but stopped at the update-feed promotion step, so
+they were never delivered as a complete release. 0.9.37 carries the same work
+and publishes it properly.
+
+- **One finishes the job instead of reporting that it stopped.** A run that
+  ends early is now diagnosed and retried by One itself with a changed
+  approach, up to two automatic attempts, and the person is involved only
+  when retrying cannot help or would be unsafe. A run that may already have
+  acted outside the app is never repeated automatically, because there is no
+  idempotency key that could collapse a duplicate send.
+- **The judgment engine reaches the model again on CLI runtimes.** It asked
+  for a boundary that every CLI refuses, so on Claude Code, Codex, Gemini,
+  and Grok every verdict silently fell back to its conservative default —
+  indistinguishable from a real decision. Judgment now requests tool-free
+  isolation, which is the stricter boundary, and uses any connected runtime
+  that can prove it.
+- **One no longer quotes its own words back as yours.** Prompts One sends on
+  the user's behalf are recorded as system turns, so reopening a conversation
+  cannot show product wording as something the person typed, and such a
+  prompt never becomes the conversation title.
+- **Creating a site shows what is actually happening.** Progress from the
+  design team now reaches the home view for the whole run instead of being
+  discarded until the first screen lands, live stage names replace a fixed
+  sentence, and a failed create keeps its reason and a retry on screen rather
+  than flashing a toast that disappears.
+- **Build refuses to reuse a stale package.** Package reuse is blocked when
+  the captured build no longer matches the session it belongs to.
+
 ## 0.9.36 — 2026-07-31
 
 This release binds Agentlas OS v1.1.91 at

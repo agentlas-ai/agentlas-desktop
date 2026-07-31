@@ -69,6 +69,22 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-31 · v0.9.37 — One finishes the job, and judgment reaches the model** —
+  A run that stops short is now diagnosed and retried by One itself with a
+  changed approach, up to two automatic attempts; the person is involved only
+  when retrying cannot help or would be unsafe, and a run that may already have
+  acted outside the app is never repeated. The judgment engine had been asking
+  for a boundary every CLI refuses, so on Claude Code, Codex, Gemini, and Grok
+  every verdict silently fell back to its default; it now requests tool-free
+  isolation and uses any connected runtime that can prove it. Prompts One sends
+  on the user's behalf are recorded as system turns instead of appearing as the
+  person's own words. Creating a site shows live progress for the whole run and
+  keeps a failure and its retry on screen. Build blocks reuse of a stale
+  package. 0.9.36 built this work but stopped at update-feed promotion, so this
+  release delivers it. This release binds Agentlas OS v1.1.91 at
+  791e69116ce58f867db47f2bb1bc896fcd46c62e. Source readiness does not prove a
+  published installer: the Releases page stays the authority for what is
+  actually downloadable.
 - **2026-07-31 · v0.9.36 — Build asks first and One stays customer-safe** —
   Build now confirms the outcome, inputs, operating context, and authority
   boundary before allocating a model or reviewing MCP connections. Its visible
