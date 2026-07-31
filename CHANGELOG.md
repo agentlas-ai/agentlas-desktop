@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.9.36 — 2026-07-31
+
+This release binds Agentlas OS v1.1.91 at
+791e69116ce58f867db47f2bb1bc896fcd46c62e.
+Passing the source gates does not prove a GitHub release or installer; the
+Releases page stays the authority for what is actually downloadable.
+
+- **Build asks before it allocates or connects.** The first user-visible turn
+  now confirms the outcome, inputs, operating context, and authority boundary.
+  Runtime selection and MCP review begin only after the user answers.
+- **Build's visible pipeline matches what the product is actually doing.**
+  Customer copy distinguishes brief confirmation, model choice, MCP review,
+  research, generation, verification, and delivery without exposing internal
+  `hep-build` or terminal protocol text.
+- **A completed build remains visible after navigation.** Cleanup tolerates an
+  older or temporarily missing preload progress bridge, so leaving Build cannot
+  crash Dashboard or make a newly registered agent appear to have vanished.
+- **One hides machine envelopes at the customer display boundary.** Proactive
+  cards, task titles, and conversation titles extract a human title from valid
+  structured data and replace unreadable system payloads with a localized
+  neutral label.
+- The transient updater recovery added in 0.9.35 remains unchanged.
+
 ## 0.9.35 — 2026-07-31
 
 This release binds Agentlas OS v1.1.91 at

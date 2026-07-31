@@ -356,16 +356,37 @@ function oneMemoryUseOnceTargetKey(target: OneMemoryUseOnceTarget): string {
   return [target.chatId, target.expectedTaskId ?? "conversation", target.expectedTaskVersion ?? "none"].join(":");
 }
 
-/** 카드 제목에 들어가는 이름 — 원문 프롬프트가 통째로 박히지 않게 마크다운을 걷어내고 짧게 자른다. */
-function briefingSourceName(raw: string): string {
-  const cleaned = raw.replace(/[*_`#>|]/g, "").replace(/\s+/g, " ").trim();
-  if (!cleaned) return raw.slice(0, 40);
+/** 카드 제목에 들어가는 이름 — 원시 시스템 봉투·마크다운·매달린 구두점을 숨기고 짧게 자른다. */
+function briefingSourceName(raw: string, locale: "ko" | "en"): string {
+  const trimmed = raw.trim();
+  if (/^[{[]/.test(trimmed)) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const record = parsed as Record<string, unknown>;
+        const candidate = [record.title, record.name, record.label, record.task, record.request]
+          .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+        if (candidate) return briefingSourceName(candidate, locale);
+      }
+      return locale === "ko" ? "현재 작업" : "Current work";
+    } catch {
+      return locale === "ko" ? "현재 작업" : "Current work";
+    }
+  }
+  const cleaned = trimmed
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/[*_`#>|{}[\]]/g, " ")
+    .replace(/\s+([:;,.!?])/g, "$1")
+    .replace(/(?:\s*[:;,\-–—|/\\])+\s*$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return locale === "ko" ? "현재 작업" : "Current work";
   return cleaned.length > 44 ? `${cleaned.slice(0, 43).trimEnd()}…` : cleaned;
 }
 
 function proactiveBriefingView(candidate: OneProactiveBriefing, locale: "ko" | "en"): DisplayBriefing {
   const ko = locale === "ko";
-  const source = briefingSourceName(candidate.source.label);
+  const source = briefingSourceName(candidate.source.label, locale);
   const copyKeys = {
     project_folder_missing: {
       eyebrow: "one.shell.proactive.project_folder_missing.eyebrow",
@@ -3014,7 +3035,7 @@ export function OneShell() {
 function TaskListButton({ item, active, locale, onOpen }: { item: OneTaskProjection; active: boolean; locale: "ko" | "en"; onOpen: (taskId: string) => void }) {
   return (
     <button type="button" className={styles.taskButton} data-active={active ? "true" : "false"} onClick={() => onOpen(item.taskId)} aria-current={active ? "page" : undefined}>
-      <strong>{item.display.title}</strong>
+      <strong>{briefingSourceName(item.display.title, locale)}</strong>
       <small>{statusLabel(item.status.value, locale, item.canonicalStatus)} · {formatTimestamp(item.status.asOf, locale)}</small>
       <span className={styles.statusDot} data-status={item.status.value} aria-hidden="true" />
     </button>
@@ -3024,7 +3045,7 @@ function TaskListButton({ item, active, locale, onOpen }: { item: OneTaskProject
 function ConversationListButton({ item, active, locale, onOpen }: { item: Chat; active: boolean; locale: "ko" | "en"; onOpen: (chatId: string) => void }) {
   return (
     <button type="button" className={styles.taskButton} data-active={active ? "true" : "false"} onClick={() => onOpen(item.id)} aria-current={active ? "page" : undefined}>
-      <strong>{item.title}</strong>
+      <strong>{briefingSourceName(item.title, locale)}</strong>
       <small>{tFor(locale, "one.shell.convlist.conversation")} · {formatTimestamp(item.updatedAt, locale)}</small>
       <span className={styles.conversationDot} aria-hidden="true" />
     </button>

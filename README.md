@@ -69,6 +69,16 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-31 · v0.9.36 — Build asks first and One stays customer-safe** —
+  Build now confirms the outcome, inputs, operating context, and authority
+  boundary before allocating a model or reviewing MCP connections. Its visible
+  stages match the actual flow, navigation after delivery no longer risks a
+  stale progress-bridge crash, and One replaces raw machine envelopes in cards
+  and lists with readable titles. The updater recovery from 0.9.35 remains in
+  place. This release binds Agentlas OS v1.1.91 at
+  791e69116ce58f867db47f2bb1bc896fcd46c62e. Source readiness does not prove a
+  published installer: the Releases page stays the authority for what is
+  actually downloadable.
 - **2026-07-31 · v0.9.35 — Native updater failures recover automatically** —
   A localized or unfamiliar macOS/Squirrel handoff error is now retryable
   instead of permanently blocking the target. If the failure arrives after

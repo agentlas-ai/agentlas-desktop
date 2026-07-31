@@ -330,6 +330,10 @@ let runtimeSessionId: string | null = null;
 let resolvedBuildRuntime: RuntimeSelection | null = null;
 let resolvedBuildRuntimePinned = false;
 let runtimeEscalationAccepted: boolean | undefined;
+// The product-owned brief is collected before allocator/MCP work. Keep the
+// answer locally until the user has also reviewed the exact runtime-bound MCP
+// plan, then use it as the first real builder turn.
+let pendingBuildBriefReply: string | null = null;
 // 런타임이 sessionId를 반환하지 않는 BYOK/Ollama도 첨부는 한 빌드에서 정확히 한 번만 보낸다.
 let attachmentsSentForBuild = false;
 // Per-build, explicit OpenCrab consent. It is set only from the conditional
@@ -400,8 +404,13 @@ export function setWorkspace(v: FsPathGrant | null) {
 export function prepareBuildHandoff(input: {
   workspace: FsPathGrant;
   request: string;
-}): { ok: true } | { ok: false; phase: "running" | "mcp-review" | "interview" } {
-  if (state.phase === "running" || state.phase === "interview" || state.phase === "mcp-review") {
+}): { ok: true } | { ok: false; phase: "running" | "mcp-review" | "runtime-approval" | "interview" } {
+  if (
+    state.phase === "running"
+    || state.phase === "interview"
+    || state.phase === "mcp-review"
+    || state.phase === "runtime-approval"
+  ) {
     return { ok: false, phase: state.phase };
   }
 
@@ -934,19 +943,25 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
 }
 
 export async function startBuild(activeRuntime?: RuntimeSelection): Promise<void> {
-  if (!state.request.trim() || !state.workspace || !state.workspaceGrant || state.phase === "running") return;
+  if (
+    !state.request.trim()
+    || !state.workspace
+    || !state.workspaceGrant
+    || ["running", "interview", "mcp-review", "runtime-approval"].includes(state.phase)
+  ) return;
   // 새 빌드 — 대화/로그/단계 초기화.
   history = [];
   runtimeSessionId = null;
   resolvedBuildRuntime = state.runtime ?? activeRuntime ?? null;
   resolvedBuildRuntimePinned = state.runtime !== null;
   runtimeEscalationAccepted = undefined;
+  pendingBuildBriefReply = null;
   state.pendingAllocation = null;
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
   autoContinues = 0;
   const generation = ++buildGeneration;
-  state.turn = 0;
+  state.turn = 1;
   state.reached = 0;
   state.result = null;
   state.registered = false;
@@ -960,14 +975,27 @@ export async function startBuild(activeRuntime?: RuntimeSelection): Promise<void
   const ko = currentLocale() === "ko";
   const reqLen = state.request.trim().length;
   const mode = state.mode || (ko ? "자동 분류" : "auto-classify");
-  state.phase = "running";
-  pushLog("stage", ko ? "빌드 엔진 확인 중" : "Resolving the build engine");
+  state.phase = "interview";
+  state.pendingQuestions = mainOwnedBuildBriefQuestions(state.mode, ko);
+  state.awaitingReply = true;
+  history.push({ role: "user", text: state.request.trim() });
+  history.push({
+    role: "assistant",
+    text: ko
+      ? "빌드 전 확인: 완료 기준, 입력, 사용 맥락, 권한 경계를 먼저 확인합니다."
+      : "Pre-build check: confirm the outcome, inputs, operating context, and authority boundary first.",
+  });
+  pushLog("stage", ko ? "빌드 요구사항 확인 — 엔진을 시작하기 전 질문" : "Confirming the build brief — questions before engine setup");
   pushLog("log", ko ? `요청 길이 ${reqLen}자 · 모드 ${mode}` : `Request length ${reqLen} chars · mode ${mode}`);
   pushLog("log", ko ? `생성 폴더 ${state.workspace}` : `Output folder ${state.workspace}`);
   if (state.attachments.length > 0) pushLog("log", ko ? `첨부 ${state.attachments.length}개: ${state.attachments.map((a) => a.name).join(", ").slice(0, 200)}` : `Attachments ${state.attachments.length}: ${state.attachments.map((a) => a.name).join(", ").slice(0, 200)}`);
   if (resolvedBuildRuntime) pushLog("log", `${ko ? "엔진" : "Engine"} ${resolvedBuildRuntime.kind}${resolvedBuildRuntime.model ? ` · ${resolvedBuildRuntime.model}` : ""}`);
+  pushLog("log", ko ? "질문 묶음에 답한 뒤에만 모델 선택과 MCP 연결 검토를 시작합니다." : "Model selection and MCP review start only after you answer this question batch.");
   commit();
+}
 
+async function prepareBuildRuntimeAndMcp(generation: number): Promise<void> {
+  const ko = currentLocale() === "ko";
   // The MCP plan is bound to the runtime it was built for, so the runtime has to
   // be FINAL before the plan exists. Resolving the allocator afterwards changed
   // the runtime under a plan that was already signed and made every escalated
@@ -1010,7 +1038,7 @@ async function loadBuildMcpPlan(generation: number): Promise<void> {
     state.mcpSelectedCandidateIds = plan.candidates.filter((candidate) => candidate.defaultSelected).map((candidate) => candidate.id);
     state.phase = "mcp-review";
     state.reached = 1;
-    pushLog("log", ko ? "MCP 추천을 준비했습니다. 한 번 확인하면 딥인터뷰를 시작합니다." : "MCP recommendations are ready. One confirmation starts the deep interview.");
+    pushLog("log", ko ? "MCP 추천을 준비했습니다. 한 번 확인하면 확인한 요구사항으로 제작을 시작합니다." : "MCP recommendations are ready. One confirmation starts creation with the brief you already approved.");
     commit();
   } catch (error) {
     if (!isCurrentBuild(generation)) return;
@@ -1044,24 +1072,33 @@ export async function approveBuildMcpPlan(selectedCandidateIds: string[]): Promi
   const allowed = new Set(state.mcpPlan.candidates.map((candidate) => candidate.id));
   state.mcpSelectedCandidateIds = [...new Set(selectedCandidateIds)].filter((id) => allowed.has(id));
   const ko = currentLocale() === "ko";
-  // The runtime was already settled before this plan was created (startBuild),
+  // The runtime was already settled before this plan was created,
   // so nothing may move it between the plan and the run.
-  const questions = mainOwnedBuildBriefQuestions(state.mode, ko);
-  state.pendingQuestions = questions;
-  state.awaitingReply = true;
-  state.phase = "interview";
-  state.turn = 1;
+  const briefReply = pendingBuildBriefReply;
+  if (!briefReply) {
+    state.pendingQuestions = [];
+    state.awaitingReply = false;
+    state.phase = "error";
+    state.errored = true;
+    state.error = {
+      kind: "build-failed",
+      message: ko
+        ? "확인한 빌드 요구사항을 불러오지 못했습니다. 요청은 유지되어 있으니 새 빌드로 다시 준비하세요."
+        : "The confirmed build brief could not be restored. Your request is still here; prepare a new build to continue.",
+    };
+    pushLog("error", state.error.message);
+    commit();
+    return;
+  }
+  state.pendingQuestions = [];
+  state.awaitingReply = false;
+  state.phase = "running";
   state.reached = Math.max(state.reached, 2);
-  history.push({ role: "user", text: state.request.trim() });
-  history.push({
-    role: "assistant",
-    text: ko
-      ? "빌드 전 확인: 완료 기준, 입력, 사용 맥락, 권한 경계를 먼저 확인합니다."
-      : "Pre-build check: confirm the outcome, inputs, operating context, and authority boundary first.",
-  });
-  pushLog("stage", ko ? "MCP 선택 승인 — 빌드 요구사항 확인" : "MCP selection approved — confirming the build brief");
-  pushLog("log", ko ? "실제 AI 엔진을 호출하기 전에 질문 묶음에 한 번만 답해 주세요." : "Answer this one question batch before the AI engine is called.");
+  pushLog("stage", ko ? "MCP 선택 승인 — 에이전트 제작 시작" : "MCP selection approved — starting agent creation");
+  pushLog("log", ko ? "확인한 요구사항과 연결 범위로 실제 AI 엔진을 시작합니다." : "Starting the AI engine with the confirmed brief and connection scope.");
   commit();
+  await runTurn(briefReply, buildGeneration);
+  pendingBuildBriefReply = null;
 }
 
 async function previewBuildAllocation(): Promise<BuildAllocationPreview | null> {
@@ -1129,9 +1166,21 @@ export async function answerBuild(
   if (!state.awaitingReply || !reply.trim()) return;
   if (openCrabOntology) openCrabOntologyChoice = openCrabOntology;
   const ko = currentLocale() === "ko";
-  pushLog("log", `↳ ${ko ? "답변" : "Reply"}: ${reply.trim().slice(0, 240)}`);
+  const normalizedReply = reply.trim();
+  pushLog("log", `↳ ${ko ? "답변" : "Reply"}: ${normalizedReply.slice(0, 240)}`);
+  if (!state.mcpPlan && state.turn === 1 && pendingBuildBriefReply === null) {
+    pendingBuildBriefReply = normalizedReply;
+    state.awaitingReply = false;
+    state.pendingQuestions = [];
+    state.phase = "running";
+    state.reached = Math.max(state.reached, 1);
+    pushLog("stage", ko ? "요구사항 확인됨 — 빌드 엔진과 연결 범위 준비" : "Brief confirmed — preparing the engine and connection scope");
+    commit();
+    await prepareBuildRuntimeAndMcp(buildGeneration);
+    return;
+  }
   commit();
-  await runTurn(reply.trim(), buildGeneration);
+  await runTurn(normalizedReply, buildGeneration);
 }
 
 export function cancelBuild() {
@@ -1163,11 +1212,14 @@ export function cancelBuild() {
   }
   state.awaitingReply = false;
   state.pendingQuestions = [];
+  state.pendingAllocation = null;
   state.runId = null;
   runtimeSessionId = null;
+  pendingBuildBriefReply = null;
   if (!cancelledRunId) {
     resolvedBuildRuntime = null;
     resolvedBuildRuntimePinned = false;
+    runtimeEscalationAccepted = undefined;
   }
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
@@ -1227,11 +1279,14 @@ export function resetBuild() {
   state.registeredEntity = null;
   state.awaitingReply = false;
   state.pendingQuestions = [];
+  state.pendingAllocation = null;
   state.turn = 0;
   history = [];
   runtimeSessionId = null;
   resolvedBuildRuntime = null;
   resolvedBuildRuntimePinned = false;
+  runtimeEscalationAccepted = undefined;
+  pendingBuildBriefReply = null;
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
   autoContinues = 0;

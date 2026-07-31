@@ -84,12 +84,12 @@ const STARTERS: { ko: string; en: string; promptKo: string; promptEn: string }[]
   },
 ];
 
-// /hep-build 의 표준 파이프라인 단계 — 빌더 에이전트 규율(모드 분류 → 인터뷰/리서치 게이트 →
-// 패키지 생성 → 검증 → 배포)을 시각화한다.
+// 사용자에게 보이는 실제 순서 — 요구사항을 먼저 확인한 뒤 엔진/MCP를 준비하고,
+// 그 다음에만 에이전트가 조사·생성·검증·배포를 수행한다.
 const STAGES: { key: string; label: string; labelEn: string; sub: string; subEn: string; icon: typeof IconRoute; color: string }[] = [
-  { key: "classify", label: "모드 분류", labelEn: "Classify", sub: "단일 · 팀 · 패키지 판정", subEn: "single · team · package", icon: IconRoute, color: "#4DABF7" },
-  { key: "mcp", label: "MCP 연결 계획", labelEn: "MCP plan", sub: "전역 MCP 추천 · 키 확인 · 한 번 승인", subEn: "system registry · key presence · one approval", icon: IconRoute, color: "#22B8CF" },
-  { key: "research", label: "인터뷰 & 리서치", labelEn: "Interview & research", sub: "요구사항 인터뷰 · 공식 소스 조사", subEn: "requirements interview · source research", icon: IconSearch, color: "#9775FA" },
+  { key: "brief", label: "요구사항 확인", labelEn: "Confirm brief", sub: "완료 기준 · 입력 · 사용 맥락 · 권한", subEn: "outcome · inputs · context · authority", icon: IconRoute, color: "#4DABF7" },
+  { key: "setup", label: "엔진·MCP 준비", labelEn: "Engine & MCP", sub: "모델 선택 · 연결 범위 확인", subEn: "model choice · connection review", icon: IconRoute, color: "#22B8CF" },
+  { key: "research", label: "리서치·설계", labelEn: "Research & plan", sub: "요구사항 기반 조사 · 패키지 설계", subEn: "brief-led research · package plan", icon: IconSearch, color: "#9775FA" },
   { key: "generate", label: "패키지 생성", labelEn: "Generate package", sub: "설치할 수 있는 패키지 파일을 만들어요", subEn: "Creates the installable package files", icon: IconWand, color: "#F783AC" },
   { key: "verify", label: "검증", labelEn: "Verify", sub: "보안·무결성 자동 검사", subEn: "automatic security & integrity checks", icon: IconShield, color: "#4DD4AC" },
   { key: "deliver", label: "배포", labelEn: "Deliver", sub: "내 라이브러리에 설치 · 클라우드에 올리기", subEn: "install to my library · upload to the cloud", icon: IconStore, color: "#FFA94D" },
@@ -350,7 +350,12 @@ export default function BuildPage() {
       if (!cloudUploadProgressIdRef.current || event.progressId !== cloudUploadProgressIdRef.current) return;
       setCloudUploadProgress(cloudUploadStageLabel(event.stage, event.detail ?? "", ko));
     });
-    return () => off?.();
+    // A renderer can briefly outlive an older/missing preload bridge during an
+    // update. Cleanup must never call a promise/null placeholder as a function
+    // and crash the destination screen while navigating away from Build.
+    return () => {
+      if (typeof off === "function") off();
+    };
   }, [ko]);
   useEffect(() => {
     if (cloudSaveChoice?.status === "pending") {
@@ -363,7 +368,7 @@ export default function BuildPage() {
     return STAGES.map((_, i) => {
       if (errored && i === Math.min(reached, STAGES.length - 1)) return "error";
       if (i < reached) return "done";
-      if (i === reached && phase === "running") return "active";
+      if (i === reached && ["running", "interview", "mcp-review", "runtime-approval"].includes(phase)) return "active";
       if (phase === "done") return "done";
       return "pending";
     });
@@ -562,7 +567,7 @@ export default function BuildPage() {
   const selectedRuntimeBlocked = selectedRuntimeStatus ? runtimeUsageBlocked(selectedRuntimeStatus, usage) : false;
   const running = phase === "running";
   // 대화형 빌드가 진행 중(엔진 실행 중이거나 인터뷰 답변 대기 중)이면 컴포저 입력을 잠근다.
-  const busy = phase === "running" || phase === "mcp-review" || phase === "interview";
+  const busy = phase === "running" || phase === "mcp-review" || phase === "runtime-approval" || phase === "interview";
   const startBlocker = !request.trim()
     ? (ko ? "요청을 먼저 입력하세요." : "Enter a request first.")
     : !workspace
@@ -610,9 +615,11 @@ export default function BuildPage() {
               <span className="forge-pulse" />
               <strong className="build-livebar-stage">
                 {phase === "interview"
-                  ? ko ? "딥인터뷰 — 답변 대기" : "Deep interview — awaiting your answer"
+                  ? ko ? "빌드 요구사항 — 답변 대기" : "Build brief — awaiting your answer"
                   : phase === "mcp-review"
                     ? ko ? "MCP 연결 계획 확인" : "Confirm the MCP plan"
+                    : phase === "runtime-approval"
+                      ? ko ? "빌드 모델 선택" : "Choose the build model"
                     : ko
                       ? STAGES[Math.min(reached, STAGES.length - 1)].label
                       : STAGES[Math.min(reached, STAGES.length - 1)].labelEn}
@@ -625,6 +632,8 @@ export default function BuildPage() {
                   ? ko ? "당신 차례입니다 — 아래 질문에 답해 주세요" : "Your turn — answer the questions below"
                   : phase === "mcp-review"
                     ? ko ? "당신 차례입니다 — MCP 선택을 확인하세요" : "Your turn — confirm the MCP selection"
+                    : phase === "runtime-approval"
+                      ? ko ? "당신 차례입니다 — 모델을 선택하세요" : "Your turn — choose the model"
                     : liveness?.activity || (ko ? "엔진 준비 중" : "Preparing the engine")}
               </span>
               <span className="build-livebar-time">{stageElapsedLabel}</span>
@@ -800,6 +809,8 @@ export default function BuildPage() {
                   <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "중지" : "Stop"}</button>
                 ) : phase === "mcp-review" ? (
                   <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "MCP 검토 취소" : "Cancel MCP review"}</button>
+                ) : phase === "runtime-approval" ? (
+                  <button onClick={cancelBuild} className="build-secondary-button titlebar-nodrag">{ko ? "모델 선택 취소" : "Cancel model review"}</button>
                 ) : phase === "interview" ? (
                   <button onClick={resetBuild} className="build-secondary-button titlebar-nodrag">{ko ? "인터뷰 취소" : "Cancel interview"}</button>
                 ) : phase === "error" && recoverable && buildError?.kind !== "workspace-unavailable" ? (
@@ -851,7 +862,19 @@ export default function BuildPage() {
                   ) : phase === "interview" ? (
                     <span className="build-live">
                       <span className="forge-pulse" />
-                      {ko ? "딥인터뷰 진행 중" : "deep interview"}
+                      {ko ? "요구사항 확인 중" : "confirming brief"}
+                      <em className="build-live-elapsed">{stageElapsedLabel}</em>
+                    </span>
+                  ) : phase === "mcp-review" ? (
+                    <span className="build-live">
+                      <span className="forge-pulse" />
+                      {ko ? "MCP 연결 확인 중" : "confirming MCP"}
+                      <em className="build-live-elapsed">{stageElapsedLabel}</em>
+                    </span>
+                  ) : phase === "runtime-approval" ? (
+                    <span className="build-live">
+                      <span className="forge-pulse" />
+                      {ko ? "모델 선택 대기" : "awaiting model choice"}
                       <em className="build-live-elapsed">{stageElapsedLabel}</em>
                     </span>
                   ) : (
@@ -941,7 +964,7 @@ export default function BuildPage() {
           {awaitingReply && pendingQuestions.length > 0 && (
             <section className="build-card build-interview-card">
               <div className="build-card-head build-interview-head">
-                <span>{ko ? `딥인터뷰 · 질문 묶음 ${turn}` : `Deep interview · question batch ${turn}`}</span>
+                <span>{ko ? `빌드 요구사항 · 질문 묶음 ${turn}` : `Build brief · question batch ${turn}`}</span>
                 <div className="build-interview-head-actions">
                   <span className="build-live"><span className="forge-pulse" />{ko ? "답변 대기" : "awaiting"}</span>
                 </div>
