@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.34 — 2026-07-31
+
+This release binds Agentlas OS v1.1.91 at
+791e69116ce58f867db47f2bb1bc896fcd46c62e.
+Passing the source gates does not prove a GitHub release or installer; the
+Releases page stays the authority for what is actually downloadable.
+
+- **Desktop embeds the exact Agentlas OS release that passed current Codex
+  testing.** Real installed-plugin QA caught and corrected oversized
+  `context.impact` and `context.slice` receipts; the visible working set now
+  stays below the 16 KB UX bound with explicit omission counts.
+- **The One and Build UX fixes remain unchanged.** Dialog sequencing, tour
+  scroll restoration, localized starter briefs, correlated Cloud-save
+  progress, and customer-safe runtime presentation continue from 0.9.32.
+
 ## 0.9.33 — 2026-07-31
 
 This release binds Agentlas OS v1.1.89 at

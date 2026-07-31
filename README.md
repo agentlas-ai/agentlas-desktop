@@ -69,6 +69,13 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-31 · v0.9.34 — Desktop embeds the current tested Agentlas OS** —
+  The One and Build UX improvements now ship with Agentlas OS 1.1.91. Real
+  installed-plugin QA verified bounded Context Map receipts and exact recovery
+  guidance before this pin was selected. This release binds Agentlas OS v1.1.91
+  at 791e69116ce58f867db47f2bb1bc896fcd46c62e. Source readiness does not prove
+  a published installer: the Releases page stays the authority for what is
+  actually downloadable.
 - **2026-07-31 · v0.9.33 — Desktop and Codex use the same Agentlas OS
   baseline** — The One and Build UX improvements from 0.9.32 now ship with
   Agentlas OS 1.1.89. Context Map results keep their requested answer prominent,
