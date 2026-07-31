@@ -51,6 +51,7 @@ import {
 } from "@/lib/build-session";
 import { buildScanDisposition, buildScanFindings, buildScanSeverityBucket } from "@/lib/build-scan";
 import type { ChatQuestion } from "@/components/ChatStream";
+import type { CloudAgentPublishProgressEvent, CloudAgentPublishStage } from "@shared/types";
 
 type StageState = "pending" | "active" | "done" | "error";
 const OPENCRAB_QUESTION_ID = "opencrab-ontology";
@@ -62,10 +63,25 @@ const MODES: { id: Mode; label: string; labelEn: string; desc: string; descEn: s
 ];
 
 // 빌드 첫 진입 빈 화면을 없애는 스타터(value-first). 클릭하면 요청 입력을 채운다.
-const STARTERS: { ko: string; en: string; prompt: string }[] = [
-  { ko: "인스타 마케팅 운영팀", en: "Instagram marketing team", prompt: "인스타그램 마케팅을 운영하는 에이전트 팀 — 콘텐츠 기획, 카피, 해시태그, 게시 일정 관리" },
-  { ko: "경리 자동화 에이전트", en: "Bookkeeping automation agent", prompt: "영수증·세금계산서를 분류하고 월 정산표를 만드는 경리 자동화 에이전트" },
-  { ko: "리서치 애널리스트", en: "Research analyst", prompt: "주제를 받아 출처를 모으고 사실검증한 뒤 요약 리포트를 쓰는 리서치 애널리스트 에이전트" },
+const STARTERS: { ko: string; en: string; promptKo: string; promptEn: string }[] = [
+  {
+    ko: "인스타 마케팅 운영팀",
+    en: "Instagram marketing team",
+    promptKo: "인스타그램 마케팅을 운영하는 에이전트 팀 — 콘텐츠 기획, 카피, 해시태그, 게시 일정 관리",
+    promptEn: "An agent team that runs Instagram marketing — content planning, copy, hashtags, and publishing schedules",
+  },
+  {
+    ko: "경리 자동화 에이전트",
+    en: "Bookkeeping automation agent",
+    promptKo: "영수증·세금계산서를 분류하고 월 정산표를 만드는 경리 자동화 에이전트",
+    promptEn: "A bookkeeping automation agent that classifies receipts and invoices, then prepares a monthly reconciliation sheet",
+  },
+  {
+    ko: "리서치 애널리스트",
+    en: "Research analyst",
+    promptKo: "주제를 받아 출처를 모으고 사실검증한 뒤 요약 리포트를 쓰는 리서치 애널리스트 에이전트",
+    promptEn: "A research analyst agent that gathers sources for a topic, verifies the facts, and writes a concise report",
+  },
 ];
 
 // /hep-build 의 표준 파이프라인 단계 — 빌더 에이전트 규율(모드 분류 → 인터뷰/리서치 게이트 →
@@ -123,6 +139,29 @@ function fmtLogTime(at: number): string {
 
 function buildLocalBillingLabel(ko: boolean): string {
   return ko ? "빌드 0크레딧" : "Build 0 credits";
+}
+
+function cloudUploadStageLabel(stage: CloudAgentPublishStage, detail: string, ko: boolean): string {
+  const labels: Record<CloudAgentPublishStage, [string, string]> = {
+    starting: ["Cloud 저장 준비 중", "Preparing Cloud save"],
+    cleaning: ["패키지 정리 중", "Cleaning the package"],
+    "routing-card": ["에이전트 역할 정보 확인 중", "Checking agent role metadata"],
+    remediating: ["안전하게 자동 수정 중", "Applying safe fixes"],
+    blockers: ["차단 항목 확인 중", "Checking blockers"],
+    excluded: ["제외 파일 확인 중", "Checking excluded files"],
+    "scan-clean": ["보안 점검 통과", "Security scan passed"],
+    scanning: ["보안 점검 중", "Running security checks"],
+    metadata: ["에이전트 정보 정리 중", "Preparing agent metadata"],
+    packaging: ["업로드 패키지 생성 중", "Building the upload package"],
+    reviewing: ["비공개 저장 조건 확인 중", "Reviewing private-save requirements"],
+    uploading: ["Agent Cloud에 업로드 중", "Uploading to Agent Cloud"],
+    receipt: ["저장 영수증 확인 중", "Verifying the save receipt"],
+    done: ["Agent Cloud 저장 완료", "Saved to Agent Cloud"],
+    error: ["Cloud 저장에 문제가 생겼습니다", "Cloud save needs attention"],
+  };
+  const label = labels[stage][ko ? 0 : 1];
+  const safeDetail = detail.trim().replace(/\s+/g, " ").slice(0, 120);
+  return safeDetail ? `${label} · ${safeDetail}` : label;
 }
 
 function friendlyHephaestusMessage(raw: string, ko: boolean): string {
@@ -189,8 +228,10 @@ export default function BuildPage() {
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
   const [questionNotes, setQuestionNotes] = useState<Record<string, string>>({});
   const [cloudChoiceError, setCloudChoiceError] = useState<string | null>(null);
+  const [cloudUploadProgress, setCloudUploadProgress] = useState<string | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const cloudUploadInFlightRef = useRef<string | null>(null);
+  const cloudUploadProgressIdRef = useRef<string | null>(null);
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
@@ -301,7 +342,16 @@ export default function BuildPage() {
   }, [pendingQuestionKey]);
   useEffect(() => {
     setCloudChoiceError(null);
+    setCloudUploadProgress(null);
+    cloudUploadProgressIdRef.current = null;
   }, [cloudSaveChoice?.id]);
+  useEffect(() => {
+    const off = ipc()?.cloudAgents.onProgress((event: CloudAgentPublishProgressEvent) => {
+      if (!cloudUploadProgressIdRef.current || event.progressId !== cloudUploadProgressIdRef.current) return;
+      setCloudUploadProgress(cloudUploadStageLabel(event.stage, event.detail ?? "", ko));
+    });
+    return () => off?.();
+  }, [ko]);
   useEffect(() => {
     if (cloudSaveChoice?.status === "pending") {
       presentBuildCloudSaveChoice(cloudSaveChoice.id);
@@ -453,6 +503,9 @@ export default function BuildPage() {
       return;
     }
     cloudUploadInFlightRef.current = choice.id;
+    const progressId = window.crypto.randomUUID();
+    cloudUploadProgressIdRef.current = progressId;
+    setCloudUploadProgress(ko ? "Cloud 저장 준비 중" : "Preparing Cloud save");
     setCloudChoiceError(null);
     try {
       const api = ipc();
@@ -463,6 +516,7 @@ export default function BuildPage() {
       const res = await api.cloudAgents.saveBuiltPrivate({
         folder: claimed.folder,
         scope: claimed.scope,
+        progressId,
       });
       if (res.status !== "registered" || !res.registration) {
         throw new Error(res.summary || res.review?.summary || "Cloud save failed");
@@ -479,6 +533,7 @@ export default function BuildPage() {
         );
       }
     } catch (error) {
+      setCloudUploadProgress(null);
       if (finishBuildCloudSave(choice.id, false)) {
         setCloudChoiceError(
           (ko
@@ -489,6 +544,7 @@ export default function BuildPage() {
       }
     } finally {
       if (cloudUploadInFlightRef.current === choice.id) cloudUploadInFlightRef.current = null;
+      if (cloudUploadProgressIdRef.current === progressId) cloudUploadProgressIdRef.current = null;
     }
   };
 
@@ -643,10 +699,10 @@ export default function BuildPage() {
                   <span className="build-starters-label">{ko ? "스타터" : "Starters"}</span>
                   {STARTERS.map((s) => (
                     <button
-                      key={s.prompt}
+                      key={s.en}
                       type="button"
                       className="build-starter-chip titlebar-nodrag"
-                      onClick={() => setBuildRequest(s.prompt)}
+                      onClick={() => setBuildRequest(ko ? s.promptKo : s.promptEn)}
                     >
                       {ko ? s.ko : s.en}
                     </button>
@@ -1047,6 +1103,7 @@ export default function BuildPage() {
         ko={ko}
         busy={cloudSaveChoice?.status === "uploading"}
         error={cloudChoiceError}
+        progress={cloudUploadProgress}
         onCloud={() => void saveBuildChoiceToCloud()}
         onLocalOnly={keepBuildLocalOnly}
       />

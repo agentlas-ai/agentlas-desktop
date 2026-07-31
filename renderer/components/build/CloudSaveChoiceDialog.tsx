@@ -10,6 +10,7 @@ interface CloudSaveChoiceDialogProps {
   ko: boolean;
   busy: boolean;
   error: string | null;
+  progress: string | null;
   onCloud: () => void;
   onLocalOnly: () => void;
 }
@@ -26,6 +27,7 @@ export function CloudSaveChoiceDialog({
   ko,
   busy,
   error,
+  progress,
   onCloud,
   onLocalOnly,
 }: CloudSaveChoiceDialogProps) {
@@ -139,6 +141,13 @@ export function CloudSaveChoiceDialog({
             </span>
           </button>
         </div>
+
+        {busy && progress && (
+          <div className="build-cloud-choice-progress" role="status" aria-live="polite">
+            <IconRefresh size={13} />
+            <span>{progress}</span>
+          </div>
+        )}
 
         {error && (
           <div className="build-cloud-choice-error" role="alert">

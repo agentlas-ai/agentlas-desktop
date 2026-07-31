@@ -334,6 +334,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   ? "route_ineligible"
                   : null;
   const featureUpdateEligible = featureUpdateRouteEligible && oneIntroBlockingCategory === null;
+  // First-run surfaces are ordered, never stacked. Main-owned One feature news
+  // wins over the page tour; once it resolves (or is deferred by live work), the
+  // current page tour may open normally.
+  const pageTourAutoOpenSuspended = oneIntroState === null
+    || (oneIntroPending && oneIntroBlockingCategory === null);
 
   useEffect(() => {
     const api = ipc();
@@ -394,7 +399,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         )}
         <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>
       </main>
-      <PageTour pathname={pathname} />
+      <PageTour pathname={pathname} autoOpenSuspended={pageTourAutoOpenSuspended} />
       <BuildDoneToast />
       <BrowserActionApprovalSheet />
       {showWorkspaceSidebar && <FloatingComputerUsePanel />}

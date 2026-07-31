@@ -69,6 +69,14 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-31 · v0.9.32 — One and Build keep the user oriented** — One shows
+  only one first-run dialog at a time, guided tours restore the prior scroll
+  position, Build starter briefs follow the selected Korean or English
+  interface, and Cloud save exposes its real upload and verification progress.
+  This release binds Agentlas OS v1.1.88 at
+  9b0248beb6f8728e58421b14f0c9b749bc24b66d. Source readiness does not prove a
+  published installer: the Releases page stays the authority for
+  what is actually downloadable.
 - **2026-07-31 · v0.9.31 — One and Build explain the work, then put the result
   where it belongs** — One names the local agents selected for a task and keeps
   “selected” separate from evidence that they actually participated. Customer

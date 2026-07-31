@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.9.32 — 2026-07-31
+
+This release binds Agentlas OS v1.1.88 at
+9b0248beb6f8728e58421b14f0c9b749bc24b66d.
+Passing the source gates does not prove a GitHub release or installer; the
+Releases page stays the authority for what is actually downloadable.
+
+- **One no longer stacks two first-run dialogs.** The dashboard tour waits for
+  the One feature introduction to finish, so navigation from One to Work has
+  one clear decision at a time.
+- **Guided tours return the user to where they started.** Opening a tour may
+  bring its target into view, but Skip, close, and completion restore every
+  affected scroll container instead of leaving the page displaced.
+- **Build starters follow the interface language.** English starter cards write
+  natural English briefs and Korean starter cards write Korean briefs.
+- **Cloud save shows the real upload stage.** Build carries a correlated
+  progress ID through the existing Main/preload contract and renders
+  customer-safe upload, verification, and completion status.
+- **The embedded engine and independent Terminal converge on current releases.**
+  Desktop carries Agentlas OS 1.1.88, while the external `agentlas` command
+  remains owned by Agentlas Terminal.
+
 ## 0.9.31 — 2026-07-31
 
 This release binds Agentlas OS v1.1.84 at

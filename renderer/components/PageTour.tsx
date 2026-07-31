@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 
 interface TourStep {
@@ -38,7 +38,14 @@ export function pageTourStorageKey(id: string): string {
   return `agentlas.pageTour.${id}.dismissed.${TOUR_VERSION}`;
 }
 
-export function PageTour({ pathname }: { pathname: string }) {
+export function PageTour({
+  pathname,
+  autoOpenSuspended = false,
+}: {
+  pathname: string;
+  /** A higher-priority first-run surface is visible or still resolving. */
+  autoOpenSuspended?: boolean;
+}) {
   const { locale } = useT();
   const ko = locale === "ko";
   const config = useMemo(() => tourConfigForPath(pathname), [pathname]);
@@ -46,11 +53,23 @@ export function PageTour({ pathname }: { pathname: string }) {
   const [stepIndex, setStepIndex] = useState(0);
   const [targetRect, setTargetRect] = useState<DOMRect | null>(null);
   const lastTargetRef = useRef<HTMLElement | null>(null);
+  const scrollSnapshotRef = useRef<Array<{ element: Element; top: number; left: number }>>([]);
+
+  const restoreScrollSnapshot = useCallback(() => {
+    const snapshot = scrollSnapshotRef.current;
+    scrollSnapshotRef.current = [];
+    for (const item of snapshot) {
+      item.element.scrollTop = item.top;
+      item.element.scrollLeft = item.left;
+    }
+  }, []);
 
   useEffect(() => {
+    restoreScrollSnapshot();
     setOpen(false);
     setStepIndex(0);
     if (!config) return undefined;
+    if (autoOpenSuspended) return undefined;
     if (config.autoOpen === false) return undefined;
     try {
       if (window.localStorage.getItem(pageTourStorageKey(config.id)) === "1") return undefined;
@@ -59,7 +78,7 @@ export function PageTour({ pathname }: { pathname: string }) {
     }
     const timer = window.setTimeout(() => setOpen(true), 650);
     return () => window.clearTimeout(timer);
-  }, [config]);
+  }, [autoOpenSuspended, config, restoreScrollSnapshot]);
 
   useEffect(() => {
     const onReplay = () => {
@@ -100,6 +119,22 @@ export function PageTour({ pathname }: { pathname: string }) {
     };
 
     const target = findTarget();
+    if (target && scrollSnapshotRef.current.length === 0) {
+      const elements: Element[] = [];
+      for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+        if (parent.scrollHeight > parent.clientHeight + 1 || parent.scrollWidth > parent.clientWidth + 1) {
+          elements.push(parent);
+        }
+      }
+      if (document.scrollingElement && !elements.includes(document.scrollingElement)) {
+        elements.push(document.scrollingElement);
+      }
+      scrollSnapshotRef.current = elements.map((element) => ({
+        element,
+        top: element.scrollTop,
+        left: element.scrollLeft,
+      }));
+    }
     target?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
     const timer = window.setTimeout(measure, target ? 220 : 80);
     window.addEventListener("resize", measure);
@@ -125,6 +160,7 @@ export function PageTour({ pathname }: { pathname: string }) {
 
   const close = () => {
     setOpen(false);
+    window.requestAnimationFrame(restoreScrollSnapshot);
     try {
       window.localStorage.setItem(pageTourStorageKey(config.id), "1");
     } catch {
