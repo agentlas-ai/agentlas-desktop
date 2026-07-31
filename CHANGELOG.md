@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.33 — 2026-07-31
+
+This release binds Agentlas OS v1.1.89 at
+40da1f0236bccf47ce86594edbbefb05123496bc.
+Passing the source gates does not prove a GitHub release or installer; the
+Releases page stays the authority for what is actually downloadable.
+
+- **Desktop now embeds the same Agentlas OS release used by current Codex
+  testing.** Context Map results keep the requested answer prominent instead of
+  repeating local bootstrap diagnostics, and a stale verification map explains
+  the exact `refresh=true` recovery.
+- **The One and Build UX fixes from 0.9.32 remain the release baseline.** Dialog
+  sequencing, tour scroll restoration, localized starter briefs, correlated
+  Cloud-save progress, and customer-safe runtime presentation are unchanged.
+
 ## 0.9.32 — 2026-07-31
 
 This release binds Agentlas OS v1.1.88 at

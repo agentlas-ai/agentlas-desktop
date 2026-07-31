@@ -69,6 +69,14 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-31 · v0.9.33 — Desktop and Codex use the same Agentlas OS
+  baseline** — The One and Build UX improvements from 0.9.32 now ship with
+  Agentlas OS 1.1.89. Context Map results keep their requested answer prominent,
+  and stale verification maps explain the exact `refresh=true` recovery. This
+  release binds Agentlas OS v1.1.89 at
+  40da1f0236bccf47ce86594edbbefb05123496bc. Source readiness does not prove a
+  published installer: the Releases page stays the authority for what is
+  actually downloadable.
 - **2026-07-31 · v0.9.32 — One and Build keep the user oriented** — One shows
   only one first-run dialog at a time, guided tours restore the prior scroll
   position, Build starter briefs follow the selected Korean or English
