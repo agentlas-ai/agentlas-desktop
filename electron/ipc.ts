@@ -1314,6 +1314,8 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
   };
   return {
     ...rendererFields,
+    // Closed enum: anything but the exact system marker is the person's own turn.
+    promptOrigin: rendererFields.promptOrigin === "system" ? "system" : undefined,
     oneMode: rendererFields.oneMode === true,
     // One's exact team roster is minted from an opaque Main capability. A
     // renderer may carry the ref, never candidate identities themselves.
@@ -3446,6 +3448,34 @@ export function registerIpcHandlers(): void {
     }
     return getOneHubDerivativeDraft(input);
   });
+  ipcMain.handle(
+    "oneAutoRecovery:judge",
+    async (_e, input: { runId?: string; chatId?: string; goal?: string; attemptsSpent?: number; previousFingerprint?: string | null }) => {
+      const runId = String(input?.runId ?? "");
+      const chatId = String(input?.chatId ?? "");
+      if (!runId || !chatId) return null;
+      // Main owns the receipt. Bind the judgment to the thread the renderer is
+      // displaying so a run id from another conversation cannot expose its
+      // failure evidence or spend a recovery judgment.
+      const receipt = invocationService.receipt(runId);
+      if (!receipt || receipt.chatId !== chatId) return null;
+      const { judgeOneAutoRecovery } = await import("./one/auto-recovery");
+      const result = await judgeOneAutoRecovery({
+        receipt,
+        goal: typeof input?.goal === "string" ? input.goal.slice(0, 4_000) : "",
+        attemptsSpent: Number.isSafeInteger(input?.attemptsSpent) ? Math.max(0, input!.attemptsSpent!) : 0,
+        previousFingerprint: typeof input?.previousFingerprint === "string" ? input.previousFingerprint : null,
+      });
+      return {
+        ...(result.decision.retry
+          ? { retry: true as const, attempt: result.decision.attempt }
+          : { retry: false as const, reason: result.decision.reason }),
+        fingerprint: result.fingerprint,
+        diagnosis: result.diagnosis,
+        decidedBy: result.decidedBy,
+      };
+    },
+  );
   ipcMain.handle("oneValueClosure:getState", () => getOneValueClosureState());
   ipcMain.handle("oneValueClosure:latestForTask", (_e, taskId: string) =>
     getLatestOneValueClosure(taskId));

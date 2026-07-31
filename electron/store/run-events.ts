@@ -559,6 +559,14 @@ function stringPayload(payload: Record<string, unknown>, key: string): string | 
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+/** Closed enum. An unknown value is treated as absent so recovery fails safe. */
+function executionPermissionPayload(
+  payload: Record<string, unknown>,
+): InvocationRunReceipt["executionPermission"] {
+  const value = payload.permissions;
+  return value === "read" || value === "write" || value === "full" ? value : undefined;
+}
+
 function stringArrayPayload(payload: Record<string, unknown>, key: string): string[] | undefined {
   const value = payload[key];
   if (!Array.isArray(value)) return undefined;
@@ -656,6 +664,9 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
       : {}),
     ...(orchestrationTargetsPayload(startPayload)
       ? { taskForceTargets: orchestrationTargetsPayload(startPayload) }
+      : {}),
+    ...(executionPermissionPayload(startPayload)
+      ? { executionPermission: executionPermissionPayload(startPayload) }
       : {}),
     ...(failure?.error_code ? { errorCode: failure.error_code } : {}),
     ...(failure?.error_message

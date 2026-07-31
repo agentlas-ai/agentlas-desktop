@@ -93,12 +93,16 @@ async function runSiteAgentPrompt(
     streamedFeedback = next;
   };
   const observeEvent = (event: McpInvocationEvent) => {
+    // web-master is a team, so its orchestrator already names the live phase
+    // ("Design Worker · working"). Prefer that over a fixed sentence: without
+    // it every step of a multi-minute run reads as the same frozen line.
+    const reported = typeof event.status === "string" ? event.status.trim() : "";
     if (event.kind === "thinking") {
-      activity?.onStatus?.(locale === "ko" ? "현재 화면과 이전 디자인 결정을 읽는 중…" : "Reading the current screen and prior design decisions…");
+      activity?.onStatus?.(reported || (locale === "ko" ? "현재 화면과 이전 디자인 결정을 읽는 중…" : "Reading the current screen and prior design decisions…"));
       return;
     }
     if (event.kind === "tool-use") {
-      activity?.onStatus?.(locale === "ko" ? "디자인 방향과 변경 범위를 검토하는 중…" : "Reviewing the design direction and change scope…");
+      activity?.onStatus?.(reported || (locale === "ko" ? "디자인 방향과 변경 범위를 검토하는 중…" : "Reviewing the design direction and change scope…"));
       return;
     }
     if (event.kind === "partial" && typeof event.text === "string") {

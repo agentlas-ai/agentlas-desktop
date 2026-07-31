@@ -560,6 +560,10 @@ app.whenReady().then(async () => {
   // mirroring it to the platform log directory first. Updater and mobile-bridge
   // diagnostics are worthless if the only copy dies with the process.
   initFileLogging();
+  const startupStartedAt = Date.now();
+  const traceStartup = (stage: string): void => {
+    console.info(`[startup] ${stage} +${Date.now() - startupStartedAt}ms`);
+  };
   if (app.isPackaged && process.platform === "darwin" && installIdentity.channel === "official") {
     try {
       const bundlePath = resolveMacAppBundle(process.execPath);
@@ -663,6 +667,7 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => !DENIED_PERMISSIONS.has(permission));
   applyDockIcon();
   initStore({ deferPostContinuityRepairs: updatePreflight.pendingInstall });
+  traceStartup("store-ready");
   try {
     reconcileOneHubDerivativeDraftStorage();
   } catch (error) {
@@ -672,6 +677,7 @@ app.whenReady().then(async () => {
   }
   // Restore/decrypt the account before the post-migration continuity check.
   const initialAuthRestore = await bootAuthFromKeychain();
+  traceStartup(`auth-${initialAuthRestore.status}`);
   const initialAuthRestoreWasTemporary = initialAuthRestore.status === "temporarily-unavailable";
   // Stage 2 (post-migration, pre-bootstrap-writers): compare the live DB and
   // managed assets against the recovery copies. Recovery-required stops here.
@@ -766,6 +772,7 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error("[hephaestus] Agentlas OS auto-update bootstrap failed:", err);
   }
+  traceStartup("os-updater-started");
   // A session can expire by TTL or be rejected by the server while every
   // renderer remains mounted. Switch the bookmark authority boundary and
   // account UI immediately instead of waiting for a future focus event.
@@ -780,6 +787,7 @@ app.whenReady().then(async () => {
   // not fresh invocation authority, so revoke callable bits before any normal
   // renderer is created; live startup sync may promote exact records again.
   failCloseActiveHubBookmarks();
+  traceStartup("hub-cache-closed");
   // Agentlas 아키텍처 — PM 소울/메모리 큐레이터/태스크 편향 큐레이터를 설치에 항상 동봉.
   // 버전 게이팅이라 평상시엔 거의 no-op. ARCHITECTURE_VERSION이 오르면 프롬프트만 재동기화.
   try {
@@ -787,6 +795,7 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error("[architecture] seedBuiltinAgents failed:", err);
   }
+  traceStartup("builtins-ready");
   // single/team 종류 backfill — entity_kind가 빈 기존 설치 행을 route.kind/이름 표식으로 한 번 채운다.
   // 이래야 Hub로 설치된 팀이 "개별 에이전트"로 오분류되지 않는다.
   try {
@@ -794,10 +803,12 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error("[architecture] backfillEntityKinds failed:", err);
   }
+  traceStartup("entity-kinds-ready");
   // 설치된 에이전트 폴더의 파일을 보장 — 라이브러리 우측 패널이 즉시 보여줄 수 있게.
   if (process.env.AGENTLAS_QA_SKIP_AGENT_MATERIALIZATION !== "1") {
     materializeAllAgents();
   }
+  traceStartup("agent-files-ready");
   try {
     const definitions = reconcileLocalRouteDefinitionHashes();
     const experience = reconcileExistingCuratedMemoryCandidates();
@@ -816,6 +827,13 @@ app.whenReady().then(async () => {
     console.error("[experience] legacy learning reconciliation failed:", err);
   }
   ensureDefaultMcpPluginsInstalled();
+  traceStartup("local-data-ready");
+  // The customer window is the startup boundary. Optional network-backed
+  // services below (Mobile Bridge, Telegram workers, browser helpers) restore
+  // independently and must never keep a healthy local Desktop invisible.
+  await createWindow();
+  traceStartup("window-loaded");
+  startOneBriefingScheduler();
   // Start only after update continuity and store bootstrap have passed. A
   // bridge failure must not make Desktop unusable; Settings exposes the exact
   // failure and can retry on the next launch.
@@ -845,7 +863,7 @@ app.whenReady().then(async () => {
       return startMobileBridgeAfterAuth();
     });
   } else {
-    await startMobileBridgeAfterAuth();
+    void startMobileBridgeAfterAuth();
   }
   // Browser 승인 서버 — continuity gate가 닫힌 뒤에만 로컬 작업 서버를 연다.
   void startBrowserApprovalServer().catch((err) =>
@@ -855,12 +873,12 @@ app.whenReady().then(async () => {
     console.error("[computer-use] control server failed:", err),
   );
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
-  try {
-    const { reconcileTelegramWorkers } = await import("./telegram/connect");
-    await reconcileTelegramWorkers();
-  } catch (err) {
-    console.error("[telegram] worker restore failed:", err);
-  }
+  void import("./telegram/connect")
+    .then(({ reconcileTelegramWorkers }) => {
+      if (!shellReadyForWindows) return;
+      return reconcileTelegramWorkers();
+    })
+    .catch((err) => console.error("[telegram] worker restore failed:", err));
   // 유휴 드리밍 큐레이션 — 옵트인(기본 OFF). 5분마다 조건만 확인(유휴/슬롯/쿨다운), 발화는 드묾.
   try {
     const { startDreamingScheduler } = await import("./memory/dreaming");
@@ -885,8 +903,6 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error("[hephaestus-sync] start failed:", err);
   }
-  await createWindow();
-  startOneBriefingScheduler();
   // Warm the account-isolated Hub bookmark cache after auth restore. This is
   // intentionally non-blocking; AppShell also triggers/subscribes on mount so
   // a renderer that was not ready for this first broadcast still reconciles.

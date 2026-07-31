@@ -75,6 +75,7 @@ import {
   classifyOneRuntimeFailure,
   type OneRuntimeRecoveryCode,
 } from "@shared/one-runtime-recovery";
+import { ONE_AUTO_RECOVERY_MAX_ATTEMPTS } from "@shared/one-auto-recovery";
 import { useJudgedOneDecision } from "@/lib/one-decision-judged";
 import type { OneRecurrenceSelectionV1 } from "@shared/one-recurrence";
 import { shouldPresentOneWeeklyReflection } from "@shared/one-weekly-reflection";
@@ -235,6 +236,27 @@ function isResultContinuationMessage(message: UiMessage): boolean {
   return message.role === "system" && /^(?:완료한|검토 중인) 이전 일에서 이어갑니다|^Continuing from the (?:completed|result-ready) work/.test(message.text);
 }
 
+/**
+ * Prompts One sends on the user's behalf. They are real turns the model must
+ * see, so they stay durable — but replaying the conversation must never show
+ * our wording as something the person typed. The prompt text and its readable
+ * label share one i18n source, so rewording a prompt can never orphan its label.
+ */
+const ONE_SYSTEM_PROMPTS = ["retry_unfinished", "runtime_recovered", "auto_recover"] as const;
+
+function oneSystemPromptLabel(message: UiMessage): string | null {
+  if (message.role !== "system") return null;
+  const text = message.text.trim();
+  for (const locale of ["ko", "en"] as const) {
+    for (const name of ONE_SYSTEM_PROMPTS) {
+      if (text === tFor(locale, `one.shell.system_prompt.${name}`).trim()) {
+        return tFor(locale, `one.shell.system_prompt.label.${name}`);
+      }
+    }
+  }
+  return null;
+}
+
 function readableJsonLabel(value: string): string {
   const spaced = value
     .replace(/[_-]+/g, " ")
@@ -303,6 +325,8 @@ function visibleOneMessageText(message: UiMessage): string {
   if (isResultContinuationMessage(message)) {
     return tFor(detectOneTextLocale(message.text) === "ko" ? "ko" : "en", "one.shell.continuation.body");
   }
+  const systemPromptLabel = oneSystemPromptLabel(message);
+  if (systemPromptLabel) return systemPromptLabel;
   if (message.role !== "assistant") return message.text;
   const extracted = extractQuestions(message.text, message.id).text;
   const unfinishedFence = extracted.indexOf("<<agentlas-ask>>");
@@ -560,6 +584,19 @@ export function OneShell() {
   const [busy, setBusy] = useState(false);
   const [acceptingResult, setAcceptingResult] = useState(false);
   const [runStatus, setRunStatus] = useState("");
+  const [autoRecovery, setAutoRecovery] = useState<
+    | { phase: "recovering"; attempt: number; diagnosis: string }
+    | { phase: "stopped"; reason: string; diagnosis: string }
+    | null
+  >(null);
+  // Per-conversation recovery budget. `judgedRunIds` makes the decision
+  // idempotent so re-renders can never spend an attempt twice.
+  const autoRecoveryRef = useRef<{
+    chatId: string | null;
+    attemptsSpent: number;
+    previousFingerprint: string | null;
+    judgedRunIds: Set<string>;
+  }>({ chatId: null, attemptsSpent: 0, previousFingerprint: null, judgedRunIds: new Set() });
   const [runProgress, setRunProgress] = useState<OneRunProgressState>(() => initialOneRunProgress());
   // Host-owned liveness for a running turn. The stage label and status detail
   // only move when the runtime emits an event, and a long research turn can emit
@@ -1241,6 +1278,9 @@ export function OneShell() {
       recurrence?: OneRecurrenceSelectionV1 | null;
       userAlreadyShown?: boolean;
       displayUserMessage?: boolean;
+      /** Marks a prompt One authored on the user's behalf. Main records it as a
+       *  system turn so the conversation never quotes our wording as theirs. */
+      promptOrigin?: "system";
     },
   ) => {
     const api = ipc();
@@ -1252,6 +1292,15 @@ export function OneShell() {
     runTaskIdRef.current = taskId;
     runChatIdRef.current = chatId;
     streamTextRef.current = "";
+    // A turn the person authored is a fresh goal: it restores the full recovery
+    // budget. One's own continuation prompts keep spending the current one.
+    if (!options?.promptOrigin) {
+      const state = autoRecoveryRef.current;
+      state.chatId = chatId;
+      state.attemptsSpent = 0;
+      state.previousFingerprint = null;
+      setAutoRecovery(null);
+    }
     setBusy(true);
     setSurface(null);
     setError(null);
@@ -1289,6 +1338,7 @@ export function OneShell() {
         runId,
         chatId,
         userPrompt: text,
+        ...(options?.promptOrigin ? { promptOrigin: options.promptOrigin } : {}),
         taskIntent,
         oneMode: true,
         ...(options?.teamRef ? { oneTeamPreflightRef: options.teamRef } : {}),
@@ -1383,11 +1433,9 @@ export function OneShell() {
       recovery.chatId,
       recovery.taskId,
       recovery.taskId === selected?.taskId ? selected.canonicalVersion : null,
-      appLocale === "ko"
-        ? "LLM 연결이 복구되었습니다. 직전 작업의 완료되지 않은 단계부터 이어서 끝까지 실행해줘."
-        : "The LLM connection is restored. Continue from the unfinished step of the previous task and complete it.",
+      tFor(appLocale, "one.shell.system_prompt.runtime_recovered"),
       recovery.taskId ? "task" : "conversation",
-      { displayUserMessage: false },
+      { displayUserMessage: false, promptOrigin: "system" },
     );
   }, [appLocale, busy, router, runtimeRecovery, selected, startRun]);
 
@@ -1722,13 +1770,102 @@ export function OneShell() {
       chatId,
       selected?.taskId ?? null,
       selected?.canonicalVersion ?? null,
-      appLocale === "ko"
-        ? "직전 실행에서 끝까지 확인되지 않은 단계를 이어서 완료하고, 완성된 결과만 보여줘."
-        : "Continue the previous run: finish the step that was not completed, and show only the finished result.",
+      tFor(appLocale, "one.shell.system_prompt.retry_unfinished"),
       selected ? "task" : "conversation",
-      { displayUserMessage: false },
+      { displayUserMessage: false, promptOrigin: "system" },
     );
   }, [appLocale, busy, conversation?.id, selected, startRun]);
+
+  /**
+   * Automatic recovery. A run that stops short is One's problem to route around,
+   * so the product retries on its own before it ever shows the person a failure.
+   * Main judges whether that is allowed; this effect only carries out the answer.
+   * Attempts are counted per conversation and reset whenever the person speaks
+   * or a run completes, so a new request always starts from a full budget.
+   */
+  useEffect(() => {
+    if (busy || !receipt) return;
+    const chatId = selected?.chatId ?? conversation?.id;
+    if (!chatId || receipt.chatId !== chatId) return;
+    if (receipt.status === "completed") {
+      // Recovery succeeded (or was never needed). Clear the banner and the budget.
+      if (autoRecovery) setAutoRecovery(null);
+      autoRecoveryRef.current.attemptsSpent = 0;
+      autoRecoveryRef.current.previousFingerprint = null;
+      return;
+    }
+    if (receipt.status !== "failed" && receipt.status !== "interrupted") return;
+    // One decision per run id, no matter how often this effect re-evaluates.
+    if (autoRecoveryRef.current.judgedRunIds.has(receipt.runId)) return;
+    autoRecoveryRef.current.judgedRunIds.add(receipt.runId);
+
+    const api = ipc();
+    if (!api?.oneAutoRecovery) return;
+    const state = autoRecoveryRef.current;
+    if (state.chatId !== chatId) {
+      state.chatId = chatId;
+      state.attemptsSpent = 0;
+      state.previousFingerprint = null;
+    }
+    const goal = selected?.display.title ?? conversation?.title ?? "";
+    let cancelled = false;
+    let judgementSettled = false;
+    void api.oneAutoRecovery
+      .judge({
+        runId: receipt.runId,
+        chatId,
+        goal,
+        attemptsSpent: state.attemptsSpent,
+        previousFingerprint: state.previousFingerprint,
+      })
+      .then((judgement) => {
+        if (cancelled || !judgement) return;
+        judgementSettled = true;
+        state.previousFingerprint = judgement.fingerprint;
+        const safeDiagnosis = toCustomerSafeText(judgement.diagnosis, appLocale);
+        if (!judgement.retry) {
+          setAutoRecovery({
+            phase: "stopped",
+            reason: judgement.reason ?? "needs-person",
+            diagnosis: safeDiagnosis,
+          });
+          return;
+        }
+        state.attemptsSpent = judgement.attempt ?? state.attemptsSpent + 1;
+        setAutoRecovery({ phase: "recovering", attempt: state.attemptsSpent, diagnosis: safeDiagnosis });
+        void startRun(
+          chatId,
+          selected?.taskId ?? null,
+          selected?.canonicalVersion ?? null,
+          tFor(appLocale, "one.shell.system_prompt.auto_recover", {
+            reason: safeDiagnosis || tFor(appLocale, "one.res.fail.generic"),
+          }),
+          selected ? "task" : "conversation",
+          { displayUserMessage: false, promptOrigin: "system" },
+        );
+      })
+      .catch(() => {
+        // Judgment is advisory. Failing to reach it must never hide the run:
+        // the closure card stays as the honest outcome.
+        if (!cancelled) {
+          judgementSettled = true;
+          setAutoRecovery(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+      if (!judgementSettled) {
+        // Navigation, locale changes, or unmounting can cancel only the
+        // renderer's wait — Main may still finish the read-only judgment.
+        // Let the run be judged again when this conversation becomes active;
+        // otherwise switching away once permanently disables its recovery.
+        autoRecoveryRef.current.judgedRunIds.delete(receipt.runId);
+      }
+    };
+    // `autoRecovery` is written here, never read as an input — including it
+    // would re-run this effect on its own output.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appLocale, busy, conversation?.id, conversation?.title, receipt, selected, startRun]);
 
   const answerConfirmation = useCallback(async (
     confirmation: PendingConfirmation,
@@ -2762,6 +2899,7 @@ export function OneShell() {
                       onOpenWork={() => void openWork()}
                       onSemanticAction={handleOneSemanticAction}
                       onRetryUnfinished={retryUnfinished}
+                      autoRecovery={autoRecovery}
                       onAcceptResult={() => void acceptResult()}
                       acceptingResult={acceptingResult}
                       valueClosure={selectedValueClosure}

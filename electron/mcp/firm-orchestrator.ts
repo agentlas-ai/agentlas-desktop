@@ -776,8 +776,14 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       ? p.priorHistory!.map((entry) => ({ ...entry }))
       : listChatMessages(chat.id, 80);
   if (!req.agentAppMode && !suppliedPriorHistory) {
-    appendChatMessage(chat.id, "user", req.userPrompt);
-    if (history.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
+    // A product-authored continuation is durable context, not the person's turn.
+    const systemAuthored = req.promptOrigin === "system";
+    if (systemAuthored) {
+      appendChatMessage(chat.id, "system", req.userPrompt);
+    } else {
+      appendChatMessage(chat.id, "user", req.userPrompt);
+      if (history.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
+    }
   }
 
   const divisions = org.divisions;

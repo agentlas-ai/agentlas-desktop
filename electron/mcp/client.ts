@@ -1446,10 +1446,19 @@ export async function runMcpInvocation(
   // the ordinary single-run persistence point. Keep the visible request durable
   // exactly once regardless of which executable orchestrator owns it.
   let userMessagePersisted = false;
+  // A product-authored continuation is not the person's turn. It stays durable
+  // so the next turn keeps the context, but it is written as a system turn:
+  // replaying the conversation must never attribute our wording to the user,
+  // and it must never become the conversation's title.
+  const promptIsSystemAuthored = req.promptOrigin === "system";
   const persistUserMessage = () => {
     if (req.agentAppMode || userMessagePersisted) return;
-    appendChatMessage(chat.id, "user", req.userPrompt);
-    if (priorHistory.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
+    if (promptIsSystemAuthored) {
+      appendChatMessage(chat.id, "system", req.userPrompt);
+    } else {
+      appendChatMessage(chat.id, "user", req.userPrompt);
+      if (priorHistory.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
+    }
     userMessagePersisted = true;
   };
   // The user's turn belongs to the conversation even when routing, provider

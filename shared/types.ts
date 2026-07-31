@@ -3488,6 +3488,14 @@ export interface McpInvocationRequest {
   /** 새 모델: chatId 기반. 에이전트는 chat에서 lookup */
   chatId: string;
   userPrompt: string;
+  /**
+   * Who authored `userPrompt`. "system" marks a prompt the product sent on the
+   * user's behalf (continue an unfinished run, resume after runtime recovery).
+   * Such a turn stays in the conversation for model context, but it is never
+   * recorded as the person's own words and never titles the conversation.
+   * Absent means "user" — the ordinary case.
+   */
+  promptOrigin?: "user" | "system";
   /** One may begin as general conversation and promote only on real work signals. */
   taskIntent?: "task" | "conversation";
   /** Renderer signal selecting the One product surface. Main derives all approved context itself. */
@@ -4985,6 +4993,37 @@ export interface InvocationRunReceipt {
   taskForceTargets?: OrchestrationTarget[];
   errorCode?: string;
   errorMessage?: string;
+  /**
+   * Tool authority this run executed under, replayed from the durable start
+   * record. Automatic recovery needs it: a `read` run cannot have mutated
+   * anything outside the app, so repeating it is safe, while a write-capable
+   * run has no idempotency key to collapse a duplicate onto.
+   */
+  executionPermission?: "read" | "write" | "full";
+}
+
+/** Result of Main's recovery judgment for one unfinished run. */
+export interface OneAutoRecoveryJudgement {
+  /** True when One may retry by itself with a changed approach. */
+  retry: boolean;
+  /** Present when retry is false: why One stopped instead. */
+  reason?:
+    | "settled"
+    | "stopped-by-user"
+    | "needs-person"
+    | "unsafe-to-repeat"
+    | "will-not-succeed"
+    | "no-progress"
+    | "exhausted"
+    | "undecided";
+  /** 1-based index of the attempt this authorizes, when retry is true. */
+  attempt?: number;
+  /** Identity of this failure, so the caller can detect a repeat next time. */
+  fingerprint: string;
+  /** Plain-language account of what blocked the run. */
+  diagnosis: string;
+  /** "form" = decided from recorded enums alone; "fallback" = no model reachable. */
+  decidedBy: "form" | "llm" | "fallback";
 }
 
 export type AgentEvolutionProposalStatus =
@@ -5942,6 +5981,20 @@ export interface AgentlasIpc {
     getState: () => Promise<OneValueClosureState>;
     latestForTask: (taskId: string) => Promise<OneValueClosureRecord | null>;
     setReflection: (input: SetOneValueClosureReflectionInput) => Promise<OneValueClosureMutationResult<OneValueClosureRecord>>;
+  };
+  /**
+   * Main-owned judgment on a run that did not finish: may One route around the
+   * obstacle itself, or must it involve the person? Read-only — deciding does
+   * not start anything.
+   */
+  oneAutoRecovery: {
+    judge: (input: {
+      runId: string;
+      chatId: string;
+      goal: string;
+      attemptsSpent: number;
+      previousFingerprint?: string | null;
+    }) => Promise<OneAutoRecoveryJudgement | null>;
   };
   /** Read-only deterministic home chip rotation signals. Never grants execution authority. */
   oneHomeSignals: {

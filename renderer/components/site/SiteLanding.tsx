@@ -43,6 +43,12 @@ type SiteLandingProps = {
   busy: boolean;
   noEngine: boolean;
   generating: boolean;
+  /** Live status and design feedback from the running generation. */
+  activity?: { status: string; feedback: string } | null;
+  /** The last create that failed, kept on screen instead of a vanishing toast. */
+  failure?: { reason: string } | null;
+  onRetryCreate?: () => void;
+  onDismissFailure?: () => void;
   /** Fresh main-owned readiness. Missing entries fail closed as offline. */
   agentAppMcpLiveStates?: Record<string, SiteAgentAppMcpLiveState>;
   onCreate: (input: {
@@ -235,6 +241,10 @@ export function SiteLanding({
   busy,
   noEngine,
   generating,
+  activity,
+  failure,
+  onRetryCreate,
+  onDismissFailure,
   agentAppMcpLiveStates,
   onCreate,
   onOpenProject,
@@ -525,7 +535,43 @@ export function SiteLanding({
           </div>
         </div>
         {noEngine && <p className={styles.engineWarning} role="status">{ko ? "설정에서 Claude Code 또는 Codex 런타임을 연결하면 생성을 시작할 수 있습니다." : "Connect Claude Code or Codex in Settings to start creating."}</p>}
-        {generating && <p className={styles.generatingStatus} role="status">{ko ? "Agentlas가 화면과 앱 구조를 만들고 있습니다…" : "Agentlas is composing the interface and app structure…"}</p>}
+
+        {generating && (
+          <section className={styles.progressPanel} role="status" aria-live="polite">
+            <span className={styles.progressSpinner} aria-hidden="true" />
+            <div className={styles.progressCopy}>
+              <strong>{activity?.status || (ko ? "Agentlas가 화면과 앱 구조를 만들고 있습니다…" : "Agentlas is composing the interface and app structure…")}</strong>
+              {activity?.feedback && <p className={styles.progressFeedback}>{activity.feedback}</p>}
+              <small>{ko
+                ? "설계에는 보통 1–3분이 걸립니다. 이 화면을 열어 두면 진행 상황이 계속 표시됩니다."
+                : "Designing usually takes 1–3 minutes. Keep this screen open to follow the progress."}</small>
+            </div>
+          </section>
+        )}
+
+        {!generating && failure && (
+          <section className={styles.failurePanel} role="alert">
+            <div className={styles.progressCopy}>
+              <strong>{ko ? "이번에는 화면을 만들지 못했어요" : "This attempt did not produce a screen"}</strong>
+              <p className={styles.failureReason}>{failure.reason}</p>
+              <small>{ko
+                ? "입력한 설명은 그대로 두었습니다. 다시 시도하면 같은 요청으로 이어서 만듭니다."
+                : "Your description is unchanged. Retrying continues with the same request."}</small>
+            </div>
+            <div className={styles.failureActions}>
+              {onRetryCreate && (
+                <button type="button" className={styles.failureRetry} onClick={onRetryCreate} disabled={busy}>
+                  {ko ? "다시 시도" : "Try again"}
+                </button>
+              )}
+              {onDismissFailure && (
+                <button type="button" className={styles.failureDismiss} onClick={onDismissFailure}>
+                  {ko ? "닫기" : "Dismiss"}
+                </button>
+              )}
+            </div>
+          </section>
+        )}
       </section>
 
       <section className={styles.templates} aria-labelledby="site-template-heading">

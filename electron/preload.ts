@@ -587,6 +587,9 @@ const api: AgentlasIpc = {
   oneHubDerivative: {
     getDraft: (input) => ipcRenderer.invoke("oneHubDerivative:getDraft", input),
   },
+  oneAutoRecovery: {
+    judge: (input) => ipcRenderer.invoke("oneAutoRecovery:judge", input),
+  },
   oneValueClosure: {
     getState: () => ipcRenderer.invoke("oneValueClosure:getState"),
     latestForTask: (taskId) => ipcRenderer.invoke("oneValueClosure:latestForTask", taskId),

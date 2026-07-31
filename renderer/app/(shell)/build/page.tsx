@@ -837,9 +837,9 @@ export default function BuildPage() {
                   </button>
                 )}
               </div>
-              {(folderMsg || startBlocker) && !running && phase !== "interview" && (
+              {(startBlocker || folderMsg) && !running && phase !== "interview" && (
                 <div role="status" className="build-inline-hint">
-                  {folderMsg || startBlocker}
+                  {startBlocker || folderMsg}
                 </div>
               )}
               <p className="build-autoadd-hint">

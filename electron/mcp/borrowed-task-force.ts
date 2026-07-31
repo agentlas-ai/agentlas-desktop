@@ -3809,8 +3809,14 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       : readStoredChatMessages(chatId, limit);
   const history = p.req.agentAppMode || !emitFinal ? [] : listChatMessages(p.chat.id, 80);
   if (!p.req.agentAppMode && emitFinal && !suppliedPriorHistory) {
-    appendChatMessage(p.chat.id, "user", p.req.userPrompt);
-    if (history.length === 0) autoTitleFromFirstMessage(p.chat.id, p.req.userPrompt);
+    // A product-authored continuation is durable context, not the person's turn.
+    const systemAuthored = p.req.promptOrigin === "system";
+    if (systemAuthored) {
+      appendChatMessage(p.chat.id, "system", p.req.userPrompt);
+    } else {
+      appendChatMessage(p.chat.id, "user", p.req.userPrompt);
+      if (history.length === 0) autoTitleFromFirstMessage(p.chat.id, p.req.userPrompt);
+    }
   }
 
   p.sink({

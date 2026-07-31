@@ -52,6 +52,12 @@ export default function SiteStudioPage() {
   // ── 홈(브리프) 상태 ─────────────────────────────────────
   const [view, setView] = useState<"home" | "studio">("home");
   const [generating, setGenerating] = useState(false);
+  // A toast disappears in 3.5s and leaves the landing view looking untouched,
+  // so a failed create reads as "the button did nothing". Keep the reason on
+  // screen, with the exact request, until the user retries or dismisses it.
+  const [createFailure, setCreateFailure] = useState<
+    { reason: string; brief: string; surface: SiteSurface; agentAppTarget?: SiteAgentAppTargetRef; projectId: string | null } | null
+  >(null);
 
   // ── 캔버스/렌더 상태 ────────────────────────────────────
   const [srcDoc, setSrcDoc] = useState<string | null>(null);
@@ -89,6 +95,11 @@ export default function SiteStudioPage() {
   // 반영되기 전의 더블클릭까지 막기 위해 동기 ref를 단일 작업 mutex로 사용한다.
   const operationRef = useRef<"generate" | "edit" | "handoff" | null>(null);
   const projectRefreshGenerationRef = useRef(0);
+  // Generation from the landing view has no open project yet, so activity would
+  // otherwise be filtered out for its whole duration — up to the 10-minute
+  // engine timeout. Track the in-flight project separately so the home view
+  // receives the same live status and design feedback the studio view gets.
+  const generatingProjectRef = useRef<string | null>(null);
 
   const project = useMemo(() => projects.find((p) => p.id === projectId) ?? null, [projects, projectId]);
   const publishProject = useMemo(
@@ -192,7 +203,9 @@ export default function SiteStudioPage() {
 
   useEffect(() => {
     const unsubscribe = ipcEvents()?.onSiteActivity?.((event: SiteActivityEvent) => {
-      if (event.projectId !== conversationProjectRef.current) return;
+      const watched = event.projectId === conversationProjectRef.current
+        || event.projectId === generatingProjectRef.current;
+      if (!watched) return;
       if (event.type === "message") {
         setConversation((prev) => (prev.some((entry) => entry.id === event.entry.id) ? prev : [...prev, event.entry]));
         return;
@@ -333,9 +346,17 @@ export default function SiteStudioPage() {
       if (!text || siteBusy || operationRef.current) return;
       operationRef.current = "generate";
       setGenerating(true);
+      setCreateFailure(null);
+      setLiveActivity(null);
+      const surface = opts.surface ?? "web";
+      const failWith = (reason: string, pid: string | null) => {
+        showToast((ko ? "생성 실패: " : "Generation failed: ") + reason);
+        setCreateFailure({ reason, brief: text, surface, agentAppTarget: opts.agentAppTarget, projectId: pid });
+      };
       try {
         const siteApi = ipc()?.site;
         let pid = opts.pid;
+        generatingProjectRef.current = pid;
         if (!pid) {
           const created = await siteApi?.createProject?.({
             name: text.slice(0, 30),
@@ -343,10 +364,11 @@ export default function SiteStudioPage() {
             agentAppTarget: opts.agentAppTarget,
           });
           if (!created) {
-            showToast(ko ? "Electron 브리지를 사용할 수 없습니다" : "Electron bridge unavailable");
+            failWith(ko ? "Electron 브리지를 사용할 수 없습니다." : "Electron bridge unavailable.", null);
             return;
           }
           pid = created.id;
+          generatingProjectRef.current = pid;
           setDevice(created.surface === "mobile" ? DEVICES[0] : DEVICES[2]);
           if (created.surface === "agent-app") {
             // This main-owned prompt must complete before design generation or
@@ -374,7 +396,7 @@ export default function SiteStudioPage() {
           locale: ko ? "ko" : "en",
         });
         if (!res?.ok || !res.screens?.length) {
-          showToast((ko ? "생성 실패: " : "Generation failed: ") + (res?.reason ?? "unknown"));
+          failWith(res?.reason ?? (ko ? "알 수 없는 이유" : "unknown"), pid);
           return;
         }
         const generatedScreens = res.screens;
@@ -405,13 +427,14 @@ export default function SiteStudioPage() {
               : `Screen ready (${res.engine})`,
         );
       } catch (error) {
-        showToast(
-          (ko ? "생성 실패: " : "Generation failed: ") +
-            (error instanceof Error ? error.message : String(error)),
-        );
+        failWith(error instanceof Error ? error.message : String(error), generatingProjectRef.current);
       } finally {
         if (operationRef.current === "generate") operationRef.current = null;
+        generatingProjectRef.current = null;
         setGenerating(false);
+        // Live activity belongs to the run that just ended. The studio view
+        // restores its own status from main when a project is opened.
+        setLiveActivity((current) => (current?.runId.startsWith("restored:") ? current : null));
       }
     },
     [ko, openScreen, refreshProjects, showToast, siteBusy],
@@ -617,6 +640,22 @@ export default function SiteStudioPage() {
           busy={siteBusy}
           noEngine={noEngine}
           generating={generating}
+          activity={generating ? liveActivity : null}
+          failure={generating ? null : createFailure}
+          onRetryCreate={() => {
+            const failed = createFailure;
+            if (!failed) return;
+            // Reuse the project the failed attempt already created so retrying
+            // never leaves an empty project behind in the gallery.
+            void runGenerate({
+              pid: failed.projectId,
+              briefText: failed.brief,
+              variantCount: 1,
+              surface: failed.surface,
+              agentAppTarget: failed.agentAppTarget,
+            });
+          }}
+          onDismissFailure={() => setCreateFailure(null)}
           onCreate={({ brief: nextBrief, surface, agentAppTarget }) => {
             void runGenerate({
               pid: null,

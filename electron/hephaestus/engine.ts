@@ -282,7 +282,15 @@ export async function resolveHephaestusStdioLaunch(
    * itself rejected, so its retry lands on a different one. Every other Core
    * feature ignores those rejections — see `hephaestusRootDetail`.
    */
-  options?: { excludeRejected?: boolean },
+  options?: {
+    excludeRejected?: boolean;
+    /**
+     * OS task launches need the resident judge hint. Maintenance workers do
+     * not, and probing every local model provider before spawning an updater
+     * can delay Desktop startup by minutes.
+     */
+    includeJudgeRuntime?: boolean;
+  },
 ): Promise<HephaestusStdioLaunch | null> {
   const selectedRoot = runtimeRootOverride?.trim()
     || hephaestusRootDetail({ excludeRejected: options?.excludeRejected })?.root
@@ -306,13 +314,15 @@ export async function resolveHephaestusStdioLaunch(
   // local model (Ollama / LM Studio / MLX). Absent for CLI / networked BYOK — the
   // OS side then reports the honest "connect a model" outcome, never a keyword.
   let judgeRuntime: string | undefined;
-  try {
-    const { pickActive } = await import("../runtime/selection");
-    const { detectRuntimes } = await import("../runtime/detect");
-    const { osJudgeRuntimeEnvValue } = await import("../runtime/os-judge-runtime");
-    judgeRuntime = osJudgeRuntimeEnvValue(pickActive(await detectRuntimes()));
-  } catch {
-    judgeRuntime = undefined;
+  if (options?.includeJudgeRuntime !== false) {
+    try {
+      const { pickActive } = await import("../runtime/selection");
+      const { detectRuntimes } = await import("../runtime/detect");
+      const { osJudgeRuntimeEnvValue } = await import("../runtime/os-judge-runtime");
+      judgeRuntime = osJudgeRuntimeEnvValue(pickActive(await detectRuntimes()));
+    } catch {
+      judgeRuntime = undefined;
+    }
   }
   return {
     command: py.python,
@@ -344,6 +354,8 @@ export async function startHephaestusRuntimeAutoUpdate(): Promise<boolean> {
   const launch = await resolveHephaestusStdioLaunch(
     "agentlas_cloud.update",
     ["--auto-update-worker", runtimeRoot],
+    undefined,
+    { includeJudgeRuntime: false },
   );
   if (!launch) return false;
   try {
@@ -486,6 +498,7 @@ export async function runHephaestusRuntimeUpdate(
     "agentlas_cloud.update",
     ["--auto-update-worker", runtimeRoot],
     runtimeRoot,
+    { includeJudgeRuntime: false },
   );
   if (!launch) {
     // Reinstalling does not install a Python interpreter. Keep this distinct.

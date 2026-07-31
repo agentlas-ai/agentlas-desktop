@@ -17,10 +17,34 @@ Releases page stays the authority for what is actually downloadable.
 - **A completed build remains visible after navigation.** Cleanup tolerates an
   older or temporarily missing preload progress bridge, so leaving Build cannot
   crash Dashboard or make a newly registered agent appear to have vanished.
+- **A disabled Build start action explains the real blocker.** Runtime quota or
+  availability guidance now takes priority over an older success message such
+  as “Output folder selected.”
+- **Filtered engine events stay out of detailed progress.** Hidden tool and
+  protocol events no longer reappear as repeated, meaningless “next stage”
+  rows while the package is being generated.
+- **Desktop no longer waits for local-model discovery before opening.** The
+  launch-time Agentlas OS updater skips a resident-judge probe it never uses,
+  while real OS task launches keep the same model-selection behavior.
+- **Optional service restore no longer hides the Desktop window.** Mobile
+  Bridge and Telegram restore independently after the local customer surface
+  and core helpers are started, so an unavailable integration cannot look like
+  an app that never launched or hold back another local feature.
 - **One hides machine envelopes at the customer display boundary.** Proactive
   cards, task titles, and conversation titles extract a human title from valid
   structured data and replace unreadable system payloads with a localized
   neutral label.
+- **One no longer quotes its own recovery prompts as the customer.** Automatic
+  retry and connection-recovery turns remain in model context as system turns,
+  use a short localized activity label in the transcript, and cannot become the
+  conversation title.
+- **One keeps failures useful without leaking machine output.** A short,
+  customer-safe cause can be expanded when available; JSON envelopes, stack
+  traces, terminal output, secrets, and local paths remain hidden.
+- **Sites creation no longer looks frozen or silently fails.** The landing view
+  follows the actual team phase and feedback during generation, preserves the
+  failed brief and reason, and retries the same project instead of leaving an
+  empty duplicate behind.
 - The transient updater recovery added in 0.9.35 remains unchanged.
 
 ## 0.9.35 — 2026-07-31

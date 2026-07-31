@@ -839,11 +839,8 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
         at: Date.now(),
       };
     } else if (e.kind === "stage") {
-      pushLog(
-        "stage",
-        safeBuildProgressText(e.text ?? e.stage ?? "", ko)
-          ?? (ko ? "다음 빌드 단계를 진행합니다." : "Continuing to the next build stage."),
-      );
+      const visible = safeBuildProgressText(e.text ?? e.stage ?? "", ko);
+      if (visible) pushLog("stage", visible);
     } else if (e.kind === "log") {
       const visible = safeBuildProgressText(e.text ?? "", ko);
       if (visible) pushLog("log", visible);

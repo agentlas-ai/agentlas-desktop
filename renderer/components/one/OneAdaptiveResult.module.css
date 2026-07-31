@@ -690,6 +690,34 @@
   background: #fffafa;
 }
 
+/* One is still working the problem — reassuring, not alarming. */
+.recoveringClosure {
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 15px;
+  border: 1px solid #d8e2ea;
+  border-radius: 15px;
+  background: #f9fbfd;
+}
+
+.recoveringSpinner {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  border: 2px solid #dbe5ec;
+  border-top-color: #6f8ba3;
+  border-radius: 50%;
+  animation: oneRecoverySpin 850ms linear infinite;
+}
+
+@keyframes oneRecoverySpin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .recoveringSpinner { animation: none; }
+}
+
 .failureClosure .actionPrimary {
   flex: 0 0 auto;
   margin-left: auto;
@@ -701,6 +729,34 @@
   color: #6f625e;
   font-size: 11px;
   line-height: 1.55;
+}
+
+.closureCause {
+  max-width: 720px;
+  margin-top: 7px;
+}
+
+.closureCause > summary {
+  color: #8a6a62;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 640;
+  list-style: none;
+}
+
+.closureCause > summary::-webkit-details-marker { display: none; }
+.closureCause > summary:focus-visible { outline: 3px solid rgba(138, 106, 98, .22); outline-offset: 2px; }
+
+.closureCause > p {
+  overflow-wrap: anywhere;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fff3f1;
+  color: #6f625e;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .closure > summary {

@@ -39,6 +39,7 @@ import {
   type OneArtifactPreviewCapabilityV1,
 } from "@shared/one-artifacts";
 import { redactSecrets } from "@shared/secret-patterns";
+import { ONE_AUTO_RECOVERY_MAX_ATTEMPTS } from "@shared/one-auto-recovery";
 import { ipc } from "@/lib/ipc";
 import { tFor } from "@/lib/i18n";
 import styles from "./OneAdaptiveResult.module.css";
@@ -76,6 +77,7 @@ export function OneAdaptiveResult({
   acceptingResult = false,
   onRetryUnfinished,
   onSemanticAction,
+  autoRecovery,
 }: {
   manifest: OneSurfaceManifestV1 | null;
   projection: OneTaskProjection;
@@ -94,6 +96,14 @@ export function OneAdaptiveResult({
   onManageImprovementAsset?: (asset: OneImprovementReusedAssetV1) => void;
   /** 끝까지 완료되지 않은 실행을 한 번의 클릭으로 이어서 진행한다. */
   onRetryUnfinished?: () => void;
+  /**
+   * One's own recovery state. While One is still routing around the obstacle
+   * there is no failure to report yet, so the closure card must not claim one.
+   */
+  autoRecovery?:
+    | { phase: "recovering"; attempt: number; diagnosis: string }
+    | { phase: "stopped"; reason: string; diagnosis: string }
+    | null;
 }) {
   const surface = useMemo(() => manifest && isOneSurfaceManifestV1(manifest) ? manifest : null, [manifest]);
   const renderDecision = useMemo(() => surface ? inspectSurfaceForDesktop(surface, projection.taskId) : null, [projection.taskId, surface]);
@@ -193,7 +203,12 @@ export function OneAdaptiveResult({
         </article>
       )}
       {receipt && isTerminal(receipt.status) && receipt.status !== "completed" && (
-        <RunClosure receipt={receipt} locale={locale} onRetryUnfinished={onRetryUnfinished} />
+        <RunClosure
+          receipt={receipt}
+          locale={locale}
+          onRetryUnfinished={onRetryUnfinished}
+          autoRecovery={autoRecovery}
+        />
       )}
       {canAcceptResult && !hasManifest && (
         <section className={styles.standaloneAcceptance} aria-label={tFor(locale, "one.res.aria.confirm_result")}>
@@ -1196,22 +1211,78 @@ function safeFallbackText(value: unknown, maxLength: number): string | null {
   return sanitizeText(text);
 }
 
-function RunClosure({ receipt, locale, onRetryUnfinished }: {
+function safeFailureCause(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const source = value.trim();
+  // Failure receipts are operational evidence, not an invitation to put JSON,
+  // stack traces, terminal output, or local implementation details back into
+  // One. Keep only a short human sentence after the normal secret/path scrub.
+  if (
+    /^[\[{]/.test(source)
+    || /(?:^|\n)\s*(?:at\s+\S|traceback\b|error:\s|npm err!|node:internal|stderr\b|stdout\b|select\s+\S+\s+from\b)/i.test(source)
+  ) {
+    return null;
+  }
+  const safe = safeFallbackText(source, 480);
+  if (!safe || safe.split(/\r?\n/).length > 3) return null;
+  return safe;
+}
+
+function RunClosure({ receipt, locale, onRetryUnfinished, autoRecovery }: {
   receipt: InvocationRunReceipt;
   locale: "ko" | "en";
   onRetryUnfinished?: () => void;
+  autoRecovery?:
+    | { phase: "recovering"; attempt: number; diagnosis: string }
+    | { phase: "stopped"; reason: string; diagnosis: string }
+    | null;
 }) {
+  // One is still working the problem. Reporting a failure now would be wrong,
+  // and asking the user to press "continue" would be asking for what One is
+  // already doing.
+  if (autoRecovery?.phase === "recovering") {
+    return (
+      <section className={styles.recoveringClosure} role="status" aria-live="polite">
+        <span className={styles.recoveringSpinner} aria-hidden="true" />
+        <div className={styles.closureSummaryCopy}>
+          <strong>{tFor(locale, "one.res.closure.recovering")}</strong>
+          <small>{tFor(locale, "one.res.closure.recovering_detail", { attempt: autoRecovery.attempt + 1 })}</small>
+        </div>
+      </section>
+    );
+  }
   const stopped = receipt.status === "cancelled";
+  const stopReason = autoRecovery?.phase === "stopped" ? autoRecovery.reason : null;
   const statusLabel = stopped
     ? tFor(locale, "one.res.closure.stopped_here")
-    : tFor(locale, "one.res.closure.not_finished");
-  const outcome = friendlyFailureMessage(receipt.errorMessage, locale, stopped);
+    : stopReason === "needs-person"
+      ? tFor(locale, "one.res.closure.needs_person")
+      : stopReason === "unsafe-to-repeat"
+        ? tFor(locale, "one.res.closure.unsafe_to_repeat")
+        : tFor(locale, "one.res.closure.not_finished");
+  // One's own account of what blocked it beats a generic template — it is the
+  // only line that says something specific about this particular run.
+  const outcome = (autoRecovery?.phase === "stopped" && safeFailureCause(autoRecovery.diagnosis))
+    || friendlyFailureMessage(receipt.errorMessage, locale, stopped);
+  // The friendly line is a summary. Keep a short customer-safe cause one click
+  // away when available, but never put machine envelopes or runtime logs back
+  // into the One transcript.
+  const cause = safeFailureCause(receipt.errorMessage);
   return (
     <section className={styles.failureClosure} role="status">
       <span className={styles.closureCheck} data-tone="bad" aria-hidden="true">!</span>
       <div className={styles.closureSummaryCopy}>
         <strong>{statusLabel}</strong>
         <small>{outcome}</small>
+        {(stopReason === "exhausted" || stopReason === "no-progress") && (
+          <small>{tFor(locale, "one.res.closure.tried_count", { n: ONE_AUTO_RECOVERY_MAX_ATTEMPTS + 1 })}</small>
+        )}
+        {cause && (
+          <details className={styles.closureCause}>
+            <summary>{tFor(locale, "one.res.closure.why")}</summary>
+            <p>{cause}</p>
+          </details>
+        )}
       </div>
       {!stopped && onRetryUnfinished && (
         <button type="button" className={styles.actionPrimary} onClick={onRetryUnfinished}>
