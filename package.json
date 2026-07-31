@@ -269,6 +269,7 @@
     "lint": "next lint --dir renderer",
     "clean": "node -e \"['dist','out','release','renderer/.next','renderer/out'].forEach(d=>require('fs').rmSync(d,{recursive:true,force:true}))\"",
     "test:one-accepted-result-value-closure": "node scripts/verify-one-accepted-result-value-closure.cjs",
+    "test:one-auto-recovery": "npm run build:electron && node scripts/verify-one-auto-recovery.cjs",
     "test:one-activation-runtime": "node scripts/verify-one-activation-runtime.cjs",
     "test:one-artifact-preview-runtime": "node scripts/verify-one-artifact-preview-runtime.cjs",
     "test:one-artifact-preview-ui": "node scripts/verify-one-artifact-preview-ui.cjs",
@@ -306,7 +307,7 @@
     "test:one-weekly-reflection-ui": "node scripts/verify-one-weekly-reflection-ui.cjs",
     "test:one-workspace-projection-runtime": "node scripts/verify-one-workspace-projection-runtime.cjs",
     "test:one-ui": "node scripts/verify-agentlas-one-ui.cjs",
-    "test:one": "npm run test:one-accepted-result-value-closure && npm run test:one-activation-runtime && npm run test:one-artifact-preview-runtime && npm run test:one-artifact-preview-ui && npm run test:one-attachments-runtime && npm run test:one-automation-suggestion-production && npm run test:one-briefing-actions-runtime && npm run test:one-canonical-task-runtime && npm run test:one-completion-suggestion-producer && npm run test:one-customer-safe-copy && npm run test:one-decision-runtime && npm run test:one-experience-reuse-runtime && npm run test:one-feature-intro-runtime && npm run test:one-hub-derivative-runtime && npm run test:one-hub-derivative-ui && npm run test:one-improvement-proof-producer && npm run test:one-improvement-proof-runtime && npm run test:one-markdown-surface && npm run test:one-memory-candidates-runtime && npm run test:one-mobile-suggestion-contract && npm run test:one-profile-runtime && npm run test:one-project-deadline-runtime && npm run test:one-request-intent && npm run test:one-review-seed-runtime && npm run test:one-review-seed-ui && npm run test:one-run-progress && npm run test:one-search-runtime && npm run test:one-suggestions-runtime && npm run test:one-surface-runtime-contract && npm run test:one-task-continuation-runtime && npm run test:one-task-projection-runtime && npm run test:one-team-preflight-runtime && npm run test:one-value-closure-runtime && npm run test:one-voice-input-ui && npm run test:one-weekly-reflection-runtime && npm run test:one-weekly-reflection-ui && npm run test:one-workspace-projection-runtime && npm run test:one-ui",
+    "test:one": "npm run test:one-accepted-result-value-closure && npm run test:one-activation-runtime && npm run test:one-artifact-preview-runtime && npm run test:one-artifact-preview-ui && npm run test:one-attachments-runtime && npm run test:one-automation-suggestion-production && npm run test:one-briefing-actions-runtime && npm run test:one-canonical-task-runtime && npm run test:one-completion-suggestion-producer && npm run test:one-customer-safe-copy && npm run test:one-decision-runtime && npm run test:one-experience-reuse-runtime && npm run test:one-feature-intro-runtime && npm run test:one-hub-derivative-runtime && npm run test:one-hub-derivative-ui && npm run test:one-improvement-proof-producer && npm run test:one-improvement-proof-runtime && npm run test:one-markdown-surface && npm run test:one-memory-candidates-runtime && npm run test:one-mobile-suggestion-contract && npm run test:one-profile-runtime && npm run test:one-project-deadline-runtime && npm run test:one-request-intent && npm run test:one-review-seed-runtime && npm run test:one-review-seed-ui && npm run test:one-run-progress && npm run test:one-search-runtime && npm run test:one-suggestions-runtime && npm run test:one-surface-runtime-contract && npm run test:one-task-continuation-runtime && npm run test:one-task-projection-runtime && npm run test:one-team-preflight-runtime && npm run test:one-value-closure-runtime && npm run test:one-voice-input-ui && npm run test:one-weekly-reflection-runtime && npm run test:one-weekly-reflection-ui && npm run test:one-workspace-projection-runtime && npm run test:one-ui && npm run test:one-auto-recovery",
     "test:one-briefing-action-reachable": "node scripts/test-one-briefing-action-reachable.cjs",
     "test:hep-call-prompt-safety": "node scripts/test-hep-call-prompt-safety.cjs",
     "test:core-call-liveness-and-auth": "node scripts/test-core-call-liveness-and-auth.cjs",
@@ -314,7 +315,8 @@
     "test:allocation-usage-wired": "node scripts/test-allocation-usage-wired.cjs",
     "test:workforce-contract-tolerance": "node scripts/test-workforce-contract-tolerance.cjs",
     "bump:engine": "node scripts/bump-bundled-engine.mjs",
-    "check:engine-freshness": "node scripts/bump-bundled-engine.mjs --check"
+    "check:engine-freshness": "node scripts/bump-bundled-engine.mjs --check",
+    "test:one-auto-recovery-live": "npm run build:electron && electron scripts/verify-one-auto-recovery-live.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

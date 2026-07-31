@@ -990,7 +990,7 @@ async function confirmNativeSiteAgentAppMcp(
         "차단 항목은 에이전트 번들의 앱 선언에서 안전 정책에 따라 제외했습니다.",
         "허용해도 설치·키 생성·로그인은 자동으로 하지 않습니다.",
         "키가 없거나 준비되지 않은 MCP는 붙이지 않고, 이번 앱 생성과 실행은 MCP 없이 계속합니다.",
-        "실행 직전에 설치/키/연결/런타임을 다시 확인하고, 하나라도 실패하면 해당 MCP만 빼고 에이전트는 stateless/no-tool로 계속 실행합니다.",
+        "실행 직전에 설치/키/연결/런타임을 다시 확인하고, 하나라도 실패하면 해당 MCP만 빼고 MCP 없이 계속 실행합니다.",
         "비밀값, 키 이름, 로컬 경로, 서버 오류 원문은 앱 화면으로 전달하지 않습니다.",
       ].join("\n")
     : [
@@ -1001,7 +1001,7 @@ async function confirmNativeSiteAgentAppMcp(
         "Blocked items came from the agent bundle's app declaration and were excluded by safety policy.",
         "Allowing this does not install a server, create a key, or sign in automatically.",
         "A missing key or unready MCP is left unattached; this app still builds and runs without MCP.",
-        "Agentlas rechecks installation, key, connection, and runtime eligibility before every run. Any failure removes only that MCP and continues stateless/no-tool.",
+        "Agentlas rechecks installation, key, connection, and runtime eligibility before every run. Any failure removes only that MCP and continues without that capability.",
         "Secret values, key names, local paths, and raw server errors never reach the app UI.",
       ].join("\n");
   const result = await dialog.showMessageBox(win, {
@@ -1048,6 +1048,12 @@ async function reviewNativeSiteAgentAppMcpUnlocked(
     return recommendation;
   }
   if (recommendation.status === "not-required" && recommendation.blocked.length === 0) return recommendation;
+  // rows.length === 0 means there is nothing the user's click can change (see
+  // the early return inside the loop below) — the automatic pre-build check
+  // would otherwise interrupt Create with a decision-free native dialog. The
+  // same "blocked" fact is already shown, non-blocking, via the project
+  // card's MCP badge (SiteLanding.tsx mcpCardPresentation) once it exists.
+  if (mode === "prebuild" && recommendation.rows.length === 0) return recommendation;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const decision = await confirmNativeSiteAgentAppMcp(win, recommendation);
     if (recommendation.rows.length === 0) return recommendation;

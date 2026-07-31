@@ -13,6 +13,38 @@ import type {
 } from "@shared/site-studio";
 import styles from "./SiteLanding.module.css";
 
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `0:${String(s).padStart(2, "0")}`;
+}
+
+/**
+ * The team's own reported phase (e.g. from web-master's orchestrator) can go
+ * silent for minutes at a time — see electron/site/generate.ts. A static
+ * label during that silence reads as frozen, so the host clock drives a
+ * rotating reassurance line once enough time has passed without a real update.
+ */
+export function elapsedCopy(ko: boolean, elapsedMs: number): string {
+  if (elapsedMs < 20_000) {
+    return ko ? "화면과 앱 구조를 설계하는 중…" : "Composing the interface and app structure…";
+  }
+  if (elapsedMs < 60_000) {
+    return ko
+      ? "여러 전문 에이전트가 협업해 세부 디자인을 다듬는 중…"
+      : "Multiple specialist agents are collaborating on the details…";
+  }
+  if (elapsedMs < 150_000) {
+    return ko
+      ? "복잡한 요청이라 조금 더 걸리고 있어요. 계속 진행 중입니다…"
+      : "This request is complex and taking a bit longer. Still working…";
+  }
+  return ko
+    ? "이 화면을 열어 두면 계속 진행됩니다. 완료되면 바로 표시돼요."
+    : "Keep this screen open — it's still working and will show up as soon as it's done.";
+}
+
 type AgentChoice = SiteAgentAppTargetRef & {
   name: string;
   description: string;
@@ -45,6 +77,8 @@ type SiteLandingProps = {
   generating: boolean;
   /** Live status and design feedback from the running generation. */
   activity?: { status: string; feedback: string } | null;
+  /** Host-owned clock (ms since the current generation started). Keeps advancing even when the model reports no interim status. */
+  elapsedMs?: number;
   /** The last create that failed, kept on screen instead of a vanishing toast. */
   failure?: { reason: string } | null;
   onRetryCreate?: () => void;
@@ -242,6 +276,7 @@ export function SiteLanding({
   noEngine,
   generating,
   activity,
+  elapsedMs,
   failure,
   onRetryCreate,
   onDismissFailure,
@@ -540,11 +575,16 @@ export function SiteLanding({
           <section className={styles.progressPanel} role="status" aria-live="polite">
             <span className={styles.progressSpinner} aria-hidden="true" />
             <div className={styles.progressCopy}>
-              <strong>{activity?.status || (ko ? "Agentlas가 화면과 앱 구조를 만들고 있습니다…" : "Agentlas is composing the interface and app structure…")}</strong>
+              <div className={styles.progressHeadline}>
+                <strong>{activity?.status || elapsedCopy(ko, elapsedMs ?? 0)}</strong>
+                {typeof elapsedMs === "number" && (
+                  <span className={styles.progressElapsed}>{formatElapsed(elapsedMs)}</span>
+                )}
+              </div>
               {activity?.feedback && <p className={styles.progressFeedback}>{activity.feedback}</p>}
               <small>{ko
-                ? "설계에는 보통 1–3분이 걸립니다. 이 화면을 열어 두면 진행 상황이 계속 표시됩니다."
-                : "Designing usually takes 1–3 minutes. Keep this screen open to follow the progress."}</small>
+                ? "복잡한 요청은 5분 가까이 걸릴 수 있습니다. 이 화면을 열어 두면 진행 상황이 계속 표시됩니다."
+                : "Complex requests can take close to 5 minutes. Keep this screen open to follow the progress."}</small>
             </div>
           </section>
         )}

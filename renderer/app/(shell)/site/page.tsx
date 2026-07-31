@@ -8,7 +8,7 @@ import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { getSnapshot as getBuildSnapshot, prepareBuildHandoff } from "@/lib/build-session";
 import { navigate } from "@/lib/navigation";
-import { SiteLanding, type SiteAgentAppMcpLiveState } from "@/components/site/SiteLanding";
+import { SiteLanding, type SiteAgentAppMcpLiveState, elapsedCopy, formatElapsed } from "@/components/site/SiteLanding";
 import { SitePublishDialog } from "@/components/site/SitePublishDialog";
 import { SITE_MESSAGE_KEY } from "@shared/site-studio";
 import type {
@@ -72,6 +72,8 @@ export default function SiteStudioPage() {
   const [toast, setToast] = useState<string | null>(null);
   const [conversation, setConversation] = useState<SiteConversationEntry[]>([]);
   const [liveActivity, setLiveActivity] = useState<LiveSiteActivity | null>(null);
+  const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null);
+  const [nowTick, setNowTick] = useState(0);
   const [handingOff, setHandingOff] = useState(false);
   const [remoteOperation, setRemoteOperation] = useState<SiteProjectOperation | null>(null);
   const [publishProjectId, setPublishProjectId] = useState<string | null>(null);
@@ -242,6 +244,21 @@ export default function SiteStudioPage() {
     return () => unsubscribe?.();
   }, [ko]);
 
+  // The host owns the clock. It keeps advancing even while the team's
+  // reported phase runs silently for a minute, which is exactly when a
+  // static label reads as frozen (see electron/site/generate.ts).
+  useEffect(() => {
+    if (generationStartedAt === null) return;
+    const id = window.setInterval(() => setNowTick((t) => t + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [generationStartedAt]);
+  // nowTick only exists to force this to recompute every second.
+  const generationElapsedMs = useMemo(
+    () => (generationStartedAt === null ? undefined : Math.max(0, Date.now() - generationStartedAt)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [generationStartedAt, nowTick],
+  );
+
   // ── 게스트(iframe) 통신 ─────────────────────────────────
   const postToGuest = useCallback((message: SiteHostMessage) => {
     const win = iframeRef.current?.contentWindow;
@@ -346,6 +363,7 @@ export default function SiteStudioPage() {
       if (!text || siteBusy || operationRef.current) return;
       operationRef.current = "generate";
       setGenerating(true);
+      setGenerationStartedAt(Date.now());
       setCreateFailure(null);
       setLiveActivity(null);
       const surface = opts.surface ?? "web";
@@ -432,6 +450,7 @@ export default function SiteStudioPage() {
         if (operationRef.current === "generate") operationRef.current = null;
         generatingProjectRef.current = null;
         setGenerating(false);
+        setGenerationStartedAt(null);
         // Live activity belongs to the run that just ended. The studio view
         // restores its own status from main when a project is opened.
         setLiveActivity((current) => (current?.runId.startsWith("restored:") ? current : null));
@@ -641,6 +660,7 @@ export default function SiteStudioPage() {
           noEngine={noEngine}
           generating={generating}
           activity={generating ? liveActivity : null}
+          elapsedMs={generating ? generationElapsedMs : undefined}
           failure={generating ? null : createFailure}
           onRetryCreate={() => {
             const failed = createFailure;
@@ -849,6 +869,9 @@ export default function SiteStudioPage() {
                   <span style={livePulse} aria-hidden="true" />
                   <strong>{liveActivity.status}</strong>
                   <span style={liveBadge}>{ko ? "LIVE" : "LIVE"}</span>
+                  {typeof generationElapsedMs === "number" && (
+                    <span style={liveActivityHint}>{formatElapsed(generationElapsedMs)}</span>
+                  )}
                 </div>
                 {liveActivity.feedback && (
                   <p style={liveFeedbackText}>
@@ -870,9 +893,7 @@ export default function SiteStudioPage() {
               (generating || editing) && (
                 <div style={{ ...chatBubble, ...assistantBubble, color: "var(--muted-deep)" }}>
                   {generating
-                    ? ko
-                      ? "웹앱디자인마스터와 연결하는 중…"
-                      : "Connecting to the design master…"
+                    ? elapsedCopy(ko, generationElapsedMs ?? 0)
                     : ko
                       ? "수정 요청을 준비하는 중…"
                       : "Preparing the edit request…"}
