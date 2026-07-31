@@ -3994,7 +3994,10 @@ export interface UpdaterState {
     | "not-available"
     | "manual-required"
     | "incompatible"
-    | "recovery-required"
+    // "recovery-required" was removed: nothing produced it once the continuity
+    // gate was disabled, yet its banner still asked users to go inspect a
+    // recovery copy. An update that needs the person to open a database file is
+    // a failed update, not a recovery path.
     | "error";
   /** update-available / update-downloaded 시 채워짐 */
   version?: string;

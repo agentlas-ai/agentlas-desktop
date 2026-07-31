@@ -290,7 +290,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         "installing",
         "manual-required",
         "incompatible",
-        "recovery-required",
       ].includes(status));
     };
     const api = ipc();

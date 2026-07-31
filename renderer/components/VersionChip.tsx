@@ -53,8 +53,6 @@ export function VersionChip() {
         return state.canRetry ? t("update.status.retry") : t("update.status.paused");
       case "incompatible":
         return state.canRetry ? t("update.status.retry") : t("update.status.compatibility");
-      case "recovery-required":
-        return t("update.status.recovery");
       case "error":
         return t("update.status.check_failed");
       case "not-available":

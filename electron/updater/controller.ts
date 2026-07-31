@@ -13,6 +13,12 @@ import type {
 
 const JOURNAL_SCHEMA_VERSION = 1;
 const CONTINUITY_GATE_VERSION = 2;
+/**
+ * How long a failed install may suppress further attempts. Long enough that a
+ * genuinely broken machine is not retried in a loop; short enough that a user
+ * who hit a transient failure is back on the update track the same day.
+ */
+const HOLD_EXPIRY_MS = 6 * 60 * 60 * 1000;
 const RECOVERY_SESSION_RETRY_DELAY_MS = 500;
 const RECOVERY_SESSION_RETRY_ATTEMPTS = 4;
 const NATIVE_INSTALL_WATCHDOG_MS = 20_000;
@@ -179,7 +185,13 @@ export interface InstallJournal {
   nativeInstallFailures?: number;
   /** Epoch milliseconds; avoids a tight retry loop after helper/payload failures. */
   retryAfter?: number;
-  continuity: ContinuitySnapshot;
+  /**
+   * Best-effort pre-install snapshot. Absent when the copy could not be taken —
+   * a backup is a convenience for manual recovery, never a precondition for
+   * updating. Crash safety during a schema change is owned by the migration
+   * transactions in the store, which hold regardless of this field.
+   */
+  continuity?: ContinuitySnapshot;
 }
 
 export type InstallJournalInspection =
@@ -244,7 +256,6 @@ export type InstalledAppTrustResult =
 const terminalStates = new Set<UpdaterState["status"]>([
   "downloaded",
   "installing",
-  "recovery-required",
 ]);
 
 const updaterErrorCodes = new Set<UpdaterErrorCode>([
@@ -643,6 +654,12 @@ export class DesktopUpdaterController {
   private blockedRetryAfter: number | undefined;
   private recoveryBackupPath: string | null = null;
   private automaticInstallPaused = false;
+  /**
+   * When the current hold was taken. Every hold expires: whatever blocked one
+   * install (a busy disk, a stuck helper, a damaged journal) is usually gone
+   * later, and no failure justifies keeping a user on an old version forever.
+   */
+  private holdSince: number | undefined;
   private lastCheckedAt: number | undefined;
   private initialized = false;
   private initPromise: Promise<void> | null = null;
@@ -763,6 +780,7 @@ export class DesktopUpdaterController {
         }
         if (markerValid) {
           this.automaticInstallPaused = true;
+          this.holdSince = this.now();
           return null;
         }
       } catch (error) {
@@ -785,6 +803,7 @@ export class DesktopUpdaterController {
         this.logger.warn("[updater] corrupt journal marker could not be renewed", error);
       }
       this.automaticInstallPaused = true;
+      this.holdSince = this.now();
       return null;
     }
     try {
@@ -804,6 +823,7 @@ export class DesktopUpdaterController {
         // Keep the corrupt file in place if the durable marker/quarantine cannot be created.
       }
       this.automaticInstallPaused = true;
+      this.holdSince = this.now();
       this.logger.warn("[updater] install journal could not be read", error);
       return null;
     }
@@ -996,6 +1016,7 @@ export class DesktopUpdaterController {
   private cleanupOrBlock(version?: string, knownJournal?: InstallJournal): boolean {
     if (this.clearStaleInstallArtifacts(knownJournal)) return true;
     this.automaticInstallPaused = true;
+    this.holdSince = this.now();
     this.blockedTargetVersion = version ?? null;
     this.blockedReasonCode = "legacy-cleanup-failed";
     this.blockedDiagnostic = undefined;
@@ -1258,14 +1279,14 @@ export class DesktopUpdaterController {
     this.blockedDiagnostic = journal.diagnostic;
     this.blockedNativeInstallFailures = journal.nativeInstallFailures ?? 0;
     this.blockedRetryAfter = journal.retryAfter;
-    this.recoveryBackupPath = journal.continuity.backupPath;
+    this.recoveryBackupPath = journal.continuity?.backupPath ?? null;
     const comparison = compareSemVer(this.deps.currentVersion(), journal.targetVersion);
     if (this.installInFlight(journal)) {
       this.publish({
         status: "installing",
         version: journal.targetVersion,
         progress: 100,
-        recoveryBackupAvailable: fs.existsSync(journal.continuity.backupPath),
+        recoveryBackupAvailable: Boolean(journal.continuity && fs.existsSync(journal.continuity.backupPath)),
       });
       this.scheduleNativeInstallReconcile(journal);
       return;
@@ -1313,8 +1334,10 @@ export class DesktopUpdaterController {
       // catching data loss, so it is off. The recovery copy is still written at
       // install time and stays on disk for manual use.
       this.logger.log(
-        `[updater] continuity gate disabled; accepting ${journal.targetVersion} `
-          + `(recovery copy kept at ${journal.continuity.backupPath})`,
+        `[updater] accepting ${journal.targetVersion} `
+          + (journal.continuity
+            ? `(recovery copy kept at ${journal.continuity.backupPath})`
+            : "(installed without a recovery copy)"),
       );
       if (!this.cleanupOrBlock(journal.targetVersion, journal)) {
         this.writeJournal({ ...journal, phase: "blocked", reasonCode: "legacy-cleanup-failed" });
@@ -1322,6 +1345,7 @@ export class DesktopUpdaterController {
       }
       if (!this.clearJournal()) {
         this.automaticInstallPaused = true;
+        this.holdSince = this.now();
         this.blockedTargetVersion = journal.targetVersion;
         this.blockedReasonCode = "install-state-corrupt";
         this.blockedDiagnostic = undefined;
@@ -1420,12 +1444,15 @@ export class DesktopUpdaterController {
       }
       if (this.state.status === "manual-required" && this.state.code === "install-start-failed") return;
       this.logger.warn("[updater] electron-updater failed outside install handoff");
-      if (this.state.status === "downloaded" || this.state.status === "recovery-required") return;
+      if (this.state.status === "downloaded") return;
       this.publish(this.errorState(this.downloadPromise ? "download-failed" : "check-failed"));
     });
 
     await this.reconcileJournal();
-    if (this.state.status === "recovery-required" || this.automaticInstallPaused) return;
+    // A hold must never stop the app from looking for updates. Skipping the
+    // timer here is what turned a single failed install into a permanently
+    // frozen version: nothing else re-arms it. `check()` owns hold expiry, so
+    // scheduling always happens and a stuck install heals on the next tick.
     if (this.deps.schedule === false) return;
 
     this.initialTimer = setTimeout(() => {
@@ -1550,18 +1577,31 @@ export class DesktopUpdaterController {
       this.publish({ status: "idle" });
     }
     if (this.automaticInstallPaused) {
-      if (this.state.code !== "legacy-cleanup-failed" || !this.clearStaleInstallArtifacts()) {
-        return Promise.resolve(this.state);
+      // Two ways out, and every hold has one. Either the specific blocker is
+      // gone now, or the hold simply aged out — the conditions that break an
+      // install (a busy disk, a stuck helper, a half-written journal) are
+      // transient, while staying on an old build is permanent.
+      const cleared = this.state.code === "legacy-cleanup-failed" && this.clearStaleInstallArtifacts();
+      const expired = this.holdSince !== undefined && this.now() - this.holdSince >= HOLD_EXPIRY_MS;
+      if (!cleared && !expired) return Promise.resolve(this.state);
+      if (expired && !cleared) {
+        this.logger.log("[updater] update hold expired; discarding it and retrying from a clean state");
+        // Aged-out holds start over rather than resuming a payload whose state
+        // we no longer trust; a failure to sweep must not re-arm the hold.
+        this.clearStaleInstallArtifacts();
+        this.clearJournal();
       }
       this.automaticInstallPaused = false;
+      this.holdSince = undefined;
       this.blockedTargetVersion = null;
       this.blockedReasonCode = "install-not-applied";
       this.blockedDiagnostic = undefined;
       this.blockedNativeInstallFailures = 0;
       this.blockedRetryAfter = undefined;
+      this.availableVersion = null;
       this.publish({ status: "idle" });
     }
-    if (this.state.status === "installing" || this.state.status === "recovery-required" || this.state.status === "downloaded") {
+    if (this.state.status === "installing" || this.state.status === "downloaded") {
       return Promise.resolve(this.state);
     }
     this.checkPromise = (async () => {
@@ -1616,24 +1656,31 @@ export class DesktopUpdaterController {
       return { accepted: false, state: this.state };
     }
 
+    // Quiescing writers makes the optional snapshot cleaner. It is not a
+    // precondition: the app is about to be replaced and restarted either way,
+    // and SQLite's own crash safety does not depend on us pausing writers.
     let resumeWriters: (() => void) | undefined;
     try {
       resumeWriters = (await this.deps.quiesceWriters?.()) || undefined;
     } catch (error) {
-      this.logger.warn("[updater] writer quiescence failed", error);
-      return { accepted: false, state: this.publish(this.manualState(version, "continuity-backup-failed")) };
+      this.logger.warn("[updater] writer quiescence failed; continuing without it", error);
     }
 
     this.armInstallWriterResume(resumeWriters);
     let installHandedOff = false;
     try {
-      let continuity: ContinuitySnapshot;
+      // Best effort. A backup that cannot be taken (a busy disk, a transient
+      // SQLite I/O error) must never cost the user the update itself — that
+      // trade blocked four consecutive updates on a real machine. What actually
+      // protects data during a schema change is the migration transaction, and
+      // the previous app version is retained by the native updater.
+      let continuity: ContinuitySnapshot | undefined;
       try {
         continuity = await this.deps.captureContinuity(version);
         this.recoveryBackupPath = continuity.backupPath;
       } catch (error) {
-        this.logger.warn("[updater] continuity backup failed", error);
-        return { accepted: false, state: this.publish(this.manualState(version, "continuity-backup-failed")) };
+        this.logger.warn("[updater] continuity backup failed; installing without a recovery copy", error);
+        this.recoveryBackupPath = null;
       }
 
       const journal: InstallJournal = {
@@ -1652,13 +1699,15 @@ export class DesktopUpdaterController {
             ? { nativeInstallFailures: prior.nativeInstallFailures ?? 0 }
             : {};
         })(),
-        continuity,
+        ...(continuity ? { continuity } : {}),
       };
+      // The journal drives post-install cleanup and retry accounting. Losing it
+      // costs diagnostics on the next boot, not correctness, so a write failure
+      // does not cancel an install the user is already waiting for.
       try {
         this.writeJournal(journal);
       } catch (error) {
-        this.logger.warn("[updater] install journal write failed", error);
-        return { accepted: false, state: this.publish(this.manualState(version, "continuity-backup-failed")) };
+        this.logger.warn("[updater] install journal write failed; installing without it", error);
       }
 
       this.publish({
@@ -1666,7 +1715,7 @@ export class DesktopUpdaterController {
         version,
         progress: 100,
         compatibility: this.state.compatibility,
-        recoveryBackupAvailable: true,
+        recoveryBackupAvailable: Boolean(continuity),
       });
       try {
         // Windows updates must reuse the existing installation without opening
@@ -1693,12 +1742,13 @@ export class DesktopUpdaterController {
     return { accepted: false, state: this.state };
   }
 
+  /**
+   * Kept for preload ABI compatibility. Updates no longer hand the user a
+   * recovery copy to inspect, so this only ever succeeds if a copy happens to
+   * exist and something still asks for it.
+   */
   revealRecoveryBackup(): UpdaterActionResult {
-    if (
-      this.state.status !== "recovery-required" ||
-      !this.recoveryBackupPath ||
-      !fs.existsSync(this.recoveryBackupPath)
-    ) {
+    if (!this.recoveryBackupPath || !fs.existsSync(this.recoveryBackupPath)) {
       return { accepted: false, state: this.state };
     }
     this.deps.revealPath(this.recoveryBackupPath);

@@ -196,7 +196,6 @@ const UPDATE_BLOCKING_STATES = new Set<UpdaterState["status"]>([
   "installing",
   "manual-required",
   "incompatible",
-  "recovery-required",
 ]);
 const BRIEFING_DISMISS_KEY = "agentlas.one.briefingDismissals.v1";
 const BRIEFING_DISMISS_MS = 24 * 60 * 60 * 1_000;

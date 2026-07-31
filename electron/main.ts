@@ -689,13 +689,13 @@ app.whenReady().then(async () => {
   } else if (initialAuthRestoreWasTemporary) {
     scheduleDeferredAuthRestore();
   }
-  if (updatePreflight.pendingInstall && getUpdaterState().status !== "recovery-required") {
+  if (updatePreflight.pendingInstall) {
     // The update transaction now owns the startup boundary. Only after the
     // pre-update snapshot has passed continuity verification may ordinary boot
     // repair projections mutate protected local rows.
     runPostContinuityStoreRepairs();
   }
-  if (getUpdaterState().status !== "recovery-required") {
+  {
     try {
       const openCrabScrub = scrubLegacyOpenCrabCredentialUrls();
       if (openCrabScrub.scrubbed > 0) {
@@ -759,10 +759,6 @@ app.whenReady().then(async () => {
     applyAppMenu(nextLocale);
   });
   shellReadyForWindows = true;
-  if (getUpdaterState().status === "recovery-required") {
-    await createWindow();
-    return;
-  }
   // Agentlas OS is independently releaseable. Desktop immediately runs from
   // the newer of its immutable bundle and managed runtime, then starts the
   // digest-verified updater in the background. Offline machines keep the

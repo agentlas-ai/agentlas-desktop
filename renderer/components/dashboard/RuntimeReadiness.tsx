@@ -32,7 +32,6 @@ interface ReadinessSnapshot {
 
 const BLOCKING_UPDATER_STATES = new Set<UpdaterState["status"]>([
   "incompatible",
-  "recovery-required",
 ]);
 const HUB_READINESS_TIMEOUT_MS = 6_000;
 

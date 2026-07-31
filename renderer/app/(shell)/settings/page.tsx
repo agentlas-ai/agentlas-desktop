@@ -1895,8 +1895,6 @@ function UpdatePanel() {
         return t("settings.update.manual_required");
       case "incompatible":
         return t("settings.update.incompatible");
-      case "recovery-required":
-        return t("settings.update.recovery_required");
       case "error":
         return t("settings.update.error", { message: state.error ?? "Unknown error" });
       default:
@@ -1996,27 +1994,7 @@ function UpdatePanel() {
             {t("settings.update.retry")}
           </button>
         ) : state.status === "manual-required" || state.status === "incompatible" ? null
-        : state.status === "recovery-required" && state.recoveryBackupAvailable ? (
-          <button
-            onClick={() => void revealRecoveryBackup()}
-            style={{
-              padding: "8px 14px",
-              borderRadius: "var(--radius-md)",
-              background: "var(--paper)",
-              color: "var(--ink)",
-              fontWeight: 700,
-              fontSize: 12,
-              flexShrink: 0,
-              maxWidth: 180,
-              whiteSpace: "normal",
-              lineHeight: 1.35,
-              border: "1px solid var(--paper-edge)",
-              boxShadow: "var(--neu-raised)",
-            }}
-          >
-            {t("settings.update.reveal_recovery")}
-          </button>
-        ) : (
+        : (
           <button
             onClick={() => void check()}
             disabled={checking || state.status === "installing"}

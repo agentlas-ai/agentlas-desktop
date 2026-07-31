@@ -3,7 +3,6 @@
 //   - downloading: 진행률 표시
 //   - downloaded:  "재시작 업데이트" 강조 버튼 (dismissed 전까지)
 //   - manual-required: 안전한 재시도 또는 로컬 데이터를 보존하는 공식 설치본 경로 노출
-//   - recovery-required: 보존한 SQLite 복구본을 여는 경로 노출
 //   - checking / not-available / routine error: 노출하지 않음 — 백그라운드로 조용히.
 //
 // 사용자가 "나중에"로 일단 닫으면 같은 다운로드 버전에 대해 다시 안 뜸 (세션 한정).
@@ -56,29 +55,23 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
   const isDownloaded = state.status === "downloaded";
   const isInstalling = state.status === "installing";
   const isManual = state.status === "manual-required" || state.status === "incompatible";
-  const isRecovery = state.status === "recovery-required";
   const canUseOfficialInstaller = state.status === "manual-required" && (
     state.code === "install-source-untrusted"
     || state.code === "install-not-applied"
     || state.code === "install-start-failed"
   );
-  const canRevealRecovery = isRecovery && state.recoveryBackupAvailable === true;
   // "available"도 즉시 노출 — 새 버전 발견 순간 알림(자동 다운로드 중).
   const isDownloading = state.status === "downloading" || state.status === "available";
   const isDismissed =
     isDownloaded && state.version && dismissedVersion === state.version;
   // 실제 업데이트가 있을 때만 노출. checking/not-available/error 등 routine 백그라운드 체크는 숨김.
-  if (!isDownloaded && !isDownloading && !isInstalling && !isManual && !isRecovery) return null;
+  if (!isDownloaded && !isDownloading && !isInstalling && !isManual) return null;
   if (isDownloaded && isDismissed) return null;
 
   async function install() {
     const api = ipc();
     if (!api) return;
     await api.updater.install();
-  }
-
-  async function revealRecoveryBackup() {
-    await ipc()?.updater.revealRecoveryBackup();
   }
 
   async function retrySafetyAction() {
@@ -92,9 +85,7 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
     await ipc()?.updater.openManualDownload();
   }
 
-  const attentionCopy = isRecovery
-    ? t("update.recovery_required")
-    : state.code === "install-source-untrusted"
+  const attentionCopy = state.code === "install-source-untrusted"
       ? t("update.repair_required")
     : state.code === "install-not-applied"
       ? t("update.install_not_applied")
@@ -120,9 +111,9 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
     <div
       className="sidenav-update-card titlebar-nodrag"
       data-downloaded={isDownloaded ? "true" : "false"}
-      data-action-required={isManual || isRecovery ? "true" : "false"}
+      data-action-required={isManual ? "true" : "false"}
       data-collapsed={collapsed ? "true" : "false"}
-      role={isManual || isRecovery ? "alert" : "status"}
+      role={isManual ? "alert" : "status"}
       aria-live="polite"
     >
       {isDownloaded ? (
@@ -149,43 +140,25 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
             </button>
           )}
         </>
-      ) : isManual || isRecovery || isInstalling ? (
+      ) : isManual || isInstalling ? (
         <>
           <span className="sidenav-update-dot" aria-hidden />
           <span className="sidenav-update-copy">
             <strong>{collapsed ? "↑" : attentionCopy}</strong>
           </span>
           {!isInstalling && (
-            (canRevealRecovery || canUseOfficialInstaller || state.canRetry) && (
+            (canUseOfficialInstaller || state.canRetry) && (
               <button
                 onClick={() => void (
-                  canRevealRecovery
-                    ? revealRecoveryBackup()
-                    : canUseOfficialInstaller
-                      ? openOfficialInstaller()
-                    : state.canRetry
-                      ? retrySafetyAction()
-                      : retrySafetyAction()
+                  canUseOfficialInstaller ? openOfficialInstaller() : retrySafetyAction()
                 )}
                 className="sidenav-update-action"
-                title={
-                  canRevealRecovery
-                    ? t("update.reveal_recovery")
-                    : canUseOfficialInstaller
-                      ? t("update.open_download")
-                    : state.canRetry
-                      ? t("update.retry")
-                      : t("update.retry")
-                }
+                title={canUseOfficialInstaller ? t("update.open_download") : t("update.retry")}
               >
                 {collapsed
-                  ? (state.canRetry && !isRecovery ? "↻" : "↗")
-                  : canRevealRecovery
-                    ? t("update.reveal_recovery")
-                    : canUseOfficialInstaller
-                      ? t("update.open_download")
-                    : state.canRetry
-                      ? t("update.retry")
+                  ? (state.canRetry ? "↻" : "↗")
+                  : canUseOfficialInstaller
+                    ? t("update.open_download")
                     : t("update.retry")}
               </button>
             )

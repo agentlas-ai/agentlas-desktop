@@ -123,7 +123,14 @@ export function preflightUpdaterStartup(userDataPath = app.getPath("userData")):
     startupRecovery = {};
     throw new Error("Updater install journal failed the pre-migration safety gate");
   }
-  const snapshot: ContinuitySnapshot = inspection.journal.continuity;
+  const snapshot: ContinuitySnapshot | undefined = inspection.journal.continuity;
+  if (!snapshot) {
+    // The install deliberately proceeded without a recovery copy. There is
+    // nothing to verify, and refusing to boot over a missing convenience would
+    // strand the user in exactly the way this gate was rewritten to avoid.
+    startupRecovery = null;
+    return { pendingInstall: true, targetVersion: inspection.journal.targetVersion, recoveryBackupAvailable: false };
+  }
   startupRecovery = {
     targetVersion: inspection.journal.targetVersion,
     backupPath: snapshot.backupPath,
@@ -152,38 +159,79 @@ export function preflightUpdaterStartup(userDataPath = app.getPath("userData")):
   };
 }
 
-/** Native fallback used when migration/bootstrap fails before renderer recovery UI exists. */
+/** Marks that this startup already attempted an automatic post-update repair. */
+function bootRepairMarkerPath(userDataPath = app.getPath("userData")): string {
+  return path.join(userDataPath, "updater", "post-update-boot-repair.json");
+}
+
+/**
+ * Recovers automatically when the first startup after an update fails.
+ *
+ * The previous behaviour showed a dialog asking the person to go find a
+ * database copy, then quit — a dead end that left the app unusable and made a
+ * transient failure look permanent. Startup can fail for reasons that have
+ * nothing to do with data (a renderer asset that did not load, a half-written
+ * pending payload), and all of those clear on their own.
+ *
+ * So: discard the pending-install bookkeeping and relaunch once. If the very
+ * next boot fails the same way, stop relaunching — an unbounded loop is worse
+ * than a plain exit — and let the normal startup error path report it.
+ */
 export async function handleUpdaterBootstrapFailure(error: unknown): Promise<boolean> {
   if (!startupRecovery) return false;
   console.error("[updater] guarded startup failed", error);
-  const backupAvailable = Boolean(startupRecovery.backupPath && fs.existsSync(startupRecovery.backupPath));
-  fallbackState = {
-    status: "recovery-required",
-    version: startupRecovery.targetVersion,
-    code: "continuity-violation",
-    error: "Agentlas stopped before background work because post-update local state could not be verified.",
-    canRetry: false,
-    recoveryBackupAvailable: backupAvailable,
-  };
-  const korean = app.getLocale().toLowerCase().startsWith("ko");
-  const buttons = backupAvailable
-    ? [korean ? "복구본 보기" : "Show recovery copy", korean ? "종료" : "Quit"]
-    : [korean ? "종료" : "Quit"];
-  const result = await dialog.showMessageBox({
-    type: "error",
-    title: korean ? "업데이트 복구가 필요합니다" : "Update recovery required",
-    message: korean
-      ? "업데이트 후 로컬 상태를 확인하기 전에 시작을 중단했습니다. 보존된 복구본은 앱 안에서 확인할 수 있습니다."
-      : "Startup stopped before post-update local state could be verified. The preserved recovery copy remains available in the app.",
-    buttons,
-    defaultId: 0,
-    cancelId: buttons.length - 1,
-    noLink: true,
-  });
-  if (backupAvailable && result.response === 0 && startupRecovery.backupPath) {
-    shell.showItemInFolder(startupRecovery.backupPath);
+  const userDataPath = app.getPath("userData");
+  const marker = bootRepairMarkerPath(userDataPath);
+
+  let alreadyRepaired = false;
+  try {
+    alreadyRepaired = fs.existsSync(marker);
+  } catch {
+    alreadyRepaired = false;
   }
+
+  // Whatever the cause, a pending install must not be replayed into the same
+  // failure on every launch. Drop it so the next boot starts clean and the
+  // ordinary feed check can fetch the release again.
+  try {
+    persistCorruptJournalHold(userDataPath);
+  } catch (cleanupError) {
+    console.error("[updater] could not clear the pending install after a failed boot", cleanupError);
+  }
+  startupRecovery = null;
+
+  if (alreadyRepaired) {
+    try {
+      fs.rmSync(marker, { force: true });
+    } catch {
+      // A stale marker only costs one skipped auto-repair next time.
+    }
+    console.error("[updater] post-update startup failed twice; not relaunching again");
+    return false;
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(marker), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(marker, JSON.stringify({ at: new Date().toISOString() }), { mode: 0o600 });
+  } catch (markerError) {
+    // Without the marker a second failure would relaunch again. Refuse to
+    // relaunch at all rather than risk a boot loop.
+    console.error("[updater] could not arm the post-update repair marker; skipping relaunch", markerError);
+    return false;
+  }
+
+  console.error("[updater] post-update startup failed; clearing the pending install and relaunching once");
+  app.relaunch();
   return true;
+}
+
+/** Clears the one-shot marker once the app has actually reached a healthy start. */
+export function noteHealthyStartup(userDataPath = app.getPath("userData")): void {
+  try {
+    fs.rmSync(bootRepairMarkerPath(userDataPath), { force: true });
+  } catch {
+    // Best effort; a leftover marker only suppresses one future auto-repair.
+  }
 }
 
 export function getUpdaterState(): UpdaterState {
@@ -216,7 +264,6 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
   const dispatchDeferredAuthRestore = () => {
     if (!controller || !options.onDeferredAuthRestore) return;
     const state = controller.getState().status;
-    if (state === "recovery-required") return;
     const controllerRequested = controller.hasDeferredSessionRestoreRequest();
     const initialRestoreWasTemporary =
       options.initialAuthRestore?.status === "temporarily-unavailable";
@@ -316,9 +363,9 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
   });
   await controller.init();
   dispatchDeferredAuthRestore();
-  // Keep the native fallback armed until a recovery-required renderer can be
+  // The native fallback now repairs and relaunches on its own, so nothing
   // created. All other authoritative states have closed the preflight window.
-  if (controller.getState().status !== "recovery-required") startupRecovery = null;
+  startupRecovery = null;
   if (!hasUpdateConfig && controller.getState().status === "idle") {
     broadcast({
       status: "error",
