@@ -390,6 +390,11 @@ const PACKAGE_MODE_RE = /\b(?:package|packaging|convert|conversion|repair|migrat
 const ATTACHMENT_PACKAGE_RE = /\b(?:attached|existing|this agent|import|handoff)\b|첨부|기존|이\s*에이전트|가져오|핸드오프/i;
 const TEAM_MODE_RE =
   /\b(?:multi[- ]?agent|organization|division|department|workers?|hq)\b|\b(?:build|create|make|design|assemble|need|want)\s+(?:an?\s+)?(?:[a-z-]+\s+){0,2}team\b|\bteam\b(?=[^\n.!?]{0,80}\b(?:agents?|roles?|workers?|delegat(?:e|ion)|handoff|orchestrat(?:e|ion))\b)|멀티\s*에이전트|(?:만들|구성|설계|필요)[^\n.!?]{0,30}팀|팀[^\n.!?]{0,40}(?:만들|구성|설계|에이전트|역할|워커|위임|핸드오프|오케스트레이션)|(?:역할|에이전트|워커)[^\n.!?]{0,60}(?:나뉘|분리|협업|위임)[^\n.!?]{0,40}팀|조직|부서|본부|여러\s*역할/i;
+const EXISTING_PACKAGE_MARKERS = ["agentlas.json", "AGENTS.md", ".agentlas"] as const;
+
+export function workspaceContainsExistingAgentlasPackage(workspace: string): boolean {
+  return EXISTING_PACKAGE_MARKERS.some((marker) => fs.existsSync(path.join(workspace, marker)));
+}
 
 /** Compact, deterministic auto mode — reference/fallback only; the judge decides. */
 export function classifyHephaestusBuildMode(
@@ -768,6 +773,20 @@ export async function runHephaestusBuild(
     hasAttachments: Boolean(req.attachments?.length),
     signal,
   })).mode;
+  if (
+    !req.runtimeSessionId
+    && buildMode !== "package"
+    && workspaceContainsExistingAgentlasPackage(req.workspace)
+  ) {
+    sink({
+      runId,
+      kind: "error",
+      text: ko
+        ? "선택한 생성 폴더에 이미 다른 Agentlas 패키지가 있습니다. 새 에이전트/팀은 빈 폴더를 선택하세요. 기존 패키지를 고치려는 경우에만 '기존 에이전트 패키징'을 선택하세요."
+        : "The selected output folder already contains another Agentlas package. Choose an empty folder for a new agent/team, or explicitly select “Package existing agent” to repair that package.",
+    });
+    return;
+  }
   // 완결성은 모델 기억력이 아니라 호스트가 보장한다: 첫 턴 전에 계약 템플릿을
   // 워크스페이스에 스캐폴드(기존 파일 무손상). 모델은 빈칸만 채우면 되고, 자율
   // 루프 런타임(claude-code 등)은 스캐폴드 위에 자유롭게 덧쓴다. 구버전 엔진

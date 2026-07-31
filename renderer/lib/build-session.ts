@@ -343,6 +343,9 @@ let openCrabOntologyChoice: "use" | "skip" | undefined;
 // cancel/reset cannot be followed by a stale disk check or build event that
 // resurrects the previous run.
 let buildGeneration = 0;
+// A native directory read happens before a new build can claim its output
+// folder. Ignore a double-click while that read is in flight.
+let workspacePreflightInFlight = false;
 
 function isCurrentBuild(generation: number): boolean {
   return generation === buildGeneration;
@@ -626,6 +629,10 @@ const AUTO_CONTINUE_MAX = 3;
 let autoContinues = 0;
 
 const PKG_MARKERS = new Set(["agentlas.json", "AGENTS.md", ".agentlas"]);
+
+export function containsExistingAgentlasPackage(entries: Array<{ name: string }>): boolean {
+  return entries.some((entry) => PKG_MARKERS.has(entry.name));
+}
 
 /** 워크스페이스(또는 1단계 하위 폴더)에서 생성된 패키지 루트를 찾는다. 없으면 null. */
 async function findPackageRoot(workspace: string, readScope: FsReadScope, generation: number): Promise<string | null> {
@@ -944,8 +951,49 @@ export async function startBuild(activeRuntime?: RuntimeSelection): Promise<void
     !state.request.trim()
     || !state.workspace
     || !state.workspaceGrant
+    || workspacePreflightInFlight
     || ["running", "interview", "mcp-review", "runtime-approval"].includes(state.phase)
   ) return;
+  // A new single/team build must never inherit and then silently reinstall an
+  // older package from a persisted output folder. Package/repair mode is the
+  // explicit opt-in for editing an existing package.
+  if (state.mode !== "package") {
+    const api = ipc();
+    if (!api) return;
+    const workspace = state.workspace;
+    const workspaceGrant = state.workspaceGrant;
+    const mode = state.mode;
+    workspacePreflightInFlight = true;
+    try {
+      const listing = await api.fs.listDirectory(workspace, workspaceGrant.scope, true);
+      if (
+        state.workspace !== workspace
+        || state.workspaceGrant !== workspaceGrant
+        || state.mode !== mode
+      ) return;
+      if (containsExistingAgentlasPackage(listing?.entries ?? [])) {
+        const ko = currentLocale() === "ko";
+        state.phase = "error";
+        state.errored = true;
+        state.recoverable = false;
+        state.error = {
+          kind: "workspace-unavailable",
+          message: ko
+            ? "선택한 생성 폴더에 이미 다른 Agentlas 패키지가 있습니다. 새 에이전트/팀은 빈 폴더를 선택하세요. 기존 패키지를 고치려는 경우에만 '기존 에이전트 패키징'을 선택하세요."
+            : "The selected output folder already contains another Agentlas package. Choose an empty folder for a new agent/team, or explicitly select “Package existing agent” to repair that package.",
+        };
+        state.log = [];
+        pushLog("error", state.error.message);
+        commit();
+        return;
+      }
+    } catch {
+      // The main process re-verifies the capability again when execution
+      // starts. Let that authoritative boundary surface unavailable folders.
+    } finally {
+      workspacePreflightInFlight = false;
+    }
+  }
   // 새 빌드 — 대화/로그/단계 초기화.
   history = [];
   runtimeSessionId = null;
