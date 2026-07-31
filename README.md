@@ -73,7 +73,11 @@ authority for which version is actually public, stable, and downloadable.
   A localized or unfamiliar macOS/Squirrel handoff error is now retryable
   instead of permanently blocking the target. If the failure arrives after
   shutdown has begun, Agentlas arms a fresh process so startup can clear stale
-  payload state and resume the signed update channel.
+  payload state and resume the signed update channel. This release binds
+  Agentlas OS v1.1.91 at
+  791e69116ce58f867db47f2bb1bc896fcd46c62e. Source readiness does not prove a
+  published installer: the Releases page stays the authority for what is
+  actually downloadable.
 - **2026-07-31 · v0.9.34 — Desktop embeds the current tested Agentlas OS** —
   The One and Build UX improvements now ship with Agentlas OS 1.1.91. Real
   installed-plugin QA verified bounded Context Map receipts and exact recovery

@@ -2,6 +2,11 @@
 
 ## 0.9.35 — 2026-07-31
 
+This release binds Agentlas OS v1.1.91 at
+791e69116ce58f867db47f2bb1bc896fcd46c62e.
+Passing the source gates does not prove a GitHub release or installer; the
+Releases page stays the authority for what is actually downloadable.
+
 - **A transient native updater failure can no longer strand later releases.**
   Localized or otherwise unfamiliar Squirrel/macOS handoff errors are retried
   instead of becoming a permanent target block.
