@@ -13,6 +13,8 @@ export interface AutomaticQuitInstallDependencies {
    */
   prepare?: () => Promise<void>;
   install: () => Promise<UpdaterActionResult>;
+  /** Arms a fresh app process when a retryable native handoff terminates this one. */
+  relaunch?: () => void;
   quit: () => void;
   subscribe?: (listener: (state: UpdaterState) => void) => () => void;
   shouldInstallOnQuit?: () => boolean;
@@ -60,6 +62,17 @@ export function createAutomaticQuitInstaller(
   const observeInstallState = (state: UpdaterState) => {
     if (!quitDeferred || !installHandoffAccepted) return;
     if (state.status === "installing" || state.status === "downloaded") return;
+    if (
+      state.status === "manual-required" &&
+      state.code === "install-start-failed" &&
+      state.canRetry === true
+    ) {
+      // quitAndInstall may already have started Electron's shutdown before
+      // Squirrel reports a transient native error. Arm a replacement process
+      // first; its normal startup check clears the stale payload after backoff
+      // and downloads the current release instead of leaving Agentlas closed.
+      deps.relaunch?.();
+    }
     logger.warn("[updater] automatic install handoff did not complete; continuing normal quit");
     continueNormalQuit();
   };

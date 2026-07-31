@@ -537,6 +537,7 @@ const automaticQuitInstaller = createAutomaticQuitInstaller({
   getState: getUpdaterState,
   prepare: prepareAutomaticUpdateQuit,
   install: installDownloadedUpdate,
+  relaunch: () => app.relaunch(),
   quit: () => app.quit(),
   subscribe: onUpdaterStateChange,
   shouldInstallOnQuit: () => !systemShutdownInProgress && invocationService.activeChatIds().length === 0,

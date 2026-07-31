@@ -346,6 +346,11 @@ function isRetryableNativeDiagnostic(diagnostic: UpdaterDiagnostic | undefined):
     "native-install-payload",
     "native-install-state",
     "native-install-timeout",
+    // Native/Squirrel errors are localized by macOS. An unfamiliar message is
+    // not evidence of an identity or signature failure: those categories are
+    // detected explicitly above. Treat the remaining handoff failure as
+    // transient so one localized OS error cannot strand every later release.
+    "native-install-unknown",
   ]).has(diagnostic.category));
 }
 

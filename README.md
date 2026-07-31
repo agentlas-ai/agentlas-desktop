@@ -69,6 +69,11 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-07-31 · v0.9.35 — Native updater failures recover automatically** —
+  A localized or unfamiliar macOS/Squirrel handoff error is now retryable
+  instead of permanently blocking the target. If the failure arrives after
+  shutdown has begun, Agentlas arms a fresh process so startup can clear stale
+  payload state and resume the signed update channel.
 - **2026-07-31 · v0.9.34 — Desktop embeds the current tested Agentlas OS** —
   The One and Build UX improvements now ship with Agentlas OS 1.1.91. Real
   installed-plugin QA verified bounded Context Map receipts and exact recovery

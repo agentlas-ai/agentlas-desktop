@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.35 — 2026-07-31
+
+- **A transient native updater failure can no longer strand later releases.**
+  Localized or otherwise unfamiliar Squirrel/macOS handoff errors are retried
+  instead of becoming a permanent target block.
+- **Agentlas relaunches after a retryable late install failure.** If
+  `quitAndInstall` has already begun shutting down the current process when the
+  native helper fails, a fresh app process is armed before normal quit
+  continues. The next startup clears stale payload state and resumes the signed
+  update channel automatically.
+- Official application identity and release-signature verification remain in
+  place; the removed behavior is the permanent pause caused by one transient
+  native error.
+
 ## 0.9.34 — 2026-07-31
 
 This release binds Agentlas OS v1.1.91 at
