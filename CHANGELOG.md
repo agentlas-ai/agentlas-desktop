@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.9.38 — 2026-08-01
+
+This release binds Agentlas OS v1.1.91 at
+791e69116ce58f867db47f2bb1bc896fcd46c62e.
+Passing the source gates does not prove a GitHub release or installer; the
+Releases page stays the authority for what is actually downloadable.
+
+- **Updates recover on their own instead of stranding you.** The pre-install
+  recovery copy was a precondition for updating, so a transient disk error
+  while copying it cancelled the update outright — four times in a row on a
+  real machine. The copy, the writer pause, and the install journal are now
+  best effort: any of them can fail and the update still installs.
+- **A failed update no longer freezes your version.** Startup used to skip
+  arming the update timer whenever a hold was active, and nothing re-armed it,
+  so one failed install meant no further updates were ever seen. Holds now
+  expire and the next check resumes from a clean state.
+- **A failed first boot after an update repairs itself.** Instead of a dialog
+  asking you to go find a database copy and then quitting, Agentlas discards
+  the pending install and restarts once on its own.
+- **The "check the preserved local recovery copy" dead end is gone.** Its
+  banner, settings row, and status chip were removed; no update state asks you
+  to open a database file.
+
+What actually protects your data during a schema change is unchanged: every
+migration runs inside a transaction, and the previous app version is retained
+by the native updater.
+
 ## 0.9.37 — 2026-07-31
 
 This release binds Agentlas OS v1.1.91 at

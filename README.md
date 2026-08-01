@@ -69,6 +69,22 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-08-01 · v0.9.38 — Updates recover on their own** —
+  The pre-install recovery copy was a precondition for updating, so a transient
+  disk error while copying it cancelled the update outright, four times in a row
+  on a real machine. That copy, the writer pause, and the install journal are now
+  best effort: any of them can fail and the update still installs. Holds expire
+  instead of freezing a version forever — startup no longer skips arming the
+  update timer while a hold is active, which is what made one failed install
+  permanent. A failed first boot after an update discards the pending install and
+  restarts once by itself, replacing a dialog that asked you to find a database
+  copy and then quit. The "check the preserved local recovery copy" surface is
+  gone entirely. Data safety during a schema change is unchanged: migrations run
+  inside transactions and the native updater keeps the previous app version. This
+  release binds Agentlas OS v1.1.91 at
+  791e69116ce58f867db47f2bb1bc896fcd46c62e. Source readiness does not prove a
+  published installer: the Releases page stays the authority for what is
+  actually downloadable.
 - **2026-07-31 · v0.9.37 — One finishes the job, and judgment reaches the model** —
   A run that stops short is now diagnosed and retried by One itself with a
   changed approach, up to two automatic attempts; the person is involved only
