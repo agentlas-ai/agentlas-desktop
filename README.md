@@ -69,6 +69,16 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-08-01 · v0.9.39 — The post-update repair stays armed** —
+  0.9.38 added a repair that restarts Agentlas once when the first boot after an
+  update fails, guarded by a marker file so it can never loop. Clearing that
+  marker after a healthy start was missing, which would have let the repair run
+  once and then permanently disable itself. This release wires it up and asserts
+  the wiring in the updater contract check.
+  This release binds Agentlas OS v1.1.91 at
+  791e69116ce58f867db47f2bb1bc896fcd46c62e. Source readiness does not prove a
+  published installer: the Releases page stays the authority for what is
+  actually downloadable.
 - **2026-08-01 · v0.9.38 — Updates recover on their own** —
   The pre-install recovery copy was a precondition for updating, so a transient
   disk error while copying it cancelled the update outright, four times in a row

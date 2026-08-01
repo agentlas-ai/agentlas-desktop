@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.39 — 2026-08-01
+
+This release binds Agentlas OS v1.1.91 at
+791e69116ce58f867db47f2bb1bc896fcd46c62e.
+Passing the source gates does not prove a GitHub release or installer; the
+Releases page stays the authority for what is actually downloadable.
+
+- **The automatic post-update repair keeps working.** 0.9.38 added a repair that
+  restarts Agentlas once if the first boot after an update fails, guarded by a
+  marker file so it cannot loop. Clearing that marker on a healthy start was
+  missing, so the repair would have run once and then disabled itself for good.
+
 ## 0.9.38 — 2026-08-01
 
 This release binds Agentlas OS v1.1.91 at
