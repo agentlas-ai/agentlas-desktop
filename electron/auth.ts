@@ -108,6 +108,68 @@ const TEMPORARY_AUTH_FILE_ERROR_CODES = new Set([
 // callback that could mutate auth state.
 const SAFE_STORAGE_ASYNC_ATTEMPT_TIMEOUT_MS = 5_000;
 
+// Electron's async safeStorage methods run through the shared libuv worker
+// pool. On macOS a locked or slow Keychain can keep the native operation alive
+// after our JavaScript deadline has elapsed. Starting a fresh retry each time
+// then parks every worker, which in turn stalls unrelated startup filesystem
+// work for minutes. Reuse the one native availability/decrypt operation until
+// it settles; the caller can still time out and let the customer window load.
+let safeStorageAvailabilityConfirmed = false;
+let safeStorageAvailabilityInFlight: Promise<boolean> | null = null;
+
+interface SafeStorageDecryptAttempt {
+  durableIdentity: string;
+  promise: ReturnType<typeof safeStorage.decryptStringAsync>;
+  settled: boolean;
+}
+
+let safeStorageDecryptInFlight: SafeStorageDecryptAttempt | null = null;
+
+function sharedSafeStorageAvailabilityAttempt(): Promise<boolean> {
+  if (safeStorageAvailabilityConfirmed) return Promise.resolve(true);
+  if (safeStorageAvailabilityInFlight) return safeStorageAvailabilityInFlight;
+  const started = Promise.resolve().then(() => safeStorage.isAsyncEncryptionAvailable());
+  safeStorageAvailabilityInFlight = started;
+  void started.then(
+    (available) => {
+      if (available) safeStorageAvailabilityConfirmed = true;
+    },
+    () => undefined,
+  ).finally(() => {
+    if (safeStorageAvailabilityInFlight === started) safeStorageAvailabilityInFlight = null;
+  });
+  return started;
+}
+
+function sharedSafeStorageDecryptAttempt(
+  ciphertext: Buffer,
+  durableIdentity: string,
+): SafeStorageDecryptAttempt | null {
+  const current = safeStorageDecryptInFlight;
+  if (current) {
+    if (current.durableIdentity === durableIdentity) return current;
+    // A newer login may replace the durable envelope while an old decrypt is
+    // parked. Do not occupy another worker until the old native call settles.
+    if (!current.settled) return null;
+  }
+
+  const entry: SafeStorageDecryptAttempt = {
+    durableIdentity,
+    promise: safeStorage.decryptStringAsync(ciphertext),
+    settled: false,
+  };
+  safeStorageDecryptInFlight = entry;
+  void entry.promise.then(
+    () => { entry.settled = true; },
+    () => { entry.settled = true; },
+  );
+  return entry;
+}
+
+function consumeSafeStorageDecryptAttempt(entry: SafeStorageDecryptAttempt): void {
+  if (safeStorageDecryptInFlight === entry) safeStorageDecryptInFlight = null;
+}
+
 export type AuthRestoreAttemptResult<T> =
   | { status: "fulfilled"; value: T }
   | { status: "rejected"; error: unknown }
@@ -182,7 +244,7 @@ async function readStoredSessionCookie(): Promise<StoredSessionCookieReadResult>
   // Keychain as unavailable during Squirrel's background relaunch. Async
   // decrypt reads the exact same v1/base64 ciphertext and waits for that
   // initialization without changing the durable file.
-  const availability = await settleAuthRestoreAttempt(() => safeStorage.isAsyncEncryptionAvailable());
+  const availability = await settleAuthRestoreAttempt(sharedSafeStorageAvailabilityAttempt);
   if (availability.status === "timed-out") {
     console.warn("[auth] async local session encryption availability timed out");
     return { status: "temporarily-unavailable" };
@@ -192,11 +254,17 @@ async function readStoredSessionCookie(): Promise<StoredSessionCookieReadResult>
     return { status: "temporarily-unavailable" };
   }
   if (!availability.value) return { status: "temporarily-unavailable" };
-  const decrypted = await settleAuthRestoreAttempt(() => safeStorage.decryptStringAsync(envelope.ciphertext));
+  const decryptAttempt = sharedSafeStorageDecryptAttempt(envelope.ciphertext, envelope.durableIdentity);
+  if (!decryptAttempt) {
+    console.warn("[auth] a previous local session decryption is still pending");
+    return { status: "temporarily-unavailable" };
+  }
+  const decrypted = await settleAuthRestoreAttempt(() => decryptAttempt.promise);
   if (decrypted.status === "timed-out") {
     console.warn("[auth] async local session decryption timed out");
     return { status: "temporarily-unavailable" };
   }
+  consumeSafeStorageDecryptAttempt(decryptAttempt);
   if (decrypted.status === "rejected" || typeof decrypted.value.result !== "string") {
     console.warn("[auth] local session ciphertext is invalid", decrypted.status === "rejected" ? decrypted.error : undefined);
     return { status: "invalid" };
@@ -468,7 +536,7 @@ export async function bootAuthFromKeychain(): Promise<AuthRestoreResult> {
   }
 }
 
-const DEFERRED_AUTH_RESTORE_DELAYS_MS = [0, 1_000, 2_000, 5_000, 10_000] as const;
+const DEFERRED_AUTH_RESTORE_DELAYS_MS = [0, 1_000, 2_000, 5_000, 10_000, 20_000, 40_000, 80_000] as const;
 
 /**
  * Bounded, non-blocking caller-owned recovery for a temporary startup miss.

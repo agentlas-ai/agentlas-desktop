@@ -9,7 +9,11 @@
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { currentLocale } from "@/lib/i18n";
 import { extractQuestions } from "@/lib/ask-question";
-import { buildScanDisposition } from "@/lib/build-scan";
+import {
+  buildScanDisposition,
+  buildScanFindings,
+  buildScanSeverityBucket,
+} from "@/lib/build-scan";
 import { announceAgentRosterChange } from "@/lib/agent-roster-events";
 import { isCompletedBuildTurn } from "@shared/build-turn";
 import type { ChatQuestion } from "@/components/ChatStream";
@@ -627,6 +631,8 @@ async function performAutoRegister(workspace: string, readScope: FsReadScope, ge
 // 에러로 표면화. 어떤 경우에도 빈 질문 카드로 사용자를 붙잡지 않는다.
 const AUTO_CONTINUE_MAX = 3;
 let autoContinues = 0;
+const SECURITY_REPAIR_MAX = 2;
+let securityRepairs = 0;
 
 const PKG_MARKERS = new Set(["agentlas.json", "AGENTS.md", ".agentlas"]);
 
@@ -654,6 +660,114 @@ async function findPackageRoot(workspace: string, readScope: FsReadScope, genera
     /* 디스크 확인 실패 — 자동 계속으로 폴백 */
   }
   return null;
+}
+
+async function scanGeneratedPackage(pkgRoot: string, readScope: FsReadScope): Promise<unknown> {
+  const api = ipc();
+  if (!api) return { status: "unverified", reason: "desktop security scanner unavailable" };
+  try {
+    const response = await api.hephaestus.securityScan({ folder: pkgRoot, scope: readScope, strict: true });
+    return (response as { json?: unknown })?.json ?? response;
+  } catch (error) {
+    return {
+      status: "unverified",
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function securityRepairPrompt(scan: unknown, ko: boolean): string {
+  const findings = (buildScanFindings(scan) ?? [])
+    .filter((finding) => buildScanSeverityBucket(finding.severity) !== "passed")
+    .slice(0, 12)
+    .map((finding) => {
+      const file = (finding.file || "generated package").replace(/[\r\n]+/g, " ").slice(0, 240);
+      const message = finding.message.replace(/[\r\n]+/g, " ").slice(0, 320);
+      return `- ${file}: ${message}`;
+    });
+  const issueList = findings.length > 0 ? findings.join("\n") : "- The package safety verdict is not clean.";
+  if (ko) {
+    return [
+      "SECURITY_REPAIR: 생성한 패키지가 로컬 안전 점검을 통과하지 못했습니다.",
+      "아래 항목만 기존 패키지 안에서 수정하고, 사용자가 요청한 기능과 권한 제한은 그대로 유지하세요.",
+      "스캐너·검증기·안전 규칙을 끄거나 우회하거나 삭제하지 마세요.",
+      "설명 문구가 오탐을 만든 경우 실행 지시처럼 보이지 않는 평문으로 뜻을 보존해 다시 쓰세요.",
+      "패키지 검증을 다시 실행한 뒤 마지막 줄을 'BUILD_COMPLETE: <패키지 폴더명>'으로 끝내세요.",
+      "",
+      issueList,
+    ].join("\n");
+  }
+  return [
+    "SECURITY_REPAIR: The generated package did not pass the local safety check.",
+    "Fix only the findings below inside the existing package while preserving the requested behavior and authority limits.",
+    "Do not disable, bypass, weaken, or remove the scanner, verifier, or safety rules.",
+    "If descriptive copy caused a false positive, preserve its meaning but rewrite it as plain non-executable documentation.",
+    "Run the package verifier again, then end the final line with 'BUILD_COMPLETE: <package folder name>'.",
+    "",
+    issueList,
+  ].join("\n");
+}
+
+function packageContractBlockers(report: unknown): string[] | null {
+  if (!report || typeof report !== "object") return null;
+  const blockers = (report as { blockers?: unknown }).blockers;
+  return Array.isArray(blockers) ? blockers.map(String) : null;
+}
+
+function stopForPackageContract(
+  pkgRoot: string,
+  scan: unknown,
+  readScope: FsReadScope,
+  blockers: string[] | null,
+): void {
+  const ko = currentLocale() === "ko";
+  state.result = { workspace: pkgRoot, securityScan: scan, readScope, mcpReceipt: state.mcpReceipt };
+  state.awaitingReply = false;
+  state.pendingQuestions = [];
+  state.errored = true;
+  state.recoverable = true;
+  state.phase = "error";
+  state.error = {
+    kind: "build-failed",
+    message: ko
+      ? "패키지 무결성 검증을 통과하지 못해 설치와 등록을 중지했습니다. 생성한 파일은 그대로 보존했습니다. 같은 폴더에서 다시 준비하면 남은 항목만 복구할 수 있습니다."
+      : "Package integrity verification did not pass, so install and registration were stopped. Generated files were preserved. Prepare again in the same folder to repair only the remaining items.",
+  };
+  pushLog(
+    "error",
+    blockers === null
+      ? (ko ? "패키지 무결성을 확인할 수 없습니다 — 통과로 간주하지 않습니다." : "Package integrity could not be verified — it was not treated as passing.")
+      : (ko ? `패키지 무결성 미충족 ${blockers.length}건 — 자동 등록을 중지했습니다.` : `Package integrity: ${blockers.length} blocker(s) remain — automatic registration was stopped.`),
+  );
+  commit();
+}
+
+function stopForSecurityVerification(
+  pkgRoot: string,
+  scan: unknown,
+  readScope: FsReadScope,
+  disposition: ReturnType<typeof buildScanDisposition>,
+): void {
+  const ko = currentLocale() === "ko";
+  state.result = { workspace: pkgRoot, securityScan: scan, readScope, mcpReceipt: state.mcpReceipt };
+  state.awaitingReply = false;
+  state.pendingQuestions = [];
+  state.errored = true;
+  state.recoverable = true;
+  state.phase = "error";
+  state.error = {
+    kind: "build-failed",
+    message: ko
+      ? "로컬 안전 검증을 통과하지 못해 설치와 등록을 중지했습니다. 생성한 파일은 보존했으며 같은 폴더에서 다시 준비해 남은 항목만 복구할 수 있습니다."
+      : "Local safety verification did not pass, so install and registration were stopped. Generated files were preserved; prepare again in the same folder to repair only the remaining items.",
+  };
+  pushLog(
+    "error",
+    ko
+      ? `안전 검증 상태: ${disposition} — 통과로 간주하지 않았습니다.`
+      : `Safety verification status: ${disposition} — it was not treated as passing.`,
+  );
+  commit();
 }
 
 /** 빌드를 완료 상태로 전환하고 조직도 자동 등록까지 수행한다. */
@@ -688,9 +802,50 @@ function finalizeBuild(pkgRoot: string, scan: unknown, readScope: FsReadScope, n
   }
 }
 
+async function verifyRepairOrFinalize(
+  pkgRoot: string,
+  scan: unknown,
+  packageContract: unknown,
+  readScope: FsReadScope,
+  note: string | null,
+  generation: number,
+): Promise<void> {
+  const ko = currentLocale() === "ko";
+  if (!isCurrentBuild(generation)) return;
+  const contractBlockers = packageContractBlockers(packageContract);
+  if (contractBlockers === null || contractBlockers.length > 0) {
+    stopForPackageContract(pkgRoot, scan, readScope, contractBlockers);
+    return;
+  }
+  const verifiedScan = buildScanDisposition(scan) === "unverified"
+    ? await scanGeneratedPackage(pkgRoot, readScope)
+    : scan;
+  if (!isCurrentBuild(generation)) return;
+
+  const disposition = buildScanDisposition(verifiedScan);
+  if ((disposition === "blocked" || disposition === "warning") && securityRepairs < SECURITY_REPAIR_MAX) {
+    securityRepairs += 1;
+    pushLog(
+      "stage",
+      ko
+        ? `안전 점검 수정 ${securityRepairs}/${SECURITY_REPAIR_MAX} — 생성한 패키지의 차단·주의 항목을 고치는 중`
+        : `Safety repair ${securityRepairs}/${SECURITY_REPAIR_MAX} — fixing generated-package blockers and warnings`,
+    );
+    commit();
+    await runTurn(securityRepairPrompt(verifiedScan, ko), generation);
+    return;
+  }
+
+  if (disposition !== "passed") {
+    stopForSecurityVerification(pkgRoot, verifiedScan, readScope, disposition);
+    return;
+  }
+
+  finalizeBuild(pkgRoot, verifiedScan, readScope, note, generation);
+}
+
 async function resolveTurnWithoutSignal(
   workspace: string,
-  scan: unknown,
   readScope: FsReadScope,
   generation: number,
 ): Promise<void> {
@@ -698,15 +853,34 @@ async function resolveTurnWithoutSignal(
   const pkgRoot = await findPackageRoot(workspace, readScope, generation);
   if (!isCurrentBuild(generation)) return;
   if (pkgRoot) {
-    finalizeBuild(
-      pkgRoot,
-      scan,
-      readScope,
-      ko
-        ? "완료 신호가 누락됐지만 디스크에서 패키지를 확인했습니다 — 완료로 처리합니다."
-        : "Completion signal was missing but the package exists on disk — finalizing.",
-      generation,
-    );
+    if (autoContinues < AUTO_CONTINUE_MAX) {
+      autoContinues += 1;
+      pushLog(
+        "stage",
+        ko
+          ? `패키지 파일 확인 — 최종 검증 ${autoContinues}/${AUTO_CONTINUE_MAX}`
+          : `Package files found — final verification ${autoContinues}/${AUTO_CONTINUE_MAX}`,
+      );
+      commit();
+      await runTurn(
+        ko
+          ? "패키지 파일이 이미 있습니다. 추가 질문 없이 같은 패키지의 계약·무결성·보안 검증을 실행하고, 실패 항목만 고친 뒤 마지막 줄에 'BUILD_COMPLETE: <패키지 폴더명>'을 출력하세요. 검증을 건너뛰거나 통과로 가정하지 마세요."
+          : "Package files already exist. Without asking more questions, run the package contract, integrity, and security verification for this same package; repair only failed items, then end with 'BUILD_COMPLETE: <package folder name>'. Do not skip verification or assume it passed.",
+        generation,
+      );
+      return;
+    }
+    state.errored = true;
+    state.recoverable = true;
+    state.phase = "error";
+    state.error = {
+      kind: "build-failed",
+      message: ko
+        ? "패키지 파일은 생성됐지만 최종 검증 완료 신호를 확인하지 못했습니다. 파일은 보존했습니다. 같은 폴더에서 다시 준비해 검증을 완료하세요."
+        : "Package files were created, but final verified completion was not confirmed. Files were preserved. Prepare again in the same folder to finish verification.",
+    };
+    pushLog("error", state.error.message);
+    commit();
     return;
   }
   if (state.turn === 1) {
@@ -866,31 +1040,20 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
 
       const complete = isCompletedBuildTurn(assistantText);
       if (complete) {
-        state.reached = STAGE_COUNT;
         // Main has already canonicalized and scope-checked the model-authored
         // BUILD_COMPLETE target. Never reinterpret that path in the renderer.
         const packageRoot = result?.workspace ?? workspace;
-        const registerPath = JUNK_WS.test(wsBasename(packageRoot)) ? null : packageRoot;
-        state.result = { workspace: packageRoot, securityScan: result?.securityScan ?? null, readScope, mcpReceipt: state.mcpReceipt };
-        pushLog("done", ko ? "빌드 완료 — 패키지 생성됨" : "Build complete — package created");
-        state.phase = "done";
-        state.recoverable = false;
+        state.reached = Math.max(state.reached, 4);
+        pushLog("stage", ko ? "안전 점검 확인 — 설치 전에 패키지를 검증하는 중" : "Checking safety — verifying the package before install");
         commit();
-        if (registerPath && buildScanDisposition(result?.securityScan ?? null) === "passed") {
-          void autoRegister(registerPath, readScope, generation);
-        } else {
-          pushLog(
-            "log",
-            !registerPath
-              ? ko
-                ? "자동 등록 생략(공용 폴더) — '조직도에서 열기'로 생성된 패키지 폴더만 직접 추가하세요."
-                : "Skipped auto-registration (shared folder) — add only the generated package folder via \"Open in org chart\"."
-              : ko
-                ? "자동 등록 생략 — 보안 검증이 통과 상태가 아닙니다. 결과에서 재스캔 후 직접 설치하세요."
-                : "Skipped auto-registration — security verification has not passed. Re-scan the result before installing.",
-          );
-          commit();
-        }
+        void verifyRepairOrFinalize(
+          packageRoot,
+          result?.securityScan ?? null,
+          result?.packageContract ?? null,
+          readScope,
+          null,
+          generation,
+        );
         return;
       }
 
@@ -913,8 +1076,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
         return;
       }
       state.turn += 1;
-      const scanFromEvent = result?.securityScan ?? null;
-      void resolveTurnWithoutSignal(workspace, scanFromEvent, readScope, generation);
+      void resolveTurnWithoutSignal(workspace, readScope, generation);
       return;
     } else if (e.kind === "error") {
       state.liveness = null;
@@ -1005,6 +1167,7 @@ export async function startBuild(activeRuntime?: RuntimeSelection): Promise<void
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
   autoContinues = 0;
+  securityRepairs = 0;
   const generation = ++buildGeneration;
   state.turn = 1;
   state.reached = 0;
@@ -1212,7 +1375,7 @@ export async function answerBuild(
   if (openCrabOntology) openCrabOntologyChoice = openCrabOntology;
   const ko = currentLocale() === "ko";
   const normalizedReply = reply.trim();
-  pushLog("log", `↳ ${ko ? "답변" : "Reply"}: ${normalizedReply.slice(0, 240)}`);
+  pushLog("log", ko ? "인터뷰 답변을 확인했습니다." : "Interview answers confirmed.");
   if (!state.mcpPlan && state.turn === 1 && pendingBuildBriefReply === null) {
     pendingBuildBriefReply = normalizedReply;
     state.awaitingReply = false;
@@ -1270,6 +1433,7 @@ export function cancelBuild() {
   openCrabOntologyChoice = undefined;
   if (!cancelledRunId) {
     autoContinues = 0;
+    securityRepairs = 0;
     state.mcpPlan = null;
     state.mcpSelectedCandidateIds = [];
     state.mcpReceipt = null;
@@ -1335,12 +1499,46 @@ export function resetBuild() {
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
   autoContinues = 0;
+  securityRepairs = 0;
   state.mcpPlan = null;
   state.mcpSelectedCandidateIds = [];
   state.mcpReceipt = null;
   state.cloudSaveChoice = null;
   state.liveness = null;
   commit();
+}
+
+/**
+ * Start a genuinely new package instead of carrying the previous request,
+ * attachments, output capability, or model choice into the next agent.
+ *
+ * resetBuild() intentionally preserves those inputs for interview cancellation
+ * and workspace re-authorization. Product entry points labelled "Create" or
+ * "New build" need the stronger boundary below. An active build is never
+ * detached or orphaned just because the user clicked another entry point.
+ */
+export function startFreshBuild(): boolean {
+  if (
+    state.phase === "running"
+    || state.phase === "interview"
+    || state.phase === "mcp-review"
+    || state.phase === "runtime-approval"
+  ) return false;
+
+  resetBuild();
+  state.request = "";
+  state.attachments = [];
+  state.mode = "";
+  state.workspace = null;
+  state.workspaceGrant = null;
+  state.runtime = null;
+  try {
+    window.localStorage.removeItem(WS_KEY);
+  } catch {
+    /* persistence failure cannot keep the old native capability alive in memory */
+  }
+  commit();
+  return true;
 }
 
 /** Mark the one-shot choice as visible. Re-renders cannot create another offer. */

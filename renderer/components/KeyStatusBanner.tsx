@@ -12,7 +12,16 @@ import { IconBolt, IconShield, IconCheck } from "@/components/Icon";
 
 const REFRESH_MS = 60_000;
 
-export function KeyStatusBanner({ mode = "banner" }: { mode?: "banner" | "pill" }) {
+export function KeyStatusBanner({
+  mode = "banner",
+  relevantProvider,
+  problemsInBanner = false,
+}: {
+  mode?: "banner" | "pill";
+  relevantProvider?: string | null;
+  /** Build shows one full warning banner; do not repeat the same warning in its header pill. */
+  problemsInBanner?: boolean;
+}) {
   const { locale } = useT();
   const ko = locale === "ko";
   const [status, setStatus] = useState<KeyStatus | null>(null);
@@ -34,9 +43,21 @@ export function KeyStatusBanner({ mode = "banner" }: { mode?: "banner" | "pill" 
 
   if (!status || status.health === "unknown") return null;
 
-  const affected = status.affected.join(", ");
+  const providerNeedle = relevantProvider?.trim().toLowerCase() ?? "";
+  const relevantAffected = providerNeedle
+    ? status.affected.filter((label) => {
+        const candidate = label.toLowerCase();
+        return candidate.includes(providerNeedle) || providerNeedle.includes(candidate);
+      })
+    : status.affected;
+  // A warning about a different engine must not interrupt the selected Build.
+  // deriveKeyStatus only reports error when every provider is dead, so errors
+  // remain globally relevant even when a specific engine label was supplied.
+  if (status.health === "warning" && providerNeedle && relevantAffected.length === 0) return null;
+  const affected = relevantAffected.join(", ");
 
   if (mode === "pill") {
+    if (problemsInBanner && status.health !== "ok") return null;
     // 정상일 때만 헤더 pill 노출(군더더기 최소화). 경고/오류는 배너 모드가 책임진다.
     if (status.health !== "ok") {
       return (

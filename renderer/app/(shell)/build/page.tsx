@@ -39,6 +39,7 @@ import {
   cancelBuild,
   resumeBuild,
   resetBuild,
+  startFreshBuild,
   addAttachments,
   removeAttachment,
   updateBuildSecurityScan,
@@ -564,6 +565,9 @@ export default function BuildPage() {
   const selectedRuntimeStatus = runtime
     ? runtimes.find((item) => runtimeKey(item) === runtimeKey(runtime)) ?? null
     : runtimes.find((item) => item.active) ?? runtimes[0] ?? null;
+  const selectedRuntimeProviderLabel = selectedRuntimeStatus
+    ? runtimeUsageProvider(selectedRuntimeStatus, usage)?.label ?? engineLabel(selectedRuntimeStatus, ko)
+    : null;
   const selectedRuntimeBlocked = selectedRuntimeStatus ? runtimeUsageBlocked(selectedRuntimeStatus, usage) : false;
   const running = phase === "running";
   // 대화형 빌드가 진행 중(엔진 실행 중이거나 인터뷰 답변 대기 중)이면 컴포저 입력을 잠근다.
@@ -600,11 +604,15 @@ export default function BuildPage() {
               </div>
             </div>
             <div className="build-header-status titlebar-nodrag">
-              <KeyStatusBanner mode="pill" />
+              <KeyStatusBanner
+                mode="pill"
+                relevantProvider={selectedRuntimeProviderLabel}
+                problemsInBanner
+              />
             </div>
           </header>
 
-          <KeyStatusBanner mode="banner" />
+          <KeyStatusBanner mode="banner" relevantProvider={selectedRuntimeProviderLabel} />
 
           {/* Ambient status layer — pinned so it is on screen no matter how far
               the log has scrolled. This is the one element that must never go
@@ -637,11 +645,11 @@ export default function BuildPage() {
                     : liveness?.activity || (ko ? "엔진 준비 중" : "Preparing the engine")}
               </span>
               <span className="build-livebar-time">{stageElapsedLabel}</span>
-              {phase === "running" && liveness && liveness.silentMs >= 15_000 && (
+              {phase === "running" && liveness && liveness.silentMs >= 45_000 && (
                 <span className="build-livebar-silent">
                   {ko
-                    ? `엔진 응답 대기 ${Math.round(liveness.silentMs / 1000)}초`
-                    : `engine quiet ${Math.round(liveness.silentMs / 1000)}s`}
+                    ? "시간이 더 필요한 단계 · 계속 작업 중"
+                    : "Longer step · still working"}
                 </span>
               )}
             </div>
@@ -818,12 +826,12 @@ export default function BuildPage() {
                     <button onClick={() => void resumeBuild()} className="build-primary-button titlebar-nodrag">
                       {ko ? "보존된 파일에서 이어서 빌드" : "Resume from saved files"}
                     </button>
-                    <button onClick={resetBuild} className="build-secondary-button titlebar-nodrag">
+                    <button onClick={startFreshBuild} className="build-secondary-button titlebar-nodrag">
                       {ko ? "새 빌드" : "New build"}
                     </button>
                   </>
                 ) : phase === "done" || phase === "error" ? (
-                  <button onClick={resetBuild} className="build-secondary-button titlebar-nodrag">{ko ? "새 빌드" : "New build"}</button>
+                  <button onClick={startFreshBuild} className="build-secondary-button titlebar-nodrag">{ko ? "새 빌드" : "New build"}</button>
                 ) : (
                   <button
                     onClick={() => {
@@ -1089,14 +1097,16 @@ export default function BuildPage() {
           {log.length > 0 && (
             <details className="build-card build-log-card" data-tour-id="build.log">
               <summary className="build-card-head">
-                <span>{ko ? "세부 진행 기록" : "Detailed progress"}</span>
-                {running ? <span className="build-live"><span className="forge-pulse" />live</span> : phase === "done" && <span>ready</span>}
+                <span>{ko ? "진행 세부사항" : "Activity details"}</span>
+                {running
+                  ? <span className="build-live"><span className="forge-pulse" />{ko ? "작업 중" : "working"}</span>
+                  : phase === "done" && <span>{ko ? "완료" : "complete"}</span>}
               </summary>
               <div className="build-log-body">
                 {log.map((l, i) => (
                   <div key={i} data-kind={l.kind}>
                     <span className="build-log-time">{fmtLogTime(l.at)}</span>
-                    {l.kind === "stage" ? `> ${l.text}` : l.text}
+                    <span>{l.text}</span>
                   </div>
                 ))}
                 {/* One replaceable tail row, never appended history. It is the
@@ -1105,12 +1115,12 @@ export default function BuildPage() {
                   <div data-kind="heartbeat" className="build-log-tail">
                     <span className="build-log-time">{fmtLogTime(liveness.at)}</span>
                     <span className="build-log-tail-dot" />
-                    {liveness.activity}
-                    {liveness.silentMs >= 15_000
-                      ? ko
-                        ? ` · 엔진 응답 대기 ${Math.round(liveness.silentMs / 1000)}초`
-                        : ` · engine quiet ${Math.round(liveness.silentMs / 1000)}s`
-                      : ""}
+                    <span>
+                      {liveness.activity}
+                      {liveness.silentMs >= 45_000
+                        ? ko ? " · 시간이 더 필요한 단계지만 계속 작업 중입니다." : " · This step is taking longer, but work is continuing."
+                        : ""}
+                    </span>
                   </div>
                 )}
                 <div ref={logEndRef} />

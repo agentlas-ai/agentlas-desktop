@@ -237,6 +237,31 @@ function applyDockIcon(): void {
 // the first-paint event never arrives, so this bounds the wait before showing
 // the window anyway.
 const MAIN_WINDOW_REVEAL_FALLBACK_MS = 8_000;
+const STARTUP_PLACEHOLDER_HTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agentlas</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f7f7f4; color: #20221f; }
+    main { width: min(420px, calc(100vw - 48px)); padding: 32px; border: 1px solid #dedfd8; border-radius: 18px; background: #ffffff; box-shadow: 0 18px 55px rgba(31, 34, 29, 0.09); }
+    h1 { margin: 0 0 10px; font-size: 25px; letter-spacing: -0.02em; }
+    p { margin: 0 0 20px; color: #656960; font-size: 14px; line-height: 1.5; }
+    progress { width: 100%; height: 6px; accent-color: #6c705b; }
+  </style>
+</head>
+<body>
+  <main role="status" aria-live="polite">
+    <h1>Agentlas</h1>
+    <p>Opening your workspace securely. Your local work stays available while account access is restored.</p>
+    <progress aria-label="Opening Agentlas"></progress>
+  </main>
+</body>
+</html>`;
+const STARTUP_PLACEHOLDER_URL = `data:text/html;charset=utf-8,${encodeURIComponent(STARTUP_PLACEHOLDER_HTML)}`;
 
 let mainWindow: BrowserWindow | null = null;
 let shellReadyForWindows = false;
@@ -368,7 +393,18 @@ function registerRendererProtocol(): void {
   });
 }
 
-async function createWindow(): Promise<void> {
+async function loadMainRendererIntoWindow(): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const startUrl = process.env.ELECTRON_START_URL;
+  if (isDev && startUrl) {
+    await mainWindow.loadURL(startUrl);
+    mainWindow.webContents.openDevTools({ mode: "detach" });
+  } else {
+    await mainWindow.loadURL("agentlas://app/index.html");
+  }
+}
+
+async function createWindow(options: { startupPlaceholder?: boolean } = {}): Promise<void> {
   mainWindow = new BrowserWindow({
     width: 1240,
     height: 820,
@@ -442,7 +478,10 @@ async function createWindow(): Promise<void> {
   // [보안] top-level navigation 가드 — 앱 내부(prod=agentlas://, dev=dev 서버)만 허용. 그 외 항해는
   // 차단하고 외부 http(s)는 기본 브라우저로. SPA 클라이언트 라우팅(pushState)은 will-navigate를 안 띄운다.
   mainWindow.webContents.on("will-navigate", (event, url) => {
-    const allowed = url.startsWith("agentlas://") || (isDev && startUrl ? url.startsWith(startUrl) : false);
+    const allowed =
+      url.startsWith("agentlas://")
+      || url === STARTUP_PLACEHOLDER_URL
+      || (isDev && startUrl ? url.startsWith(startUrl) : false);
     if (allowed) return;
     event.preventDefault();
     if (url.startsWith("http://") || url.startsWith("https://")) void shell.openExternal(url);
@@ -466,12 +505,8 @@ async function createWindow(): Promise<void> {
     }
   });
 
-  if (isDev && startUrl) {
-    await mainWindow.loadURL(startUrl);
-    mainWindow.webContents.openDevTools({ mode: "detach" });
-  } else {
-    await mainWindow.loadURL("agentlas://app/index.html");
-  }
+  if (options.startupPlaceholder) await mainWindow.loadURL(STARTUP_PLACEHOLDER_URL);
+  else await loadMainRendererIntoWindow();
 }
 
 app.on("window-all-closed", () => {
@@ -667,6 +702,13 @@ app.whenReady().then(async () => {
   });
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => !DENIED_PERMISSIONS.has(permission));
   applyDockIcon();
+  // safeStorage can wait inside the native Keychain implementation before a
+  // JavaScript timeout gets a chance to run. Put a real, read-only window on
+  // screen first so a locked or slow Keychain never makes Agentlas look dead.
+  // The application renderer and IPC surface still load only after migration,
+  // continuity, authentication, and bootstrap gates have completed.
+  await createWindow({ startupPlaceholder: true });
+  traceStartup("startup-window-visible");
   initStore({ deferPostContinuityRepairs: updatePreflight.pendingInstall });
   traceStartup("store-ready");
   try {
@@ -828,7 +870,8 @@ app.whenReady().then(async () => {
   // The customer window is the startup boundary. Optional network-backed
   // services below (Mobile Bridge, Telegram workers, browser helpers) restore
   // independently and must never keep a healthy local Desktop invisible.
-  await createWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
+  else await loadMainRendererIntoWindow();
   traceStartup("window-loaded");
   startOneBriefingScheduler();
   // Start only after update continuity and store bootstrap have passed. A
