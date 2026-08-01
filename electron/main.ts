@@ -40,6 +40,7 @@ import {
   getUpdaterState,
   handleUpdaterBootstrapFailure,
   initAutoUpdater,
+  noteHealthyStartup,
   onUpdaterStateChange,
   preflightUpdaterStartup,
   quitAndInstall as installDownloadedUpdate,
@@ -903,6 +904,10 @@ app.whenReady().then(async () => {
   // intentionally non-blocking; AppShell also triggers/subscribes on mount so
   // a renderer that was not ready for this first broadcast still reconciles.
   void syncHubBookmarks();
+  // Startup got all the way here, so the one-shot post-update repair is spent
+  // and must be re-armed. Without this the auto-repair would fire exactly once
+  // in the app's lifetime and then stay disabled by its own leftover marker.
+  noteHealthyStartup();
 }).catch(async (error) => {
   let handled = false;
   try {
