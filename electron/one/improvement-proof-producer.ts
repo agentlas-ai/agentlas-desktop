@@ -19,7 +19,6 @@ import { getDb } from "../store/db";
 import { getChat } from "../store/chats";
 import { getInvocationRunReceipt, listRunEvents } from "../store/run-events";
 import { getCanonicalTask, listCanonicalTasks } from "../store/tasks";
-import { getAgentGroup } from "../store/agent-groups";
 import { getOneMemoryState } from "./memory-candidates";
 import { listOneDomainEvents } from "./domain-events";
 import { getOneExperienceReuseState } from "./experience-reuse";
@@ -513,7 +512,6 @@ function executionSignature(task: CanonicalTask, run: InvocationRunReceipt, even
     taskKindRef,
     projectId: task.projectId,
     firmId: task.firmId,
-    agentGroupId: chat.agentGroupId,
     ownerAgentId: chat.agentId,
     oneMode: true,
     planMode: startPayload.planMode === true,
@@ -724,154 +722,6 @@ function memoryAssetDrafts(
   });
 }
 
-interface SavedTeamExecution {
-  assetId: string;
-  assetVersion: number;
-  sourceRef: string;
-  rosterSignature: string;
-  groupSignature: string;
-}
-
-function savedTeamExecution(result: VerifiedTaskResult): SavedTeamExecution | null {
-  if (!result.task.originChatId) return null;
-  const chat = getChat(result.task.originChatId);
-  if (!chat?.agentGroupId) return null;
-  const group = getAgentGroup(chat.agentGroupId);
-  const roster = teamSignature(result.task, result.run.runId);
-  if (!group || !roster || group.members.length < 2) return null;
-  const installedMembers = group.members.flatMap((member) =>
-    member.source === "installed" && member.agentId && member.agentSlug
-      ? [{ agentId: member.agentId, agentSlug: member.agentSlug }]
-      : []);
-  if (installedMembers.length !== group.members.length) return null;
-  const groupAgentIds = installedMembers.map((member) => member.agentId).sort();
-  const groupAgentSlugs = installedMembers.map((member) => member.agentSlug).sort();
-  const boundAgentIds = result.participantBindings.map((item) => item.agentId).sort();
-  const boundAgentSlugs = result.participantBindings.map((item) => item.agentSlug).sort();
-  if (
-    new Set(groupAgentIds).size !== groupAgentIds.length
-    || new Set(groupAgentSlugs).size !== groupAgentSlugs.length
-    || groupAgentIds.join("\u0000") !== boundAgentIds.join("\u0000")
-    || groupAgentSlugs.join("\u0000") !== boundAgentSlugs.join("\u0000")
-    || groupAgentSlugs.join("\u0000") !== roster.candidateSlugs.join("\u0000")
-  ) return null;
-  const assetVersion = Date.parse(group.updatedAt);
-  if (
-    !Number.isSafeInteger(assetVersion)
-    || assetVersion <= 0
-    || Date.parse(group.createdAt) > Date.parse(result.run.startedAt)
-    || assetVersion > Date.parse(result.run.startedAt)
-  ) return null;
-  const groupSignature = JSON.stringify({
-    id: group.id,
-    version: assetVersion,
-    members: group.members.map((member) => ({
-      id: member.id,
-      source: member.source,
-      agentId: member.agentId ?? null,
-      agentSlug: member.agentSlug ?? null,
-      hubSlug: member.hubSlug ?? null,
-      hubEntityKind: member.hubEntityKind ?? null,
-      firmId: member.firmId ?? null,
-      nodeId: member.nodeId ?? null,
-      role: member.role ?? null,
-    })).sort((left, right) => left.id.localeCompare(right.id)),
-  });
-  return {
-    assetId: group.id,
-    assetVersion,
-    sourceRef: `agent-group:${group.id}:${assetVersion}`,
-    rosterSignature: roster.signature,
-    groupSignature,
-  };
-}
-
-function teamAssetDraft(
-  current: VerifiedTaskResult,
-  valueState: OneValueClosureState,
-  taskKind: string,
-): ReusedAssetDraft | null {
-  const currentTeam = savedTeamExecution(current);
-  if (!currentTeam) return null;
-  const candidates = listCanonicalTasks({ limit: 200, includeArchived: false })
-    .filter((task) =>
-      task.id !== current.task.id
-      && task.status === "completed"
-      && sameTaskScope(task, current.task)
-      && task.updatedAt <= current.run.startedAt);
-  let baseline: VerifiedTaskResult | null = null;
-  let baselineTeam: SavedTeamExecution | null = null;
-  for (const task of candidates) {
-    const candidate = verifiedTaskResult(task, valueState);
-    if (!candidate || !completedBeforeCurrentRun(candidate, current) || candidate.signature !== current.signature) continue;
-    const team = savedTeamExecution(candidate);
-    if (
-      !team
-      || team.assetId !== currentTeam.assetId
-      || team.assetVersion !== currentTeam.assetVersion
-      || team.rosterSignature !== currentTeam.rosterSignature
-      || team.groupSignature !== currentTeam.groupSignature
-    ) continue;
-    baseline = candidate;
-    baselineTeam = team;
-    break;
-  }
-  if (!baseline || !baselineTeam) return null;
-  const controls: OneImprovementAssetControl[] = ["edit", "delete"];
-  const controlRefs = controls.map((control) => ({
-    control,
-    controlRef: stableRef("control", currentTeam.assetId, String(currentTeam.assetVersion), control),
-  }));
-  const evidence: ReusedAssetDraft["evidence"] = {
-    evidenceRef: stableRef("evidence", baselineTeam.sourceRef, currentTeam.sourceRef, currentTeam.assetId, String(currentTeam.assetVersion)),
-    receiptRef: stableRef("receipt", baselineTeam.sourceRef, currentTeam.sourceRef, currentTeam.assetId, String(currentTeam.assetVersion)),
-    kind: "asset_reuse",
-    source: "team_runtime",
-    taskKind,
-    observedAt: current.task.updatedAt,
-    sourceRef: currentTeam.sourceRef,
-    taskId: current.task.id,
-    taskVersion: current.task.version,
-    sourceTaskId: baseline.task.id,
-    sourceTaskVersion: baseline.task.version,
-    assetId: currentTeam.assetId,
-    assetVersion: currentTeam.assetVersion,
-    assetKind: "team",
-    sourceControlRef: currentTeam.sourceRef,
-    controlRefs,
-    rollbackRef: baselineTeam.sourceRef,
-    removeRef: controlRefs.find((item) => item.control === "delete")!.controlRef,
-  };
-  return {
-    baseline,
-    publicAsset: {
-      assetRef: currentTeam.assetId,
-      assetType: "team",
-      label: "Approved saved Agent team",
-      sourceTaskRef: baseline.task.id,
-      receiptRefs: [evidence.receiptRef],
-      controls,
-    },
-    binding: {
-      assetId: currentTeam.assetId,
-      assetVersion: currentTeam.assetVersion,
-      assetKind: "team",
-      sourceTaskId: baseline.task.id,
-      sourceTaskVersion: baseline.task.version,
-      currentTaskId: current.task.id,
-      currentTaskVersion: current.task.version,
-      taskKind,
-      reuseEvidenceRef: evidence.evidenceRef,
-      reuseReceiptRef: evidence.receiptRef,
-      sourceControlRef: evidence.sourceControlRef,
-      controlRefs,
-      rollbackRef: evidence.rollbackRef,
-      removeRef: evidence.removeRef,
-    },
-    evidence,
-  };
-}
-
 function comparisonResult(baseline: number, current: number): OneImprovementResult {
   if (current === baseline) return "no_change";
   return current < baseline ? "improved" : "regression";
@@ -1051,8 +901,7 @@ export function produceOneImprovementProofForTask(taskId: string): OneImprovemen
   if (!current) return { reason: "verified_result_unavailable", proof: null };
   const taskKind = current.signature;
   const memoryAssets = memoryAssetDrafts(current, valueState, taskKind);
-  const teamAsset = teamAssetDraft(current, valueState, taskKind);
-  const assets = [...memoryAssets, ...(teamAsset ? [teamAsset] : [])]
+  const assets = memoryAssets
     .filter((asset, index, all) => all.findIndex((candidate) => candidate.binding.assetId === asset.binding.assetId) === index)
     .slice(0, 16);
   if (assets.length === 0) {
@@ -1075,8 +924,7 @@ export function produceOneImprovementProofForTask(taskId: string): OneImprovemen
       return { reason: "verified_result_unavailable", proof: null };
     }
     const refreshedMemoryAssets = memoryAssetDrafts(refreshedCurrent, refreshedValueState, refreshedCurrent.signature);
-    const refreshedTeamAsset = teamAssetDraft(refreshedCurrent, refreshedValueState, refreshedCurrent.signature);
-    const refreshedAssets = [...refreshedMemoryAssets, ...(refreshedTeamAsset ? [refreshedTeamAsset] : [])]
+    const refreshedAssets = refreshedMemoryAssets
       .filter((asset, index, all) => all.findIndex((candidate) =>
         candidate.binding.assetId === asset.binding.assetId
         && candidate.binding.assetVersion === asset.binding.assetVersion) === index)

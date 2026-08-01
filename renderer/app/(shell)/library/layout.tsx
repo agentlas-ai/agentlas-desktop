@@ -15,7 +15,6 @@ export default function LibraryLayout({ children }: { children: React.ReactNode 
   // relies on this layout's outer scroll, so keep that for them.
   const ownsInnerScroll = pathname.startsWith("/library/agents");
   if (pathname.startsWith("/library/agents")) title = t("nav.agent");
-  else if (pathname.startsWith("/library/agent-groups")) title = t("nav.agent_group");
   else if (pathname.startsWith("/library/env")) title = t("nav.env_keys");
   else if (pathname.startsWith("/library/mcps")) title = t("nav.mcp_tools");
 

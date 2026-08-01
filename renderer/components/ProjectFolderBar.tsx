@@ -8,7 +8,7 @@ import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import type { FsPathGrant } from "@/lib/types";
-import { IconChat, IconChevronDown, IconCheck, IconFolder } from "./Icon";
+import { IconClose, IconChevronDown, IconCheck, IconFolder } from "./Icon";
 
 function basename(p: string): string {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
@@ -100,7 +100,7 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
           cursor: chatId ? "pointer" : "default",
         }}
       >
-        {inFolder ? <IconFolder size={13} /> : <IconChat size={13} />}
+        <IconFolder size={13} />
         <span
           style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
         >
@@ -125,9 +125,9 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
             zIndex: 40,
           }}
         >
-          {/* 전역 대화 */}
+          {/* 폴더 미연결 상태 */}
           <MenuRow
-            icon={<IconChat size={14} />}
+            icon={<IconFolder size={14} />}
             title={t("workspace.bar.global")}
             sub={t("workspace.bar.global_sub")}
             active={!inFolder}
@@ -158,7 +158,7 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
           />
           {inFolder && (
             <MenuRow
-              icon={<IconChat size={14} />}
+              icon={<IconClose size={14} />}
               title={t("workspace.bar.to_global")}
               onClick={() => {
                 void apply(null);

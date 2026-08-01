@@ -15,6 +15,8 @@ import { Markdown, StreamingMarkdown } from "@/components/Markdown";
 import { IconArrowUp, IconPlus, IconRefresh } from "@/components/Icon";
 import { grantForDroppedFile, ipc, ipcEvents } from "@/lib/ipc";
 import { tFor, useT } from "@/lib/i18n";
+import { visibleAgents } from "@/lib/agent-visibility";
+import { pickLocalized } from "@/lib/i18n";
 import { extractQuestions } from "@/lib/ask-question";
 import {
   detectOneTextLocale,
@@ -33,6 +35,7 @@ import type {
   ChatHistoryEntry,
   CommittedQuestionAnswer,
   InvocationRunReceipt,
+  InstalledAgent,
   McpInvocationEvent,
   MobileBridgeRuntimeStatus,
   OneBriefingSnapshot,
@@ -85,7 +88,7 @@ import {
   type OneAttachmentSafeItem,
   type PreparedOneAttachments,
 } from "@shared/one-attachments";
-import type { FsPathGrant } from "@shared/types";
+import type { FsPathGrant, OrchestrationTarget } from "@shared/types";
 import { ONE_BRIEFING_CONTRACT_VERSION, isOneProactiveBriefing } from "@shared/one-briefing";
 import {
   isPendingConfirmationSnoozed,
@@ -105,6 +108,7 @@ import {
 import {
   subscribe as buildSessionSubscribe,
   getSnapshot as getBuildSessionSnapshot,
+  startFreshBuild,
 } from "@/lib/build-session";
 import { ProductModeMenu } from "./ProductModeMenu";
 import { OneAutomationSheet } from "./OneAutomationSheet";
@@ -177,6 +181,15 @@ type PendingTeamPrompt = {
   text: string;
   attachments: PreparedOneAttachments | null;
   recurrence: OneRecurrenceSelectionV1 | null;
+  overrides: OneTurnOverrides;
+  taskForceTargets: OrchestrationTarget[];
+};
+
+type OneTurnOverrides = {
+  goalMode?: true;
+  planMode?: true;
+  sessionRouting?: true;
+  stormbreakerMode?: true;
 };
 
 type OneAttachmentDraft = {
@@ -604,6 +617,11 @@ export function OneShell() {
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [runElapsedTick, setRunElapsedTick] = useState(0);
   const [composer, setComposer] = useState("");
+  const [availableAgents, setAvailableAgents] = useState<InstalledAgent[]>([]);
+  const [agentPickerOpen, setAgentPickerOpen] = useState(false);
+  const [turnAgentIds, setTurnAgentIds] = useState<string[]>([]);
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const [turnOverrides, setTurnOverrides] = useState<OneTurnOverrides>({});
   const [recurrenceSelection, setRecurrenceSelection] = useState<OneRecurrenceSelectionV1 | null>(null);
   const [recurrencePanelOpen, setRecurrencePanelOpen] = useState(false);
   const [attachmentDrafts, setAttachmentDrafts] = useState<OneAttachmentDraft[]>([]);
@@ -634,6 +652,15 @@ export function OneShell() {
   // never flip the UI language; only the model's reply mirrors the language
   // the user actually typed, which the runner detects from the prompt itself.
   const normalizedLocale = configuredOneLocale;
+  useEffect(() => {
+    const api = ipc();
+    if (!api) return;
+    let cancelled = false;
+    void api.team.list()
+      .then((items) => { if (!cancelled) setAvailableAgents(visibleAgents(items)); })
+      .catch(() => { if (!cancelled) setAvailableAgents([]); });
+    return () => { cancelled = true; };
+  }, []);
   const structuredResultMessageId = useMemo(() => {
     if (!surface) return null;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -948,7 +975,7 @@ export function OneShell() {
           setSelected(null);
           setConversation(null);
           setReceipt(null);
-          router.replace(`/chat?id=${encodeURIComponent(chat.id)}`);
+          router.replace(`/workspace/task?id=${encodeURIComponent(chat.id)}`);
         } else {
           setSelected(null);
           setConversation(chat);
@@ -1202,6 +1229,8 @@ export function OneShell() {
                   text: activeThreadPromptFallback || proposal.goalSummary,
                   attachments: teamAttachments,
                   recurrence: null,
+                  overrides: {},
+                  taskForceTargets: [],
                 }
               : null
         ));
@@ -1275,6 +1304,8 @@ export function OneShell() {
       teamRef?: OneTeamPreflightRef;
       attachments?: PreparedOneAttachments | null;
       recurrence?: OneRecurrenceSelectionV1 | null;
+      overrides?: OneTurnOverrides;
+      taskForceTargets?: OrchestrationTarget[];
       userAlreadyShown?: boolean;
       displayUserMessage?: boolean;
       /** Marks a prompt One authored on the user's behalf. Main records it as a
@@ -1343,6 +1374,7 @@ export function OneShell() {
         ...(options?.teamRef ? { oneTeamPreflightRef: options.teamRef } : {}),
         ...(options?.attachments ? { oneAttachmentRef: options.attachments.ref } : {}),
         ...(options?.recurrence ? { oneRecurrenceSelection: options.recurrence } : {}),
+        ...(options?.taskForceTargets?.length ? { taskForceTargets: options.taskForceTargets } : {}),
         ...(attachedOneMemoryUseOnce ? {
           oneMemoryUseOnceRef: {
             contractVersion: attachedOneMemoryUseOnce.contractVersion,
@@ -1351,7 +1383,10 @@ export function OneShell() {
         } : {}),
         locale: runLocale,
         permissions: executionPermission,
-        sessionRouting: false,
+        ...(options?.overrides?.goalMode ? { goalMode: true } : {}),
+        ...(options?.overrides?.planMode ? { planMode: true } : {}),
+        ...(options?.overrides?.sessionRouting ? { sessionRouting: true } : { sessionRouting: false }),
+        ...(options?.overrides?.stormbreakerMode ? { stormbreakerMode: true } : {}),
       });
       if (options?.teamRef) {
         setTeamPreflight(await api.oneTeamPreflight.getForChat(chatId).catch(() => null));
@@ -1472,6 +1507,8 @@ export function OneShell() {
           teamRef: result.ref,
           attachments: prompt.attachments,
           recurrence: prompt.recurrence,
+          overrides: prompt.overrides,
+          taskForceTargets: prompt.taskForceTargets,
           userAlreadyShown,
           displayUserMessage: userAlreadyShown,
         },
@@ -1522,15 +1559,15 @@ export function OneShell() {
         proposal.binding.chatId,
         proposal.binding.taskId,
         proposal.binding.taskVersion,
-        // Main requires the explicit marker on a confirmed external run; without
-        // it the confirmed binding is rejected as invalid.
-        accepted && !/^\s*\/?workforce\b/i.test(prompt.text) ? `/workforce ${prompt.text}` : prompt.text,
+        prompt.text,
         "task",
         {
           runId: result.ref.reservedRunId,
           teamRef: result.ref,
           attachments: prompt.attachments,
           recurrence: prompt.recurrence,
+          overrides: prompt.overrides,
+          taskForceTargets: prompt.taskForceTargets,
           userAlreadyShown: true,
           displayUserMessage: true,
         },
@@ -1603,23 +1640,18 @@ export function OneShell() {
   const submit = useCallback(async (text: string) => {
     const attachmentSnapshot = attachmentDraftsRef.current.slice();
     const recurrenceSnapshot = recurrenceSelection ? { ...recurrenceSelection } : null;
+    const overrideSnapshot = { ...turnOverrides };
+    const taskForceTargetSnapshot: OrchestrationTarget[] = turnAgentIds.map((agentId) => ({
+      source: "local",
+      entityKind: "agent",
+      agentId,
+    }));
     const explicitValue = text.trim();
     if ((!explicitValue && attachmentSnapshot.length === 0) || busy || teamPreflightBusy) return;
     const value = explicitValue || tFor(appLocale, "one.shell.composer.attachment_prompt", { n: attachmentSnapshot.length, s: attachmentSnapshot.length === 1 ? "" : "s" });
     const api = ipc();
     if (!api) {
       setError(tFor(appLocale, "one.shell.composer.not_connected"));
-      return;
-    }
-    const onboardingState = await api.oneOnboarding.getState().catch(() => null);
-    const onboardingAuthorization = onboardingState?.status === "completed"
-      ? await api.oneOnboarding.getExecutionAuthorization().catch(() => null)
-      : null;
-    if (onboardingState?.status === "completed" && !onboardingAuthorization?.allowed) {
-      const teamChanged = onboardingAuthorization?.reason === "starter_team_changed";
-      setError(teamChanged
-        ? tFor(appLocale, "one.shell.submit.starter_team_changed")
-        : tFor(appLocale, "one.shell.submit.ai_connection_unverified"));
       return;
     }
     const canContinueInPlace = Boolean(
@@ -1661,6 +1693,8 @@ export function OneShell() {
           userPrompt: value,
           expectedTaskId: taskId,
           expectedTaskVersion: taskVersion,
+          ...(taskForceTargetSnapshot.length > 0 ? { requestedAgentIds: taskForceTargetSnapshot.map((target) => target.source === "local" && target.entityKind === "agent" ? target.agentId : "").filter(Boolean) } : {}),
+          ...(overrideSnapshot.sessionRouting ? { dynamicTeamRequested: true } : {}),
         });
         if (prepared.kind === "not_required") {
           const mainIntent = await requestIntentPromise;
@@ -1681,7 +1715,12 @@ export function OneShell() {
             taskVersion,
             value,
             resolvedIntent,
-            { attachments: preparedAttachments, recurrence: recurrenceSnapshot },
+            {
+              attachments: preparedAttachments,
+              recurrence: recurrenceSnapshot,
+              overrides: overrideSnapshot,
+              taskForceTargets: taskForceTargetSnapshot,
+            },
           );
           return;
         }
@@ -1698,6 +1737,8 @@ export function OneShell() {
           text: value,
           attachments: preparedAttachments,
           recurrence: recurrenceSnapshot,
+          overrides: overrideSnapshot,
+          taskForceTargets: taskForceTargetSnapshot,
         };
         setPendingTeamPrompt(pendingPrompt);
         setMessages((current) => [
@@ -1716,6 +1757,10 @@ export function OneShell() {
       }
     };
     setComposer("");
+    setTurnOverrides({});
+    setTurnAgentIds([]);
+    setAgentPickerOpen(false);
+    setModeMenuOpen(false);
     clearAttachmentDrafts();
     // Keep the user's request visibly in motion while a brand-new chat is
     // promoted to its canonical Task and One decides whether help is needed.
@@ -1732,12 +1777,10 @@ export function OneShell() {
         await prepareOrRun(conversation.id, null, null, "conversation");
         return;
       }
-      const starterGroupId = onboardingAuthorization?.allowed ? onboardingAuthorization.groupId : null;
       const chat = await api.chats.create({
         title: value.split(/\r?\n/)[0].slice(0, 72),
         taskMode: "conversation",
         originSurface: "one",
-        ...(starterGroupId ? { agentGroupId: starterGroupId } : {}),
       });
       setConversation(chat);
       selectedConversationIdRef.current = chat.id;
@@ -1749,7 +1792,7 @@ export function OneShell() {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(message);
     }
-  }, [autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, recurrenceSelection, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy]);
+  }, [autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, recurrenceSelection, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides]);
 
   const stopRun = useCallback(() => {
     const api = ipc();
@@ -2119,7 +2162,7 @@ export function OneShell() {
                 : null;
   const introEligible = loaded && oneIntroPending && introBlockingCategory === null && !oneOnboardingVisible;
   const workHref = selected?.chatId
-    ? `/chat?id=${encodeURIComponent(selected.chatId)}&task=${encodeURIComponent(selected.taskId)}`
+    ? `/workspace/task?id=${encodeURIComponent(selected.chatId)}&task=${encodeURIComponent(selected.taskId)}`
     : "/dashboard";
   const openWork = useCallback(async () => {
     const api = ipc();
@@ -2129,7 +2172,7 @@ export function OneShell() {
     if (api && selected) {
       const target = await resolveOneTaskWorkTarget(api, selected.taskId);
       if (target) {
-        router.push(`/chat?id=${encodeURIComponent(target.chatId)}&task=${encodeURIComponent(target.taskId)}`);
+        router.push(`/workspace/task?id=${encodeURIComponent(target.chatId)}&task=${encodeURIComponent(target.taskId)}`);
         return;
       }
     }
@@ -2144,7 +2187,7 @@ export function OneShell() {
     if (action.intent === "open_asset") {
       const kind = action.targetRef?.split(":", 1)[0];
       if (kind === "agent") router.push("/library/agents");
-      else if (kind === "team") router.push("/library/agent-groups");
+      else if (kind === "team") router.push("/library/agents");
       else if (kind === "automation") router.push("/automation");
       else if (kind === "project") void openWork();
       else if (kind === "site") router.push("/site");
@@ -2374,7 +2417,7 @@ export function OneShell() {
       return;
     }
     if (asset.assetType === "team") {
-      router.push(`/library/agent-groups?edit=${encodeURIComponent(asset.assetRef)}`);
+      router.push(`/library/agents?agentId=${encodeURIComponent(asset.assetRef)}`);
       return;
     }
     if (asset.assetType === "agent") {
@@ -2414,7 +2457,9 @@ export function OneShell() {
       router.push("/library/agents?tab=ontology");
       return;
     }
-    // build · resume_build · try_build — 빌드 표면으로 직행(세션이 있으면 그대로 이어짐).
+    // 이어하기만 현재 세션을 보존한다. "에이전트 만들기"와 "다시 사용해보기"는
+    // 이전 요청·첨부·출력 폴더를 새 에이전트에 섞지 않는 진짜 새 빌드다.
+    if (action.id !== "resume_build") startFreshBuild();
     router.push("/build");
   }, [router]);
   const closeAutomationSheet = useCallback(() => setAutomationSheetOpen(false), []);
@@ -2672,7 +2717,7 @@ export function OneShell() {
               </div>
             </section>
           )}
-          {error && <div className={styles.errorBanner} role="alert">{error}</div>}
+          {error && <div className={styles.errorBanner} role="alert">{toCustomerSafeText(error)}</div>}
           <div ref={scrollRef} className={styles.scroll}>
             <OneActivation
               state={oneActivationState}
@@ -3001,6 +3046,66 @@ export function OneShell() {
                 if (value === null) setRecurrencePanelOpen(false);
               }}
             />}
+            {turnAgentIds.length > 0 && (
+              <div className={styles.oneTurnAgentChips} aria-label={appLocale === "ko" ? "이번 턴 에이전트" : "Agents for this turn"}>
+                <span>{appLocale === "ko" ? "이번 턴" : "This turn"}</span>
+                {turnAgentIds.map((agentId) => {
+                  const candidate = availableAgents.find((item) => item.id === agentId);
+                  if (!candidate) return null;
+                  const localized = pickLocalized(candidate, appLocale);
+                  return <button
+                    key={agentId}
+                    type="button"
+                    onClick={() => setTurnAgentIds((current) => current.filter((id) => id !== agentId))}
+                    aria-label={appLocale === "ko" ? `${localized.name} 호출 취소` : `Remove ${localized.name}`}
+                  >@{localized.name}<span aria-hidden>×</span></button>;
+                })}
+              </div>
+            )}
+            {agentPickerOpen && (
+              <section className={styles.oneTurnMenu} aria-label={appLocale === "ko" ? "이번 턴 에이전트 선택" : "Choose agents for this turn"}>
+                <header>{appLocale === "ko" ? "이번 턴에 부를 서브 에이전트" : "Sub-agents for this turn"}</header>
+                <div>
+                  {availableAgents.map((candidate) => {
+                    const localized = pickLocalized(candidate, appLocale);
+                    const selectedForTurn = turnAgentIds.includes(candidate.id);
+                    return <button key={candidate.id} type="button" data-active={selectedForTurn ? "true" : "false"} onClick={() => {
+                      setTurnAgentIds((current) => current.includes(candidate.id)
+                        ? current.filter((id) => id !== candidate.id)
+                        : [...current, candidate.id]);
+                      setComposer((current) => {
+                        const match = current.match(/(^|\s)@[^\s]*$/u);
+                        return match ? `${current.slice(0, match.index)}${match[1]}` : current;
+                      });
+                      window.setTimeout(() => composerInputRef.current?.focus(), 0);
+                    }}><strong>{selectedForTurn ? "✓ " : ""}{localized.name}</strong><span>{localized.tagline}</span></button>;
+                  })}
+                </div>
+                <small>{appLocale === "ko" ? "호출된 에이전트는 이 턴에만 참여하며 One이 세션을 계속 관리합니다." : "Called agents participate in this turn only. One continues to manage the session."}</small>
+              </section>
+            )}
+            {modeMenuOpen && (
+              <section className={styles.oneTurnMenu} aria-label={appLocale === "ko" ? "이번 턴 옵션" : "Options for this turn"}>
+                <header>{appLocale === "ko" ? "명시적 옵션 · 선택하지 않으면 One이 판단" : "Explicit options · otherwise One decides"}</header>
+                <div className={styles.oneTurnToggles}>
+                  {([
+                    ["goalMode", appLocale === "ko" ? "Goal" : "Goal"],
+                    ["planMode", appLocale === "ko" ? "Plan" : "Plan"],
+                    ["sessionRouting", appLocale === "ko" ? "동적 팀" : "Dynamic team"],
+                    ["stormbreakerMode", "Stormbreaker"],
+                  ] as Array<[keyof OneTurnOverrides, string]>).map(([key, label]) => <button
+                    key={key}
+                    type="button"
+                    data-active={turnOverrides[key] ? "true" : "false"}
+                    onClick={() => setTurnOverrides((current) => {
+                      const next = { ...current };
+                      if (next[key]) delete next[key]; else next[key] = true;
+                      return next;
+                    })}
+                  >{label}</button>)}
+                </div>
+              </section>
+            )}
             <form className={styles.composer} onSubmit={(event) => { event.preventDefault(); if (busy) stopRun(); else void submit(composer); }}>
               <input
                 ref={attachmentInputRef}
@@ -3015,7 +3120,11 @@ export function OneShell() {
                 ref={composerInputRef}
                 rows={1}
                 value={composer}
-                onChange={(event) => setComposer(event.target.value)}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setComposer(value);
+                  setAgentPickerOpen(/(^|\s)@[^\s]*$/u.test(value));
+                }}
                 onCompositionStart={() => { composerComposingRef.current = true; }}
                 onCompositionEnd={() => {
                   window.setTimeout(() => { composerComposingRef.current = false; }, 0);
@@ -3048,6 +3157,22 @@ export function OneShell() {
                   >
                     <IconPlus size={20} aria-hidden="true" />
                   </button>
+                  <button
+                    type="button"
+                    className={styles.attachmentButton}
+                    disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
+                    aria-expanded={agentPickerOpen}
+                    aria-label={appLocale === "ko" ? "이번 턴에 에이전트 호출" : "Call agents for this turn"}
+                    onClick={() => { setModeMenuOpen(false); setAgentPickerOpen((open) => !open); }}
+                  >@</button>
+                  <button
+                    type="button"
+                    className={styles.attachmentButton}
+                    disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
+                    aria-expanded={modeMenuOpen}
+                    aria-label={appLocale === "ko" ? "이번 턴 옵션" : "Options for this turn"}
+                    onClick={() => { setAgentPickerOpen(false); setModeMenuOpen((open) => !open); }}
+                  >◇</button>
                   <button
                     type="button"
                     className={styles.attachmentButton}

@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.9.39",
+  "version": "0.9.40",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -15,13 +15,13 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 81,
-    "bundledRuntimeVersion": "1.1.91"
+    "targetSchemaVersion": 85,
+    "bundledRuntimeVersion": "1.1.92"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.1.91",
-    "commit": "791e69116ce58f867db47f2bb1bc896fcd46c62e"
+    "ref": "v1.1.92",
+    "commit": "2eb39adf572bc3e235866002b3143936240f76bc"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
@@ -97,7 +97,6 @@
     "test:opencrab-product": "npm run build:electron && node scripts/test-opencrab-product-contracts.cjs",
     "test:opencrab-recovery-scrub": "npm run build:electron && electron scripts/test-opencrab-recovery-scrub.cjs",
     "test:opencrab-ui": "npm run build:renderer && node scripts/test-opencrab-ui.cjs",
-    "test:agent-groups": "npm run build:electron && electron scripts/test-agent-groups.cjs",
     "test:hephaestus-recommendation": "npm run build:electron && electron scripts/test-hephaestus-recommendation.cjs",
     "test:firm-delete-integrity": "npm run build:electron && electron scripts/test-firm-delete-integrity.cjs",
     "test:project-graph-continuity": "npm run build:electron && electron scripts/test-project-graph-continuity.cjs",
@@ -149,6 +148,7 @@
     "test:codex-model-discovery": "npm run build:electron && node scripts/test-codex-model-discovery.cjs",
     "test:runtime-selection-memory": "npm run build:electron && electron scripts/test-runtime-selection-memory.cjs",
     "test:model-role-defaults": "npm run build:electron && electron scripts/test-model-role-defaults-v79.cjs && electron scripts/test-chat-runtime-pin-v79.cjs",
+    "test:project-first-v84": "npm run build:electron && electron scripts/test-project-first-v84.cjs",
     "test:workload-routing": "npm run build:electron && electron scripts/test-workload-routing.cjs",
     "test:stormbreaker-core": "npm run build:electron && electron scripts/test-stormbreaker-core-harness.cjs",
     "test:stormbreaker-core:embedded": "npm run build:electron && cross-env HEPHAESTUS_RUNTIME_ROOT=Hephaestus electron scripts/test-stormbreaker-core-harness.cjs --installed",
@@ -222,9 +222,9 @@
     "test:telegram-api-timeout": "npm run build:electron && electron scripts/test-telegram-api-timeout.cjs",
     "test:telegram-automation-report-fanout": "npm run build:electron && electron scripts/test-telegram-automation-report-fanout.cjs",
     "test:startup-founder-new-idea": "npm run build && node scripts/test-startup-founder-new-idea.cjs",
-    "test:site-studio": "npm run build:electron && node scripts/test-site-studio-tagging.cjs && node scripts/test-site-studio-edit.cjs && node scripts/test-site-studio-overlay.cjs && electron scripts/test-site-studio-store.cjs && electron scripts/test-site-workspace-handoff.cjs && node scripts/test-site-agent-app-astryx.cjs && electron scripts/test-site-agent-app-capabilities.cjs && electron scripts/test-site-agent-app-mcp-consent.cjs && electron scripts/test-site-agent-app-prebuild-mcp.cjs && electron scripts/test-site-agent-app-claude-runtime-isolation.cjs && electron scripts/test-site-agent-app-firm-isolation.cjs && electron scripts/test-site-agent-app-group-isolation.cjs && electron scripts/test-site-agent-app-runtime.cjs && electron scripts/test-site-agent-app-publish.cjs && npm run build:renderer && node scripts/test-site-landing-ui.cjs",
+    "test:site-studio": "npm run build:electron && node scripts/test-site-studio-tagging.cjs && node scripts/test-site-studio-edit.cjs && node scripts/test-site-studio-overlay.cjs && electron scripts/test-site-studio-store.cjs && electron scripts/test-site-workspace-handoff.cjs && node scripts/test-site-agent-app-astryx.cjs && electron scripts/test-site-agent-app-capabilities.cjs && electron scripts/test-site-agent-app-mcp-consent.cjs && electron scripts/test-site-agent-app-prebuild-mcp.cjs && electron scripts/test-site-agent-app-claude-runtime-isolation.cjs && electron scripts/test-site-agent-app-firm-isolation.cjs && electron scripts/test-site-agent-app-runtime.cjs && electron scripts/test-site-agent-app-publish.cjs && npm run build:renderer && node scripts/test-site-landing-ui.cjs",
     "test:site-agent-app-prebuild-mcp": "npm run build:electron && electron scripts/test-site-agent-app-prebuild-mcp.cjs",
-    "test:agent-app-runtime:prepared": "electron scripts/test-site-agent-app-capabilities.cjs && electron scripts/test-site-agent-app-mcp-consent.cjs && electron scripts/test-site-agent-app-prebuild-mcp.cjs && electron scripts/test-site-agent-app-claude-runtime-isolation.cjs && electron scripts/test-site-agent-app-firm-isolation.cjs && electron scripts/test-site-agent-app-group-isolation.cjs && electron scripts/test-site-agent-app-runtime.cjs",
+    "test:agent-app-runtime:prepared": "electron scripts/test-site-agent-app-capabilities.cjs && electron scripts/test-site-agent-app-mcp-consent.cjs && electron scripts/test-site-agent-app-prebuild-mcp.cjs && electron scripts/test-site-agent-app-claude-runtime-isolation.cjs && electron scripts/test-site-agent-app-firm-isolation.cjs && electron scripts/test-site-agent-app-runtime.cjs",
     "test:agent-app-runtime-gate": "npm run build:electron && npm run test:agent-app-runtime:prepared",
     "test:release-agent-foundation-gate": "npm run build:electron && npm run test:project-foundation-allocation:prepared && npm run test:mcp-resilience:prepared && npm run test:agent-app-runtime:prepared",
     "test:automations-store": "npm run build:electron && electron scripts/test-automations-store.cjs",
@@ -311,7 +311,6 @@
     "test:one-briefing-action-reachable": "node scripts/test-one-briefing-action-reachable.cjs",
     "test:hep-call-prompt-safety": "node scripts/test-hep-call-prompt-safety.cjs",
     "test:core-call-liveness-and-auth": "node scripts/test-core-call-liveness-and-auth.cjs",
-    "test:one-workforce-flag-roundtrip": "node scripts/test-one-workforce-flag-roundtrip.cjs",
     "test:allocation-usage-wired": "node scripts/test-allocation-usage-wired.cjs",
     "test:workforce-contract-tolerance": "node scripts/test-workforce-contract-tolerance.cjs",
     "bump:engine": "node scripts/bump-bundled-engine.mjs",

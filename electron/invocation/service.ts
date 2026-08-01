@@ -816,8 +816,7 @@ export class InvocationService {
       runId,
       // The resident judge decides "conversation vs task" by meaning: the async
       // invoke paths warm the judgment cache (prejudgeOneRequestIntent) and this
-      // sync site peeks it; without a judged verdict the wordlist classifier is
-      // only the labeled deterministic fallback.
+      // sync site peeks it; without a judged verdict the intent remains undecided.
       ...(requestedOneMode
         && invocationRequest.taskIntent === "conversation"
         && classifyOneRequestIntent(invocationRequest.userPrompt, judgedOneRequestIntent) === "task"
@@ -886,7 +885,6 @@ export class InvocationService {
           userPrompt: runReq.userPrompt,
           projectId: chat.projectId,
           firmId: chat.firmId,
-          agentGroupId: chat.agentGroupId,
           ownerAgentId: chat.agentId,
           inputRefs,
         });

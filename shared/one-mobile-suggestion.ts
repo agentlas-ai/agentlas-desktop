@@ -150,7 +150,7 @@ export interface OneMobileSuggestionActionAcknowledgement {
   reviewOnly: true;
   executionStarted: false;
   reviewRequestId: string | null;
-  targetSurface: "build" | "agent_groups" | "automation" | "work" | null;
+  targetSurface: "build" | "automation" | "work" | null;
 }
 
 const HOST_REF_RE = /^host_[a-f0-9]{32}$/;
@@ -353,7 +353,7 @@ export function isOneMobileSuggestionActionAcknowledgement(
     && (value.reviewRequestId === null
       || (typeof value.reviewRequestId === "string" && REVIEW_REF_RE.test(value.reviewRequestId)))
     && (value.targetSurface === null
-      || ["build", "agent_groups", "automation", "work"].includes(String(value.targetSurface)))
+      || ["build", "automation", "work"].includes(String(value.targetSurface)))
     && actionStatusMatches
     && (value.action === "review"
       ? value.status === "accepted_for_review" && value.reviewRequestId !== null && value.targetSurface !== null

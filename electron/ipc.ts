@@ -162,8 +162,6 @@ import { currentUiLocale } from "./ui-locale";
 import { buildChatRecap, markChatRecapViewed } from "./chat/recap";
 import { startStudio, stopStudio } from "./hephaestus/studio";
 import type {
-  AgentGroupCreateInput,
-  AgentGroupUpdateInput,
   HephaestusBuildEvent,
   HephaestusBuildRequest,
   CreateAgentEvolutionProposalInput,
@@ -234,6 +232,7 @@ import {
 } from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
 import { grantDroppedPath, grantPath, pathFromGrant, resolveFsReadPath } from "./fs/access";
+import { connectGithubProject } from "./project-sources/github";
 import {
   getAuthSession,
   getSessionCookieHeader,
@@ -362,8 +361,8 @@ import {
   setChatWorkingFolder,
   switchChatAgent,
   unarchiveChat,
-  getOrCreateAutomationSession,
 } from "./store/chats";
+import { getOrCreateAutomationSession } from "./store/automation-sessions";
 import {
   acceptCanonicalTaskResult,
   getCanonicalTask,
@@ -569,15 +568,6 @@ import {
   setAgentRuntimeOverride,
 } from "./store/agent-runtime-overrides";
 import {
-  createAgentGroup,
-  getResolvedAgentGroup,
-  listAgentGroups,
-  listResolvedAgentGroups,
-  removeAgentGroup,
-  removeAgentGroupMember,
-  updateAgentGroup,
-} from "./store/agent-groups";
-import {
   autoConnectTelegram,
   cloneTelegramConnection,
   configureTelegramBotSettings,
@@ -678,6 +668,8 @@ import type {
   OberonRenderRequest,
   OberonSheetRequest,
   Project,
+  ProjectAgentPoolMember,
+  ProjectSourceType,
   RuntimeBackend,
   RuntimeKind,
   RuntimeSelection,
@@ -1281,13 +1273,12 @@ function rendererTaskForceTargets(value: unknown): OrchestrationTarget[] | undef
     const target = raw as Record<string, unknown>;
     const source = target.source;
     const kind = target.entityKind;
-    const idKey = source === "local" ? kind === "agent" ? "agentId" : kind === "team" ? "firmId" : kind === "group" ? "groupId" : "" : "slug";
+    const idKey = source === "local" ? kind === "agent" ? "agentId" : kind === "team" ? "firmId" : "" : "slug";
     const id = idKey && typeof target[idKey] === "string" ? target[idKey].trim() : "";
     if (!id || id.length > 160) throw new Error("Invalid task-force target identity.");
     let normalized: OrchestrationTarget;
     if (source === "local" && kind === "agent") normalized = { source, entityKind: kind, agentId: id };
     else if (source === "local" && kind === "team") normalized = { source, entityKind: kind, firmId: id };
-    else if (source === "local" && kind === "group") normalized = { source, entityKind: kind, groupId: id };
     else if ((source === "cloud" || source === "hub") && (kind === "agent" || kind === "team")) {
       normalized = { source, entityKind: kind, slug: id };
     } else throw new Error("Invalid task-force target kind.");
@@ -3001,21 +2992,6 @@ export function registerIpcHandlers(): void {
   // LLM으로 팀 폴더를 분석해 3-tier 조직 스펙 생성 (임포트 팀용)
   ipcMain.handle("firms:resolveOrg", (_e, id: string) => resolveTeamOrg(id));
 
-  // ── agent groups (자주 쓰는 조합 / 상위 오케스트레이터) ──────
-  ipcMain.handle("agentGroups:list", () => listAgentGroups());
-  ipcMain.handle("agentGroups:listResolved", () => listResolvedAgentGroups());
-  ipcMain.handle("agentGroups:getResolved", (_e, id: string) => getResolvedAgentGroup(id));
-  ipcMain.handle("agentGroups:create", (_e, input: AgentGroupCreateInput) =>
-    createAgentGroup(input),
-  );
-  ipcMain.handle("agentGroups:update", (_e, id: string, patch: AgentGroupUpdateInput) =>
-    updateAgentGroup(id, patch),
-  );
-  ipcMain.handle("agentGroups:removeMember", (_e, groupId: string, memberId: string) =>
-    removeAgentGroupMember(groupId, memberId),
-  );
-  ipcMain.handle("agentGroups:remove", (_e, id: string) => removeAgentGroup(id));
-
   // ── Telegram Connect (Bot API polling + Agentlas invocation bridge) ─────
   ipcMain.handle("telegram:listBindings", () => listTelegramBindings());
   ipcMain.handle("telegram:autoConnect", (_e, input) => autoConnectTelegram(input));
@@ -3075,11 +3051,20 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle(
     "projects:create",
-    (_e, input: { name: string; defaultAgentId?: string | null; contextNote?: string | null; folderGrant?: FsPathGrant | null }) =>
+    (_e, input: {
+      name: string;
+      systemPrompt?: string | null;
+      agentPool?: ProjectAgentPoolMember[];
+      sourceType: ProjectSourceType;
+      sourceRef?: string | null;
+      folderGrant?: FsPathGrant | null;
+    }) =>
       createProject({
         name: input.name,
-        defaultAgentId: input.defaultAgentId,
-        contextNote: input.contextNote,
+        systemPrompt: input.systemPrompt,
+        agentPool: input.agentPool,
+        sourceType: input.sourceType,
+        sourceRef: input.sourceRef,
         folderPath: input.folderGrant ? pathFromGrant(input.folderGrant, "directory") : null,
       }),
   );
@@ -3088,17 +3073,21 @@ export function registerIpcHandlers(): void {
     (
       _e,
       id: string,
-      patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId">> & { folderGrant?: FsPathGrant | null },
+      patch: Partial<Pick<Project, "name" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef">> & { folderGrant?: FsPathGrant | null },
     ) => updateProject(id, {
       name: patch.name,
-      contextNote: patch.contextNote,
-      defaultAgentId: patch.defaultAgentId,
+      systemPrompt: patch.systemPrompt,
+      agentPool: patch.agentPool,
+      sourceType: patch.sourceType,
+      sourceRef: patch.sourceRef,
       ...(patch.folderGrant !== undefined
         ? { folderPath: patch.folderGrant ? pathFromGrant(patch.folderGrant, "directory") : null }
         : {}),
     }),
   );
   ipcMain.handle("projects:remove", (_e, id: string) => removeProject(id));
+  ipcMain.handle("projects:connectGithub", async (event, repositoryUrl: string) =>
+    connectGithubProject(BrowserWindow.fromWebContents(event.sender), repositoryUrl));
 
   // ── ontology activation (project-local, inbox + explicit sources only) ──
   ipcMain.handle("ontology:getProject", (_e, projectId: string) =>
@@ -3146,7 +3135,6 @@ export function registerIpcHandlers(): void {
       input: {
         agentId?: string;
         firmId?: string | null;
-        agentGroupId?: string | null;
         projectId?: string | null;
         title?: string;
         continueFromChatId?: string | null;
@@ -3185,6 +3173,27 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("chats:setHiredAgents", (_e, id: string, cards: HiredAgentCard[]) =>
     setChatHiredAgents(id, Array.isArray(cards) ? cards : []),
   );
+  ipcMain.handle("tasks:createProject", (_e, input: { projectId: string; title?: string }): CanonicalTaskWorkTarget => {
+    if (!input || typeof input.projectId !== "string" || !input.projectId.trim()) {
+      throw new TypeError("Project is required");
+    }
+    const project = getProject(input.projectId);
+    if (!project) throw new Error("Project is unavailable");
+    const controller = project.agentPool[0];
+    if (!controller) throw new Error("Choose at least one project agent before starting work");
+    const chat = createChat({
+      projectId: project.id,
+      agentId: controller.agentId,
+      title: typeof input.title === "string" && input.title.trim()
+        ? input.title.trim().slice(0, 200)
+        : "New task",
+      taskMode: "task",
+      originSurface: "work",
+    });
+    const task = getCanonicalTaskForChat(chat.id);
+    if (!task) throw new Error("Project task could not be prepared");
+    return { taskId: task.id, chatId: chat.id, title: task.title };
+  });
   ipcMain.handle("tasks:list", (_e, input?: { limit?: number; includeArchived?: boolean }) =>
     listCanonicalTasks(input),
   );
@@ -3694,14 +3703,21 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("automations:getSession", (_e, id: string) => {
     const automation = getAutomation(id);
     if (!automation) throw new Error(`Automation not found: ${id}`);
-    return getOrCreateAutomationSession({
+    const session = getOrCreateAutomationSession({
       automationId: automation.id,
+      projectId: automation.projectId ?? null,
       ...(automation.targetType === "firm"
         ? { firmId: automation.targetId }
         : automation.targetType === "agent"
           ? { agentId: automation.targetId }
           : {}),
     });
+    return {
+      id: session.id,
+      automationId: automation.id,
+      messages: listChatMessages(session.chat.id),
+      updatedAt: session.chat.updatedAt,
+    };
   });
 
   // ── schedule 문법 헬퍼(렌더러 스케줄 빌더용 — croner는 메인에서만) ──

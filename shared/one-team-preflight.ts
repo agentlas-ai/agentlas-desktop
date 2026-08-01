@@ -113,6 +113,10 @@ export interface PrepareOneTeamPreflightInput {
   userPrompt: string;
   expectedTaskId: string | null;
   expectedTaskVersion: number | null;
+  /** Explicit turn-only local sub-agents selected with @. */
+  requestedAgentIds?: string[];
+  /** Explicit optional override; omission leaves team need to One's judgment. */
+  dynamicTeamRequested?: true;
 }
 
 export type PrepareOneTeamPreflightResult =

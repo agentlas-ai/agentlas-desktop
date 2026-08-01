@@ -335,7 +335,13 @@ function resolveRendererFile(url: string): string {
   const pathname = decodeURIComponent(parsed.pathname || "/");
   let routePath = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
   const segments = routePath.split("/");
-  const staticAssetIndex = segments.findIndex((segment) => segment === "_next" || segment === "brand");
+  // CSS-relative asset URLs can arrive as
+  // `_next/static/css/_next/static/media/...` under the custom scheme. Keep the
+  // last `_next` root so fonts and other emitted assets resolve to the exported
+  // static tree instead of the 404 document.
+  const nextAssetIndex = segments.lastIndexOf("_next");
+  const brandAssetIndex = segments.findIndex((segment) => segment === "brand");
+  const staticAssetIndex = nextAssetIndex > 0 ? nextAssetIndex : brandAssetIndex;
   if (staticAssetIndex > 0) {
     routePath = segments.slice(staticAssetIndex).join("/");
   }

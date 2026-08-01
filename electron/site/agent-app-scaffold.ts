@@ -5,7 +5,8 @@ import type { AppFactoryScaffoldResult } from "../../shared/types";
 import type { SiteAgentAppArtifact } from "../../shared/site-studio";
 import { scaffoldServiceApp } from "../app-factory/scaffold";
 import { recordScaffoldedApp } from "../store/agent-apps";
-import { getOrCreateAutomationSession, setChatWorkingFolder } from "../store/chats";
+import { setChatWorkingFolder } from "../store/chats";
+import { getOrCreateAutomationSession } from "../store/automation-sessions";
 import { siteAgentAppContextFromProject } from "./agent-app";
 import { buildSiteAgentApp, captureSiteAgentAppThumbnail } from "./agent-app-thumbnail";
 import { extractSiteAgentAppVisual } from "./agent-app-visual";
@@ -52,10 +53,9 @@ export async function scaffoldSiteAgentApp(projectId: string, screenId: string):
     automationId: `site-agent-app:${project.id}`,
     agentId: target.kind === "agent" || target.kind === "team" ? target.id : undefined,
     firmId: target.kind === "firm" ? target.id : null,
-    agentGroupId: target.kind === "group" ? target.id : null,
   });
   const request = {
-    chatId: chat.id,
+    chatId: chat.chat.id,
     surfaceId: `site:${project.id}`,
     manifest: context.manifest,
   };
@@ -66,11 +66,11 @@ export async function scaffoldSiteAgentApp(projectId: string, screenId: string):
   });
   const runtimeWorkspace = path.join(result.rootPath, "runtime", "workspace");
   await fs.mkdir(runtimeWorkspace, { recursive: true, mode: 0o700 });
-  setChatWorkingFolder(chat.id, runtimeWorkspace);
+  setChatWorkingFolder(chat.chat.id, runtimeWorkspace);
   const record = recordScaffoldedApp({
-    chatId: chat.id,
+    chatId: chat.chat.id,
     projectId: null,
-    agentId: chat.agentId,
+    agentId: chat.chat.agentId,
     surfaceId: request.surfaceId,
     manifest: request.manifest,
     scaffold: result,

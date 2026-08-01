@@ -231,7 +231,6 @@ export interface OneSuggestionReviewRequest {
 
 export type OneSuggestionReviewSurface =
   | "build"
-  | "agent_groups"
   | "automation"
   | "work";
 

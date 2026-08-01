@@ -33,7 +33,6 @@ import type {
 import type {
   AgentRuntimeOverride,
   AgentRuntimeOverrideScope,
-  AgentGroupResolved,
   AgentUsageSummaryRow,
   BorrowedAgentProfile,
   Chat,
@@ -299,7 +298,6 @@ function LibraryAgentsView() {
   const [resolveMsg, setResolveMsg] = useState("");
   const [importBusy, setImportBusy] = useState(false);
   const [resolvedOrgs, setResolvedOrgs] = useState<Record<string, ResolvedOrg>>({});
-  const [agentGroups, setAgentGroups] = useState<AgentGroupResolved[]>([]);
   const [runtimeStatuses, setRuntimeStatuses] = useState<RuntimeStatus[]>([]);
   const [runtimeOverrides, setRuntimeOverrides] = useState<AgentRuntimeOverride[]>([]);
   // v74 사용 원장(run 귀속 집계) — 로스터 섹션/배지의 데이터 소스.
@@ -428,17 +426,15 @@ function LibraryAgentsView() {
     const api = ipc();
     if (!api) return;
     const generation = ++rosterRefreshGenerationRef.current;
-    const [fList, agList, runtimes, overrides, groupRows] = await Promise.all([
+    const [fList, agList, runtimes, overrides] = await Promise.all([
       api.firms.list(),
       api.team.list(),
       api.runtime.detect().catch(() => []),
       api.agentRuntime?.list ? api.agentRuntime.list().catch(() => []) : Promise.resolve([]),
-      api.agentGroups?.listResolved ? api.agentGroups.listResolved().catch(() => []) : Promise.resolve([]),
     ]);
     if (rosterRefreshGenerationRef.current !== generation) return;
     setFirms(fList);
     setAgents(visibleRosterAgents(agList));
-    setAgentGroups(groupRows);
     setRuntimeStatuses(runtimes);
     setRuntimeOverrides(overrides);
     setBookmarkOverrides({});
@@ -1156,89 +1152,6 @@ function LibraryAgentsView() {
             />
           ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {(sidebarCollapsed || rosterTab === "multi") && agentGroups.length > 0 && (
-              <div>
-                {!sidebarCollapsed && (
-                  <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted-deep)", textTransform: "uppercase", padding: "0 12px", marginBottom: 8 }}>
-                    {locale === "ko" ? "에이전트 조합" : "Agent groups"}
-                  </div>
-                )}
-                <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingLeft: sidebarCollapsed ? 0 : 12, alignItems: sidebarCollapsed ? "center" : "stretch" }}>
-                  {agentGroups.map((group) => {
-                    if (sidebarCollapsed) {
-                      return (
-                        <button
-                          key={group.id}
-                          type="button"
-                          onClick={() => navigate("/library/agent-groups")}
-                          title={group.name}
-                          style={{
-                            width: 34,
-                            height: 34,
-                            borderRadius: 10,
-                            border: group.warningCount ? "1px solid var(--amber-deep)" : "1px solid var(--paper-edge)",
-                            background: group.warningCount ? "var(--peach-soft)" : "var(--fill-1)",
-                            color: group.warningCount ? "var(--amber-deep)" : "var(--accent-strong)",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            cursor: "pointer",
-                          }}
-                        >
-                          <IconLayers size={16} />
-                        </button>
-                      );
-                    }
-                    return (
-                      <button
-                        key={group.id}
-                        type="button"
-                        onClick={() => navigate("/library/agent-groups")}
-                        style={{
-                          width: "100%",
-                          display: "grid",
-                          gridTemplateColumns: "auto minmax(0, 1fr) auto",
-                          alignItems: "center",
-                          gap: 9,
-                          padding: "8px 10px",
-                          borderRadius: "var(--radius-md)",
-                          border: group.warningCount ? "1px solid var(--amber-deep)" : "1px solid var(--paper-edge)",
-                          background: group.warningCount ? "var(--peach-soft)" : "var(--paper)",
-                          color: "var(--ink)",
-                          textAlign: "left",
-                          cursor: "pointer",
-                        }}
-                      >
-                        <span
-                          style={{
-                            width: 26,
-                            height: 26,
-                            borderRadius: 8,
-                            background: "var(--fill-1)",
-                            color: "var(--accent-strong)",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                          }}
-                        >
-                          <IconLayers size={14} />
-                        </span>
-                        <span style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                          <strong style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.name}</strong>
-                          <small style={{ fontSize: 11, color: "var(--muted-deep)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {group.orchestratorName}
-                          </small>
-                        </span>
-                        <span style={{ fontSize: 10, fontWeight: 800, color: group.warningCount ? "var(--amber-deep)" : "var(--muted-deep)" }}>
-                          {group.warningCount ? "!" : group.members.length}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
             {(sidebarCollapsed || rosterTab === "multi") && roster.multiFirms.map(firm => {
               const rOrg = resolvedOrgs[firm.id];
               const fLoc = pickLocalized(firm, locale);
@@ -1722,7 +1635,7 @@ function LibraryAgentsView() {
                   {chats.map((c) => (
                     <li key={c.id}>
                       <Link
-                        href={`/chat?id=${c.id}`}
+                        href="/one"
                         style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)", textDecoration: "none", color: "var(--ink)", transition: "border 0.2s" }}
                       >
                         <span style={{ flex: 1, minWidth: 0, fontWeight: 500, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -4449,20 +4362,10 @@ function AgentDetailView({
           {node.agentId && (
             <button
               className="agent-run-button"
-              onClick={async () => {
-                const api = ipc();
-                if (!api || !node.agentId) return;
-                try {
-                  // 보유→가동 전환: 이 일꾼과 새 작업 채팅을 열어 바로 일을 시킨다.
-                  const chat = await api.chats.create({ agentId: node.agentId });
-                  navigate(`/chat?id=${chat.id}`);
-                } catch {
-                  /* 무시 */
-                }
-              }}
-              title={locale === "ko" ? "이 에이전트와 새 작업을 시작합니다" : "Start a new task with this agent"}
+              onClick={() => navigate("/one")}
+              title={locale === "ko" ? "One에서 이 에이전트를 턴 단위로 호출할 수 있습니다" : "Call this agent for a turn in One"}
             >
-              {locale === "ko" ? "▶ 일 시키기" : "▶ Put to work"}
+              {locale === "ko" ? "One에서 호출" : "Call in One"}
             </button>
           )}
           {agent && (

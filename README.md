@@ -69,6 +69,20 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-08-01 · v0.9.40 — Project-first Work and a clearer One** —
+  Workspace now begins with Projects, where source, instructions, ordered
+  agents, tasks, and memory stay together. The old global chat and Agent Group
+  entries are retired; the first project agent controls its tasks and other
+  selected agents participate for the current turn. One remains the sole
+  controller of One conversations, while `@` calls and optional run controls
+  stay explicit and temporary. Automations now keep their own session rail,
+  conversation, graph, and inspector. Real Electron checks also cover pointer
+  drag-and-drop, restart persistence, saved-project compatibility, draft
+  recovery, narrow windows, and readable run receipts. This release binds
+  Agentlas OS v1.1.92 at
+  2eb39adf572bc3e235866002b3143936240f76bc. Source readiness does not prove a
+  published installer: the Releases page stays the authority for what is
+  actually downloadable.
 - **2026-08-01 · v0.9.39 — The post-update repair stays armed** —
   0.9.38 added a repair that restarts Agentlas once when the first boot after an
   update fails, guarded by a marker file so it can never loop. Clearing that

@@ -13,7 +13,6 @@ import { ensureCanonicalTaskForChat } from "../store/tasks";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
 import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
-import { getAgentGroup } from "../store/agent-groups";
 
 const OPEN = "<<agentlas-ask>>";
 const CLOSE = "<</agentlas-ask>>";
@@ -258,10 +257,9 @@ export function listPendingConfirmations(): PendingConfirmation[] {
     if (listCommittedQuestionAnswers(c.id).some((r) => r.sourceMessageId === last.id)) continue;
     const snoozedUntil = latestDecisionSnooze(c.id, last.id);
     const firm = c.firmId ? getFirm(c.firmId) : null;
-    const group = c.agentGroupId ? getAgentGroup(c.agentGroupId) : null;
     const agent = getAgentById(c.agentId);
-    const requesterLabel = firm?.name || group?.name || agent?.name || c.title;
-    const requesterKind = firm ? "firm" : group ? "agent-group" : "agent";
+    const requesterLabel = firm?.name || agent?.name || c.title;
+    const requesterKind = firm ? "firm" : "agent";
     out.push({
       chatId: c.id,
       sourceMessageId: last.id,

@@ -5,7 +5,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Sidebar } from "./Sidebar";
+import { ProjectSidebar } from "./ProjectSidebar";
 import { MenuBridge } from "./MenuBridge";
 import { ImportAgentsModal } from "./ImportAgentsModal";
 import { ipc, ipcEvents, updaterEvents } from "@/lib/ipc";
@@ -305,7 +305,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const showWorkspaceSidebar = pathname.startsWith("/chat") || pathname.startsWith("/project");
+  const showWorkspaceSidebar = pathname.startsWith("/workspace") || pathname.startsWith("/project");
   const featureUpdatePath = pathname.replace(/\.html$/, "");
   const featureUpdateRouteEligible =
     featureUpdatePath === "/"
@@ -377,7 +377,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       }}
     >
       {!showWorkspaceSidebar && <SideNav pendingConfirmations={pendingConfirmations} />}
-      {showWorkspaceSidebar && <Sidebar />}
+      {showWorkspaceSidebar && <ProjectSidebar />}
       <main
         style={{
           position: "relative",
@@ -419,7 +419,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       />
       <BackgroundWorkPill
         jobs={oberonJobs}
-        avoidComposer={pathname.startsWith("/chat")}
+        avoidComposer={pathname.startsWith("/workspace/task")}
         locale={locale}
         onOpen={() => router.push("/oberon")}
       />
@@ -436,7 +436,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         }}
       />
       <GuideFab
-        avoidComposer={pathname.startsWith("/chat")}
+        avoidComposer={pathname.startsWith("/workspace/task")}
         onReplayTour={replayCurrentPageTour}
       />
     </div>

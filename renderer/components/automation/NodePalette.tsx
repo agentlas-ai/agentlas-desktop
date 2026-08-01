@@ -1,5 +1,5 @@
 // 노드 팔레트(설계 §4, P1) — 우측 드로어. 4섹션(흐름 제어 / 도구 / 트리거 / 액션)에 더해
-// 에이전트·회사 섹션. 소스는 MCP_TOOL_CATALOG + listInstalledAgents/listFirms/agentGroups +
+// 에이전트·회사 섹션. 소스는 MCP_TOOL_CATALOG + listInstalledAgents/listFirms +
 // surface action enum. 항목을 클릭하면 부모가 캔버스에 노드를 추가한다(결정적 배치).
 "use client";
 import { useEffect, useMemo, useState } from "react";
@@ -11,7 +11,6 @@ import type {
   WorkflowNodeType,
   InstalledAgent,
   InstalledFirm,
-  AgentGroup,
   McpToolCatalogEntry,
   MarketplaceListing,
 } from "@/lib/types";
@@ -43,7 +42,6 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
   const { t, locale } = useT();
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
-  const [groups, setGroups] = useState<AgentGroup[]>([]);
   const [hubAgents, setHubAgents] = useState<MarketplaceListing[]>([]);
   const [tools, setTools] = useState<McpToolCatalogEntry[]>([]);
 
@@ -51,16 +49,14 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
     const api = ipc();
     if (!api) return;
     void (async () => {
-      const [ag, fm, gr, tl, hub] = await Promise.all([
+      const [ag, fm, tl, hub] = await Promise.all([
         api.team.list(),
         api.firms.list(),
-        api.agentGroups.list(),
         api.mcpTools.listCatalog(),
         api.marketplace.search("").catch(() => []),
       ]);
       setAgents(visibleAgents(ag));
       setFirms(fm);
-      setGroups(gr);
       setTools(tl);
       setHubAgents(hub);
     })();
@@ -70,7 +66,6 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
     () => [
       ...firms.map((f) => ({ label: `${pickLocalized(f, locale).name} — CEO`, ref: f.id, targetType: "firm" as const, targetVersion: undefined })),
       ...agents.map((a) => ({ label: pickLocalized(a, locale).name, ref: a.id, targetType: "agent" as const, targetVersion: undefined })),
-      ...groups.map((g) => ({ label: g.name, ref: g.id, targetType: "agent" as const, targetVersion: undefined })),
       ...hubAgents.filter((a) => a.callable === true && Boolean(a.packageHash)).map((a) => ({
         label: `${pickLocalized(a, locale).name} — Hub`,
         ref: a.slug,
@@ -78,7 +73,7 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
         targetVersion: a.packageHash,
       })),
     ],
-    [agents, firms, groups, hubAgents, locale],
+    [agents, firms, hubAgents, locale],
   );
 
   return (

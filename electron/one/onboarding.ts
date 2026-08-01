@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { looksSecret } from "../../shared/secret-patterns";
 import {
@@ -24,15 +24,13 @@ import {
   type UpdateOneOnboardingInput,
   type VerifyOneOnboardingProviderInput,
 } from "../../shared/one-onboarding";
-import type { AgentGroup, AgentGroupMember, RuntimeStatus } from "../../shared/types";
+import type { RuntimeStatus } from "../../shared/types";
 import { detectRuntimes } from "../runtime/detect";
 import { getUsageSnapshot } from "../usage";
-import { createAgentGroup, getAgentGroup, removeAgentGroup, updateAgentGroup } from "../store/agent-groups";
 import { getDb } from "../store/db";
 import { getOneProfile } from "../store/one-profile";
 import { tryRecordOneDomainEvent } from "./domain-events";
 import { acknowledgeOneFeatureIntro, getOneFeatureIntroState } from "./feature-intro";
-import { oneText } from "./one-copy";
 
 export const ONE_ONBOARDING_META_KEY = "agentlas.one.onboarding.v1";
 
@@ -132,7 +130,7 @@ function initialState(): OneOnboardingState {
     soundEnabled: true,
     rephraseUsed: false,
     selectedStarterSlugs: [],
-    starterTeamGroupId: null,
+    starterRosterReceiptId: null,
     projectSeed: "",
     startedAt: null,
     completedAt: existingUser ? now : null,
@@ -147,6 +145,13 @@ function parseState(raw: string): OneOnboardingState {
     parsed = JSON.parse(raw);
   } catch {
     throw new Error("Stored One onboarding state is corrupt; it was not overwritten");
+  }
+  if (isRecord(parsed) && "starterTeamGroupId" in parsed && !("starterRosterReceiptId" in parsed)) {
+    const { starterTeamGroupId: _retiredGroupId, ...rest } = parsed;
+    const selected = Array.isArray(rest.selectedStarterSlugs)
+      ? rest.selectedStarterSlugs.filter((value): value is string => typeof value === "string")
+      : [];
+    parsed = { ...rest, starterRosterReceiptId: starterRosterReceipt(selected) };
   }
   if (!isOneOnboardingState(parsed)) {
     throw new Error("Stored One onboarding state violates its closed contract; it was not overwritten");
@@ -198,52 +203,20 @@ function mutate(
   return next === current.state ? current.state : persist(current.raw, next);
 }
 
-function starterGroupMembers(slugs: string[], at: string): AgentGroupMember[] {
-  return slugs.map((slug) => {
+function starterRosterReceipt(slugs: string[]): string | null {
+  if (slugs.length < 2) return null;
+  const roster = slugs.map((slug) => {
     const agent = STARTER_BY_SLUG.get(slug);
-    if (!agent) throw new Error(`Unknown onboarding starter: ${slug}`);
-    return {
-      id: randomUUID(),
-      source: "hub",
-      agentSlug: agent.slug,
-      hubSlug: agent.slug,
-      hubEntityKind: agent.entityKind,
-      role: agent.roleEn,
-      addedAt: at,
-      snapshot: {
-        name: agent.nameKo,
-        nameEn: agent.nameEn,
-        tagline: agent.roleKo,
-        taglineEn: agent.roleEn,
-        routeLabel: "Hub · pinned starter",
-        trustGrade: agent.trustGrade,
-        entityKind: agent.entityKind,
-        routingStatus: "callable",
-        packageHash: agent.packageHash,
-      },
-    };
+    if (!agent) return null;
+    return { slug: agent.slug, entityKind: agent.entityKind, packageHash: agent.packageHash };
   });
+  if (roster.some((item) => item === null)) return null;
+  return `starter-roster:${createHash("sha256").update(JSON.stringify(roster)).digest("hex")}`;
 }
 
-function exactStarterGroupMatchesState(state: OneOnboardingState, group: AgentGroup | null): boolean {
-  if (!group || group.members.length !== state.selectedStarterSlugs.length || state.selectedStarterSlugs.length < 2) {
-    return false;
-  }
-  const expectedSlugs = new Set(state.selectedStarterSlugs);
-  const actualSlugs = new Set<string>();
-  const exact = group.members.every((member) => {
-    const slug = member.hubSlug || member.agentSlug || "";
-    const starter = STARTER_BY_SLUG.get(slug);
-    actualSlugs.add(slug);
-    return Boolean(
-      expectedSlugs.has(slug)
-      && starter
-      && member.source === "hub"
-      && member.hubEntityKind === starter.entityKind
-      && member.snapshot.packageHash === starter.packageHash
-    );
-  });
-  return exact && actualSlugs.size === expectedSlugs.size;
+function exactStarterRosterMatchesState(state: OneOnboardingState): boolean {
+  const receipt = starterRosterReceipt(state.selectedStarterSlugs);
+  return Boolean(receipt && receipt === state.starterRosterReceiptId);
 }
 
 function providerMatchesRuntime(provider: Exclude<OneOnboardingProvider, null>, runtime: RuntimeStatus): boolean {
@@ -279,38 +252,19 @@ export function getOneOnboardingState(): OneOnboardingState {
 }
 
 /**
- * Main-owned execution authorization for the exact team the user confirmed in
- * onboarding. A renderer-held group id is never enough: membership, entity
- * namespace, and immutable package hashes must still match the stored grant.
+ * Main-owned execution authorization for the exact roster the user confirmed
+ * during onboarding. The receipt binds ordered slugs to immutable releases.
  */
-export function isCompletedOneOnboardingStarterGroup(groupId: string): boolean {
-  if (typeof groupId !== "string" || !groupId) return false;
-  const state = readOrCreateState().state;
-  if (
-    state.status !== "completed"
-    || state.starterTeamGroupId !== groupId
-    || state.selectedStarterSlugs.length < 2
-  ) return false;
-  return exactStarterGroupMatchesState(state, getAgentGroup(groupId));
-}
-
-export function oneOnboardingStarterGroupReference(groupId: string): "none" | "valid" | "invalid" {
-  if (typeof groupId !== "string" || !groupId) return "none";
-  const state = readOrCreateState().state;
-  if (state.status !== "completed" || state.starterTeamGroupId !== groupId) return "none";
-  return exactStarterGroupMatchesState(state, getAgentGroup(groupId)) ? "valid" : "invalid";
-}
-
 export async function getOneOnboardingExecutionAuthorization(): Promise<OneOnboardingExecutionAuthorization> {
   const state = readOrCreateState().state;
-  if (state.status !== "completed") return { allowed: false, groupId: null, reason: "not_completed" };
-  if (!state.starterTeamGroupId || !exactStarterGroupMatchesState(state, getAgentGroup(state.starterTeamGroupId))) {
-    return { allowed: false, groupId: null, reason: "starter_team_changed" };
+  if (state.status !== "completed") return { allowed: false, rosterReceiptId: null, reason: "not_completed" };
+  if (!exactStarterRosterMatchesState(state)) {
+    return { allowed: false, rosterReceiptId: null, reason: "starter_roster_changed" };
   }
   if (!state.provider || !await mainOwnedReadyProvider(state.provider).catch(() => null)) {
-    return { allowed: false, groupId: state.starterTeamGroupId, reason: "provider_not_ready" };
+    return { allowed: false, rosterReceiptId: state.starterRosterReceiptId, reason: "provider_not_ready" };
   }
-  return { allowed: true, groupId: state.starterTeamGroupId, reason: "ready" };
+  return { allowed: true, rosterReceiptId: state.starterRosterReceiptId, reason: "ready" };
 }
 
 /**
@@ -427,22 +381,17 @@ export function resetOneOnboarding(input: ResetOneOnboardingInput): OneOnboardin
     restrictedMode: false,
     rephraseUsed: false,
     selectedStarterSlugs: [],
-    starterTeamGroupId: null,
+    starterRosterReceiptId: null,
     projectSeed: "",
     startedAt: timestamp.iso,
     completedAt: null,
     updatedAt: timestamp.iso,
   };
   if (!isOneOnboardingState(next)) throw new Error("One onboarding reset violated the storage contract");
-  const removableGroupId = current.state.starterTeamGroupId
-    && exactStarterGroupMatchesState(current.state, getAgentGroup(current.state.starterTeamGroupId))
-    ? current.state.starterTeamGroupId
-    : null;
   getDb().transaction(() => {
     const result = getDb().prepare("UPDATE meta SET value = ? WHERE key = ? AND value = ?")
       .run(JSON.stringify(next), ONE_ONBOARDING_META_KEY, current.raw);
     if (result.changes !== 1) throw new Error("One onboarding changed concurrently; reload and try again");
-    if (removableGroupId) removeAgentGroup(removableGroupId);
   })();
   return next;
 }
@@ -545,10 +494,8 @@ export function provisionOneOnboardingStarterTeam(
     throw new TypeError("Invalid starter team locale");
   }
   const slugs = normalizedStarterSlugs(input.memberSlugs, 2);
-  const locale = input.locale === "ko" ? "ko" : "en";
-  const groupName = oneText(locale, "one.onbe.groupName");
-  const groupDescription = oneText(locale, "one.onbe.groupDescription");
-  const orchestratorName = oneText(locale, "one.onbe.orchestratorName");
+  const rosterReceiptId = starterRosterReceipt(slugs);
+  if (!rosterReceiptId) throw new Error("Starter roster could not be pinned");
 
   let changed = false;
   const next = getDb().transaction(() => {
@@ -568,28 +515,13 @@ export function provisionOneOnboardingStarterTeam(
       }
     }
     const timestamp = nextTimestamp(current.state.version);
-    const members = starterGroupMembers(slugs, timestamp.iso);
-    const existing = current.state.starterTeamGroupId ? getAgentGroup(current.state.starterTeamGroupId) : null;
-    const group = existing
-      ? updateAgentGroup(existing.id, {
-          name: groupName,
-          description: groupDescription,
-          orchestratorName,
-          members,
-        })
-      : createAgentGroup({
-          name: groupName,
-          description: groupDescription,
-          orchestratorName,
-          members,
-        });
     const candidate: OneOnboardingState = {
       ...current.state,
       version: timestamp.version,
       status: current.state.status === "completed" ? "completed" : "in-progress",
       currentScene: current.state.status === "completed" ? "s6" : "s4",
       selectedStarterSlugs: slugs,
-      starterTeamGroupId: group.id,
+      starterRosterReceiptId: rosterReceiptId,
       startedAt: current.state.startedAt ?? timestamp.iso,
       updatedAt: timestamp.iso,
     };
@@ -639,7 +571,7 @@ export async function completeOneOnboarding(input: CompleteOneOnboardingInput): 
   }
 
   const next = mutate(input.expectedVersion, (state, timestamp) => {
-    if (!state.starterTeamGroupId || !exactStarterGroupMatchesState(state, getAgentGroup(state.starterTeamGroupId))) {
+    if (!exactStarterRosterMatchesState(state)) {
       throw new Error("Restore the exact pinned starter team before finishing onboarding");
     }
     const next: OneOnboardingState = {

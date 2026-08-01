@@ -24,7 +24,6 @@ import { hepCall } from "../hephaestus/commands";
 import {
   appendChatMessage,
   autoTitleFromFirstMessage,
-  getOrCreateAgentGroupSession,
   getOrCreateFirmSession,
   listChatMessages as readStoredChatMessages,
 } from "../store/chats";
@@ -231,16 +230,13 @@ export interface BorrowedAgentSpec {
   name: string;
   directive: string;
   /** Preserve the Hub entity boundary. Teams are mid-level orchestrators, not flat specialists. */
-  entityKind?: "agent" | "team" | "group";
-  source?: "cloud" | "hub" | "installed" | "firm" | "group" | "firm-node";
+  entityKind?: "agent" | "team";
+  source?: "cloud" | "hub" | "installed" | "firm" | "firm-node";
   routeLabel?: string;
   warnings?: string[];
-  /** Present only after the local Agent Group resolver identifies an exact installed agent. */
   installedAgentId?: string;
   /** Complete installed Team/Firm id. Never execute this target as a leaf specialist. */
   firmId?: string;
-  /** Saved Agent Group id when this is a nested middle-manager unit. */
-  groupId?: string;
   /** Package-declared tool authority from the Hub bundle (`toolPermissions`).
    *  ANDed with the host permission mode — it can only narrow, never widen. */
   toolPermissions?: { network?: string; shell?: string; fileRead?: string };
@@ -346,14 +342,8 @@ export interface BorrowedTaskForceParams {
   /** Main-memory-only One snapshot. When present, never reopen package prompt files. */
   orchestratorEffectivePrompt?: string;
   taskForceName?: string;
-  taskForceKind?: "hub" | "agent-group" | "task-force";
+  taskForceKind?: "hub" | "task-force";
   taskForceSpecs?: BorrowedAgentSpec[];
-  /** Main-owned live resolver; avoids a client <-> executor module cycle. */
-  resolveGroupTaskForce?: (input: {
-    groupId: string;
-    prompt: string;
-    signal?: AbortSignal;
-  }) => Promise<{ groupName: string; orchestratorName: string; specs: BorrowedAgentSpec[] }>;
   /** Nested units return one result and never own the visible chat terminal event. */
   emitFinal?: boolean;
   orchestrationPath?: string[];
@@ -568,43 +558,26 @@ function uniqSpecs(specs: BorrowedAgentSpec[] | undefined): BorrowedAgentSpec[] 
 }
 
 function taskForceLabel(p: BorrowedTaskForceParams): string {
-  return p.taskForceName?.trim() || (p.taskForceKind === "agent-group" ? "Agent group" : "Hub task-force");
+  return p.taskForceName?.trim() || "Hub task-force";
 }
 
 function taskForcePrepareStatus(p: BorrowedTaskForceParams, slugs: string[]): string {
-  if (p.taskForceKind === "agent-group") {
-    const name = taskForceLabel(p);
-    return p.locale === "ko"
-      ? `에이전트 조합 준비 중: ${name} · ${slugs.join(", ")}`
-      : `Preparing agent group: ${name} · ${slugs.join(", ")}`;
-  }
   return p.locale === "ko"
     ? `Hub TF 에이전트 준비 중: ${slugs.join(", ")}`
     : `Preparing Hub task-force agents: ${slugs.join(", ")}`;
 }
 
 function taskForcePlannerStatus(p: BorrowedTaskForceParams): string {
-  if (p.taskForceKind === "agent-group") {
-    return p.locale === "ko"
-      ? `${taskForceLabel(p)} 오케스트레이터가 입력 패킷을 설계 중`
-      : `${taskForceLabel(p)} orchestrator is designing input packets`;
-  }
   return p.locale === "ko"
     ? "TF 오케스트레이터가 에이전트별 입력 패킷을 설계 중"
     : "Task-force orchestrator is designing per-agent input packets";
 }
 
 function taskForceSynthesisStatus(p: BorrowedTaskForceParams): string {
-  if (p.taskForceKind === "agent-group") {
-    return p.locale === "ko" ? "에이전트 조합 결과를 종합하는 중" : "Synthesizing agent group results";
-  }
   return p.locale === "ko" ? "TF 결과를 종합하는 중" : "Synthesizing task-force results";
 }
 
 function taskForceCompleteStatus(p: BorrowedTaskForceParams): string {
-  if (p.taskForceKind === "agent-group") {
-    return p.locale === "ko" ? "에이전트 조합 종합 완료" : "Agent group synthesis complete";
-  }
   return p.locale === "ko" ? "TF 종합 완료" : "Task-force synthesis complete";
 }
 
@@ -2131,7 +2104,7 @@ function buildPlannerPrompt(
     specs.map((spec) => [
       `- slug: ${spec.slug}`,
       `  name: ${spec.name}`,
-      `  executionUnit: ${spec.entityKind === "team" ? "team-orchestrator" : spec.entityKind === "group" ? "group-orchestrator" : "single-agent"}`,
+      `  executionUnit: ${spec.entityKind === "team" ? "team-orchestrator" : "single-agent"}`,
       spec.source ? `  source: ${spec.source}` : undefined,
       spec.routeLabel ? `  currentRoute: ${spec.routeLabel}` : undefined,
       spec.warnings?.length ? `  routeWarnings: ${spec.warnings.join(", ")}` : undefined,
@@ -2199,7 +2172,6 @@ function buildBorrowedAgentSystemPrompt(spec: BorrowedAgentSpec, permission: Run
   const isLocal =
     spec.source === "installed" ||
     spec.source === "firm" ||
-    spec.source === "group" ||
     spec.source === "firm-node";
   const isTeam = spec.entityKind === "team";
   return [
@@ -2494,83 +2466,6 @@ async function runBorrowedAgentTurn(
   let observedDirectFailureCount: 2 | undefined;
   let observedDirectEscalationAttempt: 1 | undefined;
   try {
-    if (spec.source === "group" && spec.groupId) {
-      const depth = p.orchestrationDepth ?? 1;
-      const groupKey = `group:${spec.groupId}`;
-      const path = p.orchestrationPath ?? [];
-      if (depth >= 3) throw new Error(`Agent group nesting depth exceeded: ${spec.groupId}`);
-      if (path.includes(groupKey)) throw new Error(`Agent group cycle detected: ${spec.groupId}`);
-      if (!p.resolveGroupTaskForce) throw new Error("Agent group runtime resolver is unavailable.");
-      const groupRun = await p.resolveGroupTaskForce({
-        groupId: spec.groupId,
-        prompt: authoritativePacketPrompt,
-        signal: link.signal,
-      });
-      const groupChat = getOrCreateAgentGroupSession(p.chat.id, spec.groupId, p.orchestratorAgent.id);
-      const groupNodePrefix = `${id}:group`;
-      const nestedSink: EventSink = (event) => {
-        const attributed = {
-          agentId: event.agentId ? `${groupNodePrefix}:${event.agentId}` : groupNodePrefix,
-          nodeId: event.nodeId ? `${groupNodePrefix}:${event.nodeId}` : event.nodeId,
-          delegateTo: event.delegateTo?.map((target) => `${groupNodePrefix}:${target}`),
-          tier: event.tier === 1 ? 2 as const : 3 as const,
-        };
-        if (event.kind === "error") {
-          p.sink({
-            kind: "tool-use",
-            done: true,
-            status: event.error?.message || "Nested agent group execution failed",
-            tool: {
-              name: "agentlas.group.child-error",
-              result: event.error?.code || "group-failed",
-              isError: true,
-            },
-            ...attributed,
-          });
-          return;
-        }
-        if (event.kind !== "final" && event.kind !== "partial") p.sink({ ...event, ...attributed });
-      };
-      const groupResult = await runBorrowedTaskForceInvocation({
-        ...p,
-        req: {
-          ...p.req,
-          userPrompt: authoritativePacketPrompt,
-          images: undefined,
-          taskForceTargets: undefined,
-          borrowAgents: undefined,
-        },
-        chat: groupChat,
-        orchestratorAgent: {
-          ...p.orchestratorAgent,
-          name: groupRun.orchestratorName || p.orchestratorAgent.name,
-          nameEn: groupRun.orchestratorName || p.orchestratorAgent.nameEn || p.orchestratorAgent.name,
-        },
-        taskForceName: groupRun.groupName,
-        taskForceKind: "agent-group",
-        taskForceSpecs: groupRun.specs,
-        emitFinal: false,
-        orchestrationPath: [...path, groupKey],
-        orchestrationDepth: depth + 1,
-        sink: nestedSink,
-        signal: link.signal,
-      });
-      p.sink(tag({
-        kind: "tool-use",
-        done: true,
-        status: groupResult.ok
-          ? p.locale === "ko" ? `${spec.name} 조합 완료` : `${spec.name} group completed`
-          : p.locale === "ko" ? `${spec.name} 조합 실패` : `${spec.name} group failed`,
-      }));
-      return {
-        ...resultMeta,
-        spec,
-        packet,
-        text: redactSensitiveText(groupResult.text),
-        ok: groupResult.ok,
-        tokens: groupResult.tokens,
-      };
-    }
     if (spec.source === "firm" && spec.firmId) {
       const firm = getFirm(spec.firmId);
       const ceoAgent = firm ? getAgentById(firm.ceoAgentId) : null;
@@ -4028,8 +3923,8 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     : continuation.text;
   if (!p.req.agentAppMode && continuation.shouldContinue) {
     const boundaryNote = p.locale === "ko"
-      ? "안전 경계: 다중 Hub/에이전트 그룹 작업은 로컬 단일 에이전트 자동화로 대체하지 않습니다. 계속하려면 같은 조합으로 다시 실행해 모든 Hub bundle을 재검증해야 합니다."
-      : "Safety boundary: a multi-Hub or Agent Group run is never replaced by a local single-agent continuation. Resume with the same roster so every Hub bundle is revalidated.";
+      ? "안전 경계: 다중 Hub 작업은 로컬 단일 에이전트 자동화로 대체하지 않습니다. 계속하려면 같은 조합으로 다시 실행해 모든 Hub bundle을 재검증해야 합니다."
+      : "Safety boundary: a multi-Hub run is never replaced by a local single-agent continuation. Resume with the same roster so every Hub bundle is revalidated.";
     displayText = [displayText, boundaryNote].filter(Boolean).join("\n\n");
     p.sink({ kind: "tool-use", status: boundaryNote });
   }

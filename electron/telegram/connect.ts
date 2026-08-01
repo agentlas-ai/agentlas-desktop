@@ -10,8 +10,6 @@ import {
 } from "./judged-intents";
 import { runMcpInvocation } from "../mcp/client";
 import { getAgentById, listInstalledAgents } from "../mcp/registry";
-import { getAgentGroup } from "../store/agent-groups";
-import { resolveAgentGroupForRuntime } from "../store/agent-groups";
 import { createChat, getChat } from "../store/chats";
 import { getDb } from "../store/db";
 import { getFirm } from "../store/firms";
@@ -237,7 +235,7 @@ const TELEGRAM_COPY = {
     "attachment.default_prompt": "Please inspect the attached file.",
     "attachment.too_large": "The attachment is too large: {name}. The safe Telegram download limit is {limit}MB.",
     "attachment.download_failed": "Could not download the attachment: {message}",
-    "target.deleted": "The target for this Telegram connection was deleted. Open Telegram Connect in Agentlas and choose a new agent group to reconnect.",
+    "target.deleted": "The target for this Telegram connection is no longer available. Open Telegram Connect in Agentlas and choose another target.",
     "automation.disable_done": "Done. Automation completion reports will no longer be sent to this Telegram chat.",
     "automation.enable_done": "Got it. Agentlas automation completions will be reported to this Telegram chat. Say \"turn off automation reports\" to stop.",
     "automation.status_on": "Automation completion reports are on for this Telegram chat. Say \"turn off automation reports\" to stop them.",
@@ -437,9 +435,7 @@ function resolveTarget(
     if (!firm && strict) throw new Error(`Telegram Connect target firm not found: ${targetId}`);
     return firm ? { name: firm.nameEn || firm.name } : null;
   }
-  const group = getAgentGroup(targetId);
-  if (!group && strict) throw new Error(`Telegram Connect target group not found: ${targetId}`);
-  return group ? { name: group.name } : null;
+  return null;
 }
 
 async function telegramApi<T>(
@@ -1453,7 +1449,7 @@ function shouldHandleMessage(binding: TelegramBindingRow, message: TelegramMessa
 
   if (chatBindings.length <= 1) return true;
 
-  const orchestrators = chatBindings.filter((row) => row.target_kind === "firm" || row.target_kind === "group");
+  const orchestrators = chatBindings.filter((row) => row.target_kind === "firm");
   if (orchestrators.length === 1 && orchestrators[0].id === binding.id) {
     return true;
   }
@@ -1600,23 +1596,15 @@ async function ensureBindingChat(binding: TelegramBindingRow) {
     const existing = getChat(binding.chat_session_id);
     if (existing) return existing;
   }
-  let input: { agentId?: string; firmId?: string | null; agentGroupId?: string | null };
+  let input: { agentId?: string; firmId?: string | null };
   if (binding.target_kind === "agent") {
     const agent = getAgentById(binding.target_id);
     if (!agent) throw new Error(`Telegram target agent not found: ${binding.target_id}`);
     input = { agentId: agent.id };
-  } else if (binding.target_kind === "firm") {
+  } else {
     const firm = getFirm(binding.target_id);
     if (!firm) throw new Error(`Telegram target firm not found: ${binding.target_id}`);
     input = { firmId: firm.id };
-  } else {
-    const group = await resolveAgentGroupForRuntime(binding.target_id);
-    if (!group || group.members.length === 0) throw new Error(`Telegram target group has no runnable members: ${binding.target_id}`);
-    const installed = listInstalledAgents();
-    const localSlug = group.members.find((member) => member.source !== "hub")?.slug.split(":").pop();
-    const anchor = localSlug ? installed.find((agent) => agent.slug === localSlug) : null;
-    if (!anchor) throw new Error(`Telegram target group needs at least one installed local member: ${binding.target_id}`);
-    input = { agentId: anchor.id, agentGroupId: group.group.id };
   }
   const chat = createChat({
     ...input,

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.9.40 — 2026-08-01
+
+This release binds Agentlas OS v1.1.92 at
+2eb39adf572bc3e235866002b3143936240f76bc.
+Passing the source gates does not prove a GitHub release or installer; the
+Releases page stays the authority for what is actually downloadable.
+
+- **Work now starts from a project.** Workspace opens the project list, and
+  each project keeps its source, instructions, ordered team, tasks, and memory
+  together. Retired global chat and Agent Group entries are no longer product
+  routes.
+- **Team ownership is explicit.** People add and order project agents
+  themselves; the first agent controls project tasks and later agents join as
+  turn-scoped helpers. Dashboard orchestrator and worker priorities can be
+  reordered and persist across restarts.
+- **One remains the single conversation controller.** Calling several agents
+  with `@` adds them for one turn without replacing One, and optional run
+  controls clearly leave the decision to One when untouched.
+- **Automations keep their own sessions.** The automation workspace presents
+  sessions, conversation, graph, and inspector as one flow, requires an
+  explicit target, and does not create an unrelated global conversation.
+- **The redesigned flows survive real desktop use.** Pointer drag-and-drop,
+  project creation drafts, immediate task-sidebar refresh, narrow-window
+  inspectors, saved-project compatibility, and customer-safe run receipts were
+  verified in the packaged Electron surface.
+
 ## 0.9.39 — 2026-08-01
 
 This release binds Agentlas OS v1.1.91 at

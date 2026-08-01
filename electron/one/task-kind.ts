@@ -24,7 +24,6 @@ export interface OneTaskKindInput {
   userPrompt: string;
   projectId: string | null;
   firmId: string | null;
-  agentGroupId: string | null;
   ownerAgentId: string;
   /** Main-derived, content-free input identities. Raw paths and names are forbidden. */
   inputRefs: string[];
@@ -317,7 +316,6 @@ export function deriveOneTaskKindRef(input: OneTaskKindInput): string | null {
   const inputRefs = normalizedInputRefs(input.inputRefs);
   const projectId = boundedOptional(input.projectId);
   const firmId = boundedOptional(input.firmId);
-  const agentGroupId = boundedOptional(input.agentGroupId);
   if (
     !intent
     || !input.ownerAgentId
@@ -325,7 +323,6 @@ export function deriveOneTaskKindRef(input: OneTaskKindInput): string | null {
     || !inputRefs
     || projectId === undefined
     || firmId === undefined
-    || agentGroupId === undefined
   ) return null;
   const digest = createHmac("sha256", Buffer.from(localSalt(), "hex"))
     .update(JSON.stringify({
@@ -334,7 +331,6 @@ export function deriveOneTaskKindRef(input: OneTaskKindInput): string | null {
       intent,
       projectId,
       firmId,
-      agentGroupId,
       ownerAgentId: input.ownerAgentId,
       inputRefs,
     }), "utf8")

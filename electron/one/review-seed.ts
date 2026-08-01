@@ -353,7 +353,7 @@ export function getOneSuggestionReviewSeed(input: OneSuggestionReviewHandoffInpu
           ...base,
           kind: "retain_team",
           materialization: "editor_prefill",
-          targetSurface: "agent_groups",
+          targetSurface: "work",
           candidates: candidateRefs(runs),
         };
       }

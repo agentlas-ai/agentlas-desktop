@@ -437,6 +437,12 @@ export function getAutomationGraphReconciliation(
   automationId: string,
 ): AutomationGraphReconciliation | null {
   if (!validId(automationId)) throw new Error("automation_graph_reconciliation_input_invalid");
+  // Form-created automations intentionally begin with a renderer-synthesized graph.
+  // With no durable graph there can be no receipt-backed node reconciliation yet.
+  // This is an ordinary empty state, not a recovery failure.
+  const automation = getAutomation(automationId);
+  if (!automation) throw new Error("automation_graph_reconciliation_automation_missing");
+  if (!automation.graph) return null;
   // A newer manual/scheduled occurrence must not hide an older parked source
   // occurrence. For each bound event, inspect only its newest run; a later
   // successful resume supersedes older failed snapshots for that occurrence.

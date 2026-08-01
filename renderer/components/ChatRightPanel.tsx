@@ -15,14 +15,14 @@ import {
   type SurfaceStatePatchHandler,
   type WorkbenchSurface,
 } from "./WorkbenchPanel";
-import type { InstalledAgent, InstalledFirm, InvocationRunReceipt, ResolvedOrg } from "@/lib/types";
-import { IconClose, IconFileUp, IconFilm, IconFolder, IconImage, IconLayers, IconNetwork, IconPanelRight } from "./Icon";
+import type { InstalledAgent, InstalledFirm, InvocationRunReceipt, Project, ResolvedOrg } from "@/lib/types";
+import { IconClose, IconFileUp, IconFilm, IconFolder, IconImage, IconLayers, IconNetwork, IconPanelRight, IconSparkles } from "./Icon";
 import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import { receiptAutoExpanded } from "@/lib/run-receipt-state";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 
-export type ChatRightPanelTab = "file" | "agent" | "panel";
+export type ChatRightPanelTab = "agent" | "file" | "panel" | "memory";
 type PanelViewerSource = "workbench" | "file";
 
 type OutputRow = {
@@ -48,6 +48,7 @@ interface Props {
   org: ResolvedOrg | null;
   agent: InstalledAgent | null;
   agents: InstalledAgent[];
+  project: Project | null;
   busy: boolean;
   liveAgents: Record<string, LiveAgent>;
   timeline: NetTimelineItem[];
@@ -73,6 +74,7 @@ export function ChatRightPanel({
   org,
   agent,
   agents,
+  project,
   busy,
   liveAgents,
   timeline,
@@ -136,12 +138,12 @@ export function ChatRightPanel({
       )}
       <header style={headerStyle}>
         <div style={headerMarkStyle}>
-          {activeTab === "file" ? <IconFolder size={15} /> : activeTab === "agent" ? <IconNetwork size={15} /> : <IconPanelRight size={15} />}
+          {activeTab === "file" ? <IconFolder size={15} /> : activeTab === "agent" ? <IconNetwork size={15} /> : activeTab === "memory" ? <IconSparkles size={15} /> : <IconPanelRight size={15} />}
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={eyebrowStyle}>{ko ? "우측 패널" : "Right panel"}</div>
           <strong style={titleStyle}>
-            {activeTab === "file" ? (ko ? "파일과 산출물" : "Files and outputs") : activeTab === "agent" ? (ko ? "에이전트 작업" : "Agent work") : (ko ? "뷰어" : "Viewer")}
+            {activeTab === "file" ? (ko ? "파일" : "Files") : activeTab === "agent" ? (ko ? "팀" : "Team") : activeTab === "memory" ? (ko ? "기억" : "Memory") : (ko ? "미리보기" : "Preview")}
           </strong>
         </div>
         <button type="button" onClick={onClose} aria-label={ko ? "우측 패널 닫기" : "Close right panel"} title={ko ? "닫기" : "Close"} style={iconButtonStyle}>
@@ -150,9 +152,10 @@ export function ChatRightPanel({
       </header>
 
       <nav style={tabsStyle} aria-label={ko ? "우측 패널 탭" : "Right panel tabs"}>
-        <TabButton tab="file" activeTab={activeTab} onClick={onTabChange} label={ko ? "파일" : "file"} icon={<IconFolder size={13} />} />
-        <TabButton tab="agent" activeTab={activeTab} onClick={onTabChange} label={ko ? "에이전트" : "agent"} icon={<IconNetwork size={13} />} />
-        <TabButton tab="panel" activeTab={activeTab} onClick={onTabChange} label={ko ? "패널" : "panel"} icon={<IconPanelRight size={13} />} badge={hasPanelContent} />
+        <TabButton tab="agent" activeTab={activeTab} onClick={onTabChange} label={ko ? "팀" : "Team"} icon={<IconNetwork size={13} />} />
+        <TabButton tab="file" activeTab={activeTab} onClick={onTabChange} label={ko ? "파일" : "Files"} icon={<IconFolder size={13} />} />
+        <TabButton tab="panel" activeTab={activeTab} onClick={onTabChange} label={ko ? "미리보기" : "Preview"} icon={<IconPanelRight size={13} />} badge={hasPanelContent} />
+        <TabButton tab="memory" activeTab={activeTab} onClick={onTabChange} label={ko ? "기억" : "Memory"} icon={<IconSparkles size={13} />} />
       </nav>
 
       <div style={bodyStyle}>
@@ -175,7 +178,8 @@ export function ChatRightPanel({
         )}
         {activeTab === "agent" && (
           <div style={agentTabStyle}>
-            <AgentNetworkPanel
+            {project ? <ProjectTeamCard project={project} agents={agents} ko={ko} /> : null}
+            {(busy || Object.keys(liveAgents).length > 0 || timeline.length > 0 || hasPipeline) ? <AgentNetworkPanel
               embedded
               firm={firm}
               org={org}
@@ -187,7 +191,7 @@ export function ChatRightPanel({
               chatTitle={chatTitle}
               latestUserPrompt={latestUserPrompt}
               hasPipeline={hasPipeline}
-            />
+            /> : null}
             <RunReceiptCard chatId={chatId} busy={busy} />
           </div>
         )}
@@ -218,9 +222,38 @@ export function ChatRightPanel({
             <EmptyViewer />
           )
         )}
+        {activeTab === "memory" && <ProjectMemoryCard project={project} ko={ko} />}
       </div>
     </aside>
   );
+}
+
+function ProjectTeamCard({ project, agents, ko }: { project: Project; agents: InstalledAgent[]; ko: boolean }) {
+  const nameById = new Map(agents.map((agent) => [agent.id, ko ? agent.name : agent.nameEn || agent.name]));
+  return <section style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
+    <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".08em", color: "var(--muted-deep)", textTransform: "uppercase" }}>{ko ? "프로젝트 선호 팀" : "Project team priority"}</div>
+    <div style={{ display: "grid", gap: 6, marginTop: 9 }}>
+      {project.agentPool.map((member, index) => <div key={`${member.source}:${member.agentId}`} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+        <span style={{ width: 20, height: 20, display: "grid", placeItems: "center", borderRadius: 6, background: "var(--fill-1)", color: "var(--accent)", fontWeight: 800 }}>{index + 1}</span>
+        <strong>{nameById.get(member.agentId) || member.nameSnapshot}</strong>
+      </div>)}
+    </div>
+    <p style={{ margin: "10px 0 0", color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.45 }}>{ko ? "실행 중에는 실제 WorkOrder와 영수증이 생긴 에이전트만 아래에 표시됩니다." : "During a run, only agents backed by an actual WorkOrder and receipt appear below."}</p>
+  </section>;
+}
+
+function ProjectMemoryCard({ project, ko }: { project: Project | null; ko: boolean }) {
+  if (!project) return <div style={{ padding: 18, color: "var(--muted-deep)", fontSize: 12 }}>{ko ? "이 작업에 연결된 프로젝트가 없습니다." : "No project is connected to this task."}</div>;
+  return <section style={{ display: "grid", gap: 12 }}>
+    <div style={{ padding: 14, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
+      <div style={{ fontSize: 10, fontWeight: 800, color: "var(--muted-deep)", letterSpacing: ".08em", textTransform: "uppercase" }}>{ko ? "프로젝트 지시" : "Project instructions"}</div>
+      <p style={{ margin: "9px 0 0", whiteSpace: "pre-wrap", color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.55 }}>{project.systemPrompt || (ko ? "One이 프로젝트와 현재 작업을 보고 필요한 안내를 제시합니다." : "One will use the project and current task to present the next useful guidance.")}</p>
+    </div>
+    <div style={{ padding: 14, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
+      <strong style={{ fontSize: 12 }}>{ko ? "축적되는 프로젝트 기억" : "Growing project memory"}</strong>
+      <p style={{ margin: "6px 0 0", color: "var(--muted-deep)", fontSize: 11, lineHeight: 1.5 }}>{ko ? "결정, PM Soul, 사이트맵, 코드맵은 에이전트 릴리스와 분리되어 이 프로젝트에 남습니다." : "Decisions, PM Soul, sitemap, and code map stay with this project independently of agent releases."}</p>
+    </div>
+  </section>;
 }
 
 function RunReceiptCard({ chatId, busy }: { chatId: string | null; busy: boolean }) {
@@ -271,9 +304,9 @@ function RunReceiptCard({ chatId, busy }: { chatId: string | null; busy: boolean
   const openResultFolder = async () => {
     if (!receipt.resultFolder) return;
     setOpenError(null);
-    const result = await ipc()?.fs.openPath(receipt.resultFolder).catch((error) => ({
+    const result = await ipc()?.fs.openPath(receipt.resultFolder).catch(() => ({
       ok: false,
-      message: error instanceof Error ? error.message : String(error),
+      message: "",
     }));
     if (result && !result.ok) setOpenError(result.message || (ko ? "결과 폴더를 열 수 없습니다." : "Could not open the result folder."));
   };
@@ -294,8 +327,6 @@ function RunReceiptCard({ chatId, busy }: { chatId: string | null; busy: boolean
       {expanded && (
         <div style={receiptDetailsStyle}>
           <div style={receiptGridStyle}>
-            <span>{ko ? "실행 ID" : "Run ID"}</span>
-            <code title={receipt.runId} style={receiptRunIdStyle}>{receipt.runId.slice(0, 12)}</code>
             <span>{ko ? "이벤트" : "Events"}</span>
             <strong>{receipt.eventCount}</strong>
           </div>
@@ -306,7 +337,7 @@ function RunReceiptCard({ chatId, busy }: { chatId: string | null; busy: boolean
             </button>
           )}
           {(receipt.errorMessage || openError) && (
-            <div role="status" style={receiptErrorStyle}>{openError || receipt.errorMessage}</div>
+            <div role="status" style={receiptErrorStyle} data-one-content-slot data-capability="task-recovery">{openError || null}</div>
           )}
         </div>
       )}
@@ -472,7 +503,7 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
           </button>
         )}
       </header>
-      {openError && <div style={fileNoticeStyle}>{openError}</div>}
+      {openError && <div style={fileNoticeStyle} data-one-content-slot data-capability="file-recovery">{openError}</div>}
       <div style={fileViewerBodyStyle}>
         {file.viewerKind === "browser" ? (
           <BrowserViewer file={file} />
@@ -534,17 +565,12 @@ async function openWorkspaceFileExternal(file: WorkspaceFilePreview, ko: boolean
   const targets = externalOpenTargets(file);
   const bridge = ipc();
   if (bridge?.fs?.openPath) {
-    let lastMessage = "";
     for (const target of targets) {
       if (/^(data:|blob:)/i.test(target)) continue;
-      const result = await bridge.fs.openPath(target).catch((error) => ({
-        ok: false,
-        message: error instanceof Error ? error.message : String(error),
-      }));
+      const result = await bridge.fs.openPath(target).catch(() => ({ ok: false, message: "" }));
       if (result.ok) return null;
-      lastMessage = result.message || lastMessage;
     }
-    return lastMessage || (ko ? "OS로 열 실제 파일 경로를 찾지 못했습니다." : "Could not find a local file path to open.");
+    return ko ? "이 파일을 외부 앱에서 열지 못했습니다. One이 가능한 다음 행동을 제안할 수 있습니다." : "This file could not be opened externally. One can suggest the next available action.";
   }
   window.open(file.browserUrl || file.fileUrl, "_blank", "noopener,noreferrer");
   return null;
@@ -555,17 +581,12 @@ async function revealWorkspaceFile(file: WorkspaceFilePreview, ko: boolean): Pro
   if (!bridge?.fs?.showItemInFolder) {
     return ko ? "Finder에서 보기 기능을 사용할 수 없습니다." : "Show in folder is not available.";
   }
-  let lastMessage = "";
   for (const target of externalOpenTargets(file)) {
     if (/^(https?:|data:|blob:)/i.test(target)) continue;
-    const result = await bridge.fs.showItemInFolder(target).catch((error) => ({
-      ok: false,
-      message: error instanceof Error ? error.message : String(error),
-    }));
+    const result = await bridge.fs.showItemInFolder(target).catch(() => ({ ok: false, message: "" }));
     if (result.ok) return null;
-    lastMessage = result.message || lastMessage;
   }
-  return lastMessage || (ko ? "Finder에서 표시할 로컬 파일 경로를 찾지 못했습니다." : "Could not find a local file path to reveal.");
+  return ko ? "Finder에서 이 파일을 표시하지 못했습니다. One이 가능한 다음 행동을 제안할 수 있습니다." : "This file could not be shown in Finder. One can suggest the next available action.";
 }
 
 function canRevealWorkspaceFile(file: WorkspaceFilePreview): boolean {

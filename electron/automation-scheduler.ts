@@ -22,7 +22,8 @@ import {
   pinLegacyAutomationHubVersions,
 } from "./store/automations";
 import { checkComputerUsePermissions } from "./mac-permissions";
-import { getOrCreateAutomationSession, appendChatMessage, listChatMessages } from "./store/chats";
+import { appendChatMessage, listChatMessages } from "./store/chats";
+import { getOrCreateAutomationSession } from "./store/automation-sessions";
 import { runRuntimeDoctor, type DoctorReport } from "./system-agents/runtime-doctor";
 import { buildSystemOptimizerPrompt } from "./system-agents/system-optimizer";
 import { runMcpInvocation } from "./mcp/client";
@@ -269,9 +270,11 @@ function automationSessionInput(a: Automation): {
   automationId: string;
   agentId?: string;
   firmId?: string | null;
+  projectId?: string | null;
 } {
   return {
     automationId: a.id,
+    projectId: a.projectId ?? null,
     ...(a.targetType === "firm" ? { firmId: a.targetId } : a.targetType === "agent" ? { agentId: a.targetId } : {}),
   };
 }
@@ -308,7 +311,7 @@ function handleAutomationFailure(a: Automation, error: string): void {
 
   try {
     const chat = getOrCreateAutomationSession(automationSessionInput(a));
-    appendChatMessage(chat.id, "system", lines.join("\n"));
+    appendChatMessage(chat.chat.id, "system", lines.join("\n"));
 
     // 결정론 수리가 못 잡은 반복 실패 → System Optimizer 원샷 진단(같은 챗에 기록됨).
     const lastAt = lastOptimizerRunAt.get(a.id) ?? 0;
@@ -330,7 +333,7 @@ function handleAutomationFailure(a: Automation, error: string): void {
       const runId = `doctor-${a.id}-${Date.now()}`;
       const req = {
         runId,
-        chatId: chat.id,
+        chatId: chat.chat.id,
         userPrompt: prompt,
         permissions: schedulerExecutionPermission(a),
         toolMode: "auto" as const,
@@ -378,7 +381,7 @@ function handleAutomationFailure(a: Automation, error: string): void {
         .catch((err) => {
           console.error("[automation] system optimizer run failed:", err);
           try {
-            appendChatMessage(chat.id, "system", `⚠️ System Optimizer 진단 런 자체가 실패했습니다: ${err instanceof Error ? err.message : String(err)}`);
+            appendChatMessage(chat.chat.id, "system", `⚠️ System Optimizer 진단 런 자체가 실패했습니다: ${err instanceof Error ? err.message : String(err)}`);
           } catch {
             /* best-effort */
           }
@@ -411,7 +414,7 @@ function recordAutomationAttention(
         ? "👤 자동화에 확인이 필요해요"
         : "⏸️ 자동화를 잠시 멈췄어요";
     appendChatMessage(
-      chat.id,
+      chat.chat.id,
       "system",
       `${headline}: ${customerSafeAutomationDetail(status, detail)}\n${persisted?.enabled
         ? requiresGraphReconciliation(detail)
@@ -738,15 +741,16 @@ async function runOne(
       }
       const chat = getOrCreateAutomationSession({
         automationId: a.id,
+        projectId: a.projectId ?? null,
         ...(a.targetType === "firm" ? { firmId: a.targetId } : a.targetType === "agent" ? { agentId: a.targetId } : {}),
       });
       try {
         let runnerError: string | null = null;
         const req = {
           runId,
-          chatId: chat.id,
+          chatId: chat.chat.id,
           userPrompt: buildAutomationContinuityPrompt(
-            chat.id,
+            chat.chat.id,
             a.promptTemplate,
             buildStrategyDirective(priorFailureContext),
           ),

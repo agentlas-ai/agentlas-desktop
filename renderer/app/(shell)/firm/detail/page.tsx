@@ -295,8 +295,7 @@ function FirmDetailPage() {
   async function startCeoChat() {
     const api = ipc();
     if (!api || !firm) return;
-    const chat = await api.chats.create({ firmId: firm.id });
-    navigate(`/chat?id=${chat.id}`);
+    navigate("/one");
   }
 
   async function resolveOrg() {
@@ -728,7 +727,7 @@ function FirmDetailPage() {
                   {chats.map((c) => (
                     <li key={c.id}>
                       <Link
-                        href={`/chat?id=${c.id}`}
+                        href="/one"
                         style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)", textDecoration: "none", color: "var(--ink)", transition: "border 0.2s" }}
                       >
                         <span style={{ flex: 1, minWidth: 0, fontWeight: 500, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>

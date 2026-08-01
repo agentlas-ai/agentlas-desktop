@@ -100,7 +100,7 @@ export interface OneOnboardingState {
   soundEnabled: boolean;
   rephraseUsed: boolean;
   selectedStarterSlugs: string[];
-  starterTeamGroupId: string | null;
+  starterRosterReceiptId: string | null;
   projectSeed: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -151,8 +151,8 @@ export interface ResetOneOnboardingInput {
 
 export interface OneOnboardingExecutionAuthorization {
   allowed: boolean;
-  groupId: string | null;
-  reason: "ready" | "not_completed" | "starter_team_changed" | "provider_not_ready";
+  rosterReceiptId: string | null;
+  reason: "ready" | "not_completed" | "starter_roster_changed" | "provider_not_ready";
 }
 
 export interface ProvisionOneOnboardingStarterTeamInput {
@@ -195,7 +195,7 @@ export function isOneOnboardingState(value: unknown): value is OneOnboardingStat
   const keys = new Set([
     "contractVersion", "oneId", "version", "tutorialVersion", "status", "resolution", "currentScene",
     "experience", "subscription", "provider", "brainStatus", "restrictedMode", "soundEnabled", "rephraseUsed",
-    "selectedStarterSlugs", "starterTeamGroupId", "projectSeed", "startedAt", "completedAt", "createdAt", "updatedAt",
+    "selectedStarterSlugs", "starterRosterReceiptId", "projectSeed", "startedAt", "completedAt", "createdAt", "updatedAt",
   ]);
   if (Object.keys(value).some((key) => !keys.has(key))) return false;
   if (
@@ -217,7 +217,7 @@ export function isOneOnboardingState(value: unknown): value is OneOnboardingStat
     value.selectedStarterSlugs.length > ONE_ONBOARDING_STARTER_AGENTS.length ||
     !value.selectedStarterSlugs.every((slug) => typeof slug === "string" && STARTER_SLUGS.has(slug)) ||
     new Set(value.selectedStarterSlugs).size !== value.selectedStarterSlugs.length ||
-    !(value.starterTeamGroupId === null || (typeof value.starterTeamGroupId === "string" && value.starterTeamGroupId.length <= 128)) ||
+    !(value.starterRosterReceiptId === null || (typeof value.starterRosterReceiptId === "string" && value.starterRosterReceiptId.length <= 128)) ||
     typeof value.projectSeed !== "string" || value.projectSeed.length > 500 ||
     !(value.startedAt === null || isIso(value.startedAt)) ||
     !(value.completedAt === null || isIso(value.completedAt)) ||

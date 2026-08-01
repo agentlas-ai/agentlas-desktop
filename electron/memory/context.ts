@@ -671,7 +671,9 @@ export function buildMemoryContext(
       sections.push(codeMap);
       injected.push({ source: "code_map", text: codeMap });
     }
-    const contextSlice = buildProjectContextSlice(projectPath, options.taskPrompt);
+    const contextSlice = buildProjectContextSlice(projectPath, options.taskPrompt, {
+      refresh: options.materializeCodeMap !== false,
+    });
     if (contextSlice) {
       sections.push(contextSlice);
       injected.push({ source: "code_map", text: contextSlice });

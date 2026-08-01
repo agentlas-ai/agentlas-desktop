@@ -9,7 +9,6 @@
 export type DesktopStoreEntity =
   | "agent"
   | "firm"
-  | "agent-group"
   | "project"
   | "chat"
   | "task"

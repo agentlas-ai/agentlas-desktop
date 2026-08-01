@@ -9,13 +9,12 @@ import { OrgTree } from "@/components/dashboard/OrgTree";
 import { FleetSummaryStrip } from "@/components/dashboard/FleetSummaryStrip";
 import { HubBorrowRoom } from "@/components/dashboard/HubBorrowRoom";
 import { EngineUsage } from "@/components/EngineUsage";
-import { EngineAutoToggles } from "@/components/dashboard/EngineAutoToggles";
 import { RuntimeControl } from "@/components/dashboard/RuntimeControl";
 import { RuntimeReadiness } from "@/components/dashboard/RuntimeReadiness";
 import { ConfirmRequests } from "@/components/dashboard/ConfirmRequests";
 import { GrowthProposals } from "@/components/dashboard/GrowthProposals";
 import { DashboardActivity } from "@/components/dashboard/DashboardActivity";
-import { DashboardAutomations } from "@/components/dashboard/DashboardAutomations";
+import { DashboardProjects } from "@/components/dashboard/DashboardProjects";
 
 export default function DashboardPage() {
   const { locale } = useT();
@@ -28,6 +27,7 @@ export default function DashboardPage() {
           <h1 className="sr-only">{ko ? "대시보드" : "Dashboard"}</h1>
 
           <FleetSummaryStrip />
+          <DashboardProjects />
 
           <div className="dashboard-workspace">
             {/* 전역 LLM 연결은 창 폭과 무관하게 첫 조작부다. DOM에서도 먼저 두고,
@@ -35,8 +35,6 @@ export default function DashboardPage() {
             <div className="dashboard-panel dashboard-engine-panel" data-tour-id="dashboard.llm">
               <RuntimeControl />
               <EngineUsage />
-              {/* LLM 연결·사용량 바로 아래 — Stormbreaker/hep-network 자동 개입 명시적 on/off */}
-              <EngineAutoToggles />
             </div>
             {/* 퀘스트 보드가 왼쪽 위 — 조직도는 그 아래로 살짝 내려간다. */}
             <div className="dashboard-org-column" data-tour-id="dashboard.org" style={{ display: "grid", gap: 14 }}>
@@ -52,7 +50,6 @@ export default function DashboardPage() {
               <div className="dashboard-panel" data-tour-id="dashboard.activity">
                 <DashboardActivity />
               </div>
-              <div className="dashboard-panel" data-tour-id="dashboard.automations"><DashboardAutomations /></div>
               <div className="dashboard-panel" data-tour-id="dashboard.hub">
                 <HubBorrowRoom />
               </div>

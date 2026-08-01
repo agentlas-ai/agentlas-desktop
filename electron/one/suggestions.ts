@@ -683,12 +683,12 @@ function reviewSurface(type: OneSuggestionType): {
   fallbackReason: OneSuggestionReviewHandoff["fallbackReason"];
 } {
   if (type === "agent_build") return { surface: "build", baseRoute: "/build", fallbackReason: null };
-  if (type === "retain_team") return { surface: "agent_groups", baseRoute: "/library/agent-groups", fallbackReason: null };
+  if (type === "retain_team") return { surface: "work", baseRoute: "/workspace/task", fallbackReason: null };
   if (type === "automation") return { surface: "automation", baseRoute: "/automation/new", fallbackReason: null };
   // The local sanitized derivative is reviewed beside the exact originating
   // Task in Work. This is not Marketplace navigation and exposes no publish
   // operation; live Hub gates remain unknown and locked.
-  return { surface: "work", baseRoute: "/chat", fallbackReason: null };
+  return { surface: "work", baseRoute: "/workspace/task", fallbackReason: null };
 }
 
 function reviewHandoffRoute(

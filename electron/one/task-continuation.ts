@@ -76,7 +76,6 @@ export function continueOneFromTaskResult(input: ContinueOneFromTaskResultInput)
   const next = createChat({
     agentId: source.agentId,
     firmId: source.firmId,
-    agentGroupId: source.agentGroupId,
     projectId: source.projectId,
     title: nextTitle,
     continueFromChatId: source.id,

@@ -1,13 +1,10 @@
-// 단일 채팅 페이지 — chatId 기반.
-// 헤더: 채팅 제목(인라인 편집), 에이전트 정보, 삭제 버튼.
-// 본문: ChatStream + 입력창.
+// ProjectTask cockpit — 프로젝트 소유 작업의 대화, 실행, inspector.
 "use client";
 import { Suspense, useCallback, useEffect, useRef, useState, useMemo, type Dispatch, type SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type {
   Chat,
-  AgentGroupResolved,
   AgentlasSurfaceAction,
   AppFactoryAppRecord,
   AppFactoryScaffoldResult,
@@ -20,7 +17,6 @@ import type {
   McpInvocationEvent,
   McpRunKeyRequest,
   Project,
-  RuntimeCommand,
   RuntimeStatus,
   ToolFactoryScaffoldResult,
   ToolFactoryToolRecord,
@@ -37,7 +33,6 @@ import type { SurfaceStatePatchHandler, WorkbenchSurface } from "@/components/Wo
 import type { LiveAgent, NetTimelineItem } from "@/components/AgentNetworkPanel";
 import { ChatRightPanel, type ChatRightPanelTab } from "@/components/ChatRightPanel";
 import { ProjectFolderBar } from "@/components/ProjectFolderBar";
-import { AgentPicker } from "@/components/AgentPicker";
 import {
   firstMediaArtifactInText,
   linkedFileArtifactsInText,
@@ -46,8 +41,8 @@ import {
   type MediaArtifact,
 } from "@/components/Markdown";
 import type { WorkspaceFilePreview } from "@/components/WorkspacePanel";
-import { IconBuilding, IconChevronDown, IconClose, IconFolder, IconLayers, IconNetwork, IconPanelRight, IconSparkles, IconTrash, IconUsers } from "@/components/Icon";
-import { buildAppRoutePrompt, INSTALLED_APPS, parseAppSlashRoute } from "@/lib/apps";
+import { IconBuilding, IconClose, IconFolder, IconNetwork, IconPanelRight, IconSparkles, IconTrash } from "@/components/Icon";
+import { INSTALLED_APPS } from "@/lib/apps";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { surfaceApprovalRequirement, type SurfaceApprovalRequirement } from "@/lib/surface-approval";
@@ -222,6 +217,7 @@ async function ensureSurfaceApproval(
   surfaceId: string,
   action: AgentlasSurfaceAction,
   approval: SurfaceApprovalRequirement,
+  locale: "ko" | "en",
 ): Promise<boolean> {
   if (approval.persist) {
     try {
@@ -243,8 +239,8 @@ async function ensureSurfaceApproval(
       summary: approval.summary,
       metadata: approval.metadata,
     });
-  } catch (err) {
-    window.alert(err instanceof Error ? err.message : String(err));
+  } catch {
+    window.alert(locale === "ko" ? "승인을 적용하지 못했습니다." : "The approval was not applied.");
     return false;
   }
   return true;
@@ -268,7 +264,7 @@ const DEFAULT_PERMISSION: PermissionLevel = "full";
 type RightPanelPreference = { open: boolean; tab: ChatRightPanelTab };
 
 function isRightPanelTab(raw: unknown): raw is ChatRightPanelTab {
-  return raw === "file" || raw === "agent" || raw === "panel";
+  return raw === "file" || raw === "agent" || raw === "panel" || raw === "memory";
 }
 
 function readRightPanelPreference(): RightPanelPreference | null {
@@ -502,12 +498,6 @@ function toolWorkflowText(tool: ToolEvent, locale: "ko" | "en"): string {
   return tool.name;
 }
 
-function parseGoalSlash(input: string): string | null {
-  const match = input.trim().match(/^\/goal\s+([\s\S]+)$/i);
-  const goal = match?.[1]?.trim();
-  return goal || null;
-}
-
 function activityForEvent(ev: McpInvocationEvent): StreamStep["activity"] {
   if (ev.delegateTo && ev.delegateTo.length > 0) return "handoff";
   if (ev.phase === "delegate") return "start";
@@ -642,115 +632,6 @@ function parseQuestionBatchReply(text: string): Array<{ question: string; answer
   return parsed.length > 0 ? parsed : null;
 }
 
-type GeneratedAppChatRoute = {
-  action: "edit" | "archive";
-  app: AppFactoryAppRecord;
-  request: string;
-};
-
-const GENERATED_APP_EDIT_TERMS = [
-  "edit",
-  "modify",
-  "change",
-  "update",
-  "improve",
-  "fix",
-  "수정",
-  "고쳐",
-  "바꿔",
-  "변경",
-  "개선",
-  "업데이트",
-  "고도화",
-];
-
-const GENERATED_APP_ARCHIVE_TERMS = [
-  "delete",
-  "remove",
-  "archive",
-  "uninstall",
-  "삭제",
-  "지워",
-  "없애",
-  "보관",
-  "아카이브",
-  "제거",
-];
-
-function normalizeGeneratedAppText(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[_/]+/g, " ")
-    .replace(/[^a-z0-9가-힣@\s-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function generatedAppDisplayName(app: AppFactoryAppRecord): string {
-  return app.appName || app.manifest.app?.name || app.manifest.title || "Generated App";
-}
-
-function generatedAppAliases(app: AppFactoryAppRecord): string[] {
-  const values = [
-    generatedAppDisplayName(app),
-    app.manifest.app?.name,
-    app.manifest.title,
-    app.manifest.app?.appType,
-    app.rootPath.split(/[\\/]/).pop(),
-  ];
-  return [...new Set(values.map((value) => normalizeGeneratedAppText(value ?? "")).filter((value) => value.length >= 3))];
-}
-
-function detectGeneratedAppAction(input: string): GeneratedAppChatRoute["action"] | null {
-  const normalized = normalizeGeneratedAppText(input);
-  const asciiTokens = new Set(normalized.split(/[\s-]+/).filter(Boolean));
-  const hasActionTerm = (term: string) => {
-    const candidate = normalizeGeneratedAppText(term);
-    // Short English verbs must be whole tokens: otherwise common app names such
-    // as "Credit" (edit) and "Prefix" (fix) are misrouted as edit requests.
-    // Korean action stems intentionally keep substring matching for 활용형.
-    return /^[a-z0-9]+$/.test(candidate)
-      ? asciiTokens.has(candidate)
-      : normalized.includes(candidate);
-  };
-  if (GENERATED_APP_ARCHIVE_TERMS.some(hasActionTerm)) {
-    return "archive";
-  }
-  if (GENERATED_APP_EDIT_TERMS.some(hasActionTerm)) {
-    return "edit";
-  }
-  return null;
-}
-
-function parseGeneratedAppChatRoute(input: string, apps: AppFactoryAppRecord[]): GeneratedAppChatRoute | null {
-  const action = detectGeneratedAppAction(input);
-  if (!action) return null;
-  const activeApps = apps.filter((app) => app.status !== "archived");
-  if (activeApps.length === 0) return null;
-  const normalized = normalizeGeneratedAppText(input);
-  const matches = activeApps
-    .map((app) => {
-      const aliases = generatedAppAliases(app);
-      const bestAlias = aliases
-        .filter((alias) => normalized.includes(alias) || normalized.includes(`@${alias}`))
-        .sort((a, b) => b.length - a.length)[0];
-      return bestAlias ? { app, score: bestAlias.length } : null;
-    })
-    .filter((item): item is { app: AppFactoryAppRecord; score: number } => Boolean(item))
-    .sort((a, b) => b.score - a.score);
-
-  const fallbackSingleApp =
-    matches.length === 0 && activeApps.length === 1 && /\bapp\b|앱/.test(normalized)
-      ? activeApps[0]
-      : null;
-  const app = matches[0]?.app ?? fallbackSingleApp;
-  if (!app) return null;
-  return {
-    action,
-    app,
-    request: input.trim(),
-  };
-}
 
 export default function ChatPageWrapper() {
   // useSearchParams는 Suspense boundary를 요구함 (Next 15)
@@ -792,15 +673,12 @@ function ChatPage() {
   const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
   const [hiredAgents, setHiredAgents] = useState<HiredAgentCard[]>([]);
   // 전역대화 옆 "에이전트 부르기" 필 — 증가할 때마다 ChatInput의 에이전트 피커를 연다.
-  const [agentPickerSignal, setAgentPickerSignal] = useState(0);
   const [allFirms, setAllFirms] = useState<InstalledFirm[]>([]);
   const [allProjects, setAllProjects] = useState<Project[]>([]);
   const [allEnvKeys, setAllEnvKeys] = useState<string[]>([]);
   const [allGeneratedApps, setAllGeneratedApps] = useState<AppFactoryAppRecord[]>([]);
-  const [cliCommands, setCliCommands] = useState<RuntimeCommand[]>([]);
   const [installedPlugins, setInstalledPlugins] = useState<InstalledMcpServer[]>([]);
   const [firm, setFirm] = useState<InstalledFirm | null>(null);
-  const [agentGroup, setAgentGroup] = useState<AgentGroupResolved | null>(null);
   const [resolvedOrg, setResolvedOrg] = useState<ResolvedOrg | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [messages, setMessages] = useState<StreamMessage[]>([]);
@@ -820,7 +698,7 @@ function ChatPage() {
       const originChatId = task?.originChatId ?? "";
       setValidatedTaskTarget({ taskId: requestedTaskId, chatId: originChatId });
       if (originChatId && originChatId !== queryChatId) {
-        router.replace(`/chat?id=${encodeURIComponent(originChatId)}&task=${encodeURIComponent(requestedTaskId)}`);
+        router.replace(`/workspace/task?id=${encodeURIComponent(originChatId)}&task=${encodeURIComponent(requestedTaskId)}`);
       } else if (!originChatId) {
         router.replace("/one");
       }
@@ -916,7 +794,10 @@ function ChatPage() {
         planMode?: boolean;
         goalMode?: boolean;
         appsGenerateMode?: boolean;
+        /** Explicit @ calls apply only to this queued turn and never rebind the task. */
+        taskForceTargets?: OrchestrationTarget[];
         sessionRouting?: boolean;
+        stormbreakerMode?: boolean;
       };
     }>
   >([]);
@@ -1065,9 +946,7 @@ function ChatPage() {
         announceComputerUseActivity(null, "finished");
       }
       const fallbackAgentId = agent?.id ?? "active-agent";
-      const fallbackAgentName =
-        agentGroup?.orchestratorName ||
-        (agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback"));
+      const fallbackAgentName = agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback");
       const fallbackStepMeta: Partial<StreamStep> = {
         agentName: fallbackAgentName,
         activity: "status",
@@ -1470,7 +1349,6 @@ function ChatPage() {
         const api = ipc();
         void api?.chats.get(chatId).then((c) => {
           if (c) setChat(c);
-          window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chatId } }));
         });
       } else if (ev.kind === "error") {
         // 스티어링 취소면 에러 버블을 띄우지 않는다 — busy→false 시 drain 이펙트가 큐의
@@ -1481,10 +1359,10 @@ function ChatPage() {
         const wasUserCancel = cancelRequestedRef.current && !wasSteer;
         const terminalStatus = wasUserCancel
           ? (locale === "ko" ? "취소됨" : "Cancelled")
-          : ev.error?.message || (locale === "ko" ? "실패" : "Failed");
+          : (locale === "ko" ? "확인 필요" : "Needs review");
         const terminalMessage = wasUserCancel
           ? (locale === "ko" ? "실행이 취소되었습니다." : "The run was cancelled.")
-          : `⚠️ ${ev.error?.message ?? t("chat.err.unknown")}`;
+          : (locale === "ko" ? "작업이 완료되지 않았습니다. One이 현재 상태를 보고 다음 행동을 제시할 수 있습니다." : "The task was not completed. One can inspect the current state and present the next action.");
         steerCancelRef.current = false;
         const keepPlaceholder = (m: StreamMessage[]) =>
           m.flatMap((msg) => {
@@ -1533,7 +1411,7 @@ function ChatPage() {
         subRef.current = null;
       }
     },
-    [agent, agentGroup, chatId, locale, mediaBasePaths, openPanelTab, t],
+    [agent, chatId, locale, mediaBasePaths, openPanelTab, t],
   );
 
   // consumeEvent를 ref로 미러 — subscribeRun/메타데이터 effect가 consumeEvent identity 변화(agent·
@@ -1745,10 +1623,6 @@ function ChatPage() {
             );
           }
         });
-      // CLI 슬래시 명령 스캔 (매 진입 시 최신) — 느려도 채팅 표시를 막지 않게 후속 로드.
-      void api.runtime.listCommands().then((cmds) => {
-        if (!cancelled) setCliCommands(cmds);
-      });
       // 역할 기본값 또는 이 채팅의 exact pin — 헤더 칩 표시용.
       void api.runtime.detect().then((list) => {
         if (cancelled) return;
@@ -1792,13 +1666,6 @@ function ChatPage() {
             : null,
         );
       });
-      if (c.agentGroupId) {
-        void api.agentGroups.getResolved(c.agentGroupId).then((group) => {
-          if (!cancelled) setAgentGroup(group);
-        });
-      } else {
-        setAgentGroup(null);
-      }
       // 패널 노출 결정: 사용자가 명시적으로 접고/편 선호값이 있으면 그것을 우선,
       // 없으면 working_folder가 저장돼 있을 때만 자동 노출.
       void api.workspace.get(chatId).then((savedFolder) => {
@@ -2100,6 +1967,7 @@ function ChatPage() {
         routerAgent?: RecRouterAgent;
         /** Current session roster first; Agent Hub/Cloud only when the model identifies a capability gap. */
         sessionRouting?: boolean;
+        stormbreakerMode?: boolean;
       },
     ) => {
       const api = ipc();
@@ -2114,64 +1982,9 @@ function ChatPage() {
       // 새 실행은 이전 실행의 steering 취소 상태를 절대 상속하지 않는다.
       steerCancelRef.current = false;
       setCancelPending(false);
-      const goalPrompt = parseGoalSlash(userPrompt);
-      const routeInput = goalPrompt ?? userPrompt;
-      const appRoute = parseAppSlashRoute(routeInput);
-      if (appRoute && !appRoute.request && appRoute.app.route !== "/chat") {
-        router.push(appRoute.app.route);
-        return true;
-      }
-      const generatedAppRoute = appRoute ? null : parseGeneratedAppChatRoute(routeInput, allGeneratedApps);
-      if (generatedAppRoute?.action === "archive") {
-        const appName = generatedAppDisplayName(generatedAppRoute.app);
-        const placeholderId = uid();
-        setMessages((m) => [
-          ...m,
-          { id: uid(), role: "user", text: userPrompt },
-          {
-            id: placeholderId,
-            role: "agent",
-            text: locale === "ko" ? `${appName}을 Apps 목록에서 숨기는 중...` : `Hiding ${appName} from Apps...`,
-            busy: true,
-            startedAt: Date.now(),
-          },
-        ]);
-        setBusy(true);
-        setCancelPending(false);
-        try {
-          await api.appFactory.archive({ rootPath: generatedAppRoute.app.rootPath });
-          setAllGeneratedApps((apps) => apps.filter((app) => app.id !== generatedAppRoute.app.id));
-          setMessages((m) =>
-            m.map((msg) =>
-              msg.id === placeholderId
-                ? {
-                    ...msg,
-                    busy: false,
-                    text:
-                      locale === "ko"
-                        ? `${appName}을 Apps 목록에서 숨겼습니다. 파일은 복원 가능한 보관함에 남아 있습니다.`
-                        : `${appName} was hidden from Apps and kept in a reversible archive.`,
-                  }
-                : msg,
-            ),
-          );
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          setMessages((m) =>
-            m.map((msg) =>
-              msg.id === placeholderId
-                ? { ...msg, role: "system", busy: false, text: `⚠️ ${message || t("chat.err.unknown")}` }
-                : msg,
-            ),
-          );
-        } finally {
-          setBusy(false);
-          setCancelPending(false);
-        }
-        return true;
-      }
-      const invocationPrompt = appRoute ? buildAppRoutePrompt(appRoute, locale) : routeInput;
-      const visiblePrompt = appRoute ? `${appRoute.command} ${appRoute.request}`.trim() : userPrompt;
+      const routeInput = userPrompt;
+      const invocationPrompt = routeInput;
+      const visiblePrompt = userPrompt;
       const images = opts?.images;
       const placeholderId = uid();
       const imageDataUrls = images?.map(
@@ -2181,6 +1994,28 @@ function ChatPage() {
       const initialStatus = t("chat.status.sending");
       const activeAgentId = agent?.id ?? chat.agentId ?? "active-agent";
       const activeAgentName = agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback");
+      const projectTargets: OrchestrationTarget[] = (project?.agentPool ?? []).slice(1).flatMap((member) => (
+        member.source === "local"
+          ? [{ source: "local" as const, entityKind: "agent" as const, agentId: member.agentId }]
+          : []
+      ));
+      const effectiveTaskForceTargets = [...projectTargets];
+      for (const target of opts?.taskForceTargets ?? []) {
+        const duplicate = effectiveTaskForceTargets.some((candidate) => (
+          candidate.source === target.source
+          && candidate.entityKind === target.entityKind
+          && (candidate.source === "local" && target.source === "local"
+            ? candidate.entityKind === "agent" && target.entityKind === "agent"
+              ? candidate.agentId === target.agentId
+              : candidate.entityKind === "team" && target.entityKind === "team"
+                ? candidate.firmId === target.firmId
+                : false
+            : candidate.source !== "local" && target.source !== "local"
+              ? candidate.slug === target.slug
+              : false)
+        ));
+        if (!duplicate) effectiveTaskForceTargets.push(target);
+      }
       setMessages((m) => [
         ...m,
         { id: uid(), role: "user", text: visiblePrompt, imageDataUrls },
@@ -2216,14 +2051,14 @@ function ChatPage() {
       // 고용 바인딩 자동 재주입 — 추천 확정 턴은 opts로 명시되고, 이후 턴은 채팅에
       // 저장된 고용 카드가 이어받는다(증발 버그 수정). 재호출 과금은 허브 24h 리스가 0으로 접는다.
       const effectiveBorrowAgents =
-        (opts?.taskForceTargets?.length ?? 0) > 0
+        effectiveTaskForceTargets.length > 0
           ? undefined
           : (opts?.borrowAgents?.length ?? 0) > 0
           ? opts?.borrowAgents
           : hiredAgentsRef.current.length
             ? hiredAgentsRef.current.map((card) => card.slug)
             : undefined;
-      if (agentGroup || (effectiveBorrowAgents?.length ?? 0) > 0 || (opts?.taskForceTargets?.length ?? 0) > 0 || (opts?.pipelineStages?.length ?? 0) > 1) {
+      if ((effectiveBorrowAgents?.length ?? 0) > 0 || effectiveTaskForceTargets.length > 0 || (opts?.pipelineStages?.length ?? 0) > 1) {
         setNetworkOpenPersisted(true);
       }
       cancelRequestedRef.current = false;
@@ -2267,35 +2102,32 @@ function ChatPage() {
           locale,
           permissions: opts?.permissions ?? DEFAULT_PERMISSION,
           planMode: opts?.planMode,
-          goalMode: opts?.goalMode || Boolean(goalPrompt),
-          appsGenerateMode: opts?.appsGenerateMode || Boolean(appRoute),
-          targetAppId: generatedAppRoute?.action === "edit" ? generatedAppRoute.app.id : undefined,
-          targetAppAction: generatedAppRoute?.action === "edit" ? "edit" : undefined,
+          goalMode: opts?.goalMode,
+          appsGenerateMode: opts?.appsGenerateMode,
           borrowAgents: effectiveBorrowAgents,
-          taskForceTargets: opts?.taskForceTargets,
+          taskForceTargets: effectiveTaskForceTargets.length > 0 ? effectiveTaskForceTargets : undefined,
           pipelineStages: opts?.pipelineStages,
           routerAgent: opts?.routerAgent,
           sessionRouting: opts?.sessionRouting,
+          stormbreakerMode: opts?.stormbreakerMode,
           runtimeSelection: chat.runtimeSelection ?? undefined,
         });
-        window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chat.id } }));
         // runId 도착 전에 Stop을 눌렀다면(레이스) 구독을 건 직후 즉시 취소 — abort 종료 이벤트를 수신해 busy 해제.
         if (cancelRequestedRef.current) {
           void api.invoke.cancel(runId);
         }
         return true;
-      } catch (err) {
+      } catch {
         // invoke 실패 — 미리 건 구독을 정리해 유령 리스너가 남지 않게 한다.
         subRef.current?.();
         subRef.current = null;
-        const message = err instanceof Error ? err.message : String(err);
         setMessages((m) =>
           m.map((msg) =>
             msg.id === placeholderId
               ? {
                   id: msg.id,
                   role: "system",
-                  text: `⚠️ ${message || t("chat.err.unknown")}`,
+                  text: locale === "ko" ? "작업을 시작하지 못했습니다. One이 현재 상태를 확인할 수 있습니다." : "The task did not start. One can inspect the current state.",
                 }
               : msg,
           ),
@@ -2314,11 +2146,11 @@ function ChatPage() {
     },
     [
       agent,
-      agentGroup,
       allGeneratedApps,
       chat,
       busy,
       locale,
+      project,
       requestedTaskId,
       router,
       setNetworkOpenPersisted,
@@ -2500,7 +2332,7 @@ function ChatPage() {
       ) {
         if (!api) return;
         const approval = surfaceApprovalRequirement(activeSurface, action);
-        if (approval && !(await ensureSurfaceApproval(api, activeSurface.id, action, approval))) return;
+        if (approval && !(await ensureSurfaceApproval(api, activeSurface.id, action, approval, locale))) return;
         const pendingId = uid();
         const label = manifest.app?.name || manifest.title;
         setMessages((m) => [
@@ -2750,8 +2582,7 @@ function ChatPage() {
           setWorkspaceOpenPersisted(true);
           setFolderReload((n) => n + 1);
         } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          update(`${action.label} failed: ${message}`);
+          update(locale === "ko" ? "이 작업을 완료하지 못했습니다." : "This action was not completed.");
           throw err;
         }
         return;
@@ -2766,7 +2597,7 @@ function ChatPage() {
         ].join("\n");
 
       const approval = api ? surfaceApprovalRequirement(activeSurface, action) : null;
-      if (api && approval && !(await ensureSurfaceApproval(api, activeSurface.id, action, approval))) return;
+      if (api && approval && !(await ensureSurfaceApproval(api, activeSurface.id, action, approval, locale))) return;
 
       const launched = await send(launchPrompt, {
         permissions: action.permission === "full" ? "full" : action.permission === "read" ? "read" : "write",
@@ -2809,33 +2640,23 @@ function ChatPage() {
             : cur,
         );
       })
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
+      .catch(() => {
         setMessages((m) => [
           ...m,
           {
             id: uid(),
             role: "system",
-            text: `Surface state was not saved: ${message}`,
+            text: locale === "ko" ? "화면 상태를 저장하지 못했습니다." : "The surface state was not saved.",
           },
         ]);
       });
   }, []);
 
-  // 슬래시 커맨드 실행 — /new(새 채팅) /clear(기록 지우기) /help(단축키)
-  const handleCommand = useCallback(
-    (cmd: string) => {
-      if (cmd === "/apps") {
-        router.push("/apps");
-        return;
-      }
-      if (cmd === "/docstudio" || cmd === "/document-studio" || cmd === "/문서스튜디오") {
-        router.push("/apps/document-studio");
-        return;
-      }
+  const handleSessionAction = useCallback(
+    (action: "new" | "clear") => {
       const api = ipc();
       if (!api || !chat) return;
-      if (cmd === "/clear") {
+      if (action === "clear") {
         if (busy) {
           setSessionNotice(locale === "ko" ? "실행 중인 대화는 비울 수 없습니다. 먼저 실행을 멈춰 주세요." : "You cannot clear while this run is active. Stop it first.");
           return;
@@ -2858,68 +2679,46 @@ function ChatPage() {
           setMediaPreview(null);
           dropChatViewSnapshot(chat.id);
           setSessionNotice(locale === "ko" ? "대화 기록과 연결된 런타임 세션을 비웠습니다." : "Conversation history and its linked runtime session were cleared.");
-          window.dispatchEvent(new CustomEvent("agentlas:chat-changed", { detail: { id: chat.id } }));
-        }).catch((error) => {
-          setSessionNotice(error instanceof Error ? error.message : String(error));
+        }).catch(() => {
+          setSessionNotice(locale === "ko" ? "세션 기록을 비우지 못했습니다." : "The session history was not cleared.");
         });
-      } else if (cmd === "/new") {
-        void api.chats
-          .create({ agentId: chat.agentId, projectId: chat.projectId, firmId: chat.firmId, agentGroupId: chat.agentGroupId, continueFromChatId: chat.id })
-          .then((c) => router.push(`/chat?id=${c.id}`));
-      } else if (cmd === "/folder") {
-        void api.fs.pickDirectory().then((p) => {
-          if (!p) return;
-          void api.workspace.set(chat.id, p).then(() => {
-            setWorkspaceOpenPersisted(true);
-            setFolderReload((n) => n + 1);
-          });
-        });
-      } else if (cmd === "/global") {
-        void api.workspace.set(chat.id, null).then(() => setFolderReload((n) => n + 1));
-      } else if (cmd === "/rename") {
-        setEditingTitle(true);
-      } else if (cmd === "/help") {
-        setMessages((m) => [...m, { id: uid(), role: "system", text: t("chatinput.cmd.help_text") }]);
       } else {
-        // Fallback for app slash commands like /hep-network startup
-        void send(cmd, { permissions: DEFAULT_PERMISSION });
+        void api.chats
+          .create({ agentId: chat.agentId, projectId: chat.projectId, firmId: chat.firmId, continueFromChatId: chat.id })
+          .then((c) => router.push(`/workspace/task?id=${c.id}`));
       }
     },
-    [busy, chat, locale, router, t, setWorkspaceOpenPersisted, send],
+    [busy, chat, locale, router],
   );
 
-  // 홈 composer에서 ?prompt=... 또는 앱의 ?cmd=...로 넘어왔을 때
+  // A linked prompt may prefill or start a task, but product actions never ride in chat text.
   useEffect(() => {
     const seedPrompt = searchParams.get("prompt") ?? "";
-    const seedCmd = searchParams.get("cmd") ?? "";
     const seedPermission = parsePermission(
       searchParams.get("permission") ?? searchParams.get("permissions"),
     );
 
-    if ((!seedPrompt && !seedCmd) || !chat || !agent) return;
+    if (!seedPrompt || !chat || !agent) return;
     if (seededRef.current === chatId) return;
     if (messages.length > 0) return; // 이미 히스토리 있으면 무시
     seededRef.current = chatId;
     
-    if (seedCmd) {
-      handleCommand(seedCmd);
-      router.replace(`/chat?id=${chatId}`);
-    } else if (seedPrompt) {
+    if (seedPrompt) {
       // seedOnly=1 — 자동 전송하지 않고 입력창에만 채운다(프롬프트 저장소의 입력물 필요
       // 프롬프트: 사용자가 사진/문서를 첨부한 뒤 직접 전송해야 결과가 정상).
       if (searchParams.get("seedOnly") === "1") {
         setComposerPrefill(seedPrompt);
-        router.replace(`/chat?id=${chatId}`);
+        router.replace(`/workspace/task?id=${chatId}`);
         return;
       }
       if (seedPermission === "full" && !confirmFullPermissionFromUrl(locale)) {
-        router.replace(`/chat?id=${chatId}`);
+        router.replace(`/workspace/task?id=${chatId}`);
         return;
       }
       void send(seedPrompt, { permissions: seedPermission ?? DEFAULT_PERMISSION });
-      router.replace(`/chat?id=${chatId}`);
+        router.replace(`/workspace/task?id=${chatId}`);
     }
-  }, [chat, agent, chatId, locale, messages.length, send, handleCommand, router, searchParams]);
+  }, [chat, agent, chatId, locale, messages.length, send, router, searchParams]);
 
   async function switchAgent(agentId: string) {
     const api = ipc();
@@ -2928,7 +2727,6 @@ function ChatPage() {
     setChat(updated);
     setAgent(allAgents.find((a) => a.id === agentId) ?? null);
     setFirm(null); // switchAgent는 firm을 해제
-    setAgentGroup(null);
   }
 
   useEffect(
@@ -3007,8 +2805,8 @@ function ChatPage() {
       planMode: opts?.planMode,
       goalMode: opts?.goalMode,
       appsGenerateMode: opts?.appsGenerateMode,
-      // 자동 라우팅에선 plain도 에스컬레이션을 실어 보낸다 — 메인 LLM이 의도 기반으로
-      // 재랭킹·차용(codex hep-network 동작)할 수 있게 하는 경로라서다.
+      // The recommendation carries structured execution intent. Prompt text
+      // remains exactly what the user wrote.
       routerAgent: choice.routerAgent,
     };
     switch (choice.kind) {
@@ -3021,14 +2819,15 @@ function ChatPage() {
         if (choice.targets && choice.targets.length > 0) {
           void send(text, { ...sendOpts, taskForceTargets: choice.targets });
         } else {
-          void send(`hep-network ${text}`, sendOpts);
+          void send(text, { ...sendOpts, sessionRouting: true });
         }
         break;
       case "pipeline": {
         // 단계 계획을 플레이스홀더 메시지 상단 스테퍼로 보여준다(PRD→배포 가시화).
-        void send(`stormbreaker ${text}`, {
+        void send(text, {
           ...sendOpts,
           pipelineStages: choice.stages?.length ? choice.stages : undefined,
+          stormbreakerMode: true,
         });
         break;
       }
@@ -3123,12 +2922,11 @@ function ChatPage() {
   async function removeChat() {
     const api = ipc();
     if (!api || !chat) return;
-    if (!confirm(t("chat.confirm_delete"))) return;
+    if (!confirm(locale === "ko" ? "이 작업을 삭제할까요?" : "Delete this task?")) return;
     const removedId = chat.id;
     setChat(null);
     setMessages([]);
     dropChatViewSnapshot(removedId);
-    window.dispatchEvent(new CustomEvent("agentlas:chat-removed", { detail: { id: removedId } }));
     await api.chats.remove(chat.id);
     router.replace("/");
   }
@@ -3181,198 +2979,6 @@ function ChatPage() {
           minHeight: 56,
         }}
       >
-        {agentGroup ? (
-          <div
-            className="titlebar-nodrag"
-            title={agentGroup.description || agentGroup.name}
-            style={{
-              maxWidth: 420,
-              minWidth: 0,
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 8,
-              padding: "6px 9px",
-              borderRadius: 9,
-              border: "1px solid var(--accent-soft)",
-              background: "var(--fill-1)",
-              color: "var(--ink)",
-              flexShrink: 0,
-            }}
-          >
-            <span
-              style={{
-                width: 26,
-                height: 26,
-                borderRadius: 8,
-                background: "var(--accent)",
-                color: "white",
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexShrink: 0,
-              }}
-            >
-              <IconLayers size={14} />
-            </span>
-            <span style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
-              <strong
-                style={{
-                  fontSize: 12.5,
-                  lineHeight: 1.1,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {agentGroup.name}
-              </strong>
-              <span
-                style={{
-                  fontSize: 10,
-                  color: "var(--muted-deep)",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {agentGroup.orchestratorName}
-                {agentGroup.warningCount > 0
-                  ? ` · ${agentGroup.warningCount}${locale === "ko" ? "개 경고" : " warning"}`
-                  : ""}
-              </span>
-            </span>
-          </div>
-        ) : displayAgent && displayAgents.length > 0 && (
-          <AgentPicker
-            agents={displayAgents}
-            activeId={displayAgent.id}
-            onChange={(id) => void switchAgent(id)}
-            ariaLabel={t("chat.switch_agent")}
-            maxButtonWidth={firm ? 420 : 232}
-            activePrefix={
-              firm ? (
-                <span
-                  style={{
-                    width: 26,
-                    height: 26,
-                    borderRadius: 8,
-                    background: "var(--paper-edge)",
-                    color: "var(--ink-soft)",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    flexShrink: 0,
-                  }}
-                >
-                  <IconBuilding size={14} />
-                </span>
-              ) : undefined
-            }
-            activeBadge={
-              firm ? (
-                <span
-                  style={{
-                    fontSize: 10,
-                    padding: "2px 6px",
-                    borderRadius: 999,
-                    background: "var(--paper)",
-                    color: "var(--ink-soft)",
-                    border: "1px solid var(--paper-edge)",
-                    fontWeight: 700,
-                    maxWidth: 160,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    flexShrink: 0,
-                  }}
-                >
-                  CEO · {pickLocalized(firm, locale).name}
-                </span>
-              ) : undefined
-            }
-            buttonStyle={
-              firm
-                ? { background: "var(--fill-1)", border: "1px solid var(--accent-soft)" }
-                : undefined
-            }
-          />
-        )}
-        {hiredAgents.length > 0 && (
-          // 고용 동행 배지 — 빌린 에이전트가 이 채팅에 붙어 있음을 상시로 보여준다
-          // (0.7.2x 증발 버그의 가시성 해결). ×(해고)로 바인딩 해제.
-          <span
-            data-testid="hired-agents-badge"
-            title={
-              locale === "ko"
-                ? "빌린 에이전트가 이 채팅에 고용되어 다음 메시지에도 함께합니다. ×를 누르면 해고합니다."
-                : "Hired agents stay on this chat for every message. Press × to dismiss."
-            }
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              marginLeft: 8,
-              padding: "3px 6px 3px 10px",
-              borderRadius: 999,
-              background: "var(--fill-1)",
-              border: "1px solid var(--accent-soft)",
-              color: "var(--ink)",
-              fontSize: 11.5,
-              fontWeight: 650,
-              maxWidth: 260,
-              flexShrink: 0,
-            }}
-          >
-            <span aria-hidden="true">🤝</span>
-            <span
-              style={{
-                minWidth: 0,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {hiredAgents
-                .map((card) => {
-                  // 출처를 숨기지 않는다 — 같은 slug가 Hub/로컬/팀에 걸쳐 혼동되는 것 방지.
-                  // source 미기록 카드(구버전)는 라벨 생략(없는 데이터를 지어내지 않음).
-                  const src =
-                    card.source === "hub"
-                      ? "Hub"
-                      : card.source === "installed"
-                        ? locale === "ko" ? "로컬" : "local"
-                        : card.source === "firm-node"
-                          ? locale === "ko" ? "팀" : "team"
-                          : null;
-                  return `${card.name || card.slug}${src ? `(${src})` : ""}`;
-                })
-                .join(", ")}
-              {locale === "ko" ? " 함께 일하는 중" : " working with you"}
-            </span>
-            <button
-              type="button"
-              onClick={() => void dismissHiredAgents()}
-              aria-label={locale === "ko" ? "고용 해제" : "Dismiss hired agents"}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                width: 16,
-                height: 16,
-                borderRadius: 999,
-                border: 0,
-                background: "transparent",
-                color: "var(--muted-deep)",
-                cursor: "pointer",
-                fontSize: 12,
-                lineHeight: 1,
-                padding: 0,
-              }}
-            >
-              ×
-            </button>
-          </span>
-        )}
         <div style={{ flex: 1, minWidth: 0, marginLeft: 12 }}>
           {project && (
             <div
@@ -3435,7 +3041,7 @@ function ChatPage() {
               }}
               title={t("chat.rename_hint")}
             >
-              {chat.title.trim() || t("chat.untitled")}
+              {chat.title.trim() || (locale === "ko" ? "새 작업" : "New task")}
             </div>
           )}
         </div>
@@ -3495,8 +3101,8 @@ function ChatPage() {
         <button
           onClick={() => void removeChat()}
           className="titlebar-nodrag"
-          aria-label={t("chat.delete")}
-          title={t("chat.delete")}
+          aria-label={locale === "ko" ? "작업 삭제" : "Delete task"}
+          title={locale === "ko" ? "작업 삭제" : "Delete task"}
           style={{
             color: "var(--muted-deep)",
             padding: 6,
@@ -3628,16 +3234,31 @@ function ChatPage() {
       <div data-tour-id="workspace.chat" style={{ minHeight: 0, flex: 1, display: "flex", flexDirection: "column" }}>
         <ChatStream
           messages={messages}
-          agentName={agentGroup?.orchestratorName || (displayAgent ? pickLocalized(displayAgent, locale).name : t("chat.assistant_fallback"))}
-          agentTone={agentGroup ? "green" : displayAgent?.tone ?? "blue"}
+          agentName="Agentlas"
+          agentTone={displayAgent?.tone ?? "blue"}
           emptyDirectory={{
             agents: displayAgents,
             hubBookmarks,
             firms: allFirms,
             projects: allProjects,
             envKeys: allEnvKeys,
-            commands: cliCommands,
             plugins: installedPlugins,
+            projectTeam: project?.agentPool.map((member, index) => {
+              const installed = allAgents.find((candidate) => candidate.id === member.agentId);
+              const bookmark = hubBookmarks.find((candidate) => candidate.slug === member.agentId);
+              const name = installed
+                ? pickLocalized(installed, locale).name
+                : bookmark
+                  ? pickLocalized(bookmark.listing, locale).name
+                  : member.nameSnapshot || (locale === "ko" ? "에이전트" : "Agent");
+              return {
+                id: `${member.source}:${member.agentId}`,
+                token: `@${name}`,
+                label: index === 0
+                  ? (locale === "ko" ? "컨트롤러" : "Controller")
+                  : (locale === "ko" ? "턴 서브 에이전트" : "Turn sub-agent"),
+              };
+            }),
           }}
           onOpenArtifact={(a) => {
             setSurface(null);
@@ -3679,7 +3300,7 @@ function ChatPage() {
         />
       )}
       {/* Codex식: 이 대화가 폴더(프로젝트)에서 작업하는지 / 전역 대화인지 선택 */}
-      <div style={{ padding: "6px 16px 0", display: "flex", alignItems: "center", gap: 8 }}>
+      {!project && <div style={{ padding: "6px 16px 0", display: "flex", alignItems: "center", gap: 8 }}>
         <ProjectFolderBar
           chatId={chatId || null}
           reloadToken={folderReload}
@@ -3688,41 +3309,7 @@ function ChatPage() {
             if (f) setWorkspaceOpenPersisted(true);
           }}
         />
-        {/* 계속 라이브로(continuousMode)·스웜(swarmMode) 토글은 입력창 + 메뉴로 통합됨.
-            켜진 모드는 + 버튼 옆 컴팩트 칩으로 표시된다(ChatInput). */}
-        {/* 클라우드·허브 에이전트 부르기 — 전역대화 필과 같은 모양. + 메뉴에서 이동해 왔다. */}
-        <button
-          type="button"
-          data-testid="workspace-agents-pill"
-          data-popover-trigger="agent-picker"
-          onClick={() => setAgentPickerSignal((v) => v + 1)}
-          disabled={!chat}
-          title={t("workspace.bar.agents_hint")}
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            maxWidth: 280,
-            padding: "4px 8px",
-            borderRadius: 8,
-            border: "1px solid var(--paper-edge)",
-            background: hiredAgents.length > 0 ? "var(--fill-1)" : "transparent",
-            color: hiredAgents.length > 0 ? "var(--accent)" : "var(--muted-deep)",
-            fontSize: 12,
-            fontWeight: 600,
-            cursor: chat ? "pointer" : "default",
-          }}
-        >
-          <IconUsers size={13} />
-          <span
-            style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-          >
-            {t("workspace.bar.agents")}
-            {hiredAgents.length > 0 ? ` · ${hiredAgents.length}` : ""}
-          </span>
-          <IconChevronDown size={12} style={{ flexShrink: 0, opacity: 0.7 }} />
-        </button>
-      </div>
+      </div>}
       {sessionNotice && (
         <div
           role="status"
@@ -3747,16 +3334,15 @@ function ChatPage() {
               planMode: opts?.planMode,
               goalMode: opts?.goalMode,
               appsGenerateMode: opts?.appsGenerateMode,
+              taskForceTargets: opts?.taskForceTargets,
               sessionRouting: opts?.sessionRouting,
+              stormbreakerMode: opts?.stormbreakerMode,
             });
           }}
           queuedCount={queuedSteers.length}
           prefillText={composerPrefill}
           activeChatId={chat.id}
-          agentPickerSignal={agentPickerSignal}
-          onCommand={handleCommand}
-          onCallAgent={(agentId) => void switchAgent(agentId)}
-          onCallHubAgents={hireAgents}
+          onSessionAction={handleSessionAction}
           onRecommendPreview={handleRecommendPreview}
           onRecommendExecute={handleRecommendExecute}
           onStop={stop}
@@ -3772,12 +3358,8 @@ function ChatPage() {
             apps: INSTALLED_APPS,
             generatedApps: allGeneratedApps,
             envKeys: allEnvKeys,
-            commands: cliCommands,
           }}
-          runtime={activeRuntime}
-          modelOptions={modelOptions}
-          onSelectModel={switchModel}
-          onSelectEffort={switchEffort}
+          placeholder={locale === "ko" ? "원하는 결과를 설명하세요" : "Describe the result you want"}
           tokensUsage={{ current: currentTokens }}
           showModeToggles={chat.kind !== "division"}
           continuousMode={chat.continuousMode === true}
@@ -3815,7 +3397,7 @@ function ChatPage() {
       </div>
       {rightPanelOpen && (
         <ChatRightPanel
-          key={chatId || "new-chat"}
+          key={chatId || "new-task"}
           activeTab={rightPanelTab}
           onTabChange={openPanelTab}
           onClose={closeRightPanel}
@@ -3830,6 +3412,7 @@ function ChatPage() {
           org={resolvedOrg}
           agent={displayAgent}
           agents={displayAgents}
+          project={project}
           busy={busy}
           liveAgents={liveAgents}
           timeline={netTimeline}

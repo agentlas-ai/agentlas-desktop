@@ -2,7 +2,7 @@
 // 작업 중 메시지는 Codex/Claude 데스크톱처럼 step log + 경과 시간을 실시간으로 보여준다.
 "use client";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import type { HubAgentBookmark, InstalledAgent, InstalledFirm, InstalledMcpServer, Project, RuntimeCommand } from "@/lib/types";
+import type { HubAgentBookmark, InstalledAgent, InstalledFirm, InstalledMcpServer, Project } from "@/lib/types";
 import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
 import { AgentAvatar } from "./AgentAvatar";
 import { Markdown, MarkdownSegment, StreamingMarkdown, type CodeArtifact, type LinkedFileArtifact, type MediaArtifact } from "./Markdown";
@@ -107,8 +107,9 @@ export interface ChatEmptyDirectory {
   firms: InstalledFirm[];
   projects: Project[];
   envKeys: string[];
-  commands: RuntimeCommand[];
   plugins: InstalledMcpServer[];
+  /** Exact saved project order. First row owns the session; later rows are turn workers. */
+  projectTeam?: Array<{ id: string; token: string; label: string }>;
 }
 
 function messageDomId(messageId: string): string {
@@ -589,12 +590,7 @@ function EmptyChatState({
   const { t, locale } = useT();
   const sections = useMemo(() => {
     if (!directory) return [];
-    const commands: EmptyDirectoryItem[] = directory.commands.slice(0, 4).map((command) => ({
-      id: `command-${command.source}-${command.name}`,
-      token: command.name,
-      label: command.description || command.source,
-    }));
-    const mentions: EmptyDirectoryItem[] = [
+    const mentions: EmptyDirectoryItem[] = directory.projectTeam ?? [
       ...directory.agents
         .filter((agent) => agent.visibility !== "background" && agent.visibility !== "private")
         .slice(0, 2)
@@ -603,54 +599,29 @@ function EmptyChatState({
           token: `@${locale === "en" ? agent.nameEn || agent.name : agent.name}`,
           label: t("chatstream.empty_mention_agent"),
         })),
-      ...directory.firms.slice(0, 1).map((firm) => ({
-        id: `firm-${firm.id}`,
-        token: `@${locale === "en" ? firm.nameEn || firm.name : firm.name}`,
-        label: t("chatstream.empty_mention_firm"),
-      })),
       ...hubBookmarksWithoutLocalDuplicates(directory.hubBookmarks, directory.agents).slice(0, 2).map((bookmark) => ({
         id: `hub-${String(bookmark.listing.entityKind || "agent")}-${bookmark.slug}`,
         token: `@${locale === "en" ? bookmark.listing.nameEn || bookmark.listing.name : bookmark.listing.name}`,
         label: t("chatstream.empty_mention_hub"),
       })),
-      ...directory.projects.slice(0, 1).map((project) => ({
-        id: `project-${project.id}`,
-        token: `@${project.name}`,
-        label: t("chatstream.empty_mention_project"),
-      })),
-      ...directory.envKeys.slice(0, 1).map((key) => ({
-        id: `env-${key}`,
-        token: `@${key}`,
-        label: t("chatstream.empty_mention_env"),
-      })),
     ];
-    const plugins: EmptyDirectoryItem[] = directory.plugins
-      .filter((plugin) => plugin.enabled)
-      .slice(0, 4)
-      .map((plugin) => ({
-        id: `plugin-${plugin.id}`,
-        token: locale === "en" ? plugin.nameEn || plugin.name : plugin.name,
-        label: plugin.transport.toUpperCase(),
-      }));
 
     return [
-      { id: "commands", title: t("chatstream.empty_section.commands"), items: commands },
-      { id: "context", title: t("chatstream.empty_section.context"), items: mentions },
-      { id: "plugins", title: t("chatstream.empty_section.plugins"), items: plugins },
+      { id: "context", title: locale === "ko" ? "프로젝트 팀" : "Project team", items: mentions },
     ].filter((section) => section.items.length > 0);
   }, [directory, locale, t]);
 
   return (
     <section className="agentlas-chat-empty" aria-labelledby="agentlas-chat-empty-title">
       <header className="agentlas-chat-empty-header">
-        <h2 id="agentlas-chat-empty-title">{t("chatstream.empty_title", { name: agentName })}</h2>
-        <p>{t("chatstream.empty_hint")}</p>
+        <h2 id="agentlas-chat-empty-title">{locale === "ko" ? "이 프로젝트에서 무엇을 완성할까요?" : "What should this project accomplish?"}</h2>
+        <p>{locale === "ko" ? "원하는 결과를 설명하면 프로젝트 팀이 우선순위에 따라 작업합니다." : "Describe the result you want. The project team will work in its saved priority order."}</p>
       </header>
       {directory && sections.length > 0 && (
         <div className="agentlas-chat-empty-directory">
           <div className="agentlas-chat-empty-directory-intro">
-            <strong>{t("chatstream.empty_commands_title")}</strong>
-            <span>{t("chatstream.empty_commands_hint")}</span>
+            <strong>{locale === "ko" ? "이 프로젝트에서 사용할 수 있어요" : "Available in this project"}</strong>
+            <span>{locale === "ko" ? "@ 호출은 이 턴에만 서브 에이전트를 추가합니다." : "An @ call adds a sub-agent for this turn only."}</span>
           </div>
           <div className="agentlas-chat-empty-grid">
               {sections.map((section) => (

@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type {
@@ -146,6 +146,7 @@ export function RuntimeControl() {
     from: number;
     over: number;
   } | null>(null);
+  const pointerDragRef = useRef<{ role: RuntimeRole; from: number; startX: number; startY: number } | null>(null);
 
   const loadPool = useCallback(async () => {
     const api = ipc();
@@ -439,6 +440,35 @@ export function RuntimeControl() {
     await reorderMember(role, index, index + delta);
   }
 
+  function beginPointerReorder(event: ReactPointerEvent<HTMLElement>, role: RuntimeRole, from: number) {
+    if (busy) return;
+    pointerDragRef.current = { role, from, startX: event.clientX, startY: event.clientY };
+    setDragState({ role, from, over: from });
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function updatePointerReorder(event: ReactPointerEvent<HTMLElement>) {
+    const drag = pointerDragRef.current;
+    if (!drag) return;
+    const target = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+    const row = target?.closest<HTMLElement>("[data-runtime-pool-row]");
+    if (row?.dataset.runtimePoolRole !== drag.role) return;
+    const over = Number(row.dataset.runtimePoolIndex);
+    if (Number.isInteger(over) && dragState?.over !== over) setDragState({ role: drag.role, from: drag.from, over });
+  }
+
+  function finishPointerReorder(event: ReactPointerEvent<HTMLElement>) {
+    const drag = pointerDragRef.current;
+    pointerDragRef.current = null;
+    setDragState(null);
+    if (!drag || busy || Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) <= 4) return;
+    const target = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+    const row = target?.closest<HTMLElement>("[data-runtime-pool-row]");
+    if (row?.dataset.runtimePoolRole !== drag.role) return;
+    const to = Number(row.dataset.runtimePoolIndex);
+    if (Number.isInteger(to)) void reorderMember(drag.role, drag.from, to);
+  }
+
   async function removeMember(role: RuntimeRole, index: number) {
     const selections = poolSelections(role);
     const next = selections.filter((_, i) => i !== index);
@@ -563,6 +593,9 @@ export function RuntimeControl() {
               const rowLabel = `${roleLabel} ${ko ? "후보" : "candidate"} ${index + 1}`;
               return (
                 <li
+                  data-runtime-pool-row
+                  data-runtime-pool-role={role}
+                  data-runtime-pool-index={index}
                   key={`${member.position}:${selectionKey(selection)}`}
                   data-pool-position={member.position}
                   data-primary={index === 0 ? "true" : "false"}
@@ -595,7 +628,7 @@ export function RuntimeControl() {
                   <button
                     type="button"
                     className="dashboard-runtime-pool-order"
-                    draggable={!busy}
+                    draggable={false}
                     disabled={busy}
                     aria-label={
                       ko
@@ -607,6 +640,10 @@ export function RuntimeControl() {
                         ? "드래그해서 순위 변경"
                         : "Drag to change priority"
                     }
+                    onPointerDown={(event) => beginPointerReorder(event, role, index)}
+                    onPointerMove={updatePointerReorder}
+                    onPointerUp={finishPointerReorder}
+                    onPointerCancel={() => { pointerDragRef.current = null; setDragState(null); }}
                     onDragStart={(event) => {
                       event.dataTransfer.effectAllowed = "move";
                       event.dataTransfer.setData(

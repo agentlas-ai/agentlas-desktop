@@ -33,20 +33,16 @@ export const MOBILE_BRIDGE_METHODS = [
   "host.status",
   "team.list",
   "firms.list",
-  "agentGroups.listResolved",
-  "groups.create",
   "projects.list",
   "chats.listRecent",
   "chats.get",
-  "chats.create",
   "chats.rename",
   "chats.archive",
   "chats.unarchive",
   "chats.setContinuousMode",
   "chats.setSwarmMode",
-  "chats.setBorrowedAgents",
-  "chats.switchAgent",
   "chats.clearContext",
+  "tasks.createProject",
   "tasks.latestResult",
   "tasks.acceptResult",
   "one.suggestions.act",
@@ -81,8 +77,6 @@ export const MOBILE_BRIDGE_METHODS = [
   "agents.cloudDelete",
   "build.start",
   "build.status",
-  "groups.cloudList",
-  "groups.cloudSave",
   "device.revokeSelf",
 ] as const;
 
@@ -91,16 +85,13 @@ export type MobileBridgeMethod = (typeof MOBILE_BRIDGE_METHODS)[number];
 /** State-changing methods require durable replay protection in Desktop main. */
 export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "device.revokeSelf",
-  "groups.create",
-  "chats.create",
   "chats.rename",
   "chats.archive",
   "chats.unarchive",
   "chats.setContinuousMode",
   "chats.setSwarmMode",
-  "chats.setBorrowedAgents",
-  "chats.switchAgent",
   "chats.clearContext",
+  "tasks.createProject",
   "tasks.acceptResult",
   "one.suggestions.act",
   "workspace.setProject",
@@ -117,7 +108,6 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "agents.cloudUploadSave",
   "agents.cloudDelete",
   "build.start",
-  "groups.cloudSave",
 ]);
 
 export const MOBILE_BRIDGE_EVENT_NAMES = [
@@ -154,7 +144,9 @@ export interface MobileBridgeInvokeSteerParams {
   planMode?: boolean;
   goalMode?: boolean;
   appsGenerateMode?: boolean;
+  stormbreakerMode?: boolean;
   borrowAgents?: string[];
+  taskForceTargets?: MobileBridgeTurnAgentTargetDto[];
   images?: MobileBridgeImageAttachmentDto[];
   expectedQuestionMessageId?: string;
   expectedTaskId?: string;
@@ -163,17 +155,26 @@ export interface MobileBridgeInvokeSteerParams {
   expectedRunId: string;
 }
 
+/** Explicit turn-only sub-agent request. It never changes the chat controller. */
+export type MobileBridgeTurnAgentTargetDto =
+  | { source: "local"; entityKind: "agent"; agentId: string }
+  | { source: "cloud" | "hub"; entityKind: "agent"; slug: string };
+
 /**
  * Closed first-turn contract for the consumer-facing One surface on Mobile.
  *
- * The phone deliberately cannot select a chat, agent, firm, group, project,
- * permission, runtime, Hub route, borrowed target, Task, Profile, or Memory
- * capability. Desktop Main creates the conversation and derives every such
- * authority from its current authenticated host state.
+ * The phone deliberately cannot select a chat owner, agent, firm, group,
+ * project, runtime, Hub route, durable borrowed target, Task, Profile, or
+ * Memory capability. Desktop Main creates the conversation and derives every
+ * such authority from its current authenticated host state. Permission is an
+ * optional explicit user override; omission leaves the normal One choice to
+ * Desktop Main.
  */
 export interface MobileBridgeOneInvokeStartParams {
   schemaVersion: 1;
   userPrompt: string;
+  permissions?: "read" | "write" | "full";
+  taskForceTargets?: MobileBridgeTurnAgentTargetDto[];
   images?: MobileBridgeImageAttachmentDto[];
 }
 
@@ -643,44 +644,30 @@ export interface MobileBridgeFirmDto {
   installedAt: string;
 }
 
-export interface MobileBridgeAgentGroupMemberDto {
-  id: string;
-  source: "installed" | "firm" | "firm-node" | "hub";
-  agentId: string | null;
-  agentSlug: string | null;
-  hubSlug: string | null;
-  firmId: string | null;
-  nodeId: string | null;
-  role: string | null;
-  name: string;
-  nameEn: string;
-  routeLabel: string;
-  /** Exact immutable Hub identity when this installed member has one. */
-  agentDefinitionId?: string;
-  agentReleaseId?: string;
-  status: "ok" | "moved" | "missing";
-  warnings: string[];
-}
-
-export interface MobileBridgeAgentGroupDto {
-  id: string;
-  name: string;
-  description: string;
-  orchestratorName: string;
-  members: MobileBridgeAgentGroupMemberDto[];
-  warningCount: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface MobileBridgeProjectDto {
   id: string;
   name: string;
   description: string | null;
   defaultAgentId: string | null;
+  /** First ordered project-pool member. Kept separate from legacy naming. */
+  controllerAgentId: string | null;
+  controllerName: string | null;
+  agentCount: number;
   hasWorkingFolder: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface MobileBridgeProjectTaskStartParams {
+  projectId: string;
+  title?: string;
+}
+
+export interface MobileBridgeProjectTaskStartReceiptDto {
+  projectId: string;
+  taskId: string;
+  chatId: string;
+  title: string;
 }
 
 export interface MobileBridgeHiredAgentDto {
@@ -705,7 +692,6 @@ export interface MobileBridgeChatDto {
   /** Basename only. Absolute Desktop paths never cross the bridge. */
   workingFolderName: string | null;
   firmId: string | null;
-  agentGroupId: string | null;
   agentId: string;
   title: string;
   archivedAt: string | null;
@@ -1395,7 +1381,6 @@ export interface MobileBridgeSnapshot {
   runtimes: MobileBridgeRuntimeDto[];
   agents: MobileBridgeAgentDto[];
   firms: MobileBridgeFirmDto[];
-  groups: MobileBridgeAgentGroupDto[];
   projects: MobileBridgeProjectDto[];
   chats: MobileBridgeChatDto[];
   messages: Record<string, MobileBridgeChatMessageDto[]>;
@@ -1441,7 +1426,6 @@ const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "host.status",
   "team.list",
   "firms.list",
-  "agentGroups.listResolved",
   "projects.list",
   "invoke.activeChats",
   "confirm.listPending",
@@ -1450,7 +1434,6 @@ const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "hub.borrowable.list",
   "hephaestus.engineToggles",
   "ontology.projections.list",
-  "groups.cloudList",
   "device.revokeSelf",
 ]);
 
@@ -1603,6 +1586,7 @@ function validateInvokeOptions(
   ) {
     return "borrowAgents must be an array of at most 8 non-empty strings";
   }
+  const taskForceTargetsError = validateTurnAgentTargets(params.taskForceTargets);
   const hasDecisionId = params.expectedQuestionMessageId !== undefined;
   const hasDecisionTaskId = params.expectedTaskId !== undefined;
   const hasDecisionTaskVersion = params.expectedTaskVersion !== undefined;
@@ -1630,8 +1614,38 @@ function validateInvokeOptions(
     optionalBoolean(params, "planMode"),
     optionalBoolean(params, "goalMode"),
     optionalBoolean(params, "appsGenerateMode"),
+    optionalBoolean(params, "stormbreakerMode"),
+    taskForceTargetsError,
     decisionBindingError,
   );
+}
+
+function validateTurnAgentTargets(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.length > 8) {
+    return "taskForceTargets must contain at most 8 turn-only agent targets";
+  }
+  for (const target of value) {
+    if (!isRecord(target) || target.entityKind !== "agent") {
+      return "taskForceTargets accepts only agent targets";
+    }
+    if (target.source === "local") {
+      if (!hasOnlyKeys(target, ["source", "entityKind", "agentId"])) {
+        return "local taskForceTargets accepts only source, entityKind, and agentId";
+      }
+      const error = requiredString(target, "agentId", 160);
+      if (error) return error;
+    } else if (target.source === "cloud" || target.source === "hub") {
+      if (!hasOnlyKeys(target, ["source", "entityKind", "slug"])) {
+        return "remote taskForceTargets accepts only source, entityKind, and slug";
+      }
+      const error = requiredString(target, "slug", 160);
+      if (error) return error;
+    } else {
+      return "taskForceTargets source is unsupported";
+    }
+  }
+  return null;
 }
 
 const ONTOLOGY_SAFE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/+\-]{0,159}$/;
@@ -1746,53 +1760,15 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["limit"])
         ? optionalInteger(params, "limit", 1, 100)
         : "chats.listRecent accepts only limit";
-    case "groups.create": {
-      if (!hasOnlyKeys(params, ["name", "description", "orchestratorName", "memberAgentIds"])) {
-        return "groups.create contains unsupported fields";
-      }
-      const memberAgentIds = params.memberAgentIds;
-      if (
-        !Array.isArray(memberAgentIds) ||
-        memberAgentIds.length < 1 ||
-        memberAgentIds.length > 32 ||
-        memberAgentIds.some(
-          (item) =>
-            typeof item !== "string" ||
-            item.length < 1 ||
-            item.length > 256 ||
-            /[\u0000-\u001f]/.test(item),
-        )
-      ) {
-        return "memberAgentIds must contain 1 to 32 bounded installed-agent ids";
-      }
-      return firstError(
-        requiredString(params, "name", 120),
-        optionalText(params, "description", 1_000),
-        optionalString(params, "orchestratorName", 120),
-      );
-    }
     case "chats.get":
     case "chats.archive":
     case "chats.unarchive":
     case "chats.clearContext":
       return hasOnlyKeys(params, ["id"]) ? requiredString(params, "id") : `${method} accepts only id`;
-    case "chats.create": {
-      if (!hasOnlyKeys(params, ["agentId", "firmId", "agentGroupId", "projectId", "title", "continueFromChatId"])) {
-        return "chats.create contains unsupported fields";
-      }
-      const targetCount = [params.agentId, params.firmId, params.agentGroupId].filter(
-        (item) => typeof item === "string" && item.length > 0,
-      ).length;
-      if (targetCount > 1) return "chats.create accepts at most one of agentId, firmId, or agentGroupId";
-      return firstError(
-        optionalString(params, "agentId"),
-        optionalString(params, "firmId"),
-        optionalString(params, "agentGroupId"),
-        optionalString(params, "projectId"),
-        optionalString(params, "title", 200),
-        optionalString(params, "continueFromChatId"),
-      );
-    }
+    case "tasks.createProject":
+      return hasOnlyKeys(params, ["projectId", "title"])
+        ? firstError(requiredString(params, "projectId"), optionalString(params, "title", 200))
+        : "tasks.createProject accepts only projectId and title";
     case "chats.rename":
       return hasOnlyKeys(params, ["id", "title"])
         ? firstError(requiredString(params, "id"), requiredString(params, "title", 200))
@@ -1803,19 +1779,6 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         ? firstError(requiredString(params, "id"), optionalBoolean(params, "enabled"),
             typeof params.enabled === "boolean" ? null : "enabled must be a boolean")
         : `${method} accepts only id and enabled`;
-    case "chats.setBorrowedAgents": {
-      if (!hasOnlyKeys(params, ["id", "slugs"])) return "chats.setBorrowedAgents accepts only id and slugs";
-      const slugs = params.slugs;
-      if (!Array.isArray(slugs) || slugs.length > 8 || slugs.some((item) =>
-        typeof item !== "string" || item.length < 1 || item.length > 160 || /[\u0000-\u001f]/.test(item))) {
-        return "slugs must be an array of at most 8 bounded identifiers";
-      }
-      return requiredString(params, "id");
-    }
-    case "chats.switchAgent":
-      return hasOnlyKeys(params, ["id", "agentId"])
-        ? firstError(requiredString(params, "id"), requiredString(params, "agentId"))
-        : "chats.switchAgent accepts only id and agentId";
     case "tasks.acceptResult":
       return hasOnlyKeys(params, ["taskId", "expectedVersion", "expectedRunId"])
         ? firstError(
@@ -1881,7 +1844,7 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         ? requiredString(params, "chatId")
         : "composer.context accepts only chatId";
     case "one.invoke.start":
-      if (!hasOnlyKeys(params, ["schemaVersion", "userPrompt", "permissions", "images"])) {
+      if (!hasOnlyKeys(params, ["schemaVersion", "userPrompt", "permissions", "taskForceTargets", "images"])) {
         return "one.invoke.start contains unsupported fields";
       }
       return firstError(
@@ -1891,15 +1854,16 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
           ? null
           : "one.invoke.start userPrompt must contain visible text",
         validateEnum(params, "permissions", ["read", "write", "full"]),
+        validateTurnAgentTargets(params.taskForceTargets),
         validateImageAttachments(params.images),
       );
     case "invoke.start":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents", "images", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "stormbreakerMode", "borrowAgents", "taskForceTargets", "images", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
         return "invoke.start contains unsupported fields";
       }
       return validateInvokeOptions(params);
     case "invoke.steer":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "borrowAgents", "images", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "stormbreakerMode", "borrowAgents", "taskForceTargets", "images", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
         return "invoke.steer contains unsupported fields";
       }
       return firstError(validateInvokeOptions(params, true), requiredString(params, "expectedRunId", 160));
@@ -1996,34 +1960,6 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["runId"])
         ? requiredString(params, "runId", 160)
         : "build.status accepts only runId";
-    case "groups.cloudSave": {
-      if (!hasOnlyKeys(params, [
-        "name",
-        "description",
-        "members",
-        "combinationId",
-        "expectedRevision",
-        "idempotencyKey",
-      ])) {
-        return "groups.cloudSave contains unsupported fields";
-      }
-      const hasCombinationId = params.combinationId !== undefined;
-      const hasExpectedRevision = params.expectedRevision !== undefined;
-      if (hasCombinationId !== hasExpectedRevision) {
-        return "groups.cloudSave updates require combinationId and expectedRevision together";
-      }
-      const membersError = validateCloudCombinationMembers(params.members);
-      if (membersError) return membersError;
-      return firstError(
-        requiredString(params, "name", 120),
-        optionalText(params, "description", 1_000),
-        hasCombinationId ? requiredString(params, "combinationId", 128) : null,
-        hasExpectedRevision
-          ? optionalInteger(params, "expectedRevision", 1, Number.MAX_SAFE_INTEGER)
-          : null,
-        requiredString(params, "idempotencyKey", 160),
-      );
-    }
     // Empty-parameter methods returned above. Keep this fail-closed fallback so
     // a future method cannot become callable before it receives a validator.
     default:

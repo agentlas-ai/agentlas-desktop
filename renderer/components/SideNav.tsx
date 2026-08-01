@@ -18,7 +18,6 @@ import { pickLocalized, useT } from "@/lib/i18n";
 import {
   IconWand,
   IconUsers,
-  IconLayers,
   IconFileUp,
   IconHome,
   IconChat,
@@ -132,7 +131,7 @@ export function SideNav({
   const primary: Leaf[] = useMemo(
     () => [
       { label: t("nav.dashboard"), href: "/dashboard", icon: IconHome },
-      { label: t("nav.workspace"), href: "/chat", icon: IconChat },
+      { label: t("nav.workspace"), href: "/workspace", icon: IconChat },
       { label: t("nav.agent_hub"), href: "/marketplace", icon: IconUsers },
       { label: t("nav.automations"), href: "/automation", icon: IconBolt },
       { label: t("nav.site"), href: "/site", icon: IconApps },
@@ -158,11 +157,10 @@ export function SideNav({
         label: t("nav.group.agent_cloud"),
         href: "/build",
         icon: IconBuilding,
-        isActive: (p) => p.startsWith("/build") || p.startsWith("/library/agents") || p.startsWith("/library/agent-groups") || p.startsWith("/cloud"),
+        isActive: (p) => p.startsWith("/build") || p.startsWith("/library/agents") || p.startsWith("/cloud"),
         items: [
           { label: t("nav.build"), href: "/build", icon: IconWand },
           { label: t("nav.agent"), href: "/library/agents", icon: IconUsers },
-          { label: t("nav.agent_group"), href: "/library/agent-groups", icon: IconLayers },
           { label: t("nav.agent_upload"), href: "/cloud", icon: IconFileUp },
         ],
       },
@@ -171,7 +169,7 @@ export function SideNav({
         label: t("nav.group.environment"),
         href: "/library/env",
         icon: IconKey,
-        isActive: (p) => p.startsWith("/library") && !p.startsWith("/library/agents") && !p.startsWith("/library/agent-groups"),
+        isActive: (p) => p.startsWith("/library") && !p.startsWith("/library/agents"),
         items: [
           { label: t("nav.env_keys"), href: "/library/env", icon: IconKey },
           { label: t("nav.mcp_tools"), href: "/library/mcps", icon: IconNetwork },
@@ -192,8 +190,8 @@ export function SideNav({
   const hrefPath = (href: string) => href.split("?")[0] || href;
   const isLeafActive = (href: string) => {
     const path = hrefPath(href);
-    if (path === "/chat") {
-      return pathname.startsWith("/chat") || pathname.startsWith("/project");
+    if (path === "/workspace") {
+      return pathname.startsWith("/workspace") || pathname.startsWith("/project");
     }
     if (path === "/dashboard") {
       return pathname.startsWith("/dashboard");

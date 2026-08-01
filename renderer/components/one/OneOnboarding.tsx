@@ -324,7 +324,6 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
   const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const [talking, setTalking] = useState(false);
   const [finishing, setFinishing] = useState(false);
-  const [starterTeamPresent, setStarterTeamPresent] = useState(true);
   const [loadNonce, setLoadNonce] = useState(0);
   const [dismissRequested, setDismissRequested] = useState(false);
   const [dismissRetryNonce, setDismissRetryNonce] = useState(0);
@@ -448,28 +447,6 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       document.removeEventListener("keydown", trap);
     };
   }, [replay, scene, showResume, visible]);
-
-  useEffect(() => {
-    if (!state || visible || !state.starterTeamGroupId) return;
-    ipc()?.agentGroups.list().then((groups) => {
-      const group = groups.find((item) => item.id === state.starterTeamGroupId);
-      const expected = new Set(state.selectedStarterSlugs);
-      const actual = new Set<string>();
-      const exact = Boolean(group
-        && group.members.length === expected.size
-        && group.members.every((member) => {
-          const slug = member.hubSlug || member.agentSlug || "";
-          actual.add(slug);
-          const starter = ONE_ONBOARDING_STARTER_AGENTS.find((item) => item.slug === slug);
-          return expected.has(slug)
-            && member.source === "hub"
-            && member.hubEntityKind === starter?.entityKind
-            && starter?.packageHash === member.snapshot.packageHash;
-        })
-        && actual.size === expected.size);
-      setStarterTeamPresent(exact);
-    }).catch(() => setStarterTeamPresent(false));
-  }, [state, visible]);
 
   const play = useCallback((kind: "tap" | "success") => {
     if (!state?.soundEnabled || reduced) return;
@@ -1057,27 +1034,6 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
     }
   };
 
-  const repairStarterTeam = async () => {
-    const api = ipc();
-    if (!api?.oneOnboarding || !state || state.status !== "completed" || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const next = await api.oneOnboarding.provisionStarterTeam({
-        expectedVersion: state.version,
-        memberSlugs: state.selectedStarterSlugs,
-        locale,
-      });
-      setState(next);
-      setStarterTeamPresent(true);
-      setHelperOpen(false);
-    } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.repair_team")));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const sceneTitle = useMemo(() => tFor(locale, ({
     s0: "one.onb.scene.s0.title",
     s1: "one.onb.scene.s1.title",
@@ -1109,18 +1065,6 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
   if (!visible) {
     return (
       <>
-        {starterTeamPresent && state.starterTeamGroupId && state.selectedStarterSlugs.length > 0 && (
-          <div className={styles.starterDock} role="group" aria-label={tFor(locale, "one.onb.dock.aria")}>
-            <div className={styles.starterAgents}>
-              {state.selectedStarterSlugs.map((slug) => {
-                const member = ONE_ONBOARDING_STARTER_AGENTS.find((agent) => agent.slug === slug);
-                return <span key={slug} title={ko ? member?.nameKo : member?.nameEn}>{(ko ? member?.nameKo : member?.nameEn)?.slice(0, 2)}</span>;
-              })}
-            </div>
-            <strong>{tFor(locale, "one.onb.dock.orchestrator")}</strong>
-            <small>{tFor(locale, "one.onb.dock.starter_team", { count: state.selectedStarterSlugs.length })}</small>
-          </div>
-        )}
         <div className={styles.helperWrap}>
           <AnimatePresence>
             {helperOpen && (
@@ -1130,15 +1074,12 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
                   ? tFor(locale, "one.onb.helper.dismissed")
                   : state.status === "migrated"
                     ? tFor(locale, "one.onb.helper.migrated")
-                  : starterTeamPresent
-                  ? tFor(locale, "one.onb.helper.revisit")
-                  : tFor(locale, "one.onb.helper.team_changed")}</span>
+                  : tFor(locale, "one.onb.helper.revisit")}</span>
                 {error && <span role="alert">{error}</span>}
                 {(state.status === "dismissed" || state.status === "migrated")
                   ? <button type="button" disabled={busy} onClick={() => void resumeTutorial()}>{state.status === "dismissed" ? tFor(locale, "one.onb.helper.continue") : tFor(locale, "one.onb.helper.start")}</button>
                   : <button type="button" onClick={openReplay}>{tFor(locale, "one.onb.helper.replay")}</button>}
                 {state.status === "completed" && <button type="button" disabled={busy} onClick={() => void reopenProviderSetup()}>{tFor(locale, "one.onb.helper.change_ai")}</button>}
-                {!starterTeamPresent && state.status === "completed" && <button type="button" disabled={busy} onClick={() => void repairStarterTeam()}>{tFor(locale, "one.onb.helper.repair")}</button>}
               </motion.div>
             )}
           </AnimatePresence>

@@ -42,7 +42,7 @@ import {
   listChatMessages,
   setChatWorkingFolder,
 } from "../store/chats";
-import { getProject } from "../store/projects";
+import { getProject, listProjects } from "../store/projects";
 import { getCanonicalTaskForChat } from "../store/tasks";
 import { touchRuntimeSession } from "../store/runtime-sessions";
 import { getInterviewMode, isTrivialPrompt } from "../store/interview-mode";
@@ -78,11 +78,6 @@ import {
   type DesktopWorkforceRuntimePlan,
 } from "./workforce-goal-continuity";
 import { runSwarmInvocation } from "./swarm-run";
-import { getAgentGroup, listAgentGroups, resolveAgentGroupForRuntime } from "../store/agent-groups";
-import {
-  getOneOnboardingExecutionAuthorization,
-  oneOnboardingStarterGroupReference,
-} from "../one/onboarding";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import { buildMemoryContext } from "../memory/context";
 import {
@@ -654,192 +649,10 @@ async function buildBorrowUserPreamble(
   };
 }
 
-async function buildAgentGroupTaskForceSpecs(input: {
-  groupId: string;
-  prompt: string;
-  project: string | null;
-  locale: "ko" | "en";
-  sink: EventSink;
-  signal?: AbortSignal;
-  stormbreakerMode?: boolean;
-  localOnly?: boolean;
-}): Promise<{ groupName: string; orchestratorName: string; specs: BorrowedAgentSpec[] }> {
-  const savedGroup = getAgentGroup(input.groupId);
-  if (input.localOnly && savedGroup?.members.some((member) => member.source === "hub")) {
-    throw new Error(
-      input.locale === "ko"
-        ? "Agent App의 로컬 실행은 브라우저 입력을 Hub로 전송하지 않습니다. Hub 멤버가 없는 로컬 에이전트 조합을 선택하세요."
-        : "Local Agent App runs never send browser input to Hub. Choose an agent group with local members only.",
-    );
-  }
-  const onboardingReference = oneOnboardingStarterGroupReference(input.groupId);
-  if (onboardingReference === "invalid") {
-    throw new Error(
-      input.locale === "ko"
-        ? "온보딩 스타터 팀이 변경되었습니다. 왼쪽 아래 Las 도움말에서 ‘스타터 팀 복구’를 누른 뒤 실행하세요."
-        : "The onboarding starter team changed. Open Las help at lower left and choose Repair starter team before running it.",
-    );
-  }
-  if (onboardingReference === "valid" && savedGroup) {
-    const authorization = await getOneOnboardingExecutionAuthorization();
-    if (!authorization.allowed || authorization.groupId !== savedGroup.id) {
-      throw new Error(
-        input.locale === "ko"
-          ? "선택한 AI 구독의 로그인과 실행 준비가 아직 확인되지 않았습니다. 설정에서 연결한 뒤 다시 시도하세요."
-          : "The selected AI subscription is not signed in and ready. Connect it in Settings, then retry.",
-      );
-    }
-    const specs: BorrowedAgentSpec[] = [];
-    const slugs = savedGroup.members.map((member) => member.hubSlug || member.agentSlug || "");
-    try {
-      for (const member of savedGroup.members) {
-        const slug = member.hubSlug || member.agentSlug || "";
-        const version = member.snapshot.packageHash;
-        const res = await hepCall(slug, [input.prompt], {
-          project: input.project ?? ".",
-          signal: input.signal,
-          version,
-        });
-        const [spec] = requireBorrowedAgentSpecs([slug], res.json ?? null, {
-          locale: input.locale,
-          transportOk: res.ok,
-          transportError: res.error || (res.exitCode == null ? "hub_call_failed" : `hub_exit_${res.exitCode}`),
-        });
-        if (!spec) throw new BorrowedAgentUnavailableError([slug], [`missing_directive:${slug}`], input.locale);
-        if (member.hubEntityKind === "team" && !spec.executionGraph) {
-          throw new BorrowedAgentUnavailableError([slug], ["team_execution_graph_unavailable"], input.locale);
-        }
-        specs.push({
-          ...spec,
-          entityKind: member.hubEntityKind === "team" ? "team" : "agent",
-          source: "hub",
-          routeLabel: "Hub · pinned onboarding starter",
-          warnings: [],
-        });
-      }
-    } catch (error) {
-      if (input.signal?.aborted || error instanceof BorrowedAgentUnavailableError) throw error;
-      throw new BorrowedAgentUnavailableError(slugs, ["hub_call_failed"], input.locale);
-    }
-    throwIfInvocationAborted(input.signal, input.locale);
-    return {
-      groupName: savedGroup.name,
-      orchestratorName: savedGroup.orchestratorName,
-      specs,
-    };
-  }
-  const resolved = await resolveAgentGroupForRuntime(input.groupId, { allowHub: !input.localOnly });
-  if (!resolved) {
-    throw new Error(
-      input.locale === "ko"
-        ? `에이전트 조합을 찾을 수 없습니다: ${input.groupId}`
-        : `Agent group not found: ${input.groupId}`,
-    );
-  }
-  for (const skipped of resolved.skipped) {
-    input.sink({
-      kind: "tool-use",
-      status:
-        input.locale === "ko"
-          ? `조합 멤버 제외: ${skipped.name} (${skipped.warnings.join(", ")})`
-          : `Skipped group member: ${skipped.name} (${skipped.warnings.join(", ")})`,
-    });
-  }
-  const skippedHubMembers = resolved.skipped.filter((member) => member.source === "hub");
-  if (skippedHubMembers.length > 0) {
-    const skippedById = new Map(resolved.group.members.map((member) => [member.id, member]));
-    const slugs = skippedHubMembers.map((member) => {
-      const saved = skippedById.get(member.id);
-      return saved?.hubSlug || saved?.agentSlug || member.name;
-    });
-    const reasons = skippedHubMembers.flatMap((member, index) =>
-      member.warnings.map((warning) => `${slugs[index]}:${warning}`),
-    );
-    throw new BorrowedAgentUnavailableError(slugs, reasons, input.locale);
-  }
-  const hubMembers = resolved.members.filter((member) => member.source === "hub");
-  const hubSlugs = hubMembers.map((member) => member.slug);
-  let hubSpecs = new Map<string, BorrowedAgentSpec>();
-  if (hubSlugs.length > 0) {
-    try {
-      const hasPinnedVersion = hubMembers.some((member) => Boolean(member.packageHash));
-      if (hasPinnedVersion) {
-        const specs: BorrowedAgentSpec[] = [];
-        for (const member of hubMembers) {
-          const res = await hepCall(member.slug, [input.prompt], {
-            project: input.project ?? ".",
-            signal: input.signal,
-            version: member.packageHash,
-          });
-          specs.push(...requireBorrowedAgentSpecs([member.slug], res.json ?? null, {
-            locale: input.locale,
-            transportOk: res.ok,
-            transportError: res.error || (res.exitCode == null ? "hub_call_failed" : `hub_exit_${res.exitCode}`),
-          }));
-        }
-        hubSpecs = new Map(specs.map((spec) => [spec.slug, spec]));
-      } else {
-        const res = await hepCall(hubSlugs.join(","), [input.prompt], {
-          project: input.project ?? ".",
-          signal: input.signal,
-        });
-        hubSpecs = new Map(requireBorrowedAgentSpecs(hubSlugs, res.json ?? null, {
-          locale: input.locale,
-          transportOk: res.ok,
-          transportError: res.error || (res.exitCode == null ? "hub_call_failed" : `hub_exit_${res.exitCode}`),
-        }).map((spec) => [spec.slug, spec]));
-      }
-    } catch (error) {
-      if (input.signal?.aborted) throw error;
-      if (error instanceof BorrowedAgentUnavailableError) throw error;
-      throw new BorrowedAgentUnavailableError(hubSlugs, ["hub_call_failed"], input.locale);
-    }
-    throwIfInvocationAborted(input.signal, input.locale);
-  }
-  const specs = resolved.members.map((member): BorrowedAgentSpec => {
-    const hub = member.source === "hub" ? hubSpecs.get(member.slug) : null;
-    if (member.source === "hub" && !hub) {
-      throw new BorrowedAgentUnavailableError([member.slug], [`missing_directive:${member.slug}`], input.locale);
-    }
-    if (member.source === "hub" && member.entityKind === "team" && !hub?.executionGraph) {
-      throw new BorrowedAgentUnavailableError([member.slug], ["team_execution_graph_unavailable"], input.locale);
-    }
-    return {
-      slug: member.slug,
-      name: hub?.name || member.name,
-      directive: member.source === "hub" ? hub!.directive : member.directive,
-      entityKind: member.entityKind === "team" ? "team" : "agent",
-      source: member.source,
-      routeLabel: member.routeLabel,
-      warnings: member.warnings,
-      installedAgentId: member.installedAgentId,
-      firmId: member.firmId,
-      agentDefinitionId: hub?.agentDefinitionId,
-      agentReleaseId: hub?.agentReleaseId,
-      packageHash: hub?.packageHash,
-      localized: hub?.localized,
-      executionGraph: hub?.executionGraph,
-    };
-  });
-  if (specs.length === 0) {
-    throw new Error(
-      input.locale === "ko"
-        ? "이 에이전트 조합에는 현재 실행 가능한 멤버가 없습니다."
-        : "This agent group has no runnable members right now.",
-    );
-  }
-  return {
-    groupName: resolved.group.name,
-    orchestratorName: resolved.group.orchestratorName,
-    specs,
-  };
-}
-
 function orchestrationTargetKey(target: OrchestrationTarget): string {
   if (target.source === "local") {
     if (target.entityKind === "agent") return `local:agent:${target.agentId}`;
-    if (target.entityKind === "team") return `local:team:${target.firmId}`;
-    return `local:group:${target.groupId}`;
+    return `local:team:${target.firmId}`;
   }
   return `${target.source}:${target.entityKind}:${target.slug.trim().toLowerCase()}`;
 }
@@ -860,9 +673,6 @@ function requireOrchestrationTargets(value: unknown): OrchestrationTarget[] {
     }
     if (source === "local" && entityKind === "team" && typeof target.firmId === "string" && target.firmId.trim()) {
       return { source, entityKind, firmId: target.firmId.trim() };
-    }
-    if (source === "local" && entityKind === "group" && typeof target.groupId === "string" && target.groupId.trim()) {
-      return { source, entityKind, groupId: target.groupId.trim() };
     }
     if (
       (source === "cloud" || source === "hub") &&
@@ -936,21 +746,6 @@ async function buildStructuredTaskForceSpecs(input: {
         routeLabel: "Installed Team",
         installedAgentId: firm.ceoAgentId,
         firmId: firm.id,
-      });
-      continue;
-    }
-    if (target.source === "local" && target.entityKind === "group") {
-      const matches = listAgentGroups().filter((candidate) => candidate.id === target.groupId);
-      const group = matches.length === 1 ? matches[0] : null;
-      if (!group) throw new Error(`Agent group is unavailable: ${target.groupId}`);
-      specs.push({
-        slug: `group:${group.id}`,
-        name: group.name,
-        directive: `Use the saved Agent Group orchestrator "${group.orchestratorName}" and preserve its member boundaries.`,
-        entityKind: "group",
-        source: "group",
-        routeLabel: "Agent Group",
-        groupId: group.id,
       });
       continue;
     }
@@ -1387,23 +1182,8 @@ export async function runMcpInvocation(
       return earlyResult();
     }
     if (
-      oneTeamExecutionPolicy === "solo_locked"
-      && /^\s*(?:\/?workforce\b|\/?hep-network\b)/i.test(req.userPrompt)
-    ) {
-      sink({
-        kind: "error",
-        error: {
-          code: "one-team-preflight-required",
-          message: locale === "ko"
-            ? "외부 팀을 부르기 전에 One의 팀 제안과 명시적 확인이 필요합니다."
-            : "One must show a team proposal and receive explicit confirmation before external recruitment.",
-        },
-      });
-      return earlyResult();
-    }
-    if (
       oneTeamExecutionPolicy === "confirmed_external_workforce"
-      && (!boundOneTeamRuntime || !/^\s*\/?workforce\b/i.test(req.userPrompt))
+      && !boundOneTeamRuntime
     ) {
       sink({
         kind: "error",
@@ -1602,6 +1382,31 @@ export async function runMcpInvocation(
         ].join("\n");
     effectiveUserPrompt = `${lockedBoundary}\n\n${effectiveUserPrompt}`;
   }
+  if (executionContext?.source === "automation") {
+    const availableProjects = listProjects().map((project) => ({
+      name: project.name,
+      source: project.sourceType,
+      connected: Boolean(project.folderPath || project.sourceRef),
+    }));
+    const automationBoundary = locale === "ko"
+      ? [
+          "[Agentlas 자동화 실행 경계]",
+          "최종 결과에 사용 에이전트, 사용 스킬, 라우팅, 런타임 같은 내부 운용 보고를 노출하지 마세요.",
+          "프로젝트를 임의로 선택하거나 존재하지 않는다고 단정하지 마세요. 아래 프로젝트 목록과 자동화에 결합된 문맥만 근거로 판단하고, 확정할 수 없으면 사용자에게 필요한 짧은 질문을 결과로 제시하세요.",
+          `사용 가능한 프로젝트: ${JSON.stringify(availableProjects)}`,
+          "완료된 사용자 결과부터 바로 작성하세요.",
+          "[/Agentlas 자동화 실행 경계]",
+        ].join("\n")
+      : [
+          "[Agentlas automation execution boundary]",
+          "Do not expose internal routing reports such as agents used, skills used, routing, or runtime details in the final result.",
+          "Do not choose a project arbitrarily or claim that none exists. Judge only from the project list below and the context bound to this automation; if the project cannot be determined, return the short question the user needs to answer.",
+          `Available projects: ${JSON.stringify(availableProjects)}`,
+          "Start directly with the finished user result.",
+          "[/Agentlas automation execution boundary]",
+        ].join("\n");
+    effectiveUserPrompt = `${automationBoundary}\n\n${effectiveUserPrompt}`;
+  }
   if (req.sessionRouting) {
     const incumbentRoster = [
       agent.nameEn || agent.name || agent.slug,
@@ -1626,10 +1431,30 @@ export async function runMcpInvocation(
         ].join("\n");
     effectiveUserPrompt = `${sessionRoutingPolicy}\n\n${effectiveUserPrompt}`;
   }
+  if (req.oneMode && req.stormbreakerMode === true) {
+    const oneStormbreakerPreference = locale === "ko"
+      ? [
+          "[이번 턴의 명시적 실행 선호]",
+          "사용자가 이번 턴에 Stormbreaker 사용을 명시적으로 선호했습니다.",
+          "One이 유일한 컨트롤러로 남아 필요성을 판단하고, 유용할 때만 하위 실행·검증·복구 루프를 사용하세요.",
+          "이 선호는 세션 소유권이나 다음 턴으로 전파되지 않습니다.",
+          "[/이번 턴의 명시적 실행 선호]",
+        ].join("\n")
+      : [
+          "[Explicit preference for this turn]",
+          "The user explicitly prefers Stormbreaker for this turn.",
+          "One remains the sole controller and may use subordinate execution, verification, and repair loops only when useful.",
+          "This preference changes neither session ownership nor later turns.",
+          "[/Explicit preference for this turn]",
+        ].join("\n");
+    effectiveUserPrompt = `${oneStormbreakerPreference}\n\n${effectiveUserPrompt}`;
+  }
   // `/hep-network` now enters the host-LLM Agent Workforce Ontology path.
   // The old lexical recommendation path remains available only as the explicit
   // compatibility command `/hep-network --legacy`.
-  const workforceCommand = parseWorkforceCommand(req.userPrompt, req.agentAppMode === true);
+  const workforceCommand = oneTeamExecutionPolicy === "confirmed_external_workforce"
+    ? { kind: "workforce" as const, goal: req.userPrompt, benchmarkMode: false }
+    : parseWorkforceCommand(req.userPrompt, req.agentAppMode === true);
   const workforceBenchmarkMode = workforceCommand.kind === "workforce" && workforceCommand.benchmarkMode;
   let explicitWorkforceGoal = workforceCommand.kind === "workforce" ? workforceCommand.goal : null;
   const explicitNetworkGoal = workforceCommand.kind === "legacy-network" ? workforceCommand.goal : null;
@@ -1661,7 +1486,7 @@ export async function runMcpInvocation(
   // 2개 이상은 아래 Borrowed Task Force 실행기로 분기해 plan → parallel delegate → synthesize를 수행한다.
   const shouldPrepareBorrowPreamble =
     borrowedAgentSlugs.length > 0 &&
-    (borrowedAgentSlugs.length === 1 || Boolean(chat.agentGroupId) || chat.kind === "division");
+    (borrowedAgentSlugs.length === 1 || chat.kind === "division");
   if (shouldPrepareBorrowPreamble) {
     sink({
       kind: "tool-use",
@@ -1688,12 +1513,6 @@ export async function runMcpInvocation(
       explicitBorrowMemoryKeys = preparedBorrow.specs.map((spec) =>
         borrowedMemoryKey(spec.agentDefinitionId!, spec.agentReleaseId!)
       );
-      // Saved Agent Groups have their own planner/worker system prompts, so pass the
-      // already-verified Hub bundle into that orchestration request. Ordinary single
-      // invocations attach the same user-level preamble to every immediate pass below.
-      if (chat.agentGroupId) {
-        effectiveUserPrompt = `${explicitBorrowUserPreamble}\n\nRequest:\n${effectiveUserPrompt}`;
-      }
     } catch (error) {
       if (signal?.aborted) throw error;
       const message = error instanceof Error ? error.message : String(error);
@@ -2006,13 +1825,11 @@ export async function runMcpInvocation(
     return earlyResult();
   }
 
-  // Stormbreaker is an executable Goal/UltraCode mode, not only a prompt
-  // suffix. Non-trivial explicit/automatic requests enter the bounded swarm
-  // path. Agent App and restricted-read invocations must never enter it.
-  // Slash input is a first-class Desktop surface, not merely a terminal alias.
-  // Keep the historical no-slash chips working while accepting `/hep-storm`.
+  // Legacy text aliases remain accepted for old deep links, but the Desktop
+  // composer sends a typed per-turn preference and never rewrites user text.
   const stormbreakerPrefix = /^\s*(?:\/?hep-storm|\/?hep-network\s+--stormbreaker|\/?stormbreaker)\b\s*/i;
   const explicitStormbreakerRequest = stormbreakerPrefix.test(req.userPrompt);
+  const structuredStormbreakerRequest = req.stormbreakerMode === true;
   const explicitStormbreakerGoal = explicitStormbreakerRequest
     ? req.userPrompt.replace(stormbreakerPrefix, "").trim() || req.userPrompt
     : req.userPrompt;
@@ -2020,6 +1837,7 @@ export async function runMcpInvocation(
     chat.kind === "division" ||
     chat.continuousMode === true ||
     explicitStormbreakerRequest ||
+    structuredStormbreakerRequest ||
     isStormbreakerAutoEnabled()
   );
   const stormbreakerSwarm =
@@ -2028,7 +1846,7 @@ export async function runMcpInvocation(
     !restrictedReadBoundary &&
     chat.kind !== "division" &&
     !chat.continuousMode &&
-    (explicitStormbreakerRequest || isStormbreakerAutoEnabled()) &&
+    (explicitStormbreakerRequest || structuredStormbreakerRequest || isStormbreakerAutoEnabled()) &&
     // `/hep-storm` is a routing slug, not a trivial task. Classify the goal
     // after removing the explicit command so slash input reaches the same
     // executable swarm path as the Composer Stormbreaker chip.
@@ -2703,15 +2521,6 @@ export async function runMcpInvocation(
         taskForceKind: "task-force",
         taskForceSpecs,
         priorHistory,
-        resolveGroupTaskForce: ({ groupId, prompt, signal: nestedSignal }) => buildAgentGroupTaskForceSpecs({
-          groupId,
-          prompt,
-          project: workingFolder,
-          locale,
-          sink,
-          signal: nestedSignal,
-          localOnly: req.agentAppMode || req.hubMode === "local-only",
-        }),
         active,
         runtimes,
         picked,
@@ -2733,66 +2542,6 @@ export async function runMcpInvocation(
       sink({ kind: "error", error: invocationFailure(req, "task-force-failed", err) });
     }
     return earlyResult();
-  }
-
-  // ── Agent Group 오케스트레이션 ───────────────────────────
-  // 저장된 그룹은 firm/division보다 상위의 라우팅 묶음이다. 실행 직전에
-  // installed agents, org chart, live Hub catalog/bundle을 다시 풀어서 최신 경로로 호출한다.
-  if (chat.agentGroupId) {
-    if (!oneTeamExecutionPolicy) {
-      try {
-        const groupRun = await buildAgentGroupTaskForceSpecs({
-          groupId: chat.agentGroupId,
-          prompt: effectiveUserPrompt,
-          project: workingFolder,
-          locale,
-          sink,
-          signal,
-          localOnly: req.agentAppMode || req.hubMode === "local-only",
-        });
-        await runBorrowedTaskForceInvocation({
-          req: { ...req, userPrompt: effectiveUserPrompt },
-          chat,
-          orchestratorAgent: {
-            ...agent,
-            name: groupRun.orchestratorName || agent.name,
-            nameEn: groupRun.orchestratorName || agent.nameEn || agent.name,
-          },
-          taskForceName: groupRun.groupName,
-          taskForceKind: "agent-group",
-          taskForceSpecs: groupRun.specs,
-          priorHistory,
-          resolveGroupTaskForce: ({ groupId, prompt, signal: nestedSignal }) => buildAgentGroupTaskForceSpecs({
-            groupId,
-            prompt,
-            project: workingFolder,
-            locale,
-            sink,
-            signal: nestedSignal,
-            localOnly: req.agentAppMode || req.hubMode === "local-only",
-          }),
-          active,
-          runtimes,
-          picked,
-          runtimeOverride: runtimeChoice.override,
-          workingFolder,
-          ...(workspaceBinding ? { workspaceBinding } : {}),
-          ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
-          mcpConfigPath,
-          mcpAllowedTools,
-          mcpCodexConfigArgs,
-          agentAppMcpRuntimeEnv: mcpRuntimeEnv,
-          onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
-          runnerEnv: orchestrationRunnerEnv,
-          locale,
-          sink,
-          signal,
-        });
-      } catch (err) {
-        sink({ kind: "error", error: invocationFailure(req, "agent-group-failed", err) });
-      }
-      return earlyResult();
-    }
   }
 
   // ── Hub borrowed task force ─────────────────────────────────
@@ -3037,10 +2786,20 @@ export async function runMcpInvocation(
   }
   if (invocationProjectId) {
     const project = getProject(invocationProjectId);
-    if (project?.contextNote) {
+    if (project?.systemPrompt) {
       systemPrompt = `${systemPrompt}\n\n${tStatus(locale, "projectContext", {
         name: project.name,
-      })}\n${project.contextNote}`;
+      })}\n${project.systemPrompt}`;
+    }
+    if (project?.agentPool.length) {
+      const pool = project.agentPool.map((member, index) => {
+        const installed = member.source === "local" ? getAgentById(member.agentId) : null;
+        const label = installed?.name || member.nameSnapshot;
+        return `${index + 1}. ${label} [${member.source}:${member.releaseId ?? member.agentId}]`;
+      }).join("\n");
+      systemPrompt = `${systemPrompt}\n\n## Project agent pool\n${pool}\n` +
+        `Use only this project pool when staffing sub-agents. Select the smallest useful roster for each WorkOrder, ` +
+        `preserve the user's order as preference, and never silently attach a different agent to the project.`;
     }
   }
   // 회사 채팅이면 firm 정보를 system prompt에 주입 — CEO가 자기 회사를 알 수 있게

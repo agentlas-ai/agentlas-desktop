@@ -125,7 +125,7 @@ export function ConfirmRequests() {
               </div>
             </div>
             <button
-              onClick={() => navigate(`/chat?id=${it.chatId}`)}
+              onClick={() => navigate(`/workspace/task?id=${it.chatId}`)}
               className="titlebar-nodrag"
               data-dashboard-action="true"
             >

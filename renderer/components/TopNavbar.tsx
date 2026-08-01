@@ -19,12 +19,10 @@ export function TopNavbar() {
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
   const agentForgeActive =
     pathname.startsWith("/library/agents") ||
-    pathname.startsWith("/library/agent-groups") ||
     pathname.startsWith("/build");
   const environmentActive =
     pathname.startsWith("/library") &&
-    !pathname.startsWith("/library/agents") &&
-    !pathname.startsWith("/library/agent-groups");
+    !pathname.startsWith("/library/agents");
 
   const handleMouseEnter = (menu: DropdownState) => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
@@ -92,7 +90,6 @@ export function TopNavbar() {
             <>
               <DropdownLink href="/build" icon={<IconBuilding size={14} />} label={t("nav.build")} sub={t("nav.top.build_sub")} />
               <DropdownLink href="/library/agents" icon={<IconWand size={14} />} label={t("nav.agent")} sub={t("nav.top.agent_sub")} />
-              <DropdownLink href="/library/agent-groups" icon={<IconLayers size={14} />} label={t("nav.agent_group")} sub={t("nav.top.agent_group_sub")} />
             </>
           )}
           {dropdown === "hub" && (
@@ -138,7 +135,7 @@ export function TopNavbar() {
         {/* Navigation Tabs */}
         <nav className="titlebar-nodrag" style={{ display: "flex", alignItems: "center", gap: 4, height: "100%" }}>
           <NavItem label={t("nav.dashboard")} href="/dashboard" active={pathname.startsWith("/dashboard")} />
-          <NavItem label={t("nav.workspace")} href="/chat" active={pathname.startsWith("/chat") || pathname.startsWith("/project")} />
+          <NavItem label={t("nav.workspace")} href="/workspace" active={pathname.startsWith("/workspace") || pathname.startsWith("/project")} />
           <NavItem label={t("nav.group.agent_forge")} href="/build" dropdown="agent_forge" active={agentForgeActive} />
           <NavItem label={t("nav.site")} href="/site" active={pathname.startsWith("/site")} />
           <NavItem label={t("nav.group.hub")} href="/marketplace" dropdown="hub" active={pathname.startsWith("/marketplace") || pathname.startsWith("/cloud")} />

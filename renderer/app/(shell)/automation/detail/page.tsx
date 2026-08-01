@@ -64,8 +64,8 @@ function AutomationDetailPage() {
           name: a ? pickLocalized(a, locale).name : locale === "en" ? "(removed agent)" : "(삭제된 에이전트)",
         });
       }
-    } catch (err) {
-      setError(locale === "en" ? `Automation could not be loaded. Nothing changed. ${String(err)}` : `자동화를 불러오지 못했습니다. 바뀐 내용은 없습니다. ${String(err)}`);
+    } catch {
+      setError(locale === "en" ? "Automation could not be loaded. Nothing changed." : "자동화를 불러오지 못했습니다. 바뀐 내용은 없습니다.");
     } finally {
       setLoading(false);
     }
@@ -81,8 +81,8 @@ function AutomationDetailPage() {
       const next = await api.automations.toggle(automation.id, !automation.enabled);
       setAutomation(next);
       setError("");
-    } catch (err) {
-      setError(locale === "en" ? `Status did not change. ${String(err)}` : `상태를 바꾸지 못했습니다. ${String(err)}`);
+    } catch {
+      setError(locale === "en" ? "Status did not change." : "상태를 바꾸지 못했습니다.");
     }
   }
 
@@ -91,15 +91,15 @@ function AutomationDetailPage() {
     if (!api || !automation) return;
     const message =
       locale === "en"
-        ? `Delete '${automation.name}'?\n\nThis removes the automation and also deletes its linked run chat and messages.`
-        : `'${automation.name}' 자동화를 삭제할까요?\n\n자동화가 사라지며, 이 자동화가 사용하던 실행 채팅과 메시지도 같이 삭제됩니다.`;
+        ? `Delete '${automation.name}'?\n\nThis also deletes its session transcript.`
+        : `'${automation.name}' 자동화를 삭제할까요?\n\n이 자동화의 세션 대화도 같이 삭제됩니다.`;
     if (!confirm(message)) return;
     try {
       await api.automations.remove(automation.id);
       window.dispatchEvent(new CustomEvent("agentlas:automation-changed", { detail: { id: automation.id } }));
       router.replace("/automation");
-    } catch (err) {
-      setError(locale === "en" ? `Automation was not deleted. ${String(err)}` : `자동화를 삭제하지 못했습니다. ${String(err)}`);
+    } catch {
+      setError(locale === "en" ? "Automation was not deleted." : "자동화를 삭제하지 못했습니다.");
     }
   }
 
@@ -323,5 +323,5 @@ function toolModeLabel(mode: Automation["toolMode"], locale: "ko" | "en") {
 function hubModeLabel(mode: Automation["hubMode"], locale: "ko" | "en") {
   if (mode === "hub-first") return locale === "en" ? "Hub first" : "Hub 우선";
   if (mode === "local-only") return locale === "en" ? "Local only" : "로컬만";
-  return locale === "en" ? "Local first, Hub fallback" : "로컬 우선, Hub fallback";
+  return locale === "en" ? "Local first, Hub when resolved" : "로컬 우선, 필요성이 확인되면 Hub";
 }

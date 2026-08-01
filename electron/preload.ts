@@ -418,16 +418,6 @@ const api: AgentlasIpc = {
     getResolvedOrg: (id: string) => ipcRenderer.invoke("firms:getResolvedOrg", id),
     resolveOrg: (id: string) => ipcRenderer.invoke("firms:resolveOrg", id),
   },
-  agentGroups: {
-    list: () => ipcRenderer.invoke("agentGroups:list"),
-    listResolved: () => ipcRenderer.invoke("agentGroups:listResolved"),
-    getResolved: (id: string) => ipcRenderer.invoke("agentGroups:getResolved", id),
-    create: (input) => ipcRenderer.invoke("agentGroups:create", input),
-    update: (id, patch) => ipcRenderer.invoke("agentGroups:update", id, patch),
-    removeMember: (groupId, memberId) =>
-      ipcRenderer.invoke("agentGroups:removeMember", groupId, memberId),
-    remove: (id) => ipcRenderer.invoke("agentGroups:remove", id),
-  },
   telegram: {
     listBindings: () => ipcRenderer.invoke("telegram:listBindings"),
     autoConnect: (input) => ipcRenderer.invoke("telegram:autoConnect", input),
@@ -467,9 +457,10 @@ const api: AgentlasIpc = {
     get: (id: string) => ipcRenderer.invoke("projects:get", id),
     timeline: (id: string, limit?: number) => ipcRenderer.invoke("projects:timeline", id, limit),
     create: (input) => ipcRenderer.invoke("projects:create", input),
-    update: (id: string, patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId">> & { folderGrant?: FsPathGrant | null }) =>
+    update: (id: string, patch: Partial<Pick<Project, "name" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef">> & { folderGrant?: FsPathGrant | null }) =>
       ipcRenderer.invoke("projects:update", id, patch),
     remove: (id: string) => ipcRenderer.invoke("projects:remove", id),
+    connectGithub: (repositoryUrl: string) => ipcRenderer.invoke("projects:connectGithub", repositoryUrl),
   },
   ontology: {
     getProject: (projectId: string) => ipcRenderer.invoke("ontology:getProject", projectId),
@@ -505,6 +496,7 @@ const api: AgentlasIpc = {
     markViewed: (id: string) => ipcRenderer.invoke("chats:markViewed", id),
   },
   tasks: {
+    createProject: (input) => ipcRenderer.invoke("tasks:createProject", input),
     list: (input) => ipcRenderer.invoke("tasks:list", input),
     get: (id: string) => ipcRenderer.invoke("tasks:get", id),
     listProjections: (input) => ipcRenderer.invoke("tasks:listProjections", input),

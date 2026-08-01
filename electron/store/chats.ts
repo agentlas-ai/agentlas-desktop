@@ -1,10 +1,9 @@
 // Chat CRUD + chat_messages.
 // 사이드바 "최근 채팅" 섹션은 listRecent로 채운다.
 // 프로젝트 페이지는 listByProject로, 회사 페이지는 listByFirm으로 채운다.
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
-import { getAgentGroup } from "./agent-groups";
 import { getFirm } from "./firms";
 import { evictRuntimeSessionsForChat } from "./runtime-sessions";
 import { touchProject } from "./projects";
@@ -27,7 +26,6 @@ interface ChatRow {
   id: string;
   project_id: string | null;
   firm_id: string | null;
-  agent_group_id: string | null;
   agent_id: string;
   title: string;
   archived_at: string | null;
@@ -168,7 +166,6 @@ function toChat(row: ChatRow): Chat {
     ...(task ? { taskId: task.id } : {}),
     projectId: row.project_id,
     firmId: row.firm_id,
-    agentGroupId: row.agent_group_id,
     agentId: row.agent_id,
     title: row.title,
     archivedAt: row.archived_at,
@@ -252,7 +249,6 @@ export function getChat(id: string): Chat | null {
 export function createChat(input: {
   agentId?: string;
   firmId?: string | null;
-  agentGroupId?: string | null;
   projectId?: string | null;
   title?: string;
   /** 새 문맥을 시작하되, 기존 채팅이 승인받은 작업 폴더만 이어받는다. */
@@ -268,14 +264,6 @@ export function createChat(input: {
 }): Chat {
   const ko = currentUiLocale() === "ko";
   let resolvedAgentId = input.agentId;
-  if (input.agentGroupId) {
-    const group = getAgentGroup(input.agentGroupId);
-    if (!group) {
-      throw new Error(
-        ko ? `에이전트 조합 ${input.agentGroupId}을 찾을 수 없습니다` : `Could not find agent group ${input.agentGroupId}`,
-      );
-    }
-  }
   if (input.firmId && !resolvedAgentId) {
     const firm = getFirm(input.firmId);
     if (!firm) throw new Error(ko ? `회사 ${input.firmId}을 찾을 수 없습니다` : `Could not find firm ${input.firmId}`);
@@ -306,14 +294,13 @@ export function createChat(input: {
   // 첫 user 메시지 도착 시 autoTitleFromFirstMessage가 채움.
   getDb()
     .prepare(
-      `INSERT INTO chats (id, project_id, firm_id, agent_group_id, agent_id, title, kind, parent_chat_id, working_folder, created_at, updated_at, origin_surface)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO chats (id, project_id, firm_id, agent_id, title, kind, parent_chat_id, working_folder, created_at, updated_at, origin_surface)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
       input.projectId ?? null,
-      input.agentGroupId ? null : input.firmId ?? null,
-      input.agentGroupId ?? null,
+      input.firmId ?? null,
       resolvedAgentId,
       input.title?.trim() ?? "",
       input.kind ?? "user",
@@ -385,31 +372,6 @@ export function getOrCreateFirmSession(
   });
 }
 
-/** Hidden persistent session for a saved Agent Group nested under a top TF. */
-export function getOrCreateAgentGroupSession(
-  parentChatId: string,
-  groupId: string,
-  orchestratorAgentId: string,
-): Chat {
-  const marker = `⟦group⟧${groupId}`;
-  const db = getDb();
-  const existing = db
-    .prepare(
-      "SELECT * FROM chats WHERE parent_chat_id = ? AND kind = 'division' AND title = ? LIMIT 1",
-    )
-    .get(parentChatId, marker) as ChatRow | undefined;
-  if (existing) return toChat(existing);
-  const parent = getChat(parentChatId);
-  return createChat({
-    agentId: orchestratorAgentId,
-    agentGroupId: groupId,
-    projectId: parent?.projectId ?? null,
-    title: marker,
-    kind: "division",
-    parentChatId,
-  });
-}
-
 /** 사이트 디자인 스튜디오의 프로젝트별 숨김 지속 세션(division).
  *  같은 프로젝트의 생성/수정 턴이 한 대화로 이어져 빌려온 웹앱 디자인 마스터가
  *  프로젝트의 디자인 언어/결정 맥락을 기억한다. */
@@ -435,51 +397,6 @@ export function getOrCreateStudioSession(studioKey: string): Chat {
   return createChat({ title: marker, kind: "division" });
 }
 
-/** 자동화별 숨김 지속 세션을 찾거나 만든다.
- *  recurring work가 매 실행마다 새 대화로 초기화되지 않고 이전 결과/차단 상태를 이어받게 한다. */
-export function getOrCreateAutomationSession(input: {
-  automationId: string;
-  agentId?: string;
-  firmId?: string | null;
-  agentGroupId?: string | null;
-}): Chat {
-  const baseMarker = `⟦automation⟧${input.automationId}`;
-  const targetKind = input.agentGroupId ? "group" : input.firmId ? "firm" : input.agentId ? "agent" : "host";
-  const targetId = input.agentGroupId ?? input.firmId ?? input.agentId ?? "default";
-  const targetHash = createHash("sha256").update(targetKind).update("\0").update(targetId).digest("hex").slice(0, 16);
-  const marker = `${baseMarker}::target:${targetKind}:${targetHash}`;
-  const db = getDb();
-  const existing = db
-    .prepare("SELECT * FROM chats WHERE kind = 'division' AND title = ? LIMIT 1")
-    .get(marker) as ChatRow | undefined;
-  if (existing) return toChat(existing);
-
-  // 기존 단일 marker 세션은 타깃 관계가 정확히 같은 경우에만 새 marker로 승격한다.
-  // 타깃이 바뀌었다면 과거 세션/기억을 보존한 채 별도 세션을 만든다.
-  const legacy = db
-    .prepare("SELECT * FROM chats WHERE kind = 'division' AND title = ? LIMIT 1")
-    .get(baseMarker) as ChatRow | undefined;
-  const legacyMatches = legacy && (
-    (targetKind === "group" && legacy.agent_group_id === input.agentGroupId) ||
-    (targetKind === "firm" && legacy.firm_id === input.firmId) ||
-    (targetKind === "agent" && !legacy.firm_id && !legacy.agent_group_id && legacy.agent_id === input.agentId)
-  );
-  if (legacy && legacyMatches) {
-    db.prepare("UPDATE chats SET title = ?, updated_at = ? WHERE id = ?")
-      .run(marker, new Date().toISOString(), legacy.id);
-    const chat = toChat({ ...legacy, title: marker });
-    emitDesktopStoreChange({ entity: "chat", id: legacy.id });
-    return chat;
-  }
-  return createChat({
-    agentId: input.agentId,
-    firmId: input.firmId ?? null,
-    agentGroupId: input.agentGroupId ?? null,
-    title: marker,
-    kind: "division",
-  });
-}
-
 export function renameChat(id: string, title: string): Chat {
   // 빈 문자열 허용 — UI는 fallback 라벨 표시
   getDb()
@@ -494,7 +411,7 @@ export function renameChat(id: string, title: string): Chat {
 export function switchChatAgent(id: string, agentId: string): Chat {
   getDb()
     .prepare(
-      "UPDATE chats SET agent_id = ?, firm_id = NULL, agent_group_id = NULL, updated_at = ? WHERE id = ?",
+      "UPDATE chats SET agent_id = ?, firm_id = NULL, updated_at = ? WHERE id = ?",
     )
     .run(agentId, new Date().toISOString(), id);
   const chat = getChat(id) as Chat;
@@ -527,16 +444,6 @@ export function removeChat(id: string): void {
     if (task?.originChatId === id) removeCanonicalTaskForOriginChat(id);
     emitDesktopStoreChange({ entity: "chat", id });
   }
-}
-
-/** 자동화 삭제 시 연결된 숨김 실행 세션도 같이 삭제한다.
- * 그래프 러너는 타깃별 세션을 `⟦automation⟧<id>::...` 형식으로 만들 수 있으므로 prefix까지 정리한다. */
-export function removeAutomationSessions(automationId: string): void {
-  const marker = `⟦automation⟧${automationId}`;
-  getDb()
-    .prepare("DELETE FROM chats WHERE kind = 'division' AND (title = ? OR title LIKE ?)")
-    .run(marker, `${marker}::%`);
-  emitDesktopStoreChange({ entity: "chat" });
 }
 
 // ── working folder (워크스페이스 패널) ──────────────────────
@@ -618,6 +525,16 @@ interface MessageRow {
   created_at: string;
 }
 
+// Builds before v0.9.36 accidentally persisted the CEO's private synthesis
+// packet as a second user turn. The current invocation path records
+// product-authored continuations as system turns, but upgraded profiles may
+// still contain these exact legacy packets. Keep the raw row recoverable in
+// SQLite while excluding it from every transcript/model-history consumer that
+// uses listChatMessages: it was never written by the person and the following
+// assistant turn already contains the user-facing synthesis.
+const LEGACY_FIRM_SYNTHESIS_MARKER =
+  "[Results from your team — synthesize into one final answer for the user]";
+
 export function appendChatMessage(
   chatId: string,
   role: "user" | "assistant" | "system",
@@ -639,9 +556,16 @@ export function appendChatMessage(
 export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[] {
   const rows = getDb()
     .prepare(
-      "SELECT id, role, text, created_at FROM (SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?) ORDER BY created_at ASC",
+      `SELECT id, role, text, created_at FROM (
+         SELECT id, role, text, created_at
+           FROM chat_messages
+          WHERE chat_id = ?
+            AND NOT (role = 'user' AND instr(text, ?) > 0)
+          ORDER BY created_at DESC
+          LIMIT ?
+       ) ORDER BY created_at ASC`,
     )
-    .all(chatId, limit) as MessageRow[];
+    .all(chatId, LEGACY_FIRM_SYNTHESIS_MARKER, limit) as MessageRow[];
   return rows.map((r) => ({ id: r.id, role: r.role, text: r.text, createdAt: r.created_at }));
 }
 

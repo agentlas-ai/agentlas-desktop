@@ -1077,81 +1077,6 @@ export interface InstalledFirm {
   installedAt: string;
 }
 
-export type AgentGroupMemberSource = "installed" | "firm" | "firm-node" | "hub";
-export type AgentGroupMemberStatus = "ok" | "moved" | "missing";
-
-export interface AgentGroupMemberSnapshot {
-  name: string;
-  nameEn: string;
-  tagline: string;
-  taglineEn: string;
-  routeLabel: string;
-  trustGrade?: InstalledAgent["trustGrade"];
-  runtimeLabel?: InstalledAgent["runtimeLabel"];
-  entityKind?: string;
-  routingStatus?: string | null;
-  /** Exact immutable Hub bundle pin. Saved groups fail closed if this version is unavailable. */
-  packageHash?: string;
-}
-
-export interface AgentGroupMember {
-  id: string;
-  source: AgentGroupMemberSource;
-  /** Stable local installed_agents.id when available. */
-  agentId?: string;
-  /** Local or Hub slug used for automatic re-resolution after upgrades. */
-  agentSlug?: string;
-  /** Explicit Hub slug; kept separate so missing Hub catalog entries can warn. */
-  hubSlug?: string;
-  /** Hub entity namespace. Optional so pre-v0.7.34 slug-only rows keep loading. */
-  hubEntityKind?: "agent" | "team";
-  /** Firm/org-chart route where the agent was picked. */
-  firmId?: string;
-  firmSlug?: string;
-  /** Resolved org node id or raw firm orgChart agentSlug. */
-  nodeId?: string;
-  role?: string;
-  snapshot: AgentGroupMemberSnapshot;
-  addedAt: string;
-}
-
-export interface AgentGroupResolvedMember extends AgentGroupMember {
-  status: AgentGroupMemberStatus;
-  warnings: Array<
-    "agent_missing" | "firm_missing" | "hub_missing" | "route_missing" | "route_changed" | "unsupported_multi" | "unsupported_plugin"
-  >;
-  /** Latest display/routing metadata, re-resolved from installed agents/org chart/Hub. */
-  current?: AgentGroupMemberSnapshot;
-}
-
-export interface AgentGroup {
-  id: string;
-  name: string;
-  description: string;
-  orchestratorName: string;
-  members: AgentGroupMember[];
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface AgentGroupResolved extends Omit<AgentGroup, "members"> {
-  members: AgentGroupResolvedMember[];
-  warningCount: number;
-}
-
-export interface AgentGroupCreateInput {
-  name: string;
-  description?: string;
-  orchestratorName?: string;
-  members: AgentGroupMember[];
-}
-
-export interface AgentGroupUpdateInput {
-  name?: string;
-  description?: string;
-  orchestratorName?: string;
-  members?: AgentGroupMember[];
-}
 
 // ── 정규화된 3-tier 조직 스펙 (멀티 에이전트 오케스트레이션의 입력) ──────
 // firm.orgChart(또는 LLM 리졸버)를 CEO → 본부(division) → 전문가(specialist)
@@ -1201,13 +1126,40 @@ export interface Project {
   id: string;
   name: string;
   description: string | null;
-  /** 프로젝트의 기본 에이전트 (선택). 없으면 채팅마다 골라야 함 */
-  defaultAgentId: string | null;
-  /** 프로젝트 단위로 시스템 프롬프트에 더 얹을 컨텍스트 */
-  contextNote: string | null;
-  /** 이 프로젝트의 작업 폴더(절대경로). 이 프로젝트의 채팅은 이 폴더를 기본 cwd로 사용 + .agentlas 메모리 활성화 */
+  /** 프로젝트 전체에 적용되는 사용자 작성 지시. */
+  systemPrompt: string | null;
+  /** 사용자가 프로젝트에 직접 붙인 에이전트. 배열 순서가 프로젝트 내 선호 순서다. */
+  agentPool: ProjectAgentPoolMember[];
+  /** 프로젝트가 기준으로 삼는 소스. */
+  sourceType: ProjectSourceType;
+  /** GitHub URL 또는 sample identifier. Local은 folderPath가 기준이다. */
+  sourceRef: string | null;
+  /** 이 프로젝트의 로컬 작업 폴더(절대경로). */
   folderPath: string | null;
   createdAt: string;
+  updatedAt: string;
+}
+
+export type ProjectSourceType = "local" | "github" | "sample";
+
+export type ProjectSourceConnectResult =
+  | { status: "connected"; capability: "ready"; repositoryUrl: string; folderGrant: FsPathGrant }
+  | { status: "cancelled"; capability: "destination" }
+  | { status: "action_required"; capability: "repository" | "github_client" | "github_auth" | "destination" | "clone" };
+
+export interface ProjectAgentPoolMember {
+  agentId: string;
+  /** 현재 프로젝트 생성 화면은 설치된 에이전트를 사용한다. Cloud/Hub exact release는 동일 계약에 추가된다. */
+  source: "local" | "cloud" | "hub";
+  releaseId: string | null;
+  nameSnapshot: string;
+}
+
+/** Automation-owned transcript projection. The renderer never receives a Work chat. */
+export interface AutomationSession {
+  id: string;
+  automationId: string;
+  messages: ChatHistoryEntry[];
   updatedAt: string;
 }
 
@@ -1321,8 +1273,6 @@ export interface Chat {
   projectId: string | null;
   /** 회사 채팅이면 firm id, 아니면 null. firmId가 있으면 agentId = firm.ceoAgentId */
   firmId: string | null;
-  /** 에이전트 조합 채팅이면 그 group id, 아니면 null. firm보다 상위 오케스트레이터 대상이다. */
-  agentGroupId: string | null;
   /** 이 채팅에 묶인 에이전트 (개별) 또는 firm의 CEO 에이전트 */
   agentId: string;
   /** 'user'(일반, 사이드바 노출) | 'division'(백그라운드 본부/자동화 세션, 숨김) */
@@ -1447,7 +1397,7 @@ export interface ChatHistoryEntry {
   imageDataUrls?: string[];
 }
 
-export type TelegramConnectTargetKind = "agent" | "firm" | "group";
+export type TelegramConnectTargetKind = "agent" | "firm";
 export type TelegramConnectStatus =
   | "draft"
   | "bot_verified"
@@ -1589,7 +1539,7 @@ export type PollSource =
 // automations 행의 nullable graph_json 컬럼에 직렬화. null = 오늘의 단일-프롬프트 동작.
 export type WorkflowNodeType =
   | "trigger" // schedule | manual → schedule 컬럼 미러
-  | "agent" // agent.id | firm.id | agentGroupId | borrowAgents[] | swarm | pipeline
+  | "agent" // agent.id | firm.id | taskForceTargets[] | swarm | pipeline
   | "tool" // MCP catalog id / 커스텀 → 인접 agent 런타임 MCP 설정에 컴파일
   | "action" // surface action.type / appFactory:* / toolFactory:* / hep-call
   | "condition" // 이전 출력 분기
@@ -1819,6 +1769,8 @@ export interface Automation {
   targetType: AutomationTargetType;
   /** targetType에 따라 installed_agents.id, installed_firms.id, 또는 Hub agent slug */
   targetId: string;
+  /** Explicit project grounding for this automation session. null means no project context. */
+  projectId?: string | null;
   /** 실행 시 사용자 입력 대신 들어갈 프롬프트 템플릿 */
   promptTemplate: string;
   /** 자동화가 웹/화면 조작을 해야 할 때 선호하는 실행 도구. */
@@ -1869,6 +1821,7 @@ export interface AutomationUpdatePatch {
   scheduleHuman?: string;
   targetType?: AutomationTargetType;
   targetId?: string;
+  projectId?: string | null;
   promptTemplate?: string;
   toolMode?: AutomationToolMode;
   hubMode?: AutomationHubMode;
@@ -3580,6 +3533,8 @@ export interface McpInvocationRequest {
   routerAgent?: RecRouterAgent;
   /** Keep the bound chat roster first and recruit from Network/Cloud only after a model-judged capability gap. */
   sessionRouting?: boolean;
+  /** Explicit per-turn Stormbreaker preference. Absent means the controller decides; it never means OFF. */
+  stormbreakerMode?: boolean;
 }
 
 /** Main-owned Codex-style steering acknowledgement shared by Desktop and Mobile. */
@@ -3916,7 +3871,7 @@ export interface PendingConfirmation {
   firmId: string | null;
   /** 사용자에게 보여 줄 실제 요청 주체 이름. ID만 노출하지 않는다. */
   requesterLabel: string;
-  requesterKind: "agent" | "firm" | "agent-group";
+  requesterKind: "agent" | "firm";
   /** 질문 메시지 시각(ISO) */
   createdAt: string;
   /** One에서 사용자가 미룬 시각. 질문은 Work의 정본 승인 목록에서는 계속 pending이다. */
@@ -4619,7 +4574,6 @@ export type RecSource = "local" | "cloud" | "hub";
 export type OrchestrationTarget =
   | { source: "local"; entityKind: "agent"; agentId: string }
   | { source: "local"; entityKind: "team"; firmId: string }
-  | { source: "local"; entityKind: "group"; groupId: string }
   | { source: "cloud" | "hub"; entityKind: "agent" | "team"; slug: string };
 export interface RecAgent {
   id: string;
@@ -5120,7 +5074,7 @@ export interface BugReportInput {
   title?: string;
   severity?: "low" | "medium" | "high";
   email?: string;
-  /** 신고 당시 화면 경로(예: "/chat") — 재현에 도움. */
+  /** 신고 당시 화면 경로(예: "/workspace/task") — 재현에 도움. */
   page?: string;
   /** 표시 언어(ko/en). */
   locale?: string;
@@ -5764,15 +5718,6 @@ export interface AgentlasIpc {
     /** LLM으로 팀 폴더를 분석해 3-tier 조직 스펙 생성 (임포트 팀용) */
     resolveOrg: (id: string) => Promise<{ ok: boolean; org?: ResolvedOrg; error?: string }>;
   };
-  agentGroups: {
-    list: () => Promise<AgentGroup[]>;
-    listResolved: () => Promise<AgentGroupResolved[]>;
-    getResolved: (id: string) => Promise<AgentGroupResolved | null>;
-    create: (input: AgentGroupCreateInput) => Promise<AgentGroup>;
-    update: (id: string, patch: AgentGroupUpdateInput) => Promise<AgentGroup>;
-    removeMember: (groupId: string, memberId: string) => Promise<AgentGroup>;
-    remove: (id: string) => Promise<void>;
-  };
   telegram: {
     listBindings: () => Promise<TelegramConnectBinding[]>;
     autoConnect: (input: TelegramConnectAutoInput) => Promise<TelegramConnectActionResult>;
@@ -5807,14 +5752,22 @@ export interface AgentlasIpc {
   };
   projects: {
     list: () => Promise<Project[]>;
-    create: (input: { name: string; defaultAgentId?: string | null; contextNote?: string | null; folderGrant?: FsPathGrant | null }) => Promise<Project>;
+    create: (input: {
+      name: string;
+      systemPrompt?: string | null;
+      agentPool?: ProjectAgentPoolMember[];
+      sourceType: ProjectSourceType;
+      sourceRef?: string | null;
+      folderGrant?: FsPathGrant | null;
+    }) => Promise<Project>;
     get: (id: string) => Promise<Project | null>;
     timeline: (id: string, limit?: number) => Promise<ProjectTimelineSnapshot>;
     update: (
       id: string,
-      patch: Partial<Pick<Project, "name" | "contextNote" | "defaultAgentId">> & { folderGrant?: FsPathGrant | null },
+      patch: Partial<Pick<Project, "name" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef">> & { folderGrant?: FsPathGrant | null },
     ) => Promise<Project>;
     remove: (id: string) => Promise<void>;
+    connectGithub: (repositoryUrl: string) => Promise<ProjectSourceConnectResult>;
   };
   ontology: {
     getProject: (projectId: string) => Promise<OntologyProjectStatus>;
@@ -5840,7 +5793,6 @@ export interface AgentlasIpc {
     create: (input: {
       agentId?: string;
       firmId?: string | null;
-      agentGroupId?: string | null;
       projectId?: string | null;
       title?: string;
       /** 새 컨텍스트지만 기존 채팅의 main-owned 작업 폴더를 이어받는다. */
@@ -5878,6 +5830,8 @@ export interface AgentlasIpc {
   };
   /** One/Work/Mobile의 공통 정본. Chat은 이 Task의 대화 투영이다. */
   tasks: {
+    /** Create a Work task only inside an existing project and its explicit agent pool. */
+    createProject: (input: { projectId: string; title?: string }) => Promise<CanonicalTaskWorkTarget>;
     list: (input?: { limit?: number; includeArchived?: boolean }) => Promise<CanonicalTask[]>;
     get: (id: string) => Promise<CanonicalTask | null>;
     /** Main-owned semantic projection. Renderer input can choose a surface, never authority. */
@@ -6091,8 +6045,8 @@ export interface AgentlasIpc {
     liveRunChannel: (automationId: string) => string;
     /** 이 자동화의 최근 실행 스냅샷(per-node 상태). 라이브 오버레이 초기 하이드레이트용. */
     latestRun: (automationId: string) => Promise<WorkflowRunSnapshot | null>;
-    /** 자동화 결과가 누적되는 숨김 실행 세션. 사용자가 원하면 채팅 화면에서 열 수 있다. */
-    getSession: (automationId: string) => Promise<Chat>;
+    /** Automation-owned session transcript rendered beside the node graph. */
+    getSession: (automationId: string) => Promise<AutomationSession>;
   };
   /** launchd LaunchAgent — 앱이 꺼져도 자동화를 도는 macOS 영속성(opt-in, 설계 §2.6). */
   launchd: {

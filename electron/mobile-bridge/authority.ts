@@ -18,6 +18,7 @@ import {
   ensurePairingVerificationTask,
   findCanonicalTaskForChat,
   getCanonicalTask,
+  getCanonicalTaskForChat,
 } from "../store/tasks";
 import {
   ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS,
@@ -80,7 +81,6 @@ import {
   unarchiveChat,
 } from "../store/chats";
 import { getProject } from "../store/projects";
-import { createAgentGroup } from "../store/agent-groups";
 import { OwnerCloudActionError } from "../marketplace/mcp-source";
 import {
   createDesktopMobileBridgeBuildActions,
@@ -102,6 +102,7 @@ import type {
   InvocationRunReceipt,
   McpInvocationEvent,
   McpInvocationRequest,
+  OrchestrationTarget,
   Recommendation,
   RuntimeBackend,
   RuntimeKind,
@@ -372,6 +373,36 @@ function optionalBorrowAgents(params: Record<string, unknown>): string[] | undef
   return [...value] as string[];
 }
 
+function optionalTurnAgentTargets(params: Record<string, unknown>): OrchestrationTarget[] | undefined {
+  const value = params.taskForceTargets;
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 8) {
+    throw new TypeError("taskForceTargets must contain at most 8 turn-only agents");
+  }
+  return value.map((item, index) => {
+    if (!isRecord(item) || item.entityKind !== "agent") {
+      throw new TypeError(`taskForceTargets[${index}] must be an agent`);
+    }
+    if (item.source === "local") {
+      assertOnlyKeys(item, ["source", "entityKind", "agentId"], `taskForceTargets[${index}]`);
+      const agentId = requiredIdentifier(item, "agentId", RUN_ID_RE);
+      if (!listInstalledAgents().some((agent) => agent.id === agentId)) {
+        throw new Error("A turn-only local agent is unavailable on this Desktop");
+      }
+      return { source: "local", entityKind: "agent", agentId };
+    }
+    if (item.source === "cloud" || item.source === "hub") {
+      assertOnlyKeys(item, ["source", "entityKind", "slug"], `taskForceTargets[${index}]`);
+      return {
+        source: item.source,
+        entityKind: "agent",
+        slug: requiredIdentifier(item, "slug", RUN_ID_RE),
+      };
+    }
+    throw new TypeError(`taskForceTargets[${index}] source is unsupported`);
+  });
+}
+
 function optionalImages(params: Record<string, unknown>): ImageAttachment[] | undefined {
   const value = params.images;
   if (value === undefined) return undefined;
@@ -608,7 +639,9 @@ function invocationParams(
           "planMode",
           "goalMode",
           "appsGenerateMode",
+          "stormbreakerMode",
           "borrowAgents",
+          "taskForceTargets",
           "images",
           "expectedQuestionMessageId",
           "expectedTaskId",
@@ -625,7 +658,9 @@ function invocationParams(
           "planMode",
           "goalMode",
           "appsGenerateMode",
+          "stormbreakerMode",
           "borrowAgents",
+          "taskForceTargets",
           "images",
           "expectedQuestionMessageId",
           "expectedTaskId",
@@ -644,7 +679,9 @@ function invocationParams(
   const planMode = optionalBoolean(params, "planMode");
   const goalMode = optionalBoolean(params, "goalMode");
   const appsGenerateMode = optionalBoolean(params, "appsGenerateMode");
+  const stormbreakerMode = optionalBoolean(params, "stormbreakerMode");
   const borrowAgents = optionalBorrowAgents(params);
+  const taskForceTargets = optionalTurnAgentTargets(params);
   const images = optionalImages(params);
   const expectedQuestionMessageId = optionalIdentifier(params, "expectedQuestionMessageId");
   const expectedTaskId = optionalIdentifier(params, "expectedTaskId");
@@ -677,7 +714,9 @@ function invocationParams(
   if (planMode !== undefined) invocation.planMode = planMode;
   if (goalMode !== undefined) invocation.goalMode = goalMode;
   if (appsGenerateMode !== undefined) invocation.appsGenerateMode = appsGenerateMode;
+  if (stormbreakerMode !== undefined) invocation.stormbreakerMode = stormbreakerMode;
   if (borrowAgents !== undefined) invocation.borrowAgents = borrowAgents;
+  if (taskForceTargets !== undefined) invocation.taskForceTargets = taskForceTargets;
   if (images !== undefined) invocation.images = images;
   const expectedRunId: MobileBridgeInvokeSteerParams["expectedRunId"] | undefined = steering
     ? requiredIdentifier(params, "expectedRunId", RUN_ID_RE)
@@ -702,16 +741,14 @@ function createChatParams(request: MobileBridgeRpcRequest): Parameters<typeof cr
   const params = guardedParams(request, [
     "agentId",
     "firmId",
-    "agentGroupId",
     "projectId",
     "title",
     "continueFromChatId",
   ]);
   const agentId = optionalIdentifier(params, "agentId");
   const firmId = optionalIdentifier(params, "firmId");
-  const agentGroupId = optionalIdentifier(params, "agentGroupId");
-  if ([agentId, firmId, agentGroupId].filter(Boolean).length > 1) {
-    throw new TypeError("chats.create accepts at most one agentId, firmId, or agentGroupId");
+  if ([agentId, firmId].filter(Boolean).length > 1) {
+    throw new TypeError("chats.create accepts at most one agentId or firmId");
   }
   const projectId = optionalIdentifier(params, "projectId");
   const title = optionalIdentifier(params, "title", 200);
@@ -719,7 +756,6 @@ function createChatParams(request: MobileBridgeRpcRequest): Parameters<typeof cr
   return {
     ...(agentId !== undefined ? { agentId } : {}),
     ...(firmId !== undefined ? { firmId } : {}),
-    ...(agentGroupId !== undefined ? { agentGroupId } : {}),
     ...(projectId !== undefined ? { projectId } : {}),
     ...(title !== undefined ? { title } : {}),
     ...(continueFromChatId !== undefined ? { continueFromChatId } : {}),
@@ -742,8 +778,9 @@ function mobileOneStartParams(request: MobileBridgeRpcRequest): {
   userPrompt: string;
   permissions: "read" | "write" | "full";
   images?: ImageAttachment[];
+  taskForceTargets?: OrchestrationTarget[];
 } {
-  const params = guardedParams(request, ["schemaVersion", "userPrompt", "permissions", "images"]);
+  const params = guardedParams(request, ["schemaVersion", "userPrompt", "permissions", "taskForceTargets", "images"]);
   if (params.schemaVersion !== 1) {
     throw new TypeError("one.invoke.start requires schemaVersion 1");
   }
@@ -755,10 +792,12 @@ function mobileOneStartParams(request: MobileBridgeRpcRequest): {
     optionalEnum(params, "permissions", ["read", "write", "full"] as const),
   );
   const images = optionalImages(params);
+  const taskForceTargets = optionalTurnAgentTargets(params);
   return {
     userPrompt,
     permissions,
     ...(images !== undefined ? { images } : {}),
+    ...(taskForceTargets !== undefined ? { taskForceTargets } : {}),
   };
 }
 
@@ -1047,65 +1086,6 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         noParams(request);
         return asJsonValue((await this.projectSnapshot()).firms, request.method);
       }
-      case "agentGroups.listResolved": {
-        noParams(request);
-        return asJsonValue((await this.projectSnapshot()).groups, request.method);
-      }
-      case "groups.create": {
-        const params = guardedParams(request, [
-          "name",
-          "description",
-          "orchestratorName",
-          "memberAgentIds",
-        ]);
-        const name = requiredBoundedString(params, "name", 120).trim();
-        const description = optionalText(params, "description", 1_000)?.trim() ?? "";
-        const orchestratorName = optionalIdentifier(params, "orchestratorName", 120)?.trim();
-        const memberAgentIds = params.memberAgentIds;
-        if (!Array.isArray(memberAgentIds)) {
-          throw new TypeError("memberAgentIds must be an array");
-        }
-        const installedById = new Map(listInstalledAgents().map((agent) => [agent.id, agent] as const));
-        const bindingByAgentId = new Map(
-          listInstalledAgentHubBindings(64).map(
-            (binding) => [binding.installedAgentId, binding] as const,
-          ),
-        );
-        const members = [...new Set(memberAgentIds)].map((rawId) => {
-          if (typeof rawId !== "string") throw new TypeError("memberAgentIds must contain strings");
-          const agent = installedById.get(rawId);
-          if (!agent) throw new TypeError(`Installed agent not found: ${rawId}`);
-          if (!bindingByAgentId.has(rawId)) {
-            throw new TypeError(`Agent is not bound to an immutable Hub release: ${rawId}`);
-          }
-          return {
-            id: randomUUID(),
-            source: "installed" as const,
-            agentId: agent.id,
-            agentSlug: agent.slug,
-            snapshot: {
-              name: agent.name,
-              nameEn: agent.nameEn,
-              tagline: agent.tagline,
-              taglineEn: agent.taglineEn,
-              routeLabel: agent.slug,
-              trustGrade: agent.trustGrade,
-              runtimeLabel: agent.runtimeLabel,
-              entityKind: agent.kind ?? "agent",
-            },
-            addedAt: new Date().toISOString(),
-          };
-        });
-        const created = createAgentGroup({
-          name,
-          description,
-          ...(orchestratorName ? { orchestratorName } : {}),
-          members,
-        });
-        const projected = (await this.projectSnapshot()).groups.find((group) => group.id === created.id);
-        if (!projected) throw new Error("Created Agent Group projection is unavailable");
-        return asJsonValue(projected, request.method);
-      }
       case "projects.list": {
         noParams(request);
         return asJsonValue((await this.projectSnapshot()).projects, request.method);
@@ -1130,23 +1110,45 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           request.method,
         );
       }
-      case "chats.create": {
-        const input = createChatParams(request);
-        let canonicalProjectFolder: string | null = null;
-        if (input.projectId) {
-          // A Mobile caller may select only a host-owned project id. Resolve and
-          // bind its folder before the chat row exists so a missing/replaced
-          // project folder cannot silently become a global Mobile chat.
-          const project = getProject(input.projectId);
-          if (!project) throw new Error("The selected Desktop project is unavailable");
-          if (!project.folderPath) throw new Error("The selected project has no working folder");
-          canonicalProjectFolder = captureInvocationWorkspaceBinding(project.folderPath).canonicalPath;
-          if (!canonicalProjectFolder) throw new Error("The selected project has no working folder");
+      case "tasks.createProject": {
+        const params = guardedParams(request, ["projectId", "title"]);
+        const projectId = requiredIdentifier(params, "projectId");
+        const title = optionalIdentifier(params, "title", 200) ?? "New task";
+        const project = getProject(projectId);
+        if (!project) throw new Error("The selected Desktop project is unavailable");
+        if (!project.folderPath) throw new Error("The selected project has no connected working folder");
+        const controller = project.agentPool[0];
+        if (!controller) throw new Error("Choose at least one project agent before starting work");
+        if (controller.source !== "local") {
+          throw new Error("The first project agent must be installed locally on this Desktop");
         }
-        const chat = createChat(input);
-        if (canonicalProjectFolder) setChatWorkingFolder(chat.id, canonicalProjectFolder);
-        this.scheduleSnapshotUpdated();
-        return asJsonValue(projectMobileBridgeChat(chat, false), request.method);
+        if (!listInstalledAgents().some((agent) => agent.id === controller.agentId)) {
+          throw new Error("The project controller is unavailable; choose a new first project agent");
+        }
+        const canonicalProjectFolder = captureInvocationWorkspaceBinding(project.folderPath).canonicalPath;
+        if (!canonicalProjectFolder) throw new Error("The selected project has no connected working folder");
+        const chat = createChat({
+          projectId: project.id,
+          agentId: controller.agentId,
+          title,
+          taskMode: "task",
+          originSurface: "work",
+        });
+        try {
+          setChatWorkingFolder(chat.id, canonicalProjectFolder);
+          const task = getCanonicalTaskForChat(chat.id);
+          if (!task) throw new Error("The project task could not be prepared");
+          this.scheduleSnapshotUpdated(chat.id);
+          return asJsonValue({
+            projectId: project.id,
+            taskId: task.id,
+            chatId: chat.id,
+            title: task.title,
+          }, request.method);
+        } catch (error) {
+          removeChat(chat.id);
+          throw error;
+        }
       }
       case "chats.rename": {
         const params = guardedParams(request, ["id", "title"]);
@@ -1203,54 +1205,6 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         setChatSwarmMode(id, enabled);
         if (enabled) setChatContinuousMode(id, false);
         const chat = requireChat(id);
-        this.scheduleSnapshotUpdated(id);
-        return asJsonValue(
-          projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
-          request.method,
-        );
-      }
-      case "chats.setBorrowedAgents": {
-        const params = guardedParams(request, ["id", "slugs"]);
-        const id = requiredIdentifier(params, "id");
-        requireChat(id);
-        if (!Array.isArray(params.slugs) || params.slugs.length > 8) {
-          throw new TypeError("slugs must contain at most 8 identifiers");
-        }
-        const requestedSlugs = [...new Set(params.slugs.map((slug) => normalizedSlug(slug)).filter(Boolean))];
-        const allowedBySlug = new Map(
-          callableHubBookmarksForMobile().map((bookmark) => [
-            normalizedSlug(bookmark.slug || bookmark.listing.slug),
-            bookmark,
-          ] as const),
-        );
-        const unknown = requestedSlugs.find((slug) => !allowedBySlug.has(slug));
-        if (unknown) throw new Error(`Hub agent is not currently callable: ${unknown}`);
-        const now = new Date().toISOString();
-        const chat = setChatHiredAgents(id, requestedSlugs.map((slug) => {
-          const bookmark = allowedBySlug.get(slug)!;
-          return {
-            slug,
-            name: boundedRedactedText(bookmark.listing.name, 512),
-            source: "hub" as const,
-            hiredAt: now,
-          };
-        }));
-        this.scheduleSnapshotUpdated(id);
-        return asJsonValue(
-          projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
-          request.method,
-        );
-      }
-      case "chats.switchAgent": {
-        const params = guardedParams(request, ["id", "agentId"]);
-        const id = requiredIdentifier(params, "id");
-        const agentId = requiredIdentifier(params, "agentId");
-        requireChat(id);
-        const agent = listInstalledAgents().find((item) => item.id === agentId);
-        if (!agent || (agent.visibility ?? "visible") !== "visible") {
-          throw new Error("The selected agent is unavailable for direct chat");
-        }
-        const chat = switchChatAgent(id, agentId);
         this.scheduleSnapshotUpdated(id);
         return asJsonValue(
           projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
@@ -1506,9 +1460,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
               taskIntent: "conversation",
               oneMode: true,
               permissions: input.permissions,
-              sessionRouting: false,
-              hubMode: "local-only",
-              borrowAgents: [],
+              ...(input.taskForceTargets ? { taskForceTargets: input.taskForceTargets } : {}),
               ...(input.images ? { images: input.images } : {}),
             },
             captureMobileOneInvocationBinding(),
@@ -1922,63 +1874,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           throw error;
         }
       }
-      case "groups.cloudList": {
-        noParams(request);
-        const sessionRefusal = this.cloudSessionRefusal();
-        if (sessionRefusal) return asJsonValue({ refusal: sessionRefusal }, request.method);
-        try {
-          const combinations = await this.cloudAgentActions.listMyCombinations();
-          return asJsonValue({
-            combinations: combinations
-              .slice(0, 100)
-              .map((combination) => this.projectCloudCombination(combination)),
-          }, request.method);
-        } catch (error) {
-          const refusal = this.cloudRefusalOf(error);
-          if (refusal) return asJsonValue({ refusal }, request.method);
-          throw error;
-        }
-      }
-      case "groups.cloudSave": {
-        const params = guardedParams(request, [
-          "name",
-          "description",
-          "members",
-          "combinationId",
-          "expectedRevision",
-          "idempotencyKey",
-        ]);
-        const name = requiredBoundedString(params, "name", 120).trim();
-        const description = optionalText(params, "description", 1_000)?.trim() ?? "";
-        const members = parseCloudCombinationMembers(params.members);
-        const combinationId = optionalIdentifier(params, "combinationId", 128);
-        const expectedRevision = optionalInteger(
-          params,
-          "expectedRevision",
-          1,
-          Number.MAX_SAFE_INTEGER,
-        );
-        this.consumeWriteIdempotencyKey(request, params);
-        if (!name) throw new TypeError("name must not be blank");
-        if ((combinationId === undefined) !== (expectedRevision === undefined)) {
-          throw new TypeError("combinationId and expectedRevision are required together for updates");
-        }
-        const sessionRefusal = this.cloudSessionRefusal();
-        if (sessionRefusal) return asJsonValue({ refusal: sessionRefusal }, request.method);
-        try {
-          const saved = await this.cloudAgentActions.saveMyCombination({
-            name,
-            description,
-            members,
-            ...(combinationId !== undefined ? { combinationId, expectedRevision } : {}),
-          });
-          return asJsonValue(this.projectCloudCombination(saved), request.method);
-        } catch (error) {
-          const refusal = this.cloudRefusalOf(error);
-          if (refusal) return asJsonValue({ refusal }, request.method);
-          throw error;
-        }
-      }
+
 
       // DESKTOP_MOBILE_BRIDGE: Remote Hephaestus build. After a per-run local
       // approval, `build.start` answers with { runId, replayable: false }; all

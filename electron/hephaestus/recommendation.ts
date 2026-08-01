@@ -41,7 +41,6 @@ function remoteSource(decision: Record<string, unknown>, value: Record<string, u
 }
 
 function localTarget(id: string, type: string): OrchestrationTarget {
-  if (type.includes("group")) return { source: "local", entityKind: "group", groupId: id };
   if (type.includes("team") || type.includes("firm") || type.includes("company")) {
     return { source: "local", entityKind: "team", firmId: id };
   }

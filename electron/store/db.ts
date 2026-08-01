@@ -15,7 +15,7 @@ import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 81;
+const SCHEMA_VERSION = 85;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -492,7 +492,6 @@ const V50_REQUIRED_CHAT_COLUMNS = [
   "kind",
   "project_id",
   "firm_id",
-  "agent_group_id",
   "parent_chat_id",
   "created_at",
   "updated_at",
@@ -516,7 +515,6 @@ function orphanChatPreservationReasons(
   for (const column of [
     "project_id",
     "firm_id",
-    "agent_group_id",
     "parent_chat_id",
     "used_at",
     "last_viewed_at",
@@ -1597,40 +1595,6 @@ export function initStore(options: StoreInitOptions = {}): void {
          WHERE EXISTS (SELECT 1 FROM chat_messages WHERE chat_messages.chat_id = chats.id)`,
       );
       _db.exec("CREATE INDEX IF NOT EXISTS idx_chats_used_updated ON chats(used_at, updated_at DESC)");
-    }
-  }
-
-  // ── v28 → v29: Agent Groups ────────────────────────────
-  // A group is a user-made orchestration layer above firm/division routes. It
-  // stores routing references only; display and execution metadata are resolved
-  // from the latest installed agents, org charts, and live Hub catalog.
-  if (userVersion < 29) {
-    _db.exec(`
-      CREATE TABLE IF NOT EXISTS agent_groups (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT NOT NULL DEFAULT '',
-        orchestrator_name TEXT NOT NULL,
-        members_json TEXT NOT NULL DEFAULT '[]',
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_agent_groups_updated
-        ON agent_groups(updated_at DESC);
-    `);
-  }
-
-  // ── v29 → v30: chats.agent_group_id ───────────────────
-  // Agent Group chats are a user-made orchestration layer above firm/division.
-  // They keep the fallback local orchestrator agent in agent_id for FK/runtime
-  // compatibility, while agent_group_id points to the live routing roster.
-  if (userVersion < 30) {
-    const chatCols = _db
-      .prepare("PRAGMA table_info(chats)")
-      .all() as Array<{ name: string }>;
-    if (!chatCols.some((c) => c.name === "agent_group_id")) {
-      _db.exec("ALTER TABLE chats ADD COLUMN agent_group_id TEXT REFERENCES agent_groups(id) ON DELETE SET NULL");
-      _db.exec("CREATE INDEX IF NOT EXISTS idx_chats_agent_group_updated ON chats(agent_group_id, updated_at DESC)");
     }
   }
 
@@ -3697,6 +3661,128 @@ export function initStore(options: StoreInitOptions = {}): void {
   // Never rewrite the version marker on an ordinary boot (avoids taking a WAL
   // writer lock while a healthy peer is executing), and never downgrade a DB
   // created by a newer binary.
+  // v82: project-first ownership. The new UI no longer reads default_agent_id/context_note.
+  // Existing values are converted once into the explicit system prompt and ordered agent pool.
+  if (userVersion < 82 && tableExists(_db, "projects")) {
+    const projectCols = schemaColumns(_db, "projects");
+    if (!projectCols.some((column) => column.name === "system_prompt")) {
+      _db.exec("ALTER TABLE projects ADD COLUMN system_prompt TEXT");
+    }
+    if (!projectCols.some((column) => column.name === "agent_pool_json")) {
+      _db.exec("ALTER TABLE projects ADD COLUMN agent_pool_json TEXT NOT NULL DEFAULT '[]'");
+    }
+    if (!projectCols.some((column) => column.name === "source_type")) {
+      _db.exec("ALTER TABLE projects ADD COLUMN source_type TEXT NOT NULL DEFAULT 'local'");
+    }
+    if (!projectCols.some((column) => column.name === "source_ref")) {
+      _db.exec("ALTER TABLE projects ADD COLUMN source_ref TEXT");
+    }
+    _db.exec(`
+      UPDATE projects SET system_prompt = context_note
+       WHERE system_prompt IS NULL AND context_note IS NOT NULL;
+      UPDATE projects
+         SET agent_pool_json = json_array(json_object(
+           'agentId', default_agent_id,
+           'source', 'local',
+           'releaseId', NULL,
+           'nameSnapshot', COALESCE((SELECT name FROM installed_agents WHERE id = default_agent_id), 'Project agent')
+         ))
+       WHERE default_agent_id IS NOT NULL AND agent_pool_json = '[]';
+    `);
+  }
+
+  // v83: automation sessions become first-class owners. The chat row remains
+  // an internal invocation ledger and is never projected as a Work task.
+  if (userVersion < 83 && tableExists(_db, "chats")) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS automation_sessions (
+        id TEXT PRIMARY KEY,
+        automation_id TEXT NOT NULL,
+        target_kind TEXT NOT NULL CHECK(target_kind IN ('host','agent','firm','hub')),
+        target_id TEXT NOT NULL,
+        ledger_chat_id TEXT NOT NULL UNIQUE REFERENCES chats(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(automation_id, target_kind, target_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_automation_sessions_owner
+        ON automation_sessions(automation_id, updated_at DESC);
+    `);
+  }
+
+  // v84: the retired Agent Group product and its chat binding are removed.
+  // ProjectAgentPool plus per-task WorkOrder selection own this capability now.
+  if (userVersion < 84) {
+    if (tableExists(_db, "telegram_bindings")) {
+      _db.exec(`
+        DELETE FROM chats
+         WHERE id IN (SELECT chat_session_id FROM telegram_bindings WHERE target_kind = 'group');
+        DELETE FROM telegram_bindings WHERE target_kind = 'group';
+
+        CREATE TABLE telegram_bindings_v84 (
+          id TEXT PRIMARY KEY,
+          target_kind TEXT NOT NULL CHECK(target_kind IN ('agent','firm')),
+          target_id TEXT NOT NULL,
+          telegram_chat_id TEXT,
+          telegram_chat_title TEXT,
+          bot_user_id INTEGER,
+          bot_username TEXT,
+          bot_display_name TEXT,
+          chat_session_id TEXT REFERENCES chats(id) ON DELETE SET NULL,
+          status TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 0,
+          last_update_id INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT,
+          last_test_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          automation_report_enabled INTEGER NOT NULL DEFAULT 0,
+          token_saved INTEGER NOT NULL DEFAULT 0,
+          token_fingerprint TEXT
+        );
+        INSERT INTO telegram_bindings_v84 (
+          id, target_kind, target_id, telegram_chat_id, telegram_chat_title,
+          bot_user_id, bot_username, bot_display_name, chat_session_id, status,
+          enabled, last_update_id, last_error, last_test_at, created_at, updated_at,
+          automation_report_enabled, token_saved, token_fingerprint
+        )
+        SELECT
+          id, target_kind, target_id, telegram_chat_id, telegram_chat_title,
+          bot_user_id, bot_username, bot_display_name, chat_session_id, status,
+          enabled, last_update_id, last_error, last_test_at, created_at, updated_at,
+          automation_report_enabled, token_saved, token_fingerprint
+        FROM telegram_bindings;
+        DROP TABLE telegram_bindings;
+        ALTER TABLE telegram_bindings_v84 RENAME TO telegram_bindings;
+        CREATE INDEX idx_telegram_bindings_target
+          ON telegram_bindings(target_kind, target_id);
+        CREATE INDEX idx_telegram_bindings_chat
+          ON telegram_bindings(telegram_chat_id);
+        CREATE INDEX idx_telegram_bindings_enabled
+          ON telegram_bindings(enabled, status);
+        CREATE INDEX idx_telegram_bindings_automation_report
+          ON telegram_bindings(automation_report_enabled, enabled, telegram_chat_id);
+      `);
+    }
+    if (tableExists(_db, "chats")) {
+      const chatColumns = schemaColumns(_db, "chats");
+      if (chatColumns.some((column) => column.name === "agent_group_id")) {
+        _db.exec("DROP INDEX IF EXISTS idx_chats_agent_group_updated");
+        _db.exec("ALTER TABLE chats DROP COLUMN agent_group_id");
+      }
+    }
+    _db.exec("DROP TABLE IF EXISTS agent_groups");
+  }
+
+  // v85: persist the project context chosen for an automation. The internal
+  // session ledger inherits this binding instead of guessing from global data.
+  if (userVersion < 85 && tableExists(_db, "automations")) {
+    const columns = schemaColumns(_db, "automations");
+    if (!columns.some((column) => column.name === "project_id")) {
+      _db.exec("ALTER TABLE automations ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL");
+    }
+  }
+
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
 }
 

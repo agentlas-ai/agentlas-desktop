@@ -566,6 +566,8 @@ export interface AutoRouteOptions {
   semanticRoute?: (prompt: string, candidates: readonly InstalledAgent[]) => SemanticRouteSignal;
   /** When false, the sync path skips the judged-verdict peek (digest-stable callers). */
   judgedPeek?: boolean;
+  /** When true, a missing model verdict returns null without lexical or embedding routing. */
+  judgedOnly?: boolean;
 }
 
 interface RankedRouteEntry {
@@ -642,12 +644,6 @@ const AUTO_ROUTE_GUIDANCE =
   "and a specialist whose profession matches the request is a fit even when no keyword overlaps. " +
   "When the user explicitly names an installed agent, select it. 'none' is a valid and common answer.";
 
-function judgedRouteHints(pool: readonly InstalledAgent[]): Array<{ label: string; words: string[] }> {
-  return ROUTE_HINTS
-    .filter((hint) => pool.some((agent) => agent.slug === hint.slug))
-    .map((hint) => ({ label: hint.slug, words: hint.terms.slice(0, 20) }));
-}
-
 function judgedRouteReason(locale: RuntimeLocale): string {
   return locale === "ko"
     ? "요청의 의미가 이 에이전트의 전문 분야와 일치한다고 상주 판정 모델이 결정했습니다"
@@ -682,7 +678,6 @@ export async function selectAutoRoutedAgentJudged(
   // a lexically/embedding-scored specialist: we fall to the plain coordinator
   // (allowFallback) or to the plain assistant (null), so the caller can surface
   // the connect-a-model state instead of acting on a keyword guess.
-  const lexicalPrior = selectAutoRoutedAgent(userPrompt, agents, locale, { ...opts, judgedPeek: false, allowFallback: false });
   const noModelChoice = (): AutoRouteChoice | null =>
     opts?.allowFallback ? defaultCoordinationChoice(pipeline.candidates, locale) : null;
   if (!userPrompt.trim() || pipeline.pool.length === 0) {
@@ -696,9 +691,6 @@ export async function selectAutoRoutedAgentJudged(
     labels.push(agent.slug);
   }
   labels.push("none");
-  const fallbackLabel = lexicalPrior && bySlug.get(lexicalPrior.agent.slug)?.id === lexicalPrior.agent.id
-    ? lexicalPrior.agent.slug
-    : "none";
   let verdict: Verdict<string>;
   try {
     verdict = await (opts?.judgeFn ?? judge)({
@@ -706,11 +698,9 @@ export async function selectAutoRoutedAgentJudged(
       question: AUTO_ROUTE_QUESTION,
       labels,
       input: autoRouteJudgmentInput(userPrompt, pipeline.pool),
-      guidance:
-        `A deterministic lexical+embedding pre-pass picked "${fallbackLabel}". Treat that as a prior, not a fact. ` +
-        AUTO_ROUTE_GUIDANCE,
-      hints: judgedRouteHints(pipeline.pool),
-      fallback: fallbackLabel,
+      guidance: AUTO_ROUTE_GUIDANCE,
+      hints: [],
+      fallback: "none",
       signal: opts?.signal,
       timeoutMs: opts?.timeoutMs,
     });
@@ -764,6 +754,7 @@ export function selectAutoRoutedAgent(
       }
     }
   }
+  if (opts?.judgedOnly) return null;
 
   const toChoice = (entry: RankedRouteEntry, reason = entry.reason): AutoRouteChoice => ({
     agent: entry.agent,

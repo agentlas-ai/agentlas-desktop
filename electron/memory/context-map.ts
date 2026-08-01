@@ -115,11 +115,16 @@ export function triggerProjectContextMapRefresh(projectPath: string): boolean {
 export function buildProjectContextSlice(
   projectPath: string | null,
   taskPrompt: string | undefined,
+  options: { refresh?: boolean } = {},
 ): string | null {
   if (!projectPath || !verifyActivatedFolderIdentity(projectPath)) return null;
   const task = String(taskPrompt ?? "").slice(0, MAX_TASK_CHARS);
   if (!task.trim()) return null;
-  triggerProjectContextMapRefresh(projectPath);
+  // Read-only recall may consume an already materialized map, but it must not
+  // turn a question into project-local writes. The caller grants refresh
+  // authority explicitly; `slice --no-refresh` then preserves that boundary
+  // all the way through Core.
+  if (options.refresh !== false) triggerProjectContextMapRefresh(projectPath);
   const launch = contextLaunch([
     "slice",
     "--project",

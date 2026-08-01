@@ -37,8 +37,8 @@ export default function AutomationListPage() {
       // "(삭제된 에이전트)"로 잘못 표시되던 버그(visibleAgents는 픽커용 필터).
       setAgents(ag);
       setFirms(fm);
-    } catch (err) {
-      setMessage(locale === "en" ? `Automations could not be loaded. Existing schedules were not changed. ${String(err)}` : `자동화를 불러오지 못했습니다. 기존 예약은 그대로 둡니다. ${String(err)}`);
+    } catch {
+      setMessage(locale === "en" ? "Automations could not be loaded. Existing schedules were not changed." : "자동화를 불러오지 못했습니다. 기존 예약은 그대로 둡니다.");
     } finally {
       setLoading(false);
     }
@@ -53,8 +53,8 @@ export default function AutomationListPage() {
     try {
       await api.automations.toggle(id, enabled);
       await refresh();
-    } catch (err) {
-      setMessage(locale === "en" ? `Status did not change. ${String(err)}` : `상태를 바꾸지 못했습니다. ${String(err)}`);
+    } catch {
+      setMessage(locale === "en" ? "Status did not change." : "상태를 바꾸지 못했습니다.");
     }
   }
 
@@ -64,8 +64,8 @@ export default function AutomationListPage() {
     const api = ipc();
     if (!api) return;
     setMessage(locale === "en" ? "Starting the run. Opening the live flow..." : "실행을 시작하고 라이브 플로우를 엽니다...");
-    api.automations.runNow(id).catch((err) => {
-      setMessage(locale === "en" ? `Test run failed to start. ${String(err)}` : `테스트 실행을 시작하지 못했습니다. ${String(err)}`);
+    api.automations.runNow(id).catch(() => {
+      setMessage(locale === "en" ? "Test run did not start." : "테스트 실행을 시작하지 못했습니다.");
     });
     router.push(`/automation/flow?id=${encodeURIComponent(id)}`);
   }
@@ -77,15 +77,15 @@ export default function AutomationListPage() {
     const name = automation?.name ?? (locale === "en" ? "this automation" : "이 자동화");
     const message =
       locale === "en"
-        ? `Delete '${name}'?\n\nThis removes the automation and also deletes its linked run chat and messages.`
-        : `'${name}' 자동화를 삭제할까요?\n\n자동화가 사라지며, 이 자동화가 사용하던 실행 채팅과 메시지도 같이 삭제됩니다.`;
+        ? `Delete '${name}'?\n\nThis also deletes its session transcript.`
+        : `'${name}' 자동화를 삭제할까요?\n\n이 자동화의 세션 대화도 같이 삭제됩니다.`;
     if (!confirm(message)) return;
     try {
       await api.automations.remove(id);
       window.dispatchEvent(new CustomEvent("agentlas:automation-changed", { detail: { id } }));
       await refresh();
-    } catch (err) {
-      setMessage(locale === "en" ? `Automation was not deleted. ${String(err)}` : `자동화를 삭제하지 못했습니다. ${String(err)}`);
+    } catch {
+      setMessage(locale === "en" ? "Automation was not deleted." : "자동화를 삭제하지 못했습니다.");
     }
   }
 

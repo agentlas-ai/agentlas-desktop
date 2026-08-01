@@ -304,7 +304,7 @@ function tourConfigForPath(pathname: string): TourConfig | null {
       ],
     };
   }
-  if (pathname.startsWith("/chat") || pathname.startsWith("/project")) {
+  if (pathname.startsWith("/workspace") || pathname.startsWith("/project")) {
     const sidebarStep: TourStep = {
       target: "workspace.sidebar",
       titleKo: "대화·프로젝트 이동",
@@ -312,7 +312,7 @@ function tourConfigForPath(pathname: string): TourConfig | null {
       titleEn: "Jump between work",
       bodyEn: "Recent chats and projects sit on the left. Switch context in one click from this rail.",
     };
-    // 채팅 전용 스텝(대화 본문·실행 로그·입력창)은 /chat 에만 존재한다.
+    // 작업 전용 스텝(대화 본문·실행 로그·입력창)은 ProjectTask cockpit에만 존재한다.
     // /project 상세에는 사이드바만 있으므로 그 한 스텝만 안내해 빈 화면 중앙 콜아웃을 막는다.
     const chatOnlySteps: TourStep[] = [
       {
@@ -342,7 +342,7 @@ function tourConfigForPath(pathname: string): TourConfig | null {
       labelKo: "워크스페이스",
       labelEn: "Workspace",
       autoOpen: false,
-      steps: pathname.startsWith("/chat") ? [sidebarStep, ...chatOnlySteps] : [sidebarStep],
+      steps: pathname.startsWith("/workspace/task") ? [sidebarStep, ...chatOnlySteps] : [sidebarStep],
     };
   }
   if (pathname.startsWith("/build")) {

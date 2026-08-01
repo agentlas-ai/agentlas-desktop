@@ -22,7 +22,8 @@ import {
   createAgentEvolutionProposal,
 } from "./agents/evolution";
 import { inspectAgentFileText } from "./agents/files";
-import { getOrCreateAutomationSession, appendChatMessage } from "./store/chats";
+import { appendChatMessage } from "./store/chats";
+import { getOrCreateAutomationSession } from "./store/automation-sessions";
 import {
   extractStrategyChangeLine,
   failureSignature,
@@ -82,7 +83,7 @@ function appendAutomationChatMessage(automation: Automation, text: string): void
           ? { agentId: automation.targetId }
           : {}),
     });
-    appendChatMessage(chat.id, "system", text);
+    appendChatMessage(chat.chat.id, "system", text);
   } catch (error) {
     console.warn("[automation-recovery] chat feedback failed:", error);
   }

@@ -2,7 +2,7 @@ import { isSafeOneSuggestionId, isSafeOneSuggestionText } from "./one-suggestion
 
 export const ONE_REVIEW_SEED_CONTRACT_VERSION = "1.0.0" as const;
 
-export type OneReviewSeedSurface = "build" | "agent_groups" | "automation" | "work";
+export type OneReviewSeedSurface = "build" | "automation" | "work";
 export type OneReviewSeedBlockedReason =
   | "source_evidence_changed"
   | "installed_agent_unavailable"
@@ -51,7 +51,7 @@ export interface OneAgentBuildReviewSeed extends OneReviewSeedBase {
 export interface OneRetainTeamReviewSeed extends OneReviewSeedBase {
   kind: "retain_team";
   materialization: "editor_prefill";
-  targetSurface: "agent_groups";
+  targetSurface: "work";
   candidates: OneReviewInstalledAgentRef[];
 }
 
@@ -180,7 +180,7 @@ export function isOneSuggestionReviewSeed(value: unknown): value is OneSuggestio
   if (value.kind === "retain_team") {
     return exactKeys(value, [...BASE_KEYS, "candidates"])
       && value.materialization === "editor_prefill"
-      && value.targetSurface === "agent_groups"
+      && value.targetSurface === "work"
       && isAgentRefList(value.candidates)
       && Number(value.acceptedResultCount) >= 2;
   }
@@ -208,7 +208,7 @@ export function isOneSuggestionReviewSeed(value: unknown): value is OneSuggestio
   if (value.kind === "blocked") {
     return exactKeys(value, [...BASE_KEYS, "reason"])
       && value.materialization === "blocked"
-      && ["build", "agent_groups", "automation", "work"].includes(String(value.targetSurface))
+      && ["build", "automation", "work"].includes(String(value.targetSurface))
       && [
         "source_evidence_changed", "installed_agent_unavailable", "proposal_not_materializable",
         "unsupported_review_surface",

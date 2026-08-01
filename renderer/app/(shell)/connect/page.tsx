@@ -21,7 +21,6 @@ import { buildAgentRoster, visibleRosterAgents } from "@/lib/agent-roster";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type {
-  AgentGroupResolved,
   InstalledAgent,
   InstalledFirm,
   TelegramConnectBinding,
@@ -161,7 +160,6 @@ export default function ConnectPage() {
   const tokenInputRef = useRef<HTMLInputElement | null>(null);
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
-  const [groups, setGroups] = useState<AgentGroupResolved[]>([]);
   const [bindings, setBindings] = useState<TelegramConnectBinding[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
   const [botToken, setBotToken] = useState("");
@@ -187,15 +185,13 @@ export default function ConnectPage() {
     }
     setLoading(true);
     try {
-      const [agentRows, firmRows, groupRows, bindingRows] = await Promise.all([
+      const [agentRows, firmRows, bindingRows] = await Promise.all([
         api.team.list(),
         api.firms.list(),
-        api.agentGroups.listResolved(),
         api.telegram.listBindings(),
       ]);
       setAgents(visibleRosterAgents(agentRows));
       setFirms(firmRows);
-      setGroups(groupRows);
       setBindings(bindingRows);
     } catch (err) {
       const message = friendlyError(err);
@@ -220,24 +216,6 @@ export default function ConnectPage() {
     const rows: ConnectTarget[] = [];
 
     const roster = buildAgentRoster(agents, firms);
-
-    for (const group of groups) {
-      rows.push({
-        id: `group:${group.id}`,
-        targetKind: "group",
-        targetId: group.id,
-        kind: "group",
-        name: group.name,
-        subtitle: t("connect.target.group.subtitle"),
-        description:
-          group.description ||
-          t("connect.target.group.description"),
-        source: t("connect.target.group.source"),
-        routeHint: t("connect.target.group.route"),
-        sessionMode: "shared_chat",
-        readiness: group.warningCount > 0 ? "review" : "ready",
-      });
-    }
 
     for (const firm of firms) {
       const loc = pickLocalized(firm, locale);
@@ -287,7 +265,7 @@ export default function ConnectPage() {
 
     const order: Record<TargetKind, number> = { org: 0, group: 1, multi: 2, single: 3 };
     return rows.sort((a, b) => order[a.kind] - order[b.kind] || a.name.localeCompare(b.name));
-  }, [agents, firms, groups, locale, t]);
+  }, [agents, firms, locale, t]);
 
   useEffect(() => {
     if (!targets.length) {
@@ -559,7 +537,6 @@ export default function ConnectPage() {
                     <strong>{t("connect.empty.title")}</strong>
                     <span>{t("connect.empty.body")}</span>
                     <div className="connect-empty-actions">
-                      <Link href="/library/agent-groups">{t("connect.empty.create_orchestrator")}</Link>
                       <Link href="/library/agents">{t("connect.empty.create_agent")}</Link>
                     </div>
                   </div>

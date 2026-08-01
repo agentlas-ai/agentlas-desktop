@@ -262,8 +262,14 @@ export async function runMigration(opts: MigrationOptions): Promise<MigrationRes
         : "";
     const project = createProject({
       name: `${src.label} 마이그레이션`,
-      defaultAgentId: agent.id,
-      contextNote:
+      sourceType: "local",
+      agentPool: [{
+        agentId: agent.id,
+        source: "local",
+        releaseId: null,
+        nameSnapshot: src.label,
+      }],
+      systemPrompt:
         `${src.label}에서 가져온 어시스턴트입니다. 원본 설정: ${src.rootPath}` + memoryNote,
     });
     projectId = project.id;

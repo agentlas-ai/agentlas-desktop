@@ -457,9 +457,7 @@ export default function BuildPage() {
 
   const installToLibrary = async () => {
     if (registeredEntity?.id) {
-      navigate(registeredEntity.kind === "team"
-        ? `/library/agent-groups?edit=${encodeURIComponent(registeredEntity.id)}`
-        : `/library/agents?agentId=${encodeURIComponent(registeredEntity.id)}`);
+      navigate(`/library/agents?agentId=${encodeURIComponent(registeredEntity.id)}`);
       return;
     }
     const target = result?.workspace ?? workspace;
@@ -469,9 +467,7 @@ export default function BuildPage() {
       const imported = await ipc()?.team.importLocalFolder({ path: target, scope });
       if (imported?.id) {
         announceAgentRosterChange({ action: "upserted", agent: imported, source: "build" });
-        navigate(imported.kind === "team"
-          ? `/library/agent-groups?edit=${encodeURIComponent(imported.id)}`
-          : `/library/agents?agentId=${encodeURIComponent(imported.id)}`);
+        navigate(`/library/agents?agentId=${encodeURIComponent(imported.id)}`);
       }
     } catch (e) {
       setActionMsg((ko ? "설치 실패: " : "Install failed: ") + friendlyHephaestusMessage((e as Error).message, ko));

@@ -289,6 +289,28 @@ function canonicalProjection(
   };
 }
 
+function reconcileDormantProjection(
+  projection: OneTaskProjection,
+  activeChatIds: string[],
+): OneTaskProjection {
+  if (projection.status.value !== "working" || !projection.chatId || activeChatIds.includes(projection.chatId)) {
+    return projection;
+  }
+  const stopped = projection.latestReceipt?.status === "failed" || projection.latestReceipt?.status === "interrupted";
+  return {
+    ...projection,
+    status: {
+      ...projection.status,
+      value: stopped ? "failed" : "waiting",
+    },
+    truth: {
+      ...projection.truth,
+      mayStartExecution: projection.sync.mutationMode === "direct",
+      mayClaimNewCompletion: false,
+    },
+  };
+}
+
 /**
  * Prefer the canonical projection bridge when it exists. The legacy chat path
  * remains a conservative local projection only. A run receipt may describe a
@@ -297,7 +319,7 @@ function canonicalProjection(
  */
 export async function listOneTaskProjections(
   api: AgentlasIpc,
-  _activeChatIds: string[],
+  activeChatIds: string[],
   pendingConfirmations: PendingConfirmation[],
   profile?: OneProfile | null,
 ): Promise<OneTaskProjection[]> {
@@ -330,7 +352,7 @@ export async function listOneTaskProjections(
                 api.invoke.latestReceipt(task.originChatId).catch(() => null),
               ])
             : [null, null] as const;
-          return {
+          return reconcileDormantProjection({
             ...projection,
             canonicalStatus: task.status,
             chatId: task.originChatId,
@@ -338,7 +360,7 @@ export async function listOneTaskProjections(
             latestReceipt: latestReceipt && projection.references.receiptIds.includes(latestReceipt.runId)
               ? latestReceipt
               : null,
-          };
+          }, activeChatIds);
         }));
         return hydrated.filter((item): item is NonNullable<(typeof hydrated)[number]> => item !== null);
       }
@@ -356,7 +378,7 @@ export async function listOneTaskProjections(
       canonicalTasks.map(async (task) => {
         const chat = task.originChatId ? await api.chats.get(task.originChatId).catch(() => null) : null;
         if (chat?.originSurface !== "one") return null;
-        return canonicalProjection(task, chat, confirmations, null, oneId);
+        return reconcileDormantProjection(canonicalProjection(task, chat, confirmations, null, oneId), activeChatIds);
       }),
     );
     return details.filter((item): item is OneTaskProjection => Boolean(item));
@@ -370,13 +392,13 @@ export async function listOneTaskProjections(
   });
   const confirmations = new Map(pendingConfirmations.map((item) => [item.chatId, item]));
   return taskPairs.map(({ chat, task }) =>
-    canonicalProjection(task, chat, confirmations, null, oneId));
+    reconcileDormantProjection(canonicalProjection(task, chat, confirmations, null, oneId), activeChatIds));
 }
 
 export async function getOneTaskProjection(
   api: AgentlasIpc,
   taskId: string,
-  _activeChatIds: string[],
+  activeChatIds: string[],
   pendingConfirmations: PendingConfirmation[],
   profile?: OneProfile | null,
 ): Promise<OneTaskProjection | null> {
@@ -401,7 +423,7 @@ export async function getOneTaskProjection(
               api.invoke.latestReceipt(task.originChatId).catch(() => null),
             ])
           : [null, null] as const;
-        return {
+        return reconcileDormantProjection({
           ...normalized,
           canonicalStatus: task.status,
           chatId: task.originChatId,
@@ -409,7 +431,7 @@ export async function getOneTaskProjection(
           latestReceipt: latestReceipt && normalized.references.receiptIds.includes(latestReceipt.runId)
             ? latestReceipt
             : null,
-        };
+        }, activeChatIds);
       }
     } catch {
       // Continue to the exact local origin chat when the optional bridge is unavailable.
@@ -420,13 +442,13 @@ export async function getOneTaskProjection(
     const chat = canonical.originChatId ? await api.chats.get(canonical.originChatId).catch(() => null) : null;
     // Same membership rule as Main: a global Work task never renders inside One.
     if (chat?.originSurface !== "one") return null;
-    return canonicalProjection(
+    return reconcileDormantProjection(canonicalProjection(
       canonical,
       chat,
       new Map(pendingConfirmations.map((item) => [item.chatId, item])),
       null,
       oneId,
-    );
+    ), activeChatIds);
   }
   return null;
 }

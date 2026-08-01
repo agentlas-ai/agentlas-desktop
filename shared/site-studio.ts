@@ -12,7 +12,7 @@ export const SITE_SCREEN_MAX_BYTES = 512_000;
 /** Site home template lanes. Existing projects without this field load as web. */
 export type SiteSurface = "web" | "mobile" | "agent-app";
 
-export type SiteAgentAppTargetKind = "agent" | "team" | "firm" | "group";
+export type SiteAgentAppTargetKind = "agent" | "team" | "firm";
 
 /** Renderer may nominate only a stable kind/id pair; Electron main resolves display data. */
 export type SiteAgentAppTargetRef = {

@@ -1,12 +1,11 @@
-// 대시보드 "활동" 모듈 — 지금 실행 중(activeChats) + 최근 채팅(chats.listRecent).
-// 실행 중인 채팅엔 라이브 점등, 클릭하면 해당 채팅으로 이동.
+// 대시보드 작업 활동 — canonical ProjectTask만 표시한다.
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
-import type { Chat } from "@/lib/types";
+import type { CanonicalTask } from "@/lib/types";
 
 const POLL_MS = 8000;
 const PAGE_SIZE = 5;
@@ -26,7 +25,7 @@ function relTime(iso: string, ko: boolean): string {
 export function DashboardActivity() {
   const { locale } = useT();
   const ko = locale === "ko";
-  const [recent, setRecent] = useState<Chat[]>([]);
+  const [recent, setRecent] = useState<CanonicalTask[]>([]);
   const [active, setActive] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
   const [loaded, setLoaded] = useState(false);
@@ -52,9 +51,8 @@ export function DashboardActivity() {
       return;
     }
     try {
-      const c = await api.chats.listRecent(25);
-      // One 홈 전용 대화는 Work 대시보드에 섞지 않는다 — 표면 분리.
-      setRecent(c.filter((chat) => chat.originSurface !== "one"));
+      const rows = await api.tasks.list({ limit: 25 });
+      setRecent(rows.filter((task) => Boolean(task.projectId && task.originChatId)));
       setError("");
     } catch {
       // 폴링 중 일시 오류는 기존 목록을 비우지 않는다(깜빡임 방지).
@@ -74,7 +72,7 @@ export function DashboardActivity() {
     void loadRecent();
   }, POLL_MS);
 
-  const runningCount = recent.filter((c) => active.has(c.id)).length;
+  const runningCount = recent.filter((task) => task.originChatId && active.has(task.originChatId)).length;
   const pageCount = Math.max(1, Math.ceil(recent.length / PAGE_SIZE));
   const currentPage = Math.min(page, pageCount - 1);
   const visibleRecent = recent.slice(currentPage * PAGE_SIZE, currentPage * PAGE_SIZE + PAGE_SIZE);
@@ -82,7 +80,7 @@ export function DashboardActivity() {
   return (
     <div className="dashboard-module dashboard-activity-module">
       <div className="dashboard-module-head">
-        <span>{ko ? "최근 대화" : "Recent chats"}</span>
+        <span>{ko ? "최근 작업" : "Recent tasks"}</span>
         {runningCount > 0 && (
           <span className="dashboard-running-pill">
             <LiveDot />
@@ -91,26 +89,26 @@ export function DashboardActivity() {
         )}
       </div>
       {!loaded ? (
-        <div className="dashboard-module-empty">{ko ? "최근 대화를 불러오는 중…" : "Loading recent chats…"}</div>
+        <div className="dashboard-module-empty">{ko ? "최근 작업을 불러오는 중…" : "Loading recent tasks…"}</div>
       ) : error ? (
         <div className="dashboard-module-empty">{error}</div>
       ) : recent.length === 0 ? (
         <div className="dashboard-module-empty">
-          {ko ? "아직 대화가 없어요. 새 채팅으로 일을 시작하세요." : "No chats yet. Start one to get going."}
+          {ko ? "아직 프로젝트 작업이 없습니다." : "No project tasks yet."}
         </div>
       ) : (
         <>
           {visibleRecent.map((c) => {
-            const running = active.has(c.id);
+            const running = Boolean(c.originChatId && active.has(c.originChatId));
             return (
               <button
                 key={c.id}
-                onClick={() => navigate(`/chat?id=${c.id}`)}
+                onClick={() => c.originChatId && navigate(`/workspace/task?id=${encodeURIComponent(c.originChatId)}&task=${encodeURIComponent(c.id)}&projectId=${encodeURIComponent(c.projectId ?? "")}`)}
                 className="dashboard-activity-row"
               >
                 {running ? <LiveDot /> : <span className="dashboard-muted-dot" />}
                 <span>
-                  {c.title || (ko ? "새 채팅" : "New chat")}
+                  {c.title || (ko ? "새 작업" : "New task")}
                 </span>
                 <span>
                   {running ? (ko ? "실행 중" : "running") : relTime(c.updatedAt, ko)}
@@ -124,7 +122,7 @@ export function DashboardActivity() {
                 type="button"
                 onClick={() => setPage((value) => Math.max(0, value - 1))}
                 disabled={currentPage === 0}
-                aria-label={ko ? "이전 최근 대화" : "Previous recent chats"}
+                aria-label={ko ? "이전 최근 작업" : "Previous recent tasks"}
               >
                 ‹
               </button>
@@ -133,7 +131,7 @@ export function DashboardActivity() {
                 type="button"
                 onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}
                 disabled={currentPage >= pageCount - 1}
-                aria-label={ko ? "다음 최근 대화" : "Next recent chats"}
+                aria-label={ko ? "다음 최근 작업" : "Next recent tasks"}
               >
                 ›
               </button>

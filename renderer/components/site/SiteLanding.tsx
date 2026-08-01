@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
-import type { AgentGroupResolved, InstalledAgent, InstalledFirm } from "@shared/types";
+import type { InstalledAgent, InstalledFirm } from "@shared/types";
 import type {
   SiteAgentAppMcpRecommendation,
   SiteAgentAppTargetRef,
@@ -184,7 +184,6 @@ function targetKindLabel(project: SiteProjectPublicMeta, ko: boolean): string {
   const kind = project.agentAppTarget?.kind;
   if (kind === "team") return ko ? "에이전트 팀" : "Agent team";
   if (kind === "firm") return ko ? "에이전트 회사" : "Agent firm";
-  if (kind === "group") return ko ? "에이전트 조합" : "Agent group";
   return ko ? "내 에이전트" : "My agent";
 }
 
@@ -300,7 +299,6 @@ export function SiteLanding({
   const [pickerError, setPickerError] = useState("");
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
-  const [groups, setGroups] = useState<AgentGroupResolved[]>([]);
   const [pendingTarget, setPendingTarget] = useState<AgentChoice | null>(null);
   const [projectQuery, setProjectQuery] = useState("");
   const [agentAppPage, setAgentAppPage] = useState(1);
@@ -311,7 +309,7 @@ export function SiteLanding({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   const loadPicker = async () => {
-    if (pickerLoading || agents.length || firms.length || groups.length) return;
+    if (pickerLoading || agents.length || firms.length) return;
     const api = ipc();
     if (!api) {
       setPickerError(ko ? "Electron 브리지를 사용할 수 없습니다." : "Electron bridge unavailable.");
@@ -320,14 +318,12 @@ export function SiteLanding({
     setPickerLoading(true);
     setPickerError("");
     try {
-      const [agentRows, firmRows, groupRows] = await Promise.all([
+      const [agentRows, firmRows] = await Promise.all([
         api.team.list(),
         api.firms.list(),
-        api.agentGroups.listResolved(),
       ]);
       setAgents(visibleAgents(agentRows, { includeTeams: true }));
       setFirms(firmRows);
-      setGroups(groupRows);
     } catch (error) {
       setPickerError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -375,16 +371,7 @@ export function SiteLanding({
       description: ko ? firm.tagline : firm.taglineEn || firm.tagline,
       meta: ko ? `${firm.orgChart.length}명 · 회사` : `${firm.orgChart.length} members · Firm`,
     })),
-    ...groups
-      .filter((group) => group.members.every((member) => member.source !== "hub"))
-      .map((group) => ({
-      kind: "group" as const,
-      id: group.id,
-      name: group.name,
-      description: group.description,
-      meta: ko ? `${group.members.length}명 · 에이전트 조합` : `${group.members.length} members · Agent group`,
-      })),
-  ], [agents, firms, groups, ko]);
+  ], [agents, firms, ko]);
 
   const pickerChoices = useMemo(() => {
     const rows = pickerTab === "mine" ? myChoices : multiChoices;

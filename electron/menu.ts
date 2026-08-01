@@ -82,7 +82,7 @@ function menuLabels(locale: MenuLocale) {
     openWeb: "Open Agentlas Web",
     preferences: "Preferences…",
     appMenu: "Agentlas",
-    newChat: "New Chat",
+    newChat: "New Project",
     marketplace: "Marketplace",
     installedApps: "Installed Apps",
     globalEnv: "Global Env",
@@ -105,7 +105,7 @@ function menuLabels(locale: MenuLocale) {
     openWeb: "Agentlas 웹 열기",
     preferences: "설정…",
     appMenu: "Agentlas",
-    newChat: "새 채팅",
+    newChat: "새 프로젝트",
     marketplace: "마켓",
     installedApps: "설치된 앱",
     globalEnv: "연결 키",
@@ -182,7 +182,7 @@ export function buildAppMenu(
         {
           label: L.newChat,
           accelerator: "CmdOrCtrl+N",
-          click: () => send(getWindow(), "/"),
+          click: () => send(getWindow(), "/project/new"),
         },
         { type: "separator" },
         {

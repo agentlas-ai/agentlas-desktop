@@ -189,9 +189,7 @@ function assertTargetBinding(project: SiteProjectMeta): { chatId: string } {
   if (!chat) throw new Error("Agent App runtime chat is missing.");
   const matches = target.kind === "firm"
     ? chat.firmId === target.id
-    : target.kind === "group"
-      ? chat.agentGroupId === target.id
-      : chat.agentId === target.id && !chat.firmId && !chat.agentGroupId;
+    : chat.agentId === target.id && !chat.firmId;
   if (!matches) throw new Error("Agent App target binding changed; regenerate this app.");
   return { chatId: chat.id };
 }
@@ -303,7 +301,7 @@ async function handleRun(request: IncomingMessage, response: ServerResponse, run
         const prompt = buildPrompt(project, inputs, prepared.disclosure);
         const result = await new Promise<{ runId: string; text: string }>((resolve, reject) => {
           let settled = false;
-          const timeoutMs = project.agentAppTarget?.kind === "firm" || project.agentAppTarget?.kind === "group" ? 300_000 : 120_000;
+          const timeoutMs = project.agentAppTarget?.kind === "firm" ? 300_000 : 120_000;
           const finish = (callback: () => void) => {
             if (settled) return;
             settled = true;

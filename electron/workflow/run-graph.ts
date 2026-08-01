@@ -15,7 +15,8 @@ import type {
 import { createHash, randomUUID } from "node:crypto";
 import { runMcpInvocation } from "../mcp/client";
 import type { WorkforcePrepareCheckpointReceipt } from "../mcp/workforce-orchestrator";
-import { getOrCreateAutomationSession, listChatMessages } from "../store/chats";
+import { listChatMessages } from "../store/chats";
+import { getOrCreateAutomationSession } from "../store/automation-sessions";
 import {
   startGraphRun,
   checkpointGraphRunNode,
@@ -26,7 +27,6 @@ import {
 } from "../store/automations";
 import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
-import { getAgentGroup } from "../store/agent-groups";
 import { getAgentConcurrency } from "../store/concurrency";
 import { listRunEvents, tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
 import { awaitAutomationRunnerWithAbortGrace } from "../automation-watchdog";
@@ -917,7 +917,7 @@ export async function runGraph(
   }
 
   try {
-  const chat = getOrCreateAutomationSession({
+  const rootSession = getOrCreateAutomationSession({
     automationId: automation.id,
     ...(automation.targetType === "firm"
       ? { firmId: automation.targetId }
@@ -925,6 +925,7 @@ export async function runGraph(
         ? { agentId: automation.targetId }
         : {}),
   });
+  const chat = rootSession.chat;
 
   // 노드별 타깃 세션 — agent 노드의 config.ref(에이전트/회사/그룹 id)를 그 타깃에 바인딩된
   // division 세션으로 실행한다(설계 §4.4: agent(agent)→agent.id). ref 없음/미해석이면 자동화
@@ -944,13 +945,11 @@ export async function runGraph(
     if (cached) return cached;
     let resolved = chat;
     if (getAgentById(ref)) {
-      resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::a:${ref}`, agentId: ref });
+      resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::a:${ref}`, agentId: ref }).chat;
     } else if (getFirm(ref)) {
-      resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::f:${ref}`, firmId: ref });
-    } else if (getAgentGroup(ref)) {
-      resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::g:${ref}`, agentGroupId: ref });
+      resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::f:${ref}`, firmId: ref }).chat;
     } else if (str(node.config, "targetType") === "hub") {
-      resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::h:${ref}` });
+      resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::h:${ref}`, hubId: ref }).chat;
     }
     nodeChatCache.set(ref, resolved);
     return resolved;

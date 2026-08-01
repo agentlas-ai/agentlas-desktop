@@ -30,9 +30,8 @@ export async function startChatWithPrompt(
   const api = ipc();
   if (!api) return false;
   try {
-    const chat = await api.chats.create({});
     const seedFlag = opts?.seedOnly ? "&seedOnly=1" : "";
-    navigate(`/chat?id=${chat.id}&prompt=${encodeURIComponent(body)}${seedFlag}`);
+    navigate(`/one?prompt=${encodeURIComponent(body)}${seedFlag}`);
     return true;
   } catch {
     return false;

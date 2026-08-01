@@ -2,7 +2,6 @@ import { Buffer } from "node:buffer";
 
 import { listInstalledAgents } from "../mcp/registry";
 import { detectRuntimes } from "../runtime/detect";
-import { listAgentGroups, listResolvedAgentGroups } from "../store/agent-groups";
 import {
   getAutomationLiveRunState,
   listAutomations,
@@ -73,7 +72,6 @@ import type { MobileBridgeHostIdentity } from "./pairing";
 import {
   MOBILE_BRIDGE_PROTOCOL_VERSION,
   type MobileBridgeAgentDto,
-  type MobileBridgeAgentGroupDto,
   type MobileBridgeAutomationDto,
   type MobileBridgeBrowserApprovalDto,
   type MobileBridgeChatDto,
@@ -329,7 +327,6 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
     capabilities: [
       "agents",
       "firms",
-      "groups",
       "projects",
       "chats",
       "chat-stream",
@@ -349,10 +346,9 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
       "browser-approvals",
       "automations",
       "usage",
-      // v1 cloud-actions extension: registered upload preview/save, server-side
-      // cloud delete, owner cloud combinations, and remote Hephaestus builds.
+      // v1 cloud-actions extension: registered upload preview/save,
+      // server-side cloud delete, and remote Hephaestus builds.
       "cloud-agent-actions",
-      "cloud-groups",
       "remote-build",
       ...(options.ontology?.supported ? ["ontology-chips"] : []),
     ],
@@ -413,73 +409,19 @@ function firmsDto(): MobileBridgeFirmDto[] {
   }));
 }
 
-async function groupsDto(): Promise<MobileBridgeAgentGroupDto[]> {
-  // `listResolvedAgentGroups` may consult live Hub metadata. If that lookup
-  // fails, preserve the real durable local rows but mark them missing rather
-  // than inventing group members.
-  let groups: Awaited<ReturnType<typeof listResolvedAgentGroups>>;
-  try {
-    groups = await listResolvedAgentGroups();
-  } catch {
-    groups = listAgentGroups().map((group) => ({
-      ...group,
-      warningCount: group.members.length,
-      members: group.members.map((member) => ({
-        ...member,
-        status: "missing" as const,
-        warnings: ["route_missing" as const],
-      })),
-    }));
-  }
-  const bindingByAgentId = new Map(
-    listInstalledAgentHubBindings(64).map((binding) => [binding.installedAgentId, binding] as const),
-  );
-  return groups.map((group) => ({
-    id: group.id,
-    name: displayText(group.name, 512),
-    description: displayText(group.description, 2_048),
-    orchestratorName: displayText(group.orchestratorName, 512),
-    warningCount: group.warningCount,
-    createdAt: group.createdAt,
-    updatedAt: group.updatedAt,
-    members: group.members.map((member) => {
-      const display = member.current ?? member.snapshot;
-      const binding = member.agentId ? bindingByAgentId.get(member.agentId) : undefined;
-      return {
-        id: member.id,
-        source: member.source,
-        agentId: member.agentId ?? null,
-        agentSlug: member.agentSlug ?? null,
-        hubSlug: member.hubSlug ?? null,
-        firmId: member.firmId ?? null,
-        nodeId: member.nodeId ?? null,
-        role: optionalDisplayText(member.role, 512),
-        name: displayText(display.name, 512),
-        nameEn: displayText(display.nameEn, 512),
-        routeLabel: displayText(display.routeLabel, 1_024),
-        ...(binding
-          ? {
-              agentDefinitionId: binding.agentDefinitionId,
-              agentReleaseId: binding.agentReleaseId,
-            }
-          : {}),
-        status: member.status,
-        warnings: [...member.warnings],
-      };
-    }),
-  }));
-}
-
 function projectsDto(): MobileBridgeProjectDto[] {
   return listProjects().map((project) => ({
     id: project.id,
     name: displayText(project.name, 512),
     description: optionalDisplayText(project.description, 2_048),
-    defaultAgentId: project.defaultAgentId,
+    defaultAgentId: project.agentPool[0]?.agentId ?? null,
+    controllerAgentId: project.agentPool[0]?.agentId ?? null,
+    controllerName: optionalDisplayText(project.agentPool[0]?.nameSnapshot ?? null, 512),
+    agentCount: project.agentPool.length,
     hasWorkingFolder: Boolean(project.folderPath),
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
-    // DESKTOP_MOBILE_BRIDGE: contextNote and folderPath intentionally omitted.
+    // DESKTOP_MOBILE_BRIDGE: systemPrompt, full agent pool, release refs, and folderPath intentionally omitted.
   }));
 }
 
@@ -504,7 +446,6 @@ export function projectMobileBridgeChat(
     projectId: chat.projectId,
     workingFolderName: workingFolderName(chat.id),
     firmId: chat.firmId,
-    agentGroupId: chat.agentGroupId,
     agentId: chat.agentId,
     title: displayText(chat.title, 1_024),
     archivedAt: chat.archivedAt,
@@ -1162,8 +1103,7 @@ export async function projectMobileBridgeSnapshot(
   const activeChatIds = [...new Set(options.activeChatIds ?? [])];
   const activeSet = new Set(activeChatIds);
   const maxMessages = Math.max(1, Math.min(200, Math.floor(options.maxMessagesPerChat ?? 200)));
-  const [groups, runtimes, usage, presentEnvKeys] = await Promise.all([
-    groupsDto(),
+  const [runtimes, usage, presentEnvKeys] = await Promise.all([
     detectRuntimes(),
     getUsageSnapshot(),
     listEnvKeys().catch(() => [] as string[]),
@@ -1218,7 +1158,6 @@ export async function projectMobileBridgeSnapshot(
     runtimes: projectMobileBridgeRuntimes(runtimes),
     agents: agentsDto(new Set(presentEnvKeys)),
     firms: firmsDto(),
-    groups,
     projects: projectsDto(),
     chats: chatsDto(activeSet),
     messages: {},

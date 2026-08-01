@@ -588,7 +588,6 @@ function orchestrationTargetsPayload(payload: Record<string, unknown>): Orchestr
     const kind = target.entityKind;
     if (source === "local" && kind === "agent" && typeof target.agentId === "string") out.push({ source, entityKind: kind, agentId: target.agentId });
     else if (source === "local" && kind === "team" && typeof target.firmId === "string") out.push({ source, entityKind: kind, firmId: target.firmId });
-    else if (source === "local" && kind === "group" && typeof target.groupId === "string") out.push({ source, entityKind: kind, groupId: target.groupId });
     else if ((source === "cloud" || source === "hub") && (kind === "agent" || kind === "team") && typeof target.slug === "string") out.push({ source, entityKind: kind, slug: target.slug });
     else return undefined;
   }

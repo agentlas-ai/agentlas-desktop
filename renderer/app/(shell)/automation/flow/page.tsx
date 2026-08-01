@@ -33,6 +33,8 @@ import { NODE_ACCENT } from "@/components/automation/nodes/nodeShared";
 import { NodePalette, type PaletteNodeSeed } from "@/components/automation/NodePalette";
 import { NodeConfigPanel } from "@/components/automation/NodeConfigPanel";
 import { RunHistoryPanel } from "@/components/automation/RunHistoryPanel";
+import { AutomationRail } from "@/components/automation/AutomationRail";
+import { AutomationSessionPanel } from "@/components/automation/AutomationSessionPanel";
 import { IconBolt } from "@/components/Icon";
 
 export default function AutomationFlowWrapper() {
@@ -137,8 +139,8 @@ function AutomationFlowPage() {
         return;
       }
       setAutomation(found);
-    } catch (err) {
-      setError(locale === "en" ? `Automation could not be loaded. Nothing changed. ${String(err)}` : `자동화를 불러오지 못했습니다. 바뀐 내용은 없습니다. ${String(err)}`);
+    } catch {
+      setError(locale === "en" ? "Automation could not be loaded. Nothing changed." : "자동화를 불러오지 못했습니다. 바뀐 내용은 없습니다.");
     } finally {
       setLoading(false);
     }
@@ -431,8 +433,8 @@ function AutomationFlowPage() {
       setAutomation(next);
       setDirty(false);
       setMessage(t("auto.flow.saved"));
-    } catch (err) {
-      setMessage(`${t("auto.flow.save_failed")} ${String(err)}`);
+    } catch {
+      setMessage(t("auto.flow.save_failed"));
     } finally {
       setSaving(false);
     }
@@ -444,8 +446,8 @@ function AutomationFlowPage() {
     try {
       const next = await api.automations.toggle(automation.id, !automation.enabled);
       setAutomation((cur) => (cur ? { ...cur, enabled: next.enabled, nextRunAt: next.nextRunAt } : next));
-    } catch (err) {
-      setMessage(locale === "en" ? `Status did not change. ${String(err)}` : `상태를 바꾸지 못했습니다. ${String(err)}`);
+    } catch {
+      setMessage(locale === "en" ? "Status did not change." : "상태를 바꾸지 못했습니다.");
     }
   }
 
@@ -459,8 +461,8 @@ function AutomationFlowPage() {
       setMessage(locale === "en" ? "Run started. Watch node status and history on the right." : "실행을 시작했습니다. 오른쪽에서 노드 상태와 기록을 확인하세요.");
       const snap = await api.automations.latestRun(automation.id);
       if (snap?.nodeStates) setRunStates(snap.nodeStates);
-    } catch (err) {
-      setMessage(locale === "en" ? `Run did not start. ${String(err)}` : `실행을 시작하지 못했습니다. ${String(err)}`);
+    } catch {
+      setMessage(locale === "en" ? "Run did not start." : "실행을 시작하지 못했습니다.");
     } finally {
       setRunning(false);
     }
@@ -586,6 +588,8 @@ function AutomationFlowPage() {
       ) : null}
 
       <div className="automation-flow-workspace">
+        <AutomationRail currentId={automation.id} locale={locale} />
+        <AutomationSessionPanel automationId={automation.id} locale={locale} />
         <div className="automation-flow-canvas">
           {isSynthesized && !editing ? (
             <div
@@ -625,24 +629,18 @@ function AutomationFlowPage() {
           </ReactFlow>
         </div>
 
-        {editing && paletteOpen ? (
-          <NodePalette onAdd={addPaletteNode} onClose={() => setPaletteOpen(false)} />
-        ) : editing && selectedNode ? (
-          <NodeConfigPanel
-            node={selectedNode}
-            onPatch={patchSelected}
-            onLabel={labelSelected}
-            onDelete={deleteSelected}
-            onClose={() => setSelectedNodeId(null)}
-            timezone={automation?.timezone ?? null}
-          />
-        ) : selectedNode ? (
-          <NodeInspector node={selectedNode} onClose={() => setSelectedNodeId(null)} t={t} />
-        ) : !editing ? (
-          <aside style={{ width: 328, flexShrink: 0, borderLeft: "var(--hairline)", background: "var(--paper)", overflowY: "auto" }}>
-            <RunHistoryPanel automation={automation} locale={locale} />
-          </aside>
-        ) : null}
+        <aside className="automation-inspector-column">
+          {editing && paletteOpen ? (
+            <NodePalette onAdd={addPaletteNode} onClose={() => setPaletteOpen(false)} />
+          ) : editing && selectedNode ? (
+            <NodeConfigPanel node={selectedNode} onPatch={patchSelected} onLabel={labelSelected} onDelete={deleteSelected} onClose={() => setSelectedNodeId(null)} timezone={automation?.timezone ?? null} />
+          ) : selectedNode ? (
+            <NodeInspector node={selectedNode} onClose={() => setSelectedNodeId(null)} t={t} />
+          ) : (
+            <div className="automation-node-empty" data-one-content-slot />
+          )}
+          <RunHistoryPanel automation={automation} locale={locale} compact />
+        </aside>
       </div>
     </div>
   );

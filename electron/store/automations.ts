@@ -36,6 +36,7 @@ interface AutomationRow {
   schedule: string;
   target_type: AutomationTargetType;
   target_id: string;
+  project_id: string | null;
   prompt_template: string;
   execution_permission: string | null;
   tool_mode: string | null;
@@ -184,6 +185,7 @@ function toAutomation(row: AutomationRow): Automation {
     scheduleHuman: row.schedule,
     targetType: row.target_type,
     targetId: row.target_id,
+    projectId: row.project_id ?? null,
     promptTemplate: row.prompt_template,
     executionPermission: normalizeExecutionPermission(row.execution_permission),
     toolMode: normalizeToolMode(row.tool_mode),
@@ -336,6 +338,7 @@ export function createAutomation(input: {
   scheduleHuman: string;
   targetType: AutomationTargetType;
   targetId: string;
+  projectId?: string | null;
   promptTemplate: string;
   createdBy?: "user" | "agent";
   graphJson?: string | WorkflowGraph | null;
@@ -378,8 +381,9 @@ export function createAutomation(input: {
       `INSERT INTO automations
          (id, name, schedule, target_type, target_id, prompt_template, enabled, created_by,
           last_run_at, next_run_at, created_at, graph_json, schedule_json, timezone, end_at, max_runs, run_count,
-          trigger_type, trigger_json, tool_mode, hub_mode, execution_permission, target_version, runtime_selection_json)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+          trigger_type, trigger_json, tool_mode, hub_mode, execution_permission, target_version, runtime_selection_json,
+          project_id)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -409,6 +413,7 @@ export function createAutomation(input: {
       normalizeExecutionPermission(input.executionPermission),
       input.targetVersion?.trim() || null,
       input.runtimeSelection ? JSON.stringify(input.runtimeSelection) : null,
+      input.projectId ?? null,
     );
   const automation = getAutomation(id) as Automation;
   emitDesktopStoreChange({ entity: "automation", id });
@@ -429,6 +434,7 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
   const scheduleHuman = patch.scheduleHuman ?? row.schedule;
   const targetType = patch.targetType ?? row.target_type;
   const targetId = patch.targetId ?? row.target_id;
+  const projectId = patch.projectId !== undefined ? patch.projectId : row.project_id;
   const promptTemplate = patch.promptTemplate ?? row.prompt_template;
   const toolMode = resolveAutomationToolMode({
         judged: judgedComputerUse,
@@ -473,7 +479,7 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
        name = ?, schedule = ?, target_type = ?, target_id = ?, prompt_template = ?,
        tool_mode = ?, hub_mode = ?, execution_permission = ?, target_version = ?, runtime_selection_json = ?,
        schedule_json = ?, timezone = ?, end_at = ?, max_runs = ?, trigger_type = ?, trigger_json = ?,
-       next_run_at = ?
+       next_run_at = ?, project_id = ?
      WHERE id = ?`,
   ).run(
     name,
@@ -493,6 +499,7 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
     triggerType,
     triggerJson,
     nextRunAt,
+    projectId,
     id,
   );
   const automation = getAutomation(id) as Automation;
@@ -525,10 +532,16 @@ export function toggleAutomation(id: string, enabled: boolean): Automation {
 export function removeAutomation(id: string): void {
   const db = getDb();
   const remove = db.transaction(() => {
-    // These projection tables predate foreign-key cascades. Delete the hidden
-    // target-scoped chats and histories in the same commit as the parent so a
-    // removed automation cannot leave messages, unreachable history, or a
-    // forever-running canvas row behind.
+    // Delete first-class automation sessions and their internal ledgers in the
+    // same commit as the parent so no transcript survives without an owner.
+    const sessions = db.prepare(
+      "SELECT ledger_chat_id FROM automation_sessions WHERE automation_id = ? OR automation_id LIKE ?",
+    ).all(id, `${id}::%`) as Array<{ ledger_chat_id: string }>;
+    db.prepare("DELETE FROM automation_sessions WHERE automation_id = ? OR automation_id LIKE ?")
+      .run(id, `${id}::%`);
+    const removeLedger = db.prepare("DELETE FROM chats WHERE id = ?");
+    for (const session of sessions) removeLedger.run(session.ledger_chat_id);
+    // Clean unclaimed pre-v83 marker rows during deletion.
     const chatMarker = `⟦automation⟧${id}`;
     const escapedChatMarker = chatMarker.replace(/[!%_]/g, (character) => `!${character}`);
     db.prepare(

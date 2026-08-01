@@ -16,7 +16,6 @@ import type {
   SiteProjectMeta,
 } from "../../shared/site-studio";
 import { getAgentById } from "../mcp/registry";
-import { getAgentGroup } from "../store/agent-groups";
 import { getFirm } from "../store/firms";
 import { readResolvedSiteAgentAppContract } from "./agent-app-contract";
 import {
@@ -338,7 +337,7 @@ function resolveTargetAndSummary(ref: SiteAgentAppTargetRef): {
     };
     publicSummary = publicAgentSummary(agent);
     addInstalledDeclaration(agent);
-  } else if (ref.kind === "firm") {
+  } else {
     const firm = getFirm(ref.id);
     if (!firm) throw new Error("선택한 멀티에이전트 회사를 찾을 수 없습니다.");
     target = {
@@ -359,33 +358,6 @@ function resolveTargetAndSummary(ref: SiteAgentAppTargetRef): {
       addInstalledDeclaration(ceoAgent);
     }
     publicSummary = [target.name, target.description, ...members].join(" ");
-  } else {
-    const group = getAgentGroup(ref.id);
-    if (!group) throw new Error("선택한 에이전트 조합을 찾을 수 없습니다.");
-    target = {
-      kind: "group",
-      id: group.id,
-      name: trimText(group.name, 120),
-      description: trimText(group.description || group.orchestratorName, 500),
-      memberCount: Math.max(1, group.members.length),
-    };
-    publicSummary = [
-      target.name,
-      target.description,
-      ...group.members.flatMap((member) => {
-        const snapshot = member.snapshot;
-        const installed = member.agentId ? getAgentById(member.agentId) : null;
-        if (installed && !visibleAgent(installed)) return [];
-        if (installed) {
-          addInstalledDeclaration(installed);
-          return [publicAgentSummary(installed)];
-        }
-        if (member.source === "hub") {
-          capabilityUnavailable.push({ id: "hub-borrowing", reason: "blocked-by-agent-app-policy" });
-        }
-        return [`${trimText(snapshot.nameEn || snapshot.name, 120)} ${trimText(snapshot.taglineEn || snapshot.tagline, 240)}`];
-      }),
-    ].join(" ");
   }
 
   return {

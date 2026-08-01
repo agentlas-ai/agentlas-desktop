@@ -15,14 +15,12 @@ import type {
   InstalledAgent,
   InstalledFirm,
   Project,
-  RuntimeCommand,
   RuntimeStatus,
 } from "@/lib/types";
 import { useRouter } from "next/navigation";
 import { CONTEXT_MANAGED_BY } from "@shared/models";
 import type { OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent } from "@shared/types";
 import type { AgentlasAppDefinition } from "@/lib/apps";
-import { appDisplayName, appSlashCommands, appTagline } from "@/lib/apps";
 import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
@@ -38,7 +36,6 @@ function isOrchestrationTarget(value: unknown): value is OrchestrationTarget {
   if (source === "local") {
     if (entityKind === "agent") return typeof target.agentId === "string" && target.agentId.trim().length > 0;
     if (entityKind === "team") return typeof target.firmId === "string" && target.firmId.trim().length > 0;
-    if (entityKind === "group") return typeof target.groupId === "string" && target.groupId.trim().length > 0;
     return false;
   }
   return (
@@ -109,8 +106,6 @@ interface MentionContext {
   apps: AgentlasAppDefinition[];
   generatedApps?: AppFactoryAppRecord[];
   envKeys: string[]; // 등록된 env 키 (Library > Environment에서 add한)
-  /** CLI(Claude/Codex/Gemini)에서 스캔한 슬래시 명령 — / 자동완성에 노출 */
-  commands?: RuntimeCommand[];
 }
 
 interface SendOptions {
@@ -123,6 +118,8 @@ interface SendOptions {
   taskForceTargets?: OrchestrationTarget[];
   /** Keep the current chat roster first; recruit from Agent Hub/Cloud only on a real capability gap. */
   sessionRouting?: boolean;
+  /** Explicit per-turn preference. Undefined leaves the decision to One/the task controller. */
+  stormbreakerMode?: boolean;
 }
 
 /** popover에 그릴 한 행 + 평탄화 인덱스용 메타. group은 같은 헤더 아래로 그룹핑되지만 인덱스는 flat. */
@@ -134,24 +131,18 @@ interface AutocompleteOption {
   title: string;
   subtitle?: string;
   /** 아이콘은 popover에서 일괄 매핑 (group으로 결정) */
-  kind: "cmd" | "app" | "agent" | "hub" | "firm" | "project" | "env";
+  kind: "app" | "agent" | "hub" | "firm" | "project" | "env";
   /** 선택 시 입력창에 치환할 토큰 */
   replacement: string;
-  /** true면 앱 액션 실행(/new·/clear·/help). false/undefined면 텍스트 삽입(멘션·CLI 슬래시). */
-  appAction?: boolean;
-  /** 멘션(@agent/@firm) 선택 시 이 에이전트로 활성 에이전트를 전환(=에이전트 콜). 있으면 텍스트 삽입 대신 전환. */
-  switchAgentId?: string;
-  /** Hub bookmark selection binds this borrowed slug to the current chat. */
-  borrowAgentSlug?: string;
+  /** Explicit turn-only sub-agent target. It never changes the One/Task controller. */
+  target?: OrchestrationTarget;
 }
 
 type PermissionLevel = "read" | "write" | "full";
 type AppGenerateChoice = "dedicated" | "chat";
-// 챗 입력바 모드 토글 — 에이전트 찾기(추천 미리보기) + Stormbreaker(견고-실행 루프).
-// 단일선택이 아니라 다중선택이며, 전송해도 꺼지지 않고 계속 켜둘 수 있다.
-// /hep-network 직접 입력은 여전히 허브 라우팅으로 동작하지만, 하단에서는 추천/네트워크 선택을 한 흐름으로 묶는다.
-// recommend 는 프리픽스가 아니라 전송 동작을 바꾼다(실행 전에 추천 시트를 띄움). composeHepPrefix 는 무시한다.
-type HepToggleId = "network" | "stormbreaker" | "recommend";
+// Optional per-turn preferences. An untouched toggle is deliberately omitted:
+// One/the task controller keeps its own judgment instead of receiving OFF.
+type HepToggleId = "stormbreaker" | "recommend";
 type ChatInputLayer = "plus" | "permission" | "model" | "context" | "agent-picker" | "apps-question";
 
 const HEP_TOGGLES: Array<{
@@ -217,9 +208,7 @@ interface AutoRouteGate {
 
 export function ChatInput({
   onSend,
-  onCallAgent,
-  onCallHubAgents,
-  onCommand,
+  onSessionAction,
   onRecommendPreview,
   onRecommendExecute,
   onStop,
@@ -241,15 +230,11 @@ export function ChatInput({
   queuedCount = 0,
   prefillText = null,
   activeChatId = null,
-  agentPickerSignal = 0,
+  placeholder,
 }: {
   onSend: (text: string, opts?: SendOptions) => void;
-  /** 슬래시 커맨드(/new, /clear, /help …) 실행 — 텍스트 삽입이 아니라 액션 */
-  onCommand?: (cmd: string) => void;
-  /** @멘션으로 에이전트/회사를 고르면 그 에이전트를 호출(활성 에이전트 전환). */
-  onCallAgent?: (agentId: string) => void;
-  /** Hub 북마크를 고르면 설치로 가장하지 않고 이 채팅의 borrowed roster에 바인딩. */
-  onCallHubAgents?: (slugs: string[]) => void;
+  /** Button-only session actions. They are never represented as chat commands. */
+  onSessionAction?: (action: "new" | "clear") => void;
   /** 추천 토글 ON 시 보내기 전에 라우터 미리보기를 요청 — 정규화된 추천을 반환(없으면 null). */
   onRecommendPreview?: (text: string) => Promise<Recommendation | null>;
   /** 추천 시트에서 고른 실행 경로를 디스패치(에이전트 전환/네트워크/파이프라인/그냥보내기). */
@@ -287,8 +272,8 @@ export function ChatInput({
   prefillText?: string | null;
   /** 현재 채팅 id — 바뀌면 세션 전용 실행 상태(추천 시트·모드 토글)를 리셋해 세션 간 누수 방지. */
   activeChatId?: string | null;
-  /** 전역대화 옆 "에이전트 부르기" 필에서 증가시키는 시그널 — 바뀔 때마다 에이전트 피커를 연다. */
-  agentPickerSignal?: number;
+  /** Product-surface specific result prompt. */
+  placeholder?: string;
 }) {
   const { t, locale } = useT();
   const router = useRouter();
@@ -354,12 +339,7 @@ export function ChatInput({
   const [gateSheet, setGateSheet] = useState<AutoRouteGate | null>(null);
   const [appsGenerateMode, setAppsGenerateMode] = useState(false);
   const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
-  // 전역대화 옆 "에이전트 부르기" 필은 같은 버튼을 다시 누르면 닫히는 실제 토글이다.
-  useEffect(() => {
-    if (agentPickerSignal > 0) setAgentPickerOpen((open) => !open);
-    // signal 변화만 토글 원인이다. activeLayer를 deps에 넣으면 메뉴 자체 변경 때 재토글된다.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentPickerSignal]);
+  const [turnCalls, setTurnCalls] = useState<Array<{ key: string; label: string; target: OrchestrationTarget }>>([]);
   const [appsGenerateChoice, setAppsGenerateChoice] = useState<AppGenerateChoice>("dedicated");
   // 기본값을 write로 — 바이브코딩 앱에서 read-only 기본은 첫 "만들어줘"가 파일을 못 써 조용히 실패한다.
   // write는 cwd 파일 편집만 허용(셸·외부 자동호출은 차단)이라 안전한 기본값.
@@ -367,7 +347,7 @@ export function ChatInput({
   // 컨텍스트는 진단 지표가 아니라 다음 행동(새 세션/비우기)으로 바로 이어져야 한다.
   // / 슬래시 + @ 멘션 인라인 자동완성
   const [trigger, setTrigger] = useState<null | {
-    kind: "slash" | "mention";
+    kind: "mention";
     query: string;
     /** textarea 내부 trigger 문자 위치 (caret index) */
     startIndex: number;
@@ -438,17 +418,6 @@ export function ChatInput({
   // 큐에 쌓아 현재 턴 뒤에 전달한다. 중지 요청 뒤에만 새 지시를 잠시 막아 의도를 충돌시키지 않는다.
   const submitDisabled =
     (!input.trim() && images.length === 0) || disabled || (busy && stopRequested);
-  // 활성 토글을 Hephaestus 지시 프리픽스로 합성. Network=허브 라우팅, Stormbreaker=견고-실행(--stormbreaker).
-  // Network 칩은 하단에서 숨겼지만 /hep-network 직접 실행 및 내부 선택 경로를 위해 동작은 유지한다.
-  function composeHepPrefix(text: string): string {
-    const net = hepToggles.has("network");
-    const storm = hepToggles.has("stormbreaker");
-    const body = text ? ` ${text}` : "";
-    if (net && storm) return `hep-network --stormbreaker${body}`;
-    if (net) return `hep-network${body}`;
-    if (storm) return `stormbreaker${body}`;
-    return text;
-  }
   const hepHint = [...hepToggles]
     .map((id) => {
       const toggle = HEP_TOGGLES.find((t) => t.id === id);
@@ -499,7 +468,7 @@ export function ChatInput({
     setImages((arr) => arr.filter((_, j) => j !== i));
   }
 
-  // ── 입력 변경: / 또는 @ trigger 감지 ────────────────────
+  // ── 입력 변경: turn-only @ sub-agent trigger ────────────
   function onInputChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     const next = e.target.value;
     setInput(next);
@@ -513,9 +482,7 @@ export function ChatInput({
     );
     const tokenStart = lastSpace + 1;
     const token = before.slice(tokenStart);
-    if (token.startsWith("/")) {
-      setTrigger({ kind: "slash", query: token.slice(1), startIndex: tokenStart });
-    } else if (token.startsWith("@")) {
+    if (token.startsWith("@")) {
       setTrigger({ kind: "mention", query: token.slice(1), startIndex: tokenStart });
     } else {
       setTrigger(null);
@@ -567,7 +534,7 @@ export function ChatInput({
   }, [activeAgentId]);
 
   // fillOnly=true(Tab): 실행/전환 없이 텍스트만 자동완성해 넣는다(절대 전송 안 함).
-  // fillOnly=false(Enter): 앱 명령은 실행, @agent/@firm은 에이전트 전환, 그 외는 텍스트 삽입.
+  // fillOnly=false(Enter): @agent/@firm은 이번 턴 호출로 추가하고, 그 외는 텍스트 삽입.
   function applyAutocomplete(opt: AutocompleteOption, fillOnly = false) {
     if (!trigger) return;
     const before = input.slice(0, trigger.startIndex);
@@ -575,8 +542,7 @@ export function ChatInput({
     const after = input.slice(caret);
 
     if (!fillOnly) {
-      // @Hub bookmark = 공개 Hub 라우팅 참조를 이 채팅에 고용 바인딩.
-      if (opt.borrowAgentSlug && onCallHubAgents) {
+      if (opt.target) {
         setInput(`${before}${after}`.trimStart());
         setTrigger(null);
         setGateSheet(null);
@@ -585,35 +551,14 @@ export function ChatInput({
           next.delete("recommend");
           return next;
         });
-        onCallHubAgents([opt.borrowAgentSlug]);
-        setTimeout(() => textareaRef.current?.focus(), 0);
-        return;
-      }
-      // @agent / @firm 선택 = 그 에이전트 호출(활성 에이전트 전환) — 텍스트는 넣지 않고 토큰 제거.
-      if (opt.switchAgentId && onCallAgent) {
-        setInput(`${before}${after}`.trimStart());
-        setTrigger(null);
-        setGateSheet(null);
-        setHepToggles((prev) => {
-          const next = new Set(prev);
-          next.delete("recommend");
-          return next;
-        });
-        expectAgentChangeWithoutReset(opt.switchAgentId);
-        onCallAgent(opt.switchAgentId);
-        setTimeout(() => textareaRef.current?.focus(), 0);
-        return;
-      }
-      // 앱 슬래시 명령(/new·/folder·…)은 텍스트로 넣지 않고 액션 실행 — "/..." 토큰 제거.
-      if (opt.appAction && onCommand) {
-        setInput(`${before}${after}`.trimStart());
-        setTrigger(null);
-        onCommand(opt.replacement);
+        setTurnCalls((current) => current.some((call) => call.key === opt.key)
+          ? current
+          : [...current, { key: opt.key, label: opt.title, target: opt.target as OrchestrationTarget }]);
         setTimeout(() => textareaRef.current?.focus(), 0);
         return;
       }
     }
-    // (fillOnly이거나) 멘션/CLI 슬래시 → 텍스트 삽입. fillOnly는 트레일링 공백 없이 채워 계속 편집 가능.
+    // fillOnly는 트레일링 공백 없이 채워 계속 편집 가능.
     const tail = fillOnly ? "" : " ";
     const next = `${before}${opt.replacement}${tail}${after}`;
     setInput(next);
@@ -639,6 +584,8 @@ export function ChatInput({
       goalMode: goalMode || undefined,
       permissions,
       appsGenerateMode: appsGenerateMode || undefined,
+      taskForceTargets: turnCalls.length ? turnCalls.map((call) => call.target) : undefined,
+      stormbreakerMode: hepToggles.has("stormbreaker") || undefined,
     };
   }
 
@@ -652,10 +599,10 @@ export function ChatInput({
       void autoRouteAndSend(text);
       return;
     }
-    const outgoingText = composeHepPrefix(text);
-    onSend(outgoingText, currentSendOptions());
+    onSend(text, currentSendOptions());
     setInput("");
     setImages([]);
+    setTurnCalls([]);
     // 모드 토글(에이전트 찾기/Stormbreaker)은 리셋하지 않는다 — 계속 켜둘 수 있음.
     setTrigger(null);
   }
@@ -665,6 +612,7 @@ export function ChatInput({
   function finishComposerAfterSend() {
     setInput("");
     setImages([]);
+    setTurnCalls([]);
     setTrigger(null);
     setTimeout(() => textareaRef.current?.focus(), 0);
   }
@@ -951,12 +899,6 @@ export function ChatInput({
           setGoalMode={setGoalMode}
           appsGenerateMode={appsGenerateMode}
           onToggleAppsGenerate={requestAppsGenerateMode}
-          onInsertSlash={() => {
-            setInput((s) => `${s}${s.endsWith(" ") || s === "" ? "" : " "}/`);
-            setPlusOpen(false);
-            setPlusSubmenu(null);
-            setTimeout(() => textareaRef.current?.focus(), 0);
-          }}
           onInsertMention={() => {
             setInput((s) => `${s}${s.endsWith(" ") || s === "" ? "" : " "}@`);
             setPlusOpen(false);
@@ -1010,21 +952,21 @@ export function ChatInput({
             });
           }}
           onConfirm={() => {
-            // 로컬 에이전트는 전환하고, Hub 북마크는 borrowed roster에 묶는다.
             setHepToggles((prev) => {
               const next = new Set(prev);
               next.delete("recommend");
               return next;
             });
-            const hubSlugs = [...selectedAgentIds]
-              .filter((id) => id.startsWith("hub:"))
-              .map((id) => id.slice("hub:".length))
-              .filter(Boolean);
-            for (const id of [...selectedAgentIds].filter((id) => !id.startsWith("hub:"))) {
-              expectAgentChangeWithoutReset(id);
-              onCallAgent?.(id);
-            }
-            if (hubSlugs.length > 0) onCallHubAgents?.(hubSlugs);
+            const nextCalls = [...selectedAgentIds].map((id) => {
+              if (id.startsWith("hub:")) {
+                const slug = id.slice("hub:".length);
+                const bookmark = (context.hubBookmarks ?? []).find((item) => item.slug === slug);
+                return { key: id, label: bookmark ? pickLocalized(bookmark.listing, locale).name : slug, target: { source: "hub", entityKind: "agent", slug } as OrchestrationTarget };
+              }
+              const selectedAgent = context.agents.find((item) => item.id === id);
+              return { key: `a-${id}`, label: selectedAgent ? pickLocalized(selectedAgent, locale).name : id, target: { source: "local", entityKind: "agent", agentId: id } as OrchestrationTarget };
+            });
+            setTurnCalls((current) => [...current, ...nextCalls.filter((call) => !current.some((item) => item.key === call.key))]);
             setAgentPickerOpen(false);
             setSelectedAgentIds(new Set());
           }}
@@ -1341,6 +1283,10 @@ export function ChatInput({
           }}
         />
 
+        {turnCalls.length > 0 ? <div className="chat-turn-calls" aria-label={locale === "ko" ? "이번 턴에 호출할 에이전트" : "Agents for this turn"}>
+          {turnCalls.map((call) => <button type="button" key={call.key} onClick={() => setTurnCalls((current) => current.filter((item) => item.key !== call.key))}>@{call.label}<span>×</span></button>)}
+        </div> : null}
+
         {/* 텍스트 영역 */}
         <textarea
           ref={textareaRef}
@@ -1426,7 +1372,7 @@ export function ChatInput({
                 ? t("chatinput.placeholder_steering")
               : hepHint
                 ? `${hepHint} · ${locale === "ko" ? "요청을 입력하세요" : "describe the request"}`
-              : t("chatinput.placeholder_rich")
+              : placeholder ?? t("chatinput.placeholder_rich")
           }
           rows={1}
           disabled={disabled}
@@ -1659,8 +1605,8 @@ export function ChatInput({
                     </div>
                     <button
                       type="button"
-                      onClick={() => { setContextMenuOpen(false); onCommand?.("/new"); }}
-                      disabled={!onCommand}
+                      onClick={() => { setContextMenuOpen(false); onSessionAction?.("new"); }}
+                      disabled={!onSessionAction}
                       style={contextMenuActionStyle}
                     >
                       <span style={{ color: "var(--ink)", fontSize: 11.5, fontWeight: 780 }}>{t("chatinput.context.new")}</span>
@@ -1668,8 +1614,8 @@ export function ChatInput({
                     </button>
                     <button
                       type="button"
-                      onClick={() => { setContextMenuOpen(false); onCommand?.("/clear"); }}
-                      disabled={!onCommand || busy}
+                      onClick={() => { setContextMenuOpen(false); onSessionAction?.("clear"); }}
+                      disabled={!onSessionAction || busy}
                       title={busy ? t("chatinput.context.clear_busy") : undefined}
                       style={{ ...contextMenuActionStyle, opacity: busy ? 0.55 : 1, cursor: busy ? "not-allowed" : "pointer" }}
                     >
@@ -2115,77 +2061,13 @@ function AutoRouteGateSheet({
 // 키보드 ↑↓ 인덱스가 그룹 헤더를 건너뛰도록 옵션만 flat list로 모으고,
 // 표시 시 group이 바뀔 때만 그룹 헤더를 그린다.
 function buildAutocompleteOptions(
-  trigger: { kind: "slash" | "mention"; query: string; startIndex: number },
+  trigger: { kind: "mention"; query: string; startIndex: number },
   context: MentionContext,
   locale: "ko" | "en",
   t: TFunction,
 ): AutocompleteOption[] {
   const q = trigger.query.toLowerCase();
   const out: AutocompleteOption[] = [];
-
-  if (trigger.kind === "slash") {
-    // 앱 명령 — 실행(appAction)
-    const cmds = [
-      { key: "/goal", desc: t("chatinput.cmd.goal"), appAction: false },
-      { key: "/hep-storm", desc: t("chatinput.cmd.hep_storm"), appAction: false },
-      { key: "/new", desc: t("chatinput.cmd.new") },
-      { key: "/apps", desc: t("chatinput.cmd.apps") },
-      { key: "/folder", desc: t("chatinput.cmd.folder") },
-      { key: "/global", desc: t("chatinput.cmd.global") },
-      { key: "/rename", desc: t("chatinput.cmd.rename") },
-      { key: "/clear", desc: t("chatinput.cmd.clear") },
-      { key: "/help", desc: t("chatinput.cmd.help") },
-    ].filter((c) => !q || c.key.includes(q) || c.desc.toLowerCase().includes(q));
-    for (const c of cmds) {
-      out.push({
-        key: `cmd-${c.key}`,
-        group: t("chatinput.slash.app"),
-        kind: "cmd",
-        title: c.key,
-        subtitle: c.desc,
-        replacement: c.key,
-        appAction: c.appAction ?? true,
-      });
-    }
-    for (const app of context.apps) {
-      const name = appDisplayName(app, locale);
-      const tagline = appTagline(app, locale);
-      for (const command of appSlashCommands(app)) {
-        const haystack = `${command} ${name} ${tagline}`.toLowerCase();
-        if (q && !haystack.includes(q)) continue;
-        out.push({
-          key: `app-${app.id}-${command}`,
-          group: t("chatinput.slash.apps"),
-          kind: "app",
-          title: command,
-          subtitle: t("chatinput.app_cmd_hint", { name }),
-          replacement: command,
-          appAction: false,
-        });
-      }
-    }
-    // CLI 슬래시 명령 — 텍스트 삽입(전송 시 CLI가 확장). source별 그룹.
-    const srcLabel: Record<RuntimeCommand["source"], string> = {
-      "claude-code": "Claude",
-      codex: "Codex",
-      gemini: "Antigravity",
-    };
-    const cli = (context.commands ?? [])
-      .filter((c) => !q || c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q))
-      .slice(0, 40);
-    for (const c of cli) {
-      out.push({
-        key: `cli-${c.source}-${c.name}`,
-        group: srcLabel[c.source],
-        kind: "cmd",
-        title: c.name,
-        subtitle: c.description || undefined,
-        replacement: c.name,
-        appAction: false,
-      });
-    }
-    return out;
-  }
 
   // mention — 그룹: generated apps → agents → firms → projects → env, 각 최대 5개
   const generatedApps = (context.generatedApps ?? [])
@@ -2240,7 +2122,7 @@ function buildAutocompleteOptions(
       title: loc.name,
       subtitle: loc.tagline,
       replacement: `@${loc.name}`,
-      switchAgentId: a.id, // @agent = 그 에이전트 호출(활성 에이전트 전환)
+      target: { source: "local", entityKind: "agent", agentId: a.id },
     });
   }
   for (const bookmark of hubBookmarks) {
@@ -2252,7 +2134,7 @@ function buildAutocompleteOptions(
       title: loc.name,
       subtitle: loc.tagline,
       replacement: `@${loc.name}`,
-      borrowAgentSlug: bookmark.slug,
+      target: { source: "hub", entityKind: "agent", slug: bookmark.slug },
     });
   }
   for (const f of firms) {
@@ -2264,7 +2146,7 @@ function buildAutocompleteOptions(
       title: loc.name,
       subtitle: loc.tagline,
       replacement: `@${loc.name}`,
-      switchAgentId: f.ceoAgentId, // @firm = 그 회사 CEO 호출
+      target: { source: "local", entityKind: "team", firmId: f.id },
     });
   }
   for (const p of projects) {
@@ -2301,7 +2183,7 @@ function AutocompletePopover({
   t,
   onPick,
 }: {
-  trigger: { kind: "slash" | "mention"; query: string; startIndex: number };
+  trigger: { kind: "mention"; query: string; startIndex: number };
   options: AutocompleteOption[];
   activeIndex: number;
   onHover: (i: number) => void;
@@ -2309,8 +2191,7 @@ function AutocompletePopover({
   onPick: (opt: AutocompleteOption) => void;
 }) {
   const optionsRef = useRef<HTMLDivElement>(null);
-  const title =
-    trigger.kind === "slash" ? t("chatinput.slash_title") : t("chatinput.mention_title");
+  const title = t("chatinput.mention_title");
 
   // 키보드로 목록 끝까지 이동해도 현재 행이 popover의 보이는 영역 안에 남게 한다.
   // block/inline 모두 nearest라서 바깥 채팅 화면을 불필요하게 움직이지 않는다.
@@ -2358,10 +2239,6 @@ function AutocompletePopover({
 
 function kindIcon(kind: AutocompleteOption["kind"]) {
   switch (kind) {
-    case "cmd":
-      return (
-        <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 11 }}>/</span>
-      );
     case "app":
       return <IconApps size={13} style={{ color: "var(--accent)" }} />;
     case "agent":
@@ -2389,7 +2266,6 @@ function PlusMenu({
   setGoalMode,
   appsGenerateMode,
   onToggleAppsGenerate,
-  onInsertSlash,
   onInsertMention,
   hepToggles,
   onToggleHep,
@@ -2411,8 +2287,6 @@ function PlusMenu({
   setGoalMode: (v: boolean) => void;
   appsGenerateMode: boolean;
   onToggleAppsGenerate: (v: boolean) => void;
-  /** "/" 명령어 삽입 — 인라인 버튼을 + 메뉴로 통합(리사이즈 시 버튼 스캐터 방지). */
-  onInsertSlash: () => void;
   /** "@" 에이전트 부르기 삽입. */
   onInsertMention: () => void;
   /** 현재 켜진 Hephaestus 모드들(다중선택). */
@@ -2468,11 +2342,6 @@ function PlusMenu({
         onClick={onAddFile}
         icon={<IconFileUp size={14} />}
         title={t("chatinput.plus.attach")}
-      />
-      <Row
-        onClick={onInsertSlash}
-        icon={<span style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 700 }}>/</span>}
-        title={t("chatinput.slash")}
       />
       <Row
         onClick={onInsertMention}

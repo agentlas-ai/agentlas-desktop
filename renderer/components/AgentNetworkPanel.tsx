@@ -91,6 +91,30 @@ export function AgentNetworkPanel({
 }: Props) {
   const { t, locale } = useT();
   const [briefOpen, setBriefOpen] = useState(false);
+  const visibleLiveAgents = useMemo<Record<string, LiveAgent>>(() => Object.fromEntries(
+    Object.entries(liveAgents).map(([key, item]) => {
+      const installed = agents.find((candidate) =>
+        candidate.id === key
+        || candidate.slug === key
+        || candidate.id === item.name
+        || candidate.slug === item.name);
+      const current = agent && (
+        agent.id === key
+        || agent.slug === key
+        || agent.id === item.name
+        || agent.slug === item.name
+      ) ? agent : null;
+      const resolved = installed ?? current;
+      const unresolvedMachineLabel = !resolved
+        && item.name === key
+        && /[-_:/.]/u.test(item.name);
+      return [key, resolved
+        ? { ...item, name: pickLocalized(resolved, locale).name }
+        : unresolvedMachineLabel
+          ? { ...item, name: locale === "ko" ? "에이전트" : "Agent" }
+          : item];
+    }),
+  ), [agent, agents, liveAgents, locale]);
 
   const roster = useMemo<Roster | null>(() => {
     // ResolvedOrg가 있으면 그걸로 명단 (노드 id = 이벤트 agentId와 정확히 일치)
@@ -133,8 +157,8 @@ export function AgentNetworkPanel({
     return { ceo, divisions };
   }, [org, firm, agents, locale]);
 
-  const anyActive = Object.values(liveAgents).some((a) => a.active);
-  const activeCount = Object.values(liveAgents).filter((a) => a.active).length;
+  const anyActive = Object.values(visibleLiveAgents).some((a) => a.active);
+  const activeCount = Object.values(visibleLiveAgents).filter((a) => a.active).length;
   const hasHistoricalActivity = !busy && !anyActive && timeline.length > 0;
   const hasFailureSignal = timelineHasFailureSignal(timeline);
   // 진짜 멀티에이전트(팀/조직) 컨텍스트일 때만 "오케스트레이션/병렬" 프레이밍을 쓴다.
@@ -177,7 +201,13 @@ export function AgentNetworkPanel({
             {activeTitle}
           </div>
           <div style={panelSubtitleStyle}>
-            {firm ? t("network.subtitle.firm") : agent ? t("network.subtitle.agent") : t("network.idle")}
+            {firm
+              ? t("network.subtitle.firm")
+              : agent
+                ? t("network.subtitle.agent")
+                : hasHistoricalActivity
+                  ? (locale === "ko" ? "완료된 실행" : "Completed run")
+                  : t("network.idle")}
           </div>
         </div>
         {/* 병렬 배지 — 실제로 2개 이상 동시 실행일 때만(거짓 ∥ 방지) */}
@@ -256,7 +286,7 @@ export function AgentNetworkPanel({
             <OrchestrationTree
               roster={roster}
               hasRoster={hasRoster}
-              liveAgents={liveAgents}
+              liveAgents={visibleLiveAgents}
               timeline={timeline}
               busy={busy}
               locale={locale}
@@ -269,7 +299,7 @@ export function AgentNetworkPanel({
             latestUserPrompt={promptPreview}
             locale={locale}
             agentName={agent ? pickLocalized(agent, locale).name : undefined}
-            liveAgents={liveAgents}
+            liveAgents={visibleLiveAgents}
           />
         )}
       </div>

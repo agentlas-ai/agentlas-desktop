@@ -1,7 +1,7 @@
 // 프로젝트 상세 — 프로젝트 문맥, 채팅, PM 메모리 기반 작업 타임라인.
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { IconPlus, IconTrash } from "@/components/Icon";
@@ -10,9 +10,10 @@ import { pickLocalized, useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import type {
-  Chat,
+  CanonicalTask,
   InstalledAgent,
   Project,
+  ProjectAgentPoolMember,
   ProjectTimelineEntry,
   ProjectTimelineSnapshot,
 } from "@/lib/types";
@@ -30,11 +31,16 @@ function ProjectPage() {
   const id = searchParams.get("id") ?? "";
   const { t, locale } = useT();
   const [project, setProject] = useState<Project | null>(null);
-  const [chats, setChats] = useState<Chat[]>([]);
+  const [tasks, setTasks] = useState<CanonicalTask[]>([]);
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [timeline, setTimeline] = useState<ProjectTimelineSnapshot | null>(null);
   const [editingNote, setEditingNote] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
+  const [agentPoolDraft, setAgentPoolDraft] = useState<ProjectAgentPoolMember[]>([]);
+  const [editingTeam, setEditingTeam] = useState(false);
+  const [draggedAgentId, setDraggedAgentId] = useState<string | null>(null);
+  const [draggedMemberId, setDraggedMemberId] = useState<string | null>(null);
+  const pointerDragRef = useRef<{ kind: "agent" | "member"; id: string; startX: number; startY: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [pageMessage, setPageMessage] = useState("");
 
@@ -52,9 +58,9 @@ function ProjectPage() {
       return;
     }
     try {
-      const [p, cs, ag, timelineResult] = await Promise.all([
+      const [p, taskRows, ag, timelineResult] = await Promise.all([
         api.projects.get(id),
-        api.chats.listByProject(id),
+        api.tasks.list({ limit: 200 }),
         api.team.list(),
         api.projects.timeline(id).catch(() => null),
       ]);
@@ -63,8 +69,11 @@ function ProjectPage() {
         return;
       }
       setProject(p);
-      setNoteDraft(p.contextNote ?? "");
-      setChats(cs);
+      setNoteDraft(p.systemPrompt ?? "");
+      // Older projects and imported fixtures can predate the ordered pool.
+      // Keep that state explicit and empty instead of inventing a controller.
+      setAgentPoolDraft(Array.isArray(p.agentPool) ? p.agentPool : []);
+      setTasks(taskRows.filter((task) => task.projectId === id));
       setAgents(visibleAgents(ag));
       setTimeline(timelineResult);
       if (!timelineResult) {
@@ -74,11 +83,11 @@ function ProjectPage() {
             : "프로젝트는 열었지만 작업 타임라인을 읽지 못했습니다.",
         );
       }
-    } catch (error) {
+    } catch {
       setPageMessage(
         locale === "en"
-          ? `Project could not be loaded. Nothing changed. ${String(error)}`
-          : `프로젝트를 불러오지 못했습니다. 바뀐 내용은 없습니다. ${String(error)}`,
+          ? "Project could not be loaded. Nothing changed."
+          : "프로젝트를 불러오지 못했습니다. 바뀐 내용은 없습니다.",
       );
     } finally {
       setLoading(false);
@@ -92,23 +101,12 @@ function ProjectPage() {
   async function startNewChat() {
     const api = ipc();
     if (!api || !project) return;
-    const agentId =
-      project.defaultAgentId
-      ?? agents.find((agent) => agent.slug === "agentlas-orchestrator")?.id
-      ?? agents[0]?.id;
-    if (!agentId) {
-      navigate("/marketplace");
-      return;
-    }
     try {
-      const chat = await api.chats.create({ agentId, projectId: project.id });
-      navigate(`/chat?id=${encodeURIComponent(chat.id)}`);
-    } catch (error) {
-      setPageMessage(
-        locale === "en"
-          ? `New chat was not created. ${String(error)}`
-          : `새 채팅을 만들지 못했습니다. ${String(error)}`,
-      );
+      const target = await api.tasks.createProject({ projectId: project.id });
+      window.dispatchEvent(new Event("agentlas:tasks-changed"));
+      navigate(`/workspace/task?id=${encodeURIComponent(target.chatId)}&task=${encodeURIComponent(target.taskId)}&projectId=${encodeURIComponent(project.id)}`);
+    } catch {
+      setPageMessage("");
     }
   }
 
@@ -117,17 +115,132 @@ function ProjectPage() {
     if (!api || !project) return;
     try {
       const updated = await api.projects.update(project.id, {
-        contextNote: noteDraft.trim() || null,
+        systemPrompt: noteDraft.trim() || null,
       });
       setProject(updated);
       setEditingNote(false);
       setPageMessage("");
-    } catch (error) {
+    } catch {
       setPageMessage(
         locale === "en"
-          ? `Note was not saved. ${String(error)}`
-          : `노트를 저장하지 못했습니다. ${String(error)}`,
+          ? "The project instructions were not saved."
+          : "프로젝트 지시를 저장하지 못했습니다.",
       );
+    }
+  }
+
+  function addAgent(agent: InstalledAgent) {
+    setAgentPoolDraft((current) => current.some((member) => member.agentId === agent.id)
+      ? current
+      : [...current, {
+          agentId: agent.id,
+          source: "local",
+          releaseId: null,
+          nameSnapshot: pickLocalized(agent, locale).name,
+        }]);
+  }
+
+  function dropAgent(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    if (event.dataTransfer.getData("application/x-agentlas-project-member")) return;
+    const agentId = event.dataTransfer.getData("application/x-agentlas-agent");
+    const selected = agents.find((agent) => agent.id === agentId);
+    if (selected) addAgent(selected);
+  }
+
+  function movePoolMember(agentId: string, targetIndex: number) {
+    if (!editingTeam) return;
+    setAgentPoolDraft((current) => {
+      const sourceIndex = current.findIndex((member) => member.agentId === agentId);
+      if (sourceIndex < 0 || sourceIndex === targetIndex) return current;
+      const next = [...current];
+      const [moved] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      return next;
+    });
+  }
+
+  function pointerDropToPool(targetIndex?: number) {
+    if (!editingTeam) return;
+    if (draggedMemberId && targetIndex !== undefined) {
+      movePoolMember(draggedMemberId, targetIndex);
+    } else if (draggedAgentId) {
+      const selected = agents.find((agent) => agent.id === draggedAgentId);
+      if (selected) addAgent(selected);
+    }
+    setDraggedAgentId(null);
+    setDraggedMemberId(null);
+  }
+
+  function beginPointerDrag(event: ReactPointerEvent<HTMLElement>, kind: "agent" | "member", agentId: string) {
+    if (!editingTeam) return;
+    pointerDragRef.current = { kind, id: agentId, startX: event.clientX, startY: event.clientY };
+    if (kind === "agent") setDraggedAgentId(agentId);
+    else setDraggedMemberId(agentId);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function finishPointerDrag(event: ReactPointerEvent<HTMLElement>) {
+    const drag = pointerDragRef.current;
+    pointerDragRef.current = null;
+    if (!drag) return;
+    const moved = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 4;
+    if (moved) {
+      const target = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+      const memberRow = target?.closest<HTMLElement>("[data-project-member-index]");
+      const pool = target?.closest<HTMLElement>("[data-project-agent-pool]");
+      if (pool) {
+        if (drag.kind === "member" && memberRow) {
+          movePoolMember(drag.id, Number(memberRow.dataset.projectMemberIndex));
+        } else if (drag.kind === "agent") {
+          const selected = agents.find((agent) => agent.id === drag.id);
+          if (selected) addAgent(selected);
+        }
+      }
+    }
+    setDraggedAgentId(null);
+    setDraggedMemberId(null);
+  }
+
+  useEffect(() => {
+    const finishAt = (clientX: number, clientY: number) => {
+      const drag = pointerDragRef.current;
+      if (!drag || Math.hypot(clientX - drag.startX, clientY - drag.startY) <= 4) return;
+      pointerDragRef.current = null;
+      const target = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+      const pool = target?.closest<HTMLElement>("[data-project-agent-pool]");
+      const memberRow = target?.closest<HTMLElement>("[data-project-member-index]");
+      if (pool) {
+        if (drag.kind === "member" && memberRow) {
+          movePoolMember(drag.id, Number(memberRow.dataset.projectMemberIndex));
+        } else if (drag.kind === "agent") {
+          const selected = agents.find((agent) => agent.id === drag.id);
+          if (selected) addAgent(selected);
+        }
+      }
+      setDraggedAgentId(null);
+      setDraggedMemberId(null);
+    };
+    const onPointerUp = (event: PointerEvent) => finishAt(event.clientX, event.clientY);
+    const onMouseUp = (event: MouseEvent) => finishAt(event.clientX, event.clientY);
+    window.addEventListener("pointerup", onPointerUp, true);
+    window.addEventListener("mouseup", onMouseUp, true);
+    return () => {
+      window.removeEventListener("pointerup", onPointerUp, true);
+      window.removeEventListener("mouseup", onMouseUp, true);
+    };
+  }, [agents, editingTeam, locale]);
+
+  async function saveTeam() {
+    const api = ipc();
+    if (!api || !project || agentPoolDraft.length === 0) return;
+    try {
+      const updated = await api.projects.update(project.id, { agentPool: agentPoolDraft });
+      setProject(updated);
+      setEditingTeam(false);
+      setPageMessage("");
+    } catch {
+      setPageMessage(locale === "en" ? "The project team was not saved." : "프로젝트 팀을 저장하지 못했습니다.");
     }
   }
 
@@ -138,11 +251,11 @@ function ProjectPage() {
     try {
       await api.projects.remove(project.id);
       navigate("/", "replace");
-    } catch (error) {
+    } catch {
       setPageMessage(
         locale === "en"
-          ? `Project was not deleted. ${String(error)}`
-          : `프로젝트를 삭제하지 못했습니다. ${String(error)}`,
+          ? "The project was not deleted."
+          : "프로젝트를 삭제하지 못했습니다.",
       );
     }
   }
@@ -162,6 +275,7 @@ function ProjectPage() {
   }
 
   const agentById = new Map(visibleAgents(agents).map((agent) => [agent.id, agent]));
+  const availableProjectAgents = agents.filter((agent) => !agentPoolDraft.some((member) => member.agentId === agent.id));
 
   return (
     <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
@@ -189,7 +303,7 @@ function ProjectPage() {
           style={raisedButton}
         >
           <IconPlus size={14} />
-          {t("project.new_chat")}
+          {locale === "ko" ? "새 작업" : "New task"}
         </button>
         <button
           onClick={() => void removeProject()}
@@ -238,7 +352,7 @@ function ProjectPage() {
                   </button>
                   <button
                     onClick={() => {
-                      setNoteDraft(project.contextNote ?? "");
+                      setNoteDraft(project.systemPrompt ?? "");
                       setEditingNote(false);
                     }}
                     style={{ fontSize: 12, color: "var(--muted-deep)" }}
@@ -247,7 +361,7 @@ function ProjectPage() {
                   </button>
                 </div>
               </>
-            ) : project.contextNote ? (
+            ) : project.systemPrompt ? (
               <div
                 onDoubleClick={() => setEditingNote(true)}
                 style={{
@@ -259,7 +373,7 @@ function ProjectPage() {
                 }}
                 title={locale === "en" ? "Double-click to edit" : "더블클릭으로 편집"}
               >
-                {project.contextNote}
+                {project.systemPrompt}
               </div>
             ) : (
               <button
@@ -271,23 +385,96 @@ function ProjectPage() {
             )}
           </div>
 
+          <div style={{ ...cardStyle, marginBottom: 24 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+              <div style={{ ...eyebrowStyle, flex: 1 }}>{locale === "ko" ? "프로젝트 팀 · 위에서부터 우선" : "Project team · priority from the top"}</div>
+              {!editingTeam ? (
+                <button type="button" onClick={() => setEditingTeam(true)} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
+                  {locale === "ko" ? "편집" : "Edit"}
+                </button>
+              ) : null}
+            </div>
+            <div className="project-agent-workbench project-agent-workbench-compact">
+              <div className="project-agent-pool" data-project-agent-pool data-empty={agentPoolDraft.length === 0} onDragOver={(event) => event.preventDefault()} onDrop={dropAgent}>
+                {agentPoolDraft.map((member, index) => (
+                  <div
+                    className="project-agent-member"
+                    data-project-member-index={index}
+                    key={`${member.source}:${member.agentId}`}
+                    draggable={false}
+                    onPointerDown={(event) => beginPointerDrag(event, "member", member.agentId)}
+                    onPointerUp={finishPointerDrag}
+                    onPointerCancel={() => { pointerDragRef.current = null; setDraggedMemberId(null); }}
+                    onDragStart={(event) => {
+                      if (!editingTeam) return;
+                      event.dataTransfer.setData("application/x-agentlas-project-member", member.agentId);
+                      event.dataTransfer.effectAllowed = "move";
+                    }}
+                    onDragOver={(event) => { if (editingTeam) event.preventDefault(); }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      movePoolMember(event.dataTransfer.getData("application/x-agentlas-project-member"), index);
+                    }}
+                  >
+                    <span className="project-agent-order">{index + 1}</span>
+                    <strong>{member.nameSnapshot}</strong>
+                    {editingTeam ? <>
+                      <button type="button" disabled={index === 0} aria-label={locale === "ko" ? "위로 이동" : "Move up"} onClick={() => movePoolMember(member.agentId, index - 1)}>↑</button>
+                      <button type="button" disabled={index === agentPoolDraft.length - 1} aria-label={locale === "ko" ? "아래로 이동" : "Move down"} onClick={() => movePoolMember(member.agentId, index + 1)}>↓</button>
+                      <button type="button" onClick={() => setAgentPoolDraft((current) => current.filter((item) => item.agentId !== member.agentId))}>{locale === "ko" ? "제거" : "Remove"}</button>
+                    </> : null}
+                  </div>
+                ))}
+              </div>
+              {editingTeam ? (
+                <aside className="project-agent-library">
+                  {availableProjectAgents.map((candidate) => {
+                    const localized = pickLocalized(candidate, locale);
+                    return <button
+                      type="button"
+                      draggable={false}
+                      className="project-agent-source"
+                      key={candidate.id}
+                      onPointerDown={(event) => beginPointerDrag(event, "agent", candidate.id)}
+                      onMouseDown={(event) => {
+                        if (editingTeam && !pointerDragRef.current) pointerDragRef.current = { kind: "agent", id: candidate.id, startX: event.clientX, startY: event.clientY };
+                      }}
+                      onPointerUp={finishPointerDrag}
+                      onPointerCancel={() => { pointerDragRef.current = null; setDraggedAgentId(null); }}
+                      onDragStart={(event) => {
+                        event.dataTransfer.setData("application/x-agentlas-agent", candidate.id);
+                        event.dataTransfer.effectAllowed = "copy";
+                      }}
+                      onClick={() => addAgent(candidate)}
+                    ><strong>{localized.name}</strong><span>{localized.tagline}</span></button>;
+                  })}
+                </aside>
+              ) : null}
+            </div>
+            {editingTeam ? <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <button type="button" disabled={agentPoolDraft.length === 0} onClick={() => void saveTeam()} style={raisedButton}>{locale === "ko" ? "팀 저장" : "Save team"}</button>
+              <button type="button" onClick={() => { setAgentPoolDraft(project.agentPool); setEditingTeam(false); }} style={{ fontSize: 12, color: "var(--muted-deep)" }}>{t("common.cancel")}</button>
+            </div> : null}
+          </div>
+
           <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "0 0 12px" }}>
-            {t("project.section.chats")} ({chats.length})
+            {locale === "ko" ? "작업" : "Tasks"} ({tasks.length})
           </h2>
-          {chats.length === 0 ? (
+          {tasks.length === 0 ? (
             <div style={emptyStyle}>{t("project.empty_chats")}</div>
           ) : (
             <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 6 }}>
-              {chats.map((chat) => {
-                const agent = agentById.get(chat.agentId);
+              {tasks.map((task) => {
+                const agent = task.participants.map((participant) => participant.agentId ? agentById.get(participant.agentId) : null).find(Boolean);
                 return (
-                  <li key={chat.id}>
-                    <Link
-                      href={`/chat?id=${encodeURIComponent(chat.id)}`}
+                  <li key={task.id}>
+                    <button
+                      type="button"
+                      onClick={() => task.originChatId && navigate(`/workspace/task?id=${encodeURIComponent(task.originChatId)}&task=${encodeURIComponent(task.id)}&projectId=${encodeURIComponent(project.id)}`)}
                       style={chatLinkStyle}
                     >
                       <span style={chatTitleStyle}>
-                        {chat.title.trim() || t("chat.untitled")}
+                        {task.title.trim() || (locale === "ko" ? "새 작업" : "New task")}
                       </span>
                       {agent && (
                         <span style={{ fontSize: 11, color: "var(--muted-deep)", flexShrink: 0 }}>
@@ -295,14 +482,14 @@ function ProjectPage() {
                         </span>
                       )}
                       <span style={{ fontSize: 10, color: "var(--muted)", flexShrink: 0 }}>
-                        {new Date(chat.updatedAt).toLocaleString(locale === "en" ? "en-US" : "ko-KR", {
+                        {new Date(task.updatedAt).toLocaleString(locale === "en" ? "en-US" : "ko-KR", {
                           month: "numeric",
                           day: "numeric",
                           hour: "numeric",
                           minute: "numeric",
                         })}
                       </span>
-                    </Link>
+                    </button>
                   </li>
                 );
               })}
@@ -311,6 +498,15 @@ function ProjectPage() {
         </main>
 
         <aside className="project-timeline-aside" style={{ minWidth: 0 }}>
+          <section style={{ ...cardStyle, marginBottom: 16 }}>
+            <div style={{ ...eyebrowStyle, marginBottom: 8 }}>{locale === "ko" ? "소스" : "Source"}</div>
+            <strong style={{ display: "block", fontSize: 13, color: "var(--ink)" }}>
+              {project.sourceType === "local" ? (locale === "ko" ? "로컬 폴더" : "Local folder") : project.sourceType === "github" ? "GitHub" : (locale === "ko" ? "샘플" : "Sample")}
+            </strong>
+            {(project.sourceRef || project.folderPath) ? <span style={{ display: "block", marginTop: 4, fontSize: 11.5, color: "var(--muted-deep)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={project.sourceRef || project.folderPath || ""}>
+              {project.sourceType === "github" ? project.sourceRef : (project.folderPath || project.sourceRef)?.split(/[\\/]/).filter(Boolean).at(-1)}
+            </span> : null}
+          </section>
           <ProjectTimelinePanel timeline={timeline} locale={locale} />
         </aside>
       </section>
@@ -453,6 +649,14 @@ function ProjectTimelinePanel({
       className="project-memory-tree-panel"
       aria-label={locale === "en" ? "Project work timeline" : "프로젝트 작업 타임라인"}
     >
+      <header style={{ marginBottom: 14 }}>
+        <div style={eyebrowStyle}>{locale === "en" ? "Project memory" : "프로젝트 기억"}</div>
+        <p style={{ margin: "5px 0 0", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.45 }}>
+          {locale === "en"
+            ? `${timeline?.entries.length ?? 0} remembered work records, preserved across sessions.`
+            : `세션이 바뀌어도 유지되는 작업 기록 ${timeline?.entries.length ?? 0}개`}
+        </p>
+      </header>
       {!timeline ? (
         <p style={timelineEmptyStyle}>
           {locale === "en" ? "Timeline unavailable." : "타임라인을 불러올 수 없습니다."}
@@ -526,7 +730,7 @@ function timelineEntryHref(entry: ProjectTimelineEntry): string | null {
   if (entry.navigationStatus === "exact" && entry.messageId) {
     params.set("focus", entry.messageId);
   }
-  return `/chat?${params.toString()}`;
+  return `/workspace/task?${params.toString()}`;
 }
 
 function timelineNavigationLabel(entry: ProjectTimelineEntry, locale: string): string {

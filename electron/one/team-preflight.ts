@@ -2,7 +2,7 @@ import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-
 import { createHash, randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
 import { pickActive } from "../runtime/selection";
-import { isPlainConversationalPrompt, selectAutoRoutedAgent, selectAutoRoutedAgentJudged } from "../agents/auto-router";
+import { selectAutoRoutedAgent, selectAutoRoutedAgentJudged } from "../agents/auto-router";
 import { getAgentById, listInstalledAgents } from "../mcp/registry";
 import { getDb } from "../store/db";
 import { getChat, retitleAutoTitledChatForTask } from "../store/chats";
@@ -14,7 +14,6 @@ import {
 } from "../store/tasks";
 import { hasInvocationRunReceipt } from "../store/run-events";
 import { tryRecordOneDomainEvent } from "./domain-events";
-import { isCompletedOneOnboardingStarterGroup } from "./onboarding";
 import type {
   CanonicalTask,
   Chat,
@@ -46,7 +45,7 @@ const MAX_PROMPT_CHARS = 32_000;
 const PROPOSAL_TTL_MS = 30 * 60 * 1_000;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const PROCESS_INSTANCE_ID = randomUUID();
-const PROCESS_PROMPTS = new Map<string, { original: string; execution: string }>();
+const PROCESS_PROMPTS = new Map<string, { original: string; execution: string; requestedAgentIds: string[] }>();
 
 export interface OneTeamRuntimeBinding {
   kind: RuntimeStatus["kind"];
@@ -205,80 +204,6 @@ export function oneTeamRuntimeBindingMatches(
   return Boolean(active && oneTeamRuntimeBinding(active).digest === binding.digest);
 }
 
-/** Structured multi-agent commands are format signals — closed-form, never judged away. */
-const EXPLICIT_TEAM_COMMAND_RE = /^\s*(?:\/?workforce\b|\/?hep-network\b)/i;
-
-function complexityReasons(prompt: string): OneTeamPreflightComplexityReason[] {
-  if (isPlainConversationalPrompt(prompt)) return [];
-  const reasons: OneTeamPreflightComplexityReason[] = [];
-  if (/^\s*(?:\/?workforce\b|\/?hep-network\b)|(?:팀으로|여러\s*(?:에이전트|전문가)|역할\s*분담|task\s*force|agent\s*team|as\s+a\s+team)/i.test(prompt)) {
-    reasons.push("explicit_team_request");
-  }
-  if (/(?:병렬|동시에|나눠서|각자|parallel|in\s+parallel|split\s+(?:the\s+)?work|divide\s+(?:the\s+)?work)/i.test(prompt)) {
-    reasons.push("parallel_work_requested");
-  }
-  if (/(?:교차\s*검증|독립\s*검증|팩트\s*체크|출처\s*검증|double[- ]?check|cross[- ]?check|independent\s+verif|fact[- ]?check)/i.test(prompt)) {
-    reasons.push("independent_verification_requested");
-  }
-  const deliverableMatches = prompt.match(
-    /(?:보고서|표|스프레드시트|프레젠테이션|영상|이미지|문서|코드|테스트|report|table|spreadsheet|deck|presentation|video|image|document|code|tests?)/gi,
-  ) ?? [];
-  if (new Set(deliverableMatches.map((item) => item.toLowerCase())).size >= 2) {
-    reasons.push("multiple_distinct_deliverables");
-  }
-  const asksForResearchDecision =
-    /(?:비교|조사|리서치|추천|찾아|골라|선택|시장|경쟁사|후보|compare|research|recommend|find|choose|select|market|competitor|candidate)/i.test(prompt);
-  const hasMeaningfulConstraints =
-    /(?:\d[\d,.]*\s*(?:원|만원|달러|usd|krw|%|평|명|개|일|주|개월|년)|예산|가격|이하|이상|미만|초과|사이|조건|기준|장단점|우리\s*(?:집|회사|팀)|budget|price|under|over|at\s+(?:least|most)|between|criteria|trade[- ]?offs?|for\s+(?:our|my)\s+(?:home|company|team))/i.test(prompt);
-  if (asksForResearchDecision && hasMeaningfulConstraints) {
-    reasons.push("constrained_research_decision");
-  }
-  return [...new Set(reasons)];
-}
-
-/**
- * 표시용 목표 문장. 명령어와 그 플래그를 걷어낸다.
- *
- * `--stormbreaker` 가 목록에서 빠져 있어서, 그 플래그가 목표 문장에 눌러앉은 채
- * 복원 단계를 지나면 **목표가 리터럴 `"--stormbreaker X"` 가 되어 그대로 검색에
- * 전달됐다**(2026-07-28 확인). 이건 표시용 문자열이므로 알려진 플래그는 전부 걷는다.
- */
-/** 원문이 워크포스 명령으로 시작하는가. 복원과 외부선택 판정이 같은 기준을 써야 한다. */
-const WORKFORCE_COMMAND_RE = /^\s*(?:\/?workforce\b|\/?hep-network\b)/i;
-
-/**
- * 실행 단계로 넘길 프롬프트를 되돌린다. **순수 함수로 내보내는 이유**: 이 규칙이 깨지면
- * 플래그가 사라지거나 목표 문자열로 새어 들어가는데, 소스 문자열 검사로는 그걸 못 잡는다.
- * 테스트가 진짜 이 함수를 불러야 규칙 복제본이 아니라 실제 동작을 검사하게 된다.
- */
-export function restoreWorkforcePrompt(
-  // `solo` 도 온다. 워크포스가 아닌 모드는 전부 표시용 문장을 그대로 쓴다.
-  mode: "workforce" | "team" | "solo",
-  original: string,
-  execution: string,
-): string {
-  if (mode !== "workforce") return execution;
-  // 원문을 그대로 돌려준다. 재조립(`/workforce ${execution}`)은 두 가지를 잃었다:
-  //   · `--benchmark` / `--legacy` 가 사라져 One 경로에서는 도달 불가였고,
-  //   · `/hep-network --stormbreaker` 가 `/workforce --stormbreaker` 로 바뀌어
-  //     파서의 escape 를 비껴가 목표가 리터럴 `"--stormbreaker …"` 가 됐다.
-  // 원문은 호출부에서 `promptDigest` 로 검증된다. 명령어가 없는 원문(One 이 스스로
-  // 워크포스를 고른 경우)만 접두어를 붙인다 — 그때는 재조립이 아니라 유일한 표현이다.
-  return WORKFORCE_COMMAND_RE.test(original) ? original.trim() : `/workforce ${execution}`;
-}
-
-/** 테스트 전용 별칭. 표시용 정규화 규칙을 테스트가 복제하지 않게 한다. */
-export function stripWorkforceCommandForTest(prompt: string): string {
-  return stripWorkforceCommand(prompt);
-}
-
-function stripWorkforceCommand(prompt: string): string {
-  const stripped = prompt
-    .replace(/^\s*(?:\/?workforce\b|\/?hep-network\b)(?:\s+--(?:benchmark|legacy|stormbreaker)\b)*\s*/i, "")
-    .trim();
-  return stripped || prompt.trim();
-}
-
 function goalSummary(reasons: OneTeamPreflightComplexityReason[]): string {
   const labels: Record<OneTeamPreflightComplexityReason, string> = {
     explicit_team_request: "explicit team request",
@@ -294,18 +219,15 @@ function goalSummary(reasons: OneTeamPreflightComplexityReason[]): string {
 export interface OneTeamNeedResolution {
   needed: boolean;
   reasons: OneTeamPreflightComplexityReason[];
-  /** "llm" = the resident judge decided; "fallback" = today's wordlist verdict, labeled. */
-  source: "llm" | "fallback";
+  source: "llm" | "explicit" | "unavailable";
 }
 
 export type OneTeamNeedJudge = (input: {
   prompt: string;
-  lexicalReasons: OneTeamPreflightComplexityReason[];
 }) => Promise<{ needed: boolean; source: "llm" | "fallback"; reason: string }>;
 
 async function defaultJudgeTeamNeed(input: {
   prompt: string;
-  lexicalReasons: OneTeamPreflightComplexityReason[];
 }): Promise<{ needed: boolean; source: "llm" | "fallback"; reason: string }> {
   const { judgeBoolean } = await import("../system-agents/judgment");
   const { value, verdict } = await judgeBoolean({
@@ -314,57 +236,44 @@ async function defaultJudgeTeamNeed(input: {
       "Would completing this request genuinely benefit from a small team of multiple specialist agents (parallel work, independent verification, or multiple distinct deliverables) instead of one agent?",
     input: input.prompt.slice(0, 4_000),
     guidance:
-      `A deterministic pre-pass found ${input.lexicalReasons.length} complexity signal(s)` +
-      `${input.lexicalReasons.length ? ` (${input.lexicalReasons.join(", ")})` : ""}. Treat that as a prior, not a fact. ` +
-      "Judge the actual work, in any language: a short single-deliverable request is not team work even when it " +
-      "mentions comparison words, and a genuinely parallel/multi-deliverable request needs a team even when no " +
-      "reference word appears. Say yes only when a team adds real value.",
-    hints: [
-      { label: "yes", words: ["팀으로", "여러 에이전트", "역할 분담", "병렬", "동시에", "교차 검증", "as a team", "in parallel", "split the work", "cross-check", "fact-check"] },
-    ],
-    fallback: input.lexicalReasons.length > 0,
+      "Judge the actual work in any language. Say yes only when multiple specialist agents add real value through independent contributions, parallel execution, or verification. Do not infer from keywords or phrasing templates.",
+    hints: [],
+    fallback: false,
   });
   return { needed: value, source: verdict.source, reason: verdict.reason };
 }
 
 /**
- * The resident judge decides whether a team preflight is worth proposing; the
- * complexity regexes above are demoted to hints/prior and remain only the
- * labeled fallback when no model answers. Structured `/workforce`·`/hep-network`
- * commands are closed-form and are never vetoed by the judge.
+ * Explicit structured UI choices are authoritative for this turn. Otherwise
+ * the resident judge alone decides whether a team adds value. If judgment is
+ * unavailable, the function returns unavailable and never invents a team.
  */
 async function resolveOneTeamNeed(
   prompt: string,
   deps: OneTeamPreflightDependencies,
+  explicit: boolean,
 ): Promise<OneTeamNeedResolution> {
-  const lexicalReasons = complexityReasons(prompt);
-  if (EXPLICIT_TEAM_COMMAND_RE.test(prompt)) {
+  if (explicit) {
     return {
       needed: true,
-      reasons: lexicalReasons.length > 0 ? lexicalReasons : ["explicit_team_request"],
-      source: "fallback",
+      reasons: ["explicit_team_request"],
+      source: "explicit",
     };
-  }
-  if (isPlainConversationalPrompt(prompt)) {
-    return { needed: false, reasons: [], source: "fallback" };
   }
   const judgeTeamNeed = deps.judgeTeamNeed ?? defaultJudgeTeamNeed;
   let judged: Awaited<ReturnType<OneTeamNeedJudge>>;
   try {
-    judged = await judgeTeamNeed({ prompt, lexicalReasons });
+    judged = await judgeTeamNeed({ prompt });
   } catch {
-    judged = { needed: false, source: "fallback", reason: "judge failed" };
+    return { needed: false, reasons: [], source: "unavailable" };
   }
   if (judged.source !== "llm") {
-    // No connected model → do NOT auto-propose a team from the complexity
-    // wordlists. Only an explicit /workforce·/hep-network command (closed-form,
-    // handled above) staffs a team without a model verdict.
-    return { needed: false, reasons: [], source: "fallback" };
+    return { needed: false, reasons: [], source: "unavailable" };
   }
   if (!judged.needed) return { needed: false, reasons: [], source: "llm" };
   return {
     needed: true,
-    reasons: lexicalReasons.length > 0 ? lexicalReasons : ["model_assessed_team_benefit"],
+    reasons: ["model_assessed_team_benefit"],
     source: "llm",
   };
 }
@@ -455,7 +364,7 @@ async function prejudgeRosterAutoRoute(
       timeoutMs: 8_000,
     });
   } catch {
-    // Best-effort warm; the sync roster path keeps the labeled lexical fallback.
+    // Best-effort warm; a missing model verdict leaves the roster unchanged.
   }
 }
 
@@ -464,6 +373,7 @@ function exactInstalledRoster(
   deps: OneTeamPreflightDependencies,
   prompt?: string,
   allowDeterministicLocalSelection = true,
+  requestedAgentIds: string[] = [],
 ): {
   roles: OneTeamPreflightRole[];
   candidates: CandidateSnapshot[];
@@ -496,19 +406,31 @@ function exactInstalledRoster(
     roles.push(roleFromCandidate(installed, snapshot, chat, false));
     targets.push({ source: "local", entityKind: "agent", agentId: installed.id });
   }
+  for (const agentId of requestedAgentIds) {
+    const matches = all().filter((agent) => agent.id === agentId);
+    const installed = matches.length === 1 ? matches[0] : null;
+    if (!installed || installed.kind === "team" || seen.has(installed.id) || !eligibleRosterSpecialists([installed], coordinator.id).length) {
+      unresolvedExternal = true;
+      continue;
+    }
+    seen.add(installed.id);
+    const snapshot = candidateSnapshot(installed, "installed");
+    candidates.push(snapshot);
+    roles.push(roleFromCandidate(installed, snapshot, chat, false, "explicit-turn-agent"));
+    targets.push({ source: "local", entityKind: "agent", agentId: installed.id });
+  }
   if (
     allowDeterministicLocalSelection
     && prompt
     && roles.length === 1
     && !unresolvedExternal
+    && requestedAgentIds.length === 0
   ) {
     const eligible = eligibleRosterSpecialists(all(), coordinator.id);
     const locale = preferredLocaleFromText(prompt);
-    // Synchronous site: reads the judged routing verdict warmed by the async
-    // prepare path (prejudgeRosterAutoRoute); a cache miss keeps the labeled
-    // lexical fallback, and propose/revalidate stay digest-consistent because
-    // both read the same session cache.
-    const selected = selectAutoRoutedAgent(prompt, eligible, locale, { allowFallback: false });
+    // Synchronous site reads only the model verdict warmed by the async pass.
+    // A cache miss cannot become a wordlist or embedding decision.
+    const selected = selectAutoRoutedAgent(prompt, eligible, locale, { allowFallback: false, judgedOnly: true });
     if (selected) {
       const snapshot = candidateSnapshot(selected.agent, "installed");
       candidates.push(snapshot);
@@ -517,7 +439,7 @@ function exactInstalledRoster(
         snapshot,
         chat,
         false,
-        `deterministic-local-route:${selected.matchedTerms.slice().sort().join("|") || "curated-hint"}`,
+        "model-selected-local-specialist",
       ));
       targets.push({ source: "local", entityKind: "agent", agentId: selected.agent.id });
     }
@@ -801,20 +723,31 @@ export async function prepareOneTeamPreflight(
   input: PrepareOneTeamPreflightInput,
   deps: OneTeamPreflightDependencies = {},
 ): Promise<PrepareOneTeamPreflightResult> {
+  const inputKeys = Object.keys((input ?? {}) as unknown as Record<string, unknown>);
+  const allowedInputKeys = new Set(["chatId", "expectedTaskId", "expectedTaskVersion", "userPrompt", "requestedAgentIds", "dynamicTeamRequested"]);
   if (
     !input || typeof input !== "object"
-    || Object.keys(input as unknown as Record<string, unknown>).sort().join(",") !== "chatId,expectedTaskId,expectedTaskVersion,userPrompt"
+    || inputKeys.some((key) => !allowedInputKeys.has(key))
     || !ID_RE.test(input.chatId)
     || typeof input.userPrompt !== "string"
     || input.userPrompt.trim().length < 1
     || input.userPrompt.length > MAX_PROMPT_CHARS
     || (input.expectedTaskId !== null && !ID_RE.test(input.expectedTaskId))
     || (input.expectedTaskVersion !== null && (!Number.isSafeInteger(input.expectedTaskVersion) || input.expectedTaskVersion < 1))
+    || (input.requestedAgentIds !== undefined && (
+      !Array.isArray(input.requestedAgentIds)
+      || input.requestedAgentIds.length > 16
+      || input.requestedAgentIds.some((agentId) => typeof agentId !== "string" || !ID_RE.test(agentId))
+      || new Set(input.requestedAgentIds).size !== input.requestedAgentIds.length
+    ))
+    || (input.dynamicTeamRequested !== undefined && input.dynamicTeamRequested !== true)
   ) throw new OneTeamPreflightError("invalid_request", "Invalid One team preflight request");
-  // The resident judge decides whether multi-agent preflight is genuinely needed;
-  // the complexity regexes are hints, and without a model the wordlist verdict is
-  // only the labeled fallback (today's behavior).
-  const teamNeed = await resolveOneTeamNeed(input.userPrompt, deps);
+  const requestedAgentIds = input.requestedAgentIds ?? [];
+  const teamNeed = await resolveOneTeamNeed(
+    input.userPrompt,
+    deps,
+    requestedAgentIds.length > 0 || input.dynamicTeamRequested === true,
+  );
   if (!teamNeed.needed) return { kind: "not_required" };
   const reasons = teamNeed.reasons;
   recoverReservations(deps);
@@ -824,14 +757,6 @@ export async function prepareOneTeamPreflight(
   const findTask = deps.findTaskForChat ?? findCanonicalTaskForChat;
   const existingTask = findTask(chat.id);
   validateTaskInput(input, existingTask);
-  // The user already assembled and explicitly confirmed this exact immutable
-  // Hub roster during onboarding. Do not replace that saved team with an
-  // unrelated automatic local-roster proposal; the invocation layer will
-  // re-resolve every pinned release and fail closed before execution.
-  if (chat.agentGroupId && isCompletedOneOnboardingStarterGroup(chat.agentGroupId)) {
-    return { kind: "not_required" };
-  }
-
   const promptDigest = sha256(input.userPrompt);
   const existing = readStore().state.proposals.find((record) =>
     record.proposal.binding.chatId === chat.id
@@ -843,11 +768,10 @@ export async function prepareOneTeamPreflight(
     if (current.proposal.status !== "expired") return { kind: "proposal", proposal: current.proposal };
   }
 
-  const explicitExternalSelection = /^\s*(?:\/?workforce\b|\/?hep-network\b)/i.test(input.userPrompt);
   const runtime = await liveRuntime(deps);
-  if (!explicitExternalSelection) await prejudgeRosterAutoRoute(chat, input.userPrompt, deps);
-  const roster = exactInstalledRoster(chat, deps, input.userPrompt, !explicitExternalSelection);
-  const canConfirmTeam = roster.roles.length >= 2 && !roster.unresolvedExternal && !explicitExternalSelection;
+  if (requestedAgentIds.length === 0) await prejudgeRosterAutoRoute(chat, input.userPrompt, deps);
+  const roster = exactInstalledRoster(chat, deps, input.userPrompt, true, requestedAgentIds);
+  const canConfirmTeam = roster.roles.length >= 2 && !roster.unresolvedExternal;
   // When the installed roster cannot cover the work, external staffing is the
   // remaining route — not a dead end. Main already implements that run end to
   // end (`confirmed_external_workforce` + `hub-first`); this is the door that
@@ -929,7 +853,8 @@ export async function prepareOneTeamPreflight(
   if (persisted.proposalId !== proposal.proposalId) return { kind: "proposal", proposal: persisted };
   PROCESS_PROMPTS.set(proposal.proposalId, {
     original: input.userPrompt,
-    execution: stripWorkforceCommand(input.userPrompt),
+    execution: input.userPrompt,
+    requestedAgentIds,
   });
 
   if (taskWasCreated) {
@@ -1009,8 +934,7 @@ function exactRosterBinding(
 ): boolean {
   const prompt = PROCESS_PROMPTS.get(record.proposal.proposalId);
   if (!prompt) return false;
-  const explicitExternalSelection = WORKFORCE_COMMAND_RE.test(prompt.original);
-  const current = exactInstalledRoster(chat, deps, prompt.original, !explicitExternalSelection);
+  const current = exactInstalledRoster(chat, deps, prompt.original, true, prompt.requestedAgentIds);
   return sha256({
     candidates: current.candidates,
     targets: current.targets,
@@ -1337,14 +1261,9 @@ export function prepareOneTeamPreflightClaim(
     taskId: ref.expectedTaskId,
     taskVersion: ref.expectedTaskVersion,
     mode: ref.mode,
-    // 원문을 그대로 돌려준다. 재조립(`/workforce ${execution}`)은 두 가지를 잃었다:
-    //   · `--benchmark` / `--legacy` 가 사라져 One 경로에서는 도달 불가였고,
-    //   · `/hep-network --stormbreaker` 가 `/workforce --stormbreaker` 로 바뀌어
-    //     파서의 escape 를 비껴가 목표가 리터럴 `"--stormbreaker …"` 가 됐다.
-    // 원문은 바로 위에서 `promptDigest` 로 검증되므로 신뢰할 수 있다. 명령어가 없는
-    // 원문(One 이 스스로 워크포스를 고른 경우)만 접두어를 붙인다 — 그때는 재조립이
-    // 아니라 유일한 표현이다.
-    userPrompt: restoreWorkforcePrompt(ref.mode, prompt.original, prompt.execution),
+    // The exact user text is process-bound and digest-verified above. Execution
+    // mode travels separately in the closed ref; prompt text never carries it.
+    userPrompt: prompt.execution,
     permission: record.proposal.binding.permission,
     runtime: record.main.runtime,
     taskForceTargets: ref.mode === "team" ? record.main.taskForceTargets.map((target) => ({ ...target })) : [],

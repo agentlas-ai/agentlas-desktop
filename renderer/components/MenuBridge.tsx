@@ -41,7 +41,7 @@ export function MenuBridge() {
         // V1: 단축키 다이얼로그. 지금은 alert로 대체.
         alert(
           [
-            "⌘N  New chat",
+            "⌘N  New project",
             "⌘[  Toggle sidebar",
             "⌘,  Settings",
             "⌘↵  Send message",

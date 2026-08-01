@@ -59,7 +59,6 @@ interface OneMemoryUseOnceBinding {
   taskVersion: number | null;
   projectId: string | null;
   agentId: string;
-  agentGroupId: string | null;
   teamId: string | null;
 }
 
@@ -297,7 +296,6 @@ function normalizeUseOnceTarget(value: unknown): OneMemoryUseOnceBinding {
     taskVersion: task?.version ?? null,
     projectId: chat.projectId,
     agentId: chat.agentId,
-    agentGroupId: chat.agentGroupId,
     teamId: chat.firmId,
   };
 }
@@ -308,7 +306,6 @@ function sameUseOnceBinding(left: OneMemoryUseOnceBinding, right: OneMemoryUseOn
     && left.taskVersion === right.taskVersion
     && left.projectId === right.projectId
     && left.agentId === right.agentId
-    && left.agentGroupId === right.agentGroupId
     && left.teamId === right.teamId;
 }
 

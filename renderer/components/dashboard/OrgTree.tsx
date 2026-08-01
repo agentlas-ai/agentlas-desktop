@@ -14,8 +14,8 @@ import { hubBookmarkIdentityKey, hubBookmarksWithoutLocalDuplicates, onHubBookma
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { isUserFacingAgentText } from "@/lib/agent-visibility";
-import { IconBuilding, IconFileUp, IconLayers, IconSearch } from "@/components/Icon";
-import type { AgentGroupResolved, HubAgentBookmark, InstalledAgent, InstalledFirm, MarketplaceListing, ResolvedNode, ResolvedOrg } from "@/lib/types";
+import { IconBuilding, IconFileUp, IconSearch } from "@/components/Icon";
+import type { HubAgentBookmark, InstalledAgent, InstalledFirm, MarketplaceListing, ResolvedNode, ResolvedOrg } from "@/lib/types";
 
 type Mode = "multi" | "single";
 type Source = "local" | "cloud" | "hub";
@@ -37,7 +37,6 @@ export function OrgTree() {
   const [query, setQuery] = useState("");
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
-  const [agentGroups, setAgentGroups] = useState<AgentGroupResolved[]>([]);
   // 로그인한 계정의 실제 서버 클라우드(cargo) 에이전트 — "클라우드" 카테고리에 리스트업.
   const [cloudListings, setCloudListings] = useState<MarketplaceListing[]>([]);
   const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
@@ -80,17 +79,15 @@ export function OrgTree() {
     const generation = ++rosterLoadGenerationRef.current;
     const bookmarkGeneration = ++hubBookmarkGenerationRef.current;
     try {
-      const [a, f, groups, mine, bookmarks] = await Promise.all([
+      const [a, f, mine, bookmarks] = await Promise.all([
         api.team.list(),
         api.firms.list(),
-        api.agentGroups.listResolved(),
         api.marketplace.listMine().catch(() => [] as MarketplaceListing[]),
         api.marketplace.bookmarks().catch(() => null),
       ]);
       if (rosterLoadGenerationRef.current !== generation) return;
       setAgents(visibleRosterAgents(a));
       setFirms(f);
-      setAgentGroups(groups);
       setCloudListings(mine);
       if (bookmarks && hubBookmarkGenerationRef.current === bookmarkGeneration) {
         setHubBookmarks(bookmarks);
@@ -100,7 +97,6 @@ export function OrgTree() {
       if (rosterLoadGenerationRef.current !== generation) return;
       setAgents([]);
       setFirms([]);
-      setAgentGroups([]);
       setCloudListings([]);
       setLoadError(t("org.load_error"));
     } finally {
@@ -184,7 +180,6 @@ export function OrgTree() {
 
   const matches = (name: string) =>
     !query.trim() || name.toLowerCase().includes(query.trim().toLowerCase());
-  const visibleAgentGroups = agentGroups.filter((group) => matches(group.name));
 
   async function importFolder() {
     const api = ipc();
@@ -306,33 +301,6 @@ export function OrgTree() {
     <Shell mode={mode} setMode={setMode} query={query} setQuery={setQuery} onImport={importFolder} busy={busy} t={t} importMessage={importMessage}>
       {loadError && <div className="dashboard-org-empty">{loadError}</div>}
       <div className="dashboard-org-list">
-        {visibleAgentGroups.length > 0 && (
-          <div>
-            <button
-              onClick={() => navigate("/library/agent-groups")}
-              className="dashboard-org-row dashboard-org-category"
-            >
-              <IconLayers size={13} />
-              <span className="dashboard-org-label">
-                {t("org.agent_groups")}
-              </span>
-              <span className="dashboard-org-count">{visibleAgentGroups.length}</span>
-            </button>
-            {visibleAgentGroups.slice(0, 5).map((group) => (
-              <button
-                key={group.id}
-                onClick={() => navigate("/library/agent-groups")}
-                className="dashboard-org-row dashboard-org-agent dashboard-org-agent-mid dashboard-org-agent-multi"
-              >
-                <Dot />
-                <span className="dashboard-org-label">{group.name}</span>
-                <span className="dashboard-org-count">
-                  {group.warningCount > 0 ? "!" : group.members.length}
-                </span>
-              </button>
-            ))}
-          </div>
-        )}
         {cats.map((cat) => {
           const { firms: cf, agents: ca } = bySource(cat.key);
           // 클라우드 카테고리(싱글 모드)엔 로컬에 아직 안 받은 서버 클라우드 에이전트도 함께 보여준다.

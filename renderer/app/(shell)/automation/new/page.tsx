@@ -18,6 +18,7 @@ import type {
   InstalledFirm,
   MarketplaceListing,
   OneSuggestionReviewSeed,
+  Project,
   ScheduleSpec,
   Trigger,
   TriggerKind,
@@ -48,6 +49,8 @@ function NewAutomationPage() {
   const [prompt, setPrompt] = useState("");
   const [targetType, setTargetType] = useState<TargetType>("firm");
   const [targetId, setTargetId] = useState<string>("");
+  const [projectContextChoice, setProjectContextChoice] = useState<string>("");
+  const [projects, setProjects] = useState<Project[]>([]);
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
   const [hubAgents, setHubAgents] = useState<MarketplaceListing[]>([]);
@@ -93,17 +96,19 @@ function NewAutomationPage() {
       return;
     }
     void (async () => {
-      const [ag, fm, autos, hub] = await Promise.all([
+      const [ag, fm, autos, hub, projectRows] = await Promise.all([
         api.team.list(),
         api.firms.list(),
         api.automations.list(),
         api.marketplace.search("").catch(() => []),
+        api.projects.list(),
       ]);
       const visible = visibleAgents(ag);
       setAgents(visible);
       setFirms(fm);
       setAllAutomations(autos);
       setHubAgents(hub);
+      setProjects(projectRows);
 
       if (editId) {
         const existing = autos.find((a) => a.id === editId);
@@ -112,6 +117,7 @@ function NewAutomationPage() {
           setPrompt(existing.promptTemplate);
           setTargetType(existing.targetType);
           setTargetId(existing.targetId);
+          setProjectContextChoice(existing.projectId ?? "__none__");
           setTriggerType(existing.triggerType ?? "schedule");
           setToolMode(existing.toolMode ?? "auto");
           setToolModeTouched(true);
@@ -127,17 +133,6 @@ function NewAutomationPage() {
         setLoaded(true);
         return;
       }
-      // 신규: 기본 타깃 선택.
-      if (fm[0]) {
-        setTargetType("firm");
-        setTargetId(fm[0].id);
-      } else if (visible[0]) {
-        setTargetType("agent");
-        setTargetId(visible[0].id);
-      } else if (hub[0]) {
-        setTargetType("hub");
-        setTargetId(hub[0].slug);
-      }
     })();
   }, [editId]);
 
@@ -146,24 +141,11 @@ function NewAutomationPage() {
   // unrelated jobs in English/Korean and never fired at all in any other language. The mode
   // the user picks stays put; "auto" is resolved at run time by the resident judge.
 
-  // targetType 바뀌면 그 타입의 첫 항목 자동 선택(편집 로드 이후엔 사용자 선택 우선).
-  useEffect(() => {
-    if (editId && !loaded) return;
+  function chooseTargetType(type: TargetType) {
+    setTargetType(type);
+    setTargetId("");
     setError("");
-    const valid =
-      targetType === "firm"
-        ? firms.some((f) => f.id === targetId)
-        : targetType === "hub"
-          ? hubAgents.some((a) => a.slug === targetId && a.callable === true && Boolean(a.packageHash))
-          : agents.some((a) => a.id === targetId);
-    if (valid) return;
-    if (targetType === "firm" && firms[0]) setTargetId(firms[0].id);
-    if (targetType === "agent" && agents[0]) setTargetId(agents[0].id);
-    if (targetType === "hub") {
-      const exact = hubAgents.find((agent) => agent.callable === true && Boolean(agent.packageHash));
-      if (exact) setTargetId(exact.slug);
-    }
-  }, [targetType, targetId, agents, firms, hubAgents, editId, loaded]);
+  }
 
   function buildTrigger(): Trigger | null {
     if (triggerType === "fs") {
@@ -217,6 +199,7 @@ function NewAutomationPage() {
         targetType,
         targetId,
         targetVersion: targetType === "hub" ? selectedHubVersion : "",
+        projectId: projectContextChoice === "__none__" ? null : projectContextChoice,
         promptTemplate: prompt.trim() || (locale === "ko" ? "오늘 할 일 요약해줘" : "Summarize today's tasks"),
         toolMode,
         hubMode,
@@ -235,14 +218,14 @@ function NewAutomationPage() {
       } else {
         navigate("/automation", "replace");
       }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+    } catch {
+      setError(locale === "en" ? "Automation was not created." : "자동화를 만들지 못했습니다.");
     } finally {
       setBusy(false);
     }
   }
 
-  const canSubmit = !!name.trim() && !!targetId && !busy;
+  const canSubmit = !!name.trim() && !!targetId && !!projectContextChoice && !busy;
 
   return (
     <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
@@ -347,17 +330,29 @@ function NewAutomationPage() {
           </Field>
         )}
 
+        <Field label={locale === "ko" ? "작업 컨텍스트" : "Work context"}>
+          <select value={projectContextChoice} onChange={(event) => setProjectContextChoice(event.target.value)} style={inputStyle}>
+            <option value="" disabled>{locale === "ko" ? "프로젝트 사용 여부를 선택하세요" : "Choose whether this automation uses a project"}</option>
+            <option value="__none__">{locale === "ko" ? "프로젝트 없음 · 독립 작업" : "No project · standalone work"}</option>
+            {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+          <p style={{ margin: "7px 0 0", color: "var(--muted-deep)", fontSize: 11, lineHeight: 1.5 }}>
+            {locale === "ko" ? "프로젝트를 선택하면 그 소스·지시·기억을 실행 컨텍스트로 사용합니다." : "A selected project supplies its source, instructions, and memory to every run."}
+          </p>
+        </Field>
+
         <Field label={t("auto.field.target")}>
           <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-            <TabBtn active={targetType === "firm"} onClick={() => setTargetType("firm")} icon={<IconBuilding size={13} />} label={`${t("auto.target.firm")} (${firms.length})`} disabled={firms.length === 0} />
-            <TabBtn active={targetType === "agent"} onClick={() => setTargetType("agent")} icon={<IconSparkles size={13} />} label={`${t("auto.target.agent")} (${agents.length})`} disabled={agents.length === 0} />
-            <TabBtn active={targetType === "hub"} onClick={() => setTargetType("hub")} icon={<IconSparkles size={13} />} label={`Hub (${hubAgents.length})`} disabled={hubAgents.length === 0} />
+            <TabBtn active={targetType === "firm"} onClick={() => chooseTargetType("firm")} icon={<IconBuilding size={13} />} label={`${t("auto.target.firm")} (${firms.length})`} disabled={firms.length === 0} />
+            <TabBtn active={targetType === "agent"} onClick={() => chooseTargetType("agent")} icon={<IconSparkles size={13} />} label={`${t("auto.target.agent")} (${agents.length})`} disabled={agents.length === 0} />
+            <TabBtn active={targetType === "hub"} onClick={() => chooseTargetType("hub")} icon={<IconSparkles size={13} />} label={`Hub (${hubAgents.length})`} disabled={hubAgents.length === 0} />
           </div>
           {targetType === "firm" && (
             firms.length === 0 ? (
               <Empty>{t("auto.empty_firms")}</Empty>
             ) : (
               <select value={targetId} onChange={(e) => setTargetId(e.target.value)} style={inputStyle}>
+                <option value="" disabled>{locale === "ko" ? "회사를 선택하세요" : "Choose a firm"}</option>
                 {firms.map((f) => (
                   <option key={f.id} value={f.id}>
                     {pickLocalized(f, locale).name} — CEO
@@ -371,6 +366,7 @@ function NewAutomationPage() {
               <Empty>{t("auto.empty_agents")}</Empty>
             ) : (
               <select value={targetId} onChange={(e) => setTargetId(e.target.value)} style={inputStyle}>
+                <option value="" disabled>{locale === "ko" ? "에이전트를 선택하세요" : "Choose an agent"}</option>
                 {agents.map((a) => {
                   const loc = pickLocalized(a, locale);
                   return (
@@ -387,6 +383,7 @@ function NewAutomationPage() {
               <Empty>{locale === "ko" ? "Hub 에이전트를 불러오지 못했습니다." : "No Hub agents are available."}</Empty>
             ) : (
               <select value={targetId} onChange={(e) => setTargetId(e.target.value)} style={inputStyle}>
+                <option value="" disabled>{locale === "ko" ? "Hub 에이전트를 선택하세요" : "Choose a Hub agent"}</option>
                 {hubAgents.map((a) => (
                   <option key={a.slug} value={a.slug}>
                     {pickLocalized(a, locale).name} — Hub
