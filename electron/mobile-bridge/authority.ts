@@ -74,10 +74,8 @@ import {
   removeChat,
   renameChat,
   setChatContinuousMode,
-  setChatHiredAgents,
   setChatSwarmMode,
   setChatWorkingFolder,
-  switchChatAgent,
   unarchiveChat,
 } from "../store/chats";
 import { getProject } from "../store/projects";
@@ -94,8 +92,6 @@ import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
 import type { TerminalOntologyLoadoutFeedWriter } from "../ontology/terminal-loadout-feed";
 import type {
   Chat,
-  CloudAgentCombination,
-  CloudAgentCombinationMemberRef,
   CloudAgentRegisteredUploadOption,
   HephaestusBuildEvent,
   ImageAttachment,
@@ -114,7 +110,6 @@ import {
   type MobileBridgeBuildQuestionDto,
   type MobileBridgeBuildRefusalDto,
   type MobileBridgeBuildStatus,
-  type MobileBridgeCloudCombinationDto,
   type MobileBridgeCloudDeleteResultDto,
   type MobileBridgeCloudRefusalDto,
   type MobileBridgeCloudUploadSaveDto,
@@ -186,7 +181,7 @@ export interface AgentlasDesktopMobileBridgeAuthorityOptions {
   /** Content-free, private projection consumed only after an explicit Terminal flag. */
   terminalOntologyLoadoutFeedWriter?: TerminalOntologyLoadoutFeedWriter;
   /**
-   * Agent Cloud passthrough adapter (upload/delete/combinations). Tests inject
+   * Agent Cloud passthrough adapter (upload/delete). Tests inject
    * fakes; production omits it and gets the real Desktop internals.
    */
   cloudAgentActions?: MobileBridgeCloudAgentActions;
@@ -737,31 +732,6 @@ export function enforceMobileInvocationPermissionBoundary(
   };
 }
 
-function createChatParams(request: MobileBridgeRpcRequest): Parameters<typeof createChat>[0] {
-  const params = guardedParams(request, [
-    "agentId",
-    "firmId",
-    "projectId",
-    "title",
-    "continueFromChatId",
-  ]);
-  const agentId = optionalIdentifier(params, "agentId");
-  const firmId = optionalIdentifier(params, "firmId");
-  if ([agentId, firmId].filter(Boolean).length > 1) {
-    throw new TypeError("chats.create accepts at most one agentId or firmId");
-  }
-  const projectId = optionalIdentifier(params, "projectId");
-  const title = optionalIdentifier(params, "title", 200);
-  const continueFromChatId = optionalIdentifier(params, "continueFromChatId");
-  return {
-    ...(agentId !== undefined ? { agentId } : {}),
-    ...(firmId !== undefined ? { firmId } : {}),
-    ...(projectId !== undefined ? { projectId } : {}),
-    ...(title !== undefined ? { title } : {}),
-    ...(continueFromChatId !== undefined ? { continueFromChatId } : {}),
-  };
-}
-
 function assertMobileOneDeviceAuthority(context: MobileBridgeConnectionContext): void {
   if (
     context.devBootstrap
@@ -804,21 +774,6 @@ function mobileOneStartParams(request: MobileBridgeRpcRequest): {
 function mobileOneConversationTitle(userPrompt: string): string {
   const firstLine = userPrompt.split(/\r?\n/, 1)[0]?.trim() ?? "";
   return (firstLine || "One").slice(0, 200);
-}
-
-/** Authority-side revalidation of exact Hub release references (defense in depth). */
-function parseCloudCombinationMembers(value: unknown): CloudAgentCombinationMemberRef[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 32) {
-    throw new TypeError("members must contain 1 to 32 exact Hub release references");
-  }
-  return value.map((item, index) => {
-    if (!isRecord(item)) throw new TypeError(`members[${index}] must be an object`);
-    assertOnlyKeys(item, ["agentDefinitionId", "agentReleaseId"], `members[${index}]`);
-    return {
-      agentDefinitionId: requiredIdentifier(item, "agentDefinitionId", RUN_ID_RE),
-      agentReleaseId: requiredIdentifier(item, "agentReleaseId", RUN_ID_RE),
-    };
-  });
 }
 
 /** DESKTOP_MOBILE_BRIDGE: History strips in-memory data URLs; attachments never cross this v1 method. */
@@ -1144,6 +1099,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             taskId: task.id,
             chatId: chat.id,
             title: task.title,
+            controllerAgentId: controller.agentId,
           }, request.method);
         } catch (error) {
           removeChat(chat.id);
@@ -1391,7 +1347,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const params = guardedParams(request, ["chatId", "projectId"]);
         const chatId = requiredIdentifier(params, "chatId");
         const projectId = requiredIdentifier(params, "projectId");
-        requireChat(chatId);
+        const chat = requireChat(chatId);
+        if (chat.projectId && chat.projectId !== projectId) {
+          throw new Error("A project task cannot be moved to another project");
+        }
         const project = getProject(projectId);
         if (!project) throw new Error("The selected Desktop project is unavailable");
         if (!project.folderPath) throw new Error("The selected project has no working folder");
@@ -1405,7 +1364,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "workspace.clear": {
         const params = guardedParams(request, ["chatId"]);
         const chatId = requiredIdentifier(params, "chatId");
-        requireChat(chatId);
+        const chat = requireChat(chatId);
+        if (chat.projectId) {
+          throw new Error("A project task must remain connected to its project");
+        }
         setChatWorkingFolder(chatId, null);
         this.scheduleSnapshotUpdated(chatId);
         return asJsonValue({ projectId: null, workingFolderName: null }, request.method);
@@ -1780,7 +1742,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       // DESKTOP_MOBILE_BRIDGE: Agent Cloud passthrough. Uploads reuse the exact
       // registered-upload + packageAndReviewCloudAgent internals behind the
       // Desktop `cloudAgents:saveRegisteredPrivate` IPC (pinned private-link +
-      // static-only); delete/combinations call the authenticated cargo.* client.
+      // static-only); delete calls the authenticated cargo.* client.
       // Server refusals surface through `refusal` with an explicit actionState;
       // partially committed withdrawal must not be treated as a no-op. Local
       // installations are never modified by these methods.
@@ -2117,20 +2079,6 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           finish({ approved: false, code: "desktop_approval_unavailable" });
         });
     });
-  }
-
-  private projectCloudCombination(combination: CloudAgentCombination): MobileBridgeCloudCombinationDto {
-    return {
-      combinationId: boundedRedactedText(combination.combinationId, 256),
-      name: boundedRedactedText(combination.name, 512),
-      description: boundedRedactedText(combination.description, 2_048),
-      members: combination.members.slice(0, 32).map((member) => ({
-        agentDefinitionId: boundedRedactedText(member.agentDefinitionId, 256),
-        agentReleaseId: boundedRedactedText(member.agentReleaseId, 256),
-      })),
-      revision: combination.revision,
-      updatedAt: boundedRedactedText(combination.updatedAt, 64),
-    };
   }
 
   private projectBuildQuestions(text: unknown, result: unknown): MobileBridgeBuildQuestionDto[] {

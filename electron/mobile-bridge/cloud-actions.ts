@@ -5,7 +5,7 @@
 // Desktop internals that Electron IPC uses today:
 //   - registered uploads  → cloud-agents/registered-upload + packageAndReviewCloudAgent
 //     (the `cloudAgents:saveRegisteredPrivate` path, pinned to private-link/static-only)
-//   - cloud delete/combinations → the authenticated cargo.* McpSource client
+//   - cloud delete → the authenticated cargo.* McpSource client
 //   - remote build → hephaestus/builder runHephaestusBuild with an explicit
 //     empty MCP consent (Mobile never auto-attaches MCP servers)
 // Tests inject fakes through MobileBridgeAuthority options; production omits
@@ -17,8 +17,6 @@ import { getSessionCookieHeader } from "../auth";
 import { getCargoSource } from "../marketplace";
 import { registeredUploadOptions, registeredUploadRoot } from "../cloud-agents/registered-upload";
 import type {
-  CloudAgentCombination,
-  CloudAgentCombinationMemberRef,
   CloudAgentDeleteResult,
   CloudAgentPackageResult,
   CloudAgentRegisteredTarget,
@@ -49,14 +47,6 @@ export interface MobileBridgeCloudAgentActions {
   /** The `cloudAgents:saveRegisteredPrivate` path: private-link + static-only. */
   saveRegisteredPrivate(target: CloudAgentRegisteredTarget): Promise<CloudAgentPackageResult>;
   deleteMyAgent(slug: string): Promise<CloudAgentDeleteResult>;
-  listMyCombinations(): Promise<CloudAgentCombination[]>;
-  saveMyCombination(input: {
-    name: string;
-    description: string;
-    members: CloudAgentCombinationMemberRef[];
-    combinationId?: string;
-    expectedRevision?: number;
-  }): Promise<CloudAgentCombination>;
 }
 
 export interface MobileBridgeBuildRunInput {
@@ -133,8 +123,6 @@ export function createDesktopMobileBridgeCloudAgentActions(): MobileBridgeCloudA
       });
     },
     deleteMyAgent: (slug) => requireCargoSource().deleteMyAgent(slug),
-    listMyCombinations: () => requireCargoSource().listMyCombinations(),
-    saveMyCombination: (input) => requireCargoSource().saveMyCombination(input),
   };
 }
 

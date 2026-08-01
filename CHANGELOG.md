@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.41 — 2026-08-01
+
+This release binds Agentlas OS v1.1.92 at
+2eb39adf572bc3e235866002b3143936240f76bc.
+Passing the source gates does not prove a GitHub release or installer; the
+Releases page stays the authority for what is actually downloadable.
+
+- **Mobile Work preserves project ownership.** A created task returns its
+  resolved controller, an existing project task cannot be moved to another
+  project, and its project connection cannot be cleared through the generic
+  workspace action.
+- Retired Agent Group-era Cloud combination projections and adapters are gone
+  from the Mobile Bridge contract instead of remaining as unreachable product
+  vocabulary.
+
 ## 0.9.40 — 2026-08-01
 
 This release binds Agentlas OS v1.1.92 at

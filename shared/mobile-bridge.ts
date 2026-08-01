@@ -163,7 +163,7 @@ export type MobileBridgeTurnAgentTargetDto =
 /**
  * Closed first-turn contract for the consumer-facing One surface on Mobile.
  *
- * The phone deliberately cannot select a chat owner, agent, firm, group,
+ * The phone deliberately cannot select a chat owner, agent, firm,
  * project, runtime, Hub route, durable borrowed target, Task, Profile, or
  * Memory capability. Desktop Main creates the conversation and derives every
  * such authority from its current authenticated host state. Permission is an
@@ -1228,21 +1228,6 @@ export interface MobileBridgeCloudDeleteResultDto {
   deletedAt: string;
 }
 
-export interface MobileBridgeCloudCombinationMemberDto {
-  agentDefinitionId: string;
-  agentReleaseId: string;
-}
-
-/** Owner-scoped cloud combination. Hub release references only; no package bytes. */
-export interface MobileBridgeCloudCombinationDto {
-  combinationId: string;
-  name: string;
-  description: string;
-  members: MobileBridgeCloudCombinationMemberDto[];
-  revision: number;
-  updatedAt: string;
-}
-
 export interface MobileBridgeBuildQuestionDto {
   question: string;
   header?: string;
@@ -1729,24 +1714,6 @@ function ontologyRevision(value: unknown, field: string): string | null {
   return typeof value === "string" && /^rev_[a-f0-9]{32}$/.test(value)
     ? null
     : `${field} must be a canonical revision`;
-}
-
-/** Cloud combination members are exact immutable Hub release references. */
-function validateCloudCombinationMembers(value: unknown): string | null {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 32) {
-    return "members must contain 1 to 32 exact Hub release references";
-  }
-  for (const item of value) {
-    if (!isRecord(item) || !hasOnlyKeys(item, ["agentDefinitionId", "agentReleaseId"])) {
-      return "members entries accept only agentDefinitionId and agentReleaseId";
-    }
-    const error = firstError(
-      ontologyRef(item.agentDefinitionId, "agentDefinitionId"),
-      ontologyRef(item.agentReleaseId, "agentReleaseId"),
-    );
-    if (error) return error;
-  }
-  return null;
 }
 
 function validateParams(method: MobileBridgeMethod, params: Record<string, unknown>): string | null {

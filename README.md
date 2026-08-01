@@ -69,6 +69,13 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-08-01 · v0.9.41 — Mobile Work keeps the same controller** —
+  Mobile-created project tasks now return the resolved controller and cannot
+  be detached from or moved between projects through generic workspace calls.
+  Retired Agent Group-era Cloud combination projections were removed from the
+  Mobile Bridge. This release binds Agentlas OS v1.1.92 at
+  `2eb39adf572bc3e235866002b3143936240f76bc`. Passing these source gates does not prove a published release: the Releases page stays the authority for what is actually downloadable.
+
 - **2026-08-01 · v0.9.40 — Project-first Work and a clearer One** —
   Workspace now begins with Projects, where source, instructions, ordered
   agents, tasks, and memory stay together. The old global chat and Agent Group
