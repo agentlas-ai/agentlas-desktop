@@ -76,6 +76,7 @@ import { startComputerUseControlServer, stopComputerUseControlServer } from "./c
 import { authorizeLocalMediaPath } from "./fs/access";
 import { serveOneArtifactProtocolRequest } from "./one/artifact-preview";
 import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
+import { recoverDesktopStartup, type StartupRecoveryPresentation } from "./one/startup-recovery";
 import { initFileLogging, mainLogFilePath } from "./logging";
 import { setCurrentUiLocale } from "./ui-locale";
 import { prepareMacRuntimeResourcesForExecution } from "./runtime/mac-resource-seal";
@@ -256,7 +257,11 @@ const STARTUP_PLACEHOLDER_HTML = `<!doctype html>
 <body>
   <main role="status" aria-live="polite">
     <h1>Agentlas</h1>
-    <p>Opening your workspace securely. Your local work stays available while account access is restored.</p>
+    <p id="startup-summary">Opening your workspace securely.</p>
+    <section id="startup-question" hidden>
+      <p id="startup-question-copy"></p>
+      <div id="startup-options"></div>
+    </section>
     <progress aria-label="Opening Agentlas"></progress>
   </main>
 </body>
@@ -267,6 +272,37 @@ let mainWindow: BrowserWindow | null = null;
 let shellReadyForWindows = false;
 let oneBriefingLaunchTimer: NodeJS.Timeout | null = null;
 let oneBriefingInterval: NodeJS.Timeout | null = null;
+
+async function presentStartupRecovery(presentation: StartupRecoveryPresentation): Promise<string | null> {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return null;
+  const payload = JSON.stringify(presentation);
+  return mainWindow.webContents.executeJavaScript(`(() => {
+    const value = ${payload};
+    const summary = document.getElementById("startup-summary");
+    if (summary) summary.textContent = value.summary || "";
+    const sheet = document.getElementById("startup-question");
+    const question = document.getElementById("startup-question-copy");
+    const options = document.getElementById("startup-options");
+    if (sheet && question && options) {
+      sheet.hidden = !value.question;
+      question.textContent = value.question || "";
+      options.replaceChildren(...(value.options || []).map((option) => {
+        const node = document.createElement("button");
+        node.type = "button";
+        node.textContent = option.label;
+        node.dataset.actionId = option.actionId;
+        return node;
+      }));
+    }
+    if (!value.question || !value.options?.length) return null;
+    return new Promise((resolve) => {
+      options.addEventListener("click", (event) => {
+        const target = event.target instanceof Element ? event.target.closest("button[data-action-id]") : null;
+        resolve(target instanceof HTMLButtonElement ? target.dataset.actionId || null : null);
+      }, { once: true });
+    });
+  })()`);
+}
 
 async function openOneFromNotification(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
@@ -597,6 +633,8 @@ app.on("will-quit", (event) => {
   finishQuitCleanup();
 });
 
+let startupStage = "before-ready";
+
 app.whenReady().then(async () => {
   // Before any other stage: a packaged app discards console output, so start
   // mirroring it to the platform log directory first. Updater and mobile-bridge
@@ -715,7 +753,9 @@ app.whenReady().then(async () => {
   // continuity, authentication, and bootstrap gates have completed.
   await createWindow({ startupPlaceholder: true });
   traceStartup("startup-window-visible");
+  startupStage = "store-opening";
   initStore({ deferPostContinuityRepairs: updatePreflight.pendingInstall });
+  startupStage = "store-ready";
   traceStartup("store-ready");
   try {
     reconcileOneHubDerivativeDraftStorage();
@@ -964,7 +1004,24 @@ app.whenReady().then(async () => {
   } catch (recoveryError) {
     console.error("[updater] native recovery fallback failed", recoveryError);
   }
-  if (!handled) console.error("[main] startup failed", error);
+  if (handled) return;
+  console.error("[main] startup failed", error);
+  if (startupStage === "store-opening") {
+    const recoveryStarted = await recoverDesktopStartup({
+      error,
+      locale: resolveMenuLocale(),
+      present: presentStartupRecovery,
+      retry: async () => {
+        initStore();
+        app.relaunch();
+        app.exit(0);
+      },
+    });
+    if (recoveryStarted) return;
+    // No connected One runtime reached a judgment. Keep the recovery layout
+    // alive instead of turning an operational-store failure into a dead app.
+    return;
+  }
   app.exit(1);
 });
 

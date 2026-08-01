@@ -224,23 +224,26 @@ export interface OneTeamNeedResolution {
 
 export type OneTeamNeedJudge = (input: {
   prompt: string;
-}) => Promise<{ needed: boolean; source: "llm" | "fallback"; reason: string }>;
+}) => Promise<{ needed: boolean; source: "llm" | "unavailable"; reason: string }>;
 
 async function defaultJudgeTeamNeed(input: {
   prompt: string;
-}): Promise<{ needed: boolean; source: "llm" | "fallback"; reason: string }> {
-  const { judgeBoolean } = await import("../system-agents/judgment");
-  const { value, verdict } = await judgeBoolean({
+}): Promise<{ needed: boolean; source: "llm" | "unavailable"; reason: string }> {
+  const { judgeRequired } = await import("../system-agents/judgment");
+  const verdict = await judgeRequired<"yes" | "no">({
     kind: "one-team-preflight-need",
     question:
       "Would completing this request genuinely benefit from a small team of multiple specialist agents (parallel work, independent verification, or multiple distinct deliverables) instead of one agent?",
+    labels: ["yes", "no"] as const,
     input: input.prompt.slice(0, 4_000),
     guidance:
       "Judge the actual work in any language. Say yes only when multiple specialist agents add real value through independent contributions, parallel execution, or verification. Do not infer from keywords or phrasing templates.",
-    hints: [],
-    fallback: false,
   });
-  return { needed: value, source: verdict.source, reason: verdict.reason };
+  return {
+    needed: verdict.verdict === "yes",
+    source: verdict.source,
+    reason: verdict.reason,
+  };
 }
 
 /**
@@ -389,23 +392,6 @@ function exactInstalledRoster(
   const targets: OrchestrationTarget[] = [];
   let unresolvedExternal = false;
   const seen = new Set([coordinator.id]);
-  for (const card of chat.hiredAgents.slice(0, 15)) {
-    if (card.source !== "installed" && card.source !== "firm-node") {
-      unresolvedExternal = true;
-      continue;
-    }
-    const matches = all().filter((agent) => agent.id === card.slug || agent.slug === card.slug);
-    const installed = matches.length === 1 ? matches[0] : null;
-    if (!installed || installed.kind === "team" || seen.has(installed.id)) {
-      unresolvedExternal = true;
-      continue;
-    }
-    seen.add(installed.id);
-    const snapshot = candidateSnapshot(installed, card.source);
-    candidates.push(snapshot);
-    roles.push(roleFromCandidate(installed, snapshot, chat, false));
-    targets.push({ source: "local", entityKind: "agent", agentId: installed.id });
-  }
   for (const agentId of requestedAgentIds) {
     const matches = all().filter((agent) => agent.id === agentId);
     const installed = matches.length === 1 ? matches[0] : null;

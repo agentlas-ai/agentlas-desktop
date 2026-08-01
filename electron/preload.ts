@@ -479,8 +479,6 @@ const api: AgentlasIpc = {
     get: (id: string) => ipcRenderer.invoke("chats:get", id),
     create: (input) => ipcRenderer.invoke("chats:create", input),
     rename: (id: string, title: string) => ipcRenderer.invoke("chats:rename", id, title),
-    switchAgent: (id: string, agentId: string) =>
-      ipcRenderer.invoke("chats:switchAgent", id, agentId),
     archive: (id: string) => ipcRenderer.invoke("chats:archive", id),
     unarchive: (id: string) => ipcRenderer.invoke("chats:unarchive", id),
     remove: (id: string) => ipcRenderer.invoke("chats:remove", id),
@@ -490,8 +488,6 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("chats:setSwarmMode", id, enabled),
     setRuntimeSelection: (id: string, selection: RuntimeSelection | null) =>
       ipcRenderer.invoke("chats:setRuntimeSelection", id, selection),
-    setHiredAgents: (id: string, cards: unknown[]) =>
-      ipcRenderer.invoke("chats:setHiredAgents", id, cards),
     recap: (id: string) => ipcRenderer.invoke("chats:recap", id),
     markViewed: (id: string) => ipcRenderer.invoke("chats:markViewed", id),
   },
@@ -621,9 +617,6 @@ const api: AgentlasIpc = {
     autoResolve: (input) => ipcRenderer.invoke("oneTeamPreflight:autoResolve", input),
     resolve: (input) => ipcRenderer.invoke("oneTeamPreflight:resolve", input),
     failStart: (ref) => ipcRenderer.invoke("oneTeamPreflight:failStart", ref),
-  },
-  hired: {
-    list: () => ipcRenderer.invoke("hired:list"),
   },
   system: {
     concurrencyInfo: () => ipcRenderer.invoke("system:concurrencyInfo"),

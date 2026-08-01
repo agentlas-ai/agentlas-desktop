@@ -145,7 +145,6 @@ export interface MobileBridgeInvokeSteerParams {
   goalMode?: boolean;
   appsGenerateMode?: boolean;
   stormbreakerMode?: boolean;
-  borrowAgents?: string[];
   taskForceTargets?: MobileBridgeTurnAgentTargetDto[];
   images?: MobileBridgeImageAttachmentDto[];
   expectedQuestionMessageId?: string;
@@ -648,8 +647,7 @@ export interface MobileBridgeProjectDto {
   id: string;
   name: string;
   description: string | null;
-  defaultAgentId: string | null;
-  /** First ordered project-pool member. Kept separate from legacy naming. */
+  /** First ordered project-pool member and the project's Work controller. */
   controllerAgentId: string | null;
   controllerName: string | null;
   agentCount: number;
@@ -668,14 +666,6 @@ export interface MobileBridgeProjectTaskStartReceiptDto {
   taskId: string;
   chatId: string;
   title: string;
-}
-
-export interface MobileBridgeHiredAgentDto {
-  slug: string;
-  name: string | null;
-  source: string | null;
-  routeLabel: string | null;
-  hiredAt: string;
 }
 
 export interface MobileBridgeChatDto {
@@ -699,7 +689,6 @@ export interface MobileBridgeChatDto {
   updatedAt: string;
   continuousMode: boolean;
   swarmMode: boolean;
-  hiredAgents: MobileBridgeHiredAgentDto[];
   active: boolean;
 }
 
@@ -1562,15 +1551,6 @@ function validateInvokeOptions(
   params: Record<string, unknown>,
   allowObservedRunQuestion = false,
 ): string | null {
-  const borrowAgents = params.borrowAgents;
-  if (
-    borrowAgents !== undefined &&
-    (!Array.isArray(borrowAgents) ||
-      borrowAgents.length > 8 ||
-      borrowAgents.some((item) => typeof item !== "string" || item.length < 1 || item.length > 160))
-  ) {
-    return "borrowAgents must be an array of at most 8 non-empty strings";
-  }
   const taskForceTargetsError = validateTurnAgentTargets(params.taskForceTargets);
   const hasDecisionId = params.expectedQuestionMessageId !== undefined;
   const hasDecisionTaskId = params.expectedTaskId !== undefined;
@@ -1825,12 +1805,12 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         validateImageAttachments(params.images),
       );
     case "invoke.start":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "stormbreakerMode", "borrowAgents", "taskForceTargets", "images", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
         return "invoke.start contains unsupported fields";
       }
       return validateInvokeOptions(params);
     case "invoke.steer":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "stormbreakerMode", "borrowAgents", "taskForceTargets", "images", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
         return "invoke.steer contains unsupported fields";
       }
       return firstError(validateInvokeOptions(params, true), requiredString(params, "expectedRunId", 160));

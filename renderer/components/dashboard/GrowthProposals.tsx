@@ -153,11 +153,13 @@ export function GrowthProposals() {
             const card = cardCopy(proposal);
             const canUndo = proposal.status === "applied" || proposal.status === "measured";
             return (
-              <div key={proposal.id} className="dashboard-module-row">
-                <div className="dashboard-row-copy">
-                  <div>
-                    {ko ? "적용됨 · " : "Applied · "}
-                    {card ? card.change : proposal.summary}
+              <div key={proposal.id} className="dashboard-module-row" style={{ alignItems: "start" }}>
+                <div className="dashboard-row-copy" style={{ display: "grid", gap: 4 }}>
+                  <div style={{ opacity: 0.65, fontSize: 12 }}>{proposal.agentId}</div>
+                  <div>{card?.learned ?? proposal.summary}</div>
+                  {card && <div style={{ opacity: 0.82 }}>{card.change}</div>}
+                  <div style={{ opacity: 0.65, fontSize: 12 }}>
+                    {ko ? "이전 버전에서 자동 적용됨" : "Auto-applied by an earlier version"}
                   </div>
                 </div>
                 {canUndo && (

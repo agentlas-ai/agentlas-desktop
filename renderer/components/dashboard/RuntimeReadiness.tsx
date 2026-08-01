@@ -7,6 +7,7 @@ import type {
   AuthSession,
   HephaestusCommandResult,
   HephaestusStatus,
+  HephaestusUpdateJournal,
   InstalledMcpServer,
   MarketplaceSourceStatus,
   McpServerStatus,
@@ -34,6 +35,16 @@ const BLOCKING_UPDATER_STATES = new Set<UpdaterState["status"]>([
   "incompatible",
 ]);
 const HUB_READINESS_TIMEOUT_MS = 6_000;
+// These are Desktop-owned capabilities, not user-installed integrations.
+// Their readiness belongs to the OS/browser/computer-use surfaces and must not
+// be misreported as credential problems in the user's plugin inventory.
+const SYSTEM_MCP_CATALOG_IDS = new Set([
+  "hephaestus-network",
+  "agentlas-browser",
+  "playwright",
+  "cua-driver",
+  "agentlas-time",
+]);
 
 function fulfilled<T>(result: PromiseSettledResult<T>): T | null {
   return result.status === "fulfilled" ? result.value : null;
@@ -109,6 +120,14 @@ function updaterItem(state: UpdaterState | null, ko: boolean): ReadinessItem {
       status: "attention",
     };
   }
+  if (state.status === "idle" && !state.lastCheckedAt) {
+    return {
+      id: "update",
+      label: ko ? "업데이트" : "Update",
+      detail: ko ? "공식 업데이트 확인을 기다리고 있습니다." : "Waiting for the official update check.",
+      status: "checking",
+    };
+  }
   return {
     id: "update",
     label: ko ? "업데이트" : "Update",
@@ -121,7 +140,7 @@ function updaterItem(state: UpdaterState | null, ko: boolean): ReadinessItem {
 
 function overallStatus(items: ReadinessItem[]): ReadinessSnapshot["overall"] {
   if (items.some((item) => item.status === "blocked")) return "blocked";
-  if (items.some((item) => item.status === "attention")) return "attention";
+  if (items.some((item) => item.status === "attention" || item.status === "checking")) return "attention";
   return "ready";
 }
 
@@ -152,17 +171,19 @@ export function RuntimeReadiness() {
     const currentRequest = ++requestId.current;
     setChecking(true);
 
-    const [versionResult, sessionResult, runtimeResult, engineResult, hubResult, installedResult, pluginResult, updaterResult] = await Promise.allSettled([
+    const [versionResult, sessionResult, runtimeResult, engineResult, engineJournalResult, hubResult, installedResult, pluginResult, updaterResult] = await Promise.allSettled([
       api.app.getVersion(),
       api.auth.getSession(),
       api.runtime.detect(deep),
       api.hephaestus.status(locale),
+      api.hephaestus.updateJournal(),
       within(api.marketplace.status(deep), HUB_READINESS_TIMEOUT_MS),
       api.mcpTools.listInstalled(),
       api.mcpTools.status(),
       deep ? api.updater.check() : api.updater.getState(),
     ]);
     const engine = fulfilled(engineResult) as HephaestusStatus | null;
+    const engineJournal = fulfilled(engineJournalResult) as HephaestusUpdateJournal | null;
     let doctor: HephaestusCommandResult | null = null;
     if (deep && engine?.available) {
       doctor = await api.hephaestus.doctor().catch(() => null);
@@ -174,10 +195,19 @@ export function RuntimeReadiness() {
     const hub = fulfilled(hubResult) as MarketplaceSourceStatus | null;
     const installed = (fulfilled(installedResult) ?? []) as InstalledMcpServer[];
     const pluginStates = (fulfilled(pluginResult) ?? []) as McpServerStatus[];
-    const enabledPlugins = installed.filter((plugin) => plugin.enabled);
-    const connectedPlugins = pluginStates.filter((plugin) => plugin.connected).length;
-    const deferredPlugins = pluginStates.filter((plugin) => plugin.deferred === "interactive");
-    const pluginProblems = pluginStates.filter((plugin) => !plugin.connected && plugin.deferred !== "interactive");
+    const pluginStatusObserved = pluginResult.status === "fulfilled";
+    const userPlugins = installed.filter((plugin) => !plugin.catalogId || !SYSTEM_MCP_CATALOG_IDS.has(plugin.catalogId));
+    const userPluginIds = new Set(userPlugins.map((plugin) => plugin.id));
+    const enabledPlugins = userPlugins.filter((plugin) => plugin.enabled);
+    const userPluginStates = pluginStates.filter((plugin) => userPluginIds.has(plugin.id));
+    const connectedPlugins = userPluginStates.filter((plugin) => plugin.connected).length;
+    const deferredPlugins = userPluginStates.filter((plugin) => plugin.deferred === "interactive");
+    const pluginProblems = userPluginStates.filter((plugin) => !plugin.connected && plugin.deferred !== "interactive");
+    const pluginNames = new Map(userPlugins.map((plugin) => [plugin.id, plugin.name || plugin.nameEn || plugin.id]));
+    const disconnectedNames = pluginProblems
+      .map((plugin) => pluginNames.get(plugin.id) ?? plugin.id)
+      .slice(0, 3)
+      .join(" · ");
 
     const items: ReadinessItem[] = [
       {
@@ -201,12 +231,14 @@ export function RuntimeReadiness() {
           ? (engine?.reason || (ko ? "Agentlas OS 엔진을 찾지 못했습니다." : "Agentlas OS engine was not found."))
           : deep && !doctor?.ok
             ? (ko ? "엔진은 있지만 자가진단을 통과하지 못했습니다." : "The engine exists but did not pass its self-check.")
-            // A frozen bundled engine outranks "self-check passed" as the thing
-            // worth telling the user, because the self-check cannot detect it.
             : engine.source === "bundled"
-              ? (ko
-                ? `앱에 들어 있는 고정 엔진으로 돌고 있습니다${engine.version ? ` · v${engine.version}` : ""} — 최신을 받지 못해 일부 기능이 빠질 수 있어요.`
-                : `Running the frozen engine bundled with this app${engine.version ? ` · v${engine.version}` : ""} — it cannot update, so some features may be missing.`)
+              ? engineJournal?.status === "current"
+                ? (ko
+                  ? `현재 엔진 확인 완료${engine.version ? ` · v${engine.version}` : ""}`
+                  : `Current engine verified${engine.version ? ` · v${engine.version}` : ""}`)
+                : (ko
+                  ? `엔진 사용 가능${engine.version ? ` · v${engine.version}` : ""} · 업데이트 확인이 진행 중입니다.`
+                  : `Engine available${engine.version ? ` · v${engine.version}` : ""} · update verification is in progress.`)
               // Settings warns about a manually pinned engine; this row used to
               // call the same state "ready". One situation must not get two
               // answers depending on which screen you opened.
@@ -217,15 +249,12 @@ export function RuntimeReadiness() {
               : deep
                 ? (ko ? `자가진단 통과${engine.version ? ` · v${engine.version}` : ""}` : `Self-check passed${engine.version ? ` · v${engine.version}` : ""}`)
                 : (ko ? `Agentlas OS 엔진 사용 가능${engine.version ? ` · v${engine.version}` : ""}` : `Agentlas OS engine available${engine.version ? ` · v${engine.version}` : ""}`),
-        // The bundled fallback passes its own self-check while missing the
-        // Workforce goal-continuity tools, so "doctor ok" is not enough to call
-        // this ready. Surface it as attention: the app runs, but a capability
-        // the user was promised is quietly absent. Settings carries the
-        // explanation; this row only has to stop saying everything is fine.
         status: !engine?.available || (deep && !doctor?.ok)
           ? "blocked"
-          : engine.source === "bundled" || engine.source === "override"
+          : engine.source === "override"
             ? "attention"
+            : engine.source === "bundled" && engineJournal?.status !== "current"
+              ? "checking"
             : "ready",
       },
       {
@@ -245,14 +274,22 @@ export function RuntimeReadiness() {
         label: ko ? "플러그인 · MCP" : "Plugins · MCP",
         detail: enabledPlugins.length === 0
           ? (ko ? "활성 플러그인이 없습니다. 필요한 작업에서만 추가하세요." : "No active plugins. Add them only when a task needs one.")
+          : !pluginStatusObserved
+            ? (ko ? "연결 상태를 아직 확인하지 못했습니다." : "Connection state has not been observed yet.")
           : pluginProblems.length === 0
             ? (deferredPlugins.length > 0
               ? (ko
                 ? `${connectedPlugins}개 연결 확인 · ${deferredPlugins.length}개는 필요할 때만 브라우저를 엽니다.`
                 : `${connectedPlugins} connection${connectedPlugins === 1 ? "" : "s"} verified · ${deferredPlugins.length} opens only when needed.`)
               : (ko ? `${connectedPlugins}개 활성 연결 확인` : `${connectedPlugins} active connection${connectedPlugins === 1 ? "" : "s"} verified`))
-            : (ko ? `${pluginProblems.length}개 연결에 자격증명 또는 서버 확인이 필요합니다.` : `${pluginProblems.length} connection${pluginProblems.length === 1 ? "" : "s"} need credentials or a server check.`),
-        status: enabledPlugins.length === 0 ? "optional" : pluginProblems.length === 0 ? "ready" : "attention",
+            : (ko
+              ? `연결되지 않은 항목 ${pluginProblems.length}개 · ${disconnectedNames}`
+              : `${pluginProblems.length} not connected · ${disconnectedNames}`),
+        status: enabledPlugins.length === 0
+          ? "optional"
+          : !pluginStatusObserved
+            ? "checking"
+            : pluginProblems.length === 0 ? "ready" : "attention",
       },
       updaterItem(fulfilled(updaterResult) as UpdaterState | null, ko),
     ];

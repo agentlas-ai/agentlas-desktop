@@ -349,25 +349,6 @@ function requiredEnum<T extends string>(
   return value;
 }
 
-function optionalBorrowAgents(params: Record<string, unknown>): string[] | undefined {
-  const value = params.borrowAgents;
-  if (value === undefined) return undefined;
-  if (
-    !Array.isArray(value) ||
-    value.length > 8 ||
-    value.some(
-      (item) =>
-        typeof item !== "string" ||
-        item.length < 1 ||
-        item.length > 160 ||
-        /[\u0000-\u001f]/.test(item),
-    )
-  ) {
-    throw new TypeError("borrowAgents must contain at most 8 bounded identifiers");
-  }
-  return [...value] as string[];
-}
-
 function optionalTurnAgentTargets(params: Record<string, unknown>): OrchestrationTarget[] | undefined {
   const value = params.taskForceTargets;
   if (value === undefined) return undefined;
@@ -635,7 +616,6 @@ function invocationParams(
           "goalMode",
           "appsGenerateMode",
           "stormbreakerMode",
-          "borrowAgents",
           "taskForceTargets",
           "images",
           "expectedQuestionMessageId",
@@ -654,7 +634,6 @@ function invocationParams(
           "goalMode",
           "appsGenerateMode",
           "stormbreakerMode",
-          "borrowAgents",
           "taskForceTargets",
           "images",
           "expectedQuestionMessageId",
@@ -675,7 +654,6 @@ function invocationParams(
   const goalMode = optionalBoolean(params, "goalMode");
   const appsGenerateMode = optionalBoolean(params, "appsGenerateMode");
   const stormbreakerMode = optionalBoolean(params, "stormbreakerMode");
-  const borrowAgents = optionalBorrowAgents(params);
   const taskForceTargets = optionalTurnAgentTargets(params);
   const images = optionalImages(params);
   const expectedQuestionMessageId = optionalIdentifier(params, "expectedQuestionMessageId");
@@ -710,7 +688,6 @@ function invocationParams(
   if (goalMode !== undefined) invocation.goalMode = goalMode;
   if (appsGenerateMode !== undefined) invocation.appsGenerateMode = appsGenerateMode;
   if (stormbreakerMode !== undefined) invocation.stormbreakerMode = stormbreakerMode;
-  if (borrowAgents !== undefined) invocation.borrowAgents = borrowAgents;
   if (taskForceTargets !== undefined) invocation.taskForceTargets = taskForceTargets;
   if (images !== undefined) invocation.images = images;
   const expectedRunId: MobileBridgeInvokeSteerParams["expectedRunId"] | undefined = steering
@@ -797,7 +774,6 @@ function projectInvocationReceipt(receipt: InvocationRunReceipt | null): MobileB
       finishedAt: receipt.finishedAt ?? null,
       eventCount: receipt.eventCount,
       hasImages: receipt.hasImages ?? false,
-      borrowAgents: receipt.borrowAgents ?? [],
       errorCode: receipt.errorCode ?? null,
       errorMessage:
         typeof receipt.errorMessage === "string"

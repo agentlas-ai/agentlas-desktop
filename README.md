@@ -69,6 +69,18 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-08-01 · v0.9.42 — One owner, turn-only helpers** —
+  The retired chat-level hired-agent roster and session agent switch are gone.
+  One remains the sole controller of One conversations, project Work remains
+  controlled by the first ordered project agent, and extra agents apply only to
+  the current turn. Schema 86 clears legacy roster state and Mobile projects the
+  same authority contract. One's semantic judgments now require a real model
+  verdict and fail closed when unavailable; automation evidence no longer
+  rewrites agent prompts from error strings or counters. Runtime continuity and
+  Dashboard readiness also report observed state without fabricated fallbacks.
+  This release binds Agentlas OS v1.1.92 at
+  `2eb39adf572bc3e235866002b3143936240f76bc`. Passing these source gates does not prove a published release: the Releases page stays the authority for what is actually downloadable.
+
 - **2026-08-01 · v0.9.41 — Mobile Work keeps the same controller** —
   Mobile-created project tasks now return the resolved controller and cannot
   be detached from or moved between projects through generic workspace calls.

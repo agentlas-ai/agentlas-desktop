@@ -91,7 +91,6 @@ import {
 } from "../experience/context";
 import { prejudgeCanonicalTaskIds } from "../experience/taxonomy";
 import { promoteExperienceCandidatesForRun } from "../experience/store";
-import { maybeProposeEvolutionFromRun } from "../agents/evolution-triggers";
 import { writeEvolutionProposalsForProject, evolutionSessionContextLine } from "../agents/evolution-hep";
 import { resolveDesktopOperationalRuntimeSession } from "../ontology/operational-runtime-session";
 import { operationalRuntimeOverlayMatchesTask } from "../ontology/operational-runtime-contract";
@@ -1408,10 +1407,7 @@ export async function runMcpInvocation(
     effectiveUserPrompt = `${automationBoundary}\n\n${effectiveUserPrompt}`;
   }
   if (req.sessionRouting) {
-    const incumbentRoster = [
-      agent.nameEn || agent.name || agent.slug,
-      ...chat.hiredAgents.map((card) => card.name || card.slug),
-    ].filter(Boolean);
+    const incumbentRoster = [agent.nameEn || agent.name || agent.slug].filter(Boolean);
     const sessionRoutingPolicy = locale === "ko"
       ? [
           "[Agentlas 세션 팀 정책]",
@@ -3558,8 +3554,8 @@ export async function runMcpInvocation(
               taskPrompt: req.userPrompt,
               observedSourceUrls: [...observedOneSourceUrls],
               allowUncitedStructured: observedOneToolEvidence,
-              // The resident judge picks the fallback surface layout by meaning;
-              // the travel/product regexes stay as the labeled fallback.
+              // The resident judge picks the surface layout by meaning; an
+              // unavailable verdict keeps the neutral generic layout.
               judgedIntent: await resolveOneMarkdownSurfaceIntent(req.userPrompt ?? "").catch(
                 () => undefined,
               ),
@@ -3745,20 +3741,9 @@ export async function runMcpInvocation(
       } catch (err) {
         console.warn("[experience] interactive outcome promotion deferred:", err);
       }
-      // Phase 2 — 일반 실행 증거(반복 실패 / 승격 누적 / 반복 교정)에서 자가진화 제안 트리거.
-      // 결정적 카운터라 저비용(임베딩/LLM 없음). 저위험은 자동 적용+undo, 고위험은 4표면 승인.
-      // 어떤 예외도 사용자 턴을 깨지 않는다(모듈 내부에서 삼킴).
-      try {
-        const growth = maybeProposeEvolutionFromRun({ agentId: agent.id, chatId: chat.id });
-        if (growth) {
-          console.log(
-            `[evolution-triggers] ${growth.kind} proposal ${growth.proposalId} ` +
-              `(${growth.riskTier}${growth.autoApplied ? ", auto-applied" : ", pending approval"})`,
-          );
-        }
-      } catch (err) {
-        console.warn("[evolution-triggers] normal-run trigger deferred:", err);
-      }
+      // Successful-run evidence is retained above, but code does not author or
+      // auto-apply prompt semantics from counters. One may later turn the
+      // evidence into a specific proposal through a model-required judgment.
     }
 
     // 컴팩션 요약 수집 — Claude Code가 이번 세션에서 컨텍스트를 자동 압축했다면 그 요약을

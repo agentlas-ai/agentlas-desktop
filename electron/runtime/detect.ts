@@ -33,6 +33,7 @@ import {
 } from "../../shared/models";
 import { recallRuntimeSelection, rememberRuntimeSelection } from "./selection-memory";
 import { clearCliVersionProbeCache } from "./exec";
+import { writeRuntimeSelectionMirror } from "./selection-mirror";
 
 type ActiveRuntimeRow = {
   kind: RuntimeKind;
@@ -235,6 +236,7 @@ function saveActiveRuntime(status: RuntimeStatus | RuntimeSelection): void {
       longCtx ? 1 : 0,
     );
   })();
+  writeRuntimeSelectionMirror(status);
 }
 
 /**
@@ -275,6 +277,16 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     .prepare("SELECT kind, backend, source, model, long_context FROM active_runtime WHERE id = 1")
     .get() as ActiveRuntimeRow | undefined;
   const active = activeRow ?? null;
+  if (active) {
+    writeRuntimeSelectionMirror({
+      kind: active.kind,
+      ...(active.backend ? { backend: active.backend } : {}),
+      ...(active.source ? { source: active.source } : {}),
+      ...(active.model ? { model: active.model } : {}),
+      longContext: Boolean(active.long_context),
+      role: "orchestrator",
+    });
+  }
 
   const [
     cc,

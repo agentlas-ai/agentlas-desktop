@@ -171,7 +171,6 @@ import type {
   ExperienceCloudWithdrawInput,
   FsPathGrant,
   FsReadScope,
-  HiredAgentCard,
   CanonicalTaskResultAcceptance,
   OneOperatingPrincipleCreateInput,
   OneOperatingPrincipleDeleteInput,
@@ -355,11 +354,9 @@ import {
   removeChat,
   renameChat,
   setChatContinuousMode,
-  setChatHiredAgents,
   setChatRuntimeSelection,
   setChatSwarmMode,
   setChatWorkingFolder,
-  switchChatAgent,
   unarchiveChat,
 } from "./store/chats";
 import { getOrCreateAutomationSession } from "./store/automation-sessions";
@@ -501,7 +498,6 @@ import {
 } from "./one/improvement-proof-producer";
 import { createOneTaskProjectionRuntime } from "./one/task-projection";
 import { loadOrCreateMobileBridgeHostIdentity } from "./mobile-bridge/pairing";
-import { listHiredAgents } from "./agents/hired-agents";
 import { getAgentConcurrencyInfo, setAgentConcurrency } from "./store/concurrency";
 import { getInterviewMode, setInterviewMode, type InterviewMode } from "./store/interview-mode";
 import {
@@ -3147,9 +3143,6 @@ export function registerIpcHandlers(): void {
     }),
   );
   ipcMain.handle("chats:rename", (_e, id: string, title: string) => renameChat(id, title));
-  ipcMain.handle("chats:switchAgent", (_e, id: string, agentId: string) =>
-    switchChatAgent(id, agentId),
-  );
   ipcMain.handle("chats:remove", (_e, id: string) => removeChat(id));
   // 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(없으면 null).
   ipcMain.handle("chats:recap", (_e, id: string) => buildChatRecap(id, currentUiLocale() === "ko" ? "ko" : "en"));
@@ -3168,10 +3161,6 @@ export function registerIpcHandlers(): void {
     "chats:setRuntimeSelection",
     (_e, id: string, selection: RuntimeSelection | null) =>
       setChatRuntimeSelection(id, selection),
-  );
-  // 고용(빌림) 카드 채팅 바인딩 — 빈 배열이면 해고. 매 send에 자동 재주입되는 원본.
-  ipcMain.handle("chats:setHiredAgents", (_e, id: string, cards: HiredAgentCard[]) =>
-    setChatHiredAgents(id, Array.isArray(cards) ? cards : []),
   );
   ipcMain.handle("tasks:createProject", (_e, input: { projectId: string; title?: string }): CanonicalTaskWorkTarget => {
     if (!input || typeof input.projectId !== "string" || !input.projectId.trim()) {
@@ -3614,7 +3603,6 @@ export function registerIpcHandlers(): void {
     return recordOneBriefingFeedback(input);
   });
   // 사이드바 "고용 중" 로스터 — 리스 캐시 + 기억 둥지(~/.agentlas/networking) 스캔.
-  ipcMain.handle("hired:list", () => listHiredAgents());
 
   // ── automations (SQLite + scheduler) ───────────────────
   // 이벤트 트리거(fs/chain)를 가진 자동화가 바뀌면 트리거 매니저를 재동기화한다(리스너 갱신).

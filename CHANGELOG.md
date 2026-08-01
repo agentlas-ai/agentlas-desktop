@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.9.42 — 2026-08-01
+
+This release binds Agentlas OS v1.1.92 at
+2eb39adf572bc3e235866002b3143936240f76bc.
+Passing the source gates does not prove a GitHub release or installer; the
+Releases page stays the authority for what is actually downloadable.
+
+- **One and Work keep one durable owner.** The retired chat-level hired-agent
+  roster and session agent-switch bridge are removed. One remains the sole One
+  controller, while Work remains owned by the first ordered project agent.
+- **Additional agents are turn-scoped.** Explicit `@` selections and validated
+  task-force targets apply only to the current turn and are not silently saved
+  or reinjected into later requests.
+- **Upgrade and Mobile projections match the same contract.** Legacy hired
+  roster data is cleared during schema 86 migration, Mobile no longer projects
+  that retired state, and updater compatibility now advertises schema 86.
+- **One no longer invents semantic decisions.** Recovery, request intent,
+  memory intent, decision risk, completion claims, team need, and result-layout
+  selection now require a connected-model verdict. Unavailable judgment is an
+  explicit fail-closed state rather than a keyword, regex, or fixed-label guess.
+- **Observed failures do not rewrite an agent.** Automation still records
+  recovery evidence and promotes verified experience, but deterministic error
+  strings and counters no longer author or auto-apply prompt changes. Earlier
+  auto-applied entries are identified as legacy records with an undo action.
+- **Startup and readiness facts stay honest.** The selected runtime has a
+  credential-free continuity mirror for tool-free recovery when the operational
+  store cannot open, and Dashboard distinguishes checking, connected, and
+  user-installed plugin states without blaming Desktop-owned capabilities.
+- Project-first Work, exact pointer drag-and-drop, controller binding, completed
+  run receipts, and the absence of internal agent slugs were rechecked in an
+  isolated production Electron profile.
+
 ## 0.9.41 — 2026-08-01
 
 This release binds Agentlas OS v1.1.92 at

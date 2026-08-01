@@ -32,7 +32,6 @@ interface TaskChatRow {
   archived_at: string | null;
   created_at: string;
   updated_at: string;
-  hired_agents: string | null;
 }
 
 interface ParticipantRow {
@@ -107,7 +106,7 @@ function chatRow(id: string): TaskChatRow | null {
     (getDb()
       .prepare(
         `SELECT id, title, project_id, firm_id, agent_id, kind, parent_chat_id,
-                archived_at, created_at, updated_at, hired_agents
+                archived_at, created_at, updated_at
          FROM chats WHERE id = ? LIMIT 1`,
       )
       .get(id) as TaskChatRow | undefined) ?? null
@@ -195,27 +194,6 @@ function resolveAgentSlug(agentId: string): string {
   return row?.slug?.trim() || `agent:${agentId}`;
 }
 
-function hiredAgentSlugs(raw: string | null): string[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return [
-      ...new Set(
-        parsed
-          .map((item) =>
-            item && typeof item === "object" && "slug" in item && typeof item.slug === "string"
-              ? item.slug.trim()
-              : "",
-          )
-          .filter(Boolean),
-      ),
-    ];
-  } catch {
-    return [];
-  }
-}
-
 function upsertParticipant(
   taskId: string,
   input: { agentId: string | null; agentSlug: string; role: string | null; seenAt: string },
@@ -277,14 +255,6 @@ export function ensureCanonicalTaskForChat(chatId: string): CanonicalTask | null
       agentId: current.agent_id,
       agentSlug: resolveAgentSlug(current.agent_id),
       role: current.kind === "division" ? "worker" : "owner",
-      seenAt: current.updated_at,
-    });
-  }
-  for (const slug of hiredAgentSlugs(current.hired_agents)) {
-    desiredParticipants.push({
-      agentId: null,
-      agentSlug: slug,
-      role: "hired",
       seenAt: current.updated_at,
     });
   }

@@ -10,7 +10,6 @@ import { touchProject } from "./projects";
 import type {
   Chat,
   ChatHistoryEntry,
-  HiredAgentCard,
   RuntimeBackend,
   RuntimeKind,
   RuntimeSelection,
@@ -34,7 +33,6 @@ interface ChatRow {
   kind: string | null;
   continuous_mode: number | null;
   swarm_mode: number | null;
-  hired_agents: string | null;
   origin_surface: string | null;
   runtime_selection_json: string | null;
 }
@@ -136,26 +134,6 @@ function parseChatRuntimeSelection(raw: string | null): RuntimeSelection | null 
   }
 }
 
-function parseHiredAgents(raw: string | null): HiredAgentCard[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
-      .filter((item) => typeof item.slug === "string" && item.slug.trim().length > 0)
-      .map((item) => ({
-        slug: String(item.slug).trim(),
-        name: typeof item.name === "string" ? item.name : undefined,
-        source: item.source === "hub" || item.source === "installed" || item.source === "firm-node" ? item.source : undefined,
-        routeLabel: typeof item.routeLabel === "string" ? item.routeLabel : undefined,
-        hiredAt: typeof item.hiredAt === "string" ? item.hiredAt : new Date().toISOString(),
-      }));
-  } catch {
-    return [];
-  }
-}
-
 function toChat(row: ChatRow): Chat {
   // A general One conversation deliberately has no Task until execution
   // signals promote it. Existing Work/Task chats are reconciled on read.
@@ -174,7 +152,6 @@ function toChat(row: ChatRow): Chat {
     kind: row.kind === "division" ? "division" : "user",
     continuousMode: row.continuous_mode === 1,
     swarmMode: row.swarm_mode === 1,
-    hiredAgents: parseHiredAgents(row.hired_agents),
     originSurface: row.origin_surface === "one" ? "one" : "work",
     runtimeSelection: parseChatRuntimeSelection(row.runtime_selection_json),
   };
@@ -407,18 +384,6 @@ export function renameChat(id: string, title: string): Chat {
   return chat;
 }
 
-/** 채팅의 에이전트를 다른 에이전트로 전환. firm 채팅이었으면 firm 해제. */
-export function switchChatAgent(id: string, agentId: string): Chat {
-  getDb()
-    .prepare(
-      "UPDATE chats SET agent_id = ?, firm_id = NULL, updated_at = ? WHERE id = ?",
-    )
-    .run(agentId, new Date().toISOString(), id);
-  const chat = getChat(id) as Chat;
-  emitDesktopStoreChange({ entity: "chat", id });
-  return chat;
-}
-
 export function archiveChat(id: string): Chat {
   getDb()
     .prepare("UPDATE chats SET archived_at = ? WHERE id = ?")
@@ -496,24 +461,6 @@ export function setChatRuntimeSelection(
   emitDesktopStoreChange({ entity: "chat", id: chatId });
   const chat = getChat(chatId);
   if (!chat) throw new Error(`Chat not found: ${chatId}`);
-  return chat;
-}
-
-/** 고용(빌림) 카드 저장 — 빈 배열이면 해고(컬럼 비움). 메타데이터 카드만 저장한다. */
-export function setChatHiredAgents(chatId: string, cards: HiredAgentCard[]): Chat {
-  const deduped = new Map<string, HiredAgentCard>();
-  for (const card of cards) {
-    const slug = card.slug?.trim();
-    if (!slug) continue;
-    deduped.set(slug, { ...card, slug, hiredAt: card.hiredAt || new Date().toISOString() });
-  }
-  const value = deduped.size > 0 ? JSON.stringify([...deduped.values()]) : null;
-  getDb()
-    .prepare("UPDATE chats SET hired_agents = ?, updated_at = ? WHERE id = ?")
-    .run(value, new Date().toISOString(), chatId);
-  const chat = getChat(chatId);
-  if (!chat) throw new Error(`Chat ${chatId} not found`);
-  emitDesktopStoreChange({ entity: "chat", id: chatId });
   return chat;
 }
 

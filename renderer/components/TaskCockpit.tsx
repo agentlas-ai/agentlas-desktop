@@ -21,7 +21,7 @@ import type {
   ToolFactoryScaffoldResult,
   ToolFactoryToolRecord,
 } from "@/lib/types";
-import type { HiredAgentCard, InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage, RunEventUi, RuntimeSelection } from "@shared/types";
+import type { InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage, RunEventUi, RuntimeSelection } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
@@ -57,16 +57,6 @@ function uid(): string {
 
 function isInternalLoopStatus(value: string): boolean {
   return /stormbreaker\s+loop|루프\s*stormbreaker|scope-lock|verifier-first|agentlas\s*오케스트레이터/i.test(value);
-}
-
-function normalizeHiredAgentCards(cards: HiredAgentCard[]): HiredAgentCard[] {
-  const bySlug = new Map<string, HiredAgentCard>();
-  for (const card of cards) {
-    const slug = card.slug?.trim();
-    if (!slug) continue;
-    bySlug.set(slug.toLowerCase(), { ...card, slug });
-  }
-  return [...bySlug.values()];
 }
 
 function receiptRecoveryMessage(
@@ -671,8 +661,6 @@ function ChatPage() {
   const [agent, setAgent] = useState<InstalledAgent | null>(null);
   const [allAgents, setAllAgents] = useState<InstalledAgent[]>([]);
   const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
-  const [hiredAgents, setHiredAgents] = useState<HiredAgentCard[]>([]);
-  // 전역대화 옆 "에이전트 부르기" 필 — 증가할 때마다 ChatInput의 에이전트 피커를 연다.
   const [allFirms, setAllFirms] = useState<InstalledFirm[]>([]);
   const [allProjects, setAllProjects] = useState<Project[]>([]);
   const [allEnvKeys, setAllEnvKeys] = useState<string[]>([]);
@@ -743,21 +731,6 @@ function ChatPage() {
     } catch {
       // Preserve the last known/optimistic state until a later durable read succeeds.
     }
-  }, []);
-  // Hired roster is invocation state, so it cannot wait for an async SQLite
-  // round trip before the next Enter. The ref is the latest optimistic truth;
-  // persistence is serialized and reconciles only if its revision is current.
-  const hiredAgentsRef = useRef<HiredAgentCard[]>([]);
-  const hiredDurableAgentsRef = useRef<HiredAgentCard[]>([]);
-  const hiredRosterRevisionRef = useRef(0);
-  const hiredPersistChainRef = useRef<Promise<void>>(Promise.resolve());
-  const currentChatIdRef = useRef(chatId);
-  currentChatIdRef.current = chatId;
-  const applyHiredRoster = useCallback((cards: HiredAgentCard[], durable = false) => {
-    const normalized = normalizeHiredAgentCards(cards);
-    hiredAgentsRef.current = normalized;
-    if (durable) hiredDurableAgentsRef.current = normalized;
-    setHiredAgents(normalized);
   }, []);
   // 활성 런타임/모델 — 헤더 칩 표시 + BYOK 인라인 모델 변경. 진행 중 실행의 runId(취소용).
   const [activeRuntime, setActiveRuntime] = useState<RuntimeStatus | null>(null);
@@ -1470,8 +1443,6 @@ function ChatPage() {
   // 메타데이터 effect는 번역/콜백 변화에도 다시 돌 수 있으므로, 전환 초기화는 chatId에만 묶는다.
   useEffect(() => {
     if (!chatId) return;
-    hiredRosterRevisionRef.current += 1;
-    applyHiredRoster([], true);
     // 이전 채팅 뷰를 캐시에 저장 — 되돌아올 때 히스토리 로드를 기다리지 않고 즉시 복원.
     const prevChatId = prevChatIdRef.current;
     prevChatIdRef.current = chatId;
@@ -1512,7 +1483,7 @@ function ChatPage() {
       subRef.current?.();
       subRef.current = null;
     };
-  }, [applyHiredRoster, chatId]);
+  }, [chatId]);
 
   // The transcript is durable, so the Agent work panel must be durable too.
   // Rebuild terminal run activity from Main's redacted run ledger after a
@@ -1560,7 +1531,6 @@ function ChatPage() {
         return;
       }
       setChat(c);
-      applyHiredRoster(c.hiredAgents ?? [], true);
       setTitleDraft(c.title);
       // The local agent roster is the only metadata that gates composing a
       // message. Hub, MCP, project, and generated-App reads are independent:
@@ -1752,7 +1722,7 @@ function ChatPage() {
     };
     // consumeEvent를 deps에서 제외(ref로 접근) — agent/agentGroup 세팅이 이 effect를 재실행시켜
     // attach가 중복 placeholder를 만들고 구독을 갈아치우던 churn을 없앤다. subscribeRun은 이제 안정적.
-  }, [applyHiredRoster, chatId, locale, requestedFocusMessageId, router, subscribeRun, t]);
+  }, [chatId, locale, requestedFocusMessageId, router, subscribeRun, t]);
 
   useEffect(
     () =>
@@ -1961,7 +1931,7 @@ function ChatPage() {
         pipelineStages?: RecStage[];
         /** 추천 시트의 네트워크 픽이면 빌려올 Hub 에이전트 슬러그 — 백엔드가 hep-call 로 borrow. */
         borrowAgents?: string[];
-        /** Exact temporary TF roster. Unlike switchAgent this never rebinds the chat. */
+        /** Exact temporary TF roster. It never rebinds the project or session controller. */
         taskForceTargets?: OrchestrationTarget[];
         /** Router Agent 에스컬레이션 — main 런타임이 시스템 프롬프트 앞에 주입한다. */
         routerAgent?: RecRouterAgent;
@@ -2048,16 +2018,12 @@ function ChatPage() {
       ]);
       setBusy(true);
       setCancelPending(false);
-      // 고용 바인딩 자동 재주입 — 추천 확정 턴은 opts로 명시되고, 이후 턴은 채팅에
-      // 저장된 고용 카드가 이어받는다(증발 버그 수정). 재호출 과금은 허브 24h 리스가 0으로 접는다.
       const effectiveBorrowAgents =
         effectiveTaskForceTargets.length > 0
           ? undefined
           : (opts?.borrowAgents?.length ?? 0) > 0
           ? opts?.borrowAgents
-          : hiredAgentsRef.current.length
-            ? hiredAgentsRef.current.map((card) => card.slug)
-            : undefined;
+          : undefined;
       if ((effectiveBorrowAgents?.length ?? 0) > 0 || effectiveTaskForceTargets.length > 0 || (opts?.pipelineStages?.length ?? 0) > 1) {
         setNetworkOpenPersisted(true);
       }
@@ -2720,15 +2686,6 @@ function ChatPage() {
     }
   }, [chat, agent, chatId, locale, messages.length, send, router, searchParams]);
 
-  async function switchAgent(agentId: string) {
-    const api = ipc();
-    if (!api || !chat || agentId === chat.agentId) return;
-    const updated = await api.chats.switchAgent(chat.id, agentId);
-    setChat(updated);
-    setAgent(allAgents.find((a) => a.id === agentId) ?? null);
-    setFirm(null); // switchAgent는 firm을 해제
-  }
-
   useEffect(
     () =>
       onHubBookmarkChange((change) => {
@@ -2793,7 +2750,7 @@ function ChatPage() {
     ].join("\n");
   }
 
-  // 추천 시트에서 고른 경로를 실제 실행으로 디스패치. 기존 send/switchAgent 경로를 그대로 재사용한다.
+  // 추천 시트 선택은 해당 턴의 구조화된 실행 의도로만 전달한다.
   function handleRecommendExecute(
     choice: RecExecChoice,
     text: string,
@@ -2836,79 +2793,6 @@ function ChatPage() {
         void send(text, sendOpts);
         break;
     }
-  }
-
-  /**
-   * Serialize roster writes so consecutive @ selections merge instead of
-   * racing as last-write-wins. A failed write reads the durable chat back (or
-   * falls back to the last acknowledged roster) and only reconciles if no
-   * newer optimistic revision exists.
-   */
-  function enqueueHiredRosterPersistence(
-    targetChatId: string,
-    cards: HiredAgentCard[],
-    revision: number,
-  ) {
-    const snapshot = normalizeHiredAgentCards(cards);
-    hiredPersistChainRef.current = hiredPersistChainRef.current.catch(() => undefined).then(async () => {
-      const api = ipc();
-      if (!api) {
-        if (currentChatIdRef.current === targetChatId && hiredRosterRevisionRef.current === revision) {
-          applyHiredRoster(hiredDurableAgentsRef.current, true);
-        }
-        return;
-      }
-      try {
-        const persistedChat = await api.chats.setHiredAgents(targetChatId, snapshot);
-        if (currentChatIdRef.current !== targetChatId) return;
-        const persisted = normalizeHiredAgentCards(persistedChat.hiredAgents ?? snapshot);
-        hiredDurableAgentsRef.current = persisted;
-        if (hiredRosterRevisionRef.current === revision) applyHiredRoster(persisted, true);
-      } catch {
-        let durable = hiredDurableAgentsRef.current;
-        try {
-          const persistedChat = await api.chats.get(targetChatId);
-          if (persistedChat) durable = normalizeHiredAgentCards(persistedChat.hiredAgents ?? []);
-        } catch {
-          // The last acknowledged roster is the safest available fallback.
-        }
-        if (currentChatIdRef.current !== targetChatId) return;
-        hiredDurableAgentsRef.current = durable;
-        if (hiredRosterRevisionRef.current === revision) applyHiredRoster(durable, true);
-      }
-    });
-  }
-
-  /** 고용 바인딩 — renderer/ref는 즉시, SQLite는 순서대로 저장한다. */
-  function hireAgents(slugs: string[]) {
-    if (!chat) return;
-    const existing = hiredAgentsRef.current;
-    const merged = [...existing];
-    const now = new Date().toISOString();
-    for (const rawSlug of slugs) {
-      const slug = rawSlug.trim();
-      const slugKey = slug.toLowerCase();
-      if (!slug || merged.some((card) => card.slug.toLowerCase() === slugKey)) continue;
-      const bookmark = hubBookmarks.find((item) => item.slug.toLowerCase() === slugKey);
-      merged.push({
-        slug,
-        name: bookmark ? pickLocalized(bookmark.listing, locale).name : undefined,
-        source: "hub",
-        hiredAt: now,
-      });
-    }
-    if (merged.length === existing.length) return;
-    const revision = ++hiredRosterRevisionRef.current;
-    applyHiredRoster(merged);
-    enqueueHiredRosterPersistence(chat.id, merged, revision);
-  }
-
-  /** 해고 — 이 채팅의 고용 바인딩 해제. (허브 리스 자체는 만료까지 유효 — 재고용 무과금.) */
-  function dismissHiredAgents() {
-    if (!chat || hiredAgentsRef.current.length === 0) return;
-    const revision = ++hiredRosterRevisionRef.current;
-    applyHiredRoster([]);
-    enqueueHiredRosterPersistence(chat.id, [], revision);
   }
 
   async function saveTitle() {

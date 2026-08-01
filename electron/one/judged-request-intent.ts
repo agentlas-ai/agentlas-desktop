@@ -13,7 +13,12 @@ import {
   oneRequestIntentJudgmentInput,
   type OneRequestIntent,
 } from "../../shared/one-request-intent";
-import { judge, peekJudgment, type JudgeSpec, type Verdict } from "../system-agents/judgment";
+import {
+  judgeRequired,
+  peekJudgment,
+  type RequiredJudgeSpec,
+  type RequiredVerdict,
+} from "../system-agents/judgment";
 
 const INTENT_LABELS = ["conversation", "task"] as const;
 
@@ -24,13 +29,12 @@ export interface ResolvedOneRequestIntent {
 }
 
 export type OneRequestIntentJudge = (
-  spec: JudgeSpec<OneRequestIntent>,
-) => Promise<Verdict<OneRequestIntent>>;
+  spec: RequiredJudgeSpec<OneRequestIntent>,
+) => Promise<RequiredVerdict<OneRequestIntent>>;
 
 /**
- * Async resolver: judge the request intent by meaning and warm the cache. The
- * judge API requires a transport fallback label, but it is never accepted as a
- * product decision.
+ * Async resolver: judge the request intent by meaning and warm the cache. A
+ * missing or invalid model response remains explicitly undecided.
  */
 export async function resolveOneRequestIntent(
   prompt: string,
@@ -38,19 +42,17 @@ export async function resolveOneRequestIntent(
 ): Promise<ResolvedOneRequestIntent> {
   const input = oneRequestIntentJudgmentInput(prompt);
   if (!input) return { intent: "undecided", source: "unavailable", reason: "empty prompt" };
-  const run = opts.judgeFn ?? judge;
+  const run = opts.judgeFn ?? judgeRequired;
   const verdict = await run({
     kind: ONE_REQUEST_INTENT_JUDGMENT_KIND,
     question: ONE_REQUEST_INTENT_JUDGMENT_QUESTION,
     labels: INTENT_LABELS,
     input,
     guidance: ONE_REQUEST_INTENT_JUDGMENT_GUIDANCE,
-    hints: [],
-    fallback: "conversation",
     signal: opts.signal,
     timeoutMs: opts.timeoutMs,
   });
-  return verdict.source === "llm"
+  return verdict.source === "llm" && verdict.verdict !== null
     ? { intent: verdict.verdict, source: "llm", reason: verdict.reason }
     : { intent: "undecided", source: "unavailable", reason: verdict.reason };
 }

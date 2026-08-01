@@ -10,9 +10,8 @@
 // passed to the judge as `hints` (reference, never rules), and when no model is
 // reachable the verdict falls back to "needs_person" so a run that might have
 // already acted is never silently repeated.
-import { judge } from "../system-agents/judgment";
+import { judgeRequired } from "../system-agents/judgment";
 import {
-  ONE_RECOVERY_FALLBACK,
   ONE_RECOVERY_LABELS,
   oneAutoRecoveryFormGate,
   oneAutoRecoveryFromLabel,
@@ -39,7 +38,7 @@ export interface OneAutoRecoveryResult {
   fingerprint: OneRunFailureFingerprint;
   /** Plain-language account of what blocked the run, for the next attempt and for the user. */
   diagnosis: string;
-  decidedBy: "form" | "llm" | "fallback";
+  decidedBy: "form" | "llm" | "unavailable";
 }
 
 const GUIDANCE = [
@@ -55,35 +54,6 @@ const GUIDANCE = [
   "",
   "Judge the evidence given, not what you imagine happened. If the evidence does not let you tell these apart, prefer needs_person.",
 ].join("\n");
-
-/**
- * Old classification wordlists, kept only as reference for the judge.
- * A hint matching is not evidence, and a hint missing is not a pass.
- */
-const HINTS: { label: OneRecoveryLabel; words: string[] }[] = [
-  {
-    label: "retry_different_approach",
-    words: ["returned an error", "tool_error", "node_failed", "timed out", "navigation failed", "not found"],
-  },
-  {
-    label: "needs_person",
-    words: [
-      "requires user intervention",
-      "사용자 개입",
-      "stopped from the stop button",
-      "정지 버튼",
-      "signed out",
-      "not authenticated",
-      "approval",
-      "승인",
-    ],
-  },
-  { label: "unsafe_to_repeat", words: ["sent", "posted", "published", "transferred", "전송", "게시", "결제"] },
-  {
-    label: "will_not_succeed",
-    words: ["content policy", "network security blocked", "context length exceeded", "invalid api key"],
-  },
-];
 
 function evidence(input: OneAutoRecoveryInput): string {
   const { receipt } = input;
@@ -121,24 +91,30 @@ export async function judgeOneAutoRecovery(
 
   // The form gate has already rejected write-capable or unknown-authority runs.
   // Only explicitly read-only failures reach this meaning judgment.
-  const verdict = await judge<OneRecoveryLabel>({
+  const verdict = await judgeRequired<OneRecoveryLabel>({
     kind: "one-run-recovery",
     question:
       "An assistant's run did not finish. May the assistant retry it by itself with a different approach, or must it stop and involve the person?",
     labels: ONE_RECOVERY_LABELS,
     input: evidence(input),
-    hints: HINTS,
     guidance: GUIDANCE,
-    fallback: ONE_RECOVERY_FALLBACK,
     scanSecrets: true,
     ...(input.locale ? { locale: input.locale } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
   });
 
+  if (verdict.verdict === null) {
+    return {
+      decision: { retry: false, reason: "undecided" },
+      fingerprint,
+      diagnosis: "",
+      decidedBy: "unavailable",
+    };
+  }
   return {
     decision: oneAutoRecoveryFromLabel(verdict.verdict, input.attemptsSpent),
     fingerprint,
-    diagnosis: verdict.reason || input.receipt.errorMessage || "",
+    diagnosis: verdict.reason,
     decidedBy: verdict.source,
   };
 }

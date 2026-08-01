@@ -170,6 +170,32 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
   return null;
 }
 
+/**
+ * Exact DB-independent runner for One's recovery plane. It never selects a
+ * different runtime and never acquires a DB-backed concurrency slot. This path
+ * is only for tool-free judgment while the operational store is unavailable.
+ */
+export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { source?: string }): {
+  runner: Runner;
+  label: string;
+} | null {
+  if (selection.kind === "claude-code") return { runner: runClaudeCode, label: RUNNER_LABEL["claude-code"] };
+  if (selection.kind === "codex") return { runner: runCodex, label: RUNNER_LABEL.codex };
+  if (selection.kind === "gemini") {
+    return {
+      runner: runGemini,
+      label: isAgyBinaryPath(selection.source ?? "") ? "Antigravity CLI" : RUNNER_LABEL.gemini,
+    };
+  }
+  if (selection.kind === "kimi") return { runner: runKimi, label: RUNNER_LABEL.kimi };
+  if (selection.kind === "grok") return { runner: runGrok, label: RUNNER_LABEL.grok };
+  if (selection.kind === "cursor") return { runner: runCursor, label: RUNNER_LABEL.cursor };
+  if (selection.kind === "ollama") return { runner: runOllama, label: "Ollama" };
+  if (selection.kind === "lmstudio") return { runner: runLMStudio, label: "LM Studio" };
+  if (selection.kind === "mlx") return { runner: runMLX, label: "MLX" };
+  return null;
+}
+
 function applyRoleSelection(runtime: RuntimeStatus, role: RuntimeRole): RuntimeStatus {
   const selection = runtime.roleSelections?.[role];
   if (!selection) return { ...runtime, active: true };

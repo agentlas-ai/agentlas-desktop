@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isSafeOneMemoryText, type OneMemoryProposalBasis } from "../../shared/one-memory";
-import { judgeBoolean, peekJudgment } from "../system-agents/judgment";
+import { judgeRequired, peekJudgment } from "../system-agents/judgment";
 
 export interface ExplicitOneMemoryIntent {
   normalizedPreview: string;
@@ -102,23 +102,17 @@ export async function prejudgeOneMemoryIntent(
   if (request.oneMode !== true) return;
   const prompt = typeof request.userPrompt === "string" ? request.userPrompt.trim() : "";
   if (prompt.length < 4 || prompt.length > 2_000 || CONTROL_RE.test(prompt)) return;
-  const lexical = Boolean(
-    KOREAN_PREFIX_RE.exec(prompt) ?? ENGLISH_PREFIX_RE.exec(prompt) ?? KOREAN_SUFFIX_RE.exec(prompt),
-  );
   try {
-    await judgeBoolean({
+    await judgeRequired<"yes" | "no">({
       kind: ONE_MEMORY_INTENT_JUDGMENT_KIND,
       question: ONE_MEMORY_INTENT_QUESTION,
+      labels: ["yes", "no"] as const,
       input: memoryIntentJudgmentInput(prompt),
-      guidance:
-        `A deterministic pre-pass ${lexical ? "matched" : "did not match"} the remember-instruction wordlists. ` +
-        "Treat that as a prior, not a fact. " + ONE_MEMORY_INTENT_GUIDANCE,
-      hints: "words that may hint an explicit remember instruction: 기억해, 기억해줘, 앞으로는, 다음부터는, remember that, from now on, going forward",
-      fallback: lexical,
+      guidance: ONE_MEMORY_INTENT_GUIDANCE,
       signal: opts.signal,
       timeoutMs: opts.timeoutMs,
     });
   } catch {
-    // Best-effort warm; the sync site keeps the deterministic fallback.
+    // Best-effort warm; the sync site remains undecided.
   }
 }

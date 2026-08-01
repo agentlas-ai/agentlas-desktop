@@ -414,7 +414,6 @@ function projectsDto(): MobileBridgeProjectDto[] {
     id: project.id,
     name: displayText(project.name, 512),
     description: optionalDisplayText(project.description, 2_048),
-    defaultAgentId: project.agentPool[0]?.agentId ?? null,
     controllerAgentId: project.agentPool[0]?.agentId ?? null,
     controllerName: optionalDisplayText(project.agentPool[0]?.nameSnapshot ?? null, 512),
     agentCount: project.agentPool.length,
@@ -454,13 +453,6 @@ export function projectMobileBridgeChat(
     continuousMode: chat.continuousMode,
     swarmMode: chat.swarmMode,
     active,
-    hiredAgents: chat.hiredAgents.map((agent) => ({
-      slug: agent.slug,
-      name: optionalDisplayText(agent.name, 512),
-      source: agent.source ?? null,
-      routeLabel: optionalDisplayText(agent.routeLabel, 1_024),
-      hiredAt: agent.hiredAt,
-    })),
   };
 }
 

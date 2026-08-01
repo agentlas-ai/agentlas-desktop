@@ -283,7 +283,7 @@ function projectOutcome(
     const evidence = exactEvidence(item.evidenceRefs, trusted);
     if (!evidence) return [];
     // The judged verdict (warmed on the async snapshot path) decides; a cache
-    // miss keeps the deterministic regex verdict as the labeled fallback.
+    // miss fails closed and requires evidence; no regex verdict is accepted.
     if (oneValueClosureContainsCompletionClaim(item.statement, judgedCompletionClaim) && !evidence.some((entry) =>
       entry.kind === "execution_receipt" || entry.kind === "outcome_verification",
     )) return [];

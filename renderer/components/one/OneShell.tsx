@@ -2798,12 +2798,6 @@ export function OneShell() {
               </div>
             ) : (
               <div className={styles.threadContent}>
-                {selected?.chat?.hiredAgents?.length ? (
-                  <aside className={styles.prepared} aria-label={tFor(appLocale, "one.shell.thread.experts_aria")}>
-                    <span>{tFor(appLocale, "one.shell.thread.team_for_work")}</span>
-                    {selected.chat.hiredAgents.map((item) => <strong key={item.slug}>{item.name || item.slug}</strong>)}
-                  </aside>
-                ) : null}
                 <section className={styles.messages} aria-label={selected ? tFor(appLocale, "one.shell.thread.work_conversation_aria") : tFor(appLocale, "one.shell.thread.general_conversation_aria")} aria-live="polite">
                   {messages.map((message) => {
                     // Once a structured result exists, it replaces the final

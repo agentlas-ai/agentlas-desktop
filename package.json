@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.9.41",
+  "version": "0.9.42",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -15,7 +15,7 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 85,
+    "targetSchemaVersion": 86,
     "bundledRuntimeVersion": "1.1.92"
   },
   "agentlasBundledRuntimeSource": {
@@ -106,7 +106,6 @@
     "test:v52-automation-run-recovery": "npm run build:electron && electron scripts/test-v52-automation-run-recovery.cjs",
     "test:v53-hub-bookmark-sync": "npm run build:electron && electron scripts/test-v53-hub-bookmark-sync.cjs",
     "test:quest-signedout-cta": "node scripts/test-quest-signedout-cta.cjs",
-    "test:hired-agents": "npm run build:electron && electron scripts/test-hired-agents.cjs",
     "test:curator-nest-wiring": "npm run build:electron && electron scripts/test-curator-nest-wiring.cjs",
     "test:curator-nest-core-query": "npm run build:electron && electron scripts/test-curator-nest-core-query.cjs",
     "test:borrowed-agent-careers-v77": "npm run build:electron && electron scripts/test-borrowed-agent-careers-v77.cjs",

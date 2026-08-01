@@ -1292,9 +1292,6 @@ export interface Chat {
   /** 어느 표면이 시작한 대화인지 — 'one'(초개인화 One 홈) | 'work'(전역 Work).
    *  One 홈과 Work 사이드바는 이 값으로 서로를 오염하지 않는다. 구버전 row는 'work'. */
   originSurface?: "one" | "work";
-  /** 이 채팅에 고용(빌림)된 허브 에이전트 카드 — 메타데이터만(패키지 내용 없음, 복사 방지).
-   *  있으면 매 send에 borrowAgents로 자동 재주입된다. 해고(clear) 전까지 유지. */
-  hiredAgents: HiredAgentCard[];
   /** Exact chat-scoped orchestrator pin. null means follow the role default. */
   runtimeSelection?: RuntimeSelection | null;
 }
@@ -1350,32 +1347,6 @@ export interface CanonicalTaskResultContinuation {
   taskId: string;
   expectedVersion: number;
   userPrompt: string;
-}
-
-/** 고용(빌림) 카드 — 허브 에이전트의 로컬 표시용 메타데이터. 시스템 프롬프트/플레이북 등
- *  패키지 내용은 절대 담지 않는다(렌트 경제의 복사 방지 설계). 과금 권위는 허브 서버의
- *  24h 리스이며, 이 카드는 채팅 바인딩과 UI 표시만 담당한다. */
-export interface HiredAgentCard {
-  slug: string;
-  name?: string;
-  source?: "hub" | "installed" | "firm-node";
-  routeLabel?: string;
-  hiredAt: string;
-}
-
-/** 사이드바 "고용 중" 로스터 항목 — 리스 표시 캐시 + 기억 둥지 스캔의 합. 읽기 전용. */
-export interface HiredRosterItem {
-  slug: string;
-  /** 라우팅 카드에서 찾은 표시 이름 (없으면 UI가 slug을 보여준다) */
-  name?: string;
-  nameKo?: string;
-  /** 활성 리스 만료 시각 — 없거나 지났으면 "만료됨(재고용 시 기억 그대로)" 카드 */
-  leasedUntil?: string;
-  leaseActive: boolean;
-  /** 기억 둥지 존재 여부 — 재고용 시 이어서 일할 수 있다는 표시 */
-  hasMemory: boolean;
-  /** 마지막으로 같이 일한 시각 (invocation-ledger.jsonl mtime) */
-  lastWorkedAt?: string;
 }
 
 /** 에이전트 동시 실행 수(스웜 크기) — 사양 기반 추천 + 사용자 슬라이더값. */
@@ -4979,8 +4950,8 @@ export interface OneAutoRecoveryJudgement {
   fingerprint: string;
   /** Plain-language account of what blocked the run. */
   diagnosis: string;
-  /** "form" = decided from recorded enums alone; "fallback" = no model reachable. */
-  decidedBy: "form" | "llm" | "fallback";
+  /** "unavailable" means no model verdict exists; no semantic fallback ran. */
+  decidedBy: "form" | "llm" | "unavailable";
 }
 
 export type AgentEvolutionProposalStatus =
@@ -5803,8 +5774,6 @@ export interface AgentlasIpc {
       originSurface?: "one" | "work";
     }) => Promise<Chat>;
     rename: (id: string, title: string) => Promise<Chat>;
-    /** 채팅의 에이전트 변경. firm 채팅이면 firm 해제 후 개별 에이전트 모드로 전환 */
-    switchAgent: (id: string, agentId: string) => Promise<Chat>;
     /** 보관 — 사이드바에서 숨김. 채팅·메시지는 그대로 유지 */
     archive: (id: string) => Promise<Chat>;
     /** 보관 해제 — 다시 사이드바에 등장 */
@@ -5821,8 +5790,6 @@ export interface AgentlasIpc {
       id: string,
       selection: RuntimeSelection | null,
     ) => Promise<Chat>;
-    /** 고용(빌림) 카드 채팅 바인딩 — 빈 배열이면 해고. 매 send에 자동 재주입되는 원본. */
-    setHiredAgents: (id: string, cards: HiredAgentCard[]) => Promise<Chat>;
     /** 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(없으면 null). */
     recap: (id: string) => Promise<{ summary: string; count: number; sinceIso: string } | null>;
     /** 이 채팅을 방금 봤다고 기록(recap 기준점 갱신). */
@@ -6012,9 +5979,6 @@ export interface AgentlasIpc {
     failStart: (ref: OneTeamPreflightRef) => Promise<OneTeamPreflightProposal | null>;
   };
   /** 고용(빌림) 로스터 — 사이드바 "고용 중" 섹션. 리스 캐시+기억 둥지 기반 읽기 전용. */
-  hired: {
-    list: () => Promise<HiredRosterItem[]>;
-  };
   /** 시스템/하드웨어 설정 — 에이전트 동시성(스웜 크기) 슬라이더 등. */
   system: {
     concurrencyInfo: () => Promise<AgentConcurrencyInfo>;

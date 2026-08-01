@@ -15,7 +15,7 @@ import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 85;
+const SCHEMA_VERSION = 86;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -884,6 +884,7 @@ export function runPostContinuityStoreRepairs(): void {
 
 export function initStore(options: StoreInitOptions = {}): void {
   if (_db) return;
+  try {
   const dbPath = process.env.AGENTLAS_STORE_PATH || path.join(app.getPath("userData"), "agentlas.sqlite");
   preparePrivateStorePath(dbPath);
   _db = new Database(dbPath);
@@ -3783,7 +3784,23 @@ export function initStore(options: StoreInitOptions = {}): void {
     }
   }
 
+  // v86: persistent chat-hired teams are retired. One remains the sole One
+  // controller and Work uses the project's ordered agent pool; additional
+  // agents are expressed only by the current turn's structured WorkOrder.
+  if (userVersion < 86 && tableExists(_db, "chats")) {
+    const columns = schemaColumns(_db, "chats");
+    if (columns.some((column) => column.name === "hired_agents")) {
+      _db.exec("UPDATE chats SET hired_agents = NULL WHERE hired_agents IS NOT NULL");
+    }
+  }
+
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  } catch (error) {
+    try { _db?.close(); } catch {}
+    _db = null;
+    _postContinuityRepairsDeferred = false;
+    throw error;
+  }
 }
 
 /**
