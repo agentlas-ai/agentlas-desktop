@@ -22,9 +22,8 @@ import {
   pinLegacyAutomationHubVersions,
 } from "./store/automations";
 import { checkComputerUsePermissions } from "./mac-permissions";
-import { appendChatMessage, listChatMessages } from "./store/chats";
+import { listChatMessages } from "./store/chats";
 import { getOrCreateAutomationSession } from "./store/automation-sessions";
-import { runRuntimeDoctor, type DoctorReport } from "./system-agents/runtime-doctor";
 import { buildSystemOptimizerPrompt } from "./system-agents/system-optimizer";
 import { runMcpInvocation } from "./mcp/client";
 import { runGraph } from "./workflow/run-graph";
@@ -33,10 +32,7 @@ import { isStormbreakerLongRunPrompt } from "./hephaestus/loop-engineering";
 import { emitAutomationDone } from "./triggers/chain-bus";
 import {
   classifyAutomationFailure,
-  classifyAutomationOutput,
   classifyAutomationOutcome,
-  customerSafeAutomationDetail,
-  isOwnerRestrictedRefusal,
   type AutomationResultStatus,
 } from "./automation-result";
 import {
@@ -286,12 +282,6 @@ function schedulerExecutionPermission(a: Automation): "read" | "write" {
 
 /** 실패 원인을 표출하고 아는 원인은 수리한다. 반복 실패도 자동화를 끄지는 않는다. */
 function handleAutomationFailure(a: Automation, error: string): void {
-  let doctor: DoctorReport | null = null;
-  try {
-    doctor = runRuntimeDoctor(error);
-  } catch (err) {
-    console.error("[automation] runtime doctor failed:", err);
-  }
   let streak = 1;
   try {
     streak = Math.max(1, countConsecutiveFailures(a.id));
@@ -299,25 +289,13 @@ function handleAutomationFailure(a: Automation, error: string): void {
     /* run_history 조회 실패는 스트릭 1로 취급 */
   }
 
-  const lines: string[] = [`⚠️ Automation failed (연속 ${streak}회): ${error.slice(0, 400)}`];
-  if (doctor?.summary) lines.push(`🩺 Runtime Doctor: ${doctor.summary}`);
-  for (const act of doctor?.actions ?? []) lines.push(`🔧 ${act.title} — ${act.detail}`);
-
-  if (doctor?.repaired) {
-    lines.push("✅ 시스템 원인을 자동 수리했습니다. 다음 예약에 자동으로 재시도합니다.");
-  } else {
-    lines.push("🔁 자동화는 켜진 상태로 유지됩니다. 다음 예약에서 다시 시도합니다.");
-  }
-
   try {
     const chat = getOrCreateAutomationSession(automationSessionInput(a));
-    appendChatMessage(chat.chat.id, "system", lines.join("\n"));
-
-    // 결정론 수리가 못 잡은 반복 실패 → System Optimizer 원샷 진단(같은 챗에 기록됨).
+    // Operational evidence never becomes chat copy. The controller receives it
+    // privately and authors the recovery action/result in the automation's own
+    // session. No error dictionary or deterministic doctor chooses the route.
     const lastAt = lastOptimizerRunAt.get(a.id) ?? 0;
     if (
-      !doctor?.repaired &&
-      streak >= 2 &&
       !optimizerControllers.has(a.id) &&
       Date.now() - lastAt >= OPTIMIZER_MIN_INTERVAL_MS
     ) {
@@ -327,7 +305,7 @@ function handleAutomationFailure(a: Automation, error: string): void {
       const prompt = buildSystemOptimizerPrompt({
         automationName: a.name,
         errorMessage: error,
-        doctorSummary: doctor?.summary,
+        doctorSummary: undefined,
         consecutiveFailures: streak,
       });
       const runId = `doctor-${a.id}-${Date.now()}`;
@@ -343,7 +321,7 @@ function handleAutomationFailure(a: Automation, error: string): void {
         runId,
         kind: "system_optimizer_started",
         automationId: a.id,
-        payload: { streak, paused: false, doctorKind: doctor?.kind ?? "unknown" },
+        payload: { streak, paused: false },
       });
       let removeAbortListener = () => {};
       const abortGate = new Promise<never>((_resolve, reject) => {
@@ -380,11 +358,6 @@ function handleAutomationFailure(a: Automation, error: string): void {
       void Promise.race([optimizerRun, abortGate])
         .catch((err) => {
           console.error("[automation] system optimizer run failed:", err);
-          try {
-            appendChatMessage(chat.chat.id, "system", `⚠️ System Optimizer 진단 런 자체가 실패했습니다: ${err instanceof Error ? err.message : String(err)}`);
-          } catch {
-            /* best-effort */
-          }
         })
         .finally(() => {
           clearTimeout(optimizerTimer);
@@ -398,35 +371,6 @@ function handleAutomationFailure(a: Automation, error: string): void {
     console.error("[automation] failure feedback failed:", err);
   }
 
-}
-
-function recordAutomationAttention(
-  a: Automation,
-  status: Extract<AutomationResultStatus, "partial" | "blocked" | "needs_input">,
-  detail: string,
-): void {
-  try {
-    const persisted = getAutomation(a.id);
-    const chat = getOrCreateAutomationSession(automationSessionInput(a));
-    const headline = status === "partial"
-      ? "⚠️ 자동화가 일부만 완료됐어요"
-      : status === "needs_input"
-        ? "👤 자동화에 확인이 필요해요"
-        : "⏸️ 자동화를 잠시 멈췄어요";
-    appendChatMessage(
-      chat.chat.id,
-      "system",
-      `${headline}: ${customerSafeAutomationDetail(status, detail)}\n${persisted?.enabled
-        ? requiresGraphReconciliation(detail)
-          ? "⏸️ 자동화는 켜 둔 채 자동 재실행을 멈췄습니다. 실제 외부 상태를 확인해 완료 또는 재시도를 확정하면 이 occurrence만 안전하게 이어갑니다."
-          : isOwnerRestrictedRefusal(detail)
-            ? "⏸️ 자동화는 켜 두었지만, 소유자 전용 제한은 자동 재시도로 풀리지 않아요. 자동화 대상을 바꾸거나 소유자 계정으로 전환해야 이어집니다."
-            : `🔁 오류 때문에 자동화를 끄지 않았습니다.${persisted.nextRunAt ? ` 다음 재시도: ${persisted.nextRunAt}` : ""}`
-        : "⏹️ 명시한 종료 시각 또는 완료 횟수 정책에 따라 예약이 종료됐습니다."}`,
-    );
-  } catch (error) {
-    console.error("[automation] attention message failed:", error);
-  }
 }
 
 function requiresGraphReconciliation(detail: string | null | undefined): boolean {
@@ -688,7 +632,7 @@ async function runOne(
           ? `[${classified.reasonCode}] ${classified.reason}`
           : classified.reason;
       } else {
-        const classified = classifyAutomationFailure(graphError);
+        const classified = await classifyAutomationFailure(graphError);
         runStatus = outVals.length > 0 ? "partial" : classified.status;
         runError = classified.reasonCode
           ? `[${classified.reasonCode}] ${classified.reason ?? graphError ?? "automation failed"}`
@@ -856,7 +800,7 @@ async function runOne(
     }
   } catch (err) {
     const rawError = err instanceof Error ? err.message : String(err);
-    const classified = classifyAutomationFailure(rawError);
+    const classified = await classifyAutomationFailure(rawError);
     runStatus = classified.status;
     runError = classified.reasonCode
       ? `[${classified.reasonCode}] ${classified.reason ?? rawError}`
@@ -939,18 +883,12 @@ async function runOne(
     }
     // 실패 피드백·수리 — run_history 기록(markAutomationRun) 이후에 호출해야
     // countConsecutiveFailures가 이번 실패를 포함한다.
-    if (runStatus === "error" && !parentMissing && !leaseOwnershipLost) {
+    if (runStatus !== "ok" && runStatus !== "skipped" && !parentMissing && !leaseOwnershipLost) {
       try {
         handleAutomationFailure(a, runError ?? "unknown error");
       } catch (err) {
         console.error("[automation] handleAutomationFailure failed:", err);
       }
-    } else if (
-      (runStatus === "partial" || runStatus === "blocked" || runStatus === "needs_input") &&
-      !parentMissing &&
-      !leaseOwnershipLost
-    ) {
-      recordAutomationAttention(a, runStatus, runError ?? runStatus);
     }
     if (!parentMissing && !leaseOwnershipLost && opts?.triggerDelivery) {
       try {

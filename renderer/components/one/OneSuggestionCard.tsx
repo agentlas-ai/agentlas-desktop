@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { tFor, type Locale } from "@/lib/i18n";
 import type {
   OneEcosystemSuggestion,
@@ -114,7 +115,10 @@ export function OneSuggestionCard({
   const continueReview = async () => {
     const api = ipc();
     if (!api || !review || busy) {
-      if (!api) setError(tFor(locale, "one.sug.err.store"));
+      if (!api) {
+        requestOneOperationalRecovery("one-suggestion-review", new Error("Desktop bridge unavailable"));
+        setError(null);
+      }
       return;
     }
     setBusy(true);
@@ -141,7 +145,8 @@ export function OneSuggestionCard({
     } catch (cause) {
       const latest = await api.oneSuggestions.getState().catch(() => null);
       if (latest) onStateChange(latest);
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-suggestion-review", cause);
+      setError(null);
     } finally {
       setBusy(false);
     }
@@ -150,7 +155,8 @@ export function OneSuggestionCard({
   const mutate = async (operation: () => Promise<unknown>, success: string) => {
     const api = ipc();
     if (!api) {
-      setError(tFor(locale, "one.sug.err.store"));
+      requestOneOperationalRecovery("one-suggestion-action", new Error("Desktop bridge unavailable"));
+      setError(null);
       return;
     }
     setBusy(true);
@@ -163,7 +169,8 @@ export function OneSuggestionCard({
     } catch (cause) {
       const latest = await api.oneSuggestions.getState().catch(() => null);
       if (latest) onStateChange(latest);
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-suggestion-action", cause);
+      setError(null);
     } finally {
       setBusy(false);
     }

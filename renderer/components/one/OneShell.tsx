@@ -72,13 +72,8 @@ import type {
   OneSurfaceSemanticAction,
 } from "@shared/one-surface";
 import { customerSafeProgressDetail, toCustomerSafeText } from "@shared/one-customer-safe";
-import { judgmentUnavailableMessage } from "@shared/judgment-fallback";
 import { classifyOneRequestIntent } from "@shared/one-request-intent";
-import {
-  classifyOneRuntimeFailure,
-  type OneRuntimeRecoveryCode,
-} from "@shared/one-runtime-recovery";
-import { ONE_AUTO_RECOVERY_MAX_ATTEMPTS } from "@shared/one-auto-recovery";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { useJudgedOneDecision } from "@/lib/one-decision-judged";
 import type { OneRecurrenceSelectionV1 } from "@shared/one-recurrence";
 import { shouldPresentOneWeeklyReflection } from "@shared/one-weekly-reflection";
@@ -168,12 +163,6 @@ type DisplayBriefing = ReturnType<typeof chooseOneBriefing> & {
 type ArmedOneMemoryUseOnce = {
   receipt: OneMemoryUseOnceReceipt;
   targetKey: string;
-};
-
-type OneRuntimeRecoveryState = {
-  code: OneRuntimeRecoveryCode;
-  chatId: string;
-  taskId: string | null;
 };
 
 type PendingTeamPrompt = {
@@ -420,112 +409,6 @@ function briefingSourceName(raw: string, locale: "ko" | "en"): string {
   return cleaned.length > 44 ? `${cleaned.slice(0, 43).trimEnd()}…` : cleaned;
 }
 
-function proactiveBriefingView(candidate: OneProactiveBriefing, locale: "ko" | "en"): DisplayBriefing {
-  const ko = locale === "ko";
-  const source = briefingSourceName(candidate.source.label, locale);
-  const copyKeys = {
-    project_folder_missing: {
-      eyebrow: "one.shell.proactive.project_folder_missing.eyebrow",
-      title: "one.shell.proactive.project_folder_missing.title",
-      body: "one.shell.proactive.project_folder_missing.body",
-      prepared: "one.shell.proactive.project_folder_missing.prepared",
-    },
-    project_folder_unreadable: {
-      eyebrow: "one.shell.proactive.project_folder_unreadable.eyebrow",
-      title: "one.shell.proactive.project_folder_unreadable.title",
-      body: "one.shell.proactive.project_folder_unreadable.body",
-      prepared: "one.shell.proactive.project_folder_unreadable.prepared",
-    },
-    project_folder_not_directory: {
-      eyebrow: "one.shell.proactive.project_folder_not_directory.eyebrow",
-      title: "one.shell.proactive.project_folder_not_directory.title",
-      body: "one.shell.proactive.project_folder_not_directory.body",
-      prepared: "one.shell.proactive.project_folder_not_directory.prepared",
-    },
-    project_deadline_conflict: {
-      eyebrow: "one.shell.proactive.project_deadline_conflict.eyebrow",
-      title: "one.shell.proactive.project_deadline_conflict.title",
-      body: "one.shell.proactive.project_deadline_conflict.body",
-      prepared: "one.shell.proactive.project_deadline_conflict.prepared",
-    },
-    automation_error: {
-      eyebrow: "one.shell.proactive.automation_error.eyebrow",
-      title: "one.shell.proactive.automation_error.title",
-      body: "one.shell.proactive.automation_error.body",
-      prepared: "one.shell.proactive.automation_error.prepared",
-    },
-    automation_blocked: {
-      eyebrow: "one.shell.proactive.automation_blocked.eyebrow",
-      title: "one.shell.proactive.automation_blocked.title",
-      body: "one.shell.proactive.automation_blocked.body",
-      prepared: "one.shell.proactive.automation_blocked.prepared",
-    },
-    automation_needs_input: {
-      eyebrow: "one.shell.proactive.automation_needs_input.eyebrow",
-      title: "one.shell.proactive.automation_needs_input.title",
-      body: "one.shell.proactive.automation_needs_input.body",
-      prepared: "one.shell.proactive.automation_needs_input.prepared",
-    },
-    automation_partial: {
-      eyebrow: "one.shell.proactive.automation_partial.eyebrow",
-      title: "one.shell.proactive.automation_partial.title",
-      body: "one.shell.proactive.automation_partial.body",
-      prepared: "one.shell.proactive.automation_partial.prepared",
-    },
-    task_waiting_decision_stale: {
-      eyebrow: "one.shell.proactive.task_waiting_decision_stale.eyebrow",
-      title: "one.shell.proactive.task_waiting_decision_stale.title",
-      body: "one.shell.proactive.task_waiting_decision_stale.body",
-      prepared: "one.shell.proactive.task_waiting_decision_stale.prepared",
-    },
-    task_running_without_active_run: {
-      eyebrow: "one.shell.proactive.task_running_without_active_run.eyebrow",
-      title: "one.shell.proactive.task_running_without_active_run.title",
-      body: "one.shell.proactive.task_running_without_active_run.body",
-      prepared: "one.shell.proactive.task_running_without_active_run.prepared",
-    },
-    task_failed_repeated: {
-      eyebrow: "one.shell.proactive.task_failed_repeated.eyebrow",
-      title: "one.shell.proactive.task_failed_repeated.title",
-      body: "one.shell.proactive.task_failed_repeated.body",
-      prepared: "one.shell.proactive.task_failed_repeated.prepared",
-    },
-    task_failed_abandoned: {
-      eyebrow: "one.shell.proactive.task_failed_abandoned.eyebrow",
-      title: "one.shell.proactive.task_failed_abandoned.title",
-      body: "one.shell.proactive.task_failed_abandoned.body",
-      prepared: "one.shell.proactive.task_failed_abandoned.prepared",
-    },
-    task_partial_abandoned: {
-      eyebrow: "one.shell.proactive.task_partial_abandoned.eyebrow",
-      title: "one.shell.proactive.task_partial_abandoned.title",
-      body: "one.shell.proactive.task_partial_abandoned.body",
-      prepared: "one.shell.proactive.task_partial_abandoned.prepared",
-    },
-  } as const;
-  const selected = copyKeys[candidate.reasonCode];
-  const evidence = [
-    `${tFor(locale, "one.shell.proactive.evidence.source")}: ${source}`,
-    `${tFor(locale, "one.shell.proactive.evidence.observed")}: ${formatTimestamp(candidate.detectedAt, locale)}`,
-    `${tFor(locale, "one.shell.proactive.evidence.confidence")}: ${candidate.confidence.level === "high" ? tFor(locale, "one.shell.proactive.confidence.high") : candidate.confidence.level === "medium" ? tFor(locale, "one.shell.proactive.confidence.medium") : tFor(locale, "one.shell.proactive.confidence.low")}`,
-    `${tFor(locale, "one.shell.proactive.evidence.scope")}: ${candidate.reasonCode === "project_deadline_conflict" ? tFor(locale, "one.shell.proactive.scope.deadline") : candidate.source.kind === "project_folder" ? tFor(locale, "one.shell.proactive.scope.project_folder") : candidate.source.kind === "automation_run" ? tFor(locale, "one.shell.proactive.scope.automation_run") : tFor(locale, "one.shell.proactive.scope.default")}`,
-  ];
-  return {
-    kind: candidate.reasonCode === "automation_needs_input" ? "decision" : "failed",
-    eyebrow: tFor(locale, selected.eyebrow),
-    title: tFor(locale, selected.title, { name: source }),
-    body: tFor(locale, selected.body),
-    prepared: tFor(locale, selected.prepared),
-    evidence,
-    primaryLabel: candidate.preparedAction.kind === "open_project"
-      ? tFor(locale, "one.shell.proactive.action.open_project")
-      : candidate.preparedAction.kind === "open_automation"
-        ? tFor(locale, "one.shell.proactive.action.open_automation")
-        : tFor(locale, "one.shell.proactive.action.open_task"),
-    proactive: candidate,
-  };
-}
-
 function safeBriefingSnapshot(value: OneBriefingSnapshot | null): OneBriefingSnapshot | null {
   if (!value || value.contractVersion !== ONE_BRIEFING_CONTRACT_VERSION) return null;
   if (!Number.isFinite(Date.parse(value.evaluatedAt))) return null;
@@ -628,14 +511,13 @@ export function OneShell() {
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [runtimeRecovery, setRuntimeRecovery] = useState<OneRuntimeRecoveryState | null>(null);
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchHits, setSearchHits] = useState<OneSearchHitV1[]>([]);
   const [searchNextCursor, setSearchNextCursor] = useState<string | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchLoadingMore, setSearchLoadingMore] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchFailed, setSearchFailed] = useState(false);
   const [searchIncludeArchived, setSearchIncludeArchived] = useState(true);
   const [archiveMutationTaskId, setArchiveMutationTaskId] = useState<string | null>(null);
   const [railOpen, setRailOpen] = useState(false);
@@ -786,7 +668,10 @@ export function OneShell() {
     if (focusable.length === 0) return;
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
+    if (document.activeElement === root) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
       event.preventDefault();
       last.focus();
     } else if (!event.shiftKey && document.activeElement === last) {
@@ -803,11 +688,15 @@ export function OneShell() {
   }) => {
     const api = ipc();
     const value = input.query.replace(/\s+/g, " ").trim();
-    if (!api?.oneSearch || !value) return;
+    if (!value) return;
+    if (!api?.oneSearch) {
+      requestOneOperationalRecovery("one-search", new Error("Desktop bridge unavailable"));
+      return;
+    }
     const requestId = ++searchRequestRef.current;
     if (input.append) setSearchLoadingMore(true);
     else setSearchLoading(true);
-    setSearchError(null);
+    setSearchFailed(false);
     try {
       const page = await api.oneSearch.search({
         contractVersion: ONE_SEARCH_CONTRACT_VERSION,
@@ -825,7 +714,8 @@ export function OneShell() {
         setSearchHits([]);
         setSearchNextCursor(null);
       }
-      setSearchError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-search", cause);
+      setSearchFailed(true);
     } finally {
       if (requestId === searchRequestRef.current) {
         setSearchLoading(false);
@@ -846,7 +736,7 @@ export function OneShell() {
       searchRequestRef.current += 1;
       setSearchHits([]);
       setSearchNextCursor(null);
-      setSearchError(null);
+      setSearchFailed(false);
       setSearchLoading(false);
       setSearchLoadingMore(false);
       return;
@@ -861,6 +751,7 @@ export function OneShell() {
   const refreshAll = useCallback(async () => {
     const api = ipc();
     if (!api) {
+      requestOneOperationalRecovery("one-refresh", new Error("Desktop bridge unavailable"));
       setLoaded(true);
       setProjections([]);
       setConversations([]);
@@ -987,7 +878,8 @@ export function OneShell() {
       }
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-load", cause);
+      setError(null);
     } finally {
       setLoaded(true);
     }
@@ -1012,7 +904,10 @@ export function OneShell() {
 
   const reconcileConversationTask = useCallback(async (chatId: string) => {
     const api = ipc();
-    if (!api) return null;
+    if (!api) {
+      requestOneOperationalRecovery("one-task-reconcile", new Error("Desktop bridge unavailable"));
+      return null;
+    }
     const task = await api.tasks.findForChat(chatId).catch(() => null);
     if (!task) return null;
     runTaskIdRef.current = task.id;
@@ -1025,7 +920,10 @@ export function OneShell() {
 
   const settleRun = useCallback(async (chatId: string, taskId: string | null) => {
     const api = ipc();
-    if (!api) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-run-settle", new Error("Desktop bridge unavailable"));
+      return;
+    }
     const promotedTask = taskId ? await api.tasks.get(taskId).catch(() => null) : await reconcileConversationTask(chatId);
     const pending = await api.confirm.listPending().catch(() => []);
     setConfirmations(pending);
@@ -1066,7 +964,6 @@ export function OneShell() {
       const text = event.text ?? streamTextRef.current;
       setMessages((current) => upsertLiveMessage(current, text, false));
       setBusy(false);
-      setRuntimeRecovery(null);
       setRunStatus("");
       runIdRef.current = null;
       streamTextRef.current = "";
@@ -1077,28 +974,11 @@ export function OneShell() {
       return;
     }
     if (event.kind === "error") {
-      const recoveryCode = event.error?.code === "one-runtime-auth-required"
-        || event.error?.code === "one-runtime-unavailable"
-        ? event.error.code
-        : classifyOneRuntimeFailure(event.error?.message ?? "");
-      if (recoveryCode) {
-        setRuntimeRecovery({ code: recoveryCode, chatId, taskId });
-        setBusy(false);
-        setRunStatus("");
-        setError(null);
-        runIdRef.current = null;
-        streamTextRef.current = "";
-        unsubscribeRunRef.current?.();
-        unsubscribeRunRef.current = null;
-        void settleRun(chatId, taskId);
-        return;
-      }
-      const message = toCustomerSafeText(event.error?.message ?? "", appLocale)
-        || tFor(appLocale, "one.shell.run.stopped_before_completion");
-      setMessages((current) => [...current.filter((item) => item.id !== "one-live-response"), { id: uid(), role: "system", text: message }]);
+      // Failure evidence is persisted by Main and consumed by One's recovery
+      // judgment. It never becomes transcript copy in the renderer.
       setBusy(false);
       setRunStatus("");
-      setError(message);
+      setError(null);
       runIdRef.current = null;
       streamTextRef.current = "";
       unsubscribeRunRef.current?.();
@@ -1138,7 +1018,10 @@ export function OneShell() {
       return;
     }
     const api = ipc();
-    if (!api) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-thread-load", new Error("Desktop bridge unavailable"));
+      return;
+    }
     const chatId = activeThreadChatId;
     const taskId = selected?.taskId ?? null;
     runChatIdRef.current = chatId;
@@ -1176,7 +1059,10 @@ export function OneShell() {
         for (const event of attachment.events) consumeRunEventRef.current(event);
       }
     }).catch((cause) => {
-      if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+      if (!cancelled) {
+        requestOneOperationalRecovery("one-refresh", cause);
+        setError(null);
+      }
     });
     return () => {
       cancelled = true;
@@ -1241,13 +1127,12 @@ export function OneShell() {
             : [{ id: `team-request:${proposal.proposalId}`, role: "user", text: visiblePrompt }]);
         }
       })
-      .catch(() => {
+      .catch((cause) => {
         if (!cancelled) {
           setTeamPreflight(null);
           setPendingTeamPrompt(null);
-          setError(appLocale === "ko"
-            ? "이 작업의 팀 준비 상태를 확인할 수 없어 실행을 멈췄어요. 다른 작업은 안전하며, 이 작업은 새 대화로 다시 시작해 주세요."
-            : "One could not verify this work's team preparation, so execution is paused. Other work is safe; start this work again in a new conversation.");
+          setError(null);
+          requestOneOperationalRecovery("one-team-preflight-load", cause);
         }
       });
     return () => { cancelled = true; };
@@ -1334,7 +1219,6 @@ export function OneShell() {
     setBusy(true);
     setSurface(null);
     setError(null);
-    setRuntimeRecovery(null);
     setRunStatus(taskIntent === "conversation"
       ? tFor(runLocale, "one.shell.run.preparing_response")
       : tFor(runLocale, "one.shell.run.preparing_team"));
@@ -1403,23 +1287,15 @@ export function OneShell() {
       runIdRef.current = null;
       setBusy(false);
       setRunStatus("");
-      const message = cause instanceof Error ? cause.message : String(cause);
-      const recoveryCode = classifyOneRuntimeFailure(cause);
-      if (recoveryCode) {
-        setRuntimeRecovery({ code: recoveryCode, chatId, taskId });
-        setError(null);
-        if (options?.attachments) {
-          await api.oneAttachments.discard({ ref: options.attachments.ref }).catch(() => ({ discarded: false }));
-        }
-        await refreshAll();
-        return;
-      }
-      setMessages((current) => [...current.filter((item) => item.id !== "one-live-response"), { id: uid(), role: "system", text: message }]);
-      setError(message);
+      // Main owns the failed receipt and recovery evidence. Keep the unfinished
+      // run out of the transcript; refreshAll lets the automatic recovery loop
+      // judge and resume it.
+      setError(null);
       if (options?.attachments) {
         await api.oneAttachments.discard({ ref: options.attachments.ref }).catch(() => ({ discarded: false }));
       }
       await refreshAll();
+      requestOneOperationalRecovery("one-run-start", cause);
     } finally {
       if (attachedOneMemoryUseOnce) {
         // One Main consumes on accepted start. A rejected start is also a
@@ -1431,55 +1307,17 @@ export function OneShell() {
     }
   }, [armedOneMemoryUseOnce, normalizedLocale, refreshAll, scrollToLatest, subscribeRun]);
 
-  const openRuntimeRecovery = useCallback(async () => {
-    const api = ipc();
-    if (!api || !runtimeRecovery) return;
-    if (runtimeRecovery.code === "one-runtime-unavailable") {
-      router.push("/settings");
-      return;
-    }
-    const runtimes = await api.runtime.detect(true).catch(() => []);
-    const supported = runtimes.find((runtime) => (
-      runtime.active
-      && ["claude-code", "codex", "gemini", "kimi", "grok"].includes(runtime.kind)
-    ));
-    if (!supported || !["claude-code", "codex", "gemini", "kimi", "grok"].includes(supported.kind)) {
-      router.push("/settings");
-      return;
-    }
-    const result = await api.runtime.openCliLogin(
-      supported.kind as "claude-code" | "codex" | "gemini" | "kimi" | "grok",
-    );
-    if (!result.ok) setError(result.message);
-  }, [router, runtimeRecovery]);
-
-  const resumeAfterRuntimeRecovery = useCallback(async () => {
-    const api = ipc();
-    if (!api || !runtimeRecovery || busy) return;
-    const runtimes = await api.runtime.detect(true).catch(() => []);
-    if (!runtimes.some((runtime) => runtime.active)) {
-      router.push("/settings");
-      return;
-    }
-    const recovery = runtimeRecovery;
-    setRuntimeRecovery(null);
-    await startRun(
-      recovery.chatId,
-      recovery.taskId,
-      recovery.taskId === selected?.taskId ? selected.canonicalVersion : null,
-      tFor(appLocale, "one.shell.system_prompt.runtime_recovered"),
-      recovery.taskId ? "task" : "conversation",
-      { displayUserMessage: false, promptOrigin: "system" },
-    );
-  }, [appLocale, busy, router, runtimeRecovery, selected, startRun]);
-
   const autoStartTeamPreflight = useCallback(async (
     proposal: OneTeamPreflightProposal,
     prompt: PendingTeamPrompt,
     userAlreadyShown: boolean,
   ) => {
     const api = ipc();
-    if (!api || autoResolvingProposalRef.current === proposal.proposalId || runIdRef.current) return;
+    if (autoResolvingProposalRef.current === proposal.proposalId || runIdRef.current) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-team-preflight-start", new Error("Desktop bridge unavailable"));
+      return;
+    }
     autoResolvingProposalRef.current = proposal.proposalId;
     setTeamPreflightBusy(true);
     setError(null);
@@ -1514,10 +1352,11 @@ export function OneShell() {
         },
       );
       setTeamPreflight(await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => result.proposal));
-    } catch {
+    } catch (cause) {
       const current = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => null);
       if (current) setTeamPreflight(current);
-      setError(tFor(detectOneTextLocale(prompt.text) === "ko" ? "ko" : "en", "one.shell.team.start_failed"));
+      setError(null);
+      requestOneOperationalRecovery("one-team-preflight-start", cause);
     } finally {
       if (autoResolvingProposalRef.current === proposal.proposalId) autoResolvingProposalRef.current = null;
       setTeamPreflightBusy(false);
@@ -1538,7 +1377,11 @@ export function OneShell() {
     const api = ipc();
     const proposal = teamPreflight;
     const prompt = pendingTeamPrompt;
-    if (!api || !proposal || !prompt || runIdRef.current) return;
+    if (!proposal || !prompt || runIdRef.current) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-team-preflight-consent", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setTeamPreflightBusy(true);
     setError(null);
     try {
@@ -1573,10 +1416,11 @@ export function OneShell() {
         },
       );
       setTeamPreflight(await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => result.proposal));
-    } catch {
+    } catch (cause) {
       const current = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => null);
       if (current) setTeamPreflight(current);
-      setError(tFor(detectOneTextLocale(prompt.text) === "ko" ? "ko" : "en", "one.shell.team.start_failed"));
+      setError(null);
+      requestOneOperationalRecovery("one-team-preflight-consent", cause);
     } finally {
       setTeamPreflightBusy(false);
     }
@@ -1622,7 +1466,8 @@ export function OneShell() {
         originChatId: chatId,
         confirmedByUser: true,
       });
-    } catch {
+    } catch (cause) {
+      requestOneOperationalRecovery("one-activation-concern", cause);
       const latest = await api.oneActivation.getState({ platform: "desktop", locale: appLocale }).catch(() => null);
       if (!latest) return;
       current = latest;
@@ -1631,7 +1476,10 @@ export function OneShell() {
           expectedStoreVersion: current.version,
           originChatId: chatId,
           confirmedByUser: true,
-        }).catch(() => current);
+        }).catch((retryCause) => {
+          requestOneOperationalRecovery("one-activation-concern", retryCause);
+          return current;
+        });
       }
     }
     setOneActivationState(current);
@@ -1651,14 +1499,16 @@ export function OneShell() {
     const value = explicitValue || tFor(appLocale, "one.shell.composer.attachment_prompt", { n: attachmentSnapshot.length, s: attachmentSnapshot.length === 1 ? "" : "s" });
     const api = ipc();
     if (!api) {
-      setError(tFor(appLocale, "one.shell.composer.not_connected"));
+      setError(null);
+      requestOneOperationalRecovery("one-submit-connection", "Desktop bridge unavailable");
       return;
     }
     const canContinueInPlace = Boolean(
       selected?.chatId && ["partial", "completed", "failed"].includes(selected.canonicalStatus ?? ""),
     );
     if (selected && (!selected.chatId || (!selected.truth.mayStartExecution && !canContinueInPlace))) {
-      setError(tFor(appLocale, "one.shell.submit.cannot_continue"));
+      setError(null);
+      requestOneOperationalRecovery("one-submit-continuation", "Current task cannot continue with its present verified state");
       return;
     }
     if (teamPreflight && ["proposed", "blocked", "team_reserved", "workforce_reserved", "solo_reserved", "deferred"].includes(teamPreflight.status)) return;
@@ -1789,15 +1639,19 @@ export function OneShell() {
       await prepareOrRun(chat.id, null, null, "conversation");
     } catch (cause) {
       setTeamPreflightBusy(false);
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setError(message);
+      requestOneOperationalRecovery("one-submit", cause);
+      setError(null);
     }
   }, [autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, recurrenceSelection, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides]);
 
   const stopRun = useCallback(() => {
     const api = ipc();
     const runId = runIdRef.current;
-    if (!api || !runId) return;
+    if (!runId) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-run-stop", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setRunStatus(tFor(appLocale, "one.shell.run.stopping_safely"));
     void api.invoke.cancel(runId);
   }, [appLocale]);
@@ -1839,10 +1693,13 @@ export function OneShell() {
     if (receipt.status !== "failed" && receipt.status !== "interrupted") return;
     // One decision per run id, no matter how often this effect re-evaluates.
     if (autoRecoveryRef.current.judgedRunIds.has(receipt.runId)) return;
-    autoRecoveryRef.current.judgedRunIds.add(receipt.runId);
 
     const api = ipc();
-    if (!api?.oneAutoRecovery) return;
+    if (!api?.oneAutoRecovery) {
+      requestOneOperationalRecovery("one-auto-recovery", new Error("Desktop recovery controller unavailable"));
+      return;
+    }
+    autoRecoveryRef.current.judgedRunIds.add(receipt.runId);
     const state = autoRecoveryRef.current;
     if (state.chatId !== chatId) {
       state.chatId = chatId;
@@ -1915,23 +1772,46 @@ export function OneShell() {
     shouldStart = true,
   ) => {
     const api = ipc();
-    const task = projections.find((item) => item.chatId === confirmation.chatId);
-    if (!api || !task || busy || (shouldStart && !task.truth.mayStartExecution)) return;
+    const projectedTask = projections.find((item) => item.chatId === confirmation.chatId);
+    const isActiveOneConversation = conversation?.id === confirmation.chatId
+      && conversation.originSurface === "one";
+    if (
+      !api
+      || busy
+      || (!projectedTask && !isActiveOneConversation)
+      || (shouldStart && projectedTask && !projectedTask.truth.mayStartExecution)
+    ) return;
     try {
       await api.confirm.commitAnswer({ chatId: confirmation.chatId, reply: label });
       setCommittedAnswers(await api.confirm.committedAnswers(confirmation.chatId).catch(() => []));
       setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
       if (shouldStart) {
-        await startRun(confirmation.chatId, task.taskId, task.canonicalVersion, label, "task");
+        if (projectedTask) {
+          await startRun(
+            confirmation.chatId,
+            projectedTask.taskId,
+            projectedTask.canonicalVersion,
+            label,
+            "task",
+          );
+        } else {
+          const task = await api.tasks.findForChat(confirmation.chatId);
+          if (!task) throw new Error("One could not bind the decision to its task");
+          await startRun(confirmation.chatId, task.id, task.version, label, "task");
+        }
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-decision-answer", cause);
+      setError(null);
     }
-  }, [busy, projections, startRun]);
+  }, [busy, conversation?.id, conversation?.originSurface, projections, startRun]);
 
   const snoozeConfirmation = useCallback(async (confirmation: PendingConfirmation) => {
     const api = ipc();
-    if (!api) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-decision-snooze", new Error("Desktop bridge unavailable"));
+      return;
+    }
     try {
       const receipt = await api.confirm.snooze({
         chatId: confirmation.chatId,
@@ -1943,9 +1823,33 @@ export function OneShell() {
         : item));
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-decision-snooze", cause);
+      setError(null);
     }
   }, []);
+
+  const clarifyConfirmation = useCallback(async (confirmation: PendingConfirmation) => {
+    if (busy) return;
+    const projectedTask = projections.find((item) => item.chatId === confirmation.chatId);
+    const isActiveOneConversation = conversation?.id === confirmation.chatId
+      && conversation.originSurface === "one";
+    if (!projectedTask && !isActiveOneConversation) {
+      requestOneOperationalRecovery("one-decision-clarify", new Error("Decision context unavailable"));
+      return;
+    }
+    setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
+    await startRun(
+      confirmation.chatId,
+      projectedTask?.taskId ?? null,
+      projectedTask?.canonicalVersion ?? null,
+      tFor(appLocale, "one.shell.system_prompt.clarify_decision", {
+        question: confirmation.question,
+        options: confirmation.options.map((option) => option.label).join(" · "),
+      }),
+      "conversation",
+      { displayUserMessage: false, promptOrigin: "system" },
+    );
+  }, [appLocale, busy, conversation?.id, conversation?.originSurface, projections, startRun]);
 
   const openTask = useCallback((taskId: string) => {
     setRailOpen(false);
@@ -1961,9 +1865,13 @@ export function OneShell() {
 
   const mutateTaskArchive = useCallback(async (taskId: string, operation: "archive" | "restore") => {
     const api = ipc();
-    if (!api?.oneSearch || archiveMutationTaskId) return;
+    if (archiveMutationTaskId) return;
+    if (!api?.oneSearch) {
+      requestOneOperationalRecovery("one-task-archive", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setArchiveMutationTaskId(taskId);
-    setSearchError(null);
+    setSearchFailed(false);
     try {
       const initialTask = await api.tasks.get(taskId);
       if (!initialTask?.originChatId) throw new Error(tFor(appLocale, "one.shell.archive.original_conversation_unavailable"));
@@ -1993,9 +1901,9 @@ export function OneShell() {
         await requestOneSearch({ query: value, includeArchived: searchIncludeArchived });
       }
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      if (searchOpen) setSearchError(message);
-      else setError(message);
+      requestOneOperationalRecovery("one-archive", cause);
+      setSearchFailed(false);
+      setError(null);
     } finally {
       setArchiveMutationTaskId(null);
     }
@@ -2027,14 +1935,9 @@ export function OneShell() {
     [confirmations],
   );
   const reactiveBriefing = useMemo(() => chooseOneBriefing(projections, actionableConfirmations, appLocale), [actionableConfirmations, appLocale, projections]);
-  const rawBriefing: DisplayBriefing = useMemo(() => {
-    // A live decision awaiting the user keeps priority. Otherwise a grounded
-    // proactive finding is the first thing One says, even before any Task exists.
-    if (reactiveBriefing.kind === "decision") return reactiveBriefing;
-    return briefingSnapshot?.candidate
-      ? proactiveBriefingView(briefingSnapshot.candidate, appLocale)
-      : reactiveBriefing;
-  }, [appLocale, briefingSnapshot?.candidate, reactiveBriefing]);
+  // Deterministic observations remain private evidence. One may surface them
+  // only after its model has authored the customer-facing diagnosis and action.
+  const rawBriefing: DisplayBriefing = reactiveBriefing;
   const rawBriefingSignature = useMemo(() => briefingSignature(rawBriefing), [rawBriefing]);
   useEffect(() => {
     const expiresAt = readBriefingDismissal(rawBriefingSignature);
@@ -2047,8 +1950,12 @@ export function OneShell() {
   const briefing: DisplayBriefing = dismissedBriefing?.signature === rawBriefingSignature && dismissedBriefing.expiresAt > Date.now()
     ? chooseOneBriefing([], [], appLocale)
     : rawBriefing;
-  const selectedPendingConfirmation = selected?.chatId ? confirmations.find((item) => item.chatId === selected.chatId) ?? null : null;
-  const selectedConfirmation = selected?.chatId ? actionableConfirmations.find((item) => item.chatId === selected.chatId) ?? null : null;
+  const selectedPendingConfirmation = activeThreadChatId
+    ? confirmations.find((item) => item.chatId === activeThreadChatId) ?? null
+    : null;
+  const selectedConfirmation = activeThreadChatId
+    ? actionableConfirmations.find((item) => item.chatId === activeThreadChatId) ?? null
+    : null;
   const selectedSuggestion = useMemo(() => {
     if (!selected || !oneSuggestions || selected.canonicalStatus !== "completed") return null;
     return oneSuggestions.suggestions.find((suggestion) =>
@@ -2218,13 +2125,17 @@ export function OneShell() {
           expectedStoreVersion: current.version,
           confirmedByUser: true,
         });
-      } catch {
+      } catch (cause) {
+        requestOneOperationalRecovery("one-activation-work", cause);
         const latest = await api.oneActivation.getState({ platform: "desktop", locale: appLocale }).catch(() => null);
         if (latest?.status === "active" && latest.workNavigation.status === "pending") {
           current = await api.oneActivation.resolveWork({
             expectedStoreVersion: latest.version,
             confirmedByUser: true,
-          }).catch(() => latest);
+          }).catch((retryCause) => {
+            requestOneOperationalRecovery("one-activation-work", retryCause);
+            return latest;
+          });
         } else if (latest) {
           current = latest;
         }
@@ -2236,42 +2147,66 @@ export function OneShell() {
   const skipActivation = useCallback(async () => {
     const api = ipc();
     let current = oneActivationState;
-    if (!api?.oneActivation || !current || current.status !== "active") return;
+    if (!current || current.status !== "active") return;
+    if (!api?.oneActivation) {
+      requestOneOperationalRecovery("one-activation-skip", new Error("Desktop bridge unavailable"));
+      return;
+    }
     try {
       current = await api.oneActivation.skip({
         expectedStoreVersion: current.version,
         confirmedByUser: true,
       });
-    } catch {
-      const latest = await api.oneActivation.getState({ platform: "desktop", locale: appLocale });
-      current = latest.status === "active"
-        ? await api.oneActivation.skip({ expectedStoreVersion: latest.version, confirmedByUser: true })
-        : latest;
+    } catch (cause) {
+      requestOneOperationalRecovery("one-activation-skip", cause);
+      try {
+        const latest = await api.oneActivation.getState({ platform: "desktop", locale: appLocale });
+        current = latest.status === "active"
+          ? await api.oneActivation.skip({ expectedStoreVersion: latest.version, confirmedByUser: true })
+          : latest;
+      } catch (retryCause) {
+        requestOneOperationalRecovery("one-activation-skip", retryCause);
+        return;
+      }
     }
     setOneActivationState(current);
   }, [appLocale, oneActivationState]);
   const resolveActivationMobile = useCallback(async (resolution: OneActivationMobileResolution) => {
     const api = ipc();
     let current = oneActivationState;
-    if (!api?.oneActivation || !current || current.mobileConnection.status !== "offered") return;
+    if (!current || current.mobileConnection.status !== "offered") return;
+    if (!api?.oneActivation) {
+      requestOneOperationalRecovery("one-activation-mobile", new Error("Desktop bridge unavailable"));
+      return;
+    }
     try {
       current = await api.oneActivation.resolveMobile({
         expectedStoreVersion: current.version,
         resolution,
         confirmedByUser: true,
       });
-    } catch {
-      const latest = await api.oneActivation.getState({ platform: "desktop", locale: appLocale });
-      current = latest.mobileConnection.status === "offered"
-        ? await api.oneActivation.resolveMobile({ expectedStoreVersion: latest.version, resolution, confirmedByUser: true })
-        : latest;
+    } catch (cause) {
+      requestOneOperationalRecovery("one-activation-mobile", cause);
+      try {
+        const latest = await api.oneActivation.getState({ platform: "desktop", locale: appLocale });
+        current = latest.mobileConnection.status === "offered"
+          ? await api.oneActivation.resolveMobile({ expectedStoreVersion: latest.version, resolution, confirmedByUser: true })
+          : latest;
+      } catch (retryCause) {
+        requestOneOperationalRecovery("one-activation-mobile", retryCause);
+        return;
+      }
     }
     setOneActivationState(current);
     if (resolution === "opened_settings") router.push("/settings");
   }, [appLocale, oneActivationState, router]);
   const acceptResult = useCallback(async () => {
     const api = ipc();
-    if (!api || !selected || !receipt || receipt.status !== "completed" || selected.canonicalStatus !== "partial" || acceptingResult) return;
+    if (!selected || !receipt || receipt.status !== "completed" || selected.canonicalStatus !== "partial" || acceptingResult) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-result-accept", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setAcceptingResult(true);
     setError(null);
     try {
@@ -2282,7 +2217,8 @@ export function OneShell() {
       });
       await refreshAll();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-memory-use", cause);
+      setError(null);
     } finally {
       setAcceptingResult(false);
     }
@@ -2391,19 +2327,24 @@ export function OneShell() {
         confirmedByUser: true,
       });
       setOneIntroState(next);
-    } catch {
-      current = await api.oneFeatureIntro.getState();
-      if (current.acknowledgedIntroVersion >= current.currentIntroVersion) {
-        setOneIntroState(current);
-        return;
+    } catch (cause) {
+      requestOneOperationalRecovery("one-feature-intro", cause);
+      try {
+        current = await api.oneFeatureIntro.getState();
+        if (current.acknowledgedIntroVersion >= current.currentIntroVersion) {
+          setOneIntroState(current);
+          return;
+        }
+        const next = await api.oneFeatureIntro.acknowledge({
+          expectedStoreVersion: current.version,
+          introVersion: current.currentIntroVersion,
+          resolution,
+          confirmedByUser: true,
+        });
+        setOneIntroState(next);
+      } catch (retryCause) {
+        requestOneOperationalRecovery("one-feature-intro", retryCause);
       }
-      const next = await api.oneFeatureIntro.acknowledge({
-        expectedStoreVersion: current.version,
-        introVersion: current.currentIntroVersion,
-        resolution,
-        confirmedByUser: true,
-      });
-      setOneIntroState(next);
     }
   }, [oneIntroState]);
   const manageImprovementAsset = useCallback((asset: OneImprovementReusedAssetV1) => {
@@ -2484,7 +2425,10 @@ export function OneShell() {
   const [pendingBriefingAction, setPendingBriefingAction] = useState<OneBriefingActionPacket | null>(null);
   const reviewPreparedFinding = useCallback(async (candidate: OneProactiveBriefing) => {
     const api = ipc();
-    if (!api) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-prepared-finding", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setBriefingActionBusy(true);
     setError(null);
     try {
@@ -2494,7 +2438,8 @@ export function OneShell() {
       });
       setPendingBriefingAction(packet);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-prepared-finding", cause);
+      setError(null);
       await refreshAll();
     } finally {
       setBriefingActionBusy(false);
@@ -2504,7 +2449,11 @@ export function OneShell() {
   const confirmBriefingAction = useCallback(async () => {
     const api = ipc();
     const packet = pendingBriefingAction;
-    if (!api || !packet) return;
+    if (!packet) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-prepared-finding", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setBriefingActionBusy(true);
     setError(null);
     try {
@@ -2517,15 +2466,13 @@ export function OneShell() {
       });
       setPendingBriefingAction(null);
       if (!result.ok) {
-        // main 이 분류한 실패 사유를 그대로 전한다. "시작했다"고 말한 뒤 아무 일도
-        // 안 일어나는 것이 이 결함의 원래 증상이었다.
-        setError(tFor(appLocale, result.errorCategory === "recovery_required"
-          ? "one.shell.briefing.action_recovery"
-          : "one.shell.briefing.action_rejected"));
+        setError(null);
+        requestOneOperationalRecovery("one-prepared-finding-start", result);
       }
       await refreshAll();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-prepared-finding", cause);
+      setError(null);
       await refreshAll();
     } finally {
       setBriefingActionBusy(false);
@@ -2542,7 +2489,11 @@ export function OneShell() {
   }, [router]);
   const openProactiveTask = useCallback(async (candidate: OneProactiveBriefing) => {
     const api = ipc();
-    if (!api || candidate.source.kind !== "canonical_task" || candidate.preparedAction.kind !== "open_task") return;
+    if (candidate.source.kind !== "canonical_task" || candidate.preparedAction.kind !== "open_task") return;
+    if (!api) {
+      requestOneOperationalRecovery("one-prepared-finding", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setBriefingActionBusy(true);
     setError(null);
     try {
@@ -2554,7 +2505,8 @@ export function OneShell() {
       });
       openTask(exact.taskId);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-prepared-finding", cause);
+      setError(null);
       await refreshAll();
     } finally {
       setBriefingActionBusy(false);
@@ -2562,7 +2514,10 @@ export function OneShell() {
   }, [openTask, refreshAll]);
   const applyProactiveFeedback = useCallback(async (candidate: OneProactiveBriefing, feedback: "later" | "not_important" | "wrong") => {
     const api = ipc();
-    if (!api) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-prepared-finding", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setError(null);
     try {
       const next = await api.oneBriefing.feedback({
@@ -2572,7 +2527,8 @@ export function OneShell() {
       });
       setBriefingSnapshot(safeBriefingSnapshot(next));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-prepared-finding", cause);
+      setError(null);
       await refreshAll();
     }
   }, [refreshAll]);
@@ -2695,29 +2651,6 @@ export function OneShell() {
               onClick={() => { setRailCollapsed(false); setRailOpen(true); }}
             >☰</button>
           </div>
-          {runtimeRecovery && (
-            <section className={styles.runtimeRecovery} role="alert">
-              <div>
-                <strong>{tFor(appLocale, runtimeRecovery.code === "one-runtime-auth-required"
-                  ? "one.shell.runtime_recovery.auth_title"
-                  : "one.shell.runtime_recovery.connection_title")}</strong>
-                <p>{tFor(appLocale, runtimeRecovery.code === "one-runtime-auth-required"
-                  ? "one.shell.runtime_recovery.auth_body"
-                  : "one.shell.runtime_recovery.connection_body")}</p>
-              </div>
-              <div className={styles.runtimeRecoveryActions}>
-                <button type="button" className={styles.ghostButton} onClick={() => void openRuntimeRecovery()}>
-                  {tFor(appLocale, runtimeRecovery.code === "one-runtime-auth-required"
-                    ? "one.shell.runtime_recovery.open_login"
-                    : "one.shell.runtime_recovery.open_settings")}
-                </button>
-                <button type="button" className={styles.primaryButton} onClick={() => void resumeAfterRuntimeRecovery()}>
-                  {tFor(appLocale, "one.shell.runtime_recovery.resume")}
-                </button>
-              </div>
-            </section>
-          )}
-          {error && <div className={styles.errorBanner} role="alert">{toCustomerSafeText(error)}</div>}
           <div ref={scrollRef} className={styles.scroll}>
             <OneActivation
               state={oneActivationState}
@@ -2912,17 +2845,6 @@ export function OneShell() {
                       <span className={styles.runElapsed}>{formatRunElapsed(Date.now() - runStartedAt)}</span>
                     )}
                   </section>
-                )}
-                {selected && selectedConfirmation && (
-                  <DecisionCard
-                    confirmation={selectedConfirmation}
-                    taskId={selected.taskId}
-                    locale={appLocale}
-                    disabled={busy || selectedReadOnly}
-                    onAnswer={answerConfirmation}
-                    onOpenWork={() => void openWork()}
-                    onSnooze={snoozeConfirmation}
-                  />
                 )}
                 {selected && latestCommittedAnswer && (
                   <ResolvedDecisionReceipt receipt={latestCommittedAnswer} locale={appLocale} />
@@ -3224,9 +3146,8 @@ export function OneShell() {
                   />
                 ))}
                 {query.trim() && searchLoading && searchHits.length === 0 && <div className={styles.searchState} role="status">{tFor(appLocale, "one.shell.search.searching")}</div>}
-                {query.trim() && !searchLoading && !searchError && searchHits.length === 0 && <div className={styles.searchState}>{tFor(appLocale, "one.shell.search.no_match")}</div>}
-                {searchError && <div className={styles.searchError} role="alert">{searchError}</div>}
-                {query.trim() && searchNextCursor && !searchError && (
+                {query.trim() && !searchLoading && !searchFailed && searchHits.length === 0 && <div className={styles.searchState}>{tFor(appLocale, "one.shell.search.no_match")}</div>}
+                {query.trim() && searchNextCursor && !searchFailed && (
                   <button type="button" className={styles.searchMore} disabled={searchLoadingMore} onClick={loadMoreSearchResults}>
                     {searchLoadingMore ? tFor(appLocale, "one.shell.search.finding_more") : tFor(appLocale, "one.shell.search.show_older")}
                   </button>
@@ -3235,6 +3156,17 @@ export function OneShell() {
             </section>
           )}
         </main>
+        {activeThreadChatId && selectedConfirmation && (
+          <DecisionBottomSheet
+            confirmation={selectedConfirmation}
+            taskId={selected?.taskId ?? null}
+            locale={appLocale}
+            disabled={busy || selectedReadOnly}
+            onAnswer={answerConfirmation}
+            onClarify={clarifyConfirmation}
+            onSnooze={snoozeConfirmation}
+          />
+        )}
       </div>
 
       <OneProfileSheet
@@ -3388,13 +3320,113 @@ function decisionFieldValue(field: OneDecisionField, locale: "ko" | "en"): strin
     : tFor(locale, "one.shell.decision.not_stated");
 }
 
-function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpenWork, onSnooze }: {
+function DecisionBottomSheet({ confirmation, taskId, locale, disabled, onAnswer, onClarify, onSnooze }: {
   confirmation: PendingConfirmation;
-  taskId: string;
+  taskId: string | null;
   locale: "ko" | "en";
   disabled: boolean;
   onAnswer: (confirmation: PendingConfirmation, label: string, shouldStart?: boolean) => void;
-  onOpenWork: () => void;
+  onClarify: (confirmation: PendingConfirmation) => void;
+  onSnooze: (confirmation: PendingConfirmation) => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = dialogRef.current;
+    const outside: Array<{
+      element: HTMLElement;
+      inert: string | null;
+      ariaHidden: string | null;
+    }> = [];
+    let branch: HTMLElement | null = dialog;
+    while (branch?.parentElement) {
+      const parent = branch.parentElement;
+      for (const sibling of parent.children) {
+        if (sibling === branch || !(sibling instanceof HTMLElement)) continue;
+        outside.push({
+          element: sibling,
+          inert: sibling.getAttribute("inert"),
+          ariaHidden: sibling.getAttribute("aria-hidden"),
+        });
+        sibling.setAttribute("inert", "");
+        sibling.setAttribute("aria-hidden", "true");
+      }
+      if (parent === document.body) break;
+      branch = parent;
+    }
+    dialog?.focus();
+    return () => {
+      for (const item of outside.reverse()) {
+        if (item.inert === null) item.element.removeAttribute("inert");
+        else item.element.setAttribute("inert", item.inert);
+        if (item.ariaHidden === null) item.element.removeAttribute("aria-hidden");
+        else item.element.setAttribute("aria-hidden", item.ariaHidden);
+      }
+      previouslyFocused?.focus();
+    };
+  }, [confirmation.sourceMessageId]);
+
+  const trapFocus = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab") return;
+    const root = dialogRef.current;
+    if (!root) return;
+    const focusable = [...root.querySelectorAll<HTMLElement>(
+      "button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href]",
+    )].filter((item) => item.getAttribute("aria-hidden") !== "true");
+    if (focusable.length === 0) {
+      event.preventDefault();
+      root.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (document.activeElement === root) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }, []);
+
+  return (
+    <div className={styles.decisionSheetLayer} role="presentation">
+      <div className={styles.decisionSheetBackdrop} aria-hidden="true" />
+      <div
+        ref={dialogRef}
+        className={styles.decisionSheet}
+        role="dialog"
+        aria-modal="true"
+        aria-label={locale === "ko" ? "One의 사용자 결정 요청" : "Decision requested by One"}
+        tabIndex={-1}
+        onKeyDown={trapFocus}
+      >
+        <div className={styles.decisionSheetHandle} aria-hidden="true" />
+        <DecisionCard
+          confirmation={confirmation}
+          taskId={taskId}
+          locale={locale}
+          disabled={disabled}
+          onAnswer={onAnswer}
+          onClarify={onClarify}
+          onSnooze={onSnooze}
+        />
+      </div>
+    </div>
+  );
+}
+
+function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onClarify, onSnooze }: {
+  confirmation: PendingConfirmation;
+  taskId: string | null;
+  locale: "ko" | "en";
+  disabled: boolean;
+  onAnswer: (confirmation: PendingConfirmation, label: string, shouldStart?: boolean) => void;
+  onClarify: (confirmation: PendingConfirmation) => void;
   onSnooze: (confirmation: PendingConfirmation) => void;
 }) {
   // The render pass has no synchronous model: warm the judge via the bridge and
@@ -3403,9 +3435,14 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
   const { readers: judgedReaders, modelUnavailable } = useJudgedOneDecision(confirmation);
   const decision: OneDecisionViewV1 = normalizeOneDecision(confirmation, taskId, judgedReaders);
   const riskRank = Number(decision.risk.level.slice(1));
-  const approvalBlocked = riskRank >= 2 && decision.risk.certainty === "ambiguous";
   const directOptions = decision.options.filter((option) => option.enabled && option.disposition !== "reject" && option.disposition !== "modify");
   const blockedOptions = decision.options.filter((option) => option.blockedReason !== null);
+  const approvalBlocked = blockedOptions.some((option) => option.blockedReason === "unstructured_high_risk");
+  const [multiSelection, setMultiSelection] = useState<number[]>([]);
+  useEffect(() => setMultiSelection([]), [confirmation.sourceMessageId]);
+  const selectedMultiLabels = directOptions
+    .filter((option) => multiSelection.includes(option.index))
+    .map((option) => option.label);
   const rejectLabel = decision.controls.reject.source === "explicit_option"
     ? decision.controls.reject.reply
     : tFor(locale, "one.shell.decision.reject_default");
@@ -3417,7 +3454,7 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
     [tFor(locale, "one.shell.decision.field.reversibility"), decision.reversibility],
     [tFor(locale, "one.shell.decision.field.deadline"), decision.deadline],
   ];
-  const lightweightChoice = riskRank === 0 && !approvalBlocked;
+  const lightweightChoice = riskRank === 0 && !approvalBlocked && !confirmation.multiSelect;
 
   if (lightweightChoice) {
     return (
@@ -3479,39 +3516,64 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onOpen
         {tFor(locale, "one.shell.decision.evidence", { time: formatTimestamp(decision.createdAt, locale) })}
       </p>
 
-      {modelUnavailable && (
-        <div className={styles.decisionGuard} role="status">
-          <span>{judgmentUnavailableMessage(locale)}</span>
-        </div>
-      )}
-
       {approvalBlocked && (
         <div className={styles.decisionGuard} role="status">
-          <strong>{tFor(locale, "one.shell.decision.approval_unavailable")}</strong>
-          <span>{tFor(locale, "one.shell.decision.approval_unavailable_body")}</span>
+          <strong>{tFor(locale, modelUnavailable
+            ? "one.shell.decision.model_review_pending"
+            : "one.shell.decision.approval_unavailable")}</strong>
+          <span>{tFor(locale, modelUnavailable
+            ? "one.shell.decision.model_review_pending_body"
+            : "one.shell.decision.approval_unavailable_body")}</span>
           {blockedOptions.length > 0 && <small>{tFor(locale, "one.shell.decision.choices_requiring_review")}: {blockedOptions.map((option) => option.label).join(" · ")}</small>}
         </div>
       )}
 
-      {confirmation.multiSelect && !approvalBlocked && (
-        <p className={styles.decisionGuard}>{tFor(locale, "one.shell.decision.multi_select")}</p>
-      )}
-
       <div className={styles.decisionOptions}>
-        {directOptions.map((option) => (
-          <button
-            key={`${option.index}:${option.label}`}
-            type="button"
-            className={styles.decisionPrimaryButton}
-            disabled={disabled}
-            title={option.description ?? undefined}
-            onClick={() => onAnswer(confirmation, option.label)}
-          >
-            {option.label}
-          </button>
-        ))}
+        {confirmation.multiSelect && !approvalBlocked ? (
+          <>
+            <div className={styles.decisionMultiOptions} role="group" aria-label={tFor(locale, "one.shell.decision.multi_select")}>
+              {directOptions.map((option) => {
+                const selected = multiSelection.includes(option.index);
+                return (
+                  <button
+                    key={`${option.index}:${option.label}`}
+                    type="button"
+                    className={styles.decisionMultiOption}
+                    aria-pressed={selected}
+                    disabled={disabled}
+                    title={option.description ?? undefined}
+                    onClick={() => setMultiSelection((current) => selected
+                      ? current.filter((index) => index !== option.index)
+                      : [...current, option.index])}
+                  >
+                    <span aria-hidden="true">{selected ? "✓" : ""}</span>{option.label}
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              type="button"
+              className={styles.decisionPrimaryButton}
+              disabled={disabled || selectedMultiLabels.length === 0}
+              onClick={() => onAnswer(confirmation, selectedMultiLabels.join(" · "))}
+            >
+              {tFor(locale, "one.shell.decision.confirm_selection")}
+            </button>
+          </>
+        ) : directOptions.map((option) => (
+            <button
+              key={`${option.index}:${option.label}`}
+              type="button"
+              className={styles.decisionPrimaryButton}
+              disabled={disabled}
+              title={option.description ?? undefined}
+              onClick={() => onAnswer(confirmation, option.label)}
+            >
+              {option.label}
+            </button>
+          ))}
         <button type="button" className={styles.decisionRejectButton} disabled={disabled} onClick={() => onAnswer(confirmation, decision.controls.reject.reply, false)}>{rejectLabel}</button>
-        <button type="button" className={styles.decisionButton} onClick={onOpenWork}>{tFor(locale, "one.shell.decision.change_scope")}</button>
+        <button type="button" className={styles.decisionButton} disabled={disabled} onClick={() => onClarify(confirmation)}>{tFor(locale, "one.shell.decision.change_scope")}</button>
         <button type="button" className={styles.decisionButton} disabled={disabled} onClick={() => onSnooze(confirmation)}>{tFor(locale, "one.shell.decision.remind_24h")}</button>
       </div>
       <p className={styles.decisionHint}>{decisionRejectCopy(locale)}</p>

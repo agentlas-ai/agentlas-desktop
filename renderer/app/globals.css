@@ -1807,27 +1807,33 @@ button[data-dashboard-import="true"]:disabled {
   font-size: 10.5px;
 }
 
-.dashboard-runtime-auto {
+.rd .dashboard-runtime-auto {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 58px;
-  min-height: 28px;
-  padding: 0 12px;
-  border: 1px solid var(--dash-teal-2);
-  border-radius: 8px;
-  background: var(--dash-teal-2);
+  min-width: 76px;
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--rd-ink);
+  border-radius: 9px;
+  background: var(--rd-ink);
   color: #ffffff;
-  font-size: 11.5px;
-  font-weight: 740;
+  font-size: 12.5px;
+  font-weight: 800;
   cursor: pointer;
 }
 
-.dashboard-runtime-auto:hover:not(:disabled) {
-  filter: brightness(0.96);
+.rd .dashboard-runtime-auto:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 5px 14px color-mix(in oklch, var(--rd-ink) 18%, transparent);
 }
 
-.dashboard-runtime-auto:disabled {
+.rd .dashboard-runtime-auto:focus-visible {
+  outline: 3px solid color-mix(in oklch, var(--rd-accent-2) 72%, transparent);
+  outline-offset: 2px;
+}
+
+.rd .dashboard-runtime-auto:disabled {
   opacity: 0.5;
   cursor: default;
 }
@@ -2791,6 +2797,7 @@ button[data-toggle-state="on"] {
 .project-create-steps button { display: flex; align-items: center; gap: 9px; border: 0; border-bottom: 2px solid var(--rd-hair); background: transparent; padding: 10px 4px 13px; color: var(--rd-ink-3); text-align: left; cursor: pointer; }
 .project-create-steps button span { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--rd-surface-2); font-size: 11px; }
 .project-create-steps button[data-active="true"] { border-color: var(--rd-accent); color: var(--rd-ink); font-weight: 700; }
+.project-create-steps button:disabled { color: color-mix(in oklch, var(--rd-ink-3) 58%, transparent); cursor: not-allowed; }
 .project-create-body { max-width: 1080px; margin: 0 auto; padding: 36px 40px 72px; }
 .project-create-section { display: grid; gap: 22px; }
 .project-create-copy { max-width: 660px; }
@@ -2831,6 +2838,8 @@ button[data-toggle-state="on"] {
 .project-sidebar { width: 248px; flex: 0 0 248px; height: 100vh; display: flex; flex-direction: column; border-right: 1px solid var(--glass-border); }
 .project-sidebar-drag { height: 35px; flex: 0 0 35px; }
 .project-sidebar-head { padding: 6px 12px 12px; }
+.project-sidebar-dashboard { margin: 0 12px 8px; min-height: 38px; display: flex; align-items: center; gap: 9px; padding: 8px 10px; border: 0; border-radius: 10px; background: transparent; color: var(--rd-ink-2); font-weight: 700; text-align: left; cursor: pointer; }
+.project-sidebar-dashboard:hover, .project-sidebar-dashboard:focus-visible { background: var(--rd-surface-2); color: var(--rd-ink); }
 .project-sidebar-new { margin: 0 12px 18px; min-height: 38px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--rd-hair-strong); border-radius: 10px; background: var(--rd-surface); color: var(--rd-ink); font-weight: 700; cursor: pointer; }
 .project-sidebar-label { padding: 0 16px 7px; color: var(--rd-ink-3); font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .project-sidebar-list { flex: 1; min-height: 0; overflow: auto; padding: 0 9px; }
@@ -2842,6 +2851,8 @@ button[data-toggle-state="on"] {
 .project-sidebar-list .project-sidebar-task::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--rd-hair-strong); margin-left: -14px; }
 .project-sidebar-list .project-sidebar-empty { min-height: 74px; justify-content: center; border: 1px dashed var(--rd-hair); color: var(--rd-ink-3); text-align: center; }
 .project-sidebar-foot { padding: 12px; display: grid; gap: 8px; border-top: 1px solid var(--rd-hair); }
+.project-detail-back { min-height: 36px; display: inline-flex; align-items: center; gap: 7px; padding: 0 10px; border: 1px solid var(--rd-hair); border-radius: 9px; background: var(--rd-surface); color: var(--rd-ink-2); font: inherit; font-size: 12px; font-weight: 750; cursor: pointer; }
+.project-detail-back:hover, .project-detail-back:focus-visible { border-color: var(--rd-hair-strong); background: var(--rd-surface-2); color: var(--rd-ink); }
 .workspace-portfolio { height: 100%; overflow: auto; background: var(--rd-canvas); }
 .workspace-portfolio-head { padding: 50px 48px 28px; display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; border-bottom: 1px solid var(--rd-hair); }
 .workspace-portfolio-head span { color: var(--rd-accent); font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }

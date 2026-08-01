@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { ipc } from "@/lib/ipc";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { tFor, type Locale } from "@/lib/i18n";
 import type {
   OneValueClosureLifecycleClaim,
@@ -72,7 +73,10 @@ export function OneValueClosureCard({
 
   const setReflection = async (include: boolean) => {
     const api = ipc();
-    if (!api) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-value-closure", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setBusy(true);
     setMessage(null);
     setError(null);
@@ -92,7 +96,8 @@ export function OneValueClosureCard({
     } catch (cause) {
       const latest = await api.oneValueClosure.getState().catch(() => null);
       if (latest) onStateChange(latest);
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-value-closure", cause);
+      setError(null);
     } finally {
       setBusy(false);
     }

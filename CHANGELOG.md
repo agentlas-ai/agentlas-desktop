@@ -28,6 +28,16 @@ Releases page stays the authority for what is actually downloadable.
   credential-free continuity mirror for tool-free recovery when the operational
   store cannot open, and Dashboard distinguishes checking, connected, and
   user-installed plugin states without blaming Desktop-owned capabilities.
+- **Recovery stays inside the product flow.** Consequential One decisions open
+  in a model-owned bottom sheet, customer-facing failures stay free of raw
+  runtime details, and transient update handoff failures retry without leaving
+  an installed user stranded between versions.
+- **Project navigation and runtime priorities are easier to recover.** Project
+  detail and Work provide a direct Dashboard return, project folders restore
+  with their project identity, and Dashboard's high-contrast Auto control keeps
+  the ordered orchestrator and worker priorities after restart.
+- Production dependencies were refreshed without changing the model ownership
+  contract, and the shipped dependency tree now has no known audit findings.
 - Project-first Work, exact pointer drag-and-drop, controller binding, completed
   run receipts, and the absence of internal agent slugs were rechecked in an
   isolated production Electron profile.

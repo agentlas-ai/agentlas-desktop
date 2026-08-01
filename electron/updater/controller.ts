@@ -24,6 +24,8 @@ const RECOVERY_SESSION_RETRY_ATTEMPTS = 4;
 const NATIVE_INSTALL_WATCHDOG_MS = 20_000;
 const NATIVE_INSTALL_RETRY_BASE_DELAY_MS = 1_000;
 const NATIVE_INSTALL_RETRY_MAX_DELAY_MS = 5 * 60_000;
+const TRANSIENT_RETRY_BASE_DELAY_MS = 30_000;
+const TRANSIENT_RETRY_MAX_DELAY_MS = 15 * 60_000;
 const LAUNCHCTL_SERVICE_ABSENT = 113;
 
 export const CONTINUITY_CORE_TABLES = [
@@ -237,6 +239,8 @@ export interface UpdaterControllerDependencies {
   refreshSessionForRecovery?: () => Promise<void | RecoverySessionRefreshResult>;
   nativeInstallWatchdogMs?: number;
   nativeInstallRetryBaseDelayMs?: number;
+  transientRetryBaseDelayMs?: number;
+  transientRetryMaxDelayMs?: number;
   /** Test seam for fail-closed launchd inspection/bootout before stale macOS cleanup. */
   runLaunchctl?: (args: string[]) => number;
 }
@@ -637,6 +641,8 @@ export class DesktopUpdaterController {
   private state: UpdaterState = { status: "idle" };
   private timer: NodeJS.Timeout | null = null;
   private initialTimer: NodeJS.Timeout | null = null;
+  private transientRetryTimer: NodeJS.Timeout | null = null;
+  private transientFailureCount = 0;
   private checkPromise: Promise<UpdaterState> | null = null;
   private reconcilePromise: Promise<void> | null = null;
   private downloadPromise: Promise<void> | null = null;
@@ -710,6 +716,26 @@ export class DesktopUpdaterController {
   private listen(event: UpdaterEvent, listener: (...args: any[]) => void): void {
     this.listeners.push({ event, listener });
     this.deps.updater.on(event, listener);
+  }
+
+  private clearTransientRetry(): void {
+    if (this.transientRetryTimer) clearTimeout(this.transientRetryTimer);
+    this.transientRetryTimer = null;
+    this.transientFailureCount = 0;
+  }
+
+  private armTransientRetry(): void {
+    if (this.deps.schedule === false || this.transientRetryTimer) return;
+    const baseDelay = asNonNegativeInteger(this.deps.transientRetryBaseDelayMs) ?? TRANSIENT_RETRY_BASE_DELAY_MS;
+    const maxDelay = asNonNegativeInteger(this.deps.transientRetryMaxDelayMs) ?? TRANSIENT_RETRY_MAX_DELAY_MS;
+    const delay = Math.min(baseDelay * (2 ** Math.min(this.transientFailureCount, 10)), maxDelay);
+    this.transientFailureCount += 1;
+    this.logger.log(`[updater] transient update failure; retrying in ${delay}ms`);
+    this.transientRetryTimer = setTimeout(() => {
+      this.transientRetryTimer = null;
+      void this.check();
+    }, delay);
+    this.transientRetryTimer.unref?.();
   }
 
   private armInstallWriterResume(resume: (() => void) | undefined): void {
@@ -1413,6 +1439,7 @@ export class DesktopUpdaterController {
     });
     this.listen("update-not-available", () => {
       if (terminalStates.has(this.state.status) || this.downloadPromise) return;
+      this.clearTransientRetry();
       this.publish({ status: "not-available" });
     });
     this.listen("download-progress", (progress: { percent?: number }) => {
@@ -1428,6 +1455,7 @@ export class DesktopUpdaterController {
         return;
       }
       this.availableVersion = version;
+      this.clearTransientRetry();
       this.publish({
         status: "downloaded",
         version,
@@ -1444,6 +1472,7 @@ export class DesktopUpdaterController {
       this.logger.warn("[updater] electron-updater failed outside install handoff");
       if (this.state.status === "downloaded") return;
       this.publish(this.errorState(this.downloadPromise ? "download-failed" : "check-failed"));
+      this.armTransientRetry();
     });
 
     await this.reconcileJournal();
@@ -1469,8 +1498,11 @@ export class DesktopUpdaterController {
     this.deferredSessionRestoreRequested = false;
     if (this.initialTimer) clearTimeout(this.initialTimer);
     if (this.timer) clearInterval(this.timer);
+    if (this.transientRetryTimer) clearTimeout(this.transientRetryTimer);
     this.initialTimer = null;
     this.timer = null;
+    this.transientRetryTimer = null;
+    this.transientFailureCount = 0;
     if (this.nativeInstallWatchdog) clearTimeout(this.nativeInstallWatchdog);
     this.nativeInstallWatchdog = null;
     if (this.nativeInstallReconcileTimer) clearTimeout(this.nativeInstallReconcileTimer);
@@ -1530,6 +1562,7 @@ export class DesktopUpdaterController {
       .catch((error) => {
         this.logger.warn("[updater] download failed", error);
         this.publish(this.errorState("download-failed"));
+        this.armTransientRetry();
       })
       .finally(() => {
         this.downloadPromise = null;
@@ -1613,9 +1646,13 @@ export class DesktopUpdaterController {
         } else if (this.state.status === "checking") {
           this.publish({ status: "not-available" });
         }
+        if (this.state.status !== "error") this.clearTransientRetry();
       } catch (error) {
         this.logger.warn("[updater] check failed", error);
-        if (!terminalStates.has(this.state.status)) this.publish(this.errorState("check-failed"));
+        if (!terminalStates.has(this.state.status)) {
+          this.publish(this.errorState("check-failed"));
+          this.armTransientRetry();
+        }
       } finally {
         this.lastCheckedAt = this.now();
         this.publish(this.state);

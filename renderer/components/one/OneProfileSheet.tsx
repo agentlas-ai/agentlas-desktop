@@ -7,6 +7,7 @@ import {
   type FormEvent,
 } from "react";
 import { ipc } from "@/lib/ipc";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { tFor, type Locale } from "@/lib/i18n";
 import type {
   OneOperatingPrinciple,
@@ -125,7 +126,8 @@ export function OneProfileSheet({
   const mutate = async (operation: () => Promise<OneProfile>, success: string) => {
     const api = ipc();
     if (!api) {
-      setError(tFor(locale, "one.prof.err.no_store"));
+      requestOneOperationalRecovery("one-profile", new Error("Desktop bridge unavailable"));
+      setError(null);
       return null;
     }
     setBusy(true);
@@ -139,7 +141,8 @@ export function OneProfileSheet({
     } catch (cause) {
       const latest = await api.oneProfile.get().catch(() => null);
       if (latest) onProfileChange(latest);
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-profile", cause);
+      setError(null);
       return null;
     } finally {
       setBusy(false);
@@ -149,7 +152,11 @@ export function OneProfileSheet({
   const saveProfile = async (event: FormEvent) => {
     event.preventDefault();
     const api = ipc();
-    if (!api || !profile) return;
+    if (!profile) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-profile", new Error("Desktop bridge unavailable"));
+      return;
+    }
     await mutate(
       () => api.oneProfile.update({
         expectedVersion: profile.version,
@@ -162,7 +169,11 @@ export function OneProfileSheet({
   const addPrinciple = async (event: FormEvent) => {
     event.preventDefault();
     const api = ipc();
-    if (!api || !profile) return;
+    if (!profile) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-profile", new Error("Desktop bridge unavailable"));
+      return;
+    }
     const next = await mutate(
       () => api.oneProfile.addPrinciple({
         expectedVersion: profile.version,
@@ -188,7 +199,11 @@ export function OneProfileSheet({
   const savePrinciple = async (event: FormEvent, principle: OneOperatingPrinciple) => {
     event.preventDefault();
     const api = ipc();
-    if (!api || !profile) return;
+    if (!profile) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-profile", new Error("Desktop bridge unavailable"));
+      return;
+    }
     const next = await mutate(
       () => api.oneProfile.updatePrinciple({
         expectedVersion: profile.version,
@@ -205,7 +220,11 @@ export function OneProfileSheet({
 
   const togglePrinciple = async (principle: OneOperatingPrinciple) => {
     const api = ipc();
-    if (!api || !profile) return;
+    if (!profile) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-profile", new Error("Desktop bridge unavailable"));
+      return;
+    }
     await mutate(
       () => api.oneProfile.setPrincipleEnabled({
         expectedVersion: profile.version,
@@ -220,7 +239,11 @@ export function OneProfileSheet({
 
   const deletePrinciple = async (principle: OneOperatingPrinciple) => {
     const api = ipc();
-    if (!api || !profile) return;
+    if (!profile) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-profile", new Error("Desktop bridge unavailable"));
+      return;
+    }
     const confirmed = window.confirm(tFor(locale, "one.prof.confirm.delete"));
     if (!confirmed) return;
     await mutate(

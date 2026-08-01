@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
 // Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
 import { superviseStormbreaker, type StormbreakerHandle } from "../hephaestus/stormbreaker-supervisor";
-import { isNetworkAutoEnabled, isStormbreakerAutoEnabled } from "../hephaestus/supervisor";
+import { isStormbreakerAutoEnabled } from "../hephaestus/supervisor";
 import { careerGraphIngest, hepCall, routeOnly, stormbreakerHarness } from "../hephaestus/commands";
 import { normalizeRecommendation } from "../hephaestus/recommendation";
 import {
@@ -24,10 +24,6 @@ import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import {
   autoRouteStatus,
   autoRouteSystemPreamble,
-  isGlobalOrchestrator,
-  isPlainConversationalPrompt,
-  selectAutoRoutedAgentJudged,
-  shouldAutoEngageNetworkWorkforce,
   shouldForceHubFirstWorkforce,
   type AutoRouteChoice,
 } from "../agents/auto-router";
@@ -86,10 +82,7 @@ import {
 } from "../ontology/project-runtime";
 import {
   buildExperienceContext,
-  buildExperienceRoutingPrior,
-  type ExperienceRoutingPrior,
 } from "../experience/context";
-import { prejudgeCanonicalTaskIds } from "../experience/taxonomy";
 import { promoteExperienceCandidatesForRun } from "../experience/store";
 import { writeEvolutionProposalsForProject, evolutionSessionContextLine } from "../agents/evolution-hep";
 import { resolveDesktopOperationalRuntimeSession } from "../ontology/operational-runtime-session";
@@ -141,7 +134,6 @@ import { pickActive, pickRunner, selectInvocationRuntime } from "../runtime/sele
 import { pickLocale, tStatus } from "../runtime/status-i18n";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
 import { extractBuildInterviewQuestions } from "../../shared/build-turn";
-import { classifyOneRuntimeFailure } from "../../shared/one-runtime-recovery";
 import {
   oneTeamRuntimeBinding,
   oneTeamRuntimeBindingMatches,
@@ -386,15 +378,6 @@ function invocationFailure(
   error: unknown,
 ): { code: string; message: string } {
   if (req.agentAppMode) return untrustedRuntimeFailurePayload();
-  if (req.oneMode) {
-    const runtimeFailure = classifyOneRuntimeFailure(error);
-    if (runtimeFailure) {
-      return {
-        code: runtimeFailure,
-        message: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
   return {
     code: fallbackCode,
     message: error instanceof Error ? error.message : String(error),
@@ -1537,77 +1520,19 @@ export async function runMcpInvocation(
   const hasPriorContext = hadPriorConversationContext;
   // plain 대화(인사/맞장구)는 라우팅 전체를 건너뛰고 기본 LLM이 즉답 — 전문 에이전트로
   // 잘못 위임되거나 아래 Hephaestus 에스컬레이션 선지연을 무는 엣지케이스를 없앤다.
-  const plainConversation = !isTargetAppEdit && isPlainConversationalPrompt(req.userPrompt);
   const hubWorkforceRequested = shouldForceHubFirstWorkforce({
     agentAppMode: req.agentAppMode === true,
     hubMode: req.hubMode,
     borrowedAgentCount: borrowedAgentSlugs.length,
-    plainConversation,
+    plainConversation: false,
     targetAppEdit: isTargetAppEdit,
   });
   // Scheduled runs already carry an explicit target and their own Hub policy.
   // Applying the global chat auto-route here used to turn every default
   // `hub-allowed` automation into Workforce before the selected agent could run.
-  const automaticWorkforceEligible = !oneTeamExecutionPolicy && !req.sessionRouting && shouldAutoEngageNetworkWorkforce({
-    agentAppMode: req.agentAppMode === true,
-    networkAutoEnabled: isNetworkAutoEnabled(),
-    globalOrchestrator: isGlobalOrchestrator(agent),
-    hasPriorContext,
-    executionSource: executionContext?.source,
-    prompt: req.userPrompt,
-  });
-  const preRouteProjectPath = suppressMutableProjectContext
-    ? null
-    : workspaceBinding
-    ? boundMobileWorkingFolder
-    : suppressProjectBinding
-      ? null
-      : getChatWorkingFolder(chat.id) ?? (
-        invocationProjectId ? getProject(invocationProjectId)?.folderPath ?? null : null
-      );
-  // Warm the judged canonical task classification the synchronous experience
-  // prior + taste/operational overlay matchers peek below. Best-effort with a
-  // tight budget: a miss keeps the labeled deterministic wordlist fallback.
-  if (!req.agentAppMode && !plainConversation) {
-    await prejudgeCanonicalTaskIds(effectiveUserPrompt, { timeoutMs: 4_000 }).catch(() => undefined);
-  }
-  const experiencePriors = new Map<string, ExperienceRoutingPrior>();
-  if (!req.agentAppMode && !hasPriorContext && !plainConversation && isGlobalOrchestrator(agent)) {
-    for (const candidate of installedAgents) {
-      if (isGlobalOrchestrator(candidate)) continue;
-      // The prior must be keyed to the runtime this candidate would actually run
-      // on, so it follows the same pin-vs-assignment precedence as execution.
-      const candidateRuntime = selectInvocationRuntime(
-        runtimes,
-        [{ scope: "agent", targetId: candidate.id }],
-        {
-          pin: req.runtimeSelection,
-          pinIsAuthoritative: isUnattendedExecution(executionContext),
-        },
-      ).choice;
-      if (!candidateRuntime) continue;
-      try {
-        const prior = buildExperienceRoutingPrior({
-          agentId: candidate.id,
-          projectId: invocationProjectId,
-          projectPath: preRouteProjectPath,
-          environment: {
-            platform: process.platform,
-            arch: process.arch,
-            runtimeKind: candidateRuntime.active.kind,
-          },
-          basePackageHash: candidate.packageHash ?? null,
-          task: effectiveUserPrompt,
-        });
-        if (prior) experiencePriors.set(candidate.id, prior);
-      } catch (error) {
-        console.warn(`[experience] pre-route evidence unavailable for ${candidate.slug}: ${error instanceof Error ? error.message : "unknown"}`);
-      }
-    }
-  }
   const autoRoute = req.agentAppMode
     ? null
-    : oneTeamExecutionPolicy || explicitWorkforceGoal || explicitNetworkGoal || hubWorkforceRequested || automaticWorkforceEligible
+    : oneTeamExecutionPolicy || explicitWorkforceGoal || explicitNetworkGoal || hubWorkforceRequested
       ? null
     : req.sessionRouting
       ? null
@@ -1617,16 +1542,7 @@ export async function runMcpInvocation(
       ? selectAppBuilderForAppsGenerate(installedAgents, locale)
     : hasPriorContext
       ? null
-    : !plainConversation && isGlobalOrchestrator(agent)
-      ? // 앱 생성 모드만 무매치 폴백 허용 — 일반 챗은 확신 없으면 위임하지 않고
-        // 오케스트레이터가 그냥 답한다("사용 에이전트: PM Soul" 소음/오배정 반복 제거).
-        // 최종 배정은 상주 판정 모델이 내린다(어휘 점수 0인 전문가도 뽑을 수 있다);
-        // 모델이 없으면 기존 어휘+임베딩 동작이 라벨된 폴백으로 그대로 남는다.
-        (await selectAutoRoutedAgentJudged(effectiveUserPrompt, installedAgents, locale, {
-          allowFallback: false,
-          experiencePriors,
-        })).choice
-      : null;
+    : null;
   if (autoRoute) {
     agent = autoRoute.agent;
     runtimeAgentId = agent.id;
@@ -1704,19 +1620,10 @@ export async function runMcpInvocation(
     });
   }
 
-  // ── Network auto escalation ──
-  // 복합 요청의 자동 Network 개입도 lexical routerAgent 선택이 아니라 Workforce 경로를
-  // 사용한다. 명시적으로 공급된 routerAgent는 기존 호환 실행을 위해 그대로 보존한다.
+  // Network is an explicit per-turn override. Absence means the current
+  // One/project controller decides with its supplied project roster; Main never
+  // activates a global lexical route.
   let routerAgent = req.agentAppMode ? undefined : req.routerAgent;
-  if (!explicitWorkforceGoal && !explicitNetworkGoal && !routerAgent && automaticWorkforceEligible) {
-    explicitWorkforceGoal = effectiveUserPrompt;
-    sink({
-      kind: "tool-use",
-      status: locale === "ko"
-        ? "Network 자동 개입을 Agent Workforce 온톨로지로 구성합니다."
-        : "Building the Network auto-route through Agent Workforce Ontology.",
-    });
-  }
 
   const runtimeTargets = [
     { scope: "agent" as const, targetId: agent.id },

@@ -6,4 +6,3 @@ export { selectModules, type SelectOptions } from "./discovery";
 export { assembleSystemPrompt, type AssembleResult } from "./assemble";
 export { AUTOMATION_SUPERVISOR_SYSTEM_AGENT } from "./automation-supervisor";
 export { SYSTEM_OPTIMIZER_SYSTEM_AGENT, buildSystemOptimizerPrompt } from "./system-optimizer";
-export { runRuntimeDoctor, classifyAutomationFailure, type DoctorReport } from "./runtime-doctor";

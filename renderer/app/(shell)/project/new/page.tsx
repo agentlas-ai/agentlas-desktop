@@ -6,6 +6,7 @@ import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import type {
   FsPathGrant,
   InstalledAgent,
@@ -20,6 +21,7 @@ const PROJECT_DRAFT_KEY = "agentlas.project-create.draft.v1";
 interface PersistedProjectDraft {
   step: DraftStep;
   name: string;
+  nameEdited: boolean;
   systemPrompt: string;
   sourceType: ProjectSourceType;
   githubUrl: string;
@@ -33,6 +35,7 @@ export default function NewProjectPage() {
   const ko = locale === "ko";
   const [step, setStep] = useState<DraftStep>("source");
   const [name, setName] = useState("");
+  const [nameEdited, setNameEdited] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [sourceType, setSourceType] = useState<ProjectSourceType>("local");
   const [githubUrl, setGithubUrl] = useState("");
@@ -49,6 +52,11 @@ export default function NewProjectPage() {
   const [needsHelp, setNeedsHelp] = useState(false);
   const [draftHydrated, setDraftHydrated] = useState(false);
 
+  function recoverMissingBridge(scope: string) {
+    setNeedsHelp(true);
+    requestOneOperationalRecovery(scope, new Error("Desktop bridge unavailable"));
+  }
+
   useEffect(() => {
     try {
       const raw = window.sessionStorage.getItem(PROJECT_DRAFT_KEY);
@@ -56,6 +64,7 @@ export default function NewProjectPage() {
       const draft = JSON.parse(raw) as Partial<PersistedProjectDraft>;
       if (draft.step === "source" || draft.step === "instructions" || draft.step === "agents") setStep(draft.step);
       if (typeof draft.name === "string") setName(draft.name);
+      if (typeof draft.nameEdited === "boolean") setNameEdited(draft.nameEdited);
       if (typeof draft.systemPrompt === "string") setSystemPrompt(draft.systemPrompt);
       if (draft.sourceType === "local" || draft.sourceType === "github" || draft.sourceType === "sample") setSourceType(draft.sourceType);
       if (typeof draft.githubUrl === "string") setGithubUrl(draft.githubUrl);
@@ -80,6 +89,7 @@ export default function NewProjectPage() {
     const draft: PersistedProjectDraft = {
       step,
       name,
+      nameEdited,
       systemPrompt,
       sourceType,
       githubUrl,
@@ -91,11 +101,14 @@ export default function NewProjectPage() {
     } catch {
       // A draft is a convenience only; storage failure must not block project creation.
     }
-  }, [agentPool, draftHydrated, githubUrl, name, sampleName, sourceType, step, systemPrompt]);
+  }, [agentPool, draftHydrated, githubUrl, name, nameEdited, sampleName, sourceType, step, systemPrompt]);
 
   useEffect(() => {
     const api = ipc();
-    if (!api) return;
+    if (!api) {
+      recoverMissingBridge("project-create-agent-list");
+      return;
+    }
     void api.team.list().then((list) => setAgents(visibleAgents(list))).catch(() => setNeedsHelp(true));
   }, []);
 
@@ -207,7 +220,10 @@ export default function NewProjectPage() {
 
   async function chooseFolder() {
     const api = ipc();
-    if (!api) return;
+    if (!api) {
+      recoverMissingBridge("project-create-folder");
+      return;
+    }
     setNeedsHelp(false);
     try {
       const picked = await api.workspace.selectFolder();
@@ -215,7 +231,7 @@ export default function NewProjectPage() {
       setFolderGrant(picked);
       setFolderPath(picked.path);
       setGithubConnectedUrl("");
-      if (!name.trim()) setName(picked.path.split(/[\\/]/).filter(Boolean).at(-1) ?? "");
+      if (!nameEdited) setName(picked.path.split(/[\\/]/).filter(Boolean).at(-1) ?? "");
     } catch {
       setNeedsHelp(true);
     }
@@ -223,7 +239,11 @@ export default function NewProjectPage() {
 
   async function connectGithub() {
     const api = ipc();
-    if (!api || !githubUrl.trim() || busy) return;
+    if (!api) {
+      recoverMissingBridge("project-create-github");
+      return;
+    }
+    if (!githubUrl.trim() || busy) return;
     setBusy(true);
     setNeedsHelp(false);
     try {
@@ -233,9 +253,10 @@ export default function NewProjectPage() {
         setGithubConnectedUrl(result.repositoryUrl);
         setFolderGrant(result.folderGrant);
         setFolderPath(result.folderGrant.path);
-        if (!name.trim()) setName(result.folderGrant.path.split(/[\\/]/).filter(Boolean).at(-1) ?? "");
+        if (!nameEdited) setName(result.folderGrant.path.split(/[\\/]/).filter(Boolean).at(-1) ?? "");
       } else if (result.status === "action_required") {
         setNeedsHelp(true);
+        requestOneOperationalRecovery("project-create-github", result);
       }
     } catch {
       setNeedsHelp(true);
@@ -246,7 +267,11 @@ export default function NewProjectPage() {
 
   async function submit() {
     const api = ipc();
-    if (!api || !name.trim() || agentPool.length === 0 || busy) return;
+    if (!api) {
+      recoverMissingBridge("project-create-submit");
+      return;
+    }
+    if (!name.trim() || agentPool.length === 0 || busy) return;
     setBusy(true);
     setNeedsHelp(false);
     try {
@@ -287,12 +312,19 @@ export default function NewProjectPage() {
       </header>
 
       <nav className="project-create-steps" aria-label={ko ? "프로젝트 생성 단계" : "Project setup steps"}>
-        {(["source", "instructions", "agents"] as DraftStep[]).map((item, index) => (
-          <button key={item} type="button" data-active={step === item} onClick={() => setStep(item)}>
+        {(["source", "instructions", "agents"] as DraftStep[]).map((item, index) => {
+          const unavailable = item === "instructions"
+            ? !sourceReady
+            : item === "agents"
+              ? !sourceReady || !name.trim()
+              : false;
+          return (
+          <button key={item} type="button" data-active={step === item} disabled={unavailable} onClick={() => setStep(item)}>
             <span>{index + 1}</span>
             {item === "source" ? (ko ? "소스" : "Source") : item === "instructions" ? (ko ? "프로젝트 지시" : "Instructions") : (ko ? "에이전트" : "Agents")}
           </button>
-        ))}
+          );
+        })}
       </nav>
 
       <main className="project-create-body titlebar-nodrag">
@@ -309,7 +341,10 @@ export default function NewProjectPage() {
                 ["github", "GitHub", ko ? "저장소 주소로 연결" : "Connect with a repository URL"],
                 ["sample", ko ? "샘플로 시작" : "Start with a sample", ko ? "연결 없이 구조를 먼저 경험" : "Explore the structure without a connection"],
               ] as Array<[ProjectSourceType, string, string]>).map(([value, label, detail]) => (
-                <button key={value} type="button" className="project-source-card" data-selected={sourceType === value} onClick={() => setSourceType(value)}>
+                <button key={value} type="button" className="project-source-card" data-selected={sourceType === value} onClick={() => {
+                  setSourceType(value);
+                  if (!nameEdited && value === "sample") setName(sampleName);
+                }}>
                   <strong>{label}</strong><span>{detail}</span>
                 </button>
               ))}
@@ -333,7 +368,11 @@ export default function NewProjectPage() {
             ) : (
               <label className="project-field">
                 <span>{ko ? "샘플 이름" : "Sample name"}</span>
-                <input value={sampleName} onChange={(event) => setSampleName(event.target.value)} placeholder={ko ? "예: 첫 번째 웹앱" : "e.g. My first web app"} />
+                <input value={sampleName} onChange={(event) => {
+                  const next = event.target.value;
+                  setSampleName(next);
+                  if (!nameEdited) setName(next);
+                }} placeholder={ko ? "예: 첫 번째 웹앱" : "e.g. My first web app"} />
               </label>
             )}
             <FooterAction disabled={!sourceReady} onNext={() => setStep("instructions")} ko={ko} />
@@ -347,7 +386,7 @@ export default function NewProjectPage() {
             </div>
             <label className="project-field">
               <span>{ko ? "프로젝트 이름" : "Project name"}</span>
-              <input value={name} onChange={(event) => setName(event.target.value)} autoFocus />
+              <input value={name} onChange={(event) => { setName(event.target.value); setNameEdited(true); }} autoFocus />
             </label>
             <label className="project-field">
               <span>{ko ? "프로젝트 시스템 프롬프트" : "Project system prompt"}</span>
@@ -425,8 +464,7 @@ export default function NewProjectPage() {
 
         {needsHelp ? (
           <aside className="project-help-slot" aria-live="polite">
-            <div data-one-content-slot />
-            <button type="button" onClick={() => navigate("/one")}>{ko ? "One과 해결하기" : "Resolve with One"}</button>
+            <div data-one-content-slot data-capability="project-create-recovery" />
           </aside>
         ) : null}
       </main>

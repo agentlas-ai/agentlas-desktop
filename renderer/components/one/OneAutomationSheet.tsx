@@ -14,6 +14,7 @@ import {
   type FormEvent,
 } from "react";
 import { ipc } from "@/lib/ipc";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { tFor } from "@/lib/i18n";
 import type { Automation, AutomationCreateInput } from "@/lib/types";
 import styles from "./OneAutomationSheet.module.css";
@@ -153,7 +154,8 @@ export function OneAutomationSheet({ open, locale, onClose, onOpenAutomation }: 
       const automation = await api.automations.create(input);
       setCreated(automation);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-automation-create", cause);
+      setError(null);
     } finally {
       setBusy(false);
     }

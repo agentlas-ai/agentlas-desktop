@@ -4,11 +4,12 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { IconPlus, IconTrash } from "@/components/Icon";
+import { IconArrowLeft, IconPlus, IconTrash } from "@/components/Icon";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import type {
   CanonicalTask,
   InstalledAgent,
@@ -42,18 +43,24 @@ function ProjectPage() {
   const [draggedMemberId, setDraggedMemberId] = useState<string | null>(null);
   const pointerDragRef = useRef<{ kind: "agent" | "member"; id: string; startX: number; startY: number } | null>(null);
   const [loading, setLoading] = useState(true);
-  const [pageMessage, setPageMessage] = useState("");
+  const [recoveryPending, setRecoveryPending] = useState(false);
+
+  const recoverMissingBridge = useCallback((scope: string) => {
+    setRecoveryPending(true);
+    requestOneOperationalRecovery(scope, new Error("Desktop bridge unavailable"));
+  }, []);
 
   const refresh = useCallback(async () => {
     const api = ipc();
     setLoading(true);
-    setPageMessage("");
-    if (!api || !id) {
-      setPageMessage(
-        locale === "en"
-          ? "Project could not be opened. Nothing changed."
-          : "프로젝트를 열 수 없습니다. 바뀐 내용은 없습니다.",
-      );
+    setRecoveryPending(false);
+    if (!id) {
+      navigate("/dashboard", "replace");
+      setLoading(false);
+      return;
+    }
+    if (!api) {
+      recoverMissingBridge("project-detail-load");
       setLoading(false);
       return;
     }
@@ -65,7 +72,7 @@ function ProjectPage() {
         api.projects.timeline(id).catch(() => null),
       ]);
       if (!p) {
-        navigate("/", "replace");
+        navigate("/dashboard", "replace");
         return;
       }
       setProject(p);
@@ -76,23 +83,13 @@ function ProjectPage() {
       setTasks(taskRows.filter((task) => task.projectId === id));
       setAgents(visibleAgents(ag));
       setTimeline(timelineResult);
-      if (!timelineResult) {
-        setPageMessage(
-          locale === "en"
-            ? "The project opened, but its work timeline could not be read."
-            : "프로젝트는 열었지만 작업 타임라인을 읽지 못했습니다.",
-        );
-      }
+      if (!timelineResult) setRecoveryPending(true);
     } catch {
-      setPageMessage(
-        locale === "en"
-          ? "Project could not be loaded. Nothing changed."
-          : "프로젝트를 불러오지 못했습니다. 바뀐 내용은 없습니다.",
-      );
+      setRecoveryPending(true);
     } finally {
       setLoading(false);
     }
-  }, [id, locale]);
+  }, [id, recoverMissingBridge]);
 
   useEffect(() => {
     void refresh();
@@ -100,32 +97,36 @@ function ProjectPage() {
 
   async function startNewChat() {
     const api = ipc();
-    if (!api || !project) return;
+    if (!api) {
+      recoverMissingBridge("project-detail-new-task");
+      return;
+    }
+    if (!project) return;
     try {
       const target = await api.tasks.createProject({ projectId: project.id });
       window.dispatchEvent(new Event("agentlas:tasks-changed"));
       navigate(`/workspace/task?id=${encodeURIComponent(target.chatId)}&task=${encodeURIComponent(target.taskId)}&projectId=${encodeURIComponent(project.id)}`);
     } catch {
-      setPageMessage("");
+      setRecoveryPending(true);
     }
   }
 
   async function saveNote() {
     const api = ipc();
-    if (!api || !project) return;
+    if (!api) {
+      recoverMissingBridge("project-detail-save-instructions");
+      return;
+    }
+    if (!project) return;
     try {
       const updated = await api.projects.update(project.id, {
         systemPrompt: noteDraft.trim() || null,
       });
       setProject(updated);
       setEditingNote(false);
-      setPageMessage("");
+      setRecoveryPending(false);
     } catch {
-      setPageMessage(
-        locale === "en"
-          ? "The project instructions were not saved."
-          : "프로젝트 지시를 저장하지 못했습니다.",
-      );
+      setRecoveryPending(true);
     }
   }
 
@@ -233,42 +234,55 @@ function ProjectPage() {
 
   async function saveTeam() {
     const api = ipc();
-    if (!api || !project || agentPoolDraft.length === 0) return;
+    if (!api) {
+      recoverMissingBridge("project-detail-save-team");
+      return;
+    }
+    if (!project || agentPoolDraft.length === 0) return;
     try {
       const updated = await api.projects.update(project.id, { agentPool: agentPoolDraft });
       setProject(updated);
       setEditingTeam(false);
-      setPageMessage("");
+      setRecoveryPending(false);
     } catch {
-      setPageMessage(locale === "en" ? "The project team was not saved." : "프로젝트 팀을 저장하지 못했습니다.");
+      setRecoveryPending(true);
     }
   }
 
   async function removeProject() {
     const api = ipc();
-    if (!api || !project) return;
+    if (!api) {
+      recoverMissingBridge("project-detail-delete");
+      return;
+    }
+    if (!project) return;
     if (!confirm(t("project.confirm_delete", { name: project.name }))) return;
     try {
       await api.projects.remove(project.id);
-      navigate("/", "replace");
+      navigate("/dashboard", "replace");
     } catch {
-      setPageMessage(
-        locale === "en"
-          ? "The project was not deleted."
-          : "프로젝트를 삭제하지 못했습니다.",
-      );
+      setRecoveryPending(true);
     }
   }
 
   if (loading || !project) {
     return (
       <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
+        <header className="project-detail-header titlebar-drag">
+          <button
+            type="button"
+            className="project-detail-back titlebar-nodrag"
+            onClick={() => navigate("/dashboard")}
+            aria-label={locale === "ko" ? "대시보드로 돌아가기" : "Back to Dashboard"}
+          >
+            <IconArrowLeft size={16} />
+            <span>{locale === "ko" ? "대시보드" : "Dashboard"}</span>
+          </button>
+        </header>
         <section style={{ maxWidth: 720, margin: "24px auto", padding: "0 24px" }}>
-          <div style={pageNotice}>
-            {loading
-              ? locale === "en" ? "Loading project…" : "프로젝트를 불러오는 중입니다…"
-              : pageMessage || (locale === "en" ? "Project could not be opened." : "프로젝트를 열 수 없습니다.")}
-          </div>
+          {loading
+            ? <div style={pageNotice}>{locale === "en" ? "Loading project…" : "프로젝트를 불러오는 중입니다…"}</div>
+            : <div data-one-content-slot data-capability="project-detail-recovery" />}
         </section>
       </div>
     );
@@ -280,7 +294,7 @@ function ProjectPage() {
   return (
     <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
       <header
-        className="titlebar-drag"
+        className="project-detail-header titlebar-drag"
         style={{
           padding: "16px 32px",
           borderBottom: "var(--hairline)",
@@ -291,6 +305,15 @@ function ProjectPage() {
           gap: 12,
         }}
       >
+        <button
+          type="button"
+          className="project-detail-back titlebar-nodrag"
+          onClick={() => navigate("/dashboard")}
+          aria-label={locale === "ko" ? "대시보드로 돌아가기" : "Back to Dashboard"}
+        >
+          <IconArrowLeft size={16} />
+          <span>{locale === "ko" ? "대시보드" : "Dashboard"}</span>
+        </button>
         <div style={{ flex: 1 }}>
           <div style={eyebrowStyle}>{t("project.kind")}</div>
           <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 18, fontWeight: 700 }}>
@@ -316,9 +339,9 @@ function ProjectPage() {
         </button>
       </header>
 
-      {pageMessage && (
+      {recoveryPending && (
         <section style={{ maxWidth: 1280, margin: "16px auto 0", padding: "0 24px" }}>
-          <div style={pageNotice}>{pageMessage}</div>
+          <div data-one-content-slot data-capability="project-detail-recovery" />
         </section>
       )}
 
@@ -507,7 +530,7 @@ function ProjectPage() {
               {project.sourceType === "github" ? project.sourceRef : (project.folderPath || project.sourceRef)?.split(/[\\/]/).filter(Boolean).at(-1)}
             </span> : null}
           </section>
-          <ProjectTimelinePanel timeline={timeline} locale={locale} />
+          <ProjectTimelinePanel timeline={timeline} locale={locale} recoveryPending={recoveryPending} />
         </aside>
       </section>
 
@@ -635,9 +658,11 @@ function ProjectPage() {
 function ProjectTimelinePanel({
   timeline,
   locale,
+  recoveryPending,
 }: {
   timeline: ProjectTimelineSnapshot | null;
   locale: string;
+  recoveryPending: boolean;
 }) {
   const groups = useMemo(
     () => groupTimelineEntries(timeline?.entries ?? [], locale),
@@ -658,9 +683,7 @@ function ProjectTimelinePanel({
         </p>
       </header>
       {!timeline ? (
-        <p style={timelineEmptyStyle}>
-          {locale === "en" ? "Timeline unavailable." : "타임라인을 불러올 수 없습니다."}
-        </p>
+        recoveryPending ? <div data-one-content-slot data-capability="project-timeline-recovery" /> : null
       ) : groups.length === 0 ? (
         <p style={timelineEmptyStyle}>
           {locale === "en" ? "No work recorded yet." : "아직 기록된 작업이 없습니다."}

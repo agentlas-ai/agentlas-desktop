@@ -181,10 +181,9 @@ export function RuntimeControl() {
       setRuntimes(detected);
       setMessage("");
     } catch {
-      setRuntimes([]);
-      setMessage(
-        ko ? "런타임을 불러오지 못했습니다." : "Could not load runtimes.",
-      );
+      // Keep the last verified projection. Operational evidence stays in Main
+      // for One recovery and never becomes dashboard copy.
+      setMessage("");
     } finally {
       setLoading(false);
     }
@@ -249,12 +248,8 @@ export function RuntimeControl() {
       setRuntimes(detected);
       setMessage(success);
       return true;
-    } catch (err) {
-      setMessage(
-        ko
-          ? `풀을 저장하지 못했습니다. ${String(err)}`
-          : `Could not save the pool. ${String(err)}`,
-      );
+    } catch {
+      setMessage("");
       return false;
     } finally {
       setBusy(false);
@@ -399,12 +394,8 @@ export function RuntimeControl() {
           ? "연결된 런타임과 현재 역할을 기준으로 우선순위를 자동 설정했습니다."
           : "Priority tables were configured from connected runtimes and current roles.",
       );
-    } catch (err) {
-      setMessage(
-        ko
-          ? `자동 설정을 완료하지 못했습니다. ${String(err)}`
-          : `Could not complete automatic setup. ${String(err)}`,
-      );
+    } catch {
+      setMessage("");
     } finally {
       setBusy(false);
     }
@@ -873,15 +864,16 @@ export function RuntimeControl() {
         <button
           type="button"
           className="dashboard-runtime-auto"
+          aria-label={ko ? "연결된 모델로 역할 우선순위 자동 설정" : "Automatically set role priorities from connected models"}
           onClick={() => void autoConfigureRoles()}
           disabled={busy || runtimes.length === 0}
           title={
             ko
               ? "현재 역할 모델을 1순위로 두고 연결된 런타임을 후순위에 배치합니다."
-              : "Keeps current role models first and adds connected runtimes as fallbacks."
+            : "Keeps current role models first and adds connected runtimes in order."
           }
         >
-          {busy ? (ko ? "설정 중…" : "Setting…") : "Auto"}
+          {busy ? (ko ? "설정 중…" : "Setting…") : (ko ? "자동 설정" : "Auto set")}
         </button>
       </div>
       {loading ? (

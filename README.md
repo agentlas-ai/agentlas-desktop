@@ -78,6 +78,10 @@ authority for which version is actually public, stable, and downloadable.
   verdict and fail closed when unavailable; automation evidence no longer
   rewrites agent prompts from error strings or counters. Runtime continuity and
   Dashboard readiness also report observed state without fabricated fallbacks.
+  Consequential recovery decisions now stay in a model-owned bottom sheet,
+  project detail and Work have a direct Dashboard return, Dashboard's Auto
+  control persists ordered runtime priorities, and update handoff retries avoid
+  stranding an installed user between versions.
   This release binds Agentlas OS v1.1.92 at
   `2eb39adf572bc3e235866002b3143936240f76bc`. Passing these source gates does not prove a published release: the Releases page stays the authority for what is actually downloadable.
 

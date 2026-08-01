@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { ipc } from "@/lib/ipc";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { tFor, type Locale } from "@/lib/i18n";
 import type {
   OneMemoryCandidate,
@@ -42,7 +43,11 @@ export function OneMemoryCandidateCard({
 
   const save = async () => {
     const api = ipc();
-    if (!api || busy) return;
+    if (busy) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-memory-candidate", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -55,7 +60,8 @@ export function OneMemoryCandidateCard({
       await refresh();
     } catch (cause) {
       await refresh().catch(() => undefined);
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-memory-candidate", cause);
+      setError(null);
     } finally {
       setBusy(false);
     }
@@ -63,7 +69,11 @@ export function OneMemoryCandidateCard({
 
   const reject = async () => {
     const api = ipc();
-    if (!api || busy) return;
+    if (busy) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-memory-candidate", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -76,7 +86,8 @@ export function OneMemoryCandidateCard({
       await refresh();
     } catch (cause) {
       await refresh().catch(() => undefined);
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-memory-candidate", cause);
+      setError(null);
     } finally {
       setBusy(false);
     }

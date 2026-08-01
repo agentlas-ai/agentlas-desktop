@@ -534,56 +534,19 @@ export function styleById(id: string | undefined | null): StyleDna | null {
   return (STYLES as Record<string, StyleDna>)[id] ?? PALETTE_MAP[id] ?? null;
 }
 
-// 주제 → 스타일 라우터(아트디렉션 라우터의 스타일 축 확장). 명시 선택이 항상 우선.
-const STYLE_HINTS: Array<{ id: StyleId; rx: RegExp }> = [
-  // 비즈니스·보고서 계열은 컨설팅 문법이 1순위(벤치마크: 중기부 업무보고·혁신의숲 IR).
-  { id: "consulting", rx: /보고|업무보고|IR|사업계획|재무|분기|실적|컨설팅|운영|지표|전략|투자|정부|부처|정책|리뷰|report|briefing|business plan|finance|quarterly|earnings|consult|operations|kpi|strategy|invest|policy|review/i },
-  { id: "didot", rx: /패션|뷰티|럭셔리|명품|브랜딩|매거진|문화|예술|전시|웨딩|fashion|beauty|luxury|magazine|culture|art|gallery|wedding|couture/i },
-  { id: "bauhaus", rx: /디자인|교육|워크숍|창의|아이디어|건축|스튜디오|design|education|workshop|creative|architecture|studio|maker/i },
-  { id: "brutal", rx: /게임|스트리트|힙합|이스포츠|해커톤|크립토|밈|스타트업 위크|game|street|hip.?hop|esports|hackathon|crypto|meme|rave/i },
-  { id: "hara", rx: /미니멀|철학|에세이|명상|웰니스|공예|차분|minimal|philosophy|essay|meditation|wellness|craft|calm|zen/i },
-  { id: "vignelli", rx: /사이니지|타임테이블|시각체계|signage|timetable|grid system/i },
-  { id: "swiss", rx: /피치|테크|제품|런칭|컨퍼런스|세미나|pitch|tech|product|launch|conference|seminar|keynote/i },
-];
-
 /**
- * 프롬프트 → 스타일 (결정적 폴백). 매치 없으면 null(레거시 모드 룩 유지) — 기존
- * 덱/기존 동작 보존이 기본값이고, 스타일은 명시 선택 또는 주제 매치로만 켜진다.
- * 최종 결정은 routeStyleJudged가 상주 판정 모델로 내린다; 이 함수는 힌트이자
- * 라벨된 폴백일 뿐이다.
- */
-export function routeStyle(prompt: string): StyleId | null {
-  for (const h of STYLE_HINTS) if (h.rx.test(prompt)) return h.id;
-  return null;
-}
-
-const STYLE_JUDGE_HINTS: Array<{ label: StyleId | "none"; words: string[] }> = STYLE_HINTS.map((hint) => ({
-  label: hint.id,
-  words: hint.rx.source.split("|")
-    .map((word) => word.replace(/\\b|\\s\*|[\\^$*+?.{}[\]()]/g, "").trim())
-    .filter((word) => word.length >= 2)
-    .slice(0, 10),
-}));
-
-/**
- * Judged style routing via the renderer judgment bridge. Explicit user choice
- * always wins upstream (closed-form); the judged verdict decides here. With NO
- * bridge/model verdict we return null (the neutral default/legacy look) rather
- * than keyword-inferring a style — the keyword router survives only as the
- * judge's prior. The trex flow already surfaces a connect-a-model state when the
- * subsequent content generation finds no model.
+ * The connected model alone decides automatic style. Explicit user choice wins
+ * upstream; if no model verdict exists, no semantic choice is fabricated.
  */
 export async function routeStyleJudged(prompt: string): Promise<StyleId | null> {
   const trimmed = prompt.trim();
   if (!trimmed) return null;
-  const lexical = routeStyle(prompt);
   const { judgeLabelViaBridge } = await import("@/lib/judgment");
   const judged = await judgeLabelViaBridge<StyleId | "none">({
     kind: "trex-style-route",
-    labels: [...STYLE_HINTS.map((hint) => hint.id), "none"],
+    labels: [...STYLE_IDS, "none"],
     input: trimmed.slice(0, 2_000),
-    fallback: lexical ?? "none",
-    hints: STYLE_JUDGE_HINTS,
+    fallback: "none",
     timeoutMs: 5_000,
   });
   if (judged.source !== "llm") return null;

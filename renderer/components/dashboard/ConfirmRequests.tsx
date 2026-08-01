@@ -57,6 +57,20 @@ export function ConfirmRequests() {
   }, [load]);
   useVisibleInterval(() => void load(), POLL_MS);
 
+  const openConfirmation = useCallback(async (item: PendingConfirmation) => {
+    const api = ipc();
+    if (!api) return;
+    const chat = await api.chats.get(item.chatId).catch(() => null);
+    if (chat?.originSurface === "one") {
+      const task = await api.tasks.findForChat(item.chatId).catch(() => null);
+      navigate(task
+        ? `/one?task=${encodeURIComponent(task.id)}`
+        : `/one?chat=${encodeURIComponent(item.chatId)}`);
+      return;
+    }
+    navigate(`/workspace/task?id=${encodeURIComponent(item.chatId)}`);
+  }, []);
+
   const count = items?.length ?? 0;
 
   return (
@@ -125,7 +139,7 @@ export function ConfirmRequests() {
               </div>
             </div>
             <button
-              onClick={() => navigate(`/workspace/task?id=${it.chatId}`)}
+              onClick={() => void openConfirmation(it)}
               className="titlebar-nodrag"
               data-dashboard-action="true"
             >

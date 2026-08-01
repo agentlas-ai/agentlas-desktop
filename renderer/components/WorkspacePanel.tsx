@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import type { DirListing, FsReadScope, TextFilePreview, WorkspaceNode } from "@/lib/types";
 import {
   IconChevronRight,
@@ -38,6 +39,8 @@ interface Props {
   embedded?: boolean;
   /** Notify a parent viewer panel when a file is selected. */
   onOpenFilePreview?: (preview: WorkspaceFilePreview) => void;
+  /** Main-owned project source that can restore an older task's missing folder binding. */
+  projectFolder?: { projectId: string; projectName: string } | null;
 }
 
 export interface WorkspaceFilePreview {
@@ -53,8 +56,8 @@ export interface WorkspaceFilePreview {
   reason?: TextFilePreview["reason"];
 }
 
-export function WorkspacePanel({ chatId, onClose, persistence, embedded = false, onOpenFilePreview }: Props) {
-  const { t, locale } = useT();
+export function WorkspacePanel({ chatId, onClose, persistence, embedded = false, onOpenFilePreview, projectFolder = null }: Props) {
+  const { t } = useT();
   // persistence를 ref로 들고 effect 의존성을 [chatId]로 유지 (인라인 객체 재생성으로 인한 루프 방지).
   const persistRef = useRef(persistence);
   persistRef.current = persistence;
@@ -65,12 +68,13 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
   const [expanded, setExpanded] = useState<Map<string, DirListing>>(new Map());
   const [selected, setSelected] = useState<string | null>(null);
   const [preview, setPreview] = useState<TextFilePreview | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [recoveryPending, setRecoveryPending] = useState(false);
   const dragStateRef = useRef<{ startX: number; startWidth: number; currentWidth: number } | null>(null);
-  const errorPrefix = locale === "ko" ? "폴더/파일을 열 수 없습니다" : "Could not open folder or file";
-  const setPanelError = useCallback((err: unknown) => {
-    setError(`${errorPrefix}: ${err instanceof Error ? err.message : String(err)}`);
-  }, [errorPrefix]);
+  const requestBridgeRecovery = useCallback((scope: string) => {
+    setRecoveryPending(true);
+    requestOneOperationalRecovery(scope, new Error("Desktop bridge unavailable"));
+  }, []);
+  const markForOneRecovery = useCallback(() => setRecoveryPending(true), []);
 
   // 너비 영구 저장
   useEffect(() => {
@@ -87,6 +91,7 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
   useEffect(() => {
     const api = ipc();
     if (!api || !chatId) {
+      if (chatId && !api) requestBridgeRecovery("workspace-load");
       setRootPath(null);
       setReadScope(null);
       setRootListing(null);
@@ -98,7 +103,7 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
     let cancelled = false;
     void (async () => {
       try {
-        setError(null);
+        setRecoveryPending(false);
         const folder = persistRef.current
           ? await persistRef.current.load()
           : await api.workspace.get(chatId);
@@ -117,23 +122,26 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
         setExpanded(new Map());
         setSelected(null);
         setPreview(null);
-      } catch (err) {
+      } catch {
         if (!cancelled) {
           setRootListing(null);
-          setPanelError(err);
+          markForOneRecovery();
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [chatId, setPanelError]);
+  }, [chatId, markForOneRecovery, requestBridgeRecovery]);
 
   const pickFolder = useCallback(async () => {
     const api = ipc();
-    if (!api || !chatId) return;
+    if (!api || !chatId) {
+      if (chatId && !api) requestBridgeRecovery("workspace-pick-folder");
+      return;
+    }
     try {
-      setError(null);
+      setRecoveryPending(false);
       const picked = await api.fs.pickDirectory();
       if (!picked) return;
       setRootPath(picked.path);
@@ -145,16 +153,47 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
       setPreview(null);
       if (persistRef.current) await persistRef.current.save(picked.path);
       else await api.workspace.set(chatId, picked);
-    } catch (err) {
-      setPanelError(err);
+    } catch {
+      markForOneRecovery();
     }
-  }, [chatId, setPanelError]);
+  }, [chatId, markForOneRecovery, requestBridgeRecovery]);
+
+  const useProjectFolder = useCallback(async () => {
+    const api = ipc();
+    if (!api || !chatId || !projectFolder) {
+      if (!api) requestBridgeRecovery("workspace-project-folder");
+      return;
+    }
+    try {
+      setRecoveryPending(false);
+      await api.workspace.setFromProject(chatId, projectFolder.projectId);
+      const folder = await api.workspace.get(chatId);
+      if (!folder) {
+        const cause = new Error("Project folder binding was not persisted");
+        requestOneOperationalRecovery("workspace-project-folder", cause);
+        throw cause;
+      }
+      const scope: FsReadScope = { kind: "chat-workspace", chatId };
+      const listing = await api.fs.listDirectory(folder, scope, false);
+      setRootPath(folder);
+      setReadScope(scope);
+      setRootListing(listing);
+      setExpanded(new Map());
+      setSelected(null);
+      setPreview(null);
+    } catch {
+      markForOneRecovery();
+    }
+  }, [chatId, markForOneRecovery, projectFolder, requestBridgeRecovery]);
 
   const refresh = useCallback(async () => {
     const api = ipc();
-    if (!api || !rootPath || !readScope) return;
+    if (!api || !rootPath || !readScope) {
+      if (!api) requestBridgeRecovery("workspace-refresh");
+      return;
+    }
     try {
-      setError(null);
+      setRecoveryPending(false);
       const listing = await api.fs.listDirectory(rootPath, readScope, false);
       setRootListing(listing);
       // 펼쳐진 디렉터리들도 재요청
@@ -167,16 +206,19 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
         }
       }
       setExpanded(next);
-    } catch (err) {
-      setPanelError(err);
+    } catch {
+      markForOneRecovery();
     }
-  }, [rootPath, readScope, expanded, setPanelError]);
+  }, [rootPath, readScope, expanded, markForOneRecovery, requestBridgeRecovery]);
 
   const toggleDir = useCallback(
     async (node: WorkspaceNode) => {
       if (node.kind !== "dir") return;
       const api = ipc();
-      if (!api || !readScope) return;
+      if (!api || !readScope) {
+        if (!api) requestBridgeRecovery("workspace-open-folder");
+        return;
+      }
       if (expanded.has(node.path)) {
         const next = new Map(expanded);
         next.delete(node.path);
@@ -184,23 +226,26 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
         return;
       }
       try {
-        setError(null);
+        setRecoveryPending(false);
         const listing = await api.fs.listDirectory(node.path, readScope, false);
         const next = new Map(expanded);
         next.set(node.path, listing);
         setExpanded(next);
-      } catch (err) {
-        setPanelError(err);
+      } catch {
+        markForOneRecovery();
       }
     },
-    [expanded, readScope, setPanelError],
+    [expanded, markForOneRecovery, readScope, requestBridgeRecovery],
   );
 
   const openFile = useCallback(async (node: WorkspaceNode) => {
     const api = ipc();
-    if (!api || !readScope) return;
+    if (!api || !readScope) {
+      if (!api) requestBridgeRecovery("workspace-open-file");
+      return;
+    }
     setSelected(node.path);
-    setError(null);
+    setRecoveryPending(false);
     if (!node.isTextLike) {
       const binaryPreview: TextFilePreview = { path: node.path, content: "", truncated: false, size: node.size, reason: "binary" };
       setPreview(binaryPreview);
@@ -211,10 +256,10 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
       const text = await api.fs.readTextFile(node.path, readScope);
       setPreview(text);
       onOpenFilePreview?.(toWorkspaceFilePreview(node, text));
-    } catch (err) {
-      setPanelError(err);
+    } catch {
+      markForOneRecovery();
     }
-  }, [onOpenFilePreview, readScope, setPanelError]);
+  }, [markForOneRecovery, onOpenFilePreview, readScope, requestBridgeRecovery]);
 
   // 좌측 가장자리 드래그 핸들
   const onResizeStart = useCallback(
@@ -371,13 +416,14 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
       </div>
 
       {/* 본문 — 빈 상태 / 트리 */}
-      {error && (
-        <div role="alert" style={errorBannerStyle}>
-          {error}
-        </div>
-      )}
+      {recoveryPending && <div data-one-content-slot data-capability="workspace-recovery" />}
       {!rootPath ? (
-        <EmptyState onPick={() => void pickFolder()} t={t} />
+        <EmptyState
+          onPick={() => void pickFolder()}
+          projectName={projectFolder?.projectName ?? null}
+          onUseProjectFolder={projectFolder ? () => void useProjectFolder() : null}
+          t={t}
+        />
       ) : (
         <>
           <div style={{ flex: 1, overflow: "auto", padding: "6px 4px 12px", minHeight: 0 }}>
@@ -403,7 +449,17 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
 }
 
 // ── 빈 상태 ─────────────────────────────────────────────
-function EmptyState({ onPick, t }: { onPick: () => void; t: ReturnType<typeof useT>["t"] }) {
+function EmptyState({
+  onPick,
+  onUseProjectFolder,
+  projectName,
+  t,
+}: {
+  onPick: () => void;
+  onUseProjectFolder: (() => void) | null;
+  projectName: string | null;
+  t: ReturnType<typeof useT>["t"];
+}) {
   return (
     <div
       style={{
@@ -419,8 +475,29 @@ function EmptyState({ onPick, t }: { onPick: () => void; t: ReturnType<typeof us
     >
       <IconFolder size={28} style={{ color: "var(--muted)" }} />
       <div style={{ fontSize: 13, color: "var(--ink-soft)", lineHeight: 1.55, whiteSpace: "pre-line" }}>
-        {t("workspace.empty.body")}
+        {projectName
+          ? (t("workspace.project_folder_available", { name: projectName }))
+          : t("workspace.empty.body")}
       </div>
+      {onUseProjectFolder && (
+        <button
+          type="button"
+          data-workspace-use-project-folder
+          onClick={onUseProjectFolder}
+          style={{
+            padding: "8px 14px",
+            borderRadius: 999,
+            background: "var(--accent)",
+            color: "white",
+            fontSize: 12.5,
+            fontWeight: 700,
+            border: "1px solid var(--accent)",
+            cursor: "pointer",
+          }}
+        >
+          {t("workspace.use_project_folder")}
+        </button>
+      )}
       <button
         onClick={onPick}
         style={{
@@ -435,7 +512,7 @@ function EmptyState({ onPick, t }: { onPick: () => void; t: ReturnType<typeof us
           cursor: "pointer",
         }}
       >
-        {t("workspace.empty.pick")}
+        {projectName ? t("workspace.choose_other_folder") : t("workspace.empty.pick")}
       </button>
     </div>
   );
@@ -724,15 +801,3 @@ function iconBtn(): React.CSSProperties {
     cursor: "pointer",
   };
 }
-
-const errorBannerStyle: React.CSSProperties = {
-  margin: "8px 10px 0",
-  border: "1px solid color-mix(in srgb, var(--red-deep, #b4533a) 28%, var(--paper-edge))",
-  borderRadius: 8,
-  background: "color-mix(in srgb, var(--red-deep, #b4533a) 8%, var(--paper))",
-  color: "var(--red-deep, #b4533a)",
-  padding: "8px 10px",
-  fontSize: 11.5,
-  lineHeight: 1.45,
-  overflowWrap: "anywhere",
-};

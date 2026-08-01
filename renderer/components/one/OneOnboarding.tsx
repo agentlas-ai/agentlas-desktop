@@ -29,6 +29,7 @@ import {
 } from "@shared/one-onboarding";
 import type { RuntimeKind, RuntimeStatus, UsageSnapshot } from "@shared/types";
 import { tFor } from "@/lib/i18n";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import styles from "./OneOnboarding.module.css";
 
 type Props = {
@@ -91,10 +92,6 @@ const CONCEPTS = [
     examples: "Web · App · Vercel",
   },
 ] as const;
-
-function errorMessage(_error: unknown, fallback: string): string {
-  return fallback;
-}
 
 function BrandMark({ icon }: { icon: SimpleIcon }) {
   return (
@@ -338,6 +335,10 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
   const selectionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const selectionPendingRef = useRef(0);
   const providerActionRef = useRef(false);
+  const recover = useCallback((scope: string, cause: unknown) => {
+    requestOneOperationalRecovery(`one-onboarding-${scope}`, cause);
+    setError(null);
+  }, []);
 
   const visible = Boolean(state && !dismissRequested && (
     finishing
@@ -356,7 +357,10 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
 
   useEffect(() => {
     const api = ipc();
-    if (!api?.oneOnboarding) return;
+    if (!api?.oneOnboarding) {
+      recover("load", new Error("Desktop bridge unavailable"));
+      return;
+    }
     let cancelled = false;
     api.oneOnboarding.getState().then((next) => {
       if (cancelled) return;
@@ -366,9 +370,9 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       setPreviewSubscription(next.subscription);
       setPreviewProvider(next.provider);
       setShowResume(next.status === "in-progress");
-    }).catch((cause) => setError(errorMessage(cause, tFor(locale, "one.onb.err.load"))));
+    }).catch((cause) => recover("load", cause));
     return () => { cancelled = true; };
-  }, [locale, loadNonce]);
+  }, [loadNonce, recover]);
 
   useEffect(() => onVisibilityChange?.(visible), [onVisibilityChange, visible]);
 
@@ -515,13 +519,13 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
     try {
       await applyPatch({ ...patch, currentScene: next });
     } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.save_progress")));
+      recover("save-progress", cause);
     }
-  }, [applyPatch, locale, play, replay]);
+  }, [applyPatch, play, recover, replay]);
 
   const enqueueSelectionPatch = useCallback((patch: UpdateOneOnboardingInput["patch"]) => {
     const api = ipc();
-    if (!api?.oneOnboarding) return Promise.resolve<OneOnboardingState | null>(null);
+    if (!api?.oneOnboarding) return Promise.reject(new Error("Desktop bridge unavailable"));
     selectionPendingRef.current += 1;
     setBusy(true);
     const task = selectionQueueRef.current.then(async () => {
@@ -551,13 +555,13 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       play("tap");
     } catch (cause) {
       setPreviewSubscription(state?.subscription ?? null);
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.save_selection")));
+      recover("save-selection", cause);
     }
   };
 
   const detectProvider = useCallback(async (provider: Exclude<OneOnboardingProvider, null>, force = true) => {
     const api = ipc();
-    if (!api) return false;
+    if (!api) throw new Error("Desktop bridge unavailable");
     const facts = await api.runtime.detect(force);
     setRuntimeFacts(facts);
     return facts.some((runtime) => providerMatchesRuntime(provider, runtime));
@@ -576,13 +580,13 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       play("tap");
     } catch (cause) {
       setPreviewProvider(state?.provider ?? null);
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.save_provider")));
+      recover("save-provider", cause);
     }
   };
 
   const advanceAfterProviderSetup = useCallback(async (current: OneOnboardingState) => {
     const api = ipc();
-    if (!api?.oneOnboarding) return current;
+    if (!api?.oneOnboarding) throw new Error("Desktop bridge unavailable");
     if (current.experience !== "expert") {
       const next = await api.oneOnboarding.update({ expectedVersion: current.version, patch: { currentScene: "s4" } });
       setState(next);
@@ -606,7 +610,11 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
     if (providerActionRef.current) return;
     const api = ipc();
     const entry = PROVIDERS.find((item) => item.id === provider);
-    if (!api || !entry) return;
+    if (!entry) return;
+    if (!api) {
+      recover("connect-provider", new Error("Desktop bridge unavailable"));
+      return;
+    }
     providerActionRef.current = true;
     setBusy(true);
     setError(null);
@@ -648,7 +656,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
         ? tFor(locale, "one.onb.rt.kimi_limited")
         : login.message || tFor(locale, "one.onb.rt.finish_signin"));
     } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.start_connection")));
+      recover("start-connection", cause);
     } finally {
       providerActionRef.current = false;
       setBusy(false);
@@ -669,7 +677,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       const login = await api.runtime.openCliLogin(entry.runtime as "claude-code" | "codex" | "gemini" | "kimi");
       setRuntimeMessage(login.message || tFor(locale, "one.onb.rt.installed_check"));
     } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.install")));
+      recover("install-runtime", cause);
     } finally {
       setBusy(false);
     }
@@ -701,11 +709,11 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       next = await advanceAfterProviderSetup(next);
       play("success");
     } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.verify_status")));
+      recover("verify-runtime", cause);
     } finally {
       setBusy(false);
     }
-  }, [advanceAfterProviderSetup, detectProvider, locale, play, replay, state]);
+  }, [advanceAfterProviderSetup, detectProvider, locale, play, recover, replay, state]);
 
   useEffect(() => {
     const recheckAfterProviderReturn = () => {
@@ -748,12 +756,12 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
     setError(null);
     try {
       const api = ipc();
-      if (!api) return;
+      if (!api) throw new Error("Desktop bridge unavailable");
       let next = await api.oneOnboarding.chooseLimited({ expectedVersion: state.version, provider: state.provider });
       setState(next);
       next = await advanceAfterProviderSetup(next);
     } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.save_limited")));
+      recover("save-limited-mode", cause);
     } finally {
       setBusy(false);
     }
@@ -762,7 +770,11 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
   const chooseExpert = async () => {
     if (replay) return go("s3");
     const api = ipc();
-    if (!api?.oneOnboarding || !state || busy) return;
+    if (!state || busy) return;
+    if (!api?.oneOnboarding) {
+      recover("expert-setup", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -791,7 +803,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
         setState(current);
       }
     } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.quick_setup")));
+      recover("quick-setup", cause);
     } finally {
       setBusy(false);
     }
@@ -809,7 +821,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       try {
         await applyPatch({ selectedStarterSlugs: next });
       } catch (cause) {
-        setError(errorMessage(cause, tFor(locale, "one.onb.err.save_team")));
+        recover("save-team", cause);
       } finally {
         setBusy(false);
       }
@@ -825,7 +837,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
     try {
       await applyPatch({ selectedStarterSlugs: all });
     } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.save_team")));
+      recover("save-team", cause);
     } finally {
       setBusy(false);
     }
@@ -837,7 +849,11 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       return;
     }
     const api = ipc();
-    if (!api?.oneOnboarding || !state) return;
+    if (!state) return;
+    if (!api?.oneOnboarding) {
+      recover("create-team", new Error("Desktop bridge unavailable"));
+      return;
+    }
     if (replay) {
       setTeamCreated(true);
       play("success");
@@ -855,7 +871,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       setTeamCreated(true);
       play("success");
     } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.create_team")));
+      recover("create-team", cause);
     } finally {
       setBusy(false);
     }
@@ -872,7 +888,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       const next = await ipc()!.oneOnboarding.update({ expectedVersion: state.version, patch: { currentScene: "s5" } });
       setState(next);
     } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.continue")));
+      recover("continue", cause);
     }
   };
 
@@ -887,7 +903,11 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       return;
     }
     const api = ipc();
-    if (!api?.oneOnboarding || !state) return;
+    if (!state) return;
+    if (!api?.oneOnboarding) {
+      recover("save-final", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -905,7 +925,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
         setFinishing(false);
       }, reduced ? 120 : 480);
     } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.save_final")));
+      recover("save-final", cause);
     } finally {
       setBusy(false);
     }
@@ -950,7 +970,11 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
   useEffect(() => {
     if (!dismissRequested || replay || dismissPersistingRef.current) return;
     const api = ipc();
-    if (!api?.oneOnboarding) return;
+    if (!api?.oneOnboarding) {
+      recover("close", new Error("Desktop bridge unavailable"));
+      window.setTimeout(() => setDismissRetryNonce((value) => value + 1), 250);
+      return;
+    }
     dismissPersistingRef.current = true;
     void (async () => {
       try {
@@ -962,17 +986,21 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
         dismissRequestedRef.current = false;
         setDismissRequested(false);
       } catch (cause) {
-        setError(errorMessage(cause, tFor(locale, "one.onb.err.close")));
+        recover("close", cause);
         window.setTimeout(() => setDismissRetryNonce((value) => value + 1), 250);
       } finally {
         dismissPersistingRef.current = false;
       }
     })();
-  }, [dismissRequested, dismissRetryNonce, locale, replay]);
+  }, [dismissRequested, dismissRetryNonce, recover, replay]);
 
   const startOver = async () => {
     const api = ipc();
-    if (!api?.oneOnboarding || !state || busy) return;
+    if (!state || busy) return;
+    if (!api?.oneOnboarding) {
+      recover("save-progress", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -988,7 +1016,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       setTeamCreated(false);
       setShowResume(false);
     } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.save_progress")));
+      recover("save-progress", cause);
     } finally {
       setBusy(false);
     }
@@ -996,7 +1024,11 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
 
   const resumeTutorial = async () => {
     const api = ipc();
-    if (!api?.oneOnboarding || !state || busy) return;
+    if (!state || busy) return;
+    if (!api?.oneOnboarding) {
+      recover("reopen", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -1009,7 +1041,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       setReplay(false);
       setHelperOpen(false);
     } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.reopen")));
+      recover("reopen", cause);
     } finally {
       setBusy(false);
     }
@@ -1017,7 +1049,11 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
 
   const reopenProviderSetup = async () => {
     const api = ipc();
-    if (!api?.oneOnboarding || !state || state.status !== "completed" || busy) return;
+    if (!state || state.status !== "completed" || busy) return;
+    if (!api?.oneOnboarding) {
+      recover("provider-recovery", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -1028,7 +1064,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       setShowResume(false);
       setHelperOpen(false);
     } catch (cause) {
-      setError(errorMessage(cause, tFor(locale, "one.onb.err.provider_recovery")));
+      recover("provider-recovery", cause);
     } finally {
       setBusy(false);
     }

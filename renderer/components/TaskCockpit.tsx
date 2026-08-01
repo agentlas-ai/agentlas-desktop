@@ -41,7 +41,7 @@ import {
   type MediaArtifact,
 } from "@/components/Markdown";
 import type { WorkspaceFilePreview } from "@/components/WorkspacePanel";
-import { IconBuilding, IconClose, IconFolder, IconNetwork, IconPanelRight, IconSparkles, IconTrash } from "@/components/Icon";
+import { IconArrowLeft, IconBuilding, IconClose, IconFolder, IconNetwork, IconPanelRight, IconSparkles, IconTrash } from "@/components/Icon";
 import { INSTALLED_APPS } from "@/lib/apps";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
@@ -66,28 +66,9 @@ function receiptRecoveryMessage(
   if (!receipt || receipt.status === "completed" || receipt.status === "running" || receipt.status === "cancelling") {
     return null;
   }
-  if (receipt.status === "cancelled") {
-    return {
-      id: uid(),
-      role: "system",
-      text: locale === "ko" ? "실행이 취소되었습니다." : "The run was cancelled.",
-    };
-  }
-  if (receipt.status === "interrupted") {
-    return {
-      id: uid(),
-      role: "system",
-      text:
-        locale === "ko"
-          ? "⚠️ 이전 실행이 완료 영수증 없이 중단되었습니다. 새 실행으로 다시 시도하기 전에 결과 폴더와 실행 영수증을 확인하세요."
-          : "⚠️ The previous run was interrupted without a completion receipt. Check its result folder and run receipt before retrying.",
-    };
-  }
-  return {
-    id: uid(),
-    role: "system",
-    text: `⚠️ ${receipt.errorMessage || (locale === "ko" ? "실행에 실패했습니다." : "The run failed.")}`,
-  };
+  // Work receipts are evidence for the project controller, never transcript
+  // copy. Recovery runs before any controller-authored question is presented.
+  return null;
 }
 
 function receiptRecoveryStatus(receipt: InvocationRunReceipt | null, locale: "ko" | "en"): string {
@@ -95,7 +76,7 @@ function receiptRecoveryStatus(receipt: InvocationRunReceipt | null, locale: "ko
   if (receipt.status === "completed") return locale === "ko" ? "완료" : "Completed";
   if (receipt.status === "cancelled") return locale === "ko" ? "취소됨" : "Cancelled";
   if (receipt.status === "interrupted") return locale === "ko" ? "중단됨" : "Interrupted";
-  if (receipt.status === "failed") return receipt.errorMessage || (locale === "ko" ? "실패" : "Failed");
+  if (receipt.status === "failed") return locale === "ko" ? "중단됨" : "Stopped";
   return receipt.status === "cancelling"
     ? (locale === "ko" ? "종료 확인 중" : "Stopping")
     : (locale === "ko" ? "실행 중" : "Running");
@@ -756,6 +737,8 @@ function ChatPage() {
   // 스티어링으로 인한 취소인지 구분 — 이 취소는 "aborted" 에러 버블을 띄우지 않고,
   // 저장된 세션을 이어받아(resume) 큐의 스티어 메시지로 계속한다(코덱스식 실행중 방향전환).
   const steerCancelRef = useRef(false);
+  const recoverySendRef = useRef<((prompt: string) => Promise<boolean>) | null>(null);
+  const workRecoveryRef = useRef({ attemptsSpent: 0, previousFingerprint: null as string | null });
   const recapGenerationRef = useRef(0);
   // 실행 중 steering — busy일 때 엔터로 들어온 메시지를 큐에 쌓고, 현재 턴이 끝나면 순서대로 전송한다.
   const steerQueueRef = useRef<
@@ -1257,6 +1240,7 @@ function ChatPage() {
         // 취소가 final로 종료되는 런타임도 있다. busy를 내리기 전에 반드시 비워야
         // 다음 실행의 실제 error가 이전 steering 취소로 오인돼 삼켜지지 않는다.
         steerCancelRef.current = false;
+        workRecoveryRef.current = { attemptsSpent: 0, previousFingerprint: null };
         pushWorkflow("status", locale === "ko" ? "완료" : "Done", { tokens: ev.tokens });
         setMessages((m) =>
           m.map((msg) => {
@@ -1330,12 +1314,10 @@ function ChatPage() {
         // abort 시 같은 partial을 히스토리에 영속화하므로 새로고침과도 일관된다.
         const wasSteer = steerCancelRef.current;
         const wasUserCancel = cancelRequestedRef.current && !wasSteer;
+        const endedRunId = runIdRef.current;
         const terminalStatus = wasUserCancel
           ? (locale === "ko" ? "취소됨" : "Cancelled")
-          : (locale === "ko" ? "확인 필요" : "Needs review");
-        const terminalMessage = wasUserCancel
-          ? (locale === "ko" ? "실행이 취소되었습니다." : "The run was cancelled.")
-          : (locale === "ko" ? "작업이 완료되지 않았습니다. One이 현재 상태를 보고 다음 행동을 제시할 수 있습니다." : "The task was not completed. One can inspect the current state and present the next action.");
+          : (locale === "ko" ? "복구 중" : "Recovering");
         steerCancelRef.current = false;
         const keepPlaceholder = (m: StreamMessage[]) =>
           m.flatMap((msg) => {
@@ -1350,15 +1332,7 @@ function ChatPage() {
               pipeline: completePipeline(msg.pipeline),
             }];
           });
-        if (wasSteer) {
-          setMessages(keepPlaceholder);
-        } else {
-          pushWorkflow("status", terminalStatus);
-          setMessages((m) => [
-            ...keepPlaceholder(m),
-            { id: uid(), role: "system", text: terminalMessage },
-          ]);
-        }
+        setMessages(keepPlaceholder);
         setBusy(false);
         setCancelPending(false);
         cancelRequestedRef.current = false;
@@ -1382,9 +1356,29 @@ function ChatPage() {
         processedTextLenRef.current = 0;
         subRef.current?.();
         subRef.current = null;
+        if (!wasSteer && !wasUserCancel && endedRunId) {
+          const api = ipc();
+          const state = workRecoveryRef.current;
+          void api?.oneAutoRecovery.judge({
+            runId: endedRunId,
+            chatId,
+            goal: chat?.title ?? project?.name ?? "",
+            attemptsSpent: state.attemptsSpent,
+            previousFingerprint: state.previousFingerprint,
+          }).then((judgement) => {
+            if (!judgement) return;
+            state.previousFingerprint = judgement.fingerprint;
+            if (!judgement.retry) return;
+            state.attemptsSpent = judgement.attempt ?? state.attemptsSpent + 1;
+            const diagnosis = judgement.diagnosis.trim();
+            void recoverySendRef.current?.(
+              `Continue the same project task with a materially different approach. Verify the final result before replying.${diagnosis ? ` Recovery observation: ${diagnosis}` : ""}`,
+            );
+          }).catch(() => undefined);
+        }
       }
     },
-    [agent, chatId, locale, mediaBasePaths, openPanelTab, t],
+    [agent, chat?.title, chatId, locale, mediaBasePaths, openPanelTab, project?.name, t],
   );
 
   // consumeEvent를 ref로 미러 — subscribeRun/메타데이터 effect가 consumeEvent identity 변화(agent·
@@ -1938,6 +1932,7 @@ function ChatPage() {
         /** Current session roster first; Agent Hub/Cloud only when the model identifies a capability gap. */
         sessionRouting?: boolean;
         stormbreakerMode?: boolean;
+        internalRecoveryPrompt?: boolean;
       },
     ) => {
       const api = ipc();
@@ -1988,7 +1983,7 @@ function ChatPage() {
       }
       setMessages((m) => [
         ...m,
-        { id: uid(), role: "user", text: visiblePrompt, imageDataUrls },
+        ...(opts?.internalRecoveryPrompt ? [] : [{ id: uid(), role: "user" as const, text: visiblePrompt, imageDataUrls }]),
         {
           id: placeholderId,
           role: "agent",
@@ -2125,6 +2120,7 @@ function ChatPage() {
       validatedTaskChatId,
     ],
   );
+  recoverySendRef.current = (prompt: string) => send(prompt, { internalRecoveryPrompt: true });
 
   // 진행 중 실행 취소 — 입력창의 정지 버튼(전송 버튼이 busy일 때 변신) / Cmd/Ctrl+Esc.
   const stop = useCallback(() => {
@@ -2863,6 +2859,16 @@ function ChatPage() {
           minHeight: 56,
         }}
       >
+        <button
+          type="button"
+          className="project-detail-back titlebar-nodrag"
+          data-work-dashboard-return="task-header"
+          onClick={() => router.push("/dashboard")}
+          aria-label={locale === "ko" ? "대시보드로 돌아가기" : "Back to Dashboard"}
+        >
+          <IconArrowLeft size={16} />
+          <span>{locale === "ko" ? "대시보드" : "Dashboard"}</span>
+        </button>
         <div style={{ flex: 1, minWidth: 0, marginLeft: 12 }}>
           {project && (
             <div

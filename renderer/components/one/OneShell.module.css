@@ -855,6 +855,56 @@
   background: #fffdf9;
 }
 
+.decisionSheetLayer {
+  position: absolute;
+  z-index: 90;
+  inset: 0;
+  display: grid;
+  align-items: end;
+  justify-items: center;
+  pointer-events: auto;
+}
+
+.decisionSheetBackdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(27, 29, 27, 0.34);
+  backdrop-filter: blur(3px);
+}
+
+.decisionSheet {
+  position: relative;
+  width: min(760px, calc(100% - 32px));
+  max-height: min(78vh, 720px);
+  margin: 0 16px 16px;
+  overflow: auto;
+  padding: 10px 22px 22px;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 22px;
+  background: #fffdf9;
+  box-shadow: 0 24px 70px rgba(24, 27, 24, 0.24);
+  outline: none;
+  overscroll-behavior: contain;
+}
+
+.decisionSheetHandle {
+  width: 42px;
+  height: 4px;
+  margin: 0 auto 4px;
+  border-radius: 999px;
+  background: #d7d2c9;
+}
+
+.decisionSheet .decisionCard,
+.decisionSheet .decisionCard[data-variant="choice"],
+.decisionSheet .decisionCard[data-risk="R0"] {
+  width: 100%;
+  margin: 0;
+  padding: 12px 0 0;
+  border: 0;
+  background: transparent;
+}
+
 .decisionCard p { margin: 0; color: #4b4a45; font-size: 14px; line-height: 1.65; }
 .decisionKicker { color: #a06b27 !important; font-size: 10px !important; font-weight: 780; letter-spacing: 0.08em; text-transform: uppercase; }
 .decisionHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
@@ -869,6 +919,12 @@
 .decisionGuard strong { color: #50351f; font-size: 12px; }
 .decisionGuard small { color: #80644d; font-size: 10px; }
 .decisionOptions { display: flex; flex-wrap: wrap; gap: 8px; }
+.decisionMultiOptions { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.decisionMultiOption { min-height: 44px; display: inline-flex; align-items: center; gap: 8px; padding: 9px 12px; border: 1px solid #dfd8cc; border-radius: 10px; background: #fff; color: #403d37; text-align: left; cursor: pointer; }
+.decisionMultiOption > span { width: 18px; height: 18px; flex: 0 0 18px; display: grid; place-items: center; border: 1px solid #c9c1b4; border-radius: 5px; color: #fff; background: #fff; font-size: 12px; }
+.decisionMultiOption[aria-pressed="true"] { border-color: #4f6e35; background: #f4f8ef; color: #2f4720; }
+.decisionMultiOption[aria-pressed="true"] > span { border-color: #4f6e35; background: #4f6e35; }
+.decisionMultiOption:hover, .decisionMultiOption:focus-visible { border-color: #8ca274; outline: 2px solid transparent; }
 .decisionButton { min-height: 44px; padding: 0 14px; border-color: #dfd8cc; background: #fff; }
 .decisionButton:hover, .decisionButton:focus-visible { border-color: #c2ad88; background: #faf7f0; outline: 2px solid transparent; }
 .decisionPrimaryButton { min-height: 44px; padding: 0 15px; border-color: #4f6e35; color: #fff; background: #4f6e35; font-weight: 720; }
@@ -989,6 +1045,16 @@
 .resolvedDecision small { color: #70796b; font-size: 10px; line-height: 1.5; }
 
 @media (max-width: 700px) {
+  .decisionSheet {
+    width: 100%;
+    max-height: 84vh;
+    margin: 0;
+    padding: 8px 18px calc(18px + env(safe-area-inset-bottom));
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 20px 20px 0 0;
+  }
   .decisionFacts { grid-template-columns: 1fr; }
   .decisionHeading { align-items: stretch; flex-direction: column; }
   .riskBadge { align-self: flex-start; }
@@ -1705,6 +1771,7 @@
 }
 
 @media (max-width: 760px) {
+  .decisionMultiOptions { grid-template-columns: 1fr; }
   .body,
   .body[data-rail-collapsed="true"] { grid-template-columns: 1fr; }
   .rail {

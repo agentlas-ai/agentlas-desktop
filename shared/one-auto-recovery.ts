@@ -51,10 +51,10 @@ export const ONE_RECOVERY_LABELS = [
 export type OneRecoveryLabel = (typeof ONE_RECOVERY_LABELS)[number];
 
 /**
- * Fail-closed default. When the model is unavailable the honest move is to hand
+ * Fail-closed unavailable decision. When the model is unavailable the honest move is to hand
  * the run back to the person, never to retry something that might act twice.
  */
-export const ONE_RECOVERY_FALLBACK: OneRecoveryLabel = "needs_person";
+export const ONE_RECOVERY_UNAVAILABLE_DECISION: OneRecoveryLabel = "needs_person";
 
 export type OneAutoRecoveryStop =
   | "settled"

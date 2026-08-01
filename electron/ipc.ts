@@ -1410,6 +1410,15 @@ export function registerIpcHandlers(): void {
         "\"without X\" is usually a qualifier on an action option, not a refusal. Only a phrase that negates " +
         "the action itself is a rejection.",
     },
+    "one-decision-authority-readiness": {
+      question:
+        "Does this One decision request contain enough human-readable detail for the user to knowingly choose an option that grants authority?",
+      guidance:
+        "Return ready only when target, action, material impact, and relevant cost, destination/audience, and undo limits are clear in this same decision. " +
+        "A standard account login/connection is ready when the login step is explicit, there is no charge, and the connection can later be revoked. " +
+        "Payment, publication, destructive, legal, security, and permission changes need their material amount/scope/destination and reversal limits. " +
+        "Do not require Work merely because the action is R2 or higher; decide whether One can safely ask here.",
+    },
   };
   const RENDERER_SUBSET_KINDS: Record<string, { question: string; guidance: string }> = {
     "oberon-brief-tone": {
@@ -3179,6 +3188,10 @@ export function registerIpcHandlers(): void {
       taskMode: "task",
       originSurface: "work",
     });
+    // A project task starts in the project's exact source context. The path was
+    // already granted/validated by the Main-owned project source flow, so the
+    // renderer never has to guess or ask the user to reconnect it per task.
+    if (project.folderPath) setChatWorkingFolder(chat.id, project.folderPath);
     const task = getCanonicalTaskForChat(chat.id);
     if (!task) throw new Error("Project task could not be prepared");
     return { taskId: task.id, chatId: chat.id, title: task.title };
@@ -4131,7 +4144,7 @@ export function registerIpcHandlers(): void {
     const request = rendererInvocationRequest(req);
     // Warm the resident judgments the synchronous start path peeks (request
     // intent, explicit memory intent). Best-effort with a tight budget: a miss
-    // keeps the labeled deterministic fallback instead of delaying the run.
+    // remains unresolved and must never be replaced by a lexical or static verdict.
     await Promise.all([
       prejudgeOneRequestIntent(request, { timeoutMs: 4_000 }),
       prejudgeOneMemoryIntent(request, { timeoutMs: 4_000 }),

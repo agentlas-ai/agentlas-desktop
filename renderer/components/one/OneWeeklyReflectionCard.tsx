@@ -6,6 +6,7 @@ import type {
   OneWeeklyReflectionSnapshotV1,
 } from "@/lib/types";
 import { ipc } from "@/lib/ipc";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { tFor } from "@/lib/i18n";
 import styles from "./OneWeeklyReflectionCard.module.css";
 
@@ -73,7 +74,11 @@ export function OneWeeklyReflectionCard({ snapshot, locale, onChange }: OneWeekl
 
   const resolve = async (action: "acknowledge" | "hide_week") => {
     const api = ipc();
-    if (!api?.oneWeeklyReflection || busy) return;
+    if (busy) return;
+    if (!api?.oneWeeklyReflection) {
+      requestOneOperationalRecovery("one-weekly-reflection", new Error("Desktop bridge unavailable"));
+      return;
+    }
     setBusy(action);
     setError(null);
     try {
@@ -89,7 +94,8 @@ export function OneWeeklyReflectionCard({ snapshot, locale, onChange }: OneWeekl
     } catch (cause) {
       const latest = await api.oneWeeklyReflection.get().catch(() => null);
       if (latest) onChange(latest);
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-weekly-reflection", cause);
+      setError(null);
     } finally {
       setBusy(null);
     }

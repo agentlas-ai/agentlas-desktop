@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { tFor } from "@/lib/i18n";
 import type {
   OneActivationMobileResolution,
@@ -42,7 +43,8 @@ export function OneActivation({
     try {
       await action();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-activation", cause);
+      setError(null);
     } finally {
       setBusy(false);
     }

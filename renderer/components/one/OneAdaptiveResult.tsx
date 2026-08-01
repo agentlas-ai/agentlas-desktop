@@ -39,9 +39,9 @@ import {
   type OneArtifactPreviewCapabilityV1,
 } from "@shared/one-artifacts";
 import { redactSecrets } from "@shared/secret-patterns";
-import { ONE_AUTO_RECOVERY_MAX_ATTEMPTS } from "@shared/one-auto-recovery";
 import { ipc } from "@/lib/ipc";
 import { tFor } from "@/lib/i18n";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import styles from "./OneAdaptiveResult.module.css";
 
 const DESKTOP_NATIVE_BLOCK_TYPES = new Set<OneSurfaceBlockType>([
@@ -599,8 +599,15 @@ function useArtifactPreview(
   const retry = useCallback(() => setAttempt((value) => value + 1), []);
   const open = useCallback(async () => {
     const api = ipc();
-    if (!api?.oneArtifacts || !context) return false;
+    if (!context) return false;
+    if (!api?.oneArtifacts) {
+      requestOneOperationalRecovery("one-artifact-open", new Error("Desktop bridge unavailable"));
+      return false;
+    }
     const result = await api.oneArtifacts.open({ ...context, artifactRef }).catch(() => ({ opened: false }));
+    if (!result.opened) {
+      requestOneOperationalRecovery("one-artifact-open", new Error("Artifact could not be opened"));
+    }
     return result.opened;
   }, [artifactRef, context]);
   return { state, retry, open };
@@ -750,8 +757,15 @@ function MediaOutput({
 }) {
   const open = useCallback(async () => {
     const api = ipc();
-    if (!api?.oneArtifacts || !artifactContext) return;
-    await api.oneArtifacts.open({ ...artifactContext, artifactRef: output.artifactRef }).catch(() => ({ opened: false }));
+    if (!artifactContext) return;
+    if (!api?.oneArtifacts) {
+      requestOneOperationalRecovery("one-artifact-open", new Error("Desktop bridge unavailable"));
+      return;
+    }
+    const result = await api.oneArtifacts.open({ ...artifactContext, artifactRef: output.artifactRef }).catch(() => ({ opened: false }));
+    if (!result.opened) {
+      requestOneOperationalRecovery("one-artifact-open", new Error("Artifact could not be opened"));
+    }
   }, [artifactContext, output.artifactRef]);
   return (
     <article className={styles.mediaOutput} role="listitem">
@@ -770,22 +784,23 @@ function DocumentBlock({
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
 }) {
-  const [openFailed, setOpenFailed] = useState(false);
   const open = useCallback(async () => {
     const api = ipc();
-    if (!api?.oneArtifacts || !artifactContext) {
-      setOpenFailed(true);
+    if (!artifactContext) return;
+    if (!api?.oneArtifacts) {
+      requestOneOperationalRecovery("one-artifact-open", new Error("Desktop bridge unavailable"));
       return;
     }
     const result = await api.oneArtifacts.open({ ...artifactContext, artifactRef: block.artifactRef }).catch(() => ({ opened: false }));
-    setOpenFailed(!result.opened);
+    if (!result.opened) {
+      requestOneOperationalRecovery("one-artifact-open", new Error("Artifact could not be opened"));
+    }
   }, [artifactContext, block.artifactRef]);
   return <article className={styles.documentPreview} data-artifact-ref={block.artifactRef}>
     <div>
       <strong>{tFor(locale, "one.res.doc.preview")}</strong>
       <span>{block.pageCount != null ? tFor(locale, "one.res.doc.pages", { count: block.pageCount }) : tFor(locale, "one.res.doc.content_checked")}</span>
       <button type="button" onClick={() => void open()}>{tFor(locale, "one.res.open_file")}</button>
-      {openFailed && <small role="status">{tFor(locale, "one.res.file_not_on_device")}</small>}
     </div>
     <p>{displayValue(block.excerpt)}</p>
   </article>;
@@ -854,22 +869,23 @@ function ArtifactFileCard({
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
 }) {
-  const [openFailed, setOpenFailed] = useState(false);
   const open = useCallback(async () => {
     const api = ipc();
-    if (!api?.oneArtifacts || !artifactContext) {
-      setOpenFailed(true);
+    if (!artifactContext) return;
+    if (!api?.oneArtifacts) {
+      requestOneOperationalRecovery("one-artifact-open", new Error("Desktop bridge unavailable"));
       return;
     }
     const result = await api.oneArtifacts.open({ ...artifactContext, artifactRef: item.artifactRef }).catch(() => ({ opened: false }));
-    setOpenFailed(!result.opened);
+    if (!result.opened) {
+      requestOneOperationalRecovery("one-artifact-open", new Error("Artifact could not be opened"));
+    }
   }, [artifactContext, item.artifactRef]);
   return (
     <article className={styles.artifactCard} data-artifact-ref={item.artifactRef} data-verification-status={item.verificationStatus}>
       <div>
         <strong>{displayValue(item.label)}</strong>
         <span>{artifactTypeLabel(item.type, locale)} · {verificationLabel(item.verificationStatus, locale)}{item.sizeBytes != null ? ` · ${formatBytes(item.sizeBytes)}` : ""}</span>
-        {openFailed && <small role="status">{tFor(locale, "one.res.file_not_on_device")}</small>}
       </div>
       <button type="button" onClick={() => void open()}>{tFor(locale, "one.res.open")}</button>
     </article>
@@ -1211,23 +1227,6 @@ function safeFallbackText(value: unknown, maxLength: number): string | null {
   return sanitizeText(text);
 }
 
-function safeFailureCause(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const source = value.trim();
-  // Failure receipts are operational evidence, not an invitation to put JSON,
-  // stack traces, terminal output, or local implementation details back into
-  // One. Keep only a short human sentence after the normal secret/path scrub.
-  if (
-    /^[\[{]/.test(source)
-    || /(?:^|\n)\s*(?:at\s+\S|traceback\b|error:\s|npm err!|node:internal|stderr\b|stdout\b|select\s+\S+\s+from\b)/i.test(source)
-  ) {
-    return null;
-  }
-  const safe = safeFallbackText(source, 480);
-  if (!safe || safe.split(/\r?\n/).length > 3) return null;
-  return safe;
-}
-
 function RunClosure({ receipt, locale, onRetryUnfinished, autoRecovery }: {
   receipt: InvocationRunReceipt;
   locale: "ko" | "en";
@@ -1252,37 +1251,16 @@ function RunClosure({ receipt, locale, onRetryUnfinished, autoRecovery }: {
     );
   }
   const stopped = receipt.status === "cancelled";
-  const stopReason = autoRecovery?.phase === "stopped" ? autoRecovery.reason : null;
-  const statusLabel = stopped
-    ? tFor(locale, "one.res.closure.stopped_here")
-    : stopReason === "needs-person"
-      ? tFor(locale, "one.res.closure.needs_person")
-      : stopReason === "unsafe-to-repeat"
-        ? tFor(locale, "one.res.closure.unsafe_to_repeat")
-        : tFor(locale, "one.res.closure.not_finished");
-  // One's own account of what blocked it beats a generic template — it is the
-  // only line that says something specific about this particular run.
-  const outcome = (autoRecovery?.phase === "stopped" && safeFailureCause(autoRecovery.diagnosis))
-    || friendlyFailureMessage(receipt.errorMessage, locale, stopped);
-  // The friendly line is a summary. Keep a short customer-safe cause one click
-  // away when available, but never put machine envelopes or runtime logs back
-  // into the One transcript.
-  const cause = safeFailureCause(receipt.errorMessage);
+  // A failed receipt is internal evidence. Only One's model-authored diagnosis
+  // may cross this boundary; raw errors and code-authored semantic summaries do
+  // not have a customer-visible representation.
+  const outcome = autoRecovery?.phase === "stopped" ? autoRecovery.diagnosis.trim() : "";
+  if (!stopped && !outcome) return null;
   return (
     <section className={styles.failureClosure} role="status">
       <span className={styles.closureCheck} data-tone="bad" aria-hidden="true">!</span>
       <div className={styles.closureSummaryCopy}>
-        <strong>{statusLabel}</strong>
-        <small>{outcome}</small>
-        {(stopReason === "exhausted" || stopReason === "no-progress") && (
-          <small>{tFor(locale, "one.res.closure.tried_count", { n: ONE_AUTO_RECOVERY_MAX_ATTEMPTS + 1 })}</small>
-        )}
-        {cause && (
-          <details className={styles.closureCause}>
-            <summary>{tFor(locale, "one.res.closure.why")}</summary>
-            <p>{cause}</p>
-          </details>
-        )}
+        <strong>{stopped ? tFor(locale, "one.res.closure.stopped_here") : outcome}</strong>
       </div>
       {!stopped && onRetryUnfinished && (
         <button type="button" className={styles.actionPrimary} onClick={onRetryUnfinished}>
@@ -1291,24 +1269,6 @@ function RunClosure({ receipt, locale, onRetryUnfinished, autoRecovery }: {
       )}
     </section>
   );
-}
-
-function friendlyFailureMessage(errorMessage: string | null | undefined, locale: "ko" | "en", stopped: boolean): string {
-  if (stopped) {
-    return tFor(locale, "one.res.fail.stopped");
-  }
-
-  const message = errorMessage?.toLowerCase() ?? "";
-  if (/webfetch|web fetch|website|page|url|http|network|fetch/.test(message)) {
-    return tFor(locale, "one.res.fail.webpage");
-  }
-  if (/permission|denied|unauthori[sz]ed|forbidden|access/.test(message)) {
-    return tFor(locale, "one.res.fail.access");
-  }
-  if (/timeout|timed out|deadline/.test(message)) {
-    return tFor(locale, "one.res.fail.timeout");
-  }
-  return tFor(locale, "one.res.fail.generic");
 }
 
 function isTerminal(status: InvocationRunReceipt["status"]): boolean {

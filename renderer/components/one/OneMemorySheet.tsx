@@ -8,6 +8,7 @@ import {
   type FormEvent,
 } from "react";
 import { ipc } from "@/lib/ipc";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { tFor, type Locale } from "@/lib/i18n";
 import type {
   OneExperienceReuseRecord,
@@ -187,7 +188,8 @@ export function OneMemorySheet({
       return value;
     } catch (cause) {
       await refresh().catch(() => undefined);
-      setError(cause instanceof Error ? cause.message : String(cause));
+      requestOneOperationalRecovery("one-memory", cause);
+      setError(null);
       return null;
     } finally {
       setBusyId(null);
@@ -203,7 +205,11 @@ export function OneMemorySheet({
 
   const saveCandidate = async (candidate: OneMemoryCandidate) => {
     const api = ipc();
-    if (!api || !state) return;
+    if (!state) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
+      return;
+    }
     const result = await mutate(candidate.id, () => api.oneMemory.save({
       expectedStoreVersion: state.version,
       candidateId: candidate.id,
@@ -216,7 +222,11 @@ export function OneMemorySheet({
   const editAndSaveCandidate = async (event: FormEvent, candidate: OneMemoryCandidate) => {
     event.preventDefault();
     const api = ipc();
-    if (!api || !state) return;
+    if (!state) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
+      return;
+    }
     const result = await mutate(candidate.id, () => api.oneMemory.editAndSave({
       expectedStoreVersion: state.version,
       candidateId: candidate.id,
@@ -231,7 +241,11 @@ export function OneMemorySheet({
 
   const useCandidateOnce = async (candidate: OneMemoryCandidate) => {
     const api = ipc();
-    if (!api || !state || !useOnceTarget) return;
+    if (!state || !useOnceTarget) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
+      return;
+    }
     const result = await mutate(candidate.id, () => api.oneMemory.useOnce({
       expectedStoreVersion: state.version,
       candidateId: candidate.id,
@@ -248,7 +262,11 @@ export function OneMemorySheet({
 
   const rejectCandidate = async (candidate: OneMemoryCandidate) => {
     const api = ipc();
-    if (!api || !state) return;
+    if (!state) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
+      return;
+    }
     await mutate(candidate.id, () => api.oneMemory.reject({
       expectedStoreVersion: state.version,
       candidateId: candidate.id,
@@ -267,7 +285,11 @@ export function OneMemorySheet({
   const saveMemory = async (event: FormEvent, memory: OneMemoryAsset) => {
     event.preventDefault();
     const api = ipc();
-    if (!api || !state) return;
+    if (!state) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
+      return;
+    }
     const result = await mutate(memory.id, () => api.oneMemory.updateAsset({
       expectedStoreVersion: state.version,
       memoryId: memory.id,
@@ -282,7 +304,11 @@ export function OneMemorySheet({
 
   const toggleMemory = async (memory: OneMemoryAsset) => {
     const api = ipc();
-    if (!api || !state) return;
+    if (!state) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
+      return;
+    }
     await mutate(memory.id, () => api.oneMemory.setAssetEnabled({
       expectedStoreVersion: state.version,
       memoryId: memory.id,
@@ -296,7 +322,11 @@ export function OneMemorySheet({
 
   const deleteMemory = async (memory: OneMemoryAsset) => {
     const api = ipc();
-    if (!api || !state) return;
+    if (!state) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
+      return;
+    }
     if (!window.confirm(tFor(locale, "one.mem.confirm.delete_memory"))) return;
     await mutate(memory.id, () => api.oneMemory.deleteAsset({
       expectedStoreVersion: state.version,
@@ -308,7 +338,11 @@ export function OneMemorySheet({
 
   const deleteResolvedCandidate = async (candidate: OneMemoryCandidate) => {
     const api = ipc();
-    if (!api || !state) return;
+    if (!state) return;
+    if (!api) {
+      requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
+      return;
+    }
     if (!window.confirm(tFor(locale, "one.mem.confirm.delete_record"))) return;
     await mutate(candidate.id, () => api.oneMemory.deleteCandidate({
       expectedStoreVersion: state.version,

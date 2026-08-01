@@ -174,6 +174,7 @@ export function ChatRightPanel({
             }}
             chatId={chatId}
             linkedFiles={linkedFiles}
+            project={project}
           />
         )}
         {activeTab === "agent" && (
@@ -336,8 +337,8 @@ function RunReceiptCard({ chatId, busy }: { chatId: string | null; busy: boolean
               <span>{ko ? "결과 폴더 열기" : "Open result folder"}</span>
             </button>
           )}
-          {(receipt.errorMessage || openError) && (
-            <div role="status" style={receiptErrorStyle} data-one-content-slot data-capability="task-recovery">{openError || null}</div>
+          {openError && (
+            <div role="status" style={receiptErrorStyle} data-one-content-slot data-capability="task-recovery" />
           )}
         </div>
       )}
@@ -365,6 +366,7 @@ function FileTab({
   onOpenFilePreview,
   chatId,
   linkedFiles,
+  project,
 }: {
   artifact: CodeArtifact | null;
   surface: WorkbenchSurface | null;
@@ -372,6 +374,7 @@ function FileTab({
   onOpenFilePreview: (preview: WorkspaceFilePreview) => void;
   chatId: string | null;
   linkedFiles: WorkspaceFilePreview[];
+  project: Project | null;
 }) {
   const { locale } = useT();
   const ko = locale === "ko";
@@ -465,7 +468,12 @@ function FileTab({
         </section>
       )}
       <div style={workspaceWrapStyle}>
-        <WorkspacePanel embedded chatId={chatId} onOpenFilePreview={onOpenFilePreview} />
+        <WorkspacePanel
+          embedded
+          chatId={chatId}
+          projectFolder={project?.folderPath ? { projectId: project.id, projectName: project.name } : null}
+          onOpenFilePreview={onOpenFilePreview}
+        />
       </div>
     </div>
   );
@@ -503,7 +511,7 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
           </button>
         )}
       </header>
-      {openError && <div style={fileNoticeStyle} data-one-content-slot data-capability="file-recovery">{openError}</div>}
+      {openError && <div style={fileNoticeStyle} data-one-content-slot data-capability="file-recovery" />}
       <div style={fileViewerBodyStyle}>
         {file.viewerKind === "browser" ? (
           <BrowserViewer file={file} />

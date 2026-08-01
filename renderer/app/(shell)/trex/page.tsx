@@ -33,7 +33,7 @@ import {
 } from "@/lib/trex/model";
 import { IconApps, IconSparkles, IconFileUp, IconEdit, IconChevronRight, IconCheck } from "@/components/Icon";
 import { DeckStage, GlobalStyle, bgStyle } from "@/components/trex/DeckStage";
-import { STYLES, STYLE_IDS, styleById, routeStyle, routeStyleJudged, PALETTES, type StyleId } from "@/lib/trex/styles";
+import { STYLES, STYLE_IDS, styleById, routeStyleJudged, PALETTES, type StyleId } from "@/lib/trex/styles";
 import type { OpenCrabReadiness } from "@/lib/types";
 
 type ViewState = "home" | "generating" | "view" | "edit";
@@ -238,7 +238,7 @@ export default function TrexPage() {
   );
 
   const routedMode = modeOverride ?? routeMode(prompt || EXAMPLE);
-  const routedStyle = routeStyle(prompt || EXAMPLE); // 주제 자동 라우팅(항상 StyleId|null — Auto 라벨 표시용)
+  const routedStyle: StyleId | null = null;
 
   // 생성한 덱을 한 장씩 드러낸다. 시네마틱/하이브리드는 codex/agy 이미지가 있으면 배경 교체.
   const revealDeck = useCallback(

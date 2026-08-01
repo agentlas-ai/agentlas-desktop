@@ -34,6 +34,7 @@ export const IconPlus = (p: Props) => svg("M12 5v14M5 12h14", p);
 export const IconCheck = (p: Props) => svg("M4 12l5 5L20 6", p);
 export const IconChevronRight = (p: Props) => svg("M9 6l6 6-6 6", p);
 export const IconChevronDown = (p: Props) => svg("M6 9l6 6 6-6", p);
+export const IconArrowLeft = (p: Props) => svg("M19 12H5M12 19l-7-7 7-7", p);
 export const IconClose = (p: Props) => svg("M6 6l12 12M18 6L6 18", p);
 export const IconSearch = (p: Props) =>
   svg("M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3", p);

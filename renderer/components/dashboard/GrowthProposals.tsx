@@ -18,7 +18,10 @@ function cardCopy(proposal: AgentEvolutionProposalUi): GrowthProposalCardCopy | 
   if (typeof card.learned !== "string" || typeof card.change !== "string" || typeof card.reversible !== "string") {
     return null;
   }
-  return { learned: card.learned, change: card.change, reversible: card.reversible };
+  const learned = card.learned.replace(/\s+/g, " ").trim();
+  const change = card.change.replace(/\s+/g, " ").trim();
+  if (!learned || !change || learned.length > 120 || change.length > 160) return null;
+  return { learned, change, reversible: card.reversible };
 }
 
 export function GrowthProposals() {
@@ -27,7 +30,6 @@ export function GrowthProposals() {
   const [inbox, setInbox] = useState<GrowthProposalInbox | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
-  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const api = ipc();
@@ -38,9 +40,7 @@ export function GrowthProposals() {
     try {
       const next = await api.agentEvolution.listGrowth(20);
       setInbox(next);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+    } catch {
       setInbox((cur) => cur ?? { pending: [], autoApplied: [] });
     }
   }, []);
@@ -64,8 +64,9 @@ export function GrowthProposals() {
         else await api.agentEvolution.rollback(id);
         await load();
         window.dispatchEvent(new Event("agentlas:attention-refresh"));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+      } catch {
+        // The dashboard never renders operational failures. The resident
+        // recovery plane observes them and the current inbox stays intact.
       } finally {
         setBusy(null);
       }
@@ -73,8 +74,21 @@ export function GrowthProposals() {
     [load],
   );
 
-  const pending = (inbox?.pending ?? []).filter((p) => !dismissed.has(p.id));
-  const autoApplied = inbox?.autoApplied ?? [];
+  const proposalKey = (proposal: AgentEvolutionProposalUi) => {
+    const card = cardCopy(proposal);
+    return card ? `${card.learned}\u0000${card.change}` : `invalid:${proposal.id}`;
+  };
+  const dedupe = (items: AgentEvolutionProposalUi[]) => {
+    const seen = new Set<string>();
+    return items.filter((proposal) => {
+      const key = proposalKey(proposal);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  const pending = dedupe((inbox?.pending ?? []).filter((p) => !dismissed.has(p.id) && cardCopy(p) !== null));
+  const autoApplied = dedupe((inbox?.autoApplied ?? []).filter((p) => cardCopy(p) !== null));
   const count = pending.length;
 
   if (inbox && count === 0 && autoApplied.length === 0) {
@@ -97,12 +111,6 @@ export function GrowthProposals() {
         {count > 0 && <span className="dashboard-count-pill">{count}</span>}
       </div>
 
-      {error && (
-        <div className="dashboard-module-empty" style={{ color: "var(--danger, #c0392b)" }}>
-          {error}
-        </div>
-      )}
-
       {inbox === null ? (
         <div className="dashboard-module-empty">{ko ? "불러오는 중…" : "Loading…"}</div>
       ) : (
@@ -111,10 +119,9 @@ export function GrowthProposals() {
             const card = cardCopy(proposal);
             return (
               <div key={proposal.id} className="dashboard-module-row" style={{ display: "grid", gap: 8 }}>
-                <div className="dashboard-row-copy" style={{ display: "grid", gap: 4 }}>
-                  <div>{card ? card.learned : proposal.summary}</div>
-                  {card && <div style={{ opacity: 0.85 }}>{card.change}</div>}
-                  {card && <div style={{ opacity: 0.7, fontSize: 12 }}>{card.reversible}</div>}
+                <div className="dashboard-row-copy" style={{ display: "grid", gap: 3 }}>
+                  <strong>{card!.learned}</strong>
+                  {card?.change && <div style={{ opacity: 0.78, fontSize: 13 }}>{card.change}</div>}
                 </div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <button
@@ -154,13 +161,9 @@ export function GrowthProposals() {
             const canUndo = proposal.status === "applied" || proposal.status === "measured";
             return (
               <div key={proposal.id} className="dashboard-module-row" style={{ alignItems: "start" }}>
-                <div className="dashboard-row-copy" style={{ display: "grid", gap: 4 }}>
-                  <div style={{ opacity: 0.65, fontSize: 12 }}>{proposal.agentId}</div>
-                  <div>{card?.learned ?? proposal.summary}</div>
-                  {card && <div style={{ opacity: 0.82 }}>{card.change}</div>}
-                  <div style={{ opacity: 0.65, fontSize: 12 }}>
-                    {ko ? "이전 버전에서 자동 적용됨" : "Auto-applied by an earlier version"}
-                  </div>
+                <div className="dashboard-row-copy" style={{ display: "grid", gap: 3 }}>
+                  <strong>{card!.learned}</strong>
+                  {card?.change && <div style={{ opacity: 0.78, fontSize: 13 }}>{card.change}</div>}
                 </div>
                 {canUndo && (
                   <button

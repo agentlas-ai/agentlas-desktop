@@ -774,11 +774,10 @@ function projectInvocationReceipt(receipt: InvocationRunReceipt | null): MobileB
       finishedAt: receipt.finishedAt ?? null,
       eventCount: receipt.eventCount,
       hasImages: receipt.hasImages ?? false,
-      errorCode: receipt.errorCode ?? null,
-      errorMessage:
-        typeof receipt.errorMessage === "string"
-          ? boundedRedactedText(receipt.errorMessage, 4_000)
-          : null,
+      // Mobile receives execution state only. Failure evidence remains on the
+      // Desktop host for One/project-controller recovery judgment.
+      errorCode: null,
+      errorMessage: null,
     },
     "invoke.receipt",
   );

@@ -6,6 +6,7 @@ export const ONE_DECISION_CONTRACT_VERSION = "1.0.0" as const;
 export type OneDecisionRiskLevel = "R0" | "R1" | "R2" | "R3" | "R4";
 export type OneDecisionRiskCertainty = "inferred" | "ambiguous";
 export type OneDecisionOptionDisposition = "choice" | "approve" | "reject" | "modify";
+export type OneDecisionAuthorityReadiness = "ready" | "needs_details";
 export type OneDecisionFieldStatus = "stated" | "context_only" | "not_stated" | "not_applicable";
 
 export interface OneDecisionField {
@@ -27,7 +28,7 @@ export interface OneDecisionOption {
   disposition: OneDecisionOptionDisposition;
   grantsAuthority: boolean;
   enabled: boolean;
-  blockedReason: "unstructured_high_risk" | "multi_select_requires_work" | null;
+  blockedReason: "unstructured_high_risk" | null;
 }
 
 export interface OneDecisionViewV1 {
@@ -56,7 +57,7 @@ export interface OneDecisionViewV1 {
       reply: string;
       source: "explicit_option" | "product_safe_default";
     };
-    modify: { enabled: true; destination: "work" };
+    modify: { enabled: true; destination: "one" };
     snooze: { enabled: true; durationHours: 24 };
   };
 }
@@ -66,6 +67,7 @@ const RISK_ORDER: Record<OneDecisionRiskLevel, number> = { R0: 0, R1: 1, R2: 2, 
 /** Judgment-cache kinds shared by the async electron warm pass and synchronous peeks. */
 export const ONE_DECISION_RISK_JUDGMENT_KIND = "one-decision-risk";
 export const ONE_DECISION_DISPOSITION_JUDGMENT_KIND = "one-decision-disposition";
+export const ONE_DECISION_AUTHORITY_READINESS_JUDGMENT_KIND = "one-decision-authority-readiness";
 
 /**
  * Synchronous readers of already-judged verdicts. Electron passes peeks into the
@@ -76,6 +78,7 @@ export const ONE_DECISION_DISPOSITION_JUDGMENT_KIND = "one-decision-disposition"
 export interface OneDecisionJudgedReaders {
   risk?: (combinedText: string) => OneDecisionRiskLevel | null;
   disposition?: (optionText: string) => OneDecisionOptionDisposition | null;
+  authorityReadiness?: (combinedText: string) => OneDecisionAuthorityReadiness | null;
 }
 const RISK_REASONS = new Set<OneDecisionViewV1["risk"]["reasons"][number]>([
   "read_only", "preparation_only", "limited_change", "external_effect", "critical_effect",
@@ -201,7 +204,7 @@ function inferRisk(
   if (reasons.length === 0) reasons.push(level === "R0" ? "read_only" : "unstructured_authority_request");
   return {
     level,
-    certainty: RISK_ORDER[level] >= RISK_ORDER.R2 || reasons.includes("conflicting_signals") ? "ambiguous" : "inferred",
+    certainty: reasons.includes("conflicting_signals") ? "ambiguous" : "inferred",
     reasons: [...new Set(reasons)],
   };
 }
@@ -246,7 +249,9 @@ export function normalizeOneDecision(
   const dispositions = rawOptions.map((option) => classifyOption(option.label, option.description, judged?.disposition));
   const combined = [question, header, ...rawOptions.flatMap((option) => [option.label, option.description])].join(" ");
   const risk = inferRisk(combined, dispositions, judged?.risk);
-  const unstructuredHighRisk = RISK_ORDER[risk.level] >= RISK_ORDER.R2 && risk.certainty === "ambiguous";
+  const authorityReadiness = judged?.authorityReadiness?.(combined) ?? null;
+  const unstructuredHighRisk = RISK_ORDER[risk.level] >= RISK_ORDER.R2
+    && (risk.certainty === "ambiguous" || authorityReadiness !== "ready");
   const impactText = rawOptions.map((option) => option.description).filter(Boolean).join(" · ");
   const explicitRejectIndex = dispositions.findIndex((item) => item === "reject");
   const cost: OneDecisionField = matchedField(combined, COST_RE, "question") ?? (COST_RELEVANT_RE.test(combined)
@@ -267,9 +272,7 @@ export function normalizeOneDecision(
     const grantsAuthority = disposition === "approve" || (unstructuredHighRisk && disposition === "choice");
     const blockedReason = disposition === "modify" || disposition === "reject"
       ? null
-      : confirmation.multiSelect
-        ? "multi_select_requires_work" as const
-        : grantsAuthority && unstructuredHighRisk
+      : grantsAuthority && unstructuredHighRisk
           ? "unstructured_high_risk" as const
           : null;
     return {
@@ -313,7 +316,7 @@ export function normalizeOneDecision(
       reject: explicitRejectIndex >= 0
         ? { enabled: true, reply: rawOptions[explicitRejectIndex].label, source: "explicit_option" }
         : { enabled: true, reply: "Reject. Do not take the proposed action.", source: "product_safe_default" },
-      modify: { enabled: true, destination: "work" },
+      modify: { enabled: true, destination: "one" },
       snooze: { enabled: true, durationHours: 24 },
     },
   };
@@ -373,7 +376,7 @@ export function isOneDecisionViewV1(value: unknown): value is OneDecisionViewV1 
     if (option.description !== null && (typeof option.description !== "string" || option.description.length > 1_000)) return false;
     if (!["choice", "approve", "reject", "modify"].includes(String(option.disposition))) return false;
     if (typeof option.grantsAuthority !== "boolean" || typeof option.enabled !== "boolean") return false;
-    if (option.blockedReason !== null && !["unstructured_high_risk", "multi_select_requires_work"].includes(String(option.blockedReason))) return false;
+    if (option.blockedReason !== null && option.blockedReason !== "unstructured_high_risk") return false;
     if (RISK_ORDER[risk.level as OneDecisionRiskLevel] >= RISK_ORDER.R2 && risk.certainty === "ambiguous" && option.grantsAuthority && option.enabled) return false;
   }
   if (!view.controls || typeof view.controls !== "object" || Array.isArray(view.controls)) return false;
@@ -386,7 +389,7 @@ export function isOneDecisionViewV1(value: unknown): value is OneDecisionViewV1 
     reject && exactKeys(reject, ["enabled", "reply", "source"]) && reject.enabled === true
       && typeof reject.reply === "string" && reject.reply.length > 0 && reject.reply.length <= 200
       && ["explicit_option", "product_safe_default"].includes(String(reject.source))
-      && modify && exactKeys(modify, ["enabled", "destination"]) && modify.enabled === true && modify.destination === "work"
+      && modify && exactKeys(modify, ["enabled", "destination"]) && modify.enabled === true && modify.destination === "one"
       && snooze && exactKeys(snooze, ["enabled", "durationHours"]) && snooze.enabled === true && snooze.durationHours === 24,
   );
 }

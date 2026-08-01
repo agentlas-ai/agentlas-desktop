@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { tFor, type Locale } from "@/lib/i18n";
 import type {
   OneSuggestionReviewHandoff,
@@ -144,7 +145,8 @@ export function OneSuggestionReviewHandoffBanner({
     }
     const api = ipc();
     if (!api) {
-      setError(tFor(locale, "one.rev.err.no_ipc"));
+      requestOneOperationalRecovery("one-suggestion-handoff", new Error("Desktop bridge unavailable"));
+      setError(null);
       return;
     }
     let cancelled = false;
@@ -209,7 +211,10 @@ export function OneSuggestionReviewHandoffBanner({
       setHandoff(resolved);
       setSeed(resolvedSeed);
     }).catch((cause) => {
-      if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+      if (!cancelled) {
+        requestOneOperationalRecovery("one-suggestion-handoff", cause);
+        setError(null);
+      }
     });
     return () => {
       cancelled = true;

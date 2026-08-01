@@ -7,9 +7,11 @@
 // Closed-form fields (SAFE_ID_RE, COST_RE, DEADLINE_RE) stay deterministic.
 
 import {
+  ONE_DECISION_AUTHORITY_READINESS_JUDGMENT_KIND,
   ONE_DECISION_DISPOSITION_JUDGMENT_KIND,
   ONE_DECISION_RISK_JUDGMENT_KIND,
   oneDecisionJudgmentTexts,
+  type OneDecisionAuthorityReadiness,
   type OneDecisionJudgedReaders,
   type OneDecisionOptionDisposition,
   type OneDecisionRiskLevel,
@@ -19,6 +21,7 @@ import { judgeRequired, peekJudgment } from "../system-agents/judgment";
 
 const RISK_LABELS = ["R0", "R1", "R2", "R3", "R4"] as const;
 const DISPOSITION_LABELS = ["choice", "approve", "reject", "modify"] as const;
+const AUTHORITY_READINESS_LABELS = ["ready", "needs_details"] as const;
 
 const RISK_QUESTION =
   "How risky is the action this assistant decision request asks the user to authorize? " +
@@ -41,6 +44,15 @@ const DISPOSITION_GUIDANCE =
   "'Send without CC' approves sending. Only a phrase that negates the action itself " +
   "(do not send / 발송하지 않음) is a rejection.";
 
+const AUTHORITY_READINESS_QUESTION =
+  "Does this One decision request contain enough human-readable detail for the user to knowingly choose an option that grants authority?";
+
+const AUTHORITY_READINESS_GUIDANCE =
+  "Return ready only when the target, action, material impact, and any relevant cost, destination/audience, and undo path are clear enough in this same decision. " +
+  "A standard account-login or account-connection step is ready when it clearly says a login window opens, no charge is involved, and the connection can be revoked later. " +
+  "For payment, publication, destructive, legal, security, or permission changes, require the material amount/scope/destination and reversal limits. " +
+  "Do not require a trip to Work merely because the action is R2 or higher; judge whether One can safely ask here.";
+
 /** Synchronous read of an already-judged risk level. null = fail closed. */
 export function judgedOneDecisionRisk(combinedText: string): OneDecisionRiskLevel | null {
   const verdict = peekJudgment<OneDecisionRiskLevel>(ONE_DECISION_RISK_JUDGMENT_KIND, combinedText);
@@ -53,10 +65,17 @@ export function judgedOneDecisionDisposition(optionText: string): OneDecisionOpt
   return verdict && verdict.source === "llm" ? verdict.verdict : null;
 }
 
+/** Synchronous read of whether One has enough context to ask for authority here. */
+export function judgedOneDecisionAuthorityReadiness(combinedText: string): OneDecisionAuthorityReadiness | null {
+  const verdict = peekJudgment<OneDecisionAuthorityReadiness>(ONE_DECISION_AUTHORITY_READINESS_JUDGMENT_KIND, combinedText);
+  return verdict && verdict.source === "llm" ? verdict.verdict : null;
+}
+
 /** Readers Main-side normalizeOneDecision callers pass; renderer render passes never do. */
 export const oneDecisionJudgedReaders: OneDecisionJudgedReaders = {
   risk: judgedOneDecisionRisk,
   disposition: judgedOneDecisionDisposition,
+  authorityReadiness: judgedOneDecisionAuthorityReadiness,
 };
 
 // Only successful llm verdicts enter the judgment cache, so a failing warm (model
@@ -92,6 +111,15 @@ export async function prejudgeOneDecision(
       labels: RISK_LABELS,
       input: texts.combined,
       guidance: RISK_GUIDANCE,
+      signal: opts.signal,
+      timeoutMs,
+    });
+    await judgeRequired<OneDecisionAuthorityReadiness>({
+      kind: ONE_DECISION_AUTHORITY_READINESS_JUDGMENT_KIND,
+      question: AUTHORITY_READINESS_QUESTION,
+      labels: AUTHORITY_READINESS_LABELS,
+      input: texts.combined,
+      guidance: AUTHORITY_READINESS_GUIDANCE,
       signal: opts.signal,
       timeoutMs,
     });

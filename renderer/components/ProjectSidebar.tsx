@@ -6,10 +6,11 @@ import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
 import type { CanonicalTask, Project } from "@/lib/types";
-import { IconFolder, IconPlus } from "./Icon";
+import { IconFolder, IconHome, IconPlus } from "./Icon";
 import { ProductModeMenu } from "./one/ProductModeMenu";
 import { AccountChip } from "./AccountChip";
 import { VersionChip } from "./VersionChip";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 
 export function ProjectSidebar() {
   const { locale } = useT();
@@ -21,11 +22,16 @@ export function ProjectSidebar() {
 
   useEffect(() => {
     const api = ipc();
-    if (!api) return;
+    if (!api) {
+      requestOneOperationalRecovery("project-sidebar-load", new Error("Desktop bridge unavailable"));
+      return;
+    }
     let cancelled = false;
     const load = () => void Promise.all([api.projects.list(), api.tasks.list({ limit: 200 })]).then(([items, taskRows]) => {
       if (!cancelled) { setProjects(items); setTasks(taskRows); }
-    }).catch(() => { if (!cancelled) { setProjects([]); setTasks([]); } });
+    }).catch(() => {
+      // Preserve the last good navigation list while One inspects the failure.
+    });
     load();
     const onChanged = () => load();
     window.addEventListener("agentlas:projects-changed", onChanged);
@@ -41,6 +47,15 @@ export function ProjectSidebar() {
     <aside className="project-sidebar glass-thin">
       <div className="project-sidebar-drag titlebar-drag" />
       <div className="project-sidebar-head titlebar-nodrag"><ProductModeMenu current="work" /></div>
+      <button
+        type="button"
+        className="project-sidebar-dashboard"
+        data-work-dashboard-return="sidebar"
+        onClick={() => navigate("/dashboard")}
+        aria-label={ko ? "대시보드로 돌아가기" : "Back to Dashboard"}
+      >
+        <IconHome size={15} />{ko ? "대시보드" : "Dashboard"}
+      </button>
       <button type="button" className="project-sidebar-new" onClick={() => navigate("/project/new")}>
         <IconPlus size={15} />{ko ? "새 프로젝트" : "New project"}
       </button>

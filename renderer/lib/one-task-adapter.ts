@@ -114,29 +114,6 @@ function localizedBriefingBody(
   return text;
 }
 
-function localizedFailureBriefingBody(errorMessage: string | null | undefined, locale: "ko" | "en"): string {
-  const ko = locale === "ko";
-  const message = errorMessage?.toLowerCase() ?? "";
-  if (/webfetch|web fetch|website|page|url|http|network|fetch/.test(message)) {
-    return ko
-      ? "웹페이지 하나를 확인하지 못했어요. 잠시 뒤 다시 부탁하면 이어서 확인할게요."
-      : "One could not check one of the webpages. Try again in a moment.";
-  }
-  if (/permission|denied|unauthori[sz]ed|forbidden|access/.test(message)) {
-    return ko
-      ? "필요한 파일이나 서비스에 접근하지 못했어요. 연결 상태를 확인한 뒤 다시 부탁해 주세요."
-      : "One could not access a required file or service. Check the connection, then try again.";
-  }
-  if (/timeout|timed out|deadline/.test(message)) {
-    return ko
-      ? "확인 시간이 너무 길어져 멈췄어요. 다시 부탁하면 한 번 더 시도할게요."
-      : "The check took too long and stopped. Ask again and One will try once more.";
-  }
-  return ko
-    ? "확인 과정 일부가 멈췄어요. 작업을 열어 남은 내용을 확인할 수 있어요."
-    : "Part of the check stopped. Open the task to review what remains.";
-}
-
 type ProjectionTasksBridge = {
   listProjections?: (input?: unknown) => Promise<unknown>;
   getProjection?: (taskId: string, input?: unknown) => Promise<unknown>;
@@ -512,7 +489,9 @@ export function chooseOneBriefing(
       kind: "failed",
       eyebrow: ko ? "확인 필요" : "Needs attention",
       title: ko ? "멈춘 작업이 하나 있어요." : "One task stopped before completion.",
-      body: localizedFailureBriefingBody(failed.latestReceipt?.errorMessage, locale),
+      // Failure meaning is authored by One's recovery judgment at presentation
+      // time. The home briefing never classifies or paraphrases raw receipts.
+      body: "",
       prepared: ko
         ? "멈추기 전까지 나온 내용과 다시 시작할 위치를 자세히 볼 수 있어요."
         : "You can review what was completed and where to continue.",

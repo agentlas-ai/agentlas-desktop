@@ -3,7 +3,7 @@
 //
 // 실측 원칙: marketplace.search(실제 허브 검색) + marketplace.status(소스 온라인=게시자 가용성 proxy).
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { classifyHubEntity, entityClassLabel } from "@/lib/agent-entity-kind";
 import {
@@ -22,37 +22,6 @@ import {
 import { useT } from "@/lib/i18n";
 import { IconSearch, IconCheck } from "@/components/Icon";
 import type { MarketplaceListing, MarketplaceSourceStatus } from "@/lib/types";
-
-const INTENT_STOP_WORDS = new Set([
-  "agent", "agents", "help", "make", "create", "build", "please", "need", "want", "with", "for", "the",
-  "에이전트", "도와줘", "만들어", "만들어줘", "필요해", "해주세요",
-]);
-
-function intentTerms(value: string): string[] {
-  return [...new Set(
-    value.toLocaleLowerCase()
-      .match(/[a-z0-9가-힣]{2,}/g)
-      ?.filter((term) => !INTENT_STOP_WORDS.has(term)) ?? [],
-  )].slice(0, 12);
-}
-
-function isUsableIntent(value: string): boolean {
-  const normalized = value.trim();
-  if (normalized.length < 4 || normalized.length > 240) return false;
-  if (/^[a-z0-9]+(?:[-_][a-z0-9]+){2,}$/i.test(normalized)) return false;
-  return intentTerms(normalized).length > 0;
-}
-
-function listingEvidence(listing: MarketplaceListing, terms: string[]): string[] {
-  const publicCopy = [
-    listing.name,
-    listing.nameEn,
-    listing.tagline,
-    listing.taglineEn,
-    listing.category ?? "",
-  ].join(" ").toLocaleLowerCase();
-  return terms.filter((term) => publicCopy.includes(term)).slice(0, 4);
-}
 
 export function HubBorrowRoom() {
   const { locale } = useT();
@@ -156,21 +125,9 @@ export function HubBorrowRoom() {
 
   const online = status ? status.online && !status.usingFallback : false;
   const intent = query.trim();
-  const usableIntent = isUsableIntent(intent);
-  const terms = useMemo(() => intentTerms(intent), [intent]);
-  const visibleResults = useMemo(() => {
-    if (!results || !intent) return results;
-    if (!usableIntent) return [];
-    return results
-      .map((listing, sourceRank) => ({
-        listing,
-        sourceRank,
-        evidence: listingEvidence(listing, terms),
-      }))
-      .filter((item) => item.evidence.length > 0)
-      .sort((left, right) => right.evidence.length - left.evidence.length || left.sourceRank - right.sourceRank)
-      .map((item) => item.listing);
-  }, [intent, results, terms, usableIntent]);
+  // Discovery order belongs to Hub. The client must not reinterpret or rerank
+  // candidates with a local keyword list.
+  const visibleResults = results;
 
   return (
     <div className="dashboard-module hub-borrow">
@@ -194,40 +151,20 @@ export function HubBorrowRoom() {
         />
       </label>
 
-      {intent && (
-        <div className="hub-borrow-context" role="status" aria-live="polite">
-          <strong>{usableIntent ? (ko ? "공개 설명 근거 추천" : "Public-evidence recommendations") : (ko ? "요청을 조금 더 설명해 주세요" : "Describe the outcome more clearly")}</strong>
-          <span>
-            {usableIntent
-              ? (ko
-                  ? "입력한 목적어가 공개 이름·설명에 실제로 나타나는 결과만 보여줍니다."
-                  : "Only results with words from your request in their public name or description are shown.")
-              : (ko
-                  ? "식별자나 테스트 문자열 대신 원하는 결과와 분야를 문장으로 입력하세요."
-                  : "Use a sentence with the desired result and domain, not an identifier or test string.")}
-          </span>
-        </div>
-      )}
-
       {visibleResults === null ? (
         <div className="dashboard-module-empty">{ko ? "허브 에이전트를 불러오는 중…" : "Loading Hub agents…"}</div>
       ) : visibleResults.length === 0 ? (
         <div className="dashboard-module-empty">
-          {intent
-            ? (usableIntent
-                ? (ko ? "공개 설명에서 확인되는 적합한 결과가 없어요. 다른 결과나 분야를 더 구체적으로 입력해 주세요." : "No result has enough public evidence of fit. Describe a more specific result or domain.")
-                : (ko ? "검색할 일을 문장으로 더 구체적으로 적어 주세요." : "Describe the work in a more specific sentence."))
-            : (ko ? "검색 결과가 없어요." : "No results.")}
+          {ko ? "검색 결과가 없어요." : "No results."}
         </div>
       ) : (
         <div className="hub-borrow-carousel" role="list">
-          {visibleResults.slice(0, 6).map((r, index) => {
+          {visibleResults.slice(0, 6).map((r) => {
             const entityClass = classifyHubEntity(r);
             const listingIdentity = hubListingIdentityKey(r);
             const isBookmarked = bookmarked.has(listingIdentity);
             const callable = isCallableHubListing(r);
             const verificationFacts = hubVerificationFacts(r, locale).slice(0, 2);
-            const evidence = listingEvidence(r, terms);
             return (
               <div
                 key={listingIdentity}
@@ -237,11 +174,6 @@ export function HubBorrowRoom() {
                 data-contextual={intent ? "true" : "false"}
               >
                 <div className="hub-borrow-card-top">
-                  {intent && (
-                    <span className="hub-borrow-rank" data-primary={index === 0 ? "true" : "false"}>
-                      {index === 0 ? (ko ? "근거 가장 많음" : "Most evidence") : ko ? `근거 ${index + 1}` : `Evidence ${index + 1}`}
-                    </span>
-                  )}
                   <span
                     className="hub-borrow-trust"
                     data-grade={r.trustGrade}
@@ -262,13 +194,6 @@ export function HubBorrowRoom() {
                 >
                   {(ko ? r.tagline : r.taglineEn || r.tagline) || ""}
                 </div>
-                {intent && (
-                  <div className="hub-borrow-card-reason">
-                    {ko
-                      ? `공개 설명에서 확인: ${evidence.join(", ")}`
-                      : `Found in public description: ${evidence.join(", ")}`}
-                  </div>
-                )}
                 <div className="hub-borrow-card-facts" aria-label={ko ? "검증 사실" : "Verification facts"}>
                   <span data-callable={callable ? "true" : "false"}>
                     {callable ? (ko ? "Hub 호출 가능" : "Hub callable") : (ko ? "설치 전용" : "Install only")}

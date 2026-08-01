@@ -1,60 +1,7 @@
-import { createHash } from "node:crypto";
 import type { AutomationHubMode, InstalledAgent } from "../../shared/types";
 import { APP_BUILDER_SLUG, GLOBAL_ORCHESTRATOR_SLUG } from "../architecture/manifest";
-import { cardScoreAdjustment, findCardForAgent } from "./routing-cards";
 import type { RuntimeLocale } from "../runtime/status-i18n";
-import { buildEffectiveAgentSystemPrompt } from "./files";
-import { autoLocalEmbedding, rankHybridLocal, MODEL2VEC_HYBRID_NAME } from "../memory/local-embedding";
-import { judge, peekJudgment, type JudgeSpec, type Verdict } from "../system-agents/judgment";
-
-/**
- * On-device semantic verdict for a set of candidate agents. `activeModel` is
- * true only when the verified multilingual local model produced the judgment;
- * `eligibleIds` are the candidates it is semantically confident about. When the
- * model asset is absent this stays inactive and routing falls back to lexical.
- */
-export interface SemanticRouteSignal {
-  activeModel: boolean;
-  eligibleIds: ReadonlySet<string>;
-}
-
-// Routing embeddings are pure functions of an agent's identity text, so cache
-// them by id + content hash. The int8 model2vec vectors are cheap to compute,
-// but agents rarely change, so we avoid re-embedding on every keystroke-driven
-// route probe.
-const routeEmbeddingCache = new Map<string, { hash: string; vector: readonly number[] }>();
-
-function agentRouteVector(agentId: string, haystack: string): readonly number[] {
-  const hash = createHash("sha256").update(haystack).digest("hex");
-  const cached = routeEmbeddingCache.get(agentId);
-  if (cached && cached.hash === hash) return cached.vector;
-  const vector = autoLocalEmbedding(haystack).vector;
-  routeEmbeddingCache.set(agentId, { hash, vector });
-  return vector;
-}
-
-/**
- * Default local semantic judgment. Uses the verified on-device multilingual
- * model (potion-multilingual-128M) so local agent routing gets the same
- * semantic-vs-incidental discrimination the Hub/Cloud ontology gives, without
- * ever sending the prompt off-device. Falls back to inactive (lexical-only)
- * when the model asset is unavailable.
- */
-export function defaultSemanticRoute(prompt: string, candidates: readonly InstalledAgent[]): SemanticRouteSignal {
-  const query = autoLocalEmbedding(prompt);
-  if (query.degraded || query.model !== MODEL2VEC_HYBRID_NAME) {
-    return { activeModel: false, eligibleIds: new Set() };
-  }
-  const items = candidates.map((agent) => {
-    const haystack = agentHaystack(agent);
-    return { id: agent.id, text: haystack, embedding: agentRouteVector(agent.id, haystack) };
-  });
-  const ranked = rankHybridLocal(prompt, items);
-  return {
-    activeModel: true,
-    eligibleIds: new Set(ranked.filter((entry) => entry.semanticEligible).map((entry) => entry.item.id)),
-  };
-}
+import { judgeRequired, peekJudgment } from "../system-agents/judgment";
 
 export interface AutoRouteChoice {
   agent: InstalledAgent;
@@ -68,132 +15,88 @@ export interface AutoRouteExperiencePrior {
   matchedTerms: string[];
 }
 
-const STOP_WORDS = new Set([
-  "the",
-  "and",
-  "for",
-  "with",
-  "this",
-  "that",
-  "from",
-  "into",
-  "make",
-  "build",
-  "create",
-  "agent",
-  "agents",
-  "please",
-  "좀",
-  "해주세요",
-  "해줘",
-  "만들어",
-  "붙여",
-  "연결",
-  "작업",
-  "요청",
-]);
+export interface AutoRouteOptions {
+  allowFallback?: boolean;
+  judgedOnly?: boolean;
+  judgedPeek?: boolean;
+  experiencePriors?: ReadonlyMap<string, AutoRouteExperiencePrior>;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
 
-const ROUTE_HINTS: Array<{ slug: string; terms: string[]; reasonKo: string; reasonEn: string }> = [
-  {
-    slug: APP_BUILDER_SLUG,
-    terms: [
-      "apps generate",
-      "app builder",
-      "make an app",
-      "build an app",
-      "create an app",
-      "generated app",
-      "generate app",
-      "internal app",
-      "dedicated app",
-      "workflow app",
-      "dashboard app",
-      "studio app",
-      "service-app",
-      "creative-studio",
-      "scaffold-app",
-      "operate-app",
-      "앱빌더",
-      "앱 빌더",
-      "앱 만들어",
-      "앱 만들",
-      "전용 앱",
-      "내장 앱",
-      "내부 앱",
-      "생성 앱",
-      "워크플로우 앱",
-      "대시보드 앱",
-      "스튜디오 앱",
-    ],
-    reasonKo: "Apps에 등록되는 로컬 웹앱 생성/설계 요청입니다",
-    reasonEn: "the request is to create or design a generated local web app registered in Apps",
-  },
-  {
-    slug: "agentlas-memory-curator",
-    terms: ["memory", "remember", "recall", "request_context", "context_json", "메모리", "기억", "회상", "저장"],
-    reasonKo: "기억 저장/검색/스코프 품질을 다루는 요청입니다",
-    reasonEn: "the request concerns memory storage, recall, or scope quality",
-  },
-  {
-    slug: "agentlas-task-bias",
-    terms: ["bias", "sitemap", "evidence", "completion", "coverage", "편향", "사이트맵", "증거", "검증"],
-    reasonKo: "작업 편향, 사이트맵, 검증 증거를 다루는 요청입니다",
-    reasonEn: "the request concerns task bias, sitemap, or validation evidence",
-  },
-  {
-    slug: "agentlas-pm-soul",
-    terms: ["project", "plan", "decision", "handoff", "continuity", "프로젝트", "계획", "결정", "연속성", "핸드오프"],
-    reasonKo: "프로젝트 연속성/결정/조율이 중심인 요청입니다",
-    reasonEn: "the request is centered on project continuity, decisions, or coordination",
-  },
-];
+export const AUTO_ROUTE_JUDGMENT_KIND = "installed-agent-route";
 
 export function isGlobalOrchestrator(agent: InstalledAgent | null | undefined): boolean {
   return agent?.slug === GLOBAL_ORCHESTRATOR_SLUG;
 }
 
-// ── plain 대화 감지 — "엣지케이스 없는 라우팅"의 1단계 ─────────────────────────
-// 인사/맞장구/감사/짧은 확인처럼 전문 에이전트 라우팅이 오히려 이상한 메시지는
-// 스코어러·Hephaestus 에스컬레이션을 전부 건너뛰고 기본 LLM이 즉답한다(선지연 0).
-// 보수적으로: 목록에 확실히 걸리는 것만 plain. 애매하면 기존 라우팅 경로 유지.
-const PLAIN_CONVERSATION_RE =
-  /^(안녕(하세요)?|하이|헬로|반가워요?|고마워요?|감사(합니다|해요?)?|잘\s?자요?|수고(했어|하세요)?요?|응|넵?|네|예|좋아요?|오케이|okay|ok|ㅇㅋ|ㄱㅅ|ㅋ+|ㅎ+|hi|hello|hey|thanks?|thank you|good (morning|night|evening)|bye|잘가요?|화이팅|파이팅|테스트|test)[!.~^\s]*$/i;
-
-/** 라우팅이 불필요한 명백한 일상 대화인지 판정. true면 스코어러/routeOnly를 건너뛴다.
- *  주의: 여기서 "질문 vs 명령" 같은 의도 분류를 키워드로 하려 들지 말 것 — 단어 매칭으로는
- *  못 가른다(생성/줘/맞아 등이 문맥 따라 뒤집힘). 명백한 인사·맞장구만 걸러내고,
- *  나머지는 라우팅 스코어러의 신뢰도 게이트(selectAutoRoutedAgent allowFallback:false)에 맡긴다. */
-export function isPlainConversationalPrompt(prompt: string): boolean {
-  const p = prompt.trim();
-  if (!p) return true;
-  if (p.length > 40) return false; // 긴 메시지는 항상 라우팅 후보
-  return PLAIN_CONVERSATION_RE.test(p);
+export function autoRouteJudgmentInput(userPrompt: string, pool: readonly InstalledAgent[]): string {
+  return [
+    `REQUEST:\n${userPrompt.slice(0, 3_000)}`,
+    "AVAILABLE PROJECT/TURN AGENTS:",
+    ...pool.map((agent) =>
+      `- ${agent.slug}: ${agent.nameEn || agent.name} — ${(agent.taglineEn || agent.tagline || "").slice(0, 240)}`,
+    ),
+  ].join("\n");
 }
 
-// 멀티도메인 신호 — 병렬/팀/파이프라인 의도가 보이면 Hephaestus 에스컬레이션 가치가 있다.
-const MULTI_INTENT_RE =
-  /여러|각각|동시에?|병렬|팀으로|나눠서|파이프라인|워크플로우?|단계별|순서대로|multiple|in parallel|as a team|pipeline|workflow|step by step|divide|split/i;
+export interface JudgedAutoRouteResult {
+  choice: AutoRouteChoice | null;
+  source: "llm" | "unavailable";
+}
 
 /**
- * Hephaestus routeOnly(라우터 에이전트 에스컬레이션)를 호출할 가치가 있는 프롬프트인지.
- * 기본 채팅의 모든 메시지가 15초 타임아웃 라우팅을 동기로 기다리던 선지연을 없앤다 —
- * 멀티도메인/파이프라인 신호가 있거나 충분히 복합적인 요청에만 에스컬레이션한다.
+ * Meaning belongs entirely to the connected controller. Code supplies the
+ * finite roster and validates the returned exact slug; it never recruits,
+ * ranks or substitutes with words, regexes, embeddings or a default agent.
  */
-export function isEscalationWorthyPrompt(prompt: string): boolean {
-  const p = prompt.trim();
-  if (isPlainConversationalPrompt(p)) return false;
-  if (MULTI_INTENT_RE.test(p)) return true;
-  return p.length >= 80; // 복합 요청은 대체로 길다 — 짧은 단일 작업은 로컬 스코어러로 충분
+export async function selectAutoRoutedAgentJudged(
+  userPrompt: string,
+  agents: InstalledAgent[],
+  locale: RuntimeLocale,
+  opts?: AutoRouteOptions,
+): Promise<JudgedAutoRouteResult> {
+  const pool = agents.filter((agent, index) => agents.findIndex((item) => item.slug === agent.slug) === index);
+  if (!userPrompt.trim() || pool.length === 0) return { choice: null, source: "unavailable" };
+  const bySlug = new Map(pool.map((agent) => [agent.slug, agent]));
+  const verdict = await judgeRequired<string>({
+    kind: AUTO_ROUTE_JUDGMENT_KIND,
+    question: "Which exact available agent should be a task-scoped sub-agent for this turn, or none when no listed agent is justified?",
+    labels: [...bySlug.keys(), "none"],
+    input: autoRouteJudgmentInput(userPrompt, pool),
+    guidance: [
+      "Judge the full meaning in any language; do not decide from keyword overlap.",
+      "A selected agent remains subordinate to the current One/project controller and cannot own the session.",
+      "Never select an agent merely to avoid none, and never invent or substitute a slug.",
+    ].join(" "),
+    scanSecrets: true,
+    ...(opts?.signal ? { signal: opts.signal } : {}),
+    ...(opts?.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
+    locale,
+  });
+  if (!verdict.verdict || verdict.verdict === "none") {
+    return { choice: null, source: verdict.source === "llm" ? "llm" : "unavailable" };
+  }
+  const selected = bySlug.get(verdict.verdict);
+  if (!selected) return { choice: null, source: "unavailable" };
+  return {
+    choice: { agent: selected, reason: verdict.reason, matchedTerms: [] },
+    source: "llm",
+  };
 }
 
-export interface AutomaticWorkforceEligibility {
-  agentAppMode: boolean;
-  networkAutoEnabled: boolean;
-  globalOrchestrator: boolean;
-  hasPriorContext: boolean;
-  /** Undefined only for an ordinary interactive Desktop chat turn. */
-  executionSource?: "automation" | "site-studio" | "telegram" | "trex";
-  prompt: string;
+/** Synchronous consumers may use only an already model-authored cached verdict. */
+export function selectAutoRoutedAgent(
+  userPrompt: string,
+  agents: InstalledAgent[],
+  _locale: RuntimeLocale,
+  _opts?: AutoRouteOptions,
+): AutoRouteChoice | null {
+  const pool = agents.filter((agent, index) => agents.findIndex((item) => item.slug === agent.slug) === index);
+  const verdict = peekJudgment<string>(AUTO_ROUTE_JUDGMENT_KIND, autoRouteJudgmentInput(userPrompt, pool));
+  if (!verdict || verdict.source !== "llm" || verdict.verdict === "none") return null;
+  const agent = pool.find((candidate) => candidate.slug === verdict.verdict);
+  return agent ? { agent, reason: verdict.reason, matchedTerms: [] } : null;
 }
 
 export interface HubFirstWorkforceEligibility {
@@ -204,621 +107,12 @@ export interface HubFirstWorkforceEligibility {
   targetAppEdit: boolean;
 }
 
-/**
- * `hub-allowed` means the selected local/session agent gets the first attempt.
- * Only the explicit `hub-first` policy may pre-empt that target and construct a
- * Workforce before execution. Existing exact Hub borrows already have their own
- * verified package path and must not be expanded into a second Workforce.
- */
+/** Exact explicit mode/authority facts only; no prompt meaning is interpreted. */
 export function shouldForceHubFirstWorkforce(input: HubFirstWorkforceEligibility): boolean {
-  return Boolean(
-    !input.agentAppMode &&
-    input.hubMode === "hub-first" &&
-    input.borrowedAgentCount === 0 &&
-    !input.plainConversation &&
-    !input.targetAppEdit,
-  );
-}
-
-/** Ordinary complex prompts enter Workforce only at the fresh top-level leader turn. */
-export function shouldAutoEngageNetworkWorkforce(input: AutomaticWorkforceEligibility): boolean {
-  return Boolean(
-    !input.agentAppMode &&
-    input.networkAutoEnabled &&
-    input.globalOrchestrator &&
-    !input.hasPriorContext &&
-    input.executionSource == null &&
-    isEscalationWorthyPrompt(input.prompt),
-  );
-}
-
-function normalize(value: string): string {
-  return value.toLowerCase().replace(/[_/]+/g, "-");
-}
-
-/**
- * A direct agent-name hit only counts when it is a real reference, not an incidental
- * substring. A short name like "go"/"one"/"id" appears inside ordinary prose
- * ("where should I go", "someone", "video") and used to hijack routing. Long names
- * (>= 5 chars) keep the fast substring test; short ones require a word/token boundary.
- * When the on-device semantic model is loaded it is the real authority (see below); this
- * guard protects the no-model fallback path where lexical intent is honored directly.
- */
-function nameMatchesPrompt(promptText: string, normalizedName: string): boolean {
-  if (!normalizedName) return false;
-  if (normalizedName.length >= 5) return promptText.includes(normalizedName);
-  const escaped = normalizedName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // Boundary = start/end or any non-alphanumeric (covers spaces, punctuation, and
-  // Hangul/Latin transitions) on both sides of the short name.
-  return new RegExp(`(?:^|[^a-z0-9가-힣])${escaped}(?:$|[^a-z0-9가-힣])`, "i").test(promptText);
-}
-
-function tokenize(value: string): string[] {
-  const normalized = normalize(value);
-  const matches = normalized.match(/[a-z0-9][a-z0-9-]{1,}|[가-힣]{2,}/g) ?? [];
-  const expanded = matches.flatMap((term) => term.split("-").filter(Boolean).concat(term));
-  return [...new Set(expanded.filter((term) => term.length >= 2 && !STOP_WORDS.has(term)))];
-}
-
-function includesTerm(haystack: string, term: string): boolean {
-  return haystack.includes(normalize(term));
-}
-
-const APP_BUILDER_EXPLICIT_TERMS = [
-  "apps generate",
-  "app builder",
-  "make an app",
-  "build an app",
-  "create an app",
-  "generate app",
-  "generated app",
-  "internal app",
-  "dedicated app",
-  "workflow app",
-  "dashboard app",
-  "studio app",
-  "service-app",
-  "creative-studio",
-  "scaffold-app",
-  "operate-app",
-  "앱빌더",
-  "앱 빌더",
-  "앱 만들어",
-  "앱 만들",
-  "전용 앱",
-  "내장 앱",
-  "내부 앱",
-  "생성 앱",
-  "워크플로우 앱",
-  "대시보드 앱",
-  "스튜디오 앱",
-];
-
-const APP_BUILDER_REPEAT_TERMS = [
-  "automation",
-  "automate",
-  "automatic",
-  "recurring",
-  "repeat",
-  "scheduled",
-  "scheduler",
-  "every day",
-  "every week",
-  "workflow",
-  "pipeline",
-  "cron",
-  "자동화",
-  "자동",
-  "반복",
-  "정기",
-  "매일",
-  "매주",
-  "스케줄",
-  "예약",
-  "워크플로우",
-  "파이프라인",
-];
-
-const APP_BUILDER_SURFACE_TERMS = [
-  "dashboard",
-  "studio",
-  "editor",
-  "settings",
-  "state",
-  "save",
-  "saved",
-  "export",
-  "import",
-  "approve",
-  "approval",
-  "review",
-  "queue",
-  "table",
-  "filter",
-  "template",
-  "memory",
-  "profile",
-  "대시보드",
-  "스튜디오",
-  "편집",
-  "수정",
-  "설정",
-  "상태",
-  "저장",
-  "내보내기",
-  "불러오기",
-  "승인",
-  "검토",
-  "큐",
-  "목록",
-  "테이블",
-  "필터",
-  "템플릿",
-  "학습",
-  "메모리",
-  "프로필",
-];
-
-const APP_BUILDER_ACTION_TERMS = [
-  "build",
-  "create",
-  "generate",
-  "compose",
-  "manage",
-  "track",
-  "research",
-  "analyze",
-  "monitor",
-  "render",
-  "convert",
-  "만들",
-  "생성",
-  "작성",
-  "관리",
-  "추적",
-  "리서치",
-  "조사",
-  "분석",
-  "모니터",
-  "렌더",
-  "변환",
-];
-
-const TRIVIAL_PROMPTS = new Set([
-  "hi",
-  "hello",
-  "hey",
-  "thanks",
-  "thankyou",
-  "안녕",
-  "안녕하세요",
-  "고마워",
-  "감사",
-  "뭐해",
-]);
-
-function matchedTerms(promptText: string, terms: string[]): string[] {
-  return [...new Set(terms.filter((term) => includesTerm(promptText, term)))];
-}
-
-function isTrivialPrompt(promptText: string): boolean {
-  const compact = promptText.replace(/\s+/g, " ").trim();
-  const stripped = compact.replace(/[.!?~。！？,，ㅋㅎ\s]/g, "");
-  if (!stripped) return true;
-  if (stripped.length <= 18 && TRIVIAL_PROMPTS.has(stripped)) return true;
-  const words = compact.split(/\s+/).filter(Boolean);
-  return words.length <= 3 && TRIVIAL_PROMPTS.has(stripped);
-}
-
-export function isAppBuilderWorthyPrompt(prompt: string): boolean {
-  const promptText = normalize(prompt);
-  if (!promptText.trim() || isTrivialPrompt(promptText)) return false;
-
-  const explicit = matchedTerms(promptText, APP_BUILDER_EXPLICIT_TERMS);
-  if (explicit.length) return true;
-
-  const repeat = matchedTerms(promptText, APP_BUILDER_REPEAT_TERMS);
-  const surface = matchedTerms(promptText, APP_BUILDER_SURFACE_TERMS);
-  const action = matchedTerms(promptText, APP_BUILDER_ACTION_TERMS);
-  const signalCount = new Set([...repeat, ...surface, ...action]).size;
-
-  if (repeat.length && (surface.length || action.length)) return true;
-  if (surface.length >= 2 && action.length) return true;
-  return signalCount >= 4;
-}
-
-function agentHaystack(agent: InstalledAgent): string {
-  let effectivePrompt = agent.systemPrompt;
-  try {
-    effectivePrompt = buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt);
-  } catch {
-    // Routing remains available; explicit invocation still fails closed on an
-    // invalid canonical package asset.
-  }
-  return normalize(
-    [
-      agent.slug,
-      agent.name,
-      agent.nameEn,
-      agent.tagline,
-      agent.taglineEn,
-      effectivePrompt.slice(0, 3500),
-      agent.mcpServers.join(" "),
-      agent.envRequirements.map((req) => req.key).join(" "),
-    ].join("\n"),
-  );
-}
-
-function routeHintScore(promptText: string, agent: InstalledAgent, locale: RuntimeLocale): { score: number; reason?: string; terms: string[] } {
-  const hint = ROUTE_HINTS.find((item) => item.slug === agent.slug);
-  if (!hint) return { score: 0, terms: [] };
-  if (hint.slug === APP_BUILDER_SLUG && !isAppBuilderWorthyPrompt(promptText)) {
-    return { score: 0, terms: [] };
-  }
-  const terms = hint.terms.filter((term) => includesTerm(promptText, term));
-  if (!terms.length) return { score: 0, terms: [] };
-  return {
-    score: 12 + terms.length * 3,
-    reason: locale === "ko" ? hint.reasonKo : hint.reasonEn,
-    terms,
-  };
-}
-
-function scoreAgent(
-  prompt: string,
-  promptTerms: string[],
-  agent: InstalledAgent,
-  locale: RuntimeLocale,
-  experiencePrior?: AutoRouteExperiencePrior,
-): { score: number; reason: string; terms: string[]; highPrecision: boolean } {
-  const promptText = normalize(prompt);
-  if (agent.slug === APP_BUILDER_SLUG && !isAppBuilderWorthyPrompt(promptText)) {
-    return {
-      score: 0,
-      reason:
-        locale === "ko"
-          ? "전용 App을 만들 만큼 반복·상태·편집·자동화가 뚜렷하지 않아 App Builder 라우트를 보류했습니다"
-          : "the request does not clearly need a dedicated App with durable workflow, state, editing, or automation",
-      terms: [],
-      highPrecision: false,
-    };
-  }
-  const haystack = agentHaystack(agent);
-  let score = 0;
-  const matchedTerms: string[] = [];
-
-  const directNames = [agent.slug, agent.name, agent.nameEn].filter(Boolean);
-  let directNameMatched = false;
-  for (const name of directNames) {
-    const n = normalize(name);
-    if (n && nameMatchesPrompt(promptText, n)) {
-      score += 20;
-      matchedTerms.push(name);
-      directNameMatched = true;
-    }
-  }
-
-  for (const term of promptTerms) {
-    if (haystack.includes(term)) {
-      score += term.length >= 5 ? 3 : 2;
-      matchedTerms.push(term);
-    }
-  }
-
-  const hint = routeHintScore(promptText, agent, locale);
-  score += hint.score;
-  matchedTerms.push(...hint.terms);
-
-  // Hephaestus Network 라우팅 카드 보정 — routing_ready/trusted 카드만 영향 (routing-cards.ts)
-  const card = findCardForAgent(agent.slug, agent.name) ?? findCardForAgent(agent.slug, agent.nameEn);
-  if (card) {
-    score += cardScoreAdjustment(promptTerms, card);
-  }
-  if (experiencePrior) {
-    score += Math.max(0, Math.min(20, experiencePrior.score));
-    matchedTerms.push(...experiencePrior.matchedTerms);
-  }
-
-  // High-precision = an explicit routing signal, not incidental term overlap:
-  // the person named the agent, a curated route hint fired, or the user's own
-  // reviewed experience matched. These override the semantic gate below.
-  const highPrecision = directNameMatched || hint.score > 0 || (experiencePrior?.score ?? 0) > 0;
-  const uniqueTerms = [...new Set(matchedTerms)].slice(0, 6);
-  const experienceReason = experiencePrior
-    ? locale === "ko"
-      ? `검토·승격된 Experience가 ${experiencePrior.matchedTerms.join(", ")} 작업과 일치합니다`
-      : experiencePrior.reason
-    : undefined;
-  const reason =
-    hint.reason || experienceReason ||
-    (locale === "ko"
-      ? uniqueTerms.length
-        ? `요청어 ${uniqueTerms.map((term) => `"${term}"`).join(", ")}가 이 에이전트의 역할/트리거와 가장 가깝습니다`
-        : "명확한 전문 라우트가 없어 기본 프로젝트 조율 에이전트가 가장 안전합니다"
-      : uniqueTerms.length
-        ? `request terms ${uniqueTerms.map((term) => `"${term}"`).join(", ")} best match this agent's role/triggers`
-        : "no specialist matched clearly, so the default project coordinator is safest");
-
-  return { score, reason, terms: uniqueTerms, highPrecision };
-}
-
-// 전문 에이전트로 위임하려면 이 점수 이상이어야 한다. 근거: 직접 이름 언급 +20,
-// 큐레이션된 ROUTE_HINT 매치 +12부터 — 즉 이름/힌트급 증거가 있어야 위임한다.
-// 설명문 단어 몇 개가 스치는 정도(+2~3/개)로는 위임하지 않는다 — "사진 프롬프트가
-// 댓글 시더로 라우팅"되던 저신뢰 오배정과, 일상 대화가 매번 에이전트를 부르던 소음의 근원.
-// 이 문턱은 이제 "채용(recruitment)" 기준일 뿐 최종 결정이 아니다 — 최종 배정은
-// 상주 판정 모델이 내리고(selectAutoRoutedAgentJudged), 여기 어휘 파이프라인은
-// 후보 모집과 모델 부재 시의 라벨된 폴백으로 강등됐다.
-const MIN_SPECIALIST_SCORE = 10;
-
-export const AUTO_ROUTE_JUDGMENT_KIND = "agent-auto-route";
-
-/** Candidate ceiling for one routing judgment call. */
-const MAX_JUDGED_ROUTE_CANDIDATES = 30;
-
-export interface AutoRouteOptions {
-  /** true면(앱 생성 모드 등) 무매치여도 기본 조율 에이전트로 폴백한다. 기본 false —
-   *  확신 없는 라우팅 대신 null을 돌려주고, 호출부가 현재(오케스트레이터) 경로로 즉답한다. */
-  allowFallback?: boolean;
-  /** Reviewed exact-base Experience evidence, keyed by installed agent id. */
-  experiencePriors?: ReadonlyMap<string, AutoRouteExperiencePrior>;
-  /** Injectable on-device semantic judgment (default uses the local model). */
-  semanticRoute?: (prompt: string, candidates: readonly InstalledAgent[]) => SemanticRouteSignal;
-  /** When false, the sync path skips the judged-verdict peek (digest-stable callers). */
-  judgedPeek?: boolean;
-  /** When true, a missing model verdict returns null without lexical or embedding routing. */
-  judgedOnly?: boolean;
-}
-
-interface RankedRouteEntry {
-  agent: InstalledAgent;
-  score: number;
-  reason: string;
-  terms: string[];
-  highPrecision: boolean;
-}
-
-interface RoutePipeline {
-  candidates: InstalledAgent[];
-  ranked: RankedRouteEntry[];
-  semantic: SemanticRouteSignal;
-  pool: InstalledAgent[];
-}
-
-function buildRoutePipeline(
-  userPrompt: string,
-  agents: InstalledAgent[],
-  locale: RuntimeLocale,
-  opts?: AutoRouteOptions,
-): RoutePipeline | null {
-  const candidates = agents.filter((agent) => !isGlobalOrchestrator(agent));
-  if (!candidates.length) return null;
-  const promptTerms = tokenize(userPrompt);
-  const ranked = candidates
-    .map((agent) => ({
-      agent,
-      ...scoreAgent(userPrompt, promptTerms, agent, locale, opts?.experiencePriors?.get(agent.id)),
-    }))
-    .sort((a, b) =>
-      b.score - a.score ||
-      a.agent.slug.localeCompare(b.agent.slug) ||
-      a.agent.id.localeCompare(b.agent.id));
-  const semantic = (opts?.semanticRoute ?? defaultSemanticRoute)(userPrompt, candidates);
-  return { candidates, ranked, semantic, pool: judgedRoutePool(ranked, semantic) };
-}
-
-/**
- * The candidate pool the resident judge selects from: union of lexical hits,
- * embedding hits, and — when the install base is small enough — every installed
- * agent, capped. Lexical/embedding are RECRUITMENT here, never the final word:
- * the judge can pick an agent with lexical score 0 as long as it fits the pool.
- */
-function judgedRoutePool(ranked: RankedRouteEntry[], semantic: SemanticRouteSignal): InstalledAgent[] {
-  if (ranked.length <= MAX_JUDGED_ROUTE_CANDIDATES) return ranked.map((entry) => entry.agent);
-  const pool: InstalledAgent[] = [];
-  const seen = new Set<string>();
-  const push = (agent: InstalledAgent) => {
-    if (pool.length >= MAX_JUDGED_ROUTE_CANDIDATES || seen.has(agent.id)) return;
-    seen.add(agent.id);
-    pool.push(agent);
-  };
-  for (const entry of ranked) if (entry.score > 0) push(entry.agent);
-  for (const entry of ranked) if (semantic.eligibleIds.has(entry.agent.id)) push(entry.agent);
-  for (const entry of ranked) push(entry.agent);
-  return pool;
-}
-
-/** The exact judgment input for a routing decision (async warm + sync peek share it). */
-export function autoRouteJudgmentInput(userPrompt: string, pool: readonly InstalledAgent[]): string {
-  const inventory = pool.map((agent) =>
-    `- ${agent.slug}: ${agent.nameEn || agent.name} — ${(agent.taglineEn || agent.tagline || "").slice(0, 160)}`,
-  );
-  return `REQUEST:\n${userPrompt.slice(0, 3_000)}\n\nINSTALLED SPECIALISTS:\n${inventory.join("\n")}`;
-}
-
-const AUTO_ROUTE_QUESTION =
-  "Which installed specialist agent should handle this request, or 'none' when no listed specialist is a genuine fit and the default coordinator should answer directly?";
-
-const AUTO_ROUTE_GUIDANCE =
-  "Judge by meaning in any language. Sharing a few incidental words with an agent's description is NOT a fit, " +
-  "and a specialist whose profession matches the request is a fit even when no keyword overlaps. " +
-  "When the user explicitly names an installed agent, select it. 'none' is a valid and common answer.";
-
-function judgedRouteReason(locale: RuntimeLocale): string {
-  return locale === "ko"
-    ? "요청의 의미가 이 에이전트의 전문 분야와 일치한다고 상주 판정 모델이 결정했습니다"
-    : "the resident judgment model decided the request's meaning matches this agent's specialty";
-}
-
-export type AutoRouteJudge = (spec: JudgeSpec<string>) => Promise<Verdict<string>>;
-
-export interface JudgedAutoRouteResult {
-  choice: AutoRouteChoice | null;
-  /** "llm" = the model decided; "fallback" = today's lexical+embedding behavior, labeled. */
-  source: "llm" | "fallback";
-}
-
-/**
- * THE final specialist pick. The resident judge selects from the recruited pool
- * (or answers "none"); the lexical scorer and the on-device embedding are demoted
- * to recruitment/ranking and remain only the labeled fallback when no model
- * answers. Also warms the judgment cache so the synchronous
- * `selectAutoRoutedAgent` peek sees the same verdict.
- */
-export async function selectAutoRoutedAgentJudged(
-  userPrompt: string,
-  agents: InstalledAgent[],
-  locale: RuntimeLocale,
-  opts?: AutoRouteOptions & { judgeFn?: AutoRouteJudge; signal?: AbortSignal; timeoutMs?: number },
-): Promise<JudgedAutoRouteResult> {
-  const pipeline = buildRoutePipeline(userPrompt, agents, locale, opts);
-  if (!pipeline) return { choice: null, source: "fallback" };
-  // The lexical+embedding scorer produces only the judge's PRIOR here — never the
-  // no-model result. When no connected model reaches a verdict we do NOT route to
-  // a lexically/embedding-scored specialist: we fall to the plain coordinator
-  // (allowFallback) or to the plain assistant (null), so the caller can surface
-  // the connect-a-model state instead of acting on a keyword guess.
-  const noModelChoice = (): AutoRouteChoice | null =>
-    opts?.allowFallback ? defaultCoordinationChoice(pipeline.candidates, locale) : null;
-  if (!userPrompt.trim() || pipeline.pool.length === 0) {
-    return { choice: noModelChoice(), source: "fallback" };
-  }
-  const labels: string[] = [];
-  const bySlug = new Map<string, InstalledAgent>();
-  for (const agent of pipeline.pool) {
-    if (bySlug.has(agent.slug)) continue;
-    bySlug.set(agent.slug, agent);
-    labels.push(agent.slug);
-  }
-  labels.push("none");
-  let verdict: Verdict<string>;
-  try {
-    verdict = await (opts?.judgeFn ?? judge)({
-      kind: AUTO_ROUTE_JUDGMENT_KIND,
-      question: AUTO_ROUTE_QUESTION,
-      labels,
-      input: autoRouteJudgmentInput(userPrompt, pipeline.pool),
-      guidance: AUTO_ROUTE_GUIDANCE,
-      hints: [],
-      fallback: "none",
-      signal: opts?.signal,
-      timeoutMs: opts?.timeoutMs,
-    });
-  } catch {
-    return { choice: noModelChoice(), source: "fallback" };
-  }
-  if (verdict.source !== "llm") return { choice: noModelChoice(), source: "fallback" };
-  if (verdict.verdict === "none") {
-    return {
-      choice: opts?.allowFallback ? defaultCoordinationChoice(pipeline.candidates, locale) : null,
-      source: "llm",
-    };
-  }
-  const selected = bySlug.get(verdict.verdict);
-  // A hallucinated slug never routes: treat it as "no confident model pick".
-  if (!selected) return { choice: noModelChoice(), source: "fallback" };
-  const rankedEntry = pipeline.ranked.find((entry) => entry.agent.id === selected.id);
-  return {
-    choice: {
-      agent: selected,
-      reason: judgedRouteReason(locale),
-      matchedTerms: rankedEntry?.terms ?? [],
-    },
-    source: "llm",
-  };
-}
-
-export function selectAutoRoutedAgent(
-  userPrompt: string,
-  agents: InstalledAgent[],
-  locale: RuntimeLocale,
-  opts?: AutoRouteOptions,
-): AutoRouteChoice | null {
-  const pipeline = buildRoutePipeline(userPrompt, agents, locale, opts);
-  if (!pipeline) return null;
-  const { candidates, ranked, semantic, pool } = pipeline;
-
-  // 1) Judged verdict first. Synchronous callers (team preflight roster) peek the
-  //    verdict the async path warmed; a cache miss keeps the labeled lexical
-  //    fallback below, so behaviour never blocks on a model.
-  if (opts?.judgedPeek !== false) {
-    const peeked = peekJudgment<string>(AUTO_ROUTE_JUDGMENT_KIND, autoRouteJudgmentInput(userPrompt, pool));
-    if (peeked && peeked.source === "llm") {
-      if (peeked.verdict === "none") {
-        return opts?.allowFallback ? defaultCoordinationChoice(candidates, locale) : null;
-      }
-      const selected = pool.find((agent) => agent.slug === peeked.verdict);
-      if (selected) {
-        const rankedEntry = ranked.find((entry) => entry.agent.id === selected.id);
-        return { agent: selected, reason: judgedRouteReason(locale), matchedTerms: rankedEntry?.terms ?? [] };
-      }
-    }
-  }
-  if (opts?.judgedOnly) return null;
-
-  const toChoice = (entry: RankedRouteEntry, reason = entry.reason): AutoRouteChoice => ({
-    agent: entry.agent,
-    reason,
-    matchedTerms: entry.terms,
-  });
-
-  // Lexical recruitment: the strongest agent that clears the specialist bar.
-  const eligibleByLexical = ranked.filter((entry) => entry.score >= MIN_SPECIALIST_SCORE);
-  const lexicalBest = eligibleByLexical[0] ?? null;
-  const explicit = ranked.find((entry) => entry.highPrecision && entry.score >= MIN_SPECIALIST_SCORE);
-
-  // 2) An explicit routing signal — the user named the agent, a curated route
-  //    hint fired, or reviewed Experience matched — is honored before the
-  //    semantic veto (see the highPrecision contract above).
-  if (explicit) return toChoice(explicit);
-
-  // 3) On-device semantic precision filter. The lexical scorer is a bag of
-  //    words: a café restock note and a meme-video studio can share enough
-  //    incidental terms ("make", "local", "draft") to cross the bar. When the
-  //    verified multilingual local model is loaded, it VETOES a recruitment it
-  //    is not semantically confident about, and we fall through to the next
-  //    lexically-eligible agent it IS confident about — or stay solo. This gives
-  //    local routing the same semantic-vs-incidental discrimination the
-  //    Hub/Cloud ontology provides, without sending the prompt off-device. A
-  //    machine without the model asset keeps the plain lexical behavior.
-  if (semantic.activeModel && lexicalBest) {
-    const semanticPick = eligibleByLexical.find((entry) => semantic.eligibleIds.has(entry.agent.id));
-    if (semanticPick) {
-      return toChoice(
-        semanticPick,
-        locale === "ko"
-          ? `${semanticPick.reason} — 요청과 의미가 맞는지 기기 내 모델로 확인했습니다`
-          : `${semanticPick.reason} — confirmed on-device as a meaningful match`,
-      );
-    }
-    // Lexical had a candidate, but the local model rejected every one as an
-    // incidental keyword match. Do not recruit a mis-matched specialist.
-    if (!opts?.allowFallback) return null;
-    return defaultCoordinationChoice(candidates, locale);
-  }
-
-  // 4) No verified local model (asset absent) — fall back to lexical intent:
-  //    the strongest lexically-eligible agent. (With the model loaded, path 3
-  //    above already subjected these matches to the semantic veto, so a
-  //    coincidental short name can no longer hijack the route.)
-  if (lexicalBest) return toChoice(lexicalBest);
-
-  if (!opts?.allowFallback) return null;
-  return defaultCoordinationChoice(candidates, locale);
-}
-
-function defaultCoordinationChoice(candidates: readonly InstalledAgent[], locale: RuntimeLocale): AutoRouteChoice {
-  const fallback =
-    candidates.find((agent) => agent.slug === "agentlas-pm-soul") ??
-    candidates[0];
-  return {
-    agent: fallback,
-    reason:
-      locale === "ko"
-        ? "명확한 전문 에이전트가 없어 기본 프로젝트 조율 경로를 선택했습니다"
-        : "no specialist matched clearly, so Agentlas chose the default coordination route",
-    matchedTerms: [],
-  };
+  return !input.agentAppMode
+    && input.hubMode === "hub-first"
+    && input.borrowedAgentCount === 0
+    && !input.targetAppEdit;
 }
 
 export function autoRouteStatus(choice: AutoRouteChoice, locale: RuntimeLocale): string {
@@ -833,44 +127,10 @@ export function autoRouteSystemPreamble(
   locale: RuntimeLocale,
   mode: "default" | "apps-generate" | "app-edit" = "default",
 ): string {
-  const appBuilderNeedsConsent = choice.agent.slug === APP_BUILDER_SLUG && mode !== "apps-generate";
-  const instruction = mode === "app-edit"
-    ? locale === "ko"
-      ? [
-          "사용자가 기존 Agentlas App 수정을 요청했습니다.",
-          "새 App을 만들지 말고, 제공된 기존 App id/rootPath/manifest를 기준으로 그 App 파일과 동작만 수정하세요.",
-          "사용자 편집·상태·저장 데이터는 보존하고 필요한 변경 사항과 검증 결과를 짧게 보고하세요.",
-        ].join("\n")
-      : [
-          "The user asked to edit an existing Agentlas App.",
-          "Do not create a new App. Use the provided existing App id/rootPath/manifest and update only that App's files and behavior.",
-          "Preserve user edits, state, and saved data, then report the change and verification briefly.",
-        ].join("\n")
-    : appBuilderNeedsConsent
-    ? locale === "ko"
-      ? [
-          "이 요청은 Agentlas Apps에 등록되는 전용 로컬 웹앱으로 만드는 것이 적합할 수 있지만, 사용자가 아직 전용 App 생성을 명시적으로 승인하지 않았습니다.",
-          "실제 App 파일 생성, Agentlas Surface Manifest emit, scaffold-app/operate-app 액션 선언을 하지 마세요.",
-          "대신 먼저 한 문장으로 확인 질문만 하세요: \"이 요청은 Apps에 등록되는 로컬 웹앱으로 만들면 더 편합니다. 전용 App으로 만들어 진행할까요?\"",
-          "사용자가 동의하면 다음 메시지에서 App Builder 작업을 진행하세요.",
-        ].join("\n")
-      : [
-          "This request may be a good fit for a dedicated Agentlas App, but the user has not explicitly approved dedicated App creation yet.",
-          "Do not create App files, emit an Agentlas Surface Manifest, or declare scaffold-app/operate-app actions.",
-          "Ask one confirmation question first: \"This would work better as a local web app registered in Apps. Should I create that App for you?\"",
-          "If the user agrees, proceed with the App Builder flow on the next message.",
-        ].join("\n")
-    : mode === "apps-generate"
-      ? locale === "ko"
-        ? "Apps Generate 모드가 위 경로를 선택했습니다. 첫 줄에 짧게 밝힌 뒤, 선택된 App Builder 경로로 바로 작업하세요."
-        : "Apps Generate mode selected the route above. Briefly state it in the first line, then work as the selected App Builder path."
-      : locale === "ko"
-        ? "사용자는 에이전트를 직접 지정하지 않았습니다. 위 라우팅 결정을 첫 줄에 짧게 밝힌 뒤, 선택된 에이전트로 바로 작업하세요."
-        : "The user did not explicitly choose an agent. Briefly state the route above in the first line, then work as the selected agent.";
-  return [
-    "## Agentlas automatic routing",
-    "",
-    autoRouteStatus(choice, locale),
-    instruction,
-  ].join("\n");
+  const bounded = mode === "app-edit"
+    ? "Edit only the existing Agentlas App supplied by the host. Preserve user state and verify the change."
+    : mode === "apps-generate" && choice.agent.slug === APP_BUILDER_SLUG
+      ? "The user explicitly enabled Apps Generate for this turn. Build and verify the requested App."
+      : "Act only as a task-scoped sub-agent. Return the result to the current controller; never claim session ownership.";
+  return ["## Task-scoped agent call", "", autoRouteStatus(choice, locale), bounded].join("\n");
 }

@@ -769,7 +769,7 @@ app.whenReady().then(async () => {
   traceStartup(`auth-${initialAuthRestore.status}`);
   const initialAuthRestoreWasTemporary = initialAuthRestore.status === "temporarily-unavailable";
   // Stage 2 (post-migration, pre-bootstrap-writers): compare the live DB and
-  // managed assets against the recovery copies. Recovery-required stops here.
+  // managed assets against the recovery copies before deferred repairs resume.
   if (installIdentity.updatesEnabled) {
     await initAutoUpdater({
       initialAuthRestore,
@@ -934,8 +934,8 @@ app.whenReady().then(async () => {
     }
   };
   if (initialAuthRestoreWasTemporary && !deferredAuthRestorePromise) {
-    // A recovery-required state intentionally owns the next action. Never let
-    // an unknown initial Keychain state start the bridge, which would treat it
+    // Temporary authentication recovery intentionally owns the next action.
+    // Never let an unknown initial Keychain state start the bridge, which would treat it
     // as a logout and revoke every stored device pairing.
     console.warn("[mobile-bridge] start skipped; initial account restore is temporarily unavailable");
   } else if (deferredAuthRestorePromise) {

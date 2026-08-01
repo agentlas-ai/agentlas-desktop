@@ -8,7 +8,7 @@
 // language — and this codebase already paid for keyword classification once:
 // a labelled fallback hid a disconnected judge for weeks. Old wordlists are
 // passed to the judge as `hints` (reference, never rules), and when no model is
-// reachable the verdict falls back to "needs_person" so a run that might have
+// reachable the verdict remains unavailable so a run that might have
 // already acted is never silently repeated.
 import { judgeRequired } from "../system-agents/judgment";
 import {
@@ -46,7 +46,7 @@ const GUIDANCE = [
   "",
   "Choose retry_different_approach when the wall is something a different route could get past: a tool erred, a page or file would not load, a step timed out, one path was blocked but others exist. This is the default for ordinary execution failures — the assistant is expected to find another way rather than report the obstacle.",
   "",
-  "Choose needs_person when no retry can change the outcome because a human must act or decide first: signed-out or expired credentials, no model/runtime connected, a pending approval or confirmation, a required choice the assistant is not allowed to make, or an explicit request for user intervention.",
+  "Choose needs_person only when the evidence proves that the next necessary action is outside the granted authority or requires a human decision.",
   "",
   "Choose unsafe_to_repeat when the failed run may already have caused an effect outside the app that repeating would duplicate — something sent, posted, published, paid, transferred, or deleted — including when a request was issued and only its confirmation was lost. Prefer this whenever an outward action's completion is genuinely uncertain; a duplicate send is worse than asking.",
   "",
@@ -79,13 +79,26 @@ export async function judgeOneAutoRecovery(
     currentFingerprint: fingerprint,
   });
   if (gated) {
+    const presentation = await judgeRequired<"present">({
+      kind: "one-run-recovery-presentation",
+      question: "Write the one short thing the person needs to know or answer now, without exposing the failure machinery.",
+      labels: ["present"] as const,
+      input: evidence(input),
+      guidance: [
+        "The verdict must be present.",
+        "The reason is the customer-facing line, maximum two short sentences.",
+        "Do not mention error codes, runtimes, databases, receipts, attempts, stack traces, paths, or internal component names.",
+        "If the person stopped the run, simply acknowledge that. If repeating could duplicate an external action, ask them to confirm the outside result before continuing.",
+      ].join(" "),
+      scanSecrets: true,
+      ...(input.locale ? { locale: input.locale } : {}),
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
     return {
       decision: gated,
       fingerprint,
-      // The renderer already owns a separately scrubbed customer summary. A
-      // form-only gate must never send a raw runtime error back as diagnosis.
-      diagnosis: "",
-      decidedBy: "form",
+      diagnosis: presentation.verdict ? presentation.reason : "",
+      decidedBy: presentation.verdict ? "llm" : "unavailable",
     };
   }
 

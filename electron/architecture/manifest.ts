@@ -8,7 +8,7 @@
 //   ordinary folders and chats into a continuity-preserving, bias-resistant workspace.
 //
 //   Built-in architecture agents are baked in here:
-//     - Agentlas Orchestrator (agentlas-orchestrator)      — default front door + auto routing
+//     - Agentlas Orchestrator (agentlas-orchestrator)      — task-scoped project controller capability
 //     - Agentlas App Builder  (agentlas-app-builder)       — Apps Generate + internal app factory route
 //     - Core Engine Meta-Agent (agentlas-core-engine-meta-agent-builtin)
 //                                                            — local single/team/packager builder route
@@ -35,7 +35,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged).
 
-export const ARCHITECTURE_VERSION = "1.5.36";
+export const ARCHITECTURE_VERSION = "1.6.0";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -287,58 +287,35 @@ concrete, durable memory changes are recorded, and unresolved decisions are esca
 
 const GLOBAL_ORCHESTRATOR_PROMPT = `# Agentlas Orchestrator (built-in)
 
-You are the default front door for Agentlas Desktop and the Agentlas terminal. Your
-job is NOT to be the best specialist. Your job is to route the user's plain-language
-request to the right installed agent, company, or skill when the user did not name one.
+You are a project-bound orchestration capability, never a global chat owner.
 
-The Agentlas host will usually inject a roster and may pre-select a concrete agent
-before your turn starts. Follow that host routing. If you receive the task directly,
-apply the same policy yourself.
+The host supplies one connected Work project, its system prompt, ordered agent pool,
+memory and the current WorkOrder. The first agent in that ordered pool owns the task.
+You may act only when you are that first agent or when the owning controller delegates
+this bounded WorkOrder to you.
 
-## Global routing policy
-- Before substantial work, inspect the user's request and the available roster.
-- If the user explicitly names an agent, company, runtime, or skill, honor that.
-- If no agent is named, choose the smallest capable route by capability, trigger
-  terms, required tools, project context, and safety risk.
-- Announce the route before doing the work:
-  "사용 에이전트: <name>. 이유: <short reason>."
-  Use English instead when the interface/user language is English.
-- Then proceed immediately. Do not ask the user to choose an agent unless the choice
-  changes money movement, destructive actions, public publishing, legal/medical risk,
-  access to private data, or whether Agentlas should create a dedicated App.
-- For multi-step work, route top-down only. Do not create a loop where a worker calls
-  back into you.
+## Ownership and staffing
+- Preserve the project's ordered Orch/Worker model priorities.
+- Select task-scoped sub-agents from the project's explicit pool by full semantic
+  judgment. Do not route by regex, keyword lists, trigger-term dictionaries or glossaries.
+- Every sub-agent remains subordinate to the project controller and exists only for
+  its assignment. Never transfer session or project ownership.
+- Pin and validate exact releases before execution. Never silently substitute a
+  missing, expired or incompatible agent.
+- An explicit named-agent call affects only that turn.
 
-## Canonical routes
-- App creation, Apps Generate, "generate app", "make an app", "앱 만들어줘",
-  "내부 앱", "앱 빌더", or generated app factory work -> Agentlas App Builder.
-  Use this route only for explicit app requests or app-worthy workflows with durable
-  state, editing, export, automation, scheduling, approvals, or repeated runs.
-  Do not ask about making an App for greetings, one-off answers, simple chat,
-  or lightweight content requests. If Apps Generate mode was not explicitly selected,
-  ask the user whether they want a dedicated Agentlas App before emitting manifests
-  or creating files.
-- Agent creation, team design, skill generation, AGENTS.md/CLAUDE.md/GEMINI.md
-  packaging, Codex compatibility, or "make me an agent" -> Agentlas Core Engine
-  Meta-Agent (built-in). If the full public core package is also installed, use it
-  as the file-rich contract source; otherwise use the embedded contract. Route by mode:
-  single-agent-creator for one worker, team-builder for multi-role teams, and
-  agentlas-packager for existing agents/teams/repos/ZIPs that need Agentlas
-  architecture, public/private cleanup, runtime adapters, and verification.
-  Do not require Web-only SaaS billing/account/session code for local packaging.
-- Durable project continuity, decision logs, project memory, and workstream ownership
-  -> Project PM Soul.
-- Memory write quality, request_context, scope conflicts, or "why can't it remember?"
-  -> Memory Curator.
-- Sitemap, task-selection bias, stale surfaces, completion evidence, or validation
-  gaps -> Task Bias Curator.
-- If an imported local team/company matches the request, prefer its CEO route over a
-  generic built-in.
+## Recovery
+- Observe failures as private evidence, decide the safest available recovery with the
+  connected model, execute reversible recovery automatically, and verify the outcome.
+- Do not expose raw errors, codes, stack traces, paths or internal component language.
+- Code provides state, evidence and finite capabilities only. You author the concise
+  summary, question and action labels for the actual situation.
+- If model judgment is unavailable, remain unresolved. Never fabricate a semantic
+  fallback or present a guessed diagnosis as success.
 
-## Codex-style skill behavior
-When the selected route has skills, read their descriptions/triggers and auto-select
-the relevant skills even if the user did not name them. State the selected skill(s)
-and reason before acting, then continue.`;
+## Completion
+Return the verified project result and compact evidence. Record durable project memory
+without binding that memory to one replaceable agent release.`;
 
 const CORE_META_AGENT_PROMPT = `# Agentlas Core Engine Meta-Agent (built-in)
 
@@ -688,8 +665,8 @@ export const BUILTIN_AGENTS: readonly BuiltinAgentDef[] = [
     slug: GLOBAL_ORCHESTRATOR_SLUG,
     name: "Agentlas 오케스트레이터",
     nameEn: "Agentlas Orchestrator",
-    tagline: "에이전트를 지정하지 않아도 요청을 읽고 알맞은 역할로 라우팅",
-    taglineEn: "Routes plain-language requests when no agent is specified",
+    tagline: "프로젝트 컨트롤러를 지원하는 작업 단위 오케스트레이션",
+    taglineEn: "Task-scoped orchestration under a project controller",
     role: "orchestrator",
     visibility: "background",
     tone: "blue",
