@@ -94,6 +94,7 @@ import type {
   ImageAttachment,
   InstalledAgent,
 } from "../../shared/types";
+import { installMobileOneAutoRecovery } from "../one/mobile-auto-recovery";
 import { adaptLegacySurfaceToOneV1 } from "../../shared/one-surface";
 import { applyOneFriendlyFollowups } from "../../shared/one-friendly-followups";
 import {
@@ -125,6 +126,16 @@ export interface InvocationStartResult {
   runId: string;
 }
 
+export interface InvocationSettledEnvelope {
+  runId: string;
+  chatId: string;
+  receipt: InvocationRunReceipt;
+  oneMode: boolean;
+  /** Main-memory-only original goal; never projected as a wire receipt. */
+  goal: string;
+  workspaceBinding?: InvocationWorkspaceBinding;
+}
+
 interface RunRecord {
   controller: AbortController;
   chatId: string;
@@ -135,6 +146,9 @@ interface RunRecord {
   resultFolder?: string;
   actualAgentId?: string;
   workspaceBinding?: InvocationWorkspaceBinding;
+  oneMode: boolean;
+  goal: string;
+  settlementPublished: boolean;
 }
 
 interface QueuedSteer {
@@ -161,6 +175,7 @@ type OneInvocationRequest = McpInvocationRequest & {
 
 type InvocationEventListener = (envelope: InvocationEventEnvelope) => void;
 type ActiveChatsListener = (chatIds: string[]) => void;
+type InvocationSettledListener = (envelope: InvocationSettledEnvelope) => void | Promise<void>;
 
 const MAX_BUFFERED_EVENTS = 4_000;
 const MAX_PARTIAL_CHARS = 2 * 1024 * 1024;
@@ -556,6 +571,7 @@ export class InvocationService {
   private readonly activeRuns = new InvocationLifecycleRegistry<RunRecord>();
   private readonly eventListeners = new Set<InvocationEventListener>();
   private readonly activeChatsListeners = new Set<ActiveChatsListener>();
+  private readonly settledListeners = new Set<InvocationSettledListener>();
   private readonly steerQueues = new Map<string, QueuedSteer[]>();
 
   onEvent(listener: InvocationEventListener): () => void {
@@ -566,6 +582,12 @@ export class InvocationService {
   onActiveChats(listener: ActiveChatsListener): () => void {
     this.activeChatsListeners.add(listener);
     return () => this.activeChatsListeners.delete(listener);
+  }
+
+  /** Runs only after the terminal receipt is durable and the live run has settled. */
+  onSettled(listener: InvocationSettledListener): () => void {
+    this.settledListeners.add(listener);
+    return () => this.settledListeners.delete(listener);
   }
 
   activeChatIds(): string[] {
@@ -838,6 +860,9 @@ export class InvocationService {
       events: [],
       partialText: "",
       resultFolder,
+      oneMode: requestedOneMode,
+      goal: invocationRequest.userPrompt.slice(0, 4_000),
+      settlementPublished: false,
       ...(runWorkspaceBinding ? { workspaceBinding: runWorkspaceBinding } : {}),
     };
     const oneParticipantPresentation = new Map<string, { name: string; role: string }>();
@@ -902,6 +927,7 @@ export class InvocationService {
           agentId: chat.agentId,
           payload: {
             oneMode: runReq.oneMode,
+            invocationSource: runWorkspaceBinding?.source,
             oneTaskKindRef: oneTaskKindRef ?? undefined,
             oneParticipantVersionBindings,
             oneTeamPreflightProposalId: preparedOneTeamPreflight?.proposalId,
@@ -1518,6 +1544,7 @@ export class InvocationService {
           }
         }
         if (this.activeRuns.settle(runId)) this.publishActiveChats();
+        this.publishSettled(runId, record);
         releaseOneAttachmentRun(requestedOneAttachmentRef);
         this.drainSteerQueue(runReq.chatId);
       });
@@ -1660,6 +1687,28 @@ export class InvocationService {
     }
   }
 
+  private publishSettled(runId: string, record: RunRecord): void {
+    if (record.settlementPublished) return;
+    const receipt = getInvocationRunReceipt(runId);
+    if (!receipt || receipt.status === "running" || receipt.status === "cancelling") return;
+    record.settlementPublished = true;
+    const envelope: InvocationSettledEnvelope = {
+      runId,
+      chatId: record.chatId,
+      receipt,
+      oneMode: record.oneMode,
+      goal: record.goal,
+      ...(record.workspaceBinding ? { workspaceBinding: record.workspaceBinding } : {}),
+    };
+    for (const listener of this.settledListeners) {
+      try {
+        void Promise.resolve(listener(envelope)).catch(() => undefined);
+      } catch {
+        // Recovery and projection listeners can never alter terminal durability.
+      }
+    }
+  }
+
   private drainSteerQueue(chatId: string): void {
     const queue = this.steerQueues.get(chatId);
     if (!queue?.length) return;
@@ -1682,3 +1731,4 @@ export class InvocationService {
 }
 
 export const invocationService = new InvocationService();
+installMobileOneAutoRecovery(invocationService);

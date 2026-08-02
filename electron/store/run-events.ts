@@ -725,3 +725,20 @@ export function isOneInvocationChat(chatId: string): boolean {
     .all(chatId) as Array<{ payload_json: string }>;
   return rows.some((row) => parsePayload(row.payload_json).oneMode === true);
 }
+
+/** Durable origin proof used only to resume Main-owned Mobile One recovery. */
+export function isMobileOneInvocationChat(chatId: string): boolean {
+  if (!chatId) return false;
+  const row = getDb()
+    .prepare(
+      `SELECT payload_json
+       FROM run_events
+       WHERE chat_id = ? AND kind = 'invoke_started'
+       ORDER BY datetime(ts) DESC, rowid DESC
+       LIMIT 1`,
+    )
+    .get(chatId) as { payload_json?: string } | undefined;
+  return row?.payload_json
+    ? parsePayload(row.payload_json).invocationSource === "mobile-one"
+    : false;
+}

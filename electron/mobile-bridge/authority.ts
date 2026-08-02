@@ -65,6 +65,7 @@ import {
   toggleAutomation,
 } from "../store/automations";
 import {
+  appendChatMessage,
   archiveChat,
   clearChatContext,
   createChat,
@@ -80,6 +81,7 @@ import {
 } from "../store/chats";
 import { getProject } from "../store/projects";
 import { OwnerCloudActionError } from "../marketplace/mcp-source";
+import { resumeMobileOneAutoRecovery } from "../one/mobile-auto-recovery";
 import {
   createDesktopMobileBridgeBuildActions,
   createDesktopMobileBridgeCloudAgentActions,
@@ -130,6 +132,7 @@ import {
   projectMobileBridgeChat,
   projectMobileBridgeConfirmations,
   projectMobileBridgeHistory,
+  projectMobileBridgeProject,
   projectMobileBridgeRuntimes,
   projectMobileBridgeSnapshot,
   projectMobileBridgeUsage,
@@ -980,6 +983,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.onError = options.onError ?? ((error) => console.error("[mobile-bridge-authority]", error.message));
     this.cloudAgentActions = options.cloudAgentActions ?? createDesktopMobileBridgeCloudAgentActions();
     this.buildActions = options.buildActions ?? createDesktopMobileBridgeBuildActions();
+    queueMicrotask(() => {
+      void resumeMobileOneAutoRecovery(invocationService).catch((error) => this.onError(errorOf(error)));
+    });
   }
 
   /** DESKTOP_MOBILE_BRIDGE: Initial state is always a fresh Desktop projection; no seed fallback. */
@@ -1046,6 +1052,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "projects.list": {
         noParams(request);
         return asJsonValue((await this.projectSnapshot()).projects, request.method);
+      }
+      case "projects.get": {
+        const params = guardedParams(request, ["id"]);
+        const project = getProject(requiredIdentifier(params, "id"));
+        if (!project) throw new Error("The selected Desktop project is unavailable");
+        return asJsonValue(
+          projectMobileBridgeProject(project, { includeDetails: true }),
+          request.method,
+        );
       }
 
       // DESKTOP_MOBILE_BRIDGE: Chat CRUD calls the real store, then the shared
@@ -1418,6 +1433,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         });
         let result;
         try {
+          // Mobile's optimistic transcript is not durable Desktop history.
+          // Persist the person's exact turn before execution so reconnect,
+          // restart recovery, and One memory all retain the same conversation.
+          appendChatMessage(chat.id, "user", input.userPrompt);
           if (input.liveMode) setChatContinuousMode(chat.id, true);
           result = invocationService.start(
             {

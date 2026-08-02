@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import path from "node:path";
 
 import { listInstalledAgents } from "../mcp/registry";
 import { detectRuntimes } from "../runtime/detect";
@@ -28,6 +29,12 @@ import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
 import { getUsageSnapshot } from "../usage";
 import { getOneBriefingSnapshot } from "../one/briefing";
 import { getOneProfile } from "../store/one-profile";
+import { getProjectTimelineSnapshot } from "../memory/project-timeline";
+import {
+  PROJECT_SITEMAP_MAX_BYTES,
+  readActivatedProjectMemoryJson,
+} from "../memory/safe-project-read";
+import { SITEMAP_FILE } from "../architecture/manifest";
 import { createOneTaskProjectionRuntime } from "../one/task-projection";
 import type {
   Automation,
@@ -415,19 +422,99 @@ function firmsDto(): MobileBridgeFirmDto[] {
   }));
 }
 
-function projectsDto(): MobileBridgeProjectDto[] {
-  return listProjects().map((project) => ({
+function projectSourceLabel(project: ReturnType<typeof listProjects>[number]): string | null {
+  if (project.sourceType === "local") {
+    return project.folderPath ? displayText(path.basename(project.folderPath), 512) : null;
+  }
+  if (!project.sourceRef?.trim()) return null;
+  if (project.sourceType === "sample") return displayText(project.sourceRef, 512);
+  try {
+    const repository = new URL(project.sourceRef);
+    return displayText(`${repository.host}${repository.pathname}`.replace(/\/$/, ""), 1_024);
+  } catch {
+    return null;
+  }
+}
+
+function projectFilesDto(project: ReturnType<typeof listProjects>[number]): MobileBridgeProjectDto["files"] {
+  if (!project.folderPath) return [];
+  const sitemap = readActivatedProjectMemoryJson<{ nodes?: unknown[] }>(
+    project.folderPath,
+    SITEMAP_FILE,
+    PROJECT_SITEMAP_MAX_BYTES,
+  );
+  if (!Array.isArray(sitemap?.nodes)) return [];
+  const files: MobileBridgeProjectDto["files"] = [];
+  for (const candidate of sitemap.nodes) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const node = candidate as Record<string, unknown>;
+    if (node.kind !== "file" && node.kind !== "directory") continue;
+    if (typeof node.relative_path !== "string") continue;
+    const relativePath = node.relative_path.trim().replaceAll("\\", "/");
+    if (!relativePath || relativePath === ".agentlas" || relativePath.startsWith(".agentlas/")) continue;
+    files.push({
+      path: displayText(relativePath, 1_024),
+      kind: node.kind,
+      updatedAt: typeof node.last_modified === "string" && Number.isFinite(Date.parse(node.last_modified))
+        ? node.last_modified
+        : null,
+    });
+    if (files.length >= 160) break;
+  }
+  return files;
+}
+
+export function projectMobileBridgeProject(
+  project: ReturnType<typeof listProjects>[number],
+  options: { includeDetails?: boolean } = {},
+): MobileBridgeProjectDto {
+  const includeDetails = options.includeDetails === true;
+  const timeline = includeDetails ? getProjectTimelineSnapshot(project.id, 24) : null;
+  const latest = timeline?.entries[0] ?? null;
+  return {
     id: project.id,
     name: displayText(project.name, 512),
     description: optionalDisplayText(project.description, 2_048),
+    sourceType: project.sourceType,
+    sourceLabel: projectSourceLabel(project),
+    systemPrompt: optionalDisplayText(project.systemPrompt, 12_000),
+    agentPool: project.agentPool.map((member, order) => ({
+      agentId: member.agentId,
+      name: displayText(member.nameSnapshot, 512),
+      source: member.source,
+      releaseId: member.releaseId,
+      order,
+    })),
     controllerAgentId: project.agentPool[0]?.agentId ?? null,
     controllerName: optionalDisplayText(project.agentPool[0]?.nameSnapshot ?? null, 512),
     agentCount: project.agentPool.length,
     hasWorkingFolder: Boolean(project.folderPath),
+    files: includeDetails ? projectFilesDto(project) : [],
+    latestResult: latest
+      ? {
+          summary: displayText(latest.summary, 4_000),
+          updatedAt: latest.occurredAt,
+          taskId: latest.taskId,
+        }
+      : null,
+    memory: {
+      sources: timeline?.sources.map((source) => ({ kind: source.kind, status: source.status })) ?? [],
+      entries: timeline?.entries.map((entry) => ({
+        id: entry.id,
+        summary: displayText(entry.summary, 4_000),
+        occurredAt: entry.occurredAt,
+        taskId: entry.taskId,
+      })) ?? [],
+      truncated: timeline?.truncated ?? false,
+    },
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
-    // DESKTOP_MOBILE_BRIDGE: systemPrompt, full agent pool, release refs, and folderPath intentionally omitted.
-  }));
+    // DESKTOP_MOBILE_BRIDGE: absolute folder paths and raw project-memory bytes never cross the bridge.
+  };
+}
+
+function projectsDto(): MobileBridgeProjectDto[] {
+  return listProjects().map((project) => projectMobileBridgeProject(project));
 }
 
 /** DESKTOP_MOBILE_BRIDGE: One canonical secret-free chat DTO for snapshots and RPC replies. */

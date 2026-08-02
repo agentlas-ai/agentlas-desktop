@@ -34,6 +34,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "team.list",
   "firms.list",
   "projects.list",
+  "projects.get",
   "chats.listRecent",
   "chats.get",
   "chats.rename",
@@ -655,14 +656,51 @@ export interface MobileBridgeProjectDto {
   id: string;
   name: string;
   description: string | null;
+  sourceType: "local" | "github" | "sample";
+  /** Safe source identity only: folder basename, repository host/path, or sample id. */
+  sourceLabel: string | null;
+  systemPrompt: string | null;
+  agentPool: Array<{
+    agentId: string;
+    name: string;
+    source: "local" | "cloud" | "hub";
+    releaseId: string | null;
+    order: number;
+  }>;
   /** First ordered project-pool member and the project's Work controller. */
   controllerAgentId: string | null;
   controllerName: string | null;
   agentCount: number;
   hasWorkingFolder: boolean;
+  files: Array<{
+    path: string;
+    kind: "file" | "directory";
+    updatedAt: string | null;
+  }>;
+  latestResult: {
+    summary: string;
+    updatedAt: string;
+    taskId: string | null;
+  } | null;
+  memory: {
+    sources: Array<{
+      kind: "pm_soul" | "sitemap" | "code_map";
+      status: "ready" | "missing" | "invalid" | "unavailable";
+    }>;
+    entries: Array<{
+      id: string;
+      summary: string;
+      occurredAt: string;
+      taskId: string | null;
+    }>;
+    truncated: boolean;
+  };
   createdAt: string;
   updatedAt: string;
 }
+
+/** Rich fields are populated only by projects.get, never by snapshot/list projection. */
+export type MobileBridgeProjectDetailDto = MobileBridgeProjectDto;
 
 export interface MobileBridgeProjectTaskStartParams {
   projectId: string;

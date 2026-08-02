@@ -88,19 +88,15 @@ export type OneRecoveryOutcomeDecision =
 export type OneRunFailureFingerprint = string;
 
 /**
- * Identity of a failure, for no-progress detection. Volatile detail (ids,
- * numbers) is stripped so "the same wall twice" still matches. String identity
- * after normalization is form, so it stays deterministic; erring toward "same"
- * only ever retries less, which is the safe direction.
+ * Exact bounded identity only. Semantic normalization belongs to the resident
+ * judge; code must not use regexes, keyword lists, or a vocabulary to decide
+ * that two differently worded failures mean the same thing.
  */
 export function oneRunFailureFingerprint(
   receipt: Pick<InvocationRunReceipt, "errorCode" | "errorMessage">,
 ): OneRunFailureFingerprint {
   const normalized = (receipt.errorMessage ?? "")
     .toLowerCase()
-    .replace(/[0-9a-f]{8,}/g, "")
-    .replace(/\d+/g, "")
-    .replace(/\s+/g, " ")
     .trim()
     .slice(0, 200);
   return `${receipt.errorCode ?? ""}::${normalized}`;
