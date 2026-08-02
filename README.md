@@ -75,9 +75,9 @@ authority for which version is actually public, stable, and downloadable.
   concrete controller-authored next actions, while research results require an
   actionable recommendation and launch steps. Antigravity now lists the real
   models returned by `agy models`. This release binds Agentlas OS v1.1.94 at
-  `d14e0cafb92595b34fb57449ce1dc46002243382`. These source gates do not
-  themselves publish a release; the Releases page stays the authority for what
-  is actually downloadable.
+  `d14e0cafb92595b34fb57449ce1dc46002243382`. Source readiness does not prove a
+  published release; the Releases page stays the authority for what is actually
+  downloadable.
 
 - **2026-08-02 · v0.9.45 — Antigravity connection truth** —
   Agentlas now selects an installed Antigravity CLI before the retired Gemini
