@@ -143,6 +143,7 @@ export interface MobileBridgeInvokeSteerParams {
   permissions?: "read" | "write" | "full";
   planMode?: boolean;
   goalMode?: boolean;
+  networkMode?: boolean;
   appsGenerateMode?: boolean;
   stormbreakerMode?: boolean;
   taskForceTargets?: MobileBridgeTurnAgentTargetDto[];
@@ -167,12 +168,17 @@ export type MobileBridgeTurnAgentTargetDto =
  * Memory capability. Desktop Main creates the conversation and derives every
  * such authority from its current authenticated host state. Permission is an
  * optional explicit user override; omission leaves the normal One choice to
- * Desktop Main.
+ * Desktop Main. Goal, Plan, Network, and Live are also optional explicit
+ * overrides. Omission means One decides for that turn.
  */
 export interface MobileBridgeOneInvokeStartParams {
   schemaVersion: 1;
   userPrompt: string;
   permissions?: "read" | "write" | "full";
+  planMode?: boolean;
+  goalMode?: boolean;
+  networkMode?: boolean;
+  liveMode?: boolean;
   taskForceTargets?: MobileBridgeTurnAgentTargetDto[];
   images?: MobileBridgeImageAttachmentDto[];
 }
@@ -1578,6 +1584,7 @@ function validateInvokeOptions(
     validateEnum(params, "permissions", ["read", "write", "full"]),
     optionalBoolean(params, "planMode"),
     optionalBoolean(params, "goalMode"),
+    optionalBoolean(params, "networkMode"),
     optionalBoolean(params, "appsGenerateMode"),
     optionalBoolean(params, "stormbreakerMode"),
     taskForceTargetsError,
@@ -1791,7 +1798,7 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         ? requiredString(params, "chatId")
         : "composer.context accepts only chatId";
     case "one.invoke.start":
-      if (!hasOnlyKeys(params, ["schemaVersion", "userPrompt", "permissions", "taskForceTargets", "images"])) {
+      if (!hasOnlyKeys(params, ["schemaVersion", "userPrompt", "permissions", "planMode", "goalMode", "networkMode", "liveMode", "taskForceTargets", "images"])) {
         return "one.invoke.start contains unsupported fields";
       }
       return firstError(
@@ -1801,16 +1808,20 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
           ? null
           : "one.invoke.start userPrompt must contain visible text",
         validateEnum(params, "permissions", ["read", "write", "full"]),
+        optionalBoolean(params, "planMode"),
+        optionalBoolean(params, "goalMode"),
+        optionalBoolean(params, "networkMode"),
+        optionalBoolean(params, "liveMode"),
         validateTurnAgentTargets(params.taskForceTargets),
         validateImageAttachments(params.images),
       );
     case "invoke.start":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
         return "invoke.start contains unsupported fields";
       }
       return validateInvokeOptions(params);
     case "invoke.steer":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
         return "invoke.steer contains unsupported fields";
       }
       return firstError(validateInvokeOptions(params, true), requiredString(params, "expectedRunId", 160));

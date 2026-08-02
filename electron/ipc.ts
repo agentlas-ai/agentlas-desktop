@@ -3516,6 +3516,25 @@ export function registerIpcHandlers(): void {
       };
     },
   );
+  ipcMain.handle(
+    "oneAutoRecovery:verify",
+    async (_e, input: {
+      originalRunId?: string;
+      recoveryRunId?: string;
+      chatId?: string;
+      goal?: string;
+      attemptsSpent?: number;
+    }) => {
+      const { verifyOneRecoveryOutcome } = await import("./one/recovery-verification");
+      return verifyOneRecoveryOutcome({
+        originalRunId: String(input?.originalRunId ?? ""),
+        recoveryRunId: String(input?.recoveryRunId ?? ""),
+        chatId: String(input?.chatId ?? ""),
+        goal: typeof input?.goal === "string" ? input.goal : "",
+        attemptsSpent: Number.isSafeInteger(input?.attemptsSpent) ? Math.max(0, input!.attemptsSpent!) : 0,
+      });
+    },
+  );
   ipcMain.handle("oneValueClosure:getState", () => getOneValueClosureState());
   ipcMain.handle("oneValueClosure:latestForTask", (_e, taskId: string) =>
     getLatestOneValueClosure(taskId));

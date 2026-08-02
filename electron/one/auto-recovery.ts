@@ -13,11 +13,15 @@
 import { judgeRequired } from "../system-agents/judgment";
 import {
   ONE_RECOVERY_LABELS,
+  ONE_RECOVERY_OUTCOME_LABELS,
   oneAutoRecoveryFormGate,
   oneAutoRecoveryFromLabel,
+  oneRecoveryOutcomeFromLabel,
   oneRunFailureFingerprint,
   type OneAutoRecoveryDecision,
   type OneRecoveryLabel,
+  type OneRecoveryOutcomeLabel,
+  type OneRecoveryOutcomeDecision,
   type OneRunFailureFingerprint,
 } from "../../shared/one-auto-recovery";
 import type { InvocationRunReceipt } from "../../shared/types";
@@ -39,6 +43,22 @@ export interface OneAutoRecoveryResult {
   /** Plain-language account of what blocked the run, for the next attempt and for the user. */
   diagnosis: string;
   decidedBy: "form" | "llm" | "unavailable";
+}
+
+export interface OneRecoveryOutcomeInput {
+  originalReceipt: InvocationRunReceipt;
+  recoveryReceipt: InvocationRunReceipt;
+  goal: string;
+  resultText: string;
+  attemptsSpent: number;
+  locale?: RuntimeLocale;
+  signal?: AbortSignal;
+}
+
+export interface OneRecoveryOutcomeResult {
+  decision: OneRecoveryOutcomeDecision;
+  diagnosis: string;
+  decidedBy: "llm" | "unavailable";
 }
 
 const GUIDANCE = [
@@ -127,6 +147,68 @@ export async function judgeOneAutoRecovery(
   return {
     decision: oneAutoRecoveryFromLabel(verdict.verdict, input.attemptsSpent),
     fingerprint,
+    diagnosis: verdict.reason,
+    decidedBy: verdict.source,
+  };
+}
+
+/**
+ * A process exit is not outcome proof. After an automatic retry reaches a
+ * completed receipt, One asks the resident judge whether the original request
+ * is actually satisfied. No keyword, default success, or canned failure copy
+ * participates in this decision.
+ */
+export async function judgeOneRecoveryOutcome(
+  input: OneRecoveryOutcomeInput,
+): Promise<OneRecoveryOutcomeResult> {
+  if (
+    !["failed", "interrupted"].includes(input.originalReceipt.status)
+    || input.recoveryReceipt.status !== "completed"
+    || input.originalReceipt.chatId !== input.recoveryReceipt.chatId
+    || !input.resultText.trim()
+  ) {
+    return {
+      decision: { verified: false, retry: false, reason: "undecided" },
+      diagnosis: "",
+      decidedBy: "unavailable",
+    };
+  }
+
+  const verdict = await judgeRequired<OneRecoveryOutcomeLabel>({
+    kind: "one-run-recovery-outcome",
+    question:
+      "An automatic recovery run completed. Does its result actually satisfy the person's original request?",
+    labels: ONE_RECOVERY_OUTCOME_LABELS,
+    input: [
+      `Original request: ${input.goal || "(not recorded)"}`,
+      `Original run outcome: ${input.originalReceipt.status}`,
+      `Recovery run outcome: ${input.recoveryReceipt.status}`,
+      `Recovery attempts spent: ${input.attemptsSpent}`,
+      "Recovery result:",
+      input.resultText.slice(0, 12_000),
+    ].join("\n"),
+    guidance: [
+      "Choose verified_original_outcome only when the recovery result contains concrete evidence that the original request was fulfilled.",
+      "Choose retry_different_approach when the result is incomplete but another safe read-only route could still finish it.",
+      "Choose needs_person only when a person must supply authority, information, or a decision.",
+      "Choose will_not_succeed when the request cannot succeed without changing the request itself.",
+      "The reason is a maximum of two short customer-facing sentences. Do not expose runtimes, receipts, error codes, paths, or internal components.",
+      "If evidence is insufficient, choose needs_person. Never infer success from the completed process status alone.",
+    ].join(" "),
+    scanSecrets: true,
+    ...(input.locale ? { locale: input.locale } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+
+  if (verdict.verdict === null) {
+    return {
+      decision: { verified: false, retry: false, reason: "undecided" },
+      diagnosis: "",
+      decidedBy: "unavailable",
+    };
+  }
+  return {
+    decision: oneRecoveryOutcomeFromLabel(verdict.verdict, input.attemptsSpent),
     diagnosis: verdict.reason,
     decidedBy: verdict.source,
   };

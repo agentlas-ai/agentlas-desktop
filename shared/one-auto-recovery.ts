@@ -50,6 +50,16 @@ export const ONE_RECOVERY_LABELS = [
 
 export type OneRecoveryLabel = (typeof ONE_RECOVERY_LABELS)[number];
 
+/** What the resident judge may conclude after an automatic retry completes. */
+export const ONE_RECOVERY_OUTCOME_LABELS = [
+  "verified_original_outcome",
+  "retry_different_approach",
+  "needs_person",
+  "will_not_succeed",
+] as const;
+
+export type OneRecoveryOutcomeLabel = (typeof ONE_RECOVERY_OUTCOME_LABELS)[number];
+
 /**
  * Fail-closed unavailable decision. When the model is unavailable the honest move is to hand
  * the run back to the person, never to retry something that might act twice.
@@ -69,6 +79,11 @@ export type OneAutoRecoveryStop =
 export type OneAutoRecoveryDecision =
   | { retry: true; attempt: number }
   | { retry: false; reason: OneAutoRecoveryStop };
+
+export type OneRecoveryOutcomeDecision =
+  | { verified: true; retry: false }
+  | { verified: false; retry: true; attempt: number }
+  | { verified: false; retry: false; reason: OneAutoRecoveryStop };
 
 export type OneRunFailureFingerprint = string;
 
@@ -133,4 +148,24 @@ export function oneAutoRecoveryFromLabel(
   if (label === "unsafe_to_repeat") return { retry: false, reason: "unsafe-to-repeat" };
   if (label === "will_not_succeed") return { retry: false, reason: "will-not-succeed" };
   return { retry: false, reason: "needs-person" };
+}
+
+/** Maps a semantic outcome judgment onto the bounded recovery state machine. */
+export function oneRecoveryOutcomeFromLabel(
+  label: OneRecoveryOutcomeLabel,
+  attemptsSpent: number,
+): OneRecoveryOutcomeDecision {
+  if (label === "verified_original_outcome") {
+    return { verified: true, retry: false };
+  }
+  if (label === "retry_different_approach") {
+    if (attemptsSpent >= ONE_AUTO_RECOVERY_MAX_ATTEMPTS) {
+      return { verified: false, retry: false, reason: "exhausted" };
+    }
+    return { verified: false, retry: true, attempt: attemptsSpent + 1 };
+  }
+  if (label === "will_not_succeed") {
+    return { verified: false, retry: false, reason: "will-not-succeed" };
+  }
+  return { verified: false, retry: false, reason: "needs-person" };
 }

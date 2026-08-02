@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.47 — 2026-08-02
+
+This release binds Agentlas OS v1.1.95 at
+1e94a67558734f42a93c0353fa0ceddb57996d83.
+
+- **Automatic recovery closes on the original outcome.** A successful process
+  exit is no longer enough: Main binds the original failure, the recovery run,
+  and the actual assistant result, then asks One for a semantic outcome
+  assessment and records the decision before retrying or stopping.
+- **Mobile pairing follows live account authority.** Each authenticated bridge
+  connection revalidates the paired Agentlas account and revokes stale device
+  authority when that account is no longer active.
+- **Mobile One preserves explicit orchestration choices.** Goal, Plan, Network,
+  and Live travel as structured turn options; leaving them untouched continues
+  to mean that One decides rather than turning capabilities off.
+
 ## 0.9.46 — 2026-08-02
 
 This release binds Agentlas OS v1.1.95 at

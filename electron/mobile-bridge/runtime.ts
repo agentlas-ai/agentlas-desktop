@@ -189,6 +189,9 @@ async function startBridgeInternal(
   const accountPairing = new MobileBridgeAccountPairingClient();
   const pairing = new MobileBridgePairingManager(options.userDataPath, {
     consumePairingAssertion: (input) => accountPairing.consumePairingAssertion(input),
+    validateAccountAuthority: (input) => accountPairing.accountAuthorityActive({
+      accountSubject: input.accountSubject,
+    }).then((active) => active && input.accountAuthorityOrigin === accountPairing.origin),
     onChanged: emitMobileBridgeStateChange,
   });
   const replayStore = new MobileBridgeRequestReplayStore(options.userDataPath);

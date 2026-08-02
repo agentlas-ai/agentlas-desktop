@@ -3,6 +3,7 @@ import { MOBILE_BRIDGE_PAIR_ASSERTION_AUDIENCE } from "../../shared/mobile-bridg
 
 const DESKTOP_PROOF_PATH = "/api/mobile-pair/v1/desktop-proof";
 const CONSUME_ASSERTION_PATH = "/api/mobile-pair/v1/assertions/consume";
+const ACCOUNT_STATUS_PATH = "/api/mobile-pair/v1/account/status";
 const MAX_BODY_BYTES = 16 * 1024;
 const DEFAULT_TIMEOUT_MS = 8_000;
 const OFFICIAL_HOSTS = new Set([
@@ -236,6 +237,23 @@ export class MobileBridgeAccountPairingClient {
     };
   }
 
+  async accountAuthorityActive(input: { accountSubject: string }): Promise<boolean> {
+    if (!ACCOUNT_SUBJECT_RE.test(input.accountSubject)) return false;
+    let response: Response;
+    try {
+      response = await this.post(ACCOUNT_STATUS_PATH, { account_subject: input.accountSubject });
+    } catch {
+      return false;
+    }
+    let raw: unknown;
+    try {
+      raw = await boundedJson(response);
+    } catch {
+      return false;
+    }
+    return response.ok && isRecord(raw) && exactKeys(raw, ["active"]) && raw.active === true;
+  }
+
   async consumePairingAssertion(input: {
     pairingAssertion: string;
     audience: typeof MOBILE_BRIDGE_PAIR_ASSERTION_AUDIENCE;
@@ -318,6 +336,7 @@ export class MobileBridgeAccountPairingClient {
 export const mobileBridgeAccountPairingContract = {
   desktopProofPath: DESKTOP_PROOF_PATH,
   consumeAssertionPath: CONSUME_ASSERTION_PATH,
+  accountStatusPath: ACCOUNT_STATUS_PATH,
   maxBodyBytes: MAX_BODY_BYTES,
   audience: MOBILE_BRIDGE_PAIR_ASSERTION_AUDIENCE,
 } as const;

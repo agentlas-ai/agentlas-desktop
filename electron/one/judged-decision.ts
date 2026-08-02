@@ -105,26 +105,31 @@ export async function prejudgeOneDecision(
   markAttempted(texts.combined);
   const timeoutMs = opts.timeoutMs ?? 8_000;
   try {
-    await judgeRequired<OneDecisionRiskLevel>({
-      kind: ONE_DECISION_RISK_JUDGMENT_KIND,
-      question: RISK_QUESTION,
-      labels: RISK_LABELS,
-      input: texts.combined,
-      guidance: RISK_GUIDANCE,
-      signal: opts.signal,
-      timeoutMs,
-    });
-    await judgeRequired<OneDecisionAuthorityReadiness>({
-      kind: ONE_DECISION_AUTHORITY_READINESS_JUDGMENT_KIND,
-      question: AUTHORITY_READINESS_QUESTION,
-      labels: AUTHORITY_READINESS_LABELS,
-      input: texts.combined,
-      guidance: AUTHORITY_READINESS_GUIDANCE,
-      signal: opts.signal,
-      timeoutMs,
-    });
-    for (const optionText of texts.options) {
-      await judgeRequired<OneDecisionOptionDisposition>({
+    // These judgments are independent. Serial execution made one cold mobile
+    // snapshot wait for every risk/readiness/option timeout in sequence (and
+    // then repeat that cost for every pending decision). Run the bounded
+    // resident judgments concurrently; a miss still remains a fail-closed
+    // cache miss and no deterministic semantic substitute is introduced.
+    await Promise.all([
+      judgeRequired<OneDecisionRiskLevel>({
+        kind: ONE_DECISION_RISK_JUDGMENT_KIND,
+        question: RISK_QUESTION,
+        labels: RISK_LABELS,
+        input: texts.combined,
+        guidance: RISK_GUIDANCE,
+        signal: opts.signal,
+        timeoutMs,
+      }),
+      judgeRequired<OneDecisionAuthorityReadiness>({
+        kind: ONE_DECISION_AUTHORITY_READINESS_JUDGMENT_KIND,
+        question: AUTHORITY_READINESS_QUESTION,
+        labels: AUTHORITY_READINESS_LABELS,
+        input: texts.combined,
+        guidance: AUTHORITY_READINESS_GUIDANCE,
+        signal: opts.signal,
+        timeoutMs,
+      }),
+      ...texts.options.map((optionText) => judgeRequired<OneDecisionOptionDisposition>({
         kind: ONE_DECISION_DISPOSITION_JUDGMENT_KIND,
         question: DISPOSITION_QUESTION,
         labels: DISPOSITION_LABELS,
@@ -132,8 +137,8 @@ export async function prejudgeOneDecision(
         guidance: DISPOSITION_GUIDANCE,
         signal: opts.signal,
         timeoutMs,
-      });
-    }
+      })),
+    ]);
   } catch {
     // Warm-only path; sync peeks simply miss and fail closed.
   }
@@ -144,7 +149,5 @@ export async function prejudgeOneDecisions(
   confirmations: readonly Pick<PendingConfirmation, "question" | "header" | "options">[],
   opts: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<void> {
-  for (const confirmation of confirmations) {
-    await prejudgeOneDecision(confirmation, opts);
-  }
+  await Promise.all(confirmations.map((confirmation) => prejudgeOneDecision(confirmation, opts)));
 }

@@ -78,6 +78,8 @@ interface StoredMobileBridgeDevice {
   appVersion: string | null;
   issuedAt: string;
   revokedAt: string | null;
+  accountSubject?: string;
+  accountAuthorityOrigin?: string;
 }
 
 interface StoredMobileBridgeDevices {
@@ -128,6 +130,10 @@ export interface MobileBridgePairingManagerOptions {
     deviceNonce: string;
     pairingAttemptId: string;
   }) => Promise<MobileBridgeConsumedPairingAssertion>;
+  validateAccountAuthority?: (input: {
+    accountSubject: string;
+    accountAuthorityOrigin: string;
+  }) => Promise<boolean>;
   onChanged?: (reason: MobileBridgePairingChangeReason) => void;
 }
 
@@ -314,7 +320,11 @@ function validStoredDevice(value: unknown): value is StoredMobileBridgeDevice {
     (value.appVersion === null || typeof value.appVersion === "string") &&
     typeof value.issuedAt === "string" &&
     Number.isFinite(Date.parse(value.issuedAt)) &&
-    (value.revokedAt === null || (typeof value.revokedAt === "string" && Number.isFinite(Date.parse(value.revokedAt))))
+    (value.revokedAt === null || (typeof value.revokedAt === "string" && Number.isFinite(Date.parse(value.revokedAt)))) &&
+    (
+      (value.accountSubject === undefined && value.accountAuthorityOrigin === undefined) ||
+      (validAccountSubject(value.accountSubject) && validAccountAuthorityOrigin(value.accountAuthorityOrigin))
+    )
   );
 }
 
@@ -526,6 +536,7 @@ export class MobileBridgePairingManager {
   private readonly maxAttempts: number;
   private readonly now: () => Date;
   private readonly consumePairingAssertion?: MobileBridgePairingManagerOptions["consumePairingAssertion"];
+  private readonly validateAccountAuthority?: MobileBridgePairingManagerOptions["validateAccountAuthority"];
   private readonly onChanged: (reason: MobileBridgePairingChangeReason) => void;
   private activeChallenge: ActiveChallenge | null = null;
   private activeChallengeTimer: NodeJS.Timeout | null = null;
@@ -541,6 +552,7 @@ export class MobileBridgePairingManager {
     );
     this.now = options.now ?? (() => new Date());
     this.consumePairingAssertion = options.consumePairingAssertion;
+    this.validateAccountAuthority = options.validateAccountAuthority;
     this.onChanged = options.onChanged ?? (() => {});
   }
 
@@ -673,6 +685,8 @@ export class MobileBridgePairingManager {
       appVersion: request.device.appVersion ?? null,
       issuedAt,
       revokedAt: null,
+      accountSubject: consumed.accountSubject,
+      accountAuthorityOrigin: challenge.accountAuthorityOrigin,
     };
     const store = readDevices(this.userDataPath);
     store.devices.push(record);
@@ -686,7 +700,7 @@ export class MobileBridgePairingManager {
     return { deviceId: record.deviceId, token, issuedAt };
   }
 
-  authenticate(token: string): MobileBridgeDeviceMetadata | null {
+  async authenticate(token: string): Promise<MobileBridgeDeviceMetadata | null> {
     if (!validToken(token)) return null;
     // DESKTOP_MOBILE_BRIDGE: Compare every stored digest before selecting the
     // match so the credential check does not reveal an early-match position.
@@ -695,7 +709,21 @@ export class MobileBridgePairingManager {
       const matches = safeHashEquals(device.tokenHash, token);
       if (matches && device.revokedAt === null) record = device;
     }
-    return record ? this.publicMetadata(record) : null;
+    if (!record || !record.accountSubject || !record.accountAuthorityOrigin || !this.validateAccountAuthority) return null;
+    let active = false;
+    try {
+      active = await this.validateAccountAuthority({
+        accountSubject: record.accountSubject,
+        accountAuthorityOrigin: record.accountAuthorityOrigin,
+      });
+    } catch {
+      active = false;
+    }
+    if (!active) {
+      this.revokeDevice(record.deviceId);
+      return null;
+    }
+    return this.publicMetadata(record);
   }
 
   listDevices(): MobileBridgeDeviceMetadata[] {

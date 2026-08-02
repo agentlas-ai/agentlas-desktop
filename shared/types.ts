@@ -4954,6 +4954,27 @@ export interface OneAutoRecoveryJudgement {
   decidedBy: "form" | "llm" | "unavailable";
 }
 
+/** Main-owned proof that a completed recovery run satisfied the original request. */
+export interface OneAutoRecoveryVerification {
+  verified: boolean;
+  retry: boolean;
+  attempt?: number;
+  reason?:
+    | "settled"
+    | "stopped-by-user"
+    | "needs-person"
+    | "unsafe-to-repeat"
+    | "will-not-succeed"
+    | "no-progress"
+    | "exhausted"
+    | "undecided";
+  diagnosis: string;
+  decidedBy: "llm" | "unavailable";
+  originalRunId: string;
+  recoveryRunId: string;
+  assessmentReceiptId?: string;
+}
+
 export type AgentEvolutionProposalStatus =
   | "candidate"
   | "approved"
@@ -5919,6 +5940,13 @@ export interface AgentlasIpc {
       attemptsSpent: number;
       previousFingerprint?: string | null;
     }) => Promise<OneAutoRecoveryJudgement | null>;
+    verify: (input: {
+      originalRunId: string;
+      recoveryRunId: string;
+      chatId: string;
+      goal: string;
+      attemptsSpent: number;
+    }) => Promise<OneAutoRecoveryVerification | null>;
   };
   /** Read-only deterministic home chip rotation signals. Never grants execution authority. */
   oneHomeSignals: {

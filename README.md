@@ -69,6 +69,15 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-08-02 · v0.9.47 — verified recovery and live mobile authority** —
+  One no longer treats a completed retry as proof that the original request was
+  satisfied: Main binds the failed and recovery receipts, asks One to judge the
+  actual result, and records that assessment before continuing or stopping.
+  Mobile connections now revalidate the paired Agentlas account and carry Goal,
+  Plan, Network, and Live as explicit structured overrides while omission still
+  means One decides. This release binds Agentlas OS v1.1.95 at
+  `1e94a67558734f42a93c0353fa0ceddb57996d83`.
+
 - **2026-08-02 · v0.9.46 — honest One handoff and Antigravity models** —
   Projectless One work now stays in One instead of leaking into a global Work
   chat. Result cards remove the fixed finish/original buttons and show only

@@ -615,6 +615,7 @@ function invocationParams(
           "permissions",
           "planMode",
           "goalMode",
+          "networkMode",
           "appsGenerateMode",
           "stormbreakerMode",
           "taskForceTargets",
@@ -633,6 +634,7 @@ function invocationParams(
           "permissions",
           "planMode",
           "goalMode",
+          "networkMode",
           "appsGenerateMode",
           "stormbreakerMode",
           "taskForceTargets",
@@ -653,6 +655,7 @@ function invocationParams(
   const permissions = optionalEnum(params, "permissions", ["read", "write", "full"] as const);
   const planMode = optionalBoolean(params, "planMode");
   const goalMode = optionalBoolean(params, "goalMode");
+  const networkMode = optionalBoolean(params, "networkMode");
   const appsGenerateMode = optionalBoolean(params, "appsGenerateMode");
   const stormbreakerMode = optionalBoolean(params, "stormbreakerMode");
   const taskForceTargets = optionalTurnAgentTargets(params);
@@ -687,6 +690,7 @@ function invocationParams(
   if (permissions !== undefined) invocation.permissions = permissions;
   if (planMode !== undefined) invocation.planMode = planMode;
   if (goalMode !== undefined) invocation.goalMode = goalMode;
+  if (networkMode !== undefined) invocation.sessionRouting = networkMode;
   if (appsGenerateMode !== undefined) invocation.appsGenerateMode = appsGenerateMode;
   if (stormbreakerMode !== undefined) invocation.stormbreakerMode = stormbreakerMode;
   if (taskForceTargets !== undefined) invocation.taskForceTargets = taskForceTargets;
@@ -725,10 +729,24 @@ function assertMobileOneDeviceAuthority(context: MobileBridgeConnectionContext):
 function mobileOneStartParams(request: MobileBridgeRpcRequest): {
   userPrompt: string;
   permissions: "read" | "write" | "full";
+  planMode?: true;
+  goalMode?: true;
+  networkMode?: true;
+  liveMode?: true;
   images?: ImageAttachment[];
   taskForceTargets?: OrchestrationTarget[];
 } {
-  const params = guardedParams(request, ["schemaVersion", "userPrompt", "permissions", "taskForceTargets", "images"]);
+  const params = guardedParams(request, [
+    "schemaVersion",
+    "userPrompt",
+    "permissions",
+    "planMode",
+    "goalMode",
+    "networkMode",
+    "liveMode",
+    "taskForceTargets",
+    "images",
+  ]);
   if (params.schemaVersion !== 1) {
     throw new TypeError("one.invoke.start requires schemaVersion 1");
   }
@@ -739,11 +757,19 @@ function mobileOneStartParams(request: MobileBridgeRpcRequest): {
   const permissions = normalizeRemoteInvocationPermission(
     optionalEnum(params, "permissions", ["read", "write", "full"] as const),
   );
+  const planMode = optionalBoolean(params, "planMode");
+  const goalMode = optionalBoolean(params, "goalMode");
+  const networkMode = optionalBoolean(params, "networkMode");
+  const liveMode = optionalBoolean(params, "liveMode");
   const images = optionalImages(params);
   const taskForceTargets = optionalTurnAgentTargets(params);
   return {
     userPrompt,
     permissions,
+    ...(planMode === true ? { planMode: true as const } : {}),
+    ...(goalMode === true ? { goalMode: true as const } : {}),
+    ...(networkMode === true ? { networkMode: true as const } : {}),
+    ...(liveMode === true ? { liveMode: true as const } : {}),
     ...(images !== undefined ? { images } : {}),
     ...(taskForceTargets !== undefined ? { taskForceTargets } : {}),
   };
@@ -1392,6 +1418,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         });
         let result;
         try {
+          if (input.liveMode) setChatContinuousMode(chat.id, true);
           result = invocationService.start(
             {
               chatId: chat.id,
@@ -1399,6 +1426,12 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
               taskIntent: "conversation",
               oneMode: true,
               permissions: input.permissions,
+              ...(input.planMode ? { planMode: true } : {}),
+              ...(input.goalMode ? { goalMode: true } : {}),
+              // Network is an explicit structured override. The invocation
+              // layer still lets One select the exact task force and keeps
+              // every @ target turn-only.
+              ...(input.networkMode ? { sessionRouting: true } : {}),
               ...(input.taskForceTargets ? { taskForceTargets: input.taskForceTargets } : {}),
               ...(input.images ? { images: input.images } : {}),
             },

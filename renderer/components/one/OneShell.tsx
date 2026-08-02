@@ -487,10 +487,21 @@ export function OneShell() {
   // idempotent so re-renders can never spend an attempt twice.
   const autoRecoveryRef = useRef<{
     chatId: string | null;
+    goal: string;
+    originalRunId: string | null;
+    recoveryRunId: string | null;
     attemptsSpent: number;
     previousFingerprint: string | null;
     judgedRunIds: Set<string>;
-  }>({ chatId: null, attemptsSpent: 0, previousFingerprint: null, judgedRunIds: new Set() });
+  }>({
+    chatId: null,
+    goal: "",
+    originalRunId: null,
+    recoveryRunId: null,
+    attemptsSpent: 0,
+    previousFingerprint: null,
+    judgedRunIds: new Set(),
+  });
   const [runProgress, setRunProgress] = useState<OneRunProgressState>(() => initialOneRunProgress());
   // Host-owned liveness for a running turn. The stage label and status detail
   // only move when the runtime emits an event, and a long research turn can emit
@@ -1211,6 +1222,9 @@ export function OneShell() {
     if (!options?.promptOrigin) {
       const state = autoRecoveryRef.current;
       state.chatId = chatId;
+      state.goal = text;
+      state.originalRunId = runId;
+      state.recoveryRunId = null;
       state.attemptsSpent = 0;
       state.previousFingerprint = null;
       setAutoRecovery(null);
@@ -1683,11 +1697,75 @@ export function OneShell() {
     const chatId = selected?.chatId ?? conversation?.id;
     if (!chatId || receipt.chatId !== chatId) return;
     if (receipt.status === "completed") {
-      // Recovery succeeded (or was never needed). Clear the banner and the budget.
-      if (autoRecovery) setAutoRecovery(null);
-      autoRecoveryRef.current.attemptsSpent = 0;
-      autoRecoveryRef.current.previousFingerprint = null;
-      return;
+      const state = autoRecoveryRef.current;
+      if (receipt.runId !== state.recoveryRunId || !state.originalRunId) {
+        // An ordinary successful run needs no recovery proof.
+        if (autoRecovery) setAutoRecovery(null);
+        state.attemptsSpent = 0;
+        state.previousFingerprint = null;
+        state.originalRunId = null;
+        state.recoveryRunId = null;
+        return;
+      }
+      // A completed process is not proof of the requested outcome. Main binds
+      // the original failure, recovery receipt, and actual assistant result,
+      // asks One to assess them, and writes a durable assessment receipt.
+      if (state.judgedRunIds.has(receipt.runId)) return;
+      const api = ipc();
+      if (!api?.oneAutoRecovery) return;
+      state.judgedRunIds.add(receipt.runId);
+      let cancelled = false;
+      let verificationSettled = false;
+      void api.oneAutoRecovery.verify({
+        originalRunId: state.originalRunId,
+        recoveryRunId: receipt.runId,
+        chatId,
+        goal: state.goal,
+        attemptsSpent: state.attemptsSpent,
+      }).then((verification) => {
+        if (cancelled || !verification) return;
+        verificationSettled = true;
+        const safeDiagnosis = toCustomerSafeText(verification.diagnosis, appLocale);
+        if (verification.verified) {
+          setAutoRecovery(null);
+          state.attemptsSpent = 0;
+          state.previousFingerprint = null;
+          state.originalRunId = null;
+          state.recoveryRunId = null;
+          return;
+        }
+        if (!verification.retry) {
+          setAutoRecovery({
+            phase: "stopped",
+            reason: verification.reason ?? "undecided",
+            diagnosis: safeDiagnosis,
+          });
+          return;
+        }
+        state.attemptsSpent = verification.attempt ?? state.attemptsSpent + 1;
+        const nextRecoveryRunId = uid();
+        state.recoveryRunId = nextRecoveryRunId;
+        setAutoRecovery({ phase: "recovering", attempt: state.attemptsSpent, diagnosis: safeDiagnosis });
+        void startRun(
+          chatId,
+          selected?.taskId ?? null,
+          selected?.canonicalVersion ?? null,
+          tFor(appLocale, "one.shell.system_prompt.auto_recover", {
+            reason: safeDiagnosis || tFor(appLocale, "one.res.fail.generic"),
+          }),
+          selected ? "task" : "conversation",
+          { runId: nextRecoveryRunId, displayUserMessage: false, promptOrigin: "system" },
+        );
+      }).catch(() => {
+        if (!cancelled) {
+          verificationSettled = true;
+          setAutoRecovery({ phase: "stopped", reason: "undecided", diagnosis: "" });
+        }
+      });
+      return () => {
+        cancelled = true;
+        if (!verificationSettled) state.judgedRunIds.delete(receipt.runId);
+      };
     }
     if (receipt.status !== "failed" && receipt.status !== "interrupted") return;
     // One decision per run id, no matter how often this effect re-evaluates.
@@ -1702,10 +1780,14 @@ export function OneShell() {
     const state = autoRecoveryRef.current;
     if (state.chatId !== chatId) {
       state.chatId = chatId;
+      state.goal = selected?.display.title ?? conversation?.title ?? "";
+      state.originalRunId = receipt.runId;
+      state.recoveryRunId = null;
       state.attemptsSpent = 0;
       state.previousFingerprint = null;
     }
-    const goal = selected?.display.title ?? conversation?.title ?? "";
+    if (!state.originalRunId) state.originalRunId = receipt.runId;
+    const goal = state.goal || selected?.display.title || conversation?.title || "";
     let cancelled = false;
     let judgementSettled = false;
     void api.oneAutoRecovery
@@ -1730,6 +1812,8 @@ export function OneShell() {
           return;
         }
         state.attemptsSpent = judgement.attempt ?? state.attemptsSpent + 1;
+        const recoveryRunId = uid();
+        state.recoveryRunId = recoveryRunId;
         setAutoRecovery({ phase: "recovering", attempt: state.attemptsSpent, diagnosis: safeDiagnosis });
         void startRun(
           chatId,
@@ -1739,7 +1823,7 @@ export function OneShell() {
             reason: safeDiagnosis || tFor(appLocale, "one.res.fail.generic"),
           }),
           selected ? "task" : "conversation",
-          { displayUserMessage: false, promptOrigin: "system" },
+          { runId: recoveryRunId, displayUserMessage: false, promptOrigin: "system" },
         );
       })
       .catch(() => {

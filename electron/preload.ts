@@ -577,6 +577,7 @@ const api: AgentlasIpc = {
   },
   oneAutoRecovery: {
     judge: (input) => ipcRenderer.invoke("oneAutoRecovery:judge", input),
+    verify: (input) => ipcRenderer.invoke("oneAutoRecovery:verify", input),
   },
   oneValueClosure: {
     getState: () => ipcRenderer.invoke("oneValueClosure:getState"),

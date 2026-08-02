@@ -126,7 +126,7 @@ export interface MobileBridgeAuthenticatedDevice {
 }
 
 export interface MobileBridgePairingAuthority {
-  authenticate(token: string): MobileBridgeAuthenticatedDevice | null;
+  authenticate(token: string): Promise<MobileBridgeAuthenticatedDevice | null> | MobileBridgeAuthenticatedDevice | null;
   exchange(request: MobileBridgePairExchangeRequest): Promise<{
     deviceId: string;
     token: string;
@@ -350,7 +350,7 @@ export class AgentlasMobileBridgeServer {
       ? https.createServer(this.tls, (request, response) => void this.handleHttp(request, response))
       : http.createServer((request, response) => void this.handleHttp(request, response));
     this.httpServer = server;
-    server.on("upgrade", (request, socket, head) => this.handleUpgrade(request, socket, head));
+    server.on("upgrade", (request, socket, head) => void this.handleUpgrade(request, socket, head));
     server.on("error", (error) => this.onError(errorOf(error)));
 
     try {
@@ -390,7 +390,7 @@ export class AgentlasMobileBridgeServer {
     return this.startedAddress;
   }
 
-  private handleUpgrade(request: http.IncomingMessage, socket: Duplex, head: Buffer): void {
+  private async handleUpgrade(request: http.IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     if (!this.startedAddress) {
       rejectUpgrade(socket, 503, "bridge unavailable");
       return;
@@ -417,7 +417,7 @@ export class AgentlasMobileBridgeServer {
     }
     let identity: UpgradeIdentity | null = null;
     try {
-      const device = this.pairing?.authenticate(presented) ?? null;
+      const device = this.pairing ? await this.pairing.authenticate(presented) : null;
       if (device) {
         identity = {
           deviceId: device.deviceId,
