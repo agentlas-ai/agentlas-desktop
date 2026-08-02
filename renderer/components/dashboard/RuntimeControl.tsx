@@ -520,7 +520,7 @@ export function RuntimeControl() {
   } {
     const pick = pool?.picks[role];
     if (pick?.position === position && !pick.inherited) {
-      return { label: ko ? "사용 중" : "In use", tone: "active" };
+      return { label: ko ? "기본 선택" : "Selected default", tone: "active" };
     }
     const skip = pick?.skipped.find((entry) => entry.position === position);
     if (skip) {
@@ -538,7 +538,7 @@ export function RuntimeControl() {
               : "Not installed · skipped";
       return { label, tone: "skip" };
     }
-    return { label: ko ? "대기" : "Standby", tone: "idle" };
+    return { label: ko ? "예비 후보" : "Fallback", tone: "idle" };
   }
 
   function renderPool(role: RuntimeRole) {
@@ -562,7 +562,7 @@ export function RuntimeControl() {
               <span>{ko ? "엔진" : "Engine"}</span>
               <span>{ko ? "모델" : "Model"}</span>
               <span>{ko ? "작업량" : "Effort"}</span>
-              <span>{ko ? "상태" : "Status"}</span>
+              <span>{ko ? "선택" : "Selection"}</span>
               <span>{ko ? "관리" : "Manage"}</span>
             </div>
             <ol className="dashboard-runtime-pool-list">
@@ -823,11 +823,11 @@ export function RuntimeControl() {
             <span className="dashboard-runtime-role-kicker">
               {role === "orchestrator"
                 ? ko
-                  ? "의사결정 · 위임 · 결과 통합 — 1순위부터 순서대로 실행"
-                  : "Decide · delegate · synthesize — evaluated from priority 1"
+                  ? "1개 컨트롤러가 의사결정 · 위임 · 결과 통합 — 행은 모델 예비 순서"
+                  : "One controller decides, delegates, and synthesizes — rows are model fallbacks"
                 : ko
-                  ? "위임된 작업 실행 — 순위 숫자를 드래그해 순서 변경"
-                  : "Execute delegated work — drag a rank number to reorder"}
+                  ? "N개 Worker 실행이 공유하는 모델 우선순위 — 행 수는 Worker 수가 아님"
+                  : "Shared model priority for N worker executions — rows are not worker count"}
             </span>
           </div>
           <span
@@ -858,8 +858,8 @@ export function RuntimeControl() {
         <span>{ko ? "역할별 기본 모델" : "Role model defaults"}</span>
         <small>
           {ko
-            ? "연결 상태를 기준으로 두 표를 자동 구성"
-            : "Build both tables from connected runtimes"}
+            ? "1 Orchestrator : N Workers · 행은 역할별 모델 우선순위"
+            : "1 Orchestrator : N Workers · rows are role model priorities"}
         </small>
         <button
           type="button"

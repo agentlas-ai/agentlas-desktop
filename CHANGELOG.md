@@ -36,6 +36,18 @@ Releases page stays the authority for what is actually downloadable.
   detail and Work provide a direct Dashboard return, project folders restore
   with their project identity, and Dashboard's high-contrast Auto control keeps
   the ordered orchestrator and worker priorities after restart.
+- **Project staffing now reads as an organization, not a system-agent dump.**
+  The complete callable Local, owner Cloud, and bookmarked Hub roster is grouped
+  by team; internal role cells stay behind their controller; the first saved
+  member owns the project while later members remain preferences for automatic
+  WorkOrder staffing and Network gap filling.
+- **Work labels and controls match the orchestration model.** The first request
+  immediately replaces the `New task` placeholder with its concise task title,
+  project Work exposes no manual app/swarm/live/Stormbreaker toggles, and `@`
+  remains an optional one-turn override without changing session ownership.
+- **Role defaults are one controller to many workers.** Dashboard rows are
+  ordered model fallbacks shared by one Orchestrator and N Worker executions;
+  candidate rows no longer imply that a single worker slot is currently in use.
 - Production dependencies were refreshed without changing the model ownership
   contract, and the shipped dependency tree now has no known audit findings.
 - Project-first Work, exact pointer drag-and-drop, controller binding, completed

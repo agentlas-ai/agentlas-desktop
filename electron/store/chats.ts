@@ -376,11 +376,23 @@ export function getOrCreateStudioSession(studioKey: string): Chat {
 
 export function renameChat(id: string, title: string): Chat {
   // 빈 문자열 허용 — UI는 fallback 라벨 표시
-  getDb()
-    .prepare("UPDATE chats SET title = ?, updated_at = ? WHERE id = ?")
-    .run(title.trim(), new Date().toISOString(), id);
+  const db = getDb();
+  const nextTitle = title.trim();
+  const updatedAt = new Date().toISOString();
+  // A Work task and its root chat are the same user-facing object. Updating
+  // only chats left project sidebars and dashboard cards stuck on "New task".
+  db.transaction(() => {
+    db.prepare("UPDATE chats SET title = ?, updated_at = ? WHERE id = ?")
+      .run(nextTitle, updatedAt, id);
+    // A title is presentation metadata, not a lifecycle transition. Keeping
+    // the Task timestamp stable preserves the exact result-ready version that
+    // explicit acceptance binds to after a run finishes.
+    db.prepare("UPDATE tasks SET title = ? WHERE origin_chat_id = ?")
+      .run(nextTitle, id);
+  })();
   const chat = getChat(id) as Chat;
   emitDesktopStoreChange({ entity: "chat", id });
+  emitDesktopStoreChange({ entity: "task", id: `task_${id}` });
   return chat;
 }
 
@@ -577,13 +589,49 @@ function autoTitleValue(message: string): string {
   return condensed.length > 36 ? condensed.slice(0, 34) + "…" : condensed;
 }
 
+export function repairPlaceholderTaskTitles(): number {
+  const db = getDb();
+  const rows = db.prepare(
+    `SELECT c.id,
+            (SELECT m.text
+             FROM chat_messages m
+             WHERE m.chat_id = c.id AND m.role = 'user'
+             ORDER BY m.created_at ASC
+             LIMIT 1) AS first_user_text
+     FROM chats c
+     WHERE c.kind <> 'division'
+       AND lower(trim(c.title)) IN ('', '새 채팅', 'new chat', '새 작업', 'new task')`,
+  ).all() as Array<{ id: string; first_user_text: string | null }>;
+  const updates = rows.flatMap((row) => {
+    const title = row.first_user_text ? autoTitleValue(row.first_user_text) : "";
+    return title ? [{ id: row.id, title }] : [];
+  });
+  if (updates.length === 0) return 0;
+  const updatedAt = new Date().toISOString();
+  db.transaction(() => {
+    for (const row of updates) {
+      db.prepare("UPDATE chats SET title = ?, updated_at = ? WHERE id = ?")
+        .run(row.title, updatedAt, row.id);
+      db.prepare("UPDATE tasks SET title = ? WHERE origin_chat_id = ?")
+        .run(row.title, row.id);
+    }
+  })();
+  return updates.length;
+}
+
 export function autoTitleFromFirstMessage(chatId: string, firstMessage: string): void {
   const chat = getChat(chatId);
   if (!chat) return;
   // 사용자가 이미 rename했으면(= title이 비어있지 않음) 건드리지 않음.
   // 빈 문자열은 "untitled" 상태 — locale별 placeholder가 UI에서만 보임.
   // 과거 빌드(v6 이전)에서 "새 채팅"으로 저장된 행도 함께 처리.
-  if (chat.title.length > 0 && chat.title !== "새 채팅" && chat.title !== "New chat") return;
+  if (
+    chat.title.length > 0
+    && chat.title !== "새 채팅"
+    && chat.title !== "New chat"
+    && chat.title !== "새 작업"
+    && chat.title !== "New task"
+  ) return;
   const truncated = autoTitleValue(firstMessage);
   if (truncated) renameChat(chatId, truncated);
 }
@@ -603,7 +651,9 @@ export function retitleAutoTitledChatForTask(chatId: string, taskPrompt: string)
   const isAutomatic = chat.title === inheritedAutoTitle
     || chat.title === ""
     || chat.title === "새 채팅"
-    || chat.title === "New chat";
+    || chat.title === "New chat"
+    || chat.title === "새 작업"
+    || chat.title === "New task";
   if (!isAutomatic) return chat;
   const taskTitle = autoTitleValue(taskPrompt.replace(/^\s*(?:\/?workforce\b|\/?hep-network\b)(?:\s+--(?:benchmark|legacy))?\s*/i, ""));
   return taskTitle ? renameChat(chatId, taskTitle) : chat;

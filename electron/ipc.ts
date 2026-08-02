@@ -3179,9 +3179,20 @@ export function registerIpcHandlers(): void {
     if (!project) throw new Error("Project is unavailable");
     const controller = project.agentPool[0];
     if (!controller) throw new Error("Choose at least one project agent before starting work");
+    const installedController = controller.source === "local"
+      ? getAgentById(controller.agentId)
+      : null;
+    const controllerFirm = installedController?.kind === "team"
+      ? listFirms().find((firm) => firm.ceoAgentId === installedController.id) ?? null
+      : null;
     const chat = createChat({
       projectId: project.id,
       agentId: controller.agentId,
+      // A saved team controller must enter the hierarchical firm runtime.
+      // Binding only its CEO agent turns the whole HQ into one prompt and
+      // produces narrated role-play instead of real 1 orchestrator : N worker
+      // executions and receipts.
+      firmId: controllerFirm?.id ?? null,
       title: typeof input.title === "string" && input.title.trim()
         ? input.title.trim().slice(0, 200)
         : "New task",
@@ -3250,15 +3261,14 @@ export function registerIpcHandlers(): void {
       }
     }
     const accepted = acceptCanonicalTaskResult(input, receipt);
-    const closure = ensureAcceptedResultValueClosure({
-      priorTaskVersion: input.expectedVersion,
-      acceptedTask: accepted,
-      expectedRunId: input.expectedRunId,
-      receipt,
-      confirmedByUser: true,
-    });
+    // The canonical Task acceptance above is the authoritative user action.
+    // Value Closure and its downstream projections are derived records: an
+    // older Task whose title once changed its timestamp may not have an exact
+    // result-ready event for that metadata version. Never reject the already
+    // committed acceptance and leave Work stuck on "Completing…".
+    let closure: ReturnType<typeof ensureAcceptedResultValueClosure> | null = null;
     try {
-      ensureVerifiedAcceptedResultValueClosure({
+      closure = ensureAcceptedResultValueClosure({
         priorTaskVersion: input.expectedVersion,
         acceptedTask: accepted,
         expectedRunId: input.expectedRunId,
@@ -3266,60 +3276,70 @@ export function registerIpcHandlers(): void {
         confirmedByUser: true,
       });
     } catch {
-      // Host artifact verification is an optional fail-closed sibling record.
-      // Acceptance remains partial when exact bound bytes cannot be re-proven.
+      // Derived evidence remains absent when its exact historical binding
+      // cannot be reconstructed. The canonical acceptance is still durable.
     }
-    try {
-      sealOneMemoryCandidateProvenance({
-        sourceTaskId: accepted.id,
-        sourceTaskVersion: accepted.version,
-        sourceRunId: input.expectedRunId,
-        sourceValueClosureId: closure.value.closure.valueClosureId,
-        sourceValueClosureVersion: closure.value.version,
-      });
-    } catch {
-      // Memory review is optional. Provenance sealing must never roll back the
-      // already-authoritative Task acceptance and accepted Value Closure.
-    }
-    try {
-      const hostId = loadOrCreateMobileBridgeHostIdentity(app.getPath("userData")).hostId;
-      tryProduceAcceptedResultSuggestion({
-        hostId,
-        taskId: accepted.id,
-        expectedTaskVersion: accepted.version,
-        expectedTaskUpdatedAt: accepted.updatedAt,
-        expectedRunId: input.expectedRunId,
-        valueClosureId: closure.value.closure.valueClosureId,
-        expectedValueClosureVersion: closure.value.version,
-        confirmedByUser: true,
-      });
-    } catch {
-      // Ecosystem growth is optional and must never roll back result acceptance.
-    }
-    try {
-      tryCompleteOneActivationFirstValue({
-        taskId: accepted.id,
-        expectedTaskVersion: accepted.version,
-        valueClosureId: closure.value.closure.valueClosureId,
-        expectedValueClosureVersion: closure.value.version,
-      });
-    } catch {
-      // First-use activation is optional. It must never roll back the accepted
-      // Task result or its exact Value Closure.
-    }
-    try {
-      ensureOneExperienceReuseReceipt({
-        taskId: accepted.id,
-        expectedTaskVersion: accepted.version,
-        expectedTaskUpdatedAt: accepted.updatedAt,
-        expectedRunId: input.expectedRunId,
-        valueClosureId: closure.value.closure.valueClosureId,
-        expectedValueClosureVersion: closure.value.version,
-        confirmedByUser: true,
-      });
-    } catch {
-      // Compounding evidence is optional. Its failure must never roll back the
-      // already-authoritative result acceptance or accepted Value Closure.
+    if (closure) {
+      try {
+        ensureVerifiedAcceptedResultValueClosure({
+          priorTaskVersion: input.expectedVersion,
+          acceptedTask: accepted,
+          expectedRunId: input.expectedRunId,
+          receipt,
+          confirmedByUser: true,
+        });
+      } catch {
+        // Host artifact verification is an optional fail-closed sibling record.
+      }
+      try {
+        sealOneMemoryCandidateProvenance({
+          sourceTaskId: accepted.id,
+          sourceTaskVersion: accepted.version,
+          sourceRunId: input.expectedRunId,
+          sourceValueClosureId: closure.value.closure.valueClosureId,
+          sourceValueClosureVersion: closure.value.version,
+        });
+      } catch {
+        // Memory review is optional.
+      }
+      try {
+        const hostId = loadOrCreateMobileBridgeHostIdentity(app.getPath("userData")).hostId;
+        tryProduceAcceptedResultSuggestion({
+          hostId,
+          taskId: accepted.id,
+          expectedTaskVersion: accepted.version,
+          expectedTaskUpdatedAt: accepted.updatedAt,
+          expectedRunId: input.expectedRunId,
+          valueClosureId: closure.value.closure.valueClosureId,
+          expectedValueClosureVersion: closure.value.version,
+          confirmedByUser: true,
+        });
+      } catch {
+        // Ecosystem growth is optional.
+      }
+      try {
+        tryCompleteOneActivationFirstValue({
+          taskId: accepted.id,
+          expectedTaskVersion: accepted.version,
+          valueClosureId: closure.value.closure.valueClosureId,
+          expectedValueClosureVersion: closure.value.version,
+        });
+      } catch {
+        // First-use activation is optional.
+      }
+      try {
+        ensureOneExperienceReuseReceipt({
+          taskId: accepted.id,
+          expectedTaskVersion: accepted.version,
+          expectedTaskUpdatedAt: accepted.updatedAt,
+          expectedRunId: input.expectedRunId,
+          valueClosureId: closure.value.closure.valueClosureId,
+          expectedValueClosureVersion: closure.value.version,
+          confirmedByUser: true,
+        });
+      } catch {
+        // Compounding evidence is optional.
+      }
     }
     try {
       tryProduceOneImprovementProofForTask(accepted.id);

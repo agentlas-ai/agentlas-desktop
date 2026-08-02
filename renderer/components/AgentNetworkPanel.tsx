@@ -75,6 +75,33 @@ function timelineHasFailureSignal(timeline: NetTimelineItem[]): boolean {
   );
 }
 
+function cleanAgentStatus(text: string | undefined): string {
+  const value = text?.replace(/\s+/g, " ").trim() ?? "";
+  if (!value) return "";
+  if (/(?:^|\s)codex:\s|\[runtime-session\]|sessionend hook|skill descriptions were shortened|agentlas plugins|\/Users\/[^\s]+\/(?:\.codex|\.claude|Library\/Application Support)|(?:^|\s)(?:mcp__|automation_graph_|hep-network|stormbreaker[_-])|\b(?:bash|collab_tool_call|mcp_tool_call|write|read|edit|glob|grep|websearch|webfetch)\b|\b(?:codex|claude code|gemini|kimi|grok)\s+cli\b/i.test(value)) {
+    return "";
+  }
+  return value;
+}
+
+const INTERNAL_SYSTEM_ROLE_KEYS = new Set([
+  "memory-curator",
+  "pm",
+  "policy-gate",
+  "runtime-adapter",
+]);
+
+function normalizedRoleKey(value: string | undefined): string {
+  return (value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9가-힣]+/gu, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function isInternalSystemRole(key: string, name?: string, role?: string): boolean {
+  return [key, name, role].some((value) => INTERNAL_SYSTEM_ROLE_KEYS.has(normalizedRoleKey(value)));
+}
+
 export function AgentNetworkPanel({
   firm,
   org,
@@ -92,7 +119,7 @@ export function AgentNetworkPanel({
   const { t, locale } = useT();
   const [briefOpen, setBriefOpen] = useState(false);
   const visibleLiveAgents = useMemo<Record<string, LiveAgent>>(() => Object.fromEntries(
-    Object.entries(liveAgents).map(([key, item]) => {
+    Object.entries(liveAgents).flatMap(([key, item]) => {
       const installed = agents.find((candidate) =>
         candidate.id === key
         || candidate.slug === key
@@ -105,16 +132,23 @@ export function AgentNetworkPanel({
         || agent.slug === item.name
       ) ? agent : null;
       const resolved = installed ?? current;
+      if (isInternalSystemRole(key, resolved?.slug ?? item.name, item.role)) return [];
       const unresolvedMachineLabel = !resolved
         && item.name === key
         && /[-_:/.]/u.test(item.name);
-      return [key, resolved
-        ? { ...item, name: pickLocalized(resolved, locale).name }
+      const status = cleanAgentStatus(item.status);
+      return [[key, resolved
+        ? { ...item, name: pickLocalized(resolved, locale).name, status }
         : unresolvedMachineLabel
-          ? { ...item, name: locale === "ko" ? "에이전트" : "Agent" }
-          : item];
+          ? { ...item, name: locale === "ko" ? "에이전트" : "Agent", status }
+          : { ...item, status }] as const];
     }),
   ), [agent, agents, liveAgents, locale]);
+  const visibleTimeline = useMemo<NetTimelineItem[]>(() => timeline.flatMap((item) => {
+    if (isInternalSystemRole(item.agentId, item.name, item.role)) return [];
+    const text = cleanAgentStatus(item.text);
+    return text ? [{ ...item, text }] : [];
+  }), [timeline]);
 
   const roster = useMemo<Roster | null>(() => {
     // ResolvedOrg가 있으면 그걸로 명단 (노드 id = 이벤트 agentId와 정확히 일치)
@@ -157,27 +191,61 @@ export function AgentNetworkPanel({
     return { ceo, divisions };
   }, [org, firm, agents, locale]);
 
-  const anyActive = Object.values(visibleLiveAgents).some((a) => a.active);
-  const activeCount = Object.values(visibleLiveAgents).filter((a) => a.active).length;
-  const hasHistoricalActivity = !busy && !anyActive && timeline.length > 0;
-  const hasFailureSignal = timelineHasFailureSignal(timeline);
+  // Firm/org definitions contain every possible internal role. The Work UI is
+  // an execution view, not an org-chart browser: only nodes proven by a live
+  // event or receipt timeline belong here. This prevents unused system roles
+  // from appearing as a wall of fake "idle" workers.
+  const participationKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const [key, value] of Object.entries(visibleLiveAgents)) {
+      if (value.active) keys.add(key);
+    }
+    for (const item of visibleTimeline) {
+      if (item.agentId) keys.add(item.agentId);
+      for (const delegated of item.delegateTo ?? []) keys.add(delegated);
+    }
+    return keys;
+  }, [visibleLiveAgents, visibleTimeline]);
+  const participatingLiveAgents = useMemo<Record<string, LiveAgent>>(() => Object.fromEntries(
+    Object.entries(visibleLiveAgents).filter(([key]) => participationKeys.has(key)),
+  ), [participationKeys, visibleLiveAgents]);
+  const participatingRoster = useMemo<Roster | null>(() => {
+    if (!roster) return null;
+    const divisions = roster.divisions.flatMap((division) => {
+      const specialists = division.specialists.filter((specialist) => participationKeys.has(specialist.key));
+      return participationKeys.has(division.key) || specialists.length > 0
+        ? [{ ...division, specialists }]
+        : [];
+    });
+    const ceo = roster.ceo && (participationKeys.has(roster.ceo.key) || divisions.length > 0)
+      ? roster.ceo
+      : null;
+    return ceo || divisions.length > 0 ? { ceo, divisions } : null;
+  }, [participationKeys, roster]);
+
+  const anyActive = Object.values(participatingLiveAgents).some((a) => a.active);
+  const controllerKey = participatingRoster?.ceo?.key ?? null;
+  const activeWorkerCount = Object.entries(participatingLiveAgents)
+    .filter(([key, value]) => value.active && key !== controllerKey)
+    .length;
+  const hasHistoricalActivity = !busy && !anyActive && visibleTimeline.length > 0;
+  const hasFailureSignal = timelineHasFailureSignal(visibleTimeline);
   // 진짜 멀티에이전트(팀/조직) 컨텍스트일 때만 "오케스트레이션/병렬" 프레이밍을 쓴다.
-  const hasRoster = Boolean(roster && (roster.ceo || roster.divisions.length > 0));
+  const hasRoster = Boolean(participatingRoster && (participatingRoster.ceo || participatingRoster.divisions.length > 0));
   const activeTitle =
     chatTitle?.trim() ||
     (firm ? pickLocalized(firm, locale).name : agent ? pickLocalized(agent, locale).name : t("network.title"));
   const promptPreview = cleanPromptPreview(latestUserPrompt ?? "");
-  const feed = timeline.slice(-10);
-  const activityRows = workflowActivityRows(timeline, locale);
-  const webSeen = timeline.some((item) => /web|검색|search|탐색/i.test(item.text));
+  const feed = visibleTimeline.slice(-10);
+  const activityRows = workflowActivityRows(visibleTimeline, locale);
+  const webSeen = visibleTimeline.some((item) => /web|검색|search|탐색/i.test(item.text));
   const waitingForFirstEvent = feed.length === 0 && (busy || anyActive);
-  const uniqueTimelineAgents = new Set(timeline.map((item) => item.agentId).filter(Boolean));
+  const uniqueTimelineAgents = new Set(visibleTimeline.map((item) => item.agentId).filter(Boolean));
   const hasParallelSignal =
-    activeCount >= 2 ||
-    Boolean(firm || org) ||
+    activeWorkerCount >= 2 ||
     hasPipeline ||
     uniqueTimelineAgents.size > 1 ||
-    timeline.some((item) => (item.delegateTo?.length ?? 0) > 1);
+    visibleTimeline.some((item) => (item.delegateTo?.length ?? 0) > 1);
 
   return (
     <aside
@@ -211,12 +279,12 @@ export function AgentNetworkPanel({
           </div>
         </div>
         {/* 병렬 배지 — 실제로 2개 이상 동시 실행일 때만(거짓 ∥ 방지) */}
-        {activeCount >= 2 && (
+        {activeWorkerCount >= 2 && (
           <span
             style={headerCountBadgeStyle}
             title={locale === "ko" ? "병렬 실행 중인 서브에이전트 수" : "sub-agents running in parallel"}
           >
-            {activeCount} ∥
+            {activeWorkerCount} ∥
           </span>
         )}
         {(busy || anyActive) && <LiveBadge label={t("network.live")} />}
@@ -284,10 +352,10 @@ export function AgentNetworkPanel({
             </div>
 
             <OrchestrationTree
-              roster={roster}
+              roster={participatingRoster}
               hasRoster={hasRoster}
-              liveAgents={visibleLiveAgents}
-              timeline={timeline}
+              liveAgents={participatingLiveAgents}
+              timeline={visibleTimeline}
               busy={busy}
               locale={locale}
             />
@@ -295,11 +363,11 @@ export function AgentNetworkPanel({
         ) : (
           <SoloAgentSummary
             busy={busy || anyActive || waitingForFirstEvent}
-            timeline={timeline}
+            timeline={visibleTimeline}
             latestUserPrompt={promptPreview}
             locale={locale}
             agentName={agent ? pickLocalized(agent, locale).name : undefined}
-            liveAgents={visibleLiveAgents}
+            liveAgents={participatingLiveAgents}
           />
         )}
       </div>

@@ -153,7 +153,7 @@ export function ChatStream({
   /** Project timeline deep link target. The id is local history metadata only. */
   focusMessageId?: string | null;
 }) {
-  const { t } = useT();
+  const { t, locale } = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const scrollingToBottomRef = useRef(false);
@@ -588,6 +588,7 @@ function EmptyChatState({
   directory?: ChatEmptyDirectory;
 }) {
   const { t, locale } = useT();
+  const isProjectTask = Array.isArray(directory?.projectTeam);
   const sections = useMemo(() => {
     if (!directory) return [];
     const mentions: EmptyDirectoryItem[] = directory.projectTeam ?? [
@@ -607,7 +608,7 @@ function EmptyChatState({
     ];
 
     return [
-      { id: "context", title: locale === "ko" ? "프로젝트 팀" : "Project team", items: mentions },
+      { id: "context", title: locale === "ko" ? "책임자와 선호 팀" : "Controller and preferences", items: mentions },
     ].filter((section) => section.items.length > 0);
   }, [directory, locale, t]);
 
@@ -615,13 +616,13 @@ function EmptyChatState({
     <section className="agentlas-chat-empty" aria-labelledby="agentlas-chat-empty-title">
       <header className="agentlas-chat-empty-header">
         <h2 id="agentlas-chat-empty-title">{locale === "ko" ? "이 프로젝트에서 무엇을 완성할까요?" : "What should this project accomplish?"}</h2>
-        <p>{locale === "ko" ? "원하는 결과를 설명하면 프로젝트 팀이 우선순위에 따라 작업합니다." : "Describe the result you want. The project team will work in its saved priority order."}</p>
+        {!isProjectTask ? <p>{locale === "ko" ? "원하는 결과를 설명하세요." : "Describe the outcome you want."}</p> : null}
       </header>
-      {directory && sections.length > 0 && (
+      {!isProjectTask && directory && sections.length > 0 && (
         <div className="agentlas-chat-empty-directory">
           <div className="agentlas-chat-empty-directory-intro">
-            <strong>{locale === "ko" ? "이 프로젝트에서 사용할 수 있어요" : "Available in this project"}</strong>
-            <span>{locale === "ko" ? "@ 호출은 이 턴에만 서브 에이전트를 추가합니다." : "An @ call adds a sub-agent for this turn only."}</span>
+            <strong>{locale === "ko" ? "자동 오케스트레이션 기준" : "Automatic orchestration"}</strong>
+            <span>{locale === "ko" ? "아래 명단은 우선순위이며 매번 전부 투입되지 않습니다. @ 지정은 필요한 경우의 1회성 수동 개입입니다." : "This roster is a preference, not a forced run list. @ is an optional one-turn override."}</span>
           </div>
           <div className="agentlas-chat-empty-grid">
               {sections.map((section) => (
@@ -634,7 +635,7 @@ function EmptyChatState({
                   <ul className="agentlas-chat-empty-list">
                     {section.items.map((item) => (
                       <li key={item.id} className="agentlas-chat-empty-item" title={`${item.token} — ${item.label}`}>
-                        <code>{item.token}</code>
+                        <strong>{item.token}</strong>
                         <span>{item.label}</span>
                       </li>
                     ))}
@@ -753,6 +754,8 @@ const Bubble = memo(function Bubble({
   // agent — Markdown 렌더링.
   // 단일 실행은 영상형 인터리브 본문(텍스트 사이 도구 그룹) + 하단 ✳ 상태줄로,
   // 카드형 작업 패널은 실제 멀티/병렬 실행에서만 쓴다.
+  const displayText = userFacingAssistantText(message.text);
+  const displayMessage = displayText === message.text ? message : { ...message, text: displayText };
   const hasProgress = Boolean(message.busy || message.status || (message.steps && message.steps.length > 0));
   const showParallelWork = hasProgress && isParallelWorkMessage(message);
   return (
@@ -775,9 +778,9 @@ const Bubble = memo(function Bubble({
             stopRequested={stopRequested}
           />
         )}
-        {showParallelWork && message.text && message.busy && (
+        {showParallelWork && displayText && message.busy && (
           <LiveOutputPanel
-            text={message.text}
+            text={displayText}
             streaming={message.streaming}
             onOpenArtifact={onOpenArtifact}
             onOpenMedia={onOpenMedia}
@@ -786,7 +789,7 @@ const Bubble = memo(function Bubble({
             mediaBasePaths={mediaBasePaths}
           />
         )}
-        {showParallelWork && message.text && !message.busy && (
+        {showParallelWork && displayText && !message.busy && (
           <div
             style={{
               color: "var(--ink)",
@@ -796,7 +799,7 @@ const Bubble = memo(function Bubble({
             }}
           >
             <Markdown
-              text={message.text}
+              text={displayText}
               messageId={message.id}
               onOpenArtifact={onOpenArtifact}
               onOpenMedia={onOpenMedia}
@@ -808,7 +811,7 @@ const Bubble = memo(function Bubble({
         )}
         {!showParallelWork && (
           <SingleRunBody
-            message={message}
+            message={displayMessage}
             onOpenArtifact={onOpenArtifact}
             onOpenMedia={onOpenMedia}
             onOpenLinkedFile={onOpenLinkedFile}
@@ -856,11 +859,11 @@ const Bubble = memo(function Bubble({
             </button>
           </div>
         )}
-        {message.text && !message.busy && (
+        {displayText && !message.busy && (
           <div className="agentlas-msg-actions" style={{ display: "flex", gap: 4, marginTop: 6 }}>
-            <CopyMessageButton text={message.text} />
-            <SpeakMessageButton text={message.text} />
-            <OpenAsDocumentButton text={message.text} />
+            <CopyMessageButton text={displayText} />
+            <SpeakMessageButton text={displayText} />
+            <OpenAsDocumentButton text={displayText} />
           </div>
         )}
       </div>
@@ -1490,7 +1493,7 @@ function RunStatusLine({
   message: StreamMessage;
   onOpenWorkflow?: () => void;
 }) {
-  const { t } = useT();
+  const { t, locale } = useT();
   const busy = Boolean(message.busy);
   const liveElapsed = useElapsedSeconds(message.startedAt, busy);
   const thinkTick = useElapsedSeconds(
@@ -1510,10 +1513,11 @@ function RunStatusLine({
   // 그것을 우선해 동일 화면에 서로 다른 두 상태가 경쟁하지 않게 한다.
   const latestActivity = [...(message.steps ?? [])]
     .reverse()
-    .find((step) => step.text.trim())
+    .find((step) => isUserFacingStreamStep(step) && step.text.trim())
     ?.text.trim();
   const phrase = busy
-    ? runStatusPhrase(message.thinking, thinkTick, t) || message.status?.trim() || latestActivity || ""
+    ? runStatusPhrase(message.thinking, thinkTick, t)
+      || userFacingRunStatus(message.status?.trim() || latestActivity, locale)
     : "";
   const parts = [formatElapsedShort(elapsed)];
   if (tokens != null && tokens > 0) parts.push(`${formatTokens(tokens)} ${t("chatstream.tokens_unit")}`);
@@ -1584,6 +1588,31 @@ function isInternalSystemNote(text: string) {
     trimmed.startsWith("Agentlas OS operated this surface hands-free.") ||
     trimmed.startsWith("Agentlas OS prepared this surface hands-free.")
   );
+}
+
+function isInternalRuntimeStatus(text: string): boolean {
+  return /(?:^|\s)codex:\s|\[runtime-session\]|sessionend hook|skill descriptions were shortened|agentlas plugins|career graph (?:색인 갱신|refreshed):?\s*nodes=|\/Users\/[^\s]+\/(?:\.codex|\.claude|Library\/Application Support)|(?:^|\s)(?:mcp__|automation_graph_|hep-network|stormbreaker[_-])|\b(?:bash|collab_tool_call|mcp_tool_call|write|read|edit|glob|grep|websearch|webfetch)\b|\b(?:codex|claude code|gemini|kimi|grok)\s+cli\b/i.test(text);
+}
+
+function userFacingAssistantText(text: string): string {
+  return text
+    .replace(/^\s*(?:사용 스킬|Skills used)\s*:[^\n.!?]*[.!?]?\s*(?:(?:이유|Reason)\s*:[^.!?]*[.!?]\s*)?/i, "")
+    .replace(/^\s*I(?:'|’)m using (?:the )?`?[^`.\n]+`? skill because [^.]*\.\s*/i, "")
+    .replace(/^\s*Execution mode:\s*`?appbridge-ceo-orchestrator`?[^\n]*\n?/gim, "")
+    .trimStart();
+}
+
+function userFacingRunStatus(text: string | undefined, locale: "ko" | "en"): string {
+  const value = text?.replace(/\s+/g, " ").trim() ?? "";
+  if (!value || isInternalRuntimeStatus(value)) {
+    return locale === "ko" ? "작업을 진행하고 있습니다." : "Work is in progress.";
+  }
+  return value;
+}
+
+function isUserFacingStreamStep(step: StreamStep): boolean {
+  if (step.tool) return true;
+  return Boolean(step.text.trim()) && !isInternalRuntimeStatus(step.text);
 }
 
 function isParallelWorkMessage(message: StreamMessage): boolean {
@@ -1957,16 +1986,26 @@ function WorkingPanel({
   const elapsed = useElapsedSeconds(startedAt, !done);
   const [override, setOverride] = useState<boolean | null>(null);
 
-  const allRows: StreamStep[] =
-    steps.length > 0 ? steps : fallback ? [{ id: "_f", kind: "thinking", text: fallback }] : [];
+  const candidateRows: StreamStep[] = steps.length > 0
+    ? steps
+    : fallback
+      ? [{ id: "_f", kind: "thinking", text: fallback }]
+      : [];
+  const allRows = candidateRows.filter(isUserFacingStreamStep);
   const latestStep = allRows[allRows.length - 1];
+  // Tool rows often carry timestamps/counts but no novice-facing sentence.
+  // Keep their freshness signal while showing the newest real progress text
+  // instead of incorrectly claiming that no update has arrived.
+  const latestTextStep = [...allRows].reverse().find((step) => (
+    Boolean(step.text.trim()) && !isInternalRuntimeStatus(step.text)
+  ));
   const latestStepAt = latestStep?.createdAt ?? (allRows.length > 0 ? startedAt : undefined);
   const quietFor = useElapsedSeconds(latestStepAt, !done);
   const liveState = buildLiveState({
     done,
     elapsed,
     quietFor,
-    latestText: latestStep?.text,
+    latestText: latestTextStep?.text,
     locale,
   });
   const toolSteps = allRows.filter((s) => s.tool);
@@ -1978,7 +2017,9 @@ function WorkingPanel({
   const summary = buildToolSummary(counts, locale);
 
   // 실행 중에는 실시간 로그를 바로 보여주고, 완료 뒤에는 요약만 남긴다.
-  const expanded = override ?? !done;
+  // Keep novice-facing Work concise. Detailed raw runtime payloads are
+  // diagnostics, while this surface should explain what the team is doing.
+  const expanded = override ?? false;
   const activitySummary =
     toolSteps.length > 0
       ? summary
@@ -2214,7 +2255,9 @@ function ToolActivityCard({
   const tone = toolTone(view.group, step.resultIsError === true);
   const hasArgs = !!(step.args && step.args !== "{}" && step.args !== "");
   const hasResult = !!(step.result && step.result.trim());
-  const hasDisclosure = hasArgs || hasResult;
+  // Do not surface raw JSON, shell commands, internal paths, or runtime
+  // payloads in the product conversation. The receipt keeps audit counts.
+  const hasDisclosure = false;
   const kind = step.activity ?? (view.verb === "위임" || view.verb === "delegated" ? "handoff" : "tool");
   const isRunning = current && !done && !hasResult;
   const title = toolActivityTitle(view, locale);
@@ -2242,6 +2285,7 @@ function ToolActivityCard({
     >
       <button
         onClick={() => {
+          if (!hasDisclosure) return;
           if (hasResult) setResultOpen((v) => !v);
           else if (hasArgs) setArgsOpen((v) => !v);
         }}
@@ -2333,7 +2377,7 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
   const tone = toolTone(view.group, step.resultIsError === true);
   const hasArgs = !!(step.args && step.args !== "{}" && step.args !== "");
   const hasResult = !!(step.result && step.result.trim());
-  const hasDisclosure = hasArgs || hasResult;
+  const hasDisclosure = false;
   return (
     <div
       style={{
@@ -2344,9 +2388,11 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
       <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
       <button
         onClick={() => {
+          if (!hasDisclosure) return;
           if (hasResult) setResultOpen((v) => !v);
           else if (hasArgs) setArgsOpen((v) => !v);
         }}
+        disabled={!hasDisclosure}
         style={{
           display: "flex",
           alignItems: "center",
@@ -2400,7 +2446,7 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
           </span>
         )}
       </button>
-        {hasArgs && (
+        {hasDisclosure && hasArgs && (
           <button
             onClick={() => setArgsOpen((v) => !v)}
             style={{
@@ -2412,7 +2458,7 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
             {t("chatstream.tool_args")}
           </button>
         )}
-        {hasResult && (
+        {hasDisclosure && hasResult && (
           <button
             onClick={() => setResultOpen((v) => !v)}
             style={{
@@ -2425,7 +2471,7 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
           </button>
         )}
       </div>
-      {argsOpen && hasArgs && (
+      {hasDisclosure && argsOpen && hasArgs && (
         <pre
           style={{
             ...toolPre,
@@ -2435,7 +2481,7 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
           {prettyJson(step.args!)}
         </pre>
       )}
-      {resultOpen && hasResult && (
+      {hasDisclosure && resultOpen && hasResult && (
         <pre
           style={{
             ...toolPre,
@@ -2485,7 +2531,8 @@ function buildLiveState({
       tone: "active",
     };
   }
-  const current = compactStatusText(latestText);
+  const compact = compactStatusText(latestText);
+  const current = compact && !isInternalRuntimeStatus(compact) ? compact : "";
   if (quietFor >= 180) {
     return {
       label: locale === "ko" ? "멈춤 가능성" : "Possibly stuck",
@@ -2798,7 +2845,7 @@ function toolView(tool: string, argsStr: string | undefined, locale: "ko" | "en"
     return { group: "other", verb: locale === "ko" ? "루프" : "loop", label: squish(label) };
   }
   if (name === "bash")
-    return { group: "command", verb: v("command"), label: squish(str(a.command).split("\n")[0]) };
+    return { group: "command", verb: v("command"), label: locale === "ko" ? "검증 단계" : "verification step" };
   if (name === "grep")
     return {
       group: "search",
@@ -2826,7 +2873,8 @@ function toolView(tool: string, argsStr: string | undefined, locale: "ko" | "en"
     };
   if (name.startsWith("mcp__")) {
     const parts = tool.split("__");
-    const pretty = parts.length >= 3 ? `${parts[1]}·${parts.slice(2).join("·")}` : tool;
+    const server = parts[1]?.replace(/^agentlas-/, "").replace(/[-_]+/g, " ") || "connected";
+    const pretty = locale === "ko" ? `${server} 연결 도구` : `${server} connector`;
     return { group: "command", verb: locale === "ko" ? "호출" : "called", label: pretty };
   }
   return { group: "other", verb: v("other"), label: tool };

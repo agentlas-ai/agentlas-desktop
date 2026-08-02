@@ -41,6 +41,33 @@ function legacyMarker(automationId: string, target: AutomationSessionTarget): st
   return `⟦automation⟧${automationId}::target:${target.kind}:${digest}`;
 }
 
+function legacyLedgerId(
+  automationId: string,
+  target: AutomationSessionTarget,
+  marker: string,
+): string | null {
+  const db = getDb();
+  const current = db.prepare(
+    "SELECT id FROM chats WHERE kind = 'division' AND title = ? LIMIT 1",
+  ).get(marker) as { id: string } | undefined;
+  if (current) return current.id;
+
+  // Before automation_sessions existed, agent/firm automation ledgers used an
+  // exact automation-only title. Reuse one only when its stored owner proves
+  // the same target; a host or Hub row has no equivalent legacy identity.
+  const legacyTitle = `⟦automation⟧${automationId}`;
+  const legacy = target.kind === "agent"
+    ? db.prepare(
+        "SELECT id FROM chats WHERE kind = 'division' AND title = ? AND agent_id = ? AND firm_id IS NULL LIMIT 1",
+      ).get(legacyTitle, target.id) as { id: string } | undefined
+    : target.kind === "firm"
+      ? db.prepare(
+          "SELECT id FROM chats WHERE kind = 'division' AND title = ? AND firm_id = ? LIMIT 1",
+        ).get(legacyTitle, target.id) as { id: string } | undefined
+      : undefined;
+  return legacy?.id ?? null;
+}
+
 function rowToSession(row: AutomationSessionRow): AutomationExecutionSession | null {
   const chat = getChat(row.ledger_chat_id);
   if (!chat) return null;
@@ -81,11 +108,13 @@ export function getOrCreateAutomationSession(input: {
   }
 
   const marker = legacyMarker(input.automationId, target);
-  const legacy = db.prepare(
-    "SELECT id FROM chats WHERE kind = 'division' AND title = ? LIMIT 1",
-  ).get(marker) as { id: string } | undefined;
-  const chat = legacy
-    ? getChat(legacy.id)
+  const legacyId = legacyLedgerId(input.automationId, target, marker);
+  if (legacyId) {
+    db.prepare("UPDATE chats SET title = ?, updated_at = ? WHERE id = ?")
+      .run(marker, new Date().toISOString(), legacyId);
+  }
+  const chat = legacyId
+    ? getChat(legacyId)
     : createChat({
         agentId: input.agentId,
         firmId: input.firmId ?? null,

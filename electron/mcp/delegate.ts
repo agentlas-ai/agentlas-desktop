@@ -43,6 +43,9 @@ export function buildDelegateProtocol(
     "You lead a team. For THIS task, engage ONLY the direct reports actually needed —",
     "never all of them. Give each a focused brief (goal + specifics). If none are needed,",
     "do the work yourself and emit no Delegate block.",
+    "This is the only delegation planning round. Include every role required to finish the request now,",
+    "including downstream independent QA or verification roles. State dependencies in their briefs;",
+    "the host will delay verification until production results exist. Never defer a needed role to synthesis.",
     "",
     "Your direct reports:",
     list,
@@ -57,7 +60,7 @@ export function buildDelegateProtocol(
     `{ "delegations": [ { "target": "<report role or name above>", "brief": "<what they should do>", "allocation": ${workloadAllocationPromptExample("delegate")} } ], "synthesis": ${workloadAllocationPromptExample("synthesize")} }`,
     "```",
     "",
-    "After delegating, STOP — their results come back to you to synthesize. Don't do their work yourself.",
+    "After delegating, STOP — their results come back to you to synthesize. Synthesis is final and cannot start new work.",
   ].join("\n");
 }
 

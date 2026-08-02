@@ -214,6 +214,63 @@ async function parallelCap<I, O>(
   return out;
 }
 
+function isVerificationNode(node: ResolvedNode): boolean {
+  const label = `${node.id} ${node.name} ${node.role}`
+    .toLowerCase()
+    .replace(/[_-]+/g, " ");
+  return /\b(?:eval|qa|quality|test|verification|verifier)\b|policy\s+gate/.test(label);
+}
+
+type MatchedWork = { node: ResolvedNode; brief: string; allocation: WorkloadAllocation };
+
+function isIntegrationWork(item: MatchedWork, siblingProductionCount: number): boolean {
+  if (siblingProductionCount < 2 || isVerificationNode(item.node)) return false;
+  const label = `${item.node.id} ${item.node.name} ${item.node.role}`
+    .toLowerCase()
+    .replace(/[_-]+/g, " ");
+  const brief = item.brief.toLowerCase();
+  if (/\bdesign\b/.test(label)) return false;
+  return /\b(?:web|frontend|integration|integrator|release)\b/.test(label)
+    || /\b(?:integrat(?:e|ion)|wire|combine|merge)\b/.test(brief)
+    || /\bafter\b[\s\S]{0,80}\b(?:game|design|production|upstream|implementation)\b/.test(brief)
+    || /\b(?:once|when)\b[\s\S]{0,80}\b(?:complete|ready|finish)/.test(brief);
+}
+
+function stageMatched(targets: MatchedWork[]) {
+  const nonVerification = targets.filter((item) => !isVerificationNode(item.node));
+  const integration = nonVerification.filter((item) => isIntegrationWork(item, nonVerification.length));
+  const integrationIds = new Set(integration.map((item) => item.node.id));
+  return {
+    production: nonVerification.filter((item) => !integrationIds.has(item.node.id)),
+    integration,
+    verification: targets.filter((item) => isVerificationNode(item.node)),
+  };
+}
+
+function resultStatusContext(results: Array<{ node: ResolvedNode; result: string; ok: boolean }>): string {
+  return results.length > 0
+    ? results.map((result) => `- ${result.node.name}: ${result.ok ? "completed" : "failed"}`).join("\n")
+    : "- No upstream production slot was selected; inspect the current folder honestly.";
+}
+
+function verificationResultOk(text: string, sessionOk: boolean): boolean {
+  if (!sessionOk) return false;
+  const explicit = text.match(/<verification_verdict>\s*(PASS|FAIL)\s*<\/verification_verdict>/i);
+  if (explicit) return explicit[1].toUpperCase() === "PASS";
+  const opening = text.trim().slice(0, 900);
+  return !/(?:\bverdict\s*:\s*fail\b|\brelease[- ]blocking\b|\bnot complete\b|\bcannot truthfully\b|\bno[- ]go\b|\bblocking defect\b)/i.test(opening);
+}
+
+function stripVerificationVerdict(text: string): string {
+  return text.replace(/<verification_verdict>\s*(?:PASS|FAIL)\s*<\/verification_verdict>/gi, "").trim();
+}
+
+function latestTeamResultsAllOk(results: Array<{ node: ResolvedNode; result: string; ok: boolean }>): boolean {
+  const latest = new Map<string, boolean>();
+  for (const result of results) latest.set(result.node.id, result.ok);
+  return [...latest.values()].every(Boolean);
+}
+
 /** 부모 signal에 연결된 자식 AbortController — 부모 취소 전파 + 자체 abort(타임아웃) 가능. */
 function linkAbort(parent?: AbortSignal) {
   const ctrl = new AbortController();
@@ -463,6 +520,15 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       turn.reports.map((r) => ({ role: r.role, name: r.name })),
       candidateRuntimes,
     )}`;
+    if (phase === "plan") {
+      systemPrompt += [
+        "",
+        "## Planning boundary",
+        "This turn only chooses and briefs direct reports for the host orchestrator.",
+        "Do not inspect files, call tools, spawn sub-agents, implement, edit, test, or solve the task yourself.",
+        "Return the Delegate block immediately, then stop. The host executes the chosen workers after parsing it.",
+      ].join("\n");
+    }
   }
   if (!p.req.agentAppMode && !firmProjectReadOnly(p)) {
     systemPrompt += `\n\n${memoryEmitterPromptFor(turn.userPrompt)}`;
@@ -537,15 +603,29 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       longContext: active.longContextEnabled ?? false,
       effort: active.effort ?? undefined,
       signal: turn.signal ?? p.signal,
-      permission: p.req.agentAppMode ? "read" : p.req.permissions,
+      permission: p.req.agentAppMode || (phase === "plan" && Boolean(turn.reports?.length))
+        ? "read"
+        : p.req.permissions,
       restrictedReadBoundary: p.restrictedReadBoundary,
       cwd: p.req.agentAppMode ? undefined : workingFolder ?? undefined,
       chatId: p.req.agentAppMode
         ? `site-agent-app:${p.req.runId ?? "run"}:${node.id}:${phase}:${randomUUID()}`
-        : turn.chatId ?? undefined,
-      mcpConfigPath: p.req.agentAppMode ? (agentAppAllowedTools ? p.mcpConfigPath : undefined) : p.mcpConfigPath,
-      mcpAllowedTools: p.req.agentAppMode ? agentAppAllowedTools : p.mcpAllowedTools,
-      mcpCodexConfigArgs: p.req.agentAppMode ? undefined : p.mcpCodexConfigArgs,
+        : phase === "plan" && Boolean(turn.reports?.length)
+          ? undefined
+          : turn.chatId ?? undefined,
+      mcpConfigPath: phase === "plan" && Boolean(turn.reports?.length)
+        ? undefined
+        : p.req.agentAppMode
+          ? (agentAppAllowedTools ? p.mcpConfigPath : undefined)
+          : p.mcpConfigPath,
+      mcpAllowedTools: phase === "plan" && Boolean(turn.reports?.length)
+        ? undefined
+        : p.req.agentAppMode
+          ? agentAppAllowedTools
+          : p.mcpAllowedTools,
+      mcpCodexConfigArgs: p.req.agentAppMode || (phase === "plan" && Boolean(turn.reports?.length))
+        ? undefined
+        : p.mcpCodexConfigArgs,
       env: p.req.agentAppMode
         ? buildAgentAppRunnerEnv(p.runnerEnv ?? process.env, p.agentAppMcpRuntimeEnv)
         : p.runnerEnv,
@@ -869,36 +949,80 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     phase: "delegate",
     delegateTo: matched.map((m) => m.node.id),
   });
+  const initialStages = stageMatched(matched);
   mainStatus(
-    ko
-      ? `${matched.length}개 팀에 위임 — 병렬 실행 중…`
-      : `Delegated to ${matched.length} — running in parallel…`,
+    initialStages.verification.length > 0
+      ? (ko
+          ? `${initialStages.production.length}개 제작 슬롯 병렬 실행 · 통합 ${initialStages.integration.length}개 · 독립 검증 ${initialStages.verification.length}개 대기…`
+          : `${initialStages.production.length} production slots running · ${initialStages.integration.length} integration · ${initialStages.verification.length} verification waiting…`)
+      : (ko
+          ? `${matched.length}개 팀에 위임 — 병렬 실행 중…`
+          : `Delegated to ${matched.length} — running in parallel…`),
   );
 
-  // 2) DELEGATE — 병렬 실행 (본부 2+: 지속 본부 세션 / 본부 1개: 전문가 ephemeral)
-  // runNodeTurnSafe가 노드별 타임아웃 + 실패 격리 → 하나 실패해도 나머지는 계속.
-  let teamResults: Array<{ node: ResolvedNode; result: string; ok: boolean }>;
-  if (singleDivision) {
-    // tier-2 skip: matched는 전문가 — ephemeral 병렬
-    teamResults = await parallelCap(matched, getAgentConcurrency(), async (m) => {
-      const r = await runNodeTurnSafe(p, {
-        node: m.node,
-        tier: 3,
-        phase: "delegate",
-        userPrompt: m.brief,
-        history: [],
-        chatId: null,
-        divisionId: divisions[0]?.id,
-        allocation: m.allocation,
+  // 2) DELEGATE — 구현/디자인은 병렬, 검증은 결과가 실제 폴더에 반영된 뒤 실행한다.
+  // QA를 구현과 동시에 시작하면 빈 폴더를 검사한 실패 영수증이 정상 구현 결과와 충돌한다.
+  const runMatched = async (
+    targets: typeof matched,
+    stageContext: string,
+    stageKind: "production" | "integration" | "verification",
+  ): Promise<Array<{ node: ResolvedNode; result: string; ok: boolean }>> => {
+    const stagedPrompt = (brief: string) => stageKind === "verification"
+      ? `${brief}\n\n[Independent verification stage]\nAll upstream production and integration WorkOrders have finished. Inspect and exercise the current project folder as it exists now. Do not rely on an earlier empty-workspace observation.\n${stageContext}\n\nEnd the response with exactly <verification_verdict>PASS</verification_verdict> only when every requested acceptance condition passes after fixes. Otherwise end with <verification_verdict>FAIL</verification_verdict> and identify the remaining blocker.`
+      : stageKind === "integration"
+        ? `${brief}\n\n[Integration stage]\nThe upstream production WorkOrders have finished. Inspect their actual files in the current project, integrate every relevant implementation and design deliverable into the runnable product, then verify the integrated launch surface before returning. Do not report a missing or late upstream package without re-reading the current folder.\n${stageContext}`
+        : brief;
+    if (singleDivision) {
+      // tier-2 skip: matched는 전문가 — ephemeral 병렬
+      return parallelCap(targets, getAgentConcurrency(), async (m) => {
+        const userPrompt = stagedPrompt(m.brief);
+        const r = await runNodeTurnSafe(p, {
+          node: m.node,
+          tier: 3,
+          phase: "delegate",
+          userPrompt,
+          history: [],
+          chatId: null,
+          divisionId: divisions[0]?.id,
+          allocation: m.allocation,
+        });
+        return {
+          node: m.node,
+          result: stripVerificationVerdict(r.text),
+          ok: stageKind === "verification" ? verificationResultOk(r.text, r.ok) : r.ok,
+        };
       });
-      return { node: m.node, result: r.text, ok: r.ok };
-    });
-  } else {
+    }
     // 본부들 — 지속 세션 병렬, 각자 전문가에게 재위임
-    teamResults = await parallelCap(matched, getAgentConcurrency(), async (m) =>
-      runDivision(p, m.node as ResolvedDivision, m.brief, m.allocation),
+    return parallelCap(targets, getAgentConcurrency(), async (m) => {
+      const brief = stagedPrompt(m.brief);
+      const result = await runDivision(p, m.node as ResolvedDivision, brief, m.allocation);
+      return {
+        ...result,
+        result: stripVerificationVerdict(result.result),
+        ok: stageKind === "verification" ? verificationResultOk(result.result, result.ok) : result.ok,
+      };
+    });
+  };
+  const productionResults = await runMatched(initialStages.production, "", "production");
+  let integrationResults: Array<{ node: ResolvedNode; result: string; ok: boolean }> = [];
+  if (initialStages.integration.length > 0) {
+    mainStatus(ko ? "제작 결과 준비 완료 — 통합 중…" : "Production ready — integration running…");
+    integrationResults = await runMatched(initialStages.integration, resultStatusContext(productionResults), "integration");
+  }
+  let verificationResults: Array<{ node: ResolvedNode; result: string; ok: boolean }> = [];
+  if (initialStages.verification.length > 0) {
+    const upstream = [...productionResults, ...integrationResults];
+    mainStatus(ko ? "제작 결과 준비 완료 — 독립 검증 중…" : "Production ready — independent verification running…");
+    verificationResults = await runMatched(
+      initialStages.verification,
+      resultStatusContext(upstream),
+      "verification",
     );
   }
+  const teamResults = [...productionResults, ...integrationResults, ...verificationResults];
+  const usedDivisionIds = new Set(matched.map((item) => item.node.id));
+  const divisionAttempts = new Map(matched.map((item) => [item.node.id, 1]));
 
   // 3) CEO SYNTHESIZE — 팀 결과 종합 → 최종 답 (메인 버블)
   mainStatus(ko ? "팀 결과를 종합하는 중…" : "Synthesizing team results…");
@@ -908,7 +1032,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     teamResults
       .map((r) => `## ${r.node.name} (${r.node.role})\nstatus: ${r.ok ? "ok" : "failed"}\n${r.result}`)
       .join("\n\n");
-  const finalTurn = await runNodeTurnSafe(p, {
+  let finalTurn = await runNodeTurnSafe(p, {
     node: org.ceo,
     tier: 1,
     phase: "synthesize",
@@ -923,10 +1047,63 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     return { ok: false, text: finalTurn.text };
   }
 
+  // The controller can discover a genuinely missing downstream role only
+  // after reading upstream results. Execute bounded, previously-unused
+  // follow-up delegations instead of rendering "starting QA" prose and ending
+  // the run without a corresponding WorkOrder or receipt.
+  for (let round = 0; round < divisions.length; round += 1) {
+    const hasFailedResult = !latestTeamResultsAllOk(teamResults);
+    const followupMatched = matchTargets(finalTurn.delegations, divisions)
+      .filter((item) => !usedDivisionIds.has(item.node.id) || (hasFailedResult && (divisionAttempts.get(item.node.id) ?? 0) < 2));
+    if (followupMatched.length === 0) break;
+    for (const item of followupMatched) {
+      usedDivisionIds.add(item.node.id);
+      divisionAttempts.set(item.node.id, (divisionAttempts.get(item.node.id) ?? 0) + 1);
+    }
+    mainStatus(ko
+      ? `추가로 필요한 ${followupMatched.length}개 작업 슬롯 실행 중…`
+      : `Running ${followupMatched.length} newly required work slot(s)…`);
+    const followupStages = stageMatched(followupMatched);
+    const followupProductionResults = await runMatched(followupStages.production, "", "production");
+    let followupIntegrationResults: Array<{ node: ResolvedNode; result: string; ok: boolean }> = [];
+    if (followupStages.integration.length > 0) {
+      const upstream = [...teamResults, ...followupProductionResults];
+      mainStatus(ko ? "제작 결과 준비 완료 — 통합 중…" : "Production ready — integration running…");
+      followupIntegrationResults = await runMatched(followupStages.integration, resultStatusContext(upstream), "integration");
+    }
+    let followupVerificationResults: Array<{ node: ResolvedNode; result: string; ok: boolean }> = [];
+    if (followupStages.verification.length > 0) {
+      const upstream = [...teamResults, ...followupProductionResults, ...followupIntegrationResults];
+      mainStatus(ko ? "제작 결과 준비 완료 — 독립 검증 중…" : "Production ready — independent verification running…");
+      followupVerificationResults = await runMatched(followupStages.verification, resultStatusContext(upstream), "verification");
+    }
+    teamResults.push(...followupProductionResults, ...followupIntegrationResults, ...followupVerificationResults);
+    mainStatus(ko ? "추가 작업 결과를 종합하는 중…" : "Synthesizing the additional results…");
+    finalTurn = await runNodeTurnSafe(p, {
+      node: org.ceo,
+      tier: 1,
+      phase: "synthesize",
+      userPrompt:
+        `${req.userPrompt}\n\n[Updated results from your team — continue orchestration only if a still-unused required role is missing; otherwise return the final user result.]\n` +
+        `${CONFLICT_SYNTHESIS_GUIDANCE}\n\n` +
+        teamResults
+          .map((result) => `## ${result.node.name} (${result.node.role})\nstatus: ${result.ok ? "ok" : "failed"}\n${result.result}`)
+          .join("\n\n"),
+      history,
+      chatId: chat.id,
+      toMainBubble: true,
+      allocation: finalTurn.synthesisAllocation ?? plan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
+    });
+    if (!finalTurn.ok) {
+      sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", finalTurn.text) });
+      return { ok: false, text: finalTurn.text };
+    }
+  }
+
   if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", finalTurn.text);
   if (p.emitFinal !== false) sink({ kind: "final", text: finalTurn.text });
   // CEO 종합 턴의 성공은 팀의 성공이 아니다. 본부/전문가가 전멸해도 CEO가 문장을 만들어내면
   // 예전엔 ok:true로 완전 성공 보고됐다(실패 텍스트를 산출물로 오해한 종합문 + 성공 표시).
   // 자식 결과를 집계해 부분 완료가 성공으로 둔갑하지 않게 한다.
-  return { ok: teamResults.every((r) => r.ok), text: finalTurn.text };
+  return { ok: latestTeamResultsAllOk(teamResults), text: finalTurn.text };
 }

@@ -180,7 +180,7 @@ export function ChatRightPanel({
         {activeTab === "agent" && (
           <div style={agentTabStyle}>
             {project ? <ProjectTeamCard project={project} agents={agents} ko={ko} /> : null}
-            {(busy || Object.keys(liveAgents).length > 0 || timeline.length > 0 || hasPipeline) ? <AgentNetworkPanel
+            {(Object.values(liveAgents).some((entry) => entry.active) || timeline.length > 0 || hasPipeline) ? <AgentNetworkPanel
               embedded
               firm={firm}
               org={org}
@@ -232,14 +232,13 @@ export function ChatRightPanel({
 function ProjectTeamCard({ project, agents, ko }: { project: Project; agents: InstalledAgent[]; ko: boolean }) {
   const nameById = new Map(agents.map((agent) => [agent.id, ko ? agent.name : agent.nameEn || agent.name]));
   return <section style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
-    <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".08em", color: "var(--muted-deep)", textTransform: "uppercase" }}>{ko ? "프로젝트 선호 팀" : "Project team priority"}</div>
+    <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".08em", color: "var(--muted-deep)", textTransform: "uppercase" }}>{ko ? "책임자와 선호 팀" : "Controller and preferences"}</div>
     <div style={{ display: "grid", gap: 6, marginTop: 9 }}>
       {project.agentPool.map((member, index) => <div key={`${member.source}:${member.agentId}`} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
         <span style={{ width: 20, height: 20, display: "grid", placeItems: "center", borderRadius: 6, background: "var(--fill-1)", color: "var(--accent)", fontWeight: 800 }}>{index + 1}</span>
         <strong>{nameById.get(member.agentId) || member.nameSnapshot}</strong>
       </div>)}
     </div>
-    <p style={{ margin: "10px 0 0", color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.45 }}>{ko ? "실행 중에는 실제 WorkOrder와 영수증이 생긴 에이전트만 아래에 표시됩니다." : "During a run, only agents backed by an actual WorkOrder and receipt appear below."}</p>
   </section>;
 }
 

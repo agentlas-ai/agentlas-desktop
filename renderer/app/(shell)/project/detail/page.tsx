@@ -14,12 +14,18 @@ import {
   IconTrash,
   IconUsers,
 } from "@/components/Icon";
-import { buildAgentRoster, visibleRosterAgents } from "@/lib/agent-roster";
-import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
-import { pickLocalized, useT, type Locale } from "@/lib/i18n";
+import { pickLocalized, useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
+import {
+  buildProjectRosterSections,
+  isUserFacingProjectPoolMember,
+  projectPoolMemberKey,
+  type ProjectRosterCandidate,
+  type ProjectRosterSection,
+  type ProjectRosterSource,
+} from "@/lib/project-agent-roster";
 import type {
   CanonicalTask,
   HubAgentBookmark,
@@ -114,16 +120,17 @@ function ProjectPage() {
         navigate("/dashboard", "replace");
         return;
       }
-      setProject(p);
+      const userFacingPool = (Array.isArray(p.agentPool) ? p.agentPool : [])
+        .filter((member) => isUserFacingProjectPoolMember(member, ag));
+      setProject({ ...p, agentPool: userFacingPool });
       setNoteDraft(p.systemPrompt ?? "");
       // Older projects and imported fixtures can predate the ordered pool.
       // Keep that state explicit and empty instead of inventing a controller.
-      setAgentPoolDraft(Array.isArray(p.agentPool) ? p.agentPool : []);
+      setAgentPoolDraft(userFacingPool);
       setTasks(taskRows.filter((task) => task.projectId === id));
-      // Keep the complete installed graph here. Team members are intentionally
-      // background in the global flat roster, but they must remain available
-      // inside their HQ/org tree on a project. Standalone rows are filtered
-      // separately below so internal workers never leak into the top level.
+      // Keep the complete installed graph for identity resolution. The roster
+      // builder exposes only executable user-facing teams and agents; internal
+      // HQ role cells remain private to their controller.
       setAgents(ag);
       setFirms(firmRows);
       setCloudListings(mine);
@@ -481,7 +488,7 @@ function ProjectPage() {
 
           <div style={{ ...cardStyle, marginBottom: 24 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-              <div style={{ ...eyebrowStyle, flex: 1 }}>{locale === "ko" ? "프로젝트 조직 · 책임자와 구성원" : "Project organization · controller and members"}</div>
+              <div style={{ ...eyebrowStyle, flex: 1 }}>{locale === "ko" ? "프로젝트 책임자와 선호 팀" : "Project controller and preferences"}</div>
               {!editingTeam ? (
                 <button type="button" onClick={() => { setEditingTeam(true); setInspectorCollapsed(true); }} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
                   {locale === "ko" ? "편집" : "Edit"}
@@ -1073,139 +1080,6 @@ function ProjectPage() {
   );
 }
 
-type ProjectRosterSource = "local" | "cloud" | "hub";
-
-interface ProjectRosterCandidate {
-  key: string;
-  member: ProjectAgentPoolMember;
-  name: string;
-  tagline: string;
-  source: ProjectRosterSource;
-  kind: "agent" | "team";
-  installed: boolean;
-}
-
-interface ProjectRosterFirm {
-  id: string;
-  name: string;
-  members: ProjectRosterCandidate[];
-}
-
-interface ProjectRosterSection {
-  source: ProjectRosterSource;
-  labelKo: string;
-  labelEn: string;
-  firms: ProjectRosterFirm[];
-  standalone: ProjectRosterCandidate[];
-}
-
-function projectPoolMemberKey(member: ProjectAgentPoolMember): string {
-  return `${member.source}:${member.agentId}:${member.releaseId ?? ""}`;
-}
-
-function installedRosterSource(agent: InstalledAgent): ProjectRosterSource {
-  if (agent.assetSource === "agent-cloud") return "cloud";
-  if (agent.assetSource === "hub") return "hub";
-  return "local";
-}
-
-function installedProjectCandidate(agent: InstalledAgent, locale: Locale): ProjectRosterCandidate {
-  const localized = pickLocalized(agent, locale);
-  const member: ProjectAgentPoolMember = {
-    agentId: agent.id,
-    source: "local",
-    releaseId: null,
-    nameSnapshot: localized.name,
-  };
-  return {
-    key: projectPoolMemberKey(member),
-    member,
-    name: localized.name,
-    tagline: localized.tagline,
-    source: installedRosterSource(agent),
-    kind: agent.kind === "team" ? "team" : "agent",
-    installed: true,
-  };
-}
-
-function remoteProjectCandidate(
-  listing: MarketplaceListing,
-  source: "cloud" | "hub",
-  locale: Locale,
-): ProjectRosterCandidate {
-  const localized = pickLocalized(listing, locale);
-  const member: ProjectAgentPoolMember = {
-    agentId: listing.slug,
-    source,
-    releaseId: listing.agentReleaseId ?? listing.cloudRegistration?.revision ?? listing.packageHash ?? null,
-    nameSnapshot: localized.name,
-  };
-  return {
-    key: projectPoolMemberKey(member),
-    member,
-    name: localized.name,
-    tagline: localized.tagline,
-    source,
-    kind: listing.entityKind === "team" ? "team" : "agent",
-    installed: false,
-  };
-}
-
-function buildProjectRosterSections(
-  agents: InstalledAgent[],
-  firms: InstalledFirm[],
-  cloudListings: MarketplaceListing[],
-  hubBookmarks: HubAgentBookmark[],
-  locale: Locale,
-): ProjectRosterSection[] {
-  const roster = buildAgentRoster(agents, firms);
-  const installedSlugs = new Set(agents.map((agent) => agent.slug));
-  const visibleRemoteListing = (listing: MarketplaceListing) => (
-    listing.visibility !== "background" && listing.visibility !== "private"
-  );
-  const sections: ProjectRosterSection[] = [
-    { source: "local", labelKo: "로컬", labelEn: "Local", firms: [], standalone: [] },
-    { source: "cloud", labelKo: "내 에이전트", labelEn: "My agents", firms: [], standalone: [] },
-    { source: "hub", labelKo: "Hub", labelEn: "Hub", firms: [], standalone: [] },
-  ];
-  const sectionBySource = new Map(sections.map((section) => [section.source, section]));
-
-  for (const firm of firms) {
-    const members = firm.orgChart.flatMap((node) => {
-      const agent = roster.agentById.get(node.agentId);
-      return agent ? [installedProjectCandidate(agent, locale)] : [];
-    });
-    if (members.length === 0) continue;
-    const ceo = roster.agentById.get(firm.ceoAgentId);
-    const source = ceo ? installedRosterSource(ceo) : members[0].source;
-    sectionBySource.get(source)?.firms.push({
-      id: firm.id,
-      name: pickLocalized(firm, locale).name,
-      members,
-    });
-  }
-
-  for (const agent of visibleRosterAgents(roster.standaloneAgents)) {
-    const candidate = installedProjectCandidate(agent, locale);
-    sectionBySource.get(candidate.source)?.standalone.push(candidate);
-  }
-
-  for (const listing of cloudListings) {
-    if (installedSlugs.has(listing.slug) || !visibleRemoteListing(listing)) continue;
-    sectionBySource.get("cloud")?.standalone.push(remoteProjectCandidate(listing, "cloud", locale));
-  }
-  for (const bookmark of hubBookmarksWithoutLocalDuplicates(hubBookmarks, agents)) {
-    if (!visibleRemoteListing(bookmark.listing)) continue;
-    sectionBySource.get("hub")?.standalone.push(remoteProjectCandidate(bookmark.listing, "hub", locale));
-  }
-
-  for (const section of sections) {
-    section.firms.sort((left, right) => left.name.localeCompare(right.name, locale));
-    section.standalone.sort((left, right) => left.name.localeCompare(right.name, locale));
-  }
-  return sections;
-}
-
 function ProjectTeamOrgChart({
   locale,
   members,
@@ -1244,8 +1118,8 @@ function ProjectTeamOrgChart({
       >
         <div className="project-team-empty">
           {locale === "ko"
-            ? "오른쪽 조직도에서 책임자를 먼저 추가한 뒤 구성원을 배치하세요."
-            : "Add a controller from the roster, then arrange the remaining members."}
+            ? "오른쪽에서 실행 가능한 책임자를 먼저 추가하세요. 추가 인력은 선택 사항입니다."
+            : "Add a callable controller from the right. Additional preferred agents are optional."}
         </div>
       </div>
     );
@@ -1284,7 +1158,7 @@ function ProjectTeamOrgChart({
         <strong>{member.nameSnapshot}</strong>
         <span>{index === 0
           ? (locale === "ko" ? "책임자 · 프로젝트 컨트롤러" : "Controller · project owner")
-          : (locale === "ko" ? `${index}순위 구성원` : `Member priority ${index}`)}</span>
+          : (locale === "ko" ? `${index}순위 선호 인력 · 자동 투입 아님` : `Preference ${index} · not forced into every run`)}</span>
       </span>
       {editing ? (
         <span className="project-team-actions" onPointerDown={(event) => event.stopPropagation()}>
@@ -1348,9 +1222,11 @@ function ProjectAgentRosterLibrary({
   const renderCandidate = (candidate: ProjectRosterCandidate) => {
     const selected = selectedMemberKeys.has(candidate.key);
     const requiresController = !candidate.installed && !hasController;
-    const disabled = selected || requiresController;
+    const disabled = selected || requiresController || !candidate.callable;
     const helper = selected
       ? (locale === "ko" ? "프로젝트에 추가됨" : "Added to project")
+      : !candidate.callable
+        ? (locale === "ko" ? "실행할 수 없는 항목" : "Not callable")
       : requiresController
         ? (locale === "ko" ? "설치된 책임자를 먼저 선택하세요" : "Choose an installed controller first")
         : candidate.tagline;
@@ -1382,9 +1258,9 @@ function ProjectAgentRosterLibrary({
   };
 
   return (
-    <aside className="project-agent-library-tree" aria-label={locale === "ko" ? "전체 에이전트 조직도" : "All agents organization tree"}>
+    <aside className="project-agent-library-tree" aria-label={locale === "ko" ? "실행 가능한 팀과 에이전트" : "Callable teams and agents"}>
       <div className="project-roster-head">
-        <span>{locale === "ko" ? "전체 에이전트" : "All agents"}</span>
+        <span>{locale === "ko" ? "팀과 에이전트" : "Teams and agents"}</span>
         <span>{sections.reduce((sum, section) => sum + section.standalone.length + section.firms.reduce((firmSum, firm) => firmSum + firm.members.length, 0), 0)}</span>
       </div>
       {sections.map((section) => {
@@ -1401,7 +1277,7 @@ function ProjectAgentRosterLibrary({
               <>
                 {section.firms.map((firm) => {
                   const firmOpen = openFirms[firm.id] ?? false;
-                  const addable = firm.members.filter((member) => !selectedMemberKeys.has(member.key));
+                  const addable = firm.members.filter((member) => member.callable && !selectedMemberKeys.has(member.key));
                   return (
                     <div key={firm.id}>
                       <div className="project-roster-firm-row">

@@ -253,6 +253,10 @@ credentials/
 
 # Local visual QA evidence is never source or release material.
 /.artifacts/
+/.sei/
+/scripts/validate-automation-session-clone.cjs
+/scripts/validate-task-participant-repair-clone.cjs
+/scripts/test-run-event-task-participants.cjs
 
 # Tests are local-only (owner decision, 2026-07-26). CI builds, signs, and
 # publishes; it never runs a suite. Run them here before pushing:

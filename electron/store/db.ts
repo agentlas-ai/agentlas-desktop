@@ -11,6 +11,7 @@ import { app } from "electron";
 import { publicAgentVisibility } from "../agents/policy";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-member-cells";
+import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-projection";
 
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
@@ -854,6 +855,21 @@ function runStoreRepairProjections(db: Database.Database): void {
   } catch (error) {
     console.warn(
       `[migration] v77 member-cell reconciliation deferred: ${error instanceof Error ? error.message : "unknown"}`,
+    );
+  }
+
+  try {
+    const repairedTaskParticipants = db.transaction(() =>
+      reconcileTaskParticipantsFromRunEventsInDb(db),
+    )();
+    if (repairedTaskParticipants > 0) {
+      console.warn(
+        `[task] repaired ${repairedTaskParticipants} runtime participant projection(s)`,
+      );
+    }
+  } catch (error) {
+    console.warn(
+      `[task] runtime participant repair deferred: ${error instanceof Error ? error.message : "unknown"}`,
     );
   }
 

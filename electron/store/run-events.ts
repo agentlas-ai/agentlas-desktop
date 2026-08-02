@@ -11,6 +11,8 @@ import type {
 import { parseDurableOneSurfaceJson } from "../../shared/one-surface-durable";
 import { parseOneDomainEventJson } from "../../shared/one-domain-events";
 import { isOneRecurrenceSelectionV1 } from "../../shared/one-recurrence";
+import { emitDesktopStoreChange } from "./change-bus";
+import { projectObservedTaskParticipantInDb } from "./task-participant-projection";
 
 interface RunEventRow {
   id: string;
@@ -222,7 +224,19 @@ export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
       row.agent_id,
       row.payload_json,
     );
-  if (row.agent_id) bumpAgentUsage(row.agent_id, row.run_id, row.ts);
+  if (row.agent_id) {
+    bumpAgentUsage(row.agent_id, row.run_id, row.ts);
+    if (row.chat_id) {
+      const projected = projectObservedTaskParticipantInDb(getDb(), {
+        chatId: row.chat_id,
+        observedAgentIdentity: row.agent_id,
+        seenAt: row.ts,
+      });
+      if (projected.changed && projected.taskId) {
+        emitDesktopStoreChange({ entity: "task", id: projected.taskId });
+      }
+    }
+  }
   return runRowToUi(row);
 }
 

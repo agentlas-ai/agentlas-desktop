@@ -21,7 +21,7 @@ import type {
   ToolFactoryScaffoldResult,
   ToolFactoryToolRecord,
 } from "@/lib/types";
-import type { InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage, RunEventUi, RuntimeSelection } from "@shared/types";
+import type { CanonicalTask, InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage, RunEventUi, RuntimeSelection } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
@@ -44,6 +44,7 @@ import type { WorkspaceFilePreview } from "@/components/WorkspacePanel";
 import { IconArrowLeft, IconBuilding, IconClose, IconFolder, IconNetwork, IconPanelRight, IconSparkles, IconTrash } from "@/components/Icon";
 import { INSTALLED_APPS } from "@/lib/apps";
 import { visibleAgents } from "@/lib/agent-visibility";
+import { isUserFacingProjectPoolMember } from "@/lib/project-agent-roster";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { surfaceApprovalRequirement, type SurfaceApprovalRequirement } from "@/lib/surface-approval";
 import { KeyStatusBanner } from "@/components/KeyStatusBanner";
@@ -55,8 +56,17 @@ function uid(): string {
   return Math.random().toString(36).slice(2);
 }
 
+function isPlaceholderTaskTitle(value: string): boolean {
+  return ["", "새 채팅", "New chat", "새 작업", "New task"].includes(value.trim());
+}
+
+function taskTitleFromFirstPrompt(value: string): string {
+  const condensed = value.replace(/\s+/g, " ").trim();
+  return condensed.length > 36 ? `${condensed.slice(0, 34)}…` : condensed;
+}
+
 function isInternalLoopStatus(value: string): boolean {
-  return /stormbreaker\s+loop|루프\s*stormbreaker|scope-lock|verifier-first|agentlas\s*오케스트레이터/i.test(value);
+  return /stormbreaker\s+loop|루프\s*stormbreaker|scope-lock|verifier-first|agentlas\s*오케스트레이터|(?:^|\s)codex:\s|skill descriptions were shortened|sessionend hook|agentlas plugins|career graph (?:색인 갱신|refreshed):?\s*nodes=|\b(?:bash|collab_tool_call|mcp_tool_call|write|read|edit|glob|grep|websearch|webfetch)\b|\b(?:codex|claude code|gemini|kimi|grok)\s+cli\b/i.test(value);
 }
 
 function receiptRecoveryMessage(
@@ -651,6 +661,12 @@ function ChatPage() {
   const [resolvedOrg, setResolvedOrg] = useState<ResolvedOrg | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [messages, setMessages] = useState<StreamMessage[]>([]);
+  const [canonicalTask, setCanonicalTask] = useState<CanonicalTask | null>(null);
+  const [latestReceipt, setLatestReceipt] = useState<InvocationRunReceipt | null>(null);
+  const [acceptingResult, setAcceptingResult] = useState(false);
+  const [resultAcceptanceError, setResultAcceptanceError] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [cancelPending, setCancelPending] = useState(false);
 
   // A Task deep link is authoritative. Resolve it through Main before loading
   // Work so a stale or mismatched chat query can never open another Task.
@@ -682,14 +698,43 @@ function ChatPage() {
     };
   }, [queryChatId, requestedTaskId, router]);
 
+  // Work owns explicit Task result acceptance too. Without this state, a
+  // completed Work run remains `partial` forever and Dashboard reports it as
+  // still in progress even though no acceptance action exists outside One.
+  useEffect(() => {
+    const api = ipc();
+    if (!api || !chatId) {
+      setCanonicalTask(null);
+      setLatestReceipt(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void Promise.all([
+        api.tasks.findForChat(chatId),
+        api.invoke.latestReceipt(chatId),
+      ]).then(([task, receipt]) => {
+        if (cancelled) return;
+        setCanonicalTask(task);
+        setLatestReceipt(receipt);
+        setResultAcceptanceError(false);
+      }).catch(() => {
+        // Transcript and artifacts remain available. The action simply stays
+        // hidden until Main can prove both the Task and matching receipt.
+      });
+    }, busy ? 0 : 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [busy, chatId, messages.length]);
+
   // 화면에 복원된 대화 기록의 논리적 분량만 표시한다. 실제 모델 물리창 점유율은
   // CLI/BYOK별 시스템 프롬프트·툴·출력 예약과 compaction 뒤에야 정해지므로 가짜
   // 100k 분모나 퍼센트를 만들지 않는다.
   const currentTokens = useMemo(() => {
     return messages.reduce((acc, msg) => acc + (msg.tokens ?? Math.floor((msg.text?.length || 0) / 4)), 0);
   }, [messages]);
-  const [busy, setBusy] = useState(false);
-  const [cancelPending, setCancelPending] = useState(false);
   // 멀티 에이전트 실시간 텔레메트리 — 속성(agentId) 이벤트로 채워지는 네트워크 패널 상태.
   const [liveAgents, setLiveAgents] = useState<Record<string, LiveAgent>>({});
   const [netTimeline, setNetTimeline] = useState<NetTimelineItem[]>([]);
@@ -1950,6 +1995,20 @@ function ChatPage() {
       const routeInput = userPrompt;
       const invocationPrompt = routeInput;
       const visiblePrompt = userPrompt;
+      if (!opts?.internalRecoveryPrompt && isPlaceholderTaskTitle(chat.title)) {
+        const nextTitle = taskTitleFromFirstPrompt(visiblePrompt);
+        if (nextTitle) {
+          try {
+            const renamed = await api.chats.rename(chat.id, nextTitle);
+            setChat(renamed);
+            setTitleDraft(renamed.title);
+            window.dispatchEvent(new Event("agentlas:tasks-changed"));
+          } catch {
+            // Work can still start; main retries the same deterministic title
+            // from the durable first user message.
+          }
+        }
+      }
       const images = opts?.images;
       const placeholderId = uid();
       const imageDataUrls = images?.map(
@@ -1959,12 +2018,10 @@ function ChatPage() {
       const initialStatus = t("chat.status.sending");
       const activeAgentId = agent?.id ?? chat.agentId ?? "active-agent";
       const activeAgentName = agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback");
-      const projectTargets: OrchestrationTarget[] = (project?.agentPool ?? []).slice(1).map<OrchestrationTarget>((member) => (
-        member.source === "local"
-          ? { source: "local" as const, entityKind: "agent" as const, agentId: member.agentId }
-          : { source: member.source, entityKind: "agent" as const, slug: member.agentId }
-      ));
-      const effectiveTaskForceTargets = [...projectTargets];
+      // Saved project members are preferences for the controller, not a forced
+      // task force on every turn. Only an explicit one-turn @ override enters
+      // taskForceTargets; the controller chooses actual WorkOrder slots.
+      const effectiveTaskForceTargets: OrchestrationTarget[] = [];
       for (const target of opts?.taskForceTargets ?? []) {
         const duplicate = effectiveTaskForceTargets.some((candidate) => (
           candidate.source === target.source
@@ -2069,7 +2126,9 @@ function ChatPage() {
           taskForceTargets: effectiveTaskForceTargets.length > 0 ? effectiveTaskForceTargets : undefined,
           pipelineStages: opts?.pipelineStages,
           routerAgent: opts?.routerAgent,
-          sessionRouting: opts?.sessionRouting,
+          // Project Work is orchestrated by default: current controller/team
+          // first, Network recruitment only for a real capability/tool gap.
+          sessionRouting: project ? true : opts?.sessionRouting,
           stormbreakerMode: opts?.stormbreakerMode,
           runtimeSelection: chat.runtimeSelection ?? undefined,
         });
@@ -2107,6 +2166,7 @@ function ChatPage() {
     },
     [
       agent,
+      allAgents,
       allGeneratedApps,
       chat,
       busy,
@@ -2811,6 +2871,35 @@ function ChatPage() {
     router.replace("/");
   }
 
+  async function acceptWorkResult() {
+    const api = ipc();
+    if (
+      !api ||
+      !canonicalTask ||
+      canonicalTask.status !== "partial" ||
+      !latestReceipt ||
+      latestReceipt.status !== "completed" ||
+      latestReceipt.chatId !== chatId
+    ) return;
+    setAcceptingResult(true);
+    setResultAcceptanceError(false);
+    try {
+      const accepted = await api.tasks.acceptResult({
+        taskId: canonicalTask.id,
+        expectedRunId: latestReceipt.runId,
+        expectedVersion: canonicalTask.version,
+      });
+      setCanonicalTask(accepted);
+      window.dispatchEvent(new CustomEvent("agentlas:tasks-changed"));
+    } catch {
+      setResultAcceptanceError(true);
+      const refreshed = await api.tasks.findForChat(chatId).catch(() => null);
+      if (refreshed) setCanonicalTask(refreshed);
+    } finally {
+      setAcceptingResult(false);
+    }
+  }
+
   if (
     requestedTaskId &&
     (validatedTaskChatId === null || !validatedTaskChatId || chat?.id !== validatedTaskChatId)
@@ -2837,6 +2926,14 @@ function ChatPage() {
   const displayAgents = boundTeamMember
     ? [boundTeamMember, ...pickerAgents.filter((row) => row.id !== boundTeamMember.id)]
     : pickerAgents;
+  // @ is an optional one-turn override. It uses the same user-facing roster as
+  // every other picker and never exposes a team's private system-role cells.
+  const mentionAgents = displayAgents;
+  const userFacingProjectPool = (project?.agentPool ?? [])
+    .filter((member) => isUserFacingProjectPoolMember(member, allAgents));
+  const projectForDisplay = project
+    ? { ...project, agentPool: userFacingProjectPool }
+    : null;
   const displayAgent =
     agent?.visibility === "background" && !boundTeamMember ? null : agent;
   const latestUserPrompt = [...messages].reverse().find((message) => message.role === "user")?.text ?? "";
@@ -3003,6 +3100,52 @@ function ChatPage() {
         </button>
       </header>
 
+      {canonicalTask?.status === "partial" && latestReceipt?.status === "completed" && latestReceipt.chatId === chatId && (
+        <div
+          role="status"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            margin: "8px 16px 0",
+            padding: "9px 12px",
+            border: "1px solid var(--paper-edge)",
+            borderRadius: 10,
+            background: "var(--paper-2)",
+            color: "var(--ink-soft)",
+            fontSize: 12,
+          }}
+        >
+          <span style={{ flex: 1, minWidth: 0 }}>
+            {resultAcceptanceError
+              ? (locale === "ko" ? "완료 상태가 바뀌었습니다. 다시 확인해 주세요." : "The result state changed. Review it and try again.")
+              : (locale === "ko" ? "결과가 준비되었습니다. 확인했다면 프로젝트 작업을 완료로 표시하세요." : "The result is ready. After reviewing it, mark the project task complete.")}
+          </span>
+          <button
+            type="button"
+            className="titlebar-nodrag"
+            disabled={acceptingResult}
+            onClick={() => void acceptWorkResult()}
+            style={{
+              flexShrink: 0,
+              padding: "7px 11px",
+              borderRadius: 8,
+              border: "1px solid var(--accent)",
+              background: "var(--accent)",
+              color: "white",
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: acceptingResult ? "wait" : "pointer",
+              opacity: acceptingResult ? 0.65 : 1,
+            }}
+          >
+            {acceptingResult
+              ? (locale === "ko" ? "완료 처리 중…" : "Completing…")
+              : (locale === "ko" ? "완료로 표시" : "Mark complete")}
+          </button>
+        </div>
+      )}
+
       <div style={{ margin: "0 16px" }}>
         <OneSuggestionReviewHandoffBanner surface="work" locale={locale} />
       </div>
@@ -3133,7 +3276,7 @@ function ChatPage() {
             projects: allProjects,
             envKeys: allEnvKeys,
             plugins: installedPlugins,
-            projectTeam: project?.agentPool.map((member, index) => {
+            projectTeam: projectForDisplay?.agentPool.map((member, index) => {
               const installed = allAgents.find((candidate) => candidate.id === member.agentId);
               const bookmark = hubBookmarks.find((candidate) => candidate.slug === member.agentId);
               const name = installed
@@ -3143,10 +3286,10 @@ function ChatPage() {
                   : member.nameSnapshot || (locale === "ko" ? "에이전트" : "Agent");
               return {
                 id: `${member.source}:${member.agentId}`,
-                token: `@${name}`,
+                token: name,
                 label: index === 0
                   ? (locale === "ko" ? "컨트롤러" : "Controller")
-                  : (locale === "ko" ? "턴 서브 에이전트" : "Turn sub-agent"),
+                  : (locale === "ko" ? "선호 인력 · 필요할 때 선택" : "Preferred · selected when useful"),
               };
             }),
           }}
@@ -3241,7 +3384,7 @@ function ChatPage() {
           busy={busy}
           disabled={!agent}
           context={{
-            agents: displayAgents,
+            agents: mentionAgents,
             hubBookmarks,
             projects: allProjects,
             firms: allFirms,
@@ -3250,6 +3393,7 @@ function ChatPage() {
             envKeys: allEnvKeys,
           }}
           placeholder={locale === "ko" ? "원하는 결과를 설명하세요" : "Describe the result you want"}
+          projectOrchestration={Boolean(project)}
           tokensUsage={{ current: currentTokens }}
           showModeToggles={chat.kind !== "division"}
           continuousMode={chat.continuousMode === true}
@@ -3302,7 +3446,7 @@ function ChatPage() {
           org={resolvedOrg}
           agent={displayAgent}
           agents={displayAgents}
-          project={project}
+          project={projectForDisplay}
           busy={busy}
           liveAgents={liveAgents}
           timeline={netTimeline}

@@ -2695,14 +2695,31 @@ export async function runMcpInvocation(
       })}\n${project.systemPrompt}`;
     }
     if (project?.agentPool.length) {
-      const pool = project.agentPool.map((member, index) => {
+      const userFacingPool = project.agentPool.filter((member) => {
+        if (member.source !== "local") return true;
+        const installed = getAgentById(member.agentId);
+        // Background HQ cells are implementation details of their controller,
+        // not independently callable project members.
+        return !installed || (
+          installed.visibility !== "background"
+          && installed.visibility !== "private"
+          && installed.systemPrompt.trim().length > 0
+        );
+      });
+      const pool = userFacingPool.map((member, index) => {
         const installed = member.source === "local" ? getAgentById(member.agentId) : null;
         const label = installed?.name || member.nameSnapshot;
-        return `${index + 1}. ${label} [${member.source}:${member.releaseId ?? member.agentId}]`;
+        return `${index + 1}. ${label} (${index === 0 ? "controller" : "preferred"})`;
       }).join("\n");
-      systemPrompt = `${systemPrompt}\n\n## Project agent pool\n${pool}\n` +
-        `Use only this project pool when staffing sub-agents. Select the smallest useful roster for each WorkOrder, ` +
-        `preserve the user's order as preference, and never silently attach a different agent to the project.`;
+      if (pool) {
+        systemPrompt = `${systemPrompt}\n\n## Project controller and preferred team\n${pool}\n` +
+          `You are the project controller and own decomposition, staffing, execution, and verification. ` +
+          `Treat the saved order as a preference, not a requirement to run every member. Use the project team first. ` +
+          `When a WorkOrder has a genuine capability or tool gap, use the available Agentlas Workforce/Hephaestus tools ` +
+          `to recruit the minimum suitable role from Network (Local + owner Cloud + public Hub). ` +
+          `Any recruited worker is scoped to that WorkOrder and must not mutate the saved project team. ` +
+          `Do not ask the user to type @ or choose internal roles; @ is only an optional one-turn manual override.`;
+      }
     }
   }
   // 회사 채팅이면 firm 정보를 system prompt에 주입 — CEO가 자기 회사를 알 수 있게

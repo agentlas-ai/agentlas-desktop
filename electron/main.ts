@@ -32,6 +32,7 @@ import {
 import { registerIpcHandlers } from "./ipc";
 import { buildAppMenu } from "./menu";
 import { initStore, runPostContinuityStoreRepairs } from "./store/db";
+import { repairPlaceholderTaskTitles } from "./store/chats";
 import { startAutomationScheduler, stopAutomationScheduler } from "./automation-scheduler";
 import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime } from "./one/briefing";
 import { invocationService } from "./invocation/service";
@@ -755,6 +756,7 @@ app.whenReady().then(async () => {
   traceStartup("startup-window-visible");
   startupStage = "store-opening";
   initStore({ deferPostContinuityRepairs: updatePreflight.pendingInstall });
+  repairPlaceholderTaskTitles();
   startupStage = "store-ready";
   traceStartup("store-ready");
   try {

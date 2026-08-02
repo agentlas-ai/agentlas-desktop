@@ -231,6 +231,7 @@ export function ChatInput({
   prefillText = null,
   activeChatId = null,
   placeholder,
+  projectOrchestration = false,
 }: {
   onSend: (text: string, opts?: SendOptions) => void;
   /** Button-only session actions. They are never represented as chat commands. */
@@ -274,6 +275,8 @@ export function ChatInput({
   activeChatId?: string | null;
   /** Product-surface specific result prompt. */
   placeholder?: string;
+  /** Project Work owns staffing automatically; legacy execution modes are not composer choices here. */
+  projectOrchestration?: boolean;
 }) {
   const { t, locale } = useT();
   const router = useRouter();
@@ -585,6 +588,7 @@ export function ChatInput({
       permissions,
       appsGenerateMode: appsGenerateMode || undefined,
       taskForceTargets: turnCalls.length ? turnCalls.map((call) => call.target) : undefined,
+      sessionRouting: projectOrchestration || undefined,
       stormbreakerMode: hepToggles.has("stormbreaker") || undefined,
     };
   }
@@ -595,7 +599,7 @@ export function ChatInput({
     // 세션 팀 자동 보강은 매 턴 전역 검색을 하지 않는다. 현재 채팅에 붙은
     // 에이전트/팀을 먼저 실행하고, 런타임 LLM이 실제 역량 공백을 판단한 경우에만
     // Agent Hub·Cloud 보강 도구를 사용한다.
-    if (hepToggles.has("recommend") && text) {
+    if (!projectOrchestration && hepToggles.has("recommend") && text) {
       void autoRouteAndSend(text);
       return;
     }
@@ -921,6 +925,7 @@ export function ChatInput({
             setTimeout(() => textareaRef.current?.focus(), 0);
           }}
           locale={locale}
+          projectOrchestration={projectOrchestration}
           showModeToggles={showModeToggles}
           continuousMode={continuousMode}
           swarmMode={swarmMode}
@@ -1417,9 +1422,9 @@ export function ChatInput({
             </button>
 
             {/* 켜진 모드 칩 — 평소엔 + 메뉴에 있고, 활성일 때만 바에 표시(가시성 + 눌러서 끄기). */}
-            {HEP_TOGGLES.some((tg) => hepToggles.has(tg.id)) && (
+            {HEP_TOGGLES.some((tg) => hepToggles.has(tg.id) && (!projectOrchestration || tg.id !== "recommend")) && (
               <div className="chat-input-hep-toggle-group" role="group" aria-label="Active modes">
-                {HEP_TOGGLES.filter((tg) => hepToggles.has(tg.id)).map((tg) => (
+                {HEP_TOGGLES.filter((tg) => hepToggles.has(tg.id) && (!projectOrchestration || tg.id !== "recommend")).map((tg) => (
                   <button
                     key={tg.id}
                     type="button"
@@ -1445,7 +1450,7 @@ export function ChatInput({
             )}
 
             {/* 계속 라이브로 / 스웜 활성 칩 — 켜졌을 때만 바에 표시, 눌러서 끄기(평소엔 + 메뉴). */}
-            {showModeToggles && continuousMode && (
+            {showModeToggles && !projectOrchestration && continuousMode && (
               <div className="chat-input-hep-toggle-group" role="group" aria-label="Active modes">
                 <button
                   type="button"
@@ -1460,7 +1465,7 @@ export function ChatInput({
                 </button>
               </div>
             )}
-            {showModeToggles && swarmMode && (
+            {showModeToggles && !projectOrchestration && swarmMode && (
               <div className="chat-input-hep-toggle-group" role="group" aria-label="Active modes">
                 <button
                   type="button"
@@ -2270,6 +2275,7 @@ function PlusMenu({
   hepToggles,
   onToggleHep,
   locale,
+  projectOrchestration,
   showModeToggles,
   continuousMode,
   swarmMode,
@@ -2294,6 +2300,7 @@ function PlusMenu({
   /** Hephaestus 모드 토글(스톰브레이커 경고·포커스 등은 부모가 처리). */
   onToggleHep: (id: HepToggleId) => void;
   locale: string;
+  projectOrchestration: boolean;
   /** 실행 모드 토글(계속 라이브로·스웜) 노출 여부. */
   showModeToggles: boolean;
   continuousMode: boolean;
@@ -2344,11 +2351,6 @@ function PlusMenu({
         title={t("chatinput.plus.attach")}
       />
       <Row
-        onClick={onInsertMention}
-        icon={<IconAtSign size={14} />}
-        title={t("chatinput.mention")}
-      />
-      <Row
         onClick={() => setSubmenu("plugins")}
         icon={<IconLayers size={14} style={{ color: "var(--accent)" }} />}
         title={t("chatinput.plus.plugins")}
@@ -2367,13 +2369,13 @@ function PlusMenu({
         on={goalMode}
         onChange={setGoalMode}
       />
-      <ToggleRow
-        icon={<IconApps size={14} />}
-        title={t("chatinput.apps_generate_mode")}
-        on={appsGenerateMode}
-        onChange={onToggleAppsGenerate}
-      />
-      {showModeToggles && (
+      {!projectOrchestration && <ToggleRow
+          icon={<IconApps size={14} />}
+          title={t("chatinput.apps_generate_mode")}
+          on={appsGenerateMode}
+          onChange={onToggleAppsGenerate}
+        />}
+      {!projectOrchestration && showModeToggles && (
         <>
           <Divider />
           <ToggleRow
@@ -2411,8 +2413,8 @@ function PlusMenu({
           />
         </>
       )}
-      <Divider />
-      {HEP_TOGGLES.map((tg) => (
+      {!projectOrchestration && <Divider />}
+      {!projectOrchestration && HEP_TOGGLES.map((tg) => (
         <ToggleRow
           key={tg.id}
           hepToggleId={tg.id}
@@ -2434,7 +2436,13 @@ function PlusMenu({
           onChange={() => onToggleHep(tg.id)}
         />
       ))}
-      {/* "에이전트" 행은 전역대화 옆 "에이전트 부르기" 필 토글로 이동했다(chat/page.tsx). */}
+      <Divider />
+      <Row
+        onClick={onInsertMention}
+        icon={<IconAtSign size={14} />}
+        title={locale === "ko" ? "특정 에이전트 지정 (선택)" : "Specify an agent (optional)"}
+        subtitle={locale === "ko" ? "이 턴에만 수동으로 추가" : "One-turn manual override"}
+      />
     </Popover>
   );
 }
