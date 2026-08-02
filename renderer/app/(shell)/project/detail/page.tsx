@@ -4,15 +4,28 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { IconArrowLeft, IconPlus, IconTrash } from "@/components/Icon";
-import { visibleAgents } from "@/lib/agent-visibility";
-import { pickLocalized, useT } from "@/lib/i18n";
+import {
+  IconArrowLeft,
+  IconBuilding,
+  IconChevronDown,
+  IconChevronRight,
+  IconPanelRight,
+  IconPlus,
+  IconTrash,
+  IconUsers,
+} from "@/components/Icon";
+import { buildAgentRoster, visibleRosterAgents } from "@/lib/agent-roster";
+import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
+import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import type {
   CanonicalTask,
+  HubAgentBookmark,
   InstalledAgent,
+  InstalledFirm,
+  MarketplaceListing,
   Project,
   ProjectAgentPoolMember,
   ProjectTimelineEntry,
@@ -34,16 +47,39 @@ function ProjectPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<CanonicalTask[]>([]);
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
+  const [firms, setFirms] = useState<InstalledFirm[]>([]);
+  const [cloudListings, setCloudListings] = useState<MarketplaceListing[]>([]);
+  const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
   const [timeline, setTimeline] = useState<ProjectTimelineSnapshot | null>(null);
   const [editingNote, setEditingNote] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
   const [agentPoolDraft, setAgentPoolDraft] = useState<ProjectAgentPoolMember[]>([]);
   const [editingTeam, setEditingTeam] = useState(false);
-  const [draggedAgentId, setDraggedAgentId] = useState<string | null>(null);
+  const [draggedCandidateKey, setDraggedCandidateKey] = useState<string | null>(null);
   const [draggedMemberId, setDraggedMemberId] = useState<string | null>(null);
-  const pointerDragRef = useRef<{ kind: "agent" | "member"; id: string; startX: number; startY: number } | null>(null);
+  const pointerDragRef = useRef<{ kind: "candidate" | "member"; id: string; startX: number; startY: number } | null>(null);
+  const [openRosterSources, setOpenRosterSources] = useState<Record<ProjectRosterSource, boolean>>({
+    local: true,
+    cloud: true,
+    hub: false,
+  });
+  const [openRosterFirms, setOpenRosterFirms] = useState<Record<string, boolean>>({});
+  const [teamTreeOpen, setTeamTreeOpen] = useState(true);
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [recoveryPending, setRecoveryPending] = useState(false);
+
+  const rosterSections = useMemo(
+    () => buildProjectRosterSections(agents, firms, cloudListings, hubBookmarks, locale),
+    [agents, cloudListings, firms, hubBookmarks, locale],
+  );
+  const candidateByKey = useMemo(() => {
+    const rows = rosterSections.flatMap((section) => [
+      ...section.standalone,
+      ...section.firms.flatMap((firm) => firm.members),
+    ]);
+    return new Map(rows.map((candidate) => [candidate.key, candidate]));
+  }, [rosterSections]);
 
   const recoverMissingBridge = useCallback((scope: string) => {
     setRecoveryPending(true);
@@ -65,10 +101,13 @@ function ProjectPage() {
       return;
     }
     try {
-      const [p, taskRows, ag, timelineResult] = await Promise.all([
+      const [p, taskRows, ag, firmRows, mine, bookmarks, timelineResult] = await Promise.all([
         api.projects.get(id),
         api.tasks.list({ limit: 200 }),
         api.team.list(),
+        api.firms.list().catch(() => [] as InstalledFirm[]),
+        api.marketplace.listMine().catch(() => [] as MarketplaceListing[]),
+        api.marketplace.bookmarks().catch(() => [] as HubAgentBookmark[]),
         api.projects.timeline(id).catch(() => null),
       ]);
       if (!p) {
@@ -81,7 +120,14 @@ function ProjectPage() {
       // Keep that state explicit and empty instead of inventing a controller.
       setAgentPoolDraft(Array.isArray(p.agentPool) ? p.agentPool : []);
       setTasks(taskRows.filter((task) => task.projectId === id));
-      setAgents(visibleAgents(ag));
+      // Keep the complete installed graph here. Team members are intentionally
+      // background in the global flat roster, but they must remain available
+      // inside their HQ/org tree on a project. Standalone rows are filtered
+      // separately below so internal workers never leak into the top level.
+      setAgents(ag);
+      setFirms(firmRows);
+      setCloudListings(mine);
+      setHubBookmarks(bookmarks);
       setTimeline(timelineResult);
       if (!timelineResult) setRecoveryPending(true);
     } catch {
@@ -94,6 +140,22 @@ function ProjectPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    try {
+      setInspectorCollapsed(window.localStorage.getItem("agentlas:project-inspector-collapsed") === "true");
+    } catch {
+      // Local storage is a preference only; the panel remains usable without it.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("agentlas:project-inspector-collapsed", String(inspectorCollapsed));
+    } catch {
+      // Preference persistence must not block project work.
+    }
+  }, [inspectorCollapsed]);
 
   async function startNewChat() {
     const api = ipc();
@@ -130,23 +192,30 @@ function ProjectPage() {
     }
   }
 
-  function addAgent(agent: InstalledAgent) {
-    setAgentPoolDraft((current) => current.some((member) => member.agentId === agent.id)
-      ? current
-      : [...current, {
-          agentId: agent.id,
-          source: "local",
-          releaseId: null,
-          nameSnapshot: pickLocalized(agent, locale).name,
-        }]);
+  function addCandidates(candidates: ProjectRosterCandidate[]) {
+    setAgentPoolDraft((current) => {
+      const next = [...current];
+      const seen = new Set(next.map(projectPoolMemberKey));
+      for (const candidate of candidates) {
+        if (next.length === 0 && !candidate.installed) continue;
+        const key = projectPoolMemberKey(candidate.member);
+        if (seen.has(key)) continue;
+        next.push(candidate.member);
+        seen.add(key);
+      }
+      return next;
+    });
+  }
+
+  function addCandidate(candidate: ProjectRosterCandidate) {
+    addCandidates([candidate]);
   }
 
   function dropAgent(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     if (event.dataTransfer.getData("application/x-agentlas-project-member")) return;
-    const agentId = event.dataTransfer.getData("application/x-agentlas-agent");
-    const selected = agents.find((agent) => agent.id === agentId);
-    if (selected) addAgent(selected);
+    const candidate = candidateByKey.get(event.dataTransfer.getData("application/x-agentlas-project-candidate"));
+    if (candidate) addCandidate(candidate);
   }
 
   function movePoolMember(agentId: string, targetIndex: number) {
@@ -165,19 +234,20 @@ function ProjectPage() {
     if (!editingTeam) return;
     if (draggedMemberId && targetIndex !== undefined) {
       movePoolMember(draggedMemberId, targetIndex);
-    } else if (draggedAgentId) {
-      const selected = agents.find((agent) => agent.id === draggedAgentId);
-      if (selected) addAgent(selected);
+    } else if (draggedCandidateKey) {
+      const selected = candidateByKey.get(draggedCandidateKey);
+      if (selected) addCandidate(selected);
     }
-    setDraggedAgentId(null);
+    setDraggedCandidateKey(null);
     setDraggedMemberId(null);
   }
 
-  function beginPointerDrag(event: ReactPointerEvent<HTMLElement>, kind: "agent" | "member", agentId: string) {
+  function beginPointerDrag(event: ReactPointerEvent<HTMLElement>, kind: "candidate" | "member", id: string) {
     if (!editingTeam) return;
-    pointerDragRef.current = { kind, id: agentId, startX: event.clientX, startY: event.clientY };
-    if (kind === "agent") setDraggedAgentId(agentId);
-    else setDraggedMemberId(agentId);
+    setInspectorCollapsed(true);
+    pointerDragRef.current = { kind, id, startX: event.clientX, startY: event.clientY };
+    if (kind === "candidate") setDraggedCandidateKey(id);
+    else setDraggedMemberId(id);
     event.currentTarget.setPointerCapture(event.pointerId);
   }
 
@@ -193,13 +263,13 @@ function ProjectPage() {
       if (pool) {
         if (drag.kind === "member" && memberRow) {
           movePoolMember(drag.id, Number(memberRow.dataset.projectMemberIndex));
-        } else if (drag.kind === "agent") {
-          const selected = agents.find((agent) => agent.id === drag.id);
-          if (selected) addAgent(selected);
+        } else if (drag.kind === "candidate") {
+          const selected = candidateByKey.get(drag.id);
+          if (selected) addCandidate(selected);
         }
       }
     }
-    setDraggedAgentId(null);
+    setDraggedCandidateKey(null);
     setDraggedMemberId(null);
   }
 
@@ -214,12 +284,12 @@ function ProjectPage() {
       if (pool) {
         if (drag.kind === "member" && memberRow) {
           movePoolMember(drag.id, Number(memberRow.dataset.projectMemberIndex));
-        } else if (drag.kind === "agent") {
-          const selected = agents.find((agent) => agent.id === drag.id);
-          if (selected) addAgent(selected);
+        } else if (drag.kind === "candidate") {
+          const selected = candidateByKey.get(drag.id);
+          if (selected) addCandidate(selected);
         }
       }
-      setDraggedAgentId(null);
+      setDraggedCandidateKey(null);
       setDraggedMemberId(null);
     };
     const onPointerUp = (event: PointerEvent) => finishAt(event.clientX, event.clientY);
@@ -230,7 +300,7 @@ function ProjectPage() {
       window.removeEventListener("pointerup", onPointerUp, true);
       window.removeEventListener("mouseup", onMouseUp, true);
     };
-  }, [agents, editingTeam, locale]);
+  }, [candidateByKey, editingTeam]);
 
   async function saveTeam() {
     const api = ipc();
@@ -288,8 +358,8 @@ function ProjectPage() {
     );
   }
 
-  const agentById = new Map(visibleAgents(agents).map((agent) => [agent.id, agent]));
-  const availableProjectAgents = agents.filter((agent) => !agentPoolDraft.some((member) => member.agentId === agent.id));
+  const agentById = new Map(agents.map((agent) => [agent.id, agent]));
+  const selectedMemberKeys = new Set(agentPoolDraft.map(projectPoolMemberKey));
 
   return (
     <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
@@ -347,6 +417,7 @@ function ProjectPage() {
 
       <section
         className="titlebar-nodrag project-detail-grid"
+        data-inspector-collapsed={inspectorCollapsed}
         style={{ maxWidth: 1280, margin: "24px auto", padding: "0 24px" }}
       >
         <main style={{ minWidth: 0 }}>
@@ -410,68 +481,45 @@ function ProjectPage() {
 
           <div style={{ ...cardStyle, marginBottom: 24 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-              <div style={{ ...eyebrowStyle, flex: 1 }}>{locale === "ko" ? "프로젝트 팀 · 위에서부터 우선" : "Project team · priority from the top"}</div>
+              <div style={{ ...eyebrowStyle, flex: 1 }}>{locale === "ko" ? "프로젝트 조직 · 책임자와 구성원" : "Project organization · controller and members"}</div>
               {!editingTeam ? (
-                <button type="button" onClick={() => setEditingTeam(true)} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
+                <button type="button" onClick={() => { setEditingTeam(true); setInspectorCollapsed(true); }} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
                   {locale === "ko" ? "편집" : "Edit"}
                 </button>
               ) : null}
             </div>
-            <div className="project-agent-workbench project-agent-workbench-compact">
-              <div className="project-agent-pool" data-project-agent-pool data-empty={agentPoolDraft.length === 0} onDragOver={(event) => event.preventDefault()} onDrop={dropAgent}>
-                {agentPoolDraft.map((member, index) => (
-                  <div
-                    className="project-agent-member"
-                    data-project-member-index={index}
-                    key={`${member.source}:${member.agentId}`}
-                    draggable={false}
-                    onPointerDown={(event) => beginPointerDrag(event, "member", member.agentId)}
-                    onPointerUp={finishPointerDrag}
-                    onPointerCancel={() => { pointerDragRef.current = null; setDraggedMemberId(null); }}
-                    onDragStart={(event) => {
-                      if (!editingTeam) return;
-                      event.dataTransfer.setData("application/x-agentlas-project-member", member.agentId);
-                      event.dataTransfer.effectAllowed = "move";
-                    }}
-                    onDragOver={(event) => { if (editingTeam) event.preventDefault(); }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      movePoolMember(event.dataTransfer.getData("application/x-agentlas-project-member"), index);
-                    }}
-                  >
-                    <span className="project-agent-order">{index + 1}</span>
-                    <strong>{member.nameSnapshot}</strong>
-                    {editingTeam ? <>
-                      <button type="button" disabled={index === 0} aria-label={locale === "ko" ? "위로 이동" : "Move up"} onClick={() => movePoolMember(member.agentId, index - 1)}>↑</button>
-                      <button type="button" disabled={index === agentPoolDraft.length - 1} aria-label={locale === "ko" ? "아래로 이동" : "Move down"} onClick={() => movePoolMember(member.agentId, index + 1)}>↓</button>
-                      <button type="button" onClick={() => setAgentPoolDraft((current) => current.filter((item) => item.agentId !== member.agentId))}>{locale === "ko" ? "제거" : "Remove"}</button>
-                    </> : null}
-                  </div>
-                ))}
-              </div>
+            <div className="project-agent-workbench project-agent-workbench-compact" data-editing={editingTeam}>
+              <ProjectTeamOrgChart
+                locale={locale}
+                members={agentPoolDraft}
+                editing={editingTeam}
+                open={teamTreeOpen}
+                draggedMemberId={draggedMemberId}
+                onToggle={() => setTeamTreeOpen((current) => !current)}
+                onMove={movePoolMember}
+                onRemove={(agentId) => setAgentPoolDraft((current) => current.filter((item) => item.agentId !== agentId))}
+                onPointerDown={(event, agentId) => beginPointerDrag(event, "member", agentId)}
+                onPointerUp={finishPointerDrag}
+                onPointerCancel={() => { pointerDragRef.current = null; setDraggedMemberId(null); }}
+                onDrop={dropAgent}
+              />
               {editingTeam ? (
-                <aside className="project-agent-library">
-                  {availableProjectAgents.map((candidate) => {
-                    const localized = pickLocalized(candidate, locale);
-                    return <button
-                      type="button"
-                      draggable={false}
-                      className="project-agent-source"
-                      key={candidate.id}
-                      onPointerDown={(event) => beginPointerDrag(event, "agent", candidate.id)}
-                      onMouseDown={(event) => {
-                        if (editingTeam && !pointerDragRef.current) pointerDragRef.current = { kind: "agent", id: candidate.id, startX: event.clientX, startY: event.clientY };
-                      }}
-                      onPointerUp={finishPointerDrag}
-                      onPointerCancel={() => { pointerDragRef.current = null; setDraggedAgentId(null); }}
-                      onDragStart={(event) => {
-                        event.dataTransfer.setData("application/x-agentlas-agent", candidate.id);
-                        event.dataTransfer.effectAllowed = "copy";
-                      }}
-                      onClick={() => addAgent(candidate)}
-                    ><strong>{localized.name}</strong><span>{localized.tagline}</span></button>;
-                  })}
-                </aside>
+                <ProjectAgentRosterLibrary
+                  locale={locale}
+                  sections={rosterSections}
+                  selectedMemberKeys={selectedMemberKeys}
+                  hasController={agentPoolDraft.length > 0}
+                  openSources={openRosterSources}
+                  openFirms={openRosterFirms}
+                  draggedCandidateKey={draggedCandidateKey}
+                  onToggleSource={(source) => setOpenRosterSources((current) => ({ ...current, [source]: !current[source] }))}
+                  onToggleFirm={(firmId) => setOpenRosterFirms((current) => ({ ...current, [firmId]: !current[firmId] }))}
+                  onAddCandidate={addCandidate}
+                  onAddFirm={addCandidates}
+                  onPointerDown={(event, candidateKey) => beginPointerDrag(event, "candidate", candidateKey)}
+                  onPointerUp={finishPointerDrag}
+                  onPointerCancel={() => { pointerDragRef.current = null; setDraggedCandidateKey(null); }}
+                />
               ) : null}
             </div>
             {editingTeam ? <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
@@ -520,17 +568,34 @@ function ProjectPage() {
           )}
         </main>
 
-        <aside className="project-timeline-aside" style={{ minWidth: 0 }}>
-          <section style={{ ...cardStyle, marginBottom: 16 }}>
-            <div style={{ ...eyebrowStyle, marginBottom: 8 }}>{locale === "ko" ? "소스" : "Source"}</div>
-            <strong style={{ display: "block", fontSize: 13, color: "var(--ink)" }}>
-              {project.sourceType === "local" ? (locale === "ko" ? "로컬 폴더" : "Local folder") : project.sourceType === "github" ? "GitHub" : (locale === "ko" ? "샘플" : "Sample")}
-            </strong>
-            {(project.sourceRef || project.folderPath) ? <span style={{ display: "block", marginTop: 4, fontSize: 11.5, color: "var(--muted-deep)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={project.sourceRef || project.folderPath || ""}>
-              {project.sourceType === "github" ? project.sourceRef : (project.folderPath || project.sourceRef)?.split(/[\\/]/).filter(Boolean).at(-1)}
-            </span> : null}
-          </section>
-          <ProjectTimelinePanel timeline={timeline} locale={locale} recoveryPending={recoveryPending} />
+        <aside className="project-timeline-aside" data-collapsed={inspectorCollapsed} style={{ minWidth: 0 }}>
+          <button
+            type="button"
+            className="project-inspector-toggle"
+            aria-expanded={!inspectorCollapsed}
+            aria-label={inspectorCollapsed
+              ? (locale === "ko" ? "프로젝트 정보 펼치기" : "Expand project information")
+              : (locale === "ko" ? "프로젝트 정보 접기" : "Collapse project information")}
+            title={inspectorCollapsed
+              ? (locale === "ko" ? "프로젝트 정보 펼치기" : "Expand project information")
+              : (locale === "ko" ? "프로젝트 정보 접기" : "Collapse project information")}
+            onClick={() => setInspectorCollapsed((current) => !current)}
+          >
+            <IconPanelRight size={16} />
+            {inspectorCollapsed ? <span>{locale === "ko" ? "정보" : "Info"}</span> : null}
+          </button>
+          <div className="project-inspector-content" aria-hidden={inspectorCollapsed}>
+            <section style={{ ...cardStyle, marginBottom: 16 }}>
+              <div style={{ ...eyebrowStyle, marginBottom: 8 }}>{locale === "ko" ? "소스" : "Source"}</div>
+              <strong style={{ display: "block", fontSize: 13, color: "var(--ink)" }}>
+                {project.sourceType === "local" ? (locale === "ko" ? "로컬 폴더" : "Local folder") : project.sourceType === "github" ? "GitHub" : (locale === "ko" ? "샘플" : "Sample")}
+              </strong>
+              {(project.sourceRef || project.folderPath) ? <span style={{ display: "block", marginTop: 4, fontSize: 11.5, color: "var(--muted-deep)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={project.sourceRef || project.folderPath || ""}>
+                {project.sourceType === "github" ? project.sourceRef : (project.folderPath || project.sourceRef)?.split(/[\\/]/).filter(Boolean).at(-1)}
+              </span> : null}
+            </section>
+            <ProjectTimelinePanel timeline={timeline} locale={locale} recoveryPending={recoveryPending} />
+          </div>
         </aside>
       </section>
 
@@ -540,11 +605,345 @@ function ProjectPage() {
           grid-template-columns: minmax(0, 1fr) minmax(300px, 370px);
           gap: 24px;
           align-items: start;
+          transition: grid-template-columns 180ms ease, gap 180ms ease;
+        }
+        .project-detail-grid[data-inspector-collapsed="true"] {
+          grid-template-columns: minmax(0, 1fr) 44px;
+          gap: 12px;
         }
         .project-timeline-aside {
           position: sticky;
           top: 20px;
           max-height: calc(100vh - 44px);
+        }
+        .project-timeline-aside[data-collapsed="true"] {
+          width: 44px;
+        }
+        .project-inspector-toggle {
+          width: 36px;
+          height: 36px;
+          margin: 0 0 10px auto;
+          display: grid;
+          place-items: center;
+          border: 1px solid var(--paper-edge);
+          border-radius: 10px;
+          background: var(--paper);
+          color: var(--muted-deep);
+          cursor: pointer;
+          box-shadow: var(--shadow-xs);
+        }
+        .project-inspector-toggle:hover,
+        .project-inspector-toggle:focus-visible {
+          border-color: var(--muted);
+          color: var(--ink);
+          outline: 2px solid color-mix(in srgb, var(--accent) 24%, transparent);
+          outline-offset: 2px;
+        }
+        .project-inspector-toggle span {
+          writing-mode: vertical-rl;
+          margin-top: 6px;
+          color: var(--muted-deep);
+          font-size: 9px;
+          font-weight: 800;
+          letter-spacing: .08em;
+          text-transform: uppercase;
+        }
+        .project-timeline-aside[data-collapsed="true"] .project-inspector-toggle {
+          height: 76px;
+          margin-inline: auto;
+          align-content: center;
+        }
+        .project-inspector-content {
+          opacity: 1;
+          transition: opacity 120ms ease;
+        }
+        .project-timeline-aside[data-collapsed="true"] .project-inspector-content {
+          display: none;
+          opacity: 0;
+          pointer-events: none;
+        }
+        .project-agent-workbench-compact {
+          min-height: 0;
+          grid-template-columns: minmax(320px, 1.15fr) minmax(280px, .85fr);
+        }
+        .project-agent-workbench-compact[data-editing="false"] {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .project-detail-grid:not([data-inspector-collapsed="true"]) .project-agent-workbench-compact[data-editing="true"] {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .project-team-org {
+          min-height: 160px;
+          padding: 14px;
+          overflow: auto;
+          border: 1px solid var(--paper-edge);
+          border-radius: 16px;
+          background: var(--paper);
+        }
+        .project-team-org[data-empty="true"] {
+          display: grid;
+          place-items: center;
+          border-style: dashed;
+          background: color-mix(in srgb, var(--accent) 4%, var(--paper));
+        }
+        .project-team-empty {
+          max-width: 240px;
+          color: var(--muted-deep);
+          font-size: 12px;
+          line-height: 1.55;
+          text-align: center;
+        }
+        .project-team-node {
+          position: relative;
+          min-height: 52px;
+          display: grid;
+          grid-template-columns: auto 30px minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 9px;
+          padding: 8px 10px;
+          border: 1px solid var(--paper-edge);
+          border-radius: 11px;
+          background: var(--paper);
+          color: var(--ink);
+        }
+        .project-team-node[data-dragging="true"] {
+          border-color: var(--accent);
+          background: color-mix(in srgb, var(--accent) 6%, var(--paper));
+        }
+        .project-team-node-controller {
+          border-color: color-mix(in srgb, var(--accent) 34%, var(--paper-edge));
+          box-shadow: 0 8px 22px color-mix(in srgb, var(--ink) 6%, transparent);
+        }
+        .project-team-chevron {
+          width: 24px;
+          height: 24px;
+          display: grid;
+          place-items: center;
+          border: 0;
+          border-radius: 7px;
+          background: transparent;
+          color: var(--muted-deep);
+          cursor: pointer;
+        }
+        .project-team-avatar {
+          width: 30px;
+          height: 30px;
+          display: grid;
+          place-items: center;
+          border-radius: 9px;
+          background: var(--paper-2);
+          color: var(--accent);
+        }
+        .project-team-node-copy {
+          min-width: 0;
+          display: grid;
+          gap: 2px;
+        }
+        .project-team-node-copy strong {
+          overflow: hidden;
+          color: var(--ink);
+          font-size: 12.5px;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .project-team-node-copy span {
+          color: var(--muted-deep);
+          font-size: 10.5px;
+        }
+        .project-team-actions {
+          display: flex;
+          align-items: center;
+          gap: 2px;
+        }
+        .project-team-actions button {
+          min-width: 28px;
+          min-height: 28px;
+          border: 0;
+          border-radius: 7px;
+          background: transparent;
+          color: var(--muted-deep);
+          font-size: 11px;
+          cursor: pointer;
+        }
+        .project-team-actions button:hover:not(:disabled),
+        .project-team-actions button:focus-visible:not(:disabled) {
+          background: var(--paper-2);
+          color: var(--ink);
+        }
+        .project-team-actions button:disabled {
+          opacity: .28;
+          cursor: default;
+        }
+        .project-team-children {
+          position: relative;
+          display: grid;
+          gap: 7px;
+          margin: 8px 0 0 29px;
+          padding-left: 28px;
+        }
+        .project-team-children::before {
+          content: "";
+          position: absolute;
+          left: 0;
+          top: -8px;
+          bottom: 26px;
+          width: 1px;
+          background: var(--paper-edge);
+        }
+        .project-team-child::before {
+          content: "";
+          position: absolute;
+          left: -29px;
+          top: 25px;
+          width: 28px;
+          height: 1px;
+          background: var(--paper-edge);
+        }
+        .project-agent-library-tree {
+          max-height: 540px;
+          padding: 10px;
+          overflow: auto;
+          border: 1px solid var(--paper-edge);
+          border-radius: 16px;
+          background: var(--paper);
+        }
+        .project-roster-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          min-height: 34px;
+          padding: 0 6px 8px;
+          color: var(--muted-deep);
+          font-size: 10px;
+          font-weight: 800;
+          letter-spacing: .08em;
+          text-transform: uppercase;
+        }
+        .project-roster-source-row,
+        .project-roster-firm-row,
+        .project-roster-candidate {
+          width: 100%;
+          min-width: 0;
+          display: grid;
+          align-items: center;
+          border: 0;
+          border-radius: 8px;
+          background: transparent;
+          color: var(--ink);
+          text-align: left;
+        }
+        .project-roster-source-row {
+          grid-template-columns: 18px minmax(0, 1fr) auto;
+          gap: 6px;
+          min-height: 34px;
+          padding: 5px 7px;
+          font-size: 12px;
+          cursor: pointer;
+        }
+        .project-roster-source-row:hover,
+        .project-roster-firm-row:hover,
+        .project-roster-candidate:hover:not(:disabled) {
+          background: var(--paper-2);
+        }
+        .project-roster-count,
+        .project-roster-kind {
+          color: var(--muted);
+          font: 650 10px/1 var(--font-mono);
+        }
+        .project-roster-firm-row {
+          grid-template-columns: 18px 18px minmax(0, 1fr) auto auto;
+          gap: 5px;
+          min-height: 34px;
+          padding: 5px 7px 5px 18px;
+        }
+        .project-roster-firm-row > span:not(.project-roster-count) {
+          overflow: hidden;
+          font-size: 11.5px;
+          font-weight: 650;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .project-roster-add-team {
+          min-height: 24px;
+          padding: 0 7px;
+          border: 1px solid var(--paper-edge);
+          border-radius: 7px;
+          background: var(--paper);
+          color: var(--muted-deep);
+          font-size: 9.5px;
+          font-weight: 750;
+          cursor: pointer;
+        }
+        .project-roster-children {
+          position: relative;
+          display: grid;
+          gap: 2px;
+          margin-left: 31px;
+          padding-left: 14px;
+          border-left: 1px solid var(--paper-edge);
+        }
+        .project-roster-candidate {
+          position: relative;
+          grid-template-columns: 24px minmax(0, 1fr) auto;
+          gap: 7px;
+          min-height: 38px;
+          padding: 5px 7px;
+          cursor: grab;
+        }
+        .project-roster-candidate::before {
+          content: "";
+          position: absolute;
+          left: -15px;
+          top: 19px;
+          width: 14px;
+          height: 1px;
+          background: var(--paper-edge);
+        }
+        .project-roster-candidate[data-selected="true"] {
+          color: var(--muted);
+          cursor: default;
+        }
+        .project-roster-candidate[data-dragging="true"] {
+          background: color-mix(in srgb, var(--accent) 7%, var(--paper));
+          box-shadow: inset 2px 0 var(--accent);
+        }
+        .project-roster-candidate:disabled {
+          opacity: .48;
+          cursor: not-allowed;
+        }
+        .project-roster-candidate-avatar {
+          width: 24px;
+          height: 24px;
+          display: grid;
+          place-items: center;
+          border-radius: 7px;
+          background: var(--paper-2);
+          color: var(--accent);
+        }
+        .project-roster-candidate-copy {
+          min-width: 0;
+          display: grid;
+          gap: 1px;
+        }
+        .project-roster-candidate-copy strong,
+        .project-roster-candidate-copy span {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .project-roster-candidate-copy strong {
+          font-size: 11.5px;
+        }
+        .project-roster-candidate-copy span {
+          color: var(--muted-deep);
+          font-size: 9.5px;
+        }
+        .project-roster-standalone {
+          display: grid;
+          gap: 2px;
+          margin-left: 31px;
+          padding-left: 14px;
+          border-left: 1px solid var(--paper-edge);
         }
         .project-memory-tree-panel {
           max-height: inherit;
@@ -644,14 +1043,396 @@ function ProjectPage() {
           .project-detail-grid {
             grid-template-columns: minmax(0, 1fr);
           }
+          .project-detail-grid[data-inspector-collapsed="true"] {
+            grid-template-columns: minmax(0, 1fr);
+          }
           .project-timeline-aside {
             position: static;
             max-height: none;
             grid-row: 1;
           }
+          .project-timeline-aside[data-collapsed="true"] {
+            width: 100%;
+            min-height: 44px;
+          }
+          .project-timeline-aside[data-collapsed="true"] .project-inspector-toggle {
+            height: 36px;
+            margin-left: auto;
+          }
+          .project-timeline-aside[data-collapsed="true"] .project-inspector-toggle span {
+            display: none;
+          }
+        }
+        @media (max-width: 820px) {
+          .project-agent-workbench-compact {
+            grid-template-columns: minmax(0, 1fr);
+          }
         }
       `}</style>
     </div>
+  );
+}
+
+type ProjectRosterSource = "local" | "cloud" | "hub";
+
+interface ProjectRosterCandidate {
+  key: string;
+  member: ProjectAgentPoolMember;
+  name: string;
+  tagline: string;
+  source: ProjectRosterSource;
+  kind: "agent" | "team";
+  installed: boolean;
+}
+
+interface ProjectRosterFirm {
+  id: string;
+  name: string;
+  members: ProjectRosterCandidate[];
+}
+
+interface ProjectRosterSection {
+  source: ProjectRosterSource;
+  labelKo: string;
+  labelEn: string;
+  firms: ProjectRosterFirm[];
+  standalone: ProjectRosterCandidate[];
+}
+
+function projectPoolMemberKey(member: ProjectAgentPoolMember): string {
+  return `${member.source}:${member.agentId}:${member.releaseId ?? ""}`;
+}
+
+function installedRosterSource(agent: InstalledAgent): ProjectRosterSource {
+  if (agent.assetSource === "agent-cloud") return "cloud";
+  if (agent.assetSource === "hub") return "hub";
+  return "local";
+}
+
+function installedProjectCandidate(agent: InstalledAgent, locale: Locale): ProjectRosterCandidate {
+  const localized = pickLocalized(agent, locale);
+  const member: ProjectAgentPoolMember = {
+    agentId: agent.id,
+    source: "local",
+    releaseId: null,
+    nameSnapshot: localized.name,
+  };
+  return {
+    key: projectPoolMemberKey(member),
+    member,
+    name: localized.name,
+    tagline: localized.tagline,
+    source: installedRosterSource(agent),
+    kind: agent.kind === "team" ? "team" : "agent",
+    installed: true,
+  };
+}
+
+function remoteProjectCandidate(
+  listing: MarketplaceListing,
+  source: "cloud" | "hub",
+  locale: Locale,
+): ProjectRosterCandidate {
+  const localized = pickLocalized(listing, locale);
+  const member: ProjectAgentPoolMember = {
+    agentId: listing.slug,
+    source,
+    releaseId: listing.agentReleaseId ?? listing.cloudRegistration?.revision ?? listing.packageHash ?? null,
+    nameSnapshot: localized.name,
+  };
+  return {
+    key: projectPoolMemberKey(member),
+    member,
+    name: localized.name,
+    tagline: localized.tagline,
+    source,
+    kind: listing.entityKind === "team" ? "team" : "agent",
+    installed: false,
+  };
+}
+
+function buildProjectRosterSections(
+  agents: InstalledAgent[],
+  firms: InstalledFirm[],
+  cloudListings: MarketplaceListing[],
+  hubBookmarks: HubAgentBookmark[],
+  locale: Locale,
+): ProjectRosterSection[] {
+  const roster = buildAgentRoster(agents, firms);
+  const installedSlugs = new Set(agents.map((agent) => agent.slug));
+  const visibleRemoteListing = (listing: MarketplaceListing) => (
+    listing.visibility !== "background" && listing.visibility !== "private"
+  );
+  const sections: ProjectRosterSection[] = [
+    { source: "local", labelKo: "로컬", labelEn: "Local", firms: [], standalone: [] },
+    { source: "cloud", labelKo: "내 에이전트", labelEn: "My agents", firms: [], standalone: [] },
+    { source: "hub", labelKo: "Hub", labelEn: "Hub", firms: [], standalone: [] },
+  ];
+  const sectionBySource = new Map(sections.map((section) => [section.source, section]));
+
+  for (const firm of firms) {
+    const members = firm.orgChart.flatMap((node) => {
+      const agent = roster.agentById.get(node.agentId);
+      return agent ? [installedProjectCandidate(agent, locale)] : [];
+    });
+    if (members.length === 0) continue;
+    const ceo = roster.agentById.get(firm.ceoAgentId);
+    const source = ceo ? installedRosterSource(ceo) : members[0].source;
+    sectionBySource.get(source)?.firms.push({
+      id: firm.id,
+      name: pickLocalized(firm, locale).name,
+      members,
+    });
+  }
+
+  for (const agent of visibleRosterAgents(roster.standaloneAgents)) {
+    const candidate = installedProjectCandidate(agent, locale);
+    sectionBySource.get(candidate.source)?.standalone.push(candidate);
+  }
+
+  for (const listing of cloudListings) {
+    if (installedSlugs.has(listing.slug) || !visibleRemoteListing(listing)) continue;
+    sectionBySource.get("cloud")?.standalone.push(remoteProjectCandidate(listing, "cloud", locale));
+  }
+  for (const bookmark of hubBookmarksWithoutLocalDuplicates(hubBookmarks, agents)) {
+    if (!visibleRemoteListing(bookmark.listing)) continue;
+    sectionBySource.get("hub")?.standalone.push(remoteProjectCandidate(bookmark.listing, "hub", locale));
+  }
+
+  for (const section of sections) {
+    section.firms.sort((left, right) => left.name.localeCompare(right.name, locale));
+    section.standalone.sort((left, right) => left.name.localeCompare(right.name, locale));
+  }
+  return sections;
+}
+
+function ProjectTeamOrgChart({
+  locale,
+  members,
+  editing,
+  open,
+  draggedMemberId,
+  onToggle,
+  onMove,
+  onRemove,
+  onPointerDown,
+  onPointerUp,
+  onPointerCancel,
+  onDrop,
+}: {
+  locale: string;
+  members: ProjectAgentPoolMember[];
+  editing: boolean;
+  open: boolean;
+  draggedMemberId: string | null;
+  onToggle: () => void;
+  onMove: (agentId: string, targetIndex: number) => void;
+  onRemove: (agentId: string) => void;
+  onPointerDown: (event: ReactPointerEvent<HTMLElement>, agentId: string) => void;
+  onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
+  onPointerCancel: () => void;
+  onDrop: (event: DragEvent<HTMLDivElement>) => void;
+}) {
+  if (members.length === 0) {
+    return (
+      <div
+        className="project-team-org"
+        data-project-agent-pool
+        data-empty="true"
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={onDrop}
+      >
+        <div className="project-team-empty">
+          {locale === "ko"
+            ? "오른쪽 조직도에서 책임자를 먼저 추가한 뒤 구성원을 배치하세요."
+            : "Add a controller from the roster, then arrange the remaining members."}
+        </div>
+      </div>
+    );
+  }
+
+  const renderNode = (member: ProjectAgentPoolMember, index: number, child: boolean) => (
+    <div
+      className={`project-team-node ${index === 0 ? "project-team-node-controller" : "project-team-child"}`}
+      data-project-member-index={index}
+      data-dragging={draggedMemberId === member.agentId}
+      key={projectPoolMemberKey(member)}
+      draggable={false}
+      onPointerDown={(event) => { if (editing) onPointerDown(event, member.agentId); }}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+      onDragOver={(event) => { if (editing) event.preventDefault(); }}
+      onDrop={(event) => {
+        event.preventDefault();
+        onMove(event.dataTransfer.getData("application/x-agentlas-project-member"), index);
+      }}
+    >
+      {index === 0 && members.length > 1 ? (
+        <button
+          type="button"
+          className="project-team-chevron"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={onToggle}
+          aria-expanded={open}
+          aria-label={locale === "ko" ? "구성원 접기 또는 펼치기" : "Collapse or expand members"}
+        >
+          {open ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
+        </button>
+      ) : <span />}
+      <span className="project-team-avatar"><IconUsers size={14} /></span>
+      <span className="project-team-node-copy">
+        <strong>{member.nameSnapshot}</strong>
+        <span>{index === 0
+          ? (locale === "ko" ? "책임자 · 프로젝트 컨트롤러" : "Controller · project owner")
+          : (locale === "ko" ? `${index}순위 구성원` : `Member priority ${index}`)}</span>
+      </span>
+      {editing ? (
+        <span className="project-team-actions" onPointerDown={(event) => event.stopPropagation()}>
+          <button type="button" disabled={index === 0} aria-label={locale === "ko" ? "위로 이동" : "Move up"} onClick={() => onMove(member.agentId, index - 1)}>↑</button>
+          <button type="button" disabled={index === members.length - 1} aria-label={locale === "ko" ? "아래로 이동" : "Move down"} onClick={() => onMove(member.agentId, index + 1)}>↓</button>
+          <button type="button" aria-label={locale === "ko" ? `${member.nameSnapshot} 제거` : `Remove ${member.nameSnapshot}`} onClick={() => onRemove(member.agentId)}>×</button>
+        </span>
+      ) : <span className="project-roster-kind">{child ? member.source : (locale === "ko" ? "책임자" : "controller")}</span>}
+    </div>
+  );
+
+  return (
+    <div
+      className="project-team-org"
+      data-project-agent-pool
+      data-empty="false"
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={onDrop}
+    >
+      {renderNode(members[0], 0, false)}
+      {open && members.length > 1 ? (
+        <div className="project-team-children">
+          {members.slice(1).map((member, offset) => renderNode(member, offset + 1, true))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ProjectAgentRosterLibrary({
+  locale,
+  sections,
+  selectedMemberKeys,
+  hasController,
+  openSources,
+  openFirms,
+  draggedCandidateKey,
+  onToggleSource,
+  onToggleFirm,
+  onAddCandidate,
+  onAddFirm,
+  onPointerDown,
+  onPointerUp,
+  onPointerCancel,
+}: {
+  locale: string;
+  sections: ProjectRosterSection[];
+  selectedMemberKeys: Set<string>;
+  hasController: boolean;
+  openSources: Record<ProjectRosterSource, boolean>;
+  openFirms: Record<string, boolean>;
+  draggedCandidateKey: string | null;
+  onToggleSource: (source: ProjectRosterSource) => void;
+  onToggleFirm: (firmId: string) => void;
+  onAddCandidate: (candidate: ProjectRosterCandidate) => void;
+  onAddFirm: (candidates: ProjectRosterCandidate[]) => void;
+  onPointerDown: (event: ReactPointerEvent<HTMLElement>, candidateKey: string) => void;
+  onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
+  onPointerCancel: () => void;
+}) {
+  const renderCandidate = (candidate: ProjectRosterCandidate) => {
+    const selected = selectedMemberKeys.has(candidate.key);
+    const requiresController = !candidate.installed && !hasController;
+    const disabled = selected || requiresController;
+    const helper = selected
+      ? (locale === "ko" ? "프로젝트에 추가됨" : "Added to project")
+      : requiresController
+        ? (locale === "ko" ? "설치된 책임자를 먼저 선택하세요" : "Choose an installed controller first")
+        : candidate.tagline;
+    return (
+      <button
+        type="button"
+        className="project-roster-candidate"
+        data-project-agent-candidate={candidate.key}
+        data-selected={selected}
+        data-dragging={draggedCandidateKey === candidate.key}
+        disabled={disabled}
+        key={candidate.key}
+        title={helper}
+        onPointerDown={(event) => { if (!disabled) onPointerDown(event, candidate.key); }}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerCancel}
+        onClick={() => { if (!disabled) onAddCandidate(candidate); }}
+      >
+        <span className="project-roster-candidate-avatar">
+          {candidate.kind === "team" ? <IconBuilding size={12} /> : <IconUsers size={12} />}
+        </span>
+        <span className="project-roster-candidate-copy">
+          <strong>{candidate.name}</strong>
+          <span>{helper}</span>
+        </span>
+        <span className="project-roster-kind">{candidate.kind === "team" ? "multi" : candidate.source}</span>
+      </button>
+    );
+  };
+
+  return (
+    <aside className="project-agent-library-tree" aria-label={locale === "ko" ? "전체 에이전트 조직도" : "All agents organization tree"}>
+      <div className="project-roster-head">
+        <span>{locale === "ko" ? "전체 에이전트" : "All agents"}</span>
+        <span>{sections.reduce((sum, section) => sum + section.standalone.length + section.firms.reduce((firmSum, firm) => firmSum + firm.members.length, 0), 0)}</span>
+      </div>
+      {sections.map((section) => {
+        const count = section.standalone.length + section.firms.reduce((sum, firm) => sum + firm.members.length, 0);
+        const open = openSources[section.source];
+        return (
+          <div key={section.source}>
+            <button type="button" className="project-roster-source-row" onClick={() => onToggleSource(section.source)} aria-expanded={open}>
+              {open ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
+              <span>{locale === "ko" ? section.labelKo : section.labelEn}</span>
+              <span className="project-roster-count">{count}</span>
+            </button>
+            {open ? (
+              <>
+                {section.firms.map((firm) => {
+                  const firmOpen = openFirms[firm.id] ?? false;
+                  const addable = firm.members.filter((member) => !selectedMemberKeys.has(member.key));
+                  return (
+                    <div key={firm.id}>
+                      <div className="project-roster-firm-row">
+                        <button type="button" className="project-team-chevron" onClick={() => onToggleFirm(firm.id)} aria-expanded={firmOpen}>
+                          {firmOpen ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
+                        </button>
+                        <IconBuilding size={12} />
+                        <span>{firm.name}</span>
+                        <span className="project-roster-count">{firm.members.length}</span>
+                        <button
+                          type="button"
+                          className="project-roster-add-team"
+                          disabled={addable.length === 0}
+                          onClick={() => onAddFirm(addable)}
+                        >
+                          {locale === "ko" ? "팀 추가" : "Add team"}
+                        </button>
+                      </div>
+                      {firmOpen ? <div className="project-roster-children">{firm.members.map(renderCandidate)}</div> : null}
+                    </div>
+                  );
+                })}
+                {section.standalone.length > 0 ? (
+                  <div className="project-roster-standalone">{section.standalone.map(renderCandidate)}</div>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+        );
+      })}
+    </aside>
   );
 }
 

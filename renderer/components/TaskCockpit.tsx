@@ -1959,10 +1959,10 @@ function ChatPage() {
       const initialStatus = t("chat.status.sending");
       const activeAgentId = agent?.id ?? chat.agentId ?? "active-agent";
       const activeAgentName = agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback");
-      const projectTargets: OrchestrationTarget[] = (project?.agentPool ?? []).slice(1).flatMap((member) => (
+      const projectTargets: OrchestrationTarget[] = (project?.agentPool ?? []).slice(1).map<OrchestrationTarget>((member) => (
         member.source === "local"
-          ? [{ source: "local" as const, entityKind: "agent" as const, agentId: member.agentId }]
-          : []
+          ? { source: "local" as const, entityKind: "agent" as const, agentId: member.agentId }
+          : { source: member.source, entityKind: "agent" as const, slug: member.agentId }
       ));
       const effectiveTaskForceTargets = [...projectTargets];
       for (const target of opts?.taskForceTargets ?? []) {
