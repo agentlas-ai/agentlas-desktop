@@ -69,6 +69,18 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-08-02 · v0.9.43 — project orchestration without system clutter** —
+  Project staffing now shows the complete callable Local, owner Cloud, and
+  bookmarked Hub roster as teams and agents while keeping internal role cells
+  private. The first saved member remains the controller; later members are
+  preferences used by automatic WorkOrder staffing and Network gap filling.
+  Project Work removes manual app, live, swarm, dynamic-team, and Stormbreaker
+  toggles; `@` stays an optional one-turn override. Dashboard describes the
+  actual 1 Orchestrator to N Workers model, and a first request immediately
+  replaces the `New task` placeholder with a concise task title. This release
+  binds Agentlas OS v1.1.92 at
+  `2eb39adf572bc3e235866002b3143936240f76bc`. These source gates do not themselves publish a release; the Releases page stays the authority for what is actually downloadable.
+
 - **2026-08-01 · v0.9.42 — One owner, turn-only helpers** —
   The retired chat-level hired-agent roster and session agent switch are gone.
   One remains the sole controller of One conversations, project Work remains

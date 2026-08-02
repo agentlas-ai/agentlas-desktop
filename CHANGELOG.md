@@ -4,6 +4,8 @@
 
 This release binds Agentlas OS v1.1.92 at
 2eb39adf572bc3e235866002b3143936240f76bc.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
 
 - **Project staffing now reads as an organization, not a system-agent dump.**
   The complete callable Local, owner Cloud, and bookmarked Hub roster is grouped
