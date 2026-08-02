@@ -40,7 +40,23 @@ export function geminiCandidatePaths(
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
   return [
-    // 공식 Gemini CLI 우선: 사용자 전역 extension/skills/MCP를 실제 로드한다.
+    // Antigravity가 설치돼 있으면 먼저 사용한다. Google이 기존 Gemini CLI
+    // 클라이언트를 계정별로 거부할 수 있어 `--version`만으로는 실행 가능 여부를
+    // 판별할 수 없다. agy는 같은 Gemini 슬롯의 현재 지원 실행기다.
+    ...(platform === "win32"
+      ? [
+          "agy.cmd",
+          "agy.exe",
+          path.join(home, ".local", "bin", "agy.exe"),
+          path.join(home, ".local", "bin", "agy.cmd"),
+        ]
+      : []),
+    "agy",
+    path.join(home, ".local/bin/agy"),
+    path.join(home, ".agentlas/npm/bin/agy"),
+    "/opt/homebrew/bin/agy",
+    "/usr/local/bin/agy",
+    // 공식 Gemini CLI는 Antigravity가 없는 설치의 호환 경로로 유지한다.
     ...(platform === "win32"
       ? [
           "gemini.cmd",
@@ -55,20 +71,6 @@ export function geminiCandidatePaths(
     path.join(home, ".gemini/bin/gemini"),
     "/opt/homebrew/bin/gemini",
     "/usr/local/bin/gemini",
-    // Antigravity(agy)는 공식 Gemini가 없는 기존 키리스 설치의 호환 폴백이다.
-    ...(platform === "win32"
-      ? [
-          "agy.cmd",
-          "agy.exe",
-          path.join(home, ".local", "bin", "agy.exe"),
-          path.join(home, ".local", "bin", "agy.cmd"),
-        ]
-      : []),
-    "agy",
-    path.join(home, ".local/bin/agy"),
-    path.join(home, ".agentlas/npm/bin/agy"),
-    "/opt/homebrew/bin/agy",
-    "/usr/local/bin/agy",
   ];
 }
 

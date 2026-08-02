@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.45 — 2026-08-02
+
+This release binds Agentlas OS v1.1.92 at
+2eb39adf572bc3e235866002b3143936240f76bc.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **Antigravity is treated as the working Gemini runtime, not an error.** When
+  `agy` is installed Agentlas selects it before the retired Gemini CLI, labels
+  the Dashboard card Antigravity, and shows a normal connected state. The
+  legacy Gemini usage adapter's unsupported-client receipt no longer paints a
+  working Antigravity connection red; usage remains available in Antigravity.
+
 ## 0.9.44 — 2026-08-02
 
 This release binds Agentlas OS v1.1.92 at

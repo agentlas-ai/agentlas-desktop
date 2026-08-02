@@ -457,7 +457,7 @@ export function EngineUsage() {
     // usage 어댑터가 구조적으로 조회할 수 없다 — "연결됨"과 구분되는 정직한 라벨로 알린다.
     // (스냅샷 로딩 전 깜빡임 방지를 위해 snap 수신 후에만.)
     if (e.id === "gemini" && snap && !u && isAgyRuntime(e)) {
-      return ko ? "연결됨 · 사용량 미제공(Antigravity)" : "connected · usage n/a (Antigravity)";
+      return ko ? "연결됨 · 사용량은 Antigravity에서 확인" : "connected · check usage in Antigravity";
     }
     if (u?.status === "error") {
       if (u.error === "quota_exhausted") {
@@ -466,8 +466,8 @@ export function EngineUsage() {
       if (u.error === "unsupported_client") {
         if (isAgyRuntime(e)) {
           return ko
-            ? "Antigravity 작동 · 사용량 미제공"
-            : "Antigravity active · usage n/a";
+            ? "연결됨 · 사용량은 Antigravity에서 확인"
+            : "connected · check usage in Antigravity";
         }
         return ko
           ? "Gemini CLI 지원 종료 · Antigravity 필요"
@@ -502,10 +502,14 @@ export function EngineUsage() {
     const u = usageFor(e.id);
     const connected = isConnected(e);
     const rt = runtimeFor(e);
+    const agyRuntime = e.id === "gemini" && isAgyRuntime(e);
     const runtimeVersionLabel = runtimeVersionText(runtimeVersionFor(e));
     const hasBars = connected && (u?.windows.length ?? 0) > 0;
-    const terminalError = connected && isTerminalProviderError(u);
-    const retryableError = connected && u?.status === "error" && !isRateLimited(u);
+    // Antigravity가 정상 실행 중일 때 legacy Gemini usage adapter의
+    // unsupported_client는 연결 오류가 아니라 사용량 API 부재다.
+    const agyUsageUnavailable = agyRuntime && u?.error === "unsupported_client";
+    const terminalError = connected && isTerminalProviderError(u) && !agyUsageUnavailable;
+    const retryableError = connected && u?.status === "error" && !isRateLimited(u) && !agyUsageUnavailable;
     const showConnectedChip = connected && !terminalError && !retryableError;
     // The default-engine status and the "use as default" action belong at the
     // top-right of the card (compact), not in the action foot.
@@ -543,7 +547,7 @@ export function EngineUsage() {
         <div className="dashboard-engine-card-head">
           <span className="dashboard-engine-logo" aria-hidden="true"><img src={e.logoSrc} alt="" /></span>
           <span className="sr-only">{e.logoAlt}</span>
-          <span className="dashboard-engine-card-name">{e.label}</span>
+          <span className="dashboard-engine-card-name">{agyRuntime ? "Antigravity" : e.label}</span>
           <span className="dashboard-engine-head-right" style={{ marginLeft: "auto" }}>
             {activeRoles.length > 0 ? (
               <>
@@ -576,7 +580,7 @@ export function EngineUsage() {
         <div
           className="dashboard-engine-card-status"
           data-terminal-state={terminalError ? "true" : undefined}
-          style={connected && u?.status === "error" ? { color: "var(--dash-red)" } : undefined}
+          style={connected && u?.status === "error" && !agyUsageUnavailable ? { color: "var(--dash-red)" } : undefined}
           title={statusLine}
         >
           {statusLine}

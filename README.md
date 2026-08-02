@@ -69,6 +69,12 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-08-02 · v0.9.45 — Antigravity connection truth** —
+  Agentlas now selects an installed Antigravity CLI before the retired Gemini
+  CLI and presents it as a healthy Antigravity connection. A missing legacy
+  Gemini usage endpoint is no longer styled as a connection failure; users can
+  check subscription usage in Antigravity. This release binds Agentlas OS v1.1.92 at `2eb39adf572bc3e235866002b3143936240f76bc`. These source gates do not themselves publish a release; the Releases page stays the authority for what is actually downloadable.
+
 - **2026-08-02 · v0.9.44 — completed Work without internal clutter** —
   Existing project conversations now open on the final verified result instead
   of replaying internal progress narration. Shell snippets, localhost links,
