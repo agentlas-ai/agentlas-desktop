@@ -73,7 +73,7 @@ export const ONE_DECISION_AUTHORITY_READINESS_JUDGMENT_KIND = "one-decision-auth
  * Synchronous readers of already-judged verdicts. Electron passes peeks into the
  * resident judgment cache (warmed by prejudgeOneDecision on the async paths that
  * precede projection/authority). The renderer render pass passes nothing and keeps
- * the deterministic wordlist verdicts as the labeled fallback.
+ * no semantic verdict. Missing judgment remains fail-closed.
  */
 export interface OneDecisionJudgedReaders {
   risk?: (combinedText: string) => OneDecisionRiskLevel | null;
@@ -129,7 +129,7 @@ export function oneDecisionOptionJudgmentInput(label: string, description: strin
   return `${label} ${description}`;
 }
 
-/** Deterministic wordlist disposition — the labeled fallback, never the final authority. */
+/** Legacy prior retained only for compatibility tests; never execution authority. */
 export function lexicalOneDecisionDisposition(text: string): OneDecisionOptionDisposition {
   if (REJECT_RE.test(text)) return "reject";
   if (MODIFY_RE.test(text)) return "modify";
@@ -151,7 +151,7 @@ function classifyOption(
   return (judged?.(text) ?? null) ?? "choice";
 }
 
-/** Deterministic wordlist risk level — the labeled fallback prior for the judge. */
+/** Legacy prior retained only for compatibility tests; never execution authority. */
 export function lexicalOneDecisionRiskLevel(
   text: string,
   optionDispositions: readonly OneDecisionOptionDisposition[],

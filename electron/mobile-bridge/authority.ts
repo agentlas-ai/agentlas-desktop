@@ -570,7 +570,8 @@ function validateCurrentMobileDecisionAnswer(
     throw new Error("Decision is stale, snoozed, or no longer pending");
   }
   // The async invoke paths warm the judged risk/disposition verdicts before this
-  // synchronous validation; a cache miss keeps the deterministic fallback.
+  // synchronous validation; a cache miss remains fail-closed and cannot create
+  // a lexical or static verdict.
   const view = normalizeOneDecision(pending, currentTask.id, oneDecisionJudgedReaders);
   if (
     view.contractVersion !== expected.contractVersion
@@ -1172,7 +1173,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           receipt,
         );
         // Async pre-pass: warm the completion-claim judgments the synchronous
-        // Value Closure trust validator peeks. Miss = deterministic regex verdict.
+        // Value Closure trust validator peeks. A miss remains unverified and
+        // cannot be promoted by a regex or static verdict.
         await prejudgeCompletionClaims(ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS, { timeoutMs: 6_000 }).catch(() => undefined);
         const closure = ensureAcceptedResultValueClosure({
           priorTaskVersion: expectedVersion,
