@@ -1060,7 +1060,17 @@ export class DesktopUpdaterController {
     const nativeRetryable =
       code === "install-start-failed" &&
       isRetryableNativeDiagnostic(diagnostic);
-    const canRetry = code === "continuity-backup-failed" || code === "legacy-cleanup-failed" || code === "install-source-untrusted" || nativeRetryable;
+    // `install-not-applied` means the native handoff ended without replacing the
+    // bundle and without reporting an error, so there is no diagnostic to
+    // classify. That is precisely the case that must stay retryable: staying on
+    // an old build is permanent, while whatever stopped one handoff is not.
+    // Leaving it out of this set is what turned a single silent handoff into a
+    // dead end whose only exit was a manual reinstall.
+    const canRetry = code === "continuity-backup-failed"
+      || code === "legacy-cleanup-failed"
+      || code === "install-source-untrusted"
+      || code === "install-not-applied"
+      || nativeRetryable;
     return {
       status: "manual-required",
       version,
@@ -1068,7 +1078,7 @@ export class DesktopUpdaterController {
       error: safeMessage(code),
       ...(diagnostic ? { diagnostic } : {}),
       canRetry,
-      ...(nativeRetryable && retryAfter !== undefined ? { retryAfter } : {}),
+      ...(canRetry && retryAfter !== undefined ? { retryAfter } : {}),
     };
   }
 
@@ -1399,13 +1409,33 @@ export class DesktopUpdaterController {
     }
     const reasonCode = journal.reasonCode ?? "install-not-applied";
     this.blockedReasonCode = reasonCode;
-    this.writeJournal({ ...journal, phase: "blocked", reasonCode });
+    // A silent non-apply carries no native diagnostic, so nothing else would
+    // ever give it a retry deadline. Stamp one here: the immediate next check
+    // still refuses to re-pull the failed target, and once the backoff expires
+    // the update resumes on its own instead of waiting for a manual reinstall.
+    const nativeInstallFailures = (journal.nativeInstallFailures ?? 0) + (reasonCode === "install-not-applied" ? 1 : 0);
+    const baseDelay = asNonNegativeInteger(this.deps.nativeInstallRetryBaseDelayMs) ?? NATIVE_INSTALL_RETRY_BASE_DELAY_MS;
+    const retryAfter = reasonCode === "install-not-applied" && journal.retryAfter === undefined
+      ? this.now() + Math.min(
+        baseDelay * (2 ** Math.min(Math.max(0, nativeInstallFailures - 1), 16)),
+        NATIVE_INSTALL_RETRY_MAX_DELAY_MS,
+      )
+      : journal.retryAfter;
+    this.blockedNativeInstallFailures = nativeInstallFailures;
+    this.blockedRetryAfter = retryAfter;
+    this.writeJournal({
+      ...journal,
+      phase: "blocked",
+      reasonCode,
+      nativeInstallFailures,
+      ...(retryAfter !== undefined ? { retryAfter } : {}),
+    });
     this.publish(this.manualState(
       journal.targetVersion,
       reasonCode,
       journal.diagnostic,
-      journal.nativeInstallFailures ?? 0,
-      journal.retryAfter,
+      nativeInstallFailures,
+      retryAfter,
     ));
   }
 
@@ -1599,6 +1629,32 @@ export class DesktopUpdaterController {
     if (isSourceRepairRetry) {
       if (!this.cleanupOrBlock(this.state.version)) return Promise.resolve(this.state);
       this.automaticInstallPaused = false;
+      this.blockedTargetVersion = null;
+      this.blockedReasonCode = "install-not-applied";
+      this.blockedDiagnostic = undefined;
+      this.blockedNativeInstallFailures = 0;
+      this.blockedRetryAfter = undefined;
+      this.availableVersion = null;
+      this.publish({ status: "idle" });
+    }
+    // A handoff that ended without replacing the bundle and without raising a
+    // native error lands here with no diagnostic and no failure counter, so
+    // neither the native-retry branch above nor the hold-expiry branch below
+    // could ever reach it. That left exactly one exit: telling the user to
+    // reinstall by hand, while the app re-fetched the same package on every
+    // launch. Both halves are wrong. The immediate next check must NOT pull the
+    // failed target again — that is the apply-loop this contract has always
+    // forbidden — but the failure must still age out, because staying on an old
+    // build is permanent and whatever stopped one handoff is not.
+    if (this.state.status === "manual-required" && this.state.code === "install-not-applied") {
+      if (this.state.retryAfter !== undefined && this.now() < this.state.retryAfter) {
+        return Promise.resolve(this.state);
+      }
+      this.logger.log("[updater] previous install did not apply; discarding it and retrying from a clean state");
+      this.clearStaleInstallArtifacts();
+      this.clearJournal();
+      this.automaticInstallPaused = false;
+      this.holdSince = undefined;
       this.blockedTargetVersion = null;
       this.blockedReasonCode = "install-not-applied";
       this.blockedDiagnostic = undefined;

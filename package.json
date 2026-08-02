@@ -200,7 +200,7 @@
     "test:mac-update-lineage": "node scripts/test-mac-update-lineage.cjs",
     "test:release-assets": "node scripts/test-release-asset-manifest.cjs",
     "test:semver-precedence": "npm run build:electron && node scripts/test-semver-precedence.cjs",
-    "test:updater-production": "npm run test:ensure-engine && npm run test:mac-app-trust && npm run test:mac-install-transaction && npm run test:mac-update-lineage && npm run test:release-assets && electron scripts/test-updater-production-contract.cjs && npx --no-install playwright install chromium && npm run test:updater-ui",
+    "test:updater-production": "npm run test:ensure-engine && npm run test:mac-app-trust && npm run test:mac-install-transaction && npm run test:mac-update-lineage && npm run test:release-assets && electron scripts/test-updater-production-contract.cjs && electron scripts/test-updater-not-applied-recovery.cjs && npx --no-install playwright install chromium && npm run test:updater-ui",
     "test:updater-ui": "npm run build:renderer && node scripts/test-updater-ui.cjs",
     "test:mock-bridge-parity": "node scripts/test-mock-bridge-parity.cjs",
     "test:independent-terminal-boundary": "node scripts/test-independent-terminal-boundary.cjs",
@@ -313,7 +313,8 @@
     "test:workforce-contract-tolerance": "node scripts/test-workforce-contract-tolerance.cjs",
     "bump:engine": "node scripts/bump-bundled-engine.mjs",
     "check:engine-freshness": "node scripts/bump-bundled-engine.mjs --check",
-    "test:one-auto-recovery-live": "npm run build:electron && electron scripts/verify-one-auto-recovery-live.cjs"
+    "test:one-auto-recovery-live": "npm run build:electron && electron scripts/verify-one-auto-recovery-live.cjs",
+    "test:updater-not-applied": "npm run build:electron && electron scripts/test-updater-not-applied-recovery.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",
