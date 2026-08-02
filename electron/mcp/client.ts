@@ -1042,6 +1042,11 @@ function oneTaskSurfaceRecipe(prompt: string, ko: boolean): string | null {
       ? "미디어 결과는 실제 입력·생성 자산만 data.media와 widgets.asset-board로 보존하고, 자막·장면·출력 파일은 각각 별도 데이터로 두세요. 생성하지 않은 이미지를 미리보기처럼 선언하지 마세요."
       : "Use data.media with widgets.asset-board only for actual input or generated assets, keeping scenes, captions, and output files separate. Never declare media that was not created.";
   }
+  if (/(?:찾아|조사|리서치|홍보|마케팅|전략|방법|research|marketing|promotion|strategy|find\s+(?:ways|methods))/i.test(prompt)) {
+    return ko
+      ? "조사·전략 결과는 일반론 요약으로 끝내지 마세요. data.summary에는 사용자가 바로 판단할 결론과 추천 이유를 쓰고, data.table에는 우선순위·대상·채널/방법·바로 할 행동·필요 자원·위험/제약·검증 상태를 넣어 구체적인 선택지를 비교하세요. 정확히 한 행만 recommended로 표시하고, data.checklist에는 추천안을 실제로 시작할 첫 3~7단계를 순서대로 넣으세요. 준비만 한 일을 실행했다고 쓰지 마세요. 이 결과를 document로 판단하고 inspectable, editable, reusable capability에 맞는 후속 행동 2~3개를 반드시 제안하세요. 예를 들어 추천안 실행계획 구체화, 채널별 초안 작성, 측정 기준 설계처럼 방금 결과에서 바로 이어지는 행동이어야 하며 '원본 보기'나 '마무리'는 제안하지 마세요."
+      : "Do not end research or strategy work with generic summary prose. Put the decision-ready conclusion and rationale in data.summary, and compare concrete options in data.table with priority, audience, channel or method, immediate action, required resources, risks or constraints, and verification state. Mark exactly one row recommended. Add the first 3–7 ordered launch steps in data.checklist. Never claim an unexecuted preparation was completed. Treat this result as a document with inspectable, editable, and reusable capabilities and always propose 2–3 next actions that continue directly from the result, such as detailing the recommended execution plan, drafting channel-specific copy, or defining measurement criteria. Never propose viewing an original or finishing here.";
+  }
   return null;
 }
 

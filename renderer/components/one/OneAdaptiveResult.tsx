@@ -73,8 +73,7 @@ export function OneAdaptiveResult({
   receipt,
   locale,
   onOpenWork,
-  onAcceptResult,
-  acceptingResult = false,
+  canOpenWork = false,
   onRetryUnfinished,
   onSemanticAction,
   autoRecovery,
@@ -84,9 +83,8 @@ export function OneAdaptiveResult({
   receipt: InvocationRunReceipt | null;
   locale: "ko" | "en";
   onOpenWork: () => void;
+  canOpenWork?: boolean;
   onSemanticAction?: (action: OneSurfaceSemanticAction) => void;
-  onAcceptResult?: () => void;
-  acceptingResult?: boolean;
   valueClosure?: OneValueClosureRecord | null;
   experienceReuse?: OneExperienceReuseRecord | null;
   onManageExperience?: () => void;
@@ -111,13 +109,11 @@ export function OneAdaptiveResult({
   const hasManifest = Boolean(manifest && typeof manifest === "object");
   const showNative = Boolean(surface && renderDecision?.native);
   const hasSourceListBlock = Boolean(surface?.blocks.some((block) => block.type === "SourceList"));
-  const canAcceptResult = projection.canonicalStatus === "partial"
-    && receipt?.status === "completed"
-    && projection.sync.mutationMode === "direct"
-    && Boolean(onAcceptResult);
   const semanticActions = showNative && surface
     ? [surface.primaryAction, ...surface.secondaryActions].filter(
-        (action): action is OneSurfaceSemanticAction => Boolean(action?.enabled),
+        (action): action is OneSurfaceSemanticAction => Boolean(
+          action?.enabled && (action.intent !== "open_work" || canOpenWork),
+        ),
       )
     : [];
   const artifactContext = useMemo<OneArtifactBindingRequestV1 | null>(() => (
@@ -164,31 +160,22 @@ export function OneAdaptiveResult({
               />
             )}
           </div>
-          <div className={styles.actions}>
-            {canAcceptResult && (
-              <button type="button" className={styles.actionPrimary} onClick={onAcceptResult} disabled={acceptingResult}>
-                {acceptingResult ? tFor(locale, "one.res.finishing") : tFor(locale, "one.res.finish_here")}
-              </button>
-            )}
-            {semanticActions.length > 0 ? semanticActions.map((action, index) => (
+          {semanticActions.length > 0 && (
+            <div className={styles.actions} aria-label={tFor(locale, "one.res.next_actions")}>
+              <strong>{tFor(locale, "one.res.next_actions")}</strong>
+              {semanticActions.map((action, index) => (
               <button
                 key={action.actionId}
                 type="button"
-                className={!canAcceptResult && index === 0 ? styles.actionPrimary : styles.action}
+                className={index === 0 ? styles.actionPrimary : styles.action}
                 onClick={() => onSemanticAction?.(action)}
                 disabled={!onSemanticAction}
               >
                 <span>{displayValue(action.label)}</span>
                 {action.description && <small>{displayValue(action.description)}</small>}
               </button>
-            )) : (
-              <button type="button" className={canAcceptResult ? styles.action : styles.actionPrimary} onClick={onOpenWork}>
-                {tFor(locale, "one.res.see_details")}
-              </button>
-            )}
-          </div>
-          {canAcceptResult && (
-            <AcceptanceBoundaryCopy locale={locale} className={styles.acceptanceNote} />
+              ))}
+            </div>
           )}
           {showNative && surface && surface.evidence.length > 0 && !hasSourceListBlock && (
             <details className={styles.evidence}>
@@ -210,25 +197,9 @@ export function OneAdaptiveResult({
           autoRecovery={autoRecovery}
         />
       )}
-      {canAcceptResult && !hasManifest && (
-        <section className={styles.standaloneAcceptance} aria-label={tFor(locale, "one.res.aria.confirm_result")}>
-          <AcceptanceBoundaryCopy locale={locale} className={styles.standaloneAcceptanceCopy} />
-          <button type="button" className={styles.actionPrimary} onClick={onAcceptResult} disabled={acceptingResult}>
-            {acceptingResult ? tFor(locale, "one.res.finishing") : tFor(locale, "one.res.finish_here")}
-          </button>
-        </section>
-      )}
       {/* Value/experience/proof records keep compounding internally. They are
           deliberately absent from the ordinary One conversation surface. */}
     </section>
-  );
-}
-
-function AcceptanceBoundaryCopy({ locale, className }: { locale: "ko" | "en"; className: string }) {
-  return (
-    <p className={className}>
-      {tFor(locale, "one.res.acceptance_boundary")}
-    </p>
   );
 }
 

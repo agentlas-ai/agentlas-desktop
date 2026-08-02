@@ -3222,11 +3222,14 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("tasks:openInWork", (_e, taskId: string): CanonicalTaskWorkTarget | null => {
     if (typeof taskId !== "string" || !taskId.trim()) return null;
     const task = getCanonicalTask(taskId);
-    if (!task?.originChatId) return null;
+    // Work is project-first. A projectless One conversation may become a
+    // durable Task, but it must stay in One instead of reappearing as a global
+    // Work chat with no source, team, or project identity.
+    if (!task?.originChatId || !task.projectId) return null;
     const chat = getChat(task.originChatId);
     // 대화가 지워졌으면 목적지가 없다. null 을 돌려 렌더러가 조용히 죽은 링크로
     // 보내지 않게 한다 — 없는 곳으로 이동시키는 것보다 못 여는 게 정직하다.
-    if (!chat) return null;
+    if (!chat || chat.projectId !== task.projectId || !getProject(task.projectId)) return null;
     return { taskId: task.id, chatId: chat.id, title: chat.title ?? task.title ?? "" };
   });
   ipcMain.handle("tasks:findForChat", (_e, chatId: string) => findCanonicalTaskForChat(chatId));

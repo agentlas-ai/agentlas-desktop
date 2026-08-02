@@ -115,17 +115,66 @@ async function firstExisting(paths: string[]): Promise<string | null> {
 export interface GeminiProbe {
   path: string;
   version: string;
+  models: string[];
 }
 
 export function isAgyBinaryPath(binary: string | undefined): boolean {
   return /(^|[/\\])agy(?:\.(?:exe|cmd))?$/.test(String(binary ?? ""));
 }
 
+async function probeAgyModels(binary: string): Promise<string[]> {
+  if (!isAgyBinaryPath(binary)) return [];
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawnCli>;
+    try {
+      child = spawnCli(binary, ["models"], {
+        stdio: ["ignore", "pipe", "pipe"],
+        ...detachedSpawnOpts(),
+      });
+    } catch {
+      resolve([]);
+      return;
+    }
+    let settled = false;
+    let stdout = "";
+    const parsedModels = () => [...new Set(stdout
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter((value) => /^[A-Za-z0-9][A-Za-z0-9._:-]{1,119}$/.test(value)))].slice(0, 100);
+    const finish = (models: string[]) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(models);
+    };
+    const timer = setTimeout(() => {
+      killCliTree(child, 250);
+      // agy 1.1.x prints the complete catalog but can keep its non-interactive
+      // pipe alive. Preserve the validated stdout instead of turning a healthy
+      // catalog into an empty "subscription default" picker.
+      finish(parsedModels());
+    }, 5_000);
+    timer.unref?.();
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (stdout.length < 32_768) stdout = (stdout + chunk.toString("utf8")).slice(0, 32_768);
+    });
+    child.on("error", () => finish([]));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        finish([]);
+        return;
+      }
+      finish(parsedModels());
+    });
+  });
+}
+
 export async function probeGemini(): Promise<GeminiProbe | null> {
   const found = await firstExisting(preferredCandidates());
   if (!found) return null;
   const version = (await probeCliVersion(found)) ?? "unknown";
-  return { path: found, version };
+  const models = await probeAgyModels(found);
+  return { path: found, version, models };
 }
 
 let cachedBin: string | null | undefined;

@@ -477,7 +477,6 @@ export function OneShell() {
   const [surface, setSurface] = useState<OneSurfaceManifestV1 | null>(null);
   const [receipt, setReceipt] = useState<InvocationRunReceipt | null>(null);
   const [busy, setBusy] = useState(false);
-  const [acceptingResult, setAcceptingResult] = useState(false);
   const [runStatus, setRunStatus] = useState("");
   const [autoRecovery, setAutoRecovery] = useState<
     | { phase: "recovering"; attempt: number; diagnosis: string }
@@ -2068,23 +2067,23 @@ export function OneShell() {
                   ? "route_ineligible"
                 : null;
   const introEligible = loaded && oneIntroPending && introBlockingCategory === null && !oneOnboardingVisible;
-  const workHref = selected?.chatId
-    ? `/workspace/task?id=${encodeURIComponent(selected.chatId)}&task=${encodeURIComponent(selected.taskId)}`
-    : "/dashboard";
+  const canOpenSelectedInWork = Boolean(selected?.chat?.projectId);
   const openWork = useCallback(async () => {
     const api = ipc();
     // Ask Main which conversation this Task really lives in. The href below is
     // assembled from a projection that can lag behind the store, so the verified
     // target wins whenever Main can produce one.
     if (api && selected) {
+      if (!canOpenSelectedInWork) return;
       const target = await resolveOneTaskWorkTarget(api, selected.taskId);
       if (target) {
         router.push(`/workspace/task?id=${encodeURIComponent(target.chatId)}&task=${encodeURIComponent(target.taskId)}`);
         return;
       }
+      return;
     }
-    router.push(workHref);
-  }, [router, selected, workHref]);
+    router.push("/dashboard");
+  }, [canOpenSelectedInWork, router, selected]);
   const handleOneSemanticAction = useCallback((action: OneSurfaceSemanticAction) => {
     if (!action.enabled || busy) return;
     if (action.intent === "open_work") {
@@ -2200,29 +2199,6 @@ export function OneShell() {
     setOneActivationState(current);
     if (resolution === "opened_settings") router.push("/settings");
   }, [appLocale, oneActivationState, router]);
-  const acceptResult = useCallback(async () => {
-    const api = ipc();
-    if (!selected || !receipt || receipt.status !== "completed" || selected.canonicalStatus !== "partial" || acceptingResult) return;
-    if (!api) {
-      requestOneOperationalRecovery("one-result-accept", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    setAcceptingResult(true);
-    setError(null);
-    try {
-      await api.tasks.acceptResult({
-        taskId: selected.taskId,
-        expectedVersion: selected.canonicalVersion,
-        expectedRunId: receipt.runId,
-      });
-      await refreshAll();
-    } catch (cause) {
-      requestOneOperationalRecovery("one-memory-use", cause);
-      setError(null);
-    } finally {
-      setAcceptingResult(false);
-    }
-  }, [acceptingResult, receipt, refreshAll, selected]);
   const selectedCanContinueInPlace = Boolean(
     selected?.chatId && ["partial", "completed", "failed"].includes(selected.canonicalStatus ?? ""),
   );
@@ -2604,7 +2580,9 @@ export function OneShell() {
           </div>
           <div className={styles.railFooter}>
             {selected && <nav className={`${styles.railUtilities} ${styles.railTaskActions}`} aria-label={tFor(appLocale, "one.shell.rail.manage_task_aria")}>
+              {canOpenSelectedInWork && (
               <button type="button" onClick={() => void openWork()}>{tFor(appLocale, "one.shell.rail.open_in_work")}<span aria-hidden="true">↗</span></button>
+              )}
               <button
                 type="button"
                 disabled={archiveMutationTaskId === selected.taskId || Boolean(selected.chatId && activeChatIds.includes(selected.chatId))}
@@ -2857,11 +2835,10 @@ export function OneShell() {
                       receipt={receipt}
                       locale={appLocale}
                       onOpenWork={() => void openWork()}
+                      canOpenWork={canOpenSelectedInWork}
                       onSemanticAction={handleOneSemanticAction}
                       onRetryUnfinished={retryUnfinished}
                       autoRecovery={autoRecovery}
-                      onAcceptResult={() => void acceptResult()}
-                      acceptingResult={acceptingResult}
                       valueClosure={selectedValueClosure}
                       experienceReuse={selectedExperienceReuse}
                       onManageExperience={() => { setProfileOpen(false); setMemoryOpen(true); }}

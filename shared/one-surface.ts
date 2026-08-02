@@ -405,13 +405,10 @@ export function adaptLegacySurfaceToOneV1(input: {
       lastSyncedAt: syncedAt,
     },
     blocks: finalBlocks,
-    primaryAction: {
-      actionId: "action:open-work",
-      intent: "open_work",
-      label: ko ? "원본 보기" : "View original",
-      targetRef: safeId(taskId, "task:unknown"),
-      enabled: true,
-    },
+    // A legacy Surface is already the user-facing result. Never invent an
+    // "original" destination: projectless One work has no honest Work target.
+    // Controller-authored follow-ups may replace this null action later.
+    primaryAction: null,
     secondaryActions: [],
     evidence,
     fallback: {

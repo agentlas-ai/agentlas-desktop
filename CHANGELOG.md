@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.46 — 2026-08-02
+
+This release binds Agentlas OS v1.1.94 at
+d14e0cafb92595b34fb57449ce1dc46002243382.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **One results stay in One unless a real Project owns the work.** Projectless
+  One tasks can no longer reopen as global Work chats with no source, team, or
+  project identity. Old deep links return to the exact One task instead.
+- **Results end with useful next steps, not dismissal buttons.** The fixed
+  `Finish here`, `View original`, and fallback details actions are removed.
+  Controller-authored follow-ups continue the same task only when they are
+  concrete and supported by the result; research and strategy results require
+  an actionable recommendation, comparison, launch checklist, and next steps.
+- **Antigravity exposes its real model menu.** Dashboard detection reads
+  `agy models`, preserves the selected model, and shows the available Gemini,
+  Claude, and other Antigravity-hosted model names instead of only
+  `Subscription default`.
+
 ## 0.9.45 — 2026-08-02
 
 This release binds Agentlas OS v1.1.92 at

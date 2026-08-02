@@ -685,6 +685,11 @@ function ChatPage() {
     if (!api) return;
     void api.tasks.get(requestedTaskId).then((task) => {
       if (cancelled) return;
+      if (!task?.projectId) {
+        setValidatedTaskTarget({ taskId: requestedTaskId, chatId: "" });
+        router.replace(`/one?task=${encodeURIComponent(requestedTaskId)}`);
+        return;
+      }
       const originChatId = task?.originChatId ?? "";
       setValidatedTaskTarget({ taskId: requestedTaskId, chatId: originChatId });
       if (originChatId && originChatId !== queryChatId) {
@@ -1572,6 +1577,13 @@ function ChatPage() {
       const c = await api.chats.get(chatId);
       if (cancelled || !c) {
         if (!c) router.replace("/");
+        return;
+      }
+      if (c.originSurface === "one" && !c.projectId) {
+        const oneTask = await api.tasks.findForChat(c.id).catch(() => null);
+        router.replace(oneTask
+          ? `/one?task=${encodeURIComponent(oneTask.id)}`
+          : `/one?chat=${encodeURIComponent(c.id)}`);
         return;
       }
       setChat(c);

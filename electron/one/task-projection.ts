@@ -441,7 +441,7 @@ function availableActions(input: {
   receiptIds: string[];
 }): OneTaskProjectionSemanticAction[] {
   const actions: OneTaskProjectionSemanticAction[] = [];
-  if (input.request.surface === "one" && input.task.originChatId) {
+  if (input.request.surface === "one" && input.task.originChatId && input.task.projectId) {
     actions.push({
       actionId: "action:open-work",
       intent: "open_work",

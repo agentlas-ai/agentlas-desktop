@@ -69,6 +69,16 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-08-02 · v0.9.46 — honest One handoff and Antigravity models** —
+  Projectless One work now stays in One instead of leaking into a global Work
+  chat. Result cards remove the fixed finish/original buttons and show only
+  concrete controller-authored next actions, while research results require an
+  actionable recommendation and launch steps. Antigravity now lists the real
+  models returned by `agy models`. This release binds Agentlas OS v1.1.94 at
+  `d14e0cafb92595b34fb57449ce1dc46002243382`. These source gates do not
+  themselves publish a release; the Releases page stays the authority for what
+  is actually downloadable.
+
 - **2026-08-02 · v0.9.45 — Antigravity connection truth** —
   Agentlas now selects an installed Antigravity CLI before the retired Gemini
   CLI and presents it as a healthy Antigravity connection. A missing legacy

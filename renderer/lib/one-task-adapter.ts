@@ -242,13 +242,13 @@ function canonicalProjection(
       receiptIds: [],
     },
     availableActions: [
-      {
+      ...(task.projectId ? [{
         actionId: "action:open-work",
-        intent: "open_work",
+        intent: "open_work" as const,
         label: "Open in Work",
         targetRef: task.id,
         enabled: true,
-      },
+      }] : []),
       ...(decision ? [{
         actionId: "action:approve-decision",
         intent: "approve_decision" as const,

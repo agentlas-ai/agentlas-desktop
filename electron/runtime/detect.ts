@@ -405,12 +405,18 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     });
   }
   if (gm) {
+    const geminiModels = gm.models.length > 0
+      ? gm.models
+      : cliModels("gemini").map((model) => model.id);
     list.push({
       kind: "gemini",
       backend: "google",
       source: gm.path,
       version: gm.version,
       active: false,
+      model: cliModelOf("gemini", active, geminiModels, "google") ?? geminiModels[0],
+      availableModels: geminiModels,
+      allocationModels: gm.models,
     });
   }
   if (kimiCli) {
