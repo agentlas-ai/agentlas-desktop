@@ -74,8 +74,8 @@ authority for which version is actually public, stable, and downloadable.
   chat. Result cards remove the fixed finish/original buttons and show only
   concrete controller-authored next actions, while research results require an
   actionable recommendation and launch steps. Antigravity now lists the real
-  models returned by `agy models`. This release binds Agentlas OS v1.1.94 at
-  `d14e0cafb92595b34fb57449ce1dc46002243382`. Source readiness does not prove a
+  models returned by `agy models`. This release binds Agentlas OS v1.1.95 at
+  `1e94a67558734f42a93c0353fa0ceddb57996d83`. Source readiness does not prove a
   published release; the Releases page stays the authority for what is actually
   downloadable.
 
