@@ -373,6 +373,12 @@ function agentsDto(presentEnvKeys: ReadonlySet<string>): MobileBridgeAgentDto[] 
       tone: displayText(agent.tone, 256),
       runtimeLabel: optionalDisplayText(agent.runtimeLabel, 512),
       assetSource: optionalDisplayText(agent.assetSource, 1_024),
+      source: binding?.source === "hub-install" || agent.assetSource === "hub"
+        ? "hub"
+        : binding?.source === "agent-cloud-restore" || agent.assetSource === "agent-cloud"
+          ? "agent-cloud"
+          : "local",
+      toolLabels: [...new Set(agent.mcpServers.map((item) => displayText(item, 120)).filter(Boolean))].slice(0, 16),
       kind: agent.kind === "team" ? "team" : "agent",
       visibility: agent.visibility ?? "visible",
       // DESKTOP_MOBILE_BRIDGE: Only a boolean crosses the bridge. env key names,

@@ -423,6 +423,8 @@ export interface MobileBridgeAgentDto {
   tone: string;
   runtimeLabel: string | null;
   assetSource: string | null;
+  source: "local" | "agent-cloud" | "hub";
+  toolLabels: string[];
   kind: "agent" | "team";
   visibility: "visible" | "background" | "private";
   requiresSetup: boolean;
