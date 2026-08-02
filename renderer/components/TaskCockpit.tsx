@@ -65,6 +65,11 @@ function taskTitleFromFirstPrompt(value: string): string {
   return condensed.length > 36 ? `${condensed.slice(0, 34)}…` : condensed;
 }
 
+function userFacingFolderName(value: string): string {
+  const normalized = value.replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalized.split("/").filter(Boolean).at(-1) || normalized;
+}
+
 function isInternalLoopStatus(value: string): boolean {
   return /stormbreaker\s+loop|루프\s*stormbreaker|scope-lock|verifier-first|agentlas\s*오케스트레이터|(?:^|\s)codex:\s|skill descriptions were shortened|sessionend hook|agentlas plugins|career graph (?:색인 갱신|refreshed):?\s*nodes=|\b(?:bash|collab_tool_call|mcp_tool_call|write|read|edit|glob|grep|websearch|webfetch)\b|\b(?:codex|claude code|gemini|kimi|grok)\s+cli\b/i.test(value);
 }
@@ -3236,13 +3241,13 @@ function ChatPage() {
               fontSize: 10.5,
               color: "var(--muted-deep)",
             }}
-            title={restoredFolder}
+            title={userFacingFolderName(restoredFolder)}
           >
-            {restoredFolder}
+            {userFacingFolderName(restoredFolder)}
           </code>
           <button
             onClick={() => setRestoredFolder(null)}
-            aria-label={t("chat.untitled") /* 일반 닫기 — 전용 키 없음 */}
+            aria-label={locale === "ko" ? "폴더 안내 닫기" : "Dismiss folder notice"}
             title={locale === "ko" ? "배너 닫기" : "Dismiss"}
             style={{
               marginLeft: "auto",

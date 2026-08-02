@@ -69,6 +69,13 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-08-02 · v0.9.44 — completed Work without internal clutter** —
+  Existing project conversations now open on the final verified result instead
+  of replaying internal progress narration. Shell snippets, localhost links,
+  and absolute user paths are removed from the user-facing transcript, restored
+  folder notices show only the folder name, and the dismiss control is labelled
+  as a folder notice rather than a new chat. This release binds Agentlas OS v1.1.92 at `2eb39adf572bc3e235866002b3143936240f76bc`. These source gates do not themselves publish a release; the Releases page stays the authority for what is actually downloadable.
+
 - **2026-08-02 · v0.9.43 — project orchestration without system clutter** —
   Project staffing now shows the complete callable Local, owner Cloud, and
   bookmarked Hub roster as teams and agents while keeping internal role cells

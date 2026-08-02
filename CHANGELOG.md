@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.44 — 2026-08-02
+
+This release binds Agentlas OS v1.1.92 at
+2eb39adf572bc3e235866002b3143936240f76bc.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **Completed Work shows the result, not the machinery.** Legacy conversations
+  that persisted internal progress now open at their final completion section;
+  shell launch blocks, localhost links, and absolute user paths no longer leak
+  into the novice-facing transcript.
+- Restored project-folder notices show only the folder name, and their close
+  control has an accurate accessible label instead of appearing as a new-chat
+  action.
+- Existing project task titles remain concise summaries after restart while the
+  original request, run evidence, and local paths stay available to the runtime
+  without becoming UI chrome.
+
 ## 0.9.43 — 2026-08-02
 
 This release binds Agentlas OS v1.1.92 at

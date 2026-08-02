@@ -1595,11 +1595,36 @@ function isInternalRuntimeStatus(text: string): boolean {
 }
 
 function userFacingAssistantText(text: string): string {
-  return text
-    .replace(/^\s*(?:사용 스킬|Skills used)\s*:[^\n.!?]*[.!?]?\s*(?:(?:이유|Reason)\s*:[^.!?]*[.!?]\s*)?/i, "")
+  let visible = text
+    .replace(/^\s*(?:사용 스킬|Skills used)\s*:[^\n]*(?:\n|$)/i, "")
     .replace(/^\s*I(?:'|’)m using (?:the )?`?[^`.\n]+`? skill because [^.]*\.\s*/i, "")
     .replace(/^\s*Execution mode:\s*`?appbridge-ceo-orchestrator`?[^\n]*\n?/gim, "")
     .trimStart();
+
+  // Older runtimes sometimes persisted every internal progress update inside
+  // one final assistant message. Keep that evidence in the local database, but
+  // render only the controller's final result once a clear completion section
+  // exists. Short ordinary answers are never trimmed by this legacy guard.
+  const outcomeStart = visible.search(/^(?:완료했습니다(?:\.|:)|Completed(?:\.|:)|Done(?:\.|:))/im);
+  const legacyProgress = /(?:실시간 검증 중|재실행|회귀|게이트|스크린샷|MCP tool call|python3?|localhost|127\.0\.0\.1|sandbox|샌드박스)/i;
+  if (outcomeStart > 600 && legacyProgress.test(visible.slice(0, outcomeStart))) {
+    visible = visible.slice(outcomeStart);
+  }
+
+  return visible
+    // Local filesystem layout is implementation detail. Preserve useful link
+    // labels and filenames without revealing account names or absolute paths.
+    .replace(/\[([^\]]+)\]\((?:file:\/\/)?\/Users\/[^)\n]+\)/g, "$1")
+    .replace(/(?:file:\/\/)?\/Users\/[^\s)\]}>`,]+/g, (path) => path.split("/").filter(Boolean).at(-1) ?? "")
+    .replace(/https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?(?:\/[^\s]*)?/gi, "local preview")
+    // Shell launch instructions belong in the inspector or artifact action,
+    // not in the novice-facing conversation.
+    .replace(/\n+(?:실행|Run locally|To run):\s*\n+```(?:bash|sh|shell|zsh|powershell|cmd)?[\s\S]*?```\s*(?:\n+(?:브라우저에서|Open in (?:a )?browser)[^\n]*)?/gi, "")
+    .replace(/```(?:bash|sh|shell|zsh|powershell|cmd)\s*[\s\S]*?```/gi, "")
+    .replace(/(?:브라우저에서\s+`?local preview`?|Open\s+`?local preview`?\s+in\s+(?:a\s+)?browser)[^\n]*/gim, "")
+    .replace(/모든 Node 스모크·회귀 테스트 통과/g, "모든 자동 검증 통과")
+    .replace(/`(fail|pass)`/gi, "$1")
+    .trim();
 }
 
 function userFacingRunStatus(text: string | undefined, locale: "ko" | "en"): string {
