@@ -4,6 +4,8 @@
 
 This release binds Agentlas OS v1.1.95 at
 1e94a67558734f42a93c0353fa0ceddb57996d83.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
 
 - **Automatic recovery closes on the original outcome.** A successful process
   exit is no longer enough: Main binds the original failure, the recovery run,
