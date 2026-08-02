@@ -76,7 +76,9 @@ authority for which version is actually public, stable, and downloadable.
   Mobile connections now revalidate the paired Agentlas account and carry Goal,
   Plan, Network, and Live as explicit structured overrides while omission still
   means One decides. This release binds Agentlas OS v1.1.95 at
-  `1e94a67558734f42a93c0353fa0ceddb57996d83`.
+  `1e94a67558734f42a93c0353fa0ceddb57996d83`. Source readiness does not prove a
+  published release; the Releases page stays the authority for what is actually
+  downloadable.
 
 - **2026-08-02 · v0.9.46 — honest One handoff and Antigravity models** —
   Projectless One work now stays in One instead of leaking into a global Work
