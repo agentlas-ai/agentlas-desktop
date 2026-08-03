@@ -238,6 +238,16 @@ export function RuntimeReadiness() {
                 ? (ko
                   ? `현재 엔진 확인 완료${engine.version ? ` · v${engine.version}` : ""}`
                   : `Current engine verified${engine.version ? ` · v${engine.version}` : ""}`)
+                // No journal at all is not a check in flight. A bundled engine is
+                // pinned to the app — Settings calls it "앱에 들어 있는 고정본" —
+                // so there is nothing to verify and nothing will ever arrive to
+                // resolve it. Reporting "진행 중" left this row Checking forever
+                // while Settings said the same engine was current, so one engine
+                // got two answers depending on which screen you opened.
+                : !engineJournal
+                  ? (ko
+                    ? `앱에 고정된 엔진입니다${engine.version ? ` · v${engine.version}` : ""}`
+                    : `Engine pinned to this app${engine.version ? ` · v${engine.version}` : ""}`)
                 : (ko
                   ? `엔진 사용 가능${engine.version ? ` · v${engine.version}` : ""} · 업데이트 확인이 진행 중입니다.`
                   : `Engine available${engine.version ? ` · v${engine.version}` : ""} · update verification is in progress.`)
@@ -255,7 +265,10 @@ export function RuntimeReadiness() {
           ? (engineRecovery?.presentation ? "attention" : "checking")
           : engine.source === "override"
             ? "attention"
-            : engine.source === "bundled" && engineJournal?.status !== "current"
+            // Only an existing journal that has not settled means a check is
+            // actually running. Absence of a journal is a pinned engine, which
+            // is a settled state.
+            : engine.source === "bundled" && engineJournal && engineJournal.status !== "current"
               ? "checking"
             : "ready",
         actions: engineRecovery?.presentation?.options,
