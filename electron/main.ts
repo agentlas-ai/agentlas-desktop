@@ -367,6 +367,16 @@ function stopOneBriefingScheduler(): void {
 const allowMultiInstance = process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
 const singleInstanceLock = allowMultiInstance || app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
+  // Exiting silently is right only when a live first instance takes over and
+  // raises its window. When the lock is held by a dead process or by a
+  // different build of the app, nothing appears and nothing is written
+  // anywhere: launching the app looks like it did nothing at all, and the
+  // exit code says success. Say why, on stderr and in the log.
+  const notice =
+    "Agentlas is already running; handing this launch to the existing window. " +
+    "If no window appears, quit the running copy (or run with " +
+    "AGENTLAS_ALLOW_MULTI_INSTANCE=1) and try again.";
+  console.error(`[agentlas] ${notice}`);
   app.exit(0);
 }
 
