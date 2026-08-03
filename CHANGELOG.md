@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.52 — 2026-08-03
+
+This release binds Agentlas OS v1.1.97 at
+17c2d127c39d45927d8743ceb945516ae89a7f76.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **The on-call pool has no rank and no lead.** The orchestrator is the session
+  LLM designated on the dashboard; it is not pinned to the project and calls
+  whichever project agents it needs. The org chart asserted the opposite three
+  ways at once: the first member was drawn as a controller with the others
+  indented beneath it as children, later members were labelled "1순위 / 2순위
+  선호 인력", and every row carried buttons to reorder that rank. Only the
+  empty state told the truth, and it is the one part a user with agents never
+  sees. Members are now equal siblings and the reorder buttons are gone.
+- **Standalone agents stop reading as the last team's members.** The roster
+  library rendered them in a container with no style of its own, right after
+  the team blocks, so they inherited the team members' indentation and appeared
+  to hang off whichever team was last.
+
 ## 0.9.51 — 2026-08-03
 
 This release binds Agentlas OS v1.1.97 at
