@@ -71,19 +71,20 @@ function databaseFacts(db: Database.Database, protectedTables: readonly string[]
       tableIdentityHashes[table] = sha256(`empty-schema:${table}`);
       continue;
     }
-    // Row-by-row identity hashing is retired (owner decision, 2026-08-03).
-    // Nothing consumes these digests: the post-install continuity gate was
-    // switched off on 2026-07-26 after 10/10 of its violations on a real
-    // machine were ordinary app activity, and the startup preflight no longer
-    // verifies the copy either. What remained was pure cost — a sorted full
-    // scan of every protected table at update time, on a database with tens of
-    // thousands of run_events — and that scan is the only reason the updater
-    // ever tried to pause the automation scheduler, which is what failed on a
-    // machine with live automations. Keep the field shaped so existing journals
-    // stay valid, and make it honestly inert rather than a fingerprint nobody
-    // checks. The migration transaction is what actually protects the data.
-    void selected;
-    tableIdentityHashes[table] = sha256(`unverified:${table}:${rowCounts[table]}`);
+    // This projects PRIMARY KEY columns only, so it is an index scan rather
+    // than a table scan — cheap even at tens of thousands of rows. It was
+    // briefly replaced with an inert digest on the assumption that it was the
+    // update-time cost that forced writer quiescence; that assumption was
+    // wrong, and removing it also silently disabled the identity comparison
+    // this snapshot still owes its callers. Keep it.
+    const projection = selected.map((column) => quoteIdentifier(column.name)).join(", ");
+    const order = selected.map((column) => quoteIdentifier(column.name)).join(", ");
+    const identityHash = createHash("sha256");
+    for (const row of db.prepare(`SELECT ${projection} FROM ${quoteIdentifier(table)} ORDER BY ${order}`).iterate()) {
+      identityHash.update(JSON.stringify(row));
+      identityHash.update("\n");
+    }
+    tableIdentityHashes[table] = identityHash.digest("hex");
   }
   return { databaseSchemaVersion, rowCounts, tableIdentityHashes };
 }
