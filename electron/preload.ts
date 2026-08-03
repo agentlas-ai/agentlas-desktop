@@ -648,6 +648,9 @@ const api: AgentlasIpc = {
     liveRunChannel: (automationId: string) => `automations:liveRun:${automationId}`,
     latestRun: (automationId: string) => ipcRenderer.invoke("automations:latestRun", automationId),
     getSession: (automationId: string) => ipcRenderer.invoke("automations:getSession", automationId),
+    planFix: (automationId: string) => ipcRenderer.invoke("automations:planFix", automationId),
+    applyFix: (automationId: string, actionId: string) =>
+      ipcRenderer.invoke("automations:applyFix", automationId, actionId),
   },
   launchd: {
     status: () => ipcRenderer.invoke("launchd:status"),
@@ -750,6 +753,7 @@ const api: AgentlasIpc = {
   },
   hephaestus: {
     status: (locale) => ipcRenderer.invoke("hephaestus:status", locale),
+    recover: (input) => ipcRenderer.invoke("hephaestus:recover", input),
     updateJournal: () => ipcRenderer.invoke("hephaestus:updateJournal"),
     runUpdate: () => ipcRenderer.invoke("hephaestus:runUpdate"),
     doctor: () => ipcRenderer.invoke("hephaestus:doctor"),

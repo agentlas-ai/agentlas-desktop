@@ -1156,9 +1156,66 @@ export interface ProjectAgentPoolMember {
 }
 
 /** Automation-owned transcript projection. The renderer never receives a Work chat. */
+/**
+ * 자동화가 멈췄을 때 사용자가 **지금 누를 수 있는** 조치. 문장만 남기고 끝내면 사용자는
+ * 무엇을 해야 할지 알 수 없다. 행동 id는 Main이 만든 유한 집합이며, 모델은 그중에서만
+ * 고른다(자유 문자열 실행 없음). 문구는 모델이 쓰고, 실행 권한은 코드가 가진다.
+ */
+export type AutomationFixKind =
+  /** 저장된 사이트의 로그인 창을 자동화 전용 브라우저 프로필로 연다. */
+  | "browser_login"
+  /** 브라우저 자체를 못 찾거나 설정이 없어 커넥트 화면을 연다. */
+  | "open_browser_setup"
+  /** macOS 손쉬운 사용/화면 기록 권한 화면을 연다. */
+  | "open_mac_permissions"
+  /** Agentlas 계정 로그인(브라우저 왕복). */
+  | "agentlas_sign_in"
+  /** Agentlas OS 런타임 자가 수리. */
+  | "repair_runtime"
+  /** 이 자동화를 지금 다시 실행. */
+  | "retry_run"
+  /** 세션 대화에서 이어서 해결. */
+  | "ask_in_session";
+
+export interface AutomationFixOption {
+  /** Main이 발급한 실행 가능한 조치 id. 이 목록 밖의 값은 실행되지 않는다. */
+  actionId: string;
+  kind: AutomationFixKind;
+  /** 모델이 쓴 사용자 문구. 내부 코드·경로·스택은 들어가지 않는다. */
+  label: string;
+  /** 외부 효과가 있어 사용자가 먼저 눌러야 하는 조치. */
+  requiresConfirmation: boolean;
+}
+
+export interface AutomationFixPlan {
+  automationId: string;
+  /** 지금 상황을 사람 말로 설명한 문장(모델 작성). */
+  summary: string;
+  /** 사용자에게 물어야 할 때만 채워진다. */
+  question: string | null;
+  options: AutomationFixOption[];
+  /** Main이 이미 스스로 실행해 본 조치(있다면)와 그 결과. */
+  applied: { actionId: string; ok: boolean } | null;
+  /** 판정 런타임이 없어 조치를 고르지 못한 상태. UI는 이때만 일반 안내로 내려간다. */
+  unavailable: boolean;
+}
+
+export interface AutomationFixResult {
+  ok: boolean;
+  /** 사용자에게 보여줄 결과 한 줄. */
+  message: string;
+  /** 렌더러가 열어야 하는 고정 목적지(자유 URL 아님). */
+  navigate: "/connect" | "/settings" | null;
+  /** 조치 후 다시 계산한 계획. */
+  plan: AutomationFixPlan | null;
+}
+
 export interface AutomationSession {
   id: string;
   automationId: string;
+  /** Execution-ledger chat that owns this transcript. The automation screen sends
+   *  ordinary turns into it, so the session panel is a real conversation. */
+  chatId: string;
   messages: ChatHistoryEntry[];
   updatedAt: string;
 }
@@ -4432,6 +4489,17 @@ export interface HephaestusStatus {
   source: "managed" | "bundled" | "override" | null;
   pythonVersion: string | null;
 }
+export interface HephaestusRecoveryPresentation {
+  summary: string;
+  question: string | null;
+  options: Array<{ actionId: string; label: string }>;
+}
+export interface HephaestusRecoveryResult {
+  status: HephaestusStatus;
+  verified: boolean;
+  attempted: boolean;
+  presentation: HephaestusRecoveryPresentation | null;
+}
 /** 엔진 CLI 명령 결과(JSON 출력 + 원시 stdout/stderr). */
 export interface HephaestusCommandResult<T = unknown> {
   ok: boolean;
@@ -6039,6 +6107,10 @@ export interface AgentlasIpc {
     latestRun: (automationId: string) => Promise<WorkflowRunSnapshot | null>;
     /** Automation-owned session transcript rendered beside the node graph. */
     getSession: (automationId: string) => Promise<AutomationSession>;
+    /** 멈춘 자동화에 대해 지금 실행 가능한 조치까지 포함한 복구 계획. */
+    planFix: (automationId: string) => Promise<AutomationFixPlan>;
+    /** 사용자가 고른 조치를 실행. 계획에 없는 id는 아무 일도 하지 않는다. */
+    applyFix: (automationId: string, actionId: string) => Promise<AutomationFixResult>;
   };
   /** launchd LaunchAgent — 앱이 꺼져도 자동화를 도는 macOS 영속성(opt-in, 설계 §2.6). */
   launchd: {
@@ -6166,6 +6238,8 @@ export interface AgentlasIpc {
   hephaestus: {
     /** 엔진 가용성(번들 + Python). UI 게이트에 사용. */
     status: (locale?: "ko" | "en") => Promise<HephaestusStatus>;
+    /** One이 복구 행동을 선택·실행하고 같은 엔진을 다시 검증한다. */
+    recover: (input?: { locale?: "ko" | "en"; actionId?: string }) => Promise<HephaestusRecoveryResult>;
     /** Engine updater journal (read-only; null when it has never run). */
     updateJournal: () => Promise<HephaestusUpdateJournal | null>;
     /** Run the engine updater now and report what it actually did. */

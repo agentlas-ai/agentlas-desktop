@@ -250,6 +250,52 @@
   background: #eaedee;
 }
 
+.conversationRow {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-items: stretch;
+}
+
+.conversationRow .taskButton {
+  flex: 1;
+  min-width: 0;
+  padding-right: 38px;
+}
+
+.conversationDelete {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #8a9094;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  opacity: 0;
+  transform: translateY(-50%);
+  cursor: pointer;
+}
+
+.conversationRow:hover .conversationDelete,
+.conversationDelete:focus-visible {
+  opacity: 1;
+}
+
+.conversationDelete:hover,
+.conversationDelete:focus-visible {
+  background: #f6e9e7;
+  color: #a84b42;
+  outline: 2px solid transparent;
+}
+
 .taskButton strong {
   overflow: hidden;
   font-size: 12px;
@@ -1068,34 +1114,40 @@
   font-size: 13px;
 }
 
+/* 편성 상태는 대화의 한 줄이지, 새 화면이 아니다. 예전에는 260px 높이로 대화 한가운데를
+   차지해서 채팅을 열 때마다 "새로운 무언가가 시작된다"는 인상을 줬다. 답변 스트림과 같은
+   좌측 정렬·같은 글자 크기로 흐름 안에 놓는다. */
 .preparingRequest {
-  min-height: 260px;
   display: grid;
-  align-content: center;
-  justify-items: center;
-  gap: 9px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 9px;
+  row-gap: 2px;
+  padding: 2px 0;
   color: #555c60;
-  text-align: center;
+  text-align: left;
 }
 
 .preparingRequest strong {
-  margin-top: 8px;
   color: #222629;
-  font-size: 17px;
-  font-weight: 660;
+  font-size: 13.5px;
+  font-weight: 620;
 }
 
 .preparingRequest span {
+  grid-column: 2;
   color: #7d8387;
-  font-size: 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
 .preparedTeam {
+  grid-column: 2;
   display: grid;
-  justify-items: center;
-  gap: 8px;
-  width: min(100%, 520px);
-  margin-top: 10px;
+  justify-items: start;
+  gap: 6px;
+  width: 100%;
+  margin-top: 6px;
 }
 
 .preparedTeam > small {
@@ -1107,7 +1159,7 @@
 .preparedTeam > div {
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 7px;
 }
 

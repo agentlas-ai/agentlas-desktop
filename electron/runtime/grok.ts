@@ -4,15 +4,19 @@
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
-import { CLI_HISTORY_CONTEXT_TOKENS, renderConversationContext } from "./continuity";
+import { CLI_HISTORY_CONTEXT_TOKENS, composeResumeTurnPrompt, renderConversationContext } from "./continuity";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { readEnvVar } from "../secrets/vault";
 import { clearProviderHealth, recordProviderHealth } from "../usage/provider-health";
 import { invalidateUsage } from "../usage";
+import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
+import { StringDecoder } from "node:string_decoder";
+
+const KIND = "grok";
 
 const CANDIDATES = [
   // Windows: `.cmd`/`.exe`를 bare `grok`보다 먼저(bare는 PATHEXT 해석 시 `.ps1`을 잡아 막힐 수 있음).
@@ -275,6 +279,7 @@ type GrokEvent = {
   data?: unknown;
   stopReason?: string;
   sessionId?: string;
+  session_id?: string;
   requestId?: string;
   usage?: { output_tokens?: number; completion_tokens?: number };
   tokens?: number;
@@ -307,7 +312,24 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
   // re-bind to a definitely-non-null local for use inside runGrokProcess().
   const grokBin: string = bin;
 
-  events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
+  const fingerprint = req.chatId
+    ? createHash("sha256")
+        .update("grok-session-v1\0")
+        .update(req.sessionFingerprintSeed ?? req.systemPrompt ?? "")
+        .update("\0")
+        .update(req.model ?? "")
+        .digest("hex")
+    : null;
+  const savedSession = req.chatId ? getRuntimeSession(req.chatId, KIND) : null;
+  const storedSessionId = savedSession && fingerprint && savedSession.fingerprint === fingerprint ? savedSession.sessionId : null;
+  const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
+  const prompt = resumeSessionId
+    ? composeResumeTurnPrompt(req.userPrompt, req.turnContext ?? "", req.locale)
+    : buildPrompt(req);
+
+  events.onStatus(resumeSessionId
+    ? (req.locale === "ko" ? "Grok 세션 이어가는 중..." : "Resuming the Grok session...")
+    : tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 
   const cwd = req.cwd ?? agentRunCwd();
   const env = grokEnv(req.env ?? process.env);
@@ -320,8 +342,9 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
   }
   // Prompt files keep system/history text out of argv/process listings and avoid Windows command-line limits.
   const promptFile = path.join(os.tmpdir(), `agentlas-grok-${process.pid}-${randomUUID()}.txt`);
-  await fs.writeFile(promptFile, buildPrompt(req), { encoding: "utf8", mode: 0o600 });
+  await fs.writeFile(promptFile, prompt, { encoding: "utf8", mode: 0o600 });
   const args = ["--prompt-file", promptFile, "--cwd", cwd, "--output-format", "streaming-json", "--no-subagents"];
+  if (resumeSessionId) args.unshift("--resume", resumeSessionId);
   if (req.model) args.push("-m", req.model); // grok --help 확인: -m, --model <model>
   if (req.effort) args.push("--effort", req.effort);
   if (!req.untrustedNoTools && req.permission === "full") args.push("--permission-mode", "bypassPermissions");
@@ -367,8 +390,16 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     let tokens: number | undefined;
     let lastEmit = 0;
     let thoughtActive = false;
+    let sessionId: string | undefined = resumeSessionId ?? undefined;
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
 
     const handle = (ev: GrokEvent): void => {
+      const nested = ev.data && typeof ev.data === "object" ? ev.data as Record<string, unknown> : null;
+      const eventSessionId = ev.sessionId ?? ev.session_id
+        ?? (typeof nested?.sessionId === "string" ? nested.sessionId : undefined)
+        ?? (typeof nested?.session_id === "string" ? nested.session_id : undefined);
+      if (eventSessionId) sessionId = eventSessionId;
       const type = ev.type ?? ev.event;
       if (type === "thought") {
         // streaming-json exposes private reasoning deltas. Never render or persist them.
@@ -413,7 +444,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     };
 
     child.stdout?.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString("utf8");
+      buffer += stdoutDecoder.write(chunk);
       let nl: number;
       while ((nl = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, nl).trim();
@@ -429,7 +460,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       }
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+      stderr += stderrDecoder.write(chunk);
     });
 
     child.on("error", (err) => {
@@ -441,6 +472,8 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       reject(err);
     });
     child.on("close", (code) => {
+      buffer += stdoutDecoder.end();
+      stderr += stderrDecoder.end();
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
@@ -476,7 +509,8 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       if (code === 0 || text.trim()) {
         clearProviderHealth("grok");
         invalidateUsage("grok");
-        resolve({ text: text.trim(), tokens });
+        if (req.chatId && fingerprint && sessionId) saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint);
+        resolve({ text: text.trim(), tokens, sessionId });
         return;
       }
       reject(new Error(`grok CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));

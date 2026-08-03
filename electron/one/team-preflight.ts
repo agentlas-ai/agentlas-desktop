@@ -26,6 +26,7 @@ import {
   isOneTeamPreflightProposal,
   type AutoResolveOneTeamPreflightInput,
   type OneTeamPreflightComplexityReason,
+  type OneTeamPreflightPermission,
   type OneTeamPreflightProposal,
   type OneTeamPreflightRef,
   type OneTeamPreflightRole,
@@ -287,8 +288,13 @@ function inputScopes(chat: Chat): OneTeamPreflightRole["inputScopes"] {
     : ["current_user_request", "approved_one_profile_memory"];
 }
 
-function permissionScopes(): OneTeamPreflightRole["permissionScopes"] {
-  return ["workspace.read", "workspace.write", "external.recruitment.denied", "external.payment.denied"];
+function permissionScopes(permission: OneTeamPreflightPermission): OneTeamPreflightRole["permissionScopes"] {
+  return [
+    "workspace.read",
+    ...(permission === "write" ? ["workspace.write" as const] : []),
+    "external.recruitment.denied",
+    "external.payment.denied",
+  ];
 }
 
 function candidateSnapshot(
@@ -310,6 +316,7 @@ function roleFromCandidate(
   candidate: CandidateSnapshot,
   chat: Chat,
   coordinator: boolean,
+  permission: OneTeamPreflightPermission,
   rationaleBasis = "existing-session-roster",
 ): OneTeamPreflightRole {
   return {
@@ -327,7 +334,7 @@ function roleFromCandidate(
       releaseRef: candidate.packageHash,
     },
     inputScopes: inputScopes(chat),
-    permissionScopes: permissionScopes(),
+    permissionScopes: permissionScopes(permission),
     expectedOutput: coordinator
       ? "One integrated result with each specialist contribution and unresolved items identified."
       : `One bounded contribution within ${agent.taglineEn || agent.tagline || "the installed specialist's declared scope"}; return it to the coordinator for synthesis.`,
@@ -377,6 +384,7 @@ function exactInstalledRoster(
   prompt?: string,
   allowDeterministicLocalSelection = true,
   requestedAgentIds: string[] = [],
+  permission: OneTeamPreflightPermission = "write",
 ): {
   roles: OneTeamPreflightRole[];
   candidates: CandidateSnapshot[];
@@ -388,7 +396,7 @@ function exactInstalledRoster(
   const coordinator = byId(chat.agentId);
   if (!coordinator) throw new OneTeamPreflightError("candidate_changed", "The One coordinator is no longer installed");
   const candidates: CandidateSnapshot[] = [candidateSnapshot(coordinator, "installed")];
-  const roles: OneTeamPreflightRole[] = [roleFromCandidate(coordinator, candidates[0], chat, true)];
+  const roles: OneTeamPreflightRole[] = [roleFromCandidate(coordinator, candidates[0], chat, true, permission)];
   const targets: OrchestrationTarget[] = [];
   let unresolvedExternal = false;
   const seen = new Set([coordinator.id]);
@@ -402,7 +410,7 @@ function exactInstalledRoster(
     seen.add(installed.id);
     const snapshot = candidateSnapshot(installed, "installed");
     candidates.push(snapshot);
-    roles.push(roleFromCandidate(installed, snapshot, chat, false, "explicit-turn-agent"));
+    roles.push(roleFromCandidate(installed, snapshot, chat, false, permission, "explicit-turn-agent"));
     targets.push({ source: "local", entityKind: "agent", agentId: installed.id });
   }
   if (
@@ -425,6 +433,7 @@ function exactInstalledRoster(
         snapshot,
         chat,
         false,
+        permission,
         "model-selected-local-specialist",
       ));
       targets.push({ source: "local", entityKind: "agent", agentId: selected.agent.id });
@@ -710,7 +719,7 @@ export async function prepareOneTeamPreflight(
   deps: OneTeamPreflightDependencies = {},
 ): Promise<PrepareOneTeamPreflightResult> {
   const inputKeys = Object.keys((input ?? {}) as unknown as Record<string, unknown>);
-  const allowedInputKeys = new Set(["chatId", "expectedTaskId", "expectedTaskVersion", "userPrompt", "requestedAgentIds", "dynamicTeamRequested"]);
+  const allowedInputKeys = new Set(["chatId", "expectedTaskId", "expectedTaskVersion", "userPrompt", "requestedAgentIds", "dynamicTeamRequested", "permission"]);
   if (
     !input || typeof input !== "object"
     || inputKeys.some((key) => !allowedInputKeys.has(key))
@@ -727,6 +736,7 @@ export async function prepareOneTeamPreflight(
       || new Set(input.requestedAgentIds).size !== input.requestedAgentIds.length
     ))
     || (input.dynamicTeamRequested !== undefined && input.dynamicTeamRequested !== true)
+    || (input.permission !== undefined && input.permission !== "read" && input.permission !== "write")
   ) throw new OneTeamPreflightError("invalid_request", "Invalid One team preflight request");
   const requestedAgentIds = input.requestedAgentIds ?? [];
   const teamNeed = await resolveOneTeamNeed(
@@ -756,7 +766,8 @@ export async function prepareOneTeamPreflight(
 
   const runtime = await liveRuntime(deps);
   if (requestedAgentIds.length === 0) await prejudgeRosterAutoRoute(chat, input.userPrompt, deps);
-  const roster = exactInstalledRoster(chat, deps, input.userPrompt, true, requestedAgentIds);
+  const permission = input.permission ?? "write";
+  const roster = exactInstalledRoster(chat, deps, input.userPrompt, true, requestedAgentIds, permission);
   const canConfirmTeam = roster.roles.length >= 2 && !roster.unresolvedExternal;
   // When the installed roster cannot cover the work, external staffing is the
   // remaining route — not a dead end. Main already implements that run end to
@@ -783,7 +794,7 @@ export async function prepareOneTeamPreflight(
       taskVersion: waitingTask.version,
       promptDigest,
       runtimeDigest: runtime.digest,
-      permission: "write",
+      permission,
     },
     complexityReasons: reasons,
     roles: canConfirmTeam ? roster.roles : roster.roles.slice(0, 1),
@@ -920,7 +931,7 @@ function exactRosterBinding(
 ): boolean {
   const prompt = PROCESS_PROMPTS.get(record.proposal.proposalId);
   if (!prompt) return false;
-  const current = exactInstalledRoster(chat, deps, prompt.original, true, prompt.requestedAgentIds);
+  const current = exactInstalledRoster(chat, deps, prompt.original, true, prompt.requestedAgentIds, record.proposal.binding.permission);
   return sha256({
     candidates: current.candidates,
     targets: current.targets,

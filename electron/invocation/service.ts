@@ -626,7 +626,7 @@ export class InvocationService {
     if (requestedOneBriefingActionRef && requestedOneMemoryUseOnceRef) {
       throw new Error("A Briefing review cannot widen itself with a one-time Memory capability");
     }
-    if (requestedOneTeamPreflightRef && (!requestedOneMode || workspaceBinding)) {
+    if (requestedOneTeamPreflightRef && (!requestedOneMode || (workspaceBinding && !mobileOneBoundary))) {
       throw new Error("A team preflight capability is valid only for a local One invocation");
     }
     if (requestedOneTeamPreflightRef && (requestedOneBriefingActionRef || requestedOneMemoryUseOnceRef)) {
@@ -1552,10 +1552,19 @@ export class InvocationService {
     return { runId };
   }
 
-  cancel(runId: string): "requested" | "already-requested" | "not-found" {
+  cancel(
+    runId: string,
+    options: { preserveSteerQueue?: boolean } = {},
+  ): "requested" | "already-requested" | "not-found" {
+    const record = this.activeRuns.get(runId);
+    // A user-visible Stop means stop the task, including a direction that was
+    // queued by an earlier steer. The internal cancellation used to advance a
+    // steer must preserve that queue; every external cancel uses the default.
+    if (!options.preserveSteerQueue && record?.chatId) {
+      this.steerQueues.delete(record.chatId);
+    }
     const result = this.activeRuns.requestCancel(runId);
     if (result === "requested") {
-      const record = this.activeRuns.get(runId);
       tryRecordRunEvent({
         runId,
         kind: "invoke_cancel_requested",
@@ -1613,7 +1622,7 @@ export class InvocationService {
       chatId: req.chatId,
       agentId: active[1].actualAgentId,
     });
-    this.cancel(active[0]);
+    this.cancel(active[0], { preserveSteerQueue: true });
     return {
       accepted: true,
       queued: true,

@@ -82,6 +82,8 @@ import {
 import { getProject } from "../store/projects";
 import { OwnerCloudActionError } from "../marketplace/mcp-source";
 import { resumeMobileOneAutoRecovery } from "../one/mobile-auto-recovery";
+import { autoResolveOneTeamPreflight, prepareOneTeamPreflight } from "../one/team-preflight";
+import { isOneInvocationChat } from "../store/run-events";
 import {
   createDesktopMobileBridgeBuildActions,
   createDesktopMobileBridgeCloudAgentActions,
@@ -783,6 +785,46 @@ function mobileOneConversationTitle(userPrompt: string): string {
   return (firstLine || "One").slice(0, 200);
 }
 
+async function bindMobileOneTurn(
+  invocation: McpInvocationRequest,
+): Promise<McpInvocationRequest> {
+  const targets = invocation.taskForceTargets ?? [];
+  const oneInvocation: McpInvocationRequest = {
+    ...invocation,
+    oneMode: true,
+    taskForceTargets: undefined,
+  };
+  if (targets.length === 0) return oneInvocation;
+  if (!targets.every((target) => target.source === "local" && target.entityKind === "agent")) {
+    throw new Error("A turn-only remote agent requires an exact prepared Workforce release");
+  }
+  const task = findCanonicalTaskForChat(invocation.chatId);
+  const prepared = await prepareOneTeamPreflight({
+    chatId: invocation.chatId,
+    userPrompt: invocation.userPrompt,
+    expectedTaskId: task?.id ?? null,
+    expectedTaskVersion: task?.version ?? null,
+    requestedAgentIds: targets.map((target) => target.agentId),
+    permission: invocation.permissions === "read" ? "read" : "write",
+  });
+  if (prepared.kind !== "proposal" || !prepared.proposal.canConfirmTeam) {
+    throw new Error("The exact turn-only agent roster could not be prepared");
+  }
+  const resolved = await autoResolveOneTeamPreflight({
+    proposalId: prepared.proposal.proposalId,
+    expectedProposalVersion: prepared.proposal.version,
+    requestedRunId: invocation.runId ?? randomUUID(),
+  });
+  if (resolved.kind !== "reserved") {
+    throw new Error("The exact turn-only agent roster was not reserved");
+  }
+  return {
+    ...oneInvocation,
+    runId: resolved.ref.reservedRunId,
+    oneTeamPreflightRef: resolved.ref,
+  };
+}
+
 /** DESKTOP_MOBILE_BRIDGE: History strips in-memory data URLs; attachments never cross this v1 method. */
 function projectInvocationHistory(
   history: ReturnType<typeof invocationService.history>,
@@ -1438,8 +1480,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           // restart recovery, and One memory all retain the same conversation.
           appendChatMessage(chat.id, "user", input.userPrompt);
           if (input.liveMode) setChatContinuousMode(chat.id, true);
-          result = invocationService.start(
-            {
+          const invocation = await bindMobileOneTurn({
               chatId: chat.id,
               userPrompt: input.userPrompt,
               taskIntent: "conversation",
@@ -1453,7 +1494,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
               ...(input.networkMode ? { sessionRouting: true } : {}),
               ...(input.taskForceTargets ? { taskForceTargets: input.taskForceTargets } : {}),
               ...(input.images ? { images: input.images } : {}),
-            },
+            });
+          result = invocationService.start(
+            invocation,
             captureMobileOneInvocationBinding(),
           );
         } catch (error) {
@@ -1480,15 +1523,19 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           prejudgeOneRequestIntent(invocation, { timeoutMs: 4_000 }),
           prejudgeOneMemoryIntent(invocation, { timeoutMs: 4_000 }),
         ]).catch(() => undefined);
-        const workspaceBinding = captureInvocationWorkspaceBinding(
-          getChatWorkingFolder(invocation.chatId),
-        );
+        const mobileOneTurn = isOneInvocationChat(invocation.chatId);
+        const effectiveInvocation = mobileOneTurn
+          ? await bindMobileOneTurn(invocation)
+          : invocation;
+        const workspaceBinding = mobileOneTurn
+          ? captureMobileOneInvocationBinding()
+          : captureInvocationWorkspaceBinding(getChatWorkingFolder(invocation.chatId));
         const rollbackQuestionClaim = decisionAnswer
           ? claimPendingConfirmationAnswer(invocation.chatId, decisionAnswer.decisionId)
           : null;
         let result;
         try {
-          result = invocationService.start(invocation, workspaceBinding);
+          result = invocationService.start(effectiveInvocation, workspaceBinding);
         } catch (error) {
           rollbackQuestionClaim?.();
           throw error;

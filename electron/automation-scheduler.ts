@@ -313,6 +313,9 @@ function handleAutomationFailure(a: Automation, error: string): void {
         runId,
         chatId: chat.chat.id,
         userPrompt: prompt,
+        // 제품이 스스로 보내는 복구 지시다. 표시하면 "사용자가 이렇게 말했다"로 읽히고,
+        // 세션 대화에 내부 프롬프트("Private evidence …")가 그대로 노출된다.
+        promptOrigin: "system" as const,
         permissions: schedulerExecutionPermission(a),
         toolMode: "auto" as const,
         hubMode: a.hubMode ?? "hub-allowed",

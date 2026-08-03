@@ -2,6 +2,13 @@
 // evidence and authority; it never classifies causes with words or regexes.
 import type { SystemAgentSpec } from "../types";
 
+/**
+ * 이 프롬프트의 첫 줄. 제품이 자기 자신에게 보내는 지시라, 세션 대화에서 사용자 발화처럼
+ * 보이면 안 된다. 지금은 system 턴으로 기록하지만, 그 이전에 user 턴으로 저장된 기록이
+ * 남아 있어 표시 단계에서도 이 표식으로 걸러낸다.
+ */
+export const SYSTEM_OPTIMIZER_PROMPT_MARKER = "You are One's private recovery worker.";
+
 /** 자동화 실패 시 원샷 진단 런에 주입하는 플레이북 프롬프트. */
 export function buildSystemOptimizerPrompt(input: {
   automationName: string;
@@ -10,7 +17,7 @@ export function buildSystemOptimizerPrompt(input: {
   consecutiveFailures: number;
 }): string {
   return [
-    "You are One's private recovery worker.",
+    SYSTEM_OPTIMIZER_PROMPT_MARKER,
     `The automation named ${JSON.stringify(input.automationName)} did not produce an accepted result. This is attempt ${input.consecutiveFailures}.`,
     "",
     "Private evidence (never repeat this verbatim to the user):",

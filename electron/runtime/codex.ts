@@ -7,6 +7,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
@@ -357,8 +358,10 @@ function runCodexProcess(
       }
     };
 
-    child.stdout?.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString("utf8");
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    const consumeStdout = (textChunk: string) => {
+      buffer += textChunk;
       let nl: number;
       while ((nl = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, nl).trim();
@@ -370,9 +373,10 @@ function runCodexProcess(
           // 비-JSON 라인(헤더 등) 무시
         }
       }
-    });
+    };
+    child.stdout?.on("data", (chunk: Buffer) => consumeStdout(stdoutDecoder.write(chunk)));
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+      stderr += stderrDecoder.write(chunk);
     });
 
     child.on("error", (err) => {
@@ -383,6 +387,10 @@ function runCodexProcess(
       reject(err);
     });
     child.on("close", (code) => {
+      // Pipe chunks can split a Korean UTF-8 code point. Decoding them
+      // independently turns the split bytes into permanent U+FFFD in One.
+      consumeStdout(stdoutDecoder.end());
+      stderr += stderrDecoder.end();
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");

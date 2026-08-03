@@ -6,7 +6,7 @@ import { useT } from "@/lib/i18n";
 import type {
   AuthSession,
   HephaestusCommandResult,
-  HephaestusStatus,
+  HephaestusRecoveryResult,
   HephaestusUpdateJournal,
   InstalledMcpServer,
   MarketplaceSourceStatus,
@@ -22,6 +22,7 @@ interface ReadinessItem {
   label: string;
   detail: string;
   status: ReadinessStatus;
+  actions?: Array<{ actionId: string; label: string }>;
 }
 
 interface ReadinessSnapshot {
@@ -175,14 +176,15 @@ export function RuntimeReadiness() {
       api.app.getVersion(),
       api.auth.getSession(),
       api.runtime.detect(deep),
-      api.hephaestus.status(locale),
+      api.hephaestus.recover({ locale }),
       api.hephaestus.updateJournal(),
       within(api.marketplace.status(deep), HUB_READINESS_TIMEOUT_MS),
       api.mcpTools.listInstalled(),
       api.mcpTools.status(),
       deep ? api.updater.check() : api.updater.getState(),
     ]);
-    const engine = fulfilled(engineResult) as HephaestusStatus | null;
+    const engineRecovery = fulfilled(engineResult) as HephaestusRecoveryResult | null;
+    const engine = engineRecovery?.status ?? null;
     const engineJournal = fulfilled(engineJournalResult) as HephaestusUpdateJournal | null;
     let doctor: HephaestusCommandResult | null = null;
     if (deep && engine?.available) {
@@ -227,8 +229,8 @@ export function RuntimeReadiness() {
       {
         id: "agentlas-os",
         label: "Agentlas OS",
-        detail: !engine?.available
-          ? (engine?.reason || (ko ? "Agentlas OS 엔진을 찾지 못했습니다." : "Agentlas OS engine was not found."))
+        detail: !engineRecovery?.verified || !engine
+          ? (engineRecovery?.presentation?.summary ?? "")
           : deep && !doctor?.ok
             ? (ko ? "엔진은 있지만 자가진단을 통과하지 못했습니다." : "The engine exists but did not pass its self-check.")
             : engine.source === "bundled"
@@ -249,13 +251,14 @@ export function RuntimeReadiness() {
               : deep
                 ? (ko ? `자가진단 통과${engine.version ? ` · v${engine.version}` : ""}` : `Self-check passed${engine.version ? ` · v${engine.version}` : ""}`)
                 : (ko ? `Agentlas OS 엔진 사용 가능${engine.version ? ` · v${engine.version}` : ""}` : `Agentlas OS engine available${engine.version ? ` · v${engine.version}` : ""}`),
-        status: !engine?.available || (deep && !doctor?.ok)
-          ? "blocked"
+        status: !engineRecovery?.verified || !engine
+          ? (engineRecovery?.presentation ? "attention" : "checking")
           : engine.source === "override"
             ? "attention"
             : engine.source === "bundled" && engineJournal?.status !== "current"
               ? "checking"
             : "ready",
+        actions: engineRecovery?.presentation?.options,
       },
       {
         id: "hub",
@@ -343,7 +346,20 @@ export function RuntimeReadiness() {
           <div key={item.id} className="dashboard-readiness-item" data-readiness-id={item.id} data-readiness-status={item.status}>
             <div>
               <strong>{item.label}</strong>
-              <span>{item.detail}</span>
+              {item.detail && <span>{item.detail}</span>}
+              {item.actions?.map((action) => (
+                <button
+                  type="button"
+                  key={action.actionId}
+                  data-dashboard-action="true"
+                  onClick={async () => {
+                    const result = await ipc()?.hephaestus.recover({ locale, actionId: action.actionId });
+                    if (result) void inspect(true);
+                  }}
+                >
+                  {action.label}
+                </button>
+              ))}
             </div>
             <span className="dashboard-readiness-state">{statusText(item.status, ko)}</span>
           </div>

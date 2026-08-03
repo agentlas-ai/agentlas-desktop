@@ -114,6 +114,7 @@ export const runOllama: Runner = async (
       runtimeKind: "ollama",
       host,
       model,
+      keepAlive: process.env.OLLAMA_KEEP_ALIVE?.trim() || "10m",
       unreachableMessage: tStatus(req.locale, "errOllamaUnreachable", { host }),
     },
     messages,

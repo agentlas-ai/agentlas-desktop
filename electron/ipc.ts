@@ -159,6 +159,7 @@ import { previewBuildAllocation, runHephaestusBuild } from "./hephaestus/builder
 import { resolveHephaestusBuildRequest, resolveHephaestusBuildRequestForRun } from "./hephaestus/build-access";
 import { pickLocale } from "./runtime/status-i18n";
 import { currentUiLocale } from "./ui-locale";
+import { SYSTEM_OPTIMIZER_PROMPT_MARKER } from "./system-agents/system-optimizer";
 import { buildChatRecap, markChatRecapViewed } from "./chat/recap";
 import { startStudio, stopStudio } from "./hephaestus/studio";
 import type {
@@ -3743,6 +3744,15 @@ export function registerIpcHandlers(): void {
     });
   });
   ipcMain.handle("automations:latestRun", (_e, id: string) => getLatestGraphRun(id));
+  // 멈춘 자동화의 "지금 무엇을 하면 되는지" — 실행 가능한 조치까지 포함해 계산한다.
+  ipcMain.handle("automations:planFix", async (_e, id: string) => {
+    const { planAutomationFix } = await import("./automation-fix");
+    return planAutomationFix(id);
+  });
+  ipcMain.handle("automations:applyFix", async (_e, id: string, actionId: string) => {
+    const { applyAutomationFix } = await import("./automation-fix");
+    return applyAutomationFix(id, actionId);
+  });
   ipcMain.handle("automations:getSession", (_e, id: string) => {
     const automation = getAutomation(id);
     if (!automation) throw new Error(`Automation not found: ${id}`);
@@ -3758,7 +3768,12 @@ export function registerIpcHandlers(): void {
     return {
       id: session.id,
       automationId: automation.id,
-      messages: listChatMessages(session.chat.id),
+      chatId: session.chat.id,
+      // 제품이 스스로 보낸 복구 지시는 대화가 아니다. 예전에 user 턴으로 저장된 것들이
+      // "요청"으로 보이면서 내부 프롬프트("Private evidence …")까지 노출됐다.
+      messages: listChatMessages(session.chat.id).filter(
+        (message) => !message.text.startsWith(SYSTEM_OPTIMIZER_PROMPT_MARKER),
+      ),
       updatedAt: session.chat.updatedAt,
     };
   });
@@ -4229,6 +4244,10 @@ export function registerIpcHandlers(): void {
   // 임베딩된 오픈소스 엔진(Hephaestus)을 범용 CLI/JSON 으로 호출한다. 엔진 측에는 데스크탑
   // 흔적이 없고, 모든 연결 코드는 electron/hephaestus/* + 아래 핸들러에만 존재한다.
   ipcMain.handle("hephaestus:status", (_e, locale?: "ko" | "en") => hephaestusAvailable(locale));
+  ipcMain.handle("hephaestus:recover", async (_e, input?: { locale?: "ko" | "en"; actionId?: string }) => {
+    const { recoverHephaestusRuntime } = await import("./one/hephaestus-recovery");
+    return recoverHephaestusRuntime(input);
+  });
   ipcMain.handle("hephaestus:coreAuthStatus", () => hepAuthStatus());
   // 로그인은 브라우저를 띄우고 최대 3분 기다린다. 두 번 겹치면 Core 의 콜백 서버가
   // 포트를 두고 다투므로 하나로 직렬화한다.

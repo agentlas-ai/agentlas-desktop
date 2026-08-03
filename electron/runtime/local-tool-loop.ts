@@ -9,6 +9,7 @@
 // InstalledMcpServer 목록에서 역으로 찾아 testServerConnection/callServerTool을 그대로
 // 재사용한다 — Transport 생성 로직을 새로 만들지 않는다.
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import type { RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
 import { tStatus } from "./status-i18n";
@@ -16,6 +17,7 @@ import { listInstalledServers } from "../mcp-tools/registry";
 import { mcpConfigKey } from "../mcp-tools/mcp-config";
 import { testServerConnection, callServerToolContent } from "../mcp-tools/client";
 import type { InstalledMcpServer } from "../../shared/types";
+import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 
 export type LocalChatContent =
   | { type: "text"; text: string }
@@ -247,6 +249,8 @@ export interface RunLocalOpenAiChatOptions {
   model: string;
   /** 연결 실패 시 메시지(로케일 이미 반영된 문자열) */
   unreachableMessage: string;
+  /** Ollama accepts this on its native API; OpenAI-compatible servers may ignore it. */
+  keepAlive?: string;
 }
 
 /**
@@ -260,6 +264,27 @@ export async function runLocalOpenAiChat(
   messages: ChatMessage[],
 ): Promise<RunnerResult> {
   const { req, events, runtimeKind, host, model } = opts;
+  const sessionFingerprint = req.chatId
+    ? createHash("sha256")
+        .update("local-chat-session-v1\0")
+        .update(host)
+        .update("\0")
+        .update(model)
+        .update("\0")
+        .update(req.sessionFingerprintSeed ?? req.systemPrompt ?? "")
+        .digest("hex")
+    : null;
+  const previousSession = req.chatId ? getRuntimeSession(req.chatId, runtimeKind) : null;
+  if (req.chatId && sessionFingerprint) {
+    // OpenAI-compatible local servers have no provider conversation ID. The
+    // durable Agentlas chat history is the source of truth, while this
+    // logical session record makes continuity visible and detects model/host
+    // changes without pretending the server supports native resume.
+    saveRuntimeSession(req.chatId, runtimeKind, req.chatId, sessionFingerprint);
+    if (previousSession && previousSession.fingerprint === sessionFingerprint) {
+      events.onStatus(req.locale === "ko" ? "로컬 모델 대화 기록 이어가는 중..." : "Continuing local model conversation history...");
+    }
+  }
   const { tools, byName } = await loadOpenAiTools(req.mcpConfigPath, req.cwd);
   if (tools.length > 0) {
     events.onStatus(tStatus(req.locale, "mcpToolsAttached", { count: tools.length }));
@@ -284,11 +309,12 @@ export async function runLocalOpenAiChat(
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: req.signal,
-        body: JSON.stringify({
-          model,
-          stream: true,
-          messages,
-          ...(tools.length > 0 ? { tools } : {}),
+          body: JSON.stringify({
+            model,
+            stream: true,
+            messages,
+            ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}),
+            ...(tools.length > 0 ? { tools } : {}),
         }),
       });
     } catch {
@@ -304,7 +330,7 @@ export async function runLocalOpenAiChat(
           method: "POST",
           headers: { "content-type": "application/json" },
           signal: req.signal,
-          body: JSON.stringify({ model, stream: true, messages }),
+            body: JSON.stringify({ model, stream: true, messages, ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}) }),
         });
         if (!fallback.ok) {
           const fallbackErrText = await fallback.text().catch(() => "");

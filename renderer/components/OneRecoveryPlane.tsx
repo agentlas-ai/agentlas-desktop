@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import {
   ONE_OPERATIONAL_RECOVERY_EVENT,
   type OneOperationalRecoveryDetail,
@@ -41,7 +41,6 @@ function recoveryRetryDelay(attempts: number): number {
  * ownership to a worker.
  */
 export function OneRecoveryPlane() {
-  const [pendingCount, setPendingCount] = useState(0);
   const activeRef = useRef(false);
   const queueRef = useRef<QueuedRecovery[]>([]);
   const queuedFingerprintsRef = useRef<Set<string>>(new Set());
@@ -58,8 +57,6 @@ export function OneRecoveryPlane() {
         void drain();
       }, delayMs);
     };
-
-    const syncPendingCount = () => setPendingCount(queueRef.current.length);
 
     const drain = async () => {
       if (disposed || activeRef.current) return;
@@ -144,7 +141,6 @@ export function OneRecoveryPlane() {
         queueRef.current.shift();
         queuedFingerprintsRef.current.delete(queued.fingerprint);
         recentRef.current.set(queued.fingerprint, Date.now());
-        syncPendingCount();
         scheduleDrain(0);
       } else {
         scheduleDrain(queued.started ? 1_000 : recoveryRetryDelay(queued.attempts));
@@ -153,10 +149,13 @@ export function OneRecoveryPlane() {
 
     const recover = (event: Event) => {
       const detail = (event as CustomEvent<OneOperationalRecoveryDetail>).detail;
-      if (!detail?.scope) return;
+      const scope = detail?.scope?.trim();
+      const evidence = detail?.evidence?.trim();
+      // Missing evidence is not a failure class and code may not invent one.
+      if (!scope || !evidence) return;
       const normalized: OneOperationalRecoveryDetail = {
-        scope: detail.scope,
-        evidence: detail.evidence || "No diagnostic text was supplied; inspect the current authoritative state.",
+        scope,
+        evidence,
       };
       const fingerprint = `${normalized.scope}\u0000${normalized.evidence}`;
       const now = Date.now();
@@ -173,7 +172,6 @@ export function OneRecoveryPlane() {
         attempts: 0,
         started: false,
       });
-      syncPendingCount();
       scheduleDrain(0);
     };
     window.addEventListener(ONE_OPERATIONAL_RECOVERY_EVENT, recover);
@@ -185,27 +183,7 @@ export function OneRecoveryPlane() {
     };
   }, []);
 
-  if (pendingCount === 0) return null;
-  return (
-    <div
-      aria-live="polite"
-      style={{
-        position: "fixed",
-        left: "50%",
-        bottom: 22,
-        zIndex: 2147483647,
-        transform: "translateX(-50%)",
-        maxWidth: "min(520px, calc(100vw - 32px))",
-        padding: "11px 16px",
-        border: "1px solid var(--paper-edge, rgba(0, 0, 0, .12))",
-        borderRadius: 12,
-        background: "var(--ink, #111)",
-        color: "var(--paper, #fff)",
-        boxShadow: "0 12px 36px rgba(0, 0, 0, .18)",
-        pointerEvents: "none",
-      }}
-    >
-      <div style={{ fontSize: 15, fontWeight: 750 }}>One이 확인하고 바로잡고 있습니다.</div>
-    </div>
-  );
+  // Recovery stays silent until One authors a useful result or a
+  // capability-bound question. Code does not expose a failure or canned state.
+  return null;
 }

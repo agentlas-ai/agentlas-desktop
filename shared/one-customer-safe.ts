@@ -1,128 +1,33 @@
-// One is a single, calm chief-of-staff surface. A person using One must never
-// see the machinery underneath it: which CLI or runtime executed, which internal
-// studio/agent was borrowed, a run/session id, or a raw result-schema term.
-//
-// This module is the ONE customer-safe boundary the beta feedback asked for
-// ("a single customer-safe renderer in front of every progress, error, result,
-// and confirmation surface"). It is a pure string layer with no imports so it
-// can run in the renderer, the main process, and the regression test alike.
+// One owns semantic presentation. Code must not infer meaning from words,
+// classify model output, or replace it with a canned sentence.
 
 export type OneSafeLocale = "ko" | "en";
 
 /**
- * Internal execution vocabulary. Anything matching these must be stripped from,
- * or must fully suppress, a customer-visible One string. The list is derived
- * from the concrete leaks captured in the official v2 beta cut
- * (betatester/03-audit/official-v2-cut-feedback.md): `Calling Codex CLI...`,
- * `runtime-session`, `Agentlas Orchestrator`, `Meme Shorts Studio`,
- * `exactly one safe Surface`, `structured result`, and the disabled-workbench copy.
+ * Runtime progress strings are untrusted operational evidence. One's visible
+ * progress uses its structured stage projection, so every non-empty free-form
+ * runtime status stays private without inspecting its vocabulary.
  */
-const INTERNAL_TOKEN_PATTERNS: RegExp[] = [
-  // "Calling Codex CLI..." / "Calling {backend}..." and the Korean "…CLI 호출 중…"
-  /calling\s+[^\n.]*?\bcli\b[.…]*/gi,
-  /[^\n.]*?\bcli\b\s*호출\s*(?:중)?[.…]*/g,
-  // Bare backend/CLI runtime names.
-  /\b(?:codex|claude code|claude|gemini|grok|ollama|kimi|glm)\s+cli\b/gi,
-  // Session / run identifiers.
-  /\bruntime[-\s]?session\b[:\w-]*/gi,
-  /\brun[-\s]?id\b\s*[:=]?\s*[\w-]{6,}/gi,
-  // Orchestration internals.
-  /\bagentlas\s+orchestrator\b/gi,
-  /\bagentlas\s*오케스트레이터\b/g,
-  /\bstormbreaker(?:\s+loop)?\b/gi,
-  /\bscope[-\s]?lock\b/gi,
-  // Result-transport schema terms that must never read as product copy. These stay
-  // narrow on purpose: "one surface" and "structured result" are ordinary English
-  // ("let's consolidate this into one surface", "here is a structured result of your
-  // data"), and stripping them from a good answer used to empty the string, which
-  // replaced the whole reply with "this result was not completed here". Only strip the
-  // internal schema spellings, not the plain-language ones.
-  /\bsafe\s+one\s+surface\b/gi,
-  /(?:exactly\s+)?one\s+safe\s+surface/gi,
-  /\bone[-\s]surface\s+(?:manifest|schema|contract|envelope|transport|payload)\b/gi,
-  /\bsurface\s+manifest\b/gi,
-  /\bstructured\s+result\s+(?:manifest|schema|contract|envelope|transport|payload)\b/gi,
-  /\bworkbench\s+generation\b/gi,
-];
-
-/** Full developer-facing sentences that, if seen, are replaced wholesale. */
-const INTERNAL_SENTENCE_PATTERNS: RegExp[] = [
-  /automatic app\s*\/?\s*workbench generation is disabled[^.\n]*\.?/gi,
-  /앱\s*\/?\s*패널 자동 생성은 꺼져 있습니다[^.\n]*\.?/g,
-  /the (?:team run completed, but its )?structured result[^.\n]*\.?/gi,
-  /구조화(?:된)? 결과[^.\n]*(?:않았습니다|검증되지 않아 표시하지 않았습니다)\.?/g,
-];
-
-/** Runtime diagnostics that are internal only when used as progress details. */
-const INTERNAL_PROGRESS_PATTERNS: RegExp[] = [
-  // Provider-prefixed diagnostics such as:
-  // "codex: Skill descriptions were shortened to fit the 2% skills context budget."
-  /^\s*(?:codex|claude(?:\s+code)?|gemini|grok|ollama|kimi|glm)\s*:/i,
-  // Model/runtime transport envelopes are never progress copy. Keep this in the
-  // progress-only boundary so a final answer can still contain JSON when the
-  // user explicitly asked for JSON.
-  /^\s*[\[{]/,
-  /"(?:type|role|arguments|command|tool|schemaVersion|event|payload)"\s*:/i,
-  /(?:^|\s)(?:tool_call|function_call|exec_command|write_stdin|apply_patch|mcp__)(?:\s|$)/i,
-  /<\|(?:system|assistant|tool|end)[^>]*\|>/i,
-  /^\s*(?:\$|>|#)\s*(?:bash|zsh|sh|python\d*|node|npm|npx|pnpm|yarn|git)\b/im,
-  /\bskills?\s+context\s+budget\b/i,
-  /\bskill descriptions?\s+(?:were\s+)?shortened\b/i,
-  /\bsession hooks?\b/i,
-  /\bruntime[-\s]?session\b/i,
-];
-
-/** True when a progress status is purely internal and should not be shown at all. */
 export function isInternalProgressStatus(status: string | null | undefined): boolean {
-  if (!status) return false;
-  return [...INTERNAL_TOKEN_PATTERNS, ...INTERNAL_PROGRESS_PATTERNS].some((pattern) => {
-    pattern.lastIndex = 0;
-    return pattern.test(status);
-  });
+  return Boolean(status?.trim());
 }
 
 /**
- * Reduce a raw runtime status into a customer-safe progress hint, or "" when
- * nothing safe survives. One already shows a calm five-stage label, so dropping
- * an internal detail is always safe — it is never the only progress signal.
+ * Free-form runtime status never becomes customer copy. The structured One
+ * stage remains visible and no semantic fallback is manufactured here.
  */
-export function customerSafeProgressDetail(status: string | null | undefined): string {
-  if (!status) return "";
-  // A status like "Meme Shorts Studio · Calling Codex CLI..." carries an agent
-  // name prefix and an internal call. Strip the prefix, then the internal parts.
-  const withoutPrefix = status.includes(" · ") ? status.slice(status.lastIndexOf(" · ") + 3) : status;
-  if (isInternalProgressStatus(withoutPrefix) || isInternalProgressStatus(status)) return "";
-  return withoutPrefix.trim();
+export function customerSafeProgressDetail(_status: string | null | undefined): string {
+  return "";
 }
 
 /**
- * Strip internal execution vocabulary from any customer-visible One text
- * (final answer, system note, error). Whole developer sentences are replaced
- * with a neutral fallback so a leaked schema line never reads as product copy.
+ * Final text and diagnoses reaching this boundary are already One-authored.
+ * Preserve them byte-for-byte; safety and capability validation belong to the
+ * structured authority boundary, not a regex, keyword list, or dictionary.
  */
 export function toCustomerSafeText(
   text: string | null | undefined,
-  locale: OneSafeLocale = "en",
+  _locale: OneSafeLocale = "en",
 ): string {
-  if (!text) return "";
-  let out = text;
-  for (const pattern of INTERNAL_SENTENCE_PATTERNS) {
-    out = out.replace(pattern, "");
-  }
-  for (const pattern of INTERNAL_TOKEN_PATTERNS) {
-    out = out.replace(pattern, "");
-  }
-  // A clean customer answer must pass through byte-for-byte: only touch spacing
-  // and fall back to neutral copy when we actually removed internal vocabulary.
-  if (out === text) return text;
-  // Collapse the whitespace / empty bullets a removal can leave behind.
-  out = out
-    .replace(/^[ \t]*[·\-*]\s*$/gm, "")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  if (out) return out;
-  return locale === "ko"
-    ? "이 결과는 여기서 완성되지 않았어요. 지금까지 확인된 내용만 남겨뒀어요."
-    : "This result was not completed here. Only what was verified so far is kept.";
+  return text ?? "";
 }

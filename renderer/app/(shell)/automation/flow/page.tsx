@@ -16,6 +16,7 @@ import {
   addEdge,
   useNodesState,
   useEdgesState,
+  useReactFlow,
   type Node,
   type Edge,
   type Connection,
@@ -33,9 +34,11 @@ import { NODE_ACCENT } from "@/components/automation/nodes/nodeShared";
 import { NodePalette, type PaletteNodeSeed } from "@/components/automation/NodePalette";
 import { NodeConfigPanel } from "@/components/automation/NodeConfigPanel";
 import { RunHistoryPanel } from "@/components/automation/RunHistoryPanel";
-import { AutomationRail } from "@/components/automation/AutomationRail";
 import { AutomationSessionPanel } from "@/components/automation/AutomationSessionPanel";
 import { IconBolt } from "@/components/Icon";
+
+/** 좌/우 패널 접힘 상태 — 화면을 다시 열어도 사용자가 정한 레이아웃을 유지한다. */
+const PANEL_STATE_KEY = "agentlas.automation.flow.panels";
 
 export default function AutomationFlowWrapper() {
   return (
@@ -97,7 +100,45 @@ function AutomationFlowPage() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  // 좌(세션 대화)·우(노드 검사 + 실행 기록) 패널 접기. 캔버스가 좁은 화면에서 가장 먼저
+  // 희생되던 문제를 사용자가 직접 해소할 수 있게 한다. 선택은 로컬에 남는다.
+  const [leftOpen, setLeftOpen] = useState(true);
+  const [rightOpen, setRightOpen] = useState(true);
   const seq = useRef(0);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(PANEL_STATE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as { left?: boolean; right?: boolean };
+      if (typeof saved.left === "boolean") setLeftOpen(saved.left);
+      if (typeof saved.right === "boolean") setRightOpen(saved.right);
+    } catch {
+      // 저장된 값이 깨졌으면 기본값(둘 다 열림)으로 둔다.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PANEL_STATE_KEY, JSON.stringify({ left: leftOpen, right: rightOpen }));
+    } catch {
+      // 저장 실패는 이 화면의 동작을 막지 않는다.
+    }
+  }, [leftOpen, rightOpen]);
+
+  // 패널을 접었는데 그래프가 원래 자리에 그대로 있으면 넓어진 캔버스가 빈 여백으로 보인다.
+  // 폭이 바뀐 다음 프레임에 다시 맞춘다.
+  const { fitView } = useReactFlow();
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      try {
+        fitView({ padding: 0.3, maxZoom: 1 });
+      } catch {
+        // 캔버스가 아직 준비되지 않았으면 다음 상호작용에서 맞춰진다.
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [fitView, leftOpen, rightOpen]);
 
   const [rfNodes, setRfNodes, onNodesChangeBase] = useNodesState<Node<WorkflowNodeData>>([]);
   const [rfEdges, setRfEdges, onEdgesChangeBase] = useEdgesState<Edge>([]);
@@ -588,8 +629,27 @@ function AutomationFlowPage() {
       ) : null}
 
       <div className="automation-flow-workspace">
-        <AutomationRail currentId={automation.id} locale={locale} />
-        <AutomationSessionPanel automationId={automation.id} locale={locale} />
+        {leftOpen ? (
+          <AutomationSessionPanel
+            automationId={automation.id}
+            locale={locale}
+            toolMode={automation.toolMode}
+            hubMode={automation.hubMode}
+            executionPermission={automation.executionPermission}
+            onCollapse={() => setLeftOpen(false)}
+          />
+        ) : (
+          <button
+            type="button"
+            className="automation-panel-tab titlebar-nodrag"
+            data-side="left"
+            onClick={() => setLeftOpen(true)}
+            aria-label={locale === "en" ? "Show session" : "세션 대화 펼치기"}
+          >
+            <span>⟩</span>
+            <em>{locale === "en" ? "Session" : "세션 대화"}</em>
+          </button>
+        )}
         <div className="automation-flow-canvas">
           {isSynthesized && !editing ? (
             <div
@@ -629,7 +689,30 @@ function AutomationFlowPage() {
           </ReactFlow>
         </div>
 
+        {!rightOpen ? (
+          <button
+            type="button"
+            className="automation-panel-tab titlebar-nodrag"
+            data-side="right"
+            onClick={() => setRightOpen(true)}
+            aria-label={locale === "en" ? "Show details" : "상세 패널 펼치기"}
+          >
+            <span>⟨</span>
+            <em>{locale === "en" ? "Details" : "상세"}</em>
+          </button>
+        ) : (
         <aside className="automation-inspector-column">
+          <div className="automation-inspector-bar">
+            <span>{locale === "en" ? "Details" : "상세"}</span>
+            <button
+              type="button"
+              onClick={() => setRightOpen(false)}
+              aria-label={locale === "en" ? "Collapse details" : "상세 패널 접기"}
+              title={locale === "en" ? "Collapse details" : "상세 패널 접기"}
+            >
+              ⟩
+            </button>
+          </div>
           {editing && paletteOpen ? (
             <NodePalette onAdd={addPaletteNode} onClose={() => setPaletteOpen(false)} />
           ) : editing && selectedNode ? (
@@ -641,6 +724,7 @@ function AutomationFlowPage() {
           )}
           <RunHistoryPanel automation={automation} locale={locale} compact />
         </aside>
+        )}
       </div>
     </div>
   );

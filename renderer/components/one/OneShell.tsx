@@ -1946,6 +1946,35 @@ export function OneShell() {
     router.push(`/one?chat=${encodeURIComponent(chatId)}`);
   }, [router]);
 
+  const removeConversation = useCallback(async (chatId: string) => {
+    const api = ipc();
+    if (!api?.chats?.remove) {
+      requestOneOperationalRecovery("one-chat-remove", new Error("Desktop bridge unavailable"));
+      return;
+    }
+    if (activeChatIds.includes(chatId)) {
+      window.alert(appLocale === "ko" ? "실행 중인 대화는 먼저 중지한 뒤 삭제할 수 있어요." : "Stop the active run before deleting this conversation.");
+      return;
+    }
+    const target = conversations.find((item) => item.id === chatId);
+    const title = target ? briefingSourceName(target.title, appLocale) : (appLocale === "ko" ? "이 대화" : "this conversation");
+    if (!window.confirm(appLocale === "ko" ? `\"${title}\" 대화를 삭제할까요?` : `Delete \"${title}\"?`)) return;
+    try {
+      await api.chats.remove(chatId);
+      if (selectedConversationIdRef.current === chatId) {
+        selectedConversationIdRef.current = null;
+        setConversation(null);
+        setMessages([]);
+        setSurface(null);
+        setReceipt(null);
+        router.replace("/one");
+      }
+      await refreshAll();
+    } catch (cause) {
+      requestOneOperationalRecovery("one-chat-remove", cause);
+    }
+  }, [activeChatIds, appLocale, conversations, refreshAll, router]);
+
   const mutateTaskArchive = useCallback(async (taskId: string, operation: "archive" | "restore") => {
     const api = ipc();
     if (archiveMutationTaskId) return;
@@ -2657,7 +2686,7 @@ export function OneShell() {
           <div className={styles.railTop}><strong>{tFor(appLocale, "one.shell.rail.recent")}</strong></div>
           <div className={styles.railList}>
             {conversations.length > 0 && <p className={styles.railSectionLabel}>{tFor(appLocale, "one.shell.rail.section_conversations")}</p>}
-            {conversations.map((item) => <ConversationListButton key={item.id} item={item} active={item.id === selectedConversationId} locale={appLocale} onOpen={openConversation} />)}
+            {conversations.map((item) => <ConversationListButton key={item.id} item={item} active={item.id === selectedConversationId} locale={appLocale} onOpen={openConversation} onRemove={removeConversation} />)}
             {projections.length > 0 && <p className={styles.railSectionLabel}>{tFor(appLocale, "one.shell.rail.section_work")}</p>}
             {projections.map((item) => <TaskListButton key={item.taskId} item={item} active={item.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />)}
             {projections.length === 0 && conversations.length === 0 && <div className={styles.railEmpty}>{tFor(appLocale, "one.shell.rail.empty")}</div>}
@@ -3189,7 +3218,7 @@ export function OneShell() {
               <div className={styles.searchResults} aria-live="polite" aria-busy={searchLoading || searchLoadingMore}>
                 {!query.trim() && (
                   <>
-                    {filteredConversations.map((item) => <ConversationListButton key={item.id} item={item} active={item.id === selectedConversationId} locale={appLocale} onOpen={openConversation} />)}
+                    {filteredConversations.map((item) => <ConversationListButton key={item.id} item={item} active={item.id === selectedConversationId} locale={appLocale} onOpen={openConversation} onRemove={removeConversation} />)}
                     {filtered.map((item) => <TaskListButton key={item.taskId} item={item} active={item.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />)}
                     {filtered.length === 0 && filteredConversations.length === 0 && <div className={styles.railEmpty}>{tFor(appLocale, "one.shell.search.no_history")}</div>}
                   </>
@@ -3291,13 +3320,15 @@ function TaskListButton({ item, active, locale, onOpen }: { item: OneTaskProject
   );
 }
 
-function ConversationListButton({ item, active, locale, onOpen }: { item: Chat; active: boolean; locale: "ko" | "en"; onOpen: (chatId: string) => void }) {
+function ConversationListButton({ item, active, locale, onOpen, onRemove }: { item: Chat; active: boolean; locale: "ko" | "en"; onOpen: (chatId: string) => void; onRemove: (chatId: string) => Promise<void> }) {
   return (
-    <button type="button" className={styles.taskButton} data-active={active ? "true" : "false"} onClick={() => onOpen(item.id)} aria-current={active ? "page" : undefined}>
-      <strong>{briefingSourceName(item.title, locale)}</strong>
-      <small>{tFor(locale, "one.shell.convlist.conversation")} · {formatTimestamp(item.updatedAt, locale)}</small>
-      <span className={styles.conversationDot} aria-hidden="true" />
-    </button>
+    <div className={styles.conversationRow}>
+      <button type="button" className={styles.taskButton} data-active={active ? "true" : "false"} onClick={() => onOpen(item.id)} aria-current={active ? "page" : undefined}>
+        <strong>{briefingSourceName(item.title, locale)}</strong>
+        <small>{tFor(locale, "one.shell.convlist.conversation")} · {formatTimestamp(item.updatedAt, locale)}</small>
+      </button>
+      <button type="button" className={styles.conversationDelete} onClick={(event) => { event.stopPropagation(); void onRemove(item.id); }} aria-label={locale === "ko" ? "대화 삭제" : "Delete conversation"}>×</button>
+    </div>
   );
 }
 

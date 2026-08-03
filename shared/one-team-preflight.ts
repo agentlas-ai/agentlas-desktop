@@ -113,6 +113,8 @@ export interface PrepareOneTeamPreflightInput {
   userPrompt: string;
   expectedTaskId: string | null;
   expectedTaskVersion: number | null;
+  /** Exact authority for this turn; omission preserves the Desktop default. */
+  permission?: OneTeamPreflightPermission;
   /** Explicit turn-only local sub-agents selected with @. */
   requestedAgentIds?: string[];
   /** Explicit optional override; omission leaves team need to One's judgment. */
