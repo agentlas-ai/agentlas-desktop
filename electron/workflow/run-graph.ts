@@ -46,6 +46,47 @@ export interface RunGraphOptions {
   initialVars?: Record<string, unknown>;
   /** Abort 후 취소를 무시하는 노드를 기다릴 정리 유예. 테스트는 짧게 주입한다. */
   abortGraceMs?: number;
+  /**
+   * 시뮬레이션 실행. 외부에 나가는 변경을 막고, 무엇이 막혔는지 영수증으로 남긴다.
+   * 켜지면 ① 모든 노드 호출이 읽기 권한으로 강등되고(런타임이 쓰기를 거부한다),
+   * ② 부수효과 노드(effect: "mutation")는 아예 호출하지 않고 모의 결과를 돌려준다.
+   */
+  dryRun?: boolean;
+}
+
+/** 노드가 바깥 세상에 무엇을 하는가. 선언하지 않으면 시뮬레이션에서 변경으로 간주한다(fail-closed). */
+export type GraphNodeEffect = "pure" | "read" | "mutation";
+
+/** 시뮬레이션 영수증 한 줄 — "실전이었으면 무엇이 일어났는가". */
+export type GraphDryRunBlock = {
+  nodeId: string;
+  nodeLabel: string;
+  effect: GraphNodeEffect;
+  reason: string;
+};
+
+/**
+ * 노드 단위 실행 상한. 선언이 없으면 이 값이 걸린다 — 상한 없는 노드는 무한정 붙잡혀
+ * 있을 수 있고, 실행 전체를 보는 워치독은 "활동이 없는 것"만 잡지 "끝나지 않는 것"은 못 잡는다.
+ */
+const DEFAULT_NODE_TIMEOUT_MS = 60 * 60 * 1000;
+const MIN_NODE_TIMEOUT_MS = 1_000;
+
+function nodeTimeoutMs(node: WorkflowNode): number {
+  const raw = node.config?.timeoutSeconds;
+  const seconds = typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+  if (seconds === null) return DEFAULT_NODE_TIMEOUT_MS;
+  return Math.max(MIN_NODE_TIMEOUT_MS, Math.floor(seconds * 1000));
+}
+
+function nodeEffect(node: WorkflowNode): GraphNodeEffect {
+  const raw = str(node.config, "effect");
+  return raw === "pure" || raw === "read" || raw === "mutation" ? raw : "read";
+}
+
+function nodeMaxTokens(node: WorkflowNode): number | null {
+  const raw = node.config?.maxTokens;
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null;
 }
 
 function durableInitialVars(value: unknown): Record<string, unknown> {
@@ -81,6 +122,14 @@ export interface RunGraphResult {
    * 사유 원문 없이 코드만 보여주거나, 지금 누를 행동 없이 실패만 알리는 표면은 결함이다.
    */
   nodeFailures?: Record<string, GraphNodeFailure>;
+  /** 시뮬레이션 실행이었는가. 결과를 실전 결과로 오해하지 않도록 항상 함께 전달한다. */
+  dryRun?: boolean;
+  /** 시뮬레이션에서 막은 부수효과 목록(실전이었으면 일어났을 일). */
+  dryRunBlocks?: GraphDryRunBlock[];
+  /** 이번 실행이 실제로 쓴 토큰(런타임 보고 합계). */
+  tokensUsed?: number;
+  /** 상한이 선언됐는데 런타임이 사용량을 보고하지 않아 집행할 수 없었는가. */
+  budgetUnmeasured?: boolean;
 }
 
 const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v3";
@@ -983,6 +1032,61 @@ export async function runGraph(
   const reachability = buildReachability(graph);
   /** 변수 이름 → 이번 실행에서 그 변수를 쓴 노드들. */
   const varWriters = new Map<string, string[]>();
+  const dryRun = opts.dryRun === true;
+  /** 시뮬레이션에서 막은 것들 — "실전이었으면 무엇이 일어났는가"를 그대로 보여주는 영수증. */
+  const dryRunBlocks: GraphDryRunBlock[] = [];
+  /** 런타임이 보고한 토큰 누계(실행 전체 / 노드별). 보고가 없으면 상한을 집행할 수 없다. */
+  let runTokensUsed = 0;
+  /** 관측된 노드 1회 최대 사용량 — 다음 노드를 띄워도 되는지 판단하는 예약치. */
+  let maxObservedNodeTokens = 0;
+  const nodeTokensUsed = new Map<string, number>();
+  /** 상한이 선언됐는데 런타임이 사용량을 보고하지 않은 경우 — 집행한 척하지 않고 고지한다. */
+  let budgetUnmeasured = false;
+  const runTokenCap = typeof graph.budget?.maxTokens === "number" && graph.budget.maxTokens > 0
+    ? Math.floor(graph.budget.maxTokens)
+    : null;
+
+  /**
+   * 노드를 띄우기 전 남은 예산을 확인한다. 넘겼으면 3요소를 돌려주고, 여유가 있으면 null.
+   *
+   * 예약치는 **이번 실행에서 실제로 관측된 최대 노드 사용량**이다. 다 쓴 뒤에 멈추면
+   * 상한은 이미 뚫린 뒤라 의미가 없고, 근거 없는 추정치를 쓰면 멀쩡한 실행을 막는다.
+   * 관측이 아직 없는 첫 노드는 예약할 근거가 없으므로 통과시킨다(모르면 지어내지 않는다).
+   */
+  const budgetGuard = (node: WorkflowNode): GraphNodeFailure | null => {
+    const label = node.label || node.id;
+    if (runTokenCap !== null && runTokensUsed + maxObservedNodeTokens > runTokenCap) {
+      const remaining = Math.max(0, runTokenCap - runTokensUsed);
+      return {
+        code: "BUDGET_EXHAUSTED",
+        reason:
+          `이번 실행의 남은 토큰(${remaining.toLocaleString()})으로는 "${label}"을(를) 돌릴 수 없습니다. ` +
+          `상한 ${runTokenCap.toLocaleString()} 중 ${runTokensUsed.toLocaleString()}을 썼고, 앞선 노드는 한 번에 최대 ${maxObservedNodeTokens.toLocaleString()} 토큰을 썼습니다.`,
+        nextAction: "상한을 올린 뒤 [이 노드부터 재실행]하거나, 앞 단계에서 넘기는 내용을 줄이세요.",
+      };
+    }
+    const cap = nodeMaxTokens(node);
+    const used = nodeTokensUsed.get(node.id) ?? 0;
+    if (cap !== null && used >= cap) {
+      return {
+        code: "BUDGET_EXHAUSTED",
+        reason: `노드 "${label}"이 자기 상한 ${cap.toLocaleString()} 토큰을 모두 썼습니다(현재 ${used.toLocaleString()}).`,
+        nextAction: "이 노드의 상한을 올리거나, 프롬프트를 줄여 다시 실행하세요.",
+      };
+    }
+    return null;
+  };
+
+  /** 실행 후 실제 사용량을 반영한다. 상한이 있는데 보고가 없으면 그 사실을 남긴다. */
+  const settleBudget = (node: WorkflowNode, tokens: number | undefined): void => {
+    if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens < 0) {
+      if (runTokenCap !== null || nodeMaxTokens(node) !== null) budgetUnmeasured = true;
+      return;
+    }
+    runTokensUsed += tokens;
+    nodeTokensUsed.set(node.id, (nodeTokensUsed.get(node.id) ?? 0) + tokens);
+    maxObservedNodeTokens = Math.max(maxObservedNodeTokens, tokens);
+  };
   const running = new Map<string, Promise<void>>();
   const drainRunning = async (): Promise<void> => {
     const pending = [...running.values()];
@@ -1323,6 +1427,37 @@ export async function runGraph(
       case "agent":
       case "action":
       case "output": {
+        // 시뮬레이션에서 부수효과 노드는 아예 호출하지 않는다. 읽기 권한으로 낮춰 돌리면
+        // "성공했다"는 모양만 남고 실제로는 아무것도 반영되지 않아 결과를 오해하게 된다.
+        const effect = nodeEffect(node);
+        if (dryRun && effect === "mutation") {
+          beginNode(node);
+          const label = node.label || node.id;
+          dryRunBlocks.push({
+            nodeId: node.id,
+            nodeLabel: label,
+            effect,
+            reason: `실전이었다면 "${label}"이 외부에 변경을 반영했을 지점입니다. 시뮬레이션이라 호출하지 않았습니다.`,
+          });
+          outputs[node.id] = `[시뮬레이션] "${label}"은(는) 실행하지 않았습니다.`;
+          const producesKey = str(node.config, "produces");
+          if (producesKey) {
+            const applied = applyProduces(node, producesKey, outputs[node.id]);
+            if (applied) {
+              failGraphNode(node, applied);
+              return;
+            }
+          }
+          completeNode(node.id);
+          status.set(node.id, "done");
+          return;
+        }
+        // 예산은 노드를 띄우기 전에 확인한다 — 넘긴 뒤 정산하면 이미 돈이 나간 뒤다.
+        const budgetStop = budgetGuard(node);
+        if (budgetStop) {
+          failGraphNode(node, budgetStop);
+          return;
+        }
         const rawPrompt = str(node.config, "prompt") ?? str(node.config, "text") ?? automation.promptTemplate;
         const substituted = substitute(rawPrompt, vars);
         const prompt = substituted.text;
@@ -1377,6 +1512,18 @@ export async function runGraph(
           }
           refreshUnsafeToolObservation();
         };
+        // 노드 단위 상한 — 실행 전체를 보는 워치독은 "조용해진 것"만 잡지 "끝나지 않는 것"은
+        // 못 잡는다. 토큰을 계속 뱉으면서 영원히 도는 노드가 실제로 가능했다.
+        const nodeDeadlineMs = nodeTimeoutMs(node);
+        const nodeAbort = new AbortController();
+        let nodeTimedOut = false;
+        const relayRunAbort = () => nodeAbort.abort(runSignal.reason);
+        if (runSignal.aborted) relayRunAbort();
+        else runSignal.addEventListener("abort", relayRunAbort, { once: true });
+        const nodeTimer = setTimeout(() => {
+          nodeTimedOut = true;
+          nodeAbort.abort(new Error("automation_node_timeout"));
+        }, nodeDeadlineMs);
         try {
           // agent 노드는 config.ref가 가리키는 에이전트/회사 세션에서 실행(멀티에이전트 그래프).
           let runnerError: string | null = null;
@@ -1385,7 +1532,9 @@ export async function runGraph(
               runId,
               chatId: nodeChat.id,
               userPrompt: executionPrompt,
-              permissions: automation.executionPermission === "read" ? "read" : "write",
+              // 시뮬레이션은 읽기 권한으로 내려 실행한다 — 런타임이 쓰기 도구를 거부하므로
+              // 선언되지 않은 부수효과까지 실제로 막힌다(라벨만 붙이는 게 아니다).
+              permissions: dryRun || automation.executionPermission === "read" ? "read" : "write",
               borrowAgents: hubBorrowForNode(node),
               borrowVersions: hubBorrowVersionsForNode(node),
               mcpBrowserProfileKey: `automation-${automation.id}`,
@@ -1446,7 +1595,7 @@ export async function runGraph(
               }
               sink({ ...ev, agentId: ev.agentId ?? node.id, nodeId: node.id });
             },
-            runSignal,
+            nodeAbort.signal,
             undefined,
             {
               source: "automation",
@@ -1458,6 +1607,7 @@ export async function runGraph(
           if (result.workforcePrepareReceipt) {
             persistWorkforcePrepareReceipt(result.workforcePrepareReceipt);
           }
+          settleBudget(node, result.tokens);
           const text = result.finalText ?? "";
           if (checkpointPersistenceError) throw checkpointPersistenceError;
           if (runnerError) throw new Error(runnerError);
@@ -1504,7 +1654,13 @@ export async function runGraph(
           // 실패 카드의 정본. 예전엔 모든 노드 실패가 errorCode "node_failed" 하나로 뭉개져
           // 사용자에게 보여줄 사유도, 지금 누를 행동도 남지 않았다.
           const contractFailure = graphFailureOf(nodeErr);
-          const failure: GraphNodeFailure = contractFailure ?? (ambiguous
+          const failure: GraphNodeFailure = contractFailure ?? (nodeTimedOut
+            ? {
+                code: "NODE_TIMEOUT",
+                reason: `노드 "${node.label || node.id}"이 제한 시간 ${Math.round(nodeDeadlineMs / 1000)}초 안에 끝나지 않아 중단했습니다.`,
+                nextAction: "이 노드의 제한 시간을 늘리거나, 작업을 더 작은 노드로 나눈 뒤 [이 노드부터 재실행]하세요.",
+              }
+            : ambiguous
             ? {
                 code: "MUTATION_UNVERIFIED",
                 reason: `노드 "${node.label || node.id}"이 외부에 무언가를 반영했는지 확인되지 않은 채로 멈췄습니다. 원문: ${rawMessage}`,
@@ -1532,13 +1688,21 @@ export async function runGraph(
           });
           if (error === undefined) error = message;
           ok = false;
+        } finally {
+          clearTimeout(nodeTimer);
+          runSignal.removeEventListener("abort", relayRunAbort);
         }
         return;
       }
       default:
+        // 이 커널이 모르는 노드 종류를 성공으로 통과시키면, 사용자는 실행됐다고 믿고
+        // 결과는 아무 데도 없다. 모르는 것은 통과가 아니라 정지다.
         beginNode(node);
-        completeNode(node.id);
-        status.set(node.id, "done");
+        failGraphNode(node, {
+          code: "NODE_TYPE_UNSUPPORTED",
+          reason: `이 버전의 Agentlas는 노드 종류 "${node.type}"을(를) 실행할 수 없습니다.`,
+          nextAction: "Agentlas를 최신 버전으로 업데이트하거나, 이 노드를 지원되는 종류로 바꾸세요.",
+        });
         return;
     }
   };
@@ -1635,7 +1799,12 @@ export async function runGraph(
     });
   }
   const failures = Object.keys(nodeFailures).length > 0 ? { nodeFailures } : {};
+  const simulation = dryRun ? { dryRun: true as const, dryRunBlocks } : {};
+  const budget = {
+    tokensUsed: runTokensUsed,
+    ...(budgetUnmeasured ? { budgetUnmeasured: true as const } : {}),
+  };
   return ok
-    ? { ok: true, outputs, vars, ...failures }
-    : { ok: false, outputs, vars, error, ...failures };
+    ? { ok: true, outputs, vars, ...failures, ...simulation, ...budget }
+    : { ok: false, outputs, vars, error, ...failures, ...simulation, ...budget };
 }

@@ -1595,6 +1595,15 @@ export interface WorkflowGraph {
   version: 1;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
+  /**
+   * 실행 전체에 걸리는 상한. 노드별 상한(node.config.maxTokens)과는 비교 대상이 다르다 —
+   * 노드 상한은 그 노드의 누계, 여기 값은 실행 총계다.
+   * 토큰은 런타임이 실제로 보고하는 측정값이라 상한으로 쓸 수 있다. 금액은 모델·시점마다
+   * 달라지는 추정치라 상한의 단위로 쓰지 않는다.
+   */
+  budget?: {
+    maxTokens?: number;
+  };
 }
 
 // ── run history — 놓친 실행/스킵 가시화(설계 §2.7) ─────────────────
