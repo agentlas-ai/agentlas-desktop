@@ -148,11 +148,26 @@ function resumePermissionArgs(permission?: RunnerRequest["permission"]): string[
  * (2026-07-16 세션유지 사고). 시드가 없는 레거시 호출만 전체 해시로 폴백한다.
  */
 function systemFingerprint(req: RunnerRequest): string {
+  // The model is part of the session identity. A runtime session belongs to the
+  // model that created it, so resuming it under a different model is a false
+  // resume, not continuity. Leaving the model out made every BYOK model switch
+  // reuse the previous model's session id.
+  //
+  // This does NOT reintroduce the 2026-07-16 세션유지 사고. That incident came
+  // from hashing the whole system prompt and settings, so any unrelated setting
+  // change severed the conversation; the seed exists to keep those out. The
+  // model is different in kind — it genuinely cannot inherit another model's
+  // session — and the user does not experience a cut, because the fresh-session
+  // path reseeds the compacted conversation history with continuity framing
+  // (renderConversationContext). The thread the user sees lives in Agentlas's
+  // own store, not in the runtime session.
   if (req.sessionFingerprintSeed) {
     return crypto
       .createHash("sha256")
-      .update("seed.v2\0")
+      .update("seed.v3\0")
       .update(req.sessionFingerprintSeed)
+      .update("\0model\0")
+      .update(req.model ?? "")
       .digest("hex");
   }
   return crypto

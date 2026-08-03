@@ -215,10 +215,16 @@ function buildPrompt(req: RunnerRequest): string {
  * 끊긴다(2026-07-16 세션유지 사고). 시드 없는 레거시 호출만 전체 해시로 폴백.
  */
 function systemFingerprint(req: RunnerRequest): string {
+  // The model is part of the session identity — see codex.ts for the full note.
+  // A runtime session belongs to the model that created it, so resuming it under
+  // another model is a false resume. Continuity is preserved by the fresh-session
+  // path reseeding compacted history, not by keeping a stale session id.
   if (req.sessionFingerprintSeed) {
     return createHash("sha256")
-      .update("seed.v2\0")
+      .update("seed.v3\0")
       .update(req.sessionFingerprintSeed)
+      .update("\0model\0")
+      .update(req.model ?? "")
       .digest("hex");
   }
   return createHash("sha256")
