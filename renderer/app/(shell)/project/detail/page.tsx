@@ -488,7 +488,7 @@ function ProjectPage() {
 
           <div style={{ ...cardStyle, marginBottom: 24 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-              <div style={{ ...eyebrowStyle, flex: 1 }}>{locale === "ko" ? "프로젝트 책임자와 선호 팀" : "Project controller and preferences"}</div>
+              <div style={{ ...eyebrowStyle, flex: 1 }}>{locale === "ko" ? "이 프로젝트의 대기조" : "This project's on-call pool"}</div>
               {!editingTeam ? (
                 <button type="button" onClick={() => { setEditingTeam(true); setInspectorCollapsed(true); }} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
                   {locale === "ko" ? "편집" : "Edit"}
@@ -1118,7 +1118,7 @@ function ProjectTeamOrgChart({
       >
         <div className="project-team-empty">
           {locale === "ko"
-            ? "오른쪽에서 실행 가능한 책임자를 먼저 추가하세요. 추가 인력은 선택 사항입니다."
+            ? "오른쪽에서 이 프로젝트가 쓸 에이전트를 넣으세요. 순위는 없고, 오케스트레이터가 필요할 때 호출합니다."
             : "Add a callable controller from the right. Additional preferred agents are optional."}
         </div>
       </div>
@@ -1157,7 +1157,7 @@ function ProjectTeamOrgChart({
       <span className="project-team-node-copy">
         <strong>{member.nameSnapshot}</strong>
         <span>{index === 0
-          ? (locale === "ko" ? "책임자 · 프로젝트 컨트롤러" : "Controller · project owner")
+          ? (locale === "ko" ? "대기조 · 오케스트레이터가 필요할 때 호출" : "On call · invoked by the orchestrator when needed")
           : (locale === "ko" ? `${index}순위 선호 인력 · 자동 투입 아님` : `Preference ${index} · not forced into every run`)}</span>
       </span>
       {editing ? (
@@ -1166,7 +1166,7 @@ function ProjectTeamOrgChart({
           <button type="button" disabled={index === members.length - 1} aria-label={locale === "ko" ? "아래로 이동" : "Move down"} onClick={() => onMove(member.agentId, index + 1)}>↓</button>
           <button type="button" aria-label={locale === "ko" ? `${member.nameSnapshot} 제거` : `Remove ${member.nameSnapshot}`} onClick={() => onRemove(member.agentId)}>×</button>
         </span>
-      ) : <span className="project-roster-kind">{child ? member.source : (locale === "ko" ? "책임자" : "controller")}</span>}
+      ) : <span className="project-roster-kind">{child ? member.source : (locale === "ko" ? "대기조" : "on call")}</span>}
     </div>
   );
 
@@ -1228,7 +1228,7 @@ function ProjectAgentRosterLibrary({
       : !candidate.callable
         ? (locale === "ko" ? "실행할 수 없는 항목" : "Not callable")
       : requiresController
-        ? (locale === "ko" ? "설치된 책임자를 먼저 선택하세요" : "Choose an installed controller first")
+        ? (locale === "ko" ? "설치된 에이전트를 먼저 하나 넣어주세요" : "Add an installed agent first")
         : candidate.tagline;
     return (
       <button

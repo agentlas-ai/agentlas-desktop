@@ -232,7 +232,7 @@ export function ChatRightPanel({
 function ProjectTeamCard({ project, agents, ko }: { project: Project; agents: InstalledAgent[]; ko: boolean }) {
   const nameById = new Map(agents.map((agent) => [agent.id, ko ? agent.name : agent.nameEn || agent.name]));
   return <section style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
-    <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".08em", color: "var(--muted-deep)", textTransform: "uppercase" }}>{ko ? "책임자와 선호 팀" : "Controller and preferences"}</div>
+    <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".08em", color: "var(--muted-deep)", textTransform: "uppercase" }}>{ko ? "이 프로젝트의 대기조" : "This project's on-call pool"}</div>
     <div style={{ display: "grid", gap: 6, marginTop: 9 }}>
       {project.agentPool.map((member, index) => <div key={`${member.source}:${member.agentId}`} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
         <span style={{ width: 20, height: 20, display: "grid", placeItems: "center", borderRadius: 6, background: "var(--fill-1)", color: "var(--accent)", fontWeight: 800 }}>{index + 1}</span>

@@ -413,13 +413,13 @@ export default function NewProjectPage() {
             <div className="project-create-copy">
               <span className="project-create-kicker">03</span>
               <h2>{ko ? "프로젝트 책임 팀을 정하세요" : "Choose the project controller"}</h2>
-              <p>{ko ? `실행 가능한 팀과 에이전트 ${rosterCount}개가 있습니다. 첫 번째 선택이 프로젝트 책임자입니다. 추가 선택은 선호 인력일 뿐이며, 책임자가 매 작업을 나누고 부족한 역량만 Network에서 자동으로 보강합니다.` : `${rosterCount} callable teams and agents are available. Your first choice owns the project. Additional choices are preferences; the controller decomposes each task and recruits from Network only for a real capability gap.`}</p>
+              <p>{ko ? `실행 가능한 팀과 에이전트 ${rosterCount}개가 있습니다. 여기서 고른 에이전트는 순위 없이 이 프로젝트의 대기조가 됩니다. 작업을 나누는 건 대시보드에서 지정한 오케스트레이터 LLM이고, 이 대기조를 먼저 쓴 뒤 부족한 역량만 Network에서 보강합니다.` : `${rosterCount} callable teams and agents are available. Whatever you pick here joins this project's on-call pool, in no particular order. The orchestrator LLM you set on the dashboard is what splits up the work; it draws on this pool first and only reaches into Network for a capability it is missing.`}</p>
             </div>
             <div className="project-agent-workbench project-agent-workbench-org">
               <div className="project-agent-pool project-team-org-create" data-project-agent-pool data-empty={agentPool.length === 0}>
-                <div className="project-agent-pool-head"><strong>{ko ? "책임자와 선호 팀" : "Controller and preferences"}</strong><span>{agentPool.length}</span></div>
+                <div className="project-agent-pool-head"><strong>{ko ? "이 프로젝트의 대기조" : "This project's on-call pool"}</strong><span>{agentPool.length}</span></div>
                 {agentPool.length === 0 ? (
-                  <div className="project-agent-drop-copy">{ko ? "오른쪽 조직도에서 책임자를 먼저 끌어오세요" : "Drag a controller from the organization tree"}</div>
+                  <div className="project-agent-drop-copy">{ko ? "오른쪽에서 이 프로젝트가 쓸 에이전트를 끌어오세요" : "Drag in the agents this project should have on call"}</div>
                 ) : (
                   <div className="project-team-create-tree">
                     {agentPool.map((member, index) => {
@@ -436,11 +436,12 @@ export default function NewProjectPage() {
                           onPointerUp={finishPointerDrag}
                           onPointerCancel={() => { pointerDragRef.current = null; setDraggedMemberKey(null); }}
                         >
-                          <span className="project-agent-order">{index === 0 ? "C" : index}</span>
-                          <span className="project-team-create-copy"><strong>{member.nameSnapshot}</strong><small>{index === 0 ? (ko ? "책임자 · 프로젝트 컨트롤러" : "Controller · project owner") : (ko ? `${index}순위 선호 인력 · 자동 투입 아님` : `Preference ${index} · not forced into every run`)}</small></span>
+                          {/* No ordinal: the pool has no ranking. The orchestrator LLM picks whom to
+                              call per task, so a number here would invite the user to curate an
+                              order that changes nothing. */}
+                          <span className="project-agent-order" aria-hidden="true">·</span>
+                          <span className="project-team-create-copy"><strong>{member.nameSnapshot}</strong><small>{ko ? "대기조 · 오케스트레이터가 필요할 때 호출" : "On call · invoked by the orchestrator when needed"}</small></span>
                           <span className="project-team-create-actions">
-                            <button type="button" disabled={index === 0} aria-label={ko ? "위로 이동" : "Move up"} onClick={() => movePoolMember(key, index - 1)}>↑</button>
-                            <button type="button" disabled={index === agentPool.length - 1} aria-label={ko ? "아래로 이동" : "Move down"} onClick={() => movePoolMember(key, index + 1)}>↓</button>
                             <button type="button" onClick={() => setAgentPool((current) => current.filter((item) => projectPoolMemberKey(item) !== key))}>{ko ? "제거" : "Remove"}</button>
                           </span>
                         </div>
@@ -539,7 +540,7 @@ function RosterCandidateButton({
     : !candidate.callable
       ? (ko ? "조직 역할 · 팀 책임자를 통해 실행" : "Organization role · runs through its team controller")
     : requiresController
-      ? (ko ? "설치된 책임자를 먼저 선택하세요" : "Choose an installed controller first")
+      ? (ko ? "설치된 에이전트를 먼저 하나 넣어주세요" : "Add an installed agent first")
       : candidate.tagline;
   return (
     <button

@@ -18,7 +18,7 @@ export default function WorkspacePage() {
     <main className="workspace-project-grid titlebar-nodrag">
       {projects.map((project) => {
         const memberCount = project.agentPool.filter((member) => isUserFacingProjectPoolMember(member, agents)).length;
-        return <button type="button" className="workspace-project-card" key={project.id} onClick={() => navigate(`/project/detail?id=${encodeURIComponent(project.id)}`)}><span>{project.sourceType === "github" ? "GitHub" : project.sourceType === "sample" ? (ko ? "샘플" : "Sample") : (ko ? "로컬" : "Local")}</span><h2>{project.name}</h2><p>{ko ? `책임자와 선호 팀 ${memberCount}` : `${memberCount} controller/preference${memberCount === 1 ? "" : "s"}`}</p><small>{new Date(project.updatedAt).toLocaleDateString(ko ? "ko-KR" : "en-US")}</small></button>;
+        return <button type="button" className="workspace-project-card" key={project.id} onClick={() => navigate(`/project/detail?id=${encodeURIComponent(project.id)}`)}><span>{project.sourceType === "github" ? "GitHub" : project.sourceType === "sample" ? (ko ? "샘플" : "Sample") : (ko ? "로컬" : "Local")}</span><h2>{project.name}</h2><p>{ko ? `대기 에이전트 ${memberCount}` : `${memberCount} agent${memberCount === 1 ? "" : "s"} on call`}</p><small>{new Date(project.updatedAt).toLocaleDateString(ko ? "ko-KR" : "en-US")}</small></button>;
       })}
       <button type="button" className="workspace-project-card workspace-project-add" onClick={() => navigate("/project/new")}><strong>＋</strong><h2>{ko ? "프로젝트 연결" : "Connect a project"}</h2></button>
     </main>
