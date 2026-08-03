@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.54 — 2026-08-04
+
+This release binds Agentlas OS v1.1.97 at
+17c2d127c39d45927d8743ceb945516ae89a7f76.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **Updates stop re-downloading the whole app.** Differential updates have never
+  engaged on macOS: every release pulled the full ~340MB, for every user, and
+  the cause was ours. electron-updater computes a differential download against
+  a fixed name at the cache root, and our stale-artifact sweep deleted that file
+  along with the payload — including on the success path, so every completed
+  update destroyed the baseline the next one needed. The log said so three times
+  running. The sweep still discards everything it cannot trust; only an accepted
+  install now keeps the baseline it just proved.
+
 ## 0.9.53 — 2026-08-04
 
 This release binds Agentlas OS v1.1.97 at
