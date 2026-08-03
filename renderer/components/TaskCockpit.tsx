@@ -773,6 +773,9 @@ function ChatPage() {
   // 활성 런타임의 모델 목록 — 실시간 조회(BYOK는 provider API, ollama 동적, CLI 카탈로그).
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const runIdRef = useRef<string | null>(null);
+  // Whether this chat was in the last activeChats broadcast. Lets the view see
+  // an active -> inactive transition for runs it did not start itself.
+  const activeChatSeenRef = useRef(false);
   const lastRunIdRef = useRef<string | null>(null);
   // 프롬프트 저장소 seedOnly 프리필 — 자동 전송 없이 입력창에만 채울 텍스트.
   const [composerPrefill, setComposerPrefill] = useState<string | null>(null);
@@ -1863,7 +1866,18 @@ function ChatPage() {
     const events = ipcEvents();
     if (!api || !events || !chatId) return;
     return events.onActiveChats((ids) => {
-      if (!runIdRef.current || ids.includes(chatId)) return;
+      const isActive = ids.includes(chatId);
+      const wasActive = activeChatSeenRef.current;
+      activeChatSeenRef.current = isActive;
+      if (isActive) return;
+      // Reconcile whenever THIS chat stops being active — not only when this
+      // view owns the run. runIdRef is set only for runs this renderer itself
+      // started, so a run begun by an automation, a schedule, the phone bridge,
+      // another window, or one already in flight when the view opened left this
+      // handler returning immediately: the answer sat in the database and the
+      // screen kept showing the old state until the user navigated away and
+      // back. Owner-reported 2026-08-03, across every session.
+      if (!runIdRef.current && !wasActive) return;
       const endedRunId = runIdRef.current;
       runIdRef.current = null;
       subRef.current?.();
@@ -1873,8 +1887,11 @@ function ChatPage() {
       setLiveAgents((prev) =>
         Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
       );
+      // A run this view did not start has no runId here, so there is no receipt
+      // to fetch — the history refetch below is what actually surfaces its
+      // answer, and that is the whole point of reconciling those runs too.
       const receiptPromise =
-        typeof api.invoke.receipt === "function"
+        endedRunId && typeof api.invoke.receipt === "function"
           ? api.invoke.receipt(endedRunId).catch(() => null)
           : Promise.resolve(null);
       void Promise.all([
