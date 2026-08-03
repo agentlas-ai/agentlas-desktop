@@ -975,7 +975,24 @@ export class DesktopUpdaterController {
     return service ? this.runLaunchctl(["print", service]) : -1;
   }
 
-  private clearStaleInstallArtifacts(knownJournal?: InstallJournal): boolean {
+  /**
+   * Discard install material we no longer trust.
+   *
+   * `keepDifferentialBaseline` is set only by the accept-after-successful-install
+   * path. electron-updater computes a differential download against
+   * `<cache>/update.zip` (MacUpdater: `path.join(cacheDir, "update.zip")`, at the
+   * cache root, not `pending/`). Sweeping it on success meant every update
+   * destroyed the baseline the next one needed, so the log read "Unable to
+   * locate previous update.zip … (is this first install?)" on three consecutive
+   * updates and every release pulled the full ~340MB. Immediately after an
+   * accepted install that file is not untrusted material — it is the payload we
+   * just proved. Every other caller is a failure or orphan path and still
+   * discards it.
+   */
+  private clearStaleInstallArtifacts(
+    knownJournal?: InstallJournal,
+    options?: { keepDifferentialBaseline?: boolean },
+  ): boolean {
     // Never touch live install material. Report success so callers do not
     // convert an in-flight install into a blocked/manual state.
     if (this.installInFlight(knownJournal)) return true;
@@ -997,7 +1014,9 @@ export class DesktopUpdaterController {
     }
     let cleared = true;
     const updaterCache = this.updaterCachePath();
-    for (const candidate of [path.join(updaterCache, "pending"), path.join(updaterCache, "update.zip")]) {
+    const sweepTargets = [path.join(updaterCache, "pending")];
+    if (!options?.keepDifferentialBaseline) sweepTargets.push(path.join(updaterCache, "update.zip"));
+    for (const candidate of sweepTargets) {
       try {
         makeUpdaterTreeOwnerWritable(candidate);
         this.removePath(candidate, { recursive: true, force: true });
@@ -1037,8 +1056,12 @@ export class DesktopUpdaterController {
     return cleared;
   }
 
-  private cleanupOrBlock(version?: string, knownJournal?: InstallJournal): boolean {
-    if (this.clearStaleInstallArtifacts(knownJournal)) return true;
+  private cleanupOrBlock(
+    version?: string,
+    knownJournal?: InstallJournal,
+    options?: { keepDifferentialBaseline?: boolean },
+  ): boolean {
+    if (this.clearStaleInstallArtifacts(knownJournal, options)) return true;
     this.automaticInstallPaused = true;
     this.holdSince = this.now();
     this.blockedTargetVersion = version ?? null;
@@ -1373,7 +1396,7 @@ export class DesktopUpdaterController {
             ? `(recovery copy kept at ${journal.continuity.backupPath})`
             : "(installed without a recovery copy)"),
       );
-      if (!this.cleanupOrBlock(journal.targetVersion, journal)) {
+      if (!this.cleanupOrBlock(journal.targetVersion, journal, { keepDifferentialBaseline: true })) {
         this.writeJournal({ ...journal, phase: "blocked", reasonCode: "legacy-cleanup-failed" });
         return;
       }
@@ -1403,6 +1426,9 @@ export class DesktopUpdaterController {
       this.publish({ status: "updated", version: journal.targetVersion });
       return;
     }
+    // Reached only after the accepted-install branch above returned: the target
+    // version is NOT running, so this payload is exactly what we no longer
+    // trust. Discard the baseline with it.
     if (!this.cleanupOrBlock(journal.targetVersion, journal)) {
       this.writeJournal({ ...journal, phase: "blocked", reasonCode: "legacy-cleanup-failed" });
       return;
