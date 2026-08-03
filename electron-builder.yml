@@ -77,6 +77,13 @@ extraResources:
       - "!.git/**"
       - "!.git"
       - "!output/**"
+      # Private project state. A developer whose Agentlas OS checkout has ever
+      # been opened as a project carries .agentlas/ — ontology databases, the
+      # project index, source lists — and without this the signed public app
+      # would ship that personal data. ensure-engine.mjs refuses the build when
+      # such files exist; this is what actually keeps them out.
+      - "!.agentlas/**"
+      - "!**/.agentlas/**"
       - "!tests/**"
       - "!benchmarks/**"
       - "!docs/**"

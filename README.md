@@ -83,7 +83,7 @@ authority for which version is actually public, stable, and downloadable.
   and the interface says so instead of inventing a hierarchy. Switching models
   mid-conversation now starts a fresh session seeded with the compacted thread
   rather than resuming a session that belongs to another model. This release
-  binds Agentlas OS v1.1.96 at 987c3649b92754b41297878ffe5e3243c82e545c. Source readiness does not prove a public
+  binds Agentlas OS v1.1.97 at 17c2d127c39d45927d8743ceb945516ae89a7f76. Source readiness does not prove a public
   installer or update feed; the Releases page stays the authority.
 - **2026-08-02 · v0.9.47 — verified recovery and live mobile authority** —
   One no longer treats a completed retry as proof that the original request was

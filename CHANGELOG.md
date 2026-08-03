@@ -2,8 +2,8 @@
 
 ## 0.9.48 — 2026-08-03
 
-This release binds Agentlas OS v1.1.96 at
-987c3649b92754b41297878ffe5e3243c82e545c.
+This release binds Agentlas OS v1.1.97 at
+17c2d127c39d45927d8743ceb945516ae89a7f76.
 These source gates do not themselves publish a release; the Releases page
 stays the authority for what is actually downloadable.
 

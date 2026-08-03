@@ -136,6 +136,11 @@ function isPackagingExcludedIgnoredPath(relativePath) {
   if (["output", "tests", "benchmarks", "examples", ".playwright-mcp", ".pytest_cache"].includes(root)) {
     return true;
   }
+  // Private project state, excluded at copy time by electron-builder's
+  // "!.agentlas/**" filter. Listed here only because that filter now genuinely
+  // removes it — never add a path here to silence this check while the file
+  // still reaches the package.
+  if (parts.includes(".agentlas")) return true;
   if (parts.includes("__pycache__")) return true;
   if (base === ".DS_Store") return true;
   return /\.(?:pyc|pyo)$/.test(base);
