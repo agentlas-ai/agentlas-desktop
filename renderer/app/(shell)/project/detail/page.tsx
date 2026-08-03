@@ -1281,12 +1281,20 @@ function ProjectAgentRosterLibrary({
                   return (
                     <div key={firm.id}>
                       <div className="project-roster-firm-row">
-                        <button type="button" className="project-team-chevron" onClick={() => onToggleFirm(firm.id)} aria-expanded={firmOpen}>
-                          {firmOpen ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
-                        </button>
+                        {/* A self-referential firm has nothing to disclose: its only
+                            member is the team itself. Showing a chevron there promised
+                            member detail and delivered a duplicate of the same row, and
+                            the count showed 1 because the team counted itself. */}
+                        {firm.selfReferential ? (
+                          <span className="project-team-chevron" aria-hidden="true" />
+                        ) : (
+                          <button type="button" className="project-team-chevron" onClick={() => onToggleFirm(firm.id)} aria-expanded={firmOpen}>
+                            {firmOpen ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
+                          </button>
+                        )}
                         <IconBuilding size={12} />
                         <span>{firm.name}</span>
-                        <span className="project-roster-count">{firm.members.length}</span>
+                        {firm.selfReferential ? null : <span className="project-roster-count">{firm.members.length}</span>}
                         <button
                           type="button"
                           className="project-roster-add-team"
@@ -1296,7 +1304,7 @@ function ProjectAgentRosterLibrary({
                           {locale === "ko" ? "팀 추가" : "Add team"}
                         </button>
                       </div>
-                      {firmOpen ? <div className="project-roster-children">{firm.members.map(renderCandidate)}</div> : null}
+                      {firmOpen && !firm.selfReferential ? <div className="project-roster-children">{firm.members.map(renderCandidate)}</div> : null}
                     </div>
                   );
                 })}

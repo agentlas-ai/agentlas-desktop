@@ -26,6 +26,15 @@ export interface ProjectRosterFirm {
   id: string;
   name: string;
   members: ProjectRosterCandidate[];
+  /**
+   * True when this firm's entire membership is the team itself. An imported
+   * local team is registered as an agent of kind "team" that is also its own
+   * ceoAgentId, with an empty orgChart, so its member list resolves to one
+   * entry: a duplicate of the row above it. Expanding such a firm promises
+   * member detail and delivers nothing, and the count badge counts the team
+   * counting itself. Callers render these as a leaf instead of an expander.
+   */
+  selfReferential: boolean;
 }
 
 export interface ProjectRosterSection {
@@ -150,6 +159,8 @@ export function buildProjectRosterSections(
       id: firm.id,
       name: pickLocalized(firm, locale).name,
       members,
+      // The one member is the team itself: nothing to disclose.
+      selfReferential: members.length === 1 && members[0].kind === "team",
     });
   }
 

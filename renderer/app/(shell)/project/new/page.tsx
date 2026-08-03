@@ -468,16 +468,27 @@ export default function NewProjectPage() {
                             return (
                               <div key={firm.id} className="project-roster-firm-create">
                                 <div className="project-roster-firm-row-create">
-                                  <button type="button" onClick={() => setOpenRosterFirms((current) => ({ ...current, [firm.id]: !firmOpen }))} aria-expanded={firmOpen}>{firmOpen ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}</button>
-                                  <IconBuilding size={12} /><strong>{firm.name}</strong><span>{firm.members.length}</span>
+                                  {/* Self-referential firm: its only member is the team
+                                      itself, so a chevron would disclose a duplicate of
+                                      this same row and the count would be the team
+                                      counting itself. */}
+                                  {firm.selfReferential ? (
+                                    <span aria-hidden="true" />
+                                  ) : (
+                                    <button type="button" onClick={() => setOpenRosterFirms((current) => ({ ...current, [firm.id]: !firmOpen }))} aria-expanded={firmOpen}>{firmOpen ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}</button>
+                                  )}
+                                  <IconBuilding size={12} /><strong>{firm.name}</strong>{firm.selfReferential ? null : <span>{firm.members.length}</span>}
                                   <button type="button" disabled={addable.length === 0} onClick={() => addCandidates(addable)}>{ko ? "팀 추가" : "Add team"}</button>
                                 </div>
-                                {firmOpen ? <div className="project-roster-children-create">{firm.members.map((candidate) => (
+                                {firmOpen && !firm.selfReferential ? <div className="project-roster-children-create">{firm.members.map((candidate) => (
                                   <RosterCandidateButton key={candidate.key} candidate={candidate} ko={ko} selected={selectedMemberKeys.has(candidate.key)} requiresController={!candidate.installed && agentPool.length === 0} dragging={draggedCandidateKey === candidate.key} onAdd={addCandidate} onPointerDown={beginPointerDrag} onPointerUp={finishPointerDrag} onPointerCancel={() => { pointerDragRef.current = null; setDraggedCandidateKey(null); }} />
                                 ))}</div> : null}
                               </div>
                             );
                           })}
+                          {section.standalone.length > 0 && section.firms.length > 0 ? (
+                            <div className="project-roster-standalone-head">{ko ? "단일 에이전트" : "Single agents"}</div>
+                          ) : null}
                           <div className="project-roster-standalone-create">{section.standalone.map((candidate) => (
                             <RosterCandidateButton key={candidate.key} candidate={candidate} ko={ko} selected={selectedMemberKeys.has(candidate.key)} requiresController={!candidate.installed && agentPool.length === 0} dragging={draggedCandidateKey === candidate.key} onAdd={addCandidate} onPointerDown={beginPointerDrag} onPointerUp={finishPointerDrag} onPointerCancel={() => { pointerDragRef.current = null; setDraggedCandidateKey(null); }} />
                           ))}</div>
