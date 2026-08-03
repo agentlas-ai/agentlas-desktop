@@ -1141,29 +1141,19 @@ function ProjectTeamOrgChart({
         onMove(event.dataTransfer.getData("application/x-agentlas-project-member"), index);
       }}
     >
-      {index === 0 && members.length > 1 ? (
-        <button
-          type="button"
-          className="project-team-chevron"
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={onToggle}
-          aria-expanded={open}
-          aria-label={locale === "ko" ? "구성원 접기 또는 펼치기" : "Collapse or expand members"}
-        >
-          {open ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
-        </button>
-      ) : <span />}
+      {/* 첫 구성원이 나머지를 거느리지 않으므로 접을 하위 묶음도 없다. */}
+      <span />
       <span className="project-team-avatar"><IconUsers size={14} /></span>
       <span className="project-team-node-copy">
         <strong>{member.nameSnapshot}</strong>
-        <span>{index === 0
-          ? (locale === "ko" ? "대기조 · 오케스트레이터가 필요할 때 호출" : "On call · invoked by the orchestrator when needed")
-          : (locale === "ko" ? `${index}순위 선호 인력 · 자동 투입 아님` : `Preference ${index} · not forced into every run`)}</span>
+        <span>{locale === "ko"
+          ? "대기조 · 오케스트레이터가 필요할 때 호출"
+          : "On call · invoked by the orchestrator when needed"}</span>
       </span>
       {editing ? (
         <span className="project-team-actions" onPointerDown={(event) => event.stopPropagation()}>
-          <button type="button" disabled={index === 0} aria-label={locale === "ko" ? "위로 이동" : "Move up"} onClick={() => onMove(member.agentId, index - 1)}>↑</button>
-          <button type="button" disabled={index === members.length - 1} aria-label={locale === "ko" ? "아래로 이동" : "Move down"} onClick={() => onMove(member.agentId, index + 1)}>↓</button>
+          {/* 순위가 없으므로 위/아래로 옮길 자리도 없다. 재정렬 버튼은 그 자체가
+              서열이 있다는 주장이라 제거한다. */}
           <button type="button" aria-label={locale === "ko" ? `${member.nameSnapshot} 제거` : `Remove ${member.nameSnapshot}`} onClick={() => onRemove(member.agentId)}>×</button>
         </span>
       ) : <span className="project-roster-kind">{child ? member.source : (locale === "ko" ? "대기조" : "on call")}</span>}
@@ -1178,12 +1168,10 @@ function ProjectTeamOrgChart({
       onDragOver={(event) => event.preventDefault()}
       onDrop={onDrop}
     >
-      {renderNode(members[0], 0, false)}
-      {open && members.length > 1 ? (
-        <div className="project-team-children">
-          {members.slice(1).map((member, offset) => renderNode(member, offset + 1, true))}
-        </div>
-      ) : null}
+      {/* 대기조에는 책임자가 없다. 오케스트레이터는 대시보드에서 지정된 세션
+          LLM이고 프로젝트에 고정되지 않는다. 구성원은 전원 동순위 대기조이므로
+          첫 번째를 부모로 세우고 나머지를 자식으로 들여쓰지 않는다. */}
+      {members.map((member, index) => renderNode(member, index, false))}
     </div>
   );
 }
