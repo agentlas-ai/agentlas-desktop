@@ -2892,9 +2892,9 @@ button[data-toggle-state="on"] {
 .project-team-org-create { min-height: 420px; }
 .project-team-create-tree { display: grid; gap: 8px; }
 .project-team-create-node { position: relative; min-height: 62px; cursor: grab; }
-.project-team-create-node[data-controller="true"] { border-color: color-mix(in oklch, var(--rd-accent) 45%, var(--rd-hair)); box-shadow: 0 10px 24px color-mix(in oklch, var(--rd-ink) 7%, transparent); }
-.project-team-create-node[data-controller="false"] { width: calc(100% - 36px); margin-left: 36px; }
-.project-team-create-node[data-controller="false"]::before { content: ""; position: absolute; left: -23px; top: -9px; width: 22px; height: 41px; border-left: 1px solid var(--rd-hair-strong); border-bottom: 1px solid var(--rd-hair-strong); border-bottom-left-radius: 9px; }
+/* 대기조에는 책임자가 없다. 첫 구성원을 강조하고 나머지를 들여쓰기 + 연결선으로
+   묶던 규칙은 있지도 않은 서열을 그리고 있었다. 전원 같은 폭의 형제로 둔다. */
+.project-team-create-node { width: 100%; margin-left: 0; }
 .project-team-create-node[data-dragging="true"] { border-color: var(--rd-accent); background: color-mix(in oklch, var(--rd-accent) 6%, var(--rd-surface)); }
 .project-team-create-copy { min-width: 0; display: grid; gap: 3px; }
 .project-team-create-copy strong, .project-team-create-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2917,6 +2917,11 @@ button[data-toggle-state="on"] {
    expanded above them. They shared the rule above — same indent, same tree line —
    so they read as members of the last team. They sit at section level now. */
 .project-roster-standalone-create { position: relative; display: grid; gap: 2px; }
+/* 단일 에이전트는 어느 팀에도 속하지 않는다. 이 컨테이너에 규칙이 없어 행들이
+   앞 팀 구성원의 들여쓰기를 물려받았고, 목록 맨 끝 팀에 딸린 것처럼 보였다. */
+.project-roster-standalone { position: relative; display: grid; gap: 2px; margin-left: 0; padding-left: 0; }
+.project-roster-standalone > * { margin-left: 0; }
+.project-roster-standalone > *::before { display: none; }
 .project-roster-standalone-head { margin: 8px 0 2px; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted-deep); }
 .project-roster-candidate-create { position: relative; width: 100%; min-width: 0; min-height: 42px; display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 5px 7px; border: 0; border-radius: 8px; background: transparent; color: var(--rd-ink); text-align: left; cursor: grab; }
 .project-roster-candidate-create::before { content: ""; position: absolute; left: -15px; top: 21px; width: 14px; height: 1px; background: var(--rd-hair); }

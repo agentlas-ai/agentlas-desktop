@@ -412,7 +412,9 @@ export default function NewProjectPage() {
           <section className="project-create-section project-agent-step">
             <div className="project-create-copy">
               <span className="project-create-kicker">03</span>
-              <h2>{ko ? "프로젝트 책임 팀을 정하세요" : "Choose the project controller"}</h2>
+              {/* 책임 팀이라는 것은 없다. 오케스트레이터는 대시보드에서 지정한
+                  세션 LLM이고, 여기서 고르는 것은 그 LLM이 부를 대기조다. */}
+              <h2>{ko ? "이 프로젝트의 대기조를 정하세요" : "Choose this project's on-call pool"}</h2>
               <p>{ko ? `실행 가능한 팀과 에이전트 ${rosterCount}개가 있습니다. 여기서 고른 에이전트는 순위 없이 이 프로젝트의 대기조가 됩니다. 작업을 나누는 건 대시보드에서 지정한 오케스트레이터 LLM이고, 이 대기조를 먼저 쓴 뒤 부족한 역량만 Network에서 보강합니다.` : `${rosterCount} callable teams and agents are available. Whatever you pick here joins this project's on-call pool, in no particular order. The orchestrator LLM you set on the dashboard is what splits up the work; it draws on this pool first and only reaches into Network for a capability it is missing.`}</p>
             </div>
             <div className="project-agent-workbench project-agent-workbench-org">
@@ -428,7 +430,7 @@ export default function NewProjectPage() {
                         <div
                           className="project-agent-member project-team-create-node"
                           data-project-member-index={index}
-                          data-controller={index === 0}
+                          data-member-index={index}
                           data-dragging={draggedMemberKey === key}
                           key={key}
                           draggable={false}

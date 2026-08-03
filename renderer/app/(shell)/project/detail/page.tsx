@@ -1297,7 +1297,12 @@ function ProjectAgentRosterLibrary({
                   );
                 })}
                 {section.standalone.length > 0 ? (
-                  <div className="project-roster-standalone">{section.standalone.map(renderCandidate)}</div>
+                  <>
+                    {/* 단일 에이전트는 어느 팀에도 속하지 않는다. 제목 없이 팀 목록
+                        바로 뒤에 이어 붙이면 마지막 팀의 구성원으로 읽힌다. */}
+                    <div className="project-roster-standalone-head">{locale === "ko" ? "단일 에이전트" : "Standalone agents"}</div>
+                    <div className="project-roster-standalone">{section.standalone.map(renderCandidate)}</div>
+                  </>
                 ) : null}
               </>
             ) : null}
