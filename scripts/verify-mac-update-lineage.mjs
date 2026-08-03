@@ -796,6 +796,45 @@ async function main() {
   }
 }
 
+/**
+ * The differential baseline survives an accepted install.
+ *
+ * electron-updater computes a differential download against a fixed name at the
+ * cache ROOT — MacUpdater: `path.join(cacheDir, "update.zip")` — not the payload
+ * under `pending/`. Our stale-artifact sweep used to remove both, and two of its
+ * callers run on the success path, so every completed update destroyed the
+ * baseline the next one needed and every release pulled the full ~340MB.
+ *
+ * Preservation belongs to exactly one call site: the accept-after-successful
+ * install. The `install-not-applied` branch immediately below it reads almost
+ * identically and must keep discarding — there the target version is not
+ * running, so that payload is precisely the one that failed.
+ */
+export function verifyDifferentialBaselineContract(
+  sourcePath = new URL("../electron/updater/controller.ts", import.meta.url),
+) {
+  const source = readFileSync(sourcePath, "utf8");
+  const problems = [];
+  if (!/if \(!options\?\.keepDifferentialBaseline\) sweepTargets\.push\(path\.join\(updaterCache, "update\.zip"\)\)/.test(source)) {
+    problems.push("the sweep no longer honours keepDifferentialBaseline for <cache>/update.zip");
+  }
+  const preserving = (source.match(/keepDifferentialBaseline: true/g) || []).length;
+  if (preserving !== 1) {
+    problems.push(
+      `expected exactly 1 call site to preserve the differential baseline, found ${preserving}`
+        + " — only the accept-after-successful-install path may preserve it",
+    );
+  }
+  if (!/cleanupOrBlock\(journal\.targetVersion, journal, \{ keepDifferentialBaseline: true \}\)/.test(source)) {
+    problems.push("the accept-after-successful-install call site no longer preserves the baseline");
+  }
+  if (problems.length > 0) {
+    throw new Error(`differential baseline contract broken:\n  - ${problems.join("\n  - ")}`);
+  }
+  return { ok: true, preservingCallSites: preserving };
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === modulePath) {
+  console.log(JSON.stringify(verifyDifferentialBaselineContract()));
   await main();
 }
