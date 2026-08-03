@@ -62,6 +62,7 @@ import {
   type AutomationFailureContext,
 } from "./automation-strategy";
 import { recordAutomationRecovery } from "./automation-recovery";
+import { AUTOMATION_CONTINUITY_OPEN, AUTOMATION_CONTINUITY_CLOSE } from "./automation-continuity";
 import type {
   TriggerDeliveryHooks,
   TriggerDispatchResult,
@@ -166,10 +167,10 @@ function buildAutomationContinuityPrompt(chatId: string, prompt: string, strateg
     .map((message) => `[${message.role} ${message.createdAt}] ${message.text.replace(/\s+/g, " ").trim().slice(0, 1_200)}`);
   if (prior.length === 0) return effectivePrompt;
   return [
-    "[Agentlas automation continuity capsule]",
+    AUTOMATION_CONTINUITY_OPEN,
     "This is the same durable automation session. Continue from these prior outcomes; do not restart setup or create a new CLI/session unless an explicit lifecycle error requires it.",
     ...prior,
-    "[/Agentlas automation continuity capsule]",
+    AUTOMATION_CONTINUITY_CLOSE,
     "",
     effectivePrompt,
   ].join("\n");

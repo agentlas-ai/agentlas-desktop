@@ -1747,15 +1747,15 @@ export class DesktopUpdaterController {
       return { accepted: false, state: this.state };
     }
 
-    // Quiescing writers makes the optional snapshot cleaner. It is not a
-    // precondition: the app is about to be replaced and restarted either way,
-    // and SQLite's own crash safety does not depend on us pausing writers.
-    let resumeWriters: (() => void) | undefined;
-    try {
-      resumeWriters = (await this.deps.quiesceWriters?.()) || undefined;
-    } catch (error) {
-      this.logger.warn("[updater] writer quiescence failed; continuing without it", error);
-    }
+    // Writer quiescence is retired (owner decision, 2026-08-03). Its only
+    // purpose was to make the continuity snapshot's row-identity hashes
+    // consistent, and those hashes are no longer computed or compared by
+    // anything. On a machine with live automations the drain reliably failed —
+    // "Active automation did not drain before update continuity capture" — so
+    // the product paid a stall and an alarming warning to tidy a fingerprint
+    // nobody reads. The app is about to be replaced and restarted either way,
+    // and SQLite's crash safety does not depend on us pausing writers.
+    const resumeWriters: (() => void) | undefined = undefined;
 
     this.armInstallWriterResume(resumeWriters);
     let installHandedOff = false;

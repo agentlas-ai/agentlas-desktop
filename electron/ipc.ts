@@ -160,6 +160,7 @@ import { resolveHephaestusBuildRequest, resolveHephaestusBuildRequestForRun } fr
 import { pickLocale } from "./runtime/status-i18n";
 import { currentUiLocale } from "./ui-locale";
 import { SYSTEM_OPTIMIZER_PROMPT_MARKER } from "./system-agents/system-optimizer";
+import { stripAutomationContinuityCapsule } from "./automation-continuity";
 import { buildChatRecap, markChatRecapViewed } from "./chat/recap";
 import { startStudio, stopStudio } from "./hephaestus/studio";
 import type {
@@ -3738,6 +3739,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("automations:runNow", async (_e, id: string) => {
     const automation = getAutomation(id);
     if (!automation) throw new Error(`Automation not found: ${id}`);
+    // 실행은 fire-and-forget이라 시작 이후의 실패는 렌더러에 도달하지 않는다. 시작조차
+    // 할 수 없는 조건은 여기서 먼저 걸러 즉시 알린다 — 그러지 않으면 버튼을 눌러도
+    // 아무 일도 일어나지 않는 것처럼 보인다(미확정 부작용이 있으면 runGraph가 즉시 throw).
+    if (getAutomationGraphReconciliation(id)) {
+      throw new Error("automation_reconciliation_pending");
+    }
     const { runAutomationNow } = await import("./automation-scheduler");
     void runAutomationNow(id).catch((err) => {
       console.error(`[automation] run-now failed (${id}):`, err);
@@ -3771,9 +3778,12 @@ export function registerIpcHandlers(): void {
       chatId: session.chat.id,
       // 제품이 스스로 보낸 복구 지시는 대화가 아니다. 예전에 user 턴으로 저장된 것들이
       // "요청"으로 보이면서 내부 프롬프트("Private evidence …")까지 노출됐다.
-      messages: listChatMessages(session.chat.id).filter(
-        (message) => !message.text.startsWith(SYSTEM_OPTIMIZER_PROMPT_MARKER),
-      ),
+      messages: listChatMessages(session.chat.id)
+        // 제품이 스스로 보낸 복구 지시는 대화가 아니다.
+        .filter((message) => !message.text.startsWith(SYSTEM_OPTIMIZER_PROMPT_MARKER))
+        // 연속성 캡슐은 모델용 내부 컨텍스트다. 사용자가 실제로 지시한 본문만 남긴다.
+        .map((message) => ({ ...message, text: stripAutomationContinuityCapsule(message.text) }))
+        .filter((message) => message.text.trim().length > 0),
       updatedAt: session.chat.updatedAt,
     };
   });

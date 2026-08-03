@@ -22,6 +22,7 @@ import { getBrowserStatus, browserListSites, browserOpenLogin } from "./browser/
 import type { BrowserSiteRow } from "./store/browser-vault";
 import { getAutomation, listRunHistory } from "./store/automations";
 import { listTriggerEventAttention } from "./store/trigger-events";
+import { getAutomationGraphReconciliation } from "./store/graph-reconciliation";
 import { getAuthSession, signInWithBrowser } from "./auth";
 import { currentUiLocale } from "./ui-locale";
 
@@ -137,15 +138,26 @@ async function capabilities(automationId: string): Promise<Capability[]> {
     },
   });
 
-  list.push({
-    kind: "retry_run",
-    option: {
-      id: "retry_run",
-      evidence:
-        "Run this automation again right now. It can act outside the app (post, send, write), so the person must choose it deliberately.",
-      authority: "external-or-destructive",
-    },
-  });
+  // 미확정 부작용이 남아 있으면 재실행은 백엔드가 즉시 거부한다. 그런 상태에서 이 조치를
+  // 목록에 넣으면 모델이 "다시 실행해 볼까요?"라고 권하고, 사용자는 눌러도 아무 일이 없다.
+  const reconciliationPending = (() => {
+    try {
+      return Boolean(getAutomationGraphReconciliation(automationId));
+    } catch {
+      return false;
+    }
+  })();
+  if (!reconciliationPending) {
+    list.push({
+      kind: "retry_run",
+      option: {
+        id: "retry_run",
+        evidence:
+          "Run this automation again right now. It can act outside the app (post, send, write), so the person must choose it deliberately.",
+        authority: "external-or-destructive",
+      },
+    });
+  }
 
   list.push({
     kind: "ask_in_session",
@@ -176,6 +188,8 @@ function observation(input: {
   /** null이면 "이 자동화와 무관하거나 판단 근거 없음" — 권한이 있다는 뜻이 아니다. */
   screenPermissionsMissing: string[] | null;
   signedIn: boolean;
+  /** true면 사람이 각 단계의 실제 실행 여부를 확정하기 전까지 어떤 재실행도 거부된다. */
+  awaitingHumanConfirmation: boolean;
 }): string {
   return secretValueFloor(JSON.stringify({
     surface: "automation-recovery",
@@ -254,6 +268,13 @@ export async function planAutomationFix(automationId: string): Promise<Automatio
       })(),
       screenPermissionsMissing: permissions ? permissions.missing : null,
       signedIn,
+      awaitingHumanConfirmation: (() => {
+        try {
+          return Boolean(getAutomationGraphReconciliation(automationId));
+        } catch {
+          return false;
+        }
+      })(),
     }),
     actions: caps.map((cap) => cap.option),
     locale: currentUiLocale(),

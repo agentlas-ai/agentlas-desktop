@@ -67,6 +67,23 @@ interface AutomationSessionPanelProps {
   onCollapse?: () => void;
 }
 
+/**
+ * 전송 실패를 사람 말로. main이 던지는 문자열은 내부 코드라 그대로 보여주면
+ * "Error invoking remote method 'invoke:run'..." 같은 문장이 사용자 화면에 그대로 뜬다.
+ */
+function sendFailureMessage(error: unknown, ko: boolean): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (/active invocation/i.test(raw)) {
+    return ko
+      ? "이 자동화가 지금 실행 중이라 바로 보낼 수 없어요. 끝나면 이어서 보내드릴게요."
+      : "This automation is running right now, so it could not be sent yet. It will go out when the run ends.";
+  }
+  if (/auth|token|login|unauthori[sz]ed|forbidden/i.test(raw)) {
+    return ko ? "연결이 만료돼 보내지 못했어요. 다시 연결한 뒤 시도해 주세요." : "The connection expired. Reconnect and try again.";
+  }
+  return ko ? "보내지 못했어요. 잠시 뒤 다시 시도해 주세요." : "It could not be sent. Try again shortly.";
+}
+
 function isImeSubmit(e: KeyboardEvent): boolean {
   return e.nativeEvent.isComposing || e.keyCode === 229;
 }
@@ -127,22 +144,65 @@ export function AutomationSessionPanel({
 
   useEffect(() => () => unsubRef.current?.(), []);
 
+  // 자동화 실행과 이 대화는 **같은 chat**을 공유한다. 예약 실행이 도는 중에 사용자가 말을
+  // 걸면 새 실행을 던질 수 없다(같은 chat 중복 실행 금지). 진행 중이면 그 실행에 재접속해
+  // 라이브로 보여주고, 입력은 아래 send()가 이어쓰기(steer)로 큐에 넣는다.
+  useEffect(() => {
+    if (!chatId) return;
+    const api = ipc();
+    const events = ipcEvents();
+    if (!api || !events) return;
+    let cancelled = false;
+    void api.invoke.attach(chatId).then((attached) => {
+      if (cancelled || !attached || busyRef.current) return;
+      runIdRef.current = attached.runId;
+      setBusy(true);
+      busyRef.current = true;
+      setStatus(ko ? "자동화가 실행 중이에요…" : "The automation is running…");
+      let accumulated = "";
+      unsubRef.current?.();
+      unsubRef.current = events.on(api.invoke.eventChannel(attached.runId), (ev: McpInvocationEvent) => {
+        if (ev.kind === "partial") {
+          accumulated = typeof ev.delta === "string" ? accumulated + ev.delta : ev.text ?? accumulated;
+          setStreamText(accumulated);
+          return;
+        }
+        if ((ev.kind === "thinking" || ev.kind === "tool-use") && ev.status) {
+          setStatus(ev.status);
+          return;
+        }
+        if (ev.kind === "final" || ev.kind === "error") {
+          unsubRef.current?.();
+          unsubRef.current = null;
+          runIdRef.current = null;
+          setBusy(false);
+          busyRef.current = false;
+          setStatus("");
+          setStreamText("");
+          void load();
+        }
+      });
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [chatId, ko, load]);
+
   const send = useCallback(
     async (text: string) => {
       const api = ipc();
       const events = ipcEvents();
       const prompt = text.trim();
       const targetChatId = chatIdRef.current;
-      if (!api || !prompt || busyRef.current) return;
+      if (!api || !prompt) return;
       if (!targetChatId) {
         setError(ko ? "세션을 아직 열지 못했습니다. 잠시 뒤 다시 시도해 주세요." : "The session is not open yet. Try again shortly.");
         return;
       }
+      const alreadyRunning = busyRef.current;
       setError("");
       setDraft("");
       setBusy(true);
       busyRef.current = true;
-      setStreamText("");
+      if (!alreadyRunning) setStreamText("");
       setStatus(ko ? "보내는 중…" : "Sending…");
       // 낙관적 사용자 버블 — 실제 기록은 턴 종료 후 load()가 정본으로 덮어쓴다.
       setMessages((prev) => [
@@ -166,7 +226,7 @@ export function AutomationSessionPanel({
         void load();
       }
 
-      if (events) {
+      if (events && !alreadyRunning) {
         // subscribe-before-trigger — 런타임이 즉시 내보내는 초기 이벤트도 놓치지 않는다.
         unsubRef.current = events.on(api.invoke.eventChannel(runId), (ev: McpInvocationEvent) => {
           if (ev.kind === "partial") {
@@ -188,23 +248,31 @@ export function AutomationSessionPanel({
         });
       }
 
+      const request = {
+        runId,
+        chatId: targetChatId,
+        userPrompt: prompt,
+        locale,
+        // 예약 실행과 같은 권한으로 — read로 떨어지면 자기 자동화의 스크립트조차 못 돌린다.
+        permissions: (executionPermission === "read" ? "read" : "write") as "read" | "write",
+        ...(toolMode ? { toolMode } : {}),
+        ...(hubMode ? { hubMode } : {}),
+      };
       try {
-        await api.invoke.run({
-          runId,
-          chatId: targetChatId,
-          userPrompt: prompt,
-          locale,
-          // 예약 실행과 같은 권한으로 — read로 떨어지면 자기 자동화의 스크립트조차 못 돌린다.
-          permissions: executionPermission === "read" ? "read" : "write",
-          ...(toolMode ? { toolMode } : {}),
-          ...(hubMode ? { hubMode } : {}),
-        });
+        if (alreadyRunning) {
+          // 이미 도는 턴이 있으면 취소하지 않고 뒤에 세운다. 사용자의 말은 버려지지 않는다.
+          const steered = await api.invoke.steer(request);
+          setStatus(
+            steered.queued
+              ? ko ? "지금 실행이 끝나면 이어서 보낼게요." : "It will be sent right after the current run."
+              : ko ? "이어서 진행 중이에요…" : "Continuing…",
+          );
+          if (steered.runId) runIdRef.current = steered.runId;
+          return;
+        }
+        await api.invoke.run(request);
       } catch (err) {
-        finish(
-          ko
-            ? `보내지 못했습니다. ${err instanceof Error ? err.message : String(err)}`
-            : `Could not send. ${err instanceof Error ? err.message : String(err)}`,
-        );
+        finish(sendFailureMessage(err, ko));
       }
     },
     [executionPermission, hubMode, ko, load, locale, toolMode],

@@ -31,6 +31,7 @@ import { getAgentConcurrency } from "../store/concurrency";
 import { listRunEvents, tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
 import { awaitAutomationRunnerWithAbortGrace } from "../automation-watchdog";
 import { buildStrategyDirective, collectAutomationFailureContext } from "../automation-strategy";
+import { AUTOMATION_CONTINUITY_OPEN, AUTOMATION_CONTINUITY_CLOSE } from "../automation-continuity";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -580,10 +581,10 @@ function buildNodeContinuityPrompt(chatId: string, prompt: string, strategyDirec
     ));
   if (prior.length === 0) return effectivePrompt;
   return [
-    "[Agentlas automation continuity capsule]",
+    AUTOMATION_CONTINUITY_OPEN,
     "This is the same durable automation session and occurrence. Continue from prior outcomes; do not restart setup or repeat an external action already recorded as complete.",
     ...prior,
-    "[/Agentlas automation continuity capsule]",
+    AUTOMATION_CONTINUITY_CLOSE,
     "",
     effectivePrompt,
   ].join("\n");

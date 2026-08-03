@@ -63,7 +63,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
       setLatest(nextSnap);
       setAttentions(nextAttentions);
     } catch (err) {
-      setMessage(ko ? `실행 기록을 불러오지 못했습니다. ${String(err)}` : `Could not load run history. ${String(err)}`);
+      setMessage(ko ? "실행 기록을 불러오지 못했어요. 잠시 뒤 다시 시도해 주세요." : "Could not load run history. Try again shortly.");
     }
     if (!automation.graph || !snap || snap.status !== "error") {
       setReconciliation(null);
@@ -114,6 +114,9 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   );
   const needsHelp = Boolean(reconciliation || regularAttentions.length > 0 || latest?.status === "error" || blockingRun);
   // 기록 원문(판정 코드 접두사 제거). 평이한 설명 아래 "자세히"로만 노출한다.
+  // 미확정 부작용이 남아 있으면 백엔드가 재실행을 즉시 거부한다(중복 게시 방지).
+  // 눌리는 버튼을 두면 "눌러도 아무 일이 없다"가 된다.
+  const rerunBlocked = Boolean(reconciliation);
   const rawReason = useMemo(
     () => stripReasonCode(blockingRun?.error ?? regularAttentions[0]?.lastError ?? ""),
     [blockingRun?.error, regularAttentions],
@@ -144,7 +147,8 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   /** 멈춘 사유를 그대로 세션 대화에 넘겨 이어서 해결하게 한다(같은 화면 왼쪽 패널).
    *  세션 패널이 없는 화면(자동화 상세)에서는 플로우 화면으로 이동해 그대로 이어진다. */
   function continueInSession() {
-    const reason = blockingRun?.error?.trim() || regularAttentions[0]?.lastError?.trim() || "";
+    // 대화에 넘길 때도 내부 판정 코드는 뗀다 — 사용자가 자기 말로 읽을 수 있어야 한다.
+    const reason = stripReasonCode(blockingRun?.error ?? regularAttentions[0]?.lastError ?? "");
     const prompt = ko
       ? `이 자동화의 마지막 실행이 끝까지 완료되지 않았어요.\n\n기록된 사유:\n${reason || "(사유 기록 없음)"}\n\n원인을 확인하고, 지금 할 수 있는 조치를 알려준 뒤 가능하면 이어서 해결해 주세요.`
       : `The last run of this automation did not complete.\n\nRecorded reason:\n${reason || "(no reason recorded)"}\n\nDiagnose it, tell me what I can do now, and continue from here if you can.`;
@@ -169,7 +173,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
       await load();
       await loadFixPlan();
     } catch (err) {
-      setFixMessage(ko ? `조치를 실행하지 못했습니다. ${String(err)}` : `The action could not run. ${String(err)}`);
+      setFixMessage(rerunFailureMessage(err, ko));
     } finally {
       setFixBusy(null);
     }
@@ -185,7 +189,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
       setMessage(ko ? "다시 실행을 시작했습니다." : "Started another run.");
       await load();
     } catch (err) {
-      setMessage(ko ? `다시 실행하지 못했습니다. ${String(err)}` : `Could not start the run. ${String(err)}`);
+      setMessage(rerunFailureMessage(err, ko));
     } finally {
       setRerunning(false);
     }
@@ -330,10 +334,26 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
             <button type="button" onClick={continueInSession}>
               {ko ? "대화에서 이어서 해결" : "Continue in the session"}
             </button>
-            <button type="button" onClick={() => void rerun()} disabled={rerunning}>
+            <button
+              type="button"
+              onClick={() => void rerun()}
+              disabled={rerunning || rerunBlocked}
+              title={rerunBlocked
+                ? (ko
+                    ? "아래에서 각 단계가 실제로 실행됐는지 먼저 확정해 주세요. 그 전에 다시 실행하면 같은 동작이 두 번 일어날 수 있어 막아 둡니다."
+                    : "Confirm below whether each step actually ran. Until then a rerun could repeat the same action, so it is blocked.")
+                : undefined}
+            >
               {rerunning ? (ko ? "시작하는 중…" : "Starting…") : ko ? "지금 다시 실행" : "Run again now"}
             </button>
           </div>
+          {rerunBlocked ? (
+            <p className="automation-fix-result">
+              {ko
+                ? "아래에서 실제 실행 여부를 확정하기 전에는 다시 실행할 수 없어요 — 같은 동작이 두 번 일어나는 걸 막기 위해서예요."
+                : "A rerun is held until you confirm below what actually ran — this prevents the same action from happening twice."}
+            </p>
+          ) : null}
           {fixMessage ? <p className="automation-fix-result" role="status">{fixMessage}</p> : null}
           {rawReason ? (
             <details className="automation-raw-record">
@@ -512,6 +532,17 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
       ) : null}
     </section>
   );
+}
+
+/** 재실행 실패를 사람 말로 — main이 던지는 코드 문자열을 그대로 노출하지 않는다. */
+function rerunFailureMessage(error: unknown, ko: boolean): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (/reconciliation_pending|ambiguous_side_effect|reconciliation required/i.test(raw)) {
+    return ko
+      ? "아래에서 실제 실행 여부를 먼저 확정해 주세요. 확정 전에는 같은 동작이 두 번 일어날 수 있어 다시 실행하지 않습니다."
+      : "Confirm below what actually ran first. Until then a rerun could repeat the same action, so it is held.";
+  }
+  return ko ? "다시 실행하지 못했어요. 잠시 뒤 다시 시도해 주세요." : "The run could not start. Try again shortly.";
 }
 
 function reconciliationErrorMessage(error: unknown, ko: boolean): string {
