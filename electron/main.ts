@@ -218,6 +218,17 @@ const installIdentity = initializeInstallIdentity();
  */
 function applyDockIcon(): void {
   if (process.platform !== "darwin" || !app.dock) return;
+  // The comment above already says this path is dev-only, but the guard was
+  // missing, so every packaged launch ran it and logged
+  // "[dock] icon not found or empty at .../app.asar/build-resources/icon-1024.png".
+  // That lookup can never succeed in a packaged build: electron-builder's
+  // `files:` list packages dist/electron, dist/shared, dist/renderer and
+  // package.json only, so build-resources/ is never inside app.asar. The real
+  // Dock and Finder icon comes from Contents/Resources/icon.icns via
+  // CFBundleIconFile, which is why nobody noticed a wrong icon — only a
+  // permanent false warning in the shipped log, which teaches everyone to
+  // ignore startup warnings.
+  if (app.isPackaged) return;
   // dist/electron/main.js → ../../build-resources/icon-1024.png
   const iconPath = path.join(__dirname, "../../build-resources/icon-1024.png");
   try {
