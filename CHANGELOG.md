@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.9.48 — 2026-08-03
+
+This release binds Agentlas OS v1.1.96 at
+987c3649b92754b41297878ffe5e3243c82e545c.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **A failed update stops being a dead end.** A native handoff that ended
+  without replacing the app was journalled as `install-not-applied`, a state
+  with no retry deadline and no branch that could reach it — so the app settled
+  on "업데이트가 적용되지 않았습니다", re-downloaded the full package on every
+  launch, and waited for a manual reinstall. It now ages out on a bounded
+  backoff and heals itself, while still refusing to re-pull a failed target on
+  the very next check. Updates also no longer pause writers or abandon a pending
+  install because a convenience backup went missing: automations and sessions
+  keep running through an update, and the local database is trusted.
+- **Answers appear without leaving the screen.** Reconciliation was gated on
+  runs this window started itself, so a reply produced by an automation, a
+  schedule, the phone, another window, or a run already in flight sat in the
+  database until the user navigated away and back.
+- **A past failure stops claiming the present.** An automation that has since
+  completed three times kept showing "확인 필요" from an older partial run.
+  Only failures after the most recent success count as the current state; the
+  older run stays in the history.
+- **A project has an on-call pool, not a controller.** The first agent was
+  labelled "책임자 · 프로젝트 컨트롤러" and the rest ranked "N순위 선호 인력"
+  with reorder controls, and the copy asserted that this controller splits up
+  every task. There is no controller agent: the orchestrator LLM chosen on the
+  dashboard does that, drawing on the project's agents first and borrowing only
+  for what they cannot cover. Those agents carry no ranking.
+- **Switching models hands the conversation over.** The session fingerprint left
+  the model out, so a BYOK model change resumed the previous model's session — a
+  false resume. A model change now starts a fresh session seeded with the
+  compacted conversation, so the thread continues instead of being replayed into
+  a session that cannot own it.
+- **Imported teams stop disclosing themselves,** single agents stop appearing as
+  members of the last expanded team, and packaged builds stop logging a dock
+  icon warning for a path that cannot exist in a packaged build.
+
 ## 0.9.47 — 2026-08-02
 
 This release binds Agentlas OS v1.1.95 at

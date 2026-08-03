@@ -69,6 +69,22 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-08-03 · v0.9.48 — updates that heal, answers that appear, and a project
+  that tells the truth about who runs it** — a native handoff that ended without
+  replacing the app used to leave a dead end whose only exit was a manual
+  reinstall, while the full package downloaded again on every launch; it now ages
+  out on a bounded backoff and heals itself, and updates no longer pause writers
+  or cancel themselves over a missing convenience backup, so automations and
+  sessions keep running. Replies produced by an automation, a schedule, the phone,
+  or another window now appear without navigating away and back. An automation
+  that has since succeeded stops showing an older partial run as its current
+  state. A project has no controller agent: the orchestrator LLM chosen on the
+  dashboard splits up the work and draws on the project's unranked on-call pool,
+  and the interface says so instead of inventing a hierarchy. Switching models
+  mid-conversation now starts a fresh session seeded with the compacted thread
+  rather than resuming a session that belongs to another model. This release
+  binds Agentlas OS v1.1.96 at 987c3649b92754b41297878ffe5e3243c82e545c. Source readiness does not prove a public
+  installer or update feed; the Releases page stays the authority.
 - **2026-08-02 · v0.9.47 — verified recovery and live mobile authority** —
   One no longer treats a completed retry as proof that the original request was
   satisfied: Main binds the failed and recovery receipts, asks One to judge the
