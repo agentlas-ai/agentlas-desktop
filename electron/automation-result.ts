@@ -35,6 +35,36 @@ function unresolved(reasonCode: string, evidence: string | null): AutomationResu
   };
 }
 
+/** 판정 불가를 실행 실패와 구분하는 표식. 이 코드를 가진 결과는 실패 스트릭도, 복구 턴도 만들지 않는다. */
+export const JUDGMENT_UNAVAILABLE_REASON_CODE = "judgment_unavailable";
+
+export function isJudgmentUnavailable(
+  classification: Pick<AutomationResultClassification, "reasonCode">,
+): boolean {
+  return classification.reasonCode === JUDGMENT_UNAVAILABLE_REASON_CODE;
+}
+
+/**
+ * "판정하지 못했다"는 "실패했다"가 아니다.
+ *
+ * 예전에는 판정 모델에 닿지 못하면 status/outcome을 error로 내리고 reason을 null로 뒀다.
+ * 그 결과 ① 정상 완료한 실행이 실패로 기록되고, ② 사용자 카드에는 사유가 비어 있고,
+ * ③ "결과가 실패로 판정됐습니다"라는 **일어나지 않은 판정**이 문구로 나가고,
+ * ④ One 복구 워커가 거짓 전제로 한 번 더 돌아 같은 부수효과를 반복할 위험이 있었다.
+ * 판정 불가는 외부 제약(blocked)이며, 사유와 다음 행동을 갖는다.
+ */
+function judgmentUnavailable(locale: "ko" | "en"): AutomationResultClassification {
+  return {
+    status: "blocked",
+    outcome: "blocked",
+    reasonCode: JUDGMENT_UNAVAILABLE_REASON_CODE,
+    reason: locale === "ko"
+      ? "결과를 판정할 모델에 연결하지 못해 이번 실행이 성공했는지 확인하지 못했습니다. 실행 자체는 끝까지 진행됐습니다."
+      : "The run finished, but its outcome is unconfirmed: the judging model could not be reached.",
+    evidence: null,
+  };
+}
+
 /**
  * Synchronous callers may establish only form: an empty result is not success.
  * Meaning is intentionally unresolved until classifyAutomationOutcome asks the
@@ -69,7 +99,7 @@ export async function classifyAutomationOutcome(
     scanSecrets: true,
     ...(opts.signal ? { signal: opts.signal } : {}),
   });
-  if (!verdict.verdict) return unresolved("judgment_unavailable", null);
+  if (!verdict.verdict) return judgmentUnavailable(locale);
   return {
     status: verdict.verdict,
     outcome: verdict.verdict,

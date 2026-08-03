@@ -33,6 +33,7 @@ import { emitAutomationDone } from "./triggers/chain-bus";
 import {
   classifyAutomationFailure,
   classifyAutomationOutcome,
+  isJudgmentUnavailable,
   type AutomationResultStatus,
 } from "./automation-result";
 import {
@@ -421,6 +422,8 @@ async function runOne(
   }
   running.add(a.id);
   let runStatus: AutomationResultStatus = "ok";
+  /** 이번 실행이 "실패"가 아니라 "판정 불가"로 끝났는가 — 복구 워커·실패 표시의 억제 조건. */
+  let judgmentUnavailableRun = false;
   let runError: string | null = null;
   let output: string | undefined;
   let currentRunId: string | null = null;
@@ -632,6 +635,7 @@ async function runOne(
       if (runStatus === "ok") {
         const classified = await classifyAutomationOutcome(output);
         runStatus = classified.outcome;
+        judgmentUnavailableRun = isJudgmentUnavailable(classified);
         runError = classified.reasonCode && classified.reason
           ? `[${classified.reasonCode}] ${classified.reason}`
           : classified.reason;
@@ -769,10 +773,13 @@ async function runOne(
         if (!output?.trim()) throw new Error("Automation finished without an assistant result");
         const classified = await classifyAutomationOutcome(output);
         runStatus = classified.outcome;
+        judgmentUnavailableRun = isJudgmentUnavailable(classified);
         runError = classified.reasonCode && classified.reason
           ? `[${classified.reasonCode}] ${classified.reason}`
           : classified.reason;
-        const legacyNodeFailed = runStatus === "error" || runStatus === "blocked" || runStatus === "needs_input";
+        // 판정 불가는 노드를 실패로 칠하지 않는다 — 노드는 끝까지 실행됐다.
+        const legacyNodeFailed = !judgmentUnavailableRun &&
+          (runStatus === "error" || runStatus === "blocked" || runStatus === "needs_input");
         emitLegacyState("n1", legacyNodeFailed ? "failed" : runStatus === "skipped" ? "skipped" : "done");
         try {
           finishGraphRun(runId, legacyNodeFailed ? "error" : "ok");
@@ -887,7 +894,12 @@ async function runOne(
     }
     // 실패 피드백·수리 — run_history 기록(markAutomationRun) 이후에 호출해야
     // countConsecutiveFailures가 이번 실패를 포함한다.
-    if (runStatus !== "ok" && runStatus !== "skipped" && !parentMissing && !leaseOwnershipLost) {
+    // 판정 불가는 실패가 아니다: 실행은 끝까지 갔고 우리가 결과를 못 읽었을 뿐이므로,
+    // "결과가 수용되지 않았다"는 거짓 전제로 복구 워커를 돌리지 않는다(부수효과 반복 위험).
+    if (
+      runStatus !== "ok" && runStatus !== "skipped" &&
+      !judgmentUnavailableRun && !parentMissing && !leaseOwnershipLost
+    ) {
       try {
         handleAutomationFailure(a, runError ?? "unknown error");
       } catch (err) {

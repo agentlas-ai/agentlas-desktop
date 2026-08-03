@@ -229,6 +229,7 @@
     "test:agent-app-runtime-gate": "npm run build:electron && npm run test:agent-app-runtime:prepared",
     "test:release-agent-foundation-gate": "npm run build:electron && npm run test:project-foundation-allocation:prepared && npm run test:mcp-resilience:prepared && npm run test:agent-app-runtime:prepared",
     "test:automations-store": "npm run build:electron && electron scripts/test-automations-store.cjs",
+    "test:graph-kernel-contract": "npm run build:electron && electron scripts/test-graph-kernel-contract.cjs",
     "test:automation-trigger-safety": "npm run build:electron && electron scripts/test-automation-trigger-safety.cjs",
     "test:question-answer-receipt": "npm run build:electron && electron scripts/test-question-answer-receipt.cjs",
     "test:automation-scheduler-guards": "npm run build:electron && electron scripts/test-automation-scheduler-guards.cjs",

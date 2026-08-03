@@ -21,7 +21,8 @@ export interface WorkflowIssue {
     | "unreachable" // 트리거에서 도달 불가(고립 섬)
     | "no-trigger" // 트리거 노드가 하나도 없음
     | "unknown-variable" // {{var}} 소비하는데 상류 생산자 없음
-    | "condition-missing-branch"; // condition 노드에 true/false 엣지가 부족
+    | "condition-missing-branch" // condition 노드에 true/false 엣지가 부족
+    | "condition-branch-undeclared"; // condition에서 나가는 연결이 참/거짓을 선언하지 않음(커널이 실행 거부)
   /** 사람이 읽는 요약(영문 기본, UI가 code로 재번역 가능). */
   message: string;
   /** unknown-variable일 때 문제의 변수명. */
@@ -187,17 +188,31 @@ export function validateWorkflow(graph: WorkflowGraph): WorkflowIssue[] {
   }
 
   // condition 노드는 true/false 두 분기 엣지가 있어야 의미가 있다(둘 다 없으면 경고).
+  // 그리고 참/거짓을 선언하지 않은 연결은 **오류**다: 커널은 어느 쪽으로도 판정할 수 없어
+  // 실행을 멈춘다(EDGE_CONDITION_UNRESOLVED). 실행하고 나서 알게 하지 않는다.
   for (const n of graph.nodes) {
     if (n.type !== "condition") continue;
-    const handles = new Set(
-      graph.edges.filter((e) => e.source === n.id).map((e) => e.sourceHandle ?? ""),
-    );
+    const outgoing = graph.edges.filter((e) => e.source === n.id);
+    const handles = new Set(outgoing.map((e) => e.sourceHandle ?? ""));
     if (!handles.has("true") && !handles.has("false")) {
       issues.push({
         severity: "warning",
         code: "condition-missing-branch",
         nodeId: n.id,
         message: `Condition "${n.label ?? n.type}" has no true/false branch wired.`,
+      });
+    }
+    const undeclared = outgoing.filter(
+      (e) => e.sourceHandle !== "true" && e.sourceHandle !== "false",
+    );
+    if (undeclared.length > 0) {
+      issues.push({
+        severity: "error",
+        code: "condition-branch-undeclared",
+        nodeId: n.id,
+        message:
+          `Condition "${n.label ?? n.type}" has ${undeclared.length} outgoing connection(s) that do not declare the true or false side. ` +
+          "Delete them and reconnect from the condition's true/false outputs.",
       });
     }
   }

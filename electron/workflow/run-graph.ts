@@ -76,6 +76,11 @@ export interface RunGraphResult {
   /** produces 이름 → 값(변수 백 스냅샷). */
   vars: Record<string, unknown>;
   error?: string;
+  /**
+   * 노드 id → 실패 3요소. UI 실패 카드는 이 값을 렌더한다 —
+   * 사유 원문 없이 코드만 보여주거나, 지금 누를 행동 없이 실패만 알리는 표면은 결함이다.
+   */
+  nodeFailures?: Record<string, GraphNodeFailure>;
 }
 
 const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v3";
@@ -627,30 +632,138 @@ function topoSort(graph: WorkflowGraph): WorkflowNode[] {
   return order.map((id) => byId.get(id)!).filter(Boolean);
 }
 
-/** condition 노드 평가 — 변수 백을 읽어 true/false 반환. 단순 op만 지원(P0). */
-function evalCondition(node: WorkflowNode, vars: Record<string, unknown>): boolean {
+/**
+ * 노드 실패의 정직한 3요소 — 코드(기계), 사유 원문(사람), 지금 누를 행동.
+ * 사유 없는 실패·행동 없는 실패 카드는 결함으로 취급한다.
+ */
+export type GraphNodeFailure = {
+  code: string;
+  reason: string;
+  nextAction: string;
+};
+
+/** 실패 3요소를 실어 나르는 에러. 커널 내부 throw는 전부 이 형태를 목표로 한다. */
+export class GraphContractError extends Error {
+  readonly failure: GraphNodeFailure;
+  constructor(failure: GraphNodeFailure) {
+    super(`${failure.code}: ${failure.reason}`);
+    this.name = "GraphContractError";
+    this.failure = failure;
+  }
+}
+
+export function graphFailureOf(err: unknown): GraphNodeFailure | null {
+  return err instanceof GraphContractError ? err.failure : null;
+}
+
+const CONDITION_HANDLES = new Set(["true", "false"]);
+
+type ConditionOutcome =
+  | { ok: true; value: boolean }
+  | { ok: false; failure: GraphNodeFailure };
+
+/**
+ * condition 노드 평가 — 변수 백을 읽어 true/false 반환.
+ *
+ * 평가 불능(선언 변수 부재, 미지 연산자, 숫자 비교 불가)은 **fail-closed**다.
+ * 예전 구현은 미지 op에서 `Boolean(left)`로, 변수 부재에서 undefined→falsy로 조용히
+ * 흘려보냈다 — 조건이 틀린 게 아니라 "평가되지 않았다"는 사실이 사라져 분기가 임의로
+ * 결정됐다. 모르는 것을 그럴듯한 기본값으로 메꾸지 않는다.
+ */
+function evalCondition(node: WorkflowNode, vars: Record<string, unknown>): ConditionOutcome {
   const cfg = node.config;
-  const left = str(cfg, "var") ? vars[str(cfg, "var")!] : undefined;
+  const label = node.label || node.id;
+  const varName = str(cfg, "var");
   const op = str(cfg, "op") ?? "truthy";
   const right = cfg.value;
+  const unresolved = (reason: string, nextAction: string): ConditionOutcome => ({
+    ok: false,
+    failure: { code: "EDGE_CONDITION_UNRESOLVED", reason, nextAction },
+  });
+
+  if (varName && !(varName in vars)) {
+    return unresolved(
+      `조건 노드 "${label}"이 읽으려는 변수 "${varName}"가 이 실행에 존재하지 않습니다.`,
+      "이 변수를 만드는 상류 노드를 연결하거나, 조건에서 참조하는 변수 이름을 고치세요.",
+    );
+  }
+  const left = varName ? vars[varName] : undefined;
+  if (!varName && op !== "truthy" && op !== "falsy") {
+    return unresolved(
+      `조건 노드 "${label}"에 비교할 변수가 지정되지 않았습니다(연산자 "${op}").`,
+      "조건 노드를 열어 비교할 변수를 선택하세요.",
+    );
+  }
+
   switch (op) {
     case "truthy":
-      return Boolean(left);
+      return { ok: true, value: Boolean(left) };
     case "falsy":
-      return !left;
+      return { ok: true, value: !left };
     case "eq":
-      return left === right;
+      return { ok: true, value: left === right };
     case "ne":
-      return left !== right;
+      return { ok: true, value: left !== right };
     case "gt":
-      return Number(left) > Number(right);
-    case "lt":
-      return Number(left) < Number(right);
-    case "contains":
-      return typeof left === "string" && typeof right === "string" && left.includes(right);
+    case "lt": {
+      const l = Number(left);
+      const r = Number(right);
+      if (!Number.isFinite(l) || !Number.isFinite(r)) {
+        return unresolved(
+          `조건 노드 "${label}"이 숫자로 비교할 수 없는 값을 받았습니다(좌: ${JSON.stringify(left)}, 우: ${JSON.stringify(right)}).`,
+          "비교 값을 숫자로 만들거나 연산자를 문자열 비교로 바꾸세요.",
+        );
+      }
+      return { ok: true, value: op === "gt" ? l > r : l < r };
+    }
+    case "contains": {
+      if (typeof left !== "string" || typeof right !== "string") {
+        return unresolved(
+          `조건 노드 "${label}"의 포함 비교는 문자열끼리만 가능합니다(좌: ${typeof left}, 우: ${typeof right}).`,
+          "먼저 transform 노드로 문자열을 만들거나 연산자를 바꾸세요.",
+        );
+      }
+      return { ok: true, value: left.includes(right) };
+    }
     default:
-      return Boolean(left);
+      return unresolved(
+        `조건 노드 "${label}"에 이 커널이 모르는 연산자 "${op}"가 지정돼 있습니다.`,
+        "조건 노드를 열어 지원되는 연산자를 다시 고르세요.",
+      );
   }
+}
+
+/** produces 결과 병합 정책. 선언이 없으면 overwrite(기존 동작)로 본다. */
+export type GraphReducerPolicy = "overwrite" | "append" | "merge";
+
+function reducerPolicyOf(node: WorkflowNode): GraphReducerPolicy {
+  const raw = str(node.config, "reducer");
+  return raw === "append" || raw === "merge" ? raw : "overwrite";
+}
+
+/**
+ * 노드 도달 가능성(상류→하류). 두 노드가 서로 도달 불가면 **동시 실행 가능**이며,
+ * 같은 변수에 overwrite로 쓰면 결과가 도착 순서에 좌우된다(비결정적).
+ */
+function buildReachability(graph: WorkflowGraph): Map<string, Set<string>> {
+  const out = new Map<string, string[]>();
+  for (const e of graph.edges) {
+    if (!out.has(e.source)) out.set(e.source, []);
+    out.get(e.source)!.push(e.target);
+  }
+  const cache = new Map<string, Set<string>>();
+  for (const node of graph.nodes) {
+    const seen = new Set<string>();
+    const stack = [...(out.get(node.id) ?? [])];
+    while (stack.length > 0) {
+      const next = stack.pop()!;
+      if (seen.has(next)) continue;
+      seen.add(next);
+      for (const child of out.get(next) ?? []) if (!seen.has(child)) stack.push(child);
+    }
+    cache.set(node.id, seen);
+  }
+  return cache;
 }
 
 /** transform 노드 — 변수 백을 순수 함수로 reshape(extract/format/json). */
@@ -862,6 +975,14 @@ export async function runGraph(
   const ordered = topoSort(graph);
   let ok = true;
   let error: string | undefined;
+  /** 노드 id → 실패 3요소(코드·사유 원문·지금 누를 행동). 실패 카드의 정본. */
+  const nodeFailures: Record<string, GraphNodeFailure> = {};
+  /** 선언 순서 인덱스 — append 리듀서의 결정론적 정렬 키(도착 순서 아님). */
+  const declarationIndex = new Map<string, number>(graph.nodes.map((n, i) => [n.id, i] as const));
+  /** 도달 가능성 — 같은 변수에 동시 overwrite하는 두 노드를 잡아내는 데 쓴다. */
+  const reachability = buildReachability(graph);
+  /** 변수 이름 → 이번 실행에서 그 변수를 쓴 노드들. */
+  const varWriters = new Map<string, string[]>();
   const running = new Map<string, Promise<void>>();
   const drainRunning = async (): Promise<void> => {
     const pending = [...running.values()];
@@ -1046,6 +1167,100 @@ export async function runGraph(
     checkpointNodeState(nodeId, "failed");
   };
 
+  /**
+   * produces 결과를 변수 백에 병합한다. 실패하면 3요소를 돌려주고, 성공하면 null.
+   *
+   * - `overwrite`(기본): 순차 재할당은 정상이지만, **서로 도달 불가한(=동시 실행 가능한)**
+   *   두 노드가 같은 이름을 덮어쓰면 도착 순서가 결과를 바꾼다. 예전엔 경고만 찍고 넘어가
+   *   같은 그래프가 실행마다 다른 값을 냈다. 이제 거부한다.
+   * - `append`: 노드 **선언 순서**로 정렬해 담는다(도착 순서 아님) — 재실행해도 같은 배열.
+   * - `merge`: 객체끼리만. 문자열 산출은 JSON 객체로 파싱될 때만 병합한다.
+   */
+  const applyProduces = (
+    node: WorkflowNode,
+    produces: string,
+    text: string,
+  ): GraphNodeFailure | null => {
+    const policy = reducerPolicyOf(node);
+    const writers = varWriters.get(produces) ?? [];
+    if (policy === "overwrite") {
+      const rival = writers.find((other) =>
+        other !== node.id &&
+        !reachability.get(other)?.has(node.id) &&
+        !reachability.get(node.id)?.has(other),
+      );
+      if (rival) {
+        return {
+          code: "REDUCER_WRITE_CONFLICT",
+          reason:
+            `노드 "${node.label || node.id}"와 "${rival}"이(가) 동시에 실행될 수 있는데 같은 결과 이름 "${produces}"에 덮어쓰기로 저장합니다. 어느 쪽이 남을지는 먼저 끝나는 쪽에 따라 매번 달라집니다.`,
+          nextAction:
+            "두 노드의 결과 이름을 다르게 하거나, 저장 규칙을 '이어붙이기'로 바꾸세요.",
+        };
+      }
+      vars[produces] = text;
+    } else if (policy === "append") {
+      const prior = vars[produces];
+      const bucket: { order: number; nodeId: string; value: string }[] = Array.isArray(prior)
+        ? (prior as unknown[]).filter((row): row is { order: number; nodeId: string; value: string } =>
+            !!row && typeof row === "object" && "order" in row && "value" in row)
+        : prior === undefined
+          ? []
+          : [{ order: -1, nodeId: "", value: String(prior) }];
+      bucket.push({ order: declarationIndex.get(node.id) ?? 0, nodeId: node.id, value: text });
+      bucket.sort((a, b) => (a.order - b.order) || (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0));
+      vars[produces] = bucket;
+    } else {
+      const prior = vars[produces];
+      let parsed: unknown = text;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = text;
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return {
+          code: "REDUCER_MERGE_CONFLICT",
+          reason: `노드 "${node.label || node.id}"의 저장 규칙이 '합치기'인데 결과가 객체가 아닙니다(받은 값: ${typeof parsed}).`,
+          nextAction: "저장 규칙을 '덮어쓰기'나 '이어붙이기'로 바꾸거나, 앞에 transform 노드로 JSON 객체를 만드세요.",
+        };
+      }
+      const base = prior && typeof prior === "object" && !Array.isArray(prior)
+        ? (prior as Record<string, unknown>)
+        : {};
+      vars[produces] = { ...base, ...(parsed as Record<string, unknown>) };
+    }
+    varWriters.set(produces, [...writers, node.id]);
+    return null;
+  };
+
+  /**
+   * 계약 위반으로 노드를 세운다. 부수효과가 발생할 수 없는 인러너 판정(조건/변환/리듀서)에서만
+   * 쓰며, ambiguous로 올리지 않는다 — 외부에 아무것도 나가지 않았음이 확정이기 때문이다.
+   * 사유 원문과 지금 누를 행동을 함께 남긴다(코드만 남기지 않는다).
+   */
+  const failGraphNode = (node: WorkflowNode, failure: GraphNodeFailure): void => {
+    failNode(node.id, false);
+    status.set(node.id, "failed");
+    nodeFailures[node.id] = failure;
+    tryRecordFailureEvent({
+      runId,
+      source: "workflow_node",
+      automationId: automation.id,
+      nodeId: node.id,
+      agentId: node.id,
+      errorCode: failure.code,
+      errorMessage: failure.reason,
+      payload: {
+        nodeType: node.type,
+        nodeLabel: node.label,
+        nextAction: failure.nextAction,
+      },
+    });
+    if (error === undefined) error = `${failure.code}: ${failure.reason}`;
+    ok = false;
+  };
+
   const runNode = async (node: (typeof ordered)[number]): Promise<void> => {
     switch (node.type) {
       case "trigger":
@@ -1055,9 +1270,38 @@ export async function runGraph(
         return;
       case "condition": {
         beginNode(node);
-        const result = evalCondition(node, vars);
-        const drop = result ? "false" : "true";
-        for (const edge of outByNode.get(node.id) ?? []) {
+        const label = node.label || node.id;
+        const outgoing = outByNode.get(node.id) ?? [];
+        // 분기 계약은 실행 전에 확인한다. 핸들을 선언하지 않은 엣지는 어느 쪽 drop과도
+        // 일치하지 않아 **양쪽 분기가 동시에 살아나는** 무성 결함이었다. 모르는 배선은
+        // 통과시키지 않는다.
+        const undeclared = outgoing.filter((edge) => !edge.handle || !CONDITION_HANDLES.has(edge.handle));
+        if (undeclared.length > 0) {
+          failGraphNode(node, {
+            code: "EDGE_CONDITION_UNRESOLVED",
+            reason:
+              `조건 노드 "${label}"에서 나가는 연결 ${undeclared.length}개가 참/거짓 중 어느 쪽인지 선언하지 않았습니다.`,
+            nextAction: "캔버스에서 해당 연결을 지우고 조건 노드의 참·거짓 출구에서 다시 이으세요.",
+          });
+          return;
+        }
+        const outcome = evalCondition(node, vars);
+        if (!outcome.ok) {
+          failGraphNode(node, outcome.failure);
+          return;
+        }
+        const take = outcome.value ? "true" : "false";
+        const drop = outcome.value ? "false" : "true";
+        // 갈 곳이 선언돼 있는데 이번 판정과 맞는 출구가 하나도 없으면 조용히 흘리지 않는다.
+        if (outgoing.length > 0 && !outgoing.some((edge) => edge.handle === take)) {
+          failGraphNode(node, {
+            code: "NO_MATCHING_EDGE",
+            reason: `조건 노드 "${label}"이 ${take === "true" ? "참" : "거짓"}으로 판정됐지만 그쪽으로 이어진 연결이 없습니다.`,
+            nextAction: `조건 노드의 ${take === "true" ? "참" : "거짓"} 출구에 다음 작업을 연결하거나, 여기서 끝나는 게 맞다면 종료 노드를 이으세요.`,
+          });
+          return;
+        }
+        for (const edge of outgoing) {
           if (edge.handle === drop) blockedEdges.add(edge.edgeId);
         }
         completeNode(node.id);
@@ -1221,17 +1465,11 @@ export async function runGraph(
           outputs[node.id] = text;
           const produces = str(node.config, "produces");
           if (produces) {
-            // 이전 주석은 "병렬 노드는 deps로 분리돼 vars 경합이 없다"고 단언했지만 코드가 그걸
-            // 보장하지 않는다: ready 필터는 서로 엣지가 없는 노드를 같은 배치로 동시에 띄우므로,
-            // 두 독립 브랜치가 같은 produces 이름을 쓰면 마지막 완료 노드가 이긴다(비결정적).
-            // 막지는 않는다 — 순차 재할당은 정상 패턴이다. 다만 조용히 덮어쓰지는 않는다.
-            if (produces in vars && vars[produces] !== text) {
-              console.warn(
-                `[workflow] variable "${produces}" overwritten by node ${node.id}; ` +
-                  `concurrent producers of the same name are last-writer-wins and non-deterministic`,
-              );
+            const applied = applyProduces(node, produces, text);
+            if (applied) {
+              failGraphNode(node, applied);
+              return;
             }
-            vars[produces] = text;
           }
           completeNode(node.id);
           status.set(node.id, "done");
@@ -1263,15 +1501,34 @@ export async function runGraph(
             : rawMessage;
           failNode(node.id, ambiguous);
           status.set(node.id, "failed");
+          // 실패 카드의 정본. 예전엔 모든 노드 실패가 errorCode "node_failed" 하나로 뭉개져
+          // 사용자에게 보여줄 사유도, 지금 누를 행동도 남지 않았다.
+          const contractFailure = graphFailureOf(nodeErr);
+          const failure: GraphNodeFailure = contractFailure ?? (ambiguous
+            ? {
+                code: "MUTATION_UNVERIFIED",
+                reason: `노드 "${node.label || node.id}"이 외부에 무언가를 반영했는지 확인되지 않은 채로 멈췄습니다. 원문: ${rawMessage}`,
+                nextAction: "실제로 반영됐는지 확인한 뒤 [이 노드부터 재실행] 또는 [건너뛰기]를 고르세요.",
+              }
+            : {
+                code: "NODE_FAILED",
+                reason: rawMessage,
+                nextAction: "사유를 확인하고 [이 노드부터 재실행]하거나, 노드 설정을 고친 뒤 다시 실행하세요.",
+              });
+          nodeFailures[node.id] = failure;
           tryRecordFailureEvent({
             runId,
             source: "workflow_node",
             automationId: automation.id,
             nodeId: node.id,
             agentId: node.id,
-            errorCode: "node_failed",
+            errorCode: failure.code,
             errorMessage: message,
-            payload: { nodeType: node.type, nodeLabel: node.label },
+            payload: {
+              nodeType: node.type,
+              nodeLabel: node.label,
+              nextAction: failure.nextAction,
+            },
           });
           if (error === undefined) error = message;
           ok = false;
@@ -1377,5 +1634,8 @@ export async function runGraph(
       payload: { ok, error },
     });
   }
-  return ok ? { ok: true, outputs, vars } : { ok: false, outputs, vars, error };
+  const failures = Object.keys(nodeFailures).length > 0 ? { nodeFailures } : {};
+  return ok
+    ? { ok: true, outputs, vars, ...failures }
+    : { ok: false, outputs, vars, error, ...failures };
 }
