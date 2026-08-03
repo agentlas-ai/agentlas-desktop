@@ -69,6 +69,24 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-08-03 · v0.9.50 — your phone stays paired** — measured on a real
+  machine before this release: 39 paired devices, 0 of them still usable. Five
+  paths revoked every paired phone and four fired during entirely normal
+  operation — a plain 30-day session expiry with no renewal path, any sign-in
+  including the same account signing back in, every boot while signed out, and
+  any transient failure of the account check that runs on every phone
+  connection, so one relay hiccup destroyed a pairing permanently. Revocation
+  now requires proof: only a provably different workspace loses its
+  credentials, and signing out stops serving phones instead of deleting them,
+  so signing back in brings every pairing back as it was. A refused phone also
+  says which problem it hit instead of returning the same bare 401 for
+  re-pairing, an outage, a closed account, and a signed-out Desktop; and the
+  Cloud Relay tunnel, which logged nothing at all, now names why it closed. The
+  MCP tools screen no longer shows "no tools connected" for the first 10-15
+  seconds of loading, and the first-run button stays focusable while it waits.
+  This release binds Agentlas OS v1.1.97 at
+  17c2d127c39d45927d8743ceb945516ae89a7f76. Source readiness does not prove a public installer or update feed; the
+  Releases page stays the authority.
 - **2026-08-03 · v0.9.49 — one engine, one answer** — the Dashboard's
   run-readiness row for Agentlas OS used to sit on "update verification is in
   progress" indefinitely while Settings said that same engine version was

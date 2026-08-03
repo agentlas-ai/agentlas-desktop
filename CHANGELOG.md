@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.9.50 — 2026-08-03
+
+This release binds Agentlas OS v1.1.97 at
+17c2d127c39d45927d8743ceb945516ae89a7f76.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **Your phone stays paired.** Measured on a real machine before this release:
+  39 paired devices, 0 of them still usable. Five paths revoked every paired
+  phone, and four of them fired during entirely normal operation — a plain
+  30-day session expiry with no renewal path, any sign-in including the same
+  account signing back in, every boot while signed out, and any transient
+  failure of the account check that runs on every phone connection. One relay
+  hiccup destroyed a pairing permanently and the only cure was scanning a new
+  QR. The cause was treating "we could not prove who this Desktop is" as "this
+  Desktop belongs to someone else". Revocation now requires proof: only a
+  workspace that is provably different loses its credentials. Signing out stops
+  serving phones instead of deleting them, so signing back in brings every
+  pairing back exactly as it was.
+- **A refused phone says which problem it hit.** Every refusal used to be the
+  same bare 401, so a phone that simply needed re-pairing looked identical to
+  one hitting a cloud outage, a closed account, or a signed-out Desktop — and
+  it retried forever instead of telling anyone. Each case now travels with its
+  own reason, and pairings created before account binding shipped ask to be set
+  up again instead of failing silently.
+- **Remote access failures leave evidence.** The Cloud Relay tunnel logged
+  nothing at all, so a command from your phone that never arrived left no trace
+  on either machine. Every tunnel close now names its cause and whether the
+  local hop was reached, and rejected connections report their status.
+- **The MCP tools screen stops claiming nothing is connected.** The empty state
+  and the first 10-15 seconds of loading were pixel-identical, so opening the
+  screen to check plugin status showed "no tools connected" and then silently
+  swapped in five real tool cards. First load now has its own wording.
+- **The first-run button stays reachable.** Pressing Get Started relabelled the
+  button and then nothing moved for nine to eleven seconds, with no spinner and
+  no cancel. It also carried `disabled`, which removed it from the tab order, so
+  a keyboard-only user could not operate the only control on the first screen.
+
 ## 0.9.49 — 2026-08-03
 
 This release binds Agentlas OS v1.1.97 at
