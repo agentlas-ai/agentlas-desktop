@@ -20,6 +20,12 @@ const DEVICE_NONCE_RE = /^[A-Za-z0-9_-]{32,128}$/;
 const OPAQUE_PROOF_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/;
 const RECEIPT_RE = /^mpr_[A-Za-z0-9_-]{24}$/;
 
+/**
+ * "unreachable" exists so a transient outage can never be mistaken for a
+ * definitive "this account is gone". Only "inactive" may revoke a credential.
+ */
+export type AccountAuthorityStatus = "active" | "inactive" | "unreachable";
+
 export type MobileBridgeAccountPairingFailureCode =
   | "invalid_request"
   | "invalid_proof"
@@ -237,21 +243,38 @@ export class MobileBridgeAccountPairingClient {
     };
   }
 
-  async accountAuthorityActive(input: { accountSubject: string }): Promise<boolean> {
-    if (!ACCOUNT_SUBJECT_RE.test(input.accountSubject)) return false;
+  /**
+   * Tri-state on purpose. "We could not reach the account authority" is NOT
+   * "this account is inactive", and collapsing the two destroyed real
+   * pairings: the caller revoked the device on a network blip, a 503 from the
+   * status route, or any non-JSON body. A revoke is permanent and forces the
+   * user to re-scan a QR, so it may only follow a definitive server answer.
+   */
+  async accountAuthorityStatus(input: { accountSubject: string }): Promise<AccountAuthorityStatus> {
+    if (!ACCOUNT_SUBJECT_RE.test(input.accountSubject)) return "inactive";
     let response: Response;
     try {
       response = await this.post(ACCOUNT_STATUS_PATH, { account_subject: input.accountSubject });
     } catch {
-      return false;
+      return "unreachable";
     }
+    // 5xx and 429 are the authority telling us it cannot answer right now.
+    // 401/403/404 are definitive answers about this subject.
+    if (response.status >= 500 || response.status === 408 || response.status === 429) return "unreachable";
     let raw: unknown;
     try {
       raw = await boundedJson(response);
     } catch {
-      return false;
+      return "unreachable";
     }
-    return response.ok && isRecord(raw) && exactKeys(raw, ["active"]) && raw.active === true;
+    if (!response.ok) return "inactive";
+    if (!isRecord(raw) || !exactKeys(raw, ["active"])) return "unreachable";
+    return raw.active === true ? "active" : "inactive";
+  }
+
+  /** @deprecated Use accountAuthorityStatus — a boolean cannot express "unreachable". */
+  async accountAuthorityActive(input: { accountSubject: string }): Promise<boolean> {
+    return (await this.accountAuthorityStatus(input)) === "active";
   }
 
   async consumePairingAssertion(input: {

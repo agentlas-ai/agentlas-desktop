@@ -18,6 +18,7 @@ import {
   loadOrCreateMobileBridgeHostIdentity,
   readMobileBridgeEndpointManifest,
   revokeAllStoredMobileBridgeDevices,
+  revokeMobileBridgeDevicesForOtherAccounts,
   writeMobileBridgeEndpointManifest,
   type MobileBridgeEndpointManifest,
   type MobileBridgePairingChangeReason,
@@ -28,7 +29,7 @@ import { MobileBridgeAccountPairingClient } from "./account-pairing";
 import { MobileBridgeCloudRelay } from "./relay";
 import { loadOrCreateMobileBridgeTls, preferredMobileBridgeHost } from "./tls";
 import { getDefaultOntologyHubClient } from "./ontology-hub-client";
-import { getSessionCookieHeader } from "../auth";
+import { getAuthSession, getSessionCookieHeader } from "../auth";
 import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
 import {
   TerminalOntologyLoadoutFeedWriter,
@@ -179,19 +180,24 @@ async function startBridgeInternal(
 ): Promise<MobileBridgeRuntimeStatus> {
   if (running) return mobileBridgeRuntimeStatus();
   lastError = null;
-  // A credential issued under an earlier account must never become usable on
-  // a signed-out boot. This covers TTL expiry during keychain restore and a
-  // previous shutdown that happened before explicit logout cleanup completed.
-  if (!getSessionCookieHeader()) {
-    revokeAllStoredMobileBridgeDevices(options.userDataPath);
-  }
+  // A credential issued under an earlier account must never become USABLE on a
+  // signed-out boot — but it must not be deleted either. Wiping here (plus on
+  // TTL expiry and on every re-sign-in) is what left 39 of 39 paired devices
+  // revoked on a real machine. Serving is gated by desktopSessionActive below;
+  // the credential survives so signing back in restores the pairing.
   const identity = loadOrCreateMobileBridgeHostIdentity(options.userDataPath);
   const accountPairing = new MobileBridgeAccountPairingClient();
   const pairing = new MobileBridgePairingManager(options.userDataPath, {
     consumePairingAssertion: (input) => accountPairing.consumePairingAssertion(input),
-    validateAccountAuthority: (input) => accountPairing.accountAuthorityActive({
-      accountSubject: input.accountSubject,
-    }).then((active) => active && input.accountAuthorityOrigin === accountPairing.origin),
+    desktopSessionActive: () => Boolean(getSessionCookieHeader()),
+    desktopWorkspaceId: () => getAuthSession().workspaceId ?? null,
+    validateAccountAuthority: async (input) => {
+      // A credential bound to a different authority origin is a definitive
+      // mismatch. Everything else defers to the authority's own tri-state, so
+      // an outage can never be read as "this account is gone".
+      if (input.accountAuthorityOrigin !== accountPairing.origin) return "inactive";
+      return accountPairing.accountAuthorityStatus({ accountSubject: input.accountSubject });
+    },
     onChanged: emitMobileBridgeStateChange,
   });
   const replayStore = new MobileBridgeRequestReplayStore(options.userDataPath);
@@ -430,12 +436,44 @@ export function revokeMobileBridgeDevice(deviceId: string): { ok: boolean } {
 }
 
 /**
- * Account-bound pairing credentials must not survive Desktop logout, silent
- * session invalidation, or a replacement sign-in. The stopped-server path
- * revokes the durable file directly; the live path additionally disconnects
- * every authenticated socket and invalidates any outstanding QR challenge.
+ * Reconciles pairing credentials against the account now signed in.
+ *
+ * Only a PROVEN identity change revokes: a credential whose recorded workspace
+ * differs from the active one. Failing to prove identity — TTL expiry, a
+ * signed-out boot, an offline account-status check, the same account signing
+ * in again — never revokes, because that blanket behaviour deleted every real
+ * pairing on this machine (39 of 39 revoked, 0 active).
+ *
+ * Any outstanding QR challenge is still invalidated, and sockets belonging to
+ * revoked devices are still disconnected immediately.
  */
-export function revokeAllMobileBridgeDevicesForAuthChange(
+export function reconcileMobileBridgeDevicesForAccount(
+  fallbackUserDataPath?: string,
+): { revoked: number } {
+  const userDataPath = runtimeOptions?.userDataPath ?? fallbackUserDataPath;
+  const activeWorkspaceId = getAuthSession().workspaceId ?? null;
+  const state = running;
+  if (!state) {
+    if (!userDataPath) return { revoked: 0 };
+    return { revoked: revokeMobileBridgeDevicesForOtherAccounts(userDataPath, activeWorkspaceId).length };
+  }
+  // A challenge minted for the previous account can never be completed.
+  state.pairing.dispose();
+  if (!userDataPath) return { revoked: 0 };
+  const revoked = revokeMobileBridgeDevicesForOtherAccounts(userDataPath, activeWorkspaceId);
+  for (const deviceId of revoked) state.server.disconnectDevice(deviceId);
+  if (revoked.length > 0) {
+    console.warn(`[mobile-bridge] revoked ${revoked.length} device(s) bound to a different account`);
+  }
+  return { revoked: revoked.length };
+}
+
+/**
+ * Explicit, user-initiated wipe (Settings → remove every paired phone). This
+ * is the ONLY path that may revoke credentials without proof of an account
+ * change, because the user asked for it.
+ */
+export function revokeAllMobileBridgeDevicesByOwner(
   fallbackUserDataPath?: string,
 ): { revoked: number } {
   const state = running;

@@ -11,6 +11,7 @@ import {
 } from "../../shared/mobile-bridge";
 import {
   MobileBridgeAccountPairingError,
+  type AccountAuthorityStatus,
   type MobileBridgeConsumedPairingAssertion,
   type MobileBridgeDesktopAccountProof,
 } from "./account-pairing";
@@ -80,6 +81,12 @@ interface StoredMobileBridgeDevice {
   revokedAt: string | null;
   accountSubject?: string;
   accountAuthorityOrigin?: string;
+  /**
+   * The Desktop workspace this credential was issued under. Revocation is
+   * driven by a proven change of this value, never by the Desktop merely
+   * failing to prove who it is (TTL expiry, signed-out boot, outage).
+   */
+  workspaceId?: string;
 }
 
 interface StoredMobileBridgeDevices {
@@ -133,9 +140,25 @@ export interface MobileBridgePairingManagerOptions {
   validateAccountAuthority?: (input: {
     accountSubject: string;
     accountAuthorityOrigin: string;
-  }) => Promise<boolean>;
+  }) => Promise<AccountAuthorityStatus>;
+  /**
+   * Whether this Desktop currently holds a signed-in account session. A
+   * signed-out Desktop must not serve paired phones — but it must not delete
+   * their credentials either, which is what wiped real pairings on every
+   * signed-out boot.
+   */
+  desktopSessionActive?: () => boolean;
+  /** Workspace of the currently signed-in Desktop account, when known. */
+  desktopWorkspaceId?: () => string | null;
   onChanged?: (reason: MobileBridgePairingChangeReason) => void;
 }
+
+/** Why a stored credential was refused. Only `account_inactive` revokes. */
+export type MobileBridgeAuthenticationRefusal =
+  | "device_repair_required"
+  | "account_authority_unreachable"
+  | "account_inactive"
+  | "desktop_signed_out";
 
 export type MobileBridgePairingChangeReason =
   | "challenge-issued"
@@ -324,7 +347,11 @@ function validStoredDevice(value: unknown): value is StoredMobileBridgeDevice {
     (
       (value.accountSubject === undefined && value.accountAuthorityOrigin === undefined) ||
       (validAccountSubject(value.accountSubject) && validAccountAuthorityOrigin(value.accountAuthorityOrigin))
-    )
+    ) &&
+    // The revoke decision is driven by this value, so a malformed one must
+    // fail the store rather than silently look like "a different account".
+    (value.workspaceId === undefined ||
+      (typeof value.workspaceId === "string" && value.workspaceId.length > 0 && value.workspaceId.length <= 200))
   );
 }
 
@@ -354,6 +381,39 @@ function writeDevices(userDataPath: string, store: StoredMobileBridgeDevices): v
  * failed bind cannot leave an old-account bearer token valid for the next
  * successful start.
  */
+/**
+ * Revokes only credentials that provably belong to a different account.
+ *
+ * The blanket revoke this replaces fired on plain TTL expiry, on any
+ * re-sign-in (including the same account), and on every signed-out boot. On a
+ * real machine that left 39 of 39 paired devices revoked and zero usable — the
+ * product was deleting its own pairings. Inability to prove identity is not
+ * evidence of a changed identity; only a different, known workspace is.
+ *
+ * Records with no `workspaceId` predate account binding. They are left alone
+ * here and refused at authenticate() with `device_repair_required`, so the
+ * user is told to re-pair instead of silently losing the device.
+ */
+export function revokeMobileBridgeDevicesForOtherAccounts(
+  userDataPath: string,
+  activeWorkspaceId: string | null,
+  now: Date = new Date(),
+): string[] {
+  if (!activeWorkspaceId) return [];
+  const store = readDevices(userDataPath);
+  const revokedAt = now.toISOString();
+  const revoked: string[] = [];
+  for (const device of store.devices) {
+    if (device.revokedAt !== null) continue;
+    if (!device.workspaceId) continue;
+    if (device.workspaceId === activeWorkspaceId) continue;
+    device.revokedAt = revokedAt;
+    revoked.push(device.deviceId);
+  }
+  if (revoked.length > 0) writeDevices(userDataPath, store);
+  return revoked;
+}
+
 export function revokeAllStoredMobileBridgeDevices(
   userDataPath: string,
   now: Date = new Date(),
@@ -537,6 +597,8 @@ export class MobileBridgePairingManager {
   private readonly now: () => Date;
   private readonly consumePairingAssertion?: MobileBridgePairingManagerOptions["consumePairingAssertion"];
   private readonly validateAccountAuthority?: MobileBridgePairingManagerOptions["validateAccountAuthority"];
+  private readonly desktopSessionActive?: MobileBridgePairingManagerOptions["desktopSessionActive"];
+  private readonly desktopWorkspaceId?: MobileBridgePairingManagerOptions["desktopWorkspaceId"];
   private readonly onChanged: (reason: MobileBridgePairingChangeReason) => void;
   private activeChallenge: ActiveChallenge | null = null;
   private activeChallengeTimer: NodeJS.Timeout | null = null;
@@ -553,6 +615,8 @@ export class MobileBridgePairingManager {
     this.now = options.now ?? (() => new Date());
     this.consumePairingAssertion = options.consumePairingAssertion;
     this.validateAccountAuthority = options.validateAccountAuthority;
+    this.desktopSessionActive = options.desktopSessionActive;
+    this.desktopWorkspaceId = options.desktopWorkspaceId;
     this.onChanged = options.onChanged ?? (() => {});
   }
 
@@ -687,6 +751,7 @@ export class MobileBridgePairingManager {
       revokedAt: null,
       accountSubject: consumed.accountSubject,
       accountAuthorityOrigin: challenge.accountAuthorityOrigin,
+      ...(this.desktopWorkspaceId?.() ? { workspaceId: this.desktopWorkspaceId()! } : {}),
     };
     const store = readDevices(this.userDataPath);
     store.devices.push(record);
@@ -709,22 +774,70 @@ export class MobileBridgePairingManager {
       const matches = safeHashEquals(device.tokenHash, token);
       if (matches && device.revokedAt === null) record = device;
     }
-    if (!record || !record.accountSubject || !record.accountAuthorityOrigin || !this.validateAccountAuthority) return null;
-    let active = false;
+    if (!record) return null;
+    if (this.desktopSessionActive && !this.desktopSessionActive()) {
+      this.lastAuthenticationRefusal = "desktop_signed_out";
+      console.warn("[mobile-bridge] refusing device: this Desktop is signed out (credentials kept)");
+      return null;
+    }
+    // A credential minted before account binding shipped cannot be validated,
+    // but it is not evidence of a revoked account. Refuse the connection with
+    // a distinct reason so the phone can say "re-pair this Desktop" instead of
+    // retrying a bare 401 forever, and never silently revoke it.
+    if (!record.accountSubject || !record.accountAuthorityOrigin || !this.validateAccountAuthority) {
+      this.lastAuthenticationRefusal = "device_repair_required";
+      console.warn(
+        `[mobile-bridge] device ${record.deviceId} has no account binding; re-pairing is required (credential kept)`,
+      );
+      return null;
+    }
+    let status: AccountAuthorityStatus;
     try {
-      active = await this.validateAccountAuthority({
+      status = await this.validateAccountAuthority({
         accountSubject: record.accountSubject,
         accountAuthorityOrigin: record.accountAuthorityOrigin,
       });
     } catch {
-      active = false;
+      status = "unreachable";
     }
-    if (!active) {
+    if (status === "unreachable") {
+      // Refuse this attempt, keep the credential. Revoking here is what wiped
+      // real pairings on a single relay hiccup or a 503 from the status route:
+      // a revoke is permanent and forces a QR re-scan, so it may only follow a
+      // definitive answer.
+      this.lastAuthenticationRefusal = "account_authority_unreachable";
+      console.warn(
+        `[mobile-bridge] device ${record.deviceId} refused: account authority unreachable (credential kept)`,
+      );
+      return null;
+    }
+    if (status === "inactive") {
+      this.lastAuthenticationRefusal = "account_inactive";
+      console.warn(`[mobile-bridge] device ${record.deviceId} revoked: account authority reported inactive`);
       this.revokeDevice(record.deviceId);
       return null;
     }
+    // Fail closed on anything that is not an explicit "active" — a stale caller
+    // returning a boolean must not be read as permission. Refusing without
+    // revoking is the safe answer for an unrecognised status.
+    if (status !== "active") {
+      this.lastAuthenticationRefusal = "account_authority_unreachable";
+      console.warn(
+        `[mobile-bridge] device ${record.deviceId} refused: account authority returned an unrecognised status (credential kept)`,
+      );
+      return null;
+    }
+    this.lastAuthenticationRefusal = null;
     return this.publicMetadata(record);
   }
+
+  /**
+   * Why the most recent authenticate() refused. The socket layer turns this
+   * into a distinct close reason; without it every refusal was an identical
+   * bare 401 and neither the user nor the log could tell "re-pair required"
+   * from "cloud is down" from "your account was closed".
+   */
+  lastAuthenticationRefusal: MobileBridgeAuthenticationRefusal | null = null;
 
   listDevices(): MobileBridgeDeviceMetadata[] {
     return readDevices(this.userDataPath).devices.map((record) => this.publicMetadata(record));

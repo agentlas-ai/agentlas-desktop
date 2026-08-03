@@ -34,6 +34,11 @@ export default function LibraryMcpsPage() {
   const [testing, setTesting] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  // Without this the empty state renders on first paint and stays for the
+  // 10-15s the initial listing takes, pixel-identical to "nothing is
+  // connected" — a user checking plugin status in that window concludes the
+  // app has no tools and leaves.
+  const [loaded, setLoaded] = useState(false);
   // 커스텀 MCP 추가 폼
   const [customOpen, setCustomOpen] = useState(false);
   const [cName, setCName] = useState("");
@@ -105,6 +110,7 @@ export default function LibraryMcpsPage() {
     setCatalog(c);
     setInstalled(i);
     setStatuses(Object.fromEntries(s.map((status) => [status.id, status])));
+    setLoaded(true);
   }, []);
 
   useEffect(() => {
@@ -269,7 +275,9 @@ export default function LibraryMcpsPage() {
       </div>
 
       {tab === "installed" ? (
-        installed.length === 0 ? (
+        !loaded ? (
+          <Empty text={t("mcps.installed_loading")} />
+        ) : installed.length === 0 ? (
           <Empty text={t("mcps.installed_empty")} />
         ) : (
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 10 }}>

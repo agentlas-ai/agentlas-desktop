@@ -241,7 +241,7 @@ import {
   signInWithGoogle,
   signOut,
 } from "./auth";
-import { revokeAllMobileBridgeDevicesForAuthChange } from "./mobile-bridge/runtime";
+import { reconcileMobileBridgeDevicesForAccount } from "./mobile-bridge/runtime";
 import { getBillingCredits, transferEarnings } from "./billing";
 import {
   addHubPromptBookmark,
@@ -2265,7 +2265,10 @@ export function registerIpcHandlers(): void {
     const win = BrowserWindow.fromWebContents(e.sender);
     const session = await signInWithGoogle(win);
     if (session.signedIn) {
-      revokeAllMobileBridgeDevicesForAuthChange(app.getPath("userData"));
+      // Only phones bound to a DIFFERENT workspace lose their credential. The
+      // same account signing in again keeps every pairing — revoking there was
+      // a large part of why no pairing ever survived.
+      reconcileMobileBridgeDevicesForAccount(app.getPath("userData"));
       // Replace any mounted previous-account slice immediately from B's local
       // cache (often []); network reconciliation may take up to the timeout.
       failCloseActiveHubBookmarks();
@@ -2277,7 +2280,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("auth:signInWithBrowser", async () => {
     const session = await signInWithBrowser();
     if (session.signedIn) {
-      revokeAllMobileBridgeDevicesForAuthChange(app.getPath("userData"));
+      reconcileMobileBridgeDevicesForAccount(app.getPath("userData"));
       failCloseActiveHubBookmarks();
       broadcastHubBookmarkSnapshot();
       void syncHubBookmarks({ rerunIfBusy: true });
@@ -2285,8 +2288,11 @@ export function registerIpcHandlers(): void {
     return session;
   });
   ipcMain.handle("auth:signOut", async () => {
-    revokeAllMobileBridgeDevicesForAuthChange(app.getPath("userData"));
+    // Signing out stops the bridge from serving (desktopSessionActive gate) but
+    // does not delete pairings: signing back into the same account must restore
+    // them. A different account signing in revokes them at that point.
     await signOut();
+    reconcileMobileBridgeDevicesForAccount(app.getPath("userData"));
     failCloseActiveHubBookmarks();
     broadcastHubBookmarkSnapshot();
     void syncHubBookmarks();

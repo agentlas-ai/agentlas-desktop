@@ -22,6 +22,12 @@ interface RelaySocket {
   terminate(): void;
 }
 
+function upgradeStatus(response: unknown): string {
+  return response && typeof response === "object" && "statusCode" in response
+    ? String((response as { statusCode?: unknown }).statusCode ?? "unknown")
+    : "unknown";
+}
+
 interface RelaySocketOptions {
   headers?: Record<string, string>;
   handshakeTimeout?: number;
@@ -244,11 +250,21 @@ export class MobileBridgeCloudRelay {
     let pending: Array<{ data: unknown; binary: boolean }> = [];
     let pendingBytes = 0;
     let closed = false;
-    const closeBoth = () => {
+    // Every tunnel failure used to funnel into closeBoth() with no log on this
+    // side and no log on the relay, while the phone was told only "relay
+    // unavailable". A remote command that never arrived left no evidence
+    // anywhere, on either machine.
+    const closeBoth = (why: string, detail?: unknown) => {
       if (closed) return;
       closed = true;
       pending = [];
       this.tunnels.delete(cloud);
+      const reachedLocal = local !== null;
+      console.warn(
+        `[mobile-bridge-relay] tunnel ${channelId} closed: ${why}` +
+          ` (localHopStarted=${reachedLocal})` +
+          (detail ? ` — ${detail instanceof Error ? detail.message : String(detail)}` : ""),
+      );
       if (cloud.readyState === WS_OPEN) cloud.close(1012, "tunnel closed");
       if (local?.readyState === WS_OPEN) local.close(1012, "tunnel closed");
     };
@@ -259,7 +275,7 @@ export class MobileBridgeCloudRelay {
       }
       pendingBytes += rawBytes(data);
       if (pendingBytes > MAX_PENDING_BYTES) {
-        closeBoth();
+        closeBoth("local hop did not open before the buffer filled");
         return;
       }
       pending.push({ data, binary: isBinary });
@@ -280,10 +296,19 @@ export class MobileBridgeCloudRelay {
       local.on("message", (data, isBinary) => {
         if (cloud.readyState === WS_OPEN) cloud.send(data, { binary: isBinary });
       });
-      local.on("close", closeBoth);
-      local.on("error", closeBoth);
+      local.on("close", () => closeBoth("local hop closed"));
+      // The local hop pins this Desktop's own certificate. A LAN address change
+      // after the certificate was generated fails exactly here, and used to be
+      // completely silent on both ends.
+      local.on("error", (error) => closeBoth("local hop failed", error));
+      local.on("unexpected-response", (_request, response) =>
+        closeBoth(`local hop refused the upgrade (HTTP ${upgradeStatus(response)})`),
+      );
     });
-    cloud.on("close", closeBoth);
-    cloud.on("error", closeBoth);
+    cloud.on("close", () => closeBoth("relay side closed"));
+    cloud.on("error", (error) => closeBoth("relay side failed", error));
+    cloud.on("unexpected-response", (_request, response) =>
+      closeBoth(`relay refused the tunnel upgrade (HTTP ${upgradeStatus(response)})`),
+    );
   }
 }

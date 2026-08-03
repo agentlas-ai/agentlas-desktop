@@ -86,7 +86,7 @@ import {
   listMobileBridgeDevices,
   mobileBridgeRuntimeStatus,
   onMobileBridgeStateChanged,
-  revokeAllMobileBridgeDevicesForAuthChange,
+  reconcileMobileBridgeDevicesForAccount,
   revokeMobileBridgeDevice,
   retryAgentlasMobileBridge,
   startAgentlasMobileBridge,
@@ -875,7 +875,11 @@ app.whenReady().then(async () => {
   // renderer remains mounted. Switch the bookmark authority boundary and
   // account UI immediately instead of waiting for a future focus event.
   disposeAuthSessionInvalidation = onAuthSessionInvalidated(() => {
-    revokeAllMobileBridgeDevicesForAuthChange(app.getPath("userData"));
+    // Losing a session is not evidence the account changed. Reconciling here
+    // revokes nothing while signed out; the bridge simply stops serving until
+    // the user signs back in. Wiping on plain TTL expiry is what left this
+    // machine with 39 of 39 paired devices revoked and zero usable.
+    reconcileMobileBridgeDevicesForAccount(app.getPath("userData"));
     failCloseActiveHubBookmarks();
     broadcastHubBookmarkSnapshot();
     broadcastSignedOutSession();

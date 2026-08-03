@@ -134,6 +134,12 @@ export interface MobileBridgePairingAuthority {
   }>;
   /** Roll back a credential if post-exchange verification cannot be produced. */
   revokeDevice(deviceId: string): boolean;
+  /**
+   * Why the most recent authenticate() returned null. Without it every refusal
+   * is an identical bare 401, so a phone that needs to re-pair is
+   * indistinguishable from one hitting a cloud outage and retries forever.
+   */
+  readonly lastAuthenticationRefusal?: string | null;
 }
 
 export interface AgentlasMobileBridgeServerOptions {
@@ -206,11 +212,17 @@ function isLoopbackHost(value: string): boolean {
   return host === "127.0.0.1" || host === "::1" || host === "localhost";
 }
 
-function rejectUpgrade(socket: Duplex, status: 400 | 401 | 404 | 405 | 503, message: string): void {
+function rejectUpgrade(
+  socket: Duplex,
+  status: 400 | 401 | 404 | 405 | 503,
+  message: string,
+  reason?: string | null,
+): void {
   const body = `${message}\n`;
   socket.write(
     `HTTP/1.1 ${status} ${http.STATUS_CODES[status] ?? "Rejected"}\r\n` +
       "Connection: close\r\n" +
+      (reason ? `X-Agentlas-Refusal: ${reason}\r\n` : "") +
       "Content-Type: text/plain; charset=utf-8\r\n" +
       `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n` +
       body,
@@ -441,7 +453,13 @@ export class AgentlasMobileBridgeServer {
       this.onError(errorOf(error));
     }
     if (!identity) {
-      rejectUpgrade(socket, 401, "unauthorized");
+      // A bare 401 was indistinguishable across four very different causes, so
+      // the phone retried forever and the user was never told to re-pair.
+      // The reason travels in a header the phone can read on the failed
+      // upgrade; the body stays generic.
+      const refusal = this.pairing?.lastAuthenticationRefusal ?? null;
+      if (refusal) console.warn(`[mobile-bridge] upgrade refused: ${refusal}`);
+      rejectUpgrade(socket, 401, "unauthorized", refusal);
       return;
     }
     if (
