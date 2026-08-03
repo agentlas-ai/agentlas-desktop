@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.51 — 2026-08-03
+
+This release binds Agentlas OS v1.1.97 at
+17c2d127c39d45927d8743ceb945516ae89a7f76.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **Hub search says which query is running.** Hub search takes ten to fifteen
+  seconds, and only the fallback path had a loading state. Typing a new query
+  left the previous query's cards on screen, unchanged and unmarked, for the
+  whole wait — not merely silence, but the wrong result set presented as the
+  answer. The results panel now names the query being run and says the cards
+  below are still the previous ones.
+- **Open Work no longer reads as a setting.** The control that leaves the One
+  conversation for the team, files, tools, and run history sat unmarked as the
+  last button of the utilities nav, sharing exact styling with the language
+  toggle. It now carries the weight of a destination.
+
 ## 0.9.50 — 2026-08-03
 
 This release binds Agentlas OS v1.1.97 at
