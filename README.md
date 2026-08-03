@@ -69,6 +69,19 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
+- **2026-08-03 · v0.9.49 — one engine, one answer** — the Dashboard's
+  run-readiness row for Agentlas OS used to sit on "update verification is in
+  progress" indefinitely while Settings said that same engine version was
+  current: a bundled engine is pinned to the app and has no update journal by
+  design, and the absence of one was being read as a check still running, so
+  nothing was ever going to resolve it. Absence now reports the settled truth.
+  The version panel also says which thing is up to date — "최신 버전입니다" used
+  to sit directly beneath a bundled-engine warning with no scope on either, so
+  the block read as an error — and the engine note now points at the Update
+  engine control above it instead of warning that features may quietly
+  disappear with no action attached. This release binds Agentlas OS v1.1.97 at
+  17c2d127c39d45927d8743ceb945516ae89a7f76. Source readiness does not prove a public installer or update feed; the
+  Releases page stays the authority.
 - **2026-08-03 · v0.9.48 — updates that heal, answers that appear, and a project
   that tells the truth about who runs it** — a native handoff that ended without
   replacing the app used to leave a dead end whose only exit was a manual

@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.9.48",
+  "version": "0.9.49",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -316,7 +316,8 @@
     "bump:engine": "node scripts/bump-bundled-engine.mjs",
     "check:engine-freshness": "node scripts/bump-bundled-engine.mjs --check",
     "test:one-auto-recovery-live": "npm run build:electron && electron scripts/verify-one-auto-recovery-live.cjs",
-    "test:updater-not-applied": "npm run build:electron && electron scripts/test-updater-not-applied-recovery.cjs"
+    "test:updater-not-applied": "npm run build:electron && electron scripts/test-updater-not-applied-recovery.cjs",
+    "test:pairing-revocation": "npm run build:electron && node scripts/test-pairing-revocation-contract.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

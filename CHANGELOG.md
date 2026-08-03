@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.49 — 2026-08-03
+
+This release binds Agentlas OS v1.1.97 at
+17c2d127c39d45927d8743ceb945516ae89a7f76.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **The Dashboard and Settings stop disagreeing about the same engine.** The
+  run-readiness row for Agentlas OS sat on "update verification is in progress"
+  indefinitely — through a 30-minute session and after pressing Run checks —
+  while Settings said that exact engine version was current. A bundled engine is
+  pinned to the app and has no update journal by design, and the absence of one
+  was being read as a check still running, so nothing would ever arrive to
+  resolve it. Absence now reports the settled truth: the engine is pinned to
+  this app.
+- **The version panel says which thing is up to date.** "최신 버전입니다" sat
+  directly beneath a warning about the bundled engine with no scope on either,
+  so the block read as an error. The app line now names the app, and the engine
+  note points at the Update engine control already sitting above it instead of
+  warning that features may quietly disappear with no action attached.
+
 ## 0.9.48 — 2026-08-03
 
 This release binds Agentlas OS v1.1.97 at
