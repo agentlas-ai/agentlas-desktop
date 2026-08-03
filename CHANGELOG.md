@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.53 — 2026-08-04
+
+This release binds Agentlas OS v1.1.97 at
+17c2d127c39d45927d8743ceb945516ae89a7f76.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **A second launch says why no window appeared.** Failing to take the
+  single-instance lock exited with code 0 and no output at all. That is right
+  only when a live first instance raises its window; when the lock is held by a
+  dead process or a different build, launching the app looks like it did
+  nothing, and the exit code reports success.
+
 ## 0.9.52 — 2026-08-03
 
 This release binds Agentlas OS v1.1.97 at
