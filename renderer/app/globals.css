@@ -10762,3 +10762,7 @@ button[data-toggle-state="on"] {
     white-space: normal;
   }
 }
+
+/* First-run sign-in wait: the label alone does not move for 9-11s, which reads
+   as a hang. See Landing.tsx. */
+@keyframes agentlas-cta-spin { to { transform: rotate(360deg); } }

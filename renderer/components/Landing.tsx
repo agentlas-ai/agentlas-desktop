@@ -358,8 +358,13 @@ export function Landing({
         <div style={{ marginTop: 36, animation: "lFadeUp .8s .32s both" }}>
           <button
             className="titlebar-nodrag"
-            onClick={() => void getStarted()}
-            disabled={busy}
+            onClick={() => { if (!busy) void getStarted(); }}
+            // aria-disabled, not disabled: a disabled button leaves the tab
+            // order, so on the very first screen a keyboard-only user could
+            // never reach the only control there is. The click is guarded
+            // instead, which keeps it focusable and announced.
+            aria-disabled={busy}
+            aria-busy={busy}
             style={{
               display: "inline-flex",
               alignItems: "center",
@@ -391,6 +396,21 @@ export function Landing({
             }}
           >
             <span>{busy ? t("landing.cta_busy") : t("landing.cta")}</span>
+            {busy ? (
+              // Nine to eleven seconds of an unchanged label is indistinguishable
+              // from a hang. Give the wait something that moves.
+              <span
+                aria-hidden="true"
+                style={{
+                  width: 14,
+                  height: 14,
+                  borderRadius: "50%",
+                  border: "2px solid rgba(4,35,31,.25)",
+                  borderTopColor: "#04231F",
+                  animation: "agentlas-cta-spin .8s linear infinite",
+                }}
+              />
+            ) : null}
             {!busy && (
               <svg
                 width="17"
