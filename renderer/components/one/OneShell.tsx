@@ -2724,7 +2724,7 @@ export function OneShell() {
                 <span>{tFor(appLocale, "one.shell.rail.language_switch")}</span>
               </button>
               <button type="button" disabled={activationForeground} onClick={() => setIntroReplayToken((value) => value + 1)}>{tFor(appLocale, "one.shell.rail.about_one")}</button>
-              <button type="button" onClick={() => void openWork()}>{tFor(appLocale, "one.shell.rail.open_work")}<span aria-hidden="true">↗</span></button>
+              <button type="button" className={styles.railOpenWork} onClick={() => void openWork()}>{tFor(appLocale, "one.shell.rail.open_work")}<span aria-hidden="true">↗</span></button>
             </nav>
             <span className={styles.connection} data-offline={!executionAvailable ? "true" : "false"} role="status">
               <span className={styles.connectionDot} aria-hidden="true" /><span>{connectionLabel}</span>

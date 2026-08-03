@@ -356,6 +356,22 @@
   gap: 1px;
 }
 
+/* Open Work is the way into the rest of the product, not a setting. Sitting
+   unmarked at the end of the utilities nav, it read as one more toggle beside
+   the language switch. Separate it and give it the weight of a destination. */
+.railOpenWork {
+  margin-top: 7px;
+  border-top: 1px solid #e2e5e6;
+  padding-top: 9px;
+  color: #1b1f22;
+  font-weight: 560;
+}
+
+.railOpenWork span {
+  margin-left: 4px;
+  opacity: 0.7;
+}
+
 .railTaskActions {
   margin-bottom: 8px;
   padding-bottom: 8px;
