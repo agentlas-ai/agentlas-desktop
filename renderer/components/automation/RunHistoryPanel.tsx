@@ -103,14 +103,41 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   }, [reconciliation?.checkpointDigest, reconciliation?.runId]);
 
   const current = useMemo(() => summarizeSnapshot(latest, ko), [latest, ko]);
+  // 가장 최근 성공 실행의 시각. 이보다 앞선 미확인 건은 "지금 확인이 필요한 상태"가
+  // 아니다 — 그 뒤로 같은 자동화가 정상 완주했기 때문이다. 기록은 남기되 현재 상태로
+  // 올리지 않는다.
+  const lastOkAt = useMemo(() => {
+    const oks = runs.filter((run) => run.status === "ok").map((run) => Date.parse(run.ranAt)).filter(Number.isFinite);
+    return oks.length > 0 ? Math.max(...oks) : null;
+  }, [runs]);
   const regularAttentions = useMemo(
-    () => attentions.filter((attention) => attention.id !== reconciliation?.triggerEvent?.id),
-    [attentions, reconciliation?.triggerEvent?.id],
+    () => attentions.filter((attention) => {
+      if (attention.id === reconciliation?.triggerEvent?.id) return false;
+      if (lastOkAt === null) return true;
+      const at = Date.parse(attention.updatedAt);
+      // 파싱 불가한 시각은 숨기지 않는다: 판단 근거가 없으면 사용자에게 보여주는 쪽이 안전하다.
+      return !Number.isFinite(at) || at > lastOkAt;
+    }),
+    [attentions, reconciliation?.triggerEvent?.id, lastOkAt],
   );
+  // 밀려난 건을 여기서 따로 렌더하지 않는 이유: 아래 실행 기록 목록에 그 실행이
+  // 그대로 남아 있어 사용자가 언제든 확인할 수 있다. 사라지는 것은 "지금 조치하라"는
+  // 요구뿐이고, 기록은 사라지지 않는다.
   // 사용자가 화면에서 실제로 읽을 수 있는 마지막 미완료 실행 — "확인 필요"의 근거.
+  // "확인 필요"는 자동화의 현재 상태여야 한다. 이전에는 이력 어디에든 실패가 하나라도
+  // 있으면 find()가 그것을 집어 배지를 영구히 켰고, 그 뒤 몇 번을 성공해도 꺼지지
+  // 않았다(오너 보고 2026-08-03: 세 번 연속 완주한 자동화가 09:35 부분완료 때문에
+  // 계속 "확인 필요"로 표시됨). 마지막 성공 이후에 일어난 실패만 현재 상태다.
   const blockingRun = useMemo(
-    () => runs.find((run) => run.status === "error" || run.status === "needs_input" || run.status === "blocked" || run.status === "partial") ?? null,
-    [runs],
+    () => runs.find((run) => {
+      if (run.status !== "error" && run.status !== "needs_input" && run.status !== "blocked" && run.status !== "partial") {
+        return false;
+      }
+      if (lastOkAt === null) return true;
+      const at = Date.parse(run.ranAt);
+      return !Number.isFinite(at) || at > lastOkAt;
+    }) ?? null,
+    [runs, lastOkAt],
   );
   const needsHelp = Boolean(reconciliation || regularAttentions.length > 0 || latest?.status === "error" || blockingRun);
   // 기록 원문(판정 코드 접두사 제거). 평이한 설명 아래 "자세히"로만 노출한다.
