@@ -151,6 +151,9 @@ function MarketplacePage() {
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
   // Hub 검색 0건/실패 시 hep-search(엔진) 보조 후보 — 카드와 별도의 단순 리스트로 표시.
   const [hepFallback, setHepFallback] = useState<HepFallbackState | null>(null);
+  // Hub 검색은 10초 이상 걸린다. 그 동안 이전 질의 결과를 그대로 두면 사용자는
+  // 그것을 새 질의의 답으로 읽는다. 무엇을 기다리는 중인지 화면에 남긴다.
+  const [searchingFor, setSearchingFor] = useState<string | null>(null);
   const hepSeqRef = useRef(0);
   // IPC 검색 자체는 AbortSignal을 받지 않으므로, AbortController로 이전 요청을 폐기하고
   // generation을 함께 확인해 늦은 search/status/fallback 응답이 최신 화면을 덮지 못하게 한다.
@@ -263,12 +266,16 @@ function MarketplacePage() {
 
     const timer = window.setTimeout(() => {
       void (async () => {
+        if (isCurrent()) setSearchingFor(query || null);
         let results: MarketplaceListing[] | null = null;
         try {
           const response = await api.marketplace.search(q);
           if (!isCurrent()) return;
           results = Array.isArray(response) ? response : [];
           setListings(results);
+          // 결과가 화면에 놓인 순간 대기 표시를 거둔다. 뒤따르는 status 조회를
+          // 기다리면 이미 답이 보이는데도 계속 "찾는 중"으로 남는다.
+          setSearchingFor(null);
           // status는 이 검색이 Hub source 상태를 갱신한 뒤 읽되, status가 늦게 와도
           // 같은 generation일 때만 반영한다.
           const status = await api.marketplace.status();
@@ -277,6 +284,7 @@ function MarketplacePage() {
         } catch {
           if (!isCurrent()) return;
           // 검색 실패 — 기존 목록은 유지하고 fallback 판정만 수행한다.
+          setSearchingFor(null);
         }
 
         if (!isCurrent()) return;
@@ -709,6 +717,16 @@ function MarketplacePage() {
           )}
 
             <section className="portal-panel hub-results-panel" id="hub-agent" data-tour-id="hub.results">
+              {searchingFor && (
+                <div className="hub-searching-notice" role="status" aria-live="polite">
+                  <span className="hub-searching-spinner" aria-hidden="true" />
+                  <span>
+                    {ko
+                      ? `‘${searchingFor}’ 검색 중… 아래는 아직 이전 검색 결과입니다.`
+                      : `Searching for “${searchingFor}”… the results below are still from your previous search.`}
+                  </span>
+                </div>
+              )}
               {pagedListings.length > 0 ? (
                 <div className="market-card-grid">
                   {pagedListings.map((listing) => (
