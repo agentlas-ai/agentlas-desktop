@@ -82,8 +82,9 @@ async function runGrokMcpCli(
       return;
     }
     let stderr = "";
+    const grokStderrDecoder = new StringDecoder("utf8");
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+      stderr += grokStderrDecoder.write(chunk);
     });
     child.on("error", reject);
     child.on("close", (code) => {
@@ -189,7 +190,8 @@ function listGrokModels(bin: string): Promise<string[]> {
       }
       finish([]);
     }, 5000);
-    child.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
+    const outDecoder = new StringDecoder("utf8");
+    child.stdout?.on("data", (c: Buffer) => (out += outDecoder.write(c)));
     child.on("error", () => {
       // 프로세스 종료 시 stdout data 리스너를 제거해 누수 방지(stderr는 ignore라 리스너 없음).
       child.stdout?.removeAllListeners("data");

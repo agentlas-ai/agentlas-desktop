@@ -4,6 +4,7 @@
 // 호출 형식: claude -p "<user prompt>" --append-system-prompt-file <system>
 // 첫 턴은 full-context로 시작하고, 이후 턴은 Claude Code session_id로 resume한다.
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
@@ -258,7 +259,8 @@ function runClaudeHelp(bin: string, timeoutMs = 4000): Promise<string> {
       child.kill();
       finish();
     }, timeoutMs);
-    child.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
+    const outDecoder = new StringDecoder("utf8");
+    child.stdout?.on("data", (c: Buffer) => (out += outDecoder.write(c)));
     child.on("error", finish);
     child.on("close", finish);
   });
@@ -926,8 +928,9 @@ export const runClaudeCode: Runner = async (
       }
     }
 
+    const bufferDecoder = new StringDecoder("utf8");
     child.stdout?.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString("utf8");
+      buffer += bufferDecoder.write(chunk);
       let nl: number;
       while ((nl = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, nl).trim();
@@ -941,8 +944,9 @@ export const runClaudeCode: Runner = async (
       }
     });
 
+    const stderrDecoder = new StringDecoder("utf8");
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+      stderr += stderrDecoder.write(chunk);
     });
 
     child.on("error", (err) => {

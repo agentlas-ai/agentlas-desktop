@@ -1,6 +1,7 @@
 // Cursor Agent CLI runtime. The official headless contract is
 // `cursor-agent --print --output-format stream-json --model <model> <prompt>`.
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { wrapSystemPrompt } from "./runner";
@@ -130,7 +131,8 @@ async function listCursorModels(bin: string): Promise<string[]> {
       try { child.kill(); } catch { /* best effort */ }
       finish([]);
     }, 5_000);
-    child.stdout?.on("data", (chunk: Buffer) => { stdout = (stdout + chunk.toString("utf8")).slice(0, 64_000); });
+    const probeDecoder = new StringDecoder("utf8");
+    child.stdout?.on("data", (chunk: Buffer) => { stdout = (stdout + probeDecoder.write(chunk)).slice(0, 64_000); });
     child.on("error", () => finish([]));
     child.on("close", (code) => {
       if (code !== 0) return finish([]);
@@ -253,13 +255,15 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
         events.onPartial(text);
       } catch { /* malformed diagnostics stay ignored; stderr is reported on failure */ }
     };
+    const bufferDecoder = new StringDecoder("utf8");
     child.stdout?.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString("utf8");
+      buffer += bufferDecoder.write(chunk);
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       lines.forEach(consume);
     });
-    child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString("utf8")).slice(-4_000); });
+    const stderrDecoder = new StringDecoder("utf8");
+    child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + stderrDecoder.write(chunk)).slice(-4_000); });
     child.on("error", (error) => finishReject(error));
     child.on("close", (code) => {
       if (settled) return;

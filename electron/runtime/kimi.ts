@@ -1,6 +1,7 @@
 // Kimi Code CLI runtime — official Moonshot CLI (`@moonshot-ai/kimi-code`).
 // Headless contract: `kimi -p <prompt> --output-format stream-json`.
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
@@ -311,14 +312,16 @@ function runKimiProcess(
       }
     };
 
+    const bufferDecoder = new StringDecoder("utf8");
     child.stdout?.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString("utf8");
+      buffer += bufferDecoder.write(chunk);
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       lines.forEach(consume);
     });
+    const kimiStderrDecoder = new StringDecoder("utf8");
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr = `${stderr}${chunk.toString("utf8")}`.slice(-4_000);
+      stderr = `${stderr}${kimiStderrDecoder.write(chunk)}`.slice(-4_000);
     });
     child.on("error", reject);
     child.on("close", (code) => {

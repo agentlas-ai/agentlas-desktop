@@ -3,6 +3,7 @@
 //
 // 호출 형식: gemini --prompt "<text>"  (Gemini CLI의 비대화형 모드)
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import fs from "node:fs/promises";
 import { rmSync } from "node:fs";
@@ -137,6 +138,7 @@ async function probeAgyModels(binary: string): Promise<string[]> {
     }
     let settled = false;
     let stdout = "";
+    const probeDecoder = new StringDecoder("utf8");
     const parsedModels = () => [...new Set(stdout
       .split(/\r?\n/)
       .map((value) => value.trim())
@@ -156,7 +158,7 @@ async function probeAgyModels(binary: string): Promise<string[]> {
     }, 5_000);
     timer.unref?.();
     child.stdout?.on("data", (chunk: Buffer) => {
-      if (stdout.length < 32_768) stdout = (stdout + chunk.toString("utf8")).slice(0, 32_768);
+      if (stdout.length < 32_768) stdout = (stdout + probeDecoder.write(chunk)).slice(0, 32_768);
     });
     child.on("error", () => finish([]));
     child.on("close", (code) => {
@@ -408,8 +410,10 @@ async function runPreparedGemini(
     let stderr = "";
     let lastEmit = 0;
 
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
     child.stdout?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8");
+      const text = stdoutDecoder.write(chunk);
       stdout += text;
       const now = Date.now();
       if (now - lastEmit > 80) {
@@ -418,7 +422,7 @@ async function runPreparedGemini(
       }
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+      stderr += stderrDecoder.write(chunk);
     });
 
     child.on("error", (err) => {
