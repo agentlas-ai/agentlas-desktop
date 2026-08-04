@@ -27,6 +27,7 @@ import {
   getNodeApproval,
   getLatestNodeApproval,
   saveGraphRunFailures,
+  consumeGraphResumeCoordinate,
 } from "../store/automations";
 import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
@@ -967,6 +968,16 @@ export async function runGraph(
   let resumeOfRunId: string | undefined;
   let checkpoint: GraphCheckpoint | null = null;
   if (latestFailed) {
+    // 재개 좌표는 한 번만 소비된다. 두 실행이 같은 실패 스냅샷을 동시에 집으면
+    // 이미 끝난 단계가 두 번 돌 수 있으므로, 진 쪽은 재개하지 않고 정직하게 멈춘다.
+    if (!consumeGraphResumeCoordinate(latestFailed.runId)) {
+      throw new GraphContractError({
+        code: "RESUME_CONFLICT",
+        reason:
+          "다른 실행이 이미 같은 지점에서 이어서 돌고 있습니다. 같은 단계를 두 번 실행하지 않기 위해 이번 요청은 시작하지 않았습니다.",
+        nextAction: "진행 중인 실행이 끝난 뒤 결과를 확인하고, 필요하면 그때 다시 실행하세요.",
+      });
+    }
     const completedEffectFromSnapshot = latestFailed.graphDigest === graphDigest
       ? Object.entries(latestFailed.nodeStates)
         .some(([nodeId, state]) => state === "done" && effectNodeIds.has(nodeId))

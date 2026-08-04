@@ -3841,6 +3841,11 @@ export function initStore(options: StoreInitOptions = {}): void {
     if (!runColumns.some((column) => column.name === "node_failures_json")) {
       _db.exec("ALTER TABLE automation_runs ADD COLUMN node_failures_json TEXT");
     }
+    // 재개 좌표는 한 번만 소비돼야 한다. 같은 체크포인트에서 두 번 재개하면 이미 끝난
+    // 단계가 두 번 실행될 수 있다 — 소비 표식을 조건부 UPDATE로 걸어 한쪽만 이기게 한다.
+    if (!runColumns.some((column) => column.name === "resume_consumed_at")) {
+      _db.exec("ALTER TABLE automation_runs ADD COLUMN resume_consumed_at TEXT");
+    }
   }
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);

@@ -1591,3 +1591,17 @@ export function saveGraphRunFailures(
   const payload = Object.keys(failures).length > 0 ? JSON.stringify(failures) : null;
   getDb().prepare("UPDATE automation_runs SET node_failures_json = ? WHERE id = ?").run(payload, runId);
 }
+
+/**
+ * 재개 좌표를 원자적으로 소비한다. 이긴 쪽만 true를 받는다.
+ *
+ * 예전에는 재개 좌표라는 것이 없었고, "가장 최근 실패한 실행"을 매번 다시 읽었다. 같은
+ * 실패 스냅샷을 두 곳(스케줄 발화와 수동 실행 등)이 동시에 집으면 둘 다 재개해, 이미
+ * 끝난 단계가 두 번 실행될 수 있었다.
+ */
+export function consumeGraphResumeCoordinate(checkpointRunId: string): boolean {
+  const result = getDb().prepare(
+    "UPDATE automation_runs SET resume_consumed_at = ? WHERE id = ? AND resume_consumed_at IS NULL",
+  ).run(new Date().toISOString(), checkpointRunId);
+  return result.changes === 1;
+}
