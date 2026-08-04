@@ -1573,7 +1573,8 @@ export type WorkflowNodeType =
   | "condition" // 이전 출력 분기
   | "eval" // 만든 것을 **다른 노드가** 선언된 기준으로 판정 → pass/fail + 사유
   | "transform" // 노드 간 변수 map/extract/format
-  | "output"; // Slack post / notification / file write / chat surface
+  | "output" // Slack post / notification / file write / chat surface
+  | "subgraph"; // 다른 그래프를 한 단계로 부른다(함수 안의 함수)
 
 export interface WorkflowNode {
   id: string;

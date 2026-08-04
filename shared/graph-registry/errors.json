@@ -493,6 +493,55 @@
       ],
       "status": "implemented",
       "note": "정해진 횟수만큼 스스로 고쳐 봤지만 같은 자리에서 막혔다. 무엇을 시도했는지 함께 보여준다 — 사람이 그 다음을 정한다."
+    },
+    {
+      "code": "SUBGRAPH_NOT_FOUND",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "subgraph_not_found",
+      "nextActions": [
+        "edit_node"
+      ],
+      "status": "implemented",
+      "note": "부르려는 그래프가 없다. 지워졌거나 이름이 바뀐 것 — id로 고정하는 이유다."
+    },
+    {
+      "code": "SUBGRAPH_DEPTH_EXCEEDED",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "subgraph_depth",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "implemented",
+      "note": "★그래프가 그래프를 부르는 깊이가 상한을 넘었다. 서로 부르면 무한 재귀가 되므로 상한이 필수다."
+    },
+    {
+      "code": "SUBGRAPH_SELF_CALL",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "subgraph_self",
+      "nextActions": [
+        "edit_node"
+      ],
+      "status": "implemented",
+      "note": "자기 자신을 부른다. 깊이 상한 전에 바로 잡는다 — 사유가 더 정확하다."
+    },
+    {
+      "code": "SUBGRAPH_FAILED",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": true,
+      "cardKey": "subgraph_failed",
+      "nextActions": [
+        "open_inner_run",
+        "rerun"
+      ],
+      "status": "implemented",
+      "note": "안쪽 그래프가 실패했다. 안쪽 사유를 그대로 들고 온다 — 바깥에서 '그냥 실패'로 뭉개지 않는다."
     }
   ]
 }

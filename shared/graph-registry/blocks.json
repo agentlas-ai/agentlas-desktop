@@ -523,6 +523,60 @@
           ]
         }
       ]
+    },
+    {
+      "kind": "subgraph",
+      "title": "다른 그래프를 한 단계로 부른다 (함수 안의 함수)",
+      "status": "implemented",
+      "owns": [
+        "graphRef",
+        "waitForResult",
+        "produces",
+        "input"
+      ],
+      "emits": "graph/1/trigger.command",
+      "note": "조사한 어느 제품도 이걸 별도 커넥터 종류로 두지 않고 **노드**로 둔다 — n8n Execute Sub-workflow, Flowise ExecuteFlow, Temporal Child Workflow. ★깊이 상한이 없으면 A가 B를 부르고 B가 A를 불러 무한 재귀가 된다.",
+      "functions": [
+        {
+          "id": "subgraph.call",
+          "title": "부르기",
+          "status": "implemented",
+          "sub": [
+            {
+              "id": "subgraph.call.ref",
+              "title": "어느 그래프인지 (id로 고정)",
+              "status": "implemented"
+            },
+            {
+              "id": "subgraph.call.input",
+              "title": "넘길 값",
+              "status": "implemented"
+            },
+            {
+              "id": "subgraph.call.depth",
+              "title": "깊이 상한 — 무한 재귀 차단",
+              "status": "implemented"
+            }
+          ]
+        },
+        {
+          "id": "subgraph.result",
+          "title": "결과 받기",
+          "status": "implemented",
+          "sub": [
+            {
+              "id": "subgraph.result.wait",
+              "title": "기다리기",
+              "status": "implemented"
+            },
+            {
+              "id": "subgraph.result.fail",
+              "title": "안쪽이 실패하면 바깥도 안다",
+              "status": "implemented"
+            }
+          ]
+        }
+      ]
     }
   ]
 }

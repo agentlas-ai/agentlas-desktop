@@ -86,7 +86,7 @@
       "id": "C02",
       "title": "트리거가 첫 단계를 깨운다",
       "from": "trigger",
-      "to": "agent|tool|action|output|condition|eval|transform",
+      "to": "agent|tool|action|output|condition|eval|transform|subgraph",
       "envelope": "graph/1/edge.activate",
       "status": "implemented",
       "failures": [
@@ -153,7 +153,7 @@
     {
       "id": "C07",
       "title": "단계가 결과를 상태에 남긴다",
-      "from": "agent|action|output|eval|transform",
+      "from": "agent|tool|action|output|condition|eval|transform|subgraph",
       "to": "state",
       "envelope": "graph/1/port.reduce",
       "status": "implemented",
@@ -168,7 +168,7 @@
       "id": "C08",
       "title": "다음 단계가 앞 단계 값을 읽는다",
       "from": "state",
-      "to": "agent|tool|action|output|condition|eval|transform",
+      "to": "agent|tool|action|output|condition|eval|transform|subgraph",
       "envelope": "graph/1/state.read",
       "status": "implemented",
       "failures": [
@@ -181,7 +181,7 @@
       "id": "C09",
       "title": "갈림길이 한쪽만 살린다",
       "from": "condition",
-      "to": "agent|action|output|eval|transform",
+      "to": "agent|tool|action|output|condition|eval|transform|subgraph",
       "envelope": "graph/1/edge.branch",
       "status": "implemented",
       "failures": [
@@ -219,7 +219,7 @@
     {
       "id": "C12",
       "title": "다시 돈다",
-      "from": "agent|tool|action|output|condition|eval|transform",
+      "from": "agent|tool|action|output|condition|eval|transform|subgraph",
       "to": "loop",
       "envelope": "graph/1/loop.back",
       "status": "implemented",
@@ -402,8 +402,8 @@
     {
       "id": "C26",
       "title": "한 단계가 끝나면 다음 단계가 깨어난다",
-      "from": "agent|tool|action|output|condition|eval|transform",
-      "to": "agent|tool|action|output|condition|eval|transform",
+      "from": "agent|tool|action|output|condition|eval|transform|subgraph",
+      "to": "agent|tool|action|output|condition|eval|transform|subgraph",
       "envelope": "graph/1/edge.activate",
       "status": "implemented",
       "failures": [
@@ -564,8 +564,8 @@
     {
       "id": "C40",
       "title": "실패하면 이쪽으로 (저작자가 그리는 실패 경로)",
-      "from": "agent|tool|action|output|condition|eval|transform",
-      "to": "agent|tool|action|output|condition|eval|transform",
+      "from": "agent|tool|action|output|condition|eval|transform|subgraph",
+      "to": "agent|tool|action|output|condition|eval|transform|subgraph",
       "envelope": "graph/1/edge.error",
       "status": "implemented",
       "phase": "run",
@@ -578,7 +578,7 @@
       "id": "C41",
       "title": "승인 거부 뒤에 다른 길로 간다",
       "from": "person",
-      "to": "agent|tool|action|output|condition|eval|transform",
+      "to": "agent|tool|action|output|condition|eval|transform|subgraph",
       "envelope": "graph/1/edge.error",
       "status": "implemented",
       "phase": "human",
@@ -587,8 +587,8 @@
     {
       "id": "C42",
       "title": "상류가 실패해도 도는 정리 단계",
-      "from": "agent|tool|action|output|condition|eval|transform",
-      "to": "agent|tool|action|output|condition|eval|transform",
+      "from": "agent|tool|action|output|condition|eval|transform|subgraph",
+      "to": "agent|tool|action|output|condition|eval|transform|subgraph",
       "envelope": "graph/1/edge.always",
       "status": "implemented",
       "phase": "run",
@@ -598,7 +598,7 @@
       "id": "C43",
       "title": "승인이 안 오면 시간이 지나 다른 길로",
       "from": "person",
-      "to": "agent|tool|action|output|condition|eval|transform",
+      "to": "agent|tool|action|output|condition|eval|transform|subgraph",
       "envelope": "graph/1/edge.timeout",
       "status": "implemented",
       "phase": "human",
@@ -620,12 +620,18 @@
     {
       "id": "C46",
       "title": "그래프 안에서 다른 그래프를 켠다 (함수 안의 함수)",
-      "from": "agent|action|output|transform",
+      "from": "subgraph",
       "to": "trigger",
       "envelope": "graph/1/trigger.command",
-      "status": "specified",
-      "phase": "staffing",
-      "note": "★실측: 커널에 서브그래프 호출이 **0건**이다. 그래서 복잡한 자동화를 쪼갤 수 없고, 만든 그래프를 다른 그래프의 한 단계로 재사용할 수 없다. 명령 입구 셋 중 가장 급하다.\n조사 근거: n8n은 Execute Sub-workflow 노드 + Call Workflow Tool 두 경로, Flowise v2는 ExecuteFlow 노드, Temporal은 Child Workflow(자체 runId + Parent Close Policy). 어느 제품도 별도 커넥터 종류로 두지 않고 **노드**로 둔다."
+      "status": "implemented",
+      "phase": "run",
+      "note": "★실측: 커널에 서브그래프 호출이 **0건**이다. 그래서 복잡한 자동화를 쪼갤 수 없고, 만든 그래프를 다른 그래프의 한 단계로 재사용할 수 없다. 명령 입구 셋 중 가장 급하다.\n조사 근거: n8n은 Execute Sub-workflow 노드 + Call Workflow Tool 두 경로, Flowise v2는 ExecuteFlow 노드, Temporal은 Child Workflow(자체 runId + Parent Close Policy). 어느 제품도 별도 커넥터 종류로 두지 않고 **노드**로 둔다.",
+      "failures": [
+        "SUBGRAPH_NOT_FOUND",
+        "SUBGRAPH_DEPTH_EXCEEDED",
+        "SUBGRAPH_SELF_CALL",
+        "SUBGRAPH_FAILED"
+      ]
     },
     {
       "id": "C47",

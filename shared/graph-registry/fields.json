@@ -31,7 +31,8 @@
         "condition",
         "eval",
         "transform",
-        "output"
+        "output",
+        "subgraph"
       ],
       "writer": "빌더",
       "reader": "커널 디스패치",
@@ -546,6 +547,47 @@
       "reader": "커널 승인 게이트",
       "unknown": "영원히 기다린다 — 지금까지의 동작이고, 안 정했다고 마음대로 포기하지 않는다",
       "status": "implemented"
+    },
+    {
+      "name": "graphRef",
+      "on": "node.config",
+      "appliesTo": [
+        "subgraph"
+      ],
+      "grade": "critical",
+      "type": "string",
+      "writer": "저작자",
+      "reader": "커널",
+      "unknown": "SUBGRAPH_NOT_FOUND",
+      "status": "implemented",
+      "note": "자동화 id. 이름은 바뀌므로 id가 정본이다."
+    },
+    {
+      "name": "waitForResult",
+      "on": "node.config",
+      "appliesTo": [
+        "subgraph"
+      ],
+      "grade": "critical",
+      "type": "boolean",
+      "writer": "저작자",
+      "reader": "커널",
+      "unknown": "기다린다(true) — 안 기다리면 다음 단계가 없는 값을 읽는다",
+      "status": "implemented"
+    },
+    {
+      "name": "input",
+      "on": "node.config",
+      "appliesTo": [
+        "subgraph"
+      ],
+      "grade": "critical",
+      "type": "string",
+      "writer": "저작자",
+      "reader": "커널 → 안쪽 그래프 시작 값",
+      "unknown": "값 없이 부른다 — 안쪽이 값을 요구하면 그쪽에서 막힌다",
+      "status": "implemented",
+      "note": "{{변수}} 치환이 끝난 뒤 안쪽 그래프의 시작 값이 된다. 이름은 안쪽 그래프에서 도출한다."
     }
   ]
 }

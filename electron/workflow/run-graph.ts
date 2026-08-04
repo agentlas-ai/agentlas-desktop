@@ -64,6 +64,15 @@ export interface RunGraphOptions {
   /** Abort 후 취소를 무시하는 노드를 기다릴 정리 유예. 테스트는 짧게 주입한다. */
   abortGraceMs?: number;
   /**
+   * 그래프가 그래프를 부른 깊이(커넥터 C46). 맨 바깥은 0.
+   *
+   * ★상한이 없으면 A가 B를 부르고 B가 A를 불러 **무한 재귀**가 된다. 자동화는 사람이
+   * 보지 않는 동안 도는 것이라 멈출 사람이 없다 — 반복 상한을 강제하는 것과 같은 이유다.
+   */
+  depth?: number;
+  /** 지금까지 부른 그래프들 — 서로 부르는 고리를 사유와 함께 잡는다. */
+  callChain?: string[];
+  /**
    * 시뮬레이션 실행. 외부에 나가는 변경을 막고, 무엇이 막혔는지 영수증으로 남긴다.
    * 켜지면 ① 모든 노드 호출이 읽기 권한으로 강등되고(런타임이 쓰기를 거부한다),
    * ② 부수효과 노드(effect: "mutation")는 아예 호출하지 않고 모의 결과를 돌려준다.
@@ -209,6 +218,16 @@ export interface RunGraphResult {
  *  · RESUME_CONFLICT — 다른 실행이 이미 이 좌표를 가져갔다. 두 실행이 같이 진행되면 안 된다.
  *  · BUDGET_EXHAUSTED — 실행 총량이 끝났다. 대체 경로도 토큰을 쓰므로 상한을 넘게 된다.
  */
+/**
+ * 그래프가 그래프를 부를 수 있는 깊이(커넥터 C46).
+ *
+ * 왜 상한이 있어야 하나: A가 B를 부르고 B가 A를 부르면 무한 재귀다. 자동화는 사람이
+ * 보지 않는 동안 도는 것이라 멈출 사람이 없다 — 반복(loop) 상한을 강제하는 것과 같은 이유.
+ * 5로 둔 근거: 조사한 제품들이 서브워크플로 중첩을 3~10 사이로 두고, 5면 실사용 구성을
+ * 담으면서도 사고가 났을 때 금방 멈춘다.
+ */
+const MAX_SUBGRAPH_DEPTH = 5;
+
 const NON_ROUTABLE_FAILURES = new Set([
   "APPROVAL_REQUIRED",
   "MUTATION_UNVERIFIED",
@@ -2393,6 +2412,99 @@ export async function runGraph(
           clearTimeout(nodeTimer);
           runSignal.removeEventListener("abort", relayRunAbort);
         }
+        return;
+      }
+      case "subgraph": {
+        // 다른 그래프를 한 단계로 부른다 (커넥터 C46 / graph/1 trigger.command).
+        //
+        // 조사한 어느 제품도 이걸 별도 엣지 종류로 두지 않고 **노드**로 둔다 —
+        // n8n Execute Sub-workflow, Flowise ExecuteFlow, Temporal Child Workflow.
+        beginNode(node);
+        const ref = str(node.config, "graphRef");
+        if (!ref) {
+          failGraphNode(node, {
+            code: "SUBGRAPH_NOT_FOUND",
+            reason: `"${node.label || node.id}" 단계에 어느 그래프를 부를지가 없습니다.`,
+            nextAction: "이 단계에서 실행할 자동화를 골라 주세요.",
+          });
+          return;
+        }
+        // ★자기 자신을 부르는 것은 깊이 상한 전에 잡는다 — 사유가 더 정확하다.
+        const chain = opts.callChain ?? [automation.id];
+        if (ref === automation.id || chain.includes(ref)) {
+          failGraphNode(node, {
+            code: "SUBGRAPH_SELF_CALL",
+            reason: `"${node.label || node.id}"이(가) 이미 실행 중인 자동화를 다시 부릅니다.`
+              + " 그대로 두면 끝없이 자기를 부르게 됩니다.",
+            nextAction: "부를 자동화를 다른 것으로 바꾸거나, 이 단계를 지워 주세요.",
+          });
+          return;
+        }
+        const depth = (opts.depth ?? 0) + 1;
+        if (depth > MAX_SUBGRAPH_DEPTH) {
+          failGraphNode(node, {
+            code: "SUBGRAPH_DEPTH_EXCEEDED",
+            reason: `자동화가 자동화를 부른 깊이가 ${MAX_SUBGRAPH_DEPTH}단을 넘었습니다.`,
+            nextAction: "부르는 단계를 줄이거나, 안쪽 자동화를 하나로 합쳐 주세요.",
+          });
+          return;
+        }
+        const { getAutomation: loadAutomation } = require("../store/automations") as typeof import("../store/automations");
+        const inner = loadAutomation(ref);
+        if (!inner?.graph || inner.graph.nodes.length === 0) {
+          failGraphNode(node, {
+            code: "SUBGRAPH_NOT_FOUND",
+            reason: `부르려는 자동화를 찾지 못했습니다(${ref}). 지워졌거나 아직 만들어지지 않았습니다.`,
+            nextAction: "자동화 목록에서 부를 것을 다시 골라 주세요.",
+          });
+          return;
+        }
+        // 넘길 값 — {{변수}} 치환이 끝난 상태로 안쪽 그래프의 시작 값이 된다.
+        const rawInput = str(node.config, "input");
+        const innerVars: Record<string, unknown> = {};
+        if (rawInput) {
+          const requirement = graphInputRequirement(inner.graph);
+          const substituted = substitute(rawInput, vars);
+          if (requirement?.varName) innerVars[requirement.varName] = substituted.text;
+        }
+        journal("node_intent", node.id, { subgraph: ref, depth });
+        const innerResult = await runGraph(inner, inner.graph, {
+          ...(opts.sink ? { sink: opts.sink } : {}),
+          ...(opts.signal ? { signal: opts.signal } : {}),
+          runId: `${runId}::sub:${node.id}`,
+          ...(Object.keys(innerVars).length ? { initialVars: innerVars } : {}),
+          ...(dryRun ? { dryRun: true } : {}),
+          depth,
+          // 고리를 잡으려면 지금까지 부른 것을 들고 가야 한다.
+          callChain: [...chain, ref],
+        });
+        // ★안쪽 사유를 그대로 들고 온다 — 바깥에서 "그냥 실패"로 뭉개면 어디서 왜 죽었는지
+        //   사람이 알 수 없다. 안쪽 실행 기록으로 가는 길도 함께 준다.
+        if (!innerResult.ok) {
+          const innerReasons = Object.values(innerResult.nodeFailures ?? {})
+            .map((f) => f.reason).slice(0, 2).join(" ");
+          failGraphNode(node, {
+            code: "SUBGRAPH_FAILED",
+            reason: `부른 자동화 "${inner.name}"이(가) 끝까지 가지 못했습니다.`
+              + (innerReasons ? ` 안에서: ${innerReasons}` : ""),
+            nextAction: `"${inner.name}"의 실행 기록을 열어 그 단계를 고친 뒤 다시 실행하세요.`,
+          });
+          return;
+        }
+        const innerOutputs = Object.values(innerResult.outputs ?? {});
+        const innerText = innerOutputs.length ? innerOutputs[innerOutputs.length - 1] : "";
+        envelopes[node.id] = declaredEnvelope(node.id, node.label || node.id, innerText);
+        outputs[node.id] = innerText;
+        const producesKey = str(node.config, "produces");
+        if (producesKey) {
+          const applied = applyProduces(node, producesKey, innerText);
+          if (applied) {
+            failGraphNode(node, applied);
+            return;
+          }
+        }
+        completeNode(node.id);
+        status.set(node.id, "done");
         return;
       }
       default:
