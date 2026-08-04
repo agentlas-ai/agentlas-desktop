@@ -636,6 +636,10 @@ const api: AgentlasIpc = {
     updateGraph: (id: string, graph: WorkflowGraph | null) =>
       ipcRenderer.invoke("automations:updateGraph", id, graph),
     runNow: (id: string, opts?: { dryRun?: boolean }) => ipcRenderer.invoke("automations:runNow", id, opts),
+    proposeGraphPatch: (id: string, patch: { ops: unknown[]; rationale?: string }) =>
+      ipcRenderer.invoke("automations:proposeGraphPatch", id, patch),
+    applyGraphPatch: (id: string, patch: { ops: unknown[]; rationale?: string }) =>
+      ipcRenderer.invoke("automations:applyGraphPatch", id, patch),
     decideNodeApproval: (id: string, nodeId: string, decision: "approved" | "rejected") =>
       ipcRenderer.invoke("automations:decideNodeApproval", id, nodeId, decision),
     listRuns: (id: string, limit?: number) => ipcRenderer.invoke("automations:listRuns", id, limit),

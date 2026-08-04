@@ -3742,6 +3742,55 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("automations:updateGraph", (_e, id: string, graph: WorkflowGraph | null) =>
     updateAutomationGraph(id, graph),
   );
+  // 그래프 변경 제안 — 평가만 한다. 적용은 사용자가 diff를 보고 누른 뒤 별도 호출로만.
+  // 모델 출력이 저장된 그래프에 직접 닿는 경로는 만들지 않는다(설계 D8).
+  const evaluatePatchFor = (id: string, patch: unknown) => {
+    const automation = getAutomation(id);
+    if (!automation) throw new Error(`Automation not found: ${id}`);
+    if (!automation.graph) {
+      return {
+        ok: false as const,
+        code: "PATCH_NO_GRAPH",
+        reason: "이 자동화에는 아직 고칠 그래프가 없습니다.",
+        nextAction: "먼저 그래프를 만든 뒤 다시 요청해 주세요.",
+      };
+    }
+    const { evaluateGraphPatch } = require("./workflow/graph-patch") as typeof import("./workflow/graph-patch");
+    const parsed = patch && typeof patch === "object" ? (patch as { ops?: unknown; rationale?: string }) : null;
+    const ops = Array.isArray(parsed?.ops) ? parsed!.ops : [];
+    return {
+      automation,
+      decision: evaluateGraphPatch(automation.graph, {
+        ops: ops as never,
+        ...(parsed?.rationale ? { rationale: parsed.rationale } : {}),
+      }),
+    } as const;
+  };
+
+  ipcMain.handle("automations:proposeGraphPatch", (_e, id: string, patch: unknown) => {
+    const evaluated = evaluatePatchFor(id, patch);
+    if ("ok" in evaluated) return evaluated;
+    const { decision } = evaluated;
+    if (!decision.ok) return decision;
+    const { graphPatchNeedsApproval } = require("./workflow/graph-patch") as typeof import("./workflow/graph-patch");
+    return {
+      ok: true as const,
+      risks: decision.risks,
+      summary: decision.summary,
+      needsApproval: graphPatchNeedsApproval(decision),
+    };
+  });
+
+  ipcMain.handle("automations:applyGraphPatch", (_e, id: string, patch: unknown) => {
+    const evaluated = evaluatePatchFor(id, patch);
+    if ("ok" in evaluated) return evaluated;
+    const { decision } = evaluated;
+    if (!decision.ok) return decision;
+    // 여기 도달했다는 것은 사용자가 diff를 보고 눌렀다는 뜻이다. 검증은 한 번 더 한다 —
+    // 제안과 적용 사이에 그래프가 바뀌었으면 위 평가에서 이미 걸린다.
+    updateAutomationGraph(id, decision.next);
+    return { ok: true as const };
+  });
   ipcMain.handle("automations:runNow", async (_e, id: string, opts?: { dryRun?: boolean }) => {
     const automation = getAutomation(id);
     if (!automation) throw new Error(`Automation not found: ${id}`);

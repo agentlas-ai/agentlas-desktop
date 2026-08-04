@@ -6112,6 +6112,27 @@ export interface AgentlasIpc {
     updateGraph: (id: string, graph: WorkflowGraph | null) => Promise<Automation>;
     /** opts.dryRun: 시뮬레이션 실행 — 외부 변경을 막고 무엇이 막혔는지 남긴다. */
     runNow: (id: string, opts?: { dryRun?: boolean }) => Promise<void>;
+    /**
+     * 그래프 변경 제안을 평가한다 — **적용하지 않는다**.
+     * 무엇이 바뀌는지와 사람이 봐야 할 이유를 돌려주고, 적용은 별도 호출로만 한다.
+     */
+    proposeGraphPatch: (
+      id: string,
+      patch: { ops: unknown[]; rationale?: string },
+    ) => Promise<
+      | { ok: false; code: string; reason: string; nextAction: string }
+      | {
+        ok: true;
+        risks: string[];
+        summary: { added: string[]; removed: string[]; changed: string[] };
+        needsApproval: boolean;
+      }
+    >;
+    /** 사용자가 diff를 보고 승인한 뒤에만 저장한다. */
+    applyGraphPatch: (
+      id: string,
+      patch: { ops: unknown[]; rationale?: string },
+    ) => Promise<{ ok: boolean; code?: string; reason?: string; nextAction?: string }>;
     /** 승인 브레이크가 걸린 단계의 결정을 기록한다. 승인은 판정이 아니라 사람의 결정이다. */
     decideNodeApproval: (
       id: string,
