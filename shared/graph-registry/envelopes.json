@@ -1194,7 +1194,7 @@
     {
       "id": "graph/1/edge.timeout",
       "boundary": "기다리다 시간이 지나면",
-      "status": "specified",
+      "status": "implemented",
       "payload": [
         {
           "field": "sourceHandle",
@@ -1204,11 +1204,18 @@
           ]
         },
         {
-          "field": "waitedMs",
-          "grade": "critical"
+          "field": "approvalWaitHours",
+          "grade": "degradable",
+          "note": "없으면 영원히 기다린다(지금까지의 동작)"
+        },
+        {
+          "field": "waitedHours",
+          "grade": "critical",
+          "note": "실제로 얼마나 기다렸나 — 사유에 들어간다"
         }
       ],
-      "note": "Dify Human Input 타임아웃 분기 상당. 미구현."
+      "note": "기다림 끝은 오류가 아니라 **시간**이라 자기 문으로 나간다. 같은 문이면 '실패했다'와 '안 왔다'가 뭉개진다.",
+      "implementedAs": "run-graph.ts approvalGuard + routeNodeFailure(handle=\"timeout\") · automation_approval_waits (스키마 v90)"
     },
     {
       "id": "graph/1/status.change",

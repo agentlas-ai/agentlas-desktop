@@ -1572,6 +1572,31 @@ export function getLatestNodeApproval(
   };
 }
 
+/**
+ * 이 단계의 승인을 **언제부터** 기다렸는가 (커넥터 C43).
+ * 처음 물어본 시각을 남기고, 이미 있으면 그대로 둔다 — 매 실행마다 시계를 되감으면
+ * 아무리 기다려도 만료가 오지 않는다.
+ */
+export function markApprovalWaitStarted(automationId: string, nodeId: string): string {
+  const now = new Date().toISOString();
+  getDb().prepare(
+    `INSERT INTO automation_approval_waits (automation_id, node_id, first_requested_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(automation_id, node_id) DO NOTHING`,
+  ).run(automationId, nodeId, now);
+  const row = getDb().prepare(
+    "SELECT first_requested_at FROM automation_approval_waits WHERE automation_id = ? AND node_id = ?",
+  ).get(automationId, nodeId) as { first_requested_at?: string } | undefined;
+  return row?.first_requested_at ?? now;
+}
+
+/** 결정이 오면 시계를 지운다 — 다음에 다시 물을 때는 그때부터 센다. */
+export function clearApprovalWait(automationId: string, nodeId: string): void {
+  getDb().prepare(
+    "DELETE FROM automation_approval_waits WHERE automation_id = ? AND node_id = ?",
+  ).run(automationId, nodeId);
+}
+
 export function recordNodeApproval(input: {
   automationId: string;
   occurrenceId: string;
@@ -1588,6 +1613,8 @@ export function recordNodeApproval(input: {
      ON CONFLICT(automation_id, occurrence_id, node_id)
      DO UPDATE SET decision = excluded.decision, decided_at = excluded.decided_at, decided_by = excluded.decided_by`,
   ).run(input.automationId, input.occurrenceId, input.nodeId, input.decision, decidedAt, decidedBy);
+  // 결정이 왔으니 기다린 시계는 지운다.
+  clearApprovalWait(input.automationId, input.nodeId);
   emitDesktopStoreChange({ entity: "automation", id: input.automationId });
   return {
     automationId: input.automationId,

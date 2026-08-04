@@ -403,7 +403,8 @@
         "true",
         "false",
         "error",
-        "always"
+        "always",
+        "timeout"
       ],
       "writer": "빌더",
       "reader": "커널 분기",
@@ -529,6 +530,21 @@
       "writer": "저작자",
       "reader": "커널 → 런타임 MCP 설정",
       "unknown": "TOOL_NODE_UNCONFIGURED",
+      "status": "implemented"
+    },
+    {
+      "name": "approvalWaitHours",
+      "on": "node.config",
+      "appliesTo": [
+        "agent",
+        "action",
+        "output"
+      ],
+      "grade": "degradable",
+      "type": "number",
+      "writer": "저작자",
+      "reader": "커널 승인 게이트",
+      "unknown": "영원히 기다린다 — 지금까지의 동작이고, 안 정했다고 마음대로 포기하지 않는다",
       "status": "implemented"
     }
   ]

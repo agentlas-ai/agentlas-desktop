@@ -35,6 +35,7 @@ import {
 import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
 import { getAgentConcurrency } from "../store/concurrency";
+import { markApprovalWaitStarted } from "../store/automations";
 import { listRunEvents, tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
 import { awaitAutomationRunnerWithAbortGrace } from "../automation-watchdog";
 import { buildStrategyDirective, collectAutomationFailureContext } from "../automation-strategy";
@@ -1356,6 +1357,24 @@ export async function runGraph(
         nextAction: "그대로 두려면 아무것도 하지 않아도 됩니다. 다시 진행하려면 이 단계를 승인하세요.",
       };
     }
+    // ★언제부터 기다렸는지는 **실행 밖**에 남는다. 승인이 없으면 실행이 그 자리에서 끝나고
+    //   다음 예약이 새 occurrence로 다시 물어보기 때문에, 실행 안에는 "3일째"라는 사실이 없다.
+    const waitingSince = markApprovalWaitStarted(automation.id, node.id);
+    const rawWait = node.config?.approvalWaitHours;
+    const waitHours = typeof rawWait === "number" && Number.isFinite(rawWait) && rawWait > 0
+      ? rawWait
+      : null;
+    if (waitHours !== null && waitHours > 0) {
+      const elapsedMs = Date.now() - Date.parse(waitingSince);
+      if (Number.isFinite(elapsedMs) && elapsedMs > waitHours * 3_600_000) {
+        const hours = Math.round(elapsedMs / 3_600_000);
+        return {
+          code: "APPROVAL_TIMED_OUT",
+          reason: `"${label}" 단계의 확인을 ${hours}시간째 기다렸습니다(약속한 시간 ${waitHours}시간).`,
+          nextAction: "지금 확인하거나, 이 단계가 기다림 끝에 갈 길을 캔버스에서 이어 주세요.",
+        };
+      }
+    }
     return {
       code: "APPROVAL_REQUIRED",
       reason:
@@ -1737,7 +1756,10 @@ export async function runGraph(
    * 둔다. 두 곳이 각자 판단하면 "어떤 실패는 라우팅되고 어떤 실패는 아닌" 드리프트가 생긴다.
    */
   const routeNodeFailure = (node: WorkflowNode, failure: GraphNodeFailure): boolean => {
-    const routes = (outByNode.get(node.id) ?? []).filter((e) => e.handle === "error");
+    // 실패 종류가 갈 문(handle)을 정한다. 기다림 끝(C43)은 오류가 아니라 **시간**이라
+    // 자기 문으로 나간다 — 같은 문으로 내보내면 "실패했다"와 "안 왔다"가 뭉개진다.
+    const handle = failure.code === "APPROVAL_TIMED_OUT" ? "timeout" : "error";
+    const routes = (outByNode.get(node.id) ?? []).filter((e) => e.handle === handle);
     if (routes.length === 0) return false;
     // ★라우팅하면 안 되는 것들 — 닫힌 목록. 하나하나 이유가 다르다.
     //   (계약 게이트가 실측으로 잡았다: 승인 대기까지 실패 경로로 흘려 사람 결정을
@@ -1751,9 +1773,9 @@ export async function runGraph(
     // 평상시 출구는 막고 실패 출구만 연다 — 둘 다 살리면 성공한 척하는 분기가 생긴다.
     // 다만 `always`(정리 단계, 커넥터 C42)는 막지 않는다 — 상류가 어떻게 끝났든 도는 게 계약이다.
     for (const edge of outByNode.get(node.id) ?? []) {
-      if (edge.handle !== "error" && edge.handle !== "always") blockedEdges.add(edge.edgeId);
+      if (edge.handle !== handle && edge.handle !== "always") blockedEdges.add(edge.edgeId);
     }
-    journal("node_routed", node.id, { via: "error", code: failure.code });
+    journal("node_routed", node.id, { via: handle, code: failure.code });
     return true;
   };
 

@@ -16,7 +16,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 89;
+const SCHEMA_VERSION = 90;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -3909,6 +3909,24 @@ export function initStore(options: StoreInitOptions = {}): void {
       _db.exec("ALTER TABLE run_history ADD COLUMN outcome_reason TEXT");
     }
   }
+
+  // v90: 승인을 **언제부터** 기다렸는가 (커넥터 C43).
+  //
+  // 승인이 없으면 실행이 그 자리에서 끝나고, 다음 예약이 **새 occurrence**로 다시 물어본다.
+  // 그래서 "3일째 기다리는 중"이라는 사실이 실행 안에는 없다 — 매번 처음 묻는 것처럼 보인다.
+  // 그 사실을 실행 밖에 남겨야 그래프가 "안 오면 이쪽으로"를 표현할 수 있다.
+  //
+  // Dify Human Input은 전용 타임아웃 분기를 갖고(기본 3일, 안 이으면 워크플로 종료),
+  // Airflow HITL은 response_timeout + defaults로 자동 해소한다. 우리는 만료 시 운영자
+  // 알림뿐이라 그래프가 만료를 처리할 방법이 없었다.
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS automation_approval_waits (
+      automation_id      TEXT NOT NULL,
+      node_id            TEXT NOT NULL,
+      first_requested_at TEXT NOT NULL,
+      PRIMARY KEY (automation_id, node_id)
+    )
+  `);
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
   } catch (error) {

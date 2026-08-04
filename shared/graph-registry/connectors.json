@@ -599,9 +599,12 @@
       "from": "person",
       "to": "agent|tool|action|output|condition|eval|transform",
       "envelope": "graph/1/edge.timeout",
-      "status": "specified",
-      "phase": "staffing",
-      "note": "Dify Human Input은 **전용 타임아웃 분기**(기본 3일, 안 이으면 워크플로 종료), Airflow HITL은 response_timeout + defaults 자동 해소. 우리는 만료 시 운영자 알림뿐이라 그래프가 만료를 처리할 수 없다."
+      "status": "implemented",
+      "phase": "human",
+      "note": "Dify Human Input은 전용 타임아웃 분기(기본 3일, 안 이으면 워크플로 종료), Airflow HITL은 response_timeout + defaults. 우리는 만료 시 운영자 알림뿐이라 그래프가 만료를 처리할 수 없었다.\\n★언제부터 기다렸는지는 **실행 밖**(automation_approval_waits)에 남는다. 승인이 없으면 실행이 그 자리에서 끝나고 다음 예약이 새 occurrence로 다시 묻기 때문에, 실행 안에만 두면 매번 처음처럼 보여 아무리 기다려도 만료가 오지 않는다. 결정이 오면 시계를 지운다.",
+      "failures": [
+        "APPROVAL_TIMED_OUT"
+      ]
     },
     {
       "id": "C44",

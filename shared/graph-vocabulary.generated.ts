@@ -16,6 +16,7 @@ export const GRAPH_WIRE = "graph/1" as const;
 export const GRAPH_ERROR_CODES = [
   "APPROVAL_REJECTED",
   "APPROVAL_REQUIRED",
+  "APPROVAL_TIMED_OUT",
   "ARCHITECT_NO_REQUEST",
   "ARCHITECT_UNAVAILABLE",
   "AUTOMATION_NOT_CONNECTED",
@@ -92,6 +93,7 @@ export type GraphNodeKindGenerated = (typeof GRAPH_NODE_KINDS)[number];
 export const GRAPH_ERROR_CARDS: Record<string, { cardKey: string; nextActions: string[] }> = {
   APPROVAL_REJECTED: { cardKey: "approval_rejected", nextActions: ["edit_graph"] },
   APPROVAL_REQUIRED: { cardKey: "approval_required", nextActions: ["approve", "reject"] },
+  APPROVAL_TIMED_OUT: { cardKey: "approval_timed_out", nextActions: ["approve", "reject", "edit_graph"] },
   ARCHITECT_UNAVAILABLE: { cardKey: "architect_unavailable", nextActions: ["retry"] },
   AUTOMATION_NOT_CONNECTED: { cardKey: "not_connected", nextActions: ["open_connections"] },
   BLOB_UNRESOLVED: { cardKey: "blob_unresolved", nextActions: ["open_session"] },
@@ -152,6 +154,7 @@ export const GRAPH_VERBATIM_CODES = [
 export const GRAPH_FIELD_GRADES: Record<string, "critical" | "degradable" | "extension"> = {
   "$blob": "critical",
   "approval": "critical",
+  "approvalWaitHours": "degradable",
   "catalog": "critical",
   "criteria": "critical",
   "effect": "critical",

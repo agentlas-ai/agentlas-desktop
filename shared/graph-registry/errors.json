@@ -466,6 +466,20 @@
       ],
       "status": "implemented",
       "note": "어느 에이전트에도 안 이어져 아무 데도 안 쓰인다. 커넥터 C06이 성립하지 않는 상태."
+    },
+    {
+      "code": "APPROVAL_TIMED_OUT",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "approval_timed_out",
+      "nextActions": [
+        "approve",
+        "reject",
+        "edit_graph"
+      ],
+      "status": "implemented",
+      "note": "기다림이 약속한 시간을 넘었다. 타임아웃 문이 이어져 있으면 그리로 가고, 없으면 계속 기다린다."
     }
   ]
 }
