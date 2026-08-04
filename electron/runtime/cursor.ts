@@ -8,6 +8,17 @@ import { wrapSystemPrompt } from "./runner";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { tStatus } from "./status-i18n";
 
+/**
+ * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
+ * 예산 소진으로 일어난다. 예전엔 전부 "사용자가 정지 버튼으로"라고 단정했다.
+ */
+function abortReasonError(req: { signal?: AbortSignal; locale?: unknown }): Error {
+  const reason = req.signal?.reason;
+  if (reason instanceof Error && reason.message.trim()) return reason;
+  if (typeof reason === "string" && reason.trim()) return new Error(reason);
+  return new Error(tStatus(req.locale as never, "aborted"));
+}
+
 const CANDIDATES = [
   path.join(os.homedir(), ".cursor", "bin", "cursor-agent"),
   path.join(os.homedir(), ".local", "bin", "cursor-agent"),
@@ -270,7 +281,7 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
       settled = true;
       req.signal?.removeEventListener("abort", onAbort);
       if (buffer.trim()) consume(buffer);
-      if (req.signal?.aborted) return reject(new Error(tStatus(req.locale, "aborted")));
+      if (req.signal?.aborted) return reject(abortReasonError(req));
       if (code !== 0) return reject(new Error(`Cursor Agent CLI exit ${code}${stderr ? `\n${stderr}` : ""}`));
       resolve({ text: text.trim() || stderr.trim() || "(Cursor Agent returned no text)" });
     });

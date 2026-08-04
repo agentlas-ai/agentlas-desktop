@@ -16,6 +16,18 @@ import { invalidateUsage } from "../usage";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import { StringDecoder } from "node:string_decoder";
 
+/**
+ * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
+ * 예산 소진으로 일어난다. 예전엔 전부 "사용자가 정지 버튼으로"라고 단정해,
+ * 누른 적 없는 사람이 거짓 사유를 받았다(실사용 실측).
+ */
+function abortReasonError(req: { signal?: AbortSignal; locale?: unknown }): Error {
+  const reason = req.signal?.reason;
+  if (reason instanceof Error && reason.message.trim()) return reason;
+  if (typeof reason === "string" && reason.trim()) return new Error(reason);
+  return new Error(tStatus(req.locale as never, "aborted"));
+}
+
 const KIND = "grok";
 
 const CANDIDATES = [
@@ -482,7 +494,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       req.signal?.removeEventListener("abort", onAbort);
       void fs.rm(promptFile, { force: true });
       if (req.signal?.aborted) {
-        reject(new Error(tStatus(req.locale, "aborted")));
+        reject(abortReasonError(req));
         return;
       }
       if (buffer.trim()) {

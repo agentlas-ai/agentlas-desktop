@@ -42,15 +42,34 @@ export function shouldPreferComputerUseForAutomation(
   return judged?.(text) === true;
 }
 
+/**
+ * 이 그래프가 바깥으로 나가는 단계를 하나라도 가지고 있는가.
+ *
+ * 그래프가 스스로 "전부 읽기"라고 선언했다면, 이름을 보고 추측한 판단보다 **그 선언이 강하다.**
+ * 실사용 실측: 사용자가 "화면에만 보여주세요"라고 답해 전 단계가 read로 만들어진 자동화가,
+ * 이름에 "인스타"가 들어갔다는 이유로 컴퓨터 조종(computer-use)으로 올라갔다.
+ * 그리고 접근성 권한이 없다고 실행이 막혔다 — 사용자는 "화면에만 보여준다면서 왜 내 컴퓨터를
+ * 조종하려 하나" 하고 무서워했다. 바깥에 나갈 단계가 없으면 조종할 것도 없다.
+ */
+export function graphTouchesOutside(graph: unknown): boolean {
+  const nodes = (graph as { nodes?: Array<{ config?: Record<string, unknown> }> } | null)?.nodes;
+  if (!Array.isArray(nodes) || nodes.length === 0) return true; // 모르면 좁히지 않는다
+  return nodes.some((node) => node?.config?.effect === "mutation");
+}
+
 export function resolveAutomationToolMode(input: {
   toolMode?: AutomationToolMode | null;
   name?: string | null;
   promptTemplate?: string | null;
   targetLabel?: string | null;
+  /** 이 자동화의 그래프. 전 단계가 읽기면 바깥 도구로 올리지 않는다. */
+  graph?: unknown;
   /** Synchronous read of a judged verdict for this text (see peekJudgment). */
   judged?: (text: string) => boolean | null;
 }): AutomationToolMode {
   if (input.toolMode === "browser" || input.toolMode === "computer-use") return input.toolMode;
+  // 선언이 추측을 이긴다 — 다만 **좁히는 방향으로만** 쓴다(넓히는 데는 쓰지 않는다).
+  if (input.graph !== undefined && !graphTouchesOutside(input.graph)) return "auto";
   const text = [input.name ?? "", input.promptTemplate ?? "", input.targetLabel ?? ""].join("\n");
   // Exact real-login browser intent outranks the generic social-site heuristic.
   // Otherwise a Reddit job that explicitly says "Agentlas Browser / 9222" is silently

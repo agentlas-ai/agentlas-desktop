@@ -73,7 +73,10 @@ const DICT = {
       "(CEO로서 어느 본부에 무엇을 맡길지 위임 계획을 정리해 응답하세요.)",
     compacted: "컨텍스트 압축 — 이전 대화 {n}개 메시지를 요약으로 접었습니다",
     compactedDigestHeader: "[압축된 이전 대화 요약 — 오래된 맥락을 간추렸습니다]",
-    aborted: "사용자가 정지 버튼으로 실행을 중지했습니다.",
+    // 중지 원인은 여러 가지다(사람이 누름·무활동 워치독·단계 시간 초과·예산 소진).
+    // 예전엔 전부 "사용자가 정지 버튼으로"라고 단정해, 누른 적 없는 사람이 거짓 사유를 받았다.
+    aborted: "실행이 중지되었습니다.",
+    abortedByUser: "사용자가 정지 버튼으로 실행을 중지했습니다.",
     mcpToolsAttached: "MCP 도구 {count}개 연결됨",
     mcpToolCallUnsupported: "이 모델/서버는 도구 호출(tool_calls) 응답 형식을 지원하지 않는 것 같습니다 — 도구 없이 텍스트로만 계속합니다.",
   },
@@ -125,7 +128,8 @@ const DICT = {
       "(As CEO, lay out which head you'd task with what in your reply.)",
     compacted: "Context compacted — folded {n} earlier messages into a summary",
     compactedDigestHeader: "[Summary of compacted earlier conversation — older context condensed]",
-    aborted: "Run stopped from the stop button.",
+    aborted: "The run was stopped.",
+    abortedByUser: "Run stopped from the stop button.",
     mcpToolsAttached: "{count} MCP tool(s) attached",
     mcpToolCallUnsupported: "This model/server doesn't seem to support tool-call responses — continuing with text only, no tools.",
   },

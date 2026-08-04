@@ -408,6 +408,7 @@ export function createAutomation(input: {
         name: input.name,
         promptTemplate: input.promptTemplate,
         targetLabel: input.targetType,
+        graph: input.graphJson,
       }),
       normalizeHubMode(input.hubMode),
       normalizeExecutionPermission(input.executionPermission),
@@ -437,11 +438,12 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
   const projectId = patch.projectId !== undefined ? patch.projectId : row.project_id;
   const promptTemplate = patch.promptTemplate ?? row.prompt_template;
   const toolMode = resolveAutomationToolMode({
-        judged: judgedComputerUse,
+    judged: judgedComputerUse,
     toolMode: normalizeToolMode(patch.toolMode ?? row.tool_mode),
     name,
     promptTemplate,
     targetLabel: targetType,
+    graph: parseGraph(row.graph_json),
   });
   const hubMode = normalizeHubMode(patch.hubMode ?? row.hub_mode);
   // undefined = 미변경(기존 핀 유지), 빈 문자열 = 핀 해제(latest로 복귀).
