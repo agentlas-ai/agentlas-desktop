@@ -2,6 +2,7 @@ import type { OneSurfaceManifestV1 } from "./one-surface";
 import type { AgentlasOneTaskProjectionV1 } from "./one-task-projection";
 import { ONE_DECISION_CONTRACT_VERSION, type OneDecisionViewV1 } from "./one-decision";
 import type { OneMobileEcosystemSuggestionV1 } from "./one-mobile-suggestion";
+import { PROJECT_AGENT_POOL_MAX } from "./project-agent-pool";
 
 /**
  * Agentlas Desktop Mobile Bridge wire contract.
@@ -35,6 +36,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "firms.list",
   "projects.list",
   "projects.get",
+  "projects.setAgentPool",
   "chats.listRecent",
   "chats.get",
   "chats.rename",
@@ -92,6 +94,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "chats.setContinuousMode",
   "chats.setSwarmMode",
   "chats.clearContext",
+  "projects.setAgentPool",
   "tasks.createProject",
   "tasks.acceptResult",
   "one.suggestions.act",
@@ -430,6 +433,13 @@ export interface MobileBridgeAgentDto {
   visibility: "visible" | "background" | "private";
   requiresSetup: boolean;
   /**
+   * Whether Desktop would accept this agent as a project-pool member.
+   * `visibility` alone cannot decide it — a materialized HQ cell with an empty
+   * system prompt is also refused — and the prompt itself never crosses the
+   * bridge, so the phone must not re-derive this rule.
+   */
+  projectSelectable: boolean;
+  /**
    * Immutable Hub identity. Both fields are emitted together or both omitted.
    * A slug, package hash, or latest release is never used as a substitute.
    */
@@ -701,6 +711,32 @@ export interface MobileBridgeProjectDto {
 
 /** Rich fields are populated only by projects.get, never by snapshot/list projection. */
 export type MobileBridgeProjectDetailDto = MobileBridgeProjectDto;
+
+/**
+ * One ordered project-pool member the phone asks Desktop to staff.
+ *
+ * DESKTOP_MOBILE_BRIDGE: the phone deliberately cannot send a display name.
+ * Desktop resolves `nameSnapshot` from the installed agent (local) or from the
+ * member already bound to this project (cloud/hub), so a mobile write can never
+ * relabel an agent or mint a new remote binding.
+ */
+export interface MobileBridgeProjectAgentPoolMemberInput {
+  agentId: string;
+  source: "local" | "cloud" | "hub";
+  releaseId?: string | null;
+}
+
+export interface MobileBridgeProjectAgentPoolParams {
+  projectId: string;
+  /** Ordered target pool. Index 0 becomes the project's Work controller. */
+  members: MobileBridgeProjectAgentPoolMemberInput[];
+  /**
+   * Ordered `source:agentId:releaseId` keys the phone observed before editing.
+   * A mismatch means Desktop restaffed the project meanwhile, and the write is
+   * refused instead of overwriting the newer pool.
+   */
+  expectedMemberKeys: string[];
+}
 
 export interface MobileBridgeProjectTaskStartParams {
   projectId: string;
@@ -1743,6 +1779,61 @@ function ontologyRevision(value: unknown, field: string): string | null {
     : `${field} must be a canonical revision`;
 }
 
+const CONTROL_CHARACTERS = /[\u0000-\u001f]/;
+
+const PROJECT_POOL_SOURCES = ["local", "cloud", "hub"] as const;
+
+/**
+ * DESKTOP_MOBILE_BRIDGE: shape-only gate for a project staffing write. Whether
+ * an agent may actually be staffed (installed, user-facing, already bound) is
+ * decided by Desktop authority, never here.
+ */
+function validateProjectAgentPool(params: Record<string, unknown>): string | null {
+  if (!hasOnlyKeys(params, ["projectId", "members", "expectedMemberKeys"])) {
+    return "projects.setAgentPool accepts only projectId, members, and expectedMemberKeys";
+  }
+  const projectIdError = requiredString(params, "projectId");
+  if (projectIdError) return projectIdError;
+
+  const { members } = params;
+  if (!Array.isArray(members) || members.length > PROJECT_AGENT_POOL_MAX) {
+    return `members must be an ordered array of at most ${PROJECT_AGENT_POOL_MAX} agents`;
+  }
+  const seen = new Set<string>();
+  for (const member of members) {
+    if (!isRecord(member) || !hasOnlyKeys(member, ["agentId", "source", "releaseId"])) {
+      return "members contains an unsupported project agent";
+    }
+    const memberError = firstError(
+      requiredString(member, "agentId"),
+      validateEnum(member, "source", PROJECT_POOL_SOURCES, false),
+      optionalString(member, "releaseId", 200),
+    );
+    if (memberError) return memberError;
+    const key = `${String(member.source)}:${String(member.agentId)}:${
+      typeof member.releaseId === "string" ? member.releaseId : ""
+    }`;
+    if (seen.has(key)) return "members must not repeat the same project agent";
+    seen.add(key);
+  }
+
+  const expected = params.expectedMemberKeys;
+  if (!Array.isArray(expected) || expected.length > PROJECT_AGENT_POOL_MAX) {
+    return `expectedMemberKeys must be an ordered array of at most ${PROJECT_AGENT_POOL_MAX} keys`;
+  }
+  for (const key of expected) {
+    if (
+      typeof key !== "string" ||
+      key.length < 1 ||
+      key.length > 600 ||
+      CONTROL_CHARACTERS.test(key)
+    ) {
+      return "expectedMemberKeys contains an invalid project pool key";
+    }
+  }
+  return null;
+}
+
 function validateParams(method: MobileBridgeMethod, params: Record<string, unknown>): string | null {
   if (!isMobileBridgeJsonValue(params)) return "params must contain only bounded JSON values";
   if (EMPTY_METHODS.has(method)) {
@@ -1758,7 +1849,12 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
     case "chats.archive":
     case "chats.unarchive":
     case "chats.clearContext":
+    // projects.get shipped without a validator and every call fell through to
+    // the fail-closed default, so project detail was unreachable from Mobile.
+    case "projects.get":
       return hasOnlyKeys(params, ["id"]) ? requiredString(params, "id") : `${method} accepts only id`;
+    case "projects.setAgentPool":
+      return validateProjectAgentPool(params);
     case "tasks.createProject":
       return hasOnlyKeys(params, ["projectId", "title"])
         ? firstError(requiredString(params, "projectId"), optionalString(params, "title", 200))

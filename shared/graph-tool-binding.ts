@@ -475,6 +475,13 @@ export interface GraphAgentBinding {
   targetType: "agent" | "firm" | "hub" | null;
   /** Hub는 **정확한 릴리스**를 못 박는다. 없는 채로 부르면 무엇이 실행될지 모른다. */
   targetVersion: string | null;
+  /**
+   * 이 단계에 맞는 에이전트를 찾을 때 쓸 검색어 — **노드의 지시문에서 뽑는다**(커넥터 C23).
+   *
+   * ★사람에게 다시 타이핑하게 하지 않는다. 무엇을 시킬지는 이미 이 단계에 적혀 있고,
+   * 그걸 그대로 검색어로 쓰는 것이 사람이 할 수 있는 가장 정확한 질의다.
+   */
+  recommendQuery: string;
 }
 
 export function collectAgentBindings(graph: WorkflowGraph | null | undefined): GraphAgentBinding[] {
@@ -485,12 +492,15 @@ export function collectAgentBindings(graph: WorkflowGraph | null | undefined): G
     const rawType = node.config?.targetType;
     const targetType = rawType === "agent" || rawType === "firm" || rawType === "hub" ? rawType : null;
     const version = node.config?.targetVersion;
+    const prompt = typeof node.config?.prompt === "string" ? node.config.prompt : "";
     out.push({
       nodeId: node.id,
       nodeLabel: node.label || node.id,
       ref,
       targetType: ref ? (targetType ?? "agent") : null,
       targetVersion: typeof version === "string" && version ? version : null,
+      // 지시문이 곧 질의다. 없으면 단계 이름으로 떨어진다 — 빈 질의로 전부 가져오지 않는다.
+      recommendQuery: (prompt.trim() || node.label || "").slice(0, 200),
     });
   }
   return out;

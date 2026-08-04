@@ -500,6 +500,14 @@ function AgentSwapSection({ automationId, agents, ko, locale, onOutcome }: {
 }) {
   const [roster, setRoster] = useState<Array<{ ref: string; label: string; targetType: "agent" | "firm" | "hub"; targetVersion: string | null }>>([]);
   const [busy, setBusy] = useState(false);
+  /**
+   * "이 단계에 맞는 것 찾기"의 결과 (커넥터 C23).
+   * ★찾아서 **보여주기만** 한다 — 붙이는 것은 사람이 누른다. 제품이 알아서 붙이면
+   * 사용자는 자기 그래프에 누가 들어왔는지 모른다.
+   */
+  const [found, setFound] = useState<Record<string, Array<{ ref: string; label: string; targetVersion: string }>>>({});
+  const [finding, setFinding] = useState<string | null>(null);
+  const [noMatch, setNoMatch] = useState<string | null>(null);
 
   useEffect(() => {
     const api = ipc();
@@ -531,6 +539,44 @@ function AgentSwapSection({ automationId, agents, ko, locale, onOutcome }: {
       setRoster(rows);
     })();
   }, [locale]);
+
+  /** 노드의 지시문을 그대로 질의로 써서 Hub에서 찾는다 — 사람이 다시 타이핑하지 않는다. */
+  async function recommend(agent: GraphAgentBinding) {
+    const api = ipc();
+    if (!api) return;
+    setFinding(agent.nodeId);
+    setNoMatch(null);
+    try {
+      const hits = await api.marketplace.search(agent.recommendQuery).catch(() => []);
+      const rows = hits
+        // ★릴리스가 못 박히지 않은 것은 후보에 넣지 않는다 — 보여주고 거절하면 화면이 거짓말한 것이다.
+        .filter((listing) => listing.callable === true && Boolean(listing.packageHash))
+        .slice(0, 5)
+        .map((listing) => ({
+          ref: listing.slug,
+          label: pickLocalized(listing, locale).name,
+          targetVersion: listing.packageHash as string,
+        }));
+      setFound((prev) => ({ ...prev, [agent.nodeId]: rows }));
+      if (!rows.length) setNoMatch(agent.nodeId);
+    } finally {
+      setFinding(null);
+    }
+  }
+
+  async function attach(nodeId: string, row: { ref: string; label: string; targetVersion: string }) {
+    const api = ipc();
+    if (!api) return;
+    setBusy(true);
+    try {
+      onOutcome(await api.automations.swapAgent(automationId, {
+        nodeId, ref: row.ref, targetType: "hub", targetVersion: row.targetVersion, label: row.label,
+      }));
+      setFound((prev) => ({ ...prev, [nodeId]: [] }));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function swap(nodeId: string, ref: string) {
     const api = ipc();
@@ -574,6 +620,50 @@ function AgentSwapSection({ automationId, agents, ko, locale, onOutcome }: {
               <option key={`${row.targetType}:${row.ref}`} value={row.ref}>{row.label}</option>
             ))}
           </select>
+
+          {/* ★찾아서 보여주기만 한다. 붙이는 것은 사람이 누른다(커넥터 C23). */}
+          {agent.recommendQuery ? (
+            <button
+              data-testid={`connections-recommend-${agent.nodeId}`}
+              disabled={finding !== null || busy}
+              onClick={() => void recommend(agent)}
+              style={{
+                border: "none", background: "none", padding: 0, cursor: "pointer",
+                fontSize: 11, color: "var(--ink-soft)", textDecoration: "underline",
+                justifySelf: "start",
+              }}
+            >
+              {finding === agent.nodeId
+                ? (ko ? "찾는 중…" : "Searching…")
+                : (ko ? "이 단계에 맞는 것 찾기" : "Find one for this step")}
+            </button>
+          ) : null}
+
+          {(found[agent.nodeId] ?? []).length ? (
+            <div data-testid={`connections-found-${agent.nodeId}`} style={{ display: "grid", gap: 4 }}>
+              <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>
+                {ko ? "찾은 것 — 쓰려면 누르세요" : "Found — click to use"}
+              </span>
+              {(found[agent.nodeId] ?? []).map((row) => (
+                <button
+                  key={row.ref}
+                  data-testid={`connections-attach-${row.ref}`}
+                  disabled={busy}
+                  onClick={() => void attach(agent.nodeId, row)}
+                  style={{ ...btn(false), textAlign: "left" }}
+                >
+                  {row.label}
+                </button>
+              ))}
+            </div>
+          ) : noMatch === agent.nodeId ? (
+            <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>
+              {/* 없으면 없다고 말한다. 빈 목록을 조용히 두면 눌러도 아무 일이 없는 것처럼 보인다. */}
+              {ko
+                ? "이 단계에 맞는 것을 못 찾았습니다. 지시문을 조금 더 구체적으로 적으면 잘 찾습니다."
+                : "Nothing matched this step. A more specific instruction finds more."}
+            </span>
+          ) : null}
         </label>
       ))}
       {!roster.length ? (

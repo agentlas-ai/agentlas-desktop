@@ -183,6 +183,7 @@ export const GRAPH_FIELD_GRADES: Record<string, "critical" | "degradable" | "ext
   "pattern": "degradable",
   "produces": "degradable",
   "prompt": "critical",
+  "recommendQuery": "degradable",
   "reducer": "critical",
   "ref": "critical",
   "repeatOn": "critical",

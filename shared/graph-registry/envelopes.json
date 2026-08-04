@@ -1292,7 +1292,7 @@
     {
       "id": "graph/1/agent.recommend",
       "boundary": "커널 → 사람 (후보 보여주기)",
-      "status": "specified",
+      "status": "implemented",
       "payload": [
         {
           "field": "query",
@@ -1310,7 +1310,8 @@
           "note": "왜 이게 맞다고 보는지. 없으면 사람이 고를 근거가 없다"
         }
       ],
-      "note": "★찾아서 **보여주기만** 한다. 붙이는 것은 사람이 누른다(C22 swapAgent). 제품이 알아서 붙이면 사용자는 자기 그래프에 누가 들어왔는지 모른다."
+      "note": "★찾아서 **보여주기만** 한다. 붙이는 것은 사람이 누른다(C22 swapAgent). 제품이 알아서 붙이면 사용자는 자기 그래프에 누가 들어왔는지 모른다.",
+      "implementedAs": "collectAgentBindings.recommendQuery → ConnectionsDialog recommend()/attach() → swapAgent"
     }
   ]
 }

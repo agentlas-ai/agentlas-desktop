@@ -588,6 +588,16 @@
       "unknown": "값 없이 부른다 — 안쪽이 값을 요구하면 그쪽에서 막힌다",
       "status": "implemented",
       "note": "{{변수}} 치환이 끝난 뒤 안쪽 그래프의 시작 값이 된다. 이름은 안쪽 그래프에서 도출한다."
+    },
+    {
+      "name": "recommendQuery",
+      "on": "envelope",
+      "grade": "degradable",
+      "type": "string",
+      "writer": "커널(노드 지시문에서 도출)",
+      "reader": "연결 창 추천 버튼",
+      "unknown": "단계 이름으로 떨어진다 — 빈 질의로 전부 가져오지 않는다",
+      "status": "implemented"
     }
   ]
 }
