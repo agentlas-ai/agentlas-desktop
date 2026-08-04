@@ -234,6 +234,7 @@
     "test:graph-architect-contract": "npm run build:electron && node scripts/test-graph-architect-contract.cjs",
     "test:graph-canvas-ui": "npm run build:renderer && node scripts/test-graph-canvas-ui.cjs",
     "seed:graph-dryrun": "npm run build:electron && electron scripts/seed-graph-dryrun.cjs",
+    "seed:zero-run": "npm run build:electron && electron scripts/seed-zero-run.cjs",
     "test:automation-trigger-safety": "npm run build:electron && electron scripts/test-automation-trigger-safety.cjs",
     "test:question-answer-receipt": "npm run build:electron && electron scripts/test-question-answer-receipt.cjs",
     "test:automation-scheduler-guards": "npm run build:electron && electron scripts/test-automation-scheduler-guards.cjs",
