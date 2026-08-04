@@ -108,8 +108,15 @@ const corePatterns = [
   /^electron\/mcp-tools\//,
   /^electron\/runtime\//,
   /^electron\/secrets\/vault\.ts$/,
+  // 그래프 커널과 그 둘레(스케줄러·실행 스토어·결과 판정)는 부수효과가 바깥으로 나가는
+  // 경로다. 여기 없으면 커널을 고쳐도 CI가 코어 게이트를 돌리지 않는다 — 실제로 그랬다.
+  /^electron\/workflow\//,
+  /^electron\/automation-scheduler\.ts$/,
+  /^electron\/automation-result\.ts$/,
+  /^electron\/store\/automations\.ts$/,
+  /^electron\/store\/graph-reconciliation\.ts$/,
   /^scripts\/lib\/agentlas-core-root\.cjs$/,
-  /^scripts\/test-(?:project-bootstrap-(?:desktop|core)|project-memory-read-boundary|model2vec-hybrid-parity|memory-hybrid-retrieval|curator-nest-core-query|v56-experience-cloud-migration|codex-model-discovery|workload-routing|build-workload-routing|hephaestus-settings-migration|auto-router-gates|stormbreaker-core-harness|stormbreaker-swarm-contract|swarm-engine|automation-result-contract|owned-agent-runtime-prompts|borrowed-task-force|borrowed-agent-fail-closed)\.cjs$/,
+  /^scripts\/test-(?:project-bootstrap-(?:desktop|core)|project-memory-read-boundary|model2vec-hybrid-parity|memory-hybrid-retrieval|curator-nest-core-query|v56-experience-cloud-migration|codex-model-discovery|workload-routing|build-workload-routing|hephaestus-settings-migration|auto-router-gates|stormbreaker-core-harness|stormbreaker-swarm-contract|swarm-engine|automation-result-contract|graph-kernel-contract|graph-canvas-ui|owned-agent-runtime-prompts|borrowed-task-force|borrowed-agent-fail-closed)\.cjs$/,
 ];
 
 const planScopes = (rawFiles, options = {}) => {
