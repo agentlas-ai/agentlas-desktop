@@ -121,7 +121,7 @@ export function DescribeAutomation({ locale, onCreated }: {
       }}
     >
       <div style={{ fontSize: 14, fontWeight: 700, color: "var(--ink)" }}>
-        {ko ? "무엇을 자동으로 하고 싶으세요?" : "What would you like automated?"}
+        {ko ? "자동으로 돌릴 일을 적어 주세요." : "Tell me what to run for you."}
       </div>
       <div style={{ display: "flex", gap: 8 }}>
         <input
@@ -131,8 +131,8 @@ export function DescribeAutomation({ locale, onCreated }: {
           onChange={(e) => setRequest(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") start(); }}
           placeholder={ko
-            ? "예: 매일 아침에 오늘 쓸 블로그 글감 하나 뽑아줘"
-            : "e.g. every morning, give me one blog topic to write about"}
+            ? "예: 평일 아침 8시에 블로그 글감 세 개 뽑아서 메모앱에 저장"
+            : "e.g. weekday mornings at 8, pull three blog topics and save them to my notes"}
           style={{
             flex: 1, padding: "10px 12px", borderRadius: "var(--radius-sm)",
             border: "1px solid var(--paper-edge)", background: "var(--paper-2)",
@@ -141,11 +141,11 @@ export function DescribeAutomation({ locale, onCreated }: {
         />
         {state ? (
           <button data-testid="describe-reset" onClick={reset} style={btn(false)}>
-            {ko ? "처음부터" : "Start over"}
+            {ko ? "처음부터 다시" : "Start over"}
           </button>
         ) : (
           <button data-testid="describe-start" onClick={start} disabled={busy || !request.trim()} style={btn(true)}>
-            {busy ? (ko ? "생각 중…" : "Thinking…") : (ko ? "만들기" : "Build it")}
+            {busy ? (ko ? "정리하는 중…" : "Working…") : (ko ? "초안 잡기" : "Draft it")}
           </button>
         )}
       </div>
@@ -154,8 +154,8 @@ export function DescribeAutomation({ locale, onCreated }: {
         <div data-testid="describe-questions" style={{ display: "grid", gap: 12 }}>
           <div style={{ fontSize: 12, color: "var(--muted-deep)" }}>
             {ko
-              ? `제가 대신 정하면 안 되는 것들입니다 (${(state?.round ?? 0) + 1}번째 / 최대 ${MAX_ROUNDS}번)`
-              : `A few things I should not decide for you (round ${(state?.round ?? 0) + 1} of ${MAX_ROUNDS})`}
+              ? `임의로 정하면 안 되는 항목입니다 (${(state?.round ?? 0) + 1}번째 / 최대 ${MAX_ROUNDS}번)`
+              : `These are not mine to decide (round ${(state?.round ?? 0) + 1} of ${MAX_ROUNDS})`}
           </div>
           {questions.map((q) => (
             <div key={q.id} style={{ display: "grid", gap: 6 }}>
@@ -182,7 +182,7 @@ export function DescribeAutomation({ locale, onCreated }: {
                 data-testid={`describe-answer-${q.id}`}
                 value={drafts[q.id] ?? ""}
                 onChange={(e) => setDrafts((d) => ({ ...d, [q.id]: e.target.value }))}
-                placeholder={ko ? "여기에 답하세요 (모르시면 \"알아서 해주세요\")" : "Your answer (or \"you decide\")"}
+                placeholder={ko ? "답을 적어 주세요 (판단이 서지 않으면 \"알아서 해주세요\")" : "Your answer — or \"you decide\""}
                 style={{
                   padding: "8px 10px", borderRadius: "var(--radius-sm)",
                   border: "1px solid var(--paper-edge)", background: "var(--paper-2)",
@@ -198,7 +198,7 @@ export function DescribeAutomation({ locale, onCreated }: {
               disabled={busy || questions.some((q) => !(drafts[q.id] ?? "").trim())}
               style={btn(true)}
             >
-              {busy ? (ko ? "생각 중…" : "Thinking…") : (ko ? "답했어요" : "Answered")}
+              {busy ? (ko ? "정리하는 중…" : "Working…") : (ko ? "답 보내기" : "Send answers")}
             </button>
           </div>
         </div>
@@ -216,7 +216,7 @@ export function DescribeAutomation({ locale, onCreated }: {
                 {node.label}
                 {node.config?.effect === "mutation" ? (
                   <span style={{ color: "var(--muted-deep)" }}>
-                    {ko ? " — 바깥을 바꿈, 실행 전 확인" : " — goes outside, asks first"}
+                    {ko ? " — 바깥으로 나감, 실행 전 확인" : " — goes outside, asks first"}
                   </span>
                 ) : null}
               </li>
@@ -224,20 +224,20 @@ export function DescribeAutomation({ locale, onCreated }: {
           </ol>
           <div style={{ fontSize: 12, color: "var(--muted-deep)" }}>
             {ready.triggerType === "schedule"
-              ? (ko ? `실행 시각: ${ready.scheduleHuman}` : `Runs on: ${ready.scheduleHuman}`)
-              : (ko ? "값을 넣을 때마다 실행합니다." : "Runs whenever you give it a value.")}
+              ? scheduleSentence(ready.scheduleHuman, ko)
+              : (ko ? "값을 넣을 때만 실행합니다." : "Runs only when you give it a value.")}
             {mutations.length ? (ko ? ` · 바깥으로 나가는 단계 ${mutations.length}개` : ` · ${mutations.length} step(s) go outside`) : ""}
           </div>
           <div style={{ fontSize: 12, color: "var(--muted-deep)" }}>
             {ko
-              ? "꺼진 상태로 만듭니다. 확인하고 직접 켜셔야 돌아갑니다."
-              : "It is created switched off. Nothing runs until you turn it on."}
+              ? "꺼진 상태로 저장됩니다. 직접 켜기 전에는 돌지 않습니다."
+              : "Saved switched off. It does not run until you turn it on."}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button data-testid="describe-create" onClick={() => void create()} disabled={busy} style={btn(true)}>
-              {busy ? (ko ? "만드는 중…" : "Creating…") : (ko ? "이대로 만들기" : "Create it")}
+              {busy ? (ko ? "저장하는 중…" : "Saving…") : (ko ? "이대로 저장" : "Save it")}
             </button>
-            <button onClick={reset} style={btn(false)}>{ko ? "그만두기" : "Discard"}</button>
+            <button onClick={reset} style={btn(false)}>{ko ? "취소" : "Discard"}</button>
           </div>
         </div>
       ) : null}
@@ -250,6 +250,20 @@ export function DescribeAutomation({ locale, onCreated }: {
       ) : null}
     </section>
   );
+}
+
+/** 실행 시각을 사람 말로. "daily-08:00"은 제품 내부 토큰이지 사용자가 읽을 말이 아니다. */
+function scheduleSentence(schedule: string, ko: boolean): string {
+  const daily = /^daily-(\d{2}):(\d{2})$/.exec(schedule);
+  if (daily) return ko ? `매일 ${daily[1]}:${daily[2]}에 실행` : `Runs daily at ${daily[1]}:${daily[2]}`;
+  const weekly = /^weekly-([a-z]{3})-(\d{2}):(\d{2})$/.exec(schedule);
+  if (weekly) {
+    const days: Record<string, string> = { mon: "월", tue: "화", wed: "수", thu: "목", fri: "금", sat: "토", sun: "일" };
+    return ko
+      ? `매주 ${days[weekly[1]] ?? weekly[1]}요일 ${weekly[2]}:${weekly[3]}에 실행`
+      : `Runs every ${weekly[1]} at ${weekly[2]}:${weekly[3]}`;
+  }
+  return ko ? `실행 시점: ${schedule}` : `Runs on: ${schedule}`;
 }
 
 function btn(primary: boolean): React.CSSProperties {

@@ -110,7 +110,7 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
   if (!bp.goal?.trim()) {
     push("무엇을 위한 자동화인지가 없습니다.", {
       id: "goal",
-      question: "이 자동화로 무엇을 얻고 싶으신가요? 한 문장으로 말씀해 주세요.",
+      question: "이 자동화로 무엇을 얻고 싶으신가요? 한 문장이면 됩니다.",
       why: "나중에 목록에서 보고 무엇이었는지 알아보려면 필요합니다.",
     });
   }
@@ -124,7 +124,7 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
       push("실행 시각이 없습니다.", {
         id: "schedule",
         question: "몇 시에 돌릴까요?",
-        why: "시각을 제가 정하면, 사용자가 원하지 않는 시각에 조용히 돌게 됩니다.",
+        why: "시각을 대신 정하면, 보지 않는 시간에 조용히 돌게 됩니다.",
         choices: ["매일 아침 8시", "매일 저녁 9시", "평일 아침 9시", "매주 월요일 아침 9시"],
       });
     }
@@ -148,7 +148,7 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
   if (steps.length === 0) {
     push("할 일이 하나도 없습니다.", {
       id: "steps",
-      question: "이 자동화가 무슨 일을 해야 하나요? 순서대로 말씀해 주세요.",
+      question: "무슨 일을 해야 하나요? 순서대로 적어 주세요.",
       why: "단계가 없으면 만들 수 있는 것이 없습니다.",
     });
   }
@@ -165,7 +165,7 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
       push(`${at}가 무엇을 할지 적혀 있지 않습니다.`, {
         id: `step-${index}-instruction`,
         question: `"${step.title || at}" 단계에서 정확히 무엇을 해야 하나요?`,
-        why: "지시가 비면 에이전트가 되물어 오고, 자동화는 아무것도 못 합니다.",
+        why: "지시가 비면 에이전트가 되물어 오고, 자동화는 아무것도 하지 못합니다.",
       });
     }
     if (step.effect !== "read" && step.effect !== "mutation") {
@@ -173,9 +173,9 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
       //   승인 브레이크가 걸리지 않은 채 실행된다.
       push(`${at}가 바깥을 바꾸는지 정해지지 않았습니다.`, {
         id: `step-${index}-effect`,
-        question: `"${step.title || at}" 단계는 바깥으로 나가는 일(글 게시·메일 발송·파일 저장·결제 등)을 하나요?`,
-        why: "바깥을 바꾸는 단계는 실행 전에 확인을 받도록 잠가 둡니다.",
-        choices: ["아니요, 글을 만들기만 합니다", "네, 바깥으로 나갑니다"],
+        question: `"${step.title || at}"은(는) 바깥으로 나가는 일(글 게시, 메일 발송, 파일 저장, 결제)을 하나요?`,
+        why: "바깥을 바꾸는 단계는 실행 전에 확인받도록 잠가 둡니다.",
+        choices: ["아니요, 만들기만 합니다", "네, 바깥으로 나갑니다"],
       });
     }
     for (const name of step.consumes ?? []) {
@@ -205,7 +205,7 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
       push(`${at}가 무엇과 비교하는지 정해져 있지 않습니다.`, {
         id: `branch-${branch.afterStep}-value`,
         question: `${at}에서, 어떤 경우에 "예"로 갈까요?`,
-        why: "비교할 것이 없으면 갈림길이 판단을 못 하고 거기서 멈춥니다.",
+        why: "비교할 것이 없으면 갈림길이 판단하지 못하고 거기서 멈춥니다.",
       });
     }
     if (branch.repeatStep !== undefined) {
@@ -215,8 +215,8 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
       if (typeof cap !== "number" || !Number.isFinite(cap) || cap < 1 || cap > MAX_REPEATS) {
         push(`${at}의 반복 횟수가 정해져 있지 않습니다.`, {
           id: `branch-${branch.afterStep}-repeats`,
-          question: `${at}에서 되돌아가는 반복은 최대 몇 번까지 할까요?`,
-          why: "사람이 보지 않는 동안 도는 자동화라, 멈출 지점이 없으면 실행하지 않습니다.",
+          question: `${at}에서 되돌아가는 반복, 최대 몇 번까지 할까요?`,
+          why: "사람이 보지 않는 사이에 도는 자동화라, 멈출 지점이 없으면 실행하지 않습니다.",
           choices: ["2번", "3번", "5번"],
         });
       }
@@ -231,9 +231,9 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
 function triggerQuestion(): BlueprintQuestion {
   return {
     id: "trigger",
-    question: "이 자동화는 정해진 시각에 저절로 돌까요, 아니면 값을 넣을 때마다 돌까요?",
-    why: "둘은 완전히 다른 자동화입니다. 제가 임의로 정하면 원하지 않는 때에 돌게 됩니다.",
-    choices: ["정해진 시각에 저절로", "내가 값을 넣을 때마다"],
+    question: "정해진 시각에 스스로 돌까요, 값을 넣을 때만 돌까요?",
+    why: "두 방식은 서로 다른 자동화입니다. 임의로 정하면 원하지 않는 때에 돌게 됩니다.",
+    choices: ["정해진 시각에 스스로", "값을 넣을 때만"],
   };
 }
 

@@ -149,7 +149,7 @@ const unreadable = (): InterviewParse => ({
   ok: false,
   code: "INTERVIEW_OUTPUT_UNREADABLE",
   reason: "만들 내용을 읽지 못했습니다.",
-  nextAction: "무엇을 자동으로 하고 싶은지 한 문장으로 다시 말씀해 주세요.",
+  nextAction: "자동으로 돌릴 일을 한 문장으로 다시 적어 주세요.",
 });
 
 /**
@@ -177,7 +177,7 @@ export function parseInterviewTurn(text: string | null | undefined, state: Inter
         ok: false,
         code: "INTERVIEW_REPEATED_QUESTIONS",
         reason: "이미 답하신 것만 다시 물으려 했습니다.",
-        nextAction: "다시 시도하거나, 만들고 싶은 것을 조금 더 구체적으로 말씀해 주세요.",
+        nextAction: "다시 시도하거나, 만들 것을 조금 더 구체적으로 적어 주세요.",
       };
     }
     return { ok: true, turn: { kind: "ask", questions } };
@@ -199,7 +199,7 @@ export function parseInterviewTurn(text: string | null | undefined, state: Inter
     ok: false,
     code: "INTERVIEW_BLUEPRINT_INVALID",
     reason: problems.map((p) => p.reason).slice(0, 4).join(" "),
-    nextAction: "만들고 싶은 것을 조금 더 구체적으로 말씀해 주시면 다시 시도합니다.",
+    nextAction: "조금 더 구체적으로 적어 주시면 다시 시도합니다.",
   };
 }
 
