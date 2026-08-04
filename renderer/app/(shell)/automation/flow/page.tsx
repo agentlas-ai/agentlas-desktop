@@ -100,6 +100,8 @@ function AutomationFlowPage() {
   const [inputPrompt, setInputPrompt] = useState<{ label: string; value: string } | null>(null);
   /** 이 그래프가 쓰는 것들을 한 창에서 정리한다(공급자 묶음별). */
   const [connectionsOpen, setConnectionsOpen] = useState(false);
+  /** 켤 수 있는 상태인가. 버튼 이름이 이걸 그대로 말한다. */
+  const [blockedByConnections, setBlockedByConnections] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -204,6 +206,12 @@ function AutomationFlowPage() {
         return;
       }
       setAutomation(found);
+      // 켜기가 막혀 있으면 버튼 이름이 그렇게 말해야 한다.
+      // Zapier가 발행 버튼 라벨 자체를 상태로 바꾼다(Publish / Fix to Publish /
+      // Update to Publish) — 눌러 보고 나서야 아는 것보다 낫다.
+      void api.automations.connectionReport(id)
+        .then((report) => setBlockedByConnections(report?.activation.canActivate === false))
+        .catch(() => setBlockedByConnections(false));
     } catch {
       setError(locale === "en" ? "Automation could not be loaded. Nothing changed." : "자동화를 불러오지 못했습니다. 바뀐 내용은 없습니다.");
     } finally {
@@ -749,8 +757,20 @@ function AutomationFlowPage() {
             <button onClick={() => void runNow()} disabled={running} className="titlebar-nodrag" style={{ ...actionBtn, color: running ? "var(--muted-deep)" : "var(--ink)" }}>
               {running ? t("auto.flow.running") : t("auto.flow.run_now")}
             </button>
-            <button onClick={() => void toggleEnabled()} className="titlebar-nodrag" style={pillBtn(automation.enabled)}>
-              {automation.enabled ? t("auto.action.disable") : t("auto.action.enable")}
+            <button
+              data-testid="toggle-enabled"
+              onClick={() => void toggleEnabled()}
+              className="titlebar-nodrag"
+              style={pillBtn(automation.enabled)}
+              title={!automation.enabled && blockedByConnections
+                ? (locale === "en" ? "Connect what it uses first." : "쓰는 것을 먼저 연결해야 켜집니다.")
+                : undefined}
+            >
+              {automation.enabled
+                ? t("auto.action.disable")
+                : blockedByConnections
+                  ? (locale === "en" ? "Connect to turn on" : "연결해야 켜집니다")
+                  : t("auto.action.enable")}
             </button>
           </>
         )}
