@@ -287,9 +287,10 @@
       "failures": [
         "INTERVIEW_STATE_INVALID",
         "INTERVIEW_MODEL_UNAVAILABLE",
-        "INTERVIEW_BLUEPRINT_INVALID"
+        "INTERVIEW_BLUEPRINT_INVALID",
+        "INTERVIEW_SELF_CORRECTION_EXHAUSTED"
       ],
-      "note": "청사진이 검증을 못 넘으면 모델이 '다 됐다'고 해도 질문으로 되돌린다.",
+      "note": "청사진이 검증을 못 넘으면 모델이 '다 됐다'고 해도 질문으로 되돌린다. 물어서 채울 수 없는 문제(모델이 형식을 틀린 것)는 **모델에게 무엇이 틀렸는지 돌려주고 정해진 횟수만큼 스스로 고치게 한다** — 사람에게 떠넘기지 않는다.",
       "phase": "author"
     },
     {

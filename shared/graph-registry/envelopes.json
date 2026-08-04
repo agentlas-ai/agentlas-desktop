@@ -643,6 +643,11 @@
       "implementedAs": "shared/graph-blueprint.ts + automations:interviewGraph",
       "payload": [
         {
+          "field": "request",
+          "grade": "critical",
+          "note": "사람이 처음 한 말 — 인터뷰 내내 목적의 정본"
+        },
+        {
           "field": "round",
           "grade": "critical"
         },
@@ -651,16 +656,27 @@
           "grade": "critical"
         },
         {
+          "field": "asked",
+          "grade": "critical",
+          "note": "이미 물은 질문 id — 같은 것을 또 묻지 않는다"
+        },
+        {
           "field": "questions",
           "grade": "critical",
           "note": "보기(choices)를 함께 준다 — 닫힌 어휘일 때"
+        },
+        {
+          "field": "attempts",
+          "grade": "critical",
+          "note": "★지난 시도가 **왜** 지어지지 못했는지. 이게 없으면 모델은 같은 실수를 반복하고, 우리는 사람에게 '조금 더 구체적으로 적어 주세요'라고 떠넘긴다 — 무엇이 틀렸는지 아는 쪽은 우리인데."
         }
       ],
       "failures": [
         "INTERVIEW_STATE_INVALID",
         "INTERVIEW_MODEL_UNAVAILABLE",
         "INTERVIEW_BLUEPRINT_INVALID"
-      ]
+      ],
+      "note": "커널은 이미 지난 실패를 다음 실행 지시에 붙인다(C27). 인터뷰 루프도 같은 규율을 쓴다 — 스스로 고칠 기회를 정해진 횟수만큼 주고, 그래도 안 되면 무엇을 시도했는지와 함께 정직하게 멈춘다."
     },
     {
       "id": "graph/1/blueprint",

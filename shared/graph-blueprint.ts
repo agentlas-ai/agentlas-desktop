@@ -104,7 +104,13 @@ export interface BlueprintQuestion {
 
 export type BlueprintTurn =
   | { kind: "ask"; questions: BlueprintQuestion[] }
-  | { kind: "blueprint"; blueprint: GraphBlueprint };
+  | { kind: "blueprint"; blueprint: GraphBlueprint }
+  /**
+   * 모델이 형식을 틀렸다 — 사람이 답을 안 준 게 아니다.
+   * 무엇이 틀렸는지 돌려주고 **스스로 고치게** 한다. 사람에게 "구체적으로 적어 주세요"로
+   * 떠넘기면 막다른 길이 된다: 무엇이 틀렸는지 사람은 모르고, 우리는 안다.
+   */
+  | { kind: "retry"; problems: string[] };
 
 export interface BlueprintProblem {
   /** 이 문제를 풀려면 사람에게 물어야 하는가. */

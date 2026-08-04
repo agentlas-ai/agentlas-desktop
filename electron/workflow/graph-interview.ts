@@ -34,10 +34,27 @@ export interface InterviewState {
   /** 이미 물은 질문 id — 같은 것을 또 묻지 않는다. */
   asked: string[];
   round: number;
+  /**
+   * 지난 시도가 **왜** 지어지지 못했는가.
+   *
+   * ★이게 없으면 모델은 같은 실수를 반복하고, 우리는 사람에게 "조금 더 구체적으로
+   * 적어 주세요"라고 떠넘기게 된다 — 무엇이 틀렸는지 아는 쪽은 우리인데.
+   * 커널은 이미 같은 규율을 쓴다: 지난 실패를 다음 실행 지시에 붙인다(buildStrategyDirective).
+   */
+  attempts?: Array<{ round: number; problems: string[] }>;
 }
 
+/**
+ * 모델이 스스로 고쳐 볼 기회의 상한.
+ *
+ * 무한히 맡기지 않는 이유: 같은 자리에서 계속 막히면 그건 모델이 못 고치는 문제이고,
+ * 계속 부르면 사람은 아무 설명 없이 기다리기만 한다. 상한에 닿으면 **무엇을 시도했는지와
+ * 함께** 멈춘다.
+ */
+export const MAX_SELF_CORRECTIONS = 2;
+
 export function startInterview(request: string): InterviewState {
-  return { request: request.trim(), answers: [], asked: [], round: 0 };
+  return { request: request.trim(), answers: [], asked: [], round: 0, attempts: [] };
 }
 
 const RULES = [
@@ -130,6 +147,18 @@ export function buildInterviewPrompt(state: InterviewState): string {
   if (state.asked.length) {
     lines.push("", `Question ids already asked (do not repeat): ${state.asked.join(", ")}`);
   }
+  // ★지난 시도가 왜 지어지지 못했는지를 **모델 앞에 놓는다**. 커널이 지난 실패를 다음
+  //   실행 지시에 붙이는 것과 같은 규율이다 — 없으면 같은 실수를 그대로 반복한다.
+  const attempts = state.attempts ?? [];
+  if (attempts.length) {
+    lines.push(
+      "",
+      "Your previous blueprint could NOT be built. Fix exactly these problems and return a",
+      "corrected blueprint. Do not repeat the same mistake, and do not ask the person about it —",
+      "these are format problems on your side, not missing information:",
+      ...attempts.flatMap((a) => a.problems.map((problem) => `  · ${problem}`)),
+    );
+  }
   if (state.round >= MAX_INTERVIEW_ROUNDS - 1) {
     lines.push(
       "",
@@ -221,11 +250,12 @@ export function parseInterviewTurn(text: string | null | undefined, state: Inter
     state,
   );
   if (questions.length) return { ok: true, turn: { kind: "ask", questions } };
+  // 물어서 채울 수 없는 문제 — 사람이 답을 안 준 게 아니라 **모델이 형식을 틀린** 것이다.
+  // 그걸 사람에게 "구체적으로 적어 주세요"로 떠넘기면 막다른 길이 된다: 무엇이 틀렸는지
+  // 사람은 모르고, 우리는 안다. 무엇이 틀렸는지 돌려주고 스스로 고치게 한다.
   return {
-    ok: false,
-    code: "INTERVIEW_BLUEPRINT_INVALID",
-    reason: problems.map((p) => p.reason).slice(0, 4).join(" "),
-    nextAction: "조금 더 구체적으로 적어 주시면 다시 시도합니다.",
+    ok: true,
+    turn: { kind: "retry", problems: problems.map((p) => p.reason) },
   };
 }
 

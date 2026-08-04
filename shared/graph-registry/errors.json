@@ -432,8 +432,8 @@
       "severity": "edit",
       "retryable": false,
       "verbatim": true,
-      "status": "implemented",
-      "note": "청사진이 검증을 못 넘으면 모델이 '다 됐다'고 해도 질문으로 되돌린다."
+      "status": "specified",
+      "note": "★2026-08-04 자기 수정 루프를 넣으면서 **쓰이지 않게 됐다**. 물어서 채울 수 있는 문제는 질문으로, 형식 문제는 재시도로 되돌아가므로 이 막다른 길에 도달하지 않는다. 지우지 않고 남겨 둔다 — 옛 기록에 이 코드가 있고, 되살아나면 그건 막다른 길이 돌아왔다는 뜻이다."
     },
     {
       "code": "CREATE_INPUT_INVALID",
@@ -480,6 +480,19 @@
       ],
       "status": "implemented",
       "note": "기다림이 약속한 시간을 넘었다. 타임아웃 문이 이어져 있으면 그리로 가고, 없으면 계속 기다린다."
+    },
+    {
+      "code": "INTERVIEW_SELF_CORRECTION_EXHAUSTED",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "cardKey": "interview_stuck",
+      "nextActions": [
+        "rephrase",
+        "open_canvas"
+      ],
+      "status": "implemented",
+      "note": "정해진 횟수만큼 스스로 고쳐 봤지만 같은 자리에서 막혔다. 무엇을 시도했는지 함께 보여준다 — 사람이 그 다음을 정한다."
     }
   ]
 }

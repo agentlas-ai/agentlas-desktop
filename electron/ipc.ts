@@ -3847,50 +3847,84 @@ export function registerIpcHandlers(): void {
       return { ok: false, code: "INTERVIEW_STATE_INVALID", reason: "만들 내용을 읽지 못했습니다.", nextAction: "무엇을 자동으로 하고 싶은지 한 문장으로 말씀해 주세요." };
     }
     const { callConnectedModel } = require("./system-agents/judgment") as typeof import("./system-agents/judgment");
-    let text: string | null = null;
-    try {
-      text = await callConnectedModel({
-        systemPrompt: "You return only compact JSON. No prose.",
-        input: buildInterviewPrompt(current),
-        timeoutMs: 120_000,
-      });
-    } catch (error) {
+    const { MAX_SELF_CORRECTIONS } = require("./workflow/graph-interview") as typeof import("./workflow/graph-interview");
+
+    /**
+     * 한 턴 안에서 **스스로 고칠 기회**를 정해진 횟수만큼 준다.
+     *
+     * 예전엔 청사진이 검증에 걸리면 "조금 더 구체적으로 말씀해 주시면 다시 시도합니다"로
+     * 끝났다. 그건 막다른 길이다 — 무엇이 틀렸는지 **사람은 모르고 우리는 안다**. 형식이
+     * 틀린 것은 사람이 다시 말한다고 고쳐지지 않는다. 커널이 지난 실패를 다음 실행 지시에
+     * 붙이는 것과 같은 규율로, 무엇이 틀렸는지 모델에게 돌려주고 다시 짓게 한다.
+     *
+     * 무한히 맡기지 않는 이유: 같은 자리에서 계속 막히면 모델이 못 고치는 문제이고,
+     * 계속 부르면 사람은 아무 설명 없이 기다리기만 한다.
+     */
+    let attempt = { ...current, attempts: [...(current.attempts ?? [])] };
+    for (let round = 0; round <= MAX_SELF_CORRECTIONS; round += 1) {
+      let text: string | null = null;
+      try {
+        text = await callConnectedModel({
+          systemPrompt: "You return only compact JSON. No prose.",
+          input: buildInterviewPrompt(attempt),
+          timeoutMs: 120_000,
+        });
+      } catch (error) {
+        return {
+          ok: false,
+          code: "INTERVIEW_MODEL_UNAVAILABLE",
+          reason: `AI를 부르지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+          nextAction: "잠시 뒤 다시 시도해 주세요.",
+        };
+      }
+      if (!text) {
+        return {
+          ok: false,
+          code: "INTERVIEW_MODEL_UNAVAILABLE",
+          reason: "AI가 답하지 못했습니다.",
+          nextAction: "잠시 뒤 다시 시도해 주세요.",
+        };
+      }
+      const parsed = parseInterviewTurn(text, attempt);
+      if (!parsed.ok) return parsed;
+      if (parsed.turn.kind === "ask") {
+        return { ok: true as const, kind: "ask" as const, questions: parsed.turn.questions };
+      }
+      if (parsed.turn.kind === "retry") {
+        attempt = {
+          ...attempt,
+          attempts: [...attempt.attempts, { round: attempt.round, problems: parsed.turn.problems }],
+        };
+        continue;
+      }
+      const built = buildGraphFromBlueprint(parsed.turn.blueprint);
+      if (!built.ok) {
+        // 청사진 검증은 통과했는데 짓는 데서 걸렸다 — 이것도 형식 문제다. 같은 규율.
+        attempt = {
+          ...attempt,
+          attempts: [...attempt.attempts, { round: attempt.round, problems: built.problems.map((p) => p.reason) }],
+        };
+        continue;
+      }
       return {
-        ok: false,
-        code: "INTERVIEW_MODEL_UNAVAILABLE",
-        reason: `AI를 부르지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
-        nextAction: "잠시 뒤 다시 시도해 주세요.",
+        ok: true as const,
+        kind: "blueprint" as const,
+        blueprint: parsed.turn.blueprint,
+        graph: built.graph,
+        scheduleHuman: built.scheduleHuman,
+        triggerType: built.triggerType,
       };
     }
-    if (!text) {
-      return {
-        ok: false,
-        code: "INTERVIEW_MODEL_UNAVAILABLE",
-        reason: "AI가 답하지 못했습니다.",
-        nextAction: "잠시 뒤 다시 시도해 주세요.",
-      };
-    }
-    const parsed = parseInterviewTurn(text, current);
-    if (!parsed.ok) return parsed;
-    if (parsed.turn.kind === "ask") return { ok: true as const, kind: "ask" as const, questions: parsed.turn.questions };
-    const built = buildGraphFromBlueprint(parsed.turn.blueprint);
-    if (!built.ok) {
-      return {
-        ok: false,
-        code: "INTERVIEW_BLUEPRINT_INVALID",
-        reason: built.problems.map((p) => p.reason).slice(0, 4).join(" "),
-        nextAction: "만들고 싶은 것을 조금 더 구체적으로 말씀해 주시면 다시 시도합니다.",
-      };
-    }
+    // 상한에 닿았다. **무엇을 시도했는지와 함께** 멈춘다 — 조용히 포기하지 않는다.
+    const tried = attempt.attempts.flatMap((a) => a.problems);
     return {
-      ok: true as const,
-      kind: "blueprint" as const,
-      blueprint: parsed.turn.blueprint,
-      graph: built.graph,
-      scheduleHuman: built.scheduleHuman,
-      triggerType: built.triggerType,
+      ok: false,
+      code: "INTERVIEW_SELF_CORRECTION_EXHAUSTED",
+      reason: `${MAX_SELF_CORRECTIONS + 1}번 다시 만들어 봤지만 같은 자리에서 막혔습니다: ${[...new Set(tried)].slice(0, 3).join(" / ")}`,
+      nextAction: "만들고 싶은 것을 다른 말로 적어 주시거나, 캔버스에서 직접 만들어 보세요.",
     };
   });
+
 
   // 인터뷰가 끝난 뒤 실제로 만든다. **꺼진 상태로** 들어온다 — 사람이 보고 켜야 돈다.
   ipcMain.handle("automations:createFromBlueprint", (_e, payload: unknown) => {
