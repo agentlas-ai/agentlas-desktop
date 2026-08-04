@@ -1606,6 +1606,74 @@ export function consumeGraphResumeCoordinate(checkpointRunId: string): boolean {
   return result.changes === 1;
 }
 
+// ── 입력 트리거 값 ─────────────────────────────────────────────────────────
+// 입력으로 시작하는 그래프는 사람이 준 값 없이는 의미가 없다. 그 값을 담을 자리가
+// 없던 동안 터미널은 값을 물어보고 버렸고(사용자에겐 전달된 것처럼 보였다),
+// 데스크탑은 아예 묻지 않은 채 빈 값으로 실행했다.
+//
+// 값은 한 번만 쓰인다 — 예약이 여러 번 돌 때 옛 입력이 다시 실행되면
+// 사용자가 요청한 적 없는 실행이 된다. 소비는 조건부 UPDATE로 한쪽만 이긴다.
+
+export const RUN_INPUT_MAX_BYTES = 256 * 1024;
+
+export interface PendingRunInput {
+  id: string;
+  payload: Record<string, unknown>;
+  requestedBy: string;
+  createdAt: string;
+}
+
+/** 실행 요청과 함께 들어온 값을 대기시킨다. 다음 실행 1회가 이 값을 집어간다. */
+export function enqueueRunInput(
+  automationId: string,
+  payload: Record<string, unknown>,
+  requestedBy: string,
+): string {
+  const json = JSON.stringify(payload ?? {});
+  if (Buffer.byteLength(json, "utf8") > RUN_INPUT_MAX_BYTES) {
+    throw new Error("automation_run_input_too_large");
+  }
+  const id = randomUUID();
+  getDb().prepare(
+    `INSERT INTO automation_run_inputs (id, automation_id, payload_json, requested_by, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(id, automationId, json, requestedBy, new Date().toISOString());
+  return id;
+}
+
+/** 대기 중인 입력이 있는가. 화면이 "값 대기 중"이라고 말하려면 필요하다. */
+export function peekRunInput(automationId: string): PendingRunInput | null {
+  const row = getDb().prepare(
+    `SELECT id, payload_json, requested_by, created_at FROM automation_run_inputs
+     WHERE automation_id = ? AND consumed_at IS NULL ORDER BY created_at LIMIT 1`,
+  ).get(automationId) as
+    | { id: string; payload_json: string; requested_by: string; created_at: string }
+    | undefined;
+  if (!row) return null;
+  let payload: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(row.payload_json) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    payload = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  return { id: row.id, payload, requestedBy: row.requested_by, createdAt: row.created_at };
+}
+
+/**
+ * 가장 오래된 미소비 입력을 이 실행에 묶는다. 소비에 실패하면(다른 실행이 먼저 가져감)
+ * null을 돌려준다 — 같은 값으로 두 번 실행하지 않기 위해서다.
+ */
+export function consumeRunInput(automationId: string, runId: string): PendingRunInput | null {
+  const pending = peekRunInput(automationId);
+  if (!pending) return null;
+  const claimed = getDb().prepare(
+    "UPDATE automation_run_inputs SET consumed_at = ?, consumed_run_id = ? WHERE id = ? AND consumed_at IS NULL",
+  ).run(new Date().toISOString(), runId, pending.id);
+  return claimed.changes === 1 ? pending : null;
+}
+
 // ── 실행 저널 ──────────────────────────────────────────────────────────────
 // append-only. 체크포인트(현재 상태 1건)와 달리 순서가 남으므로, "의도는 남았는데
 // 정산이 없다" 같은 부분 실패 신호를 사후에 읽을 수 있다.

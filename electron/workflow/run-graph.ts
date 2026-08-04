@@ -37,6 +37,7 @@ import { listRunEvents, tryRecordFailureEvent, tryRecordRunEvent } from "../stor
 import { awaitAutomationRunnerWithAbortGrace } from "../automation-watchdog";
 import { buildStrategyDirective, collectAutomationFailureContext } from "../automation-strategy";
 import { AUTOMATION_CONTINUITY_OPEN, AUTOMATION_CONTINUITY_CLOSE } from "../automation-continuity";
+import { graphInputRequirement } from "../../shared/graph-trigger-input";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -701,6 +702,139 @@ function buildNodeContinuityPrompt(chatId: string, prompt: string, strategyDirec
  * 위상 정렬 — edges의 source→target DAG를 Kahn 알고리즘으로 정렬. 사이클/고아는 안전하게
  * 뒤에 붙인다(무한 루프 방지). 결정적 순서를 위해 원본 노드 배열 순서를 tie-break로 쓴다.
  */
+// ── 반복(되돌아가는 연결) ──────────────────────────────────────────────────
+// "만들고 → 검토하고 → 부족하면 다시 만든다"는 그래프의 기본 모양이다. 예전 커널은
+// 되돌아가는 연결을 만나면 위상 정렬이 풀리지 않아 **아무 이유도 없이** 실행이 멈췄다
+// (nodeFailures가 비어 있어 화면에는 실패 카드조차 뜨지 않았다).
+//
+// 반복을 지원하되 두 가지는 양보하지 않는다:
+//  · 상한을 선언하지 않은 반복은 실행하지 않는다. 자동화는 사람이 없는 동안 도는 것이라,
+//    멈출 사람이 그 자리에 없다.
+//  · 되돌아가는 연결은 갈림길에서만 나갈 수 있다. 조건 없이 되돌아가는 그래프는
+//    빠져나갈 방법이 정의돼 있지 않다.
+
+export interface GraphLoop {
+  edgeId: string;
+  /** 되돌아갈 지점(반복의 머리). */
+  head: string;
+  /** 되돌리는 지점(반복의 꼬리) — 반드시 갈림길이어야 한다. */
+  tail: string;
+  maxIterations: number;
+  /** 한 바퀴를 돌 때 다시 실행돼야 하는 노드들. */
+  body: string[];
+}
+
+const DEFAULT_MAX_ITERATIONS = 5;
+const HARD_MAX_ITERATIONS = 50;
+
+/** DFS 스택 위의 노드를 가리키는 연결 = 되돌아가는 연결. */
+function findBackEdges(graph: WorkflowGraph): Set<string> {
+  const adj = new Map<string, Array<{ target: string; edgeId: string }>>();
+  for (const node of graph.nodes) adj.set(node.id, []);
+  for (const edge of graph.edges) adj.get(edge.source)?.push({ target: edge.target, edgeId: edge.id });
+  const back = new Set<string>();
+  const state = new Map<string, 0 | 1 | 2>(); // 0 미방문 · 1 스택 위 · 2 완료
+  const visit = (id: string): void => {
+    state.set(id, 1);
+    for (const next of adj.get(id) ?? []) {
+      const seen = state.get(next.target) ?? 0;
+      if (seen === 1) back.add(next.edgeId);
+      else if (seen === 0) visit(next.target);
+    }
+    state.set(id, 2);
+  };
+  const hasIncoming = new Set(graph.edges.map((e) => e.target));
+  for (const node of graph.nodes) if (!hasIncoming.has(node.id) && !state.get(node.id)) visit(node.id);
+  for (const node of graph.nodes) if (!state.get(node.id)) visit(node.id);
+  return back;
+}
+
+/** head에서 닿을 수 있고 동시에 tail에 닿을 수 있는 노드 = 이 반복의 몸통. */
+function loopBody(graph: WorkflowGraph, head: string, tail: string, backEdgeIds: Set<string>): string[] {
+  const forward = new Map<string, string[]>();
+  const reverse = new Map<string, string[]>();
+  for (const node of graph.nodes) { forward.set(node.id, []); reverse.set(node.id, []); }
+  for (const edge of graph.edges) {
+    if (backEdgeIds.has(edge.id)) continue;
+    forward.get(edge.source)?.push(edge.target);
+    reverse.get(edge.target)?.push(edge.source);
+  }
+  const reach = (start: string, map: Map<string, string[]>): Set<string> => {
+    const out = new Set<string>([start]);
+    const stack = [start];
+    while (stack.length) {
+      const id = stack.pop()!;
+      for (const next of map.get(id) ?? []) if (!out.has(next)) { out.add(next); stack.push(next); }
+    }
+    return out;
+  };
+  const fromHead = reach(head, forward);
+  const toTail = reach(tail, reverse);
+  return graph.nodes.map((n) => n.id).filter((id) => fromHead.has(id) && toTail.has(id));
+}
+
+export type GraphLoopPlan =
+  | { ok: true; loops: GraphLoop[] }
+  | { ok: false; nodeId: string; failure: GraphNodeFailure };
+
+/** 이 그래프의 반복을 읽어 낸다. 안전하게 돌릴 수 없는 반복은 실행 전에 막는다. */
+export function planGraphLoops(graph: WorkflowGraph): GraphLoopPlan {
+  const backEdgeIds = findBackEdges(graph);
+  const loops: GraphLoop[] = [];
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  for (const edge of graph.edges) {
+    if (!backEdgeIds.has(edge.id)) continue;
+    const tailNode = byId.get(edge.source);
+    const headNode = byId.get(edge.target);
+    if (!tailNode || !headNode) continue;
+    const label = tailNode.label || tailNode.id;
+    if (tailNode.type !== "condition") {
+      return {
+        ok: false,
+        nodeId: tailNode.id,
+        failure: {
+          code: "LOOP_WITHOUT_EXIT",
+          reason: `"${label}"에서 "${headNode.label || headNode.id}"(으)로 되돌아가는 반복에 빠져나갈 갈림길이 없습니다.`,
+          nextAction: "되돌아가기 전에 갈림길 단계를 넣고, 참·거짓 중 한쪽만 되돌아가게 이으세요.",
+        },
+      };
+    }
+    const declared = typeof edge.maxIterations === "number"
+      ? edge.maxIterations
+      : (typeof headNode.config?.maxIterations === "number" ? headNode.config.maxIterations : null);
+    if (declared === null) {
+      return {
+        ok: false,
+        nodeId: tailNode.id,
+        failure: {
+          code: "LOOP_BOUND_UNDECLARED",
+          reason: `"${label}"에서 되돌아가는 반복에 몇 바퀴까지 돌지가 정해져 있지 않습니다. 자동화는 사람이 보지 않는 동안 돌기 때문에, 멈출 지점이 없는 반복은 실행하지 않습니다.`,
+          nextAction: `되돌아가는 연결을 눌러 반복 횟수를 정하세요(예: ${DEFAULT_MAX_ITERATIONS}회).`,
+        },
+      };
+    }
+    if (!Number.isFinite(declared) || declared < 1 || declared > HARD_MAX_ITERATIONS) {
+      return {
+        ok: false,
+        nodeId: tailNode.id,
+        failure: {
+          code: "LOOP_BOUND_INVALID",
+          reason: `"${label}"의 반복 횟수 ${declared}은(는) 실행할 수 있는 범위(1~${HARD_MAX_ITERATIONS})를 벗어납니다.`,
+          nextAction: `반복 횟수를 1~${HARD_MAX_ITERATIONS} 사이로 고치세요.`,
+        },
+      };
+    }
+    loops.push({
+      edgeId: edge.id,
+      head: edge.target,
+      tail: edge.source,
+      maxIterations: Math.floor(declared),
+      body: loopBody(graph, edge.target, edge.source, backEdgeIds),
+    });
+  }
+  return { ok: true, loops };
+}
+
 function topoSort(graph: WorkflowGraph): WorkflowNode[] {
   const nodes = graph.nodes;
   const indexOf = new Map<string, number>(nodes.map((n, i) => [n.id, i]));
@@ -1085,6 +1219,12 @@ export async function runGraph(
   };
 
   const ordered = topoSort(graph);
+  // 반복 계획을 실행 전에 세운다. 안전하게 돌릴 수 없는 반복은 한 노드도 실행하기 전에 막는다
+  // — 반쯤 돌린 뒤 막으면 이미 나간 작업을 되돌릴 수 없다.
+  const loopPlan = planGraphLoops(graph);
+  const loops = loopPlan.ok ? loopPlan.loops : [];
+  const backEdgeIds = new Set(loops.map((loop) => loop.edgeId));
+  const loopIterations = new Map<string, number>(loops.map((loop) => [loop.edgeId, 0] as const));
   let ok = true;
   let error: string | undefined;
   /** 노드 id → 실패 3요소(코드·사유 원문·지금 누를 행동). 실패 카드의 정본. */
@@ -1317,7 +1457,9 @@ export async function runGraph(
    * (살아있는 부모가 하나라도 있으면 실행 — join 보호).
    */
   const shouldSkip = (nodeId: string): boolean => {
-    const ins = inbound.get(nodeId) ?? [];
+    // 되돌아가는 연결은 "아직 안 온 미래"다. 그걸 기다리거나 근거로 삼으면
+    // 반복의 머리는 영원히 준비되지 않는다.
+    const ins = (inbound.get(nodeId) ?? []).filter((i) => !backEdgeIds.has(i.edgeId));
     if (ins.length === 0) return false;
     return ins.every((i) => blockedEdges.has(i.edgeId) || skipped.has(i.source));
   };
@@ -1336,7 +1478,27 @@ export async function runGraph(
   };
   // 노드가 실행 가능한가? 모든 inbound 엣지가 blocked이거나 그 source가 settled여야(상류 완료).
   const inboundResolved = (nodeId: string): boolean =>
-    (inbound.get(nodeId) ?? []).every((i) => blockedEdges.has(i.edgeId) || settled(i.source));
+    (inbound.get(nodeId) ?? [])
+      .filter((i) => !backEdgeIds.has(i.edgeId))
+      .every((i) => blockedEdges.has(i.edgeId) || settled(i.source));
+
+  /**
+   * 한 바퀴를 더 돈다 — 반복 몸통을 처음 상태로 되돌린다.
+   * 되돌리지 않으면 이미 끝난 노드로 취급돼 두 번째 바퀴가 실행되지 않는다.
+   */
+  const rewindLoop = (loop: GraphLoop): void => {
+    for (const nodeId of loop.body) {
+      completed.delete(nodeId);
+      skipped.delete(nodeId);
+      status.set(nodeId, "pending");
+      // 캔버스도 다시 "대기"로 되돌려야 두 번째 바퀴가 도는 것이 보인다.
+      checkpointNodeState(nodeId, "pending");
+    }
+    // 지난 바퀴에서 막아 둔 분기도 함께 푼다 — 안 그러면 이번 바퀴는 다른 길로 간다.
+    for (const edge of graph.edges) {
+      if (loop.body.includes(edge.source) && !backEdgeIds.has(edge.id)) blockedEdges.delete(edge.id);
+    }
+  };
 
   const beginNode = (node: WorkflowNode, resolvedPrompt?: string): void => {
     checkpoint!.inFlightNodeIds = [...new Set([...checkpoint!.inFlightNodeIds, node.id])].sort();
@@ -1514,6 +1676,34 @@ export async function runGraph(
           });
           return;
         }
+        // 이번 판정이 되돌아가는 쪽이면 한 바퀴를 더 돈다. 상한에 닿으면 돌지 않고
+        // 그 사실을 말한다 — 조용히 멈추면 사용자는 왜 결과가 없는지 알 수 없다.
+        const takenBackEdge = outgoing.find((edge) => edge.handle === take && backEdgeIds.has(edge.edgeId));
+        if (takenBackEdge) {
+          const loop = loops.find((candidate) => candidate.edgeId === takenBackEdge.edgeId)!;
+          const done = loopIterations.get(loop.edgeId) ?? 0;
+          if (done >= loop.maxIterations) {
+            failGraphNode(node, {
+              code: "LOOP_LIMIT_REACHED",
+              reason: `"${label}"이 ${loop.maxIterations}바퀴를 다 돌 때까지 빠져나가는 조건을 만족하지 못했습니다.`,
+              nextAction: "반복 횟수를 늘리거나, 빠져나가는 조건을 지금 결과에 맞게 고친 뒤 다시 실행하세요.",
+            });
+            return;
+          }
+          loopIterations.set(loop.edgeId, done + 1);
+          journal("node_routed", node.id, {
+            loopEdgeId: loop.edgeId,
+            iteration: done + 1,
+            maxIterations: loop.maxIterations,
+          });
+          for (const edge of outgoing) {
+            if (edge.handle === drop) blockedEdges.add(edge.edgeId);
+          }
+          completeNode(node.id);
+          status.set(node.id, "done");
+          rewindLoop(loop);
+          return;
+        }
         for (const edge of outgoing) {
           if (edge.handle === drop) blockedEdges.add(edge.edgeId);
         }
@@ -1577,6 +1767,27 @@ export async function runGraph(
         const rawPrompt = str(node.config, "prompt") ?? str(node.config, "text") ?? automation.promptTemplate;
         const substituted = substitute(rawPrompt, vars);
         const prompt = substituted.text;
+        // 참조한 값이 없으면 실행하지 않는다. 예전에는 프롬프트가 **통째로** 비었을 때만
+        // 막았다. 그래서 "'{{topic}}' 주제로 계획을 세워줘"처럼 나머지 문장이 남아 있으면
+        // 빈 구멍인 채로 실행돼, 주제 없이 지어낸 결과가 정상 완료로 기록됐다.
+        // 값이 없는 것과 값이 비어 있는 것은 다르며, 전자는 사람이 채워야 하는 상태다.
+        if (substituted.missing.length > 0 && prompt.trim()) {
+          const names = substituted.missing.join(", ");
+          // "앞 단계가 안 만들어 줬다"와 "사람이 넣어야 하는데 안 넣었다"는 고치는 방법이
+          // 완전히 다르다. 그래프가 밖에서 받아야 하는 값이면 그렇게 말해야 한다.
+          const requirement = graphInputRequirement(graph);
+          const fromTrigger = !!requirement && substituted.missing.includes(requirement.varName);
+          failGraphNode(node, {
+            code: "NODE_INPUT_MISSING",
+            reason: fromTrigger
+              ? `이 그래프는 시작할 때 "${names}" 값을 받아야 하는데, 값 없이 실행됐습니다.`
+              : `"${names}" 값을 앞 단계가 만들어 주지 않아 이 단계를 실행하지 않았습니다.`,
+            nextAction: fromTrigger
+              ? "‘지금 실행’을 눌러 값을 입력하거나, 터미널에서 agentlas graph run \"<이름>\" 으로 값을 넣어 실행하세요."
+              : "앞 단계가 이 값을 만들어 내는지 확인하고, 조건 분기로 건너뛰었다면 그 분기를 점검하세요.",
+          });
+          return;
+        }
         if (!prompt.trim()) {
           // 예전엔 무조건 "done"이었다. 프롬프트가 통째로 비었는데 성공 모양의 no-op으로 기록돼,
           // 앞 단계가 산출을 못 낸 사실이 실행 결과 어디에도 남지 않았다. 원인을 구분해 보고한다:
@@ -1855,6 +2066,18 @@ export async function runGraph(
     }
   };
 
+  // 안전하게 돌릴 수 없는 반복은 한 노드도 실행하기 전에 막는다.
+  if (!loopPlan.ok) {
+    const target = graph.nodes.find((n) => n.id === loopPlan.nodeId);
+    if (target) {
+      beginNode(target);
+      failGraphNode(target, loopPlan.failure);
+    } else {
+      ok = false;
+      error = loopPlan.failure.reason;
+    }
+  }
+
   const concurrency = Math.max(1, Math.floor(getAgentConcurrency()));
   for (;;) {
     if (runSignal.aborted) {
@@ -1896,11 +2119,20 @@ export async function runGraph(
       const stillPending = ordered.some((n) => status.get(n.id) === "pending");
       if (!stillPending) break; // 정상 수렴
       // pending인데 실행도 준비도 안 됨(사이클 등) → 실패 처리하고 종료(무한루프 방지).
-      for (const n of ordered) {
-        if (status.get(n.id) === "pending") {
-          status.set(n.id, "failed");
-          failNode(n.id, false);
-        }
+      // 예전에는 여기서 상태만 failed로 바꾸고 끝냈다. 실패 카드가 하나도 안 떠서
+      // 화면에는 "실패"만 뜨고 왜 멈췄는지도, 무엇을 고쳐야 하는지도 없었다.
+      const stuck = ordered.filter((n) => status.get(n.id) === "pending");
+      for (const n of stuck) {
+        status.set(n.id, "failed");
+        failNode(n.id, false);
+        nodeFailures[n.id] ??= {
+          code: "NODE_NEVER_REACHED",
+          reason: `"${n.label || n.id}" 앞의 연결이 끝내 정해지지 않아 이 단계는 시작하지 못했습니다.`
+            + (backEdgeIds.size > 0
+              ? " 되돌아가는 연결이 있는 그래프입니다 — 반복이 빠져나가지 못했을 수 있습니다."
+              : " 서로 맞물려 기다리는 연결(순환)이 있는지 확인하세요."),
+          nextAction: "캔버스에서 이 단계로 들어오는 연결을 확인하고, 되돌아가는 연결이 있다면 갈림길과 반복 횟수를 점검하세요.",
+        };
       }
       ok = false;
       error = error ?? "graph did not converge (cycle or unreachable node)";

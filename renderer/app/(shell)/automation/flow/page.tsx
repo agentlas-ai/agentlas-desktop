@@ -95,6 +95,8 @@ function AutomationFlowPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [running, setRunning] = useState(false);
+  /** 시작 값을 받아야 하는 그래프에서 사람에게 값을 묻는 상태. */
+  const [inputPrompt, setInputPrompt] = useState<{ label: string; value: string } | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -102,7 +104,11 @@ function AutomationFlowPage() {
   const [saving, setSaving] = useState(false);
   // 좌(세션 대화)·우(노드 검사 + 실행 기록) 패널 접기. 캔버스가 좁은 화면에서 가장 먼저
   // 희생되던 문제를 사용자가 직접 해소할 수 있게 한다. 선택은 로컬에 남는다.
-  const [leftOpen, setLeftOpen] = useState(true);
+  // 세션 대화는 접힌 채로 시작한다. 1440px 창에서 좌 300 + 우 320을 늘 펴 두면
+  // 이 화면의 주인공인 캔버스가 절반도 못 갖고, 그래프가 축소돼 노드 글자가 작아진다.
+  // 대화는 할 말이 생겼을 때 여는 것이고, 접기 탭은 그대로 보인다.
+  // 사용자가 한 번이라도 편 뒤에는 그 선택이 저장돼 유지된다.
+  const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(true);
   const seq = useRef(0);
 
@@ -132,7 +138,7 @@ function AutomationFlowPage() {
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
       try {
-        fitView({ padding: 0.3, maxZoom: 1 });
+        fitView({ padding: 0.16, maxZoom: 1 });
       } catch {
         // 캔버스가 아직 준비되지 않았으면 다음 상호작용에서 맞춰진다.
       }
@@ -589,9 +595,19 @@ function AutomationFlowPage() {
     }
   }
 
-  async function runNow(dryRun = false) {
+  async function runNow(dryRun = false, inputValue?: string) {
     const api = ipc();
     if (!api || !automation) return;
+    // 시작 값을 받아야 하는 그래프는 값을 받고 나서 실행한다. 예전에는 그냥 시작해서
+    // 빈 값으로 돌았고, 사용자는 결과를 열어보고서야 값이 빠진 걸 알았다.
+    if (!dryRun && inputValue === undefined) {
+      const requirement = await api.automations.inputRequirement(automation.id).catch(() => null);
+      if (requirement?.required) {
+        setInputPrompt({ label: requirement.label, value: "" });
+        setMessage("");
+        return;
+      }
+    }
     setRunning(true);
     setMessage(
       dryRun
@@ -601,7 +617,18 @@ function AutomationFlowPage() {
         : (locale === "en" ? "Starting background run..." : "백그라운드 실행을 시작하는 중입니다..."),
     );
     try {
-      await api.automations.runNow(automation.id, dryRun ? { dryRun: true } : undefined);
+      const requirement = inputValue !== undefined
+        ? await api.automations.inputRequirement(automation.id).catch(() => null)
+        : null;
+      await api.automations.runNow(
+        automation.id,
+        dryRun
+          ? { dryRun: true }
+          : (requirement?.required && inputValue !== undefined
+            ? { input: { [requirement.varName]: inputValue } }
+            : undefined),
+      );
+      setInputPrompt(null);
       setMessage(
         dryRun
           ? (locale === "en"
@@ -705,15 +732,22 @@ function AutomationFlowPage() {
         )}
       </header>
 
+      {/* 알림·제안·결정 카드는 캔버스 **위에 뜬다**. 예전에는 캔버스 위쪽에 차곡차곡 쌓여서,
+          카드가 하나 늘 때마다 그래프가 아래로 밀리고 좁아졌다 — 화면의 주인공이
+          부수 메시지에 밀려 가장 작은 영역을 갖는 상태였다. */}
+      <div className="automation-flow-overlay-anchor">
+      <div className="automation-flow-overlay">
+
       {(message || (editing && dirty)) ? (
         <div
           className="titlebar-nodrag"
           style={{
-            margin: "12px 32px 0",
+            order: 5,
             padding: "8px 12px",
             borderRadius: "var(--radius-md)",
             border: "1px solid var(--accent-soft)",
-            background: "var(--fill-1)",
+            // 캔버스 위에 떠 있는 카드라 반투명이면 아래 글자가 비쳐 읽히지 않는다.
+            background: "var(--paper)",
             color: "var(--ink-soft)",
             fontSize: 12,
           }}
@@ -726,7 +760,7 @@ function AutomationFlowPage() {
       {!editing ? (
         <div
           className="titlebar-nodrag"
-          style={{ margin: "12px 32px 0", display: "grid", gap: 8 }}
+          style={{ display: "grid", gap: 8, order: 4 }}
         >
           <div style={{ display: "flex", gap: 8 }}>
             <input
@@ -813,6 +847,52 @@ function AutomationFlowPage() {
         </div>
       ) : null}
 
+      {/* 시작 값을 받아야 하는 그래프. 값을 받고 나서 실행한다 —
+          묻지 않고 시작하면 빈 값으로 도는 것을 사용자가 결과에서야 알게 된다. */}
+      {inputPrompt ? (
+        <div
+          data-testid="graph-input-prompt"
+          style={{
+            order: 1,
+            padding: "12px 14px", borderRadius: 12,
+            border: "1px solid var(--line)", background: "var(--paper)",
+            display: "flex", flexDirection: "column", gap: 8,
+          }}
+        >
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink)" }}>{inputPrompt.label}</div>
+          <input
+            data-testid="graph-input-value"
+            autoFocus
+            value={inputPrompt.value}
+            placeholder={locale === "en" ? "Type the value this run starts from" : "이번 실행이 시작할 값을 입력하세요"}
+            onChange={(e) => setInputPrompt({ ...inputPrompt, value: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && inputPrompt.value.trim()) void runNow(false, inputPrompt.value.trim());
+              if (e.key === "Escape") setInputPrompt(null);
+            }}
+            className="titlebar-nodrag"
+            style={{
+              padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)",
+              background: "var(--paper-2)", color: "var(--ink)", fontSize: 13, outline: "none",
+            }}
+          />
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              data-testid="graph-input-start"
+              className="titlebar-nodrag"
+              disabled={running || !inputPrompt.value.trim()}
+              onClick={() => void runNow(false, inputPrompt.value.trim())}
+              style={{ ...actionBtn, opacity: inputPrompt.value.trim() ? 1 : 0.5 }}
+            >
+              {locale === "en" ? "Start with this" : "이 값으로 실행"}
+            </button>
+            <button className="titlebar-nodrag" onClick={() => setInputPrompt(null)} style={pillBtn(false)}>
+              {locale === "en" ? "Cancel" : "취소"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {/* 멈춘 이유와 지금 누를 행동. 승인 대기는 버튼까지 함께 준다 —
           사유만 보여주고 무엇을 하라는 말이 없는 실패 표면은 결함이다. */}
       {Object.entries(nodeFailures).map(([failedNodeId, failure]) => {
@@ -824,7 +904,7 @@ function AutomationFlowPage() {
             className="titlebar-nodrag"
             data-testid={`node-failure-${failedNodeId}`}
             style={{
-              margin: "12px 32px 0",
+              order: 2,
               padding: "12px 14px",
               borderRadius: "var(--radius-md)",
               border: `1px solid ${awaitingApproval ? "var(--accent-soft)" : "var(--paper-edge)"}`,
@@ -858,9 +938,19 @@ function AutomationFlowPage() {
                 </button>
               </div>
             ) : null}
-            <div style={{ fontSize: 10, color: "var(--muted-deep)", fontFamily: "var(--font-mono)" }}>
-              {failure.code}
-            </div>
+            {/* 기계 코드는 사용자가 읽을 문장이 아니다. 지원에 붙여 넣을 때만 필요하므로
+                기본은 접어 두고, 사유·행동이 카드의 주인공이 되게 한다. */}
+            <details style={{ marginTop: 2 }}>
+              <summary
+                className="titlebar-nodrag"
+                style={{ fontSize: 11, color: "var(--muted-deep)", cursor: "pointer", listStyle: "none" }}
+              >
+                {locale === "en" ? "Technical detail" : "기술 정보"}
+              </summary>
+              <div style={{ fontSize: 10, color: "var(--muted-deep)", fontFamily: "var(--font-mono)", marginTop: 4 }}>
+                {failure.code}
+              </div>
+            </details>
           </div>
         );
       })}
@@ -869,7 +959,6 @@ function AutomationFlowPage() {
         <div
           className="titlebar-nodrag"
           style={{
-            margin: "12px 32px 0",
             padding: "10px 12px",
             borderRadius: "var(--radius-md)",
             border: `1px solid ${errorCount > 0 ? "var(--danger, #d64545)" : "var(--accent-soft)"}`,
@@ -891,6 +980,9 @@ function AutomationFlowPage() {
           </ul>
         </div>
       ) : null}
+
+      </div>
+      </div>
 
       <div className="automation-flow-workspace">
         {leftOpen ? (
@@ -931,7 +1023,7 @@ function AutomationFlowPage() {
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             fitView
-            fitViewOptions={{ padding: 0.3, maxZoom: 1 }}
+            fitViewOptions={{ padding: 0.16, maxZoom: 1 }}
             minZoom={0.3}
             maxZoom={1.6}
             proOptions={{ hideAttribution: true }}

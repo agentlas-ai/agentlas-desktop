@@ -1589,6 +1589,12 @@ export interface WorkflowEdge {
   target: string;
   /** condition 노드의 분기 핸들: "true" | "false" | 변수명 라벨. */
   sourceHandle?: string;
+  /**
+   * 앞 단계로 되돌아가는 연결(반복)에서 **몇 바퀴까지 돌 것인가**.
+   * 자동화는 사람이 보지 않는 동안 도는 것이므로 상한 없는 반복은 실행하지 않는다
+   * — 토큰과 시간이 끝없이 나가고, 멈출 사람이 그 자리에 없다.
+   */
+  maxIterations?: number;
 }
 
 export interface WorkflowGraph {
@@ -6111,7 +6117,9 @@ export interface AgentlasIpc {
     update: (id: string, patch: AutomationUpdatePatch) => Promise<Automation>;
     updateGraph: (id: string, graph: WorkflowGraph | null) => Promise<Automation>;
     /** opts.dryRun: 시뮬레이션 실행 — 외부 변경을 막고 무엇이 막혔는지 남긴다. */
-    runNow: (id: string, opts?: { dryRun?: boolean }) => Promise<void>;
+    runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) => Promise<void>;
+    /** 이 그래프가 시작할 때 사람에게 받아야 하는 값(없으면 null). */
+    inputRequirement: (id: string) => Promise<{ required: boolean; varName: string; label: string } | null>;
     /**
      * 사용자의 한 문장을 그래프 변경 제안으로 바꾼다. **적용하지 않는다** —
      * 무엇이 바뀌는지 보여주고, 적용은 applyGraphPatch로만 한다.

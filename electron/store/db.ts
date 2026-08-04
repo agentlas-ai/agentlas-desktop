@@ -16,7 +16,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 87;
+const SCHEMA_VERSION = 88;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -3865,6 +3865,27 @@ export function initStore(options: StoreInitOptions = {}): void {
   `);
   _db.exec(
     "CREATE INDEX IF NOT EXISTS idx_graph_run_journal_run ON graph_run_journal(run_id, seq)",
+  );
+
+  // v88: 입력 트리거 그래프가 사람에게 받은 값이 앉는 자리.
+  // 이전에는 이 자리가 없어서, 터미널이 값을 물어보고도 버렸고(사용자에겐 전달된 것처럼 보였다)
+  // 데스크탑 "지금 실행"은 아예 묻지 않았다. 그러면 {{topic}} 같은 구멍이 빈 문자열로 메꿔진 채
+  // 실행돼, 주제 없이 지어낸 결과가 정상 완료로 기록된다.
+  // 한 번만 쓰이도록 소비 표식을 조건부 UPDATE로 건다(재개 좌표와 같은 규율).
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS automation_run_inputs (
+      id            TEXT PRIMARY KEY,
+      automation_id TEXT NOT NULL,
+      payload_json  TEXT NOT NULL,
+      requested_by  TEXT NOT NULL,
+      created_at    TEXT NOT NULL,
+      consumed_at   TEXT,
+      consumed_run_id TEXT
+    )
+  `);
+  _db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_automation_run_inputs_pending "
+    + "ON automation_run_inputs(automation_id, consumed_at, created_at)",
   );
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);

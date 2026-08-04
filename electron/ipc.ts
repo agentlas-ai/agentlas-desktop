@@ -511,7 +511,9 @@ import {
   updateAutomationGraph,
   listRunHistory,
   getLatestGraphRun,
+  enqueueRunInput,
 } from "./store/automations";
+import { graphInputRequirement } from "../shared/graph-trigger-input";
 import {
   getAgentSurface,
   listAgentSurfaceEvents,
@@ -3832,9 +3834,23 @@ export function registerIpcHandlers(): void {
     updateAutomationGraph(id, decision.next);
     return { ok: true as const };
   });
-  ipcMain.handle("automations:runNow", async (_e, id: string, opts?: { dryRun?: boolean }) => {
+  ipcMain.handle("automations:runNow", async (
+    _e,
+    id: string,
+    opts?: { dryRun?: boolean; input?: Record<string, unknown> },
+  ) => {
     const automation = getAutomation(id);
     if (!automation) throw new Error(`Automation not found: ${id}`);
+    // 시작 입력이 필요한 그래프인데 값이 없으면 실행하지 않는다. 예전에는 그냥 시작해서
+    // 빈 값으로 돌았고, 사용자는 결과를 보고서야 값이 빠진 걸 알았다.
+    const requirement = graphInputRequirement(automation.graph);
+    if (requirement && opts?.dryRun !== true) {
+      const value = opts?.input?.[requirement.varName];
+      if (typeof value !== "string" || !value.trim()) {
+        throw new Error("automation_input_required");
+      }
+      enqueueRunInput(id, { [requirement.varName]: value.trim() }, "desktop");
+    }
     // 실행은 fire-and-forget이라 시작 이후의 실패는 렌더러에 도달하지 않는다. 시작조차
     // 할 수 없는 조건은 여기서 먼저 걸러 즉시 알린다 — 그러지 않으면 버튼을 눌러도
     // 아무 일도 일어나지 않는 것처럼 보인다(미확정 부작용이 있으면 runGraph가 즉시 throw).
@@ -3846,6 +3862,11 @@ export function registerIpcHandlers(): void {
     void runAutomationNow(id, dryRun ? { dryRun: true } : undefined).catch((err) => {
       console.error(`[automation] run-now failed (${id}):`, err);
     });
+  });
+  ipcMain.handle("automations:inputRequirement", (_e, id: string) => {
+    const automation = getAutomation(id);
+    if (!automation) return null;
+    return graphInputRequirement(automation.graph);
   });
   ipcMain.handle("automations:latestRun", (_e, id: string) => getLatestGraphRun(id));
   // 승인은 사람의 결정이라 판정 모델 가용성과 무관하게 동작해야 한다. 결정은 가장 최근

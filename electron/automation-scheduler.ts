@@ -20,6 +20,7 @@ import {
   pinAutomationRuntimeIfUnset,
   getAutomationExecutionContractState,
   pinLegacyAutomationHubVersions,
+  consumeRunInput,
 } from "./store/automations";
 import { checkComputerUsePermissions } from "./mac-permissions";
 import { appendChatMessage, listChatMessages } from "./store/chats";
@@ -587,6 +588,18 @@ async function runOne(
       const runId = `run-${a.id}-${Date.now()}`;
       currentRunId = runId;
       opts?.triggerDelivery?.onRunBound(runId);
+      // 사람이 대기시켜 둔 입력을 이 실행에 묶는다. 소비는 한 번만 성공하므로
+      // 같은 값으로 두 번 실행되지 않는다. 이벤트 트리거가 준 값이 있으면 그 위에 얹는다
+      // — 사람이 방금 준 값이 자동 수집된 값보다 뒤에 오는 것이 사용자의 기대다.
+      let graphInitialVars = opts?.triggerContext;
+      if (!opts?.dryRun) {
+        try {
+          const pending = consumeRunInput(a.id, runId);
+          if (pending) graphInitialVars = { ...(graphInitialVars ?? {}), ...pending.payload };
+        } catch (error) {
+          console.error("[automation] pending run input could not be bound:", error);
+        }
+      }
       // 무활동 워치독 — 그래프 경로도 이벤트가 끊기면 행으로 판정한다(노드 자체 타임아웃
       // 1800s보다 훨씬 먼저 사용자에게 실패 피드백이 가도록).
       const graphWatchdog = createAutomationWatchdogState();
@@ -622,7 +635,7 @@ async function runOne(
             ...(opts?.dryRun ? { dryRun: true } : {}),
           runId,
           occurrenceId: opts?.triggerDelivery?.occurrenceId,
-          initialVars: opts?.triggerContext,
+          initialVars: graphInitialVars,
           sink: (ev) => {
               // A cancellation-ignoring runtime may emit after the scheduler's finite abort
               // boundary. Do not revive watchdog/live state after this run has been finalized.

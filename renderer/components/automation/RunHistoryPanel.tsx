@@ -139,7 +139,13 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     }) ?? null,
     [runs, lastOkAt],
   );
-  const needsHelp = Boolean(reconciliation || regularAttentions.length > 0 || latest?.status === "error" || blockingRun);
+  // 캔버스가 이미 "어느 단계에서, 왜, 무엇을 누르면 되는지"를 띄우고 있으면 이 패널은
+  // 같은 실행을 다른 말로 또 설명하지 않는다. 예전에는 한 화면에서 캔버스는
+  // "확인이 필요합니다 — 아직 실행하지 않았습니다"라고 하고, 이 패널은
+  // "끝까지 완료되지 않았어요"라고 해서, 한 상황에 설명 두 개와 버튼 네 개가 동시에 떴다.
+  const canvasOwnsDecision = Object.keys(latest?.nodeFailures ?? {}).length > 0;
+  const needsHelp = !canvasOwnsDecision
+    && Boolean(reconciliation || regularAttentions.length > 0 || latest?.status === "error" || blockingRun);
   // 기록 원문(판정 코드 접두사 제거). 평이한 설명 아래 "자세히"로만 노출한다.
   // 미확정 부작용이 남아 있으면 백엔드가 재실행을 즉시 거부한다(중복 게시 방지).
   // 눌리는 버튼을 두면 "눌러도 아무 일이 없다"가 된다.
