@@ -3695,6 +3695,29 @@ export function registerIpcHandlers(): void {
     },
   );
   ipcMain.handle("automations:toggle", async (_e, id: string, enabled: boolean) => {
+    // ★켜기 게이트. 저장은 언제나 허용하되, **연결이 빠진 채로는 켜지 않는다.**
+    // 업계 합의(create-then-gate): Zapier "you will not be able to turn it on",
+    // n8n "Please resolve outstanding issues before you activate it",
+    // Power Automate `ConnectionAuthorizationFailed`.
+    // 이 검사가 없으면 사용자는 아무것도 모른 채 켜고 새벽에 조용히 죽는다(실사용 실측).
+    if (enabled) {
+      const automation = getAutomation(id);
+      if (automation?.graph) {
+        const { reportGraphConnections } = require("./workflow/tool-inventory") as typeof import("./workflow/tool-inventory");
+        const report = await reportGraphConnections(
+          automation.graph,
+          currentUiLocale() === "en" ? "en" : "ko",
+        );
+        if (!report.activation.canActivate) {
+          const error = new Error(report.activation.reason) as Error & {
+            code?: string; nextAction?: string;
+          };
+          error.code = "AUTOMATION_NOT_CONNECTED";
+          error.nextAction = report.activation.nextAction;
+          throw error;
+        }
+      }
+    }
     const next = toggleAutomation(id, enabled);
     await resyncTriggers();
     return next;
@@ -3945,6 +3968,16 @@ export function registerIpcHandlers(): void {
       console.error(`[automation] run-now failed (${id}):`, err);
     });
   });
+  // 이 그래프가 무엇에 연결돼야 하는가 — **공급자 묶음으로** 답한다.
+  // 조사 결과 이 묶기를 하는 제품이 없다(Power Automate는 커넥터마다 새 탭→닫기→Refresh→
+  // 재선택 4스텝 왕복, 3개면 12스텝). 구글 캘린더·시트·지메일은 계정 하나로 함께 열린다.
+  ipcMain.handle("automations:connectionReport", async (_e, id: string) => {
+    const automation = getAutomation(id);
+    if (!automation) return null;
+    const { reportGraphConnections } = require("./workflow/tool-inventory") as typeof import("./workflow/tool-inventory");
+    return reportGraphConnections(automation.graph, currentUiLocale() === "en" ? "en" : "ko");
+  });
+
   ipcMain.handle("automations:inputRequirement", (_e, id: string) => {
     const automation = getAutomation(id);
     if (!automation) return null;

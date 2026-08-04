@@ -1571,6 +1571,7 @@ export type WorkflowNodeType =
   | "tool" // MCP catalog id / 커스텀 → 인접 agent 런타임 MCP 설정에 컴파일
   | "action" // surface action.type / appFactory:* / toolFactory:* / hep-call
   | "condition" // 이전 출력 분기
+  | "eval" // 만든 것을 **다른 노드가** 선언된 기준으로 판정 → pass/fail + 사유
   | "transform" // 노드 간 변수 map/extract/format
   | "output"; // Slack post / notification / file write / chat surface
 
@@ -6120,6 +6121,8 @@ export interface AgentlasIpc {
     runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) => Promise<void>;
     /** 이 그래프가 시작할 때 사람에게 받아야 하는 값(없으면 null). */
     inputRequirement: (id: string) => Promise<{ required: boolean; varName: string; label: string } | null>;
+    /** 이 그래프가 연결돼야 하는 것 — 공급자 묶음별로. 켜기 게이트와 같은 계산을 쓴다. */
+    connectionReport: (id: string) => Promise<import("./graph-tool-binding").GraphConnectionReportShape | null>;
     /** 자연어로 새 자동화를 만드는 인터뷰 한 턴. 질문이 오거나, 지어진 그래프가 온다. */
     interviewGraph: (state: unknown) => Promise<
       | { ok: true; kind: "ask"; questions: Array<{ id: string; question: string; why: string; choices?: string[] }> }

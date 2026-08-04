@@ -36,6 +36,7 @@ import { NodeConfigPanel } from "@/components/automation/NodeConfigPanel";
 import { RunHistoryPanel } from "@/components/automation/RunHistoryPanel";
 import { AutomationSessionPanel } from "@/components/automation/AutomationSessionPanel";
 import { IconBolt } from "@/components/Icon";
+import { ConnectionsDialog } from "@/components/automation/ConnectionsDialog";
 
 /** 좌/우 패널 접힘 상태 — 화면을 다시 열어도 사용자가 정한 레이아웃을 유지한다. */
 const PANEL_STATE_KEY = "agentlas.automation.flow.panels";
@@ -97,6 +98,8 @@ function AutomationFlowPage() {
   const [running, setRunning] = useState(false);
   /** 시작 값을 받아야 하는 그래프에서 사람에게 값을 묻는 상태. */
   const [inputPrompt, setInputPrompt] = useState<{ label: string; value: string } | null>(null);
+  /** 이 그래프가 쓰는 것들을 한 창에서 정리한다(공급자 묶음별). */
+  const [connectionsOpen, setConnectionsOpen] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -509,7 +512,16 @@ function AutomationFlowPage() {
     try {
       const next = await api.automations.toggle(automation.id, !automation.enabled);
       setAutomation((cur) => (cur ? { ...cur, enabled: next.enabled, nextRunAt: next.nextRunAt } : next));
-    } catch {
+    } catch (error) {
+      // 켜기 게이트가 막았으면 **그 사유를 그대로** 보여주고 연결 창을 연다.
+      // "상태를 바꾸지 못했습니다"만 남기면 사용자는 왜인지 영영 모른다(실사용 실측의 반복).
+      const raw = error instanceof Error ? error.message : String(error ?? "");
+      const notConnected = raw.includes("AUTOMATION_NOT_CONNECTED") || raw.includes("연결되지 않은");
+      if (notConnected) {
+        setMessage(raw.replace(/^Error:\s*/, "").replace(/^.*AUTOMATION_NOT_CONNECTED[^:]*:\s*/, ""));
+        setConnectionsOpen(true);
+        return;
+      }
       setMessage(locale === "en" ? "Status did not change." : "상태를 바꾸지 못했습니다.");
     }
   }
@@ -711,6 +723,18 @@ function AutomationFlowPage() {
             <button onClick={() => setEditing(true)} className="titlebar-nodrag" style={pillBtn(false)}>
               {t("auto.flow.edit")}
             </button>
+            {/* 연결이 빠져 있으면 나머지가 다 무의미하다 — 시뮬레이션·실행보다 앞에 둔다. */}
+            <button
+              data-testid="open-connections"
+              onClick={() => setConnectionsOpen(true)}
+              className="titlebar-nodrag"
+              style={pillBtn(false)}
+              title={locale === "en"
+                ? "See what this automation uses, and connect it — one account opens every tool on it."
+                : "이 자동화가 쓰는 것을 보고 연결합니다. 계정 하나로 그 계정의 도구가 함께 열립니다."}
+            >
+              {locale === "en" ? "Connections" : "연결"}
+            </button>
             <button
               onClick={() => void runNow(true)}
               disabled={running}
@@ -735,6 +759,14 @@ function AutomationFlowPage() {
       {/* 알림·제안·결정 카드는 캔버스 **위에 뜬다**. 예전에는 캔버스 위쪽에 차곡차곡 쌓여서,
           카드가 하나 늘 때마다 그래프가 아래로 밀리고 좁아졌다 — 화면의 주인공이
           부수 메시지에 밀려 가장 작은 영역을 갖는 상태였다. */}
+      {connectionsOpen ? (
+        <ConnectionsDialog
+          automationId={automation.id}
+          locale={locale}
+          onClose={() => setConnectionsOpen(false)}
+        />
+      ) : null}
+
       <div className="automation-flow-overlay-anchor">
       <div className="automation-flow-overlay">
 

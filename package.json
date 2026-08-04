@@ -327,7 +327,9 @@
     "test:graph-interview-contract": "npm run build:electron && node scripts/test-graph-interview-contract.cjs",
     "test:stream-decode-contract": "node scripts/test-stream-decode-contract.cjs",
     "test:graph-describe-ui": "npm run build:renderer && node scripts/test-graph-describe-ui.cjs",
-    "test:automation-honesty-contract": "npm run build:electron && node scripts/test-automation-honesty-contract.cjs"
+    "test:automation-honesty-contract": "npm run build:electron && node scripts/test-automation-honesty-contract.cjs",
+    "test:graph-tool-binding-contract": "npm run build:electron && node scripts/test-graph-tool-binding-contract.cjs",
+    "test:graph-connections-ui": "npm run build:renderer && node scripts/test-graph-connections-ui.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

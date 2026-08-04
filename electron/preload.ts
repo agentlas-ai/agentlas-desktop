@@ -637,6 +637,7 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("automations:updateGraph", id, graph),
     runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) => ipcRenderer.invoke("automations:runNow", id, opts),
     inputRequirement: (id: string) => ipcRenderer.invoke("automations:inputRequirement", id),
+    connectionReport: (id: string) => ipcRenderer.invoke("automations:connectionReport", id),
     interviewGraph: (state: unknown) => ipcRenderer.invoke("automations:interviewGraph", state),
     createFromBlueprint: (payload: unknown) => ipcRenderer.invoke("automations:createFromBlueprint", payload),
     requestGraphPatch: (id: string, request: string) =>
