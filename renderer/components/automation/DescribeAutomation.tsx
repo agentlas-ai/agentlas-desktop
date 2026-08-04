@@ -11,6 +11,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import type { WorkflowGraph } from "@/lib/types";
+import { humanSchedule } from "@shared/graph-blueprint";
 
 interface Question { id: string; question: string; why: string; choices?: string[] }
 interface Ready {
@@ -224,7 +225,7 @@ export function DescribeAutomation({ locale, onCreated }: {
           </ol>
           <div style={{ fontSize: 12, color: "var(--muted-deep)" }}>
             {ready.triggerType === "schedule"
-              ? scheduleSentence(ready.scheduleHuman, ko)
+              ? (ko ? `${humanSchedule(ready.scheduleHuman, "ko")}에 실행` : `Runs ${humanSchedule(ready.scheduleHuman, "en")}`)
               : (ko ? "값을 넣을 때만 실행합니다." : "Runs only when you give it a value.")}
             {mutations.length ? (ko ? ` · 바깥으로 나가는 단계 ${mutations.length}개` : ` · ${mutations.length} step(s) go outside`) : ""}
           </div>
@@ -250,20 +251,6 @@ export function DescribeAutomation({ locale, onCreated }: {
       ) : null}
     </section>
   );
-}
-
-/** 실행 시각을 사람 말로. "daily-08:00"은 제품 내부 토큰이지 사용자가 읽을 말이 아니다. */
-function scheduleSentence(schedule: string, ko: boolean): string {
-  const daily = /^daily-(\d{2}):(\d{2})$/.exec(schedule);
-  if (daily) return ko ? `매일 ${daily[1]}:${daily[2]}에 실행` : `Runs daily at ${daily[1]}:${daily[2]}`;
-  const weekly = /^weekly-([a-z]{3})-(\d{2}):(\d{2})$/.exec(schedule);
-  if (weekly) {
-    const days: Record<string, string> = { mon: "월", tue: "화", wed: "수", thu: "목", fri: "금", sat: "토", sun: "일" };
-    return ko
-      ? `매주 ${days[weekly[1]] ?? weekly[1]}요일 ${weekly[2]}:${weekly[3]}에 실행`
-      : `Runs every ${weekly[1]} at ${weekly[2]}:${weekly[3]}`;
-  }
-  return ko ? `실행 시점: ${schedule}` : `Runs on: ${schedule}`;
 }
 
 function btn(primary: boolean): React.CSSProperties {

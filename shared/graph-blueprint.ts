@@ -359,8 +359,54 @@ export function branchLabel(branch: BlueprintBranch): string {
   }
 }
 
+/**
+ * 실행 시점을 사람 말로. `0 8 * * 1-5`나 `daily-08:00`은 제품이 쓰는 저장 형식이지
+ * 사람이 읽을 말이 아니다 — 화면에 그대로 내보내면 사용자는 자기 자동화가 언제 도는지 모른다.
+ */
+export function humanSchedule(schedule: string, locale: "ko" | "en" = "ko"): string {
+  const raw = String(schedule ?? "").trim();
+  if (!raw || raw === "manual") return locale === "ko" ? "값을 넣을 때만" : "only when you start it";
+  const daily = /^daily-(\d{2}):(\d{2})$/.exec(raw);
+  if (daily) return locale === "ko" ? `매일 ${hhmm(daily[1], daily[2], "ko")}` : `every day at ${daily[1]}:${daily[2]}`;
+  const parts = raw.split(/\s+/);
+  if (parts.length === 5) {
+    const [min, hour, dom, mon, dow] = parts;
+    if (/^\d+$/.test(min) && /^\d+$/.test(hour) && mon === "*") {
+      const at = hhmm(hour.padStart(2, "0"), min.padStart(2, "0"), locale);
+      const when = dowPhrase(dow, dom, locale);
+      return locale === "ko" ? `${when} ${at}` : `${when} at ${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
+    }
+  }
+  return raw;
+}
+
+function hhmm(hour: string, minute: string, locale: "ko" | "en"): string {
+  if (locale !== "ko") return `${hour}:${minute}`;
+  const h = Number(hour);
+  const period = h < 12 ? "오전" : "오후";
+  const shown = h % 12 === 0 ? 12 : h % 12;
+  return minute === "00" ? `${period} ${shown}시` : `${period} ${shown}시 ${Number(minute)}분`;
+}
+
+const DOW_KO: Record<string, string> = { "0": "일", "1": "월", "2": "화", "3": "수", "4": "목", "5": "금", "6": "토", "7": "일" };
+
+function dowPhrase(dow: string, dom: string, locale: "ko" | "en"): string {
+  if (dow === "*" && dom === "*") return locale === "ko" ? "매일" : "every day";
+  if (dow === "1-5") return locale === "ko" ? "평일(월~금)" : "every weekday";
+  if (dow === "0,6" || dow === "6,0") return locale === "ko" ? "주말" : "every weekend";
+  if (/^\d$/.test(dow)) {
+    return locale === "ko" ? `매주 ${DOW_KO[dow]}요일` : `every week on day ${dow}`;
+  }
+  if (dow === "*" && /^\d+$/.test(dom)) {
+    return locale === "ko" ? `매월 ${Number(dom)}일` : `on day ${dom} of each month`;
+  }
+  if (/^[\d,]+$/.test(dow)) {
+    const days = dow.split(",").map((d) => DOW_KO[d] ?? d).join("·");
+    return locale === "ko" ? `매주 ${days}요일` : `on ${dow}`;
+  }
+  return locale === "ko" ? "정해진 때" : "on schedule";
+}
+
 function scheduleLabel(schedule: string): string {
-  const daily = /^daily-(\d{2}):(\d{2})$/.exec(schedule);
-  if (daily) return `매일 ${daily[1]}:${daily[2]}`;
-  return schedule;
+  return humanSchedule(schedule, "ko");
 }
