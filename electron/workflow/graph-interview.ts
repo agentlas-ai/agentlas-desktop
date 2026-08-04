@@ -8,6 +8,7 @@
 //  · 청사진이 검증을 통과하지 못하면, 모델이 "다 됐다"고 해도 질문으로 되돌린다.
 //  · 같은 질문을 두 번 하지 않는다(사람이 이미 답한 것을 또 묻는 인터뷰는 신뢰를 잃는다).
 //  · 질문은 한 번에 3개까지. 한꺼번에 쏟으면 사람이 답을 포기한다.
+import { CAPABILITIES, PROVIDER_CATALOG } from "../../shared/graph-tool-binding";
 import {
   BLUEPRINT_SCHEMA,
   validateBlueprint,
@@ -80,16 +81,38 @@ const RULES = [
   "  · a step that reads {{x}} must list x in consumes, and some earlier step (or the input trigger)",
   "    must declare produces:\"x\".",
   "  · effect:\"mutation\" for anything that leaves the machine or changes a file.",
+  "  · uses: [{\"capability\":\"<from the list below>\",\"provider\":\"<id>\"|null}] — the outside",
+  "    services this step needs. Pick the capability from the closed list; if the person named a",
+  "    service, put its id in provider, otherwise leave provider null and it will be asked later.",
+  "    A step that only writes text needs no `uses` at all.",
+  "  · Never invent a capability or provider id. If what they want is not in the list, say so",
+  "    in the step instruction and leave `uses` out rather than inventing one.",
+  "  · Do NOT ask whether an account is already connected, and do not mention API keys, tokens,",
+  "    logins, or authentication. The product checks connections itself and asks separately.",
+  "    Ask only WHICH service, and only when it genuinely changes what gets built.",
   "",
   "branches[] entries (optional): {\"afterStep\":<0-based>,\"var\":\"<one word>\",",
   "  \"op\":\"contains|truthy|falsy|eq|ne|gt|lt\",\"value\":\"...\",",
   "  \"yesStep\":<index>,\"noStep\":<index>,",
   "  \"repeatStep\":<index>,\"repeatOn\":\"yes\"|\"no\",\"maxRepeats\":<1-20>}.",
   "  · repeatStep goes BACK to an earlier step. It REQUIRES repeatOn and maxRepeats.",
+  "",
+  "checks[] (optional, but REQUIRED whenever a branch repeats):",
+  "  {\"afterStep\":<0-based>,\"subject\":\"<a value some step produces>\",",
+  "   \"criteria\":\"<what makes it good enough, in the person's words>\",\"produces\":\"<one word>\"}",
+  "  · A check is a SEPARATE step that judges the result against the criteria and produces",
+  "    \"pass\" or \"fail\". A repeat must branch on that verdict — never on words inside the",
+  "    result itself. A step that grades its own output is not a check.",
+  "  · So: to repeat until good enough, add a check after the step, then branch on",
+  "    {\"var\":\"<the check's produces>\",\"op\":\"eq\",\"value\":\"fail\",\"repeatOn\":\"yes\",...}.",
+  "  · Ask the person what \"good enough\" means for them. Do not invent the criteria.",
   "  · repeatOn says which side loops. Write the condition the way the person said it and",
   "    put the loop on the side they meant — do not flip either one to make it fit.",
   "",
   "Ask at most 3 questions per turn. Never repeat a question id you already asked.",
+  "",
+  `capability must be one of: ${CAPABILITIES.join(", ")}`,
+  `provider must be one of: ${PROVIDER_CATALOG.map((p) => p.id).join(", ")}`,
 ].join("\n");
 
 /** 이번 턴에 모델에게 보낼 지시. 지금까지 알아낸 것을 전부 함께 준다. */

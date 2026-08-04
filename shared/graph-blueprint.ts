@@ -9,6 +9,7 @@
 // 바깥을 바꾸는 단계인지 모르면 읽기로 낮추지 않는다. 자동화는 사람이 없는 동안 돌기 때문에
 // "그럴듯한 기본값"이 그대로 실행된다.
 import type { WorkflowGraph, WorkflowNode, WorkflowEdge } from "./types";
+import { CAPABILITIES, findProvider, providersFor } from "./graph-tool-binding";
 
 export const BLUEPRINT_SCHEMA = "agentlas.graph-blueprint.v1";
 
@@ -25,6 +26,14 @@ export interface BlueprintStep {
   consumes?: string[];
   /** 바깥을 바꾸는가. 모르면 청사진을 받지 않는다 — 아래 validate 참조. */
   effect: BlueprintEffect;
+  /**
+   * 이 단계가 **무엇을 가지고** 일하는가. 사람 말이 아니라 닫힌 어휘(CAPABILITIES)로 적는다.
+   *
+   * 실사용 실측: "캘린더요"라는 답에서 `title: "캘린더에서 일정 가져오기"`만 저장됐고,
+   * 연결이 없다는 사실이 어디에도 없어 켜졌고, 실행하고서야 죽었다.
+   * provider를 아직 안 정했으면 null로 둔다 — **그래도 저장은 된다**(create-then-gate).
+   */
+  uses?: Array<{ capability: string; provider?: string | null }>;
 }
 
 export interface BlueprintBranch {
@@ -51,6 +60,17 @@ export interface BlueprintBranch {
   maxRepeats?: number;
 }
 
+export interface BlueprintCheck {
+  /** 이 단계 **뒤에** 검증을 놓는다. */
+  afterStep: number;
+  /** 무엇을 볼 것인가 — 앞 단계가 만든 값의 이름. */
+  subject: string;
+  /** 통과 기준. 사람 말로 적는다. 이 문장이 그대로 판정에 쓰인다. */
+  criteria: string;
+  /** 판정 결과를 담을 이름(기본: check<N>_verdict). */
+  produces?: string;
+}
+
 export type BlueprintTrigger =
   | { kind: "cron"; schedule: string }
   | { kind: "input"; label: string; varName: string };
@@ -63,6 +83,12 @@ export interface GraphBlueprint {
   trigger: BlueprintTrigger;
   steps: BlueprintStep[];
   branches?: BlueprintBranch[];
+  /**
+   * 검증 단계. 만든 것을 **다른 노드가** 기준으로 판정한다.
+   * 반복(repeatStep)이 있으면 반드시 있어야 한다 — 없으면 "마음에 들 때까지"를
+   * 글자 찾기로 흉내 내게 되고, 그건 이 제품이 다른 곳에서 걷어낸 단어장 판정이다.
+   */
+  checks?: BlueprintCheck[];
 }
 
 export interface BlueprintQuestion {
@@ -99,6 +125,31 @@ const MAX_STEPS = 20;
 export const MAX_REPEATS = 20;
 
 const VAR_RE = /^[A-Za-z_][\w-]*$/;
+
+/** capability를 사람 말로. 화면과 질문 보기에 쓴다. */
+export const CAPABILITY_LABEL: Record<string, string> = {
+  "calendar.events.list": "캘린더 일정 읽기",
+  "calendar.events.create": "캘린더에 일정 넣기",
+  "sheets.rows.read": "스프레드시트 읽기",
+  "sheets.rows.append": "스프레드시트에 추가",
+  "mail.messages.list": "메일 읽기",
+  "mail.messages.send": "메일 보내기",
+  "chat.messages.post": "채팅에 올리기",
+  "chat.messages.list": "채팅 읽기",
+  "docs.pages.read": "문서 읽기",
+  "docs.pages.create": "문서 만들기",
+  "docs.database.query": "문서 데이터베이스 조회",
+  "code.issues.list": "이슈 읽기",
+  "code.issues.create": "이슈 만들기",
+  "code.repo.read": "코드 읽기",
+  "tasks.issues.list": "할 일 읽기",
+  "tasks.issues.create": "할 일 만들기",
+  "files.read": "이 컴퓨터 파일 읽기",
+  "files.write": "이 컴퓨터에 파일 쓰기",
+  "web.search": "웹 검색",
+};
+
+const CAPABILITY_CHOICES: string[] = CAPABILITIES.map((id) => CAPABILITY_LABEL[id] ?? id);
 
 /**
  * 청사진이 실제로 그래프로 지어질 수 있는지 검사한다.
@@ -201,11 +252,70 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
         });
       }
     }
+
+    // 도구 요구 — 닫힌 어휘로만. 사람 말은 여기 못 들어온다.
+    for (const use of step.uses ?? []) {
+      if (!use || typeof use !== "object") { push(`${at}의 도구 선언을 읽지 못했습니다.`); continue; }
+      if (!CAPABILITIES.includes(use.capability)) {
+        push(`${at}가 이 제품이 모르는 도구("${use.capability}")를 쓰려고 합니다.`, {
+          id: `step-${index}-capability`,
+          question: `"${step.title || at}" 단계는 어떤 서비스를 씁니까?`,
+          why: "이 제품이 다룰 수 있는 것으로 골라야 실제로 연결할 수 있습니다.",
+          choices: CAPABILITY_CHOICES,
+        });
+        continue;
+      }
+      // 공급자 미정은 **막지 않는다**(업계 합의: create-then-gate). 다만 사람에게 묻는다 —
+      // "캘린더"는 여럿이고, 그중 어느 것인지는 사람만 안다.
+      if (use.provider && !findProvider(use.provider)) {
+        push(`${at}가 이 제품이 모르는 서비스("${use.provider}")를 가리킵니다.`, {
+          id: `step-${index}-provider`,
+          question: `"${step.title || at}" 단계는 어느 서비스를 씁니까?`,
+          why: "서비스가 정해져야 어느 계정을 연결할지 알 수 있습니다.",
+          choices: providersFor(use.capability).map((provider) => provider.label),
+        });
+      }
+    }
     if (step.produces) {
       if (!VAR_RE.test(step.produces)) push(`${at}의 결과 이름 "${step.produces}"은(는) 쓸 수 없습니다.`);
       else produced.add(step.produces);
     }
   });
+
+
+  // 검증 단계
+  const checkVerdicts = new Set<string>();
+  for (const check of bp.checks ?? []) {
+    const at = `${(check.afterStep ?? 0) + 1}번째 단계 뒤의 검증`;
+    if (!steps[check.afterStep]) { push(`${at}가 없는 단계를 가리킵니다.`); continue; }
+    if (!check.subject || !produced.has(check.subject)) {
+      push(`${at}가 볼 "${check.subject}" 값을 아무도 만들지 않습니다.`);
+    }
+    if (!check.criteria?.trim()) {
+      push(`${at}의 통과 기준이 없습니다.`, {
+        id: `check-${check.afterStep}-criteria`,
+        question: `"${steps[check.afterStep]?.title ?? at}" 결과가 어떤 상태여야 통과인가요?`,
+        why: "기준이 없으면 무엇을 보고 판정할지 정할 수 없습니다.",
+      });
+    }
+    const name = check.produces?.trim() || `check${check.afterStep + 1}_verdict`;
+    produced.add(name);
+    checkVerdicts.add(name);
+  }
+
+  // ★반복이 있는데 검증이 없으면, "마음에 들 때까지"를 글자 찾기로 흉내 내게 된다.
+  //   실사용 실측: 만들어진 반복 그래프가 전부 **글 쓰는 노드가 자기 결과에 "좋음"을 붙이고
+  //   갈림길이 그 글자를 찾는** 모양이었다 — 만든 놈이 자기를 채점하는 단어장 판정이다.
+  for (const branch of bp.branches ?? []) {
+    if (branch.repeatStep === undefined) continue;
+    if (!checkVerdicts.has(branch.var)) {
+      push(`${(branch.afterStep ?? 0) + 1}번째 단계 뒤의 반복이 검증 결과가 아니라 "${branch.var}"의 내용을 보고 돌지 말지 정합니다.`, {
+        id: `branch-${branch.afterStep}-needs-check`,
+        question: `"${steps[branch.repeatStep]?.title ?? "앞 단계"}"를 다시 할지 말지, 무엇을 보고 정할까요? 통과 기준을 한 문장으로 적어 주세요.`,
+        why: "만든 단계가 자기 결과에 붙인 글자를 보고 정하면, 자기가 자기를 채점하는 셈이 됩니다.",
+      });
+    }
+  }
 
   // 갈림길·반복
   for (const branch of bp.branches ?? []) {
@@ -322,6 +432,16 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
         ...(step.effect === "mutation" ? { approval: "ask" } : {}),
         ...(step.produces ? { produces: step.produces } : {}),
         ...(step.consumes?.length ? { consumes: step.consumes[0] } : {}),
+        // 도구 요구는 노드가 지고 간다 — 켜기 게이트가 이걸 읽어 연결 여부를 계산한다.
+        ...(step.uses?.length
+          ? {
+            needs: step.uses.map((use) => ({
+              capability: use.capability,
+              provider: use.provider && findProvider(use.provider) ? use.provider : null,
+              required: true,
+            })),
+          }
+          : {}),
       },
     });
   });
@@ -330,6 +450,9 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
   const branches = bp.branches ?? [];
   const branchAt = new Map<number, BlueprintBranch>();
   branches.forEach((branch) => branchAt.set(branch.afterStep, branch));
+  const checkAt = new Map<number, BlueprintCheck>();
+  for (const check of bp.checks ?? []) checkAt.set(check.afterStep, check);
+  const checkId = (index: number): string => `verify${index + 1}`;
 
   let edgeSeq = 0;
   const link = (source: string, target: string, handle?: string, maxIterations?: number): void => {
@@ -343,11 +466,30 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
   };
 
   link("start", stepId(0));
+  // 검증 노드를 먼저 세운다 — 갈림길은 검증 결과를 읽는다.
+  bp.checks?.forEach((check) => {
+    if (!bp.steps[check.afterStep]) return;
+    nodes.push({
+      id: checkId(check.afterStep),
+      type: "eval",
+      label: `검증: ${check.criteria.slice(0, 40)}`,
+      position: { x: column(check.afterStep + 1) + 70, y: 0 },
+      config: {
+        subject: check.subject,
+        criteria: check.criteria,
+        produces: check.produces?.trim() || `check${check.afterStep + 1}_verdict`,
+      },
+    });
+  });
   bp.steps.forEach((_step, index) => {
+    const check = checkAt.get(index);
     const branch = branchAt.get(index);
+    // 단계 → (검증) → 갈림길 순서로 잇는다.
+    const afterStepId = check ? checkId(index) : stepId(index);
+    if (check) link(stepId(index), checkId(index));
     if (!branch) {
       const next = bp.steps[index + 1];
-      if (next) link(stepId(index), stepId(index + 1));
+      if (next) link(afterStepId, stepId(index + 1));
       return;
     }
     const branchId = `check${index + 1}`;
@@ -364,7 +506,7 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
         ...(branch.value !== undefined ? { value: branch.value } : {}),
       },
     });
-    link(stepId(index), branchId);
+    link(afterStepId, branchId);
     // 되돌아가는 쪽은 선언(repeatOn)대로 잇는다 — 예전처럼 거짓 쪽으로 고정하면
     // 사람이 말한 방향과 반대인 자동화가 만들어진다.
     const repeatSide = branch.repeatStep !== undefined ? branch.repeatOn : undefined;
