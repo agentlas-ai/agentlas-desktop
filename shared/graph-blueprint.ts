@@ -32,14 +32,21 @@ export interface BlueprintBranch {
   afterStep: number;
   /** 사람에게 보여줄 갈림길 이름. 실제 규칙과 다르면 안 되므로 규칙에서 만든다. */
   var: string;
-  op: "contains" | "truthy" | "falsy" | "eq" | "neq" | "gt" | "lt";
+  op: (typeof CONDITION_OPS)[number];
   value?: string | number;
   /** 참일 때 갈 단계 번호(없으면 여기서 끝). */
   yesStep?: number;
   /** 거짓일 때 갈 단계 번호(없으면 여기서 끝). */
   noStep?: number;
-  /** 거짓일 때 앞 단계로 되돌아가 반복한다면 그 단계 번호. */
+  /** 앞 단계로 되돌아가 반복한다면 그 단계 번호. */
   repeatStep?: number;
+  /**
+   * 어느 쪽으로 갈 때 되돌아가는가. **선언이 필요하다.**
+   * 예전엔 "거짓일 때만" 되돌아갈 수 있었다. 그래서 "'다시'라고 하면 다시 쓴다"를
+   * 표현하려면 조건이나 방향 중 하나를 뒤집어야만 했고, 실제로 만들어진 갈림길이
+   * 전부 거꾸로였다(실사용 실측 3/3). 되돌아가는 쪽을 사람이 말한 그대로 적게 한다.
+   */
+  repeatOn?: "yes" | "no";
   /** 반복 상한. repeatStep이 있으면 반드시 있어야 한다. */
   maxRepeats?: number;
 }
@@ -79,8 +86,15 @@ export interface BlueprintProblem {
   reason: string;
 }
 
-const OPS = new Set(["contains", "truthy", "falsy", "eq", "neq", "gt", "lt"]);
-const VALUE_OPS = new Set(["contains", "eq", "neq", "gt", "lt"]);
+/**
+ * 갈림길이 쓸 수 있는 판단 방법. **커널이 실제로 실행할 수 있는 것과 같아야 한다.**
+ * 예전엔 여기에 "neq"가 있었는데 커널은 "ne"만 실행했다 — 제품이 자기가 만들어 놓고
+ * 자기가 못 읽는 자동화를 저장했고, 사람은 마지막 단계에서야 알았다(실사용 실측).
+ * scripts/test-graph-interview-contract.cjs 가 커널 소스와 이 목록을 대조한다.
+ */
+export const CONDITION_OPS = ["truthy", "falsy", "eq", "ne", "gt", "lt", "contains"] as const;
+const OPS = new Set<string>(CONDITION_OPS);
+const VALUE_OPS = new Set(["contains", "eq", "ne", "gt", "lt"]);
 const MAX_STEPS = 20;
 export const MAX_REPEATS = 20;
 
@@ -208,9 +222,38 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
         why: "비교할 것이 없으면 갈림길이 판단하지 못하고 거기서 멈춥니다.",
       });
     }
+    // 앞 단계로 가는 연결은 이름이 무엇이든 **반복**이다. yesStep/noStep으로 뒤로 가면서
+    // 상한이 없으면 커널이 실행을 거절한다 — 저장하는 자리에서 막는다(실측: 3/3이 이렇게 만들어졌다).
+    for (const [key, target] of [["yesStep", branch.yesStep], ["noStep", branch.noStep]] as const) {
+      if (typeof target !== "number") continue;
+      if (target <= branch.afterStep && branch.repeatStep === undefined) {
+        push(`${at}의 "${key === "yesStep" ? "예" : "아니오"}" 쪽이 앞 단계로 되돌아가는데 반복 횟수가 없습니다.`, {
+          id: `branch-${branch.afterStep}-repeats`,
+          question: `${at}에서 되돌아가는 반복, 최대 몇 번까지 할까요?`,
+          why: "사람이 보지 않는 사이에 도는 자동화라, 멈출 지점이 없으면 실행하지 않습니다.",
+          choices: ["2번", "3번", "5번"],
+        });
+      }
+    }
     if (branch.repeatStep !== undefined) {
+      if (branch.repeatOn !== "yes" && branch.repeatOn !== "no") {
+        // 막기만 하면 인터뷰가 막다른 길이 된다. **방향은 사람이 말해야 하는 것**이고,
+        // 실제로 만들어진 갈림길이 전부 거꾸로였던 이유가 바로 이 방향이다(실측 3/3).
+        const back = steps[branch.repeatStep]?.title ?? "앞 단계";
+        const rule = branchLabel(branch);
+        push(`${at}가 어느 쪽으로 갈 때 되돌아가는지 정해지지 않았습니다.`, {
+          id: `branch-${branch.afterStep}-direction`,
+          question: `"${rule}" — 어느 쪽일 때 "${back}"부터 다시 할까요?`,
+          why: "이 방향이 뒤집히면 원하는 것과 정반대로 도는 자동화가 됩니다.",
+          choices: [`그렇다면 다시`, `아니라면 다시`],
+        });
+      }
       if (!steps[branch.repeatStep]) push(`${at}의 되돌아갈 단계가 없습니다.`);
       if (branch.repeatStep > branch.afterStep) push(`${at}는 뒤쪽 단계로 되돌아갈 수 없습니다.`);
+      // 되돌아가는 쪽과 이어가는 쪽이 같은 단계면 갈림길이 아무 역할도 못 한다.
+      if (branch.repeatOn === "yes" ? branch.noStep === branch.repeatStep : branch.yesStep === branch.repeatStep) {
+        push(`${at}의 양쪽이 모두 같은 단계로 갑니다 — 갈림길이 아무것도 가르지 않습니다.`);
+      }
       const cap = branch.maxRepeats;
       if (typeof cap !== "number" || !Number.isFinite(cap) || cap < 1 || cap > MAX_REPEATS) {
         push(`${at}의 반복 횟수가 정해져 있지 않습니다.`, {
@@ -322,17 +365,22 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
       },
     });
     link(stepId(index), branchId);
-    // 참 쪽
-    if (branch.yesStep !== undefined && bp.steps[branch.yesStep]) {
+    // 되돌아가는 쪽은 선언(repeatOn)대로 잇는다 — 예전처럼 거짓 쪽으로 고정하면
+    // 사람이 말한 방향과 반대인 자동화가 만들어진다.
+    const repeatSide = branch.repeatStep !== undefined ? branch.repeatOn : undefined;
+    if (repeatSide === "yes") {
+      link(branchId, stepId(branch.repeatStep!), "true", branch.maxRepeats);
+    } else if (branch.yesStep !== undefined && bp.steps[branch.yesStep]) {
       link(branchId, stepId(branch.yesStep), "true");
     } else if (bp.steps[index + 1]) {
       link(branchId, stepId(index + 1), "true");
     }
-    // 거짓 쪽 — 되돌아가는 반복이면 상한과 함께.
-    if (branch.repeatStep !== undefined) {
-      link(branchId, stepId(branch.repeatStep), "false", branch.maxRepeats);
+    if (repeatSide === "no") {
+      link(branchId, stepId(branch.repeatStep!), "false", branch.maxRepeats);
     } else if (branch.noStep !== undefined && bp.steps[branch.noStep]) {
       link(branchId, stepId(branch.noStep), "false");
+    } else if (repeatSide === "yes" && bp.steps[index + 1]) {
+      link(branchId, stepId(index + 1), "false");
     }
   });
 
@@ -344,6 +392,40 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
   };
 }
 
+
+/**
+ * 갈림길이 실제로 어떻게 갈라지는지 사람 말로. **저장 전에 이걸로 확인을 받는다.**
+ *
+ * 실사용 실측에서 만들어진 갈림길 3개가 **전부 방향이 거꾸로**였다("다시 써줘"라고 하면
+ * 끝내고, 마음에 든다고 하면 다시 쓰는 식). 그림을 안 봤으면 그대로 켰을 것이고,
+ * 켜도 아무도 알려주지 않는다. 방향은 코드가 검증할 수 없으니 사람이 읽고 답해야 한다.
+ */
+export function describeBranches(bp: GraphBlueprint, locale: "ko" | "en" = "ko"): string[] {
+  const lines: string[] = [];
+  const title = (index?: number): string =>
+    typeof index === "number" && bp.steps[index] ? bp.steps[index].title : (locale === "ko" ? "끝" : "the end");
+  for (const branch of bp.branches ?? []) {
+    const rule = branchLabel(branch);
+    const repeatText = branch.repeatStep !== undefined
+      ? (locale === "ko"
+        ? `"${title(branch.repeatStep)}"부터 다시 (최대 ${branch.maxRepeats}번)`
+        : `back to "${title(branch.repeatStep)}" (up to ${branch.maxRepeats}x)`)
+      : null;
+    const yes = repeatText && branch.repeatOn === "yes"
+      ? repeatText
+      : branch.yesStep !== undefined ? title(branch.yesStep) : title(branch.afterStep + 1);
+    const no = repeatText && branch.repeatOn !== "yes"
+      ? repeatText
+      : branch.noStep !== undefined ? title(branch.noStep) : title(branch.afterStep + 1);
+    // 이미 따옴표가 붙은 반복 문구에 또 씌우면 ""…""처럼 겹친다.
+    const quote = (text: string): string => (text.startsWith('"') ? text : `"${text}"`);
+    lines.push(locale === "ko"
+      ? `${rule} → 그렇다면 ${quote(yes ?? "끝")}, 아니라면 ${quote(no)}`
+      : `${rule} → yes: ${quote(yes ?? "the end")}, no: ${quote(no)}`);
+  }
+  return lines;
+}
+
 /** 갈림길 이름을 규칙에서 만든다. */
 export function branchLabel(branch: BlueprintBranch): string {
   const shown = typeof branch.value === "string" ? `"${branch.value}"` : String(branch.value ?? "");
@@ -352,7 +434,7 @@ export function branchLabel(branch: BlueprintBranch): string {
     case "truthy": return `${branch.var}에 값이 있나?`;
     case "falsy": return `${branch.var}이(가) 비었나?`;
     case "eq": return `${branch.var}이(가) ${shown}인가?`;
-    case "neq": return `${branch.var}이(가) ${shown}이 아닌가?`;
+    case "ne": return `${branch.var}이(가) ${shown}이 아닌가?`;
     case "gt": return `${branch.var}이(가) ${shown}보다 큰가?`;
     case "lt": return `${branch.var}이(가) ${shown}보다 작은가?`;
     default: return `${branch.var} 확인`;
