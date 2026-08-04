@@ -3846,7 +3846,26 @@ export function initStore(options: StoreInitOptions = {}): void {
     if (!runColumns.some((column) => column.name === "resume_consumed_at")) {
       _db.exec("ALTER TABLE automation_runs ADD COLUMN resume_consumed_at TEXT");
     }
+
   }
+
+  // 실행 저널 — 노드 하나가 지나간 자리를 append-only로 남긴다.
+  // 체크포인트는 "지금 상태" 하나만 덮어쓰므로, 무엇이 어떤 순서로 일어났는지는 사라진다.
+  // 특히 "실행 의도는 기록됐는데 정산이 없다"는 부분 실패 신호는 순서가 있어야만 읽힌다.
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS graph_run_journal (
+      run_id   TEXT NOT NULL,
+      seq      INTEGER NOT NULL,
+      ts       TEXT NOT NULL,
+      kind     TEXT NOT NULL,
+      node_id  TEXT,
+      payload_json TEXT,
+      PRIMARY KEY (run_id, seq)
+    )
+  `);
+  _db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_graph_run_journal_run ON graph_run_journal(run_id, seq)",
+  );
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
   } catch (error) {

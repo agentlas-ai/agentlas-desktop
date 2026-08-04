@@ -1605,3 +1605,70 @@ export function consumeGraphResumeCoordinate(checkpointRunId: string): boolean {
   ).run(new Date().toISOString(), checkpointRunId);
   return result.changes === 1;
 }
+
+// ── 실행 저널 ──────────────────────────────────────────────────────────────
+// append-only. 체크포인트(현재 상태 1건)와 달리 순서가 남으므로, "의도는 남았는데
+// 정산이 없다" 같은 부분 실패 신호를 사후에 읽을 수 있다.
+
+export type GraphJournalKind =
+  | "run_created" | "run_validated"
+  | "node_reserved" | "node_intent" | "node_settled" | "node_routed"
+  | "node_retry" | "node_failed"
+  | "suspended" | "resumed"
+  | "run_completed" | "run_failed";
+
+export interface GraphJournalEntry {
+  seq: number;
+  ts: string;
+  kind: GraphJournalKind;
+  nodeId: string | null;
+  payload: Record<string, unknown> | null;
+}
+
+/** 다음 seq를 계산해 한 줄 덧붙인다. 저널 쓰기 실패가 실행을 멈추지는 않는다. */
+export function appendGraphJournal(
+  runId: string,
+  kind: GraphJournalKind,
+  nodeId?: string | null,
+  payload?: Record<string, unknown>,
+): void {
+  const db = getDb();
+  const row = db.prepare("SELECT COALESCE(MAX(seq), 0) AS maxSeq FROM graph_run_journal WHERE run_id = ?")
+    .get(runId) as { maxSeq: number } | undefined;
+  const seq = (row?.maxSeq ?? 0) + 1;
+  db.prepare(
+    "INSERT OR IGNORE INTO graph_run_journal (run_id, seq, ts, kind, node_id, payload_json) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(runId, seq, new Date().toISOString(), kind, nodeId ?? null, payload ? JSON.stringify(payload) : null);
+}
+
+export function listGraphJournal(runId: string, limit = 500): GraphJournalEntry[] {
+  const rows = getDb().prepare(
+    "SELECT seq, ts, kind, node_id, payload_json FROM graph_run_journal WHERE run_id = ? ORDER BY seq ASC LIMIT ?",
+  ).all(runId, Math.max(1, Math.min(5000, limit))) as Array<{
+    seq: number; ts: string; kind: string; node_id: string | null; payload_json: string | null;
+  }>;
+  return rows.map((row) => {
+    let payload: Record<string, unknown> | null = null;
+    try {
+      payload = row.payload_json ? (JSON.parse(row.payload_json) as Record<string, unknown>) : null;
+    } catch {
+      payload = null;
+    }
+    return { seq: row.seq, ts: row.ts, kind: row.kind as GraphJournalKind, nodeId: row.node_id, payload };
+  });
+}
+
+/**
+ * 실행 의도만 남고 정산이 없는 노드 — 바깥에 반영됐는지 알 수 없는 지점.
+ * 재개할 때 "그냥 다시 실행"과 "사람에게 물어봄"을 가르는 근거다.
+ */
+export function unsettledJournalNodes(runId: string): string[] {
+  const entries = listGraphJournal(runId);
+  const intent = new Set<string>();
+  for (const entry of entries) {
+    if (!entry.nodeId) continue;
+    if (entry.kind === "node_intent") intent.add(entry.nodeId);
+    if (entry.kind === "node_settled" || entry.kind === "node_failed") intent.delete(entry.nodeId);
+  }
+  return [...intent].sort();
+}

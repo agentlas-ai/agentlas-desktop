@@ -28,6 +28,7 @@ import {
   getLatestNodeApproval,
   saveGraphRunFailures,
   consumeGraphResumeCoordinate,
+  appendGraphJournal,
 } from "../store/automations";
 import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
@@ -1096,6 +1097,18 @@ export async function runGraph(
   const varWriters = new Map<string, string[]>();
   /** 노드 id → 이번 실행에서 시도한 횟수(재시도 판정용). */
   const nodeAttempts = new Map<string, number>();
+  /** 저널 한 줄. 관측 실패가 실행을 멈추지는 않는다. */
+  const journal = (
+    kind: Parameters<typeof appendGraphJournal>[1],
+    nodeId?: string | null,
+    payload?: Record<string, unknown>,
+  ): void => {
+    try {
+      appendGraphJournal(runId, kind, nodeId ?? null, payload);
+    } catch {
+      /* 저널은 감사용이다 — 쓰지 못해도 실행은 계속한다 */
+    }
+  };
   const dryRun = opts.dryRun === true;
   /** 시뮬레이션에서 막은 것들 — "실전이었으면 무엇이 일어났는가"를 그대로 보여주는 영수증. */
   const dryRunBlocks: GraphDryRunBlock[] = [];
@@ -1335,6 +1348,8 @@ export async function runGraph(
       resolvedPrompt: resolvedPrompt ?? null,
       vars,
     });
+    journal("node_reserved", node.id, { nodeType: node.type });
+    journal("node_intent", node.id, { nodeType: node.type });
     checkpointNodeState(node.id, "running");
   };
 
@@ -1343,6 +1358,7 @@ export async function runGraph(
     checkpoint!.ambiguousNodeIds = checkpoint!.ambiguousNodeIds.filter((id) => id !== nodeId);
     skipped.delete(nodeId);
     completed.add(nodeId);
+    journal("node_settled", nodeId);
     checkpointNodeState(nodeId, "done");
   };
 
@@ -1360,6 +1376,7 @@ export async function runGraph(
     if (ambiguous && !checkpoint!.ambiguousNodeIds.includes(nodeId)) {
       checkpoint!.ambiguousNodeIds = [...checkpoint!.ambiguousNodeIds, nodeId].sort();
     }
+    journal("node_failed", nodeId, { ambiguous });
     checkpointNodeState(nodeId, "failed");
   };
 
@@ -1766,6 +1783,7 @@ export async function runGraph(
             checkpoint!.inFlightNodeIds = checkpoint!.inFlightNodeIds.filter((id) => id !== node.id);
             status.set(node.id, "pending");
             emitNodeState(node.id, "pending");
+            journal("node_retry", node.id, { attempt: attempts, maxAttempts });
             tryRecordRunEvent({
               runId,
               kind: "workflow_node_retry",
@@ -1928,6 +1946,10 @@ export async function runGraph(
       payload: { ok, error },
     });
   }
+  journal(ok ? "run_completed" : "run_failed", null, {
+    ...(error ? { error: String(error).slice(0, 240) } : {}),
+    tokensUsed: runTokensUsed,
+  });
   // 실패 3요소는 실행 스냅샷에 남겨야 화면이 사유와 행동을 말할 수 있다.
   try {
     saveGraphRunFailures(runId, nodeFailures);
