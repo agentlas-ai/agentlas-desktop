@@ -155,6 +155,8 @@ function AutomationFlowPage() {
   const [rfEdges, setRfEdges, onEdgesChangeBase] = useEdgesState<Edge>([]);
   // 노드 id → 라이브 실행 상태(설계 §5 P2). 라이브 채널 이벤트 + latestRun 하이드레이트로 채움.
   const [runStates, setRunStates] = useState<Record<string, WorkflowNodeRunState>>({});
+  /** 노드가 지금 무엇을 하는 중인가 — 실패가 아닌 상태 변화(C44). */
+  const [nodeProgress, setNodeProgress] = useState<Record<string, string>>({});
   // 왜 멈췄고 지금 무엇을 누르면 되는지. 상태 단어만 있는 화면은 사용자에게 아무 말도 못 한다.
   const [nodeFailures, setNodeFailures] = useState<
     Record<string, { code: string; reason: string; nextAction: string }>
@@ -302,6 +304,28 @@ function AutomationFlowPage() {
       if (ev.nodeId && ev.nodeState) {
         setRunStates((prev) => ({ ...prev, [ev.nodeId as string]: ev.nodeState as WorkflowNodeRunState }));
       }
+      // ★실패가 아닌 **상태 변화**를 받는다(커넥터 C44). 예전에는 nodeState만 건너와서,
+      //   긴 노드가 도는 동안 화면이 "실행 중"에 멈춰 있었다 — 사람은 그걸 "멈췄다"로 읽는다.
+      if (!ev.nodeId) return;
+      const progress = ev.kind === "tool-use"
+        ? (ev.tool?.name ?? ev.status ?? "")
+        : ev.kind === "thinking"
+          ? (ev.status ?? "")
+          : ev.kind === "reasoning" && ev.reasoning?.phase === "start"
+            ? "생각하는 중"
+            : "";
+      if (progress) {
+        setNodeProgress((prev) => ({ ...prev, [ev.nodeId as string]: progress.slice(0, 60) }));
+      }
+      // 노드가 끝나면 그 노드의 진행 문구는 지운다 — 끝난 단계에 옛 문구가 남으면
+      // 아직 그걸 하고 있는 것처럼 보인다.
+      if (ev.nodeState && ev.nodeState !== "running") {
+        setNodeProgress((prev) => {
+          const next = { ...prev };
+          delete next[ev.nodeId as string];
+          return next;
+        });
+      }
     });
     return () => {
       cancelled = true;
@@ -311,8 +335,11 @@ function AutomationFlowPage() {
 
   // runStates가 바뀔 때마다 노드 data.runState 주입(캔버스가 테두리/펄스로 애니메이션).
   useEffect(() => {
-    setRfNodes((nodes) => nodes.map((n) => ({ ...n, data: { ...n.data, runState: runStates[n.id] } })));
-  }, [runStates, setRfNodes]);
+    setRfNodes((nodes) => nodes.map((n) => ({
+      ...n,
+      data: { ...n.data, runState: runStates[n.id], progress: nodeProgress[n.id] },
+    })));
+  }, [runStates, nodeProgress, setRfNodes]);
 
   // 실행 중 노드로 향하는 엣지를 애니메이션(러너가 흐르는 wire를 시각화).
   useEffect(() => {

@@ -1177,17 +1177,19 @@
     {
       "id": "graph/1/edge.always",
       "boundary": "상류 결과와 무관하게 도는 정리 단계",
-      "status": "specified",
+      "status": "implemented",
       "payload": [
         {
           "field": "sourceHandle",
           "grade": "critical",
           "values": [
             "always"
-          ]
+          ],
+          "note": "조건이 없다 — 상류가 성공하든 실패하든 스킵되든 돈다"
         }
       ],
-      "note": "Airflow setup/teardown 상당. 미구현."
+      "note": "정리가 돌았다고 실패가 성공이 되지 않는다. 정리 자신이 실패하면 멈춘다.",
+      "implementedAs": "run-graph.ts alwaysEdgeIds — shouldSkip 예외 + fail-stop 예외 + 실패 라우팅이 막지 않음"
     },
     {
       "id": "graph/1/edge.timeout",
@@ -1211,18 +1213,31 @@
     {
       "id": "graph/1/status.change",
       "boundary": "런타임 → 화면 (실패 아닌 상태 변화)",
-      "status": "specified",
+      "status": "implemented",
       "payload": [
         {
-          "field": "state",
+          "field": "nodeId",
           "grade": "critical"
         },
         {
+          "field": "kind",
+          "grade": "critical",
+          "values": [
+            "tool-use",
+            "thinking",
+            "reasoning",
+            "nodeState"
+          ],
+          "note": "실패(error)는 여기 없다 — 다른 채널이다"
+        },
+        {
           "field": "text",
-          "grade": "degradable"
+          "grade": "degradable",
+          "note": "지금 무엇을 하는 중인가. 60자로 자른다"
         }
       ],
-      "note": "Node-RED Status 노드 상당. 미구현."
+      "note": "★끝난 노드의 옛 문구는 지운다 — 남으면 아직 그걸 하는 것처럼 보인다.",
+      "implementedAs": "automation-scheduler.ts broadcastLiveRun → flow/page.tsx setNodeProgress → nodeShared 카드"
     },
     {
       "id": "graph/1/trigger.asset",

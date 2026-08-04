@@ -30,6 +30,7 @@ export function ConditionNode({ data, selected }: NodeProps) {
       selected={selected}
       connectable={d.connectable}
       runState={d.runState}
+      progress={d.progress}
       branchHandles
     />
   );

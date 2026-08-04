@@ -334,7 +334,8 @@
     "test:graph-registry-conformance": "node scripts/gen-graph-registry.cjs --check && node scripts/test-graph-registry-conformance.cjs",
     "test:graph-node-protocol": "npm run build:electron && node scripts/test-graph-node-protocol-contract.cjs",
     "test:run-status-split": "npm run build:electron && electron scripts/test-run-status-split-contract.cjs",
-    "graph:map": "node scripts/gen-graph-map.cjs"
+    "graph:map": "node scripts/gen-graph-map.cjs",
+    "test:graph-progress": "node scripts/test-graph-progress-contract.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

@@ -1552,11 +1552,20 @@ export async function runGraph(
    * inbound 엣지가 있으면, 모든 엣지가 blocked이거나 skipped 부모에서 올 때만 스킵
    * (살아있는 부모가 하나라도 있으면 실행 — join 보호).
    */
+  /** 이 노드로 들어오는 `always` 엣지 — 상류가 어떻게 끝나든 도는 정리 단계(커넥터 C42). */
+  const alwaysEdgeIds = new Set(
+    graph.edges.filter((e) => e.sourceHandle === "always").map((e) => e.id),
+  );
+
   const shouldSkip = (nodeId: string): boolean => {
     // 되돌아가는 연결은 "아직 안 온 미래"다. 그걸 기다리거나 근거로 삼으면
     // 반복의 머리는 영원히 준비되지 않는다.
     const ins = (inbound.get(nodeId) ?? []).filter((i) => !backEdgeIds.has(i.edgeId));
     if (ins.length === 0) return false;
+    // ★정리 단계는 상류가 실패하거나 스킵돼도 돈다 — 그게 이 엣지의 존재 이유다.
+    //   Airflow의 teardown이 같은 계약이다: work가 실패해도 실행되고, 상태 판정에서 빠진다.
+    //   여기서 빼지 않으면 "정리해 달라"고 그려 둔 단계가 정확히 필요한 때 안 돈다.
+    if (ins.some((i) => alwaysEdgeIds.has(i.edgeId))) return false;
     return ins.every((i) => blockedEdges.has(i.edgeId) || skipped.has(i.source));
   };
 
@@ -1740,8 +1749,9 @@ export async function runGraph(
     vars[`${node.id}_error_reason`] = failure.reason;
     nodeFailures[node.id] = { ...failure, routed: true };
     // 평상시 출구는 막고 실패 출구만 연다 — 둘 다 살리면 성공한 척하는 분기가 생긴다.
+    // 다만 `always`(정리 단계, 커넥터 C42)는 막지 않는다 — 상류가 어떻게 끝났든 도는 게 계약이다.
     for (const edge of outByNode.get(node.id) ?? []) {
-      if (edge.handle !== "error") blockedEdges.add(edge.edgeId);
+      if (edge.handle !== "error" && edge.handle !== "always") blockedEdges.add(edge.edgeId);
     }
     journal("node_routed", node.id, { via: "error", code: failure.code });
     return true;
@@ -2415,10 +2425,20 @@ export async function runGraph(
       }
     }
     // 첫 실패가 나면 새 노드는 더 안 띄운다(fail-stop) — 진행 중인 것만 마무리.
-    if (!ok) break;
+    //
+    // ★단 하나 예외: **정리 단계**(`always` 엣지로 이어진 노드, 커넥터 C42). 상류가 어떻게
+    //   끝나든 도는 게 그 엣지의 존재 이유다. 여기서 같이 막으면 "무슨 일이 있어도 이건
+    //   정리해 달라"고 그려 둔 단계가 **정확히 필요한 때** 안 돈다. Airflow teardown도
+    //   같은 계약이다(work가 실패해도 실행, DAG 상태 판정에서는 제외).
+    //
+    //   정리 단계 자신이 실패하면 그때는 멈춘다 — 무한히 정리를 시도하지 않는다.
+    const isCleanupNode = (nodeId: string): boolean =>
+      (inbound.get(nodeId) ?? []).some((i) => alwaysEdgeIds.has(i.edgeId));
     const ready = ordered.filter(
-      (n) => status.get(n.id) === "pending" && inboundResolved(n.id) && !shouldSkip(n.id),
+      (n) => status.get(n.id) === "pending" && inboundResolved(n.id) && !shouldSkip(n.id)
+        && (ok || isCleanupNode(n.id)),
     );
+    if (!ok && ready.length === 0 && running.size === 0) break;
     const slots = Math.max(0, concurrency - running.size);
     for (const node of ready.slice(0, slots)) {
       status.set(node.id, "running");

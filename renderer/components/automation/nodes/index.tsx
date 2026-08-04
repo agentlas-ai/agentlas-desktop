@@ -25,6 +25,7 @@ export interface WorkflowNodeData {
   connectable?: boolean;
   /** 라이브 실행 상태(설계 §5 P2) — 캔버스 오버레이가 주입. */
   runState?: string;
+  progress?: string;
   [key: string]: unknown;
 }
 
@@ -63,6 +64,7 @@ export function TriggerNode({ data, selected }: NodeProps) {
       selected={selected}
       connectable={d.connectable}
       runState={d.runState}
+      progress={d.progress}
       hasIn={false}
     />
   );
@@ -83,6 +85,7 @@ export function AgentNode({ data, selected }: NodeProps) {
       selected={selected}
       connectable={d.connectable}
       runState={d.runState}
+      progress={d.progress}
     />
   );
 }
@@ -100,6 +103,7 @@ export function ToolNode({ data, selected }: NodeProps) {
       selected={selected}
       connectable={d.connectable}
       runState={d.runState}
+      progress={d.progress}
       badge={needsCredential ? <ConnectServiceBadge label={d.strings.connectService} /> : undefined}
     />
   );
@@ -117,6 +121,7 @@ export function ActionNode({ data, selected }: NodeProps) {
       selected={selected}
       connectable={d.connectable}
       runState={d.runState}
+      progress={d.progress}
     />
   );
 }
@@ -133,6 +138,7 @@ export function OutputNode({ data, selected }: NodeProps) {
       selected={selected}
       connectable={d.connectable}
       runState={d.runState}
+      progress={d.progress}
       hasOut={false}
     />
   );

@@ -45,6 +45,8 @@ export function NodeCard(props: {
   connectable?: boolean;
   /** 라이브 실행 상태(설계 §5 P2) — 있으면 테두리를 상태색으로, running이면 펄스. */
   runState?: string;
+  /** 지금 무엇을 하는 중인가 — 실패가 아닌 상태 변화(커넥터 C44). */
+  progress?: string;
   /** condition 노드용 분기 소스 핸들(true/false) — 우측 상/하단에 배치. */
   branchHandles?: boolean;
 }) {
@@ -76,6 +78,20 @@ export function NodeCard(props: {
         transition: "border-color 160ms ease, box-shadow 160ms ease, opacity 160ms ease",
       }}
     >
+      {/* ★"실행 중"만 보이면 사람은 멈춘 걸로 읽는다. 지금 무엇을 하는 중인지를 그 자리에 쓴다.
+          실패가 아니라 상태 변화이므로 색을 쓰지 않고 조용히 둔다(커넥터 C44). */}
+      {isRunning && props.progress ? (
+        <div
+          data-testid="node-progress"
+          style={{
+            position: "absolute", left: 14, right: 14, bottom: -18,
+            fontSize: 10, color: "var(--muted-deep)",
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+          }}
+        >
+          {props.progress}
+        </div>
+      ) : null}
       {props.hasIn !== false ? (
         <Handle type="target" position={Position.Left} style={handleStyle} isConnectable={connectable} />
       ) : null}

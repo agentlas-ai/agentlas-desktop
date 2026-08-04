@@ -589,9 +589,9 @@
       "from": "agent|tool|action|output|condition|eval|transform",
       "to": "agent|tool|action|output|condition|eval|transform",
       "envelope": "graph/1/edge.always",
-      "status": "specified",
-      "phase": "staffing",
-      "note": "Airflow setup/teardown — teardown은 work가 실패해도 실행되고 DAG 상태 판정에서 제외된다. Airflow의 trigger_rule은 13종(all_done·one_failed·none_failed_min_one_success…)이고 우리 합류는 사실상 all_success 1종이다(실측: 상류 실패 시 하류 미실행). dry-run·mutation을 다루는 제품이라 정리 계약의 부재는 비용이 크다."
+      "status": "implemented",
+      "phase": "run",
+      "note": "Airflow setup/teardown과 같은 계약 — work가 실패해도 teardown은 실행되고, DAG 상태 판정에서는 빠진다. 우리도 정리가 돌았다고 실패가 성공이 되지는 않는다.\\n★구현하며 드러난 것: 커널에 `if (!ok) break` fail-stop이 있어서, 정리 단계를 예외로 두지 않으면 **정확히 필요한 때** 안 돈다. 정리 단계 자신이 실패하면 그때는 멈춘다 — 무한히 정리를 시도하지 않는다."
     },
     {
       "id": "C43",
@@ -609,9 +609,9 @@
       "from": "runtime",
       "to": "surface",
       "envelope": "graph/1/status.change",
-      "status": "specified",
-      "phase": "staffing",
-      "note": "Node-RED Status 노드의 존재 이유가 날카롭다 — *\"MQTT 노드가 연결을 잃어도 에러 이벤트가 아니라 상태 변화만 일으킨다\"*. 이 저장소의 stale-online 사고(요청 타임아웃이 연결을 안 죽여 영원히 온라인)와 같은 모양이다. 우리에겐 이 채널이 없다."
+      "status": "implemented",
+      "phase": "record",
+      "note": "Node-RED가 Status 노드를 따로 둔 이유가 이것이다 — 문서 원문: *\"MQTT 노드가 연결을 잃어도 에러 이벤트가 아니라 상태 변화만 일으킨다.\"* 이 저장소의 stale-online 사고(요청 타임아웃이 연결을 안 죽여 영원히 온라인)도 같은 모양이다.\\n★예전에는 nodeState가 붙은 이벤트만 화면으로 갔다. 긴 노드가 도는 동안 화면이 '실행 중'에 멈춰 있어 사람은 그걸 '멈췄다'로 읽었다. 이제 도구 호출·생각 신호가 노드 카드 아래 한 줄로 뜬다. 실패가 아니므로 경고색을 쓰지 않는다."
     },
     {
       "id": "C45",

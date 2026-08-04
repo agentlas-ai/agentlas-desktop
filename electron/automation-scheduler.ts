@@ -658,7 +658,19 @@ async function runOne(
               if (!acceptGraphEvents) return;
               noteAutomationWatchdogEvent(graphWatchdog, ev);
               persistGraphHeartbeat();
-              if (ev.nodeState) broadcastLiveRun(a.id, ev);
+              // ★실패가 아닌 **상태 변화**도 화면에 보낸다 (커넥터 C44).
+              //
+              // 예전에는 `nodeState`가 붙은 이벤트만 건너갔다. 그래서 긴 노드가 도는 동안
+              // 화면은 "실행 중"에서 멈춰 있고, 무엇을 하는 중인지·어디까지 왔는지가
+              // 아무 데도 안 보였다. 사람은 그걸 "멈췄다"로 읽는다.
+              //
+              // Node-RED가 Status 노드를 따로 둔 이유가 정확히 이것이다 — 문서 원문:
+              // *"MQTT 노드가 연결을 잃어도 에러 이벤트가 아니라 상태 변화만 일으킨다."*
+              // 이 저장소의 stale-online 사고(요청 타임아웃이 연결을 안 죽여 영원히 온라인)도
+              // 같은 모양이다: 실패는 아닌데 상태가 변했고, 그걸 받을 채널이 없었다.
+              if (ev.nodeState || ev.kind === "tool-use" || ev.kind === "thinking" || ev.kind === "reasoning") {
+                broadcastLiveRun(a.id, ev);
+              }
             },
           }),
         );
