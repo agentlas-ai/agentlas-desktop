@@ -9,7 +9,7 @@
 // 바깥을 바꾸는 단계인지 모르면 읽기로 낮추지 않는다. 자동화는 사람이 없는 동안 돌기 때문에
 // "그럴듯한 기본값"이 그대로 실행된다.
 import type { WorkflowGraph, WorkflowNode, WorkflowEdge } from "./types";
-import { CAPABILITIES, findProvider, providersFor } from "./graph-tool-binding";
+import { CAPABILITIES, CAPABILITY_LABEL, findProvider, providersFor } from "./graph-tool-binding";
 
 export const BLUEPRINT_SCHEMA = "agentlas.graph-blueprint.v1";
 
@@ -126,28 +126,11 @@ export const MAX_REPEATS = 20;
 
 const VAR_RE = /^[A-Za-z_][\w-]*$/;
 
-/** capability를 사람 말로. 화면과 질문 보기에 쓴다. */
-export const CAPABILITY_LABEL: Record<string, string> = {
-  "calendar.events.list": "캘린더 일정 읽기",
-  "calendar.events.create": "캘린더에 일정 넣기",
-  "sheets.rows.read": "스프레드시트 읽기",
-  "sheets.rows.append": "스프레드시트에 추가",
-  "mail.messages.list": "메일 읽기",
-  "mail.messages.send": "메일 보내기",
-  "chat.messages.post": "채팅에 올리기",
-  "chat.messages.list": "채팅 읽기",
-  "docs.pages.read": "문서 읽기",
-  "docs.pages.create": "문서 만들기",
-  "docs.database.query": "문서 데이터베이스 조회",
-  "code.issues.list": "이슈 읽기",
-  "code.issues.create": "이슈 만들기",
-  "code.repo.read": "코드 읽기",
-  "tasks.issues.list": "할 일 읽기",
-  "tasks.issues.create": "할 일 만들기",
-  "files.read": "이 컴퓨터 파일 읽기",
-  "files.write": "이 컴퓨터에 파일 쓰기",
-  "web.search": "웹 검색",
-};
+/**
+ * capability를 사람 말로. 어휘의 집은 graph-tool-binding이라 거기서 온다 —
+ * 질문 보기와 연결 창이 **같은 한 벌**을 써야 두 화면의 말이 갈라지지 않는다.
+ */
+export { CAPABILITY_LABEL } from "./graph-tool-binding";
 
 const CAPABILITY_CHOICES: string[] = CAPABILITIES.map((id) => CAPABILITY_LABEL[id] ?? id);
 

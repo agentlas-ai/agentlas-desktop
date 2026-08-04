@@ -3978,6 +3978,51 @@ export function registerIpcHandlers(): void {
     return reportGraphConnections(automation.graph, currentUiLocale() === "en" ? "en" : "ko");
   });
 
+  // 원터치 교체 — 같은 일을 하는 다른 서비스로 **한 번에** 갈아끼운다.
+  // 검사는 여기(main)에서 한다. 화면이 후보를 잘못 그려도, 할 수 없는 것으로는 안 바뀐다.
+  ipcMain.handle(
+    "automations:swapProvider",
+    async (_e, id: string, input: { capability: string; fromProvider: string | null; toProvider: string }) => {
+      const automation = getAutomation(id);
+      if (!automation) throw new Error(`Automation not found: ${id}`);
+      const locale = currentUiLocale() === "en" ? "en" : "ko";
+      const { planProviderSwap } = require("../shared/graph-tool-binding") as typeof import("../shared/graph-tool-binding");
+      const plan = planProviderSwap(automation.graph, {
+        capability: String(input?.capability ?? ""),
+        fromProvider: typeof input?.fromProvider === "string" ? input.fromProvider : null,
+        toProvider: String(input?.toProvider ?? ""),
+      }, locale);
+      if (!plan.ok) return plan;
+      updateAutomationGraph(id, plan.graph);
+      const { reportGraphConnections } = require("./workflow/tool-inventory") as typeof import("./workflow/tool-inventory");
+      return { ok: true, changed: plan.changed, report: await reportGraphConnections(plan.graph, locale) };
+    },
+  );
+  ipcMain.handle(
+    "automations:swapAgent",
+    async (
+      _e,
+      id: string,
+      input: { nodeId: string; ref: string; targetType: "agent" | "firm" | "hub"; targetVersion?: string | null; label?: string },
+    ) => {
+      const automation = getAutomation(id);
+      if (!automation) throw new Error(`Automation not found: ${id}`);
+      const locale = currentUiLocale() === "en" ? "en" : "ko";
+      const { planAgentSwap } = require("../shared/graph-tool-binding") as typeof import("../shared/graph-tool-binding");
+      const plan = planAgentSwap(automation.graph, {
+        nodeId: String(input?.nodeId ?? ""),
+        ref: String(input?.ref ?? ""),
+        targetType: input?.targetType === "firm" || input?.targetType === "hub" ? input.targetType : "agent",
+        targetVersion: typeof input?.targetVersion === "string" ? input.targetVersion : null,
+        ...(typeof input?.label === "string" ? { label: input.label } : {}),
+      }, locale);
+      if (!plan.ok) return plan;
+      updateAutomationGraph(id, plan.graph);
+      const { reportGraphConnections } = require("./workflow/tool-inventory") as typeof import("./workflow/tool-inventory");
+      return { ok: true, changed: plan.changed, report: await reportGraphConnections(plan.graph, locale) };
+    },
+  );
+
   ipcMain.handle("automations:inputRequirement", (_e, id: string) => {
     const automation = getAutomation(id);
     if (!automation) return null;

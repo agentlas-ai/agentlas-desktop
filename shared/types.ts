@@ -6123,6 +6123,19 @@ export interface AgentlasIpc {
     inputRequirement: (id: string) => Promise<{ required: boolean; varName: string; label: string } | null>;
     /** 이 그래프가 연결돼야 하는 것 — 공급자 묶음별로. 켜기 게이트와 같은 계산을 쓴다. */
     connectionReport: (id: string) => Promise<import("./graph-tool-binding").GraphConnectionReportShape | null>;
+    /**
+     * 같은 일을 하는 다른 서비스로 **한 번에** 갈아끼운다.
+     * 못 하는 것으로는 바꿔주지 않는다 — 거절도 코드·사유·다음 행동으로 온다.
+     */
+    swapProvider: (
+      id: string,
+      input: { capability: string; fromProvider: string | null; toProvider: string },
+    ) => Promise<import("./graph-tool-binding").GraphSwapOutcome>;
+    /** 한 단계가 부르는 에이전트를 바꾼다. */
+    swapAgent: (
+      id: string,
+      input: { nodeId: string; ref: string; targetType: "agent" | "firm" | "hub"; targetVersion?: string | null; label?: string },
+    ) => Promise<import("./graph-tool-binding").GraphSwapOutcome>;
     /** 자연어로 새 자동화를 만드는 인터뷰 한 턴. 질문이 오거나, 지어진 그래프가 온다. */
     interviewGraph: (state: unknown) => Promise<
       | { ok: true; kind: "ask"; questions: Array<{ id: string; question: string; why: string; choices?: string[] }> }

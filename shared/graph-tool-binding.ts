@@ -148,6 +148,59 @@ export function providersFor(capability: string): ProviderSpec[] {
   return PROVIDER_CATALOG.filter((provider) => provider.capabilities.includes(capability));
 }
 
+/**
+ * capability를 사람 말로. 질문 보기·연결 창·교체 후보가 **이 한 벌**을 함께 쓴다.
+ * 어휘(CAPABILITIES)의 집이 여기이므로 이름도 여기 산다.
+ */
+export const CAPABILITY_LABEL: Record<string, string> = {
+  "calendar.events.list": "캘린더 일정 읽기",
+  "calendar.events.create": "캘린더에 일정 넣기",
+  "sheets.rows.read": "스프레드시트 읽기",
+  "sheets.rows.append": "스프레드시트에 추가",
+  "mail.messages.list": "메일 읽기",
+  "mail.messages.send": "메일 보내기",
+  "chat.messages.post": "채팅에 올리기",
+  "chat.messages.list": "채팅 읽기",
+  "docs.pages.read": "문서 읽기",
+  "docs.pages.create": "문서 만들기",
+  "docs.database.query": "문서 데이터베이스 조회",
+  "code.issues.list": "이슈 읽기",
+  "code.issues.create": "이슈 만들기",
+  "code.repo.read": "코드 읽기",
+  "tasks.issues.list": "할 일 읽기",
+  "tasks.issues.create": "할 일 만들기",
+  "files.read": "이 컴퓨터 파일 읽기",
+  "files.write": "이 컴퓨터에 파일 쓰기",
+  "web.search": "웹 검색",
+};
+
+export const CAPABILITY_LABEL_EN: Record<string, string> = {
+  "calendar.events.list": "Read calendar events",
+  "calendar.events.create": "Add a calendar event",
+  "sheets.rows.read": "Read a spreadsheet",
+  "sheets.rows.append": "Append to a spreadsheet",
+  "mail.messages.list": "Read mail",
+  "mail.messages.send": "Send mail",
+  "chat.messages.post": "Post to chat",
+  "chat.messages.list": "Read chat",
+  "docs.pages.read": "Read a document",
+  "docs.pages.create": "Create a document",
+  "docs.database.query": "Query a document database",
+  "code.issues.list": "Read issues",
+  "code.issues.create": "Create an issue",
+  "code.repo.read": "Read code",
+  "tasks.issues.list": "Read tasks",
+  "tasks.issues.create": "Create a task",
+  "files.read": "Read a file on this computer",
+  "files.write": "Write a file on this computer",
+  "web.search": "Search the web",
+};
+
+export function capabilityLabel(capability: string, locale: "ko" | "en" = "ko"): string {
+  const table = locale === "ko" ? CAPABILITY_LABEL : CAPABILITY_LABEL_EN;
+  return table[capability] ?? capability;
+}
+
 /** 한 단계가 선언하는 도구 요구. 노드 config의 `needs`에 산다. */
 export interface ToolRequirement {
   /** 무엇을 하려는가. 닫힌 어휘(CAPABILITIES). */
@@ -362,9 +415,251 @@ export function decideActivation(
   };
 }
 
+// ── 원터치 교체 ────────────────────────────────────────────────────
+//
+// 왜 필요한가: 지금까지 이 창은 **못 채운 것**만 보여줬다. 그래서 이미 연결된 것을
+// 다른 것으로 바꾸고 싶으면 갈 곳이 없었다 — 노드를 하나씩 찾아 들어가 설정을
+// 고쳐야 했고, 그건 "그래프별로 한 창에서" 라는 이 창의 목적과 정반대다.
+//
+// 교체의 규칙 하나: **할 수 없는 것으로는 바꿔주지 않는다.** 같은 capability를
+// 못 하는 공급자로 한 번에 갈아끼우면, 저장은 되는데 실행은 안 되는 그래프가 남는다.
+// 그건 이 제품이 반복해서 겪은 결함의 모양이다(저장은 되고 못 도는 상태). 거절한다.
+
+/** 이 그래프가 쓰는 것 하나 — 이미 연결된 것도 포함한다(교체하려면 보여야 한다). */
+export interface GraphBinding {
+  nodeId: string;
+  nodeLabel: string;
+  capability: string;
+  capabilityLabel: string;
+  capabilityLabelEn: string;
+  provider: ProviderSpec | null;
+  status: RequirementStatus;
+  required: boolean;
+  /** 같은 일을 할 수 있는 다른 공급자들. 이 목록이 곧 원터치 교체 후보다. */
+  alternatives: ProviderSpec[];
+}
+
+/** 그래프가 쓰는 것 **전부**. gap과 달리 준비된 것도 담는다. */
+export function collectBindings(
+  graph: WorkflowGraph | null | undefined,
+  inventory: ToolInventory,
+): GraphBinding[] {
+  const out: GraphBinding[] = [];
+  for (const node of graph?.nodes ?? []) {
+    for (const requirement of readRequirements(node)) {
+      const { status } = requirementStatus(requirement, inventory);
+      const provider = findProvider(requirement.provider);
+      out.push({
+        nodeId: node.id,
+        nodeLabel: node.label || node.id,
+        capability: requirement.capability,
+        capabilityLabel: capabilityLabel(requirement.capability, "ko"),
+        capabilityLabelEn: capabilityLabel(requirement.capability, "en"),
+        provider,
+        status,
+        required: requirement.required,
+        alternatives: providersFor(requirement.capability)
+          .filter((candidate) => candidate.id !== provider?.id),
+      });
+    }
+  }
+  return out;
+}
+
+/** 에이전트 노드가 지금 누구를 부르는가. 이것도 한 창에서 바꿀 수 있어야 한다. */
+export interface GraphAgentBinding {
+  nodeId: string;
+  nodeLabel: string;
+  /** 설치된 에이전트 id · firm id · Hub slug. 안 정했으면 null. */
+  ref: string | null;
+  targetType: "agent" | "firm" | "hub" | null;
+  /** Hub는 **정확한 릴리스**를 못 박는다. 없는 채로 부르면 무엇이 실행될지 모른다. */
+  targetVersion: string | null;
+}
+
+export function collectAgentBindings(graph: WorkflowGraph | null | undefined): GraphAgentBinding[] {
+  const out: GraphAgentBinding[] = [];
+  for (const node of graph?.nodes ?? []) {
+    if (node.type !== "agent") continue;
+    const ref = typeof node.config?.ref === "string" && node.config.ref ? node.config.ref : null;
+    const rawType = node.config?.targetType;
+    const targetType = rawType === "agent" || rawType === "firm" || rawType === "hub" ? rawType : null;
+    const version = node.config?.targetVersion;
+    out.push({
+      nodeId: node.id,
+      nodeLabel: node.label || node.id,
+      ref,
+      targetType: ref ? (targetType ?? "agent") : null,
+      targetVersion: typeof version === "string" && version ? version : null,
+    });
+  }
+  return out;
+}
+
+export type SwapPlan =
+  | {
+      ok: true;
+      graph: WorkflowGraph;
+      /** 무엇이 어떻게 바뀌었는가 — 화면이 이걸 그대로 사람에게 말한다. */
+      changed: Array<{ nodeId: string; nodeLabel: string; from: string | null; to: string }>;
+    }
+  | { ok: false; code: string; reason: string; nextAction: string };
+
+const KO = (locale: "ko" | "en") => locale === "ko";
+
+/**
+ * 한 capability를 다른 공급자로 **한 번에** 바꾼다.
+ * 같은 capability를 쓰는 모든 노드가 함께 바뀐다 — 그게 "원터치"의 뜻이다.
+ */
+export function planProviderSwap(
+  graph: WorkflowGraph | null | undefined,
+  input: { capability: string; fromProvider: string | null; toProvider: string },
+  locale: "ko" | "en" = "ko",
+): SwapPlan {
+  const ko = KO(locale);
+  const target = findProvider(input.toProvider);
+  if (!target) {
+    return {
+      ok: false,
+      code: "SWAP_UNKNOWN_PROVIDER",
+      reason: ko
+        ? `"${input.toProvider}"는 이 제품이 아는 서비스가 아닙니다.`
+        : `"${input.toProvider}" is not a service this product knows.`,
+      nextAction: ko ? "목록에 있는 것 중에서 골라 주세요." : "Pick one from the list.",
+    };
+  }
+  // ★가장 중요한 거절. 못 하는 것으로 바꾸면 저장은 되고 실행은 안 되는 그래프가 남는다.
+  if (!target.capabilities.includes(input.capability)) {
+    const label = capabilityLabel(input.capability, locale);
+    return {
+      ok: false,
+      code: "SWAP_CAPABILITY_MISMATCH",
+      reason: ko
+        ? `${target.label}로는 "${label}"를 할 수 없습니다.`
+        : `${target.labelEn} cannot do "${label}".`,
+      nextAction: ko
+        ? "이 일을 할 수 있는 서비스 중에서 골라 주세요."
+        : "Pick a service that can do this.",
+    };
+  }
+  const changed: Array<{ nodeId: string; nodeLabel: string; from: string | null; to: string }> = [];
+  const nodes = (graph?.nodes ?? []).map((node) => {
+    const requirements = readRequirements(node);
+    if (!requirements.length) return node;
+    let touched = false;
+    const next = requirements.map((requirement) => {
+      if (requirement.capability !== input.capability) return requirement;
+      if (input.fromProvider !== null && requirement.provider !== input.fromProvider) return requirement;
+      if (requirement.provider === target.id) return requirement;
+      touched = true;
+      changed.push({
+        nodeId: node.id,
+        nodeLabel: node.label || node.id,
+        from: requirement.provider,
+        to: target.id,
+      });
+      // 공급자가 바뀌면 **고른 리소스는 남길 수 없다**. 캘린더 id는 그 계정 안에서만 뜻이 있다.
+      const { resource: _dropped, ...rest } = requirement;
+      return { ...rest, provider: target.id };
+    });
+    if (!touched) return node;
+    return { ...node, config: { ...node.config, needs: next } };
+  });
+  if (!changed.length) {
+    return {
+      ok: false,
+      code: "SWAP_NO_MATCH",
+      reason: ko
+        ? "바꿀 것이 없습니다 — 이미 그걸 쓰고 있거나, 이 일을 쓰는 단계가 없습니다."
+        : "Nothing to change — it already uses this, or no step needs it.",
+      nextAction: ko ? "창을 닫았다 다시 열어 지금 상태를 확인해 주세요." : "Reopen this window to see the current state.",
+    };
+  }
+  return { ok: true, graph: { ...(graph as WorkflowGraph), nodes }, changed };
+}
+
+/** 한 단계가 부르는 에이전트를 바꾼다. Hub는 정확한 릴리스 없이 못 바꾼다. */
+export function planAgentSwap(
+  graph: WorkflowGraph | null | undefined,
+  input: { nodeId: string; ref: string; targetType: "agent" | "firm" | "hub"; targetVersion?: string | null; label?: string },
+  locale: "ko" | "en" = "ko",
+): SwapPlan {
+  const ko = KO(locale);
+  const node = (graph?.nodes ?? []).find((candidate) => candidate.id === input.nodeId);
+  if (!node) {
+    return {
+      ok: false,
+      code: "SWAP_NODE_NOT_FOUND",
+      reason: ko ? "그 단계를 찾지 못했습니다." : "That step was not found.",
+      nextAction: ko ? "창을 닫았다 다시 열어 주세요." : "Reopen this window.",
+    };
+  }
+  if (node.type !== "agent") {
+    return {
+      ok: false,
+      code: "SWAP_NOT_AGENT_NODE",
+      reason: ko ? "그 단계는 에이전트를 부르는 단계가 아닙니다." : "That step does not call an agent.",
+      nextAction: ko ? "에이전트 단계에서 바꿔 주세요." : "Change it on an agent step.",
+    };
+  }
+  // Hub 에이전트는 릴리스를 못 박아야 한다. 못 박지 않으면 다음에 무엇이 실행될지 모른다 —
+  // 이 제품은 이미 "재발행이 새 definition을 만들어 옛 프로필이 계속 active"인 사고를 겪었다.
+  if (input.targetType === "hub" && !(input.targetVersion ?? "").trim()) {
+    return {
+      ok: false,
+      code: "SWAP_HUB_RELEASE_UNPINNED",
+      reason: ko
+        ? "Hub 에이전트는 어느 판(release)인지가 확인돼야 바꿀 수 있습니다."
+        : "A Hub agent can only be swapped in when its exact release is known.",
+      nextAction: ko
+        ? "허브에서 바로 부를 수 있는 에이전트 중에서 골라 주세요."
+        : "Pick an agent the Hub reports as directly callable.",
+    };
+  }
+  const previous = typeof node.config?.ref === "string" ? node.config.ref : null;
+  if (previous === input.ref) {
+    return {
+      ok: false,
+      code: "SWAP_NO_MATCH",
+      reason: ko ? "이미 그 에이전트를 쓰고 있습니다." : "It already uses that agent.",
+      nextAction: ko ? "다른 것을 골라 주세요." : "Pick a different one.",
+    };
+  }
+  const nodes = (graph?.nodes ?? []).map((candidate) => (candidate.id === input.nodeId
+    ? {
+        ...candidate,
+        config: {
+          ...candidate.config,
+          ref: input.ref,
+          targetType: input.targetType,
+          targetVersion: input.targetType === "hub" ? (input.targetVersion ?? null) : null,
+        },
+      }
+    : candidate));
+  return {
+    ok: true,
+    graph: { ...(graph as WorkflowGraph), nodes },
+    changed: [{
+      nodeId: node.id,
+      nodeLabel: node.label || node.id,
+      from: previous,
+      to: input.label?.trim() || input.ref,
+    }],
+  };
+}
+
+/** 교체 요청의 답. 성공이면 **바뀐 뒤의 상태**를 함께 준다(다시 물어볼 필요 없이). */
+export type GraphSwapOutcome =
+  | { ok: true; changed: Array<{ nodeId: string; nodeLabel: string; from: string | null; to: string }>; report: GraphConnectionReportShape }
+  | { ok: false; code: string; reason: string; nextAction: string };
+
 /** IPC로 렌더러에 건너가는 보고 형태. 렌더러가 electron/ 을 import 하지 않게 여기에 둔다. */
 export interface GraphConnectionReportShape {
   activation: ActivationDecision;
   tasks: ProviderTask[];
+  /** 이 그래프가 쓰는 것 전부(준비된 것 포함) — 교체 화면이 이걸 그린다. */
+  bindings: GraphBinding[];
+  /** 이 그래프가 부르는 에이전트들 — 이것도 한 창에서 바꾼다. */
+  agents: GraphAgentBinding[];
   hasRequirements: boolean;
 }

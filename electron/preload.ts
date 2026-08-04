@@ -638,6 +638,12 @@ const api: AgentlasIpc = {
     runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) => ipcRenderer.invoke("automations:runNow", id, opts),
     inputRequirement: (id: string) => ipcRenderer.invoke("automations:inputRequirement", id),
     connectionReport: (id: string) => ipcRenderer.invoke("automations:connectionReport", id),
+    swapProvider: (id: string, input: { capability: string; fromProvider: string | null; toProvider: string }) =>
+      ipcRenderer.invoke("automations:swapProvider", id, input),
+    swapAgent: (
+      id: string,
+      input: { nodeId: string; ref: string; targetType: "agent" | "firm" | "hub"; targetVersion?: string | null; label?: string },
+    ) => ipcRenderer.invoke("automations:swapAgent", id, input),
     interviewGraph: (state: unknown) => ipcRenderer.invoke("automations:interviewGraph", state),
     createFromBlueprint: (payload: unknown) => ipcRenderer.invoke("automations:createFromBlueprint", payload),
     requestGraphPatch: (id: string, request: string) =>

@@ -9,10 +9,14 @@
 import { listInstalledServers } from "../mcp-tools/registry";
 import { listEnvKeys } from "../secrets/vault";
 import {
+  collectAgentBindings,
+  collectBindings,
   collectGaps,
   decideActivation,
   groupGapsByProvider,
   type ActivationDecision,
+  type GraphAgentBinding,
+  type GraphBinding,
   type ProviderTask,
   type ToolInventory,
 } from "../../shared/graph-tool-binding";
@@ -42,6 +46,10 @@ export interface GraphConnectionReport {
   activation: ActivationDecision;
   /** 공급자 묶음별 할 일 — 화면이 이걸로 "구글 한 번 로그인" 카드를 만든다. */
   tasks: ProviderTask[];
+  /** 쓰는 것 **전부**(준비된 것 포함). 교체는 이미 연결된 것에도 걸려야 한다. */
+  bindings: GraphBinding[];
+  /** 부르는 에이전트들. */
+  agents: GraphAgentBinding[];
   /** 요구가 하나도 없으면 이 그래프는 도구 없이 도는 것이다. */
   hasRequirements: boolean;
 }
@@ -53,10 +61,15 @@ export async function reportGraphConnections(
 ): Promise<GraphConnectionReport> {
   const inventory = await readToolInventory();
   const gaps = collectGaps(graph, inventory);
+  const agents = collectAgentBindings(graph);
   return {
     activation: decideActivation(graph, inventory, locale),
     tasks: groupGapsByProvider(gaps),
-    hasRequirements: (graph?.nodes ?? []).some((node) => Array.isArray(node.config?.needs)
-      && (node.config.needs as unknown[]).length > 0),
+    bindings: collectBindings(graph, inventory),
+    agents,
+    // 에이전트만 부르는 그래프도 이 창에서 바꿀 게 있다 — 그때 "연결할 것 없음"으로 닫지 않는다.
+    hasRequirements: agents.length > 0
+      || (graph?.nodes ?? []).some((node) => Array.isArray(node.config?.needs)
+        && (node.config.needs as unknown[]).length > 0),
   };
 }
