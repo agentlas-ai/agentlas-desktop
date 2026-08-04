@@ -139,7 +139,30 @@ function ProviderCard({ task, ko, onChanged }: {
   onChanged: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [keyFormOpen, setKeyFormOpen] = useState(false);
+  const [values, setValues] = useState<Record<string, string>>({});
   const count = task.providers.reduce((sum, row) => sum + row.gaps.length, 0);
+  const helpUrls = [...new Set(task.providers
+    .map((row) => row.provider?.keyHelpUrl)
+    .filter((url): url is string => !!url))];
+
+  /** 한 묶음이 요구하는 것을 한 번에 저장한다 — 그러면 그 계정의 도구가 함께 열린다. */
+  async function saveKeys() {
+    const api = ipc();
+    if (!api) return;
+    setBusy(true);
+    try {
+      for (const key of task.missing.envKeys) {
+        const value = (values[key] ?? "").trim();
+        if (value) await api.env.set(key, value);
+      }
+      setValues({});
+      setKeyFormOpen(false);
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function installMissing(catalogId: string) {
     const api = ipc();
@@ -203,8 +226,12 @@ function ProviderCard({ task, ko, onChanged }: {
         </div>
       ))}
 
-      {/* 지금 누를 것. 값이 필요한 경우엔 이 창에서 비밀을 받지 않는다 —
-          MCP 스펙의 MUST NOT("비밀은 폼으로 받지 말고 별도 경로로"). 설정 화면으로 보낸다. */}
+      {/* 지금 누를 것. **한 묶음을 한 번에** 채운다 — 이게 이 창의 존재 이유다.
+          연결 방식에 따라 다르게 다룬다:
+           · api-key — 사용자가 그 서비스에서 만든 키를 붙여넣는다. n8n·Zapier도 이건 폼이다.
+                       한 번 넣으면 그 계정의 도구가 **함께** 열린다.
+           · oauth   — 브라우저에서 그 서비스에 로그인해야 한다. **폼으로 받지 않는다**
+                       (MCP MUST NOT: 자격이 LLM 컨텍스트·중간 서버를 통과해선 안 된다). */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 2 }}>
         {task.missing.mcpCatalogIds.map((catalogId) => (
           <button
@@ -217,21 +244,75 @@ function ProviderCard({ task, ko, onChanged }: {
             {busy ? (ko ? "설치하는 중…" : "Installing…") : (ko ? `${catalogId} 설치` : `Install ${catalogId}`)}
           </button>
         ))}
-        {task.missing.envKeys.length ? (
-          <a
-            href="/settings"
+        {task.missing.envKeys.length && task.authKind === "api-key" && !keyFormOpen ? (
+          <button
             data-testid={`connections-signin-${task.group}`}
-            style={{ ...btn(true), textDecoration: "none", display: "inline-flex", alignItems: "center" }}
+            onClick={() => setKeyFormOpen(true)}
+            style={btn(true)}
           >
-            {ko ? "계정 연결하기" : "Connect account"}
-          </a>
+            {ko ? "한 번에 연결하기" : "Connect once"}
+          </button>
         ) : null}
       </div>
-      {task.missing.envKeys.length ? (
-        <div style={{ fontSize: 11, color: "var(--muted-deep)" }}>
-          {ko
-            ? "연결은 설정 화면에서 진행합니다. 비밀번호나 키를 이 창에 적지 않습니다."
-            : "Sign-in happens in Settings. Never type a password or key into this window."}
+
+      {/* 키 방식 — 한 묶음이 요구하는 것을 **한 번에** 받는다. */}
+      {keyFormOpen && task.authKind === "api-key" ? (
+        <div data-testid={`connections-keyform-${task.group}`} style={{ display: "grid", gap: 6 }}>
+          {task.missing.envKeys.map((key) => (
+            <label key={key} style={{ display: "grid", gap: 3 }}>
+              <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>{key}</span>
+              <input
+                data-testid={`connections-key-${key}`}
+                type="password"
+                value={values[key] ?? ""}
+                onChange={(e) => setValues((v) => ({ ...v, [key]: e.target.value }))}
+                placeholder={ko ? "여기에 붙여넣기" : "Paste it here"}
+                style={{
+                  padding: "6px 8px", borderRadius: "var(--radius-sm)",
+                  border: "1px solid var(--paper-edge)", background: "var(--paper)",
+                  color: "var(--ink)", fontSize: 12, outline: "none",
+                }}
+              />
+            </label>
+          ))}
+          {helpUrls.length ? (
+            <div style={{ fontSize: 11, color: "var(--muted-deep)" }}>
+              {ko ? "키를 만드는 곳: " : "Create a key at: "}
+              {helpUrls.map((url) => (
+                <a key={url} href={url} style={{ color: "var(--ink-soft)" }}>{url}</a>
+              ))}
+            </div>
+          ) : null}
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              data-testid={`connections-key-save-${task.group}`}
+              disabled={busy || task.missing.envKeys.some((key) => !(values[key] ?? "").trim())}
+              onClick={() => void saveKeys()}
+              style={btn(true)}
+            >
+              {busy ? (ko ? "저장하는 중…" : "Saving…") : (ko ? "저장하고 연결" : "Save and connect")}
+            </button>
+            <button onClick={() => setKeyFormOpen(false)} style={btn(false)}>
+              {ko ? "취소" : "Cancel"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {/* OAuth — 아직 브라우저 로그인이 배선돼 있지 않다. **있는 척하지 않는다.**
+          누르면 아무 일도 없는 버튼을 두는 것이 지금까지 이 제품이 겪은 결함의 형태였다. */}
+      {task.missing.envKeys.length && task.authKind !== "api-key" ? (
+        <div data-testid={`connections-oauth-${task.group}`} style={{ fontSize: 11, color: "var(--muted-deep)", display: "grid", gap: 3 }}>
+          <span style={{ color: "var(--ink)" }}>
+            {ko
+              ? `${task.groupLabel} 로그인은 아직 이 앱에 연결돼 있지 않습니다.`
+              : `Signing in to ${task.groupLabelEn} is not wired into this app yet.`}
+          </span>
+          <span>
+            {ko
+              ? "비밀번호는 어디에도 적지 마세요. 이 자동화는 그때까지 켜지지 않습니다."
+              : "Do not type a password anywhere. This automation stays off until then."}
+          </span>
         </div>
       ) : null}
     </div>

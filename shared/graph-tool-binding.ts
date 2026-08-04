@@ -44,6 +44,16 @@ export interface ProviderSpec {
   group: ProviderGroup;
   /** 이 공급자가 할 수 있는 일들. */
   capabilities: string[];
+  /**
+   * 어떻게 연결하는가.
+   *  · "oauth"   — 브라우저에서 그 서비스에 로그인해야 한다. **폼으로 받지 않는다**
+   *                (MCP: 자격이 LLM 컨텍스트나 중간 서버를 통과해선 안 된다).
+   *  · "api-key" — 사용자가 그 서비스에서 만든 키를 붙여넣는다. n8n·Zapier도 이건 폼이다.
+   *  · "none"    — 연결이 필요 없다.
+   */
+  authKind: "oauth" | "api-key" | "none";
+  /** 키를 어디서 만드는지. api-key일 때 사람에게 보여준다. */
+  keyHelpUrl?: string;
   /** 이 공급자를 쓰려면 채워져야 하는 것. 비었으면 로그인이 필요 없다는 뜻. */
   requires: {
     /** MCP 카탈로그 id — 이 서버가 설치·활성이어야 한다. */
@@ -64,62 +74,62 @@ export const PROVIDER_CATALOG: ProviderSpec[] = [
   {
     id: "google_calendar", label: "Google 캘린더", labelEn: "Google Calendar", group: "google",
     capabilities: ["calendar.events.list", "calendar.events.create"],
-    requires: { envKeys: ["GOOGLE_OAUTH_TOKEN"] },
+    authKind: "oauth", requires: { envKeys: ["GOOGLE_OAUTH_TOKEN"] },
   },
   {
     id: "google_sheets", label: "Google 스프레드시트", labelEn: "Google Sheets", group: "google",
     capabilities: ["sheets.rows.read", "sheets.rows.append"],
-    requires: { envKeys: ["GOOGLE_OAUTH_TOKEN"] },
+    authKind: "oauth", requires: { envKeys: ["GOOGLE_OAUTH_TOKEN"] },
   },
   {
     id: "gmail", label: "Gmail", labelEn: "Gmail", group: "google",
     capabilities: ["mail.messages.list", "mail.messages.send"],
-    requires: { envKeys: ["GOOGLE_OAUTH_TOKEN"] },
+    authKind: "oauth", requires: { envKeys: ["GOOGLE_OAUTH_TOKEN"] },
   },
   {
     id: "outlook_calendar", label: "Outlook 캘린더", labelEn: "Outlook Calendar", group: "microsoft",
     capabilities: ["calendar.events.list", "calendar.events.create"],
-    requires: { envKeys: ["MICROSOFT_OAUTH_TOKEN"] },
+    authKind: "oauth", requires: { envKeys: ["MICROSOFT_OAUTH_TOKEN"] },
   },
   {
     id: "outlook_mail", label: "Outlook 메일", labelEn: "Outlook Mail", group: "microsoft",
     capabilities: ["mail.messages.list", "mail.messages.send"],
-    requires: { envKeys: ["MICROSOFT_OAUTH_TOKEN"] },
+    authKind: "oauth", requires: { envKeys: ["MICROSOFT_OAUTH_TOKEN"] },
   },
   {
     id: "apple_calendar", label: "Apple 캘린더", labelEn: "Apple Calendar", group: "apple",
     capabilities: ["calendar.events.list", "calendar.events.create"],
-    requires: {},
+    authKind: "none", requires: {},
   },
   {
     id: "slack", label: "Slack", labelEn: "Slack", group: "slack",
     capabilities: ["chat.messages.post", "chat.messages.list"],
-    requires: { mcpCatalogId: "slack", envKeys: ["SLACK_BOT_TOKEN"] },
+    authKind: "api-key", keyHelpUrl: "https://api.slack.com/apps", requires: { mcpCatalogId: "slack", envKeys: ["SLACK_BOT_TOKEN"] },
   },
   {
     id: "notion", label: "Notion", labelEn: "Notion", group: "notion",
     capabilities: ["docs.pages.read", "docs.pages.create", "docs.database.query"],
-    requires: { mcpCatalogId: "notion", envKeys: ["NOTION_API_KEY"] },
+    authKind: "api-key", keyHelpUrl: "https://www.notion.so/my-integrations", requires: { mcpCatalogId: "notion", envKeys: ["NOTION_API_KEY"] },
   },
   {
     id: "github", label: "GitHub", labelEn: "GitHub", group: "github",
     capabilities: ["code.issues.list", "code.issues.create", "code.repo.read"],
-    requires: { mcpCatalogId: "github", envKeys: ["GITHUB_TOKEN"] },
+    authKind: "api-key", keyHelpUrl: "https://github.com/settings/tokens", requires: { mcpCatalogId: "github", envKeys: ["GITHUB_TOKEN"] },
   },
   {
     id: "linear", label: "Linear", labelEn: "Linear", group: "atlassian",
     capabilities: ["tasks.issues.list", "tasks.issues.create"],
-    requires: { mcpCatalogId: "linear", envKeys: ["LINEAR_API_KEY"] },
+    authKind: "api-key", keyHelpUrl: "https://linear.app/settings/api", requires: { mcpCatalogId: "linear", envKeys: ["LINEAR_API_KEY"] },
   },
   {
     id: "local_files", label: "이 컴퓨터의 파일", labelEn: "Files on this computer", group: "local",
     capabilities: ["files.read", "files.write"],
-    requires: { mcpCatalogId: "filesystem" },
+    authKind: "none", requires: { mcpCatalogId: "filesystem" },
   },
   {
     id: "web_search", label: "웹 검색", labelEn: "Web search", group: "other",
     capabilities: ["web.search"],
-    requires: { mcpCatalogId: "brave-search", envKeys: ["BRAVE_API_KEY"] },
+    authKind: "api-key", keyHelpUrl: "https://brave.com/search/api/", requires: { mcpCatalogId: "brave-search", envKeys: ["BRAVE_API_KEY"] },
   },
 ];
 
@@ -253,6 +263,11 @@ export interface ProviderTask {
   }>;
   /** 이 묶음에서 채워야 하는 것 전부(중복 제거). */
   missing: { mcpCatalogIds: string[]; envKeys: string[] };
+  /**
+   * 이 묶음을 어떻게 연결하는가. 한 묶음 안에 섞이면 "mixed"다.
+   * 화면은 이걸 보고 폼을 낼지(api-key), 브라우저 로그인을 낼지(oauth) 정한다.
+   */
+  authKind: "oauth" | "api-key" | "none" | "mixed";
 }
 
 const GROUP_LABEL: Record<ProviderGroup, { ko: string; en: string }> = {
@@ -289,6 +304,7 @@ export function groupGapsByProvider(gaps: RequirementGap[]): ProviderTask[] {
         groupLabelEn: GROUP_LABEL[group].en,
         providers: [],
         missing: { mcpCatalogIds: [], envKeys: [] },
+        authKind: "none",
       };
       byGroup.set(group, task);
     }
@@ -299,6 +315,11 @@ export function groupGapsByProvider(gaps: RequirementGap[]): ProviderTask[] {
       task.providers.push(row);
     }
     row.gaps.push(gap);
+    if (provider) {
+      task.authKind = task.authKind === "none" || task.authKind === provider.authKind
+        ? provider.authKind
+        : "mixed";
+    }
     if (gap.missing.mcpCatalogId && !task.missing.mcpCatalogIds.includes(gap.missing.mcpCatalogId)) {
       task.missing.mcpCatalogIds.push(gap.missing.mcpCatalogId);
     }
