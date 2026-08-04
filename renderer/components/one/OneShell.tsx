@@ -2475,6 +2475,11 @@ export function OneShell() {
       setAutomationSheetOpen(true);
       return;
     }
+    if (action.id === "approve_graph" && action.targetId) {
+      // 승인 카드는 캔버스에 있다 — 상세 화면으로 보내면 누를 것을 못 찾는다.
+      router.push(`/automation/flow?id=${encodeURIComponent(action.targetId)}`);
+      return;
+    }
     if (action.id === "fix_automation" && action.targetId) {
       router.push(`/automation/detail?id=${encodeURIComponent(action.targetId)}`);
       return;

@@ -28,6 +28,43 @@ function latestFailedAutomation(): OneHomeSignalsV1["fixTarget"] {
   return null;
 }
 
+/**
+ * 승인을 기다리며 멈춘 그래프 — 고장이 아니라 사람이 안 눌러서 멈춘 상태다.
+ * 실패 신호와 섞으면 "고치기"로 안내되지만, 여기서 필요한 건 수리가 아니라 결정이다.
+ */
+function graphAwaitingApproval(): OneHomeSignalsV1["approvalTarget"] {
+  const rows = getDb().prepare(
+    `SELECT a.id AS id, a.name AS name, r.node_failures_json AS failures
+       FROM automations a
+       JOIN automation_runs r ON r.automation_id = a.id
+      WHERE r.node_failures_json IS NOT NULL
+        AND r.started_at = (
+          SELECT MAX(started_at) FROM automation_runs WHERE automation_id = a.id
+        )
+      ORDER BY r.started_at DESC
+      LIMIT 20`,
+  ).all() as Array<{ id: string; name: string; failures: string | null }>;
+  for (const row of rows) {
+    let parsed: Record<string, { code?: string }> | null = null;
+    try {
+      parsed = row.failures ? (JSON.parse(row.failures) as Record<string, { code?: string }>) : null;
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) continue;
+    const waiting = Object.entries(parsed).find(([, value]) => value?.code === "APPROVAL_REQUIRED");
+    if (waiting) {
+      return {
+        kind: "graph_awaiting_approval",
+        automationId: row.id,
+        name: row.name,
+        nodeLabel: waiting[0],
+      };
+    }
+  }
+  return null;
+}
+
 function usedWithin(nowMs: number, isoValue: string | null | undefined): boolean {
   if (!isoValue) return false;
   const parsed = Date.parse(isoValue);
@@ -87,5 +124,6 @@ export function getOneHomeSignals(nowMs = Date.now()): OneHomeSignalsV1 {
     firstRun: usageCount.n === 0,
     fixTarget,
     staleCapability,
+    approvalTarget: graphAwaitingApproval(),
   };
 }

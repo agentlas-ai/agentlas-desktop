@@ -1886,6 +1886,13 @@ export interface OneHomeSignalsV1 {
   fixTarget: { kind: "failed_automation"; automationId: string; name: string } | null;
   /** 최근 7일간 사용 흔적이 없는 기능(고정 우선순위에서 첫 번째). */
   staleCapability: "automation" | "experience" | "build" | "library" | null;
+  /**
+   * 사람의 승인을 기다리며 멈춰 있는 그래프. 실패와 다르다 — 고장난 게 아니라
+   * **사용자가 누르지 않아서** 멈춘 것이므로, 알려주지 않으면 영영 그대로 있는다.
+   */
+  approvalTarget:
+    | { kind: "graph_awaiting_approval"; automationId: string; name: string; nodeLabel: string }
+    | null;
 }
 
 /** launchd LaunchAgent 상태(설계 §2.6). macOS 전용. */

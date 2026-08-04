@@ -16,6 +16,7 @@ export type OneUseCaseChipId =
   | "experience"
   | "resume_build"
   | "fix_automation"
+  | "approve_graph"
   | "try_automation"
   | "try_experience"
   | "try_build"
@@ -40,7 +41,7 @@ interface OneUseCaseChipsProps {
 
 /**
  * 로테이션 슬롯 결정 — 우선순위는 항상 같다:
- * 1) 이 창에서 만들다 만 빌드(이어하기) 2) 최신 실행이 실패한 자동화(고치기)
+ * 1) 이 창에서 만들다 만 빌드(이어하기) 2) 승인 대기 그래프 3) 최신 실행이 실패한 자동화(고치기)
  * 3) 최근 7일 미사용 기능 소개. 신호가 없으면 슬롯 자체를 그리지 않는다.
  */
 export function resolveOneRotationChip(
@@ -48,6 +49,11 @@ export function resolveOneRotationChip(
   signals: OneHomeSignalsV1 | null,
 ): OneUseCaseChipAction | null {
   if (hasUnfinishedBuild) return { id: "resume_build" };
+  // 승인 대기는 실패보다 앞선다. 고장난 게 아니라 사용자가 누르지 않아서 멈춘 것이라,
+  // 알려주지 않으면 영영 그대로 있고 "고치기"로 안내하면 엉뚱한 길로 보낸다.
+  if (signals?.approvalTarget) {
+    return { id: "approve_graph", targetId: signals.approvalTarget.automationId };
+  }
   if (signals?.fixTarget) {
     return { id: "fix_automation", targetId: signals.fixTarget.automationId };
   }
@@ -70,6 +76,9 @@ const FIXED_CHIPS: Array<{ id: OneUseCaseChipId; key: "one.chips.build" | "one.c
 
 function rotationLabel(action: OneUseCaseChipAction, locale: "ko" | "en", signals: OneHomeSignalsV1 | null): string {
   if (action.id === "resume_build") return tFor(locale, "one.chips.resume_build");
+  if (action.id === "approve_graph") {
+    return tFor(locale, "one.chips.approve_graph", { name: signals?.approvalTarget?.name ?? "" });
+  }
   if (action.id === "fix_automation") {
     return tFor(locale, "one.chips.fix_automation", { name: signals?.fixTarget?.name ?? "" });
   }
