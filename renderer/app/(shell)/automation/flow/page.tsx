@@ -492,14 +492,26 @@ function AutomationFlowPage() {
     }
   }
 
-  async function runNow() {
+  async function runNow(dryRun = false) {
     const api = ipc();
     if (!api || !automation) return;
     setRunning(true);
-    setMessage(locale === "en" ? "Starting background run..." : "백그라운드 실행을 시작하는 중입니다...");
+    setMessage(
+      dryRun
+        ? (locale === "en"
+          ? "Starting a simulation. Nothing will be sent outside."
+          : "시뮬레이션을 시작합니다. 바깥으로 나가는 작업은 실행되지 않습니다.")
+        : (locale === "en" ? "Starting background run..." : "백그라운드 실행을 시작하는 중입니다..."),
+    );
     try {
-      await api.automations.runNow(automation.id);
-      setMessage(locale === "en" ? "Run started. Watch node status and history on the right." : "실행을 시작했습니다. 오른쪽에서 노드 상태와 기록을 확인하세요.");
+      await api.automations.runNow(automation.id, dryRun ? { dryRun: true } : undefined);
+      setMessage(
+        dryRun
+          ? (locale === "en"
+            ? "Simulation started. Steps that change something outside are skipped and listed instead."
+            : "시뮬레이션을 시작했습니다. 바깥을 바꾸는 단계는 실행하지 않고 목록으로 보여줍니다.")
+          : (locale === "en" ? "Run started. Watch node status and history on the right." : "실행을 시작했습니다. 오른쪽에서 노드 상태와 기록을 확인하세요."),
+      );
       const snap = await api.automations.latestRun(automation.id);
       if (snap?.nodeStates) setRunStates(snap.nodeStates);
     } catch {
@@ -573,6 +585,17 @@ function AutomationFlowPage() {
             </button>
             <button onClick={() => setEditing(true)} className="titlebar-nodrag" style={pillBtn(false)}>
               {t("auto.flow.edit")}
+            </button>
+            <button
+              onClick={() => void runNow(true)}
+              disabled={running}
+              className="titlebar-nodrag"
+              style={pillBtn(false)}
+              title={locale === "en"
+                ? "Run without sending anything outside, then see what a real run would have done."
+                : "바깥으로 아무것도 내보내지 않고 돌려본 뒤, 실전이었으면 무엇이 일어났을지 봅니다."}
+            >
+              {t("auto.flow.simulate")}
             </button>
             <button onClick={() => void runNow()} disabled={running} className="titlebar-nodrag" style={{ ...actionBtn, color: running ? "var(--muted-deep)" : "var(--ink)" }}>
               {running ? t("auto.flow.running") : t("auto.flow.run_now")}

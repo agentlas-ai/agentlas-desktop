@@ -3742,7 +3742,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("automations:updateGraph", (_e, id: string, graph: WorkflowGraph | null) =>
     updateAutomationGraph(id, graph),
   );
-  ipcMain.handle("automations:runNow", async (_e, id: string) => {
+  ipcMain.handle("automations:runNow", async (_e, id: string, opts?: { dryRun?: boolean }) => {
     const automation = getAutomation(id);
     if (!automation) throw new Error(`Automation not found: ${id}`);
     // 실행은 fire-and-forget이라 시작 이후의 실패는 렌더러에 도달하지 않는다. 시작조차
@@ -3752,7 +3752,8 @@ export function registerIpcHandlers(): void {
       throw new Error("automation_reconciliation_pending");
     }
     const { runAutomationNow } = await import("./automation-scheduler");
-    void runAutomationNow(id).catch((err) => {
+    const dryRun = opts?.dryRun === true;
+    void runAutomationNow(id, dryRun ? { dryRun: true } : undefined).catch((err) => {
       console.error(`[automation] run-now failed (${id}):`, err);
     });
   });

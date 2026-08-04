@@ -400,6 +400,8 @@ async function runOne(
     claim?: boolean;
     advanceSchedule?: boolean;
     allowDisabledLease?: boolean;
+    /** 시뮬레이션 실행 — 외부에 나가는 변경을 막고 무엇이 막혔는지 영수증으로 남긴다. */
+    dryRun?: boolean;
     triggerDelivery?: TriggerDeliveryHooks;
     triggerContext?: TriggerEventPayload;
     /** The scheduled fire time. Recording the run and advancing the schedule
@@ -617,6 +619,7 @@ async function runOne(
         const graphRun = Promise.resolve().then(() =>
           runGraph(a, a.graph!, {
             signal: controller.signal,
+            ...(opts?.dryRun ? { dryRun: true } : {}),
           runId,
           occurrenceId: opts?.triggerDelivery?.occurrenceId,
           initialVars: opts?.triggerContext,
@@ -1006,13 +1009,18 @@ export async function runDueAutomationsNow(now: Date = new Date()): Promise<void
 }
 
 /** "Run now" — 스케줄 무관하게 지정 자동화를 즉시 1회 실행(enabled 여부 무시). */
-export async function runAutomationNow(id: string): Promise<void> {
+export async function runAutomationNow(id: string, opts?: { dryRun?: boolean }): Promise<void> {
   if (installQuiescing) throw new Error("Automation execution is paused while an update is prepared");
   const a = getAutomation(id);
   if (!a) throw new Error(`Automation not found: ${id}`);
   // Disabled automations remain manually runnable, but still acquire the same
   // shared lease as every scheduled/headless execution.
-  await runOne(a, { claim: true, advanceSchedule: false, allowDisabledLease: true });
+  await runOne(a, {
+    claim: true,
+    advanceSchedule: false,
+    allowDisabledLease: true,
+    ...(opts?.dryRun ? { dryRun: true } : {}),
+  });
 }
 
 /**

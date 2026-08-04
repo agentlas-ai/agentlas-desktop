@@ -6098,7 +6098,8 @@ export interface AgentlasIpc {
     /** 기존 자동화의 이름/스케줄/타깃/프롬프트/트리거를 갱신(삭제-재생성 회피, 설계 한계 #7). */
     update: (id: string, patch: AutomationUpdatePatch) => Promise<Automation>;
     updateGraph: (id: string, graph: WorkflowGraph | null) => Promise<Automation>;
-    runNow: (id: string) => Promise<void>;
+    /** opts.dryRun: 시뮬레이션 실행 — 외부 변경을 막고 무엇이 막혔는지 남긴다. */
+    runNow: (id: string, opts?: { dryRun?: boolean }) => Promise<void>;
     listRuns: (id: string, limit?: number) => Promise<AutomationRunRecord[]>;
     listTriggerAttention: (automationId: string) => Promise<AutomationTriggerEventAttention[]>;
     reconcileTriggerEvent: (

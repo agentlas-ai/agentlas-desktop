@@ -635,7 +635,7 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("automations:update", id, patch),
     updateGraph: (id: string, graph: WorkflowGraph | null) =>
       ipcRenderer.invoke("automations:updateGraph", id, graph),
-    runNow: (id: string) => ipcRenderer.invoke("automations:runNow", id),
+    runNow: (id: string, opts?: { dryRun?: boolean }) => ipcRenderer.invoke("automations:runNow", id, opts),
     listRuns: (id: string, limit?: number) => ipcRenderer.invoke("automations:listRuns", id, limit),
     listTriggerAttention: (automationId: string) =>
       ipcRenderer.invoke("automations:listTriggerAttention", automationId),

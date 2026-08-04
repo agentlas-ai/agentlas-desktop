@@ -775,6 +775,7 @@ const dict = {
     // 자동화 플로우 뷰어(그래프)
     "auto.flow.view": "플로우 보기",
     "auto.flow.run_now": "지금 실행",
+    "auto.flow.simulate": "시뮬레이션",
     "auto.flow.running": "실행 중…",
     "auto.flow.activate": "켜기",
     "auto.action.enable": "켜기",
@@ -3102,6 +3103,7 @@ const dict = {
     // Automation flow viewer (graph)
     "auto.flow.view": "View flow",
     "auto.flow.run_now": "Run now",
+    "auto.flow.simulate": "Simulate",
     "auto.flow.running": "Running…",
     "auto.flow.activate": "Turn on",
     "auto.action.enable": "Turn on",
