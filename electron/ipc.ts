@@ -3810,6 +3810,88 @@ export function registerIpcHandlers(): void {
     };
   });
 
+  // 자연어로 **새 자동화를 만드는** 인터뷰 한 턴. 화면은 질문을 받아 사람에게 보여주고,
+  // 답을 모아 다시 이 자리로 돌아온다. 그래프는 청사진에서 코드가 짓는다 —
+  // 모델이 노드와 연결을 직접 쓰면, 사람이 겪은 결함(미선언 분기·고아 노드·상한 없는 반복)이
+  // 그대로 재발한다.
+  ipcMain.handle("automations:interviewGraph", async (_e, state: unknown) => {
+    const {
+      buildInterviewPrompt, parseInterviewTurn,
+    } = require("./workflow/graph-interview") as typeof import("./workflow/graph-interview");
+    const { buildGraphFromBlueprint } = require("../shared/graph-blueprint") as typeof import("../shared/graph-blueprint");
+    const current = state as import("./workflow/graph-interview").InterviewState;
+    if (!current || typeof current !== "object" || typeof current.request !== "string") {
+      return { ok: false, code: "INTERVIEW_STATE_INVALID", reason: "만들 내용을 읽지 못했습니다.", nextAction: "무엇을 자동으로 하고 싶은지 한 문장으로 말씀해 주세요." };
+    }
+    const { callConnectedModel } = require("./system-agents/judgment") as typeof import("./system-agents/judgment");
+    let text: string | null = null;
+    try {
+      text = await callConnectedModel({
+        systemPrompt: "You return only compact JSON. No prose.",
+        input: buildInterviewPrompt(current),
+        timeoutMs: 120_000,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        code: "INTERVIEW_MODEL_UNAVAILABLE",
+        reason: `AI를 부르지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+        nextAction: "잠시 뒤 다시 시도해 주세요.",
+      };
+    }
+    if (!text) {
+      return {
+        ok: false,
+        code: "INTERVIEW_MODEL_UNAVAILABLE",
+        reason: "AI가 답하지 못했습니다.",
+        nextAction: "잠시 뒤 다시 시도해 주세요.",
+      };
+    }
+    const parsed = parseInterviewTurn(text, current);
+    if (!parsed.ok) return parsed;
+    if (parsed.turn.kind === "ask") return { ok: true as const, kind: "ask" as const, questions: parsed.turn.questions };
+    const built = buildGraphFromBlueprint(parsed.turn.blueprint);
+    if (!built.ok) {
+      return {
+        ok: false,
+        code: "INTERVIEW_BLUEPRINT_INVALID",
+        reason: built.problems.map((p) => p.reason).slice(0, 4).join(" "),
+        nextAction: "만들고 싶은 것을 조금 더 구체적으로 말씀해 주시면 다시 시도합니다.",
+      };
+    }
+    return {
+      ok: true as const,
+      kind: "blueprint" as const,
+      blueprint: parsed.turn.blueprint,
+      graph: built.graph,
+      scheduleHuman: built.scheduleHuman,
+      triggerType: built.triggerType,
+    };
+  });
+
+  // 인터뷰가 끝난 뒤 실제로 만든다. **꺼진 상태로** 들어온다 — 사람이 보고 켜야 돈다.
+  ipcMain.handle("automations:createFromBlueprint", (_e, payload: unknown) => {
+    const input = payload as {
+      name?: string; graph?: unknown; scheduleHuman?: string; targetId?: string;
+    } | null;
+    if (!input?.name?.trim() || !input.graph) {
+      return { ok: false, code: "CREATE_INPUT_INVALID", reason: "만들 내용을 읽지 못했습니다.", nextAction: "다시 시도해 주세요." };
+    }
+    const existing = listAutomations().find((a) => a.name === input.name!.trim());
+    const name = existing ? `${input.name!.trim()} (2)` : input.name!.trim();
+    const created = createAutomation({
+      name,
+      scheduleHuman: input.scheduleHuman?.trim() || "manual",
+      targetType: "agent",
+      targetId: input.targetId?.trim() || "builtin-agentlas-orchestrator",
+      promptTemplate: name,
+      executionPermission: "read",
+      graphJson: input.graph as never,
+    });
+    toggleAutomation(created.id, false);
+    return { ok: true as const, id: created.id, name, renamed: !!existing };
+  });
+
   ipcMain.handle("automations:proposeGraphPatch", (_e, id: string, patch: unknown) => {
     const evaluated = evaluatePatchFor(id, patch);
     if ("ok" in evaluated) return evaluated;

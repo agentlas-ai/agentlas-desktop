@@ -6120,6 +6120,16 @@ export interface AgentlasIpc {
     runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) => Promise<void>;
     /** 이 그래프가 시작할 때 사람에게 받아야 하는 값(없으면 null). */
     inputRequirement: (id: string) => Promise<{ required: boolean; varName: string; label: string } | null>;
+    /** 자연어로 새 자동화를 만드는 인터뷰 한 턴. 질문이 오거나, 지어진 그래프가 온다. */
+    interviewGraph: (state: unknown) => Promise<
+      | { ok: true; kind: "ask"; questions: Array<{ id: string; question: string; why: string; choices?: string[] }> }
+      | { ok: true; kind: "blueprint"; blueprint: unknown; graph: WorkflowGraph; scheduleHuman: string; triggerType: "schedule" | "manual" }
+      | { ok: false; code: string; reason: string; nextAction: string }
+    >;
+    /** 인터뷰로 정해진 그래프를 실제로 만든다(꺼진 상태로). */
+    createFromBlueprint: (payload: { name: string; graph: WorkflowGraph; scheduleHuman: string; targetId?: string }) => Promise<
+      { ok: true; id: string; name: string; renamed: boolean } | { ok: false; code: string; reason: string; nextAction: string }
+    >;
     /**
      * 사용자의 한 문장을 그래프 변경 제안으로 바꾼다. **적용하지 않는다** —
      * 무엇이 바뀌는지 보여주고, 적용은 applyGraphPatch로만 한다.

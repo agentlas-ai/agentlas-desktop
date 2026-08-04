@@ -325,7 +325,8 @@
     "test:updater-not-applied": "npm run build:electron && electron scripts/test-updater-not-applied-recovery.cjs",
     "test:pairing-revocation": "npm run build:electron && node scripts/test-pairing-revocation-contract.cjs",
     "test:graph-interview-contract": "npm run build:electron && node scripts/test-graph-interview-contract.cjs",
-    "test:stream-decode-contract": "node scripts/test-stream-decode-contract.cjs"
+    "test:stream-decode-contract": "node scripts/test-stream-decode-contract.cjs",
+    "test:graph-describe-ui": "npm run build:renderer && node scripts/test-graph-describe-ui.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

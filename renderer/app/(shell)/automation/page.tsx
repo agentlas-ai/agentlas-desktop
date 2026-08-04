@@ -7,6 +7,7 @@ import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type { Automation, InstalledAgent, InstalledFirm } from "@/lib/types";
 import { IconBolt, IconBuilding, IconPlus, IconTrash } from "@/components/Icon";
+import { DescribeAutomation } from "@/components/automation/DescribeAutomation";
 
 export default function AutomationListPage() {
   const { t, locale } = useT();
@@ -152,6 +153,9 @@ export default function AutomationListPage() {
       </header>
 
       <section style={{ maxWidth: 880, margin: "24px auto", padding: "0 24px" }} data-tour-id="automation.list">
+        {/* 말로 설명해 만드는 입구를 목록 맨 위에 둔다 — 폼을 채우는 것보다 먼저 보여야
+            "무엇을 만들 수 있는지" 모르는 사람이 시작할 수 있다. */}
+        <DescribeAutomation locale={locale} onCreated={() => void refresh()} />
         {message ? (
           <div
             style={{

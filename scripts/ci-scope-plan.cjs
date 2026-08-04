@@ -121,7 +121,7 @@ const corePatterns = [
   // 자식 프로세스 출력 디코딩 — 여기가 깨지면 결과물의 한글이 깨진다.
   /^electron\/runtime\//,
   /^scripts\/lib\/agentlas-core-root\.cjs$/,
-  /^scripts\/test-(?:project-bootstrap-(?:desktop|core)|project-memory-read-boundary|model2vec-hybrid-parity|memory-hybrid-retrieval|curator-nest-core-query|v56-experience-cloud-migration|codex-model-discovery|workload-routing|build-workload-routing|hephaestus-settings-migration|auto-router-gates|stormbreaker-core-harness|stormbreaker-swarm-contract|swarm-engine|automation-result-contract|graph-kernel-contract|graph-canvas-ui|graph-patch-contract|graph-architect-contract|graph-interview-contract|stream-decode-contract|owned-agent-runtime-prompts|borrowed-task-force|borrowed-agent-fail-closed)\.cjs$/,
+  /^scripts\/test-(?:project-bootstrap-(?:desktop|core)|project-memory-read-boundary|model2vec-hybrid-parity|memory-hybrid-retrieval|curator-nest-core-query|v56-experience-cloud-migration|codex-model-discovery|workload-routing|build-workload-routing|hephaestus-settings-migration|auto-router-gates|stormbreaker-core-harness|stormbreaker-swarm-contract|swarm-engine|automation-result-contract|graph-kernel-contract|graph-canvas-ui|graph-patch-contract|graph-architect-contract|graph-interview-contract|graph-describe-ui|stream-decode-contract|owned-agent-runtime-prompts|borrowed-task-force|borrowed-agent-fail-closed)\.cjs$/,
 ];
 
 const planScopes = (rawFiles, options = {}) => {
