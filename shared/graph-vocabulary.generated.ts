@@ -49,6 +49,8 @@ export const GRAPH_ERROR_CODES = [
   "SWAP_NOT_AGENT_NODE",
   "SWAP_NO_MATCH",
   "SWAP_UNKNOWN_PROVIDER",
+  "TOOL_NODE_UNATTACHED",
+  "TOOL_NODE_UNCONFIGURED",
 ] as const;
 export type GraphErrorCode = (typeof GRAPH_ERROR_CODES)[number];
 
@@ -115,6 +117,8 @@ export const GRAPH_ERROR_CARDS: Record<string, { cardKey: string; nextActions: s
   REDUCER_WRITE_CONFLICT: { cardKey: "reducer_conflict", nextActions: ["rename_output", "use_append"] },
   RESUME_CONFLICT: { cardKey: "resume_conflict", nextActions: ["reload"] },
   SCHEMA_UNSUPPORTED_MAJOR: { cardKey: "update_required", nextActions: ["update_app"] },
+  TOOL_NODE_UNATTACHED: { cardKey: "tool_node_unattached", nextActions: ["edit_graph"] },
+  TOOL_NODE_UNCONFIGURED: { cardKey: "tool_node_unconfigured", nextActions: ["edit_node"] },
 };
 
 /**
@@ -148,6 +152,7 @@ export const GRAPH_VERBATIM_CODES = [
 export const GRAPH_FIELD_GRADES: Record<string, "critical" | "degradable" | "extension"> = {
   "$blob": "critical",
   "approval": "critical",
+  "catalog": "critical",
   "criteria": "critical",
   "effect": "critical",
   "ext": "extension",

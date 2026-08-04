@@ -442,6 +442,30 @@
       "retryable": false,
       "verbatim": true,
       "status": "implemented"
+    },
+    {
+      "code": "TOOL_NODE_UNCONFIGURED",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "tool_node_unconfigured",
+      "nextActions": [
+        "edit_node"
+      ],
+      "status": "implemented",
+      "note": "도구 단계인데 무슨 도구인지가 없다. 조용히 통과시키면 사용자는 붙였다고 믿는다."
+    },
+    {
+      "code": "TOOL_NODE_UNATTACHED",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "tool_node_unattached",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "implemented",
+      "note": "어느 에이전트에도 안 이어져 아무 데도 안 쓰인다. 커넥터 C06이 성립하지 않는 상태."
     }
   ]
 }

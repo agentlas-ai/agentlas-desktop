@@ -410,15 +410,29 @@
     {
       "kind": "tool",
       "title": "도구 노드",
-      "status": "drift",
-      "note": "커널이 직접 호출하지 않고 인접 agent 런타임 선언으로 컴파일된다(설계 §4.4). 노드로 그려지는데 스스로 하는 일이 없어, 사용자에게는 '놓았는데 아무 일도 안 하는 노드'로 보인다.",
+      "status": "implemented",
+      "note": "선으로 이어진 에이전트의 도구 설정으로 컴파일된다(C06). 안 이어졌거나 도구를 안 골랐으면 실행이 사유와 함께 멈춘다 — 조용히 통과시키지 않는다.",
       "functions": [
         {
           "id": "tool.compile",
-          "title": "인접 agent의 MCP 설정으로 컴파일",
+          "title": "이어진 에이전트에 붙는다",
           "status": "implemented",
-          "sub": []
+          "sub": [
+            {
+              "id": "tool.compile.declare",
+              "title": "무슨 도구인지 고르기",
+              "status": "implemented"
+            },
+            {
+              "id": "tool.compile.attach",
+              "title": "쓸 에이전트와 선으로 잇기",
+              "status": "implemented"
+            }
+          ]
         }
+      ],
+      "owns": [
+        "catalog"
       ]
     },
     {

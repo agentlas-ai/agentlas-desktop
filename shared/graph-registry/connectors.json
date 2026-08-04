@@ -1,0 +1,377 @@
+{
+  "wire": "graph/1",
+  "note": "블록 사이 커넥터 전수. `from`이 `to`에게 `envelope`를 건넨다. 여기 없는 연결은 제품에 없어야 하고, 여기 있는데 코드에 없으면 status가 specified여야 한다. 적합성 게이트가 양방향으로 대조한다 — 고아 블록(들어오거나 나가는 커넥터가 없는 블록)과 죽은 봉투(아무 커넥터도 안 쓰는 봉투)를 잡는다.",
+  "actors": [
+    {
+      "id": "person",
+      "title": "사람",
+      "note": "저작·승인·값 입력"
+    },
+    {
+      "id": "kernel",
+      "title": "그래프 커널",
+      "note": "electron/workflow/run-graph.ts"
+    },
+    {
+      "id": "scheduler",
+      "title": "스케줄러",
+      "note": "electron/automation-scheduler.ts"
+    },
+    {
+      "id": "runtime",
+      "title": "에이전트 런타임",
+      "note": "CLI/MCP 세션"
+    },
+    {
+      "id": "judge",
+      "title": "판정 엔진",
+      "note": "judgeRequired — 단어 목록이 아니다"
+    },
+    {
+      "id": "state",
+      "title": "실행 상태",
+      "note": "vars — 노드가 남긴 값들이 사는 곳"
+    },
+    {
+      "id": "journal",
+      "title": "저널",
+      "note": "graph_run_journal — 이 계층의 진실"
+    },
+    {
+      "id": "vault",
+      "title": "금고·MCP 설치",
+      "note": "값은 여기서만 산다"
+    },
+    {
+      "id": "model",
+      "title": "저작 모델",
+      "note": "인터뷰·Architect. 청사진만 말하고 그래프는 코드가 짓는다"
+    },
+    {
+      "id": "surface",
+      "title": "화면",
+      "note": "캔버스·실행기록·연결 창"
+    }
+  ],
+  "connectors": [
+    {
+      "id": "C01",
+      "title": "실행이 시작된다",
+      "from": "scheduler",
+      "to": "trigger",
+      "envelope": "graph/1/trigger.fire",
+      "status": "implemented",
+      "failures": [
+        "RESUME_CONFLICT"
+      ],
+      "note": "값이 필요한 그래프는 값 없이 시작하지 않는다 — 빈 문자열로 메꾸면 지어낸 결과가 정상 완료로 기록된다."
+    },
+    {
+      "id": "C02",
+      "title": "트리거가 첫 단계를 깨운다",
+      "from": "trigger",
+      "to": "agent|tool|action|output|condition|eval|transform",
+      "envelope": "graph/1/edge.activate",
+      "status": "implemented",
+      "failures": [
+        "NODE_NEVER_REACHED"
+      ],
+      "note": "엣지를 따라간다. 아무 데도 안 닿는 노드가 있으면 실행 전에 걸린다. 도구 노드도 여기로 활성화된다 — 커널이 방문해서 붙었는지 확인한다."
+    },
+    {
+      "id": "C03",
+      "title": "커널이 에이전트를 부른다",
+      "from": "agent",
+      "to": "runtime",
+      "envelope": "graph/1/envelope.invoke",
+      "status": "implemented",
+      "failures": [
+        "NODE_TIMEOUT",
+        "NODE_FAILED",
+        "APPROVAL_REQUIRED",
+        "APPROVAL_REJECTED"
+      ],
+      "note": "시뮬레이션은 permissions=read로 내려 보낸다 — 런타임이 쓰기 도구를 실제로 거부한다."
+    },
+    {
+      "id": "C04",
+      "title": "에이전트가 결과를 돌려준다",
+      "from": "runtime",
+      "to": "agent",
+      "envelope": "graph/1/port.output",
+      "status": "implemented",
+      "failures": [
+        "NODE_NO_RESULT",
+        "BLOB_UNRESOLVED"
+      ],
+      "note": "★결과와 소음이 다른 칸. 다음 노드로 가는 함수가 notes를 인자로 못 받는다."
+    },
+    {
+      "id": "C05",
+      "title": "에이전트가 도구를 쓴다",
+      "from": "runtime",
+      "to": "tool",
+      "envelope": "graph/1/envelope.toolcall",
+      "status": "specified",
+      "spec": "06 §6",
+      "note": "런타임이 자기 MCP 설정으로 부른다. 커널이 중간에 서지 않아 봉투가 아직 없다 — 다만 무슨 도구를 켤지는 C06이 정한다(그쪽은 실물)."
+    },
+    {
+      "id": "C06",
+      "title": "도구 노드가 옆 에이전트의 도구 설정으로 컴파일된다",
+      "from": "tool",
+      "to": "agent",
+      "envelope": "graph/1/tool.compile",
+      "status": "implemented",
+      "note": "그래프에서 이 도구 노드와 **선으로 이어진** 에이전트 노드에 붙는다(양방향). 화면에 그린 선이 곧 결합이라 화면과 실행이 어긋날 수 없다. 선언한 도구는 자동 선택 결과와 무관하게 켠다 — 안 그러면 '붙였는데 안 쓰인다'가 된다.",
+      "failures": [
+        "TOOL_NODE_UNCONFIGURED",
+        "TOOL_NODE_UNATTACHED"
+      ]
+    },
+    {
+      "id": "C07",
+      "title": "단계가 결과를 상태에 남긴다",
+      "from": "agent|action|output|eval|transform",
+      "to": "state",
+      "envelope": "graph/1/port.reduce",
+      "status": "implemented",
+      "failures": [
+        "REDUCER_WRITE_CONFLICT",
+        "REDUCER_MERGE_CONFLICT"
+      ],
+      "note": "이어붙이기 순서는 **노드 선언 순서**. 도착 순서에 기대면 재실행마다 값이 달라진다."
+    },
+    {
+      "id": "C08",
+      "title": "다음 단계가 앞 단계 값을 읽는다",
+      "from": "state",
+      "to": "agent|tool|action|output|condition|eval|transform",
+      "envelope": "graph/1/state.read",
+      "status": "implemented",
+      "failures": [
+        "NODE_INPUT_MISSING"
+      ],
+      "note": "{{이름}} 치환. 아무도 안 만드는 값을 참조하면 저작 시점에 걸린다."
+    },
+    {
+      "id": "C09",
+      "title": "갈림길이 한쪽만 살린다",
+      "from": "condition",
+      "to": "agent|action|output|eval|transform",
+      "envelope": "graph/1/edge.branch",
+      "status": "implemented",
+      "failures": [
+        "EDGE_CONDITION_UNRESOLVED",
+        "NO_MATCHING_EDGE"
+      ],
+      "note": "참/거짓을 선언하지 않은 엣지는 fail-closed. 예전엔 양쪽이 동시에 돌았다."
+    },
+    {
+      "id": "C10",
+      "title": "커널이 판정을 맡긴다",
+      "from": "eval",
+      "to": "judge",
+      "envelope": "graph/1/envelope.judge",
+      "status": "implemented",
+      "failures": [
+        "EVAL_INCOMPLETE",
+        "EVAL_UNAVAILABLE",
+        "NODE_INPUT_MISSING"
+      ],
+      "note": "★단어 매칭 금지. 그리고 만든 노드가 자기를 채점할 수 없다."
+    },
+    {
+      "id": "C11",
+      "title": "판정이 결과와 사유를 돌려준다",
+      "from": "judge",
+      "to": "state",
+      "envelope": "graph/1/port.reduce",
+      "status": "implemented",
+      "note": "verdict + reason 두 값. 사유가 없으면 다음 바퀴가 같은 걸 다시 만들고 같은 이유로 또 떨어진다."
+    },
+    {
+      "id": "C12",
+      "title": "다시 돈다",
+      "from": "agent|tool|action|output|condition|eval|transform",
+      "to": "loop",
+      "envelope": "graph/1/loop.back",
+      "status": "implemented",
+      "failures": [
+        "LOOP_BOUND_UNDECLARED",
+        "LOOP_BOUND_INVALID",
+        "LOOP_WITHOUT_EXIT",
+        "LOOP_LIMIT_REACHED"
+      ],
+      "note": "되돌아가는 엣지. 상한 미선언과 나가는 길 없음은 저작 시점에 거절."
+    },
+    {
+      "id": "C13",
+      "title": "왜 다시 도는지 다음 바퀴에 알린다",
+      "from": "loop",
+      "to": "state",
+      "envelope": "graph/1/loop.feedback",
+      "status": "implemented",
+      "note": "판정 사유를 다음 바퀴가 읽을 수 있게 남긴다."
+    },
+    {
+      "id": "C14",
+      "title": "커널이 무슨 일이 있었는지 남긴다",
+      "from": "kernel",
+      "to": "journal",
+      "envelope": "graph/1/journal.entry",
+      "status": "implemented",
+      "note": "★intent는 있는데 settle이 없으면 '부수효과가 나갔는지 모른다'는 뜻이고 그게 재실행 정지의 근거다."
+    },
+    {
+      "id": "C15",
+      "title": "사람이 나가도 된다고 정한다",
+      "from": "person",
+      "to": "kernel",
+      "envelope": "graph/1/approval.decision",
+      "status": "implemented",
+      "failures": [
+        "APPROVAL_REQUIRED",
+        "APPROVAL_REJECTED",
+        "RESUME_CONFLICT"
+      ],
+      "note": "결정은 (실행, 발생) 좌표에 묶인 1회용. 승인 하나가 다음 실행까지 재사용되지 않는다."
+    },
+    {
+      "id": "C16",
+      "title": "실행 결과가 기록으로 남는다",
+      "from": "kernel",
+      "to": "surface",
+      "envelope": "graph/1/run.record",
+      "status": "implemented",
+      "note": "★status(끝까지 돌았나)와 outcome(결과가 쓸 만한가)은 다른 질문의 답이라 칸이 다르다."
+    },
+    {
+      "id": "C17",
+      "title": "사람 말이 청사진이 된다",
+      "from": "person",
+      "to": "model",
+      "envelope": "graph/1/interview.turn",
+      "status": "implemented",
+      "failures": [
+        "INTERVIEW_STATE_INVALID",
+        "INTERVIEW_MODEL_UNAVAILABLE",
+        "INTERVIEW_BLUEPRINT_INVALID"
+      ],
+      "note": "청사진이 검증을 못 넘으면 모델이 '다 됐다'고 해도 질문으로 되돌린다."
+    },
+    {
+      "id": "C18",
+      "title": "청사진이 그래프가 된다",
+      "from": "model",
+      "to": "kernel",
+      "envelope": "graph/1/blueprint",
+      "status": "implemented",
+      "failures": [
+        "INTERVIEW_BLUEPRINT_INVALID",
+        "CREATE_INPUT_INVALID"
+      ],
+      "note": "★모델은 청사진만 말하고 노드 id·연결·핸들은 코드가 만든다. 그래서 미선언 분기·고아 노드·상한 없는 반복을 **만들 수 없다**."
+    },
+    {
+      "id": "C19",
+      "title": "고칠 것을 제안한다",
+      "from": "model",
+      "to": "kernel",
+      "envelope": "graph/1/patch",
+      "status": "implemented",
+      "failures": [
+        "PATCH_NO_GRAPH",
+        "ARCHITECT_NO_REQUEST",
+        "ARCHITECT_UNAVAILABLE"
+      ],
+      "note": "제안은 평가만 하고 쓰지 않는다. 적용은 저장 직전에 다시 평가한다(그새 그래프가 움직였을 수 있으므로)."
+    },
+    {
+      "id": "C20",
+      "title": "이 그래프가 무엇에 연결돼야 하는지 계산한다",
+      "from": "kernel",
+      "to": "surface",
+      "envelope": "graph/1/connection.report",
+      "status": "implemented",
+      "failures": [
+        "AUTOMATION_NOT_CONNECTED"
+      ],
+      "note": "모델에게 묻지 않는다 — 그래프와 이 컴퓨터의 실제 상태를 대조해 계산한다. 그래서 메시지가 언제나 맞다."
+    },
+    {
+      "id": "C21",
+      "title": "사람이 계정을 한 번에 연결한다",
+      "from": "person",
+      "to": "vault",
+      "envelope": "graph/1/connection.bind",
+      "status": "implemented",
+      "note": "★값은 브리지로 바로 간다. 화면·로그·모델 어디에도 남지 않는다(MCP: 자격은 LLM 컨텍스트를 통과해선 안 된다)."
+    },
+    {
+      "id": "C22",
+      "title": "사람이 도구·에이전트를 한 번에 바꾼다",
+      "from": "person",
+      "to": "kernel",
+      "envelope": "graph/1/binding.swap",
+      "status": "implemented",
+      "failures": [
+        "SWAP_UNKNOWN_PROVIDER",
+        "SWAP_CAPABILITY_MISMATCH",
+        "SWAP_NO_MATCH",
+        "SWAP_NODE_NOT_FOUND",
+        "SWAP_NOT_AGENT_NODE",
+        "SWAP_HUB_RELEASE_UNPINNED"
+      ],
+      "note": "할 수 없는 것으로는 안 바꿔준다 — 저장은 되는데 실행은 안 되는 그래프를 막는다."
+    },
+    {
+      "id": "C23",
+      "title": "슬롯을 편성으로 채운다",
+      "from": "agent",
+      "to": "kernel",
+      "envelope": "graph/1/workorder.slot",
+      "status": "specified",
+      "spec": "03 D19 / 06 §3",
+      "note": "에이전트 노드 = 워크오더 슬롯. 지금은 ref 직결이라 편성이 없다."
+    },
+    {
+      "id": "C24",
+      "title": "표면과 커널이 판을 맞춘다",
+      "from": "surface",
+      "to": "kernel",
+      "envelope": "graph/1/hello",
+      "status": "specified",
+      "spec": "06 §2.4",
+      "failures": [
+        "SCHEMA_UNSUPPORTED_MAJOR",
+        "WIRE_KIND_UNKNOWN"
+      ],
+      "note": "협상 중 간주한 값은 전부 보고한다(조용한 기본값 금지)."
+    },
+    {
+      "id": "C25",
+      "title": "예산을 쓴다",
+      "from": "agent",
+      "to": "kernel",
+      "envelope": "graph/1/budget.settle",
+      "status": "implemented",
+      "failures": [
+        "BUDGET_EXHAUSTED"
+      ],
+      "note": "토큰은 런타임이 실제로 보고하는 측정값이라 상한으로 쓸 수 있다. 금액은 모델·시점마다 달라지는 추정치라 상한의 단위로 쓰지 않는다."
+    },
+    {
+      "id": "C26",
+      "title": "한 단계가 끝나면 다음 단계가 깨어난다",
+      "from": "agent|tool|action|output|condition|eval|transform",
+      "to": "agent|tool|action|output|condition|eval|transform",
+      "envelope": "graph/1/edge.activate",
+      "status": "implemented",
+      "failures": [
+        "NODE_NEVER_REACHED"
+      ],
+      "note": "★가장 평범한 연결인데 이 지도에 없었다. 적합성 게이트가 '도구 블록으로 들어오는 실물 커넥터가 없다'고 잡아 주고서야 드러났다 — 지도가 실제보다 성겨도 코드는 돌기 때문에, 사람 눈으로는 안 보인다."
+    }
+  ]
+}

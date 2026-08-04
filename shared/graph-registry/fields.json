@@ -501,6 +501,20 @@
       "unknown": "노드 상한 없음(실행 전체 budget.maxTokens만 적용)",
       "status": "implemented",
       "note": "노드 상한은 그 노드의 누계, graph.budget은 실행 총계 — 비교 대상이 다르다. 금액이 아니라 토큰인 이유: 금액은 모델·시점마다 달라지는 추정치라 상한의 단위로 못 쓴다."
+    },
+    {
+      "name": "catalog",
+      "on": "node.config",
+      "appliesTo": [
+        "tool",
+        "output"
+      ],
+      "grade": "critical",
+      "type": "string",
+      "writer": "저작자",
+      "reader": "커널 → 런타임 MCP 설정",
+      "unknown": "TOOL_NODE_UNCONFIGURED",
+      "status": "implemented"
     }
   ]
 }

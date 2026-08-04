@@ -1450,6 +1450,30 @@ export async function runGraph(
     return target?.version ? { [target.slug]: target.version } : undefined;
   };
 
+  /**
+   * `tool` 노드가 옆 에이전트에 붙는다 (레지스트리 커넥터 C06 / graph/1 tool.compile).
+   *
+   * ★이 커넥터가 없던 동안 `tool` 노드는 **캔버스에 놓을 수 있는데 놓아도 아무 일이
+   *   일어나지 않는 노드**였다. 커널은 beginNode→completeNode만 하고 끝냈고, 그 노드의
+   *   catalog를 읽는 코드가 제품 어디에도 없었다. 사용자는 도구를 붙였다고 믿는다.
+   *
+   * 붙는 규칙: 이 에이전트 노드와 **엣지로 직접 이어진** tool 노드들(양방향).
+   * 그래프에 그린 선이 곧 결합이라, 화면과 실행이 어긋날 수 없다.
+   */
+  const declaredToolsForNode = (node: WorkflowNode): string[] | undefined => {
+    if (node.type !== "agent") return undefined;
+    const neighbours = new Set<string>();
+    for (const edge of graph.edges) {
+      if (edge.source === node.id) neighbours.add(edge.target);
+      if (edge.target === node.id) neighbours.add(edge.source);
+    }
+    const ids = (graph.nodes ?? [])
+      .filter((candidate) => candidate.type === "tool" && neighbours.has(candidate.id))
+      .map((candidate) => str(candidate.config, "catalog"))
+      .filter((id): id is string => !!id);
+    return ids.length ? [...new Set(ids)] : undefined;
+  };
+
   // skipped: 실행하지 않기로 확정된 노드. blockedEdges: condition이 drop한 엣지 id.
   // A resumed occurrence restores both sets from its digest-bound checkpoint.
   // 노드별 inbound 엣지(엣지 id + source) — 스킵 전파 판정용.
@@ -1812,12 +1836,38 @@ export async function runGraph(
         completeNode(node.id);
         status.set(node.id, "done");
         return;
-      case "tool":
-        // 툴은 러너가 직접 호출하지 않는다 — 인접 agent 런타임 선언(설계 §4.4).
+      case "tool": {
+        // 툴은 러너가 직접 호출하지 않는다 — 인접 agent 런타임 선언(커넥터 C06).
+        // 다만 **조용히 통과시키지 않는다**: 어느 에이전트에도 안 붙었거나 무엇을
+        // 붙일지 안 골랐으면, 사용자는 도구를 붙였다고 믿는데 실제로는 아무 일도
+        // 일어나지 않는다. 그 상태를 사유와 함께 세운다.
         beginNode(node);
+        const catalog = str(node.config, "catalog");
+        if (!catalog) {
+          failGraphNode(node, {
+            code: "TOOL_NODE_UNCONFIGURED",
+            reason: `도구 단계 "${node.label || node.id}"에 어떤 도구를 쓸지가 없습니다.`,
+            nextAction: "이 단계에서 쓸 도구를 골라 주세요.",
+          });
+          return;
+        }
+        const attached = (graph.nodes ?? []).some((candidate) =>
+          candidate.type === "agent"
+          && graph.edges.some((edge) =>
+            (edge.source === node.id && edge.target === candidate.id)
+            || (edge.target === node.id && edge.source === candidate.id)));
+        if (!attached) {
+          failGraphNode(node, {
+            code: "TOOL_NODE_UNATTACHED",
+            reason: `도구 "${catalog}"가 어느 에이전트 단계에도 이어져 있지 않아 아무 데도 쓰이지 않습니다.`,
+            nextAction: "이 도구를 쓸 에이전트 단계와 선으로 이어 주세요.",
+          });
+          return;
+        }
         completeNode(node.id);
         status.set(node.id, "done");
         return;
+      }
       case "agent":
       case "action":
       case "output": {
@@ -1971,6 +2021,8 @@ export async function runGraph(
               // 선언되지 않은 부수효과까지 실제로 막힌다(라벨만 붙이는 게 아니다).
               permissions: dryRun || automation.executionPermission === "read" ? "read" : "write",
               borrowAgents: hubBorrowForNode(node),
+              // 그래프에서 이 에이전트에 이어 붙인 도구들(커넥터 C06).
+              ...(declaredToolsForNode(node) ? { requiredToolCatalogIds: declaredToolsForNode(node) } : {}),
               borrowVersions: hubBorrowVersionsForNode(node),
               mcpBrowserProfileKey: `automation-${automation.id}`,
               toolMode: automation.toolMode ?? "auto",

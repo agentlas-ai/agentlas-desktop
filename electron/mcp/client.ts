@@ -1980,7 +1980,14 @@ export async function runMcpInvocation(
       }
       const cfg = await buildMcpConfigFile({
         ...(req.mcpBrowserProfileKey ? { browserProfileKey: req.mcpBrowserProfileKey } : {}),
-        catalogIds: [...installedTools.map((tool) => tool.id), ...hubBridgedServerIds],
+        // 그래프가 선으로 이어 선언한 도구는 자동 선택 결과와 **함께** 켠다.
+        // 선언은 사용자가 화면에 그려 넣은 것이라, 선택기가 안 골랐다고 빠지면
+        // "붙였는데 안 쓰인다"가 된다(커넥터 C06).
+        catalogIds: [...new Set([
+          ...installedTools.map((tool) => tool.id),
+          ...hubBridgedServerIds,
+          ...(req.requiredToolCatalogIds ?? []),
+        ])],
       });
       if (cfg) {
         mcpConfigPath = cfg.configPath;

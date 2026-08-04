@@ -3566,6 +3566,15 @@ export interface McpInvocationRequest {
   permissions?: "read" | "write" | "full";
   /** 자동화 등 백그라운드 실행에서 Playwright persistent profile lock을 피하기 위한 MCP 브라우저 프로필 키. */
   mcpBrowserProfileKey?: string;
+  /**
+   * 그래프가 **명시적으로 붙인** 도구들(MCP 카탈로그 id). 커넥터 C06 — 캔버스에서
+   * `tool` 노드를 이 에이전트에 선으로 이어 놓은 것들이다.
+   *
+   * ★자동 선택과 다르다: 자동 선택은 프롬프트를 보고 골라 주는 편의이고, 이건
+   * 사용자가 그래프에 그려 넣은 **선언**이다. 선언한 것은 선택 결과와 무관하게 켠다 —
+   * 안 그러면 화면에서는 도구를 붙였는데 실행에는 없는 상태가 된다.
+   */
+  requiredToolCatalogIds?: string[];
   /** 자동화가 저장한 실행 도구 선호도. */
   toolMode?: AutomationToolMode;
   /** 자동화가 저장한 Hub 사용 정책. */
