@@ -38,6 +38,14 @@ import { awaitAutomationRunnerWithAbortGrace } from "../automation-watchdog";
 import { buildStrategyDirective, collectAutomationFailureContext } from "../automation-strategy";
 import { AUTOMATION_CONTINUITY_OPEN, AUTOMATION_CONTINUITY_CLOSE } from "../automation-continuity";
 import { graphInputRequirement } from "../../shared/graph-trigger-input";
+import {
+  declaredEnvelope,
+  makeNodeEnvelope,
+  toDownstreamInput,
+  toHumanText,
+  type NodeNote,
+  type NodeOutputEnvelope,
+} from "../../shared/graph-node-protocol";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -1173,6 +1181,12 @@ export async function runGraph(
   }
   const vars: Record<string, unknown> = structuredClone(checkpoint.vars);
   const outputs: Record<string, string> = { ...checkpoint.outputs };
+  /**
+   * 노드가 낸 것의 **기계 채널**(agentlas.node-output.v1). `outputs`는 사람이 읽는 칸이고
+   * 이쪽은 결과·소음·출처가 갈려 있는 칸이다. 체크포인트 형태(문자열 맵)는 건드리지 않는다 —
+   * 재개는 사람이 읽는 칸만 복원하면 되고, 봉투는 그 실행 안에서만 뜻이 있다.
+   */
+  const envelopes: Record<string, NodeOutputEnvelope> = {};
   const completed = new Set(checkpoint.completedNodeIds);
   const skipped = new Set(checkpoint.skippedNodeIds);
   const blockedEdges = new Set(checkpoint.blockedEdgeIds);
@@ -1779,6 +1793,11 @@ export async function runGraph(
         // ★사유를 다음 바퀴가 읽을 수 있게 남긴다. 이게 없으면 반복이 같은 것을 다시 만들고
         //  같은 이유로 또 떨어진다(실측: 3바퀴를 돌아도 결과가 나아지지 않았다).
         vars[`${produces}_reason`] = verdict.reason ?? "";
+        // 판정도 봉투를 낸다. 판정은 텍스트가 아니라 **구조**라서 json으로 담는다 —
+        // 그래야 다음 단계가 문자열을 다시 뜯어 읽는(=단어장 판정으로 되돌아가는) 길이 없다.
+        envelopes[node.id] = declaredEnvelope(node.id, node.label || node.id, {
+          json: { verdict: verdict.verdict, reason: verdict.reason ?? null },
+        });
         outputs[node.id] = verdict.reason
           ? `${verdict.verdict}: ${verdict.reason}`
           : verdict.verdict;
@@ -1814,7 +1833,11 @@ export async function runGraph(
             effect,
             reason: `실전이었다면 "${label}"이 외부에 변경을 반영했을 지점입니다. 시뮬레이션이라 호출하지 않았습니다.`,
           });
-          outputs[node.id] = `[시뮬레이션] "${label}"은(는) 실행하지 않았습니다.`;
+          // 시뮬레이션 안내문도 같은 봉투에 담는다 — 노드마다 다른 모양을 내지 않는다.
+          envelopes[node.id] = declaredEnvelope(
+            node.id, label, `[시뮬레이션] "${label}"은(는) 실행하지 않았습니다.`,
+          );
+          outputs[node.id] = toHumanText(envelopes[node.id]);
           const producesKey = str(node.config, "produces");
           if (producesKey) {
             const applied = applyProduces(node, producesKey, outputs[node.id]);
@@ -1930,6 +1953,15 @@ export async function runGraph(
         try {
           // agent 노드는 config.ref가 가리키는 에이전트/회사 세션에서 실행(멀티에이전트 그래프).
           let runnerError: string | null = null;
+          // ── agentlas.node-output.v1 ──────────────────────────────────────
+          // 결과와 소음을 **다른 칸**에 담는다. 지금까지는 노드 사이를 건너는 것이
+          // `finalText` 평문 한 줄뿐이라 도구 잡음과 최종 답이 같은 문자열이었다
+          // (CrewAI와 같은 모양 — 조사한 다섯 중 가장 약한 쪽). AutoGen은 이 경계를
+          // 타입으로 강제한다: 이벤트에는 모델 입력으로 바뀌는 메서드가 아예 없다.
+          const notes: NodeNote[] = [];
+          // `final`이 안 와도 스트리밍으로 쌓인 본문은 결과다. 실제로 일을 해 놓고
+          // "결과가 없다"며 죽던 노드가 이 경로로 산다 — 다만 출처를 meta에 남긴다.
+          let accumulatedText = "";
           const result = await runMcpInvocation(
             {
               runId,
@@ -1946,8 +1978,21 @@ export async function runGraph(
               runtimeSelection: automation.runtimeSelection,
             },
             (ev) => {
+              // 소음은 소음 칸으로. 이 칸은 다음 노드의 입력이 되는 길이 아예 없다.
+              if (ev.kind === "tool-use" && ev.tool?.name) {
+                notes.push({ at: "tool", name: ev.tool.name, text: ev.status ?? ev.tool.name });
+              } else if (ev.kind === "thinking" && ev.text?.trim()) {
+                notes.push({ at: "thinking", text: ev.text.trim().slice(0, 2000) });
+              } else if (ev.kind === "partial") {
+                // partial은 같은 본문의 누적/증분이다 — 둘 다 다룬다.
+                if (typeof ev.text === "string") accumulatedText = ev.text;
+                else if (typeof ev.delta === "string") accumulatedText += ev.delta;
+              }
               if (ev.kind === "error") {
                 runnerError = ev.error?.message || "runner failed";
+                if (ev.error?.message) {
+                  notes.push({ at: "error", name: ev.error.code, text: ev.error.message.slice(0, 2000) });
+                }
               }
               if (
                 ev.kind === "tool-use" &&
@@ -2011,14 +2056,47 @@ export async function runGraph(
             persistWorkforcePrepareReceipt(result.workforcePrepareReceipt);
           }
           settleBudget(node, result.tokens);
-          const text = result.finalText ?? "";
           if (checkpointPersistenceError) throw checkpointPersistenceError;
           if (runnerError) throw new Error(runnerError);
-          if (!text.trim()) throw new Error(`Node "${node.label || node.id}" finished without an assistant result`);
-          outputs[node.id] = text;
+          const envelope = makeNodeEnvelope({
+            nodeId: node.id,
+            nodeLabel: node.label || node.id,
+            finalText: result.finalText,
+            accumulatedText,
+            notes,
+            tokens: result.tokens,
+            emptyReason: notes.some((note) => note.at === "tool")
+              ? `"${node.label || node.id}"이(가) 도구를 쓰긴 했지만 마지막에 결과를 내지 않았습니다.`
+              : `"${node.label || node.id}"이(가) 아무 결과도 내지 않았습니다.`,
+          });
+          envelopes[node.id] = envelope;
+          // ★결과 없음은 사유 없는 에러가 아니라 **타입 있는 실패**다.
+          // 예전엔 `finished without an assistant result` 한 줄이 전부라, 사람은 왜인지도
+          // 다음에 무엇을 할지도 알 수 없었다(페르소나가 실제로 여기서 막혔다).
+          if (envelope.result.kind === "none") {
+            failGraphNode(node, {
+              code: "NODE_NO_RESULT",
+              reason: envelope.result.reason,
+              nextAction: notes.some((note) => note.at === "tool")
+                ? "이 단계에 '무엇을 결과로 남겨라'를 한 줄 적어 주세요 — 도구만 쓰고 끝나면 다음 단계가 받을 것이 없습니다."
+                : "이 단계의 지시를 조금 더 구체적으로 적어 주세요.",
+            });
+            return;
+          }
+          outputs[node.id] = toHumanText(envelope);
           const produces = str(node.config, "produces");
           if (produces) {
-            const applied = applyProduces(node, produces, text);
+            // 다음 노드로 가는 길은 result뿐이다 — notes는 이 함수가 아예 못 본다.
+            const downstream = toDownstreamInput(envelope);
+            if (downstream === null) {
+              failGraphNode(node, {
+                code: "NODE_RESULT_TOO_LARGE",
+                reason: `"${node.label || node.id}"의 결과가 너무 커서 다음 단계로 값으로 넘길 수 없습니다.`,
+                nextAction: "이 단계가 요약이나 파일 경로를 남기도록 지시를 바꿔 주세요.",
+              });
+              return;
+            }
+            const applied = applyProduces(node, produces, downstream);
             if (applied) {
               failGraphNode(node, applied);
               return;
