@@ -641,7 +641,14 @@
       "envelope": "graph/1/trigger.command",
       "status": "specified",
       "phase": "staffing",
-      "note": "코드 안에서 그래프를 호출하는 길. 실측 0건. 지금 바깥에서 켤 수 있는 길은 webhook과 터미널 요청뿐이라, 사용자 코드에 자동화를 끼워 넣을 수 없다."
+      "note": "코드 안에서 그래프를 호출하는 길. **문은 만들었고 입구가 없다** — `shared/graph-run-request.ts`가 '켜도 되는가'를 판단하고 거절도 코드·사유·행동을 갖는다. 남은 것은 그 문을 두드릴 패키지(파이썬/노드)를 내는 일이고, 그건 배포 결정이 따르는 별건이다.\\n★문을 먼저 만든 이유: 입구마다 각자 검사하면 같은 그래프가 부르는 쪽에 따라 다르게 돈다. 실제로 터미널은 SQL을 직접 쓰고 데스크탑은 IPC에서 따로 검사하고 있었다.",
+      "failures": [
+        "RUN_REQUEST_REF_MISSING",
+        "RUN_REQUEST_REF_AMBIGUOUS",
+        "RUN_REQUEST_NOT_FOUND",
+        "RUN_REQUEST_DISABLED",
+        "RUN_REQUEST_INPUT_REQUIRED"
+      ]
     },
     {
       "id": "C48",
@@ -651,7 +658,14 @@
       "envelope": "graph/1/trigger.command",
       "status": "specified",
       "phase": "staffing",
-      "note": "그래프를 MCP 도구로 노출해 에이전트가 '이 자동화 돌려줘'로 부르게 하는 것. 실측 0건.\nn8n의 Call n8n Workflow Tool(ai_tool 커넥션)과 Dify의 '워크플로를 Tool로 발행'이 같은 자리다. 그래프를 유통하는 제품에서 조합 가능성의 상한을 정한다."
+      "note": "그래프를 MCP 도구로 노출해 에이전트가 '이 자동화 돌려줘'로 부르게 하는 것. **문은 만들었고 서버 표면이 없다** — 데스크탑은 지금 MCP 서버를 노출하지 않는다(실측: createServer/StdioServerTransport 0건). 서버를 여는 것은 보안 결정이 따르는 별건이다.\\nn8n의 Call n8n Workflow Tool(ai_tool 커넥션)과 Dify의 '워크플로를 Tool로 발행'이 같은 자리.",
+      "failures": [
+        "RUN_REQUEST_REF_MISSING",
+        "RUN_REQUEST_REF_AMBIGUOUS",
+        "RUN_REQUEST_NOT_FOUND",
+        "RUN_REQUEST_DISABLED",
+        "RUN_REQUEST_INPUT_REQUIRED"
+      ]
     }
   ],
   "phases": [

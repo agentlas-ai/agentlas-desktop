@@ -3984,17 +3984,24 @@ export function registerIpcHandlers(): void {
     id: string,
     opts?: { dryRun?: boolean; input?: Record<string, unknown> },
   ) => {
-    const automation = getAutomation(id);
-    if (!automation) throw new Error(`Automation not found: ${id}`);
-    // 시작 입력이 필요한 그래프인데 값이 없으면 실행하지 않는다. 예전에는 그냥 시작해서
-    // 빈 값으로 돌았고, 사용자는 결과를 보고서야 값이 빠진 걸 알았다.
-    const requirement = graphInputRequirement(automation.graph);
-    if (requirement && opts?.dryRun !== true) {
-      const value = opts?.input?.[requirement.varName];
-      if (typeof value !== "string" || !value.trim()) {
-        throw new Error("automation_input_required");
-      }
-      enqueueRunInput(id, { [requirement.varName]: value.trim() }, "desktop");
+    // 켜도 되는가의 판단은 **한 곳**에서 한다(shared/graph-run-request).
+    // 입구마다 각자 검사하면 같은 그래프가 부르는 쪽에 따라 다르게 돈다 — 지금 터미널은
+    // SQL을 직접 쓰고 여기는 IPC에서 따로 검사하고 있었다.
+    const { decideGraphRunRequest } = require("../shared/graph-run-request") as typeof import("../shared/graph-run-request");
+    const decision = decideGraphRunRequest({
+      ref: id,
+      automations: listAutomations(),
+      ...(opts?.input ? { input: opts.input } : {}),
+      ...(opts?.dryRun ? { dryRun: true } : {}),
+    });
+    if (!decision.ok) {
+      const error = new Error(decision.reason) as Error & { code?: string; nextAction?: string };
+      error.code = decision.code;
+      error.nextAction = decision.nextAction;
+      throw error;
+    }
+    for (const [name, value] of Object.entries(decision.input)) {
+      enqueueRunInput(id, { [name]: value }, "desktop");
     }
     // 실행은 fire-and-forget이라 시작 이후의 실패는 렌더러에 도달하지 않는다. 시작조차
     // 할 수 없는 조건은 여기서 먼저 걸러 즉시 알린다 — 그러지 않으면 버튼을 눌러도

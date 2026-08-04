@@ -542,6 +542,80 @@
       ],
       "status": "implemented",
       "note": "안쪽 그래프가 실패했다. 안쪽 사유를 그대로 들고 온다 — 바깥에서 '그냥 실패'로 뭉개지 않는다."
+    },
+    {
+      "code": "RUN_REQUEST_REF_MISSING",
+      "since": "1.0",
+      "severity": "request",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "RUN_REQUEST_REF_AMBIGUOUS",
+      "since": "1.0",
+      "severity": "request",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "이름이 겹친다. ★이름으로 부른 것이 어느 날 다른 그래프를 켜면 조용한 사고다 — 지어내지 않고 거절한다."
+    },
+    {
+      "code": "RUN_REQUEST_NOT_FOUND",
+      "since": "1.0",
+      "severity": "request",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "RUN_REQUEST_DISABLED",
+      "since": "1.0",
+      "severity": "request",
+      "retryable": false,
+      "cardKey": "run_request_disabled",
+      "nextActions": [
+        "enable_automation"
+      ],
+      "status": "implemented",
+      "note": "꺼진 것을 켜 주지 않는다. 요청이 조용히 대기열에 앉으면 사용자는 실행된 줄 안다."
+    },
+    {
+      "code": "RUN_REQUEST_INPUT_REQUIRED",
+      "since": "1.0",
+      "severity": "request",
+      "retryable": false,
+      "cardKey": "run_request_input",
+      "nextActions": [
+        "provide_input"
+      ],
+      "status": "implemented",
+      "note": "값 없이 시작하면 {{구멍}}이 빈 문자열로 메꿔져 지어낸 결과가 정상 완료로 기록된다."
+    },
+    {
+      "code": "INTERVIEW_OUTPUT_UNREADABLE",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": true,
+      "cardKey": "interview_unreadable",
+      "nextActions": [
+        "retry"
+      ],
+      "status": "implemented",
+      "note": "모델 답에서 읽을 수 있는 형태를 못 찾았다. ★스캔 범위를 넓히고서야 드러난 코드 — 게이트가 안 보던 파일에 있었다."
+    },
+    {
+      "code": "INTERVIEW_REPEATED_QUESTIONS",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": true,
+      "cardKey": "interview_repeated",
+      "nextActions": [
+        "retry",
+        "rephrase"
+      ],
+      "status": "implemented",
+      "note": "이미 답한 것만 다시 물으려 했다. asked[] id 기반 재질문 감지 — 조사한 다른 구현에는 이 방어가 없었다."
     }
   ]
 }
