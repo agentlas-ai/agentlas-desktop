@@ -69,29 +69,32 @@
       "since": "1.0",
       "phase": "run",
       "uiKey": "run_started",
-      "status": "implemented"
+      "status": "specified",
+      "note": "실행이 시작됐다는 저널 줄. **제품이 한 번도 안 쓴다** — startGraphRun은 automation_runs 행만 만들고 저널에 아무것도 안 남긴다. 그래서 실행 단위 타임라인이 노드 줄로만 이뤄져 있다."
     },
     {
       "kind": "run_validated",
       "since": "1.0",
       "phase": "run",
       "no-ui": true,
-      "status": "implemented"
+      "status": "specified",
+      "note": "그래프 검증을 통과했다는 줄. 방출부 0곳(코드 전체에서 이 문자열이 한 번도 안 나온다)."
     },
     {
       "kind": "suspended",
       "since": "1.0",
       "phase": "run",
       "uiKey": "run_suspended",
-      "status": "implemented",
-      "note": "조용한 정지는 고장과 구분되지 않는다 — 왜 멈췄고 무엇을 하면 되는지가 함께 남아야 한다."
+      "status": "specified",
+      "note": "재실행 정지 사실을 저널에 남기는 줄. 지금은 automations 테이블과 챗 메시지로만 남아, 저널만 읽어서는 왜 멈췄는지 알 수 없다."
     },
     {
       "kind": "resumed",
       "since": "1.0",
       "phase": "run",
       "uiKey": "run_resumed",
-      "status": "implemented"
+      "status": "specified",
+      "note": "정지에서 이어 시작했다는 줄. 방출부 0곳."
     },
     {
       "kind": "run_completed",
@@ -107,5 +110,6 @@
       "uiKey": "run_failed",
       "status": "implemented"
     }
-  ]
+  ],
+  "deadVocabularyNote": "★2026-08-04 적합성 게이트가 잡음: 13종 중 4종을 제품이 한 번도 내지 않는다. 선언만 있고 방출부가 없으면 '기록이 있다'는 착시를 준다 — 실행 단위 타임라인이 실제로는 비어 있다. 고치는 순서: 방출부를 만들고 status를 implemented로 올린다(반대로 하면 게이트가 막는다)."
 }

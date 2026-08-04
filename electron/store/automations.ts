@@ -7,6 +7,7 @@
 // 기록 + max_runs/end_at 종료를 적용한다. graph_json/schedule_json/timezone은 additive.
 import { judgedComputerUse } from "../system-agents/judged-tool-mode";
 import { createHash, randomUUID } from "node:crypto";
+import type { GraphJournalKindGenerated } from "../../shared/graph-vocabulary.generated";
 import { hostname } from "node:os";
 import { emitDesktopStoreChange } from "./change-bus";
 import { AUTOMATION_RUN_STALE_AFTER_MS, getDb } from "./db";
@@ -1701,14 +1702,13 @@ export function consumeRunInput(automationId: string, runId: string): PendingRun
 // append-only. 체크포인트(현재 상태 1건)와 달리 순서가 남으므로, "의도는 남았는데
 // 정산이 없다" 같은 부분 실패 신호를 사후에 읽을 수 있다.
 
-export type GraphJournalKind =
-  | "run_created" | "run_validated"
-  | "node_reserved" | "node_intent" | "node_settled" | "node_routed"
-  | "node_retry" | "node_failed"
-  // 큰 결과가 값이 아니라 참조로 남았다는 기록. 조용한 절단 금지의 이행(06 §4.6).
-  | "blob_externalized"
-  | "suspended" | "resumed"
-  | "run_completed" | "run_failed";
+/**
+ * 저널 종류. **선언은 레지스트리에 있고 여기는 파생이다**(06 §2.1 사본 금지).
+ * 값을 늘리려면 `shared/graph-registry/journal.json` 을 고치고
+ * `node scripts/gen-graph-registry.cjs` 를 다시 돌린다 — 여기 손으로 적으면
+ * 적합성 게이트가 잡는다.
+ */
+export type GraphJournalKind = GraphJournalKindGenerated;
 
 export interface GraphJournalEntry {
   seq: number;

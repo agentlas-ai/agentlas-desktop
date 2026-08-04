@@ -1953,7 +1953,7 @@ export async function runGraph(
         try {
           // agent 노드는 config.ref가 가리키는 에이전트/회사 세션에서 실행(멀티에이전트 그래프).
           let runnerError: string | null = null;
-          // ── agentlas.node-output.v1 ──────────────────────────────────────
+          // ── graph/1 port.output (shared/graph-registry/envelopes.json) ────
           // 결과와 소음을 **다른 칸**에 담는다. 지금까지는 노드 사이를 건너는 것이
           // `finalText` 평문 한 줄뿐이라 도구 잡음과 최종 답이 같은 문자열이었다
           // (CrewAI와 같은 모양 — 조사한 다섯 중 가장 약한 쪽). AutoGen은 이 경계를
