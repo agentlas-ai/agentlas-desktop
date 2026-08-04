@@ -116,7 +116,7 @@ const corePatterns = [
   /^electron\/store\/automations\.ts$/,
   /^electron\/store\/graph-reconciliation\.ts$/,
   /^scripts\/lib\/agentlas-core-root\.cjs$/,
-  /^scripts\/test-(?:project-bootstrap-(?:desktop|core)|project-memory-read-boundary|model2vec-hybrid-parity|memory-hybrid-retrieval|curator-nest-core-query|v56-experience-cloud-migration|codex-model-discovery|workload-routing|build-workload-routing|hephaestus-settings-migration|auto-router-gates|stormbreaker-core-harness|stormbreaker-swarm-contract|swarm-engine|automation-result-contract|graph-kernel-contract|graph-canvas-ui|owned-agent-runtime-prompts|borrowed-task-force|borrowed-agent-fail-closed)\.cjs$/,
+  /^scripts\/test-(?:project-bootstrap-(?:desktop|core)|project-memory-read-boundary|model2vec-hybrid-parity|memory-hybrid-retrieval|curator-nest-core-query|v56-experience-cloud-migration|codex-model-discovery|workload-routing|build-workload-routing|hephaestus-settings-migration|auto-router-gates|stormbreaker-core-harness|stormbreaker-swarm-contract|swarm-engine|automation-result-contract|graph-kernel-contract|graph-canvas-ui|graph-patch-contract|owned-agent-runtime-prompts|borrowed-task-force|borrowed-agent-fail-closed)\.cjs$/,
 ];
 
 const planScopes = (rawFiles, options = {}) => {
