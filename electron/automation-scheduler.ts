@@ -931,10 +931,14 @@ async function runOne(
     }
     // 실패 피드백·수리 — run_history 기록(markAutomationRun) 이후에 호출해야
     // countConsecutiveFailures가 이번 실패를 포함한다.
-    // 판정 불가는 실패가 아니다: 실행은 끝까지 갔고 우리가 결과를 못 읽었을 뿐이므로,
-    // "결과가 수용되지 않았다"는 거짓 전제로 복구 워커를 돌리지 않는다(부수효과 반복 위험).
+    // 복구 워커는 "제품이 고칠 수 있는 것"에만 보낸다.
+    //  · 판정 불가: 실행은 끝까지 갔고 우리가 결과를 못 읽었을 뿐이다.
+    //  · needs_input: 사람이 결정하거나 값을 줘야 끝나는 상태다. 모델을 보내면
+    //    "결과가 수용되지 않았다"는 거짓 전제로 사람만 할 수 있는 일을 시키는 셈이고,
+    //    매 실행마다 호출이 한 번씩 더 나간다. 이 상태는 사용자에게 표면화하면 된다.
+    // blocked·partial·error는 외부 제약 해소나 재시도로 실제로 나아질 수 있으므로 그대로 둔다.
     if (
-      runStatus !== "ok" && runStatus !== "skipped" &&
+      runStatus !== "ok" && runStatus !== "skipped" && runStatus !== "needs_input" &&
       !judgmentUnavailableRun && !parentMissing && !leaseOwnershipLost
     ) {
       try {
