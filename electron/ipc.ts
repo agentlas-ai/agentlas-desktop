@@ -3758,6 +3758,28 @@ export function registerIpcHandlers(): void {
     });
   });
   ipcMain.handle("automations:latestRun", (_e, id: string) => getLatestGraphRun(id));
+  // 승인은 사람의 결정이라 판정 모델 가용성과 무관하게 동작해야 한다. 결정은 가장 최근
+  // 실행의 occurrence에 묶는다 — 승인 하나가 다음 실행까지 조용히 재사용되면 안 된다.
+  ipcMain.handle(
+    "automations:decideNodeApproval",
+    (_e, id: string, nodeId: string, decision: "approved" | "rejected") => {
+      const automation = getAutomation(id);
+      if (!automation) throw new Error(`Automation not found: ${id}`);
+      if (typeof nodeId !== "string" || !nodeId.trim()) throw new Error("automation_approval_node_invalid");
+      if (decision !== "approved" && decision !== "rejected") {
+        throw new Error("automation_approval_decision_invalid");
+      }
+      const { getLatestGraphRunOccurrence, recordNodeApproval } = require("./store/automations") as
+        typeof import("./store/automations");
+      const occurrenceId = getLatestGraphRunOccurrence(id);
+      if (!occurrenceId) {
+        // 승인할 대상이 없는데 승인한 척하지 않는다.
+        return { ok: false, occurrenceId: null };
+      }
+      recordNodeApproval({ automationId: id, occurrenceId, nodeId, decision });
+      return { ok: true, occurrenceId };
+    },
+  );
   // 멈춘 자동화의 "지금 무엇을 하면 되는지" — 실행 가능한 조치까지 포함해 계산한다.
   ipcMain.handle("automations:planFix", async (_e, id: string) => {
     const { planAutomationFix } = await import("./automation-fix");

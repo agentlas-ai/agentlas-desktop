@@ -904,12 +904,20 @@ export function getLatestGraphRun(automationId: string): WorkflowRunSnapshot | n
   } catch {
     nodeStates = {};
   }
+  let nodeFailures: Record<string, { code: string; reason: string; nextAction: string }> = {};
+  try {
+    const raw = (row as { node_failures_json?: string | null }).node_failures_json;
+    nodeFailures = raw ? (JSON.parse(raw) as typeof nodeFailures) : {};
+  } catch {
+    nodeFailures = {};
+  }
   return {
     runId: row.id,
     automationId: row.automation_id ?? automationId,
     startedAt: row.started_at ?? "",
     status: (row.status as WorkflowRunSnapshot["status"]) ?? "running",
     nodeStates,
+    ...(Object.keys(nodeFailures).length > 0 ? { nodeFailures } : {}),
   };
 }
 
@@ -1475,4 +1483,111 @@ export function releaseAutomationRun(id: string, owner: string): boolean {
     .run(id, owner);
   if (result.changes > 0) emitDesktopStoreChange({ entity: "automation", id });
   return result.changes > 0;
+}
+
+// ── 노드 승인 브레이크 ────────────────────────────────────────────────────
+// "이 단계는 사람이 확인한 뒤에 나간다"는 계약. 승인은 판정이 아니라 사람의 결정이므로
+// 모델 가용성과 무관하게 동작해야 하고, 앱을 껐다 켜도 남아야 한다.
+
+export type AutomationNodeApprovalDecision = "approved" | "rejected";
+
+export interface AutomationNodeApproval {
+  automationId: string;
+  occurrenceId: string;
+  nodeId: string;
+  decision: AutomationNodeApprovalDecision;
+  decidedAt: string;
+  decidedBy: string;
+}
+
+/** 이 occurrence에 대한 결정(매번 승인 모드). */
+export function getNodeApproval(
+  automationId: string,
+  occurrenceId: string,
+  nodeId: string,
+): AutomationNodeApproval | null {
+  const row = getDb().prepare(
+    `SELECT automation_id, occurrence_id, node_id, decision, decided_at, decided_by
+       FROM automation_node_approvals
+      WHERE automation_id = ? AND occurrence_id = ? AND node_id = ?`,
+  ).get(automationId, occurrenceId, nodeId) as
+    | { automation_id: string; occurrence_id: string; node_id: string; decision: string; decided_at: string; decided_by: string }
+    | undefined;
+  if (!row) return null;
+  return {
+    automationId: row.automation_id,
+    occurrenceId: row.occurrence_id,
+    nodeId: row.node_id,
+    decision: row.decision === "rejected" ? "rejected" : "approved",
+    decidedAt: row.decided_at,
+    decidedBy: row.decided_by,
+  };
+}
+
+/** 이 노드에 대한 가장 최근 승인(첫 1회만 승인 모드). 거절은 재사용하지 않는다. */
+export function getLatestNodeApproval(
+  automationId: string,
+  nodeId: string,
+): AutomationNodeApproval | null {
+  const row = getDb().prepare(
+    `SELECT automation_id, occurrence_id, node_id, decision, decided_at, decided_by
+       FROM automation_node_approvals
+      WHERE automation_id = ? AND node_id = ? AND decision = 'approved'
+      ORDER BY decided_at DESC LIMIT 1`,
+  ).get(automationId, nodeId) as
+    | { automation_id: string; occurrence_id: string; node_id: string; decision: string; decided_at: string; decided_by: string }
+    | undefined;
+  if (!row) return null;
+  return {
+    automationId: row.automation_id,
+    occurrenceId: row.occurrence_id,
+    nodeId: row.node_id,
+    decision: "approved",
+    decidedAt: row.decided_at,
+    decidedBy: row.decided_by,
+  };
+}
+
+export function recordNodeApproval(input: {
+  automationId: string;
+  occurrenceId: string;
+  nodeId: string;
+  decision: AutomationNodeApprovalDecision;
+  decidedBy?: string;
+}): AutomationNodeApproval {
+  const decidedAt = new Date().toISOString();
+  const decidedBy = input.decidedBy?.trim() || "user";
+  getDb().prepare(
+    `INSERT INTO automation_node_approvals
+       (automation_id, occurrence_id, node_id, decision, decided_at, decided_by)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(automation_id, occurrence_id, node_id)
+     DO UPDATE SET decision = excluded.decision, decided_at = excluded.decided_at, decided_by = excluded.decided_by`,
+  ).run(input.automationId, input.occurrenceId, input.nodeId, input.decision, decidedAt, decidedBy);
+  emitDesktopStoreChange({ entity: "automation", id: input.automationId });
+  return {
+    automationId: input.automationId,
+    occurrenceId: input.occurrenceId,
+    nodeId: input.nodeId,
+    decision: input.decision,
+    decidedAt,
+    decidedBy,
+  };
+}
+
+/** 승인 결정을 묶을 대상 — 가장 최근 실행의 occurrence. 없으면 null(지어내지 않는다). */
+export function getLatestGraphRunOccurrence(automationId: string): string | null {
+  const row = getDb().prepare(
+    "SELECT occurrence_id FROM automation_runs WHERE automation_id = ? ORDER BY started_at DESC LIMIT 1",
+  ).get(automationId) as { occurrence_id: string | null } | undefined;
+  return row?.occurrence_id ?? null;
+}
+
+/** 실패 3요소를 실행 스냅샷에 남긴다. 화면 실패 카드가 읽는 유일한 출처다. */
+export function saveGraphRunFailures(
+  runId: string,
+  failures: Record<string, { code: string; reason: string; nextAction: string }>,
+): void {
+  const payload = Object.keys(failures).length > 0 ? JSON.stringify(failures) : null;
+  getDb().prepare("UPDATE automation_runs SET node_failures_json = ? WHERE id = ?").run(payload, runId);
 }

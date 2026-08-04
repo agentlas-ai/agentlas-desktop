@@ -3705,6 +3705,11 @@ export interface WorkflowRunSnapshot {
   status: "running" | "ok" | "error";
   /** 노드 id → 마지막 상태. */
   nodeStates: Record<string, WorkflowNodeRunState>;
+  /**
+   * 노드 id → 왜 멈췄고 지금 무엇을 누르면 되는지.
+   * 상태 단어만으로는 실패 카드가 아무 말도 할 수 없다.
+   */
+  nodeFailures?: Record<string, { code: string; reason: string; nextAction: string }>;
 }
 
 /** 워킹 폴더 트리의 한 엔트리 — lazy expand. dir이면 hasChildren 힌트로 chevron 표시. */
@@ -6100,6 +6105,12 @@ export interface AgentlasIpc {
     updateGraph: (id: string, graph: WorkflowGraph | null) => Promise<Automation>;
     /** opts.dryRun: 시뮬레이션 실행 — 외부 변경을 막고 무엇이 막혔는지 남긴다. */
     runNow: (id: string, opts?: { dryRun?: boolean }) => Promise<void>;
+    /** 승인 브레이크가 걸린 단계의 결정을 기록한다. 승인은 판정이 아니라 사람의 결정이다. */
+    decideNodeApproval: (
+      id: string,
+      nodeId: string,
+      decision: "approved" | "rejected",
+    ) => Promise<{ ok: boolean; occurrenceId: string | null }>;
     listRuns: (id: string, limit?: number) => Promise<AutomationRunRecord[]>;
     listTriggerAttention: (automationId: string) => Promise<AutomationTriggerEventAttention[]>;
     reconcileTriggerEvent: (

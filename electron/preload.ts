@@ -636,6 +636,8 @@ const api: AgentlasIpc = {
     updateGraph: (id: string, graph: WorkflowGraph | null) =>
       ipcRenderer.invoke("automations:updateGraph", id, graph),
     runNow: (id: string, opts?: { dryRun?: boolean }) => ipcRenderer.invoke("automations:runNow", id, opts),
+    decideNodeApproval: (id: string, nodeId: string, decision: "approved" | "rejected") =>
+      ipcRenderer.invoke("automations:decideNodeApproval", id, nodeId, decision),
     listRuns: (id: string, limit?: number) => ipcRenderer.invoke("automations:listRuns", id, limit),
     listTriggerAttention: (automationId: string) =>
       ipcRenderer.invoke("automations:listTriggerAttention", automationId),

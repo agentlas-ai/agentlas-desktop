@@ -144,6 +144,11 @@ function AutomationFlowPage() {
   const [rfEdges, setRfEdges, onEdgesChangeBase] = useEdgesState<Edge>([]);
   // 노드 id → 라이브 실행 상태(설계 §5 P2). 라이브 채널 이벤트 + latestRun 하이드레이트로 채움.
   const [runStates, setRunStates] = useState<Record<string, WorkflowNodeRunState>>({});
+  // 왜 멈췄고 지금 무엇을 누르면 되는지. 상태 단어만 있는 화면은 사용자에게 아무 말도 못 한다.
+  const [nodeFailures, setNodeFailures] = useState<
+    Record<string, { code: string; reason: string; nextAction: string }>
+  >({});
+  const [approvalBusy, setApprovalBusy] = useState(false);
   const runStatesRef = useRef<Record<string, WorkflowNodeRunState>>({});
   runStatesRef.current = runStates;
 
@@ -261,6 +266,7 @@ function AutomationFlowPage() {
     // 초기 하이드레이트.
     void api?.automations.latestRun(automation.id).then((snap) => {
       if (!cancelled && snap && snap.nodeStates) setRunStates(snap.nodeStates);
+      if (!cancelled) setNodeFailures(snap?.nodeFailures ?? {});
     });
     if (!events) return;
     const channel = api?.automations.liveRunChannel(automation.id);
@@ -492,6 +498,40 @@ function AutomationFlowPage() {
     }
   }
 
+  async function decideApproval(nodeId: string, decision: "approved" | "rejected") {
+    const api = ipc();
+    if (!api || !automation) return;
+    setApprovalBusy(true);
+    try {
+      const result = await api.automations.decideNodeApproval(automation.id, nodeId, decision);
+      if (!result?.ok) {
+        // 승인할 실행이 없으면 승인한 척하지 않는다.
+        setMessage(locale === "en"
+          ? "There is no run waiting on this step right now."
+          : "지금 이 단계에서 기다리고 있는 실행이 없습니다.");
+        return;
+      }
+      setNodeFailures((prev) => {
+        const next = { ...prev };
+        delete next[nodeId];
+        return next;
+      });
+      if (decision === "approved") {
+        setMessage(locale === "en"
+          ? "Approved. Run it again to continue from this step."
+          : "승인했습니다. 다시 실행하면 이 단계부터 이어집니다.");
+      } else {
+        setMessage(locale === "en"
+          ? "Recorded. This step will not run until you approve it."
+          : "기록했습니다. 승인하기 전까지 이 단계는 실행되지 않습니다.");
+      }
+    } catch {
+      setMessage(locale === "en" ? "The decision was not saved." : "결정을 저장하지 못했습니다.");
+    } finally {
+      setApprovalBusy(false);
+    }
+  }
+
   async function runNow(dryRun = false) {
     const api = ipc();
     if (!api || !automation) return;
@@ -514,6 +554,7 @@ function AutomationFlowPage() {
       );
       const snap = await api.automations.latestRun(automation.id);
       if (snap?.nodeStates) setRunStates(snap.nodeStates);
+      setNodeFailures(snap?.nodeFailures ?? {});
     } catch {
       setMessage(locale === "en" ? "Run did not start." : "실행을 시작하지 못했습니다.");
     } finally {
@@ -623,6 +664,58 @@ function AutomationFlowPage() {
           {message || t("auto.flow.unsaved")}
         </div>
       ) : null}
+
+      {/* 멈춘 이유와 지금 누를 행동. 승인 대기는 버튼까지 함께 준다 —
+          사유만 보여주고 무엇을 하라는 말이 없는 실패 표면은 결함이다. */}
+      {Object.entries(nodeFailures).map(([failedNodeId, failure]) => {
+        const nodeLabel = rfNodes.find((n) => n.id === failedNodeId)?.data?.label ?? failedNodeId;
+        const awaitingApproval = failure.code === "APPROVAL_REQUIRED";
+        return (
+          <div
+            key={failedNodeId}
+            className="titlebar-nodrag"
+            data-testid={`node-failure-${failedNodeId}`}
+            style={{
+              margin: "12px 32px 0",
+              padding: "12px 14px",
+              borderRadius: "var(--radius-md)",
+              border: `1px solid ${awaitingApproval ? "var(--accent-soft)" : "var(--paper-edge)"}`,
+              background: "var(--paper)",
+              fontSize: 12,
+              color: "var(--ink)",
+              display: "grid",
+              gap: 8,
+            }}
+          >
+            <div style={{ fontWeight: 600 }}>{String(nodeLabel)}</div>
+            <div style={{ color: "var(--ink-soft)", lineHeight: 1.6 }}>{failure.reason}</div>
+            <div style={{ color: "var(--muted-deep)", lineHeight: 1.6 }}>{failure.nextAction}</div>
+            {awaitingApproval ? (
+              <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
+                <button
+                  className="titlebar-nodrag"
+                  disabled={approvalBusy}
+                  onClick={() => void decideApproval(failedNodeId, "approved")}
+                  style={actionBtn}
+                >
+                  {t("auto.flow.approve_and_continue")}
+                </button>
+                <button
+                  className="titlebar-nodrag"
+                  disabled={approvalBusy}
+                  onClick={() => void decideApproval(failedNodeId, "rejected")}
+                  style={pillBtn(false)}
+                >
+                  {t("auto.flow.approve_reject")}
+                </button>
+              </div>
+            ) : null}
+            <div style={{ fontSize: 10, color: "var(--muted-deep)", fontFamily: "var(--font-mono)" }}>
+              {failure.code}
+            </div>
+          </div>
+        );
+      })}
 
       {editing && issues.length > 0 ? (
         <div

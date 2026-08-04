@@ -24,6 +24,9 @@ import {
   saveGraphRunCheckpoint,
   updateGraphRunNode,
   finishGraphRun,
+  getNodeApproval,
+  getLatestNodeApproval,
+  saveGraphRunFailures,
 } from "../store/automations";
 import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
@@ -82,6 +85,23 @@ function nodeTimeoutMs(node: WorkflowNode): number {
 function nodeEffect(node: WorkflowNode): GraphNodeEffect {
   const raw = str(node.config, "effect");
   return raw === "pure" || raw === "read" || raw === "mutation" ? raw : "read";
+}
+
+/**
+ * 이 단계를 사람이 먼저 확인해야 하는가.
+ * - `auto`(기본): 확인 없이 진행.
+ * - `ask`: 실행할 때마다 확인.
+ * - `ask_once`: 이 노드를 처음 내보낼 때 한 번만 확인.
+ */
+export type GraphNodeApprovalTier = "auto" | "ask" | "ask_once";
+
+function nodeApprovalTier(node: WorkflowNode): GraphNodeApprovalTier {
+  const raw = str(node.config, "approval");
+  if (raw === "ask" || raw === "ask_once") return raw;
+  // 선언이 없으면 자동. 다만 바깥을 바꾸는 단계는 기본을 "매번 확인"으로 둔다 —
+  // 되돌리기 어려운 일을 아무 말 없이 내보내는 쪽이 더 큰 사고다(D20).
+  if (raw === "auto") return "auto";
+  return nodeEffect(node) === "mutation" ? "ask" : "auto";
 }
 
 function nodeMaxTokens(node: WorkflowNode): number | null {
@@ -1077,6 +1097,34 @@ export async function runGraph(
     return null;
   };
 
+  /**
+   * 승인이 필요한 단계인데 아직 결정이 없으면 실행을 세운다.
+   * 거절은 승인 없음과 다르게 말한다 — 사용자가 이미 판단한 결과이기 때문이다.
+   */
+  const approvalGuard = (node: WorkflowNode): GraphNodeFailure | null => {
+    const tier = nodeApprovalTier(node);
+    if (tier === "auto") return null;
+    const label = node.label || node.id;
+    const decision = tier === "ask_once"
+      ? (getNodeApproval(automation.id, checkpoint!.occurrenceId, node.id)
+        ?? getLatestNodeApproval(automation.id, node.id))
+      : getNodeApproval(automation.id, checkpoint!.occurrenceId, node.id);
+    if (decision?.decision === "approved") return null;
+    if (decision?.decision === "rejected") {
+      return {
+        code: "APPROVAL_REJECTED",
+        reason: `"${label}" 단계를 실행하지 않기로 하셨습니다(${new Date(decision.decidedAt).toLocaleString()}).`,
+        nextAction: "그대로 두려면 아무것도 하지 않아도 됩니다. 다시 진행하려면 이 단계를 승인하세요.",
+      };
+    }
+    return {
+      code: "APPROVAL_REQUIRED",
+      reason:
+        `"${label}" 단계는 바깥으로 나가기 전에 확인이 필요합니다. 아직 실행하지 않았습니다.`,
+      nextAction: "내용을 확인한 뒤 [승인하고 이어서 실행] 또는 [이번엔 실행하지 않기]를 고르세요.",
+    };
+  };
+
   /** 실행 후 실제 사용량을 반영한다. 상한이 있는데 보고가 없으면 그 사실을 남긴다. */
   const settleBudget = (node: WorkflowNode, tokens: number | undefined): void => {
     if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens < 0) {
@@ -1452,6 +1500,13 @@ export async function runGraph(
           status.set(node.id, "done");
           return;
         }
+        // 승인 브레이크 — 사람이 "나가도 된다"고 하기 전에는 실행하지 않는다.
+        // 시뮬레이션은 바깥으로 나가는 게 없으므로 확인을 요구하지 않는다.
+        const approvalStop = dryRun ? null : approvalGuard(node);
+        if (approvalStop) {
+          failGraphNode(node, approvalStop);
+          return;
+        }
         // 예산은 노드를 띄우기 전에 확인한다 — 넘긴 뒤 정산하면 이미 돈이 나간 뒤다.
         const budgetStop = budgetGuard(node);
         if (budgetStop) {
@@ -1797,6 +1852,12 @@ export async function runGraph(
       automationId: automation.id,
       payload: { ok, error },
     });
+  }
+  // 실패 3요소는 실행 스냅샷에 남겨야 화면이 사유와 행동을 말할 수 있다.
+  try {
+    saveGraphRunFailures(runId, nodeFailures);
+  } catch (persistError) {
+    console.error("[workflow] node failure detail could not be persisted:", persistError);
   }
   const failures = Object.keys(nodeFailures).length > 0 ? { nodeFailures } : {};
   const simulation = dryRun ? { dryRun: true as const, dryRunBlocks } : {};

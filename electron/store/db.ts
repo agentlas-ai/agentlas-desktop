@@ -16,7 +16,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 86;
+const SCHEMA_VERSION = 87;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -3812,6 +3812,34 @@ export function initStore(options: StoreInitOptions = {}): void {
     const columns = schemaColumns(_db, "chats");
     if (columns.some((column) => column.name === "hired_agents")) {
       _db.exec("UPDATE chats SET hired_agents = NULL WHERE hired_agents IS NOT NULL");
+    }
+  }
+
+  // ── v86 → v87: 노드 승인 브레이크 ──────────────────────────────────────
+  // 사람이 "이건 나가도 된다"고 누른 사실은 durable해야 한다. 메모리에만 있으면
+  // 앱을 껐다 켜는 순간 승인이 사라져 자동화가 영원히 같은 자리에서 멈춘다.
+  // occurrence 단위로 기록해, 승인 하나가 다음 실행까지 조용히 재사용되지 않게 한다
+  // (매번 승인 vs 첫 1회만 승인은 노드 설정이 정한다).
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS automation_node_approvals (
+      automation_id TEXT NOT NULL,
+      occurrence_id TEXT NOT NULL,
+      node_id       TEXT NOT NULL,
+      decision      TEXT NOT NULL,
+      decided_at    TEXT NOT NULL,
+      decided_by    TEXT NOT NULL,
+      PRIMARY KEY (automation_id, occurrence_id, node_id)
+    )
+  `);
+  _db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_automation_node_approvals_node ON automation_node_approvals(automation_id, node_id, decided_at)",
+  );
+  // 실패 3요소(코드·사유 원문·지금 누를 행동)를 실행에 함께 남긴다. 예전에는 노드 상태가
+  // "failed" 한 단어뿐이라, 화면이 왜 멈췄는지도 무엇을 누르면 되는지도 말할 수 없었다.
+  if (tableExists(_db, "automation_runs")) {
+    const runColumns = schemaColumns(_db, "automation_runs");
+    if (!runColumns.some((column) => column.name === "node_failures_json")) {
+      _db.exec("ALTER TABLE automation_runs ADD COLUMN node_failures_json TEXT");
     }
   }
 
