@@ -323,7 +323,9 @@
     "check:engine-freshness": "node scripts/bump-bundled-engine.mjs --check",
     "test:one-auto-recovery-live": "npm run build:electron && electron scripts/verify-one-auto-recovery-live.cjs",
     "test:updater-not-applied": "npm run build:electron && electron scripts/test-updater-not-applied-recovery.cjs",
-    "test:pairing-revocation": "npm run build:electron && node scripts/test-pairing-revocation-contract.cjs"
+    "test:pairing-revocation": "npm run build:electron && node scripts/test-pairing-revocation-contract.cjs",
+    "test:graph-interview-contract": "npm run build:electron && node scripts/test-graph-interview-contract.cjs",
+    "test:stream-decode-contract": "node scripts/test-stream-decode-contract.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",
