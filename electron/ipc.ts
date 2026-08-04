@@ -3767,6 +3767,47 @@ export function registerIpcHandlers(): void {
     } as const;
   };
 
+  // 사용자의 한 문장 → 변경 제안. 여기서도 **적용은 하지 않는다**.
+  ipcMain.handle("automations:requestGraphPatch", async (_e, id: string, request: string) => {
+    const automation = getAutomation(id);
+    if (!automation) throw new Error(`Automation not found: ${id}`);
+    const sentence = String(request ?? "").trim();
+    if (!sentence) {
+      return { ok: false as const, code: "ARCHITECT_NO_REQUEST", reason: "무엇을 바꿀지 알려주세요.", nextAction: "고치고 싶은 내용을 한 문장으로 적어 주세요." };
+    }
+    if (!automation.graph) {
+      return { ok: false as const, code: "PATCH_NO_GRAPH", reason: "이 자동화에는 아직 고칠 그래프가 없습니다.", nextAction: "먼저 그래프를 만든 뒤 다시 요청해 주세요." };
+    }
+    const architect = require("./workflow/graph-architect") as typeof import("./workflow/graph-architect");
+    const { evaluateGraphPatch, graphPatchNeedsApproval } = require("./workflow/graph-patch") as typeof import("./workflow/graph-patch");
+    const { callConnectedModel } = require("./system-agents/judgment") as typeof import("./system-agents/judgment");
+    const text = await callConnectedModel({
+      systemPrompt: architect.buildGraphArchitectPrompt(automation.graph),
+      input: sentence.slice(0, 4_000),
+    });
+    if (text === null) {
+      // 모델에 닿지 못한 것을 "바꿀 게 없다"로 말하면 거짓이 된다.
+      return {
+        ok: false as const,
+        code: "ARCHITECT_UNAVAILABLE",
+        reason: "그래프를 고쳐 줄 모델에 연결하지 못했습니다. 아무것도 바꾸지 않았습니다.",
+        nextAction: "설정에서 모델 연결을 확인한 뒤 다시 시도해 주세요.",
+      };
+    }
+    const parsed = architect.parseGraphPatchProposal(text);
+    if (!parsed.ok) return { ok: false as const, code: parsed.code, reason: parsed.reason, nextAction: parsed.nextAction };
+    const decision = evaluateGraphPatch(automation.graph, parsed.patch);
+    if (!decision.ok) return { ok: false as const, code: decision.code, reason: decision.reason, nextAction: decision.nextAction };
+    return {
+      ok: true as const,
+      patch: parsed.patch,
+      risks: decision.risks,
+      summary: decision.summary,
+      needsApproval: graphPatchNeedsApproval(decision),
+      ...(parsed.patch.rationale ? { rationale: parsed.patch.rationale } : {}),
+    };
+  });
+
   ipcMain.handle("automations:proposeGraphPatch", (_e, id: string, patch: unknown) => {
     const evaluated = evaluatePatchFor(id, patch);
     if ("ok" in evaluated) return evaluated;

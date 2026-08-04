@@ -6113,6 +6113,24 @@ export interface AgentlasIpc {
     /** opts.dryRun: 시뮬레이션 실행 — 외부 변경을 막고 무엇이 막혔는지 남긴다. */
     runNow: (id: string, opts?: { dryRun?: boolean }) => Promise<void>;
     /**
+     * 사용자의 한 문장을 그래프 변경 제안으로 바꾼다. **적용하지 않는다** —
+     * 무엇이 바뀌는지 보여주고, 적용은 applyGraphPatch로만 한다.
+     */
+    requestGraphPatch: (
+      id: string,
+      request: string,
+    ) => Promise<
+      | { ok: false; code: string; reason: string; nextAction: string }
+      | {
+        ok: true;
+        patch: { ops: unknown[]; rationale?: string };
+        risks: string[];
+        summary: { added: string[]; removed: string[]; changed: string[] };
+        needsApproval: boolean;
+        rationale?: string;
+      }
+    >;
+    /**
      * 그래프 변경 제안을 평가한다 — **적용하지 않는다**.
      * 무엇이 바뀌는지와 사람이 봐야 할 이유를 돌려주고, 적용은 별도 호출로만 한다.
      */

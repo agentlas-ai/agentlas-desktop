@@ -149,6 +149,16 @@ function AutomationFlowPage() {
     Record<string, { code: string; reason: string; nextAction: string }>
   >({});
   const [approvalBusy, setApprovalBusy] = useState(false);
+  // 자연어로 그래프를 고치는 제안 — 적용 전까지는 저장된 그래프를 건드리지 않는다.
+  const [architectDraft, setArchitectDraft] = useState("");
+  const [architectBusy, setArchitectBusy] = useState(false);
+  const [proposal, setProposal] = useState<{
+    patch: { ops: unknown[]; rationale?: string };
+    risks: string[];
+    summary: { added: string[]; removed: string[]; changed: string[] };
+    needsApproval: boolean;
+    rationale?: string;
+  } | null>(null);
   const runStatesRef = useRef<Record<string, WorkflowNodeRunState>>({});
   runStatesRef.current = runStates;
 
@@ -498,6 +508,53 @@ function AutomationFlowPage() {
     }
   }
 
+  async function requestGraphChange() {
+    const api = ipc();
+    if (!api || !automation) return;
+    const sentence = architectDraft.trim();
+    if (!sentence) return;
+    setArchitectBusy(true);
+    setProposal(null);
+    setMessage(locale === "en" ? "Working out what would change..." : "무엇이 바뀔지 알아보는 중입니다...");
+    try {
+      const result = await api.automations.requestGraphPatch(automation.id, sentence);
+      if (!result.ok) {
+        // 실패는 사유와 다음 행동을 그대로 보여준다 — 코드만 남기지 않는다.
+        setMessage(`${result.reason} ${result.nextAction}`);
+        return;
+      }
+      setProposal(result);
+      setMessage(locale === "en"
+        ? "Nothing has changed yet. Review it and apply."
+        : "아직 아무것도 바뀌지 않았습니다. 내용을 확인하고 적용하세요.");
+    } catch {
+      setMessage(locale === "en" ? "The change could not be worked out." : "변경 내용을 만들지 못했습니다.");
+    } finally {
+      setArchitectBusy(false);
+    }
+  }
+
+  async function applyProposal() {
+    const api = ipc();
+    if (!api || !automation || !proposal) return;
+    setArchitectBusy(true);
+    try {
+      const result = await api.automations.applyGraphPatch(automation.id, proposal.patch);
+      if (!result.ok) {
+        setMessage(`${result.reason ?? ""} ${result.nextAction ?? ""}`.trim() || (locale === "en" ? "Not applied." : "적용하지 못했습니다."));
+        return;
+      }
+      setProposal(null);
+      setArchitectDraft("");
+      setMessage(locale === "en" ? "Applied." : "적용했습니다.");
+      await load();
+    } catch {
+      setMessage(locale === "en" ? "Not applied." : "적용하지 못했습니다.");
+    } finally {
+      setArchitectBusy(false);
+    }
+  }
+
   async function decideApproval(nodeId: string, decision: "approved" | "rejected") {
     const api = ipc();
     if (!api || !automation) return;
@@ -662,6 +719,97 @@ function AutomationFlowPage() {
           }}
         >
           {message || t("auto.flow.unsaved")}
+        </div>
+      ) : null}
+
+      {/* 자연어로 고치기 — 제안은 보여주기만 하고, 적용은 사람이 누른 뒤에만. */}
+      {!editing ? (
+        <div
+          className="titlebar-nodrag"
+          style={{ margin: "12px 32px 0", display: "grid", gap: 8 }}
+        >
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              value={architectDraft}
+              onChange={(e) => setArchitectDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void requestGraphChange();
+                }
+              }}
+              placeholder={t("auto.flow.architect_placeholder")}
+              disabled={architectBusy}
+              style={{
+                flex: 1,
+                padding: "8px 12px",
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--paper-edge)",
+                background: "var(--paper)",
+                fontSize: 13,
+                outline: "none",
+              }}
+            />
+            <button
+              className="titlebar-nodrag"
+              disabled={architectBusy || !architectDraft.trim()}
+              onClick={() => void requestGraphChange()}
+              style={pillBtn(false)}
+            >
+              {t("auto.flow.architect_ask")}
+            </button>
+          </div>
+          {proposal ? (
+            <div
+              data-testid="graph-patch-proposal"
+              style={{
+                padding: "12px 14px",
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--accent-soft)",
+                background: "var(--paper)",
+                fontSize: 12,
+                display: "grid",
+                gap: 8,
+              }}
+            >
+              <div style={{ fontWeight: 600 }}>{t("auto.flow.architect_preview")}</div>
+              {proposal.rationale ? (
+                <div style={{ color: "var(--ink-soft)" }}>{proposal.rationale}</div>
+              ) : null}
+              {proposal.summary.added.length > 0 ? (
+                <div>{t("auto.flow.architect_added")}: {proposal.summary.added.join(", ")}</div>
+              ) : null}
+              {proposal.summary.removed.length > 0 ? (
+                <div>{t("auto.flow.architect_removed")}: {proposal.summary.removed.join(", ")}</div>
+              ) : null}
+              {proposal.summary.changed.length > 0 ? (
+                <div>{t("auto.flow.architect_changed")}: {proposal.summary.changed.join(", ")}</div>
+              ) : null}
+              {proposal.risks.length > 0 ? (
+                <div style={{ color: "var(--ink)" }}>
+                  {t("auto.flow.architect_check")}: {proposal.risks.map((risk) => t(`auto.flow.risk_${risk}` as never)).join(", ")}
+                </div>
+              ) : null}
+              <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
+                <button
+                  className="titlebar-nodrag"
+                  disabled={architectBusy}
+                  onClick={() => void applyProposal()}
+                  style={actionBtn}
+                >
+                  {t("auto.flow.architect_apply")}
+                </button>
+                <button
+                  className="titlebar-nodrag"
+                  disabled={architectBusy}
+                  onClick={() => setProposal(null)}
+                  style={pillBtn(false)}
+                >
+                  {t("auto.flow.architect_discard")}
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : null}
 

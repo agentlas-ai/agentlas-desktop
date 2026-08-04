@@ -636,6 +636,8 @@ const api: AgentlasIpc = {
     updateGraph: (id: string, graph: WorkflowGraph | null) =>
       ipcRenderer.invoke("automations:updateGraph", id, graph),
     runNow: (id: string, opts?: { dryRun?: boolean }) => ipcRenderer.invoke("automations:runNow", id, opts),
+    requestGraphPatch: (id: string, request: string) =>
+      ipcRenderer.invoke("automations:requestGraphPatch", id, request),
     proposeGraphPatch: (id: string, patch: { ops: unknown[]; rationale?: string }) =>
       ipcRenderer.invoke("automations:proposeGraphPatch", id, patch),
     applyGraphPatch: (id: string, patch: { ops: unknown[]; rationale?: string }) =>

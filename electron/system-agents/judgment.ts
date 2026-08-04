@@ -159,6 +159,21 @@ function parseVerdict<V extends string>(text: string, labels: readonly V[]): { v
  * or null when no runtime is reachable / the call times out / it throws — so every judge
  * variant degrades to its own caller-supplied default instead of to a wordlist.
  */
+/**
+ * 연결된 런타임에 한 번 물어 텍스트를 받는다. 닿지 못하면 null — 지어내지 않는다.
+ * 라벨 판정(judge*) 외에 **구조화 출력이 필요한 호출부**(Graph Architect 등)도 같은 경로를 쓴다.
+ * 경로가 갈리면 타임아웃·런타임 선택·비밀 바닥 같은 규칙이 두 벌이 되고, 한쪽만 낡는다.
+ */
+export async function callConnectedModel(opts: {
+  systemPrompt: string;
+  input: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  locale?: RuntimeLocale;
+}): Promise<string | null> {
+  return callJudgmentModel(opts);
+}
+
 async function callJudgmentModel(opts: {
   systemPrompt: string;
   input: string;
