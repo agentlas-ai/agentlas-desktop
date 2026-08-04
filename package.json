@@ -329,7 +329,11 @@
     "test:graph-describe-ui": "npm run build:renderer && node scripts/test-graph-describe-ui.cjs",
     "test:automation-honesty-contract": "npm run build:electron && node scripts/test-automation-honesty-contract.cjs",
     "test:graph-tool-binding-contract": "npm run build:electron && node scripts/test-graph-tool-binding-contract.cjs",
-    "test:graph-connections-ui": "npm run build:renderer && node scripts/test-graph-connections-ui.cjs"
+    "test:graph-connections-ui": "npm run build:renderer && node scripts/test-graph-connections-ui.cjs",
+    "graph:registry:gen": "node scripts/gen-graph-registry.cjs",
+    "test:graph-registry-conformance": "node scripts/gen-graph-registry.cjs --check && node scripts/test-graph-registry-conformance.cjs",
+    "test:graph-node-protocol": "npm run build:electron && node scripts/test-graph-node-protocol-contract.cjs",
+    "test:run-status-split": "npm run build:electron && electron scripts/test-run-status-split-contract.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",
