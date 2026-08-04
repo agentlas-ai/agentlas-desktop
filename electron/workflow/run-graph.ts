@@ -114,12 +114,20 @@ function nodeApprovalTier(node: WorkflowNode): GraphNodeApprovalTier {
 function nodeMaxAttempts(node: WorkflowNode): number {
   const declared = node.config?.retries;
   if (typeof declared === "number" && Number.isFinite(declared) && declared >= 0) {
+    // 변경 단계는 멱등 선언 없이 재시도 횟수만 올릴 수 없다 — 그 조합이 이중 발행이다.
+    if (nodeEffect(node) === "mutation" && !str(node.config, "idempotencyKey")) return 1;
     return Math.min(5, Math.floor(declared)) + 1;
   }
   if (nodeEffect(node) === "mutation") {
     return str(node.config, "idempotencyKey") ? 3 : 1;
   }
   return 3;
+}
+
+/** 사용자가 재시도를 명시적으로 켰는가 — 근거 없는 재시도와 구분한다. */
+function retriesDeclared(node: WorkflowNode): boolean {
+  const declared = node.config?.retries;
+  return typeof declared === "number" && Number.isFinite(declared) && declared > 0;
 }
 
 /** 일시 오류 재시도 간격 — 같은 순간에 몰려 다시 실패하지 않게 지수적으로 벌린다. */
@@ -1732,7 +1740,18 @@ export async function runGraph(
           nodeAttempts.set(node.id, attempts);
           const maxAttempts = nodeMaxAttempts(node);
           const contractStop = graphFailureOf(nodeErr) !== null;
-          if (!ambiguous && !nodeTimedOut && !contractStop && !runSignal.aborted && attempts < maxAttempts) {
+          // 재시도의 근거는 "부수효과가 없었다"가 아니라 "일시 오류였다"여야 한다.
+          // 부수효과 부재만으로 즉시 다시 두드리면, 영구 고장 자동화가 매 스케줄마다
+          // 몇 배의 호출을 태운다(이 제품의 기존 설계는 다음 슬롯 재시도였다).
+          // 근거는 둘 중 하나다: 런타임이 타입으로 일시 오류라고 알렸거나, 사용자가 켰거나.
+          const transientSignal = receipts.some((receipt) =>
+            receipt.name.startsWith("error:") &&
+            isTypedReplaySafeInvocationError(receipt.name.slice("error:".length)),
+          ) || retriesDeclared(node);
+          if (
+            transientSignal && !ambiguous && !nodeTimedOut && !contractStop &&
+            !runSignal.aborted && attempts < maxAttempts
+          ) {
             checkpoint!.inFlightNodeIds = checkpoint!.inFlightNodeIds.filter((id) => id !== node.id);
             status.set(node.id, "pending");
             emitNodeState(node.id, "pending");
