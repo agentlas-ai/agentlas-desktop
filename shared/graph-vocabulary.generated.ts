@@ -187,6 +187,45 @@ export const GRAPH_FIELD_GRADES: Record<string, "critical" | "degradable" | "ext
   "wire": "critical",
 };
 
+/**
+ * ★모르는 값을 만났을 때 **그 항목만** 강등한다 (06 §2.3 degradable / §2.5).
+ *
+ * 이 함수가 있는 이유: 이 플랫폼은 "닫힌 열거형에 클라이언트가 모르는 값 1개가 오자
+ * **후보집합을 통째로 폐기**한" 사고를 겪었다. 런타임 구버전은 코드 23개만 알고
+ * 신버전은 33개를 보내는데, 구버전이 모르는 1개를 만나면 전부 버렸다.
+ *
+ * 표면끼리 판이 다른 것은 정상이다(데스크탑이 스키마 정본이고 터미널은 뒤따라온다).
+ * 그러니 모르는 값은 **원문을 보존한 채** 항목 단위로 강등하고 나머지는 정상 처리한다.
+ * 집합 폐기·스트림 절단·에러 승격은 전부 금지.
+ */
+export type Degradable<T extends string> = { known: T } | { unknown: string };
+
+export function readEnum<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+): Degradable<T> {
+  const text = typeof value === "string" ? value : String(value ?? "");
+  return (allowed as readonly string[]).includes(text)
+    ? { known: text as T }
+    : { unknown: text };
+}
+
+/** 강등된 항목을 사람에게 보여줄 문구. **원문을 지우지 않는다.** */
+export function degradedLabel(value: Degradable<string>, locale: "ko" | "en" = "ko"): string {
+  if ("known" in value) return value.known;
+  return locale === "ko"
+    ? `알 수 없음 (원문: ${value.unknown})`
+    : `unknown (raw: ${value.unknown})`;
+}
+
+/** 목록에서 모르는 항목만 강등하고 **아무것도 버리지 않는다**. */
+export function readEnumList<T extends string>(
+  values: readonly unknown[],
+  allowed: readonly T[],
+): Degradable<T>[] {
+  return values.map((value) => readEnum(value, allowed));
+}
+
 /** 이 코드를 사람에게 어떻게 보여줄지. 매핑이 없으면 원문 노출이 정답이다. */
 export function graphErrorPresentation(code: string): {
   cardKey: string | null;

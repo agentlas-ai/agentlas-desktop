@@ -121,7 +121,8 @@
       "id": "graph/1/envelope.toolcall",
       "boundary": "에이전트 런타임 → 도구",
       "spec": "06 §6",
-      "status": "specified"
+      "status": "specified",
+      "note": "커널이 도구 호출을 중개하는 봉투. 스파이크 A7(런타임 도구 프록시) 미검증."
     },
     {
       "id": "graph/1/port.output",
@@ -335,7 +336,8 @@
       "id": "graph/1/hello",
       "boundary": "표면/SDK ↔ 커널 (버전 협상)",
       "spec": "06 §2.4",
-      "status": "specified"
+      "status": "specified",
+      "note": "원격 표면(SDK·Hub)이 생기면 필요하다. 지금 두 표면은 같은 파일을 공유해 전송 채널이 없다."
     },
     {
       "id": "graph/1/envelope.judge",
@@ -801,6 +803,315 @@
       "failures": [
         "BUDGET_EXHAUSTED"
       ]
+    },
+    {
+      "id": "graph/1/strategy.directive",
+      "boundary": "지난 실패 → 이번 실행 지시",
+      "status": "implemented",
+      "implementedAs": "electron/automation-strategy.ts buildStrategyDirective",
+      "payload": [
+        {
+          "field": "streak",
+          "grade": "critical",
+          "note": "연속 실패 횟수"
+        },
+        {
+          "field": "priorErrors",
+          "grade": "critical",
+          "note": "무엇이 어떻게 실패했는지 원문"
+        },
+        {
+          "field": "directive",
+          "grade": "critical",
+          "note": "프롬프트 **앞**에 붙는다 — 뒤에 붙이면 모델이 앞 지시를 우선한다"
+        }
+      ],
+      "note": "★없으면 재시도가 같은 방법을 그대로 반복한다."
+    },
+    {
+      "id": "graph/1/continuity.capsule",
+      "boundary": "이전 실행 → 이번 실행",
+      "status": "implemented",
+      "implementedAs": "run-graph.ts buildAutomationContinuityPrompt (AUTOMATION_CONTINUITY_OPEN/CLOSE)",
+      "payload": [
+        {
+          "field": "priorMessages",
+          "grade": "degradable",
+          "note": "최근 assistant·system 4개, 각 1,200자 상한"
+        },
+        {
+          "field": "open/close",
+          "grade": "critical",
+          "note": "경계 표식 — 모델이 캡슐과 본 지시를 구분한다"
+        }
+      ],
+      "note": "공급자 resume은 최적화일 뿐 연속성의 근거가 아니다."
+    },
+    {
+      "id": "graph/1/watchdog.abort",
+      "boundary": "워치독 → 실행 중인 노드",
+      "status": "implemented",
+      "implementedAs": "electron/automation-watchdog.ts + nodeTimeoutMs",
+      "payload": [
+        {
+          "field": "reason",
+          "grade": "critical",
+          "values": [
+            "stall",
+            "node_timeout",
+            "run_abort"
+          ],
+          "note": "★왜 끊겼는지. 'stop 버튼으로 멈춤'을 지어내지 않는다(signal.reason을 읽는다)"
+        },
+        {
+          "field": "lastEventAt",
+          "grade": "critical"
+        }
+      ],
+      "failures": [
+        "NODE_TIMEOUT"
+      ]
+    },
+    {
+      "id": "graph/1/concurrency.slot",
+      "boundary": "동시 실행 슬롯 → 커널",
+      "status": "implemented",
+      "implementedAs": "store/concurrency getAgentConcurrency",
+      "payload": [
+        {
+          "field": "limit",
+          "grade": "critical",
+          "note": "사용자 슬라이더. 1 미만으로 내려가지 않는다"
+        }
+      ]
+    },
+    {
+      "id": "graph/1/run.event",
+      "boundary": "커널 → 실행 이벤트 기록",
+      "status": "implemented",
+      "implementedAs": "store/run-events tryRecordRunEvent / tryRecordFailureEvent",
+      "payload": [
+        {
+          "field": "runId",
+          "grade": "critical"
+        },
+        {
+          "field": "nodeId",
+          "grade": "degradable"
+        },
+        {
+          "field": "kind",
+          "grade": "critical"
+        },
+        {
+          "field": "detail",
+          "grade": "degradable",
+          "note": "원문 보존"
+        }
+      ],
+      "note": "저널(상태 전이)과 다른 채널 — 사람·복구 워커가 읽는 사건 기록이고, 다음 실행의 전략 지시문이 여기서 나온다."
+    },
+    {
+      "id": "graph/1/identity.resolve",
+      "boundary": "명부 → 에이전트 노드",
+      "status": "implemented",
+      "implementedAs": "mcp/registry getAgentById + store/firms getFirm + hubTargetForNode",
+      "payload": [
+        {
+          "field": "ref",
+          "grade": "critical"
+        },
+        {
+          "field": "targetType",
+          "grade": "critical",
+          "values": [
+            "agent",
+            "firm",
+            "hub"
+          ]
+        },
+        {
+          "field": "targetVersion",
+          "grade": "critical",
+          "note": "Hub는 정확한 판 없이 못 부른다"
+        }
+      ],
+      "failures": [
+        "SWAP_HUB_RELEASE_UNPINNED"
+      ]
+    },
+    {
+      "id": "graph/1/session.bind",
+      "boundary": "노드 → 자기 durable 대화",
+      "status": "implemented",
+      "implementedAs": "store/automation-sessions getOrCreateAutomationSession",
+      "payload": [
+        {
+          "field": "chatId",
+          "grade": "critical",
+          "note": "노드별. 같은 노드는 다음 실행에도 같은 대화를 이어 쓴다"
+        }
+      ]
+    },
+    {
+      "id": "graph/1/reconcile.decision",
+      "boundary": "사람 → 커널 (부수효과 확인)",
+      "status": "implemented",
+      "implementedAs": "electron/store/graph-reconciliation.ts + automations:reconcileGraph",
+      "payload": [
+        {
+          "field": "runId",
+          "grade": "critical"
+        },
+        {
+          "field": "checkpointDigest",
+          "grade": "critical",
+          "note": "★그새 그래프가 바뀌었으면 옛 카드로 확인 못 한다"
+        },
+        {
+          "field": "nodeId",
+          "grade": "critical"
+        },
+        {
+          "field": "resolution",
+          "grade": "critical",
+          "values": [
+            "completed",
+            "not_executed"
+          ]
+        },
+        {
+          "field": "output",
+          "grade": "critical",
+          "note": "completed인데 그 단계가 값을 남겼어야 하면 필수"
+        }
+      ],
+      "failures": [
+        "MUTATION_UNVERIFIED",
+        "RESUME_CONFLICT"
+      ]
+    },
+    {
+      "id": "graph/1/fix.plan",
+      "boundary": "커널 → 화면 (지금 누를 것)",
+      "status": "implemented",
+      "implementedAs": "electron/automation-fix.ts",
+      "payload": [
+        {
+          "field": "summary",
+          "grade": "degradable"
+        },
+        {
+          "field": "options",
+          "grade": "critical",
+          "note": "행동 목록. 비어 있으면 카드가 막다른 길이 된다"
+        },
+        {
+          "field": "unavailable",
+          "grade": "critical",
+          "note": "★계획을 못 세웠으면 그렇다고 말한다 — 지어낸 행동을 주지 않는다"
+        }
+      ]
+    },
+    {
+      "id": "graph/1/trigger.attention",
+      "boundary": "커널 → 화면 (보관된 사건)",
+      "status": "implemented",
+      "implementedAs": "electron/store/trigger-events.ts",
+      "payload": [
+        {
+          "field": "triggerKind",
+          "grade": "critical"
+        },
+        {
+          "field": "attemptCount",
+          "grade": "degradable"
+        },
+        {
+          "field": "lastError",
+          "grade": "critical",
+          "note": "원문 보존"
+        },
+        {
+          "field": "runOutcome",
+          "grade": "degradable"
+        }
+      ]
+    },
+    {
+      "id": "graph/1/activation.decision",
+      "boundary": "커널 → 사람 (켜도 되나)",
+      "status": "implemented",
+      "implementedAs": "shared/graph-tool-binding.ts decideActivation",
+      "payload": [
+        {
+          "field": "canActivate",
+          "grade": "critical"
+        },
+        {
+          "field": "reason",
+          "grade": "critical",
+          "note": "못 켜는 이유 — 결정론 계산 결과라 언제나 맞다"
+        },
+        {
+          "field": "nextAction",
+          "grade": "critical"
+        },
+        {
+          "field": "gaps",
+          "grade": "critical",
+          "note": "무엇이 비었는지 항목별로"
+        }
+      ],
+      "failures": [
+        "AUTOMATION_NOT_CONNECTED"
+      ]
+    },
+    {
+      "id": "graph/1/vocabulary.degrade",
+      "boundary": "판이 다른 표면 사이",
+      "status": "implemented",
+      "implementedAs": "shared/graph-vocabulary.generated.ts + agentlas_terminal/engine/graph/vocabulary.generated.cjs (한 레지스트리에서 생성)",
+      "payload": [
+        {
+          "field": "known",
+          "grade": "critical",
+          "note": "이 판이 아는 값"
+        },
+        {
+          "field": "unknown",
+          "grade": "critical",
+          "note": "★모르는 값의 **원문**. 지우면 아는 값처럼 보인다"
+        }
+      ],
+      "note": "모르는 값 1개에 집합을 폐기하지 않는다. 항목만 강등하고 나머지는 정상 처리."
+    },
+    {
+      "id": "graph/1/toolcall.observed",
+      "boundary": "런타임 → 커널 (관측)",
+      "status": "implemented",
+      "implementedAs": "run-graph.ts sink(tool-use) → GraphToolReceipt",
+      "payload": [
+        {
+          "field": "name",
+          "grade": "critical"
+        },
+        {
+          "field": "resultDigest",
+          "grade": "critical",
+          "note": "결과 원문이 아니라 지문 — 영수증이지 값이 아니다"
+        },
+        {
+          "field": "readOnly",
+          "grade": "critical",
+          "note": "쓰기 도구였는지. 재실행 안전 판정의 근거"
+        },
+        {
+          "field": "succeeded",
+          "grade": "critical"
+        }
+      ],
+      "note": "★관측이지 제어가 아니다. 커널은 이 호출을 막을 수 없다 — 막는 것은 permissions=read로 런타임에 맡긴다."
     }
   ]
 }
