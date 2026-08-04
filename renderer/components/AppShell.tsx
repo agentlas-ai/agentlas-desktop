@@ -21,6 +21,7 @@ import { BrowserActionApprovalSheet } from "./BrowserActionApprovalSheet";
 import FloatingComputerUsePanel from "./browser/FloatingComputerUsePanel";
 import { OntologyChipFeatureUpdateModal } from "./OntologyChipFeatureUpdateModal";
 import { OneFeatureIntro } from "./one/OneFeatureIntro";
+import { WorkFirstRunOnboarding } from "./WorkFirstRunOnboarding";
 import { ONE_INTRO_ACK_KEY } from "@/lib/one-task-adapter";
 import type {
   OneFeatureIntroBlockingStateCategory,
@@ -49,6 +50,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [oberonJobs, setOberonJobs] = useState<OberonBackgroundJob[]>([]);
   const [appUpdateBusy, setAppUpdateBusy] = useState(true);
   const [oneIntroState, setOneIntroState] = useState<OneFeatureIntroState | null>(null);
+  const [workFirstRunVisible, setWorkFirstRunVisible] = useState(false);
   const introDeferralInFlightRef = useRef<string | null>(null);
   const router = useRouter();
   const pathname = usePathname() ?? "/";
@@ -336,7 +338,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // First-run surfaces are ordered, never stacked. Main-owned One feature news
   // wins over the page tour; once it resolves (or is deferred by live work), the
   // current page tour may open normally.
-  const pageTourAutoOpenSuspended = oneIntroState === null
+  const pageTourAutoOpenSuspended = workFirstRunVisible || oneIntroState === null
     || (oneIntroPending && oneIntroBlockingCategory === null);
 
   useEffect(() => {
@@ -399,6 +401,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>
       </main>
       <PageTour pathname={pathname} autoOpenSuspended={pageTourAutoOpenSuspended} />
+      {pathname.startsWith("/dashboard") && (
+        <WorkFirstRunOnboarding onVisibilityChange={setWorkFirstRunVisible} />
+      )}
       <BuildDoneToast />
       <BrowserActionApprovalSheet />
       {showWorkspaceSidebar && <FloatingComputerUsePanel />}

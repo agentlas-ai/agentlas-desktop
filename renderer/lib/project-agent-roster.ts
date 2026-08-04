@@ -1,6 +1,10 @@
 import { buildAgentRoster, visibleRosterAgents } from "@/lib/agent-roster";
 import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
 import { pickLocalized, type Locale } from "@/lib/i18n";
+import {
+  isUserFacingProjectAgent,
+  projectPoolMemberKey,
+} from "@shared/project-agent-pool";
 import type {
   HubAgentBookmark,
   InstalledAgent,
@@ -45,21 +49,9 @@ export interface ProjectRosterSection {
   standalone: ProjectRosterCandidate[];
 }
 
-export function projectPoolMemberKey(member: ProjectAgentPoolMember): string {
-  return `${member.source}:${member.agentId}:${member.releaseId ?? ""}`;
-}
-
-/**
- * Project staffing is a user-facing preference surface. Materialized HQ cells
- * (policy gates, memory curators, domain slots, and other background roles)
- * belong to the team's private implementation and must never look like agents
- * the user is expected to select or call.
- */
-export function isUserFacingProjectAgent(agent: InstalledAgent): boolean {
-  return agent.visibility !== "background"
-    && agent.visibility !== "private"
-    && agent.systemPrompt.trim().length > 0;
-}
+// The pool key and the user-facing predicate are shared with the Mobile Bridge
+// authority so both staffing surfaces accept exactly the same agents.
+export { isUserFacingProjectAgent, projectPoolMemberKey };
 
 export function isUserFacingProjectPoolMember(
   member: ProjectAgentPoolMember,

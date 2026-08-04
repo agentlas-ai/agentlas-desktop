@@ -30,6 +30,11 @@ export type PaletteNodeSeed = Omit<WorkflowNode, "id" | "position">;
 const FLOW_ITEMS = [
   { type: "condition" as WorkflowNodeType, labelKey: "auto.node.condition" as const, icon: <IconRoute size={13} /> },
   { type: "transform" as WorkflowNodeType, labelKey: "auto.node.transform" as const, icon: <IconLayers size={13} /> },
+  // ★커널이 실행할 수 있는 종류는 팔레트에도 있어야 한다. 없으면 "만들었는데 놓을 수
+  //   없는 기능"이 된다 — 도구 노드가 정확히 그 상태였고(놓아도 아무 일이 안 일어남),
+  //   `eval`·`subgraph`는 아예 놓을 수조차 없었다.
+  { type: "eval" as WorkflowNodeType, labelKey: "auto.node.eval" as const, hintKey: "auto.node.evalHint" as const, icon: <IconSparkles size={13} /> },
+  { type: "subgraph" as WorkflowNodeType, labelKey: "auto.node.subgraph" as const, hintKey: "auto.node.subgraphHint" as const, icon: <IconLayers size={13} /> },
 ];
 
 const ACTION_ITEMS: Array<{ action: string; label: string }> = [
@@ -163,6 +168,7 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
             key={it.type}
             icon={it.icon}
             label={t(it.labelKey)}
+            {...("hintKey" in it && it.hintKey ? { hint: t(it.hintKey) } : {})}
             onClick={() => onAdd({ type: it.type, config: {}, label: t(it.labelKey) })}
           />
         ))}
@@ -191,7 +197,9 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function Item({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
+function Item({ icon, label, hint, onClick }: {
+  icon: React.ReactNode; label: string; hint?: string; onClick: () => void;
+}) {
   return (
     <button
       onClick={onClick}
@@ -210,8 +218,16 @@ function Item({ icon, label, onClick }: { icon: React.ReactNode; label: string; 
         cursor: "pointer",
       }}
     >
-      <span style={{ color: "var(--accent)", display: "inline-flex", flexShrink: 0 }}>{icon}</span>
-      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+      <span style={{ color: "var(--accent)", display: "inline-flex", flexShrink: 0, alignSelf: hint ? "flex-start" : "center", marginTop: hint ? 2 : 0 }}>{icon}</span>
+      <span style={{ display: "grid", gap: 2, minWidth: 0 }}>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+        {/* 처음 보는 종류는 이름만으로 무엇인지 알 수 없다 — 한 줄로 말해 준다. */}
+        {hint ? (
+          <span style={{ fontSize: 10.5, color: "var(--muted-deep)", lineHeight: 1.35, whiteSpace: "normal" }}>
+            {hint}
+          </span>
+        ) : null}
+      </span>
     </button>
   );
 }

@@ -336,7 +336,8 @@
     "test:run-status-split": "npm run build:electron && electron scripts/test-run-status-split-contract.cjs",
     "graph:map": "node scripts/gen-graph-map.cjs",
     "test:graph-progress": "node scripts/test-graph-progress-contract.cjs",
-    "test:graph-run-request": "npm run build:electron && node scripts/test-graph-run-request-contract.cjs"
+    "test:graph-run-request": "npm run build:electron && node scripts/test-graph-run-request-contract.cjs",
+    "test:graph-canvas-parity": "node scripts/test-graph-canvas-parity.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

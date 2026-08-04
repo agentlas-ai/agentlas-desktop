@@ -269,7 +269,7 @@
         "produces"
       ],
       "emits": "graph/1/envelope.judge",
-      "note": "단어 매칭 금지 — 상주 판정 엔진(judgeRequired). 만든 노드가 자기를 채점할 수 없다.",
+      "note": "단어 매칭 금지 — 상주 판정 엔진(judgeRequired). 만든 노드가 자기를 채점할 수 없다.\n★캔버스에서 놓을 수 있다(팔레트·노드카드·설정패널 전부 배선). 커널만 알고 화면이 모르면 사용자에겐 없는 기능이다 — 이 종류들이 정확히 그 상태였다.",
       "functions": [
         {
           "id": "eval.subject",
@@ -535,7 +535,7 @@
         "input"
       ],
       "emits": "graph/1/trigger.command",
-      "note": "조사한 어느 제품도 이걸 별도 커넥터 종류로 두지 않고 **노드**로 둔다 — n8n Execute Sub-workflow, Flowise ExecuteFlow, Temporal Child Workflow. ★깊이 상한이 없으면 A가 B를 부르고 B가 A를 불러 무한 재귀가 된다.",
+      "note": "조사한 어느 제품도 이걸 별도 커넥터 종류로 두지 않고 **노드**로 둔다 — n8n Execute Sub-workflow, Flowise ExecuteFlow, Temporal Child Workflow. ★깊이 상한이 없으면 A가 B를 부르고 B가 A를 불러 무한 재귀가 된다.\n★캔버스에서 놓을 수 있다(팔레트·노드카드·설정패널 전부 배선). 커널만 알고 화면이 모르면 사용자에겐 없는 기능이다 — 이 종류들이 정확히 그 상태였다.",
       "functions": [
         {
           "id": "subgraph.call",

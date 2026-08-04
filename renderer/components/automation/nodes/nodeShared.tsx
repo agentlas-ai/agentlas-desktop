@@ -24,6 +24,9 @@ export const NODE_ACCENT: Record<string, string> = {
   condition: "var(--accent)",
   transform: "var(--muted-deep)",
   output: "var(--accent)",
+  // 커널이 실행하는 종류는 화면도 알아야 한다 — 모르면 색이 없는 채로 그려진다.
+  eval: "var(--accent)",
+  subgraph: "var(--ink)",
 };
 
 /**
@@ -49,6 +52,13 @@ export function NodeCard(props: {
   progress?: string;
   /** condition 노드용 분기 소스 핸들(true/false) — 우측 상/하단에 배치. */
   branchHandles?: boolean;
+  /**
+   * 실패·정리 출구를 그릴 수 있게 한다 (커넥터 C40·C42).
+   *
+   * ★없으면 "실패하면 이쪽으로"를 커널은 실행할 수 있는데 저작자가 **그릴 수가 없다**.
+   * 만들어 놓고 닿을 수 없는 기능이 되는 그 모양이다.
+   */
+  outcomeHandles?: boolean;
 }) {
   const accent = props.accent ?? NODE_ACCENT[props.type] ?? "var(--muted-deep)";
   const connectable = props.connectable ?? false;
@@ -172,11 +182,48 @@ export function NodeCard(props: {
       ) : props.hasOut !== false ? (
         <Handle type="source" position={Position.Right} style={handleStyle} isConnectable={connectable} />
       ) : null}
+
+      {/* 실패 출구와 정리 출구 — 평상시 출구와 **다른 자리**에 둔다(아래쪽).
+          같은 자리에 겹치면 어느 선을 끌고 있는지 사람이 알 수 없다. */}
+      {props.outcomeHandles ? (
+        <>
+          <Handle
+            id="error"
+            type="source"
+            position={Position.Bottom}
+            style={{ ...handleStyle, left: "34%", background: "var(--danger, #d64545)" }}
+            isConnectable={connectable}
+          />
+          <span style={outcomeLabelStyle("34%", "var(--danger, #d64545)")}>실패</span>
+          <Handle
+            id="always"
+            type="source"
+            position={Position.Bottom}
+            style={{ ...handleStyle, left: "70%", background: "var(--muted-deep)" }}
+            isConnectable={connectable}
+          />
+          <span style={outcomeLabelStyle("70%", "var(--muted-deep)")}>정리</span>
+        </>
+      ) : null}
     </div>
   );
 }
 
 /** condition 분기 핸들 옆 T/F 라벨. */
+/** 실패·정리 출구의 이름표. 핸들만 있으면 무엇인지 모른다. */
+function outcomeLabelStyle(left: string, color: string): CSSProperties {
+  return {
+    position: "absolute",
+    bottom: -16,
+    left,
+    transform: "translateX(-50%)",
+    fontSize: 9,
+    color,
+    pointerEvents: "none",
+    whiteSpace: "nowrap",
+  };
+}
+
 function branchLabelStyle(top: string, color: string): CSSProperties {
   return {
     position: "absolute",

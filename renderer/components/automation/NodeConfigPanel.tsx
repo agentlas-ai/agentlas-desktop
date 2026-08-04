@@ -81,6 +81,7 @@ export function NodeConfigPanel({
   onDelete,
   onClose,
   timezone,
+  automationId,
 }: {
   node: WorkflowNode;
   /** config 부분 갱신(머지). 부모가 그래프 노드에 반영 + dirty 표시. */
@@ -91,6 +92,8 @@ export function NodeConfigPanel({
   onClose: () => void;
   /** 자동화 행의 타임존 — 레거시 토큰 복원 시 cron 해석 존(노드 config엔 tz가 없다). */
   timezone?: string | null;
+  /** 지금 편집 중인 자동화 — 자기 자신을 부를 후보에서 빼기 위해 필요하다. */
+  automationId?: string;
 }) {
   const { t, locale } = useT();
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
@@ -98,6 +101,12 @@ export function NodeConfigPanel({
   const [hubAgents, setHubAgents] = useState<MarketplaceListing[]>([]);
   const [tools, setTools] = useState<McpToolCatalogEntry[]>([]);
   const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
+  /**
+   * 이 단계에서 부를 수 있는 자동화들.
+   * ★자기 자신은 뺀다 — 고를 수 있게 보여 놓고 커널이 거절하면 화면이 거짓말한 것이다
+   *   (커널의 SUBGRAPH_SELF_CALL 과 같은 판단을 화면이 먼저 한다).
+   */
+  const [callableGraphs, setCallableGraphs] = useState<Array<{ id: string; name: string }>>([]);
 
   useEffect(() => {
     const api = ipc();
@@ -115,8 +124,14 @@ export function NodeConfigPanel({
       setTools(tl);
       setRuntimes(rt);
       setHubAgents(hub);
+      const list = await api.automations.list().catch(() => []);
+      setCallableGraphs(
+        list
+          .filter((row) => row.id !== automationId && (row.graph?.nodes?.length ?? 0) > 0)
+          .map((row) => ({ id: row.id, name: row.name })),
+      );
     })();
-  }, []);
+  }, [automationId]);
 
   const cfg = node.config ?? {};
   const s = (k: string): string => (typeof cfg[k] === "string" ? (cfg[k] as string) : "");
@@ -256,6 +271,71 @@ export function NodeConfigPanel({
         <Field label={t("auto.cfg.action")}>
           <input value={s("action")} onChange={(e) => onPatch({ action: e.target.value })} placeholder="notify | file-write | hep-call …" style={inp} />
         </Field>
+      )}
+
+      {node.type === "eval" && (
+        <>
+          {/* 검증은 **다른 노드가** 만든 것을 기준으로 판정한다. 만든 노드가 자기를
+              채점하면 그건 판정이 아니라 자기 채점이다. */}
+          <Field label={t("auto.cfg.eval_subject")}>
+            <input
+              value={s("subject")}
+              onChange={(e) => onPatch({ subject: e.target.value })}
+              placeholder="draft"
+              style={{ ...inp, fontFamily: "var(--font-mono)" }}
+            />
+          </Field>
+          <Field label={t("auto.cfg.eval_criteria")}>
+            {/* ★기준은 사람 말로 적는다. 이 문장이 그대로 판정에 쓰인다 —
+                단어 목록으로 재지 않는다. */}
+            <textarea
+              value={s("criteria")}
+              onChange={(e) => onPatch({ criteria: e.target.value })}
+              rows={3}
+              placeholder="근거가 두 개 이상 있고, 문장이 어색하지 않다"
+              style={{ ...inp, resize: "vertical", fontFamily: "var(--font-body)" }}
+            />
+          </Field>
+          <Field label={t("auto.cfg.eval_produces")}>
+            <input
+              value={s("produces")}
+              onChange={(e) => onPatch({ produces: e.target.value })}
+              placeholder="verdict"
+              style={{ ...inp, fontFamily: "var(--font-mono)" }}
+            />
+          </Field>
+        </>
+      )}
+
+      {node.type === "subgraph" && (
+        <>
+          {/* ★id로 고른다. 이름은 사람이 바꾸고 겹칠 수도 있어서, 이름으로 저장하면
+              어느 날 다른 자동화가 실행된다. */}
+          <Field label={t("auto.cfg.subgraph_ref")}>
+            <select value={s("graphRef")} onChange={(e) => onPatch({ graphRef: e.target.value })} style={inp}>
+              <option value="">—</option>
+              {callableGraphs.map((row) => (
+                <option key={row.id} value={row.id}>{row.name}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label={t("auto.cfg.subgraph_input")}>
+            <input
+              value={s("input")}
+              onChange={(e) => onPatch({ input: e.target.value })}
+              placeholder="{{topic}}"
+              style={{ ...inp, fontFamily: "var(--font-mono)" }}
+            />
+          </Field>
+          <Field label={t("auto.cfg.subgraph_produces")}>
+            <input
+              value={s("produces")}
+              onChange={(e) => onPatch({ produces: e.target.value })}
+              placeholder="innerResult"
+              style={{ ...inp, fontFamily: "var(--font-mono)" }}
+            />
+          </Field>
+        </>
       )}
 
       {node.type === "condition" && (

@@ -186,6 +186,9 @@ function AutomationFlowPage() {
       output: t("auto.node.output"),
       condition: t("auto.node.condition"),
       transform: t("auto.node.transform"),
+      eval: t("auto.node.eval"),
+      subgraph: t("auto.node.subgraph"),
+      subgraphUnset: t("auto.node.subgraphUnset"),
       producesLabel: t("auto.flow.produces"),
       consumesLabel: t("auto.flow.consumes"),
     }),
@@ -1151,7 +1154,7 @@ function AutomationFlowPage() {
           {editing && paletteOpen ? (
             <NodePalette onAdd={addPaletteNode} onClose={() => setPaletteOpen(false)} />
           ) : editing && selectedNode ? (
-            <NodeConfigPanel node={selectedNode} onPatch={patchSelected} onLabel={labelSelected} onDelete={deleteSelected} onClose={() => setSelectedNodeId(null)} timezone={automation?.timezone ?? null} />
+            <NodeConfigPanel node={selectedNode} onPatch={patchSelected} onLabel={labelSelected} onDelete={deleteSelected} onClose={() => setSelectedNodeId(null)} timezone={automation?.timezone ?? null} automationId={automation?.id} />
           ) : selectedNode ? (
             <NodeInspector node={selectedNode} onClose={() => setSelectedNodeId(null)} t={t} />
           ) : (

@@ -9,6 +9,7 @@ import {
   IconRoute,
   IconArrowUp,
   IconSparkles,
+  IconLayers,
 } from "@/components/Icon";
 import { NodeCard, ConnectServiceBadge, cfgStr } from "./nodeShared";
 import { ConditionNode } from "./ConditionNode";
@@ -39,6 +40,11 @@ export interface NodeStrings {
   output: string;
   condition: string;
   transform: string;
+  eval: string;
+  subgraph: string;
+  /** 부르는 자동화의 이름 — 없으면 아직 안 고른 것이다. */
+  subgraphRef?: string;
+  subgraphUnset: string;
   producesLabel: string;
   consumesLabel: string;
 }
@@ -79,13 +85,14 @@ export function AgentNode({ data, selected }: NodeProps) {
   return (
     <NodeCard
       type="agent"
-      icon={isFirm ? <IconBuilding size={13} /> : <IconSparkles size={13} />}
+      icon={isFirm ? <IconBuilding size={13}/> : <IconSparkles size={13} />}
       title={d.label || (isFirm ? d.strings.firm : isHub ? "Hub" : d.strings.agent)}
       subtitle={prompt || ref || summaryProduces(d)}
       selected={selected}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
+      outcomeHandles
     />
   );
 }
@@ -115,13 +122,14 @@ export function ActionNode({ data, selected }: NodeProps) {
   return (
     <NodeCard
       type="action"
-      icon={<IconRoute size={13} />}
+      icon={<IconRoute size={13}/>}
       title={d.label || (action ? `${d.strings.action}: ${action}` : d.strings.action)}
       subtitle={summaryProduces(d)}
       selected={selected}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
+      outcomeHandles
     />
   );
 }
@@ -132,14 +140,55 @@ export function OutputNode({ data, selected }: NodeProps) {
   return (
     <NodeCard
       type="output"
-      icon={<IconArrowUp size={13} />}
+      icon={<IconArrowUp size={13}/>}
       title={d.label || d.strings.output}
       subtitle={catalog}
       selected={selected}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
+      outcomeHandles
       hasOut={false}
+    />
+  );
+}
+
+export function EvalNode({ data, selected }: NodeProps) {
+  const d = data as WorkflowNodeData;
+  const subject = cfgStr(d.config, "subject");
+  const criteria = cfgStr(d.config, "criteria");
+  return (
+    <NodeCard
+      type="eval"
+      icon={<IconSparkles size={13} />}
+      title={d.label || d.strings.eval}
+      // 무엇을 어떤 기준으로 보는지가 카드에 보여야 한다 — 안 보이면 "검증"이라는
+      // 이름만 있고 무엇을 재는지는 열어봐야 안다.
+      subtitle={subject && criteria ? `${subject} — ${criteria}` : (criteria || subject)}
+      selected={selected}
+      connectable={d.connectable}
+      runState={d.runState}
+      progress={d.progress}
+      branchHandles
+    />
+  );
+}
+
+export function SubgraphNode({ data, selected }: NodeProps) {
+  const d = data as WorkflowNodeData;
+  const ref = cfgStr(d.config, "graphRef");
+  return (
+    <NodeCard
+      type="subgraph"
+      icon={<IconLayers size={13}/>}
+      title={d.label || d.strings.subgraph}
+      // ★어느 자동화를 부르는지가 안 보이면, 캔버스만 보고는 무엇이 실행되는지 알 수 없다.
+      subtitle={ref ? (d.strings.subgraphRef ?? ref) : d.strings.subgraphUnset}
+      selected={selected}
+      connectable={d.connectable}
+      runState={d.runState}
+      progress={d.progress}
+      outcomeHandles
     />
   );
 }
@@ -153,4 +202,8 @@ export const workflowNodeTypes = {
   output: OutputNode,
   condition: ConditionNode,
   transform: TransformNode,
+  // ★커널이 실행하는 종류는 전부 여기 있어야 한다. 빠지면 React Flow 가 그 노드를
+  //   못 그리고, 사용자는 그래프에 구멍이 난 것을 본다.
+  eval: EvalNode,
+  subgraph: SubgraphNode,
 };
