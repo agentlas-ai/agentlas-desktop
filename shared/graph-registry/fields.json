@@ -401,12 +401,14 @@
       "type": "enum",
       "values": [
         "true",
-        "false"
+        "false",
+        "error"
       ],
       "writer": "빌더",
       "reader": "커널 분기",
       "unknown": "EDGE_CONDITION_UNRESOLVED — 미선언 엣지는 양쪽 다 살리지 않는다",
-      "status": "implemented"
+      "status": "implemented",
+      "note": "조건 노드의 참/거짓 출구와 **실패 출구**를 같은 칸으로 선언한다. 핸들을 종류마다 늘리는 대신, 실패 사유는 상태 변수(<노드>_error)로 갈라 본다 — n8n도 타입을 늘리지 않고 포트를 늘려 같은 문제를 풀었다."
     },
     {
       "name": "runtime",

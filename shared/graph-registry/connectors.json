@@ -559,6 +559,69 @@
       ],
       "note": "지금 두 표면(데스크탑·터미널)은 같은 SQLite 파일을 공유해 **전송 채널이 없다** — 그래서 협상 대신 강등(C24)으로 같은 문제를 푼다. SDK·Hub 같은 원격 표면이 생기면 그때 필요하다.",
       "phase": "version"
+    },
+    {
+      "id": "C40",
+      "title": "실패하면 이쪽으로 (저작자가 그리는 실패 경로)",
+      "from": "agent|tool|action|output|condition|eval|transform",
+      "to": "agent|tool|action|output|condition|eval|transform",
+      "envelope": "graph/1/edge.error",
+      "status": "implemented",
+      "phase": "run",
+      "failures": [
+        "MUTATION_UNVERIFIED"
+      ],
+      "note": "★조사한 두 제품이 같은 자리에 이걸 둔다 — n8n은 `main` 타입에 category:'error'를 붙인 추가 출력 포트(node-helpers.ts:1221), Dify는 `fail-branch` 소스 핸들(LLM/HTTP/Code/Tool 4종). 우리는 실측으로 없음을 확인했다: 상류가 실패하면 하류가 아예 안 돌아, 실패했을 때 '대신 이걸 해라'를 그릴 방법이 없었다.\\n★단 **부수효과가 나갔는지 모르는 실패(MUTATION_UNVERIFIED)는 라우팅하지 않는다** — 모르는 상태에서 대체 경로를 타면 같은 게 두 번 나갈 수 있다. 그건 계속 멈춘다."
+    },
+    {
+      "id": "C41",
+      "title": "승인 거부 뒤에 다른 길로 간다",
+      "from": "person",
+      "to": "agent|tool|action|output|condition|eval|transform",
+      "envelope": "graph/1/edge.error",
+      "status": "implemented",
+      "phase": "human",
+      "note": "Flowise HumanInput은 출력 앵커가 2개(proceed/reject), Dify는 액션 버튼마다 분기를 만든다. 우리는 거부가 곧 종료였다 — 거부 후 '팀에 알리기' 같은 대체 경로를 못 그렸다. 실패 경로(C40)를 타고, 사유 변수로 거부인지 오류인지 구분한다."
+    },
+    {
+      "id": "C42",
+      "title": "상류가 실패해도 도는 정리 단계",
+      "from": "agent|tool|action|output|condition|eval|transform",
+      "to": "agent|tool|action|output|condition|eval|transform",
+      "envelope": "graph/1/edge.always",
+      "status": "specified",
+      "phase": "staffing",
+      "note": "Airflow setup/teardown — teardown은 work가 실패해도 실행되고 DAG 상태 판정에서 제외된다. Airflow의 trigger_rule은 13종(all_done·one_failed·none_failed_min_one_success…)이고 우리 합류는 사실상 all_success 1종이다(실측: 상류 실패 시 하류 미실행). dry-run·mutation을 다루는 제품이라 정리 계약의 부재는 비용이 크다."
+    },
+    {
+      "id": "C43",
+      "title": "승인이 안 오면 시간이 지나 다른 길로",
+      "from": "person",
+      "to": "agent|tool|action|output|condition|eval|transform",
+      "envelope": "graph/1/edge.timeout",
+      "status": "specified",
+      "phase": "staffing",
+      "note": "Dify Human Input은 **전용 타임아웃 분기**(기본 3일, 안 이으면 워크플로 종료), Airflow HITL은 response_timeout + defaults 자동 해소. 우리는 만료 시 운영자 알림뿐이라 그래프가 만료를 처리할 수 없다."
+    },
+    {
+      "id": "C44",
+      "title": "실패는 아닌데 상태가 변했다",
+      "from": "runtime",
+      "to": "surface",
+      "envelope": "graph/1/status.change",
+      "status": "specified",
+      "phase": "staffing",
+      "note": "Node-RED Status 노드의 존재 이유가 날카롭다 — *\"MQTT 노드가 연결을 잃어도 에러 이벤트가 아니라 상태 변화만 일으킨다\"*. 이 저장소의 stale-online 사고(요청 타임아웃이 연결을 안 죽여 영원히 온라인)와 같은 모양이다. 우리에겐 이 채널이 없다."
+    },
+    {
+      "id": "C45",
+      "title": "다른 그래프의 산출물이 갱신되면 돈다",
+      "from": "history",
+      "to": "trigger",
+      "envelope": "graph/1/trigger.asset",
+      "status": "specified",
+      "phase": "staffing",
+      "note": "Airflow Asset — producer outlets / consumer schedule, **AND(&) OR(|) 논리 중첩 가능**. 우리 chain 트리거는 '자동화 A가 끝나면 B'라는 push뿐이라 '산출물이 갱신되면'을 못 쓴다. 그래프를 유통하는 제품에서 조합 가능성의 상한을 정하는 자리다."
     }
   ],
   "phases": [

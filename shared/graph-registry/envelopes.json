@@ -1112,6 +1112,137 @@
         }
       ],
       "note": "★관측이지 제어가 아니다. 커널은 이 호출을 막을 수 없다 — 막는 것은 permissions=read로 런타임에 맡긴다."
+    },
+    {
+      "id": "graph/1/edge.error",
+      "boundary": "실패한 노드 → 대체 경로",
+      "status": "implemented",
+      "implementedAs": "run-graph.ts routeNodeFailure (sourceHandle=\"error\")",
+      "payload": [
+        {
+          "field": "sourceHandle",
+          "grade": "critical",
+          "values": [
+            "error"
+          ],
+          "note": "엣지가 실패 경로임을 선언한다"
+        },
+        {
+          "field": "code",
+          "grade": "critical",
+          "note": "무엇이 실패했나 — 상태에 남아 조건 노드가 읽을 수 있다"
+        },
+        {
+          "field": "reason",
+          "grade": "critical",
+          "note": "사유 원문"
+        },
+        {
+          "field": "nodeId",
+          "grade": "critical",
+          "note": "어느 단계가 실패했나"
+        },
+        {
+          "field": "routed",
+          "grade": "critical",
+          "note": "★처리된 실패임을 표시한다. 화면이 이걸 안 보면 잘 처리된 실행을 '고장'으로 띄운다."
+        }
+      ],
+      "failures": [
+        "MUTATION_UNVERIFIED"
+      ],
+      "note": "★부수효과가 나갔는지 모르는 실패는 라우팅하지 않는다 — 모르는 채로 대체 경로를 타면 같은 게 두 번 나갈 수 있다.",
+      "nonRoutable": {
+        "note": "이 실패들은 실패 경로로 흘려보내지 않는다. 이유가 하나하나 다르다.",
+        "codes": [
+          {
+            "code": "APPROVAL_REQUIRED",
+            "why": "실패가 아니라 **일시정지**. 사람을 기다리는 중인데 대체 경로를 타면 결정을 조용히 건너뛴다. ★계약 게이트가 실측으로 잡은 결함이다."
+          },
+          {
+            "code": "MUTATION_UNVERIFIED",
+            "why": "바깥에 나갔는지 **모르는** 상태. 모르는 채로 대체 경로를 타면 같은 게 두 번 나갈 수 있다."
+          },
+          {
+            "code": "RESUME_CONFLICT",
+            "why": "다른 실행이 이미 이 좌표를 가져갔다. 두 실행이 같이 진행되면 안 된다."
+          },
+          {
+            "code": "BUDGET_EXHAUSTED",
+            "why": "실행 총량이 끝났다. 대체 경로도 토큰을 쓰므로 상한을 넘게 된다."
+          }
+        ]
+      }
+    },
+    {
+      "id": "graph/1/edge.always",
+      "boundary": "상류 결과와 무관하게 도는 정리 단계",
+      "status": "specified",
+      "payload": [
+        {
+          "field": "sourceHandle",
+          "grade": "critical",
+          "values": [
+            "always"
+          ]
+        }
+      ],
+      "note": "Airflow setup/teardown 상당. 미구현."
+    },
+    {
+      "id": "graph/1/edge.timeout",
+      "boundary": "기다리다 시간이 지나면",
+      "status": "specified",
+      "payload": [
+        {
+          "field": "sourceHandle",
+          "grade": "critical",
+          "values": [
+            "timeout"
+          ]
+        },
+        {
+          "field": "waitedMs",
+          "grade": "critical"
+        }
+      ],
+      "note": "Dify Human Input 타임아웃 분기 상당. 미구현."
+    },
+    {
+      "id": "graph/1/status.change",
+      "boundary": "런타임 → 화면 (실패 아닌 상태 변화)",
+      "status": "specified",
+      "payload": [
+        {
+          "field": "state",
+          "grade": "critical"
+        },
+        {
+          "field": "text",
+          "grade": "degradable"
+        }
+      ],
+      "note": "Node-RED Status 노드 상당. 미구현."
+    },
+    {
+      "id": "graph/1/trigger.asset",
+      "boundary": "산출물 갱신 → 그래프 시작",
+      "status": "specified",
+      "payload": [
+        {
+          "field": "assetId",
+          "grade": "critical"
+        },
+        {
+          "field": "logic",
+          "grade": "critical",
+          "values": [
+            "and",
+            "or"
+          ]
+        }
+      ],
+      "note": "Airflow Asset 스케줄링 상당. 미구현."
     }
   ]
 }

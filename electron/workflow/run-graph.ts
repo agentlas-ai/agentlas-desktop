@@ -196,6 +196,25 @@ export interface RunGraphResult {
   budgetUnmeasured?: boolean;
 }
 
+/**
+ * 저작자가 그린 실패 경로(커넥터 C40)로 **흘려보내면 안 되는** 실패들. 닫힌 목록이다.
+ *
+ * 이유가 하나하나 다르다:
+ *  · APPROVAL_REQUIRED — 실패가 아니라 **일시정지**다. 사람을 기다리는 중인데 대체 경로를
+ *    타면 사람의 결정을 조용히 건너뛴다. (거부 APPROVAL_REJECTED는 결정이므로 라우팅한다 —
+ *    "거부되면 팀에 알리기" 같은 경로를 그릴 수 있어야 한다.)
+ *  · MUTATION_UNVERIFIED — 바깥에 나갔는지 **모르는** 상태. 모르는 채로 대체 경로를 타면
+ *    같은 게 두 번 나갈 수 있다.
+ *  · RESUME_CONFLICT — 다른 실행이 이미 이 좌표를 가져갔다. 두 실행이 같이 진행되면 안 된다.
+ *  · BUDGET_EXHAUSTED — 실행 총량이 끝났다. 대체 경로도 토큰을 쓰므로 상한을 넘게 된다.
+ */
+const NON_ROUTABLE_FAILURES = new Set([
+  "APPROVAL_REQUIRED",
+  "MUTATION_UNVERIFIED",
+  "RESUME_CONFLICT",
+  "BUDGET_EXHAUSTED",
+]);
+
 const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v3";
 const LEGACY_GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v2";
 const WORKFORCE_PREPARE_RECEIPT_SCHEMA = "agentlas.workforce-prepare-checkpoint-receipt.v1";
@@ -886,6 +905,13 @@ export type GraphNodeFailure = {
   code: string;
   reason: string;
   nextAction: string;
+  /**
+   * 저작자가 그린 실패 경로로 흘러갔는가 (커넥터 C40).
+   *
+   * ★true면 이 단계는 실패했지만 **그래프가 처리했다**. 화면이 이걸 안 보면
+   * 잘 처리된 실행을 "고장"으로 띄우게 된다 — 이 세션이 계속 고쳐 온 결함의 모양 그대로다.
+   */
+  routed?: boolean;
 };
 
 /** 실패 3요소를 실어 나르는 에러. 커널 내부 throw는 전부 이 형태를 목표로 한다. */
@@ -1684,9 +1710,47 @@ export async function runGraph(
    * 쓰며, ambiguous로 올리지 않는다 — 외부에 아무것도 나가지 않았음이 확정이기 때문이다.
    * 사유 원문과 지금 누를 행동을 함께 남긴다(코드만 남기지 않는다).
    */
+  /**
+   * 이 실패를 저작자가 그린 실패 경로로 흘려보낼 수 있는가 (커넥터 C40).
+   *
+   * 조사한 두 제품이 같은 자리에 이 기능을 둔다 — n8n은 `main` 타입에 category:'error'를 붙인
+   * 추가 출력 포트로, Dify는 `fail-branch` 소스 핸들로. 우리는 실측으로 없음을 확인했다:
+   * 상류가 실패하면 하류가 아예 안 돌아, "실패하면 대신 이걸 해라"를 그릴 방법이 없었다.
+   *
+   * ★단 하나 라우팅하지 않는 실패가 있다: **부수효과가 나갔는지 모르는 것**.
+   *   모르는 채로 대체 경로를 타면 같은 게 두 번 나갈 수 있다. 그건 계속 멈춘다.
+   */
+  /**
+   * 이 실패를 저작자가 그린 실패 경로로 흘려보냈는가. 흘려보냈으면 true —
+   * 그때 실행은 **계속된다**(run 전체를 실패로 만들지 않는다).
+   *
+   * 실패 지점이 커널에 두 곳(계약 위반 즉시 정지 / 노드 실행 catch)이라 규칙을 여기 한 곳에
+   * 둔다. 두 곳이 각자 판단하면 "어떤 실패는 라우팅되고 어떤 실패는 아닌" 드리프트가 생긴다.
+   */
+  const routeNodeFailure = (node: WorkflowNode, failure: GraphNodeFailure): boolean => {
+    const routes = (outByNode.get(node.id) ?? []).filter((e) => e.handle === "error");
+    if (routes.length === 0) return false;
+    // ★라우팅하면 안 되는 것들 — 닫힌 목록. 하나하나 이유가 다르다.
+    //   (계약 게이트가 실측으로 잡았다: 승인 대기까지 실패 경로로 흘려 사람 결정을
+    //    조용히 건너뛰는 버그를 만들 뻔했다.)
+    if (NON_ROUTABLE_FAILURES.has(failure.code)) return false;
+    // 무엇이 왜 실패했는지를 상태에 남겨, 실패 경로가 조건 노드로 사유를 갈라 볼 수 있게 한다
+    // (거부인지 시간초과인지 오류인지). 핸들을 종류마다 늘리는 대신 값으로 구분한다.
+    vars[`${node.id}_error`] = failure.code;
+    vars[`${node.id}_error_reason`] = failure.reason;
+    nodeFailures[node.id] = { ...failure, routed: true };
+    // 평상시 출구는 막고 실패 출구만 연다 — 둘 다 살리면 성공한 척하는 분기가 생긴다.
+    for (const edge of outByNode.get(node.id) ?? []) {
+      if (edge.handle !== "error") blockedEdges.add(edge.edgeId);
+    }
+    journal("node_routed", node.id, { via: "error", code: failure.code });
+    return true;
+  };
+
   const failGraphNode = (node: WorkflowNode, failure: GraphNodeFailure): void => {
     failNode(node.id, false);
     status.set(node.id, "failed");
+    if (routeNodeFailure(node, failure)) return;
     nodeFailures[node.id] = failure;
     tryRecordFailureEvent({
       runId,
@@ -2271,6 +2335,8 @@ export async function runGraph(
                 nextAction: "사유를 확인하고 [이 노드부터 재실행]하거나, 노드 설정을 고친 뒤 다시 실행하세요.",
               });
           nodeFailures[node.id] = failure;
+          // 저작자가 실패 경로를 그려 뒀으면 그리로 보낸다 — 실행은 계속된다(커넥터 C40).
+          const handled = routeNodeFailure(node, failure);
           tryRecordFailureEvent({
             runId,
             source: "workflow_node",
@@ -2283,10 +2349,14 @@ export async function runGraph(
               nodeType: node.type,
               nodeLabel: node.label,
               nextAction: failure.nextAction,
+              // 처리된 실패도 기록은 남긴다 — 다만 실행을 실패로 만들지 않는다.
+              routed: handled,
             },
           });
-          if (error === undefined) error = message;
-          ok = false;
+          if (!handled) {
+            if (error === undefined) error = message;
+            ok = false;
+          }
         } finally {
           clearTimeout(nodeTimer);
           runSignal.removeEventListener("abort", relayRunAbort);
