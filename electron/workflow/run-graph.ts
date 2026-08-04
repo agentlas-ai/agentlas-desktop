@@ -104,6 +104,29 @@ function nodeApprovalTier(node: WorkflowNode): GraphNodeApprovalTier {
   return nodeEffect(node) === "mutation" ? "ask" : "auto";
 }
 
+/**
+ * 이 노드를 몇 번까지 다시 시도해도 되는가.
+ *
+ * 재시도는 "같은 일이 두 번 일어나도 괜찮다"가 보장될 때만 안전하다. 바깥을 바꾸는
+ * 단계는 멱등 키를 선언했을 때만 자동 재시도를 허용하고, 선언이 없으면 0회 —
+ * 게시가 나갔는지 모르는 채로 다시 누르는 것이 가장 흔한 이중 발행 사고다.
+ */
+function nodeMaxAttempts(node: WorkflowNode): number {
+  const declared = node.config?.retries;
+  if (typeof declared === "number" && Number.isFinite(declared) && declared >= 0) {
+    return Math.min(5, Math.floor(declared)) + 1;
+  }
+  if (nodeEffect(node) === "mutation") {
+    return str(node.config, "idempotencyKey") ? 3 : 1;
+  }
+  return 3;
+}
+
+/** 일시 오류 재시도 간격 — 같은 순간에 몰려 다시 실패하지 않게 지수적으로 벌린다. */
+function retryBackoffMs(attempt: number): number {
+  return Math.min(8_000, 500 * 2 ** (attempt - 1));
+}
+
 function nodeMaxTokens(node: WorkflowNode): number | null {
   const raw = node.config?.maxTokens;
   return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null;
@@ -1052,6 +1075,8 @@ export async function runGraph(
   const reachability = buildReachability(graph);
   /** 변수 이름 → 이번 실행에서 그 변수를 쓴 노드들. */
   const varWriters = new Map<string, string[]>();
+  /** 노드 id → 이번 실행에서 시도한 횟수(재시도 판정용). */
+  const nodeAttempts = new Map<string, number>();
   const dryRun = opts.dryRun === true;
   /** 시뮬레이션에서 막은 것들 — "실전이었으면 무엇이 일어났는가"를 그대로 보여주는 영수증. */
   const dryRunBlocks: GraphDryRunBlock[] = [];
@@ -1701,6 +1726,26 @@ export async function runGraph(
           const replaySafeFailure = automation.executionPermission === "read" ||
             replaySafeTypedFailure || replaySafePreparedFailure || noObservedSideEffect;
           const ambiguous = checkpointPersistenceError !== null || unsafeToolObserved || !replaySafeFailure;
+          // 재시도 레인 — 부수효과가 **확실히 없었을 때만** 다시 시도한다. 모호하면
+          // 재시도가 곧 이중 실행이므로, 그 판단은 사람에게 넘긴다.
+          const attempts = (nodeAttempts.get(node.id) ?? 0) + 1;
+          nodeAttempts.set(node.id, attempts);
+          const maxAttempts = nodeMaxAttempts(node);
+          const contractStop = graphFailureOf(nodeErr) !== null;
+          if (!ambiguous && !nodeTimedOut && !contractStop && !runSignal.aborted && attempts < maxAttempts) {
+            checkpoint!.inFlightNodeIds = checkpoint!.inFlightNodeIds.filter((id) => id !== node.id);
+            status.set(node.id, "pending");
+            emitNodeState(node.id, "pending");
+            tryRecordRunEvent({
+              runId,
+              kind: "workflow_node_retry",
+              automationId: automation.id,
+              nodeId: node.id,
+              payload: { attempt: attempts, maxAttempts, reason: rawMessage.slice(0, 240) },
+            });
+            await new Promise<void>((resolve) => setTimeout(resolve, retryBackoffMs(attempts)));
+            return;
+          }
           const message = ambiguous
             ? `automation_ambiguous_side_effect: ${node.id} may have committed an external action; ${rawMessage}`
             : rawMessage;
