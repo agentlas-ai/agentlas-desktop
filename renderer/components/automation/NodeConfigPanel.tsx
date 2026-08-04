@@ -326,6 +326,49 @@ export function NodeConfigPanel({
           <Field label={t("auto.cfg.produces")}>
             <input value={s("produces")} onChange={(e) => onPatch({ produces: e.target.value })} placeholder="result" style={{ ...inp, fontFamily: "var(--font-mono)" }} />
           </Field>
+          {s("produces") ? (
+            <Field label={t("auto.cfg.reducer")}>
+              <select value={s("reducer") || "overwrite"} onChange={(e) => onPatch({ reducer: e.target.value })} style={inp}>
+                <option value="overwrite">{t("auto.cfg.reducer_overwrite")}</option>
+                <option value="append">{t("auto.cfg.reducer_append")}</option>
+                <option value="merge">{t("auto.cfg.reducer_merge")}</option>
+              </select>
+            </Field>
+          ) : null}
+
+          {/* 안전장치 — 이 노드가 바깥에 무엇을 하는지, 얼마나 오래·얼마나 많이 쓸 수 있는지.
+              선언이 없으면 시뮬레이션은 이 노드를 조회로 보고 실제로 돌린다. */}
+          <div style={{ height: 1, background: "var(--paper-edge)", margin: "2px 0" }} />
+          <Field label={t("auto.cfg.effect")}>
+            <select value={s("effect") || "read"} onChange={(e) => onPatch({ effect: e.target.value })} style={inp}>
+              <option value="pure">{t("auto.cfg.effect_pure")}</option>
+              <option value="read">{t("auto.cfg.effect_read")}</option>
+              <option value="mutation">{t("auto.cfg.effect_mutation")}</option>
+            </select>
+            <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
+              {t("auto.cfg.effect_hint")}
+            </div>
+          </Field>
+          <Field label={t("auto.cfg.timeout")}>
+            <input
+              type="number"
+              min={1}
+              value={s("timeoutSeconds")}
+              onChange={(e) => onPatch({ timeoutSeconds: e.target.value === "" ? undefined : Number(e.target.value) })}
+              placeholder="3600"
+              style={inp}
+            />
+          </Field>
+          <Field label={t("auto.cfg.max_tokens")}>
+            <input
+              type="number"
+              min={1}
+              value={s("maxTokens")}
+              onChange={(e) => onPatch({ maxTokens: e.target.value === "" ? undefined : Number(e.target.value) })}
+              placeholder={t("auto.cfg.max_tokens_placeholder")}
+              style={inp}
+            />
+          </Field>
         </>
       )}
 
