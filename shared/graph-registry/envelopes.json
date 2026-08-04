@@ -327,12 +327,6 @@
       "implementedAs": "electron/workflow/graph-patch.ts"
     },
     {
-      "id": "graph/1/workorder.slot",
-      "boundary": "그래프 슬롯 → 편성",
-      "spec": "06 §3.2",
-      "status": "specified"
-    },
-    {
       "id": "graph/1/hello",
       "boundary": "표면/SDK ↔ 커널 (버전 협상)",
       "spec": "06 §2.4",
@@ -1263,24 +1257,60 @@
       "implementedAs": "automation-scheduler.ts broadcastLiveRun → flow/page.tsx setNodeProgress → nodeShared 카드"
     },
     {
-      "id": "graph/1/trigger.asset",
-      "boundary": "산출물 갱신 → 그래프 시작",
+      "id": "graph/1/trigger.command",
+      "boundary": "무언가가 그래프를 켠다",
       "status": "specified",
       "payload": [
         {
-          "field": "assetId",
-          "grade": "critical"
+          "field": "graphRef",
+          "grade": "critical",
+          "note": "이름 또는 id. 이름은 바뀌므로 id가 정본이다"
         },
         {
-          "field": "logic",
+          "field": "input",
           "grade": "critical",
-          "values": [
-            "and",
-            "or"
-          ]
+          "note": "넘길 값. 인풋 트리거가 있는 그래프면 필수"
+        },
+        {
+          "field": "waitForResult",
+          "grade": "critical",
+          "note": "결과를 기다리나 던지고 가나 — 안 정하면 부르는 쪽이 멈춰 있는지 모른다"
+        },
+        {
+          "field": "depth",
+          "grade": "critical",
+          "note": "★그래프 안의 그래프는 서로를 부를 수 있다. 깊이 상한 없이는 무한 재귀가 된다"
+        },
+        {
+          "field": "callerNodeId",
+          "grade": "degradable",
+          "note": "누가 불렀나 — 실패했을 때 어디로 돌아갈지"
         }
       ],
-      "note": "Airflow Asset 스케줄링 상당. 미구현."
+      "note": "명령 트리거의 봉투 하나. 입구가 셋(그래프 안·SDK·MCP)이지만 건너가는 것은 같아야 한다 — 다르면 같은 그래프가 부르는 쪽에 따라 다르게 돈다."
+    },
+    {
+      "id": "graph/1/agent.recommend",
+      "boundary": "커널 → 사람 (후보 보여주기)",
+      "status": "specified",
+      "payload": [
+        {
+          "field": "query",
+          "grade": "critical",
+          "note": "이 노드의 지시문에서 뽑는다 — 사람이 다시 타이핑하게 하지 않는다"
+        },
+        {
+          "field": "candidates",
+          "grade": "critical",
+          "note": "설치된 것 + Hub. Hub는 릴리스가 못 박힌 것만"
+        },
+        {
+          "field": "why",
+          "grade": "degradable",
+          "note": "왜 이게 맞다고 보는지. 없으면 사람이 고를 근거가 없다"
+        }
+      ],
+      "note": "★찾아서 **보여주기만** 한다. 붙이는 것은 사람이 누른다(C22 swapAgent). 제품이 알아서 붙이면 사용자는 자기 그래프에 누가 들어왔는지 모른다."
     }
   ]
 }

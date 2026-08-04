@@ -79,7 +79,7 @@
       "failures": [
         "RESUME_CONFLICT"
       ],
-      "note": "값이 필요한 그래프는 값 없이 시작하지 않는다 — 빈 문자열로 메꾸면 지어낸 결과가 정상 완료로 기록된다.",
+      "note": "트리거는 **세 갈래**다(오너 확정 2026-08-04):\n · **스케줄**(결정론) — cron·주기·한 번·poll\n · **명령**(누가 켠다) — 사람이 누름·다른 자동화가 끝나면·webhook·파일 변경·터미널 요청\n · **인풋**(비결정론) — 사람이 값을 넣고, 조건 판단은 그래프 안에서 한다\n★'A랑 B 둘 다 갱신되면' 같은 조합 조건에 새 트리거 종류를 만들 필요가 없다 — 인풋 트리거 + 그래프 안 조건으로 표현된다. 종류를 늘리는 대신 **명령 입구**를 연다.\n값이 필요한 그래프는 값 없이 시작하지 않는다 — 빈 문자열로 메꾸면 지어낸 결과가 정상 완료로 기록된다.",
       "phase": "start"
     },
     {
@@ -365,14 +365,14 @@
     },
     {
       "id": "C23",
-      "title": "슬롯을 편성으로 채운다",
-      "from": "agent",
-      "to": "kernel",
-      "envelope": "graph/1/workorder.slot",
+      "title": "이 단계에 맞는 에이전트를 추천받는다 (사람이 클릭해서 붙임)",
+      "from": "kernel",
+      "to": "person",
+      "envelope": "graph/1/agent.recommend",
       "status": "specified",
       "spec": "03 D19 / 06 §3",
-      "note": "에이전트 노드 = 워크오더 슬롯(03 D19). 지금은 ref 직결이라 편성이 없다. 이건 커넥터 배선이 아니라 **기능 신설**이라 이 작업의 범위 밖이다 — 목록에 남겨 둔다.",
-      "phase": "staffing"
+      "note": "★오너 확정 2026-08-04 — **자동 편성이 아니다.** 제품은 **찾아서 보여주기만** 하고, 실제로 붙이는 것은 사람이 버튼을 눌러야 한다.\n내가 처음에 '별도 기능 프로그램'이라고 판단한 것은 자동 편성을 상상해서였고, 그건 틀렸다. 이 형태로 좁히면 조각이 이미 다 있다: marketplace 검색은 연결 창이 이미 부르고 있고(빈 검색어로 전부 가져오는 중), 붙이는 것은 오늘 만든 원터치 교체(C22)가 한다. 빠진 것은 **노드의 지시문을 검색어로 넘기는 버튼** 하나다.\n자연어로 그래프를 만들 때는 이미 있는 편성 명령으로 찾아 붙인다 — 새로 만들 것이 아니다.",
+      "phase": "author"
     },
     {
       "id": "C24",
@@ -618,14 +618,34 @@
       "note": "Node-RED가 Status 노드를 따로 둔 이유가 이것이다 — 문서 원문: *\"MQTT 노드가 연결을 잃어도 에러 이벤트가 아니라 상태 변화만 일으킨다.\"* 이 저장소의 stale-online 사고(요청 타임아웃이 연결을 안 죽여 영원히 온라인)도 같은 모양이다.\\n★예전에는 nodeState가 붙은 이벤트만 화면으로 갔다. 긴 노드가 도는 동안 화면이 '실행 중'에 멈춰 있어 사람은 그걸 '멈췄다'로 읽었다. 이제 도구 호출·생각 신호가 노드 카드 아래 한 줄로 뜬다. 실패가 아니므로 경고색을 쓰지 않는다."
     },
     {
-      "id": "C45",
-      "title": "다른 그래프의 산출물이 갱신되면 돈다",
-      "from": "history",
+      "id": "C46",
+      "title": "그래프 안에서 다른 그래프를 켠다 (함수 안의 함수)",
+      "from": "agent|action|output|transform",
       "to": "trigger",
-      "envelope": "graph/1/trigger.asset",
+      "envelope": "graph/1/trigger.command",
       "status": "specified",
       "phase": "staffing",
-      "note": "Airflow Asset — producer outlets / consumer schedule, **AND(&) OR(|) 논리 중첩 가능**. 우리 chain 트리거는 '자동화 A가 끝나면 B'라는 push뿐이라 '산출물이 갱신되면'을 못 쓴다. 그래프를 유통하는 제품에서 조합 가능성의 상한을 정하는 자리다."
+      "note": "★실측: 커널에 서브그래프 호출이 **0건**이다. 그래서 복잡한 자동화를 쪼갤 수 없고, 만든 그래프를 다른 그래프의 한 단계로 재사용할 수 없다. 명령 입구 셋 중 가장 급하다.\n조사 근거: n8n은 Execute Sub-workflow 노드 + Call Workflow Tool 두 경로, Flowise v2는 ExecuteFlow 노드, Temporal은 Child Workflow(자체 runId + Parent Close Policy). 어느 제품도 별도 커넥터 종류로 두지 않고 **노드**로 둔다."
+    },
+    {
+      "id": "C47",
+      "title": "코드에서 그래프를 켠다 (SDK)",
+      "from": "person",
+      "to": "trigger",
+      "envelope": "graph/1/trigger.command",
+      "status": "specified",
+      "phase": "staffing",
+      "note": "코드 안에서 그래프를 호출하는 길. 실측 0건. 지금 바깥에서 켤 수 있는 길은 webhook과 터미널 요청뿐이라, 사용자 코드에 자동화를 끼워 넣을 수 없다."
+    },
+    {
+      "id": "C48",
+      "title": "다른 에이전트가 그래프를 도구로 부른다 (MCP)",
+      "from": "runtime",
+      "to": "trigger",
+      "envelope": "graph/1/trigger.command",
+      "status": "specified",
+      "phase": "staffing",
+      "note": "그래프를 MCP 도구로 노출해 에이전트가 '이 자동화 돌려줘'로 부르게 하는 것. 실측 0건.\nn8n의 Call n8n Workflow Tool(ai_tool 커넥션)과 Dify의 '워크플로를 Tool로 발행'이 같은 자리다. 그래프를 유통하는 제품에서 조합 가능성의 상한을 정한다."
     }
   ],
   "phases": [
