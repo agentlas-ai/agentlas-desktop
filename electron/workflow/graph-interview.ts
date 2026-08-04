@@ -41,7 +41,17 @@ export interface InterviewState {
    * 적어 주세요"라고 떠넘기게 된다 — 무엇이 틀렸는지 아는 쪽은 우리인데.
    * 커널은 이미 같은 규율을 쓴다: 지난 실패를 다음 실행 지시에 붙인다(buildStrategyDirective).
    */
-  attempts?: Array<{ round: number; problems: string[] }>;
+  attempts?: Array<{
+    round: number;
+    problems: string[];
+    /**
+     * 그 시도가 **얼마나 컸는가**. 다음 시도가 이보다 작아졌으면 모델이 문제를
+     * "그 단계를 지워서" 고친 것이다 — 사람이 요구한 일이 조용히 사라진다.
+     */
+    stepCount?: number;
+    /** 시작 방식. 바뀌었으면 사람이 말한 시작 조건이 뒤집힌 것이다. */
+    triggerKind?: string;
+  }>;
 }
 
 /**
@@ -157,7 +167,22 @@ export function buildInterviewPrompt(state: InterviewState): string {
       "corrected blueprint. Do not repeat the same mistake, and do not ask the person about it —",
       "these are format problems on your side, not missing information:",
       ...attempts.flatMap((a) => a.problems.map((problem) => `  · ${problem}`)),
+      "",
+      // ★가장 위험한 '고치는 방법'을 미리 막는다. 검증 오류는 그 단계를 지우면 사라지지만,
+      //   그러면 사람이 부탁한 일이 조용히 없어진 채로 검증을 통과한다.
+      "DO NOT fix a problem by deleting the step it complains about, by dropping the outside",
+      "action the person asked for, or by changing when the automation starts. Keep everything",
+      "the person asked for and fix only the format. If a problem seems unfixable, keep the",
+      "step and return ask[] instead.",
     );
+    const last = attempts[attempts.length - 1];
+    if (typeof last.stepCount === "number") {
+      lines.push(
+        `Your previous attempt had ${last.stepCount} step(s)`
+        + (last.triggerKind ? ` and started from: ${last.triggerKind}` : "")
+        + ". The corrected blueprint must keep at least that much.",
+      );
+    }
   }
   if (state.round >= MAX_INTERVIEW_ROUNDS - 1) {
     lines.push(
@@ -213,6 +238,36 @@ const unreadable = (): InterviewParse => ({
  * ★핵심: 모델이 blueprint를 냈더라도 **검증을 통과하지 못하면 질문으로 되돌린다.**
  * 이것이 "집요하게 묻는다"를 프롬프트 문구가 아니라 코드로 만드는 지점이다.
  */
+/**
+ * 다시 만든 청사진이 **앞 시도보다 작아졌는가**.
+ *
+ * ★프롬프트로 "지우지 마라"고 부탁하는 것만으로는 안 된다. 검증 오류는 그 단계를 지우면
+ * 사라지고, **지워진 청사진은 검증을 통과한다**. 그러면 사람이 부탁한 일이 조용히 없어진
+ * 채로 "다 만들었습니다"가 나간다 — 이 제품이 반복해서 겪은 결함의 형태 그대로다.
+ *
+ * 좁게 막는다: 문제가 "단계가 너무 많다"였을 때만 줄어드는 것이 정상이다.
+ */
+export function weakenedAgainstLastAttempt(
+  blueprint: GraphBlueprint,
+  state: InterviewState,
+): string | null {
+  const attempts = state.attempts ?? [];
+  const last = attempts[attempts.length - 1];
+  if (!last) return null;
+  const steps = Array.isArray(blueprint.steps) ? blueprint.steps.length : 0;
+  const complainedAboutSize = last.problems.some((p) => p.includes("단계가") && p.includes("개입니다"));
+  if (typeof last.stepCount === "number" && steps < last.stepCount && !complainedAboutSize) {
+    return `앞서 만든 것에는 단계가 ${last.stepCount}개였는데 이번에는 ${steps}개입니다.`
+      + " 문제를 그 단계를 지워서 고치면, 부탁하신 일이 사라진 채로 만들어집니다.";
+  }
+  const trigger = blueprint.trigger?.kind;
+  if (last.triggerKind && trigger && trigger !== last.triggerKind) {
+    return `시작 방식이 "${last.triggerKind}"에서 "${trigger}"로 바뀌었습니다.`
+      + " 언제 시작할지는 말씀하신 대로 두어야 합니다.";
+  }
+  return null;
+}
+
 export function parseInterviewTurn(text: string | null | undefined, state: InterviewState): InterviewParse {
   const raw = firstJsonObject(String(text ?? ""));
   if (!raw) return unreadable();
@@ -242,7 +297,12 @@ export function parseInterviewTurn(text: string | null | undefined, state: Inter
   if (!blueprint || typeof blueprint !== "object") return unreadable();
   const normalized: GraphBlueprint = { ...blueprint, schema: BLUEPRINT_SCHEMA };
   const problems = validateBlueprint(normalized);
-  if (problems.length === 0) return { ok: true, turn: { kind: "blueprint", blueprint: normalized } };
+  if (problems.length === 0) {
+    // 검증은 통과했다. 그런데 **앞 시도보다 작아졌으면** 문제를 지워서 고친 것이다.
+    const weakened = weakenedAgainstLastAttempt(normalized, state);
+    if (weakened) return { ok: true, turn: { kind: "retry", problems: [weakened] } };
+    return { ok: true, turn: { kind: "blueprint", blueprint: normalized } };
+  }
 
   // 만들 수 없는 청사진이다. 물어서 채울 수 있는 것은 질문으로 돌려준다.
   const questions = normalizeQuestions(
@@ -255,7 +315,13 @@ export function parseInterviewTurn(text: string | null | undefined, state: Inter
   // 사람은 모르고, 우리는 안다. 무엇이 틀렸는지 돌려주고 스스로 고치게 한다.
   return {
     ok: true,
-    turn: { kind: "retry", problems: problems.map((p) => p.reason) },
+    turn: {
+      kind: "retry",
+      problems: problems.map((p) => p.reason),
+      // 이번 시도가 얼마나 컸는지 함께 넘긴다 — 다음 시도가 이보다 작아지면 막는다.
+      stepCount: Array.isArray(normalized.steps) ? normalized.steps.length : 0,
+      ...(normalized.trigger?.kind ? { triggerKind: normalized.trigger.kind } : {}),
+    },
   };
 }
 

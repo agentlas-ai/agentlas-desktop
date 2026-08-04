@@ -110,7 +110,13 @@ export type BlueprintTurn =
    * 무엇이 틀렸는지 돌려주고 **스스로 고치게** 한다. 사람에게 "구체적으로 적어 주세요"로
    * 떠넘기면 막다른 길이 된다: 무엇이 틀렸는지 사람은 모르고, 우리는 안다.
    */
-  | { kind: "retry"; problems: string[] };
+  | {
+      kind: "retry";
+      problems: string[];
+      /** 이번 시도가 얼마나 컸는가 — 다음 시도가 이보다 작아지면 막는다. */
+      stepCount?: number;
+      triggerKind?: string;
+    };
 
 export interface BlueprintProblem {
   /** 이 문제를 풀려면 사람에게 물어야 하는가. */

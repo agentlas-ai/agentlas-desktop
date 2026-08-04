@@ -3893,7 +3893,13 @@ export function registerIpcHandlers(): void {
       if (parsed.turn.kind === "retry") {
         attempt = {
           ...attempt,
-          attempts: [...attempt.attempts, { round: attempt.round, problems: parsed.turn.problems }],
+          attempts: [...attempt.attempts, {
+            round: attempt.round,
+            problems: parsed.turn.problems,
+            // 다음 시도가 이보다 작아지면 막는다 — 문제를 지워서 고치는 것을 코드가 잡는다.
+            ...(typeof parsed.turn.stepCount === "number" ? { stepCount: parsed.turn.stepCount } : {}),
+            ...(parsed.turn.triggerKind ? { triggerKind: parsed.turn.triggerKind } : {}),
+          }],
         };
         continue;
       }
