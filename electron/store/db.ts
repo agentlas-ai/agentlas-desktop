@@ -3540,9 +3540,14 @@ export function initStore(options: StoreInitOptions = {}): void {
     !storedModelRoles.has("orchestrator") ||
     !storedModelRoles.has("worker")
   ) {
-    const active = _db
-      .prepare("SELECT kind, backend, source, model, long_context FROM active_runtime WHERE id = 1")
-      .get() as {
+    // 마이그레이션은 자기가 만들지 않은 테이블의 존재를 가정하면 안 된다. 여기서 던지면
+    // initStore 전체가 실패해 앱이 열리지 않는다 — 모델 역할 시드는 있으면 좋은 것이지
+    // 부팅 전제가 아니다(바로 아래 meta 조회는 이미 같은 방식으로 방어하고 있었다).
+    const active = (tableExists(_db, "active_runtime")
+      ? _db
+        .prepare("SELECT kind, backend, source, model, long_context FROM active_runtime WHERE id = 1")
+        .get()
+      : undefined) as {
         kind: string;
         backend: string | null;
         source: string | null;

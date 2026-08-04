@@ -22,7 +22,7 @@ import {
   pinLegacyAutomationHubVersions,
 } from "./store/automations";
 import { checkComputerUsePermissions } from "./mac-permissions";
-import { listChatMessages } from "./store/chats";
+import { appendChatMessage, listChatMessages } from "./store/chats";
 import { getOrCreateAutomationSession } from "./store/automation-sessions";
 import { buildSystemOptimizerPrompt } from "./system-agents/system-optimizer";
 import { runMcpInvocation } from "./mcp/client";
@@ -363,6 +363,18 @@ function handleAutomationFailure(a: Automation, error: string): void {
       void Promise.race([optimizerRun, abortGate])
         .catch((err) => {
           console.error("[automation] system optimizer run failed:", err);
+          // 복구 시도가 죽은 사실은 콘솔에만 남으면 없는 것과 같다. 사용자는 자동화가
+          // 실패한 것만 보고, 제품이 고치려다 실패한 것은 영영 모른다 — 사유를 세션에 남긴다.
+          const reason = err instanceof Error ? err.message : String(err);
+          try {
+            appendChatMessage(
+              chat.chat.id,
+              "system",
+              `System Optimizer 진단 런 자체가 실패했습니다: ${reason.slice(0, 500)}`,
+            );
+          } catch (writeErr) {
+            console.error("[automation] optimizer failure notice could not be written:", writeErr);
+          }
         })
         .finally(() => {
           clearTimeout(optimizerTimer);
@@ -425,6 +437,11 @@ async function runOne(
   /** 이번 실행이 "실패"가 아니라 "판정 불가"로 끝났는가 — 복구 워커·실패 표시의 억제 조건. */
   let judgmentUnavailableRun = false;
   let runError: string | null = null;
+  /**
+   * 커널이 남긴 원문 실패 문자열. runError는 사용자에게 보여줄 문장으로 교체되므로
+   * 기계 판단(부수효과 모호 → 재실행 정지)은 반드시 이 값으로 한다.
+   */
+  let machineError: string | null = null;
   let output: string | undefined;
   let currentRunId: string | null = null;
   // 이번 실행 "이전"의 실패 스트릭 — 성공 시 복구 학습(recordAutomationRecovery) 판정에 쓴다.
@@ -629,6 +646,8 @@ async function runOne(
         : result.error ?? null;
       runStatus = result.ok && !graphStall ? "ok" : "error";
       runError = graphError;
+      // 판정이 이 문장을 사용자용으로 갈아끼우기 전에 원문을 붙들어 둔다(안전 판단용).
+      machineError = graphError;
       // 그래프 outputs 중 마지막 노드 출력을 체인 페이로드로 노출.
       const outVals = Object.values(result.outputs ?? {});
       output = outVals.length ? outVals[outVals.length - 1] : undefined;
@@ -811,6 +830,10 @@ async function runOne(
     }
   } catch (err) {
     const rawError = err instanceof Error ? err.message : String(err);
+    // 사용자에게 보여줄 문장과, 제품이 안전 판단에 쓰는 기계 표식은 같은 문자열일 수 없다.
+    // 판정은 원문을 읽기 좋은 한 문장으로 **교체**하므로, 교체된 문장에서 다시 표식을 찾으면
+    // 없다. 원문을 따로 붙들어 둔다.
+    machineError = rawError;
     const classified = await classifyAutomationFailure(rawError);
     runStatus = classified.status;
     runError = classified.reasonCode
@@ -844,9 +867,7 @@ async function runOne(
             error: runError,
             advanceSchedule: opts?.advanceSchedule ?? true,
             executionConsumed: runStatus === "ok" || runStatus === "skipped",
-            suspendForReconciliation:
-              (runStatus === "blocked" || runStatus === "partial") &&
-              requiresGraphReconciliation(runError),
+            suspendForReconciliation: requiresGraphReconciliation(machineError ?? runError),
             sourceRunId: currentRunId,
             output,
           });
@@ -863,13 +884,26 @@ async function runOne(
         }
       }
     }
-    if (
-      !parentMissing && !leaseOwnershipLost &&
-      (runStatus === "blocked" || runStatus === "partial") &&
-      requiresGraphReconciliation(runError)
-    ) {
+    // 재실행 정지는 커널이 남긴 결정론적 신호(부수효과가 반영됐는지 알 수 없음)만 보고 정한다.
+    // 예전에는 여기에 runStatus(=LLM 판정 결과)까지 걸려 있었다. 판정 모델에 닿지 못하면
+    // 상태가 error로 떨어져 조건이 어긋났고, 게시가 나갔는지 모르는 자동화가 다음 슬롯에
+    // 그대로 다시 실행됐다 — 판정하지 못한 것이 위험한 재실행을 허용하는 근거가 될 수는 없다.
+    if (!parentMissing && !leaseOwnershipLost && requiresGraphReconciliation(machineError ?? runError)) {
       try {
+        // 스케줄은 markAutomationRun이 이미 지웠을 수도 있다(같은 결정의 두 경로).
+        // 어느 쪽이 지웠든 사용자에게는 한 가지 사실만 남으면 된다 — 왜 멈췄고 무엇을 하면 되는가.
+        // 조용한 정지는 고장과 구분되지 않는다: "예약해 둔 자동화가 그냥 안 돈다"로만 보인다.
         suspendAutomationForGraphReconciliation(a.id);
+        const chat = getOrCreateAutomationSession(automationSessionInput(a));
+        appendChatMessage(
+          chat.chat.id,
+          "system",
+          [
+            "이전 실행이 외부에 무언가를 반영했는지 확인되지 않아 자동 재실행을 멈췄습니다.",
+            "같은 작업이 두 번 나가는 것을 막기 위한 조치이며, 자동화는 꺼지지 않았습니다.",
+            "자동화 상세에서 어떤 단계가 실제로 반영됐는지 확인해 주시면 그 지점부터 이어서 실행합니다.",
+          ].join(" "),
+        );
       } catch (error) {
         console.error("[automation] graph reconciliation suspension failed:", error);
       }
