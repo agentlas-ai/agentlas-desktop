@@ -142,9 +142,14 @@
         {
           "id": "agent.model",
           "title": "무슨 모델로",
-          "status": "drift",
-          "note": "config.runtime을 커널이 읽지 않는다(런타임 선택은 자동화 단위 runtimeSelection). 노드별 모델 지정은 06 §5 봉투에 있으나 미배선.",
+          "status": "implemented",
+          "note": "노드가 자기 런타임을 고른다(C03). 좁히기만 한다 — 종류만 바꾸고 나머지는 자동화 선택을 물려받아, 노드가 자동화보다 넓은 권한을 열 수 없다.",
           "sub": [
+            {
+              "id": "agent.model.runtime",
+              "title": "이 단계가 돌 런타임",
+              "status": "implemented"
+            },
             {
               "id": "agent.model.tier",
               "title": "등급 힌트",
@@ -155,6 +160,9 @@
               "title": "정확한 모델 핀(발행 시 스크럽 대상)",
               "status": "specified"
             }
+          ],
+          "owns": [
+            "runtime"
           ]
         },
         {

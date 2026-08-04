@@ -11,6 +11,8 @@ import type {
   WorkflowNode,
   McpInvocationEvent,
   WorkflowNodeRunState,
+  RuntimeKind,
+  RuntimeSelection,
 } from "../../shared/types";
 import { createHash, randomUUID } from "node:crypto";
 import { runMcpInvocation } from "../mcp/client";
@@ -1451,6 +1453,36 @@ export async function runGraph(
   };
 
   /**
+   * 이 노드가 어느 런타임/모델로 도는가 (레지스트리 커넥터 C03 / graph/1 envelope.invoke).
+   *
+   * ★화면(NodeConfigPanel)은 `config.runtime`을 저장하는데 커널이 읽지 않았다.
+   *   사용자는 이 단계만 다른 런타임으로 돌리도록 골라 놓고, 실행은 자동화 기본값으로
+   *   돌았다. 화면이 저장하는데 아무도 안 읽는 값은 있는 기능이 아니다.
+   *
+   * 좁히기만 한다: 노드는 **런타임 종류만** 바꾸고 나머지(모델·권한 관련 필드)는
+   * 자동화 선택을 그대로 물려받는다. 노드가 자동화보다 넓은 권한을 스스로 열 수 없다.
+   */
+  // 런타임 종류는 닫힌 열거형이다. 모르는 값을 그대로 넘기면 런타임 해석이
+  // 어디선가 조용히 기본값으로 떨어진다 — 여기서 막는다.
+  const RUNTIME_KINDS: readonly RuntimeKind[] = [
+    "claude-code", "codex", "gemini", "kimi", "grok", "cursor", "byok", "ollama", "lmstudio", "mlx",
+  ];
+  const isRuntimeKind = (value: string): value is RuntimeKind =>
+    (RUNTIME_KINDS as readonly string[]).includes(value);
+
+  const runtimeSelectionForNode = (node: WorkflowNode): RuntimeSelection | undefined => {
+    const base = automation.runtimeSelection ?? undefined;
+    const declared = str(node.config, "runtime");
+    if (!declared) return base;
+    if (!isRuntimeKind(declared)) {
+      // 모르는 값은 조용히 무시하지 않고 자동화 기본값을 쓴다 — 다만 왜인지 남긴다.
+      console.warn(`[graph] node ${node.id}: unknown runtime "${declared}", using the automation default`);
+      return base;
+    }
+    return { ...(base ?? {}), kind: declared };
+  };
+
+  /**
    * `tool` 노드가 옆 에이전트에 붙는다 (레지스트리 커넥터 C06 / graph/1 tool.compile).
    *
    * ★이 커넥터가 없던 동안 `tool` 노드는 **캔버스에 놓을 수 있는데 놓아도 아무 일이
@@ -2027,7 +2059,7 @@ export async function runGraph(
               mcpBrowserProfileKey: `automation-${automation.id}`,
               toolMode: automation.toolMode ?? "auto",
               hubMode: automation.hubMode ?? "hub-allowed",
-              runtimeSelection: automation.runtimeSelection,
+              runtimeSelection: runtimeSelectionForNode(node),
             },
             (ev) => {
               // 소음은 소음 칸으로. 이 칸은 다음 노드의 입력이 되는 길이 아예 없다.

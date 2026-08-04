@@ -172,7 +172,7 @@ export const GRAPH_FIELD_GRADES: Record<string, "critical" | "degradable" | "ext
   "ref": "critical",
   "repeatOn": "critical",
   "retries": "critical",
-  "runtime": "degradable",
+  "runtime": "critical",
   "sourceHandle": "critical",
   "subject": "critical",
   "targetType": "critical",

@@ -414,13 +414,25 @@
       "appliesTo": [
         "agent"
       ],
-      "grade": "degradable",
-      "type": "string",
+      "grade": "critical",
+      "type": "enum",
       "writer": "저작자",
-      "reader": "(없음)",
-      "unknown": "n/a",
-      "status": "drift",
-      "note": "★화면은 저장하는데 커널이 안 읽는다. 노드별 런타임/모델 지정이 실제로는 안 걸린다."
+      "reader": "커널 → runtimeSelectionForNode → invoke",
+      "unknown": "자동화 기본값으로 되돌리고 **사유를 남긴다**. 모르는 값을 그대로 넘기면 런타임 해석이 어디선가 조용히 기본으로 떨어진다",
+      "status": "implemented",
+      "note": "★좁히기만 한다 — 노드는 런타임 종류만 바꾸고 나머지는 자동화 선택을 물려받는다. 노드가 자동화보다 넓은 권한을 스스로 열 수 없다.",
+      "values": [
+        "claude-code",
+        "codex",
+        "gemini",
+        "kimi",
+        "grok",
+        "cursor",
+        "byok",
+        "ollama",
+        "lmstudio",
+        "mlx"
+      ]
     },
     {
       "name": "wire",

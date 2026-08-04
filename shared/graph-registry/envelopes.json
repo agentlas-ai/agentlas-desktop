@@ -63,7 +63,12 @@
         {
           "field": "runtimeSelection",
           "grade": "degradable",
-          "note": "자동화 단위. ★노드별 지정은 미배선(drift: agent.model)"
+          "note": "노드가 config.runtime으로 종류를 좁힐 수 있다(C03). 모르는 값은 자동화 기본값으로 되돌리고 사유를 남긴다."
+        },
+        {
+          "field": "requiredToolCatalogIds",
+          "grade": "critical",
+          "note": "그래프에서 선으로 이어 붙인 도구들(C06). 자동 선택과 **합쳐서** 켠다"
         }
       ],
       "returns": [
