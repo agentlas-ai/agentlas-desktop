@@ -41,17 +41,45 @@
 //  R4. 모르는 판(version)은 fail-closed. 최선을 다해 읽지 않는다.
 //  R5. 봉투는 값을 **가리지 않는다**. 기존 `{{변수}}`와 조건식은 그대로 값을 본다.
 
-/** 이 봉투의 판. 바뀌면 이름이 바뀐다 — 조용히 뜻이 달라지지 않게. */
-export const NODE_OUTPUT_PROTOCOL = "agentlas.node-output.v1";
+/**
+ * 이 계층의 네임스페이스. **정본은 `graph/1`**이다
+ * (06_Graph_Wire_Protocol_Spec_v1 §2.1 — 네임스페이스 2개: `graph/1`, `agentgraph/1`).
+ *
+ * ★2026-08-04 교정: 처음 만들 때 정본을 안 읽고 `agentlas.node-output.v1`이라는 이름을
+ * 새로 지었다. 이름이 갈라지면 같은 경계에 계약이 두 벌 생기고, 그게 이 저장소가
+ * 반복해서 겪은 드리프트의 시작이다. 레지스트리(`shared/graph-registry/`)와
+ * 적합성 게이트가 이제 그걸 잡는다.
+ */
+export const GRAPH_WIRE = "graph/1";
+/** 이 봉투의 종류. 06 §4 "노드 간 데이터 프로토콜"의 포트 출력. */
+export const NODE_OUTPUT_KIND = "port.output";
 
-/** 값이 이보다 크면 값으로 나르지 않는다. Temporal 파이썬 SDK 오프로드 기본값과 같은 수. */
+/**
+ * 값이 이보다 크면 **인라인으로 나르지 않고 외부화**한다.
+ * Temporal 파이썬 SDK의 오프로드 기본값(`payload_size_threshold = 256*1024`)과 같은 수다.
+ *
+ * ★이건 "필드 상한"이 아니다. 06 §4.6은 못박는다 —
+ * *"필드 단위 문자 상한은 어디에도 없다"*. 넘으면 자르거나 실행을 세우는 게 아니라
+ * 자리에 `$blob` 참조가 남고 `blob_externalized`가 저널에 기록된다(조용한 절단 금지).
+ */
 export const RESULT_INLINE_LIMIT_BYTES = 256 * 1024;
+
+/**
+ * 외부화된 값의 자리표. 06 §4.6의 정본 모양이다.
+ * `store`는 어느 보존소인지 — 지금은 실행 단위(`run`)뿐이다.
+ */
+export interface BlobRef {
+  $blob: { digest: string; size: number; mediaType: string; store: "run" };
+}
 
 export type NodeResult =
   | { kind: "text"; text: string }
   | { kind: "json"; json: unknown }
-  /** 값이 너무 커서 자리만 남긴 것. 어디에 있는지와 얼마나 큰지를 반드시 함께 적는다. */
-  | { kind: "ref"; uri: string; bytes: number; mediaType?: string; preview?: string }
+  /**
+   * 값이 커서 외부화된 것. **자리는 비지 않는다** — 참조와 크기가 남고,
+   * 앞부분은 사람이 볼 수 있게 함께 싣는다.
+   */
+  | { kind: "blob"; ref: BlobRef; preview?: string }
   /** 결과가 **없다**. 빈 문자열이 아니라 이 모양으로 말한다. */
   | { kind: "none"; reason: string };
 
@@ -67,7 +95,11 @@ export interface NodeNote {
 }
 
 export interface NodeOutputEnvelope {
-  protocol: typeof NODE_OUTPUT_PROTOCOL;
+  /** 06 §2.1 공통 봉투 필드 — 미지 major는 fail-closed. */
+  wire: typeof GRAPH_WIRE;
+  kind: typeof NODE_OUTPUT_KIND;
+  /** 확장 전용 칸. 소비자는 **must-ignore이되 버리지 않는다**(06 §2.3). */
+  ext?: Record<string, unknown>;
   nodeId: string;
   nodeLabel: string;
   result: NodeResult;
@@ -77,9 +109,12 @@ export interface NodeOutputEnvelope {
     source: "final" | "partial-accumulated" | "structured" | "declared" | "none";
     runtime?: string;
     tokens?: number;
-    /** 잘랐으면 true. **조용히 true가 되는 경로를 만들지 않는다** — 화면이 이걸 읽는다. */
-    truncated: boolean;
-    /** 잘리기 전 크기(바이트). truncated일 때만 뜻이 있다. */
+    /**
+     * 값이 외부로 나갔는가. **자른 게 아니다** — 원본은 온전히 보존되고 자리에 참조가 남는다.
+     * 조용히 true가 되는 경로를 만들지 않는다: 화면과 저널이 이걸 읽는다.
+     */
+    externalized: boolean;
+    /** 외부화된 원본 크기(바이트). externalized일 때만 뜻이 있다. */
     originalBytes?: number;
   };
 }
@@ -106,10 +141,13 @@ export function makeNodeEnvelope(input: {
   tokens?: number;
   /** 결과가 없을 때 사람에게 할 말. 없으면 기본 문장을 쓴다. */
   emptyReason?: string;
+  /** 외부화 시 자리표에 넣을 내용 지문. 커널이 보관하면서 계산한다. */
+  digest?: string;
 }): NodeOutputEnvelope {
   const notes = input.notes ?? [];
   const base = {
-    protocol: NODE_OUTPUT_PROTOCOL as typeof NODE_OUTPUT_PROTOCOL,
+    wire: GRAPH_WIRE as typeof GRAPH_WIRE,
+    kind: NODE_OUTPUT_KIND as typeof NODE_OUTPUT_KIND,
     nodeId: input.nodeId,
     nodeLabel: input.nodeLabel || input.nodeId,
     notes,
@@ -118,7 +156,7 @@ export function makeNodeEnvelope(input: {
     return {
       ...base,
       result: { kind: "json", json: input.structured },
-      meta: { source: "structured", truncated: false, ...runtimeMeta(input) },
+      meta: { source: "structured", externalized: false, ...runtimeMeta(input) },
     };
   }
   const final = (input.finalText ?? "").trim();
@@ -132,7 +170,7 @@ export function makeNodeEnvelope(input: {
         reason: input.emptyReason
           ?? `"${base.nodeLabel}"이(가) 아무 결과도 내지 않았습니다.`,
       },
-      meta: { source: "none", truncated: false, ...runtimeMeta(input) },
+      meta: { source: "none", externalized: false, ...runtimeMeta(input) },
     };
   }
   const bytes = byteLength(text);
@@ -142,15 +180,20 @@ export function makeNodeEnvelope(input: {
     return {
       ...base,
       result: {
-        kind: "ref",
-        uri: `agentlas:node-output/${encodeURIComponent(input.nodeId)}`,
-        bytes,
-        mediaType: "text/plain; charset=utf-8",
+        kind: "blob",
+        ref: {
+          $blob: {
+            digest: input.digest ?? "",
+            size: bytes,
+            mediaType: "text/plain; charset=utf-8",
+            store: "run",
+          },
+        },
         preview: text.slice(0, 2000),
       },
       meta: {
         source: final ? "final" : "partial-accumulated",
-        truncated: true,
+        externalized: true,
         originalBytes: bytes,
         ...runtimeMeta(input),
       },
@@ -161,7 +204,7 @@ export function makeNodeEnvelope(input: {
     result: { kind: "text", text },
     meta: {
       source: final ? "final" : "partial-accumulated",
-      truncated: false,
+      externalized: false,
       ...runtimeMeta(input),
     },
   };
@@ -181,12 +224,13 @@ export function declaredEnvelope(
   value: string | { json: unknown },
 ): NodeOutputEnvelope {
   return {
-    protocol: NODE_OUTPUT_PROTOCOL,
+    wire: GRAPH_WIRE,
+    kind: NODE_OUTPUT_KIND,
     nodeId,
     nodeLabel: nodeLabel || nodeId,
     result: typeof value === "string" ? { kind: "text", text: value } : { kind: "json", json: value.json },
     notes: [],
-    meta: { source: "declared", truncated: false },
+    meta: { source: "declared", externalized: false },
   };
 }
 
@@ -203,9 +247,10 @@ export function toDownstreamInput(envelope: NodeOutputEnvelope | null | undefine
       return result.text;
     case "json":
       return JSON.stringify(result.json);
-    case "ref":
-      // 참조는 값이 아니다. 다음 노드에게 **값인 척** 넘기지 않는다.
-      return null;
+    case "blob":
+      // ★참조는 값이 아니다. 다만 **실행을 세우지도 않는다**(06 §4.6) —
+      //   자리표를 그대로 넘기고, 해석은 읽는 쪽이 한다. 해석 실패만 BLOB_UNRESOLVED.
+      return JSON.stringify(result.ref);
     case "none":
       return null;
   }
@@ -220,8 +265,8 @@ export function toHumanText(envelope: NodeOutputEnvelope | null | undefined): st
       return result.text;
     case "json":
       return JSON.stringify(result.json, null, 2);
-    case "ref":
-      return `${result.preview ?? ""}\n\n[결과가 너무 커서 전부 싣지 않았습니다 — ${Math.round(result.bytes / 1024)}KB]`.trim();
+    case "blob":
+      return `${result.preview ?? ""}\n\n[결과가 커서 따로 보관했습니다 — ${Math.round(result.ref.$blob.size / 1024)}KB]`.trim();
     case "none":
       return "";
   }
@@ -231,14 +276,16 @@ export function toHumanText(envelope: NodeOutputEnvelope | null | undefined): st
 export function parseNodeEnvelope(raw: unknown): NodeOutputEnvelope | null {
   if (!raw || typeof raw !== "object") return null;
   const value = raw as Partial<NodeOutputEnvelope>;
-  if (value.protocol !== NODE_OUTPUT_PROTOCOL) return null;
+  // 미지 major = fail-closed. 최선을 다해 읽지 않는다(06 §2.3).
+  if (value.wire !== GRAPH_WIRE || value.kind !== NODE_OUTPUT_KIND) return null;
   if (typeof value.nodeId !== "string" || !value.nodeId) return null;
   const result = value.result as NodeResult | undefined;
   if (!result || typeof result !== "object") return null;
-  const kinds = ["text", "json", "ref", "none"];
+  const kinds = ["text", "json", "blob", "none"];
   if (!kinds.includes((result as { kind?: string }).kind ?? "")) return null;
   return {
-    protocol: NODE_OUTPUT_PROTOCOL,
+    wire: GRAPH_WIRE,
+    kind: NODE_OUTPUT_KIND,
     nodeId: value.nodeId,
     nodeLabel: typeof value.nodeLabel === "string" && value.nodeLabel ? value.nodeLabel : value.nodeId,
     result,
@@ -247,7 +294,7 @@ export function parseNodeEnvelope(raw: unknown): NodeOutputEnvelope | null {
       : [],
     meta: {
       source: value.meta?.source ?? "declared",
-      truncated: value.meta?.truncated === true,
+      externalized: value.meta?.externalized === true,
       ...(value.meta?.runtime ? { runtime: value.meta.runtime } : {}),
       ...(typeof value.meta?.tokens === "number" ? { tokens: value.meta.tokens } : {}),
       ...(typeof value.meta?.originalBytes === "number" ? { originalBytes: value.meta.originalBytes } : {}),

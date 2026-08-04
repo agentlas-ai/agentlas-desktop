@@ -1,0 +1,506 @@
+{
+  "wire": "graph/1",
+  "note": "필드 사전. 06 §2.3 — 모든 필드는 등급을 **명시적으로** 선언한다(무선언 = 등록 거부). 등급: critical=fail-closed / degradable=항목만 강등 / extension=must-ignore.",
+  "grades": {
+    "critical": "계약의 성립 조건. 없거나 모르면 거절 + 코드.",
+    "degradable": "없어도 항목 단위로 진행. 원문 보존·보고.",
+    "extension": "미래·서드파티. 버리지 말고 통과."
+  },
+  "fields": [
+    {
+      "name": "id",
+      "on": "node",
+      "grade": "critical",
+      "type": "string",
+      "writer": "빌더(코드)",
+      "reader": "커널·엣지·체크포인트",
+      "unknown": "결손 = 그래프 검증 실패",
+      "status": "implemented",
+      "note": "모델이 쓰지 않는다. buildGraphFromBlueprint가 만든다."
+    },
+    {
+      "name": "type",
+      "on": "node",
+      "grade": "critical",
+      "type": "enum",
+      "values": [
+        "trigger",
+        "agent",
+        "tool",
+        "action",
+        "condition",
+        "eval",
+        "transform",
+        "output"
+      ],
+      "writer": "빌더",
+      "reader": "커널 디스패치",
+      "unknown": "NODE_TYPE_UNSUPPORTED (fail-closed)",
+      "status": "implemented"
+    },
+    {
+      "name": "label",
+      "on": "node",
+      "grade": "degradable",
+      "type": "string",
+      "writer": "저작자·인터뷰",
+      "reader": "화면·실패 사유 문장",
+      "unknown": "id로 대체",
+      "status": "implemented"
+    },
+    {
+      "name": "ref",
+      "on": "node.config",
+      "appliesTo": [
+        "agent"
+      ],
+      "grade": "critical",
+      "type": "string",
+      "writer": "저작자·편성",
+      "reader": "커널 호출",
+      "unknown": "자동화 기본 대상으로 폴백",
+      "status": "implemented"
+    },
+    {
+      "name": "targetType",
+      "on": "node.config",
+      "appliesTo": [
+        "agent"
+      ],
+      "grade": "critical",
+      "type": "enum",
+      "values": [
+        "agent",
+        "firm",
+        "hub"
+      ],
+      "writer": "저작자",
+      "reader": "커널 호출 경로 선택",
+      "unknown": "agent로 간주",
+      "status": "implemented"
+    },
+    {
+      "name": "targetVersion",
+      "on": "node.config",
+      "appliesTo": [
+        "agent"
+      ],
+      "grade": "critical",
+      "type": "string|null",
+      "writer": "저작자",
+      "reader": "Hub 대여",
+      "unknown": "Hub 대상이면 거절 — 무엇이 실행될지 모르기 때문",
+      "status": "implemented",
+      "note": "재발행이 새 definition을 만들어 옛 프로필이 계속 active였던 사고가 이 규칙의 이유."
+    },
+    {
+      "name": "prompt",
+      "on": "node.config",
+      "appliesTo": [
+        "agent"
+      ],
+      "grade": "critical",
+      "type": "string",
+      "writer": "저작자·인터뷰",
+      "reader": "커널 → 런타임",
+      "unknown": "자동화 promptTemplate로 폴백",
+      "status": "implemented"
+    },
+    {
+      "name": "produces",
+      "on": "node.config",
+      "appliesTo": [
+        "agent",
+        "action",
+        "output",
+        "eval",
+        "transform"
+      ],
+      "grade": "degradable",
+      "type": "string",
+      "writer": "저작자·인터뷰",
+      "reader": "커널 상태 쓰기",
+      "unknown": "결과를 상태에 안 남긴다(다음 노드가 참조하면 검증 단계에서 걸림)",
+      "status": "implemented"
+    },
+    {
+      "name": "reducer",
+      "on": "node.config",
+      "appliesTo": [
+        "agent",
+        "action",
+        "output",
+        "transform"
+      ],
+      "grade": "critical",
+      "type": "enum",
+      "values": [
+        "overwrite",
+        "append",
+        "merge"
+      ],
+      "writer": "저작자",
+      "reader": "커널 상태 병합",
+      "unknown": "overwrite로 간주 — 다만 동시 실행 가능한 두 노드가 같은 이름에 overwrite면 REDUCER_WRITE_CONFLICT",
+      "status": "implemented",
+      "note": "append 정렬은 도착 순서가 아니라 **노드 선언 순서**. LangGraph 문서가 병렬 쓰기 순서를 arbitrary라고 못박은 것과 같은 이유."
+    },
+    {
+      "name": "effect",
+      "on": "node.config",
+      "appliesTo": [
+        "agent",
+        "action",
+        "output"
+      ],
+      "grade": "critical",
+      "type": "enum",
+      "values": [
+        "read",
+        "mutation"
+      ],
+      "writer": "저작자·인터뷰",
+      "reader": "시뮬레이션 차단·승인 게이트·재실행 안전",
+      "unknown": "이름으로 추측하지 않는다 — 선언을 좁히기만 한다",
+      "status": "implemented"
+    },
+    {
+      "name": "approval",
+      "on": "node.config",
+      "appliesTo": [
+        "agent",
+        "action",
+        "output"
+      ],
+      "grade": "critical",
+      "type": "enum",
+      "values": [
+        "auto",
+        "ask",
+        "ask_once"
+      ],
+      "writer": "저작자",
+      "reader": "커널 승인 브레이크",
+      "unknown": "mutation이면 ask로 간주(안전 쪽)",
+      "status": "implemented"
+    },
+    {
+      "name": "idempotencyKey",
+      "on": "node.config",
+      "appliesTo": [
+        "agent",
+        "action",
+        "output"
+      ],
+      "grade": "critical",
+      "type": "string",
+      "writer": "저작자",
+      "reader": "재시도 허용 판정",
+      "unknown": "mutation 노드는 재시도 잠김 — retries를 올려도 이 규칙을 못 넘는다",
+      "status": "implemented"
+    },
+    {
+      "name": "needs",
+      "on": "node.config",
+      "appliesTo": [
+        "agent"
+      ],
+      "grade": "critical",
+      "type": "array<{capability,provider,required,resource?}>",
+      "writer": "인터뷰·연결 창",
+      "reader": "연결 검사·켜기 게이트",
+      "unknown": "닫힌 어휘 밖 capability는 아예 안 읽힌다(모델이 어휘를 지어낼 수 없다)",
+      "status": "implemented"
+    },
+    {
+      "name": "subject",
+      "on": "node.config",
+      "appliesTo": [
+        "eval"
+      ],
+      "grade": "critical",
+      "type": "string",
+      "writer": "인터뷰",
+      "reader": "판정 엔진",
+      "unknown": "EVAL_INCOMPLETE",
+      "status": "implemented"
+    },
+    {
+      "name": "criteria",
+      "on": "node.config",
+      "appliesTo": [
+        "eval"
+      ],
+      "grade": "critical",
+      "type": "string",
+      "writer": "인터뷰",
+      "reader": "판정 엔진",
+      "unknown": "EVAL_INCOMPLETE",
+      "status": "implemented"
+    },
+    {
+      "name": "var",
+      "on": "node.config",
+      "appliesTo": [
+        "condition"
+      ],
+      "grade": "critical",
+      "type": "string",
+      "writer": "저작자",
+      "reader": "조건 평가",
+      "unknown": "EDGE_CONDITION_UNRESOLVED — falsy로 흘리지 않는다",
+      "status": "implemented"
+    },
+    {
+      "name": "op",
+      "on": "node.config",
+      "appliesTo": [
+        "condition"
+      ],
+      "grade": "critical",
+      "type": "enum",
+      "values": [
+        "eq",
+        "ne",
+        "gt",
+        "lt",
+        "contains",
+        "truthy",
+        "falsy"
+      ],
+      "writer": "저작자",
+      "reader": "조건 평가",
+      "unknown": "EDGE_CONDITION_UNRESOLVED — Boolean(left)로 흘리지 않는다",
+      "status": "implemented"
+    },
+    {
+      "name": "value",
+      "on": "node.config",
+      "appliesTo": [
+        "condition"
+      ],
+      "grade": "degradable",
+      "type": "string|number|boolean",
+      "writer": "저작자",
+      "reader": "조건 평가",
+      "unknown": "truthy/falsy가 아니면 평가 불능",
+      "status": "implemented"
+    },
+    {
+      "name": "mode",
+      "on": "node.config",
+      "appliesTo": [
+        "transform"
+      ],
+      "grade": "critical",
+      "type": "enum",
+      "values": [
+        "copy",
+        "json",
+        "template",
+        "extract"
+      ],
+      "writer": "저작자",
+      "reader": "커널 변환",
+      "unknown": "copy로 간주",
+      "status": "implemented"
+    },
+    {
+      "name": "from",
+      "on": "node.config",
+      "appliesTo": [
+        "transform"
+      ],
+      "grade": "critical",
+      "type": "string",
+      "writer": "저작자",
+      "reader": "커널 변환",
+      "unknown": "NODE_INPUT_MISSING",
+      "status": "implemented"
+    },
+    {
+      "name": "to",
+      "on": "node.config",
+      "appliesTo": [
+        "transform"
+      ],
+      "grade": "critical",
+      "type": "string",
+      "writer": "저작자",
+      "reader": "커널 변환",
+      "unknown": "결과를 어디에 둘지 모름 = 검증 실패",
+      "status": "implemented"
+    },
+    {
+      "name": "template",
+      "on": "node.config",
+      "appliesTo": [
+        "transform"
+      ],
+      "grade": "degradable",
+      "type": "string",
+      "writer": "저작자",
+      "reader": "커널 변환",
+      "unknown": "mode=template일 때만 필요",
+      "status": "implemented"
+    },
+    {
+      "name": "pattern",
+      "on": "node.config",
+      "appliesTo": [
+        "transform"
+      ],
+      "grade": "degradable",
+      "type": "string",
+      "writer": "저작자",
+      "reader": "커널 변환",
+      "unknown": "mode=extract일 때만 필요",
+      "status": "implemented"
+    },
+    {
+      "name": "text",
+      "on": "node.config",
+      "appliesTo": [
+        "output"
+      ],
+      "grade": "degradable",
+      "type": "string",
+      "writer": "저작자",
+      "reader": "커널 출력",
+      "unknown": "앞 단계 결과를 그대로 쓴다",
+      "status": "implemented"
+    },
+    {
+      "name": "maxIterations",
+      "on": "graph.loop",
+      "grade": "critical",
+      "type": "integer",
+      "writer": "저작자·인터뷰",
+      "reader": "커널 반복 상한",
+      "unknown": "LOOP_BOUND_UNDECLARED (fail-closed)",
+      "status": "implemented"
+    },
+    {
+      "name": "repeatOn",
+      "on": "graph.loop",
+      "grade": "critical",
+      "type": "enum",
+      "values": [
+        "yes",
+        "no"
+      ],
+      "writer": "인터뷰(사람이 말로 정함)",
+      "reader": "빌더 — 되돌아가는 엣지의 방향",
+      "unknown": "물어본다. 추측하면 3/3으로 뒤집혔다(실측)",
+      "status": "implemented"
+    },
+    {
+      "name": "sourceHandle",
+      "on": "edge",
+      "grade": "critical",
+      "type": "enum",
+      "values": [
+        "true",
+        "false"
+      ],
+      "writer": "빌더",
+      "reader": "커널 분기",
+      "unknown": "EDGE_CONDITION_UNRESOLVED — 미선언 엣지는 양쪽 다 살리지 않는다",
+      "status": "implemented"
+    },
+    {
+      "name": "runtime",
+      "on": "node.config",
+      "appliesTo": [
+        "agent"
+      ],
+      "grade": "degradable",
+      "type": "string",
+      "writer": "저작자",
+      "reader": "(없음)",
+      "unknown": "n/a",
+      "status": "drift",
+      "note": "★화면은 저장하는데 커널이 안 읽는다. 노드별 런타임/모델 지정이 실제로는 안 걸린다."
+    },
+    {
+      "name": "wire",
+      "on": "envelope",
+      "grade": "critical",
+      "type": "string",
+      "writer": "발신자 전원",
+      "reader": "수신자 전원",
+      "unknown": "SCHEMA_UNSUPPORTED_MAJOR (fail-closed)",
+      "status": "specified",
+      "spec": "06 §2.3"
+    },
+    {
+      "name": "ext",
+      "on": "envelope",
+      "grade": "extension",
+      "type": "object",
+      "writer": "확장 주체",
+      "reader": "(선택)",
+      "unknown": "must-ignore + 패스스루(버리지 않는다)",
+      "status": "specified",
+      "spec": "06 §2.3"
+    },
+    {
+      "name": "$blob",
+      "on": "any-value",
+      "grade": "critical",
+      "type": "{digest,size,mediaType,store}",
+      "writer": "커널(자동)",
+      "reader": "전 소비자",
+      "unknown": "BLOB_UNRESOLVED + 사유",
+      "status": "implemented",
+      "spec": "06 §4.6",
+      "note": "필드 단위 상한 없음. 256KiB는 '외부화 시작점'이지 상한이 아니다(자르지 않는다)."
+    },
+    {
+      "name": "timeoutSeconds",
+      "on": "node.config",
+      "appliesTo": [
+        "agent",
+        "action",
+        "output"
+      ],
+      "grade": "degradable",
+      "type": "integer",
+      "writer": "저작자",
+      "reader": "커널 노드 상한",
+      "unknown": "자동화 기본 상한을 쓴다",
+      "status": "implemented",
+      "note": "실행 전체 워치독은 '조용해진 것'만 잡지 '끝나지 않는 것'은 못 잡는다 — 토큰을 계속 뱉으며 영원히 도는 노드가 실제로 가능했다."
+    },
+    {
+      "name": "retries",
+      "on": "node.config",
+      "appliesTo": [
+        "agent",
+        "action",
+        "output"
+      ],
+      "grade": "critical",
+      "type": "integer",
+      "writer": "저작자",
+      "reader": "커널 재시도 판정",
+      "unknown": "0(재시도 없음)",
+      "status": "implemented",
+      "note": "★변경 단계는 idempotencyKey 선언이 있어야만 재시도가 열린다. retries를 올려도 이 규칙은 못 넘는다."
+    },
+    {
+      "name": "maxTokens",
+      "on": "node.config",
+      "appliesTo": [
+        "agent"
+      ],
+      "grade": "degradable",
+      "type": "integer",
+      "writer": "저작자",
+      "reader": "커널 예산",
+      "unknown": "노드 상한 없음(실행 전체 budget.maxTokens만 적용)",
+      "status": "implemented",
+      "note": "노드 상한은 그 노드의 누계, graph.budget은 실행 총계 — 비교 대상이 다르다. 금액이 아니라 토큰인 이유: 금액은 모델·시점마다 달라지는 추정치라 상한의 단위로 못 쓴다."
+    }
+  ]
+}

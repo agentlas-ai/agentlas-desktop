@@ -16,7 +16,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 88;
+const SCHEMA_VERSION = 89;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -3887,6 +3887,28 @@ export function initStore(options: StoreInitOptions = {}): void {
     "CREATE INDEX IF NOT EXISTS idx_automation_run_inputs_pending "
     + "ON automation_run_inputs(automation_id, consumed_at, created_at)",
   );
+
+  // v89: 실행 기록의 두 답을 두 칸으로 가른다.
+  //
+  // 지금까지 `status` 한 칸이 서로 다른 두 질문의 답을 번갈아 담았다:
+  //   · 커널의 답 — 그래프가 끝까지 돌았는가 (ok/partial/error/skipped)
+  //   · 판정의 답 — 나온 결과물이 쓸 만한가 (needs_input/blocked/…)
+  // 스케줄러가 커널의 답을 판정 결과로 **덮어써서**, 끝까지 잘 돈 실행이 화면에는
+  // "내 확인 필요"로만 보였다. 사용자는 성공인지 실패인지 알 수 없었다.
+  //
+  // ★옛 행은 고치지 않는다. `needs_input`/`blocked`는 성공 경로와 실패 경로 **양쪽**에서
+  //   나올 수 있어서(classifyAutomationOutcome / classifyAutomationFailure 둘 다 그 값을
+  //   낼 수 있다) 지금 와서 어느 쪽이었는지 복원할 방법이 없다. 지어내지 않고 NULL로 둔다 —
+  //   화면은 NULL을 "옛 기록이라 두 답이 섞여 있음"으로 읽는다.
+  if (tableExists(_db, "run_history")) {
+    const columns = schemaColumns(_db, "run_history").map((column) => column.name);
+    if (!columns.includes("outcome")) {
+      _db.exec("ALTER TABLE run_history ADD COLUMN outcome TEXT");
+    }
+    if (!columns.includes("outcome_reason")) {
+      _db.exec("ALTER TABLE run_history ADD COLUMN outcome_reason TEXT");
+    }
+  }
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
   } catch (error) {

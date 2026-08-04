@@ -1,0 +1,72 @@
+{
+  "wire": "graph/1",
+  "note": "경계별 봉투 — 무엇과 무엇 사이에 무엇이 오가는가. 06이 규정한 이름이 정본이며, 코드가 다른 이름을 쓰면 drift다.",
+  "envelopes": [
+    {
+      "id": "graph/1/envelope.invoke",
+      "boundary": "커널 → 에이전트 런타임",
+      "spec": "06 §5",
+      "status": "specified",
+      "note": "지금 코드는 runMcpInvocation 인자를 직접 조립한다 — 이름 붙은 봉투가 없다."
+    },
+    {
+      "id": "graph/1/envelope.toolcall",
+      "boundary": "에이전트 런타임 → 도구",
+      "spec": "06 §6",
+      "status": "specified"
+    },
+    {
+      "id": "graph/1/port.output",
+      "boundary": "노드 → 노드 (결과)",
+      "spec": "06 §4",
+      "status": "implemented",
+      "implementedAs": "shared/graph-node-protocol.ts (wire=graph/1, kind=port.output)",
+      "keep": [
+        "result와 notes를 구조로 가른 것 — AutoGen의 타입 경계. 06이 금지하지 않으며 §4의 포트 개념과 양립한다.",
+        "결과 없음을 타입 있는 실패로 만든 것 (NODE_NO_RESULT)"
+      ],
+      "note": "2026-08-04 교정 완료 — 처음엔 agentlas.node-object.v1 이라는 별도 이름으로 만들었고 큰 값을 필드 상한+실행 실패로 다뤘다. 지금은 graph/1 공통 봉투(wire/kind/ext) 와 $blob 자동 외부화를 따른다. result/notes 구조 분리는 유지(06이 금지하지 않고 §4 포트 개념과 양립)."
+    },
+    {
+      "id": "graph/1/port.reduce",
+      "boundary": "노드 → 상태 (병합)",
+      "spec": "06 §4.3",
+      "status": "implemented",
+      "implementedAs": "run-graph.ts applyProduces",
+      "note": "항목 봉투 {branchId,nodeId,seq,value} 중 branchId/seq는 미구현 — 지금은 {order,nodeId,value}."
+    },
+    {
+      "id": "graph/1/journal.entry",
+      "boundary": "커널 → 저널/화면",
+      "spec": "06 §7.1",
+      "status": "implemented",
+      "implementedAs": "graph_run_journal 테이블"
+    },
+    {
+      "id": "graph/1/approval.decision",
+      "boundary": "사람(어느 표면이든) → 커널",
+      "spec": "06 §9.1",
+      "status": "implemented",
+      "implementedAs": "automation_node_approvals (occurrence 단위 CAS)"
+    },
+    {
+      "id": "graph/1/patch",
+      "boundary": "Graph Architect → 엔진",
+      "spec": "06 §9.2",
+      "status": "implemented",
+      "implementedAs": "electron/workflow/graph-patch.ts"
+    },
+    {
+      "id": "graph/1/workorder.slot",
+      "boundary": "그래프 슬롯 → 편성",
+      "spec": "06 §3.2",
+      "status": "specified"
+    },
+    {
+      "id": "graph/1/hello",
+      "boundary": "표면/SDK ↔ 커널 (버전 협상)",
+      "spec": "06 §2.4",
+      "status": "specified"
+    }
+  ]
+}

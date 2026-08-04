@@ -1,0 +1,111 @@
+{
+  "wire": "graph/1",
+  "note": "저널 종류 (06 §7). 저널이 이 계층의 진실이다 — intent는 있는데 settle이 없으면 '부수효과가 나갔는지 모른다'는 뜻이고, 그게 재실행 정지의 근거다. 모든 kind는 uiKey를 갖거나 명시적으로 no-ui여야 한다(GV-6).",
+  "phases": {
+    "note": "커널 5상. reserve→intent→(execute)→settle→route.",
+    "values": [
+      "reserve",
+      "intent",
+      "settle",
+      "route"
+    ],
+    "status": "implemented"
+  },
+  "kinds": [
+    {
+      "kind": "node_reserved",
+      "since": "1.0",
+      "phase": "reserve",
+      "uiKey": "node_running",
+      "status": "implemented"
+    },
+    {
+      "kind": "node_intent",
+      "since": "1.0",
+      "phase": "intent",
+      "uiKey": "node_running",
+      "status": "implemented",
+      "note": "★이 줄이 있고 node_settled가 없으면 부수효과 반영 여부를 모른다 — 자동 재실행을 멈추는 근거."
+    },
+    {
+      "kind": "node_settled",
+      "since": "1.0",
+      "phase": "settle",
+      "uiKey": "node_done",
+      "status": "implemented"
+    },
+    {
+      "kind": "node_routed",
+      "since": "1.0",
+      "phase": "route",
+      "no-ui": true,
+      "status": "implemented"
+    },
+    {
+      "kind": "node_failed",
+      "since": "1.0",
+      "phase": "settle",
+      "uiKey": "node_failed",
+      "status": "implemented"
+    },
+    {
+      "kind": "node_retry",
+      "since": "1.0",
+      "phase": "intent",
+      "uiKey": "node_running",
+      "status": "implemented"
+    },
+    {
+      "kind": "blob_externalized",
+      "since": "1.0",
+      "phase": "settle",
+      "no-ui": true,
+      "status": "implemented",
+      "spec": "06 §4.6",
+      "note": "큰 값이 자동 외부화됐다는 기록. 조용한 절단 금지의 이행."
+    },
+    {
+      "kind": "run_created",
+      "since": "1.0",
+      "phase": "run",
+      "uiKey": "run_started",
+      "status": "implemented"
+    },
+    {
+      "kind": "run_validated",
+      "since": "1.0",
+      "phase": "run",
+      "no-ui": true,
+      "status": "implemented"
+    },
+    {
+      "kind": "suspended",
+      "since": "1.0",
+      "phase": "run",
+      "uiKey": "run_suspended",
+      "status": "implemented",
+      "note": "조용한 정지는 고장과 구분되지 않는다 — 왜 멈췄고 무엇을 하면 되는지가 함께 남아야 한다."
+    },
+    {
+      "kind": "resumed",
+      "since": "1.0",
+      "phase": "run",
+      "uiKey": "run_resumed",
+      "status": "implemented"
+    },
+    {
+      "kind": "run_completed",
+      "since": "1.0",
+      "phase": "run",
+      "uiKey": "run_done",
+      "status": "implemented"
+    },
+    {
+      "kind": "run_failed",
+      "since": "1.0",
+      "phase": "run",
+      "uiKey": "run_failed",
+      "status": "implemented"
+    }
+  ]
+}

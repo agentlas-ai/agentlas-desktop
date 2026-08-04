@@ -1,0 +1,447 @@
+{
+  "wire": "graph/1",
+  "note": "오류 코드 단일 네임스페이스 (06 §8). 형식 = SCREAMING_SNAKE. 모든 엔트리는 cardKey 또는 verbatim:true 중 하나를 반드시 갖는다(GV-5). 커널이 여기 없는 코드를 내면 게이트 실패 — '코드 없는 failed 전이 = 커널 결함'의 형식화.",
+  "foreignCodes": {
+    "rule": "Hub 서버 원문 코드(insufficient_credits 등 lowercase)는 번역·재포장 금지. source:'hub-server' 라벨과 함께 원문 그대로 통과.",
+    "status": "specified"
+  },
+  "errors": [
+    {
+      "code": "NODE_TYPE_UNSUPPORTED",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "NODE_FAILED",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": true,
+      "cardKey": "node_failed",
+      "nextActions": [
+        "open_session",
+        "rerun"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "NODE_TIMEOUT",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": true,
+      "cardKey": "node_timeout",
+      "nextActions": [
+        "rerun",
+        "raise_timeout"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "NODE_INPUT_MISSING",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "node_input_missing",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "NODE_NEVER_REACHED",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "node_never_reached",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "NODE_NO_RESULT",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": true,
+      "cardKey": "node_no_result",
+      "nextActions": [
+        "edit_node_prompt",
+        "rerun"
+      ],
+      "status": "implemented",
+      "note": "2026-08-04 신설. 이전에는 사유 없는 Error('finished without an assistant result')였다."
+    },
+    {
+      "code": "EDGE_CONDITION_UNRESOLVED",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "condition_unresolved",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "NO_MATCHING_EDGE",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "no_matching_edge",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "REDUCER_WRITE_CONFLICT",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "reducer_conflict",
+      "nextActions": [
+        "rename_output",
+        "use_append"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "REDUCER_MERGE_CONFLICT",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "reducer_conflict",
+      "nextActions": [
+        "change_reducer",
+        "add_transform"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "LOOP_BOUND_UNDECLARED",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "loop_bound_missing",
+      "nextActions": [
+        "set_loop_bound"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "LOOP_BOUND_INVALID",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "loop_bound_missing",
+      "nextActions": [
+        "set_loop_bound"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "LOOP_WITHOUT_EXIT",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "loop_no_exit",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "LOOP_LIMIT_REACHED",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "loop_limit",
+      "nextActions": [
+        "raise_loop_bound",
+        "open_session"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "APPROVAL_REQUIRED",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "approval_required",
+      "nextActions": [
+        "approve",
+        "reject"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "APPROVAL_REJECTED",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "approval_rejected",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "MUTATION_UNVERIFIED",
+      "since": "1.0",
+      "severity": "run",
+      "retryable": false,
+      "cardKey": "mutation_unverified",
+      "nextActions": [
+        "reconcile_nodes"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "BUDGET_EXHAUSTED",
+      "since": "1.0",
+      "severity": "run",
+      "retryable": false,
+      "cardKey": "budget_exceeded",
+      "nextActions": [
+        "raise_budget",
+        "open_session"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "RESUME_CONFLICT",
+      "since": "1.0",
+      "severity": "run",
+      "retryable": false,
+      "cardKey": "resume_conflict",
+      "nextActions": [
+        "reload"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "EVAL_INCOMPLETE",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "eval_incomplete",
+      "nextActions": [
+        "edit_node"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "EVAL_UNAVAILABLE",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": true,
+      "cardKey": "eval_unavailable",
+      "nextActions": [
+        "rerun"
+      ],
+      "status": "implemented",
+      "note": "판정 불가는 실패가 아니다 — 일어나지 않은 판정을 결과로 쓰지 않는다."
+    },
+    {
+      "code": "AUTOMATION_NOT_CONNECTED",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "not_connected",
+      "nextActions": [
+        "open_connections"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "SWAP_UNKNOWN_PROVIDER",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "SWAP_CAPABILITY_MISMATCH",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "SWAP_NO_MATCH",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "SWAP_NODE_NOT_FOUND",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "SWAP_NOT_AGENT_NODE",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "SWAP_HUB_RELEASE_UNPINNED",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "SCHEMA_UNSUPPORTED_MAJOR",
+      "since": "1.0",
+      "severity": "channel",
+      "retryable": false,
+      "cardKey": "update_required",
+      "nextActions": [
+        "update_app"
+      ],
+      "status": "specified",
+      "spec": "06 §2.3"
+    },
+    {
+      "code": "WIRE_KIND_UNKNOWN",
+      "since": "1.0",
+      "severity": "message",
+      "retryable": false,
+      "verbatim": true,
+      "status": "specified",
+      "spec": "06 §2.3"
+    },
+    {
+      "code": "PATH_ROOT_UNKNOWN",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "specified",
+      "spec": "06 §4.2"
+    },
+    {
+      "code": "PORT_SCHEMA_VIOLATION",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "port_schema_violation",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "specified",
+      "spec": "06 §4.5"
+    },
+    {
+      "code": "INPUT_MAPPING_INVALID",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "input_mapping_invalid",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "specified",
+      "spec": "06 §4.5"
+    },
+    {
+      "code": "BLOB_UNRESOLVED",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "blob_unresolved",
+      "nextActions": [
+        "open_session"
+      ],
+      "status": "specified",
+      "spec": "06 §4.6",
+      "note": "큰 값은 실행을 세우지 않는다 — 참조 해석 실패만 이 코드다."
+    },
+    {
+      "code": "CONFORMANCE_GATE_FAILED",
+      "since": "1.0",
+      "severity": "build",
+      "retryable": false,
+      "verbatim": true,
+      "status": "tooling",
+      "spec": "06 §13.3",
+      "note": "게이트 러너가 내는 코드다 — 제품 코드에는 없다(C2 대상 아님)."
+    },
+    {
+      "code": "PATCH_NO_GRAPH",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "ARCHITECT_NO_REQUEST",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "ARCHITECT_UNAVAILABLE",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": true,
+      "cardKey": "architect_unavailable",
+      "nextActions": [
+        "retry"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "INTERVIEW_STATE_INVALID",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "INTERVIEW_MODEL_UNAVAILABLE",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": true,
+      "cardKey": "interview_unavailable",
+      "nextActions": [
+        "retry"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "INTERVIEW_BLUEPRINT_INVALID",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "청사진이 검증을 못 넘으면 모델이 '다 됐다'고 해도 질문으로 되돌린다."
+    },
+    {
+      "code": "CREATE_INPUT_INVALID",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    }
+  ]
+}

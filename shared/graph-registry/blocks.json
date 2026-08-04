@@ -1,0 +1,506 @@
+{
+  "wire": "graph/1",
+  "note": "빌딩블록 분해 — 노드 종류(대) → 기능(중) → 하위 기능(소). 각 블록이 소유하는 config 필드와, 그 블록의 경계에서 오가는 봉투를 함께 선언한다. status는 README 참조.",
+  "blocks": [
+    {
+      "kind": "trigger",
+      "title": "언제 시작하는가",
+      "status": "implemented",
+      "owns": [
+        "schedule",
+        "triggerType"
+      ],
+      "emits": "graph/1/envelope.trigger",
+      "functions": [
+        {
+          "id": "trigger.schedule",
+          "title": "시계로 시작",
+          "status": "implemented",
+          "sub": [
+            {
+              "id": "trigger.schedule.cron",
+              "title": "cron 식",
+              "status": "implemented"
+            },
+            {
+              "id": "trigger.schedule.interval",
+              "title": "N마다",
+              "status": "implemented"
+            },
+            {
+              "id": "trigger.schedule.once",
+              "title": "한 번",
+              "status": "implemented"
+            }
+          ]
+        },
+        {
+          "id": "trigger.event",
+          "title": "일이 생기면 시작",
+          "status": "implemented",
+          "sub": [
+            {
+              "id": "trigger.event.fs",
+              "title": "파일이 바뀌면",
+              "status": "implemented"
+            },
+            {
+              "id": "trigger.event.chain",
+              "title": "다른 자동화가 끝나면",
+              "status": "implemented"
+            },
+            {
+              "id": "trigger.event.webhook",
+              "title": "바깥에서 부르면",
+              "status": "implemented"
+            },
+            {
+              "id": "trigger.event.poll",
+              "title": "주기적으로 살펴보다가",
+              "status": "implemented"
+            }
+          ]
+        },
+        {
+          "id": "trigger.input",
+          "title": "사람이 값을 주면 시작",
+          "status": "implemented",
+          "note": "값은 automation_run_inputs에 1회 소비로 앉는다. 값 없이 실행하면 {{구멍}}이 빈 문자열로 메꿔져 지어낸 결과가 정상 완료로 기록된다 — 그래서 값 없는 실행은 거절한다.",
+          "sub": [
+            {
+              "id": "trigger.input.declare",
+              "title": "받을 값 선언",
+              "status": "implemented"
+            },
+            {
+              "id": "trigger.input.consume",
+              "title": "1회 소비",
+              "status": "implemented"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "agent",
+      "title": "에이전트 슬롯 — 누가 무엇으로 하는가",
+      "status": "implemented",
+      "owns": [
+        "ref",
+        "targetType",
+        "targetVersion",
+        "prompt",
+        "produces",
+        "reducer",
+        "effect",
+        "approval",
+        "idempotencyKey",
+        "needs",
+        "runtime"
+      ],
+      "emits": "graph/1/envelope.invoke",
+      "note": "06 §5. D19에 따르면 이 노드는 '워크오더 슬롯'이다 — 지금 코드는 ref 직결이라 슬롯 편성은 미구현(specified).",
+      "functions": [
+        {
+          "id": "agent.identity",
+          "title": "누구를 부르는가",
+          "status": "implemented",
+          "sub": [
+            {
+              "id": "agent.identity.local",
+              "title": "설치된 에이전트",
+              "status": "implemented",
+              "owns": [
+                "ref"
+              ]
+            },
+            {
+              "id": "agent.identity.firm",
+              "title": "회사(CEO)",
+              "status": "implemented",
+              "owns": [
+                "ref"
+              ]
+            },
+            {
+              "id": "agent.identity.hub",
+              "title": "Hub 에이전트 — 릴리스 핀 필수",
+              "status": "implemented",
+              "owns": [
+                "ref",
+                "targetVersion"
+              ]
+            },
+            {
+              "id": "agent.identity.slot",
+              "title": "워크오더 슬롯(편성으로 채움)",
+              "status": "specified",
+              "spec": "03 D19 / 06 §3"
+            }
+          ]
+        },
+        {
+          "id": "agent.model",
+          "title": "무슨 모델로",
+          "status": "drift",
+          "note": "config.runtime을 커널이 읽지 않는다(런타임 선택은 자동화 단위 runtimeSelection). 노드별 모델 지정은 06 §5 봉투에 있으나 미배선.",
+          "sub": [
+            {
+              "id": "agent.model.tier",
+              "title": "등급 힌트",
+              "status": "specified"
+            },
+            {
+              "id": "agent.model.pin",
+              "title": "정확한 모델 핀(발행 시 스크럽 대상)",
+              "status": "specified"
+            }
+          ]
+        },
+        {
+          "id": "agent.tools",
+          "title": "무슨 도구를 쓰는가",
+          "status": "implemented",
+          "owns": [
+            "needs"
+          ],
+          "note": "capability → provider → connection → resource 4층. shared/graph-tool-binding.ts.",
+          "sub": [
+            {
+              "id": "agent.tools.declare",
+              "title": "무슨 일이 필요한지 선언(capability)",
+              "status": "implemented"
+            },
+            {
+              "id": "agent.tools.provider",
+              "title": "어느 서비스로 할지(provider)",
+              "status": "implemented"
+            },
+            {
+              "id": "agent.tools.connection",
+              "title": "연결됐는지 결정론 검사",
+              "status": "implemented"
+            },
+            {
+              "id": "agent.tools.resource",
+              "title": "어느 캘린더/채널인지",
+              "status": "specified",
+              "note": "타입은 있으나 고르는 화면 없음"
+            }
+          ]
+        },
+        {
+          "id": "agent.effect",
+          "title": "바깥에 무엇을 하는가",
+          "status": "implemented",
+          "owns": [
+            "effect",
+            "approval",
+            "idempotencyKey"
+          ],
+          "sub": [
+            {
+              "id": "agent.effect.classify",
+              "title": "read / mutation 선언",
+              "status": "implemented"
+            },
+            {
+              "id": "agent.effect.approval",
+              "title": "사람 승인 브레이크",
+              "status": "implemented"
+            },
+            {
+              "id": "agent.effect.idempotency",
+              "title": "두 번 나가지 않게",
+              "status": "implemented"
+            }
+          ]
+        },
+        {
+          "id": "agent.output",
+          "title": "무엇을 남기는가",
+          "status": "implemented",
+          "owns": [
+            "produces",
+            "reducer"
+          ],
+          "note": "결과(result)와 작업기록(notes)이 다른 칸. 다음 노드로 가는 함수가 notes를 인자로 못 받는다.",
+          "sub": [
+            {
+              "id": "agent.output.result",
+              "title": "결과(다음 노드가 읽는 것)",
+              "status": "implemented"
+            },
+            {
+              "id": "agent.output.notes",
+              "title": "작업 기록(다음 노드가 못 읽는 것)",
+              "status": "implemented"
+            },
+            {
+              "id": "agent.output.reduce",
+              "title": "여럿이 같은 이름에 쓸 때",
+              "status": "implemented"
+            },
+            {
+              "id": "agent.output.blob",
+              "title": "큰 값 자동 외부화",
+              "status": "implemented",
+              "spec": "06 §4.6"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "eval",
+      "title": "만든 것을 판정",
+      "status": "implemented",
+      "owns": [
+        "subject",
+        "criteria",
+        "produces"
+      ],
+      "emits": "graph/1/envelope.judge",
+      "note": "단어 매칭 금지 — 상주 판정 엔진(judgeRequired). 만든 노드가 자기를 채점할 수 없다.",
+      "functions": [
+        {
+          "id": "eval.subject",
+          "title": "무엇을 보는가",
+          "status": "implemented",
+          "sub": [
+            {
+              "id": "eval.subject.var",
+              "title": "앞 단계가 만든 값",
+              "status": "implemented"
+            }
+          ]
+        },
+        {
+          "id": "eval.criteria",
+          "title": "어떤 기준으로",
+          "status": "implemented",
+          "sub": [
+            {
+              "id": "eval.criteria.text",
+              "title": "사람 말로 쓴 기준",
+              "status": "implemented"
+            },
+            {
+              "id": "eval.criteria.checks",
+              "title": "항목별 체크",
+              "status": "specified",
+              "note": "BlueprintCheck는 있으나 커널 미배선"
+            }
+          ]
+        },
+        {
+          "id": "eval.verdict",
+          "title": "판정 결과",
+          "status": "implemented",
+          "sub": [
+            {
+              "id": "eval.verdict.value",
+              "title": "pass / fail",
+              "status": "implemented"
+            },
+            {
+              "id": "eval.verdict.reason",
+              "title": "왜 — 다음 바퀴가 읽는다",
+              "status": "implemented"
+            },
+            {
+              "id": "eval.verdict.unavailable",
+              "title": "판정 못 함 ≠ 실패",
+              "status": "implemented"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "condition",
+      "title": "결정론 갈림길",
+      "status": "implemented",
+      "owns": [
+        "var",
+        "op",
+        "value"
+      ],
+      "note": "06 §4.4가 EBNF 문법 1벌을 규정한다. 지금 코드는 {var,op,value} 단일 비교뿐 — 문법의 부분집합.",
+      "functions": [
+        {
+          "id": "condition.compare",
+          "title": "값 비교",
+          "status": "implemented",
+          "sub": [
+            {
+              "id": "condition.compare.ops",
+              "title": "eq/ne/gt/lt/contains/truthy/falsy",
+              "status": "implemented"
+            },
+            {
+              "id": "condition.compare.expr",
+              "title": "&&/||/! 조합식",
+              "status": "specified",
+              "spec": "06 §4.4"
+            }
+          ]
+        },
+        {
+          "id": "condition.branch",
+          "title": "어느 쪽으로",
+          "status": "implemented",
+          "note": "참/거짓을 선언하지 않은 엣지는 fail-closed. 예전엔 양쪽이 동시에 돌았다.",
+          "sub": [
+            {
+              "id": "condition.branch.handle",
+              "title": "엣지가 참/거짓을 선언",
+              "status": "implemented"
+            },
+            {
+              "id": "condition.branch.unresolved",
+              "title": "평가 불능은 멈춘다",
+              "status": "implemented"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "transform",
+      "title": "결정론 코드 — 값 다루기",
+      "status": "implemented",
+      "owns": [
+        "mode",
+        "from",
+        "to",
+        "template",
+        "pattern"
+      ],
+      "functions": [
+        {
+          "id": "transform.map",
+          "title": "값 옮기기",
+          "status": "implemented",
+          "sub": [
+            {
+              "id": "transform.map.copy",
+              "title": "그대로",
+              "status": "implemented"
+            },
+            {
+              "id": "transform.map.json",
+              "title": "JSON으로 읽기",
+              "status": "implemented"
+            },
+            {
+              "id": "transform.map.template",
+              "title": "틀에 끼우기",
+              "status": "implemented"
+            },
+            {
+              "id": "transform.map.extract",
+              "title": "패턴으로 뽑기",
+              "status": "implemented"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "tool",
+      "title": "도구 노드",
+      "status": "drift",
+      "note": "커널이 직접 호출하지 않고 인접 agent 런타임 선언으로 컴파일된다(설계 §4.4). 노드로 그려지는데 스스로 하는 일이 없어, 사용자에게는 '놓았는데 아무 일도 안 하는 노드'로 보인다.",
+      "functions": [
+        {
+          "id": "tool.compile",
+          "title": "인접 agent의 MCP 설정으로 컴파일",
+          "status": "implemented",
+          "sub": []
+        }
+      ]
+    },
+    {
+      "kind": "action",
+      "title": "정해진 동작",
+      "status": "implemented",
+      "owns": [
+        "effect",
+        "approval",
+        "idempotencyKey",
+        "produces"
+      ],
+      "functions": [
+        {
+          "id": "action.surface",
+          "title": "표면 동작",
+          "status": "implemented",
+          "sub": []
+        }
+      ]
+    },
+    {
+      "kind": "output",
+      "title": "바깥으로 내보내기",
+      "status": "implemented",
+      "owns": [
+        "effect",
+        "approval",
+        "idempotencyKey",
+        "text",
+        "produces"
+      ],
+      "functions": [
+        {
+          "id": "output.post",
+          "title": "올리기/보내기/쓰기",
+          "status": "implemented",
+          "sub": []
+        }
+      ]
+    },
+    {
+      "kind": "loop",
+      "title": "반복 — 노드가 아니라 그래프의 성질",
+      "status": "implemented",
+      "owns": [
+        "maxIterations",
+        "repeatOn"
+      ],
+      "note": "되돌아가는 엣지로 표현된다. 상한 미선언은 fail-closed(LOOP_BOUND_UNDECLARED), 나가는 길 없는 반복도 거절(LOOP_WITHOUT_EXIT).",
+      "functions": [
+        {
+          "id": "loop.bound",
+          "title": "몇 바퀴까지",
+          "status": "implemented",
+          "sub": [
+            {
+              "id": "loop.bound.declare",
+              "title": "상한 선언 필수",
+              "status": "implemented"
+            },
+            {
+              "id": "loop.bound.exit",
+              "title": "나가는 길 필수",
+              "status": "implemented"
+            }
+          ]
+        },
+        {
+          "id": "loop.feedback",
+          "title": "왜 다시 도는지 다음 바퀴에 전달",
+          "status": "implemented",
+          "note": "eval 사유를 $.feedback으로. 없으면 같은 걸 다시 만들고 같은 이유로 또 떨어진다.",
+          "sub": [
+            {
+              "id": "loop.feedback.reason",
+              "title": "판정 사유 주입",
+              "status": "implemented"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

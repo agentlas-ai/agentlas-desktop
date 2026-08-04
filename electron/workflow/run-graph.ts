@@ -2087,14 +2087,16 @@ export async function runGraph(
           const produces = str(node.config, "produces");
           if (produces) {
             // 다음 노드로 가는 길은 result뿐이다 — notes는 이 함수가 아예 못 본다.
-            const downstream = toDownstreamInput(envelope);
-            if (downstream === null) {
-              failGraphNode(node, {
-                code: "NODE_RESULT_TOO_LARGE",
-                reason: `"${node.label || node.id}"의 결과가 너무 커서 다음 단계로 값으로 넘길 수 없습니다.`,
-                nextAction: "이 단계가 요약이나 파일 경로를 남기도록 지시를 바꿔 주세요.",
+            //
+            // ★큰 결과로 실행을 세우지 않는다(06 §4.6). 처음 구현은 여기서
+            //   NODE_RESULT_TOO_LARGE로 노드를 죽였는데, 정본은 "필드 단위 문자 상한은
+            //   어디에도 없다"이고 큰 값은 자리에 $blob 참조를 남기고 계속 간다.
+            //   결과가 아예 없는 경우는 위에서 이미 NODE_NO_RESULT로 걸렀다.
+            const downstream = toDownstreamInput(envelope) ?? "";
+            if (envelope.meta.externalized) {
+              journal("blob_externalized", node.id, {
+                bytes: envelope.meta.originalBytes ?? 0,
               });
-              return;
             }
             const applied = applyProduces(node, produces, downstream);
             if (applied) {

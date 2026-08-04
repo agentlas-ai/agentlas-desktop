@@ -1621,7 +1621,19 @@ export interface AutomationRunRecord {
   scheduledFor: string | null;
   /** 실제 실행 시각(ISO). */
   ranAt: string;
+  /**
+   * **커널의 답 — 그래프가 끝까지 돌았는가.** 판정 모델이 이 칸을 덮어쓰지 않는다.
+   * (blocked·needs_input은 옛 기록에만 남아 있는 값이다. 그때는 한 칸에 두 답이 섞였다.)
+   */
   status: "ok" | "partial" | "error" | "skipped" | "blocked" | "needs_input";
+  /**
+   * **판정의 답 — 나온 결과물이 쓸 만한가.** status와 다른 질문이라 칸이 다르다.
+   * `null`이면 옛 기록(두 답이 섞여 있어 복원 불가) 또는 판정을 하지 않은 실행이다 —
+   * 모르는 것을 accepted로 메꾸지 않는다.
+   */
+  outcome: "accepted" | "needs_input" | "blocked" | "rejected" | "unjudged" | null;
+  /** 판정이 그렇게 본 이유. status의 error와 섞지 않는다. */
+  outcomeReason: string | null;
   /** 이 실행에서 병합/스킵된 놓친 발생 수. */
   skippedCount: number;
   error: string | null;

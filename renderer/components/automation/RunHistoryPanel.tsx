@@ -107,7 +107,13 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   // 아니다 — 그 뒤로 같은 자동화가 정상 완주했기 때문이다. 기록은 남기되 현재 상태로
   // 올리지 않는다.
   const lastOkAt = useMemo(() => {
-    const oks = runs.filter((run) => run.status === "ok").map((run) => Date.parse(run.ranAt)).filter(Number.isFinite);
+    // ★"성공"은 끝까지 돌았고 **결과도 수용된** 실행이다.
+    // 칸을 나눈 뒤 status==="ok" 만 보면, 판정이 "사람이 정해야 한다"고 본 실행까지
+    // 성공으로 세어 확인 배지를 꺼버린다. outcome이 없는 옛 기록은 예전대로 센다.
+    const oks = runs
+      .filter((run) => run.status === "ok"
+        && (run.outcome === null || run.outcome === "accepted" || run.outcome === "unjudged"))
+      .map((run) => Date.parse(run.ranAt)).filter(Number.isFinite);
     return oks.length > 0 ? Math.max(...oks) : null;
   }, [runs]);
   const regularAttentions = useMemo(
@@ -130,9 +136,12 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   // 계속 "확인 필요"로 표시됨). 마지막 성공 이후에 일어난 실패만 현재 상태다.
   const blockingRun = useMemo(
     () => runs.find((run) => {
-      if (run.status !== "error" && run.status !== "needs_input" && run.status !== "blocked" && run.status !== "partial") {
-        return false;
-      }
+      // 실행 상태가 멀쩡해도 판정이 "사람이 정해야 한다"면 그것도 확인이 필요한 상태다.
+      // 두 답이 한 칸에 있던 때는 자동으로 걸렸지만, 칸을 나눈 뒤로는 둘 다 봐야 한다.
+      const needsAttention = run.status === "error" || run.status === "needs_input"
+        || run.status === "blocked" || run.status === "partial"
+        || run.outcome === "needs_input" || run.outcome === "blocked" || run.outcome === "rejected";
+      if (!needsAttention) return false;
       if (lastOkAt === null) return true;
       const at = Date.parse(run.ranAt);
       return !Number.isFinite(at) || at > lastOkAt;
@@ -343,12 +352,14 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
           <div className="automation-reconcile-head">
             <div>
               <span>{ko ? "확인이 필요해요" : "Needs attention"}</span>
-              <strong>{plainOutcome(blockingRun?.status ?? "error", ko).title}</strong>
+              <strong>{blockingRun ? plainRun(blockingRun, ko).title : plainOutcome("error", ko).title}</strong>
             </div>
           </div>
           {/* 상황 설명은 제품이 실제 상태(브라우저 세션·권한·로그인·런타임)를 보고 만든 문장을
               우선한다. 계산이 아직/불가면 상태 기반 기본 문장으로 내려간다. */}
-          <p>{fixPlan && !fixPlan.unavailable && fixPlan.summary ? fixPlan.summary : plainOutcome(blockingRun?.status ?? "error", ko).body}</p>
+          <p>{fixPlan && !fixPlan.unavailable && fixPlan.summary
+            ? fixPlan.summary
+            : blockingRun ? plainRun(blockingRun, ko).body : plainOutcome("error", ko).body}</p>
           {fixPlan?.question ? <p className="automation-fix-question">{fixPlan.question}</p> : null}
           <div className="automation-reconcile-actions">
             {/* 실행 가능한 조치 — 로그인 창 열기, macOS 설정 열기, 실행 환경 복구처럼
@@ -531,18 +542,24 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
           <div className="automation-run-empty">{ko ? "실행 기록이 없습니다." : "No runs yet."}</div>
         ) : (
           runs.map((run) => (
-            <article key={run.id} className="automation-run-row" data-status={run.status}>
+            <article key={run.id} className="automation-run-row" data-status={run.status} data-outcome={run.outcome ?? undefined}>
               <div>
                 <strong>{statusLabel(run.status, ko)}</strong>
+                {/* ★두 답을 한 칸에 뭉개지 않는다. 예전에는 판정 결과가 실행 상태를
+                    덮어써서, 끝까지 잘 돈 실행이 목록에 "내 확인 필요"로만 보였다 —
+                    사용자는 성공인지 실패인지 알 수 없었다. 이제 나란히 놓는다. */}
+                {outcomeChip(run, ko) ? (
+                  <span className="automation-run-outcome">{outcomeChip(run, ko)}</span>
+                ) : null}
                 <span>{formatDateTime(run.ranAt, ko)}</span>
               </div>
               {/* 목록은 평이한 한 줄만. 기록 원문은 접어서 따로 — 둘 다 남기되 순서를 지킨다. */}
-              {run.error ? (
+              {run.error || run.outcomeReason ? (
                 <>
-                  <p>{plainOutcome(run.status, ko).body}</p>
+                  <p>{plainRun(run, ko).body}</p>
                   <details className="automation-raw-record">
                     <summary>{ko ? "기록 원문 보기" : "Show the raw record"}</summary>
-                    <p>{stripReasonCode(run.error)}</p>
+                    <p>{stripReasonCode(run.error ?? run.outcomeReason ?? "")}</p>
                   </details>
                 </>
               ) : run.skippedCount > 0 ? (
@@ -691,6 +708,65 @@ function plainOutcome(status: AutomationRunRecord["status"], ko: boolean): { tit
 /** `[controller_judged] …` 같은 내부 판정 코드 접두사 제거 — 사용자가 쓸 수 없는 정보다. */
 function stripReasonCode(error: string): string {
   return error.replace(/^\s*\[[a-z0-9_.:-]+\]\s*/i, "").trim();
+}
+
+/**
+ * 판정의 답을 짧은 꼬리표로. **실행 상태와 다른 질문의 답**이라 자리를 따로 준다.
+ * `null`(옛 기록·판정 안 함)이면 아무 말도 하지 않는다 — 모르는 것을 "괜찮음"으로 메꾸면
+ * 그게 바로 이 화면이 지금까지 사용자를 헷갈리게 한 방식이다.
+ */
+function outcomeChip(run: AutomationRunRecord, ko: boolean): string | null {
+  switch (run.outcome) {
+    case "accepted":
+      return null;   // 잘 됐고 결과도 쓸 만하다 — 굳이 덧붙이지 않는다.
+    case "needs_input":
+      return ko ? "내 확인 필요" : "Needs your decision";
+    case "blocked":
+      return ko ? "바깥에서 막힘" : "Blocked outside";
+    case "rejected":
+      return ko ? "결과가 기준에 못 미침" : "Result fell short";
+    case "unjudged":
+      return ko ? "결과 판정 못 함" : "Result not judged";
+    default:
+      return null;
+  }
+}
+
+/** 실행 상태와 판정 결과를 함께 읽어 사람 말로. 판정이 있으면 그쪽이 할 말이 더 많다. */
+function plainRun(run: AutomationRunRecord, ko: boolean): { title: string; body: string } {
+  if (run.status === "ok" && run.outcome && run.outcome !== "accepted") {
+    if (run.outcome === "needs_input") {
+      return {
+        title: ko ? "끝까지 돌았고, 내가 정해줄 게 있어요" : "It ran through, and needs a decision from you",
+        body: ko
+          ? "자동화는 멈춘 데 없이 끝까지 돌았어요. 다만 결과에 사람이 정해야 하는 부분이 있어요."
+          : "The automation ran all the way through. The result just needs a decision from you.",
+      };
+    }
+    if (run.outcome === "blocked") {
+      return {
+        title: ko ? "끝까지 돌았지만 바깥에서 막혔어요" : "It ran through but something outside blocked it",
+        body: ko
+          ? "단계는 다 지나갔는데 상대 서비스가 막았어요. 자동화는 그대로 켜져 있어요."
+          : "Every step ran, but the other service refused. The automation is still on.",
+      };
+    }
+    if (run.outcome === "unjudged") {
+      return {
+        title: ko ? "끝까지 돌았어요(결과는 확인 못 함)" : "It ran through (result not judged)",
+        body: ko
+          ? "자동화는 끝까지 돌았어요. 결과가 쓸 만한지는 이번엔 판정하지 못했어요 — 실패라는 뜻은 아닙니다."
+          : "It ran to the end. Whether the result is good could not be judged this time — that is not a failure.",
+      };
+    }
+    return {
+      title: ko ? "끝까지 돌았는데 결과가 기준에 못 미쳤어요" : "It ran through but the result fell short",
+      body: ko
+        ? "단계는 다 지나갔어요. 나온 결과가 원하던 수준이 아니었어요."
+        : "Every step ran. The result just was not what you asked for.",
+    };
+  }
+  return plainOutcome(run.status, ko);
 }
 
 function statusLabel(status: AutomationRunRecord["status"], ko: boolean): string {

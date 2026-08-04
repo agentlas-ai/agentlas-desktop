@@ -3171,8 +3171,24 @@ button[data-toggle-state="off"] {
 
 .automation-run-row[data-status="partial"],
 .automation-run-row[data-status="blocked"],
-.automation-run-row[data-status="needs_input"] {
+.automation-run-row[data-status="needs_input"],
+/* 끝까지 돌았어도 판정이 사람 손을 필요로 하면 이 행은 여전히 눈에 띄어야 한다.
+   실행 상태와 판정 결과는 다른 질문의 답이라, 테두리도 둘 중 하나만 봐서는 안 된다. */
+.automation-run-row[data-outcome="needs_input"],
+.automation-run-row[data-outcome="blocked"],
+.automation-run-row[data-outcome="rejected"] {
   border-color: color-mix(in oklch, var(--amber-deep, #a15c00) 30%, var(--paper-edge));
+}
+
+/* 판정의 답을 다는 자리. 실행 상태(굵은 글씨) 바로 옆에 붙고 시각은 오른쪽에 남는다. */
+.automation-run-row .automation-run-outcome {
+  margin-inline-end: auto;
+  font-family: var(--font-body);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklch, var(--amber-deep, #a15c00) 30%, var(--paper-edge));
+  color: var(--ink-soft);
 }
 
 .automation-run-row > div {

@@ -2,7 +2,7 @@
 // 실행 = 타깃(firm/agent)의 백그라운드(division) chat을 만들어 runMcpInvocation로 promptTemplate을 돌린다.
 // (M1: 인프로세스 타이머. 앱이 꺼져 있으면 안 돎 — launchd persistent 데몬은 후속 작업.)
 import { app, Notification } from "electron";
-import type { Automation } from "../shared/types";
+import type { Automation, AutomationRunRecord } from "../shared/types";
 import {
   dueAutomations,
   getAutomation,
@@ -436,7 +436,23 @@ async function runOne(
     return { accepted: false };
   }
   running.add(a.id);
+  /**
+   * 판정 어휘(ok/skipped/…)를 결과 어휘로 옮긴다. 두 어휘를 같은 것으로 쓰다가
+   * 한 칸에 두 답이 섞였으므로, 옮기는 자리를 한 곳으로 못 박는다.
+   */
+  const outcomeOf = (verdict: AutomationResultStatus): AutomationRunRecord["outcome"] => {
+    if (verdict === "ok" || verdict === "skipped") return "accepted";
+    if (verdict === "needs_input") return "needs_input";
+    if (verdict === "blocked") return "blocked";
+    return "rejected";
+  };
   let runStatus: AutomationResultStatus = "ok";
+  /**
+   * 판정의 답 — **나온 결과물이 쓸 만한가**. runStatus(끝까지 돌았는가)와 다른 질문이다.
+   * null이면 판정을 부르지 않은 실행이다(예: 실행 자체를 못 한 preflight 스킵).
+   */
+  let runOutcome: AutomationRunRecord["outcome"] = null;
+  let runOutcomeReason: string | null = null;
   /** 이번 실행이 "실패"가 아니라 "판정 불가"로 끝났는가 — 복구 워커·실패 표시의 억제 조건. */
   let judgmentUnavailableRun = false;
   let runError: string | null = null;
@@ -668,12 +684,22 @@ async function runOne(
       const outVals = Object.values(result.outputs ?? {});
       output = outVals.length ? outVals[outVals.length - 1] : undefined;
       if (runStatus === "ok") {
+        // ★두 답을 두 칸에 남긴다.
+        //
+        // 예전에는 여기서 `runStatus = classified.outcome` 으로 **커널의 답을 지웠다**.
+        // 커널은 "그래프가 끝까지 돌았다(ok)"고 했는데 화면에는 판정의 답만 남아
+        // "내 확인 필요"로 보였고, 사용자는 성공인지 실패인지 알 수 없었다.
+        // 두 값은 서로 다른 질문의 답이라 한 칸에 겹쳐 담을 수 없다:
+        //   status  = 끝까지 돌았는가 (커널이 안다)
+        //   outcome = 나온 결과물이 쓸 만한가 (판정이 본다)
         const classified = await classifyAutomationOutcome(output);
-        runStatus = classified.outcome;
         judgmentUnavailableRun = isJudgmentUnavailable(classified);
+        runOutcome = judgmentUnavailableRun ? "unjudged" : outcomeOf(classified.outcome);
+        runOutcomeReason = classified.reason ?? null;
         runError = classified.reasonCode && classified.reason
           ? `[${classified.reasonCode}] ${classified.reason}`
           : classified.reason;
+        // runStatus는 건드리지 않는다. 후속 정책은 아래에서 두 값을 함께 보고 정한다.
       } else {
         const classified = await classifyAutomationFailure(graphError);
         runStatus = outVals.length > 0 ? "partial" : classified.status;
@@ -807,14 +833,23 @@ async function runOne(
         if (runnerError) throw new Error(runnerError);
         if (!output?.trim()) throw new Error("Automation finished without an assistant result");
         const classified = await classifyAutomationOutcome(output);
-        runStatus = classified.outcome;
         judgmentUnavailableRun = isJudgmentUnavailable(classified);
+        // 그래프 경로와 같은 규율 — 판정의 답은 자기 칸으로 간다.
+        // 여기서 runStatus를 덮으면 "끝까지 돌았다"는 사실이 다시 지워진다.
+        runOutcome = judgmentUnavailableRun ? "unjudged" : outcomeOf(classified.outcome);
+        runOutcomeReason = classified.reason ?? null;
+        // 다만 판정이 명시적으로 "실패"·"건너뜀"이라고 본 것은 실행 결과 자체의 성질이라
+        // (레거시 경로엔 커널이 없어 이 판정이 유일한 종료 신호다) runStatus에 반영한다.
+        if (classified.outcome === "error" || classified.outcome === "partial"
+          || classified.outcome === "skipped") {
+          runStatus = classified.outcome;
+        }
         runError = classified.reasonCode && classified.reason
           ? `[${classified.reasonCode}] ${classified.reason}`
           : classified.reason;
         // 판정 불가는 노드를 실패로 칠하지 않는다 — 노드는 끝까지 실행됐다.
         const legacyNodeFailed = !judgmentUnavailableRun &&
-          (runStatus === "error" || runStatus === "blocked" || runStatus === "needs_input");
+          (runStatus === "error" || runOutcome === "blocked" || runOutcome === "needs_input");
         emitLegacyState("n1", legacyNodeFailed ? "failed" : runStatus === "skipped" ? "skipped" : "done");
         try {
           finishGraphRun(runId, legacyNodeFailed ? "error" : "ok");
@@ -882,7 +917,12 @@ async function runOne(
             status: runStatus,
             error: runError,
             advanceSchedule: opts?.advanceSchedule ?? true,
-            executionConsumed: runStatus === "ok" || runStatus === "skipped",
+            // 판정이 "사람 손이 필요하다"고 본 실행은 지금까지처럼 발생을 소진하지 않는다
+            // (max_runs 보존). status가 ok로 남아도 이 정책은 그대로다 — 정책은 판정을 본다.
+            executionConsumed: (runStatus === "ok" || runStatus === "skipped")
+              && runOutcome !== "needs_input" && runOutcome !== "blocked",
+            outcome: runOutcome,
+            outcomeReason: runOutcomeReason,
             suspendForReconciliation: requiresGraphReconciliation(machineError ?? runError),
             sourceRunId: currentRunId,
             output,
@@ -928,7 +968,8 @@ async function runOne(
     // 이벤트 + 메모리/경험 자동 승격 + (동일 실패 2회 복구 시) 프롬프트 진화 자동 적용.
     // 어떤 실패도 런 결과에 영향을 주지 않는다(모듈 내부에서 전부 격리).
     if (
-      runStatus === "ok" && !parentMissing && !leaseOwnershipLost &&
+      runStatus === "ok" && runOutcome !== "needs_input" && runOutcome !== "blocked" &&
+      !parentMissing && !leaseOwnershipLost &&
       priorFailureContext.streak >= 1 && currentRunId
     ) {
       try {
@@ -952,6 +993,7 @@ async function runOne(
     // blocked·partial·error는 외부 제약 해소나 재시도로 실제로 나아질 수 있으므로 그대로 둔다.
     if (
       runStatus !== "ok" && runStatus !== "skipped" && runStatus !== "needs_input" &&
+      runOutcome !== "needs_input" &&
       !judgmentUnavailableRun && !parentMissing && !leaseOwnershipLost
     ) {
       try {

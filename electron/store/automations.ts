@@ -68,6 +68,9 @@ interface RunHistoryRow {
   status: string | null;
   skipped_count: number | null;
   error: string | null;
+  /** v89 이후에만 있다. 옛 행은 null — 그때는 status 한 칸에 두 답이 섞여 있었다. */
+  outcome: string | null;
+  outcome_reason: string | null;
 }
 
 function parseGraph(raw: string | null): WorkflowGraph | null {
@@ -1176,11 +1179,14 @@ export function recordRun(input: {
   status: AutomationRunRecord["status"];
   skippedCount?: number;
   error?: string | null;
+  outcome?: AutomationRunRecord["outcome"];
+  outcomeReason?: string | null;
 }): void {
   getDb()
     .prepare(
-      `INSERT INTO run_history (id, automation_id, scheduled_for, ran_at, status, skipped_count, error)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO run_history
+         (id, automation_id, scheduled_for, ran_at, status, skipped_count, error, outcome, outcome_reason)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       randomUUID(),
@@ -1190,6 +1196,8 @@ export function recordRun(input: {
       input.status,
       input.skippedCount ?? 0,
       input.error ?? null,
+      input.outcome ?? null,
+      input.outcomeReason ?? null,
     );
 }
 
@@ -1220,6 +1228,10 @@ export function listRunHistory(automationId: string, limit = 50): AutomationRunR
     scheduledFor: r.scheduled_for,
     ranAt: r.ran_at ?? "",
     status: (r.status as AutomationRunRecord["status"]) ?? "ok",
+    // ★모르는 것을 accepted로 메꾸지 않는다. 옛 행은 outcome이 없다 — 그때는 이 두 답이
+    //   한 칸에 섞여 있었고, 지금 와서 어느 쪽이었는지 복원할 방법이 없다.
+    outcome: (r.outcome as AutomationRunRecord["outcome"]) ?? null,
+    outcomeReason: r.outcome_reason ?? null,
     skippedCount: r.skipped_count ?? 0,
     error: r.error,
   }));
@@ -1249,6 +1261,13 @@ export function markAutomationRun(
     /** Keep the automation enabled but atomically remove its next due slot
      * when this occurrence needs explicit side-effect reconciliation. */
     suspendForReconciliation?: boolean;
+    /**
+     * 판정의 답 — **결과물이 쓸 만한가**. status(끝까지 돌았는가)와 다른 질문이라
+     * 다른 칸에 앉는다. 예전엔 판정이 status를 덮어써서 끝까지 잘 돈 실행이 화면에
+     * "내 확인 필요"로만 보였다.
+     */
+    outcome?: AutomationRunRecord["outcome"];
+    outcomeReason?: string | null;
   },
 ): void {
   const db = getDb();
@@ -1320,11 +1339,13 @@ export function markAutomationRun(
     ).run(atIso, persistedNextRunAt, runCount, shouldDisable ? 0 : row.enabled, id);
     if (updated.changes !== 1) throw new AutomationRunParentMissingError(id);
     db.prepare(
-      `INSERT INTO run_history (id, automation_id, scheduled_for, ran_at, status, skipped_count, error)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO run_history
+         (id, automation_id, scheduled_for, ran_at, status, skipped_count, error, outcome, outcome_reason)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       randomUUID(), id, row.next_run_at, atIso, terminalStatus,
       skipped > 0 ? skipped : 0, opts?.error ?? null,
+      opts?.outcome ?? null, opts?.outcomeReason ?? null,
     );
     if (sourceRunId) {
       recordAutomationTerminalReceipt(id, sourceRunId, terminalStatus, opts?.output, atIso);
@@ -1684,6 +1705,8 @@ export type GraphJournalKind =
   | "run_created" | "run_validated"
   | "node_reserved" | "node_intent" | "node_settled" | "node_routed"
   | "node_retry" | "node_failed"
+  // 큰 결과가 값이 아니라 참조로 남았다는 기록. 조용한 절단 금지의 이행(06 §4.6).
+  | "blob_externalized"
   | "suspended" | "resumed"
   | "run_completed" | "run_failed";
 
