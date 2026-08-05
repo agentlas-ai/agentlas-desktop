@@ -6,6 +6,7 @@
 // React Flow는 client-only이고 이 앱은 Next.js static export(file://)이므로 "use client" 필수.
 "use client";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { humanSchedule } from "@shared/graph-blueprint";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   ReactFlow,
@@ -217,6 +218,9 @@ function AutomationFlowPage() {
       cleanupExitHint: locale === "en"
         ? "Runs once at the end whether the step succeeded or failed — for tidying up."
         : "성공하든 실패하든 마지막에 한 번 도는 뒷정리 길입니다.",
+      aiNoteHint: locale === "en"
+        ? "Leave a note for the AI, or have it set this step up"
+        : "AI에게 이 단계 주석·수정 맡기기",
     }),
     [t, locale],
   );
@@ -290,12 +294,16 @@ function AutomationFlowPage() {
         id: e.id,
         source: e.source,
         target: e.target,
-        sourceHandle: e.sourceHandle, // 네이티브 핸들 복원 — 저장 시 진실원본으로 다시 읽힌다
+        // ★핸들을 안 적은 옛 엣지는 기본 자리(아래→위)로 붙인다. 노드에 핸들이 여러 개가
+        //   된 뒤로는 붙일 자리를 안 정해 주면 **선이 통째로 안 그려진다** — 잘 돌던
+        //   그래프가 화면에서만 사라지는 최악의 모양이다. 저장 시에는 원래 값을 다시 쓴다.
+        sourceHandle: e.sourceHandle ?? "out-b",
+        targetHandle: "in-t",
         // ★되돌아가는 반복의 상한은 **엣지에** 붙어 있다. 여기서 안 들고 오면 저장할 때
         //   같이 사라지고, 잘 돌던 그래프가 그때부터 LOOP_BOUND_UNDECLARED로 거절된다
         //   (실측: 자연어로 만든 반복 그래프를 캔버스에서 열었다 저장하기만 해도 죽었다).
         data: typeof e.maxIterations === "number" ? { maxIterations: e.maxIterations } : undefined,
-        label: e.sourceHandle,
+        label: e.sourceHandle && !/^out-[tblr]$/.test(e.sourceHandle) ? e.sourceHandle : undefined,
         animated: false,
         style: { stroke: "var(--muted-deep)", strokeWidth: 1.4 },
         labelStyle: { fontFamily: "var(--font-mono)", fontSize: 10, fill: "var(--muted-deep)" },
@@ -465,9 +473,14 @@ function AutomationFlowPage() {
         target: e.target,
         // 조건 분기는 React Flow 네이티브 sourceHandle 필드가 진실원본(새로 그린 엣지). 없으면
         // 라벨로 폴백(과거에 로드된 엣지). 둘 다 없으면 무조건 엣지.
-        ...(e.sourceHandle
+        //
+        // ★`out-t|b|l|r`는 **화면이 어느 면에 붙였나**일 뿐이라 그래프에 저장하지 않는다.
+        //   커널이 아는 sourceHandle은 true/false/error/always뿐이고, 화면 좌표가 그 자리에
+        //   섞여 들어가면 조건 분기가 어느 쪽도 아닌 값이 되어 실행이 거절된다
+        //   (EDGE_CONDITION_UNRESOLVED). 배치는 화면 것, 배선 의미는 그래프 것이다.
+        ...(e.sourceHandle && !/^out-[tblr]$/.test(e.sourceHandle)
           ? { sourceHandle: e.sourceHandle }
-          : typeof e.label === "string" && e.label
+          : typeof e.label === "string" && e.label && !/^out-[tblr]$/.test(e.label)
             ? { sourceHandle: e.label }
             : {}),
         // ★상한은 캔버스가 만들지도 지우지도 않는다 — 있으면 그대로 되돌려 놓는다.
@@ -725,9 +738,14 @@ function AutomationFlowPage() {
   }
 
   async function requestGraphChange() {
+    return requestGraphChangeWith(architectDraft.trim());
+  }
+
+  /** 같은 제안 흐름을 문장으로 바로 부른다(실패 카드의 "AI가 고치게 하기"가 쓴다). */
+  async function requestGraphChangeWith(sentenceIn: string) {
     const api = ipc();
     if (!api || !automation) return;
-    const sentence = architectDraft.trim();
+    const sentence = sentenceIn.trim();
     if (!sentence) return;
     setArchitectBusy(true);
     setProposal(null);
@@ -893,7 +911,11 @@ function AutomationFlowPage() {
           <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 17, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {automation.name}
           </h1>
-          <div style={{ fontSize: 11, color: "var(--muted-deep)" }}>{automation.scheduleHuman}</div>
+          {/* ★크론 원문(`0 9 * * 1`)을 그대로 보여주지 않는다 — humanSchedule이 이미
+              사람 말로 바꿀 줄 아는데 이 자리만 안 쓰고 있었다(실사용 실측). */}
+          <div style={{ fontSize: 11, color: "var(--muted-deep)" }}>
+            {humanSchedule(automation.scheduleHuman, locale)}
+          </div>
         </div>
 
         {editing ? (
@@ -1145,6 +1167,10 @@ function AutomationFlowPage() {
         const nodeLabel = rfNodes.find((n) => n.id === failedNodeId)?.data?.label ?? failedNodeId;
         const awaitingApproval = failure.code === "APPROVAL_REQUIRED";
         const evalStuck = failure.code === "EVAL_STUCK";
+        // ★코드가 쓰는 파이썬 패키지를 준비 못 한 실패. 사람에게 pip 이름을 묻는 것은
+        //   답이 아니다 — 코드를 지은 것은 AI이고, 사용자는 `PIL`의 pip 이름이
+        //   `Pillow`라는 걸 알 이유가 없다(실측: PIL·sklearn 둘 다 죽었다).
+        const depMissing = failure.code === "CODE_DEPENDENCY_MISSING";
         return (
           <div
             key={failedNodeId}
@@ -1200,6 +1226,29 @@ function AutomationFlowPage() {
             {/* ★"기준이 틀렸을 수도"의 두 갈래: 채점표를 고치거나(캔버스에서),
                 판정이 틀렸다고 교정한다. 교정은 그 노드의 이후 판정에 few-shot으로
                 주입된다 — 사람의 채점 감각이 그래프에 쌓이는 자리(5건이면 유의미). */}
+            {depMissing ? (
+              <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
+                <button
+                  className="titlebar-nodrag"
+                  data-testid="fix-dependency"
+                  disabled={architectBusy}
+                  onClick={() => {
+                    // 그 단계 하나만 고치는 지시로 architect에 보낸다. 제안은 사람이 승인한다.
+                    const scoped = locale === "en"
+                      ? `The step "${nodeLabel}" (node id ${failedNodeId}) fails because a Python package it imports is not installed. Add the correct pip package name(s) to that step's packages field — the pip name often differs from the import name. Change nothing else.`
+                      : `"${nodeLabel}" 단계(노드 id ${failedNodeId})가 쓰는 파이썬 패키지를 준비하지 못해 실패합니다. 그 단계의 packages에 올바른 pip 이름을 넣어 주세요 — pip 이름은 import 이름과 다를 때가 많습니다. 다른 것은 바꾸지 마세요.`;
+                    setArchitectDraft(scoped);
+                    void requestGraphChangeWith(scoped);
+                  }}
+                  style={pillBtn(true)}
+                >
+                  {architectBusy
+                    ? (locale === "en" ? "Working…" : "고치는 중…")
+                    : (locale === "en" ? "Have AI fix it" : "AI가 고치게 하기")}
+                </button>
+              </div>
+            ) : null}
+
             {evalStuck ? (
               <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
                 <button
@@ -1408,6 +1457,7 @@ function AutomationFlowPage() {
               value={(selectedEdge.data as { maxIterations?: number } | undefined)?.maxIterations ?? null}
               onChange={setLoopBound}
               onClose={() => setSelectedEdgeId(null)}
+              locale={locale}
             />
           ) : editing && selectedNode ? (
             <NodeConfigPanel node={selectedNode} onPatch={patchSelected} onLabel={labelSelected} onDelete={deleteSelected} onClose={() => setSelectedNodeId(null)} timezone={automation?.timezone ?? null} automationId={automation?.id} />
@@ -1435,18 +1485,20 @@ function AutomationFlowPage() {
  *   멈출 지점이 없는 반복은 아무도 멈춰 줄 수 없다.
  */
 function LoopBoundPanel({
-  isBackEdge, value, onChange, onClose,
+  isBackEdge, value, onChange, onClose, locale,
 }: {
   isBackEdge: boolean;
   value: number | null;
   onChange: (v: number | null) => void;
   onClose: () => void;
+  locale: "ko" | "en";
 }) {
+  const L = (ko: string, en: string) => (locale === "en" ? en : ko);
   return (
     <div className="automation-node-panel" data-one-content-slot>
       <div className="automation-node-panel-head">
         <strong>{isBackEdge ? "되돌아가는 연결" : "연결"}</strong>
-        <button type="button" className="ghost-btn" onClick={onClose}>닫기</button>
+        <button type="button" className="ghost-btn" onClick={onClose}>{L("닫기", "Close")}</button>
       </div>
       {isBackEdge ? (
         <>
@@ -1455,11 +1507,11 @@ function LoopBoundPanel({
             자동화는 아무도 보고 있지 않을 때 돌기 때문입니다.
           </p>
           <label className="automation-field">
-            <span>최대 반복 횟수</span>
+            <span>{L("최대 반복 횟수", "Maximum repeats")}</span>
             <input
               type="number" min={1} max={50}
               value={value ?? ""}
-              placeholder="예: 3"
+              placeholder={L("예: 3", "e.g. 3")}
               onChange={(e) => {
                 const n = Number(e.target.value);
                 onChange(Number.isFinite(n) && n >= 1 && n <= 50 ? Math.round(n) : null);

@@ -75,6 +75,20 @@ function specFromLegacyToken(token: string, tz: string): ScheduleSpec | null {
   return null;
 }
 
+
+/**
+ * 이 패널 전용 이중언어 헬퍼.
+ *
+ * ★실사용 실측(2026-08-06): 앱 언어가 English인데 이 패널만 "무엇을 계산·가공하나",
+ * "스크립트 (AI가 채웁니다…)"처럼 한국어가 그대로 나와, 같은 화면에서 언어가 반쪽씩
+ * 섞였다. 문자열 78곳이 하드코딩이고 locale 분기는 한 곳뿐이었다.
+ * i18n 키를 새로 78개 만드는 대신 여기서 짝을 맞춘다 — 문구와 번역이 같은 줄에 있어
+ * 한쪽만 고치는 드리프트가 구조적으로 안 생긴다.
+ */
+function bi(locale: "ko" | "en", ko: string, en: string): string {
+  return locale === "en" ? en : ko;
+}
+
 export function NodeConfigPanel({
   node,
   onPatch,
@@ -282,50 +296,58 @@ export function NodeConfigPanel({
           그려 놓고 실행에는 안 붙이던 것과 같은 병이다. 무엇을 할지는 아래 지시문에 쓴다. */}
 
       {node.type === "output" && (
-        <Field label="내보낼 내용">
+        <Field label={bi(locale, "내보낼 내용", "What goes out")}>
           <textarea
             value={s("text")}
             onChange={(e) => onPatch({ text: e.target.value })}
             rows={5}
-            placeholder="예: 이번 주 요약 — {{summary}}"
+            placeholder={bi(locale, "예: 이번 주 요약 — {{summary}}", "e.g. This week's summary — {{summary}}")}
             style={{ ...inp, minHeight: 96, resize: "vertical" }}
           />
           <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
-            여기 적은 그대로 나갑니다. 앞 단계 결과는 {"{{이름}}"}으로 끼워 넣습니다.
+            {bi(locale,
+              "여기 적은 그대로 나갑니다. 앞 단계 결과는 {{이름}}으로 끼워 넣습니다.",
+              "This goes out exactly as written. Insert an earlier result with {{name}}.")}
           </div>
         </Field>
       )}
 
       {node.type === "code" && (
         <>
-          <Field label="무엇을 계산·가공하나">
+          <Field label={bi(locale, "무엇을 계산·가공하나", "What it computes or reshapes")}>
             <textarea
               value={s("note")}
               onChange={(e) => onPatch({ note: e.target.value })}
               rows={2}
-              placeholder="예: 종가를 어제와 비교해 변동률(%)을 낸다"
+              placeholder={bi(locale, "예: 종가를 어제와 비교해 변동률(%)을 낸다", "e.g. compare the close with yesterday and give the percent change")}
               style={{ ...inp, minHeight: 48, resize: "vertical" }}
             />
             <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
-              여기 적으면 AI가 스크립트를 짭니다. 사람이 코드를 짤 필요는 없어요.
+              {bi(locale,
+                "여기 적으면 AI가 스크립트를 짭니다. 사람이 코드를 짤 필요는 없어요.",
+                "Write this and the AI produces the script — you never have to write code.")}
             </div>
           </Field>
-          <Field label="언어">
+          <Field label={bi(locale, "언어", "Language")}>
             <select value={s("codeLang") || "python"} onChange={(e) => onPatch({ codeLang: e.target.value })} style={inp}>
-              <option value="python">python (데이터·계산에 강함)</option>
+              <option value="python">{bi(locale, "python (데이터·계산에 강함)", "python (best for data and maths)")}</option>
               <option value="js">javascript</option>
             </select>
           </Field>
-          <Field label="스크립트 (AI가 채웁니다 — 직접 고쳐도 됩니다)">
+          <Field label={bi(locale, "스크립트 (AI가 채웁니다 — 직접 고쳐도 됩니다)", "Script (the AI fills this in — you can edit it)")}>
             <textarea
               value={s("code")}
               onChange={(e) => onPatch({ code: e.target.value })}
               rows={6}
-              placeholder={"# 앞 단계 값은 vars 로 들어옵니다.\n# 결과는 result 에 넣으세요.\nresult = ..."}
+              placeholder={bi(locale,
+                "# 앞 단계 값은 vars 로 들어옵니다.\n# 결과는 result 에 넣으세요.\nresult = ...",
+                "# Earlier values arrive in vars.\n# Put what you produce in result.\nresult = ...")}
               style={{ ...inp, minHeight: 120, resize: "vertical", fontFamily: "var(--font-mono)", fontSize: 12 }}
             />
             <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
-              앞 단계 값은 {"vars"} 로 들어오고, {"result"} 에 넣은 것이 다음 단계로 갑니다.
+              {bi(locale,
+                "앞 단계 값은 vars 로 들어오고, result 에 넣은 것이 다음 단계로 갑니다.",
+                "Earlier values arrive in vars; whatever you put in result goes to the next step.")}
             </div>
           </Field>
         </>
@@ -443,7 +465,7 @@ export function NodeConfigPanel({
               value={s("criteria")}
               onChange={(e) => onPatch({ criteria: e.target.value })}
               rows={2}
-              placeholder="근거가 두 개 이상 있고, 문장이 어색하지 않다"
+              placeholder={bi(locale, "근거가 두 개 이상 있고, 문장이 어색하지 않다", "has at least two sources, and reads naturally")}
               style={{ ...inp, resize: "vertical", fontFamily: "var(--font-body)" }}
             />
           </Field>
@@ -600,24 +622,24 @@ export function NodeConfigPanel({
               승인은 "나가기 전에 내가 본다", 멱등키는 "두 번 나가지 않는다", 재시도는
               "한 번 실패했다고 포기하지 않는다"이다. 셋 다 사람이 정할 일인데, 지금까지는
               말로 만들거나 JSON을 직접 고쳐야만 걸 수 있었다. */}
-          <Field label="사람 승인">
+          <Field label={bi(locale, "사람 승인", "Human approval")}>
             <select value={s("approval") || "auto"} onChange={(e) => onPatch({ approval: e.target.value })} style={inp}>
-              <option value="auto">필요 없음 — 알아서 진행</option>
-              <option value="ask">나갈 때마다 물어보기</option>
+              <option value="auto">{bi(locale, "필요 없음 — 알아서 진행", "Not needed — go ahead")}</option>
+              <option value="ask">{bi(locale, "나갈 때마다 물어보기", "Ask every time")}</option>
               {/* ★커널이 받는 값은 `ask_once`다. "once"로 보내면 어디에도 안 걸려 조용히 auto가 된다 —
                   승인을 걸었다고 믿는 사람이 승인 없이 내보내진다. */}
-              <option value="ask_once">처음 한 번만 물어보기</option>
+              <option value="ask_once">{bi(locale, "처음 한 번만 물어보기", "Ask the first time only")}</option>
             </select>
           </Field>
           {/* ★출력 노드는 효과를 안 적어도 커널이 "바깥으로 나간다"로 본다. 그런데 멱등키 칸을
               `effect === "mutation"`일 때만 보여 주면, 정작 그 칸이 가장 필요한 노드에서
               **숨어 있다** — 멱등키가 없으면 발행 단계는 재시도조차 못 한다. */}
           {s("effect") === "mutation" || node.type === "output" ? (
-            <Field label="같은 일을 두 번 하지 않기">
+            <Field label={bi(locale, "같은 일을 두 번 하지 않기", "Do not do the same thing twice")}>
               <input
                 value={s("idempotencyKey")}
                 onChange={(e) => onPatch({ idempotencyKey: e.target.value })}
-                placeholder="예: 발송-{{orderId}}"
+                placeholder={bi(locale, "예: 발송-{{orderId}}", "e.g. send-{{orderId}}")}
                 style={{ ...inp, fontFamily: "var(--font-mono)" }}
               />
               <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
@@ -625,7 +647,7 @@ export function NodeConfigPanel({
               </div>
             </Field>
           ) : null}
-          <Field label="실패하면 다시 시도">
+          <Field label={bi(locale, "실패하면 다시 시도", "Retry on failure")}>
             <input
               type="number" min={0} max={5}
               value={s("retries")}

@@ -127,6 +127,21 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
         />
       </Section>
 
+      {/* ★흐름 블록(코드·판정·조건·반복)을 에이전트 목록 **위**에 둔다.
+          에이전트는 수십 개까지 늘어나는 목록이고 흐름 블록은 고정 5개인데, 아래에
+          있으면 "코드 단계 하나 넣기"에 에이전트 20개를 스크롤해 지나야 한다
+          (실사용 실측 2026-08-06: 실제 앱에서 코드 항목이 화면에 아예 안 보였다). */}
+      <Section title={t("auto.palette.section.flow")}>
+        {FLOW_ITEMS.map((it) => (
+          <Item
+            key={it.type}
+            icon={it.icon}
+            label={t(it.labelKey)}
+            {...("hintKey" in it && it.hintKey ? { hint: t(it.hintKey) } : {})}
+            onClick={() => onAdd({ type: it.type, config: {}, label: t(it.labelKey) })}
+          />
+        ))}
+      </Section>
       <Section title={t("auto.palette.section.agents")}>
         {agentSeeds.map((a) => (
           <Item
@@ -180,17 +195,6 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
         />
       </Section>
 
-      <Section title={t("auto.palette.section.flow")}>
-        {FLOW_ITEMS.map((it) => (
-          <Item
-            key={it.type}
-            icon={it.icon}
-            label={t(it.labelKey)}
-            {...("hintKey" in it && it.hintKey ? { hint: t(it.hintKey) } : {})}
-            onClick={() => onAdd({ type: it.type, config: {}, label: t(it.labelKey) })}
-          />
-        ))}
-      </Section>
     </aside>
   );
 }

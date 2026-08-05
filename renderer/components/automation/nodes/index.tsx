@@ -55,6 +55,8 @@ export interface NodeStrings {
   failExitHint: string;
   cleanupExit: string;
   cleanupExitHint: string;
+  /** 노드 좌상단 AI 버튼 설명. */
+  aiNoteHint: string;
 }
 
 function summaryProduces(data: WorkflowNodeData): string | undefined {
@@ -77,6 +79,7 @@ export function TriggerNode({ data, selected }: NodeProps) {
       subtitle={schedule}
       selected={selected}
       onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
+      aiHint={d.strings.aiNoteHint}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
@@ -99,11 +102,10 @@ export function AgentNode({ data, selected }: NodeProps) {
       subtitle={prompt || ref || summaryProduces(d)}
       selected={selected}
       onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
+      aiHint={d.strings.aiNoteHint}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
-      outcomeHandles
-      outcomeStrings={{ fail: d.strings.failExit, failHint: d.strings.failExitHint, cleanup: d.strings.cleanupExit, cleanupHint: d.strings.cleanupExitHint }}
     />
   );
 }
@@ -120,6 +122,7 @@ export function ToolNode({ data, selected }: NodeProps) {
       subtitle={summaryProduces(d)}
       selected={selected}
       onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
+      aiHint={d.strings.aiNoteHint}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
@@ -139,11 +142,10 @@ export function ActionNode({ data, selected }: NodeProps) {
       subtitle={summaryProduces(d)}
       selected={selected}
       onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
+      aiHint={d.strings.aiNoteHint}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
-      outcomeHandles
-      outcomeStrings={{ fail: d.strings.failExit, failHint: d.strings.failExitHint, cleanup: d.strings.cleanupExit, cleanupHint: d.strings.cleanupExitHint }}
     />
   );
 }
@@ -159,11 +161,10 @@ export function OutputNode({ data, selected }: NodeProps) {
       subtitle={catalog}
       selected={selected}
       onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
+      aiHint={d.strings.aiNoteHint}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
-      outcomeHandles
-      outcomeStrings={{ fail: d.strings.failExit, failHint: d.strings.failExitHint, cleanup: d.strings.cleanupExit, cleanupHint: d.strings.cleanupExitHint }}
       hasOut={false}
     />
   );
@@ -183,6 +184,7 @@ export function EvalNode({ data, selected }: NodeProps) {
       subtitle={subject && criteria ? `${subject} — ${criteria}` : (criteria || subject)}
       selected={selected}
       onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
+      aiHint={d.strings.aiNoteHint}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
@@ -203,11 +205,10 @@ export function SubgraphNode({ data, selected }: NodeProps) {
       subtitle={ref ? (d.strings.subgraphRef ?? ref) : d.strings.subgraphUnset}
       selected={selected}
       onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
+      aiHint={d.strings.aiNoteHint}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
-      outcomeHandles
-      outcomeStrings={{ fail: d.strings.failExit, failHint: d.strings.failExitHint, cleanup: d.strings.cleanupExit, cleanupHint: d.strings.cleanupExitHint }}
     />
   );
 }
@@ -225,11 +226,10 @@ export function CodeNode({ data, selected }: NodeProps) {
       subtitle={hasCode ? `${lang}` : (d.codeLangLabel ? `${d.codeLangLabel}` : lang)}
       selected={selected}
       onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
+      aiHint={d.strings.aiNoteHint}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
-      outcomeHandles
-      outcomeStrings={{ fail: d.strings.failExit, failHint: d.strings.failExitHint, cleanup: d.strings.cleanupExit, cleanupHint: d.strings.cleanupExitHint }}
     />
   );
 }

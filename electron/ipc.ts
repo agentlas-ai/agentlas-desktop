@@ -3943,10 +3943,37 @@ export function registerIpcHandlers(): void {
     for (let round = 0; round <= MAX_SELF_CORRECTIONS; round += 1) {
       let text: string | null = null;
       try {
+        /*
+         * ★답이 다 나오기 전에도 **지금까지 정해진 단계**를 화면으로 보낸다.
+         *
+         * 런타임은 이미 조각을 주고 있었는데(runner.ts onPartial) 판정기가 버리고 있어서,
+         * 인터뷰는 완성된 청사진이 올 때까지 아무것도 못 그렸다 — 사람은 몇 십 초를
+         * 빈 화면으로 기다렸다. 여기서 조각을 훑어 `"title": "..."` 이 나올 때마다
+         * 그 순서대로 흘려보낸다. **완성된 JSON을 기다리지 않는다** — 부분 문자열은
+         * 파싱이 안 되는 것이 정상이고, 우리가 필요한 건 "몇 번째 단계가 무엇인가"뿐이다.
+         */
+        const seenTitles: string[] = [];
+        let partialBuf = "";
         text = await callConnectedModel({
           systemPrompt: "You return only compact JSON. No prose.",
           input: buildInterviewPrompt(attempt, currentUiLocale()),
           timeoutMs: 120_000,
+          onPartial: (chunk) => {
+            partialBuf += chunk;
+            for (const m of partialBuf.matchAll(/"title"\s*:\s*"([^"\\]{1,80})"/g)) {
+              const title = m[1];
+              if (seenTitles.includes(title)) continue;
+              seenTitles.push(title);
+              for (const win of BrowserWindow.getAllWindows()) {
+                try {
+                  win.webContents.send("automations:interview:steps", {
+                    index: seenTitles.length - 1,
+                    title,
+                  });
+                } catch { /* 창이 닫혔을 뿐이다 */ }
+              }
+            }
+          },
         });
       } catch (error) {
         return {

@@ -324,7 +324,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
           return {
             ok: false, isolation, failureCode: "CODE_DEPENDENCY_MISSING",
             reason: `코드가 쓰는 파이썬 패키지 "${missing}"가 이 컴퓨터에 없고, 설치도 실패했습니다: `
-              + `${rescue.failed.reason} — 이 단계 설정의 packages에 정확한 pip 이름을 선언하면 실행 전에 준비됩니다.`,
+              + `${rescue.failed.reason}`,
           };
         }
       }
@@ -336,7 +336,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
         return {
           ok: false, isolation, failureCode: "CODE_DEPENDENCY_MISSING",
           reason: `코드가 쓰는 파이썬 모듈 "${stillMissing}"를 준비하지 못했습니다. pip 이름이 모듈 이름과 다른 패키지일 수 있습니다 — `
-            + `이 단계 설정의 packages에 정확한 pip 이름을 선언해 주세요. 원문: ${reason.slice(0, 800)}`,
+            + `원문: ${reason.slice(0, 800)}`,
         };
       }
       return { ok: false, isolation, reason: reason.slice(0, 4000) };

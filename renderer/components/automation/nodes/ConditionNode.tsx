@@ -29,6 +29,7 @@ export function ConditionNode({ data, selected }: NodeProps) {
       subtitle={conditionSummary(d.config)}
       selected={selected}
       onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
+      aiHint={d.strings.aiNoteHint}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}

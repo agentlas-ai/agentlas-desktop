@@ -7,9 +7,9 @@
 // 만든 것은 **꺼진 채로** 저장된다. 자동화는 사람이 없는 동안 도는 것이라,
 // "만들어 뒀습니다"로 끝내면 안 된다.
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ipc } from "@/lib/ipc";
+import { ipc, ipcEvents } from "@/lib/ipc";
 import type { WorkflowGraph } from "@/lib/types";
 import { humanSchedule } from "@shared/graph-blueprint";
 
@@ -41,12 +41,31 @@ export function DescribeAutomation({ locale, onCreated }: {
   const [saved, setSaved] = useState(false);
   // 확인 화면에서 "고칠 점"을 말하면 인터뷰로 되돌아간다 — 취소가 전부 버리면 안 된다.
   const [revision, setRevision] = useState("");
+  /**
+   * ★만들어지는 동안 **정해진 단계가 도착하는 대로** 보여준다.
+   *
+   * 예전에는 답이 끝날 때까지 "정리하는 중…" 한 줄뿐이라, 사람은 몇 십 초를 아무것도
+   * 안 보이는 화면에서 기다렸다(그 침묵이 저장 버튼 연타의 뿌리이기도 하다).
+   * 런타임은 이미 조각을 주고 있었고 판정기가 버리던 것을 열었다.
+   */
+  const [liveSteps, setLiveSteps] = useState<string[]>([]);
+
+  useEffect(() => {
+    const events = ipcEvents();
+    if (!events?.on) return;
+    return events.on("automations:interview:steps", (payload: unknown) => {
+      const row = payload as { index?: number; title?: string } | null;
+      if (!row?.title) return;
+      setLiveSteps((prev) => (prev.includes(row.title!) ? prev : [...prev, row.title!]));
+    });
+  }, []);
 
   async function turn(next: typeof state) {
     const api = ipc();
     if (!api || !next) return;
     setBusy(true);
     setProblem(null);
+    setLiveSteps([]);
     try {
       const res = await api.automations.interviewGraph(next);
       if (!res.ok) { setProblem({ reason: res.reason, nextAction: res.nextAction }); return; }
@@ -185,6 +204,14 @@ export function DescribeAutomation({ locale, onCreated }: {
           </button>
         )}
       </div>
+
+      {busy && liveSteps.length > 0 ? (
+        <ol data-testid="describe-live-steps" style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 3 }}>
+          {liveSteps.map((title, i) => (
+            <li key={`${i}-${title}`} style={{ fontSize: 12, color: "var(--ink-soft)" }}>{title}</li>
+          ))}
+        </ol>
+      ) : null}
 
       {questions.length > 0 ? (
         <div data-testid="describe-questions" style={{ display: "grid", gap: 12 }}>

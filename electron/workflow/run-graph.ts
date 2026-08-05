@@ -2350,7 +2350,9 @@ export async function runGraph(
               // 의존성 결손은 코드 결함이 아니다 — "다시 짜라"가 아니라 "패키지를 선언하라".
               code: "CODE_DEPENDENCY_MISSING",
               reason: run.reason ?? "코드가 쓰는 파이썬 패키지를 준비하지 못했습니다.",
-              nextAction: "이 단계 설정의 packages에 정확한 pip 이름을 선언해 주세요 — 실행 전에 자동 설치됩니다.",
+              // ★사람에게 pip 이름을 묻지 않는다 — 코드를 지은 것은 AI다.
+              //   (실측: PIL→Pillow, sklearn→scikit-learn. 사용자가 알 이유가 없다.)
+              nextAction: "[AI가 고치게 하기]를 누르면 이 단계에 올바른 패키지 이름을 채워 넣은 수정안을 만들어 드립니다.",
             }
             : {
               code: "CODE_STEP_FAILED",

@@ -848,7 +848,10 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
     if (
       !channel.startsWith("invoke:event:") &&
       !channel.startsWith("hephaestus:build:") &&
-      !channel.startsWith("automations:liveRun:")
+      !channel.startsWith("automations:liveRun:") &&
+      // 그래프 인터뷰가 답을 써 내려가는 동안 부분 청사진을 흘려보내는 채널.
+      // 없으면 사람은 몇 십 초를 빈 화면으로 기다린다(런타임은 이미 조각을 준다).
+      !channel.startsWith("automations:interview:")
     )
       return () => {};
     ipcRenderer.on(channel, wrapped);

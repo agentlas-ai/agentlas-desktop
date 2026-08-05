@@ -55,6 +55,17 @@ export const NODE_TAG_COLORS: Record<string, { bg: string; fg: string }> = {
  * - 좌측 target 핸들 / 우측 source 핸들(트리거는 target 없음, output은 source 없음).
  * - selected면 액센트 링.
  */
+/**
+ * 연결을 붙일 수 있는 네 면. 순서가 곧 기본값이다(핸들 미지정 엣지는 첫 항목에 붙는다) —
+ * 배치가 위→아래이므로 위·아래를 먼저 둔다.
+ */
+const SIDES = [
+  { id: "t", position: Position.Top, offset: { left: "50%" } },
+  { id: "b", position: Position.Bottom, offset: { left: "50%" } },
+  { id: "l", position: Position.Left, offset: { top: "50%" } },
+  { id: "r", position: Position.Right, offset: { top: "50%" } },
+] as const;
+
 export function NodeCard(props: {
   type: string;
   icon: ReactNode;
@@ -76,14 +87,22 @@ export function NodeCard(props: {
   /**
    * 실패·정리 출구를 그릴 수 있게 한다 (커넥터 C40·C42).
    *
-   * ★없으면 "실패하면 이쪽으로"를 커널은 실행할 수 있는데 저작자가 **그릴 수가 없다**.
-   * 만들어 놓고 닿을 수 없는 기능이 되는 그 모양이다.
+   * ★기본은 **꺼져 있다**(2026-08-06). 실측: 저장된 그래프 13개·연결 57개 중
+   *   실패 연결 0개, 정리 연결 0개 — 모든 노드에 아무도 쓰지 않는 포트 2개와 라벨 2개가
+   *   늘 붙어 있었다. 그럴 만한 이유가 있다:
+   *     · "실패하면 알려줘"는 이미 제품이 한다(automation-scheduler의 데스크탑 알림).
+   *     · 임시 파일 정리도 이미 자동이다(code-runner의 cleanup()).
+   *   즉 두 포트는 **이미 기본 동작인 것을 사람이 선으로 다시 그리라고 요구**하고 있었다.
+   *   커널은 그대로 그 연결을 실행하므로(run-graph의 error/always 처리) 예전 그래프는
+   *   계속 돌고, 고급 사용자가 이 prop을 켜면 다시 그릴 수 있다.
    */
   outcomeHandles?: boolean;
   /** 실패·정리 출구의 이름·설명(로케일 주입). 없으면 한국어 기본값. */
   outcomeStrings?: { fail: string; failHint: string; cleanup: string; cleanupHint: string };
   /** 좌상단 AI 주석 버튼(항목 5) — 누르면 "이 단계만 AI에게" 팝업이 열린다. 편집 모드에서만 주입된다. */
   onAiNote?: () => void;
+  /** 그 버튼의 설명(로케일 주입). 없으면 한국어 기본값. */
+  aiHint?: string;
 }) {
   const accent = props.accent ?? NODE_ACCENT[props.type] ?? "var(--muted-deep)";
   const connectable = props.connectable ?? false;
@@ -127,14 +146,25 @@ export function NodeCard(props: {
           {props.progress}
         </div>
       ) : null}
-      {props.hasIn !== false ? (
-        <Handle type="target" position={Position.Left} style={handleStyle} isConnectable={connectable} />
-      ) : null}
+      {/* ★들어오고 나가는 자리를 **네 면 모두** 연다(오너 결정 2026-08-06).
+          배치가 위→아래라 기본은 위(들어옴)·아래(나감)이고, 옆으로 도는 선은 좌우로 붙인다.
+          ★그리는 순서가 곧 기본값이다 — 핸들을 지정하지 않은 옛 엣지는 React Flow가
+          **처음 나온 핸들**에 붙이므로, 위(target)·아래(source)를 맨 앞에 둔다. */}
+      {props.hasIn !== false ? SIDES.map((side) => (
+        <Handle
+          key={`t-${side.id}`}
+          id={`in-${side.id}`}
+          type="target"
+          position={side.position}
+          style={{ ...handleStyle, ...side.offset }}
+          isConnectable={connectable}
+        />
+      )) : null}
       {props.onAiNote ? (
         <button
           type="button"
           className="automation-flow-node-ai"
-          title="AI에게 이 단계 주석·수정 맡기기"
+          title={props.aiHint ?? "AI에게 이 단계 주석·수정 맡기기"}
           onClick={(e) => { e.stopPropagation(); props.onAiNote?.(); }}
         >
           AI
@@ -201,26 +231,35 @@ export function NodeCard(props: {
       {props.branchHandles ? (
         <>
           {/* true 핸들(상단) / false 핸들(하단) — sourceHandle id로 엣지가 분기를 실어나른다. */}
+          {/* 세로 흐름이라 참/거짓은 **아래쪽 좌우**로 갈린다 — 오른쪽 위아래로 두면
+              위→아래로 읽는 눈에 어느 쪽이 먼저인지 안 보인다. */}
           <Handle
             id="true"
             type="source"
-            position={Position.Right}
-            style={{ ...handleStyle, top: "32%", background: "var(--ok, #2e9e5b)" }}
+            position={Position.Bottom}
+            style={{ ...handleStyle, left: "30%", background: "var(--ok, #2e9e5b)" }}
             isConnectable={connectable}
           />
-          <span style={branchLabelStyle("32%", "var(--ok, #2e9e5b)")}>T</span>
+          <span style={branchLabelStyle("30%", "var(--ok, #2e9e5b)")}>T</span>
           <Handle
             id="false"
             type="source"
-            position={Position.Right}
-            style={{ ...handleStyle, top: "68%", background: "var(--danger, #d64545)" }}
+            position={Position.Bottom}
+            style={{ ...handleStyle, left: "70%", background: "var(--danger, #d64545)" }}
             isConnectable={connectable}
           />
-          <span style={branchLabelStyle("68%", "var(--danger, #d64545)")}>F</span>
+          <span style={branchLabelStyle("70%", "var(--danger, #d64545)")}>F</span>
         </>
-      ) : props.hasOut !== false ? (
-        <Handle type="source" position={Position.Right} style={handleStyle} isConnectable={connectable} />
-      ) : null}
+      ) : props.hasOut !== false ? SIDES.map((side) => (
+        <Handle
+          key={`s-${side.id}`}
+          id={`out-${side.id}`}
+          type="source"
+          position={side.position}
+          style={{ ...handleStyle, ...side.offset }}
+          isConnectable={connectable}
+        />
+      )) : null}
 
       {/* 실패 출구와 정리 출구 — 평상시 출구와 **다른 자리**에 둔다(아래쪽).
           같은 자리에 겹치면 어느 선을 끌고 있는지 사람이 알 수 없다. */}

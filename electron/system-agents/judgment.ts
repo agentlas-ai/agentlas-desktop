@@ -170,6 +170,14 @@ export async function callConnectedModel(opts: {
   timeoutMs?: number;
   signal?: AbortSignal;
   locale?: RuntimeLocale;
+  /**
+   * 모델이 답을 써 내려가는 동안 부분 텍스트를 흘려준다.
+   *
+   * ★없던 통로가 아니다 — 런타임은 이미 `onPartial`을 주고 있었는데(runner.ts) 이
+   * 함수가 `() => {}`로 **버리고** 있었다. 그래서 그래프 인터뷰는 답이 다 끝난 뒤에야
+   * 화면에 무언가를 그릴 수 있었고, 사람은 몇 십 초를 빈 화면으로 기다렸다.
+   */
+  onPartial?: (text: string) => void;
 }): Promise<string | null> {
   return callJudgmentModel(opts);
 }
@@ -180,6 +188,7 @@ async function callJudgmentModel(opts: {
   timeoutMs?: number;
   signal?: AbortSignal;
   locale?: RuntimeLocale;
+  onPartial?: (text: string) => void;
 }): Promise<string | null> {
   let runtimes: RuntimeStatus[];
   let operationalStoreUnavailable = false;
@@ -232,7 +241,11 @@ async function callJudgmentModel(opts: {
             signal: controller.signal,
             locale: opts.locale ?? "en",
           },
-          { onPartial: () => {}, onStatus: () => {}, onTool: () => {} },
+          {
+            onPartial: (chunk: string) => { try { opts.onPartial?.(chunk); } catch { /* 화면 사정은 판정을 막지 않는다 */ } },
+            onStatus: () => {},
+            onTool: () => {},
+          },
         );
         return result.text ?? "";
       } catch {
