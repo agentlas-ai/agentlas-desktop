@@ -31,6 +31,26 @@ export const NODE_ACCENT: Record<string, string> = {
 };
 
 /**
+ * 우상단 종류 태그의 배경·글자색 — 오너 지정 팔레트(2026-08-05).
+ * Navy #0C2C47 · Yellow #DA9B2B · Green #2E5749 · Orange #BF512C ·
+ * Mint #ABCBCA · Mauve #D6C9C5 · White #FFFFFF.
+ * 종류가 색으로 먼저 읽혀야 캔버스를 훑을 때 흐름이 보인다(실측 항목 7).
+ */
+export const NODE_TAG_COLORS: Record<string, { bg: string; fg: string }> = {
+  trigger: { bg: "#0C2C47", fg: "#FFFFFF" },                 // Navy — 시작점
+  agent: { bg: "#DA9B2B", fg: "#0C2C47" },                   // Yellow — 일꾼
+  firm: { bg: "#DA9B2B", fg: "#0C2C47" },                    // 일꾼 무리도 같은 계열
+  code: { bg: "#2E5749", fg: "#FFFFFF" },                    // Green — 계산
+  transform: { bg: "#2E5749", fg: "#FFFFFF" },               // 값 가공도 계산 계열
+  action: { bg: "#BF512C", fg: "#FFFFFF" },                  // Orange — 바깥으로 나감
+  output: { bg: "#BF512C", fg: "#FFFFFF" },                  // 내보내기도 바깥 계열
+  eval: { bg: "#D6C9C5", fg: "#0C2C47" },                    // Mauve — 채점
+  condition: { bg: "#ABCBCA", fg: "#0C2C47" },               // Mint — 갈림길
+  tool: { bg: "#FFFFFF", fg: "#0C2C47" },                    // White — 도구
+  subgraph: { bg: "#FFFFFF", fg: "#0C2C47" },
+};
+
+/**
  * 모든 커스텀 노드가 공유하는 카드 셸.
  * - 좌측 target 핸들 / 우측 source 핸들(트리거는 target 없음, output은 source 없음).
  * - selected면 액센트 링.
@@ -60,6 +80,10 @@ export function NodeCard(props: {
    * 만들어 놓고 닿을 수 없는 기능이 되는 그 모양이다.
    */
   outcomeHandles?: boolean;
+  /** 실패·정리 출구의 이름·설명(로케일 주입). 없으면 한국어 기본값. */
+  outcomeStrings?: { fail: string; failHint: string; cleanup: string; cleanupHint: string };
+  /** 좌상단 AI 주석 버튼(항목 5) — 누르면 "이 단계만 AI에게" 팝업이 열린다. 편집 모드에서만 주입된다. */
+  onAiNote?: () => void;
 }) {
   const accent = props.accent ?? NODE_ACCENT[props.type] ?? "var(--muted-deep)";
   const connectable = props.connectable ?? false;
@@ -106,9 +130,23 @@ export function NodeCard(props: {
       {props.hasIn !== false ? (
         <Handle type="target" position={Position.Left} style={handleStyle} isConnectable={connectable} />
       ) : null}
+      {props.onAiNote ? (
+        <button
+          type="button"
+          className="automation-flow-node-ai"
+          title="AI에게 이 단계 주석·수정 맡기기"
+          onClick={(e) => { e.stopPropagation(); props.onAiNote?.(); }}
+        >
+          AI
+        </button>
+      ) : null}
       <span
         className="automation-flow-node-type"
-        style={{ color: accent }}
+        style={{
+          background: (NODE_TAG_COLORS[props.type] ?? { bg: "var(--paper)" }).bg,
+          color: (NODE_TAG_COLORS[props.type] ?? { fg: accent }).fg,
+          borderColor: "transparent",
+        }}
       >
         {props.type}
       </span>
@@ -195,7 +233,13 @@ export function NodeCard(props: {
             style={{ ...handleStyle, left: "34%", background: "var(--danger, #d64545)" }}
             isConnectable={connectable}
           />
-          <span style={outcomeLabelStyle("34%", "var(--danger, #d64545)")}>실패</span>
+          {/* ★이름표에 설명을 단다 — "실패, 정리가 뭐지"가 실측 첫 반응이었다(항목 2). */}
+          <span
+            title={props.outcomeStrings?.failHint ?? "이 단계가 실패했을 때만 가는 길입니다"}
+            style={{ ...outcomeLabelStyle("34%", "var(--danger, #d64545)"), pointerEvents: "auto", cursor: "help" }}
+          >
+            {props.outcomeStrings?.fail ?? "실패"}
+          </span>
           <Handle
             id="always"
             type="source"
@@ -203,7 +247,12 @@ export function NodeCard(props: {
             style={{ ...handleStyle, left: "70%", background: "var(--muted-deep)" }}
             isConnectable={connectable}
           />
-          <span style={outcomeLabelStyle("70%", "var(--muted-deep)")}>정리</span>
+          <span
+            title={props.outcomeStrings?.cleanupHint ?? "성공하든 실패하든 마지막에 한 번 도는 뒷정리 길입니다"}
+            style={{ ...outcomeLabelStyle("70%", "var(--muted-deep)"), pointerEvents: "auto", cursor: "help" }}
+          >
+            {props.outcomeStrings?.cleanup ?? "정리"}
+          </span>
         </>
       ) : null}
     </div>

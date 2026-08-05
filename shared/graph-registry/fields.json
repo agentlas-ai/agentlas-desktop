@@ -661,6 +661,20 @@
       "note": "기본 python(번들 인터프리터·데이터 라이브러리)."
     },
     {
+      "name": "packages",
+      "on": "node.config",
+      "appliesTo": [
+        "code"
+      ],
+      "grade": "degradable",
+      "type": "string[]",
+      "writer": "AI(orch)",
+      "reader": "커널(실행 전 설치)",
+      "unknown": "없으면 표준 라이브러리만 가정",
+      "status": "implemented",
+      "note": "스크립트가 표준 라이브러리 밖을 import하면 pip 이름을 여기 선언한다. 커널이 실행 전에 관리 폴더에 설치하고 PYTHONPATH로 붙인다. 미선언 import는 실행에서 ModuleNotFoundError → 커널이 1회 자동 설치·재시도 후, 그래도 실패면 CODE_DEPENDENCY_MISSING."
+    },
+    {
       "name": "note",
       "on": "node.config",
       "grade": "degradable",
@@ -713,6 +727,21 @@
       "reader": "스태핑(Hub 검색)·화면",
       "status": "implemented",
       "note": "이 단계를 할 일꾼의 성격을 사람 말로. ★모델은 역할만 말하고 실제 에이전트(ref)는 코드가 Hub에서 검색해 꽂는다 — 모델이 slug를 지어내면 실행 때 죽는다."
+    },
+    {
+      "name": "roleEn",
+      "on": "node.config",
+      "appliesTo": [
+        "agent",
+        "action"
+      ],
+      "grade": "degradable",
+      "type": "string",
+      "writer": "AI(orch)",
+      "reader": "편성(검색 질의)",
+      "unknown": "role 원문으로 검색(질이 떨어질 뿐 동작한다)",
+      "status": "implemented",
+      "note": "role의 영어 번역. 카탈로그가 영어라 검색은 이걸로 한다 — 한국어 질의는 같은 대상을 144위로 묻는다(실측). 화면 표시는 여전히 role."
     }
   ]
 }

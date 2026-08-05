@@ -36,6 +36,11 @@ export function DescribeAutomation({ locale, onCreated }: {
   const [ready, setReady] = useState<Ready | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<{ reason: string; nextAction: string } | null>(null);
+  // ★저장 후 상태 — 실측: 저장이 조용히 끝나고 화면 전환이 늦자 사람이 버튼을 8번 눌러
+  //   같은 그래프 사본이 8개 쌓였다. 저장했으면 "저장했고 이동 중"이라고 말해야 한다.
+  const [saved, setSaved] = useState(false);
+  // 확인 화면에서 "고칠 점"을 말하면 인터뷰로 되돌아간다 — 취소가 전부 버리면 안 된다.
+  const [revision, setRevision] = useState("");
 
   async function turn(next: typeof state) {
     const api = ipc();
@@ -90,7 +95,7 @@ export function DescribeAutomation({ locale, onCreated }: {
 
   async function create() {
     const api = ipc();
-    if (!api || !ready) return;
+    if (!api || !ready || saved) return;
     setBusy(true);
     try {
       const res = await api.automations.createFromBlueprint({
@@ -101,16 +106,44 @@ export function DescribeAutomation({ locale, onCreated }: {
         goal: ready.blueprint.goal,
       });
       if (!res.ok) { setProblem({ reason: res.reason, nextAction: res.nextAction }); return; }
-      reset();
+      // ★저장됐다고 먼저 말하고, 화면을 지우지 않은 채 캔버스로 이동한다.
+      //   저장 직후 reset()으로 카드를 지우면 — 특히 이동이 느릴 때 — 사람 눈에는
+      //   "아무 일도 안 일어남"으로 보이고, 버튼을 다시 누른다(실측: 사본 8개).
+      setSaved(true);
       onCreated();
       router.push(`/automation/flow?id=${res.id}`);
+    } catch {
+      // 조용한 실패 금지 — 예외가 나가면 버튼만 풀리고 아무 말이 없다.
+      setProblem({
+        reason: ko ? "저장하지 못했습니다." : "Could not save it.",
+        nextAction: ko ? "잠시 뒤 다시 시도해 주세요." : "Try again in a moment.",
+      });
     } finally {
       setBusy(false);
     }
   }
 
+  /** 확인 화면에서 "이 부분을 고쳐 주세요"라고 말하면 인터뷰가 한 턴 더 돈다. */
+  function revise() {
+    if (!state || !revision.trim()) return;
+    const note = revision.trim();
+    setRevision("");
+    setReady(null);
+    void turn({
+      request: state.request,
+      answers: [...state.answers, {
+        questionId: `revise-${state.round}`,
+        question: ko ? "확인 화면을 보고 사람이 고쳐 달라고 한 것" : "Revision the person asked for after reviewing the plan",
+        answer: note,
+      }],
+      asked: state.asked,
+      round: state.round + 1,
+    });
+  }
+
   function reset() {
     setRequest(""); setState(null); setQuestions([]); setDrafts({}); setReady(null); setProblem(null);
+    setSaved(false); setRevision("");
   }
 
   const mutations = (ready?.graph.nodes ?? []).filter((n) => n.config?.effect === "mutation");
@@ -148,7 +181,7 @@ export function DescribeAutomation({ locale, onCreated }: {
           </button>
         ) : (
           <button data-testid="describe-start" onClick={start} disabled={busy || !request.trim()} style={btn(true)}>
-            {busy ? (ko ? "정리하는 중…" : "Working…") : (ko ? "초안 잡기" : "Draft it")}
+            {busy ? <SpinnerLabel text={ko ? "정리하는 중…" : "Working…"} light /> : (ko ? "초안 잡기" : "Draft it")}
           </button>
         )}
       </div>
@@ -173,7 +206,10 @@ export function DescribeAutomation({ locale, onCreated }: {
                       style={{
                         ...btn(false),
                         padding: "5px 10px", fontSize: 12,
-                        ...(drafts[q.id] === choice ? { borderColor: "var(--accent-soft)", color: "var(--ink)" } : {}),
+                        // ★shorthand(border)와 개별 속성(borderColor)을 섞으면 리렌더에서
+                        //   제거 순서가 꼬인다(React 경고, 실측 항목 13). 항상 전체 border로.
+                        border: `1px solid ${drafts[q.id] === choice ? "var(--accent-soft)" : "var(--paper-edge)"}`,
+                        ...(drafts[q.id] === choice ? { color: "var(--ink)" } : {}),
                       }}
                     >
                       {choice}
@@ -201,7 +237,7 @@ export function DescribeAutomation({ locale, onCreated }: {
               disabled={busy || questions.some((q) => !(drafts[q.id] ?? "").trim())}
               style={btn(true)}
             >
-              {busy ? (ko ? "정리하는 중…" : "Working…") : (ko ? "답 보내기" : "Send answers")}
+              {busy ? <SpinnerLabel text={ko ? "정리하는 중…" : "Working…"} light /> : (ko ? "답 보내기" : "Send answers")}
             </button>
           </div>
         </div>
@@ -267,12 +303,46 @@ export function DescribeAutomation({ locale, onCreated }: {
               ? "꺼진 상태로 저장됩니다. 직접 켜기 전에는 돌지 않습니다."
               : "Saved switched off. It does not run until you turn it on."}
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button data-testid="describe-create" onClick={() => void create()} disabled={busy} style={btn(true)}>
-              {busy ? (ko ? "저장하는 중…" : "Saving…") : (ko ? "이대로 저장" : "Save it")}
-            </button>
-            <button onClick={reset} style={btn(false)}>{ko ? "취소" : "Discard"}</button>
-          </div>
+          {saved ? (
+            <div data-testid="describe-saved" style={{
+              display: "flex", alignItems: "center", gap: 8,
+              padding: "10px 12px", borderRadius: "var(--radius-sm)",
+              background: "var(--paper-2)", border: "1px solid var(--paper-edge)",
+              fontSize: 13, fontWeight: 600, color: "var(--ink)",
+            }}>
+              <span className="describe-spinner" aria-hidden />
+              {ko ? "저장했습니다 — 캔버스로 이동하는 중…" : "Saved — opening the canvas…"}
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button data-testid="describe-create" onClick={() => void create()} disabled={busy} style={btn(true)}>
+                  {busy ? <SpinnerLabel text={ko ? "저장하는 중…" : "Saving…"} light /> : (ko ? "이대로 저장" : "Save it")}
+                </button>
+                <button onClick={reset} style={btn(false)}>{ko ? "버리기" : "Discard"}</button>
+              </div>
+              {/* ★취소가 전부 버리는 문이면 안 된다 — 확인 화면에서 본 것을 고쳐 달라고
+                  말하면 인터뷰가 한 턴 더 돈다(지금까지의 답은 그대로 산다). */}
+              <div style={{ display: "flex", gap: 8 }}>
+                <input
+                  data-testid="describe-revision"
+                  value={revision}
+                  disabled={busy}
+                  onChange={(e) => setRevision(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") revise(); }}
+                  placeholder={ko ? "고칠 점이 있으면 적어 주세요 — 예: 메일 대신 파일로 저장" : "Anything to change? e.g. save to a file instead of email"}
+                  style={{
+                    flex: 1, padding: "8px 10px", borderRadius: "var(--radius-sm)",
+                    border: "1px solid var(--paper-edge)", background: "var(--paper-2)",
+                    color: "var(--ink)", fontSize: 12, outline: "none",
+                  }}
+                />
+                <button onClick={revise} disabled={busy || !revision.trim()} style={{ ...btn(false), fontSize: 12 }}>
+                  {ko ? "고쳐서 다시" : "Revise"}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       ) : null}
 
@@ -283,6 +353,16 @@ export function DescribeAutomation({ locale, onCreated }: {
         </div>
       ) : null}
     </section>
+  );
+}
+
+/** 도는 중임을 몸으로 보여주는 라벨 — 글자만 "Working…"으로 바꾸면 아무도 못 알아본다(실측). */
+function SpinnerLabel({ text, light }: { text: string; light?: boolean }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+      <span className={light ? "describe-spinner describe-spinner-light" : "describe-spinner"} aria-hidden />
+      {text}
+    </span>
   );
 }
 

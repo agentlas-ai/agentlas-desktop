@@ -2334,6 +2334,10 @@ export async function runGraph(
           code: codeText, lang,
           vars: codeVars,
           effect: codeEffect === "mutation" ? "mutation" : codeEffect === "pure" ? "pure" : "read",
+          // 선언된 서드파티 패키지 — 커널이 실행 전에 설치한다(code-runner의 배경 주석 참고).
+          ...(Array.isArray(node.config?.packages)
+            ? { packages: (node.config.packages as unknown[]).map((v) => String(v)) }
+            : {}),
           // 코드가 파일을 만들면 안전한 전용 폴더에서. run-graph에는 별도 워킹 폴더 개념이
           // 없으므로 code-runner의 기본 폴더(agentRunCwd)를 쓴다.
           timeoutSeconds: nodeTimeoutMs(node) / 1000,
@@ -2341,11 +2345,18 @@ export async function runGraph(
         });
         if (run.stdout?.trim()) journal("node_intent", node.id, { codeLog: run.stdout.slice(0, 500) });
         if (!run.ok) {
-          failGraphNode(node, {
-            code: "CODE_STEP_FAILED",
-            reason: run.reason ?? "코드 단계가 실패했습니다.",
-            nextAction: "이 단계에 무엇을 하려는지 더 구체적으로 적어 주세요 — AI가 스크립트를 다시 짭니다.",
-          });
+          failGraphNode(node, run.failureCode === "CODE_DEPENDENCY_MISSING"
+            ? {
+              // 의존성 결손은 코드 결함이 아니다 — "다시 짜라"가 아니라 "패키지를 선언하라".
+              code: "CODE_DEPENDENCY_MISSING",
+              reason: run.reason ?? "코드가 쓰는 파이썬 패키지를 준비하지 못했습니다.",
+              nextAction: "이 단계 설정의 packages에 정확한 pip 이름을 선언해 주세요 — 실행 전에 자동 설치됩니다.",
+            }
+            : {
+              code: "CODE_STEP_FAILED",
+              reason: run.reason ?? "코드 단계가 실패했습니다.",
+              nextAction: "이 단계에 무엇을 하려는지 더 구체적으로 적어 주세요 — AI가 스크립트를 다시 짭니다.",
+            });
           return;
         }
         const codeText2 = run.result == null

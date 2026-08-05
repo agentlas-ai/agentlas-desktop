@@ -133,14 +133,17 @@ function reachableFromTriggers(graph: WorkflowGraph): Set<string> {
  * 그래프를 검증해 이슈 배열을 반환한다(빈 배열 = 문제 없음). error는 저장/활성 차단 후보,
  * warning은 안내용. 편집기가 severity로 색을 나눈다.
  */
-export function validateWorkflow(graph: WorkflowGraph): WorkflowIssue[] {
+export function validateWorkflow(graph: WorkflowGraph, locale: "ko" | "en" = "ko"): WorkflowIssue[] {
   const issues: WorkflowIssue[] = [];
   const nodeIds = new Set(graph.nodes.map((n) => n.id));
+  // ★문구는 **제품 언어 하나로만** 나간다. 절반은 영어, 절반은 한국어로 섞여 나가던 것이
+  //   실측 항목 4다 — 같은 화면에서 언어가 섞이면 어느 쪽 사용자도 못 읽는다.
+  const t = (ko: string, en: string) => (locale === "ko" ? ko : en);
 
   // 트리거 존재 여부.
   const hasTrigger = graph.nodes.some((n) => n.type === "trigger");
   if (!hasTrigger && graph.nodes.length > 0) {
-    issues.push({ severity: "warning", code: "no-trigger", message: "No trigger node — this flow fires only via Run now." });
+    issues.push({ severity: "warning", code: "no-trigger", message: t("시작(트리거) 단계가 없습니다 — \"지금 실행\"으로만 돌릴 수 있습니다.", "No trigger step — this flow runs only when you press Run now.") });
   }
 
   // 엣지가 없는 노드 id를 가리키는지.
@@ -150,7 +153,7 @@ export function validateWorkflow(graph: WorkflowGraph): WorkflowIssue[] {
         severity: "error",
         code: "edge-missing-node",
         nodeId: nodeIds.has(e.source) ? e.source : e.target,
-        message: `Edge ${e.id} points to a node that no longer exists.`,
+        message: t("이미 지워진 단계로 이어지는 연결이 남아 있습니다. 그 연결을 지워 주세요.", "A connection still points at a step that no longer exists. Delete that connection."),
       });
     }
   }
@@ -170,7 +173,7 @@ export function validateWorkflow(graph: WorkflowGraph): WorkflowIssue[] {
         severity: "error",
         code: "dangling-node",
         nodeId: n.id,
-        message: `Node "${n.label ?? n.type}" has no incoming connection and will never run.`,
+        message: t(`"${n.label ?? n.type}" 단계로 들어오는 연결이 없어 실행되지 않습니다. 앞 단계 출구에서 이 단계로 선을 이어 주세요.`, `"${n.label ?? n.type}" has no incoming connection, so it will never run. Draw a line into it from an earlier step.`),
       });
     }
   }
@@ -186,7 +189,7 @@ export function validateWorkflow(graph: WorkflowGraph): WorkflowIssue[] {
           severity: "warning",
           code: "unreachable",
           nodeId: n.id,
-          message: `Node "${n.label ?? n.type}" is not reachable from any trigger.`,
+          message: t(`"${n.label ?? n.type}" 단계는 시작점에서 닿지 않아 실행되지 않습니다.`, `"${n.label ?? n.type}" cannot be reached from the trigger, so it will not run.`),
         });
       }
     }
@@ -204,7 +207,7 @@ export function validateWorkflow(graph: WorkflowGraph): WorkflowIssue[] {
         severity: "warning",
         code: "condition-missing-branch",
         nodeId: n.id,
-        message: `Condition "${n.label ?? n.type}" has no true/false branch wired.`,
+        message: t(`"${n.label ?? n.type}" 갈림길에 참/거짓 어느 쪽 연결도 없습니다.`, `Condition "${n.label ?? n.type}" has no true/false branch wired.`),
       });
     }
     const undeclared = outgoing.filter(
@@ -215,9 +218,10 @@ export function validateWorkflow(graph: WorkflowGraph): WorkflowIssue[] {
         severity: "error",
         code: "condition-branch-undeclared",
         nodeId: n.id,
-        message:
-          `Condition "${n.label ?? n.type}" has ${undeclared.length} outgoing connection(s) that do not declare the true or false side. ` +
-          "Delete them and reconnect from the condition's true/false outputs.",
+        message: t(
+          `"${n.label ?? n.type}" 갈림길에서 나가는 연결 ${undeclared.length}개가 참/거짓을 정하지 않았습니다. 그 연결을 지우고 참·거짓 출구에서 다시 이어 주세요.`,
+          `Condition "${n.label ?? n.type}" has ${undeclared.length} outgoing connection(s) that do not declare the true or false side. Delete them and reconnect from the true/false outputs.`,
+        ),
       });
     }
   }
@@ -251,8 +255,10 @@ export function validateWorkflow(graph: WorkflowGraph): WorkflowIssue[] {
           code: "error-var-without-error-edge",
           nodeId: node.id,
           variable: ref,
-          message: `"${node.label ?? node.type}"이(가) 실패 사유 {{${ref}}}를 쓰는데, `
-            + `"${sourceId}"에 실패 출구로 나가는 연결이 하나도 없습니다. 그 값은 만들어지지 않습니다.`,
+          message: t(
+            `"${node.label ?? node.type}"이(가) 실패 사유 {{${ref}}}를 쓰는데, "${sourceId}"에 실패 출구로 나가는 연결이 하나도 없습니다. 그 값은 만들어지지 않습니다.`,
+            `"${node.label ?? node.type}" reads the failure reason {{${ref}}}, but "${sourceId}" has no failure exit wired — that value will never exist.`,
+          ),
         });
       }
     }
@@ -275,9 +281,14 @@ export function validateWorkflow(graph: WorkflowGraph): WorkflowIssue[] {
       severity: "error",
       code: "transform-unconfigured",
       nodeId: node.id,
-      message: `"${node.label ?? node.type}" 값 가공 단계에 가져올 값이 없습니다.`
-        + (hasConsumes ? ` 받는 값이 "${cfg.consumes}"이니 그 이름을 적으면 됩니다.` : "")
-        + " 채우지 않으면 실행되지 않습니다.",
+      message: t(
+        `"${node.label ?? node.type}" 값 가공 단계에 가져올 값이 없습니다.`
+          + (hasConsumes ? ` 받는 값이 "${cfg.consumes}"이니 그 이름을 적으면 됩니다.` : "")
+          + " 채우지 않으면 실행되지 않습니다.",
+        `"${node.label ?? node.type}" transform step has no value to pull.`
+          + (hasConsumes ? ` It receives "${cfg.consumes}" — put that name in.` : "")
+          + " It will not run until this is filled.",
+      ),
     });
   }
 
@@ -324,9 +335,10 @@ export function validateWorkflow(graph: WorkflowGraph): WorkflowIssue[] {
         code: "loop-bound-missing",
         nodeId: e.source,
         edgeId: e.id,
-        message:
-          `"${headNode?.label ?? e.target}"(으)로 되돌아가는 연결에 반복 횟수가 정해져 있지 않습니다. ` +
-          "그 연결을 눌러 최대 반복 횟수를 정해 주세요 — 정하지 않으면 실행되지 않습니다.",
+        message: t(
+          `"${headNode?.label ?? e.target}"(으)로 되돌아가는 연결에 반복 횟수가 정해져 있지 않습니다. 그 연결을 눌러 최대 반복 횟수를 정해 주세요 — 정하지 않으면 실행되지 않습니다.`,
+          `The connection looping back to "${headNode?.label ?? e.target}" has no iteration limit. Click that connection and set a maximum — it will not run without one.`,
+        ),
       });
     }
   }
@@ -342,7 +354,10 @@ export function validateWorkflow(graph: WorkflowGraph): WorkflowIssue[] {
           code: "unknown-variable",
           nodeId: node.id,
           variable: v,
-          message: `Node "${node.label ?? node.type}" uses {{${v}}} but no upstream node produces it.`,
+          message: t(
+            `"${node.label ?? node.type}" 단계가 {{${v}}} 값을 읽는데, 앞의 어느 단계도 그 값을 만들지 않습니다.`,
+            `"${node.label ?? node.type}" reads {{${v}}}, but no earlier step produces it.`,
+          ),
         });
       }
     }

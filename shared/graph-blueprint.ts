@@ -47,6 +47,8 @@ export interface BlueprintStep {
   code?: string;
   /** 코드 언어. 기본 python(번들 인터프리터·데이터 라이브러리). */
   codeLang?: "python" | "js";
+  /** 코드가 쓰는 서드파티 pip 이름들 — 커널이 실행 전에 설치한다. 표준 라이브러리는 선언 불필요. */
+  packages?: string[];
   /**
    * 이 단계를 **어떤 성격의 일꾼**이 해야 하는가 — 사람 말로 적는다("한국어 마케팅 글쓰기").
    * ★모델은 **역할만** 말하고 실제 에이전트는 코드가 Hub에서 검색해 꽂는다. 모델이
@@ -54,6 +56,8 @@ export interface BlueprintStep {
    *   그래프 전체에서 지키는 규율("모델은 청사진만, 실물은 코드가")과 같은 이유다.
    */
   role?: string;
+  /** role의 영어 번역 — 카탈로그가 영어라 검색은 이걸로 한다(다국어 라우팅 실측). */
+  roleEn?: string;
   /**
    * 바깥으로 나가기 전에 사람 확인을 받을지. **기본은 항상 "ask"(잠금)**이고,
    * 사람이 "검토 없이 바로 나가도 된다"고 **명시로 말했을 때만** "auto"가 된다.
@@ -493,7 +497,12 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
       config: {
         // 코드 노드는 프롬프트가 아니라 스크립트를 지고 간다. 지시문은 참고용(note)으로 함께.
         ...(isCode
-          ? { code: step.code ?? "", codeLang: step.codeLang === "js" ? "js" : "python", note: step.instruction }
+          ? {
+            code: step.code ?? "", codeLang: step.codeLang === "js" ? "js" : "python", note: step.instruction,
+            ...(Array.isArray(step.packages) && step.packages.length
+              ? { packages: step.packages.map((v) => String(v).trim()).filter(Boolean) }
+              : {}),
+          }
           : { prompt: step.instruction }),
         effect: step.effect,
         // 바깥을 바꾸는 단계는 **기본이 잠김**("확인 후 실행"). 사람이 명시로
@@ -502,6 +511,7 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
           ? { approval: step.approval === "auto" ? "auto" : "ask" }
           : {}),
         ...(step.role?.trim() ? { role: step.role.trim() } : {}),
+        ...(step.roleEn?.trim() ? { roleEn: step.roleEn.trim() } : {}),
         ...(step.produces ? { produces: step.produces } : {}),
         ...(step.consumes?.length ? { consumes: step.consumes[0] } : {}),
         // 도구 요구는 노드가 지고 간다 — 켜기 게이트가 이걸 읽어 연결 여부를 계산한다.

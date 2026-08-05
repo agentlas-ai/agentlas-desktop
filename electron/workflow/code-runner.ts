@@ -39,6 +39,14 @@ export interface CodeRunInput {
   signal?: AbortSignal;
   /** 노드의 선언 효과 — read/pure면 쓰기·네트워크를 OS가 차단한다(가능한 OS에서). */
   effect?: "pure" | "read" | "mutation";
+  /**
+   * 스크립트가 쓰는 서드파티 파이썬 패키지의 pip 이름들.
+   * ★근본 배경(실측 2026-08-05): AI가 `import yfinance`를 쓰는 코드를 지었는데 번들
+   * 런타임에 그 패키지가 없어, 아침 리포트가 매번 같은 자리에서 원문 traceback으로
+   * 죽었다. 코드를 지어 주는 제품이 "그 코드가 돌 환경"까지 책임지지 않으면
+   * 그래프는 복잡하지 않아도 죽는다. 선언된 패키지는 실행 **전에** 커널이 설치한다.
+   */
+  packages?: string[];
 }
 
 export interface CodeRunResult {
@@ -51,6 +59,11 @@ export interface CodeRunResult {
   isolation: CodeIsolationLevel;
   /** 스크립트가 stdout에 남긴 로그(결과 JSON 줄 제외). 소음 칸이라 다음 노드로 안 간다. */
   stdout?: string;
+  /**
+   * 실패의 기계 이름 — 지금은 의존성 결손 하나뿐.
+   * 원문 traceback만 던지면 화면이 판정 문장으로 덮어쓴다(기계 표식 소실 사고의 재발 방지).
+   */
+  failureCode?: "CODE_DEPENDENCY_MISSING";
 }
 
 const RESULT_MARKER = "__AGENTLAS_CODE_RESULT__";
@@ -103,6 +116,82 @@ function splitResult(stdout: string): { result: unknown; logs: string } {
   }
 }
 
+// ── 파이썬 서드파티 패키지 — 커널이 실행 전에 설치한다 ─────────────────────
+//
+// 설치는 **스텝 샌드박스 밖**에서 한다. 스텝은 read면 네트워크가 차단되지만, 설치는
+// 커널이 하는 준비 작업이라 그 차단과 충돌하지 않는다. 설치 대상은 관리 폴더 하나이고
+// 스텝에는 PYTHONPATH로만 붙는다 — 번들 런타임 자체를 오염시키지 않는다.
+
+/** pip 인자로 안전한 이름만. spawn이라 셸 주입은 없지만 "-"로 시작하면 pip 옵션이 된다. */
+function safePipName(name: string): string | null {
+  const v = String(name || "").trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?(==[A-Za-z0-9.*+!_-]+)?$/.test(v) ? v : null;
+}
+
+function pythonDepsDir(): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { app } = require("electron") as { app?: { getPath?: (k: string) => string } };
+    if (app?.getPath) return path.join(app.getPath("userData"), "code-deps", "py");
+  } catch { /* 테스트·CLI 컨텍스트 */ }
+  return path.join(os.tmpdir(), "agentlas-code-deps", "py");
+}
+
+function depsManifestPath(dir: string): string {
+  return path.join(dir, ".installed.json");
+}
+
+function readInstalled(dir: string): Set<string> {
+  try {
+    const raw = JSON.parse(fs.readFileSync(depsManifestPath(dir), "utf8")) as { installed?: string[] };
+    return new Set((raw.installed ?? []).map((s) => s.toLowerCase()));
+  } catch { return new Set(); }
+}
+
+function recordInstalled(dir: string, name: string): void {
+  const set = readInstalled(dir);
+  set.add(name.toLowerCase());
+  try {
+    fs.writeFileSync(depsManifestPath(dir), JSON.stringify({ installed: [...set].sort() }, null, 2) + "\n", "utf8");
+  } catch { /* 기록 실패는 재설치로 이어질 뿐 — pip은 멱등이다 */ }
+}
+
+/** 선언된 패키지들을 관리 폴더에 설치한다. 실패한 패키지와 사유를 돌려준다. */
+async function ensurePythonPackages(
+  python: string,
+  packages: string[],
+  env: NodeJS.ProcessEnv,
+): Promise<{ ok: boolean; installedNow: string[]; failed?: { name: string; reason: string } }> {
+  const dir = pythonDepsDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const have = readInstalled(dir);
+  const installedNow: string[] = [];
+  for (const raw of packages) {
+    const name = safePipName(raw);
+    if (!name) return { ok: false, installedNow, failed: { name: String(raw), reason: "패키지 이름 형식이 올바르지 않습니다." } };
+    if (have.has(name.toLowerCase())) continue;
+    const r = await new Promise<{ code: number | null; err: string }>((resolve) => {
+      const child = spawn(python, [
+        "-m", "pip", "install", "--target", dir,
+        "--disable-pip-version-check", "--no-input", "--quiet", name,
+      ], { env, stdio: ["ignore", "pipe", "pipe"] });
+      let err = "";
+      child.stderr.on("data", (d: Buffer) => { err += d.toString("utf8"); });
+      const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* already gone */ } }, 180_000);
+      child.on("close", (c) => { clearTimeout(timer); resolve({ code: c, err }); });
+      child.on("error", (e) => { clearTimeout(timer); resolve({ code: -1, err: String(e) }); });
+    });
+    if (r.code !== 0) {
+      return { ok: false, installedNow, failed: { name, reason: r.err.trim().slice(-500) || `pip 종료 코드 ${r.code}` } };
+    }
+    recordInstalled(dir, name);
+    installedNow.push(name);
+  }
+  return { ok: true, installedNow };
+}
+
+const MISSING_MODULE_RE = /ModuleNotFoundError: No module named '([^']+)'/;
+
 /** 스크립트를 임시 파일로 물질화 — argv로 코드를 넘기면 길이·따옴표에서 깨진다. */
 function materializeScript(harness: string, lang: CodeLang): { file: string; cleanup: () => void } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentlas-code-"));
@@ -140,6 +229,23 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
     const env = input.lang === "python"
       ? withPythonCacheBoundary({ ...process.env })
       : { ...process.env };
+    const provisionNotes: string[] = [];
+    if (input.lang === "python") {
+      // 관리 폴더는 항상 PYTHONPATH에 붙는다 — 이전 실행이 설치해 둔 것도 보인다.
+      const depsDir = pythonDepsDir();
+      env.PYTHONPATH = env.PYTHONPATH ? `${depsDir}${path.delimiter}${env.PYTHONPATH}` : depsDir;
+      const declared = (input.packages ?? []).map((s) => String(s).trim()).filter(Boolean);
+      if (declared.length) {
+        const ensured = await ensurePythonPackages(interpreter, declared, env);
+        if (ensured.installedNow.length) provisionNotes.push(`[deps] 설치: ${ensured.installedNow.join(", ")}`);
+        if (!ensured.ok && ensured.failed) {
+          return {
+            ok: false, isolation: "process-isolated", failureCode: "CODE_DEPENDENCY_MISSING",
+            reason: `이 단계가 선언한 파이썬 패키지 "${ensured.failed.name}"를 설치하지 못했습니다: ${ensured.failed.reason}`,
+          };
+        }
+      }
+    }
     // ── macOS Seatbelt — read 코드의 쓰기·네트워크를 OS가 실제로 차단 ──────
     const wantSandbox = process.platform === "darwin" && input.effect !== "mutation";
     let command = interpreter;
@@ -176,36 +282,68 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
         };
       }
     }
-    const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    const runOnce = async (): Promise<{ code: number | null; stdout: string; stderr: string }> => {
+      const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d: Buffer) => { stdout += d.toString("utf8"); });
+      child.stderr.on("data", (d: Buffer) => { stderr += d.toString("utf8"); });
+      // 앞 단계 값을 stdin으로 넘긴다 — argv에 실으면 크기·따옴표에서 깨진다.
+      try { child.stdin.write(JSON.stringify({ vars: input.vars })); child.stdin.end(); } catch { /* 프로세스가 이미 죽었을 수 있다 */ }
+      const timer = setTimeout(() => { killCliTree(child); }, timeoutMs);
+      const onAbort = () => killCliTree(child);
+      input.signal?.addEventListener("abort", onAbort, { once: true });
+      const code: number | null = await new Promise((resolve) => {
+        child.on("close", (c) => resolve(c));
+        child.on("error", () => resolve(-1));
+      });
+      clearTimeout(timer);
+      input.signal?.removeEventListener("abort", onAbort);
+      return { code, stdout, stderr };
+    };
 
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d: Buffer) => { stdout += d.toString("utf8"); });
-    child.stderr.on("data", (d: Buffer) => { stderr += d.toString("utf8"); });
-
-    // 앞 단계 값을 stdin으로 넘긴다 — argv에 실으면 크기·따옴표에서 깨진다.
-    try { child.stdin.write(JSON.stringify({ vars: input.vars })); child.stdin.end(); } catch { /* 프로세스가 이미 죽었을 수 있다 */ }
-
-    const timer = setTimeout(() => { killCliTree(child); }, timeoutMs);
-    const onAbort = () => killCliTree(child);
-    input.signal?.addEventListener("abort", onAbort, { once: true });
-
-    const code: number | null = await new Promise((resolve) => {
-      child.on("close", (c) => resolve(c));
-      child.on("error", () => resolve(-1));
-    });
-    clearTimeout(timer);
-    input.signal?.removeEventListener("abort", onAbort);
-
+    let run = await runOnce();
     if (input.signal?.aborted) {
       return { ok: false, isolation, reason: "실행이 중지되었습니다." };
     }
-    if (code !== 0) {
-      const reason = stderr.trim() || `코드 스텝이 오류로 끝났습니다 (종료 코드 ${code}).`;
+    // ── 미선언 import 구조(救助) — 없는 모듈이면 설치를 시도하고 딱 한 번 다시 돈다 ──
+    //   선언이 정답이지만, 이미 저장된 그래프(선언 이전에 지어진 코드)를 원문 traceback으로
+    //   죽게 두는 것은 도움이 아니다. 모듈 이름=pip 이름일 때는 이 구조가 그대로 살린다.
+    //   (설치는 샌드박스 밖 커널 작업. 재시도는 같은 격리로 다시 돈다.)
+    if (run.code !== 0 && input.lang === "python") {
+      const missing = MISSING_MODULE_RE.exec(run.stderr)?.[1]?.split(".")[0];
+      if (missing && safePipName(missing)) {
+        const rescue = await ensurePythonPackages(interpreter, [missing], env);
+        if (rescue.ok) {
+          provisionNotes.push(`[deps] 없던 모듈 "${missing}" 설치 후 재시도`);
+          run = await runOnce();
+          if (input.signal?.aborted) {
+            return { ok: false, isolation, reason: "실행이 중지되었습니다." };
+          }
+        } else if (rescue.failed) {
+          return {
+            ok: false, isolation, failureCode: "CODE_DEPENDENCY_MISSING",
+            reason: `코드가 쓰는 파이썬 패키지 "${missing}"가 이 컴퓨터에 없고, 설치도 실패했습니다: `
+              + `${rescue.failed.reason} — 이 단계 설정의 packages에 정확한 pip 이름을 선언하면 실행 전에 준비됩니다.`,
+          };
+        }
+      }
+    }
+    if (run.code !== 0) {
+      const stillMissing = input.lang === "python" ? MISSING_MODULE_RE.exec(run.stderr)?.[1] : null;
+      const reason = run.stderr.trim() || `코드 스텝이 오류로 끝났습니다 (종료 코드 ${run.code}).`;
+      if (stillMissing) {
+        return {
+          ok: false, isolation, failureCode: "CODE_DEPENDENCY_MISSING",
+          reason: `코드가 쓰는 파이썬 모듈 "${stillMissing}"를 준비하지 못했습니다. pip 이름이 모듈 이름과 다른 패키지일 수 있습니다 — `
+            + `이 단계 설정의 packages에 정확한 pip 이름을 선언해 주세요. 원문: ${reason.slice(0, 800)}`,
+        };
+      }
       return { ok: false, isolation, reason: reason.slice(0, 4000) };
     }
-    const { result, logs } = splitResult(stdout);
-    return { ok: true, result, isolation, stdout: logs.slice(0, 4000) };
+    const { result, logs } = splitResult(run.stdout);
+    const logOut = [provisionNotes.join("\n"), logs].filter(Boolean).join("\n");
+    return { ok: true, result, isolation, stdout: logOut.slice(0, 4000) };
   } finally {
     cleanup();
   }

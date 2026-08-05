@@ -83,20 +83,26 @@ export async function staffGraph(
     if (node.type !== "agent" && node.type !== "action") continue;
     const role = typeof node.config?.role === "string" ? node.config.role.trim() : "";
     if (!role) continue;
+    // ★검색은 영어 role로 한다 — 카탈로그 말뭉치가 영어라, 한국어 질의는 맞는 일꾼을
+    //   묻어 버린다(실측: 동일 질의 영어 1위 vs 한국어 144위 · hwpx-smith가 HTML
+    //   보고서 단계에 붙은 오배정의 진범). 화면에 보여주는 이름은 여전히 role이다.
+    const roleEn = typeof node.config?.roleEn === "string" && node.config.roleEn.trim()
+      ? node.config.roleEn.trim()
+      : role;
     // 같은 역할은 같은 에이전트로 — 한 그래프 안에서 역할이 갈리면 사람이 이해할 수 없다.
     const cached = seen.get(role);
     if (cached) {
       slots.push({ ...cached, nodeId: node.id });
       continue;
     }
-    const local = matchInstalled(role, source.installed);
+    const local = matchInstalled(roleEn === role ? role : `${role} ${roleEn}`, source.installed);
     let slot: StaffedSlot;
     if (local) {
       slot = { nodeId: node.id, role, ref: local.id, targetType: "agent", label: local.name, source: "installed" };
     } else {
       let rows: MarketplaceListing[] = [];
       try {
-        rows = await source.searchHub(queryFor(role));
+        rows = await source.searchHub(queryFor(roleEn));
       } catch {
         rows = []; // 검색 실패는 편성 실패지 그래프 실패가 아니다 — 비워 두고 넘어간다.
       }

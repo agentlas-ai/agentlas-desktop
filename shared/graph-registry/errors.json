@@ -816,6 +816,15 @@
       "note": "AI가 짠 스크립트가 오류로 끝났다. stderr 원문을 보존한다 — 지어내지 않는다."
     },
     {
+      "code": "CODE_DEPENDENCY_MISSING",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": true,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "코드가 쓰는 파이썬 패키지가 이 컴퓨터에 없고 자동 설치도 실패했다. 원문 traceback을 사람에게 그대로 던지던 것(실측: yfinance ModuleNotFoundError)을 기계 코드+설치 안내로 바꾼 자리. 설치는 스텝 샌드박스 밖에서 커널이 한다 — 스텝의 네트워크 차단과 충돌하지 않는다."
+    },
+    {
       "code": "PATCH_EDGE_HANDLE_MISSING",
       "since": "1.1",
       "severity": "authoring",

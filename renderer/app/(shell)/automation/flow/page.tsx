@@ -12,7 +12,6 @@ import {
   ReactFlowProvider,
   Background,
   Controls,
-  MiniMap,
   addEdge,
   useNodesState,
   useEdgesState,
@@ -143,6 +142,8 @@ function AutomationFlowPage() {
   // 패널을 접었는데 그래프가 원래 자리에 그대로 있으면 넓어진 캔버스가 빈 여백으로 보인다.
   // 폭이 바뀐 다음 프레임에 다시 맞춘다.
   const { fitView } = useReactFlow();
+  // 팔레트로 노드를 추가한 직후 한 번만 fitView — 커밋·측정이 끝난 뒤에 돈다.
+  const pendingFitRef = useRef(false);
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
       try {
@@ -176,6 +177,11 @@ function AutomationFlowPage() {
     rationale?: string;
   } | null>(null);
   const runStatesRef = useRef<Record<string, WorkflowNodeRunState>>({});
+  // 하단 검증 로그 패널(항목 6) — VS Code 터미널처럼 크기를 끌어서 조절한다.
+  // ★기본은 접힘(카운트 줄만). 편집 중 문제가 생길 때마다 패널이 펴지며 캔버스를
+  //   밀면, 드래그하던 좌표가 어긋난다(게이트 실측) — 펴는 것은 사람이 한다.
+  const [logOpen, setLogOpen] = useState(false);
+  const [logHeight, setLogHeight] = useState(150);
   runStatesRef.current = runStates;
 
   const nodeStrings: NodeStrings = useMemo(
@@ -195,8 +201,16 @@ function AutomationFlowPage() {
       subgraphUnset: t("auto.node.subgraphUnset"),
       producesLabel: t("auto.flow.produces"),
       consumesLabel: t("auto.flow.consumes"),
+      failExit: locale === "en" ? "on failure" : "실패",
+      failExitHint: locale === "en"
+        ? "Taken only when this step fails — wire it to a step that handles the failure."
+        : "이 단계가 실패했을 때만 가는 길입니다 — 실패를 처리할 단계로 이어 주세요.",
+      cleanupExit: locale === "en" ? "cleanup" : "정리",
+      cleanupExitHint: locale === "en"
+        ? "Runs once at the end whether the step succeeded or failed — for tidying up."
+        : "성공하든 실패하든 마지막에 한 번 도는 뒷정리 길입니다.",
     }),
-    [t],
+    [t, locale],
   );
 
   const load = useCallback(async () => {
@@ -291,7 +305,19 @@ function AutomationFlowPage() {
       nodes.map((n) => ({
         ...n,
         draggable: editing,
-        data: { ...n.data, strings: nodeStrings, connectable: editing },
+        data: {
+          ...n.data,
+          strings: nodeStrings,
+          connectable: editing,
+          // 노드 좌상단 AI 주석 CTA(항목 5) — 편집 모드에서만 살아 있다.
+          onAiNote: editing
+            ? () => setAiNote({
+              nodeId: n.id,
+              label: String((n.data as WorkflowNodeData).label ?? n.id),
+              text: String(((n.data as WorkflowNodeData).config as { note?: unknown })?.note ?? ""),
+            })
+            : undefined,
+        },
       })),
     );
   }, [editing, nodeStrings, setRfNodes]);
@@ -442,8 +468,16 @@ function AutomationFlowPage() {
           : {}),
       })),
     };
-    return validateWorkflow(graph);
-  }, [editing, rfNodes, rfEdges]);
+    return validateWorkflow(graph, locale);
+  }, [editing, rfNodes, rfEdges, locale]);
+  useEffect(() => {
+    if (!pendingFitRef.current) return;
+    pendingFitRef.current = false;
+    // 측정이 끝난 다음 프레임에 — 안 그러면 새 노드 크기를 모른 채 계산한다.
+    const id = window.setTimeout(() => fitView({ padding: 0.16, maxZoom: 1, duration: 150 }), 30);
+    return () => window.clearTimeout(id);
+  }, [rfNodes.length, fitView]);
+
   const errorCount = issues.filter((i) => i.severity === "error").length;
   const warnCount = issues.filter((i) => i.severity === "warning").length;
 
@@ -522,6 +556,10 @@ function AutomationFlowPage() {
         selectable: true,
       },
     ]);
+    // ★새 노드가 화면 밖(오른쪽 패널 아래)에 떨어지면 사람은 "안 생겼다"로 읽고,
+    //   이어 그리려던 선은 패널에 먹힌다(게이트 실측). 놓자마자 보이게 당겨 온다.
+    //   rAF는 React 커밋보다 먼저 돌 수 있어 — 노드 수 변화를 보는 효과가 맞춘다.
+    pendingFitRef.current = true;
     setSelectedNodeId(nid);
     // ★놓았으면 팔레트를 닫는다. 팔레트와 설정 패널이 **같은 자리**를 쓰기 때문에,
     //   열어둔 채로 두면 방금 놓은 노드는 물론 다른 어느 노드를 눌러도 설정이 안 열린다
@@ -635,6 +673,46 @@ function AutomationFlowPage() {
         return;
       }
       setMessage(locale === "en" ? "Status did not change." : "상태를 바꾸지 못했습니다.");
+    }
+  }
+
+  // ── 노드 AI 주석(항목 5) — 노드에서 바로 "이 단계만" 고쳐 달라고 말한다 ────
+  const [aiNote, setAiNote] = useState<{ nodeId: string; label: string; text: string } | null>(null);
+
+  /** 주석만 저장 — 노드 config.note에 남는다(AI가 다음에 이 단계를 지을 때 읽는 메모). */
+  function saveAiNote() {
+    if (!aiNote) return;
+    setRfNodes((nodes) => nodes.map((n) => n.id === aiNote.nodeId
+      ? { ...n, data: { ...n.data, config: { ...(n.data as WorkflowNodeData).config, note: aiNote.text } } }
+      : n));
+    setDirty(true);
+    setAiNote(null);
+  }
+
+  /** 주석을 그 노드 한정 지시로 만들어 architect에 바로 보낸다 — 제안·승인 흐름은 기존과 동일. */
+  async function aiSetNode() {
+    if (!aiNote?.text.trim()) return;
+    const scoped = locale === "en"
+      ? `Change ONLY the step "${aiNote.label}" (node id ${aiNote.nodeId}). Do not touch other steps. Instruction: ${aiNote.text.trim()}`
+      : `"${aiNote.label}" 단계(노드 id ${aiNote.nodeId})만 바꿔 주세요. 다른 단계는 건드리지 마세요. 지시: ${aiNote.text.trim()}`;
+    setAiNote(null);
+    setArchitectDraft(scoped);
+    const api = ipc();
+    if (!api || !automation) return;
+    setArchitectBusy(true);
+    setProposal(null);
+    setMessage(locale === "en" ? "Working out what would change..." : "무엇이 바뀔지 알아보는 중입니다...");
+    try {
+      const result = await api.automations.requestGraphPatch(automation.id, scoped);
+      if (!result.ok) { setMessage(`${result.reason} ${result.nextAction}`); return; }
+      setProposal(result);
+      setMessage(locale === "en"
+        ? "Nothing has changed yet. Review it and apply."
+        : "아직 아무것도 바뀌지 않았습니다. 내용을 확인하고 적용하세요.");
+    } catch {
+      setMessage(locale === "en" ? "The change could not be worked out." : "변경 내용을 만들지 못했습니다.");
+    } finally {
+      setArchitectBusy(false);
     }
   }
 
@@ -1151,32 +1229,6 @@ function AutomationFlowPage() {
         );
       })}
 
-      {editing && issues.length > 0 ? (
-        <div
-          className="titlebar-nodrag"
-          style={{
-            padding: "10px 12px",
-            borderRadius: "var(--radius-md)",
-            border: `1px solid ${errorCount > 0 ? "var(--danger, #d64545)" : "var(--accent-soft)"}`,
-            background: "var(--paper)",
-            fontSize: 12,
-          }}
-        >
-          <div style={{ fontWeight: 600, marginBottom: 6, color: errorCount > 0 ? "var(--danger, #d64545)" : "var(--ink)" }}>
-            {errorCount > 0
-              ? `${t("auto.validate.errors")}: ${errorCount}${warnCount > 0 ? ` · ${t("auto.validate.warnings")}: ${warnCount}` : ""}`
-              : `${t("auto.validate.warnings")}: ${warnCount}`}
-          </div>
-          <ul style={{ margin: 0, paddingLeft: 16, display: "flex", flexDirection: "column", gap: 3, color: "var(--ink-soft)" }}>
-            {issues.slice(0, 6).map((iss, i) => (
-              <li key={i} style={{ color: iss.severity === "error" ? "var(--danger, #d64545)" : "var(--muted-deep)" }}>
-                {iss.message}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-
       </div>
       </div>
 
@@ -1233,13 +1285,87 @@ function AutomationFlowPage() {
           >
             <Background color="var(--paper-edge)" gap={24} size={1} />
             <Controls showInteractive={false} />
-            <MiniMap
-              pannable
-              zoomable
-              nodeColor={(n) => NODE_ACCENT[n.type ?? "agent"] ?? "var(--muted-deep)"}
-              style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)" }}
-            />
+            {/* 미니맵 삭제(실측 항목 6) — 자리만 차지하고 캔버스 우하단을 가렸다.
+                검증 결과는 아래 로그 패널이 담당한다. */}
           </ReactFlow>
+          {aiNote ? (
+            <div className="automation-ai-note-pop titlebar-nodrag" role="dialog" aria-label="AI note">
+              <div className="automation-ai-note-title">
+                {locale === "en" ? `Tell AI about “${aiNote.label}”` : `“${aiNote.label}” 단계에 메모`}
+              </div>
+              <textarea
+                autoFocus
+                value={aiNote.text}
+                onChange={(e) => setAiNote({ ...aiNote, text: e.target.value })}
+                placeholder={locale === "en"
+                  ? "e.g. keep it under 200 characters, always include a source link"
+                  : "예: 200자 이내로, 출처 링크는 꼭 포함"}
+              />
+              <div className="automation-ai-note-actions">
+                <button type="button" onClick={() => setAiNote(null)}>{locale === "en" ? "Close" : "닫기"}</button>
+                <button type="button" onClick={saveAiNote} disabled={!aiNote.text.trim()}>
+                  {locale === "en" ? "Save note" : "주석 저장"}
+                </button>
+                <button type="button" data-primary onClick={() => void aiSetNode()} disabled={!aiNote.text.trim() || architectBusy}>
+                  {locale === "en" ? "Have AI set this step" : "AI로 바로 세팅"}
+                </button>
+              </div>
+              <p>
+                {locale === "en"
+                  ? "Save keeps the note on the step for the AI to read. “Have AI set this step” proposes a change to this step only — nothing applies until you approve it."
+                  : "주석 저장은 이 단계에 메모로 남습니다(AI가 읽는 메모). “AI로 바로 세팅”은 이 단계만 고치는 제안을 만들고, 승인 전에는 아무것도 바뀌지 않습니다."}
+              </p>
+            </div>
+          ) : null}
+          {/* ★검증 로그 패널 — 에러·경고를 상단 팝업이 아니라 VS Code 하단 패널처럼.
+              위 팝업은 캔버스를 밀어내고, 읽기 전에 사라지고, 줄이 많으면 잘렸다. */}
+          {editing && issues.length > 0 ? (
+            <div className="automation-issue-log titlebar-nodrag" style={{ height: logOpen ? logHeight : 30 }}>
+              <div
+                className="automation-issue-log-grip"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  const startY = e.clientY;
+                  const startH = logHeight;
+                  const move = (ev: MouseEvent) => {
+                    setLogHeight(Math.min(420, Math.max(64, startH + (startY - ev.clientY))));
+                    setLogOpen(true);
+                  };
+                  const up = () => {
+                    window.removeEventListener("mousemove", move);
+                    window.removeEventListener("mouseup", up);
+                  };
+                  window.addEventListener("mousemove", move);
+                  window.addEventListener("mouseup", up);
+                }}
+              />
+              <button type="button" className="automation-issue-log-head" onClick={() => setLogOpen((v) => !v)}>
+                <span data-kind="error" style={{ visibility: errorCount > 0 ? "visible" : "hidden" }}>
+                  {t("auto.validate.errors")} {errorCount}
+                </span>
+                <span data-kind="warning" style={{ visibility: warnCount > 0 ? "visible" : "hidden" }}>
+                  {t("auto.validate.warnings")} {warnCount}
+                </span>
+                <em>{logOpen ? "▾" : "▴"}</em>
+              </button>
+              {logOpen ? (
+                <ul className="automation-issue-log-list">
+                  {issues.map((iss, i) => (
+                    <li key={i} data-severity={iss.severity}>
+                      {/* 줄을 누르면 그 노드가 선택된다 — 어디 문제인지 찾아 헤매지 않게. */}
+                      <button
+                        type="button"
+                        onClick={() => { if (iss.nodeId) { setSelectedNodeId(iss.nodeId); setSelectedEdgeId(null); } }}
+                      >
+                        <b>{iss.severity === "error" ? (locale === "en" ? "ERROR" : "오류") : (locale === "en" ? "WARN" : "경고")}</b>
+                        {iss.message}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
         {!rightOpen ? (

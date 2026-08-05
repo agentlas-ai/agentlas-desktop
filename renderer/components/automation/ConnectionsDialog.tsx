@@ -628,8 +628,10 @@ function AgentSwapSection({ automationId, agents, ko, locale, onOutcome }: {
               disabled={finding !== null || busy}
               onClick={() => void recommend(agent)}
               style={{
-                border: "none", background: "none", padding: 0, cursor: "pointer",
-                fontSize: 11, color: "var(--ink-soft)", textDecoration: "underline",
+                // ★밑줄 링크였을 때 아무도 못 찾았다(실측 항목 8) — 진짜 버튼으로.
+                border: "1px solid #0C2C47", background: "var(--paper)", cursor: "pointer",
+                padding: "6px 12px", borderRadius: "var(--radius-sm)",
+                fontSize: 12, fontWeight: 700, color: "#0C2C47",
                 justifySelf: "start",
               }}
             >

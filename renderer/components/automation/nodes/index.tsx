@@ -50,6 +50,11 @@ export interface NodeStrings {
   subgraphUnset: string;
   producesLabel: string;
   consumesLabel: string;
+  /** 실패·정리 출구 — 이름표만 있으면 "실패, 정리가 뭐지"가 된다(실측 항목 2). */
+  failExit: string;
+  failExitHint: string;
+  cleanupExit: string;
+  cleanupExitHint: string;
 }
 
 function summaryProduces(data: WorkflowNodeData): string | undefined {
@@ -71,6 +76,7 @@ export function TriggerNode({ data, selected }: NodeProps) {
       title={d.label || d.strings.trigger}
       subtitle={schedule}
       selected={selected}
+      onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
@@ -92,10 +98,12 @@ export function AgentNode({ data, selected }: NodeProps) {
       title={d.label || (isFirm ? d.strings.firm : isHub ? "Hub" : d.strings.agent)}
       subtitle={prompt || ref || summaryProduces(d)}
       selected={selected}
+      onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
       outcomeHandles
+      outcomeStrings={{ fail: d.strings.failExit, failHint: d.strings.failExitHint, cleanup: d.strings.cleanupExit, cleanupHint: d.strings.cleanupExitHint }}
     />
   );
 }
@@ -111,6 +119,7 @@ export function ToolNode({ data, selected }: NodeProps) {
       title={d.label || (catalog ? `${d.strings.tool}: ${catalog}` : d.strings.tool)}
       subtitle={summaryProduces(d)}
       selected={selected}
+      onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
@@ -129,10 +138,12 @@ export function ActionNode({ data, selected }: NodeProps) {
       title={d.label || (action ? `${d.strings.action}: ${action}` : d.strings.action)}
       subtitle={summaryProduces(d)}
       selected={selected}
+      onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
       outcomeHandles
+      outcomeStrings={{ fail: d.strings.failExit, failHint: d.strings.failExitHint, cleanup: d.strings.cleanupExit, cleanupHint: d.strings.cleanupExitHint }}
     />
   );
 }
@@ -147,10 +158,12 @@ export function OutputNode({ data, selected }: NodeProps) {
       title={d.label || d.strings.output}
       subtitle={catalog}
       selected={selected}
+      onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
       outcomeHandles
+      outcomeStrings={{ fail: d.strings.failExit, failHint: d.strings.failExitHint, cleanup: d.strings.cleanupExit, cleanupHint: d.strings.cleanupExitHint }}
       hasOut={false}
     />
   );
@@ -169,6 +182,7 @@ export function EvalNode({ data, selected }: NodeProps) {
       // 이름만 있고 무엇을 재는지는 열어봐야 안다.
       subtitle={subject && criteria ? `${subject} — ${criteria}` : (criteria || subject)}
       selected={selected}
+      onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
@@ -188,10 +202,12 @@ export function SubgraphNode({ data, selected }: NodeProps) {
       // ★어느 자동화를 부르는지가 안 보이면, 캔버스만 보고는 무엇이 실행되는지 알 수 없다.
       subtitle={ref ? (d.strings.subgraphRef ?? ref) : d.strings.subgraphUnset}
       selected={selected}
+      onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
       outcomeHandles
+      outcomeStrings={{ fail: d.strings.failExit, failHint: d.strings.failExitHint, cleanup: d.strings.cleanupExit, cleanupHint: d.strings.cleanupExitHint }}
     />
   );
 }
@@ -208,10 +224,12 @@ export function CodeNode({ data, selected }: NodeProps) {
       // 무슨 언어인지, 스크립트가 채워졌는지가 캔버스에서 보여야 한다.
       subtitle={hasCode ? `${lang}` : (d.codeLangLabel ? `${d.codeLangLabel}` : lang)}
       selected={selected}
+      onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
       connectable={d.connectable}
       runState={d.runState}
       progress={d.progress}
       outcomeHandles
+      outcomeStrings={{ fail: d.strings.failExit, failHint: d.strings.failExitHint, cleanup: d.strings.cleanupExit, cleanupHint: d.strings.cleanupExitHint }}
     />
   );
 }

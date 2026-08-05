@@ -29,6 +29,7 @@ export function TransformNode({ data, selected }: NodeProps) {
       title={d.label || d.strings.transform}
       subtitle={transformSummary(d.config)}
       selected={selected}
+      onAiNote={typeof d.onAiNote === "function" ? (d.onAiNote as () => void) : undefined}
       connectable={d.connectable}
       runState={d.runState}
     />

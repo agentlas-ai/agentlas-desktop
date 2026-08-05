@@ -54,8 +54,22 @@ function computeDepths(graph: WorkflowGraph): Map<string, number> {
 }
 
 /**
- * 그래프를 결정적 좌→우 레이아웃으로 재배치한 새 노드 배열을 반환한다.
- * 같은 컬럼에 여러 노드가 있으면 세로로 균등 분산(중앙 정렬).
+ * 한 띠(band)에 넣을 컬럼 수 — 전체 컬럼 수에서 결정적으로 계산한다.
+ *
+ * ★일직선의 문제(실측 항목 3): 14단계 그래프가 폭 4,000px 한 줄로 그려져 화면에
+ * 맞추면 글자가 안 읽히고, 늘리면 전체가 안 보였다. 긴 사슬은 **접어서** 대략
+ * 정사각형에 가깝게 만든다 — 뱀처럼 좌→우, 다음 띠는 우→좌로 흐르므로
+ * 이웃 단계끼리는 항상 붙어 있다.
+ */
+export function columnsPerBand(totalCols: number): number {
+  if (totalCols <= 4) return totalCols; // 짧으면 접을 이유가 없다
+  return Math.max(4, Math.ceil(Math.sqrt(totalCols * 2)));
+}
+
+/**
+ * 그래프를 결정적 사행(蛇行) 레이아웃으로 재배치한 새 노드 배열을 반환한다.
+ * 위상 컬럼을 띠로 접어 좌→우 / 우→좌로 번갈아 흐르게 하고,
+ * 같은 컬럼에 여러 노드가 있으면 세로로 균등 분산(중앙 정렬)한다.
  */
 export function layoutGraph(graph: WorkflowGraph): WorkflowNode[] {
   const depth = computeDepths(graph);
@@ -66,8 +80,34 @@ export function layoutGraph(graph: WorkflowGraph): WorkflowNode[] {
     if (!byCol.has(d)) byCol.set(d, []);
     byCol.get(d)!.push(n);
   }
+  // 컬럼 인덱스를 0..N-1로 압축(중간이 빈 depth가 있어도 띠 계산이 일그러지지 않게).
+  const cols = [...byCol.keys()].sort((a, b) => a - b);
+  const colOrder = new Map(cols.map((c, i) => [c, i]));
+  const totalCols = cols.length;
+  const perBand = columnsPerBand(totalCols);
+
+  // 띠별 높이 = 그 띠에서 가장 붐비는 컬럼의 노드 수. 띠 사이는 한 칸 더 띈다
+  // (되돌아가는 선이 지나갈 자리).
+  const bandCount = Math.ceil(totalCols / perBand);
+  const bandHeight: number[] = [];
+  for (let b = 0; b < bandCount; b += 1) {
+    let maxRows = 1;
+    for (const [c, i] of colOrder) {
+      if (Math.floor(i / perBand) === b) maxRows = Math.max(maxRows, byCol.get(c)!.length);
+    }
+    bandHeight.push(maxRows * ROW_H + ROW_H); // 노드들 + 띠 간 여백 한 칸
+  }
+  const bandTop: number[] = [];
+  let acc = 0;
+  for (let b = 0; b < bandCount; b += 1) { bandTop.push(acc); acc += bandHeight[b]; }
+
   const out: WorkflowNode[] = [];
   for (const [col, nodes] of byCol) {
+    const i = colOrder.get(col) ?? 0;
+    const band = Math.floor(i / perBand);
+    let c = i % perBand;
+    // 홀수 띠는 우→좌 — 접힌 자리에서 이웃 단계가 서로 붙어 있게(뱀 모양).
+    if (band % 2 === 1) c = perBand - 1 - c;
     const count = nodes.length;
     nodes.forEach((n, row) => {
       // 컬럼 중앙 기준으로 위아래 분산.
@@ -75,8 +115,8 @@ export function layoutGraph(graph: WorkflowGraph): WorkflowNode[] {
       out.push({
         ...n,
         position: {
-          x: NODE_ORIGIN_X + col * COL_W,
-          y: NODE_ORIGIN_Y + offset,
+          x: NODE_ORIGIN_X + c * COL_W,
+          y: NODE_ORIGIN_Y + bandTop[band] + (bandHeight[band] - ROW_H) / 2 + offset,
         },
       });
     });

@@ -93,7 +93,10 @@ const RULES = [
   "default over a fourth round of questions about the same thing.",
   "",
   "Write questions the way a helpful shop assistant would: short, concrete, one thing at a time,",
-  "with examples when a choice is not obvious. Write them in the same language the person used.",
+  "with examples when a choice is not obvious. Write every question, choice, name, goal, label,",
+  "and note in the PRODUCT LANGUAGE stated at the end of this prompt — even when the person",
+  "writes in another language. The person chose the product language in settings; drifting to",
+  "the input language makes the product look broken. (Their own words quoted back are fine.)",
   "",
   "Return ONLY compact JSON, one of these two shapes:",
   '  {"ask":[{"id":"<stable-id>","question":"...","why":"...","choices":["...","..."]}]}',
@@ -110,12 +113,18 @@ const RULES = [
   "    agent/action step. Write the role, NEVER an agent name or id — the product searches",
   "    the real catalog and fills the slot itself. A name you invent does not exist and the",
   "    graph dies at run time. Steps that need the same kind of worker get the same role text.",
+  "    Alongside role, add roleEn: the same role faithfully translated to English. The catalog",
+  "    is English — searching with a non-English role buries the right worker (measured: the",
+  "    same query ranked its target 1st in English and 144th in Korean).",
   "  · kind:\"code\" when the step is an EXACT computation or data-shaping that a chat model would",
   "    get quietly wrong: number math, currency/percent, parsing HTML/CSV/JSON, spreadsheet cells,",
   "    date arithmetic, calling a data library (e.g. yfinance). For those, add kind:\"code\", a short",
   "    codeLang (\"python\" default, or \"js\"), and code:\"<the script>\". The script gets the upstream",
   "    values as `vars` (a dict/object) and must set `result` to what the next step reads.",
   "    Read consumes[] the same way. YOU write the code — the person only describes what they want.",
+  "    If the script imports anything outside the Python standard library, declare the pip names in",
+  "    packages:[\"yfinance\"] on that step — the product installs them before the run. Prefer the",
+  "    standard library when it can do the job; an undeclared import dies on the user's machine.",
   "  · kind:\"agent\" (the default, omit it) for judgement, writing, summarizing, deciding — anything",
   "    where being approximately right is fine. Split a step: fetch+compute in a code step, then",
   "    judge/write in an agent step. Do not put exact math inside an agent instruction.",
@@ -171,7 +180,7 @@ const RULES = [
 ].join("\n");
 
 /** 이번 턴에 모델에게 보낼 지시. 지금까지 알아낸 것을 전부 함께 준다. */
-export function buildInterviewPrompt(state: InterviewState): string {
+export function buildInterviewPrompt(state: InterviewState, locale: "ko" | "en" = "ko"): string {
   const known = state.answers.length
     ? state.answers.map((a) => `Q(${a.questionId}): ${a.question}\nA: ${a.answer}`).join("\n\n")
     : "(nothing yet)";
@@ -185,6 +194,9 @@ export function buildInterviewPrompt(state: InterviewState): string {
   if (state.asked.length) {
     lines.push("", `Question ids already asked (do not repeat): ${state.asked.join(", ")}`);
   }
+  // ★산출 언어는 입력 언어가 아니라 **제품 설정**이 정한다(실측 항목 1·15: 영어 설정에서
+  //   한국어 질문이 나와 화면 절반이 뒤섞였다).
+  lines.push("", `PRODUCT LANGUAGE: ${locale === "ko" ? "Korean" : "English"}. Every user-facing string you emit is in this language.`);
   // ★지난 시도가 왜 지어지지 못했는지를 **모델 앞에 놓는다**. 커널이 지난 실패를 다음
   //   실행 지시에 붙이는 것과 같은 규율이다 — 없으면 같은 실수를 그대로 반복한다.
   const attempts = state.attempts ?? [];

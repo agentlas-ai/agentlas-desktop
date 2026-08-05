@@ -2165,7 +2165,85 @@ button[data-dashboard-import="true"]:disabled {
   position: relative;
   overflow: hidden;
   background: var(--paper-2);
+  /* 하단 검증 로그 패널(항목 6)이 캔버스 아래 칸을 차지한다. */
+  display: flex;
+  flex-direction: column;
 }
+
+.automation-flow-canvas > .automation-flow-react {
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── 하단 검증 로그 — VS Code 터미널 패널의 문법(위 모서리 그립으로 리사이즈) ── */
+.automation-issue-log {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 30px;
+  border-top: 1px solid var(--paper-edge);
+  background: var(--paper);
+  position: relative;
+}
+
+.automation-issue-log-grip {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 7px;
+  cursor: ns-resize;
+  z-index: 2;
+}
+
+.automation-issue-log-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 12px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted-deep);
+}
+
+.automation-issue-log-head span[data-kind="error"] { color: var(--danger, #d64545); }
+.automation-issue-log-head span[data-kind="warning"] { color: #DA9B2B; }
+.automation-issue-log-head em { margin-left: auto; font-style: normal; }
+
+.automation-issue-log-list {
+  margin: 0;
+  padding: 0 0 6px;
+  list-style: none;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.automation-issue-log-list li button {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  width: 100%;
+  padding: 3px 12px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+}
+
+.automation-issue-log-list li button:hover { background: var(--paper-2); }
+.automation-issue-log-list li b { flex: none; font-size: 10px; width: 34px; }
+.automation-issue-log-list li[data-severity="error"] b { color: var(--danger, #d64545); }
+.automation-issue-log-list li[data-severity="warning"] b { color: #DA9B2B; }
 
 /* 알림·제안·결정 카드 층. 예전에는 이 카드들이 캔버스 **위쪽에 쌓여** 그래프를 아래로
    밀어냈다 — 메시지가 하나 늘 때마다 화면의 주인공인 그래프가 작아졌다.
@@ -3223,10 +3301,25 @@ button[data-toggle-state="off"] {
 .automation-event-attention {
   display: grid;
   gap: 11px;
-  padding: 12px;
-  border: 1px solid color-mix(in oklch, var(--amber-deep, #a15c00) 38%, var(--paper-edge));
+  padding: 12px 12px 12px 14px;
+  /* ★"저렇게 나오면 아무도 모름"(실측 항목 16) — 옅은 베이지 카드가 다른 카드들
+     사이에 묻혔다. 왼쪽 두꺼운 주황 띠 + 진한 바탕 + 그림자로 위계를 만든다.
+     주황은 오너 팔레트 Orange #BF512C(바깥으로 나가는 것·주의 계열). */
+  border: 1px solid color-mix(in srgb, #BF512C 45%, var(--paper-edge));
+  border-left: 5px solid #BF512C;
   border-radius: var(--radius-md);
-  background: color-mix(in oklch, var(--amber-deep, #a15c00) 5%, var(--paper));
+  background: color-mix(in srgb, #BF512C 9%, var(--paper));
+  box-shadow: 0 2px 10px color-mix(in srgb, #BF512C 18%, transparent);
+  animation: attention-arrive 420ms ease;
+}
+
+@keyframes attention-arrive {
+  from { transform: translateY(-3px); box-shadow: 0 0 0 6px color-mix(in srgb, #BF512C 25%, transparent); }
+  to { transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .automation-reconcile-card, .automation-event-attention { animation: none; }
 }
 
 .automation-reconcile-head,
@@ -3245,11 +3338,18 @@ button[data-toggle-state="off"] {
 .automation-reconcile-head span,
 .automation-event-attention span {
   display: block;
-  color: var(--amber-deep, #8a5100);
+  color: #BF512C;
   font-family: var(--font-mono);
-  font-size: 9px;
-  font-weight: 720;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+/* 눈썹 앞 경고 표식 — 글자보다 먼저 읽힌다. */
+.automation-reconcile-head span::before,
+.automation-event-attention span::before {
+  content: "⚠ ";
 }
 
 .automation-reconcile-head strong,
@@ -6602,53 +6702,6 @@ button[data-toggle-state="on"] {
   overflow-wrap: anywhere;
   white-space: normal !important;
   word-break: break-word;
-}
-
-/* Hub 플러그인 설치 승인 — stdio 행은 이 기계에서 그 명령을 실행한다는 뜻이라
-   명령 원문을 반드시 눈에 보이게 둔다. 접히거나 잘리면 그 승인은 승인이 아니다. */
-.rd .hub-plugin-approval {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--rd-border, rgba(0, 0, 0, 0.12));
-  border-radius: 10px;
-  background: var(--rd-surface-2, rgba(0, 0, 0, 0.03));
-}
-
-.rd .hub-plugin-approval-title {
-  font-size: 12px;
-  font-weight: 600;
-  margin-bottom: 6px;
-}
-
-.rd .hub-plugin-approval-row + .hub-plugin-approval-row {
-  margin-top: 6px;
-}
-
-.rd .hub-plugin-approval-row code {
-  display: block;
-  font-size: 11.5px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.rd .hub-plugin-approval-note {
-  margin-top: 6px;
-  font-size: 11.5px;
-  line-height: 1.45;
-  opacity: 0.78;
-  overflow-wrap: anywhere;
-}
-
-.rd .hub-plugin-approval-note[data-tone="error"] {
-  color: var(--rd-danger, #b3261e);
-  opacity: 1;
-}
-
-.rd .hub-plugin-approval-note[data-tone="ok"] {
-  color: var(--rd-success, #1e7a44);
-  opacity: 1;
 }
 
 /* 승인 대기 도구 카드 — 자동 브리지가 붙여 두고 켜지지 않은 stdio 서버.
@@ -10982,3 +11035,114 @@ button[data-toggle-state="on"] {
 /* First-run sign-in wait: the label alone does not move for 9-11s, which reads
    as a hang. See Landing.tsx. */
 @keyframes agentlas-cta-spin { to { transform: rotate(360deg); } }
+
+/* 인터뷰·저장 진행 스피너 — "Working…" 글자만으로는 도는 줄 모른다(실측 항목 10). */
+.describe-spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--paper-edge);
+  border-top-color: var(--ink);
+  animation: agentlas-cta-spin 0.7s linear infinite;
+  display: inline-block;
+}
+.describe-spinner-light {
+  border-color: color-mix(in srgb, var(--paper) 35%, transparent);
+  border-top-color: var(--paper);
+}
+@media (prefers-reduced-motion: reduce) {
+  .describe-spinner { animation-duration: 2.4s; }
+}
+
+/* 노드 좌상단 AI 주석 CTA(항목 5) — 작지만 항상 그 자리에. */
+.automation-flow-node-ai {
+  position: absolute;
+  top: -10px;
+  left: 12px;
+  padding: 2px 7px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 999px;
+  background: var(--paper);
+  color: #0C2C47;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  z-index: 3;
+  transition: background 120ms ease, color 120ms ease;
+}
+.automation-flow-node-ai:hover { background: #0C2C47; color: #fff; }
+
+/* AI 주석 팝업 — 캔버스 위 오버레이. ★불투명 필수(반투명이 아래 글자와 겹친 실측 재발 방지). */
+.automation-ai-note-pop {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  width: min(440px, calc(100% - 32px));
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-md);
+  background: var(--paper);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.16);
+}
+.automation-ai-note-title { font-size: 13px; font-weight: 700; color: var(--ink); }
+.automation-ai-note-pop textarea {
+  min-height: 72px;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-sm);
+  background: var(--paper-2);
+  color: var(--ink);
+  font-size: 12px;
+  font-family: var(--font-body);
+  outline: none;
+}
+.automation-ai-note-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.automation-ai-note-actions button {
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--paper-edge);
+  background: var(--paper);
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.automation-ai-note-actions button[data-primary] {
+  background: #0C2C47;
+  border-color: #0C2C47;
+  color: #fff;
+}
+.automation-ai-note-actions button:disabled { opacity: 0.5; cursor: default; }
+.automation-ai-note-pop p { margin: 0; font-size: 11px; color: var(--muted-deep); }
+
+/* 세션 대화의 질문 카드 — 내부 프로토콜 JSON을 사람 말로(실측 항목 17). */
+.automation-session-ask {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 9px 10px;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-sm);
+  background: var(--paper-2);
+  font-size: 12px;
+  color: var(--ink);
+}
+.automation-session-ask-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.automation-session-ask-options button {
+  padding: 4px 10px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+.automation-session-ask-options button:hover { border-color: #0C2C47; color: #0C2C47; }

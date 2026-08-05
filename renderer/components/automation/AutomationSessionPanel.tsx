@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { extractQuestions } from "@/lib/ask-question";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import type {
   AutomationExecutionPermission,
@@ -341,16 +342,41 @@ export function AutomationSessionPanel({
       </header>
 
       <div className="automation-session-stream" ref={scrollRef}>
-        {messages.map((message) => (
-          <article key={message.id} data-role={message.role}>
-            <small>{message.role === "user" ? (ko ? "요청" : "Request") : "Agentlas"}</small>
-            <p>{message.text}</p>
-          </article>
-        ))}
+        {messages.map((message) => {
+          // ★내부 질문 프로토콜(<<agentlas-ask>> JSON)이 원문 그대로 보였다(실측 항목 17).
+          //   사용자는 시스템 프롬프트가 새는 것으로 읽는다 — 질문은 카드로, 본문은 본문만.
+          const parsed = message.role === "assistant"
+            ? extractQuestions(message.text, message.id)
+            : { text: message.text, questions: [] };
+          return (
+            <article key={message.id} data-role={message.role}>
+              <small>{message.role === "user" ? (ko ? "요청" : "Request") : "Agentlas"}</small>
+              {parsed.text.trim() ? <p>{parsed.text}</p> : null}
+              {parsed.questions.map((q) => (
+                <div key={q.id} className="automation-session-ask">
+                  <div>{q.question}</div>
+                  <div className="automation-session-ask-options">
+                    {q.options.map((opt) => (
+                      <button
+                        key={opt.label}
+                        type="button"
+                        title={opt.description}
+                        disabled={busy}
+                        onClick={() => void send(opt.label)}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </article>
+          );
+        })}
         {busy ? (
           <article data-role="assistant" data-live="true">
             <small>Agentlas</small>
-            <p>{streamText || status || (ko ? "생각하는 중…" : "Thinking…")}</p>
+            <p>{(streamText ? extractQuestions(streamText, "live").text : "") || status || (ko ? "생각하는 중…" : "Thinking…")}</p>
           </article>
         ) : null}
         {messages.length === 0 && !busy && !unavailable ? (
