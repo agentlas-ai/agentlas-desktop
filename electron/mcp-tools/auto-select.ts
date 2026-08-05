@@ -8,6 +8,8 @@ import { testServerConnection } from "./client";
 import { readEnvVar } from "../secrets/vault";
 import { getSource as getMarketSource } from "../marketplace";
 import { COMPUTER_USE_JUDGMENT_GUIDANCE, COMPUTER_USE_JUDGMENT_KIND, COMPUTER_USE_JUDGMENT_QUESTION, resolveAutomationToolMode } from "../../shared/automation-tool-policy";
+import { buildToolAccessNotice } from "../../shared/tool-access-notice";
+import { listPendingHubPluginApprovals } from "./hub-plugin-bridge";
 import { judgedComputerUse } from "../system-agents/judged-tool-mode";
 import type {
   AutomationHubMode,
@@ -51,6 +53,11 @@ export interface AutoSelectedMcpContext {
   hubPluginCount: number;
   hubPlugins: HubPluginCandidate[];
   hubPluginError?: string;
+  /**
+   * 이미 이 기계에 붙어 있지만 로컬 실행 승인을 기다리며 꺼져 있는 도구 이름들.
+   * 새로 설치하라고 권하기 전에 이것부터 말해야 한다 — 사용자는 이미 받아 놓았다.
+   */
+  pendingApprovalTools?: string[];
   /** True when the resident judge actually decided this run's optional tool set. */
   needsDecided: boolean;
   /** Value-free note: nothing was decided, or the candidate inventory was capped. */
@@ -491,12 +498,24 @@ export async function autoSelectMcpTools(input: {
       score: 100,
     }));
 
+  // 이미 이 기계에 붙어 있고 켜기만 하면 되는 것 — 새 설치를 권하기 전에 알려야 한다.
+  // 조회 실패는 이 실행을 막지 않는다(고지가 한 줄 짧아질 뿐).
+  let pendingApprovalTools: string[] = [];
+  try {
+    pendingApprovalTools = listPendingHubPluginApprovals().map(
+      (row) => `${row.slug} (${[row.command, ...row.args].filter(Boolean).join(" ")})`,
+    );
+  } catch {
+    pendingApprovalTools = [];
+  }
+
   return {
     tools: result,
     localInventory,
     localPluginCount: localInventory.length,
     hubPluginCount: hubInventory.hubPluginCount,
     hubPlugins,
+    ...(pendingApprovalTools.length > 0 ? { pendingApprovalTools } : {}),
     needsDecided: needs.decided,
     ...(needsNote ? { needsNote } : {}),
     ...(hubInventory.hubPluginError ? { hubPluginError: hubInventory.hubPluginError } : {}),
@@ -507,7 +526,10 @@ export function buildMcpAutoSelectionPrompt(
   selected: AutoSelectedMcpContext,
   opts?: { toolMode?: AutomationToolMode; hubMode?: AutomationHubMode },
 ): string {
-  if (selected.tools.length === 0 && selected.hubPluginCount === 0) return "";
+  // 붙은 도구가 없을 때 침묵하지 않는다. 이전에는 여기서 빈 문자열을 반환해, 도구가
+  // 하나도 없는 실행에 **아무 안내도 나가지 않았다** — 도구가 없다는 사실 자체가
+  // 에이전트가 알아야 할 정보이고, 그때가 바로 설치를 권해야 하는 순간이다.
+  // 공통 고지는 표면 무관하게 shared/tool-access-notice.ts가 만든다.
   const installed = selected.tools.filter((tool) => tool.installed);
   const blocked = selected.tools.filter((tool) => !tool.installed && tool.missingEnv.length > 0);
   const unavailable = selected.tools.filter((tool) => tool.state !== "ready");
@@ -558,18 +580,18 @@ export function buildMcpAutoSelectionPrompt(
       ? `Local inventory for Hub plugin resolution: ${inventoryPreview}${inventoryMore}.`
       : "",
     selected.needsNote ? `Tool selection note: ${selected.needsNote}` : "",
-    installed.length > 0
-      ? `Installed/enabled tools available this run: ${installed.map((tool) => `${tool.id} (${tool.name})`).join(", ")}.`
-      : "No additional installable local tools were available for this run.",
     hubCandidates,
     "Use the available MCP tools directly when they are relevant. Do not ask the user to install a tool that is already listed as available.",
-    "Before saying a tool/plugin is unavailable, resolve against both local inventory and Agentlas Hub. If an agentlas_resolve_plugins MCP tool is exposed, call it with the needed capabilities and localInventory. Otherwise use the Hephaestus Network MCP tools to route Hub specialists/plugins.",
+    // 표면 공통 고지 — 붙은 도구·승인 대기·Hub 조회 가능 여부·설치 경계를 한 벌로 낸다.
+    // 터미널과 OS 플러그인이 같은 문장을 쓰므로, 여기서만 문구를 바꾸면 안 된다.
+    buildToolAccessNotice({
+      availableTools: installed.map((tool) => `${tool.id} (${tool.name})`),
+      blockedTools: blocked.map((tool) => `${tool.id} missing ${tool.missingEnv.join(", ")}`),
+      pendingApprovalTools: selected.pendingApprovalTools ?? [],
+      hubCatalogAvailable: selected.hubPluginCount > 0 && !selected.hubPluginError,
+      hubCatalogError: selected.hubPluginError ?? null,
+    }),
     "Only ask the user when the selected Hub plugin requires login, OAuth, credentials, paid/credit approval, or a macOS/browser permission. Include the exact plugin slug or install command in that question.",
-    blocked.length > 0
-      ? `Tools matched but need credentials before use: ${blocked
-          .map((tool) => `${tool.id} missing ${tool.missingEnv.join(", ")}`)
-          .join("; ")}. Ask for secure vault setup only if the task truly needs them.`
-      : "",
     unavailable.length > 0
       ? `Unavailable MCP state (value-free): ${unavailable
           .map((tool) => `${tool.id}=${tool.state}${tool.required ? "(required)" : ""}`)
