@@ -4108,6 +4108,26 @@ export function registerIpcHandlers(): void {
     },
   );
   ipcMain.handle(
+    "automations:proposeChecklistFromExample",
+    async (_e, id: string, example: string) => {
+      const automation = getAutomation(id);
+      if (!automation) throw new Error(`Automation not found: ${id}`);
+      if (typeof example !== "string" || !example.trim()) {
+        return { ok: false as const, items: [] };
+      }
+      const { proposeChecklistFromExample } = await import("./system-agents/judgment");
+      const proposal = await proposeChecklistFromExample({
+        example,
+        ...(automation.goal ? { goal: automation.goal } : {}),
+        locale: (await import("./ui-locale")).currentUiLocale(),
+      });
+      // 제안이 불가하면 불가라고 말한다 — 빈 채점표를 성공처럼 주지 않는다.
+      return proposal.source === "llm"
+        ? { ok: true as const, items: proposal.items }
+        : { ok: false as const, items: [] };
+    },
+  );
+  ipcMain.handle(
     "automations:recordEvalCorrection",
     (_e, id: string, nodeId: string, correctedVerdict: "pass" | "fail", note?: string) => {
       const automation = getAutomation(id);

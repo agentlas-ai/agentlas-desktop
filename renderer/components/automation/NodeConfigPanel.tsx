@@ -97,6 +97,10 @@ export function NodeConfigPanel({
   automationId?: string;
 }) {
   const { t, locale } = useT();
+  // 예시→채점표 역생성 상태
+  const [exampleDraft, setExampleDraft] = useState("");
+  const [exampleBusy, setExampleBusy] = useState(false);
+  const [exampleError, setExampleError] = useState("");
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
   const [hubAgents, setHubAgents] = useState<MarketplaceListing[]>([]);
@@ -389,6 +393,49 @@ export function NodeConfigPanel({
             <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
               {t("auto.cfg.eval_items_hint")}
             </div>
+            {/* ★기준은 못 써도 좋은 산출물은 알아본다 — 예시 하나로 채점표를 역생성.
+                제안일 뿐이라 위 편집기에 채워지고, 사람이 고친 뒤에야 저장된다. */}
+            <details style={{ marginTop: 6 }}>
+              <summary style={{ fontSize: 11, color: "var(--muted-deep)", cursor: "pointer" }}>
+                {t("auto.cfg.eval_from_example")}
+              </summary>
+              <textarea
+                value={exampleDraft}
+                onChange={(e) => setExampleDraft(e.target.value)}
+                rows={4}
+                placeholder={t("auto.cfg.eval_from_example_placeholder")}
+                style={{ ...inp, minHeight: 72, resize: "vertical", marginTop: 6 }}
+                data-testid="eval-example-input"
+              />
+              <button
+                disabled={exampleBusy || !exampleDraft.trim()}
+                onClick={() => {
+                  void (async () => {
+                    const api = ipc();
+                    if (!api || !automationId) return;
+                    setExampleBusy(true);
+                    try {
+                      const res = await api.automations.proposeChecklistFromExample(automationId, exampleDraft);
+                      if (res.ok && res.items.length) {
+                        onPatch({ items: res.items });
+                        setExampleDraft("");
+                      } else {
+                        setExampleError(t("auto.cfg.eval_from_example_failed"));
+                      }
+                    } finally {
+                      setExampleBusy(false);
+                    }
+                  })();
+                }}
+                style={{ ...inp, cursor: "pointer", marginTop: 6 }}
+                data-testid="eval-example-generate"
+              >
+                {exampleBusy ? t("auto.cfg.eval_from_example_busy") : t("auto.cfg.eval_from_example_go")}
+              </button>
+              {exampleError ? (
+                <div style={{ fontSize: 11, color: "var(--red-deep, #b4533a)", marginTop: 4 }}>{exampleError}</div>
+              ) : null}
+            </details>
           </Field>
           <Field label={t("auto.cfg.eval_criteria")}>
             {/* 한 문장 기준(하위호환) — 채점표 항목이 있으면 항목이 우선한다. */}

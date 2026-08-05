@@ -6230,6 +6230,11 @@ export interface AgentlasIpc {
       patch: { ops: unknown[]; rationale?: string },
     ) => Promise<{ ok: boolean; code?: string; reason?: string; nextAction?: string }>;
     /** 승인 브레이크가 걸린 단계의 결정을 기록한다. 승인은 판정이 아니라 사람의 결정이다. */
+    /** 좋은 예시 하나 → 채점표 제안. 제안일 뿐 — 편집기에 채워지고 사람이 고친 뒤 저장된다. */
+    proposeChecklistFromExample: (
+      id: string,
+      example: string,
+    ) => Promise<{ ok: boolean; items: Array<{ text: string; kind: "must" | "mustNot" }> }>;
     /** "이 판정은 틀렸다" — 교정을 남기면 그 노드의 이후 판정에 few-shot으로 주입된다. */
     recordEvalCorrection: (
       id: string,

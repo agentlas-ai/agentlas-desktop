@@ -652,6 +652,8 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("automations:proposeGraphPatch", id, patch),
     applyGraphPatch: (id: string, patch: { ops: unknown[]; rationale?: string }) =>
       ipcRenderer.invoke("automations:applyGraphPatch", id, patch),
+    proposeChecklistFromExample: (id: string, example: string) =>
+      ipcRenderer.invoke("automations:proposeChecklistFromExample", id, example),
     recordEvalCorrection: (id: string, nodeId: string, correctedVerdict: "pass" | "fail", note?: string) =>
       ipcRenderer.invoke("automations:recordEvalCorrection", id, nodeId, correctedVerdict, note),
     decideNodeApproval: (id: string, nodeId: string, decision: "approved" | "rejected" | "always") =>

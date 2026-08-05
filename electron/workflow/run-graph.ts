@@ -2116,12 +2116,13 @@ export async function runGraph(
             });
             return;
           }
+          // 사람의 교정 기록 — 판정이 그래프 주인의 기준을 배우는 통로.
+          //   (1차 판정과 흔들림 재판정이 같은 교정을 봐야 하므로 시도 블록 밖에서 읽는다.)
+          const { listEvalCorrections } = await import("../store/automations");
+          const corrections = listEvalCorrections(automation.id, node.id);
           let list: import("../system-agents/judgment").ChecklistVerdict;
           try {
             const { judgeChecklist } = await import("../system-agents/judgment");
-            // 사람의 교정 기록 — 판정이 그래프 주인의 기준을 배우는 통로.
-            const { listEvalCorrections } = await import("../store/automations");
-            const corrections = listEvalCorrections(automation.id, node.id);
             list = await judgeChecklist({
               kind: `graph-eval-list:${sha256Value({ items: checklist }).slice(0, 24)}`,
               items: checklist,
@@ -2149,10 +2150,38 @@ export async function runGraph(
             });
             return;
           }
+          // ★흔들림 측정(옵션) — 같은 입력을 한 번 더 판정해 항목별 불일치를 기록한다.
+          //   판정은 같은 입력에도 흔들린다는 실측(20회 중 최대 50% 뒤집힘)이 있고,
+          //   흔들리는 판정은 흔들린다고 말해야 한다. 결과는 1차 판정을 쓴다 —
+          //   재판정으로 결과를 바꾸면 "몇 번 돌리느냐"가 결과를 정하게 된다.
+          let stability: { agreed: boolean; disagreedItems: string[] } | null = null;
+          if (node.config?.stability === true) {
+            try {
+              const { judgeChecklist: judgeAgain } = await import("../system-agents/judgment");
+              const second = await judgeAgain({
+                kind: `graph-eval-list:${sha256Value({ items: checklist }).slice(0, 24)}`,
+                items: checklist,
+                subjectText: String(value),
+                salt: "stability-2",
+                ...(evidenceValue != null
+                  ? { evidence: typeof evidenceValue === "string" ? evidenceValue : JSON.stringify(evidenceValue) }
+                  : {}),
+                ...(corrections.length ? { corrections } : {}),
+                ...(runSignal ? { signal: runSignal } : {}),
+              });
+              if (second.verdict !== null) {
+                const firstById = new Map(list.items.map((v) => [v.id, v.verdict]));
+                const disagreed = second.items
+                  .filter((v) => firstById.get(v.id) !== undefined && firstById.get(v.id) !== v.verdict)
+                  .map((v) => v.id);
+                stability = { agreed: disagreed.length === 0 && second.verdict === list.verdict, disagreedItems: disagreed };
+              }
+            } catch { /* 흔들림 측정 실패는 판정 실패가 아니다 */ }
+          }
           vars[produces] = list.verdict;
           vars[`${produces}_reason`] = list.reasonText;
           envelopes[node.id] = declaredEnvelope(node.id, node.label || node.id, {
-            json: { verdict: list.verdict, items: list.items },
+            json: { verdict: list.verdict, items: list.items, ...(stability ? { stability } : {}) },
           });
           outputs[node.id] = list.verdict === "fail" && list.reasonText
             ? `fail:\n${list.reasonText}`
@@ -2161,6 +2190,7 @@ export async function runGraph(
           journal("node_settled", node.id, {
             verdict: list.verdict,
             ...(list.reasonText ? { reason: list.reasonText.slice(0, 600) } : {}),
+            ...(stability && !stability.agreed ? { unstable: stability.disagreedItems } : {}),
           });
           if (list.verdict === "fail") {
             // 실패 항목 id 집합 — 반복 주입과 EVAL_STUCK(같은 항목 연속 2회) 판정에 쓴다.

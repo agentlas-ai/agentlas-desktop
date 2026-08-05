@@ -695,6 +695,15 @@
       "reader": "커널(eval)",
       "status": "implemented",
       "note": "판정 근거가 담긴 변수 이름 — 재조회 스텝이 만든 값. 있으면 판정이 채점표→근거→대상 순서로 대조한다(reference 기반 판정: 같은모델 자기판정 실패율 70%→15% 실측). 없으면 대상만 보고 판정."
+    },
+    {
+      "name": "stability",
+      "on": "node.config",
+      "grade": "degradable",
+      "writer": "저작자",
+      "reader": "커널(eval)",
+      "status": "implemented",
+      "note": "true면 같은 입력을 한 번 더 판정해 항목별 불일치를 기록(비용 2배 — 옵션). 결과는 1차 판정 — 재판정으로 결과를 바꾸면 '몇 번 돌리느냐'가 결과를 정한다. 실측: 같은 입력 20회 중 최대 50% 뒤집힘."
     }
   ]
 }
