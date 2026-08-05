@@ -3945,7 +3945,7 @@ export function registerIpcHandlers(): void {
       try {
         text = await callConnectedModel({
           systemPrompt: "You return only compact JSON. No prose.",
-          input: buildInterviewPrompt(attempt, currentUiLocale()),
+          input: buildInterviewPrompt(attempt),
           timeoutMs: 120_000,
         });
       } catch (error) {
