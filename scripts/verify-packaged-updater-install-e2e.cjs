@@ -1174,7 +1174,18 @@ async function runWindowsE2E({ baselineInstaller, feedUrl, feed, isolation, opti
       () => windowsExecutableVersion(installedExecutable) === options.targetVersion,
       { intervalMs: 500, label: "NSIS target replacement", timeoutMs: options.timeoutMs },
     );
-    assertOfficialGithubUpdateConfig(path.join(installDir, "resources", "app-update.yml"));
+    // NSIS는 실행 파일과 resources/를 한 순간에 바꾸지 않는다. 교체된 exe 버전만 보고
+    // 곧바로 resources/app-update.yml을 읽으면, 아직 쓰이지 않은 파일을 "빠졌다"고
+    // 단정한다 — 설치는 정상인데 게이트만 실패한다. 패키지가 커질수록 이 틈이 벌어진다
+    // (2026-08-05 실측: 720MB 아티팩트에서 같은 날 세 번 실패,
+    //  `installed target resources/app-update.yml is missing`).
+    // exe와 같은 방식으로 파일이 나타날 때까지 기다린 뒤 내용을 검증한다.
+    const installedAppUpdateYml = path.join(installDir, "resources", "app-update.yml");
+    await waitUntil(
+      () => fs.existsSync(installedAppUpdateYml),
+      { intervalMs: 500, label: "NSIS resources/app-update.yml materialization", timeoutMs: options.timeoutMs },
+    );
+    assertOfficialGithubUpdateConfig(installedAppUpdateYml);
     await waitUntil(
       () => !fs.existsSync(expectedJournal),
       { intervalMs: 250, label: "target relaunch journal reconciliation", timeoutMs: options.timeoutMs },
