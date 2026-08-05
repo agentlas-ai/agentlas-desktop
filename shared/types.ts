@@ -5835,6 +5835,19 @@ export interface AgentlasIpc {
       }>;
       liveServerIds: string[];
     }>;
+    /**
+     * 자동 브리지가 등록해 두고 승인을 기다리는 stdio 서버 목록.
+     * 실행 중 채팅에 지나가는 영수증과 달리 영구 상태에서 읽으므로, 대화를 새로 열어도
+     * 같은 답이 나온다.
+     */
+    pendingHubApprovals: () => Promise<Array<{
+      serverId: string;
+      slug: string;
+      serverName: string;
+      command: string | null;
+      args: string[];
+      envKeys: string[];
+    }>>;
     /** 실제로 붙어서 tools/list 해보고 상태 반환 */
     test: (id: string) => Promise<McpServerStatus>;
     /** 활성화된 모든 서버 상태 (env 부족분 포함) */

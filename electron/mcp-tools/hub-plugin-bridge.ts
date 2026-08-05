@@ -128,6 +128,52 @@ export async function fetchHubPluginManifest(manifestUrl: string): Promise<{ mcp
 }
 
 /**
+ * 자동 브리지가 등록해 두고 승인을 기다리는 stdio 서버들.
+ *
+ * 승인 대기는 이미 영구 상태다(`mcp_servers`에 `enabled=0`으로 앉아 있다). 그런데
+ * 그 사실은 실행 중 채팅에 `needs-approval` 한 줄로 지나갈 뿐이라, 사용자가 그 순간을
+ * 놓치면 어디서 무엇을 켜야 하는지 알 방법이 없었다. 화면이 이 목록을 직접 물어보면
+ * 세션이 끊겨도, 대화를 새로 열어도 같은 답을 얻는다.
+ *
+ * 판별 기준은 브리지가 만든 행의 모양이다: 카탈로그 출신이 아니고(catalogId 없음),
+ * 이름이 `<slug>:<서버이름>`이며, stdio이고, 꺼져 있다. 사용자가 직접 등록한 커스텀
+ * 서버나 사용자가 의도적으로 끈 카탈로그 서버는 여기 들어오지 않는다.
+ */
+export function listPendingHubPluginApprovals(): Array<{
+  serverId: string;
+  slug: string;
+  serverName: string;
+  command: string | null;
+  args: string[];
+  envKeys: string[];
+}> {
+  let installed: ReturnType<typeof listInstalledServers>;
+  try {
+    installed = listInstalledServers();
+  } catch {
+    return [];
+  }
+  const pending: ReturnType<typeof listPendingHubPluginApprovals> = [];
+  for (const server of installed) {
+    if (server.enabled) continue;
+    if (server.transport !== "stdio") continue;
+    if (server.catalogId) continue;
+    const name = String(server.name ?? "");
+    const colon = name.indexOf(":");
+    if (colon <= 0) continue;
+    pending.push({
+      serverId: server.id,
+      slug: name.slice(0, colon),
+      serverName: name.slice(colon + 1) || name,
+      command: server.command ?? null,
+      args: server.args ?? [],
+      envKeys: server.envKeys ?? [],
+    });
+  }
+  return pending;
+}
+
+/**
  * 이미 같은 연결이 등록돼 있는지. 자동 브리지와 사용자 설치가 **같은 판정**을 써야
  * "에이전트가 자동 등록해 둔 비활성 행"을 마켓플레이스 설치가 중복 생성하지 않고
  * 그 행을 그대로 켤 수 있다.

@@ -662,6 +662,16 @@ function ChatPage() {
   const [allEnvKeys, setAllEnvKeys] = useState<string[]>([]);
   const [allGeneratedApps, setAllGeneratedApps] = useState<AppFactoryAppRecord[]>([]);
   const [installedPlugins, setInstalledPlugins] = useState<InstalledMcpServer[]>([]);
+  const [pendingHubApprovals, setPendingHubApprovals] = useState<Array<{
+    serverId: string;
+    slug: string;
+    serverName: string;
+    command: string | null;
+    args: string[];
+    envKeys: string[];
+  }>>([]);
+  /** 이번 화면에서 "나중에"를 누른 항목 — 같은 카드가 계속 뜨면 내용을 안 읽고 닫는다. */
+  const [dismissedHubApprovals, setDismissedHubApprovals] = useState<Set<string>>(new Set());
   const [firm, setFirm] = useState<InstalledFirm | null>(null);
   const [resolvedOrg, setResolvedOrg] = useState<ResolvedOrg | null>(null);
   const [project, setProject] = useState<Project | null>(null);
@@ -1615,6 +1625,11 @@ function ChatPage() {
       }).catch(() => undefined);
       void api.mcpTools.listInstalled().then((plugins) => {
         if (!cancelled) setInstalledPlugins(plugins);
+      }).catch(() => undefined);
+      // 자동 브리지가 붙여 두고 승인을 기다리는 도구. 실행 중에는 영수증 한 줄로만
+      // 지나가서, 그 순간을 놓치면 어디서 무엇을 켜는지 알 수 없었다.
+      void api.mcpTools.pendingHubApprovals().then((rows) => {
+        if (!cancelled) setPendingHubApprovals(rows);
       }).catch(() => undefined);
       void api.appFactory.listApps(chatId).then((generatedApps) => {
         if (!cancelled) setAllGeneratedApps(generatedApps);
@@ -3297,6 +3312,51 @@ function ChatPage() {
           </button>
         </div>
       )}
+
+      {pendingHubApprovals.filter((row) => !dismissedHubApprovals.has(row.serverId)).map((row) => (
+        <div key={row.serverId} className="hub-approval-card">
+          <div className="hub-approval-card-title">
+            {`"${row.slug}" 도구가 붙어 있지만 아직 켜지지 않았습니다`}
+          </div>
+          <div className="hub-approval-card-body">
+            이 명령이 이 Mac에서 실행됩니다 — 켜면 다음 대화부터 사용됩니다.
+          </div>
+          <code className="hub-approval-card-command">
+            {[row.command, ...row.args].filter(Boolean).join(" ")}
+          </code>
+          {row.envKeys.length > 0 ? (
+            <div className="hub-approval-card-body">
+              {`켠 뒤 키 입력이 필요합니다: ${row.envKeys.join(", ")}`}
+            </div>
+          ) : null}
+          <div className="hub-approval-card-actions">
+            <button
+              type="button"
+              className="btn sm primary"
+              onClick={() => {
+                const approvalApi = ipc();
+                if (!approvalApi) return;
+                void approvalApi.mcpTools
+                  .setEnabled(row.serverId, true)
+                  .then(() => {
+                    setPendingHubApprovals((rows) => rows.filter((r) => r.serverId !== row.serverId));
+                    void approvalApi.mcpTools.listInstalled().then(setInstalledPlugins).catch(() => undefined);
+                  })
+                  .catch(() => undefined);
+              }}
+            >
+              켜기
+            </button>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => setDismissedHubApprovals((prev) => new Set(prev).add(row.serverId))}
+            >
+              나중에
+            </button>
+          </div>
+        </div>
+      ))}
 
       <div data-tour-id="workspace.chat" style={{ minHeight: 0, flex: 1, display: "flex", flexDirection: "column" }}>
         <ChatStream

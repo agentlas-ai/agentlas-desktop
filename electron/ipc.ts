@@ -99,7 +99,11 @@ import {
   removeServer,
   setServerEnabled,
 } from "./mcp-tools/registry";
-import { installHubPlugin, previewHubPlugin } from "./mcp-tools/hub-plugin-bridge";
+import {
+  installHubPlugin,
+  listPendingHubPluginApprovals,
+  previewHubPlugin,
+} from "./mcp-tools/hub-plugin-bridge";
 import { statusAllServers, testServerById } from "./mcp-tools/client";
 import { recommendMcpBuildPlan } from "./mcp-tools/build-plan";
 import { getOpenCrabReadiness } from "./opencrab/ontology";
@@ -2823,6 +2827,9 @@ export function registerIpcHandlers(): void {
         approveLocalExecution: input?.approveLocalExecution === true,
       }),
   );
+  // 자동 브리지가 등록해 두고 승인을 기다리는 stdio 서버. 실행 중 채팅에 한 줄 지나가는
+  // needs-approval 영수증을 놓치면 사용자는 어디서 무엇을 켜는지 알 수 없었다.
+  ipcMain.handle("mcpTools:pendingHubApprovals", () => listPendingHubPluginApprovals());
   ipcMain.handle("mcpTools:test", (_e, id: string) => testServerById(id));
   ipcMain.handle("mcpTools:status", () => statusAllServers());
   ipcMain.handle("mcpTools:recommendForBuild", (_e, input) => recommendMcpBuildPlan(input));
@@ -3938,7 +3945,7 @@ export function registerIpcHandlers(): void {
       try {
         text = await callConnectedModel({
           systemPrompt: "You return only compact JSON. No prose.",
-          input: buildInterviewPrompt(attempt),
+          input: buildInterviewPrompt(attempt, currentUiLocale()),
           timeoutMs: 120_000,
         });
       } catch (error) {

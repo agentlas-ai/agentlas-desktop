@@ -374,6 +374,7 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("mcpTools:previewHubPlugin", manifestUrl),
     installHubPlugin: (input: { slug: string; manifestUrl: string; approveLocalExecution?: boolean }) =>
       ipcRenderer.invoke("mcpTools:installHubPlugin", input),
+    pendingHubApprovals: () => ipcRenderer.invoke("mcpTools:pendingHubApprovals"),
     test: (id: string) => ipcRenderer.invoke("mcpTools:test", id),
     status: () => ipcRenderer.invoke("mcpTools:status"),
     recommendForBuild: (input) => ipcRenderer.invoke("mcpTools:recommendForBuild", input),
