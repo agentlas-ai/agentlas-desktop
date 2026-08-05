@@ -34,6 +34,14 @@ interface Capability {
   kind: AutomationFixKind;
   /** browser_login 전용 — 어느 사이트의 로그인 창을 열지. */
   site?: string;
+  /**
+   * ★이 조치가 **무엇에 관한 것인가** — 필수다. 예전에는 조치 7개가 각자 알아서 관련성을
+   * 판단했다: 하나(open_mac_permissions)는 제대로 좁혔고, 하나(browser_login)는 아예 안
+   * 좁혀서 브라우저를 안 쓰는 자동화에도 "로그인하세요"가 떴고, 나머지는 그 질문 자체가
+   * 없었다. 관련성 판단을 조치에서 빼내 한 곳(아래 필터)으로 모으고, 이 필드를 필수로 만들어
+   * 8번째 조치가 생겨도 선언 없이는 컴파일되지 않게 한다. 오류는 무한하지만 행동은 유한하다.
+   */
+  relevantTo: "browser" | "screen" | "always";
 }
 
 function siteActionId(site: string): string {
@@ -46,6 +54,14 @@ function siteActionId(site: string): string {
  */
 async function capabilities(automationId: string): Promise<Capability[]> {
   const list: Capability[] = [];
+  // 이 자동화가 실제로 무엇을 쓰는가 — **선언된 사실**로만 계산한다(사람이 고른 toolMode).
+  // 이름·키워드로 추측하지 않는다. 모르면 좁히지 않는다(false가 아니라 보수적으로 둘 다 false:
+  // toolMode가 없으면 브라우저도 화면도 "쓴다고 선언된 적 없음"이다).
+  const automation = getAutomation(automationId);
+  const uses: Record<"browser" | "screen", boolean> = {
+    browser: automation?.toolMode === "browser",
+    screen: automation?.toolMode === "computer-use",
+  };
 
   let sites: BrowserSiteRow[] = [];
   try {
@@ -66,6 +82,7 @@ async function capabilities(automationId: string): Promise<Capability[]> {
       if (site.session.status === "valid") continue;
       list.push({
         kind: "browser_login",
+        relevantTo: "browser",
         site: site.site,
         option: {
           id: siteActionId(site.site),
@@ -80,6 +97,7 @@ async function capabilities(automationId: string): Promise<Capability[]> {
   } else {
     list.push({
       kind: "open_browser_setup",
+      relevantTo: "browser",
       option: {
         id: "open_browser_setup",
         evidence:
@@ -94,11 +112,11 @@ async function capabilities(automationId: string): Promise<Capability[]> {
   // 그럴듯하지만 엉뚱한 조치("손쉬운 사용을 켜세요")를 고른다.
   // 또한 macOS 권한은 앱 번들 단위라, 소스로 띄운 개발 실행의 상태는 설치본과 다르다.
   // 미패키지 실행에서 읽은 값은 사용자의 실제 설정에 대한 근거가 아니므로 아예 넣지 않는다.
-  const usesComputerUse = getAutomation(automationId)?.toolMode === "computer-use";
-  const permissions = usesComputerUse && app.isPackaged ? checkComputerUsePermissions() : null;
+  const permissions = uses.screen && app.isPackaged ? checkComputerUsePermissions() : null;
   if (permissions && !permissions.ok) {
     list.push({
       kind: "open_mac_permissions",
+      relevantTo: "screen",
       option: {
         id: "open_mac_permissions",
         evidence:
@@ -119,6 +137,7 @@ async function capabilities(automationId: string): Promise<Capability[]> {
   if (!session?.signedIn) {
     list.push({
       kind: "agentlas_sign_in",
+      relevantTo: "always",
       option: {
         id: "agentlas_sign_in",
         evidence:
@@ -130,6 +149,7 @@ async function capabilities(automationId: string): Promise<Capability[]> {
 
   list.push({
     kind: "repair_runtime",
+    relevantTo: "always",
     option: {
       id: "repair_runtime",
       evidence:
@@ -150,6 +170,7 @@ async function capabilities(automationId: string): Promise<Capability[]> {
   if (!reconciliationPending) {
     list.push({
       kind: "retry_run",
+      relevantTo: "always",
       option: {
         id: "retry_run",
         evidence:
@@ -161,6 +182,7 @@ async function capabilities(automationId: string): Promise<Capability[]> {
 
   list.push({
     kind: "ask_in_session",
+    relevantTo: "always",
     option: {
       id: "ask_in_session",
       evidence:
@@ -169,8 +191,10 @@ async function capabilities(automationId: string): Promise<Capability[]> {
     },
   });
 
-  void automationId;
-  return list;
+  // ★관련성 필터 — 한 곳에서. 이 자동화가 안 쓰는 것에 대한 조치는 후보에 아예 안 올린다.
+  //   "브라우저 안 쓰는데 로그인하세요"는 틀린 전제를 모델에게 주는 것이고, 모델은 그 위에서
+  //   그럴듯하지만 엉뚱한 조치를 고른다(open_mac_permissions 주석의 실측과 같은 병).
+  return list.filter((cap) => cap.relevantTo === "always" || uses[cap.relevantTo]);
 }
 
 /** 모델에게 넘기는 비공개 관찰. 비밀값은 바닥선에서 제거한다. */

@@ -43,10 +43,9 @@ const FLOW_ITEMS = [
   { type: "code" as WorkflowNodeType, labelKey: "auto.node.code" as const, hintKey: "auto.node.codeHint" as const, icon: <IconCode size={13} /> },
 ];
 
-// ★`notify | file-write | hep-call`을 고르게 하던 목록을 없앴다 — 그 값을 **읽는 코드가
-//   제품에 하나도 없었다.** action 노드는 적어 둔 지시문대로 돌 뿐이다. 고르게 해 두면
-//   사람은 고른 대로 돌 거라고 믿는다. 무엇을 할지는 지시문에 쓴다.
-const ACTION_ITEMS: Array<{ action: string; label: string }> = [];
+// ★예전의 `notify | file-write | hep-call` 선택지는 없앴다 — 그 값을 읽는 코드가 제품에
+//   하나도 없었다. 대신 **일반 action 항목 하나**를 둔다: 무엇을 할지는 지시문(prompt)에
+//   쓰고, 바깥을 바꾸는 노드답게 승인이 잠긴 채(ask) 놓인다.
 
 export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed) => void; onClose: () => void }) {
   const { t, locale } = useT();
@@ -157,14 +156,17 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
       </Section>
 
       <Section title={t("auto.palette.section.actions")}>
-        {ACTION_ITEMS.map((a) => (
-          <Item
-            key={a.action}
-            icon={<IconArrowUp size={13} />}
-            label={a.label}
-            onClick={() => onAdd({ type: "action", config: { action: a.action }, label: `${t("auto.node.action")}: ${a.action}` })}
-          />
-        ))}
+        <Item
+          icon={<IconArrowUp size={13} />}
+          label={t("auto.node.action")}
+          hint={t("auto.node.actionHint")}
+          onClick={() => onAdd({
+            type: "action" as WorkflowNodeType,
+            // 바깥을 바꾸는 노드는 잠긴 채 태어난다 — 기본을 낮추는 것은 사람이 따로 결정할 일.
+            config: { effect: "mutation", approval: "ask" },
+            label: t("auto.node.action"),
+          })}
+        />
       </Section>
 
       <Section title={t("auto.palette.section.flow")}>

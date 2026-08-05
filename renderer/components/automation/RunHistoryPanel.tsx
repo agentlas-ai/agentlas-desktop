@@ -152,7 +152,13 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   // 같은 실행을 다른 말로 또 설명하지 않는다. 예전에는 한 화면에서 캔버스는
   // "확인이 필요합니다 — 아직 실행하지 않았습니다"라고 하고, 이 패널은
   // "끝까지 완료되지 않았어요"라고 해서, 한 상황에 설명 두 개와 버튼 네 개가 동시에 떴다.
-  const canvasOwnsDecision = Object.keys(latest?.nodeFailures ?? {}).length > 0;
+  // ★캔버스가 결정권을 갖는 것은 **사람의 결정이 필요한 실패**(승인 대기·거부·채점표 수정)뿐이다.
+  //   예전에는 노드 실패가 하나라도 있으면 이 패널이 통째로 꺼졌는데, 환경 오류(브라우저 안 뜸·
+  //   로그인 풀림)는 **항상** 노드 실패를 만들므로 — 정확히 수리 버튼이 필요한 순간에만
+  //   [로그인 창 열기]·[실행 환경 복구]가 절대 나타나지 않았다.
+  const DECISION_CODES = new Set(["APPROVAL_REQUIRED", "APPROVAL_REJECTED", "APPROVAL_TIMED_OUT", "EVAL_STUCK", "NODE_INPUT_MISSING"]);
+  const failureCodes = Object.values(latest?.nodeFailures ?? {}).map((f) => f?.code).filter(Boolean);
+  const canvasOwnsDecision = failureCodes.length > 0 && failureCodes.every((code) => DECISION_CODES.has(code));
   const needsHelp = !canvasOwnsDecision
     && Boolean(reconciliation || regularAttentions.length > 0 || latest?.status === "error" || blockingRun);
   // 기록 원문(판정 코드 접두사 제거). 평이한 설명 아래 "자세히"로만 노출한다.
