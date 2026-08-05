@@ -87,6 +87,11 @@ export interface BlueprintCheck {
   items?: Array<{ text: string; kind: "must" | "mustNot" }>;
   /** 판정 결과를 담을 이름(기본: check<N>_verdict). */
   produces?: string;
+  /**
+   * 판정 근거가 담긴 값의 이름 — 재조회 스텝이 만든 것. 사실 확인형 검증
+   * ("값이 실제와 일치하나")은 대상만 보고 판정할 수 없어 이 근거와 대조한다.
+   */
+  evidence?: string;
 }
 
 export type BlueprintTrigger =
@@ -333,6 +338,13 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
         why: "기준이 없으면 무엇을 보고 판정할지 정할 수 없습니다.",
       });
     }
+    if (check.evidence && !produced.has(check.evidence)) {
+      push(`${at}가 근거로 삼는 "${check.evidence}" 값을 아무도 만들지 않습니다.`, {
+        id: `check-${check.afterStep}-evidence`,
+        question: `검증 근거 "${check.evidence}"은(는) 어느 단계가 가져오나요?`,
+        why: "근거 없는 사실 확인은 판정자가 지어내게 됩니다 — 재조회 단계가 먼저 필요합니다.",
+      });
+    }
     const name = check.produces?.trim() || `check${check.afterStep + 1}_verdict`;
     produced.add(name);
     checkVerdicts.add(name);
@@ -531,6 +543,7 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
           subject: check.subject,
           ...(check.criteria?.trim() ? { criteria: check.criteria } : {}),
           ...(itemRows.length ? { items: itemRows } : {}),
+          ...(typeof check.evidence === "string" && check.evidence.trim() ? { evidence: check.evidence.trim() } : {}),
           produces: check.produces?.trim()
             || (ordinal === 0 ? `check${afterStep + 1}_verdict` : `check${afterStep + 1}_${ordinal + 1}_verdict`),
         },

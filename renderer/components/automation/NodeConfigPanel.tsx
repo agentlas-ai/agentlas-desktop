@@ -400,6 +400,19 @@ export function NodeConfigPanel({
               style={{ ...inp, resize: "vertical", fontFamily: "var(--font-body)" }}
             />
           </Field>
+          <Field label={t("auto.cfg.eval_evidence")}>
+            {/* ★사실 확인형 검증("값이 실제와 일치하나")은 대상만 보고 판정 못 한다 —
+                재조회 단계가 만든 값 이름을 적으면 판정이 그 근거와 대조한다. */}
+            <input
+              value={s("evidence")}
+              onChange={(e) => onPatch({ evidence: e.target.value })}
+              placeholder="real_price"
+              style={{ ...inp, fontFamily: "var(--font-mono)" }}
+            />
+            <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
+              {t("auto.cfg.eval_evidence_hint")}
+            </div>
+          </Field>
           <Field label={t("auto.cfg.eval_produces")}>
             <input
               value={s("produces")}

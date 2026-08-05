@@ -293,6 +293,7 @@ export const GRAPH_FIELD_GRADES: Record<string, "critical" | "degradable" | "ext
   "consumes": "degradable",
   "criteria": "critical",
   "effect": "critical",
+  "evidence": "degradable",
   "ext": "extension",
   "from": "critical",
   "graphRef": "critical",

@@ -2103,6 +2103,19 @@ export async function runGraph(
           })
           : [];
         if (checklist.length > 0) {
+          // ★근거 기반 판정 — 재조회 스텝이 만든 값(config.evidence)이 있으면 함께 대조한다.
+          //   "주가가 실제와 일치하나"류는 대상만 보고는 판정 불가이고, 같은 모델이 자기
+          //   산출물을 판정하는 편향의 최대 완화책이 reference 제공이다(실패율 70%→15% 실측).
+          const evidenceVar = str(node.config, "evidence");
+          const evidenceValue = evidenceVar ? vars[evidenceVar] : undefined;
+          if (evidenceVar && (evidenceValue == null || String(evidenceValue).trim() === "")) {
+            failGraphNode(node, {
+              code: "NODE_INPUT_MISSING",
+              reason: `판정 근거로 선언된 "${evidenceVar}" 값을 앞 단계가 만들어 주지 않았습니다.`,
+              nextAction: "근거를 만드는 재조회 단계가 이 검증보다 앞에 있는지 확인하세요.",
+            });
+            return;
+          }
           let list: import("../system-agents/judgment").ChecklistVerdict;
           try {
             const { judgeChecklist } = await import("../system-agents/judgment");
@@ -2110,6 +2123,9 @@ export async function runGraph(
               kind: `graph-eval-list:${sha256Value({ items: checklist }).slice(0, 24)}`,
               items: checklist,
               subjectText: String(value),
+              ...(evidenceValue != null
+                ? { evidence: typeof evidenceValue === "string" ? evidenceValue : JSON.stringify(evidenceValue) }
+                : {}),
               ...(runSignal ? { signal: runSignal } : {}),
             });
           } catch (error) {

@@ -686,6 +686,15 @@
       "reader": "커널(judgeChecklist)",
       "status": "implemented",
       "note": "채점표 — [{text, kind:'must'|'mustNot'}]. must=있어야 한다, mustNot=하면 안 된다(판정자의 후한 버릇·꼼수 통과 방지). 없으면 criteria 한 문장을 must 1개로 판정(하위호환). 내용은 AI가 그래프를 보고 매번 쓴다 — 코드에 분야 목록 없음."
+    },
+    {
+      "name": "evidence",
+      "on": "node.config",
+      "grade": "degradable",
+      "writer": "AI(인터뷰·architect)·저작자",
+      "reader": "커널(eval)",
+      "status": "implemented",
+      "note": "판정 근거가 담긴 변수 이름 — 재조회 스텝이 만든 값. 있으면 판정이 채점표→근거→대상 순서로 대조한다(reference 기반 판정: 같은모델 자기판정 실패율 70%→15% 실측). 없으면 대상만 보고 판정."
     }
   ]
 }
