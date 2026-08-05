@@ -3838,6 +3838,20 @@ export function initStore(options: StoreInitOptions = {}): void {
   _db.exec(
     "CREATE INDEX IF NOT EXISTS idx_automation_node_approvals_node ON automation_node_approvals(automation_id, node_id, decided_at)",
   );
+  // ★판정 교정 — 사람이 "이 판정은 틀렸다"고 한 기록. 그 노드의 이후 판정에 few-shot으로
+  //   주입된다(5건이면 유의미하다는 실측 — 사람의 채점 감각이 그래프에 쌓이는 자리).
+  //   교정은 그래프(digest 봉인)가 아니라 여기 실행 밖 기록에 산다 — 항상허용과 같은 이유.
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS automation_eval_corrections (
+      automation_id  TEXT NOT NULL,
+      node_id        TEXT NOT NULL,
+      subject_preview TEXT NOT NULL,
+      corrected_verdict TEXT NOT NULL,
+      note           TEXT NOT NULL DEFAULT '',
+      created_at     TEXT NOT NULL,
+      PRIMARY KEY (automation_id, node_id, created_at)
+    )
+  `);
   // ★"항상 허용"은 **그래프가 아니라 승인 기록에** 남는다.
   //   노드 config의 approval을 ask_once로 바꾸면 graph_json이 달라져 graphDigest가 바뀌고,
   //   바로 그 순간 멈춰 있던 실행의 재개가 거부된다 — 항상 허용을 누른 사람이 그 실행을

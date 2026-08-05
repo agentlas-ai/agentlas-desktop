@@ -4107,6 +4107,40 @@ export function registerIpcHandlers(): void {
       return { ok: true, occurrenceId, always: decision === "always" };
     },
   );
+  ipcMain.handle(
+    "automations:recordEvalCorrection",
+    (_e, id: string, nodeId: string, correctedVerdict: "pass" | "fail", note?: string) => {
+      const automation = getAutomation(id);
+      if (!automation) throw new Error(`Automation not found: ${id}`);
+      if (correctedVerdict !== "pass" && correctedVerdict !== "fail") {
+        throw new Error("automation_eval_correction_invalid");
+      }
+      // 교정 대상(판정이 봤던 결과)은 마지막 실행의 체크포인트에서 서버가 찾는다 —
+      // 렌더러에 실행 변수를 다시 실어 나르지 않는다.
+      const { recordEvalCorrection } = require("./store/automations") as
+        typeof import("./store/automations");
+      const { getDb } = require("./store/db") as typeof import("./store/db");
+      const node = automation.graph?.nodes.find((n) => n.id === nodeId);
+      const subjectVar = typeof node?.config?.subject === "string" ? node.config.subject : null;
+      let preview = "";
+      try {
+        const row = getDb().prepare(
+          "SELECT checkpoint_json FROM automation_runs WHERE automation_id = ? ORDER BY started_at DESC LIMIT 1",
+        ).get(id) as { checkpoint_json: string | null } | undefined;
+        const checkpoint = row?.checkpoint_json
+          ? JSON.parse(row.checkpoint_json) as { vars?: Record<string, unknown> } : null;
+        const value = subjectVar ? checkpoint?.vars?.[subjectVar] : undefined;
+        if (value != null) preview = String(value);
+      } catch { /* 미리보기는 없어도 교정은 성립한다 */ }
+      recordEvalCorrection({
+        automationId: id, nodeId,
+        subjectPreview: preview,
+        correctedVerdict,
+        ...(note?.trim() ? { note: note.trim() } : {}),
+      });
+      return { ok: true as const };
+    },
+  );
   // 멈춘 자동화의 "지금 무엇을 하면 되는지" — 실행 가능한 조치까지 포함해 계산한다.
   ipcMain.handle("automations:planFix", async (_e, id: string) => {
     const { planAutomationFix } = await import("./automation-fix");

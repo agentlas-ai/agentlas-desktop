@@ -1054,6 +1054,7 @@ function AutomationFlowPage() {
       {Object.entries(nodeFailures).map(([failedNodeId, failure]) => {
         const nodeLabel = rfNodes.find((n) => n.id === failedNodeId)?.data?.label ?? failedNodeId;
         const awaitingApproval = failure.code === "APPROVAL_REQUIRED";
+        const evalStuck = failure.code === "EVAL_STUCK";
         return (
           <div
             key={failedNodeId}
@@ -1103,6 +1104,29 @@ function AutomationFlowPage() {
                   style={pillBtn(false)}
                 >
                   {t("auto.flow.approve_reject")}
+                </button>
+              </div>
+            ) : null}
+            {/* ★"기준이 틀렸을 수도"의 두 갈래: 채점표를 고치거나(캔버스에서),
+                판정이 틀렸다고 교정한다. 교정은 그 노드의 이후 판정에 few-shot으로
+                주입된다 — 사람의 채점 감각이 그래프에 쌓이는 자리(5건이면 유의미). */}
+            {evalStuck ? (
+              <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
+                <button
+                  className="titlebar-nodrag"
+                  onClick={() => {
+                    void (async () => {
+                      const api = ipc();
+                      if (!api || !automation) return;
+                      await api.automations.recordEvalCorrection(automation.id, failedNodeId, "pass");
+                      setMessage(locale === "en"
+                        ? "Recorded. Future judgments on this step will learn from this ruling."
+                        : "기록했습니다. 이 단계의 다음 판정부터 이 교정을 배웁니다.");
+                    })();
+                  }}
+                  style={pillBtn(false)}
+                >
+                  {t("auto.flow.eval_correct_pass")}
                 </button>
               </div>
             ) : null}

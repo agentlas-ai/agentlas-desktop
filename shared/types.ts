@@ -6230,6 +6230,13 @@ export interface AgentlasIpc {
       patch: { ops: unknown[]; rationale?: string },
     ) => Promise<{ ok: boolean; code?: string; reason?: string; nextAction?: string }>;
     /** 승인 브레이크가 걸린 단계의 결정을 기록한다. 승인은 판정이 아니라 사람의 결정이다. */
+    /** "이 판정은 틀렸다" — 교정을 남기면 그 노드의 이후 판정에 few-shot으로 주입된다. */
+    recordEvalCorrection: (
+      id: string,
+      nodeId: string,
+      correctedVerdict: "pass" | "fail",
+      note?: string,
+    ) => Promise<{ ok: boolean }>;
     decideNodeApproval: (
       id: string,
       nodeId: string,

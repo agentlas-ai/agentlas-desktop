@@ -1638,6 +1638,57 @@ export function getAlwaysAllowApproval(
   };
 }
 
+export interface AutomationEvalCorrection {
+  subjectPreview: string;
+  correctedVerdict: "pass" | "fail";
+  note: string;
+  createdAt: string;
+}
+
+/** "이 판정은 틀렸다" — 사람의 교정을 남긴다. 이후 그 노드의 판정에 few-shot으로 주입된다. */
+export function recordEvalCorrection(input: {
+  automationId: string;
+  nodeId: string;
+  subjectPreview: string;
+  correctedVerdict: "pass" | "fail";
+  note?: string;
+}): void {
+  getDb().prepare(
+    `INSERT OR REPLACE INTO automation_eval_corrections
+       (automation_id, node_id, subject_preview, corrected_verdict, note, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.automationId, input.nodeId,
+    input.subjectPreview.slice(0, 600),
+    input.correctedVerdict,
+    (input.note ?? "").slice(0, 400),
+    new Date().toISOString(),
+  );
+  emitDesktopStoreChange({ entity: "automation", id: input.automationId });
+}
+
+/** 최근 교정 몇 건 — 판정 few-shot 재료. 많이 넣을수록 좋은 게 아니라 최신이 사람의 현재 기준이다. */
+export function listEvalCorrections(
+  automationId: string,
+  nodeId: string,
+  limit = 5,
+): AutomationEvalCorrection[] {
+  const rows = getDb().prepare(
+    `SELECT subject_preview, corrected_verdict, note, created_at
+       FROM automation_eval_corrections
+      WHERE automation_id = ? AND node_id = ?
+      ORDER BY created_at DESC LIMIT ?`,
+  ).all(automationId, nodeId, limit) as Array<{
+    subject_preview: string; corrected_verdict: string; note: string; created_at: string;
+  }>;
+  return rows.map((row) => ({
+    subjectPreview: row.subject_preview,
+    correctedVerdict: row.corrected_verdict === "pass" ? "pass" : "fail",
+    note: row.note,
+    createdAt: row.created_at,
+  }));
+}
+
 export function recordNodeApproval(input: {
   automationId: string;
   occurrenceId: string;

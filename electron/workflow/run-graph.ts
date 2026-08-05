@@ -2119,10 +2119,14 @@ export async function runGraph(
           let list: import("../system-agents/judgment").ChecklistVerdict;
           try {
             const { judgeChecklist } = await import("../system-agents/judgment");
+            // 사람의 교정 기록 — 판정이 그래프 주인의 기준을 배우는 통로.
+            const { listEvalCorrections } = await import("../store/automations");
+            const corrections = listEvalCorrections(automation.id, node.id);
             list = await judgeChecklist({
               kind: `graph-eval-list:${sha256Value({ items: checklist }).slice(0, 24)}`,
               items: checklist,
               subjectText: String(value),
+              ...(corrections.length ? { corrections } : {}),
               ...(evidenceValue != null
                 ? { evidence: typeof evidenceValue === "string" ? evidenceValue : JSON.stringify(evidenceValue) }
                 : {}),
