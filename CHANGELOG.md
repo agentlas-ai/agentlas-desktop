@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.9.55 — 2026-08-05
+
+This release binds Agentlas OS v1.1.97 at
+17c2d127c39d45927d8743ceb945516ae89a7f76.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **Code steps now receive every value they read.** A graph step written as code
+  asks for the values it needs, but only the one value declared as its input
+  ever arrived. The kernel recognised `vars.x` and `vars["x"]` and missed
+  `vars.get("x")` — the ordinary way to read a dictionary in Python, and
+  therefore the way these scripts are written. Every other value silently became
+  an empty string, so the script did not fail; it produced a weaker result, and
+  the checklist that grades the run then passed it on that weaker evidence.
+  Values read only from code were invisible in the same way when deciding what a
+  graph must be given at start, so a graph could run with a hole in it and never
+  ask. Both paths now derive from one shared rule, and a gate refuses any second
+  copy of it.
+
+- **A graph can be handed to someone else.** Graphs publish to the Hub and
+  install from it. Fields named as credentials are replaced with vault
+  placeholders; a credential-shaped value in a field we cannot name blocks the
+  export rather than being quietly stripped. Model pins become tier hints so the
+  graph runs on the recipient's own models, and local user paths are removed.
+  Installing lists what is still empty — vault keys, agent slots, MCP servers —
+  instead of reporting success.
+
+- **An installed graph carries no approvals.** Approvals belong to the machine
+  that granted them, so a graph someone hands you cannot arrive already
+  permitted to post, send, or write on your behalf. Outward steps stay locked
+  until you approve them here.
+
+- **Hourly schedules stay hourly.** A schedule written as a bare cron expression
+  was not recognised and silently degraded to daily.
+
 ## 0.9.54 — 2026-08-04
 
 This release binds Agentlas OS v1.1.97 at
