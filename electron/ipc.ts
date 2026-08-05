@@ -3982,7 +3982,7 @@ export function registerIpcHandlers(): void {
         };
         continue;
       }
-      const built = buildGraphFromBlueprint(parsed.turn.blueprint);
+      const built = buildGraphFromBlueprint(parsed.turn.blueprint, currentUiLocale());
       if (!built.ok) {
         // 청사진 검증은 통과했는데 짓는 데서 걸렸다 — 이것도 형식 문제다. 같은 규율.
         attempt = {

@@ -11078,9 +11078,10 @@ button[data-toggle-state="on"] {
 /* AI 주석 팝업 — 캔버스 위 오버레이. ★불투명 필수(반투명이 아래 글자와 겹친 실측 재발 방지). */
 .automation-ai-note-pop {
   position: absolute;
-  top: 16px;
-  left: 50%;
-  transform: translateX(-50%);
+  /* ★위쪽 중앙에 두면 "말로 고치기" 입력줄을 가린다(실사용 실측) — 아래로 내린다. */
+  bottom: 44px;
+  left: 16px;
+  transform: none;
   z-index: 30;
   width: min(440px, calc(100% - 32px));
   display: grid;

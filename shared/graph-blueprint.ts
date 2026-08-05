@@ -371,6 +371,40 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
     checkVerdicts.add(name);
   }
 
+  /*
+   * ★계산한 값이 그대로 **바깥으로 나가면** 검증이 있어야 한다.
+   *
+   * 실사용 실측(2026-08-06, 주간 매출 요약): 코드가 증감률을 전부 `null`로 냈는데
+   * 아무도 안 보고 그대로 요약 엑셀로 저장될 뻔했다. 검증은 "반복이 있을 때만"
+   * 요구했기 때문에 이 그래프에는 한 칸도 없었다 — 사람이 없는 동안 도는 자동화가
+   * 빈 결과를 산출물로 만들어 내보내는 형태다.
+   *
+   * 규칙은 케이스가 아니라 구조다: 앞 단계가 만든 값을 mutation 단계가 소비하면,
+   * 그 값에 대한 검증이 그 사이에 있어야 한다. (사람이 직접 준 값이나, 바깥에
+   * 나가지 않는 그래프에는 요구하지 않는다 — 쓸데없는 관문을 늘리지 않는다.)
+   */
+  {
+    const checkedSubjects = new Set(
+      (bp.checks ?? []).map((check) => check.subject?.trim()).filter((v): v is string => !!v),
+    );
+    steps.forEach((step, index) => {
+      if (step.effect !== "mutation") return;
+      const consumes = Array.isArray(step.consumes) ? step.consumes : [];
+      for (const value of consumes) {
+        const name = String(value ?? "").trim();
+        if (!name || checkedSubjects.has(name)) continue;
+        // 앞의 어떤 단계가 만들어 낸 값인가(사람이 넣은 시작 값은 검증 대상이 아니다).
+        const madeByAStep = steps.some((s, i) => i < index && s.produces?.trim() === name);
+        if (!madeByAStep) continue;
+        push(
+          `"${step.title || `${index + 1}번째 단계`}"는 바깥으로 나가는데, 그 앞에서 만든 `
+          + `"${name}" 값이 쓸 만한지 확인하는 단계가 없습니다. `
+          + `checks[]에 {"afterStep":<그 값을 만든 단계>,"subject":"${name}",…}를 넣어 주세요.`,
+        );
+      }
+    });
+  }
+
   // ★반복이 있는데 검증이 없으면, "마음에 들 때까지"를 글자 찾기로 흉내 내게 된다.
   //   실사용 실측: 만들어진 반복 그래프가 전부 **글 쓰는 노드가 자기 결과에 "좋음"을 붙이고
   //   갈림길이 그 글자를 찾는** 모양이었다 — 만든 놈이 자기를 채점하는 단어장 판정이다.
@@ -466,7 +500,18 @@ export type BlueprintBuild =
  * 청사진을 그래프로 짓는다. **노드 id와 연결은 전부 여기서 만든다** —
  * 모델이 직접 쓰면 참/거짓 미선언 연결이나 고아 노드가 생기고, 그건 실행돼야 드러난다.
  */
-export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
+/** 길이를 넘으면 마지막 온전한 낱말까지만 남긴다 — 말이 중간에서 끊기지 않게. */
+function clipAtWord(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  // 공백이 있는 언어(영어 등)는 낱말 경계까지 물린다. 한국어처럼 띄어쓰기가 드문
+  // 문장은 그대로 자르되 말줄임표로 잘렸음을 알린다.
+  const lastSpace = cut.lastIndexOf(" ");
+  const body = lastSpace > max * 0.5 ? cut.slice(0, lastSpace) : cut;
+  return `${body.trimEnd()}…`;
+}
+
+export function buildGraphFromBlueprint(bp: GraphBlueprint, locale: "ko" | "en" = "ko"): BlueprintBuild {
   const problems = validateBlueprint(bp);
   if (problems.length) return { ok: false, problems };
 
@@ -558,7 +603,12 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
   for (const [afterStep, list] of checkAt) {
     if (!bp.steps[afterStep]) continue;
     list.forEach((check, ordinal) => {
-      const label = (check.criteria?.trim() || check.items?.find((item) => item?.text?.trim())?.text || "채점표").slice(0, 40);
+      // ★검증 노드 이름 — 접두어는 **제품 언어**를 따르고, 자를 때는 단어를 쪼개지 않는다.
+      //   예전에는 "검증: "이 하드코딩돼 영어 그래프에도 한국어가 붙었고, 40자에서
+      //   기계적으로 잘라 "…comes from the sal"처럼 말이 끊겼다(실사용 실측 2026-08-06).
+      const rawLabel = (check.criteria?.trim() || check.items?.find((item) => item?.text?.trim())?.text
+        || (locale === "en" ? "Checklist" : "채점표")).trim();
+      const label = clipAtWord(rawLabel, 40);
       const itemRows = Array.isArray(check.items)
         ? check.items
           .filter((item) => typeof item?.text === "string" && item.text.trim())
@@ -567,7 +617,7 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
       nodes.push({
         id: checkId(afterStep, ordinal),
         type: "eval",
-        label: `검증: ${label}`,
+        label: `${locale === "en" ? "Check" : "검증"}: ${label}`,
         position: { x: column(afterStep + 1) + 70 + ordinal * 60, y: 0 },
         config: {
           subject: check.subject,

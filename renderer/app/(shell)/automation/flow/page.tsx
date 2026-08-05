@@ -40,6 +40,14 @@ import { ConnectionsDialog } from "@/components/automation/ConnectionsDialog";
 /** 좌/우 패널 접힘 상태 — 화면을 다시 열어도 사용자가 정한 레이아웃을 유지한다. */
 const PANEL_STATE_KEY = "agentlas.automation.flow.panels";
 
+/**
+ * 캔버스를 맞추는 규칙 — **한 벌만 둔다.**
+ * 세 곳(마운트·패널 토글·노드 추가)이 각자 옵션을 들고 있어, 마운트에서 하한을 걸어도
+ * 뒤이은 호출이 하한 없이 덮어써 노드가 글자를 못 읽을 배율까지 줄어들었다(실사용 실측).
+ * minZoom: 넓은 그래프는 다 보여주려 하지 말고, 읽을 수 있는 크기를 지키고 밀어서 본다.
+ */
+const FIT_VIEW = { padding: 0.16, maxZoom: 1, minZoom: 0.62 } as const;
+
 export default function AutomationFlowWrapper() {
   return (
     <Suspense fallback={null}>
@@ -147,7 +155,7 @@ function AutomationFlowPage() {
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
       try {
-        fitView({ padding: 0.16, maxZoom: 1 });
+        fitView({ ...FIT_VIEW });
       } catch {
         // 캔버스가 아직 준비되지 않았으면 다음 상호작용에서 맞춰진다.
       }
@@ -474,7 +482,7 @@ function AutomationFlowPage() {
     if (!pendingFitRef.current) return;
     pendingFitRef.current = false;
     // 측정이 끝난 다음 프레임에 — 안 그러면 새 노드 크기를 모른 채 계산한다.
-    const id = window.setTimeout(() => fitView({ padding: 0.16, maxZoom: 1, duration: 150 }), 30);
+    const id = window.setTimeout(() => fitView({ ...FIT_VIEW, duration: 150 }), 30);
     return () => window.clearTimeout(id);
   }, [rfNodes.length, fitView]);
 
@@ -1271,7 +1279,7 @@ function AutomationFlowPage() {
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             fitView
-            fitViewOptions={{ padding: 0.16, maxZoom: 1 }}
+            fitViewOptions={FIT_VIEW}
             minZoom={0.3}
             maxZoom={1.6}
             proOptions={{ hideAttribution: true }}
