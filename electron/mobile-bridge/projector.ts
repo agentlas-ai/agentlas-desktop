@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import path from "node:path";
 
 import { listInstalledAgents } from "../mcp/registry";
+import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
 import { detectRuntimes } from "../runtime/detect";
 import {
   getAutomationLiveRunState,
@@ -388,6 +389,9 @@ function agentsDto(presentEnvKeys: ReadonlySet<string>): MobileBridgeAgentDto[] 
       toolLabels: [...new Set(agent.mcpServers.map((item) => displayText(item, 120)).filter(Boolean))].slice(0, 16),
       kind: agent.kind === "team" ? "team" : "agent",
       visibility: agent.visibility ?? "visible",
+      // Same predicate the Desktop roster and projects.setAgentPool use, so the
+      // phone never offers a row Desktop authority would refuse.
+      projectSelectable: isUserFacingProjectAgent(agent),
       // DESKTOP_MOBILE_BRIDGE: Only a boolean crosses the bridge. env key names,
       // hints, values, MCP config, prompts, package hashes, and local paths do not.
       requiresSetup: agent.envRequirements.some(

@@ -79,7 +79,12 @@ import {
   setChatWorkingFolder,
   unarchiveChat,
 } from "../store/chats";
-import { getProject } from "../store/projects";
+import { getProject, updateProject } from "../store/projects";
+import {
+  PROJECT_AGENT_POOL_MAX,
+  isUserFacingProjectAgent,
+  projectPoolMemberKey,
+} from "../../shared/project-agent-pool";
 import { OwnerCloudActionError } from "../marketplace/mcp-source";
 import { resumeMobileOneAutoRecovery } from "../one/mobile-auto-recovery";
 import { autoResolveOneTeamPreflight, prepareOneTeamPreflight } from "../one/team-preflight";
@@ -103,6 +108,7 @@ import type {
   McpInvocationEvent,
   McpInvocationRequest,
   OrchestrationTarget,
+  ProjectAgentPoolMember,
   Recommendation,
   RuntimeBackend,
   RuntimeKind,
@@ -1101,6 +1107,87 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         if (!project) throw new Error("The selected Desktop project is unavailable");
         return asJsonValue(
           projectMobileBridgeProject(project, { includeDetails: true }),
+          request.method,
+        );
+      }
+      // DESKTOP_MOBILE_BRIDGE: project staffing from a paired phone. Mobile may
+      // add a locally installed agent, drop any member, and reorder the pool.
+      // It may not mint a new Cloud/Hub binding and it may not rename an agent:
+      // remote members must already be bound to this exact project, and every
+      // nameSnapshot is resolved here from Desktop authority.
+      case "projects.setAgentPool": {
+        const params = guardedParams(request, ["projectId", "members", "expectedMemberKeys"]);
+        const project = getProject(requiredIdentifier(params, "projectId"));
+        if (!project) throw new Error("The selected Desktop project is unavailable");
+
+        const observedKeys = params.expectedMemberKeys;
+        if (!Array.isArray(observedKeys)) throw new TypeError("expectedMemberKeys must be an array");
+        const currentKeys = project.agentPool.map(projectPoolMemberKey);
+        if (
+          observedKeys.length !== currentKeys.length ||
+          currentKeys.some((key, index) => key !== observedKeys[index])
+        ) {
+          throw new Error("This project's team changed on Desktop. Reload the project and try again.");
+        }
+
+        const requested = params.members;
+        if (!Array.isArray(requested)) throw new TypeError("members must be an array");
+        if (requested.length === 0) throw new Error("A project keeps at least one agent");
+        if (requested.length > PROJECT_AGENT_POOL_MAX) {
+          throw new Error(`A project stages at most ${PROJECT_AGENT_POOL_MAX} agents`);
+        }
+
+        const installedById = new Map(listInstalledAgents().map((agent) => [agent.id, agent] as const));
+        const boundByKey = new Map(
+          project.agentPool.map((member) => [projectPoolMemberKey(member), member] as const),
+        );
+        const nextPool: ProjectAgentPoolMember[] = [];
+        const nextKeys = new Set<string>();
+        for (const entry of requested) {
+          if (!isRecord(entry)) throw new TypeError("members contains an unsupported project agent");
+          assertOnlyKeys(entry, ["agentId", "source", "releaseId"], "members");
+          const agentId = requiredIdentifier(entry, "agentId");
+          const source = requiredIdentifier(entry, "source");
+          if (source !== "local" && source !== "cloud" && source !== "hub") {
+            throw new TypeError("members contains an unsupported project agent source");
+          }
+          const releaseId = optionalIdentifier(entry, "releaseId", 200) ?? null;
+          let member: ProjectAgentPoolMember;
+          if (source === "local") {
+            const installed = installedById.get(agentId);
+            if (!installed) throw new Error("That agent is not installed on this Desktop");
+            if (!isUserFacingProjectAgent(installed)) {
+              throw new Error("That agent is an internal team role and cannot staff a project");
+            }
+            if (releaseId !== null) throw new TypeError("A local project agent has no releaseId");
+            member = { agentId, source, releaseId: null, nameSnapshot: installed.name };
+          } else {
+            // A phone can keep or drop an existing Cloud/Hub member. Creating one
+            // needs the borrow/lease authority Mobile deliberately does not have.
+            const bound = boundByKey.get(`${source}:${agentId}:${releaseId ?? ""}`);
+            if (!bound) {
+              throw new Error("Add Cloud or Hub agents to this project from Desktop");
+            }
+            member = bound;
+          }
+          const key = projectPoolMemberKey(member);
+          if (nextKeys.has(key)) throw new Error("That agent is already on this project");
+          nextKeys.add(key);
+          nextPool.push(member);
+        }
+
+        // The first ordered member is the Work controller, and tasks.createProject
+        // refuses anything but a locally installed agent there. Reject it now
+        // rather than letting the phone silently make the project unstartable.
+        const controller = nextPool[0];
+        if (controller.source !== "local" || !installedById.has(controller.agentId)) {
+          throw new Error("The first project agent must be installed locally on this Desktop");
+        }
+
+        const updated = updateProject(project.id, { agentPool: nextPool });
+        this.scheduleSnapshotUpdated();
+        return asJsonValue(
+          projectMobileBridgeProject(updated, { includeDetails: true }),
           request.method,
         );
       }
