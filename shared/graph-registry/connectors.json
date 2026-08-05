@@ -537,28 +537,34 @@
     },
     {
       "id": "C38",
-      "title": "커널이 도구 호출을 중개한다 (미구현)",
+      "title": "커널이 도구 호출을 중개한다",
       "from": "kernel",
       "to": "tool",
       "envelope": "graph/1/envelope.toolcall",
-      "status": "specified",
+      "status": "implemented",
       "spec": "06 §6 / 기획 스파이크 A7",
-      "note": "★지금은 **관측만** 한다(C05). 제어하려면 런타임에 도구 프록시를 꽂아야 하는데 그 가능성이 아직 미검증(A7)이다. 깨지면 dry-run 계약을 '에이전트 노드 통째 mock'으로 명시 강등해야 한다 — 지금 제어라고 적으면 dry-run 보장이 실제보다 강해 보인다.",
-      "phase": "run"
+      "note": "도구 호출 **직전**에 도는 관문(PreToolUse)으로 막는다. 샌드박스는 MCP 호출에 적용되지 않고 `--allowedTools` 류는 허용만 하므로 거절할 수 있는 지점은 여기뿐이다. 실측 2026-08-04(claude 2.1.220): PreToolUse deny가 bypassPermissions를 이기고 Bash 호출을 실제로 막았다.\n★막을 수 없는 런타임에서는 막았다고 적지 않는다 — 등급 3칸(enforced/cooperative/observed)을 실행 결과에 그대로 싣고, 시뮬레이션의 약속 문장도 가장 약한 노드 등급에 맞춰 내린다. codex는 심볼만 확인됐고 거절 실측이 무응답이라 cooperative로 둔다.",
+      "phase": "run",
+      "failures": [
+        "TOOL_BROKER_TOOL_NOT_DECLARED",
+        "TOOL_BROKER_MUTATION_IN_SIMULATION",
+        "TOOL_BROKER_PLAN_UNREADABLE",
+        "TOOL_BROKER_CALL_UNREADABLE"
+      ]
     },
     {
       "id": "C39",
-      "title": "원격 표면과 판을 협상한다 (미구현)",
+      "title": "원격 표면과 판을 협상한다",
       "from": "surface",
       "to": "kernel",
       "envelope": "graph/1/hello",
-      "status": "specified",
+      "status": "implemented",
       "spec": "06 §2.4",
       "failures": [
         "SCHEMA_UNSUPPORTED_MAJOR",
         "WIRE_KIND_UNKNOWN"
       ],
-      "note": "지금 두 표면(데스크탑·터미널)은 같은 SQLite 파일을 공유해 **전송 채널이 없다** — 그래서 협상 대신 강등(C24)으로 같은 문제를 푼다. SDK·Hub 같은 원격 표면이 생기면 그때 필요하다.",
+      "note": "`initialize`에서 부른 쪽이 말하는 판(wire)을 받아 major가 다르면 시작 자체를 거절한다.\\n★오래 미뤄져 있던 이유: 두 표면(데스크탑·터미널)이 같은 SQLite를 공유해 **전송 채널이 없었고**, 그래서 협상 대신 강등(C24)으로 같은 문제를 풀었다. C47 SDK가 별도 아티팩트로 생기면서 처음으로 앱보다 오래된 판이 존재할 수 있게 됐고, 그때 조용히 진행하면 부른 쪽은 모르는 모양의 답을 받아 자기 코드가 고장 난 줄 안다.",
       "phase": "version"
     },
     {
@@ -639,15 +645,16 @@
       "from": "person",
       "to": "trigger",
       "envelope": "graph/1/trigger.command",
-      "status": "specified",
+      "status": "implemented",
       "phase": "staffing",
-      "note": "코드 안에서 그래프를 호출하는 길. **문은 만들었고 입구가 없다** — `shared/graph-run-request.ts`가 '켜도 되는가'를 판단하고 거절도 코드·사유·행동을 갖는다. 남은 것은 그 문을 두드릴 패키지(파이썬/노드)를 내는 일이고, 그건 배포 결정이 따르는 별건이다.\\n★문을 먼저 만든 이유: 입구마다 각자 검사하면 같은 그래프가 부르는 쪽에 따라 다르게 돈다. 실제로 터미널은 SQL을 직접 쓰고 데스크탑은 IPC에서 따로 검사하고 있었다.",
+      "note": "`packages/graph-sdk`가 Agentlas 실행 파일을 `--graph-surface`로 띄워 stdio로 문을 두드린다. 판단은 `shared/graph-run-request.ts` 한 곳이 하고 SDK는 코드·사유·행동을 **그대로** 돌려준다 — 거절을 예외로 던지지 않는 이유는 사유가 스택에서 뭉개지면 부른 코드가 무엇을 고칠지 알 수 없기 때문이다.\\n통과한 요청은 직접 실행하지 않고 대기열(trigger_kind='command', v91)에 적는다. 실행은 자동화를 소유한 프로세스가 한다 — 아니면 같은 자동화가 두 곳에서 동시에 돈다.\\n★npm 발행은 안 했다(private). 배포는 별건의 결정이고, 안 올린 것을 올렸다고 적지 않는다.",
       "failures": [
         "RUN_REQUEST_REF_MISSING",
         "RUN_REQUEST_REF_AMBIGUOUS",
         "RUN_REQUEST_NOT_FOUND",
         "RUN_REQUEST_DISABLED",
-        "RUN_REQUEST_INPUT_REQUIRED"
+        "RUN_REQUEST_INPUT_REQUIRED",
+        "RUN_REQUEST_QUEUE_UNAVAILABLE"
       ]
     },
     {
@@ -656,16 +663,45 @@
       "from": "runtime",
       "to": "trigger",
       "envelope": "graph/1/trigger.command",
-      "status": "specified",
+      "status": "implemented",
       "phase": "staffing",
-      "note": "그래프를 MCP 도구로 노출해 에이전트가 '이 자동화 돌려줘'로 부르게 하는 것. **문은 만들었고 서버 표면이 없다** — 데스크탑은 지금 MCP 서버를 노출하지 않는다(실측: createServer/StdioServerTransport 0건). 서버를 여는 것은 보안 결정이 따르는 별건이다.\\nn8n의 Call n8n Workflow Tool(ai_tool 커넥션)과 Dify의 '워크플로를 Tool로 발행'이 같은 자리.",
+      "note": "`--graph-surface`가 그래프를 MCP 도구 둘로 내놓는다: `agentlas_list_graphs` · `agentlas_run_graph`. n8n의 Call n8n Workflow Tool과 Dify의 '워크플로를 Tool로 발행'이 같은 자리다.\\n★전송은 stdio뿐 — 포트를 열지 않는다. 부른 쪽이 이 프로세스를 직접 띄웠을 때만 닿으므로 네트워크에서 도달할 방법이 없다. 원격 표면은 인증·권한이 따르는 보안 결정이라 코드가 몰래 내리지 않는다.\\n★거절은 isError로 감싸지 않는다. 감싸면 부른 에이전트는 사유를 못 읽고 '도구가 고장 났다'로 처리한다.",
       "failures": [
         "RUN_REQUEST_REF_MISSING",
         "RUN_REQUEST_REF_AMBIGUOUS",
         "RUN_REQUEST_NOT_FOUND",
         "RUN_REQUEST_DISABLED",
-        "RUN_REQUEST_INPUT_REQUIRED"
+        "RUN_REQUEST_INPUT_REQUIRED",
+        "RUN_REQUEST_QUEUE_UNAVAILABLE"
       ]
+    },
+    {
+      "id": "C49",
+      "title": "코드 스텝이 스크립트를 격리 런타임에 넘긴다",
+      "from": "code",
+      "to": "runtime",
+      "envelope": "graph/1/envelope.invoke",
+      "status": "implemented",
+      "failures": [
+        "CODE_NODE_EMPTY",
+        "CODE_STEP_FAILED"
+      ],
+      "phase": "run",
+      "note": "AI가 짠 스크립트를 격리 런타임(별도 프로세스)에 넘기고 결과를 받는다. 바깥을 바꾸면 실행 전 승인."
+    },
+    {
+      "id": "C50",
+      "title": "격리 런타임이 코드 결과를 돌려준다",
+      "from": "runtime",
+      "to": "code",
+      "envelope": "graph/1/port.output",
+      "status": "implemented",
+      "failures": [
+        "CODE_NODE_EMPTY",
+        "CODE_STEP_FAILED"
+      ],
+      "phase": "run",
+      "note": "AI가 짠 스크립트를 격리 런타임(별도 프로세스)에 넘기고 결과를 받는다. 바깥을 바꾸면 실행 전 승인."
     }
   ],
   "phases": [

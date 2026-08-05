@@ -15,20 +15,28 @@ export type GraphPatchProposalParse =
   | { ok: true; patch: GraphPatch }
   | { ok: false; code: string; reason: string; nextAction: string };
 
-/** 모델에게 보낼 지시. 그래프의 현재 모양을 함께 준다 — 없으면 존재하지 않는 단계를 고치려 든다. */
-export function buildGraphArchitectPrompt(graph: WorkflowGraph): string {
+/**
+ * 모델에게 보낼 지시. 그래프의 현재 모양을 **값까지** 함께 준다.
+ *
+ * ★예전에는 `configKeys`(칸 이름만)를 줬다. 그러면 모델은 "이 노드를 이렇게 고쳐줘"를
+ *   받아도 지금 뭐가 적혀 있는지 모른 채 고친다 — 프롬프트 본문도, 판정 기준도,
+ *   갈림길의 조건값도 못 본다. "이게 무슨 그래프인지" 알 단서가 라벨뿐이었다.
+ *   사람이 노드에 달아 둔 주석(config.note)도 여기 실려 모델의 지시가 된다.
+ */
+export function buildGraphArchitectPrompt(graph: WorkflowGraph, goal?: string | null): string {
   const shape = {
     nodes: graph.nodes.map((node) => ({
       id: node.id,
       type: node.type,
       label: node.label ?? null,
-      configKeys: Object.keys(node.config ?? {}).sort(),
+      config: node.config ?? {},
     })),
     edges: graph.edges.map((edge) => ({
       id: edge.id,
       source: edge.source,
       target: edge.target,
       ...(edge.sourceHandle ? { sourceHandle: edge.sourceHandle } : {}),
+      ...(typeof edge.maxIterations === "number" ? { maxIterations: edge.maxIterations } : {}),
     })),
   };
   return [
@@ -36,14 +44,31 @@ export function buildGraphArchitectPrompt(graph: WorkflowGraph): string {
     "Return ONLY compact JSON: {\"ops\":[...],\"rationale\":\"<one short sentence>\"}.",
     "Allowed op values: addNode, editNode, removeNode, addEdge, removeEdge, setPolicy, setTrigger.",
     "addNode needs `node` ({id,type,label,config}); editNode/setPolicy need `nodeId` and `config`;",
-    "removeNode needs `nodeId`; addEdge needs `edge` ({id,source,target[,sourceHandle]});",
+    "removeNode needs `nodeId`; addEdge needs `edge` ({id,source,target[,sourceHandle][,maxIterations]});",
     "removeEdge needs `edgeId`; setTrigger needs `config`.",
-    "Node types: trigger, agent, tool, action, condition, transform, output.",
+    "Node types: trigger, agent, tool, action, condition, transform, output, eval, subgraph, code.",
+    "  · eval judges an upstream value: config {subject:\"<var name>\", produces:\"<one word>\",",
+    "    items:[{text:\"<atomic, checkable>\", kind:\"must\"|\"mustNot\"}]} — it writes",
+    "    \"pass\"/\"fail\" and <produces>_reason. Propose 2-5 must items (what must exist)",
+    "    plus 1-3 mustNot items (common failure modes: invented numbers, placeholder text).",
+    "    Items must be atomic — 'The CSV has a numeric price column', not 'The data looks good'.",
+    "    To add verification to a graph: eval after the step, then a condition on its verdict,",
+    "    with a bounded edge back to the step (maxIterations) and a forward edge onward.",
+    "  · code runs a script YOU write for EXACT computation or data-shaping a chat model would get",
+    "    quietly wrong (number math, parsing, spreadsheets): config {code:\"<script>\",",
+    "    codeLang:\"python\"|\"js\", note:\"<what it does>\"}. Upstream values arrive as `vars`;",
+    "    set `result` to what the next step reads. Never propose a code node with empty code.",
+    "  · subgraph calls another automation: config {graphRef:\"<automation id>\", input:\"...\"}.",
     "A step that changes something outside must declare config.effect = \"mutation\".",
     "Every edge leaving a condition node must set sourceHandle to \"true\" or \"false\".",
+    "An edge that loops back to an earlier step must set maxIterations (a number >= 1) —",
+    "  unbounded repetition is rejected at run time, so a loop without it is a broken proposal.",
+    "Nodes may carry config.note — a comment the person wrote on that node. Treat it as their",
+    "  instruction for that step; when they ask for changes, notes tell you what they meant.",
     "Do not invent ids that are not in the graph below, and do not reuse an existing id for a new node.",
     "If the request cannot be expressed as these ops, return {\"ops\":[]} — do not approximate.",
     "",
+    ...(goal?.trim() ? [`This automation exists to: ${goal.trim()}`] : []),
     `Current graph: ${JSON.stringify(shape)}`,
   ].join("\n");
 }

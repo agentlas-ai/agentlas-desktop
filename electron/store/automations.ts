@@ -50,6 +50,7 @@ interface AutomationRow {
   next_run_at: string | null;
   created_at: string;
   graph_json: string | null;
+  goal: string | null;
   schedule_json: string | null;
   timezone: string | null;
   end_at: string | null;
@@ -202,6 +203,7 @@ function toAutomation(row: AutomationRow): Automation {
     lastRunAt: row.last_run_at,
     nextRunAt: row.next_run_at,
     graph: parseGraph(row.graph_json),
+    goal: row.goal ?? null,
     timezone: row.timezone,
     scheduleSpec: spec,
     triggerType,
@@ -346,6 +348,8 @@ export function createAutomation(input: {
   promptTemplate: string;
   createdBy?: "user" | "agent";
   graphJson?: string | WorkflowGraph | null;
+  /** 무엇을 위한 자동화인가(인터뷰 blueprint.goal). AI가 나중에 그래프를 이해할 유일한 문장. */
+  goal?: string | null;
   scheduleJson?: string | null;
   timezone?: string | null;
   endAt?: string | null;
@@ -420,6 +424,10 @@ export function createAutomation(input: {
       input.runtimeSelection ? JSON.stringify(input.runtimeSelection) : null,
       input.projectId ?? null,
     );
+  // goal 은 additive 컬럼이라 INSERT 목록을 안 건드리고 따로 채운다(빈 값이면 안 쓴다).
+  if (input.goal && input.goal.trim()) {
+    getDb().prepare("UPDATE automations SET goal = ? WHERE id = ?").run(input.goal.trim(), id);
+  }
   const automation = getAutomation(id) as Automation;
   emitDesktopStoreChange({ entity: "automation", id });
   return automation;
@@ -1597,22 +1605,59 @@ export function clearApprovalWait(automationId: string, nodeId: string): void {
   ).run(automationId, nodeId);
 }
 
+/**
+ * ★이 노드에 "항상 허용"이 걸려 있는가. 그래프가 아니라 **승인 기록**에서 읽는다
+ *   (그래프를 바꾸면 digest가 달라져 멈춘 실행의 재개가 거부되기 때문 — db.ts 주석 참조).
+ *   거부가 나중에 오면 항상 허용은 무효다: 사람이 마음을 바꾼 것이 최신 결정이다.
+ */
+export function getAlwaysAllowApproval(
+  automationId: string,
+  nodeId: string,
+): AutomationNodeApproval | null {
+  const row = getDb().prepare(
+    `SELECT automation_id, occurrence_id, node_id, decision, decided_at, decided_by
+       FROM automation_node_approvals
+      WHERE automation_id = ? AND node_id = ?
+      ORDER BY decided_at DESC LIMIT 1`,
+  ).get(automationId, nodeId) as
+    | { automation_id: string; occurrence_id: string; node_id: string; decision: string; decided_at: string; decided_by: string }
+    | undefined;
+  if (!row || row.decision !== "approved") return null;
+  const scoped = getDb().prepare(
+    `SELECT 1 FROM automation_node_approvals
+      WHERE automation_id = ? AND node_id = ? AND occurrence_id = ? AND scope = 'always'`,
+  ).get(automationId, nodeId, row.occurrence_id);
+  if (!scoped) return null;
+  return {
+    automationId: row.automation_id,
+    occurrenceId: row.occurrence_id,
+    nodeId: row.node_id,
+    decision: row.decision as AutomationNodeApprovalDecision,
+    decidedAt: row.decided_at,
+    decidedBy: row.decided_by,
+  };
+}
+
 export function recordNodeApproval(input: {
   automationId: string;
   occurrenceId: string;
   nodeId: string;
   decision: AutomationNodeApprovalDecision;
   decidedBy?: string;
+  /** "always"면 이 노드는 앞으로 다시 묻지 않는다(그래프는 안 바뀐다). */
+  scope?: "once" | "always";
 }): AutomationNodeApproval {
   const decidedAt = new Date().toISOString();
   const decidedBy = input.decidedBy?.trim() || "user";
+  const scope = input.scope === "always" ? "always" : "once";
   getDb().prepare(
     `INSERT INTO automation_node_approvals
-       (automation_id, occurrence_id, node_id, decision, decided_at, decided_by)
-     VALUES (?, ?, ?, ?, ?, ?)
+       (automation_id, occurrence_id, node_id, decision, decided_at, decided_by, scope)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(automation_id, occurrence_id, node_id)
-     DO UPDATE SET decision = excluded.decision, decided_at = excluded.decided_at, decided_by = excluded.decided_by`,
-  ).run(input.automationId, input.occurrenceId, input.nodeId, input.decision, decidedAt, decidedBy);
+     DO UPDATE SET decision = excluded.decision, decided_at = excluded.decided_at,
+                   decided_by = excluded.decided_by, scope = excluded.scope`,
+  ).run(input.automationId, input.occurrenceId, input.nodeId, input.decision, decidedAt, decidedBy, scope);
   // 결정이 왔으니 기다린 시계는 지운다.
   clearApprovalWait(input.automationId, input.nodeId);
   emitDesktopStoreChange({ entity: "automation", id: input.automationId });

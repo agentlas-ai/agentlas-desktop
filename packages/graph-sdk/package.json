@@ -1,0 +1,9 @@
+{
+  "name": "@agentlas/graph-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "코드에서 Agentlas 그래프를 켠다 (커넥터 C47). stdio 전용 — 포트를 열지 않는다.",
+  "main": "index.mjs",
+  "exports": { ".": "./index.mjs" }
+}

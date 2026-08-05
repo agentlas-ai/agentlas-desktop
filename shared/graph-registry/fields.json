@@ -115,14 +115,17 @@
         "action",
         "output",
         "eval",
-        "transform"
+        "transform",
+        "trigger",
+        "subgraph"
       ],
       "grade": "degradable",
       "type": "string",
       "writer": "저작자·인터뷰",
       "reader": "커널 상태 쓰기",
       "unknown": "결과를 상태에 안 남긴다(다음 노드가 참조하면 검증 단계에서 걸림)",
-      "status": "implemented"
+      "status": "implemented",
+      "note": "★transform에서는 `to`가 결과 이름이다. `produces`로 적어도 같은 뜻으로 읽는다(커널이 별칭 처리). ★trigger(시작 값 이름)와 subgraph(안쪽 결과를 담을 이름)에서도 읽힌다 — 선언이 빠져 있었다."
     },
     {
       "name": "reducer",
@@ -144,7 +147,7 @@
       "reader": "커널 상태 병합",
       "unknown": "overwrite로 간주 — 다만 동시 실행 가능한 두 노드가 같은 이름에 overwrite면 REDUCER_WRITE_CONFLICT",
       "status": "implemented",
-      "note": "append 정렬은 도착 순서가 아니라 **노드 선언 순서**. LangGraph 문서가 병렬 쓰기 순서를 arbitrary라고 못박은 것과 같은 이유."
+      "note": "append 정렬은 도착 순서가 아니라 **노드 선언 순서**. LangGraph 문서가 병렬 쓰기 순서를 arbitrary라고 못박은 것과 같은 이유. ★transform에서는 `to`가 결과 이름이다. `produces`로 적어도 같은 뜻으로 읽는다(커널이 별칭 처리)."
     },
     {
       "name": "effect",
@@ -157,13 +160,15 @@
       "grade": "critical",
       "type": "enum",
       "values": [
+        "pure",
         "read",
         "mutation"
       ],
       "writer": "저작자·인터뷰",
       "reader": "시뮬레이션 차단·승인 게이트·재실행 안전",
       "unknown": "이름으로 추측하지 않는다 — 선언을 좁히기만 한다",
-      "status": "implemented"
+      "status": "implemented",
+      "note": "★커널은 pure/read/mutation 셋을 안다(run-graph.ts GraphNodeEffect). 레지스트리에 pure가 빠져 있었다."
     },
     {
       "name": "approval",
@@ -296,15 +301,16 @@
       "grade": "critical",
       "type": "enum",
       "values": [
-        "copy",
+        "identity",
+        "format",
         "json",
-        "template",
         "extract"
       ],
       "writer": "저작자",
       "reader": "커널 변환",
-      "unknown": "copy로 간주",
-      "status": "implemented"
+      "unknown": "TRANSFORM_MODE_UNKNOWN",
+      "status": "implemented",
+      "note": "★이 목록은 커널 `TRANSFORM_MODES`와 화면 선택지와 **같은 집합**이어야 한다. 예전에 여기만 copy/template로 적혀 있어, 레지스트리를 읽고 JSON을 쓴 경로가 커널에 없는 모드를 유효하다고 믿었다(실측)."
     },
     {
       "name": "from",
@@ -316,7 +322,7 @@
       "type": "string",
       "writer": "저작자",
       "reader": "커널 변환",
-      "unknown": "NODE_INPUT_MISSING",
+      "unknown": "TRANSFORM_NODE_UNCONFIGURED",
       "status": "implemented"
     },
     {
@@ -329,7 +335,7 @@
       "type": "string",
       "writer": "저작자",
       "reader": "커널 변환",
-      "unknown": "결과를 어디에 둘지 모름 = 검증 실패",
+      "unknown": "TRANSFORM_NODE_UNCONFIGURED",
       "status": "implemented"
     },
     {
@@ -411,7 +417,7 @@
       "reader": "커널 분기",
       "unknown": "EDGE_CONDITION_UNRESOLVED — 미선언 엣지는 양쪽 다 살리지 않는다",
       "status": "implemented",
-      "note": "한 칸에 네 가지 출구를 선언한다 — 참/거짓(조건), 실패(C40), 무조건(C42). 핸들을 종류마다 늘리는 대신 실패 사유는 상태 변수(<노드>_error)로 갈라 본다. n8n도 타입을 늘리지 않고 포트를 늘려 같은 문제를 풀었다."
+      "note": "한 칸에 네 가지 출구를 선언한다 — 참/거짓(조건), 실패(C40), 무조건(C42). 핸들을 종류마다 늘리는 대신 실패 사유는 상태 변수(<노드>_error)로 갈라 본다. n8n도 타입을 늘리지 않고 포트를 늘려 같은 문제를 풀었다.\n★실패 경로가 다음 단계에 넘기는 변수 이름은 두 개다: `<노드id>_error`는 **분기용 코드**(NODE_FAILED/NODE_TIMEOUT/…), `<노드id>_error_reason`이 **사람이 읽을 사유 원문**이다. 판정 노드의 `<produces>` / `<produces>_reason`과 같은 규약이다. implementedAs: run-graph.ts routeNodeFailure vars[`${node.id}_error`] · vars[`${node.id}_error_reason`]"
     },
     {
       "name": "runtime",
@@ -523,15 +529,15 @@
       "name": "catalog",
       "on": "node.config",
       "appliesTo": [
-        "tool",
-        "output"
+        "tool"
       ],
       "grade": "critical",
       "type": "string",
       "writer": "저작자",
       "reader": "커널 → 런타임 MCP 설정",
       "unknown": "TOOL_NODE_UNCONFIGURED",
-      "status": "implemented"
+      "status": "implemented",
+      "note": "★tool 노드에만 붙는다. output에도 선언돼 있어서 화면이 출력 노드에 도구 셀렉트를 그렸고, 골라도 실행에는 안 붙었다(실측)."
     },
     {
       "name": "approvalWaitHours",
@@ -573,7 +579,8 @@
       "writer": "저작자",
       "reader": "커널",
       "unknown": "기다린다(true) — 안 기다리면 다음 단계가 없는 값을 읽는다",
-      "status": "implemented"
+      "status": "specified",
+      "note": "★커널은 이 값을 읽지 않는다(항상 기다린다). false로 적어도 조용히 무시된다. 비동기 발사를 구현하기 전까지 status는 specified다 — 구현했다고 적으면 저작자가 없는 기능을 믿고 그래프를 짓는다."
     },
     {
       "name": "input",
@@ -598,6 +605,87 @@
       "reader": "연결 창 추천 버튼",
       "unknown": "단계 이름으로 떨어진다 — 빈 질의로 전부 가져오지 않는다",
       "status": "implemented"
+    },
+    {
+      "name": "kind",
+      "on": "trigger.config",
+      "grade": "critical",
+      "writer": "저작자·인터뷰",
+      "reader": "커널·화면",
+      "status": "implemented",
+      "note": "이 그래프가 시작할 때 사람에게 값을 받는지 정한다. shared/graph-trigger-input.ts가 읽는다. ★레지스트리에 선언이 없던 사실상의 공개 계약이었다.",
+      "values": [
+        "input",
+        "manual"
+      ]
+    },
+    {
+      "name": "promptLabel",
+      "on": "trigger.config",
+      "grade": "degradable",
+      "writer": "저작자·인터뷰",
+      "reader": "화면",
+      "status": "implemented",
+      "note": "시작할 때 사람에게 보여줄 질문 문구. 없으면 값 이름으로 대체된다."
+    },
+    {
+      "name": "scheduleSpec",
+      "on": "trigger.config",
+      "grade": "critical",
+      "writer": "저작자",
+      "reader": "스케줄러",
+      "status": "implemented",
+      "note": "실제 발사 시각 계산에 쓰인다(electron/store/automations.ts). 없으면 schedule 문자열로 되돌아간다."
+    },
+    {
+      "name": "code",
+      "on": "node.config",
+      "grade": "critical",
+      "writer": "AI(orch)",
+      "reader": "커널",
+      "status": "implemented",
+      "note": "AI가 짠 스크립트. 사람은 말로만 설명한다. 없으면 CODE_NODE_EMPTY."
+    },
+    {
+      "name": "codeLang",
+      "on": "node.config",
+      "grade": "degradable",
+      "writer": "AI(orch)",
+      "reader": "커널",
+      "status": "implemented",
+      "values": [
+        "python",
+        "js"
+      ],
+      "unknown": "python으로 간주",
+      "note": "기본 python(번들 인터프리터·데이터 라이브러리)."
+    },
+    {
+      "name": "note",
+      "on": "node.config",
+      "grade": "degradable",
+      "writer": "저작자·인터뷰",
+      "reader": "화면",
+      "status": "implemented",
+      "note": "사람이 단 주석·지시문 참고. 실행에 안 쓰인다."
+    },
+    {
+      "name": "consumes",
+      "on": "node.config",
+      "grade": "degradable",
+      "writer": "저작자·인터뷰",
+      "reader": "커널·검증기",
+      "status": "implemented",
+      "note": "이 단계가 읽는 값 이름. run-graph가 코드 스텝에 넘길 값을 좁히는 데도 쓴다. workflow-validate가 상류 생산자 유무를 본다."
+    },
+    {
+      "name": "items",
+      "on": "node.config",
+      "grade": "degradable",
+      "writer": "AI(인터뷰·architect)·저작자",
+      "reader": "커널(judgeChecklist)",
+      "status": "implemented",
+      "note": "채점표 — [{text, kind:'must'|'mustNot'}]. must=있어야 한다, mustNot=하면 안 된다(판정자의 후한 버릇·꼼수 통과 방지). 없으면 criteria 한 문장을 must 1개로 판정(하위호환). 내용은 AI가 그래프를 보고 매번 쓴다 — 코드에 분야 목록 없음."
     }
   ]
 }

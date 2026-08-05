@@ -1510,6 +1510,11 @@ export interface TriggerCondition {
 // 이벤트 계열(fs/chain)은 스케줄러가 아니라 트리거 매니저의 리스너에 등록 → 유휴 0.
 export type Trigger =
   | { kind: "schedule"; onlyIf?: TriggerCondition }
+  // 커넥터 C47·C48 — 바깥에서 "이거 돌려줘"가 들어오는 종류. 예약처럼 시계가 부르지도,
+  // 소스처럼 값이 변해 부르지도 않는다. **누군가 명시적으로 부른 것**이다.
+  // 그래프에 그려 넣는 트리거 노드가 아니라 대기열에 앉는 종류라, 실행 기록에서
+  // 어디서 온 요청인지가 남는다(예약 실행과 섞이면 영원히 구분할 수 없다).
+  | { kind: "command"; onlyIf?: TriggerCondition }
   | { kind: "fs"; path: string; on: "create" | "modify" | "delete"; debounceMs?: number; onlyIf?: TriggerCondition }
   | { kind: "chain"; afterAutomationId: string; onlyIf?: TriggerCondition }
   | { kind: "webhook"; token: string; onlyIf?: TriggerCondition }
@@ -1574,7 +1579,8 @@ export type WorkflowNodeType =
   | "eval" // 만든 것을 **다른 노드가** 선언된 기준으로 판정 → pass/fail + 사유
   | "transform" // 노드 간 변수 map/extract/format
   | "output" // Slack post / notification / file write / chat surface
-  | "subgraph"; // 다른 그래프를 한 단계로 부른다(함수 안의 함수)
+  | "subgraph" // 다른 그래프를 한 단계로 부른다(함수 안의 함수)
+  | "code"; // ★AI가 짠 스크립트를 격리 실행 — 정확한 계산·데이터 가공(주가·엑셀·파싱). 말로는 틀리는 것.
 
 export interface WorkflowNode {
   id: string;
@@ -1851,6 +1857,8 @@ export interface Automation {
   nextRunAt: string | null;
   /** 저장된 워크플로우 그래프(있으면 그래프 러너로 실행). null = 단일 프롬프트. */
   graph?: WorkflowGraph | null;
+  /** 무엇을 위한 자동화인가 — 인터뷰가 적은 한 문장. AI가 그래프를 이해할 단서. */
+  goal?: string | null;
   /** IANA 타임존(예 "Asia/Seoul"). cron 해석 기준. */
   timezone?: string | null;
   /** 구조화 스케줄 spec(있으면 scheduleHuman 레거시 토큰보다 우선). */
@@ -3576,6 +3584,20 @@ export interface McpInvocationRequest {
    * 안 그러면 화면에서는 도구를 붙였는데 실행에는 없는 상태가 된다.
    */
   requiredToolCatalogIds?: string[];
+  /**
+   * 커넥터 C38 — 이번 호출에 걸 **도구 중개 관문**. 런타임이 도구를 부르기 직전에 도는
+   * 훅 설정 파일 경로다. 위 `requiredToolCatalogIds`가 "무엇을 켤지"라면 이건 "무엇을
+   * 못 쓰게 할지"이고, 켜기만 하는 쪽으로는 선언을 지킬 수 없다(허용 깃발은 거절을 못 한다).
+   * 관문을 걸 수 없는 런타임에서는 **채우지 않는다** — 비워 두는 것이 정직한 상태다.
+   */
+  toolBrokerSettingsPath?: string;
+  /**
+   * 이번 호출이 **시뮬레이션**인가. 권한을 read로 낮추는 것과 다르다 — 권한은 런타임이
+   * 해석하는 요청이고, 이 표시는 중개 관문이 바깥을 바꾸는 도구를 실제로 거절하게 만든다.
+   */
+  simulation?: boolean;
+  /** 중개 관문을 만들 때 쓰는 노드 식별(실행 id / 노드 id). 커널만 채운다. */
+  toolBrokerScope?: { runId: string; nodeId: string };
   /** 자동화가 저장한 실행 도구 선호도. */
   toolMode?: AutomationToolMode;
   /** 자동화가 저장한 Hub 사용 정책. */
@@ -6165,7 +6187,7 @@ export interface AgentlasIpc {
       | { ok: false; code: string; reason: string; nextAction: string }
     >;
     /** 인터뷰로 정해진 그래프를 실제로 만든다(꺼진 상태로). */
-    createFromBlueprint: (payload: { name: string; graph: WorkflowGraph; scheduleHuman: string; targetId?: string }) => Promise<
+    createFromBlueprint: (payload: { name: string; graph: WorkflowGraph; scheduleHuman: string; targetId?: string; goal?: string }) => Promise<
       { ok: true; id: string; name: string; renamed: boolean } | { ok: false; code: string; reason: string; nextAction: string }
     >;
     /**
@@ -6211,8 +6233,9 @@ export interface AgentlasIpc {
     decideNodeApproval: (
       id: string,
       nodeId: string,
-      decision: "approved" | "rejected",
-    ) => Promise<{ ok: boolean; occurrenceId: string | null }>;
+      /** "always" = 이 노드는 앞으로 다시 묻지 않는다(그래프는 안 바뀐다 — 재개가 살아 있어야 하므로). */
+      decision: "approved" | "rejected" | "always",
+    ) => Promise<{ ok: boolean; occurrenceId: string | null; always?: boolean }>;
     listRuns: (id: string, limit?: number) => Promise<AutomationRunRecord[]>;
     listTriggerAttention: (automationId: string) => Promise<AutomationTriggerEventAttention[]>;
     reconcileTriggerEvent: (

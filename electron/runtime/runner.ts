@@ -59,6 +59,12 @@ export interface RunnerRequest {
   mcpConfigPath?: string;
   /** 위 구성의 MCP 툴 이름 prefix 목록(예: "mcp__playwright"). write/full 권한에서 자동 승인용. */
   mcpAllowedTools?: string[];
+  /**
+   * 커넥터 C38 — 도구 호출 **직전**에 도는 관문 설정 파일. Main이 노드별로 만들어 넘긴다.
+   * 위 `mcpAllowedTools`는 허용만 하고 거절을 못 하므로, 선언되지 않은 호출과 시뮬레이션 중
+   * 바깥을 바꾸는 호출을 실제로 막는 곳은 여기뿐이다. 모델도 렌더러도 이 값을 만들 수 없다.
+   */
+  toolBrokerSettingsPath?: string;
   /** Codex CLI `exec`에 붙이는 MCP config override args (`-c mcp_servers...`). */
   mcpCodexConfigArgs?: string[];
   /** Agentlas-resolved environment: agent .env first, then global multimodal fallback/vault. */

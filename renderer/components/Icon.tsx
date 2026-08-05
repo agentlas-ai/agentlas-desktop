@@ -115,6 +115,8 @@ export const IconTarget = (p: Props) =>
   svg("M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z", p);
 export const IconRoute = (p: Props) =>
   svg("M6 19a2 2 0 1 1 0-4 2 2 0 0 1 0 4zM18 9a2 2 0 1 1 0-4 2 2 0 0 1 0 4zM18 9v7a4 4 0 0 1-4 4H7M6 15V8a4 4 0 0 1 4-4h3", p);
+export const IconCode = (p: Props) =>
+  svg("M8 6 3 12l5 6M16 6l5 6-5 6M14 4l-4 16", p);
 export const IconShield = (p: Props) =>
   svg("M12 3 4 6v6c0 5 3.5 9.3 8 10 4.5-.7 8-5 8-10V6l-8-3z", p);
 export const IconFileUp = (p: Props) =>

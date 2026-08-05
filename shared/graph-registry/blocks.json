@@ -295,8 +295,8 @@
             },
             {
               "id": "eval.criteria.checks",
-              "title": "항목별 체크",
-              "status": "specified",
+              "title": "항목별 체크(채점표) — must/mustNot",
+              "status": "implemented",
               "note": "BlueprintCheck는 있으나 커널 미배선"
             }
           ]
@@ -392,8 +392,8 @@
           "status": "implemented",
           "sub": [
             {
-              "id": "transform.map.copy",
-              "title": "그대로",
+              "id": "transform.map.identity",
+              "title": "그대로 옮기기(identity)",
               "status": "implemented"
             },
             {
@@ -402,8 +402,8 @@
               "status": "implemented"
             },
             {
-              "id": "transform.map.template",
-              "title": "틀에 끼우기",
+              "id": "transform.map.format",
+              "title": "틀에 끼워 넣기(format)",
               "status": "implemented"
             },
             {
@@ -414,6 +414,65 @@
           ]
         }
       ]
+    },
+    {
+      "kind": "code",
+      "title": "AI가 짠 코드 — 정확한 계산·데이터 가공",
+      "status": "implemented",
+      "owns": [
+        "code",
+        "codeLang",
+        "effect",
+        "approval",
+        "idempotencyKey",
+        "produces",
+        "consumes",
+        "note",
+        "timeoutSeconds"
+      ],
+      "emits": "graph/1/envelope.invoke",
+      "functions": [
+        {
+          "id": "code.author",
+          "title": "무엇을 계산할지",
+          "status": "implemented",
+          "sub": [
+            {
+              "id": "code.author.describe",
+              "title": "사람은 말로만",
+              "status": "implemented"
+            },
+            {
+              "id": "code.author.script",
+              "title": "AI가 스크립트를 짠다",
+              "status": "implemented"
+            }
+          ]
+        },
+        {
+          "id": "code.run",
+          "title": "격리 실행",
+          "status": "implemented",
+          "sub": [
+            {
+              "id": "code.run.isolate",
+              "title": "별도 프로세스 + 타임아웃",
+              "status": "implemented"
+            },
+            {
+              "id": "code.run.approve",
+              "title": "바깥을 바꾸면 실행 전 승인",
+              "status": "implemented"
+            },
+            {
+              "id": "code.run.jail",
+              "title": "파일·네트워크 jail",
+              "status": "specified"
+            }
+          ]
+        }
+      ],
+      "note": "정확한 계산·데이터 가공(주가·엑셀·파싱)은 말로 시키면 조용히 틀린다. AI가 스크립트를 짜고 격리 실행한다. 경계(코드냐 말이냐)는 AI가 스텝마다 고른다. 격리는 지금 프로세스 분리+타임아웃+승인 게이트이고, 파일·네트워크 jail은 다음 슬라이스(specified)."
     },
     {
       "kind": "tool",
@@ -517,7 +576,7 @@
           "sub": [
             {
               "id": "loop.feedback.reason",
-              "title": "판정 사유 주입",
+              "title": "판정 사유 주입 — 커널이 재실행 프롬프트에 자동 첨부",
               "status": "implemented"
             }
           ]
@@ -535,7 +594,7 @@
         "input"
       ],
       "emits": "graph/1/trigger.command",
-      "note": "조사한 어느 제품도 이걸 별도 커넥터 종류로 두지 않고 **노드**로 둔다 — n8n Execute Sub-workflow, Flowise ExecuteFlow, Temporal Child Workflow. ★깊이 상한이 없으면 A가 B를 부르고 B가 A를 불러 무한 재귀가 된다.\n★캔버스에서 놓을 수 있다(팔레트·노드카드·설정패널 전부 배선). 커널만 알고 화면이 모르면 사용자에겐 없는 기능이다 — 이 종류들이 정확히 그 상태였다.",
+      "note": "안쪽 결과는 **위상 순서의 마지막**으로 고른다(값을 남긴 노드 중, output 타입 우선, always로만 들어오는 정리 단계 제외). 값이 하나도 없으면 SUBGRAPH_NO_RESULT.\\n★한때 '끝이 여럿이면 거절'로 만들었다가 되돌렸다 — 마지막 에이전트에 도구 노드를 매단 그래프, 값 가공으로 끝나는 그래프, 결과를 두 군데 남기는 그래프처럼 **아주 흔한 모양이 무더기로 죽었다**. 거절 대신 순서를 뜻 있는 것(위상)으로 바꿔, 원래 문제였던 비결정성만 없앴다.",
       "functions": [
         {
           "id": "subgraph.call",
@@ -567,7 +626,7 @@
             {
               "id": "subgraph.result.wait",
               "title": "기다리기",
-              "status": "implemented"
+              "status": "specified"
             },
             {
               "id": "subgraph.result.fail",

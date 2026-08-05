@@ -15,6 +15,11 @@ import type {
   RuntimeSelection,
 } from "../../shared/types";
 import { createHash, randomUUID } from "node:crypto";
+import {
+  dryRunPromise,
+  TOOL_BROKER_LEVEL_LABEL,
+  type ToolBrokerLevel,
+} from "../../shared/graph-tool-broker";
 import { runMcpInvocation } from "../mcp/client";
 import type { WorkforcePrepareCheckpointReceipt } from "../mcp/workforce-orchestrator";
 import { listChatMessages } from "../store/chats";
@@ -28,6 +33,7 @@ import {
   finishGraphRun,
   getNodeApproval,
   getLatestNodeApproval,
+  getAlwaysAllowApproval,
   saveGraphRunFailures,
   consumeGraphResumeCoordinate,
   appendGraphJournal,
@@ -48,6 +54,7 @@ import {
   toHumanText,
   type NodeNote,
   type NodeOutputEnvelope,
+  defaultNodeEffect,
 } from "../../shared/graph-node-protocol";
 
 type EventSink = (ev: McpInvocationEvent) => void;
@@ -107,7 +114,14 @@ function nodeTimeoutMs(node: WorkflowNode): number {
 
 function nodeEffect(node: WorkflowNode): GraphNodeEffect {
   const raw = str(node.config, "effect");
-  return raw === "pure" || raw === "read" || raw === "mutation" ? raw : "read";
+  if (raw === "pure" || raw === "read" || raw === "mutation") return raw;
+  // ★출력 노드는 **바깥으로 내보내는 블록**이다(레지스트리 선언). 그런데 이 저장소에서
+  //   output 노드에 effect를 써 주는 생성 경로가 없다(automation-emitter는 그 필드를 안 만들고,
+  //   화면 셀렉트도 기본값을 저장하지 않는다). 그래서 기본을 read로 두면 그 노드는
+  //   **시뮬레이션에서 안 막히고, 승인도 안 묻고, 멱등키 없이 3번까지 재시도된다.**
+  //   실측으로 그 조합이 나왔다: dry-run이 실제로 발행한다.
+  //   안 적힌 출력은 나가는 것으로 본다 — 안전한 쪽으로 틀리는 게 맞는 방향이다.
+  return defaultNodeEffect(node.type);
 }
 
 /**
@@ -124,7 +138,12 @@ function nodeApprovalTier(node: WorkflowNode): GraphNodeApprovalTier {
   // 선언이 없으면 자동. 다만 바깥을 바꾸는 단계는 기본을 "매번 확인"으로 둔다 —
   // 되돌리기 어려운 일을 아무 말 없이 내보내는 쪽이 더 큰 사고다(D20).
   if (raw === "auto") return "auto";
-  return nodeEffect(node) === "mutation" ? "ask" : "auto";
+  // ★기본 승인은 **사람이 적은 효과**만 보고 정한다. 추론된 효과로 정하면, 지금까지 아무 말 없이
+  //   잘 돌던 자동화가 어느 날 갑자기 전부 "승인 대기"로 멈춘다 — 사람이 아무것도 바꾸지 않았는데.
+  //   승인은 사람이 내리는 결정이라, 선언이 없을 때 우리가 대신 켜 주는 것은 도움이 아니라 고장이다.
+  //   (시뮬레이션 차단과 재시도 정책은 다르다 — 그건 안전 성질이라 선언이 없어도 보수적으로 간다.)
+  const declaredEffect = str(node.config, "effect");
+  return declaredEffect === "mutation" ? "ask" : "auto";
 }
 
 /**
@@ -1059,13 +1078,44 @@ function buildReachability(graph: WorkflowGraph): Map<string, Set<string>> {
 }
 
 /** transform 노드 — 변수 백을 순수 함수로 reshape(extract/format/json). */
-function applyTransform(node: WorkflowNode, vars: Record<string, unknown>): void {
+/** 커널이 실제로 아는 가공 방식. 화면 선택지·레지스트리와 **같은 집합**이어야 한다. */
+export const TRANSFORM_MODES = ["identity", "format", "json", "extract"] as const;
+
+/**
+ * 값을 가공한다. **실패하면 사유를 돌려준다** — 예전처럼 조용히 아무것도 안 하고 성공으로
+ * 남으면, 값이 없어 죽는 것은 다음 단계이고 화면에서 원인 노드는 초록불이 된다.
+ */
+function applyTransform(node: WorkflowNode, vars: Record<string, unknown>): GraphNodeFailure | null {
   const cfg = node.config;
   const from = str(cfg, "from");
-  const to = str(cfg, "to") ?? from;
-  if (!from || !to) return;
+  // ★`produces`를 결과 이름으로 적는 사람이 있다 — 다른 모든 노드가 그 이름을 쓰기 때문이다.
+  //   레지스트리도 transform에 `produces`가 붙는다고 선언해 왔다. 별칭으로 받는다.
+  const to = str(cfg, "to") ?? str(cfg, "produces") ?? from;
+  const label = node.label || node.id;
+  if (!from) {
+    return {
+      code: "TRANSFORM_NODE_UNCONFIGURED",
+      reason: `"${label}"에 어떤 값을 가공할지(from)가 없습니다.`,
+      nextAction: "앞 단계가 만든 값 이름을 이 단계의 '가져올 값'에 적어 주세요.",
+    };
+  }
+  if (!to) {
+    return {
+      code: "TRANSFORM_NODE_UNCONFIGURED",
+      reason: `"${label}"에 결과를 어느 이름으로 둘지(to)가 없습니다.`,
+      nextAction: "이 단계가 만들 값의 이름을 적어 주세요.",
+    };
+  }
   const source = vars[from];
   const mode = str(cfg, "mode") ?? "identity";
+  if (!TRANSFORM_MODES.includes(mode as (typeof TRANSFORM_MODES)[number])) {
+    // 모르는 방식을 그냥 복사로 처리하면, 사람이 고른 가공이 조용히 사라진 채 통과한다.
+    return {
+      code: "TRANSFORM_MODE_UNKNOWN",
+      reason: `"${label}"의 가공 방식 "${mode}"을(를) 이 제품이 모릅니다.`,
+      nextAction: `가공 방식을 ${TRANSFORM_MODES.join(" · ")} 중 하나로 바꿔 주세요.`,
+    };
+  }
   switch (mode) {
     case "json":
       try {
@@ -1094,8 +1144,10 @@ function applyTransform(node: WorkflowNode, vars: Record<string, unknown>): void
       break;
     }
     default:
+      // identity — 그대로 옮긴다. 위에서 모르는 방식은 이미 걸렀다.
       vars[to] = source;
   }
+  return null;
 }
 
 /**
@@ -1238,6 +1290,34 @@ export async function runGraph(
   const completed = new Set(checkpoint.completedNodeIds);
   const skipped = new Set(checkpoint.skippedNodeIds);
   const blockedEdges = new Set(checkpoint.blockedEdgeIds);
+  // ★재개할 때, **다시 돌 노드가 지난번에 막아 둔 출구**는 풀어 준다.
+  //
+  //   막힘은 지난 실행의 판단이다. 그 노드를 다시 돌리기로 한 이상 판단도 다시 해야 하는데,
+  //   체크포인트에서 그대로 복원하면 두 판단이 겹친다: 지난번 실패로 성공 출구가 막혀 있고,
+  //   이번에 성공하면 실패 출구까지 닫혀 **그 노드의 나가는 길이 전부 막힌다**.
+  //   그러면 하류가 통째로 건너뛰어지고 그래프는 "성공"으로 끝난다 — 아무것도 안 하고.
+  for (const edge of graph.edges) {
+    if (!completed.has(edge.source)) blockedEdges.delete(edge.id);
+  }
+  // ★문을 여는 것만으로는 부족하다 — 그 문이 닫혀 있던 동안 "안 돌 것"으로 **확정된** 노드가
+  //   체크포인트에 박혀 있다. 그것까지 되돌리지 않으면 이 해제는 자기가 노린 상황에서
+  //   100% 무효다(실측: 실패→복구 후 재개하면 정상 경로가 영영 안 돌고 그래프가 "성공"으로 끝난다).
+  {
+    const liveInbound = (nodeId: string): boolean => {
+      const ins = graph.edges.filter((e) => e.target === nodeId);
+      if (ins.length === 0) return true;
+      return ins.some((e) => !blockedEdges.has(e.id) && !skipped.has(e.source));
+    };
+    let revived = true;
+    while (revived) {
+      revived = false;
+      for (const n of graph.nodes) {
+        if (!skipped.has(n.id) || !liveInbound(n.id)) continue;
+        skipped.delete(n.id);
+        revived = true;
+      }
+    }
+  }
 
   const syncCheckpoint = (): GraphCheckpoint => {
     checkpoint!.completedNodeIds = [...completed].sort();
@@ -1314,6 +1394,8 @@ export async function runGraph(
   const dryRun = opts.dryRun === true;
   /** 시뮬레이션에서 막은 것들 — "실전이었으면 무엇이 일어났는가"를 그대로 보여주는 영수증. */
   const dryRunBlocks: GraphDryRunBlock[] = [];
+  // 커넥터 C38 — 노드별로 도구 중개가 **실제로** 어디까지 걸렸는지. 계획이 아니라 결과다.
+  const toolBrokerByNode = new Map<string, { level: ToolBrokerLevel; reason: string }>();
   /** 런타임이 보고한 토큰 누계(실행 전체 / 노드별). 보고가 없으면 상한을 집행할 수 없다. */
   let runTokensUsed = 0;
   /** 관측된 노드 1회 최대 사용량 — 다음 노드를 띄워도 되는지 판단하는 예약치. */
@@ -1360,10 +1442,19 @@ export async function runGraph(
    * 승인이 필요한 단계인데 아직 결정이 없으면 실행을 세운다.
    * 거절은 승인 없음과 다르게 말한다 — 사용자가 이미 판단한 결과이기 때문이다.
    */
+  // 채점표 실패의 흔적 — 반복 주입(loop.feedback.reason)과 EVAL_STUCK 판정용.
+  // ★실행(run) 스코프다: 새 실행은 빈 상태에서 시작한다. 같은 실행의 반복 바퀴 사이에서만 비교한다.
+  const evalFailSignatures = new Map<string, string>();
+  const evalFeedback = new Map<string, string>();
+
   const approvalGuard = (node: WorkflowNode): GraphNodeFailure | null => {
     const tier = nodeApprovalTier(node);
     if (tier === "auto") return null;
     const label = node.label || node.id;
+    // ★사람이 이 노드에 "항상 허용"을 걸어 두었으면 다시 묻지 않는다.
+    //   그 결정은 그래프가 아니라 승인 기록에 있다 — 그래프를 바꾸면 digest가 달라져
+    //   바로 그 순간 멈춘 실행의 재개가 거부되기 때문이다.
+    if (getAlwaysAllowApproval(automation.id, node.id)) return null;
     const decision = tier === "ask_once"
       ? (getNodeApproval(automation.id, checkpoint!.occurrenceId, node.id)
         ?? getLatestNodeApproval(automation.id, node.id))
@@ -1641,6 +1732,22 @@ export async function runGraph(
     for (const edge of graph.edges) {
       if (loop.body.includes(edge.source) && !backEdgeIds.has(edge.id)) blockedEdges.delete(edge.id);
     }
+    // ★막아 둔 것을 푸는 것만으로는 부족하다. 그 분기가 막혀 있는 동안 **"안 돌 것"으로
+    //   확정된 노드**는 그대로 남는다. 반복 바깥에 있는 복구·대안 단계가 정확히 이 자리에서
+    //   영영 죽는다(실측: 첫 바퀴 성공 → 실패 경로가 닫히며 복구 단계가 skip 확정 →
+    //   두 바퀴째 실제로 실패해도 복구가 안 돎).
+    //   되감기는 지난 바퀴가 내린 결정을 되돌리는 일이므로, 건너뛰기 결정도 같이 되돌린다.
+    let revived = true;
+    while (revived) {
+      revived = false;
+      for (const candidate of graph.nodes) {
+        if (!skipped.has(candidate.id) || shouldSkip(candidate.id)) continue;
+        skipped.delete(candidate.id);
+        status.set(candidate.id, "pending");
+        checkpointNodeState(candidate.id, "pending");
+        revived = true;
+      }
+    }
   };
 
   const beginNode = (node: WorkflowNode, resolvedPrompt?: string): void => {
@@ -1663,6 +1770,16 @@ export async function runGraph(
     checkpoint!.ambiguousNodeIds = checkpoint!.ambiguousNodeIds.filter((id) => id !== nodeId);
     skipped.delete(nodeId);
     completed.add(nodeId);
+    // ★잘 끝난 노드의 **실패 출구는 닫는다**.
+    //
+    // 실패했을 때 반대쪽을 막는 코드(routeNodeFailure)는 있었는데, 성공했을 때 실패 쪽을 막는
+    // 코드가 없었다. 그래서 잘 돈 노드의 error 출구에 이어 둔 "담당자에게 알려라" 단계가
+    // 실패가 없는데도 실행 대상이 됐고, {{...\_error_reason}}이 없어 NODE_INPUT_MISSING으로
+    // 죽으면서 **성공한 그래프 전체를 실패로 만들었다**(실측: 신규 리드 처리 시나리오).
+    // 사람이 보기에는 "아무 문제 없었는데 실패 알림 단계 때문에 실패"라는 앞뒤가 안 맞는 결과다.
+    for (const edge of outByNode.get(nodeId) ?? []) {
+      if (edge.handle === "error" || edge.handle === "timeout") blockedEdges.add(edge.edgeId);
+    }
     journal("node_settled", nodeId);
     checkpointNodeState(nodeId, "done");
   };
@@ -1791,8 +1908,42 @@ export async function runGraph(
     nodeFailures[node.id] = { ...failure, routed: true };
     // 평상시 출구는 막고 실패 출구만 연다 — 둘 다 살리면 성공한 척하는 분기가 생긴다.
     // 다만 `always`(정리 단계, 커넥터 C42)는 막지 않는다 — 상류가 어떻게 끝났든 도는 게 계약이다.
+    //
+    // ★그리고 실패 출구는 **다시 연다**. 같은 노드가 앞 바퀴에 성공했다면 그때 이 출구를
+    //   닫아 뒀는데(completeNode), 이번 바퀴에 실제로 실패했으니 열려 있어야 한다.
+    //   안 열면 실패가 갈 곳을 잃고 복구 단계가 영영 안 돈다 — 실측으로 정확히 그랬다.
+    //   막는 것과 여는 것을 같은 자리에서 다루지 않으면 언제나 한쪽이 남는다.
+    const reopened: string[] = [];
     for (const edge of outByNode.get(node.id) ?? []) {
-      if (edge.handle !== handle && edge.handle !== "always") blockedEdges.add(edge.edgeId);
+      if (edge.handle === handle) {
+        blockedEdges.delete(edge.edgeId);
+        // 이미 열려 있었더라도 아래를 되살려야 한다 — 닫혀 있던 동안 확정된 건너뛰기는
+        // 문을 여는 것만으로 풀리지 않는다.
+        reopened.push(edge.edgeId);
+      } else if (edge.handle !== "always") {
+        blockedEdges.add(edge.edgeId);
+      }
+    }
+    // ★출구를 다시 여는 것만으로는 부족하다 — 그 출구가 닫혀 있던 동안 **건너뛰기로 확정된**
+    //   노드는 그대로 남는다. 반복 그래프에서 첫 바퀴에 성공하면 실패 경로가 닫히고, 그 아래
+    //   복구 단계가 그 자리에서 "안 돌 것"으로 확정된다. 두 바퀴째 실제로 실패해도 이미
+    //   확정된 건너뛰기는 풀리지 않아, 복구가 영영 안 돈다(실측).
+    //   문을 열었으면 그 문으로 갈 수 있었던 것들도 함께 되살려야 한다.
+    if (reopened.length) {
+      const revive = (nodeId: string): void => {
+        if (!skipped.has(nodeId) || shouldSkip(nodeId)) return;
+        skipped.delete(nodeId);
+        status.set(nodeId, "pending");
+        checkpointNodeState(nodeId, "pending");
+        for (const out of outByNode.get(nodeId) ?? []) {
+          const target = graph.edges.find((e) => e.id === out.edgeId)?.target;
+          if (target) revive(target);
+        }
+      };
+      for (const edgeId of reopened) {
+        const target = graph.edges.find((e) => e.id === edgeId)?.target;
+        if (target) revive(target);
+      }
     }
     journal("node_routed", node.id, { via: handle, code: failure.code });
     return true;
@@ -1909,10 +2060,15 @@ export async function runGraph(
         beginNode(node);
         const subject = str(node.config, "subject");
         const criteria = str(node.config, "criteria");
-        if (!subject || !criteria) {
+        const hasItems = Array.isArray(node.config?.items)
+          && (node.config.items as unknown[]).some((entry) =>
+            typeof (entry as { text?: unknown })?.text === "string"
+            && ((entry as { text: string }).text.trim() !== ""));
+        // 기준은 채점표(items) 또는 한 문장(criteria) 어느 쪽이든 된다 — 둘 다 없을 때만 미완성.
+        if (!subject || (!criteria && !hasItems)) {
           failGraphNode(node, {
             code: "EVAL_INCOMPLETE",
-            reason: `검증 단계 "${node.label || node.id}"에 무엇을(subject) 어떤 기준으로(criteria) 볼지가 없습니다.`,
+            reason: `검증 단계 "${node.label || node.id}"에 무엇을(subject) 어떤 기준으로(채점표 또는 criteria) 볼지가 없습니다.`,
             nextAction: "검증할 값과 통과 기준을 적어 주세요.",
           });
           return;
@@ -1927,11 +2083,96 @@ export async function runGraph(
           return;
         }
         const produces = str(node.config, "produces") ?? `${node.id}_verdict`;
+
+        // ── 채점표 경로 — config.items 가 있으면 항목별 yes/no 판정 ───────────
+        // 한 문장 기준 하나의 pass/fail 은 "뭘 고쳐야 하는지"를 말하지 못한다(실측:
+        // 명시적 항목을 주면 재시도 성공 31%→98%). 항목은 must(있어야 한다)와
+        // mustNot(하면 안 된다 — 판정자의 후한 버릇·꼼수 통과를 막는다)로 나뉜다.
+        // 내용은 저작 시점에 AI가 그 그래프를 보고 쓴다 — 코드에 분야 목록은 없다.
+        const rawItems = Array.isArray(node.config?.items) ? (node.config.items as unknown[]) : null;
+        const checklist = rawItems
+          ? rawItems.flatMap((entry, index) => {
+            const row = entry as { text?: unknown; kind?: unknown };
+            const text = typeof row?.text === "string" ? row.text.trim() : "";
+            if (!text) return [];
+            return [{
+              id: `i${index + 1}`,
+              text,
+              kind: row?.kind === "mustNot" ? "mustNot" as const : "must" as const,
+            }];
+          })
+          : [];
+        if (checklist.length > 0) {
+          let list: import("../system-agents/judgment").ChecklistVerdict;
+          try {
+            const { judgeChecklist } = await import("../system-agents/judgment");
+            list = await judgeChecklist({
+              kind: `graph-eval-list:${sha256Value({ items: checklist }).slice(0, 24)}`,
+              items: checklist,
+              subjectText: String(value),
+              ...(runSignal ? { signal: runSignal } : {}),
+            });
+          } catch (error) {
+            failGraphNode(node, {
+              code: "EVAL_UNAVAILABLE",
+              reason: `검증을 수행하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+              nextAction: "잠시 뒤 다시 실행하거나, 이 단계를 지우고 다시 만들어 주세요.",
+            });
+            return;
+          }
+          if (list.verdict === null) {
+            // 판정 불가(전 항목 unknown 포함)는 실패가 아니다.
+            failGraphNode(node, {
+              code: "EVAL_UNAVAILABLE",
+              reason: "검증을 수행하지 못했습니다(판정 엔진이 채점표에 답하지 못했습니다).",
+              nextAction: "잠시 뒤 다시 실행해 주세요.",
+            });
+            return;
+          }
+          vars[produces] = list.verdict;
+          vars[`${produces}_reason`] = list.reasonText;
+          envelopes[node.id] = declaredEnvelope(node.id, node.label || node.id, {
+            json: { verdict: list.verdict, items: list.items },
+          });
+          outputs[node.id] = list.verdict === "fail" && list.reasonText
+            ? `fail:\n${list.reasonText}`
+            : list.verdict;
+          // ★저널에 사유를 함께 남긴다 — "몇 바퀴째 왜 떨어졌는지"가 실행 기록에 남게.
+          journal("node_settled", node.id, {
+            verdict: list.verdict,
+            ...(list.reasonText ? { reason: list.reasonText.slice(0, 600) } : {}),
+          });
+          if (list.verdict === "fail") {
+            // 실패 항목 id 집합 — 반복 주입과 EVAL_STUCK(같은 항목 연속 2회) 판정에 쓴다.
+            const failedIds = list.items.filter((v) => v.verdict === "no").map((v) => v.id).sort();
+            const prev = evalFailSignatures.get(node.id);
+            const signature = failedIds.join(",");
+            evalFailSignatures.set(node.id, signature);
+            evalFeedback.set(node.id, list.reasonText);
+            if (prev !== undefined && prev === signature) {
+              // ★같은 항목으로 연속 2회 — 더 돌려도 같은 이유로 떨어진다.
+              //   상한을 다 태우지 않고 멈춰 사람에게 넘긴다(기준 자체가 안 맞을 수 있다).
+              failGraphNode(node, {
+                code: "EVAL_STUCK",
+                reason: `같은 항목으로 두 번 연속 통과하지 못했습니다:\n${list.reasonText}`,
+                nextAction: "기준이 산출물과 안 맞을 수 있습니다 — 채점표를 고치거나 앞 단계의 지시를 바꿔 주세요.",
+              });
+              return;
+            }
+          } else {
+            evalFailSignatures.delete(node.id);
+            evalFeedback.delete(node.id);
+          }
+          completeNode(node.id);
+          status.set(node.id, "done");
+          return;
+        }
+
         let verdict: { verdict: "pass" | "fail" | null; reason: string | null };
         try {
           const { judgeRequired } = await import("../system-agents/judgment");
           verdict = await judgeRequired<"pass" | "fail">({
-            kind: `graph-eval:${sha256Value({ criteria }).slice(0, 24)}`,
+            kind: `graph-eval:${sha256Value({ criteria: criteria ?? "" }).slice(0, 24)}`,
             question: "Does this result meet the stated criteria?",
             labels: ["pass", "fail"] as const,
             input: `Criteria:\n${criteria}\n\nResult:\n${String(value)}`,
@@ -1977,12 +2218,110 @@ export async function runGraph(
         status.set(node.id, "done");
         return;
       }
-      case "transform":
+      case "transform": {
+        // ★값 가공은 **조용히 아무것도 안 할 수 없다**.
+        //
+        // 예전에는 `applyTransform`이 void였고 호출부가 무조건 done으로 적었다. 그래서
+        // `from`이 비었거나 모르는 mode를 쓰면 노드는 초록불인데 값은 안 생겼고, 다음 단계가
+        // NODE_INPUT_MISSING으로 죽었다. 사람이 보는 화면에서는 **성공한 단계 다음이
+        // 실패**하는 모양이라, 원인을 의심할 곳이 없다.
+        // 이 저장소는 같은 병을 tool 노드와 빈 프롬프트 agent 노드에서 이미 두 번 고쳤다.
         beginNode(node);
-        applyTransform(node, vars);
+        const applied = applyTransform(node, vars);
+        if (applied) { failGraphNode(node, applied); return; }
         completeNode(node.id);
         status.set(node.id, "done");
         return;
+      }
+      case "code": {
+        // ★AI가 짠 스크립트를 격리 실행한다 (슬라이스 1).
+        //
+        // 왜 별도 노드인가: 정확한 계산·데이터 가공(주가·엑셀·파싱)은 말로 시키면 숫자가
+        // 조용히 틀린다. 그건 판단이 아니라 코드다. 그 코드는 사람이 아니라 AI가 짜고,
+        // 여기가 그걸 돌리는 자리다.
+        beginNode(node);
+        const codeText = str(node.config, "code");
+        if (!codeText) {
+          failGraphNode(node, {
+            code: "CODE_NODE_EMPTY",
+            reason: `"${node.label || node.id}" 코드 단계에 실행할 스크립트가 없습니다.`,
+            nextAction: "이 단계가 무엇을 계산·가공할지 말로 적어 주세요 — AI가 스크립트를 채웁니다.",
+          });
+          return;
+        }
+        // ★바깥을 바꾸는 코드는 실행 **전에** 승인 게이트를 지난다(파일 쓰기·삭제·전송).
+        //   읽기·계산은 승인 없이 돈다. 시뮬레이션에서도 바깥은 안 건드린다.
+        const codeEffect = nodeEffect(node);
+        if (dryRun && codeEffect === "mutation") {
+          dryRunBlocks.push({
+            nodeId: node.id, nodeLabel: node.label || node.id, effect: codeEffect,
+            reason: `실전이었다면 "${node.label || node.id}" 코드가 바깥을 바꿨을 지점입니다. 시뮬레이션이라 돌리지 않았습니다.`,
+          });
+          envelopes[node.id] = declaredEnvelope(node.id, node.label || node.id,
+            `[시뮬레이션] "${node.label || node.id}" 코드는 실행하지 않았습니다.`);
+          outputs[node.id] = toHumanText(envelopes[node.id]);
+          completeNode(node.id);
+          status.set(node.id, "done");
+          return;
+        }
+        if (codeEffect === "mutation") {
+          const stop = approvalGuard(node);
+          if (stop) { failGraphNode(node, stop); return; }
+        }
+        // 이 단계가 읽는 값만 스크립트에 넘긴다 — 전체 변수 백을 주면 소음이 섞인다.
+        const consumeKey = str(node.config, "consumes");
+        const referenced = new Set<string>();
+        for (const m of codeText.matchAll(/vars(?:\.([A-Za-z_$][\w$]*)|\[["']([^"']+)["']\])/g)) {
+          const name = m[1] ?? m[2];
+          if (name) referenced.add(name);
+        }
+        if (consumeKey) referenced.add(consumeKey);
+        const codeVars: Record<string, unknown> = {};
+        for (const name of referenced) if (name in vars) codeVars[name] = vars[name];
+
+        const lang = str(node.config, "codeLang") === "js" ? "js" : "python";
+        const { runCodeStep } = await import("./code-runner");
+        const run = await runCodeStep({
+          code: codeText, lang,
+          vars: codeVars,
+          // 코드가 파일을 만들면 안전한 전용 폴더에서. run-graph에는 별도 워킹 폴더 개념이
+          // 없으므로 code-runner의 기본 폴더(agentRunCwd)를 쓴다.
+          timeoutSeconds: nodeTimeoutMs(node) / 1000,
+          ...(runSignal ? { signal: runSignal } : {}),
+        });
+        if (run.stdout?.trim()) journal("node_intent", node.id, { codeLog: run.stdout.slice(0, 500) });
+        if (!run.ok) {
+          failGraphNode(node, {
+            code: "CODE_STEP_FAILED",
+            reason: run.reason ?? "코드 단계가 실패했습니다.",
+            nextAction: "이 단계에 무엇을 하려는지 더 구체적으로 적어 주세요 — AI가 스크립트를 다시 짭니다.",
+          });
+          return;
+        }
+        const codeText2 = run.result == null
+          ? ""
+          : (typeof run.result === "string" ? run.result : JSON.stringify(run.result));
+        envelopes[node.id] = run.result != null && typeof run.result !== "string"
+          ? declaredEnvelope(node.id, node.label || node.id, codeText2)
+          : declaredEnvelope(node.id, node.label || node.id, codeText2);
+        outputs[node.id] = codeText2;
+        const codeProduces = str(node.config, "produces");
+        if (codeProduces) {
+          // 리듀서·충돌 검사는 문자열 형태로 태운다(다른 노드와 같은 규율).
+          const conflict = applyProduces(node, codeProduces, codeText2);
+          if (conflict) { failGraphNode(node, conflict); return; }
+          // ★그런 다음 **진짜 타입**으로 덮는다. 코드가 객체를 냈으면 객체로 남겨야
+          //   다음 코드 노드가 vars[x]["sum"]으로 읽는다. applyProduces가 문자열로
+          //   덮어써 버리면 계산 결과가 문자열이 돼 조용히 어긋난다(실측).
+          //   말 노드는 {{x}} 치환 때 substitute가 객체를 JSON으로 바꿔 준다.
+          if (reducerPolicyOf(node) === "overwrite" && run.result != null) {
+            vars[codeProduces] = run.result;
+          }
+        }
+        completeNode(node.id);
+        status.set(node.id, "done");
+        return;
+      }
       case "tool": {
         // 툴은 러너가 직접 호출하지 않는다 — 인접 agent 런타임 선언(커넥터 C06).
         // 다만 **조용히 통과시키지 않는다**: 어느 에이전트에도 안 붙었거나 무엇을
@@ -2015,9 +2354,82 @@ export async function runGraph(
         status.set(node.id, "done");
         return;
       }
-      case "agent":
-      case "action":
       case "output": {
+        // ★출력 노드의 `text`는 **지시문이 아니라 내용**이다.
+        //
+        // 예전에는 agent/action과 한 블록에 묶여 `config.text`가 그대로 프롬프트로 모델에
+        // 들어갔다. 그러면 사람이 "이걸 내보내라"고 적어 둔 완성된 결과를 모델이 마지막에
+        // 한 번 더 **다시 쓰고**, 그 재작성본이 그래프의 산출물이 된다.
+        // 실측(그래프 안의 그래프): 안쪽 결과 "영업 12 / 개발 30 / 지원 8"이 출력 노드를
+        // 지나며 "결과"로 바뀌어 바깥으로 나갔다 — 실패도 경고도 없이.
+        //
+        // 레지스트리는 이 블록을 "바깥으로 내보내기"로 선언한다(effect·approval·idempotencyKey를
+        // 소유한다). 그래서 **정말 바깥으로 나가는 출력은 여전히 런타임이 필요하다** —
+        // 아래 agent/action 경로로 내려보내되, 내용을 지시문으로 오해하지 않도록 감싸고
+        // 결과는 모델이 뱉은 말이 아니라 **선언된 내용**으로 남긴다.
+        // 바깥으로 안 나가는 출력(effect: read)은 그래프의 종착점일 뿐이라 모델을 아예 안 부른다.
+        // ★`text`는 **내용**, `prompt`는 **지시문**이다. 둘을 같은 것으로 다루면
+        //   "이걸 게시해라"라는 지시문이 게시물 본문이 된다(실측).
+        //   그래서 감싸기·결과 고정은 `text`가 있을 때만 하고, 없으면 예전처럼 지시문으로 돈다.
+        const declaredText = str(node.config, "text") ?? str(node.config, "prompt")
+          ?? automation.promptTemplate;
+        if (!declaredText) {
+          beginNode(node);
+          failGraphNode(node, {
+            code: "OUTPUT_NODE_EMPTY",
+            reason: `내보낼 것이 적혀 있지 않은 출력 단계입니다 ("${node.label || node.id}").`,
+            nextAction: "이 단계에서 무엇을 결과로 남길지 한 줄 적어 주세요.",
+          });
+          return;
+        }
+        // ★"안 적힌 것"은 read가 아니다.
+        //
+        //   `nodeEffect`의 기본값은 read인데, 이 저장소에서 output 노드에 effect를 써 주는
+        //   경로가 하나도 없다(automation-emitter는 그 필드를 아예 안 만든다). 그래서 효과를
+        //   기준으로 갈라 버리면 **발행용으로 만들어진 output 노드 전부가** 모델을 안 부르고
+        //   지나간다 — 글은 안 올라가는데 실행은 초록불이다. 레지스트리는 이 블록을
+        //   "바깥으로 내보내기"로 선언한다. 그러니 **명시적으로 read/pure라고 적힌 것만**
+        //   지나가고, 안 적힌 것은 바깥으로 나가는 것으로 본다.
+        const declaredEffect = str(node.config, "effect");
+        // ★`text`가 없으면 통과시킬 "내용"이 없다. 지시문(`prompt`)이나 자동화 기본 프롬프트를
+        //   산출물로 확정하면 "요약을 이메일로 보내라" 같은 **할 일 문장이 결과**가 된다
+        //   (그리고 그 값이 하류·부모 그래프까지 간다). 내용이 없으면 지시문대로 돌게 둔다.
+        if ((declaredEffect === "read" || declaredEffect === "pure") && str(node.config, "text")) {
+          // 안 나가는 출력이라도 사람이 걸어 둔 승인은 지킨다 — "read지만 내가 보고 넘기겠다"는
+          // 선언을 조용히 무시하면, 승인은 걸어 둔 사람에게만 없는 기능이 된다.
+          const outputApprovalStop = dryRun ? null : approvalGuard(node);
+          if (outputApprovalStop) { beginNode(node); failGraphNode(node, outputApprovalStop); return; }
+          beginNode(node);
+          const filled = substitute(declaredText, vars);
+          // 값이 없는 구멍을 빈칸으로 내보내지 않는다. 예전엔 agent 경로가 이걸 잡아 줬는데,
+          // 출력 노드를 따로 떼면서 그 검사까지 같이 빠질 뻔했다.
+          // ★`.trim()`을 조건에 걸면 **통째로 빈 결과**가 빠져나간다("{{x}}"만 있고 x가 없을 때).
+          //   값이 없는 것과 값이 비어 있는 것은 다르고, 전자는 사람이 채워야 하는 상태다.
+          if (filled.missing.length > 0) {
+            failGraphNode(node, {
+              code: "NODE_INPUT_MISSING",
+              reason: `내보낼 내용의 "${filled.missing.join(", ")}" 값을 앞 단계가 만들어 주지 않았습니다.`,
+              nextAction: "앞 단계가 그 값을 만들어 내는지, 조건 분기로 건너뛰지는 않았는지 확인하세요.",
+            });
+            return;
+          }
+          envelopes[node.id] = declaredEnvelope(node.id, node.label || node.id, filled.text);
+          outputs[node.id] = filled.text;
+          const outProduces = str(node.config, "produces");
+          if (outProduces) {
+            const conflict = applyProduces(node, outProduces, filled.text);
+            if (conflict) { failGraphNode(node, conflict); return; }
+          }
+          completeNode(node.id);
+          status.set(node.id, "done");
+          return;
+        }
+        // 바깥으로 나가는 출력은 승인·시뮬레이션·멱등키가 다 걸려야 하므로 아래 공용 경로로
+        // 흘려보낸다(return하지 않는다). 다만 내용을 지시문으로 오해하지 않도록 감싼다.
+      }
+      // eslint-disable-next-line no-fallthrough
+      case "agent":
+      case "action": {
         // 시뮬레이션에서 부수효과 노드는 아예 호출하지 않는다. 읽기 권한으로 낮춰 돌리면
         // "성공했다"는 모양만 남고 실제로는 아무것도 반영되지 않아 결과를 오해하게 된다.
         const effect = nodeEffect(node);
@@ -2060,15 +2472,60 @@ export async function runGraph(
           failGraphNode(node, budgetStop);
           return;
         }
-        const rawPrompt = str(node.config, "prompt") ?? str(node.config, "text") ?? automation.promptTemplate;
+        // ★출력 노드의 `text`는 **내용**이지 지시문이 아니다. 감싸지 않고 그대로 넘기면
+        //   모델이 그 내용을 "이렇게 써 달라는 요청"으로 읽고 다시 써 버린다(실측: 안쪽
+        //   그래프의 결과 한 줄이 "결과"로 바뀌어 나갔다). 감싸는 문장이 그 오해를 막는다.
+        // 내용이 선언된 출력만 "그대로 내보내기"로 다룬다. 지시문만 있는 출력(emitter가 만드는
+        // 모양)은 예전처럼 지시문대로 돌아야 한다 — 아니면 빈 내용을 내보내고 성공으로 남는다.
+        const outwardText = node.type === "output" ? str(node.config, "text") : undefined;
+        const isOutwardOutput = !!outwardText;
+        const declaredOutputText = outwardText ?? "";
+        // ★`prompt`가 함께 있으면 그건 **어디로 어떻게** 내보낼지다. 감싸면서 버리면
+        //   "Slack #general에 올려라" 같은 유일한 목적지 지시가 조용히 사라진다.
+        const outwardInstruction = node.type === "output" ? str(node.config, "prompt") : undefined;
+        const rawPrompt = isOutwardOutput
+          ? [
+              "아래 내용을 **그대로** 바깥으로 내보내라. 고치거나 요약하거나 다시 쓰지 마라.",
+              ...(outwardInstruction ? ["", `어떻게 내보낼지: ${outwardInstruction}`] : []),
+              "내보낸 뒤에는 어디에 어떻게 내보냈는지만 한 줄로 알려라.",
+              "",
+              "--- 내보낼 내용 ---",
+              declaredOutputText,
+            ].join("\n")
+          : (str(node.config, "prompt") ?? str(node.config, "text") ?? automation.promptTemplate);
         const substituted = substitute(rawPrompt, vars);
-        const prompt = substituted.text;
+        // ── loop.feedback.reason — 판정 사유를 재실행 프롬프트에 자동 첨부 ──────
+        // 반복 바퀴에서 채점표가 fail을 낸 뒤 이 노드가 다시 도는 경우, "지난 시도가
+        // 왜 떨어졌는지"를 커널이 붙인다. 사람이 {{x_reason}}을 프롬프트에 적어야만
+        // 전달되던 것을(실측: 아무도 안 적는다) 기본 동작으로 바꾼 것.
+        // 이미 프롬프트가 _reason 값을 직접 참조해 치환됐다면 중복 첨부하지 않는다.
+        let feedbackBlock = "";
+        if (evalFeedback.size > 0 && !isOutwardOutput) {
+          const alreadyReferenced = /\{\{\s*[\w-]*_reason\s*\}\}/.test(rawPrompt);
+          if (!alreadyReferenced) {
+            const lines = [...evalFeedback.values()].filter((text) => text.trim());
+            if (lines.length > 0) {
+              feedbackBlock = [
+                "",
+                "",
+                "[지난 시도가 통과하지 못한 이유 — 이 항목들을 고치세요]",
+                ...lines,
+              ].join("\n");
+            }
+          }
+        }
+        const prompt = substituted.text + feedbackBlock;
         // 참조한 값이 없으면 실행하지 않는다. 예전에는 프롬프트가 **통째로** 비었을 때만
         // 막았다. 그래서 "'{{topic}}' 주제로 계획을 세워줘"처럼 나머지 문장이 남아 있으면
         // 빈 구멍인 채로 실행돼, 주제 없이 지어낸 결과가 정상 완료로 기록됐다.
         // 값이 없는 것과 값이 비어 있는 것은 다르며, 전자는 사람이 채워야 하는 상태다.
-        if (substituted.missing.length > 0 && prompt.trim()) {
-          const names = substituted.missing.join(", ");
+        // ★판정 사유(_reason) 변수는 예외 — 반복의 **첫 바퀴에는 아직 판정이 없어서**
+        //   값이 없는 것이 정상이다. 이걸 막으면 사유를 명시 참조한 반복 프롬프트가
+        //   첫 바퀴에서 NODE_INPUT_MISSING으로 죽는다(게이트가 실측으로 잡은 결함).
+        //   다른 변수의 빈 구멍은 여전히 막는다 — 그건 저작 실수다.
+        const blockingMissing = substituted.missing.filter((name) => !name.endsWith("_reason"));
+        if (blockingMissing.length > 0 && prompt.trim()) {
+          const names = blockingMissing.join(", ");
           // "앞 단계가 안 만들어 줬다"와 "사람이 넣어야 하는데 안 넣었다"는 고치는 방법이
           // 완전히 다르다. 그래프가 밖에서 받아야 하는 값이면 그렇게 말해야 한다.
           const requirement = graphInputRequirement(graph);
@@ -2175,6 +2632,10 @@ export async function runGraph(
               toolMode: automation.toolMode ?? "auto",
               hubMode: automation.hubMode ?? "hub-allowed",
               runtimeSelection: runtimeSelectionForNode(node),
+              // 커넥터 C38 — 이 노드의 도구 중개 관문을 만들 자리. 실제 도구 이름은
+              // MCP 설정을 만드는 쪽만 알기 때문에 여기서는 "누구의 것인지"만 넘긴다.
+              toolBrokerScope: { runId, nodeId: node.id },
+              ...(dryRun ? { simulation: true as const } : {}),
             },
             (ev) => {
               // 소음은 소음 칸으로. 이 칸은 다음 노드의 입력이 되는 길이 아예 없다.
@@ -2257,6 +2718,7 @@ export async function runGraph(
           settleBudget(node, result.tokens);
           if (checkpointPersistenceError) throw checkpointPersistenceError;
           if (runnerError) throw new Error(runnerError);
+          if (result.toolBroker) toolBrokerByNode.set(node.id, result.toolBroker);
           const envelope = makeNodeEnvelope({
             nodeId: node.id,
             nodeLabel: node.label || node.id,
@@ -2282,7 +2744,12 @@ export async function runGraph(
             });
             return;
           }
-          outputs[node.id] = toHumanText(envelope);
+          // ★출력 노드가 다음으로 넘기는 것은 **선언된 내용**이지 모델이 뱉은 말이 아니다.
+          //   모델의 답("스레드에 올렸습니다")을 결과로 삼으면, 그래프의 산출물이 실제
+          //   내보낸 내용이 아니라 내보냈다는 보고문이 된다.
+          outputs[node.id] = isOutwardOutput
+            ? substitute(declaredOutputText, vars).text
+            : toHumanText(envelope);
           const produces = str(node.config, "produces");
           if (produces) {
             // 다음 노드로 가는 길은 result뿐이다 — notes는 이 함수가 아예 못 본다.
@@ -2291,7 +2758,11 @@ export async function runGraph(
             //   NODE_RESULT_TOO_LARGE로 노드를 죽였는데, 정본은 "필드 단위 문자 상한은
             //   어디에도 없다"이고 큰 값은 자리에 $blob 참조를 남기고 계속 간다.
             //   결과가 아예 없는 경우는 위에서 이미 NODE_NO_RESULT로 걸렀다.
-            const downstream = toDownstreamInput(envelope) ?? "";
+            // ★출력 노드는 다음 단계에도 **선언된 내용**을 넘긴다. 여기만 봉투(모델의 답)를
+            //   쓰면 실행 기록에는 내보낸 내용이, 다음 노드에는 "올렸습니다"가 가는 어긋남이 난다.
+            const downstream = isOutwardOutput
+              ? outputs[node.id]
+              : (toDownstreamInput(envelope) ?? "");
             if (envelope.meta.externalized) {
               journal("blob_externalized", node.id, {
                 bytes: envelope.meta.originalBytes ?? 0,
@@ -2491,8 +2962,90 @@ export async function runGraph(
           });
           return;
         }
-        const innerOutputs = Object.values(innerResult.outputs ?? {});
-        const innerText = innerOutputs.length ? innerOutputs[innerOutputs.length - 1] : "";
+        // ★안쪽 결과를 **결정적으로** 고른다.
+        //
+        //   예전 규칙은 `Object.values(outputs)`의 마지막 원소였는데, 그건 그래프의 뜻이 아니라
+        //   실행 스케줄의 부산물이다: 노드는 병렬로 돌아 삽입 순서가 완료 순서이고, 재개하면
+        //   체크포인트 JSON의 직렬화 순서이며, 노드 id가 "1","2" 같은 정수형이면 자바스크립트가
+        //   숫자 오름차순으로 재정렬한다. 같은 그래프가 실행마다 다른 값을 내보낼 수 있었다.
+        //
+        //   ★그렇다고 "끝이 여럿이면 실패"로 두면 멀쩡한 그래프가 무더기로 죽는다(반례로 확인):
+        //   마지막 에이전트에 tool 노드를 매단 그래프, transform으로 끝나는 그래프
+        //   (둘 다 outputs를 안 쓴다), 결과를 두 군데 남기는 그래프, 정리 단계가 output인 그래프.
+        //   그래서 **거절하지 않고, 순서를 뜻 있는 것으로 바꾼다** — 위상 순서의 마지막.
+        const innerGraph = inner.graph!;
+        const innerEdges = innerGraph.edges ?? [];
+        const innerNodes = innerGraph.nodes ?? [];
+        const innerOrder = new Map<string, number>();
+        {
+          // ★DFS 전위 번호는 위상 순서가 아니다. 다이아몬드(A→B, A→X, B→Z, X→Y, Y→Z)에서
+          //   조인 노드 Z가 먼저 방문돼 작은 번호를 받고, 위상적으로 앞선 Y가 더 큰 번호를
+          //   받는다 — "마지막"을 고르면 중간 노드가 이긴다. 진짜 위상 정렬로 센다.
+          const indegree = new Map<string, number>();
+          const adjacency = new Map<string, string[]>();
+          for (const n of innerNodes) { indegree.set(n.id, 0); adjacency.set(n.id, []); }
+          // ★되돌아가는 연결을 빼고 센다. 안 빼면 반복 머리의 indegree가 0이 안 돼
+          //   Kahn이 거기서 멈추고, **사이클 하류까지 전부** 순서를 못 받는다. 그러면
+          //   "마지막"이 그래프의 뜻이 아니라 노드 id 철자로 정해진다(실측: 최종본 대신
+          //   반복 몸통의 초안이 부모로 나갔다).
+          const innerBack = findBackEdges({ version: 1, nodes: innerNodes, edges: innerEdges });
+          for (const e of innerEdges) {
+            if (innerBack.has(e.id)) continue;
+            if (!indegree.has(e.target) || !adjacency.has(e.source)) continue;
+            indegree.set(e.target, (indegree.get(e.target) ?? 0) + 1);
+            adjacency.get(e.source)!.push(e.target);
+          }
+          // 노드 배열 순서에 기대지 않도록 id로 정렬해 꺼낸다 — 같은 그래프는 늘 같은 순서.
+          const ready = innerNodes.filter((n) => (indegree.get(n.id) ?? 0) === 0)
+            .map((n) => n.id).sort();
+          let step = 0;
+          while (ready.length) {
+            const id = ready.shift()!;
+            innerOrder.set(id, step++);
+            for (const next of (adjacency.get(id) ?? []).slice().sort()) {
+              const left = (indegree.get(next) ?? 0) - 1;
+              indegree.set(next, left);
+              if (left === 0) { ready.push(next); ready.sort(); }
+            }
+          }
+          // 사이클에 갇힌 노드(반복 그래프)는 위상 순서가 없다 — id 순으로 맨 뒤에 붙인다.
+          for (const n of innerNodes.slice().sort((a, b) => a.id.localeCompare(b.id))) {
+            if (!innerOrder.has(n.id)) innerOrder.set(n.id, step++);
+          }
+        }
+        // 정리 단계(always로만 들어오는 노드)는 그래프가 내놓은 답이 아니다.
+        const isCleanupOnly = (id: string): boolean => {
+          const ins = innerEdges.filter((e) => e.target === id);
+          return ins.length > 0 && ins.every((e) => e.sourceHandle === "always");
+        };
+        const withValue = innerNodes.filter((candidate) =>
+          candidate.type !== "trigger" &&
+          !isCleanupOnly(candidate.id) &&
+          // ★빈 결과도 결과다 — "찾은 게 없음 = 빈 문자열"이 답인 그래프가 있다.
+          //   판단 기준은 "값이 비었나"가 아니라 **그 노드가 실제로 결과를 남겼나**다.
+          (innerResult.outputs ?? {})[candidate.id] !== undefined &&
+          // 시뮬레이션에서 호출하지 않은 노드의 안내문은 값이 아니다. 값으로 세면
+          // 자리표시자 문자열이 부모의 변수로 흘러가 조건 분기를 엉뚱하게 가른다.
+          !(innerResult.dryRunBlocks ?? []).some((b) => b.nodeId === candidate.id),
+        );
+        // ★출력 노드 우선은 **끝에 있는** 출력에만 적용한다. 중간에 알림용 출력이 끼어 있으면
+        //   그게 뒤의 진짜 결과를 가로챈다(실측: "수집 완료"가 자식 그래프의 답이 됐다).
+        const preferOutput = withValue.filter((candidate) =>
+          candidate.type === "output" && !innerEdges.some((e) => e.source === candidate.id),
+        );
+        const pool = preferOutput.length ? preferOutput : withValue;
+        const chosen = pool.slice().sort(
+          (a, b) => (innerOrder.get(a.id) ?? 0) - (innerOrder.get(b.id) ?? 0),
+        ).pop();
+        if (!chosen) {
+          failGraphNode(node, {
+            code: "SUBGRAPH_NO_RESULT",
+            reason: `부른 자동화 "${inner.name}"이(가) 끝까지 돌았지만 가져올 결과를 남기지 않았습니다.`,
+            nextAction: "안쪽 자동화의 마지막 단계에 '무엇을 결과로 남길지'를 정해 주세요.",
+          });
+          return;
+        }
+        const innerText = String((innerResult.outputs ?? {})[chosen.id] ?? "");
         envelopes[node.id] = declaredEnvelope(node.id, node.label || node.id, innerText);
         outputs[node.id] = innerText;
         const producesKey = str(node.config, "produces");
@@ -2653,12 +3206,35 @@ export async function runGraph(
     console.error("[workflow] node failure detail could not be persisted:", persistError);
   }
   const failures = Object.keys(nodeFailures).length > 0 ? { nodeFailures } : {};
-  const simulation = dryRun ? { dryRun: true as const, dryRunBlocks } : {};
+  // ★시뮬레이션이 사람에게 하는 약속은 **가장 약한 노드**에 맞춘다. 한 노드라도 못 막았으면
+  //   그 실행은 "아무것도 바뀌지 않았다"고 말할 수 없다. 강한 쪽에 맞추면 정확히 그 한 노드가
+  //   밤새 바깥을 바꿔 놓는다.
+  const observedLevels = [...toolBrokerByNode.values()].map((row) => row.level);
+  const weakestBrokerLevel: ToolBrokerLevel = observedLevels.length
+    ? (["observed", "cooperative", "enforced"] as const).find((level) => observedLevels.includes(level))!
+    : "observed";
+  const brokerage = toolBrokerByNode.size
+    ? {
+        toolBrokerage: {
+          level: weakestBrokerLevel,
+          label: TOOL_BROKER_LEVEL_LABEL[weakestBrokerLevel],
+          byNode: Object.fromEntries(toolBrokerByNode),
+        },
+      }
+    : {};
+  const simulation = dryRun
+    ? {
+        dryRun: true as const,
+        dryRunBlocks,
+        // 시뮬레이션의 보장은 등급을 넘지 못한다.
+        dryRunPromise: dryRunPromise(weakestBrokerLevel),
+      }
+    : {};
   const budget = {
     tokensUsed: runTokensUsed,
     ...(budgetUnmeasured ? { budgetUnmeasured: true as const } : {}),
   };
   return ok
-    ? { ok: true, outputs, vars, ...failures, ...simulation, ...budget }
-    : { ok: false, outputs, vars, error, ...failures, ...simulation, ...budget };
+    ? { ok: true, outputs, vars, ...failures, ...simulation, ...budget, ...brokerage }
+    : { ok: false, outputs, vars, error, ...failures, ...simulation, ...budget, ...brokerage };
 }

@@ -103,6 +103,9 @@ function AutomationFlowPage() {
   /** 켤 수 있는 상태인가. 버튼 이름이 이걸 그대로 말한다. */
   const [blockedByConnections, setBlockedByConnections] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  // ★되돌아가는 연결(반복)의 상한은 **엣지에** 붙는다. 그런데 엣지를 고를 방법이 없어서,
+  //   커널이 "되돌아가는 연결을 눌러 반복 횟수를 정하세요"라고 안내하는데 누를 것이 없었다.
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -188,6 +191,7 @@ function AutomationFlowPage() {
       transform: t("auto.node.transform"),
       eval: t("auto.node.eval"),
       subgraph: t("auto.node.subgraph"),
+      code: t("auto.node.code"),
       subgraphUnset: t("auto.node.subgraphUnset"),
       producesLabel: t("auto.flow.produces"),
       consumesLabel: t("auto.flow.consumes"),
@@ -265,6 +269,10 @@ function AutomationFlowPage() {
         source: e.source,
         target: e.target,
         sourceHandle: e.sourceHandle, // 네이티브 핸들 복원 — 저장 시 진실원본으로 다시 읽힌다
+        // ★되돌아가는 반복의 상한은 **엣지에** 붙어 있다. 여기서 안 들고 오면 저장할 때
+        //   같이 사라지고, 잘 돌던 그래프가 그때부터 LOOP_BOUND_UNDECLARED로 거절된다
+        //   (실측: 자연어로 만든 반복 그래프를 캔버스에서 열었다 저장하기만 해도 죽었다).
+        data: typeof e.maxIterations === "number" ? { maxIterations: e.maxIterations } : undefined,
         label: e.sourceHandle,
         animated: false,
         style: { stroke: "var(--muted-deep)", strokeWidth: 1.4 },
@@ -406,6 +414,10 @@ function AutomationFlowPage() {
     if (!editing) return [];
     const graph: WorkflowGraph = {
       version: 1,
+      // ★실행 총계 상한(budget)은 캔버스가 만들지도 지우지도 않는다 — 그대로 들고 간다.
+      //   엣지의 반복 상한과 같은 병인데 이쪽이 더 조용하다: 상한이 사라지면 실행이 거절되는
+      //   게 아니라 **그냥 상한 없이 잘 돈다.** 아무도 알아채지 못한다.
+      ...(seedGraph?.budget ? { budget: seedGraph.budget } : {}),
       nodes: rfNodes.map((n) => ({
         id: n.id,
         type: (n.type as WorkflowNode["type"]) ?? "agent",
@@ -424,6 +436,10 @@ function AutomationFlowPage() {
           : typeof e.label === "string" && e.label
             ? { sourceHandle: e.label }
             : {}),
+        // ★상한은 캔버스가 만들지도 지우지도 않는다 — 있으면 그대로 되돌려 놓는다.
+        ...(typeof (e.data as { maxIterations?: unknown } | undefined)?.maxIterations === "number"
+          ? { maxIterations: (e.data as { maxIterations: number }).maxIterations }
+          : {}),
       })),
     };
     return validateWorkflow(graph);
@@ -443,6 +459,52 @@ function AutomationFlowPage() {
       label: rf.data.label,
     };
   }, [selectedNodeId, rfNodes]);
+
+  /**
+   * 되돌아가는 연결인가 — 트리거에서 오는 순서상 **뒤에서 앞으로** 가는 연결이다.
+   * 커널이 반복으로 읽는 것과 같은 모양이고, 이것만 상한을 요구한다.
+   */
+  const backEdgeIds = useMemo(() => {
+    // ★DFS 색칠 — 커널 findBackEdges·검증기와 같은 방식. 전위 번호 비교 휴리스틱은
+    //   사이클 없는 다이아몬드를 반복으로 오인해, 반복도 아닌 연결에 상한을 물어본다.
+    const adjacency = new Map<string, { to: string; edgeId: string }[]>();
+    for (const e of rfEdges) {
+      if (!adjacency.has(e.source)) adjacency.set(e.source, []);
+      adjacency.get(e.source)!.push({ to: e.target, edgeId: e.id });
+    }
+    const color = new Map<string, "gray" | "black">();
+    const back = new Set<string>();
+    const visit = (id: string): void => {
+      color.set(id, "gray");
+      for (const out of adjacency.get(id) ?? []) {
+        const c = color.get(out.to);
+        if (c === "gray") back.add(out.edgeId);
+        else if (c === undefined) visit(out.to);
+      }
+      color.set(id, "black");
+    };
+    // ★커널 findBackEdges와 **같은 시작점 규칙**: 들어오는 연결이 없는 노드부터 돈다.
+    //   DFS 색칠에서 어느 엣지가 되돌아가는 연결이 되는지는 시작점에 달려 있다.
+    //   순서가 다르면 화면은 A→B에 상한을 물어보고 커널은 B→A를 요구해, 저장은 통과하는데
+    //   실행만 거절되고 상한을 넣을 자리는 없는 상태로 되돌아간다.
+    const hasIncoming = new Set(rfEdges.map((e) => e.target));
+    for (const n of rfNodes) if (!hasIncoming.has(n.id) && !color.has(n.id)) visit(n.id);
+    for (const n of rfNodes) if (!color.has(n.id)) visit(n.id);
+    return back;
+  }, [rfEdges, rfNodes]);
+
+  const selectedEdge = useMemo(
+    () => (selectedEdgeId ? rfEdges.find((e) => e.id === selectedEdgeId) ?? null : null),
+    [selectedEdgeId, rfEdges],
+  );
+
+  const setLoopBound = useCallback((value: number | null) => {
+    if (!selectedEdgeId) return;
+    setRfEdges((eds) => eds.map((e) => (e.id === selectedEdgeId
+      ? { ...e, data: value == null ? undefined : { ...(e.data ?? {}), maxIterations: value } }
+      : e)));
+    setDirty(true);
+  }, [selectedEdgeId]);
 
   function addPaletteNode(seed: PaletteNodeSeed) {
     const nid = `n${seq.current++}-${Date.now()}`;
@@ -492,6 +554,10 @@ function AutomationFlowPage() {
   function toGraph(): WorkflowGraph {
     return {
       version: 1,
+      // ★실행 총계 상한(budget)은 캔버스가 만들지도 지우지도 않는다 — 그대로 들고 간다.
+      //   엣지의 반복 상한과 같은 병인데 이쪽이 더 조용하다: 상한이 사라지면 실행이 거절되는
+      //   게 아니라 **그냥 상한 없이 잘 돈다.** 아무도 알아채지 못한다.
+      ...(seedGraph?.budget ? { budget: seedGraph.budget } : {}),
       nodes: rfNodes.map((n) => ({
         id: n.id,
         type: (n.type as WorkflowNode["type"]) ?? "agent",
@@ -510,6 +576,10 @@ function AutomationFlowPage() {
           : typeof e.label === "string" && e.label
             ? { sourceHandle: e.label }
             : {}),
+        // ★상한은 캔버스가 만들지도 지우지도 않는다 — 있으면 그대로 되돌려 놓는다.
+        ...(typeof (e.data as { maxIterations?: unknown } | undefined)?.maxIterations === "number"
+          ? { maxIterations: (e.data as { maxIterations: number }).maxIterations }
+          : {}),
       })),
     };
   }
@@ -611,7 +681,7 @@ function AutomationFlowPage() {
     }
   }
 
-  async function decideApproval(nodeId: string, decision: "approved" | "rejected") {
+  async function decideApproval(nodeId: string, decision: "approved" | "rejected" | "always") {
     const api = ipc();
     if (!api || !automation) return;
     setApprovalBusy(true);
@@ -629,7 +699,11 @@ function AutomationFlowPage() {
         delete next[nodeId];
         return next;
       });
-      if (decision === "approved") {
+      if (decision === "always") {
+        setMessage(locale === "en"
+          ? "Always allowed. This step will not ask again."
+          : "항상 허용했습니다. 이 단계는 다시 묻지 않습니다.");
+      } else if (decision === "approved") {
         setMessage(locale === "en"
           ? "Approved. Run it again to continue from this step."
           : "승인했습니다. 다시 실행하면 이 단계부터 이어집니다.");
@@ -1010,6 +1084,18 @@ function AutomationFlowPage() {
                 >
                   {t("auto.flow.approve_and_continue")}
                 </button>
+                {/* ★한 번 믿기로 한 단계는 매번 묻지 않는다. 이 결정은 그래프가 아니라
+                    승인 기록에 남는다 — 그래프를 바꾸면 digest가 달라져 지금 멈춰 있는
+                    바로 그 실행의 재개가 거부되기 때문이다. */}
+                <button
+                  className="titlebar-nodrag"
+                  disabled={approvalBusy}
+                  onClick={() => void decideApproval(failedNodeId, "always")}
+                  style={pillBtn(false)}
+                  title={t("auto.flow.approve_always_hint")}
+                >
+                  {t("auto.flow.approve_always")}
+                </button>
                 <button
                   className="titlebar-nodrag"
                   disabled={approvalBusy}
@@ -1113,8 +1199,9 @@ function AutomationFlowPage() {
             nodesConnectable={editing}
             elementsSelectable
             deleteKeyCode={editing ? ["Backspace", "Delete"] : null}
-            onNodeClick={(_, node) => setSelectedNodeId(node.id)}
-            onPaneClick={() => setSelectedNodeId(null)}
+            onNodeClick={(_, node) => { setSelectedNodeId(node.id); setSelectedEdgeId(null); }}
+            onEdgeClick={(_, e) => { setSelectedEdgeId(e.id); setSelectedNodeId(null); }}
+            onPaneClick={() => { setSelectedNodeId(null); setSelectedEdgeId(null); }}
           >
             <Background color="var(--paper-edge)" gap={24} size={1} />
             <Controls showInteractive={false} />
@@ -1153,6 +1240,13 @@ function AutomationFlowPage() {
           </div>
           {editing && paletteOpen ? (
             <NodePalette onAdd={addPaletteNode} onClose={() => setPaletteOpen(false)} />
+          ) : editing && selectedEdge ? (
+            <LoopBoundPanel
+              isBackEdge={backEdgeIds.has(selectedEdge.id)}
+              value={(selectedEdge.data as { maxIterations?: number } | undefined)?.maxIterations ?? null}
+              onChange={setLoopBound}
+              onClose={() => setSelectedEdgeId(null)}
+            />
           ) : editing && selectedNode ? (
             <NodeConfigPanel node={selectedNode} onPatch={patchSelected} onLabel={labelSelected} onDelete={deleteSelected} onClose={() => setSelectedNodeId(null)} timezone={automation?.timezone ?? null} automationId={automation?.id} />
           ) : selectedNode ? (
@@ -1164,6 +1258,65 @@ function AutomationFlowPage() {
         </aside>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * 되돌아가는 연결의 반복 상한을 정하는 자리.
+ *
+ * ★이게 없어서 생기던 일: 캔버스에서 반복(뒤로 가는 연결)을 그리면 저장은 되는데
+ *   실행만 `LOOP_BOUND_UNDECLARED`로 거절됐고, 그 사유가 안내하는 "되돌아가는 연결을 눌러
+ *   반복 횟수를 정하세요"는 존재하지 않는 화면을 가리켰다. 상한을 넣을 방법이 아예 없어서
+ *   사람은 그 그래프를 영영 못 돌렸다.
+ * 상한을 요구하는 이유는 따로 있다 — 자동화는 사람이 보지 않는 동안 돌기 때문에,
+ *   멈출 지점이 없는 반복은 아무도 멈춰 줄 수 없다.
+ */
+function LoopBoundPanel({
+  isBackEdge, value, onChange, onClose,
+}: {
+  isBackEdge: boolean;
+  value: number | null;
+  onChange: (v: number | null) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="automation-node-panel" data-one-content-slot>
+      <div className="automation-node-panel-head">
+        <strong>{isBackEdge ? "되돌아가는 연결" : "연결"}</strong>
+        <button type="button" className="ghost-btn" onClick={onClose}>닫기</button>
+      </div>
+      {isBackEdge ? (
+        <>
+          <p className="automation-node-panel-hint">
+            앞 단계로 되돌아갑니다. 몇 바퀴까지 돌지 정해야 실행할 수 있어요 —
+            자동화는 아무도 보고 있지 않을 때 돌기 때문입니다.
+          </p>
+          <label className="automation-field">
+            <span>최대 반복 횟수</span>
+            <input
+              type="number" min={1} max={50}
+              value={value ?? ""}
+              placeholder="예: 3"
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                onChange(Number.isFinite(n) && n >= 1 && n <= 50 ? Math.round(n) : null);
+              }}
+            />
+          </label>
+          <div className="automation-chip-row">
+            {[2, 3, 5].map((n) => (
+              <button key={n} type="button" className={value === n ? "chip chip-on" : "chip"} onClick={() => onChange(n)}>
+                {n}번
+              </button>
+            ))}
+          </div>
+        </>
+      ) : (
+        <p className="automation-node-panel-hint">
+          앞에서 뒤로 가는 보통 연결입니다. 따로 정할 것이 없어요.
+        </p>
+      )}
     </div>
   );
 }

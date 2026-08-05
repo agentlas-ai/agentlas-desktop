@@ -120,10 +120,20 @@ const corePatterns = [
   /^shared\/automation-tool-policy\.ts$/,
   /^shared\/graph-tool-binding\.ts$/,
   /^shared\/graph-trigger-input\.ts$/,
+  // 도구 중개·바깥 표면·레지스트리·저작 화면도 같은 이유로 코어다 — 여기가 바뀌면
+  // 부수효과가 나가는 방식이나 사람이 만들 수 있는 것이 바뀐다.
+  /^shared\/graph-tool-broker\.ts$/,
+  /^shared\/graph-run-request\.ts$/,
+  /^shared\/graph-node-protocol\.ts$/,
+  /^shared\/graph-registry\//,
+  /^electron\/graph-surface\//,
+  /^renderer\/lib\/workflow-validate\.ts$/,
+  /^renderer\/components\/automation\//,
+  /^renderer\/app\/\(shell\)\/automation\//,
   // 자식 프로세스 출력 디코딩 — 여기가 깨지면 결과물의 한글이 깨진다.
   /^electron\/runtime\//,
   /^scripts\/lib\/agentlas-core-root\.cjs$/,
-  /^scripts\/test-(?:project-bootstrap-(?:desktop|core)|project-memory-read-boundary|model2vec-hybrid-parity|memory-hybrid-retrieval|curator-nest-core-query|v56-experience-cloud-migration|codex-model-discovery|workload-routing|build-workload-routing|hephaestus-settings-migration|auto-router-gates|stormbreaker-core-harness|stormbreaker-swarm-contract|swarm-engine|automation-result-contract|graph-kernel-contract|graph-canvas-ui|graph-patch-contract|graph-architect-contract|graph-interview-contract|graph-tool-binding-contract|graph-connections-ui|automation-honesty-contract|graph-describe-ui|stream-decode-contract|owned-agent-runtime-prompts|borrowed-task-force|borrowed-agent-fail-closed)\.cjs$/,
+  /^scripts\/test-(?:project-bootstrap-(?:desktop|core)|project-memory-read-boundary|model2vec-hybrid-parity|memory-hybrid-retrieval|curator-nest-core-query|v56-experience-cloud-migration|codex-model-discovery|workload-routing|build-workload-routing|hephaestus-settings-migration|auto-router-gates|stormbreaker-core-harness|stormbreaker-swarm-contract|swarm-engine|automation-result-contract|graph-kernel-contract|graph-canvas-ui|graph-patch-contract|graph-architect-contract|graph-interview-contract|graph-tool-binding-contract|graph-connections-ui|automation-honesty-contract|graph-describe-ui|stream-decode-contract|owned-agent-runtime-prompts|borrowed-task-force|borrowed-agent-fail-closed|graph-scenarios|graph-loop-authoring|graph-authorability|graph-tool-broker-contract|graph-surface-contract|interview-loop-live|graph-progress-live|graph-registry-conformance|graph-node-protocol-contract|graph-run-request-contract|graph-canvas-parity|graph-progress-contract|run-status-split-contract|run-status-stream-contract)\.cjs$/,
 ];
 
 const planScopes = (rawFiles, options = {}) => {

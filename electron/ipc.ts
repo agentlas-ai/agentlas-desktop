@@ -3807,7 +3807,7 @@ export function registerIpcHandlers(): void {
     const { evaluateGraphPatch, graphPatchNeedsApproval } = require("./workflow/graph-patch") as typeof import("./workflow/graph-patch");
     const { callConnectedModel } = require("./system-agents/judgment") as typeof import("./system-agents/judgment");
     const text = await callConnectedModel({
-      systemPrompt: architect.buildGraphArchitectPrompt(automation.graph),
+      systemPrompt: architect.buildGraphArchitectPrompt(automation.graph, automation.goal),
       input: sentence.slice(0, 4_000),
     });
     if (text === null) {
@@ -3935,7 +3935,7 @@ export function registerIpcHandlers(): void {
   // 인터뷰가 끝난 뒤 실제로 만든다. **꺼진 상태로** 들어온다 — 사람이 보고 켜야 돈다.
   ipcMain.handle("automations:createFromBlueprint", (_e, payload: unknown) => {
     const input = payload as {
-      name?: string; graph?: unknown; scheduleHuman?: string; targetId?: string;
+      name?: string; graph?: unknown; scheduleHuman?: string; targetId?: string; goal?: string;
     } | null;
     if (!input?.name?.trim() || !input.graph) {
       return { ok: false, code: "CREATE_INPUT_INVALID", reason: "만들 내용을 읽지 못했습니다.", nextAction: "다시 시도해 주세요." };
@@ -3950,6 +3950,8 @@ export function registerIpcHandlers(): void {
       promptTemplate: name,
       executionPermission: "read",
       graphJson: input.graph as never,
+      // ★목적 문장을 함께 저장한다 — 사라지면 AI가 이 그래프를 다시 이해할 수 없다.
+      ...(input.goal?.trim() ? { goal: input.goal.trim() } : {}),
     });
     toggleAutomation(created.id, false);
     return { ok: true as const, id: created.id, name, renamed: !!existing };
@@ -4080,11 +4082,11 @@ export function registerIpcHandlers(): void {
   // 실행의 occurrence에 묶는다 — 승인 하나가 다음 실행까지 조용히 재사용되면 안 된다.
   ipcMain.handle(
     "automations:decideNodeApproval",
-    (_e, id: string, nodeId: string, decision: "approved" | "rejected") => {
+    (_e, id: string, nodeId: string, decision: "approved" | "rejected" | "always") => {
       const automation = getAutomation(id);
       if (!automation) throw new Error(`Automation not found: ${id}`);
       if (typeof nodeId !== "string" || !nodeId.trim()) throw new Error("automation_approval_node_invalid");
-      if (decision !== "approved" && decision !== "rejected") {
+      if (decision !== "approved" && decision !== "rejected" && decision !== "always") {
         throw new Error("automation_approval_decision_invalid");
       }
       const { getLatestGraphRunOccurrence, recordNodeApproval } = require("./store/automations") as
@@ -4094,8 +4096,15 @@ export function registerIpcHandlers(): void {
         // 승인할 대상이 없는데 승인한 척하지 않는다.
         return { ok: false, occurrenceId: null };
       }
-      recordNodeApproval({ automationId: id, occurrenceId, nodeId, decision });
-      return { ok: true, occurrenceId };
+      // ★"항상 허용"은 승인 기록에 scope로 남긴다 — 그래프를 바꾸지 않는다.
+      //   노드 config를 ask_once로 고치면 graph_json이 달라져 graphDigest가 바뀌고,
+      //   지금 멈춰 있는 바로 그 실행의 재개가 거부된다.
+      recordNodeApproval({
+        automationId: id, occurrenceId, nodeId,
+        decision: decision === "always" ? "approved" : decision,
+        ...(decision === "always" ? { scope: "always" as const } : {}),
+      });
+      return { ok: true, occurrenceId, always: decision === "always" };
     },
   );
   // 멈춘 자동화의 "지금 무엇을 하면 되는지" — 실행 가능한 조치까지 포함해 계산한다.

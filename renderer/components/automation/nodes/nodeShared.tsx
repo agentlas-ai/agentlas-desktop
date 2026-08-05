@@ -27,6 +27,7 @@ export const NODE_ACCENT: Record<string, string> = {
   // 커널이 실행하는 종류는 화면도 알아야 한다 — 모르면 색이 없는 채로 그려진다.
   eval: "var(--accent)",
   subgraph: "var(--ink)",
+  code: "var(--muted-deep)",
 };
 
 /**

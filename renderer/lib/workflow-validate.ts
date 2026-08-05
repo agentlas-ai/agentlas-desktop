@@ -22,11 +22,16 @@ export interface WorkflowIssue {
     | "no-trigger" // 트리거 노드가 하나도 없음
     | "unknown-variable" // {{var}} 소비하는데 상류 생산자 없음
     | "condition-missing-branch" // condition 노드에 true/false 엣지가 부족
-    | "condition-branch-undeclared"; // condition에서 나가는 연결이 참/거짓을 선언하지 않음(커널이 실행 거부)
+    | "condition-branch-undeclared" // condition에서 나가는 연결이 참/거짓을 선언하지 않음(커널이 실행 거부)
+    | "loop-bound-missing" // 되돌아가는 연결에 반복 상한이 없음(커널이 실행 거부)
+    | "transform-unconfigured" // 값 가공 단계에 무엇을 가공할지가 없음(커널이 실행 거부)
+    | "error-var-without-error-edge"; // 실패 사유를 쓰는데 그 단계의 실패 연결이 없음
   /** 사람이 읽는 요약(영문 기본, UI가 code로 재번역 가능). */
   message: string;
   /** unknown-variable일 때 문제의 변수명. */
   variable?: string;
+  /** loop-bound-missing일 때 문제의 엣지 id — UI가 그 연결을 골라 줄 수 있게. */
+  edgeId?: string;
 }
 
 /** config에서 문자열 필드 안전 추출. */
@@ -213,6 +218,115 @@ export function validateWorkflow(graph: WorkflowGraph): WorkflowIssue[] {
         message:
           `Condition "${n.label ?? n.type}" has ${undeclared.length} outgoing connection(s) that do not declare the true or false side. ` +
           "Delete them and reconnect from the condition's true/false outputs.",
+      });
+    }
+  }
+
+  // ★실패 사유(`<노드>_error_reason`)를 쓰는데 그 단계에 **실패 출구가 아예 없으면** 알린다.
+  //
+  //   처음에는 "실패 연결로만 들어와야 한다"까지 요구했는데, 그건 멀쩡한 그래프를 무더기로
+  //   막았다: 실패 경로가 2단계인 그래프(A -error→ 정리 → 알림), 실패 사유로 다시 갈라 보는
+  //   그래프(A -error→ 조건 -참→ 알림), 정리 엣지를 함께 받는 알림 노드. 전부 정상이다 —
+  //   변수는 실행 전체에서 살아 있으니 몇 단계를 건너도 읽힌다.
+  //   그래서 **확실히 참인 것만** 말한다: 그 단계에 실패 출구가 하나도 없으면 그 사유는
+  //   어떤 실행에서도 생기지 않는다. 그리고 severity는 warning이다 — 저장을 막을 만큼
+  //   확신할 수 있는 판단이 아니다.
+  {
+    const errorVar = /^(.+?)_error(_reason)?$/;
+    for (const node of graph.nodes) {
+      const cfg = (node.config ?? {}) as Record<string, unknown>;
+      const text = [cfg.prompt, cfg.text, cfg.template].filter((v): v is string => typeof v === "string").join(" ");
+      for (const ref of referencedVars(text)) {
+        const m = errorVar.exec(ref);
+        if (!m) continue;
+        const sourceId = m[1];
+        if (!graph.nodes.some((n) => n.id === sourceId)) continue;
+        // 다른 노드가 이 이름을 실제로 만들어 낸다면 업무 변수다 — 건드리지 않는다.
+        if (graph.nodes.some((n) => (n.config as { produces?: unknown } | undefined)?.produces === ref)) continue;
+        const hasErrorExit = graph.edges.some((e) => e.source === sourceId
+          && (e.sourceHandle === "error" || e.sourceHandle === "timeout"));
+        if (hasErrorExit) continue;
+        issues.push({
+          severity: "warning",
+          code: "error-var-without-error-edge",
+          nodeId: node.id,
+          variable: ref,
+          message: `"${node.label ?? node.type}"이(가) 실패 사유 {{${ref}}}를 쓰는데, `
+            + `"${sourceId}"에 실패 출구로 나가는 연결이 하나도 없습니다. 그 값은 만들어지지 않습니다.`,
+        });
+      }
+    }
+  }
+
+  // ★값 가공 단계는 팔레트에서 **빈 설정으로** 놓인다. 예전 커널은 설정이 없으면 조용히
+  //   아무것도 안 하고 성공으로 남겼기 때문에, 그렇게 저장된 그래프가 실제로 존재한다.
+  //   이제 커널이 실패시키므로, 저장 전에 여기서 먼저 말해 줘야 "어제까지 되던 게 갑자기
+  //   실행에서만 죽는" 상태가 안 된다.
+  for (const node of graph.nodes) {
+    if (node.type !== "transform") continue;
+    const cfg = (node.config ?? {}) as Record<string, unknown>;
+    // ★커널보다 엄격하면 **멀쩡한 그래프의 저장을 막는다.** 커널은 `to`가 없으면 `from`으로
+    //   폴백하므로 제자리 가공(`{from:"summary", mode:"extract"}`)은 정상 실행된다.
+    //   요구할 것은 `from` 하나뿐이다.
+    const hasFrom = typeof cfg.from === "string" && cfg.from.trim();
+    if (hasFrom) continue;
+    const hasConsumes = typeof cfg.consumes === "string" && cfg.consumes.trim();
+    issues.push({
+      severity: "error",
+      code: "transform-unconfigured",
+      nodeId: node.id,
+      message: `"${node.label ?? node.type}" 값 가공 단계에 가져올 값이 없습니다.`
+        + (hasConsumes ? ` 받는 값이 "${cfg.consumes}"이니 그 이름을 적으면 됩니다.` : "")
+        + " 채우지 않으면 실행되지 않습니다.",
+    });
+  }
+
+  // ★되돌아가는 연결에는 상한이 있어야 한다 — 저장할 때 말해야지, 실행에서 처음 알면
+  //   사람은 이미 만들기를 끝냈다고 믿은 뒤다. 실측으로 정확히 그 상태가 났다:
+  //   저장은 통과, 실행만 LOOP_BOUND_UNDECLARED로 거절, 그리고 상한을 넣을 화면이 없어
+  //   빠져나올 방법도 없었다.
+  {
+    // ★되돌아가는 연결은 **DFS 색칠**로 찾는다(커널 findBackEdges와 같은 방식).
+    //   전위 번호로 `to <= from`을 보는 휴리스틱은 사이클이 하나도 없는 다이아몬드
+    //   (A→B, A→X, B→Z, X→Y, Y→Z)에서 Y→Z를 반복으로 오인해 저장을 막는다.
+    const adjacency = new Map<string, { to: string; edgeId: string }[]>();
+    for (const e of graph.edges) {
+      if (!adjacency.has(e.source)) adjacency.set(e.source, []);
+      adjacency.get(e.source)!.push({ to: e.target, edgeId: e.id });
+    }
+    const color = new Map<string, "gray" | "black">();
+    const backEdges = new Set<string>();
+    const visit = (id: string): void => {
+      color.set(id, "gray");
+      for (const out of adjacency.get(id) ?? []) {
+        const c = color.get(out.to);
+        if (c === "gray") backEdges.add(out.edgeId);
+        else if (c === undefined) visit(out.to);
+      }
+      color.set(id, "black");
+    };
+    // ★커널 findBackEdges와 **같은 시작점 규칙**: 들어오는 연결이 없는 노드부터 돈다.
+    //   DFS 색칠에서 어느 엣지가 되돌아가는 연결이 되는지는 시작점에 달려 있다.
+    //   순서가 다르면 화면은 A→B에 상한을 물어보고 커널은 B→A를 요구해, 저장은 통과하는데
+    //   실행만 거절되고 상한을 넣을 자리는 없는 상태로 되돌아간다.
+    const hasIncoming = new Set(graph.edges.map((e) => e.target));
+    for (const n of graph.nodes) if (!hasIncoming.has(n.id) && !color.has(n.id)) visit(n.id);
+    for (const n of graph.nodes) if (!color.has(n.id)) visit(n.id);
+
+    for (const e of graph.edges) {
+      if (!backEdges.has(e.id)) continue;
+      const onEdge = (e as { maxIterations?: unknown }).maxIterations;
+      const headNode = graph.nodes.find((n) => n.id === e.target);
+      const onNode = (headNode?.config as { maxIterations?: unknown } | undefined)?.maxIterations;
+      if (typeof onEdge === "number" || typeof onNode === "number") continue;
+      issues.push({
+        severity: "error",
+        code: "loop-bound-missing",
+        nodeId: e.source,
+        edgeId: e.id,
+        message:
+          `"${headNode?.label ?? e.target}"(으)로 되돌아가는 연결에 반복 횟수가 정해져 있지 않습니다. ` +
+          "그 연결을 눌러 최대 반복 횟수를 정해 주세요 — 정하지 않으면 실행되지 않습니다.",
       });
     }
   }

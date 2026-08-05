@@ -150,6 +150,11 @@ import {
   redactOneAttachmentEvent,
   redactOneAttachmentText,
 } from "../one/attachments";
+import {
+  materializeToolBroker,
+  type MaterializedToolBroker,
+} from "../workflow/tool-broker-runtime";
+import type { ToolBrokerLevel } from "../../shared/graph-tool-broker";
 import type {
   Chat,
   AppFactoryAppRecord,
@@ -971,6 +976,12 @@ export interface McpInvocationResult {
   tokens?: number;
   stormbreakerContinueRequested: boolean;
   resultFolder?: string;
+  /**
+   * 커넥터 C38 — 이 호출에서 도구 중개가 **실제로** 어디까지 걸렸는가. 계획이 아니라
+   * 결과다. 관문 파일을 만들었어도 실행이 다른 경로(회사·스웜 등)로 갔으면 여기 등급은
+   * 내려온다. 화면과 실행 기록은 계획이 아니라 이 값을 보여줘야 한다.
+   */
+  toolBroker?: { level: ToolBrokerLevel; reason: string };
   /** Trusted main-process metadata; never accepted from model/tool event text. */
   workforcePrepareReceipt?: WorkforcePrepareCheckpointReceipt;
 }
@@ -1767,6 +1778,11 @@ export async function runMcpInvocation(
   let mcpAllowedTools: string[] | undefined;
   let mcpCodexConfigArgs: string[] | undefined;
   let mcpRuntimeEnv: Record<string, string> | undefined;
+  // 커넥터 C38 — 이번 호출에 걸린 도구 중개 관문. 걸지 못했으면 계속 null이고,
+  // 그 사실이 그대로 실행 기록으로 나간다(못 막은 것을 막았다고 적지 않는다).
+  let toolBroker: MaterializedToolBroker | null = null;
+  // 관문 파일이 **실제로 러너 요청에 실렸는가**. 계획과 결과를 가르는 유일한 사실이다.
+  let toolBrokerInstalled = false;
   let mcpAutoSelectionPrompt = "";
   const runtimeCanUseMcp =
     active.kind === "claude-code" ||
@@ -1994,6 +2010,23 @@ export async function runMcpInvocation(
         mcpAllowedTools = cfg.allowedTools;
         mcpCodexConfigArgs = cfg.codexConfigArgs;
         mcpRuntimeEnv = cfg.runtimeEnv;
+      }
+      // ★C38 — 관문은 **여기서** 만든다. 커널은 catalog id로 도구를 선언하지만 런타임이
+      // 실제로 보는 이름은 config key에서 나온다(`mcp__<key>__*`). 두 이름을 다 아는
+      // 유일한 지점이 이 자리다. 커널에서 이름을 짐작해 만들면 선언한 도구까지 막힌다.
+      if (req.toolBrokerScope) {
+        const declaredCatalogIds = req.requiredToolCatalogIds ?? [];
+        const declaredToolNames = (cfg?.includedServers ?? [])
+          .filter((server) => !!server.catalogId && declaredCatalogIds.includes(server.catalogId))
+          .map((server) => `mcp__${server.configKey}`);
+        toolBroker = materializeToolBroker({
+          runId: req.toolBrokerScope.runId,
+          nodeId: req.toolBrokerScope.nodeId,
+          declaredToolCatalogIds: declaredCatalogIds,
+          declaredToolNames,
+          dryRun: req.simulation === true,
+          runtimeKind: active.kind === "claude-code" ? "claude" : active.kind,
+        });
       }
     } catch (err) {
       console.error("[mcp] buildMcpConfigFile failed:", err);
@@ -3055,6 +3088,10 @@ export async function runMcpInvocation(
       mcpConfigPath,
       mcpAllowedTools,
       mcpCodexConfigArgs,
+      // C38 — 관문을 실제로 건 것은 **이 경로**뿐이다. 관문 파일이 여기 실리는 순간에만
+      // 등급이 "강제됨"으로 남는다(아래 brokerInstalled). 다른 실행 경로에서 등급만 들고
+      // 다니면, 막지 않은 실행에 막았다는 라벨이 붙는다.
+      ...(toolBroker?.settingsPath ? { toolBrokerSettingsPath: toolBroker.settingsPath } : {}),
       env: runnerEnv.env,
       untrustedNoTools: req.agentAppMode === true,
       untrustedAllowedMcpTools: req.agentAppMode ? mcpAllowedTools : undefined,
@@ -3070,6 +3107,7 @@ export async function runMcpInvocation(
       // lightweight and plain-text capable.
       forceSurface: oneTeamExecutionPolicy ? true : undefined,
     };
+    toolBrokerInstalled = Boolean(runnerReq.toolBrokerSettingsPath);
     // 라이브 토큰은 러너 1회 실행 기준 누적치 — Stormbreaker 연속 패스에서 다음 패스가
     // 0부터 다시 세도 표시가 뒤로 가지 않도록 이전 패스 최고치를 floor로 더한다.
     let liveUsageFloor = 0;
@@ -3780,6 +3818,18 @@ export async function runMcpInvocation(
       stormbreakerContinueRequested,
       resultFolder: resolvedResultFolder,
       workforcePrepareReceipt,
+      // C38 — 계획이 아니라 **결과**를 돌려준다. 관문 파일을 만들어 놓고 실행이 다른
+      // 경로로 갔으면 등급은 여기서 내려간다.
+      ...(toolBroker
+        ? {
+            toolBroker: toolBrokerInstalled
+              ? { level: toolBroker.plan.level, reason: toolBroker.plan.reason }
+              : {
+                  level: "observed" as const,
+                  reason: "이 실행은 중개 관문을 걸 수 없는 경로로 갔습니다 — 기록만 남습니다.",
+                },
+          }
+        : {}),
     };
   } catch (err) {
     if (modelTurnStarted) {

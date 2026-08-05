@@ -97,6 +97,8 @@ export function DescribeAutomation({ locale, onCreated }: {
         name: ready.blueprint.name || (ko ? "새 자동화" : "New automation"),
         graph: ready.graph,
         scheduleHuman: ready.scheduleHuman,
+        // ★목적 문장 — 저장 안 하면 "이게 무슨 그래프인지"를 아는 유일한 문장이 여기서 사라진다.
+        goal: ready.blueprint.goal,
       });
       if (!res.ok) { setProblem({ reason: res.reason, nextAction: res.nextAction }); return; }
       reset();
@@ -219,6 +221,20 @@ export function DescribeAutomation({ locale, onCreated }: {
                   <span style={{ color: "var(--muted-deep)" }}>
                     {ko ? " — 바깥으로 나감, 실행 전 확인" : " — goes outside, asks first"}
                   </span>
+                ) : null}
+                {/* ★AI가 제안한 채점표를 저장 전에 사람이 본다 — 항목이 곧 판정 기준이므로
+                    안 보이면 무엇으로 채점되는지 모른 채 승인하는 셈이다. */}
+                {Array.isArray(node.config?.items) && (node.config.items as Array<{ text?: string; kind?: string }>).length > 0 ? (
+                  <ul data-testid="describe-checklist" style={{ margin: "3px 0 0", paddingLeft: 14, display: "grid", gap: 2 }}>
+                    {(node.config.items as Array<{ text?: string; kind?: string }>).map((item, i) => (
+                      <li key={i} style={{ fontSize: 11, color: "var(--muted-deep)", listStyle: "none" }}>
+                        {item.kind === "mustNot" ? "✕" : "✓"} {item.text}
+                        <span style={{ opacity: 0.7 }}>
+                          {item.kind === "mustNot" ? (ko ? " (하면 안 됨)" : " (must not)") : ""}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
                 ) : null}
               </li>
             ))}

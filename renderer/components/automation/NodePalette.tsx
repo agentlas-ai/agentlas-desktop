@@ -22,6 +22,7 @@ import {
   IconLayers,
   IconArrowUp,
   IconSparkles,
+  IconCode,
 } from "@/components/Icon";
 
 /** 팔레트가 부모에 넘기는 노드 시드(부모가 id/position을 채워 그래프에 삽입). */
@@ -35,13 +36,17 @@ const FLOW_ITEMS = [
   //   `eval`·`subgraph`는 아예 놓을 수조차 없었다.
   { type: "eval" as WorkflowNodeType, labelKey: "auto.node.eval" as const, hintKey: "auto.node.evalHint" as const, icon: <IconSparkles size={13} /> },
   { type: "subgraph" as WorkflowNodeType, labelKey: "auto.node.subgraph" as const, hintKey: "auto.node.subgraphHint" as const, icon: <IconLayers size={13} /> },
+  // ★"바깥으로 내보내기"는 이 제품이 하는 일의 끝인데, 팔레트에 없어서 **놓을 수가 없었다**.
+  //   커널·레지스트리·캔버스 렌더러는 다 아는데 만들 방법만 없던 세 번째 사례다.
+  { type: "output" as WorkflowNodeType, labelKey: "auto.node.output" as const, hintKey: "auto.node.outputHint" as const, icon: <IconArrowUp size={13} /> },
+  // ★코드 노드 — 정확한 계산·데이터 가공. 사람은 놓기만 하고 무엇을 계산할지 적으면 AI가 스크립트를 짠다.
+  { type: "code" as WorkflowNodeType, labelKey: "auto.node.code" as const, hintKey: "auto.node.codeHint" as const, icon: <IconCode size={13} /> },
 ];
 
-const ACTION_ITEMS: Array<{ action: string; label: string }> = [
-  { action: "notify", label: "notify" },
-  { action: "file-write", label: "file-write" },
-  { action: "hep-call", label: "hep-call" },
-];
+// ★`notify | file-write | hep-call`을 고르게 하던 목록을 없앴다 — 그 값을 **읽는 코드가
+//   제품에 하나도 없었다.** action 노드는 적어 둔 지시문대로 돌 뿐이다. 고르게 해 두면
+//   사람은 고른 대로 돌 거라고 믿는다. 무엇을 할지는 지시문에 쓴다.
+const ACTION_ITEMS: Array<{ action: string; label: string }> = [];
 
 export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed) => void; onClose: () => void }) {
   const { t, locale } = useT();

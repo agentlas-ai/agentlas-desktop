@@ -34,6 +34,18 @@ export interface BlueprintStep {
    * provider를 아직 안 정했으면 null로 둔다 — **그래도 저장은 된다**(create-then-gate).
    */
   uses?: Array<{ capability: string; provider?: string | null }>;
+  /**
+   * 이 단계를 **무엇으로** 실행하는가. 안 적으면 "agent"(말로 시킴).
+   * - "agent": 판단·글쓰기 — 런타임(Claude 등)에 프롬프트로 넘긴다.
+   * - "code": **정확한 계산·데이터 가공** — AI가 짠 스크립트를 격리 실행한다.
+   *   숫자 계산·엑셀·파싱은 말로 시키면 조용히 틀리므로 이쪽으로 온다.
+   *   ★경계는 사람이 아니라 AI가 스텝마다 고른다(인터뷰 프롬프트가 가르친다).
+   */
+  kind?: "agent" | "code";
+  /** kind가 "code"일 때 실제 스크립트. AI가 채운다. */
+  code?: string;
+  /** 코드 언어. 기본 python(번들 인터프리터·데이터 라이브러리). */
+  codeLang?: "python" | "js";
 }
 
 export interface BlueprintBranch {
@@ -65,8 +77,14 @@ export interface BlueprintCheck {
   afterStep: number;
   /** 무엇을 볼 것인가 — 앞 단계가 만든 값의 이름. */
   subject: string;
-  /** 통과 기준. 사람 말로 적는다. 이 문장이 그대로 판정에 쓰인다. */
+  /** 통과 기준 한 문장(하위호환). items 가 있으면 항목별 판정이 우선한다. */
   criteria: string;
+  /**
+   * 채점표 — 항목별 yes/no. must = 있어야 한다(빠뜨림 방지),
+   * mustNot = 하면 안 된다(판정자의 후한 버릇·꼼수 통과 방지).
+   * 내용은 AI가 그 그래프를 보고 쓴다 — 코드에 분야 목록은 없다.
+   */
+  items?: Array<{ text: string; kind: "must" | "mustNot" }>;
   /** 판정 결과를 담을 이름(기본: check<N>_verdict). */
   produces?: string;
 }
@@ -238,6 +256,20 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
         choices: ["아니요, 만들기만 합니다", "네, 바깥으로 나갑니다"],
       });
     }
+    // ★코드 스텝은 스크립트가 있어야 한다. 없으면 "코드로 하겠다"고 해 놓고 빈 채로 저장돼
+    //   실행에서 CODE_NODE_EMPTY로 죽는다(저작 시점에 막는 게 맞다).
+    if (step.kind === "code") {
+      if (!step.code?.trim()) {
+        push(`${at}는 코드로 실행한다고 했는데 스크립트가 비어 있습니다.`, {
+          id: `step-${index}-code`,
+          question: `"${step.title || at}" 단계에서 무엇을 계산·가공하나요? (AI가 스크립트를 채웁니다)`,
+          why: "코드 단계는 스크립트가 없으면 실행되지 않습니다.",
+        });
+      }
+      if (step.codeLang && step.codeLang !== "python" && step.codeLang !== "js") {
+        push(`${at}의 코드 언어 "${step.codeLang}"을(를) 이 제품이 모릅니다(python 또는 js).`);
+      }
+    }
     for (const name of step.consumes ?? []) {
       if (!produced.has(name)) {
         push(`${at}가 쓰는 "${name}" 값을 아무도 만들지 않습니다.`, {
@@ -286,7 +318,15 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
     if (!check.subject || !produced.has(check.subject)) {
       push(`${at}가 볼 "${check.subject}" 값을 아무도 만들지 않습니다.`);
     }
-    if (!check.criteria?.trim()) {
+    const checkItems = Array.isArray(check.items)
+      ? check.items.filter((item) => typeof item?.text === "string" && item.text.trim())
+      : [];
+    for (const item of Array.isArray(check.items) ? check.items : []) {
+      if (typeof item?.text !== "string" || !item.text.trim()) {
+        push(`${at}의 채점표 항목 하나가 비어 있습니다.`);
+      }
+    }
+    if (checkItems.length === 0 && !check.criteria?.trim()) {
       push(`${at}의 통과 기준이 없습니다.`, {
         id: `check-${check.afterStep}-criteria`,
         question: `"${steps[check.afterStep]?.title ?? at}" 결과가 어떤 상태여야 통과인가요?`,
@@ -414,13 +454,18 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
 
   const stepId = (index: number): string => `step${index + 1}`;
   bp.steps.forEach((step, index) => {
+    const isCode = step.kind === "code";
     nodes.push({
       id: stepId(index),
-      type: step.effect === "mutation" ? "action" : "agent",
+      // 코드 스텝은 code 노드로, 아니면 바깥 변경 여부에 따라 action/agent.
+      type: isCode ? "code" : (step.effect === "mutation" ? "action" : "agent"),
       label: step.title,
       position: { x: column(index + 1), y: 0 },
       config: {
-        prompt: step.instruction,
+        // 코드 노드는 프롬프트가 아니라 스크립트를 지고 간다. 지시문은 참고용(note)으로 함께.
+        ...(isCode
+          ? { code: step.code ?? "", codeLang: step.codeLang === "js" ? "js" : "python", note: step.instruction }
+          : { prompt: step.instruction }),
         effect: step.effect,
         // 바깥을 바꾸는 단계는 기본이 "확인 후 실행"이다. 이 기본값을 낮추는 것은
         // 자동화를 만드는 자리가 아니라 사람이 따로 결정할 일이다.
@@ -445,9 +490,15 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
   const branches = bp.branches ?? [];
   const branchAt = new Map<number, BlueprintBranch>();
   branches.forEach((branch) => branchAt.set(branch.afterStep, branch));
-  const checkAt = new Map<number, BlueprintCheck>();
-  for (const check of bp.checks ?? []) checkAt.set(check.afterStep, check);
-  const checkId = (index: number): string => `verify${index + 1}`;
+  // ★한 단계 뒤에 검증 여럿 — "주가 재확인 + 형식 검사"를 검증 2개로 표현한다.
+  const checkAt = new Map<number, BlueprintCheck[]>();
+  for (const check of bp.checks ?? []) {
+    const list = checkAt.get(check.afterStep) ?? [];
+    list.push(check);
+    checkAt.set(check.afterStep, list);
+  }
+  const checkId = (index: number, ordinal = 0): string =>
+    ordinal === 0 ? `verify${index + 1}` : `verify${index + 1}-${ordinal + 1}`;
 
   let edgeSeq = 0;
   const link = (source: string, target: string, handle?: string, maxIterations?: number): void => {
@@ -462,26 +513,38 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
 
   link("start", stepId(0));
   // 검증 노드를 먼저 세운다 — 갈림길은 검증 결과를 읽는다.
-  bp.checks?.forEach((check) => {
-    if (!bp.steps[check.afterStep]) return;
-    nodes.push({
-      id: checkId(check.afterStep),
-      type: "eval",
-      label: `검증: ${check.criteria.slice(0, 40)}`,
-      position: { x: column(check.afterStep + 1) + 70, y: 0 },
-      config: {
-        subject: check.subject,
-        criteria: check.criteria,
-        produces: check.produces?.trim() || `check${check.afterStep + 1}_verdict`,
-      },
+  for (const [afterStep, list] of checkAt) {
+    if (!bp.steps[afterStep]) continue;
+    list.forEach((check, ordinal) => {
+      const label = (check.criteria?.trim() || check.items?.find((item) => item?.text?.trim())?.text || "채점표").slice(0, 40);
+      const itemRows = Array.isArray(check.items)
+        ? check.items
+          .filter((item) => typeof item?.text === "string" && item.text.trim())
+          .map((item) => ({ text: item.text.trim(), kind: item.kind === "mustNot" ? "mustNot" : "must" }))
+        : [];
+      nodes.push({
+        id: checkId(afterStep, ordinal),
+        type: "eval",
+        label: `검증: ${label}`,
+        position: { x: column(afterStep + 1) + 70 + ordinal * 60, y: 0 },
+        config: {
+          subject: check.subject,
+          ...(check.criteria?.trim() ? { criteria: check.criteria } : {}),
+          ...(itemRows.length ? { items: itemRows } : {}),
+          produces: check.produces?.trim()
+            || (ordinal === 0 ? `check${afterStep + 1}_verdict` : `check${afterStep + 1}_${ordinal + 1}_verdict`),
+        },
+      });
     });
-  });
+  }
   bp.steps.forEach((_step, index) => {
-    const check = checkAt.get(index);
+    const checkList = checkAt.get(index) ?? [];
     const branch = branchAt.get(index);
-    // 단계 → (검증) → 갈림길 순서로 잇는다.
-    const afterStepId = check ? checkId(index) : stepId(index);
-    if (check) link(stepId(index), checkId(index));
+    // 단계 → 검증1 → 검증2 → … → 갈림길 순서로 잇는다(직렬 — 각 검증이 독립 판정).
+    const afterStepId = checkList.length ? checkId(index, checkList.length - 1) : stepId(index);
+    checkList.forEach((_check, ordinal) => {
+      link(ordinal === 0 ? stepId(index) : checkId(index, ordinal - 1), checkId(index, ordinal));
+    });
     if (!branch) {
       const next = bp.steps[index + 1];
       if (next) link(afterStepId, stepId(index + 1));
@@ -518,6 +581,30 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
       link(branchId, stepId(branch.noStep), "false");
     } else if (repeatSide === "yes" && bp.steps[index + 1]) {
       link(branchId, stepId(index + 1), "false");
+    }
+    // ★빠져나가는 쪽이 비어 있으면 **끝나는 자리를 만들어 준다**.
+    //
+    //   "마음에 들 때까지 다시 써"를 마지막 단계에 걸면, 되돌아가는 쪽만 이어지고
+    //   빠져나가는 쪽은 아무 데도 안 간다. 그러면 커널은 NO_MATCHING_EDGE로 멈춘다 —
+    //   그것도 **드디어 통과한 순간에**. 실패하는 동안은 잘 돌다가 성공하자마자 죽는,
+    //   가장 나쁜 타이밍이다. 말로 만든 사람은 자기가 뭘 빠뜨렸는지 알 수도 없다.
+    //   조건 노드가 "여기서 끝나는 게 맞다면 종료 노드를 이으세요"라고 안내하는 그 자리를
+    //   컴파일러가 대신 채운다.
+    const exitSide = repeatSide === "yes" ? "false" : repeatSide === "no" ? "true" : null;
+    if (exitSide && !edges.some((e) => e.source === branchId && e.sourceHandle === exitSide)) {
+      const doneId = `${branchId}-done`;
+      const produced = bp.steps[branch.repeatStep ?? index]?.produces;
+      nodes.push({
+        id: doneId,
+        type: "output",
+        position: { x: 0, y: 0 },
+        label: "끝",
+        config: {
+          effect: "read",
+          text: produced ? `{{${produced}}}` : "완료했습니다.",
+        },
+      });
+      link(branchId, doneId, exitSide);
     }
   });
 

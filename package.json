@@ -337,7 +337,19 @@
     "graph:map": "node scripts/gen-graph-map.cjs",
     "test:graph-progress": "node scripts/test-graph-progress-contract.cjs",
     "test:graph-run-request": "npm run build:electron && node scripts/test-graph-run-request-contract.cjs",
-    "test:graph-canvas-parity": "node scripts/test-graph-canvas-parity.cjs"
+    "test:graph-canvas-parity": "node scripts/test-graph-canvas-parity.cjs",
+    "test:graph-scenarios": "electron scripts/test-graph-scenarios.cjs",
+    "test:graph-loop-authoring": "node scripts/test-graph-loop-authoring.cjs",
+    "test:graph-authorability": "node scripts/test-graph-authorability.cjs",
+    "test:graph-tool-broker": "node scripts/test-graph-tool-broker-contract.cjs",
+    "test:graph-surface": "electron scripts/test-graph-surface-contract.cjs",
+    "test:interview-loop-live": "electron scripts/test-interview-loop-live.cjs",
+    "test:graph-progress-live": "electron scripts/test-graph-progress-live.cjs",
+    "test:graph": "npm run --silent test:graph-registry-conformance && npm run --silent test:graph-canvas-parity && npm run --silent test:graph-authorability && npm run --silent test:graph-loop-authoring && npm run --silent test:graph-node-protocol && npm run --silent test:graph-run-request && npm run --silent test:graph-tool-binding-contract && npm run --silent test:graph-tool-broker && npm run --silent test:graph-progress && npm run --silent test:automation-honesty-contract && npm run --silent test:graph-interview-contract && npm run --silent test:graph-patch-contract && npm run --silent test:graph-architect-contract && npm run --silent test:graph-describe-ui && npm run --silent test:graph-connections-ui && npm run --silent test:graph-canvas-ui && npm run --silent test:graph-kernel-contract && npm run --silent test:run-status-split && npm run --silent test:run-status-stream && npm run --silent test:interview-loop-live && npm run --silent test:graph-progress-live && npm run --silent test:graph-surface && npm run --silent test:graph-code-step && npm run --silent test:graph-always-allow && npm run --silent test:graph-goal && npm run --silent test:graph-eval-checklist && npm run --silent test:graph-scenarios",
+    "test:graph-code-step": "electron scripts/test-graph-code-step-contract.cjs",
+    "test:graph-always-allow": "electron scripts/test-graph-always-allow-contract.cjs",
+    "test:graph-goal": "electron scripts/test-graph-goal-persistence.cjs",
+    "test:graph-eval-checklist": "electron scripts/test-graph-eval-checklist-contract.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

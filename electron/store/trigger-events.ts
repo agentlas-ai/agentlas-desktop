@@ -123,7 +123,8 @@ function finiteIso(value: Date): string {
 }
 
 function validateTriggerKind(kind: TriggerKind): asserts kind is TriggerEventRecord["triggerKind"] {
-  if (kind !== "fs" && kind !== "chain" && kind !== "webhook" && kind !== "poll") {
+  // v91부터 "command"(코드·다른 에이전트가 명시적으로 부른 요청)도 이 대기열에 앉는다.
+  if (kind !== "fs" && kind !== "chain" && kind !== "webhook" && kind !== "poll" && kind !== "command") {
     throw new Error(`trigger_event_kind_invalid: ${kind}`);
   }
 }
@@ -228,7 +229,13 @@ export function enqueueTriggerEvent(input: EnqueueTriggerEventInput): EnqueueTri
        SELECT ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?
        WHERE EXISTS (
          SELECT 1 FROM automations
-         WHERE id = ? AND enabled = 1 AND trigger_type = ?
+         WHERE id = ? AND enabled = 1
+           -- 소스가 미는 종류(fs/chain/webhook/poll)는 그 자동화가 실제로 그 소스를 듣고
+           -- 있을 때만 앉힌다 — 아니면 아무도 안 듣는 이벤트가 대기열에 쌓인다.
+           -- ★"command"는 다르다. 부르는 쪽이 명시적으로 지목한 요청이라, 예약으로 도는
+           --   자동화든 입력을 받는 자동화든 이름으로 부를 수 있어야 한다. 여기서 종류를
+           --   맞추라고 하면 코드·다른 에이전트는 예약 자동화를 영영 못 부른다.
+           AND (? = 'command' OR trigger_type = ?)
        )`,
     ).run(
       id,
@@ -240,6 +247,7 @@ export function enqueueTriggerEvent(input: EnqueueTriggerEventInput): EnqueueTri
       nowIso,
       nowIso,
       input.automationId,
+      input.triggerKind,
       input.triggerKind,
     );
     inserted = result.changes === 1;

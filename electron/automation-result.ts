@@ -1,5 +1,6 @@
 import { judgeRequired } from "./system-agents/judgment";
 import { currentUiLocale } from "./ui-locale";
+import { GRAPH_VERBATIM_CODES } from "../shared/graph-vocabulary.generated";
 
 /**
  * 판정 이유는 그대로 사용자 화면에 실린다. 언어와 어휘를 지정하지 않으면 영어 기술 문장이
@@ -132,11 +133,20 @@ export async function classifyAutomationFailure(
     ...(opts.signal ? { signal: opts.signal } : {}),
   });
   if (!verdict.verdict) return unresolved("judgment_unavailable", null);
+  // ★원문 그대로 보여야 하는 실패는 판정이 쓴 사람 문장으로 **바꾸지 않는다**.
+  //
+  //   레지스트리는 실패 코드마다 "카드로 풀어 쓸 것"과 "원문 그대로 둘 것"을 갈라 선언한다
+  //   (errors.json의 verbatim). 그런데 그 선언을 읽는 코드가 제품에 하나도 없었다 —
+  //   생성물은 만들어지는데 아무도 안 쓰는 상태였고, 게이트는 `import type` 한 줄로
+  //   "쓰이고 있다"고 통과시켰다(타입 임포트는 컴파일에서 사라진다).
+  //   이 저장소는 같은 병으로 이미 사고를 겪었다: 판정이 원본 에러를 사람 문장으로 갈아 끼워
+  //   기계 표식이 사라지고, 그래서 위험한 재실행이 허용됐다.
+  const verbatimHit = GRAPH_VERBATIM_CODES.find((code) => value.includes(code));
   return {
     status: verdict.verdict,
     outcome: verdict.verdict,
     reasonCode: "controller_judged",
-    reason: verdict.reason || null,
+    reason: verbatimHit ? value.slice(0, 2_000) : (verdict.reason || null),
     evidence: null,
   };
 }

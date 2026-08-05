@@ -18,6 +18,7 @@ import type {
 import { ScheduleBuilder } from "./ScheduleBuilder";
 import { NODE_ACCENT } from "./nodes/nodeShared";
 import { IconClose } from "@/components/Icon";
+import { defaultNodeEffect } from "@/lib/graph-node-effect";
 
 /**
  * 레거시 스케줄 토큰("cron:…", "daily-HH:MM", "weekday-HH:MM", "weekly-<dow>-HH:MM",
@@ -254,7 +255,11 @@ export function NodeConfigPanel({
         </>
       )}
 
-      {(node.type === "tool" || node.type === "output") && (
+      {/* ★도구는 `tool` 노드에만 고른다. 예전에는 출력 노드에도 이 셀렉트를 그렸는데,
+          커널은 tool 노드에서만 catalog를 읽는다(run-graph.ts declaredToolsForNode는
+          agent 노드 옆의 tool 노드만 본다). 그래서 사람이 출력 노드에서 도구를 골라도
+          실행에는 아무것도 안 붙었다 — 캔버스에 놓아도 아무 일 없던 tool 노드와 같은 병이다. */}
+      {node.type === "tool" && (
         <Field label={t("auto.cfg.catalog")}>
           <select value={s("catalog")} onChange={(e) => onPatch({ catalog: e.target.value })} style={inp}>
             <option value="">—</option>
@@ -267,10 +272,59 @@ export function NodeConfigPanel({
         </Field>
       )}
 
-      {node.type === "action" && (
-        <Field label={t("auto.cfg.action")}>
-          <input value={s("action")} onChange={(e) => onPatch({ action: e.target.value })} placeholder="notify | file-write | hep-call …" style={inp} />
+      {/* ★"어떤 동작인지"를 적는 칸은 뺐다. `notify | file-write | hep-call` 같은 값을
+          받아 놓고 **읽는 코드가 제품에 하나도 없었다** — action 노드는 그냥 지시문대로 돈다.
+          없는 기능을 고르게 하면 사람은 고른 대로 돌 거라고 믿는다. 출력 노드에 도구 셀렉트를
+          그려 놓고 실행에는 안 붙이던 것과 같은 병이다. 무엇을 할지는 아래 지시문에 쓴다. */}
+
+      {node.type === "output" && (
+        <Field label="내보낼 내용">
+          <textarea
+            value={s("text")}
+            onChange={(e) => onPatch({ text: e.target.value })}
+            rows={5}
+            placeholder="예: 이번 주 요약 — {{summary}}"
+            style={{ ...inp, minHeight: 96, resize: "vertical" }}
+          />
+          <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
+            여기 적은 그대로 나갑니다. 앞 단계 결과는 {"{{이름}}"}으로 끼워 넣습니다.
+          </div>
         </Field>
+      )}
+
+      {node.type === "code" && (
+        <>
+          <Field label="무엇을 계산·가공하나">
+            <textarea
+              value={s("note")}
+              onChange={(e) => onPatch({ note: e.target.value })}
+              rows={2}
+              placeholder="예: 종가를 어제와 비교해 변동률(%)을 낸다"
+              style={{ ...inp, minHeight: 48, resize: "vertical" }}
+            />
+            <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
+              여기 적으면 AI가 스크립트를 짭니다. 사람이 코드를 짤 필요는 없어요.
+            </div>
+          </Field>
+          <Field label="언어">
+            <select value={s("codeLang") || "python"} onChange={(e) => onPatch({ codeLang: e.target.value })} style={inp}>
+              <option value="python">python (데이터·계산에 강함)</option>
+              <option value="js">javascript</option>
+            </select>
+          </Field>
+          <Field label="스크립트 (AI가 채웁니다 — 직접 고쳐도 됩니다)">
+            <textarea
+              value={s("code")}
+              onChange={(e) => onPatch({ code: e.target.value })}
+              rows={6}
+              placeholder={"# 앞 단계 값은 vars 로 들어옵니다.\n# 결과는 result 에 넣으세요.\nresult = ..."}
+              style={{ ...inp, minHeight: 120, resize: "vertical", fontFamily: "var(--font-mono)", fontSize: 12 }}
+            />
+            <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
+              앞 단계 값은 {"vars"} 로 들어오고, {"result"} 에 넣은 것이 다음 단계로 갑니다.
+            </div>
+          </Field>
+        </>
       )}
 
       {node.type === "eval" && (
@@ -285,13 +339,63 @@ export function NodeConfigPanel({
               style={{ ...inp, fontFamily: "var(--font-mono)" }}
             />
           </Field>
+          {/* ★채점표 — 항목별 yes/no. 한 문장 기준 하나는 "뭘 고쳐야 하는지"를 말하지
+              못한다(항목을 주면 재시도 성공 31%→98% 실측). must=있어야 한다,
+              mustNot=하면 안 된다(판정자의 후한 버릇·꼼수 통과 방지). */}
+          <Field label={t("auto.cfg.eval_items")}>
+            {(Array.isArray(node.config?.items) ? (node.config.items as Array<{ text?: string; kind?: string }>) : []).map((item, index, list) => (
+              <div key={index} style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                <select
+                  value={item.kind === "mustNot" ? "mustNot" : "must"}
+                  onChange={(e) => {
+                    const next = list.map((row, i) => (i === index ? { ...row, kind: e.target.value } : row));
+                    onPatch({ items: next });
+                  }}
+                  style={{ ...inp, width: 110, flex: "none" }}
+                  data-testid={`eval-item-kind-${index}`}
+                >
+                  <option value="must">{t("auto.cfg.eval_item_must")}</option>
+                  <option value="mustNot">{t("auto.cfg.eval_item_mustnot")}</option>
+                </select>
+                <input
+                  value={item.text ?? ""}
+                  onChange={(e) => {
+                    const next = list.map((row, i) => (i === index ? { ...row, text: e.target.value } : row));
+                    onPatch({ items: next });
+                  }}
+                  placeholder={t("auto.cfg.eval_item_placeholder")}
+                  style={{ ...inp, flex: 1 }}
+                  data-testid={`eval-item-text-${index}`}
+                />
+                <button
+                  onClick={() => onPatch({ items: list.filter((_, i) => i !== index) })}
+                  style={{ ...inp, width: 34, flex: "none", cursor: "pointer" }}
+                  title={t("auto.cfg.eval_item_remove")}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            <button
+              onClick={() => {
+                const list = Array.isArray(node.config?.items) ? (node.config.items as unknown[]) : [];
+                onPatch({ items: [...list, { text: "", kind: "must" }] });
+              }}
+              style={{ ...inp, cursor: "pointer" }}
+              data-testid="eval-item-add"
+            >
+              {t("auto.cfg.eval_item_add")}
+            </button>
+            <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
+              {t("auto.cfg.eval_items_hint")}
+            </div>
+          </Field>
           <Field label={t("auto.cfg.eval_criteria")}>
-            {/* ★기준은 사람 말로 적는다. 이 문장이 그대로 판정에 쓰인다 —
-                단어 목록으로 재지 않는다. */}
+            {/* 한 문장 기준(하위호환) — 채점표 항목이 있으면 항목이 우선한다. */}
             <textarea
               value={s("criteria")}
               onChange={(e) => onPatch({ criteria: e.target.value })}
-              rows={3}
+              rows={2}
               placeholder="근거가 두 개 이상 있고, 문장이 어색하지 않다"
               style={{ ...inp, resize: "vertical", fontFamily: "var(--font-body)" }}
             />
@@ -420,7 +524,9 @@ export function NodeConfigPanel({
               선언이 없으면 시뮬레이션은 이 노드를 조회로 보고 실제로 돌린다. */}
           <div style={{ height: 1, background: "var(--paper-edge)", margin: "2px 0" }} />
           <Field label={t("auto.cfg.effect")}>
-            <select value={s("effect") || "read"} onChange={(e) => onPatch({ effect: e.target.value })} style={inp}>
+            {/* ★화면이 보여 주는 기본값은 커널이 쓰는 기본값과 같아야 한다.
+                안 그러면 "조회"로 보이는 노드가 실행에서는 내보내기로 취급된다. */}
+            <select value={s("effect") || defaultNodeEffect(node.type)} onChange={(e) => onPatch({ effect: e.target.value })} style={inp}>
               <option value="pure">{t("auto.cfg.effect_pure")}</option>
               <option value="read">{t("auto.cfg.effect_read")}</option>
               <option value="mutation">{t("auto.cfg.effect_mutation")}</option>
@@ -428,6 +534,48 @@ export function NodeConfigPanel({
             <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
               {t("auto.cfg.effect_hint")}
             </div>
+          </Field>
+
+          {/* ★바깥을 바꾸는 단계의 안전장치 — 커널이 실제로 읽는데 **넣을 칸이 없었다**.
+              승인은 "나가기 전에 내가 본다", 멱등키는 "두 번 나가지 않는다", 재시도는
+              "한 번 실패했다고 포기하지 않는다"이다. 셋 다 사람이 정할 일인데, 지금까지는
+              말로 만들거나 JSON을 직접 고쳐야만 걸 수 있었다. */}
+          <Field label="사람 승인">
+            <select value={s("approval") || "auto"} onChange={(e) => onPatch({ approval: e.target.value })} style={inp}>
+              <option value="auto">필요 없음 — 알아서 진행</option>
+              <option value="ask">나갈 때마다 물어보기</option>
+              {/* ★커널이 받는 값은 `ask_once`다. "once"로 보내면 어디에도 안 걸려 조용히 auto가 된다 —
+                  승인을 걸었다고 믿는 사람이 승인 없이 내보내진다. */}
+              <option value="ask_once">처음 한 번만 물어보기</option>
+            </select>
+          </Field>
+          {/* ★출력 노드는 효과를 안 적어도 커널이 "바깥으로 나간다"로 본다. 그런데 멱등키 칸을
+              `effect === "mutation"`일 때만 보여 주면, 정작 그 칸이 가장 필요한 노드에서
+              **숨어 있다** — 멱등키가 없으면 발행 단계는 재시도조차 못 한다. */}
+          {s("effect") === "mutation" || node.type === "output" ? (
+            <Field label="같은 일을 두 번 하지 않기">
+              <input
+                value={s("idempotencyKey")}
+                onChange={(e) => onPatch({ idempotencyKey: e.target.value })}
+                placeholder="예: 발송-{{orderId}}"
+                style={{ ...inp, fontFamily: "var(--font-mono)" }}
+              />
+              <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
+                이 값을 적어야 실패한 발행을 다시 시도합니다. 비워 두면 한 번만 시도합니다 — 두 번 나가는 사고를 막기 위해서입니다.
+              </div>
+            </Field>
+          ) : null}
+          <Field label="실패하면 다시 시도">
+            <input
+              type="number" min={0} max={5}
+              value={s("retries")}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                onPatch({ retries: Number.isFinite(n) && n >= 0 && n <= 5 ? Math.round(n) : undefined });
+              }}
+              placeholder="0"
+              style={inp}
+            />
           </Field>
           <Field label={t("auto.cfg.timeout")}>
             <input
@@ -450,6 +598,21 @@ export function NodeConfigPanel({
             />
           </Field>
         </>
+      )}
+
+      {/* ★주석 — 모든 노드에. 사람은 코드나 설정 대신 여기에 의도를 적고,
+          캔버스의 "말로 고치기"(architect)가 이 주석을 그 단계에 대한 지시로 읽는다.
+          코드 노드는 자기 설명 칸(note)을 위에서 이미 그렸으므로 중복해 그리지 않는다. */}
+      {node.type !== "code" && (
+        <Field label={t("auto.cfg.note")}>
+          <textarea
+            value={s("note")}
+            onChange={(e) => onPatch({ note: e.target.value })}
+            rows={2}
+            placeholder={t("auto.cfg.note_placeholder")}
+            style={{ ...inp, minHeight: 44, resize: "vertical" }}
+          />
+        </Field>
       )}
 
       <button

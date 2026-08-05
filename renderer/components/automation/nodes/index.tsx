@@ -10,6 +10,7 @@ import {
   IconArrowUp,
   IconSparkles,
   IconLayers,
+  IconCode,
 } from "@/components/Icon";
 import { NodeCard, ConnectServiceBadge, cfgStr } from "./nodeShared";
 import { ConditionNode } from "./ConditionNode";
@@ -42,6 +43,8 @@ export interface NodeStrings {
   transform: string;
   eval: string;
   subgraph: string;
+  code: string;
+  codeLangLabel?: string;
   /** 부르는 자동화의 이름 — 없으면 아직 안 고른 것이다. */
   subgraphRef?: string;
   subgraphUnset: string;
@@ -193,6 +196,26 @@ export function SubgraphNode({ data, selected }: NodeProps) {
   );
 }
 
+export function CodeNode({ data, selected }: NodeProps) {
+  const d = data as WorkflowNodeData;
+  const lang = cfgStr(d.config, "codeLang") || "python";
+  const hasCode = !!cfgStr(d.config, "code");
+  return (
+    <NodeCard
+      type="code"
+      icon={<IconCode size={13}/>}
+      title={d.label || d.strings.code}
+      // 무슨 언어인지, 스크립트가 채워졌는지가 캔버스에서 보여야 한다.
+      subtitle={hasCode ? `${lang}` : (d.codeLangLabel ? `${d.codeLangLabel}` : lang)}
+      selected={selected}
+      connectable={d.connectable}
+      runState={d.runState}
+      progress={d.progress}
+      outcomeHandles
+    />
+  );
+}
+
 /** React Flow nodeTypes 맵 — WorkflowNodeType → 컴포넌트. */
 export const workflowNodeTypes = {
   trigger: TriggerNode,
@@ -206,4 +229,5 @@ export const workflowNodeTypes = {
   //   못 그리고, 사용자는 그래프에 구멍이 난 것을 본다.
   eval: EvalNode,
   subgraph: SubgraphNode,
+  code: CodeNode,
 };

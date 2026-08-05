@@ -129,6 +129,16 @@ export function writeStdin(child: ChildProcess, payload: string): void {
  * 전용 폴더를 만들어 cwd로 사용한다.
  */
 let _runCwd: string | null = null;
+/**
+ * ★AI가 짠 JS 코드 스텝을 돌릴 node 실행 파일. Electron 안에서는 `ELECTRON_RUN_AS_NODE`가
+ * 붙은 자기 자신이 아니라 순수 node가 필요하다 — 아니면 사용자 코드가 Electron API에 닿는다.
+ * (tool-factory의 nodeExecPath와 같은 규칙 — 코드 실행기가 공유한다.)
+ */
+export function nodeExecPathForCode(): string {
+  const versions = process.versions as NodeJS.ProcessVersions & { electron?: string };
+  return process.env.npm_node_execpath || process.env.NODE || (versions.electron ? "node" : process.execPath);
+}
+
 export function agentRunCwd(): string {
   if (_runCwd) return _runCwd;
   const dir = path.join(app.getPath("userData"), "agent-cwd");

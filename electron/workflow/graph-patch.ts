@@ -150,6 +150,94 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
     }
   }
 
+  // ── 저장 시점 구조 검사 ──────────────────────────────────────────────────
+  // ★청사진 경로는 저장하는 자리(validateBlueprint)에서 막는데, 패치 경로는 여태
+  //   실행할 때까지 통과시켰다. 그러면 AI가 만든 반복·갈림길이 "저장은 되고 실행에서
+  //   거절"되는 모양이 된다 — 사람은 승인까지 해 놓고 왜 안 도는지 알 수 없다.
+  //   같은 결함을 같은 자리(저장 시점)에서 막는다.
+  //
+  // ★단, **이 패치가 만든 것만** 검사한다. 그래프에 이미 있던 결함까지 검사하면
+  //   사람이 안 건드린 연결 때문에 무관한 변경이 거절된다 — "당신의 변경을 거절합니다.
+  //   이유: 당신이 안 만든 연결" 은 원인을 찾을 수 없는 문장이다.
+  //   기존 결함은 캔버스 검증기(workflow-validate)의 몫이다.
+  const priorEdgeIds = new Set(graph.edges.map((e) => e.id));
+  const touchedNodeIds = new Set<string>();
+  for (const op of patch.ops) {
+    if (op.op === "addNode" && op.node?.id) touchedNodeIds.add(op.node.id);
+    if ((op.op === "editNode" || op.op === "setPolicy") && op.nodeId) touchedNodeIds.add(op.nodeId);
+  }
+
+  // 1. 이 패치가 추가한 갈림길 연결은 참/거짓을 선언해야 한다 (EDGE_CONDITION_UNRESOLVED 예방)
+  const conditionIds = new Set(nodes.filter((n) => n.type === "condition").map((n) => n.id));
+  for (const edge of edges) {
+    if (priorEdgeIds.has(edge.id)) continue;
+    if (!conditionIds.has(edge.source)) continue;
+    if (edge.sourceHandle === "true" || edge.sourceHandle === "false") continue;
+    return fail(
+      "PATCH_EDGE_HANDLE_MISSING",
+      `갈림길에서 나가는 연결(${edge.source} → ${edge.target})이 참일 때인지 거짓일 때인지 정하지 않았습니다.`,
+      "이 변경은 적용하지 않았습니다. 참/거짓 어느 쪽인지 함께 말씀해 주세요.",
+    );
+  }
+
+  // 2. 이 패치로 **새로 생긴** 상한 없는 반복은 거절한다 (LOOP_BOUND_UNDECLARED 예방)
+  //    ★DFS 색칠 — 커널 findBackEdges·캔버스와 같은 방식, 같은 시작점 규칙(들어오는
+  //    연결이 없는 노드부터). 시작점이 다르면 여기서는 A→B를 반복이라 하고 커널은
+  //    B→A를 요구해, 검사가 서로 다른 엣지에 상한을 물어보게 된다.
+  //    "새로 생긴"의 판정은 전/후 back-edge 집합의 차이다 — 패치가 추가한 연결이
+  //    기존 연결을 back-edge로 만드는 경우(옛 연결이 반복이 되는 경우)도 이 패치가
+  //    만든 반복이므로 잡아야 한다.
+  {
+    type E = (typeof edges)[number];
+    const findBack = (ns: { id: string }[], es: E[]): E[] => {
+      const adjacency = new Map<string, { to: string; edge: E }[]>();
+      for (const e of es) {
+        if (!adjacency.has(e.source)) adjacency.set(e.source, []);
+        adjacency.get(e.source)!.push({ to: e.target, edge: e });
+      }
+      const color = new Map<string, "gray" | "black">();
+      const back: E[] = [];
+      const visit = (id: string): void => {
+        color.set(id, "gray");
+        for (const out of adjacency.get(id) ?? []) {
+          const c = color.get(out.to);
+          if (c === "gray") back.push(out.edge);
+          else if (c === undefined) visit(out.to);
+        }
+        color.set(id, "black");
+      };
+      const hasIncoming = new Set(es.map((e) => e.target));
+      for (const n of ns) if (!hasIncoming.has(n.id) && !color.has(n.id)) visit(n.id);
+      for (const n of ns) if (!color.has(n.id)) visit(n.id);
+      return back;
+    };
+    const priorBackIds = new Set(findBack(graph.nodes, graph.edges as E[]).map((e) => e.id));
+    for (const backEdge of findBack(nodes, edges)) {
+      if (priorBackIds.has(backEdge.id)) continue; // 원래부터 반복이던 것 — 이 패치 탓이 아니다
+      const bound = backEdge.maxIterations;
+      if (typeof bound === "number" && Number.isFinite(bound) && bound >= 1) continue;
+      return fail(
+        "PATCH_LOOP_BOUND_MISSING",
+        `되돌아가는 연결(${backEdge.source} → ${backEdge.target})에 반복 상한이 없습니다.`,
+        "이 변경은 적용하지 않았습니다. 몇 바퀴까지 반복할지(maxIterations)를 함께 말씀해 주세요.",
+      );
+    }
+  }
+
+  // 3. 이 패치가 추가·수정한 코드 단계는 스크립트가 있어야 한다 (CODE_NODE_EMPTY 예방)
+  for (const node of nodes) {
+    if (node.type !== "code") continue;
+    if (!touchedNodeIds.has(node.id)) continue;
+    const codeText = typeof node.config?.code === "string" ? node.config.code.trim() : "";
+    if (!codeText) {
+      return fail(
+        "PATCH_CODE_EMPTY",
+        `코드 단계 "${node.label || node.id}"에 실행할 스크립트가 없습니다.`,
+        "이 변경은 적용하지 않았습니다. 그 단계가 무엇을 계산할지 말씀해 주시면 스크립트까지 채워 다시 제안합니다.",
+      );
+    }
+  }
+
   return {
     ok: true,
     next: { ...graph, nodes, edges },

@@ -301,3 +301,17 @@ export function parseNodeEnvelope(raw: unknown): NodeOutputEnvelope | null {
     },
   };
 }
+
+/**
+ * 선언이 없을 때 이 노드가 바깥에 하는 일. **커널과 화면이 같은 답을 써야 한다.**
+ *
+ * ★화면이 `s("effect") || "read"`로 보여 주면서 그 값을 저장하지 않으면, 사람은 "조회"가
+ *   골라져 있다고 믿는데 커널은 자기 기본값으로 판단한다. 실제로 캔버스에서 만든 출력 노드가
+ *   화면엔 "조회"로 뜨는데 시뮬레이션에서 통째로 차단됐다 — 같은 노드가 화면과 실행에서
+ *   다른 것이었다.
+ */
+export function defaultNodeEffect(nodeType: string): "pure" | "read" | "mutation" {
+  // 출력 블록은 "바깥으로 내보내기"다(레지스트리 선언). 안 적혔다고 조회로 보면
+  // 시뮬레이션이 실제로 발행하고, 승인도 재시도 정책도 조회 기준으로 돈다.
+  return nodeType === "output" ? "mutation" : "read";
+}

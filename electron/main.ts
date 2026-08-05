@@ -725,6 +725,22 @@ app.whenReady().then(async () => {
   // launchd LaunchAgent가 `--headless-automations` 플래그로 이 바이너리를 coarse 인터벌마다
   // poke한다. 창을 만들지 않고 due 자동화를 1회 실행한 뒤 종료한다. 러너는 이미 렌더러를
   // 안 건드리므로(sink no-op) 엔진 전체를 그대로 재사용한다. (full launchd 설치는 P1.)
+  // ── 그래프 표면(커넥터 C47·C48) ───────────────────────────────
+  // 코드(SDK)와 다른 에이전트(MCP)가 그래프를 부르는 입구. **stdio 전용**이라
+  // 이 프로세스를 직접 띄운 쪽에만 닿고, 네트워크에서 도달할 방법이 없다.
+  // 창을 만들지 않고, 스케줄러도 켜지 않는다 — 요청을 대기열에 적을 뿐이다.
+  if (process.argv.includes("--graph-surface")) {
+    try {
+      initStore();
+      const { serveGraphSurfaceOverStdio } = await import("./graph-surface/server");
+      serveGraphSurfaceOverStdio();
+    } catch (err) {
+      console.error("[graph-surface] failed:", err);
+      app.quit();
+    }
+    return;
+  }
+
   if (process.argv.includes("--headless-automations")) {
     if (updatePreflight.pendingInstall) {
       // The GUI launch owns post-migration continuity review. Never let a

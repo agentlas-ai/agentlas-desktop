@@ -16,7 +16,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 90;
+const SCHEMA_VERSION = 91;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -1654,6 +1654,10 @@ export function initStore(options: StoreInitOptions = {}): void {
       }
     };
     addAutoCol("graph_json", "graph_json TEXT");
+    // ★"이 자동화가 무엇을 위한 것인가" — 인터뷰의 blueprint.goal. 예전에는 저장 순간
+    //   사라져서, 나중에 AI(architect·검증 설계기)가 "이게 무슨 그래프인지" 알 단서가
+    //   노드 라벨뿐이었다. 검증 자동 설계의 선행 조건.
+    addAutoCol("goal", "goal TEXT");
     addAutoCol("schedule_json", "schedule_json TEXT");
     addAutoCol("timezone", "timezone TEXT");
     addAutoCol("end_at", "end_at TEXT");
@@ -3834,6 +3838,16 @@ export function initStore(options: StoreInitOptions = {}): void {
   _db.exec(
     "CREATE INDEX IF NOT EXISTS idx_automation_node_approvals_node ON automation_node_approvals(automation_id, node_id, decided_at)",
   );
+  // ★"항상 허용"은 **그래프가 아니라 승인 기록에** 남는다.
+  //   노드 config의 approval을 ask_once로 바꾸면 graph_json이 달라져 graphDigest가 바뀌고,
+  //   바로 그 순간 멈춰 있던 실행의 재개가 거부된다 — 항상 허용을 누른 사람이 그 실행을
+  //   잇지 못하는 모양이 된다. 그래서 결정은 그래프 밖에 둔다(additive 컬럼).
+  {
+    const approvalCols = _db.prepare("PRAGMA table_info(automation_node_approvals)").all() as Array<{ name: string }>;
+    if (!approvalCols.some((c) => c.name === "scope")) {
+      _db.exec("ALTER TABLE automation_node_approvals ADD COLUMN scope TEXT NOT NULL DEFAULT 'once'");
+    }
+  }
   // 실패 3요소(코드·사유 원문·지금 누를 행동)를 실행에 함께 남긴다. 예전에는 노드 상태가
   // "failed" 한 단어뿐이라, 화면이 왜 멈췄는지도 무엇을 누르면 되는지도 말할 수 없었다.
   if (tableExists(_db, "automation_runs")) {
@@ -3927,6 +3941,50 @@ export function initStore(options: StoreInitOptions = {}): void {
       PRIMARY KEY (automation_id, node_id)
     )
   `);
+
+  // v91: 명령 트리거가 대기열에 앉을 자리 (커넥터 C47·C48).
+  //
+  // 오너의 트리거 분류는 셋이다 — 예약(결정론)·명령·입력. 그런데 대기열은 소스가 밀어
+  // 넣는 넷(fs/chain/webhook/poll)만 받게 못 박혀 있어서, 코드나 다른 에이전트가 보낸
+  // "이 그래프 돌려줘"가 앉을 자리가 없었다. 자리가 없으면 바깥 표면은 둘 중 하나를 한다:
+  // 자기 프로세스에서 직접 돌리거나(같은 자동화가 두 곳에서 동시에 돈다), 다른 종류인 척
+  // webhook으로 적거나(어디서 온 요청인지 영원히 알 수 없게 된다). 둘 다 사고다.
+  //
+  // CHECK 제약은 고칠 수 없으므로 표준 재작성(새 표 → 복사 → 교체)으로 넓힌다.
+  // 기존 행은 종류·클레임 상태까지 그대로 옮긴다 — 대기 중인 배달을 잃으면 안 된다.
+  if (tableExists(_db, "automation_trigger_events")) {
+    const ddl = (_db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='automation_trigger_events'",
+    ).get() as { sql?: string } | undefined)?.sql ?? "";
+    if (!ddl.includes("'command'")) {
+      const columns = schemaColumns(_db, "automation_trigger_events").map((column) => column.name);
+      const columnList = columns.join(", ");
+      const rebuild = _db.transaction(() => {
+        _db!.exec(`ALTER TABLE automation_trigger_events RENAME TO automation_trigger_events_v90`);
+        _db!.exec(ddl
+          .replace(
+            "CHECK(trigger_kind IN ('fs','chain','webhook','poll'))",
+            "CHECK(trigger_kind IN ('fs','chain','webhook','poll','command'))",
+          ));
+        _db!.exec(
+          `INSERT INTO automation_trigger_events (${columnList}) `
+          + `SELECT ${columnList} FROM automation_trigger_events_v90`,
+        );
+        _db!.exec("DROP TABLE automation_trigger_events_v90");
+      });
+      rebuild();
+      // 인덱스는 옛 표와 함께 사라졌다. v70이 만든 것과 **같은 이름·같은 정의**로 되살린다 —
+      // 이름이 달라지면 다음 마이그레이션의 IF NOT EXISTS가 중복 인덱스를 만든다.
+      _db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_automation_trigger_events_due
+          ON automation_trigger_events(status, next_attempt_at, created_at);
+        CREATE INDEX IF NOT EXISTS idx_automation_trigger_events_automation
+          ON automation_trigger_events(automation_id, status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_automation_trigger_events_run
+          ON automation_trigger_events(run_id) WHERE run_id IS NOT NULL;
+      `);
+    }
+  }
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
   } catch (error) {

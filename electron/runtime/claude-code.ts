@@ -509,6 +509,12 @@ export const runClaudeCode: Runner = async (
       hasExactUntrustedMcpGrant)
       ? ["--allowedTools", runReq.mcpAllowedTools.join(",")]
       : [];
+  // ★C38 — 도구 호출 직전 관문. 실측(2026-08-04, claude 2.1.220): PreToolUse deny가
+  // `--permission-mode bypassPermissions`를 이기고 Bash 호출을 실제로 막았다. 허용 깃발
+  // (`--allowedTools`)은 켜기만 하므로, 선언되지 않은 호출을 거절하는 곳은 여기뿐이다.
+  const toolBrokerArgs = runReq.toolBrokerSettingsPath
+    ? ["--settings", runReq.toolBrokerSettingsPath]
+    : [];
   const noToolsArgs = runReq.untrustedNoTools
     ? [
         // Claude's safe-mode disables even an explicit --mcp-config. Keep it
@@ -577,6 +583,7 @@ export const runClaudeCode: Runner = async (
           ...noToolsArgs,
           ...mcpArgs,
           ...allowedToolArgs,
+          ...toolBrokerArgs,
         ]
       : [
           "-p",
@@ -592,6 +599,7 @@ export const runClaudeCode: Runner = async (
           ...noToolsArgs,
           ...mcpArgs,
           ...allowedToolArgs,
+          ...toolBrokerArgs,
         ];
     let child: ReturnType<typeof spawnCli>;
     try {
