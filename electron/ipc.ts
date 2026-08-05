@@ -3767,6 +3767,61 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("automations:updateGraph", (_e, id: string, graph: WorkflowGraph | null) =>
     updateAutomationGraph(id, graph),
   );
+
+  // ── 그래프를 Hub에 올리고, Hub에서 받아 설치한다 ──────────────────────────
+  //
+  // ★두 방향 모두 **미바인딩**을 정직하게 말한다. 발행은 무엇을 지웠는지,
+  //   설치는 무엇이 비어 있는지 돌려준다. "됐습니다"만 말하면 사람은 돈다고 믿는다.
+  ipcMain.handle("automations:publishGraph", async (_e, id: string, opts?: { version?: string }) => {
+    const automation = getAutomation(id);
+    if (!automation) throw new Error(`Automation not found: ${id}`);
+    if (!automation.graph) {
+      return { ok: false as const, reason: "이 자동화에는 아직 그래프가 없습니다." };
+    }
+    const { publishGraphToHub } = await import("./cloud-agents/graph-publish");
+    return publishGraphToHub({
+      automation,
+      graph: automation.graph,
+      ...(opts?.version ? { version: opts.version } : {}),
+    });
+  });
+
+  ipcMain.handle("automations:fetchGraphFromHub", async (_e, slug: string) => {
+    const { fetchGraphFromHub } = await import("./cloud-agents/graph-publish");
+    return fetchGraphFromHub(String(slug || "").trim());
+  });
+
+  ipcMain.handle("automations:installGraphFromHub", async (_e, slug: string, opts?: { name?: string }) => {
+    const { fetchGraphFromHub } = await import("./cloud-agents/graph-publish");
+    const fetched = await fetchGraphFromHub(String(slug || "").trim());
+    if (!fetched.ok || !fetched.package) return fetched;
+    const pkg = fetched.package;
+    const name = (opts?.name || pkg.manifest.name || slug).trim();
+    // 같은 이름이 이미 있으면 덮어쓰지 않는다 — 남의 작업을 지우는 설치는 없다.
+    if (listAutomations().some((row) => row.name === name)) {
+      return { ok: false as const, reason: `"${name}" 이름의 자동화가 이미 있습니다.` };
+    }
+    const created = createAutomation({
+      name,
+      scheduleHuman: pkg.manifest.trigger.schedule || "수동 실행",
+      // 슬롯은 비운 채로 만든다. 받는 사람이 채우기 전에 도는 것이 가장 나쁘다.
+      targetType: "agent",
+      targetId: "",
+      promptTemplate: "",
+      graphJson: pkg.graph,
+      createdBy: "user",
+      ...(pkg.manifest.trigger.schedule ? { scheduleJson: pkg.manifest.trigger.schedule } : {}),
+      // 입력 트리거는 그래프의 트리거 노드가 들고 있다(TriggerKind에 input은 없다).
+      ...(pkg.manifest.trigger.kind === "cron" ? { triggerType: "schedule" as const } : {}),
+    });
+    return {
+      ok: true as const,
+      automationId: created.id,
+      name,
+      bindings: fetched.bindings ?? [],
+      ...(fetched.packageHash ? { packageHash: fetched.packageHash } : {}),
+    };
+  });
   // 그래프 변경 제안 — 평가만 한다. 적용은 사용자가 diff를 보고 누른 뒤 별도 호출로만.
   // 모델 출력이 저장된 그래프에 직접 닿는 경로는 만들지 않는다(설계 D8).
   const evaluatePatchFor = (id: string, patch: unknown) => {
@@ -3912,11 +3967,32 @@ export function registerIpcHandlers(): void {
         };
         continue;
       }
+      // ★슬롯 편성 — 단계가 선언한 역할을 **실물 에이전트**로 채운다.
+      //   기본은 Hub(생태계가 돌아야 한다). 못 찾은 슬롯은 비워 둔다 — 아무거나
+      //   꽂으면 사람은 꽂힌 대로 돌 거라 믿는다. 사람은 저장 확인 화면에서 이 결정을 본다.
+      let staffedGraph = built.graph;
+      let staffing: import("./workflow/graph-staffing").StaffedSlot[] = [];
+      try {
+        const { staffGraph, applyStaffing } = await import("./workflow/graph-staffing");
+        const { listInstalledAgentsReadOnly } = await import("./mcp/registry");
+        const { getSource } = await import("./marketplace");
+        staffing = await staffGraph(built.graph, {
+          installed: listInstalledAgentsReadOnly().map((a) => ({
+            id: a.id, name: a.name, ...(a.tagline ? { tagline: a.tagline } : {}),
+          })),
+          searchHub: (q) => getSource().searchAgents(q),
+        });
+        staffedGraph = applyStaffing(built.graph, staffing);
+      } catch {
+        // 편성 실패는 그래프 실패가 아니다 — 기본 에이전트로 도는 그래프가 나온다.
+        staffing = [];
+      }
       return {
         ok: true as const,
         kind: "blueprint" as const,
         blueprint: parsed.turn.blueprint,
-        graph: built.graph,
+        graph: staffedGraph,
+        staffing,
         scheduleHuman: built.scheduleHuman,
         triggerType: built.triggerType,
       };

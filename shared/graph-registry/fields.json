@@ -704,6 +704,15 @@
       "reader": "커널(eval)",
       "status": "implemented",
       "note": "true면 같은 입력을 한 번 더 판정해 항목별 불일치를 기록(비용 2배 — 옵션). 결과는 1차 판정 — 재판정으로 결과를 바꾸면 '몇 번 돌리느냐'가 결과를 정한다. 실측: 같은 입력 20회 중 최대 50% 뒤집힘."
+    },
+    {
+      "name": "role",
+      "on": "node.config",
+      "grade": "degradable",
+      "writer": "AI(인터뷰)",
+      "reader": "스태핑(Hub 검색)·화면",
+      "status": "implemented",
+      "note": "이 단계를 할 일꾼의 성격을 사람 말로. ★모델은 역할만 말하고 실제 에이전트(ref)는 코드가 Hub에서 검색해 꽂는다 — 모델이 slug를 지어내면 실행 때 죽는다."
     }
   ]
 }

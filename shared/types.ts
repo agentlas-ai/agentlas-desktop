@@ -3256,7 +3256,7 @@ export interface CloudAgentPackageDownload {
   packageHashVersion?: CloudAgentPackageHashVersion;
   fileCount: number;
   totalBytes: number;
-  agentKind: "agent" | "team" | "repo";
+  agentKind: "agent" | "team" | "repo" | "graph";
   runtimeLabels: string[];
   files: CloudAgentPackageDownloadFile[];
   /** Optional owner-restore CAS identity. Package bytes remain independently hashed. */
@@ -3293,7 +3293,7 @@ export interface CloudAgentPackageManifest {
   slug: string;
   name: string;
   tagline: string;
-  agentKind: "agent" | "team" | "repo";
+  agentKind: "agent" | "team" | "repo" | "graph";
   runtimeLabels: string[];
   visibility: CloudAgentVisibility;
   rootFingerprint: string;

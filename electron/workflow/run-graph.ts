@@ -2320,11 +2320,10 @@ export async function runGraph(
         }
         // 이 단계가 읽는 값만 스크립트에 넘긴다 — 전체 변수 백을 주면 소음이 섞인다.
         const consumeKey = str(node.config, "consumes");
-        const referenced = new Set<string>();
-        for (const m of codeText.matchAll(/vars(?:\.([A-Za-z_$][\w$]*)|\[["']([^"']+)["']\])/g)) {
-          const name = m[1] ?? m[2];
-          if (name) referenced.add(name);
-        }
+        // ★참조 판별은 공용 함수 하나뿐 — 여기서 정규식을 다시 쓰면 `vars.get("x")`를
+        //   못 읽던 그 결함이 되살아난다(shared/graph-code-vars.ts의 배경 참고).
+        const { codeReferencedVars } = await import("../../shared/graph-code-vars");
+        const referenced = new Set<string>(codeReferencedVars(codeText));
         if (consumeKey) referenced.add(consumeKey);
         const codeVars: Record<string, unknown> = {};
         for (const name of referenced) if (name in vars) codeVars[name] = vars[name];

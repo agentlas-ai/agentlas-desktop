@@ -125,6 +125,16 @@ export function parseLegacyToken(token: string, tz: string): ScheduleSpec | null
  *  (b) 레거시 하이픈 토큰(기존 경로) — schedule 컬럼.
  * 우선 JSON 파싱을 시도하고, 실패하면 레거시 토큰으로 매핑한다. 둘 다 실패면 null.
  */
+/**
+ * 5칸(또는 초 포함 6칸) cron 식인가. 레거시 토큰("daily-09:00", "30m")과 겹치지 않게
+ * 칸 수와 허용 문자로만 판별한다 — 여기서 관대해지면 오타가 조용히 cron으로 둔갑한다.
+ */
+function isCronExpression(raw: string): boolean {
+  const parts = raw.split(/\s+/);
+  if (parts.length !== 5 && parts.length !== 6) return false;
+  return parts.every((part) => /^[0-9*,\-/]+$/.test(part) || /^[A-Za-z]{3}(-[A-Za-z]{3})?$/.test(part));
+}
+
 export function specFromStored(stored: string, tz: string): ScheduleSpec | null {
   const raw = (stored || "").trim();
   if (!raw) return null;
@@ -144,6 +154,11 @@ export function specFromStored(stored: string, tz: string): ScheduleSpec | null 
     const expr = raw.slice(5).trim();
     if (expr) return { kind: "cron", expr, tz: tz || "UTC" };
   }
+  // ★접두사 없는 **맨 cron 식**도 받는다. 터미널 인터뷰는 사람이 고른 시각을
+  //   "0 9-23 * * *" 형태로 저장하는데, 여기서 못 읽으면 24h 폴백으로 떨어져
+  //   **사람이 고른 시각이 조용히 사라진다**(실측 2026-08-05: "09~23시 매시간"으로
+  //   만든 자동화의 다음 실행이 24시간 뒤로 잡혔다 — 하루 15회가 1회가 됐다).
+  if (isCronExpression(raw)) return { kind: "cron", expr: raw, tz: tz || "UTC" };
   return parseLegacyToken(raw, tz);
 }
 

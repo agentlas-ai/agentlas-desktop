@@ -9,6 +9,7 @@
 // 바깥을 바꾸는 단계인지 모르면 읽기로 낮추지 않는다. 자동화는 사람이 없는 동안 돌기 때문에
 // "그럴듯한 기본값"이 그대로 실행된다.
 import type { WorkflowGraph, WorkflowNode, WorkflowEdge } from "./types";
+import { layoutGraph, needsLayout } from "./graph-layout";
 import { CAPABILITIES, CAPABILITY_LABEL, findProvider, providersFor } from "./graph-tool-binding";
 
 export const BLUEPRINT_SCHEMA = "agentlas.graph-blueprint.v1";
@@ -46,6 +47,22 @@ export interface BlueprintStep {
   code?: string;
   /** 코드 언어. 기본 python(번들 인터프리터·데이터 라이브러리). */
   codeLang?: "python" | "js";
+  /**
+   * 이 단계를 **어떤 성격의 일꾼**이 해야 하는가 — 사람 말로 적는다("한국어 마케팅 글쓰기").
+   * ★모델은 **역할만** 말하고 실제 에이전트는 코드가 Hub에서 검색해 꽂는다. 모델이
+   *   에이전트 이름(slug)을 직접 쓰면 없는 것을 지어내 실행 때 죽는다 — 이 제품이
+   *   그래프 전체에서 지키는 규율("모델은 청사진만, 실물은 코드가")과 같은 이유다.
+   */
+  role?: string;
+  /**
+   * 바깥으로 나가기 전에 사람 확인을 받을지. **기본은 항상 "ask"(잠금)**이고,
+   * 사람이 "검토 없이 바로 나가도 된다"고 **명시로 말했을 때만** "auto"가 된다.
+   * ★모델이 스스로 낮출 수 없다 — 인터뷰 프롬프트가 그렇게 가르치고, 낮춘 단계는
+   *   저장 전 확인 화면에 "확인 없이 바로 나감"으로 표시된다.
+   *   (실측 2026-08-05: 사용자가 "게시 전 검토 필요 없음"이라고 말했는데 반영할 칸이
+   *    없어 전부 잠긴 채 만들어졌다 — 요청과 다른 물건이 나왔다.)
+   */
+  approval?: "ask" | "auto";
 }
 
 export interface BlueprintBranch {
@@ -479,9 +496,12 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
           ? { code: step.code ?? "", codeLang: step.codeLang === "js" ? "js" : "python", note: step.instruction }
           : { prompt: step.instruction }),
         effect: step.effect,
-        // 바깥을 바꾸는 단계는 기본이 "확인 후 실행"이다. 이 기본값을 낮추는 것은
-        // 자동화를 만드는 자리가 아니라 사람이 따로 결정할 일이다.
-        ...(step.effect === "mutation" ? { approval: "ask" } : {}),
+        // 바깥을 바꾸는 단계는 **기본이 잠김**("확인 후 실행"). 사람이 명시로
+        // "검토 없이"라고 말했을 때만 auto로 내려간다 — 모델이 스스로 못 낮춘다.
+        ...(step.effect === "mutation"
+          ? { approval: step.approval === "auto" ? "auto" : "ask" }
+          : {}),
+        ...(step.role?.trim() ? { role: step.role.trim() } : {}),
         ...(step.produces ? { produces: step.produces } : {}),
         ...(step.consumes?.length ? { consumes: step.consumes[0] } : {}),
         // 도구 요구는 노드가 지고 간다 — 켜기 게이트가 이걸 읽어 연결 여부를 계산한다.
@@ -621,9 +641,15 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint): BlueprintBuild {
     }
   });
 
+  // ★겹치지 않게 배치한 뒤 돌려준다. 예전에는 단계 간격이 280px인데 검증을 +70,
+  //   갈림길을 +140만 띄워 노드 폭(230)보다 좁았고, 검증·반복이 있는 실제 그래프는
+  //   캔버스에서 카드가 서로 겹쳐 글자를 못 읽었다(실측 2026-08-05, 노드 14개 그래프).
+  //   ★캔버스와 **같은 함수**를 쓴다 — 배치 규칙이 두 벌이 되면 반드시 갈라진다.
+  const built = { version: 1 as const, nodes, edges };
+  const laidOut = needsLayout(built) ? layoutGraph(built) : nodes;
   return {
     ok: true,
-    graph: { version: 1, nodes, edges },
+    graph: { version: 1, nodes: laidOut, edges },
     scheduleHuman: trigger.kind === "cron" ? trigger.schedule : "manual",
     triggerType: trigger.kind === "cron" ? "schedule" : "manual",
   };

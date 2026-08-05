@@ -4,6 +4,7 @@
 // 어긋난다. 사용자에겐 값을 넣었는데 빈 값으로 실행된 것처럼 보인다.
 // 터미널·플러그인도 같은 규칙을 따라야 하며, 그쪽은 별도 패키지라 문자열 계약으로만 공유한다.
 import type { WorkflowGraph, WorkflowNode } from "./types";
+import { codeReferencedVars } from "./graph-code-vars";
 
 /** 값을 못 정했을 때 쓰는 변수 이름. 프롬프트에서 {{input}} 으로 읽힌다. */
 export const DEFAULT_TRIGGER_INPUT_VAR = "input";
@@ -70,12 +71,17 @@ export function unproducedVariables(graph: WorkflowGraph | null | undefined): st
     if (typeof to === "string" && to.trim()) produced.add(to.trim());
   }
   const referenced: string[] = [];
+  const want = (name: string) => {
+    if (!name || produced.has(name) || referenced.includes(name)) return;
+    referenced.push(name);
+  };
   for (const node of graph?.nodes ?? []) {
     const text = `${node.config?.prompt ?? ""}\n${node.config?.text ?? ""}\n${node.config?.template ?? ""}`;
-    for (const match of text.matchAll(/\{\{\s*([\w.-]+)\s*\}\}/g)) {
-      const name = match[1];
-      if (!produced.has(name) && !referenced.includes(name)) referenced.push(name);
-    }
+    for (const match of text.matchAll(/\{\{\s*([\w.-]+)\s*\}\}/g)) want(match[1] ?? "");
+    // ★코드 단계가 읽는 값도 그래프 어휘다. 이걸 빼면 **코드만 읽는 값**은 아무도
+    //   요구하지 않아 빈 채로 돈다 — 말 노드에서 이미 P0로 겪은 함정의 코드판.
+    const code = typeof node.config?.code === "string" ? node.config.code : "";
+    for (const name of codeReferencedVars(code)) want(name);
   }
   return referenced;
 }

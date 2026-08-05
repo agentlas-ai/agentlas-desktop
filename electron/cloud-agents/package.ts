@@ -1940,7 +1940,7 @@ function readLocalizedListing(snapshot: PackageSnapshot): CloudAgentLocalizedLis
   return undefined;
 }
 
-function localizedListingProblems(value: CloudAgentLocalizedListing | undefined): string[] {
+export function localizedListingProblems(value: CloudAgentLocalizedListing | undefined): string[] {
   if (!value) return ["localized object missing"];
   const issues: string[] = [];
   if (!value.titleEn) issues.push("titleEn missing");
@@ -1959,7 +1959,7 @@ function localizedListingProblems(value: CloudAgentLocalizedListing | undefined)
   return issues;
 }
 
-async function generateLocalizedListingWithSubmitterRuntime(
+export async function generateLocalizedListingWithSubmitterRuntime(
   rootPath: string,
   name: string,
   tagline: string,
@@ -2133,7 +2133,7 @@ function packageOutputDir(slug: string): string {
   return path.join(root, `${slug}-${stamp}`);
 }
 
-function hashPackage(files: PackagedFile[]): string {
+export function hashPackage(files: PackagedFile[]): string {
   const h = createHash("sha256");
   // 코드포인트 정렬 — localeCompare 금지. 서버(register/route.ts hashPackage)·Python
   // upload.py와 바이트 동일해야 한다. localeCompare는 ICU/로케일 의존이라 대소문자 혼합

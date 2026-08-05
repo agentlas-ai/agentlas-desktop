@@ -91,13 +91,25 @@ export function layoutGraph(graph: WorkflowGraph): WorkflowNode[] {
  * 저장된 그래프가 유효한 position을 이미 가졌는지 판정.
  * 모든 노드가 (0,0)이거나 겹쳐 있으면 재배치가 필요하다고 본다.
  */
+/** 노드 카드의 실측 크기 — 이보다 가까우면 화면에서 겹쳐 글자를 못 읽는다. */
+const NODE_W = 230;
+const NODE_H = 90;
+
 export function needsLayout(graph: WorkflowGraph): boolean {
   if (graph.nodes.length <= 1) return false;
-  const seen = new Set<string>();
-  for (const n of graph.nodes) {
-    const key = `${Math.round(n.position?.x ?? 0)}:${Math.round(n.position?.y ?? 0)}`;
-    if (seen.has(key)) return true; // 겹침 → 재배치.
-    seen.add(key);
+  // ★예전에는 좌표가 **완전히 같을 때만** 재배치했다. 그래서 청사진이 검증을 +70,
+  //   갈림길을 +140만 띄워 놓은 그래프(노드 폭 230)는 "다른 좌표"라 통과했고,
+  //   사용자는 카드가 서로 겹쳐 글자를 못 읽는 캔버스를 봤다(실측 2026-08-05).
+  //   이제 **실제로 겹치는가**로 판단한다.
+  const placed = graph.nodes.map((n) => ({
+    x: Math.round(n.position?.x ?? 0),
+    y: Math.round(n.position?.y ?? 0),
+  }));
+  for (let i = 0; i < placed.length; i += 1) {
+    for (let j = i + 1; j < placed.length; j += 1) {
+      if (Math.abs(placed[i].x - placed[j].x) < NODE_W
+        && Math.abs(placed[i].y - placed[j].y) < NODE_H) return true;
+    }
   }
   return false;
 }

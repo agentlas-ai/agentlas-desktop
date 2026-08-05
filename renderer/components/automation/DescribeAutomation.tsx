@@ -218,12 +218,29 @@ export function DescribeAutomation({ locale, onCreated }: {
               <li key={node.id} style={{ fontSize: 12, color: "var(--ink)" }}>
                 {node.label}
                 {node.config?.effect === "mutation" ? (
-                  <span style={{ color: "var(--muted-deep)" }}>
-                    {ko ? " — 바깥으로 나감, 실행 전 확인" : " — goes outside, asks first"}
-                  </span>
+                  // ★확인 없이 나가는 단계는 눈에 띄어야 한다 — 사람이 그렇게 정했더라도
+                  //   저장 전에 자기가 무엇을 풀었는지 다시 보는 자리가 여기뿐이다.
+                  node.config?.approval === "auto" ? (
+                    <span style={{ color: "var(--red-deep, #b4533a)", fontWeight: 600 }}>
+                      {ko ? " — 바깥으로 나감, 확인 없이 바로" : " — goes outside without asking"}
+                    </span>
+                  ) : (
+                    <span style={{ color: "var(--muted-deep)" }}>
+                      {ko ? " — 바깥으로 나감, 실행 전 확인" : " — goes outside, asks first"}
+                    </span>
+                  )
                 ) : null}
                 {/* ★AI가 제안한 채점표를 저장 전에 사람이 본다 — 항목이 곧 판정 기준이므로
                     안 보이면 무엇으로 채점되는지 모른 채 승인하는 셈이다. */}
+                {/* ★누가 이 단계를 하는지 — 편성 결과를 저장 전에 보여준다.
+                    안 보이면 사람은 "누가 내 일을 하는지" 모른 채 승인하게 된다. */}
+                {typeof node.config?.role === "string" && node.config.role ? (
+                  <span style={{ color: "var(--muted-deep)" }}>
+                    {node.config?.ref
+                      ? ` · ${node.config.targetType === "hub" ? "Hub" : ko ? "설치본" : "installed"}: ${String(node.config.ref)}`
+                      : (ko ? ` · 일꾼 미정 (${node.config.role})` : ` · unstaffed (${node.config.role})`)}
+                  </span>
+                ) : null}
                 {Array.isArray(node.config?.items) && (node.config.items as Array<{ text?: string; kind?: string }>).length > 0 ? (
                   <ul data-testid="describe-checklist" style={{ margin: "3px 0 0", paddingLeft: 14, display: "grid", gap: 2 }}>
                     {(node.config.items as Array<{ text?: string; kind?: string }>).map((item, i) => (

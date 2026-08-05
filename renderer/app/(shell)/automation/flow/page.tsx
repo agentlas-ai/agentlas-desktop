@@ -27,7 +27,7 @@ import "@xyflow/react/dist/style.css";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type { Automation, WorkflowGraph, WorkflowNode, WorkflowNodeRunState } from "@/lib/types";
-import { layoutGraph, needsLayout } from "@/lib/workflow-layout";
+import { layoutGraph, needsLayout } from "@shared/graph-layout";
 import { validateWorkflow, type WorkflowIssue } from "@/lib/workflow-validate";
 import { workflowNodeTypes, type NodeStrings, type WorkflowNodeData } from "@/components/automation/nodes";
 import { NODE_ACCENT } from "@/components/automation/nodes/nodeShared";
@@ -523,6 +523,10 @@ function AutomationFlowPage() {
       },
     ]);
     setSelectedNodeId(nid);
+    // ★놓았으면 팔레트를 닫는다. 팔레트와 설정 패널이 **같은 자리**를 쓰기 때문에,
+    //   열어둔 채로 두면 방금 놓은 노드는 물론 다른 어느 노드를 눌러도 설정이 안 열린다
+    //   — 사람은 "추가 → 방금 것 설정" 순서로 일하므로 편집이 그 자리에서 막힌다(실측).
+    setPaletteOpen(false);
     setDirty(true);
   }
 
