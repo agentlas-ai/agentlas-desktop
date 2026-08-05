@@ -2,10 +2,41 @@
 
 ## 0.9.55 — 2026-08-05
 
-This release binds Agentlas OS v1.1.97 at
-17c2d127c39d45927d8743ceb945516ae89a7f76.
+This release binds Agentlas OS v1.1.98 at
+b8fc76d44dadd2933216ce669d9f53425a606392.
 These source gates do not themselves publish a release; the Releases page
 stays the authority for what is actually downloadable.
+
+- **Automatic updates stop refusing themselves.** The updater compared the
+  local database schema against the release and held the install permanently
+  when it fell outside the declared range — and that code was not retryable, so
+  the hold never cleared on its own. Neither direction was reachable in normal
+  use: migrations run before the updater reads `user_version`, and they cover
+  every version from 1 upward, so the number it sees is always this build's own.
+  Across 45 release tags the migration target and the advertised range never
+  once disagreed. The only value that ever reached the check came from a
+  development build sharing the profile — data newer than the release means a
+  newer app is needed, not a blocked one. Desktop apps that version SQLite the
+  same way do not gate their updater on it.
+- **Hub plugins install by clicking.** The marketplace card's only button copied
+  a shell command, so a Desktop user had to open a terminal to install a plugin
+  the agent had just recommended; of the Hub catalogue only the handful that
+  also shipped in the bundled catalogue could be installed by clicking. Install
+  now shows the exact command that will run on this machine, and what still has
+  to be filled in afterwards, before anything is registered — a stdio server is
+  a local process, and an approval given without seeing the command is not an
+  approval. Nothing is installed until that screen is answered, and a plugin
+  that ships no connectable server says so instead of quietly succeeding.
+- **A tool waiting for approval says so until it is answered.** Attaching a Hub
+  plugin during a run leaves a local server registered but switched off, and
+  that fact went by once as a line of run output. It is now asked for directly
+  from stored state, so it survives a restart and a new conversation, and the
+  card carries the command that will run alongside the button that runs it.
+- **The same tool under two names counts once.** The Hub and the bundled
+  catalogue name several tools differently (`brave-search-mcp` against
+  `brave-search`), so an already installed tool was still advertised as
+  installable. Neither side's identifiers were changed — renaming either breaks
+  installed rows or outbound links — only the comparison is normalised.
 
 - **Code steps now receive every value they read.** A graph step written as code
   asks for the values it needs, but only the one value declared as its input
