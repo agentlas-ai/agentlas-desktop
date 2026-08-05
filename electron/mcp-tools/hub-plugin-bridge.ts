@@ -100,7 +100,7 @@ function normalizeManifestMcpRows(raw: unknown): HubManifestMcpRow[] {
   return rows;
 }
 
-async function fetchHubPluginManifest(manifestUrl: string): Promise<{ mcp: HubManifestMcpRow[] } | null> {
+export async function fetchHubPluginManifest(manifestUrl: string): Promise<{ mcp: HubManifestMcpRow[] } | null> {
   let url: URL;
   try {
     url = new URL(manifestUrl);
@@ -125,6 +125,158 @@ async function fetchHubPluginManifest(manifestUrl: string): Promise<{ mcp: HubMa
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * 이미 같은 연결이 등록돼 있는지. 자동 브리지와 사용자 설치가 **같은 판정**을 써야
+ * "에이전트가 자동 등록해 둔 비활성 행"을 마켓플레이스 설치가 중복 생성하지 않고
+ * 그 행을 그대로 켤 수 있다.
+ */
+function findEquivalentServer(
+  installed: ReturnType<typeof listInstalledServers>,
+  row: HubManifestMcpRow,
+): ReturnType<typeof listInstalledServers>[number] | undefined {
+  return installed.find((server) =>
+    (row.url ? server.url === row.url : false) ||
+    (server.transport === "stdio" && row.transport === "stdio" && server.command === row.command &&
+      JSON.stringify(server.args) === JSON.stringify(row.args ?? [])));
+}
+
+/**
+ * 사용자가 마켓플레이스에서 직접 고른 Hub 플러그인의 연결 정보를 **설치하지 않고** 읽어온다.
+ *
+ * 설치 버튼이 승인 시트를 띄우려면 "무엇이 실행되는가"를 먼저 보여줘야 한다. stdio 행은
+ * 로컬에서 그 명령을 그대로 실행한다는 뜻이므로, 사람이 명령 원문을 보지 못한 채 누르는
+ * 승인은 승인이 아니다. 그래서 미리보기와 설치를 두 단계로 나눈다.
+ */
+export async function previewHubPlugin(
+  manifestUrl: string,
+  deps: { fetchManifest?: typeof fetchHubPluginManifest } = {},
+): Promise<{ rows: HubManifestMcpRow[]; needsLocalExecution: boolean; alreadyInstalledIds: string[] }> {
+  const fetchManifest = deps.fetchManifest ?? fetchHubPluginManifest;
+  const manifest = await fetchManifest(manifestUrl);
+  const rows = manifest?.mcp ?? [];
+  let installed: ReturnType<typeof listInstalledServers>;
+  try {
+    installed = listInstalledServers();
+  } catch {
+    installed = [];
+  }
+  const alreadyInstalledIds: string[] = [];
+  for (const row of rows) {
+    const existing = findEquivalentServer(installed, row);
+    if (existing) alreadyInstalledIds.push(existing.id);
+  }
+  return {
+    rows,
+    needsLocalExecution: rows.some((row) => row.transport === "stdio"),
+    alreadyInstalledIds,
+  };
+}
+
+/**
+ * 사용자가 승인 시트에서 명시적으로 누른 단일 Hub 플러그인을 설치한다.
+ *
+ * `bridgeHubPluginCandidates`(에이전트 실행 중 자동 브리지)와 갈라지는 점은 하나뿐이다:
+ * 저기서는 아무도 누르지 않았으므로 stdio가 비활성으로 남지만, 여기서는 사람이 명령 원문을
+ * 보고 눌렀으므로 `approveLocalExecution`이 참일 때만 활성으로 등록한다. 승인 없이 부르면
+ * 자동 브리지와 똑같이 비활성으로 남는다 — 이 함수는 승인을 만들어내지 않는다.
+ */
+export async function installHubPlugin(input: {
+  slug: string;
+  manifestUrl: string;
+  approveLocalExecution: boolean;
+}, deps: { fetchManifest?: typeof fetchHubPluginManifest } = {}): Promise<HubPluginBridgeResult> {
+  const fetchManifest = deps.fetchManifest ?? fetchHubPluginManifest;
+  const manifest = await fetchManifest(input.manifestUrl);
+  const rows = manifest?.mcp ?? [];
+  const receipts: HubPluginBridgeReceipt[] = [];
+  const liveServerIds: string[] = [];
+  if (rows.length === 0) {
+    return {
+      receipts: [{
+        slug: input.slug,
+        serverName: input.slug,
+        transport: "unknown",
+        action: "skipped",
+        reason: "no machine-connectable MCP endpoint in the Hub manifest",
+      }],
+      liveServerIds: [],
+    };
+  }
+  let installed: ReturnType<typeof listInstalledServers>;
+  try {
+    installed = listInstalledServers();
+  } catch {
+    installed = [];
+  }
+  for (const row of rows) {
+    try {
+      const existing = findEquivalentServer(installed, row);
+      if (existing) {
+        // 이미 있는 행은 다시 만들지 않는다. 다만 승인을 새로 받은 stdio는 켜 준다 —
+        // 자동 브리지가 비활성으로 남겨둔 바로 그 행이 여기로 들어온다.
+        if (!existing.enabled && row.transport === "stdio" && input.approveLocalExecution) {
+          setServerEnabled(existing.id, true);
+          receipts.push({
+            slug: input.slug,
+            serverName: existing.name,
+            transport: existing.transport,
+            action: "connected",
+            serverId: existing.id,
+          });
+        } else {
+          receipts.push({
+            slug: input.slug,
+            serverName: existing.name,
+            transport: existing.transport,
+            action: "already-installed",
+            serverId: existing.id,
+          });
+        }
+        if (existing.transport === "http" || existing.transport === "sse") liveServerIds.push(existing.id);
+        continue;
+      }
+      const server = installCustomServer({
+        name: `${input.slug}:${row.name}`.slice(0, 120),
+        transport: row.transport,
+        ...(row.url ? { url: row.url } : {}),
+        ...(row.command ? { command: row.command } : {}),
+        args: row.args ?? [],
+        envKeys: row.envKeys ?? [],
+      });
+      installed.push(server);
+      if (row.transport === "stdio" && !input.approveLocalExecution) {
+        setServerEnabled(server.id, false);
+        receipts.push({
+          slug: input.slug,
+          serverName: server.name,
+          transport: "stdio",
+          action: "needs-approval",
+          reason: "local execution was not approved",
+          serverId: server.id,
+        });
+        continue;
+      }
+      if (row.transport === "http" || row.transport === "sse") liveServerIds.push(server.id);
+      receipts.push({
+        slug: input.slug,
+        serverName: server.name,
+        transport: row.transport,
+        action: "connected",
+        serverId: server.id,
+      });
+    } catch (error) {
+      receipts.push({
+        slug: input.slug,
+        serverName: row.name,
+        transport: row.transport,
+        action: "skipped",
+        reason: error instanceof Error ? error.message.slice(0, 160) : "registration failed",
+      });
+    }
+  }
+  return { receipts, liveServerIds: [...new Set(liveServerIds)] };
 }
 
 /**
@@ -173,10 +325,7 @@ export async function bridgeHubPluginCandidates(
     }
     for (const row of manifest.mcp) {
       try {
-        const existing = installedServers.find((server) =>
-          (row.url && server.url === row.url) ||
-          (server.transport === "stdio" && row.transport === "stdio" && server.command === row.command &&
-            JSON.stringify(server.args) === JSON.stringify(row.args ?? [])));
+        const existing = findEquivalentServer(installedServers, row);
         if (existing) {
           receipts.push({
             slug: candidate.slug,

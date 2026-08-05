@@ -5798,6 +5798,43 @@ export interface AgentlasIpc {
     }) => Promise<InstalledMcpServer>;
     remove: (id: string) => Promise<void>;
     setEnabled: (id: string, enabled: boolean) => Promise<InstalledMcpServer>;
+    /**
+     * Hub 플러그인의 연결 정보를 **설치하지 않고** 읽는다. 승인 시트가 "이 명령이 이
+     * 기계에서 실행됩니다"를 보여주려면 설치 전에 읽을 수 있어야 한다.
+     */
+    previewHubPlugin: (manifestUrl: string) => Promise<{
+      rows: Array<{
+        name: string;
+        transport: "http" | "sse" | "stdio";
+        url?: string;
+        command?: string;
+        args?: string[];
+        envKeys?: string[];
+      }>;
+      /** stdio 행이 하나라도 있으면 참 — 로컬 프로세스 실행 승인이 필요하다. */
+      needsLocalExecution: boolean;
+      alreadyInstalledIds: string[];
+    }>;
+    /**
+     * 사용자가 승인 시트에서 직접 누른 Hub 플러그인을 설치한다.
+     * `approveLocalExecution`이 거짓이면 stdio 행은 비활성으로 남는다 — 이 호출은
+     * 승인을 만들어내지 않는다.
+     */
+    installHubPlugin: (input: {
+      slug: string;
+      manifestUrl: string;
+      approveLocalExecution?: boolean;
+    }) => Promise<{
+      receipts: Array<{
+        slug: string;
+        serverName: string;
+        transport: string;
+        action: "connected" | "already-installed" | "needs-approval" | "skipped";
+        reason?: string;
+        serverId?: string;
+      }>;
+      liveServerIds: string[];
+    }>;
     /** 실제로 붙어서 tools/list 해보고 상태 반환 */
     test: (id: string) => Promise<McpServerStatus>;
     /** 활성화된 모든 서버 상태 (env 부족분 포함) */

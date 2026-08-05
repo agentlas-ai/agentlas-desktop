@@ -357,7 +357,9 @@
     "test:graph-staffing": "node scripts/test-graph-staffing.cjs",
     "test:schedule-bare-cron": "node scripts/test-schedule-bare-cron.cjs",
     "test:graph-code-vars": "node scripts/test-graph-code-vars-contract.cjs",
-    "test:graph-package": "node scripts/test-graph-package-contract.cjs"
+    "test:graph-package": "node scripts/test-graph-package-contract.cjs",
+    "test:hub-plugin-install-ui": "npm run build:renderer && node scripts/test-hub-plugin-install-ui.cjs",
+    "test:plugin-slug-contract": "node scripts/test-plugin-slug-contract.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

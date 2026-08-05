@@ -99,6 +99,7 @@ import {
   removeServer,
   setServerEnabled,
 } from "./mcp-tools/registry";
+import { installHubPlugin, previewHubPlugin } from "./mcp-tools/hub-plugin-bridge";
 import { statusAllServers, testServerById } from "./mcp-tools/client";
 import { recommendMcpBuildPlan } from "./mcp-tools/build-plan";
 import { getOpenCrabReadiness } from "./opencrab/ontology";
@@ -2806,6 +2807,22 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("mcpTools:setEnabled", (_e, id: string, enabled: boolean) =>
     setServerEnabled(id, enabled),
   );
+  // Hub 플러그인 설치 — 미리보기와 설치를 반드시 나눈다. stdio 행은 그 명령을 이 기계에서
+  // 실행한다는 뜻이므로, 사람이 명령 원문을 보지 못한 채 누르는 승인은 승인이 아니다.
+  // 이전에는 마켓플레이스 카드가 설치 명령을 클립보드에 복사만 해줘서, Desktop 사용자가
+  // 터미널을 따로 열지 않으면 Hub 플러그인을 쓸 수 없었다.
+  ipcMain.handle("mcpTools:previewHubPlugin", (_e, manifestUrl: string) =>
+    previewHubPlugin(String(manifestUrl)),
+  );
+  ipcMain.handle(
+    "mcpTools:installHubPlugin",
+    (_e, input: { slug: string; manifestUrl: string; approveLocalExecution?: boolean }) =>
+      installHubPlugin({
+        slug: String(input?.slug ?? ""),
+        manifestUrl: String(input?.manifestUrl ?? ""),
+        approveLocalExecution: input?.approveLocalExecution === true,
+      }),
+  );
   ipcMain.handle("mcpTools:test", (_e, id: string) => testServerById(id));
   ipcMain.handle("mcpTools:status", () => statusAllServers());
   ipcMain.handle("mcpTools:recommendForBuild", (_e, input) => recommendMcpBuildPlan(input));
@@ -4017,6 +4034,15 @@ export function registerIpcHandlers(): void {
       return { ok: false, code: "CREATE_INPUT_INVALID", reason: "만들 내용을 읽지 못했습니다.", nextAction: "다시 시도해 주세요." };
     }
     const existing = listAutomations().find((a) => a.name === input.name!.trim());
+    // ★같은 이름 + 같은 그래프면 새로 만들지 않고 있는 것을 돌려준다.
+    //   실측(2026-08-05): 저장 버튼이 전환 피드백 없이 조용해서 사람이 여러 번 눌렀고,
+    //   같은 그래프가 "(2)" 사본 8개로 쌓였다. 중복 제거가 아니라 멱등이 정답이다.
+    if (existing) {
+      const prior = getAutomation(existing.id);
+      if (prior?.graph && JSON.stringify(prior.graph) === JSON.stringify(input.graph)) {
+        return { ok: true as const, id: existing.id, name: existing.name, renamed: false, reused: true };
+      }
+    }
     const name = existing ? `${input.name!.trim()} (2)` : input.name!.trim();
     const created = createAutomation({
       name,

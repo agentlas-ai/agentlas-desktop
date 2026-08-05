@@ -17,6 +17,7 @@ import {
   hubVerificationFacts,
   isCallableHubListing,
 } from "@/lib/hub-verification";
+import { installedServerMatchesPluginSlug } from "@shared/plugin-slug";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import type {
   ExperienceHubCatalogResult,
@@ -142,6 +143,9 @@ function MarketplacePage() {
   const [importNotice, setImportNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [listings, setListings] = useState<MarketplaceListing[]>([]);
   const [installedAgentSlugs, setInstalledAgentSlugs] = useState<Set<string>>(new Set());
+  const [installedMcpServers, setInstalledMcpServers] = useState<
+    Array<{ catalogId?: string | null; name?: string | null; enabled?: boolean }>
+  >([]);
   const [bookmarkedIdentities, setBookmarkedIdentities] = useState<Set<string>>(new Set());
   const [sourceStatus, setSourceStatus] = useState<MarketplaceSourceStatus | null>(null);
   const [q, setQ] = useState(() => searchParams.get("q") ?? "");
@@ -188,12 +192,16 @@ function MarketplacePage() {
     const api = ipc();
     if (!api) return;
     const bookmarkGeneration = ++bookmarkStateGenerationRef.current;
-    const [ag, session, bookmarks] = await Promise.all([
+    const [ag, session, bookmarks, mcpServers] = await Promise.all([
       api.team.list(),
       api.auth.getSession(),
       api.marketplace.bookmarks?.().catch(() => []),
+      // 플러그인 카드가 "이미 설치됨"을 말할 수 있어야 한다. 이게 없으면 Desktop 카탈로그로
+      // 이미 깐 도구에도 계속 "설치"를 권한다(hub:brave-search-mcp ↔ desktop:brave-search).
+      api.mcpTools.listInstalled().catch(() => []),
     ]);
     setInstalledAgentSlugs(new Set(visibleAgents(ag).map((a) => a.slug)));
+    setInstalledMcpServers(mcpServers ?? []);
     if (bookmarkStateGenerationRef.current === bookmarkGeneration) {
       setBookmarkedIdentities(new Set((bookmarks ?? []).map(hubBookmarkIdentityKey)));
     }
@@ -735,6 +743,8 @@ function MarketplacePage() {
                       listing={listing}
                       locale={locale}
                       sameSlugInstalled={installedAgentSlugs.has(listing.slug)}
+                pluginServerInstalled={installedMcpServers.some((server) =>
+                  installedServerMatchesPluginSlug(server, listing.slug))}
                       bookmarked={bookmarkedIdentities.has(hubListingIdentityKey(listing))}
                       bookmarking={bookmarking === hubListingIdentityKey(listing)}
                       onBookmark={() => void bookmarkOne(listing)}
@@ -1022,10 +1032,28 @@ function RdTag({
 // 카드 문법: 이름 + 한 줄 소개 + 실적 한 줄 + 배지 + CTA(텍스트·버튼 위주,
 // 의미 없는 첫글자 로고 타일은 제거).
 
+type HubPluginPreviewRow = {
+  name: string;
+  transport: "http" | "sse" | "stdio";
+  url?: string;
+  command?: string;
+  args?: string[];
+  envKeys?: string[];
+};
+
+/** 승인 화면에 보여줄 한 줄 — 원격은 접속할 주소, 로컬은 실행될 명령 원문. */
+function describeHubPluginRow(row: HubPluginPreviewRow): string {
+  if (row.transport === "stdio") {
+    return [row.command, ...(row.args ?? [])].filter(Boolean).join(" ");
+  }
+  return row.url ?? "";
+}
+
 function AgentCard({
   listing,
   locale,
   sameSlugInstalled,
+  pluginServerInstalled,
   bookmarked,
   bookmarking,
   onBookmark,
@@ -1034,6 +1062,8 @@ function AgentCard({
   listing: MarketplaceListing;
   locale: Locale;
   sameSlugInstalled: boolean;
+  /** 이 플러그인의 MCP 서버가 이미 이 Mac에 등록돼 있는가(Hub/Desktop 이름 차이 무시). */
+  pluginServerInstalled: boolean;
   bookmarked: boolean;
   bookmarking: boolean;
   onBookmark: () => void;
@@ -1043,6 +1073,19 @@ function AgentCard({
   const ko = locale === "ko";
   const entityKind = classifyHubEntity(listing);
   const plugin = entityKind === "plugin";
+  // Hub 플러그인 설치 — 이전에는 설치 명령을 클립보드에 복사만 해줘서, Desktop 사용자가
+  // 터미널을 따로 열지 않으면 Hub 플러그인을 쓸 수 없었다(실측: Hub 140개 중 Desktop
+  // 카탈로그와 겹쳐 클릭 설치가 되던 것은 9개뿐).
+  // stdio 행은 이 기계에서 그 명령을 실행한다는 뜻이라, 명령 원문을 보여주기 전에는
+  // 절대 설치하지 않는다 — 무엇에 동의하는지 모르고 누른 승인은 승인이 아니다.
+  const [install, setInstall] = useState<
+    | { phase: "idle" }
+    | { phase: "loading" }
+    | { phase: "confirm"; rows: HubPluginPreviewRow[]; needsLocalExecution: boolean }
+    | { phase: "installing" }
+    | { phase: "done"; message: string }
+    | { phase: "error"; message: string }
+  >({ phase: "idle" });
   const callable = !plugin && isCallableHubListing(listing);
   const perCallCredits = typeof listing.perCallCredits === "number" && Number.isFinite(listing.perCallCredits)
     ? listing.perCallCredits
@@ -1135,24 +1178,163 @@ function AgentCard({
               : (ko ? "이 Mac에 설치됨" : "Installed on this Mac")}
           </RdTag>
         ) : null}
-        {plugin && command ? <RdTag className="hub-command-chip" dashed>{command}</RdTag> : null}
+        {/* 플러그인은 설치 버튼이 주 행동이고, 실행될 명령 원문은 승인 화면이 그대로
+            보여준다. 카드에까지 명령 칩을 두면 폭에 눌려 잘린 채 남는다(실측:
+            "npx agentlas@latest plugin add mock-"에서 끊김). 명령은 복사 버튼이 갖는다. */}
         {!plugin && !callable ? <RdTag dashed>{ko ? "Hub 호출 불가" : "Hub call unavailable"}</RdTag> : null}
       </div>
+      {plugin && install.phase === "confirm" ? (
+        <div className="hub-plugin-approval">
+          <div className="hub-plugin-approval-title">
+            {install.needsLocalExecution
+              ? (ko ? "이 명령이 이 Mac에서 실행됩니다" : "This command will run on this Mac")
+              : (ko ? "이 주소에 연결합니다" : "This endpoint will be connected")}
+          </div>
+          {install.rows.map((row) => (
+            <div key={row.name} className="hub-plugin-approval-row">
+              <code>{describeHubPluginRow(row)}</code>
+              {row.envKeys && row.envKeys.length > 0 ? (
+                <div className="hub-plugin-approval-note">
+                  {ko
+                    ? `설치 후 키 입력 필요: ${row.envKeys.join(", ")}`
+                    : `Keys required after install: ${row.envKeys.join(", ")}`}
+                </div>
+              ) : null}
+            </div>
+          ))}
+          <div className="hub-card-actions">
+            <button
+              type="button"
+              className="btn sm primary"
+              onClick={() => {
+                setInstall({ phase: "installing" });
+                void window.agentlas.mcpTools
+                  .installHubPlugin({
+                    slug: listing.slug,
+                    manifestUrl: listing.manifestUrl,
+                    approveLocalExecution: true,
+                  })
+                  .then((result) => {
+                    const connected = result.receipts.filter((r) => r.action === "connected").length;
+                    const already = result.receipts.filter((r) => r.action === "already-installed").length;
+                    const failed = result.receipts.filter((r) => r.action === "skipped");
+                    if (connected === 0 && already === 0) {
+                      setInstall({
+                        phase: "error",
+                        message: failed[0]?.reason
+                          ?? (ko ? "연결 정보를 찾지 못했습니다." : "No connection info was found."),
+                      });
+                      return;
+                    }
+                    setInstall({
+                      phase: "done",
+                      message: ko
+                        ? `연결됨 — 다음 대화부터 바로 쓸 수 있습니다${already ? " (이미 설치된 항목 포함)" : ""}.`
+                        : `Connected — usable from your next conversation${already ? " (some were already installed)" : ""}.`,
+                    });
+                  })
+                  .catch((error: unknown) => {
+                    setInstall({
+                      phase: "error",
+                      message: error instanceof Error ? error.message : String(error),
+                    });
+                  });
+              }}
+            >
+              {install.needsLocalExecution
+                ? (ko ? "승인하고 설치" : "Approve and install")
+                : (ko ? "연결" : "Connect")}
+            </button>
+            <button type="button" className="btn sm" onClick={() => setInstall({ phase: "idle" })}>
+              {ko ? "취소" : "Cancel"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {plugin && (install.phase === "done" || install.phase === "error") ? (
+        <div
+          className="hub-plugin-approval-note"
+          data-tone={install.phase === "error" ? "error" : "ok"}
+        >
+          {install.message}
+        </div>
+      ) : null}
       <div className="hub-card-actions">
         <button
           type="button"
-          className={"btn sm" + (!plugin && !bookmarked ? " primary" : "")}
-          onClick={plugin ? () => command && void navigator.clipboard.writeText(command) : bookmarked ? undefined : onBookmark}
-          disabled={!plugin && (bookmarking || bookmarked)}
+          className={"btn sm" + ((plugin && install.phase === "idle") || (!plugin && !bookmarked) ? " primary" : "")}
+          onClick={
+            plugin
+              ? () => {
+                  if (install.phase === "loading" || install.phase === "installing") return;
+                  setInstall({ phase: "loading" });
+                  void window.agentlas.mcpTools
+                    .previewHubPlugin(listing.manifestUrl)
+                    .then((preview) => {
+                      if (preview.rows.length === 0) {
+                        setInstall({
+                          phase: "error",
+                          message: ko
+                            ? "이 플러그인에는 연결할 서버가 없습니다 (스킬 묶음입니다)."
+                            : "This plugin ships no connectable server (it is a skill bundle).",
+                        });
+                        return;
+                      }
+                      setInstall({
+                        phase: "confirm",
+                        rows: preview.rows,
+                        needsLocalExecution: preview.needsLocalExecution,
+                      });
+                    })
+                    .catch((error: unknown) => {
+                      setInstall({
+                        phase: "error",
+                        message: error instanceof Error ? error.message : String(error),
+                      });
+                    });
+                }
+              : bookmarked
+                ? undefined
+                : onBookmark
+          }
+          disabled={
+            plugin
+              // confirm 중에도 잠근다 — 승인 화면이 떠 있는데 같은 버튼이 다시 눌리면
+              // 사용자는 어느 쪽이 실제 행동인지 알 수 없다.
+              ? install.phase === "loading" || install.phase === "installing"
+                || install.phase === "done" || install.phase === "confirm"
+                || (pluginServerInstalled && install.phase === "idle")
+              : bookmarking || bookmarked
+          }
         >
           {plugin
-            ? (ko ? "설치 명령 복사" : "Copy install command")
+            ? install.phase === "loading"
+              ? (ko ? "확인 중…" : "Checking…")
+              : install.phase === "installing"
+                ? (ko ? "설치 중…" : "Installing…")
+                : install.phase === "done"
+                  ? (ko ? "설치됨" : "Installed")
+                  // Hub와 Desktop 카탈로그가 같은 도구를 다른 이름으로 부르므로
+                  // (brave-search-mcp ↔ brave-search) slug를 정규화해 판정한다.
+                  : pluginServerInstalled && install.phase === "idle"
+                    ? (ko ? "설치됨" : "Installed")
+                    : (ko ? "설치" : "Install")
             : bookmarking
               ? (ko ? "북마크 중…" : "Saving bookmark…")
               : bookmarked
                 ? (ko ? "북마크됨" : "Bookmarked")
                 : (ko ? "북마크" : "Bookmark")}
         </button>
+        {plugin && command ? (
+          <button
+            type="button"
+            className="btn sm"
+            onClick={() => void navigator.clipboard.writeText(command)}
+            title={ko ? "터미널에서 직접 설치할 때 쓰세요." : "Use this to install from a terminal instead."}
+          >
+            {ko ? "명령 복사" : "Copy command"}
+          </button>
+        ) : null}
         {callable ? (
           <button
             type="button"

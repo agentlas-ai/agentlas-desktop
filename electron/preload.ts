@@ -368,6 +368,12 @@ const api: AgentlasIpc = {
     remove: (id: string) => ipcRenderer.invoke("mcpTools:remove", id),
     setEnabled: (id: string, enabled: boolean) =>
       ipcRenderer.invoke("mcpTools:setEnabled", id, enabled),
+    // Hub 플러그인 — 미리보기로 "무엇이 실행되는가"를 먼저 보여주고, 설치는 사람이
+    // 그 화면에서 누른 승인(approveLocalExecution)이 있을 때만 로컬 실행을 켠다.
+    previewHubPlugin: (manifestUrl: string) =>
+      ipcRenderer.invoke("mcpTools:previewHubPlugin", manifestUrl),
+    installHubPlugin: (input: { slug: string; manifestUrl: string; approveLocalExecution?: boolean }) =>
+      ipcRenderer.invoke("mcpTools:installHubPlugin", input),
     test: (id: string) => ipcRenderer.invoke("mcpTools:test", id),
     status: () => ipcRenderer.invoke("mcpTools:status"),
     recommendForBuild: (input) => ipcRenderer.invoke("mcpTools:recommendForBuild", input),
