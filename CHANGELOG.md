@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.9.56 — 2026-08-06
+
+This release binds Agentlas OS v1.1.98 at
+b8fc76d44dadd2933216ce669d9f53425a606392.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **An unattended run cannot ship a result nobody checked.** A weekly sales
+  summary computed every week-over-week change as empty and was one approval
+  away from writing that into the report. Verification steps were only required
+  when a branch repeated, so this graph had none. Now any step that changes
+  something outside must be preceded by a check on the value it is about to
+  send — unless that value came straight from you, or the graph never leaves
+  the machine. Rebuilt from the same request, the automation grades itself on
+  seven items, two aimed squarely at that failure.
+
+- **Verification steps are named in your language, and not cut mid-word.** The
+  prefix was always Korean, and the text was truncated at a fixed length.
+
+- **A wide graph stays readable.** Fitting the canvas shrank a fourteen-step
+  graph until its labels could not be read. Three separate places each fit the
+  view with their own settings and the last one won; there is now one rule, and
+  it stops shrinking at a readable size and lets you pan.
+
+- **Terminal: `--help` reaches the real help.** `agentlas graph --help` printed
+  a two-line stub while the command's own eight-line help was unreachable.
+
+- **Terminal: `graph install --name` works.** The documented flag had never
+  worked — its value was appended to the file path.
+
+- **Terminal: `graph show` stops indenting a straight chain.** Fourteen steps
+  meant twenty-eight columns of indentation. Depth now marks real branches.
+
+- **Terminal: building a graph follows your language setting.** One Korean word
+  in the request flipped the interview to Korean while every other screen
+  stayed English.
+
 ## 0.9.55 — 2026-08-05
 
 This release binds Agentlas OS v1.1.98 at
