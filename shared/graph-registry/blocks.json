@@ -79,7 +79,12 @@
             }
           ]
         }
-      ]
+      ],
+      "ui": {
+        "section": "none",
+        "placeable": false,
+        "placeReason": "그래프마다 하나뿐이고 처음 만들 때 함께 지어진다"
+      }
     },
     {
       "kind": "agent",
@@ -257,7 +262,12 @@
             }
           ]
         }
-      ]
+      ],
+      "ui": {
+        "section": "inventory",
+        "placeable": true,
+        "placeNote": "에이전트 섹션에서 실제 설치본·회사·Hub를 골라 놓는다"
+      }
     },
     {
       "kind": "eval",
@@ -323,7 +333,11 @@
             }
           ]
         }
-      ]
+      ],
+      "ui": {
+        "section": "flow",
+        "placeable": true
+      }
     },
     {
       "kind": "condition",
@@ -372,7 +386,11 @@
             }
           ]
         }
-      ]
+      ],
+      "ui": {
+        "section": "flow",
+        "placeable": true
+      }
     },
     {
       "kind": "transform",
@@ -413,7 +431,11 @@
             }
           ]
         }
-      ]
+      ],
+      "ui": {
+        "section": "flow",
+        "placeable": true
+      }
     },
     {
       "kind": "code",
@@ -472,7 +494,11 @@
           ]
         }
       ],
-      "note": "정확한 계산·데이터 가공(주가·엑셀·파싱)은 말로 시키면 조용히 틀린다. AI가 스크립트를 짜고 격리 실행한다. 경계(코드냐 말이냐)는 AI가 스텝마다 고른다. 격리는 지금 프로세스 분리+타임아웃+승인 게이트이고, 파일·네트워크 jail은 다음 슬라이스(specified)."
+      "note": "정확한 계산·데이터 가공(주가·엑셀·파싱)은 말로 시키면 조용히 틀린다. AI가 스크립트를 짜고 격리 실행한다. 경계(코드냐 말이냐)는 AI가 스텝마다 고른다. 격리는 지금 프로세스 분리+타임아웃+승인 게이트이고, 파일·네트워크 jail은 다음 슬라이스(specified).",
+      "ui": {
+        "section": "flow",
+        "placeable": true
+      }
     },
     {
       "kind": "tool",
@@ -500,7 +526,12 @@
       ],
       "owns": [
         "catalog"
-      ]
+      ],
+      "ui": {
+        "section": "inventory",
+        "placeable": true,
+        "placeNote": "도구 섹션에서 실제 설치 도구를 골라 놓는다"
+      }
     },
     {
       "kind": "action",
@@ -519,7 +550,11 @@
           "status": "implemented",
           "sub": []
         }
-      ]
+      ],
+      "ui": {
+        "section": "actions",
+        "placeable": true
+      }
     },
     {
       "kind": "output",
@@ -539,7 +574,11 @@
           "status": "implemented",
           "sub": []
         }
-      ]
+      ],
+      "ui": {
+        "section": "flow",
+        "placeable": true
+      }
     },
     {
       "kind": "loop",
@@ -581,7 +620,12 @@
             }
           ]
         }
-      ]
+      ],
+      "ui": {
+        "section": "none",
+        "placeable": false,
+        "placeReason": "노드가 아니라 되돌아가는 연결의 성질이다 — 엣지를 이어서 만든다"
+      }
     },
     {
       "kind": "subgraph",
@@ -635,7 +679,11 @@
             }
           ]
         }
-      ]
+      ],
+      "ui": {
+        "section": "flow",
+        "placeable": true
+      }
     }
   ]
 }

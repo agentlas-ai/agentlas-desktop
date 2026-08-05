@@ -24,24 +24,35 @@ import {
   IconSparkles,
   IconCode,
 } from "@/components/Icon";
+import { GRAPH_BLOCK_UI } from "@shared/graph-vocabulary.generated";
 
 /** 팔레트가 부모에 넘기는 노드 시드(부모가 id/position을 채워 그래프에 삽입). */
 export type PaletteNodeSeed = Omit<WorkflowNode, "id" | "position">;
 
-const FLOW_ITEMS = [
-  { type: "condition" as WorkflowNodeType, labelKey: "auto.node.condition" as const, icon: <IconRoute size={13} /> },
-  { type: "transform" as WorkflowNodeType, labelKey: "auto.node.transform" as const, icon: <IconLayers size={13} /> },
-  // ★커널이 실행할 수 있는 종류는 팔레트에도 있어야 한다. 없으면 "만들었는데 놓을 수
-  //   없는 기능"이 된다 — 도구 노드가 정확히 그 상태였고(놓아도 아무 일이 안 일어남),
-  //   `eval`·`subgraph`는 아예 놓을 수조차 없었다.
-  { type: "eval" as WorkflowNodeType, labelKey: "auto.node.eval" as const, hintKey: "auto.node.evalHint" as const, icon: <IconSparkles size={13} /> },
-  { type: "subgraph" as WorkflowNodeType, labelKey: "auto.node.subgraph" as const, hintKey: "auto.node.subgraphHint" as const, icon: <IconLayers size={13} /> },
-  // ★"바깥으로 내보내기"는 이 제품이 하는 일의 끝인데, 팔레트에 없어서 **놓을 수가 없었다**.
-  //   커널·레지스트리·캔버스 렌더러는 다 아는데 만들 방법만 없던 세 번째 사례다.
-  { type: "output" as WorkflowNodeType, labelKey: "auto.node.output" as const, hintKey: "auto.node.outputHint" as const, icon: <IconArrowUp size={13} /> },
-  // ★코드 노드 — 정확한 계산·데이터 가공. 사람은 놓기만 하고 무엇을 계산할지 적으면 AI가 스크립트를 짠다.
-  { type: "code" as WorkflowNodeType, labelKey: "auto.node.code" as const, hintKey: "auto.node.codeHint" as const, icon: <IconCode size={13} /> },
-];
+// ★흐름 섹션은 설계서(blocks.json → GRAPH_BLOCK_UI)에서 파생된다 — 손으로 쓴 두 번째
+//   목록 금지. "출력 블록이 커널·설계서·캔버스엔 있는데 팔레트에만 빠져 놓을 수 없던"
+//   사고(실측 2회: output, action)가 이 목록이 손으로 관리되던 병의 증상이었다.
+//   아이콘·문구는 코드에 남는다(JSX·i18n은 JSON에 못 산다) — 대신 누락은 게이트가 잡는다.
+const FLOW_ICONS: Record<string, React.ReactNode> = {
+  condition: <IconRoute size={13} />,
+  transform: <IconWand size={13} />,
+  eval: <IconSparkles size={13} />,
+  subgraph: <IconLayers size={13} />,
+  output: <IconArrowUp size={13} />,
+  code: <IconCode size={13} />,
+};
+const FLOW_ITEMS = (Object.entries(GRAPH_BLOCK_UI) as Array<[
+  WorkflowNodeType, { section: string; placeable: boolean },
+]>)
+  .filter(([, ui]) => ui.section === "flow" && ui.placeable)
+  .map(([kind]) => ({
+    type: kind,
+    // 파생 키의 실재는 게이트(test-graph-canvas-parity)가 검사한다 — 타입 유니온은
+    // 전 종류의 키를 만들 수 있어 없는 키(triggerHint 등)까지 포함하므로 여기서 좁힌다.
+    labelKey: `auto.node.${kind}` as never,
+    hintKey: `auto.node.${kind}Hint` as never,
+    icon: FLOW_ICONS[kind] ?? <IconWand size={13} />,
+  }));
 
 // ★예전의 `notify | file-write | hep-call` 선택지는 없앴다 — 그 값을 읽는 코드가 제품에
 //   하나도 없었다. 대신 **일반 action 항목 하나**를 둔다: 무엇을 할지는 지시문(prompt)에

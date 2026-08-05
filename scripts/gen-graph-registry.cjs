@@ -35,6 +35,25 @@ const liveErrors = errors.errors
 const journalKinds = journal.kinds.map((k) => k.kind).sort();
 const nodeKinds = blocks.blocks.map((b) => b.kind).filter((k) => k !== "loop").sort();
 
+// 화면 배치 선언 — 손으로 적은 목록 3벌(팔레트·게이트 예외표·라벨표)이 어긋나던 병의 정본.
+// ui 무선언 블록은 생성 자체를 거절한다(무선언 = 등록 거부).
+for (const b of blocks.blocks) {
+  if (!b.ui || typeof b.ui.placeable !== "boolean" || !b.ui.section) {
+    throw new Error(`블록 "${b.kind}" 에 ui 선언(section·placeable)이 없습니다 — blocks.json 에 적으세요`);
+  }
+  if (!b.ui.placeable && !b.ui.placeReason) {
+    throw new Error(`블록 "${b.kind}" 는 놓을 수 없다면서 placeReason 이 없습니다 — 사유 없는 예외는 거짓 예외표를 만든다`);
+  }
+}
+const blockUi = Object.fromEntries(
+  blocks.blocks.map((b) => [b.kind, {
+    section: b.ui.section,
+    placeable: b.ui.placeable,
+    ...(b.ui.placeReason ? { placeReason: b.ui.placeReason } : {}),
+  }]),
+);
+const blockUiTs = JSON.stringify(blockUi, null, 2);
+
 // 카드 매핑은 06 §8.2가 "빌드타임 생성되는 1벌"로 못박은 것 — 손으로 쓴 두 번째 표 금지.
 const cardMap = errors.errors
   .filter((e) => e.cardKey)
@@ -83,6 +102,14 @@ export const GRAPH_NODE_KINDS = [
 ${list(nodeKinds)}
 ] as const;
 export type GraphNodeKindGenerated = (typeof GRAPH_NODE_KINDS)[number];
+
+/**
+ * 블록별 화면 배치 — 팔레트·게이트가 이걸 읽는다. 손으로 쓴 두 번째 목록 금지.
+ *   section: "flow"(팔레트에서 그대로 놓음) | "actions" | "inventory"(설치된 것 중 고름) | "none"
+ *   placeable: 사람이 팔레트에서 놓을 수 있는가. false면 placeReason(사유)이 반드시 있다.
+ */
+export const GRAPH_BLOCK_UI = ${blockUiTs} as const;
+export type GraphBlockUiKind = keyof typeof GRAPH_BLOCK_UI;
 
 /**
  * 오류 코드 → 화면 카드 매핑 **1벌** (06 §8.2).
@@ -178,6 +205,7 @@ const GRAPH_WIRE = "graph/1";
 const GRAPH_ERROR_CODES = ${JSON.stringify(liveErrors)};
 const GRAPH_JOURNAL_KINDS = ${JSON.stringify(journalKinds)};
 const GRAPH_NODE_KINDS = ${JSON.stringify(nodeKinds)};
+const GRAPH_BLOCK_UI = ${JSON.stringify(blockUi)};
 
 /** 모르는 값은 원문을 보존한 채 항목 단위로 강등한다. 집합 폐기 금지. */
 function readEnum(value, allowed) {
@@ -192,7 +220,7 @@ function degradedLabel(value, lang) {
 }
 
 module.exports = {
-  GRAPH_WIRE, GRAPH_ERROR_CODES, GRAPH_JOURNAL_KINDS, GRAPH_NODE_KINDS,
+  GRAPH_WIRE, GRAPH_ERROR_CODES, GRAPH_JOURNAL_KINDS, GRAPH_NODE_KINDS, GRAPH_BLOCK_UI,
   readEnum, degradedLabel,
 };
 `;

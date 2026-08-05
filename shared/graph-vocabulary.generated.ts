@@ -126,6 +126,61 @@ export const GRAPH_NODE_KINDS = [
 export type GraphNodeKindGenerated = (typeof GRAPH_NODE_KINDS)[number];
 
 /**
+ * 블록별 화면 배치 — 팔레트·게이트가 이걸 읽는다. 손으로 쓴 두 번째 목록 금지.
+ *   section: "flow"(팔레트에서 그대로 놓음) | "actions" | "inventory"(설치된 것 중 고름) | "none"
+ *   placeable: 사람이 팔레트에서 놓을 수 있는가. false면 placeReason(사유)이 반드시 있다.
+ */
+export const GRAPH_BLOCK_UI = {
+  "trigger": {
+    "section": "none",
+    "placeable": false,
+    "placeReason": "그래프마다 하나뿐이고 처음 만들 때 함께 지어진다"
+  },
+  "agent": {
+    "section": "inventory",
+    "placeable": true
+  },
+  "eval": {
+    "section": "flow",
+    "placeable": true
+  },
+  "condition": {
+    "section": "flow",
+    "placeable": true
+  },
+  "transform": {
+    "section": "flow",
+    "placeable": true
+  },
+  "code": {
+    "section": "flow",
+    "placeable": true
+  },
+  "tool": {
+    "section": "inventory",
+    "placeable": true
+  },
+  "action": {
+    "section": "actions",
+    "placeable": true
+  },
+  "output": {
+    "section": "flow",
+    "placeable": true
+  },
+  "loop": {
+    "section": "none",
+    "placeable": false,
+    "placeReason": "노드가 아니라 되돌아가는 연결의 성질이다 — 엣지를 이어서 만든다"
+  },
+  "subgraph": {
+    "section": "flow",
+    "placeable": true
+  }
+} as const;
+export type GraphBlockUiKind = keyof typeof GRAPH_BLOCK_UI;
+
+/**
  * 오류 코드 → 화면 카드 매핑 **1벌** (06 §8.2).
  * 손으로 쓴 두 번째 매핑 표가 발견되면 게이트 실패다.
  */
