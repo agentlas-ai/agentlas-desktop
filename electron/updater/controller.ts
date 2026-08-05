@@ -1139,13 +1139,22 @@ export class DesktopUpdaterController {
     if (!runtimeVersion || (compareSemVer(runtimeVersion, compatibility.minimumRuntimeVersion) ?? -1) < 0) {
       return "minimum-runtime-version";
     }
-    const schemaVersion = this.deps.databaseSchemaVersion();
-    if (schemaVersion === null || schemaVersion < compatibility.minimumSchemaVersion) {
-      return "minimum-schema-version";
-    }
-    if (schemaVersion > compatibility.targetSchemaVersion) {
-      return "minimum-schema-version";
-    }
+    // The database schema deliberately does not gate the update.
+    //
+    // It never could. initStore() runs its migrations before initAutoUpdater()
+    // (main.ts), and those migrations cover every version from 1 upward, so by
+    // the time the updater reads user_version it is always exactly this app's
+    // SCHEMA_VERSION. "Too old to migrate" cannot be observed here.
+    //
+    // The one input that ever reached this check was a value NEWER than the
+    // release — written by a development build sharing the same profile. That
+    // means the user needs a NEWER app, so refusing the update pointed away
+    // from the only thing that fixes it, and the code was not retryable, which
+    // held the install permanently.
+    //
+    // Desktop apps that version their SQLite the same way (Signal, VS Code,
+    // Joplin) never gate the updater on the schema. At worst the running app
+    // refuses to open a future database and tells the user to update.
     return null;
   }
 
