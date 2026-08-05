@@ -488,8 +488,8 @@
             },
             {
               "id": "code.run.jail",
-              "title": "파일·네트워크 jail",
-              "status": "specified"
+              "title": "파일·네트워크 jail — macOS Seatbelt(그 외 OS는 프로세스 분리뿐, 등급으로 정직 표기)",
+              "status": "implemented"
             }
           ]
         }

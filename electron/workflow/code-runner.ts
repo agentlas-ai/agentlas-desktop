@@ -5,13 +5,17 @@
  * 조용히 틀린다. 그건 판단이 아니라 정확한 계산이라 **코드로 짜야** 한다. 그 코드는 사람이
  * 아니라 AI가 짜고, 여기가 그걸 돌리는 자리다.
  *
- * ★격리 등급을 결과에 정직하게 싣는다(도구 중개 C38과 같은 규율). 지금 슬라이스의 격리는:
- *   - 별도 프로세스 + 타임아웃 (무한 루프·행이 실행 전체를 잡지 못한다)
- *   - 바깥을 바꾸는 코드(effect: mutation)는 **실행 전에 커널의 승인 게이트**를 지난다
- *     (파일 쓰기·삭제·전송을 사람이 먼저 본다. 노드별 "항상 허용"으로 풀 수 있다)
- *   - 읽기·계산(effect: read/pure)은 승인 없이 돈다
- *   이것은 "완전 격리"가 아니다. 파일시스템 jail·네트워크 정책은 다음 슬라이스다.
- *   그래서 등급을 `process-isolated`로 적고, 더 강한 격리가 붙기 전까지 그 이상을 주장하지 않는다.
+ * ★격리 등급을 결과에 정직하게 싣는다(도구 중개 C38과 같은 규율). 등급은 계획이 아니라 결과다:
+ *   - macOS: `os-sandboxed` — Seatbelt(`/usr/bin/sandbox-exec`)로 read 코드의 **쓰기·네트워크를
+ *     OS가 실제로 차단**한다. Codex CLI·Claude Code·Chromium·Bazel이 쓰는 검증된 경로
+ *     (deprecated 표시는 있으나 대체재 없이 전부 현역 — 리서치 2026-08-05).
+ *     ★macOS에서 샌드박스 구성이 실패하면 **폴백하지 않고 실패**한다 — 조용한 강등이 최악이다.
+ *   - 그 외 OS: `process-isolated` — 별도 프로세스 + 타임아웃뿐. 윈도우는 관리자 권한 없이
+ *     네트워크를 막을 실용 수단이 업계 전체에 없다(Codex도 비관리자 모드에선 포기,
+ *     Claude Code는 네이티브 윈도우 미지원). 리눅스 bwrap/Landlock은 백로그.
+ *   - 바깥을 바꾸는 코드(effect: mutation)는 어느 OS든 **실행 전 승인 게이트**를 지난다.
+ *   - ★비밀 폴더는 read 코드도 **읽기 차단**(macOS) — 네트워크를 막아도 stdout이 유출 통로다:
+ *     읽은 비밀이 결과 JSON에 실리면 LLM을 거쳐 밖으로 나간다.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -22,7 +26,7 @@ import { withPythonCacheBoundary } from "../runtime/python-cache";
 import { agentRunCwd, killCliTree, nodeExecPathForCode } from "../runtime/exec";
 
 export type CodeLang = "python" | "js";
-export type CodeIsolationLevel = "process-isolated" | "unavailable";
+export type CodeIsolationLevel = "os-sandboxed" | "process-isolated" | "unavailable";
 
 export interface CodeRunInput {
   code: string;
@@ -33,6 +37,8 @@ export interface CodeRunInput {
   cwd?: string;
   timeoutSeconds?: number;
   signal?: AbortSignal;
+  /** 노드의 선언 효과 — read/pure면 쓰기·네트워크를 OS가 차단한다(가능한 OS에서). */
+  effect?: "pure" | "read" | "mutation";
 }
 
 export interface CodeRunResult {
@@ -134,7 +140,43 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
     const env = input.lang === "python"
       ? withPythonCacheBoundary({ ...process.env })
       : { ...process.env };
-    const child = spawn(interpreter, [file], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    // ── macOS Seatbelt — read 코드의 쓰기·네트워크를 OS가 실제로 차단 ──────
+    const wantSandbox = process.platform === "darwin" && input.effect !== "mutation";
+    let command = interpreter;
+    let args = [file];
+    let isolation: CodeIsolationLevel = "process-isolated";
+    if (wantSandbox) {
+      // (allow default) 후 deny — 인터프리터가 자기 dylib·/dev/urandom을 읽어야 해서
+      // (deny default)는 못 쓴다(Bazel·Codex와 같은 접근). 쓰기는 스크립트 폴더·tmp·
+      // 파이썬 캐시 경계만 열고, 네트워크는 전면 차단, 비밀 폴더는 읽기도 차단한다.
+      const home = os.homedir();
+      const writable = [path.dirname(file), os.tmpdir(), cwd];
+      const denyRead = [
+        path.join(home, ".ssh"), path.join(home, ".aws"),
+        path.join(home, ".config", "gh"), path.join(home, ".gnupg"),
+        path.join(home, "Library", "Keychains"),
+      ];
+      const esc = (p: string) => p.replace(/"/g, '\\"');
+      const profile = [
+        "(version 1)",
+        "(allow default)",
+        "(deny network*)",
+        "(deny file-write*)",
+        ...writable.map((p) => `(allow file-write* (subpath "${esc(p)}"))`),
+        ...denyRead.map((p) => `(deny file-read* (subpath "${esc(p)}"))`),
+      ].join("\n");
+      command = "/usr/bin/sandbox-exec";
+      args = ["-p", profile, interpreter, file];
+      isolation = "os-sandboxed";
+      if (!fs.existsSync(command)) {
+        // ★조용한 폴백 금지 — 울타리 없이 돌리고 "격리했다"고 말하는 것이 최악이다.
+        return {
+          ok: false, isolation: "unavailable",
+          reason: "macOS 샌드박스 실행기(sandbox-exec)를 찾지 못해 코드를 돌리지 않았습니다.",
+        };
+      }
+    }
+    const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
 
     let stdout = "";
     let stderr = "";
@@ -156,14 +198,14 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
     input.signal?.removeEventListener("abort", onAbort);
 
     if (input.signal?.aborted) {
-      return { ok: false, isolation: "process-isolated", reason: "실행이 중지되었습니다." };
+      return { ok: false, isolation, reason: "실행이 중지되었습니다." };
     }
     if (code !== 0) {
       const reason = stderr.trim() || `코드 스텝이 오류로 끝났습니다 (종료 코드 ${code}).`;
-      return { ok: false, isolation: "process-isolated", reason: reason.slice(0, 4000) };
+      return { ok: false, isolation, reason: reason.slice(0, 4000) };
     }
     const { result, logs } = splitResult(stdout);
-    return { ok: true, result, isolation: "process-isolated", stdout: logs.slice(0, 4000) };
+    return { ok: true, result, isolation, stdout: logs.slice(0, 4000) };
   } finally {
     cleanup();
   }

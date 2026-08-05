@@ -2334,6 +2334,7 @@ export async function runGraph(
         const run = await runCodeStep({
           code: codeText, lang,
           vars: codeVars,
+          effect: codeEffect === "mutation" ? "mutation" : codeEffect === "pure" ? "pure" : "read",
           // 코드가 파일을 만들면 안전한 전용 폴더에서. run-graph에는 별도 워킹 폴더 개념이
           // 없으므로 code-runner의 기본 폴더(agentRunCwd)를 쓴다.
           timeoutSeconds: nodeTimeoutMs(node) / 1000,
