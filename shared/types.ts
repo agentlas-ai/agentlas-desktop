@@ -6218,6 +6218,10 @@ export interface AgentlasIpc {
     /** 기존 자동화의 이름/스케줄/타깃/프롬프트/트리거를 갱신(삭제-재생성 회피, 설계 한계 #7). */
     update: (id: string, patch: AutomationUpdatePatch) => Promise<Automation>;
     updateGraph: (id: string, graph: WorkflowGraph | null) => Promise<Automation>;
+    /** 이 실행본(프로세스) 기준의 화면 조작 권한 상태 — 설치본과 개발 실행은 별개 앱이다. */
+    computerUsePermissions: () => Promise<{ ok: boolean; missing: string[] }>;
+    /** macOS 손쉬운 사용 설정 화면을 바로 연다 — 경로 문장은 모르는 사람에게 없는 것과 같다. */
+    openAccessibilitySettings: () => Promise<void>;
     /** 그래프를 Hub에 올린다(공개 자산이 된다). */
     publishGraph: (id: string, opts?: { version?: string }) => Promise<
       { ok: true; slug: string; version: string; url?: string } | { ok: false; reason: string }

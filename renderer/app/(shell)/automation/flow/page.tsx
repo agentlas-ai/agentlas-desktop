@@ -116,6 +116,8 @@ function AutomationFlowPage() {
      되돌아갈 자리 없이 사라졌다. 목록은 열 때 한 번만 읽는다. */
   /* Hub에 올리기 — 메인 프로세스엔 처음부터 있었는데 누를 자리가 없었다. */
   const [publishing, setPublishing] = useState(false);
+  /* 화면 조작 권한(이 실행본 기준). 문장이 아니라 버튼으로 안내한다. */
+  const [cuaPerm, setCuaPerm] = useState<{ ok: boolean; missing: string[] } | null>(null);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [versions, setVersions] = useState<Array<{ id: string; savedAt: string; note?: string; nodeCount: number }>>([]);
   const [restoring, setRestoring] = useState("");
@@ -698,6 +700,11 @@ function AutomationFlowPage() {
     }
   }
 
+  useEffect(() => {
+    if (automation?.toolMode !== "computer-use") { setCuaPerm(null); return; }
+    void ipc()?.automations.computerUsePermissions().then(setCuaPerm).catch(() => setCuaPerm(null));
+  }, [automation?.toolMode]);
+
   async function openVersions() {
     const api = ipc();
     if (!api || !automation) return;
@@ -1206,6 +1213,38 @@ function AutomationFlowPage() {
       <div className="automation-flow-overlay-anchor">
       <div className="automation-flow-overlay">
 
+      {cuaPerm && !cuaPerm.ok ? (
+        <div
+          className="titlebar-nodrag"
+          data-testid="cua-permission-card"
+          style={{
+            order: 2, padding: "12px 14px", borderRadius: "var(--radius-md)",
+            border: "1px solid var(--accent-soft)", background: "var(--paper)", fontSize: 12,
+            display: "grid", gap: 8,
+          }}
+        >
+          <div style={{ fontWeight: 600 }}>
+            {locale === "en"
+              ? "This automation drives the screen, and macOS has not granted this app copy that permission."
+              : "이 자동화는 화면을 조작하는데, macOS가 이 앱 실행본에 그 권한을 주지 않았습니다."}
+          </div>
+          <div style={{ color: "var(--muted-deep)" }}>
+            {locale === "en"
+              ? "If you already turned it on, it may be for a different copy — the installed app and a dev run count as different apps."
+              : "이미 켰다면 다른 실행본에 켰을 수 있습니다 — 설치본과 개발 실행은 서로 다른 앱으로 취급됩니다."}
+            {" "}({cuaPerm.missing.join(" · ")})
+          </div>
+          <div>
+            <button
+              onClick={() => void ipc()?.automations.openAccessibilitySettings()}
+              style={pillBtn(false)}
+            >
+              {locale === "en" ? "Open the exact Settings pane" : "설정 화면 바로 열기"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {(message || (editing && dirty)) ? (
         <div
           className="titlebar-nodrag"
@@ -1224,96 +1263,7 @@ function AutomationFlowPage() {
         </div>
       ) : null}
 
-      {/* 자연어로 고치기 — 제안은 보여주기만 하고, 적용은 사람이 누른 뒤에만. */}
-      {!editing ? (
-        <div
-          className="titlebar-nodrag"
-          style={{ display: "grid", gap: 8, order: 4 }}
-        >
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
-              value={architectDraft}
-              onChange={(e) => setArchitectDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  void requestGraphChange();
-                }
-              }}
-              placeholder={t("auto.flow.architect_placeholder")}
-              disabled={architectBusy}
-              style={{
-                flex: 1,
-                padding: "8px 12px",
-                borderRadius: "var(--radius-md)",
-                border: "1px solid var(--paper-edge)",
-                background: "var(--paper)",
-                fontSize: 13,
-                outline: "none",
-              }}
-            />
-            <button
-              className="titlebar-nodrag"
-              disabled={architectBusy || !architectDraft.trim()}
-              onClick={() => void requestGraphChange()}
-              style={pillBtn(false)}
-            >
-              {t("auto.flow.architect_ask")}
-            </button>
-          </div>
-          {proposal ? (
-            <div
-              data-testid="graph-patch-proposal"
-              style={{
-                padding: "12px 14px",
-                borderRadius: "var(--radius-md)",
-                border: "1px solid var(--accent-soft)",
-                background: "var(--paper)",
-                fontSize: 12,
-                display: "grid",
-                gap: 8,
-              }}
-            >
-              <div style={{ fontWeight: 600 }}>{t("auto.flow.architect_preview")}</div>
-              {proposal.rationale ? (
-                <div style={{ color: "var(--ink-soft)" }}>{proposal.rationale}</div>
-              ) : null}
-              {proposal.summary.added.length > 0 ? (
-                <div>{t("auto.flow.architect_added")}: {proposal.summary.added.join(", ")}</div>
-              ) : null}
-              {proposal.summary.removed.length > 0 ? (
-                <div>{t("auto.flow.architect_removed")}: {proposal.summary.removed.join(", ")}</div>
-              ) : null}
-              {proposal.summary.changed.length > 0 ? (
-                <div>{t("auto.flow.architect_changed")}: {proposal.summary.changed.join(", ")}</div>
-              ) : null}
-              {proposal.risks.length > 0 ? (
-                <div style={{ color: "var(--ink)" }}>
-                  {t("auto.flow.architect_check")}: {proposal.risks.map((risk) => t(`auto.flow.risk_${risk}` as never)).join(", ")}
-                </div>
-              ) : null}
-              <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
-                <button
-                  className="titlebar-nodrag"
-                  disabled={architectBusy}
-                  onClick={() => void applyProposal()}
-                  style={actionBtn}
-                >
-                  {t("auto.flow.architect_apply")}
-                </button>
-                <button
-                  className="titlebar-nodrag"
-                  disabled={architectBusy}
-                  onClick={() => setProposal(null)}
-                  style={pillBtn(false)}
-                >
-                  {t("auto.flow.architect_discard")}
-                </button>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+
 
       {/* 시작 값을 받아야 하는 그래프. 값을 받고 나서 실행한다 —
           묻지 않고 시작하면 빈 값으로 도는 것을 사용자가 결과에서야 알게 된다. */}
@@ -1512,6 +1462,101 @@ function AutomationFlowPage() {
           </button>
         )}
         <div className="automation-flow-canvas">
+          {/* ★말로 고치기 = 바텀시트(오너 지시). 상단 오버레이에 두면 세션 대화 헤더와
+              한 줄에 껴서 눈에 안 들어온다 — 캔버스 아래 고정, 불투명. */}
+          {!editing ? (
+            <div className="automation-flow-bottomsheet titlebar-nodrag" data-testid="architect-bottomsheet">
+        {!editing ? (
+          <div
+            className="titlebar-nodrag"
+            style={{ display: "grid", gap: 8, order: 4 }}
+          >
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                value={architectDraft}
+                onChange={(e) => setArchitectDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void requestGraphChange();
+                  }
+                }}
+                placeholder={t("auto.flow.architect_placeholder")}
+                disabled={architectBusy}
+                style={{
+                  flex: 1,
+                  padding: "8px 12px",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid var(--paper-edge)",
+                  background: "var(--paper)",
+                  fontSize: 13,
+                  outline: "none",
+                }}
+              />
+              <button
+                className="titlebar-nodrag"
+                disabled={architectBusy || !architectDraft.trim()}
+                onClick={() => void requestGraphChange()}
+                style={pillBtn(false)}
+              >
+                {t("auto.flow.architect_ask")}
+              </button>
+            </div>
+            {proposal ? (
+              <div
+                data-testid="graph-patch-proposal"
+                style={{
+                  padding: "12px 14px",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid var(--accent-soft)",
+                  background: "var(--paper)",
+                  fontSize: 12,
+                  display: "grid",
+                  gap: 8,
+                }}
+              >
+                <div style={{ fontWeight: 600 }}>{t("auto.flow.architect_preview")}</div>
+                {proposal.rationale ? (
+                  <div style={{ color: "var(--ink-soft)" }}>{proposal.rationale}</div>
+                ) : null}
+                {proposal.summary.added.length > 0 ? (
+                  <div>{t("auto.flow.architect_added")}: {proposal.summary.added.join(", ")}</div>
+                ) : null}
+                {proposal.summary.removed.length > 0 ? (
+                  <div>{t("auto.flow.architect_removed")}: {proposal.summary.removed.join(", ")}</div>
+                ) : null}
+                {proposal.summary.changed.length > 0 ? (
+                  <div>{t("auto.flow.architect_changed")}: {proposal.summary.changed.join(", ")}</div>
+                ) : null}
+                {proposal.risks.length > 0 ? (
+                  <div style={{ color: "var(--ink)" }}>
+                    {t("auto.flow.architect_check")}: {proposal.risks.map((risk) => t(`auto.flow.risk_${risk}` as never)).join(", ")}
+                  </div>
+                ) : null}
+                <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
+                  <button
+                    className="titlebar-nodrag"
+                    disabled={architectBusy}
+                    onClick={() => void applyProposal()}
+                    style={actionBtn}
+                  >
+                    {t("auto.flow.architect_apply")}
+                  </button>
+                  <button
+                    className="titlebar-nodrag"
+                    disabled={architectBusy}
+                    onClick={() => setProposal(null)}
+                    style={pillBtn(false)}
+                  >
+                    {t("auto.flow.architect_discard")}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+            </div>
+          ) : null}
           {isSynthesized && !editing ? (
             <div
               className="automation-flow-origin-note"

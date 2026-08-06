@@ -615,8 +615,10 @@ async function runOne(
     if (cuaPerm && !cuaPerm.ok) {
       runStatus = "needs_input";
       runError =
-        `macOS ${cuaPerm.missing.join(" · ")} 권한이 꺼져 있어 컴퓨터유즈 자동화를 건너뜁니다(먹통 방지). ` +
-        `시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에서 Agentlas를 켜세요. 켜면 다음 예약에 자동 재시도합니다.`;
+        `macOS가 이 앱 실행본에 ${cuaPerm.missing.join(" · ")} 권한을 주지 않아 컴퓨터유즈 자동화를 건너뜁니다(먹통 방지). ` +
+        // ★"켜세요"라는 경로 문장만으로는 부족하다 — 캔버스의 권한 카드가 설정 화면을
+        //   바로 여는 버튼을 제공한다. 이미 켰다면 다른 실행본(설치본↔개발 실행)에 켰을 수 있다.
+        `자동화 화면의 [설정 화면 바로 열기] 버튼으로 켜 주세요. 켜면 다음 예약에 자동 재시도합니다.`;
       console.warn(`[automation] CUA preflight skip (${a.name}): missing ${cuaPerm.missing.join(", ")}`);
     } else if (a.targetType === "hub" && !a.targetVersion) {
       runStatus = "needs_input";

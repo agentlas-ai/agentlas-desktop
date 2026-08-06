@@ -570,6 +570,17 @@ async function runPreparedGemini(
     if (isAgy) {
       const startedAt = Date.now();
       agyHeartbeat = setInterval(() => {
+        /*
+         * ★자식 생존을 **확인하고** 뛴다 — 확인 없는 심장박동은 죽은 자식을 영원히
+         * "살아 있다"고 보고해, close 이벤트가 유실되면 실행이 좀비가 된다
+         * (실측 2026-08-06: agy가 자체 30m 타임아웃으로 죽은 뒤에도 노드가 33분+
+         * running — 워치독이 심장박동에 속아 못 끊었다). 죽었으면 박동을 멈춰
+         * 워치독이 제 일을 하게 둔다.
+         */
+        if (child.killed || child.exitCode !== null || child.signalCode !== null) {
+          clearAgyHeartbeat();
+          return;
+        }
         const seconds = Math.round((Date.now() - startedAt) / 1000);
         events.onStatus(`agy: session alive, waiting for output (${seconds}s)`);
       }, 60_000);

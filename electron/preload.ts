@@ -646,6 +646,9 @@ const api: AgentlasIpc = {
      * ★그래프를 Hub에 올리고 받는 길. 메인 프로세스에는 처음부터 있었는데 preload에
      * 실리지 않아 **앱에서는 손이 닿지 않았다** — 만든 기능에 문이 없던 자리다.
      */
+    computerUsePermissions: () =>
+      ipcRenderer.invoke("system:computerUsePermissions") as Promise<{ ok: boolean; missing: string[] }>,
+    openAccessibilitySettings: () => ipcRenderer.invoke("system:openAccessibilitySettings") as Promise<void>,
     publishGraph: (id: string, opts?: { version?: string }) =>
       ipcRenderer.invoke("automations:publishGraph", id, opts) as Promise<
         { ok: true; slug: string; version: string; url?: string } | { ok: false; reason: string }

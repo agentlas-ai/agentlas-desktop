@@ -108,9 +108,14 @@ export function layoutGraph(graph: WorkflowGraph): WorkflowNode[] {
   for (const [row, nodes] of byRow) {
     const i = rowOrder.get(row) ?? 0;
     const strip = Math.floor(i / perStrip);
-    let r = i % perStrip;
-    // 홀수 줄기는 아래→위 — 접힌 자리에서 이웃 단계가 서로 붙어 있게(뱀 모양).
-    if (strip % 2 === 1) r = perStrip - 1 - r;
+    const r = i % perStrip;
+    /*
+     * ★모든 줄기는 위→아래로만 읽힌다 — 사행(蛇行) 뒤집기 폐기(오너 실판정 2026-08-06).
+     * 접힌 자리끼리 붙이겠다고 홀수 줄기를 아래→위로 뒤집었더니, 사람 눈에는 검증이
+     * 자기 결과를 쓰는 갈림길 **아래에** 있는 등 순서가 거꾸로 보였다. 사람은 항상
+     * 위→아래로 읽지, 줄기마다 방향을 바꿔 읽지 않는다. 접힘 연속성보다 읽기 방향
+     * 일관성이 우선이다 — 신문 칼럼과 같은 규칙.
+     */
     const count = nodes.length;
     nodes.forEach((n, col) => {
       // 행 중앙 기준으로 좌우 분산.

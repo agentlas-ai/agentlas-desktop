@@ -1,6 +1,7 @@
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from "electron";
+import { checkComputerUsePermissions } from "./mac-permissions";
 import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -2590,6 +2591,16 @@ export function registerIpcHandlers(): void {
   });
 
   // ── 에이전트 동시성(스웜 크기) — 사양 기반 추천 + 사용자 슬라이더 ─────────
+  /*
+   * ★권한 안내는 문장이 아니라 버튼이어야 한다(오너 실판정 2026-08-06) — "시스템 설정 >
+   * 개인정보 보호…를 켜세요"는 모르는 사람에겐 없는 것과 같다. 상태 조회는 실행 중인
+   * **이 프로세스** 기준의 진실(isTrustedAccessibilityClient)이다 — 설치본에 켠 권한과
+   * 개발 실행은 macOS가 서로 다른 앱으로 취급한다(오너가 "이미 켰는데?"라고 한 실측 혼선의 뿌리).
+   */
+  ipcMain.handle("system:computerUsePermissions", () => checkComputerUsePermissions());
+  ipcMain.handle("system:openAccessibilitySettings", async () => {
+    await shell.openExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
+  });
   ipcMain.handle("system:concurrencyInfo", () => getAgentConcurrencyInfo());
   // 브리핑 인터뷰 모드 (smart / build-only / off)
   ipcMain.handle("interview:getMode", () => getInterviewMode());

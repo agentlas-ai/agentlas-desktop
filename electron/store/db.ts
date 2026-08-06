@@ -4035,6 +4035,19 @@ export function initStore(options: StoreInitOptions = {}): void {
   const REQUIRED_COLUMNS: Record<string, Array<[string, string]>> = {
     automations: [["goal", "goal TEXT"]],
   };
+  /*
+   * ★잔존 금지 트리거 — 버전 무관으로 매 부팅 제거한다.
+   *
+   * 실측(2026-08-06): 터미널 bootstrap-schema.sql이 심은 agentlas_auto_cua_social_*
+   * 트리거가 소셜 키워드 목록("twitter/인스타/댓글/게시/로그인"…)으로 tool_mode를
+   * computer-use로 강제 되돌리고 있었다 — 코드의 단어목록 판정을 LLM 판정으로 대체할 때
+   * 이 DB 트리거만 살아남아, 코드 리뷰가 볼 수 없는 곳에서 toolMode 도출 규칙(P2)을
+   * 무효화했다(UPDATE tool_mode='auto'가 같은 연결에서 즉시 되돌아왔다). 판정은
+   * 코드·게이트가 보는 곳에만 산다 — DB 트리거로 만들지 않는다.
+   */
+  for (const legacyTrigger of ["agentlas_auto_cua_social_insert", "agentlas_auto_cua_social_update"]) {
+    _db.exec(`DROP TRIGGER IF EXISTS ${legacyTrigger}`);
+  }
   for (const [table, columns] of Object.entries(REQUIRED_COLUMNS)) {
     const present = new Set(
       (_db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name),

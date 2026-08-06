@@ -11147,3 +11147,20 @@ button[data-toggle-state="on"] {
   cursor: pointer;
 }
 .automation-session-ask-options button:hover { border-color: #0C2C47; color: #0C2C47; }
+
+/* 말로 고치기 바텀시트 — 캔버스 하단 고정(오너 지시 2026-08-06). 반드시 불투명. */
+.automation-flow-bottomsheet {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(720px, calc(100% - 48px));
+  z-index: 24;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--paper-edge);
+  background: var(--paper);
+  box-shadow: 0 8px 28px rgba(0,0,0,0.14);
+}
