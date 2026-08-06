@@ -524,8 +524,33 @@ function AutomationFlowPage() {
     return () => window.clearTimeout(id);
   }, [rfNodes.length, fitView]);
 
-  const errorCount = issues.filter((i) => i.severity === "error").length;
-  const warnCount = issues.filter((i) => i.severity === "warning").length;
+  /*
+   * ★실행 에러·워닝도 이 로그로 온다(오너 지시 — 169 항목 6번). 처음엔 편집 검증만
+   * 옮기고 실행 실패는 상단 팝업에 남겨 뒀는데, 그 팝업이 정확히 "캔버스를 밀어내고
+   * 읽기 전에 사라지는" 원래 문제였다. 편집 중엔 검증 이슈, 평시엔 최근 실행의
+   * 실패·상태가 같은 패널에 줄로 쌓인다 — VS Code 하단 패널과 같은 계약.
+   */
+  const runLogEntries: WorkflowIssue[] = useMemo(() => {
+    if (editing) return [];
+    const rows: WorkflowIssue[] = [];
+    for (const [nodeId, failure] of Object.entries(nodeFailures)) {
+      const node = automation?.graph?.nodes.find((n) => n.id === nodeId);
+      rows.push({
+        severity: "error",
+        nodeId,
+        code: "dangling-node", // 로그 표시용 자리 — 문구는 message가 전부 말한다.
+        message: `${node?.label || nodeId} — ${failure.reason || failure.code}`,
+      } as unknown as WorkflowIssue);
+    }
+    if (liveRunning) {
+      rows.push({ severity: "warning", code: "dangling-node",
+        message: locale === "en" ? "Run in progress…" : "실행 진행 중…" } as unknown as WorkflowIssue);
+    }
+    return rows;
+  }, [editing, nodeFailures, liveRunning, automation?.graph, locale]);
+  const logRows = editing ? issues : runLogEntries;
+  const errorCount = logRows.filter((i) => i.severity === "error").length;
+  const warnCount = logRows.filter((i) => i.severity === "warning").length;
 
   const selectedNode: WorkflowNode | null = useMemo(() => {
     if (!selectedNodeId) return null;
@@ -1626,7 +1651,7 @@ function AutomationFlowPage() {
           ) : null}
           {/* ★검증 로그 패널 — 에러·경고를 상단 팝업이 아니라 VS Code 하단 패널처럼.
               위 팝업은 캔버스를 밀어내고, 읽기 전에 사라지고, 줄이 많으면 잘렸다. */}
-          {editing && issues.length > 0 ? (
+          {logRows.length > 0 ? (
             <div className="automation-issue-log titlebar-nodrag" style={{ height: logOpen ? logHeight : 30 }}>
               <div
                 className="automation-issue-log-grip"
@@ -1657,7 +1682,7 @@ function AutomationFlowPage() {
               </button>
               {logOpen ? (
                 <ul className="automation-issue-log-list">
-                  {issues.map((iss, i) => (
+                  {logRows.map((iss, i) => (
                     <li key={i} data-severity={iss.severity}>
                       {/* 줄을 누르면 그 노드가 선택된다 — 어디 문제인지 찾아 헤매지 않게. */}
                       <button
