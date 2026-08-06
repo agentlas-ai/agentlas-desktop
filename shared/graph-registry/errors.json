@@ -859,6 +859,15 @@
       "verbatim": true,
       "status": "implemented",
       "note": "같은 채점 항목으로 연속 2회 실패 — 더 돌려도 같은 이유로 떨어진다. 기준이 산출물과 안 맞을 수 있으므로 상한 전에 멈추고 사람에게 넘긴다(Anthropic 'failed' 상태의 UX화, 재시도 낭비 방지)."
+    },
+    {
+      "code": "CODE_PRODUCED_NOTHING",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": true,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "코드 단계가 값을 넘기겠다고 선언(produces)해 놓고 아무것도 돌려주지 않았다 — 예전에는 성공으로 넘어가 다음 단계가 빈 값을 정상 입력으로 받았다. 스크립트가 마지막에 result를 안 넣은 경우가 대부분이다."
     }
   ]
 }

@@ -2369,6 +2369,20 @@ export async function runGraph(
           : declaredEnvelope(node.id, node.label || node.id, codeText2);
         outputs[node.id] = codeText2;
         const codeProduces = str(node.config, "produces");
+        /*
+         * ★값을 넘기겠다고 선언해 놓고 아무것도 안 돌려줬으면 **실패다**.
+         * 예전에는 그대로 성공으로 넘어가, 다음 단계가 빈 값을 정상 입력으로 받았다 —
+         * 실행은 초록인데 결과만 비는, 사람이 가장 알아채기 어려운 형태의 실패다.
+         * (스크립트가 마지막에 result를 안 넣은 경우가 대부분이라 고칠 곳도 분명하다.)
+         */
+        if (codeProduces && run.result == null && !codeText2) {
+          failGraphNode(node, {
+            code: "CODE_PRODUCED_NOTHING",
+            reason: `"${node.label || node.id}" 코드가 ${codeProduces} 값을 넘기기로 돼 있는데 아무것도 돌려주지 않았습니다.`,
+            nextAction: "[AI가 고치게 하기]를 누르면 스크립트 마지막에서 결과를 내놓도록 고쳐 드립니다.",
+          });
+          return;
+        }
         if (codeProduces) {
           // 리듀서·충돌 검사는 문자열 형태로 태운다(다른 노드와 같은 규율).
           const conflict = applyProduces(node, codeProduces, codeText2);
