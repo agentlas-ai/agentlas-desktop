@@ -639,9 +639,11 @@ function dedupeListings(listings: MarketplaceListing[]): MarketplaceListing[] {
   for (const listing of listings) {
     const entityKind = listing.entityKind === "plugin" || listing.source === "hub-plugin"
       ? "plugin"
-      : listing.entityKind === "team" || (typeof listing.agentCount === "number" && listing.agentCount > 1)
-        ? "team"
-        : "agent";
+      : listing.entityKind === "graph"
+        ? "graph" // 같은 slug의 에이전트와 그래프는 별개 자산 — 접으면 한쪽이 사라진다
+        : listing.entityKind === "team" || (typeof listing.agentCount === "number" && listing.agentCount > 1)
+          ? "team"
+          : "agent";
     const identity = `${entityKind}:${listing.slug.trim().toLowerCase()}`;
     if (!byIdentity.has(identity)) byIdentity.set(identity, listing);
   }
@@ -672,17 +674,25 @@ function enrichRankedListing(
 export function marketPublicAgentToListing(raw: Record<string, unknown>): MarketplaceListing | null {
   const slug = cleanString(raw.slug);
   if (!slug) return null;
-  const entityKind = cleanString(raw.kind, "agent") === "team" ? "team" : "agent";
+  // 서버 kind는 자산의 모양(agent/team/graph)이다. "team 아니면 agent"로 접으면
+  // 그래프가 에이전트 선반에 진열된다 — 서버가 이미 오늘 그 사고를 냈고(judged
+  // 판별기 graph 분기 누락), 여기서 또 접으면 서버를 고쳐도 클라이언트가 되살린다.
+  const rawEntityKind = cleanString(raw.kind, "agent");
+  const entityKind = rawEntityKind === "team" ? "team" : rawEntityKind === "graph" ? "graph" : "agent";
   const titleEn = englishListingText(raw.titleEn, englishListingText(raw.title, slug));
   const titleKo = cleanString(raw.titleKo, titleEn);
   const name = titleKo || titleEn || slug;
   const taglineEn = englishListingText(
     raw.taglineEn,
-    englishListingText(raw.tagline, entityKind === "team" ? "Callable Hub team" : "Callable Hub agent"),
+    englishListingText(
+      raw.tagline,
+      entityKind === "team" ? "Callable Hub team" : entityKind === "graph" ? "Installable automation graph" : "Callable Hub agent",
+    ),
   );
   const taglineKo = cleanString(raw.taglineKo, taglineEn);
   const totalBorrows = cleanNumber(raw.totalBorrows);
-  const perCallCredits = cleanNumber(raw.perCallCredits, entityKind === "team" ? 10 : 3);
+  // 그래프는 호출 가격이 없다(서버 pricing과 동일 규칙) — 기본값도 만들지 않는다.
+  const perCallCredits = entityKind === "graph" ? 0 : cleanNumber(raw.perCallCredits, entityKind === "team" ? 10 : 3);
   // REST `kind` carries the entity shape (agent/team); delivery state lives in
   // deliveryKind. Anything other than an explicit cloud-callable is install-only.
   const deliveryKind = cleanString(raw.deliveryKind) === "cloud-callable" ? "cloud-callable" : "install-only";
@@ -756,6 +766,7 @@ function marketPublicPluginToListing(raw: Record<string, unknown>): MarketplaceL
     developer,
     detailUrl: detailUrl.startsWith("http") ? detailUrl : `https://agentlas.cloud${detailUrl}`,
     installCli: cleanString(install.cli, `npx agentlas@latest plugin add ${slug}`),
+    ...(cleanString(raw.homepage) ? { homepage: cleanString(raw.homepage) } : {}),
   };
 }
 

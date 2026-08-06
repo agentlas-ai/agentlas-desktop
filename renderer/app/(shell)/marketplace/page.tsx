@@ -36,7 +36,7 @@ const C = {
   blue: "color-mix(in oklch, #0284c7 18%, var(--rd-surface))",
 };
 
-type HubCategory = "all" | "agent" | "team" | "plugin";
+type HubCategory = "all" | "agent" | "team" | "plugin" | "graph";
 type HubView = "agents" | "experience";
 
 function isLiveHubListing(listing: MarketplaceListing): boolean {
@@ -46,6 +46,7 @@ function isLiveHubListing(listing: MarketplaceListing): boolean {
 function hubCategoryFor(listing: MarketplaceListing): HubCategory {
   const entityClass = classifyHubEntity(listing);
   if (entityClass === "plugin") return "plugin";
+  if (entityClass === "graph") return "graph";
   if (entityClass === "multi") return "team";
   return "agent";
 }
@@ -401,6 +402,7 @@ function MarketplacePage() {
     agent: matchingListings.filter((listing) => hubCategoryFor(listing) === "agent").length,
     team: matchingListings.filter((listing) => hubCategoryFor(listing) === "team").length,
     plugin: matchingListings.filter((listing) => hubCategoryFor(listing) === "plugin").length,
+    graph: matchingListings.filter((listing) => hubCategoryFor(listing) === "graph").length,
   };
   const activeListings = category === "all"
     ? matchingListings
@@ -667,6 +669,7 @@ function MarketplacePage() {
                 ["agent", ko ? "에이전트" : "Agents"],
                 ["team", ko ? "팀" : "Teams"],
                 ["plugin", ko ? "플러그인" : "Plugins"],
+                ["graph", ko ? "그래프" : "Graphs"],
               ] as Array<[HubCategory, string]>).map(([value, label]) => (
                 <button
                   key={value}
@@ -1073,6 +1076,15 @@ function AgentCard({
   const ko = locale === "ko";
   const entityKind = classifyHubEntity(listing);
   const plugin = entityKind === "plugin";
+  // 그래프는 호출·고용 대상이 아니라 받아서 내 계정에 채워 넣는 도면이다.
+  // 카드의 주 행동은 [그래프 설치] 하나 — Agentlas Graph의 설치 배선을 그대로 쓴다.
+  const graph = entityKind === "graph";
+  const [graphInstall, setGraphInstall] = useState<
+    | { phase: "idle" }
+    | { phase: "installing" }
+    | { phase: "done"; message: string }
+    | { phase: "error"; message: string }
+  >({ phase: "idle" });
   // Hub 플러그인 설치 — 이전에는 설치 명령을 클립보드에 복사만 해줘서, Desktop 사용자가
   // 터미널을 따로 열지 않으면 Hub 플러그인을 쓸 수 없었다(실측: Hub 140개 중 Desktop
   // 카탈로그와 겹쳐 클릭 설치가 되던 것은 9개뿐).
@@ -1086,17 +1098,19 @@ function AgentCard({
     | { phase: "done"; message: string }
     | { phase: "error"; message: string }
   >({ phase: "idle" });
-  const callable = !plugin && isCallableHubListing(listing);
-  const perCallCredits = typeof listing.perCallCredits === "number" && Number.isFinite(listing.perCallCredits)
-    ? listing.perCallCredits
-    : entityKind === "multi" ? TEAM_CALL_CREDITS : plugin ? 0 : AGENT_CALL_CREDITS;
+  // 그래프는 서버가 뭐라 광고했든 호출형이 아니다 — 낡은 인덱스 스냅샷이
+  // callable:true를 실어 와도 여기서 끊는다(서버 normalizeEntry와 같은 경계).
+  const callable = !plugin && !graph && isCallableHubListing(listing);
+  const perCallCredits = graph
+    ? 0
+    : typeof listing.perCallCredits === "number" && Number.isFinite(listing.perCallCredits)
+      ? listing.perCallCredits
+      : entityKind === "multi" ? TEAM_CALL_CREDITS : plugin ? 0 : AGENT_CALL_CREDITS;
   const creditTooltipId = `hub-credit-${entityKind}-${listing.slug}`;
   const author = listing.ownerName ? (ko ? `${listing.ownerName} 제공` : `by ${listing.ownerName}`) : "Agentlas Hub";
-  const command = plugin
-    ? (listing.installCli || `npx agentlas@latest plugin add ${listing.slug}`)
-    : callable
-      ? `/hep-call ${listing.slug}`
-      : listing.installCli || null;
+  // 이 플러그인을 실제로 제공하는 사이트. Hub가 아직 homepage를 못 돌려주는 낡은 응답이면
+  // 최소한 Hub 자체 상세 페이지(manifestUrl)로라도 보낸다 — 링크가 아예 없는 것보다 낫다.
+  const websiteUrl = plugin ? (listing.homepage || listing.manifestUrl) : null;
   const cardLabel = entityClassLabel(entityKind, locale);
   const verificationFacts = hubVerificationFacts(listing, locale);
   const statFacts = [
@@ -1115,9 +1129,11 @@ function AgentCard({
         <span>
           {plugin
             ? (ko ? "도구 연결 가능" : "Tool available")
-            : callable
-              ? (ko ? "지금 호출 가능" : "Ready to call")
-              : (ko ? "설치 후 사용" : "Install to use")}
+            : graph
+              ? (ko ? "받아서 내 자동화로" : "Install as my automation")
+              : callable
+                ? (ko ? "지금 호출 가능" : "Ready to call")
+                : (ko ? "설치 후 사용" : "Install to use")}
         </span>
       </div>
       <div className="hub-card-head">
@@ -1125,9 +1141,11 @@ function AgentCard({
           <div className="hub-card-kicker">
             {plugin
               ? (ko ? "허브 플러그인" : "HUB PLUGIN")
-              : entityKind === "multi"
-                ? (ko ? "Hub · 멀티 에이전트 팀" : "Hub · multi-agent team")
-                : (ko ? "Hub · 싱글 에이전트" : "Hub · single agent")}
+              : graph
+                ? (ko ? "Hub · 자동화 그래프" : "Hub · automation graph")
+                : entityKind === "multi"
+                  ? (ko ? "Hub · 멀티 에이전트 팀" : "Hub · multi-agent team")
+                  : (ko ? "Hub · 싱글 에이전트" : "Hub · single agent")}
           </div>
           <div className="portal-card-title hub-card-title">{loc.name}</div>
           <div className="hub-card-author">{author}</div>
@@ -1146,12 +1164,13 @@ function AgentCard({
               {ko ? `24시간 사용 · ${perCallCredits} 크레딧` : `24-hour use · ${perCallCredits} credits`}
             </span>
           </span>
+        ) : plugin ? (
+          <RdTag className="hub-credit-tag" bg={C.blue}>
+            {listing.category || cardLabel}
+          </RdTag>
         ) : (
-          <RdTag
-            className="hub-credit-tag"
-            bg={plugin ? C.peach : C.purple}
-          >
-            {plugin ? (ko ? "도구" : "Tool") : (ko ? "설치 전용" : "Install only")}
+          <RdTag className="hub-credit-tag" bg={C.purple}>
+            {ko ? "설치 전용" : "Install only"}
           </RdTag>
         )}
       </div>
@@ -1163,26 +1182,30 @@ function AgentCard({
           {statFacts.join(" · ")}
         </div>
       )}
-      <div className="portal-chip-row hub-card-meta">
-        {!plugin && <SecurityGradeTag listing={listing} locale={locale} />}
-        <RdTag dashed bg={plugin ? C.peach : entityKind === "multi" ? C.purple : C.green}>{plugin ? (listing.category || cardLabel) : cardLabel}</RdTag>
-        {sameSlugInstalled && !plugin ? (
-          <RdTag
-            dashed
-            title={callable
-              ? (ko ? "Hub 사용권을 보유했다는 뜻이 아니라, 이 Mac에 같은 이름으로 가져온 로컬 에이전트가 있다는 뜻입니다." : "A same-name local agent exists on this Mac; this does not prove Hub access.")
-              : undefined}
-          >
-            {callable
-              ? (ko ? "같은 이름의 로컬 에이전트 있음" : "Same-name local agent")
-              : (ko ? "이 Mac에 설치됨" : "Installed on this Mac")}
-          </RdTag>
-        ) : null}
-        {/* 플러그인은 설치 버튼이 주 행동이고, 실행될 명령 원문은 승인 화면이 그대로
-            보여준다. 카드에까지 명령 칩을 두면 폭에 눌려 잘린 채 남는다(실측:
-            "npx agentlas@latest plugin add mock-"에서 끊김). 명령은 복사 버튼이 갖는다. */}
-        {!plugin && !callable ? <RdTag dashed>{ko ? "Hub 호출 불가" : "Hub call unavailable"}</RdTag> : null}
-      </div>
+      {/* 플러그인 카드는 카테고리 태그가 위(hub-card-head)로 옮겨갔고, 이 줄의 나머지
+          배지(보안 등급·설치 상태·호출 가능 여부)는 전부 에이전트/팀 전용이라
+          플러그인일 땐 이 줄 자체가 빈 채로 남는다 — 통째로 건너뛴다. */}
+      {!plugin && (
+        <div className="portal-chip-row hub-card-meta">
+          <SecurityGradeTag listing={listing} locale={locale} />
+          <RdTag dashed bg={entityKind === "multi" ? C.purple : C.green}>{cardLabel}</RdTag>
+          {sameSlugInstalled ? (
+            <RdTag
+              dashed
+              title={callable
+                ? (ko ? "Hub 사용권을 보유했다는 뜻이 아니라, 이 Mac에 같은 이름으로 가져온 로컬 에이전트가 있다는 뜻입니다." : "A same-name local agent exists on this Mac; this does not prove Hub access.")
+                : undefined}
+            >
+              {callable
+                ? (ko ? "같은 이름의 로컬 에이전트 있음" : "Same-name local agent")
+                : (ko ? "이 Mac에 설치됨" : "Installed on this Mac")}
+            </RdTag>
+          ) : null}
+          {/* "호출 불가"는 결함 배지다 — 애초에 호출이 없는 그래프에 붙이면
+              멀쩡한 도면이 고장난 에이전트처럼 읽힌다. */}
+          {!callable && !graph ? <RdTag dashed>{ko ? "Hub 호출 불가" : "Hub call unavailable"}</RdTag> : null}
+        </div>
+      )}
       {plugin && install.phase === "confirm" ? (
         <div className="hub-plugin-approval">
           <div className="hub-plugin-approval-title">
@@ -1259,10 +1282,55 @@ function AgentCard({
           {install.message}
         </div>
       ) : null}
+      {graph && (graphInstall.phase === "done" || graphInstall.phase === "error") ? (
+        <div
+          className="hub-plugin-approval-note"
+          data-tone={graphInstall.phase === "error" ? "error" : "ok"}
+        >
+          {graphInstall.message}
+        </div>
+      ) : null}
       <div className="hub-card-actions">
+        {graph ? (
+          <button
+            type="button"
+            className={"btn sm hub-card-action-btn" + (graphInstall.phase === "idle" || graphInstall.phase === "error" ? " primary" : "")}
+            disabled={graphInstall.phase === "installing" || graphInstall.phase === "done"}
+            onClick={() => {
+              if (graphInstall.phase === "installing" || graphInstall.phase === "done") return;
+              setGraphInstall({ phase: "installing" });
+              void window.agentlas.automations
+                .installGraphFromHub(listing.slug)
+                .then((res) => {
+                  // 받아온 것은 꺼진 채로 들어온다 — 말해 주지 않으면 안 도는 이유를 모른다.
+                  if (!res.ok) { setGraphInstall({ phase: "error", message: res.reason }); return; }
+                  setGraphInstall({
+                    phase: "done",
+                    message: ko
+                      ? `"${res.name}"을(를) 받았습니다. Agentlas Graph에 꺼진 상태로 들어왔으니 살펴본 뒤 켜 주세요.`
+                      : `Installed "${res.name}". It arrived switched off in Agentlas Graph — look it over, then turn it on.`,
+                  });
+                })
+                .catch((error: unknown) => {
+                  setGraphInstall({
+                    phase: "error",
+                    message: error instanceof Error
+                      ? error.message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, "")
+                      : String(error),
+                  });
+                });
+            }}
+          >
+            {graphInstall.phase === "installing"
+              ? (ko ? "받는 중…" : "Installing…")
+              : graphInstall.phase === "done"
+                ? (ko ? "설치됨" : "Installed")
+                : (ko ? "그래프 설치" : "Install graph")}
+          </button>
+        ) : null}
         <button
           type="button"
-          className={"btn sm" + ((plugin && install.phase === "idle") || (!plugin && !bookmarked) ? " primary" : "")}
+          className={"btn sm hub-card-action-btn" + ((plugin && install.phase === "idle") || (!plugin && !graph && !bookmarked) ? " primary" : "")}
           onClick={
             plugin
               ? () => {
@@ -1325,20 +1393,20 @@ function AgentCard({
                 ? (ko ? "북마크됨" : "Bookmarked")
                 : (ko ? "북마크" : "Bookmark")}
         </button>
-        {plugin && command ? (
+        {plugin && websiteUrl ? (
           <button
             type="button"
-            className="btn sm"
-            onClick={() => void navigator.clipboard.writeText(command)}
-            title={ko ? "터미널에서 직접 설치할 때 쓰세요." : "Use this to install from a terminal instead."}
+            className="btn sm hub-card-action-btn"
+            onClick={() => window.open(websiteUrl, "_blank", "noopener,noreferrer")}
+            title={ko ? "이 플러그인을 제공하는 사이트로 이동합니다." : "Opens the site that provides this plugin."}
           >
-            {ko ? "명령 복사" : "Copy command"}
+            {ko ? "Website →" : "Website →"}
           </button>
         ) : null}
         {callable ? (
           <button
             type="button"
-            className="btn sm"
+            className="btn sm hub-card-action-btn"
             onClick={onCopyCall}
             title={ko ? "복사한 호출어를 작업 공간의 채팅에 붙여넣으세요." : "Paste the copied call into a Workspace conversation."}
           >
