@@ -3852,6 +3852,8 @@ export function registerIpcHandlers(): void {
       promptTemplate: "",
       graphJson: pkg.graph,
       createdBy: "user",
+      // 받는 사람이 슬롯을 채우기 전에 도는 것이 가장 나쁘다 — 꺼진 채로 설치한다.
+      enabled: false,
       ...(pkg.manifest.trigger.schedule ? { scheduleJson: pkg.manifest.trigger.schedule } : {}),
       // 입력 트리거는 그래프의 트리거 노드가 들고 있다(TriggerKind에 input은 없다).
       ...(pkg.manifest.trigger.kind === "cron" ? { triggerType: "schedule" as const } : {}),
@@ -4108,10 +4110,12 @@ export function registerIpcHandlers(): void {
       promptTemplate: name,
       executionPermission: "read",
       graphJson: input.graph as never,
+      // ★확인 카드가 "꺼진 상태로 저장됩니다"라고 약속한다 — 그 상태로 **태어나야** 한다.
+      //   만들고 나서 끄는 두 걸음 사이에서 예외가 나면 켜진 채 남는다(실측).
+      enabled: false,
       // ★목적 문장을 함께 저장한다 — 사라지면 AI가 이 그래프를 다시 이해할 수 없다.
       ...(input.goal?.trim() ? { goal: input.goal.trim() } : {}),
     });
-    toggleAutomation(created.id, false);
     return { ok: true as const, id: created.id, name, renamed: !!existing };
   });
 
@@ -4151,6 +4155,9 @@ export function registerIpcHandlers(): void {
     const decision = decideGraphRunRequest({
       ref: id,
       automations: listAutomations(),
+      // 데스크탑의 [지금 실행]·[시뮬레이션]은 사람이 그 화면 앞에서 직접 누른 것이다 —
+      // 대기열에 앉는 요청이 아니므로 꺼져 있어도 한 번 돌려볼 수 있어야 한다.
+      mode: "immediate",
       ...(opts?.input ? { input: opts.input } : {}),
       ...(opts?.dryRun ? { dryRun: true } : {}),
     });

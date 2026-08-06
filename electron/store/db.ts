@@ -4019,6 +4019,31 @@ export function initStore(options: StoreInitOptions = {}): void {
     }
   }
 
+  /*
+   * ★사다리 뒤 백스톱 — **버전과 무관하게** 있어야 할 칸이 있는지 매 부팅 확인한다.
+   *
+   * 배경(실측 2026-08-06): `automations.goal`이 `userVersion < 33` 블록 안에 추가돼
+   * 있었다. 새 DB는 0에서 시작하니 33을 밟아 칸이 생기고 게이트도 통과했지만,
+   * **이미 33을 지난 기존 설치는 그 블록을 영원히 건너뛴다.** 결과: 저장이
+   * "no such column: goal"로 죽었는데, 그 예외가 INSERT **뒤에** 나는 바람에
+   * 자동화는 켜진 채 남고 화면에는 "저장하지 못했습니다"가 떴다.
+   *
+   * 이 병은 사다리 규율만으로는 반복된다 — 새 칸을 옛 단계에 끼워 넣는 것은
+   * 리뷰에서 눈으로 잡아야 하는 종류의 실수다. 그래서 선언한 칸을 매번 대조한다.
+   * 이미 있으면 아무 일도 하지 않으므로 부팅 비용은 PRAGMA 몇 번뿐이다.
+   */
+  const REQUIRED_COLUMNS: Record<string, Array<[string, string]>> = {
+    automations: [["goal", "goal TEXT"]],
+  };
+  for (const [table, columns] of Object.entries(REQUIRED_COLUMNS)) {
+    const present = new Set(
+      (_db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name),
+    );
+    for (const [name, ddl] of columns) {
+      if (!present.has(name)) _db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    }
+  }
+
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
   } catch (error) {
     try { _db?.close(); } catch {}

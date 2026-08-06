@@ -679,8 +679,8 @@ function plainOutcome(status: AutomationRunRecord["status"], ko: boolean): { tit
     return {
       title: ko ? "내가 정해줘야 진행돼요" : "It needs a decision from you",
       body: ko
-        ? "사람이 정해야 하는 부분이 있어 멈췄어요. 자동화는 그대로 켜져 있고, 정해주면 이어서 진행합니다."
-        : "It stopped because a person has to decide something. The automation is still on and will continue once you decide.",
+        ? "사람이 정해야 하는 부분이 있어 멈췄어요. 정해주면 이어서 진행합니다."
+        : "It stopped because a person has to decide something. It will continue once you decide.",
     };
   }
   if (status === "blocked") {
@@ -761,8 +761,8 @@ function plainRun(run: AutomationRunRecord, ko: boolean): { title: string; body:
       return {
         title: ko ? "끝까지 돌았지만 바깥에서 막혔어요" : "It ran through but something outside blocked it",
         body: ko
-          ? "단계는 다 지나갔는데 상대 서비스가 막았어요. 자동화는 그대로 켜져 있어요."
-          : "Every step ran, but the other service refused. The automation is still on.",
+          ? "단계는 다 지나갔는데 상대 서비스가 막았어요."
+          : "Every step ran, but the other service refused.",
       };
     }
     if (run.outcome === "unjudged") {
@@ -780,7 +780,19 @@ function plainRun(run: AutomationRunRecord, ko: boolean): { title: string; body:
         : "Every step ran. The result just was not what you asked for.",
     };
   }
-  return plainOutcome(run.status, ko);
+  const plain = plainOutcome(run.status, ko);
+  /*
+   * ★기록된 사유가 **이미 사람 말이면 그것을 쓴다.**
+   *
+   * 평이한 설명은 영어 기술 문장을 덮으려고 만든 것인데, 덮는 김에 고칠 방법까지 덮었다.
+   * 실측(2026-08-06): 진짜 사유는 "macOS 손쉬운 사용 권한이 꺼져 있어 … 시스템 설정에서
+   * 켜세요"였는데 화면에는 "사람이 정해야 하는 부분이 있어 멈췄어요"만 떴다. 그 화면이
+   * 권하는 [대화에서 이어서 해결]로는 OS 권한을 절대 못 켠다 — 아는 쪽은 제품인데
+   * 모르는 쪽이 사람이 됐다. 판별은 모양이 아니라 **한글이 섞여 있고 길이가 사람 문장인가**로 한다.
+   */
+  const recorded = (run.error ?? "").trim();
+  const readable = recorded.length > 0 && recorded.length <= 400 && (!ko || /[\uac00-\ud7a3]/.test(recorded));
+  return readable ? { title: plain.title, body: recorded } : plain;
 }
 
 function statusLabel(status: AutomationRunRecord["status"], ko: boolean): string {

@@ -60,13 +60,26 @@ export function decideGraphRunRequest(input: {
   input?: Record<string, unknown>;
   /** 시뮬레이션은 값이 없어도 돌 수 있다 — 바깥으로 아무것도 안 나가기 때문. */
   dryRun?: boolean;
+  /**
+   * 누가 어떻게 부르는가. 기본은 `"queued"`(터미널·플러그인이 데스크탑에 남기는 요청).
+   *
+   * ★`"immediate"`는 **사람이 그 화면 앞에서 직접 누른** 실행이다. 이 둘을 같은 규칙으로
+   * 다루면 안 된다: 꺼진 자동화에 대한 대기열 요청은 조용히 앉아 있다가 사용자를
+   * 속이므로 거절이 맞지만, 직접 실행은 그 자리에서 바로 돌고 결과가 눈앞에 뜬다.
+   * 하나로 묶어 뒀더니 제품이 스스로 모순을 만들었다(실측 2026-08-06): 새 자동화는
+   * "꺼진 상태로 저장됩니다 — 직접 켜기 전에는 돌지 않습니다"라고 약속해 놓고,
+   * 켜기 전에 살펴보라던 [지금 실행]·[시뮬레이션]을 바로 그 이유로 거절했다.
+   * 결국 20분 크론을 **무장한 다음에야** 한 번 돌려볼 수 있었다.
+   */
+  mode?: "queued" | "immediate";
 }): GraphRunRequestDecision {
   const found = resolveGraphRef(input.ref, input.automations);
   if (!found.ok) return found;
   const automation = found.automation;
 
-  if (!automation.enabled) {
+  if (!automation.enabled && input.mode !== "immediate") {
     // ★꺼진 것을 켜 주지 않는다. 요청이 조용히 대기열에 앉으면 사용자는 실행된 줄 안다.
+    // 직접 실행(mode:"immediate")은 대기열에 앉지 않으므로 이 위험이 없다.
     return {
       ok: false, code: "RUN_REQUEST_DISABLED",
       reason: `"${automation.name}"이(가) 꺼져 있어 실행 요청이 읽히지 않습니다.`,

@@ -350,6 +350,15 @@ export function createAutomation(input: {
   graphJson?: string | WorkflowGraph | null;
   /** 무엇을 위한 자동화인가(인터뷰 blueprint.goal). AI가 나중에 그래프를 이해할 유일한 문장. */
   goal?: string | null;
+  /**
+   * ★꺼진 채로 태어나야 하는가. 기본은 켬(옛 동작).
+   *
+   * 예전에는 "만들고 나서 끄기" 두 걸음이었다. 그 사이에서 예외가 나면 자동화는
+   * **켜진 채** 남고 화면에는 저장 실패가 뜬다 — 사람은 안 만들어졌다고 믿는데
+   * 20분 뒤 그것이 돈다(실측 2026-08-06, `no such column: goal`).
+   * 꺼진 상태를 약속했으면 그 상태로 태어나야 한다.
+   */
+  enabled?: boolean;
   scheduleJson?: string | null;
   timezone?: string | null;
   endAt?: string | null;
@@ -391,7 +400,7 @@ export function createAutomation(input: {
           last_run_at, next_run_at, created_at, graph_json, schedule_json, timezone, end_at, max_runs, run_count,
           trigger_type, trigger_json, tool_mode, hub_mode, execution_permission, target_version, runtime_selection_json,
           project_id)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -400,6 +409,7 @@ export function createAutomation(input: {
       input.targetType,
       input.targetId,
       input.promptTemplate,
+      input.enabled === false ? 0 : 1,
       input.createdBy ?? "user",
       nextRunAt,
       now.toISOString(),

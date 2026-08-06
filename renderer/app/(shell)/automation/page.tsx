@@ -65,8 +65,13 @@ export default function AutomationListPage() {
     const api = ipc();
     if (!api) return;
     setMessage(locale === "en" ? "Starting the run. Opening the live flow..." : "실행을 시작하고 라이브 플로우를 엽니다...");
-    api.automations.runNow(id).catch(() => {
-      setMessage(locale === "en" ? "Test run did not start." : "테스트 실행을 시작하지 못했습니다.");
+    api.automations.runNow(id).catch((error: unknown) => {
+      // ★거절에는 언제나 사유가 실려 온다 — 그것을 버리고 "시작하지 못했습니다"만
+      //   말하면, 무엇을 고쳐야 하는지 아는 쪽은 제품인데 모르는 쪽은 사람이 된다.
+      const reason = error instanceof Error
+        ? error.message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, "")
+        : "";
+      setMessage(reason || (locale === "en" ? "Test run did not start." : "테스트 실행을 시작하지 못했습니다."));
     });
     router.push(`/automation/flow?id=${encodeURIComponent(id)}`);
   }
