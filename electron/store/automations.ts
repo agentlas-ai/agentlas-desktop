@@ -526,6 +526,16 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
     projectId,
     id,
   );
+  /*
+   * ★goal도 patch를 받는다 — 없던 시절, 그래프 편집·발행 경로 어디서도 목적 문장을
+   * 나중에 채울 수 없었다(실측 2026-08-06: 터미널이 goal 없이 저장한 그래프를 발행하려
+   * 하자 tagline이 하드코딩 폴백으로 떨어졌는데, 고칠 방법이 없었다). 빈 문자열이면
+   * 지우는 것으로 읽는다.
+   */
+  if (patch.goal !== undefined) {
+    getDb().prepare("UPDATE automations SET goal = ? WHERE id = ?")
+      .run(patch.goal && patch.goal.trim() ? patch.goal.trim() : null, id);
+  }
   const automation = getAutomation(id) as Automation;
   emitDesktopStoreChange({ entity: "automation", id });
   return automation;

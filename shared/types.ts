@@ -1883,6 +1883,8 @@ export type AutomationCreateInput = Omit<
 /** 기존 자동화 편집 패치(설계 한계 #7 — 삭제-재생성 대신 in-place 수정). */
 export interface AutomationUpdatePatch {
   name?: string;
+  /** 목적 문장. 빈 문자열 = 지움, undefined = 미변경. */
+  goal?: string;
   scheduleHuman?: string;
   targetType?: AutomationTargetType;
   targetId?: string;

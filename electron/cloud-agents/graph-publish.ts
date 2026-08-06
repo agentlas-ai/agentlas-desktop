@@ -137,8 +137,17 @@ export async function publishGraphToHub(input: {
   const packageHash = hashPackage(files);
   const slug = graphPackageSlug(input.automation.name);
   const name = input.automation.name;
-  const tagline = (input.automation.goal || "").trim().slice(0, 200)
-    || `${built.package.graph.nodes.length}단계 자동화 그래프`;
+  /*
+   * ★칸별 언어 폴백 — 한 문자열을 양쪽 칸에 복사하면 어느 한쪽은 반드시 틀린 언어가 된다.
+   * 실측(2026-08-06): goal이 비어 한국어 폴백("N단계 자동화 그래프")이 descriptionEn에
+   * 실렸고, 서버가 "descriptionEn contains Hangul"로 발행을 통째로 거절했다.
+   */
+  const goalText = (input.automation.goal || "").trim().slice(0, 200);
+  const stepCount = built.package.graph.nodes.length;
+  const tagline = goalText || `${stepCount}단계 자동화 그래프`;
+  const taglineEn = goalText && !/[가-힣]/.test(goalText)
+    ? goalText
+    : `${stepCount}-step automation graph`;
   const visibility: CloudAgentVisibility = input.visibility ?? "marketplace";
 
   /*
@@ -168,7 +177,7 @@ export async function publishGraphToHub(input: {
   let localized = {
     titleEn: input.titleEn || name,
     titleKo: input.titleKo || name,
-    descriptionEn: input.descriptionEn || tagline,
+    descriptionEn: input.descriptionEn || taglineEn,
     descriptionKo: input.descriptionKo || tagline,
   };
   if (localizedListingProblems(localized).length > 0) {
