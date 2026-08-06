@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.9.58 — 2026-08-06
+
+This release binds Agentlas OS v1.1.98 at
+b8fc76d44dadd2933216ce669d9f53425a606392.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **A save you can walk back.** Saving a graph only overwrote it, so one bad
+  edit while talking it through could take a working automation with it. Every
+  save now keeps the version before it, and an earlier version can be restored
+  from the graph's toolbar. Restoring is itself a save, so the version you were
+  on stays in the list and you can go forward again. A save that changes nothing
+  does not add a version.
+- **A step that hands over nothing now says so.** A code step that promised a
+  value to the next step but returned nothing passed as a success — the run was
+  green while the result was empty, the hardest kind of failure to notice. It
+  now stops with a reason and offers to have the AI fix the script. A step that
+  never promised a value is untouched.
+- **What a run costs.** Token usage was counted all along but never read back,
+  so an automation running every morning could not tell you what it spends. The
+  run card shows it.
+- **An automation can call another one by describing it.** Calling a saved
+  automation as a step was only possible by drawing it; now it can be asked for
+  in words. Only automations that actually exist are accepted, and a graph
+  cannot call itself.
+- **The Hub publish review reports what it read.** It was returning a verdict it
+  never computed — always a pass, never a remark. It now reports only facts:
+  what each script imports, what it declared, and whether a step that goes
+  outside asks first. The review still runs once, at publish.
+
 ## 0.9.57 — 2026-08-06
 
 This release binds Agentlas OS v1.1.98 at
