@@ -4016,7 +4016,27 @@ export function registerIpcHandlers(): void {
         };
       }
       const parsed = parseInterviewTurn(text, attempt);
-      if (!parsed.ok) return parsed;
+      if (!parsed.ok) {
+        /*
+         * ★모델이 형식을 틀린 것과 사람이 답을 안 준 것은 다르다.
+         *
+         * 출력이 JSON으로 안 읽히면 지금까지는 그 자리에서 인터뷰가 죽고 **사람이 준
+         * 답까지 전부 사라졌다.** 화면에는 "자동으로 돌릴 일을 한 문장으로 다시 적어
+         * 주세요"가 떴다 — 사람 문장이 틀린 것처럼(실측 2026-08-06, 연속 3회 재현).
+         * 형식 문제는 이미 스스로 고치게 하는 장치가 있다. 같은 예산 안에서 그쪽으로 보낸다.
+         */
+        if (parsed.code !== "INTERVIEW_OUTPUT_UNREADABLE" || attempt.attempts.length >= MAX_SELF_CORRECTIONS) {
+          return parsed;
+        }
+        attempt = {
+          ...attempt,
+          attempts: [...attempt.attempts, {
+            round: attempt.round,
+            problems: ["지난 답이 JSON 하나로 읽히지 않았습니다. 설명 없이 JSON 객체 하나만 내보내세요."],
+          }],
+        };
+        continue;
+      }
       if (parsed.turn.kind === "ask") {
         return { ok: true as const, kind: "ask" as const, questions: parsed.turn.questions };
       }

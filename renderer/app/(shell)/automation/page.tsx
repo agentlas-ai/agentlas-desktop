@@ -17,6 +17,9 @@ export default function AutomationListPage() {
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
+  /* Hub에서 받기 — 올리는 길과 받는 길이 둘 다 메인 프로세스에만 있었다. */
+  const [hubSlug, setHubSlug] = useState("");
+  const [installing, setInstalling] = useState(false);
 
   async function refresh() {
     const api = ipc();
@@ -47,6 +50,29 @@ export default function AutomationListPage() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  async function installFromHub() {
+    const api = ipc();
+    if (!api || !hubSlug.trim() || installing) return;
+    setInstalling(true);
+    setMessage(locale === "en" ? "Fetching it from the Hub…" : "Hub에서 받는 중입니다…");
+    try {
+      const res = await api.automations.installGraphFromHub(hubSlug.trim());
+      if (!res.ok) { setMessage(res.reason); return; }
+      setHubSlug("");
+      await refresh();
+      // 받아온 것은 꺼진 채로 들어온다 — 그 사실을 말해 주지 않으면 안 도는 이유를 모른다.
+      setMessage(locale === "en"
+        ? `Installed "${res.name}". It is switched off — look it over, then turn it on.`
+        : `"${res.name}"을(를) 받았습니다. 꺼진 상태이니 살펴본 뒤 켜 주세요.`);
+    } catch (error) {
+      setMessage(error instanceof Error
+        ? error.message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, "")
+        : (locale === "en" ? "Could not install it." : "받지 못했습니다."));
+    } finally {
+      setInstalling(false);
+    }
+  }
 
   async function toggle(id: string, enabled: boolean) {
     const api = ipc();
@@ -161,6 +187,33 @@ export default function AutomationListPage() {
         {/* 말로 설명해 만드는 입구를 목록 맨 위에 둔다 — 폼을 채우는 것보다 먼저 보여야
             "무엇을 만들 수 있는지" 모르는 사람이 시작할 수 있다. */}
         <DescribeAutomation locale={locale} onCreated={() => void refresh()} />
+
+        {/* ★Hub에서 받기. 올리기·받기 둘 다 메인 프로세스에는 처음부터 있었는데
+            누를 자리가 없어 앱에서는 존재하지 않는 기능이었다. */}
+        <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "12px 0 4px" }}>
+          <input
+            value={hubSlug}
+            onChange={(e) => setHubSlug(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") void installFromHub(); }}
+            placeholder={locale === "en" ? "Install a graph from the Hub — paste its name" : "Hub에서 그래프 받기 — 이름을 붙여 넣으세요"}
+            style={{
+              flex: 1, padding: "9px 12px", borderRadius: "var(--radius-md)",
+              border: "1px solid var(--paper-edge)", background: "var(--paper)", color: "var(--ink)",
+              fontSize: 13, outline: "none",
+            }}
+          />
+          <button
+            onClick={() => void installFromHub()}
+            disabled={installing || !hubSlug.trim()}
+            style={{
+              padding: "9px 14px", borderRadius: "var(--radius-md)", border: "1px solid var(--paper-edge)",
+              background: "var(--paper)", color: "var(--ink)", fontSize: 13,
+              opacity: installing || !hubSlug.trim() ? 0.55 : 1,
+            }}
+          >
+            {installing ? (locale === "en" ? "Fetching…" : "받는 중…") : (locale === "en" ? "Install" : "받기")}
+          </button>
+        </div>
         {message ? (
           <div
             style={{

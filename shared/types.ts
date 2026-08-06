@@ -6216,6 +6216,14 @@ export interface AgentlasIpc {
     /** 기존 자동화의 이름/스케줄/타깃/프롬프트/트리거를 갱신(삭제-재생성 회피, 설계 한계 #7). */
     update: (id: string, patch: AutomationUpdatePatch) => Promise<Automation>;
     updateGraph: (id: string, graph: WorkflowGraph | null) => Promise<Automation>;
+    /** 그래프를 Hub에 올린다(공개 자산이 된다). */
+    publishGraph: (id: string, opts?: { version?: string }) => Promise<
+      { ok: true; slug: string; version: string; url?: string } | { ok: false; reason: string }
+    >;
+    /** 올려둔 그래프를 받아 자동화로 설치한다 — 꺼진 채로 들어온다. */
+    installGraphFromHub: (slug: string, opts?: { name?: string }) => Promise<
+      { ok: true; id: string; name: string } | { ok: false; reason: string }
+    >;
     /** 저장할 때마다 남는 직전 판(최신 순). 되돌리기의 목록. */
     listGraphVersions: (id: string) => Promise<Array<{ id: string; savedAt: string; note?: string; nodeCount: number }>>;
     restoreGraphVersion: (id: string, versionId: string) => Promise<

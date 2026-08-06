@@ -283,12 +283,35 @@ function firstJsonObject(text: string): string | null {
   return null;
 }
 
-const unreadable = (): InterviewParse => ({
-  ok: false,
-  code: "INTERVIEW_OUTPUT_UNREADABLE",
-  reason: "만들 내용을 읽지 못했습니다.",
-  nextAction: "자동으로 돌릴 일을 한 문장으로 다시 적어 주세요.",
-});
+/**
+ * ★런타임이 JSON 대신 **사람에게 하는 말**을 돌려줬을 수 있다.
+ *
+ * 실측 2026-08-06: 모델이 `You've hit your weekly limit · resets Aug 8 at 6pm (Asia/Seoul)`을
+ * 돌려줬는데, 제품은 그 문장을 삼키고 "만들 내용을 읽지 못했습니다 / 한 문장으로 다시
+ * 적어 주세요"라고 말했다. 사람은 자기 문장이 틀린 줄 알고 몇 번이고 다시 쓴다 —
+ * 아무리 잘 써도 안 된다. 무엇이 막혔는지 아는 쪽은 제품인데, 그것을 지우고 있었다.
+ *
+ * 짧고 JSON이 아니면 잘린 청사진이 아니라 **고지문**이다. 그대로 보여준다.
+ */
+const RUNTIME_NOTICE_MAX = 240;
+const unreadable = (rawText?: string | null): InterviewParse => {
+  const text = (rawText ?? "").trim();
+  if (text.length > 0 && text.length <= RUNTIME_NOTICE_MAX && !text.includes("{")) {
+    return {
+      ok: false,
+      // 재시도로 해결되지 않는다 — 형식 문제가 아니다.
+      code: "INTERVIEW_MODEL_UNAVAILABLE",
+      reason: `AI가 만들지 못했습니다 — ${text}`,
+      nextAction: "다른 모델을 연결하거나, 안내에 적힌 시각 이후에 다시 시도해 주세요.",
+    };
+  }
+  return {
+    ok: false,
+    code: "INTERVIEW_OUTPUT_UNREADABLE",
+    reason: "만들 내용을 읽지 못했습니다.",
+    nextAction: "자동으로 돌릴 일을 한 문장으로 다시 적어 주세요.",
+  };
+};
 
 /**
  * 모델 출력을 읽는다. 형태가 어긋나면 거절한다.
@@ -328,14 +351,14 @@ export function weakenedAgainstLastAttempt(
 
 export function parseInterviewTurn(text: string | null | undefined, state: InterviewState): InterviewParse {
   const raw = firstJsonObject(String(text ?? ""));
-  if (!raw) return unreadable();
+  if (!raw) return unreadable(text);
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return unreadable();
+    return unreadable(text);
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return unreadable();
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return unreadable(text);
   const record = parsed as { ask?: unknown; blueprint?: unknown };
 
   if (Array.isArray(record.ask) && record.ask.length > 0) {
@@ -352,7 +375,7 @@ export function parseInterviewTurn(text: string | null | undefined, state: Inter
   }
 
   const blueprint = record.blueprint as GraphBlueprint | undefined;
-  if (!blueprint || typeof blueprint !== "object") return unreadable();
+  if (!blueprint || typeof blueprint !== "object") return unreadable(text);
   const normalized: GraphBlueprint = { ...blueprint, schema: BLUEPRINT_SCHEMA };
   const problems = validateBlueprint(normalized);
   if (problems.length === 0) {

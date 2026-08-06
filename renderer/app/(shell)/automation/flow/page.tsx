@@ -114,6 +114,8 @@ function AutomationFlowPage() {
   const [connectionsOpen, setConnectionsOpen] = useState(false);
   /* ★이전 판 — 저장이 덮어쓰기뿐이라, 말로 고치다 한 번 잘못 저장하면 잘 돌던 그래프가
      되돌아갈 자리 없이 사라졌다. 목록은 열 때 한 번만 읽는다. */
+  /* Hub에 올리기 — 메인 프로세스엔 처음부터 있었는데 누를 자리가 없었다. */
+  const [publishing, setPublishing] = useState(false);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [versions, setVersions] = useState<Array<{ id: string; savedAt: string; note?: string; nodeCount: number }>>([]);
   const [restoring, setRestoring] = useState("");
@@ -676,6 +678,26 @@ function AutomationFlowPage() {
     setDirty(true);
   }
 
+  async function publishToHub() {
+    const api = ipc();
+    if (!api || !automation || publishing) return;
+    setPublishing(true);
+    setMessage(locale === "en" ? "Publishing to the Hub…" : "Hub에 올리는 중입니다…");
+    try {
+      const res = await api.automations.publishGraph(automation.id);
+      // 거절이든 성공이든 **무엇이 일어났는지 그대로** 말한다.
+      setMessage(res.ok
+        ? (locale === "en" ? `Published as ${res.slug} (${res.version}).` : `Hub에 올렸습니다 — ${res.slug} (${res.version}).`)
+        : res.reason);
+    } catch (error) {
+      setMessage(error instanceof Error
+        ? error.message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, "")
+        : (locale === "en" ? "Publishing failed." : "올리지 못했습니다."));
+    } finally {
+      setPublishing(false);
+    }
+  }
+
   async function openVersions() {
     const api = ipc();
     if (!api || !automation) return;
@@ -1018,6 +1040,19 @@ function AutomationFlowPage() {
                 : "이 자동화가 쓰는 것을 보고 연결합니다. 계정 하나로 그 계정의 도구가 함께 열립니다."}
             >
               {locale === "en" ? "Connections" : "연결"}
+            </button>
+            <button
+              onClick={() => void publishToHub()}
+              disabled={publishing}
+              className="titlebar-nodrag"
+              style={{ ...pillBtn(false), opacity: publishing ? 0.55 : 1 }}
+              title={locale === "en"
+                ? "Put this graph on the Hub so other people can install and run it."
+                : "이 그래프를 Hub에 올려 다른 사람이 받아 쓸 수 있게 합니다."}
+            >
+              {publishing
+                ? (locale === "en" ? "Publishing…" : "올리는 중…")
+                : (locale === "en" ? "Publish to Hub" : "Hub에 올리기")}
             </button>
             <button
               onClick={() => void openVersions()}

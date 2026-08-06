@@ -691,7 +691,7 @@ export function buildGraphFromBlueprint(
       type: "condition",
       // 이름을 규칙에서 만든다 — 사람이 지은 이름이 실제 규칙과 달라 예측이 안 되던 문제(실측)를
       // 애초에 만들 수 없게 한다.
-      label: branchLabel(branch),
+      label: branchLabel(branch, locale),
       position: { x: column(index + 1) + 140, y: 0 },
       config: {
         var: branch.var,
@@ -770,7 +770,7 @@ export function describeBranches(bp: GraphBlueprint, locale: "ko" | "en" = "ko")
   const title = (index?: number): string =>
     typeof index === "number" && bp.steps[index] ? bp.steps[index].title : (locale === "ko" ? "끝" : "the end");
   for (const branch of bp.branches ?? []) {
-    const rule = branchLabel(branch);
+    const rule = branchLabel(branch, locale);
     const repeatText = branch.repeatStep !== undefined
       ? (locale === "ko"
         ? `"${title(branch.repeatStep)}"부터 다시 (최대 ${branch.maxRepeats}번)`
@@ -791,9 +791,29 @@ export function describeBranches(bp: GraphBlueprint, locale: "ko" | "en" = "ko")
   return lines;
 }
 
-/** 갈림길 이름을 규칙에서 만든다. */
-export function branchLabel(branch: BlueprintBranch): string {
+/**
+ * 갈림길 이름을 규칙에서 만든다.
+ *
+ * ★언어를 받는다. 예전에는 **무조건 한국어**였다 — 영어로 만든 그래프에도
+ * `verdict이(가) "fail"인가?` 같은 칸이 박혔다. 화면이 섞여 보이는 데서 끝나지 않고,
+ * 그 라벨이 공개 설명문에 실려 Hub 발행이 통째로 거절됐다(실측 2026-08-06:
+ * "descriptionEn contains Hangul"). 언어는 이미 컴파일러가 들고 있었는데 이 함수만
+ * 안 받고 있었다.
+ */
+export function branchLabel(branch: BlueprintBranch, locale: "ko" | "en" = "ko"): string {
   const shown = typeof branch.value === "string" ? `"${branch.value}"` : String(branch.value ?? "");
+  if (locale === "en") {
+    switch (branch.op) {
+      case "contains": return `Does ${branch.var} contain ${shown}?`;
+      case "truthy": return `Does ${branch.var} have a value?`;
+      case "falsy": return `Is ${branch.var} empty?`;
+      case "eq": return `Is ${branch.var} ${shown}?`;
+      case "ne": return `Is ${branch.var} not ${shown}?`;
+      case "gt": return `Is ${branch.var} greater than ${shown}?`;
+      case "lt": return `Is ${branch.var} less than ${shown}?`;
+      default: return `Check ${branch.var}`;
+    }
+  }
   switch (branch.op) {
     case "contains": return `${branch.var}에 ${shown}이(가) 있나?`;
     case "truthy": return `${branch.var}에 값이 있나?`;
