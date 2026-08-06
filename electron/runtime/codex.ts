@@ -9,7 +9,7 @@ import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
-import { wrapSystemPrompt } from "./runner";
+import { startCliHeartbeat, wrapSystemPrompt } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import {
@@ -241,6 +241,8 @@ function runCodexProcess(
       ...detachedSpawnOpts(),
     });
     trackRunChild(child);
+    // ★호스트 소유 생존 신호 — 러너 공통 규칙(runner.ts startCliHeartbeat 주석 참고).
+    const stopHeartbeat = startCliHeartbeat(child, events.onStatus, "codex");
 
     const onAbort = () => killCliTree(child);
     if (req.signal) {
@@ -428,6 +430,7 @@ function runCodexProcess(
 
     child.on("error", (err) => {
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
+      stopHeartbeat();
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
@@ -439,6 +442,7 @@ function runCodexProcess(
       consumeStdout(stdoutDecoder.end());
       stderr += stderrDecoder.end();
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
+      stopHeartbeat();
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);

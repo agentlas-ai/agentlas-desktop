@@ -10,7 +10,7 @@ import { rmSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
-import { wrapSystemPrompt } from "./runner";
+import { startCliHeartbeat, wrapSystemPrompt } from "./runner";
 import {
   CLI_HISTORY_CONTEXT_TOKENS,
   composeResumeTurnPrompt,
@@ -560,34 +560,12 @@ async function runPreparedGemini(
     const stdoutDecoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
     /*
-     * ★호스트 소유 생존 신호(이 제품의 기결정 — liveness를 모델에 맡기지 않는다).
-     * agy는 생각(thinking) 구간에서 이벤트를 전혀 내지 않는다(실측 2026-08-06: flash-high가
-     * 체스 게임 설계로 수 분 침묵 → 스톨 워치독 480s 오폭 3회). 자식이 살아 있는 한
-     * 호스트가 60초마다 **정직한 문구로** 알린다 — 진행을 지어내는 게 아니라
-     * "살아 있고 아직 출력이 없다"는 사실을 전달한다.
+     * ★호스트 소유 생존 신호 — agy만이 아니라 **이 파일의 모든 스폰**(기결정: liveness를
+     * 모델에 맡기지 않는다). 실측(2026-08-06): agy에만 달았더니 같은 그래프의 다음 노드가
+     * 공식 Gemini CLI로 해석되어 8분 침묵 → 스톨 워치독(480s)이 정당하게 끊었다.
+     * 특례는 특례가 안 붙은 형제를 지뢰로 남긴다. 생존 확인·좀비 방지는 헬퍼 주석 참고.
      */
-    let agyHeartbeat: ReturnType<typeof setInterval> | null = null;
-    if (isAgy) {
-      const startedAt = Date.now();
-      agyHeartbeat = setInterval(() => {
-        /*
-         * ★자식 생존을 **확인하고** 뛴다 — 확인 없는 심장박동은 죽은 자식을 영원히
-         * "살아 있다"고 보고해, close 이벤트가 유실되면 실행이 좀비가 된다
-         * (실측 2026-08-06: agy가 자체 30m 타임아웃으로 죽은 뒤에도 노드가 33분+
-         * running — 워치독이 심장박동에 속아 못 끊었다). 죽었으면 박동을 멈춰
-         * 워치독이 제 일을 하게 둔다.
-         */
-        if (child.killed || child.exitCode !== null || child.signalCode !== null) {
-          clearAgyHeartbeat();
-          return;
-        }
-        const seconds = Math.round((Date.now() - startedAt) / 1000);
-        events.onStatus(`agy: session alive, waiting for output (${seconds}s)`);
-      }, 60_000);
-    }
-    const clearAgyHeartbeat = (): void => {
-      if (agyHeartbeat) { clearInterval(agyHeartbeat); agyHeartbeat = null; }
-    };
+    const clearAgyHeartbeat = startCliHeartbeat(child, events.onStatus, isAgy ? "agy" : "gemini");
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = stdoutDecoder.write(chunk);
       if (isAgy) {

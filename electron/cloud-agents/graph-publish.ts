@@ -216,18 +216,40 @@ export async function publishGraphToHub(input: {
   };
 
   const base = webBase();
-  const response = await fetch(`${base}/api/cloud-agents/v1/register`, {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie, origin: base, "if-none-match": "*" },
-    body: JSON.stringify({
-      manifest,
-      bundle: { manifest, files, source: { packagedBy: "agentlas-desktop", packagedAt: manifest.createdAt, costOwner: "none" } },
-      review,
-      visibility,
-      notes: null,
-      billing: { modelCallsPaidBy: "none", localRuntime: null },
-    }),
+  const registerBody = JSON.stringify({
+    manifest,
+    bundle: { manifest, files, source: { packagedBy: "agentlas-desktop", packagedAt: manifest.createdAt, costOwner: "none" } },
+    review,
+    visibility,
+    notes: null,
+    billing: { modelCallsPaidBy: "none", localRuntime: null },
   });
+  const register = (precondition: Record<string, string>) =>
+    fetch(`${base}/api/cloud-agents/v1/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin: base, ...precondition },
+      body: registerBody,
+    });
+  // 첫 시도는 create. 그래프 발행은 로컬 폴더가 없어 에이전트 경로의 restore
+  // marker(revision 기억)가 없다 — 대신 서버가 412에 현재 세대(cloudId·revision)를
+  // 실어 주므로, 같은 slug의 **내 소유** 자산이면 그 세대를 정확히 겨냥해 한 번만
+  // 갱신으로 재시도한다(실측 2026-08-06: 재발행이 무조건 412로 죽었다 — create 전용).
+  // 재시도도 412면 다른 호스트와의 진짜 경합이므로 그대로 실패를 보고한다.
+  let response = await register({ "if-none-match": "*" });
+  if (response.status === 412) {
+    const conflict = await response.json().catch(() => null) as
+      | { code?: string; current?: { cloudId?: string; revision?: string } }
+      | null;
+    const current = conflict?.code === "cloud_agent_revision_conflict" ? conflict.current : undefined;
+    if (current?.cloudId && current.revision) {
+      response = await register({
+        "if-match": `"${current.revision}"`,
+        "x-agentlas-cloud-id": current.cloudId,
+      });
+    } else {
+      return { ok: false, reason: `Hub 등록 실패 (412): ${JSON.stringify(conflict).slice(0, 300)}` };
+    }
+  }
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     return { ok: false, reason: `Hub 등록 실패 (${response.status}): ${text.slice(0, 300)}` };

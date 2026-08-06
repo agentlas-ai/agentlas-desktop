@@ -295,6 +295,43 @@ export function runnerOutcome(res: RunnerResult):
   return { ok: true, text: res.text };
 }
 
+/**
+ * ★호스트 소유 생존 신호 — 모든 CLI 스폰 공통(이 제품의 기결정: liveness를 모델에
+ * 맡기지 않는다). 어떤 런타임이든 생각/도구 구간에서 수 분 침묵할 수 있고, 그 침묵은
+ * 무활동 워치독(480s)에게 사망과 구별되지 않는다.
+ *
+ * 실측(2026-08-06): 이 신호를 agy에만 달았더니, 같은 그래프의 다음 노드가 공식
+ * Gemini CLI로 해석되어 8분 침묵 → 스톨 워치독이 정당하게 끊었다. 특례는 특례가
+ * 안 붙은 형제를 지뢰로 남긴다 — 그래서 이 헬퍼는 러너 공통이다.
+ *
+ * 자식 생존을 **확인하고** 뛴다: 확인 없는 심장박동은 죽은 자식을 영원히 "살아
+ * 있다"고 보고해, close 이벤트가 유실되면 실행이 좀비가 된다(agy 자체 30m 타임아웃
+ * 사후 33분+ running 실측). 죽었으면 박동을 멈춰 워치독이 제 일을 하게 둔다.
+ *
+ * 반환된 함수를 스폰 종료 경로(close/error/정상 반환)에서 반드시 호출할 것.
+ */
+export function startCliHeartbeat(
+  child: { killed: boolean; exitCode: number | null; signalCode: NodeJS.Signals | null },
+  onStatus: (status: string) => void,
+  label: string,
+  intervalMs = 60_000,
+): () => void {
+  const startedAt = Date.now();
+  let timer: ReturnType<typeof setInterval> | null = setInterval(() => {
+    if (child.killed || child.exitCode !== null || child.signalCode !== null) {
+      stop();
+      return;
+    }
+    const seconds = Math.round((Date.now() - startedAt) / 1000);
+    onStatus(`${label}: session alive, waiting for output (${seconds}s)`);
+  }, intervalMs);
+  timer.unref?.();
+  const stop = (): void => {
+    if (timer) { clearInterval(timer); timer = null; }
+  };
+  return stop;
+}
+
 export type Runner = (
   req: RunnerRequest,
   events: RunnerEvents,

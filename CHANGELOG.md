@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.9.61 — 2026-08-06
+
+This release binds Agentlas OS v1.1.98 at
+b8fc76d44dadd2933216ce669d9f53425a606392.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **Published graphs now have their own shelf in Agent Hub.** A published
+  automation graph used to be filed as a 3-credit callable agent whose install
+  link was dead — the Hub index dropped the declared "graph" kind, and the
+  desktop client folded it the same way. The Hub now shows a Graphs tab; a
+  graph card advertises no per-call price, and its one primary action is
+  installing it into Agentlas Graph, where it arrives switched off for review.
+- **Republishing a graph updates it instead of failing.** Publishing the same
+  graph twice died with a revision conflict because the client only knew how to
+  create. When the slug already exists and you own it, the publish now targets
+  the server's current generation and updates it in place.
+- **A quiet model no longer looks dead.** The host now reports "session alive,
+  waiting for output" for every CLI runtime while its process is alive — not
+  just one of them. A step that thought silently for eight minutes was being
+  aborted by the inactivity watchdog even though its runtime was healthy;
+  the heartbeat stops the moment the process actually exits, so a hung child
+  is still cut exactly as before.
+- **A stale "needs attention" card can finally be dismissed.** An old run's
+  demand (for example, a re-login notice from a runtime you no longer use)
+  stayed on screen with no way to resolve it. Dismissing closes every demand up
+  to that point while the runs themselves stay in the history list; a run that
+  fails after you dismissed still raises a fresh card, and an unconfirmed
+  side-effect can never be dismissed — that one needs your decision.
+- **One failure, one surface.** The canvas keeps a top card only for failures
+  that carry a human action (approval, judgment correction, dependency repair).
+  Informational failures live in the bottom log panel, which now also hosts the
+  chat input — no more floating sheet covering the graph.
+
 ## 0.9.60 — 2026-08-06
 
 This release binds Agentlas OS v1.1.98 at

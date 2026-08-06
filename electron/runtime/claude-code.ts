@@ -10,6 +10,7 @@ import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult , RunnerFailure } from "./runner";
 import {
+  startCliHeartbeat,
   workforceNativeToolEnforcement,
   workforceZeroToolsEnforcement,
   wrapSystemPrompt,
@@ -655,6 +656,10 @@ export const runClaudeCode: Runner = async (
     }
     trackRunChild(child);
     writeStdin(child, flatUser);
+    // ★호스트 소유 생존 신호 — 러너 공통 규칙(runner.ts startCliHeartbeat 주석 참고).
+    //   stream-json이라도 긴 생각/도구 구간은 수 분 침묵할 수 있고, 그 침묵은
+    //   무활동 워치독에게 사망과 구별되지 않는다.
+    const stopHeartbeat = startCliHeartbeat(child, events.onStatus, "claude");
 
     // 취소 — 사용자가 Stop을 누르면 자식 프로세스 트리 종료. 병렬 세션 각각 독립 취소.
     const onAbort = () => killCliTree(child);
@@ -1016,6 +1021,7 @@ export const runClaudeCode: Runner = async (
 
     child.on("error", (err) => {
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
+      stopHeartbeat();
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       cleanupSysFile();
@@ -1024,6 +1030,7 @@ export const runClaudeCode: Runner = async (
     });
     child.on("close", (code) => {
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
+      stopHeartbeat();
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       cleanupSysFile();
