@@ -19,6 +19,7 @@ import type {
   Automation,
   CloudAgentPackageManifest,
   CloudAgentReviewResult,
+  CloudAgentSecurityFinding,
   CloudAgentVisibility,
   WorkflowGraph,
 } from "../../shared/types";
@@ -56,6 +57,50 @@ export interface GraphPublishResult {
   /** 무엇을 지웠는지 사람이 볼 수 있게. */
   scrubbed?: Array<{ nodeId: string; field: string; action: string }>;
   reason?: string;
+}
+
+
+/**
+ * 그래프의 코드가 **무엇을 하는지 사실만** 적는다 — 발행 기록에 남고, 받는 사람이 본다.
+ *
+ * 판정하지 않는다. "이 이름은 위험" 목록을 박는 순간 그건 케이스 열거이고, 목록에 없는
+ * 것은 조용히 통과한다. 대신 **읽으면 사람이 판단할 수 있는 것**을 그대로 싣는다.
+ */
+function describeGraphCode(graph: WorkflowGraph): CloudAgentSecurityFinding[] {
+  const out: CloudAgentSecurityFinding[] = [];
+  for (const node of graph.nodes ?? []) {
+    const cfg = (node.config ?? {}) as Record<string, unknown>;
+    const label = node.label || node.id;
+    const code = typeof cfg.code === "string" ? cfg.code : "";
+    if (code) {
+      const imports = [...new Set(
+        [...code.matchAll(/^\s*(?:import\s+([A-Za-z_][\w.]*)|from\s+([A-Za-z_][\w.]*)\s+import)/gm)]
+          .map((m) => (m[1] ?? m[2] ?? "").split(".")[0])
+          .filter(Boolean),
+      )];
+      const packages = Array.isArray(cfg.packages) ? cfg.packages.map(String) : [];
+      out.push({
+        id: `graph-code:${node.id}`,
+        severity: "info",
+        category: "review",
+        message: `코드 단계 "${label}" — 불러오는 것: ${imports.length ? imports.join(", ") : "(없음)"}`
+          + ` · 설치되는 패키지: ${packages.length ? packages.join(", ") : "(선언 없음)"}`
+          + ` · ${code.split("\n").length}줄`,
+      });
+    }
+    if (cfg.effect === "mutation") {
+      out.push({
+        id: `graph-outward:${node.id}`,
+        severity: "info",
+        category: "policy",
+        message: `바깥으로 나가는 단계 "${label}" — `
+          + (cfg.approval === "auto"
+            ? "확인 없이 바로 실행되도록 설정돼 있습니다."
+            : "실행 전에 사람 확인을 받습니다."),
+      });
+    }
+  }
+  return out;
 }
 
 export async function publishGraphToHub(input: {
@@ -96,15 +141,24 @@ export async function publishGraphToHub(input: {
     || `${built.package.graph.nodes.length}단계 자동화 그래프`;
   const visibility: CloudAgentVisibility = input.visibility ?? "marketplace";
 
-  // 그래프에는 정적 스캔 대상 코드 트리가 없다. 검사 대상은 **패키지 자신의 세척 결과**이고
-  // 그건 이미 buildGraphPackage가 fail-closed로 했다(막을 사유가 있으면 여기 못 온다).
+  /*
+   * ★검토는 **올릴 때 한 번**만 한다(받는 쪽에서 또 하지 않는다).
+   *
+   * 예전 이 자리는 `verdict:"pass", findings:[]`를 그냥 써 넣었다 — 아무것도 안 보고
+   * "검사했고 통과"라고 기록한 셈이다. 그래프에 에이전트 같은 코드 트리가 없는 것은
+   * 맞지만, **코드 스텝 본문은 그래프 안에 있다**. 그걸 안 보면 검사한 게 없다.
+   *
+   * 무엇을 하는가: 지어내지 않고 **사실만 적는다** — 코드가 무엇을 불러오는지(import),
+   * 무엇을 설치하는지(packages), 어디서 바깥으로 나가는지. 위험한 이름 목록을 박아
+   * 판정하지 않는다(그건 케이스 열거다). 받는 사람은 이 목록을 설치 화면에서 본다.
+   */
   const review: CloudAgentReviewResult = {
     mode: "static-only",
     verdict: "pass",
     costOwner: "none",
     summary: `그래프 패키지 — 노드 ${built.package.graph.nodes.length}개, 세척 ${built.findings.length}건, `
       + `채워야 할 항목 ${graphBindingChecklist(built.package).length}개.`,
-    findings: [],
+    findings: describeGraphCode(built.package.graph),
     reviewedAt: new Date().toISOString(),
   };
 

@@ -514,6 +514,8 @@ import {
   toggleAutomation,
   updateAutomation,
   updateAutomationGraph,
+  listGraphVersions,
+  restoreGraphVersion,
   listRunHistory,
   getLatestGraphRun,
   enqueueRunInput,
@@ -3792,6 +3794,16 @@ export function registerIpcHandlers(): void {
     updateAutomationGraph(id, graph),
   );
 
+  // ★저장된 판으로 되돌리기 — 저장이 덮어쓰기뿐이라 잘못 저장하면 돌아갈 자리가 없었다.
+  ipcMain.handle("automations:listGraphVersions", (_e, id: string) => listGraphVersions(id));
+  ipcMain.handle("automations:restoreGraphVersion", (_e, id: string, versionId: string) => {
+    try {
+      return { ok: true as const, automation: restoreGraphVersion(id, versionId) };
+    } catch (error) {
+      return { ok: false as const, reason: error instanceof Error ? error.message : "restore_failed" };
+    }
+  });
+
   // ── 그래프를 Hub에 올리고, Hub에서 받아 설치한다 ──────────────────────────
   //
   // ★두 방향 모두 **미바인딩**을 정직하게 말한다. 발행은 무엇을 지웠는지,
@@ -3945,7 +3957,11 @@ export function registerIpcHandlers(): void {
      * 무한히 맡기지 않는 이유: 같은 자리에서 계속 막히면 모델이 못 고치는 문제이고,
      * 계속 부르면 사람은 아무 설명 없이 기다리기만 한다.
      */
-    let attempt = { ...current, attempts: [...(current.attempts ?? [])] };
+    // ★부를 수 있는 자동화 목록을 실물로 실어 준다 — 없으면 모델이 id를 지어낸다.
+    const knownGraphs = listAutomations()
+      .filter((row) => row.graph && row.graph.nodes?.length)
+      .map((row) => ({ id: row.id, name: row.name }));
+    let attempt = { ...current, knownGraphs, attempts: [...(current.attempts ?? [])] };
     for (let round = 0; round <= MAX_SELF_CORRECTIONS; round += 1) {
       let text: string | null = null;
       try {
@@ -4015,7 +4031,7 @@ export function registerIpcHandlers(): void {
         };
         continue;
       }
-      const built = buildGraphFromBlueprint(parsed.turn.blueprint, currentUiLocale());
+      const built = buildGraphFromBlueprint(parsed.turn.blueprint, currentUiLocale(), { knownGraphs });
       if (!built.ok) {
         // 청사진 검증은 통과했는데 짓는 데서 걸렸다 — 이것도 형식 문제다. 같은 규율.
         attempt = {
@@ -4120,7 +4136,7 @@ export function registerIpcHandlers(): void {
     if (!decision.ok) return decision;
     // 여기 도달했다는 것은 사용자가 diff를 보고 눌렀다는 뜻이다. 검증은 한 번 더 한다 —
     // 제안과 적용 사이에 그래프가 바뀌었으면 위 평가에서 이미 걸린다.
-    updateAutomationGraph(id, decision.next);
+    updateAutomationGraph(id, decision.next, { note: "말로 고치기" });
     return { ok: true as const };
   });
   ipcMain.handle("automations:runNow", async (

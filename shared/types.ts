@@ -3764,6 +3764,11 @@ export interface WorkflowRunSnapshot {
   /** 노드 id → 마지막 상태. */
   nodeStates: Record<string, WorkflowNodeRunState>;
   /**
+   * 이 실행이 쓴 토큰. 커널은 처음부터 세고 있었지만 읽는 곳이 없어 화면이 몰랐다 —
+   * 매일 도는 자동화가 얼마를 쓰는지 모른 채 켜 두게 된다.
+   */
+  tokensUsed?: number;
+  /**
    * 노드 id → 왜 멈췄고 지금 무엇을 누르면 되는지.
    * 상태 단어만으로는 실패 카드가 아무 말도 할 수 없다.
    */
@@ -6211,6 +6216,11 @@ export interface AgentlasIpc {
     /** 기존 자동화의 이름/스케줄/타깃/프롬프트/트리거를 갱신(삭제-재생성 회피, 설계 한계 #7). */
     update: (id: string, patch: AutomationUpdatePatch) => Promise<Automation>;
     updateGraph: (id: string, graph: WorkflowGraph | null) => Promise<Automation>;
+    /** 저장할 때마다 남는 직전 판(최신 순). 되돌리기의 목록. */
+    listGraphVersions: (id: string) => Promise<Array<{ id: string; savedAt: string; note?: string; nodeCount: number }>>;
+    restoreGraphVersion: (id: string, versionId: string) => Promise<
+      { ok: true; automation: Automation } | { ok: false; reason: string }
+    >;
     /** opts.dryRun: 시뮬레이션 실행 — 외부 변경을 막고 무엇이 막혔는지 남긴다. */
     runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) => Promise<void>;
     /** 이 그래프가 시작할 때 사람에게 받아야 하는 값(없으면 null). */

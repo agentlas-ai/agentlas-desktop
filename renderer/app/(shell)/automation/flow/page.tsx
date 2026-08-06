@@ -112,6 +112,11 @@ function AutomationFlowPage() {
   const [inputPrompt, setInputPrompt] = useState<{ label: string; value: string } | null>(null);
   /** 이 그래프가 쓰는 것들을 한 창에서 정리한다(공급자 묶음별). */
   const [connectionsOpen, setConnectionsOpen] = useState(false);
+  /* ★이전 판 — 저장이 덮어쓰기뿐이라, 말로 고치다 한 번 잘못 저장하면 잘 돌던 그래프가
+     되돌아갈 자리 없이 사라졌다. 목록은 열 때 한 번만 읽는다. */
+  const [versionsOpen, setVersionsOpen] = useState(false);
+  const [versions, setVersions] = useState<Array<{ id: string; savedAt: string; note?: string; nodeCount: number }>>([]);
+  const [restoring, setRestoring] = useState("");
   /** 켤 수 있는 상태인가. 버튼 이름이 이걸 그대로 말한다. */
   const [blockedByConnections, setBlockedByConnections] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -671,6 +676,35 @@ function AutomationFlowPage() {
     setDirty(true);
   }
 
+  async function openVersions() {
+    const api = ipc();
+    if (!api || !automation) return;
+    setVersionsOpen(true);
+    try {
+      setVersions(await api.automations.listGraphVersions(automation.id));
+    } catch {
+      setVersions([]);
+    }
+  }
+
+  async function restoreVersion(versionId: string) {
+    const api = ipc();
+    if (!api || !automation || restoring) return;
+    setRestoring(versionId);
+    try {
+      const result = await api.automations.restoreGraphVersion(automation.id, versionId);
+      if (!result.ok) {
+        setMessage(locale === "en" ? "Could not restore that version." : "그 판으로 되돌리지 못했습니다.");
+        return;
+      }
+      setVersionsOpen(false);
+      await load();
+      setMessage(locale === "en" ? "Restored. The version you were on is still in the list." : "되돌렸습니다. 방금까지의 판도 목록에 남아 있습니다.");
+    } finally {
+      setRestoring("");
+    }
+  }
+
   async function save() {
     const api = ipc();
     if (!api || !automation) return;
@@ -986,6 +1020,16 @@ function AutomationFlowPage() {
               {locale === "en" ? "Connections" : "연결"}
             </button>
             <button
+              onClick={() => void openVersions()}
+              className="titlebar-nodrag"
+              style={pillBtn(versionsOpen)}
+              title={locale === "en"
+                ? "Every save keeps the previous version — go back to one if an edit made things worse."
+                : "저장할 때마다 직전 판이 남습니다. 고쳤다가 더 나빠지면 그 판으로 돌아갈 수 있습니다."}
+            >
+              {locale === "en" ? "History" : "이전 판"}
+            </button>
+            <button
               onClick={() => void runNow(true)}
               disabled={running}
               className="titlebar-nodrag"
@@ -1064,6 +1108,64 @@ function AutomationFlowPage() {
           locale={locale}
           onClose={() => setConnectionsOpen(false)}
         />
+      ) : null}
+
+      {/* ★이전 판 목록. 되돌리기도 저장이므로 지금 판이 먼저 이력에 남는다 —
+          되돌린 게 잘못이었을 때 다시 앞으로 올 수 있어야 한다. */}
+      {versionsOpen ? (
+        <div
+          className="titlebar-nodrag"
+          onClick={() => setVersionsOpen(false)}
+          style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.28)", display: "flex", alignItems: "center", justifyContent: "center" }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            data-testid="graph-versions"
+            style={{ width: 460, maxHeight: "70vh", overflow: "auto", background: "var(--paper)", border: "var(--hairline)", borderRadius: 12, padding: 18 }}
+          >
+            <h2 style={{ margin: "0 0 4px", fontFamily: "var(--font-head)", fontSize: 15 }}>
+              {locale === "en" ? "Earlier versions" : "이전 판"}
+            </h2>
+            <p style={{ margin: "0 0 14px", fontSize: 12, color: "var(--muted-deep)" }}>
+              {locale === "en"
+                ? "A version is kept each time you save. Going back is itself a save, so the one you are on now stays too."
+                : "저장할 때마다 직전 판이 남습니다. 되돌리는 것도 저장이라, 지금 판도 목록에 남습니다."}
+            </p>
+            {versions.length === 0 ? (
+              <div style={{ fontSize: 12, color: "var(--muted-deep)" }}>
+                {locale === "en" ? "No earlier version yet — the first one appears after your next save." : "아직 이전 판이 없습니다. 다음 저장부터 남습니다."}
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {versions.map((v) => (
+                  <div key={v.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", border: "var(--hairline)", borderRadius: 8 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12 }}>{new Date(v.savedAt).toLocaleString(locale === "en" ? "en-US" : "ko-KR", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</div>
+                      <div style={{ fontSize: 11, color: "var(--muted-deep)" }}>
+                        {(locale === "en" ? `${v.nodeCount} steps` : `${v.nodeCount}단계`)}
+                        {v.note ? ` · ${v.note}` : ""}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => void restoreVersion(v.id)}
+                      disabled={!!restoring}
+                      style={{ ...pillBtn(false), opacity: restoring ? 0.55 : 1 }}
+                    >
+                      {restoring === v.id
+                        ? (locale === "en" ? "Restoring…" : "되돌리는 중…")
+                        : (locale === "en" ? "Restore" : "이 판으로")}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ marginTop: 14, textAlign: "right" }}>
+              <button onClick={() => setVersionsOpen(false)} style={pillBtn(false)}>
+                {t("common.close")}
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
 
       <div className="automation-flow-overlay-anchor">

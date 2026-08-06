@@ -346,6 +346,14 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
         <div className="automation-run-snapshot" data-status={latest.status}>
           <span>{formatDateTime(latest.startedAt, ko)}</span>
           <span>{current.detail}</span>
+          {/* ★이 실행이 쓴 토큰. 커널은 처음부터 세고 있었는데 읽는 곳이 없어 화면이 몰랐다 —
+              매일 도는 자동화가 얼마를 쓰는지 모른 채 켜 두게 된다. 금액은 모델마다 달라
+              지어내지 않고, 세어 둔 숫자만 그대로 보여준다. */}
+          {typeof latest.tokensUsed === "number" && latest.tokensUsed > 0 ? (
+            <span data-testid="run-tokens">
+              {ko ? `토큰 ${latest.tokensUsed.toLocaleString()}` : `${latest.tokensUsed.toLocaleString()} tokens`}
+            </span>
+          ) : null}
         </div>
       ) : (
         <div className="automation-run-empty">{ko ? "아직 실행 기록이 없어요." : "No runs yet."}</div>

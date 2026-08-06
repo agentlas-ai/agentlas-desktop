@@ -3895,6 +3895,25 @@ export function initStore(options: StoreInitOptions = {}): void {
     "CREATE INDEX IF NOT EXISTS idx_graph_run_journal_run ON graph_run_journal(run_id, seq)",
   );
 
+  // ★그래프 판 이력 — 저장할 때마다 **직전 판**을 여기 남긴다.
+  // 지금까지 저장은 덮어쓰기뿐이라, 말로 고치다 한 번 잘못 저장하면 잘 돌던 그래프가
+  // 되돌릴 방법 없이 사라졌다(실측: 캔버스가 반복 상한을 버려 열었다 저장만 해도 죽었다).
+  // 실행 저널과 달리 이건 **저작** 이력이다 — 무엇이 언제 바뀌었나가 아니라, 어디로
+  // 돌아갈 수 있나를 위해 있다.
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS automation_graph_versions (
+      id            TEXT PRIMARY KEY,
+      automation_id TEXT NOT NULL,
+      saved_at      TEXT NOT NULL,
+      note          TEXT,
+      node_count    INTEGER NOT NULL DEFAULT 0,
+      graph_json    TEXT NOT NULL
+    )
+  `);
+  _db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_automation_graph_versions ON automation_graph_versions(automation_id, saved_at DESC)",
+  );
+
   // v88: 입력 트리거 그래프가 사람에게 받은 값이 앉는 자리.
   // 이전에는 이 자리가 없어서, 터미널이 값을 물어보고도 버렸고(사용자에겐 전달된 것처럼 보였다)
   // 데스크탑 "지금 실행"은 아예 묻지 않았다. 그러면 {{topic}} 같은 구멍이 빈 문자열로 메꿔진 채

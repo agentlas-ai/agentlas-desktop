@@ -642,6 +642,14 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("automations:update", id, patch),
     updateGraph: (id: string, graph: WorkflowGraph | null) =>
       ipcRenderer.invoke("automations:updateGraph", id, graph),
+    listGraphVersions: (id: string) =>
+      ipcRenderer.invoke("automations:listGraphVersions", id) as Promise<
+        Array<{ id: string; savedAt: string; note?: string; nodeCount: number }>
+      >,
+    restoreGraphVersion: (id: string, versionId: string) =>
+      ipcRenderer.invoke("automations:restoreGraphVersion", id, versionId) as Promise<
+        { ok: true; automation: Automation } | { ok: false; reason: string }
+      >,
     runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) => ipcRenderer.invoke("automations:runNow", id, opts),
     inputRequirement: (id: string) => ipcRenderer.invoke("automations:inputRequirement", id),
     connectionReport: (id: string) => ipcRenderer.invoke("automations:connectionReport", id),

@@ -28,6 +28,8 @@ export interface InterviewAnswer {
 }
 
 export interface InterviewState {
+  /** 이 순간 저장된 자동화들 — runGraph 단계가 고를 수 있는 유일한 대상(지어내기 방지). */
+  knownGraphs?: Array<{ id: string; name: string }>;
   /** 사람이 처음 한 말. 인터뷰 내내 목적의 정본. */
   request: string;
   answers: InterviewAnswer[];
@@ -125,6 +127,11 @@ const RULES = [
   "    If the script imports anything outside the Python standard library, declare the pip names in",
   "    packages:[\"yfinance\"] on that step — the product installs them before the run. Prefer the",
   "    standard library when it can do the job; an undeclared import dies on the user's machine.",
+  "  · kind:\"runGraph\" when the person wants an automation they ALREADY have to run as one",
+  "    step of this one (\"then run my weekly report\"). Add graphRef:\"<id>\" chosen from the",
+  "    list of saved automations at the end of this prompt — never invent an id, and never use",
+  "    the name (names change, ids do not). If nothing in that list matches, do not guess:",
+  "    write the work as ordinary steps instead.",
   "  · kind:\"agent\" (the default, omit it) for judgement, writing, summarizing, deciding — anything",
   "    where being approximately right is fine. Split a step: fetch+compute in a code step, then",
   "    judge/write in an agent step. Do not put exact math inside an agent instruction.",
@@ -198,6 +205,15 @@ export function buildInterviewPrompt(state: InterviewState, locale: "ko" | "en" 
   }
   // ★산출 언어는 입력 언어가 아니라 **제품 설정**이 정한다(실측 항목 1·15: 영어 설정에서
   //   한국어 질문이 나와 화면 절반이 뒤섞였다).
+  // ★부를 수 있는 자동화 목록을 **그 순간 실물로** 싣는다. 이것이 없으면 모델은
+  //   id를 지어내고, 그 그래프는 실행 때 죽는다(에이전트 슬롯과 같은 규율).
+  if (state.knownGraphs?.length) {
+    lines.push(
+      "",
+      "Saved automations you may call with kind:\"runGraph\" (use the id exactly):",
+      ...state.knownGraphs.slice(0, 40).map((g) => `  ${g.id} — ${g.name}`),
+    );
+  }
   lines.push("", `PRODUCT LANGUAGE: ${locale === "ko" ? "Korean" : "English"}. Every user-facing string you emit is in this language.`);
   // ★지난 시도가 왜 지어지지 못했는지를 **모델 앞에 놓는다**. 커널이 지난 실패를 다음
   //   실행 지시에 붙이는 것과 같은 규율이다 — 없으면 같은 실수를 그대로 반복한다.

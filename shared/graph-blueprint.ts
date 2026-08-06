@@ -42,7 +42,13 @@ export interface BlueprintStep {
    *   숫자 계산·엑셀·파싱은 말로 시키면 조용히 틀리므로 이쪽으로 온다.
    *   ★경계는 사람이 아니라 AI가 스텝마다 고른다(인터뷰 프롬프트가 가르친다).
    */
-  kind?: "agent" | "code";
+  kind?: "agent" | "code" | "runGraph";
+  /**
+   * kind가 "runGraph"일 때 부를 자동화의 **id**(이름 아님 — 이름은 바뀐다).
+   * ★모델이 지어낼 수 없다: 인터뷰 지시문이 그 순간 실제로 저장된 목록만 보여 주고,
+   *   목록에 없는 id는 검증에서 거절된다. 지어낸 id는 실행에서 죽는다.
+   */
+  graphRef?: string;
   /** kind가 "code"일 때 실제 스크립트. AI가 채운다. */
   code?: string;
   /** 코드 언어. 기본 python(번들 인터프리터·데이터 라이브러리). */
@@ -195,7 +201,20 @@ const CAPABILITY_CHOICES: string[] = CAPABILITIES.map((id) => CAPABILITY_LABEL[i
  * **여기서 통과시킨 것만 그래프가 된다.** 모자란 곳은 "기본값"이 아니라 질문으로 돌려준다 —
  * 자동화는 사람이 보지 않을 때 도는 것이라, 지어낸 값이 그대로 실행된다.
  */
-export function validateBlueprint(bp: GraphBlueprint | null | undefined): BlueprintProblem[] {
+/**
+ * 이 순간 실제로 저장돼 있는 자동화들 — `runGraph` 단계가 가리킬 수 있는 유일한 대상.
+ * 비워 두면 그 검사를 건너뛴다(목록을 모르는 호출부까지 막지 않는다).
+ */
+export interface BlueprintContext {
+  knownGraphs?: Array<{ id: string; name: string }>;
+  /** 지금 고치고 있는 자동화 — 자기를 부르면 무한 재귀다. */
+  selfId?: string;
+}
+
+export function validateBlueprint(
+  bp: GraphBlueprint | null | undefined,
+  ctx: BlueprintContext = {},
+): BlueprintProblem[] {
   const problems: BlueprintProblem[] = [];
   const push = (reason: string, ask: BlueprintQuestion | null = null): void => {
     problems.push({ reason, ask });
@@ -284,6 +303,21 @@ export function validateBlueprint(bp: GraphBlueprint | null | undefined): Bluepr
     }
     // ★코드 스텝은 스크립트가 있어야 한다. 없으면 "코드로 하겠다"고 해 놓고 빈 채로 저장돼
     //   실행에서 CODE_NODE_EMPTY로 죽는다(저작 시점에 막는 게 맞다).
+    if (step.kind === "runGraph") {
+      /*
+       * ★부를 자동화는 **실재해야 한다.** 이름이 아니라 id로 가리키는 이유도 같다 —
+       * 이름은 바뀌고, 지어낸 id는 실행에서 죽는다(그때는 이미 저장된 뒤다).
+       * 목록을 모르는 호출부에서는 이 검사를 건너뛴다(형식만 본다).
+       */
+      const ref = step.graphRef?.trim();
+      if (!ref) {
+        push(`${at}가 어느 자동화를 부를지 정하지 않았습니다.`);
+      } else if (ctx.selfId && ref === ctx.selfId) {
+        push(`${at}가 자기 자신을 부릅니다 — 끝나지 않습니다.`);
+      } else if (ctx.knownGraphs?.length && !ctx.knownGraphs.some((g) => g.id === ref)) {
+        push(`${at}가 부르려는 자동화("${ref}")가 없습니다. 저장된 자동화 중에서 골라야 합니다.`);
+      }
+    }
     if (step.kind === "code") {
       if (!step.code?.trim()) {
         push(`${at}는 코드로 실행한다고 했는데 스크립트가 비어 있습니다.`, {
@@ -511,8 +545,12 @@ function clipAtWord(text: string, max: number): string {
   return `${body.trimEnd()}…`;
 }
 
-export function buildGraphFromBlueprint(bp: GraphBlueprint, locale: "ko" | "en" = "ko"): BlueprintBuild {
-  const problems = validateBlueprint(bp);
+export function buildGraphFromBlueprint(
+  bp: GraphBlueprint,
+  locale: "ko" | "en" = "ko",
+  ctx: BlueprintContext = {},
+): BlueprintBuild {
+  const problems = validateBlueprint(bp, ctx);
   if (problems.length) return { ok: false, problems };
 
   const nodes: WorkflowNode[] = [];
@@ -533,15 +571,19 @@ export function buildGraphFromBlueprint(bp: GraphBlueprint, locale: "ko" | "en" 
   const stepId = (index: number): string => `step${index + 1}`;
   bp.steps.forEach((step, index) => {
     const isCode = step.kind === "code";
+    // 다른 자동화를 한 단계로 부른다(커넥터 C46). 캔버스엔 있는데 말로는 못 만들던 구멍.
+    const isSub = step.kind === "runGraph";
     nodes.push({
       id: stepId(index),
       // 코드 스텝은 code 노드로, 아니면 바깥 변경 여부에 따라 action/agent.
-      type: isCode ? "code" : (step.effect === "mutation" ? "action" : "agent"),
+      type: isSub ? "subgraph" : isCode ? "code" : (step.effect === "mutation" ? "action" : "agent"),
       label: step.title,
       position: { x: column(index + 1), y: 0 },
       config: {
         // 코드 노드는 프롬프트가 아니라 스크립트를 지고 간다. 지시문은 참고용(note)으로 함께.
-        ...(isCode
+        ...(isSub
+          ? { graphRef: step.graphRef ?? "", note: step.instruction }
+          : isCode
           ? {
             code: step.code ?? "", codeLang: step.codeLang === "js" ? "js" : "python", note: step.instruction,
             ...(Array.isArray(step.packages) && step.packages.length

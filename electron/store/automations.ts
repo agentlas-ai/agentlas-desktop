@@ -570,10 +570,81 @@ export function removeAutomation(id: string): void {
   emitDesktopStoreChange({ entity: "chat" });
 }
 
+/** 한 자동화가 간직하는 판 수 — 이보다 오래된 판은 저장할 때 정리한다. */
+const GRAPH_VERSION_KEEP = 20;
+
+/**
+ * ★저장 직전의 판을 이력에 남긴다.
+ *
+ * 저장은 지금까지 덮어쓰기뿐이었다 — 말로 고치다 한 번 잘못 저장하면 잘 돌던 그래프가
+ * 되돌아갈 자리 없이 사라진다. 이력을 남기는 쪽은 저장 경로 **한 곳**이어야 한다
+ * (호출자마다 챙기게 하면 어느 경로는 반드시 빠진다).
+ */
+function snapshotGraphVersion(automationId: string, graph: WorkflowGraph, note?: string): void {
+  const db = getDb();
+  const json = JSON.stringify(graph);
+  db.prepare(
+    "INSERT INTO automation_graph_versions (id, automation_id, saved_at, note, node_count, graph_json) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(randomUUID(), automationId, new Date().toISOString(), note ?? null, graph.nodes?.length ?? 0, json);
+  db.prepare(
+    `DELETE FROM automation_graph_versions WHERE automation_id = ? AND id NOT IN (
+       SELECT id FROM automation_graph_versions WHERE automation_id = ? ORDER BY saved_at DESC, id DESC LIMIT ?
+     )`,
+  ).run(automationId, automationId, GRAPH_VERSION_KEEP);
+}
+
+export interface GraphVersionSummary {
+  id: string;
+  savedAt: string;
+  note?: string;
+  nodeCount: number;
+}
+
+/** 되돌아갈 수 있는 판 목록(최신 순). */
+export function listGraphVersions(automationId: string, limit = GRAPH_VERSION_KEEP): GraphVersionSummary[] {
+  const rows = getDb()
+    .prepare(
+      "SELECT id, saved_at, note, node_count FROM automation_graph_versions WHERE automation_id = ? ORDER BY saved_at DESC, id DESC LIMIT ?",
+    )
+    .all(automationId, limit) as Array<{ id: string; saved_at: string; note: string | null; node_count: number }>;
+  return rows.map((r) => ({
+    id: r.id,
+    savedAt: r.saved_at,
+    ...(r.note ? { note: r.note } : {}),
+    nodeCount: r.node_count ?? 0,
+  }));
+}
+
+/**
+ * 저장된 판으로 되돌린다. 되돌리기 **자체도 저장**이므로 지금 판이 먼저 이력에 남는다 —
+ * 되돌린 게 잘못이었을 때 다시 앞으로 올 수 있어야 한다.
+ */
+export function restoreGraphVersion(automationId: string, versionId: string): Automation {
+  const row = getDb()
+    .prepare("SELECT graph_json FROM automation_graph_versions WHERE id = ? AND automation_id = ?")
+    .get(versionId, automationId) as { graph_json?: string } | undefined;
+  if (!row?.graph_json) throw new Error("graph_version_not_found");
+  const graph = JSON.parse(row.graph_json) as WorkflowGraph;
+  return updateAutomationGraph(automationId, graph, { note: "되돌리기" });
+}
+
 /** 저장된 그래프를 갱신(그래프 편집/생성 경로). null이면 그래프 제거(단일 프롬프트로 복귀). */
-export function updateAutomationGraph(id: string, graph: WorkflowGraph | null): Automation {
+export function updateAutomationGraph(
+  id: string,
+  graph: WorkflowGraph | null,
+  options?: { note?: string },
+): Automation {
   const existing = getAutomation(id);
   if (!existing) throw new Error(`Automation not found: ${id}`);
+  /*
+   * 덮어쓰기 전에 직전 판을 남긴다. 단, **바뀐 게 없으면 남기지 않는다** — 열었다 그냥
+   * 저장한 것까지 이력이 되면 정작 되돌아갈 판이 상한 밖으로 밀려난다.
+   * 이력 때문에 저장 자체가 실패하면 안 되므로 실패는 삼킨다.
+   */
+  const changed = JSON.stringify(existing.graph ?? null) !== JSON.stringify(graph ?? null);
+  if (changed && existing.graph && existing.graph.nodes?.length) {
+    try { snapshotGraphVersion(id, existing.graph, options?.note); } catch { /* 저장이 우선 */ }
+  }
   getDb()
     .prepare("UPDATE automations SET graph_json = ? WHERE id = ?")
     .run(graph ? JSON.stringify(graph) : null, id);
@@ -925,12 +996,27 @@ export function getLatestGraphRun(automationId: string): WorkflowRunSnapshot | n
   } catch {
     nodeFailures = {};
   }
+  /*
+   * ★이 실행이 쓴 토큰 — 커널은 세고 있었는데 **아무도 읽지 않아** 화면이 알 방법이
+   * 없었다(도달성 게이트가 잡은 자리). 저널의 완료 항목에 이미 실려 있으므로
+   * 새로 저장할 것 없이 여기서 꺼내 함께 돌려준다.
+   */
+  let tokensUsed: number | undefined;
+  try {
+    for (const entry of listGraphJournal(row.id, 5000)) {
+      if (entry.kind !== "run_completed" && entry.kind !== "run_failed") continue;
+      const n = (entry.payload as { tokensUsed?: unknown } | null)?.tokensUsed;
+      if (typeof n === "number" && Number.isFinite(n)) tokensUsed = n;
+    }
+  } catch { /* 저널을 못 읽어도 실행 상태는 돌려준다 */ }
+
   return {
     runId: row.id,
     automationId: row.automation_id ?? automationId,
     startedAt: row.started_at ?? "",
     status: (row.status as WorkflowRunSnapshot["status"]) ?? "running",
     nodeStates,
+    ...(typeof tokensUsed === "number" ? { tokensUsed } : {}),
     ...(Object.keys(nodeFailures).length > 0 ? { nodeFailures } : {}),
   };
 }
