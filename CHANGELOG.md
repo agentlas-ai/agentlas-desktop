@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.9.57 — 2026-08-06
+
+This release binds Agentlas OS v1.1.98 at
+b8fc76d44dadd2933216ce669d9f53425a606392.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **The canvas reads top to bottom.** Steps flow downward — the direction people
+  read an order — and fold into a new column when a chain gets long. A
+  fourteen-step graph now fits in 1120×600 instead of trailing off the right
+  edge. Connections attach on any of a node's four sides, and a branch splits
+  down-left and down-right so both outcomes read in the direction the eye is
+  already travelling.
+
+- **Two ports nobody ever used are gone.** Every node carried a failure exit and
+  a cleanup exit. Across every saved graph on this machine, not one was ever
+  connected — and for good reason: telling you a run failed is already what the
+  app does, and clearing a step's temporary files is already automatic. They
+  were asking you to draw a line for something that already happens. The kernel
+  still runs those paths, so a graph that has them keeps working.
+
+- **You are no longer asked for a pip name.** When a step's code imports a
+  Python package that is not installed, the product used to tell you to declare
+  the correct pip name — but there is no way for you to know that PIL installs
+  as Pillow or sklearn as scikit-learn. The failure now offers to have the AI
+  fix that step, since the AI wrote the code.
+
+- **You see the steps as they are decided.** While an automation is being
+  written for you, each step appears as soon as it is settled instead of the
+  whole plan arriving at the end after a silent wait.
+
+- **The node settings panel follows your language.** Seventy-eight strings were
+  Korean regardless of the setting, so half the panel read in one language and
+  half in the other. Flow blocks (check, condition, code, output) also moved
+  above the agent list in the palette — they were buried under twenty agents.
+
 ## 0.9.56 — 2026-08-06
 
 This release binds Agentlas OS v1.1.98 at
