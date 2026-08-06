@@ -518,6 +518,7 @@ import {
   listGraphVersions,
   restoreGraphVersion,
   listRunHistory,
+  acknowledgeAutomationRun,
   getLatestGraphRun,
   enqueueRunInput,
 } from "./store/automations";
@@ -3775,6 +3776,9 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("automations:get", (_e, id: string) => getAutomation(id));
   ipcMain.handle("automations:listRuns", (_e, id: string, limit?: number) => listRunHistory(id, limit ?? 50));
+  // 확인필요 카드 닫기 — 기록은 남기고 "지금 조치하라"는 요구만 끈다.
+  ipcMain.handle("automations:acknowledgeRun", (_e, id: string, runId: string) =>
+    acknowledgeAutomationRun(id, runId));
   ipcMain.handle("automations:listTriggerAttention", (_e, automationId: string) =>
     listTriggerEventAttention(automationId),
   );

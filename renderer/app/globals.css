@@ -6800,6 +6800,13 @@ button[data-toggle-state="on"] {
   padding-top: 14px;
 }
 
+/* 설치/Website 두 버튼이 카드 패딩만큼만 남기고 가로를 절반씩 나눠 채운다. */
+.rd .hub-card-actions .hub-card-action-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  justify-content: center;
+}
+
 .rd .hub-card-actions > a {
   min-width: 0;
   text-decoration: none;

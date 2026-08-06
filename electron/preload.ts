@@ -690,6 +690,8 @@ const api: AgentlasIpc = {
     decideNodeApproval: (id: string, nodeId: string, decision: "approved" | "rejected" | "always") =>
       ipcRenderer.invoke("automations:decideNodeApproval", id, nodeId, decision),
     listRuns: (id: string, limit?: number) => ipcRenderer.invoke("automations:listRuns", id, limit),
+    acknowledgeRun: (id: string, runId: string) =>
+      ipcRenderer.invoke("automations:acknowledgeRun", id, runId) as Promise<boolean>,
     listTriggerAttention: (automationId: string) =>
       ipcRenderer.invoke("automations:listTriggerAttention", automationId),
     reconcileTriggerEvent: (input: AutomationTriggerEventReconcileInput) =>

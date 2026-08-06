@@ -136,6 +136,10 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   // 계속 "확인 필요"로 표시됨). 마지막 성공 이후에 일어난 실패만 현재 상태다.
   const blockingRun = useMemo(
     () => runs.find((run) => {
+      // 사용자가 이미 닫은 요구는 다시 올리지 않는다 — 기록은 아래 목록에 그대로 있다.
+      // (오너 보고 2026-08-06: 옛 핀 시절 실행의 "클로드 재로그인" 카드가 해소 수단
+      // 없이 눌러앉았다. 그 뒤 성공 실행이 없으면 lastOkAt 규칙만으로는 영원히 남는다.)
+      if (run.acknowledgedAt) return false;
       // 실행 상태가 멀쩡해도 판정이 "사람이 정해야 한다"면 그것도 확인이 필요한 상태다.
       // 두 답이 한 칸에 있던 때는 자동으로 걸렸지만, 칸을 나눈 뒤로는 둘 다 봐야 한다.
       const needsAttention = run.status === "error" || run.status === "needs_input"
@@ -159,8 +163,20 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   const DECISION_CODES = new Set(["APPROVAL_REQUIRED", "APPROVAL_REJECTED", "APPROVAL_TIMED_OUT", "EVAL_STUCK", "NODE_INPUT_MISSING"]);
   const failureCodes = Object.values(latest?.nodeFailures ?? {}).map((f) => f?.code).filter(Boolean);
   const canvasOwnsDecision = failureCodes.length > 0 && failureCodes.every((code) => DECISION_CODES.has(code));
+  // 최신 스냅샷의 error도, 사용자가 그보다 뒤에 요구를 닫았다면 다시 올리지 않는다 —
+  // 닫기가 blockingRun만 끄고 이 절이 카드를 되살리면 닫기 버튼은 거짓말이 된다.
+  // (run_history의 id와 스냅샷 runId는 다른 체계라 id로는 이을 수 없다 — 시각으로 잇는다.
+  //  닫기 이후 새로 시작해 실패한 실행은 startedAt이 닫은 시각보다 뒤라 다시 뜬다.)
+  const latestAcknowledged = Boolean(
+    latest && runs.some((run) => {
+      const acked = run.acknowledgedAt ? Date.parse(run.acknowledgedAt) : NaN;
+      const started = Date.parse(latest.startedAt);
+      return Number.isFinite(acked) && Number.isFinite(started) && acked >= started;
+    }),
+  );
   const needsHelp = !canvasOwnsDecision
-    && Boolean(reconciliation || regularAttentions.length > 0 || latest?.status === "error" || blockingRun);
+    && Boolean(reconciliation || regularAttentions.length > 0
+      || (latest?.status === "error" && !latestAcknowledged) || blockingRun);
   // 기록 원문(판정 코드 접두사 제거). 평이한 설명 아래 "자세히"로만 노출한다.
   // 미확정 부작용이 남아 있으면 백엔드가 재실행을 즉시 거부한다(중복 게시 방지).
   // 눌리는 버튼을 두면 "눌러도 아무 일이 없다"가 된다.
@@ -404,6 +420,32 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
             >
               {rerunning ? (ko ? "시작하는 중…" : "Starting…") : ko ? "지금 다시 실행" : "Run again now"}
             </button>
+            {/* 닫기 — 과거 실행의 요구가 해소 수단 없이 눌러앉는 것을 끊는다(오너 보고
+                2026-08-06). 기록은 아래 목록에 남고, 부작용 미확정(reconciliation)
+                상태는 사람이 확정하기 전엔 닫을 수 없다 — 그건 알림이 아니라 빚이다. */}
+            {blockingRun && !reconciliation ? (
+              <button
+                type="button"
+                data-testid="dismiss-needs-attention"
+                onClick={() => {
+                  void (async () => {
+                    const api = ipc();
+                    if (!api) return;
+                    try {
+                      await api.automations.acknowledgeRun(automation.id, blockingRun.id);
+                      await load();
+                    } catch {
+                      setMessage(ko ? "알림을 닫지 못했어요. 잠시 뒤 다시 시도해 주세요." : "Could not dismiss. Try again shortly.");
+                    }
+                  })();
+                }}
+                title={ko
+                  ? "이 실행 기록은 아래 목록에 그대로 남고, 이 알림만 닫습니다."
+                  : "The run stays in the history below; only this notice is dismissed."}
+              >
+                {ko ? "이 알림 닫기" : "Dismiss this notice"}
+              </button>
+            ) : null}
           </div>
           {rerunBlocked ? (
             <p className="automation-fix-result">

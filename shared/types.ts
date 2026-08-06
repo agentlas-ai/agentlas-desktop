@@ -906,6 +906,8 @@ export interface MarketplaceListing {
   developer?: string;
   detailUrl?: string;
   installCli?: string;
+  /** Plugin provider's real-world site (not the Hub's own detail page). */
+  homepage?: string;
   /** Exact immutable Hub identity. Both values must be present to enable Ontology projection. */
   agentDefinitionId?: string;
   agentReleaseId?: string;
@@ -1644,6 +1646,8 @@ export interface AutomationRunRecord {
   /** 이 실행에서 병합/스킵된 놓친 발생 수. */
   skippedCount: number;
   error: string | null;
+  /** 사용자가 확인필요 요구를 닫은 시각. 기록은 남고 "지금 조치하라"만 꺼진다. */
+  acknowledgedAt?: string | null;
 }
 
 /** A retained event occurrence that cannot be safely replayed automatically. */
@@ -6328,6 +6332,8 @@ export interface AgentlasIpc {
       decision: "approved" | "rejected" | "always",
     ) => Promise<{ ok: boolean; occurrenceId: string | null; always?: boolean }>;
     listRuns: (id: string, limit?: number) => Promise<AutomationRunRecord[]>;
+    /** 확인필요 카드 닫기 — 기록은 남고 "지금 조치하라"는 요구만 꺼진다. */
+    acknowledgeRun: (id: string, runId: string) => Promise<boolean>;
     listTriggerAttention: (automationId: string) => Promise<AutomationTriggerEventAttention[]>;
     reconcileTriggerEvent: (
       input: AutomationTriggerEventReconcileInput,

@@ -118,6 +118,8 @@ function AutomationFlowPage() {
   const [publishing, setPublishing] = useState(false);
   /* 화면 조작 권한(이 실행본 기준). 문장이 아니라 버튼으로 안내한다. */
   const [cuaPerm, setCuaPerm] = useState<{ ok: boolean; missing: string[] } | null>(null);
+  /* 최근 실행 시각 — 로그 줄에 병기. 없으면 어제의 실패가 지금 상태처럼 읽힌다(실측 혼선). */
+  const [runStartedAt, setRunStartedAt] = useState<string | null>(null);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [versions, setVersions] = useState<Array<{ id: string; savedAt: string; note?: string; nodeCount: number }>>([]);
   const [restoring, setRestoring] = useState("");
@@ -373,6 +375,7 @@ function AutomationFlowPage() {
     void api?.automations.latestRun(automation.id).then((snap) => {
       if (!cancelled && snap && snap.nodeStates) setRunStates(snap.nodeStates);
       if (!cancelled) setNodeFailures(snap?.nodeFailures ?? {});
+      if (!cancelled) setRunStartedAt(snap?.startedAt ?? null);
     });
     if (!events) return;
     const channel = api?.automations.liveRunChannel(automation.id);
@@ -535,11 +538,16 @@ function AutomationFlowPage() {
     const rows: WorkflowIssue[] = [];
     for (const [nodeId, failure] of Object.entries(nodeFailures)) {
       const node = automation?.graph?.nodes.find((n) => n.id === nodeId);
+      const when = runStartedAt
+        ? new Date(runStartedAt).toLocaleString(locale === "en" ? "en-US" : "ko-KR", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+        : "";
       rows.push({
         severity: "error",
         nodeId,
         code: "dangling-node", // 로그 표시용 자리 — 문구는 message가 전부 말한다.
-        message: `${node?.label || nodeId} — ${failure.reason || failure.code}`,
+        // ★시각을 앞세운다 — 어제의 실패(옛 claude 핀 시절 기록)가 "지금 클로드를 쓰고
+        //   있다"는 오해를 낳았다(실측). 기록은 기록으로 읽히게 한다.
+        message: `${when ? `[${when}] ` : ""}${node?.label || nodeId} — ${failure.reason || failure.code}`,
       } as unknown as WorkflowIssue);
     }
     if (liveRunning) {
@@ -547,7 +555,7 @@ function AutomationFlowPage() {
         message: locale === "en" ? "Run in progress…" : "실행 진행 중…" } as unknown as WorkflowIssue);
     }
     return rows;
-  }, [editing, nodeFailures, liveRunning, automation?.graph, locale]);
+  }, [editing, nodeFailures, liveRunning, automation?.graph, locale, runStartedAt]);
   const logRows = editing ? issues : runLogEntries;
   const errorCount = logRows.filter((i) => i.severity === "error").length;
   const warnCount = logRows.filter((i) => i.severity === "warning").length;
@@ -1341,8 +1349,10 @@ function AutomationFlowPage() {
         </div>
       ) : null}
 
-      {/* 멈춘 이유와 지금 누를 행동. 승인 대기는 버튼까지 함께 준다 —
-          사유만 보여주고 무엇을 하라는 말이 없는 실패 표면은 결함이다. */}
+      {/* 위 카드는 **사람이 누를 버튼이 있는 실패**만 띄운다(승인·판정 교정·의존성 수리).
+          사유·경과 같은 정보성 실패는 하단 로그 패널이 전담한다 — 같은 실패가 위아래
+          두 곳에 뜨면 어느 쪽이 진짜 행동 지점인지 알 수 없다(오너 지시 2026-08-06:
+          "아래 만들었으면 위에 저거 없애야지"). */}
       {Object.entries(nodeFailures).map(([failedNodeId, failure]) => {
         const nodeLabel = rfNodes.find((n) => n.id === failedNodeId)?.data?.label ?? failedNodeId;
         const awaitingApproval = failure.code === "APPROVAL_REQUIRED";
@@ -1351,6 +1361,8 @@ function AutomationFlowPage() {
         //   답이 아니다 — 코드를 지은 것은 AI이고, 사용자는 `PIL`의 pip 이름이
         //   `Pillow`라는 걸 알 이유가 없다(실측: PIL·sklearn 둘 다 죽었다).
         const depMissing = failure.code === "CODE_DEPENDENCY_MISSING";
+        // 버튼 없는 실패는 카드가 아니라 로그 줄이다.
+        if (!awaitingApproval && !evalStuck && !depMissing) return null;
         return (
           <div
             key={failedNodeId}
@@ -1492,101 +1504,7 @@ function AutomationFlowPage() {
           </button>
         )}
         <div className="automation-flow-canvas">
-          {/* ★말로 고치기 = 바텀시트(오너 지시). 상단 오버레이에 두면 세션 대화 헤더와
-              한 줄에 껴서 눈에 안 들어온다 — 캔버스 아래 고정, 불투명. */}
-          {!editing ? (
-            <div className="automation-flow-bottomsheet titlebar-nodrag" data-testid="architect-bottomsheet">
-        {!editing ? (
-          <div
-            className="titlebar-nodrag"
-            style={{ display: "grid", gap: 8, order: 4 }}
-          >
-            <div style={{ display: "flex", gap: 8 }}>
-              <input
-                value={architectDraft}
-                onChange={(e) => setArchitectDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    void requestGraphChange();
-                  }
-                }}
-                placeholder={t("auto.flow.architect_placeholder")}
-                disabled={architectBusy}
-                style={{
-                  flex: 1,
-                  padding: "8px 12px",
-                  borderRadius: "var(--radius-md)",
-                  border: "1px solid var(--paper-edge)",
-                  background: "var(--paper)",
-                  fontSize: 13,
-                  outline: "none",
-                }}
-              />
-              <button
-                className="titlebar-nodrag"
-                disabled={architectBusy || !architectDraft.trim()}
-                onClick={() => void requestGraphChange()}
-                style={pillBtn(false)}
-              >
-                {t("auto.flow.architect_ask")}
-              </button>
-            </div>
-            {proposal ? (
-              <div
-                data-testid="graph-patch-proposal"
-                style={{
-                  padding: "12px 14px",
-                  borderRadius: "var(--radius-md)",
-                  border: "1px solid var(--accent-soft)",
-                  background: "var(--paper)",
-                  fontSize: 12,
-                  display: "grid",
-                  gap: 8,
-                }}
-              >
-                <div style={{ fontWeight: 600 }}>{t("auto.flow.architect_preview")}</div>
-                {proposal.rationale ? (
-                  <div style={{ color: "var(--ink-soft)" }}>{proposal.rationale}</div>
-                ) : null}
-                {proposal.summary.added.length > 0 ? (
-                  <div>{t("auto.flow.architect_added")}: {proposal.summary.added.join(", ")}</div>
-                ) : null}
-                {proposal.summary.removed.length > 0 ? (
-                  <div>{t("auto.flow.architect_removed")}: {proposal.summary.removed.join(", ")}</div>
-                ) : null}
-                {proposal.summary.changed.length > 0 ? (
-                  <div>{t("auto.flow.architect_changed")}: {proposal.summary.changed.join(", ")}</div>
-                ) : null}
-                {proposal.risks.length > 0 ? (
-                  <div style={{ color: "var(--ink)" }}>
-                    {t("auto.flow.architect_check")}: {proposal.risks.map((risk) => t(`auto.flow.risk_${risk}` as never)).join(", ")}
-                  </div>
-                ) : null}
-                <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
-                  <button
-                    className="titlebar-nodrag"
-                    disabled={architectBusy}
-                    onClick={() => void applyProposal()}
-                    style={actionBtn}
-                  >
-                    {t("auto.flow.architect_apply")}
-                  </button>
-                  <button
-                    className="titlebar-nodrag"
-                    disabled={architectBusy}
-                    onClick={() => setProposal(null)}
-                    style={pillBtn(false)}
-                  >
-                    {t("auto.flow.architect_discard")}
-                  </button>
-                </div>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-            </div>
-          ) : null}
+
           {isSynthesized && !editing ? (
             <div
               className="automation-flow-origin-note"
@@ -1651,8 +1569,9 @@ function AutomationFlowPage() {
           ) : null}
           {/* ★검증 로그 패널 — 에러·경고를 상단 팝업이 아니라 VS Code 하단 패널처럼.
               위 팝업은 캔버스를 밀어내고, 읽기 전에 사라지고, 줄이 많으면 잘렸다. */}
-          {logRows.length > 0 ? (
-            <div className="automation-issue-log titlebar-nodrag" style={{ height: logOpen ? logHeight : 30 }}>
+          {(!editing || logRows.length > 0) ? (
+            /* ★터미널처럼 한 패널 — 로그가 위, 챗 입력이 아래 고정(오너 지시: 플로팅 금지·합치기). */
+            <div className="automation-issue-log titlebar-nodrag" style={{ height: logOpen ? logHeight : (editing ? 30 : 92), display: "flex", flexDirection: "column" }}>
               <div
                 className="automation-issue-log-grip"
                 onMouseDown={(e) => {
@@ -1695,6 +1614,100 @@ function AutomationFlowPage() {
                     </li>
                   ))}
                 </ul>
+              ) : null}
+              {!editing ? (
+                <div style={{ marginTop: "auto", padding: "8px 10px", borderTop: "1px solid var(--paper-edge)", background: "var(--paper)", display: "grid", gap: 8 }}>
+      
+              {!editing ? (
+                <div
+                  className="titlebar-nodrag"
+                  style={{ display: "grid", gap: 8, order: 4 }}
+                >
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input
+                      value={architectDraft}
+                      onChange={(e) => setArchitectDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          void requestGraphChange();
+                        }
+                      }}
+                      placeholder={t("auto.flow.architect_placeholder")}
+                      disabled={architectBusy}
+                      style={{
+                        flex: 1,
+                        padding: "8px 12px",
+                        borderRadius: "var(--radius-md)",
+                        border: "1px solid var(--paper-edge)",
+                        background: "var(--paper)",
+                        fontSize: 13,
+                        outline: "none",
+                      }}
+                    />
+                    <button
+                      className="titlebar-nodrag"
+                      disabled={architectBusy || !architectDraft.trim()}
+                      onClick={() => void requestGraphChange()}
+                      style={pillBtn(false)}
+                    >
+                      {t("auto.flow.architect_ask")}
+                    </button>
+                  </div>
+                  {proposal ? (
+                    <div
+                      data-testid="graph-patch-proposal"
+                      style={{
+                        padding: "12px 14px",
+                        borderRadius: "var(--radius-md)",
+                        border: "1px solid var(--accent-soft)",
+                        background: "var(--paper)",
+                        fontSize: 12,
+                        display: "grid",
+                        gap: 8,
+                      }}
+                    >
+                      <div style={{ fontWeight: 600 }}>{t("auto.flow.architect_preview")}</div>
+                      {proposal.rationale ? (
+                        <div style={{ color: "var(--ink-soft)" }}>{proposal.rationale}</div>
+                      ) : null}
+                      {proposal.summary.added.length > 0 ? (
+                        <div>{t("auto.flow.architect_added")}: {proposal.summary.added.join(", ")}</div>
+                      ) : null}
+                      {proposal.summary.removed.length > 0 ? (
+                        <div>{t("auto.flow.architect_removed")}: {proposal.summary.removed.join(", ")}</div>
+                      ) : null}
+                      {proposal.summary.changed.length > 0 ? (
+                        <div>{t("auto.flow.architect_changed")}: {proposal.summary.changed.join(", ")}</div>
+                      ) : null}
+                      {proposal.risks.length > 0 ? (
+                        <div style={{ color: "var(--ink)" }}>
+                          {t("auto.flow.architect_check")}: {proposal.risks.map((risk) => t(`auto.flow.risk_${risk}` as never)).join(", ")}
+                        </div>
+                      ) : null}
+                      <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
+                        <button
+                          className="titlebar-nodrag"
+                          disabled={architectBusy}
+                          onClick={() => void applyProposal()}
+                          style={actionBtn}
+                        >
+                          {t("auto.flow.architect_apply")}
+                        </button>
+                        <button
+                          className="titlebar-nodrag"
+                          disabled={architectBusy}
+                          onClick={() => setProposal(null)}
+                          style={pillBtn(false)}
+                        >
+                          {t("auto.flow.architect_discard")}
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+                </div>
               ) : null}
             </div>
           ) : null}

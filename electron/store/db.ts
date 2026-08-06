@@ -4034,6 +4034,9 @@ export function initStore(options: StoreInitOptions = {}): void {
    */
   const REQUIRED_COLUMNS: Record<string, Array<[string, string]>> = {
     automations: [["goal", "goal TEXT"]],
+    // 확인필요 카드의 "해소" 기록 — 기록 자체는 지우지 않고(감사 가능), "지금
+    // 조치하라"는 요구만 닫는다. 사용자가 닫기 전에는 NULL.
+    run_history: [["acknowledged_at", "acknowledged_at TEXT"]],
   };
   /*
    * ★잔존 금지 트리거 — 버전 무관으로 매 부팅 제거한다.

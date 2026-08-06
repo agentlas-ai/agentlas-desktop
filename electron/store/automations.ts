@@ -1349,7 +1349,34 @@ export function listRunHistory(automationId: string, limit = 50): AutomationRunR
     outcomeReason: r.outcome_reason ?? null,
     skippedCount: r.skipped_count ?? 0,
     error: r.error,
+    acknowledgedAt: (r as { acknowledged_at?: string | null }).acknowledged_at ?? null,
   }));
+}
+
+/**
+ * 확인필요 카드의 닫기 — 실행 기록은 그대로 두고 "지금 조치하라"는 요구만 닫는다.
+ * (오너 보고 2026-08-06: 옛 핀 시절 실행의 "클로드 재로그인" 카드가 해소 수단 없이
+ * 계속 남았다. 기록 삭제가 아니라 요구 해소이므로 acknowledged_at 한 칸이면 된다.)
+ */
+export function acknowledgeAutomationRun(automationId: string, runId: string): boolean {
+  const db = getDb();
+  const anchor = db
+    .prepare("SELECT ran_at FROM run_history WHERE automation_id = ? AND id = ?")
+    .get(automationId, runId) as { ran_at?: string } | undefined;
+  if (!anchor?.ran_at) return false;
+  // 닫는 대상은 "실행 1건"이 아니라 "지금 화면의 요구"다 — 카드는 가장 최근의
+  // 미해소 실행을 대표로 세우므로, 그 시점까지의 미해소 요구를 전부 닫지 않으면
+  // 닫기를 눌러도 카드가 다음 옛 실행으로 갈아타며 남는다(실측 2026-08-06).
+  // 이후에 생기는 새 실행의 요구는 건드리지 않는다.
+  const res = db
+    .prepare(
+      `UPDATE run_history SET acknowledged_at = ?
+       WHERE automation_id = ? AND acknowledged_at IS NULL AND ran_at <= ?
+         AND (status IN ('error','needs_input','blocked','partial')
+           OR outcome IN ('needs_input','blocked','rejected'))`,
+    )
+    .run(new Date().toISOString(), automationId, anchor.ran_at);
+  return res.changes > 0;
 }
 
 /**
