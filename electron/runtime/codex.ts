@@ -8,8 +8,9 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
-import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
+import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
 import { wrapSystemPrompt } from "./runner";
+import { detectRuntimeRefusal } from "./runtime-refusal";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import {
   CLI_HISTORY_CONTEXT_TOKENS,
@@ -192,6 +193,8 @@ interface CodexRunResult {
   text: string;
   threadId: string | null;
   tokens?: number;
+  /** 스트림 표식(또는 exit0 휴리스틱)이 말한 실패 — 있으면 text는 답이 아니다. */
+  failure?: RunnerFailure;
 }
 
 /**
@@ -199,6 +202,28 @@ interface CodexRunResult {
  * 세션 id(thread.started)와 답변 텍스트(agent_message), 토큰 사용량을 뽑는다.
  * 프롬프트는 stdin으로(`-`) — Windows cmd.exe 인자 한계 회피.
  */
+
+/**
+ * codex exec --json 이벤트 하나에서 실패 표식을 읽는다 — 순수 함수(게이트가 픽스처 주입).
+ * codex 한도는 표식이 없다(거절문이 agent_message + turn.completed) — 그 케이스는
+ * 완주 시점의 detectRuntimeRefusal 휴리스틱이 맡는다(출처 heuristic).
+ */
+export function codexFailureFromEvent(
+  ev: { type?: string; item?: { type?: string; message?: unknown }; error?: { message?: unknown } },
+): RunnerFailure | null {
+  if (ev.type === "item.completed" && ev.item?.type === "error") {
+    const message = typeof ev.item.message === "string" && ev.item.message.trim()
+      ? ev.item.message.trim().slice(0, 2000) : "codex error";
+    return { kind: "exit", message, runtime: "codex", source: "marker" };
+  }
+  if (ev.type === "turn.failed") {
+    const message = typeof ev.error?.message === "string" && ev.error.message.trim()
+      ? ev.error.message.trim().slice(0, 2000) : "codex turn failed";
+    return { kind: "exit", message, runtime: "codex", source: "marker" };
+  }
+  return null;
+}
+
 function runCodexProcess(
   bin: string,
   args: string[],
@@ -207,6 +232,7 @@ function runCodexProcess(
   events: RunnerEvents,
 ): Promise<CodexRunResult> {
   return new Promise((resolve, reject) => {
+    let runnerFailure: RunnerFailure | null = null;
     const child = spawnCli(bin, args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: req.env ?? process.env,
@@ -302,7 +328,13 @@ function runCodexProcess(
         const message = (ev.item as { message?: unknown }).message;
         if (typeof message === "string" && message.trim()) {
           events.onStatus(`codex: ${truncateUi(message, 400)}`);
+          // ★상태줄 강등만으로는 부족하다 — onStatus는 대부분의 호출자에서 () => {}다.
+          //   턴 차원 실패로 기록해 결과 계약(failure)에 싣는다(분류는 순수 함수 한 곳).
+          runnerFailure = runnerFailure ?? codexFailureFromEvent(ev);
         }
+      } else if (ev.type === "turn.failed") {
+        // ★핸들러가 아예 없던 이벤트 — 프로토콜이 턴 실패를 선언하는 자리다.
+        runnerFailure = codexFailureFromEvent(ev as { type?: string; error?: { message?: unknown } }) ?? runnerFailure;
       } else if (ev.type === "item.started" && ev.item?.type === "reasoning") {
         // reasoning 구간 신호 — 상태줄 "생각 중…" 회전의 근거 (Claude 경로와 동일 계약).
         openThinking();
@@ -410,7 +442,18 @@ function runCodexProcess(
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
-      resolve({ code, stderr, text, threadId, tokens });
+      /*
+       * ★표식 없이 완주(exit 0)했는데 산출물이 거절 고지문인 경우 — 실측: codex 한도는
+       * 거절문이 agent_message로 오고 turn.completed(표식 0). 이 한 자리에서만 텍스트
+       * 판별을 허용하고 출처를 heuristic으로 남긴다(규칙은 runtime-refusal.ts 한 곳).
+       */
+      if (code === 0 && !runnerFailure) {
+        const refusal = detectRuntimeRefusal(text);
+        if (refusal) {
+          runnerFailure = { kind: refusal.kind, message: refusal.message, runtime: "codex", source: "heuristic" };
+        }
+      }
+      resolve({ code, stderr, text, threadId, tokens, ...(runnerFailure ? { failure: runnerFailure } : {}) });
     });
   });
 }
@@ -555,6 +598,7 @@ export const runCodex: Runner = async (
       events.onStatus(`[runtime-session] resumed kind=${KIND}`);
       return {
         text: r.text.trim(),
+        ...(r.failure ? { failure: r.failure } : {}),
         sessionId: r.threadId ?? resumeSessionId,
         tokens: r.tokens,
         appliedEffort,
@@ -602,6 +646,7 @@ export const runCodex: Runner = async (
     events.onStatus(`[runtime-session] created kind=${KIND}`);
     return {
       text: created.text.trim(),
+      ...(created.failure ? { failure: created.failure } : {}),
       sessionId: created.threadId ?? undefined,
       tokens: created.tokens,
       appliedEffort,

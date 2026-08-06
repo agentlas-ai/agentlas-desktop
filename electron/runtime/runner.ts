@@ -238,8 +238,37 @@ export interface RunnerEvents {
   onThinking?: (phase: "start" | "end", durationMs?: number) => void;
 }
 
+/**
+ * ★런타임 실패의 종류 — 표식(marker) 기반. 텍스트 모양으로 성공을 판정하지 않기 위한 계약.
+ *
+ * 배경(2026-08-06 실측): claude CLI가 한도 소진을 스트림 표식(rate_limit_event →
+ * is_error:true/429)으로 정확히 말했는데, 이 결과 계약에 실패 칸이 없어서 거절문
+ * ("You've hit your weekly limit")이 text에 실려 정상 답 행세를 했다 — 판정 폴백이
+ * 안 걸리고, 노드 산출물·챗 답변이 됐다. throw 아니면 텍스트, 두 상태뿐이었던 것이 뿌리다.
+ */
+export type RunnerFailureKind = "quota" | "auth" | "refused" | "empty" | "exit" | "timeout" | "unsupported";
+
+export interface RunnerFailure {
+  kind: RunnerFailureKind;
+  /** 런타임 고지문 원문(잘라서). 지어내지 않는다 — 리셋 시각 같은 행동 단서가 들어 있다. */
+  message: string;
+  runtime: string;
+  /**
+   * 판정 출처. `heuristic`은 표식 없는 런타임(실측: codex 한도)용 최후 그물 —
+   * 화면은 단정 대신 완곡하게 말하고, 원문은 저널에 보존해야 한다.
+   */
+  source: "marker" | "exit" | "heuristic";
+  /** 한도 리셋 시각 등 — 표식에 실려 오면 그대로. */
+  retryAfterHint?: string;
+}
+
 export interface RunnerResult {
   text: string;
+  /**
+   * 실려 있으면 text는 답이 아니다(표시용 고지문일 수 있다). 소비자는 이 칸으로만
+   * 실패를 판정한다 — 텍스트 길이·모양으로 판정하는 코드는 이 계약 위반이다.
+   */
+  failure?: RunnerFailure;
   /** Claude/Codex 같은 CLI 런타임이 반환한 재개 가능한 세션 id. */
   sessionId?: string;
   /** 생성 토큰 수 (가능한 런타임만) — 상태줄 표시용. */
@@ -256,6 +285,14 @@ export interface RunnerResult {
   appliedEffort?: string | null;
   /** Present only when a Workforce runtime has verified and enforced its main-minted grant. */
   workforcePermissionEnforcement?: WorkforcePermissionEnforcementReceipt;
+}
+
+/** 소비자용 한 줄 판정 — if/else 흩어짐 방지. */
+export function runnerOutcome(res: RunnerResult):
+  | { ok: true; text: string }
+  | { ok: false; failure: RunnerFailure } {
+  if (res.failure) return { ok: false, failure: res.failure };
+  return { ok: true, text: res.text };
 }
 
 export type Runner = (

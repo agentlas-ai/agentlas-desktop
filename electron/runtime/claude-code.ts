@@ -8,7 +8,7 @@ import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
-import type { Runner, RunnerRequest, RunnerEvents, RunnerResult } from "./runner";
+import type { Runner, RunnerRequest, RunnerEvents, RunnerResult , RunnerFailure } from "./runner";
 import {
   workforceNativeToolEnforcement,
   workforceZeroToolsEnforcement,
@@ -357,6 +357,41 @@ function systemFingerprint(req: RunnerRequest): string {
     .digest("hex");
 }
 
+
+/**
+ * claude stream-json 이벤트 하나에서 실패 표식을 읽는다 — 순수 함수(게이트가 픽스처 주입).
+ * 실측 스트림(2026-08-06): rate_limit_event(status:rejected) → assistant(error:"rate_limit")
+ * → result(is_error:true, api_error_status:429). 종료코드는 가변 — 이벤트가 진실.
+ */
+export function claudeFailureFromEvent(
+  ev: { type?: string; is_error?: boolean; result?: unknown; terminal_reason?: string;
+        api_error_status?: number; rate_limit_info?: { status?: string; resetsAt?: number } },
+  finalText: string,
+  prior: RunnerFailure | null,
+): RunnerFailure | null {
+  if (ev.type === "rate_limit_event" && ev.rate_limit_info?.status === "rejected") {
+    return {
+      kind: "quota", message: "Claude rate limit rejected", runtime: "claude", source: "marker",
+      ...(typeof ev.rate_limit_info.resetsAt === "number"
+        ? { retryAfterHint: new Date(ev.rate_limit_info.resetsAt * 1000).toISOString() }
+        : {}),
+    };
+  }
+  if (ev.type === "result" && ev.is_error === true) {
+    const message = typeof ev.result === "string" && ev.result.trim()
+      ? ev.result.trim().slice(0, 2000) : "claude error";
+    return {
+      kind: ev.api_error_status === 429 ? "quota"
+        : /not logged in|please run \/login/i.test(finalText) ? "auth"
+        : ev.terminal_reason === "api_error" ? "quota"
+        : "exit",
+      message, runtime: "claude", source: "marker",
+      ...(prior?.retryAfterHint ? { retryAfterHint: prior.retryAfterHint } : {}),
+    };
+  }
+  return prior;
+}
+
 export const runClaudeCode: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
@@ -638,6 +673,8 @@ export const runClaudeCode: Runner = async (
     let observedUsage: { inputTokens: number; outputTokens: number } | undefined;
     let stderr = "";
     let structuredRuntimeError: Error | null = null;
+    /** 스트림 표식이 말한 실패 — 있으면 종료코드와 무관하게 이 턴은 답이 아니다. */
+    let runnerFailure: import("./runner").RunnerFailure | null = null;
     let lastEmit = 0;
     let sessionId: string | undefined;
     let accCapped = false;
@@ -759,6 +796,8 @@ export const runClaudeCode: Runner = async (
       error?: unknown;
       is_error?: boolean;
       terminal_reason?: string;
+      api_error_status?: number;
+      rate_limit_info?: { status?: string; resetsAt?: number };
       event?: {
         type?: string;
         index?: number;
@@ -914,6 +953,9 @@ export const runClaudeCode: Runner = async (
           const result = truncateUi(stringifyToolPayload(block.content));
           events.onTool?.(toolName, undefined, result, toolId, block.is_error === true);
         }
+      } else if (ev.type === "rate_limit_event") {
+        // ★한도 거절은 표식이다 — 예전에는 케이스가 없어 조용히 버려졌다(분류는 순수 함수 한 곳).
+        runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure);
       } else if (ev.type === "result") {
         if (typeof ev.result === "string") finalText = ev.result;
         if (ev.usage?.output_tokens != null) tokens = ev.usage.output_tokens;
@@ -935,6 +977,9 @@ export const runClaudeCode: Runner = async (
             };
           }
         }
+        // ★모든 is_error가 표식이다 — 예전에는 로그인 만료 한 케이스만 집고 나머지를
+        //   버려서, 성공 분기(exit 0)가 거절문을 정상 답으로 내보냈다.
+        runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure);
         if (
           ev.is_error === true
           && (ev.terminal_reason === "api_error" || /not logged in|please run \/login/i.test(finalText))
@@ -1029,6 +1074,9 @@ export const runClaudeCode: Runner = async (
         events.onStatus(`[runtime-session] ${resumeSessionId ? "resumed" : "created"} kind=${KIND}`);
         resolve({
           text: display.trim(),
+          // ★exit 0이어도 표식이 실패를 말했으면 그대로 싣는다 — 소비자는 이 칸으로 판정한다.
+          //   (실측: 한도 거절은 exit 1이었지만 종료코드는 버전·경로 따라 가변 — 이벤트가 진실.)
+          ...(runnerFailure ? { failure: runnerFailure } : {}),
           sessionId,
           tokens,
           observedUsage,

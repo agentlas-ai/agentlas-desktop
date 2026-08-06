@@ -8,7 +8,8 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { rmSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
+import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
+import { detectRuntimeRefusal } from "./runtime-refusal";
 import { wrapSystemPrompt } from "./runner";
 import {
   CLI_HISTORY_CONTEXT_TOKENS,
@@ -286,6 +287,16 @@ export function buildAgyPromptBootstrap(promptFile: string): string {
   return `Read the complete Agentlas request from ${JSON.stringify(promptFile)}, follow it exactly, and do not reveal the file path.`;
 }
 
+
+/** gemini exit 0 완주의 실패 판별 — 순수 함수(게이트가 픽스처 주입). */
+export function geminiExit0Failure(stdout: string, stderr: string): RunnerFailure | undefined {
+  if (isGeminiUnsupportedClient(`${stderr}\n${stdout}`)) {
+    return { kind: "unsupported", message: "gemini unsupported client", runtime: "gemini", source: "marker" };
+  }
+  const refusal = detectRuntimeRefusal(stdout.trim());
+  return refusal ? { kind: refusal.kind, message: refusal.message, runtime: "gemini", source: "heuristic" } : undefined;
+}
+
 export function isGeminiUnsupportedClient(value: string): boolean {
   return /UNSUPPORTED_CLIENT|no longer supported[\s\S]{0,240}Antigravity|migrate to the Antigravity suite/i.test(value);
 }
@@ -455,7 +466,14 @@ async function runPreparedGemini(
         return;
       }
       if (code === 0) {
-        if (!isAgy) {
+        /*
+         * ★exit 0이어도 산출물이 산출물인지 본다 — 표식과 미지원 클라이언트 검사는
+         * 예전엔 exit≠0 분기에만 있어서, 조용히 exit 0으로 끝나는 거절이 정상 답이 됐다.
+         * (표식 우선, 휴리스틱은 runtime-refusal.ts 한 곳 — 출처를 heuristic으로 남긴다.)
+         */
+        const trimmed = stdout.trim();
+        const failure = geminiExit0Failure(stdout, stderr);
+        if (!isAgy && !failure) {
           clearProviderHealth("gemini");
           invalidateUsage("gemini");
           cachedUnsupportedPreference = false;
@@ -464,7 +482,7 @@ async function runPreparedGemini(
         if (req.chatId && fingerprint && sessionId) {
           saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint);
         }
-        resolve({ text: stdout.trim(), sessionId });
+        resolve({ text: trimmed, ...(failure ? { failure } : {}), sessionId });
       } else {
         const combined = `${stderr}\n${stdout}`;
         if (!isAgy && allowAgyFallback && isGeminiUnsupportedClient(combined)) {

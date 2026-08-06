@@ -2145,7 +2145,11 @@ export async function runGraph(
             // 판정 불가(전 항목 unknown 포함)는 실패가 아니다.
             failGraphNode(node, {
               code: "EVAL_UNAVAILABLE",
-              reason: "검증을 수행하지 못했습니다(판정 엔진이 채점표에 답하지 못했습니다).",
+              // ★판정 엔진이 "왜"를 말했으면 그대로 싣는다(한도·로그인 등) — 덮으면
+              //   사람은 잠시 뒤 다시 눌러도 똑같이 막히는 이유를 영영 모른다.
+              reason: list.reasonText
+                ? `검증을 수행하지 못했습니다 — ${list.reasonText}`
+                : "검증을 수행하지 못했습니다(판정 엔진이 채점표에 답하지 못했습니다).",
               nextAction: "잠시 뒤 다시 실행해 주세요.",
             });
             return;
@@ -2246,7 +2250,10 @@ export async function runGraph(
           // 판정 불가는 실패가 아니다 — 일어나지 않은 판정을 결과로 쓰지 않는다.
           failGraphNode(node, {
             code: "EVAL_UNAVAILABLE",
-            reason: "검증을 수행하지 못했습니다(판정 엔진이 답하지 못했습니다).",
+            // ★판정 엔진이 "왜"를 말했으면 그대로 싣는다(한도·로그인 등).
+            reason: verdict.reason
+              ? `검증을 수행하지 못했습니다 — ${verdict.reason}`
+              : "검증을 수행하지 못했습니다(판정 엔진이 답하지 못했습니다).",
             nextAction: "잠시 뒤 다시 실행해 주세요.",
           });
           return;

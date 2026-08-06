@@ -3904,18 +3904,27 @@ export function registerIpcHandlers(): void {
     }
     const architect = require("./workflow/graph-architect") as typeof import("./workflow/graph-architect");
     const { evaluateGraphPatch, graphPatchNeedsApproval } = require("./workflow/graph-patch") as typeof import("./workflow/graph-patch");
-    const { callConnectedModel } = require("./system-agents/judgment") as typeof import("./system-agents/judgment");
-    const text = await callConnectedModel({
+    const { callConnectedModelDetailed } = require("./system-agents/judgment") as typeof import("./system-agents/judgment");
+    const detailed = await callConnectedModelDetailed({
       systemPrompt: architect.buildGraphArchitectPrompt(automation.graph, automation.goal),
       input: sentence.slice(0, 4_000),
     });
+    const text = detailed.text;
     if (text === null) {
-      // 모델에 닿지 못한 것을 "바꿀 게 없다"로 말하면 거짓이 된다.
+      /*
+       * ★인터뷰 수리의 쌍둥이(2026-08-06) — 여기만 안 고쳐져 있었다. 모델이 이유를
+       * 말하며 거절했으면(한도·로그인) 그 문장을 그대로 보여준다. "한 문장으로 다시
+       * 말씀해 주세요"는 사람 문장이 문제일 때만 맞는 말이다.
+       */
       return {
         ok: false as const,
         code: "ARCHITECT_UNAVAILABLE",
-        reason: "그래프를 고쳐 줄 모델에 연결하지 못했습니다. 아무것도 바꾸지 않았습니다.",
-        nextAction: "설정에서 모델 연결을 확인한 뒤 다시 시도해 주세요.",
+        reason: detailed.failure
+          ? `그래프를 고치지 못했습니다 — ${detailed.failure.message}`
+          : "그래프를 고쳐 줄 모델에 연결하지 못했습니다. 아무것도 바꾸지 않았습니다.",
+        nextAction: detailed.failure?.kind === "quota"
+          ? "안내에 적힌 시각 이후에 다시 시도하거나, 다른 모델을 연결해 주세요."
+          : "설정에서 모델 연결을 확인한 뒤 다시 시도해 주세요.",
       };
     }
     const parsed = architect.parseGraphPatchProposal(text);
@@ -3945,7 +3954,7 @@ export function registerIpcHandlers(): void {
     if (!current || typeof current !== "object" || typeof current.request !== "string") {
       return { ok: false, code: "INTERVIEW_STATE_INVALID", reason: "만들 내용을 읽지 못했습니다.", nextAction: "무엇을 자동으로 하고 싶은지 한 문장으로 말씀해 주세요." };
     }
-    const { callConnectedModel } = require("./system-agents/judgment") as typeof import("./system-agents/judgment");
+    const { callConnectedModelDetailed } = require("./system-agents/judgment") as typeof import("./system-agents/judgment");
     const { MAX_SELF_CORRECTIONS } = require("./workflow/graph-interview") as typeof import("./workflow/graph-interview");
 
     /**
@@ -3978,7 +3987,7 @@ export function registerIpcHandlers(): void {
          */
         const seenTitles: string[] = [];
         let partialBuf = "";
-        text = await callConnectedModel({
+        const detailedTurn = await callConnectedModelDetailed({
           systemPrompt: "You return only compact JSON. No prose.",
           input: buildInterviewPrompt(attempt, currentUiLocale()),
           timeoutMs: 120_000,
@@ -3999,6 +4008,21 @@ export function registerIpcHandlers(): void {
             }
           },
         });
+        text = detailedTurn.text;
+        /*
+         * ★표식이 먼저다 — 240자 문구 추측(graph-interview.ts)은 표식 없는 런타임용
+         * 폴백으로 강등됐다. 런타임이 이유를 말하며 거절했으면 그 문장을 그대로.
+         */
+        if (text === null && detailedTurn.failure) {
+          return {
+            ok: false,
+            code: "INTERVIEW_MODEL_UNAVAILABLE",
+            reason: `AI가 만들지 못했습니다 — ${detailedTurn.failure.message}`,
+            nextAction: detailedTurn.failure.kind === "quota"
+              ? "안내에 적힌 시각 이후에 다시 시도하거나, 다른 모델을 연결해 주세요."
+              : "다른 모델을 연결하거나, 잠시 뒤 다시 시도해 주세요.",
+          };
+        }
       } catch (error) {
         return {
           ok: false,

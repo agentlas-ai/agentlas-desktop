@@ -3196,6 +3196,17 @@ export async function runMcpInvocation(
     let activeRunnerReq = runnerReq;
     modelTurnStarted = true;
     let result = await picked.runner(activeRunnerReq, runnerEvents);
+    /*
+     * ★런타임이 표식으로 실패를 말했으면 그 text는 답이 아니다 — 거절 고지문이다.
+     * 여기서 막지 않으면 고지문이 assistant 챗 답변으로 영속되고(appendChatMessage),
+     * 그래프 agent 노드에서는 vars[produces]에 앉아 다음 단계의 입력이 된다
+     * (실측 2026-08-06: "You've hit your weekly limit"이 노드 산출물이 될 뻔한 경로).
+     * 이 한 관문이 One 챗과 그래프 노드 양쪽을 같이 지킨다 — throw는 기존 오류
+     * 경로(sink error → NODE_FAILED/챗 오류 카드)를 그대로 탄다.
+     */
+    if (result.failure) {
+      throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}${result.failure.source === "heuristic" ? " (appears)" : ""}: ${result.failure.message}`);
+    }
     result = sanitizeRestrictedPass(result);
     advanceUsageFloor();
     for (let pass = 2; pass <= maxPasses; pass += 1) {
@@ -3238,6 +3249,9 @@ export async function runMcpInvocation(
         images: undefined,
       };
       result = await picked.runner(activeRunnerReq, runnerEvents);
+      if (result.failure) {
+        throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
+      }
       result = sanitizeRestrictedPass(result);
       advanceUsageFloor();
     }
@@ -3267,6 +3281,9 @@ export async function runMcpInvocation(
           images: undefined,
         };
         result = await picked.runner(activeRunnerReq, runnerEvents);
+        if (result.failure) {
+          throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
+        }
         result = sanitizeRestrictedPass(result);
         advanceUsageFloor();
         if (hasOneRecoveryDecision(result.text)) {
@@ -3288,6 +3305,9 @@ export async function runMcpInvocation(
           images: undefined,
         };
         result = await picked.runner(activeRunnerReq, runnerEvents);
+        if (result.failure) {
+          throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
+        }
         result = sanitizeRestrictedPass(result);
         advanceUsageFloor();
         oneRecoveryDecisionPending = hasOneRecoveryDecision(result.text);
