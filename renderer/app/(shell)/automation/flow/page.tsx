@@ -104,6 +104,10 @@ function AutomationFlowPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [running, setRunning] = useState(false);
+  // 켜기/끄기가 도는 동안 버튼을 잠근다(중복 클릭 방지 + 눌린 티).
+  const [stopping, setStopping] = useState(false);
+  const [toggling, setToggling] = useState(false);
+  const togglingRef = useRef(false);
   /** 시작 값을 받아야 하는 그래프에서 사람에게 값을 묻는 상태. */
   const [inputPrompt, setInputPrompt] = useState<{ label: string; value: string } | null>(null);
   /** 이 그래프가 쓰는 것들을 한 창에서 정리한다(공급자 묶음별). */
@@ -186,6 +190,13 @@ function AutomationFlowPage() {
     rationale?: string;
   } | null>(null);
   const runStatesRef = useRef<Record<string, WorkflowNodeRunState>>({});
+  /**
+   * 지금 실제로 도는가 — 라이브 노드 상태가 진실이다.
+   * `running`(내가 방금 눌렀나)만 보면 앱을 껐다 켰거나 스케줄러가 시작한 실행에는
+   * 중지 버튼이 안 나온다. 정작 멈추고 싶은 건 **내가 안 보는 사이 시작된 것**이다.
+   */
+  const liveRunning = Object.values(runStates).some((st) => st === "running");
+
   // 하단 검증 로그 패널(항목 6) — VS Code 터미널처럼 크기를 끌어서 조절한다.
   // ★기본은 접힘(카운트 줄만). 편집 중 문제가 생길 때마다 패널이 펴지며 캔버스를
   //   밀면, 드래그하던 좌표가 어긋난다(게이트 실측) — 펴는 것은 사람이 한다.
@@ -679,7 +690,14 @@ function AutomationFlowPage() {
 
   async function toggleEnabled() {
     const api = ipc();
-    if (!api || !automation) return;
+    if (!api || !automation || togglingRef.current) return;
+    // ★누르면 **먼저** 반응한다. 예전에는 켜기 게이트(연결 검사)가 도는 몇 초 동안
+    //   버튼이 그대로여서, 사람은 "안 눌렸나?" 하고 다시 눌렀다.
+    togglingRef.current = true;
+    setToggling(true);
+    setMessage(automation.enabled
+      ? (locale === "en" ? "Turning it off…" : "끄는 중입니다…")
+      : (locale === "en" ? "Turning it on — checking what it needs…" : "켜는 중입니다 — 필요한 연결을 확인합니다…"));
     try {
       const next = await api.automations.toggle(automation.id, !automation.enabled);
       setAutomation((cur) => (cur ? { ...cur, enabled: next.enabled, nextRunAt: next.nextRunAt } : next));
@@ -694,6 +712,9 @@ function AutomationFlowPage() {
         return;
       }
       setMessage(locale === "en" ? "Status did not change." : "상태를 바꾸지 못했습니다.");
+    } finally {
+      togglingRef.current = false;
+      setToggling(false);
     }
   }
 
@@ -833,7 +854,12 @@ function AutomationFlowPage() {
     // 시작 값을 받아야 하는 그래프는 값을 받고 나서 실행한다. 예전에는 그냥 시작해서
     // 빈 값으로 돌았고, 사용자는 결과를 열어보고서야 값이 빠진 걸 알았다.
     if (!dryRun && inputValue === undefined) {
+      // ★조회가 도는 동안에도 눌린 티가 나야 한다 — 값이 필요한 그래프에서는 이 await가
+      //   유일하게 화면이 조용한 구간이었다.
+      setRunning(true);
+      setMessage(locale === "en" ? "Checking what it needs…" : "필요한 값을 확인하는 중입니다…");
       const requirement = await api.automations.inputRequirement(automation.id).catch(() => null);
+      setRunning(false);
       if (requirement?.required) {
         setInputPrompt({ label: requirement.label, value: "" });
         setMessage("");
@@ -971,22 +997,59 @@ function AutomationFlowPage() {
               {t("auto.flow.simulate")}
             </button>
             <button onClick={() => void runNow()} disabled={running} className="titlebar-nodrag" style={{ ...actionBtn, color: running ? "var(--muted-deep)" : "var(--ink)" }}>
-              {running ? t("auto.flow.running") : t("auto.flow.run_now")}
+              {running ? <SpinnerLabel text={t("auto.flow.running")} /> : t("auto.flow.run_now")}
             </button>
+            {/* ★도는 것을 사람이 멈춘다. 자동화는 사람이 안 볼 때 도는 것이라,
+                봤을 때 세울 수 있어야 한다(다른 기능은 전부 취소가 있었다). */}
+            {liveRunning ? (
+              <button
+                data-testid="stop-run"
+                className="titlebar-nodrag"
+                disabled={stopping}
+                onClick={() => {
+                  void (async () => {
+                    const api = ipc();
+                    if (!api || !automation) return;
+                    setStopping(true);
+                    setMessage(locale === "en" ? "Stopping…" : "멈추는 중입니다…");
+                    try {
+                      const r = await api.automations.stopRun(automation.id);
+                      setMessage(r.stopped
+                        ? (locale === "en"
+                          ? "Stopping. Steps already sent outside are left for you to confirm."
+                          : "멈춥니다. 이미 바깥으로 나간 단계는 확인할 수 있게 남겨 둡니다.")
+                        : (locale === "en" ? "There is nothing running right now." : "지금 도는 실행이 없습니다."));
+                    } finally {
+                      setStopping(false);
+                    }
+                  })();
+                }}
+                style={pillBtn(false)}
+              >
+                {stopping
+                  ? <SpinnerLabel text={locale === "en" ? "Stopping…" : "멈추는 중…"} />
+                  : (locale === "en" ? "Stop" : "중지")}
+              </button>
+            ) : null}
             <button
               data-testid="toggle-enabled"
               onClick={() => void toggleEnabled()}
               className="titlebar-nodrag"
-              style={pillBtn(automation.enabled)}
+              disabled={toggling}
+              style={{ ...pillBtn(automation.enabled), ...(toggling ? { opacity: 0.6, cursor: "default" } : {}) }}
               title={!automation.enabled && blockedByConnections
                 ? (locale === "en" ? "Connect what it uses first." : "쓰는 것을 먼저 연결해야 켜집니다.")
                 : undefined}
             >
-              {automation.enabled
-                ? t("auto.action.disable")
-                : blockedByConnections
-                  ? (locale === "en" ? "Connect to turn on" : "연결해야 켜집니다")
-                  : t("auto.action.enable")}
+              {toggling
+                ? <SpinnerLabel text={automation.enabled
+                  ? (locale === "en" ? "Turning off…" : "끄는 중…")
+                  : (locale === "en" ? "Turning on…" : "켜는 중…")} />
+                : automation.enabled
+                  ? t("auto.action.disable")
+                  : blockedByConnections
+                    ? (locale === "en" ? "Connect to turn on" : "연결해야 켜집니다")
+                    : t("auto.action.enable")}
             </button>
           </>
         )}
@@ -1634,6 +1697,16 @@ const actionBtn: React.CSSProperties = {
   boxShadow: "var(--neu-raised)",
   cursor: "pointer",
 };
+
+/** 도는 중임을 몸으로 보여주는 라벨 — 글자만 바꾸면 아무도 못 알아본다(실측). */
+function SpinnerLabel({ text }: { text: string }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <span className="describe-spinner" aria-hidden />
+      {text}
+    </span>
+  );
+}
 
 function pillBtn(active: boolean): React.CSSProperties {
   return {

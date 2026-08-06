@@ -3796,6 +3796,12 @@ export function registerIpcHandlers(): void {
   //
   // ★두 방향 모두 **미바인딩**을 정직하게 말한다. 발행은 무엇을 지웠는지,
   //   설치는 무엇이 비어 있는지 돌려준다. "됐습니다"만 말하면 사람은 돈다고 믿는다.
+  // 도는 실행을 사람이 멈춘다. 멈출 것이 없으면 그대로 false — 멈춘 척하지 않는다.
+  ipcMain.handle("automations:stopRun", (_e, id: string) => {
+    const { stopAutomationRun } = require("./automation-scheduler") as typeof import("./automation-scheduler");
+    return { ok: true as const, stopped: stopAutomationRun(String(id || "").trim()) };
+  });
+
   ipcMain.handle("automations:publishGraph", async (_e, id: string, opts?: { version?: string }) => {
     const automation = getAutomation(id);
     if (!automation) throw new Error(`Automation not found: ${id}`);

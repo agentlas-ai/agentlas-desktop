@@ -653,6 +653,7 @@ const api: AgentlasIpc = {
     ) => ipcRenderer.invoke("automations:swapAgent", id, input),
     interviewGraph: (state: unknown) => ipcRenderer.invoke("automations:interviewGraph", state),
     createFromBlueprint: (payload: unknown) => ipcRenderer.invoke("automations:createFromBlueprint", payload),
+    stopRun: (id: string) => ipcRenderer.invoke("automations:stopRun", id),
     requestGraphPatch: (id: string, request: string) =>
       ipcRenderer.invoke("automations:requestGraphPatch", id, request),
     proposeGraphPatch: (id: string, patch: { ops: unknown[]; rationale?: string }) =>

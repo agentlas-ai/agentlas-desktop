@@ -6241,6 +6241,11 @@ export interface AgentlasIpc {
       { ok: true; id: string; name: string; renamed: boolean } | { ok: false; code: string; reason: string; nextAction: string }
     >;
     /**
+     * 도는 실행을 멈춘다. `stopped: false`면 멈출 것이 없었다는 뜻 — 멈춘 척하지 않는다.
+     * 커널이 진행 중 노드를 정리한 뒤, 바깥에 반영됐는지 모르는 단계는 재조정 대기로 남는다.
+     */
+    stopRun: (id: string) => Promise<{ ok: true; stopped: boolean }>;
+    /**
      * 사용자의 한 문장을 그래프 변경 제안으로 바꾼다. **적용하지 않는다** —
      * 무엇이 바뀌는지 보여주고, 적용은 applyGraphPatch로만 한다.
      */

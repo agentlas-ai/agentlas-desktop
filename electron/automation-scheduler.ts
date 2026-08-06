@@ -395,6 +395,21 @@ function requiresGraphReconciliation(detail: string | null | undefined): boolean
   return /(?:partial_reconciliation_required|ambiguous_side_effect|automation_partial_graph_changed)/i.test(detail ?? "");
 }
 
+/** 지금 도는 실행의 중단 손잡이 — 자동화 id 하나당 하나. */
+const ABORT_BY_AUTOMATION = new Map<string, AbortController>();
+
+/**
+ * 도는 실행을 멈춘다. 멈출 것이 없으면 `false` — 멈춘 척하지 않는다.
+ * 커널은 이미 중단을 다룰 줄 안다(runSignal + abortGraceMs): 진행 중 노드가 정리될
+ * 시간을 준 뒤, 바깥에 반영됐는지 모르는 단계는 재조정 대기로 남는다.
+ */
+export function stopAutomationRun(automationId: string): boolean {
+  const controller = ABORT_BY_AUTOMATION.get(automationId);
+  if (!controller) return false;
+  controller.abort(new Error("automation_stopped_by_user"));
+  return true;
+}
+
 async function runOne(
   a: Automation,
   opts?: {
@@ -477,6 +492,15 @@ async function runOne(
   let leaseRenewWarningEmitted = false;
   try {
     const controller = new AbortController();
+    /*
+     * ★사람이 멈출 수 있게 이 실행의 중단 손잡이를 등록한다.
+     *
+     * 컨트롤러는 원래 있었지만 **밖에서 부를 통로가 없어**, 잘못 도는 실행을 눈으로
+     * 보면서도 끝날 때까지 기다려야 했다(다른 기능은 전부 취소가 있다:
+     * invoke:cancel · hephaestus:cancelBuild · oberon:cancelRender).
+     * 자동화는 사람이 안 볼 때 도는 것이라, 봤을 때 세울 수 있어야 한다.
+     */
+    ABORT_BY_AUTOMATION.set(a.id, controller);
     if (opts?.claim) {
       leaseHeartbeatTimer = setInterval(() => {
         try {
@@ -682,6 +706,7 @@ async function runOne(
         }
         throw err;
       } finally {
+    if (ABORT_BY_AUTOMATION.get(a.id) === controller) ABORT_BY_AUTOMATION.delete(a.id);
         acceptGraphEvents = false;
         clearInterval(graphStallTimer);
       }
