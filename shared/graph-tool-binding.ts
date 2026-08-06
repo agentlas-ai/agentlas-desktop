@@ -240,6 +240,14 @@ export interface ToolInventory {
   mcpCatalogIds: string[];
   /** 금고에 값이 들어 있는 키들. **값은 절대 여기 담지 않는다.** */
   filledEnvKeys: string[];
+  /**
+   * ★연결된 실행 런타임이 **내장으로** 제공하는 capability들 (예: claude/codex CLI의 웹 검색).
+   *
+   * 없으면 빈 것으로 친다(옛 호출자 호환). 이 칸이 없던 시절, web.search가 brave-search
+   * MCP 하나에 고정돼 있어서 — 검색을 내장한 런타임이 연결돼 있는데도 — Brave API 키를
+   * 넣기 전에는 그래프를 켤 수조차 없었다(실측 2026-08-06, 과거 brave-search 사고와 같은 뿌리).
+   */
+  runtimeCapabilities?: string[];
 }
 
 export type RequirementStatus = "ready" | "provider-unset" | "not-connected" | "resource-unset";
@@ -259,7 +267,21 @@ export function requirementStatus(
   inventory: ToolInventory,
 ): { status: RequirementStatus; missing: { mcpCatalogId?: string; envKeys: string[] } } {
   const empty = { envKeys: [] as string[] };
-  if (!requirement.provider) return { status: "provider-unset", missing: empty };
+  /*
+   * ★capability 해소에서 특정 MCP 하나가 인질이 되면 안 된다.
+   *
+   * 실행 런타임이 그 capability를 **내장**하면 그 자체로 충족이다 — 웹 검색을 내장한
+   * CLI가 연결돼 있는데 Brave API 키를 요구하는 것은 인질극이었다(실측 2026-08-06,
+   * 켜기 게이트가 여기 막혔다. 과거 brave-search 키워드 선택 사고와 같은 뿌리).
+   *
+   * 반면 **다른 제공자로의 조용한 대체는 하지 않는다** — 캘린더·시트 같은 capability는
+   * 제공자 선택이 곧 데이터 선택이라(구글 캘린더 ≠ 애플 캘린더), 사람이 고르지 않은
+   * 제공자를 코드가 골라 주면 "조용한 기본값" 안티패턴이 된다. 내장 충족만이 안전한
+   * 열거다: 런타임은 데이터가 아니라 능력이기 때문이다.
+   */
+  if ((inventory.runtimeCapabilities ?? []).includes(requirement.capability)) {
+    return { status: "ready", missing: empty };
+  }
   const provider = findProvider(requirement.provider);
   if (!provider) return { status: "provider-unset", missing: empty };
   const missingEnv = (provider.requires.envKeys ?? [])

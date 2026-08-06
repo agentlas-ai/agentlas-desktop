@@ -38,7 +38,28 @@ export async function readToolInventory(): Promise<ToolInventory> {
   } catch (error) {
     console.error("[graph] vault key names could not be read:", error);
   }
-  return { mcpCatalogIds: [...new Set(mcpCatalogIds)], filledEnvKeys: [...new Set(filledEnvKeys)] };
+  /*
+   * ★연결된 실행 런타임의 내장 capability — 웹 검색을 내장한 CLI가 연결돼 있으면
+   * web.search 요구는 그 자체로 충족이다. 이게 없던 시절, brave-search MCP 1:1 고정이
+   * 켜기 게이트를 인질로 잡았다(실측 2026-08-06). 읽지 못하면 빈 것으로 친다.
+   */
+  let runtimeCapabilities: string[] = [];
+  try {
+    const { detectRuntimes } = await import("../runtime/detect");
+    const { RUNTIME_NATIVE_CAPABILITIES } = await import("../runtime/native-capabilities");
+    const runtimes = await detectRuntimes();
+    runtimeCapabilities = [...new Set(
+      // detectRuntimes가 돌려주는 것은 이미 "이 컴퓨터에서 감지된" 런타임들이다.
+      runtimes.flatMap((runtime) => RUNTIME_NATIVE_CAPABILITIES[runtime.kind] ?? []),
+    )];
+  } catch (error) {
+    console.error("[graph] runtime capabilities could not be read:", error);
+  }
+  return {
+    mcpCatalogIds: [...new Set(mcpCatalogIds)],
+    filledEnvKeys: [...new Set(filledEnvKeys)],
+    runtimeCapabilities,
+  };
 }
 
 export interface GraphConnectionReport {

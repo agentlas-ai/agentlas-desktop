@@ -68,8 +68,22 @@ export function resolveAutomationToolMode(input: {
   judged?: (text: string) => boolean | null;
 }): AutomationToolMode {
   if (input.toolMode === "browser" || input.toolMode === "computer-use") return input.toolMode;
-  // 선언이 추측을 이긴다 — 다만 **좁히는 방향으로만** 쓴다(넓히는 데는 쓰지 않는다).
-  if (input.graph !== undefined && !graphTouchesOutside(input.graph)) return "auto";
+  /*
+   * ★그래프가 있으면 toolMode는 **단계 선언에서만** 나온다 — 이름·프롬프트 추측 금지.
+   *
+   * 그래프의 capability 어휘는 닫혀 있고(needs — graph-tool-binding.ts CAPABILITIES),
+   * 그 어휘에 화면 조작은 **없다**. 즉 그래프는 구조적으로 화면 조작을 선언할 수 없으므로
+   * 그래프 기반 자동화를 computer-use로 올릴 근거 자체가 존재하지 않는다.
+   *
+   * 실측(2026-08-06): 웹 검색+초안+파일 저장뿐인 X 그래프가 이름에 "X(트위터)"가
+   * 들어갔다는 이유로 판정 모델이 computer-use를 골랐고, 접근성 권한이 없어 **실행
+   * 자체가 스킵**됐다(needs_input). 판정 프롬프트가 "Merely mentioning a site is NOT
+   * a reason"이라 경고까지 하고 있었지만, 경고는 구조가 아니다.
+   *
+   * 어휘에 화면 조작 capability가 생기는 날, 여기가 그것을 읽는 자리다.
+   * 텍스트 판정은 그래프 없는 레거시 단일 프롬프트 전용으로 남는다.
+   */
+  if (input.graph !== undefined) return "auto";
   const text = [input.name ?? "", input.promptTemplate ?? "", input.targetLabel ?? ""].join("\n");
   // Exact real-login browser intent outranks the generic social-site heuristic.
   // Otherwise a Reddit job that explicitly says "Agentlas Browser / 9222" is silently

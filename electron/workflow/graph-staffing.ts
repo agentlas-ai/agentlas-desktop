@@ -18,6 +18,8 @@ export interface StaffingCandidateSource {
   installed: Array<{ id: string; name: string; tagline?: string }>;
   /** Hub 검색 — 역할 문구로 실제 공개 에이전트를 찾는다. */
   searchHub: (query: string) => Promise<MarketplaceListing[]>;
+  /** 적합성 판정 주입(게이트용). 없으면 상주 판정(judgeChecklist)을 쓴다. */
+  judgeFit?: StaffingFitJudge;
 }
 
 export interface StaffedSlot {
@@ -31,6 +33,12 @@ export interface StaffedSlot {
   label?: string;
   source: "installed" | "hub" | "unresolved";
 }
+
+/** 적합성 판정의 최소 계약 — 게이트는 스텁을, 프로덕션은 judgeChecklist를 꽂는다. */
+export type StaffingFitJudge = (spec: {
+  role: string;
+  candidate: { name: string; tagline: string };
+}) => Promise<"pass" | "fail" | null>;
 
 /** 역할 문구를 검색 질의로. 사람 말 그대로 던지면 잡음이 많아 앞부분만 쓴다. */
 function queryFor(role: string): string {
@@ -58,15 +66,63 @@ function matchInstalled(
   return best && best.hits >= 2 ? { id: best.id, name: best.name } : null;
 }
 
-/** Hub 결과 중 **실제로 부를 수 있는** 것만. 설치 전용은 지금 못 돌린다. */
-function pickHub(rows: MarketplaceListing[]): MarketplaceListing | null {
+/** Hub 결과 중 **실제로 부를 수 있는** 것만, 신뢰 순으로. **회수까지가 이 함수의 일이다.** */
+function hubCandidates(rows: MarketplaceListing[]): MarketplaceListing[] {
   const callable = rows.filter((r) => r.callable === true || r.kind === "cloud-callable");
-  const pool = callable.length ? callable : [];
-  if (pool.length === 0) return null;
-  // 신뢰 등급 우선, 그다음 설치 수. 둘 다 같으면 먼저 온 것.
   const grade = (g: string | undefined) => (g === "A" ? 3 : g === "B" ? 2 : g === "C" ? 1 : 0);
-  return [...pool].sort((a, b) =>
-    grade(b.trustGrade) - grade(a.trustGrade) || (b.installCount ?? 0) - (a.installCount ?? 0))[0] ?? null;
+  return [...callable].sort((a, b) =>
+    grade(b.trustGrade) - grade(a.trustGrade) || (b.installCount ?? 0) - (a.installCount ?? 0));
+}
+
+/**
+ * ★검색은 회수, 선발은 판정 (오너 결정 2026-07-26 그대로 — 임베딩·검색 순위는 회수용).
+ *
+ * 예전에는 검색 1위를 자동 채용했다. 그래서 hwpx-smith(한글 워드프로세서 에이전트)가
+ * "초안 파일 저장" 단계에, saas-economy가 "바이럴 댓글 전략 조사"에 붙었다(실측
+ * 2026-08-06) — 검색은 "관련 있어 보이는 것"을 돌려줄 뿐, "이 일을 맡길 수 있는가"를
+ * 답하지 않는다. 판정 기준은 케이스 목록이 아니라 **매번 role 문구와 에이전트
+ * 자기소개에서** 만들어진다. 판정이 불가하거나(모델 없음) 전원 불합격이면 슬롯을
+ * 비운다 — 이미 공인된 동작이다("아무거나 꽂으면 사람은 꽂힌 대로 돌 거라 믿는다").
+ */
+/** 프로덕션 판정 — role 문구와 자기소개에서 매번 기준을 만든다(케이스 목록 0). */
+async function defaultFitJudge(spec: { role: string; candidate: { name: string; tagline: string } }): Promise<"pass" | "fail" | null> {
+  let judgeChecklist: typeof import("../system-agents/judgment").judgeChecklist;
+  try {
+    ({ judgeChecklist } = await import("../system-agents/judgment"));
+  } catch {
+    return null;
+  }
+  const verdict = await judgeChecklist({
+    kind: "graph-staffing-fit",
+    subjectText: `Role to staff: ${spec.role} / Candidate agent: ${spec.candidate.name} — ${spec.candidate.tagline}`.slice(0, 900),
+    items: [
+      { id: "does-the-work", text: "The candidate's stated purpose covers the actual work this role describes (not merely a shared keyword or domain).", kind: "must" },
+      { id: "wrong-tool", text: "The candidate is specialized for a different file format, platform, or task than the role needs.", kind: "mustNot" },
+    ],
+    timeoutMs: 20_000,
+  });
+  return verdict.verdict;
+}
+
+async function judgeHubFit(
+  role: string,
+  candidates: MarketplaceListing[],
+  judge: StaffingFitJudge,
+): Promise<MarketplaceListing | null> {
+  for (const candidate of candidates.slice(0, 3)) {
+    try {
+      const verdict = await judge({
+        role,
+        candidate: { name: candidate.name, tagline: [candidate.tagline, candidate.taglineEn].filter(Boolean).join(" / ") },
+      });
+      if (verdict === "pass") return candidate;
+      // fail이면 다음 후보 — 판정 불가(null)면 즉시 비운다. 검색 순위로 대신 뽑지 않는다.
+      if (verdict === null) return null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 /**
@@ -106,7 +162,11 @@ export async function staffGraph(
       } catch {
         rows = []; // 검색 실패는 편성 실패지 그래프 실패가 아니다 — 비워 두고 넘어간다.
       }
-      const hub = pickHub(rows);
+      const hub = await judgeHubFit(
+        roleEn === role ? role : `${role} (${roleEn})`,
+        hubCandidates(rows),
+        source.judgeFit ?? defaultFitJudge,
+      );
       slot = hub
         ? {
           nodeId: node.id, role, ref: hub.slug, targetType: "hub",
