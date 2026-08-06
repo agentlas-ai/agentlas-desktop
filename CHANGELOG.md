@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.9.59 — 2026-08-06
+
+This release binds Agentlas OS v1.1.98 at
+b8fc76d44dadd2933216ce669d9f53425a606392.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **Saving an automation was failing on every existing install.** A column added
+  to the database in an old migration step never reached anyone who had already
+  passed that step, so saving died on a missing column. Worse, it died *after*
+  the automation had been written: the screen said it could not be saved while
+  the automation was left switched **on**, so a schedule you believed had never
+  been created would start running. A version-independent check now restores any
+  missing column at startup, and an automation that is meant to be off is created
+  off rather than created on and switched off a moment later.
+- **You can try an automation before turning it on.** It is saved switched off so
+  you can look it over — but Run now and Simulate were refused for exactly that
+  reason, so the only way to test one was to arm its schedule first. A run you
+  start yourself is no longer treated like a queued request from another surface.
+- **A stopped run says what actually stopped it.** The run card was replacing the
+  recorded reason with a generic sentence, and told you the automation was still
+  on even when it was off. When the record already reads as a sentence — "turn on
+  Accessibility for Agentlas" — that is what you see.
+- **Publishing a graph to the Hub, and installing one, are reachable.** Both paths
+  existed but were never exposed to the app, so neither could be done from the
+  product. Publish sits on the graph toolbar; install sits above the automation
+  list. An installed graph arrives switched off and says so.
+- **A graph written in English no longer gets Korean branch labels.** The label a
+  branch shows was always built in Korean regardless of language, and that text
+  ended up in the public listing, which made publishing to the Hub fail outright.
+- **When the model cannot answer, you are told why.** A runtime replying "you've
+  hit your weekly limit" was reported as "could not read what to build — describe
+  it in one sentence", so people rewrote a sentence that was never the problem,
+  and every answer already given was thrown away. The runtime's own message now
+  reaches you, and a genuine format error retries instead of ending the interview.
+
 ## 0.9.58 — 2026-08-06
 
 This release binds Agentlas OS v1.1.98 at
