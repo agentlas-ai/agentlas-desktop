@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.62 — 2026-08-06
+
+This release binds Agentlas OS v1.1.98 at
+b8fc76d44dadd2933216ce669d9f53425a606392.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **Clicking a trigger node no longer rewrites its schedule.** A graph built by
+  the interview stores its schedule as a raw cron line; the inspector could not
+  read that form, so opening the trigger fell back to a daily-09:00 default —
+  the canvas flagged unsaved changes from a mere click, and saving silently
+  turned a 20-minute schedule into once a day. The raw form is now read back
+  exactly, and a regression gate keeps it that way.
+- **The list page reacts the moment you press it.** Turning an automation on
+  from the list showed nothing while the activation check ran, and a refusal
+  (a missing connection) was swallowed into a generic "status did not change".
+  The list now behaves like the canvas: immediate feedback, and the real
+  reason when it refuses.
+
 ## 0.9.61 — 2026-08-06
 
 This release binds Agentlas OS v1.1.98 at
