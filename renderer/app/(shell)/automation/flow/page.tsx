@@ -324,6 +324,10 @@ function AutomationFlowPage() {
         //   (실측: 자연어로 만든 반복 그래프를 캔버스에서 열었다 저장하기만 해도 죽었다).
         data: typeof e.maxIterations === "number" ? { maxIterations: e.maxIterations } : undefined,
         label: e.sourceHandle && !/^out-[tblr]$/.test(e.sourceHandle) ? e.sourceHandle : undefined,
+        // ★선은 직각으로 꺾인다(오너 실판정 2026-08-06) — 대각선 베지어는 노드 사이를
+        //   가로질러 스파게티가 된다. 꺾인 선은 위→아래 배치와 함께 회로도처럼 읽힌다.
+        type: "smoothstep",
+        pathOptions: { borderRadius: 8 },
         animated: false,
         style: { stroke: "var(--muted-deep)", strokeWidth: 1.4 },
         labelStyle: { fontFamily: "var(--font-mono)", fontSize: 10, fill: "var(--muted-deep)" },
@@ -461,6 +465,7 @@ function AutomationFlowPage() {
             // condition 노드의 true/false 핸들에서 그으면 라벨도 동기화(표시용). 진실원본은
             // 네이티브 sourceHandle 필드(...conn에 포함)이며 저장 시 그걸 우선 읽는다.
             ...(conn.sourceHandle ? { label: conn.sourceHandle } : {}),
+            type: "smoothstep",
             style: { stroke: "var(--muted-deep)", strokeWidth: 1.4 },
           },
           eds,
