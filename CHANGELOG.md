@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.9.60 — 2026-08-06
+
+This release binds Agentlas OS v1.1.98 at
+b8fc76d44dadd2933216ce669d9f53425a606392.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- **A model saying "I can't answer" is no longer treated as the answer.** When a
+  runtime hit its usage limit it replied with a human notice, and because success
+  was judged by "some text came back", that notice became the model's answer: the
+  healthy runtime behind it was never tried, the notice could become a step's
+  output or a chat reply, and the screen told you to rewrite a sentence that was
+  never the problem. Runtime results now carry a machine-readable failure; every
+  consumer judges by that marker, falls back to the next connected runtime, and
+  when everything is exhausted you are shown the runtime's own words — including
+  when it resets.
+- **An automation's tool mode comes from what its steps declare, not from its
+  name.** A drafting graph whose steps only searched the web and saved a file was
+  forced onto the screen-driving path because its name mentioned a social site,
+  and then could not run without an OS permission it never needed. A graph's
+  vocabulary cannot declare screen driving, so a graph is never guessed onto
+  that path; name-based judgment remains only for legacy single-prompt
+  automations.
+- **A built-in ability counts.** A step needing web search demanded a Brave API
+  key even though the connected runtime can search the web natively. A
+  capability the runtime itself provides now satisfies the requirement; no
+  single connector holds activation hostage. Providers that carry your data
+  (calendars, sheets) are never silently substituted.
+- **Search rank does not hire.** Hub staffing used to install the top search
+  result; a Korean word-processor agent ended up assigned to "save a draft
+  file". Candidates are now judged for fit against the role's own wording, and
+  a slot is left empty rather than filled with the wrong specialist.
+
 ## 0.9.59 — 2026-08-06
 
 This release binds Agentlas OS v1.1.98 at
