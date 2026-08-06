@@ -32,7 +32,7 @@ import { defaultNodeEffect } from "@/lib/graph-node-effect";
  * cron "0 * * * *"로 복원하면 발사 기준이 조용히 정시 고정으로 바뀐다.
  */
 const LEGACY_DOW = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
-function specFromLegacyToken(token: string, tz: string): ScheduleSpec | null {
+export function specFromLegacyToken(token: string, tz: string): ScheduleSpec | null {
   const s = token.trim();
   if (!s) return null;
   if (s.startsWith("cron:")) {
@@ -71,6 +71,15 @@ function specFromLegacyToken(token: string, tz: string): ScheduleSpec | null {
   if (m) {
     const t = hm(m[2]);
     return t ? { kind: "cron", expr: `${t.m} ${t.h} ${parseInt(m[1], 10)} * *`, tz } : null;
+  }
+  // ★그래프 인터뷰가 저장하는 스케줄 토큰은 원시 5필드 cron일 수 있다("*/20 * * * *").
+  //   이 분기가 없으면 복원이 null이 되고, ScheduleBuilder가 value=null로 마운트해
+  //   daily-09:00 기본값을 즉시 방출한다 — 트리거 노드를 **클릭만** 해도 unsaved가
+  //   켜지고, Save를 누르면 20분 주기가 하루 1회로 조용히 덮어써진다
+  //   (synthesizeLegacyGraph 주석의 그 사고가 그래프 경로에서 재발, 실측 2026-08-06).
+  const fields = s.split(/\s+/);
+  if (fields.length === 5 && fields.every((f) => /^[\dA-Za-z*,/-]+$/.test(f))) {
+    return { kind: "cron", expr: s, tz };
   }
   return null;
 }

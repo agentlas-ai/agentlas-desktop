@@ -77,11 +77,22 @@ export default function AutomationListPage() {
   async function toggle(id: string, enabled: boolean) {
     const api = ipc();
     if (!api) return;
+    // ★누르면 먼저 반응한다 — 켜기 게이트(연결 검사)가 도는 몇 초 동안 버튼이
+    //   그대로면 사람은 "안 눌렸나?" 하고 다시 누른다(플로우 화면에서 고친 병의
+    //   목록 화면 쌍둥이, 실측 2026-08-06).
+    setMessage(enabled
+      ? (locale === "en" ? "Turning it on — checking what it needs…" : "켜는 중입니다 — 필요한 연결을 확인합니다…")
+      : (locale === "en" ? "Turning it off…" : "끄는 중입니다…"));
     try {
       await api.automations.toggle(id, enabled);
+      setMessage("");
       await refresh();
-    } catch {
-      setMessage(locale === "en" ? "Status did not change." : "상태를 바꾸지 못했습니다.");
+    } catch (error) {
+      // 거절에는 사유가 실려 온다 — 버리지 않는다(runNow와 같은 규칙).
+      const reason = error instanceof Error
+        ? error.message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, "")
+        : "";
+      setMessage(reason || (locale === "en" ? "Status did not change." : "상태를 바꾸지 못했습니다."));
     }
   }
 
