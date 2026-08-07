@@ -1,4 +1,8 @@
-import { createHash } from "node:crypto";
+import {
+  canonicalJsonValue,
+  graphExecutionDigest,
+  sha256Value,
+} from "../../shared/graph-execution-digest";
 import type {
   Automation,
   AutomationGraphReconcileInput,
@@ -91,37 +95,10 @@ function occurrenceVars(automationId: string, occurrenceId: string): Record<stri
   throw new Error("automation_graph_reconciliation_bound_event_malformed");
 }
 
-function canonicalJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalJsonValue);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-        .map(([key, child]) => [key, canonicalJsonValue(child)]),
-    );
-  }
-  return value;
-}
-
-function sha256Value(value: unknown): string {
-  return `sha256:${createHash("sha256")
-    .update(JSON.stringify(canonicalJsonValue(value)))
-    .digest("hex")}`;
-}
-
-function graphExecutionDigest(automation: Automation, graph: WorkflowGraph): string {
-  return sha256Value({
-    graph,
-    targetType: automation.targetType,
-    targetId: automation.targetId,
-    targetVersion: automation.targetVersion ?? null,
-    promptTemplate: automation.promptTemplate,
-    executionPermission: automation.executionPermission ?? "write",
-    toolMode: automation.toolMode ?? "auto",
-    hubMode: automation.hubMode ?? "hub-allowed",
-    runtimeSelection: automation.runtimeSelection ?? null,
-  });
-}
+// canonicalJsonValue / sha256Value / graphExecutionDigest live in
+// shared/graph-execution-digest.ts. They used to be private copies here and in
+// electron/workflow/run-graph.ts; changing one without the other made every
+// in-flight resume fail as graph drift.
 
 function validId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 512 && !value.includes("\0");

@@ -1623,10 +1623,14 @@ function routingCardProblem(card: Record<string, unknown>): string | null {
   }
   if (!isRecord(card.workforce)) return "workforce must be a complete semantic resume";
   const workforce = card.workforce;
+  // `skills` has a floor of 0, not 1. Skills are modules and live outside the
+  // core, so a fully modular agent legitimately declares none. Requiring one
+  // here would block publishing every modular package. Kept identical in
+  // agentlas_terminal/engine/cloud-assets/package.cjs — the two must not drift.
   const semanticLists: Array<[string, RegExp, number, number]> = [
     ["communities", /^community:[a-z0-9][a-z0-9-]*$/, 1, 5],
     ["roles", /^role:[a-z0-9][a-z0-9-]*$/, 0, 4],
-    ["skills", /^skill:[a-z0-9][a-z0-9-]*$/, 1, 12],
+    ["skills", /^skill:[a-z0-9][a-z0-9-]*$/, 0, 12],
     ["knowledge", /^knowledge:[a-z0-9][a-z0-9-]*$/, 0, 256],
   ];
   for (const [field, pattern, minimum, maximum] of semanticLists) {

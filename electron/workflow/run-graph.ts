@@ -16,6 +16,11 @@ import type {
 } from "../../shared/types";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  canonicalJsonValue,
+  graphExecutionDigest,
+  sha256Value,
+} from "../../shared/graph-execution-digest";
+import {
   dryRunPromise,
   TOOL_BROKER_LEVEL_LABEL,
   type ToolBrokerLevel,
@@ -285,37 +290,11 @@ export type GraphCheckpoint = {
   checkpointDigest: string;
 };
 
-function canonicalJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalJsonValue);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-        .map(([key, child]) => [key, canonicalJsonValue(child)]),
-    );
-  }
-  return value;
-}
+// canonicalJsonValue / sha256Value / graphExecutionDigest live in
+// shared/graph-execution-digest.ts. They used to be private copies here and in
+// electron/store/graph-reconciliation.ts; changing one without the other made
+// every in-flight resume fail as graph drift.
 
-function sha256Value(value: unknown): string {
-  return `sha256:${createHash("sha256")
-    .update(JSON.stringify(canonicalJsonValue(value)))
-    .digest("hex")}`;
-}
-
-function graphExecutionDigest(automation: Automation, graph: WorkflowGraph): string {
-  return sha256Value({
-    graph,
-    targetType: automation.targetType,
-    targetId: automation.targetId,
-    targetVersion: automation.targetVersion ?? null,
-    promptTemplate: automation.promptTemplate,
-    executionPermission: automation.executionPermission ?? "write",
-    toolMode: automation.toolMode ?? "auto",
-    hubMode: automation.hubMode ?? "hub-allowed",
-    runtimeSelection: automation.runtimeSelection ?? null,
-  });
-}
 
 function hubTargetForNode(
   automation: Automation,

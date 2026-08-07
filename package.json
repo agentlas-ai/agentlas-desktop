@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.9.62",
+  "version": "0.9.63",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -16,12 +16,12 @@
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
     "targetSchemaVersion": 91,
-    "bundledRuntimeVersion": "1.1.98"
+    "bundledRuntimeVersion": "1.1.99"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.1.98",
-    "commit": "b8fc76d44dadd2933216ce669d9f53425a606392"
+    "ref": "v1.1.99",
+    "commit": "7524f206532c5c509be316d497781b240be3d487"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
@@ -366,7 +366,9 @@
     "test:store-schema-backfill": "electron scripts/test-store-schema-backfill.cjs",
     "test:runtime-failure-contract": "npm run --silent build:electron && node scripts/test-runtime-failure-contract.cjs",
     "test:judgment-fallback": "node scripts/test-judgment-fallback-contract.cjs",
-    "test:refusal-not-output": "node scripts/test-refusal-not-output-contract.cjs"
+    "test:refusal-not-output": "node scripts/test-refusal-not-output-contract.cjs",
+    "test:experience-axis-migration": "npm run build:electron && electron scripts/test-experience-axis-migration.cjs",
+    "test:curator-trust-gate": "npm run build:electron && electron scripts/test-curator-trust-gate.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

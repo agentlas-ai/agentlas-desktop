@@ -1593,6 +1593,38 @@ export function countPromotedExperiencesForAgent(agentIdValue: string): number {
   return Number(row?.n ?? 0);
 }
 
+/**
+ * How many experience records still sit on the old one-axis coordinate.
+ *
+ * Experience lookup matches `base_package_hash` exactly, and that hash covers
+ * the whole package — so attaching a part moves it and the lookup quietly
+ * misses. The repair is to match on the body (core) axis instead, and the
+ * migration in db.ts writes `base_core_hash` onto every record that can carry
+ * one. Records it could not resolve stay at `axisVersion: 2` rather than being
+ * deleted, and this counter is how they stay visible.
+ *
+ * This number must be 0 before the coordinate change is switched on. It is the
+ * observable form of an ordering rule that would otherwise be only a sentence
+ * in a plan: flip the coordinates first and accumulated experience evaporates
+ * with no error and no warning.
+ */
+export function countExperienceRecordsBelowAxisVersion(minimumAxisVersion = 3): {
+  packs: number;
+  candidates: number;
+  total: number;
+} {
+  const minimum = Number.isInteger(minimumAxisVersion) ? minimumAxisVersion : 3;
+  const countBelow = (table: "experience_packs" | "experience_candidates"): number => {
+    const row = getDb()
+      .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE axis_version < ?`)
+      .get(minimum) as { n?: number } | undefined;
+    return Number(row?.n ?? 0);
+  };
+  const packs = countBelow("experience_packs");
+  const candidates = countBelow("experience_candidates");
+  return { packs, candidates, total: packs + candidates };
+}
+
 export function listExperiencePromotionReceipts(packId: string): ExperiencePromotionReceipt[] {
   const pack = getPackRow(cleanText(packId, "packId", 120));
   const rows = getDb().prepare(

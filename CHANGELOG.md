@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.63 — 2026-08-07
+
+- Engine completes a package's contract from its own declarations before verify;
+  `agent.md`, work brief, sitemap, routing benchmarks, capability eval plan,
+  builder interview, research sources, and output example are derived, never invented.
+- packageHash is stable across repeat uploads: identity is recorded after the
+  package is finished, not before.
+- Borrowed agents receive a write command for their own experience store, so
+  memory accumulates instead of only being read.
+
+This release binds Agentlas OS v1.1.99 at 7524f206532c5c509be316d497781b240be3d487.
+This changelog entry describes source readiness and does not prove a published
+release.
+
 ## 0.9.62 — 2026-08-06
 
 This release binds Agentlas OS v1.1.98 at

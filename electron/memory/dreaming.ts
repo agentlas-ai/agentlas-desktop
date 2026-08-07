@@ -195,6 +195,12 @@ async function dreamOnce(): Promise<void> {
       if (rules.length === 0 || absorbed.length === 0) continue;
       const absorbedEntries = absorbed.map((n) => entries[n - 1]);
       const strictestSensitivity = strictestMemorySensitivity(absorbedEntries);
+      // Supersede keeps the pointer, not just the count. The AMGB governed
+      // reference (governance 1.000) deprecates with a retained value id —
+      // "deprecate, never silent overwrite" — and a bare "consolidated 5/8"
+      // sentence loses exactly that: nothing could ever answer which entries
+      // this rule replaced. The ids are the provenance edge.
+      const supersedePointers = absorbedEntries.map((entry) => `supersedes:${entry.id}`);
       const consolidated = rules.slice(0, 5).map((rule) =>
         insertMemoryEntry({
           scope: "agent_repo",
@@ -203,7 +209,10 @@ async function dreamOnce(): Promise<void> {
           agentId: target.agentId,
           confidence: "medium",
           sensitivity: strictestSensitivity,
-          evidence: [`dreaming: consolidated ${absorbed.length}/${entries.length} entries`],
+          evidence: [
+            `dreaming: consolidated ${absorbed.length}/${entries.length} entries`,
+            ...supersedePointers,
+          ],
         }));
       const absorbedIds = absorbedEntries.map((entry) => entry.id);
       supersedeMemoryEntries(absorbedIds);

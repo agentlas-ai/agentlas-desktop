@@ -135,6 +135,15 @@ export interface CuratedReply {
   curatorMode: MemoryCuratorMode;
 }
 
+// Kinds that assert something about the world. A low-confidence claim of one
+// of these is quarantined to the session log instead of being promoted —
+// the AMGB governed reference's trust gate.
+const QUARANTINE_ON_LOW_CONFIDENCE: ReadonlySet<MemoryKind> = new Set([
+  "fact",
+  "decision",
+  "procedure",
+]);
+
 function emptyReport(): CurationReport {
   return { written: 0, deduped: 0, redacted: 0, sessionOnly: 0, discarded: 0 };
 }
@@ -479,6 +488,39 @@ export function curateEvents(
           action: "redacted",
           reason: "secret",
           kind: ev.memory_kind,
+          at: new Date().toISOString(),
+        });
+      }
+      continue;
+    }
+
+    // Trust gate — the one AMGB governed rule this curator was missing. The
+    // benchmark reference (governance 1.000) quarantines a low-trust claim
+    // before promotion: it may sit in the session log, it never becomes a
+    // durable fact. Here the emitter's own confidence is the trust signal, and
+    // the gate is deliberately narrow: only kinds that assert something about
+    // the world (fact/decision/procedure) are held back — a low-confidence
+    // "hypothesis" is already labelled as conjecture and a "preference" is the
+    // user's to state at any confidence. Without this, a low-confidence fact
+    // was written durable exactly like a high-confidence one, which is the
+    // measured difference between governance 1.000 and 0.617.
+    if (ev.confidence === "low" && QUARANTINE_ON_LOW_CONFIDENCE.has(ev.memory_kind)) {
+      report.sessionOnly += 1;
+      recordCandidateDecision({
+        options,
+        index,
+        event: ev,
+        scope: "session",
+        action: "session",
+        reason: "policy-low-trust-quarantine",
+      });
+      if (ctx.projectPath) {
+        appendMemoryLog(ctx.projectPath, {
+          action: "session",
+          reason: "low-trust-quarantine",
+          kind: ev.memory_kind,
+          content: ev.content,
+          source_provenance: ctx.sourceProvenance ?? "assistant-turn",
           at: new Date().toISOString(),
         });
       }

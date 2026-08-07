@@ -2365,6 +2365,11 @@ export function initStore(options: StoreInitOptions = {}): void {
         name TEXT NOT NULL,
         description TEXT NOT NULL DEFAULT '',
         base_package_hash TEXT,
+        -- 2축 좌표. 몸통(코어) 해시가 신원이고 부품 목록 해시는 실행 무결성이다.
+        -- axis_version 2 = 옛 한 축 기록, 3 = 두 축을 갖춘 기록. 상세는 REQUIRED_COLUMNS 주석.
+        axis_version INTEGER NOT NULL DEFAULT 2,
+        base_core_hash TEXT,
+        module_set_hash TEXT,
         status TEXT NOT NULL DEFAULT 'active'
           CHECK(status IN ('active','archived')),
         created_at TEXT NOT NULL,
@@ -2373,6 +2378,10 @@ export function initStore(options: StoreInitOptions = {}): void {
       );
       CREATE INDEX IF NOT EXISTS idx_experience_packs_agent_scope
         ON experience_packs(agent_id, project_scope_key, environment_key, updated_at DESC);
+      -- 몸통 축 인덱스는 여기서 만들지 않는다. 이 블록은 부팅 때마다 돌지만, 기존 설치에는
+      -- base_core_hash 칸이 이 시점에 아직 없다(칸은 아래 REQUIRED_COLUMNS 백스톱이 만든다).
+      -- 여기 두면 새 설치에만 인덱스가 생기고 기존 설치는 조용히 빠진다 — 실측으로 확인함.
+      -- 생성 지점은 승격 블록 바로 뒤다.
 
       CREATE TABLE IF NOT EXISTS experience_candidates (
         id TEXT PRIMARY KEY,
@@ -4037,6 +4046,38 @@ export function initStore(options: StoreInitOptions = {}): void {
     // 확인필요 카드의 "해소" 기록 — 기록 자체는 지우지 않고(감사 가능), "지금
     // 조치하라"는 요구만 닫는다. 사용자가 닫기 전에는 NULL.
     run_history: [["acknowledged_at", "acknowledged_at TEXT"]],
+    /*
+     * ★2축 좌표 — 경험이 부품 교체에 살아남게 하는 자리 (SL-02).
+     *
+     * 오늘 경험 조회는 `base_package_hash` 정확 일치다(experience/store.ts
+     * ensureAutoExperiencePack). 그 해시는 패키지 **전체**를 덮으므로, 스킬 같은
+     * 부품을 하나 붙이는 순간 값이 바뀌고 조회가 어긋나 **쌓인 경험이 조용히 사라진다**.
+     * 에러도 경고도 없이 새 팩이 하나 더 생길 뿐이라 사용자는 알 수 없다.
+     *
+     * 그래서 좌표를 둘로 나눈다:
+     *   base_core_hash   몸통(코어)만의 해시 — 신원. 부품을 붙여도 안 변한다.
+     *   module_set_hash  붙인 부품 목록의 해시 — 실행 무결성.
+     * 조회를 몸통 축으로 옮기면 부품 교체가 경험을 끊지 못한다.
+     *
+     * axis_version 은 그 이행을 **관찰 가능하게** 만드는 장치다. 2 = 옛 한 축 기록,
+     * 3 = 두 축을 갖춘 기록. 좌표계를 실제로 바꾸기 전에 `axis_version < 3` 이
+     * 0인지 세면, 순서를 지켰는지를 문장이 아니라 숫자로 확인할 수 있다.
+     *
+     * 이 칸들을 사다리 단계가 아니라 버전 무관 백스톱에 두는 이유: 새 칸을 이미
+     * 지나간 단계에 끼워 넣으면 그 단계를 지난 기존 설치에는 영원히 안 생긴다
+     * (바로 위 주석의 automations.goal 사고). 새 설치는 아래 CREATE TABLE이,
+     * 기존 설치는 이 백스톱이 책임진다.
+     */
+    experience_packs: [
+      ["axis_version", "axis_version INTEGER NOT NULL DEFAULT 2"],
+      ["base_core_hash", "base_core_hash TEXT"],
+      ["module_set_hash", "module_set_hash TEXT"],
+    ],
+    experience_candidates: [
+      ["axis_version", "axis_version INTEGER NOT NULL DEFAULT 2"],
+      ["base_core_hash", "base_core_hash TEXT"],
+      ["module_set_hash", "module_set_hash TEXT"],
+    ],
   };
   /*
    * ★잔존 금지 트리거 — 버전 무관으로 매 부팅 제거한다.
@@ -4052,11 +4093,89 @@ export function initStore(options: StoreInitOptions = {}): void {
     _db.exec(`DROP TRIGGER IF EXISTS ${legacyTrigger}`);
   }
   for (const [table, columns] of Object.entries(REQUIRED_COLUMNS)) {
+    if (!tableExists(_db, table)) continue;
     const present = new Set(
       (_db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name),
     );
     for (const [name, ddl] of columns) {
       if (!present.has(name)) _db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    }
+  }
+
+  /*
+   * ★경험 레코드 v3 승격 — 부품을 붙이기 전에 몸통 축을 먼저 심는다 (SL-02).
+   *
+   * 오늘은 부품이 아직 없으므로 패키지 전체 = 몸통이다. 그래서 몸통 축의 올바른
+   * 초기값은 지금의 base_package_hash 그 자체이고, 부품 목록은 비어 있다.
+   * 지금 심어 두면, 나중에 조회를 몸통 축으로 옮길 때 옮길 값이 이미 자리에 있다.
+   * 반대 순서로 하면 — 좌표계를 먼저 바꾸면 — 그 순간 조회가 어긋나 쌓인 경험이
+   * 조용히 사라진다. 이 블록이 그 순서를 강제한다.
+   *
+   * 승격은 재실행 가능하고, 실패한 레코드를 삭제하지 않는다. 몸통 축을 정할 수 없는
+   * 레코드(base_package_hash가 비었다)는 axis_version 2로 남겨 두고, 아래 카운터가
+   * 그 수를 드러낸다. 0이 아니면 좌표계 전환을 착수해서는 안 된다 —
+   * 조용히 버리는 것보다 세는 편이 낫다.
+   */
+  /*
+   * ★쓸 것이 있을 때만 쓴다.
+   *
+   * 이 블록은 매 부팅마다 지나간다. 조건 없이 UPDATE를 던지면 맞는 행이 0건이어도
+   * SQLite는 쓰기 잠금을 잡으려 하고, 다른 프로세스가 WAL 쓰기 중이면 부팅이
+   * "database is locked"로 죽는다 — 마이그레이션 한 줄이 앱을 못 켜게 만든다
+   * (test:v52-automation-run-recovery가 정확히 이 상황을 재현한다).
+   * 읽기는 WAL에서 쓰기 잠금과 경합하지 않으므로, 먼저 세고 필요할 때만 쓴다.
+   */
+  const dbForPromotion = _db;
+  const pendingPromotion = (table: string, extraWhere: string): number => {
+    if (!tableExists(dbForPromotion, table)) return 0;
+    const columns = new Set(schemaColumns(dbForPromotion, table).map((column) => column.name));
+    if (!columns.has("axis_version")) return 0;
+    const row = dbForPromotion
+      .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE axis_version < 3 ${extraWhere}`)
+      .get() as { n?: number } | undefined;
+    return Number(row?.n ?? 0);
+  };
+
+  if (pendingPromotion("experience_packs", "AND base_package_hash IS NOT NULL AND base_package_hash != ''") > 0) {
+    _db.exec(`
+      UPDATE experience_packs
+         SET base_core_hash = base_package_hash,
+             module_set_hash = COALESCE(module_set_hash, ''),
+             axis_version = 3
+       WHERE axis_version < 3 AND base_package_hash IS NOT NULL AND base_package_hash != ''`);
+  }
+  if (pendingPromotion("experience_candidates", "") > 0) {
+    const candidateColumns = new Set(schemaColumns(_db, "experience_candidates").map((column) => column.name));
+    if (candidateColumns.has("base_package_hash")) {
+      _db.exec(`
+        UPDATE experience_candidates
+           SET base_core_hash = base_package_hash,
+               module_set_hash = COALESCE(module_set_hash, ''),
+               axis_version = 3
+         WHERE axis_version < 3 AND base_package_hash IS NOT NULL AND base_package_hash != ''`);
+    } else {
+      // 후보는 팩을 통해 몸통 축을 물려받는다. 자기 칸이 없는 스키마에서는 팩과 조인한다.
+      _db.exec(`
+        UPDATE experience_candidates
+           SET base_core_hash = (SELECT p.base_core_hash FROM experience_packs p WHERE p.id = experience_candidates.pack_id),
+               module_set_hash = COALESCE(module_set_hash, ''),
+               axis_version = 3
+         WHERE axis_version < 3
+           AND (SELECT p.base_core_hash FROM experience_packs p WHERE p.id = experience_candidates.pack_id) IS NOT NULL`);
+    }
+  }
+  // 몸통 축 인덱스는 칸이 확실히 존재하는 여기서 만든다. 위쪽 CREATE TABLE 블록에 두면
+  // 기존 설치에는 아직 칸이 없어 새 설치에만 생긴다 — "새 DB만 초록"이 되는 자리다.
+  if (tableExists(_db, "experience_packs")) {
+    // `CREATE INDEX IF NOT EXISTS`도 쓰기 잠금을 잡는다. 이미 있으면 읽기로 확인하고 건너뛴다
+    // (위 승격 블록과 같은 이유 — 부팅이 남의 WAL 쓰기에 막히면 안 된다).
+    const indexPresent = _db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_experience_packs_core_axis'")
+      .get();
+    const hasCoreAxis = schemaColumns(_db, "experience_packs").some((column) => column.name === "base_core_hash");
+    if (!indexPresent && hasCoreAxis) {
+      _db.exec(`CREATE INDEX IF NOT EXISTS idx_experience_packs_core_axis
+                  ON experience_packs(agent_id, project_scope_key, environment_key, base_core_hash)`);
     }
   }
 
