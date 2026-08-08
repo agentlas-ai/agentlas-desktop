@@ -7,6 +7,13 @@ import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
 import { AgentAvatar } from "./AgentAvatar";
 import { Markdown, MarkdownSegment, StreamingMarkdown, type CodeArtifact, type LinkedFileArtifact, type MediaArtifact } from "./Markdown";
 import { useT } from "@/lib/i18n";
+import {
+  buildToolCallDisplay,
+  formatToolRunSummary,
+  normalizeToolCall,
+  summarizeToolRun,
+  type ToolCallDetail,
+} from "@shared/tool-call-detail";
 import { useRouter } from "next/navigation";
 import { stageDocumentHandoff } from "@/lib/document-store";
 
@@ -1246,7 +1253,7 @@ function ToolGroupBlock({
   if (live) {
     const running = steps.filter((s) => s.result == null);
     const cur = running[running.length - 1] ?? steps[steps.length - 1];
-    const view = toolView(cur.tool!, cur.args, locale);
+    const view = toolView(cur.tool!, cur.args, locale, cur.result);
     return (
       <div
         role="status"
@@ -1264,9 +1271,11 @@ function ToolGroupBlock({
       </div>
     );
   }
-  const counts: Record<ToolGroup, number> = { command: 0, read: 0, edit: 0, search: 0, other: 0 };
-  for (const s of steps) counts[toolView(s.tool!, s.args, locale).group] += 1;
-  const summary = buildToolSummary(counts, locale);
+  // 같은 파일을 5번 고쳐도 "파일 1개 편집"이다 — 집합으로 센다(공용 집계).
+  const summary = formatToolRunSummary(
+    summarizeToolRun(steps.map((s) => toolView(s.tool!, s.args, locale, s.result).detail)),
+    locale,
+  );
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0 }}>
       <button
@@ -1346,7 +1355,7 @@ function ToolGroupRow({
 }) {
   const { locale } = useT();
   const [detailOpen, setDetailOpen] = useState(false);
-  const view = toolView(step.tool!, step.args, locale);
+  const view = toolView(step.tool!, step.args, locale, step.result);
   const filePath = toolStepFilePath(step);
   const detailText = step.result?.trim() || (step.args && step.args !== "{}" ? prettyJson(step.args) : "");
   const openFile = () => {
@@ -1405,6 +1414,18 @@ function ToolGroupRow({
         >
           {view.label || step.tool}
         </span>
+        {view.facts && (
+          <span
+            style={{
+              flexShrink: 0,
+              color: "var(--muted-deep)",
+              fontSize: 12,
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {view.facts}
+          </span>
+        )}
         <span aria-hidden style={{ flexShrink: 0, color: "var(--muted)", fontSize: 14, lineHeight: 1 }}>›</span>
       </button>
       {detailOpen && detailText && (
@@ -2036,10 +2057,11 @@ function WorkingPanel({
   const toolSteps = allRows.filter((s) => s.tool);
   const thinkingSteps = allRows.filter((s) => !s.tool);
 
-  // 도구 그룹 카운트 → "실행됨 명령 N개, 읽기 파일 N개" 요약 (스크린샷 형식).
-  const counts: Record<ToolGroup, number> = { command: 0, read: 0, edit: 0, search: 0, other: 0 };
-  for (const s of toolSteps) counts[toolView(s.tool!, s.args, locale).group] += 1;
-  const summary = buildToolSummary(counts, locale);
+  // 연속 도구 호출 한 줄 요약. 파일은 집합으로 세어 같은 파일 반복 편집을 부풀리지 않는다.
+  const summary = formatToolRunSummary(
+    summarizeToolRun(toolSteps.map((s) => toolView(s.tool!, s.args, locale, s.result).detail)),
+    locale,
+  );
 
   // 실행 중에는 실시간 로그를 바로 보여주고, 완료 뒤에는 요약만 남긴다.
   // Keep novice-facing Work concise. Detailed raw runtime payloads are
@@ -2530,6 +2552,10 @@ interface ToolViewModel {
   group: ToolGroup;
   verb: string;
   label: string;
+  /** 오른쪽 보조 사실 — `+23 −1`, `exit 0`, `파일 8개 · 31건 일치`. */
+  facts?: string;
+  /** 정규화된 의미 — 상세 렌더와 요약 집계가 이걸 읽는다. */
+  detail: ToolCallDetail;
 }
 
 type ActivityKind = NonNullable<StreamStep["activity"]>;
@@ -2860,74 +2886,44 @@ function parseArgs(s?: string): Record<string, unknown> {
   }
 }
 
-function toolView(tool: string, argsStr: string | undefined, locale: "ko" | "en"): ToolViewModel {
-  const a = parseArgs(argsStr);
-  const name = tool.toLowerCase();
-  const str = (x: unknown) => (typeof x === "string" ? x : "");
-  const v = (g: ToolGroup) => VERB[g][locale];
-  if (name.includes("stormbreaker")) {
-    const label = tool.replace(/^.*Stormbreaker(?: Loop)?\s*·\s*/i, "Stormbreaker Loop · ");
-    return { group: "other", verb: locale === "ko" ? "루프" : "loop", label: squish(label) };
-  }
-  if (name === "bash")
-    return { group: "command", verb: v("command"), label: locale === "ko" ? "검증 단계" : "verification step" };
-  if (name === "grep")
-    return {
-      group: "search",
-      verb: v("search"),
-      label: squish(`grep ${str(a.pattern)}${a.path ? " " + str(a.path) : ""}`),
-    };
-  if (name === "glob")
-    return { group: "search", verb: v("search"), label: squish(`find ${str(a.pattern) || str(a.glob)}`) };
-  if (name === "read")
-    return {
-      group: "read",
-      verb: v("read"),
-      label: baseName(str(a.file_path) || str(a.path) || str(a.notebook_path)),
-    };
-  if (name === "edit" || name === "multiedit" || name === "write" || name === "notebookedit")
-    return { group: "edit", verb: v("edit"), label: baseName(str(a.file_path) || str(a.notebook_path)) };
-  if (name === "websearch") return { group: "search", verb: v("search"), label: squish(str(a.query)) };
-  if (name === "webfetch")
-    return { group: "command", verb: locale === "ko" ? "가져옴" : "fetched", label: squish(str(a.url)) };
-  if (name === "task")
-    return {
-      group: "command",
-      verb: locale === "ko" ? "위임" : "delegated",
-      label: squish(str(a.description) || str(a.subagent_type)),
-    };
-  if (name.startsWith("mcp__")) {
-    const parts = tool.split("__");
-    const server = parts[1]?.replace(/^agentlas-/, "").replace(/[-_]+/g, " ") || "connected";
-    const pretty = locale === "ko" ? `${server} 연결 도구` : `${server} connector`;
-    return { group: "command", verb: locale === "ko" ? "호출" : "called", label: pretty };
-  }
-  return { group: "other", verb: v("other"), label: tool };
+function toolView(
+  tool: string,
+  argsStr: string | undefined,
+  locale: "ko" | "en",
+  result?: string,
+): ToolViewModel {
+  // ★판별은 shared/tool-call-detail.ts 한 곳에서만. 예전에는 이 함수가 Claude Code
+  // 도구명에 하드코딩돼 codex/gemini/ollama/MCP가 전부 "기타"로 떨어졌고,
+  // `bash`는 실제 명령을 버리고 "검증 단계"로 치환했다(정보량이 가장 큰 값을 지움).
+  const detail = normalizeToolCall({ name: tool, args: argsStr, result });
+  const display = buildToolCallDisplay({ name: tool, detail, locale });
+  const group = toolGroupOf(detail);
+  return {
+    group,
+    verb: VERB[group][locale],
+    label: display.summary?.trim() || display.displayName,
+    ...(display.facts ? { facts: display.facts } : {}),
+    detail,
+  };
 }
 
-function buildToolSummary(counts: Record<ToolGroup, number>, locale: "ko" | "en"): string {
-  const order: ToolGroup[] = ["command", "read", "edit", "search", "other"];
-  const ko: Record<ToolGroup, (n: number) => string> = {
-    command: (n) => `실행됨 명령 ${n}개`,
-    read: (n) => `읽기 파일 ${n}개`,
-    edit: (n) => `편집 파일 ${n}개`,
-    search: (n) => `검색 ${n}개`,
-    other: (n) => `도구 ${n}개`,
-  };
-  const en: Record<ToolGroup, (n: number) => string> = {
-    command: (n) => `ran ${n} command${n > 1 ? "s" : ""}`,
-    read: (n) => `read ${n} file${n > 1 ? "s" : ""}`,
-    edit: (n) => `edited ${n} file${n > 1 ? "s" : ""}`,
-    search: (n) => `${n} search${n > 1 ? "es" : ""}`,
-    other: (n) => `${n} tool${n > 1 ? "s" : ""}`,
-  };
-  const fmt = locale === "ko" ? ko : en;
-  return order
-    .filter((g) => counts[g] > 0)
-    .map((g) => fmt[g](counts[g]))
-    .join(", ");
+function toolGroupOf(detail: ToolCallDetail): ToolGroup {
+  switch (detail.type) {
+    case "shell":
+      return "command";
+    case "read":
+      return "read";
+    case "edit":
+    case "write":
+      return "edit";
+    case "search":
+      return "search";
+    case "fetch":
+      return "command";
+    default:
+      return "other";
+  }
 }
-
 function ChevronDown() {
   return (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>

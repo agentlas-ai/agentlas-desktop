@@ -371,7 +371,8 @@
     "test:experience-axis-migration": "npm run build:electron && electron scripts/test-experience-axis-migration.cjs",
     "test:curator-trust-gate": "npm run build:electron && electron scripts/test-curator-trust-gate.cjs",
     "test:release-asset-phases": "node scripts/test-release-asset-phases.cjs",
-    "test:mobile-bridge-refusal-audit": "node scripts/test-mobile-bridge-refusal-audit.cjs"
+    "test:mobile-bridge-refusal-audit": "node scripts/test-mobile-bridge-refusal-audit.cjs",
+    "test:tool-call-normalization": "npm run --silent build:electron && node scripts/test-tool-call-normalization.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",
