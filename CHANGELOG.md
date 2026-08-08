@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.70 — 2026-08-09
+
+This release binds Agentlas OS v1.1.99 at
+7524f206532c5c509be316d497781b240be3d487.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- A graph screen now tells you, in one line above the canvas, what just
+  happened and what to press. When a run is paused for approval it names the
+  step it stopped before and says that approving continues from there.
+- Run again now says what it will do. When a stopped run can be picked up
+  where it left off, the button reads Continue run instead of Run now, and
+  finished steps are not repeated.
+- A run waiting on you is no longer listed as a failure. Nothing failed; it
+  was waiting.
+- The panel below the canvas uses its full width. The step palette and step
+  settings were still sized for the old right-hand column, so two thirds of
+  the sheet sat empty.
+- Add step works while editing. With no validation problems open, the panel
+  that holds the palette was not on screen at all, so the button appeared to
+  do nothing.
+- Small controls are easier to hit, and the duplicate Details heading inside
+  the Details tab is gone.
+
 ## 0.9.69 — 2026-08-09
 
 This release binds Agentlas OS v1.1.99 at
