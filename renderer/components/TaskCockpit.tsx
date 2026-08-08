@@ -619,6 +619,18 @@ function parseQuestionBatchReply(text: string): Array<{ question: string; answer
 }
 
 
+/**
+ * ★IPC 목록은 배열로 못박고 들어온다.
+ *
+ * 실측(2026-08-08, 실렌더 검증): `pendingHubApprovals()` 가 null 을 돌려주자
+ * 렌더에서 `.filter` 가 던져 **ErrorBoundary 가 작업 화면을 통째로 대체**했다
+ * ("One이 화면을 바로잡고 있습니다"). `.catch()` 는 거절만 막고 null **반환**은 못 막는다.
+ * 목록 하나가 비었다고 채팅 전체가 사라지면 안 된다 — 그 부분만 비운다.
+ */
+function asList<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : [];
+}
+
 export default function ChatPageWrapper() {
   // useSearchParams는 Suspense boundary를 요구함 (Next 15)
   return (
@@ -773,7 +785,7 @@ function ChatPage() {
     const generation = ++hubBookmarkGenerationRef.current;
     try {
       const bookmarks = await api.marketplace.bookmarks();
-      if (hubBookmarkGenerationRef.current === generation) setHubBookmarks(bookmarks);
+      if (hubBookmarkGenerationRef.current === generation) setHubBookmarks(asList(bookmarks));
     } catch {
       // Preserve the last known/optimistic state until a later durable read succeeds.
     }
@@ -1629,10 +1641,10 @@ function ChatPage() {
       setAgent(agents.find((a) => a.id === c.agentId) ?? null);
 
       void api.firms.list().then((firms) => {
-        if (!cancelled && agentRosterGenerationRef.current === rosterGeneration) setAllFirms(firms);
+        if (!cancelled && agentRosterGenerationRef.current === rosterGeneration) setAllFirms(asList(firms));
       }).catch(() => undefined);
       void api.projects.list().then((projects) => {
-        if (!cancelled) setAllProjects(projects);
+        if (!cancelled) setAllProjects(asList(projects));
       }).catch(() => undefined);
       void api.env.list().then((envVars) => {
         if (!cancelled) {
@@ -1641,15 +1653,15 @@ function ChatPage() {
         }
       }).catch(() => undefined);
       void api.mcpTools.listInstalled().then((plugins) => {
-        if (!cancelled) setInstalledPlugins(plugins);
+        if (!cancelled) setInstalledPlugins(asList(plugins));
       }).catch(() => undefined);
       // 자동 브리지가 붙여 두고 승인을 기다리는 도구. 실행 중에는 영수증 한 줄로만
       // 지나가서, 그 순간을 놓치면 어디서 무엇을 켜는지 알 수 없었다.
       void api.mcpTools.pendingHubApprovals().then((rows) => {
-        if (!cancelled) setPendingHubApprovals(rows);
+        if (!cancelled) setPendingHubApprovals(asList(rows));
       }).catch(() => undefined);
       void api.appFactory.listApps(chatId).then((generatedApps) => {
-        if (!cancelled) setAllGeneratedApps(generatedApps);
+        if (!cancelled) setAllGeneratedApps(asList(generatedApps));
       }).catch(() => undefined);
       void api.marketplace.bookmarks().then((bookmarks) => {
         if (!cancelled && hubBookmarkGenerationRef.current === bookmarkGeneration) setHubBookmarks(bookmarks);
@@ -3422,6 +3434,7 @@ function ChatPage() {
           interactionBusy={busy}
           stopRequested={cancelPending}
           mediaBasePaths={mediaBasePaths}
+          workspaceRoot={restoredFolder ?? defaultRunFolder ?? undefined}
           focusMessageId={requestedFocusMessageId}
         />
       </div>

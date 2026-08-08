@@ -49,6 +49,14 @@ function prepareContext(
     locale: req.locale,
   });
   if (digest) events.onStatus(tStatus(req.locale, "compacted", { n: droppedCount }));
+  if (digest) {
+    events.onNotice?.({
+      level: "info",
+      message: tStatus(req.locale, "compacted", { n: droppedCount }),
+      code: "history-compacted",
+      display: "divider",
+    });
+  }
   const baseSystem = digest ? `${req.systemPrompt}\n\n${digest}` : req.systemPrompt;
   return {
     model,

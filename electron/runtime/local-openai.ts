@@ -66,6 +66,15 @@ export function makeLocalOpenAiRunner(
       locale: req.locale,
     });
     if (digest) events.onStatus(tStatus(req.locale, "compacted", { n: droppedCount }));
+    if (digest) {
+      // 압축은 지나가는 상태가 아니라 대화에 남아야 하는 사실이다.
+      events.onNotice?.({
+        level: "info",
+        message: tStatus(req.locale, "compacted", { n: droppedCount }),
+        code: "history-compacted",
+        display: "divider",
+      });
+    }
     const systemText = digest ? `${req.systemPrompt}\n\n${digest}` : req.systemPrompt;
 
     const messages: ChatMessage[] = [{

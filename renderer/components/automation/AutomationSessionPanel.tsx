@@ -405,7 +405,16 @@ export function AutomationSessionPanel({
               : "Automation runs and your own turns continue here in one thread. Ask anything."}
           </div>
         ) : null}
-        {unavailable ? <div className="automation-session-empty" data-one-content-slot /> : null}
+        {unavailable ? (
+          // ★내용 없는 빈 div 였다. 세션을 못 불러오면 사용자는 테두리만 있는 빈 상자와
+          //   비활성 입력창을 보게 되고, 왜 그런지 알 방법이 없었다(실렌더 실측 2026-08-08).
+          //   One 이 이 슬롯을 채울 수 있지만, 아무도 안 채워도 화면은 말을 해야 한다.
+          <div className="automation-session-empty" data-one-content-slot>
+            {ko
+              ? "이 자동화의 대화를 불러오지 못했습니다. 잠시 뒤 다시 열어 보세요."
+              : "This automation's conversation could not be loaded. Try opening it again in a moment."}
+          </div>
+        ) : null}
       </div>
 
       {error ? (

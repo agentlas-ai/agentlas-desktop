@@ -3215,6 +3215,9 @@ export async function runMcpInvocation(
       // reasoning(thinking) 구간 신호 — 상태줄 "생각 중…" 회전 + "N초 동안 생각함".
       onThinking: (phase: "start" | "end", durationMs?: number) =>
         sink({ kind: "reasoning", reasoning: { phase, durationMs } }),
+      // 러너가 사용자에게 남겨야 하는 사실(첫 소비자: 컨텍스트 압축).
+      // 상태줄과 달리 대화에 남는다.
+      onNotice: (notice: NonNullable<McpInvocationEvent["notice"]>) => sink({ kind: "notice", notice }),
     };
     const advanceUsageFloor = () => {
       liveUsageFloor = liveUsageHigh;

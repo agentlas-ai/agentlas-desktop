@@ -1,7 +1,7 @@
 // 메시지 스트림 렌더 — agent 메시지는 Markdown으로, 사용자 메시지는 plain.
 // 작업 중 메시지는 Codex/Claude 데스크톱처럼 step log + 경과 시간을 실시간으로 보여준다.
 "use client";
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Fragment, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { HubAgentBookmark, InstalledAgent, InstalledFirm, InstalledMcpServer, Project } from "@/lib/types";
 import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
 import { AgentAvatar } from "./AgentAvatar";
@@ -122,6 +122,8 @@ export interface ChatNotice {
   message: string;
   code?: string;
   details?: string;
+  /** divider면 좌우 선 사이의 라벨 — 대화의 경계(컨텍스트 압축 등). */
+  display?: "row" | "divider";
 }
 
 export interface ChatEmptyDirectory {
@@ -154,12 +156,15 @@ export function ChatStream({
   interactionBusy = false,
   stopRequested = false,
   mediaBasePaths = [],
+  workspaceRoot,
   focusMessageId,
 }: {
   messages: StreamMessage[];
   agentName: string;
   agentTone: InstalledAgent["tone"];
   emptyDirectory?: ChatEmptyDirectory;
+  /** 실행 폴더 — 도구 행의 파일 경로를 이 기준 상대경로로 줄인다. */
+  workspaceRoot?: string;
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
@@ -274,6 +279,7 @@ export function ChatStream({
   }
 
   return (
+    <WorkspaceRootContext.Provider value={workspaceRoot}>
     <div
       className="agentlas-chat-stream"
       style={{
@@ -284,6 +290,13 @@ export function ChatStream({
         display: "flex",
       }}
     >
+      <ChatOutlineRail
+        messages={messages}
+        onJump={(id) => {
+          const node = document.getElementById(messageDomId(id));
+          node?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }}
+      />
       <div
         ref={scrollRef}
         onScroll={handleScroll}
@@ -597,6 +610,7 @@ export function ChatStream({
         }
       `}</style>
     </div>
+    </WorkspaceRootContext.Provider>
   );
 }
 
@@ -617,8 +631,14 @@ function EmptyChatState({
   const isProjectTask = Array.isArray(directory?.projectTeam);
   const sections = useMemo(() => {
     if (!directory) return [];
+    // ★목록 하나가 비어 있다고 작업 화면 전체가 죽으면 안 된다.
+    // 실측(2026-08-08, 실렌더 검증): 로스터가 null 인 상태에서
+    // `directory.agents.filter` 가 던져 ErrorBoundary 가 채팅을 통째로 대체했다
+    // ("One이 화면을 바로잡고 있습니다"). 부분 실패는 그 부분만 비운다.
+    const agents = Array.isArray(directory.agents) ? directory.agents : [];
+    const bookmarks = Array.isArray(directory.hubBookmarks) ? directory.hubBookmarks : [];
     const mentions: EmptyDirectoryItem[] = directory.projectTeam ?? [
-      ...directory.agents
+      ...agents
         .filter((agent) => agent.visibility !== "background" && agent.visibility !== "private")
         .slice(0, 2)
         .map((agent) => ({
@@ -626,7 +646,7 @@ function EmptyChatState({
           token: `@${locale === "en" ? agent.nameEn || agent.name : agent.name}`,
           label: t("chatstream.empty_mention_agent"),
         })),
-      ...hubBookmarksWithoutLocalDuplicates(directory.hubBookmarks, directory.agents).slice(0, 2).map((bookmark) => ({
+      ...hubBookmarksWithoutLocalDuplicates(bookmarks, agents).slice(0, 2).map((bookmark) => ({
         id: `hub-${String(bookmark.listing.entityKind || "agent")}-${bookmark.slug}`,
         token: `@${locale === "en" ? bookmark.listing.nameEn || bookmark.listing.name : bookmark.listing.name}`,
         label: t("chatstream.empty_mention_hub"),
@@ -1275,11 +1295,12 @@ function ToolGroupBlock({
   onOpenWorkflow?: () => void;
 }) {
   const { locale } = useT();
+  const workspaceRootForRun = useContext(WorkspaceRootContext);
   const [open, setOpen] = useState(false);
   if (live) {
     const running = steps.filter((s) => s.result == null);
     const cur = running[running.length - 1] ?? steps[steps.length - 1];
-    const view = toolView(cur.tool!, cur.args, locale, cur.result);
+    const view = toolView(cur.tool!, cur.args, locale, cur.result, workspaceRootForRun);
     return (
       <div
         role="status"
@@ -1299,7 +1320,7 @@ function ToolGroupBlock({
   }
   // 같은 파일을 5번 고쳐도 "파일 1개 편집"이다 — 집합으로 센다(공용 집계).
   const summary = formatToolRunSummary(
-    summarizeToolRun(steps.map((s) => toolView(s.tool!, s.args, locale, s.result).detail)),
+    summarizeToolRun(steps.map((s) => toolView(s.tool!, s.args, locale, s.result, workspaceRootForRun).detail)),
     locale,
   );
   return (
@@ -1380,8 +1401,10 @@ function ToolGroupRow({
   onOpenWorkflow?: () => void;
 }) {
   const { locale } = useT();
+  const workspaceRootForRun = useContext(WorkspaceRootContext);
   const [detailOpen, setDetailOpen] = useState(false);
-  const view = toolView(step.tool!, step.args, locale, step.result);
+  const workspaceRoot = useContext(WorkspaceRootContext);
+  const view = toolView(step.tool!, step.args, locale, step.result, workspaceRoot);
   const filePath = toolStepFilePath(step);
   const detailText = step.result?.trim() || (step.args && step.args !== "{}" ? prettyJson(step.args) : "");
   const openFile = () => {
@@ -1454,7 +1477,23 @@ function ToolGroupRow({
         )}
         <span aria-hidden style={{ flexShrink: 0, color: "var(--muted)", fontSize: 14, lineHeight: 1 }}>›</span>
       </button>
-      {detailOpen && detailText && (
+      {detailOpen && view.detail.type === "todo" && (
+        // 모델의 계획은 JSON 덩어리가 아니라 체크리스트다. 정규화가 이미 항목을 준다.
+        <ul className="agentlas-chat-todo">
+          {view.detail.items.map((item, i) => (
+            <li
+              key={`${i}-${item.text}`}
+              className={item.completed ? "agentlas-chat-todo-done" : undefined}
+            >
+              <span aria-hidden className="agentlas-chat-todo-mark">
+                {item.completed ? "✓" : "○"}
+              </span>
+              <span>{item.text}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {detailOpen && view.detail.type !== "todo" && detailText && (
         <pre style={{ ...toolPre, margin: "0 12px 10px" }}>{detailText}</pre>
       )}
     </div>
@@ -2080,12 +2119,13 @@ function WorkingPanel({
     latestText: latestTextStep?.text,
     locale,
   });
+  const workspaceRootForRun = useContext(WorkspaceRootContext);
   const toolSteps = allRows.filter((s) => s.tool);
   const thinkingSteps = allRows.filter((s) => !s.tool);
 
   // 연속 도구 호출 한 줄 요약. 파일은 집합으로 세어 같은 파일 반복 편집을 부풀리지 않는다.
   const summary = formatToolRunSummary(
-    summarizeToolRun(toolSteps.map((s) => toolView(s.tool!, s.args, locale, s.result).detail)),
+    summarizeToolRun(toolSteps.map((s) => toolView(s.tool!, s.args, locale, s.result, workspaceRootForRun).detail)),
     locale,
   );
 
@@ -2941,11 +2981,12 @@ function toolView(
   argsStr: string | undefined,
   locale: "ko" | "en",
   result?: string,
+  cwd?: string,
 ): ToolViewModel {
   // ★판별은 shared/tool-call-detail.ts 한 곳에서만. 예전에는 이 함수가 Claude Code
   // 도구명에 하드코딩돼 codex/gemini/ollama/MCP가 전부 "기타"로 떨어졌고,
   // `bash`는 실제 명령을 버리고 "검증 단계"로 치환했다(정보량이 가장 큰 값을 지움).
-  const detail = normalizeToolCall({ name: tool, args: argsStr, result });
+  const detail = normalizeToolCall({ name: tool, args: argsStr, result, cwd });
   const display = buildToolCallDisplay({ name: tool, detail, locale });
   const group = toolGroupOf(detail);
   return {
@@ -2963,6 +3004,20 @@ function toolView(
  */
 function ChatNoticeRow({ notice }: { notice: ChatNotice }) {
   const [open, setOpen] = useState(false);
+  if (notice.display === "divider") {
+    // 대화의 경계. 예전에는 상태줄로 지나가서 사용자는 자기 대화가 잘렸다는 걸
+    // 알 수 없었다 — "왜 아까 말한 걸 잊었냐"의 절반이 여기서 나온다.
+    return (
+      <div className="agentlas-chat-divider" role="separator" aria-label={notice.message}>
+        <span className="agentlas-chat-divider-line" aria-hidden />
+        <span className="agentlas-chat-divider-label">
+          <span aria-hidden>✂</span>
+          {notice.message}
+        </span>
+        <span className="agentlas-chat-divider-line" aria-hidden />
+      </div>
+    );
+  }
   const tone = {
     info: { fg: "var(--accent)", icon: "ⓘ" },
     success: { fg: "#2f7d4f", icon: "✓" },
@@ -3005,6 +3060,64 @@ function ChatNoticeRow({ notice }: { notice: ChatNotice }) {
  * flat `gap: 16` 하나로는 "사용자가 연달아 두 마디 한 것"과 "역할이 바뀐 것"이 같은
  * 거리로 벌어져 대화 덩어리가 안 읽힌다. 조합별로 정하면 덩어리가 눈에 들어온다.
  */
+/**
+ * 대화 아웃라인 레일 — 사용자 프롬프트 하나당 눈금 하나.
+ *
+ * 긴 실행 하나가 수백 행을 만드는데 "내가 아까 뭘 요청했지"를 찾을 방법이 없었다
+ * (Ctrl+F도 없다). 눈금을 누르면 그 프롬프트로 간다. 눈금 3개 미만이면 숨는다 —
+ * 짧은 대화에서는 레일이 소음이다.
+ */
+function ChatOutlineRail({
+  messages,
+  onJump,
+}: {
+  messages: StreamMessage[];
+  onJump: (messageId: string) => void;
+}) {
+  const prompts = useMemo(
+    () => messages.filter((m) => m.role === "user").map((m) => ({ id: m.id, text: m.text })),
+    [messages],
+  );
+  const [hovered, setHovered] = useState<number | null>(null);
+  if (prompts.length < 3) return null;
+  return (
+    <div
+      className="agentlas-chat-outline"
+      role="navigation"
+      aria-label="대화 아웃라인"
+      onPointerLeave={() => setHovered(null)}
+    >
+      {prompts.map((prompt, index) => {
+        // 포인터 근처가 부드럽게 굵어진다(raised cosine, 반경 2) — 밴드가 켜졌다
+        // 꺼지는 게 아니라 하나의 융기가 포인터를 따라 움직이는 것으로 읽힌다.
+        const distance = hovered === null ? Infinity : Math.abs(index - hovered);
+        const lift = distance >= 2 ? 0 : (1 + Math.cos((Math.PI * distance) / 2)) / 2;
+        return (
+          <button
+            key={prompt.id}
+            type="button"
+            className="agentlas-chat-outline-tick"
+            title={prompt.text.slice(0, 80)}
+            aria-label={prompt.text.slice(0, 80)}
+            onPointerEnter={() => setHovered(index)}
+            onClick={() => onJump(prompt.id)}
+            style={{ width: 10 + lift * 8, opacity: 0.45 + lift * 0.55 }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * 실행 폴더 — 도구 행의 경로를 상대경로로 줄이는 데만 쓴다.
+ *
+ * ★실렌더 검증(2026-08-08)에서 잡힌 것: `stripCwdPrefix` 는 게이트에서 단독으로
+ * 통과했는데, 정작 렌더러가 cwd 를 안 넘겨서 화면에는 절대경로가 그대로 나왔다.
+ * 순수 함수 테스트만으로는 "호출부가 인자를 안 준다"를 못 잡는다.
+ */
+const WorkspaceRootContext = createContext<string | undefined>(undefined);
+
 function messageGap(above: StreamMessage | undefined, below: StreamMessage): number {
   if (!above) return 0;
   // 같은 화자가 연달아 말하면 붙인다 — 한 사람의 여러 마디는 한 덩어리다.

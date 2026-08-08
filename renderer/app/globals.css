@@ -11516,3 +11516,104 @@ button[data-toggle-state="on"] {
   white-space: pre-wrap;
   overflow-x: auto;
 }
+
+/* 대화 경계 마커 — 컨텍스트 압축처럼 "여기서 앞이 접혔다"를 말하는 사실.
+   상태줄로 지나가면 사용자는 자기 대화가 잘린 걸 모른다. */
+.agentlas-chat-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0;
+  min-width: 0;
+}
+.agentlas-chat-divider-line {
+  flex: 1;
+  height: 1px;
+  background: var(--paper-edge);
+}
+.agentlas-chat-divider-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  color: var(--muted-deep);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* 모델이 낸 계획 — JSON이 아니라 체크리스트로 읽힌다. */
+.agentlas-chat-todo {
+  list-style: none;
+  margin: 0 12px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 9px;
+  background: var(--paper-2);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.agentlas-chat-todo li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.agentlas-chat-todo-mark {
+  flex-shrink: 0;
+  width: 12px;
+  color: var(--muted-deep);
+}
+.agentlas-chat-todo-done {
+  color: var(--muted-deep);
+  text-decoration: line-through;
+}
+.agentlas-chat-todo-done .agentlas-chat-todo-mark {
+  color: #2f7d4f;
+}
+
+/* 대화 아웃라인 레일 — 프롬프트당 눈금 하나. 긴 실행에서 "아까 그 요청"으로 돌아간다. */
+.agentlas-chat-outline {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  padding: 6px 2px;
+  pointer-events: auto;
+}
+.agentlas-chat-outline-tick {
+  height: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 2px;
+  background: var(--muted-deep);
+  cursor: pointer;
+  transition: width 90ms ease-out, opacity 90ms ease-out;
+}
+.agentlas-chat-outline-tick:hover,
+.agentlas-chat-outline-tick:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .agentlas-chat-outline-tick { transition: none; }
+}
+
+/* 임베드(하단 통합 패널) 모드의 빈 상태 — 독립 패널용 min-height 170px 를 그대로
+   쓰면 194px 짜리 하단 패널에서 문구가 잘려 나가 **흰 박스만** 남는다(실렌더 실측
+   2026-08-08: DOM 에는 문구가 있는데 화면에는 없었다). 자리를 요구하지 않고 자기
+   크기대로 눕는다. */
+.automation-session-panel[data-embedded="true"] .automation-session-empty {
+  min-height: 0;
+  padding: 12px 14px;
+  place-items: start;
+  text-align: left;
+}

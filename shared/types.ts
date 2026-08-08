@@ -3731,6 +3731,11 @@ export interface McpInvocationEvent {
     code?: string;
     /** 원문·payload. 펼쳤을 때만 보인다. */
     details?: string;
+    /**
+     * `divider`면 좌우 선 사이의 라벨로 그린다 — 대화의 **경계**를 표시하는 사실
+     * (컨텍스트 압축이 첫 소비자). 없으면 보통 고지 행.
+     */
+    display?: "row" | "divider";
   };
   /** Agent OS surface manifest, emitted when an agent produces a safe interactive surface. */
   surfaceId?: string;

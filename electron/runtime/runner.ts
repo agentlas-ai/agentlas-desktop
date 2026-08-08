@@ -236,6 +236,20 @@ export interface RunnerEvents {
   onUsage?: (tokens: number) => void;
   /** reasoning(thinking) 구간 신호 — 구간 시작/종료. durationMs는 end에만(이번 구간 지속 ms). 선택. */
   onThinking?: (phase: "start" | "end", durationMs?: number) => void;
+  /**
+   * ★호스트가 사용자에게 하는 말. 상태줄(onStatus)과 다르다 — 상태줄은 **지나가는** 값이고
+   * 이건 대화에 **남아야 하는 사실**이다.
+   *
+   * 첫 소비자: 컨텍스트 압축. 예전에는 `onStatus("컨텍스트 압축 — …")` 한 줄로 지나가서
+   * 사용자는 자기 대화가 잘렸다는 걸 알 수 없었다("왜 아까 말한 걸 잊었냐"의 절반).
+   */
+  onNotice?: (notice: {
+    level: "info" | "success" | "warning" | "error";
+    message: string;
+    code?: string;
+    /** divider면 좌우 선 사이의 라벨로 그린다(대화의 경계를 표시하는 사실). */
+    display?: "row" | "divider";
+  }) => void;
 }
 
 /**

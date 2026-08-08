@@ -777,7 +777,7 @@ const dict = {
     "auto.flow.run_now": "지금 실행",
     "auto.flow.simulate": "시뮬레이션",
     "auto.flow.approve_and_continue": "승인하고 이어서 실행",
-    "auto.flow.architect_placeholder": "Chat anything",
+    "auto.flow.architect_placeholder": "무엇이든 물어보거나 지시하세요",
     "auto.flow.architect_ask": "고칠 내용 보기",
     "auto.flow.architect_preview": "이렇게 바뀝니다 — 아직 적용하지 않았습니다",
     "auto.flow.architect_added": "추가",

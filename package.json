@@ -372,7 +372,8 @@
     "test:curator-trust-gate": "npm run build:electron && electron scripts/test-curator-trust-gate.cjs",
     "test:release-asset-phases": "node scripts/test-release-asset-phases.cjs",
     "test:mobile-bridge-refusal-audit": "node scripts/test-mobile-bridge-refusal-audit.cjs",
-    "test:tool-call-normalization": "npm run --silent build:electron && node scripts/test-tool-call-normalization.cjs"
+    "test:tool-call-normalization": "npm run --silent build:electron && node scripts/test-tool-call-normalization.cjs",
+    "test:route-render-sweep": "npm run --silent build:renderer && node scripts/test-route-render-sweep.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",
