@@ -2,6 +2,11 @@
 
 ## 0.9.64 — 2026-08-08
 
+This release binds Agentlas OS v1.1.99 at
+7524f206532c5c509be316d497781b240be3d487.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
 - Approving a step actually ends the question. Deciding on an approval used to
   leave the APPROVAL_REQUIRED record in the run snapshot, so live polling
   resurrected the approval card seconds after you answered it — an endless
