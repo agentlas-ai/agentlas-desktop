@@ -177,17 +177,11 @@ export function NodeConfigPanel({
 
   return (
     <aside
-      className="titlebar-nodrag"
+      className="titlebar-nodrag automation-embedded-panel automation-node-config"
       style={{
-        width: 320,
-        flexShrink: 0,
-        borderLeft: "var(--hairline)",
         background: "var(--paper)",
         overflowY: "auto",
         padding: 16,
-        display: "flex",
-        flexDirection: "column",
-        gap: 14,
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

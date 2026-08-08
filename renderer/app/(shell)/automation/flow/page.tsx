@@ -238,6 +238,17 @@ function AutomationFlowPage() {
     setLogOpen(true);
     setBottomTab("details");
   }, [hasActionCards]);
+  /* ★노드를 고르거나 팔레트를 열면 그 내용도 [상세] 탭에 산다 — 탭이 다른 데 가 있으면
+     클릭해도 화면이 아무 반응이 없다. 인스펙터가 오른쪽 열이던 시절에는 항상 보였지만,
+     하단 탭으로 옮긴 뒤로는 데려가 주지 않으면 사라진 기능이 된다(실렌더 2026-08-09). */
+  useEffect(() => {
+    if (!selectedNodeId && !selectedEdgeId && !paletteOpen) return;
+    setLogOpen(true);
+    setBottomTab("details");
+    // 팔레트·노드 설정은 로그 한 줄보다 크다 — 기본 높이로는 내용이 잘려 나간다.
+    // 사용자가 이미 더 크게 끌어 놨으면 줄이지 않는다.
+    setLogHeight((h) => Math.max(h, 340));
+  }, [selectedNodeId, selectedEdgeId, paletteOpen]);
   runStatesRef.current = runStates;
 
   const nodeStrings: NodeStrings = useMemo(
@@ -589,6 +600,33 @@ function AutomationFlowPage() {
   const logRows = editing ? issues : runLogEntries;
   const errorCount = logRows.filter((i) => i.severity === "error").length;
   const warnCount = logRows.filter((i) => i.severity === "warning").length;
+
+  /* ★"지금 무슨 상태이고, 무엇을 누르면 되는가" — 화면에 이 답이 정확히 한 군데 있어야 한다.
+     오너 실측(2026-08-09 녹화): 툴바에 버튼 8개, 하단에 카드 여러 장, 어느 것도
+     "지금 이걸 누르세요"라고 말하지 않아 [지금 다시 실행]만 반복해서 눌렸다.
+     Norman의 평가의 간극(무슨 일이 일어났는가) + 실행의 간극(무엇을 하면 되는가)을
+     한 줄로 닫는다. 주 행동은 **언제나 하나**다(Hick-Hyman: 선택지가 늘수록 결정이 늦다). */
+  const pausedApproval = useMemo(() => {
+    const entry = Object.entries(nodeFailures).find(([, f]) => f.code === "APPROVAL_REQUIRED");
+    if (!entry) return null;
+    const [nodeId] = entry;
+    return { nodeId, label: automation?.graph?.nodes.find((n) => n.id === nodeId)?.label || nodeId };
+  }, [nodeFailures, automation?.graph]);
+  // 멈춘 실행이 있으면 "지금 실행"은 실제로 **이어서 실행**이다(run-graph 가 같은
+  // occurrence 체크포인트에서 재개한다). 버튼이 하는 일과 이름이 달라 사용자는
+  // 매번 "처음부터 도는 건가?"를 물어야 했다 — 이름을 하는 일에 맞춘다.
+  const resumable = !editing && !liveRunning
+    && Object.values(runStates).some((st) => st === "done")
+    && (Object.keys(nodeFailures).length > 0 || Object.values(runStates).some((st) => st === "failed"));
+  const runningNodeLabel = useMemo(() => {
+    const id = Object.entries(runStates).find(([, st]) => st === "running")?.[0];
+    if (!id) return "";
+    return automation?.graph?.nodes.find((n) => n.id === id)?.label || id;
+  }, [runStates, automation?.graph]);
+  const totalNodes = automation?.graph?.nodes.length ?? 0;
+  const doneNodes = Object.values(runStates).filter((st) => st === "done").length;
+  // 상세 탭이 지금 펼쳐져 보이는가 — 상태줄이 같은 행동을 두 번 내놓지 않기 위한 조건.
+  const detailsShown = logOpen && bottomTab === "details";
 
   const selectedNode: WorkflowNode | null = useMemo(() => {
     if (!selectedNodeId) return null;
@@ -1033,7 +1071,8 @@ function AutomationFlowPage() {
           ? (locale === "en"
             ? "Simulation started. Steps that change something outside are skipped and listed instead."
             : "시뮬레이션을 시작했습니다. 바깥을 바꾸는 단계는 실행하지 않고 목록으로 보여줍니다.")
-          : (locale === "en" ? "Run started. Watch node status and history on the right." : "실행을 시작했습니다. 오른쪽에서 노드 상태와 기록을 확인하세요."),
+          // ★오른쪽 열은 이제 없다(하단 탭으로 옮겼다) — 없는 곳을 가리키지 않는다.
+          : (locale === "en" ? "Run started. Watch the steps light up on the canvas; the log is in the panel below." : "실행을 시작했습니다. 캔버스에서 단계가 켜지는 것을 보고, 자세한 기록은 아래 [로그] 탭에 쌓입니다."),
       );
       const snap = await api.automations.latestRun(automation.id);
       if (snap?.nodeStates) setRunStates(snap.nodeStates);
@@ -1065,17 +1104,9 @@ function AutomationFlowPage() {
      사용자는 어느 쪽을 눌러야 하는지 몰랐다. */
   const inspectorContent = (
     <>
-                <div className="automation-inspector-bar">
-            <span>{locale === "en" ? "Details" : "상세"}</span>
-            <button
-              type="button"
-              onClick={() => setRightOpen(false)}
-              aria-label={locale === "en" ? "Collapse details" : "상세 패널 접기"}
-              title={locale === "en" ? "Collapse details" : "상세 패널 접기"}
-            >
-              ⟩
-            </button>
-          </div>
+          {/* ★탭 이름이 이미 "상세"인데 그 안에서 또 "상세 ⟩"라는 머리줄이 나오던 자리.
+              같은 말을 두 번 하고, 접기 화살표는 이제 존재하지 않는 오른쪽 열을 접으려
+              했다(실렌더 2026-08-09). 탭이 제목이자 접기다 — 이 줄은 지운다. */}
           {editing && paletteOpen ? (
             <NodePalette onAdd={addPaletteNode} onClose={() => setPaletteOpen(false)} />
           ) : editing && selectedEdge ? (
@@ -1104,7 +1135,7 @@ function AutomationFlowPage() {
   );
 
 return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "var(--paper-2)", minHeight: 0 }}>
+    <div className="automation-flow-screen" style={{ flex: 1, display: "flex", flexDirection: "column", background: "var(--paper-2)", minHeight: 0 }}>
       <header
         className="titlebar-drag"
         style={{
@@ -1204,8 +1235,26 @@ return (
             >
               {t("auto.flow.simulate")}
             </button>
-            <button onClick={() => void runNow()} disabled={running} className="titlebar-nodrag" style={{ ...actionBtn, color: running ? "var(--muted-deep)" : "var(--ink)" }}>
-              {running ? <SpinnerLabel text={t("auto.flow.running")} /> : t("auto.flow.run_now")}
+            {/* ★멈춘 실행이 남아 있으면 이 버튼은 처음부터가 아니라 **이어서** 돈다
+                (run-graph 가 같은 occurrence 체크포인트에서 재개한다). 이름이 그 사실을
+                말하지 않아 오너가 "첨부터 실행되는건지 모르겠"다고 했다 — 이름을
+                하는 일에 맞춘다(HE.md 기대와의 일치성). */}
+            <button
+              onClick={() => void runNow()}
+              disabled={running}
+              className="titlebar-nodrag"
+              title={resumable
+                ? (locale === "en"
+                  ? "Continues the stopped run from where it stopped — finished steps do not run twice."
+                  : "멈춘 그 자리부터 이어서 돕니다. 이미 끝난 단계는 다시 실행되지 않습니다.")
+                : undefined}
+              style={{ ...actionBtn, color: running ? "var(--muted-deep)" : "var(--ink)" }}
+            >
+              {running
+                ? <SpinnerLabel text={t("auto.flow.running")} />
+                : resumable
+                  ? (locale === "en" ? "Continue run" : "이어서 실행")
+                  : t("auto.flow.run_now")}
             </button>
             {/* ★도는 것을 사람이 멈춘다. 자동화는 사람이 안 볼 때 도는 것이라,
                 봤을 때 세울 수 있어야 한다(다른 기능은 전부 취소가 있었다). */}
@@ -1262,6 +1311,64 @@ return (
           </>
         )}
       </header>
+
+      {/* ★상태 한 줄 — 화면에서 "지금 무슨 일이 일어났고 무엇을 누르면 되는가"의 유일한 답.
+          편집 중에는 뜨지 않는다(그때의 관심사는 실행이 아니라 그래프다). */}
+      {!editing ? (
+        <div
+          className="automation-run-status"
+          data-tone={pausedApproval ? "wait" : liveRunning ? "run" : errorCount > 0 ? "stop" : "idle"}
+          data-testid="run-status-strip"
+        >
+          <span className="automation-run-status-dot" aria-hidden="true" />
+          <span className="automation-run-status-text">
+            {pausedApproval
+              ? (locale === "en"
+                ? `Paused before “${pausedApproval.label}” — it has not run yet. Approving continues from here.`
+                : `“${pausedApproval.label}” 앞에서 멈춰 있습니다 — 아직 실행하지 않았습니다. 승인하면 여기서부터 이어집니다.`)
+              : liveRunning
+                ? (locale === "en"
+                  ? `Running${runningNodeLabel ? ` — ${runningNodeLabel}` : ""} · ${doneNodes}/${totalNodes} done`
+                  : `실행 중${runningNodeLabel ? ` — ${runningNodeLabel}` : ""} · ${totalNodes}단계 중 ${doneNodes}단계 완료`)
+                : errorCount > 0
+                  ? (locale === "en"
+                    ? `Stopped · ${doneNodes}/${totalNodes} done. What stopped it is in Details.`
+                    : `멈춰 있습니다 · ${totalNodes}단계 중 ${doneNodes}단계 완료. 무엇 때문인지는 [상세]에 있습니다.`)
+                  : runStartedAt
+                    // ★"안 돌고 있다"만 말하면 사용자는 "그래서 지난번엔 어떻게 됐는데?"를
+                    //   또 찾아 헤맨다(평가의 간극). 마지막 실행 결과를 여기서 끝낸다.
+                    ? (locale === "en"
+                      ? `Last run ${new Date(runStartedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} · ${doneNodes}/${totalNodes} steps done`
+                      : `마지막 실행 ${new Date(runStartedAt).toLocaleString("ko-KR", { month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })} · ${totalNodes}단계 중 ${doneNodes}단계 완료`)
+                    : (locale === "en" ? "Not run yet — press Run now to try it once." : "아직 실행한 적이 없습니다 — [지금 실행]으로 한 번 돌려볼 수 있습니다.")}
+          </span>
+          {/* 주 행동은 언제나 **하나**, 그리고 아래 [상세]가 이미 그 카드를 펼쳐 놓았으면
+              여기는 아무 버튼도 두지 않는다: 같은 행동이 두 군데 있으면 사용자는 둘이
+              다른 일을 한다고 읽는다(오너 지적 "지금 다시 실행이 왜 2개나 있고"). */}
+          {detailsShown ? null : pausedApproval ? (
+            <button
+              type="button"
+              data-testid="status-approve"
+              className="automation-run-status-action"
+              disabled={approvalBusy}
+              onClick={() => void decideApproval(pausedApproval.nodeId, "approved")}
+            >
+              {approvalBusy
+                ? (locale === "en" ? "Approving…" : "승인하는 중…")
+                : (locale === "en" ? "Approve and continue" : "승인하고 이어서 실행")}
+            </button>
+          ) : errorCount > 0 && !liveRunning ? (
+            <button
+              type="button"
+              data-testid="status-open-details"
+              className="automation-run-status-action"
+              onClick={() => { setLogOpen(true); setBottomTab("details"); }}
+            >
+              {locale === "en" ? "Open Details" : "상세 열기"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* 알림·제안·결정 카드는 캔버스 **위에 뜬다**. 예전에는 캔버스 위쪽에 차곡차곡 쌓여서,
           카드가 하나 늘 때마다 그래프가 아래로 밀리고 좁아졌다 — 화면의 주인공이
@@ -1446,7 +1553,11 @@ return (
           ) : null}
           {/* ★검증 로그 패널 — 에러·경고를 상단 팝업이 아니라 VS Code 하단 패널처럼.
               위 팝업은 캔버스를 밀어내고, 읽기 전에 사라지고, 줄이 많으면 잘렸다. */}
-          {(!editing || logRows.length > 0) ? (
+          {/* ★편집 중에도 이 패널이 있어야 한다 — 팔레트·노드 설정이 [상세] 탭에 살기
+              때문이다. 예전 조건(`!editing || logRows.length > 0`)이면 검증 이슈가 하나도
+              없는 정상 편집 상태에서 패널 자체가 렌더되지 않아, [노드 추가]를 눌러도
+              팔레트가 갈 곳이 없었다 — 눌러도 아무 일이 없는 버튼(게이트 실측 2026-08-09). */}
+          {(!editing || logRows.length > 0 || paletteOpen || selectedNodeId || selectedEdgeId) ? (
             /* ★터미널처럼 한 패널 — 로그가 위, 챗 입력이 아래 고정(오너 지시: 플로팅 금지·합치기). */
             <div className="automation-issue-log titlebar-nodrag" style={{ height: logOpen ? logHeight : (editing ? 30 : 92), display: "flex", flexDirection: "column" }}>
               <div
@@ -1581,7 +1692,12 @@ return (
           사유·경과 같은 정보성 실패는 하단 로그 패널이 전담한다 — 같은 실패가 위아래
           두 곳에 뜨면 어느 쪽이 진짜 행동 지점인지 알 수 없다(오너 지시 2026-08-06:
           "아래 만들었으면 위에 저거 없애야지"). */}
-      {Object.entries(nodeFailures).map(([failedNodeId, failure]) => {
+      {/* ★편집 중에는 실행 결정 카드를 이 탭에서 비운다. 지금 여기 있는 이유는
+          "노드를 놓거나 고치려고"이고, 팔레트·노드 설정이 그 카드에 밀려 화면 밖으로
+          내려가면 [노드 추가]를 눌러도 아무것도 안 나온 것처럼 보인다(실렌더 2026-08-09).
+          결정은 사라지지 않는다 — 탭 배지와 상단 상태줄이 계속 부르고, 편집을 끝내면
+          그 자리에 그대로 있다. */}
+      {(editing ? [] : Object.entries(nodeFailures)).map(([failedNodeId, failure]) => {
         const nodeLabel = rfNodes.find((n) => n.id === failedNodeId)?.data?.label ?? failedNodeId;
         const awaitingApproval = failure.code === "APPROVAL_REQUIRED";
         const evalStuck = failure.code === "EVAL_STUCK";
@@ -1939,15 +2055,8 @@ function NodeInspector({ node, onClose, t }: { node: WorkflowNode; onClose: () =
   const entries = Object.entries(node.config ?? {});
   return (
     <aside
-      className="titlebar-nodrag"
-      style={{
-        width: 300,
-        flexShrink: 0,
-        borderLeft: "var(--hairline)",
-        background: "var(--paper)",
-        overflowY: "auto",
-        padding: 16,
-      }}
+      className="titlebar-nodrag automation-embedded-panel"
+      style={{ background: "var(--paper)", overflowY: "auto", padding: 16 }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
         <span
@@ -1962,7 +2071,12 @@ function NodeInspector({ node, onClose, t }: { node: WorkflowNode; onClose: () =
         >
           {node.type}
         </span>
-        <button onClick={onClose} aria-label={t("common.close")} style={{ color: "var(--muted-deep)", padding: 2 }}>
+        {/* 피츠: 실측 18×18 이라 조준해야 눌렸다. 보이는 글리프는 그대로, 히트만 28×28. */}
+        <button
+          onClick={onClose}
+          aria-label={t("common.close")}
+          style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", minWidth: 28, minHeight: 28, color: "var(--muted-deep)" }}
+        >
           ×
         </button>
       </div>

@@ -190,9 +190,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
      승인 자체를 할 수 없다. 승인은 상세 탭의 노드 카드가 한다. 여기서는 재실행을
      막고 어디서 결정하면 되는지만 말한다. 누르면 같은 일이 반복되는 버튼은
      "제어권"이 아니라 함정이다(HE.md 제어성·사용 오류에 대한 견고성). */
-  const awaitingApprovalDecision = /APPROVAL_REQUIRED|승인 대기|승인 확인이 필요/.test(
-    `${blockingRun?.error ?? ""} ${blockingRun?.outcomeReason ?? ""}`,
-  );
+  const awaitingApprovalDecision = blockingRun ? runWaitsForApproval(blockingRun) : false;
   const rerunBlocked = Boolean(reconciliation) || awaitingApprovalDecision;
   const rawReason = useMemo(
     () => stripReasonCode(blockingRun?.error ?? regularAttentions[0]?.lastError ?? ""),
@@ -630,7 +628,10 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
           runs.map((run) => (
             <article key={run.id} className="automation-run-row" data-status={run.status} data-outcome={run.outcome ?? undefined}>
               <div>
-                <strong>{statusLabel(run.status, ko)}</strong>
+                {/* ★승인 대기로 멈춘 실행을 "실패"라고 부르지 않는다 — 아무것도 실패하지
+                    않았고 사람을 기다렸을 뿐이다. 잘못된 이름은 사용자가 원인을 엉뚱한
+                    곳에서 찾게 만든다(오너 실측: 승인 대기 실행이 목록에 "실패"로 떴다). */}
+                <strong>{runWaitsForApproval(run) ? (ko ? "승인 대기" : "Waiting for approval") : statusLabel(run.status, ko)}</strong>
                 {/* ★두 답을 한 칸에 뭉개지 않는다. 예전에는 판정 결과가 실행 상태를
                     덮어써서, 끝까지 잘 돈 실행이 목록에 "내 확인 필요"로만 보였다 —
                     사용자는 성공인지 실패인지 알 수 없었다. 이제 나란히 놓는다. */}
@@ -722,6 +723,19 @@ function summarizeSnapshot(snap: WorkflowRunSnapshot | null, ko: boolean): { tit
     };
   }
   if (snap.status === "error" || failed > 0) {
+    /* ★승인 대기는 실패가 아니라 **일시정지**다(run-graph 의 계약과 같은 말).
+       한 상황을 위 상태줄은 "멈춰 있습니다 — 승인하면 이어집니다"라고 하고 여기서는
+       "끝까지 완료되지 않았어요"라고 하면, 사용자는 두 개의 다른 일이 일어난 줄 안다
+       (HE.md 중복 효과). 같은 사실은 같은 말로 한 번만. */
+    const waiting = Object.values(snap.nodeFailures ?? {}).some((f) => f?.code === "APPROVAL_REQUIRED");
+    if (waiting) {
+      return {
+        title: ko ? "승인을 기다리는 중이에요" : "Waiting for your approval",
+        detail: ko
+          ? "아직 바깥으로 나간 것은 없어요. 승인하면 멈춘 자리부터 이어집니다."
+          : "Nothing has gone out yet. Approving continues from where it stopped.",
+      };
+    }
     return {
       title: ko ? "끝까지 완료되지 않았어요" : "Not fully completed",
       detail: ko ? "완료로 처리하지 않았어요." : "It was not marked complete.",
@@ -865,6 +879,11 @@ function plainRun(run: AutomationRunRecord, ko: boolean): { title: string; body:
   const recorded = (run.error ?? "").trim();
   const readable = recorded.length > 0 && recorded.length <= 400 && (!ko || /[\uac00-\ud7a3]/.test(recorded));
   return readable ? { title: plain.title, body: recorded } : plain;
+}
+
+/** 이 기록이 "승인을 기다리다 멈춘 것"인가 — 판별 규칙은 한 곳에만 둔다. */
+function runWaitsForApproval(run: AutomationRunRecord): boolean {
+  return /APPROVAL_REQUIRED|승인 대기|승인 확인이 필요/.test(`${run.error ?? ""} ${run.outcomeReason ?? ""}`);
 }
 
 function statusLabel(status: AutomationRunRecord["status"], ko: boolean): string {

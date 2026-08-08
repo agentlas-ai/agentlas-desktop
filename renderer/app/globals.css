@@ -2311,7 +2311,9 @@ button[data-dashboard-import="true"]:disabled {
 .automation-inspector-column > aside { width: 100% !important; border-left: 0 !important; }
 .automation-inspector-bar { position: sticky; top: 0; z-index: 2; min-height: 48px; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--rd-hair); background: var(--rd-surface); }
 .automation-inspector-bar span { font-size: 12px; font-weight: 750; }
-.automation-inspector-bar button { border: 0; background: transparent; color: var(--rd-ink-3); font-size: 11px; cursor: pointer; }
+/* 피츠의 법칙: 글리프 하나짜리 버튼은 실측 4×17px 이었다 — 조준해야 눌리는 크기다.
+   보이는 크기는 그대로 두고 히트 영역만 28×28 로 넓힌다(실측 2026-08-09). */
+.automation-inspector-bar button { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; border: 0; background: transparent; color: var(--rd-ink-3); font-size: 11px; cursor: pointer; }
 .automation-inspector-bar button:hover { color: var(--rd-ink); }
 .automation-node-empty { min-height: 48px; border-bottom: 1px solid var(--rd-hair); }
 /* 기록 원문 — 평이한 설명 뒤에만, 접힌 채로. 기본 화면에서 시스템 문장이 앞서지 않게. */
@@ -11713,3 +11715,94 @@ button[data-toggle-state="on"] {
   cursor: pointer;
 }
 .automation-bottom-collapse:hover { color: var(--ink); }
+
+/* ★하단 [상세] 탭에 들어가는 패널들 — 팔레트·노드 설정·노드 정보.
+   셋 다 오른쪽 열 시절의 고정폭(260/320/300)과 왼쪽 테두리를 그대로 갖고 있어서,
+   전폭 바텀시트 안에서 왼쪽 3분의 1만 쓰고 나머지는 빈칸이었다
+   (오너 지적 2026-08-09: "오른쪽은 왜 빈칸임?"). 폭은 패널이 정한다. */
+.automation-embedded-panel {
+  width: 100%;
+  min-width: 0;
+  border-left: 0;
+}
+/* 넓어진 만큼 세로로 길게 늘어놓지 않는다 — 스크롤 대신 열을 쓴다. */
+.automation-embedded-panel > section,
+.automation-embedded-panel > div:not(:first-child) {
+  break-inside: avoid;
+}
+/* 노드 설정 폼 — 전폭 하단 패널에서 입력 한 칸이 1100px 이 되면 읽기도 훑기도 나쁘다.
+   짧은 칸은 나란히, 여러 줄 입력(프롬프트·스크립트·채점표)만 한 줄 전체를 쓴다. */
+.automation-node-config {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  align-content: start;
+  gap: 14px;
+}
+.automation-node-config > *:has(textarea),
+.automation-node-config > *:has(.automation-node-config-wide) { grid-column: 1 / -1; }
+/* 머리줄(노드 종류 + 닫기)은 칸이 아니라 줄이다 — 첫 칸에 끼면 닫기가 폼 한가운데 뜬다. */
+.automation-node-config > div:first-child { grid-column: 1 / -1; }
+
+.automation-palette-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 4px;
+}
+
+/* ★상태 한 줄 — 캔버스 바로 위, 헤더 바로 아래. 화면에서 "지금 무슨 상태이고 무엇을
+   누르면 되는가"를 말하는 유일한 자리다. 카드처럼 떠 있지 않고 레이아웃에 붙어 있어
+   나타났다 사라져도 캔버스를 밀지 않는다(높이 고정). */
+.automation-run-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  min-height: 36px;
+  padding: 0 32px;
+  border-bottom: 1px solid var(--paper-edge);
+  background: var(--paper);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.automation-run-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--muted);
+  flex: none;
+}
+.automation-run-status[data-tone="run"] .automation-run-status-dot { background: var(--accent); animation: automation-run-status-pulse 1.4s ease-in-out infinite; }
+.automation-run-status[data-tone="wait"] .automation-run-status-dot { background: var(--warn, #d08700); }
+.automation-run-status[data-tone="stop"] .automation-run-status-dot { background: var(--danger, #c0392b); }
+@keyframes automation-run-status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .automation-run-status[data-tone="run"] .automation-run-status-dot { animation: none; }
+}
+.automation-run-status-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 결정을 기다리는 줄은 눈에 먼저 들어와야 한다 — 색을 문장에도 준다. */
+.automation-run-status[data-tone="wait"] .automation-run-status-text { color: var(--ink); font-weight: 600; }
+.automation-run-status-action {
+  flex: none;
+  /* 피츠: 주 행동은 이 줄에서 가장 큰 타깃이다. */
+  min-height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.automation-run-status-action:disabled { opacity: 0.6; cursor: default; }
+.automation-run-status[data-tone="stop"] .automation-run-status-action {
+  border-color: var(--paper-edge);
+  background: var(--paper-2);
+  color: var(--ink);
+}

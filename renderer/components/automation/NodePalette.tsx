@@ -98,11 +98,8 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
 
   return (
     <aside
-      className="titlebar-nodrag"
+      className="titlebar-nodrag automation-embedded-panel automation-node-palette"
       style={{
-        width: 260,
-        flexShrink: 0,
-        borderLeft: "var(--hairline)",
         background: "var(--paper)",
         overflowY: "auto",
         padding: 14,
@@ -214,7 +211,9 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       >
         {title}
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>{children}</div>
+      {/* 하단 전폭 패널에서는 세로로 한 줄씩 쌓지 않는다 — 넓은 폭을 열로 쓴다.
+          좁아지면 자동으로 한 열로 돌아온다(고정 열 수 금지). */}
+      <div className="automation-palette-items">{children}</div>
     </div>
   );
 }
