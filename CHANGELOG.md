@@ -23,6 +23,9 @@ stays the authority for what is actually downloadable.
   do nothing.
 - Small controls are easier to hit, and the duplicate Details heading inside
   the Details tab is gone.
+- Stopping a local model run reports why it stopped. It said "This operation
+  was aborted" in English; briefly it would also have called a watchdog or
+  timeout a cancellation you made.
 
 ## 0.9.69 — 2026-08-09
 

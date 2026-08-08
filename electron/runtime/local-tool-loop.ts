@@ -14,6 +14,7 @@ import type { RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from ".
 import { workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { tStatus } from "./status-i18n";
+import { abortReasonError } from "./abort-reason";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { mcpConfigKey } from "../mcp-tools/mcp-config";
 import { testServerConnection, callServerToolContent } from "../mcp-tools/client";
@@ -348,8 +349,9 @@ export async function runLocalOpenAiChat(
       // 취소는 취소로 올려보낸다. 다만 **원 에러를 그대로 던지면 안 된다**:
       // AbortController 의 DOMException 문구("This operation was aborted")가 그대로
       // 화면에 흘러 한국어 UI에 영어 기계 문장이 박혔다(실측 2026-08-09 녹화).
-      // CLI 러너들이 이미 쓰는 현지화 문구와 같은 말을 쓴다.
-      if (req.signal?.aborted) throw new Error(tStatus(req.locale, "aborted"));
+      // 그렇다고 "사용자가 중지했습니다"로 덮어도 안 된다 — 워치독·시간 초과가
+      // 끊은 것까지 사람이 누른 것으로 만든다. 끊은 쪽이 실은 이유를 먼저 읽는다.
+      if (req.signal?.aborted) throw abortReasonError(req);
       throw new Error(opts.unreachableMessage);
     }
     if (!resp.ok) {

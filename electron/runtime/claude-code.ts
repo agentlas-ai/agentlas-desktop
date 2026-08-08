@@ -24,6 +24,7 @@ import {
   unseenHistoryGap,
 } from "./continuity";
 import { tStatus } from "./status-i18n";
+import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
 import { createUntrustedRuntimeFailure } from "./untrusted-error";
@@ -40,12 +41,6 @@ import { isAuthenticSystemTimeMcpLaunch } from "../mcp-tools/system-time-server"
  * 예산 소진으로 일어난다. 예전엔 전부 "사용자가 정지 버튼으로"라고 단정해,
  * 누른 적 없는 사람이 거짓 사유를 받았다(실사용 실측).
  */
-function abortReasonError(req: { signal?: AbortSignal; locale?: unknown }): Error {
-  const reason = req.signal?.reason;
-  if (reason instanceof Error && reason.message.trim()) return reason;
-  if (typeof reason === "string" && reason.trim()) return new Error(reason);
-  return new Error(tStatus(req.locale as never, "aborted"));
-}
 
 const KIND = "claude-code";
 const AGENT_APP_MCP_SECRET_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;

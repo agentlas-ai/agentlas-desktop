@@ -7,17 +7,12 @@ import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner
 import { wrapSystemPrompt } from "./runner";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { tStatus } from "./status-i18n";
+import { abortReasonError } from "./abort-reason";
 
 /**
  * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
  * 예산 소진으로 일어난다. 예전엔 전부 "사용자가 정지 버튼으로"라고 단정했다.
  */
-function abortReasonError(req: { signal?: AbortSignal; locale?: unknown }): Error {
-  const reason = req.signal?.reason;
-  if (reason instanceof Error && reason.message.trim()) return reason;
-  if (typeof reason === "string" && reason.trim()) return new Error(reason);
-  return new Error(tStatus(req.locale as never, "aborted"));
-}
 
 const CANDIDATES = [
   path.join(os.homedir(), ".cursor", "bin", "cursor-agent"),
