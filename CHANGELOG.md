@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.9.67 — 2026-08-08
+
+This release binds Agentlas OS v1.1.99 at
+7524f206532c5c509be316d497781b240be3d487.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- The project task screen no longer replaces itself with a recovery message.
+  One list arriving empty from the app's own internals was enough to throw
+  during render and hand the whole chat to the error boundary; a caught
+  rejection was guarded but an empty result was not. Lists are now normalized
+  where they enter the screen, so a missing roster empties one section instead
+  of the page.
+- File paths in tool rows are relative to the folder you are working in again.
+  The shortening existed and was tested, but the screen never passed it the
+  working folder, so it printed the full path from the disk root.
+- The graph's bottom panel says what it is. Its guidance line was in the page
+  but sized for a taller panel, so it was clipped away and left a bare white
+  box between two dividers; a session that cannot be loaded now says so instead
+  of showing an empty box with a dead input.
+- The graph composer asks in Korean. Its placeholder read "Chat anything" in
+  the Korean interface.
+- Context compaction is visible in the conversation. When earlier turns are
+  folded into a summary, the transcript now shows that boundary instead of a
+  status line that scrolls past — the reason a long conversation could seem to
+  forget what you said.
+- A plan the agent writes renders as a checklist, and a long conversation has
+  an outline rail: one tick per request, click to jump back to it.
+
 ## 0.9.66 — 2026-08-08
 
 This release binds Agentlas OS v1.1.99 at
