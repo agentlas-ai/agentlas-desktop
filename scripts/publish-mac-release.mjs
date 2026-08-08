@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -8,6 +9,7 @@ const modulePath = fileURLToPath(import.meta.url);
 const desktopRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_ASSET_WAIT_MS = 15 * 60 * 1000;
 const DEFAULT_ASSET_POLL_MS = 10 * 1000;
+export const PUBLIC_CHECKSUM_FILE = "desktop-release-assets.json";
 
 export function requiredReleaseAssetNames(version) {
   return [
@@ -28,7 +30,53 @@ export function requiredReleaseAssetNames(version) {
     "latest-linux.yml",
     "latest-mac.yml",
     "desktop-release-verification.json",
+    PUBLIC_CHECKSUM_FILE,
   ];
+}
+
+/**
+ * Every asset a user can install from or auto-update to.  Blockmaps, feeds,
+ * and evidence documents are excluded: they are metadata about these files,
+ * not payloads a user runs.  `desktop-release-verification.json` deliberately
+ * covers only the two notarized macOS DMGs, so publishing that file alone left
+ * six of these eight payloads with no published checksum while the notes
+ * claimed otherwise.  This list is what the public checksum file must cover
+ * exactly -- not a subset.
+ */
+export function userPayloadAssetNames(version) {
+  return requiredReleaseAssetNames(version).filter(
+    (name) =>
+      !name.endsWith(".blockmap") &&
+      !name.endsWith(".yml") &&
+      !name.endsWith(".json"),
+  );
+}
+
+export function buildPublicChecksumDocument({ version, tag, repo, releaseDir }) {
+  assertStableReleaseIdentity(version, tag);
+  const payloads = userPayloadAssetNames(version).map((name) => {
+    const file = join(releaseDir, name);
+    if (!existsSync(file) || !lstatSync(file).isFile() || lstatSync(file).size <= 0) {
+      throw new Error(`Public checksum coverage requires a non-empty ${name}`);
+    }
+    const bytes = readFileSync(file);
+    return {
+      fileName: name,
+      sizeBytes: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      sha512: createHash("sha512").update(bytes).digest("base64"),
+      url: `https://github.com/${repo}/releases/download/${tag}/${name}`,
+    };
+  });
+  return {
+    schemaVersion: "agentlas.desktop-release-assets.v1",
+    generatedAt: new Date().toISOString(),
+    repo,
+    tag,
+    version,
+    coverage: "every-user-installable-payload",
+    artifacts: payloads.sort((left, right) => left.fileName.localeCompare(right.fileName)),
+  };
 }
 
 /**
@@ -305,6 +353,16 @@ async function main() {
   run("node", ["scripts/fix-mac-latest-zip.mjs"]);
   cleanupAppleDouble(releaseDir);
 
+  // Publish the checksums that were already being computed privately.  The
+  // release notes below state their own coverage from this document, so the
+  // claim can no longer be wider than the evidence.
+  const publicChecksums = buildPublicChecksumDocument({ version, tag, repo, releaseDir });
+  writeFileSync(
+    join(releaseDir, PUBLIC_CHECKSUM_FILE),
+    `${JSON.stringify(publicChecksums, null, 2)}\n`,
+  );
+  cleanupAppleDouble(releaseDir);
+
   const notesPath = join(releaseDir, "github-release-notes.md");
   writeFileSync(
     notesPath,
@@ -320,7 +378,13 @@ async function main() {
       "- Runs with user-selected BYOK APIs or local CLI runtimes.",
       "",
       "Stable/latest promotion occurs only after all required platform installers, update feeds, and Mac verification evidence are present.",
-      "Checksums and file sizes are in `desktop-release-verification.json`.",
+      // Derived, never hand-written: the sentence names the exact count this
+      // release actually documents.  Adding a platform target changes this
+      // line by itself.
+      `SHA-256/SHA-512 checksums and file sizes for all ${publicChecksums.artifacts.length} installable payloads ` +
+        `(${publicChecksums.artifacts.map((artifact) => artifact.fileName).join(", ")}) ` +
+        `are in \`${PUBLIC_CHECKSUM_FILE}\`.`,
+      "Apple notarization and Gatekeeper evidence for the two macOS DMGs is in `desktop-release-verification.json`.",
       "",
     ].join("\n"),
   );

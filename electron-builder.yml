@@ -84,6 +84,11 @@ extraResources:
       # such files exist; this is what actually keeps them out.
       - "!.agentlas/**"
       - "!**/.agentlas/**"
+      # ...except the one tracked, non-personal file: the engine's product
+      # runtime contract. It shipped in 0.9.63 only because electron-builder's
+      # matcher happens not to apply the exclusions above to this dotfile path;
+      # re-include it explicitly so the outcome is a decision, not an accident.
+      - ".agentlas/product-runtime-contract.json"
       - "!tests/**"
       - "!benchmarks/**"
       - "!docs/**"

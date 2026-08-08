@@ -23,9 +23,11 @@ import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
+  PUBLIC_CHECKSUM_FILE,
   assertStableReleaseIdentity,
   publicReleaseAssetNames,
   requiredReleaseAssetNames,
+  userPayloadAssetNames,
 } from "./publish-mac-release.mjs";
 
 const require = createRequire(import.meta.url);
@@ -160,6 +162,83 @@ export function assertPublicVerificationShape(verification, version, tag) {
       throw new Error(`desktop-release-verification.json public artifact shape failed for ${arch}.`);
     }
   }
+}
+
+/**
+ * The published checksum document must cover the installable payload set
+ * EXACTLY -- not a subset.  A subset check is what let v0.9.63 ship notes
+ * saying "checksums are in <file>" while six of eight payloads (both macOS
+ * update ZIPs, both Windows executables, the AppImage and the deb) had no
+ * published digest at all.  Adding a build target now fails this gate until
+ * its evidence exists, and a digest that disagrees with the shipped bytes
+ * fails it too.
+ */
+export function assertPublicChecksumCoverage({ document, version, tag, repo, assetByName }) {
+  if (!document || typeof document !== "object" || Array.isArray(document) ||
+      document.schemaVersion !== "agentlas.desktop-release-assets.v1" ||
+      document.version !== version || document.tag !== tag || tag !== `v${version}` ||
+      document.repo !== repo || document.coverage !== "every-user-installable-payload" ||
+      !isIsoTimestamp(document.generatedAt) || !Array.isArray(document.artifacts)) {
+    throw new Error(`${PUBLIC_CHECKSUM_FILE} is not the exact public v1 schema.`);
+  }
+  const expected = new Set(userPayloadAssetNames(version));
+  const actual = new Set();
+  for (const artifact of document.artifacts) {
+    if (!exactKeys(artifact, ["fileName", "sizeBytes", "sha256", "sha512", "url"])) {
+      throw new Error(`${PUBLIC_CHECKSUM_FILE} entry shape failed.`);
+    }
+    if (actual.has(artifact.fileName)) {
+      throw new Error(`${PUBLIC_CHECKSUM_FILE} lists ${artifact.fileName} twice.`);
+    }
+    actual.add(artifact.fileName);
+  }
+  const missing = [...expected].filter((name) => !actual.has(name)).sort();
+  const unexpected = [...actual].filter((name) => !expected.has(name)).sort();
+  if (missing.length || unexpected.length) {
+    throw new Error(
+      `${PUBLIC_CHECKSUM_FILE} must cover every installable payload exactly ` +
+      `(missing=${missing.join(", ") || "none"}; unexpected=${unexpected.join(", ") || "none"}).`,
+    );
+  }
+  for (const artifact of document.artifacts) {
+    const measured = assetByName.get(artifact.fileName);
+    if (!measured) throw new Error(`${PUBLIC_CHECKSUM_FILE} names an asset this release does not ship: ${artifact.fileName}`);
+    if (artifact.sizeBytes !== measured.sizeBytes ||
+        artifact.sha256 !== measured.sha256 ||
+        artifact.sha512 !== measured.sha512) {
+      throw new Error(`${PUBLIC_CHECKSUM_FILE} disagrees with the shipped bytes of ${artifact.fileName}.`);
+    }
+    if (artifact.url !== `https://github.com/${repo}/releases/download/${tag}/${artifact.fileName}`) {
+      throw new Error(`${PUBLIC_CHECKSUM_FILE} download URL is wrong for ${artifact.fileName}.`);
+    }
+  }
+  return { coverage: expected.size, subsetAllowed: false };
+}
+
+/**
+ * The notes are generated from the checksum document, so every coverage claim
+ * in them must still name that document and its exact count at publish time.
+ * A hand-edited note that widens the claim fails here.
+ */
+export function assertReleaseNotesClaims({ notes, document }) {
+  const names = document.artifacts.map((artifact) => artifact.fileName);
+  const required = [
+    `all ${names.length} installable payloads`,
+    `are in \`${PUBLIC_CHECKSUM_FILE}\``,
+    ...names,
+  ];
+  for (const fragment of required) {
+    if (!notes.includes(fragment)) {
+      throw new Error(`Release notes do not state their own checksum coverage: missing "${fragment}".`);
+    }
+  }
+  if (/checksums? and file sizes are in `desktop-release-verification\.json`/i.test(notes)) {
+    throw new Error(
+      "Release notes claim desktop-release-verification.json holds every checksum; " +
+      "that file covers only the two notarized macOS DMGs.",
+    );
+  }
+  return { claimsChecked: required.length };
 }
 
 function assertNoAppleDouble(releaseDir) {
@@ -303,6 +382,23 @@ export function validateLocalReleaseDirectory({
   const verification = JSON.parse(readFileSync(join(releaseDir, "desktop-release-verification.json"), "utf8"));
   if (verification.sourceCommit.toLowerCase() !== sourceCommit.toLowerCase()) {
     throw new Error("desktop-release-verification.json does not bind this exact Desktop source commit.");
+  }
+  const checksumDocument = JSON.parse(readFileSync(join(releaseDir, PUBLIC_CHECKSUM_FILE), "utf8"));
+  assertPublicChecksumCoverage({
+    document: checksumDocument,
+    version,
+    tag,
+    repo: verification.repo,
+    assetByName,
+  });
+  // Generated notes are the normal path; a release staged without them is
+  // still checked once they exist so a hand-edited body cannot widen the claim.
+  const notesFile = join(releaseDir, "github-release-notes.md");
+  if (existsSync(notesFile)) {
+    assertReleaseNotesClaims({
+      notes: readFileSync(notesFile, "utf8"),
+      document: checksumDocument,
+    });
   }
   return {
     schemaVersion: 1,

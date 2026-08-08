@@ -10,9 +10,10 @@
 - Borrowed agents receive a write command for their own experience store, so
   memory accumulates instead of only being read.
 
-This release binds Agentlas OS v1.1.99 at 7524f206532c5c509be316d497781b240be3d487.
-This changelog entry describes source readiness and does not prove a published
-release.
+This release binds Agentlas OS v1.1.99 at
+7524f206532c5c509be316d497781b240be3d487.
+These source gates do not themselves publish a public installer or update
+feed; the Releases page stays the authority for what is actually downloadable.
 
 ## 0.9.62 — 2026-08-06
 

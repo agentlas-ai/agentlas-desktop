@@ -328,6 +328,19 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
   if (!assetVerifier.includes("publicReleaseAssetNames") || !assetVerifier.includes("--public-allowlist")) {
     throw new Error("release asset verification does not enforce an explicit public allowlist");
   }
+  // v0.9.63 shipped notes saying every checksum was published while only the
+  // two macOS DMGs had one. The coverage gate and the derived notes are the
+  // repair; neither may be removed without this failing.
+  const publisher = readFileSync(join(root, "scripts", "publish-mac-release.mjs"), "utf8");
+  if (!assetVerifier.includes("assertPublicChecksumCoverage") ||
+      !assetVerifier.includes("assertReleaseNotesClaims") ||
+      !publisher.includes("buildPublicChecksumDocument") ||
+      !publisher.includes("userPayloadAssetNames") ||
+      !publisher.includes("installable payloads")) {
+    throw new Error(
+      "release publishing no longer proves that published checksums cover every installable payload",
+    );
+  }
 
   const readme = readFileSync(join(root, "README.md"), "utf8");
   const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
