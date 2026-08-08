@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.64 — 2026-08-08
+
+- Approving a step actually ends the question. Deciding on an approval used to
+  leave the APPROVAL_REQUIRED record in the run snapshot, so live polling
+  resurrected the approval card seconds after you answered it — an endless
+  loop of the same question. A decision now clears that node's failure from
+  the snapshot, and "Approve and continue" does what it says: the run resumes
+  immediately from the same checkpoint, so a one-time approval matches too.
+- The canvas speaks from one place. Floating status banners ("Saved" and
+  friends) covered the canvas and blocked clicks; they are gone. Status,
+  errors, action cards (start value, approval, verdict correction, dependency
+  repair), and the session conversation now all live in the bottom panel,
+  terminal style, with a single input: Enter talks to the session, and the
+  button beside it drafts a graph change. The separate session column is gone.
+- An edge can be deleted again: select it and press the delete button in its
+  panel (or the Delete key). The loop-bound panel that rendered as unstyled
+  skeleton HTML now has its real styling.
+- Saving no longer rearranges your nodes. The post-save rehydration ran the
+  overlap heuristic over the layout you just placed by hand; the canvas is now
+  the source of truth right after a save.
+
 ## 0.9.63 — 2026-08-07
 
 - Engine completes a package's contract from its own declarations before verify;
