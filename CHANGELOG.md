@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.9.68 — 2026-08-09
+
+This release binds Agentlas OS v1.1.99 at
+7524f206532c5c509be316d497781b240be3d487.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- Approving a step now approves it. The button people were pressing sat on a
+  run-history card that has no step attached, so it could only start the run
+  over — which stopped at the same approval again, however many times it was
+  pressed. The approval that carries the step is now the one on screen.
+- The graph's lower area is one panel with three tabs — Chat, Log, Details —
+  the way a terminal keeps its tabs. The separate right-hand column is gone and
+  the canvas has its full width back. The same run used to be explained in
+  three places at once, in three different wordings, with no way to tell which
+  one to act on.
+- Details calls for you when a step is waiting on a decision: the tab carries a
+  count, and the panel opens on that tab instead of leaving you to find it.
+- The button beside the graph's message box sends the message. It used to
+  propose a graph change instead, which is not what a button next to a text
+  field means.
+- The graph's bottom panel uses its full width. Its conversation was still
+  sized as the narrow side column it used to be, so text was squeezed into
+  300px while the rest of the panel stayed blank.
+
 ## 0.9.67 — 2026-08-08
 
 This release binds Agentlas OS v1.1.99 at
