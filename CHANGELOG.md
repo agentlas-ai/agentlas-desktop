@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.69 — 2026-08-09
+
+This release binds Agentlas OS v1.1.99 at
+7524f206532c5c509be316d497781b240be3d487.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- A run stopped for approval no longer offers to start over. That button could
+  only reach the same approval again, so pressing it repeatedly looked like
+  approval that never took. The card now points at the step waiting for a
+  decision and says plainly that running again stops at the same place.
+- Stopping a run says so in your own language. Cancelling a local model run
+  surfaced the browser's own "This operation was aborted" text.
+
 ## 0.9.68 — 2026-08-09
 
 This release binds Agentlas OS v1.1.99 at
