@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   IconAtSign,
   IconBolt,
@@ -155,6 +155,47 @@ function logId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+/**
+ * ★진행 중 상태는 화면 밖에 산다 — 오너 지시(2026-08-08).
+ *
+ * Telegram 자동 연결은 사용자가 브라우저에서 로그인할 때까지 기다린다(분 단위).
+ * 그동안 다른 메뉴로 갔다 오면 컴포넌트가 언마운트되며 busy/로그가 사라져,
+ * 진행 중인 연결이 화면에서 통째로 없던 일이 됐다. Main의 작업은 계속 돌고 있다.
+ * 그래서 이 둘만 모듈 스코프에 둔다(빌드·클라우드 업로드와 같은 방식).
+ */
+interface ConnectProgress {
+  busy: string | null;
+  logs: ConnectLogRow[];
+}
+let connectProgress: ConnectProgress = { busy: null, logs: [] };
+let connectProgressSnapshot: ConnectProgress = connectProgress;
+const connectProgressListeners = new Set<() => void>();
+
+function emitConnectProgress(next: ConnectProgress): void {
+  connectProgress = next;
+  connectProgressSnapshot = next;
+  for (const listener of connectProgressListeners) listener();
+}
+
+function subscribeConnectProgress(listener: () => void): () => void {
+  connectProgressListeners.add(listener);
+  return () => {
+    connectProgressListeners.delete(listener);
+  };
+}
+
+function getConnectProgress(): ConnectProgress {
+  return connectProgressSnapshot;
+}
+
+function setConnectBusy(busy: string | null): void {
+  emitConnectProgress({ ...connectProgress, busy });
+}
+
+function pushConnectLog(row: ConnectLogRow): void {
+  emitConnectProgress({ ...connectProgress, logs: [row, ...connectProgress.logs].slice(0, 24) });
+}
+
 export default function ConnectPage() {
   const { locale, t } = useT();
   const tokenInputRef = useRef<HTMLInputElement | null>(null);
@@ -165,14 +206,17 @@ export default function ConnectPage() {
   const [botToken, setBotToken] = useState("");
   const [botName, setBotName] = useState("");
   const [manualOpen, setManualOpen] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState("");
-  const [logs, setLogs] = useState<ConnectLogRow[]>([]);
+  // busy/logs 는 모듈 스토어 소유 — 메뉴를 옮겨도 진행 중인 연결이 남는다.
+  const progress = useSyncExternalStore(subscribeConnectProgress, getConnectProgress, getConnectProgress);
+  const busy = progress.busy;
+  const logs = progress.logs;
+  const setBusy = setConnectBusy;
 
   const appendLog = useCallback(
     (text: string, tone: ConnectLogTone = "info") => {
-      setLogs((rows) => [{ id: logId(), at: nowLabel(locale), text, tone }, ...rows].slice(0, 24));
+      pushConnectLog({ id: logId(), at: nowLabel(locale), text, tone });
     },
     [locale],
   );

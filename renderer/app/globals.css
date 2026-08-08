@@ -10767,15 +10767,20 @@ button[data-toggle-state="on"] {
   border-bottom: 1px solid rgba(5, 37, 35, 0.08);
 }
 
+/* 오너 지시(2026-08-08): 세로 3분할 금지 — 가로로 나눈다.
+   선택 정보 / 봇 이름 / 연결 버튼을 좁은 오른쪽 열에 나란히 세우면 서로를 눌러
+   글자와 입력칸이 겹쳐 깨졌다(스크린샷 실측). 셋을 행으로 쌓으면 폭이 얼마든
+   각자 온전한 가로폭을 갖는다. */
 .connect-port-setup {
   display: flex;
+  flex-direction: column;
   align-items: stretch;
   gap: 8px;
   margin: 10px 0;
 }
 
 .connect-port-setup .connect-selected-strip {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   min-width: 0;
   margin: 0;
   padding: 7px 0;
@@ -10801,10 +10806,17 @@ button[data-toggle-state="on"] {
   white-space: nowrap;
 }
 
+.connect-port-setup .connect-secret-box {
+  /* 행으로 쌓이므로 자기 폭을 온전히 쓴다 — 입력칸이 눌려 잘리던 자리. */
+  margin: 0;
+  min-width: 0;
+}
+
 .connect-port-create {
   flex: 0 0 auto;
-  align-self: center;
-  min-height: 32px;
+  align-self: stretch;
+  justify-content: center;
+  min-height: 34px;
   padding: 0 11px;
   border-radius: 6px;
   font-size: 11.5px;
@@ -11263,4 +11275,179 @@ button[data-toggle-state="on"] {
   font-weight: 600;
   color: #b0433a;
   cursor: pointer;
+}
+
+/* ── 프로젝트 채팅 빈 화면 + 스트림 컨트롤 ────────────────────────────────
+   실측(2026-08-08): 이 클래스들이 마크업에는 있는데 규칙이 0건이라, 프로젝트
+   작업 화면 위쪽이 맨 HTML(제목·목록만 있는 스켈레톤)으로 떴다. 그래프
+   자동화 패널에서 나왔던 결함과 같은 모양 — 클래스 이름만 있고 스타일이 없는
+   블록. 형제 표면을 훑어 같은 계열을 함께 채운다.
+   (인라인 스타일이 붙어 있는 클래스는 훅이므로 여기 없다.) */
+.agentlas-chat-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  align-self: stretch;
+  max-width: 820px;
+  padding: 26px 0 8px;
+}
+.agentlas-chat-empty-header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.agentlas-chat-empty-header h2 {
+  margin: 0;
+  font-size: 21px;
+  line-height: 1.35;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+.agentlas-chat-empty-header p {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+.agentlas-chat-empty-directory {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 14px;
+  background: var(--paper-2);
+}
+.agentlas-chat-empty-directory-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.agentlas-chat-empty-directory-intro strong {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-deep);
+}
+.agentlas-chat-empty-directory-intro span {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+.agentlas-chat-empty-grid {
+  display: grid;
+  /* 좁은 pane에서도 안 깨지게 — 열은 폭이 허락할 때만 늘어난다. */
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.agentlas-chat-empty-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.agentlas-chat-empty-group h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.agentlas-chat-empty-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.agentlas-chat-empty-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 9px;
+  background: var(--paper);
+}
+.agentlas-chat-empty-item strong {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.agentlas-chat-empty-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.agentlas-chat-message-anchor {
+  align-self: stretch;
+  min-width: 0;
+}
+.agentlas-chat-copy-button,
+.chat-input-stop-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-deep);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.agentlas-chat-copy-button:hover,
+.chat-input-stop-button:hover:not(:disabled) {
+  border-color: var(--paper-edge);
+  background: var(--paper-2);
+  color: var(--ink);
+}
+.chat-input-stop-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.agentlas-chat-latest-button {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 999px;
+  background: var(--paper);
+  box-shadow: 0 6px 18px rgba(15, 18, 20, 0.12);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+}
+.agentlas-chat-latest-button:hover {
+  background: var(--paper-2);
+}
+.agentlas-chat-streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--ink-soft);
+  animation: agentlas-chat-caret 1s steps(2, start) infinite;
+}
+@keyframes agentlas-chat-caret {
+  to { visibility: hidden; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .agentlas-chat-streaming-cursor { animation: none; opacity: 0.6; }
 }

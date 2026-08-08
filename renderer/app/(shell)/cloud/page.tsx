@@ -1,18 +1,29 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { IconCheck, IconFileUp } from "@/components/Icon";
 import type {
-  CloudAgentPublishProgressEvent,
   CloudAgentPublishStage,
   CloudAgentRegisteredUploadOption,
-  FsPathGrant,
 } from "@shared/types";
 import { useSearchParams } from "next/navigation";
-
-type Visibility = "private-link" | "marketplace";
+import {
+  beginCloudUpload,
+  finishCloudUpload,
+  getCloudUploadServerSnapshot,
+  getCloudUploadSnapshot,
+  setCloudUploadPurposeAnswer,
+  setCloudUploadRegisteredKey,
+  setCloudUploadResult,
+  setCloudUploadRootGrant,
+  subscribeCloudUpload,
+  type CloudUploadCareerGraphProof as CareerGraphProof,
+  type CloudUploadIssue as UploadIssue,
+  type CloudUploadResult as UploadResult,
+  type CloudUploadVisibility as Visibility,
+} from "@/lib/cloud-upload-session";
 
 /**
  * The visible phase timeline. Research on long-running agent UIs is consistent:
@@ -47,33 +58,9 @@ function formatElapsed(ms: number): string {
   return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `0:${String(s).padStart(2, "0")}`;
 }
 
-type UploadIssue = {
-  severity: string;
-  message: string;
-  file?: string;
-  remediation?: string;
-};
-
-type CareerGraphProof = {
-  indexStatus?: string;
-  policy?: string;
-  counts?: Record<string, number>;
-  canonicalSources?: number;
-  staleSourceCount?: number;
-  nodeTypes?: Record<string, number>;
-  edgeTypes?: Record<string, number>;
-};
-
-type UploadResult = {
-  ok: boolean;
-  title: string;
-  issues: UploadIssue[];
-  visibility?: Visibility;
-  detail?: string;
-  link?: string;
-  careerGraph?: CareerGraphProof;
-  needsPurpose?: boolean;
-};
+// UploadIssue / CareerGraphProof / UploadResult / Visibility 는 이제
+// lib/cloud-upload-session.ts 가 소유한다 — 화면이 언마운트돼도 살아남아야 하는
+// 값들이라 타입도 그 스토어와 같은 자리에 둔다.
 
 function registeredOptionKey(option: CloudAgentRegisteredUploadOption): string {
   if ("firmId" in option.target) return `team:firm:${option.target.firmId}`;
@@ -85,28 +72,17 @@ export default function CloudAgentPublishPage() {
   const searchParams = useSearchParams();
   const requestedTeamId = searchParams.get("team");
   const ko = locale !== "en";
-  const [rootGrant, setRootGrant] = useState<FsPathGrant | null>(null);
+  // ★진행 상태는 이 화면이 소유하지 않는다 — 다른 메뉴로 갔다 와도 업로드가
+  // 그대로 이어져 보여야 하므로 모듈 스토어(cloud-upload-session)가 소유한다.
+  // 업로드는 Main에서 계속 돌고 있었는데 화면만 초기화되던 문제의 수리.
+  const session = useSyncExternalStore(
+    subscribeCloudUpload,
+    getCloudUploadSnapshot,
+    getCloudUploadServerSnapshot,
+  );
+  const { rootGrant, registeredKey, running, result, purposeAnswer, progressStage, progressDetail, startedAt } = session;
   const [registeredOptions, setRegisteredOptions] = useState<CloudAgentRegisteredUploadOption[]>([]);
-  const [registeredKey, setRegisteredKey] = useState("");
-  const [running, setRunning] = useState<Visibility | null>(null);
-  const [result, setResult] = useState<UploadResult | null>(null);
-  const [purposeAnswer, setPurposeAnswer] = useState("");
-  // Live upload progress. `progressId` correlates Main's events to THIS upload,
-  // so a stale event from an abandoned run can never drive the current bar.
-  const progressIdRef = useRef<string>("");
-  const [progressStage, setProgressStage] = useState<CloudAgentPublishStage | null>(null);
-  const [progressDetail, setProgressDetail] = useState<string>("");
-  const [startedAt, setStartedAt] = useState<number | null>(null);
   const [nowTick, setNowTick] = useState(0);
-
-  useEffect(() => {
-    const off = ipc()?.cloudAgents.onProgress((event: CloudAgentPublishProgressEvent) => {
-      if (!progressIdRef.current || event.progressId !== progressIdRef.current) return;
-      setProgressStage(event.stage);
-      setProgressDetail(event.detail ?? "");
-    });
-    return () => off?.();
-  }, []);
 
   // The host owns the clock. It keeps advancing even while a single phase runs
   // silently for a minute, which is exactly when a static label reads as frozen.
@@ -122,7 +98,7 @@ export default function CloudAgentPublishPage() {
       if (!cancelled) {
         setRegisteredOptions(options);
         const requested = requestedTeamId ? options.find((option) => "firmId" in option.target && option.target.firmId === requestedTeamId) : null;
-        if (requested) setRegisteredKey(registeredOptionKey(requested));
+        if (requested) setCloudUploadRegisteredKey(registeredOptionKey(requested));
       }
     }).catch(() => {
       if (!cancelled) setRegisteredOptions([]);
@@ -136,32 +112,23 @@ export default function CloudAgentPublishPage() {
     const api = ipc();
     if (!api || running) return;
     const dir = await api.fs.pickDirectory();
-    if (dir) {
-      setRootGrant(dir);
-      setRegisteredKey("");
-      setResult(null);
-      setPurposeAnswer("");
-    }
+    if (dir) setCloudUploadRootGrant(dir);
   }
 
   async function upload(visibility: Visibility, answer?: string) {
     const api = ipc();
     if (!api) return;
     if (!rootGrant && !selectedRegistered) {
-      setResult({
+      setCloudUploadResult({
         ok: false,
         title: ko ? "폴더를 먼저 선택하세요." : "Choose a folder first.",
         issues: [],
       });
       return;
     }
-    const progressId = globalThis.crypto?.randomUUID?.() ?? `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    progressIdRef.current = progressId;
-    setProgressStage("starting");
-    setProgressDetail("");
-    setStartedAt(Date.now());
-    setRunning(visibility);
-    setResult(null);
+    // 이 실행의 소유권 표식. 화면을 떠났다 와도 스토어가 같은 id로 이어받는다.
+    const progressId = beginCloudUpload(visibility);
+    let outcome: UploadResult | null = null;
     try {
       const res = selectedRegistered
         ? visibility === "marketplace"
@@ -191,7 +158,7 @@ export default function CloudAgentPublishPage() {
         const link = visibility === "marketplace"
           ? res.registration?.marketplaceUrl ?? res.registration?.url
           : res.registration?.url;
-        setResult({
+        outcome = {
           ok: true,
           title:
             visibility === "marketplace"
@@ -201,11 +168,11 @@ export default function CloudAgentPublishPage() {
           visibility,
           link,
           careerGraph,
-        });
+        };
         return;
       }
       const classified = classifyUploadFailure(json, undefined, "", ko);
-      setResult({
+      outcome = {
         ok: false,
         title: classified.title,
         issues: issues.length > 0 ? issues : classified.issue ? [classified.issue] : [],
@@ -213,24 +180,21 @@ export default function CloudAgentPublishPage() {
         detail: buildFailureDetail(json, undefined, "", ""),
         careerGraph,
         needsPurpose,
-      });
+      };
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       const classified = classifyUploadFailure(null, detail, "", ko);
-      setResult({
+      outcome = {
         ok: false,
         title: classified.title,
         issues: classified.issue ? [classified.issue] : [],
         visibility,
         detail,
-      });
+      };
     } finally {
-      // The run is over on every path — stop asserting that a phase is live.
-      progressIdRef.current = "";
-      setRunning(null);
-      setProgressStage(null);
-      setProgressDetail("");
-      setStartedAt(null);
+      // 어느 경로로 끝나든 실행은 끝났다. 결과도 스토어가 받는다 — 사용자가 화면을
+      // 떠나 있는 동안 끝나도 돌아왔을 때 결과가 그대로 있어야 한다.
+      finishCloudUpload(progressId, outcome);
     }
   }
 
@@ -263,9 +227,7 @@ export default function CloudAgentPublishPage() {
               value={registeredKey}
               disabled={Boolean(running)}
               onChange={(event) => {
-                setRegisteredKey(event.target.value);
-                if (event.target.value) setRootGrant(null);
-                setResult(null);
+                setCloudUploadRegisteredKey(event.target.value);
               }}
               style={{ ...folderPicker, width: "100%", appearance: "auto" }}
             >
@@ -386,7 +348,7 @@ export default function CloudAgentPublishPage() {
                 <textarea
                   id="agent-purpose-answer"
                   value={purposeAnswer}
-                  onChange={(event) => setPurposeAnswer(event.target.value)}
+                  onChange={(event) => setCloudUploadPurposeAnswer(event.target.value)}
                   maxLength={1200}
                   rows={4}
                   placeholder={ko

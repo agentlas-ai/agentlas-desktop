@@ -349,15 +349,6 @@ function LibraryAgentsView() {
   const [promptSourcePath, setPromptSourcePath] = useState("");
   const [savingFiles, setSavingFiles] = useState(false);
 
-  // 스킬 주입 서랍 (Skill Evolution Drawer)
-  // 하드코딩 목록이 아니라 엔진 skills/ 디렉토리를 실제로 스캔한 카탈로그를 쓴다(실측 원칙).
-  const [skillDrawerOpen, setSkillDrawerOpen] = useState(false);
-  const [availableSkills, setAvailableSkills] = useState<{ slug: string; name: string; description: string }[]>([]);
-  useEffect(() => {
-    ipc()?.skills?.listCatalog?.()
-      .then((list) => setAvailableSkills(list ?? []))
-      .catch(() => setAvailableSkills([]));
-  }, []);
 
   // 온톨로지 인박스 — 실제 보류 중인 학습 제안만 표출(가짜 데이터 없음).
   // selectedNode 의 메모리 미결 과제(openQuestions)에서 도출 → 정식 규칙 승격 후보.
@@ -743,44 +734,6 @@ function LibraryAgentsView() {
     } catch (e) {
       showToast((locale === "ko" ? "진화 후보 생성 실패: " : "Failed to create evolution candidate: ") + String(e));
       return undefined;
-    } finally {
-      setSavingFiles(false);
-    }
-  }
-
-  async function createSkillEvolutionProposal(skill: { slug?: string; name: string; description: string }): Promise<boolean> {
-    const api = ipc();
-    if (!api || !selectedNode?.agentId) return false;
-    const slug = (skill.slug ?? skill.name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-    const targetPath = `skills/${slug}/SKILL.md`;
-    setSavingFiles(true);
-    try {
-      const catalogAsset = await api.skills.readCatalog(slug);
-      const current = await api.agentFiles.read(selectedNode.agentId, targetPath).catch(() => ({ content: "" }));
-      const proposal = await api.agentEvolution.createProposal({
-        agentId: selectedNode.agentId,
-        targetPath,
-        currentContent: current.content ?? "",
-        proposedContent: catalogAsset.content,
-        proposalType: "skill",
-        risk: "medium",
-        summary: locale === "ko" ? `${skill.name} 수동 스킬 주입 검토` : `Review manual ${skill.name} skill injection`,
-        source: {
-          surface: "desktop.library.skill_catalog",
-          skillSlug: catalogAsset.slug,
-          catalogContentHash: catalogAsset.contentHash,
-          catalogByteLength: catalogAsset.byteLength,
-        },
-        decisionNote: locale === "ko" ? "사용자가 스킬 후보를 만들었습니다. 아직 파일은 생성되지 않았습니다." : "User created a skill candidate. No file has been created yet.",
-      });
-      setEvolutionProposals((prev) => [proposal, ...prev.filter((item) => item.id !== proposal.id)]);
-      setSkillDrawerOpen(false);
-      setActiveTab("activity");
-      showToast(locale === "ko" ? "스킬 diff 후보를 만들었습니다. 승인 전에는 주입되지 않습니다." : "Skill diff candidate created. It is not injected until approval.");
-      return true;
-    } catch (error) {
-      showToast((locale === "ko" ? "스킬 후보 생성 실패: " : "Failed to create skill candidate: ") + String(error));
-      return false;
     } finally {
       setSavingFiles(false);
     }
@@ -1668,14 +1621,10 @@ function LibraryAgentsView() {
             onSaveMemory={saveMemory}
             promptContent={promptContent}
             onCreateEvolution={createEvolutionProposal}
-            onCreateSkillEvolution={createSkillEvolutionProposal}
             onApproveEvolution={approveEvolutionProposal}
             onRejectEvolution={rejectEvolutionProposal}
             onRollbackEvolution={rollbackEvolutionProposal}
             saving={savingFiles}
-            availableSkills={availableSkills}
-            skillDrawerOpen={skillDrawerOpen}
-            onSetSkillDrawerOpen={setSkillDrawerOpen}
             ontologyInbox={ontologyInbox}
             onSetOntologyInbox={setOntologyInbox}
             showToast={showToast}
@@ -3790,14 +3739,10 @@ interface AgentDetailViewProps {
   onSaveMemory: (updater: (prev: any) => any) => Promise<void>;
   promptContent: string;
   onCreateEvolution: (newPrompt: string, source?: Record<string, unknown>) => Promise<AgentEvolutionProposalUi | undefined>;
-  onCreateSkillEvolution: (skill: { slug?: string; name: string; description: string }) => Promise<boolean>;
   onApproveEvolution: (proposalId: string) => Promise<void>;
   onRejectEvolution: (proposalId: string) => Promise<void>;
   onRollbackEvolution: (proposalId: string) => Promise<void>;
   saving: boolean;
-  availableSkills: { slug: string; name: string; description: string }[];
-  skillDrawerOpen: boolean;
-  onSetSkillDrawerOpen: (v: boolean) => void;
   ontologyInbox: { id: string; type: "gotcha" | "decision"; title: string; content: string; source: "local" | "cloud" }[];
   onSetOntologyInbox: (v: any) => void;
   showToast: (msg: string) => void;
@@ -3822,14 +3767,10 @@ function AgentDetailView({
   onSaveMemory,
   promptContent,
   onCreateEvolution,
-  onCreateSkillEvolution,
   onApproveEvolution,
   onRejectEvolution,
   onRollbackEvolution,
   saving,
-  availableSkills,
-  skillDrawerOpen,
-  onSetSkillDrawerOpen,
   ontologyInbox,
   onSetOntologyInbox,
   showToast,
@@ -4293,26 +4234,6 @@ function AgentDetailView({
       ? `학습 제안 '${target.title}'이 메모리에 병합 반영되었습니다.`
       : `Learning suggestion '${target.title}' merged into memory.`);
   };
-
-  // 수동 스킬 주입도 먼저 durable candidate만 만든다. 파일/"완료" 메모리는
-  // 별도 diff 승인 뒤 main-process CAS + receipt가 성공해야 생긴다.
-  const handleInjectSkill = async (skill: { slug?: string; name: string; description: string }) => {
-    const created = await onCreateSkillEvolution(skill);
-    if (!created) return;
-    setTimelineEvents((prev) => [
-      {
-        id: `timeline-${Date.now()}`,
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        title: locale === "ko" ? "스킬 주입 검토 후보" : "Skill injection review candidate",
-        desc: locale === "ko"
-          ? `'${skill.name}' diff 후보를 만들었습니다. 승인 전에는 SKILL.md가 생성되지 않습니다.`
-          : `Created a '${skill.name}' diff candidate. SKILL.md is not created before approval.`,
-        type: "skill",
-      },
-      ...prev,
-    ]);
-  };
-
 
   // 아바타 그라데이션 모노그램
   const detailDisplayName = agent ? agentDisplayName(agent, locale) : node.name;
@@ -5270,68 +5191,6 @@ function AgentDetailView({
                     </div>
                   )}
 	                </>
-	                )}
-	              </div>
-
-	              <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-	                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: skillDrawerOpen ? 12 : 0 }}>
-	                  <h4 style={{ margin: 0, fontSize: 13.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
-	                    <IconLayers size={14} style={{ color: "var(--accent)" }} />
-	                    {locale === "ko" ? "스킬 주입" : "Skill injection"}
-	                  </h4>
-	                  <button
-	                    type="button"
-	                    onClick={() => onSetSkillDrawerOpen(!skillDrawerOpen)}
-	                    style={{
-	                      padding: "7px 12px",
-	                      background: skillDrawerOpen ? "var(--paper-2)" : "var(--accent)",
-	                      color: skillDrawerOpen ? "var(--ink-soft)" : "#fff",
-	                      border: skillDrawerOpen ? "1px solid var(--paper-edge)" : "1px solid var(--accent)",
-	                      borderRadius: 6,
-	                      fontSize: 12,
-	                      fontWeight: 650,
-	                      cursor: "pointer",
-	                    }}
-	                  >
-	                    {skillDrawerOpen
-	                      ? (locale === "ko" ? "닫기" : "Close")
-	                      : (locale === "ko" ? "스킬 고르기" : "Choose skill")}
-	                  </button>
-	                </div>
-	                {skillDrawerOpen && (
-	                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-	                    {availableSkills.length === 0 ? (
-	                      <div style={{ padding: 12, border: "1px dashed var(--paper-edge)", borderRadius: 8, color: "var(--muted-deep)", fontSize: 12 }}>
-	                        {locale === "ko" ? "주입 가능한 스킬이 없습니다." : "No skills available to inject."}
-	                      </div>
-	                    ) : (
-	                      availableSkills.map((skill) => (
-	                        <div key={skill.slug ?? skill.name} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)" }}>
-	                          <div style={{ flex: 1, minWidth: 0 }}>
-	                            <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--ink)" }}>{skill.name}</div>
-	                            <div style={{ fontSize: 11.5, color: "var(--ink-soft)", marginTop: 2, lineHeight: 1.45 }}>{skill.description}</div>
-	                          </div>
-	                          <button
-	                            type="button"
-	                            onClick={() => void handleInjectSkill(skill)}
-	                            style={{
-	                              padding: "6px 10px",
-	                              background: "var(--accent)",
-	                              color: "#fff",
-	                              border: "none",
-	                              borderRadius: 6,
-	                              fontSize: 11.5,
-	                              fontWeight: 650,
-	                              cursor: "pointer",
-	                              flexShrink: 0,
-	                            }}
-	                          >
-	                            {locale === "ko" ? "주입" : "Inject"}
-	                          </button>
-	                        </div>
-	                      ))
-	                    )}
-	                  </div>
 	                )}
 	              </div>
 

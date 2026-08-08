@@ -10,8 +10,9 @@
 // 재사용한다 — Transport 생성 로직을 새로 만들지 않는다.
 import fs from "node:fs";
 import { createHash } from "node:crypto";
-import type { RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
+import type { RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
+import { detectRuntimeRefusal } from "./runtime-refusal";
 import { tStatus } from "./status-i18n";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { mcpConfigKey } from "../mcp-tools/mcp-config";
@@ -46,6 +47,29 @@ interface ResolvedTool {
 
 const MAX_TOOL_LOOP_TURNS = 8;
 const MAX_TOOL_RESULT_CHARS = 20_000;
+
+/**
+ * ★로컬 런타임의 실패 표식 — CLI 러너와 같은 계약(RunnerResult.failure).
+ *
+ * 실측 사고(2026-08-08, ollama): 로컬 모델이 도구 왕복에서 무너진 뒤
+ * "The system encountered a timeout error while processing a request. ..."
+ * 같은 기계 문장을 최종 답으로 뱉었고, 이 루프에는 실패 칸이 아예 없어서
+ * 그 문장이 정상 답으로 저장됐다(chat_messages 실물 확인). CLI 러너들은
+ * 2026-08-06에 이 계약으로 전환됐는데 로컬 4종(ollama/lmstudio/mlx/
+ * local-openai)이 공유하는 이 파일만 빠져 있었다 — 특례가 아니라 누락이다.
+ *
+ * 여기서 표식을 다는 경우는 "텍스트가 답이 아닌데 성공처럼 보이는" 것들뿐이다:
+ * 빈 답, 거절 고지문, 도구 루프 미수렴. 전송/HTTP 실패는 지금처럼 throw로
+ * 크게 실패한다(표식을 안 읽는 소비자에게도 확실히 전달되어야 한다).
+ */
+function localFailure(
+  kind: RunnerFailure["kind"],
+  message: string,
+  runtimeKind: string,
+  source: RunnerFailure["source"] = "marker",
+): RunnerFailure {
+  return { kind, message: message.slice(0, 400), runtime: runtimeKind, source };
+}
 
 /**
  * 카탈로그의 filesystem류 서버는 허용 루트가 "~"(홈 전체)로 등록돼 있다. CLI 런타임은
@@ -301,6 +325,8 @@ export async function runLocalOpenAiChat(
   let finalText = "";
   let sawAnyToolCall = false;
   let sawUnsupportedToolCallAttempt = false;
+  /** 루프가 답에 도달해서 끝났는가. false로 빠져나오면 도구 왕복만 하다 상한에 닿은 것. */
+  let reachedAnswer = false;
 
   for (let turn = 0; turn < MAX_TOOL_LOOP_TURNS; turn += 1) {
     let resp: Response;
@@ -317,7 +343,10 @@ export async function runLocalOpenAiChat(
             ...(tools.length > 0 ? { tools } : {}),
         }),
       });
-    } catch {
+    } catch (err) {
+      // 사용자가 멈춘 것을 "서버에 연결 못 함"이라고 말하면 거짓말이 된다 —
+      // 취소는 취소로 올려보내 상위 취소 처리가 알아보게 한다.
+      if (req.signal?.aborted) throw err;
       throw new Error(opts.unreachableMessage);
     }
     if (!resp.ok) {
@@ -338,6 +367,7 @@ export async function runLocalOpenAiChat(
         }
         const result = await streamChatTurn(fallback, events.onPartial);
         finalText = result.text;
+        reachedAnswer = true;
         break;
       }
       throw new Error(`${host} ${resp.status}: ${errText.slice(0, 300)}`);
@@ -346,6 +376,7 @@ export async function runLocalOpenAiChat(
     const result = await streamChatTurn(resp, events.onPartial);
     if (result.toolCalls.length === 0) {
       finalText = result.text;
+      reachedAnswer = true;
       break;
     }
     sawAnyToolCall = true;
@@ -380,5 +411,30 @@ export async function runLocalOpenAiChat(
         })()
       : workforceZeroToolsEnforcement(req, runtimeKind, zeroToolsCapabilities);
 
-  return { text: finalText.trim(), workforcePermissionEnforcement: enforcement };
+  // ★여기서부터가 실패 판정 — 텍스트 "모양"이 아니라 이 런의 사실로만 판단한다.
+  const answer = finalText.trim();
+  let failure: RunnerFailure | null = null;
+  if (!reachedAnswer) {
+    // 도구만 왕복하다 상한에 닿았다. 마지막 중간 텍스트는 답이 아니다.
+    failure = localFailure(
+      "exit",
+      tStatus(req.locale, "errLocalToolLoopStuck", { model, turns: MAX_TOOL_LOOP_TURNS }),
+      runtimeKind,
+    );
+  } else if (!answer) {
+    failure = localFailure("empty", tStatus(req.locale, "errLocalEmptyAnswer", { model }), runtimeKind);
+  } else {
+    // 표식 없이 완주했는데 산출물이 거절/한도 고지문인 경우 — 판별 규칙은
+    // runtime-refusal.ts 한 곳에만 살고, 출처는 heuristic으로 남긴다.
+    const refusal = detectRuntimeRefusal(answer);
+    if (refusal) failure = localFailure(refusal.kind, refusal.message, runtimeKind, "heuristic");
+  }
+
+  return {
+    // 실패일 때도 원문은 지우지 않는다 — 표식을 안 읽는 소비자에게 빈 말풍선을
+    // 주지 않기 위해서다. 판정은 어디까지나 failure 칸이 한다.
+    text: answer || (failure ? failure.message : ""),
+    ...(failure ? { failure } : {}),
+    workforcePermissionEnforcement: enforcement,
+  };
 }

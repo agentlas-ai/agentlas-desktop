@@ -34,9 +34,18 @@ const NOTICE_PATTERNS: RegExp[] = [
   /\bnot logged in\b/i,
   /\b(login|session|token) (expired|invalid)\b/i,
   /\bsubscription (required|expired)\b/i,
+  // ── 모델이 쓴 기계 자기보고 (2026-08-08 ollama 실측) ──
+  // "The system encountered a timeout error while processing a request. No further
+  // function calls are required. Please retry the operation..." — 도구 왕복이 무너진 뒤
+  // 로컬 모델이 뱉은 문장이 최종 답으로 저장됐다. 이건 사람에게 하는 답이 아니라
+  // 프로토콜 잡담이다. 짧고 구조 없는 출력에서만 보므로 산출물 오탐 여지가 거의 없다.
+  /\bno further (function|tool) calls?\b/i,
+  /\bsystem encountered (a|an) [a-z]+ error\b/i,
+  /\bretry the (operation|request)\b/i,
 ];
 
 function kindOf(text: string): RunnerFailureKind {
+  if (/\btimed? ?out\b|\btimeout\b/i.test(text)) return "timeout";
   if (/\b(log ?in|sign ?in|logged in|expired|unauthorized|subscription)\b/i.test(text)) return "auth";
   if (/\b(limit|quota|credits?|resets?|try again)\b/i.test(text)) return "quota";
   return "refused";

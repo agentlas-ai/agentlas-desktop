@@ -339,6 +339,26 @@ function completeWorkforceResume(card: Record<string, unknown>, scanRoot: string
  * reach it) — auto-generate a valid card from the agent's own identity so no
  * agent dead-ends on it. Only writes into the throwaway copy at scanRoot.
  */
+/**
+ * 비공개 저장이 이대로면 막히는가 — 모델 수리 패스를 켤지 정하는 값싼 사전 판정.
+ *
+ * 파일시스템 스캔만 한다(모델 호출 없음). 라우팅 카드·이중언어 메타데이터처럼
+ * **공개 발행에만** 요구되는 항목은 여기서 보지 않는다 — 비공개 저장은 그것들을
+ * 애초에 요구하지 않으므로, 없다고 해서 수리 패스를 켜면 헛일이다.
+ */
+function privateSaveNeedsRemediation(
+  rootPath: string,
+  restoredExecutablePaths: ReadonlySet<string>,
+): boolean {
+  try {
+    return scanAgentFolder(rootPath, restoredExecutablePaths)
+      .findings.some((finding) => finding.severity === "blocker");
+  } catch {
+    // 사전 판정이 못 돌면 수리 루프에 맡긴다 — 조용히 통과시키지 않는다.
+    return true;
+  }
+}
+
 function ensureRoutingCard(
   scanRoot: string,
   purposeInput?: { summary: string; capabilities: string[] },
@@ -477,7 +497,12 @@ export async function packageAndReviewCloudAgent(
   let scanRoot = rootPath;
   let autofixCleanup: (() => void) | null = null;
   let remediationActions: RemediationAction[] = [];
-  if (isPublicHubPublish) {
+  // ★비공개(내 클라우드) 저장도 막다른 길이 되면 안 된다 — 오너 지시(2026-08-08).
+  // 이 수리 사전 패스는 공개 Hub 발행에만 걸려 있었다. 그래서 같은 폴더가 공개로는
+  // 자동 수리되어 올라가고, 정작 **자기 클라우드에 비공개로** 저장할 때는 blocker
+  // 하나에 그대로 멈췄다. 비공개도 같은 루프를 태우되, 값이 드는 모델 패스는
+  // **실제로 막혔을 때만** 돈다 — 깨끗한 패키지의 저장 속도는 그대로다.
+  if (isPublicHubPublish || privateSaveNeedsRemediation(rootPath, restoredExecutablePaths)) {
     try {
       let active: RuntimeStatus | null;
       if (opts && Object.prototype.hasOwnProperty.call(opts, "activeRuntime")) {
@@ -503,7 +528,8 @@ export async function packageAndReviewCloudAgent(
         const purposeInput = input.purposeAnswer
           ? await normalizePurposeAnswerWithSubmitterRuntime(scanRoot, input.purposeAnswer)
           : undefined;
-        if (ensureRoutingCard(scanRoot, purposeInput)) {
+        // 라우팅 카드는 공개 발행에만 요구된다(readRoutingCard 호출 자체가 공개 전용).
+        if (isPublicHubPublish && ensureRoutingCard(scanRoot, purposeInput)) {
           opts?.onStage?.("routing-card");
           remediationActions.push({ file: ROUTING_CARD_PATH, action: "rewritten", detail: "auto-generated routing card" });
         }

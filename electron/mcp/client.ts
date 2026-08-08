@@ -104,6 +104,7 @@ import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
 import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, parseSurfaces } from "../surface-emitter";
+import { applyFinalDisplayBackstop } from "./final-display-backstop";
 import {
   oneFriendlyFollowupProtocol,
   parseOneFriendlyFollowups,
@@ -1145,12 +1146,38 @@ export async function runMcpInvocation(
   let finalTextFromSink = "";
   let resolvedResultFolder: string | undefined;
   let workforcePrepareReceipt: WorkforcePrepareCheckpointReceipt | undefined;
+  let backstopSurfaceSeq = 0;
   sink = (rawEvent: McpInvocationEvent) => {
-    const ev = redactOneAttachmentEvent(req, rawEvent);
+    let ev = redactOneAttachmentEvent(req, rawEvent);
+    const emit = (event: McpInvocationEvent) =>
+      callerSink(runtimeAgentId && !event.runtimeAgentId ? { ...event, runtimeAgentId } : event);
+    if (ev.kind === "final") {
+      // ★표시 위생 백스톱 — 여기가 모든 실행 갈래(단일·firm·swarm·borrowed·
+      // earlyResult 20여 곳)가 예외 없이 지나는 단 한 자리다. 갈래마다 정리를
+      // 복붙하지 않고 이 지점에서 한 번만 판단한다(멱등 — 이미 정리된 텍스트는
+      // 여는 울타리가 없어 그대로 통과).
+      const hygiene = applyFinalDisplayBackstop(ev.text, {
+        locale: pickLocale(req),
+        // 미신뢰(Agent App) 실행은 모델이 쓴 매니페스트를 렌더하지 않는다.
+        allowSurfaceRender: !req.agentAppMode,
+      });
+      if (hygiene.changed) {
+        // 값은 버리지 않는다: 유효 매니페스트는 원래 보여야 했던 화면으로 승격.
+        for (const surface of hygiene.surfaces) {
+          backstopSurfaceSeq += 1;
+          emit({
+            kind: "surface",
+            surfaceId: `surface:${req.runId ?? "run"}:backstop:${backstopSurfaceSeq}`,
+            surface,
+          });
+        }
+        ev = { ...ev, text: hygiene.text };
+      }
+    }
     if (ev.kind === "final" && ev.text?.trim()) {
       finalTextFromSink = ev.text.trim();
     }
-    callerSink(runtimeAgentId && !ev.runtimeAgentId ? { ...ev, runtimeAgentId } : ev);
+    emit(ev);
   };
   const earlyResult = () => ({
     finalText: finalTextFromSink || undefined,

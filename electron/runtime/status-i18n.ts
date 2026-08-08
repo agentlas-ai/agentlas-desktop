@@ -51,6 +51,10 @@ const DICT = {
       "로컬 Ollama 서버에 연결하지 못했습니다 ({host}). `ollama serve`가 실행 중인지 확인하세요.",
     errOllamaNoModel:
       "사용할 Ollama 모델이 없습니다. 터미널에서 `ollama pull gemma3` 등으로 모델을 받은 뒤 설정에서 선택하세요.",
+    errLocalEmptyAnswer:
+      "로컬 모델({model})이 답을 한 글자도 내지 않고 끝났습니다. 모델을 바꾸거나 더 짧은 요청으로 다시 시도하세요.",
+    errLocalToolLoopStuck:
+      "로컬 모델({model})이 도구 호출만 {turns}번 반복하고 답에 도달하지 못했습니다. 이번 실행은 결과로 인정하지 않습니다.",
     sysGuide:
       "사용자의 인터페이스 언어는 한국어입니다. 사용자가 어떤 언어로 입력하든 항상 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 언어로 답하라고 명시적으로 요청할 때만 그 언어를 쓰세요.",
     sysHeader: "당신은 Agentlas Desktop에서 사용자가 설치한 전문 어시스턴트입니다.",
@@ -106,6 +110,10 @@ const DICT = {
       "Couldn't reach the local Ollama server ({host}). Make sure `ollama serve` is running.",
     errOllamaNoModel:
       "No Ollama model available. Pull one in your terminal (e.g. `ollama pull gemma3`), then select it in Settings.",
+    errLocalEmptyAnswer:
+      "The local model ({model}) finished without producing a single character. Try another model or a shorter request.",
+    errLocalToolLoopStuck:
+      "The local model ({model}) kept calling tools for {turns} turns without reaching an answer. This run is not accepted as a result.",
     sysGuide:
       "The user's interface language is English. Always reply in English, regardless of the language the user writes in. Only use another language if the user explicitly asks you to in this message.",
     sysHeader: "You are a specialist assistant installed by the user in Agentlas Desktop.",
