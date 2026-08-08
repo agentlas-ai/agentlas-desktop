@@ -4313,8 +4313,8 @@ export function registerIpcHandlers(): void {
       if (decision !== "approved" && decision !== "rejected" && decision !== "always") {
         throw new Error("automation_approval_decision_invalid");
       }
-      const { getLatestGraphRunOccurrence, recordNodeApproval } = require("./store/automations") as
-        typeof import("./store/automations");
+      const { getLatestGraphRunOccurrence, recordNodeApproval, clearGraphRunFailureForNode } =
+        require("./store/automations") as typeof import("./store/automations");
       const occurrenceId = getLatestGraphRunOccurrence(id);
       if (!occurrenceId) {
         // 승인할 대상이 없는데 승인한 척하지 않는다.
@@ -4328,6 +4328,11 @@ export function registerIpcHandlers(): void {
         decision: decision === "always" ? "approved" : decision,
         ...(decision === "always" ? { scope: "always" as const } : {}),
       });
+      // ★승인 무한루프의 절반(실측 2026-08-08): 결정 뒤에도 스냅샷의
+      //   APPROVAL_REQUIRED가 남아 라이브 폴링이 승인 카드를 계속 되살렸다.
+      //   결정이 기록됐으니 카드의 근거를 스냅샷에서 지운다(거부 포함 —
+      //   거부도 결정이며, 카드가 계속 "결정하라"고 조르면 안 된다).
+      clearGraphRunFailureForNode(id, nodeId);
       return { ok: true, occurrenceId, always: decision === "always" };
     },
   );

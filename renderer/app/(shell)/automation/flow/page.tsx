@@ -929,19 +929,24 @@ function AutomationFlowPage() {
         delete next[nodeId];
         return next;
       });
-      if (decision === "always") {
-        setMessage(locale === "en"
-          ? "Always allowed. This step will not ask again."
-          : "항상 허용했습니다. 이 단계는 다시 묻지 않습니다.");
-      } else if (decision === "approved") {
-        setMessage(locale === "en"
-          ? "Approved. Run it again to continue from this step."
-          : "승인했습니다. 다시 실행하면 이 단계부터 이어집니다.");
-      } else {
+      if (decision === "rejected") {
         setMessage(locale === "en"
           ? "Recorded. This step will not run until you approve it."
           : "기록했습니다. 승인하기 전까지 이 단계는 실행되지 않습니다.");
+        return;
       }
+      // ★승인 무한루프의 나머지 절반(실측 2026-08-08): [승인하고 이어서 실행]이
+      //   실제로는 이어서 실행하지 않았다 — 사람이 따로 재실행해야 한다는 사실이
+      //   화면 어디에도 없어, 카드만 계속 되살아나는 것으로 보였다. 버튼 이름대로
+      //   승인 즉시 재개 실행을 발사한다.
+      setMessage(decision === "always"
+        ? (locale === "en"
+          ? "Always allowed. Continuing the run from this step…"
+          : "항상 허용했습니다. 이 단계부터 이어서 실행합니다…")
+        : (locale === "en"
+          ? "Approved. Continuing the run from this step…"
+          : "승인했습니다. 이 단계부터 이어서 실행합니다…"));
+      await runNow();
     } catch {
       setMessage(locale === "en" ? "The decision was not saved." : "결정을 저장하지 못했습니다.");
     } finally {

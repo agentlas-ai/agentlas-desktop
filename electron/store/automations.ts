@@ -1863,6 +1863,31 @@ export function getLatestGraphRunOccurrence(automationId: string): string | null
   return row?.occurrence_id ?? null;
 }
 
+/**
+ * 승인이 결정된 노드의 실패 기록을 최신 실행 스냅샷에서 지운다.
+ *
+ * ★승인 무한루프의 절반(실측 2026-08-08, 화면 녹화): 사람이 [항상 허용]을 눌러도
+ * 스냅샷의 node_failures_json에는 APPROVAL_REQUIRED가 그대로 남아, 라이브 폴링이
+ * 몇 초마다 승인 카드를 되살렸다 — 사람은 방금 승인한 단계에게 영원히 다시
+ * 승인을 요구받았다. 결정은 기록됐으니 "지금 조치하라"는 카드의 근거를 지운다.
+ */
+export function clearGraphRunFailureForNode(automationId: string, nodeId: string): void {
+  const db = getDb();
+  const row = db.prepare(
+    "SELECT id, node_failures_json FROM automation_runs WHERE automation_id = ? ORDER BY started_at DESC LIMIT 1",
+  ).get(automationId) as { id: string; node_failures_json: string | null } | undefined;
+  if (!row?.node_failures_json) return;
+  try {
+    const failures = JSON.parse(row.node_failures_json) as Record<string, unknown>;
+    if (!(nodeId in failures)) return;
+    delete failures[nodeId];
+    const payload = Object.keys(failures).length > 0 ? JSON.stringify(failures) : null;
+    db.prepare("UPDATE automation_runs SET node_failures_json = ? WHERE id = ?").run(payload, row.id);
+  } catch {
+    // 손상된 JSON은 여기서 고치지 않는다 — 카드 부활보다 나쁜 것은 조용한 데이터 파괴다.
+  }
+}
+
 /** 실패 3요소를 실행 스냅샷에 남긴다. 화면 실패 카드가 읽는 유일한 출처다. */
 export function saveGraphRunFailures(
   runId: string,
