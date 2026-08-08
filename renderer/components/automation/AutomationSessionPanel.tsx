@@ -66,6 +66,14 @@ interface AutomationSessionPanelProps {
    */
   executionPermission?: AutomationExecutionPermission;
   onCollapse?: () => void;
+  /**
+   * 하단 통합 패널 임베드 모드(오너 지시 2026-08-08: 세션 대화를 별도 열이 아니라
+   * 바텀시트 하나로). 헤더와 자체 입력줄을 숨기고 대화 스트림만 그린다 —
+   * 입력은 바깥의 공용 입력 하나가 sendHandleRef로 이 패널의 send를 부른다.
+   */
+  embedded?: boolean;
+  /** 바깥 공용 입력이 세션 전송을 부를 수 있는 손잡이. */
+  sendHandleRef?: React.MutableRefObject<((text: string) => void) | null>;
 }
 
 /**
@@ -96,6 +104,8 @@ export function AutomationSessionPanel({
   hubMode,
   executionPermission,
   onCollapse,
+  embedded = false,
+  sendHandleRef,
 }: AutomationSessionPanelProps) {
   const ko = locale === "ko";
   const [messages, setMessages] = useState<ChatHistoryEntry[]>([]);
@@ -292,6 +302,13 @@ export function AutomationSessionPanel({
     return () => window.removeEventListener(AUTOMATION_SESSION_PROMPT_EVENT, onPrompt);
   }, [automationId, send]);
 
+  // 임베드 모드 — 바깥의 공용 입력이 이 세션의 send를 그대로 쓴다(입력은 화면에 하나).
+  useEffect(() => {
+    if (!sendHandleRef) return;
+    sendHandleRef.current = (text: string) => void send(text);
+    return () => { sendHandleRef.current = null; };
+  }, [send, sendHandleRef]);
+
   // 다른 화면(자동화 상세)에서 넘어온 요청을 세션이 열리는 즉시 한 번만 이어받는다.
   useEffect(() => {
     if (!chatId) return;
@@ -321,7 +338,8 @@ export function AutomationSessionPanel({
   }
 
   return (
-    <section className="automation-session-panel titlebar-nodrag">
+    <section className="automation-session-panel titlebar-nodrag" data-embedded={embedded ? "true" : undefined}>
+      {!embedded ? (
       <header>
         <span>{ko ? "세션 대화" : "Session"}</span>
         <div className="automation-session-head-actions">
@@ -340,6 +358,7 @@ export function AutomationSessionPanel({
           ) : null}
         </div>
       </header>
+      ) : null}
 
       <div className="automation-session-stream" ref={scrollRef}>
         {messages.map((message) => {
@@ -395,6 +414,7 @@ export function AutomationSessionPanel({
         </div>
       ) : null}
 
+      {!embedded ? (
       <div className="automation-session-composer">
         <textarea
           value={draft}
@@ -426,6 +446,7 @@ export function AutomationSessionPanel({
           )}
         </div>
       </div>
+      ) : null}
     </section>
   );
 }

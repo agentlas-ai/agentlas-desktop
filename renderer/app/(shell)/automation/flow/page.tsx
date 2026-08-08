@@ -132,6 +132,10 @@ function AutomationFlowPage() {
   const [editing, setEditing] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [dirty, setDirty] = useState(false);
+  /** 저장 직후 하이드레이션 1회 스킵 — 캔버스 배치를 needsLayout이 덮어쓰지 못하게. */
+  const skipNextHydrationRef = useRef(false);
+  /** 하단 통합 패널의 공용 입력이 세션 대화 전송을 부르는 손잡이(임베드 세션이 채운다). */
+  const sessionSendRef = useRef<((text: string) => void) | null>(null);
   const [saving, setSaving] = useState(false);
   // 좌(세션 대화)·우(노드 검사 + 실행 기록) 패널 접기. 캔버스가 좁은 화면에서 가장 먼저
   // 희생되던 문제를 사용자가 직접 해소할 수 있게 한다. 선택은 로컬에 남는다.
@@ -211,8 +215,17 @@ function AutomationFlowPage() {
   // 하단 검증 로그 패널(항목 6) — VS Code 터미널처럼 크기를 끌어서 조절한다.
   // ★기본은 접힘(카운트 줄만). 편집 중 문제가 생길 때마다 패널이 펴지며 캔버스를
   //   밀면, 드래그하던 좌표가 어긋난다(게이트 실측) — 펴는 것은 사람이 한다.
-  const [logOpen, setLogOpen] = useState(false);
-  const [logHeight, setLogHeight] = useState(150);
+  // 하단 통합 패널은 보기 모드에서 기본으로 열려 있다 — 세션 대화·행동 카드가
+  // 여기 살기 때문에, 접혀 있으면 "화면이 아무 말도 안 한다"가 된다.
+  const [logOpen, setLogOpen] = useState(true);
+  const [logHeight, setLogHeight] = useState(260);
+  // 행동이 필요한 카드(시작 값·승인·판정 교정·의존성 수리)가 생기면 패널을 편다 —
+  // 접힌 패널 뒤에서 조용히 기다리게 두지 않는다.
+  const hasActionCards = inputPrompt !== null || Object.values(nodeFailures).some((f) =>
+    f.code === "APPROVAL_REQUIRED" || f.code === "EVAL_STUCK" || f.code === "CODE_DEPENDENCY_MISSING");
+  useEffect(() => {
+    if (hasActionCards) setLogOpen(true);
+  }, [hasActionCards]);
   runStatesRef.current = runStates;
 
   const nodeStrings: NodeStrings = useMemo(
@@ -294,6 +307,11 @@ function AutomationFlowPage() {
   // automation 로드/변경 시 캔버스 시드.
   useEffect(() => {
     if (!seedGraph) return;
+    // 저장 직후 1회는 건너뛴다 — 캔버스가 이미 방금 저장한 그 상태다(save() 주석 참고).
+    if (skipNextHydrationRef.current) {
+      skipNextHydrationRef.current = false;
+      return;
+    }
     seq.current = seedGraph.nodes.length;
     setRfNodes(
       seedGraph.nodes.map((n) => ({
@@ -779,6 +797,11 @@ function AutomationFlowPage() {
     setMessage("");
     try {
       const next = await api.automations.updateGraph(automation.id, toGraph());
+      // ★저장 직후에는 캔버스가 진실이다. setAutomation이 하이드레이션을 다시 돌리면
+      //   needsLayout(겹침 휴리스틱)이 사용자가 손으로 잡은 배치를 결정적 재배치로
+      //   덮어썼다 — "저장을 눌렀더니 그래프 생김새가 바뀐다"(오너 실측 2026-08-08).
+      //   방금 저장한 그래프로는 캔버스를 재시드하지 않는다.
+      skipNextHydrationRef.current = true;
       setAutomation(next);
       setDirty(false);
       setMessage(t("auto.flow.saved"));
@@ -1288,33 +1311,147 @@ function AutomationFlowPage() {
         </div>
       ) : null}
 
-      {(message || (editing && dirty)) ? (
-        <div
-          className="titlebar-nodrag"
-          style={{
-            order: 5,
-            padding: "8px 12px",
-            borderRadius: "var(--radius-md)",
-            border: "1px solid var(--accent-soft)",
-            // 캔버스 위에 떠 있는 카드라 반투명이면 아래 글자가 비쳐 읽히지 않는다.
-            background: "var(--paper)",
-            color: "var(--ink-soft)",
-            fontSize: 12,
-          }}
-        >
-          {message || t("auto.flow.unsaved")}
-        </div>
-      ) : null}
+      {/* ★상태 문구("저장했습니다" 등)는 더 이상 떠 있는 카드가 아니다 — 캔버스를 가려
+          클릭을 막았다(오너 실측 2026-08-08). 하단 통합 패널의 헤더 줄이 말한다. */}
 
 
 
+
+      </div>
+      </div>
+
+      {/* ★세션 대화는 별도 열이 아니라 하단 통합 패널 안에 산다(오너 지시 2026-08-08:
+          "세션대화도 없애고 아래 바텀시트로 모든 기능 통합"). 왼쪽 열이 사라진 만큼
+          캔버스가 전체 폭을 쓴다. */}
+      <div className="automation-flow-workspace">
+        <div className="automation-flow-canvas">
+
+          {isSynthesized && !editing ? (
+            <div
+              className="automation-flow-origin-note"
+            >
+              {t("auto.flow.synthesized")}
+            </div>
+          ) : null}
+          <ReactFlow
+            className="automation-flow-react"
+            nodes={rfNodes}
+            edges={rfEdges}
+            nodeTypes={workflowNodeTypes}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            fitView
+            fitViewOptions={FIT_VIEW}
+            minZoom={0.3}
+            maxZoom={1.6}
+            proOptions={{ hideAttribution: true }}
+            nodesDraggable={editing}
+            nodesConnectable={editing}
+            elementsSelectable
+            deleteKeyCode={editing ? ["Backspace", "Delete"] : null}
+            onNodeClick={(_, node) => { setSelectedNodeId(node.id); setSelectedEdgeId(null); }}
+            onEdgeClick={(_, e) => { setSelectedEdgeId(e.id); setSelectedNodeId(null); }}
+            onPaneClick={() => { setSelectedNodeId(null); setSelectedEdgeId(null); }}
+          >
+            <Background color="var(--paper-edge)" gap={24} size={1} />
+            <Controls showInteractive={false} />
+            {/* 미니맵 삭제(실측 항목 6) — 자리만 차지하고 캔버스 우하단을 가렸다.
+                검증 결과는 아래 로그 패널이 담당한다. */}
+          </ReactFlow>
+          {aiNote ? (
+            <div className="automation-ai-note-pop titlebar-nodrag" role="dialog" aria-label="AI note">
+              <div className="automation-ai-note-title">
+                {locale === "en" ? `Tell AI about “${aiNote.label}”` : `“${aiNote.label}” 단계에 메모`}
+              </div>
+              <textarea
+                autoFocus
+                value={aiNote.text}
+                onChange={(e) => setAiNote({ ...aiNote, text: e.target.value })}
+                placeholder={locale === "en"
+                  ? "e.g. keep it under 200 characters, always include a source link"
+                  : "예: 200자 이내로, 출처 링크는 꼭 포함"}
+              />
+              <div className="automation-ai-note-actions">
+                <button type="button" onClick={() => setAiNote(null)}>{locale === "en" ? "Close" : "닫기"}</button>
+                <button type="button" onClick={saveAiNote} disabled={!aiNote.text.trim()}>
+                  {locale === "en" ? "Save note" : "주석 저장"}
+                </button>
+                <button type="button" data-primary onClick={() => void aiSetNode()} disabled={!aiNote.text.trim() || architectBusy}>
+                  {locale === "en" ? "Have AI set this step" : "AI로 바로 세팅"}
+                </button>
+              </div>
+              <p>
+                {locale === "en"
+                  ? "Save keeps the note on the step for the AI to read. “Have AI set this step” proposes a change to this step only — nothing applies until you approve it."
+                  : "주석 저장은 이 단계에 메모로 남습니다(AI가 읽는 메모). “AI로 바로 세팅”은 이 단계만 고치는 제안을 만들고, 승인 전에는 아무것도 바뀌지 않습니다."}
+              </p>
+            </div>
+          ) : null}
+          {/* ★검증 로그 패널 — 에러·경고를 상단 팝업이 아니라 VS Code 하단 패널처럼.
+              위 팝업은 캔버스를 밀어내고, 읽기 전에 사라지고, 줄이 많으면 잘렸다. */}
+          {(!editing || logRows.length > 0) ? (
+            /* ★터미널처럼 한 패널 — 로그가 위, 챗 입력이 아래 고정(오너 지시: 플로팅 금지·합치기). */
+            <div className="automation-issue-log titlebar-nodrag" style={{ height: logOpen ? logHeight : (editing ? 30 : 92), display: "flex", flexDirection: "column" }}>
+              <div
+                className="automation-issue-log-grip"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  const startY = e.clientY;
+                  const startH = logHeight;
+                  const move = (ev: MouseEvent) => {
+                    setLogHeight(Math.min(420, Math.max(64, startH + (startY - ev.clientY))));
+                    setLogOpen(true);
+                  };
+                  const up = () => {
+                    window.removeEventListener("mousemove", move);
+                    window.removeEventListener("mouseup", up);
+                  };
+                  window.addEventListener("mousemove", move);
+                  window.addEventListener("mouseup", up);
+                }}
+              />
+              <button type="button" className="automation-issue-log-head" onClick={() => setLogOpen((v) => !v)}>
+                <span data-kind="error" style={{ visibility: errorCount > 0 ? "visible" : "hidden" }}>
+                  {t("auto.validate.errors")} {errorCount}
+                </span>
+                <span data-kind="warning" style={{ visibility: warnCount > 0 ? "visible" : "hidden" }}>
+                  {t("auto.validate.warnings")} {warnCount}
+                </span>
+                {/* 상태 문구는 여기(터미널 상태줄) — 떠 있는 카드로 캔버스를 가리지 않는다. */}
+                {(message || (editing && dirty)) ? (
+                  <span data-kind="status" style={{ color: "var(--ink-soft)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "60%" }}>
+                    {message || t("auto.flow.unsaved")}
+                  </span>
+                ) : null}
+                <em>{logOpen ? "▾" : "▴"}</em>
+              </button>
+              {logOpen ? (
+                <ul className="automation-issue-log-list">
+                  {logRows.map((iss, i) => (
+                    <li key={i} data-severity={iss.severity}>
+                      {/* 줄을 누르면 그 노드가 선택된다 — 어디 문제인지 찾아 헤매지 않게. */}
+                      <button
+                        type="button"
+                        onClick={() => { if (iss.nodeId) { setSelectedNodeId(iss.nodeId); setSelectedEdgeId(null); } }}
+                      >
+                        <b>{iss.severity === "error" ? (locale === "en" ? "ERROR" : "오류") : (locale === "en" ? "WARN" : "경고")}</b>
+                        {iss.message}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {/* ★행동이 필요한 카드(시작 값·승인·판정 교정·의존성 수리)는 전부 이 패널 안에서
+                  해결한다(오너 지시 2026-08-08: 플로팅 금지, 바텀시트 하나로). */}
+              <div style={{ padding: "8px 10px", display: "grid", gap: 8 }}>
       {/* 시작 값을 받아야 하는 그래프. 값을 받고 나서 실행한다 —
           묻지 않고 시작하면 빈 값으로 도는 것을 사용자가 결과에서야 알게 된다. */}
       {inputPrompt ? (
         <div
           data-testid="graph-input-prompt"
           style={{
-            order: 1,
+            
             padding: "12px 14px", borderRadius: 12,
             border: "1px solid var(--line)", background: "var(--paper)",
             display: "flex", flexDirection: "column", gap: 8,
@@ -1374,7 +1511,7 @@ function AutomationFlowPage() {
             className="titlebar-nodrag"
             data-testid={`node-failure-${failedNodeId}`}
             style={{
-              order: 2,
+              
               padding: "12px 14px",
               borderRadius: "var(--radius-md)",
               border: `1px solid ${awaitingApproval ? "var(--accent-soft)" : "var(--paper-edge)"}`,
@@ -1482,147 +1619,25 @@ function AutomationFlowPage() {
           </div>
         );
       })}
-
-      </div>
-      </div>
-
-      <div className="automation-flow-workspace">
-        {leftOpen ? (
-          <AutomationSessionPanel
-            automationId={automation.id}
-            locale={locale}
-            toolMode={automation.toolMode}
-            hubMode={automation.hubMode}
-            executionPermission={automation.executionPermission}
-            onCollapse={() => setLeftOpen(false)}
-          />
-        ) : (
-          <button
-            type="button"
-            className="automation-panel-tab titlebar-nodrag"
-            data-side="left"
-            onClick={() => setLeftOpen(true)}
-            aria-label={locale === "en" ? "Show session" : "세션 대화 펼치기"}
-          >
-            <span>⟩</span>
-            <em>{locale === "en" ? "Session" : "세션 대화"}</em>
-          </button>
-        )}
-        <div className="automation-flow-canvas">
-
-          {isSynthesized && !editing ? (
-            <div
-              className="automation-flow-origin-note"
-            >
-              {t("auto.flow.synthesized")}
-            </div>
-          ) : null}
-          <ReactFlow
-            className="automation-flow-react"
-            nodes={rfNodes}
-            edges={rfEdges}
-            nodeTypes={workflowNodeTypes}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            fitView
-            fitViewOptions={FIT_VIEW}
-            minZoom={0.3}
-            maxZoom={1.6}
-            proOptions={{ hideAttribution: true }}
-            nodesDraggable={editing}
-            nodesConnectable={editing}
-            elementsSelectable
-            deleteKeyCode={editing ? ["Backspace", "Delete"] : null}
-            onNodeClick={(_, node) => { setSelectedNodeId(node.id); setSelectedEdgeId(null); }}
-            onEdgeClick={(_, e) => { setSelectedEdgeId(e.id); setSelectedNodeId(null); }}
-            onPaneClick={() => { setSelectedNodeId(null); setSelectedEdgeId(null); }}
-          >
-            <Background color="var(--paper-edge)" gap={24} size={1} />
-            <Controls showInteractive={false} />
-            {/* 미니맵 삭제(실측 항목 6) — 자리만 차지하고 캔버스 우하단을 가렸다.
-                검증 결과는 아래 로그 패널이 담당한다. */}
-          </ReactFlow>
-          {aiNote ? (
-            <div className="automation-ai-note-pop titlebar-nodrag" role="dialog" aria-label="AI note">
-              <div className="automation-ai-note-title">
-                {locale === "en" ? `Tell AI about “${aiNote.label}”` : `“${aiNote.label}” 단계에 메모`}
               </div>
-              <textarea
-                autoFocus
-                value={aiNote.text}
-                onChange={(e) => setAiNote({ ...aiNote, text: e.target.value })}
-                placeholder={locale === "en"
-                  ? "e.g. keep it under 200 characters, always include a source link"
-                  : "예: 200자 이내로, 출처 링크는 꼭 포함"}
-              />
-              <div className="automation-ai-note-actions">
-                <button type="button" onClick={() => setAiNote(null)}>{locale === "en" ? "Close" : "닫기"}</button>
-                <button type="button" onClick={saveAiNote} disabled={!aiNote.text.trim()}>
-                  {locale === "en" ? "Save note" : "주석 저장"}
-                </button>
-                <button type="button" data-primary onClick={() => void aiSetNode()} disabled={!aiNote.text.trim() || architectBusy}>
-                  {locale === "en" ? "Have AI set this step" : "AI로 바로 세팅"}
-                </button>
-              </div>
-              <p>
-                {locale === "en"
-                  ? "Save keeps the note on the step for the AI to read. “Have AI set this step” proposes a change to this step only — nothing applies until you approve it."
-                  : "주석 저장은 이 단계에 메모로 남습니다(AI가 읽는 메모). “AI로 바로 세팅”은 이 단계만 고치는 제안을 만들고, 승인 전에는 아무것도 바뀌지 않습니다."}
-              </p>
-            </div>
-          ) : null}
-          {/* ★검증 로그 패널 — 에러·경고를 상단 팝업이 아니라 VS Code 하단 패널처럼.
-              위 팝업은 캔버스를 밀어내고, 읽기 전에 사라지고, 줄이 많으면 잘렸다. */}
-          {(!editing || logRows.length > 0) ? (
-            /* ★터미널처럼 한 패널 — 로그가 위, 챗 입력이 아래 고정(오너 지시: 플로팅 금지·합치기). */
-            <div className="automation-issue-log titlebar-nodrag" style={{ height: logOpen ? logHeight : (editing ? 30 : 92), display: "flex", flexDirection: "column" }}>
-              <div
-                className="automation-issue-log-grip"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  const startY = e.clientY;
-                  const startH = logHeight;
-                  const move = (ev: MouseEvent) => {
-                    setLogHeight(Math.min(420, Math.max(64, startH + (startY - ev.clientY))));
-                    setLogOpen(true);
-                  };
-                  const up = () => {
-                    window.removeEventListener("mousemove", move);
-                    window.removeEventListener("mouseup", up);
-                  };
-                  window.addEventListener("mousemove", move);
-                  window.addEventListener("mouseup", up);
-                }}
-              />
-              <button type="button" className="automation-issue-log-head" onClick={() => setLogOpen((v) => !v)}>
-                <span data-kind="error" style={{ visibility: errorCount > 0 ? "visible" : "hidden" }}>
-                  {t("auto.validate.errors")} {errorCount}
-                </span>
-                <span data-kind="warning" style={{ visibility: warnCount > 0 ? "visible" : "hidden" }}>
-                  {t("auto.validate.warnings")} {warnCount}
-                </span>
-                <em>{logOpen ? "▾" : "▴"}</em>
-              </button>
-              {logOpen ? (
-                <ul className="automation-issue-log-list">
-                  {logRows.map((iss, i) => (
-                    <li key={i} data-severity={iss.severity}>
-                      {/* 줄을 누르면 그 노드가 선택된다 — 어디 문제인지 찾아 헤매지 않게. */}
-                      <button
-                        type="button"
-                        onClick={() => { if (iss.nodeId) { setSelectedNodeId(iss.nodeId); setSelectedEdgeId(null); } }}
-                      >
-                        <b>{iss.severity === "error" ? (locale === "en" ? "ERROR" : "오류") : (locale === "en" ? "WARN" : "경고")}</b>
-                        {iss.message}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+              {/* ★세션 대화 스트림 — 별도 열이 아니라 이 패널 안에서 흐른다.
+                  실행 기록·질문 카드·어시스턴트 응답이 로그와 같은 자리에서 이어진다. */}
+              {!editing ? (
+                <div style={{ flex: 1, minHeight: 0, overflowY: "auto", borderTop: "1px solid var(--paper-edge)" }}>
+                  <AutomationSessionPanel
+                    automationId={automation.id}
+                    locale={locale}
+                    toolMode={automation.toolMode}
+                    hubMode={automation.hubMode}
+                    executionPermission={automation.executionPermission}
+                    embedded
+                    sendHandleRef={sessionSendRef}
+                  />
+                </div>
               ) : null}
               {!editing ? (
                 <div style={{ marginTop: "auto", padding: "8px 10px", borderTop: "1px solid var(--paper-edge)", background: "var(--paper)", display: "grid", gap: 8 }}>
-      
+
               {!editing ? (
                 <div
                   className="titlebar-nodrag"
@@ -1635,7 +1650,16 @@ function AutomationFlowPage() {
                       onKeyDown={(e) => {
                         if (e.key === "Enter" && !e.shiftKey) {
                           e.preventDefault();
-                          void requestGraphChange();
+                          // ★Enter = 세션 대화로 보낸다(묻기·지시). 그래프 수정 제안은
+                          //   옆의 [고칠 내용 보기] 버튼이 담당한다 — 입력은 하나, 행동은 둘.
+                          const text = architectDraft.trim();
+                          if (!text) return;
+                          if (sessionSendRef.current) {
+                            sessionSendRef.current(text);
+                            setArchitectDraft("");
+                          } else {
+                            void requestGraphChange();
+                          }
                         }
                       }}
                       placeholder={t("auto.flow.architect_placeholder")}
@@ -1750,6 +1774,12 @@ function AutomationFlowPage() {
               value={(selectedEdge.data as { maxIterations?: number } | undefined)?.maxIterations ?? null}
               onChange={setLoopBound}
               onClose={() => setSelectedEdgeId(null)}
+              onDelete={() => {
+                const edgeId = selectedEdge.id;
+                setRfEdges((eds) => eds.filter((e) => e.id !== edgeId));
+                setSelectedEdgeId(null);
+                setDirty(true);
+              }}
               locale={locale}
             />
           ) : editing && selectedNode ? (
@@ -1778,12 +1808,14 @@ function AutomationFlowPage() {
  *   멈출 지점이 없는 반복은 아무도 멈춰 줄 수 없다.
  */
 function LoopBoundPanel({
-  isBackEdge, value, onChange, onClose, locale,
+  isBackEdge, value, onChange, onClose, onDelete, locale,
 }: {
   isBackEdge: boolean;
   value: number | null;
   onChange: (v: number | null) => void;
   onClose: () => void;
+  /** 편집 모드에서만 온다 — 보기 모드에서 선을 지우게 두지 않는다. */
+  onDelete?: () => void;
   locale: "ko" | "en";
 }) {
   const L = (ko: string, en: string) => (locale === "en" ? en : ko);
@@ -1824,6 +1856,13 @@ function LoopBoundPanel({
           앞에서 뒤로 가는 보통 연결입니다. 따로 정할 것이 없어요.
         </p>
       )}
+      {/* ★한 번 그린 선을 지울 방법이 없었다(오너 실측 2026-08-08) — 키보드(Delete)를
+          모르는 사람도 지울 수 있게 버튼으로. */}
+      {onDelete ? (
+        <button type="button" className="automation-edge-delete" onClick={onDelete}>
+          {L("이 연결 삭제", "Delete this connection")}
+        </button>
+      ) : null}
     </div>
   );
 }

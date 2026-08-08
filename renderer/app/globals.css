@@ -11171,3 +11171,96 @@ button[data-toggle-state="on"] {
   background: var(--paper);
   box-shadow: 0 8px 28px rgba(0,0,0,0.14);
 }
+
+/* ── 연결(엣지) 설정 패널 — 노드 인스펙터와 같은 자리·같은 격 ──
+   이 클래스들이 없어서 반복 상한 패널이 맨 HTML 스켈레톤으로 떴다(오너 실측 2026-08-08). */
+.automation-node-panel {
+  width: 320px;
+  flex-shrink: 0;
+  border-left: var(--hairline);
+  background: var(--paper);
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--ink);
+}
+.automation-node-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.automation-node-panel-head strong {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-deep);
+}
+.automation-node-panel-hint {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+.automation-node-panel .ghost-btn {
+  border: 1px solid var(--paper-edge);
+  background: var(--paper-2);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--muted-deep);
+  cursor: pointer;
+}
+.automation-field {
+  display: grid;
+  gap: 6px;
+}
+.automation-field span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+.automation-field input {
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--paper-edge);
+  background: var(--paper-2);
+  color: var(--ink);
+  font-size: 13px;
+  outline: none;
+  width: 100%;
+}
+.automation-chip-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.automation-chip-row .chip {
+  border: 1px solid var(--paper-edge);
+  background: var(--paper-2);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.automation-chip-row .chip-on {
+  border-color: var(--accent);
+  background: var(--fill-1);
+  color: var(--accent);
+  font-weight: 600;
+}
+.automation-edge-delete {
+  margin-top: 4px;
+  border: 1px solid rgba(190, 70, 60, 0.35);
+  background: var(--paper-2);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #b0433a;
+  cursor: pointer;
+}
