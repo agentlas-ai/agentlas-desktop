@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import {
   PUBLIC_CHECKSUM_FILE,
   assertStableReleaseIdentity,
+  buildOutputAssetNames,
   publicReleaseAssetNames,
   requiredReleaseAssetNames,
   userPayloadAssetNames,
@@ -383,18 +384,33 @@ export function validateLocalReleaseDirectory({
   if (verification.sourceCommit.toLowerCase() !== sourceCommit.toLowerCase()) {
     throw new Error("desktop-release-verification.json does not bind this exact Desktop source commit.");
   }
-  const checksumDocument = JSON.parse(readFileSync(join(releaseDir, PUBLIC_CHECKSUM_FILE), "utf8"));
-  assertPublicChecksumCoverage({
-    document: checksumDocument,
-    version,
-    tag,
-    repo: verification.repo,
-    assetByName,
-  });
+  // 이 문서는 발행기가 만든다. 발행 전 단계(빌드 산출물만 있는 시점)에서는 아직
+  // 없는 게 정상이고, 그때 요구하면 릴리스가 구조적으로 불가능해진다(v0.9.64 실패).
+  // 단, 있으면 언제나 완전 검사한다 — 조용한 통과는 없다.
+  const checksumPath = join(releaseDir, PUBLIC_CHECKSUM_FILE);
+  const checksumRequiredNow = required.includes(PUBLIC_CHECKSUM_FILE);
+  if (checksumRequiredNow && !existsSync(checksumPath)) {
+    throw new Error(`Missing required release artifact: ${PUBLIC_CHECKSUM_FILE}`);
+  }
+  const checksumDocument = existsSync(checksumPath)
+    ? JSON.parse(readFileSync(checksumPath, "utf8"))
+    : null;
+  if (checksumDocument) {
+    assertPublicChecksumCoverage({
+      document: checksumDocument,
+      version,
+      tag,
+      repo: verification.repo,
+      assetByName: new Map(
+        userPayloadAssetNames(version)
+          .map((name) => [name, assetByName.get(name) ?? requireRegularFile(join(releaseDir, name))]),
+      ),
+    });
+  }
   // Generated notes are the normal path; a release staged without them is
   // still checked once they exist so a hand-edited body cannot widen the claim.
   const notesFile = join(releaseDir, "github-release-notes.md");
-  if (existsSync(notesFile)) {
+  if (checksumDocument && existsSync(notesFile)) {
     assertReleaseNotesClaims({
       notes: readFileSync(notesFile, "utf8"),
       document: checksumDocument,
@@ -506,12 +522,17 @@ async function main() {
   const releaseDir = resolve(desktopRoot, String(args.get("--release-dir") || "release"));
   const sourceCommit = String(args.get("--source-commit") || currentCommit());
   const publicAllowlist = args.get("--public-allowlist") === "true";
+  const buildOutputsOnly = args.get("--build-outputs-only") === "true";
   const manifest = validateLocalReleaseDirectory({
     releaseDir,
     version,
     tag,
     sourceCommit,
-    assetNames: publicAllowlist ? publicReleaseAssetNames(version) : undefined,
+    // 발행 전 게이트는 빌드 산출물만 본다. 발행기가 스스로 만든 증거를
+    // 자기 선행 조건으로 요구하지 않기 위해서다.
+    assetNames: buildOutputsOnly
+      ? buildOutputAssetNames(version)
+      : publicAllowlist ? publicReleaseAssetNames(version) : undefined,
     requirePrivateWebEnv: false,
   });
   if (args.get("--verify-remote") === "true") {

@@ -11,7 +11,18 @@ const DEFAULT_ASSET_WAIT_MS = 15 * 60 * 1000;
 const DEFAULT_ASSET_POLL_MS = 10 * 1000;
 export const PUBLIC_CHECKSUM_FILE = "desktop-release-assets.json";
 
-export function requiredReleaseAssetNames(version) {
+/**
+ * What the OS build jobs actually produce.  This is the set that exists in
+ * `release/` BEFORE the publisher runs.
+ *
+ * v0.9.64 failed to publish because the public checksum document was added to
+ * the single required list, and the pre-write gate demanded it in the same
+ * directory the publisher had not written yet ("Missing required release
+ * artifact: desktop-release-assets.json").  Evidence that a step derives
+ * cannot be a precondition of that step.  The two phases are named separately
+ * now so neither list can quietly grow into the other's job.
+ */
+export function buildOutputAssetNames(version) {
   return [
     `Agentlas-${version}-Windows-x64-Setup.exe`,
     `Agentlas-${version}-Windows-x64-Setup.exe.blockmap`,
@@ -30,8 +41,16 @@ export function requiredReleaseAssetNames(version) {
     "latest-linux.yml",
     "latest-mac.yml",
     "desktop-release-verification.json",
-    PUBLIC_CHECKSUM_FILE,
   ];
+}
+
+/**
+ * Everything the public release must contain once the publisher has run —
+ * the build outputs plus the checksum document the publisher derives from
+ * them.  This stays the upload allowlist and the post-write contract.
+ */
+export function requiredReleaseAssetNames(version) {
+  return [...buildOutputAssetNames(version), PUBLIC_CHECKSUM_FILE];
 }
 
 /**

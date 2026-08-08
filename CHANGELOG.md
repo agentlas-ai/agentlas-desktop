@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.9.65 — 2026-08-08
+
+This release binds Agentlas OS v1.1.99 at
+7524f206532c5c509be316d497781b240be3d487.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- An answer is an answer, not the protocol behind it. A team chat could end by
+  printing the hidden `<<agentlas-surface>>` block verbatim — raw JSON on
+  screen and in the saved transcript — because the step that strips it lived
+  on the single-agent path only, and every orchestrated path returns earlier.
+  Stripping now happens at the one place every run passes through, so a valid
+  surface is shown as the view it was meant to be instead of being pasted as
+  text, and an invalid one is never shown at all.
+- A local model that breaks down says so as a failure, not as your answer.
+  After a tool round-trip collapsed, Ollama replied "The system encountered a
+  timeout error … no further function calls are required", and that sentence
+  was stored as the result. Local runtimes (Ollama, LM Studio, MLX, and custom
+  OpenAI-compatible endpoints) now report empty replies, unconverged tool
+  loops, and refusal notices through the same failure marker the CLI runtimes
+  use, and cancelling a run is no longer reported as "server unreachable".
+- The project chat's opening screen has its design back. Its markup referenced
+  styles that did not exist, so it rendered as bare HTML — a heading and a
+  list with no card, spacing, or grid. The copy button, the jump-to-latest
+  button, the streaming caret, and the stop button were missing styles for the
+  same reason and are fixed with it.
+- Saving privately to your own Agent Cloud no longer dead-ends. The automatic
+  repair pass ran only for public Hub publishing, so the same folder that
+  published fine could be refused outright as a private save. Private saves
+  now take the same repair path, and the costly model pass runs only when the
+  package is actually blocked.
+- Work in progress survives leaving the screen. Upload and Telegram connection
+  progress lived in the page's own state, so switching menus during a run
+  erased the phase, log, and result while the work kept going in the
+  background. Both now keep their state outside the view, the way the build
+  screen already did.
+- The Telegram ports panel stacks instead of crushing itself: the selection,
+  the bot name field, and the create button were three columns in a narrow
+  side panel and overlapped; they are rows now.
+- "Skill injection" is removed from the agent detail screen.
+- Releases can be published again. 0.9.64 never shipped: the pre-publish gate
+  demanded `desktop-release-assets.json`, a document the publisher itself
+  writes later in the same job, so the release failed on evidence that cannot
+  exist yet. Build outputs and publisher-derived evidence are separate
+  contracts now, each checked in the phase where it exists.
+
 ## 0.9.64 — 2026-08-08
 
 This release binds Agentlas OS v1.1.99 at

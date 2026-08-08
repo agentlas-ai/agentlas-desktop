@@ -497,6 +497,7 @@ jobs:
           --tag="$RESOLVED_TAG"
           --version="$RESOLVED_VERSION"
           --public-allowlist
+          --build-outputs-only
 
       - name: Install pinned Railway CLI before stable publication
         if: env.RESOLVED_DRAFT != 'true'
