@@ -454,6 +454,34 @@ function AutomationFlowPage() {
     };
   }, [automation]);
 
+  /* ★실행이 끝났는데 화면이 왜 멈췄는지 말을 못 하던 자리.
+     라이브 이벤트는 `nodeState: "failed"` 만 실어 오고, **사유는 실려 오지 않는다** —
+     커널이 사유를 DB에 쓰는 것은 실행이 끝날 때(`saveGraphRunFailures`)다. 그래서
+     라이브로 지켜보던 사람에게는 빨간 노드 하나만 남고, 카드도 로그 줄도 상태줄도
+     아무 말을 안 했다. 새로고침해야 비로소 이유가 나왔다(실렌더 2026-08-09).
+     도는 동안, 그리고 끝난 직후 한 번 더 스냅샷을 당겨온다. */
+  useEffect(() => {
+    if (!automation) return;
+    const api = ipc();
+    if (!api) return;
+    let cancelled = false;
+    const pull = () => {
+      void api.automations.latestRun(automation.id).then((snap) => {
+        if (cancelled || !snap) return;
+        if (snap.nodeStates) setRunStates(snap.nodeStates);
+        setNodeFailures(snap.nodeFailures ?? {});
+        setRunStartedAt(snap.startedAt ?? null);
+      }).catch(() => undefined);
+    };
+    if (liveRunning) {
+      const id = window.setInterval(pull, 3_000);
+      return () => { cancelled = true; window.clearInterval(id); };
+    }
+    // 마지막 노드 이벤트와 커널의 마무리 쓰기 사이에 틈이 있다 — 끝난 뒤 한 번 더.
+    const id = window.setTimeout(pull, 1_200);
+    return () => { cancelled = true; window.clearTimeout(id); };
+  }, [automation, liveRunning]);
+
   // runStates가 바뀔 때마다 노드 data.runState 주입(캔버스가 테두리/펄스로 애니메이션).
   useEffect(() => {
     setRfNodes((nodes) => nodes.map((n) => ({
@@ -627,6 +655,9 @@ function AutomationFlowPage() {
   const doneNodes = Object.values(runStates).filter((st) => st === "done").length;
   // 상세 탭이 지금 펼쳐져 보이는가 — 상태줄이 같은 행동을 두 번 내놓지 않기 위한 조건.
   const detailsShown = logOpen && bottomTab === "details";
+  // 멈췄는가 — 사유가 아직 안 실렸어도 노드가 failed 면 멈춘 것이다. 사유가 없다고
+  // "정상 종료"처럼 말하면, 빨간 노드를 보고 있는 사람에게 화면이 거짓말을 한다.
+  const stopped = errorCount > 0 || Object.values(runStates).some((st) => st === "failed");
 
   const selectedNode: WorkflowNode | null = useMemo(() => {
     if (!selectedNodeId) return null;
@@ -1317,7 +1348,7 @@ return (
       {!editing ? (
         <div
           className="automation-run-status"
-          data-tone={pausedApproval ? "wait" : liveRunning ? "run" : errorCount > 0 ? "stop" : "idle"}
+          data-tone={pausedApproval ? "wait" : liveRunning ? "run" : stopped ? "stop" : "idle"}
           data-testid="run-status-strip"
         >
           <span className="automation-run-status-dot" aria-hidden="true" />
@@ -1330,7 +1361,7 @@ return (
                 ? (locale === "en"
                   ? `Running${runningNodeLabel ? ` — ${runningNodeLabel}` : ""} · ${doneNodes}/${totalNodes} done`
                   : `실행 중${runningNodeLabel ? ` — ${runningNodeLabel}` : ""} · ${totalNodes}단계 중 ${doneNodes}단계 완료`)
-                : errorCount > 0
+                : stopped
                   ? (locale === "en"
                     ? `Stopped · ${doneNodes}/${totalNodes} done. What stopped it is in Details.`
                     : `멈춰 있습니다 · ${totalNodes}단계 중 ${doneNodes}단계 완료. 무엇 때문인지는 [상세]에 있습니다.`)
@@ -1357,7 +1388,7 @@ return (
                 ? (locale === "en" ? "Approving…" : "승인하는 중…")
                 : (locale === "en" ? "Approve and continue" : "승인하고 이어서 실행")}
             </button>
-          ) : errorCount > 0 && !liveRunning ? (
+          ) : stopped && !liveRunning ? (
             <button
               type="button"
               data-testid="status-open-details"
