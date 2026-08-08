@@ -910,6 +910,10 @@ export function projectMobileBridgeInvocationEvent(
   const projected: MobileBridgeInvocationEventDto = {
     kind: event.kind === "mcp-key-request" ? "thinking" : event.kind,
   };
+  if (event.kind === "notice" && event.notice) {
+    // 고지는 폰에도 간다. 다만 기계 원문(details)은 보내지 않는다 — 화면에 쓸 값만.
+    projected.status = boundedRedactedText(event.notice.message, 1_000);
+  }
   if (typeof event.status === "string") {
     projected.status = boundedRedactedText(event.status, 1_000);
   }

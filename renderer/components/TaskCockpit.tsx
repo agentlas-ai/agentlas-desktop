@@ -1179,6 +1179,23 @@ function ChatPage() {
               : msg,
           ),
         );
+      } else if (ev.kind === "notice" && ev.notice) {
+        // ★호스트 고지는 답변 본문에 섞지 않는다. 자기 행으로 붙는다.
+        const notice = ev.notice;
+        setMessages((prev) => {
+          const lastAgent = [...prev].reverse().find((m) => m.role === "agent");
+          if (!lastAgent) {
+            return [
+              ...prev,
+              { id: uid(), role: "agent" as const, text: "", notices: [{ id: uid(), ...notice }] },
+            ];
+          }
+          return prev.map((m) =>
+            m.id === lastAgent.id
+              ? { ...m, notices: [...(m.notices ?? []), { id: uid(), ...notice }] }
+              : m,
+          );
+        });
       } else if (ev.kind === "surface" && ev.surface) {
         pushWorkflow("tool", `Surface ready · ${ev.surface.title}`);
         const surfaceId = ev.surfaceId ?? uid();

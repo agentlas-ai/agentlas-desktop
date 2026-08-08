@@ -3703,7 +3703,16 @@ export interface McpInvocationEvent {
     | "surface"
     | "usage"
     | "reasoning"
-    | "mcp-key-request";
+    | "mcp-key-request"
+    /**
+     * ★호스트가 하는 말. 모델의 답과 **같은 칸을 쓰지 않는다**.
+     *
+     * 실측 사고(2026-08-08): 서피스 봉투 원문이 답변으로 저장됐고, 그걸 잘라낸 자리에
+     * 호스트가 "결과를 정리하는 중 문제가 생겨…"를 **본문 텍스트로** 넣었다. 자동화 등록
+     * 요약도 답변 끝에 이어붙였다. 호스트 고지에 자기 행이 없어서 생긴 일이다.
+     * 고지는 이 이벤트로 보내고 화면은 심각도를 가진 별도 행으로 그린다.
+     */
+    | "notice";
   status?: string;
   text?: string;
   /** partial 델타 스트리밍(무-agentId 메인 스트림 한정) — text(누적 전문) 대신 직전 partial
@@ -3713,6 +3722,16 @@ export interface McpInvocationEvent {
   /** 델타 적용 후 전체 텍스트 길이 — 렌더러가 누적 결과를 검증해 어긋나면 재동기화한다. */
   textLen?: number;
   error?: { code: string; message: string };
+  /** kind:"notice" 전용 — 호스트 고지. 답변 본문과 절대 합치지 않는다. */
+  notice?: {
+    level: "info" | "success" | "warning" | "error";
+    /** 사람이 읽는 한 줄. */
+    message: string;
+    /** 기계 코드(있으면). 화면은 접어 두고 진단에 쓴다. */
+    code?: string;
+    /** 원문·payload. 펼쳤을 때만 보인다. */
+    details?: string;
+  };
   /** Agent OS surface manifest, emitted when an agent produces a safe interactive surface. */
   surfaceId?: string;
   surface?: AgentlasSurfaceManifest;

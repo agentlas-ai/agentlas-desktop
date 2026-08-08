@@ -106,6 +106,22 @@ export interface StreamMessage {
   pipeline?: PipelineStage[];
   /** 멀티모달 엔진 미연결 — 본문 아래에 "설정으로 가기" 버튼을 렌더한다. */
   needsMultimodalSetup?: boolean;
+  /**
+   * ★호스트가 이 턴에 대해 한 말. **본문(text)과 분리된 칸이다.**
+   *
+   * 예전에는 자동화 등록 요약도, 서피스 정리 실패 사과도 전부 `text`에 이어붙거나
+   * 대입돼서 모델이 그렇게 말한 것처럼 읽혔다(2026-08-08 실측). 고지는 자기 행으로
+   * 심각도와 함께 뜨고, 기계 원문은 접혀 있다.
+   */
+  notices?: ChatNotice[];
+}
+
+export interface ChatNotice {
+  id: string;
+  level: "info" | "success" | "warning" | "error";
+  message: string;
+  code?: string;
+  details?: string;
 }
 
 export interface ChatEmptyDirectory {
@@ -288,13 +304,15 @@ export function ChatStream({
           background: "var(--paper)",
           display: "flex",
           flexDirection: "column",
-          gap: 16,
+          // 간격은 컨테이너가 아니라 **이웃 쌍**이 정한다(아래 messageGap).
+          // flat gap 하나면 사용자 연속 발화와 역할 전환이 같은 거리로 벌어져
+          // 대화의 덩어리가 안 보인다.
         }}
       >
         {messages.length === 0 && (
           <EmptyChatState agentName={agentName} directory={emptyDirectory} />
         )}
-        {messages.map((m) => (
+        {messages.map((m, index) => (
           <div
             key={m.id}
             id={messageDomId(m.id)}
@@ -302,6 +320,7 @@ export function ChatStream({
             data-chat-message-id={m.id}
             data-timeline-focus={focusMessageId === m.id ? "true" : "false"}
             className="agentlas-chat-message-anchor"
+            style={{ marginTop: messageGap(messages[index - 1], m) }}
           >
             <Bubble
               message={m}
@@ -841,6 +860,13 @@ const Bubble = memo(function Bubble({
                   onAnswer={(answers) => onAnswerQuestion?.(message.id, q.id, answers)}
                 />
               ))}
+          </div>
+        )}
+        {message.notices && message.notices.length > 0 && (
+          <div className="agentlas-chat-notices">
+            {message.notices.map((notice) => (
+              <ChatNoticeRow key={notice.id} notice={notice} />
+            ))}
           </div>
         )}
         {message.needsMultimodalSetup && !message.busy && (
@@ -2096,6 +2122,8 @@ function WorkingPanel({
           fontWeight: 500,
           flexWrap: "wrap",
           color: "var(--muted-deep)",
+          // 실행 중과 완료가 **같은 높이**를 쓴다 — 턴이 끝날 때 줄이 튀지 않는다.
+          minHeight: 20,
         }}
       >
         <span style={statusBadge(done)}>
@@ -2103,7 +2131,13 @@ function WorkingPanel({
           {done && <span aria-hidden style={doneDot} />}
           <span>{done ? t("chatstream.done") : liveState.label}</span>
         </span>
-        <span style={{ color: "var(--muted-deep)" }}>
+        <span
+          style={{
+            color: "var(--muted-deep)",
+            // 초·토큰이 1초마다 바뀌어도 폭이 떨리지 않는다.
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
           {done
             ? t("chatstream.took", { sec: formatElapsed(elapsed, locale) })
             : t("chatstream.working_for", { sec: formatElapsed(elapsed, locale) })}
@@ -2208,7 +2242,6 @@ function WorkingPanel({
               style={{
                 display: "flex",
                 flexDirection: "column",
-                gap: 4,
                 paddingLeft: 14,
                 borderLeft: "1px solid color-mix(in srgb, var(--muted) 28%, transparent)",
                 marginLeft: 3,
@@ -2216,12 +2249,19 @@ function WorkingPanel({
               }}
             >
               {allRows.map((s, idx) => (
-                <ActivityRow
+                <div
                   key={s.id}
-                  step={s}
-                  current={!done && idx === allRows.length - 1}
-                  done={done}
-                />
+                  // ★간격은 이웃 쌍이 정한다: 도구가 연달아 나오면 붙여서 **한 블록**으로
+                  // 읽히고, 생각↔도구 경계에서만 벌어진다. 균일 gap이면 도구 20개가
+                  // 20개의 독립 카드로 떠서 화면이 성게처럼 된다.
+                  style={{ marginTop: activityRowGap(allRows[idx - 1], s) }}
+                >
+                  <ActivityRow
+                    step={s}
+                    current={!done && idx === allRows.length - 1}
+                    done={done}
+                  />
+                </div>
               ))}
             </div>
           )}
@@ -2229,6 +2269,16 @@ function WorkingPanel({
       )}
     </div>
   );
+}
+
+/** 활동 행 사이 간격 — 도구 연속은 0, 종류가 바뀌는 경계에서만 벌어진다. */
+function activityRowGap(above: StreamStep | undefined, below: StreamStep): number {
+  if (!above) return 0;
+  const aboveIsTool = Boolean(above.tool);
+  const belowIsTool = Boolean(below.tool);
+  if (aboveIsTool && belowIsTool) return 0;
+  if (!aboveIsTool && !belowIsTool) return 4;
+  return 6;
 }
 
 function ActivityRow({
@@ -2905,6 +2955,65 @@ function toolView(
     ...(display.facts ? { facts: display.facts } : {}),
     detail,
   };
+}
+
+/**
+ * 호스트 고지 한 줄. 심각도가 색과 아이콘을 정하고, 기계 원문(details·code)은 접혀 있다.
+ * 이 행은 **모델의 답이 아니다** — 그래서 말풍선 본문과 다른 표면을 쓴다.
+ */
+function ChatNoticeRow({ notice }: { notice: ChatNotice }) {
+  const [open, setOpen] = useState(false);
+  const tone = {
+    info: { fg: "var(--accent)", icon: "ⓘ" },
+    success: { fg: "#2f7d4f", icon: "✓" },
+    warning: { fg: "#9a6700", icon: "!" },
+    error: { fg: "var(--red-deep)", icon: "×" },
+  }[notice.level];
+  const expandable = Boolean(notice.details || notice.code);
+  return (
+    <div className={`agentlas-chat-notice agentlas-chat-notice-${notice.level}`}>
+      <span aria-hidden className="agentlas-chat-notice-icon" style={{ color: tone.fg }}>
+        {tone.icon}
+      </span>
+      <div className="agentlas-chat-notice-body">
+        <span style={{ color: tone.fg }}>{notice.message}</span>
+        {expandable && (
+          <button
+            type="button"
+            className="agentlas-chat-notice-toggle"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+          >
+            {open ? "자세히 닫기" : "자세히"}
+          </button>
+        )}
+        {open && (
+          <pre className="agentlas-chat-notice-details">
+            {[notice.code ? `code: ${notice.code}` : "", notice.details ?? ""]
+              .filter(Boolean)
+              .join("\n")}
+          </pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 이웃 두 메시지의 **종류 조합**이 간격을 정한다.
+ *
+ * flat `gap: 16` 하나로는 "사용자가 연달아 두 마디 한 것"과 "역할이 바뀐 것"이 같은
+ * 거리로 벌어져 대화 덩어리가 안 읽힌다. 조합별로 정하면 덩어리가 눈에 들어온다.
+ */
+function messageGap(above: StreamMessage | undefined, below: StreamMessage): number {
+  if (!above) return 0;
+  // 같은 화자가 연달아 말하면 붙인다 — 한 사람의 여러 마디는 한 덩어리다.
+  if (above.role === below.role) return above.role === "user" ? 4 : 8;
+  // 시스템 고지는 앞뒤와 살짝 떨어져 자기 존재를 드러낸다.
+  if (above.role === "system" || below.role === "system") return 14;
+  // 사용자 → 에이전트: 답이 시작되는 자리라 가장 크게 연다.
+  if (above.role === "user") return 20;
+  return 16;
 }
 
 function toolGroupOf(detail: ToolCallDetail): ToolGroup {

@@ -376,7 +376,7 @@ export interface MobileBridgeInvocationToolDto {
 }
 
 export interface MobileBridgeInvocationEventDto {
-  kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface" | "usage" | "reasoning";
+  kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface" | "usage" | "reasoning" | "notice";
   status?: string;
   text?: string;
   delta?: string;

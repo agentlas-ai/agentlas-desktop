@@ -11451,3 +11451,68 @@ button[data-toggle-state="on"] {
 @media (prefers-reduced-motion: reduce) {
   .agentlas-chat-streaming-cursor { animation: none; opacity: 0.6; }
 }
+
+/* ── 호스트 고지 행 (agentlas-chat-notice) ────────────────────────────────
+   모델의 답이 아니라 **호스트가 하는 말**이라, 말풍선 본문과 다른 표면을 쓴다.
+   실측(2026-08-08): 예전에는 이 문장들이 답변 텍스트에 이어붙거나 대입돼서
+   "에이전트가 그렇게 말했다"로 읽혔다. 심각도는 색이 말하고, 기계 원문은 접힌다.
+   ★클래스를 쓰면 규칙도 같이 쓴다 — 규칙 없는 클래스가 스켈레톤 화면을 만든다. */
+.agentlas-chat-notices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  align-self: stretch;
+  min-width: 0;
+}
+.agentlas-chat-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 9px;
+  background: var(--paper-2);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.agentlas-chat-notice-error { border-color: rgba(176, 67, 58, 0.32); }
+.agentlas-chat-notice-warning { border-color: rgba(154, 103, 0, 0.3); }
+.agentlas-chat-notice-success { border-color: rgba(47, 125, 79, 0.28); }
+.agentlas-chat-notice-icon {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-weight: 700;
+  line-height: 1.55;
+}
+.agentlas-chat-notice-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.agentlas-chat-notice-toggle {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted-deep);
+  font-size: 11.5px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.agentlas-chat-notice-details {
+  margin: 2px 0 0;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--paper);
+  border: 1px solid var(--paper-edge);
+  color: var(--ink-soft);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}

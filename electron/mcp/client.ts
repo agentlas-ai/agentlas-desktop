@@ -917,6 +917,20 @@ function automationPermissionRequiredText(locale: "ko" | "en"): string {
     : "Automation was not saved. Run again with write permission.";
 }
 
+/**
+ * 호스트 고지 한 줄. **모델의 답과 절대 같은 칸을 쓰지 않는다.**
+ *
+ * 이 함수가 존재하는 이유(2026-08-08 실측): 호스트가 할 말이 생길 때마다 답변
+ * 문자열에 이어붙이거나 아예 대입해 버려서, 사용자는 "에이전트가 그렇게 말했다"고
+ * 읽었다. 서피스 원문 유출도 자동화 요약도 전부 이 한 칸을 공유한 결과였다.
+ */
+function emitHostNotice(
+  sink: (event: McpInvocationEvent) => void,
+  notice: NonNullable<McpInvocationEvent["notice"]>,
+): void {
+  sink({ kind: "notice", notice });
+}
+
 function appendAutomationSummary(text: string, summary: string): string {
   const trimmed = text.trim();
   if (!summary.trim()) return trimmed;
@@ -3545,18 +3559,40 @@ export async function runMcpInvocation(
         console.error("[automation] parseAutomations failed:", err);
       }
     }
+    // 호스트가 하는 말은 답변 본문에 이어붙이지 않는다 — 자기 행(notice)으로 나간다.
     if (automationRegistrations.length > 0) {
-      displayText = appendAutomationSummary(displayText, automationFinalSummary(automationRegistrations, locale));
+      sink({
+        kind: "notice",
+        notice: {
+          level: "success",
+          message: automationFinalSummary(automationRegistrations, locale),
+          code: "automation-registered",
+        },
+      });
     }
     if (automationPermissionRequired) {
-      displayText = appendAutomationSummary(displayText, automationPermissionRequiredText(locale));
+      sink({
+        kind: "notice",
+        notice: {
+          level: "warning",
+          message: automationPermissionRequiredText(locale),
+          code: "automation-permission-required",
+        },
+      });
     }
     try {
       const surfaceParse = parseSurfaces(displayText);
       if (surfaceParse.diagnostics.some((diagnostic) => diagnostic.code === "surface-parse-failed")) {
-        displayText = locale === "ko"
-          ? "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요."
-          : "Something went wrong while preparing this result, so it is not complete.";
+        // 예전에는 이 문장을 **답변 본문에 대입**했다. 호스트의 사과가 모델의 답 행세를
+        // 하던 자리 — 이제는 고지 행으로 나가고 본문은 남기지 않는다.
+        emitHostNotice(sink, {
+          level: "error",
+          message: locale === "ko"
+            ? "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요."
+            : "Something went wrong while preparing this result, so it is not complete.",
+          code: "surface-parse-failed",
+        });
+        displayText = "";
       } else {
         const parsedOneSurface = req.oneMode === true
           && surfaceParse.errors.length === 0
@@ -3629,9 +3665,16 @@ export async function runMcpInvocation(
       // Defensive fallback for failures outside an individual manifest. Never
       // retain or log the rejected model body because it may contain a local
       // path or another Main-private Surface transport value.
-      displayText = locale === "ko"
-        ? "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요."
-        : "Something went wrong while preparing this result, so it is not complete.";
+      //
+      // 호스트의 사과는 답변 본문이 아니라 고지 행으로 나간다(2026-08-08).
+      emitHostNotice(sink, {
+        level: "error",
+        message: locale === "ko"
+          ? "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요."
+          : "Something went wrong while preparing this result, so it is not complete.",
+        code: "surface-pipeline-failed",
+      });
+      displayText = "";
       console.error("[surface] parseSurfaces failed");
     }
     if (!req.agentAppMode || projectReadOnlyBoundary) {
