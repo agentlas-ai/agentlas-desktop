@@ -31,6 +31,7 @@ import {
   type MobileBridgeRequestReplayStore,
 } from "./replay";
 import { mobileBridgeJsonBytes } from "./sanitize";
+import type { MobileBridgeRevocationCause } from "./pairing";
 
 // `ws` is currently present only as a transitive dependency of @google/genai.
 // DESKTOP_MOBILE_BRIDGE: package.json must declare `ws` directly before the
@@ -133,7 +134,7 @@ export interface MobileBridgePairingAuthority {
     issuedAt: string;
   }>;
   /** Roll back a credential if post-exchange verification cannot be produced. */
-  revokeDevice(deviceId: string): boolean;
+  revokeDevice(deviceId: string, cause?: MobileBridgeRevocationCause): boolean;
   /**
    * Why the most recent authenticate() returned null. Without it every refusal
    * is an identical bare 401, so a phone that needs to re-pair is
@@ -424,7 +425,10 @@ export class AgentlasMobileBridgeServer {
     }
     const presented = bearerToken(request);
     if (!presented) {
-      rejectUpgrade(socket, 401, "unauthorized");
+      // ★사유 없는 401 금지(2026-08-08 실측). 이 경로는 로그도 헤더도 없어서,
+      // "릴레이가 토큰을 안 실었나 / 폐기됐나"를 로그만으로 가릴 수 없었다.
+      console.warn("[mobile-bridge] upgrade refused: no bearer credential presented");
+      rejectUpgrade(socket, 401, "unauthorized", "token_missing");
       return;
     }
     let identity: UpgradeIdentity | null = null;
@@ -457,8 +461,16 @@ export class AgentlasMobileBridgeServer {
       // the phone retried forever and the user was never told to re-pair.
       // The reason travels in a header the phone can read on the failed
       // upgrade; the body stays generic.
+      //
+      // ★2026-08-08: `if (refusal)` 때문에 사유가 안 잡힌 경우는 여전히 조용했다.
+      // 사유가 비어 있다는 사실 자체가 결함 신호이므로 그것도 적는다 —
+      // 로그에 아무것도 없는 상태로는 다음에도 같은 시간을 쓴다.
       const refusal = this.pairing?.lastAuthenticationRefusal ?? null;
-      if (refusal) console.warn(`[mobile-bridge] upgrade refused: ${refusal}`);
+      console.warn(
+        refusal
+          ? `[mobile-bridge] upgrade refused: ${refusal}`
+          : "[mobile-bridge] upgrade refused: no reason recorded (authentication path is missing a refusal reason)",
+      );
       rejectUpgrade(socket, 401, "unauthorized", refusal);
       return;
     }
@@ -607,7 +619,7 @@ export class AgentlasMobileBridgeServer {
     } catch (error) {
       if (issuedCredential) {
         try {
-          this.pairing.revokeDevice(issuedCredential.deviceId);
+          this.pairing.revokeDevice(issuedCredential.deviceId, "pairing_rollback");
         } catch {
           // The original failure remains authoritative. A production pairing
           // manager persists revocation synchronously; never expose the token.

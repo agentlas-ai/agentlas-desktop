@@ -135,6 +135,7 @@ import {
   type MobileBridgeToolPayloadSummaryDto,
 } from "../../shared/mobile-bridge";
 import type { MobileBridgeHostIdentity } from "./pairing";
+import type { MobileBridgeRevocationCause } from "./pairing";
 import {
   projectMobileBridgeAutomation,
   projectMobileBridgeChat,
@@ -186,7 +187,7 @@ export interface AgentlasDesktopMobileBridgeAuthorityOptions {
   appVersion: string;
   onError?: (error: Error) => void;
   /** Production injects the pairing authority; tests may omit it unless exercising revocation. */
-  revokeDevice?: (deviceId: string) => boolean;
+  revokeDevice?: (deviceId: string, cause?: MobileBridgeRevocationCause) => boolean;
   /** Authenticated Hub adapter. Omit to keep the extension unavailable. */
   ontologyHubClient?: OntologyHubClient;
   /** Content-free, private projection consumed only after an explicit Terminal flag. */
@@ -2074,7 +2075,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         if (!this.options.revokeDevice) throw new Error("Device revocation authority is unavailable");
         // Desired-state idempotency: another authenticated socket for the same
         // device may have won the race, but the credential is revoked either way.
-        this.options.revokeDevice(context.deviceId);
+        this.options.revokeDevice(context.deviceId, "device_requested");
         return { revoked: true };
       }
       default: {

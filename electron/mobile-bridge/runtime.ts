@@ -198,7 +198,12 @@ async function startBridgeInternal(
       if (input.accountAuthorityOrigin !== accountPairing.origin) return "inactive";
       return accountPairing.accountAuthorityStatus({ accountSubject: input.accountSubject });
     },
-    onChanged: emitMobileBridgeStateChange,
+    onChanged: (reason) => {
+      // 새 기기가 붙으면 릴레이의 "재페어링 필요" 래치를 푼다 — 그 래치는
+      // 폐기된 자격으로 무한 재시도하던 것을 막는 것이지, 새 페어링을 막는 게 아니다.
+      if (reason === "device-paired") relay?.clearRepairRequiredLatch();
+      emitMobileBridgeStateChange(reason);
+    },
   });
   const replayStore = new MobileBridgeRequestReplayStore(options.userDataPath);
   const displayName = (options.displayName?.trim() || os.hostname() || "Agentlas Desktop").slice(0, 160);
@@ -209,7 +214,7 @@ async function startBridgeInternal(
     hostIdentity: identity,
     displayName,
     appVersion: options.appVersion,
-    revokeDevice: (deviceId) => pairing.revokeDevice(deviceId),
+    revokeDevice: (deviceId, cause) => pairing.revokeDevice(deviceId, cause ?? "device_requested"),
     ontologyHubClient,
     terminalOntologyLoadoutFeedWriter: terminalLoadoutFeedWriter,
     onError: (error) => console.error("[mobile-bridge-authority]", error.message),
@@ -430,7 +435,7 @@ export function listMobileBridgeDevices(): MobileBridgeDeviceSummary[] {
 
 export function revokeMobileBridgeDevice(deviceId: string): { ok: boolean } {
   if (!running) return { ok: false };
-  const ok = running.pairing.revokeDevice(deviceId);
+  const ok = running.pairing.revokeDevice(deviceId, "owner_removed_device");
   if (ok) running.server.disconnectDevice(deviceId);
   return { ok };
 }
@@ -486,7 +491,7 @@ export function revokeAllMobileBridgeDevicesByOwner(
   let revoked = 0;
   for (const device of state.pairing.listDevices()) {
     if (device.revokedAt !== null) continue;
-    if (!state.pairing.revokeDevice(device.deviceId)) continue;
+    if (!state.pairing.revokeDevice(device.deviceId, "owner_removed_all")) continue;
     revoked += 1;
     state.server.disconnectDevice(device.deviceId);
   }

@@ -370,7 +370,8 @@
     "test:refusal-not-output": "node scripts/test-refusal-not-output-contract.cjs",
     "test:experience-axis-migration": "npm run build:electron && electron scripts/test-experience-axis-migration.cjs",
     "test:curator-trust-gate": "npm run build:electron && electron scripts/test-curator-trust-gate.cjs",
-    "test:release-asset-phases": "node scripts/test-release-asset-phases.cjs"
+    "test:release-asset-phases": "node scripts/test-release-asset-phases.cjs",
+    "test:mobile-bridge-refusal-audit": "node scripts/test-mobile-bridge-refusal-audit.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

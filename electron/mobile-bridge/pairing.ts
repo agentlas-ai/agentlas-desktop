@@ -153,12 +153,74 @@ export interface MobileBridgePairingManagerOptions {
   onChanged?: (reason: MobileBridgePairingChangeReason) => void;
 }
 
-/** Why a stored credential was refused. Only `account_inactive` revokes. */
+/**
+ * Why a stored credential was refused. Only `account_inactive` revokes.
+ *
+ * ★실측 사고(2026-08-08): 릴레이 터널이 로컬 홉에서 401로 100초에 13번 끊겼는데
+ * `main.log`에 단서가 **0줄**이었다. 이유는 이 열거형에 "토큰이 아예 없다 /
+ * 형식이 틀렸다 / 그 토큰에 맞는 살아있는 기기가 없다" 세 경우가 없어서,
+ * 그 세 경로가 사유도 로그도 없는 맨 401을 냈기 때문이다(그중 세 번째가 이번 건 —
+ * devices.json 40대 전부 폐기, 활성 0). 맨 401은 이미 한 번 문제로 지목돼
+ * `lastAuthenticationRefusal`이 생겼는데, 정작 가장 흔한 세 경로가 빠져 있었다.
+ *
+ * 규칙: **401을 내는 모든 경로는 여기 사유 하나를 갖는다.** 사유 없는 401 금지.
+ */
 export type MobileBridgeAuthenticationRefusal =
   | "device_repair_required"
   | "account_authority_unreachable"
   | "account_inactive"
-  | "desktop_signed_out";
+  | "desktop_signed_out"
+  /** Authorization 헤더가 없거나 Bearer 형식이 아니다(릴레이/앱 배선 문제). */
+  | "token_missing"
+  /** Bearer는 왔는데 토큰 문법이 우리 발급 형식이 아니다. */
+  | "token_malformed"
+  /** 문법은 맞지만 살아있는 기기와 안 맞는다 — 폐기됐거나 다른 데스크탑의 것. 재페어링만이 답이다. */
+  | "device_unknown_or_revoked";
+
+/** 재페어링 말고는 회복 경로가 없는 사유 — 릴레이가 재시도를 멈춰야 한다. */
+export function isTerminalMobileBridgeRefusal(
+  refusal: MobileBridgeAuthenticationRefusal | null | undefined,
+): boolean {
+  return refusal === "device_unknown_or_revoked" || refusal === "device_repair_required";
+}
+
+/**
+ * 폐기(revoke)를 누가 왜 했는가. 폐기는 영구적이고 QR 재스캔을 강제하는 **파괴적**
+ * 동작이므로 흔적 없는 폐기를 금지한다.
+ *
+ * 실측(2026-08-08): `devices.json` 40대 전부 폐기·활성 0인데 `main.log`에 revoke
+ * 기록이 0줄이었다. 폐기 경로 5개 중 3개만 로그를 남기고, 하필 사용자 전체 삭제와
+ * 발급 롤백이 조용했다.
+ */
+export type MobileBridgeRevocationCause =
+  /** 계정 권위가 "비활성"이라고 명확히 답했다. */
+  | "account_inactive"
+  /** 자격의 워크스페이스가 현재 로그인 계정과 다르다(증명된 정체 변경). */
+  | "account_changed"
+  /** 사용자가 설정에서 이 기기를 지웠다. */
+  | "owner_removed_device"
+  /** 사용자가 설정에서 전부 지웠다. */
+  | "owner_removed_all"
+  /** 모바일이 스스로 연결 해제를 요청했다. */
+  | "device_requested"
+  /** 페어링 응답을 만들다 실패해 방금 발급한 자격을 되돌린다. */
+  | "pairing_rollback"
+  /** 호출부가 사유를 안 줬다 — 이 값이 로그에 보이면 그 호출부가 결함이다. */
+  | "unspecified";
+
+export function logMobileBridgeRevocation(
+  cause: MobileBridgeRevocationCause,
+  count: number,
+  deviceIds: readonly string[] = [],
+): void {
+  if (count <= 0) return;
+  const sample = deviceIds.slice(0, 3).join(", ");
+  console.warn(
+    `[mobile-bridge] revoked ${count} device(s) — cause=${cause}` +
+      (sample ? ` (${sample}${deviceIds.length > 3 ? ", …" : ""})` : "") +
+      (cause === "unspecified" ? " ← 사유 없는 폐기: 호출부에 cause를 달아야 한다" : ""),
+  );
+}
 
 export type MobileBridgePairingChangeReason =
   | "challenge-issued"
@@ -411,6 +473,7 @@ export function revokeMobileBridgeDevicesForOtherAccounts(
     revoked.push(device.deviceId);
   }
   if (revoked.length > 0) writeDevices(userDataPath, store);
+  logMobileBridgeRevocation("account_changed", revoked.length, revoked);
   return revoked;
 }
 
@@ -427,6 +490,8 @@ export function revokeAllStoredMobileBridgeDevices(
     revoked.push(device.deviceId);
   }
   if (revoked.length > 0) writeDevices(userDataPath, store);
+  // 사용자 지시로 전부 지우는 경로. 예전에는 이 자리가 완전히 조용했다.
+  logMobileBridgeRevocation("owner_removed_all", revoked.length, revoked);
   return revoked;
 }
 
@@ -766,15 +831,33 @@ export class MobileBridgePairingManager {
   }
 
   async authenticate(token: string): Promise<MobileBridgeDeviceMetadata | null> {
-    if (!validToken(token)) return null;
+    if (!validToken(token)) {
+      this.lastAuthenticationRefusal = "token_malformed";
+      console.warn("[mobile-bridge] refusing device: presented token is not a bridge credential");
+      return null;
+    }
     // DESKTOP_MOBILE_BRIDGE: Compare every stored digest before selecting the
     // match so the credential check does not reveal an early-match position.
     let record: StoredMobileBridgeDevice | null = null;
+    let revokedMatch: StoredMobileBridgeDevice | null = null;
     for (const device of readDevices(this.userDataPath).devices) {
       const matches = safeHashEquals(device.tokenHash, token);
-      if (matches && device.revokedAt === null) record = device;
+      if (!matches) continue;
+      if (device.revokedAt === null) record = device;
+      else revokedMatch = device;
     }
-    if (!record) return null;
+    if (!record) {
+      // ★이번 사고의 실제 경로. 예전에는 조용히 null이라 로그가 0줄이었다.
+      // 폐기된 기기와 아예 모르는 토큰을 구분해 적는다 — 전자는 "언제 폐기됐나"가
+      // 곧 원인 추적의 시작점이다(실측: 40대 전부 폐기, 활성 0).
+      this.lastAuthenticationRefusal = "device_unknown_or_revoked";
+      console.warn(
+        revokedMatch
+          ? `[mobile-bridge] refusing device ${revokedMatch.deviceId}: credential was revoked at ${revokedMatch.revokedAt} — re-pairing is required`
+          : "[mobile-bridge] refusing device: credential matches no paired device on this Desktop — re-pairing is required",
+      );
+      return null;
+    }
     if (this.desktopSessionActive && !this.desktopSessionActive()) {
       this.lastAuthenticationRefusal = "desktop_signed_out";
       console.warn("[mobile-bridge] refusing device: this Desktop is signed out (credentials kept)");
@@ -814,7 +897,7 @@ export class MobileBridgePairingManager {
     if (status === "inactive") {
       this.lastAuthenticationRefusal = "account_inactive";
       console.warn(`[mobile-bridge] device ${record.deviceId} revoked: account authority reported inactive`);
-      this.revokeDevice(record.deviceId);
+      this.revokeDevice(record.deviceId, "account_inactive");
       return null;
     }
     // Fail closed on anything that is not an explicit "active" — a stale caller
@@ -843,12 +926,18 @@ export class MobileBridgePairingManager {
     return readDevices(this.userDataPath).devices.map((record) => this.publicMetadata(record));
   }
 
-  revokeDevice(deviceId: string): boolean {
+  /**
+   * @param cause 왜 폐기하는가. 폐기는 **영구적이고 QR 재스캔을 강제**하므로
+   *   반드시 기록된다 — 실측(2026-08-08): 40대가 전부 폐기됐는데 `main.log`에
+   *   revoke 한 줄이 없어서 "누가 지웠는지"를 코드 독해로 추적해야 했다.
+   */
+  revokeDevice(deviceId: string, cause: MobileBridgeRevocationCause = "unspecified"): boolean {
     const store = readDevices(this.userDataPath);
     const record = store.devices.find((device) => device.deviceId === deviceId && device.revokedAt === null);
     if (!record) return false;
     record.revokedAt = this.now().toISOString();
     writeDevices(this.userDataPath, store);
+    logMobileBridgeRevocation(cause, 1, [deviceId]);
     this.emitChanged("device-revoked");
     return true;
   }

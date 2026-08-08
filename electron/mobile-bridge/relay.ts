@@ -28,6 +28,23 @@ function upgradeStatus(response: unknown): string {
     : "unknown";
 }
 
+/**
+ * 로컬 브리지가 거절 사유를 실어 보내는 헤더. 이걸 읽지 않으면 재페어링이 필요한
+ * 상황과 일시적 장애를 구분할 수 없어 같은 실패를 영원히 반복한다
+ * (실측 2026-08-08: 100초에 터널 13개, 전부 401).
+ */
+function upgradeRefusal(response: unknown): string | null {
+  if (!response || typeof response !== "object" || !("headers" in response)) return null;
+  const headers = (response as { headers?: unknown }).headers;
+  if (!headers || typeof headers !== "object") return null;
+  const raw = (headers as Record<string, unknown>)["x-agentlas-refusal"];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return typeof value === "string" && value.length > 0 && value.length <= 64 ? value : null;
+}
+
+/** 재페어링 말고는 회복 경로가 없는 사유 — 터널을 계속 열면 안 된다. */
+const TERMINAL_REFUSALS = new Set(["device_unknown_or_revoked", "device_repair_required"]);
+
 interface RelaySocketOptions {
   headers?: Record<string, string>;
   handshakeTimeout?: number;
@@ -233,9 +250,28 @@ export class MobileBridgeCloudRelay {
     this.openTunnel(message.channelId, message.deviceToken);
   }
 
+  /**
+   * 로컬 홉이 "재페어링만이 답"이라고 답했을 때 걸리는 래치. 걸린 동안은 터널을
+   * 열지 않는다 — 열어도 같은 401이고, 폰은 그 사실을 알 수 없어 계속 두드린다.
+   */
+  private repairRequiredRefusal: string | null = null;
+
+  /** 페어링 상태가 바뀌면 래치를 푼다(새 기기가 붙을 수 있게 된다). */
+  clearRepairRequiredLatch(): void {
+    if (!this.repairRequiredRefusal) return;
+    this.repairRequiredRefusal = null;
+    console.info("[mobile-bridge-relay] re-pairing latch cleared; tunnels may open again");
+  }
+
   private openTunnel(channelId: string, deviceToken: string): void {
     const cookie = getSessionCookieHeader();
     if (!cookie || this.stopped) return;
+    if (this.repairRequiredRefusal) {
+      console.warn(
+        `[mobile-bridge-relay] tunnel ${channelId} not opened: ${this.repairRequiredRefusal} — re-pair this Desktop`,
+      );
+      return;
+    }
     const cloud = new RelayWebSocket(relayUrl(this.endpoint, {
       role: "tunnel",
       hostId: this.options.hostId,
@@ -301,9 +337,22 @@ export class MobileBridgeCloudRelay {
       // after the certificate was generated fails exactly here, and used to be
       // completely silent on both ends.
       local.on("error", (error) => closeBoth("local hop failed", error));
-      local.on("unexpected-response", (_request, response) =>
-        closeBoth(`local hop refused the upgrade (HTTP ${upgradeStatus(response)})`),
-      );
+      local.on("unexpected-response", (_request, response) => {
+        const refusal = upgradeRefusal(response);
+        if (refusal && TERMINAL_REFUSALS.has(refusal)) {
+          // 사유가 회복 불가면 재시도가 의미 없다. 래치를 걸어 다음 터널 요청을
+          // 즉시 거절하고, 사람이 읽을 한 줄을 남긴다. 래치는 페어링이 바뀔 때 풀린다.
+          this.repairRequiredRefusal = refusal;
+          console.warn(
+            `[mobile-bridge-relay] remote access needs re-pairing (${refusal}); ` +
+              "not opening further tunnels until this Desktop is paired again",
+          );
+        }
+        closeBoth(
+          `local hop refused the upgrade (HTTP ${upgradeStatus(response)}` +
+            `${refusal ? `, refusal=${refusal}` : ", refusal=none"})`,
+        );
+      });
     });
     cloud.on("close", () => closeBoth("relay side closed"));
     cloud.on("error", (error) => closeBoth("relay side failed", error));
