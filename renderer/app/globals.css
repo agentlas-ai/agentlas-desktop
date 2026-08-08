@@ -11638,3 +11638,78 @@ button[data-toggle-state="on"] {
   max-width: none;
   width: 100%;
 }
+
+/* ★하단 탭 바 — VS Code 터미널 탭(오너 지시 2026-08-09).
+   대화·로그·상세가 세 자리에 흩어져 같은 실행을 세 번 다르게 설명하던 것을
+   한 섹션 세 탭으로 접었다. 한 번에 하나만 보이고, 주의가 필요한 탭은 스스로 부른다. */
+.automation-bottom-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 8px;
+  min-height: 30px;
+  border-bottom: 1px solid var(--paper-edge);
+  background: var(--paper-2);
+  flex: none;
+}
+.automation-bottom-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* 피츠의 법칙: 시각 크기보다 히트 영역을 넓게 — 30px 높이 전체가 타깃이다. */
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted-deep);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.automation-bottom-tab:hover { color: var(--ink); }
+.automation-bottom-tab[data-active="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+.automation-bottom-tab em {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--paper-edge);
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+}
+/* 사람이 결정해야 끝나는 것은 색으로 부른다 — 나머지 배지와 같은 무게로 두면 묻힌다. */
+.automation-bottom-tab em[data-urgent="true"] {
+  background: var(--accent);
+  color: #fff;
+}
+.automation-bottom-status {
+  margin-left: auto;
+  margin-right: 6px;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+.automation-bottom-collapse {
+  /* 상태 문구가 없을 때도 오른쪽 끝에 붙는다 — 접기 자리는 항상 같은 곳이다. */
+  margin-left: auto;
+  min-width: 26px;
+  min-height: 26px;
+  border: 0;
+  background: transparent;
+  color: var(--muted-deep);
+  font-size: 11px;
+  cursor: pointer;
+}
+.automation-bottom-collapse:hover { color: var(--ink); }

@@ -217,14 +217,26 @@ function AutomationFlowPage() {
   //   밀면, 드래그하던 좌표가 어긋난다(게이트 실측) — 펴는 것은 사람이 한다.
   // 하단 통합 패널은 보기 모드에서 기본으로 열려 있다 — 세션 대화·행동 카드가
   // 여기 살기 때문에, 접혀 있으면 "화면이 아무 말도 안 한다"가 된다.
+  /* ★하단은 한 섹션, 세 탭 — VS Code 터미널 탭과 같은 계약(오너 지시 2026-08-09).
+     예전에는 대화·로그·상세가 서로 다른 자리에 흩어져 같은 실행을 세 번
+     다르게 설명했다. 한 번에 하나만 보이고, 주의가 필요한 탭은 점으로 부른다. */
+  const [bottomTab, setBottomTab] = useState<"session" | "log" | "details">("session");
   const [logOpen, setLogOpen] = useState(true);
   const [logHeight, setLogHeight] = useState(260);
   // 행동이 필요한 카드(시작 값·승인·판정 교정·의존성 수리)가 생기면 패널을 편다 —
   // 접힌 패널 뒤에서 조용히 기다리게 두지 않는다.
-  const hasActionCards = inputPrompt !== null || Object.values(nodeFailures).some((f) =>
-    f.code === "APPROVAL_REQUIRED" || f.code === "EVAL_STUCK" || f.code === "CODE_DEPENDENCY_MISSING");
+  /* 사람이 결정해야 끝나는 실패의 수 — 상세 탭이 이 숫자로 스스로 부른다.
+     승인 대기를 사용자가 찾아 헤매지 않게 하는 유일한 신호다. */
+  const decisionCount = Object.values(nodeFailures).filter((f) =>
+    f.code === "APPROVAL_REQUIRED" || f.code === "EVAL_STUCK" || f.code === "CODE_DEPENDENCY_MISSING").length
+    + (inputPrompt !== null ? 1 : 0);
+  const hasActionCards = decisionCount > 0;
   useEffect(() => {
-    if (hasActionCards) setLogOpen(true);
+    // 결정이 필요해지면 패널을 열고 **그 탭으로 데려간다** — 어디를 눌러야 하는지
+    // 사용자가 추측하게 두지 않는다(오너 실측: "뭘 눌러야하는지도 모르겠고").
+    if (!hasActionCards) return;
+    setLogOpen(true);
+    setBottomTab("details");
   }, [hasActionCards]);
   runStatesRef.current = runStates;
 
@@ -1047,7 +1059,51 @@ function AutomationFlowPage() {
     );
   }
 
-  return (
+    /* ★상세(인스펙터)는 오른쪽 열이 아니라 하단 탭 하나다 — 오너 지시(2026-08-09):
+     "바텀시트에 인스펙터를 띄우라… 겹친 세 가지를 탭으로, VS Code 터미널 탭처럼".
+     한 상황을 두 자리에서 다른 말로 설명하던 것이 중복 효과(HE.md)였고,
+     사용자는 어느 쪽을 눌러야 하는지 몰랐다. */
+  const inspectorContent = (
+    <>
+                <div className="automation-inspector-bar">
+            <span>{locale === "en" ? "Details" : "상세"}</span>
+            <button
+              type="button"
+              onClick={() => setRightOpen(false)}
+              aria-label={locale === "en" ? "Collapse details" : "상세 패널 접기"}
+              title={locale === "en" ? "Collapse details" : "상세 패널 접기"}
+            >
+              ⟩
+            </button>
+          </div>
+          {editing && paletteOpen ? (
+            <NodePalette onAdd={addPaletteNode} onClose={() => setPaletteOpen(false)} />
+          ) : editing && selectedEdge ? (
+            <LoopBoundPanel
+              isBackEdge={backEdgeIds.has(selectedEdge.id)}
+              value={(selectedEdge.data as { maxIterations?: number } | undefined)?.maxIterations ?? null}
+              onChange={setLoopBound}
+              onClose={() => setSelectedEdgeId(null)}
+              onDelete={() => {
+                const edgeId = selectedEdge.id;
+                setRfEdges((eds) => eds.filter((e) => e.id !== edgeId));
+                setSelectedEdgeId(null);
+                setDirty(true);
+              }}
+              locale={locale}
+            />
+          ) : editing && selectedNode ? (
+            <NodeConfigPanel node={selectedNode} onPatch={patchSelected} onLabel={labelSelected} onDelete={deleteSelected} onClose={() => setSelectedNodeId(null)} timezone={automation?.timezone ?? null} automationId={automation?.id} />
+          ) : selectedNode ? (
+            <NodeInspector node={selectedNode} onClose={() => setSelectedNodeId(null)} t={t} />
+          ) : (
+            <div className="automation-node-empty" data-one-content-slot />
+          )}
+          <RunHistoryPanel automation={automation} locale={locale} compact />
+        </>
+  );
+
+return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "var(--paper-2)", minHeight: 0 }}>
       <header
         className="titlebar-drag"
@@ -1411,22 +1467,43 @@ function AutomationFlowPage() {
                   window.addEventListener("mouseup", up);
                 }}
               />
-              <button type="button" className="automation-issue-log-head" onClick={() => setLogOpen((v) => !v)}>
-                <span data-kind="error" style={{ visibility: errorCount > 0 ? "visible" : "hidden" }}>
-                  {t("auto.validate.errors")} {errorCount}
-                </span>
-                <span data-kind="warning" style={{ visibility: warnCount > 0 ? "visible" : "hidden" }}>
-                  {t("auto.validate.warnings")} {warnCount}
-                </span>
+              {/* ★탭 바 — VS Code 터미널 탭. 탭을 누르면 그 탭이 열리고, 이미 열린
+                  탭을 다시 누르면 접힌다. 주의가 필요한 탭은 숫자·점으로 스스로 부른다. */}
+              <div className="automation-bottom-tabs">
+                {([
+                  { id: "session" as const, label: locale === "en" ? "Chat" : "대화", badge: 0 },
+                  { id: "log" as const, label: locale === "en" ? "Log" : "로그", badge: errorCount + warnCount },
+                  { id: "details" as const, label: locale === "en" ? "Details" : "상세", badge: decisionCount },
+                ]).map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    className="automation-bottom-tab titlebar-nodrag"
+                    data-active={bottomTab === tab.id && logOpen ? "true" : undefined}
+                    onClick={() => {
+                      if (bottomTab === tab.id && logOpen) { setLogOpen(false); return; }
+                      setBottomTab(tab.id);
+                      setLogOpen(true);
+                    }}
+                  >
+                    {tab.label}
+                    {tab.badge > 0 ? <em data-urgent={tab.id === "details" ? "true" : undefined}>{tab.badge}</em> : null}
+                  </button>
+                ))}
                 {/* 상태 문구는 여기(터미널 상태줄) — 떠 있는 카드로 캔버스를 가리지 않는다. */}
                 {(message || (editing && dirty)) ? (
-                  <span data-kind="status" style={{ color: "var(--ink-soft)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "60%" }}>
-                    {message || t("auto.flow.unsaved")}
-                  </span>
+                  <span className="automation-bottom-status">{message || t("auto.flow.unsaved")}</span>
                 ) : null}
-                <em>{logOpen ? "▾" : "▴"}</em>
-              </button>
-              {logOpen ? (
+                <button
+                  type="button"
+                  className="automation-bottom-collapse titlebar-nodrag"
+                  onClick={() => setLogOpen((v) => !v)}
+                  aria-label={logOpen ? (locale === "en" ? "Collapse panel" : "패널 접기") : (locale === "en" ? "Expand panel" : "패널 펼치기")}
+                >
+                  {logOpen ? "▾" : "▴"}
+                </button>
+              </div>
+              {logOpen && bottomTab === "log" ? (
                 <ul className="automation-issue-log-list">
                   {logRows.map((iss, i) => (
                     <li key={i} data-severity={iss.severity}>
@@ -1444,7 +1521,16 @@ function AutomationFlowPage() {
               ) : null}
               {/* ★행동이 필요한 카드(시작 값·승인·판정 교정·의존성 수리)는 전부 이 패널 안에서
                   해결한다(오너 지시 2026-08-08: 플로팅 금지, 바텀시트 하나로). */}
-              <div style={{ padding: "8px 10px", display: "grid", gap: 8 }}>
+              {/* 결정이 필요한 실패(승인 대기 등)와 인스펙터는 같은 탭에 산다 —
+                  "확인이 필요한 것"이 한 자리에 있어야 사람이 헤매지 않는다. */}
+              <div
+                style={{
+                  padding: "8px 10px",
+                  display: logOpen && bottomTab === "details" ? "grid" : "none",
+                  gap: 8,
+                  overflowY: "auto",
+                }}
+              >
       {/* 시작 값을 받아야 하는 그래프. 값을 받고 나서 실행한다 —
           묻지 않고 시작하면 빈 값으로 도는 것을 사용자가 결과에서야 알게 된다. */}
       {inputPrompt ? (
@@ -1620,10 +1706,16 @@ function AutomationFlowPage() {
         );
       })}
               </div>
+              {/* 인스펙터(노드 상세·실행 기록·확인 필요)도 같은 상세 탭에 산다. */}
+              {logOpen && bottomTab === "details" ? (
+                <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 10px 10px" }}>
+                  {inspectorContent}
+                </div>
+              ) : null}
               {/* ★세션 대화 스트림 — 별도 열이 아니라 이 패널 안에서 흐른다.
                   실행 기록·질문 카드·어시스턴트 응답이 로그와 같은 자리에서 이어진다. */}
               {!editing ? (
-                <div style={{ flex: 1, minHeight: 0, overflowY: "auto", borderTop: "1px solid var(--paper-edge)" }}>
+                <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: logOpen && bottomTab === "session" ? "block" : "none" }}>
                   <AutomationSessionPanel
                     automationId={automation.id}
                     locale={locale}
@@ -1636,7 +1728,7 @@ function AutomationFlowPage() {
                 </div>
               ) : null}
               {!editing ? (
-                <div style={{ marginTop: "auto", padding: "8px 10px", borderTop: "1px solid var(--paper-edge)", background: "var(--paper)", display: "grid", gap: 8 }}>
+                <div style={{ marginTop: "auto", padding: "8px 10px", borderTop: "1px solid var(--paper-edge)", background: "var(--paper)", display: logOpen && bottomTab === "session" ? "grid" : "none", gap: 8, paddingRight: 64 }}>
 
               {!editing ? (
                 <div
@@ -1765,56 +1857,7 @@ function AutomationFlowPage() {
           ) : null}
         </div>
 
-        {!rightOpen ? (
-          <button
-            type="button"
-            className="automation-panel-tab titlebar-nodrag"
-            data-side="right"
-            onClick={() => setRightOpen(true)}
-            aria-label={locale === "en" ? "Show details" : "상세 패널 펼치기"}
-          >
-            <span>⟨</span>
-            <em>{locale === "en" ? "Details" : "상세"}</em>
-          </button>
-        ) : (
-        <aside className="automation-inspector-column">
-          <div className="automation-inspector-bar">
-            <span>{locale === "en" ? "Details" : "상세"}</span>
-            <button
-              type="button"
-              onClick={() => setRightOpen(false)}
-              aria-label={locale === "en" ? "Collapse details" : "상세 패널 접기"}
-              title={locale === "en" ? "Collapse details" : "상세 패널 접기"}
-            >
-              ⟩
-            </button>
-          </div>
-          {editing && paletteOpen ? (
-            <NodePalette onAdd={addPaletteNode} onClose={() => setPaletteOpen(false)} />
-          ) : editing && selectedEdge ? (
-            <LoopBoundPanel
-              isBackEdge={backEdgeIds.has(selectedEdge.id)}
-              value={(selectedEdge.data as { maxIterations?: number } | undefined)?.maxIterations ?? null}
-              onChange={setLoopBound}
-              onClose={() => setSelectedEdgeId(null)}
-              onDelete={() => {
-                const edgeId = selectedEdge.id;
-                setRfEdges((eds) => eds.filter((e) => e.id !== edgeId));
-                setSelectedEdgeId(null);
-                setDirty(true);
-              }}
-              locale={locale}
-            />
-          ) : editing && selectedNode ? (
-            <NodeConfigPanel node={selectedNode} onPatch={patchSelected} onLabel={labelSelected} onDelete={deleteSelected} onClose={() => setSelectedNodeId(null)} timezone={automation?.timezone ?? null} automationId={automation?.id} />
-          ) : selectedNode ? (
-            <NodeInspector node={selectedNode} onClose={() => setSelectedNodeId(null)} t={t} />
-          ) : (
-            <div className="automation-node-empty" data-one-content-slot />
-          )}
-          <RunHistoryPanel automation={automation} locale={locale} compact />
-        </aside>
-        )}
+
       </div>
     </div>
   );
