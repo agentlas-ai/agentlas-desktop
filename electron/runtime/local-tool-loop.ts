@@ -345,8 +345,11 @@ export async function runLocalOpenAiChat(
       });
     } catch (err) {
       // 사용자가 멈춘 것을 "서버에 연결 못 함"이라고 말하면 거짓말이 된다 —
-      // 취소는 취소로 올려보내 상위 취소 처리가 알아보게 한다.
-      if (req.signal?.aborted) throw err;
+      // 취소는 취소로 올려보낸다. 다만 **원 에러를 그대로 던지면 안 된다**:
+      // AbortController 의 DOMException 문구("This operation was aborted")가 그대로
+      // 화면에 흘러 한국어 UI에 영어 기계 문장이 박혔다(실측 2026-08-09 녹화).
+      // CLI 러너들이 이미 쓰는 현지화 문구와 같은 말을 쓴다.
+      if (req.signal?.aborted) throw new Error(tStatus(req.locale, "aborted"));
       throw new Error(opts.unreachableMessage);
     }
     if (!resp.ok) {

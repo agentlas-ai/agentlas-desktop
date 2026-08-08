@@ -184,7 +184,16 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   const fixOptionIds = new Set((fixPlan?.options ?? []).map((option) => option.actionId));
   const hasRetryOption = fixOptionIds.has("retry_run");
   const hasSessionOption = fixOptionIds.has("ask_in_session");
-  const rerunBlocked = Boolean(reconciliation);
+  /* ★승인 대기에는 "다시 실행"을 권하지 않는다.
+     실측(2026-08-09 오너 녹화): 사용자가 이 카드의 [지금 다시 실행]을 반복해서 눌렀고
+     매번 같은 승인 대기에 다시 걸렸다 — 이 카드는 run_history 행이라 nodeId 가 없어
+     승인 자체를 할 수 없다. 승인은 상세 탭의 노드 카드가 한다. 여기서는 재실행을
+     막고 어디서 결정하면 되는지만 말한다. 누르면 같은 일이 반복되는 버튼은
+     "제어권"이 아니라 함정이다(HE.md 제어성·사용 오류에 대한 견고성). */
+  const awaitingApprovalDecision = /APPROVAL_REQUIRED|승인 대기|승인 확인이 필요/.test(
+    `${blockingRun?.error ?? ""} ${blockingRun?.outcomeReason ?? ""}`,
+  );
+  const rerunBlocked = Boolean(reconciliation) || awaitingApprovalDecision;
   const rawReason = useMemo(
     () => stripReasonCode(blockingRun?.error ?? regularAttentions[0]?.lastError ?? ""),
     [blockingRun?.error, regularAttentions],
@@ -461,7 +470,14 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
               </button>
             ) : null}
           </div>
-          {rerunBlocked ? (
+          {awaitingApprovalDecision ? (
+            <p className="automation-fix-result">
+              {ko
+                ? "이 실행은 승인을 기다리다 멈췄습니다. 아래 [상세] 탭에서 그 단계를 승인하면 멈춘 지점부터 이어집니다 — 다시 실행하면 같은 자리에서 또 멈춥니다."
+                : "This run stopped waiting for approval. Approve that step in the Details tab and it resumes where it stopped — running again stops at the same point."}
+            </p>
+          ) : null}
+          {rerunBlocked && !awaitingApprovalDecision ? (
             <p className="automation-fix-result">
               {ko
                 ? "아래에서 실제 실행 여부를 확정하기 전에는 다시 실행할 수 없어요 — 같은 동작이 두 번 일어나는 걸 막기 위해서예요."
