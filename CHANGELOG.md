@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.9.66 — 2026-08-08
+
+This release binds Agentlas OS v1.1.99 at
+7524f206532c5c509be316d497781b240be3d487.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- Tool calls finally say what they did. Every runtime's tool call is normalized
+  into one semantic shape before it reaches the screen, so a row can show the
+  file that changed with `+23 −1`, the command with its exit code, or the search
+  with its file and match counts. Before this the renderer only had opaque JSON
+  strings, tool names from one runtime were the only ones it recognized — every
+  other runtime's calls fell into "other" — and a shell call had its actual
+  command replaced with the words "verification step".
+- The host no longer speaks in the agent's voice. Automation summaries and
+  "something went wrong while preparing this result" were appended to, or
+  assigned over, the answer text, so they read as if the agent had said them.
+  Host notices are now their own row with their own severity, and their machine
+  detail is folded away.
+- Chat spacing comes from what sits next to what. A single uniform gap made a
+  person's two consecutive messages as far apart as a change of speaker, and
+  scattered twenty tool calls into twenty separate cards. Neighbours now decide:
+  consecutive tool calls close up into one block, a reply opens wider than a
+  follow-up.
+- The turn status line stops twitching. Elapsed time and token counts use
+  tabular figures so their width does not change as the numbers do, and the row
+  keeps its height when a turn finishes.
+- A phone that cannot connect now says why. Relay tunnels were being refused by
+  this Desktop with a bare 401 and no log line at all — thirteen in a hundred
+  seconds with nothing to read. Every refusal path now records a reason
+  (no credential, malformed credential, or unknown/revoked device), every
+  revocation records who did it and why, and a refusal that only re-pairing can
+  fix stops the retry loop instead of hammering.
+
 ## 0.9.65 — 2026-08-08
 
 This release binds Agentlas OS v1.1.99 at
