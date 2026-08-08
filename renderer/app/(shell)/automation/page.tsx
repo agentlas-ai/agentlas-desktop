@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
+import { humanSchedule } from "@shared/graph-blueprint";
 import type { Automation, InstalledAgent, InstalledFirm } from "@/lib/types";
 import { IconBolt, IconBuilding, IconPlus, IconTrash } from "@/components/Icon";
 import { DescribeAutomation } from "@/components/automation/DescribeAutomation";
@@ -20,6 +21,10 @@ export default function AutomationListPage() {
   /* Hub에서 받기 — 올리는 길과 받는 길이 둘 다 메인 프로세스에만 있었다. */
   const [hubSlug, setHubSlug] = useState("");
   const [installing, setInstalling] = useState(false);
+  /* ★결정을 기다리는 자동화를 목록에서 알아볼 수 없었다(실렌더 2026-08-09).
+     이 목록이 첫 화면인데, 승인 대기로 멈춘 그래프가 정상인 것과 똑같이 보여서
+     사용자는 [지금 실행]을 눌렀고 — 그것은 같은 자리에서 또 멈춘다. */
+  const [waiting, setWaiting] = useState<Record<string, string>>({});
 
   async function refresh() {
     const api = ipc();
@@ -41,6 +46,16 @@ export default function AutomationListPage() {
       // "(삭제된 에이전트)"로 잘못 표시되던 버그(visibleAgents는 픽커용 필터).
       setAgents(ag);
       setFirms(fm);
+      // 각 자동화의 마지막 실행에서 "사람이 결정해야 끝나는 실패"만 추린다.
+      // 실패해도 목록은 그대로 뜬다 — 배지가 없다고 목록을 못 보면 더 나쁘다.
+      void Promise.all(list.map(async (automation) => {
+        const snap = await api.automations.latestRun(automation.id).catch(() => null);
+        const failure = Object.values(snap?.nodeFailures ?? {})
+          .find((f) => f?.code === "APPROVAL_REQUIRED" || f?.code === "EVAL_STUCK");
+        return failure ? ([automation.id, failure.code] as const) : null;
+      })).then((rows) => {
+        setWaiting(Object.fromEntries(rows.filter(Boolean) as (readonly [string, string])[]));
+      }).catch(() => undefined);
     } catch {
       setMessage(locale === "en" ? "Automations could not be loaded. Existing schedules were not changed." : "자동화를 불러오지 못했습니다. 기존 예약은 그대로 둡니다.");
     } finally {
@@ -298,13 +313,40 @@ export default function AutomationListPage() {
                     {a.name}
                   </Link>
                   <div style={{ fontSize: 11, color: "var(--muted-deep)", overflowWrap: "anywhere" }}>
-                    {a.scheduleHuman} ·{" "}
+                    {/* ★크론 원문(`daily-09:00`)을 그대로 보여주던 자리 — 캔버스 헤더는
+                        이미 humanSchedule 로 사람 말을 하는데 목록만 안 쓰고 있었다
+                        (실렌더 2026-08-09). 목록이 첫 화면이라 여기가 더 중요하다. */}
+                    {humanSchedule(a.scheduleHuman, locale)} ·{" "}
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                       {targetLabel(a).icon}
                       {targetLabel(a).name}
                     </span>
                   </div>
                 </div>
+                {/* 기다리는 결정이 있으면 그것이 이 행의 주 행동이다 — 켜기/끄기·실행보다 앞. */}
+                {waiting[a.id] ? (
+                  <button
+                    onClick={() => router.push(`/automation/flow?id=${encodeURIComponent(a.id)}`)}
+                    className="titlebar-nodrag"
+                    data-testid={`automation-waiting-${a.id}`}
+                    title={locale === "en"
+                      ? "This run stopped for a decision. Open it to decide — running again stops at the same place."
+                      : "이 실행은 결정을 기다리다 멈췄습니다. 열어서 결정하세요 — 다시 실행하면 같은 자리에서 또 멈춥니다."}
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: 999,
+                      fontSize: 11,
+                      fontWeight: 700,
+                      border: "1px solid var(--accent)",
+                      background: "var(--accent)",
+                      color: "#fff",
+                    }}
+                  >
+                    {waiting[a.id] === "EVAL_STUCK"
+                      ? (locale === "en" ? "Needs your call" : "내가 정해야 함")
+                      : (locale === "en" ? "Waiting for approval" : "승인 대기")}
+                  </button>
+                ) : null}
                 <button
                   onClick={() => void toggle(a.id, !a.enabled)}
                   style={{
@@ -319,6 +361,9 @@ export default function AutomationListPage() {
                 >
                   {a.enabled ? t("auto.action.disable") : t("auto.action.enable")}
                 </button>
+                {/* 결정을 기다리는 동안에는 실행을 권하지 않는다 — 눌러 봐야 같은 자리에서
+                    또 멈춘다. 그 자리는 위의 [승인 대기]가 대신한다. */}
+                {waiting[a.id] ? null : (
                 <button
                   onClick={() => runNow(a.id)}
                   className="titlebar-nodrag"
@@ -335,6 +380,7 @@ export default function AutomationListPage() {
                 >
                   {t("auto.list.run")}
                 </button>
+                )}
                 <Link
                   href={`/automation/new?id=${encodeURIComponent(a.id)}`}
                   className="titlebar-nodrag"
