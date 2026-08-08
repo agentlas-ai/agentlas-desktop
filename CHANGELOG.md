@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.71 — 2026-08-09
+
+This release binds Agentlas OS v1.1.99 at
+7524f206532c5c509be316d497781b240be3d487.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- The automation list shows which automations are waiting on you. A run
+  stopped for a decision looked exactly like one running fine, so Run now was
+  the obvious thing to press — and it stops at the same place. The row now
+  offers the decision instead.
+- Schedules read as schedules in the list. It printed the raw `daily-09:00`.
+- Watching a run live now tells you why it stopped. The step turned red and
+  nothing said anything until you reloaded the screen.
+
 ## 0.9.70 — 2026-08-09
 
 This release binds Agentlas OS v1.1.99 at
