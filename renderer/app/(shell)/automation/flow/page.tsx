@@ -1674,6 +1674,29 @@ function AutomationFlowPage() {
                         outline: "none",
                       }}
                     />
+                    {/* ★기본 버튼은 입력창이 하는 일을 그대로 한다 — 보내기.
+                        예전에는 이 자리에 [고칠 내용 보기]가 있어서, 채팅 입력 옆의
+                        기본 버튼이 전혀 다른 동작(그래프 수정 제안)을 했다. 기대와의
+                        일치성 위반(HE.md) — 입력창 옆 버튼은 Send 다. */}
+                    <button
+                      className="titlebar-nodrag"
+                      disabled={architectBusy || !architectDraft.trim()}
+                      onClick={() => {
+                        const text = architectDraft.trim();
+                        if (!text) return;
+                        if (sessionSendRef.current) {
+                          sessionSendRef.current(text);
+                          setArchitectDraft("");
+                          return;
+                        }
+                        void requestGraphChange();
+                      }}
+                      style={actionBtn}
+                    >
+                      {t("auto.flow.session_send")}
+                    </button>
+                    {/* 그래프를 고치는 것은 보내기와 다른 일이므로 보조 자리에서
+                        자기 이름으로 선다. */}
                     <button
                       className="titlebar-nodrag"
                       disabled={architectBusy || !architectDraft.trim()}

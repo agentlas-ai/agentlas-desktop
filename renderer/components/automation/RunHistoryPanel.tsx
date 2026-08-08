@@ -180,6 +180,10 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   // 기록 원문(판정 코드 접두사 제거). 평이한 설명 아래 "자세히"로만 노출한다.
   // 미확정 부작용이 남아 있으면 백엔드가 재실행을 즉시 거부한다(중복 게시 방지).
   // 눌리는 버튼을 두면 "눌러도 아무 일이 없다"가 된다.
+  // 모델이 이미 제안한 동작은 우리 버튼과 중복이다 — actionId 로 판별한다.
+  const fixOptionIds = new Set((fixPlan?.options ?? []).map((option) => option.actionId));
+  const hasRetryOption = fixOptionIds.has("retry_run");
+  const hasSessionOption = fixOptionIds.has("ask_in_session");
   const rerunBlocked = Boolean(reconciliation);
   const rawReason = useMemo(
     () => stripReasonCode(blockingRun?.error ?? regularAttentions[0]?.lastError ?? ""),
@@ -391,6 +395,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
             ? fixPlan.summary
             : blockingRun ? plainRun(blockingRun, ko).body : plainOutcome("error", ko).body}</p>
           {fixPlan?.question ? <p className="automation-fix-question">{fixPlan.question}</p> : null}
+          {/* 모델 제안과 우리 버튼이 같은 동작이면 하나만 남긴다(아래 주석 참조). */}
           <div className="automation-reconcile-actions">
             {/* 실행 가능한 조치 — 로그인 창 열기, macOS 설정 열기, 실행 환경 복구처럼
                 누르면 진짜로 그 일이 일어나는 버튼만 나온다. */}
@@ -405,9 +410,17 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
                 {fixBusy === option.actionId ? (ko ? "진행 중…" : "Working…") : option.label}
               </button>
             ))}
-            <button type="button" onClick={continueInSession}>
-              {ko ? "대화에서 이어서 해결" : "Continue in the session"}
-            </button>
+            {/* ★모델이 같은 동작을 이미 제안했으면 우리 버튼은 빼야 한다.
+                실측(2026-08-09 녹화): fixPlan 이 retry_run·ask_in_session 을 고르면
+                이 카드에 버튼이 5개가 뜨는데 그중 4개가 2쌍의 중복이었다.
+                힉의 법칙 — 선택지가 늘수록 결정 시간이 늘고, 같은 일을 하는 두 버튼은
+                선택지가 아니라 의심거리다. 문맥에 맞는 라벨을 가진 모델 옵션을 남긴다. */}
+            {!hasSessionOption ? (
+              <button type="button" onClick={continueInSession}>
+                {ko ? "대화에서 이어서 해결" : "Continue in the session"}
+              </button>
+            ) : null}
+            {!hasRetryOption ? (
             <button
               type="button"
               onClick={() => void rerun()}
@@ -420,6 +433,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
             >
               {rerunning ? (ko ? "시작하는 중…" : "Starting…") : ko ? "지금 다시 실행" : "Run again now"}
             </button>
+            ) : null}
             {/* 닫기 — 과거 실행의 요구가 해소 수단 없이 눌러앉는 것을 끊는다(오너 보고
                 2026-08-06). 기록은 아래 목록에 남고, 부작용 미확정(reconciliation)
                 상태는 사람이 확정하기 전엔 닫을 수 없다 — 그건 알림이 아니라 빚이다. */}

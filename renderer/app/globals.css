@@ -11617,3 +11617,24 @@ button[data-toggle-state="on"] {
   place-items: start;
   text-align: left;
 }
+
+/* ★바텀시트는 터미널이다 — 오너 지시(2026-08-09) "바텀시트 전체를 터미널처럼 쓰라고".
+   `.automation-session-panel` 의 `width: 300px` + 오른쪽 테두리는 세션이 **독립 열**이던
+   시절의 값이다. 하단 패널로 임베드하면서 그 폭을 안 풀어, 왼쪽 300px 에 글이 갇히고
+   오른쪽 절반이 죽은 공간으로 남았다(녹화 실측). 분할 주의 효과(HE.md) 정면 위반 —
+   같은 실행에 관한 정보가 물리적으로 갈라지면 사용자는 시선을 왕복해야 한다. */
+.automation-session-panel[data-embedded="true"] {
+  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
+  border-right: 0;
+  background: transparent;
+}
+.automation-session-panel[data-embedded="true"] .automation-session-stream {
+  padding: 10px 14px;
+}
+/* 터미널처럼 — 한 줄씩 흐르고, 말풍선처럼 좁게 가두지 않는다. */
+.automation-session-panel[data-embedded="true"] .automation-session-stream article {
+  max-width: none;
+  width: 100%;
+}
