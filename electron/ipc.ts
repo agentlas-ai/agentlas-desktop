@@ -4110,11 +4110,18 @@ export function registerIpcHandlers(): void {
         const { staffGraph, applyStaffing } = await import("./workflow/graph-staffing");
         const { listInstalledAgentsReadOnly } = await import("./mcp/registry");
         const { getSource } = await import("./marketplace");
+        const installedAgents = listInstalledAgentsReadOnly();
+        // 특화도 Hub도 못 찾은 슬롯의 기본 러너 = 상주 오케스트레이터. 이게 없으면
+        // AGENT 노드가 no-runner로 멈춰 "만들었는데 안 도는" 그래프가 된다(실측).
+        const orchestrator = installedAgents.find((a) => a.id === "builtin-agentlas-orchestrator");
         staffing = await staffGraph(built.graph, {
-          installed: listInstalledAgentsReadOnly().map((a) => ({
+          installed: installedAgents.map((a) => ({
             id: a.id, name: a.name, ...(a.tagline ? { tagline: a.tagline } : {}),
           })),
           searchHub: (q) => getSource().searchAgents(q),
+          ...(orchestrator
+            ? { defaultRunnerRef: orchestrator.id, defaultRunnerLabel: orchestrator.name }
+            : {}),
         });
         staffedGraph = applyStaffing(built.graph, staffing);
       } catch {

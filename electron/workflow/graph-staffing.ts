@@ -20,6 +20,15 @@ export interface StaffingCandidateSource {
   searchHub: (query: string) => Promise<MarketplaceListing[]>;
   /** 적합성 판정 주입(게이트용). 없으면 상주 판정(judgeChecklist)을 쓴다. */
   judgeFit?: StaffingFitJudge;
+  /**
+   * 특화 매치도 Hub도 못 찾은 슬롯의 기본 러너. 자동화의 targetId(대개
+   * builtin-agentlas-orchestrator)를 넘긴다. "아무거나 꽂지 않는다"는 원칙은
+   * 유지하되 — 오케스트레이터는 임의의 특화 에이전트가 아니라 이 자동화가
+   * 이미 소유한 범용 실행자이므로, 이걸로 채워 그래프가 멈추지 않고 돌게 한다.
+   * 없으면 종전대로 unresolved(빈 슬롯)로 둔다.
+   */
+  defaultRunnerRef?: string;
+  defaultRunnerLabel?: string;
 }
 
 export interface StaffedSlot {
@@ -31,7 +40,7 @@ export interface StaffedSlot {
   /** Hub는 어느 릴리스인지 봉인해야 나중에 다른 게 실행되지 않는다. */
   targetVersion?: string;
   label?: string;
-  source: "installed" | "hub" | "unresolved";
+  source: "installed" | "hub" | "unresolved" | "default-runner";
 }
 
 /** 적합성 판정의 최소 계약 — 게이트는 스텁을, 프로덕션은 judgeChecklist를 꽂는다. */
@@ -173,7 +182,15 @@ export async function staffGraph(
           ...(hub.packageHash ? { targetVersion: hub.packageHash } : {}),
           label: hub.name, source: "hub",
         }
-        : { nodeId: node.id, role, ref: null, targetType: null, source: "unresolved" };
+        : source.defaultRunnerRef
+          // 특화도 Hub도 없다 — 자동화 소유의 범용 러너(오케스트레이터)로 채워
+          // 그래프가 no-runner로 멈추지 않게 한다. 출처를 default-runner로 남겨
+          // 화면이 "특화 미배정, 기본 러너로 실행"임을 정직하게 보여줄 수 있다.
+          ? {
+            nodeId: node.id, role, ref: source.defaultRunnerRef, targetType: "agent",
+            label: source.defaultRunnerLabel || source.defaultRunnerRef, source: "default-runner",
+          }
+          : { nodeId: node.id, role, ref: null, targetType: null, source: "unresolved" };
     }
     seen.set(role, slot);
     slots.push(slot);
