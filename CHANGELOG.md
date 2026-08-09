@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.73 — 2026-08-09
+
+This release binds Agentlas OS v1.1.99 at
+7524f206532c5c509be316d497781b240be3d487.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- Runs no longer stop to ask for approval. A step that reaches outside used to
+  be locked automatically, so most automations halted on their first run and
+  waited for someone who was not there. You decide when you build the graph;
+  it runs when it runs.
+- The review screen before you save now marks every step that goes outside
+  without asking, in red. That screen is where the decision is made.
+- A step can still be set to ask, and that setting is honoured.
+- Simulate still refuses to call steps that change anything outside, and a
+  step with no idempotency key is still never retried.
+
 ## 0.9.72 — 2026-08-09
 
 This release binds Agentlas OS v1.1.99 at
