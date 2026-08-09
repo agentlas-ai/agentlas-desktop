@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.75 — 2026-08-10
+
+This release binds Agentlas OS v1.1.105 at
+90e5cfa081637ec3ea5a701e67d29b100b88ea67.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- Bundled Agentlas OS runtime moves v1.1.99 -> v1.1.104: upload no longer blocks
+  on repairable structure/market gaps, five new host adapters, plugin-mirror sync.
+- Team org chart: an imported team keeps its CEO -> division -> agent hierarchy
+  instead of flattening every member under the CEO, and each level binds its real
+  agent id so per-agent experience is reachable at every tier. Korean role and
+  agent ids are preserved (they were being erased to empty keys).
+
 ## 0.9.74 — 2026-08-09
 
 This release binds Agentlas OS v1.1.99 at
