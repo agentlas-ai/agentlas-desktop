@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.74 — 2026-08-09
+
+This release binds Agentlas OS v1.1.99 at
+7524f206532c5c509be316d497781b240be3d487.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- Steps that fetch things can reach the internet again. Reading a page changes
+  nothing, so such a step is written as a read step — and read steps had their
+  network cut off, which killed most first steps outright. Writing files and
+  reading secrets are still fenced off.
+- An automation built from a description can now do what it described. It was
+  created read-only even when its own plan said a step would post, send or
+  save, so the model refused its own work. What a graph may do now follows
+  from what the graph says it does.
+- Automations made before the approval change no longer stop for approvals
+  nobody asked for.
+- A notice that needs your attention can always be closed, and closing it
+  works. Some notices had no way to dismiss them at all.
+- Pressing something now tells you when it did not work, instead of leaving
+  you to press again. Notices are also no longer assembled by reading
+  sentences — a three-day-old note once became an approval request sitting on
+  a run that had already succeeded.
+
 ## 0.9.73 — 2026-08-09
 
 This release binds Agentlas OS v1.1.99 at
