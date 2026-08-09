@@ -274,3 +274,7 @@ scripts/fixtures/
 # it stays in CI and the runner sparse-checks this exact file out of the release
 # commit. It drives the built installer, not product internals.
 !scripts/verify-packaged-updater-install-e2e.cjs
+
+# session scratch/demo (never publish)
+scripts/capture-x-graph.cjs
+scripts/demo/
