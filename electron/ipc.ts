@@ -29,6 +29,7 @@ import {
   setModelRoleMembers as setModelRoleMembersStore,
 } from "./store/model-roles";
 import type { RuntimeRole } from "../shared/types";
+import { requiredExecutionPermission } from "../shared/graph-node-protocol";
 import { runtimeVersionsWithAutoUpdate } from "./runtime/auto-update";
 import { agentRunCwd } from "./runtime/exec";
 import { tryAcquireRuntimeMaintenance } from "./runtime/run-slots";
@@ -3779,6 +3780,12 @@ export function registerIpcHandlers(): void {
   // 확인필요 카드 닫기 — 기록은 남기고 "지금 조치하라"는 요구만 끈다.
   ipcMain.handle("automations:acknowledgeRun", (_e, id: string, runId: string) =>
     acknowledgeAutomationRun(id, runId));
+  // 실행 id 없이 "지금까지의 확인 요구"를 전부 닫는다 — 어떤 카드든 끝낼 수 있는 행동.
+  ipcMain.handle("automations:acknowledgeAttention", (_e, id: string) => {
+    const { acknowledgeAutomationAttention } = require("./store/automations") as
+      typeof import("./store/automations");
+    return acknowledgeAutomationAttention(id);
+  });
   ipcMain.handle("automations:listTriggerAttention", (_e, automationId: string) =>
     listTriggerEventAttention(automationId),
   );
@@ -3805,9 +3812,19 @@ export function registerIpcHandlers(): void {
       return result;
     },
   );
-  ipcMain.handle("automations:updateGraph", (_e, id: string, graph: WorkflowGraph | null) =>
-    updateAutomationGraph(id, graph),
-  );
+  ipcMain.handle("automations:updateGraph", (_e, id: string, graph: WorkflowGraph | null) => {
+    const saved = updateAutomationGraph(id, graph);
+    /* ★고친 그래프가 바깥으로 나가게 됐으면 권한도 따라 올라간다.
+       내리지는 않는다 — 넓혀 둔 것은 사람이 그렇게 정했을 수 있고, 좁히는 쪽이
+       "어제까지 되던 게 오늘 안 됨"을 만든다. 올리는 쪽만 자동이다. */
+    if (graph && requiredExecutionPermission(graph) === "write") {
+      const current = getAutomation(id);
+      if (current && current.executionPermission !== "write") {
+        return updateAutomation(id, { executionPermission: "write" });
+      }
+    }
+    return saved;
+  });
 
   // ★저장된 판으로 되돌리기 — 저장이 덮어쓰기뿐이라 잘못 저장하면 돌아갈 자리가 없었다.
   ipcMain.handle("automations:listGraphVersions", (_e, id: string) => listGraphVersions(id));
@@ -4174,7 +4191,9 @@ export function registerIpcHandlers(): void {
       targetType: "agent",
       targetId: input.targetId?.trim() || "builtin-agentlas-orchestrator",
       promptTemplate: name,
-      executionPermission: "read",
+      // ★권한은 그래프가 선언한 것에서 따라 나온다 — 여기서 "read" 로 못박아 두면
+      //   자기 청사진이 선언한 mutation 단계를 스스로 못 하는 자동화가 태어난다.
+      executionPermission: requiredExecutionPermission(input.graph as never),
       graphJson: input.graph as never,
       // ★확인 카드가 "꺼진 상태로 저장됩니다"라고 약속한다 — 그 상태로 **태어나야** 한다.
       //   만들고 나서 끄는 두 걸음 사이에서 예외가 나면 켜진 채 남는다(실측).

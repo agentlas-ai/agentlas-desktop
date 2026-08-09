@@ -290,6 +290,7 @@ export const GRAPH_VERBATIM_CODES = [
 export const GRAPH_FIELD_GRADES: Record<string, "critical" | "degradable" | "extension"> = {
   "$blob": "critical",
   "approval": "critical",
+  "approvalSetBy": "degradable",
   "approvalWaitHours": "degradable",
   "catalog": "critical",
   "code": "critical",

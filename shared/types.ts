@@ -1852,6 +1852,8 @@ export interface Automation {
   runtimeSelection?: RuntimeSelection;
   /** 예약 실행 권한. 스케줄러는 read/write만 허용하며 full로 승격하지 않는다. */
   executionPermission: AutomationExecutionPermission;
+  /** 확인 요구를 "여기까지 다 봤다"고 닫은 시각. 이 시각 이전 실행의 요구는 닫힌 것으로 본다. */
+  attentionClearedAt?: string | null;
   enabled: boolean;
   /** 'user'(폼에서 사람이 생성) | 'agent'(채팅에서 에이전트가 `## Automation` 블록으로 생성) */
   createdBy: "user" | "agent";
@@ -6358,6 +6360,8 @@ export interface AgentlasIpc {
     listRuns: (id: string, limit?: number) => Promise<AutomationRunRecord[]>;
     /** 확인필요 카드 닫기 — 기록은 남고 "지금 조치하라"는 요구만 꺼진다. */
     acknowledgeRun: (id: string, runId: string) => Promise<boolean>;
+    /** 실행 id 없이 지금까지의 확인 요구를 전부 닫는다 — 어떤 카드든 끝낼 수 있는 종결 행동. */
+    acknowledgeAttention: (id: string) => Promise<number>;
     listTriggerAttention: (automationId: string) => Promise<AutomationTriggerEventAttention[]>;
     reconcileTriggerEvent: (
       input: AutomationTriggerEventReconcileInput,

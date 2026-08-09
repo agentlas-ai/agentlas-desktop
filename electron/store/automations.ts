@@ -40,6 +40,7 @@ interface AutomationRow {
   project_id: string | null;
   prompt_template: string;
   execution_permission: string | null;
+  attention_cleared_at: string | null;
   tool_mode: string | null;
   hub_mode: string | null;
   target_version: string | null;
@@ -193,6 +194,7 @@ function toAutomation(row: AutomationRow): Automation {
     projectId: row.project_id ?? null,
     promptTemplate: row.prompt_template,
     executionPermission: normalizeExecutionPermission(row.execution_permission),
+    attentionClearedAt: typeof row.attention_cleared_at === "string" ? row.attention_cleared_at : null,
     toolMode: normalizeToolMode(row.tool_mode),
     hubMode: normalizeHubMode(row.hub_mode),
     targetVersion: row.target_version ?? undefined,
@@ -1358,6 +1360,34 @@ export function listRunHistory(automationId: string, limit = 50): AutomationRunR
  * (오너 보고 2026-08-06: 옛 핀 시절 실행의 "클로드 재로그인" 카드가 해소 수단 없이
  * 계속 남았다. 기록 삭제가 아니라 요구 해소이므로 acknowledged_at 한 칸이면 된다.)
  */
+/**
+ * 이 자동화의 "지금까지의 확인 요구"를 전부 닫는다 — **실행 id 없이**.
+ *
+ * ★막다른 길을 구조적으로 없애기 위한 종결 행동이다(2026-08-09).
+ * 예전 닫기(`acknowledgeAutomationRun`)는 run_history 의 특정 행을 앵커로 요구했다.
+ * 그런데 카드가 뜨는 근거는 그 행만이 아니다 — 스냅샷의 error 로도 뜬다. 그래서
+ * 앵커로 쓸 행이 없으면 **닫기 버튼 자체가 사라졌고**, 사용자에게는 끌 수 없는 카드가
+ * 남았다. 어떤 카드든 끝낼 수 있는 행동이 하나는 있어야 한다.
+ *
+ * 닫는 것은 "요구"이지 "기록"이 아니다 — 실행 기록은 목록에 그대로 남는다.
+ * 이후에 생기는 새 요구는 건드리지 않는다(now 이하만).
+ */
+export function acknowledgeAutomationAttention(automationId: string): number {
+  const now = new Date().toISOString();
+  // 스냅샷의 error 로 떠 있는 카드도 같이 닫는다 — 근거가 둘인데 하나만 닫으면
+  // 눌러도 그대로 남는다(그게 막다른 길이었다).
+  getDb().prepare("UPDATE automations SET attention_cleared_at = ? WHERE id = ?").run(now, automationId);
+  const res = getDb()
+    .prepare(
+      `UPDATE run_history SET acknowledged_at = ?
+       WHERE automation_id = ? AND acknowledged_at IS NULL
+         AND (status IN ('error','needs_input','blocked','partial')
+           OR outcome IN ('needs_input','blocked','rejected'))`,
+    )
+    .run(now, automationId);
+  return res.changes;
+}
+
 export function acknowledgeAutomationRun(automationId: string, runId: string): boolean {
   const db = getDb();
   const anchor = db

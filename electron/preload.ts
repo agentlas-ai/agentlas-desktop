@@ -692,6 +692,9 @@ const api: AgentlasIpc = {
     listRuns: (id: string, limit?: number) => ipcRenderer.invoke("automations:listRuns", id, limit),
     acknowledgeRun: (id: string, runId: string) =>
       ipcRenderer.invoke("automations:acknowledgeRun", id, runId) as Promise<boolean>,
+    // 실행 id 없이 지금까지의 확인 요구를 전부 닫는다 — 어떤 카드든 끝낼 수 있는 행동.
+    acknowledgeAttention: (id: string) =>
+      ipcRenderer.invoke("automations:acknowledgeAttention", id) as Promise<number>,
     listTriggerAttention: (automationId: string) =>
       ipcRenderer.invoke("automations:listTriggerAttention", automationId),
     reconcileTriggerEvent: (input: AutomationTriggerEventReconcileInput) =>

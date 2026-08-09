@@ -4042,7 +4042,19 @@ export function initStore(options: StoreInitOptions = {}): void {
    * 이미 있으면 아무 일도 하지 않으므로 부팅 비용은 PRAGMA 몇 번뿐이다.
    */
   const REQUIRED_COLUMNS: Record<string, Array<[string, string]>> = {
-    automations: [["goal", "goal TEXT"]],
+    automations: [
+      ["goal", "goal TEXT"],
+      /*
+       * 확인 요구를 "여기까지 다 봤다"고 닫은 시각.
+       *
+       * ★막다른 길을 없애기 위한 칸이다(2026-08-09). 확인 카드는 두 가지 근거로 뜬다:
+       * run_history 의 미해소 행, 그리고 **마지막 실행 스냅샷의 error**. 예전 닫기는
+       * 앞의 것만 닫을 수 있어서, 스냅샷으로 떠 있는 카드는 눌러도 그대로였다 —
+       * 사용자에게는 끌 수 없는 카드가 남는다. 이 시각 이전에 시작된 실행의 요구는
+       * 종류와 무관하게 닫힌 것으로 본다. 기록 자체는 지우지 않는다(감사 가능).
+       */
+      ["attention_cleared_at", "attention_cleared_at TEXT"],
+    ],
     // 확인필요 카드의 "해소" 기록 — 기록 자체는 지우지 않고(감사 가능), "지금
     // 조치하라"는 요구만 닫는다. 사용자가 닫기 전에는 NULL.
     run_history: [["acknowledged_at", "acknowledged_at TEXT"]],

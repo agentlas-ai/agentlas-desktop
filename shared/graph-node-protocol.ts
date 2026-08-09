@@ -310,6 +310,30 @@ export function parseNodeEnvelope(raw: unknown): NodeOutputEnvelope | null {
  *   화면엔 "조회"로 뜨는데 시뮬레이션에서 통째로 차단됐다 — 같은 노드가 화면과 실행에서
  *   다른 것이었다.
  */
+/**
+ * 이 그래프가 **자기 일을 하려면** 어떤 권한이 있어야 하는가.
+ *
+ * ★그래프가 곧 선언이다(2026-08-09). 예전에는 청사진으로 만든 자동화가 전부
+ * `executionPermission: "read"` 로 태어났다 — 그 청사진이 스스로 `effect: "mutation"`
+ * 단계를 선언하고 있는데도. 그래서 만들어진 자동화는 **태어날 때부터 자기 일을 못 했다**:
+ * 런타임이 쓰기 도구를 거부하고, 모델은 "권한이 부족해 진행할 수 없습니다"라고 답한다.
+ * 실측(오너 DB): 청사진으로 만든 자동화 3/3 이 read, 그 중 둘이 정확히 그 답을 냈다.
+ *
+ * 권한은 따로 정하는 기본값이 아니라 **그래프가 선언한 것에서 따라 나오는 값**이다.
+ * 판정 규칙은 커널의 `nodeEffect` 와 같아야 한다 — 안 적힌 출력/행동은 나가는 것으로 본다.
+ */
+export function requiredExecutionPermission(
+  graph: { nodes?: { type?: string; config?: Record<string, unknown> | null }[] } | null | undefined,
+): "read" | "write" {
+  const reachesOutside = (graph?.nodes ?? []).some((node) => {
+    const declared = node?.config?.effect;
+    if (declared === "mutation") return true;
+    if (declared === "read" || declared === "pure") return false;
+    return defaultNodeEffect(String(node?.type ?? "")) === "mutation";
+  });
+  return reachesOutside ? "write" : "read";
+}
+
 export function defaultNodeEffect(nodeType: string): "pure" | "read" | "mutation" {
   // 출력 블록은 "바깥으로 내보내기"다(레지스트리 선언). 안 적혔다고 조회로 보면
   // 시뮬레이션이 실제로 발행하고, 승인도 재시도 정책도 조회 기준으로 돈다.

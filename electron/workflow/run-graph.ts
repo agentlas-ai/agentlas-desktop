@@ -60,6 +60,7 @@ import {
   type NodeNote,
   type NodeOutputEnvelope,
   defaultNodeEffect,
+  requiredExecutionPermission,
 } from "../../shared/graph-node-protocol";
 
 type EventSink = (ev: McpInvocationEvent) => void;
@@ -153,8 +154,17 @@ function nodeApprovalTier(node: WorkflowNode): GraphNodeApprovalTier {
      사람이 스스로 켠 것까지 우리가 끄지는 않는다. 다만 **아무도 안 적었을 때 우리가
      대신 켜 주지 않는다** — 그 자동 승인이 병목의 전부였다. */
   const raw = str(node.config, "approval");
-  if (raw === "ask" || raw === "ask_once") return raw;
-  return "auto";
+  if (raw !== "ask" && raw !== "ask_once") return "auto";
+  /* ★저장된 자물쇠 대부분은 **사람이 고른 적이 없다**(실측 2026-08-09).
+     정책을 바꾸기 전까지 청사진이 바깥으로 나가는 단계에 자동으로 `ask` 를 박아 넣었고,
+     그 값이 graph_json 에 그대로 남아 있다. 그래서 커널에서 자동 잠금을 없앤 뒤에도
+     **이미 만들어진 자동화는 전부 그대로 멈춘다** — 오너의 그래프 두 개가 실제로 그랬다.
+
+     사람이 고른 것과 우리가 박은 것을 사후에 구분할 방법이 없으므로, **앞으로 고른 것에
+     표식을 남기고** 표식 없는 잠금은 존중하지 않는다. 화면에서 승인을 고르면
+     `approvalSetBy: "user"` 가 함께 저장된다(NodeConfigPanel). 표식이 붙은 잠금만
+     실행을 멈춘다 — 사람이 스스로 켠 것은 끄지 않고, 우리가 켠 것은 사람에게 물려주지 않는다. */
+  return str(node.config, "approvalSetBy") === "user" ? raw : "auto";
 }
 
 /**
@@ -1159,6 +1169,14 @@ export async function runGraph(
   ) {
     throw new Error("automation_occurrence_id_invalid");
   }
+  /* ★권한은 **그래프가 선언한 것**에서 나온다(2026-08-09).
+     저장된 `executionPermission` 은 사람이 고른 적이 없는 값이다 — 화면 어디에도 그걸
+     고르는 자리가 없고, 청사진 생성 경로가 전부 "read" 로 못박아 두고 있었다. 그래서
+     자기 청사진이 mutation 단계를 선언한 자동화가 read 로 태어나 런타임에 거부당했다
+     (실측: 모델이 "권한이 부족해 진행할 수 없습니다"라고 답하고 채점표가 fail).
+     저장값이 더 넓으면(write) 그건 존중한다 — 넓힌 것은 되돌리지 않는다. */
+  const effectivePermission: "read" | "write" =
+    automation.executionPermission === "write" ? "write" : requiredExecutionPermission(graph);
   const initialVars = durableInitialVars(opts.initialVars);
   // 자율 전략 진화 — 이 자동화의 현재 실패 스트릭을 1회 수집해, 실패가 이어지는 동안
   // 모든 agent/action/output 노드 프롬프트에 "다른 방법 강제" 지시문을 주입한다.
@@ -2692,7 +2710,7 @@ export async function runGraph(
               userPrompt: executionPrompt,
               // 시뮬레이션은 읽기 권한으로 내려 실행한다 — 런타임이 쓰기 도구를 거부하므로
               // 선언되지 않은 부수효과까지 실제로 막힌다(라벨만 붙이는 게 아니다).
-              permissions: dryRun || automation.executionPermission === "read" ? "read" : "write",
+              permissions: dryRun || effectivePermission === "read" ? "read" : "write",
               borrowAgents: hubBorrowForNode(node),
               // 그래프에서 이 에이전트에 이어 붙인 도구들(커넥터 C06).
               ...(declaredToolsForNode(node) ? { requiredToolCatalogIds: declaredToolsForNode(node) } : {}),
@@ -2865,7 +2883,7 @@ export async function runGraph(
           // slot, not silently suspend the whole automation for reconciliation.
           const noObservedSideEffect = receipts.length === 0 &&
             (checkpoint!.prepareReceipts[node.id]?.length ?? 0) === 0;
-          const replaySafeFailure = automation.executionPermission === "read" ||
+          const replaySafeFailure = effectivePermission === "read" ||
             replaySafeTypedFailure || replaySafePreparedFailure || noObservedSideEffect;
           const ambiguous = checkpointPersistenceError !== null || unsafeToolObserved || !replaySafeFailure;
           // 재시도 레인 — 부수효과가 **확실히 없었을 때만** 다시 시도한다. 모호하면

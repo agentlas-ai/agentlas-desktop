@@ -252,9 +252,25 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
     let args = [file];
     let isolation: CodeIsolationLevel = "process-isolated";
     if (wantSandbox) {
-      // (allow default) 후 deny — 인터프리터가 자기 dylib·/dev/urandom을 읽어야 해서
-      // (deny default)는 못 쓴다(Bazel·Codex와 같은 접근). 쓰기는 스크립트 폴더·tmp·
-      // 파이썬 캐시 경계만 열고, 네트워크는 전면 차단, 비밀 폴더는 읽기도 차단한다.
+      /* (allow default) 후 deny — 인터프리터가 자기 dylib·/dev/urandom을 읽어야 해서
+         (deny default)는 못 쓴다(Bazel·Codex와 같은 접근). 쓰기는 스크립트 폴더·tmp·
+         파이썬 캐시 경계만 열고, 비밀 폴더는 읽기도 차단한다.
+
+         ★네트워크는 막지 않는다(2026-08-09). 예전에는 `(deny network*)` 였고, 그것이
+         "어떤 그래프도 안 돌아간다"의 가장 큰 원인이었다:
+
+           · 코드 단계가 실제로 하는 일은 대부분 "가져오기"다(뉴스·시세·API 조회).
+           · 가져오는 것은 바깥을 **바꾸지 않으므로** 저작자도 AI도 `effect: "read"` 라고
+             적는다. 그게 의미상 맞다.
+           · 그런데 read 는 샌드박스가 켜지고 네트워크가 끊긴다 → DNS 부터 실패
+             (`URLError: [Errno 8] nodename nor servname provided`) → CODE_STEP_FAILED.
+           · 유일한 우회는 `effect: "mutation"` 이라고 **거짓 선언**하는 것이었고,
+             그러면 승인 게이트까지 켜졌다. 정직하게 적을수록 안 돌아가는 구조였다.
+
+         샌드박스가 지켜야 하는 것은 "이 기계에 남는 흔적"(파일 쓰기·비밀 읽기)이다.
+         바깥으로 HTTP 요청을 보내는 것은 이 기계에 흔적을 남기지 않는다. 나가는 것에
+         대한 통제는 여기가 아니라 계약 층이 한다 — 시뮬레이션은 mutation 단계를
+         호출조차 하지 않고, 멱등키 없는 mutation 은 재시도하지 않는다. */
       const home = os.homedir();
       const writable = [path.dirname(file), os.tmpdir(), cwd];
       const denyRead = [
@@ -266,7 +282,6 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       const profile = [
         "(version 1)",
         "(allow default)",
-        "(deny network*)",
         "(deny file-write*)",
         ...writable.map((p) => `(allow file-write* (subpath "${esc(p)}"))`),
         ...denyRead.map((p) => `(deny file-read* (subpath "${esc(p)}"))`),

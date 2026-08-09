@@ -628,7 +628,15 @@ export function NodeConfigPanel({
           {/* ★오너 결정(2026-08-09): 실행 중 승인은 기본이 아니다. 여기서 정한 것이
               **그때 정한 전부**이고, 도는 중에는 묻지 않는다. 기본은 "묻지 않고 진행". */}
           <Field label={bi(locale, "실행 중 확인", "Ask while running")}>
-            <select value={s("approval") || "auto"} onChange={(e) => onPatch({ approval: e.target.value })} style={inp}>
+            {/* ★고른 사람이 있다는 표식을 함께 남긴다 — 커널은 표식 있는 잠금만 존중한다.
+                (정책 변경 전 청사진이 자동으로 박아 둔 `ask` 와 구분하는 유일한 방법.) */}
+            <select
+              value={s("approval") || "auto"}
+              onChange={(e) => onPatch(e.target.value === "auto"
+                ? { approval: "auto", approvalSetBy: undefined }
+                : { approval: e.target.value, approvalSetBy: "user" })}
+              style={inp}
+            >
               <option value="auto">{bi(locale, "묻지 않고 진행 (기본)", "Do not ask — just run (default)")}</option>
               <option value="ask">{bi(locale, "나갈 때마다 물어보기", "Ask every time")}</option>
               {/* ★커널이 받는 값은 `ask_once`다. "once"로 보내면 어디에도 안 걸려 조용히 auto가 된다 —

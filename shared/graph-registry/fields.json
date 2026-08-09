@@ -186,9 +186,29 @@
         "ask_once"
       ],
       "writer": "저작자",
-      "reader": "커널 승인 브레이크",
-      "unknown": "mutation이면 ask로 간주(안전 쪽)",
+      "reader": "커널 승인 브레이크(approvalSetBy 표식이 있을 때만)",
+      "unknown": "선언이 없거나 표식이 없으면 auto (실행 중 승인 없음, 2026-08-09 오너 결정)",
       "status": "implemented"
+    },
+    {
+      "name": "approvalSetBy",
+      "on": "node.config",
+      "appliesTo": [
+        "agent",
+        "action",
+        "output",
+        "code"
+      ],
+      "grade": "degradable",
+      "type": "enum",
+      "values": [
+        "user"
+      ],
+      "writer": "화면(노드 설정)",
+      "reader": "커널 승인 브레이크",
+      "unknown": "없으면 approval 선언을 존중하지 않는다 — 정책 변경 전 청사진이 자동으로 박아 둔 잠금과 구분하는 유일한 표식",
+      "status": "implemented",
+      "note": "사람이 실행 중 확인을 직접 고른 경우에만 붙는다. 이 표식이 없는 ask/ask_once 는 auto 로 읽는다."
     },
     {
       "name": "idempotencyKey",
