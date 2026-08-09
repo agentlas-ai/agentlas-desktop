@@ -625,14 +625,23 @@ export function NodeConfigPanel({
               승인은 "나가기 전에 내가 본다", 멱등키는 "두 번 나가지 않는다", 재시도는
               "한 번 실패했다고 포기하지 않는다"이다. 셋 다 사람이 정할 일인데, 지금까지는
               말로 만들거나 JSON을 직접 고쳐야만 걸 수 있었다. */}
-          <Field label={bi(locale, "사람 승인", "Human approval")}>
+          {/* ★오너 결정(2026-08-09): 실행 중 승인은 기본이 아니다. 여기서 정한 것이
+              **그때 정한 전부**이고, 도는 중에는 묻지 않는다. 기본은 "묻지 않고 진행". */}
+          <Field label={bi(locale, "실행 중 확인", "Ask while running")}>
             <select value={s("approval") || "auto"} onChange={(e) => onPatch({ approval: e.target.value })} style={inp}>
-              <option value="auto">{bi(locale, "필요 없음 — 알아서 진행", "Not needed — go ahead")}</option>
+              <option value="auto">{bi(locale, "묻지 않고 진행 (기본)", "Do not ask — just run (default)")}</option>
               <option value="ask">{bi(locale, "나갈 때마다 물어보기", "Ask every time")}</option>
               {/* ★커널이 받는 값은 `ask_once`다. "once"로 보내면 어디에도 안 걸려 조용히 auto가 된다 —
                   승인을 걸었다고 믿는 사람이 승인 없이 내보내진다. */}
               <option value="ask_once">{bi(locale, "처음 한 번만 물어보기", "Ask the first time only")}</option>
             </select>
+            <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
+              {s("effect") === "mutation" || node.type === "output"
+                ? bi(locale,
+                  "이 단계는 바깥으로 나갑니다. 여기서 정한 대로 돕니다 — 기본은 묻지 않고 진행합니다. 자동화는 사람이 안 볼 때 도는 것이라, 도중에 사람을 기다리면 거기서 멈춘 채 끝나지 않습니다. 실제로 나가는 게 걱정되면 [시뮬레이션]으로 먼저 돌려 보세요 — 바깥으로 나가는 단계는 호출하지 않고 무엇이 일어났을지만 보여줍니다.",
+                  "This step reaches outside. It follows what you set here — by default it just runs. Automations run while you are away, so waiting for a person mid-run means it never finishes. To see what would happen without it happening, use Simulate.")
+                : bi(locale, "기본은 묻지 않고 진행합니다.", "By default it runs without asking.")}
+            </div>
           </Field>
           {/* ★출력 노드는 효과를 안 적어도 커널이 "바깥으로 나간다"로 본다. 그런데 멱등키 칸을
               `effect === "mutation"`일 때만 보여 주면, 정작 그 칸이 가장 필요한 노드에서

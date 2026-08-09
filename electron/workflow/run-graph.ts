@@ -138,17 +138,23 @@ function nodeEffect(node: WorkflowNode): GraphNodeEffect {
 export type GraphNodeApprovalTier = "auto" | "ask" | "ask_once";
 
 function nodeApprovalTier(node: WorkflowNode): GraphNodeApprovalTier {
+  /* ★오너 결정(2026-08-09): **실행 중 승인은 없앤다.**
+     "승인단계 걍 없애라 그게 병목이네 그거 때문에 아예 안되네
+      그냥 모든 승인은 최초에 그래프 만드는 단계에서" — 승인은 그래프를 **만들 때**
+     한 번 정하는 것이고, 도는 중에는 묻지 않는다.
+
+     왜 이게 옳은가(실측): 자동화는 사람이 안 볼 때 도는 것이다. 도는 중에 사람을
+     기다리면 실행은 거기서 죽고, 사람은 몇 시간 뒤에야 멈춘 걸 안다. 그때 화면에서
+     승인 하나를 못 찾으면(실제로 못 찾았다) 자동화는 영영 안 끝난다. 되돌리기 어려운
+     일에 대한 방어는 승인 대기가 아니라 (1) 만들 때의 동의 (2) 시뮬레이션에서의 차단
+     (3) 멱등키 없는 mutation 재시도 0회 — 이 셋이 이미 하고 있다.
+
+     남겨 둔 것: 저작자가 **명시적으로** `approval: "ask"` 를 적으면 그건 존중한다.
+     사람이 스스로 켠 것까지 우리가 끄지는 않는다. 다만 **아무도 안 적었을 때 우리가
+     대신 켜 주지 않는다** — 그 자동 승인이 병목의 전부였다. */
   const raw = str(node.config, "approval");
   if (raw === "ask" || raw === "ask_once") return raw;
-  // 선언이 없으면 자동. 다만 바깥을 바꾸는 단계는 기본을 "매번 확인"으로 둔다 —
-  // 되돌리기 어려운 일을 아무 말 없이 내보내는 쪽이 더 큰 사고다(D20).
-  if (raw === "auto") return "auto";
-  // ★기본 승인은 **사람이 적은 효과**만 보고 정한다. 추론된 효과로 정하면, 지금까지 아무 말 없이
-  //   잘 돌던 자동화가 어느 날 갑자기 전부 "승인 대기"로 멈춘다 — 사람이 아무것도 바꾸지 않았는데.
-  //   승인은 사람이 내리는 결정이라, 선언이 없을 때 우리가 대신 켜 주는 것은 도움이 아니라 고장이다.
-  //   (시뮬레이션 차단과 재시도 정책은 다르다 — 그건 안전 성질이라 선언이 없어도 보수적으로 간다.)
-  const declaredEffect = str(node.config, "effect");
-  return declaredEffect === "mutation" ? "ask" : "auto";
+  return "auto";
 }
 
 /**

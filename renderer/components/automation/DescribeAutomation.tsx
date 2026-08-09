@@ -283,13 +283,18 @@ export function DescribeAutomation({ locale, onCreated }: {
                 {node.config?.effect === "mutation" ? (
                   // ★확인 없이 나가는 단계는 눈에 띄어야 한다 — 사람이 그렇게 정했더라도
                   //   저장 전에 자기가 무엇을 풀었는지 다시 보는 자리가 여기뿐이다.
-                  node.config?.approval === "auto" ? (
-                    <span style={{ color: "var(--red-deep, #b4533a)", fontWeight: 600 }}>
-                      {ko ? " — 바깥으로 나감, 확인 없이 바로" : " — goes outside without asking"}
-                    </span>
-                  ) : (
+                  /* ★오너 결정(2026-08-09)으로 실행 중 승인이 기본에서 빠졌다. 그러니
+                     "이 단계는 묻지 않고 바깥으로 나간다"는 사실을 **여기서** 읽어야 한다 —
+                     이제 이 화면이 사람이 그 사실을 보는 마지막 자리다. 선언이 없으면
+                     기본은 auto 이므로, 예전처럼 `=== "auto"` 로만 보면 정작 기본값에서
+                     경고가 사라진다. */
+                  node.config?.approval === "ask" || node.config?.approval === "ask_once" ? (
                     <span style={{ color: "var(--muted-deep)" }}>
                       {ko ? " — 바깥으로 나감, 실행 전 확인" : " — goes outside, asks first"}
+                    </span>
+                  ) : (
+                    <span style={{ color: "var(--red-deep, #b4533a)", fontWeight: 600 }}>
+                      {ko ? " — 바깥으로 나감, 확인 없이 바로" : " — goes outside without asking"}
                     </span>
                   )
                 ) : null}

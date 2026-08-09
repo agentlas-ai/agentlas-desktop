@@ -200,11 +200,25 @@ export function RunHistoryPanel({ automation, locale, compact = false, approvalS
      nodeId 가 없다고 재실행만 권했는데, 같은 패널이 이미 들고 있는 latest 스냅샷의
      nodeFailures 에 그 nodeId 가 들어 있다. 오너 지적(2026-08-09):
      "저거 자체에 다시실행이 아니고 승인이 나와야 하는거 아니냐?" — 맞다. */
-  const approvalNodeId = useMemo(
-    () => Object.entries(latest?.nodeFailures ?? {})
-      .find(([, f]) => f?.code === "APPROVAL_REQUIRED")?.[0] ?? null,
-    [latest?.nodeFailures],
-  );
+  const approvalNodeId = useMemo(() => {
+    const fromSnapshot = Object.entries(latest?.nodeFailures ?? {})
+      .find(([, f]) => f?.code === "APPROVAL_REQUIRED")?.[0];
+    if (fromSnapshot) return fromSnapshot;
+    /* ★막다른 길이 실제로 났다(오너 캡처 2026-08-09): 승인을 기록하면 커널이 스냅샷의
+       실패를 지우는데(clearGraphRunFailureForNode), 그 뒤 재개가 실패하면 실행은 여전히
+       그 단계에서 멈춘 채인데 **승인할 대상을 아무도 모른다** — 카드에 [이 알림 닫기]만
+       남았다. 스냅샷이 비면 그래프가 스스로 답한다: 승인을 요구하도록 선언된 단계 중
+       아직 안 끝난 것. */
+    if (!blockingRun) return null;
+    const stuck = Object.entries(latest?.nodeStates ?? {})
+      .filter(([, st]) => st === "failed" || st === "pending")
+      .map(([nodeId]) => nodeId);
+    const declared = (automation.graph?.nodes ?? []).find((n) => {
+      const approval = (n.config as { approval?: unknown } | undefined)?.approval;
+      return (approval === "ask" || approval === "ask_once") && stuck.includes(n.id);
+    });
+    return declared?.id ?? null;
+  }, [latest?.nodeFailures, latest?.nodeStates, blockingRun, automation.graph]);
   const awaitingApprovalDecision = approvalNodeId !== null
     || (blockingRun ? runWaitsForApproval(blockingRun) : false);
   const [approving, setApproving] = useState(false);

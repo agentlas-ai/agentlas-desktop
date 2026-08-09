@@ -592,10 +592,13 @@ export function buildGraphFromBlueprint(
           }
           : { prompt: step.instruction }),
         effect: step.effect,
-        // 바깥을 바꾸는 단계는 **기본이 잠김**("확인 후 실행"). 사람이 명시로
-        // "검토 없이"라고 말했을 때만 auto로 내려간다 — 모델이 스스로 못 낮춘다.
-        ...(step.effect === "mutation"
-          ? { approval: step.approval === "auto" ? "auto" : "ask" }
+        /* ★오너 결정(2026-08-09): 만들 때 기본은 **묻지 않고 진행**이다.
+           예전에는 바깥으로 나가는 단계를 전부 "확인 후 실행"으로 잠갔는데, 그러면
+           만들어진 자동화가 거의 다 첫 실행에서 승인 대기로 멈춘다 — 사람이 안 볼 때
+           도는 것이 자동화라 거기서 끝난다. 사람이 "확인받고 해"라고 **말했을 때만** 잠근다.
+           바깥으로 나가는 것에 대한 동의는 이 그래프를 만들기로 한 그 순간에 이미 있었다. */
+        ...(step.effect === "mutation" && step.approval === "ask"
+          ? { approval: "ask" as const }
           : {}),
         ...(step.role?.trim() ? { role: step.role.trim() } : {}),
         ...(step.roleEn?.trim() ? { roleEn: step.roleEn.trim() } : {}),
