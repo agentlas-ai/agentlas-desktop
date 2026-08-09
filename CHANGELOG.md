@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.72 — 2026-08-09
+
+This release binds Agentlas OS v1.1.99 at
+7524f206532c5c509be316d497781b240be3d487.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- Details is a panel on the right again. What you decide while looking at the
+  canvas belongs beside it; the log and the chat, which fill up over time,
+  stay underneath. The bottom now holds those two only.
+- The card that says a run is waiting on you offers the approval itself. It
+  used to offer only Run again, which reaches the same stop, and it called a
+  pending decision a failure.
+- Approving no longer brings the card back. The screen re-read the run a
+  moment before the kernel had written the resume, so the decision you just
+  made reappeared as still pending.
+- The log writes down what actually happens: each step starting and finishing,
+  every tool call, the model in use, and the gap between events.
+
 ## 0.9.71 — 2026-08-09
 
 This release binds Agentlas OS v1.1.99 at

@@ -2308,6 +2308,108 @@ button[data-dashboard-import="true"]:disabled {
 .automation-session-composer-actions button[data-variant="stop"] { border-color: color-mix(in oklch, #d64545 40%, var(--rd-hair)); color: #d64545; }
 .automation-inspector-column { width: 320px; flex: 0 1 320px; min-width: 240px; min-height: 0; overflow-y: auto; overflow-x: hidden; border-left: 1px solid var(--rd-hair); background: var(--rd-surface); }
 .automation-inspector-column * { min-width: 0; }
+/* ★[로그] 탭의 실제 진행 줄 — 시각·단계·내용·간격이 항상 같은 자리에 온다.
+   시각이 줄마다 흔들리면 훑을 수 없다(tabular-nums). */
+/* 같은 ul 안의 이슈 줄(flex)보다 뒤에 와야 그리드가 이긴다 — 명시도를 맞춘다. */
+.automation-issue-log-list li.automation-activity-row > button,
+.automation-activity-row > button {
+  display: grid;
+  /* 단계 이름이 "피드 …"로 잘리면 어느 단계인지 못 읽는다 — 이름 칸을 먼저 준다. */
+  grid-template-columns: 66px minmax(110px, 168px) 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  width: 100%;
+  padding: 2px 6px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.automation-activity-row > button:hover { background: var(--fill-1, rgba(0,0,0,0.04)); }
+.automation-activity-row time {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  color: var(--muted-deep);
+}
+/* ★`.automation-issue-log-list li b { width: 34px }` 가 이 줄의 단계 이름까지 34px 로
+   잘라 "피드 …"만 보였다(실렌더 2026-08-09). 같은 ul 을 쓰는 대가 — 명시도를 올린다. */
+.automation-issue-log-list li.automation-activity-row b,
+.automation-activity-row b {
+  width: auto;
+  flex: initial;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.automation-activity-row span { font-size: 11px; color: var(--ink); overflow-wrap: anywhere; }
+.automation-activity-row i {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  font-style: normal;
+  color: var(--muted-deep);
+}
+.automation-activity-row[data-tone="run"] b { color: var(--accent); }
+.automation-activity-row[data-tone="fail"] b { color: var(--danger, #c0392b); }
+.automation-activity-row[data-tone="done"] time { color: var(--muted); }
+.automation-activity-empty { padding: 10px 8px; font-size: 11.5px; color: var(--muted-deep); }
+/* 접었을 때 되펴는 손잡이 — 접힌 열은 존재를 알릴 방법이 있어야 한다.
+   기다리는 결정이 있으면 숫자로 부른다(접어 둔 채 잊히면 안 된다). */
+/* 상세 열은 320px 다 — 결정 버튼 세 개를 한 줄에 세우면 "승인하고 이 / 어서 실행"으로
+   쪼개진다. 주 버튼은 한 줄 전체, 보조 둘은 나란히(실렌더 2026-08-09). */
+.automation-inspector-column [data-testid^="node-failure-"] > div:last-of-type {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.automation-inspector-column [data-testid^="node-failure-"] > div:last-of-type > button:first-child {
+  grid-column: 1 / -1;
+}
+.automation-inspector-column [data-testid^="node-failure-"] button {
+  /* 좁은 열에서 글자가 잘리느니 두 줄로 접힌다 — 잘린 이름은 이름이 아니다. */
+  white-space: normal;
+  line-height: 1.35;
+  padding: 7px 8px;
+  min-width: 0;
+}
+
+.automation-inspector-reopen {
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  width: 30px;
+  min-height: 92px;
+  margin: 8px 6px 0 0;
+  padding: 8px 0;
+  border: 1px solid var(--rd-hair, var(--paper-edge));
+  border-radius: 8px;
+  background: var(--rd-surface, var(--paper));
+  color: var(--muted-deep);
+  font-size: 11px;
+  cursor: pointer;
+}
+.automation-inspector-reopen:hover { color: var(--ink); }
+.automation-inspector-reopen-label { writing-mode: vertical-rl; letter-spacing: 1px; }
+.automation-inspector-reopen em {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+}
 .automation-inspector-column > aside { width: 100% !important; border-left: 0 !important; }
 .automation-inspector-bar { position: sticky; top: 0; z-index: 2; min-height: 48px; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--rd-hair); background: var(--rd-surface); }
 .automation-inspector-bar span { font-size: 12px; font-weight: 750; }

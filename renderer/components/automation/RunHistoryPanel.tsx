@@ -23,6 +23,12 @@ interface RunHistoryPanelProps {
   automation: Automation;
   locale: "ko" | "en";
   compact?: boolean;
+  /**
+   * 같은 열에서 캔버스가 이미 그 승인 카드를 그리고 있는가.
+   * 상세가 오른쪽 한 열로 합쳐진 뒤(2026-08-09), 승인 버튼이 두 장 쌓일 수 있게 됐다 —
+   * 같은 결정을 두 번 내놓으면 사용자는 둘이 다른 일을 한다고 읽는다. 승인은 한 번만.
+   */
+  approvalShownByCanvas?: boolean;
 }
 
 const POLL_MS = 5_000;
@@ -32,7 +38,7 @@ type NodeDecisionDraft = {
   output: string;
 };
 
-export function RunHistoryPanel({ automation, locale, compact = false }: RunHistoryPanelProps) {
+export function RunHistoryPanel({ automation, locale, compact = false, approvalShownByCanvas = false }: RunHistoryPanelProps) {
   const ko = locale === "ko";
   const [runs, setRuns] = useState<AutomationRunRecord[]>([]);
   const [latest, setLatest] = useState<WorkflowRunSnapshot | null>(null);
@@ -190,7 +196,38 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
      승인 자체를 할 수 없다. 승인은 상세 탭의 노드 카드가 한다. 여기서는 재실행을
      막고 어디서 결정하면 되는지만 말한다. 누르면 같은 일이 반복되는 버튼은
      "제어권"이 아니라 함정이다(HE.md 제어성·사용 오류에 대한 견고성). */
-  const awaitingApprovalDecision = blockingRun ? runWaitsForApproval(blockingRun) : false;
+  /* ★승인을 기다리는 노드는 **스냅샷이 알고 있다**. 이 카드는 run_history 행이라
+     nodeId 가 없다고 재실행만 권했는데, 같은 패널이 이미 들고 있는 latest 스냅샷의
+     nodeFailures 에 그 nodeId 가 들어 있다. 오너 지적(2026-08-09):
+     "저거 자체에 다시실행이 아니고 승인이 나와야 하는거 아니냐?" — 맞다. */
+  const approvalNodeId = useMemo(
+    () => Object.entries(latest?.nodeFailures ?? {})
+      .find(([, f]) => f?.code === "APPROVAL_REQUIRED")?.[0] ?? null,
+    [latest?.nodeFailures],
+  );
+  const awaitingApprovalDecision = approvalNodeId !== null
+    || (blockingRun ? runWaitsForApproval(blockingRun) : false);
+  const [approving, setApproving] = useState(false);
+  const approveAndContinue = useCallback(async () => {
+    const api = ipc();
+    if (!api || !approvalNodeId || approving) return;
+    setApproving(true);
+    setFixMessage(ko ? "승인했습니다. 멈춘 자리부터 이어서 실행합니다…" : "Approved. Continuing from where it stopped…");
+    try {
+      const result = await api.automations.decideNodeApproval(automation.id, approvalNodeId, "approved");
+      if (!result?.ok) {
+        // 승인할 실행이 없으면 승인한 척하지 않는다.
+        setFixMessage(ko ? "지금 이 단계에서 기다리고 있는 실행이 없습니다." : "No run is waiting on this step right now.");
+        return;
+      }
+      await api.automations.runNow(automation.id);
+      await load();
+    } catch {
+      setFixMessage(ko ? "승인을 저장하지 못했어요. 잠시 뒤 다시 시도해 주세요." : "The approval was not saved. Try again shortly.");
+    } finally {
+      setApproving(false);
+    }
+  }, [approvalNodeId, approving, automation.id, ko, load]);
   const rerunBlocked = Boolean(reconciliation) || awaitingApprovalDecision;
   const rawReason = useMemo(
     () => stripReasonCode(blockingRun?.error ?? regularAttentions[0]?.lastError ?? ""),
@@ -392,21 +429,48 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
         <section className="automation-reconcile-card" role="status">
           <div className="automation-reconcile-head">
             <div>
-              <span>{ko ? "확인이 필요해요" : "Needs attention"}</span>
-              <strong>{blockingRun ? plainRun(blockingRun, ko).title : plainOutcome("error", ko).title}</strong>
+              {/* ★승인 대기를 "확인이 필요해요 / 일부만 됐어요"로 부르면 오류처럼 읽힌다.
+                  아무것도 실패하지 않았고, 우리가 사람의 결정을 기다린 것뿐이다
+                  (오너 지적: "확인이 필요한걸 왜 오류로 하냐고"). */}
+              <span>{awaitingApprovalDecision
+                ? (ko ? "내 승인을 기다리는 중" : "Waiting for your approval")
+                : (ko ? "확인이 필요해요" : "Needs attention")}</span>
+              <strong>{awaitingApprovalDecision
+                ? (ko ? "승인하면 멈춘 자리부터 이어집니다" : "Approving continues it from where it stopped")
+                : blockingRun ? plainRun(blockingRun, ko).title : plainOutcome("error", ko).title}</strong>
             </div>
           </div>
           {/* 상황 설명은 제품이 실제 상태(브라우저 세션·권한·로그인·런타임)를 보고 만든 문장을
               우선한다. 계산이 아직/불가면 상태 기반 기본 문장으로 내려간다. */}
-          <p>{fixPlan && !fixPlan.unavailable && fixPlan.summary
-            ? fixPlan.summary
-            : blockingRun ? plainRun(blockingRun, ko).body : plainOutcome("error", ko).body}</p>
+          <p>{awaitingApprovalDecision
+            ? (ko
+              ? "바깥으로 나가는 단계 앞에서 멈췄습니다. 아직 아무것도 나가지 않았어요."
+              : "It stopped before a step that reaches outside. Nothing has gone out yet.")
+            : fixPlan && !fixPlan.unavailable && fixPlan.summary
+              ? fixPlan.summary
+              : blockingRun ? plainRun(blockingRun, ko).body : plainOutcome("error", ko).body}</p>
           {fixPlan?.question ? <p className="automation-fix-question">{fixPlan.question}</p> : null}
           {/* 모델 제안과 우리 버튼이 같은 동작이면 하나만 남긴다(아래 주석 참조). */}
           <div className="automation-reconcile-actions">
+            {/* ★승인 대기의 주 행동은 승인이다 — 여기서 바로 끝난다. 다른 데로
+                보내지 않는다(예전에는 "오른쪽 상세에서 승인하세요"라고 안내만 했다). */}
+            {approvalNodeId && !approvalShownByCanvas ? (
+              <button
+                type="button"
+                data-testid="attention-approve"
+                data-primary="true"
+                disabled={approving}
+                onClick={() => void approveAndContinue()}
+              >
+                {approving
+                  ? (ko ? "승인하는 중…" : "Approving…")
+                  : (ko ? "승인하고 이어서 실행" : "Approve and continue")}
+              </button>
+            ) : null}
             {/* 실행 가능한 조치 — 로그인 창 열기, macOS 설정 열기, 실행 환경 복구처럼
-                누르면 진짜로 그 일이 일어나는 버튼만 나온다. */}
-            {(fixPlan?.options ?? []).map((option) => (
+                누르면 진짜로 그 일이 일어나는 버튼만 나온다. 승인 대기에는 모델의
+                복구 제안이 끼어들 자리가 없다 — 고장이 아니기 때문이다. */}
+            {(awaitingApprovalDecision ? [] : (fixPlan?.options ?? [])).map((option) => (
               <button
                 key={option.actionId}
                 type="button"
@@ -471,8 +535,8 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
           {awaitingApprovalDecision ? (
             <p className="automation-fix-result">
               {ko
-                ? "이 실행은 승인을 기다리다 멈췄습니다. 아래 [상세] 탭에서 그 단계를 승인하면 멈춘 지점부터 이어집니다 — 다시 실행하면 같은 자리에서 또 멈춥니다."
-                : "This run stopped waiting for approval. Approve that step in the Details tab and it resumes where it stopped — running again stops at the same point."}
+                ? "다시 실행하면 같은 자리에서 또 멈춥니다 — 승인이 이 실행을 이어가는 유일한 길입니다."
+                : "Running again stops at the same place — approving is the only thing that moves this run forward."}
             </p>
           ) : null}
           {rerunBlocked && !awaitingApprovalDecision ? (

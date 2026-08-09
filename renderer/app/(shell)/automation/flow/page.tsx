@@ -189,11 +189,36 @@ function AutomationFlowPage() {
   const [runStates, setRunStates] = useState<Record<string, WorkflowNodeRunState>>({});
   /** 노드가 지금 무엇을 하는 중인가 — 실패가 아닌 상태 변화(C44). */
   const [nodeProgress, setNodeProgress] = useState<Record<string, string>>({});
+  /* ★[로그] 탭은 실제 진행을 시간순으로 다 적는다(오너 지시 2026-08-09:
+     "앞으로 로그 탭에다 실제 진행상황 다 띄워라 이런식으로 다 디테일하게").
+     예전 로그 탭에는 실패 요약 몇 줄과 "실행 진행 중…" 한 줄뿐이라, 도는 동안
+     화면이 아무 말도 하지 않았다. 커널이 이미 보내고 있던 이벤트를 버리지 않고 쌓는다. */
+  const [activity, setActivity] = useState<
+    { id: number; at: number; nodeId: string; label: string; text: string; tone: "run" | "done" | "fail" | "info" }[]
+  >([]);
+  const activitySeq = useRef(0);
   // 왜 멈췄고 지금 무엇을 누르면 되는지. 상태 단어만 있는 화면은 사용자에게 아무 말도 못 한다.
   const [nodeFailures, setNodeFailures] = useState<
     Record<string, { code: string; reason: string; nextAction: string }>
   >({});
   const [approvalBusy, setApprovalBusy] = useState(false);
+  /* ★승인 무한루프의 마지막 조각(캡처 실증 2026-08-09).
+     [승인하고 이어서 실행]은 승인을 기록하고 곧바로 재개 실행을 쏘는데, 그 직후
+     스냅샷을 다시 읽는다 — 그런데 커널이 재개분을 아직 DB에 쓰기 전이라 **방금 승인한
+     그 실패가 그대로 들어 있다**. 그래서 화면은 승인 카드를 되살렸고, 사용자에게는
+     "몇 번을 눌러도 안 된다"로 보였다. 사람이 이미 결정한 노드는, 그 노드가 실제로
+     다시 움직이는 것을 볼 때까지 스냅샷이 되살리지 못한다. */
+  const [decidedNodes, setDecidedNodes] = useState<Record<string, number>>({});
+  const decidedRef = useRef<Record<string, number>>({});
+  decidedRef.current = decidedNodes;
+  const applySnapshotFailures = useCallback(
+    (next: Record<string, { code: string; reason: string; nextAction: string }> | undefined) => {
+      const decided = decidedRef.current;
+      const entries = Object.entries(next ?? {}).filter(([nodeId]) => !decided[nodeId]);
+      setNodeFailures(Object.fromEntries(entries));
+    },
+    [],
+  );
   // 자연어로 그래프를 고치는 제안 — 적용 전까지는 저장된 그래프를 건드리지 않는다.
   const [architectDraft, setArchitectDraft] = useState("");
   const [architectBusy, setArchitectBusy] = useState(false);
@@ -220,7 +245,7 @@ function AutomationFlowPage() {
   /* ★하단은 한 섹션, 세 탭 — VS Code 터미널 탭과 같은 계약(오너 지시 2026-08-09).
      예전에는 대화·로그·상세가 서로 다른 자리에 흩어져 같은 실행을 세 번
      다르게 설명했다. 한 번에 하나만 보이고, 주의가 필요한 탭은 점으로 부른다. */
-  const [bottomTab, setBottomTab] = useState<"session" | "log" | "details">("session");
+  const [bottomTab, setBottomTab] = useState<"session" | "log">("session");
   const [logOpen, setLogOpen] = useState(true);
   const [logHeight, setLogHeight] = useState(260);
   // 행동이 필요한 카드(시작 값·승인·판정 교정·의존성 수리)가 생기면 패널을 편다 —
@@ -234,20 +259,17 @@ function AutomationFlowPage() {
   useEffect(() => {
     // 결정이 필요해지면 패널을 열고 **그 탭으로 데려간다** — 어디를 눌러야 하는지
     // 사용자가 추측하게 두지 않는다(오너 실측: "뭘 눌러야하는지도 모르겠고").
+    // 결정이 필요해지면 **오른쪽 상세를 편다** — 접힌 열 뒤에서 조용히 기다리게 두지 않는다.
     if (!hasActionCards) return;
-    setLogOpen(true);
-    setBottomTab("details");
+    setRightOpen(true);
   }, [hasActionCards]);
   /* ★노드를 고르거나 팔레트를 열면 그 내용도 [상세] 탭에 산다 — 탭이 다른 데 가 있으면
      클릭해도 화면이 아무 반응이 없다. 인스펙터가 오른쪽 열이던 시절에는 항상 보였지만,
      하단 탭으로 옮긴 뒤로는 데려가 주지 않으면 사라진 기능이 된다(실렌더 2026-08-09). */
   useEffect(() => {
+    // 노드·엣지를 고르거나 팔레트를 열면 그 내용이 사는 오른쪽 열을 편다.
     if (!selectedNodeId && !selectedEdgeId && !paletteOpen) return;
-    setLogOpen(true);
-    setBottomTab("details");
-    // 팔레트·노드 설정은 로그 한 줄보다 크다 — 기본 높이로는 내용이 잘려 나간다.
-    // 사용자가 이미 더 크게 끌어 놨으면 줄이지 않는다.
-    setLogHeight((h) => Math.max(h, 340));
+    setRightOpen(true);
   }, [selectedNodeId, selectedEdgeId, paletteOpen]);
   runStatesRef.current = runStates;
 
@@ -415,15 +437,55 @@ function AutomationFlowPage() {
     // 초기 하이드레이트.
     void api?.automations.latestRun(automation.id).then((snap) => {
       if (!cancelled && snap && snap.nodeStates) setRunStates(snap.nodeStates);
-      if (!cancelled) setNodeFailures(snap?.nodeFailures ?? {});
+      if (!cancelled) applySnapshotFailures(snap?.nodeFailures);
       if (!cancelled) setRunStartedAt(snap?.startedAt ?? null);
     });
     if (!events) return;
     const channel = api?.automations.liveRunChannel(automation.id);
     if (!channel) return;
     const off = events.on(channel, (ev) => {
+      // ★들어온 사실을 그대로 한 줄씩 남긴다 — 요약하지 않는다. 요약은 상태줄이 한다.
+      const pushActivity = (text: string, tone: "run" | "done" | "fail" | "info") => {
+        const nodeId = String(ev.nodeId ?? "");
+        const label = automation.graph?.nodes.find((n) => n.id === nodeId)?.label || nodeId || "그래프";
+        activitySeq.current += 1;
+        const id = activitySeq.current;
+        // 뒤에서부터 400줄만 — 긴 실행에서 메모리와 렌더를 지킨다.
+        setActivity((prev) => [...prev, { id, at: Date.now(), nodeId, label, text, tone }].slice(-400));
+      };
       if (ev.nodeId && ev.nodeState) {
         setRunStates((prev) => ({ ...prev, [ev.nodeId as string]: ev.nodeState as WorkflowNodeRunState }));
+        // 결정한 노드가 실제로 다시 움직였다 — 표식을 푼다. 이 뒤의 실패는 새 사실이다.
+        if (ev.nodeState === "running" || ev.nodeState === "done") {
+          setDecidedNodes((prev) => {
+            if (!prev[ev.nodeId as string]) return prev;
+            const next = { ...prev };
+            delete next[ev.nodeId as string];
+            return next;
+          });
+        }
+        const stateText: Record<string, string> = {
+          running: locale === "en" ? "started" : "시작",
+          done: locale === "en" ? "finished" : "완료",
+          failed: locale === "en" ? "stopped" : "멈춤",
+          skipped: locale === "en" ? "skipped" : "건너뜀",
+          pending: locale === "en" ? "queued" : "대기",
+        };
+        const text = stateText[ev.nodeState as string] ?? String(ev.nodeState);
+        pushActivity(
+          ev.model ? `${text} · ${ev.model}` : text,
+          ev.nodeState === "running" ? "run" : ev.nodeState === "failed" ? "fail" : ev.nodeState === "done" ? "done" : "info",
+        );
+      }
+      // 도구 호출·생각·위임은 "지금 실제로 무엇을 하는 중인가"의 전부다.
+      if (ev.kind === "tool-use" && ev.tool?.name) {
+        pushActivity((locale === "en" ? "tool " : "도구 ") + ev.tool.name, "info");
+      } else if (ev.kind === "reasoning" && ev.reasoning?.phase === "start") {
+        pushActivity(locale === "en" ? "thinking" : "생각하는 중", "info");
+      } else if (ev.kind === "thinking" && ev.status) {
+        pushActivity(String(ev.status).slice(0, 120), "info");
+      } else if (ev.delegateTo?.length) {
+        pushActivity((locale === "en" ? "delegating to " : "위임 → ") + ev.delegateTo.join(", "), "info");
       }
       // ★실패가 아닌 **상태 변화**를 받는다(커넥터 C44). 예전에는 nodeState만 건너와서,
       //   긴 노드가 도는 동안 화면이 "실행 중"에 멈춰 있었다 — 사람은 그걸 "멈췄다"로 읽는다.
@@ -469,7 +531,7 @@ function AutomationFlowPage() {
       void api.automations.latestRun(automation.id).then((snap) => {
         if (cancelled || !snap) return;
         if (snap.nodeStates) setRunStates(snap.nodeStates);
-        setNodeFailures(snap.nodeFailures ?? {});
+        applySnapshotFailures(snap.nodeFailures);
         setRunStartedAt(snap.startedAt ?? null);
       }).catch(() => undefined);
     };
@@ -654,7 +716,7 @@ function AutomationFlowPage() {
   const totalNodes = automation?.graph?.nodes.length ?? 0;
   const doneNodes = Object.values(runStates).filter((st) => st === "done").length;
   // 상세 탭이 지금 펼쳐져 보이는가 — 상태줄이 같은 행동을 두 번 내놓지 않기 위한 조건.
-  const detailsShown = logOpen && bottomTab === "details";
+  const detailsShown = rightOpen;
   // 멈췄는가 — 사유가 아직 안 실렸어도 노드가 failed 면 멈춘 것이다. 사유가 없다고
   // "정상 종료"처럼 말하면, 빨간 노드를 보고 있는 사람에게 화면이 거짓말을 한다.
   const stopped = errorCount > 0 || Object.values(runStates).some((st) => st === "failed");
@@ -1028,6 +1090,7 @@ function AutomationFlowPage() {
           : "지금 이 단계에서 기다리고 있는 실행이 없습니다.");
         return;
       }
+      setDecidedNodes((prev) => ({ ...prev, [nodeId]: Date.now() }));
       setNodeFailures((prev) => {
         const next = { ...prev };
         delete next[nodeId];
@@ -1102,12 +1165,11 @@ function AutomationFlowPage() {
           ? (locale === "en"
             ? "Simulation started. Steps that change something outside are skipped and listed instead."
             : "시뮬레이션을 시작했습니다. 바깥을 바꾸는 단계는 실행하지 않고 목록으로 보여줍니다.")
-          // ★오른쪽 열은 이제 없다(하단 탭으로 옮겼다) — 없는 곳을 가리키지 않는다.
-          : (locale === "en" ? "Run started. Watch the steps light up on the canvas; the log is in the panel below." : "실행을 시작했습니다. 캔버스에서 단계가 켜지는 것을 보고, 자세한 기록은 아래 [로그] 탭에 쌓입니다."),
+          : (locale === "en" ? "Run started. Watch the steps light up on the canvas; details are on the right, the log below." : "실행을 시작했습니다. 캔버스에서 단계가 켜지는 것을 보고, 자세한 것은 오른쪽 [상세]에, 기록은 아래 [로그]에 쌓입니다."),
       );
       const snap = await api.automations.latestRun(automation.id);
       if (snap?.nodeStates) setRunStates(snap.nodeStates);
-      setNodeFailures(snap?.nodeFailures ?? {});
+      applySnapshotFailures(snap?.nodeFailures);
     } catch {
       setMessage(locale === "en" ? "Run did not start." : "실행을 시작하지 못했습니다.");
     } finally {
@@ -1133,11 +1195,216 @@ function AutomationFlowPage() {
      "바텀시트에 인스펙터를 띄우라… 겹친 세 가지를 탭으로, VS Code 터미널 탭처럼".
      한 상황을 두 자리에서 다른 말로 설명하던 것이 중복 효과(HE.md)였고,
      사용자는 어느 쪽을 눌러야 하는지 몰랐다. */
+  /* ★결정이 필요한 것들(시작 값·승인 대기·판정 교정·의존성 수리)은 인스펙터와 한자리에.
+     오너 지시(2026-08-09): "탭은 로그·대화만 두고 상세는 기존처럼 오른쪽 사이드바".
+     하단 탭에 넣었더니 캔버스를 보면서 결정할 수 없었고, 편집 중에는 팔레트와 자리를
+     다퉜다. 결정은 캔버스 옆에서, 로그·대화는 캔버스 아래에서. */
+  const decisionCards = (
+              <div
+                style={{
+                  padding: "8px 10px",
+                  display: "grid",
+                  gap: 8,
+                  overflowY: "auto",
+                }}
+              >
+      {/* 시작 값을 받아야 하는 그래프. 값을 받고 나서 실행한다 —
+          묻지 않고 시작하면 빈 값으로 도는 것을 사용자가 결과에서야 알게 된다. */}
+      {inputPrompt ? (
+        <div
+          data-testid="graph-input-prompt"
+          style={{
+            
+            padding: "12px 14px", borderRadius: 12,
+            border: "1px solid var(--line)", background: "var(--paper)",
+            display: "flex", flexDirection: "column", gap: 8,
+          }}
+        >
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink)" }}>{inputPrompt.label}</div>
+          <input
+            data-testid="graph-input-value"
+            autoFocus
+            value={inputPrompt.value}
+            placeholder={locale === "en" ? "Type the value this run starts from" : "이번 실행이 시작할 값을 입력하세요"}
+            onChange={(e) => setInputPrompt({ ...inputPrompt, value: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && inputPrompt.value.trim()) void runNow(false, inputPrompt.value.trim());
+              if (e.key === "Escape") setInputPrompt(null);
+            }}
+            className="titlebar-nodrag"
+            style={{
+              padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)",
+              background: "var(--paper-2)", color: "var(--ink)", fontSize: 13, outline: "none",
+            }}
+          />
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              data-testid="graph-input-start"
+              className="titlebar-nodrag"
+              disabled={running || !inputPrompt.value.trim()}
+              onClick={() => void runNow(false, inputPrompt.value.trim())}
+              style={{ ...actionBtn, opacity: inputPrompt.value.trim() ? 1 : 0.5 }}
+            >
+              {locale === "en" ? "Start with this" : "이 값으로 실행"}
+            </button>
+            <button className="titlebar-nodrag" onClick={() => setInputPrompt(null)} style={pillBtn(false)}>
+              {locale === "en" ? "Cancel" : "취소"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {/* 위 카드는 **사람이 누를 버튼이 있는 실패**만 띄운다(승인·판정 교정·의존성 수리).
+          사유·경과 같은 정보성 실패는 하단 로그 패널이 전담한다 — 같은 실패가 위아래
+          두 곳에 뜨면 어느 쪽이 진짜 행동 지점인지 알 수 없다(오너 지시 2026-08-06:
+          "아래 만들었으면 위에 저거 없애야지"). */}
+      {/* ★편집 중에는 실행 결정 카드를 이 탭에서 비운다. 지금 여기 있는 이유는
+          "노드를 놓거나 고치려고"이고, 팔레트·노드 설정이 그 카드에 밀려 화면 밖으로
+          내려가면 [노드 추가]를 눌러도 아무것도 안 나온 것처럼 보인다(실렌더 2026-08-09).
+          결정은 사라지지 않는다 — 탭 배지와 상단 상태줄이 계속 부르고, 편집을 끝내면
+          그 자리에 그대로 있다. */}
+      {(editing ? [] : Object.entries(nodeFailures)).map(([failedNodeId, failure]) => {
+        const nodeLabel = rfNodes.find((n) => n.id === failedNodeId)?.data?.label ?? failedNodeId;
+        const awaitingApproval = failure.code === "APPROVAL_REQUIRED";
+        const evalStuck = failure.code === "EVAL_STUCK";
+        // ★코드가 쓰는 파이썬 패키지를 준비 못 한 실패. 사람에게 pip 이름을 묻는 것은
+        //   답이 아니다 — 코드를 지은 것은 AI이고, 사용자는 `PIL`의 pip 이름이
+        //   `Pillow`라는 걸 알 이유가 없다(실측: PIL·sklearn 둘 다 죽었다).
+        const depMissing = failure.code === "CODE_DEPENDENCY_MISSING";
+        // 버튼 없는 실패는 카드가 아니라 로그 줄이다.
+        if (!awaitingApproval && !evalStuck && !depMissing) return null;
+        return (
+          <div
+            key={failedNodeId}
+            className="titlebar-nodrag"
+            data-testid={`node-failure-${failedNodeId}`}
+            style={{
+              
+              padding: "12px 14px",
+              borderRadius: "var(--radius-md)",
+              border: `1px solid ${awaitingApproval ? "var(--accent-soft)" : "var(--paper-edge)"}`,
+              background: "var(--paper)",
+              fontSize: 12,
+              color: "var(--ink)",
+              display: "grid",
+              gap: 8,
+            }}
+          >
+            <div style={{ fontWeight: 600 }}>{String(nodeLabel)}</div>
+            <div style={{ color: "var(--ink-soft)", lineHeight: 1.6 }}>{failure.reason}</div>
+            <div style={{ color: "var(--muted-deep)", lineHeight: 1.6 }}>{failure.nextAction}</div>
+            {awaitingApproval ? (
+              <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
+                <button
+                  className="titlebar-nodrag"
+                  disabled={approvalBusy}
+                  onClick={() => void decideApproval(failedNodeId, "approved")}
+                  style={actionBtn}
+                >
+                  {t("auto.flow.approve_and_continue")}
+                </button>
+                {/* ★한 번 믿기로 한 단계는 매번 묻지 않는다. 이 결정은 그래프가 아니라
+                    승인 기록에 남는다 — 그래프를 바꾸면 digest가 달라져 지금 멈춰 있는
+                    바로 그 실행의 재개가 거부되기 때문이다. */}
+                <button
+                  className="titlebar-nodrag"
+                  disabled={approvalBusy}
+                  onClick={() => void decideApproval(failedNodeId, "always")}
+                  style={pillBtn(false)}
+                  title={t("auto.flow.approve_always_hint")}
+                >
+                  {t("auto.flow.approve_always")}
+                </button>
+                <button
+                  className="titlebar-nodrag"
+                  disabled={approvalBusy}
+                  onClick={() => void decideApproval(failedNodeId, "rejected")}
+                  style={pillBtn(false)}
+                >
+                  {t("auto.flow.approve_reject")}
+                </button>
+              </div>
+            ) : null}
+            {/* ★"기준이 틀렸을 수도"의 두 갈래: 채점표를 고치거나(캔버스에서),
+                판정이 틀렸다고 교정한다. 교정은 그 노드의 이후 판정에 few-shot으로
+                주입된다 — 사람의 채점 감각이 그래프에 쌓이는 자리(5건이면 유의미). */}
+            {depMissing ? (
+              <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
+                <button
+                  className="titlebar-nodrag"
+                  data-testid="fix-dependency"
+                  disabled={architectBusy}
+                  onClick={() => {
+                    // 그 단계 하나만 고치는 지시로 architect에 보낸다. 제안은 사람이 승인한다.
+                    const scoped = locale === "en"
+                      ? `The step "${nodeLabel}" (node id ${failedNodeId}) fails because a Python package it imports is not installed. Add the correct pip package name(s) to that step's packages field — the pip name often differs from the import name. Change nothing else.`
+                      : `"${nodeLabel}" 단계(노드 id ${failedNodeId})가 쓰는 파이썬 패키지를 준비하지 못해 실패합니다. 그 단계의 packages에 올바른 pip 이름을 넣어 주세요 — pip 이름은 import 이름과 다를 때가 많습니다. 다른 것은 바꾸지 마세요.`;
+                    setArchitectDraft(scoped);
+                    void requestGraphChangeWith(scoped);
+                  }}
+                  style={pillBtn(true)}
+                >
+                  {architectBusy
+                    ? (locale === "en" ? "Working…" : "고치는 중…")
+                    : (locale === "en" ? "Have AI fix it" : "AI가 고치게 하기")}
+                </button>
+              </div>
+            ) : null}
+
+            {evalStuck ? (
+              <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
+                <button
+                  className="titlebar-nodrag"
+                  onClick={() => {
+                    void (async () => {
+                      const api = ipc();
+                      if (!api || !automation) return;
+                      await api.automations.recordEvalCorrection(automation.id, failedNodeId, "pass");
+                      setMessage(locale === "en"
+                        ? "Recorded. Future judgments on this step will learn from this ruling."
+                        : "기록했습니다. 이 단계의 다음 판정부터 이 교정을 배웁니다.");
+                    })();
+                  }}
+                  style={pillBtn(false)}
+                >
+                  {t("auto.flow.eval_correct_pass")}
+                </button>
+              </div>
+            ) : null}
+            {/* 기계 코드는 사용자가 읽을 문장이 아니다. 지원에 붙여 넣을 때만 필요하므로
+                기본은 접어 두고, 사유·행동이 카드의 주인공이 되게 한다. */}
+            <details style={{ marginTop: 2 }}>
+              <summary
+                className="titlebar-nodrag"
+                style={{ fontSize: 11, color: "var(--muted-deep)", cursor: "pointer", listStyle: "none" }}
+              >
+                {locale === "en" ? "Technical detail" : "기술 정보"}
+              </summary>
+              <div style={{ fontSize: 10, color: "var(--muted-deep)", fontFamily: "var(--font-mono)", marginTop: 4 }}>
+                {failure.code}
+              </div>
+            </details>
+          </div>
+        );
+      })}
+              </div>
+  );
+
   const inspectorContent = (
     <>
-          {/* ★탭 이름이 이미 "상세"인데 그 안에서 또 "상세 ⟩"라는 머리줄이 나오던 자리.
-              같은 말을 두 번 하고, 접기 화살표는 이제 존재하지 않는 오른쪽 열을 접으려
-              했다(실렌더 2026-08-09). 탭이 제목이자 접기다 — 이 줄은 지운다. */}
+          <div className="automation-inspector-bar">
+            <span>{locale === "en" ? "Details" : "상세"}</span>
+            <button
+              type="button"
+              onClick={() => setRightOpen(false)}
+              aria-label={locale === "en" ? "Collapse details" : "상세 패널 접기"}
+              title={locale === "en" ? "Collapse details" : "상세 패널 접기"}
+            >
+              ⟩
+            </button>
+          </div>
+          {/* 결정이 필요한 것이 있으면 이 열의 맨 위에 온다 — 노드 설정보다 먼저 읽혀야 한다. */}
+          {decisionCards}
           {editing && paletteOpen ? (
             <NodePalette onAdd={addPaletteNode} onClose={() => setPaletteOpen(false)} />
           ) : editing && selectedEdge ? (
@@ -1161,7 +1428,13 @@ function AutomationFlowPage() {
           ) : (
             <div className="automation-node-empty" data-one-content-slot />
           )}
-          <RunHistoryPanel automation={automation} locale={locale} compact />
+          {/* 캔버스가 이미 그 승인 카드를 그리고 있으면 이 패널은 같은 결정을 또 내놓지 않는다. */}
+          <RunHistoryPanel
+            automation={automation}
+            locale={locale}
+            compact
+            approvalShownByCanvas={!editing && pausedApproval !== null}
+          />
         </>
   );
 
@@ -1363,8 +1636,8 @@ return (
                   : `실행 중${runningNodeLabel ? ` — ${runningNodeLabel}` : ""} · ${totalNodes}단계 중 ${doneNodes}단계 완료`)
                 : stopped
                   ? (locale === "en"
-                    ? `Stopped · ${doneNodes}/${totalNodes} done. What stopped it is in Details.`
-                    : `멈춰 있습니다 · ${totalNodes}단계 중 ${doneNodes}단계 완료. 무엇 때문인지는 [상세]에 있습니다.`)
+                    ? `Stopped · ${doneNodes}/${totalNodes} done. What stopped it is in Details on the right.`
+                    : `멈춰 있습니다 · ${totalNodes}단계 중 ${doneNodes}단계 완료. 무엇 때문인지는 오른쪽 [상세]에 있습니다.`)
                   : runStartedAt
                     // ★"안 돌고 있다"만 말하면 사용자는 "그래서 지난번엔 어떻게 됐는데?"를
                     //   또 찾아 헤맨다(평가의 간극). 마지막 실행 결과를 여기서 끝낸다.
@@ -1393,7 +1666,7 @@ return (
               type="button"
               data-testid="status-open-details"
               className="automation-run-status-action"
-              onClick={() => { setLogOpen(true); setBottomTab("details"); }}
+              onClick={() => setRightOpen(true)}
             >
               {locale === "en" ? "Open Details" : "상세 열기"}
             </button>
@@ -1615,7 +1888,6 @@ return (
                 {([
                   { id: "session" as const, label: locale === "en" ? "Chat" : "대화", badge: 0 },
                   { id: "log" as const, label: locale === "en" ? "Log" : "로그", badge: errorCount + warnCount },
-                  { id: "details" as const, label: locale === "en" ? "Details" : "상세", badge: decisionCount },
                 ]).map((tab) => (
                   <button
                     key={tab.id}
@@ -1629,7 +1901,7 @@ return (
                     }}
                   >
                     {tab.label}
-                    {tab.badge > 0 ? <em data-urgent={tab.id === "details" ? "true" : undefined}>{tab.badge}</em> : null}
+                    {tab.badge > 0 ? <em>{tab.badge}</em> : null}
                   </button>
                 ))}
                 {/* 상태 문구는 여기(터미널 상태줄) — 떠 있는 카드로 캔버스를 가리지 않는다. */}
@@ -1648,7 +1920,7 @@ return (
               {logOpen && bottomTab === "log" ? (
                 <ul className="automation-issue-log-list">
                   {logRows.map((iss, i) => (
-                    <li key={i} data-severity={iss.severity}>
+                    <li key={`iss-${i}`} data-severity={iss.severity}>
                       {/* 줄을 누르면 그 노드가 선택된다 — 어디 문제인지 찾아 헤매지 않게. */}
                       <button
                         type="button"
@@ -1659,206 +1931,40 @@ return (
                       </button>
                     </li>
                   ))}
+                  {/* ★실제 진행 — 커널이 보내는 사실을 시간순으로 다 적는다.
+                      시각은 tabular-nums 로 자리를 고정한다(줄마다 흔들리면 못 읽는다). */}
+                  {activity.map((row, i) => {
+                    const prev = i > 0 ? activity[i - 1] : null;
+                    const gap = prev ? row.at - prev.at : 0;
+                    return (
+                      <li key={`act-${row.id}`} className="automation-activity-row" data-tone={row.tone}>
+                        <button
+                          type="button"
+                          onClick={() => { if (row.nodeId) { setSelectedNodeId(row.nodeId); setSelectedEdgeId(null); } }}
+                        >
+                          {/* ko-KR 의 toLocaleTimeString 은 hour12:false 여도 "8시 47분 55초"를 낸다 —
+                              로그는 훑는 것이라 자릿수가 고정된 HH:MM:SS 여야 한다. */}
+                          <time>{new Date(row.at).toTimeString().slice(0, 8)}</time>
+                          <b>{row.label}</b>
+                          <span>{row.text}</span>
+                          {gap >= 1000 ? <i>+{(gap / 1000).toFixed(1)}s</i> : null}
+                        </button>
+                      </li>
+                    );
+                  })}
+                  {activity.length === 0 && logRows.length === 0 ? (
+                    <li className="automation-activity-empty">
+                      {locale === "en"
+                        ? "Nothing has run yet. Each step, tool call and stop is written here as it happens."
+                        : "아직 돌린 것이 없습니다. 실행하면 단계·도구 호출·멈춘 지점이 일어나는 대로 여기에 적힙니다."}
+                    </li>
+                  ) : null}
                 </ul>
               ) : null}
               {/* ★행동이 필요한 카드(시작 값·승인·판정 교정·의존성 수리)는 전부 이 패널 안에서
                   해결한다(오너 지시 2026-08-08: 플로팅 금지, 바텀시트 하나로). */}
               {/* 결정이 필요한 실패(승인 대기 등)와 인스펙터는 같은 탭에 산다 —
                   "확인이 필요한 것"이 한 자리에 있어야 사람이 헤매지 않는다. */}
-              <div
-                style={{
-                  padding: "8px 10px",
-                  display: logOpen && bottomTab === "details" ? "grid" : "none",
-                  gap: 8,
-                  overflowY: "auto",
-                }}
-              >
-      {/* 시작 값을 받아야 하는 그래프. 값을 받고 나서 실행한다 —
-          묻지 않고 시작하면 빈 값으로 도는 것을 사용자가 결과에서야 알게 된다. */}
-      {inputPrompt ? (
-        <div
-          data-testid="graph-input-prompt"
-          style={{
-            
-            padding: "12px 14px", borderRadius: 12,
-            border: "1px solid var(--line)", background: "var(--paper)",
-            display: "flex", flexDirection: "column", gap: 8,
-          }}
-        >
-          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink)" }}>{inputPrompt.label}</div>
-          <input
-            data-testid="graph-input-value"
-            autoFocus
-            value={inputPrompt.value}
-            placeholder={locale === "en" ? "Type the value this run starts from" : "이번 실행이 시작할 값을 입력하세요"}
-            onChange={(e) => setInputPrompt({ ...inputPrompt, value: e.target.value })}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && inputPrompt.value.trim()) void runNow(false, inputPrompt.value.trim());
-              if (e.key === "Escape") setInputPrompt(null);
-            }}
-            className="titlebar-nodrag"
-            style={{
-              padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)",
-              background: "var(--paper-2)", color: "var(--ink)", fontSize: 13, outline: "none",
-            }}
-          />
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              data-testid="graph-input-start"
-              className="titlebar-nodrag"
-              disabled={running || !inputPrompt.value.trim()}
-              onClick={() => void runNow(false, inputPrompt.value.trim())}
-              style={{ ...actionBtn, opacity: inputPrompt.value.trim() ? 1 : 0.5 }}
-            >
-              {locale === "en" ? "Start with this" : "이 값으로 실행"}
-            </button>
-            <button className="titlebar-nodrag" onClick={() => setInputPrompt(null)} style={pillBtn(false)}>
-              {locale === "en" ? "Cancel" : "취소"}
-            </button>
-          </div>
-        </div>
-      ) : null}
-
-      {/* 위 카드는 **사람이 누를 버튼이 있는 실패**만 띄운다(승인·판정 교정·의존성 수리).
-          사유·경과 같은 정보성 실패는 하단 로그 패널이 전담한다 — 같은 실패가 위아래
-          두 곳에 뜨면 어느 쪽이 진짜 행동 지점인지 알 수 없다(오너 지시 2026-08-06:
-          "아래 만들었으면 위에 저거 없애야지"). */}
-      {/* ★편집 중에는 실행 결정 카드를 이 탭에서 비운다. 지금 여기 있는 이유는
-          "노드를 놓거나 고치려고"이고, 팔레트·노드 설정이 그 카드에 밀려 화면 밖으로
-          내려가면 [노드 추가]를 눌러도 아무것도 안 나온 것처럼 보인다(실렌더 2026-08-09).
-          결정은 사라지지 않는다 — 탭 배지와 상단 상태줄이 계속 부르고, 편집을 끝내면
-          그 자리에 그대로 있다. */}
-      {(editing ? [] : Object.entries(nodeFailures)).map(([failedNodeId, failure]) => {
-        const nodeLabel = rfNodes.find((n) => n.id === failedNodeId)?.data?.label ?? failedNodeId;
-        const awaitingApproval = failure.code === "APPROVAL_REQUIRED";
-        const evalStuck = failure.code === "EVAL_STUCK";
-        // ★코드가 쓰는 파이썬 패키지를 준비 못 한 실패. 사람에게 pip 이름을 묻는 것은
-        //   답이 아니다 — 코드를 지은 것은 AI이고, 사용자는 `PIL`의 pip 이름이
-        //   `Pillow`라는 걸 알 이유가 없다(실측: PIL·sklearn 둘 다 죽었다).
-        const depMissing = failure.code === "CODE_DEPENDENCY_MISSING";
-        // 버튼 없는 실패는 카드가 아니라 로그 줄이다.
-        if (!awaitingApproval && !evalStuck && !depMissing) return null;
-        return (
-          <div
-            key={failedNodeId}
-            className="titlebar-nodrag"
-            data-testid={`node-failure-${failedNodeId}`}
-            style={{
-              
-              padding: "12px 14px",
-              borderRadius: "var(--radius-md)",
-              border: `1px solid ${awaitingApproval ? "var(--accent-soft)" : "var(--paper-edge)"}`,
-              background: "var(--paper)",
-              fontSize: 12,
-              color: "var(--ink)",
-              display: "grid",
-              gap: 8,
-            }}
-          >
-            <div style={{ fontWeight: 600 }}>{String(nodeLabel)}</div>
-            <div style={{ color: "var(--ink-soft)", lineHeight: 1.6 }}>{failure.reason}</div>
-            <div style={{ color: "var(--muted-deep)", lineHeight: 1.6 }}>{failure.nextAction}</div>
-            {awaitingApproval ? (
-              <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
-                <button
-                  className="titlebar-nodrag"
-                  disabled={approvalBusy}
-                  onClick={() => void decideApproval(failedNodeId, "approved")}
-                  style={actionBtn}
-                >
-                  {t("auto.flow.approve_and_continue")}
-                </button>
-                {/* ★한 번 믿기로 한 단계는 매번 묻지 않는다. 이 결정은 그래프가 아니라
-                    승인 기록에 남는다 — 그래프를 바꾸면 digest가 달라져 지금 멈춰 있는
-                    바로 그 실행의 재개가 거부되기 때문이다. */}
-                <button
-                  className="titlebar-nodrag"
-                  disabled={approvalBusy}
-                  onClick={() => void decideApproval(failedNodeId, "always")}
-                  style={pillBtn(false)}
-                  title={t("auto.flow.approve_always_hint")}
-                >
-                  {t("auto.flow.approve_always")}
-                </button>
-                <button
-                  className="titlebar-nodrag"
-                  disabled={approvalBusy}
-                  onClick={() => void decideApproval(failedNodeId, "rejected")}
-                  style={pillBtn(false)}
-                >
-                  {t("auto.flow.approve_reject")}
-                </button>
-              </div>
-            ) : null}
-            {/* ★"기준이 틀렸을 수도"의 두 갈래: 채점표를 고치거나(캔버스에서),
-                판정이 틀렸다고 교정한다. 교정은 그 노드의 이후 판정에 few-shot으로
-                주입된다 — 사람의 채점 감각이 그래프에 쌓이는 자리(5건이면 유의미). */}
-            {depMissing ? (
-              <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
-                <button
-                  className="titlebar-nodrag"
-                  data-testid="fix-dependency"
-                  disabled={architectBusy}
-                  onClick={() => {
-                    // 그 단계 하나만 고치는 지시로 architect에 보낸다. 제안은 사람이 승인한다.
-                    const scoped = locale === "en"
-                      ? `The step "${nodeLabel}" (node id ${failedNodeId}) fails because a Python package it imports is not installed. Add the correct pip package name(s) to that step's packages field — the pip name often differs from the import name. Change nothing else.`
-                      : `"${nodeLabel}" 단계(노드 id ${failedNodeId})가 쓰는 파이썬 패키지를 준비하지 못해 실패합니다. 그 단계의 packages에 올바른 pip 이름을 넣어 주세요 — pip 이름은 import 이름과 다를 때가 많습니다. 다른 것은 바꾸지 마세요.`;
-                    setArchitectDraft(scoped);
-                    void requestGraphChangeWith(scoped);
-                  }}
-                  style={pillBtn(true)}
-                >
-                  {architectBusy
-                    ? (locale === "en" ? "Working…" : "고치는 중…")
-                    : (locale === "en" ? "Have AI fix it" : "AI가 고치게 하기")}
-                </button>
-              </div>
-            ) : null}
-
-            {evalStuck ? (
-              <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
-                <button
-                  className="titlebar-nodrag"
-                  onClick={() => {
-                    void (async () => {
-                      const api = ipc();
-                      if (!api || !automation) return;
-                      await api.automations.recordEvalCorrection(automation.id, failedNodeId, "pass");
-                      setMessage(locale === "en"
-                        ? "Recorded. Future judgments on this step will learn from this ruling."
-                        : "기록했습니다. 이 단계의 다음 판정부터 이 교정을 배웁니다.");
-                    })();
-                  }}
-                  style={pillBtn(false)}
-                >
-                  {t("auto.flow.eval_correct_pass")}
-                </button>
-              </div>
-            ) : null}
-            {/* 기계 코드는 사용자가 읽을 문장이 아니다. 지원에 붙여 넣을 때만 필요하므로
-                기본은 접어 두고, 사유·행동이 카드의 주인공이 되게 한다. */}
-            <details style={{ marginTop: 2 }}>
-              <summary
-                className="titlebar-nodrag"
-                style={{ fontSize: 11, color: "var(--muted-deep)", cursor: "pointer", listStyle: "none" }}
-              >
-                {locale === "en" ? "Technical detail" : "기술 정보"}
-              </summary>
-              <div style={{ fontSize: 10, color: "var(--muted-deep)", fontFamily: "var(--font-mono)", marginTop: 4 }}>
-                {failure.code}
-              </div>
-            </details>
-          </div>
-        );
-      })}
-              </div>
-              {/* 인스펙터(노드 상세·실행 기록·확인 필요)도 같은 상세 탭에 산다. */}
-              {logOpen && bottomTab === "details" ? (
-                <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 10px 10px" }}>
-                  {inspectorContent}
-                </div>
-              ) : null}
               {/* ★세션 대화 스트림 — 별도 열이 아니라 이 패널 안에서 흐른다.
                   실행 기록·질문 카드·어시스턴트 응답이 로그와 같은 자리에서 이어진다. */}
               {!editing ? (
@@ -2003,6 +2109,28 @@ return (
             </div>
           ) : null}
         </div>
+
+        {/* ★상세(인스펙터)는 오른쪽 열이다 — 오너 지시(2026-08-09):
+            "탭은 로그·대화만 두고 상세는 기존처럼 오른쪽 사이드바를 써야지".
+            캔버스를 보면서 결정해야 하는 것(승인·시작 값·노드 설정)은 캔버스 **옆**에,
+            시간순으로 쌓이는 것(로그·대화)은 캔버스 **아래**에. */}
+        {rightOpen ? (
+          <aside className="automation-inspector-column titlebar-nodrag" data-testid="inspector-column">
+            {inspectorContent}
+          </aside>
+        ) : (
+          <button
+            type="button"
+            className="automation-inspector-reopen titlebar-nodrag"
+            data-testid="inspector-reopen"
+            onClick={() => setRightOpen(true)}
+            title={locale === "en" ? "Show details" : "상세 열기"}
+          >
+            {decisionCount > 0 ? <em>{decisionCount}</em> : null}
+            <span aria-hidden="true">⟨</span>
+            <span className="automation-inspector-reopen-label">{locale === "en" ? "Details" : "상세"}</span>
+          </button>
+        )}
 
 
       </div>
