@@ -16,6 +16,7 @@ const { detectRuntimeLabels, importLocalFolder } = require("../dist/electron/age
 const { readAgentFile, writeAgentFile } = require("../dist/electron/agents/files.js");
 const { listRoutes, setRoute, reconcileLocalRouteDefinitionHashes } = require("../dist/electron/agents/routes.js");
 const { getFirmBySlug, listFirms } = require("../dist/electron/store/firms.js");
+const { getResolvedOrg, resolveFromOrgChart } = require("../dist/electron/store/org-spec.js");
 
 function writeFile(filePath, body) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -131,14 +132,30 @@ function writeFile(filePath, body) {
       path.join(blueprintTeamRoot, "agents", "00-orchestrator", "agent.md"),
       "BLUEPRINT-ORCHESTRATOR-BODY: run the room.\n",
     );
+    writeFile(path.join(blueprintTeamRoot, "agents", "10-research-hq", "agent.md"), "Lead research.\n");
     writeFile(path.join(blueprintTeamRoot, "agents", "20-analyst", "agent.md"), "Analyze.\n");
     writeFile(path.join(blueprintTeamRoot, ".agentlas", "company-blueprint.json"), JSON.stringify({
       topology: "hub-and-spoke",
       orchestrator: "00-orchestrator",
       nodes: [
         { id: "00-orchestrator", path: "agents/00-orchestrator/agent.md" },
-        { id: "20-analyst", path: "agents/20-analyst/agent.md" },
+        { id: "10-research-hq", role: "Research HQ", path: "agents/10-research-hq/agent.md", reportsTo: "00-orchestrator" },
+        { id: "20-analyst", role: "Analyst", path: "agents/20-analyst/agent.md", reportsTo: "10-research-hq" },
       ],
+      divisions: [{
+        id: "10-research-hq",
+        name: "Research HQ",
+        role: "Research HQ",
+        reportsTo: "00-orchestrator",
+        agent: "agents/10-research-hq/agent.md",
+        agents: [{
+          id: "20-analyst",
+          name: "Analyst",
+          role: "Analyst",
+          reportsTo: "10-research-hq",
+          agent: "agents/20-analyst/agent.md",
+        }],
+      }],
     }, null, 2));
     const blueprintTeam = await importLocalFolder(blueprintTeamRoot);
     const blueprintPrompt = getDb()
@@ -148,6 +165,20 @@ function writeFile(filePath, body) {
       blueprintPrompt.includes("BLUEPRINT-ORCHESTRATOR-BODY"),
       "the manager declared in company-blueprint.json must become the team brain",
     );
+    const blueprintFirm = getFirmBySlug(`firm-${blueprintTeam.agent.slug}`);
+    assert.ok(blueprintFirm, "a hierarchy blueprint must register a firm");
+    assert.equal(blueprintFirm.orgChart.length, 3, "the imported chart must be CEO -> HQ -> specialist");
+    assert.ok(blueprintFirm.orgChart.every((node) => node.agentId), "every hierarchy node must bind a real installed agent");
+    const chartOrg = resolveFromOrgChart(blueprintFirm);
+    assert.equal(chartOrg.divisions.length, 1);
+    assert.equal(chartOrg.divisions[0].specialists.length, 1);
+    assert.ok(chartOrg.divisions[0].agentId, "HQ render data must carry its installed agent id");
+    assert.ok(chartOrg.divisions[0].specialists[0].agentId, "specialist render data must carry its installed agent id");
+    const savedOrg = getResolvedOrg(blueprintFirm);
+    assert.equal(savedOrg.divisions.length, 1);
+    assert.equal(savedOrg.divisions[0].specialists.length, 1);
+    assert.equal(savedOrg.divisions[0].agentId, chartOrg.divisions[0].agentId);
+    assert.equal(savedOrg.divisions[0].specialists[0].agentId, chartOrg.divisions[0].specialists[0].agentId);
 
     const localizedRoot = path.join(tempDir, "localized-agent");
     writeFile(path.join(localizedRoot, "AGENTS.md"), "# 증거 분석가\n\n증거를 분석합니다.\n");
@@ -203,6 +234,16 @@ function writeFile(filePath, body) {
     assert.ok(listRoutes().some((route) => route.agentId === team.agent.id && route.path === teamRoot && route.kind === "team"));
     const teamFirms = listFirms();
     assert.ok(teamFirms.some((firm) => firm.slug === `firm-${team.agent.slug}` && firm.ceoAgentId === team.agent.id));
+    const flatFirm = getFirmBySlug(`firm-${team.agent.slug}`);
+    assert.ok(flatFirm);
+    const flatCeo = flatFirm.orgChart.find((node) => node.reportsTo === null);
+    const flatMembers = flatFirm.orgChart.filter((node) => node.reportsTo === flatCeo.agentSlug);
+    assert.equal(flatMembers.length, 2, "a blueprint without hierarchy must keep its genuine flat shape");
+    assert.equal(
+      flatFirm.orgChart.some((node) => flatMembers.some((member) => node.reportsTo === member.agentSlug)),
+      false,
+      "flat fallback must not invent HQ nesting",
+    );
 
     const concurrentRoot = path.join(tempDir, "concurrent-agent");
     writeFile(path.join(concurrentRoot, "AGENT.md"), "# Concurrent Agent\n\nSingle-flight import proof.\n");

@@ -12,13 +12,14 @@ import { emitDesktopStoreChange } from "../store/change-bus";
 import { removeRoute, replaceRoute, listRoutes, type RuntimeLabel } from "./routes";
 import { getFirmBySlug, upsertLocalTeamFirm } from "../store/firms";
 import { scanAgentFolder, type FolderScan, type ScanMember } from "./folder-scan";
-import { clearResolvedOrg, saveResolvedOrg } from "../store/org-spec";
+import { bindResolvedOrgAgentIds, clearResolvedOrg, saveResolvedOrg } from "../store/org-spec";
 import { detectEnvRequirementsFromFolder } from "./env-detect";
 import type {
   CloudAgentLocalizedListing,
   FirmOrgNode,
   InstalledAgent,
   InstalledFirm,
+  ResolvedDivision,
   ResolvedOrg,
 } from "../../shared/types";
 import { currentUiLocale } from "../ui-locale";
@@ -327,6 +328,80 @@ function declaredTeamManagerPaths(dir: string): string[] {
     }
   }
   return candidates;
+}
+
+type BlueprintRow = Record<string, unknown>;
+
+/** Read only explicit blueprint hierarchy. Missing hierarchy deliberately returns null for flat fallback. */
+function readCompanyBlueprintHierarchy(dir: string): ResolvedOrg["divisions"] | null {
+  let blueprint: BlueprintRow;
+  try {
+    const parsed: unknown = JSON.parse(
+      fs.readFileSync(path.join(dir, ".agentlas", "company-blueprint.json"), "utf8"),
+    );
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    blueprint = parsed as BlueprintRow;
+  } catch {
+    return null;
+  }
+
+  const rows = Array.isArray(blueprint.nodes)
+    ? blueprint.nodes.filter((node): node is BlueprintRow => Boolean(node) && typeof node === "object" && !Array.isArray(node))
+    : [];
+  const byId = new Map(
+    rows
+      .map((node) => [typeof node.id === "string" ? node.id.trim() : "", node] as const)
+      .filter(([id]) => Boolean(id)),
+  );
+  const orchestrator = typeof blueprint.orchestrator === "string" ? blueprint.orchestrator.trim() : "";
+  const text = (value: unknown): string => typeof value === "string" ? value.trim() : "";
+  const blueprintSlug = (value: string): string =>
+    value.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "node";
+  const rowFor = (value: unknown): BlueprintRow | null => {
+    if (typeof value === "string") return byId.get(value.trim()) ?? { id: value.trim() };
+    return value && typeof value === "object" && !Array.isArray(value) ? value as BlueprintRow : null;
+  };
+  const promptRef = (row: BlueprintRow): string | undefined =>
+    [row.promptFileRef, row.agent, row.path, row.file].map(text).find(Boolean) || undefined;
+  const nodeFrom = (row: BlueprintRow, fallbackRole: string): Omit<ResolvedDivision, "specialists"> => {
+    const id = text(row.id) || blueprintSlug(text(row.name) || text(row.role) || fallbackRole);
+    const role = text(row.role) || text(row.name) || fallbackRole;
+    const name = text(row.name) || role;
+    const ref = promptRef(row);
+    return {
+      id,
+      name,
+      role,
+      ...(ref ? {
+        promptFileRef: ref,
+        prompt: readFirst(dir, [ref], 8000) || undefined,
+      } : {}),
+    };
+  };
+  const specialistsFor = (division: BlueprintRow): ResolvedDivision["specialists"] => {
+    const nested = [division.agents, division.specialists, division.members]
+      .find((value) => Array.isArray(value));
+    const nestedRows = Array.isArray(nested)
+      ? nested.map(rowFor).filter((row): row is BlueprintRow => Boolean(row))
+      : [];
+    const divisionId = text(division.id);
+    const graphRows = divisionId ? rows.filter((row) => text(row.reportsTo) === divisionId) : [];
+    return (nestedRows.length > 0 ? nestedRows : graphRows)
+      .slice(0, 24)
+      .map((row) => nodeFrom({ ...byId.get(text(row.id)), ...row }, "Specialist"));
+  };
+
+  const declaredDivisions = Array.isArray(blueprint.divisions)
+    ? blueprint.divisions.map(rowFor).filter((row): row is BlueprintRow => Boolean(row))
+    : [];
+  const graphDivisions = orchestrator ? rows.filter((row) => text(row.reportsTo) === orchestrator) : [];
+  const divisions = (declaredDivisions.length > 0 ? declaredDivisions : graphDivisions)
+    .slice(0, 24)
+    .map((row) => ({
+      ...nodeFrom({ ...byId.get(text(row.id)), ...row }, "Division"),
+      specialists: specialistsFor(row),
+    }));
+  return divisions.length > 0 ? divisions : null;
 }
 
 /**
@@ -768,10 +843,8 @@ async function importLocalFolderOnce(
       // 팀이면 대표 agent + firm + resolved org가 하나의 SQLite commit이다. 어느 한
       // 단계라도 실패하면 "조직도에 추가됨" 성공 영수증을 만들지 않는다.
       if (kind === "team") {
-        const registeredFirm = registerTeamAsFirm(dir, id, slug, name, tagline, undefined, scan.members);
-        if (!registeredFirm) throw new Error(ko ? "팀 조직도를 등록하지 못했습니다." : "Could not register the team org chart.");
-        firmId = registeredFirm.id;
-        const divisions: ResolvedOrg["divisions"] = scan.members.map((m) => ({
+        const blueprintDivisions = readCompanyBlueprintHierarchy(dir);
+        const sourceDivisions: ResolvedOrg["divisions"] = blueprintDivisions ?? scan.members.map((m) => ({
           id: m.id,
           name: m.name,
           role: m.role,
@@ -779,6 +852,18 @@ async function importLocalFolderOnce(
           promptFileRef: m.promptFileRef,
           specialists: [],
         }));
+        const registeredFirm = registerTeamAsFirm(
+          dir,
+          id,
+          slug,
+          name,
+          tagline,
+          blueprintDivisions ?? undefined,
+          scan.members,
+        );
+        if (!registeredFirm) throw new Error(ko ? "팀 조직도를 등록하지 못했습니다." : "Could not register the team org chart.");
+        firmId = registeredFirm.id;
+        const divisions = bindResolvedOrgAgentIds(registeredFirm, sourceDivisions);
         if (divisions.length > 0) {
           const org: ResolvedOrg = {
             source: "resolver",

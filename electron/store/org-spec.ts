@@ -48,6 +48,68 @@ export function resolveFromOrgChart(firm: InstalledFirm): ResolvedOrg {
   return { source: "orgchart", ceo, divisions };
 }
 
+// Identity for matching resolver/blueprint nodes to installed-agent cells.
+// MUST be script-agnostic: `[^a-z0-9]` erased every Korean role/name/id to "" so
+// Korean teams (the majority) collapsed to empty keys and mis-bound. `\p{L}\p{N}`
+// keeps letters+digits across scripts and drops only separators/punctuation.
+const orgIdentity = (value: string | undefined): string =>
+  (value ?? "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+
+/** Bind resolver/blueprint nodes to the installed-agent cells committed with the firm. */
+export function bindResolvedOrgAgentIds(
+  firm: InstalledFirm,
+  divisions: ResolvedDivision[],
+): ResolvedDivision[] {
+  const ceo = firm.orgChart.find((node) => node.reportsTo === null) ?? firm.orgChart[0];
+  if (!ceo) return divisions;
+
+  const claimed = new Set<string>();
+  const match = (
+    node: ResolvedNode,
+    candidates: typeof firm.orgChart,
+  ): (typeof firm.orgChart)[number] | undefined => {
+    const id = orgIdentity(node.id);
+    const role = orgIdentity(node.role);
+    const name = orgIdentity(node.name);
+    const ranked = candidates
+      .filter((candidate) => !claimed.has(candidate.agentSlug))
+      .map((candidate) => {
+        const slug = orgIdentity(candidate.agentSlug);
+        const candidateRole = orgIdentity(candidate.role);
+        let score = 0;
+        if (candidate.agentSlug === node.id) score = 100;
+        else if (id && slug.endsWith(id)) score = 90;
+        else if (role && candidateRole === role) score = 80;
+        else if (name && candidateRole === name) score = 70;
+        else if (role && slug.includes(role)) score = 60;
+        else if (name && slug.includes(name)) score = 50;
+        return { candidate, score };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score || a.candidate.agentSlug.localeCompare(b.candidate.agentSlug));
+    const selected = ranked[0]?.candidate;
+    if (selected) claimed.add(selected.agentSlug);
+    return selected;
+  };
+
+  const directReports = firm.orgChart.filter((node) => node.reportsTo === ceo.agentSlug);
+  return divisions.map((division) => {
+    const divisionRow = match(division, directReports);
+    const specialistRows = divisionRow
+      ? firm.orgChart.filter((node) => node.reportsTo === divisionRow.agentSlug)
+      : [];
+    const specialists = division.specialists.map((specialist) => {
+      const row = match(specialist, specialistRows);
+      return row?.agentId ? { ...specialist, agentId: row.agentId } : specialist;
+    });
+    return {
+      ...division,
+      ...(divisionRow?.agentId ? { agentId: divisionRow.agentId } : {}),
+      specialists,
+    };
+  });
+}
+
 /** 저장된 스펙(리졸버 산출물)이 있으면 그것을, 없으면 orgChart 파생을 반환. */
 export function getResolvedOrg(firm: InstalledFirm): ResolvedOrg {
   const raw = getMeta(key(firm.id));

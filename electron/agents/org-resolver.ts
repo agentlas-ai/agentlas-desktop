@@ -8,7 +8,7 @@ import path from "node:path";
 import type { AgentTeamResolution, ResolvedDivision, ResolvedNode, ResolvedOrg } from "../../shared/types";
 import { getFirm } from "../store/firms";
 import { getAgentById, setAgentEntityKind } from "../mcp/registry";
-import { saveResolvedOrg, getResolvedOrg } from "../store/org-spec";
+import { bindResolvedOrgAgentIds, saveResolvedOrg, getResolvedOrg } from "../store/org-spec";
 import { pickActiveRunner } from "../mcp/client";
 import { PROJECT_MEMORY_DIR } from "../architecture/manifest";
 import { getRoute } from "./routes";
@@ -220,13 +220,14 @@ export async function resolveTeamOrg(
     agentId: firm.ceoAgentId,
     prompt: ceoAgent.systemPrompt,
   };
-  const divisions: ResolvedDivision[] = rawDivisions.slice(0, 24).map((d) => {
+  const unresolvedDivisions: ResolvedDivision[] = rawDivisions.slice(0, 24).map((d) => {
     const o = (d && typeof d === "object" ? d : {}) as Raw;
     const specialists = Array.isArray(o.specialists)
       ? (o.specialists as unknown[]).slice(0, 24).map(toNode)
       : [];
     return { ...toNode(d), specialists };
   });
+  const divisions = bindResolvedOrgAgentIds(firm, unresolvedDivisions);
 
   const org: ResolvedOrg = {
     source: "resolver",
