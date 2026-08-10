@@ -63,7 +63,7 @@ export interface InterviewState {
  * 계속 부르면 사람은 아무 설명 없이 기다리기만 한다. 상한에 닿으면 **무엇을 시도했는지와
  * 함께** 멈춘다.
  */
-export const MAX_SELF_CORRECTIONS = 2;
+export const MAX_SELF_CORRECTIONS = 4;
 
 export function startInterview(request: string): InterviewState {
   return { request: request.trim(), answers: [], asked: [], round: 0, attempts: [] };
@@ -102,7 +102,7 @@ const RULES = [
   "",
   "Return ONLY compact JSON, one of these two shapes:",
   '  {"ask":[{"id":"<stable-id>","question":"...","why":"...","choices":["...","..."]}]}',
-  `  {"blueprint":{"schema":"${BLUEPRINT_SCHEMA}","name":"...","goal":"...","trigger":{...},"steps":[...],"branches":[...]}}`,
+  `  {"blueprint":{"schema":"${BLUEPRINT_SCHEMA}","name":"...","goal":"...","trigger":{...},"steps":[...],"branches":[...],"checks":[...]}}`,
   "",
   "trigger is either {\"kind\":\"cron\",\"schedule\":\"daily-08:00\"} (24h, or a 5-field cron string)",
   "or {\"kind\":\"input\",\"label\":\"<what to ask the person>\",\"varName\":\"<one word, a-z>\"}.",
@@ -222,8 +222,13 @@ export function buildInterviewPrompt(state: InterviewState, locale: "ko" | "en" 
     lines.push(
       "",
       "Your previous blueprint could NOT be built. Fix exactly these problems and return a",
-      "corrected blueprint. Do not repeat the same mistake, and do not ask the person about it —",
-      "these are format problems on your side, not missing information:",
+      "corrected blueprint. EVERY fix below is ADDITIVE: add the missing top-level checks[] entry",
+      "(each problem message gives you the exact entry to add). Keep EVERY step, the trigger, and",
+      "every produces/consumes exactly as they are — never delete, merge, or shrink a step to make",
+      "a problem disappear: that removes what the person asked for and just triggers a different",
+      "error. More steps and more checks is the right direction, never fewer. Do not repeat the",
+      "same mistake, and do not ask the person — these are format problems on your side,",
+      "not missing information:",
       ...attempts.flatMap((a) => a.problems.map((problem) => `  · ${problem}`)),
       "",
       // ★가장 위험한 '고치는 방법'을 미리 막는다. 검증 오류는 그 단계를 지우면 사라지지만,

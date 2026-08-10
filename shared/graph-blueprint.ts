@@ -428,12 +428,15 @@ export function validateBlueprint(
         const name = String(value ?? "").trim();
         if (!name || checkedSubjects.has(name)) continue;
         // 앞의 어떤 단계가 만들어 낸 값인가(사람이 넣은 시작 값은 검증 대상이 아니다).
-        const madeByAStep = steps.some((s, i) => i < index && s.produces?.trim() === name);
-        if (!madeByAStep) continue;
+        const madeAt = steps.findIndex((s, i) => i < index && s.produces?.trim() === name);
+        if (madeAt < 0) continue;
         push(
           `"${step.title || `${index + 1}번째 단계`}"는 바깥으로 나가는데, 그 앞에서 만든 `
-          + `"${name}" 값이 쓸 만한지 확인하는 단계가 없습니다. `
-          + `checks[]에 {"afterStep":<그 값을 만든 단계>,"subject":"${name}",…}를 넣어 주세요.`,
+          + `"${name}" 값이 쓸 만한지 확인하는 단계가 없습니다. 단계는 하나도 지우지 말고, `
+          + `top-level checks[]에 이 항목을 그대로 추가하세요: `
+          + `{"afterStep":${madeAt},"subject":"${name}","criteria":"${name}이(가) 비어있지 않고 요청대로 채워졌다",`
+          + `"produces":"${name}_ok","items":[{"text":"${name}이(가) 실제 내용으로 채워졌다","kind":"must"},`
+          + `{"text":"빈 값·자리표시자·지어낸 값이 아니다","kind":"mustNot"}]}`,
         );
       }
     });
