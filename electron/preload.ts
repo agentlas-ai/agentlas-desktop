@@ -497,6 +497,8 @@ const api: AgentlasIpc = {
     remove: (id: string) => ipcRenderer.invoke("chats:remove", id),
     setContinuousMode: (id: string, enabled: boolean) =>
       ipcRenderer.invoke("chats:setContinuousMode", id, enabled),
+    setGoalMode: (id: string, enabled: boolean) =>
+      ipcRenderer.invoke("chats:setGoalMode", id, enabled),
     setSwarmMode: (id: string, enabled: boolean) =>
       ipcRenderer.invoke("chats:setSwarmMode", id, enabled),
     setRuntimeSelection: (id: string, selection: RuntimeSelection | null) =>

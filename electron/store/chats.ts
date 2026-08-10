@@ -33,6 +33,7 @@ interface ChatRow {
   kind: string | null;
   continuous_mode: number | null;
   swarm_mode: number | null;
+  goal_id: string | null;
   origin_surface: string | null;
   runtime_selection_json: string | null;
 }
@@ -152,6 +153,7 @@ function toChat(row: ChatRow): Chat {
     kind: row.kind === "division" ? "division" : "user",
     continuousMode: row.continuous_mode === 1,
     swarmMode: row.swarm_mode === 1,
+    goalId: row.goal_id ?? null,
     originSurface: row.origin_surface === "one" ? "one" : "work",
     runtimeSelection: parseChatRuntimeSelection(row.runtime_selection_json),
   };
@@ -533,6 +535,35 @@ export function setChatContinuousMode(chatId: string, enabled: boolean): void {
     .prepare("UPDATE chats SET continuous_mode = ?, updated_at = ? WHERE id = ?")
     .run(enabled ? 1 : 0, new Date().toISOString(), chatId);
   emitDesktopStoreChange({ entity: "chat", id: chatId });
+}
+
+/** persistent goal 바인딩 — 칩 ON 시 goal_ledger 축(goal_id)을 이 채팅에 고정한다.
+ *  null = 목표 추진 꺼짐(명시적 종료 뒤). 한 번 켠 목표의 축은 대화가 Task로 승격돼도
+ *  변하지 않는다 — 파생 대신 저장이 축을 지킨다. */
+export function setChatGoalBinding(chatId: string, goalId: string | null): void {
+  getDb()
+    .prepare("UPDATE chats SET goal_id = ?, updated_at = ? WHERE id = ?")
+    .run(goalId, new Date().toISOString(), chatId);
+  emitDesktopStoreChange({ entity: "chat", id: chatId });
+}
+
+/** goal 축으로 바인딩 해제 — 목표가 완료/종료되면 그 goal_id를 문 채팅의 칩을
+ *  정직하게 끈다. 프롬프트 문자열 파싱 없이 축으로만 찾는다. */
+export function clearChatGoalBindingByGoalId(goalId: string): number {
+  if (!goalId.trim()) return 0;
+  const result = getDb()
+    .prepare("UPDATE chats SET goal_id = NULL WHERE goal_id = ?")
+    .run(goalId);
+  if (result.changes > 0) emitDesktopStoreChange({ entity: "chat" });
+  return result.changes;
+}
+
+/** 가벼운 goal 축 판독 — toChat(Task 재조정) 없이 goal_id만 읽는다(핫패스: 실행 루프). */
+export function getChatGoalId(chatId: string): string | null {
+  const row = getDb()
+    .prepare("SELECT goal_id AS gid FROM chats WHERE id = ?")
+    .get(chatId) as { gid: string | null } | undefined;
+  return row?.gid ?? null;
 }
 
 /** 스웜 모드 — 켜면 이 채팅이 목표를 작업 그래프로 분해해 여러 워커가 병렬 협업한다(runSwarmInvocation). */

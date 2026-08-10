@@ -52,6 +52,7 @@ interface AutomationRow {
   created_at: string;
   graph_json: string | null;
   goal: string | null;
+  goal_id: string | null;
   schedule_json: string | null;
   timezone: string | null;
   end_at: string | null;
@@ -206,6 +207,7 @@ function toAutomation(row: AutomationRow): Automation {
     nextRunAt: row.next_run_at,
     graph: parseGraph(row.graph_json),
     goal: row.goal ?? null,
+    goalId: row.goal_id ?? null,
     timezone: row.timezone,
     scheduleSpec: spec,
     triggerType,
@@ -242,6 +244,18 @@ export function listAutomations(): Automation[] {
 
 export function getAutomation(id: string): Automation | null {
   const row = getDb().prepare("SELECT * FROM automations WHERE id = ?").get(id) as AutomationRow | undefined;
+  return row ? toAutomation(row) : null;
+}
+
+/**
+ * persistent goal 축으로 연속실행 자동화를 찾는다 — 프롬프트 안 마커 문자열 검색의
+ * 1급 대체. 한 goal에 연속실행은 최대 하나라는 불변식의 조회면이다.
+ */
+export function findAutomationByGoalId(goalId: string): Automation | null {
+  if (!goalId.trim()) return null;
+  const row = getDb()
+    .prepare("SELECT * FROM automations WHERE goal_id = ? ORDER BY created_at DESC LIMIT 1")
+    .get(goalId) as AutomationRow | undefined;
   return row ? toAutomation(row) : null;
 }
 
@@ -352,6 +366,8 @@ export function createAutomation(input: {
   graphJson?: string | WorkflowGraph | null;
   /** 무엇을 위한 자동화인가(인터뷰 blueprint.goal). AI가 나중에 그래프를 이해할 유일한 문장. */
   goal?: string | null;
+  /** persistent goal 조인 키(goal_ledger 축). 연속실행 자동화만 채운다. */
+  goalId?: string | null;
   /**
    * ★꺼진 채로 태어나야 하는가. 기본은 켬(옛 동작).
    *
@@ -439,6 +455,10 @@ export function createAutomation(input: {
   // goal 은 additive 컬럼이라 INSERT 목록을 안 건드리고 따로 채운다(빈 값이면 안 쓴다).
   if (input.goal && input.goal.trim()) {
     getDb().prepare("UPDATE automations SET goal = ? WHERE id = ?").run(input.goal.trim(), id);
+  }
+  // goal_id 도 additive 컬럼 — 같은 이유로 INSERT 목록을 안 건드린다.
+  if (input.goalId && input.goalId.trim()) {
+    getDb().prepare("UPDATE automations SET goal_id = ? WHERE id = ?").run(input.goalId.trim(), id);
   }
   const automation = getAutomation(id) as Automation;
   emitDesktopStoreChange({ entity: "automation", id });
@@ -537,6 +557,11 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
   if (patch.goal !== undefined) {
     getDb().prepare("UPDATE automations SET goal = ? WHERE id = ?")
       .run(patch.goal && patch.goal.trim() ? patch.goal.trim() : null, id);
+  }
+  // goal_id — null 해제, undefined 미변경(goal 칸과 같은 additive 패치 규율).
+  if (patch.goalId !== undefined) {
+    getDb().prepare("UPDATE automations SET goal_id = ? WHERE id = ?")
+      .run(patch.goalId && patch.goalId.trim() ? patch.goalId.trim() : null, id);
   }
   const automation = getAutomation(id) as Automation;
   emitDesktopStoreChange({ entity: "automation", id });

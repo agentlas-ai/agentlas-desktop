@@ -1057,6 +1057,11 @@ function isImageLikePath(value: string): boolean {
   return /\.(png|jpe?g|gif|webp|avif|svg)$/i.test(value.trim());
 }
 
+/** 앱 안에서 직접 렌더할 수 있는 파일 — 전용 프로토콜로 서빙해야 한다(`file://` 은 차단됨). */
+function isInlineServablePath(value: string): boolean {
+  return /\.(png|jpe?g|gif|webp|avif|svg|mp4|webm|mov|m4v|ogv|pdf)$/i.test(value.trim());
+}
+
 function cleanImageSrcCandidate(value: string): string {
   return value.trim().replace(/^[\s(]+/, "").replace(/[).,;:]+$/, "");
 }
@@ -1185,7 +1190,8 @@ function fileUrlForLocalPath(absPath: string): string {
 function fileUrlForLinkedFile(target: string): string {
   if (/^(https?:|data:|blob:|agentlas:)/i.test(target)) return target;
   if (target.startsWith("file://")) return target;
-  if (isImageLikePath(target)) return `agentlas://localfile/?p=${encodeURIComponent(target)}`;
+  // 이미지·영상·PDF 는 렌더러가 직접 그린다 — `file://` 은 webSecurity 에 막히므로 전용 프로토콜로.
+  if (isInlineServablePath(target)) return `agentlas://localfile/?p=${encodeURIComponent(target)}`;
   if (target.startsWith("/") || /^[A-Za-z]:[\\/]/.test(target)) return fileUrlForLocalPath(target);
   return target;
 }

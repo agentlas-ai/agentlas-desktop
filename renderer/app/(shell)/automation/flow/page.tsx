@@ -201,21 +201,12 @@ function AutomationFlowPage() {
   const [nodeFailures, setNodeFailures] = useState<
     Record<string, { code: string; reason: string; nextAction: string }>
   >({});
-  const [approvalBusy, setApprovalBusy] = useState(false);
-  /* ★승인 무한루프의 마지막 조각(캡처 실증 2026-08-09).
-     [승인하고 이어서 실행]은 승인을 기록하고 곧바로 재개 실행을 쏘는데, 그 직후
-     스냅샷을 다시 읽는다 — 그런데 커널이 재개분을 아직 DB에 쓰기 전이라 **방금 승인한
-     그 실패가 그대로 들어 있다**. 그래서 화면은 승인 카드를 되살렸고, 사용자에게는
-     "몇 번을 눌러도 안 된다"로 보였다. 사람이 이미 결정한 노드는, 그 노드가 실제로
-     다시 움직이는 것을 볼 때까지 스냅샷이 되살리지 못한다. */
-  const [decidedNodes, setDecidedNodes] = useState<Record<string, number>>({});
-  const decidedRef = useRef<Record<string, number>>({});
-  decidedRef.current = decidedNodes;
+  /* 승인 게이트 폐지(오너 이사회 결정 2026-08-10) — 이 화면은 더 이상 실행 중 승인을
+     묻지 않는다. 스냅샷 실패는 그대로 반영한다(승인 결정으로 실패를 지우던 억제 상태도
+     함께 없앴다 — 억제할 승인 카드 자체가 없다). */
   const applySnapshotFailures = useCallback(
     (next: Record<string, { code: string; reason: string; nextAction: string }> | undefined) => {
-      const decided = decidedRef.current;
-      const entries = Object.entries(next ?? {}).filter(([nodeId]) => !decided[nodeId]);
-      setNodeFailures(Object.fromEntries(entries));
+      setNodeFailures(next ?? {});
     },
     [],
   );
@@ -253,7 +244,7 @@ function AutomationFlowPage() {
   /* 사람이 결정해야 끝나는 실패의 수 — 상세 탭이 이 숫자로 스스로 부른다.
      승인 대기를 사용자가 찾아 헤매지 않게 하는 유일한 신호다. */
   const decisionCount = Object.values(nodeFailures).filter((f) =>
-    f.code === "APPROVAL_REQUIRED" || f.code === "EVAL_STUCK" || f.code === "CODE_DEPENDENCY_MISSING").length
+    f.code === "EVAL_STUCK" || f.code === "CODE_DEPENDENCY_MISSING").length
     + (inputPrompt !== null ? 1 : 0);
   const hasActionCards = decisionCount > 0;
   useEffect(() => {
@@ -455,15 +446,6 @@ function AutomationFlowPage() {
       };
       if (ev.nodeId && ev.nodeState) {
         setRunStates((prev) => ({ ...prev, [ev.nodeId as string]: ev.nodeState as WorkflowNodeRunState }));
-        // 결정한 노드가 실제로 다시 움직였다 — 표식을 푼다. 이 뒤의 실패는 새 사실이다.
-        if (ev.nodeState === "running" || ev.nodeState === "done") {
-          setDecidedNodes((prev) => {
-            if (!prev[ev.nodeId as string]) return prev;
-            const next = { ...prev };
-            delete next[ev.nodeId as string];
-            return next;
-          });
-        }
         const stateText: Record<string, string> = {
           running: locale === "en" ? "started" : "시작",
           done: locale === "en" ? "finished" : "완료",
@@ -696,12 +678,6 @@ function AutomationFlowPage() {
      "지금 이걸 누르세요"라고 말하지 않아 [지금 다시 실행]만 반복해서 눌렸다.
      Norman의 평가의 간극(무슨 일이 일어났는가) + 실행의 간극(무엇을 하면 되는가)을
      한 줄로 닫는다. 주 행동은 **언제나 하나**다(Hick-Hyman: 선택지가 늘수록 결정이 늦다). */
-  const pausedApproval = useMemo(() => {
-    const entry = Object.entries(nodeFailures).find(([, f]) => f.code === "APPROVAL_REQUIRED");
-    if (!entry) return null;
-    const [nodeId] = entry;
-    return { nodeId, label: automation?.graph?.nodes.find((n) => n.id === nodeId)?.label || nodeId };
-  }, [nodeFailures, automation?.graph]);
   // 멈춘 실행이 있으면 "지금 실행"은 실제로 **이어서 실행**이다(run-graph 가 같은
   // occurrence 체크포인트에서 재개한다). 버튼이 하는 일과 이름이 달라 사용자는
   // 매번 "처음부터 도는 건가?"를 물어야 했다 — 이름을 하는 일에 맞춘다.
@@ -1077,50 +1053,6 @@ function AutomationFlowPage() {
     }
   }
 
-  async function decideApproval(nodeId: string, decision: "approved" | "rejected" | "always") {
-    const api = ipc();
-    if (!api || !automation) return;
-    setApprovalBusy(true);
-    try {
-      const result = await api.automations.decideNodeApproval(automation.id, nodeId, decision);
-      if (!result?.ok) {
-        // 승인할 실행이 없으면 승인한 척하지 않는다.
-        setMessage(locale === "en"
-          ? "There is no run waiting on this step right now."
-          : "지금 이 단계에서 기다리고 있는 실행이 없습니다.");
-        return;
-      }
-      setDecidedNodes((prev) => ({ ...prev, [nodeId]: Date.now() }));
-      setNodeFailures((prev) => {
-        const next = { ...prev };
-        delete next[nodeId];
-        return next;
-      });
-      if (decision === "rejected") {
-        setMessage(locale === "en"
-          ? "Recorded. This step will not run until you approve it."
-          : "기록했습니다. 승인하기 전까지 이 단계는 실행되지 않습니다.");
-        return;
-      }
-      // ★승인 무한루프의 나머지 절반(실측 2026-08-08): [승인하고 이어서 실행]이
-      //   실제로는 이어서 실행하지 않았다 — 사람이 따로 재실행해야 한다는 사실이
-      //   화면 어디에도 없어, 카드만 계속 되살아나는 것으로 보였다. 버튼 이름대로
-      //   승인 즉시 재개 실행을 발사한다.
-      setMessage(decision === "always"
-        ? (locale === "en"
-          ? "Always allowed. Continuing the run from this step…"
-          : "항상 허용했습니다. 이 단계부터 이어서 실행합니다…")
-        : (locale === "en"
-          ? "Approved. Continuing the run from this step…"
-          : "승인했습니다. 이 단계부터 이어서 실행합니다…"));
-      await runNow();
-    } catch {
-      setMessage(locale === "en" ? "The decision was not saved." : "결정을 저장하지 못했습니다.");
-    } finally {
-      setApprovalBusy(false);
-    }
-  }
-
   async function runNow(dryRun = false, inputValue?: string) {
     const api = ipc();
     if (!api || !automation) return;
@@ -1265,24 +1197,23 @@ function AutomationFlowPage() {
           그 자리에 그대로 있다. */}
       {(editing ? [] : Object.entries(nodeFailures)).map(([failedNodeId, failure]) => {
         const nodeLabel = rfNodes.find((n) => n.id === failedNodeId)?.data?.label ?? failedNodeId;
-        const awaitingApproval = failure.code === "APPROVAL_REQUIRED";
         const evalStuck = failure.code === "EVAL_STUCK";
         // ★코드가 쓰는 파이썬 패키지를 준비 못 한 실패. 사람에게 pip 이름을 묻는 것은
         //   답이 아니다 — 코드를 지은 것은 AI이고, 사용자는 `PIL`의 pip 이름이
         //   `Pillow`라는 걸 알 이유가 없다(실측: PIL·sklearn 둘 다 죽었다).
         const depMissing = failure.code === "CODE_DEPENDENCY_MISSING";
         // 버튼 없는 실패는 카드가 아니라 로그 줄이다.
-        if (!awaitingApproval && !evalStuck && !depMissing) return null;
+        if (!evalStuck && !depMissing) return null;
         return (
           <div
             key={failedNodeId}
             className="titlebar-nodrag"
             data-testid={`node-failure-${failedNodeId}`}
             style={{
-              
+
               padding: "12px 14px",
               borderRadius: "var(--radius-md)",
-              border: `1px solid ${awaitingApproval ? "var(--accent-soft)" : "var(--paper-edge)"}`,
+              border: "1px solid var(--paper-edge)",
               background: "var(--paper)",
               fontSize: 12,
               color: "var(--ink)",
@@ -1293,38 +1224,6 @@ function AutomationFlowPage() {
             <div style={{ fontWeight: 600 }}>{String(nodeLabel)}</div>
             <div style={{ color: "var(--ink-soft)", lineHeight: 1.6 }}>{failure.reason}</div>
             <div style={{ color: "var(--muted-deep)", lineHeight: 1.6 }}>{failure.nextAction}</div>
-            {awaitingApproval ? (
-              <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
-                <button
-                  className="titlebar-nodrag"
-                  disabled={approvalBusy}
-                  onClick={() => void decideApproval(failedNodeId, "approved")}
-                  style={actionBtn}
-                >
-                  {t("auto.flow.approve_and_continue")}
-                </button>
-                {/* ★한 번 믿기로 한 단계는 매번 묻지 않는다. 이 결정은 그래프가 아니라
-                    승인 기록에 남는다 — 그래프를 바꾸면 digest가 달라져 지금 멈춰 있는
-                    바로 그 실행의 재개가 거부되기 때문이다. */}
-                <button
-                  className="titlebar-nodrag"
-                  disabled={approvalBusy}
-                  onClick={() => void decideApproval(failedNodeId, "always")}
-                  style={pillBtn(false)}
-                  title={t("auto.flow.approve_always_hint")}
-                >
-                  {t("auto.flow.approve_always")}
-                </button>
-                <button
-                  className="titlebar-nodrag"
-                  disabled={approvalBusy}
-                  onClick={() => void decideApproval(failedNodeId, "rejected")}
-                  style={pillBtn(false)}
-                >
-                  {t("auto.flow.approve_reject")}
-                </button>
-              </div>
-            ) : null}
             {/* ★"기준이 틀렸을 수도"의 두 갈래: 채점표를 고치거나(캔버스에서),
                 판정이 틀렸다고 교정한다. 교정은 그 노드의 이후 판정에 few-shot으로
                 주입된다 — 사람의 채점 감각이 그래프에 쌓이는 자리(5건이면 유의미). */}
@@ -1428,12 +1327,10 @@ function AutomationFlowPage() {
           ) : (
             <div className="automation-node-empty" data-one-content-slot />
           )}
-          {/* 캔버스가 이미 그 승인 카드를 그리고 있으면 이 패널은 같은 결정을 또 내놓지 않는다. */}
           <RunHistoryPanel
             automation={automation}
             locale={locale}
             compact
-            approvalShownByCanvas={!editing && pausedApproval !== null}
           />
         </>
   );
@@ -1621,16 +1518,12 @@ return (
       {!editing ? (
         <div
           className="automation-run-status"
-          data-tone={pausedApproval ? "wait" : liveRunning ? "run" : stopped ? "stop" : "idle"}
+          data-tone={liveRunning ? "run" : stopped ? "stop" : "idle"}
           data-testid="run-status-strip"
         >
           <span className="automation-run-status-dot" aria-hidden="true" />
           <span className="automation-run-status-text">
-            {pausedApproval
-              ? (locale === "en"
-                ? `Paused before “${pausedApproval.label}” — it has not run yet. Approving continues from here.`
-                : `“${pausedApproval.label}” 앞에서 멈춰 있습니다 — 아직 실행하지 않았습니다. 승인하면 여기서부터 이어집니다.`)
-              : liveRunning
+            {liveRunning
                 ? (locale === "en"
                   ? `Running${runningNodeLabel ? ` — ${runningNodeLabel}` : ""} · ${doneNodes}/${totalNodes} done`
                   : `실행 중${runningNodeLabel ? ` — ${runningNodeLabel}` : ""} · ${totalNodes}단계 중 ${doneNodes}단계 완료`)
@@ -1649,19 +1542,7 @@ return (
           {/* 주 행동은 언제나 **하나**, 그리고 아래 [상세]가 이미 그 카드를 펼쳐 놓았으면
               여기는 아무 버튼도 두지 않는다: 같은 행동이 두 군데 있으면 사용자는 둘이
               다른 일을 한다고 읽는다(오너 지적 "지금 다시 실행이 왜 2개나 있고"). */}
-          {detailsShown ? null : pausedApproval ? (
-            <button
-              type="button"
-              data-testid="status-approve"
-              className="automation-run-status-action"
-              disabled={approvalBusy}
-              onClick={() => void decideApproval(pausedApproval.nodeId, "approved")}
-            >
-              {approvalBusy
-                ? (locale === "en" ? "Approving…" : "승인하는 중…")
-                : (locale === "en" ? "Approve and continue" : "승인하고 이어서 실행")}
-            </button>
-          ) : stopped && !liveRunning ? (
+          {detailsShown ? null : stopped && !liveRunning ? (
             <button
               type="button"
               data-testid="status-open-details"

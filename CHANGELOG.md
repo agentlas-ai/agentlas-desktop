@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.9.80 — 2026-08-11
+
+This release binds Agentlas OS v1.1.108 at
+088d7311261b803efa4bdb9b1a7397f4b5f20b9a.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- Running an automation no longer stops to ask. A step that reaches outside
+  used to wait for a person to click approve, which meant automations died
+  quietly at the first outbound step — they run when nobody is watching, so
+  that wait had no end. The defenses that do not need a person are unchanged:
+  a simulation still never sends anything, a mutation without an idempotency
+  key is still never retried, and an unverified side effect still stops the
+  run.
+- Files the agent produces now open by themselves in the right panel. Opening
+  a file from the file list used to show its name and an empty body, because
+  the list handed the viewer a placeholder that carried no content; it now
+  reads the file. Only images opened automatically before, so documents,
+  tables, and data files stayed invisible. PDFs render at all now — they were
+  loaded over a scheme the window blocks.
+- A goal survives the session that started it. Goal mode used to be a sentence
+  added to one prompt; it now creates a durable goal with its own tasks, cycle
+  accounting, and budget, and the loop continues from that state rather than
+  from whether the model remembered to ask for another pass. A goal that
+  stalls pauses and calls for help, and real progress lifts that pause — a
+  goal meant to run for months would otherwise die the first quiet week.
+- `hep-build` reports anonymous counters so build failures are visible to us
+  without anyone filing a report. No paths, names, prompts, or error text ever
+  leave the machine, and `AGENTLAS_TELEMETRY=0` or `DO_NOT_TRACK=1` stops it.
+
 ## 0.9.79 — 2026-08-10
 
 This release binds Agentlas OS v1.1.107 at

@@ -36,9 +36,6 @@ import {
   saveGraphRunCheckpoint,
   updateGraphRunNode,
   finishGraphRun,
-  getNodeApproval,
-  getLatestNodeApproval,
-  getAlwaysAllowApproval,
   saveGraphRunFailures,
   consumeGraphResumeCoordinate,
   appendGraphJournal,
@@ -46,7 +43,6 @@ import {
 import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
 import { getAgentConcurrency } from "../store/concurrency";
-import { markApprovalWaitStarted } from "../store/automations";
 import { listRunEvents, tryRecordFailureEvent, tryRecordRunEvent } from "../store/run-events";
 import { awaitAutomationRunnerWithAbortGrace } from "../automation-watchdog";
 import { buildStrategyDirective, collectAutomationFailureContext } from "../automation-strategy";
@@ -132,40 +128,17 @@ function nodeEffect(node: WorkflowNode): GraphNodeEffect {
 
 /**
  * 이 단계를 사람이 먼저 확인해야 하는가.
- * - `auto`(기본): 확인 없이 진행.
- * - `ask`: 실행할 때마다 확인.
- * - `ask_once`: 이 노드를 처음 내보낼 때 한 번만 확인.
+ * ★오너 이사회 결정(2026-08-10): **실행 중 승인은 전면 폐지한다.**
+ * 사람이 기계적으로 누르기만 하는 관문은 안전장치가 아니라 병목이다 — 자동화는 사람이
+ * 안 볼 때 도는 것이고, 도는 중에 사람을 기다리면 실행은 거기서 죽는다. 되돌리기 어려운
+ * 일에 대한 방어는 승인 대기가 아니라 (1) 시뮬레이션에서의 차단(`dryRunBlocks`)
+ * (2) 멱등키 없는 mutation 재시도 0회(`nodeMaxAttempts`) (3) 부수효과 미확인 정지
+ * (`MUTATION_UNVERIFIED`) — 이 셋이 이미 하고 있고, 이들은 사람을 기다리지 않는다.
+ *
+ * `node.config` 의 `approval`/`approvalSetBy`/`approvalWaitHours` 필드는 **일부러
+ * 남겨 둔다**. 지우면 저장된 모든 자동화의 `graphExecutionDigest` 가 바뀌어, 바로 그
+ * 순간 멈춰 있던 실행들의 재개가 전부 거부되기 때문이다. 커널은 그 값을 읽지 않는다.
  */
-export type GraphNodeApprovalTier = "auto" | "ask" | "ask_once";
-
-function nodeApprovalTier(node: WorkflowNode): GraphNodeApprovalTier {
-  /* ★오너 결정(2026-08-09): **실행 중 승인은 없앤다.**
-     "승인단계 걍 없애라 그게 병목이네 그거 때문에 아예 안되네
-      그냥 모든 승인은 최초에 그래프 만드는 단계에서" — 승인은 그래프를 **만들 때**
-     한 번 정하는 것이고, 도는 중에는 묻지 않는다.
-
-     왜 이게 옳은가(실측): 자동화는 사람이 안 볼 때 도는 것이다. 도는 중에 사람을
-     기다리면 실행은 거기서 죽고, 사람은 몇 시간 뒤에야 멈춘 걸 안다. 그때 화면에서
-     승인 하나를 못 찾으면(실제로 못 찾았다) 자동화는 영영 안 끝난다. 되돌리기 어려운
-     일에 대한 방어는 승인 대기가 아니라 (1) 만들 때의 동의 (2) 시뮬레이션에서의 차단
-     (3) 멱등키 없는 mutation 재시도 0회 — 이 셋이 이미 하고 있다.
-
-     남겨 둔 것: 저작자가 **명시적으로** `approval: "ask"` 를 적으면 그건 존중한다.
-     사람이 스스로 켠 것까지 우리가 끄지는 않는다. 다만 **아무도 안 적었을 때 우리가
-     대신 켜 주지 않는다** — 그 자동 승인이 병목의 전부였다. */
-  const raw = str(node.config, "approval");
-  if (raw !== "ask" && raw !== "ask_once") return "auto";
-  /* ★저장된 자물쇠 대부분은 **사람이 고른 적이 없다**(실측 2026-08-09).
-     정책을 바꾸기 전까지 청사진이 바깥으로 나가는 단계에 자동으로 `ask` 를 박아 넣었고,
-     그 값이 graph_json 에 그대로 남아 있다. 그래서 커널에서 자동 잠금을 없앤 뒤에도
-     **이미 만들어진 자동화는 전부 그대로 멈춘다** — 오너의 그래프 두 개가 실제로 그랬다.
-
-     사람이 고른 것과 우리가 박은 것을 사후에 구분할 방법이 없으므로, **앞으로 고른 것에
-     표식을 남기고** 표식 없는 잠금은 존중하지 않는다. 화면에서 승인을 고르면
-     `approvalSetBy: "user"` 가 함께 저장된다(NodeConfigPanel). 표식이 붙은 잠금만
-     실행을 멈춘다 — 사람이 스스로 켠 것은 끄지 않고, 우리가 켠 것은 사람에게 물려주지 않는다. */
-  return str(node.config, "approvalSetBy") === "user" ? raw : "auto";
-}
 
 /**
  * 이 노드를 몇 번까지 다시 시도해도 되는가.
@@ -1450,52 +1423,6 @@ export async function runGraph(
   const evalFailSignatures = new Map<string, string>();
   const evalFeedback = new Map<string, string>();
 
-  const approvalGuard = (node: WorkflowNode): GraphNodeFailure | null => {
-    const tier = nodeApprovalTier(node);
-    if (tier === "auto") return null;
-    const label = node.label || node.id;
-    // ★사람이 이 노드에 "항상 허용"을 걸어 두었으면 다시 묻지 않는다.
-    //   그 결정은 그래프가 아니라 승인 기록에 있다 — 그래프를 바꾸면 digest가 달라져
-    //   바로 그 순간 멈춘 실행의 재개가 거부되기 때문이다.
-    if (getAlwaysAllowApproval(automation.id, node.id)) return null;
-    const decision = tier === "ask_once"
-      ? (getNodeApproval(automation.id, checkpoint!.occurrenceId, node.id)
-        ?? getLatestNodeApproval(automation.id, node.id))
-      : getNodeApproval(automation.id, checkpoint!.occurrenceId, node.id);
-    if (decision?.decision === "approved") return null;
-    if (decision?.decision === "rejected") {
-      return {
-        code: "APPROVAL_REJECTED",
-        reason: `"${label}" 단계를 실행하지 않기로 하셨습니다(${new Date(decision.decidedAt).toLocaleString()}).`,
-        nextAction: "그대로 두려면 아무것도 하지 않아도 됩니다. 다시 진행하려면 이 단계를 승인하세요.",
-      };
-    }
-    // ★언제부터 기다렸는지는 **실행 밖**에 남는다. 승인이 없으면 실행이 그 자리에서 끝나고
-    //   다음 예약이 새 occurrence로 다시 물어보기 때문에, 실행 안에는 "3일째"라는 사실이 없다.
-    const waitingSince = markApprovalWaitStarted(automation.id, node.id);
-    const rawWait = node.config?.approvalWaitHours;
-    const waitHours = typeof rawWait === "number" && Number.isFinite(rawWait) && rawWait > 0
-      ? rawWait
-      : null;
-    if (waitHours !== null && waitHours > 0) {
-      const elapsedMs = Date.now() - Date.parse(waitingSince);
-      if (Number.isFinite(elapsedMs) && elapsedMs > waitHours * 3_600_000) {
-        const hours = Math.round(elapsedMs / 3_600_000);
-        return {
-          code: "APPROVAL_TIMED_OUT",
-          reason: `"${label}" 단계의 확인을 ${hours}시간째 기다렸습니다(약속한 시간 ${waitHours}시간).`,
-          nextAction: "지금 확인하거나, 이 단계가 기다림 끝에 갈 길을 캔버스에서 이어 주세요.",
-        };
-      }
-    }
-    return {
-      code: "APPROVAL_REQUIRED",
-      reason:
-        `"${label}" 단계는 바깥으로 나가기 전에 확인이 필요합니다. 아직 실행하지 않았습니다.`,
-      nextAction: "내용을 확인한 뒤 [승인하고 이어서 실행] 또는 [이번엔 실행하지 않기]를 고르세요.",
-    };
-  };
-
   /** 실행 후 실제 사용량을 반영한다. 상한이 있는데 보고가 없으면 그 사실을 남긴다. */
   const settleBudget = (node: WorkflowNode, tokens: number | undefined): void => {
     if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens < 0) {
@@ -2324,10 +2251,6 @@ export async function runGraph(
           status.set(node.id, "done");
           return;
         }
-        if (codeEffect === "mutation") {
-          const stop = approvalGuard(node);
-          if (stop) { failGraphNode(node, stop); return; }
-        }
         // 이 단계가 읽는 값만 스크립트에 넘긴다 — 전체 변수 백을 주면 소음이 섞인다.
         const consumeKey = str(node.config, "consumes");
         // ★참조 판별은 공용 함수 하나뿐 — 여기서 정규식을 다시 쓰면 `vars.get("x")`를
@@ -2482,10 +2405,6 @@ export async function runGraph(
         //   산출물로 확정하면 "요약을 이메일로 보내라" 같은 **할 일 문장이 결과**가 된다
         //   (그리고 그 값이 하류·부모 그래프까지 간다). 내용이 없으면 지시문대로 돌게 둔다.
         if ((declaredEffect === "read" || declaredEffect === "pure") && str(node.config, "text")) {
-          // 안 나가는 출력이라도 사람이 걸어 둔 승인은 지킨다 — "read지만 내가 보고 넘기겠다"는
-          // 선언을 조용히 무시하면, 승인은 걸어 둔 사람에게만 없는 기능이 된다.
-          const outputApprovalStop = dryRun ? null : approvalGuard(node);
-          if (outputApprovalStop) { beginNode(node); failGraphNode(node, outputApprovalStop); return; }
           beginNode(node);
           const filled = substitute(declaredText, vars);
           // 값이 없는 구멍을 빈칸으로 내보내지 않는다. 예전엔 agent 경로가 이걸 잡아 줬는데,
@@ -2544,13 +2463,6 @@ export async function runGraph(
           }
           completeNode(node.id);
           status.set(node.id, "done");
-          return;
-        }
-        // 승인 브레이크 — 사람이 "나가도 된다"고 하기 전에는 실행하지 않는다.
-        // 시뮬레이션은 바깥으로 나가는 게 없으므로 확인을 요구하지 않는다.
-        const approvalStop = dryRun ? null : approvalGuard(node);
-        if (approvalStop) {
-          failGraphNode(node, approvalStop);
           return;
         }
         // 예산은 노드를 띄우기 전에 확인한다 — 넘긴 뒤 정산하면 이미 돈이 나간 뒤다.

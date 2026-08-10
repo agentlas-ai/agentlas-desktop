@@ -1400,6 +1400,9 @@ export interface Chat {
   continuousMode: boolean;
   /** 스웜 모드 — 목표를 작업 그래프로 분해해 여러 워커가 병렬로 협업(emergent A2A). */
   swarmMode: boolean;
+  /** 이 채팅이 추진 중인 persistent goal의 원장 축(goal_ledger 조인 키).
+   *  null = 목표 추진 꺼짐. 켜는 순간 고정되며(칩 ON), 끄기는 명시적 목표 종료다. */
+  goalId?: string | null;
   /** 어느 표면이 시작한 대화인지 — 'one'(초개인화 One 홈) | 'work'(전역 Work).
    *  One 홈과 Work 사이드바는 이 값으로 서로를 오염하지 않는다. 구버전 row는 'work'. */
   originSurface?: "one" | "work";
@@ -1936,6 +1939,10 @@ export interface Automation {
   graph?: WorkflowGraph | null;
   /** 무엇을 위한 자동화인가 — 인터뷰가 적은 한 문장. AI가 그래프를 이해할 단서. */
   goal?: string | null;
+  /** 이 자동화가 어느 persistent goal의 연속실행인가(goal_ledger 조인 키).
+   *  프롬프트 안 마커 문자열 검색 대신 쓰는 1급 식별자 — 한 goal에 연속실행은
+   *  최대 하나만 만들어지고, 목표 종료 시 정확히 이 행만 비활성화된다. */
+  goalId?: string | null;
   /** IANA 타임존(예 "Asia/Seoul"). cron 해석 기준. */
   timezone?: string | null;
   /** 구조화 스케줄 spec(있으면 scheduleHuman 레거시 토큰보다 우선). */
@@ -1962,6 +1969,8 @@ export interface AutomationUpdatePatch {
   name?: string;
   /** 목적 문장. 빈 문자열 = 지움, undefined = 미변경. */
   goal?: string;
+  /** persistent goal 조인 키. null = 해제, undefined = 미변경. */
+  goalId?: string | null;
   scheduleHuman?: string;
   targetType?: AutomationTargetType;
   targetId?: string;
@@ -6109,6 +6118,9 @@ export interface AgentlasIpc {
     /** "계속 라이브로" 모드 — 켜두면 Stormbreaker 연속실행이 짧은 상한에 닿아도 이 채팅에서
      *  라이브 스트리밍을 계속 이어간다(수 시간 단위). */
     setContinuousMode: (id: string, enabled: boolean) => Promise<Chat>;
+    /** 목표 추진 on/off — 켜면 goal 원장에 목표를 만들고 chat에 goal_id를 바인딩하며
+     *  continuousMode를 함께 켠다. 끄기(칩 ×)는 단순 off가 아니라 명시적 목표 종료다. */
+    setGoalMode: (id: string, enabled: boolean) => Promise<Chat>;
     /** 스웜 모드 on/off — 여러 워커가 목표를 분해해 병렬 협업. */
     setSwarmMode: (id: string, enabled: boolean) => Promise<Chat>;
     /** Set or clear this chat's exact orchestrator runtime without changing role defaults. */

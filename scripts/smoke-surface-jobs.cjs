@@ -68,7 +68,9 @@ assert.equal(summary.resumableCount, 2);
 assert.equal(summary.costEstimate, 1.75);
 assert.equal(summary.costSpent, 0.25);
 assert.equal(summary.budgetLimit, 3);
-assert.equal(summary.needsApproval, true);
+// 승인 게이트 폐지(오너 이사회 결정 2026-08-10) — needsApproval 은 이제 사람을 세우는
+// 관문이 아니라 "예산 임계를 넘었다"는 정보 표시다. 임계값 자체가 계약이므로 그것만 잰다.
+assert.equal(summary.approvalThreshold, 1);
 assert.equal(summary.overLimit, false);
 
 const overLimit = summarizeSurfaceJobRecords(jobs, { currency: "USD", limit: 1 });

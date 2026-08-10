@@ -761,7 +761,8 @@ function extensionOf(name: string): string {
 }
 
 function fileUrlForPath(absPath: string, viewerKind?: WorkspaceFilePreview["viewerKind"]): string {
-  if (viewerKind === "image" || viewerKind === "video") {
+  if (viewerKind === "image" || viewerKind === "video" || viewerKind === "pdf") {
+    // pdf 도 같은 경로로 서빙한다 — `file://` 은 webSecurity 에 막혀 빈 iframe 이 된다.
     return `agentlas://localfile/?p=${encodeURIComponent(absPath)}`;
   }
   const normalized = absPath.replace(/\\/g, "/");

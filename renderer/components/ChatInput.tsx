@@ -226,6 +226,8 @@ export function ChatInput({
   showModeToggles = false,
   continuousMode = false,
   swarmMode = false,
+  goalActive,
+  onToggleGoal,
   onToggleContinuous,
   onToggleSwarm,
   queuedCount = 0,
@@ -265,6 +267,11 @@ export function ChatInput({
   /** 계속 라이브로(continuousMode) 현재 상태 + 토글. */
   continuousMode?: boolean;
   onToggleContinuous?: () => void;
+  /** persistent goal(chats.goal_id) 현재 상태 + 토글 — 제공되면 goal 칩은 DB 영속
+   *  상태를 따르는 controlled 모드가 되고(새로고침에도 유지), 칩 ×는 명시적 목표
+   *  종료(onToggleGoal)를 부른다. 미제공 표면은 기존 per-turn 로컬 상태 그대로. */
+  goalActive?: boolean;
+  onToggleGoal?: () => void;
   /** 스웜(swarmMode) 현재 상태 + 토글. */
   swarmMode?: boolean;
   onToggleSwarm?: () => void;
@@ -324,6 +331,14 @@ export function ChatInput({
   const [plusSubmenu, setPlusSubmenu] = useState<"plugins" | null>(null);
   const [planMode, setPlanMode] = useState(false);
   const [goalMode, setGoalMode] = useState(false);
+  // goal 칩의 유효 상태 — 부모가 DB 영속 상태(goalActive/onToggleGoal)를 주면 그것이
+  // 진실이고(useState는 새로고침에 사라진다), 아니면 기존 per-turn 로컬 상태.
+  const goalControlled = typeof onToggleGoal === "function";
+  const effectiveGoalMode = goalControlled ? goalActive === true : goalMode;
+  const toggleGoalMode = (next: boolean) => {
+    if (goalControlled) onToggleGoal?.();
+    else setGoalMode(next);
+  };
   // 다중선택·지속 모드 토글(에이전트 찾기/Stormbreaker). 전송해도 유지된다.
   const [hepToggles, setHepToggles] = useState<Set<HepToggleId>>(() => new Set());
   // Stormbreaker를 처음 켤 때 뜨는 비용/시간 경고 버블. dismiss하면 다시 안 뜸.
@@ -597,7 +612,7 @@ export function ChatInput({
     return {
       images: attachments,
       planMode: planMode || undefined,
-      goalMode: goalMode || undefined,
+      goalMode: effectiveGoalMode || undefined,
       permissions,
       appsGenerateMode: appsGenerateMode || undefined,
       taskForceTargets: turnCalls.length ? turnCalls.map((call) => call.target) : undefined,
@@ -937,8 +952,8 @@ export function ChatInput({
           }}
           planMode={planMode}
           setPlanMode={setPlanMode}
-          goalMode={goalMode}
-          setGoalMode={setGoalMode}
+          goalMode={effectiveGoalMode}
+          setGoalMode={toggleGoalMode}
           appsGenerateMode={appsGenerateMode}
           onToggleAppsGenerate={requestAppsGenerateMode}
           onInsertMention={() => {
@@ -1691,7 +1706,7 @@ export function ChatInput({
             
             {/* Plan/Goal 모드 토글은 툴바에서 숨김 — + 메뉴(PlusMenu)의 ToggleRow로만 노출.
                 켜져 있으면 아래 활성 칩(chat-input-active-modes)이 상태를 보여준다. */}
-            {(planMode || goalMode) && (
+            {(planMode || effectiveGoalMode) && (
               <div style={{ display: "flex", gap: 4 }}>
                 {planMode && (
                   <button
@@ -1704,10 +1719,11 @@ export function ChatInput({
                     <span className="chat-input-chip-label">{t("chatinput.plan_mode")}</span> ✕
                   </button>
                 )}
-                {goalMode && (
+                {effectiveGoalMode && (
                   <button
                     className="chat-input-chip"
-                    onClick={() => setGoalMode(false)}
+                    // controlled(영속 goal)일 때 이 ×는 단순 off가 아니라 명시적 목표 종료다.
+                    onClick={() => toggleGoalMode(false)}
                     title={t("chatinput.goal_mode")}
                     style={{ ...toolBtnStyle(true), width: "auto", padding: "0 8px", gap: 4, fontSize: 10.5, fontWeight: 600, color: "var(--accent)" }}
                   >

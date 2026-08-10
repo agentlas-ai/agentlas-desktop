@@ -11,14 +11,23 @@ import { isStormbreakerAutoEnabled } from "../hephaestus/supervisor";
 import { careerGraphIngest, hepCall, routeOnly, stormbreakerHarness } from "../hephaestus/commands";
 import { normalizeRecommendation } from "../hephaestus/recommendation";
 import {
+  buildGoalDrivenContinuationPrompt,
   buildStormbreakerLongRunPrompt,
   buildStormbreakerContinuationPrompt,
   CONTINUOUS_MODE_MAX_PASSES,
+  goalContinuationSchedule,
   STORMBREAKER_LONG_RUN_SCHEDULE,
   STORMBREAKER_LOOP_PROTOCOL,
   STORMBREAKER_MAX_EXECUTION_PASSES,
   stripStormbreakerContinueMarker,
 } from "../hephaestus/loop-engineering";
+import {
+  ensureGoalLedgerGoal,
+  GOAL_HARD_STOP_REASONS,
+  goalProgressKeyForText,
+  recordGoalLedgerCycle,
+  type GoalLedgerDecision,
+} from "./goal-ledger";
 import { getAgentById, listInstalledAgents } from "./registry";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import {
@@ -34,9 +43,11 @@ import {
   appendChatMessage,
   autoTitleFromFirstMessage,
   getChat,
+  getChatGoalId,
   getChatWorkingFolder,
   listChatMessages,
   repairRootChatSurfaceController,
+  setChatGoalBinding,
   setChatWorkingFolder,
 } from "../store/chats";
 import { getProject, listProjects } from "../store/projects";
@@ -112,7 +123,7 @@ import {
   type OneFriendlyFollowupPlanV1,
 } from "../../shared/one-friendly-followups";
 import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMarkdownSurfaceIntent } from "../one/markdown-surface";
-import { createAutomation, listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
+import { createAutomation, findAutomationByGoalId, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { projectContextKey, recordContextSourceMarker, tryRecordRunEvent } from "../store/run-events";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import {
@@ -3228,9 +3239,38 @@ export async function runMcpInvocation(
     const advanceUsageFloor = () => {
       liveUsageFloor = liveUsageHigh;
     };
+    // ── persistent goal 축 ────────────────────────────────────────
+    // goal은 프롬프트 접두사가 아니라 호스트 상태다. 칩(chats.goal_id)이 이미
+    // 바인딩했으면 그 축을 쓰고, 칩 없이 per-turn goalMode로만 온 요청(모바일·
+    // 텔레그램 등)은 여기서 같은 축(durableWorkforceGoalId)으로 바인딩해 영속화한다.
+    // 원장 upsert는 fail-soft — Hephaestus 런타임이 없으면 기존 마커-단독 동작 그대로.
+    let activeGoalId: string | null = null;
+    if (!req.agentAppMode && chat.kind !== "division") {
+      activeGoalId = getChatGoalId(chat.id);
+      if (!activeGoalId && req.goalMode && canWrite) {
+        activeGoalId = durableWorkforceGoalId;
+        try {
+          setChatGoalBinding(chat.id, activeGoalId);
+        } catch {
+          activeGoalId = null;
+        }
+      }
+      if (activeGoalId && req.goalMode && !promptIsSystemAuthored) {
+        // 사용자의 최신 goal 문장이 원장의 objective가 된다(idempotent upsert).
+        await ensureGoalLedgerGoal({
+          goalId: activeGoalId,
+          objective: req.userPrompt,
+          projectDir: workforceProjectDir,
+        });
+      }
+    }
     // "계속 라이브로" 모드: 채팅에 켜져 있으면 짧은 상한(3턴)에서 멈춰 30분 간격 백그라운드로
     // 넘기지 않고, 같은 채팅에서 라이브 스트리밍을 계속 이어간다(사실상 무제한, 안전 상한만).
-    const continuousMode = !req.agentAppMode && !projectReadOnlyBoundary && chat.kind !== "division" && chat.continuousMode === true;
+    // persistent goal이 바인딩된 채팅은 goal이 미달인 동안 같은 라이브 루프를 기본으로 쓴다 —
+    // "goal 명령은 완성될 때까지 계속 도는 루프가 기본"(오너 요구). 정지 판단은 모델이 아니라
+    // goal 원장(예산·무진전·명시 종료)이 내린다.
+    const continuousMode = !req.agentAppMode && !projectReadOnlyBoundary && chat.kind !== "division" &&
+      (chat.continuousMode === true || activeGoalId != null);
     const maxPasses = req.agentAppMode
       ? 1
       : continuousMode
@@ -3259,9 +3299,34 @@ export async function runMcpInvocation(
     }
     result = sanitizeRestrictedPass(result);
     advanceUsageFloor();
+    // persistent goal 사이클 회계 — 매 패스를 원장에 기록하고(무진전·예산 감시),
+    // "계속 여부"는 (모델 마커 OR goal 미달)의 OR로 정한다. 반대 방향도 있다:
+    // 예산 소진·무진전 정지·명시 종료는 마커가 있어도 정지시킨다(폭주 방지, 사람 호출).
+    let latestGoalDecision: GoalLedgerDecision | null = null;
+    let goalHardStop: GoalLedgerDecision | null = null;
     for (let pass = 2; pass <= maxPasses; pass += 1) {
       const continuation = stripStormbreakerContinueMarker(result.text);
-      if (!continuation.shouldContinue || signal?.aborted) {
+      let passShouldContinue = continuation.shouldContinue;
+      let goalDrivenPass = false;
+      if (activeGoalId && continuousMode && !signal?.aborted) {
+        latestGoalDecision = await recordGoalLedgerCycle({
+          goalId: activeGoalId,
+          progressKey: goalProgressKeyForText(continuation.text),
+          outcome: passShouldContinue ? "pass-continue-marker" : "pass-final-output",
+          projectDir: workforceProjectDir,
+        }) ?? latestGoalDecision;
+        if (latestGoalDecision) {
+          if (passShouldContinue && !latestGoalDecision.continue && GOAL_HARD_STOP_REASONS.has(latestGoalDecision.reason)) {
+            passShouldContinue = false;
+            goalHardStop = latestGoalDecision;
+          } else if (!passShouldContinue && latestGoalDecision.continue) {
+            // Codex 동형: 모델이 마커를 안 붙여도 goal이 미달이면 계속한다.
+            passShouldContinue = true;
+            goalDrivenPass = true;
+          }
+        }
+      }
+      if (!passShouldContinue || signal?.aborted) {
         result = { ...result, text: continuation.text };
         break;
       }
@@ -3279,15 +3344,27 @@ export async function runMcpInvocation(
         if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind);
         sink({
           kind: "tool-use",
-          status:
-            locale === "ko" ? `계속 진행 중 · ${pass}턴째 (안 끊기고 이어짐)` : `Continuing · pass ${pass} (uninterrupted)`,
+          status: goalDrivenPass
+            ? locale === "ko"
+              ? `목표 미달 · ${pass}턴째 계속 (남은 작업 ${latestGoalDecision?.openTaskCount ?? 0}건)`
+              : `Goal not reached · continuing pass ${pass} (${latestGoalDecision?.openTaskCount ?? 0} open tasks)`
+            : locale === "ko" ? `계속 진행 중 · ${pass}턴째 (안 끊기고 이어짐)` : `Continuing · pass ${pass} (uninterrupted)`,
         });
       }
       stormbreaker?.continuePass({
         pass,
-        reason: "runner reported more safe Stormbreaker work remains",
+        reason: goalDrivenPass
+          ? "goal ledger reports the goal is not achieved yet"
+          : "runner reported more safe Stormbreaker work remains",
       });
-      const continuationPrompt = buildStormbreakerContinuationPrompt(result.text, pass);
+      const continuationPrompt = goalDrivenPass
+        ? buildGoalDrivenContinuationPrompt({
+            pass,
+            objective: latestGoalDecision?.objective ?? null,
+            openTaskCount: latestGoalDecision?.openTaskCount ?? 0,
+            previousOutput: result.text,
+          })
+        : buildStormbreakerContinuationPrompt(result.text, pass);
       activeRunnerReq = {
         ...runnerReq,
         // Remote Hub instructions stay at user authority. Reattach the exact
@@ -3369,16 +3446,59 @@ export async function runMcpInvocation(
       }
     }
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
-    const stormbreakerContinueRequested = !req.agentAppMode && finalContinuation.shouldContinue;
+    let stormbreakerContinueRequested = !req.agentAppMode && finalContinuation.shouldContinue;
     result = { ...result, text: finalContinuation.text };
+    // ── persistent goal 최종 판정 (L2: continue = 모델마커 OR goal 미달) ──────
+    // 라이브 루프가 이미 사이클을 기록했으면 그 판정을 재사용하고, 아니면(비-continuous
+    // 경로·read 경계 등) 여기서 한 사이클을 기록해 회계를 이어간다. goal 미달이면 마커
+    // 없이도 연속실행이 예약되고, 예산/정지/종료는 마커보다 우선한다.
+    if (!req.agentAppMode && activeGoalId && chat.kind !== "division" && !signal?.aborted) {
+      if (!latestGoalDecision) {
+        latestGoalDecision = await recordGoalLedgerCycle({
+          goalId: activeGoalId,
+          progressKey: goalProgressKeyForText(finalContinuation.text),
+          outcome: stormbreakerContinueRequested ? "turn-continue-marker" : "turn-final-output",
+          projectDir: workforceProjectDir,
+        });
+      }
+      if (latestGoalDecision) {
+        if (!stormbreakerContinueRequested && latestGoalDecision.continue) {
+          stormbreakerContinueRequested = true;
+        } else if (
+          stormbreakerContinueRequested &&
+          !latestGoalDecision.continue &&
+          GOAL_HARD_STOP_REASONS.has(latestGoalDecision.reason)
+        ) {
+          stormbreakerContinueRequested = false;
+          goalHardStop = latestGoalDecision;
+        }
+      }
+    }
+    if (goalHardStop) {
+      // 정지 사유를 숨기지 않는다 — 조용한 정지는 고장과 구분되지 않는다.
+      sink({
+        kind: "tool-use",
+        tool: {
+          name: "Goal Loop · halt",
+          result: locale === "ko"
+            ? `목표 실행을 멈추고 확인을 요청합니다 (사유: ${goalHardStop.reason}${goalHardStop.blockedReason ? ` · ${goalHardStop.blockedReason}` : ""}). 목표 칩을 다시 켜면 새 캠페인으로 재개됩니다.`
+            : `Goal execution halted for review (reason: ${goalHardStop.reason}${goalHardStop.blockedReason ? ` · ${goalHardStop.blockedReason}` : ""}). Re-enabling the goal chip resumes as a fresh campaign.`,
+        },
+      });
+    }
     // continuousMode는 안전 상한(20,000턴)이 사실상 안 걸리므로 정상적으론 이 분기에 안 들어온다.
     // 혹시라도 상한에 닿았는데 아직 할 일이 있다고 하면(진짜 폭주 등) 작업을 잃지 않도록 기존
-    // 백그라운드 30분 자동화로 안전하게 이어받는다.
+    // 백그라운드 자동화로 안전하게 이어받는다. persistent goal 채팅은 goal 미달이기만 해도
+    // (마커 없이) 여기로 들어와 앱 재시작·크래시 뒤에도 목표가 계속 돈다.
     if (!req.agentAppMode && stormbreakerContinueRequested && chat.kind !== "division" && canWrite) {
       const marker = `Source chat: ${chat.id}`;
-      const existingContinuation = listAutomations().find(
-        (automation) => automation.enabled && automation.promptTemplate.includes(marker),
-      );
+      // goal_id 1급 조회가 먼저다 — 프롬프트 마커 문자열 검색은 goal_id 없는 레거시
+      // 연속실행의 폴백으로만 남는다. goal당 연속실행은 정확히 한 행이다.
+      const goalContinuation = activeGoalId ? findAutomationByGoalId(activeGoalId) : null;
+      const existingContinuation = goalContinuation
+        ?? listAutomations().find(
+          (automation) => automation.enabled && automation.promptTemplate.includes(marker),
+        );
       // A hidden continuation is a new invocation, not a trusted continuation
       // of the current process. Pin an explicit single Hub hire as a Hub target
       // so the scheduler performs a fresh authoritative hepCall on every run.
@@ -3395,10 +3515,23 @@ export async function runMcpInvocation(
           targetId: continuationHubSlug,
         });
       }
+      if (existingContinuation && activeGoalId) {
+        // 레거시(마커로 찾은) 행에 goal 축을 심고, 목표가 다시 살아났는데 꺼진 행이면
+        // 새 행을 만들지 않고 정확히 그 행을 재가동한다.
+        if (existingContinuation.goalId !== activeGoalId) {
+          updateAutomation(existingContinuation.id, { goalId: activeGoalId });
+        }
+        if (!existingContinuation.enabled) toggleAutomation(existingContinuation.id, true);
+      }
       if (!existingContinuation) {
+        const continuationSchedule = activeGoalId
+          ? goalContinuationSchedule(latestGoalDecision)
+          : STORMBREAKER_LONG_RUN_SCHEDULE;
         createAutomation({
-          name: `Stormbreaker continuation · ${chat.title || agent.name}`,
-          scheduleHuman: STORMBREAKER_LONG_RUN_SCHEDULE,
+          name: activeGoalId
+            ? `Goal continuation · ${chat.title || agent.name}`
+            : `Stormbreaker continuation · ${chat.title || agent.name}`,
+          scheduleHuman: continuationSchedule,
           targetType: continuationHubSlug ? "hub" : chat.firmId ? "firm" : "agent",
           targetId: continuationHubSlug ?? chat.firmId ?? chat.agentId,
           promptTemplate: buildStormbreakerLongRunPrompt({
@@ -3408,12 +3541,15 @@ export async function runMcpInvocation(
             workingFolder,
           }),
           createdBy: "agent",
+          ...(activeGoalId ? { goalId: activeGoalId } : {}),
         });
         sink({
           kind: "tool-use",
           tool: {
-            name: "Stormbreaker Loop · long-run",
-            result: `More safe work remains after ${STORMBREAKER_MAX_EXECUTION_PASSES} immediate passes. Queued a hidden ${STORMBREAKER_LONG_RUN_SCHEDULE} continuation that reuses its own durable session and disables itself when the marker stops.`,
+            name: activeGoalId ? "Goal Loop · long-run" : "Stormbreaker Loop · long-run",
+            result: activeGoalId
+              ? `The goal is not achieved yet. Queued a hidden ${continuationSchedule} goal continuation that keeps running until the goal ledger reports completion, budget exhaustion, or an explicit end.`
+              : `More safe work remains after ${STORMBREAKER_MAX_EXECUTION_PASSES} immediate passes. Queued a hidden ${STORMBREAKER_LONG_RUN_SCHEDULE} continuation that reuses its own durable session and disables itself when the marker stops.`,
           },
         });
       }

@@ -171,7 +171,9 @@ function normalizeTool(
     safety: {
       externalCalls: Boolean(tool.safety?.externalCalls),
       fileWrites: Boolean(tool.safety?.fileWrites),
-      requiresApproval: tool.safety?.requiresApproval !== false,
+      // 승인 게이트 폐지(오너 이사회 결정 2026-08-10) — 생성 도구는 승인을 요구하지
+      // 않는다(예전 기본값은 true 였다). 필드는 매니페스트 호환을 위해 남긴다.
+      requiresApproval: false,
       notes:
         tool.safety?.notes ||
         "Generated tool packages are local scaffolds. They do not call external services or write outside their root by default.",

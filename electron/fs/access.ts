@@ -44,6 +44,11 @@ const GENERATED_ROOT_NAMES = [
 const LOCAL_MEDIA_EXTS = new Set([
   ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".avif", ".bmp",
   ".mp4", ".webm", ".mov", ".m4v", ".ogv",
+  /* ★PDF — 렌더러는 `agentlas://app` origin 이고 `webSecurity: true` 라서 `file://`
+     iframe 은 무조건 차단된다. 이 목록에 없으면 PDF 뷰어는 **구조적으로** 아무것도
+     못 띄운다(칩으로 광고만 하고 있었다). 서빙 경로는 이미지·영상과 동일한
+     main-authoritative root + realpath 검사를 그대로 통과한다. */
+  ".pdf",
 ]);
 
 const grants = new Map<string, GrantRecord>();

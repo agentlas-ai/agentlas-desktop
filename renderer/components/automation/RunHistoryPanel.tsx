@@ -2,7 +2,7 @@
 // 실행 기록 + "확인 필요" 처리. 이 패널의 계약: 확인이 필요하다고 말할 때는 반드시
 // (1) 무엇이 멈췄는지 실제 사유와 (2) 사용자가 지금 누를 수 있는 행동을 함께 준다.
 // 사유도 행동도 없는 "확인이 필요해요"는 사용자를 막다른 길에 세운다.
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
@@ -23,12 +23,6 @@ interface RunHistoryPanelProps {
   automation: Automation;
   locale: "ko" | "en";
   compact?: boolean;
-  /**
-   * 같은 열에서 캔버스가 이미 그 승인 카드를 그리고 있는가.
-   * 상세가 오른쪽 한 열로 합쳐진 뒤(2026-08-09), 승인 버튼이 두 장 쌓일 수 있게 됐다 —
-   * 같은 결정을 두 번 내놓으면 사용자는 둘이 다른 일을 한다고 읽는다. 승인은 한 번만.
-   */
-  approvalShownByCanvas?: boolean;
 }
 
 const POLL_MS = 5_000;
@@ -38,17 +32,9 @@ type NodeDecisionDraft = {
   output: string;
 };
 
-export function RunHistoryPanel({ automation, locale, compact = false, approvalShownByCanvas = false }: RunHistoryPanelProps) {
+export function RunHistoryPanel({ automation, locale, compact = false }: RunHistoryPanelProps) {
   const ko = locale === "ko";
   const [runs, setRuns] = useState<AutomationRunRecord[]>([]);
-  /* ★닫은 사실은 두 곳에 있어야 한다.
-     · DB(`automations.attention_cleared_at`) — 새로고침·재시작 뒤에도 닫혀 있다.
-     · 이 화면의 지역 상태 — `automation` 은 부모가 준 prop 이라 닫기 직후에 갱신되지
-       않는다. 저장만 하고 여기서 안 읽으면, 눌러도 카드가 그대로 남는다(실측). */
-  const [clearedLocallyAt, setClearedLocallyAt] = useState<number | null>(null);
-  // 검증 시점에는 최신 값이 필요하다 — 클로저가 잡은 옛 값으로 판단하면 늘 "안 바뀜"이 된다.
-  const latestRef = useRef<WorkflowRunSnapshot | null>(null);
-  const needsHelpRef = useRef(false);
   const [latest, setLatest] = useState<WorkflowRunSnapshot | null>(null);
   const [attentions, setAttentions] = useState<AutomationTriggerEventAttention[]>([]);
   const [reconciliation, setReconciliation] = useState<AutomationGraphReconciliation | null>(null);
@@ -63,9 +49,8 @@ export function RunHistoryPanel({ automation, locale, compact = false, approvalS
   const [fixMessage, setFixMessage] = useState("");
 
   /* ★"눌렀는데 아무 일도 안 일어남"을 구조적으로 금지한다.
-     어떤 행동이든 (1) 실행하고 (2) 다시 읽고 (3) **근거가 그대로면 그 사실을 말한다**.
-     조용히 그대로 두면 사용자는 같은 버튼을 다시 누르고, 그게 "아무리 눌러도 안 된다"의
-     정체였다. 케이스별 분기가 아니라 모든 행동에 같은 후처리를 건다. */
+     어떤 행동이든 (1) 실행하고 (2) 다시 읽는다. 조용히 그대로 두면 사용자는 같은
+     버튼을 다시 누르고, 그게 "아무리 눌러도 안 된다"의 정체였다. */
   const load = useCallback(async () => {
     const api = ipc();
     if (!api) return;
@@ -96,22 +81,6 @@ export function RunHistoryPanel({ automation, locale, compact = false, approvalS
       setRecoveryError(reconciliationErrorMessage(err, ko));
     }
   }, [automation.graph, automation.id, compact, ko]);
-
-  const actAndVerify = useCallback(async (
-    label: string,
-    run: () => Promise<void>,
-    stillBlocked: () => boolean,
-  ) => {
-    await run();
-    await load();
-    // load 직후의 state 는 아직 이 렌더에 안 들어왔다 — 다음 틱에 확인한다.
-    window.setTimeout(() => {
-      if (!stillBlocked()) return;
-      setFixMessage(ko
-        ? `${label} 했지만 같은 요구가 그대로 남아 있습니다. 아래 [기록 원문 보기]에 그 이유가 있습니다.`
-        : `${label} did not clear it — the same demand is still there. The raw record below says why.`);
-    }, 1200);
-  }, [ko, load]);
 
   useEffect(() => {
     void load();
@@ -190,11 +159,13 @@ export function RunHistoryPanel({ automation, locale, compact = false, approvalS
   // 같은 실행을 다른 말로 또 설명하지 않는다. 예전에는 한 화면에서 캔버스는
   // "확인이 필요합니다 — 아직 실행하지 않았습니다"라고 하고, 이 패널은
   // "끝까지 완료되지 않았어요"라고 해서, 한 상황에 설명 두 개와 버튼 네 개가 동시에 떴다.
-  // ★캔버스가 결정권을 갖는 것은 **사람의 결정이 필요한 실패**(승인 대기·거부·채점표 수정)뿐이다.
+  // ★캔버스가 결정권을 갖는 것은 **사람의 결정이 필요한 실패**(채점표 수정·입력 요구)뿐이다.
   //   예전에는 노드 실패가 하나라도 있으면 이 패널이 통째로 꺼졌는데, 환경 오류(브라우저 안 뜸·
   //   로그인 풀림)는 **항상** 노드 실패를 만들므로 — 정확히 수리 버튼이 필요한 순간에만
   //   [로그인 창 열기]·[실행 환경 복구]가 절대 나타나지 않았다.
-  const DECISION_CODES = new Set(["APPROVAL_REQUIRED", "APPROVAL_REJECTED", "APPROVAL_TIMED_OUT", "EVAL_STUCK", "NODE_INPUT_MISSING"]);
+  //   (승인 게이트는 오너 이사회 결정 2026-08-10 으로 폐지 — APPROVAL_* 는 더 이상 나오지 않는다.
+  //    EVAL_STUCK·NODE_INPUT_MISSING 은 승인이 아니라 진짜 입력/판정 요구라 남는다.)
+  const DECISION_CODES = new Set(["EVAL_STUCK", "NODE_INPUT_MISSING"]);
   const failureCodes = Object.values(latest?.nodeFailures ?? {}).map((f) => f?.code).filter(Boolean);
   const canvasOwnsDecision = failureCodes.length > 0 && failureCodes.every((code) => DECISION_CODES.has(code));
   // 최신 스냅샷의 error도, 사용자가 그보다 뒤에 요구를 닫았다면 다시 올리지 않는다 —
@@ -204,10 +175,9 @@ export function RunHistoryPanel({ automation, locale, compact = false, approvalS
   /* 닫기가 남긴 시각 이전에 시작된 실행의 요구는 종류와 무관하게 닫힌 것으로 본다.
      예전에는 run_history 행으로만 판단해서, 스냅샷의 error 로 떠 있는 카드는
      닫아도 그대로 남았다 — 끌 수 없는 카드가 곧 막다른 길이다. */
-  const clearedAt = Math.max(
-    automation.attentionClearedAt ? Date.parse(automation.attentionClearedAt) : Number.NEGATIVE_INFINITY,
-    clearedLocallyAt ?? Number.NEGATIVE_INFINITY,
-  );
+  const clearedAt = automation.attentionClearedAt
+    ? Date.parse(automation.attentionClearedAt)
+    : Number.NEGATIVE_INFINITY;
   const latestClearedByUser = Boolean(
     latest && Number.isFinite(clearedAt) && Date.parse(latest.startedAt) <= clearedAt,
   );
@@ -234,14 +204,12 @@ export function RunHistoryPanel({ automation, locale, compact = false, approvalS
     || Object.values(latest?.nodeStates ?? {}).some((state) => state === "running");
   const latestKernelOk = latest?.status === "ok"
     && Object.keys(latest?.nodeFailures ?? {}).length === 0;
-  latestRef.current = latest;
   const blockingRunOpen = Boolean(blockingRun) && !(
     Number.isFinite(clearedAt) && blockingRun && Date.parse(blockingRun.ranAt) <= clearedAt
   );
   const needsHelp = !canvasOwnsDecision && !liveRunning && !latestKernelOk
     && Boolean(reconciliation || regularAttentions.length > 0
       || (latest?.status === "error" && !latestAcknowledged) || blockingRunOpen);
-  needsHelpRef.current = needsHelp;
   // 기록 원문(판정 코드 접두사 제거). 평이한 설명 아래 "자세히"로만 노출한다.
   // 미확정 부작용이 남아 있으면 백엔드가 재실행을 즉시 거부한다(중복 게시 방지).
   // 눌리는 버튼을 두면 "눌러도 아무 일이 없다"가 된다.
@@ -249,55 +217,9 @@ export function RunHistoryPanel({ automation, locale, compact = false, approvalS
   const fixOptionIds = new Set((fixPlan?.options ?? []).map((option) => option.actionId));
   const hasRetryOption = fixOptionIds.has("retry_run");
   const hasSessionOption = fixOptionIds.has("ask_in_session");
-  /* ★승인 대기에는 "다시 실행"을 권하지 않는다.
-     실측(2026-08-09 오너 녹화): 사용자가 이 카드의 [지금 다시 실행]을 반복해서 눌렀고
-     매번 같은 승인 대기에 다시 걸렸다 — 이 카드는 run_history 행이라 nodeId 가 없어
-     승인 자체를 할 수 없다. 승인은 상세 탭의 노드 카드가 한다. 여기서는 재실행을
-     막고 어디서 결정하면 되는지만 말한다. 누르면 같은 일이 반복되는 버튼은
-     "제어권"이 아니라 함정이다(HE.md 제어성·사용 오류에 대한 견고성). */
-  /* ★승인을 기다리는 노드는 **스냅샷이 알고 있다**. 이 카드는 run_history 행이라
-     nodeId 가 없다고 재실행만 권했는데, 같은 패널이 이미 들고 있는 latest 스냅샷의
-     nodeFailures 에 그 nodeId 가 들어 있다. 오너 지적(2026-08-09):
-     "저거 자체에 다시실행이 아니고 승인이 나와야 하는거 아니냐?" — 맞다. */
-  /* ★원인은 **기계가 남긴 표식**으로만 정한다 — 문장을 읽어 추측하지 않는다.
-     실측(2026-08-09, 두 건):
-       · 파이썬 네트워크 오류가 "승인 대기"로 둔갑했다.
-       · 판정 모델이 3일 전 실행에 쓴 한국어 문장 "사용자 승인 대기 중"을 정규식이
-         매치해, **오늘 성공한 실행** 위에 가짜 승인 카드를 띄웠다. 그 버튼은 자기를
-         띄운 근거(3일 전 run_history 행)를 건드릴 수 없어서 몇 번을 눌러도 그대로였다.
-     추측으로 만든 원인은 반드시 막다른 길을 만든다 — 없는 문제는 해결할 수 없기 때문이다. */
-  const approvalNodeId = useMemo(
-    () => Object.entries(latest?.nodeFailures ?? {})
-      .find(([, f]) => f?.code === "APPROVAL_REQUIRED")?.[0] ?? null,
-    [latest?.nodeFailures],
-  );
-  const awaitingApprovalDecision = approvalNodeId !== null;
-  const [approving, setApproving] = useState(false);
-  const [dismissing, setDismissing] = useState(false);
-  const approveAndContinue = useCallback(async () => {
-    const api = ipc();
-    if (!api || !approvalNodeId || approving) return;
-    setApproving(true);
-    setFixMessage(ko ? "승인했습니다. 멈춘 자리부터 이어서 실행합니다…" : "Approved. Continuing from where it stopped…");
-    try {
-      const result = await api.automations.decideNodeApproval(automation.id, approvalNodeId, "approved");
-      if (!result?.ok) {
-        setFixMessage(ko ? "지금 이 단계에서 기다리고 있는 실행이 없습니다." : "No run is waiting on this step right now.");
-        return;
-      }
-      await actAndVerify(
-        ko ? "승인" : "Approving",
-        () => api.automations.runNow(automation.id).then(() => undefined),
-        () => latestRef.current?.nodeFailures?.[approvalNodeId]?.code === "APPROVAL_REQUIRED",
-      );
-    } catch {
-      setFixMessage(ko ? "승인을 저장하지 못했어요. 잠시 뒤 다시 시도해 주세요." : "The approval was not saved. Try again shortly.");
-    } finally {
-      setApproving(false);
-    }
-  }, [approvalNodeId, approving, automation.id, ko, load]);
-
-  const rerunBlocked = Boolean(reconciliation) || awaitingApprovalDecision;
+  /* 승인 게이트 폐지(오너 이사회 결정 2026-08-10) — 이 패널은 더 이상 승인을 묻지도,
+     승인 대기를 감지하지도 않는다. 재실행을 막는 것은 부작용 미확정(reconciliation)뿐이다. */
+  const rerunBlocked = Boolean(reconciliation);
   const rawReason = useMemo(
     () => stripReasonCode(blockingRun?.error ?? regularAttentions[0]?.lastError ?? ""),
     [blockingRun?.error, regularAttentions],
@@ -498,48 +420,21 @@ export function RunHistoryPanel({ automation, locale, compact = false, approvalS
         <section className="automation-reconcile-card" role="status">
           <div className="automation-reconcile-head">
             <div>
-              {/* ★승인 대기를 "확인이 필요해요 / 일부만 됐어요"로 부르면 오류처럼 읽힌다.
-                  아무것도 실패하지 않았고, 우리가 사람의 결정을 기다린 것뿐이다
-                  (오너 지적: "확인이 필요한걸 왜 오류로 하냐고"). */}
-              <span>{awaitingApprovalDecision
-                ? (ko ? "내 승인을 기다리는 중" : "Waiting for your approval")
-                : (ko ? "확인이 필요해요" : "Needs attention")}</span>
-              <strong>{awaitingApprovalDecision
-                ? (ko ? "승인하면 멈춘 자리부터 이어집니다" : "Approving continues it from where it stopped")
-                : blockingRun ? plainRun(blockingRun, ko).title : plainOutcome("error", ko).title}</strong>
+              <span>{ko ? "확인이 필요해요" : "Needs attention"}</span>
+              <strong>{blockingRun ? plainRun(blockingRun, ko).title : plainOutcome("error", ko).title}</strong>
             </div>
           </div>
           {/* 상황 설명은 제품이 실제 상태(브라우저 세션·권한·로그인·런타임)를 보고 만든 문장을
               우선한다. 계산이 아직/불가면 상태 기반 기본 문장으로 내려간다. */}
-          <p>{awaitingApprovalDecision
-            ? (ko
-              ? "바깥으로 나가는 단계 앞에서 멈췄습니다. 아직 아무것도 나가지 않았어요."
-              : "It stopped before a step that reaches outside. Nothing has gone out yet.")
-            : fixPlan && !fixPlan.unavailable && fixPlan.summary
-              ? fixPlan.summary
-              : blockingRun ? plainRun(blockingRun, ko).body : plainOutcome("error", ko).body}</p>
+          <p>{fixPlan && !fixPlan.unavailable && fixPlan.summary
+            ? fixPlan.summary
+            : blockingRun ? plainRun(blockingRun, ko).body : plainOutcome("error", ko).body}</p>
           {fixPlan?.question ? <p className="automation-fix-question">{fixPlan.question}</p> : null}
           {/* 모델 제안과 우리 버튼이 같은 동작이면 하나만 남긴다(아래 주석 참조). */}
           <div className="automation-reconcile-actions">
-            {/* ★승인 대기의 주 행동은 승인이다 — 여기서 바로 끝난다. 다른 데로
-                보내지 않는다(예전에는 "오른쪽 상세에서 승인하세요"라고 안내만 했다). */}
-            {approvalNodeId && !approvalShownByCanvas ? (
-              <button
-                type="button"
-                data-testid="attention-approve"
-                data-primary="true"
-                disabled={approving}
-                onClick={() => void approveAndContinue()}
-              >
-                {approving
-                  ? (ko ? "승인하는 중…" : "Approving…")
-                  : (ko ? "승인하고 이어서 실행" : "Approve and continue")}
-              </button>
-            ) : null}
             {/* 실행 가능한 조치 — 로그인 창 열기, macOS 설정 열기, 실행 환경 복구처럼
-                누르면 진짜로 그 일이 일어나는 버튼만 나온다. 승인 대기에는 모델의
-                복구 제안이 끼어들 자리가 없다 — 고장이 아니기 때문이다. */}
-            {(awaitingApprovalDecision ? [] : (fixPlan?.options ?? [])).map((option) => (
+                누르면 진짜로 그 일이 일어나는 버튼만 나온다. */}
+            {(fixPlan?.options ?? []).map((option) => (
               <button
                 key={option.actionId}
                 type="button"
@@ -574,57 +469,8 @@ export function RunHistoryPanel({ automation, locale, compact = false, approvalS
               {rerunning ? (ko ? "시작하는 중…" : "Starting…") : ko ? "지금 다시 실행" : "Run again now"}
             </button>
             ) : null}
-            {/* 닫기 — 과거 실행의 요구가 해소 수단 없이 눌러앉는 것을 끊는다(오너 보고
-                2026-08-06). 기록은 아래 목록에 남고, 부작용 미확정(reconciliation)
-                상태는 사람이 확정하기 전엔 닫을 수 없다 — 그건 알림이 아니라 빚이다. */}
-            {/* ★종결 행동 — 조건 없이 항상 있다.
-                예전에는 `blockingRun && !reconciliation` 일 때만 닫기가 있었다. 그래서
-                카드가 스냅샷의 error 로 떠 있으면 **끌 방법이 아예 없었다**(막다른 길).
-                어떤 카드든 사람이 끝낼 수 있어야 한다는 것이 이 버튼의 유일한 존재 이유다.
-                미확정 부작용(reconciliation)만 예외 — 그건 알림이 아니라 빚이고,
-                아래에 확정 버튼이 따로 있다. */}
-            {!reconciliation ? (
-              <button
-                type="button"
-                data-testid="dismiss-needs-attention"
-                disabled={dismissing}
-                onClick={() => {
-                  void (async () => {
-                    const api = ipc();
-                    if (!api) return;
-                    setDismissing(true);
-                    try {
-                      await actAndVerify(
-                        ko ? "닫기" : "Dismissing",
-                        async () => {
-                          await api.automations.acknowledgeAttention(automation.id);
-                          setClearedLocallyAt(Date.now());
-                        },
-                        () => needsHelpRef.current,
-                      );
-                    } catch {
-                      setFixMessage(ko ? "알림을 닫지 못했어요. 잠시 뒤 다시 시도해 주세요." : "Could not dismiss. Try again shortly.");
-                    } finally {
-                      setDismissing(false);
-                    }
-                  })();
-                }}
-                title={ko
-                  ? "이 실행 기록은 아래 목록에 그대로 남고, 이 알림만 닫습니다."
-                  : "The run stays in the history below; only this notice is dismissed."}
-              >
-                {dismissing ? (ko ? "닫는 중…" : "Dismissing…") : (ko ? "이 알림 닫기" : "Dismiss this notice")}
-              </button>
-            ) : null}
           </div>
-          {awaitingApprovalDecision ? (
-            <p className="automation-fix-result">
-              {ko
-                ? "다시 실행하면 같은 자리에서 또 멈춥니다 — 승인이 이 실행을 이어가는 유일한 길입니다."
-                : "Running again stops at the same place — approving is the only thing that moves this run forward."}
-            </p>
-          ) : null}
-          {rerunBlocked && !awaitingApprovalDecision ? (
+          {rerunBlocked ? (
             <p className="automation-fix-result">
               {ko
                 ? "아래에서 실제 실행 여부를 확정하기 전에는 다시 실행할 수 없어요 — 같은 동작이 두 번 일어나는 걸 막기 위해서예요."
@@ -877,19 +723,6 @@ function summarizeSnapshot(snap: WorkflowRunSnapshot | null, ko: boolean): { tit
     };
   }
   if (snap.status === "error" || failed > 0) {
-    /* ★승인 대기는 실패가 아니라 **일시정지**다(run-graph 의 계약과 같은 말).
-       한 상황을 위 상태줄은 "멈춰 있습니다 — 승인하면 이어집니다"라고 하고 여기서는
-       "끝까지 완료되지 않았어요"라고 하면, 사용자는 두 개의 다른 일이 일어난 줄 안다
-       (HE.md 중복 효과). 같은 사실은 같은 말로 한 번만. */
-    const waiting = Object.values(snap.nodeFailures ?? {}).some((f) => f?.code === "APPROVAL_REQUIRED");
-    if (waiting) {
-      return {
-        title: ko ? "승인을 기다리는 중이에요" : "Waiting for your approval",
-        detail: ko
-          ? "아직 바깥으로 나간 것은 없어요. 승인하면 멈춘 자리부터 이어집니다."
-          : "Nothing has gone out yet. Approving continues from where it stopped.",
-      };
-    }
     return {
       title: ko ? "끝까지 완료되지 않았어요" : "Not fully completed",
       detail: ko ? "완료로 처리하지 않았어요." : "It was not marked complete.",

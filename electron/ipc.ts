@@ -1,6 +1,6 @@
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
-import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { checkComputerUsePermissions } from "./mac-permissions";
 import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
@@ -366,11 +366,14 @@ import {
   removeChat,
   renameChat,
   setChatContinuousMode,
+  setChatGoalBinding,
   setChatRuntimeSelection,
   setChatSwarmMode,
   setChatWorkingFolder,
   unarchiveChat,
 } from "./store/chats";
+import { completeGoalLedgerGoal, ensureGoalLedgerGoal } from "./mcp/goal-ledger";
+import { findAutomationByGoalId } from "./store/automations";
 import { getOrCreateAutomationSession } from "./store/automation-sessions";
 import {
   acceptCanonicalTaskResult,
@@ -742,7 +745,6 @@ function oneImprovementProofListTaskId(input: unknown): string | undefined {
 }
 let pendingConfirmationCount = 0;
 let pendingConfirmationBounceId: number | null = null;
-let lastPendingConfirmationNoticeAt = 0;
 
 /**
  * custom_base_url 검증 — byok.ts가 이 값으로 BYOK 키를 Bearer 전송하므로 임의 origin 재지정을 막는다.
@@ -806,24 +808,8 @@ function applyPendingConfirmationAttention(win: BrowserWindow | null, rawCount: 
     // ignore platform-specific attention failures
   }
 
-  const now = Date.now();
-  if (now - lastPendingConfirmationNoticeAt < 30_000) return;
-  lastPendingConfirmationNoticeAt = now;
-
-  try {
-    if (Notification.isSupported()) {
-      const ko = currentUiLocale() === "ko";
-      new Notification({
-        title: ko ? "Agentlas 승인 대기" : "Agentlas approval pending",
-        body: ko
-          ? (count === 1 ? "에이전트가 결정을 기다리고 있습니다." : `${count}개의 에이전트 승인 요청이 대기 중입니다.`)
-          : (count === 1 ? "An agent is waiting on a decision." : `${count} agent approval requests are pending.`),
-        silent: false,
-      }).show();
-    }
-  } catch {
-    // Native notifications can be disabled by the OS.
-  }
+  // 승인 게이트 폐지(오너 이사회 결정 2026-08-10) — "Agentlas 승인 대기" macOS 알림은
+  // 더 이상 보내지 않는다. 배지/도크 표시는 남는다(정보 표시이지 승인 요구가 아니다).
 }
 
 function recordAppFactoryOperation(
@@ -963,72 +949,14 @@ export function assertTrustedSitePublishIpcSender(event: IpcMainInvokeEvent): Br
 }
 
 async function confirmNativeSiteAgentAppMcp(
-  win: BrowserWindow,
-  recommendation: SiteAgentAppMcpRecommendation,
+  _win: BrowserWindow,
+  _recommendation: SiteAgentAppMcpRecommendation,
 ): Promise<"approved" | "declined"> {
-  const ko = currentUiLocale().toLowerCase().startsWith("ko");
-  const lines = recommendation.rows.map((row) => {
-    const credential = row.credentialMode === "keyless"
-      ? (ko ? "키 불필요" : "no key required")
-      : row.keyState === "present"
-        ? (ko ? "API 키 확인됨" : "API key present")
-        : row.keyState === "missing"
-          ? (ko ? "API 키 없음" : "API key missing")
-          : (ko ? "API 키 상태 확인 불가" : "API key state unavailable");
-    const readiness = row.readiness === "ready"
-      ? (ko ? "실행 전 연결 검증 예정" : "will verify before each run")
-      : row.readiness === "not-installed"
-        ? (ko ? "미설치 · 연결하지 않음" : "not installed · will not attach")
-        : row.readiness === "missing-key"
-          ? (ko ? "키 없음 · 연결하지 않음" : "missing key · will not attach")
-          : (ko ? "설정 미완료 · 연결하지 않음" : "not configured · will not attach");
-    return `• ${row.name} (${row.catalogId}) · ${credential} · ${readiness}`;
-  });
-  const blockedLines = recommendation.blocked.map((issue) =>
-    `• ${issue.id} · ${ko ? "Agent App 안전 정책에서 차단" : "blocked by Agent App safety policy"}`,
-  );
-  const detail = ko
-    ? [
-        ...lines,
-        ...blockedLines,
-        "",
-        "연결 후보는 Desktop 시스템 전역 MCP에서 확인했습니다.",
-        "차단 항목은 에이전트 번들의 앱 선언에서 안전 정책에 따라 제외했습니다.",
-        "허용해도 설치·키 생성·로그인은 자동으로 하지 않습니다.",
-        "키가 없거나 준비되지 않은 MCP는 붙이지 않고, 이번 앱 생성과 실행은 MCP 없이 계속합니다.",
-        "실행 직전에 설치/키/연결/런타임을 다시 확인하고, 하나라도 실패하면 해당 MCP만 빼고 MCP 없이 계속 실행합니다.",
-        "비밀값, 키 이름, 로컬 경로, 서버 오류 원문은 앱 화면으로 전달하지 않습니다.",
-      ].join("\n")
-    : [
-        ...lines,
-        ...blockedLines,
-        "",
-        "Connection candidates were resolved from Desktop's system-wide MCP registry.",
-        "Blocked items came from the agent bundle's app declaration and were excluded by safety policy.",
-        "Allowing this does not install a server, create a key, or sign in automatically.",
-        "A missing key or unready MCP is left unattached; this app still builds and runs without MCP.",
-        "Agentlas rechecks installation, key, connection, and runtime eligibility before every run. Any failure removes only that MCP and continues without that capability.",
-        "Secret values, key names, local paths, and raw server errors never reach the app UI.",
-      ].join("\n");
-  const result = await dialog.showMessageBox(win, {
-    type: "question",
-    buttons: recommendation.rows.length > 0
-      ? ko ? ["MCP 없이 계속", "준비된 MCP 연결"] : ["Continue without MCP", "Attach ready MCP"]
-      : [ko ? "확인" : "OK"],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true,
-    title: ko ? "Agent App MCP 연결 검토" : "Review Agent App MCP access",
-    message: ko
-      ? recommendation.rows.length > 0
-        ? `${recommendation.targetName} 앱을 만들기 전에 시스템 전역 MCP를 연결할까요?`
-        : `${recommendation.targetName} 앱에서 차단된 MCP 선언을 확인하세요.`
-      : recommendation.rows.length > 0
-        ? `Attach system-wide MCPs before building ${recommendation.targetName}?`
-        : `Review the MCP declarations blocked for ${recommendation.targetName}.`,
-    detail,
-  });
-  return recommendation.rows.length > 0 && result.response === 1 ? "approved" : "declined";
+  /* 승인 게이트 폐지(오너 이사회 결정 2026-08-10) — 빌드 전 MCP 연결 검토 모달은 더
+     이상 띄우지 않고, 예전 모달의 기본 버튼이던 "MCP 없이 계속"(= declined)을 자동
+     선택한다. 앱 생성·실행은 MCP 없이 계속되고, 어떤 MCP 도 자동으로 붙지 않는다 —
+     실행 직전 설치/키/연결/런타임 재검증과 안전 정책 차단은 그대로 남는다. */
+  return "declined";
 }
 
 /**
@@ -3246,6 +3174,42 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("chats:setContinuousMode", (_e, id: string, enabled: boolean) => {
     setChatContinuousMode(id, enabled);
+    return getChat(id);
+  });
+  /*
+   * 목표 추진 칩 — 켜면 단순 프롬프트 접두사가 아니라 persistent goal이 된다:
+   * ① goal_ledger 축(goal_id)을 chat에 바인딩(대화가 Task로 승격돼도 축 불변),
+   * ② goal 원장 행 생성(best-effort — 첫 goal 전송이 objective를 최신 문장으로 채움),
+   * ③ continuousMode 자동 ON(완성까지 계속 도는 루프가 기본).
+   * 끄기(칩 ×)는 단순 off가 아니라 **명시적 목표 종료**다: 원장 cancelled, 이
+   * goal의 연속실행 자동화 정확히 한 행 비활성화, 바인딩 해제.
+   * 원장 호출은 fail-soft(런타임 없으면 조용히 생략)이며 UI 응답을 막지 않는다.
+   */
+  ipcMain.handle("chats:setGoalMode", (_e, id: string, enabled: boolean) => {
+    const chat = getChat(id);
+    if (!chat) throw new Error(`Chat not found: ${id}`);
+    if (enabled) {
+      const task = getCanonicalTaskForChat(id);
+      const goalId = chat.goalId ?? desktopWorkforceGoalId(task?.id ?? id);
+      setChatGoalBinding(id, goalId);
+      setChatContinuousMode(id, true);
+      const objective = (chat.title || "").trim() || "Persistent goal for this conversation";
+      void ensureGoalLedgerGoal({
+        goalId,
+        objective,
+        projectDir: getChatWorkingFolder(id),
+      });
+    } else if (chat.goalId) {
+      const continuation = findAutomationByGoalId(chat.goalId);
+      if (continuation?.enabled) toggleAutomation(continuation.id, false);
+      void completeGoalLedgerGoal({
+        goalId: chat.goalId,
+        status: "cancelled",
+        reason: "user-ended-goal-chip",
+        projectDir: getChatWorkingFolder(id),
+      });
+      setChatGoalBinding(id, null);
+    }
     return getChat(id);
   });
   ipcMain.handle("chats:setSwarmMode", (_e, id: string, enabled: boolean) => {

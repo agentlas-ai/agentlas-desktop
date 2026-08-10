@@ -185,7 +185,8 @@
       "nextActions": [
         "edit_graph"
       ],
-      "status": "implemented"
+      "status": "specified",
+      "note": "승인 게이트 폐지(오너 이사회 결정 2026-08-10)로 커널이 더 이상 내지 않는다. 옛 실행 기록(automation_node_approvals)에 남은 코드를 읽기 위한 어휘로만 유지."
     },
     {
       "code": "MUTATION_UNVERIFIED",

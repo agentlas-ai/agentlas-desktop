@@ -59,6 +59,8 @@ interface Props {
   hasPipeline?: boolean;
   width?: number;
   onResizeWidth?: (width: number) => void;
+  /** 파일을 **내용까지 읽어서** 뷰어에 올린다. 부모만 chatId 스코프의 fs 접근을 갖는다. */
+  onHydrateFilePreview?: (preview: WorkspaceFilePreview) => void | Promise<void>;
 }
 
 export function ChatRightPanel({
@@ -69,6 +71,7 @@ export function ChatRightPanel({
   artifact,
   surface,
   filePreview: externalFilePreview,
+  onHydrateFilePreview,
   linkedFiles = [],
   onSurfaceAction,
   onSurfaceStatePatch,
@@ -173,7 +176,8 @@ export function ChatRightPanel({
       </header>
 
       <nav style={tabsStyle} aria-label={ko ? "우측 패널 탭" : "Right panel tabs"}>
-        <TabButton tab="agent" activeTab={activeTab} onClick={onTabChange} label={ko ? "에이전트" : "Agents"} icon={<IconNetwork size={13} />} />
+        {/* ★도는 중이라는 사실은 탭을 눌러야 알 수 있으면 안 된다 — 눌러 보기 전에 보여야 한다. */}
+        <TabButton tab="agent" activeTab={activeTab} onClick={onTabChange} label={ko ? "에이전트" : "Agents"} icon={<IconNetwork size={13} />} badge={busy || Object.values(liveAgents).some((entry) => entry.active)} />
         <TabButton tab="file" activeTab={activeTab} onClick={onTabChange} label={ko ? "파일" : "Files"} icon={<IconFolder size={13} />} />
         <TabButton tab="panel" activeTab={activeTab} onClick={onTabChange} label={ko ? "미리보기" : "Preview"} icon={<IconPanelRight size={13} />} badge={hasPanelContent} />
         <TabButton tab="memory" activeTab={activeTab} onClick={onTabChange} label={ko ? "기억" : "Memory"} icon={<IconSparkles size={13} />} />
@@ -189,6 +193,17 @@ export function ChatRightPanel({
               onTabChange("panel");
             }}
             onOpenFilePreview={(preview) => {
+              /* ★파일을 열 때는 **반드시 내용을 읽어서** 연다.
+                 링크된 파일 목록이 넘겨주는 preview 는 `content: ""` 인 껍데기다
+                 (`workspacePreviewFromLinkedFile`). 예전엔 그걸 그대로 뷰어에 넣어서
+                 헤더는 뜨는데 본문만 백지인 화면이 나왔다 — 사용자에게는 "미리보기가
+                 아무것도 못 띄운다"로 보였다. 하이드레이션은 부모(TaskCockpit)만 할 수
+                 있으므로(chatId 스코프의 fs 접근) 여기서 자체 상태로 처리하지 않는다. */
+              if (onHydrateFilePreview) {
+                void onHydrateFilePreview(preview);
+                onTabChange("panel");
+                return;
+              }
               setFilePreview(preview);
               setViewerSource("file");
               onTabChange("panel");
@@ -619,14 +634,16 @@ function FileTab({
 
   return (
     <div style={fileTabStyle}>
+      {/* ★"산출물 0"인데 아래에 파일이 27개 있는 화면은 거짓 신호였다. 이 섹션이 세는 것은
+          만들어진 결과물이 아니라 **지금 뷰어에 올라와 있는 것**이다. 이름을 실제에 맞추고,
+          없을 때는 0을 자랑하는 대신 섹션을 접는다 — 사람이 세는 것은 아래의 산출물이다. */}
+      {outputRows.length > 0 && (
       <section style={outputsStyle}>
         <div style={sectionHeaderStyle}>
-          <span>{ko ? "산출물" : "Outputs"}</span>
+          <span>{ko ? "열린 뷰어" : "Open viewers"}</span>
           <span>{outputRows.length}</span>
         </div>
-        {outputRows.length === 0 ? (
-          <div style={smallEmptyStyle}>{ko ? "열린 산출물이 아직 없습니다." : "No outputs opened yet."}</div>
-        ) : (
+        {(
           <div style={outputListStyle}>
             {outputRows.map((row) => (
               <button
@@ -646,10 +663,18 @@ function FileTab({
           </div>
         )}
       </section>
+      )}
+      {linkedFiles.length === 0 && outputRows.length === 0 && (
+        <div style={smallEmptyStyle}>
+          {ko
+            ? "아직 만들어진 산출물이 없습니다. 에이전트가 파일을 만들면 여기에 바로 올라옵니다."
+            : "Nothing produced yet. Files the agent creates show up here."}
+        </div>
+      )}
       {linkedFiles.length > 0 && (
         <section style={outputsStyle}>
           <div style={sectionHeaderStyle}>
-            <span>{ko ? "링크된 파일" : "Linked files"}</span>
+            <span>{ko ? "산출물" : "Outputs"}</span>
             <span>{linkedFiles.length}</span>
           </div>
           <div style={outputListStyle}>
@@ -741,6 +766,21 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
           </div>
         ) : file.viewerKind === "pdf" ? (
           <iframe src={file.fileUrl} title={file.name} style={iframePreviewStyle} />
+        ) : isTextualViewerKind(file.viewerKind) && !file.content ? (
+          /* ★내용이 없으면 **백지 대신 이유를 말한다.** 헤더만 뜨고 본문이 비어 있는
+             화면은 "미리보기가 고장났다"로 읽힌다 — 실제로 그렇게 보고됐다. */
+          <div style={unsupportedViewerStyle}>
+            <IconFileUp size={28} style={{ color: "var(--muted)" }} />
+            <strong>{ko ? "이 파일의 내용을 읽지 못했습니다" : "Could not read this file"}</strong>
+            <p>
+              {ko
+                ? "파일이 옮겨졌거나 이 대화의 작업 폴더 밖에 있을 수 있습니다. 기본 앱으로 열어 확인하세요."
+                : "It may have moved, or it sits outside this chat's working folder. Open it in its default app."}
+            </p>
+            <button type="button" onClick={openExternal} style={fileViewerPrimaryButtonStyle}>
+              {ko ? "파일 열기" : "Open file"}
+            </button>
+          </div>
         ) : file.viewerKind === "markdown" ? (
           <MarkdownFileViewer file={file} />
         ) : file.viewerKind === "json" || file.viewerKind === "text" ? (
@@ -767,6 +807,11 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
       </div>
     </section>
   );
+}
+
+/** 본문을 텍스트로 그리는 뷰어들 — 이들만 `content` 하이드레이션에 의존한다. */
+function isTextualViewerKind(kind: WorkspaceFilePreview["viewerKind"]): boolean {
+  return kind === "markdown" || kind === "json" || kind === "text";
 }
 
 function externalOpenTargets(file: WorkspaceFilePreview): string[] {

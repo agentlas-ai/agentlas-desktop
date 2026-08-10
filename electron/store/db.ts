@@ -427,6 +427,29 @@ function recoverStaleAutomationRunsInDb(db: Database.Database, now: Date): numbe
           JSON.stringify({ replaySafeCheckpoint: sealedRecoveryCheckpointIsReplaySafe(candidate) }),
         );
       }
+      /*
+       * ★목표 재기동 (2026-08-10) — 죽은 런을 error로 "닫기만" 하던 자리에,
+       * goal 연속실행(automations.goal_id)만은 다음 tick에 재투입한다.
+       * 진행 중이던 목표는 프로세스가 죽었다고 끝난 것이 아니다("에이전트가
+       * 죽거나 멈추면 다시 띄워서 계속 진행"). 시계 트리거이고 켜져 있는
+       * 자동화에 한해 next_run_at을 지금으로 당긴다 — 예산·정지 판단은
+       * 실행 시점에 goal 원장(should_continue)이 다시 내린다.
+       * 이 UPDATE가 참조하는 칸(goal_id·enabled·next_run_at·trigger_type) 중
+       * 하나라도 없는 옛 스키마에서는 통째로 건너뛴다 — 복구 경로는 어떤
+       * 과거 스키마 위에서도 죽어선 안 된다(v52 픽스처가 실측한다).
+       */
+      const automationColumns = new Set(
+        schemaColumns(db, "automations").map((column) => column.name),
+      );
+      if (["goal_id", "enabled", "next_run_at", "trigger_type"].every((column) => automationColumns.has(column))) {
+        db.prepare(
+          `UPDATE automations
+           SET next_run_at = ?
+           WHERE id = ? AND enabled = 1 AND goal_id IS NOT NULL
+             AND COALESCE(trigger_type, 'schedule') = 'schedule'
+             AND (next_run_at IS NULL OR next_run_at > ?)`,
+        ).run(now.toISOString(), candidate.automation_id, now.toISOString());
+      }
     }
     return recovered;
   });
@@ -4117,8 +4140,19 @@ export function initStore(options: StoreInitOptions = {}): void {
    * 이미 있으면 아무 일도 하지 않으므로 부팅 비용은 PRAGMA 몇 번뿐이다.
    */
   const REQUIRED_COLUMNS: Record<string, Array<[string, string]>> = {
+    /*
+     * ★persistent-goal 루프의 조인 축 (2026-08-10).
+     *
+     * goal_id는 세 조각(goalMode 칩 · workforce goal_binding · Stormbreaker
+     * 연속실행)을 잇는 단 하나의 축이다. chats.goal_id = 이 채팅이 추진 중인
+     * 목표(NULL=목표 없음, 칩 OFF), automations.goal_id = 이 자동화가 어느
+     * 목표의 연속실행인가(마커 문자열 검색 대신 1급 컬럼). 원장 자체는
+     * ~/.agentlas/networking/workforce-goals.sqlite3 (goal_ledger 테이블)에 산다.
+     */
+    chats: [["goal_id", "goal_id TEXT"]],
     automations: [
       ["goal", "goal TEXT"],
+      ["goal_id", "goal_id TEXT"],
       /*
        * 확인 요구를 "여기까지 다 봤다"고 닫은 시각.
        *

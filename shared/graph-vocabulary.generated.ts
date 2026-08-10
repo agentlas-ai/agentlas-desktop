@@ -14,7 +14,6 @@ export const GRAPH_WIRE = "graph/1" as const;
 
 /** 제품이 실제로 내는 오류 코드 전부. 여기 없는 코드를 내면 적합성 게이트가 실패한다. */
 export const GRAPH_ERROR_CODES = [
-  "APPROVAL_REJECTED",
   "APPROVAL_REQUIRED",
   "APPROVAL_TIMED_OUT",
   "ARCHITECT_NO_CHANGE",

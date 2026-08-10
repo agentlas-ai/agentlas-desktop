@@ -223,8 +223,14 @@ async function ensureSurfaceApproval(
       // Continue to explicit confirmation if the ledger is temporarily unavailable.
     }
   }
-  const ok = window.confirm(approval.message);
-  if (!ok) return false;
+  /* ★오너 이사회 결정(2026-08-10): 사람이 기계적으로 누르기만 하는 확인은 없앤다.
+     AI 가 끝까지 리드하고, 결정은 **원장에 기록**으로 남는다(묻지 않을 뿐 감사는 유지).
+     단 하나 남긴 것: **실제 돈이 나가는 결제.** 그건 되돌릴 수 없고 법적 책임이 따르므로
+     "기계적으로 누르는 관문"의 범주가 아니다. */
+  if (approval.kind === "payment") {
+    const ok = window.confirm(approval.message);
+    if (!ok) return false;
+  }
   try {
     await api.surfaces.approve({
       surfaceId,
@@ -913,16 +919,25 @@ function ChatPage() {
   const openWorkspaceFilePreview = useCallback(async (preview: WorkspaceFilePreview) => {
     let next = preview;
     const api = ipc();
+    /* ★읽을 경로는 `path` 하나가 아니라 후보 전체에서 고른다.
+       채팅 본문에서 뽑아낸 파일 참조는 `1.docx` 같은 맨 이름일 때가 있고, 그때
+       `path` 는 절대경로가 아니라 그 이름 그대로다. 예전엔 그 경우 읽기를 통째로
+       건너뛰어 본문이 빈 뷰어가 떴다 — 작업 폴더 배너를 닫아 base path 가 하나
+       줄면 멀쩡하던 파일도 그렇게 됐다. `openTargets` 에 절대경로가 하나라도
+       있으면 그걸로 읽는다. */
+    const readablePath = [preview.path, ...(preview.openTargets ?? [])]
+      .find((candidate) => typeof candidate === "string" && isAbsoluteLocalPath(candidate));
     const shouldReadText =
       api &&
       Boolean(chatId) &&
-      isAbsoluteLocalPath(preview.path) &&
+      Boolean(readablePath) &&
       ["markdown", "json", "text", "browser"].includes(preview.viewerKind);
-    if (shouldReadText) {
-      const text = await api.fs.readTextFile(preview.path, { kind: "chat-assets", chatId }).catch(() => null);
+    if (shouldReadText && readablePath) {
+      const text = await api.fs.readTextFile(readablePath, { kind: "chat-assets", chatId }).catch(() => null);
       if (text) {
         next = {
           ...preview,
+          path: readablePath,
           size: text.size || preview.size,
           content: text.content,
           truncated: text.truncated,
@@ -1385,16 +1400,22 @@ function ChatPage() {
         processedTextLenRef.current = 0;
         subRef.current?.();
         subRef.current = null;
-        // 산출물 자동 패널 오픈 — 답변에 이미지 산출물이 있으면(사용자가 패널을 명시적으로
-        // 닫아두지 않았다면) 우측 패널에 바로 띄운다. 클릭을 기다리지 않는 능동적 패널 활용.
-        const autoMedia = firstMediaArtifactInText(ev.text ?? "", mediaBasePaths);
-        if (autoMedia) {
-          const pref = readRightPanelPreference();
-          if (!pref || pref.open) {
+        /* 산출물 자동 패널 오픈 — 답이 만들어 낸 것을 사람이 **클릭하기 전에** 띄운다.
+           ★예전엔 이미지만 띄웠다. 그래서 문서·표·코드처럼 실제 작업 산출물 대부분은
+           우측 패널이 끝내 비어 있었고("열린 산출물이 아직 없습니다"), 사람은 뭐가
+           만들어졌는지 알 수 없었다. 이미지를 우선하되, 없으면 이 답이 언급한 첫 파일을
+           **내용까지 읽어서** 올린다. */
+        const pref = readRightPanelPreference();
+        if (!pref || pref.open) {
+          const autoMedia = firstMediaArtifactInText(ev.text ?? "", mediaBasePaths);
+          if (autoMedia) {
             setSurface(null);
             setArtifact(null);
             setMediaPreview(workspacePreviewFromMedia(autoMedia));
             openPanelTab("panel");
+          } else {
+            const produced = linkedFileArtifactsInText(ev.text ?? "", mediaBasePaths)[0];
+            if (produced) void openWorkspaceFilePreview(workspacePreviewFromLinkedFile(produced));
           }
         }
         // 첫 메시지였으면 main이 자동 제목 생성 → 갱신해서 사이드바도 반영
@@ -3496,6 +3517,22 @@ function ChatPage() {
           showModeToggles={chat.kind !== "division"}
           continuousMode={chat.continuousMode === true}
           swarmMode={chat.swarmMode === true}
+          goalActive={Boolean(chat.goalId)}
+          onToggleGoal={() => {
+            // 목표 추진 칩 — DB 영속(persistent goal). 켜면 main이 goal 원장 생성 +
+            // goal_id 바인딩 + continuousMode ON을 한 번에 처리하고, 끄면(칩 ×)
+            // 명시적 목표 종료다(원장 cancelled + 연속실행 자동화 비활성화).
+            const next = !chat.goalId;
+            const prev = chat;
+            setChat({ ...chat, goalId: next ? "pending" : null, continuousMode: next ? true : chat.continuousMode });
+            const api = ipc();
+            void api?.chats
+              .setGoalMode(chat.id, next)
+              .then((updated: Chat | null) => {
+                if (updated) setChat(updated);
+              })
+              .catch(() => setChat(prev));
+          }}
           onToggleContinuous={() => {
             const next = !chat.continuousMode;
             // 스웜과 상호 배제 — 켜면 스웜은 끈다.
@@ -3537,6 +3574,7 @@ function ChatPage() {
           artifact={artifact}
           surface={surface}
           filePreview={mediaPreview}
+          onHydrateFilePreview={openWorkspaceFilePreview}
           linkedFiles={linkedFiles}
           onSurfaceAction={handleSurfaceAction}
           onSurfaceStatePatch={handleSurfaceStatePatch}

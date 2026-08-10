@@ -21,15 +21,22 @@ import {
   getAutomationExecutionContractState,
   pinLegacyAutomationHubVersions,
   consumeRunInput,
+  updateAutomation,
 } from "./store/automations";
 import { checkComputerUsePermissions } from "./mac-permissions";
-import { appendChatMessage, listChatMessages } from "./store/chats";
+import { appendChatMessage, clearChatGoalBindingByGoalId, listChatMessages } from "./store/chats";
+import {
+  completeGoalLedgerGoal,
+  GOAL_HARD_STOP_REASONS,
+  goalProgressKeyForText,
+  recordGoalLedgerCycle,
+} from "./mcp/goal-ledger";
 import { getOrCreateAutomationSession } from "./store/automation-sessions";
 import { buildSystemOptimizerPrompt } from "./system-agents/system-optimizer";
 import { runMcpInvocation } from "./mcp/client";
 import { runGraph } from "./workflow/run-graph";
 import { broadcastLiveRun } from "./workflow/live-run";
-import { isStormbreakerLongRunPrompt } from "./hephaestus/loop-engineering";
+import { goalContinuationSchedule, isStormbreakerLongRunPrompt } from "./hephaestus/loop-engineering";
 import { emitAutomationDone } from "./triggers/chain-bus";
 import {
   classifyAutomationFailure,
@@ -896,8 +903,59 @@ async function runOne(
           /* ignore */
         }
         if (runStatus === "error") throw new Error(runError ?? "Automation result was classified as failed");
-        if (isStormbreakerLongRunPrompt(a.promptTemplate) && !result.stormbreakerContinueRequested) {
-          toggleAutomation(a.id, false);
+        if (isStormbreakerLongRunPrompt(a.promptTemplate)) {
+          /*
+           * persistent goal 연속실행의 종료/지속 판단.
+           *
+           * 예전 규칙(마커가 없으면 즉시 자기 종료)은 지속을 "모델이 마커를
+           * 붙였는가"에 종속시켰다 — Codex와의 결정적 차이가 정확히 여기였다.
+           * goal_id가 있는 행은 goal 원장이 판단한다:
+           *   완료  = 판정기 ok + 모델도 계속 요청 없음 + 원장에도 미완 task 없음
+           *           (세 신호 일치 시에만 goal을 닫고 정확히 이 행만 끈다)
+           *   정지  = 예산 소진·무진전 정지·명시 종료 — 마커가 있어도 멈춘다
+           *   지속  = 그 외 전부. goal 상태에 따라 케이던스만 조정한다
+           *           (진행 중이면 짧게, 아니면 백오프).
+           * goal_id가 없거나 원장에 닿지 못하면 기존 마커-단독 규칙 그대로다.
+           */
+          const goalDecision = a.goalId
+            ? await recordGoalLedgerCycle({
+                goalId: a.goalId,
+                progressKey: goalProgressKeyForText(output ?? ""),
+                outcome: `run-${runOutcome}`,
+              })
+            : null;
+          if (a.goalId && goalDecision) {
+            const hardStop = !goalDecision.continue && GOAL_HARD_STOP_REASONS.has(goalDecision.reason);
+            // 판정기가 정확히 ok(수용)로 본 실행만 — skipped는 runStatus가 갈라내므로
+            // runStatus==="ok" && runOutcome==="accepted" 조합이 "verdict ok"와 동치다.
+            const verifiedComplete = !result.stormbreakerContinueRequested
+              && runStatus === "ok" && runOutcome === "accepted"
+              && goalDecision.reason === "no_open_tasks";
+            if (verifiedComplete) {
+              await completeGoalLedgerGoal({
+                goalId: a.goalId,
+                status: "completed",
+                reason: "judged-ok-no-open-tasks-no-marker",
+              });
+              clearChatGoalBindingByGoalId(a.goalId);
+              toggleAutomation(a.id, false);
+            } else if (hardStop) {
+              // goal은 blocked/예산소진으로 원장에 남는다(사람 호출). 재실행만 멈춘다.
+              toggleAutomation(a.id, false);
+            } else if (goalDecision.continue || result.stormbreakerContinueRequested) {
+              const cadence = goalContinuationSchedule(goalDecision);
+              if (a.scheduleHuman !== cadence) {
+                updateAutomation(a.id, { scheduleHuman: cadence });
+              }
+            } else {
+              // 미완인데 계속할 근거도 없음(예: task 0건인데 판정은 ok가 아님) —
+              // 완료를 주장하지 않고 재실행만 멈춘다. goal은 active로 남아
+              // 사용자가 채팅에서 다시 밀 수 있다.
+              toggleAutomation(a.id, false);
+            }
+          } else if (!result.stormbreakerContinueRequested) {
+            toggleAutomation(a.id, false);
+          }
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

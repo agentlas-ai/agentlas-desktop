@@ -48,10 +48,12 @@ export default function AutomationListPage() {
       setFirms(fm);
       // 각 자동화의 마지막 실행에서 "사람이 결정해야 끝나는 실패"만 추린다.
       // 실패해도 목록은 그대로 뜬다 — 배지가 없다고 목록을 못 보면 더 나쁘다.
+      // (승인 대기 배지는 승인 게이트 폐지(2026-08-10)로 제거 — EVAL_STUCK 은 승인이
+      //  아니라 사람의 판정 교정이 필요한 상태라 남는다.)
       void Promise.all(list.map(async (automation) => {
         const snap = await api.automations.latestRun(automation.id).catch(() => null);
         const failure = Object.values(snap?.nodeFailures ?? {})
-          .find((f) => f?.code === "APPROVAL_REQUIRED" || f?.code === "EVAL_STUCK");
+          .find((f) => f?.code === "EVAL_STUCK");
         return failure ? ([automation.id, failure.code] as const) : null;
       })).then((rows) => {
         setWaiting(Object.fromEntries(rows.filter(Boolean) as (readonly [string, string])[]));
@@ -342,9 +344,7 @@ export default function AutomationListPage() {
                       color: "#fff",
                     }}
                   >
-                    {waiting[a.id] === "EVAL_STUCK"
-                      ? (locale === "en" ? "Needs your call" : "내가 정해야 함")
-                      : (locale === "en" ? "Waiting for approval" : "승인 대기")}
+                    {locale === "en" ? "Needs your call" : "내가 정해야 함"}
                   </button>
                 ) : null}
                 <button

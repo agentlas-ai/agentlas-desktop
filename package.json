@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.9.79",
+  "version": "0.9.80",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -16,12 +16,12 @@
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
     "targetSchemaVersion": 93,
-    "bundledRuntimeVersion": "1.1.107"
+    "bundledRuntimeVersion": "1.1.108"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.1.107",
-    "commit": "1f590f74e28244ab1ed1996cc61c6d5b0f2b5553"
+    "ref": "v1.1.108",
+    "commit": "088d7311261b803efa4bdb9b1a7397f4b5f20b9a"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
@@ -60,6 +60,7 @@
     "test:app-builder-routing": "npm run build:electron && node scripts/test-app-builder-routing.cjs",
     "test:app-builder-seed": "npm run build:electron && electron scripts/test-app-builder-seed.cjs",
     "test:session-continuity": "node scripts/test-session-continuity-guards.cjs",
+    "test:goal-loop": "npm run build:electron && node scripts/goal-loop-contract.cjs && electron scripts/goal-reinjection-contract.cjs",
     "test:runtime-pin-precedence": "npm run build:electron && node scripts/test-runtime-pin-precedence.cjs",
     "test:browser-approval-gate": "npm run build:electron && node scripts/test-browser-approval-gate.cjs",
     "test:super-ontology-seed": "npm run build:electron && node scripts/test-super-ontology-seed.cjs",
@@ -345,9 +346,9 @@
     "test:graph-surface": "electron scripts/test-graph-surface-contract.cjs",
     "test:interview-loop-live": "electron scripts/test-interview-loop-live.cjs",
     "test:graph-progress-live": "electron scripts/test-graph-progress-live.cjs",
-    "test:graph": "npm run --silent test:graph-registry-conformance && npm run --silent test:graph-canvas-parity && npm run --silent test:graph-authorability && npm run --silent test:graph-loop-authoring && npm run --silent test:graph-node-protocol && npm run --silent test:graph-run-request && npm run --silent test:graph-tool-binding-contract && npm run --silent test:graph-tool-broker && npm run --silent test:graph-progress && npm run --silent test:automation-honesty-contract && npm run --silent test:graph-interview-contract && npm run --silent test:graph-patch-contract && npm run --silent test:graph-architect-contract && npm run --silent test:graph-describe-ui && npm run --silent test:graph-connections-ui && npm run --silent test:graph-canvas-ui && npm run --silent test:graph-ergonomics && npm run --silent test:graph-no-dead-end && npm run --silent test:graph-kernel-contract && npm run --silent test:run-status-split && npm run --silent test:run-status-stream && npm run --silent test:interview-loop-live && npm run --silent test:graph-progress-live && npm run --silent test:graph-surface && npm run --silent test:graph-code-step && npm run --silent test:graph-always-allow && npm run --silent test:approval-loop && npm run --silent test:graph-goal && npm run --silent test:graph-eval-checklist && npm run --silent test:automation-fix-relevance && npm run --silent test:code-sandbox-live && npm run --silent test:graph-layout-approval && node scripts/test-graph-manual-edit.cjs && npm run --silent test:graph-staffing && npm run --silent test:schedule-bare-cron && npm run --silent test:graph-scenarios && npm run test:graph-code-vars && npm run test:graph-package && npm run --silent test:graph-reachability && npm run --silent test:graph-version-history && npm run --silent test:store-schema-backfill && node scripts/test-runtime-failure-contract.cjs && node scripts/test-judgment-fallback-contract.cjs && node scripts/test-refusal-not-output-contract.cjs && node scripts/test-final-display-hygiene.cjs",
+    "test:graph": "npm run --silent test:graph-registry-conformance && npm run --silent test:graph-canvas-parity && npm run --silent test:graph-authorability && npm run --silent test:graph-loop-authoring && npm run --silent test:graph-node-protocol && npm run --silent test:graph-run-request && npm run --silent test:graph-tool-binding-contract && npm run --silent test:graph-tool-broker && npm run --silent test:graph-progress && npm run --silent test:automation-honesty-contract && npm run --silent test:graph-interview-contract && npm run --silent test:graph-patch-contract && npm run --silent test:graph-architect-contract && npm run --silent test:graph-describe-ui && npm run --silent test:graph-connections-ui && npm run --silent test:graph-canvas-ui && npm run --silent test:graph-ergonomics && npm run --silent test:graph-no-dead-end && npm run --silent test:graph-kernel-contract && npm run --silent test:run-status-split && npm run --silent test:run-status-stream && npm run --silent test:interview-loop-live && npm run --silent test:graph-progress-live && npm run --silent test:graph-surface && npm run --silent test:graph-code-step && npm run --silent test:approval-never-blocks && npm run --silent test:graph-goal && npm run --silent test:graph-eval-checklist && npm run --silent test:automation-fix-relevance && npm run --silent test:code-sandbox-live && npm run --silent test:graph-layout-approval && node scripts/test-graph-manual-edit.cjs && npm run --silent test:graph-staffing && npm run --silent test:schedule-bare-cron && npm run --silent test:graph-scenarios && npm run test:graph-code-vars && npm run test:graph-package && npm run --silent test:graph-reachability && npm run --silent test:graph-version-history && npm run --silent test:store-schema-backfill && node scripts/test-runtime-failure-contract.cjs && node scripts/test-judgment-fallback-contract.cjs && node scripts/test-refusal-not-output-contract.cjs && node scripts/test-final-display-hygiene.cjs",
     "test:graph-code-step": "electron scripts/test-graph-code-step-contract.cjs",
-    "test:graph-always-allow": "electron scripts/test-graph-always-allow-contract.cjs",
+    "test:approval-never-blocks": "npm run build:electron && electron scripts/approval-never-blocks-contract.mjs",
     "test:graph-goal": "electron scripts/test-graph-goal-persistence.cjs",
     "test:graph-eval-checklist": "electron scripts/test-graph-eval-checklist-contract.cjs",
     "test:automation-fix-relevance": "electron scripts/test-automation-fix-relevance.cjs",
@@ -375,7 +376,6 @@
     "test:tool-call-normalization": "npm run --silent build:electron && node scripts/test-tool-call-normalization.cjs",
     "test:route-render-sweep": "npm run --silent build:renderer && node scripts/test-route-render-sweep.cjs",
     "test:graph-ergonomics": "npm run build:renderer && node scripts/test-graph-ergonomics.cjs",
-    "test:approval-loop": "npm run build:electron && electron scripts/test-approval-loop-contract.cjs",
     "test:graph-no-dead-end": "node scripts/test-graph-no-dead-end.cjs"
   },
   "dependencies": {
