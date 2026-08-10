@@ -2592,6 +2592,34 @@ export function registerIpcHandlers(): void {
     clearModelCache();
   });
 
+  // ── 터미널 프로필(사용자 편집형 CLI 러너) ───────────────────────────
+  // Paseo식: 각 프로필 = {id, name, template}. template의 {{{prompt}}}가 메시지로
+  // 치환돼 CLI로 실행된다. 하드코딩된 claude/codex/gemini와 달리 사용자가 어떤 CLI든
+  // 등록·편집한다. (런타임 dispatch 배선은 후속 — 여기서는 저장/조회만.)
+  ipcMain.handle("config:getTerminalProfiles", () => {
+    try {
+      const row = getDb().prepare("SELECT value FROM meta WHERE key = 'terminal_profiles'").get() as { value: string } | undefined;
+      if (!row?.value) return [];
+      const parsed = JSON.parse(row.value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
+  });
+  ipcMain.handle("config:setTerminalProfiles", (_e, profiles: unknown) => {
+    // {{{prompt}}} 없는 템플릿은 거부한다 — 없으면 메시지가 어디로 들어갈지 없어 프롬프트가 사라진다.
+    const list = Array.isArray(profiles) ? profiles : [];
+    const safe = list
+      .filter((p): p is Record<string, unknown> => !!p && typeof p === "object")
+      .map((p) => ({
+        id: String(p.id ?? ""),
+        name: String(p.name ?? "").slice(0, 80),
+        template: String(p.template ?? "").slice(0, 2000),
+        enabled: p.enabled !== false,
+      }))
+      .filter((p) => p.id && p.name && p.template.includes("{{{prompt}}}"));
+    getDb().prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('terminal_profiles', ?)").run(JSON.stringify(safe));
+    return safe;
+  });
+
   // ── 에이전트 동시성(스웜 크기) — 사양 기반 추천 + 사용자 슬라이더 ─────────
   /*
    * ★권한 안내는 문장이 아니라 버튼이어야 한다(오너 실판정 2026-08-06) — "시스템 설정 >

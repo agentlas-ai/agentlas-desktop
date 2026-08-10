@@ -20,6 +20,7 @@ import type {
   Project,
   RuntimeBackend,
   RuntimeSelection,
+  TerminalProfile,
   UsageRetryProviderId,
   UpdaterState,
   WorkflowGraph,
@@ -273,6 +274,9 @@ const api: AgentlasIpc = {
   config: {
     getCustomBaseUrl: () => ipcRenderer.invoke("config:getCustomBaseUrl"),
     setCustomBaseUrl: (url: string) => ipcRenderer.invoke("config:setCustomBaseUrl", url),
+    getTerminalProfiles: () => ipcRenderer.invoke("config:getTerminalProfiles"),
+    setTerminalProfiles: (profiles: TerminalProfile[]) =>
+      ipcRenderer.invoke("config:setTerminalProfiles", profiles),
   },
   secrets: {
     saveApiKey: (backend: RuntimeBackend, key: string) =>

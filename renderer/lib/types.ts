@@ -486,6 +486,7 @@ export type {
   UsageRetryResult,
   UsageWindowKind,
   PendingConfirmation,
+  TerminalProfile,
   WorkspaceNode,
 } from "@shared/types";
 

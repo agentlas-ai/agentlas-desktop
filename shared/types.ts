@@ -580,6 +580,20 @@ export type {
 export type RuntimeKind = "claude-code" | "codex" | "gemini" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx";
 export type RuntimeRole = "orchestrator" | "worker";
 
+/**
+ * 사용자 편집형 터미널 프로필 — Paseo식 "프로바이더". 하드코딩된 claude/codex/gemini와
+ * 달리, 사용자가 임의의 CLI를 등록한다. `template`의 `{{{prompt}}}`가 메시지로 치환돼
+ * 실행된다(예: `claude {{{prompt}}}`, `opencode --prompt={{{prompt}}}`).
+ * ★런타임 dispatch 배선(RuntimeKind 편입)은 후속 단계 — 지금은 설정 저장/조회만.
+ */
+export interface TerminalProfile {
+  id: string;
+  name: string;
+  /** 반드시 `{{{prompt}}}`를 포함(없으면 메시지가 실행 커맨드에 안 들어감). */
+  template: string;
+  enabled: boolean;
+}
+
 /** LLM 제공자. "ollama"/"lmstudio"/"mlx"는 로컬 머신에서 도는 오픈 모델(gemma/deepseek/qwen 등). */
 export type RuntimeBackend =
   | "anthropic"
@@ -5732,6 +5746,8 @@ export interface AgentlasIpc {
   config: {
     getCustomBaseUrl: () => Promise<string>;
     setCustomBaseUrl: (url: string) => Promise<void>;
+    getTerminalProfiles: () => Promise<TerminalProfile[]>;
+    setTerminalProfiles: (profiles: TerminalProfile[]) => Promise<TerminalProfile[]>;
   };
   secrets: {
     saveApiKey: (backend: RuntimeBackend, key: string) => Promise<void>;

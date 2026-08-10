@@ -12,6 +12,7 @@ import type {
   MultimodalSettings,
   RuntimeBackend,
   RuntimeStatus,
+  TerminalProfile,
   UpdaterState,
   LaunchdStatus,
 } from "@/lib/types";
@@ -661,6 +662,8 @@ export default function SettingsPage() {
           onSaveEnv={(key) => void saveMultimodalEnv(key)}
           onRetry={() => void refreshMultimodal()}
         />
+
+        <TerminalProfilesPanel />
 
         {/* 로컬 모델 (Ollama) */}
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "32px 0 12px" }}>
@@ -2242,6 +2245,187 @@ function LaunchdPanel() {
               : t("settings.launchd.enable")}
         </button>
       </div>
+    </>
+  );
+}
+
+// ── 터미널 프로필(사용자 편집형 CLI 러너) — Paseo식 "프로바이더" ──────────
+// 하드코딩된 claude/codex/gemini 외에, 사용자가 임의 CLI를 등록·편집한다.
+// template의 {{{prompt}}}가 메시지로 치환돼 실행된다(예: `claude {{{prompt}}}`).
+// ★런타임 dispatch(RuntimeKind 편입)는 후속 단계 — 이 패널은 저장/조회만 담당.
+const TP_PRESETS: Array<{ name: string; template: string }> = [
+  { name: "Claude Code", template: "claude {{{prompt}}}" },
+  { name: "Codex", template: "codex {{{prompt}}}" },
+  { name: "OpenCode", template: "opencode --prompt={{{prompt}}}" },
+  { name: "Gemini CLI", template: "gemini -p {{{prompt}}}" },
+];
+
+function TerminalProfilesPanel() {
+  const { locale } = useT();
+  const ko = locale === "ko";
+  const [profiles, setProfiles] = useState<TerminalProfile[] | null>(null);
+  const [editing, setEditing] = useState<TerminalProfile | null>(null);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    const api = ipc();
+    if (!api) return;
+    void api.config.getTerminalProfiles().then(setProfiles).catch(() => setProfiles([]));
+  }, []);
+
+  const list = profiles ?? [];
+
+  async function persist(next: TerminalProfile[]) {
+    const api = ipc();
+    if (!api) return;
+    // setter가 정제한 목록을 되돌려준다({{{prompt}}} 없는 항목은 서버가 제거) — 그걸 신뢰.
+    const saved = await api.config.setTerminalProfiles(next);
+    setProfiles(saved);
+  }
+
+  function startAdd() {
+    setErr("");
+    setEditing({ id: `tp-${crypto.randomUUID()}`, name: "", template: "", enabled: true });
+  }
+  async function saveEditing() {
+    if (!editing) return;
+    const name = editing.name.trim();
+    const template = editing.template.trim();
+    if (!name) { setErr(ko ? "이름을 입력하세요." : "Enter a name."); return; }
+    if (!template.includes("{{{prompt}}}")) {
+      setErr(ko
+        ? "명령 템플릿에 {{{prompt}}} 를 반드시 포함하세요 — 메시지가 들어갈 자리입니다."
+        : "The command template must contain {{{prompt}}} — that is where the message goes.");
+      return;
+    }
+    const cleaned: TerminalProfile = { ...editing, name, template };
+    const exists = list.some((p) => p.id === cleaned.id);
+    const next = exists ? list.map((p) => (p.id === cleaned.id ? cleaned : p)) : [...list, cleaned];
+    await persist(next);
+    setEditing(null);
+    setErr("");
+  }
+  async function remove(id: string) { await persist(list.filter((p) => p.id !== id)); }
+  async function toggle(id: string) {
+    await persist(list.map((p) => (p.id === id ? { ...p, enabled: !p.enabled } : p)));
+  }
+  async function move(id: string, dir: -1 | 1) {
+    const idx = list.findIndex((p) => p.id === id);
+    const swap = idx + dir;
+    if (idx < 0 || swap < 0 || swap >= list.length) return;
+    const next = [...list];
+    [next[idx], next[swap]] = [next[swap], next[idx]];
+    await persist(next);
+  }
+
+  const chip = (bg: string, color: string): CSSProperties => ({
+    fontSize: 11, fontWeight: 700, padding: "5px 10px", borderRadius: 8,
+    border: "1px solid var(--paper-edge)", background: bg, color, cursor: "pointer", flexShrink: 0,
+  });
+  const inputStyle: CSSProperties = {
+    width: "100%", boxSizing: "border-box", padding: "8px 10px", fontSize: 12.5,
+    border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)", color: "var(--ink)",
+  };
+
+  return (
+    <>
+      <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "32px 0 12px" }}>
+        {ko ? "터미널 프로필" : "Terminal profiles"}
+      </h2>
+      <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 8px", lineHeight: 1.55 }}>
+        {ko
+          ? "임의의 CLI를 러너 프로필로 등록합니다. 명령 템플릿의 {{{prompt}}} 자리에 메시지가 치환됩니다. 내장 엔진(Claude·Codex·Gemini) 외에 원하는 도구를 자유롭게 정의하세요."
+          : "Register any CLI as a runner profile. The message is substituted into the {{{prompt}}} slot of the command template. Define whatever tool you want beyond the built-in engines (Claude, Codex, Gemini)."}
+      </p>
+      <p style={{ fontSize: 11, color: "var(--muted-deep)", margin: "0 0 12px", opacity: 0.85 }}>
+        {ko
+          ? "※ 지금은 프로필 저장까지 지원합니다. 저장한 프로필을 엔진 선택에서 실행 러너로 쓰는 배선은 준비 중입니다."
+          : "※ For now profiles are saved here. Wiring saved profiles as selectable execution runners is in progress."}
+      </p>
+
+      <div style={{ border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)", overflow: "hidden" }}>
+        {list.length === 0 && !editing && (
+          <div style={{ padding: 16, fontSize: 12, color: "var(--muted-deep)", textAlign: "center" }}>
+            {ko ? "등록된 프로필이 없습니다." : "No profiles yet."}
+          </div>
+        )}
+
+        {list.map((p, i) => (
+          <div key={p.id} style={{
+            display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
+            borderTop: i === 0 ? "none" : "1px solid var(--paper-edge)",
+            opacity: p.enabled ? 1 : 0.5,
+          }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+              <button type="button" aria-label="up" disabled={i === 0} onClick={() => void move(p.id, -1)}
+                style={{ fontSize: 9, lineHeight: 1, padding: "1px 4px", border: "none", background: "none", color: i === 0 ? "var(--paper-edge)" : "var(--muted-deep)", cursor: i === 0 ? "default" : "pointer" }}>▲</button>
+              <button type="button" aria-label="down" disabled={i === list.length - 1} onClick={() => void move(p.id, 1)}
+                style={{ fontSize: 9, lineHeight: 1, padding: "1px 4px", border: "none", background: "none", color: i === list.length - 1 ? "var(--paper-edge)" : "var(--muted-deep)", cursor: i === list.length - 1 ? "default" : "pointer" }}>▼</button>
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>{p.name}</div>
+              <code style={{ fontSize: 11.5, color: "var(--muted-deep)", fontFamily: "var(--font-mono, monospace)", wordBreak: "break-all" }}>{p.template}</code>
+            </div>
+            <button type="button" onClick={() => void toggle(p.id)}
+              style={chip(p.enabled ? "var(--fill-1)" : "var(--paper-2)", p.enabled ? "var(--accent)" : "var(--muted-deep)")}>
+              {p.enabled ? (ko ? "켜짐" : "On") : (ko ? "꺼짐" : "Off")}
+            </button>
+            <button type="button" onClick={() => { setErr(""); setEditing({ ...p }); }} style={chip("var(--paper-2)", "var(--ink)")}>
+              {ko ? "편집" : "Edit"}
+            </button>
+            <button type="button" onClick={() => void remove(p.id)} style={chip("var(--paper-2)", "var(--red-deep, #b4533a)")}>
+              {ko ? "삭제" : "Delete"}
+            </button>
+          </div>
+        ))}
+
+        {editing && (
+          <div style={{ padding: 14, borderTop: list.length ? "1px solid var(--paper-edge)" : "none", background: "var(--paper-2)" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--muted-deep)" }}>
+                {ko ? "이름" : "Name"}
+                <input value={editing.name} placeholder={ko ? "예: OpenCode" : "e.g. OpenCode"}
+                  onChange={(e) => setEditing({ ...editing, name: e.target.value })}
+                  style={{ ...inputStyle, marginTop: 5 }} />
+              </label>
+              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--muted-deep)" }}>
+                {ko ? "명령 템플릿" : "Command template"}
+                <input value={editing.template} placeholder="claude {{{prompt}}}" spellCheck={false}
+                  onChange={(e) => setEditing({ ...editing, template: e.target.value })}
+                  style={{ ...inputStyle, marginTop: 5, fontFamily: "var(--font-mono, monospace)" }} />
+              </label>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>{ko ? "예시:" : "Presets:"}</span>
+                {TP_PRESETS.map((preset) => (
+                  <button key={preset.name} type="button"
+                    onClick={() => setEditing({ ...editing, name: editing.name || preset.name, template: preset.template })}
+                    style={chip("var(--paper)", "var(--ink-soft)")}>{preset.name}</button>
+                ))}
+              </div>
+              {err && <div style={{ fontSize: 11.5, color: "var(--red-deep, #b4533a)" }}>{err}</div>}
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                <button type="button" onClick={() => { setEditing(null); setErr(""); }} style={chip("var(--paper)", "var(--muted-deep)")}>
+                  {ko ? "취소" : "Cancel"}
+                </button>
+                <button type="button" onClick={() => void saveEditing()}
+                  style={{ ...chip("var(--accent)", "#fff"), padding: "6px 14px" }}>
+                  {ko ? "저장" : "Save"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {!editing && (
+        <button type="button" onClick={startAdd}
+          style={{
+            marginTop: 10, padding: "8px 14px", borderRadius: "var(--radius-md)", fontSize: 12, fontWeight: 700,
+            border: "1px dashed var(--paper-edge)", background: "var(--paper)", color: "var(--ink)", cursor: "pointer",
+          }}>
+          + {ko ? "프로필 추가" : "Add profile"}
+        </button>
+      )}
     </>
   );
 }
