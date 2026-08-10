@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.78 — 2026-08-10
+
+This release binds Agentlas OS v1.1.106 at
+20decf4d5e8f0164ce5ad3e7de5349638c417dd8.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- The Work right rail now names its primary surface Agents, not Tools or Team.
+  A project still owns the work, while the people-like execution identities
+  attached to it remain visible as agents.
+- During a run, the agent responsible for the latest event and that event's
+  actual activity appear first. Connected agents no longer crowd out live
+  execution: three remain visible for recognition and the rest fold into one
+  bounded disclosure.
+- Project Memory now reads the existing project timeline contract instead of
+  showing a static promise. It distinguishes saved PM Soul, sitemap, and code
+  map state from missing, unreadable, or disconnected storage and shows recent
+  durable work records with links back to their tasks.
+- Project detail and task mentions use agent and agent-team terminology while
+  preserving the project-first execution and memory ownership model.
+
 ## 0.9.77 — 2026-08-10
 
 This release binds Agentlas OS v1.1.106 at

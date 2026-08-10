@@ -1,7 +1,8 @@
 // Unified right rail for chat: files, agent workflow, and artifact/viewer panel.
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Markdown, type CodeArtifact } from "./Markdown";
 import { WorkspacePanel, type WorkspaceFilePreview } from "./WorkspacePanel";
 import {
@@ -15,7 +16,7 @@ import {
   type SurfaceStatePatchHandler,
   type WorkbenchSurface,
 } from "./WorkbenchPanel";
-import type { InstalledAgent, InstalledFirm, InvocationRunReceipt, Project, ResolvedOrg } from "@/lib/types";
+import type { InstalledAgent, InstalledFirm, InvocationRunReceipt, Project, ProjectTimelineSnapshot, ResolvedOrg } from "@/lib/types";
 import { IconClose, IconFileUp, IconFilm, IconFolder, IconImage, IconLayers, IconNetwork, IconPanelRight, IconSparkles } from "./Icon";
 import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
@@ -163,7 +164,7 @@ export function ChatRightPanel({
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={eyebrowStyle}>{ko ? "우측 패널" : "Right panel"}</div>
           <strong style={titleStyle}>
-            {activeTab === "file" ? (ko ? "파일" : "Files") : activeTab === "agent" ? (ko ? "팀" : "Team") : activeTab === "memory" ? (ko ? "기억" : "Memory") : (ko ? "미리보기" : "Preview")}
+            {activeTab === "file" ? (ko ? "파일" : "Files") : activeTab === "agent" ? (ko ? "에이전트" : "Agents") : activeTab === "memory" ? (ko ? "기억" : "Memory") : (ko ? "미리보기" : "Preview")}
           </strong>
         </div>
         <button type="button" onClick={onClose} aria-label={ko ? "우측 패널 닫기" : "Close right panel"} title={ko ? "닫기" : "Close"} style={iconButtonStyle}>
@@ -172,7 +173,7 @@ export function ChatRightPanel({
       </header>
 
       <nav style={tabsStyle} aria-label={ko ? "우측 패널 탭" : "Right panel tabs"}>
-        <TabButton tab="agent" activeTab={activeTab} onClick={onTabChange} label={ko ? "팀" : "Team"} icon={<IconNetwork size={13} />} />
+        <TabButton tab="agent" activeTab={activeTab} onClick={onTabChange} label={ko ? "에이전트" : "Agents"} icon={<IconNetwork size={13} />} />
         <TabButton tab="file" activeTab={activeTab} onClick={onTabChange} label={ko ? "파일" : "Files"} icon={<IconFolder size={13} />} />
         <TabButton tab="panel" activeTab={activeTab} onClick={onTabChange} label={ko ? "미리보기" : "Preview"} icon={<IconPanelRight size={13} />} badge={hasPanelContent} />
         <TabButton tab="memory" activeTab={activeTab} onClick={onTabChange} label={ko ? "기억" : "Memory"} icon={<IconSparkles size={13} />} />
@@ -199,7 +200,6 @@ export function ChatRightPanel({
         )}
         {activeTab === "agent" && (
           <div style={agentTabStyle}>
-            {project ? <ProjectTeamCard project={project} agents={agents} ko={ko} /> : null}
             {(Object.values(liveAgents).some((entry) => entry.active) || timeline.length > 0 || hasPipeline) ? <AgentNetworkPanel
               embedded
               firm={firm}
@@ -213,6 +213,7 @@ export function ChatRightPanel({
               latestUserPrompt={latestUserPrompt}
               hasPipeline={hasPipeline}
             /> : null}
+            {project ? <ProjectTeamCard project={project} agents={agents} liveAgents={liveAgents} ko={ko} /> : null}
             <RunReceiptCard chatId={chatId} busy={busy} />
           </div>
         )}
@@ -243,36 +244,164 @@ export function ChatRightPanel({
             <EmptyViewer />
           )
         )}
-        {activeTab === "memory" && <ProjectMemoryCard project={project} ko={ko} />}
+        {activeTab === "memory" && <ProjectMemoryCard project={project} busy={busy} ko={ko} />}
       </div>
     </aside>
   );
 }
 
-function ProjectTeamCard({ project, agents, ko }: { project: Project; agents: InstalledAgent[]; ko: boolean }) {
+function ProjectTeamCard({
+  project,
+  agents,
+  liveAgents,
+  ko,
+}: {
+  project: Project;
+  agents: InstalledAgent[];
+  liveAgents: Record<string, LiveAgent>;
+  ko: boolean;
+}) {
   const nameById = new Map(agents.map((agent) => [agent.id, ko ? agent.name : agent.nameEn || agent.name]));
-  return <section style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
-    <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".08em", color: "var(--muted-deep)", textTransform: "uppercase" }}>{ko ? "이 프로젝트의 도구" : "This project's tools"}</div>
-    <div style={{ display: "grid", gap: 6, marginTop: 9 }}>
-      {project.agentPool.map((member, index) => <div key={projectPoolMemberKey(member)} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-        <span style={{ width: 20, height: 20, display: "grid", placeItems: "center", borderRadius: 6, background: "var(--fill-1)", color: "var(--accent)", fontWeight: 800 }}>{index + 1}</span>
-        <strong>{member.entityKind === "agent" && member.agentId ? nameById.get(member.agentId) || member.nameSnapshot : member.nameSnapshot}</strong>
-        <span style={{ marginLeft: "auto", color: "var(--muted-deep)", fontSize: 10 }}>{member.entityKind === "team" ? (ko ? "팀 도구" : "Team tool") : (ko ? "전문가 도구" : "Specialist tool")}</span>
-      </div>)}
+  const rows = project.agentPool.map((member, index) => {
+    const name = member.entityKind === "agent" && member.agentId
+      ? nameById.get(member.agentId) || member.nameSnapshot
+      : member.nameSnapshot;
+    const identities = new Set([
+      member.targetId,
+      member.agentId,
+      member.controllerAgentId,
+      member.firmId,
+      member.nameSnapshot,
+      name,
+    ].filter((value): value is string => Boolean(value)));
+    const live = Object.entries(liveAgents).find(([key, entry]) => identities.has(key) || identities.has(entry.name))?.[1];
+    return { member, index, name, live };
+  });
+  const activeRows = rows.filter((row) => row.live?.active);
+  const waitingRows = rows.filter((row) => !row.live?.active);
+  const visibleWaitingRows = waitingRows.slice(0, activeRows.length > 0 ? 2 : 3);
+  const hiddenWaitingRows = waitingRows.slice(visibleWaitingRows.length);
+  const renderRow = ({ member, index, name, live }: (typeof rows)[number]) => (
+    <div key={projectPoolMemberKey(member)} style={{ display: "grid", gridTemplateColumns: "24px minmax(0, 1fr) auto", alignItems: "center", gap: 8, minHeight: 34, fontSize: 12 }}>
+      <span style={{ width: 22, height: 22, display: "grid", placeItems: "center", borderRadius: 7, background: live?.active ? "color-mix(in srgb, var(--green-deep) 14%, var(--paper))" : "var(--fill-1)", color: live?.active ? "var(--green-deep)" : "var(--muted-deep)", fontWeight: 800 }}>{index + 1}</span>
+      <span style={{ minWidth: 0 }}>
+        <strong style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</strong>
+        {live?.active && live.status ? <span style={{ display: "block", marginTop: 2, color: "var(--muted-deep)", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{live.status}</span> : null}
+      </span>
+      <span style={{ color: live?.active ? "var(--green-deep)" : "var(--muted-deep)", fontSize: 10, fontWeight: live?.active ? 750 : 500 }}>
+        {live?.active
+          ? (ko ? "실행 중" : "Running")
+          : (ko ? "대기" : "Ready")}
+      </span>
     </div>
+  );
+  return <section style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".08em", color: "var(--muted-deep)", textTransform: "uppercase" }}>{ko ? "프로젝트 에이전트" : "Project agents"}</div>
+      <span style={{ marginLeft: "auto", color: "var(--muted-deep)", fontSize: 10 }}>{ko ? `${rows.length}명 연결됨` : `${rows.length} connected`}</span>
+    </div>
+    {activeRows.length > 0 || visibleWaitingRows.length > 0 ? <div style={{ display: "grid", gap: 4, marginTop: 8 }}>{activeRows.map(renderRow)}{visibleWaitingRows.map(renderRow)}</div> : null}
+    {hiddenWaitingRows.length > 0 ? (
+      <details style={{ marginTop: activeRows.length > 0 ? 8 : 6 }}>
+        <summary style={{ cursor: "pointer", minHeight: 32, display: "flex", alignItems: "center", color: "var(--ink-soft)", fontSize: 11.5, fontWeight: 650 }}>
+          {ko ? `나머지 에이전트 ${hiddenWaitingRows.length}명 보기` : `Show ${hiddenWaitingRows.length} more agents`}
+        </summary>
+        <div style={{ display: "grid", gap: 2, paddingTop: 4 }}>{hiddenWaitingRows.map(renderRow)}</div>
+      </details>
+    ) : null}
+    {rows.length === 0 ? <p style={{ margin: "8px 0 0", color: "var(--muted-deep)", fontSize: 11 }}>{ko ? "이 프로젝트에 연결된 에이전트가 없습니다." : "No agents are connected to this project."}</p> : null}
   </section>;
 }
 
-function ProjectMemoryCard({ project, ko }: { project: Project | null; ko: boolean }) {
+function ProjectMemoryCard({ project, busy, ko }: { project: Project | null; busy: boolean; ko: boolean }) {
+  const [snapshot, setSnapshot] = useState<ProjectTimelineSnapshot | null>(null);
+  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  const load = useCallback(async () => {
+    if (!project) return;
+    const api = ipc();
+    if (!api) {
+      setState("error");
+      return;
+    }
+    try {
+      const next = await api.projects.timeline(project.id, 20);
+      setSnapshot(next);
+      setState("ready");
+    } catch {
+      setState("error");
+    }
+  }, [project?.id]);
+
+  useEffect(() => {
+    setSnapshot(null);
+    setState("loading");
+    void load();
+    if (!busy) return;
+    const interval = window.setInterval(() => void load(), 2500);
+    return () => window.clearInterval(interval);
+  }, [busy, load]);
+
   if (!project) return <div style={{ padding: 18, color: "var(--muted-deep)", fontSize: 12 }}>{ko ? "이 작업에 연결된 프로젝트가 없습니다." : "No project is connected to this task."}</div>;
+  const sourceLabel = (kind: ProjectTimelineSnapshot["sources"][number]["kind"]) => ({
+    pm_soul: ko ? "PM Soul" : "PM Soul",
+    sitemap: ko ? "사이트맵" : "Sitemap",
+    code_map: ko ? "코드맵" : "Code map",
+  })[kind];
+  const sourceDetail = (source: ProjectTimelineSnapshot["sources"][number]) => {
+    if (source.status === "ready") {
+      const count = source.detail?.split(":")[1];
+      if (source.kind === "pm_soul" && count) return ko ? `${Number(count).toLocaleString()}자 저장됨` : `${Number(count).toLocaleString()} chars saved`;
+      if (source.kind === "sitemap" && count) return ko ? `${Number(count).toLocaleString()}개 노드` : `${Number(count).toLocaleString()} nodes`;
+      if (source.kind === "code_map" && source.detail) return source.detail.replace("files:", ko ? "파일 " : "files ").replace(",symbols:", ko ? " · 심볼 " : " · symbols ");
+      return ko ? "저장됨" : "Ready";
+    }
+    if (source.status === "missing") return ko ? "아직 생성되지 않음" : "Not created yet";
+    if (source.status === "invalid") return ko ? "읽기 오류" : "Unreadable";
+    return source.detail === "project-folder-not-connected"
+      ? (ko ? "프로젝트 폴더 연결 필요" : "Connect a project folder")
+      : (ko ? "폴더 다시 연결 필요" : "Reconnect the folder");
+  };
+  const latestEntries = snapshot?.entries.slice(0, 6) ?? [];
   return <section style={{ display: "grid", gap: 12 }}>
+    <div style={{ padding: 14, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <strong style={{ fontSize: 12.5 }}>{ko ? "프로젝트 기억" : "Project memory"}</strong>
+        {state === "ready" ? <span style={{ marginLeft: "auto", color: "var(--muted-deep)", fontSize: 10 }}>{ko ? `작업 기록 ${snapshot?.entries.length ?? 0}개` : `${snapshot?.entries.length ?? 0} work records`}</span> : null}
+      </div>
+      {state === "loading" ? <p style={{ margin: "10px 0 0", color: "var(--muted-deep)", fontSize: 11 }}>{ko ? "실제 저장 상태를 확인하는 중…" : "Checking saved memory…"}</p> : null}
+      {state === "error" ? (
+        <div role="alert" style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, color: "var(--red-deep)", fontSize: 11 }}>
+          <span>{ko ? "프로젝트 기억을 불러오지 못했습니다." : "Could not load project memory."}</span>
+          <button type="button" onClick={() => { setState("loading"); void load(); }} style={{ marginLeft: "auto", fontWeight: 750 }}>{ko ? "다시 시도" : "Retry"}</button>
+        </div>
+      ) : null}
+      {state === "ready" ? (
+        <>
+          <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+            {snapshot?.sources.map((source) => <div key={source.kind} style={{ display: "grid", gridTemplateColumns: "8px minmax(72px, .7fr) minmax(0, 1fr)", alignItems: "center", gap: 7, minHeight: 24, fontSize: 11 }}>
+              <span aria-hidden style={{ width: 7, height: 7, borderRadius: "50%", background: source.status === "ready" ? "var(--green-deep)" : source.status === "invalid" ? "var(--red-deep)" : source.status === "missing" ? "var(--amber-deep)" : "var(--muted)" }} />
+              <strong>{sourceLabel(source.kind)}</strong>
+              <span style={{ color: "var(--muted-deep)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sourceDetail(source)}</span>
+            </div>)}
+          </div>
+          <div style={{ marginTop: 12, paddingTop: 10, borderTop: "var(--hairline)" }}>
+            <div style={{ fontSize: 10, fontWeight: 800, color: "var(--muted-deep)", letterSpacing: ".06em" }}>{ko ? "최근 기억" : "RECENT MEMORY"}</div>
+            {latestEntries.length === 0 ? <p style={{ margin: "8px 0 0", color: "var(--muted-deep)", fontSize: 11, lineHeight: 1.5 }}>{ko ? "아직 저장된 작업 기록이 없습니다. 작업이 완료되어 durable decision이나 결과가 생기면 여기에 표시됩니다." : "No work record has been saved yet. Durable decisions and outcomes appear here after work completes."}</p> : (
+              <ol style={{ margin: "8px 0 0", padding: 0, listStyle: "none", display: "grid", gap: 7 }}>
+                {latestEntries.map((entry) => <li key={entry.id} style={{ fontSize: 11.5, lineHeight: 1.45 }}>
+                  {entry.chatId && (entry.navigationStatus === "exact" || entry.navigationStatus === "chat_only")
+                    ? <Link href={`/workspace/task?id=${encodeURIComponent(entry.chatId)}${entry.messageId ? `&focus=${encodeURIComponent(entry.messageId)}` : ""}`} style={{ color: "var(--ink)", textDecoration: "none" }}>{entry.summary}</Link>
+                    : <span>{entry.summary}</span>}
+                </li>)}
+              </ol>
+            )}
+          </div>
+        </>
+      ) : null}
+    </div>
     <div style={{ padding: 14, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
       <div style={{ fontSize: 10, fontWeight: 800, color: "var(--muted-deep)", letterSpacing: ".08em", textTransform: "uppercase" }}>{ko ? "프로젝트 지시" : "Project instructions"}</div>
       <p style={{ margin: "9px 0 0", whiteSpace: "pre-wrap", color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.55 }}>{project.systemPrompt || (ko ? "이 프로젝트의 목표와 작업 기준을 여기에 적어 두세요." : "Add this project's goals and working instructions here.")}</p>
-    </div>
-    <div style={{ padding: 14, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
-      <strong style={{ fontSize: 12 }}>{ko ? "축적되는 프로젝트 기억" : "Growing project memory"}</strong>
-      <p style={{ margin: "6px 0 0", color: "var(--muted-deep)", fontSize: 11, lineHeight: 1.5 }}>{ko ? "결정, PM Soul, 사이트맵, 코드맵은 에이전트 릴리스와 분리되어 이 프로젝트에 남습니다." : "Decisions, PM Soul, sitemap, and code map stay with this project independently of agent releases."}</p>
     </div>
   </section>;
 }

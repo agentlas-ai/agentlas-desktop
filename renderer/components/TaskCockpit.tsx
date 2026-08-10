@@ -3330,8 +3330,8 @@ function ChatPage() {
                 id: projectPoolMemberKey(member),
                 token: name,
                 label: member.entityKind === "team"
-                  ? (locale === "ko" ? "팀 도구 · 필요할 때 호출" : "Team tool · invoked when useful")
-                  : (locale === "ko" ? "전문가 도구 · 필요할 때 호출" : "Specialist tool · invoked when useful"),
+                  ? (locale === "ko" ? "에이전트 팀 · 필요할 때 참여" : "Agent team · joins when needed")
+                  : (locale === "ko" ? "전문 에이전트 · 필요할 때 참여" : "Specialist agent · joins when needed"),
               };
             }),
           }}

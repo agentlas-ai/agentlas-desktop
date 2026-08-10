@@ -224,6 +224,15 @@ export function AgentNetworkPanel({
   }, [participationKeys, roster]);
 
   const anyActive = Object.values(participatingLiveAgents).some((a) => a.active);
+  const latestActivity = visibleTimeline[visibleTimeline.length - 1] ?? null;
+  const currentLiveEntry = (latestActivity && participatingLiveAgents[latestActivity.agentId]
+    ? [latestActivity.agentId, participatingLiveAgents[latestActivity.agentId]] as const
+    : Object.entries(participatingLiveAgents).find(([, entry]) => entry.active)
+      ?? Object.entries(participatingLiveAgents)[0]) ?? null;
+  const currentLiveAgent = currentLiveEntry?.[1] ?? null;
+  const currentActivity = latestActivity?.agentId === currentLiveEntry?.[0]
+    ? latestActivity.text
+    : currentLiveAgent?.status;
   const controllerKey = participatingRoster?.ceo?.key ?? null;
   const activeWorkerCount = Object.entries(participatingLiveAgents)
     .filter(([key, value]) => value.active && key !== controllerKey)
@@ -233,8 +242,8 @@ export function AgentNetworkPanel({
   // 진짜 멀티에이전트(팀/조직) 컨텍스트일 때만 "오케스트레이션/병렬" 프레이밍을 쓴다.
   const hasRoster = Boolean(participatingRoster && (participatingRoster.ceo || participatingRoster.divisions.length > 0));
   const activeTitle =
-    chatTitle?.trim() ||
-    (firm ? pickLocalized(firm, locale).name : agent ? pickLocalized(agent, locale).name : t("network.title"));
+    currentLiveAgent?.name?.trim() ||
+    (agent ? pickLocalized(agent, locale).name : firm ? pickLocalized(firm, locale).name : chatTitle?.trim() || t("network.title"));
   const promptPreview = cleanPromptPreview(latestUserPrompt ?? "");
   const feed = visibleTimeline.slice(-10);
   const activityRows = workflowActivityRows(visibleTimeline, locale);
@@ -269,13 +278,14 @@ export function AgentNetworkPanel({
             {activeTitle}
           </div>
           <div style={panelSubtitleStyle}>
-            {firm
-              ? t("network.subtitle.firm")
-              : agent
-                ? t("network.subtitle.agent")
-                : hasHistoricalActivity
-                  ? (locale === "ko" ? "완료된 실행" : "Completed run")
-                  : t("network.idle")}
+            {currentActivity
+              || (firm
+                ? t("network.subtitle.firm")
+                : agent
+                  ? t("network.subtitle.agent")
+                  : hasHistoricalActivity
+                    ? (locale === "ko" ? "완료된 실행" : "Completed run")
+                    : t("network.idle"))}
           </div>
         </div>
         {/* 병렬 배지 — 실제로 2개 이상 동시 실행일 때만(거짓 ∥ 방지) */}

@@ -719,7 +719,7 @@ function ProjectPage() {
 
           <div style={{ ...cardStyle, marginBottom: 24 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-              <div style={{ ...eyebrowStyle, flex: 1 }}>{locale === "ko" ? "이 프로젝트의 도구" : "This project's tools"}</div>
+              <div style={{ ...eyebrowStyle, flex: 1 }}>{locale === "ko" ? "프로젝트 에이전트" : "Project agents"}</div>
               {!editingTeam ? (
                 <button type="button" onClick={() => { setEditingTeam(true); setInspectorCollapsed(true); }} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
                   {locale === "ko" ? "편집" : "Edit"}
