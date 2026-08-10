@@ -922,6 +922,18 @@ export function ChatInput({
             setPlusSubmenu(null);
             fileInputRef.current?.click();
           }}
+          onAddFolder={async () => {
+            setPlusOpen(false);
+            setPlusSubmenu(null);
+            const api = ipc();
+            if (!api) return;
+            try {
+              const grant = await api.fs.pickDirectory();
+              if (grant?.path) setFileGrants((a) => [...a, { path: grant.path, kind: grant.kind }]);
+            } catch {
+              /* cancelled or denied */
+            }
+          }}
           planMode={planMode}
           setPlanMode={setPlanMode}
           goalMode={goalMode}
@@ -2316,6 +2328,7 @@ function PlusMenu({
   setSubmenu,
   plugins,
   onAddFile,
+  onAddFolder,
   planMode,
   setPlanMode,
   goalMode,
@@ -2338,6 +2351,7 @@ function PlusMenu({
   setSubmenu: (s: "plugins" | null) => void;
   plugins: string[];
   onAddFile: () => void;
+  onAddFolder: () => void;
   planMode: boolean;
   setPlanMode: (v: boolean) => void;
   goalMode: boolean;
@@ -2400,6 +2414,11 @@ function PlusMenu({
         onClick={onAddFile}
         icon={<IconFileUp size={14} />}
         title={t("chatinput.plus.attach")}
+      />
+      <Row
+        onClick={onAddFolder}
+        icon={<IconFolder size={14} />}
+        title={t("chatinput.plus.attach_folder")}
       />
       <Row
         onClick={() => setSubmenu("plugins")}
