@@ -182,6 +182,7 @@ export function commitPendingConfirmationAnswer(
   if (!normalizedReply) throw new Error("Decision response is empty");
   recordCommittedAnswerReceipt(chatId, last.id, normalizedReply);
   claimedQuestionMessages.add(`${chatId}\0${last.id}`);
+  invalidatePendingConfirmationsCache();
   // A committed user answer is the real approval-resolution boundary. This
   // evidence does not imply that an external action or outcome subsequently ran.
   const task = ensureCanonicalTaskForChat(chatId);
@@ -238,12 +239,28 @@ export function snoozePendingConfirmation(
       chatId,
       payload: { sourceMessageId, resumeAt: snoozedUntil },
     });
+    invalidatePendingConfirmationsCache();
   }
   return { chatId, sourceMessageId, snoozedUntil };
 }
 
+// listPendingConfirmations는 호출당 수십 개의 동기 쿼리를 실행하는데, 독립 폴러
+// 셋(AppShell·대시보드 위젯·태스크 투영 빌더)이 같은 틱 안에서 겹쳐 부른다.
+// 1초 캐시는 그 겹침만 제거한다 — 새 질문 도착은 최대 1초 늦게 보이고, 이 파일
+// 안의 상태 변화(답 확정·클레임·스누즈)는 즉시 무효화된다.
+const PENDING_CONFIRMATIONS_TTL_MS = 1_000;
+let pendingConfirmationsCache: { at: number; items: PendingConfirmation[] } | null = null;
+
+function invalidatePendingConfirmationsCache(): void {
+  pendingConfirmationsCache = null;
+}
+
 /** 지금 사용자 확인을 기다리는 채팅들. 최신순. */
 export function listPendingConfirmations(): PendingConfirmation[] {
+  const cached = pendingConfirmationsCache;
+  if (cached && Date.now() - cached.at < PENDING_CONFIRMATIONS_TTL_MS) {
+    return cached.items.map((item) => ({ ...item }));
+  }
   const out: PendingConfirmation[] = [];
   for (const c of listRecentChats(40)) {
     if (c.archivedAt) continue;
@@ -282,7 +299,8 @@ export function listPendingConfirmations(): PendingConfirmation[] {
   for (const claimed of claimedQuestionMessages) {
     if (!stillPending.has(claimed)) claimedQuestionMessages.delete(claimed);
   }
-  return out;
+  pendingConfirmationsCache = { at: Date.now(), items: out };
+  return out.map((item) => ({ ...item }));
 }
 
 /**
@@ -310,9 +328,13 @@ export function claimPendingConfirmationAnswer(
     throw new Error("Question is stale or no longer pending");
   }
   claimedQuestionMessages.add(key);
+  invalidatePendingConfirmationsCache();
   if (claimedQuestionMessages.size > 10_000) {
     const oldest = claimedQuestionMessages.values().next().value as string | undefined;
     if (oldest && oldest !== key) claimedQuestionMessages.delete(oldest);
   }
-  return () => claimedQuestionMessages.delete(key);
+  return () => {
+    claimedQuestionMessages.delete(key);
+    invalidatePendingConfirmationsCache();
+  };
 }

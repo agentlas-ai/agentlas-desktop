@@ -66,6 +66,19 @@ export function isOberonBackgroundJobActive(job: OberonBackgroundJob): boolean {
 
 export function trackOberonLiveJob(kind: Exclude<OberonBackgroundJobKind, "plan">, job: OberonLiveJob): OberonBackgroundJob {
   const snapshot = fromLiveJob(kind, job);
+  // 폴러 둘(페이지 1초 + 전역 모니터 1.2초)이 같은 잡을 추적한다. 표시 내용이
+  // 그대로면 localStorage 직렬화·변경 이벤트·AppShell 리렌더를 전부 생략한다.
+  const existing = readJobs().find((row) => row.kind === snapshot.kind && row.id === snapshot.id);
+  if (
+    existing
+    && existing.status === snapshot.status
+    && clampPercent(existing.percent) === clampPercent(snapshot.percent)
+    && existing.message === snapshot.message
+    && existing.phase === snapshot.phase
+    && existing.title === snapshot.title
+  ) {
+    return existing;
+  }
   upsertJob(snapshot);
   return snapshot;
 }

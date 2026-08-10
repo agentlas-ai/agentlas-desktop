@@ -656,18 +656,19 @@ export function createOneTaskProjectionRuntime(
     ...DEFAULT_SOURCES,
     ...(options.sources ?? {}),
   };
-  const getProjection = (
+  const projectionFor = (
     taskId: string,
     request: OneTaskProjectionRequest,
+    readSources: OneTaskProjectionReadSources,
   ): AgentlasOneTaskProjectionV1 | null => {
     if (!isSafeIdentifier(taskId) || !validRequest(request)) return null;
-    const task = canonicalTask(safeRead(() => sources.getCanonicalTask(taskId)));
+    const task = canonicalTask(safeRead(() => readSources.getCanonicalTask(taskId)));
     if (!task || task.id !== taskId) return null;
     // One은 초개인화 표면이다. One이 직접 시작한 대화의 Task만 One에 투영하고,
     // 전역 Work 작업은 절대 One 홈으로 새지 않는다. Work/Mobile 표면은 전체를 본다.
     if (request.surface === "one") {
       const origin = task.originChatId
-        ? safeRead(() => sources.chatOriginSurface(task.originChatId as string))
+        ? safeRead(() => readSources.chatOriginSurface(task.originChatId as string))
         : null;
       if (origin !== "one") return null;
     }
@@ -676,8 +677,12 @@ export function createOneTaskProjectionRuntime(
       surface: request.surface,
     })));
     if (!authority) return null;
-    return buildProjection(task, request, authority, sources);
+    return buildProjection(task, request, authority, readSources);
   };
+  const getProjection = (
+    taskId: string,
+    request: OneTaskProjectionRequest,
+  ): AgentlasOneTaskProjectionV1 | null => projectionFor(taskId, request, sources);
 
   return {
     getProjection,
@@ -694,13 +699,26 @@ export function createOneTaskProjectionRuntime(
         includeArchived: request.includeArchived === true,
       }));
       if (!Array.isArray(rows)) return [];
+      // 확인 요청 스냅샷은 태스크마다 달라지지 않는다. 목록 호출 한 번에 한 번만
+      // 읽어 모든 projection이 공유한다 — 원래는 태스크 수만큼 다중 쿼리
+      // 스냅샷을 처음부터 다시 만들었다.
+      let pendingConfirmationsSnapshot: { value: unknown } | undefined;
+      const listSources: OneTaskProjectionReadSources = {
+        ...sources,
+        listPendingConfirmations: () => {
+          if (!pendingConfirmationsSnapshot) {
+            pendingConfirmationsSnapshot = { value: sources.listPendingConfirmations() };
+          }
+          return pendingConfirmationsSnapshot.value;
+        },
+      };
       return rows.slice(0, listLimit(request.limit)).flatMap((value) => {
         const task = canonicalTask(value);
         if (!task) return [];
-        const projection = getProjection(task.id, {
+        const projection = projectionFor(task.id, {
           surface: request.surface,
           ...(request.mode ? { mode: request.mode } : {}),
-        });
+        }, listSources);
         return projection ? [projection] : [];
       });
     },

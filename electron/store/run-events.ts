@@ -654,10 +654,16 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
 
   const latest = rows[rows.length - 1] ?? start;
   const terminalPayload = terminal ? parsePayload(terminal.payload_json) : {};
-  const settledPayload = [...rows]
-    .reverse()
-    .map((row) => parsePayload(row.payload_json))
-    .find((payload) => stringPayload(payload, "resultFolder"));
+  // 원래는 reverse().map(parse)가 결과를 찾은 뒤에도 **모든** payload를 eager하게
+  // 파싱했다. 뒤에서부터 찾고 발견 즉시 멈춘다.
+  let settledPayload: Record<string, unknown> | undefined;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const payload = parsePayload(rows[index].payload_json);
+    if (stringPayload(payload, "resultFolder")) {
+      settledPayload = payload;
+      break;
+    }
+  }
   const failure = getDb()
     .prepare("SELECT * FROM failure_events WHERE run_id = ? ORDER BY datetime(ts) DESC, rowid DESC LIMIT 1")
     .get(runId) as FailureEventRow | undefined;
@@ -694,10 +700,12 @@ export function getLatestInvocationRunReceipt(chatId: string): InvocationRunRece
   if (!chatId) return null;
   const row = getDb()
     .prepare(
+      // ts는 항상 nowIso() 산출 ISO-8601이라 사전순=시간순. datetime() 래핑은
+      // 인덱스(idx_run_events_chat_kind_ts)를 못 타게 해 원장 풀스캔을 강제했다.
       `SELECT run_id
        FROM run_events
        WHERE chat_id = ? AND kind = 'invoke_started'
-       ORDER BY datetime(ts) DESC, rowid DESC
+       ORDER BY ts DESC, rowid DESC
        LIMIT 1`,
     )
     .get(chatId) as { run_id?: string } | undefined;
@@ -719,7 +727,7 @@ export function isOneInvocationChat(chatId: string): boolean {
       `SELECT payload_json
        FROM run_events
        WHERE chat_id = ? AND kind = 'invoke_started'
-       ORDER BY datetime(ts) DESC, rowid DESC
+       ORDER BY ts DESC, rowid DESC
        LIMIT 100`,
     )
     .all(chatId) as Array<{ payload_json: string }>;
@@ -734,7 +742,7 @@ export function isMobileOneInvocationChat(chatId: string): boolean {
       `SELECT payload_json
        FROM run_events
        WHERE chat_id = ? AND kind = 'invoke_started'
-       ORDER BY datetime(ts) DESC, rowid DESC
+       ORDER BY ts DESC, rowid DESC
        LIMIT 1`,
     )
     .get(chatId) as { payload_json?: string } | undefined;

@@ -19,6 +19,7 @@ import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
 import { announceAgentRosterChange } from "@/lib/agent-roster-events";
 import { KeyStatusBanner } from "@/components/KeyStatusBanner";
+import { ElapsedClock } from "@/components/ElapsedClock";
 import { McpBuildInterviewCard } from "@/components/build/McpBuildInterviewCard";
 import { McpAttachmentReceiptCard } from "@/components/build/McpAttachmentReceiptCard";
 import { CloudSaveChoiceDialog } from "@/components/build/CloudSaveChoiceDialog";
@@ -378,35 +379,21 @@ export default function BuildPage() {
   // 실행 경과 표시 — 텍스트 한 줄 없이도 "죽지 않았다"를 증명하는 유일한 신호.
   // 단계(reached)가 바뀔 때만 리셋한다: 같은 단계 안에서 여러 인터뷰 턴이 오가도
   // (phase가 running↔interview로 왕복해도) 그 단계에 들어간 뒤 누적 시간을 보여준다.
-  const stageStartedAtRef = useRef<number>(Date.now());
-  const [elapsedTick, setElapsedTick] = useState(0);
+  // 시계 자체는 ElapsedClock 리프가 돌므로 이 페이지는 초당 리렌더되지 않는다.
+  const [stageStartedAt, setStageStartedAt] = useState<number>(() => Date.now());
   useEffect(() => {
-    stageStartedAtRef.current = Date.now();
+    setStageStartedAt(Date.now());
   }, [reached]);
-  // The ref is seeded at MOUNT, but a build usually starts long after the page
-  // was opened — without this the very first stage claimed however many minutes
-  // the page had been sitting idle. A liveness element that overstates the clock
-  // is worse than none, so re-seed the moment the build actually becomes active.
+  // The start time is seeded at MOUNT, but a build usually starts long after the
+  // page was opened — without this the very first stage claimed however many
+  // minutes the page had been sitting idle. A liveness element that overstates
+  // the clock is worse than none, so re-seed when the build becomes active.
   const wasActiveRef = useRef(false);
   useEffect(() => {
     const active = phase === "running" || phase === "interview" || phase === "mcp-review" || phase === "runtime-approval";
-    if (active && !wasActiveRef.current) stageStartedAtRef.current = Date.now();
+    if (active && !wasActiveRef.current) setStageStartedAt(Date.now());
     wasActiveRef.current = active;
   }, [phase]);
-  useEffect(() => {
-    if (phase !== "running" && phase !== "interview" && phase !== "mcp-review" && phase !== "runtime-approval") return;
-    const id = window.setInterval(() => setElapsedTick((t) => t + 1), 1000);
-    return () => window.clearInterval(id);
-  }, [phase]);
-  const stageElapsedLabel = useMemo(() => {
-    const seconds = Math.max(0, Math.round((Date.now() - stageStartedAtRef.current) / 1000));
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
-    return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `0:${String(s).padStart(2, "0")}`;
-    // elapsedTick is intentionally unused in the body — it exists only to force
-    // this memo to recompute every second while the ref-backed start time itself
-    // does not change.
-  }, [reached, phase, elapsedTick]);
 
   const pickWorkspace = async () => {
     const api = ipc();
@@ -640,7 +627,7 @@ export default function BuildPage() {
                       ? ko ? "당신 차례입니다 — 모델을 선택하세요" : "Your turn — choose the model"
                     : liveness?.activity || (ko ? "엔진 준비 중" : "Preparing the engine")}
               </span>
-              <span className="build-livebar-time">{stageElapsedLabel}</span>
+              <span className="build-livebar-time"><ElapsedClock startedAt={stageStartedAt} /></span>
               {phase === "running" && liveness && liveness.silentMs >= 45_000 && (
                 <span className="build-livebar-silent">
                   {ko
@@ -861,25 +848,25 @@ export default function BuildPage() {
                     <span className="build-live">
                       <span className="forge-pulse" />
                       {ko ? STAGES[Math.min(reached, STAGES.length - 1)].label : STAGES[Math.min(reached, STAGES.length - 1)].labelEn}
-                      <em className="build-live-elapsed">{stageElapsedLabel}</em>
+                      <em className="build-live-elapsed"><ElapsedClock startedAt={stageStartedAt} /></em>
                     </span>
                   ) : phase === "interview" ? (
                     <span className="build-live">
                       <span className="forge-pulse" />
                       {ko ? "요구사항 확인 중" : "confirming brief"}
-                      <em className="build-live-elapsed">{stageElapsedLabel}</em>
+                      <em className="build-live-elapsed"><ElapsedClock startedAt={stageStartedAt} /></em>
                     </span>
                   ) : phase === "mcp-review" ? (
                     <span className="build-live">
                       <span className="forge-pulse" />
                       {ko ? "MCP 연결 확인 중" : "confirming MCP"}
-                      <em className="build-live-elapsed">{stageElapsedLabel}</em>
+                      <em className="build-live-elapsed"><ElapsedClock startedAt={stageStartedAt} /></em>
                     </span>
                   ) : phase === "runtime-approval" ? (
                     <span className="build-live">
                       <span className="forge-pulse" />
                       {ko ? "모델 선택 대기" : "awaiting model choice"}
-                      <em className="build-live-elapsed">{stageElapsedLabel}</em>
+                      <em className="build-live-elapsed"><ElapsedClock startedAt={stageStartedAt} /></em>
                     </span>
                   ) : (
                     <span>{phase}</span>
@@ -893,7 +880,7 @@ export default function BuildPage() {
                       state={stageStates[i]}
                       isLast={i === STAGES.length - 1}
                       ko={ko}
-                      elapsedLabel={stageStates[i] === "active" ? stageElapsedLabel : undefined}
+                      elapsedStartedAt={stageStates[i] === "active" ? stageStartedAt : undefined}
                     />
                   ))}
                 </div>
@@ -1172,14 +1159,14 @@ function StageRow({
   state,
   isLast,
   ko,
-  elapsedLabel,
+  elapsedStartedAt,
 }: {
   stage: (typeof STAGES)[number];
   state: StageState;
   isLast: boolean;
   ko: boolean;
-  /** Wall-clock time spent on this stage so far. Only meaningful while state === "active". */
-  elapsedLabel?: string;
+  /** Wall-clock start of this stage. Only meaningful while state === "active". */
+  elapsedStartedAt?: number;
 }) {
   const Icon = stage.icon;
   const c = stage.color;
@@ -1198,7 +1185,12 @@ function StageRow({
       <div className="build-stage-copy">
         <div>
           <span>{ko ? stage.label : stage.labelEn}</span>
-          {active && <em>{ko ? "진행 중" : "running"}{elapsedLabel ? ` · ${elapsedLabel}` : ""}</em>}
+          {active && (
+            <em>
+              {ko ? "진행 중" : "running"}
+              {elapsedStartedAt !== undefined && <> · <ElapsedClock startedAt={elapsedStartedAt} /></>}
+            </em>
+          )}
           {done && <em>{ko ? "완료" : "done"}</em>}
           {error && <em>{ko ? "중단" : "stopped"}</em>}
         </div>

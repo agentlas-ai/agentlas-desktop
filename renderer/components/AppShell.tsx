@@ -42,6 +42,23 @@ const ONBOARDED_KEY = "agentlas.onboarded";
 const IMPORT_PROMPTED_KEY = "agentlas.import.prompted";
 const GUIDE_FAB_HIDDEN_KEY = "agentlas.guideFab.hidden";
 const ATTENTION_POLL_MS = 3_000;
+const ATTENTION_POLL_HIDDEN_MS = 15_000;
+
+// 표시 내용이 같으면 이전 배열 참조를 그대로 돌려줘야 셸이 리렌더되지 않는다.
+// visibleOberonBackgroundJobs()는 호출마다 새 배열을 만들므로 여기서 걸러 준다.
+function sameOberonJobList(prev: OberonBackgroundJob[], next: OberonBackgroundJob[]): boolean {
+  if (prev.length !== next.length) return false;
+  for (let i = 0; i < prev.length; i += 1) {
+    const a = prev[i];
+    const b = next[i];
+    if (
+      a.id !== b.id || a.status !== b.status || a.percent !== b.percent
+      || a.message !== b.message || a.phase !== b.phase || a.label !== b.label
+      || a.updatedAtMs !== b.updatedAtMs
+    ) return false;
+  }
+  return true;
+}
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [importOpen, setImportOpen] = useState(false);
@@ -204,12 +221,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // 승인 대기(독 빨간 배지·독 튕김·"승인 대기" 알림)는 앱을 내려놓은 사이에 와도 떠야 하므로
   // 이 폴링만은 화면이 숨어도 계속 돈다(다른 폴러와 달리 절전 예외). 이 알림은 오직 렌더러
   // 폴링에만 물려 있어서(메인이 따로 안 쏨) 멈추면 최소화 중 승인 요청이 배지·알림으로 안 뜬다.
+  // 다만 숨김 중 배지는 몇 초 늦어도 무방하므로 간격만 늘려 백그라운드 IPC를 줄인다.
   useEffect(() => {
     void syncAttention();
-    const timer = window.setInterval(() => void syncAttention(), ATTENTION_POLL_MS);
+    let timer = window.setInterval(() => void syncAttention(), ATTENTION_POLL_MS);
+    const onVisibility = () => {
+      window.clearInterval(timer);
+      const hidden = document.visibilityState === "hidden";
+      timer = window.setInterval(() => void syncAttention(), hidden ? ATTENTION_POLL_HIDDEN_MS : ATTENTION_POLL_MS);
+      if (!hidden) void syncAttention();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("agentlas:attention-refresh", syncAttention);
     return () => {
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("agentlas:attention-refresh", syncAttention);
       const api = ipc();
       void api?.attention?.setPendingConfirmations(0);
@@ -266,11 +292,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const sync = () => setOberonJobs(visibleOberonBackgroundJobs());
+    // 이 폴은 잡이 하나도 없어도 2초마다 새 배열로 setState 해 셸 전체(사이드바·
+    // 투어·토스트 전부)를 상시 리렌더시키던 유일한 지점이다. 내용이 같으면 이전
+    // 참조를 유지해 리렌더를 없애고, 창이 숨어 있는 동안은 틱을 쉰다(변화는
+    // subscribeOberonBackgroundJobs 이벤트가 즉시 반영한다).
+    const sync = () => setOberonJobs((prev) => {
+      const next = visibleOberonBackgroundJobs();
+      return sameOberonJobList(prev, next) ? prev : next;
+    });
+    const tick = () => {
+      if (document.visibilityState !== "hidden") sync();
+    };
     sync();
     const stopMonitor = startOberonBackgroundJobMonitor();
     const unsubscribe = subscribeOberonBackgroundJobs(sync);
-    const timer = window.setInterval(sync, 2_000);
+    const timer = window.setInterval(tick, 2_000);
     return () => {
       window.clearInterval(timer);
       unsubscribe();

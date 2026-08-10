@@ -3627,15 +3627,18 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("oneValueClosure:setReflection", (_e, input: SetOneValueClosureReflectionInput) =>
     setOneValueClosureReflection(input));
   ipcMain.handle("oneHomeSignals:get", () => getOneHomeSignals());
-  ipcMain.handle("oneWeeklyReflection:get", async () => {
+  ipcMain.handle("oneWeeklyReflection:get", () => {
     // Async pre-pass: warm completion-claim judgments for the stored closure
     // statements the synchronous reflection builder peeks (miss = regex fallback).
+    // 폴 경로(5초 틱)에서 LLM 판정을 기다리면 핸들러가 최대 4초 막힌다 — 웜업은
+    // 백그라운드로 흘리고 스냅샷은 즉시 반환한다(판정은 다음 폴부터 반영, 문장별
+    // 메모이즈라 중복 추론 없음).
     const statements = getOneValueClosureState().closures
       .flatMap((record) => record.closure.valueItems
         .filter((item): item is Extract<typeof item, { kind: "fact" }> => item.kind === "fact")
         .map((item) => item.statement))
       .slice(0, 24);
-    await prejudgeCompletionClaims(statements, { timeoutMs: 4_000 }).catch(() => undefined);
+    void prejudgeCompletionClaims(statements, { timeoutMs: 4_000 }).catch(() => undefined);
     return getOneWeeklyReflectionSnapshot();
   });
   ipcMain.handle("oneWeeklyReflection:resolve", (_e, input: ResolveOneWeeklyReflectionInputV1) =>
@@ -3659,9 +3662,22 @@ export function registerIpcHandlers(): void {
     const latest = getLatestOneImprovementProof(exactTaskId);
     return task && latest?.currentTaskVersion === task.version ? latest : null;
   });
-  ipcMain.handle("oneBriefing:get", () => getOneBriefingSnapshot());
-  ipcMain.handle("oneBriefing:openTask", (_e, input: OpenOneBriefingTaskInput) =>
-    resolveOneBriefingTaskNavigation(input));
+  // 브리핑 탐지는 프로젝트별 lstat·자동화별 이력 조회를 동반하는 비싼 스윕이다.
+  // 5초 폴링이 그대로 때리지 않게 10초 캐시를 두고, 사용자 행동(openTask)은
+  // 즉시 무효화한다. 탐지 지연 10초는 프로액티브 브리핑 표면에서 체감 불가.
+  let oneBriefingSnapshotCache: { at: number; snapshot: ReturnType<typeof getOneBriefingSnapshot> } | null = null;
+  ipcMain.handle("oneBriefing:get", () => {
+    if (oneBriefingSnapshotCache && Date.now() - oneBriefingSnapshotCache.at < 10_000) {
+      return oneBriefingSnapshotCache.snapshot;
+    }
+    const snapshot = getOneBriefingSnapshot();
+    oneBriefingSnapshotCache = { at: Date.now(), snapshot };
+    return snapshot;
+  });
+  ipcMain.handle("oneBriefing:openTask", (_e, input: OpenOneBriefingTaskInput) => {
+    oneBriefingSnapshotCache = null;
+    return resolveOneBriefingTaskNavigation(input);
+  });
   ipcMain.handle("oneRequestIntent:resolve", async (_e, prompt: unknown) => {
     if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 4_000) {
       throw new TypeError("Invalid One request-intent prompt");

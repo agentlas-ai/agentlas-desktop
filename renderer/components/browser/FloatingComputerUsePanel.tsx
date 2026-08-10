@@ -51,14 +51,20 @@ export default function FloatingComputerUsePanel() {
         // (busy socket, mid-navigation, a slow screenshot). Blanking on every
         // failed poll made the panel flicker to "Waiting for screen" between
         // good frames. Only replace the image when a new one actually arrives.
-        setBrowserFrame((prev) => next.dataUrl || !prev?.dataUrl
-          ? next
-          : { ...next, dataUrl: prev.dataUrl, title: prev.title, url: prev.url, width: prev.width, height: prev.height });
+        // 그리고 화면이 안 변했으면(같은 dataUrl) 이전 참조를 유지한다 — 멀티 MB
+        // 문자열 state 교체와 이미지 재디코드를 틱마다 반복하지 않는다.
+        setBrowserFrame((prev) => {
+          if (!next.dataUrl && prev?.dataUrl) return prev;
+          if (prev && prev.dataUrl === next.dataUrl && prev.title === next.title && prev.url === next.url) return prev;
+          return next;
+        });
       } else {
         const next = await api.computerUse.capturePreview(sourceId);
-        setComputerFrame((prev) => next.dataUrl || !prev?.dataUrl
-          ? next
-          : { ...next, dataUrl: prev.dataUrl });
+        setComputerFrame((prev) => {
+          if (!next.dataUrl && prev?.dataUrl) return prev;
+          if (prev && prev.dataUrl === next.dataUrl) return prev;
+          return next;
+        });
         if (!sourceId && next.selectedSourceId) setSourceId(next.selectedSourceId);
       }
     } catch {

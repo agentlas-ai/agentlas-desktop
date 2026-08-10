@@ -957,7 +957,13 @@ export function tryProduceOneImprovementProofForTask(taskId: string): OneImprove
 }
 
 /** Eventual Main reconciliation used by Desktop reads and Mobile projection. */
+let lastReconcileSweepAt = 0;
 export function reconcileOneImprovementProofs(limit = MAX_RECONCILE_TASKS): number {
+  // 읽기 폴링(5초 틱)이 이 보정을 그대로 끌고 오면 태스크 수만큼의 조회가 틱마다
+  // 반복된다. eventual 보정이므로 10초에 한 번이면 같은 결과에 수렴한다.
+  const now = Date.now();
+  if (now - lastReconcileSweepAt < 10_000) return 0;
+  lastReconcileSweepAt = now;
   const bounded = Math.max(1, Math.min(MAX_RECONCILE_TASKS, Math.floor(limit)));
   let created = 0;
   for (const task of listCanonicalTasks({ limit: bounded, includeArchived: false })) {

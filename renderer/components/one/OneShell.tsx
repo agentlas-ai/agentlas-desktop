@@ -12,6 +12,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { Markdown, StreamingMarkdown } from "@/components/Markdown";
+import { ElapsedClock } from "@/components/ElapsedClock";
 import { IconArrowUp, IconPlus, IconRefresh } from "@/components/Icon";
 import { grantForDroppedFile, ipc, ipcEvents } from "@/lib/ipc";
 import { tFor, useT } from "@/lib/i18n";
@@ -509,7 +510,6 @@ export function OneShell() {
   // nothing for minutes — leaving an identical card on screen that is
   // indistinguishable from a hang. This clock never depends on the runtime.
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
-  const [runElapsedTick, setRunElapsedTick] = useState(0);
   const [composer, setComposer] = useState("");
   const [availableAgents, setAvailableAgents] = useState<InstalledAgent[]>([]);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
@@ -592,13 +592,7 @@ export function OneShell() {
   useEffect(() => {
     setRunStartedAt(busy ? Date.now() : null);
   }, [busy]);
-  useEffect(() => {
-    if (!busy) return;
-    const id = window.setInterval(() => setRunElapsedTick((tick) => tick + 1), 1000);
-    return () => window.clearInterval(id);
-  }, [busy]);
-  // runElapsedTick exists purely to re-render the clock each second.
-  void runElapsedTick;
+  // 경과 시계는 ElapsedClock 리프가 스스로 돈다 — 3,801줄 셸을 초당 리렌더시키지 않는다.
 
   useEffect(() => {
     const input = composerInputRef.current;
@@ -2960,9 +2954,7 @@ export function OneShell() {
                       </div>
                     )}
                     {runStatus && <span className={styles.runStatusDetail}>{runStatus}</span>}
-                    {runStartedAt !== null && (
-                      <span className={styles.runElapsed}>{formatRunElapsed(Date.now() - runStartedAt)}</span>
-                    )}
+                    <ElapsedClock startedAt={runStartedAt} format={formatRunElapsed} className={styles.runElapsed} />
                   </section>
                 )}
                 {selected && latestCommittedAnswer && (

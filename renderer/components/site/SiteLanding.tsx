@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { ipc } from "@/lib/ipc";
+import { ElapsedClock } from "@/components/ElapsedClock";
 import { visibleAgents } from "@/lib/agent-visibility";
 import type { InstalledAgent, InstalledFirm } from "@shared/types";
 import type {
@@ -77,8 +78,8 @@ type SiteLandingProps = {
   generating: boolean;
   /** Live status and design feedback from the running generation. */
   activity?: { status: string; feedback: string } | null;
-  /** Host-owned clock (ms since the current generation started). Keeps advancing even when the model reports no interim status. */
-  elapsedMs?: number;
+  /** Wall-clock start of the current generation. The clock leaf advances itself. */
+  elapsedStartedAt?: number;
   /** The last create that failed, kept on screen instead of a vanishing toast. */
   failure?: { reason: string } | null;
   onRetryCreate?: () => void;
@@ -275,7 +276,7 @@ export function SiteLanding({
   noEngine,
   generating,
   activity,
-  elapsedMs,
+  elapsedStartedAt,
   failure,
   onRetryCreate,
   onDismissFailure,
@@ -563,9 +564,14 @@ export function SiteLanding({
             <span className={styles.progressSpinner} aria-hidden="true" />
             <div className={styles.progressCopy}>
               <div className={styles.progressHeadline}>
-                <strong>{activity?.status || elapsedCopy(ko, elapsedMs ?? 0)}</strong>
-                {typeof elapsedMs === "number" && (
-                  <span className={styles.progressElapsed}>{formatElapsed(elapsedMs)}</span>
+                <strong>
+                  {activity?.status
+                    || (elapsedStartedAt !== undefined
+                      ? <ElapsedClock startedAt={elapsedStartedAt} format={(ms) => elapsedCopy(ko, ms)} />
+                      : elapsedCopy(ko, 0))}
+                </strong>
+                {elapsedStartedAt !== undefined && (
+                  <ElapsedClock startedAt={elapsedStartedAt} format={formatElapsed} className={styles.progressElapsed} />
                 )}
               </div>
               {activity?.feedback && <p className={styles.progressFeedback}>{activity.feedback}</p>}

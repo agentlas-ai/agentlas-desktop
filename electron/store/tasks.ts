@@ -258,29 +258,30 @@ export function ensureCanonicalTaskForChat(chatId: string): CanonicalTask | null
       seenAt: current.updated_at,
     });
   }
+  // 변경 판정은 읽기만으로 끝낸다. 폴링 표면이 이 함수를 틱마다 수백 번 부르는데,
+  // 무변경 태스크가 WAL 쓰기 트랜잭션을 커밋하면 그 비용이 메인 스레드 전체를 막는다.
+  const prior = db
+    .prepare("SELECT * FROM tasks WHERE id = ? LIMIT 1")
+    .get(taskId) as TaskRow | undefined;
+  const status: CanonicalTaskStatus = root.archived_at
+    ? "archived"
+    : prior?.status === "archived"
+      ? "open"
+      : normalizeStatus(prior?.status ?? "open");
+  const coreChanged =
+    !prior ||
+    prior.title !== root.title ||
+    prior.project_id !== root.project_id ||
+    prior.firm_id !== root.firm_id ||
+    normalizeStatus(prior.status) !== status ||
+    prior.archived_at !== root.archived_at ||
+    prior.origin_chat_id !== root.id;
+  const participantsChanged =
+    Boolean(prior) && desiredParticipants.some((input) => participantNeedsUpsert(taskId, input));
+  if (prior && !coreChanged && !participantsChanged) return toTask(prior);
   const reconcile = db.transaction(() => {
-    const prior = db
-      .prepare("SELECT * FROM tasks WHERE id = ? LIMIT 1")
-      .get(taskId) as TaskRow | undefined;
-    const status: CanonicalTaskStatus = root.archived_at
-      ? "archived"
-      : prior?.status === "archived"
-        ? "open"
-        : normalizeStatus(prior?.status ?? "open");
-    const coreChanged =
-      !prior ||
-      prior.title !== root.title ||
-      prior.project_id !== root.project_id ||
-      prior.firm_id !== root.firm_id ||
-      normalizeStatus(prior.status) !== status ||
-      prior.archived_at !== root.archived_at ||
-      prior.origin_chat_id !== root.id;
-    const participantsChanged =
-      Boolean(prior) && desiredParticipants.some((input) => participantNeedsUpsert(taskId, input));
     const updatedAt = prior
-      ? coreChanged || participantsChanged
-        ? monotonicUpdatedAt(prior.updated_at, rootUpdatedAt, current.updated_at)
-        : prior.updated_at
+      ? monotonicUpdatedAt(prior.updated_at, rootUpdatedAt, current.updated_at)
       : monotonicUpdatedAt(null, rootUpdatedAt, current.updated_at);
     db.prepare(
       `INSERT INTO tasks
@@ -315,8 +316,18 @@ export function ensureCanonicalTaskForChat(chatId: string): CanonicalTask | null
   return row ? toTask(row) : null;
 }
 
+// 읽기측 스윕은 안전망이지 전파 경로가 아니다: 생성·개명·아카이브는 쓰기 시점에
+// 원장을 갱신한다(chats.ts). 폴링 표면 여러 개가 한 틱 안에서 list API를 중복
+// 호출하므로, 전체 스윕은 이 간격 안에서 한 번이면 충분하다.
+const RECONCILE_SWEEP_MIN_INTERVAL_MS = 15_000;
+let lastFullReconcileSweepAt = 0;
+const lastProjectReconcileSweepAt = new Map<string, number>();
+
 function reconcileAllUserChats(): void {
   if (!tableExists("chats") || !tableExists("tasks")) return;
+  const now = Date.now();
+  if (now - lastFullReconcileSweepAt < RECONCILE_SWEEP_MIN_INTERVAL_MS) return;
+  lastFullReconcileSweepAt = now;
   const rows = getDb()
     .prepare("SELECT id FROM chats WHERE kind <> 'division' ORDER BY updated_at DESC LIMIT 200")
     .all() as Array<{ id: string }>;
@@ -329,6 +340,10 @@ function reconcileAllUserChats(): void {
 
 function reconcileProjectUserChats(projectId: string): void {
   if (!tableExists("chats") || !tableExists("tasks")) return;
+  const now = Date.now();
+  const last = lastProjectReconcileSweepAt.get(projectId) ?? 0;
+  if (now - last < RECONCILE_SWEEP_MIN_INTERVAL_MS) return;
+  lastProjectReconcileSweepAt.set(projectId, now);
   const rows = getDb()
     .prepare("SELECT id FROM chats WHERE project_id = ? AND kind <> 'division' ORDER BY updated_at DESC LIMIT 200")
     .all(projectId) as Array<{ id: string }>;

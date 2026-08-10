@@ -97,6 +97,17 @@ function receiptRecoveryStatus(receipt: InvocationRunReceipt | null, locale: "ko
     : (locale === "ko" ? "실행 중" : "Running");
 }
 
+// 렌더마다 [...messages].reverse()로 전체 배열을 복사하지 않도록 뒤에서부터 찾는다.
+function lastMessageOfRole(
+  messages: StreamMessage[],
+  role: StreamMessage["role"],
+): StreamMessage | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === role) return messages[i];
+  }
+  return undefined;
+}
+
 function workspacePreviewFromMedia(media: MediaArtifact): WorkspaceFilePreview {
   const openTargets = uniqueStrings([media.path, ...(media.paths ?? []), media.src]);
   return {
@@ -829,18 +840,42 @@ function ChatPage() {
     () => mediaBasePathCandidates(restoredFolder, defaultRunFolder),
     [restoredFolder, defaultRunFolder],
   );
+  // 파셜마다 대화 전체를 정규식으로 재스캔하면 비용이 대화 길이에 비례해 자란다
+  // ("오래 쓰면 느려짐"의 렌더러 쪽 원인). 스트리밍 중 본문이 자라는 메시지는
+  // 마지막 하나뿐이므로 메시지별로 스캔 결과를 캐시한다. 본문은 append-only라
+  // 길이 변화가 곧 내용 변화다.
+  const linkedFileScanCacheRef = useRef(
+    new Map<string, { textLength: number; baseKey: string; previews: WorkspaceFilePreview[] }>(),
+  );
   const linkedFiles = useMemo(() => {
+    const baseKey = mediaBasePaths.join("\u0000");
+    const cache = linkedFileScanCacheRef.current;
     const out: WorkspaceFilePreview[] = [];
     const seen = new Set<string>();
+    const liveIds = new Set<string>();
     for (const message of messages) {
       if (message.role !== "agent" || !message.text) continue;
-      for (const file of linkedFileArtifactsInText(message.text, mediaBasePaths)) {
-        const preview = workspacePreviewFromLinkedFile(file);
+      liveIds.add(message.id);
+      let entry = cache.get(message.id);
+      if (!entry || entry.textLength !== message.text.length || entry.baseKey !== baseKey) {
+        entry = {
+          textLength: message.text.length,
+          baseKey,
+          previews: linkedFileArtifactsInText(message.text, mediaBasePaths)
+            .map((file) => workspacePreviewFromLinkedFile(file)),
+        };
+        cache.set(message.id, entry);
+      }
+      for (const preview of entry.previews) {
         const key = preview.path || preview.fileUrl;
         if (seen.has(key)) continue;
         seen.add(key);
         out.push(preview);
       }
+    }
+    // 채팅 전환·/clear로 사라진 메시지의 캐시는 함께 버린다.
+    if (cache.size > liveIds.size) {
+      for (const id of cache.keys()) if (!liveIds.has(id)) cache.delete(id);
     }
     return out;
   }, [messages, mediaBasePaths]);
@@ -1515,6 +1550,11 @@ function ChatPage() {
     return () => {
       subRef.current?.();
       subRef.current = null;
+      // 라우트 이탈(언마운트)에도 저장한다. 기존에는 같은 마운트 안에서 채팅을
+      // 전환할 때만 저장해서, 워크스페이스를 떠났다 돌아오면 캐시가 100% 미스라
+      // 매번 빈 화면 + 전체 재로드였다. 채팅 전환 시에는 위 본문 저장과 같은
+      // 내용을 한 번 더 쓰는 것뿐이라 무해(멱등)하다.
+      saveChatViewSnapshot(chatId, viewSnapshotRef.current);
     };
   }, [chatId]);
 
@@ -2957,6 +2997,74 @@ function ChatPage() {
     router.replace("/");
   }
 
+  // ── 스트리밍 파셜마다 ChatStream 이하 전체가 리렌더되던 원인 수리 ──
+  // 아래 값들이 렌더마다 새 참조(인라인 화살표·객체 리터럴)로 내려가면 memo(Bubble)가
+  // 무력화돼 파셜(초당 최대 ~16회)마다 모든 말풍선·ChatInput·우측 패널이 다시 그려진다.
+  // 조건부 return보다 앞(훅 구역)에서 참조를 고정한다.
+  const pickerAgents = useMemo(() => visibleAgents(allAgents, { includeTeams: true }), [allAgents]);
+  const boundTeamMember = useMemo(
+    () => (agent && agent.visibility === "background" && agent.parentTeamId ? agent : null),
+    [agent],
+  );
+  const displayAgents = useMemo(
+    () => (boundTeamMember
+      ? [boundTeamMember, ...pickerAgents.filter((row) => row.id !== boundTeamMember.id)]
+      : pickerAgents),
+    [boundTeamMember, pickerAgents],
+  );
+  const userFacingProjectPool = useMemo(
+    () => (project?.agentPool ?? []).filter((member) => isUserFacingProjectPoolMember(member, allAgents)),
+    [project, allAgents],
+  );
+  const projectForDisplay = useMemo(
+    () => (project ? { ...project, agentPool: userFacingProjectPool } : null),
+    [project, userFacingProjectPool],
+  );
+  const chatEmptyDirectory = useMemo(() => ({
+    agents: displayAgents,
+    hubBookmarks,
+    firms: allFirms,
+    projects: allProjects,
+    envKeys: allEnvKeys,
+    plugins: installedPlugins,
+    projectTeam: projectForDisplay?.agentPool.map((member) => {
+      const installed = member.entityKind === "agent" && member.agentId
+        ? allAgents.find((candidate) => candidate.id === member.agentId)
+        : null;
+      const firm = member.entityKind === "team" && member.firmId
+        ? allFirms.find((candidate) => candidate.id === member.firmId)
+        : null;
+      const name = installed
+        ? pickLocalized(installed, locale).name
+        : firm
+          ? pickLocalized(firm, locale).name
+          : member.nameSnapshot || (member.entityKind === "team"
+            ? (locale === "ko" ? "팀" : "Team")
+            : (locale === "ko" ? "에이전트" : "Agent"));
+      return {
+        id: projectPoolMemberKey(member),
+        token: name,
+        label: member.entityKind === "team"
+          ? (locale === "ko" ? "에이전트 팀 · 필요할 때 참여" : "Agent team · joins when needed")
+          : (locale === "ko" ? "전문 에이전트 · 필요할 때 참여" : "Specialist agent · joins when needed"),
+      };
+    }),
+  }), [displayAgents, hubBookmarks, allFirms, allProjects, allEnvKeys, installedPlugins, projectForDisplay, allAgents, locale]);
+  const handleOpenArtifact = useCallback((a: CodeArtifact) => {
+    setSurface(null);
+    setMediaPreview(null);
+    setArtifact(a);
+    openPanelTab("panel");
+  }, [openPanelTab]);
+  const handleOpenMedia = useCallback((media: MediaArtifact) => {
+    setSurface(null);
+    setArtifact(null);
+    setMediaPreview(workspacePreviewFromMedia(media));
+    openPanelTab("panel");
+  }, [openPanelTab]);
+  const handleOpenWorkflow = useCallback(() => setNetworkOpenPersisted(true), [setNetworkOpenPersisted]);
+  const handleOpenMultimodalSetup = useCallback(() => router.push("/settings#multimodal"), [router]);
+
   if (
     requestedTaskId &&
     (validatedTaskChatId === null || !validatedTaskChatId || chat?.id !== validatedTaskChatId)
@@ -2974,29 +3082,15 @@ function ChatPage() {
       </div>
     );
   }
-  // 에이전트 선택기에는 팀(멀티에이전트)도 노출한다 — 팀 자체를 골라 대화할 수 있어야 한다.
-  // v81부터 팀 내부 워커는 background라 목록에 없지만, 이 대화가 이미 그 워커에
-  // 바인딩돼 있으면 표시·전환은 계속돼야 한다 — 현재 에이전트만 예외로 목록에 얹는다.
-  const pickerAgents = visibleAgents(allAgents, { includeTeams: true });
-  const boundTeamMember =
-    agent && agent.visibility === "background" && agent.parentTeamId ? agent : null;
-  const displayAgents = boundTeamMember
-    ? [boundTeamMember, ...pickerAgents.filter((row) => row.id !== boundTeamMember.id)]
-    : pickerAgents;
   // @ is an optional one-turn override. It uses the same user-facing roster as
   // every other picker and never exposes a team's private system-role cells.
+  // (pickerAgents/displayAgents/projectForDisplay는 훅 구역에서 참조 고정.)
   const mentionAgents = displayAgents;
-  const userFacingProjectPool = (project?.agentPool ?? [])
-    .filter((member) => isUserFacingProjectPoolMember(member, allAgents));
-  const projectForDisplay = project
-    ? { ...project, agentPool: userFacingProjectPool }
-    : null;
   const displayAgent =
     agent?.visibility === "background" && !boundTeamMember ? null : agent;
-  const latestUserPrompt = [...messages].reverse().find((message) => message.role === "user")?.text ?? "";
+  const latestUserPrompt = lastMessageOfRole(messages, "user")?.text ?? "";
   // 현재(가장 최근) 에이전트 실행이 다단계 파이프라인(2+ stage)이면, 단일 에이전트라도 카드/네트워크 뷰를 켠다.
-  const hasPipeline =
-    ([...messages].reverse().find((message) => message.role === "agent")?.pipeline?.length ?? 0) > 1;
+  const hasPipeline = (lastMessageOfRole(messages, "agent")?.pipeline?.length ?? 0) > 1;
 
   return (
     <div style={{ display: "flex", height: "100%", width: "100%", minWidth: 0, overflow: "hidden" }}>
@@ -3305,51 +3399,12 @@ function ChatPage() {
           messages={messages}
           agentName="Agentlas"
           agentTone={displayAgent?.tone ?? "blue"}
-          emptyDirectory={{
-            agents: displayAgents,
-            hubBookmarks,
-            firms: allFirms,
-            projects: allProjects,
-            envKeys: allEnvKeys,
-            plugins: installedPlugins,
-            projectTeam: projectForDisplay?.agentPool.map((member) => {
-              const installed = member.entityKind === "agent" && member.agentId
-                ? allAgents.find((candidate) => candidate.id === member.agentId)
-                : null;
-              const firm = member.entityKind === "team" && member.firmId
-                ? allFirms.find((candidate) => candidate.id === member.firmId)
-                : null;
-              const name = installed
-                ? pickLocalized(installed, locale).name
-                : firm
-                  ? pickLocalized(firm, locale).name
-                  : member.nameSnapshot || (member.entityKind === "team"
-                    ? (locale === "ko" ? "팀" : "Team")
-                    : (locale === "ko" ? "에이전트" : "Agent"));
-              return {
-                id: projectPoolMemberKey(member),
-                token: name,
-                label: member.entityKind === "team"
-                  ? (locale === "ko" ? "에이전트 팀 · 필요할 때 참여" : "Agent team · joins when needed")
-                  : (locale === "ko" ? "전문 에이전트 · 필요할 때 참여" : "Specialist agent · joins when needed"),
-              };
-            }),
-          }}
-          onOpenArtifact={(a) => {
-            setSurface(null);
-            setMediaPreview(null);
-            setArtifact(a);
-            openPanelTab("panel");
-          }}
-          onOpenMedia={(media) => {
-            setSurface(null);
-            setArtifact(null);
-            setMediaPreview(workspacePreviewFromMedia(media));
-            openPanelTab("panel");
-          }}
+          emptyDirectory={chatEmptyDirectory}
+          onOpenArtifact={handleOpenArtifact}
+          onOpenMedia={handleOpenMedia}
           onOpenLinkedFile={openLinkedFile}
-          onOpenWorkflow={() => setNetworkOpenPersisted(true)}
-          onOpenMultimodalSetup={() => router.push("/settings#multimodal")}
+          onOpenWorkflow={handleOpenWorkflow}
+          onOpenMultimodalSetup={handleOpenMultimodalSetup}
           interactionBusy={busy}
           stopRequested={cancelPending}
           mediaBasePaths={mediaBasePaths}

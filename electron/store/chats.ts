@@ -476,6 +476,13 @@ export function archiveChat(id: string): Chat {
   getDb()
     .prepare("UPDATE chats SET archived_at = ? WHERE id = ?")
     .run(new Date().toISOString(), id);
+  // 아카이브는 쓰기 시점에 태스크 원장으로 전파한다. 읽기측 스윕은 스로틀되어
+  // 있으므로 여기서 미루면 태스크 목록이 최대 스윕 간격만큼 낡는다.
+  const task = findCanonicalTaskForChat(id);
+  if (task) {
+    ensureCanonicalTaskForChat(id);
+    emitDesktopStoreChange({ entity: "task", id: task.id });
+  }
   const chat = getChat(id) as Chat;
   emitDesktopStoreChange({ entity: "chat", id });
   return chat;
@@ -485,6 +492,11 @@ export function unarchiveChat(id: string): Chat {
   getDb()
     .prepare("UPDATE chats SET archived_at = NULL, updated_at = ? WHERE id = ?")
     .run(new Date().toISOString(), id);
+  const task = findCanonicalTaskForChat(id);
+  if (task) {
+    ensureCanonicalTaskForChat(id);
+    emitDesktopStoreChange({ entity: "task", id: task.id });
+  }
   const chat = getChat(id) as Chat;
   emitDesktopStoreChange({ entity: "chat", id });
   return chat;

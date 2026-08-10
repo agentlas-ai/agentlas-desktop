@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.9.79 — 2026-08-10
+
+This release binds Agentlas OS v1.1.107 at
+1f590f74e28244ab1ed1996cc61c6d5b0f2b5553.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- Steering a running Work task now keeps the conversation visible while the
+  current direction stops and the new instruction is queued. Returning from
+  another screen is no longer required to repaint the answer.
+- Long-running conversations avoid repeated full-history scans and preserve a
+  lightweight view snapshot when leaving the task, reducing blank reloads and
+  progressively slower streaming.
+- The right rail now shows the project instruction and durable memory status
+  beside the agents doing the work. Each attached agent row explains its
+  purpose, while live activity takes precedence during execution.
+- Renderer reads share bounded, invalidated IPC results. Store change events
+  refresh the affected surface, and a replaced preload bridge cannot reuse a
+  method bound to the previous bridge.
+- Task and run-event hot paths avoid unchanged write transactions and table
+  scans, including an indexed latest-run lookup and throttled reconciliation.
+- The bundled Agentlas OS v1.1.107 adds working One checkpoints for OpenCode,
+  OpenClaw, Goose, and Cursor and correctly wires checkpoints when One is
+  switched on, independent of status-line ownership.
+
 ## 0.9.78 — 2026-08-10
 
 This release binds Agentlas OS v1.1.106 at

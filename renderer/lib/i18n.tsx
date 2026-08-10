@@ -12,6 +12,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useState,
   type ReactNode,
 } from "react";
@@ -4973,8 +4974,11 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   // SSR 기본값 "ko"로 먼저 그려져, 영어 시스템에서 ko→en 깜빡임이 생기거나 텍스트 없는
   // 순간이 (다크 테마에선 --paper=#131316이라) 검은 화면처럼 보이던 문제를 막는다.
   // 빈 자리는 현재 테마색(var(--paper))으로 채워 라이트/다크 어느 쪽도 검게 보이지 않게 한다.
+  // value 객체 리터럴이 렌더마다 새 참조면, 이 프로바이더에 상태가 하나라도 늘어나는
+  // 순간 앱 전체의 useT() 소비자가 전부 리렌더된다. 지금 참조를 고정해 둔다.
+  const contextValue = useMemo(() => ({ locale, pref, setPref, t }), [locale, pref, setPref, t]);
   return (
-    <I18nContext.Provider value={{ locale, pref, setPref, t }}>
+    <I18nContext.Provider value={contextValue}>
       {_ready ? children : <div style={{ minHeight: "100vh", background: "var(--paper)" }} aria-hidden />}
     </I18nContext.Provider>
   );

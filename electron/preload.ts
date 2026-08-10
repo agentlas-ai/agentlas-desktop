@@ -921,6 +921,14 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
     ipcRenderer.on("site:activity", wrapped);
     return () => ipcRenderer.removeListener("site:activity", wrapped);
   },
+  // 스토어 변경 방송 — {entity, id}뿐, 행 내용은 절대 싣지 않는다(change-bus 계약).
+  // 렌더러 읽기 캐시 무효화용: 폴링 TTL보다 빠르게, 정확한 시점에 비운다.
+  onStoreChanged: (handler: (change: { entity: string; id?: string }) => void) => {
+    const wrapped = (_evt: Electron.IpcRendererEvent, change: { entity: string; id?: string }) =>
+      handler(change);
+    ipcRenderer.on("store:changed", wrapped);
+    return () => ipcRenderer.removeListener("store:changed", wrapped);
+  },
 });
 
 // 자동 업데이트 상태 broadcast — updater.ts의 broadcast()에서 webContents.send("updater:state", state)

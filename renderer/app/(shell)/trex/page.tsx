@@ -33,6 +33,7 @@ import {
 } from "@/lib/trex/model";
 import { IconApps, IconSparkles, IconFileUp, IconEdit, IconChevronRight, IconCheck } from "@/components/Icon";
 import { DeckStage, GlobalStyle, bgStyle } from "@/components/trex/DeckStage";
+import { ElapsedClock } from "@/components/ElapsedClock";
 import { STYLES, STYLE_IDS, styleById, routeStyleJudged, PALETTES, type StyleId } from "@/lib/trex/styles";
 import type { OpenCrabReadiness } from "@/lib/types";
 
@@ -170,7 +171,6 @@ export default function TrexPage() {
   const [imagePending, setImagePending] = useState<Set<string>>(new Set());
   // 병렬 에이전트 활동 피드 — 콘텐츠/이미지 에이전트의 라이브 상태(멈춤 아님을 보여주는 창구).
   const [agentJobs, setAgentJobs] = useState<AgentJob[]>([]);
-  const [, setJobTick] = useState(0); // 경과초 1s 갱신
 
   const patchJob = useCallback((j: AgentJobPatch) => {
     setAgentJobs((prev) => {
@@ -181,14 +181,11 @@ export default function TrexPage() {
     });
   }, []);
 
-  // 실행 중 작업이 있으면 1초마다 경과초 리렌더, 전부 끝나면 8초 후 피드 정리.
+  // 경과초는 행별 ElapsedClock 리프가 돈다(1,200줄 페이지를 초당 리렌더시키지 않음).
+  // 전부 끝나면 8초 후 피드 정리.
   useEffect(() => {
     const anyRunning = agentJobs.some((j) => j.status === "running");
-    if (anyRunning) {
-      const t = window.setInterval(() => setJobTick((v) => v + 1), 1000);
-      return () => window.clearInterval(t);
-    }
-    if (agentJobs.length > 0) {
+    if (!anyRunning && agentJobs.length > 0) {
       const t = window.setTimeout(() => setAgentJobs([]), 8000);
       return () => window.clearTimeout(t);
     }
@@ -487,7 +484,6 @@ export default function TrexPage() {
             {ko ? "에이전트 활동" : "Agent activity"}
           </div>
           {agentJobs.map((j) => {
-            const secs = Math.max(0, Math.round(((j.endedAt ?? Date.now()) - j.startedAt) / 1000));
             return (
               <div key={j.key} style={agentFeedRow}>
                 <span style={{ flexShrink: 0, width: 14, textAlign: "center" }}>
@@ -495,7 +491,11 @@ export default function TrexPage() {
                 </span>
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{j.label}</span>
                 {j.engine && <span style={agentFeedEngine}>{j.engine}</span>}
-                <span style={{ opacity: 0.55, fontVariantNumeric: "tabular-nums" }}>{secs}s</span>
+                <span style={{ opacity: 0.55, fontVariantNumeric: "tabular-nums" }}>
+                  {j.endedAt !== undefined
+                    ? `${Math.max(0, Math.round((j.endedAt - j.startedAt) / 1000))}s`
+                    : <ElapsedClock startedAt={j.startedAt} format={(ms) => `${Math.max(0, Math.round(ms / 1000))}s`} />}
+                </span>
               </div>
             );
           })}

@@ -4,6 +4,7 @@ import type { CSSProperties } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { IconCheck, IconFileUp } from "@/components/Icon";
+import { ElapsedClock } from "@/components/ElapsedClock";
 import type {
   CloudAgentPublishStage,
   CloudAgentRegisteredUploadOption,
@@ -82,15 +83,8 @@ export default function CloudAgentPublishPage() {
   );
   const { rootGrant, registeredKey, running, result, purposeAnswer, progressStage, progressDetail, startedAt } = session;
   const [registeredOptions, setRegisteredOptions] = useState<CloudAgentRegisteredUploadOption[]>([]);
-  const [nowTick, setNowTick] = useState(0);
-
-  // The host owns the clock. It keeps advancing even while a single phase runs
-  // silently for a minute, which is exactly when a static label reads as frozen.
-  useEffect(() => {
-    if (startedAt === null) return;
-    const id = window.setInterval(() => setNowTick((t) => t + 1), 1000);
-    return () => window.clearInterval(id);
-  }, [startedAt]);
+  // 시계는 UploadProgressPanel 안의 ElapsedClock 리프가 스스로 돈다 —
+  // 1,000줄 페이지를 초당 리렌더시키지 않는다.
 
   useEffect(() => {
     let cancelled = false;
@@ -295,9 +289,7 @@ export default function CloudAgentPublishPage() {
             visibility={running}
             stage={progressStage}
             detail={progressDetail}
-            elapsedMs={startedAt === null ? 0 : Date.now() - startedAt}
-            // nowTick only exists to re-render this panel every second.
-            tick={nowTick}
+            startedAt={startedAt}
           />
         )}
 
@@ -450,17 +442,14 @@ function UploadProgressPanel({
   visibility,
   stage,
   detail,
-  elapsedMs,
-  tick,
+  startedAt,
 }: {
   ko: boolean;
   visibility: Visibility;
   stage: CloudAgentPublishStage | null;
   detail: string;
-  elapsedMs: number;
-  tick: number;
+  startedAt: number | null;
 }) {
-  void tick;
   const isPublic = visibility === "marketplace";
   const phases = UPLOAD_PHASES.filter((phase) => isPublic || !phase.publicOnly);
   const subPhase = stage ? UPLOAD_DETAIL_STAGES[stage] : undefined;
@@ -488,7 +477,7 @@ function UploadProgressPanel({
           </strong>
         </div>
         <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--muted-deep)", fontVariantNumeric: "tabular-nums" }}>
-          {formatElapsed(elapsedMs)}
+          <ElapsedClock startedAt={startedAt} format={formatElapsed} />
         </span>
       </div>
 

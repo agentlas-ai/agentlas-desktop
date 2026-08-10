@@ -32,6 +32,7 @@ import {
 import { registerIpcHandlers } from "./ipc";
 import { buildAppMenu } from "./menu";
 import { initStore, runPostContinuityStoreRepairs } from "./store/db";
+import { onDesktopStoreChange } from "./store/change-bus";
 import { repairPlaceholderTaskTitles } from "./store/chats";
 import { startAutomationScheduler, stopAutomationScheduler } from "./automation-scheduler";
 import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime } from "./one/briefing";
@@ -878,6 +879,14 @@ app.whenReady().then(async () => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
       window.webContents.send("mobileBridge:changed", { reason });
+    }
+  });
+  // 스토어 변경을 렌더러에 방송한다 — 폴링을 못 없애는 이유였던 "메인이 안 쏨"을
+  // 여기서 해소한다. 페이로드는 change-bus 계약 그대로 {entity, id}뿐이다.
+  onDesktopStoreChange((change) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
+      window.webContents.send("store:changed", change);
     }
   });
   setCurrentUiLocale(resolveMenuLocale());

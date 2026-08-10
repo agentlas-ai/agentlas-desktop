@@ -16,7 +16,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 92;
+const SCHEMA_VERSION = 93;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -4084,6 +4084,22 @@ export function initStore(options: StoreInitOptions = {}): void {
              AND EXISTS (SELECT 1 FROM installed_agents WHERE slug = 'agentlas-one');
         `);
       })();
+    }
+  }
+
+  // v93: run_events를 chat_id로 읽는 핫패스 인덱스.
+  //
+  // getLatestInvocationRunReceipt류(run-events.ts)가 폴링 틱마다 chat_id 조건으로
+  // 최신 invoke_started 행을 찾는데, run_events에는 chat_id 인덱스가 없어 부팅
+  // 이후 계속 자라는 원장 전체를 매번 훑었다(태스크 40개 × 5초 틱 = 틱당 풀스캔
+  // 40회). IF NOT EXISTS 라 매 부팅 무해하고, 칸이 없는 옛 스키마에서는 건너뛴다.
+  if (tableExists(_db, "run_events")) {
+    const runEventColumns = new Set(schemaColumns(_db, "run_events").map((column) => column.name));
+    if (["chat_id", "kind", "ts"].every((column) => runEventColumns.has(column))) {
+      _db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_run_events_chat_kind_ts
+          ON run_events(chat_id, kind, ts DESC);
+      `);
     }
   }
 

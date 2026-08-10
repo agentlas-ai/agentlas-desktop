@@ -213,6 +213,7 @@ export function ChatRightPanel({
               latestUserPrompt={latestUserPrompt}
               hasPipeline={hasPipeline}
             /> : null}
+            {project ? <ProjectContextSummary project={project} busy={busy} ko={ko} onOpenMemory={() => onTabChange("memory")} /> : null}
             {project ? <ProjectTeamCard project={project} agents={agents} liveAgents={liveAgents} ko={ko} /> : null}
             <RunReceiptCard chatId={chatId} busy={busy} />
           </div>
@@ -261,11 +262,17 @@ function ProjectTeamCard({
   liveAgents: Record<string, LiveAgent>;
   ko: boolean;
 }) {
-  const nameById = new Map(agents.map((agent) => [agent.id, ko ? agent.name : agent.nameEn || agent.name]));
+  const agentById = new Map(agents.map((agent) => [agent.id, agent]));
   const rows = project.agentPool.map((member, index) => {
-    const name = member.entityKind === "agent" && member.agentId
-      ? nameById.get(member.agentId) || member.nameSnapshot
+    const installed = [member.agentId, member.controllerAgentId, member.targetId]
+      .map((id) => id ? agentById.get(id) : undefined)
+      .find(Boolean);
+    const name = installed
+      ? (installed.localDisplayName || (ko ? installed.name : installed.nameEn || installed.name))
       : member.nameSnapshot;
+    const purpose = installed
+      ? (ko ? installed.tagline : installed.taglineEn || installed.tagline)
+      : "";
     const identities = new Set([
       member.targetId,
       member.agentId,
@@ -275,18 +282,20 @@ function ProjectTeamCard({
       name,
     ].filter((value): value is string => Boolean(value)));
     const live = Object.entries(liveAgents).find(([key, entry]) => identities.has(key) || identities.has(entry.name))?.[1];
-    return { member, index, name, live };
+    return { member, index, name, purpose, live };
   });
   const activeRows = rows.filter((row) => row.live?.active);
   const waitingRows = rows.filter((row) => !row.live?.active);
   const visibleWaitingRows = waitingRows.slice(0, activeRows.length > 0 ? 2 : 3);
   const hiddenWaitingRows = waitingRows.slice(visibleWaitingRows.length);
-  const renderRow = ({ member, index, name, live }: (typeof rows)[number]) => (
-    <div key={projectPoolMemberKey(member)} style={{ display: "grid", gridTemplateColumns: "24px minmax(0, 1fr) auto", alignItems: "center", gap: 8, minHeight: 34, fontSize: 12 }}>
+  const renderRow = ({ member, index, name, purpose, live }: (typeof rows)[number]) => (
+    <div key={projectPoolMemberKey(member)} style={{ display: "grid", gridTemplateColumns: "24px minmax(0, 1fr) auto", alignItems: "center", gap: 8, minHeight: 44, fontSize: 12 }}>
       <span style={{ width: 22, height: 22, display: "grid", placeItems: "center", borderRadius: 7, background: live?.active ? "color-mix(in srgb, var(--green-deep) 14%, var(--paper))" : "var(--fill-1)", color: live?.active ? "var(--green-deep)" : "var(--muted-deep)", fontWeight: 800 }}>{index + 1}</span>
       <span style={{ minWidth: 0 }}>
         <strong style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</strong>
-        {live?.active && live.status ? <span style={{ display: "block", marginTop: 2, color: "var(--muted-deep)", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{live.status}</span> : null}
+        <span style={{ display: "block", marginTop: 2, color: live?.active ? "var(--ink-soft)" : "var(--muted-deep)", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {live?.active && live.status ? live.status : purpose || (ko ? "프로젝트에서 필요할 때 참여" : "Joins when the project needs it")}
+        </span>
       </span>
       <span style={{ color: live?.active ? "var(--green-deep)" : "var(--muted-deep)", fontSize: 10, fontWeight: live?.active ? 750 : 500 }}>
         {live?.active
@@ -313,7 +322,7 @@ function ProjectTeamCard({
   </section>;
 }
 
-function ProjectMemoryCard({ project, busy, ko }: { project: Project | null; busy: boolean; ko: boolean }) {
+function useProjectTimeline(project: Project | null, busy: boolean) {
   const [snapshot, setSnapshot] = useState<ProjectTimelineSnapshot | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const load = useCallback(async () => {
@@ -324,8 +333,7 @@ function ProjectMemoryCard({ project, busy, ko }: { project: Project | null; bus
       return;
     }
     try {
-      const next = await api.projects.timeline(project.id, 20);
-      setSnapshot(next);
+      setSnapshot(await api.projects.timeline(project.id, 20));
       setState("ready");
     } catch {
       setState("error");
@@ -340,6 +348,65 @@ function ProjectMemoryCard({ project, busy, ko }: { project: Project | null; bus
     const interval = window.setInterval(() => void load(), 2500);
     return () => window.clearInterval(interval);
   }, [busy, load]);
+
+  const retry = useCallback(() => {
+    setState("loading");
+    void load();
+  }, [load]);
+
+  return { snapshot, state, retry };
+}
+
+function ProjectContextSummary({
+  project,
+  busy,
+  ko,
+  onOpenMemory,
+}: {
+  project: Project;
+  busy: boolean;
+  ko: boolean;
+  onOpenMemory: () => void;
+}) {
+  const { snapshot, state } = useProjectTimeline(project, busy);
+  const readySources = snapshot?.sources.filter((source) => source.status === "ready") ?? [];
+  const sourceName = (kind: ProjectTimelineSnapshot["sources"][number]["kind"]) => ({
+    pm_soul: "PM Soul",
+    sitemap: ko ? "사이트맵" : "Sitemap",
+    code_map: ko ? "코드맵" : "Code map",
+  })[kind];
+  const instruction = project.systemPrompt?.trim() || (ko ? "프로젝트 지시가 아직 없습니다." : "No project instruction yet.");
+  const health = state === "loading"
+    ? (ko ? "저장 상태 확인 중…" : "Checking saved state…")
+    : state === "error"
+      ? (ko ? "저장 상태를 확인할 수 없음" : "Saved state unavailable")
+      : readySources.length > 0
+        ? readySources.map((source) => sourceName(source.kind)).join(" · ")
+        : (ko ? "아직 생성된 기억 자산 없음" : "No memory assets yet");
+
+  return (
+    <button
+      type="button"
+      onClick={onOpenMemory}
+      aria-label={ko ? "프로젝트 지시와 기억 자세히 보기" : "Open project instructions and memory"}
+      style={{ width: "100%", padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)", color: "var(--ink)", textAlign: "left", cursor: "pointer" }}
+    >
+      <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".08em", color: "var(--muted-deep)", textTransform: "uppercase" }}>{ko ? "프로젝트 맥락" : "Project context"}</span>
+        <span style={{ marginLeft: "auto", color: "var(--muted-deep)", fontSize: 10 }}>
+          {state === "ready" ? (ko ? `기억 ${snapshot?.entries.length ?? 0}건` : `${snapshot?.entries.length ?? 0} memories`) : ""}
+        </span>
+      </span>
+      <strong style={{ display: "block", marginTop: 8, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{instruction}</strong>
+      <span style={{ display: "block", marginTop: 6, color: state === "error" ? "var(--red-deep)" : "var(--muted-deep)", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {ko ? "축적 상태 · " : "Saved state · "}{health}
+      </span>
+    </button>
+  );
+}
+
+function ProjectMemoryCard({ project, busy, ko }: { project: Project | null; busy: boolean; ko: boolean }) {
+  const { snapshot, state, retry } = useProjectTimeline(project, busy);
 
   if (!project) return <div style={{ padding: 18, color: "var(--muted-deep)", fontSize: 12 }}>{ko ? "이 작업에 연결된 프로젝트가 없습니다." : "No project is connected to this task."}</div>;
   const sourceLabel = (kind: ProjectTimelineSnapshot["sources"][number]["kind"]) => ({
@@ -372,7 +439,7 @@ function ProjectMemoryCard({ project, busy, ko }: { project: Project | null; bus
       {state === "error" ? (
         <div role="alert" style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, color: "var(--red-deep)", fontSize: 11 }}>
           <span>{ko ? "프로젝트 기억을 불러오지 못했습니다." : "Could not load project memory."}</span>
-          <button type="button" onClick={() => { setState("loading"); void load(); }} style={{ marginLeft: "auto", fontWeight: 750 }}>{ko ? "다시 시도" : "Retry"}</button>
+          <button type="button" onClick={retry} style={{ marginLeft: "auto", fontWeight: 750 }}>{ko ? "다시 시도" : "Retry"}</button>
         </div>
       ) : null}
       {state === "ready" ? (

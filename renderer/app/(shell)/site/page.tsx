@@ -9,6 +9,7 @@ import { useT } from "@/lib/i18n";
 import { getSnapshot as getBuildSnapshot, prepareBuildHandoff } from "@/lib/build-session";
 import { navigate } from "@/lib/navigation";
 import { SiteLanding, type SiteAgentAppMcpLiveState, elapsedCopy, formatElapsed } from "@/components/site/SiteLanding";
+import { ElapsedClock } from "@/components/ElapsedClock";
 import { SitePublishDialog } from "@/components/site/SitePublishDialog";
 import { SITE_MESSAGE_KEY } from "@shared/site-studio";
 import type {
@@ -73,7 +74,6 @@ export default function SiteStudioPage() {
   const [conversation, setConversation] = useState<SiteConversationEntry[]>([]);
   const [liveActivity, setLiveActivity] = useState<LiveSiteActivity | null>(null);
   const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null);
-  const [nowTick, setNowTick] = useState(0);
   const [handingOff, setHandingOff] = useState(false);
   const [remoteOperation, setRemoteOperation] = useState<SiteProjectOperation | null>(null);
   const [publishProjectId, setPublishProjectId] = useState<string | null>(null);
@@ -244,20 +244,8 @@ export default function SiteStudioPage() {
     return () => unsubscribe?.();
   }, [ko]);
 
-  // The host owns the clock. It keeps advancing even while the team's
-  // reported phase runs silently for a minute, which is exactly when a
-  // static label reads as frozen (see electron/site/generate.ts).
-  useEffect(() => {
-    if (generationStartedAt === null) return;
-    const id = window.setInterval(() => setNowTick((t) => t + 1), 1000);
-    return () => window.clearInterval(id);
-  }, [generationStartedAt]);
-  // nowTick only exists to force this to recompute every second.
-  const generationElapsedMs = useMemo(
-    () => (generationStartedAt === null ? undefined : Math.max(0, Date.now() - generationStartedAt)),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [generationStartedAt, nowTick],
-  );
+  // 시계는 ElapsedClock 리프가 스스로 돈다 — 조용한 단계에서도 라벨은 계속 흐르되
+  // (see electron/site/generate.ts), 1,100줄 페이지가 초당 리렌더되지는 않는다.
 
   // ── 게스트(iframe) 통신 ─────────────────────────────────
   const postToGuest = useCallback((message: SiteHostMessage) => {
@@ -660,7 +648,7 @@ export default function SiteStudioPage() {
           noEngine={noEngine}
           generating={generating}
           activity={generating ? liveActivity : null}
-          elapsedMs={generating ? generationElapsedMs : undefined}
+          elapsedStartedAt={generating ? generationStartedAt ?? undefined : undefined}
           failure={generating ? null : createFailure}
           onRetryCreate={() => {
             const failed = createFailure;
@@ -869,9 +857,7 @@ export default function SiteStudioPage() {
                   <span style={livePulse} aria-hidden="true" />
                   <strong>{liveActivity.status}</strong>
                   <span style={liveBadge}>{ko ? "LIVE" : "LIVE"}</span>
-                  {typeof generationElapsedMs === "number" && (
-                    <span style={liveActivityHint}>{formatElapsed(generationElapsedMs)}</span>
-                  )}
+                  <ElapsedClock startedAt={generationStartedAt} format={formatElapsed} style={liveActivityHint} />
                 </div>
                 {liveActivity.feedback && (
                   <p style={liveFeedbackText}>
@@ -893,7 +879,9 @@ export default function SiteStudioPage() {
               (generating || editing) && (
                 <div style={{ ...chatBubble, ...assistantBubble, color: "var(--muted-deep)" }}>
                   {generating
-                    ? elapsedCopy(ko, generationElapsedMs ?? 0)
+                    ? generationStartedAt !== null
+                      ? <ElapsedClock startedAt={generationStartedAt} format={(ms) => elapsedCopy(ko, ms)} />
+                      : elapsedCopy(ko, 0)
                     : ko
                       ? "수정 요청을 준비하는 중…"
                       : "Preparing the edit request…"}
