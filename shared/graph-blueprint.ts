@@ -166,6 +166,9 @@ export type BlueprintTurn =
       /** 이번 시도가 얼마나 컸는가 — 다음 시도가 이보다 작아지면 막는다. */
       stepCount?: number;
       triggerKind?: string;
+      /** 약화-retry일 때만: 검증을 통과한 (단순화된) 청사진. 자가교정이 끝내 수렴 못 하면
+       *  막다른 길 대신 이 작동본으로 폴백한다(일반인 구제). */
+      blueprint?: GraphBlueprint;
     };
 
 export interface BlueprintProblem {
