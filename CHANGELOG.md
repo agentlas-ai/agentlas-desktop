@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.82 — 2026-08-11
+
+Binds the same Agentlas OS v1.1.108 at
+088d7311261b803efa4bdb9b1a7397f4b5f20b9a.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- A test run no longer opens your real database. The gates in scripts/ opened
+  the live store directly, and running them while the app was open corrupted
+  the run-receipt table badly enough that the app stopped starting. Nothing was
+  lost, but a script run now gets its own temporary store and says so.
+- Codex rows show their effort again. Codex reports reasoning levels per model
+  and they differ between models, but the picker only read the runtime-wide
+  list, which Codex never sets — so the cell sat empty while six levels existed
+  underneath. Each row now asks for its own model.
+- The candidate badges no longer carry their meaning in color alone. Which row
+  actually runs reads at a glance.
+
 ## 0.9.81 — 2026-08-11
 
 Binds the same Agentlas OS v1.1.108 at
