@@ -166,9 +166,6 @@ export type BlueprintTurn =
       /** 이번 시도가 얼마나 컸는가 — 다음 시도가 이보다 작아지면 막는다. */
       stepCount?: number;
       triggerKind?: string;
-      /** 약화-retry일 때만: 검증을 통과한 (단순화된) 청사진. 자가교정이 끝내 수렴 못 하면
-       *  막다른 길 대신 이 작동본으로 폴백한다(일반인 구제). */
-      blueprint?: GraphBlueprint;
     };
 
 export interface BlueprintProblem {
@@ -198,6 +195,42 @@ const VAR_RE = /^[A-Za-z_][\w-]*$/;
 export { CAPABILITY_LABEL } from "./graph-tool-binding";
 
 const CAPABILITY_CHOICES: string[] = CAPABILITIES.map((id) => CAPABILITY_LABEL[id] ?? id);
+
+/**
+ * ★바깥으로 나가는 단계가 소비하는 '앞에서 만든 값'에 검증 check가 없으면 **코드가 채운다**.
+ *
+ * 검증기는 어떤 check가 필요한지(어느 단계 뒤·무슨 값)를 이미 정확히 안다. 그걸 모델에게
+ * 되물어 진동시키는 대신 여기서 표준 check를 넣어 **부탁받은 완전한 그래프를 완성한다.**
+ * 단계를 깎지도(전부 유지), 캔버스로 떠넘기지도 않는다 — 빠진 건 검증 단계 하나뿐이고,
+ * 그건 사람이 정할 게 아니라 코드가 채울 수 있는 기계적 산물이다. 사람은 저장 확인 화면에서
+ * 이 항목을 보고 고칠 수 있다(propose, not ask). 이것이 "대충 던지고 네가 업글해"의 반대다.
+ */
+export function autofillOutputChecks(bp: GraphBlueprint): GraphBlueprint {
+  if (!bp || !Array.isArray(bp.steps)) return bp;
+  const checks: BlueprintCheck[] = Array.isArray(bp.checks) ? [...bp.checks] : [];
+  const checked = new Set(checks.map((c) => (c.subject ?? "").trim()).filter(Boolean));
+  bp.steps.forEach((step, index) => {
+    if (step.effect !== "mutation") return;
+    for (const value of Array.isArray(step.consumes) ? step.consumes : []) {
+      const name = String(value ?? "").trim();
+      if (!name || checked.has(name)) continue;
+      const madeAt = bp.steps.findIndex((s, i) => i < index && (s.produces ?? "").trim() === name);
+      if (madeAt < 0) continue;
+      checks.push({
+        afterStep: madeAt,
+        subject: name,
+        criteria: `${name}이(가) 비어있지 않고 요청대로 채워졌다`,
+        produces: `${name}_ok`,
+        items: [
+          { text: `${name}이(가) 실제 내용으로 채워졌다`, kind: "must" },
+          { text: "빈 값·자리표시자·지어낸 값이 아니다", kind: "mustNot" },
+        ],
+      });
+      checked.add(name);
+    }
+  });
+  return { ...bp, checks };
+}
 
 /**
  * 청사진이 실제로 그래프로 지어질 수 있는지 검사한다.

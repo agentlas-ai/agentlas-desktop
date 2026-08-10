@@ -12,6 +12,7 @@ import { CAPABILITIES, PROVIDER_CATALOG } from "../../shared/graph-tool-binding"
 import {
   BLUEPRINT_SCHEMA,
   validateBlueprint,
+  autofillOutputChecks,
   type BlueprintQuestion,
   type BlueprintTurn,
   type GraphBlueprint,
@@ -381,14 +382,14 @@ export function parseInterviewTurn(text: string | null | undefined, state: Inter
 
   const blueprint = record.blueprint as GraphBlueprint | undefined;
   if (!blueprint || typeof blueprint !== "object") return unreadable(text);
-  const normalized: GraphBlueprint = { ...blueprint, schema: BLUEPRINT_SCHEMA };
+  // ★출력값 검증 check는 모델에 되물어 진동시키지 말고 **코드가 채운다** — 부탁받은 완전한
+  //   그래프를 완성한다(깎지도 떠넘기지도 않음). 나머지 문제만 모델/사람에게 돌린다.
+  const normalized: GraphBlueprint = autofillOutputChecks({ ...blueprint, schema: BLUEPRINT_SCHEMA });
   const problems = validateBlueprint(normalized);
   if (problems.length === 0) {
     // 검증은 통과했다. 그런데 **앞 시도보다 작아졌으면** 문제를 지워서 고친 것이다.
     const weakened = weakenedAgainstLastAttempt(normalized, state);
-    // 약화됐어도 이 청사진은 검증을 통과했다 — 지을 수 있고 돌아간다. 그대로 실어 보내
-    // 자가교정이 끝내 수렴 못 하면 막다른 길 대신 이 "단순화된 작동본"으로 폴백하게 한다.
-    if (weakened) return { ok: true, turn: { kind: "retry", problems: [weakened], blueprint: normalized } };
+    if (weakened) return { ok: true, turn: { kind: "retry", problems: [weakened] } };
     return { ok: true, turn: { kind: "blueprint", blueprint: normalized } };
   }
 

@@ -4042,10 +4042,6 @@ export function registerIpcHandlers(): void {
       .filter((row) => row.graph && row.graph.nodes?.length)
       .map((row) => ({ id: row.id, name: row.name }));
     let attempt = { ...current, knownGraphs, attempts: [...(current.attempts ?? [])] };
-    // ★막다른 길 금지: 자가교정이 끝내 수렴 못 해도, 진동 중 검증을 통과한 (단순화된)
-    //   청사진을 기억해 뒀다가 소진 시 그걸 저장한다. 일반인은 캔버스에서 check 노드를 손으로
-    //   못 만든다 — 안 도는 것보다 도는 단순본이 낫다.
-    let lastGood: import("../shared/graph-blueprint").GraphBlueprint | null = null;
     for (let round = 0; round <= MAX_SELF_CORRECTIONS; round += 1) {
       let text: string | null = null;
       try {
@@ -4138,8 +4134,6 @@ export function registerIpcHandlers(): void {
         return { ok: true as const, kind: "ask" as const, questions: parsed.turn.questions };
       }
       if (parsed.turn.kind === "retry") {
-        // 약화-retry는 검증을 통과한 청사진을 함께 싣는다 — 폴백용으로 기억한다.
-        if (parsed.turn.blueprint) lastGood = parsed.turn.blueprint;
         attempt = {
           ...attempt,
           attempts: [...attempt.attempts, {
@@ -4198,25 +4192,7 @@ export function registerIpcHandlers(): void {
         triggerType: built.triggerType,
       };
     }
-    // 상한에 닿았다. ★막다른 길로 보내지 않는다 — 진동 중 검증을 통과한 (단순화된) 청사진을
-    //   봤으면 그걸 지어 저장한다. 일반인은 캔버스에서 직접 못 만든다. 안 도는 것보다 도는 게 낫다.
-    if (lastGood) {
-      const fallback = buildGraphFromBlueprint(lastGood, currentUiLocale(), { knownGraphs });
-      if (fallback.ok) {
-        return {
-          ok: true as const,
-          kind: "blueprint" as const,
-          blueprint: lastGood,
-          graph: fallback.graph,
-          staffing: [] as import("./workflow/graph-staffing").StaffedSlot[],
-          scheduleHuman: fallback.scheduleHuman,
-          triggerType: fallback.triggerType,
-          // 렌더러가 "결과 검증 단계는 못 넣었지만 도는 단순본으로 저장" 안내를 띄우게 한다.
-          simplified: true as const,
-        };
-      }
-    }
-    // 지을 수 있는 유효본이 하나도 없었을 때만 — **무엇을 시도했는지와 함께** 멈춘다.
+    // 상한에 닿았다. **무엇을 시도했는지와 함께** 멈춘다 — 조용히 포기하지 않는다.
     const tried = attempt.attempts.flatMap((a) => a.problems);
     return {
       ok: false,
