@@ -40,6 +40,7 @@ import {
   type CodeArtifact,
   type LinkedFileArtifact,
   type MediaArtifact,
+  localServerUrlsInText,
 } from "@/components/Markdown";
 import type { WorkspaceFilePreview } from "@/components/WorkspacePanel";
 import { IconArrowLeft, IconBuilding, IconClose, IconFolder, IconNetwork, IconPanelRight, IconSparkles, IconTrash } from "@/components/Icon";
@@ -173,6 +174,34 @@ function fileUrlForToolPath(filePath: string): string {
   const normalized = filePath.replace(/\\/g, "/");
   const withSlash = normalized.startsWith("/") ? normalized : `/${normalized}`;
   return `file://${encodeURI(withSlash).replace(/#/g, "%23").replace(/\?/g, "%3F")}`;
+}
+
+/**
+ * 지금 돌고 있는 로컬 서버를 볼 수 있는 산출물로.
+ *
+ * 파일이 아니라 실행 중인 것이므로 읽을 내용이 없다 — 뷰어는 주소를 직접 연다.
+ * 로컬 호스트로 한정하는 이유는 `localServerUrlsInText` 에 적어 두었다.
+ */
+function workspacePreviewFromLocalServer(url: string): WorkspaceFilePreview {
+  let label = url;
+  try {
+    const parsed = new URL(url);
+    label = parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
+  } catch {
+    // 라벨은 표시용일 뿐이라 원문으로 둔다.
+  }
+  return {
+    path: url,
+    name: label,
+    size: 0,
+    viewerKind: "browser",
+    fileUrl: url,
+    browserUrl: url,
+    openTargets: [url],
+    content: "",
+    truncated: false,
+    reason: "binary",
+  };
 }
 
 function workspacePreviewFromLinkedFile(file: LinkedFileArtifact): WorkspaceFilePreview {
@@ -925,7 +954,9 @@ function ChatPage() {
          (읽기/쓰기/편집), 공용 판별기로 그것도 함께 거둔다 — 도구 이름을 여기서
          다시 추측하면 러너마다 갈라진다. */
       const toolPaths = toolFilePathsFromSteps(message.steps);
-      const stepsKey = toolPaths.join(" ");
+      // 에이전트가 앱을 세웠으면, 사람이 다음에 할 일은 그걸 보는 것이다.
+      const serverUrls = localServerUrlsInText(text);
+      const stepsKey = [...toolPaths, ...serverUrls].join("\u0000");
       liveIds.add(message.id);
       let entry = cache.get(message.id);
       if (
@@ -939,9 +970,12 @@ function ChatPage() {
           baseKey,
           stepsKey,
           previews: [
-            ...linkedFileArtifactsInText(text, mediaBasePaths),
-            ...toolPaths.map((p) => linkedFileArtifactFromPath(p)),
-          ].map((file) => workspacePreviewFromLinkedFile(file)),
+            ...[
+              ...linkedFileArtifactsInText(text, mediaBasePaths),
+              ...toolPaths.map((p) => linkedFileArtifactFromPath(p)),
+            ].map((file) => workspacePreviewFromLinkedFile(file)),
+            ...serverUrls.map((url) => workspacePreviewFromLocalServer(url)),
+          ],
         };
         cache.set(message.id, entry);
       }

@@ -1124,6 +1124,26 @@ function localFileRefsFromText(text: string): string[] {
   return refs;
 }
 
+/**
+ * 답변이 띄웠다고 말한 **로컬 개발 서버** 주소.
+ *
+ * 에이전트가 앱을 세우면 사람이 다음에 하는 일은 그걸 보는 것이다. 그런데 우리 우측
+ * 패널은 로컬 *파일*만 받아서, 서버를 띄운 답변은 볼 것이 하나도 없는 것처럼 보였다
+ * (다른 런타임은 이 자리에 실행 중인 앱을 그린다).
+ *
+ * 로컬 호스트로 한정한다 — 임의의 외부 주소를 답변만 보고 자동으로 여는 것은
+ * 프롬프트 인젝션이 원격 요청을 시키는 통로가 된다. 여기서 도는 것만 그린다.
+ */
+export function localServerUrlsInText(text: string): string[] {
+  const out: string[] = [];
+  const pattern = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::(\d{2,5}))?(?:\/[^\s`'"<>)\]]*)?/gi;
+  for (const match of text.matchAll(pattern)) {
+    const url = match[0].replace(/[).,;:]+$/, "");
+    if (!out.includes(url)) out.push(url);
+  }
+  return out;
+}
+
 function localDirectoryRefsFromText(text: string): string[] {
   const refs: string[] = [];
   const push = (value: string | undefined) => {

@@ -90,7 +90,46 @@ assert.match(
   "opening a file from the list must go through the parent's hydration path, or it opens empty",
 );
 
+// ── 4. A running local server is something to look at ───────────────────
+// An agent that stands up an app leaves nothing in the file list; the next
+// thing a person wants is the app itself.
+const markdown = read("renderer/components/Markdown.tsx");
+const at = markdown.indexOf("export function localServerUrlsInText");
+assert.ok(at > 0, "local server URLs must be extractable from an answer");
+const serverFn = markdown.slice(at, at + 900);
+
+// Lift the actual pattern out and run it, so this tests behaviour rather than
+// the presence of a sentence.
+const patternLine = serverFn.match(/const pattern = (\/.+\/[gimsuy]*);/);
+assert.ok(patternLine, "the detector must keep its pattern in one readable place");
+const rebuilt = new RegExp(patternLine[1].slice(1, patternLine[1].lastIndexOf("/")), "gi");
+const matches = (text) => Array.from(text.matchAll(rebuilt)).map((m) => m[0]);
+
+assert.deepEqual(
+  matches("app is up at http://localhost:5173/ and also http://127.0.0.1:3000"),
+  ["http://localhost:5173/", "http://127.0.0.1:3000"],
+  "local dev servers must be detected",
+);
+// Only local hosts: auto-opening any URL an answer contains would turn prompt
+// injection into an outbound request from the user's machine.
+assert.deepEqual(
+  matches("see https://example.com/x and http://evil.test:8080/y"),
+  [],
+  "detection must never pick up a remote host",
+);
+assert.match(
+  cockpit,
+  /workspacePreviewFromLocalServer/,
+  "detected local servers must become previews the panel can open",
+);
+assert.match(
+  cockpit,
+  /viewerKind: "browser"/,
+  "a local server preview must open in the browser viewer",
+);
+
 console.log("right panel artifacts contract ok");
 console.log("  ✓ produced files are found from tool arguments, via the shared normalizer");
 console.log("  ✓ images/video/pdf are served over agentlas://localfile and .pdf is authorized");
 console.log("  ✓ an empty viewer explains itself and file opens hydrate through the parent");
+console.log("  ✓ a running local server becomes a previewable artifact, remote hosts never do");
