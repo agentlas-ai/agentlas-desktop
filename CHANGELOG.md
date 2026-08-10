@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.81 — 2026-08-11
+
+Binds the same Agentlas OS v1.1.108 at
+088d7311261b803efa4bdb9b1a7397f4b5f20b9a.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- A file the agent wrote counts as an artifact even when the answer never names
+  it. The panel used to find files by scanning the answer's prose, so a reply
+  that wrote a file and then discussed the result — without repeating the path —
+  left the panel empty. Tool calls already carry the path, so it reads those
+  too, through the same normalizer the tool rows use.
+- An app the agent just started is something you can look at. A local address in
+  the answer opens in the panel's browser viewer. Local addresses only:
+  automatically opening any URL an answer contains would turn prompt injection
+  into an outbound request from your machine.
+
 ## 0.9.80 — 2026-08-11
 
 This release binds Agentlas OS v1.1.108 at
