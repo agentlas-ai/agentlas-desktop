@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.77 — 2026-08-10
+
+This release binds Agentlas OS v1.1.106 at
+20decf4d5e8f0164ce5ad3e7de5349638c417dd8.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- Update recovery no longer mistakes a valid journal without an optional
+  continuity backup for corruption. A temporary disk or SQLite backup failure
+  therefore cannot silently pause automatic installs.
+- A persisted recovery hold now keeps its original detection time across app
+  restarts. Its six-hour safety window can expire for ordinary users instead
+  of restarting forever each time the app opens.
+- Packaged runtime dependencies are refreshed to remove the six high-severity
+  audit findings present after v0.9.76, with no major dependency upgrade.
+- The bundled Agentlas OS moves to v1.1.106, adding the persistent Agentlas One
+  workspace and portable Claude Code and Codex host adapters to every Desktop
+  installer built from this release.
+
 ## 0.9.76 — 2026-08-10
 
 This release binds Agentlas OS v1.1.105 at

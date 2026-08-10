@@ -556,7 +556,16 @@ function isValidJournal(value: unknown): value is InstallJournal {
     (raw.diagnostic === undefined || isValidUpdaterDiagnostic(raw.diagnostic)) &&
     (raw.nativeInstallFailures === undefined || asNonNegativeInteger(raw.nativeInstallFailures) !== null) &&
     (raw.retryAfter === undefined || asNonNegativeInteger(raw.retryAfter) !== null) &&
-    isValidContinuitySnapshot(raw.continuity)
+    // ★continuity 는 **선택**이다 — 타입도 그렇고(`continuity?`), 기록 경로도 그렇게 쓴다:
+    // 백업을 못 뜨면(바쁜 디스크·일시적 SQLite I/O 오류) `...(continuity ? {continuity} : {})`
+    // 로 아예 빼고 저널을 쓴다. "백업 실패가 업데이트를 막으면 안 된다"는 것이 그 분기의
+    // 존재 이유였다(실기계에서 업데이트 4연속 차단을 고친 수리).
+    //
+    // 그런데 여기서만 그걸 **필수**로 요구했다. 그래서 백업이 실패한 순간 앱이 방금 쓴
+    // 저널을 스스로 corrupt 로 판정 → corrupt 마커 기록 → 자동 설치 정지, 라는 사슬이 돌았다.
+    // 즉 업데이트를 살리려고 만든 자가교정 분기를, 뒤에 있는 fail-closed 단언이 죽였다.
+    // 소비자는 전부 이미 `journal.continuity?.` 로 없을 때를 다루고 있다(1378·1385·1434행).
+    (raw.continuity === undefined || isValidContinuitySnapshot(raw.continuity))
   );
 }
 
@@ -834,7 +843,19 @@ export class DesktopUpdaterController {
         }
         if (markerValid) {
           this.automaticInstallPaused = true;
-          this.holdSince = this.now();
+          // ★보류 시계는 **마커에 적힌 시각**에서 센다. `this.now()` 로 다시 시작하면
+          // 6시간 만기(HOLD_EXPIRY_MS)가 앱을 껐다 켤 때마다 0으로 돌아가, 6시간 연속
+          // 실행하지 않는 보통 사용자에게는 만기가 **영원히 오지 않는다**.
+          //
+          // 다른 탈출구가 둘 다 이 상태에선 닫혀 있어서 그게 곧 영구 차단이었다:
+          //  · 바로 위 분기는 앱 버전이 마커와 **다를 때**만 마커를 지우는데, 자동 설치가
+          //    멈춰 있으니 버전이 바뀔 수가 없다.
+          //  · check() 의 수동 재시도는 install-start-failed / install-source-untrusted
+          //    만 다루고, 이 상태(install-state-corrupt)는 다루지 않는다.
+          // detectedAt 은 이미 마커에 있고 재시작을 견딘다 — 그걸 쓰면 만기가 실제로 온다.
+          const detectedAt = typeof marker.detectedAt === "string" ? Date.parse(marker.detectedAt) : Number.NaN;
+          this.holdSince =
+            Number.isFinite(detectedAt) && detectedAt <= this.now() ? detectedAt : this.now();
           return null;
         }
       } catch (error) {

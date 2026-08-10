@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.9.76",
+  "version": "0.9.77",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -16,12 +16,12 @@
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
     "targetSchemaVersion": 92,
-    "bundledRuntimeVersion": "1.1.105"
+    "bundledRuntimeVersion": "1.1.106"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.1.105",
-    "commit": "90e5cfa081637ec3ea5a701e67d29b100b88ea67"
+    "ref": "v1.1.106",
+    "commit": "20decf4d5e8f0164ce5ad3e7de5349638c417dd8"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
