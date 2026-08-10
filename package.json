@@ -350,6 +350,8 @@
     "test:graph-code-step": "electron scripts/test-graph-code-step-contract.cjs",
     "test:approval-never-blocks": "npm run build:electron && electron scripts/approval-never-blocks-contract.mjs",
     "test:right-panel-artifacts": "npm run build:electron && node scripts/right-panel-artifacts-contract.mjs",
+    "test:store-isolation": "node scripts/store-isolation-contract.mjs",
+    "test:effort-per-model": "node scripts/effort-per-model-contract.mjs",
     "test:graph-goal": "electron scripts/test-graph-goal-persistence.cjs",
     "test:graph-eval-checklist": "electron scripts/test-graph-eval-checklist-contract.cjs",
     "test:automation-fix-relevance": "electron scripts/test-automation-fix-relevance.cjs",

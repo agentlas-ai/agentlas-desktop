@@ -11,6 +11,42 @@ import type {
 import { cliModelTagLabel } from "@shared/models";
 
 type ModelRow = { id: string; label: string; tag?: string };
+
+/**
+ * 이 행이 고를 수 있는 작업량.
+ *
+ * ★런타임 하나에 하나가 아니라 **모델마다 다르다**. Codex 는 모델이 광고하는
+ * `supported_reasoning_levels` 를 그대로 쓰고(순서가 곧 능력 랭크다), Claude Code 는
+ * CLI 가 알려 준 목록을 런타임 수준에 싣는다. 예전에는 런타임 수준만 읽어서 Codex 행의
+ * 작업량 칸이 언제나 비어 있었다 — 고를 수 있는데 고를 자리가 없었다.
+ *
+ * 판별 순서는 커널(`supportedEfforts`)과 같다: 모델 프로필이 있으면 그것, 없으면 런타임.
+ */
+function effortsFor(
+  runtime: RuntimeStatus | null | undefined,
+  modelId: string | null | undefined,
+): Array<{ id: string; label: string }> {
+  const perModel = modelId ? runtime?.allocationModelProfiles?.[modelId]?.efforts : undefined;
+  if (perModel && perModel.length > 0) {
+    return perModel.map((id) => ({ id, label: effortLabel(id) }));
+  }
+  return runtime?.efforts ?? [];
+}
+
+/** `xhigh` → `Xhigh` 가 아니라 `XHigh` — 호스트가 준 값을 사람이 읽는 형태로만 바꾼다. */
+function effortLabel(id: string): string {
+  const known: Record<string, string> = {
+    none: "None",
+    minimal: "Minimal",
+    low: "Low",
+    medium: "Medium",
+    high: "High",
+    xhigh: "XHigh",
+    max: "Max",
+    ultra: "Ultra",
+  };
+  return known[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
+}
 type RoleView = {
   role: RuntimeRole;
   runtime: RuntimeStatus | null;
@@ -572,7 +608,7 @@ export function RuntimeControl() {
               const runtimeIndex = runtimeIndexForSelection(selection);
               const runtime = runtimeForSelection(selection);
               const models = modelRowsForSelection(selection);
-              const efforts = runtime?.efforts ?? [];
+              const efforts = effortsFor(runtime, selection.model);
               const duplicate =
                 members.filter(
                   (candidate) =>

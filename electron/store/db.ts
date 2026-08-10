@@ -6,6 +6,7 @@
 import Database from "better-sqlite3";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
 import { publicAgentVisibility } from "../agents/policy";
@@ -921,10 +922,46 @@ export function runPostContinuityStoreRepairs(): void {
   _postContinuityRepairsDeferred = false;
 }
 
+/**
+ * 이 프로세스가 열어도 되는 저장소 경로.
+ *
+ * ★스크립트로 띄운 Electron 은 사람의 실제 데이터를 열지 않는다(2026-08-11).
+ * 게이트 51개가 `userData` 를 격리하지 않은 채 라이브 `agentlas.sqlite` 를 직접 열고
+ * 있었고, 앱이 켜진 상태에서 게이트를 돌리자 동시 접근으로 `run_events` 와 그 인덱스
+ * 4개가 malformed 가 됐다 — 앱이 아예 시작하지 못했다(복구는 `.recover` 로 손실 0,
+ * 사용자 데이터 81개 테이블 중 깨진 것은 그 하나뿐이었다).
+ *
+ * 판별은 "패키징되지 않은 실행이 `scripts/` 아래 파일을 돌리고 있는가" 하나다.
+ * 그때 명시적 경로가 없으면 **조용히 라이브로 떨어지지 않고** 프로세스별 임시
+ * 저장소로 돌린다. 라이브를 정말 열려면 `AGENTLAS_STORE_PATH` 로 그렇게 적어야 한다 —
+ * 실수로 되는 일과 적어서 되는 일은 달라야 한다.
+ */
+function resolveStorePath(): string {
+  const explicit = process.env.AGENTLAS_STORE_PATH?.trim();
+  if (explicit) return explicit;
+
+  const entry = process.argv[1] ?? "";
+  const runningAScript = !app.isPackaged && /[\\/]scripts[\\/]/.test(entry);
+  if (runningAScript) {
+    const sandbox = path.join(
+      os.tmpdir(),
+      `agentlas-script-store-${process.pid}`,
+      "agentlas.sqlite",
+    );
+    console.warn(
+      `[store] script run detected (${path.basename(entry)}) — using an isolated store at ${sandbox}.\n` +
+      "[store] set AGENTLAS_STORE_PATH to open a specific database on purpose.",
+    );
+    return sandbox;
+  }
+
+  return path.join(app.getPath("userData"), "agentlas.sqlite");
+}
+
 export function initStore(options: StoreInitOptions = {}): void {
   if (_db) return;
   try {
-  const dbPath = process.env.AGENTLAS_STORE_PATH || path.join(app.getPath("userData"), "agentlas.sqlite");
+  const dbPath = resolveStorePath();
   preparePrivateStorePath(dbPath);
   _db = new Database(dbPath);
   _db.pragma("journal_mode = WAL");
