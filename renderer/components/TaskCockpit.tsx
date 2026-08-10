@@ -23,6 +23,7 @@ import type {
 } from "@/lib/types";
 import type { InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage, RunEventUi, RuntimeSelection } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
+import { normalizeToolCall } from "@shared/tool-call-detail";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
 import { extractQuestions } from "@/lib/ask-question";
@@ -121,6 +122,57 @@ function workspacePreviewFromMedia(media: MediaArtifact): WorkspaceFilePreview {
     truncated: false,
     reason: "binary",
   };
+}
+
+/**
+ * 도구 호출이 실제로 건드린 파일 경로.
+ *
+ * 판별은 공용 `normalizeToolCall` 한 곳에서만 한다 — 여기서 도구 이름을 다시 보고
+ * 추측하면 claude-code/codex/gemini/MCP 마다 결과가 갈라진다(옛 `toolView` 가 정확히
+ * 그렇게 무너졌다). 읽은 파일도 포함한다: 사람이 "그 파일 좀 보자"고 할 대상은
+ * 우리가 만든 것만이 아니다.
+ */
+function toolFilePathsFromSteps(steps: StreamStep[] | undefined): string[] {
+  if (!steps || steps.length === 0) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const step of steps) {
+    if (step.kind !== "tool" || !step.tool) continue;
+    let detail: ReturnType<typeof normalizeToolCall>;
+    try {
+      detail = normalizeToolCall({ name: step.tool, args: step.args, result: step.result });
+    } catch {
+      continue;
+    }
+    if (detail.type !== "read" && detail.type !== "write" && detail.type !== "edit") continue;
+    const filePath = detail.filePath;
+    if (!filePath || seen.has(filePath)) continue;
+    seen.add(filePath);
+    out.push(filePath);
+  }
+  return out;
+}
+
+/** 도구가 준 경로 하나를 링크 파일 산출물로. 경로는 이미 구체적이라 추론이 필요 없다. */
+function linkedFileArtifactFromPath(filePath: string): LinkedFileArtifact {
+  return {
+    id: `tool-file:${filePath}`,
+    name: basename(filePath),
+    href: filePath,
+    path: filePath,
+    paths: [filePath],
+    fileUrl: fileUrlForToolPath(filePath),
+  };
+}
+
+function fileUrlForToolPath(filePath: string): string {
+  // 이미지·영상·PDF 는 앱 안에서 직접 그린다 — `file://` 은 webSecurity 에 막힌다.
+  if (/\.(png|jpe?g|gif|webp|avif|svg|mp4|webm|mov|m4v|ogv|pdf)$/i.test(filePath)) {
+    return `agentlas://localfile/?p=${encodeURIComponent(filePath)}`;
+  }
+  const normalized = filePath.replace(/\\/g, "/");
+  const withSlash = normalized.startsWith("/") ? normalized : `/${normalized}`;
+  return `file://${encodeURI(withSlash).replace(/#/g, "%23").replace(/\?/g, "%3F")}`;
 }
 
 function workspacePreviewFromLinkedFile(file: LinkedFileArtifact): WorkspaceFilePreview {
@@ -851,7 +903,12 @@ function ChatPage() {
   // 마지막 하나뿐이므로 메시지별로 스캔 결과를 캐시한다. 본문은 append-only라
   // 길이 변화가 곧 내용 변화다.
   const linkedFileScanCacheRef = useRef(
-    new Map<string, { textLength: number; baseKey: string; previews: WorkspaceFilePreview[] }>(),
+    new Map<string, {
+      textLength: number;
+      baseKey: string;
+      stepsKey: string;
+      previews: WorkspaceFilePreview[];
+    }>(),
   );
   const linkedFiles = useMemo(() => {
     const baseKey = mediaBasePaths.join("\u0000");
@@ -860,15 +917,31 @@ function ChatPage() {
     const seen = new Set<string>();
     const liveIds = new Set<string>();
     for (const message of messages) {
-      if (message.role !== "agent" || !message.text) continue;
+      if (message.role !== "agent") continue;
+      const text = message.text ?? "";
+      /* ★산출물은 **모델이 언급한 것**이 아니라 **실제로 만들어진 것**이다.
+         본문 스캔만 하면, 파일을 쓰고 그 이름을 산문에 적지 않은 답변은 산출물이
+         하나도 없는 것처럼 보인다. 도구 호출 인자에 경로가 이미 실려 오므로
+         (읽기/쓰기/편집), 공용 판별기로 그것도 함께 거둔다 — 도구 이름을 여기서
+         다시 추측하면 러너마다 갈라진다. */
+      const toolPaths = toolFilePathsFromSteps(message.steps);
+      const stepsKey = toolPaths.join(" ");
       liveIds.add(message.id);
       let entry = cache.get(message.id);
-      if (!entry || entry.textLength !== message.text.length || entry.baseKey !== baseKey) {
+      if (
+        !entry
+        || entry.textLength !== text.length
+        || entry.baseKey !== baseKey
+        || entry.stepsKey !== stepsKey
+      ) {
         entry = {
-          textLength: message.text.length,
+          textLength: text.length,
           baseKey,
-          previews: linkedFileArtifactsInText(message.text, mediaBasePaths)
-            .map((file) => workspacePreviewFromLinkedFile(file)),
+          stepsKey,
+          previews: [
+            ...linkedFileArtifactsInText(text, mediaBasePaths),
+            ...toolPaths.map((p) => linkedFileArtifactFromPath(p)),
+          ].map((file) => workspacePreviewFromLinkedFile(file)),
         };
         cache.set(message.id, entry);
       }
