@@ -23,7 +23,7 @@ import type { OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent
 import type { AgentlasAppDefinition } from "@/lib/apps";
 import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
-import { ipc } from "@/lib/ipc";
+import { ipc, grantForDroppedFile } from "@/lib/ipc";
 import { openPricing } from "@/components/UpgradeCta";
 
 type ModelOption = { id: string; label: string; tag?: string };
@@ -282,6 +282,10 @@ export function ChatInput({
   const router = useRouter();
   const [input, setInput] = useState("");
   const [images, setImages] = useState<PreviewedImage[]>([]);
+  // 비이미지 첨부 — 내용 업로드가 아니라 경로 참조(capability). 파일·폴더·영상 공통.
+  const [fileGrants, setFileGrants] = useState<Array<{ path: string; kind: "file" | "directory" }>>([]);
+  // 붙여넣은 긴 텍스트 — 입력창을 채우지 않고 에셋 칩으로 접어 동봉.
+  const [pastedTexts, setPastedTexts] = useState<Array<{ name: string; text: string }>>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   // 메뉴는 한 번에 하나만 열린다. 서로 독립된 boolean을 두면 권한/모델/컨텍스트가
@@ -420,7 +424,9 @@ export function ChatInput({
   // busy는 제외 — 실행 중에도 Enter/전송 버튼으로 steering 메시지를 보낼 수 있다. 부모가
   // 큐에 쌓아 현재 턴 뒤에 전달한다. 중지 요청 뒤에만 새 지시를 잠시 막아 의도를 충돌시키지 않는다.
   const submitDisabled =
-    (!input.trim() && images.length === 0) || disabled || (busy && stopRequested);
+    (!input.trim() && images.length === 0 && fileGrants.length === 0 && pastedTexts.length === 0) ||
+    disabled ||
+    (busy && stopRequested);
   const hepHint = [...hepToggles]
     .map((id) => {
       const toggle = HEP_TOGGLES.find((t) => t.id === id);
@@ -437,11 +443,16 @@ export function ChatInput({
   // ── 파일 첨부 ──────────────────────────────────────────
   async function addFiles(files: FileList | File[]) {
     const accepted: PreviewedImage[] = [];
+    const grantedFiles: Array<{ path: string; kind: "file" | "directory" }> = [];
     const rejected: string[] = [];
     const errors: string[] = [];
     for (const file of Array.from(files)) {
       if (!file.type.startsWith("image/")) {
-        rejected.push(file.name);
+        // 이미지 외(파일·폴더·영상·문서): 내용을 올리지 않고 경로만 참조한다 —
+        // 로컬 에이전트가 파일시스템 도구로 읽는다. grant가 접근 권한을 등록한다.
+        const grant = await grantForDroppedFile(file);
+        if (grant?.path) grantedFiles.push({ path: grant.path, kind: grant.kind });
+        else rejected.push(file.name);
         continue;
       }
       if (file.size > 5 * 1024 * 1024) {
@@ -461,8 +472,9 @@ export function ChatInput({
       }
     }
     if (accepted.length > 0) setImages((arr) => [...arr, ...accepted]);
+    if (grantedFiles.length > 0) setFileGrants((arr) => [...arr, ...grantedFiles]);
     if (rejected.length > 0) {
-      errors.push(t("chatinput.only_images", { names: rejected.join(", ") }));
+      errors.push(`${rejected.join(", ")} — ${locale === "ko" ? "첨부하지 못했습니다" : "could not attach"}`);
     }
     setAttachmentError(errors.length > 0 ? errors.join(" ") : null);
   }
@@ -593,9 +605,18 @@ export function ChatInput({
     };
   }
 
+  /** 첨부(파일·폴더 경로 + 붙여넣은 텍스트)를 메시지 본문에 동봉 — 로컬 에이전트가 경로로 읽는다. */
+  function withAttachmentContext(base: string): string {
+    const parts: string[] = [];
+    for (const g of fileGrants) parts.push(`- ${g.kind === "directory" ? "폴더" : "파일"}: ${g.path}`);
+    for (const p of pastedTexts) parts.push(`- ${locale === "ko" ? "붙여넣은 텍스트" : "pasted text"} "${p.name}":\n${p.text}`);
+    if (parts.length === 0) return base;
+    return `${base}${base ? "\n\n" : ""}[${locale === "ko" ? "첨부" : "attachments"}]\n${parts.join("\n")}`;
+  }
+
   function submit() {
     if (submitDisabled) return;
-    const text = input.trim();
+    const text = withAttachmentContext(input.trim());
     // 세션 팀 자동 보강은 매 턴 전역 검색을 하지 않는다. 현재 채팅에 붙은
     // 에이전트/팀을 먼저 실행하고, 런타임 LLM이 실제 역량 공백을 판단한 경우에만
     // Agent Hub·Cloud 보강 도구를 사용한다.
@@ -606,6 +627,8 @@ export function ChatInput({
     onSend(text, currentSendOptions());
     setInput("");
     setImages([]);
+    setFileGrants([]);
+    setPastedTexts([]);
     setTurnCalls([]);
     // 모드 토글(에이전트 찾기/Stormbreaker)은 리셋하지 않는다 — 계속 켜둘 수 있음.
     setTrigger(null);
@@ -616,6 +639,8 @@ export function ChatInput({
   function finishComposerAfterSend() {
     setInput("");
     setImages([]);
+    setFileGrants([]);
+    setPastedTexts([]);
     setTurnCalls([]);
     setTrigger(null);
     setTimeout(() => textareaRef.current?.focus(), 0);
@@ -1276,10 +1301,28 @@ export function ChatInput({
           </div>
         )}
 
+        {(fileGrants.length > 0 || pastedTexts.length > 0) && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "0 4px 6px" }}>
+            {fileGrants.map((g, i) => (
+              <span key={`f${i}`} title={g.path} style={{ display: "inline-flex", alignItems: "center", gap: 6, maxWidth: 240, padding: "4px 9px", borderRadius: 999, border: "1px solid var(--paper-edge, #d8d8d8)", background: "var(--paper-2, #f4f4f5)", fontSize: 12 }}>
+                <span aria-hidden="true">{g.kind === "directory" ? "📁" : "📎"}</span>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.path.split("/").pop() || g.path}</span>
+                <button type="button" aria-label={locale === "ko" ? "첨부 제거" : "Remove attachment"} onClick={() => setFileGrants((a) => a.filter((_, j) => j !== i))} style={{ border: 0, background: "transparent", cursor: "pointer", padding: 0, lineHeight: 1, opacity: 0.6 }}>×</button>
+              </span>
+            ))}
+            {pastedTexts.map((p, i) => (
+              <span key={`t${i}`} title={p.text.slice(0, 300)} style={{ display: "inline-flex", alignItems: "center", gap: 6, maxWidth: 240, padding: "4px 9px", borderRadius: 999, border: "1px solid var(--paper-edge, #d8d8d8)", background: "var(--paper-2, #f4f4f5)", fontSize: 12 }}>
+                <span aria-hidden="true">📝</span>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+                <button type="button" aria-label={locale === "ko" ? "텍스트 제거" : "Remove text"} onClick={() => setPastedTexts((a) => a.filter((_, j) => j !== i))} style={{ border: 0, background: "transparent", cursor: "pointer", padding: 0, lineHeight: 1, opacity: 0.6 }}>×</button>
+              </span>
+            ))}
+          </div>
+        )}
+
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*"
           multiple
           style={{ display: "none" }}
           onChange={(e) => {
@@ -1368,6 +1411,14 @@ export function ChatInput({
             if (files.length > 0) {
               e.preventDefault();
               void addFiles(files);
+              return;
+            }
+            // 긴 텍스트 붙여넣기 → 입력창을 채우지 않고 에셋 칩으로 접는다(ChatGPT/Claude 패턴).
+            const pasted = e.clipboardData?.getData("text/plain") ?? "";
+            if (pasted.length > 1200) {
+              e.preventDefault();
+              const firstLine = pasted.split("\n").find((l) => l.trim())?.trim().slice(0, 40) || "text";
+              setPastedTexts((a) => [...a, { name: `${firstLine}… (${pasted.length}${locale === "ko" ? "자" : " chars"})`, text: pasted }]);
             }
           }}
           placeholder={
