@@ -28,7 +28,10 @@ const outDir = process.env.AGENTLAS_STEERING_QA_OUT
 const rawVideoDir = path.join(outDir, ".recordings");
 const videoPath = path.join(outDir, "chat-steering-ui.webm");
 const reportPath = path.join(outDir, "report.json");
-const viewport = { width: 1280, height: 840 };
+const viewport = {
+  width: Number(process.env.AGENTLAS_STEERING_QA_WIDTH || 1280),
+  height: Number(process.env.AGENTLAS_STEERING_QA_HEIGHT || 840),
+};
 
 const initialPrompt = "현재 채팅 UI를 점검하고 핵심 개선안을 정리해줘.";
 const steeringPrompt = "기능 구현보다 먼저 UI 깨짐과 회귀 테스트를 확인해줘.";
@@ -213,8 +216,8 @@ async function readThinkingLegibility(page) {
 }
 
 async function main() {
-  if (!fs.existsSync(path.join(distDir, "chat.html"))) {
-    throw new Error("dist/renderer/chat.html is missing; run `npm run build:renderer` first");
+  if (!fs.existsSync(path.join(distDir, "workspace", "task.html"))) {
+    throw new Error("dist/renderer/workspace/task.html is missing; run `npm run build:renderer` first");
   }
 
   fs.rmSync(outDir, { recursive: true, force: true });
@@ -240,7 +243,10 @@ async function main() {
 
         (() => {
           const captured = Object.create(null);
+          const activeChatHandlers = [];
+          let currentRun = null;
           const originalOn = window.agentlasEvents.on.bind(window.agentlasEvents);
+          const originalRun = window.agentlas.invoke.run.bind(window.agentlas.invoke);
           window.agentlasEvents.on = (channel, handler) => {
             (captured[channel] = captured[channel] || []).push(handler);
             const off = originalOn(channel, handler);
@@ -249,21 +255,59 @@ async function main() {
               if (typeof off === "function") off();
             };
           };
-
-          const originalCancel = window.agentlas.invoke.cancel.bind(window.agentlas.invoke);
-          window.agentlas.invoke.cancel = async (runId) => {
-            window.__steeringQA.cancelRequests.push({ runId, requestedAt: Date.now() });
-            // Keep the queued state visible long enough for deterministic video
-            // evidence, then use the real shared-mock cancellation transition.
-            await new Promise((resolve) => window.setTimeout(resolve, 850));
-            return originalCancel(runId);
+          window.agentlasEvents.onActiveChats = (handler) => {
+            activeChatHandlers.push(handler);
+            return () => {
+              const index = activeChatHandlers.indexOf(handler);
+              if (index >= 0) activeChatHandlers.splice(index, 1);
+            };
+          };
+          const publishActiveChats = (ids) => {
+            for (const handler of [...activeChatHandlers]) handler(ids);
+          };
+          const publish = (channel, payload) => {
+            if (currentRun && channel === 'invoke:' + currentRun.runId) currentRun.events.push(payload);
+            for (const handler of [...(captured[channel] || [])]) handler(payload);
+          };
+          window.agentlas.invoke.run = async (payload) => {
+            const result = await originalRun(payload);
+            currentRun = {
+              runId: result.runId,
+              chatId: payload.chatId,
+              startedAt: new Date().toISOString(),
+              events: [],
+            };
+            return result;
+          };
+          window.agentlas.invoke.attach = async (chatId) => {
+            if (!currentRun || currentRun.chatId !== chatId) return null;
+            return { ...currentRun, events: [...currentRun.events] };
+          };
+          window.agentlas.invoke.activeChats = async () => currentRun ? [currentRun.chatId] : [];
+          window.agentlas.invoke.steer = async (payload) => {
+            window.__qa.calls.push({ name: 'invoke.steer', payload });
+            const prior = currentRun;
+            window.__steeringQA.steerRequests.push({ payload, requestedAt: Date.now() });
+            window.setTimeout(() => {
+              if (prior) publish('invoke:' + prior.runId, { kind: 'error', error: { code: 'cancelled', message: 'Cancelled' } });
+              currentRun = null;
+              publishActiveChats([]);
+              window.setTimeout(() => {
+                currentRun = {
+                  runId: 'main-steer-run-2',
+                  chatId: payload.chatId,
+                  startedAt: new Date().toISOString(),
+                  events: [],
+                };
+                publishActiveChats([payload.chatId]);
+              }, 120);
+            }, 850);
+            return { accepted: true, queued: true, activeRunId: prior?.runId, position: 1 };
           };
 
           window.__steeringQA = {
-            cancelRequests: [],
-            emit: (channel, payload) => {
-              for (const handler of [...(captured[channel] || [])]) handler(payload);
-            },
+            steerRequests: [],
+            emit: publish,
           };
         })();
       `,
@@ -283,7 +327,7 @@ async function main() {
 
     // Chat keeps lightweight polling alive, so networkidle is not a valid
     // readiness signal. The mounted, enabled composer below is authoritative.
-    await page.goto(`${baseUrl}/chat.html?id=chat-1`, { waitUntil: "domcontentloaded" });
+    await page.goto(`${baseUrl}/workspace/task.html?id=chat-1`, { waitUntil: "domcontentloaded" });
     const composer = page.locator('[data-chat-input="true"]');
     await composer.waitFor({ state: "visible" });
     await page.waitForFunction(() => {
@@ -311,26 +355,28 @@ async function main() {
     await page.screenshot({ path: path.join(outDir, "01-active-thinking.png") });
     await sleep(700);
 
-    // The same composer remains writable while busy; this submission must queue
-    // and cancel the current turn without becoming a user-visible error.
+    // The same composer remains writable while busy. The instruction must be
+    // visible immediately, then Main owns cancellation and the replacement run.
     await composer.fill(steeringPrompt);
     const steeringSend = page.locator('[data-chat-steering-send="true"]');
     await steeringSend.waitFor({ state: "visible" });
     assert.equal(await steeringSend.isEnabled(), true, "busy composer must allow a steering send");
     await steeringSend.click();
-    await page.getByText(/1개 대기 중|1 queued/).waitFor();
-    await page.waitForFunction(() => window.__steeringQA.cancelRequests.length === 1);
+    await page.getByText(/새 방향 반영 중|Applying direction/).waitFor();
+    await page.getByText(steeringPrompt, { exact: true }).waitFor();
+    await page.waitForFunction(() => window.__steeringQA.steerRequests.length === 1);
     layouts.push(await assertLayout(page, "steering-queued"));
     await page.screenshot({ path: path.join(outDir, "02-steering-queued.png") });
     await sleep(950);
 
-    await page.waitForFunction(() => window.__qa.calls.filter((call) => call.name === "invoke.cancel").length === 1);
-    await page.waitForFunction(() => window.__qa.calls.filter((call) => call.name === "invoke.run").length === 2);
+    await page.waitForFunction(() => window.__qa.calls.filter((call) => call.name === "invoke.steer").length === 1);
+    await page.waitForFunction(() => !document.body.innerText.includes("새 방향 반영 중") && !document.body.innerText.includes("Applying direction"));
     const runs = await invokeCalls(page);
-    const secondRun = runs[1].payload;
-    assert.equal(secondRun.userPrompt, steeringPrompt, "queued steering instruction must restart the run");
-    assert.notEqual(secondRun.runId, firstRun.runId, "steering restart needs a fresh renderer run id");
-    assert.equal(await page.getByText(/1개 대기 중|1 queued/).count(), 0, "queue badge must clear after restart");
+    assert.equal(runs.length, 1, "renderer must not start a duplicate run while Main owns steering");
+    const steerCalls = await invokeCalls(page, "invoke.steer");
+    assert.equal(steerCalls[0].payload.userPrompt, steeringPrompt, "steering instruction must use the Main-owned steer contract");
+    const secondRun = { runId: "main-steer-run-2", userPrompt: steeringPrompt };
+    assert.equal(await page.getByText(/새 방향 반영 중|Applying direction/).count(), 0, "steering badge must clear after attach");
     assert.equal(await page.getByText(/^⚠️.*Cancelled$/).count(), 0, "steering cancellation must not render an error bubble");
 
     const secondChannel = `invoke:${secondRun.runId}`;
@@ -368,7 +414,7 @@ async function main() {
     assert.deepEqual(consoleErrors, [], `console errors: ${consoleErrors.join("\n")}`);
     assert.deepEqual(requestFailures, [], `request failures: ${requestFailures.join("\n")}`);
 
-    const cancelRequests = await page.evaluate(() => window.__steeringQA.cancelRequests);
+    const steerRequests = await page.evaluate(() => window.__steeringQA.steerRequests);
     const invokeCancels = await invokeCalls(page, "invoke.cancel");
     const video = page.video();
     assert.ok(video, "Playwright video recorder must be active");
@@ -393,8 +439,9 @@ async function main() {
       assertions: {
         activeThinkingStream: true,
         busyComposerAcceptedSteering: true,
-        steeringQueuedBeforeCancel: true,
-        cancellationRestartedWithFreshRun: true,
+        steeringVisibleBeforeTransition: true,
+        mainOwnedSteerContract: true,
+        replacementRunAttachedWithoutNavigation: true,
         cancellationErrorHidden: true,
         initialPartialPreserved: true,
         finalResponseRendered: true,
@@ -405,11 +452,11 @@ async function main() {
       },
       thinkingLegibility,
       layouts,
-      runs: runs.map((call) => ({
+      rendererRuns: runs.map((call) => ({
         runId: call.payload.runId,
         userPrompt: call.payload.userPrompt,
       })),
-      cancelRequests,
+      steerRequests,
       invokeCancels: invokeCancels.map((call) => call.payload),
     };
     fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
