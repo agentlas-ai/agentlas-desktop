@@ -342,6 +342,7 @@ export function AgentOntologyGraphView({
   locale,
   graphLoading = false,
   graphError = false,
+  onRetry,
 }: {
   summary: ExperienceOntologySummary | null;
   graphSnapshot: ExperienceOntologyGraphSnapshot | null;
@@ -350,6 +351,7 @@ export function AgentOntologyGraphView({
   locale: Locale;
   graphLoading?: boolean;
   graphError?: boolean;
+  onRetry?: () => void;
 }) {
   return (
     <OntologyAtlas
@@ -360,6 +362,7 @@ export function AgentOntologyGraphView({
       locale={locale}
       graphLoading={graphLoading}
       graphError={graphError}
+      onRetry={onRetry}
     />
   );
 }
@@ -429,7 +432,7 @@ export function AgentHubOntologyProjectionView({
   const attachmentSummary = projection
     ? (ko
       ? `현재 ${activeCount}개 사용 중${scheduledCount > 0 ? ` · 새로 시작하는 대화부터 ${scheduledCount}개 적용 예정` : ""}${approvalCount > 0 ? ` · 내 확인 필요 ${approvalCount}개` : ""}`
-      : `${activeCount} in use now${scheduledCount > 0 ? ` · ${scheduledCount} set for new conversations` : ""}${approvalCount > 0 ? ` · ${approvalCount} awaiting your review` : ""}`)
+      : `${activeCount} in use now${scheduledCount > 0 ? ` · ${scheduledCount} set for the next project run` : ""}${approvalCount > 0 ? ` · ${approvalCount} awaiting your review` : ""}`)
     : (ko ? "아직 이 에이전트에 연결된 경험칩이 없습니다." : "No Experience Chips are connected to this agent yet.");
 
   return (
@@ -473,7 +476,7 @@ export function AgentHubOntologyProjectionView({
           <span aria-hidden="true" style={{ width: 27, height: 27, display: "grid", placeItems: "center", borderRadius: 9, background: "var(--paper)", color: "var(--accent)" }}><IconLayers size={13} /></span>
           <strong style={{ color: "var(--ink)" }}>{ko ? "자세히 보기" : "View details"}</strong>
           <span style={ontologyCompactMetricStyle}>{ko ? `현재 사용 중 ${activeCount}` : `In use ${activeCount}`}</span>
-          {scheduledCount > 0 && <span style={ontologyCompactMetricStyle}>{ko ? `새 대화부터 ${scheduledCount}` : `New conversations ${scheduledCount}`}</span>}
+          {scheduledCount > 0 && <span style={ontologyCompactMetricStyle}>{ko ? `다음 프로젝트 실행부터 ${scheduledCount}` : `Next project run ${scheduledCount}`}</span>}
           {approvalCount > 0 && <span style={ontologyCompactMetricStyle}>{ko ? `내 확인 필요 ${approvalCount}` : `Needs review ${approvalCount}`}</span>}
           <span aria-hidden="true" style={{ marginLeft: "auto", width: 7, height: 7, borderRight: "1.5px solid currentColor", borderBottom: "1.5px solid currentColor", transform: "rotate(45deg) translateY(-2px)" }} />
         </summary>
@@ -512,7 +515,7 @@ export function AgentHubOntologyProjectionView({
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
             <LoadoutCard
               testId="ontology-active-loadout"
-              title={ko ? "현재 대화에서 사용 중" : "In use in the current conversation"}
+              title={ko ? "현재 프로젝트 실행에서 사용 중" : "In use in the current project run"}
               state={projection.loadout.state}
               entries={projection.loadout.entries}
               chips={chips}
@@ -521,11 +524,11 @@ export function AgentHubOntologyProjectionView({
             />
             <LoadoutCard
               testId="ontology-next-session"
-              title={ko ? "새로 시작하는 대화부터 적용" : "Applies to newly started conversations"}
+              title={ko ? "다음 프로젝트 실행부터 적용" : "Applies to the next project run"}
               state={projection.scheduledNextSession?.state ?? "none"}
               entries={projection.scheduledNextSession?.entries ?? []}
               chips={chips}
-              empty={ko ? "새 대화에 적용할 변경이 없습니다." : "No change is set for new conversations."}
+              empty={ko ? "다음 프로젝트 실행에 적용할 변경이 없습니다." : "No change is set for the next project run."}
               locale={locale}
             />
           </div>
@@ -546,7 +549,7 @@ export function AgentHubOntologyProjectionView({
                 <div key={approval.approvalId} style={ontologyRowStyle}>
                   <strong style={{ fontSize: 11.5 }}>{ko ? "적용할지 직접 확인해 주세요" : "Choose whether to apply this change"}</strong>
                   <span style={{ color: "var(--ink-soft)", fontSize: 10.5, lineHeight: 1.45 }}>
-                    {ko ? "적용해도 지금 대화는 바뀌지 않고, 새로 시작하는 대화부터 사용됩니다." : "Your current conversation stays unchanged; the chip starts with newly created conversations."}
+                    {ko ? "적용해도 현재 실행은 바뀌지 않고, 이 도구를 사용하는 다음 프로젝트 실행부터 사용됩니다." : "The current run stays unchanged; the chip starts with the next project run that uses this tool."}
                   </span>
                   <span style={ontologyMetaStyle}>{ko ? "확인 가능 기한" : "Review by"} {formatOntologyTime(approval.expiresAt, locale)}</span>
                   <LoadoutEntries entries={approval.selectedChips} chips={chips} locale={locale} />
@@ -559,7 +562,7 @@ export function AgentHubOntologyProjectionView({
                     >
                       {resolvingApprovalId === approval.approvalId
                         ? (ko ? "확인 중…" : "Applying…")
-                        : (ko ? "새 대화부터 적용" : "Apply to new conversations")}
+                        : (ko ? "다음 프로젝트 실행부터 적용" : "Apply to next project run")}
                     </button>
                     <button
                       type="button"
@@ -607,7 +610,7 @@ export function AgentHubOntologyProjectionView({
 
 function ontologyAttachOutcomeMessage(outcome: AgentOntologyAttachDecisionResult["outcome"], ko: boolean): string {
   const messages: Record<AgentOntologyAttachDecisionResult["outcome"], [string, string]> = {
-    accepted: ["장착했습니다. 새로 시작하는 대화부터 사용됩니다.", "Attached. It will be used in newly created conversations."],
+    accepted: ["장착했습니다. 이 도구를 사용하는 다음 프로젝트 실행부터 적용됩니다.", "Attached. It will apply to the next project run that uses this tool."],
     denied: ["이번에는 적용하지 않았습니다.", "This change was not applied."],
     "already-resolved": ["이미 처리된 요청입니다. 최신 상태로 다시 확인했습니다.", "This request was already resolved. The latest state is shown."],
     offline: ["Hub에 연결되지 않아 적용하지 못했습니다.", "The change was not applied because Hub is offline."],

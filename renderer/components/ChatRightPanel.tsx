@@ -1,7 +1,7 @@
 // Unified right rail for chat: files, agent workflow, and artifact/viewer panel.
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Markdown, type CodeArtifact } from "./Markdown";
 import { WorkspacePanel, type WorkspaceFilePreview } from "./WorkspacePanel";
 import {
@@ -21,6 +21,7 @@ import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import { receiptAutoExpanded } from "@/lib/run-receipt-state";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
+import { projectPoolMemberKey } from "@shared/project-agent-pool";
 
 export type ChatRightPanelTab = "agent" | "file" | "panel" | "memory";
 type PanelViewerSource = "workbench" | "file";
@@ -125,14 +126,33 @@ export function ChatRightPanel({
     window.addEventListener("pointerup", onUp, { once: true });
   }
 
+  function resizeByKeyboard(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (!onResizeWidth || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const current = width ?? 360;
+    const maxWidth = Math.max(340, Math.min(window.innerWidth - 420, Math.floor(window.innerWidth * 0.64)));
+    const next = event.key === "Home"
+      ? 300
+      : event.key === "End"
+        ? maxWidth
+        : current + (event.key === "ArrowLeft" ? 16 : -16);
+    onResizeWidth(Math.min(maxWidth, Math.max(300, next)));
+  }
+
   return (
     <aside className="chat-right-panel titlebar-nodrag" style={{ ...shellStyle, width: width ?? shellStyle.width, maxWidth: "none" }}>
       {onResizeWidth && (
         <div
           role="separator"
+          tabIndex={0}
           aria-orientation="vertical"
+          aria-valuemin={300}
+          aria-valuemax={960}
+          aria-valuenow={width ?? 360}
+          aria-label={ko ? "우측 패널 너비" : "Right panel width"}
           title={ko ? "패널 너비 조절" : "Resize panel"}
           onPointerDown={beginResize}
+          onKeyDown={resizeByKeyboard}
           style={resizeHandleStyle}
         />
       )}
@@ -232,11 +252,12 @@ export function ChatRightPanel({
 function ProjectTeamCard({ project, agents, ko }: { project: Project; agents: InstalledAgent[]; ko: boolean }) {
   const nameById = new Map(agents.map((agent) => [agent.id, ko ? agent.name : agent.nameEn || agent.name]));
   return <section style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
-    <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".08em", color: "var(--muted-deep)", textTransform: "uppercase" }}>{ko ? "이 프로젝트의 대기조" : "This project's on-call pool"}</div>
+    <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".08em", color: "var(--muted-deep)", textTransform: "uppercase" }}>{ko ? "이 프로젝트의 도구" : "This project's tools"}</div>
     <div style={{ display: "grid", gap: 6, marginTop: 9 }}>
-      {project.agentPool.map((member, index) => <div key={`${member.source}:${member.agentId}`} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+      {project.agentPool.map((member, index) => <div key={projectPoolMemberKey(member)} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
         <span style={{ width: 20, height: 20, display: "grid", placeItems: "center", borderRadius: 6, background: "var(--fill-1)", color: "var(--accent)", fontWeight: 800 }}>{index + 1}</span>
-        <strong>{nameById.get(member.agentId) || member.nameSnapshot}</strong>
+        <strong>{member.entityKind === "agent" && member.agentId ? nameById.get(member.agentId) || member.nameSnapshot : member.nameSnapshot}</strong>
+        <span style={{ marginLeft: "auto", color: "var(--muted-deep)", fontSize: 10 }}>{member.entityKind === "team" ? (ko ? "팀 도구" : "Team tool") : (ko ? "전문가 도구" : "Specialist tool")}</span>
       </div>)}
     </div>
   </section>;
@@ -247,7 +268,7 @@ function ProjectMemoryCard({ project, ko }: { project: Project | null; ko: boole
   return <section style={{ display: "grid", gap: 12 }}>
     <div style={{ padding: 14, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
       <div style={{ fontSize: 10, fontWeight: 800, color: "var(--muted-deep)", letterSpacing: ".08em", textTransform: "uppercase" }}>{ko ? "프로젝트 지시" : "Project instructions"}</div>
-      <p style={{ margin: "9px 0 0", whiteSpace: "pre-wrap", color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.55 }}>{project.systemPrompt || (ko ? "One이 프로젝트와 현재 작업을 보고 필요한 안내를 제시합니다." : "One will use the project and current task to present the next useful guidance.")}</p>
+      <p style={{ margin: "9px 0 0", whiteSpace: "pre-wrap", color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.55 }}>{project.systemPrompt || (ko ? "이 프로젝트의 목표와 작업 기준을 여기에 적어 두세요." : "Add this project's goals and working instructions here.")}</p>
     </div>
     <div style={{ padding: 14, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
       <strong style={{ fontSize: 12 }}>{ko ? "축적되는 프로젝트 기억" : "Growing project memory"}</strong>
@@ -337,7 +358,7 @@ function RunReceiptCard({ chatId, busy }: { chatId: string | null; busy: boolean
             </button>
           )}
           {openError && (
-            <div role="status" style={receiptErrorStyle} data-one-content-slot data-capability="task-recovery" />
+            <div role="alert" style={receiptErrorStyle}>{openError}</div>
           )}
         </div>
       )}
@@ -510,7 +531,7 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
           </button>
         )}
       </header>
-      {openError && <div style={fileNoticeStyle} data-one-content-slot data-capability="file-recovery" />}
+      {openError && <div role="alert" style={fileNoticeStyle}>{openError}</div>}
       <div style={fileViewerBodyStyle}>
         {file.viewerKind === "browser" ? (
           <BrowserViewer file={file} />
@@ -577,7 +598,7 @@ async function openWorkspaceFileExternal(file: WorkspaceFilePreview, ko: boolean
       const result = await bridge.fs.openPath(target).catch(() => ({ ok: false, message: "" }));
       if (result.ok) return null;
     }
-    return ko ? "이 파일을 외부 앱에서 열지 못했습니다. One이 가능한 다음 행동을 제안할 수 있습니다." : "This file could not be opened externally. One can suggest the next available action.";
+    return ko ? "이 파일을 외부 앱에서 열지 못했습니다. 파일 위치와 기본 앱 설정을 확인해 주세요." : "This file could not be opened externally. Check its location and default app.";
   }
   window.open(file.browserUrl || file.fileUrl, "_blank", "noopener,noreferrer");
   return null;
@@ -593,7 +614,7 @@ async function revealWorkspaceFile(file: WorkspaceFilePreview, ko: boolean): Pro
     const result = await bridge.fs.showItemInFolder(target).catch(() => ({ ok: false, message: "" }));
     if (result.ok) return null;
   }
-  return ko ? "Finder에서 이 파일을 표시하지 못했습니다. One이 가능한 다음 행동을 제안할 수 있습니다." : "This file could not be shown in Finder. One can suggest the next available action.";
+  return ko ? "Finder에서 이 파일을 표시하지 못했습니다. 파일이 이동되거나 삭제되지 않았는지 확인해 주세요." : "This file could not be shown in Finder. Check whether it was moved or deleted.";
 }
 
 function canRevealWorkspaceFile(file: WorkspaceFilePreview): boolean {

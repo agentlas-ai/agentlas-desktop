@@ -327,22 +327,43 @@ function reconcileAllUserChats(): void {
   }
 }
 
+function reconcileProjectUserChats(projectId: string): void {
+  if (!tableExists("chats") || !tableExists("tasks")) return;
+  const rows = getDb()
+    .prepare("SELECT id FROM chats WHERE project_id = ? AND kind <> 'division' ORDER BY updated_at DESC LIMIT 200")
+    .all(projectId) as Array<{ id: string }>;
+  for (const row of rows) {
+    if (findCanonicalTaskForChat(row.id)) ensureCanonicalTaskForChat(row.id);
+  }
+}
+
 export function listCanonicalTasks(input: {
+  projectId?: string;
   limit?: number;
   includeArchived?: boolean;
+  reconcile?: boolean;
 } = {}): CanonicalTask[] {
   if (!tableExists("tasks")) return [];
-  reconcileAllUserChats();
+  const projectId = typeof input.projectId === "string" && input.projectId.trim()
+    ? input.projectId.trim()
+    : null;
+  // New project chats materialize their canonical Task at creation. Navigation
+  // surfaces can therefore read the indexed task ledger directly; legacy
+  // reconciliation remains opt-out for migrations and explicit repair flows.
+  if (input.reconcile !== false) {
+    if (projectId) reconcileProjectUserChats(projectId);
+    else reconcileAllUserChats();
+  }
   const limit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 50)));
-  const rows = getDb()
-    .prepare(
+  const statement = getDb().prepare(
       `SELECT * FROM tasks
        WHERE id NOT LIKE 'task_pairing_%'
          ${input.includeArchived ? "" : "AND status <> 'archived'"}
+         ${projectId ? "AND project_id = ?" : ""}
        ORDER BY updated_at DESC
        LIMIT ?`,
-    )
-    .all(limit) as TaskRow[];
+    );
+  const rows = (projectId ? statement.all(projectId, limit) : statement.all(limit)) as TaskRow[];
   return rows.map(toTask);
 }
 

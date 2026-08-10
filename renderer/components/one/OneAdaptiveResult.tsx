@@ -75,6 +75,7 @@ export function OneAdaptiveResult({
   onOpenWork,
   canOpenWork = false,
   onRetryUnfinished,
+  onAcceptResult,
   onSemanticAction,
   autoRecovery,
 }: {
@@ -94,6 +95,8 @@ export function OneAdaptiveResult({
   onManageImprovementAsset?: (asset: OneImprovementReusedAssetV1) => void;
   /** 끝까지 완료되지 않은 실행을 한 번의 클릭으로 이어서 진행한다. */
   onRetryUnfinished?: () => void;
+  /** Main verifies the exact Task version and completed run receipt. */
+  onAcceptResult?: () => Promise<void>;
   /**
    * One's own recovery state. While One is still routing around the obstacle
    * there is no failure to report yet, so the closure card must not claim one.
@@ -107,6 +110,13 @@ export function OneAdaptiveResult({
   const renderDecision = useMemo(() => surface ? inspectSurfaceForDesktop(surface, projection.taskId) : null, [projection.taskId, surface]);
   const fallback = useMemo(() => readSafeFallback(manifest, projection.taskId), [manifest, projection.taskId]);
   const hasManifest = Boolean(manifest && typeof manifest === "object");
+  const canAcceptResult = Boolean(
+    projection.canonicalStatus === "partial"
+    && receipt?.status === "completed"
+    && receipt.chatId === projection.chatId
+    && onAcceptResult,
+  );
+  const standaloneAcceptance = canAcceptResult && !hasManifest;
   const showNative = Boolean(surface && renderDecision?.native);
   const hasSourceListBlock = Boolean(surface?.blocks.some((block) => block.type === "SourceList"));
   const semanticActions = showNative && surface
@@ -197,8 +207,53 @@ export function OneAdaptiveResult({
           autoRecovery={autoRecovery}
         />
       )}
+      {canAcceptResult && !hasManifest && onAcceptResult && (
+        <ResultAcceptance locale={locale} standalone={standaloneAcceptance} onAccept={onAcceptResult} />
+      )}
+      {canAcceptResult && hasManifest && onAcceptResult && (
+        <ResultAcceptance locale={locale} standalone={false} onAccept={onAcceptResult} />
+      )}
       {/* Value/experience/proof records keep compounding internally. They are
           deliberately absent from the ordinary One conversation surface. */}
+    </section>
+  );
+}
+
+function ResultAcceptance({ locale, standalone, onAccept }: {
+  locale: "ko" | "en";
+  standalone: boolean;
+  onAccept: () => Promise<void>;
+}) {
+  const [acceptingResult, setAcceptingResult] = useState(false);
+  const [acceptanceFailed, setAcceptanceFailed] = useState(false);
+  return (
+    <section
+      className={styles.standaloneAcceptance}
+      data-standalone={standalone ? "true" : "false"}
+      aria-label={tFor(locale, "one.res.aria.confirm_result")}
+    >
+      <p className={styles.standaloneAcceptanceCopy} role={acceptanceFailed ? "alert" : undefined}>
+        {acceptanceFailed
+          ? tFor(locale, "one.res.acceptance_failed")
+          : tFor(locale, "one.res.acceptance_boundary")}
+      </p>
+      <button
+        type="button"
+        className={styles.actionPrimary}
+        disabled={acceptingResult}
+        onClick={() => {
+          if (acceptingResult) return;
+          setAcceptingResult(true);
+          setAcceptanceFailed(false);
+          void onAccept()
+            .catch(() => setAcceptanceFailed(true))
+            .finally(() => setAcceptingResult(false));
+        }}
+      >
+        {acceptingResult
+          ? tFor(locale, "one.res.finishing")
+          : tFor(locale, "one.res.finish_here")}
+      </button>
     </section>
   );
 }

@@ -10,7 +10,6 @@ import { IconChevronDown, IconChevronRight, IconFolder, IconHome, IconPlus } fro
 import { ProductModeMenu } from "./one/ProductModeMenu";
 import { AccountChip } from "./AccountChip";
 import { VersionChip } from "./VersionChip";
-import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 
 export function ProjectSidebar() {
   const { locale } = useT();
@@ -19,6 +18,7 @@ export function ProjectSidebar() {
   const currentId = params.get("projectId") ?? params.get("id");
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<CanonicalTask[]>([]);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
@@ -41,14 +41,14 @@ export function ProjectSidebar() {
   useEffect(() => {
     const api = ipc();
     if (!api) {
-      requestOneOperationalRecovery("project-sidebar-load", new Error("Desktop bridge unavailable"));
+      setLoadFailed(true);
       return;
     }
     let cancelled = false;
-    const load = () => void Promise.all([api.projects.list(), api.tasks.list({ limit: 200 })]).then(([items, taskRows]) => {
-      if (!cancelled) { setProjects(items); setTasks(taskRows); }
+    const load = () => void Promise.all([api.projects.list(), api.tasks.list({ limit: 200, reconcile: false })]).then(([items, taskRows]) => {
+      if (!cancelled) { setProjects(items); setTasks(taskRows); setLoadFailed(false); }
     }).catch(() => {
-      // Preserve the last good navigation list while One inspects the failure.
+      if (!cancelled) setLoadFailed(true);
     });
     load();
     const onChanged = () => load();
@@ -90,7 +90,8 @@ export function ProjectSidebar() {
             {!chatsCollapsed && projectTasks.map((task) => <button type="button" className="project-sidebar-task" key={task.id} onClick={() => navigate(`/workspace/task?id=${encodeURIComponent(task.originChatId ?? "")}&task=${encodeURIComponent(task.id)}&projectId=${encodeURIComponent(project.id)}`)}><span>{task.title || (ko ? "새 작업" : "New task")}</span></button>)}
           </div>;
         })}
-        {projects.length === 0 ? <button type="button" className="project-sidebar-empty" onClick={() => navigate("/project/new")}>{ko ? "첫 프로젝트를 연결하세요" : "Connect your first project"}</button> : null}
+        {loadFailed ? <div className="project-sidebar-empty" role="alert">{ko ? "프로젝트 목록을 불러오지 못했습니다" : "Projects are temporarily unavailable"}</div> : null}
+        {!loadFailed && projects.length === 0 ? <button type="button" className="project-sidebar-empty" onClick={() => navigate("/project/new")}>{ko ? "첫 프로젝트를 연결하세요" : "Connect your first project"}</button> : null}
       </nav>
       <div className="project-sidebar-foot"><AccountChip /><VersionChip /></div>
     </aside>

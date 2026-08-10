@@ -51,7 +51,7 @@ export function DashboardActivity() {
       return;
     }
     try {
-      const rows = await api.tasks.list({ limit: 25 });
+      const rows = await api.tasks.list({ limit: 25, reconcile: false });
       setRecent(rows.filter((task) => Boolean(task.projectId && task.originChatId)));
       setError("");
     } catch {

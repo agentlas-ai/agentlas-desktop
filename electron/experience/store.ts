@@ -1276,14 +1276,13 @@ export function promoteExperienceCandidate(input: ExperiencePromotionInput): Exp
     return receiptFromRow(existing);
   }
   if (candidate.status !== "candidate") throw new Error("Only pending Experience candidates can be promoted.");
-  if (input.publicSafe === true && candidate.sensitivity !== "public") {
-    throw new Error("Only public-sensitivity candidates can be marked public-safe.");
+  // Manual review is only an attestation. It must never mint a verified/public
+  // receipt in the same action: public release is a separate owner action that
+  // re-runs the canonical privacy scan through unsealExperienceCandidatePublic.
+  if (input.publicSafe === true) {
+    throw new Error("Direct user attestation is not an authoritative local verifier. Promote privately, then use the separate public unseal gate.");
   }
-  // Public-safe direct promotion: explicit owner consent (asserted above) plus
-  // a fully privacy-clean summary mints a verified public receipt in one flow.
-  // Any scanner residue keeps throwing via assertPublicExperienceText.
-  const publicSafe = input.publicSafe === true;
-  if (publicSafe) assertPublicExperienceText(candidate.summary);
+  const publicSafe = false;
   const id = randomUUID();
   const now = new Date().toISOString();
   const evidenceHash = hash("experience-evidence-v1", ...refs);

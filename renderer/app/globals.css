@@ -6007,6 +6007,14 @@ button[data-toggle-state="on"] {
 .chat-input-shell {
   min-width: 0;
   max-width: calc(100vw - 32px);
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, var(--paper-edge));
+  box-shadow: 0 10px 30px rgba(15, 18, 20, 0.08), 0 1px 2px rgba(15, 18, 20, 0.05);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.chat-input-shell:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--paper-edge));
+  box-shadow: 0 12px 32px rgba(15, 18, 20, 0.1), 0 0 0 3px color-mix(in srgb, var(--accent) 9%, transparent);
 }
 
 .chat-input-toolbar {
@@ -6017,6 +6025,8 @@ button[data-toggle-state="on"] {
   width: 100%;
   min-width: 0;
   overflow: visible;
+  padding-top: 7px;
+  border-top: 1px solid color-mix(in srgb, var(--paper-edge) 78%, transparent);
 }
 
 .chat-input-tools-left,
@@ -6062,18 +6072,18 @@ button[data-toggle-state="on"] {
   min-width: 0;
   max-width: 100%;
   padding: 2px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--paper) 78%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--paper-edge));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--paper));
 }
 
 .chat-input-hep-chip {
-  height: 26px;
+  min-height: 32px;
   min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 0 8px;
+  padding: 0 9px;
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
@@ -6104,8 +6114,67 @@ button[data-toggle-state="on"] {
 }
 
 .chat-input-send-button {
-  flex: 0 0 32px;
+  flex: 0 0 38px;
   margin-left: auto;
+}
+
+.chat-input-steering-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  animation: chat-steering-pulse 1s ease-in-out infinite alternate;
+}
+
+@keyframes chat-steering-pulse {
+  from { opacity: 0.3; transform: scale(0.82); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.task-cockpit-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--paper-2) 72%, var(--paper));
+}
+
+.task-cockpit-header-action {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-deep);
+  cursor: pointer;
+}
+
+.task-cockpit-header-action:hover,
+.task-cockpit-header-action[data-active="true"] {
+  border-color: var(--paper-edge);
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.task-cockpit-header-action[data-active="true"] {
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgba(15, 18, 20, 0.08);
+}
+
+.task-cockpit-header-danger {
+  margin-left: 2px;
+  border-left-color: var(--paper-edge);
+  border-radius: 0 8px 8px 0;
+}
+
+.task-cockpit-header-danger:hover {
+  color: var(--red-deep);
+  background: color-mix(in srgb, var(--red-deep) 6%, var(--paper));
 }
 
 .chat-input-context-pill {
@@ -8497,11 +8566,17 @@ button[data-toggle-state="on"] {
   background: color-mix(in oklch, var(--accent) 7%, var(--paper));
   color: var(--ink);
   box-shadow: 0 8px 24px rgba(0, 21, 25, 0.08);
+  container-type: inline-size;
 }
 .sidenav-update-card[data-downloaded="true"] {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 10px;
+  background: color-mix(in oklch, var(--accent) 6%, var(--paper));
+  border-color: color-mix(in oklch, var(--accent) 30%, var(--paper-edge));
+  color: var(--ink);
 }
 .sidenav-update-card[data-downloaded="false"] {
   grid-template-columns: auto minmax(0, 1fr);
@@ -8513,10 +8588,28 @@ button[data-toggle-state="on"] {
   background: color-mix(in oklch, var(--accent) 9%, var(--paper));
 }
 .sidenav-update-card[data-collapsed="true"] {
+  display: grid;
   grid-template-columns: 1fr;
   justify-items: center;
   gap: 6px;
   padding: 8px 6px;
+}
+.sidenav-update-head {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 44px;
+  align-items: start;
+  gap: 8px;
+}
+.sidenav-update-icon {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 13%, var(--paper));
 }
 .sidenav-update-dot {
   width: 9px;
@@ -8543,16 +8636,23 @@ button[data-toggle-state="on"] {
   overflow-wrap: anywhere;
 }
 .sidenav-update-copy strong {
-  font-weight: 850;
+  font-size: 12.5px;
+  font-weight: 800;
 }
 .sidenav-update-copy span {
-  opacity: 0.82;
-  font-weight: 650;
+  color: var(--ink-muted);
+  font-weight: 600;
+}
+.sidenav-update-copy .sidenav-update-version {
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 750;
 }
 .sidenav-update-action,
-.sidenav-update-dismiss {
-  min-width: 28px;
-  height: 28px;
+.sidenav-update-dismiss,
+.sidenav-update-secondary {
+  min-width: 44px;
+  min-height: 44px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -8564,16 +8664,17 @@ button[data-toggle-state="on"] {
   font-weight: 850;
 }
 .sidenav-update-action {
-  padding: 0 9px;
-  background: #fff;
-  color: var(--accent);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
+  padding: 0 12px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--paper);
+  box-shadow: 0 1px 3px rgba(0, 21, 25, 0.12);
 }
 .sidenav-update-card[data-action-required="true"] .sidenav-update-action {
   grid-column: 2;
   justify-self: start;
   width: 100%;
-  min-height: 32px;
+  min-height: 44px;
   height: auto;
   padding: 7px 10px;
   white-space: normal;
@@ -8587,12 +8688,105 @@ button[data-toggle-state="on"] {
 .sidenav-update-dismiss {
   padding: 0;
   background: transparent;
-  color: inherit;
-  opacity: 0.8;
+  color: var(--ink-muted);
+  border: 0;
 }
 .sidenav-update-action:hover,
-.sidenav-update-dismiss:hover {
+.sidenav-update-dismiss:hover,
+.sidenav-update-secondary:hover {
   transform: translateY(-1px);
+}
+.sidenav-update-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 8px;
+}
+.sidenav-update-actions > button:only-child {
+  grid-column: 1 / -1;
+}
+.sidenav-update-secondary {
+  padding: 0 10px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 750;
+  gap: 5px;
+}
+.sidenav-update-chevron {
+  flex: 0 0 auto;
+  transition: transform 0.16s ease;
+}
+.sidenav-update-chevron[data-open="true"] {
+  transform: rotate(180deg);
+}
+.sidenav-update-changelog {
+  padding: 9px 10px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--paper) 90%, var(--paper-2));
+  color: var(--ink);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.sidenav-update-changelog > strong {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+.sidenav-update-changelog ul {
+  margin: 0;
+  padding-inline-start: 16px;
+}
+.sidenav-update-changelog p {
+  margin: 0;
+  color: var(--ink-muted);
+}
+.sidenav-update-changelog li + li {
+  margin-top: 3px;
+}
+.sidenav-update-release-link {
+  min-height: 44px;
+  margin: 7px -4px -3px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  text-align: left;
+}
+.sidenav-update-release-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.sidenav-update-action:focus-visible,
+.sidenav-update-dismiss:focus-visible,
+.sidenav-update-secondary:focus-visible,
+.sidenav-update-release-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@container (max-width: 218px) {
+  .sidenav-update-head {
+    grid-template-columns: minmax(0, 1fr) 44px;
+  }
+  .sidenav-update-icon {
+    display: none;
+  }
+  .sidenav-update-actions {
+    grid-template-columns: 1fr;
+  }
+  .sidenav-update-actions > button {
+    width: 100%;
+    grid-column: 1;
+  }
 }
 .sidenav-account {
   min-width: 0;
@@ -8646,6 +8840,41 @@ button[data-toggle-state="on"] {
   background: var(--accent, #6b6e52);
   border-color: var(--accent, #6b6e52);
   color: #fff;
+}
+
+/* The detail rail can become narrower than the window because the app shell and
+   toolbox roster both remain visible. Keep the project action usable instead
+   of clipping its primary button off-screen. */
+@media (max-width: 1080px) {
+  .agent-detail-actionbar {
+    flex-wrap: wrap;
+    padding: 10px 16px !important;
+    gap: 8px !important;
+  }
+  .agent-detail-actionbar .project-attach-control {
+    flex: 1 0 100%;
+    width: 100%;
+  }
+  .agent-detail-actionbar .project-attach-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .agent-detail-actionbar .project-attach-control select {
+    flex: 1 1 auto;
+    min-width: 0 !important;
+    max-width: none !important;
+  }
+  .agent-detail-actionbar .project-attach-control button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
 }
 
 /* HubBorrowRoom — 허브 빌려쓰기 */

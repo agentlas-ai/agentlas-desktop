@@ -36,6 +36,7 @@ let fallbackState: UpdaterState = { status: "idle" };
 let startupRecovery: { targetVersion?: string; backupPath?: string } | null = null;
 const stateListeners = new Set<(state: UpdaterState) => void>();
 const OFFICIAL_DESKTOP_INSTALL_URL = "https://agentlas.cloud/desktop";
+const OFFICIAL_DESKTOP_RELEASES_URL = "https://github.com/agentlas-ai/agentlas-desktop-releases/releases";
 
 function updateConfigPath(): string {
   return path.join(process.resourcesPath, "app-update.yml");
@@ -419,6 +420,23 @@ export async function openManualDownload(): Promise<UpdaterActionResult> {
   }
   try {
     await shell.openExternal(OFFICIAL_DESKTOP_INSTALL_URL);
+    return { accepted: true, state };
+  } catch {
+    return { accepted: false, state };
+  }
+}
+
+/** Open the public, read-only release record without changing updater state. */
+export async function openReleaseNotes(version?: string): Promise<UpdaterActionResult> {
+  const state = controller?.getState() ?? fallbackState;
+  const safeVersion = typeof version === "string" && /^\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.-]+)?$/.test(version)
+    ? version
+    : null;
+  const url = safeVersion
+    ? `${OFFICIAL_DESKTOP_RELEASES_URL}/tag/v${encodeURIComponent(safeVersion)}`
+    : OFFICIAL_DESKTOP_RELEASES_URL;
+  try {
+    await shell.openExternal(url);
     return { accepted: true, state };
   } catch {
     return { accepted: false, state };

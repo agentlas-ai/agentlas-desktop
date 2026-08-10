@@ -35,7 +35,7 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged).
 
-export const ARCHITECTURE_VERSION = "1.6.0";
+export const ARCHITECTURE_VERSION = "1.7.1";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -660,6 +660,33 @@ decision). Cannot expand the project mission without explicit user approval.
 Keep outputs small: a policy/priority recommendation, a revalidation request, a
 sitemap update proposal, or a provisional-node decision.`;
 
+/**
+ * One 의 불변 신원 축. 작업공간 투영 id(`~/.agentlas/one/manifest.json` 의 `oneId`)와 구분한다 —
+ * 기억·경험 귀속은 여기 하나로만 한다(필수개정 5: agentId 불변).
+ */
+export const ONE_AGENT_SLUG = "agentlas-one";
+
+const ONE_AGENT_PROMPT = `# Agentlas One (Agentlas built-in)
+
+너는 채팅 어시스턴트가 아니라 오너 전속 개인 에이전트다. 세션·프로젝트·런타임을 넘어
+같은 정체성을 유지한다. 자기소개를 반복하지 않는다.
+
+## 일하는 법
+- 전문가가 필요하면 새로 고르기 전에 이미 묶인 로스터를 재사용한다. 채용은 가산이다.
+- "못 한다"고 말하기 전에 보유 수단(로컬 에이전트·오너 클라우드·Hub·플러그인)을 실제로 조회한다.
+  호출하지 않은 도구를 호출한 척하지 않는다.
+- 되돌리기 어려운 일(파일 삭제·발송·결제·공개) 직전에는 기억보다 실측을 우선한다.
+  확인이 안 되면 진행하지 말고 오너에게 묻는다.
+- 기억이 서로 모순되면 하나를 골라 단정하지 말고 충돌을 그대로 말한다.
+- 막히면 멈추지 말고 남은 수단을 순서대로 시도하고, 다 막히면 어디서 왜 막혔는지 기계 근거로 한 줄.
+
+## 기억
+durable 기억을 직접 쓰지 않는다. 관찰은 Memory Events 로 내고 런타임이 티켓으로 포장해
+큐레이터에 넘긴다. 증거 없는 fact/decision/procedure 는 hypothesis 다.
+
+## 경계
+허브·클라우드에 업로드되지 않는다. 오너의 원시 기억·자격증명·전사를 외부로 내보내지 않는다.`;
+
 export const BUILTIN_AGENTS: readonly BuiltinAgentDef[] = [
   {
     slug: GLOBAL_ORCHESTRATOR_SLUG,
@@ -726,6 +753,20 @@ export const BUILTIN_AGENTS: readonly BuiltinAgentDef[] = [
     visibility: "background",
     tone: "amber",
     systemPrompt: TASK_BIAS_PROMPT,
+  },
+  {
+    // 기획 202행: 개인 전용 단일 에이전트, 허브·클라우드 업로드 불가.
+    // 마켓 카드가 아니라 신원 행이다 — memory_entries/experience_packs 의 agent_id 가
+    // 가리킬 대상이 없어 One 만 기억·경험을 못 쌓고 있었다(실측: One 소유 0행).
+    slug: ONE_AGENT_SLUG,
+    name: "Agentlas One",
+    nameEn: "Agentlas One",
+    tagline: "오너 전속 개인 에이전트 — 전문가·도구·기억을 필요할 때만 꺼내 쓴다",
+    taglineEn: "Owner-bound personal agent that pulls in specialists, tools, and memory on demand",
+    role: "orchestrator",
+    visibility: "background",
+    tone: "green",
+    systemPrompt: ONE_AGENT_PROMPT,
   },
 ];
 

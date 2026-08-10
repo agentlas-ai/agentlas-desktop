@@ -36,6 +36,7 @@ import {
   getChat,
   getChatWorkingFolder,
   listChatMessages,
+  repairRootChatSurfaceController,
   setChatWorkingFolder,
 } from "../store/chats";
 import { getProject, listProjects } from "../store/projects";
@@ -1248,7 +1249,8 @@ export async function runMcpInvocation(
         : undefined,
     };
   }
-  const chat = getChat(req.chatId);
+  const storedChat = getChat(req.chatId);
+  const chat = storedChat ? repairRootChatSurfaceController(storedChat) : null;
   if (!chat) {
     sink({ kind: "error", error: { code: "no-chat", message: tStatus(locale, "errChatNotFound") } });
     return earlyResult();
@@ -1912,6 +1914,8 @@ export async function runMcpInvocation(
         workingFolder,
         toolMode: req.toolMode,
         hubMode: req.hubMode,
+        // 같은 채팅의 후속 턴이면 지난 선택과 접속 확인을 재사용한다(auto-select 메모).
+        conversationId: req.chatId,
       };
       let selectedContext = await autoSelectMcpTools(autoSelectInput);
       // ── 실행 전 API 키 요청 게이트 (대화형 렌더러 런 전용) ──────────────
@@ -1928,7 +1932,8 @@ export async function runMcpInvocation(
         context: selectedContext,
         sink,
         signal,
-        reselect: () => autoSelectMcpTools(autoSelectInput),
+        // 키가 저장된 뒤의 재선택은 세상이 바뀐 시점이다 — 메모를 버리고 처음부터 다시 고른다.
+        reselect: () => autoSelectMcpTools({ ...autoSelectInput, bypassSelectionMemo: true }),
       });
       selectedContext = keyGate.context;
       if (keyGate.outcome !== "skipped") {
@@ -2782,7 +2787,7 @@ export async function runMcpInvocation(
     }
     if (project?.agentPool.length) {
       const userFacingPool = project.agentPool.filter((member) => {
-        if (member.source !== "local") return true;
+        if (member.entityKind === "team" || !member.agentId) return true;
         const installed = getAgentById(member.agentId);
         // Background HQ cells are implementation details of their controller,
         // not independently callable project members.
@@ -2792,15 +2797,16 @@ export async function runMcpInvocation(
           && installed.systemPrompt.trim().length > 0
         );
       });
-      const pool = userFacingPool.map((member, index) => {
-        const installed = member.source === "local" ? getAgentById(member.agentId) : null;
-        const label = installed?.name || member.nameSnapshot;
-        return `${index + 1}. ${label} (${index === 0 ? "controller" : "preferred"})`;
+      const pool = userFacingPool.map((member) => {
+        const installed = member.entityKind === "agent" && member.agentId ? getAgentById(member.agentId) : null;
+        const firm = member.entityKind === "team" && member.firmId ? getFirm(member.firmId) : null;
+        const label = installed?.name || firm?.name || member.nameSnapshot;
+        return `- ${label} [${member.entityKind}; ${member.source}; ${member.releaseId ?? "local"}]`;
       }).join("\n");
       if (pool) {
-        systemPrompt = `${systemPrompt}\n\n## Project controller and preferred team\n${pool}\n` +
-          `You are the project controller and own decomposition, staffing, execution, and verification. ` +
-          `Treat the saved order as a preference, not a requirement to run every member. Use the project team first. ` +
+        systemPrompt = `${systemPrompt}\n\n## Project tool pool\n${pool}\n` +
+          `You are the task orchestrator for this project and own decomposition, staffing, execution, and verification. ` +
+          `The saved rows are unordered reusable tools, not session owners or a mandatory chain. Use suitable project tools first. ` +
           `When a WorkOrder has a genuine capability or tool gap, use the available Agentlas Workforce/Hephaestus tools ` +
           `to recruit the minimum suitable role from Network (Local + owner Cloud + public Hub). ` +
           `Any recruited worker is scoped to that WorkOrder and must not mutate the saved project team. ` +

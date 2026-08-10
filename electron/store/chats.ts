@@ -223,6 +223,76 @@ export function getChat(id: string): Chat | null {
   return row ? toChat(row) : null;
 }
 
+/**
+ * Repair legacy root chats whose controller came from the other surface or a
+ * reusable project tool. One is an owner-bound personal surface; project work
+ * is controlled by the built-in project orchestrator.
+ *
+ * This invocation-time guard complements the schema migration so an already
+ * open app cannot start another cross-surface turn before its next restart.
+ * Rebinding also evicts the old provider session so neither surface can resume
+ * a prompt/session created under the other controller identity.
+ */
+export function repairRootChatSurfaceController(chat: Chat): Chat {
+  if (chat.kind === "division") return chat;
+  const db = getDb();
+  const current = db
+    .prepare("SELECT slug FROM installed_agents WHERE id = ?")
+    .get(chat.agentId) as { slug?: string } | undefined;
+  const expectedSlug = chat.originSurface === "one"
+    ? "agentlas-one"
+    : chat.originSurface === "work" && chat.projectId
+      ? "agentlas-orchestrator"
+      : null;
+  if (!expectedSlug || (current?.slug === expectedSlug && !chat.firmId)) return chat;
+  const controller = db
+    .prepare("SELECT id FROM installed_agents WHERE slug = ? LIMIT 1")
+    .get(expectedSlug) as { id?: string } | undefined;
+  if (!controller?.id) return chat;
+  const changed = db.transaction(() => {
+    const result = db
+      .prepare(`UPDATE chats
+                   SET agent_id = ?, firm_id = NULL
+                 WHERE id = ? AND agent_id = ?`)
+      .run(controller.id, chat.id, chat.agentId);
+    if (result.changes > 0) {
+      db.prepare("DELETE FROM chat_runtime_sessions WHERE chat_id = ?").run(chat.id);
+    }
+    return result.changes;
+  })();
+  if (changed === 0) return getChat(chat.id) ?? chat;
+  evictRuntimeSessionsForChat(chat.id);
+  emitDesktopStoreChange({ entity: "chat", id: chat.id });
+  return getChat(chat.id) ?? chat;
+}
+
+/** @deprecated Use the two-way surface repair; kept for packaged callers/tests. */
+export function repairWorkProjectChatController(chat: Chat): Chat {
+  return repairRootChatSurfaceController(chat);
+}
+
+export function repairAllRootChatSurfaceControllers(): number {
+  const rows = getDb()
+    .prepare(`SELECT * FROM chats
+               WHERE COALESCE(kind, 'user') = 'user'
+                 AND (origin_surface = 'one' OR (origin_surface = 'work' AND project_id IS NOT NULL))`)
+    .all() as ChatRow[];
+  let repaired = 0;
+  for (const row of rows) {
+    const before = toChat(row);
+    const after = repairRootChatSurfaceController(before);
+    if (after.agentId !== before.agentId || after.firmId !== before.firmId) repaired += 1;
+  }
+  return repaired;
+}
+
+function defaultRootAgentId(originSurface: "one" | "work"): string | undefined {
+  const slug = originSurface === "one" ? "agentlas-one" : "agentlas-orchestrator";
+  return (getDb()
+    .prepare("SELECT id FROM installed_agents WHERE slug = ? LIMIT 1")
+    .get(slug) as { id?: string } | undefined)?.id;
+}
+
 export function createChat(input: {
   agentId?: string;
   firmId?: string | null;
@@ -240,17 +310,23 @@ export function createChat(input: {
   originSurface?: "one" | "work";
 }): Chat {
   const ko = currentUiLocale() === "ko";
+  const originSurface = input.originSurface === "one" ? "one" : "work";
   let resolvedAgentId = input.agentId;
-  if (input.firmId && !resolvedAgentId) {
-    const firm = getFirm(input.firmId);
-    if (!firm) throw new Error(ko ? `회사 ${input.firmId}을 찾을 수 없습니다` : `Could not find firm ${input.firmId}`);
+  const resolvedFirmId = input.kind !== "division" && originSurface === "work" && input.projectId
+    ? null
+    : input.firmId ?? null;
+  // Root surfaces own their controller identity. Project pool members and One
+  // specialists enter as reusable turn tools, never as the root chat owner.
+  if (input.kind !== "division" && (originSurface === "one" || input.projectId)) {
+    resolvedAgentId = defaultRootAgentId(originSurface) ?? resolvedAgentId;
+  }
+  if (resolvedFirmId && !resolvedAgentId) {
+    const firm = getFirm(resolvedFirmId);
+    if (!firm) throw new Error(ko ? `회사 ${resolvedFirmId}을 찾을 수 없습니다` : `Could not find firm ${resolvedFirmId}`);
     resolvedAgentId = firm.ceoAgentId;
   }
   if (!resolvedAgentId) {
-    const fallback = getDb()
-      .prepare("SELECT id FROM installed_agents WHERE slug = 'agentlas-orchestrator' LIMIT 1")
-      .get() as { id: string } | undefined;
-    resolvedAgentId = fallback?.id;
+    resolvedAgentId = defaultRootAgentId(originSurface);
   }
   if (!resolvedAgentId) {
     throw new Error(ko ? "새 채팅에는 agentId 또는 firmId가 필요합니다" : "A new chat needs an agentId or firmId");
@@ -277,7 +353,7 @@ export function createChat(input: {
     .run(
       id,
       input.projectId ?? null,
-      input.firmId ?? null,
+      resolvedFirmId,
       resolvedAgentId,
       input.title?.trim() ?? "",
       input.kind ?? "user",
@@ -285,7 +361,7 @@ export function createChat(input: {
       continuedWorkingFolder,
       now,
       now,
-      input.originSurface === "one" ? "one" : "work",
+      originSurface,
     );
   if (input.projectId) touchProject(input.projectId);
   if (input.taskMode !== "conversation") ensureCanonicalTaskForChat(id);

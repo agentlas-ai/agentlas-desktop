@@ -68,6 +68,7 @@ import { backfillEntityKinds } from "./mcp/registry";
 import { reconcileLocalRouteDefinitionHashes } from "./agents/routes";
 import { reconcileExistingCuratedMemoryCandidates } from "./experience/store";
 import { seedBuiltinAgents } from "./architecture/seed";
+import { repairAllRootChatSurfaceControllers } from "./store/chats";
 import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
 import { startHephaestusRuntimeAutoUpdate } from "./hephaestus/engine";
 import { scrubLegacyOpenCrabMcpConfig } from "./mcp-tools/mcp-config";
@@ -923,6 +924,11 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error("[architecture] seedBuiltinAgents failed:", err);
   }
+  try {
+    repairAllRootChatSurfaceControllers();
+  } catch (err) {
+    console.error("[architecture] surface controller repair failed:", err);
+  }
   traceStartup("builtins-ready");
   // single/team 종류 backfill — entity_kind가 빈 기존 설치 행을 route.kind/이름 표식으로 한 번 채운다.
   // 이래야 Hub로 설치된 팀이 "개별 에이전트"로 오분류되지 않는다.
@@ -1031,6 +1037,20 @@ app.whenReady().then(async () => {
     startHephaestusSync();
   } catch (err) {
     console.error("[hephaestus-sync] start failed:", err);
+  }
+  // One 은 Desktop 밖(Claude Code·터미널 등)에서도 돌기 때문에 기억의 권위가 파일 계층에 있다.
+  // 부팅 때 그 서랍의 durable 을 memory_entries 로 반입한다. 멱등이며 실패해도 부팅을 막지 않는다.
+  try {
+    const { importOneDurableMemory } = await import("./memory/one-import");
+    const outcome = importOneDurableMemory();
+    if (outcome.imported > 0 || outcome.failed > 0) {
+      console.log(
+        `[one-import] scanned=${outcome.scanned} imported=${outcome.imported} ` +
+        `skipped=${outcome.skipped} failed=${outcome.failed}`,
+      );
+    }
+  } catch (err) {
+    console.error("[one-import] failed:", err);
   }
   // Warm the account-isolated Hub bookmark cache after auth restore. This is
   // intentionally non-blocking; AppShell also triggers/subscribes on mount so

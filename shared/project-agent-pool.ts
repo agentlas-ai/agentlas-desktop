@@ -13,7 +13,15 @@ import type { ProjectAgentPoolMember } from "./types";
 export const PROJECT_AGENT_POOL_MAX = 32;
 
 export function projectPoolMemberKey(member: ProjectAgentPoolMember): string {
-  return `${member.source}:${member.agentId}:${member.releaseId ?? ""}`;
+  return `${member.source}:${member.entityKind}:${member.targetId}:${member.releaseId ?? ""}`;
+}
+
+export function projectPoolMemberInstalledAgentId(member: ProjectAgentPoolMember): string | null {
+  return member.entityKind === "agent" ? member.agentId : member.controllerAgentId;
+}
+
+export function projectPoolMemberLocalFirmId(member: ProjectAgentPoolMember): string | null {
+  return member.entityKind === "team" && member.source === "local" ? member.firmId : null;
 }
 
 /** The exact installed-agent fields staffing depends on. */

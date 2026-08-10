@@ -16,7 +16,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 91;
+const SCHEMA_VERSION = 92;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -4028,6 +4028,65 @@ export function initStore(options: StoreInitOptions = {}): void {
     }
   }
 
+  // v92: One과 Work의 실행 신원을 분리한다.
+  //
+  // 프로젝트 task는 프로젝트가 작업 주체이고 built-in orchestrator가 컨트롤러다.
+  // One 대화는 반대로 owner-bound One 신원이 컨트롤러다. 과거에는 두 표면 모두
+  // 임의 agent_id/firm_id를 받을 수 있어 상태줄뿐 아니라 실제 시스템 프롬프트·기억
+  // 귀속·provider resume 세션까지 겹쳤다. 표시 문구만 바꾸지 않고 양쪽 원장을
+  // 정규화하고, 신원이 바뀐 CLI resume 포인터도 함께 폐기한다.
+  if (tableExists(_db, "chats") && tableExists(_db, "installed_agents")) {
+    const db = _db;
+    const chatColumns = new Set(schemaColumns(db, "chats").map((column) => column.name));
+    const canRepairSurfaceIdentity = chatColumns.has("origin_surface")
+      && chatColumns.has("project_id")
+      && chatColumns.has("firm_id")
+      && chatColumns.has("kind");
+    if (canRepairSurfaceIdentity) {
+      db.transaction(() => {
+        if (tableExists(db, "chat_runtime_sessions")) {
+          db.exec(`
+            DELETE FROM chat_runtime_sessions
+             WHERE chat_id IN (
+               SELECT c.id
+                 FROM chats c
+                WHERE COALESCE(c.kind, 'user') = 'user'
+                  AND (
+                    (c.origin_surface = 'work' AND c.project_id IS NOT NULL
+                      AND EXISTS (SELECT 1 FROM installed_agents WHERE slug = 'agentlas-orchestrator') AND (
+                      c.agent_id NOT IN (SELECT id FROM installed_agents WHERE slug = 'agentlas-orchestrator')
+                      OR c.firm_id IS NOT NULL
+                    ))
+                    OR
+                    (c.origin_surface = 'one'
+                      AND EXISTS (SELECT 1 FROM installed_agents WHERE slug = 'agentlas-one') AND (
+                      c.agent_id NOT IN (SELECT id FROM installed_agents WHERE slug = 'agentlas-one')
+                      OR c.firm_id IS NOT NULL
+                    ))
+                  )
+             )
+          `);
+        }
+        db.exec(`
+          UPDATE chats
+             SET agent_id = (SELECT id FROM installed_agents WHERE slug = 'agentlas-orchestrator' LIMIT 1),
+                 firm_id = NULL
+           WHERE origin_surface = 'work'
+             AND project_id IS NOT NULL
+             AND COALESCE(kind, 'user') = 'user'
+             AND EXISTS (SELECT 1 FROM installed_agents WHERE slug = 'agentlas-orchestrator');
+
+          UPDATE chats
+             SET agent_id = (SELECT id FROM installed_agents WHERE slug = 'agentlas-one' LIMIT 1),
+                 firm_id = NULL
+           WHERE origin_surface = 'one'
+             AND COALESCE(kind, 'user') = 'user'
+             AND EXISTS (SELECT 1 FROM installed_agents WHERE slug = 'agentlas-one');
+        `);
+      })();
+    }
+  }
+
   /*
    * ★사다리 뒤 백스톱 — **버전과 무관하게** 있어야 할 칸이 있는지 매 부팅 확인한다.
    *
@@ -4190,6 +4249,27 @@ export function initStore(options: StoreInitOptions = {}): void {
                   ON experience_packs(agent_id, project_scope_key, environment_key, base_core_hash)`);
     }
   }
+
+  // ★판정 영수증 영속 — 세션 메모리 LRU 하나뿐이라 앱을 껐다 켜면 같은 질문을 모델에게
+  //   처음부터 다시 물었다(실측: 대화 한 턴에 판정 2회, 재시작 시 전부 미스).
+  //   판정은 같은 입력에 같은 답이어야 하므로 캐시가 아니라 **기록**이다.
+  //   사다리 중간이 아니라 끝에 둔다 — 이미 지나간 단계에 끼우면 기존 설치가 못 받는다.
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS judgment_verdicts (
+      kind          TEXT NOT NULL,
+      signature     TEXT NOT NULL,
+      verdict       TEXT NOT NULL,
+      confidence    REAL NOT NULL DEFAULT 0,
+      reason        TEXT NOT NULL DEFAULT '',
+      created_at    TEXT NOT NULL,
+      last_hit_at   TEXT NOT NULL,
+      hits          INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (kind, signature)
+    )
+  `);
+  _db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_judgment_verdicts_recency ON judgment_verdicts(last_hit_at)",
+  );
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
   } catch (error) {

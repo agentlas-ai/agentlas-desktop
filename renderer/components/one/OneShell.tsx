@@ -452,6 +452,7 @@ export function OneShell() {
   const [conversation, setConversation] = useState<Chat | null>(null);
   const [activeChatIds, setActiveChatIds] = useState<string[]>([]);
   const [confirmations, setConfirmations] = useState<PendingConfirmation[]>([]);
+  const [dismissedDecisionId, setDismissedDecisionId] = useState<string | null>(null);
   const [committedAnswers, setCommittedAnswers] = useState<CommittedQuestionAnswer[]>([]);
   const [updaterState, setUpdaterState] = useState<UpdaterState | null>(null);
   const [mobileStatus, setMobileStatus] = useState<MobileBridgeRuntimeStatus | null>(null);
@@ -2068,6 +2069,9 @@ export function OneShell() {
   const selectedConfirmation = activeThreadChatId
     ? actionableConfirmations.find((item) => item.chatId === activeThreadChatId) ?? null
     : null;
+  const visibleSelectedConfirmation = selectedConfirmation?.sourceMessageId === dismissedDecisionId
+    ? null
+    : selectedConfirmation;
   const selectedSuggestion = useMemo(() => {
     if (!selected || !oneSuggestions || selected.canonicalStatus !== "completed") return null;
     return oneSuggestions.suggestions.find((suggestion) =>
@@ -2228,6 +2232,25 @@ export function OneShell() {
       { displayUserMessage: false },
     );
   }, [busy, conversation?.id, openWork, router, selected, startRun]);
+  const acceptSelectedResult = useCallback(async () => {
+    const api = ipc();
+    if (
+      !api
+      || !selected
+      || selected.canonicalStatus !== "partial"
+      || !selected.chatId
+      || !receipt
+      || receipt.status !== "completed"
+      || receipt.chatId !== selected.chatId
+    ) throw new Error("Result acceptance is no longer available");
+    await api.tasks.acceptResult({
+      taskId: selected.taskId,
+      expectedRunId: receipt.runId,
+      expectedVersion: selected.canonicalVersion,
+    });
+    window.dispatchEvent(new CustomEvent("agentlas:tasks-changed"));
+    await refreshAll();
+  }, [receipt, refreshAll, selected]);
   const openActivationWork = useCallback(async () => {
     const api = ipc();
     let current = oneActivationState;
@@ -2956,6 +2979,7 @@ export function OneShell() {
                       canOpenWork={canOpenSelectedInWork}
                       onSemanticAction={handleOneSemanticAction}
                       onRetryUnfinished={retryUnfinished}
+                      onAcceptResult={acceptSelectedResult}
                       autoRecovery={autoRecovery}
                       valueClosure={selectedValueClosure}
                       experienceReuse={selectedExperienceReuse}
@@ -3250,16 +3274,26 @@ export function OneShell() {
               </div>
             </section>
           )}
+          {selectedConfirmation && !visibleSelectedConfirmation && (
+            <button
+              type="button"
+              className={styles.decisionResumeButton}
+              onClick={() => setDismissedDecisionId(null)}
+            >
+              {tFor(appLocale, "one.shell.decision.reopen")}
+            </button>
+          )}
         </main>
-        {activeThreadChatId && selectedConfirmation && (
+        {activeThreadChatId && visibleSelectedConfirmation && (
           <DecisionBottomSheet
-            confirmation={selectedConfirmation}
+            confirmation={visibleSelectedConfirmation}
             taskId={selected?.taskId ?? null}
             locale={appLocale}
             disabled={busy || selectedReadOnly}
             onAnswer={answerConfirmation}
             onClarify={clarifyConfirmation}
             onSnooze={snoozeConfirmation}
+            onDismiss={() => setDismissedDecisionId(visibleSelectedConfirmation.sourceMessageId)}
           />
         )}
       </div>
@@ -3417,7 +3451,7 @@ function decisionFieldValue(field: OneDecisionField, locale: "ko" | "en"): strin
     : tFor(locale, "one.shell.decision.not_stated");
 }
 
-function DecisionBottomSheet({ confirmation, taskId, locale, disabled, onAnswer, onClarify, onSnooze }: {
+function DecisionBottomSheet({ confirmation, taskId, locale, disabled, onAnswer, onClarify, onSnooze, onDismiss }: {
   confirmation: PendingConfirmation;
   taskId: string | null;
   locale: "ko" | "en";
@@ -3425,6 +3459,7 @@ function DecisionBottomSheet({ confirmation, taskId, locale, disabled, onAnswer,
   onAnswer: (confirmation: PendingConfirmation, label: string, shouldStart?: boolean) => void;
   onClarify: (confirmation: PendingConfirmation) => void;
   onSnooze: (confirmation: PendingConfirmation) => void;
+  onDismiss: () => void;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
 
@@ -3465,6 +3500,11 @@ function DecisionBottomSheet({ confirmation, taskId, locale, disabled, onAnswer,
   }, [confirmation.sourceMessageId]);
 
   const trapFocus = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onDismiss();
+      return;
+    }
     if (event.key !== "Tab") return;
     const root = dialogRef.current;
     if (!root) return;
@@ -3488,11 +3528,16 @@ function DecisionBottomSheet({ confirmation, taskId, locale, disabled, onAnswer,
       event.preventDefault();
       first.focus();
     }
-  }, []);
+  }, [onDismiss]);
 
   return (
     <div className={styles.decisionSheetLayer} role="presentation">
-      <div className={styles.decisionSheetBackdrop} aria-hidden="true" />
+      <button
+        type="button"
+        className={styles.decisionSheetBackdrop}
+        aria-label={tFor(locale, "one.shell.decision.close")}
+        onClick={onDismiss}
+      />
       <div
         ref={dialogRef}
         className={styles.decisionSheet}
@@ -3503,6 +3548,9 @@ function DecisionBottomSheet({ confirmation, taskId, locale, disabled, onAnswer,
         onKeyDown={trapFocus}
       >
         <div className={styles.decisionSheetHandle} aria-hidden="true" />
+        <button type="button" className={styles.decisionDismissButton} onClick={onDismiss}>
+          {tFor(locale, "one.shell.decision.close")}
+        </button>
         <DecisionCard
           confirmation={confirmation}
           taskId={taskId}
@@ -3543,14 +3591,22 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onClar
   const rejectLabel = decision.controls.reject.source === "explicit_option"
     ? decision.controls.reject.reply
     : tFor(locale, "one.shell.decision.reject_default");
-  const fields: Array<[string, OneDecisionField]> = [
-    [tFor(locale, "one.shell.decision.field.target"), decision.target],
-    [tFor(locale, "one.shell.decision.field.action"), decision.action],
-    [tFor(locale, "one.shell.decision.field.impact"), decision.impact],
+  const rejectReply = decision.controls.reject.source === "explicit_option"
+    ? decision.controls.reject.reply
+    : rejectLabel;
+  const rejectOption = decision.options.find((option) => option.disposition === "reject");
+  const hasModifyOption = decision.options.some((option) => option.disposition === "modify");
+  const candidateSupportingFields: Array<[string, OneDecisionField]> = [
     [tFor(locale, "one.shell.decision.field.cost"), decision.cost],
     [tFor(locale, "one.shell.decision.field.reversibility"), decision.reversibility],
     [tFor(locale, "one.shell.decision.field.deadline"), decision.deadline],
   ];
+  if (decision.target.source !== "header" && decision.target.status === "stated") {
+    candidateSupportingFields.unshift([tFor(locale, "one.shell.decision.field.target"), decision.target]);
+  }
+  const supportingFields = candidateSupportingFields.filter(([, field]) => (
+    field.status === "stated" && Boolean(field.value)
+  ));
   const lightweightChoice = riskRank === 0 && !approvalBlocked && !confirmation.multiSelect;
 
   if (lightweightChoice) {
@@ -3583,7 +3639,7 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onClar
             </button>
           ))}
           <button type="button" className={styles.decisionButton} disabled={disabled} onClick={() => onSnooze(confirmation)}>
-            {tFor(locale, "one.shell.common.later")}
+            {tFor(locale, "one.shell.decision.remind_24h")}
           </button>
         </div>
         <p className={styles.decisionHint}>{tFor(locale, "one.shell.decision.choice_hint")}</p>
@@ -3597,21 +3653,27 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onClar
           <p className={styles.decisionKicker}>{tFor(locale, "one.shell.decision.kicker_decision")}</p>
           <p id={`${confirmation.sourceMessageId}-decision-title`} className={styles.decisionTitle}>{decision.target.source === "header" && decision.target.value ? decision.target.value : tFor(locale, "one.shell.decision.review_next_action")}</p>
         </div>
-        <span className={styles.riskBadge}>{tFor(locale, "one.shell.decision.review_before_continuing")}</span>
       </div>
 
-      <dl className={styles.decisionFacts}>
-        {fields.map(([label, field]) => (
-          <div key={label}>
-            <dt>{label}</dt>
-            <dd>{decisionFieldValue(field, locale)}</dd>
-          </div>
-        ))}
-      </dl>
+      {decision.action.value && (
+        <section className={styles.decisionContext} aria-labelledby={`${confirmation.sourceMessageId}-decision-context`}>
+          <p id={`${confirmation.sourceMessageId}-decision-context`} className={styles.decisionSectionLabel}>
+            {tFor(locale, "one.shell.decision.current_situation")}
+          </p>
+          <p>{decision.action.value}</p>
+        </section>
+      )}
 
-      <p className={styles.decisionEvidence}>
-        {tFor(locale, "one.shell.decision.evidence", { time: formatTimestamp(decision.createdAt, locale) })}
-      </p>
+      {supportingFields.length > 0 && (
+        <dl className={styles.decisionMetadata}>
+          {supportingFields.map(([label, field]) => (
+            <div key={label}>
+              <dt>{label}</dt>
+              <dd>{decisionFieldValue(field, locale)}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
 
       {approvalBlocked && (
         <div className={styles.decisionGuard} role="status">
@@ -3625,54 +3687,81 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onClar
         </div>
       )}
 
-      <div className={styles.decisionOptions}>
-        {confirmation.multiSelect && !approvalBlocked ? (
-          <>
-            <div className={styles.decisionMultiOptions} role="group" aria-label={tFor(locale, "one.shell.decision.multi_select")}>
-              {directOptions.map((option) => {
-                const selected = multiSelection.includes(option.index);
-                return (
-                  <button
-                    key={`${option.index}:${option.label}`}
-                    type="button"
-                    className={styles.decisionMultiOption}
-                    aria-pressed={selected}
-                    disabled={disabled}
-                    title={option.description ?? undefined}
-                    onClick={() => setMultiSelection((current) => selected
-                      ? current.filter((index) => index !== option.index)
-                      : [...current, option.index])}
-                  >
-                    <span aria-hidden="true">{selected ? "✓" : ""}</span>{option.label}
-                  </button>
-                );
-              })}
-            </div>
-            <button
-              type="button"
-              className={styles.decisionPrimaryButton}
-              disabled={disabled || selectedMultiLabels.length === 0}
-              onClick={() => onAnswer(confirmation, selectedMultiLabels.join(" · "))}
-            >
-              {tFor(locale, "one.shell.decision.confirm_selection")}
-            </button>
-          </>
-        ) : directOptions.map((option) => (
+      <div className={styles.decisionActionGroup}>
+        <p className={styles.decisionSectionLabel}>{tFor(locale, "one.shell.decision.choose_action")}</p>
+        <div className={styles.decisionOptions}>
+          {confirmation.multiSelect && !approvalBlocked ? (
+            <>
+              <div className={styles.decisionMultiOptions} role="group" aria-label={tFor(locale, "one.shell.decision.multi_select")}>
+                {directOptions.map((option) => {
+                  const selected = multiSelection.includes(option.index);
+                  return (
+                    <button
+                      key={`${option.index}:${option.label}`}
+                      type="button"
+                      className={styles.decisionMultiOption}
+                      aria-pressed={selected}
+                      disabled={disabled}
+                      title={option.description ?? undefined}
+                      onClick={() => setMultiSelection((current) => selected
+                        ? current.filter((index) => index !== option.index)
+                        : [...current, option.index])}
+                    >
+                      <span aria-hidden="true">{selected ? "✓" : ""}</span>{option.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <button
+                type="button"
+                className={styles.decisionPrimaryButton}
+                disabled={disabled || selectedMultiLabels.length === 0}
+                onClick={() => onAnswer(confirmation, selectedMultiLabels.join(" · "))}
+              >
+                {tFor(locale, "one.shell.decision.confirm_selection_and_run")}
+              </button>
+            </>
+          ) : directOptions.map((option) => (
             <button
               key={`${option.index}:${option.label}`}
               type="button"
               className={styles.decisionPrimaryButton}
               disabled={disabled}
-              title={option.description ?? undefined}
               onClick={() => onAnswer(confirmation, option.label)}
             >
-              {option.label}
+              <span>{riskRank >= 2
+                ? tFor(locale, "one.shell.decision.approve_and_run", { action: option.label })
+                : option.label}</span>
+              {option.description && <small>{option.description}</small>}
             </button>
           ))}
-        <button type="button" className={styles.decisionRejectButton} disabled={disabled} onClick={() => onAnswer(confirmation, decision.controls.reject.reply, false)}>{rejectLabel}</button>
-        <button type="button" className={styles.decisionButton} disabled={disabled} onClick={() => onClarify(confirmation)}>{tFor(locale, "one.shell.decision.change_scope")}</button>
-        <button type="button" className={styles.decisionButton} disabled={disabled} onClick={() => onSnooze(confirmation)}>{tFor(locale, "one.shell.decision.remind_24h")}</button>
+        </div>
+        <div className={styles.decisionSecondaryActions}>
+          <button type="button" className={styles.decisionRejectButton} disabled={disabled} onClick={() => onAnswer(confirmation, rejectReply, false)}>
+            <span>{rejectLabel}</span>
+            {rejectOption?.description && <small>{rejectOption.description}</small>}
+          </button>
+          {(approvalBlocked || hasModifyOption) && (
+            <button type="button" className={styles.decisionButton} disabled={disabled} onClick={() => onClarify(confirmation)}>
+              {tFor(locale, approvalBlocked ? "one.shell.decision.change_scope" : "one.shell.decision.adjust_conditions")}
+            </button>
+          )}
+          <button
+            type="button"
+            className={styles.decisionButton}
+            disabled={disabled}
+            title={tFor(locale, "one.shell.decision.remind_24h")}
+            onClick={() => onSnooze(confirmation)}
+          >
+            {tFor(locale, "one.shell.decision.remind_24h")}
+          </button>
+        </div>
       </div>
+
+      <details className={styles.decisionEvidence}>
+        <summary>{tFor(locale, "one.shell.decision.evidence_summary")}</summary>
+        <p>{tFor(locale, "one.shell.decision.evidence", { time: formatTimestamp(decision.createdAt, locale) })}</p>
+      </details>
       <p className={styles.decisionHint}>{decisionRejectCopy(locale)}</p>
     </section>
   );

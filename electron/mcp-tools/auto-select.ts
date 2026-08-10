@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import { resolveMcpNeeds, type McpNeedCandidate, type ResolvedMcpNeeds } from "./need-resolver";
 import os from "node:os";
 import path from "node:path";
@@ -175,6 +176,76 @@ function hubListingDescription(listing: MarketplaceListing): string {
   );
 }
 
+/**
+ * 명시적으로 초기화된 프로젝트 폴더인가. `.agentlas` 존재가 그 표식이고, 터미널의 펜스 적용도
+ * 같은 기준을 쓴다(임의 cwd 에 스캐폴딩을 만들지 않는다는 계약과 동일선).
+ * 판정 불가(경로 없음/접근 불가)는 **프로젝트가 아님**으로 본다 — 좁히기는 확실할 때만 한다.
+ */
+// ── ④ 후속 턴 재사용 (per-conversation selection memo) ─────────────────────
+// 같은 대화 안에서 도구 구성이 바뀔 이유는 거의 없는데, 이 선택기는 매 턴
+//   ① 판정 2회(LLM) ② 고른 서버 **최대 10개를 새로 띄워 접속 확인**
+// 을 전부 다시 했다. 실제 자원을 먹는 쪽은 ②다(매번 프로세스 spawn).
+//
+// 두 단계로 아낀다. 어느 쪽도 "의미"로 판단하지 않는다 — 구조가 같을 때만 재사용한다.
+//   1단계: 대화·모드·설치목록·과제문 서명이 **전부 같으면** 지난 결과를 그대로 돌려준다.
+//   2단계: 서명이 달라 다시 판정하더라도, 이 대화에서 방금 접속에 성공한 서버는 다시 띄우지 않는다.
+//          실패한 서버는 캐시하지 않는다 — 사용자가 바로 그걸 고치는 중일 수 있다.
+const SELECTION_MEMO_TTL_MS = 5 * 60_000;
+const SELECTION_MEMO_MAX = 40;
+
+interface SelectionMemoEntry {
+  context: AutoSelectedMcpContext;
+  at: number;
+}
+
+const selectionMemo = new Map<string, SelectionMemoEntry>();
+/** key = `${structuralKey}\u0000${serverId}` → 마지막 접속 성공 시각 */
+const probeMemo = new Map<string, number>();
+
+/** 메모는 여러 턴에 걸쳐 살아 있다 — 호출부가 만진 흔적이 다음 턴으로 새면 안 된다. */
+function cloneContext(context: AutoSelectedMcpContext): AutoSelectedMcpContext {
+  return {
+    ...context,
+    tools: context.tools.map((tool) => ({ ...tool, missingEnv: [...tool.missingEnv] })),
+    localInventory: [...context.localInventory],
+    hubPlugins: context.hubPlugins.map((plugin) => ({ ...plugin })),
+    ...(context.pendingApprovalTools ? { pendingApprovalTools: [...context.pendingApprovalTools] } : {}),
+  };
+}
+
+function shortHash(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
+
+function memoSet<V>(store: Map<string, V>, key: string, value: V): void {
+  store.delete(key);
+  store.set(key, value);
+  while (store.size > SELECTION_MEMO_MAX) {
+    const oldest = store.keys().next().value;
+    if (oldest === undefined) break;
+    store.delete(oldest);
+  }
+}
+
+/**
+ * 자격 증명이 새로 저장되면 세상이 바뀐다 — 그때는 아무 메모도 믿으면 안 된다.
+ * (키 요청 시트가 값을 받은 뒤 부르는 reselect 경로가 이걸 통과한다.)
+ */
+export function invalidateMcpSelectionMemo(): void {
+  selectionMemo.clear();
+  probeMemo.clear();
+}
+
+function isExplicitProjectFolder(workingFolder?: string | null): boolean {
+  const folder = typeof workingFolder === "string" ? workingFolder.trim() : "";
+  if (!folder) return false;
+  try {
+    return fs.existsSync(path.join(folder, ".agentlas"));
+  } catch {
+    return false;
+  }
+}
+
 /** Fetch the Hub plugin inventory. NOTHING is scored or filtered by words here — the
  *  listings are handed to the resident judge as candidates and it names the ones the
  *  task actually needs. */
@@ -204,6 +275,10 @@ export async function autoSelectMcpTools(input: {
   workingFolder?: string | null;
   toolMode?: AutomationToolMode;
   hubMode?: AutomationHubMode;
+  /** 같은 채팅의 후속 턴을 알아보기 위한 대화 식별자. 없으면 재사용하지 않는다. */
+  conversationId?: string | null;
+  /** 자격 증명 입력 직후의 재선택 — 메모를 무시하고 처음부터 다시 고른다. */
+  bypassSelectionMemo?: boolean;
 }, injectedDeps: Partial<AutoSelectMcpDependencies> = {}): Promise<AutoSelectedMcpContext> {
   const deps: AutoSelectMcpDependencies = { ...DEFAULT_AUTO_SELECT_DEPS, ...injectedDeps };
   // The task as written, not lowercased and not tokenized — the resident judge reads it.
@@ -216,6 +291,31 @@ export async function autoSelectMcpTools(input: {
   // judged, not silently skipped. The verdict is cached, so the synchronous store writes that
   // resolve the same automation later read it too (see peekJudgment / judgedComputerUse).
   // Skipped only when the user already chose the mode by hand — nothing left to decide.
+  // 설치 목록 읽기는 로컬 DB 조회다 — 판정보다 앞에 두어야 메모 지문을 만들 수 있다.
+  let initialInstalledServers: InstalledMcpServer[] = [];
+  try {
+    initialInstalledServers = deps.listInstalledServers();
+  } catch {
+    initialInstalledServers = [];
+  }
+  const installedFingerprint = shortHash(
+    initialInstalledServers
+      .map((server) => `${server.id}|${server.catalogId ?? ""}|${server.enabled ? 1 : 0}`)
+      .sort()
+      .join("\n"),
+  );
+  if (input.bypassSelectionMemo) invalidateMcpSelectionMemo();
+  const conversationId = typeof input.conversationId === "string" ? input.conversationId.trim() : "";
+  const structuralKey = conversationId
+    ? [conversationId, input.toolMode ?? "auto", input.hubMode ?? "auto", installedFingerprint].join("\u0000")
+    : "";
+  const memoKey = structuralKey ? `${structuralKey}\u0000${shortHash(taskText)}` : "";
+  if (memoKey) {
+    const hit = selectionMemo.get(memoKey);
+    if (hit && Date.now() - hit.at < SELECTION_MEMO_TTL_MS) return cloneContext(hit.context);
+    if (hit) selectionMemo.delete(memoKey);
+  }
+
   const toolModeText = [input.agentName ?? "", input.userPrompt ?? "", input.workingFolder ?? ""].join("\n");
   if (input.toolMode !== "browser" && input.toolMode !== "computer-use" && toolModeText.trim()) {
     try {
@@ -241,12 +341,6 @@ export async function autoSelectMcpTools(input: {
     targetLabel: input.workingFolder,
     judged: judgedComputerUse,
   });
-  let initialInstalledServers: InstalledMcpServer[] = [];
-  try {
-    initialInstalledServers = deps.listInstalledServers();
-  } catch {
-    initialInstalledServers = [];
-  }
   const installed = new Set(
     initialInstalledServers
       .map((server) => server.catalogId)
@@ -260,7 +354,17 @@ export async function autoSelectMcpTools(input: {
   // remain strict and never receive this browser fallback.
   const allowAutomaticBrowserFallback = input.toolMode == null && effectiveToolMode === "computer-use";
 
-  const hubInventory = await fetchHubPluginInventory(hubAllowed);
+  // ── ① 프로젝트 우선 (project-first narrowing) ────────────────────────────
+  // 프로젝트를 여는 이유는 그 안에 이미 갖춰 둔 것을 먼저 쓰라는 뜻이다. 그런데 이 선택기는
+  // 프로젝트 턴에서도 Hub 카탈로그 전체(실측 140개)를 매 턴 판정기에 밀어 넣고 있었다.
+  //
+  // Hub 를 **잃는 것이 아니다**: `hephaestus-network` 는 항상 핀으로 붙어 있어서 모델이 정말
+  // 필요할 때 런타임에 해소한다(agentlas_resolve_plugins). 여기서 빼는 것은 "미리 판정하기"뿐이다.
+  // 그래서 프로젝트 턴에서는 Hub 인벤토리를 **가져오지도 않는다** — 5분 캐시가 비어 있을 때의
+  // 8초 대기까지 함께 사라진다.
+  const projectScoped = isExplicitProjectFolder(input.workingFolder);
+  const offerHubToJudge = hubAllowed && !projectScoped;
+  const hubInventory = await fetchHubPluginInventory(offerHubToJudge);
 
   // ── Pins: settings and explicit user choices. These are the ONLY tools that may be
   // attached without the resident judge, and none of them can raise a key prompt on its
@@ -350,6 +454,10 @@ export async function autoSelectMcpTools(input: {
       ? ""
       : "No connected model was available to decide which optional tools this task needs, so only explicitly configured tools were attached.",
     cappedHub > 0 ? `${cappedHub} further Hub plugins were not offered to the selector this run.` : "",
+    // 조용히 줄이지 않는다 — 왜 Hub 후보가 없는지 영수증에 남긴다.
+    projectScoped && hubAllowed
+      ? "Project-first: Hub plugins were not pre-judged this run because this is an initialized project folder. Hub stays reachable at runtime through hephaestus-network."
+      : "",
     needs.omitted.length > 0 ? `${needs.omitted.length} candidates exceeded the selector inventory cap.` : "",
   ]
     .filter(Boolean)
@@ -369,10 +477,16 @@ export async function autoSelectMcpTools(input: {
     .slice(0, 10);
 
   const resolved = await Promise.allSettled(picked.map(async (entry): Promise<AutoSelectedMcpTool> => {
-    // `required` is a host binding, never a selection outcome.
+    // `required` is a host binding, never a selection outcome — so it follows the mode the
+    // **user** chose, not the mode this run's judgment landed on.
+    //
+    // 이 구분은 이미 아래 mayRequestCredentials 에 있었지만 여기에는 없었다. 드러나지 않은
+    // 이유는 텍스트 판정으로 computer-use 가 되는 경로가 **한 번도 살아 있지 않았기 때문**이다
+    // (peekJudgment 가 judge() 와 다른 구분자로 키를 만들어 영구 미스였다 — 같은 커밋에서 수리).
+    // 그 경로가 살아나는 순간 정책이 고른 모드가 host binding 행세를 하게 된다.
     const required =
-      effectiveToolMode === "browser" && entry.id === "agentlas-browser" ||
-      effectiveToolMode === "computer-use" && entry.id === "cua-driver";
+      input.toolMode === "browser" && entry.id === "agentlas-browser" ||
+      input.toolMode === "computer-use" && entry.id === "cua-driver";
     const base = {
       id: entry.id,
       name: entry.nameEn || entry.name,
@@ -396,6 +510,14 @@ export async function autoSelectMcpTools(input: {
     }
     if (!server) return { ...base, installed: false, missingEnv: [], state: "server-unavailable" };
     if (!server.enabled) return { ...base, installed: false, missingEnv: [], state: "disabled" };
+    // 이 대화에서 방금 붙었던 서버는 다시 띄우지 않는다. **성공만** 기억한다.
+    const probeKey = structuralKey ? `${structuralKey}\u0000${server.id}` : "";
+    if (probeKey) {
+      const lastOk = probeMemo.get(probeKey);
+      if (lastOk !== undefined && Date.now() - lastOk < SELECTION_MEMO_TTL_MS) {
+        return { ...base, installed: true, missingEnv: [], state: "ready" };
+      }
+    }
     try {
       const status = await deps.testServerConnection(server);
       if (status.missingEnv.length > 0) {
@@ -405,6 +527,7 @@ export async function autoSelectMcpTools(input: {
     } catch {
       return { ...base, installed: false, missingEnv: [], state: "probe-failed" };
     }
+    if (probeKey) memoSet(probeMemo, probeKey, Date.now());
     return { ...base, installed: true, missingEnv: [], state: "ready" };
   }));
   const result: AutoSelectedMcpTool[] = resolved.map((item, index) => {
@@ -509,7 +632,7 @@ export async function autoSelectMcpTools(input: {
     pendingApprovalTools = [];
   }
 
-  return {
+  const context: AutoSelectedMcpContext = {
     tools: result,
     localInventory,
     localPluginCount: localInventory.length,
@@ -520,6 +643,9 @@ export async function autoSelectMcpTools(input: {
     ...(needsNote ? { needsNote } : {}),
     ...(hubInventory.hubPluginError ? { hubPluginError: hubInventory.hubPluginError } : {}),
   };
+  // 모델이 못 닿아 아무것도 못 정한 실행은 기억하지 않는다 — 그 침묵을 다음 턴까지 굳히면 안 된다.
+  if (memoKey && needs.decided) memoSet(selectionMemo, memoKey, { context: cloneContext(context), at: Date.now() });
+  return context;
 }
 
 export function buildMcpAutoSelectionPrompt(

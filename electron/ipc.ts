@@ -133,6 +133,7 @@ import {
 import { importLocalFolder } from "./agents/import-local";
 import { getDb } from "./store/db";
 import { getResolvedOrg } from "./store/org-spec";
+import { listInstalledAgentHubBindings } from "./ontology/hub-bindings";
 import { resolveTeamOrg, resolveAgentTeam } from "./agents/org-resolver";
 import { runMcpInvocation } from "./mcp/client";
 import {
@@ -235,6 +236,7 @@ import {
   checkSafely as updaterCheck,
   getUpdaterState,
   openManualDownload as updaterOpenManualDownload,
+  openReleaseNotes as updaterOpenReleaseNotes,
   quitAndInstall as updaterInstall,
   revealRecoveryBackup as updaterRevealRecoveryBackup,
 } from "./updater";
@@ -356,6 +358,7 @@ import {
   getChatWorkingFolder,
   listArchivedChats,
   listChatMessages,
+  repairRootChatSurfaceController,
   listChatsByFirm,
   listChatsByProject,
   listRecentChats,
@@ -377,6 +380,7 @@ import {
   listCanonicalTasks,
 } from "./store/tasks";
 import { mutateOneTaskArchive, searchOneHistory } from "./one/search";
+import { importExternalCliSession, listExternalCliSessions } from "./external-cli-sessions";
 import {
   prejudgeOneRequestIntent,
   resolveOneRequestIntent,
@@ -2165,6 +2169,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("updater:check", () => updaterCheck());
   ipcMain.handle("updater:install", () => updaterInstall());
   ipcMain.handle("updater:openManualDownload", () => updaterOpenManualDownload());
+  ipcMain.handle("updater:openReleaseNotes", (_event, version?: string) => updaterOpenReleaseNotes(version));
   ipcMain.handle("updater:revealRecoveryBackup", () => updaterRevealRecoveryBackup());
 
   // ── fs (워킹 폴더 패널 read-only) ───────────────────────
@@ -2358,7 +2363,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("quests:list", () => listQuests());
   ipcMain.handle("quests:claim", (_e, questId: string) => claimQuest(questId));
 
-  // ── 에이전트 durable 메모리 — 런타임 큐레이터 DB를 자가진화/타임라인 UI로 ────
+  // ── 에이전트 전역 durable 메모리 — 프로젝트 귀속 콘텐츠는 이 표면에서 제외 ──
   ipcMain.handle("agentMemory:entries", (_e, agentId: string, limit?: number) =>
     listMemoryEntriesForAgentUi(agentId, Math.min(Math.max(Number(limit) || 100, 1), 300)),
   );
@@ -2404,6 +2409,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("experience:ontologyGraph", (_e, agentId: string) =>
     getExperienceOntologyGraphSnapshot(agentId));
   ipcMain.handle("agents:borrowed-profiles", () => listBorrowedAgentProfiles());
+  ipcMain.handle("agents:exact-bindings", () => listInstalledAgentHubBindings());
   ipcMain.handle("agents:borrowed-ontology-graph", (_e, profileId: string) =>
     getBorrowedAgentOntologyGraph(profileId));
   ipcMain.handle("experience:hubProjection", (_e, agentId: string, force?: boolean) =>
@@ -3209,7 +3215,10 @@ export function registerIpcHandlers(): void {
     listChatsByProject(projectId),
   );
   ipcMain.handle("chats:listByFirm", (_e, firmId: string) => listChatsByFirm(firmId));
-  ipcMain.handle("chats:get", (_e, id: string) => getChat(id));
+  ipcMain.handle("chats:get", (_e, id: string) => {
+    const chat = getChat(id);
+    return chat ? repairRootChatSurfaceController(chat) : null;
+  });
   ipcMain.handle(
     "chats:create",
     (
@@ -3248,28 +3257,28 @@ export function registerIpcHandlers(): void {
     (_e, id: string, selection: RuntimeSelection | null) =>
       setChatRuntimeSelection(id, selection),
   );
+  ipcMain.handle("externalCliSessions:list", (_e, input?: { projectId?: unknown; query?: unknown; limit?: unknown }) =>
+    listExternalCliSessions({
+      projectId: typeof input?.projectId === "string" ? input.projectId : "",
+      query: typeof input?.query === "string" ? input.query : "",
+      limit: Math.min(Math.max(Number(input?.limit) || 60, 1), 100),
+    }));
+  ipcMain.handle("externalCliSessions:importToProject", (_e, input: unknown) =>
+    importExternalCliSession(input as Parameters<typeof importExternalCliSession>[0]));
   ipcMain.handle("tasks:createProject", (_e, input: { projectId: string; title?: string }): CanonicalTaskWorkTarget => {
     if (!input || typeof input.projectId !== "string" || !input.projectId.trim()) {
       throw new TypeError("Project is required");
     }
     const project = getProject(input.projectId);
     if (!project) throw new Error("Project is unavailable");
-    const controller = project.agentPool[0];
-    if (!controller) throw new Error("Choose at least one project agent before starting work");
-    const installedController = controller.source === "local"
-      ? getAgentById(controller.agentId)
-      : null;
-    const controllerFirm = installedController?.kind === "team"
-      ? listFirms().find((firm) => firm.ceoAgentId === installedController.id) ?? null
-      : null;
+    const projectController = listInstalledAgents().find((agent) => agent.slug === "agentlas-orchestrator");
+    if (!projectController) throw new Error("Project orchestrator is unavailable");
     const chat = createChat({
       projectId: project.id,
-      agentId: controller.agentId,
-      // A saved team controller must enter the hierarchical firm runtime.
-      // Binding only its CEO agent turns the whole HQ into one prompt and
-      // produces narrated role-play instead of real 1 orchestrator : N worker
-      // executions and receipts.
-      firmId: controllerFirm?.id ?? null,
+      // Project work is owned by the project and the built-in task
+      // orchestrator. Saved agents and teams remain reusable tools in the
+      // project's pool; the first row is not promoted to session owner.
+      agentId: projectController.id,
       title: typeof input.title === "string" && input.title.trim()
         ? input.title.trim().slice(0, 200)
         : "New task",
@@ -3284,7 +3293,7 @@ export function registerIpcHandlers(): void {
     if (!task) throw new Error("Project task could not be prepared");
     return { taskId: task.id, chatId: chat.id, title: task.title };
   });
-  ipcMain.handle("tasks:list", (_e, input?: { limit?: number; includeArchived?: boolean }) =>
+  ipcMain.handle("tasks:list", (_e, input?: { projectId?: string; limit?: number; includeArchived?: boolean; reconcile?: boolean }) =>
     listCanonicalTasks(input),
   );
   ipcMain.handle("tasks:get", (_e, id: string) => getCanonicalTask(id));
@@ -4902,13 +4911,17 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("invoke:run", async (_event, req: McpInvocationRequest) => {
     const request = rendererInvocationRequest(req);
-    // Warm the resident judgments the synchronous start path peeks (request
-    // intent, explicit memory intent). Best-effort with a tight budget: a miss
-    // remains unresolved and must never be replaced by a lexical or static verdict.
-    await Promise.all([
-      prejudgeOneRequestIntent(request, { timeoutMs: 4_000 }),
-      prejudgeOneMemoryIntent(request, { timeoutMs: 4_000 }),
-    ]).catch(() => undefined);
+    // One's intent and personal-memory judges belong to the One surface only.
+    // A Work project turn goes directly to the project execution contract and
+    // must not silently spend time in, or inherit policy from, One's judges.
+    if (request.oneMode === true) {
+      // Best-effort with a tight budget: a miss remains unresolved and must
+      // never be replaced by a lexical or static verdict.
+      await Promise.all([
+        prejudgeOneRequestIntent(request, { timeoutMs: 4_000 }),
+        prejudgeOneMemoryIntent(request, { timeoutMs: 4_000 }),
+      ]).catch(() => undefined);
+    }
     return invocationService.start(request);
   });
   ipcMain.handle("invoke:steer", (_event, req: McpInvocationRequest) => invocationService.steer(rendererInvocationRequest(req)));

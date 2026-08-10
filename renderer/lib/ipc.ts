@@ -7,7 +7,6 @@ import type {
   FsPathGrant,
 } from "./types";
 import type { SiteActivityEvent } from "@shared/site-studio";
-import { requestOneOperationalRecovery } from "./one-operational-recovery";
 
 interface AgentlasEvents {
   on: (
@@ -42,67 +41,11 @@ declare global {
  * Renderer 어디서나 호출. SSR 시점에는 window가 없으므로 client-only.
  * 안전하게 typeof check.
  */
-let recoveryAwareIpc: AgentlasIpc | null = null;
-let recoveryAwareSource: AgentlasIpc | null = null;
-
-function recoveryAwareClone<T extends object>(
-  target: T,
-  path: string[] = [],
-  cache: WeakMap<object, object> = new WeakMap(),
-): T {
-  const cached = cache.get(target);
-  if (cached) return cached as T;
-
-  // Electron contextBridge exposes a deeply frozen object. Proxying that object
-  // violates JavaScript's non-configurable-property invariants and can crash
-  // the whole renderer merely by reading a namespace such as `menu`. Build a
-  // plain recovery-aware facade instead, while invoking every bridge function
-  // against its original owning object.
-  const facade: Record<PropertyKey, unknown> = {};
-  cache.set(target, facade);
-  for (const key of Reflect.ownKeys(target)) {
-    const value = Reflect.get(target, key);
-    if (typeof key === "symbol" || value == null) {
-      facade[key] = value;
-      continue;
-    }
-    const scope = [...path, String(key)];
-    if (typeof value === "function") {
-      facade[key] = (...args: unknown[]) => {
-        let output: unknown;
-        try {
-          output = Reflect.apply(value, target, args);
-        } catch (cause) {
-          requestOneOperationalRecovery(scope.join("."), cause);
-          throw cause;
-        }
-        if (!output || typeof (output as PromiseLike<unknown>).then !== "function") return output;
-        return Promise.resolve(output).then(
-          (result) => result,
-          (cause) => {
-            requestOneOperationalRecovery(scope.join("."), cause);
-            throw cause;
-          },
-        );
-      };
-      continue;
-    }
-    facade[key] = typeof value === "object"
-      ? recoveryAwareClone(value as object, scope, cache)
-      : value;
-  }
-  return facade as T;
-}
-
 export function ipc(): AgentlasIpc | null {
   if (typeof window === "undefined") return null;
-  const source = window.agentlas ?? null;
-  if (!source) return null;
-  if (!recoveryAwareIpc || recoveryAwareSource !== source) {
-    recoveryAwareSource = source;
-    recoveryAwareIpc = recoveryAwareClone(source);
-  }
-  return recoveryAwareIpc;
+  // Surface-specific components own their own failure UX. A Work IPC failure
+  // must never be converted into a hidden One turn or One decision request.
+  return window.agentlas ?? null;
 }
 
 export function ipcEvents(): AgentlasEvents | null {

@@ -29,6 +29,7 @@ import {
   getChat,
   getChatWorkingFolder,
   listChatMessages,
+  repairRootChatSurfaceController,
 } from "../store/chats";
 import {
   ensureCanonicalTaskForChat,
@@ -613,8 +614,18 @@ export class InvocationService {
       oneAttachmentRef: requestedOneAttachmentRef,
       ...requestWithoutMainContext
     } = incoming;
+    const storedChat = getChat(req.chatId);
+    if (!storedChat) throw new Error("Chat not found");
+    const chat = repairRootChatSurfaceController(storedChat);
     const mobileOneBoundary = workspaceBinding?.source === "mobile-one";
+    if (incoming.oneMode === true && chat.originSurface !== "one") {
+      throw new Error("One execution is valid only for a One-owned conversation");
+    }
+    if (chat.originSurface === "one" && incoming.oneMode !== true) {
+      throw new Error("A One-owned conversation cannot run through the Work execution contract");
+    }
     const requestedOneMode = incoming.oneMode === true
+      && chat.originSurface === "one"
       && (!workspaceBinding || mobileOneBoundary)
       && req.agentAppMode !== true;
     if (requestedOneMemoryUseOnceRef && (!requestedOneMode || workspaceBinding)) {
@@ -686,8 +697,6 @@ export class InvocationService {
       : undefined;
     const controller = new AbortController();
     const startedAt = new Date().toISOString();
-    const chat = getChat(req.chatId);
-    if (!chat) throw new Error("Chat not found");
     const preparedOneTeamPreflight = requestedOneTeamPreflightRef
       ? prepareOneTeamPreflightClaim(requestedOneTeamPreflightRef, chat.id)
       : null;
@@ -1206,10 +1215,12 @@ export class InvocationService {
         }
 
         const rawSurfaceForArtifactBinding = event.kind === "surface" ? event.surface : undefined;
-        // Convert a legacy Work surface exactly once in Main. One and Mobile
-        // consume this same closed semantic manifest; neither platform gets to
-        // reinterpret the raw payload independently.
-        event = attachOneSurfaceProjection(event, runReq.chatId);
+        // Desktop Work owns and consumes its native Work surface. Only One or
+        // the separately bounded Mobile bridge receives the closed One/Mobile
+        // semantic projection; ordinary project work must not mint One state.
+        if (requestedOneMode || runWorkspaceBinding) {
+          event = attachOneSurfaceProjection(event, runReq.chatId);
+        }
         if (event.oneFriendlyFollowups) {
           // The plan is an untrusted model proposal used only by the Main
           // projection boundary. One and Mobile receive semantic actions only.

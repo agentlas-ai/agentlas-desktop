@@ -7,17 +7,21 @@ import { useSearchParams } from "next/navigation";
 import {
   IconArrowLeft,
   IconBuilding,
+  IconChat,
+  IconClose,
   IconChevronDown,
   IconChevronRight,
+  IconFileUp,
   IconPanelRight,
   IconPlus,
+  IconRefresh,
+  IconSearch,
   IconTrash,
   IconUsers,
 } from "@/components/Icon";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
-import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import {
   buildProjectRosterSections,
   isUserFacingProjectPoolMember,
@@ -28,8 +32,10 @@ import {
 } from "@/lib/project-agent-roster";
 import type {
   CanonicalTask,
+  ExternalCliSessionSummary,
   HubAgentBookmark,
   InstalledAgent,
+  InstalledAgentExactBinding,
   InstalledFirm,
   MarketplaceListing,
   Project,
@@ -56,6 +62,7 @@ function ProjectPage() {
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
   const [cloudListings, setCloudListings] = useState<MarketplaceListing[]>([]);
   const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
+  const [exactBindings, setExactBindings] = useState<InstalledAgentExactBinding[]>([]);
   const [timeline, setTimeline] = useState<ProjectTimelineSnapshot | null>(null);
   const [editingNote, setEditingNote] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
@@ -74,22 +81,28 @@ function ProjectPage() {
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [recoveryPending, setRecoveryPending] = useState(false);
+  const [taskStartOpen, setTaskStartOpen] = useState(false);
+  const [externalSessionsOpen, setExternalSessionsOpen] = useState(false);
+  const [externalSessions, setExternalSessions] = useState<ExternalCliSessionSummary[]>([]);
+  const [externalSessionQuery, setExternalSessionQuery] = useState("");
+  const [externalSessionsLoading, setExternalSessionsLoading] = useState(false);
+  const [externalSessionsError, setExternalSessionsError] = useState("");
+  const [externalSessionImporting, setExternalSessionImporting] = useState<string | null>(null);
 
   const rosterSections = useMemo(
-    () => buildProjectRosterSections(agents, firms, cloudListings, hubBookmarks, locale),
-    [agents, cloudListings, firms, hubBookmarks, locale],
+    () => buildProjectRosterSections(agents, firms, cloudListings, hubBookmarks, locale, exactBindings),
+    [agents, cloudListings, exactBindings, firms, hubBookmarks, locale],
   );
   const candidateByKey = useMemo(() => {
     const rows = rosterSections.flatMap((section) => [
       ...section.standalone,
-      ...section.firms.flatMap((firm) => firm.members),
+      ...section.firms.flatMap((firm) => [firm.team, ...firm.members]),
     ]);
     return new Map(rows.map((candidate) => [candidate.key, candidate]));
   }, [rosterSections]);
 
-  const recoverMissingBridge = useCallback((scope: string) => {
+  const recoverMissingBridge = useCallback((_scope: string) => {
     setRecoveryPending(true);
-    requestOneOperationalRecovery(scope, new Error("Desktop bridge unavailable"));
   }, []);
 
   const refresh = useCallback(async () => {
@@ -107,14 +120,13 @@ function ProjectPage() {
       return;
     }
     try {
-      const [p, taskRows, ag, firmRows, mine, bookmarks, timelineResult] = await Promise.all([
+      // Project-owned work must not wait on optional catalog/timeline sources.
+      // Load the local project, tasks, and installed graph first so the page can
+      // become usable even when a remote catalog or derived timeline stalls.
+      const [p, taskRows, ag] = await Promise.all([
         api.projects.get(id),
-        api.tasks.list({ limit: 200 }),
+        api.tasks.list({ projectId: id, limit: 200, reconcile: false }),
         api.team.list(),
-        api.firms.list().catch(() => [] as InstalledFirm[]),
-        api.marketplace.listMine().catch(() => [] as MarketplaceListing[]),
-        api.marketplace.bookmarks().catch(() => [] as HubAgentBookmark[]),
-        api.projects.timeline(id).catch(() => null),
       ]);
       if (!p) {
         navigate("/dashboard", "replace");
@@ -132,9 +144,19 @@ function ProjectPage() {
       // builder exposes only executable user-facing teams and agents; internal
       // HQ role cells remain private to their controller.
       setAgents(ag);
+      setLoading(false);
+
+      const [firmRows, mine, bookmarks, bindings, timelineResult] = await Promise.all([
+        api.firms.list().catch(() => [] as InstalledFirm[]),
+        api.marketplace.listMine().catch(() => [] as MarketplaceListing[]),
+        api.marketplace.bookmarks().catch(() => [] as HubAgentBookmark[]),
+        api.agents.exactBindings().catch(() => [] as InstalledAgentExactBinding[]),
+        api.projects.timeline(id).catch(() => null),
+      ]);
       setFirms(firmRows);
       setCloudListings(mine);
       setHubBookmarks(bookmarks);
+      setExactBindings(bindings);
       setTimeline(timelineResult);
       if (!timelineResult) setRecoveryPending(true);
     } catch {
@@ -179,6 +201,59 @@ function ProjectPage() {
       setRecoveryPending(true);
     }
   }
+
+  const loadExternalSessions = useCallback(async () => {
+    const api = ipc();
+    if (!api) {
+      setExternalSessionsError(locale === "ko" ? "Desktop 연결을 확인할 수 없습니다." : "Desktop connection is unavailable.");
+      return;
+    }
+    setExternalSessionsLoading(true);
+    setExternalSessionsError("");
+    try {
+      if (!project) return;
+      setExternalSessions(await api.externalCliSessions.list({ projectId: project.id, limit: 80 }));
+    } catch (error) {
+      setExternalSessionsError(locale === "ko" ? `세션을 읽지 못했습니다: ${String(error)}` : `Could not read sessions: ${String(error)}`);
+    } finally {
+      setExternalSessionsLoading(false);
+    }
+  }, [locale, project]);
+
+  async function openExternalSessionImport() {
+    setExternalSessionsOpen(true);
+    setExternalSessionQuery("");
+    await loadExternalSessions();
+  }
+
+  async function importExternalSession(session: ExternalCliSessionSummary) {
+    const api = ipc();
+    if (!api || !project) return;
+    setExternalSessionImporting(session.sourceKey);
+    setExternalSessionsError("");
+    try {
+      const target = await api.externalCliSessions.importToProject({
+        sourceKey: session.sourceKey,
+        projectId: project.id,
+      });
+      window.dispatchEvent(new Event("agentlas:tasks-changed"));
+      navigate(`/workspace/task?id=${encodeURIComponent(target.chatId)}&task=${encodeURIComponent(target.taskId)}&projectId=${encodeURIComponent(project.id)}`);
+    } catch (error) {
+      setExternalSessionsError(locale === "ko" ? `가져오지 못했습니다: ${String(error)}` : `Could not import this session: ${String(error)}`);
+      setExternalSessionImporting(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!externalSessionsOpen && !taskStartOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || externalSessionImporting) return;
+      if (externalSessionsOpen) setExternalSessionsOpen(false);
+      else setTaskStartOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [externalSessionImporting, externalSessionsOpen, taskStartOpen]);
 
   async function saveNote() {
     const api = ipc();
@@ -225,10 +300,10 @@ function ProjectPage() {
     if (candidate) addCandidate(candidate);
   }
 
-  function movePoolMember(agentId: string, targetIndex: number) {
+  function movePoolMember(memberKey: string, targetIndex: number) {
     if (!editingTeam) return;
     setAgentPoolDraft((current) => {
-      const sourceIndex = current.findIndex((member) => member.agentId === agentId);
+      const sourceIndex = current.findIndex((member) => projectPoolMemberKey(member) === memberKey);
       if (sourceIndex < 0 || sourceIndex === targetIndex) return current;
       const next = [...current];
       const [moved] = next.splice(sourceIndex, 1);
@@ -315,7 +390,7 @@ function ProjectPage() {
       recoverMissingBridge("project-detail-save-team");
       return;
     }
-    if (!project || agentPoolDraft.length === 0) return;
+    if (!project) return;
     try {
       const updated = await api.projects.update(project.id, { agentPool: agentPoolDraft });
       setProject(updated);
@@ -359,7 +434,7 @@ function ProjectPage() {
         <section style={{ maxWidth: 720, margin: "24px auto", padding: "0 24px" }}>
           {loading
             ? <div style={pageNotice}>{locale === "en" ? "Loading project…" : "프로젝트를 불러오는 중입니다…"}</div>
-            : <div data-one-content-slot data-capability="project-detail-recovery" />}
+            : <div style={pageNotice} role="alert">{locale === "en" ? "The project could not be loaded. Return to the dashboard and try again." : "프로젝트를 불러오지 못했습니다. 대시보드로 돌아가 다시 시도하세요."}</div>}
         </section>
       </div>
     );
@@ -367,6 +442,13 @@ function ProjectPage() {
 
   const agentById = new Map(agents.map((agent) => [agent.id, agent]));
   const selectedMemberKeys = new Set(agentPoolDraft.map(projectPoolMemberKey));
+  const normalizedExternalSessionQuery = externalSessionQuery.trim().toLocaleLowerCase(locale);
+  const visibleExternalSessions = externalSessions.filter((session) => !normalizedExternalSessionQuery || [
+    session.title,
+    session.preview,
+    session.projectLabel ?? "",
+    session.provider,
+  ].some((value) => value.toLocaleLowerCase(locale).includes(normalizedExternalSessionQuery)));
 
   return (
     <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
@@ -398,8 +480,11 @@ function ProjectPage() {
           </h1>
         </div>
         <button
-          onClick={() => void startNewChat()}
+          type="button"
+          onClick={() => setTaskStartOpen(true)}
           className="titlebar-nodrag"
+          aria-haspopup="dialog"
+          aria-expanded={taskStartOpen}
           style={raisedButton}
         >
           <IconPlus size={14} />
@@ -416,9 +501,155 @@ function ProjectPage() {
         </button>
       </header>
 
+      {taskStartOpen && (
+        <div
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setTaskStartOpen(false);
+          }}
+          style={{ position: "fixed", inset: 0, zIndex: 1190, display: "grid", placeItems: "center", padding: 24, background: "rgba(21, 22, 18, .3)", backdropFilter: "blur(3px)" }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="task-start-title"
+            aria-describedby="task-start-description"
+            style={{ width: "min(520px, calc(100vw - 32px))", overflow: "hidden", border: "1px solid var(--paper-edge)", borderRadius: 16, background: "var(--paper)", boxShadow: "0 24px 80px rgba(20, 22, 18, .22)" }}
+          >
+            <header style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "20px 20px 16px" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ ...eyebrowStyle, marginBottom: 6 }}>{project.name}</div>
+                <h2 id="task-start-title" style={{ margin: 0, fontSize: 19, fontFamily: "var(--font-head)" }}>{locale === "ko" ? "어떻게 시작할까요?" : "How would you like to start?"}</h2>
+                <p id="task-start-description" style={{ margin: "7px 0 0", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.55 }}>
+                  {locale === "ko" ? "새 대화를 시작하거나, 이 프로젝트 폴더에서 진행하던 CLI 기록을 가져올 수 있습니다." : "Start a new conversation or bring in CLI history created inside this project folder."}
+                </p>
+              </div>
+              <button type="button" onClick={() => setTaskStartOpen(false)} aria-label={locale === "ko" ? "닫기" : "Close"} style={{ width: 44, height: 44, display: "grid", placeItems: "center", borderRadius: 10, color: "var(--muted-deep)" }}>
+                <IconClose size={17} />
+              </button>
+            </header>
+            <div style={{ display: "grid", gap: 10, padding: "0 20px 20px" }}>
+              <button
+                autoFocus
+                type="button"
+                className="project-task-start-option"
+                data-primary="true"
+                onClick={() => { setTaskStartOpen(false); void startNewChat(); }}
+                style={{ minHeight: 82, display: "grid", gridTemplateColumns: "44px minmax(0, 1fr) auto", alignItems: "center", gap: 12, padding: "14px", border: "1px solid color-mix(in srgb, var(--accent) 42%, var(--paper-edge))", borderRadius: 12, background: "color-mix(in srgb, var(--accent) 5%, var(--paper))", color: "var(--ink)", textAlign: "left" }}
+              >
+                <span style={{ width: 44, height: 44, display: "grid", placeItems: "center", borderRadius: 11, background: "var(--accent)", color: "white" }}><IconChat size={19} /></span>
+                <span style={{ minWidth: 0 }}>
+                  <strong style={{ display: "block", fontSize: 14 }}>{locale === "ko" ? "새 채팅" : "New conversation"}</strong>
+                  <small style={{ display: "block", marginTop: 5, color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.45 }}>{locale === "ko" ? "빈 작업에서 목표를 입력하고 바로 시작합니다." : "Start with an empty task and describe the result you want."}</small>
+                </span>
+                <IconChevronRight size={17} style={{ color: "var(--muted-deep)" }} />
+              </button>
+              <button
+                type="button"
+                className="project-task-start-option"
+                onClick={() => { setTaskStartOpen(false); void openExternalSessionImport(); }}
+                style={{ minHeight: 82, display: "grid", gridTemplateColumns: "44px minmax(0, 1fr) auto", alignItems: "center", gap: 12, padding: "14px", border: "1px solid var(--paper-edge)", borderRadius: 12, background: "var(--paper)", color: "var(--ink)", textAlign: "left" }}
+              >
+                <span style={{ width: 44, height: 44, display: "grid", placeItems: "center", borderRadius: 11, background: "var(--fill-1)", color: "var(--accent)" }}><IconFileUp size={19} /></span>
+                <span style={{ minWidth: 0 }}>
+                  <strong style={{ display: "block", fontSize: 14 }}>{locale === "ko" ? "CLI 세션 가져오기" : "Import CLI session"}</strong>
+                  <small style={{ display: "block", marginTop: 5, color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.45 }}>{locale === "ko" ? "Claude Code 또는 Codex 기록을 프로젝트 작업으로 가져옵니다." : "Import Claude Code or Codex history as project-owned work."}</small>
+                </span>
+                <IconChevronRight size={17} style={{ color: "var(--muted-deep)" }} />
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {externalSessionsOpen && (
+        <div
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !externalSessionImporting) setExternalSessionsOpen(false);
+          }}
+          style={{ position: "fixed", inset: 0, zIndex: 1200, display: "grid", placeItems: "center", padding: 24, background: "rgba(21, 22, 18, .34)", backdropFilter: "blur(3px)" }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="external-cli-session-title"
+            style={{ width: "min(760px, calc(100vw - 32px))", maxHeight: "min(720px, calc(100vh - 48px))", display: "flex", flexDirection: "column", overflow: "hidden", border: "1px solid var(--paper-edge)", borderRadius: 16, background: "var(--paper)", boxShadow: "0 24px 80px rgba(20, 22, 18, .22)" }}
+          >
+            <header style={{ display: "flex", alignItems: "center", gap: 12, padding: "18px 20px", borderBottom: "1px solid var(--paper-edge)" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <h2 id="external-cli-session-title" style={{ margin: 0, fontSize: 17, fontFamily: "var(--font-head)" }}>{locale === "ko" ? "CLI 세션 가져오기" : "Import a CLI session"}</h2>
+                <p style={{ margin: "5px 0 0", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.5 }}>
+                  {locale === "ko"
+                    ? `${project.name} 폴더에서 시작한 CLI 세션만 이 프로젝트 작업 기록으로 가져옵니다. 원본 파일과 세션은 바꾸거나 재개하지 않습니다. 다음 실행은 이 프로젝트가 소유하는 새 Agentlas 세션입니다.`
+                    : `Only CLI sessions started inside ${project.name}'s folder are shown. Import creates project-owned work without changing or resuming the original file or session.`}
+                </p>
+              </div>
+              <button type="button" disabled={Boolean(externalSessionImporting)} onClick={() => setExternalSessionsOpen(false)} aria-label={locale === "ko" ? "닫기" : "Close"} style={{ width: 44, height: 44, display: "grid", placeItems: "center", borderRadius: 10, color: "var(--muted-deep)" }}>
+                <IconClose size={17} />
+              </button>
+            </header>
+
+            <div style={{ display: "flex", gap: 8, padding: "12px 20px", borderBottom: "1px solid var(--paper-edge)" }}>
+              <label style={{ position: "relative", flex: 1 }}>
+                <span className="sr-only">{locale === "ko" ? "CLI 세션 검색" : "Search CLI sessions"}</span>
+                <IconSearch size={14} style={{ position: "absolute", left: 13, top: 15, color: "var(--muted-deep)" }} />
+                <input
+                  autoFocus
+                  type="search"
+                  value={externalSessionQuery}
+                  onChange={(event) => setExternalSessionQuery(event.target.value)}
+                  placeholder={locale === "ko" ? "대화·프로젝트·CLI 검색" : "Search conversation, project, or CLI"}
+                  style={{ width: "100%", height: 44, padding: "0 36px", border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper-2)", color: "var(--ink)", fontSize: 13 }}
+                />
+              </label>
+              <button type="button" onClick={() => void loadExternalSessions()} disabled={externalSessionsLoading || Boolean(externalSessionImporting)} aria-label={locale === "ko" ? "새로고침" : "Refresh"} style={{ width: 44, height: 44, display: "grid", placeItems: "center", border: "1px solid var(--paper-edge)", borderRadius: 10, color: "var(--ink)" }}>
+                <IconRefresh size={15} />
+              </button>
+            </div>
+
+            <div style={{ overflowY: "auto", minHeight: 220, padding: "8px 12px 16px" }}>
+              {externalSessionsError && <div role="alert" style={{ margin: "8px", padding: 12, borderRadius: 10, background: "var(--red-soft)", color: "var(--red-deep)", fontSize: 12 }}>{externalSessionsError}</div>}
+              {externalSessionsLoading ? (
+                <div role="status" style={{ padding: 32, textAlign: "center", color: "var(--muted-deep)", fontSize: 12 }}>{locale === "ko" ? "Claude Code와 Codex 기록을 확인하는 중…" : "Checking Claude Code and Codex history…"}</div>
+              ) : visibleExternalSessions.length === 0 ? (
+                <div role="status" style={{ padding: 32, textAlign: "center", color: "var(--muted-deep)", fontSize: 12 }}>{locale === "ko" ? "가져올 수 있는 세션이 없습니다." : "No importable sessions found."}</div>
+              ) : visibleExternalSessions.map((session) => {
+                const busy = externalSessionImporting === session.sourceKey;
+                return (
+                  <article key={session.sourceKey} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 14, alignItems: "center", padding: "14px 10px", borderBottom: "1px solid var(--paper-edge)" }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+                        <span style={{ flexShrink: 0, padding: "3px 7px", borderRadius: 999, background: "var(--fill-1)", color: "var(--muted-deep)", fontSize: 9.5, fontWeight: 750 }}>{session.provider === "codex" ? "Codex" : "Claude Code"}</span>
+                        <strong style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13 }}>{session.title}</strong>
+                      </div>
+                      <p style={{ margin: "7px 0 0", color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.5, display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 2, overflow: "hidden" }}>{session.preview}</p>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8, color: "var(--muted-deep)", fontSize: 10.5 }}>
+                        {session.projectLabel && <span>{session.projectLabel}</span>}
+                        <span>{locale === "ko" ? `메시지 ${session.messageCount}개` : `${session.messageCount} messages`}</span>
+                        {session.truncated && <span>{locale === "ko" ? "최근 기록만 가져옴" : "Recent window only"}</span>}
+                        <time dateTime={session.updatedAt}>{new Intl.DateTimeFormat(locale === "ko" ? "ko-KR" : "en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(session.updatedAt))}</time>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void importExternalSession(session)}
+                      disabled={Boolean(externalSessionImporting)}
+                      style={{ minWidth: 104, minHeight: 44, padding: "0 14px", borderRadius: 9, background: "var(--accent)", color: "#fff", fontSize: 12, fontWeight: 750, opacity: externalSessionImporting && !busy ? .48 : 1 }}
+                    >
+                      {busy ? (locale === "ko" ? "가져오는 중…" : "Importing…") : (locale === "ko" ? "이 프로젝트로 가져오기" : "Import into this project")}
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+      )}
+
       {recoveryPending && (
-        <section style={{ maxWidth: 1280, margin: "16px auto 0", padding: "0 24px" }}>
-          <div data-one-content-slot data-capability="project-detail-recovery" />
+        <section style={{ maxWidth: 1280, margin: "16px auto 0", padding: "0 24px" }} role="alert">
+          <div style={pageNotice}>{locale === "en" ? "Some project information could not be loaded. Your saved work was not changed." : "프로젝트 정보 일부를 불러오지 못했습니다. 저장된 작업은 변경되지 않았습니다."}</div>
         </section>
       )}
 
@@ -488,7 +719,7 @@ function ProjectPage() {
 
           <div style={{ ...cardStyle, marginBottom: 24 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-              <div style={{ ...eyebrowStyle, flex: 1 }}>{locale === "ko" ? "이 프로젝트의 대기조" : "This project's on-call pool"}</div>
+              <div style={{ ...eyebrowStyle, flex: 1 }}>{locale === "ko" ? "이 프로젝트의 도구" : "This project's tools"}</div>
               {!editingTeam ? (
                 <button type="button" onClick={() => { setEditingTeam(true); setInspectorCollapsed(true); }} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
                   {locale === "ko" ? "편집" : "Edit"}
@@ -504,8 +735,8 @@ function ProjectPage() {
                 draggedMemberId={draggedMemberId}
                 onToggle={() => setTeamTreeOpen((current) => !current)}
                 onMove={movePoolMember}
-                onRemove={(agentId) => setAgentPoolDraft((current) => current.filter((item) => item.agentId !== agentId))}
-                onPointerDown={(event, agentId) => beginPointerDrag(event, "member", agentId)}
+                onRemove={(memberKey) => setAgentPoolDraft((current) => current.filter((item) => projectPoolMemberKey(item) !== memberKey))}
+                onPointerDown={(event, memberKey) => beginPointerDrag(event, "member", memberKey)}
                 onPointerUp={finishPointerDrag}
                 onPointerCancel={() => { pointerDragRef.current = null; setDraggedMemberId(null); }}
                 onDrop={dropAgent}
@@ -515,7 +746,6 @@ function ProjectPage() {
                   locale={locale}
                   sections={rosterSections}
                   selectedMemberKeys={selectedMemberKeys}
-                  hasController={agentPoolDraft.length > 0}
                   openSources={openRosterSources}
                   openFirms={openRosterFirms}
                   draggedCandidateKey={draggedCandidateKey}
@@ -530,14 +760,16 @@ function ProjectPage() {
               ) : null}
             </div>
             {editingTeam ? <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <button type="button" disabled={agentPoolDraft.length === 0} onClick={() => void saveTeam()} style={raisedButton}>{locale === "ko" ? "팀 저장" : "Save team"}</button>
+              <button type="button" onClick={() => void saveTeam()} style={raisedButton}>{locale === "ko" ? "도구 저장" : "Save tools"}</button>
               <button type="button" onClick={() => { setAgentPoolDraft(project.agentPool); setEditingTeam(false); }} style={{ fontSize: 12, color: "var(--muted-deep)" }}>{t("common.cancel")}</button>
             </div> : null}
           </div>
 
-          <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "0 0 12px" }}>
-            {locale === "ko" ? "작업" : "Tasks"} ({tasks.length})
-          </h2>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "0 0 12px" }}>
+            <h2 style={{ flex: 1, fontFamily: "var(--font-head)", fontSize: 15, margin: 0 }}>
+              {locale === "ko" ? "작업" : "Tasks"} ({tasks.length})
+            </h2>
+          </div>
           {tasks.length === 0 ? (
             <div style={emptyStyle}>{t("project.empty_chats")}</div>
           ) : (
@@ -613,6 +845,22 @@ function ProjectPage() {
           gap: 24px;
           align-items: start;
           transition: grid-template-columns 180ms ease, gap 180ms ease;
+        }
+        .project-task-start-option {
+          cursor: pointer;
+          transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+        }
+        .project-task-start-option:hover {
+          border-color: color-mix(in srgb, var(--accent) 46%, var(--paper-edge)) !important;
+          background: color-mix(in srgb, var(--accent) 6%, var(--paper)) !important;
+          transform: translateY(-1px);
+        }
+        .project-task-start-option:focus-visible {
+          outline: 2px solid color-mix(in srgb, var(--accent) 48%, transparent);
+          outline-offset: 2px;
+        }
+        .project-task-start-option:active {
+          transform: translateY(0);
         }
         .project-detail-grid[data-inspector-collapsed="true"] {
           grid-template-columns: minmax(0, 1fr) 44px;
@@ -1100,9 +1348,9 @@ function ProjectTeamOrgChart({
   open: boolean;
   draggedMemberId: string | null;
   onToggle: () => void;
-  onMove: (agentId: string, targetIndex: number) => void;
-  onRemove: (agentId: string) => void;
-  onPointerDown: (event: ReactPointerEvent<HTMLElement>, agentId: string) => void;
+  onMove: (memberKey: string, targetIndex: number) => void;
+  onRemove: (memberKey: string) => void;
+  onPointerDown: (event: ReactPointerEvent<HTMLElement>, memberKey: string) => void;
   onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
   onPointerCancel: () => void;
   onDrop: (event: DragEvent<HTMLDivElement>) => void;
@@ -1119,7 +1367,7 @@ function ProjectTeamOrgChart({
         <div className="project-team-empty">
           {locale === "ko"
             ? "오른쪽에서 이 프로젝트가 쓸 에이전트를 넣으세요. 순위는 없고, 오케스트레이터가 필요할 때 호출합니다."
-            : "Add a callable controller from the right. Additional preferred agents are optional."}
+            : "Add the agents or teams this project may use as tools. The orchestrator calls them when useful."}
         </div>
       </div>
     );
@@ -1127,12 +1375,12 @@ function ProjectTeamOrgChart({
 
   const renderNode = (member: ProjectAgentPoolMember, index: number, child: boolean) => (
     <div
-      className={`project-team-node ${index === 0 ? "project-team-node-controller" : "project-team-child"}`}
+      className="project-team-node project-team-child"
       data-project-member-index={index}
-      data-dragging={draggedMemberId === member.agentId}
+      data-dragging={draggedMemberId === projectPoolMemberKey(member)}
       key={projectPoolMemberKey(member)}
       draggable={false}
-      onPointerDown={(event) => { if (editing) onPointerDown(event, member.agentId); }}
+      onPointerDown={(event) => { if (editing) onPointerDown(event, projectPoolMemberKey(member)); }}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerCancel}
       onDragOver={(event) => { if (editing) event.preventDefault(); }}
@@ -1147,16 +1395,16 @@ function ProjectTeamOrgChart({
       <span className="project-team-node-copy">
         <strong>{member.nameSnapshot}</strong>
         <span>{locale === "ko"
-          ? "대기조 · 오케스트레이터가 필요할 때 호출"
-          : "On call · invoked by the orchestrator when needed"}</span>
+          ? "프로젝트 도구 · 필요할 때 호출"
+          : "Project tool · invoked when needed"}</span>
       </span>
       {editing ? (
         <span className="project-team-actions" onPointerDown={(event) => event.stopPropagation()}>
           {/* 순위가 없으므로 위/아래로 옮길 자리도 없다. 재정렬 버튼은 그 자체가
               서열이 있다는 주장이라 제거한다. */}
-          <button type="button" aria-label={locale === "ko" ? `${member.nameSnapshot} 제거` : `Remove ${member.nameSnapshot}`} onClick={() => onRemove(member.agentId)}>×</button>
+          <button type="button" aria-label={locale === "ko" ? `${member.nameSnapshot} 제거` : `Remove ${member.nameSnapshot}`} onClick={() => onRemove(projectPoolMemberKey(member))}>×</button>
         </span>
-      ) : <span className="project-roster-kind">{child ? member.source : (locale === "ko" ? "대기조" : "on call")}</span>}
+      ) : <span className="project-roster-kind">{child ? member.source : (locale === "ko" ? "프로젝트 도구" : "project tool")}</span>}
     </div>
   );
 
@@ -1180,7 +1428,6 @@ function ProjectAgentRosterLibrary({
   locale,
   sections,
   selectedMemberKeys,
-  hasController,
   openSources,
   openFirms,
   draggedCandidateKey,
@@ -1195,7 +1442,6 @@ function ProjectAgentRosterLibrary({
   locale: string;
   sections: ProjectRosterSection[];
   selectedMemberKeys: Set<string>;
-  hasController: boolean;
   openSources: Record<ProjectRosterSource, boolean>;
   openFirms: Record<string, boolean>;
   draggedCandidateKey: string | null;
@@ -1209,15 +1455,12 @@ function ProjectAgentRosterLibrary({
 }) {
   const renderCandidate = (candidate: ProjectRosterCandidate) => {
     const selected = selectedMemberKeys.has(candidate.key);
-    const requiresController = !candidate.installed && !hasController;
-    const disabled = selected || requiresController || !candidate.callable;
+    const disabled = selected || !candidate.callable;
     const helper = selected
       ? (locale === "ko" ? "프로젝트에 추가됨" : "Added to project")
       : !candidate.callable
-        ? (locale === "ko" ? "실행할 수 없는 항목" : "Not callable")
-      : requiresController
-        ? (locale === "ko" ? "설치된 에이전트를 먼저 하나 넣어주세요" : "Add an installed agent first")
-        : candidate.tagline;
+        ? candidate.blockedReason ?? (locale === "ko" ? "실행할 수 없는 항목" : "Not callable")
+      : candidate.tagline;
     return (
       <button
         type="button"
@@ -1249,10 +1492,10 @@ function ProjectAgentRosterLibrary({
     <aside className="project-agent-library-tree" aria-label={locale === "ko" ? "실행 가능한 팀과 에이전트" : "Callable teams and agents"}>
       <div className="project-roster-head">
         <span>{locale === "ko" ? "팀과 에이전트" : "Teams and agents"}</span>
-        <span>{sections.reduce((sum, section) => sum + section.standalone.length + section.firms.reduce((firmSum, firm) => firmSum + firm.members.length, 0), 0)}</span>
+        <span>{sections.reduce((sum, section) => sum + section.standalone.length + section.firms.reduce((firmSum, firm) => firmSum + 1 + firm.members.length, 0), 0)}</span>
       </div>
       {sections.map((section) => {
-        const count = section.standalone.length + section.firms.reduce((sum, firm) => sum + firm.members.length, 0);
+        const count = section.standalone.length + section.firms.reduce((sum, firm) => sum + 1 + firm.members.length, 0);
         const open = openSources[section.source];
         return (
           <div key={section.source}>
@@ -1265,7 +1508,7 @@ function ProjectAgentRosterLibrary({
               <>
                 {section.firms.map((firm) => {
                   const firmOpen = openFirms[firm.id] ?? false;
-                  const addable = firm.members.filter((member) => member.callable && !selectedMemberKeys.has(member.key));
+                  const teamAddable = firm.team.callable && !selectedMemberKeys.has(firm.team.key);
                   return (
                     <div key={firm.id}>
                       <div className="project-roster-firm-row">
@@ -1286,10 +1529,10 @@ function ProjectAgentRosterLibrary({
                         <button
                           type="button"
                           className="project-roster-add-team"
-                          disabled={addable.length === 0}
-                          onClick={() => onAddFirm(addable)}
+                          disabled={!teamAddable}
+                          onClick={() => onAddFirm([firm.team])}
                         >
-                          {locale === "ko" ? "팀 추가" : "Add team"}
+                          {locale === "ko" ? "팀 도구 추가" : "Add team tool"}
                         </button>
                       </div>
                       {firmOpen && !firm.selfReferential ? <div className="project-roster-children">{firm.members.map(renderCandidate)}</div> : null}
@@ -1341,7 +1584,7 @@ function ProjectTimelinePanel({
         </p>
       </header>
       {!timeline ? (
-        recoveryPending ? <div data-one-content-slot data-capability="project-timeline-recovery" /> : null
+        recoveryPending ? <p style={timelineEmptyStyle} role="alert">{locale === "en" ? "The project timeline is temporarily unavailable." : "프로젝트 작업 기록을 잠시 불러올 수 없습니다."}</p> : null
       ) : groups.length === 0 ? (
         <p style={timelineEmptyStyle}>
           {locale === "en" ? "No work recorded yet." : "아직 기록된 작업이 없습니다."}
@@ -1480,6 +1723,7 @@ const raisedButton: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
   gap: 6,
+  minHeight: 44,
   padding: "8px 14px",
   borderRadius: "var(--radius-md)",
   background: "var(--paper)",

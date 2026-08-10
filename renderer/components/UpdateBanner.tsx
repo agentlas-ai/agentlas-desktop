@@ -9,6 +9,7 @@
 // 새 버전이 다시 다운로드되면 자동으로 다시 노출.
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { IconChevronDown, IconClose, IconRefresh, IconSparkles } from "@/components/Icon";
 import { ipc, updaterEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type { UpdaterState } from "@/lib/types";
@@ -18,6 +19,7 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
   const [state, setState] = useState<UpdaterState>({ status: "idle" });
   /** 사용자가 "나중에" 누른 버전. 그 버전에 대해서는 더 이상 안 띄움 */
   const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
+  const [showReleaseNotes, setShowReleaseNotes] = useState(false);
   const lastFocusCheck = useRef(0);
 
   useEffect(() => {
@@ -64,6 +66,11 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
   const isDownloading = state.status === "downloading" || state.status === "available";
   const isDismissed =
     isDownloaded && state.version && dismissedVersion === state.version;
+  const releaseNoteLines = (state.releaseNotes ?? "")
+    .split(/\n+/)
+    .map((line) => line.replace(/^[-*•]\s*/, "").trim())
+    .filter(Boolean)
+    .slice(0, 5);
   // 실제 업데이트가 있을 때만 노출. checking/not-available/error 등 routine 백그라운드 체크는 숨김.
   if (!isDownloaded && !isDownloading && !isInstalling && !isManual) return null;
   if (isDownloaded && isDismissed) return null;
@@ -83,6 +90,10 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
 
   async function openOfficialInstaller() {
     await ipc()?.updater.openManualDownload();
+  }
+
+  async function openReleaseNotes() {
+    await ipc()?.updater.openReleaseNotes(state.version);
   }
 
   const attentionCopy = state.code === "install-source-untrusted"
@@ -117,29 +128,80 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
       aria-live="polite"
     >
       {isDownloaded ? (
-        <>
-          <span className="sidenav-update-dot" aria-hidden />
-          <span className="sidenav-update-copy">
-            <strong>{collapsed ? "↑" : t("update.ready_compact")}</strong>
-          </span>
+        collapsed ? (
           <button
             onClick={() => void install()}
             className="sidenav-update-action"
+            aria-label={t("update.restart_action")}
             title={t("update.restart_now")}
           >
-            {collapsed ? "↻" : t("update.restart_compact")}
+            <IconRefresh size={17} aria-hidden="true" />
           </button>
-          {!collapsed && (
-            <button
-              onClick={() => state.version && setDismissedVersion(state.version)}
-              aria-label={t("update.dismiss")}
-              title={t("update.dismiss")}
-              className="sidenav-update-dismiss"
-            >
-              ×
-            </button>
-          )}
-        </>
+        ) : (
+          <>
+            <div className="sidenav-update-head">
+              <span className="sidenav-update-icon" aria-hidden="true">
+                <IconSparkles size={16} />
+              </span>
+              <span className="sidenav-update-copy">
+                <strong>{t("update.ready_compact")}</strong>
+                <span className="sidenav-update-version">v{state.version ?? "?"}</span>
+                <span>{t("update.ready_description")}</span>
+              </span>
+              <button
+                onClick={() => state.version && setDismissedVersion(state.version)}
+                aria-label={t("update.dismiss")}
+                title={t("update.dismiss")}
+                className="sidenav-update-dismiss"
+              >
+                <IconClose size={15} aria-hidden="true" />
+              </button>
+            </div>
+            {showReleaseNotes && (
+              <div className="sidenav-update-changelog">
+                <strong>{t("update.changelog_title")}</strong>
+                {releaseNoteLines.length > 0 ? (
+                  <ul>
+                    {releaseNoteLines.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}
+                  </ul>
+                ) : (
+                  <p>{t("update.changelog_unavailable")}</p>
+                )}
+                <button
+                  type="button"
+                  className="sidenav-update-release-link"
+                  onClick={() => void openReleaseNotes()}
+                >
+                  {t("update.open_release_notes")}
+                </button>
+              </div>
+            )}
+            <div className="sidenav-update-actions">
+              <button
+                type="button"
+                className="sidenav-update-secondary"
+                aria-expanded={showReleaseNotes}
+                onClick={() => setShowReleaseNotes((visible) => !visible)}
+              >
+                <span>{showReleaseNotes ? t("update.hide_whats_new") : t("update.whats_new")}</span>
+                <span
+                  className="sidenav-update-chevron"
+                  data-open={showReleaseNotes ? "true" : "false"}
+                  aria-hidden="true"
+                >
+                  <IconChevronDown size={14} />
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void install()}
+                className="sidenav-update-action"
+              >
+                {t("update.restart_action")}
+              </button>
+            </div>
+          </>
+        )
       ) : isManual || isInstalling ? (
         <>
           <span className="sidenav-update-dot" aria-hidden />

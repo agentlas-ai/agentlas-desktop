@@ -671,13 +671,17 @@ export interface MobileBridgeProjectDto {
   sourceLabel: string | null;
   systemPrompt: string | null;
   agentPool: Array<{
-    agentId: string;
+    entityKind: "agent" | "team";
+    targetId: string;
+    agentId: string | null;
+    firmId: string | null;
+    controllerAgentId: string | null;
     name: string;
     source: "local" | "cloud" | "hub";
     releaseId: string | null;
     order: number;
   }>;
-  /** First ordered project-pool member and the project's Work controller. */
+  /** @deprecated Project pool rows are tools, not the Work controller. */
   controllerAgentId: string | null;
   controllerName: string | null;
   agentCount: number;
@@ -713,7 +717,7 @@ export interface MobileBridgeProjectDto {
 export type MobileBridgeProjectDetailDto = MobileBridgeProjectDto;
 
 /**
- * One ordered project-pool member the phone asks Desktop to staff.
+ * One project tool the phone asks Desktop to keep attached.
  *
  * DESKTOP_MOBILE_BRIDGE: the phone deliberately cannot send a display name.
  * Desktop resolves `nameSnapshot` from the installed agent (local) or from the
@@ -721,17 +725,21 @@ export type MobileBridgeProjectDetailDto = MobileBridgeProjectDto;
  * relabel an agent or mint a new remote binding.
  */
 export interface MobileBridgeProjectAgentPoolMemberInput {
-  agentId: string;
+  entityKind: "agent" | "team";
+  targetId: string;
+  agentId?: string | null;
+  firmId?: string | null;
+  controllerAgentId?: string | null;
   source: "local" | "cloud" | "hub";
   releaseId?: string | null;
 }
 
 export interface MobileBridgeProjectAgentPoolParams {
   projectId: string;
-  /** Ordered target pool. Index 0 becomes the project's Work controller. */
+  /** Stable display order only. No pool row owns the Work session. */
   members: MobileBridgeProjectAgentPoolMemberInput[];
   /**
-   * Ordered `source:agentId:releaseId` keys the phone observed before editing.
+   * Ordered `source:entityKind:targetId:releaseId` keys observed before editing.
    * A mismatch means Desktop restaffed the project meanwhile, and the write is
    * refused instead of overwriting the newer pool.
    */
@@ -1785,7 +1793,7 @@ const PROJECT_POOL_SOURCES = ["local", "cloud", "hub"] as const;
 
 /**
  * DESKTOP_MOBILE_BRIDGE: shape-only gate for a project staffing write. Whether
- * an agent may actually be staffed (installed, user-facing, already bound) is
+ * a tool may actually be attached (installed, user-facing, already bound) is
  * decided by Desktop authority, never here.
  */
 function validateProjectAgentPool(params: Record<string, unknown>): string | null {
@@ -1797,23 +1805,29 @@ function validateProjectAgentPool(params: Record<string, unknown>): string | nul
 
   const { members } = params;
   if (!Array.isArray(members) || members.length > PROJECT_AGENT_POOL_MAX) {
-    return `members must be an ordered array of at most ${PROJECT_AGENT_POOL_MAX} agents`;
+    return `members must be an ordered array of at most ${PROJECT_AGENT_POOL_MAX} tools`;
   }
   const seen = new Set<string>();
   for (const member of members) {
-    if (!isRecord(member) || !hasOnlyKeys(member, ["agentId", "source", "releaseId"])) {
-      return "members contains an unsupported project agent";
+    if (!isRecord(member) || !hasOnlyKeys(member, ["entityKind", "targetId", "agentId", "firmId", "controllerAgentId", "source", "releaseId"])) {
+      return "members contains an unsupported project tool";
     }
+    const entityKind = typeof member.entityKind === "string" ? member.entityKind : "agent";
+    if (entityKind !== "agent" && entityKind !== "team") return "members contains an unsupported project tool kind";
+    const targetId = typeof member.targetId === "string" ? member.targetId : member.agentId;
+    if (typeof targetId !== "string" || !targetId.trim()) return "members contains a project tool without targetId";
     const memberError = firstError(
-      requiredString(member, "agentId"),
       validateEnum(member, "source", PROJECT_POOL_SOURCES, false),
       optionalString(member, "releaseId", 200),
+      optionalString(member, "agentId", 200),
+      optionalString(member, "firmId", 200),
+      optionalString(member, "controllerAgentId", 200),
     );
     if (memberError) return memberError;
-    const key = `${String(member.source)}:${String(member.agentId)}:${
+    const key = `${String(member.source)}:${entityKind}:${targetId}:${
       typeof member.releaseId === "string" ? member.releaseId : ""
     }`;
-    if (seen.has(key)) return "members must not repeat the same project agent";
+    if (seen.has(key)) return "members must not repeat the same project tool";
     seen.add(key);
   }
 

@@ -81,6 +81,7 @@ import {
   IconFolder,
   IconKey,
   IconLayers,
+  IconNetwork,
   IconPaperclip,
   IconPlus,
   IconRoute,
@@ -1211,12 +1212,12 @@ export function ChatInput({
       )}
 
       <div
-        className="glass-lift chat-input-shell"
+        className="chat-input-shell"
         style={{
           width: "min(100%, 980px)",
           margin: "0 auto",
-          borderRadius: 18,
-          padding: "10px 12px",
+          borderRadius: 16,
+          padding: "9px 10px 8px",
           display: "flex",
           flexDirection: "column",
           gap: 8,
@@ -1455,7 +1456,7 @@ export function ChatInput({
             resize: "none",
             padding: "4px 6px",
             fontFamily: "var(--font-body)",
-            minHeight: 46,
+            minHeight: 50,
             maxHeight: 150,
             overflowY: "auto",
             boxSizing: "border-box",
@@ -1484,9 +1485,11 @@ export function ChatInput({
               <IconPlus size={15} />
             </button>
 
-            {/* 켜진 모드 칩 — 평소엔 + 메뉴에 있고, 활성일 때만 바에 표시(가시성 + 눌러서 끄기). */}
-            {HEP_TOGGLES.some((tg) => hepToggles.has(tg.id) && (!projectOrchestration || tg.id !== "recommend")) && (
-              <div className="chat-input-hep-toggle-group" role="group" aria-label="Active modes">
+            {/* 활성 실행 모드는 하나의 상태 그룹으로 묶는다. 설정은 + 메뉴에서 찾고,
+                이곳에서는 현재 켜진 모드를 확인하거나 바로 끌 수 있다. */}
+            {(HEP_TOGGLES.some((tg) => hepToggles.has(tg.id) && (!projectOrchestration || tg.id !== "recommend")) ||
+              (showModeToggles && !projectOrchestration && (continuousMode || swarmMode))) && (
+              <div className="chat-input-hep-toggle-group" role="group" aria-label={locale === "ko" ? "활성 실행 모드" : "Active run modes"}>
                 {HEP_TOGGLES.filter((tg) => hepToggles.has(tg.id) && (!projectOrchestration || tg.id !== "recommend")).map((tg) => (
                   <button
                     key={tg.id}
@@ -1509,13 +1512,7 @@ export function ChatInput({
                     <span className="chat-input-hep-label">{locale === "ko" ? tg.labelKo : tg.labelEn}</span>
                   </button>
                 ))}
-              </div>
-            )}
-
-            {/* 계속 라이브로 / 스웜 활성 칩 — 켜졌을 때만 바에 표시, 눌러서 끄기(평소엔 + 메뉴). */}
-            {showModeToggles && !projectOrchestration && continuousMode && (
-              <div className="chat-input-hep-toggle-group" role="group" aria-label="Active modes">
-                <button
+                {showModeToggles && !projectOrchestration && continuousMode && <button
                   type="button"
                   className="chat-input-hep-chip active"
                   onClick={() => onToggleContinuous?.()}
@@ -1525,12 +1522,8 @@ export function ChatInput({
                 >
                   <span className="chat-input-hep-dot" aria-hidden />
                   <span className="chat-input-hep-label">{locale === "ko" ? "계속 라이브로" : "Keep going live"}</span>
-                </button>
-              </div>
-            )}
-            {showModeToggles && !projectOrchestration && swarmMode && (
-              <div className="chat-input-hep-toggle-group" role="group" aria-label="Active modes">
-                <button
+                </button>}
+                {showModeToggles && !projectOrchestration && swarmMode && <button
                   type="button"
                   className="chat-input-hep-chip active"
                   onClick={() => onToggleSwarm?.()}
@@ -1538,16 +1531,16 @@ export function ChatInput({
                   title={`${locale === "ko" ? "스웜" : "Swarm"} — ${locale === "ko" ? "끄기" : "turn off"}`}
                   aria-pressed={true}
                 >
-                  <span aria-hidden style={{ fontSize: 11, lineHeight: 1 }}>🐝</span>
+                  <IconNetwork size={12} aria-hidden />
                   <span className="chat-input-hep-label">{locale === "ko" ? "스웜" : "Swarm"}</span>
-                </button>
+                </button>}
               </div>
             )}
 
             {/* 실행 중 steering 대기 표시 — 큐에 쌓인 메시지가 있으면 개수를 보여준다. */}
             {queuedCount > 0 && (
               <span
-                title={locale === "ko" ? "실행이 끝나면 순서대로 전송됩니다" : "Will send in order when the run finishes"}
+                title={locale === "ko" ? "현재 실행을 멈추고 새 지시로 전환하고 있습니다" : "Stopping the current run and switching to the new direction"}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
@@ -1563,8 +1556,8 @@ export function ChatInput({
                   whiteSpace: "nowrap",
                 }}
               >
-                <span aria-hidden>⏳</span>
-                {locale === "ko" ? `${queuedCount}개 대기 중` : `${queuedCount} queued`}
+                <span className="chat-input-steering-pulse" aria-hidden />
+                {locale === "ko" ? "새 방향 반영 중" : "Applying direction"}
               </span>
             )}
 
@@ -1747,13 +1740,13 @@ export function ChatInput({
                       aria-label={stopLabel}
                       title={stopLabel}
                       style={{
-                        width: 32,
-                        height: 32,
+                        width: 38,
+                        height: 38,
                         flexShrink: 0,
                         display: "inline-flex",
                         alignItems: "center",
                         justifyContent: "center",
-                        borderRadius: 8,
+                        borderRadius: 11,
                         border: "1px solid var(--paper-edge)",
                         background: "var(--paper)",
                         color: stopRequested ? "var(--muted-deep)" : "var(--ink)",
@@ -1783,17 +1776,17 @@ export function ChatInput({
                     aria-label={busy ? t("chatinput.send_steering") : t("chatinput.send")}
                     title={busy ? t("chatinput.send_steering") : undefined}
                     style={{
-                      width: 32,
-                      height: 32,
+                      width: 38,
+                      height: 38,
                       flexShrink: 0,
                       borderRadius: "50%",
-                      background: !submitDisabled ? "var(--paper)" : "var(--paper-2)",
-                      color: submitDisabled ? "var(--muted-deep)" : "var(--ink)",
-                      border: "1px solid var(--paper-edge)",
+                      background: !submitDisabled ? "var(--ink)" : "var(--paper-2)",
+                      color: submitDisabled ? "var(--muted-deep)" : "var(--paper)",
+                      border: `1px solid ${!submitDisabled ? "var(--ink)" : "var(--paper-edge)"}`,
                       display: "inline-flex",
                       alignItems: "center",
                       justifyContent: "center",
-                      boxShadow: !submitDisabled ? "var(--neu-raised)" : "none",
+                      boxShadow: !submitDisabled ? "0 4px 12px rgba(15, 18, 20, 0.16)" : "none",
                       cursor: submitDisabled ? "default" : "pointer",
                     }}
                   >
@@ -2471,7 +2464,7 @@ function PlusMenu({
             onChange={onToggleContinuous}
           />
           <ToggleRow
-            icon={<span aria-hidden style={{ fontSize: 13, lineHeight: 1 }}>🐝</span>}
+            icon={<IconNetwork size={14} aria-hidden />}
             title={locale === "ko" ? "스웜" : "Swarm"}
             subtitle={
               locale === "ko"
@@ -2752,6 +2745,7 @@ function Row({
         width: "100%",
         alignItems: "center",
         gap: 10,
+        minHeight: 46,
         padding: "8px 10px",
         borderRadius: 8,
         background: active ? "var(--fill-1)" : "transparent",
@@ -2853,8 +2847,8 @@ function ToggleRow({
       </span>
       <span
         style={{
-          width: 30,
-          height: 17,
+          width: 36,
+          height: 20,
           borderRadius: 999,
           background: on ? "var(--accent)" : "var(--paper-edge)",
           position: "relative",
@@ -2865,9 +2859,9 @@ function ToggleRow({
           style={{
             position: "absolute",
             top: 2,
-            left: on ? 15 : 2,
-            width: 13,
-            height: 13,
+            left: on ? 18 : 2,
+            width: 16,
+            height: 16,
             borderRadius: "50%",
             background: "white",
             transition: "left 0.12s",

@@ -121,6 +121,103 @@ function cacheSet(key: string, value: Verdict<string>): void {
   }
 }
 
+// ── ③ 의도 서명 (intent signature) ────────────────────────────────────────
+// 캐시 키가 프롬프트 원문이면 공백·대소문자·구두점 하나만 달라도 미스가 나고 모델을 다시 부른다.
+// 그렇다고 단어를 버려 의미를 뭉개면 **다른 질문이 같은 판정을 받는다** — 그게 더 위험하다.
+// 그래서 의미를 지우지 않는 정규화만 한다: 대소문자, 공백, 제로폭 문자, 끝맺음 구두점.
+// 단어는 하나도 버리지 않는다.
+function intentSignature(text: string): string {
+  return text
+    .normalize("NFKC")
+    .replace(/[​-‍﻿]/g, "")
+    .toLowerCase()
+    .replace(/[\s　]+/g, " ")
+    .replace(/[.!?。！？]+(\s|$)/g, "$1")
+    .trim();
+}
+
+// ── ② 판정 영속 (durable verdicts) ────────────────────────────────────────
+// store 를 정적 import 하면 판정 모듈이 Electron 부팅 순서에 묶인다(테스트도 깨진다).
+// 실패는 조용히 삼키되 **캐시로만 취급**한다 — 기록이 없다고 판정을 지어내지 않는다.
+function durableGet(kind: string, signature: string): Verdict<string> | undefined {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { getDb } = require("../store/db") as typeof import("../store/db");
+    const row = getDb()
+      .prepare("SELECT verdict, confidence, reason FROM judgment_verdicts WHERE kind = ? AND signature = ?")
+      .get(kind, signature) as { verdict: string; confidence: number; reason: string } | undefined;
+    if (!row) return undefined;
+    getDb()
+      .prepare("UPDATE judgment_verdicts SET hits = hits + 1, last_hit_at = ? WHERE kind = ? AND signature = ?")
+      .run(new Date().toISOString(), kind, signature);
+    return { verdict: row.verdict, confidence: row.confidence, reason: row.reason, source: "llm" };
+  } catch {
+    return undefined;
+  }
+}
+
+function durablePut(kind: string, signature: string, value: Verdict<string>): void {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { getDb } = require("../store/db") as typeof import("../store/db");
+    const now = new Date().toISOString();
+    getDb()
+      .prepare(
+        `INSERT INTO judgment_verdicts (kind, signature, verdict, confidence, reason, created_at, last_hit_at, hits)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+         ON CONFLICT(kind, signature) DO UPDATE SET
+           verdict = excluded.verdict,
+           confidence = excluded.confidence,
+           reason = excluded.reason,
+           last_hit_at = excluded.last_hit_at`,
+      )
+      .run(kind, signature, value.verdict, value.confidence, value.reason, now, now);
+  } catch {
+    // 기록 실패가 판정을 막지 않는다.
+  }
+}
+
+// 캐시 키는 **한 곳에서만** 만든다.
+// (전에는 judge()가 NUL 구분자로 쓰고 peekJudgment()가 공백으로 읽어, 동기 읽기 7곳이
+//  전부 영구 미스였다 — 워밍한 판정을 아무도 못 읽고 매번 보수적 기본값으로 떨어졌다.)
+function judgmentCacheKey(kind: string, input: string): string {
+  return `${kind}\u0000${intentSignature(input)}`;
+}
+
+function subsetCacheKey(kind: string, labels: readonly string[], input: string): string {
+  return `${kind}\u0000${labels.join(",")}\u0000${intentSignature(input)}`;
+}
+
+// 집합 판정은 선택 목록이므로 verdict 칸에 JSON으로 싣는다. kind 앞에 접두사를 붙여
+// 단일 판정과 같은 표를 써도 서로 덮어쓰지 않게 한다.
+function durableSubsetGet<V extends string>(
+  kind: string,
+  labels: readonly V[],
+  signature: string,
+): SubsetVerdict<V> | undefined {
+  const row = durableGet(`subset:${kind}`, signature);
+  if (!row) return undefined;
+  try {
+    const parsed = JSON.parse(row.verdict) as unknown;
+    if (!Array.isArray(parsed)) return undefined;
+    const allowed = new Set<string>(labels);
+    // 라벨 목록이 그 사이 바뀌었을 수 있다 — 지금 허용되지 않는 id가 하나라도 있으면 버린다.
+    if (!parsed.every((id) => typeof id === "string" && allowed.has(id))) return undefined;
+    return { selected: parsed as V[], confidence: row.confidence, reason: row.reason, source: "llm" };
+  } catch {
+    return undefined;
+  }
+}
+
+function durableSubsetPut<V extends string>(kind: string, signature: string, verdict: SubsetVerdict<V>): void {
+  durablePut(`subset:${kind}`, signature, {
+    verdict: JSON.stringify(verdict.selected),
+    confidence: verdict.confidence,
+    reason: verdict.reason,
+    source: "llm",
+  });
+}
+
 /** The one deterministic safety line: mask credential *shapes*, never remove the surrounding text. */
 export function secretValueFloor(text: string): { redacted: string; containedSecret: boolean } {
   const containedSecret = looksSecret(text);
@@ -357,9 +454,16 @@ export async function judge<V extends string>(spec: JudgeSpec<V>): Promise<Verdi
     judgedInput = floor.redacted;
   }
 
-  const cacheKey = `${spec.kind} ${judgedInput}`;
+  const signature = intentSignature(judgedInput);
+  const cacheKey = judgmentCacheKey(spec.kind, judgedInput);
   const cached = cacheGet<V>(cacheKey);
   if (cached) return { ...cached, redactedInput, containedSecret };
+  // 세션 캐시가 비어도(앱 재시작) 같은 뜻의 입력이면 기록된 판정을 쓴다.
+  const durable = durableGet(spec.kind, signature);
+  if (durable && (spec.labels as readonly string[]).includes(durable.verdict)) {
+    cacheSet(cacheKey, durable);
+    return { ...(durable as Verdict<V>), redactedInput, containedSecret };
+  }
 
   const fallbackVerdict: Verdict<V> = {
     verdict: spec.fallback,
@@ -405,7 +509,14 @@ export async function judge<V extends string>(spec: JudgeSpec<V>): Promise<Verdi
   const parsed = parseVerdict<V>(text, spec.labels);
   if (!parsed) return fallbackVerdict;
   const verdict: Verdict<V> = { ...parsed, source: "llm", redactedInput, containedSecret };
-  cacheSet(cacheKey, { verdict: parsed.verdict, confidence: parsed.confidence, reason: parsed.reason, source: "llm" });
+  const stored: Verdict<string> = {
+    verdict: parsed.verdict,
+    confidence: parsed.confidence,
+    reason: parsed.reason,
+    source: "llm",
+  };
+  cacheSet(cacheKey, stored);
+  durablePut(spec.kind, signature, stored);
   return verdict;
 }
 
@@ -423,10 +534,16 @@ export async function judgeRequired<V extends string>(
     redactedInput = floor.redacted;
     containedSecret = floor.containedSecret;
   }
-  const cacheKey = `${spec.kind}\u0000${judgedInput}`;
+  const signature = intentSignature(judgedInput);
+  const cacheKey = judgmentCacheKey(spec.kind, judgedInput);
   const cached = cacheGet<V>(cacheKey);
   if (cached) {
     return { ...cached, source: "llm", redactedInput, containedSecret };
+  }
+  const durable = durableGet(spec.kind, signature);
+  if (durable && (spec.labels as readonly string[]).includes(durable.verdict)) {
+    cacheSet(cacheKey, durable);
+    return { ...(durable as RequiredVerdict<V>), source: "llm", redactedInput, containedSecret };
   }
   const systemPrompt = [
     "You are Agentlas One making one bounded judgment from observed evidence.",
@@ -455,6 +572,7 @@ export async function judgeRequired<V extends string>(
     return { verdict: null, confidence: 0, reason: "", source: "unavailable", redactedInput, containedSecret };
   }
   cacheSet(cacheKey, { ...parsed, source: "llm" });
+  durablePut(spec.kind, signature, { ...parsed, source: "llm" });
   return { ...parsed, source: "llm", redactedInput, containedSecret };
 }
 
@@ -606,12 +724,18 @@ export async function judgeSubset<V extends string>(spec: SubsetSpec<V>): Promis
   const limit = spec.maxInputChars ?? MAX_INPUT_CHARS;
   const input = spec.input.length > limit ? spec.input.slice(0, limit) : spec.input;
 
-  const cacheKey = `${spec.kind} ${spec.labels.join(",")} ${input}`;
+  const signature = intentSignature(input);
+  const cacheKey = subsetCacheKey(spec.kind, spec.labels, input);
   const cached = subsetCache.get(cacheKey);
   if (cached) {
     subsetCache.delete(cacheKey);
     subsetCache.set(cacheKey, cached);
     return cached as SubsetVerdict<V>;
+  }
+  const durableSubset = durableSubsetGet<V>(spec.kind, spec.labels, signature);
+  if (durableSubset) {
+    subsetCache.set(cacheKey, durableSubset as SubsetVerdict<string>);
+    return durableSubset;
   }
 
   const undecided: SubsetVerdict<V> = {
@@ -650,6 +774,7 @@ export async function judgeSubset<V extends string>(spec: SubsetSpec<V>): Promis
   if (!parsed) return undecided;
   const verdict: SubsetVerdict<V> = { ...parsed, source: "llm" };
   subsetCache.set(cacheKey, verdict);
+  durableSubsetPut(spec.kind, signature, verdict);
   if (subsetCache.size > CACHE_MAX) {
     const oldest = subsetCache.keys().next().value;
     if (oldest !== undefined) subsetCache.delete(oldest);
@@ -686,7 +811,7 @@ export function clearJudgmentCache(): void {
  */
 export function peekJudgment<V extends string>(kind: string, input: string, maxInputChars = MAX_INPUT_CHARS): Verdict<V> | null {
   const text = input.length > maxInputChars ? input.slice(0, maxInputChars) : input;
-  const hit = cacheGet<V>(`${kind} ${text}`);
+  const hit = cacheGet<V>(judgmentCacheKey(kind, text));
   return hit ?? null;
 }
 
@@ -709,7 +834,7 @@ export function peekSubsetJudgment<V extends string>(
   maxInputChars = MAX_INPUT_CHARS,
 ): SubsetVerdict<V> | null {
   const text = input.length > maxInputChars ? input.slice(0, maxInputChars) : input;
-  const key = `${kind} ${labels.join(",")} ${text}`;
+  const key = subsetCacheKey(kind, labels, text);
   const hit = subsetCache.get(key);
   if (!hit) return null;
   subsetCache.delete(key);

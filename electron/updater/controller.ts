@@ -121,6 +121,7 @@ type UpdaterEvent =
 export interface UpdateInfoLike {
   version?: string;
   agentlasCompatibility?: unknown;
+  releaseNotes?: unknown;
 }
 
 export interface UpdateCheckResultLike {
@@ -633,6 +634,34 @@ function mergeCheckedAt(state: UpdaterState, checkedAt: number | undefined): Upd
   return checkedAt ? { ...state, lastCheckedAt: checkedAt } : state;
 }
 
+/** Convert electron-updater feed notes into bounded renderer-safe plain text. */
+function normalizeReleaseNotes(value: unknown): string | undefined {
+  const notes = typeof value === "string"
+    ? [value]
+    : Array.isArray(value)
+      ? value.flatMap((entry) => {
+          if (typeof entry === "string") return [entry];
+          if (!entry || typeof entry !== "object") return [];
+          const note = (entry as { note?: unknown }).note;
+          return typeof note === "string" ? [note] : [];
+        })
+      : [];
+  const plainText = notes
+    .join("\n")
+    .replace(/<br\s*\/?\s*>/gi, "\n")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(0, 8)
+    .join("\n")
+    .slice(0, 1_200)
+    .trim();
+  return plainText || undefined;
+}
+
 export class DesktopUpdaterController {
   private readonly logger: Pick<Console, "log" | "warn" | "error">;
   private readonly now: () => number;
@@ -651,6 +680,7 @@ export class DesktopUpdaterController {
   /** True from native quitAndInstall handoff until its terminal resolution. */
   private nativeInstallHandedOff = false;
   private availableVersion: string | null = null;
+  private availableReleaseNotes: string | undefined;
   private blockedTargetVersion: string | null = null;
   private blockedReasonCode: UpdaterErrorCode = "install-not-applied";
   private blockedDiagnostic: UpdaterDiagnostic | undefined;
@@ -1510,7 +1540,12 @@ export class DesktopUpdaterController {
     this.listen("download-progress", (progress: { percent?: number }) => {
       if (!this.availableVersion || terminalStates.has(this.state.status)) return;
       const percent = Number.isFinite(progress?.percent) ? Math.max(0, Math.min(100, Math.round(progress.percent!))) : 0;
-      this.publish({ status: "downloading", version: this.availableVersion, progress: percent });
+      this.publish({
+        status: "downloading",
+        version: this.availableVersion,
+        progress: percent,
+        releaseNotes: this.availableReleaseNotes,
+      });
     });
     this.listen("update-downloaded", (info: UpdateInfoLike) => {
       const version = typeof info?.version === "string" ? info.version : this.availableVersion ?? undefined;
@@ -1520,11 +1555,13 @@ export class DesktopUpdaterController {
         return;
       }
       this.availableVersion = version;
+      this.availableReleaseNotes = normalizeReleaseNotes(info.releaseNotes) ?? this.availableReleaseNotes;
       this.clearTransientRetry();
       this.publish({
         status: "downloaded",
         version,
         progress: 100,
+        releaseNotes: this.availableReleaseNotes,
         compatibility: this.state.compatibility,
       });
     });
@@ -1619,8 +1656,9 @@ export class DesktopUpdaterController {
     if (!(await this.verifyInstalledAppTrustOrBlock(version, access))) return;
 
     this.availableVersion = version;
-    this.publish({ status: "available", version, compatibility });
-    this.publish({ status: "downloading", version, progress: 0, compatibility });
+    this.availableReleaseNotes = normalizeReleaseNotes(info.releaseNotes);
+    this.publish({ status: "available", version, releaseNotes: this.availableReleaseNotes, compatibility });
+    this.publish({ status: "downloading", version, progress: 0, releaseNotes: this.availableReleaseNotes, compatibility });
     this.downloadPromise = this.deps.updater
       .downloadUpdate()
       .then(() => undefined)
@@ -1659,6 +1697,7 @@ export class DesktopUpdaterController {
       this.blockedNativeInstallFailures = 0;
       this.blockedRetryAfter = undefined;
       this.availableVersion = null;
+      this.availableReleaseNotes = undefined;
       this.publish({ status: "idle" });
     }
     if (isSourceRepairRetry) {
@@ -1670,6 +1709,7 @@ export class DesktopUpdaterController {
       this.blockedNativeInstallFailures = 0;
       this.blockedRetryAfter = undefined;
       this.availableVersion = null;
+      this.availableReleaseNotes = undefined;
       this.publish({ status: "idle" });
     }
     // A handoff that ended without replacing the bundle and without raising a
@@ -1696,6 +1736,7 @@ export class DesktopUpdaterController {
       this.blockedNativeInstallFailures = 0;
       this.blockedRetryAfter = undefined;
       this.availableVersion = null;
+      this.availableReleaseNotes = undefined;
       this.publish({ status: "idle" });
     }
     if (this.automaticInstallPaused) {
@@ -1721,6 +1762,7 @@ export class DesktopUpdaterController {
       this.blockedNativeInstallFailures = 0;
       this.blockedRetryAfter = undefined;
       this.availableVersion = null;
+      this.availableReleaseNotes = undefined;
       this.publish({ status: "idle" });
     }
     if (this.state.status === "installing" || this.state.status === "downloaded") {

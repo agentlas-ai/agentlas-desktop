@@ -264,7 +264,11 @@ export async function runMigration(opts: MigrationOptions): Promise<MigrationRes
       name: `${src.label} 마이그레이션`,
       sourceType: "local",
       agentPool: [{
+        entityKind: "agent",
+        targetId: agent.id,
         agentId: agent.id,
+        firmId: null,
+        controllerAgentId: null,
         source: "local",
         releaseId: null,
         nameSnapshot: src.label,

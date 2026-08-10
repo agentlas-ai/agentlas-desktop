@@ -95,6 +95,7 @@ export async function runHandsFreeAgentOs(
       firmId: team.firm.id,
       projectId: input.chat.projectId,
       title: `${team.firm.name} operations`,
+      kind: "division",
     });
     firmChatId = firmChat.id;
     operatorAgentId = team.agent.id;

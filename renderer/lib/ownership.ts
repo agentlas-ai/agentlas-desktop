@@ -1,4 +1,5 @@
-// 소유 vs 빌림을 "외형(CSS)"이 아니라 "사실"로 가르는 단일 분류기.
+// 설치 보관 상태와 출처를 표시하는 분류기. 서명된 소유권 원장이 없으므로
+// 로컬 사본/Cloud 복원/Hub 설치만으로 법적·계정 소유권을 확정하지 않는다.
 // Agent Cloud 복원본은 로컬 실행 폴더를 가지지만 권위 출처는 Cloud다. localPath 유무만으로
 // 출처를 추측하면 복원 자산이 로컬 임포트로 오표시되므로 assetSource를 먼저 판정한다.
 import type { InstalledAgent } from "./types";
@@ -7,7 +8,7 @@ export type OwnershipClass = "owned-local" | "owned-cloud" | "borrowed";
 
 export interface OwnershipInfo {
   klass: OwnershipClass;
-  /** 내 자산인가(파일을 내가 가졌나). borrowed 만 false. */
+  /** 로컬/계정 라이브러리에 실행 사본이 있는가. 법적 소유권 의미가 아니다. */
   owned: boolean;
   /** 짧은 배지 라벨 (ko) */
   label: string;
@@ -32,7 +33,7 @@ export function classifyAgent(
     return {
       klass: "owned-cloud",
       owned: true,
-      label: ko ? "내 자산" : "My asset",
+      label: ko ? "Cloud 복원 사본" : "Cloud-restored copy",
       origin: ko
         ? `Agent Cloud에서 검증 복원된 실행 사본${version}`
         : `Verified execution copy restored from Agent Cloud${version}`,
@@ -45,7 +46,7 @@ export function classifyAgent(
     return {
       klass: "owned-local",
       owned: true,
-      label: ko ? "내 자산" : "My asset",
+      label: fromHub ? (ko ? "Hub 설치 사본" : "Hub-installed copy") : (ko ? "로컬 설치 사본" : "Local installed copy"),
       origin: fromHub
         ? (ko ? "Hub 패키지를 로컬 실행 사본으로 설치함" : "Hub package installed as a local execution copy")
         : a.localPath,
@@ -56,7 +57,7 @@ export function classifyAgent(
   return {
     klass: "owned-cloud",
     owned: true,
-    label: ko ? "내 자산" : "My asset",
+    label: ko ? "라이브러리 설치 사본" : "Library-installed copy",
     origin: ko ? "클라우드에서 내 라이브러리에 설치됨" : "Installed to my library from the cloud",
     fragile: false,
   };

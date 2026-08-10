@@ -9,7 +9,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
-import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import type { DirListing, FsReadScope, TextFilePreview, WorkspaceNode } from "@/lib/types";
 import {
   IconChevronRight,
@@ -70,11 +69,10 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
   const [preview, setPreview] = useState<TextFilePreview | null>(null);
   const [recoveryPending, setRecoveryPending] = useState(false);
   const dragStateRef = useRef<{ startX: number; startWidth: number; currentWidth: number } | null>(null);
-  const requestBridgeRecovery = useCallback((scope: string) => {
+  const requestBridgeRecovery = useCallback((_scope: string) => {
     setRecoveryPending(true);
-    requestOneOperationalRecovery(scope, new Error("Desktop bridge unavailable"));
   }, []);
-  const markForOneRecovery = useCallback(() => setRecoveryPending(true), []);
+  const markRecoveryPending = useCallback(() => setRecoveryPending(true), []);
 
   // 너비 영구 저장
   useEffect(() => {
@@ -125,14 +123,14 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
       } catch {
         if (!cancelled) {
           setRootListing(null);
-          markForOneRecovery();
+          markRecoveryPending();
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [chatId, markForOneRecovery, requestBridgeRecovery]);
+  }, [chatId, markRecoveryPending, requestBridgeRecovery]);
 
   const pickFolder = useCallback(async () => {
     const api = ipc();
@@ -154,9 +152,9 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
       if (persistRef.current) await persistRef.current.save(picked.path);
       else await api.workspace.set(chatId, picked);
     } catch {
-      markForOneRecovery();
+      markRecoveryPending();
     }
-  }, [chatId, markForOneRecovery, requestBridgeRecovery]);
+  }, [chatId, markRecoveryPending, requestBridgeRecovery]);
 
   const useProjectFolder = useCallback(async () => {
     const api = ipc();
@@ -169,9 +167,7 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
       await api.workspace.setFromProject(chatId, projectFolder.projectId);
       const folder = await api.workspace.get(chatId);
       if (!folder) {
-        const cause = new Error("Project folder binding was not persisted");
-        requestOneOperationalRecovery("workspace-project-folder", cause);
-        throw cause;
+        throw new Error("Project folder binding was not persisted");
       }
       const scope: FsReadScope = { kind: "chat-workspace", chatId };
       const listing = await api.fs.listDirectory(folder, scope, false);
@@ -182,9 +178,9 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
       setSelected(null);
       setPreview(null);
     } catch {
-      markForOneRecovery();
+      markRecoveryPending();
     }
-  }, [chatId, markForOneRecovery, projectFolder, requestBridgeRecovery]);
+  }, [chatId, markRecoveryPending, projectFolder, requestBridgeRecovery]);
 
   const refresh = useCallback(async () => {
     const api = ipc();
@@ -207,9 +203,9 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
       }
       setExpanded(next);
     } catch {
-      markForOneRecovery();
+      markRecoveryPending();
     }
-  }, [rootPath, readScope, expanded, markForOneRecovery, requestBridgeRecovery]);
+  }, [rootPath, readScope, expanded, markRecoveryPending, requestBridgeRecovery]);
 
   const toggleDir = useCallback(
     async (node: WorkspaceNode) => {
@@ -232,10 +228,10 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
         next.set(node.path, listing);
         setExpanded(next);
       } catch {
-        markForOneRecovery();
+        markRecoveryPending();
       }
     },
-    [expanded, markForOneRecovery, readScope, requestBridgeRecovery],
+    [expanded, markRecoveryPending, readScope, requestBridgeRecovery],
   );
 
   const openFile = useCallback(async (node: WorkspaceNode) => {
@@ -257,9 +253,9 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
       setPreview(text);
       onOpenFilePreview?.(toWorkspaceFilePreview(node, text));
     } catch {
-      markForOneRecovery();
+      markRecoveryPending();
     }
-  }, [markForOneRecovery, onOpenFilePreview, readScope, requestBridgeRecovery]);
+  }, [markRecoveryPending, onOpenFilePreview, readScope, requestBridgeRecovery]);
 
   // 좌측 가장자리 드래그 핸들
   const onResizeStart = useCallback(
@@ -416,7 +412,7 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
       </div>
 
       {/* 본문 — 빈 상태 / 트리 */}
-      {recoveryPending && <div data-one-content-slot data-capability="workspace-recovery" />}
+      {recoveryPending && <div role="alert" style={{ margin: "8px 10px", padding: "9px 10px", borderRadius: 8, border: "1px solid var(--paper-edge)", background: "var(--paper-2)", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.45 }}>{t("workspace.load_failed")}</div>}
       {!rootPath ? (
         <EmptyState
           onPick={() => void pickFolder()}

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.9.76 — 2026-08-10
+
+This release binds Agentlas OS v1.1.105 at
+90e5cfa081637ec3ea5a701e67d29b100b88ea67.
+These source gates do not themselves publish a release; the Releases page
+stays the authority for what is actually downloadable.
+
+- Work is project-owned from end to end. Project conversations use the Work
+  orchestrator, while Agentlas One keeps its own identity, recovery flow, and
+  runtime session instead of appearing inside a project task.
+- New task now asks how to begin: start a new conversation or import a safe,
+  project-matched Claude Code or Codex CLI transcript. Imported history stays
+  attached to the selected project and leaves the original CLI session intact.
+- Agent Toolbox now treats teams and individual agents as reusable project
+  tools. It separates team identity from the controller agent, shows exact
+  source and release binding, blocks ambiguous remote attachments, and keeps
+  project memory separate from portable Experience Chips.
+- Steering a running task now stops the current direction and resumes with the
+  new instruction without requiring a trip to another screen. The composer and
+  task controls have clearer active states and larger interaction targets.
+- Project navigation no longer rescans up to 200 unrelated chats whenever a
+  screen opens. Project detail uses the indexed project task ledger, and shared
+  navigation reads already-materialized Tasks directly.
+- Update cards show the target version, a bounded in-app changelog, a link to
+  the full public release record, and one explicit update-and-restart action.
+  The layout remains usable when the sidebar or window is narrow.
+- Decision sheets now emphasize the concrete choice and consequence instead of
+  a fixed metadata grid. Labels state whether a choice executes work, closes
+  the sheet, or reminds you in 24 hours.
+
 ## 0.9.75 — 2026-08-10
 
 This release binds Agentlas OS v1.1.105 at

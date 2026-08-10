@@ -119,8 +119,10 @@ export function getInstalledAgentHubBinding(installedAgentId: string): Installed
   return row ? fromRow(row) : null;
 }
 
-export function listInstalledAgentHubBindings(limit = 64): InstalledAgentHubBinding[] {
-  const boundedLimit = Math.max(0, Math.min(64, Math.floor(limit)));
+export function listInstalledAgentHubBindings(limit = 2_048): InstalledAgentHubBinding[] {
+  // The renderer uses this as an identity ledger, not a paged activity feed.
+  // Returning only the newest 64 silently made older remote tools look unbound.
+  const boundedLimit = Math.max(0, Math.min(2_048, Math.floor(limit)));
   if (boundedLimit === 0) return [];
   const rows = getDb().prepare(
     `SELECT b.installed_agent_id, b.agent_definition_id, b.agent_release_id, b.source, b.bound_at

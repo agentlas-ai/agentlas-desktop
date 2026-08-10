@@ -44,8 +44,30 @@ import {
 export default function FirmDetailWrapper() {
   return (
     <Suspense fallback={null}>
-      <FirmDetailPage />
+      <FirmDetailRedirect />
     </Suspense>
+  );
+}
+
+/**
+ * Firm detail used to maintain a second, agent-centric copy of My Agents with
+ * its own chat launcher, identity labels, and Experience semantics. Keep old
+ * deep links working, but resolve them into the canonical project-toolbox
+ * detail so a team has one user-facing model.
+ */
+function FirmDetailRedirect() {
+  const searchParams = useSearchParams();
+  const { locale } = useT();
+  const id = searchParams.get("id") ?? "";
+
+  useEffect(() => {
+    navigate(id ? `/library/agents?firmId=${encodeURIComponent(id)}` : "/library/agents", "replace");
+  }, [id]);
+
+  return (
+    <main role="status" style={{ minHeight: "100%", display: "grid", placeItems: "center", padding: 24, color: "var(--muted-deep)", fontSize: 13 }}>
+      {locale === "ko" ? "팀 도구함으로 이동하는 중…" : "Opening the team toolbox…"}
+    </main>
   );
 }
 

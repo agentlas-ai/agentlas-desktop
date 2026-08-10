@@ -6,7 +6,6 @@ import { IconBuilding, IconChevronDown, IconChevronRight, IconUsers } from "@/co
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
-import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import {
   buildProjectRosterSections,
   projectPoolMemberKey,
@@ -17,6 +16,7 @@ import type {
   FsPathGrant,
   HubAgentBookmark,
   InstalledAgent,
+  InstalledAgentExactBinding,
   InstalledFirm,
   MarketplaceListing,
   ProjectAgentPoolMember,
@@ -56,6 +56,7 @@ export default function NewProjectPage() {
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
   const [cloudListings, setCloudListings] = useState<MarketplaceListing[]>([]);
   const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
+  const [exactBindings, setExactBindings] = useState<InstalledAgentExactBinding[]>([]);
   const [agentPool, setAgentPool] = useState<ProjectAgentPoolMember[]>([]);
   const [openRosterSources, setOpenRosterSources] = useState<Record<ProjectRosterSource, boolean>>({ local: true, cloud: true, hub: false });
   const [openRosterFirms, setOpenRosterFirms] = useState<Record<string, boolean>>({});
@@ -67,25 +68,24 @@ export default function NewProjectPage() {
   const [draftHydrated, setDraftHydrated] = useState(false);
 
   const rosterSections = useMemo(
-    () => buildProjectRosterSections(agents, firms, cloudListings, hubBookmarks, locale),
-    [agents, cloudListings, firms, hubBookmarks, locale],
+    () => buildProjectRosterSections(agents, firms, cloudListings, hubBookmarks, locale, exactBindings),
+    [agents, cloudListings, exactBindings, firms, hubBookmarks, locale],
   );
   const candidateByKey = useMemo(() => {
     const rows = rosterSections.flatMap((section) => [
       ...section.standalone,
-      ...section.firms.flatMap((firm) => firm.members),
+      ...section.firms.flatMap((firm) => [firm.team, ...firm.members]),
     ]);
     return new Map(rows.map((candidate) => [candidate.key, candidate]));
   }, [rosterSections]);
   const selectedMemberKeys = useMemo(() => new Set(agentPool.map(projectPoolMemberKey)), [agentPool]);
   const rosterCount = useMemo(() => rosterSections.reduce(
-    (sum, section) => sum + section.standalone.length + section.firms.reduce((firmSum, firm) => firmSum + firm.members.length, 0),
+    (sum, section) => sum + section.standalone.length + section.firms.reduce((firmSum, firm) => firmSum + 1 + firm.members.length, 0),
     0,
   ), [rosterSections]);
 
-  function recoverMissingBridge(scope: string) {
+  function recoverMissingBridge(_scope: string) {
     setNeedsHelp(true);
-    requestOneOperationalRecovery(scope, new Error("Desktop bridge unavailable"));
   }
 
   useEffect(() => {
@@ -101,12 +101,26 @@ export default function NewProjectPage() {
       if (typeof draft.githubUrl === "string") setGithubUrl(draft.githubUrl);
       if (typeof draft.sampleName === "string") setSampleName(draft.sampleName);
       if (Array.isArray(draft.agentPool)) {
-        setAgentPool(draft.agentPool.filter((member): member is ProjectAgentPoolMember => (
-          Boolean(member)
-          && typeof member.agentId === "string"
-          && (member.source === "local" || member.source === "cloud" || member.source === "hub")
-          && typeof member.nameSnapshot === "string"
-        )));
+        const restored: ProjectAgentPoolMember[] = [];
+        for (const member of draft.agentPool) {
+          if (!member || (member.source !== "local" && member.source !== "cloud" && member.source !== "hub") || typeof member.nameSnapshot !== "string") continue;
+          if (member.entityKind === "team" && typeof member.targetId === "string") {
+            restored.push(member);
+            continue;
+          }
+          if (typeof member.agentId !== "string" || !member.agentId) continue;
+          restored.push({
+            entityKind: "agent" as const,
+            targetId: typeof member.targetId === "string" && member.targetId ? member.targetId : member.agentId,
+            agentId: member.agentId,
+            firmId: null,
+            controllerAgentId: null,
+            source: member.source,
+            releaseId: typeof member.releaseId === "string" ? member.releaseId : null,
+            nameSnapshot: member.nameSnapshot,
+          });
+        }
+        setAgentPool(restored);
       }
     } catch {
       window.sessionStorage.removeItem(PROJECT_DRAFT_KEY);
@@ -145,18 +159,20 @@ export default function NewProjectPage() {
       api.firms.list().catch(() => [] as InstalledFirm[]),
       api.marketplace.listMine().catch(() => [] as MarketplaceListing[]),
       api.marketplace.bookmarks().catch(() => [] as HubAgentBookmark[]),
-    ]).then(([agentRows, firmRows, mine, bookmarks]) => {
+      api.agents.exactBindings().catch(() => [] as InstalledAgentExactBinding[]),
+    ]).then(([agentRows, firmRows, mine, bookmarks, bindings]) => {
       setAgents(agentRows);
       setFirms(firmRows);
       setCloudListings(mine);
       setHubBookmarks(bookmarks);
+      setExactBindings(bindings);
     }).catch(() => setNeedsHelp(true));
   }, []);
 
   function addCandidate(candidate: ProjectRosterCandidate) {
     setAgentPool((current) => {
       if (current.some((member) => projectPoolMemberKey(member) === candidate.key)) return current;
-      if (!candidate.callable || (current.length === 0 && !candidate.installed)) return current;
+      if (!candidate.callable) return current;
       return [...current, candidate.member];
     });
   }
@@ -166,7 +182,7 @@ export default function NewProjectPage() {
       const next = [...current];
       const selected = new Set(next.map(projectPoolMemberKey));
       for (const candidate of candidates) {
-        if (!candidate.callable || selected.has(candidate.key) || (next.length === 0 && !candidate.installed)) continue;
+        if (!candidate.callable || selected.has(candidate.key)) continue;
         next.push(candidate.member);
         selected.add(candidate.key);
       }
@@ -264,7 +280,6 @@ export default function NewProjectPage() {
         if (!nameEdited) setName(result.folderGrant.path.split(/[\\/]/).filter(Boolean).at(-1) ?? "");
       } else if (result.status === "action_required") {
         setNeedsHelp(true);
-        requestOneOperationalRecovery("project-create-github", result);
       }
     } catch {
       setNeedsHelp(true);
@@ -279,7 +294,7 @@ export default function NewProjectPage() {
       recoverMissingBridge("project-create-submit");
       return;
     }
-    if (!name.trim() || agentPool.length === 0 || busy) return;
+    if (!name.trim() || busy) return;
     setBusy(true);
     setNeedsHelp(false);
     try {
@@ -313,7 +328,7 @@ export default function NewProjectPage() {
       <header className="project-create-head titlebar-drag">
         <div>
           <span>{ko ? "새 프로젝트" : "New project"}</span>
-          <h1>{ko ? "프로젝트를 연결하고 팀을 구성하세요" : "Connect your project and assemble its team"}</h1>
+          <h1>{ko ? "프로젝트를 연결하고 도구를 붙이세요" : "Connect your project and attach its tools"}</h1>
         </div>
         <button type="button" className="project-create-close titlebar-nodrag" onClick={() => router.back()}>
           {ko ? "닫기" : "Close"}
@@ -331,7 +346,7 @@ export default function NewProjectPage() {
               ? (ko ? "소스" : "Source")
               : item === "instructions"
                 ? (ko ? "프로젝트 지시" : "Instructions")
-                : (ko ? "조직도" : "Team");
+                : (ko ? "도구" : "Tools");
           return (
             <button key={item} type="button" data-active={step === item} disabled={unavailable} onClick={() => setStep(item)}>
               <span>{index + 1}</span>{label}
@@ -412,16 +427,16 @@ export default function NewProjectPage() {
           <section className="project-create-section project-agent-step">
             <div className="project-create-copy">
               <span className="project-create-kicker">03</span>
-              {/* 책임 팀이라는 것은 없다. 오케스트레이터는 대시보드에서 지정한
-                  세션 LLM이고, 여기서 고르는 것은 그 LLM이 부를 대기조다. */}
-              <h2>{ko ? "이 프로젝트의 대기조를 정하세요" : "Choose this project's on-call pool"}</h2>
-              <p>{ko ? `실행 가능한 팀과 에이전트 ${rosterCount}개가 있습니다. 여기서 고른 에이전트는 순위 없이 이 프로젝트의 대기조가 됩니다. 작업을 나누는 건 대시보드에서 지정한 오케스트레이터 LLM이고, 이 대기조를 먼저 쓴 뒤 부족한 역량만 Network에서 보강합니다.` : `${rosterCount} callable teams and agents are available. Whatever you pick here joins this project's on-call pool, in no particular order. The orchestrator LLM you set on the dashboard is what splits up the work; it draws on this pool first and only reaches into Network for a capability it is missing.`}</p>
+              {/* 작업 주체는 프로젝트다. 여기서 고르는 팀과 에이전트는 프로젝트에
+                  연결해 두는 재사용 도구이며 세션 소유자나 책임자가 아니다. */}
+              <h2>{ko ? "이 프로젝트에 도구를 붙이세요" : "Attach tools to this project"}</h2>
+              <p>{ko ? `실행 가능한 팀과 에이전트 ${rosterCount}개가 있습니다. 필요한 도구만 붙이면 되며, 지금 비워 두고 프로젝트를 만든 뒤 추가해도 됩니다. 작업은 프로젝트가 소유하고 내장 오케스트레이터가 분배하며, 부족한 역량은 Network에서 보강합니다.` : `${rosterCount} callable teams and agents are available. Attach only the tools this project needs, or leave this empty and add them later. The project owns the work, its built-in orchestrator delegates it, and Network can fill capability gaps.`}</p>
             </div>
             <div className="project-agent-workbench project-agent-workbench-org">
               <div className="project-agent-pool project-team-org-create" data-project-agent-pool data-empty={agentPool.length === 0}>
-                <div className="project-agent-pool-head"><strong>{ko ? "이 프로젝트의 대기조" : "This project's on-call pool"}</strong><span>{agentPool.length}</span></div>
+                <div className="project-agent-pool-head"><strong>{ko ? "프로젝트 도구" : "Project tools"}</strong><span>{agentPool.length}</span></div>
                 {agentPool.length === 0 ? (
-                  <div className="project-agent-drop-copy">{ko ? "오른쪽에서 이 프로젝트가 쓸 에이전트를 끌어오세요" : "Drag in the agents this project should have on call"}</div>
+                  <div className="project-agent-drop-copy">{ko ? "선택 사항입니다. 오른쪽에서 팀이나 에이전트를 추가하거나 그대로 진행하세요." : "Optional. Add a team or agent from the right, or continue without one."}</div>
                 ) : (
                   <div className="project-team-create-tree">
                     {agentPool.map((member, index) => {
@@ -442,7 +457,7 @@ export default function NewProjectPage() {
                               call per task, so a number here would invite the user to curate an
                               order that changes nothing. */}
                           <span className="project-agent-order" aria-hidden="true">·</span>
-                          <span className="project-team-create-copy"><strong>{member.nameSnapshot}</strong><small>{ko ? "대기조 · 오케스트레이터가 필요할 때 호출" : "On call · invoked by the orchestrator when needed"}</small></span>
+                          <span className="project-team-create-copy"><strong>{member.nameSnapshot}</strong><small>{ko ? "프로젝트 도구 · 필요할 때 호출" : "Project tool · invoked when needed"}</small></span>
                           <span className="project-team-create-actions">
                             <button type="button" onClick={() => setAgentPool((current) => current.filter((item) => projectPoolMemberKey(item) !== key))}>{ko ? "제거" : "Remove"}</button>
                           </span>
@@ -455,7 +470,7 @@ export default function NewProjectPage() {
               <aside className="project-agent-library project-agent-library-tree-create" aria-label={ko ? "실행 가능한 팀과 에이전트" : "Callable teams and agents"}>
                 <div className="project-agent-pool-head"><strong>{ko ? "팀과 에이전트" : "Teams and agents"}</strong><span>{rosterCount}</span></div>
                 {rosterSections.map((section) => {
-                  const count = section.standalone.length + section.firms.reduce((sum, firm) => sum + firm.members.length, 0);
+                  const count = section.standalone.length + section.firms.reduce((sum, firm) => sum + 1 + firm.members.length, 0);
                   const open = openRosterSources[section.source];
                   return (
                     <div key={section.source} className="project-roster-create-section">
@@ -467,7 +482,7 @@ export default function NewProjectPage() {
                         <div>
                           {section.firms.map((firm) => {
                             const firmOpen = openRosterFirms[firm.id] ?? false;
-                            const addable = firm.members.filter((member) => member.callable && !selectedMemberKeys.has(member.key));
+                            const teamAddable = firm.team.callable && !selectedMemberKeys.has(firm.team.key);
                             return (
                               <div key={firm.id} className="project-roster-firm-create">
                                 <div className="project-roster-firm-row-create">
@@ -481,10 +496,10 @@ export default function NewProjectPage() {
                                     <button type="button" onClick={() => setOpenRosterFirms((current) => ({ ...current, [firm.id]: !firmOpen }))} aria-expanded={firmOpen}>{firmOpen ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}</button>
                                   )}
                                   <IconBuilding size={12} /><strong>{firm.name}</strong>{firm.selfReferential ? null : <span>{firm.members.length}</span>}
-                                  <button type="button" disabled={addable.length === 0} onClick={() => addCandidates(addable)}>{ko ? "팀 추가" : "Add team"}</button>
+                                  <button type="button" disabled={!teamAddable} onClick={() => addCandidate(firm.team)}>{ko ? "팀 도구 추가" : "Add team tool"}</button>
                                 </div>
                                 {firmOpen && !firm.selfReferential ? <div className="project-roster-children-create">{firm.members.map((candidate) => (
-                                  <RosterCandidateButton key={candidate.key} candidate={candidate} ko={ko} selected={selectedMemberKeys.has(candidate.key)} requiresController={!candidate.installed && agentPool.length === 0} dragging={draggedCandidateKey === candidate.key} onAdd={addCandidate} onPointerDown={beginPointerDrag} onPointerUp={finishPointerDrag} onPointerCancel={() => { pointerDragRef.current = null; setDraggedCandidateKey(null); }} />
+                                  <RosterCandidateButton key={candidate.key} candidate={candidate} ko={ko} selected={selectedMemberKeys.has(candidate.key)} dragging={draggedCandidateKey === candidate.key} onAdd={addCandidate} onPointerDown={beginPointerDrag} onPointerUp={finishPointerDrag} onPointerCancel={() => { pointerDragRef.current = null; setDraggedCandidateKey(null); }} />
                                 ))}</div> : null}
                               </div>
                             );
@@ -493,7 +508,7 @@ export default function NewProjectPage() {
                             <div className="project-roster-standalone-head">{ko ? "단일 에이전트" : "Single agents"}</div>
                           ) : null}
                           <div className="project-roster-standalone-create">{section.standalone.map((candidate) => (
-                            <RosterCandidateButton key={candidate.key} candidate={candidate} ko={ko} selected={selectedMemberKeys.has(candidate.key)} requiresController={!candidate.installed && agentPool.length === 0} dragging={draggedCandidateKey === candidate.key} onAdd={addCandidate} onPointerDown={beginPointerDrag} onPointerUp={finishPointerDrag} onPointerCancel={() => { pointerDragRef.current = null; setDraggedCandidateKey(null); }} />
+                            <RosterCandidateButton key={candidate.key} candidate={candidate} ko={ko} selected={selectedMemberKeys.has(candidate.key)} dragging={draggedCandidateKey === candidate.key} onAdd={addCandidate} onPointerDown={beginPointerDrag} onPointerUp={finishPointerDrag} onPointerCancel={() => { pointerDragRef.current = null; setDraggedCandidateKey(null); }} />
                           ))}</div>
                         </div>
                       ) : null}
@@ -504,12 +519,12 @@ export default function NewProjectPage() {
             </div>
             <div className="project-create-actions">
               <button type="button" className="secondary" onClick={() => setStep("instructions")}>{ko ? "이전" : "Back"}</button>
-              <button type="button" disabled={agentPool.length === 0 || busy} onClick={() => void submit()}>{busy ? (ko ? "만드는 중…" : "Creating…") : (ko ? "프로젝트 만들기" : "Create project")}</button>
+              <button type="button" disabled={busy} onClick={() => void submit()}>{busy ? (ko ? "만드는 중…" : "Creating…") : (ko ? "프로젝트 만들기" : "Create project")}</button>
             </div>
           </section>
         )}
 
-        {needsHelp ? <aside className="project-help-slot" aria-live="polite"><div data-one-content-slot data-capability="project-create-recovery" /></aside> : null}
+        {needsHelp ? <aside className="project-help-slot" role="alert">{ko ? "프로젝트 연결을 완료하지 못했습니다. 입력 내용은 유지했으니 연결 상태를 확인하고 다시 시도하세요." : "The project could not be connected. Your entries are preserved; check the connection and try again."}</aside> : null}
       </main>
     </div>
   );
@@ -519,7 +534,6 @@ function RosterCandidateButton({
   candidate,
   ko,
   selected,
-  requiresController,
   dragging,
   onAdd,
   onPointerDown,
@@ -529,21 +543,18 @@ function RosterCandidateButton({
   candidate: ProjectRosterCandidate;
   ko: boolean;
   selected: boolean;
-  requiresController: boolean;
   dragging: boolean;
   onAdd: (candidate: ProjectRosterCandidate) => void;
   onPointerDown: (event: ReactPointerEvent<HTMLElement>, kind: "candidate", id: string) => void;
   onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
   onPointerCancel: () => void;
 }) {
-  const disabled = selected || requiresController || !candidate.callable;
+  const disabled = selected || !candidate.callable;
   const helper = selected
     ? (ko ? "프로젝트에 추가됨" : "Added to project")
     : !candidate.callable
-      ? (ko ? "조직 역할 · 팀 책임자를 통해 실행" : "Organization role · runs through its team controller")
-    : requiresController
-      ? (ko ? "설치된 에이전트를 먼저 하나 넣어주세요" : "Add an installed agent first")
-      : candidate.tagline;
+      ? candidate.blockedReason ?? (ko ? "실행할 수 없는 항목" : "Not callable")
+    : candidate.tagline;
   return (
     <button
       type="button"

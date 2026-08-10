@@ -333,13 +333,14 @@ export function hasEquivalentMemory(
   return Boolean(row);
 }
 
-/** 에이전트 상세 UI용 — 이 에이전트가 남긴 모든 활성 메모리(프로젝트 무관), 최신순.
- *  런타임 큐레이터가 쌓는 durable 메모리를 자가진화/타임라인 화면에 보이게 하는 읽기 경로. */
+/** 에이전트 상세 UI용 — 프로젝트에 귀속되지 않은 agent-repo 메모리만 최신순.
+ *  프로젝트 메모리는 프로젝트가 소유하므로 전역 에이전트 상세에서 섞거나 노출하지 않는다. */
 export function listMemoryEntriesForAgentUi(agentId: string, limit = 100): MemoryEntry[] {
   const rows = getDb()
     .prepare(
       `SELECT * FROM memory_entries
        WHERE superseded_at IS NULL AND agent_id = ?
+         AND scope = 'agent_repo' AND project_id IS NULL AND project_path IS NULL
        ORDER BY created_at DESC LIMIT ?`,
     )
     .all(agentId, limit) as Row[];

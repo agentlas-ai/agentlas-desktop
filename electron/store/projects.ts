@@ -21,7 +21,10 @@ function toProject(row: ProjectRow): Project {
   let agentPool: ProjectAgentPoolMember[] = [];
   try {
     const parsed = JSON.parse(row.agent_pool_json || "[]") as unknown;
-    if (Array.isArray(parsed)) agentPool = parsed.filter(isProjectAgentPoolMember);
+    if (Array.isArray(parsed)) agentPool = parsed.flatMap((item) => {
+      const normalized = normalizeProjectAgentPoolMember(item);
+      return normalized ? [normalized] : [];
+    });
   } catch {
     agentPool = [];
   }
@@ -39,20 +42,49 @@ function toProject(row: ProjectRow): Project {
   };
 }
 
-function isProjectAgentPoolMember(value: unknown): value is ProjectAgentPoolMember {
-  if (!value || typeof value !== "object") return false;
-  const item = value as Partial<ProjectAgentPoolMember>;
-  return typeof item.agentId === "string"
-    && (item.source === "local" || item.source === "cloud" || item.source === "hub")
-    && (item.releaseId === null || typeof item.releaseId === "string")
-    && typeof item.nameSnapshot === "string";
+function normalizeProjectAgentPoolMember(value: unknown): ProjectAgentPoolMember | null {
+  if (!value || typeof value !== "object") return null;
+  const item = value as Record<string, unknown>;
+  const source = item.source;
+  const releaseId = item.releaseId;
+  const nameSnapshot = item.nameSnapshot;
+  if ((source !== "local" && source !== "cloud" && source !== "hub")
+    || (releaseId !== null && typeof releaseId !== "string")
+    || typeof nameSnapshot !== "string") return null;
+
+  if (item.entityKind === "team") {
+    const targetId = typeof item.targetId === "string" ? item.targetId.trim() : "";
+    const firmId = typeof item.firmId === "string" && item.firmId.trim() ? item.firmId.trim() : null;
+    const controllerAgentId = typeof item.controllerAgentId === "string" && item.controllerAgentId.trim()
+      ? item.controllerAgentId.trim()
+      : null;
+    if (!targetId || (source === "local" && !firmId)) return null;
+    return { entityKind: "team", targetId, agentId: null, firmId, controllerAgentId, source, releaseId, nameSnapshot };
+  }
+
+  const legacyAgentId = typeof item.agentId === "string" && item.agentId.trim() ? item.agentId.trim() : null;
+  const targetId = typeof item.targetId === "string" ? item.targetId.trim() : legacyAgentId;
+  if (!targetId || (source === "local" && !legacyAgentId)) return null;
+  return {
+    entityKind: "agent",
+    targetId,
+    agentId: legacyAgentId,
+    firmId: null,
+    controllerAgentId: null,
+    source,
+    releaseId,
+    nameSnapshot,
+  };
 }
 
 function normalizeAgentPool(value: ProjectAgentPoolMember[] | undefined): ProjectAgentPoolMember[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
-  return value.filter(isProjectAgentPoolMember).filter((member) => {
-    const key = `${member.source}:${member.agentId}:${member.releaseId ?? ""}`;
+  return value.flatMap((item) => {
+    const member = normalizeProjectAgentPoolMember(item);
+    return member ? [member] : [];
+  }).filter((member) => {
+    const key = `${member.source}:${member.entityKind}:${member.targetId}:${member.releaseId ?? ""}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

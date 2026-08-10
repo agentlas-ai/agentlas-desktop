@@ -183,6 +183,7 @@ const api: AgentlasIpc = {
   },
   agents: {
     usageSummary: () => ipcRenderer.invoke("agents:usage-summary"),
+    exactBindings: () => ipcRenderer.invoke("agents:exact-bindings"),
     borrowedProfiles: () => ipcRenderer.invoke("agents:borrowed-profiles"),
     borrowedOntologyGraph: (profileId: string) =>
       ipcRenderer.invoke("agents:borrowed-ontology-graph", profileId),
@@ -247,6 +248,7 @@ const api: AgentlasIpc = {
     check: () => ipcRenderer.invoke("updater:check"),
     install: () => ipcRenderer.invoke("updater:install"),
     openManualDownload: () => ipcRenderer.invoke("updater:openManualDownload"),
+    openReleaseNotes: (version?: string) => ipcRenderer.invoke("updater:openReleaseNotes", version),
     revealRecoveryBackup: () => ipcRenderer.invoke("updater:revealRecoveryBackup"),
   },
   runtime: {
@@ -501,6 +503,10 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("chats:setRuntimeSelection", id, selection),
     recap: (id: string) => ipcRenderer.invoke("chats:recap", id),
     markViewed: (id: string) => ipcRenderer.invoke("chats:markViewed", id),
+  },
+  externalCliSessions: {
+    list: (input) => ipcRenderer.invoke("externalCliSessions:list", input),
+    importToProject: (input) => ipcRenderer.invoke("externalCliSessions:importToProject", input),
   },
   tasks: {
     createProject: (input) => ipcRenderer.invoke("tasks:createProject", input),

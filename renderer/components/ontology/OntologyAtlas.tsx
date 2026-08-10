@@ -353,6 +353,7 @@ export function OntologyAtlas({
   locale,
   graphLoading = false,
   graphError = false,
+  onRetry,
 }: {
   summary: ExperienceOntologySummary | null;
   graphSnapshot: ExperienceOntologyGraphSnapshot | null;
@@ -361,6 +362,7 @@ export function OntologyAtlas({
   locale: Locale;
   graphLoading?: boolean;
   graphError?: boolean;
+  onRetry?: () => void;
 }) {
   const [scope, setScope] = useState<Scope>("all");
   const [engineState, setEngineState] = useState<EngineState>("loading");
@@ -477,6 +479,18 @@ export function OntologyAtlas({
   const relationCount = visible.edges.length;
   const nodeCount = visible.nodes.length;
   const isEmpty = !graphLoading && !graphError && relationCount === 0;
+
+  if (graphError) {
+    return (
+      <section className={styles.atlas} data-testid="agent-ontology-graph" aria-label={ko ? "에이전트 경험 지도" : "Agent experience map"}>
+        <div role="alert" data-testid="ontology-data-error" style={{ minHeight: 150, display: "grid", alignContent: "center", justifyItems: "center", gap: 9, padding: 24, border: "1px solid var(--paper-edge)", borderRadius: 14, background: "var(--paper)", color: "var(--ink)", textAlign: "center" }}>
+          <strong style={{ fontSize: 14 }}>{ko ? "경험 지도를 불러오지 못했습니다" : "The experience map could not be loaded"}</strong>
+          <span style={{ maxWidth: 420, color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.55 }}>{ko ? "그래프를 실제 데이터처럼 비워 두지 않습니다. 아래 경험 요약은 계속 확인할 수 있습니다." : "The graph is not shown as an empty data surface. Experience summaries below remain available."}</span>
+          {onRetry && <button type="button" onClick={onRetry} style={{ minHeight: 34, padding: "0 12px", borderRadius: 7, border: "1px solid var(--paper-edge)", background: "var(--paper-2)", color: "var(--ink)", cursor: "pointer", fontWeight: 700 }}>{ko ? "다시 불러오기" : "Retry"}</button>}
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className={styles.atlas} data-testid="agent-ontology-graph" aria-label={ko ? "에이전트 경험 지도" : "Agent experience map"}>

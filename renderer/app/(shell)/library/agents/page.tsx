@@ -13,7 +13,6 @@ import { onAgentRosterChange } from "@/lib/agent-roster-events";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { AgentMemorySaveQueue, parseMemoryMarkdown, type ParsedMemory } from "@/lib/agent-memory";
-import { classifyAgent } from "@/lib/ownership";
 import { cliModelTagLabel } from "@shared/models";
 import type {
   AgentEvolutionProposalUi,
@@ -43,8 +42,10 @@ import type {
   ExperiencePromotionReceipt,
   FsPathGrant,
   InstalledAgent,
+  InstalledAgentExactBinding,
   InstalledFirm,
   MarketplaceListing,
+  Project,
   ResolvedOrg,
   ResolvedNode,
   RuntimeSelection,
@@ -71,7 +72,6 @@ import { buildMemoryLearningEvent, formatLearningTime, simpleMemorySummary } fro
 import {
   IconBuilding,
   IconChat,
-  IconTrash,
   IconChevronRight,
   IconChevronDown,
   IconSidebar,
@@ -86,9 +86,77 @@ import {
   IconFileUp,
   IconPaperclip,
   IconRoute,
+  IconSearch,
 } from "@/components/Icon";
 
 type ManageView = "general" | "published";
+
+function projectPoolHasTarget(
+  project: Project | null,
+  entityKind: "agent" | "team",
+  localTargetId: string | null | undefined,
+): boolean {
+  if (!localTargetId) return false;
+  return Boolean(project?.agentPool.some((member) => entityKind === "team"
+    ? member.entityKind === "team" && member.firmId === localTargetId
+    : member.entityKind === "agent" && member.agentId === localTargetId));
+}
+
+function ProjectAttachControl({
+  projects,
+  projectId,
+  entityKind,
+  localTargetId,
+  locale,
+  disabled,
+  onProjectChange,
+  onAttach,
+}: {
+  projects: Project[];
+  projectId: string;
+  entityKind: "agent" | "team";
+  localTargetId: string | null | undefined;
+  locale: Locale;
+  disabled?: boolean;
+  onProjectChange: (projectId: string) => void;
+  onAttach: () => void;
+}) {
+  const selected = projects.find((project) => project.id === projectId) ?? null;
+  const attached = projectPoolHasTarget(selected, entityKind, localTargetId);
+  const ko = locale === "ko";
+  if (projects.length === 0) {
+    return (
+      <button type="button" onClick={() => navigate("/project/new")} className="agent-run-button">
+        {ko ? "프로젝트를 먼저 만들기" : "Create a project first"}
+      </button>
+    );
+  }
+  return (
+    <div className="project-attach-control" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+      <label className="project-attach-label" style={{ fontSize: 11.5, color: "var(--muted-deep)", whiteSpace: "nowrap" }}>
+        {ko ? "장착할 프로젝트" : "Attach to project"}
+      </label>
+      <select
+        aria-label={ko ? "장착할 프로젝트" : "Project to attach to"}
+        value={projectId}
+        onChange={(event) => onProjectChange(event.target.value)}
+        style={{ minWidth: 150, maxWidth: 240, height: 44, border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper)", color: "var(--ink)", padding: "0 32px 0 11px", fontSize: 12 }}
+      >
+        {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+      </select>
+      <button
+        type="button"
+        className="agent-run-button"
+        onClick={onAttach}
+        disabled={disabled || attached}
+        title={attached ? (ko ? "이미 이 프로젝트의 도구함에 있습니다." : "Already in this project's tool pool.") : undefined}
+        style={{ opacity: disabled || attached ? 0.55 : 1 }}
+      >
+        {attached ? (ko ? "장착됨" : "Attached") : (ko ? "프로젝트에 장착" : "Attach to project")}
+      </button>
+    </div>
+  );
+}
 
 const rosterNameStyle: CSSProperties = {
   display: "-webkit-box",
@@ -205,8 +273,8 @@ function MemoryImportPanel({
       </div>
       <p style={{ margin: "0 0 10px", fontSize: 12, color: "var(--ink-soft)" }}>
         {ko
-          ? "레거시 마크다운(폴더/파일)을 골라 이 에이전트·팀의 메모리 구조로 옮깁니다. 먼저 어디로 들어갈지 미리 보여주고, 확인 후에만 저장합니다. 같은 내용은 다시 넣어도 중복되지 않습니다."
-          : "Pick legacy markdown (folder/file) to move into this agent/team's memory. You preview where each section lands, then apply — re-running never duplicates."}
+              ? "재사용 가능한 규칙·절차가 담긴 레거시 마크다운만 이 도구의 로컬 기억 후보로 옮깁니다. 프로젝트 상태는 해당 프로젝트에 남겨야 합니다. 먼저 대상과 개인정보 제외 내역을 미리 보여주고 확인 후 저장합니다."
+              : "Move only reusable rules and procedures from legacy markdown into this tool's local memory candidates. Project state must remain with its project. Preview destinations and privacy exclusions before saving."}
       </p>
       <div style={{ display: "flex", gap: 8 }}>
         <button
@@ -300,6 +368,9 @@ function LibraryAgentsView() {
   const [resolvedOrgs, setResolvedOrgs] = useState<Record<string, ResolvedOrg>>({});
   const [runtimeStatuses, setRuntimeStatuses] = useState<RuntimeStatus[]>([]);
   const [runtimeOverrides, setRuntimeOverrides] = useState<AgentRuntimeOverride[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState("");
+  const [exactBindings, setExactBindings] = useState<InstalledAgentExactBinding[]>([]);
   // v74 사용 원장(run 귀속 집계) — 로스터 섹션/배지의 데이터 소스.
   const [usageRows, setUsageRows] = useState<AgentUsageSummaryRow[]>([]);
   const [borrowedProfiles, setBorrowedProfiles] = useState<BorrowedAgentProfile[]>([]);
@@ -310,7 +381,10 @@ function LibraryAgentsView() {
   const [orgWidth, setOrgWidth] = useState(300);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   // 좌측 로스터 탭 — 멀티(에이전트 팀=firm) / 싱글(개별 에이전트). 대시보드 조직도와 동일한 분리.
-  const [rosterTab, setRosterTab] = useState<"multi" | "single">("multi");
+  const [rosterTab, setRosterTab] = useState<"all" | "multi" | "single">("all");
+  const [rosterQuery, setRosterQuery] = useState("");
+  const [rosterSource, setRosterSource] = useState<"all" | "local" | "cloud" | "hub">("all");
+  const [rosterReadiness, setRosterReadiness] = useState<"all" | "ready" | "attention">("all");
 
   // 선택된 에이전트 노드 (null 이면 회사 오버뷰 노출)
   const [selectedNode, setSelectedNode] = useState<ResolvedNode | null>(null);
@@ -417,17 +491,36 @@ function LibraryAgentsView() {
     const api = ipc();
     if (!api) return;
     const generation = ++rosterRefreshGenerationRef.current;
-    const [fList, agList, runtimes, overrides] = await Promise.all([
+    const [fList, agList, runtimes, overrides, projectList, bindingList] = await Promise.all([
       api.firms.list(),
       api.team.list(),
       api.runtime.detect().catch(() => []),
       api.agentRuntime?.list ? api.agentRuntime.list().catch(() => []) : Promise.resolve([]),
+      api.projects.list().catch(() => []),
+      api.agents.exactBindings().catch(() => []),
     ]);
     if (rosterRefreshGenerationRef.current !== generation) return;
-    setFirms(fList);
-    setAgents(visibleRosterAgents(agList));
-    setRuntimeStatuses(runtimes);
-    setRuntimeOverrides(overrides);
+    const safeFirms = Array.isArray(fList) ? fList : [];
+    const safeAgents = Array.isArray(agList) ? agList : [];
+    const safeRuntimes = Array.isArray(runtimes) ? runtimes : [];
+    const safeOverrides = Array.isArray(overrides) ? overrides : [];
+    const safeProjects = Array.isArray(projectList) ? projectList : [];
+    const safeBindings = Array.isArray(bindingList) ? bindingList : [];
+    setFirms(safeFirms);
+    setFirmCollapsed((current) => Object.fromEntries(
+      safeFirms.map((firm) => [firm.id, current[firm.id] ?? true]),
+    ));
+    // Keep the full installed projection for organization/detail lookups. Only
+    // the top-level roster is filtered; otherwise real background member cells
+    // become fake "unbound" organization slots.
+    setAgents(safeAgents);
+    setRuntimeStatuses(safeRuntimes);
+    setRuntimeOverrides(safeOverrides);
+    setProjects(safeProjects);
+    setExactBindings(safeBindings);
+    setActiveProjectId((current) => current && safeProjects.some((project) => project.id === current)
+      ? current
+      : safeProjects[0]?.id ?? "");
     setBookmarkOverrides({});
     if (api.agents?.usageSummary) {
       void api.agents.usageSummary()
@@ -446,7 +539,7 @@ function LibraryAgentsView() {
 
     // 순차 for-await(20개면 ~4s 프리즈) → 동시성 3 병렬. 실패/null firm 은 기존처럼 누락(worker 내부 try/catch 로 null 반환). 순서 보존.
     const orgs: Record<string, ResolvedOrg> = {};
-    const orgPairs = await mapWithConcurrency(fList, 3, async (f) => {
+    const orgPairs = await mapWithConcurrency(safeFirms, 3, async (f) => {
       try {
         const o = await api.firms.getResolvedOrg(f.id);
         return o ? ([f.id, o] as const) : null;
@@ -471,7 +564,7 @@ function LibraryAgentsView() {
         // Do not wait for the slower firm/org resolution pass before showing a
         // just-built local agent under My Agents.
         setAgents((previous) =>
-          visibleRosterAgents([change.agent, ...previous.filter((agent) => agent.id !== change.agent.id)]),
+          [change.agent, ...previous.filter((agent) => agent.id !== change.agent.id)],
         );
         setRosterTab((change.agent.kind ?? "agent") === "team" ? "multi" : "single");
         void refresh();
@@ -561,6 +654,134 @@ function LibraryAgentsView() {
     showToast(locale === "ko" ? "이 Mac의 표시 이름을 저장했습니다." : "Saved the display name for this Mac.");
   }
 
+  async function attachAgentToActiveProject(agent: InstalledAgent | null) {
+    const api = ipc();
+    const project = projects.find((item) => item.id === activeProjectId) ?? null;
+    if (!api || !agent || !project) {
+      showToast(locale === "ko" ? "장착할 프로젝트와 실제 에이전트를 선택하세요." : "Choose a project and an installed agent.");
+      return;
+    }
+    if (projectPoolHasTarget(project, "agent", agent.id)) {
+      showToast(locale === "ko" ? "이미 이 프로젝트에 장착되어 있습니다." : "Already attached to this project.");
+      return;
+    }
+    const exactBinding = exactBindings.find((binding) => binding.installedAgentId === agent.id) ?? null;
+    const remoteSource = agent.assetSource === "hub" || agent.assetSource === "agent-cloud";
+    if (remoteSource && !exactBinding) {
+      showToast(locale === "ko"
+        ? "정확한 원격 릴리스를 확인할 수 없어 장착하지 않았습니다. 다시 가져오거나 복원해 주세요."
+        : "This tool has no verified exact remote release. Re-import or restore it before attaching.");
+      return;
+    }
+    const source = exactBinding?.source === "hub-install"
+      ? "hub"
+      : exactBinding?.source === "agent-cloud-restore"
+        ? "cloud"
+        : "local";
+    try {
+      const updated = await api.projects.update(project.id, {
+        agentPool: [
+          ...project.agentPool,
+          {
+            entityKind: "agent",
+            targetId: exactBinding?.agentDefinitionId ?? agent.id,
+            agentId: agent.id,
+            firmId: null,
+            controllerAgentId: null,
+            source,
+            releaseId: exactBinding?.agentReleaseId ?? null,
+            nameSnapshot: agentDisplayName(agent, locale),
+          },
+        ],
+      });
+      setProjects((current) => current.map((item) => item.id === updated.id ? updated : item));
+      showToast(locale === "ko" ? `${updated.name} 프로젝트의 도구함에 장착했습니다.` : `Attached to ${updated.name}.`);
+    } catch (error) {
+      showToast((locale === "ko" ? "프로젝트 장착 실패: " : "Could not attach to project: ") + String(error));
+    }
+  }
+
+  async function attachTeamToActiveProject(firm: InstalledFirm) {
+    const api = ipc();
+    const project = projects.find((item) => item.id === activeProjectId) ?? null;
+    const controller = agentMap.get(firm.ceoAgentId) ?? null;
+    if (!api || !project || !controller) {
+      showToast(locale === "ko" ? "장착할 프로젝트와 실행 가능한 팀을 선택하세요." : "Choose a project and an executable team.");
+      return;
+    }
+    if (projectPoolHasTarget(project, "team", firm.id)) {
+      showToast(locale === "ko" ? "이미 이 프로젝트에 장착된 팀입니다." : "This team is already attached to the project.");
+      return;
+    }
+    const remoteSource = controller.assetSource === "hub" || controller.assetSource === "agent-cloud";
+    if (remoteSource) {
+      showToast(locale === "ko"
+        ? "컨트롤러 에이전트 릴리스를 팀 릴리스로 대신 사용할 수 없습니다. 팀 자체의 정확한 ID·릴리스 바인딩이 제공될 때까지 장착하지 않습니다."
+        : "A controller agent release cannot stand in for a team release. Attachment stays blocked until the team has its own exact identity and release binding.");
+      return;
+    }
+    try {
+      const updated = await api.projects.update(project.id, {
+        agentPool: [
+          ...project.agentPool,
+          {
+            entityKind: "team",
+            targetId: firm.id,
+            agentId: null,
+            firmId: firm.id,
+            controllerAgentId: controller.id,
+            source: "local",
+            releaseId: null,
+            nameSnapshot: pickLocalized(firm, locale).name,
+          },
+        ],
+      });
+      setProjects((current) => current.map((item) => item.id === updated.id ? updated : item));
+      showToast(locale === "ko" ? `${updated.name} 프로젝트에 팀 도구를 장착했습니다.` : `Attached the team tool to ${updated.name}.`);
+    } catch (error) {
+      showToast((locale === "ko" ? "팀 장착 실패: " : "Could not attach team: ") + String(error));
+    }
+  }
+
+  async function attachStandaloneTeamToActiveProject(team: InstalledAgent) {
+    const api = ipc();
+    const project = projects.find((item) => item.id === activeProjectId) ?? null;
+    const binding = exactBindings.find((item) => item.installedAgentId === team.id) ?? null;
+    const source = binding?.source === "hub-install" ? "hub" : binding?.source === "agent-cloud-restore" ? "cloud" : null;
+    if (!api || !project) {
+      showToast(locale === "ko" ? "장착할 프로젝트를 선택하세요." : "Choose a project to attach this team to.");
+      return;
+    }
+    if (!binding || !source) {
+      showToast(locale === "ko"
+        ? "독립 팀은 팀 자체의 정확한 Definition ID와 릴리스가 확인되어야 장착할 수 있습니다."
+        : "A standalone team needs its own exact Definition ID and release before attachment.");
+      return;
+    }
+    if (projectPoolHasTarget(project, "team", binding.agentDefinitionId)) {
+      showToast(locale === "ko" ? "이미 이 프로젝트에 장착된 팀입니다." : "This team is already attached to the project.");
+      return;
+    }
+    try {
+      const updated = await api.projects.update(project.id, {
+        agentPool: [...project.agentPool, {
+          entityKind: "team",
+          targetId: binding.agentDefinitionId,
+          agentId: null,
+          firmId: null,
+          controllerAgentId: null,
+          source,
+          releaseId: binding.agentReleaseId,
+          nameSnapshot: agentDisplayName(team, locale),
+        }],
+      });
+      setProjects((current) => current.map((item) => item.id === updated.id ? updated : item));
+      showToast(locale === "ko" ? `${updated.name} 프로젝트에 팀 도구를 장착했습니다.` : `Attached the team tool to ${updated.name}.`);
+    } catch (error) {
+      showToast((locale === "ko" ? "팀 장착 실패: " : "Could not attach team: ") + String(error));
+    }
+  }
+
   useEffect(() => {
     if (!targetAgentId && !targetNodeId) return;
     const target = findAgentRouteNode({
@@ -583,12 +804,24 @@ function LibraryAgentsView() {
     }
   }, [agents, firms, locale, resolvedOrgs, targetAgentId, targetDetailTab, targetFirmId, targetNodeId]);
 
+  // Legacy firm links now land on the canonical team detail. A firm without a
+  // member target is the team itself, not an implicit request to open its CEO.
+  useEffect(() => {
+    if (!targetFirmId || targetAgentId || targetNodeId) return;
+    if (!firms.some((firm) => firm.id === targetFirmId)) return;
+    setRosterTab("multi");
+    setSelectedNode(null);
+    setSelectedFirmId(targetFirmId);
+    setFirmCollapsed((current) => ({ ...current, [targetFirmId]: false }));
+  }, [firms, targetAgentId, targetFirmId, targetNodeId]);
+
   // Feature-update and external deep links may open the per-agent Ontology tab
   // without already knowing a local installed id. Select the first visible
   // installed agent deterministically; never guess a Hub release binding here.
   useEffect(() => {
     if (targetDetailTab !== "ontology" || targetAgentId || targetNodeId || selectedNode || agents.length === 0) return;
-    const first = agents[0];
+    const first = visibleRosterAgents(agents)[0];
+    if (!first) return;
     const loc = pickLocalized(first, locale);
     setRosterTab((first.kind ?? "agent") === "team" ? "multi" : "single");
     setSelectedNode({
@@ -625,11 +858,11 @@ function LibraryAgentsView() {
       try {
         const listing = await api.agentFiles.list(selectedNode.agentId);
         if (cancelled) return;
-        const fileEntries = listing.entries.filter((e) => e.kind === "file");
+        const fileEntries = listing.entries;
         setAgentFiles(fileEntries);
 
         // memory.md 탐색 및 로드
-        const memFile = fileEntries.find((e) => e.name.toLowerCase() === "memory.md");
+        const memFile = fileEntries.find((e) => e.kind === "file" && e.name.toLowerCase() === "memory.md");
         if (memFile) {
           const m = await api.agentFiles.read(selectedNode.agentId, memFile.path);
           if (cancelled) return;
@@ -753,7 +986,7 @@ function LibraryAgentsView() {
         setPromptContent(proposal.afterContent);
       } else if (proposal.proposalType === "skill" && selectedNode?.agentId) {
         const listing = await api.agentFiles.list(selectedNode.agentId);
-        setAgentFiles(listing.entries.filter((entry) => entry.kind === "file"));
+        setAgentFiles(listing.entries);
       }
       const receipt = proposal.receipts.find((item) => item.action === "apply");
       showToast(receipt
@@ -797,7 +1030,7 @@ function LibraryAgentsView() {
         setPromptContent(proposal.beforeContent);
       } else if (proposal.proposalType === "skill" && selectedNode?.agentId) {
         const listing = await api.agentFiles.list(selectedNode.agentId);
-        setAgentFiles(listing.entries.filter((entry) => entry.kind === "file"));
+        setAgentFiles(listing.entries);
       }
       const receipt = proposal.receipts.find((item) => item.action === "rollback");
       showToast(receipt
@@ -879,8 +1112,19 @@ function LibraryAgentsView() {
     const api = ipc();
     if (!api || !agent) return;
     const displayName = agentDisplayName(agent, locale);
-    if (!window.confirm(locale === "ko" ? `'${displayName}' 에이전트를 설치 목록에서 제거할까요? 원본 폴더는 삭제하지 않습니다.` : `Remove '${displayName}' from installed agents? The source folder will not be deleted.`)) return;
+    const affectedProjects = projects.filter((project) => projectPoolHasTarget(project, "agent", agent.id));
+    const impact = affectedProjects.length > 0
+      ? (locale === "ko"
+          ? `\n\n장착 해제될 프로젝트 ${affectedProjects.length}개: ${affectedProjects.map((project) => project.name).join(", ")}`
+          : `\n\nIt will be detached from ${affectedProjects.length} project(s): ${affectedProjects.map((project) => project.name).join(", ")}`)
+      : "";
+    if (!window.confirm(locale === "ko" ? `'${displayName}' 에이전트를 설치 목록에서 제거할까요? 원본 폴더는 삭제하지 않습니다.${impact}` : `Remove '${displayName}' from installed agents? The source folder will not be deleted.${impact}`)) return;
     try {
+      for (const project of affectedProjects) {
+        await api.projects.update(project.id, {
+          agentPool: project.agentPool.filter((member) => member.agentId !== agent.id),
+        });
+      }
       await api.team.uninstall(agent.id);
       setSelectedNode(null);
       await refresh();
@@ -894,8 +1138,26 @@ function LibraryAgentsView() {
     const api = ipc();
     if (!api || !firm) return;
     const name = pickLocalized(firm, locale).name;
-    if (!window.confirm(locale === "ko" ? `'${name}' 팀을 설치 목록에서 제거할까요? 원본 폴더는 삭제하지 않습니다.` : `Remove the '${name}' team? The source folder will not be deleted.`)) return;
+    const firmAgentIds = new Set([firm.ceoAgentId, ...firm.orgChart.flatMap((node) => node.agentId ? [node.agentId] : [])]);
+    const affectedProjects = projects.filter((project) => project.agentPool.some((member) => (
+      member.entityKind === "team"
+        ? member.firmId === firm.id
+        : Boolean(member.agentId && firmAgentIds.has(member.agentId))
+    )));
+    const impact = affectedProjects.length > 0
+      ? (locale === "ko"
+          ? `\n\n장착 해제될 프로젝트 ${affectedProjects.length}개: ${affectedProjects.map((project) => project.name).join(", ")}`
+          : `\n\nIt will be detached from ${affectedProjects.length} project(s): ${affectedProjects.map((project) => project.name).join(", ")}`)
+      : "";
+    if (!window.confirm(locale === "ko" ? `'${name}' 팀을 설치 목록에서 제거할까요? 원본 폴더는 삭제하지 않습니다.${impact}` : `Remove the '${name}' team? The source folder will not be deleted.${impact}`)) return;
     try {
+      for (const project of affectedProjects) {
+        await api.projects.update(project.id, {
+          agentPool: project.agentPool.filter((member) => member.entityKind === "team"
+            ? member.firmId !== firm.id
+            : !member.agentId || !firmAgentIds.has(member.agentId)),
+        });
+      }
       await api.firms.uninstall(firm.id);
       setSelectedFirmId(null);
       await refresh();
@@ -905,8 +1167,71 @@ function LibraryAgentsView() {
     }
   }
 
-  const roster = useMemo(() => buildAgentRoster(agents, firms), [agents, firms]);
-  const agentMap = roster.agentById;
+  const fullRoster = useMemo(() => buildAgentRoster(agents, firms), [agents, firms]);
+  const roster = useMemo(() => buildAgentRoster(visibleRosterAgents(agents), firms), [agents, firms]);
+  const agentMap = fullRoster.agentById;
+  const exactBindingByInstalledId = useMemo(
+    () => new Map(exactBindings.map((binding) => [binding.installedAgentId, binding] as const)),
+    [exactBindings],
+  );
+  const rosterSourceForAgent = useCallback((agent: InstalledAgent): "local" | "cloud" | "hub" => {
+    const binding = exactBindingByInstalledId.get(agent.id);
+    if (binding?.source === "agent-cloud-restore" || agent.assetSource === "agent-cloud") return "cloud";
+    if (binding?.source === "hub-install" || agent.assetSource === "hub") return "hub";
+    return "local";
+  }, [exactBindingByInstalledId]);
+  const rosterAgentReady = useCallback((agent: InstalledAgent): boolean => {
+    if (agent.sourceMissingSince) return false;
+    const source = rosterSourceForAgent(agent);
+    if (source !== "local") return exactBindingByInstalledId.has(agent.id);
+    // A local team without a firm projection has no authoritative hierarchy.
+    return agent.kind !== "team";
+  }, [exactBindingByInstalledId, rosterSourceForAgent]);
+  const rosterAgentFilterMatches = useCallback((agent: InstalledAgent): boolean => {
+    const sourceMatches = rosterSource === "all" || rosterSourceForAgent(agent) === rosterSource;
+    const ready = rosterAgentReady(agent);
+    const readinessMatches = rosterReadiness === "all"
+      || (rosterReadiness === "ready" ? ready : !ready);
+    return sourceMatches && readinessMatches;
+  }, [rosterAgentReady, rosterReadiness, rosterSource, rosterSourceForAgent]);
+  const rosterFirmFilterMatches = useCallback((firm: InstalledFirm): boolean => {
+    const controller = agentMap.get(firm.ceoAgentId);
+    if (!controller) return rosterReadiness !== "ready" && (rosterSource === "all" || rosterSource === "local");
+    const source = rosterSourceForAgent(controller);
+    const ready = source === "local" && !controller.sourceMissingSince;
+    return (rosterSource === "all" || rosterSource === source)
+      && (rosterReadiness === "all" || (rosterReadiness === "ready" ? ready : !ready));
+  }, [agentMap, rosterReadiness, rosterSource, rosterSourceForAgent]);
+  const normalizedRosterQuery = rosterQuery.trim().toLocaleLowerCase(locale);
+  const rosterAgentMatches = useCallback((agent: InstalledAgent): boolean => {
+    if (!normalizedRosterQuery) return true;
+    const localized = pickLocalized(agent, locale);
+    return [agentDisplayName(agent, locale), localized.tagline, agent.slug]
+      .some((value) => value.toLocaleLowerCase(locale).includes(normalizedRosterQuery));
+  }, [locale, normalizedRosterQuery]);
+  const rosterFirmMatches = useCallback((firm: InstalledFirm): boolean => {
+    if (!normalizedRosterQuery) return true;
+    const localized = pickLocalized(firm, locale);
+    if ([localized.name, localized.tagline, firm.slug]
+      .some((value) => value.toLocaleLowerCase(locale).includes(normalizedRosterQuery))) return true;
+    return firm.orgChart.some((node) => {
+      const bound = agentMap.get(node.agentId);
+      return [node.role, node.agentSlug, bound ? agentDisplayName(bound, locale) : ""]
+        .some((value) => value.toLocaleLowerCase(locale).includes(normalizedRosterQuery));
+    });
+  }, [agentMap, locale, normalizedRosterQuery]);
+  const visibleMultiFirms = useMemo(
+    () => roster.multiFirms.filter((firm) => rosterFirmMatches(firm) && rosterFirmFilterMatches(firm)),
+    [roster.multiFirms, rosterFirmFilterMatches, rosterFirmMatches],
+  );
+  const visibleStandaloneTeams = useMemo(
+    () => roster.standaloneMultiAgents.filter((agent) => rosterAgentMatches(agent) && rosterAgentFilterMatches(agent)),
+    [roster.standaloneMultiAgents, rosterAgentFilterMatches, rosterAgentMatches],
+  );
+  const visibleSingleAgents = useMemo(
+    () => roster.singleModeAgents.filter((agent) => rosterAgentMatches(agent) && rosterAgentFilterMatches(agent)),
+    [roster.singleModeAgents, rosterAgentFilterMatches, rosterAgentMatches],
+  );
 
   // ── v74 사용/북마크 파생 — 로스터 섹션·배지 ─────────────────────────────
   const usageByAgentId = useMemo(() => new Map(usageRows.map((row) => [row.agentId, row])), [usageRows]);
@@ -942,12 +1267,32 @@ function LibraryAgentsView() {
       name: locale === "en" ? profile.nameEn : profile.name,
       bookmarked: Boolean(profile.bookmarkedAt),
     })), [borrowedProfiles, installedSlugSet, locale]);
+  const visibleHubShelfRows = useMemo(() => {
+    if ((rosterSource !== "all" && rosterSource !== "hub") || rosterReadiness !== "all") return [];
+    if (!normalizedRosterQuery) return hubShelfRows;
+    return hubShelfRows.filter((profile) => [profile.name, profile.slug]
+      .some((value) => value.toLocaleLowerCase(locale).includes(normalizedRosterQuery)));
+  }, [hubShelfRows, locale, normalizedRosterQuery, rosterReadiness, rosterSource]);
   const firmUsageRollup = useCallback((firm: InstalledFirm): number => {
     let total = 0;
     for (const node of firm.orgChart) total += usageByAgentId.get(node.agentId)?.useCount ?? 0;
     return total;
   }, [usageByAgentId]);
   const selectedFirm = selectedFirmId ? firms.find((firm) => firm.id === selectedFirmId) ?? null : null;
+  const selectedStandaloneTeam = !selectedFirm && selectedNode?.agentId
+    ? agents.find((agent) => agent.id === selectedNode.agentId && agent.kind === "team") ?? null
+    : null;
+  const selectedStandaloneTeamBinding = selectedStandaloneTeam
+    ? exactBindings.find((binding) => binding.installedAgentId === selectedStandaloneTeam.id) ?? null
+    : null;
+  const selectedFirmController = selectedFirm ? agentMap.get(selectedFirm.ceoAgentId) ?? null : null;
+  const selectedFirmControllerBinding = selectedFirmController
+    ? exactBindings.find((binding) => binding.installedAgentId === selectedFirmController.id) ?? null
+    : null;
+  const selectedFirmNeedsTeamBinding = Boolean(
+    selectedFirmController
+    && (selectedFirmController.assetSource === "hub" || selectedFirmController.assetSource === "agent-cloud"),
+  );
   const selectedBorrowedProfile = selectedBorrowedProfileId
     ? borrowedProfiles.find((profile) => profile.profileId === selectedBorrowedProfileId) ?? null
     : null;
@@ -1009,15 +1354,16 @@ function LibraryAgentsView() {
             </button>
           ) : (
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, width: "100%" }}>
-              <div
+              <button
+                type="button"
                 onClick={() => setSelectedNode(null)}
-                style={{ flex: 1, cursor: "pointer", display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}
+                style={{ flex: 1, cursor: "pointer", display: "flex", alignItems: "center", gap: 8, minWidth: 0, padding: 0, border: 0, background: "transparent", color: "inherit", textAlign: "left" }}
               >
                 <IconLayers size={14} style={{ color: "var(--accent)" }} />
                 <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--font-head)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {locale === "ko" ? "내 에이전트" : "My Agents"}
+                  {locale === "ko" ? "에이전트 도구함" : "Agent Toolbox"}
                 </div>
-              </div>
+              </button>
               <button
                 onClick={(event) => {
                   event.stopPropagation();
@@ -1030,7 +1376,7 @@ function LibraryAgentsView() {
                   display: "inline-flex",
                   alignItems: "center",
                   gap: 6,
-                  minHeight: 30,
+                  minHeight: 44,
                   padding: "0 10px",
                   borderRadius: 8,
                   border: "1px solid var(--paper-edge)",
@@ -1061,17 +1407,17 @@ function LibraryAgentsView() {
                 data-active={manageView === view ? "true" : "false"}
               >
                 {view === "general"
-                  ? locale === "ko" ? "일반 에이전트" : "Regular agents"
-                  : locale === "ko" ? "퍼블리시한 에이전트" : "Published agents"}
+                  ? locale === "ko" ? "설치됨" : "Installed"
+                  : locale === "ko" ? "내가 공개함" : "Published by me"}
               </button>
             ))}
           </div>
         )}
 
-        {/* 멀티/싱글 로스터 탭 (일반 에이전트 안에서만 표시) */}
+        {/* 자산 유형은 출처/관리 상태와 독립된 한 축이다. */}
         {manageView === "general" && !sidebarCollapsed && (
-          <div className="library-roster-tabs">
-            {(["multi", "single"] as const).map((tab) => (
+          <div className="library-roster-tabs" role="group" aria-label={locale === "ko" ? "도구 유형" : "Tool type"}>
+            {(["all", "multi", "single"] as const).map((tab) => (
               <button
                 key={tab}
                 type="button"
@@ -1079,11 +1425,57 @@ function LibraryAgentsView() {
                 className="library-roster-tab"
                 data-active={rosterTab === tab ? "true" : "false"}
               >
-                {tab === "multi"
-                  ? locale === "ko" ? "멀티 · 에이전트 팀" : "Multi · teams"
-                  : locale === "ko" ? "싱글 · 에이전트" : "Single · agents"}
+                {tab === "all"
+                  ? locale === "ko" ? "전체" : "All"
+                  : tab === "multi"
+                    ? locale === "ko" ? "팀" : "Teams"
+                    : locale === "ko" ? "싱글" : "Singles"}
               </button>
             ))}
+          </div>
+        )}
+
+        {manageView === "general" && !sidebarCollapsed && (
+          <label style={{ position: "relative", display: "block", padding: "8px 12px 0" }}>
+            <span className="sr-only">{locale === "ko" ? "에이전트 도구 검색" : "Search agent tools"}</span>
+            <IconSearch size={14} aria-hidden="true" style={{ position: "absolute", left: 24, top: 23, color: "var(--muted-deep)", pointerEvents: "none" }} />
+            <input
+              type="search"
+              value={rosterQuery}
+              onChange={(event) => setRosterQuery(event.target.value)}
+              placeholder={locale === "ko" ? "팀·에이전트·역할 검색" : "Search teams, agents, and roles"}
+              style={{ width: "100%", minHeight: 44, padding: "0 34px", border: "1px solid var(--paper-edge)", borderRadius: 9, background: "var(--paper)", color: "var(--ink)", fontSize: 12.5, outline: "none" }}
+            />
+          </label>
+        )}
+
+        {manageView === "general" && !sidebarCollapsed && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, padding: "8px 12px 0" }}>
+            <label>
+              <span className="sr-only">{locale === "ko" ? "원본 출처" : "Origin"}</span>
+              <select
+                value={rosterSource}
+                onChange={(event) => setRosterSource(event.target.value as typeof rosterSource)}
+                style={{ width: "100%", minHeight: 44, padding: "0 10px", border: "1px solid var(--paper-edge)", borderRadius: 9, background: "var(--paper)", color: "var(--ink)", fontSize: 12 }}
+              >
+                <option value="all">{locale === "ko" ? "출처 · 전체" : "Origin · All"}</option>
+                <option value="local">{locale === "ko" ? "출처 · 로컬" : "Origin · Local"}</option>
+                <option value="cloud">{locale === "ko" ? "출처 · Cloud" : "Origin · Cloud"}</option>
+                <option value="hub">{locale === "ko" ? "출처 · Hub" : "Origin · Hub"}</option>
+              </select>
+            </label>
+            <label>
+              <span className="sr-only">{locale === "ko" ? "프로젝트 장착 상태" : "Project attachment readiness"}</span>
+              <select
+                value={rosterReadiness}
+                onChange={(event) => setRosterReadiness(event.target.value as typeof rosterReadiness)}
+                style={{ width: "100%", minHeight: 44, padding: "0 10px", border: "1px solid var(--paper-edge)", borderRadius: 9, background: "var(--paper)", color: "var(--ink)", fontSize: 12 }}
+              >
+                <option value="all">{locale === "ko" ? "상태 · 전체" : "Status · All"}</option>
+                <option value="ready">{locale === "ko" ? "상태 · 장착 가능" : "Status · Ready"}</option>
+                <option value="attention">{locale === "ko" ? "상태 · 확인 필요" : "Status · Needs review"}</option>
+              </select>
+            </label>
           </div>
         )}
 
@@ -1105,7 +1497,7 @@ function LibraryAgentsView() {
             />
           ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {(sidebarCollapsed || rosterTab === "multi") && roster.multiFirms.map(firm => {
+            {(sidebarCollapsed || rosterTab === "all" || rosterTab === "multi") && visibleMultiFirms.map(firm => {
               const rOrg = resolvedOrgs[firm.id];
               const fLoc = pickLocalized(firm, locale);
               const isCollapsed = firmCollapsed[firm.id];
@@ -1115,11 +1507,11 @@ function LibraryAgentsView() {
                     <div
                       style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: "var(--radius-sm)", background: selectedFirmId === firm.id ? "var(--fill-1)" : "var(--paper-2)", marginBottom: 8, minWidth: 0 }}
                     >
-                      <button type="button" onClick={() => setFirmCollapsed(prev => ({ ...prev, [firm.id]: !isCollapsed }))} aria-label={isCollapsed ? "Expand team" : "Collapse team"} style={{ border: 0, background: "transparent", padding: 0, color: "inherit", cursor: "pointer", display: "inline-flex" }}>
+                      <button type="button" onClick={() => setFirmCollapsed(prev => ({ ...prev, [firm.id]: !isCollapsed }))} aria-label={isCollapsed ? "Expand team" : "Collapse team"} style={{ width: 44, height: 44, flexShrink: 0, border: 0, borderRadius: 8, background: "transparent", padding: 0, color: "inherit", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
                         <IconChevronDown size={14} style={{ transform: isCollapsed ? "rotate(-90deg)" : "none", transition: "transform 0.2s" }} />
                       </button>
                       <IconBuilding size={14} style={{ color: "var(--accent)" }} />
-                      <button type="button" onClick={() => { setSelectedFirmId(firm.id); setSelectedNode(null); }} style={{ border: 0, background: "transparent", padding: 0, cursor: "pointer", textAlign: "left", minWidth: 0, flex: 1, color: "inherit" }}>
+                      <button type="button" onClick={() => { setSelectedFirmId(firm.id); setSelectedNode(null); }} style={{ border: 0, background: "transparent", padding: 0, cursor: "pointer", textAlign: "left", minWidth: 0, minHeight: 44, flex: 1, color: "inherit" }}>
                         <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--font-head)", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{fLoc.name}</span>
                       </button>
                       {(() => {
@@ -1190,7 +1582,7 @@ function LibraryAgentsView() {
               );
             })}
 
-            {(sidebarCollapsed || rosterTab === "multi") && roster.standaloneMultiAgents.length > 0 && (
+            {(sidebarCollapsed || rosterTab === "all" || rosterTab === "multi") && visibleStandaloneTeams.length > 0 && (
               <div style={{ marginTop: 8 }}>
                 {!sidebarCollapsed && (
                   <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-deep)", textTransform: "uppercase", padding: "0 12px", marginBottom: 8 }}>
@@ -1198,7 +1590,7 @@ function LibraryAgentsView() {
                   </div>
                 )}
                 <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingLeft: sidebarCollapsed ? 0 : 12, alignItems: sidebarCollapsed ? "center" : "stretch" }}>
-                  {roster.standaloneMultiAgents.map((a) => {
+                  {visibleStandaloneTeams.map((a) => {
                     const loc = pickLocalized(a, locale);
                     const displayName = agentDisplayName(a, locale);
                     const isAct = selectedNode?.agentId === a.id;
@@ -1223,16 +1615,17 @@ function LibraryAgentsView() {
                             type="button"
                             onClick={(e) => { e.stopPropagation(); void toggleTeam(a.id); }}
                             title={expanded ? (locale === "ko" ? "접기" : "Collapse") : (locale === "ko" ? "하위 에이전트 펼치기" : "Show sub-agents")}
-                            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 18, height: 18, border: "none", background: "transparent", cursor: "pointer", color: "var(--muted-deep)" }}
+                            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 44, height: 44, flexShrink: 0, border: "none", background: "transparent", cursor: "pointer", color: "var(--muted-deep)" }}
                           >
                             <IconChevronDown size={13} style={{ transform: expanded ? "none" : "rotate(-90deg)", transition: "transform 0.2s" }} />
                           </button>
-                          <div
+                          <button
+                            type="button"
                             onClick={() => {
                               setSelectedNode({ id: a.id, name: displayName, role: loc.tagline, agentId: a.id });
                               setActiveTab("identity");
                             }}
-                            style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 10 }}
+                            style={{ flex: 1, minWidth: 0, minHeight: 44, display: "flex", alignItems: "center", gap: 10, padding: 0, border: 0, background: "transparent", color: "inherit", textAlign: "left", cursor: "pointer" }}
                           >
                             <AgentAvatar name={displayName} tone={a.tone} size={28} />
                             <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
@@ -1242,7 +1635,7 @@ function LibraryAgentsView() {
                               </span>
                               <span style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.tagline}</span>
                             </div>
-                          </div>
+                          </button>
                           <IconLayers size={14} style={{ color: "var(--accent)" }} />
                         </div>
                         {expanded && (
@@ -1276,16 +1669,16 @@ function LibraryAgentsView() {
             )}
 
             {/* Independent Agents (싱글 탭) — 북마크 → 자주 씀 → 전체 섹션 */}
-            {(sidebarCollapsed || rosterTab === "single") && (
+            {(sidebarCollapsed || rosterTab === "all" || rosterTab === "single") && (
             <div style={{ marginTop: 8 }} data-testid="single-roster-sections">
-              {!sidebarCollapsed && roster.singleModeAgents.length === 0 && (
+              {!sidebarCollapsed && rosterTab === "single" && visibleSingleAgents.length === 0 && (
                 <div style={{ fontSize: 12, color: "var(--muted-deep)", padding: "8px 12px" }}>
                   {t("library.agents.single_empty")}
                 </div>
               )}
               {sidebarCollapsed ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "center" }}>
-                  {roster.singleModeAgents.map(a => {
+                  {visibleSingleAgents.map(a => {
                     const loc = pickLocalized(a, locale);
                     const displayName = agentDisplayName(a, locale);
                     return <MiniNodeAvatar key={a.id} node={{ name: displayName, role: loc.tagline }} active={selectedNode?.agentId === a.id} onClick={() => {
@@ -1295,9 +1688,9 @@ function LibraryAgentsView() {
                   })}
                 </div>
               ) : (() => {
-                const bookmarked = roster.singleModeAgents.filter((a) => isBookmarked(a));
-                const frequent = roster.singleModeAgents.filter((a) => !isBookmarked(a) && isFrequentlyUsed(a.id));
-                const rest = roster.singleModeAgents.filter((a) => !isBookmarked(a) && !isFrequentlyUsed(a.id));
+                const bookmarked = visibleSingleAgents.filter((a) => isBookmarked(a));
+                const frequent = visibleSingleAgents.filter((a) => !isBookmarked(a) && isFrequentlyUsed(a.id));
+                const rest = visibleSingleAgents.filter((a) => !isBookmarked(a) && !isFrequentlyUsed(a.id));
                 const sections = [
                   { key: "bookmarked", title: locale === "ko" ? "북마크" : "Bookmarked", agents: bookmarked },
                   { key: "frequent", title: locale === "ko" ? "자주 씀" : "Frequently used", agents: frequent },
@@ -1319,24 +1712,29 @@ function LibraryAgentsView() {
                         return (
                           <div
                             key={a.id}
-                            onClick={() => {
-                              setSelectedNode({ id: a.id, name: displayName, role: loc.tagline, agentId: a.id });
-                              setActiveTab("identity");
-                            }}
                             style={{
-                              display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", cursor: "pointer",
+                              display: "flex", alignItems: "center", gap: 4, padding: "4px 6px 4px 4px",
                               borderRadius: "var(--radius-md)", background: isAct ? "var(--fill-1)" : "transparent",
                               border: isAct ? "1px solid var(--accent)" : "1px solid transparent"
                             }}
                           >
-                            <AgentAvatar name={displayName} tone={a.tone} size={28} />
-                            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                              <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                                <span style={{ minWidth: 0, fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{displayName}</span>
-                                <RosterUsageBadge usage={usage} frequent={frequentAgent} locale={locale} />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedNode({ id: a.id, name: displayName, role: loc.tagline, agentId: a.id });
+                                setActiveTab("identity");
+                              }}
+                              style={{ minWidth: 0, minHeight: 44, flex: 1, display: "flex", alignItems: "center", gap: 10, padding: "4px 8px", border: 0, background: "transparent", color: "inherit", textAlign: "left", cursor: "pointer" }}
+                            >
+                              <AgentAvatar name={displayName} tone={a.tone} size={28} />
+                              <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                                <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                                  <span style={{ minWidth: 0, fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{displayName}</span>
+                                  <RosterUsageBadge usage={usage} frequent={frequentAgent} locale={locale} />
+                                </span>
+                                <span style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.tagline}</span>
                               </span>
-                              <span style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.tagline}</span>
-                            </div>
+                            </button>
                             <button
                               type="button"
                               aria-pressed={bookmarkedAgent}
@@ -1348,7 +1746,7 @@ function LibraryAgentsView() {
                                 event.stopPropagation();
                                 void toggleBookmark(a.id, !bookmarkedAgent);
                               }}
-                              style={{ flexShrink: 0, border: "none", background: "transparent", cursor: "pointer", padding: 2, fontSize: 14, lineHeight: 1, color: bookmarkedAgent ? "var(--amber-deep)" : "var(--muted-deep)" }}
+                              style={{ flexShrink: 0, width: 44, height: 44, border: "none", background: "transparent", cursor: "pointer", padding: 0, fontSize: 16, lineHeight: 1, color: bookmarkedAgent ? "var(--amber-deep)" : "var(--muted-deep)" }}
                             >
                               {bookmarkedAgent ? "\u2605" : "\u2606"}
                             </button>
@@ -1366,13 +1764,27 @@ function LibraryAgentsView() {
 
           {/* Hub 북마크·최근 사용 — 설치 자산이 아닌 사용자별 read-only 경력 프로필.
               클릭은 Marketplace 검색이 아니라 이 사용자의 실행·메모리 상세를 연다. */}
-          {!sidebarCollapsed && hubShelfRows.length > 0 && (
+          {!sidebarCollapsed && (normalizedRosterQuery || rosterSource !== "all" || rosterReadiness !== "all") && (
+            rosterTab === "multi"
+              ? visibleMultiFirms.length === 0 && visibleStandaloneTeams.length === 0
+              : rosterTab === "single"
+                ? visibleSingleAgents.length === 0
+                : visibleMultiFirms.length === 0 && visibleStandaloneTeams.length === 0 && visibleSingleAgents.length === 0
+          ) && visibleHubShelfRows.length === 0 && (
+            <div role="status" style={{ padding: "20px 12px", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.55 }}>
+              {normalizedRosterQuery
+                ? (locale === "ko" ? `‘${rosterQuery.trim()}’과 일치하는 도구가 없습니다.` : `No tools match “${rosterQuery.trim()}”.`)
+                : (locale === "ko" ? "선택한 출처와 장착 상태에 맞는 도구가 없습니다." : "No tools match the selected origin and attachment status.")}
+            </div>
+          )}
+
+          {!sidebarCollapsed && visibleHubShelfRows.length > 0 && (
             <div data-roster-section="hub-shelf" style={{ marginTop: 8, borderTop: "1px solid var(--glass-border)", paddingTop: 8 }}>
               <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted-deep)", textTransform: "uppercase", padding: "0 12px", marginBottom: 6 }}>
                 {locale === "ko" ? "Hub 북마크 · 최근 사용" : "Hub bookmarks · recently used"}
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingLeft: 12, paddingRight: 6 }}>
-                {hubShelfRows.map((row) => (
+                {visibleHubShelfRows.map((row) => (
                   <button
                     type="button"
                     key={row.profileId}
@@ -1406,14 +1818,23 @@ function LibraryAgentsView() {
         {/* 사이드바 접기 하단 컨트롤 */}
         <footer style={{ borderTop: "1px solid var(--glass-border)", padding: 8, display: "flex", justifyContent: sidebarCollapsed ? "center" : "flex-end" }}>
           <button
+            type="button"
             onClick={toggleSidebar}
+            aria-label={sidebarCollapsed
+              ? (locale === "ko" ? "에이전트 도구함 펼치기" : "Expand agent toolbox")
+              : (locale === "ko" ? "에이전트 도구함 접기" : "Collapse agent toolbox")}
             style={{
               background: "none",
               border: "none",
               cursor: "pointer",
               color: "var(--muted-deep)",
-              padding: 4,
-              borderRadius: 4,
+              width: 44,
+              height: 44,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 0,
+              borderRadius: 8,
             }}
           >
             <IconSidebar size={16} style={{ transform: sidebarCollapsed ? "rotate(180deg)" : "none" }} />
@@ -1424,13 +1845,33 @@ function LibraryAgentsView() {
         {!sidebarCollapsed && (
           <div
             role="separator"
+            aria-label={locale === "ko" ? "에이전트 도구함 너비" : "Agent toolbox width"}
+            aria-orientation="vertical"
+            aria-valuemin={200}
+            aria-valuemax={500}
+            aria-valuenow={orgWidth}
+            tabIndex={0}
             onMouseDown={startResize}
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              const delta = event.key === "ArrowLeft" ? -16 : 16;
+              setOrgWidth((current) => {
+                const next = Math.max(200, Math.min(500, current + delta));
+                try {
+                  window.localStorage.setItem("agentlas.firm.orgWidth", String(next));
+                } catch {
+                  // ignore
+                }
+                return next;
+              });
+            }}
             style={{
               position: "absolute",
               right: -3,
               top: 0,
               bottom: 0,
-              width: 6,
+              width: 10,
               cursor: "col-resize",
               zIndex: 10,
             }}
@@ -1475,31 +1916,152 @@ function LibraryAgentsView() {
               </span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 18 }}>{pickLocalized(selectedFirm, locale).name}</h1>
-                <p style={{ margin: "3px 0 0", color: "var(--muted-deep)", fontSize: 12 }}>{locale === "ko" ? "에이전트 팀 자체 관리" : "Manage the agent team as one unit"}</p>
+                <p style={{ margin: "3px 0 0", color: "var(--muted-deep)", fontSize: 12 }}>{locale === "ko" ? "프로젝트에 장착하는 팀 도구" : "A team tool attached to projects"}</p>
               </div>
             </header>
             <section style={{ maxWidth: 760, margin: "24px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 16 }}>
               <div style={{ padding: 20, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)" }}>
-                <h2 style={{ margin: 0, fontSize: 15 }}>{locale === "ko" ? "팀 실행 단위" : "Team execution unit"}</h2>
+                <h2 style={{ margin: 0, fontSize: 15 }}>{locale === "ko" ? "팀 도구 구성" : "Team tool composition"}</h2>
                 <p style={{ margin: "7px 0 0", color: "var(--ink-soft)", fontSize: 13, lineHeight: 1.6 }}>
                   {locale === "ko"
-                    ? "이 팀은 최상위 TF에서 중간관리 오케스트레이터 하나로 선택됩니다. 하위 worker와 eval·judge 같은 내부 역할은 별도 소유 에이전트처럼 관리하지 않습니다."
-                    : "This team is selected as one middle-manager unit inside a top-level task force. Internal workers and control roles such as eval or judge are not managed as separate owned agents."}
+                    ? "프로젝트는 이 팀을 도구 하나로 장착합니다. 실행할 때는 CEO→HQ→전문가 위계를 유지하며, 내부 worker와 eval·judge는 별도 소유 에이전트처럼 노출하지 않습니다."
+                    : "A project attaches this team as one tool. Execution preserves the CEO → HQ → specialist hierarchy; internal workers, evals, and judges are not exposed as separately owned agents."}
                 </p>
                 <dl style={{ margin: "16px 0 0", display: "grid", gridTemplateColumns: "120px 1fr", gap: "8px 12px", fontSize: 12 }}>
+                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "로컬 팀 ID" : "Local team ID"}</dt><dd style={{ margin: 0 }}>{selectedFirm.id}</dd>
                   <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "팀 슬러그" : "Team slug"}</dt><dd style={{ margin: 0 }}>{selectedFirm.slug}</dd>
-                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "오케스트레이터" : "Orchestrator"}</dt><dd style={{ margin: 0 }}>{agentMap.get(selectedFirm.ceoAgentId) ? agentDisplayName(agentMap.get(selectedFirm.ceoAgentId)!, locale) : selectedFirm.ceoAgentId}</dd>
-                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "사용자 기능 멤버" : "User-facing members"}</dt><dd style={{ margin: 0 }}>{selectedFirm.orgChart.filter((node) => isVisibleFirmOrgNode(node, agentMap)).length}</dd>
+                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "실행 컨트롤러" : "Execution controller"}</dt><dd style={{ margin: 0 }}>{selectedFirmController ? agentDisplayName(selectedFirmController, locale) : selectedFirm.ceoAgentId}</dd>
+                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "원본 출처" : "Origin"}</dt><dd style={{ margin: 0 }}>{selectedFirmController?.assetSource === "agent-cloud" ? "Agent Cloud" : selectedFirmController?.assetSource === "hub" ? "Agentlas Hub" : (locale === "ko" ? "로컬 가져오기" : "Local import")}</dd>
+                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "팀 릴리스 바인딩" : "Team release binding"}</dt>
+                  <dd style={{ margin: 0, color: selectedFirmNeedsTeamBinding ? "var(--amber-deep)" : "var(--ink)" }}>
+                    {selectedFirmNeedsTeamBinding
+                      ? (locale === "ko" ? "팀 자체 ID·릴리스 필요 · 장착 차단" : "Team-level ID and release required · attachment blocked")
+                      : (locale === "ko" ? "로컬 팀 ID에 고정" : "Pinned to local team ID")}
+                  </dd>
+                  {selectedFirmControllerBinding && (
+                    <>
+                      <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "컨트롤러 릴리스" : "Controller release"}</dt>
+                      <dd style={{ margin: 0 }}>{selectedFirmControllerBinding.agentReleaseId} <span style={{ color: "var(--muted-deep)" }}>({locale === "ko" ? "팀 릴리스 아님" : "not the team release"})</span></dd>
+                    </>
+                  )}
+                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "사용자용 조직 자리" : "User-facing slots"}</dt><dd style={{ margin: 0 }}>{selectedFirm.orgChart.filter((node) => isUserFacingAgentText(node.agentSlug, node.role)).length}</dd>
+                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "실제 연결됨" : "Bound agents"}</dt><dd style={{ margin: 0 }}>{selectedFirm.orgChart.filter((node) => isUserFacingAgentText(node.agentSlug, node.role) && agentMap.has(node.agentId)).length}</dd>
                 </dl>
               </div>
+              <div style={{ padding: 20, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)" }}>
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
+                  <h2 style={{ margin: 0, fontSize: 15 }}>{locale === "ko" ? "CEO → HQ → 전문가 구성" : "CEO → HQ → specialist composition"}</h2>
+                  <span style={{ color: "var(--muted-deep)", fontSize: 11 }}>{locale === "ko" ? "실제 연결 상태" : "Actual binding state"}</span>
+                </div>
+                <p style={{ margin: "7px 0 14px", color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.55 }}>
+                  {locale === "ko"
+                    ? "조직 자리와 실행 가능한 에이전트를 구분합니다. 미연결 자리는 역할 설계일 뿐 프로젝트에 장착되거나 경험 칩을 소유하지 않습니다. 연결된 멤버를 선택하면 그 멤버의 Experience Chips로 이동합니다."
+                    : "Organization slots are distinct from executable agents. An unbound slot is only a role design; it cannot be attached to projects or own Experience Chips. Select a bound member to open that member's Experience Chips."}
+                </p>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 8 }}>
+                  {selectedFirm.orgChart.filter((node) => isUserFacingAgentText(node.agentSlug, node.role)).map((node) => {
+                    const boundAgent = agentMap.get(node.agentId) ?? null;
+                    const parent = node.reportsTo ? selectedFirm.orgChart.find((candidate) => candidate.agentSlug === node.reportsTo) : null;
+                    return (
+                      <button
+                        key={node.agentSlug}
+                        type="button"
+                        disabled={!boundAgent}
+                        onClick={() => {
+                          if (!boundAgent) return;
+                          setSelectedFirmId(null);
+                          setSelectedNode({ id: boundAgent.id, name: agentDisplayName(boundAgent, locale), role: node.role, agentId: boundAgent.id });
+                          setActiveTab("ontology");
+                        }}
+                        aria-label={boundAgent ? `${agentDisplayName(boundAgent, locale)} · ${locale === "ko" ? "Experience Chips 보기" : "View Experience Chips"}` : undefined}
+                        style={{ minWidth: 0, minHeight: 58, padding: 11, border: "1px solid var(--paper-edge)", borderRadius: 9, background: boundAgent ? "var(--paper-2)" : "var(--paper)", color: "var(--ink)", opacity: boundAgent ? 1 : 0.72, textAlign: "left", cursor: boundAgent ? "pointer" : "default" }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ width: 28, height: 28, borderRadius: 8, display: "grid", placeItems: "center", background: boundAgent ? "var(--accent-soft)" : "var(--fill-1)", color: boundAgent ? "var(--accent)" : "var(--muted-deep)", fontSize: 11, fontWeight: 800 }}>
+                            {(boundAgent ? agentDisplayName(boundAgent, locale) : node.role).slice(0, 1).toUpperCase()}
+                          </span>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <strong style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>{boundAgent ? agentDisplayName(boundAgent, locale) : node.role}</strong>
+                            <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--muted-deep)", fontSize: 10.5 }}>{parent ? `${parent.role} → ${node.role}` : node.role}</span>
+                          </div>
+                          <span style={{ flexShrink: 0, padding: "2px 6px", borderRadius: 999, background: boundAgent ? "var(--green-soft)" : "var(--fill-1)", color: boundAgent ? "var(--green-deep)" : "var(--muted-deep)", fontSize: 9.5, fontWeight: 750 }}>
+                            {boundAgent ? (locale === "ko" ? "연결됨" : "Bound") : (locale === "ko" ? "미연결" : "Unbound")}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <button type="button" onClick={() => navigate(`/cloud?team=${encodeURIComponent(selectedFirm.id)}`)} style={{ minHeight: 36, padding: "0 14px", borderRadius: 8, border: "1px solid var(--accent)", background: "var(--accent)", color: "#fff", cursor: "pointer", fontWeight: 750 }}>
-                  {locale === "ko" ? "팀을 Cloud / Hub에 올리기" : "Upload team to Cloud / Hub"}
-                </button>
-                <button type="button" onClick={() => void removeInstalledFirm(selectedFirm)} style={{ minHeight: 36, padding: "0 14px", borderRadius: 8, border: "1px solid var(--red-deep)", background: "transparent", color: "var(--red-deep)", cursor: "pointer", fontWeight: 700 }}>
-                  {locale === "ko" ? "팀 제거" : "Remove team"}
+                <ProjectAttachControl
+                  projects={projects}
+                  projectId={activeProjectId}
+                  entityKind="team"
+                  localTargetId={selectedFirm.id}
+                  locale={locale}
+                  disabled={!selectedFirmController || selectedFirmNeedsTeamBinding}
+                  onProjectChange={setActiveProjectId}
+                  onAttach={() => void attachTeamToActiveProject(selectedFirm)}
+                />
+                <button type="button" onClick={() => navigate(`/cloud?team=${encodeURIComponent(selectedFirm.id)}`)} style={{ minHeight: 44, padding: "0 14px", borderRadius: 8, border: "1px solid var(--paper-edge)", background: "var(--paper)", color: "var(--ink)", cursor: "pointer", fontWeight: 700 }}>
+                  {locale === "ko" ? "Cloud 저장·Hub 공개 관리" : "Manage Cloud save & Hub publish"}
                 </button>
               </div>
+              {(!selectedFirmController || selectedFirmNeedsTeamBinding) && (
+                <p role="status" style={{ margin: "-4px 0 0", color: "var(--amber-deep)", fontSize: 11.5, lineHeight: 1.5 }}>
+                  {!selectedFirmController
+                    ? (locale === "ko"
+                        ? "이 팀의 로컬 실행 진입점이 없어 장착할 수 없습니다. 팀을 다시 가져오거나 복원하세요."
+                        : "This team has no local execution entrypoint. Re-import or restore the team.")
+                    : (locale === "ko"
+                        ? "원격 컨트롤러의 릴리스를 팀 전체의 릴리스로 추정하지 않습니다. 팀 자체의 정확한 ID·릴리스 계약이 필요합니다."
+                        : "The controller's remote release is not inferred to be the team's release. A team-level exact identity and release contract is required.")}
+                </p>
+              )}
+              <details style={{ alignSelf: "flex-start", fontSize: 11.5, color: "var(--muted-deep)" }}>
+                <summary style={{ cursor: "pointer", minHeight: 44, display: "flex", alignItems: "center" }}>{locale === "ko" ? "고급 관리" : "Advanced management"}</summary>
+                <button type="button" onClick={() => void removeInstalledFirm(selectedFirm)} style={{ minHeight: 44, padding: "0 14px", borderRadius: 8, border: "1px solid var(--red-deep)", background: "transparent", color: "var(--red-deep)", cursor: "pointer", fontWeight: 700 }}>
+                  {locale === "ko" ? "프로젝트 영향 확인 후 팀 제거" : "Review project impact and remove team"}
+                </button>
+              </details>
+            </section>
+          </div>
+        ) : selectedStandaloneTeam ? (
+          <div style={{ flex: 1, overflowY: "auto" }} data-tour-id="agents.detail" data-testid="canonical-package-team-detail">
+            <header className="titlebar-drag" style={{ padding: "16px 32px", minHeight: 56, borderBottom: "var(--hairline)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 12 }}>
+              <span style={{ width: 36, height: 36, borderRadius: 10, background: "var(--fill-1)", color: "var(--accent)", display: "inline-flex", alignItems: "center", justifyContent: "center" }}><IconLayers size={18} /></span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 18 }}>{agentDisplayName(selectedStandaloneTeam, locale)}</h1>
+                <p style={{ margin: "3px 0 0", color: "var(--muted-deep)", fontSize: 12 }}>{locale === "ko" ? "프로젝트에 장착하는 팀 패키지" : "A team package attached to projects"}</p>
+              </div>
+            </header>
+            <section style={{ maxWidth: 760, margin: "24px auto", padding: "0 24px", display: "grid", gap: 16 }}>
+              <div style={{ padding: 20, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)" }}>
+                <h2 style={{ margin: 0, fontSize: 15 }}>{locale === "ko" ? "팀 신원 원장" : "Team identity ledger"}</h2>
+                <p style={{ margin: "7px 0 16px", color: "var(--ink-soft)", fontSize: 12.5, lineHeight: 1.6 }}>
+                  {locale === "ko" ? "팀을 싱글 에이전트처럼 실행하거나 팀 전체의 Experience를 복제하지 않습니다. 이 패키지에 직접 연결된 팀 ID·릴리스만 프로젝트 장착에 사용합니다." : "This team is not run as a single agent and does not copy member Experience. Only the identity and release bound directly to this team package may be attached."}
+                </p>
+                <dl style={{ margin: 0, display: "grid", gridTemplateColumns: "132px 1fr", gap: "9px 12px", fontSize: 12 }}>
+                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "로컬 설치 ID" : "Local install ID"}</dt><dd style={{ margin: 0 }}>{selectedStandaloneTeam.id}</dd>
+                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "팀 슬러그" : "Team slug"}</dt><dd style={{ margin: 0 }}>{selectedStandaloneTeam.slug}</dd>
+                  <dt style={{ color: "var(--muted-deep)" }}>Definition ID</dt><dd style={{ margin: 0 }}>{selectedStandaloneTeamBinding?.agentDefinitionId ?? (locale === "ko" ? "확인 필요" : "Verification required")}</dd>
+                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "정확한 릴리스" : "Exact release"}</dt><dd style={{ margin: 0 }}>{selectedStandaloneTeamBinding?.agentReleaseId ?? (locale === "ko" ? "확인 필요 · 장착 차단" : "Verification required · attachment blocked")}</dd>
+                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "출처" : "Origin"}</dt><dd style={{ margin: 0 }}>{selectedStandaloneTeamBinding?.source === "hub-install" ? "Agentlas Hub" : selectedStandaloneTeamBinding?.source === "agent-cloud-restore" ? "Agent Cloud" : (locale === "ko" ? "로컬 설치" : "Local install")}</dd>
+                  <dt style={{ color: "var(--muted-deep)" }}>Package hash</dt><dd style={{ margin: 0 }}>{selectedStandaloneTeam.packageHash ?? (locale === "ko" ? "기록 없음" : "Not recorded")}</dd>
+                </dl>
+              </div>
+              <ProjectAttachControl
+                projects={projects}
+                projectId={activeProjectId}
+                entityKind="team"
+                localTargetId={selectedStandaloneTeamBinding?.agentDefinitionId ?? selectedStandaloneTeam.id}
+                locale={locale}
+                disabled={!selectedStandaloneTeamBinding}
+                onProjectChange={setActiveProjectId}
+                onAttach={() => void attachStandaloneTeamToActiveProject(selectedStandaloneTeam)}
+              />
+              {!selectedStandaloneTeamBinding && <p role="status" style={{ margin: 0, color: "var(--amber-deep)", fontSize: 11.5 }}>{locale === "ko" ? "팀 자체의 정확한 원격 바인딩이 없으므로 프로젝트에 장착하지 않습니다." : "This team is not attachable until its own exact remote binding is available."}</p>}
             </section>
           </div>
         ) : selectedNode === null ? (
@@ -1524,7 +2086,7 @@ function LibraryAgentsView() {
                 <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 18, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                   {manageView === "published"
                     ? locale === "ko" ? "퍼블리시한 에이전트 관리" : "Published Agents"
-                    : locale === "ko" ? "에이전트 라이브러리" : "My Agents Library"}
+                    : locale === "ko" ? "프로젝트용 에이전트 도구함" : "Project Agent Toolbox"}
                 </h1>
               </div>
               <button
@@ -1536,7 +2098,7 @@ function LibraryAgentsView() {
                   display: "inline-flex",
                   alignItems: "center",
                   gap: 8,
-                  minHeight: 34,
+                  minHeight: 44,
                   padding: "0 12px",
                   borderRadius: 8,
                   border: "1px solid var(--accent)",
@@ -1562,8 +2124,8 @@ function LibraryAgentsView() {
                     ? "왼쪽 목록에서 내가 agentlas.cloud에 퍼블리시한 에이전트를 확인하고, 로컬에 설치해 상세 관리로 이어갈 수 있습니다."
                     : "Select an agent you published on agentlas.cloud, install it locally, then manage it in the detail view."
                   : locale === "ko"
-                    ? "로컬 환경에 설치된 모든 에이전트와 조직(Team) 목록입니다. 좌측 조직도에서 개별 에이전트를 클릭하여 세부 통제 센터를 열어보세요."
-                    : "List of all agents and organizations (Teams). Click an agent to open its detailed control center."}
+                    ? "작업은 프로젝트가 소유합니다. 이 화면에서는 팀과 싱글 에이전트의 구성·권한·경험 칩을 확인하고, 필요한 프로젝트의 도구함에 장착합니다."
+                    : "Projects own the work. Inspect each team or single agent's composition, permissions, and Experience Chips here, then attach it to a project's tool pool."}
               </p>
               
               {manageView === "published" ? (
@@ -1574,34 +2136,38 @@ function LibraryAgentsView() {
                 </div>
               ) : (
               <>
-              {/* 회사 관련 채팅 리스트 */}
-              <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "0 0 12px", display: "flex", alignItems: "center", gap: 6 }}>
-                <IconChat size={14} style={{ color: "var(--accent)" }} />
-                {t("firm.section.chats")} ({chats.length})
-              </h2>
-              {chats.length === 0 ? (
-                <div style={{ padding: 32, border: "1px dashed var(--paper-edge)", borderRadius: "var(--radius-md)", color: "var(--muted-deep)", textAlign: "center", fontSize: 13 }}>
-                  {t("firm.empty_chats")}
-                </div>
-              ) : (
-                <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 8 }}>
-                  {chats.map((c) => (
-                    <li key={c.id}>
-                      <Link
-                        href="/one"
-                        style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)", textDecoration: "none", color: "var(--ink)", transition: "border 0.2s" }}
-                      >
-                        <span style={{ flex: 1, minWidth: 0, fontWeight: 500, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {c.title.trim() || t("chat.untitled")}
-                        </span>
-                        <span style={{ fontSize: 11, color: "var(--muted)", flexShrink: 0 }}>
-                          {new Date(c.updatedAt).toLocaleString(locale === "en" ? "en-US" : "ko-KR", { month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" })}
-                        </span>
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.35fr) minmax(240px, .65fr)", gap: 16 }}>
+                <section style={{ padding: 18, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)" }}>
+                  <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "0 0 6px", display: "flex", alignItems: "center", gap: 7 }}>
+                    <IconLayers size={15} style={{ color: "var(--accent)" }} />
+                    {locale === "ko" ? "프로젝트별 장착 상태" : "Attached by project"}
+                  </h2>
+                  <p style={{ margin: "0 0 14px", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.55 }}>
+                    {locale === "ko" ? "프로젝트가 작업·기억·산출물을 소유하고, 아래 에이전트 풀은 그 프로젝트가 사용할 도구 목록입니다." : "The project owns work, memory, and outputs; its agent pool is the set of tools available to that project."}
+                  </p>
+                  {projects.length === 0 ? (
+                    <button type="button" onClick={() => navigate("/project/new")} className="agent-run-button">{locale === "ko" ? "첫 프로젝트 만들기" : "Create first project"}</button>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                      {projects.slice(0, 8).map((project) => (
+                        <button key={project.id} type="button" onClick={() => navigate(`/project/detail?id=${encodeURIComponent(project.id)}`)} style={{ minHeight: 44, display: "flex", alignItems: "center", gap: 10, padding: "7px 4px", border: 0, borderTop: "1px solid var(--paper-edge)", background: "transparent", color: "var(--ink)", cursor: "pointer", textAlign: "left" }}>
+                          <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{project.name}</span>
+                          <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>{locale === "ko" ? `도구 ${project.agentPool.length}개` : `${project.agentPool.length} tools`}</span>
+                          <IconChevronRight size={14} style={{ color: "var(--muted)" }} />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </section>
+                <aside style={{ padding: 18, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper-2)" }}>
+                  <h2 style={{ margin: "0 0 8px", fontSize: 14 }}>{locale === "ko" ? "시스템 에이전트는 별도" : "System agents stay separate"}</h2>
+                  <p style={{ margin: 0, color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.6 }}>
+                    {locale === "ko"
+                      ? "PM Soul·Memory Curator·Task Bias는 OS에 상주합니다. 팀이나 싱글 패키지에 복사하거나 사용자가 프로젝트 도구로 장착하지 않습니다."
+                      : "PM Soul, Memory Curator, and Task Bias live in the OS. They are not copied into packages or attached as user-selectable project tools."}
+                  </p>
+                </aside>
+              </div>
               </>
               )}
             </section>
@@ -1631,6 +2197,11 @@ function LibraryAgentsView() {
             runtimeStatuses={runtimeStatuses}
             runtimeOverrides={runtimeOverrides}
             nodeContext={selectedContext}
+            projects={projects}
+            exactBinding={exactBindings.find((binding) => binding.installedAgentId === selectedNode.agentId) ?? null}
+            activeProjectId={activeProjectId}
+            onActiveProjectChange={setActiveProjectId}
+            onAttachToProject={(agent) => void attachAgentToActiveProject(agent)}
             onRuntimeOverridesChange={setRuntimeOverrides}
             onSaveAlias={(value) => {
               const current = agents.find((item) => item.id === selectedNode.agentId);
@@ -1691,7 +2262,7 @@ function PublishedAgentsRoster({
           type="button"
           onClick={onSignIn}
           style={{
-            minHeight: 34,
+            minHeight: 44,
             borderRadius: 8,
             border: "1px solid var(--accent)",
             background: "var(--accent)",
@@ -1767,7 +2338,7 @@ function PublishedAgentsRoster({
               onClick={() => onInstall(item.slug)}
               disabled={busy}
               style={{
-                minHeight: 28,
+                minHeight: 44,
                 padding: "0 9px",
                 borderRadius: 7,
                 border: `1px solid ${isInstalled ? "var(--paper-edge)" : "var(--accent)"}`,
@@ -1795,11 +2366,14 @@ function MiniNodeAvatar({ node, active, onClick }: { node: { name: string; role?
   const letters = node.name.slice(0, 2).toUpperCase();
   return (
     <button
+      type="button"
       onClick={onClick}
+      aria-label={node.role ? `${node.name} · ${node.role}` : node.name}
+      aria-pressed={active}
       title={`${node.name} (${node.role ?? ""})`}
       style={{
-        width: 32,
-        height: 32,
+        width: 44,
+        height: 44,
         borderRadius: 8,
         background: active ? "var(--accent)" : "var(--paper)",
         color: active ? "var(--paper)" : "var(--ink)",
@@ -1889,10 +2463,12 @@ function OrgNodeCard({ node, tier, active, onClick }: { node: ResolvedNode; tier
   const isCeo = tier === 1;
   const roleLabel = readableRoleLabel(node.role, node.name);
   return (
-    <div
+    <button
+      type="button"
       onClick={onClick}
       title={[node.name, roleLabel].filter(Boolean).join(" - ")}
       style={{
+        width: "100%",
         display: "flex",
         alignItems: "flex-start",
         gap: 8,
@@ -1902,6 +2478,9 @@ function OrgNodeCard({ node, tier, active, onClick }: { node: ResolvedNode; tier
         borderRadius: "var(--radius-sm)",
         cursor: "pointer",
         transition: "all 0.15s ease",
+        color: "inherit",
+        font: "inherit",
+        textAlign: "left",
       }}
     >
       <div
@@ -1933,7 +2512,7 @@ function OrgNodeCard({ node, tier, active, onClick }: { node: ResolvedNode; tier
           )}
         </div>
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -1997,10 +2576,12 @@ function OrgChart({
 
     return (
       <div key={node.agentSlug} style={{ marginTop: depth === 0 ? 0 : 6 }}>
-        <div
+        <button
+          type="button"
           onClick={() => onSelect(resolved)}
           title={[displayName, roleLabel].filter(Boolean).join(" - ")}
           style={{
+            width: "100%",
             display: "flex",
             alignItems: "flex-start",
             gap: 8,
@@ -2010,6 +2591,9 @@ function OrgChart({
             borderRadius: "var(--radius-sm)",
             cursor: "pointer",
             transition: "all 0.15s ease",
+            color: "inherit",
+            font: "inherit",
+            textAlign: "left",
           }}
         >
           <div
@@ -2041,7 +2625,7 @@ function OrgChart({
               )}
             </div>
           </div>
-        </div>
+        </button>
         {kids.length > 0 && (
           <div
             style={{
@@ -3252,7 +3836,7 @@ function ExperiencePanel({
       </section>
 
       <details style={{ borderBottom: "1px solid var(--paper-edge)", paddingBottom: 12 }}>
-        <summary style={{ minHeight: 42, display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontSize: 12.5, fontWeight: 750 }}>
+        <summary style={{ minHeight: 44, display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", fontSize: 12.5, fontWeight: 750 }}>
           <span>{ko ? "취향 경험 후보" : "Taste candidates"}</span><span>{tasteDrafts.length}</span>
         </summary>
       <section data-testid="local-taste-drafts" style={{ background: "color-mix(in srgb, var(--paper) 92%, var(--accent-soft))", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16, boxShadow: "0 10px 28px color-mix(in srgb, var(--ink) 7%, transparent)" }}>
@@ -3358,7 +3942,7 @@ function ExperiencePanel({
       </details>
 
       <details style={{ borderBottom: "1px solid var(--paper-edge)", paddingBottom: 12 }}>
-        <summary style={{ minHeight: 42, display: "flex", alignItems: "center", cursor: "pointer", fontSize: 12.5, fontWeight: 750 }}>
+        <summary style={{ minHeight: 44, display: "flex", alignItems: "center", cursor: "pointer", fontSize: 12.5, fontWeight: 750 }}>
           {ko ? "새 경험 칩 만들기" : "Create a new experience chip"}
         </summary>
       <section style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
@@ -3637,7 +4221,7 @@ function BorrowedAgentDetailView({
   return (
     <div style={{ flex: 1, overflowY: "auto" }} data-testid="borrowed-agent-detail" data-profile-id={profile.profileId}>
       <header className="titlebar-drag" style={{ minHeight: 64, padding: "12px 24px", borderBottom: "var(--hairline)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 12 }}>
-        <button type="button" className="titlebar-nodrag" onClick={onBack} aria-label={locale === "ko" ? "목록으로" : "Back to list"} style={{ width: 32, height: 32, borderRadius: 8, border: "1px solid var(--paper-edge)", background: "var(--paper-2)", cursor: "pointer", color: "var(--ink)" }}>
+        <button type="button" className="titlebar-nodrag" onClick={onBack} aria-label={locale === "ko" ? "목록으로" : "Back to list"} style={{ width: 44, height: 44, flexShrink: 0, borderRadius: 8, border: "1px solid var(--paper-edge)", background: "var(--paper-2)", cursor: "pointer", color: "var(--ink)" }}>
           ‹
         </button>
         <span style={{ width: 38, height: 38, borderRadius: 11, background: "var(--accent-soft)", color: "var(--accent)", display: "grid", placeItems: "center" }}>
@@ -3750,6 +4334,11 @@ interface AgentDetailViewProps {
   runtimeStatuses: RuntimeStatus[];
   runtimeOverrides: AgentRuntimeOverride[];
   nodeContext: SelectedNodeContext | null;
+  projects: Project[];
+  exactBinding: InstalledAgentExactBinding | null;
+  activeProjectId: string;
+  onActiveProjectChange: (projectId: string) => void;
+  onAttachToProject: (agent: InstalledAgent | null) => void;
   onRuntimeOverridesChange: (items: AgentRuntimeOverride[]) => void;
   onSaveAlias: (value: string) => Promise<void>;
   onRemoveAgent: () => void;
@@ -3778,11 +4367,29 @@ function AgentDetailView({
   runtimeStatuses,
   runtimeOverrides,
   nodeContext,
+  projects,
+  exactBinding,
+  activeProjectId,
+  onActiveProjectChange,
+  onAttachToProject,
   onRuntimeOverridesChange,
   onSaveAlias,
   onRemoveAgent,
 }: AgentDetailViewProps) {
   const { locale } = useT();
+  const loadoutRows = useMemo(() => {
+    const names = new Set(agentFiles.map((entry) => entry.name.toLowerCase()));
+    const has = (...candidates: string[]) => candidates.some((candidate) => names.has(candidate));
+    return [
+      { key: "skills", labelKo: "Skills", labelEn: "Skills", present: has("skills") },
+      { key: "knowledge", labelKo: "Knowledge", labelEn: "Knowledge", present: has("knowledge") },
+      { key: "tools", labelKo: "Tools", labelEn: "Tools", present: has("tools") || (agent?.mcpServers?.length ?? 0) > 0, detail: (agent?.mcpServers?.length ?? 0) > 0 ? `MCP ${agent!.mcpServers.length}` : undefined },
+      { key: "permissions", labelKo: "Permissions", labelEn: "Permissions", present: has("permissions", "policy.yaml") },
+      { key: "contracts", labelKo: "Contracts", labelEn: "Contracts", present: has("contracts") },
+      { key: "hooks", labelKo: "Hooks", labelEn: "Hooks", present: has("hooks") },
+      { key: "experience", labelKo: "Experience", labelEn: "Experience", present: has("experience") },
+    ];
+  }, [agent, agentFiles]);
 
   // 규칙 카드별 열림/닫힘(Accordion) 관리 상태
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
@@ -4249,6 +4856,38 @@ function AgentDetailView({
     }
   };
 
+  if (!agent) {
+    return (
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, background: "var(--paper-2)" }} data-testid="unbound-org-slot">
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 24px", borderBottom: "var(--hairline)", background: "var(--paper)" }}>
+          <button type="button" onClick={onBackToOverview} style={{ minHeight: 44, padding: "0 12px", borderRadius: 8, border: "1px solid var(--paper-edge)", background: "var(--paper-2)", color: "var(--ink-soft)", cursor: "pointer" }}>
+            {locale === "ko" ? "← 에이전트 도구함" : "← Agent Toolbox"}
+          </button>
+          <span style={{ color: "var(--muted-deep)", fontSize: 12 }}>{locale === "ko" ? "조직 구조" : "Organization structure"}</span>
+        </div>
+        <section style={{ width: "min(680px, calc(100% - 48px))", margin: "56px auto", padding: 24, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ width: 42, height: 42, borderRadius: 12, display: "grid", placeItems: "center", background: "var(--fill-1)", color: "var(--accent)" }}><IconBuilding size={18} /></span>
+            <div>
+              <h1 style={{ margin: 0, fontSize: 18 }}>{node.name}</h1>
+              <p style={{ margin: "4px 0 0", color: "var(--muted-deep)", fontSize: 12 }}>{node.role}</p>
+            </div>
+          </div>
+          <h2 style={{ margin: "22px 0 7px", fontSize: 14 }}>{locale === "ko" ? "아직 실제 에이전트가 연결되지 않은 조직 자리입니다" : "This organization slot has no bound agent yet"}</h2>
+          <p style={{ margin: 0, color: "var(--ink-soft)", fontSize: 13, lineHeight: 1.65 }}>
+            {locale === "ko"
+              ? "이 항목은 회사 위계를 설명하지만 실행 가능한 도구는 아닙니다. Agent ID·신뢰 등급·런타임·메모리·경험 칩을 추정해 표시하지 않습니다. 실제 에이전트를 연결한 뒤 프로젝트 도구함에 장착할 수 있습니다."
+              : "This row describes company hierarchy, but it is not an executable tool. Agent ID, trust, runtime, memory, and Experience Chips are not inferred. Bind a real agent before attaching it to a project."}
+          </p>
+          <div style={{ display: "flex", gap: 9, marginTop: 18, flexWrap: "wrap" }}>
+            <button type="button" onClick={() => navigate("/build")} className="agent-run-button">{locale === "ko" ? "에이전트 만들기" : "Build an agent"}</button>
+            <button type="button" onClick={() => navigate("/project/new")} style={{ minHeight: 44, padding: "0 12px", borderRadius: 8, border: "1px solid var(--paper-edge)", background: "var(--paper-2)", color: "var(--ink)", cursor: "pointer", fontWeight: 700 }}>{locale === "ko" ? "프로젝트 도구 구성 보기" : "Open project tool setup"}</button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div style={{ flex: 1, display: "flex", minWidth: 0, minHeight: 0, overflow: "hidden" }} data-tour-id="agents.detail">
       
@@ -4256,7 +4895,7 @@ function AgentDetailView({
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, height: "100%", overflow: "hidden" }}>
         
         {/* 상단 액션 바 */}
-        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 24px", borderBottom: "var(--hairline)", background: "var(--paper)", minWidth: 0 }}>
+        <div className="agent-detail-actionbar" style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 24px", borderBottom: "var(--hairline)", background: "var(--paper)", minWidth: 0 }}>
           <button
             onClick={onBackToOverview}
             style={{
@@ -4264,7 +4903,8 @@ function AgentDetailView({
               alignItems: "center",
               gap: 4,
               fontSize: 12,
-              padding: "4px 8px",
+              minHeight: 44,
+              padding: "0 10px",
               borderRadius: 6,
               background: "var(--paper-2)",
               border: "1px solid var(--paper-edge)",
@@ -4274,48 +4914,22 @@ function AgentDetailView({
               flexShrink: 0,
             }}
           >
-            {locale === "ko" ? "← 회사 개요" : "← Company overview"}
+            {locale === "ko" ? "← 도구함 개요" : "← Toolbox overview"}
           </button>
           <div style={{ height: 12, width: 1, background: "var(--paper-edge)" }} />
           <div style={{ flex: "1 1 120px", minWidth: 0, fontSize: 13, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            {agent?.kind === "team" ? (locale === "ko" ? "팀 에이전트" : "Team agent") : (locale === "ko" ? "개별 전문가 에이전트" : "Individual specialist agent")}
+            {agent?.kind === "team" ? (locale === "ko" ? "프로젝트용 팀 도구" : "Project team tool") : (locale === "ko" ? "프로젝트용 전문가 도구" : "Project specialist tool")}
           </div>
-          {node.agentId && (
-            <button
-              className="agent-run-button"
-              onClick={() => navigate("/one")}
-              title={locale === "ko" ? "One에서 이 에이전트를 턴 단위로 호출할 수 있습니다" : "Call this agent for a turn in One"}
-            >
-              {locale === "ko" ? "One에서 호출" : "Call in One"}
-            </button>
-          )}
-          {agent && (
-            <button
-              className="titlebar-nodrag"
-              onClick={onRemoveAgent}
-              title={locale === "ko" ? "설치 목록에서 제거합니다. 원본 폴더는 삭제하지 않습니다." : "Remove from installed agents. The source folder is not deleted."}
-              style={{
-                marginLeft: node.agentId ? 0 : "auto",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 5,
-                minHeight: 30,
-                padding: "0 10px",
-                borderRadius: 7,
-                border: "1px solid color-mix(in srgb, var(--red-deep, #b83b2f) 30%, var(--paper-edge))",
-                background: "var(--paper)",
-                color: "var(--red-deep, #b83b2f)",
-                fontSize: 12,
-                fontWeight: 700,
-                cursor: "pointer",
-                whiteSpace: "nowrap",
-                flexShrink: 0,
-              }}
-            >
-              <IconTrash size={13} />
-              {locale === "ko" ? "제거" : "Remove"}
-            </button>
-          )}
+          <ProjectAttachControl
+            projects={projects}
+            projectId={activeProjectId}
+            entityKind="agent"
+            localTargetId={agent?.id}
+            locale={locale}
+            disabled={!agent}
+            onProjectChange={onActiveProjectChange}
+            onAttach={() => onAttachToProject(agent)}
+          />
         </div>
 
         {/* 에이전트 마스터 헤더 */}
@@ -4359,11 +4973,11 @@ function AgentDetailView({
           {(["identity", "memory", "playbook", "activity", "ontology"] as const).map((tab) => {
             const active = activeTab === tab;
             const labels = {
-              identity: locale === "ko" ? "정체성 & 페르소나" : "Identity & Persona",
-              memory: locale === "ko" ? "큐레이팅된 메모리" : "Curated Memory",
-              playbook: locale === "ko" ? "플레이북 & 워크플로우" : "Playbook & Workflow",
-              activity: locale === "ko" ? "활동과 개선" : "Activity & Improvements",
-              ontology: locale === "ko" ? "경험" : "Experience",
+              identity: locale === "ko" ? "정체성·권한" : "Identity & permissions",
+              memory: locale === "ko" ? "로컬 기억" : "Local memory",
+              playbook: locale === "ko" ? "구성요소" : "Loadout",
+              activity: locale === "ko" ? "변경 기록" : "Change history",
+              ontology: locale === "ko" ? "경험 칩" : "Experience Chips",
             };
             return (
               <button
@@ -4371,6 +4985,7 @@ function AgentDetailView({
                 onClick={() => onTabChange(tab)}
                 aria-current={active ? "page" : undefined}
                 style={{
+                  minHeight: 44,
                   padding: "8px 16px",
                   borderRadius: "var(--radius-sm)",
                   fontSize: 12.5,
@@ -4397,11 +5012,11 @@ function AgentDetailView({
             <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 840 }}>
 
               <div data-testid="governed-agent-identity" style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-                <h3 style={{ margin: "0 0 7px", fontSize: 14 }}>{locale === "ko" ? "거버넌스된 에이전트 정체성" : "Governed agent identity"}</h3>
+                <h3 style={{ margin: "0 0 7px", fontSize: 14 }}>{locale === "ko" ? "도구 정체성은 내용과 분리됩니다" : "Tool identity is separate from its contents"}</h3>
                 <p style={{ margin: 0, color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.55 }}>
                   {locale === "ko"
-                    ? "내부 지시 원문은 이 화면에 노출하지 않습니다. 학습으로 바뀌는 내용은 ‘활동과 개선’에서 비교하고, 직접 승인한 뒤에만 적용됩니다. 적용 후에도 되돌릴 수 있습니다."
-                    : "Raw internal instructions are not shown here. Learning-driven changes are compared under Activity & Improvements and applied only after explicit approval. Applied changes can still be reverted."}
+                    ? "로컬 설치 ID, 불변 에이전트 정의 ID, 정확한 릴리스를 서로 분리합니다. 원격 자산은 검증된 정의·릴리스 바인딩이 있을 때만 프로젝트에 장착됩니다."
+                    : "Local installation ID, immutable agent definition ID, and exact release stay separate. Remote tools attach to projects only with a verified definition-release binding."}
                 </p>
               </div>
 
@@ -4420,35 +5035,25 @@ function AgentDetailView({
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
                   <h4 style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 700 }}>{locale === "ko" ? "런타임 정보" : "Runtime info"}</h4>
                   <div style={{ fontSize: 12.5, lineHeight: 1.8, color: "var(--ink-soft)" }}>
-                    <div><strong>{locale === "ko" ? "에이전트 ID:" : "Agent ID:"}</strong> {node.agentId ?? (locale === "ko" ? "미설치(임시)" : "Not installed (temporary)")}</div>
+                    <div><strong>{locale === "ko" ? "로컬 설치 ID:" : "Local installation ID:"}</strong> {node.agentId ?? (locale === "ko" ? "조직 자리 · 실제 에이전트 미연결" : "Organization slot · no agent bound")}</div>
+                    {exactBinding ? (
+                      <>
+                        <div><strong>{locale === "ko" ? "에이전트 정의 ID:" : "Agent definition ID:"}</strong> {exactBinding.agentDefinitionId}</div>
+                        <div><strong>{locale === "ko" ? "정확한 릴리스:" : "Exact release:"}</strong> {exactBinding.agentReleaseId}</div>
+                      </>
+                    ) : agent.assetSource === "hub" || agent.assetSource === "agent-cloud" ? (
+                      <div style={{ color: "var(--amber-deep)" }}><strong>{locale === "ko" ? "릴리스 바인딩:" : "Release binding:"}</strong> {locale === "ko" ? "확인 필요 · 프로젝트 장착 차단" : "Verification required · project attach blocked"}</div>
+                    ) : null}
+                    {agent?.packageHash && <div><strong>{locale === "ko" ? "패키지 해시:" : "Package hash:"}</strong> {agent.packageHash.slice(0, 16)}…</div>}
                     <div><strong>{locale === "ko" ? "적용 런타임:" : "Active runtime:"}</strong> {effectiveRuntimeOverride ? selectionSummary(effectiveRuntimeOverride.selection, locale) : (locale === "ko" ? "역할별 자동 라우팅" : "Role-based auto-routing")}</div>
-                    <div><strong>{locale === "ko" ? "신뢰 등급:" : "Trust grade:"}</strong> Trust {agent?.trustGrade ?? "B"}</div>
-                    {agent && (() => {
-                      const own = classifyAgent(agent, locale);
-                      return (
-                        <div className="agent-ownership-row" data-owned={own.owned ? "true" : "false"}>
-                          <strong>{locale === "ko" ? "소유:" : "Ownership:"}</strong>{" "}
-                          <span className="agent-ownership-badge" data-owned={own.owned ? "true" : "false"}>
-                            {own.owned
-                              ? `${own.label} · owned`
-                              : (locale === "ko" ? "빌린 게스트 · borrowed" : "Borrowed guest · borrowed")}
-                          </span>
-                          <div className="agent-ownership-path">{own.origin}</div>
-                          {own.localPath && own.origin !== own.localPath && (
-                            <div className="agent-ownership-path">{own.localPath}</div>
-                          )}
-                          <div className="agent-ownership-note">
-                            {own.owned
-                              ? own.klass === "owned-cloud"
-                                ? (locale === "ko" ? "검증된 package hash의 로컬 실행 사본 — Cloud 원본과 버전을 구분해 복원합니다." : "A local execution copy of the verified package hash — restored with its Cloud origin and version intact.")
-                                : own.localPath
-                                ? (locale === "ko" ? "내 디스크의 실제 폴더 — 게시자가 사라져도 안 죽는다." : "A real folder on my disk — it survives even if the publisher disappears.")
-                                : (locale === "ko" ? "내 라이브러리에 설치됨 — 내 자산이다." : "Installed in my library — it's my asset.")
-                              : (locale === "ko" ? "원격 게스트 — 게시자가 내리면 사용 불가. Fork 하면 내 것이 된다." : "Remote guest — unusable if the publisher takes it down. Fork it to make it yours.")}
-                          </div>
-                        </div>
-                      );
-                    })()}
+                    <div><strong>{locale === "ko" ? "신뢰 등급:" : "Trust grade:"}</strong> Trust {agent.trustGrade}</div>
+                    <div><strong>{locale === "ko" ? "원본 출처:" : "Origin:"}</strong> {agent.assetSource === "agent-cloud" ? "Agent Cloud" : agent.assetSource === "hub" ? "Agentlas Hub" : (locale === "ko" ? "로컬 가져오기" : "Local import")}</div>
+                    <div><strong>{locale === "ko" ? "가용 상태:" : "Availability:"}</strong> {agent.sourceMissingSince ? (locale === "ko" ? "원본 경로 연결 끊김" : "Source path disconnected") : (locale === "ko" ? "이 Mac에 설치된 실행 사본" : "Installed execution copy on this Mac")}</div>
+                    <div><strong>{locale === "ko" ? "보관 근거:" : "Custody evidence:"}</strong> {agent.assetSource === "agent-cloud"
+                      ? (locale === "ko" ? "Agent Cloud에서 복원된 실행 사본 · 소유권 별도 확인" : "Execution copy restored from Agent Cloud · ownership not independently verified")
+                      : agent.assetSource === "hub"
+                        ? (locale === "ko" ? "Hub 패키지의 로컬 실행 사본 · 게시자 소유권 별도" : "Local execution copy of a Hub package · publisher ownership is separate")
+                        : (locale === "ko" ? "이 Mac의 로컬 폴더에서 가져온 사본 · 소유권 미확인" : "Copy imported from a local folder on this Mac · ownership unverified")}</div>
                   </div>
                 </div>
                 <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
@@ -4466,6 +5071,28 @@ function AgentDetailView({
                   </div>
                 </div>
               </div>
+
+              {agent && (
+                <details style={{ alignSelf: "flex-start", color: "var(--muted-deep)", fontSize: 11.5 }}>
+                  <summary style={{ minHeight: 44, display: "flex", alignItems: "center", cursor: "pointer", fontWeight: 700 }}>
+                    {locale === "ko" ? "설치 관리" : "Installation management"}
+                  </summary>
+                  <div style={{ display: "grid", gap: 9, maxWidth: 520, padding: "2px 0 4px" }}>
+                    <p style={{ margin: 0, color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.55 }}>
+                      {locale === "ko"
+                        ? "제거하면 연결된 프로젝트의 도구함에서도 장착 해제됩니다. 확인 단계에서 영향을 받는 프로젝트를 먼저 보여주며 원본 폴더는 삭제하지 않습니다."
+                        : "Removal also detaches this tool from connected projects. The confirmation lists affected projects first, and the source folder is not deleted."}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={onRemoveAgent}
+                      style={{ justifySelf: "start", minHeight: 44, padding: "0 14px", borderRadius: 8, border: "1px solid var(--red-deep)", background: "transparent", color: "var(--red-deep)", cursor: "pointer", fontWeight: 700 }}
+                    >
+                      {locale === "ko" ? "프로젝트 영향 확인 후 제거" : "Review project impact and remove"}
+                    </button>
+                  </div>
+                </details>
+              )}
             </div>
           )}
 
@@ -4474,6 +5101,11 @@ function AgentDetailView({
             <div style={{ display: "flex", flexDirection: "column", gap: 20, maxWidth: 840 }}>
 
               {/* 메모리 요약 — 비개발자 어휘로 한 문장. 그래프는 아래의 2차(고급) 보기에서. */}
+              <p style={{ margin: 0, padding: "12px 14px", border: "1px solid var(--paper-edge)", borderRadius: 9, background: "var(--paper)", color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.55 }}>
+                {locale === "ko"
+                  ? "여기에는 프로젝트에 속하지 않는 에이전트 전역 기억만 표시합니다. 프로젝트 작업에서 생긴 기억은 해당 프로젝트 화면에서만 확인합니다."
+                  : "This view shows only agent-wide memory that is not owned by a project. Memory created during project work is visible only inside that project."}
+              </p>
               <div className="memory-summary">
                 <div className="memory-summary-line">
                   {locale === "ko" ? "이 에이전트가 기억하는 것: 결정 " : "What this agent remembers: Decisions "}<strong>{memoryParsed.decisions.length}</strong>
@@ -4481,13 +5113,13 @@ function AgentDetailView({
                   {" · "}{locale === "ko" ? "미결 " : "Open "}<strong>{memoryParsed.openQuestions.length}</strong>
                   {(() => {
                     const synced = [...memoryParsed.decisions, ...memoryParsed.gotchas].filter((r) => r.synced).length;
-                    return synced > 0 ? <> · {locale === "ko" ? "허브 공유 " : "Hub-shared "}<strong>{synced}</strong></> : null;
+                    return synced > 0 ? <> · {locale === "ko" ? "공유 후보 표시 " : "Marked as share candidates "}<strong>{synced}</strong></> : null;
                   })()}
                 </div>
                 <div className="memory-summary-note">
                   {locale === "ko"
-                    ? "기억은 내 디스크의 markdown 파일로 저장됩니다 — 켜고 끈 상태도 파일에 함께 남아 새로고침해도 유지됩니다."
-                    : "Memory is stored as markdown files on my disk — the on/off state is saved with the file too, so it persists across refreshes."}
+                    ? "여기는 설치 패키지의 로컬 curated notes입니다. 프로젝트의 작업 상태와 원시 기억은 프로젝트 .agentlas에 남고, 검토된 해결법만 별도의 경험 칩으로 승격됩니다. ‘공유 후보’ 표시는 업로드 영수증이 아닙니다."
+                    : "These are local curated notes for the installed package. Project state and raw memory stay in the project's .agentlas folder; only reviewed solutions can become separate Experience Chips. A share-candidate mark is not an upload receipt."}
                 </div>
               </div>
 
@@ -4766,12 +5398,13 @@ function AgentDetailView({
                   locale={locale}
                   graphLoading={ontologyGraphLoading}
                   graphError={ontologyGraphError}
+                  onRetry={() => setOntologyRevision((current) => current + 1)}
                 />
                 <div data-testid="ontology-human-guide" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 9 }}>
                   <div style={{ padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "var(--paper)" }}>
                     <strong style={{ display: "block", fontSize: 12.5 }}>{locale === "ko" ? "구매한 경험 칩 쓰기" : "Use a purchased chip"}</strong>
                     <span style={{ display: "block", marginTop: 4, color: "var(--ink-soft)", fontSize: 11, lineHeight: 1.5 }}>
-                      {locale === "ko" ? "아래에서 이 에이전트에 장착된 칩과 새 대화 적용 상태를 확인합니다." : "See what is attached to this agent and what will apply to new conversations below."}
+                      {locale === "ko" ? "아래에서 이 도구에 장착된 칩과 다음 프로젝트 실행 적용 상태를 확인합니다." : "See what is attached to this tool and what will apply to the next project run below."}
                     </span>
                     <Link href="/marketplace?view=experience" className="btn sm" style={{ display: "inline-flex", marginTop: 9 }}>
                       {locale === "ko" ? "Hub에서 경험칩 찾기" : "Find chips on Hub"}
@@ -4846,11 +5479,29 @@ function AgentDetailView({
           {/* 탭 3: 플레이북 & 워크플로우 */}
           {activeTab === "playbook" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 840 }}>
+              <section style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
+                <h4 style={{ margin: "0 0 6px", fontSize: 13.5 }}>{locale === "ko" ? "장착 구성요소" : "Attached loadout"}</h4>
+                <p style={{ margin: "0 0 13px", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}>
+                  {locale === "ko"
+                    ? "패키지에서 실제로 발견한 최상위 구성만 표시합니다. ‘선언 없음’은 고장 판정이 아니라, 현재 설치본에서 확인하지 못했다는 뜻입니다."
+                    : "Only top-level components actually observed in the installed package are shown. Not declared means unobserved here, not necessarily broken."}
+                </p>
+                <div style={{ display: "grid", border: "1px solid var(--paper-edge)", borderRadius: 10, overflow: "hidden" }}>
+                  {loadoutRows.map((row, index) => (
+                    <div key={row.key} style={{ minHeight: 48, padding: "8px 11px", borderBottom: index === loadoutRows.length - 1 ? 0 : "1px solid var(--paper-edge)", background: "var(--paper)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14 }}>
+                      <strong style={{ minWidth: 0, fontSize: 12.5 }}>{locale === "ko" ? row.labelKo : row.labelEn}</strong>
+                      <span style={{ flexShrink: 0, padding: "3px 8px", borderRadius: 999, fontSize: 10.5, fontWeight: 720, color: row.present ? "var(--green-deep)" : "var(--muted-deep)", background: row.present ? "var(--green-soft)" : "var(--paper-2)" }}>
+                        {row.detail ?? (row.present ? (locale === "ko" ? "발견됨" : "Observed") : (locale === "ko" ? "선언 없음" : "Not declared"))}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </section>
               <div style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
                 <h4 style={{ margin: "0 0 14px 0", fontSize: 13.5, fontWeight: 700 }}>{locale === "ko" ? "실행 루프 (Runtime Loop)" : "Runtime Loop"}</h4>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10 }}>
                   {[
-                    { label: "Route", desc: locale === "ko" ? "Chat 또는 Hub 호출에서 이 에이전트가 후보가 됩니다." : "This agent becomes a candidate on Chat or Hub invocations.", icon: IconRoute },
+                    { label: "Route", desc: locale === "ko" ? "프로젝트 작업의 요구사항과 맞을 때 이 도구가 실행 후보가 됩니다." : "This tool becomes an execution candidate when it matches a project's work requirements.", icon: IconRoute },
                     { label: "Context", desc: locale === "ko" ? "프로젝트, Env, 메모리 규칙이 invocation에 주입됩니다." : "Project, env, and memory rules are injected into the invocation.", icon: IconBrain },
                     { label: "Tools", desc: locale === "ko" ? "필요한 MCP 서버와 로컬 권한을 확인합니다." : "Checks the required MCP servers and local permissions.", icon: IconLayers },
                     { label: "Persist", desc: locale === "ko" ? "학습은 durable DB에, 승인·롤백은 영수증에 남습니다. 플레이북 파일은 승인 없이 생기지 않습니다." : "Learning is stored in the durable DB and approve/rollback actions in receipts. No playbook file is created without approval.", icon: IconPaperclip },
@@ -4888,23 +5539,17 @@ function AgentDetailView({
                   </h4>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 12, color: "var(--ink-soft)", lineHeight: 1.55 }}>
                     <div><strong>{locale === "ko" ? "역할:" : "Role:"}</strong> {node.role || (locale === "ko" ? "자동 라우팅" : "Auto-routing")}</div>
-                    <div><strong>Agent ID:</strong> {node.agentId ?? (locale === "ko" ? "미설치 노드" : "Uninstalled node")}</div>
+                    <div><strong>{locale === "ko" ? "로컬 설치 ID:" : "Local installation ID:"}</strong> {node.agentId ?? (locale === "ko" ? "미연결 조직 자리" : "Unbound organization slot")}</div>
                     <div><strong>{locale === "ko" ? "적용 런타임:" : "Active runtime:"}</strong> {effectiveRuntimeOverride ? selectionSummary(effectiveRuntimeOverride.selection, locale) : (locale === "ko" ? "런타임 자동 선택" : "Automatic runtime selection")}</div>
-                    <div><strong>{locale === "ko" ? "신뢰 등급:" : "Trust grade:"}</strong> Trust {agent?.trustGrade ?? "B"}</div>
-                    {agent && (() => {
-                      const own = classifyAgent(agent, locale);
-                      return (
-                        <div>
-                          <strong>{locale === "ko" ? "소유:" : "Ownership:"}</strong>{" "}
-                          <span className="agent-ownership-badge" data-owned={own.owned ? "true" : "false"}>
-                            {own.owned
-                              ? `${own.label} · owned`
-                              : (locale === "ko" ? "빌린 게스트 · borrowed" : "Borrowed guest · borrowed")}
-                          </span>
-                        </div>
-                      );
-                    })()}
-                    <div><strong>{locale === "ko" ? "호출 경로:" : "Invocation paths:"}</strong> {locale === "ko" ? "Chat 멘션, Team 라우팅, Hub 후보 검색" : "Chat mentions, Team routing, Hub candidate search"}</div>
+                    <div><strong>{locale === "ko" ? "신뢰 등급:" : "Trust grade:"}</strong> Trust {agent.trustGrade}</div>
+                    <div><strong>{locale === "ko" ? "원본 출처:" : "Origin:"}</strong> {agent.assetSource === "agent-cloud" ? "Agent Cloud" : agent.assetSource === "hub" ? "Agentlas Hub" : (locale === "ko" ? "로컬 가져오기" : "Local import")}</div>
+                    <div><strong>{locale === "ko" ? "가용 상태:" : "Availability:"}</strong> {agent.sourceMissingSince ? (locale === "ko" ? "원본 경로 연결 끊김" : "Source path disconnected") : (locale === "ko" ? "이 Mac에 설치된 실행 사본" : "Installed execution copy on this Mac")}</div>
+                    <div><strong>{locale === "ko" ? "소유 구분:" : "Ownership:"}</strong> {agent.assetSource === "agent-cloud"
+                      ? (locale === "ko" ? "내 Agent Cloud 자산" : "My Agent Cloud asset")
+                      : agent.assetSource === "hub"
+                        ? (locale === "ko" ? "게시자 자산의 로컬 실행 사본" : "Local execution copy of a publisher asset")
+                        : (locale === "ko" ? "내 로컬 폴더 자산" : "My local folder asset")}</div>
+                    <div><strong>{locale === "ko" ? "사용 위치:" : "Used from:"}</strong> {locale === "ko" ? "프로젝트 에이전트 풀, 팀 위계, Network 후보 선택" : "Project agent pool, team hierarchy, Network candidate selection"}</div>
                   </div>
                 </div>
 

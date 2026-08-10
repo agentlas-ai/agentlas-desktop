@@ -21,7 +21,7 @@ import type {
   ToolFactoryScaffoldResult,
   ToolFactoryToolRecord,
 } from "@/lib/types";
-import type { CanonicalTask, InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage, RunEventUi, RuntimeSelection } from "@shared/types";
+import type { InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage, RunEventUi, RuntimeSelection } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
@@ -44,7 +44,7 @@ import type { WorkspaceFilePreview } from "@/components/WorkspacePanel";
 import { IconArrowLeft, IconBuilding, IconClose, IconFolder, IconNetwork, IconPanelRight, IconSparkles, IconTrash } from "@/components/Icon";
 import { INSTALLED_APPS } from "@/lib/apps";
 import { visibleAgents } from "@/lib/agent-visibility";
-import { isUserFacingProjectPoolMember } from "@/lib/project-agent-roster";
+import { isUserFacingProjectPoolMember, projectPoolMemberKey } from "@/lib/project-agent-roster";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { surfaceApprovalRequirement, type SurfaceApprovalRequirement } from "@/lib/surface-approval";
 import { KeyStatusBanner } from "@/components/KeyStatusBanner";
@@ -624,7 +624,7 @@ function parseQuestionBatchReply(text: string): Array<{ question: string; answer
  *
  * 실측(2026-08-08, 실렌더 검증): `pendingHubApprovals()` 가 null 을 돌려주자
  * 렌더에서 `.filter` 가 던져 **ErrorBoundary 가 작업 화면을 통째로 대체**했다
- * ("One이 화면을 바로잡고 있습니다"). `.catch()` 는 거절만 막고 null **반환**은 못 막는다.
+ * (전역 오류 폴백). `.catch()` 는 거절만 막고 null **반환**은 못 막는다.
  * 목록 하나가 비었다고 채팅 전체가 사라지면 안 된다 — 그 부분만 비운다.
  */
 function asList<T>(value: T[] | null | undefined): T[] {
@@ -688,10 +688,6 @@ function ChatPage() {
   const [resolvedOrg, setResolvedOrg] = useState<ResolvedOrg | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [messages, setMessages] = useState<StreamMessage[]>([]);
-  const [canonicalTask, setCanonicalTask] = useState<CanonicalTask | null>(null);
-  const [latestReceipt, setLatestReceipt] = useState<InvocationRunReceipt | null>(null);
-  const [acceptingResult, setAcceptingResult] = useState(false);
-  const [resultAcceptanceError, setResultAcceptanceError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [cancelPending, setCancelPending] = useState(false);
 
@@ -729,37 +725,6 @@ function ChatPage() {
       cancelled = true;
     };
   }, [queryChatId, requestedTaskId, router]);
-
-  // Work owns explicit Task result acceptance too. Without this state, a
-  // completed Work run remains `partial` forever and Dashboard reports it as
-  // still in progress even though no acceptance action exists outside One.
-  useEffect(() => {
-    const api = ipc();
-    if (!api || !chatId) {
-      setCanonicalTask(null);
-      setLatestReceipt(null);
-      return;
-    }
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      void Promise.all([
-        api.tasks.findForChat(chatId),
-        api.invoke.latestReceipt(chatId),
-      ]).then(([task, receipt]) => {
-        if (cancelled) return;
-        setCanonicalTask(task);
-        setLatestReceipt(receipt);
-        setResultAcceptanceError(false);
-      }).catch(() => {
-        // Transcript and artifacts remain available. The action simply stays
-        // hidden until Main can prove both the Task and matching receipt.
-      });
-    }, busy ? 0 : 250);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [busy, chatId, messages.length]);
 
   // 화면에 복원된 대화 기록의 논리적 분량만 표시한다. 실제 모델 물리창 점유율은
   // CLI/BYOK별 시스템 프롬프트·툴·출력 예약과 compaction 뒤에야 정해지므로 가짜
@@ -817,13 +782,12 @@ function ChatPage() {
   // 스티어링으로 인한 취소인지 구분 — 이 취소는 "aborted" 에러 버블을 띄우지 않고,
   // 저장된 세션을 이어받아(resume) 큐의 스티어 메시지로 계속한다(코덱스식 실행중 방향전환).
   const steerCancelRef = useRef(false);
-  const recoverySendRef = useRef<((prompt: string) => Promise<boolean>) | null>(null);
-  const workRecoveryRef = useRef({ attemptsSpent: 0, previousFingerprint: null as string | null });
   const recapGenerationRef = useRef(0);
   // 실행 중 steering — busy일 때 엔터로 들어온 메시지를 큐에 쌓고, 현재 턴이 끝나면 순서대로 전송한다.
   const steerQueueRef = useRef<
     Array<{
       text: string;
+      optimisticMessageId: string;
       opts?: {
         images?: ImageAttachment[];
         permissions?: PermissionLevel;
@@ -1337,7 +1301,6 @@ function ChatPage() {
         // 취소가 final로 종료되는 런타임도 있다. busy를 내리기 전에 반드시 비워야
         // 다음 실행의 실제 error가 이전 steering 취소로 오인돼 삼켜지지 않는다.
         steerCancelRef.current = false;
-        workRecoveryRef.current = { attemptsSpent: 0, previousFingerprint: null };
         pushWorkflow("status", locale === "ko" ? "완료" : "Done", { tokens: ev.tokens });
         setMessages((m) =>
           m.map((msg) => {
@@ -1405,16 +1368,15 @@ function ChatPage() {
           if (c) setChat(c);
         });
       } else if (ev.kind === "error") {
-        // 스티어링 취소면 에러 버블을 띄우지 않는다 — busy→false 시 drain 이펙트가 큐의
-        // 스티어 메시지를 저장된 세션 resume으로 이어보낸다. 어느 경로든 이미 스트리밍된
+        // 스티어링 취소면 에러 버블을 띄우지 않는다. Main이 보존한 큐에서 새 run을 시작하면
+        // activeChats 이벤트로 즉시 attach한다. 어느 경로든 이미 스트리밍된
         // 텍스트는 지우지 않고 완료된 버블로 남긴다(치던 답이 사라지는 UX 방지) — main도
         // abort 시 같은 partial을 히스토리에 영속화하므로 새로고침과도 일관된다.
         const wasSteer = steerCancelRef.current;
         const wasUserCancel = cancelRequestedRef.current && !wasSteer;
-        const endedRunId = runIdRef.current;
         const terminalStatus = wasUserCancel
           ? (locale === "ko" ? "취소됨" : "Cancelled")
-          : (locale === "ko" ? "복구 중" : "Recovering");
+          : (locale === "ko" ? "중단됨" : "Stopped");
         steerCancelRef.current = false;
         const keepPlaceholder = (m: StreamMessage[]) =>
           m.flatMap((msg) => {
@@ -1453,26 +1415,6 @@ function ChatPage() {
         processedTextLenRef.current = 0;
         subRef.current?.();
         subRef.current = null;
-        if (!wasSteer && !wasUserCancel && endedRunId) {
-          const api = ipc();
-          const state = workRecoveryRef.current;
-          void api?.oneAutoRecovery.judge({
-            runId: endedRunId,
-            chatId,
-            goal: chat?.title ?? project?.name ?? "",
-            attemptsSpent: state.attemptsSpent,
-            previousFingerprint: state.previousFingerprint,
-          }).then((judgement) => {
-            if (!judgement) return;
-            state.previousFingerprint = judgement.fingerprint;
-            if (!judgement.retry) return;
-            state.attemptsSpent = judgement.attempt ?? state.attemptsSpent + 1;
-            const diagnosis = judgement.diagnosis.trim();
-            void recoverySendRef.current?.(
-              `Continue the same project task with a materially different approach. Verify the final result before replying.${diagnosis ? ` Recovery observation: ${diagnosis}` : ""}`,
-            );
-          }).catch(() => undefined);
-        }
       }
     },
     [agent, chat?.title, chatId, locale, mediaBasePaths, openPanelTab, project?.name, t],
@@ -1913,7 +1855,51 @@ function ChatPage() {
       const isActive = ids.includes(chatId);
       const wasActive = activeChatSeenRef.current;
       activeChatSeenRef.current = isActive;
-      if (isActive) return;
+      if (isActive) {
+        // Main owns the steering queue and starts the next run with a new runId.
+        // Attach as soon as that run becomes active; otherwise this renderer
+        // stays subscribed to the cancelled run until the user leaves and
+        // re-enters the chat.
+        if (runIdRef.current) return;
+        void api.invoke.attach(chatId).then((attached) => {
+          if (!attached || runIdRef.current) return;
+          const placeholderId = uid();
+          const attachedStartedAt = attached.startedAt ? Date.parse(attached.startedAt) : NaN;
+          const startedAt = Number.isFinite(attachedStartedAt) ? attachedStartedAt : Date.now();
+          const reconnectAgentName = agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback");
+          setMessages((current) => [
+            ...current,
+            {
+              id: placeholderId,
+              role: "agent",
+              text: "",
+              busy: true,
+              startedAt,
+              steps: [{
+                id: uid(),
+                kind: "thinking",
+                text: locale === "ko" ? "새 방향을 반영하는 중" : "Applying the new direction",
+                agentName: reconnectAgentName,
+                activity: "start",
+                createdAt: startedAt,
+              }],
+            },
+          ]);
+          const accepted = steerQueueRef.current.shift();
+          setQueuedSteers(steerQueueRef.current.map((item) => item.text));
+          if (accepted) steerCancelRef.current = false;
+          setBusy(true);
+          setCancelPending(false);
+          runIdRef.current = attached.runId;
+          lastRunIdRef.current = attached.runId;
+          partialTextRef.current = "";
+          processedTextLenRef.current = 0;
+          const lastStatusRef = { text: "" };
+          for (const event of attached.events) consumeEventRef.current(event, placeholderId, lastStatusRef);
+          subscribeRun(attached.runId, placeholderId, lastStatusRef);
+        }).catch(() => undefined);
+        return;
+      }
       // Reconcile whenever THIS chat stops being active — not only when this
       // view owns the run. runIdRef is set only for runs this renderer itself
       // started, so a run begun by an automation, a schedule, the phone bridge,
@@ -1949,10 +1935,15 @@ function ChatPage() {
         setLiveAgents((prev) =>
           Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false, status }])),
         );
-        setMessages(recovery ? [...next, recovery] : next);
+        setMessages((current) => {
+          if (current.some((message) => message.busy || message.streaming)) return current;
+          const optimisticIds = new Set(steerQueueRef.current.map((item) => item.optimisticMessageId));
+          const pendingDirections = current.filter((message) => optimisticIds.has(message.id));
+          return [...next, ...pendingDirections, ...(recovery ? [recovery] : [])];
+        });
       });
     });
-  }, [chatId, locale]);
+  }, [agent, chatId, locale, subscribeRun, t]);
 
   // 안전망 보강 (무한 '진행중' 방지) — onActiveChats 브로드캐스트를 놓치는 레이스(빠른/조기 종료 실행이
   // runId 설정·구독 전에 끝나 final/activeChats를 모두 놓친 경우)에 대비한다. busy 동안 main의 활성 실행
@@ -2055,7 +2046,6 @@ function ChatPage() {
         /** Current session roster first; Agent Hub/Cloud only when the model identifies a capability gap. */
         sessionRouting?: boolean;
         stormbreakerMode?: boolean;
-        internalRecoveryPrompt?: boolean;
       },
     ) => {
       const api = ipc();
@@ -2073,7 +2063,7 @@ function ChatPage() {
       const routeInput = userPrompt;
       const invocationPrompt = routeInput;
       const visiblePrompt = userPrompt;
-      if (!opts?.internalRecoveryPrompt && isPlaceholderTaskTitle(chat.title)) {
+      if (isPlaceholderTaskTitle(chat.title)) {
         const nextTitle = taskTitleFromFirstPrompt(visiblePrompt);
         if (nextTitle) {
           try {
@@ -2096,7 +2086,7 @@ function ChatPage() {
       const initialStatus = t("chat.status.sending");
       const activeAgentId = agent?.id ?? chat.agentId ?? "active-agent";
       const activeAgentName = agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback");
-      // Saved project members are preferences for the controller, not a forced
+      // Saved project members are tools available to the orchestrator, not a forced
       // task force on every turn. Only an explicit one-turn @ override enters
       // taskForceTargets; the controller chooses actual WorkOrder slots.
       const effectiveTaskForceTargets: OrchestrationTarget[] = [];
@@ -2118,7 +2108,7 @@ function ChatPage() {
       }
       setMessages((m) => [
         ...m,
-        ...(opts?.internalRecoveryPrompt ? [] : [{ id: uid(), role: "user" as const, text: visiblePrompt, imageDataUrls }]),
+        { id: uid(), role: "user" as const, text: visiblePrompt, imageDataUrls },
         {
           id: placeholderId,
           role: "agent",
@@ -2204,8 +2194,8 @@ function ChatPage() {
           taskForceTargets: effectiveTaskForceTargets.length > 0 ? effectiveTaskForceTargets : undefined,
           pipelineStages: opts?.pipelineStages,
           routerAgent: opts?.routerAgent,
-          // Project Work is orchestrated by default: current controller/team
-          // first, Network recruitment only for a real capability/tool gap.
+          // Project Work is orchestrated by default: attached tools first,
+          // Network recruitment only for a real capability/tool gap.
           sessionRouting: project ? true : opts?.sessionRouting,
           stormbreakerMode: opts?.stormbreakerMode,
           runtimeSelection: chat.runtimeSelection ?? undefined,
@@ -2225,7 +2215,9 @@ function ChatPage() {
               ? {
                   id: msg.id,
                   role: "system",
-                  text: locale === "ko" ? "작업을 시작하지 못했습니다. One이 현재 상태를 확인할 수 있습니다." : "The task did not start. One can inspect the current state.",
+                  text: locale === "ko"
+                    ? "작업을 시작하지 못했습니다. 입력 내용은 보존되었습니다. 실행 환경을 확인한 뒤 다시 시도해 주세요."
+                    : "The task did not start. Your input was preserved. Check the runtime and try again.",
                 }
               : msg,
           ),
@@ -2258,8 +2250,6 @@ function ChatPage() {
       validatedTaskChatId,
     ],
   );
-  recoverySendRef.current = (prompt: string) => send(prompt, { internalRecoveryPrompt: true });
-
   // 진행 중 실행 취소 — 입력창의 정지 버튼(전송 버튼이 busy일 때 변신) / Cmd/Ctrl+Esc.
   const stop = useCallback(() => {
     const api = ipc();
@@ -2278,33 +2268,51 @@ function ChatPage() {
     void api.invoke.cancel(runId);
   }, []);
 
-  // 실행 중 steering — busy면 큐에 넣고(엔터가 막히지 않게), 아니면 즉시 전송한다.
+  // 실행 중 steering — Main의 공용 steer 계약에 바로 맡긴다. 사용자의 방향 전환은
+  // 응답을 기다리지 않고 대화에 즉시 보이며, Main이 현재 run을 안전하게 끝낸 뒤
+  // 같은 세션에서 다음 run을 시작한다.
   const submitOrQueue = useCallback(
     (text: string, opts?: (typeof steerQueueRef)["current"][number]["opts"]) => {
       if (busy) {
-        steerQueueRef.current.push({ text, opts });
+        const api = ipc();
+        if (!api || !chat) return;
+        const optimisticMessageId = `steer:${uid()}`;
+        steerQueueRef.current.push({ text, opts, optimisticMessageId });
         setQueuedSteers(steerQueueRef.current.map((q) => q.text));
-        // 코덱스식 스티어링 — 현재 실행을 즉시 취소하고, abort 시 저장된 세션을 이어받아(resume)
-        // 이 메시지로 계속한다. Stop 버튼과 달리 큐를 비우지 않고, 취소 에러 버블도 억제한다.
-        const runId = runIdRef.current ?? lastRunIdRef.current;
-        if (runId) {
-          steerCancelRef.current = true;
-          void ipc()?.invoke.cancel(runId);
-        }
+        setMessages((current) => [...current, {
+          id: optimisticMessageId,
+          role: "user",
+          text,
+          imageDataUrls: opts?.images?.map((image) => `data:${image.mediaType};base64,${image.data}`),
+        }]);
+        steerCancelRef.current = true;
+        void api.invoke.steer({
+          chatId: chat.id,
+          userPrompt: text,
+          images: opts?.images,
+          locale,
+          permissions: opts?.permissions ?? DEFAULT_PERMISSION,
+          planMode: opts?.planMode,
+          goalMode: opts?.goalMode,
+          appsGenerateMode: opts?.appsGenerateMode,
+          taskForceTargets: opts?.taskForceTargets,
+          sessionRouting: project ? true : opts?.sessionRouting,
+          stormbreakerMode: opts?.stormbreakerMode,
+          runtimeSelection: chat.runtimeSelection ?? undefined,
+        }).catch(() => {
+          steerQueueRef.current = steerQueueRef.current.filter((item) => item.optimisticMessageId !== optimisticMessageId);
+          setQueuedSteers(steerQueueRef.current.map((item) => item.text));
+          setMessages((current) => current.map((message) => message.id === optimisticMessageId
+            ? { id: message.id, role: "system", text: locale === "ko" ? "방향 전환을 전달하지 못했습니다. 다시 보내 주세요." : "The new direction was not delivered. Please send it again." }
+            : message));
+          steerCancelRef.current = false;
+        });
         return;
       }
       void send(text, opts);
     },
-    [busy, send],
+    [busy, chat, locale, project, send],
   );
-
-  // 턴이 끝나면(busy→false) 큐에 쌓인 steering 메시지를 하나씩 순서대로 전송한다.
-  useEffect(() => {
-    if (busy || steerQueueRef.current.length === 0) return;
-    const next = steerQueueRef.current.shift();
-    setQueuedSteers(steerQueueRef.current.map((q) => q.text));
-    if (next) void send(next.text, next.opts);
-  }, [busy, send]);
 
   // 이 채팅의 모델/작업량만 변경한다. 역할 기본값과 다른 채팅은 건드리지 않는다.
   // model === "" 이면 모델 미지정(구독 기본).
@@ -2949,35 +2957,6 @@ function ChatPage() {
     router.replace("/");
   }
 
-  async function acceptWorkResult() {
-    const api = ipc();
-    if (
-      !api ||
-      !canonicalTask ||
-      canonicalTask.status !== "partial" ||
-      !latestReceipt ||
-      latestReceipt.status !== "completed" ||
-      latestReceipt.chatId !== chatId
-    ) return;
-    setAcceptingResult(true);
-    setResultAcceptanceError(false);
-    try {
-      const accepted = await api.tasks.acceptResult({
-        taskId: canonicalTask.id,
-        expectedRunId: latestReceipt.runId,
-        expectedVersion: canonicalTask.version,
-      });
-      setCanonicalTask(accepted);
-      window.dispatchEvent(new CustomEvent("agentlas:tasks-changed"));
-    } catch {
-      setResultAcceptanceError(true);
-      const refreshed = await api.tasks.findForChat(chatId).catch(() => null);
-      if (refreshed) setCanonicalTask(refreshed);
-    } finally {
-      setAcceptingResult(false);
-    }
-  }
-
   if (
     requestedTaskId &&
     (validatedTaskChatId === null || !validatedTaskChatId || chat?.id !== validatedTaskChatId)
@@ -3110,119 +3089,48 @@ function ChatPage() {
             </div>
           )}
         </div>
-        {/* BYOC 키/구독 상태 pill — 키 사망이 가장 흔한 실패이므로 헤더에 상시 노출 */}
-        <span className="titlebar-nodrag" style={{ flexShrink: 0, display: "inline-flex" }}>
-          <KeyStatusBanner mode="pill" />
-        </span>
+        <div className="task-cockpit-header-actions titlebar-nodrag" role="group" aria-label={locale === "ko" ? "작업 보기" : "Task views"}>
         <button
           onClick={() => (networkOpen ? closeRightPanel() : setNetworkOpenPersisted(true))}
-          className="titlebar-nodrag"
+          className="task-cockpit-header-action"
           data-tour-id="workspace.workflow-toggle"
           aria-label={t("chat.network_panel")}
           title={t("chat.network_panel")}
-          style={{
-            color: networkOpen ? "var(--accent)" : "var(--muted-deep)",
-            background: networkOpen ? "var(--fill-1)" : "transparent",
-            padding: 6,
-            borderRadius: 6,
-            border: "none",
-            cursor: "pointer",
-          }}
+          data-active={networkOpen ? "true" : "false"}
         >
           <IconNetwork size={16} />
         </button>
         <button
           onClick={() => (workspaceOpen ? closeRightPanel() : setWorkspaceOpenPersisted(true))}
-          className="titlebar-nodrag"
+          className="task-cockpit-header-action"
           aria-label={t("chat.workspace_panel")}
           title={t("chat.workspace_panel")}
-          style={{
-            color: workspaceOpen ? "var(--accent)" : "var(--muted-deep)",
-            background: workspaceOpen ? "var(--fill-1)" : "transparent",
-            padding: 6,
-            borderRadius: 6,
-            border: "none",
-            cursor: "pointer",
-          }}
+          data-active={workspaceOpen ? "true" : "false"}
         >
           <IconFolder size={16} />
         </button>
         <button
           onClick={() => (rightPanelOpen && rightPanelTab === "panel" ? closeRightPanel() : openPanelTab("panel"))}
-          className="titlebar-nodrag"
+          className="task-cockpit-header-action"
           aria-label={locale === "ko" ? "뷰어 패널" : "Viewer panel"}
           title={locale === "ko" ? "뷰어 패널" : "Viewer panel"}
-          style={{
-            color: rightPanelOpen && rightPanelTab === "panel" ? "var(--accent)" : artifact || surface ? "var(--ink-soft)" : "var(--muted-deep)",
-            background: rightPanelOpen && rightPanelTab === "panel" ? "var(--fill-1)" : "transparent",
-            padding: 6,
-            borderRadius: 6,
-            border: "none",
-            cursor: "pointer",
-          }}
+          data-active={rightPanelOpen && rightPanelTab === "panel" ? "true" : "false"}
+          data-has-content={artifact || surface ? "true" : "false"}
         >
           <IconPanelRight size={16} />
         </button>
         <button
           onClick={() => void removeChat()}
-          className="titlebar-nodrag"
+          className="task-cockpit-header-action task-cockpit-header-danger"
           aria-label={locale === "ko" ? "작업 삭제" : "Delete task"}
           title={locale === "ko" ? "작업 삭제" : "Delete task"}
-          style={{
-            color: "var(--muted-deep)",
-            padding: 6,
-            borderRadius: 6,
-          }}
         >
           <IconTrash size={16} />
         </button>
+        </div>
       </header>
 
-      {canonicalTask?.status === "partial" && latestReceipt?.status === "completed" && latestReceipt.chatId === chatId && (
-        <div
-          role="status"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            margin: "8px 16px 0",
-            padding: "9px 12px",
-            border: "1px solid var(--paper-edge)",
-            borderRadius: 10,
-            background: "var(--paper-2)",
-            color: "var(--ink-soft)",
-            fontSize: 12,
-          }}
-        >
-          <span style={{ flex: 1, minWidth: 0 }}>
-            {resultAcceptanceError
-              ? (locale === "ko" ? "완료 상태가 바뀌었습니다. 다시 확인해 주세요." : "The result state changed. Review it and try again.")
-              : (locale === "ko" ? "결과가 준비되었습니다. 확인했다면 프로젝트 작업을 완료로 표시하세요." : "The result is ready. After reviewing it, mark the project task complete.")}
-          </span>
-          <button
-            type="button"
-            className="titlebar-nodrag"
-            disabled={acceptingResult}
-            onClick={() => void acceptWorkResult()}
-            style={{
-              flexShrink: 0,
-              padding: "7px 11px",
-              borderRadius: 8,
-              border: "1px solid var(--accent)",
-              background: "var(--accent)",
-              color: "white",
-              fontSize: 12,
-              fontWeight: 700,
-              cursor: acceptingResult ? "wait" : "pointer",
-              opacity: acceptingResult ? 0.65 : 1,
-            }}
-          >
-            {acceptingResult
-              ? (locale === "ko" ? "완료 처리 중…" : "Completing…")
-              : (locale === "ko" ? "완료로 표시" : "Mark complete")}
-          </button>
-        </div>
-      )}
+      <KeyStatusBanner mode="banner" />
 
       <div style={{ margin: "0 16px" }}>
         <OneSuggestionReviewHandoffBanner surface="work" locale={locale} />
@@ -3342,6 +3250,10 @@ function ChatPage() {
         </div>
       )}
 
+      {/* Hub-approval cards render above the shell content, outside the .rd theme
+          scope where --rd-* vars and .btn styling live — without this wrapper the
+          켜기/나중에 buttons fall back to unstyled plain text. */}
+      <div className="rd">
       {pendingHubApprovals.filter((row) => !dismissedHubApprovals.has(row.serverId)).map((row) => (
         <div key={row.serverId} className="hub-approval-card">
           <div className="hub-approval-card-title">
@@ -3386,6 +3298,7 @@ function ChatPage() {
           </div>
         </div>
       ))}
+      </div>
 
       <div data-tour-id="workspace.chat" style={{ minHeight: 0, flex: 1, display: "flex", flexDirection: "column" }}>
         <ChatStream
@@ -3399,20 +3312,26 @@ function ChatPage() {
             projects: allProjects,
             envKeys: allEnvKeys,
             plugins: installedPlugins,
-            projectTeam: projectForDisplay?.agentPool.map((member, index) => {
-              const installed = allAgents.find((candidate) => candidate.id === member.agentId);
-              const bookmark = hubBookmarks.find((candidate) => candidate.slug === member.agentId);
+            projectTeam: projectForDisplay?.agentPool.map((member) => {
+              const installed = member.entityKind === "agent" && member.agentId
+                ? allAgents.find((candidate) => candidate.id === member.agentId)
+                : null;
+              const firm = member.entityKind === "team" && member.firmId
+                ? allFirms.find((candidate) => candidate.id === member.firmId)
+                : null;
               const name = installed
                 ? pickLocalized(installed, locale).name
-                : bookmark
-                  ? pickLocalized(bookmark.listing, locale).name
-                  : member.nameSnapshot || (locale === "ko" ? "에이전트" : "Agent");
+                : firm
+                  ? pickLocalized(firm, locale).name
+                  : member.nameSnapshot || (member.entityKind === "team"
+                    ? (locale === "ko" ? "팀" : "Team")
+                    : (locale === "ko" ? "에이전트" : "Agent"));
               return {
-                id: `${member.source}:${member.agentId}`,
+                id: projectPoolMemberKey(member),
                 token: name,
-                label: index === 0
-                  ? (locale === "ko" ? "컨트롤러" : "Controller")
-                  : (locale === "ko" ? "선호 인력 · 필요할 때 선택" : "Preferred · selected when useful"),
+                label: member.entityKind === "team"
+                  ? (locale === "ko" ? "팀 도구 · 필요할 때 호출" : "Team tool · invoked when useful")
+                  : (locale === "ko" ? "전문가 도구 · 필요할 때 호출" : "Specialist tool · invoked when useful"),
               };
             }),
           }}

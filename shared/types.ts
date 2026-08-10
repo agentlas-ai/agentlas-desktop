@@ -803,6 +803,15 @@ export interface InstalledAgent {
   parentTeamId?: string | null;
 }
 
+/** Main-owned exact remote identity for an installed execution copy. */
+export interface InstalledAgentExactBinding {
+  installedAgentId: string;
+  agentDefinitionId: string;
+  agentReleaseId: string;
+  source: "hub-install" | "agent-cloud-restore";
+  boundAt: string;
+}
+
 /**
  * v74 에이전트 사용 원장(run_events 귀속 집계) 행. useCount는 이 에이전트가
  * 참여한 서로 다른 런 수. 삭제된 에이전트 이력도 installed=false로 남는다.
@@ -1144,7 +1153,7 @@ export interface Project {
   description: string | null;
   /** 프로젝트 전체에 적용되는 사용자 작성 지시. */
   systemPrompt: string | null;
-  /** 사용자가 프로젝트에 직접 붙인 에이전트. 배열 순서가 프로젝트 내 선호 순서다. */
+  /** 사용자가 프로젝트에 붙인 에이전트·팀 도구. 배열 순서는 표시 안정성만 위한 값이다. */
   agentPool: ProjectAgentPoolMember[];
   /** 프로젝트가 기준으로 삼는 소스. */
   sourceType: ProjectSourceType;
@@ -1163,13 +1172,42 @@ export type ProjectSourceConnectResult =
   | { status: "cancelled"; capability: "destination" }
   | { status: "action_required"; capability: "repository" | "github_client" | "github_auth" | "destination" | "clone" };
 
-export interface ProjectAgentPoolMember {
-  agentId: string;
-  /** 현재 프로젝트 생성 화면은 설치된 에이전트를 사용한다. Cloud/Hub exact release는 동일 계약에 추가된다. */
+interface ProjectToolPoolMemberBase {
+  /** Identity namespace that resolves targetId. */
   source: "local" | "cloud" | "hub";
+  /** Exact remote release. Local source packages intentionally use null. */
   releaseId: string | null;
+  /** Stable display fallback only; never used as execution identity. */
   nameSnapshot: string;
 }
+
+export interface ProjectAgentPoolAgentMember extends ProjectToolPoolMemberBase {
+  entityKind: "agent";
+  /** Canonical identity in the declared source namespace. */
+  targetId: string;
+  /** Installed Desktop projection, when materialized locally. */
+  agentId: string | null;
+  firmId: null;
+  controllerAgentId: null;
+}
+
+export interface ProjectAgentPoolTeamMember extends ProjectToolPoolMemberBase {
+  entityKind: "team";
+  /** Local firm id, or the exact Cloud/Hub team slug before local materialization. */
+  targetId: string;
+  agentId: null;
+  /** Present only after a team has an authoritative local firm projection. */
+  firmId: string | null;
+  /** Execution entrypoint metadata; the team identity remains targetId/firmId. */
+  controllerAgentId: string | null;
+}
+
+/**
+ * A project owns work and keeps an unordered pool of reusable tools. An agent
+ * and a team are distinct execution targets; a team must never collapse to its
+ * CEO agent id merely because the CEO is its runtime entrypoint.
+ */
+export type ProjectAgentPoolMember = ProjectAgentPoolAgentMember | ProjectAgentPoolTeamMember;
 
 /** Automation-owned transcript projection. The renderer never receives a Work chat. */
 /**
@@ -1439,6 +1477,25 @@ export interface ChatHistoryEntry {
   createdAt: string;
   /** 사용자 메시지에 첨부된 이미지 — 영구화는 V1, 현재는 in-flight만 */
   imageDataUrls?: string[];
+}
+
+export interface ExternalCliSessionSummary {
+  /** Main-owned opaque reference. Raw CLI log paths never cross into the renderer. */
+  sourceKey: string;
+  provider: "claude-code" | "codex";
+  title: string;
+  preview: string;
+  /** Basename only; the user's raw local path remains in Main. */
+  projectLabel: string | null;
+  updatedAt: string;
+  messageCount: number;
+  /** Import is intentionally bounded; true means only the most recent safe window is copied. */
+  truncated: boolean;
+}
+
+export interface ExternalCliSessionImportInput {
+  sourceKey: string;
+  projectId: string;
 }
 
 export type TelegramConnectTargetKind = "agent" | "firm";
@@ -4109,6 +4166,8 @@ export interface UpdaterState {
   version?: string;
   /** download-progress의 백분율 (0-100). downloading 상태일 때만 의미 있음 */
   progress?: number;
+  /** main에서 HTML/링크/과도한 길이를 제거한 사용자 표시용 릴리스 노트. */
+  releaseNotes?: string;
   /** renderer가 원문 오류를 추측하지 않고 안전한 복구 UI를 고를 수 있는 안정 코드. */
   code?: UpdaterErrorCode;
   /** 사용자에게 보여도 되는 짧은 설명. 내부 경로/토큰/스택은 포함하지 않는다. */
@@ -5588,7 +5647,7 @@ export interface AgentlasIpc {
     list: () => Promise<QuestListResult>;
     claim: (questId: string) => Promise<QuestClaimResult>;
   };
-  /** 에이전트 durable 메모리(런타임 큐레이터가 쌓는 DB) — 자가진화/타임라인 UI 소스. */
+  /** 에이전트 전역 durable 메모리. 프로젝트 메모리는 프로젝트 화면에서만 조회한다. */
   agentMemory: {
     entries: (agentId: string, limit?: number) => Promise<AgentMemoryEntryUi[]>;
     /** Phase 1b: 레거시 마크다운 폴더/파일 → 멤버·팀·공유 메모리 dry-run 미리보기. 경로 미지정 시 폴더 선택. */
@@ -5602,6 +5661,7 @@ export interface AgentlasIpc {
   /** v74 사용 원장 + 북마크 — run 귀속 시 자동 축적되는 agent_usage 조회/북마크 토글. */
   agents: {
     usageSummary: () => Promise<AgentUsageSummaryRow[]>;
+    exactBindings: () => Promise<InstalledAgentExactBinding[]>;
     borrowedProfiles: () => Promise<BorrowedAgentProfile[]>;
     borrowedOntologyGraph: (profileId: string) => Promise<ExperienceOntologyGraphSnapshot>;
     setBookmark: (agentId: string, bookmarked: boolean) => Promise<{ agentId: string; bookmarkedAt: string | null }>;
@@ -5699,6 +5759,8 @@ export interface AgentlasIpc {
     install: () => Promise<UpdaterActionResult>;
     /** macOS 네이티브 교체가 시작·적용되지 않았거나 서명 계보가 다를 때 공식 설치 페이지를 연다. */
     openManualDownload: () => Promise<UpdaterActionResult>;
+    /** 현재 버전의 공개 릴리즈 노트를 기본 브라우저에서 연다. 업데이트 상태는 바꾸지 않는다. */
+    openReleaseNotes: (version?: string) => Promise<UpdaterActionResult>;
     /** 연속성 검증 실패 때 main이 보관한 복구본을 Finder/Explorer에서 연다. */
     revealRecoveryBackup: () => Promise<UpdaterActionResult>;
   };
@@ -6059,11 +6121,15 @@ export interface AgentlasIpc {
     /** 이 채팅을 방금 봤다고 기록(recap 기준점 갱신). */
     markViewed: (id: string) => Promise<void>;
   };
+  externalCliSessions: {
+    list: (input: { projectId: string; query?: string; limit?: number }) => Promise<ExternalCliSessionSummary[]>;
+    importToProject: (input: ExternalCliSessionImportInput) => Promise<CanonicalTaskWorkTarget>;
+  };
   /** One/Work/Mobile의 공통 정본. Chat은 이 Task의 대화 투영이다. */
   tasks: {
     /** Create a Work task only inside an existing project and its explicit agent pool. */
     createProject: (input: { projectId: string; title?: string }) => Promise<CanonicalTaskWorkTarget>;
-    list: (input?: { limit?: number; includeArchived?: boolean }) => Promise<CanonicalTask[]>;
+    list: (input?: { projectId?: string; limit?: number; includeArchived?: boolean; reconcile?: boolean }) => Promise<CanonicalTask[]>;
     get: (id: string) => Promise<CanonicalTask | null>;
     /** Main-owned semantic projection. Renderer input can choose a surface, never authority. */
     listProjections: (input: OneTaskProjectionListRequest) => Promise<AgentlasOneTaskProjectionV1[]>;

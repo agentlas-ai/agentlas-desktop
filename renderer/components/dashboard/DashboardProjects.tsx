@@ -13,7 +13,7 @@ export function DashboardProjects() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<CanonicalTask[]>([]);
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
-  useEffect(() => { void Promise.all([ipc()?.projects.list() ?? Promise.resolve([]), ipc()?.tasks.list({ limit: 200 }) ?? Promise.resolve([]), ipc()?.team.list() ?? Promise.resolve([])]).then(([p, t, a]) => { setProjects(p); setTasks(t); setAgents(a); }).catch(() => undefined); }, []);
+  useEffect(() => { void Promise.all([ipc()?.projects.list() ?? Promise.resolve([]), ipc()?.tasks.list({ limit: 200, reconcile: false }) ?? Promise.resolve([]), ipc()?.team.list() ?? Promise.resolve([])]).then(([p, t, a]) => { setProjects(p); setTasks(t); setAgents(a); }).catch(() => undefined); }, []);
   const taskMap = useMemo(() => new Map(projects.map((project) => [project.id, tasks.filter((task) => task.projectId === project.id)])), [projects, tasks]);
   return <section className="dashboard-projects dashboard-panel">
     <header><div><span>{ko ? "프로젝트" : "Projects"}</span><strong>{ko ? "진행 중인 일" : "Work in progress"}</strong></div><button type="button" onClick={() => navigate("/workspace")}>{ko ? "전체 보기" : "View all"}</button></header>

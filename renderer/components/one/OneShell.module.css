@@ -930,8 +930,14 @@
 .decisionSheetBackdrop {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
   background: rgba(27, 29, 27, 0.34);
   backdrop-filter: blur(3px);
+  cursor: default;
 }
 
 .decisionSheet {
@@ -957,6 +963,52 @@
   background: #d7d2c9;
 }
 
+.decisionDismissButton {
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: -4px 0 -40px auto;
+  padding: 0 12px;
+  border: 0;
+  color: #68635b;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.decisionDismissButton:hover,
+.decisionDismissButton:focus-visible {
+  color: #35422d;
+  background: #f3f0e9;
+  outline: 2px solid #72885f;
+  outline-offset: -2px;
+}
+
+.decisionResumeButton {
+  position: absolute;
+  z-index: 46;
+  right: 18px;
+  bottom: 88px;
+  min-height: 44px;
+  padding: 0 15px;
+  border: 1px solid #71835f;
+  border-radius: 12px;
+  color: #fff;
+  background: #566b45;
+  box-shadow: 0 8px 24px rgba(33, 43, 29, 0.2);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.decisionResumeButton:hover,
+.decisionResumeButton:focus-visible {
+  background: #435536;
+  outline: 2px solid #fff;
+  outline-offset: -4px;
+}
+
 .decisionSheet .decisionCard,
 .decisionSheet .decisionCard[data-variant="choice"],
 .decisionSheet .decisionCard[data-risk="R0"] {
@@ -971,17 +1023,24 @@
 .decisionKicker { color: #a06b27 !important; font-size: 10px !important; font-weight: 780; letter-spacing: 0.08em; text-transform: uppercase; }
 .decisionHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .decisionTitle { margin-top: 5px !important; color: #24231f !important; font-size: 18px !important; font-weight: 720; }
-.riskBadge { flex: 0 0 auto; min-height: 28px; display: inline-flex; align-items: center; padding: 0 9px; border: 1px solid #dccfb9; border-radius: 999px; color: #7d5a2c; background: #fffaf1; font-size: 10px; font-weight: 720; }
-.decisionFacts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; border-top: 1px solid #eee7db; border-left: 1px solid #eee7db; }
-.decisionFacts > div { min-width: 0; padding: 11px 12px; border-right: 1px solid #eee7db; border-bottom: 1px solid #eee7db; }
-.decisionFacts dt { margin: 0 0 4px; color: #827b70; font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
-.decisionFacts dd { margin: 0; color: #3d3a34; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
-.decisionEvidence { color: #777066 !important; font-size: 11px !important; }
+.decisionSectionLabel { margin-bottom: 6px !important; color: #827b70 !important; font-size: 10px !important; font-weight: 760; letter-spacing: 0.045em; }
+.decisionContext { display: grid; gap: 0; padding: 14px 16px; border-radius: 12px; background: #f6f3ed; }
+.decisionContext > p:last-child { color: #37352f; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.decisionMetadata { display: grid; gap: 6px; margin: -2px 0 0; padding: 0 0 0 14px; border-left: 2px solid #e6dfd3; }
+.decisionMetadata > div { min-width: 0; display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; align-items: baseline; padding: 2px 0; }
+.decisionMetadata dt { margin: 0; color: #888176; font-size: 9px; font-weight: 720; }
+.decisionMetadata dd { margin: 0; color: #454139; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.decisionEvidence { color: #777066; font-size: 11px; }
+.decisionEvidence summary { width: fit-content; min-height: 32px; display: flex; align-items: center; color: #777066; font-size: 11px; cursor: pointer; }
+.decisionEvidence summary:hover, .decisionEvidence summary:focus-visible { color: #4f5f43; outline: 2px solid transparent; }
+.decisionEvidence p { padding: 3px 0 0 14px; color: #777066 !important; font-size: 11px !important; }
 .decisionGuard { display: grid; gap: 5px; margin: 0; padding: 12px 14px; border: 1px solid #e3c9b4; border-radius: 12px; color: #67482f; background: #fff8f1; font-size: 12px; line-height: 1.55; }
 .decisionGuard strong { color: #50351f; font-size: 12px; }
 .decisionGuard small { color: #80644d; font-size: 10px; }
-.decisionOptions { display: flex; flex-wrap: wrap; gap: 8px; }
-.decisionMultiOptions { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.decisionActionGroup { display: grid; gap: 8px; }
+.decisionOptions { display: grid; gap: 8px; }
+.decisionSecondaryActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.decisionMultiOptions { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .decisionMultiOption { min-height: 44px; display: inline-flex; align-items: center; gap: 8px; padding: 9px 12px; border: 1px solid #dfd8cc; border-radius: 10px; background: #fff; color: #403d37; text-align: left; cursor: pointer; }
 .decisionMultiOption > span { width: 18px; height: 18px; flex: 0 0 18px; display: grid; place-items: center; border: 1px solid #c9c1b4; border-radius: 5px; color: #fff; background: #fff; font-size: 12px; }
 .decisionMultiOption[aria-pressed="true"] { border-color: #4f6e35; background: #f4f8ef; color: #2f4720; }
@@ -989,10 +1048,12 @@
 .decisionMultiOption:hover, .decisionMultiOption:focus-visible { border-color: #8ca274; outline: 2px solid transparent; }
 .decisionButton { min-height: 44px; padding: 0 14px; border-color: #dfd8cc; background: #fff; }
 .decisionButton:hover, .decisionButton:focus-visible { border-color: #c2ad88; background: #faf7f0; outline: 2px solid transparent; }
-.decisionPrimaryButton { min-height: 44px; padding: 0 15px; border-color: #4f6e35; color: #fff; background: #4f6e35; font-weight: 720; }
+.decisionPrimaryButton { min-height: 48px; display: grid; justify-items: start; gap: 2px; padding: 9px 15px; border-color: #4f6e35; color: #fff; background: #4f6e35; font-weight: 720; text-align: left; }
+.decisionPrimaryButton small { color: rgba(255, 255, 255, .82); font-size: 10px; font-weight: 520; line-height: 1.45; }
 .decisionPrimaryButton:hover, .decisionPrimaryButton:focus-visible { border-color: #3c5728; background: #3c5728; outline: 2px solid transparent; }
-.decisionRejectButton { min-height: 44px; padding: 0 14px; border-color: #dec9c4; color: #7f4139; background: #fff; }
-.decisionRejectButton:hover, .decisionRejectButton:focus-visible { border-color: #ba8b82; background: #fff8f6; outline: 2px solid transparent; }
+.decisionRejectButton { min-height: 44px; display: grid; justify-items: start; gap: 2px; padding: 8px 14px; border-color: #dfd8cc; color: #4e4a43; background: #fff; text-align: left; }
+.decisionRejectButton small { color: #827b70; font-size: 10px; line-height: 1.4; }
+.decisionRejectButton:hover, .decisionRejectButton:focus-visible { border-color: #bdb4a7; background: #faf8f3; outline: 2px solid transparent; }
 .decisionHint { color: #858078 !important; font-size: 10px !important; }
 .decisionCard[data-variant="choice"] {
   width: min(100%, 680px);
@@ -1016,7 +1077,7 @@
 .decisionCard[data-variant="choice"] .decisionOptions { gap: 7px; }
 .decisionCard[data-variant="choice"] .decisionPrimaryButton,
 .decisionCard[data-variant="choice"] .decisionButton {
-  min-height: 38px;
+  min-height: 44px;
   padding: 0 13px;
   border-color: #dfe3e0;
   border-radius: 10px;
@@ -1042,11 +1103,9 @@
   border-radius: 14px;
   background: #fff;
 }
-.decisionCard[data-risk="R0"] .riskBadge,
 .decisionCard[data-risk="R0"] .decisionEvidence,
 .decisionCard[data-risk="R0"] .decisionGuard,
 .decisionCard[data-risk="R0"] .decisionRejectButton,
-.decisionCard[data-risk="R0"] .decisionButton,
 .decisionCard[data-risk="R0"] .decisionHint { display: none; }
 .decisionCard[data-risk="R0"] .decisionKicker { display: none; }
 .decisionCard[data-risk="R0"] .decisionTitle {
@@ -1057,26 +1116,9 @@
   letter-spacing: .045em;
   text-transform: uppercase;
 }
-.decisionCard[data-risk="R0"] .decisionFacts {
-  display: block;
-  border: 0;
-}
-.decisionCard[data-risk="R0"] .decisionFacts > div { display: none; }
-.decisionCard[data-risk="R0"] .decisionFacts > div:nth-child(2) {
-  display: block;
-  padding: 0;
-  border: 0;
-}
-.decisionCard[data-risk="R0"] .decisionFacts dt { display: none; }
-.decisionCard[data-risk="R0"] .decisionFacts dd {
-  color: #292e2b;
-  font-size: 16px;
-  font-weight: 690;
-  line-height: 1.5;
-}
 .decisionCard[data-risk="R0"] .decisionOptions { gap: 7px; }
 .decisionCard[data-risk="R0"] .decisionPrimaryButton {
-  min-height: 38px;
+  min-height: 44px;
   padding: 0 13px;
   border-color: #dfe3e0;
   border-radius: 10px;
@@ -1117,10 +1159,8 @@
     border-left: 0;
     border-radius: 20px 20px 0 0;
   }
-  .decisionFacts { grid-template-columns: 1fr; }
   .decisionHeading { align-items: stretch; flex-direction: column; }
-  .riskBadge { align-self: flex-start; }
-  .decisionOptions > button { width: 100%; }
+  .decisionOptions > button, .decisionSecondaryActions > button { width: 100%; }
 }
 
 .emptyThread {

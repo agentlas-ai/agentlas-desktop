@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { GLOBAL_ORCHESTRATOR_SLUG } from "../architecture/manifest";
 import {
   extractBuildInterviewQuestions,
   isCompletedBuildTurn,
@@ -80,6 +79,7 @@ import {
   unarchiveChat,
 } from "../store/chats";
 import { getProject, updateProject } from "../store/projects";
+import { getFirm } from "../store/firms";
 import {
   PROJECT_AGENT_POOL_MAX,
   isUserFacingProjectAgent,
@@ -1137,21 +1137,23 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
 
         const requested = params.members;
         if (!Array.isArray(requested)) throw new TypeError("members must be an array");
-        if (requested.length === 0) throw new Error("A project keeps at least one agent");
         if (requested.length > PROJECT_AGENT_POOL_MAX) {
           throw new Error(`A project stages at most ${PROJECT_AGENT_POOL_MAX} agents`);
         }
 
         const installedById = new Map(listInstalledAgents().map((agent) => [agent.id, agent] as const));
-        const boundByKey = new Map(
-          project.agentPool.map((member) => [projectPoolMemberKey(member), member] as const),
-        );
         const nextPool: ProjectAgentPoolMember[] = [];
         const nextKeys = new Set<string>();
         for (const entry of requested) {
           if (!isRecord(entry)) throw new TypeError("members contains an unsupported project agent");
-          assertOnlyKeys(entry, ["agentId", "source", "releaseId"], "members");
-          const agentId = requiredIdentifier(entry, "agentId");
+          assertOnlyKeys(entry, ["entityKind", "targetId", "agentId", "firmId", "controllerAgentId", "source", "releaseId"], "members");
+          const entityKind = optionalIdentifier(entry, "entityKind", 16) ?? "agent";
+          if (entityKind !== "agent" && entityKind !== "team") {
+            throw new TypeError("members contains an unsupported project tool kind");
+          }
+          const legacyAgentId = optionalIdentifier(entry, "agentId", 200) ?? null;
+          const targetId = optionalIdentifier(entry, "targetId", 200) ?? legacyAgentId;
+          if (!targetId) throw new TypeError("members contains a project tool without targetId");
           const source = requiredIdentifier(entry, "source");
           if (source !== "local" && source !== "cloud" && source !== "hub") {
             throw new TypeError("members contains an unsupported project agent source");
@@ -1159,17 +1161,49 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           const releaseId = optionalIdentifier(entry, "releaseId", 200) ?? null;
           let member: ProjectAgentPoolMember;
           if (source === "local") {
-            const installed = installedById.get(agentId);
-            if (!installed) throw new Error("That agent is not installed on this Desktop");
-            if (!isUserFacingProjectAgent(installed)) {
-              throw new Error("That agent is an internal team role and cannot staff a project");
+            if (entityKind === "team") {
+              const firmId = optionalIdentifier(entry, "firmId", 200) ?? targetId;
+              const firm = getFirm(firmId);
+              if (!firm) throw new Error("That team is not installed on this Desktop");
+              const controller = installedById.get(firm.ceoAgentId);
+              if (!controller) throw new Error("That team has no installed execution entrypoint");
+              if (releaseId !== null) throw new TypeError("A local project team has no releaseId");
+              member = {
+                entityKind: "team",
+                targetId: firm.id,
+                agentId: null,
+                firmId: firm.id,
+                controllerAgentId: controller.id,
+                source,
+                releaseId: null,
+                nameSnapshot: firm.name,
+              };
+            } else {
+              const agentId = legacyAgentId ?? targetId;
+              const installed = installedById.get(agentId);
+              if (!installed) throw new Error("That agent is not installed on this Desktop");
+              if (!isUserFacingProjectAgent(installed)) {
+                throw new Error("That agent is an internal team role and cannot staff a project");
+              }
+              if (releaseId !== null) throw new TypeError("A local project agent has no releaseId");
+              member = {
+                entityKind: "agent",
+                targetId: agentId,
+                agentId,
+                firmId: null,
+                controllerAgentId: null,
+                source,
+                releaseId: null,
+                nameSnapshot: installed.name,
+              };
             }
-            if (releaseId !== null) throw new TypeError("A local project agent has no releaseId");
-            member = { agentId, source, releaseId: null, nameSnapshot: installed.name };
           } else {
             // A phone can keep or drop an existing Cloud/Hub member. Creating one
             // needs the borrow/lease authority Mobile deliberately does not have.
-            const bound = boundByKey.get(`${source}:${agentId}:${releaseId ?? ""}`);
+            const bound = project.agentPool.find((candidate) => candidate.source === source
+              && candidate.entityKind === entityKind
+              && candidate.targetId === targetId
+              && candidate.releaseId === releaseId);
             if (!bound) {
               throw new Error("Add Cloud or Hub agents to this project from Desktop");
             }
@@ -1179,14 +1213,6 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           if (nextKeys.has(key)) throw new Error("That agent is already on this project");
           nextKeys.add(key);
           nextPool.push(member);
-        }
-
-        // The first ordered member is the Work controller, and tasks.createProject
-        // refuses anything but a locally installed agent there. Reject it now
-        // rather than letting the phone silently make the project unstartable.
-        const controller = nextPool[0];
-        if (controller.source !== "local" || !installedById.has(controller.agentId)) {
-          throw new Error("The first project agent must be installed locally on this Desktop");
         }
 
         const updated = updateProject(project.id, { agentPool: nextPool });
@@ -1223,19 +1249,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const project = getProject(projectId);
         if (!project) throw new Error("The selected Desktop project is unavailable");
         if (!project.folderPath) throw new Error("The selected project has no connected working folder");
-        const controller = project.agentPool[0];
-        if (!controller) throw new Error("Choose at least one project agent before starting work");
-        if (controller.source !== "local") {
-          throw new Error("The first project agent must be installed locally on this Desktop");
-        }
-        if (!listInstalledAgents().some((agent) => agent.id === controller.agentId)) {
-          throw new Error("The project controller is unavailable; choose a new first project agent");
-        }
         const canonicalProjectFolder = captureInvocationWorkspaceBinding(project.folderPath).canonicalPath;
         if (!canonicalProjectFolder) throw new Error("The selected project has no connected working folder");
         const chat = createChat({
           projectId: project.id,
-          agentId: controller.agentId,
           title,
           taskMode: "task",
           originSurface: "work",
@@ -1250,7 +1267,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             taskId: task.id,
             chatId: chat.id,
             title: task.title,
-            controllerAgentId: controller.agentId,
+            controllerAgentId: chat.agentId,
           }, request.method);
         } catch (error) {
           removeChat(chat.id);
@@ -1549,21 +1566,14 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "one.invoke.start": {
         assertMobileOneDeviceAuthority(context);
         const input = mobileOneStartParams(request);
-        const coordinator = listInstalledAgents().find(
-          (agent) => agent.slug === GLOBAL_ORCHESTRATOR_SLUG,
-        );
-        if (!coordinator) {
-          throw new Error("The canonical One coordinator is not installed on this Desktop");
-        }
-
         // Main creates a Task-free One conversation and keeps its identity,
         // project/team selection, and durable One capabilities authoritative.
         // Permission is the normal Desktop execution choice and is forwarded
         // from the paired Mobile remote without creating a second mobile mode.
         const chat = createChat({
-          agentId: coordinator.id,
           title: mobileOneConversationTitle(input.userPrompt),
           taskMode: "conversation",
+          originSurface: "one",
         });
         let result;
         try {
