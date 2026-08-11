@@ -875,6 +875,11 @@ function MobileBridgePanel() {
   const [message, setMessage] = useState("");
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState(false);
+  // Install gate — asked before a pairing QR is issued, because the QR is only
+  // readable by the app's own scanner and is useless to someone without the app.
+  const [installGate, setInstallGate] = useState<"closed" | "ask" | "stores">("closed");
+  const [storeChoice, setStoreChoice] = useState<"android" | "ios" | null>(null);
+  const [storeQrDataUrl, setStoreQrDataUrl] = useState("");
 
   const refresh = useCallback(async () => {
     const api = ipc();
@@ -928,6 +933,33 @@ function MobileBridgePanel() {
     }, Math.max(0, expiresAt - Date.now()));
     return () => window.clearTimeout(timer);
   }, [locale, pairing, refresh]);
+
+  // Unlike the pairing QR, a store QR carries an ordinary https URL, so the
+  // phone's default camera opens it. iOS has no listing yet (App Store review),
+  // so that branch states the truth instead of producing a dead link.
+  const ANDROID_STORE_URL = "https://play.google.com/store/apps/details?id=com.agentai.agentlas";
+
+  async function showStoreQr(platform: "android" | "ios") {
+    setStoreChoice(platform);
+    if (platform === "ios") {
+      setStoreQrDataUrl("");
+      return;
+    }
+    try {
+      setStoreQrDataUrl(
+        await QRCode.toDataURL(ANDROID_STORE_URL, {
+          errorCorrectionLevel: "M",
+          margin: 2,
+          width: 336,
+          color: { dark: "#111210", light: "#FFFFFF" },
+        }),
+      );
+    } catch {
+      // A failed render must not strand the person on a blank panel; the link
+      // itself is still shown by the caller's copy.
+      setStoreQrDataUrl("");
+    }
+  }
 
   async function issuePairing() {
     const api = ipc();
@@ -1091,7 +1123,7 @@ function MobileBridgePanel() {
           <button
             type="button"
             disabled={!status?.running || busy}
-            onClick={() => void issuePairing()}
+            onClick={() => setInstallGate("ask")}
             style={{
               border: 0,
               borderRadius: 999,
@@ -1109,6 +1141,174 @@ function MobileBridgePanel() {
           </button>
         </div>
 
+        {/* The pairing QR carries app-only data, so a phone's default camera cannot
+            complete a pairing — it just dumps the text (measured: a user's scan
+            landed in a notes app). WhatsApp has the same constraint and solves it
+            the same way: state the exact in-app path before showing the code.
+            This gate also answers the prerequisite question — is the app even
+            installed — instead of leaving a person with an unusable QR. */}
+        {installGate !== "closed" && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={locale === "ko" ? "모바일 앱 설치 확인" : "Mobile app install check"}
+            data-testid="mobile-bridge-install-gate"
+            onClick={() => setInstallGate("closed")}
+            style={{
+              position: "fixed", inset: 0, zIndex: 60, display: "grid", placeItems: "center",
+              background: "rgba(16,16,16,.44)", padding: 20,
+            }}
+          >
+            <div
+              onClick={(event) => event.stopPropagation()}
+              style={{
+                width: "min(420px, 100%)", background: "var(--paper)", borderRadius: 18,
+                border: "1px solid var(--paper-edge)", boxShadow: "0 24px 60px -24px rgba(0,0,0,.5)",
+                padding: 22,
+              }}
+            >
+              {installGate === "ask" ? (
+                <>
+                  <div style={{ fontSize: 15, fontWeight: 750 }}>
+                    {locale === "ko" ? "Agentlas 모바일 앱을 설치하셨나요?" : "Do you have the Agentlas mobile app?"}
+                  </div>
+                  <p style={{ margin: "8px 0 18px", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.65 }}>
+                    {locale === "ko"
+                      ? "연결 QR은 Agentlas 앱의 스캐너로만 읽을 수 있습니다. 폰 기본 카메라로 찍으면 연결되지 않습니다."
+                      : "The pairing QR only works with the scanner inside the Agentlas app. Your phone's default camera cannot complete the pairing."}
+                  </p>
+                  <div style={{ display: "grid", gap: 8 }}>
+                    <button
+                      type="button"
+                      data-testid="install-gate-have-app"
+                      onClick={() => { setInstallGate("closed"); void issuePairing(); }}
+                      style={{
+                        border: 0, borderRadius: 12, padding: "11px 14px", background: "var(--ink)",
+                        color: "var(--paper)", fontSize: 12.5, fontWeight: 700,
+                      }}
+                    >
+                      {locale === "ko" ? "이미 설치했습니다" : "I already have it"}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="install-gate-need-app"
+                      onClick={() => setInstallGate("stores")}
+                      style={{
+                        border: "1px solid var(--paper-edge)", borderRadius: 12, padding: "11px 14px",
+                        background: "var(--paper-2)", color: "var(--ink)", fontSize: 12.5, fontWeight: 700,
+                      }}
+                    >
+                      {locale === "ko" ? "설치하러 가기" : "Get the app"}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div style={{ fontSize: 15, fontWeight: 750 }}>
+                    {locale === "ko" ? "설치할 기기를 고르세요" : "Choose your phone"}
+                  </div>
+                  <p style={{ margin: "8px 0 18px", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.65 }}>
+                    {locale === "ko"
+                      ? "로고를 누르면 설치용 QR이 나옵니다. 그 QR은 폰 기본 카메라로 찍어도 됩니다."
+                      : "Pick a platform to get an install QR. That one does work with your phone's default camera."}
+                  </p>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                    <button
+                      type="button"
+                      data-testid="install-gate-android"
+                      onClick={() => void showStoreQr("android")}
+                      style={{
+                        display: "grid", placeItems: "center", gap: 8, padding: "18px 12px",
+                        border: `1px solid ${storeChoice === "android" ? "var(--ink)" : "var(--paper-edge)"}`,
+                        borderRadius: 14, background: "var(--paper-2)", color: "var(--ink)",
+                        fontSize: 11.5, fontWeight: 700,
+                      }}
+                    >
+                      <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">
+                        <path fill="#34A853" d="M3.6 1.9a1 1 0 0 0-.5.9v18.4a1 1 0 0 0 .5.9l10-10.1z" />
+                        <path fill="#FBBC04" d="M17.3 8.3 14 6.4 3.6 1.9c-.1 0-.1 0-.1.1l10.1 10z" />
+                        <path fill="#EA4335" d="M13.6 12.1 3.5 22c0 .1 0 .1.1.1l10.4-4.5 3.3-1.9z" />
+                        <path fill="#4285F4" d="M20.7 10.9 17.3 9l-3.7 3.1 3.7 3.4 3.4-1.9c.8-.4.8-2.3 0-2.7z" />
+                      </svg>
+                      Google Play
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="install-gate-ios"
+                      onClick={() => void showStoreQr("ios")}
+                      style={{
+                        display: "grid", placeItems: "center", gap: 8, padding: "18px 12px",
+                        border: `1px solid ${storeChoice === "ios" ? "var(--ink)" : "var(--paper-edge)"}`,
+                        borderRadius: 14, background: "var(--paper-2)", color: "var(--ink)",
+                        fontSize: 11.5, fontWeight: 700,
+                      }}
+                    >
+                      <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+                        <path d="M16.4 12.7c0-2.2 1.8-3.2 1.9-3.3-1-1.5-2.6-1.7-3.2-1.7-1.4-.1-2.7.8-3.3.8-.7 0-1.7-.8-2.8-.8-1.5 0-2.8.8-3.6 2.1-1.5 2.6-.4 6.5 1.1 8.6.7 1 1.6 2.2 2.7 2.2 1.1 0 1.5-.7 2.8-.7 1.3 0 1.6.7 2.8.7 1.2 0 1.9-1.1 2.6-2.1.8-1.2 1.2-2.4 1.2-2.4s-2.2-.9-2.2-3.4zM14.3 5.9c.6-.7 1-1.7.9-2.7-.9 0-2 .6-2.6 1.3-.6.6-1.1 1.7-.9 2.6 1 .1 2-.5 2.6-1.2z" />
+                      </svg>
+                      App Store
+                    </button>
+                  </div>
+
+                  {storeChoice === "ios" && (
+                    <div
+                      data-testid="install-gate-ios-pending"
+                      style={{
+                        marginTop: 14, padding: "11px 12px", borderRadius: 10,
+                        background: "var(--paper-2)", color: "var(--ink-soft)", fontSize: 11.5, lineHeight: 1.6,
+                      }}
+                    >
+                      {locale === "ko"
+                        ? "iOS 앱은 App Store 심사 중입니다. 지금은 Android만 설치할 수 있습니다."
+                        : "The iOS app is still in App Store review. Android is the only install available right now."}
+                    </div>
+                  )}
+
+                  {storeChoice === "android" && storeQrDataUrl && (
+                    <div data-testid="install-gate-android-qr" style={{ marginTop: 14, display: "grid", gap: 10, justifyItems: "center" }}>
+                      <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 14, background: "#fff", padding: 10 }}>
+                        <img
+                          src={storeQrDataUrl}
+                          alt={locale === "ko" ? "Google Play 설치 QR" : "Google Play install QR"}
+                          style={{ display: "block", width: 168, height: 168 }}
+                        />
+                      </div>
+                      <div style={{ color: "var(--muted-deep)", fontSize: 11, textAlign: "center", lineHeight: 1.6 }}>
+                        {locale === "ko"
+                          ? "폰 카메라로 찍으면 Google Play가 열립니다. 설치 후 이 창에서 “이미 설치했습니다”를 누르세요."
+                          : "Scan it with your phone camera to open Google Play. After installing, choose “I already have it”."}
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+                    <button
+                      type="button"
+                      onClick={() => { setStoreChoice(null); setStoreQrDataUrl(""); setInstallGate("ask"); }}
+                      style={{
+                        flex: 1, border: "1px solid var(--paper-edge)", borderRadius: 12, padding: "9px 12px",
+                        background: "var(--paper-2)", color: "var(--ink)", fontSize: 12, fontWeight: 700,
+                      }}
+                    >
+                      {locale === "ko" ? "뒤로" : "Back"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setInstallGate("closed"); void issuePairing(); }}
+                      style={{
+                        flex: 1, border: 0, borderRadius: 12, padding: "9px 12px",
+                        background: "var(--ink)", color: "var(--paper)", fontSize: 12, fontWeight: 700,
+                      }}
+                    >
+                      {locale === "ko" ? "설치했습니다" : "Installed — continue"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
         {pairing && qrDataUrl && (
           <div data-testid="mobile-bridge-pairing" style={{ display: "grid", gridTemplateColumns: "minmax(240px, 288px) 1fr", gap: 20, marginTop: 18, alignItems: "center" }}>
             <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 18, background: "#fff", padding: 12 }}>
@@ -1117,12 +1317,17 @@ function MobileBridgePanel() {
             </div>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 700 }}>
-                {locale === "ko" ? "폰에서 이 QR을 스캔하세요" : "Scan this QR from your phone"}
+                {locale === "ko"
+                  ? "Agentlas 앱에서 스캔하세요 — 기기 추가 → QR 스캔"
+                  : "Scan from the Agentlas app — Add device → Scan QR"}
               </div>
+              {/* Naming the in-app path is the fix for the reported failure: the
+                  instruction used to say only "scan this", so people reached for
+                  the default camera, which cannot complete a pairing. */}
               <p style={{ margin: "6px 0 12px", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.6 }}>
                 {locale === "ko"
-                  ? "2분 후 만료되며 한 번만 쓸 수 있습니다. 장기 기기 키나 Desktop 비밀값은 QR에 들어가지 않습니다."
-                  : "It expires in two minutes and works once. The QR never contains a long-lived device key or Desktop secret."}
+                  ? "폰 기본 카메라로는 연결되지 않습니다. 2분 후 만료되며 한 번만 쓸 수 있고, 장기 기기 키나 Desktop 비밀값은 QR에 들어가지 않습니다."
+                  : "Your phone's default camera cannot complete this pairing. It expires in two minutes and works once; the QR never contains a long-lived device key or Desktop secret."}
               </p>
               <button
                 type="button"

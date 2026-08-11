@@ -186,6 +186,7 @@ function canonicalProjection(
   confirmations: Map<string, PendingConfirmation>,
   _receipt: InvocationRunReceipt | null,
   oneId: string,
+  locale: "ko" | "en",
 ): OneTaskProjection {
   const chatId = task.originChatId;
   const decision = chatId ? confirmations.get(chatId) : undefined;
@@ -218,8 +219,12 @@ function canonicalProjection(
     projectionSurface: "one",
     projectionMode: decision ? "approval_focused" : "summary",
     display: {
-      title: task.title.trim() || chat?.title.trim() || "새로운 일",
-      summary: decision?.question ?? "One과 Work가 같은 정본 Task를 보고 있습니다.",
+      // These are rendered as-is by One, so a Korean literal here reached
+      // English users regardless of their language setting.
+      title: task.title.trim() || chat?.title.trim() || (locale === "ko" ? "새로운 일" : "New work"),
+      summary: decision?.question ?? (locale === "ko"
+        ? "One과 Work가 같은 정본 Task를 보고 있습니다."
+        : "One and Work are looking at the same canonical Task."),
     },
     status,
     sync: {
@@ -299,6 +304,7 @@ export async function listOneTaskProjections(
   activeChatIds: string[],
   pendingConfirmations: PendingConfirmation[],
   profile?: OneProfile | null,
+  locale: "ko" | "en" = "en",
 ): Promise<OneTaskProjection[]> {
   const oneId = await persistedOneId(api, profile);
   const bridge = optionalTasksBridge(api);
@@ -355,7 +361,7 @@ export async function listOneTaskProjections(
       canonicalTasks.map(async (task) => {
         const chat = task.originChatId ? await api.chats.get(task.originChatId).catch(() => null) : null;
         if (chat?.originSurface !== "one") return null;
-        return reconcileDormantProjection(canonicalProjection(task, chat, confirmations, null, oneId), activeChatIds);
+        return reconcileDormantProjection(canonicalProjection(task, chat, confirmations, null, oneId, locale), activeChatIds);
       }),
     );
     return details.filter((item): item is OneTaskProjection => Boolean(item));
@@ -369,7 +375,7 @@ export async function listOneTaskProjections(
   });
   const confirmations = new Map(pendingConfirmations.map((item) => [item.chatId, item]));
   return taskPairs.map(({ chat, task }) =>
-    reconcileDormantProjection(canonicalProjection(task, chat, confirmations, null, oneId), activeChatIds));
+    reconcileDormantProjection(canonicalProjection(task, chat, confirmations, null, oneId, locale), activeChatIds));
 }
 
 export async function getOneTaskProjection(
@@ -378,6 +384,7 @@ export async function getOneTaskProjection(
   activeChatIds: string[],
   pendingConfirmations: PendingConfirmation[],
   profile?: OneProfile | null,
+  locale: "ko" | "en" = "en",
 ): Promise<OneTaskProjection | null> {
   const oneId = await persistedOneId(api, profile);
   const bridge = optionalTasksBridge(api);
@@ -425,6 +432,7 @@ export async function getOneTaskProjection(
       new Map(pendingConfirmations.map((item) => [item.chatId, item])),
       null,
       oneId,
+      locale,
     ), activeChatIds);
   }
   return null;

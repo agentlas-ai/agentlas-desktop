@@ -3020,6 +3020,7 @@ function toolView(
  * 이 행은 **모델의 답이 아니다** — 그래서 말풍선 본문과 다른 표면을 쓴다.
  */
 function ChatNoticeRow({ notice }: { notice: ChatNotice }) {
+  const { locale } = useT();
   const [open, setOpen] = useState(false);
   if (notice.display === "divider") {
     // 대화의 경계. 예전에는 상태줄로 지나가서 사용자는 자기 대화가 잘렸다는 걸
@@ -3056,7 +3057,9 @@ function ChatNoticeRow({ notice }: { notice: ChatNotice }) {
             onClick={() => setOpen((v) => !v)}
             aria-expanded={open}
           >
-            {open ? "자세히 닫기" : "자세히"}
+            {locale === "ko"
+              ? (open ? "자세히 닫기" : "자세히")
+              : (open ? "Hide details" : "Details")}
           </button>
         )}
         {open && (
@@ -3091,6 +3094,7 @@ function ChatOutlineRail({
   messages: StreamMessage[];
   onJump: (messageId: string) => void;
 }) {
+  const { locale } = useT();
   const prompts = useMemo(
     () => messages.filter((m) => m.role === "user").map((m) => ({ id: m.id, text: m.text })),
     [messages],
@@ -3101,7 +3105,7 @@ function ChatOutlineRail({
     <div
       className="agentlas-chat-outline"
       role="navigation"
-      aria-label="대화 아웃라인"
+      aria-label={locale === "ko" ? "대화 아웃라인" : "Conversation outline"}
       onPointerLeave={() => setHovered(null)}
     >
       {prompts.map((prompt, index) => {

@@ -3,6 +3,7 @@
 "use client";
 import type { CSSProperties, ReactNode } from "react";
 import { Handle, Position } from "@xyflow/react";
+import { useT } from "@/lib/i18n";
 
 export const NODE_WIDTH = 216;
 
@@ -97,13 +98,31 @@ export function NodeCard(props: {
    *   계속 돌고, 고급 사용자가 이 prop을 켜면 다시 그릴 수 있다.
    */
   outcomeHandles?: boolean;
-  /** 실패·정리 출구의 이름·설명(로케일 주입). 없으면 한국어 기본값. */
+  /** 실패·정리 출구의 이름·설명(로케일 주입). 없으면 현재 로케일 기본값. */
   outcomeStrings?: { fail: string; failHint: string; cleanup: string; cleanupHint: string };
   /** 좌상단 AI 주석 버튼(항목 5) — 누르면 "이 단계만 AI에게" 팝업이 열린다. 편집 모드에서만 주입된다. */
   onAiNote?: () => void;
-  /** 그 버튼의 설명(로케일 주입). 없으면 한국어 기본값. */
+  /** 그 버튼의 설명(로케일 주입). 없으면 현재 로케일 기본값. */
   aiHint?: string;
 }) {
+  // The fallbacks used to be Korean literals, and no caller ever passed
+  // `outcomeStrings` — so every node rendered "실패"/"정리" to English users
+  // too. Defaults now follow the active locale; useT falls back to `en`
+  // outside a provider, so a node rendered in isolation stays English.
+  const { locale } = useT();
+  const outcomeFallback = locale === "ko"
+    ? {
+        fail: "실패",
+        failHint: "이 단계가 실패했을 때만 가는 길입니다",
+        cleanup: "정리",
+        cleanupHint: "성공하든 실패하든 마지막에 한 번 도는 뒷정리 길입니다",
+      }
+    : {
+        fail: "on failure",
+        failHint: "Taken only when this step fails",
+        cleanup: "cleanup",
+        cleanupHint: "Runs once at the end whether the step succeeded or failed",
+      };
   const accent = props.accent ?? NODE_ACCENT[props.type] ?? "var(--muted-deep)";
   const connectable = props.connectable ?? false;
   const runColor = props.runState ? RUN_STATE_COLOR[props.runState] : undefined;
@@ -164,7 +183,9 @@ export function NodeCard(props: {
         <button
           type="button"
           className="automation-flow-node-ai"
-          title={props.aiHint ?? "AI에게 이 단계 주석·수정 맡기기"}
+          title={props.aiHint ?? (locale === "ko"
+            ? "AI에게 이 단계 주석·수정 맡기기"
+            : "Leave a note for the AI, or have it set this step up")}
           onClick={(e) => { e.stopPropagation(); props.onAiNote?.(); }}
         >
           AI
@@ -274,10 +295,10 @@ export function NodeCard(props: {
           />
           {/* ★이름표에 설명을 단다 — "실패, 정리가 뭐지"가 실측 첫 반응이었다(항목 2). */}
           <span
-            title={props.outcomeStrings?.failHint ?? "이 단계가 실패했을 때만 가는 길입니다"}
+            title={props.outcomeStrings?.failHint ?? outcomeFallback.failHint}
             style={{ ...outcomeLabelStyle("34%", "var(--danger, #d64545)"), pointerEvents: "auto", cursor: "help" }}
           >
-            {props.outcomeStrings?.fail ?? "실패"}
+            {props.outcomeStrings?.fail ?? outcomeFallback.fail}
           </span>
           <Handle
             id="always"
@@ -287,10 +308,10 @@ export function NodeCard(props: {
             isConnectable={connectable}
           />
           <span
-            title={props.outcomeStrings?.cleanupHint ?? "성공하든 실패하든 마지막에 한 번 도는 뒷정리 길입니다"}
+            title={props.outcomeStrings?.cleanupHint ?? outcomeFallback.cleanupHint}
             style={{ ...outcomeLabelStyle("70%", "var(--muted-deep)"), pointerEvents: "auto", cursor: "help" }}
           >
-            {props.outcomeStrings?.cleanup ?? "정리"}
+            {props.outcomeStrings?.cleanup ?? outcomeFallback.cleanup}
           </span>
         </>
       ) : null}

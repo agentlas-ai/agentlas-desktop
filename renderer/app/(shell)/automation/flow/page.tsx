@@ -438,7 +438,11 @@ function AutomationFlowPage() {
       // ★들어온 사실을 그대로 한 줄씩 남긴다 — 요약하지 않는다. 요약은 상태줄이 한다.
       const pushActivity = (text: string, tone: "run" | "done" | "fail" | "info") => {
         const nodeId = String(ev.nodeId ?? "");
-        const label = automation.graph?.nodes.find((n) => n.id === nodeId)?.label || nodeId || "그래프";
+        // The last fallback is rendered in the activity feed, so it followed the
+        // node label into English sessions as Korean.
+        const label = automation.graph?.nodes.find((n) => n.id === nodeId)?.label
+          || nodeId
+          || (locale === "en" ? "graph" : "그래프");
         activitySeq.current += 1;
         const id = activitySeq.current;
         // 뒤에서부터 400줄만 — 긴 실행에서 메모리와 렌더를 지킨다.

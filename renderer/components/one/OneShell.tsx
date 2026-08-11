@@ -824,7 +824,7 @@ export function OneShell() {
           // Renderer storage is legacy-only and never gates presentation.
         }
       }
-      const items = await listOneTaskProjections(api, active, pending, profile);
+      const items = await listOneTaskProjections(api, active, pending, profile, appLocale);
       setActiveChatIds(active);
       setConfirmations(pending);
       setUpdaterState(update);
@@ -849,7 +849,7 @@ export function OneShell() {
       const wanted = selectedTaskIdRef.current;
       if (wanted) {
         const detail = items.find((item) => item.taskId === wanted)
-          ?? await getOneTaskProjection(api, wanted, active, pending, profile);
+          ?? await getOneTaskProjection(api, wanted, active, pending, profile, appLocale);
         setSelected(detail);
         setConversation(null);
         setReceipt(detail?.latestReceipt ?? null);
@@ -863,7 +863,7 @@ export function OneShell() {
           selectedTaskIdRef.current = promotedTask.id;
           selectedConversationIdRef.current = null;
           const detail = items.find((item) => item.taskId === promotedTask.id)
-            ?? await getOneTaskProjection(api, promotedTask.id, active, pending, profile);
+            ?? await getOneTaskProjection(api, promotedTask.id, active, pending, profile, appLocale);
           setSelected(detail);
           setConversation(null);
           setReceipt(detail?.latestReceipt ?? null);
