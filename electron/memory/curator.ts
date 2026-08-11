@@ -83,10 +83,21 @@ export interface CurationContext {
 // curator-ruleset.json instead of inline constants.
 import {
   classifyTeamLearningRoute,
+  hasWellShapedEvidence,
   loadCuratorRuleset,
   mentionsProjectSpecifics as rulesMentionsProjectSpecifics,
+  widensCapability,
   type TeamLearningLayer,
 } from "./curator-rules";
+
+// R21 W2a — kinds whose evidence must be machine-checkable in shape before a
+// durable claim is written. Matches the OS ruleset kinds.evidenceRequired: a
+// preference/hypothesis is not held to this bar.
+const EVIDENCE_SHAPE_REQUIRED: ReadonlySet<MemoryKind> = new Set<MemoryKind>([
+  "fact",
+  "decision",
+  "procedure",
+]);
 
 export { classifyTeamLearningRoute, type TeamLearningLayer };
 
@@ -510,6 +521,60 @@ export function curateEvents(
         appendMemoryLog(ctx.projectPath, {
           action: "session",
           reason: "low-trust-quarantine",
+          kind: ev.memory_kind,
+          content: ev.content,
+          source_provenance: ctx.sourceProvenance ?? "assistant-turn",
+          at: new Date().toISOString(),
+        });
+      }
+      continue;
+    }
+
+    // R21 W2b — a memory may never widen tool permissions (n=1 invariant, R20).
+    // Discarded like a policy violation; an approval OBSERVATION is not matched.
+    if (widensCapability(ev.content)) {
+      report.discarded += 1;
+      recordCandidateDecision({
+        options,
+        index,
+        event: ev,
+        scope: "discard",
+        action: "discarded",
+        reason: "capability-widening",
+      });
+      if (ctx.projectPath) {
+        appendMemoryLog(ctx.projectPath, {
+          action: "discarded",
+          reason: "capability-widening",
+          kind: ev.memory_kind,
+          at: new Date().toISOString(),
+        });
+      }
+      continue;
+    }
+
+    // R21 W2a — an evidence-required claim whose evidence is present but all
+    // ill-shaped (self-reported ratings/feelings only) is held to the session
+    // log, never durable. Empty evidence keeps its existing path; ANY one
+    // well-shaped entry passes, so real evidence is never starved.
+    if (
+      EVIDENCE_SHAPE_REQUIRED.has(ev.memory_kind) &&
+      ev.evidence_refs.length > 0 &&
+      !hasWellShapedEvidence(ev.evidence_refs)
+    ) {
+      report.sessionOnly += 1;
+      recordCandidateDecision({
+        options,
+        index,
+        event: ev,
+        scope: "session",
+        action: "deferred",
+        reason: "evidence-shape-insufficient",
+      });
+      if (ctx.projectPath) {
+        appendMemoryLog(ctx.projectPath, {
+          action: "session",
+          reason: "evidence-shape-insufficient",
           kind: ev.memory_kind,
           content: ev.content,
           source_provenance: ctx.sourceProvenance ?? "assistant-turn",

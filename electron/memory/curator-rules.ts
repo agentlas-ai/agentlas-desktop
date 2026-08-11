@@ -96,6 +96,31 @@ export function projectBoundaryPathRe(): RegExp {
 }
 
 /**
+ * R21 W2b — a memory may make an agent more cautious, never less. Rejects a
+ * candidate that asserts a permission/approval gate can be skipped; an
+ * OBSERVATION about approvals ("the approval gate was the bottleneck") is
+ * deliberately not matched. Ruleset-driven (patterns.capabilityWidening).
+ */
+export function widensCapability(content: string): boolean {
+  const re = rulesetPattern("capabilityWidening");
+  return re ? re.test(content) : false;
+}
+
+/**
+ * R21 W2a — evidence must be machine-checkable in SHAPE (path:line, URL,
+ * command, hash, test/gate name). Returns true when AT LEAST ONE entry is
+ * well-shaped, so real evidence is never starved; a candidate whose only
+ * support is self-reported satisfaction ("user rating 5/5") returns false and
+ * is held out of durable. Blocks the arXiv:2509.26354 refund reward-hacking
+ * case by shape, after semantic screening was measured non-separable (R20).
+ */
+export function hasWellShapedEvidence(evidence: readonly string[]): boolean {
+  const re = rulesetPattern("evidenceShapeAccept");
+  if (!re) return evidence.length > 0; // fail-open: never starve when the pattern is missing
+  return evidence.some((item) => re.test(String(item)));
+}
+
+/**
  * Does this learning name the project it came from?
  *
  * `agent_repo` is the one scope that deliberately crosses project boundaries;
