@@ -315,6 +315,7 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
 
   return (
     <aside
+      className={embedded ? "workspace-panel workspace-panel-embedded" : "workspace-panel"}
       style={{
         position: "relative",
         width: embedded ? "100%" : width,
@@ -355,6 +356,7 @@ export function WorkspacePanel({ chatId, onClose, persistence, embedded = false,
 
       {/* 헤더 */}
       <div
+        className="workspace-panel-header"
         style={{
           display: "flex",
           alignItems: "center",

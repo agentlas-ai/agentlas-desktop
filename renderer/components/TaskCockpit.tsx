@@ -43,7 +43,7 @@ import {
   localServerUrlsInText,
 } from "@/components/Markdown";
 import type { WorkspaceFilePreview } from "@/components/WorkspacePanel";
-import { IconArrowLeft, IconBuilding, IconClose, IconFolder, IconNetwork, IconPanelRight, IconSparkles, IconTrash } from "@/components/Icon";
+import { IconBuilding, IconClose, IconFolder, IconNetwork, IconPanelRight, IconSparkles, IconTrash } from "@/components/Icon";
 import { INSTALLED_APPS } from "@/lib/apps";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { isUserFacingProjectPoolMember, projectPoolMemberKey } from "@/lib/project-agent-roster";
@@ -344,7 +344,10 @@ const WORKSPACE_OPEN_KEY = "agentlas.workspace.open";
 const NETWORK_OPEN_KEY = "agentlas.network.open";
 const RIGHT_PANEL_STATE_KEY = "agentlas.chat.right_panel";
 const RIGHT_PANEL_WIDTH_KEY = "agentlas.chat.right_panel_width";
-const RIGHT_PANEL_DEFAULT_WIDTH = 360;
+// Codex desktop reference (1306px window): the inspector occupies 392px.
+// Keep that measured width as the default so opening the rail does not produce
+// a materially different chat/composer geometry from the reference app.
+const RIGHT_PANEL_DEFAULT_WIDTH = 392;
 const RIGHT_PANEL_MIN_WIDTH = 300;
 const RIGHT_PANEL_MAX_WIDTH = 760;
 
@@ -401,6 +404,9 @@ function clampRightPanelWidth(width: number): number {
 function readRightPanelWidth(): number {
   try {
     const raw = Number(window.localStorage.getItem(RIGHT_PANEL_WIDTH_KEY));
+    // 360 was the pre-parity default. Existing installs persisted it even when
+    // the user never resized, so migrate that sentinel to the measured width.
+    if (raw === 360) return RIGHT_PANEL_DEFAULT_WIDTH;
     if (Number.isFinite(raw) && raw > 0) return clampRightPanelWidth(raw);
   } catch {
     // ignore
@@ -640,6 +646,51 @@ function historyEntryToStreamMessage(entry: { id: string; role: string; text: st
     questions: parsed.questions.length > 0 ? parsed.questions : undefined,
     needsMultimodalSetup: setup.needsSetup || undefined,
   };
+}
+
+/**
+ * A live final can be painted a few milliseconds before a follow-up history
+ * read observes the same durable row. Replacing the whole transcript with that
+ * older snapshot made the answer visibly appear and then disappear. Preserve
+ * only freshly settled live messages that the durable snapshot does not yet
+ * contain; the next reconciliation naturally deduplicates them by role+text.
+ */
+function reconcileTranscriptSnapshot(
+  current: StreamMessage[],
+  durable: StreamMessage[],
+  recovery?: StreamMessage | null,
+  optimisticIds: ReadonlySet<string> = new Set<string>(),
+): StreamMessage[] {
+  if (current.some((message) => message.busy || message.streaming)) return current;
+  const signature = (message: StreamMessage) => `${message.role}\u0000${message.text.trim()}`;
+  const durableIndexById = new Map(durable.map((message, index) => [message.id, index]));
+  // Anchor at the newest row both snapshots genuinely share. Comparing every
+  // historical signature would suppress a new answer when it happens to have
+  // the same text as an older answer in the session.
+  let currentAnchor = -1;
+  let durableAnchor = -1;
+  current.forEach((message, index) => {
+    const durableIndex = durableIndexById.get(message.id);
+    if (durableIndex == null || durableIndex < durableAnchor) return;
+    currentAnchor = index;
+    durableAnchor = durableIndex;
+  });
+  const durableTailSignatures = new Set(durable.slice(durableAnchor + 1).map(signature));
+  const currentTail = current.slice(currentAnchor + 1);
+  const pendingDirections = currentTail.filter((message) => optimisticIds.has(message.id));
+  const freshlySettled = currentTail.filter((message) => (
+    message.finishedAt != null
+    && !message.busy
+    && !message.streaming
+    && message.text.trim().length > 0
+    && !durableTailSignatures.has(signature(message))
+  ));
+  const tail = [...freshlySettled, ...pendingDirections].filter((message, index, rows) => (
+    rows.findIndex((candidate) => candidate.id === message.id) === index
+  ));
+  const next = [...durable, ...tail];
+  if (recovery && !new Set(next.map(signature)).has(signature(recovery))) next.push(recovery);
+  return next;
 }
 
 // 재진입(히스토리 재로드) 시 이미 답한 질문이 다시 '미답변'으로 보여 사용자가 재선택→중복 전송하는
@@ -2132,10 +2183,8 @@ function ChatPage() {
         );
         setMessages((current) => {
           if (transcriptRevisionRef.current !== historyRevision) return current;
-          if (current.some((message) => message.busy || message.streaming)) return current;
           const optimisticIds = new Set(steerQueueRef.current.map((item) => item.optimisticMessageId));
-          const pendingDirections = current.filter((message) => optimisticIds.has(message.id));
-          return [...next, ...pendingDirections, ...(recovery ? [recovery] : [])];
+          return reconcileTranscriptSnapshot(current, next, recovery, optimisticIds);
         });
       });
     });
@@ -2184,7 +2233,12 @@ function ChatPage() {
           );
           setMessages((current) => (
             transcriptRevisionRef.current === historyRevision
-              ? (recovery ? [...next, recovery] : next)
+              ? reconcileTranscriptSnapshot(
+                  current,
+                  next,
+                  recovery,
+                  new Set(steerQueueRef.current.map((item) => item.optimisticMessageId)),
+                )
               : current
           ));
         }
@@ -3323,37 +3377,51 @@ function ChatPage() {
   const displayAgent =
     agent?.visibility === "background" && !boundTeamMember ? null : agent;
   const latestUserPrompt = lastMessageOfRole(messages, "user")?.text ?? "";
+  const activeRunContext = (() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.role !== "agent" || !message.busy) continue;
+      for (let promptIndex = index - 1; promptIndex >= 0; promptIndex -= 1) {
+        const prompt = messages[promptIndex];
+        if (prompt.role === "user") return { startedAt: message.startedAt, prompt: prompt.text };
+      }
+      return { startedAt: message.startedAt, prompt: "" };
+    }
+    return null;
+  })();
   // 현재(가장 최근) 에이전트 실행이 다단계 파이프라인(2+ stage)이면, 단일 에이전트라도 카드/네트워크 뷰를 켠다.
   const hasPipeline = (lastMessageOfRole(messages, "agent")?.pipeline?.length ?? 0) > 1;
 
   return (
-    <div style={{ display: "flex", height: "100%", width: "100%", minWidth: 0, overflow: "hidden" }}>
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+    <div className="task-cockpit-shell" style={{ display: "flex", height: "100%", width: "100%", minWidth: 0, overflow: "hidden" }}>
+      <div className="task-cockpit-main" style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
       <header
-        className="titlebar-drag"
+        className="task-cockpit-header titlebar-drag"
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 10,
-          padding: "10px 20px",
+          gap: 6,
+          padding: "0 12px",
           borderBottom: "var(--hairline)",
           background: "var(--paper)",
-          minHeight: 56,
+          minHeight: 47,
+          height: 47,
         }}
       >
         <button
           type="button"
           className="project-detail-back titlebar-nodrag"
           data-work-dashboard-return="task-header"
-          onClick={() => router.push("/dashboard")}
-          aria-label={locale === "ko" ? "대시보드로 돌아가기" : "Back to Dashboard"}
+          onClick={() => router.push(project ? `/project/detail?id=${project.id}` : "/dashboard")}
+          aria-label={project ? (locale === "ko" ? "프로젝트 열기" : "Open project") : (locale === "ko" ? "대시보드로 돌아가기" : "Back to Dashboard")}
         >
-          <IconArrowLeft size={16} />
-          <span>{locale === "ko" ? "대시보드" : "Dashboard"}</span>
+          <IconFolder size={16} />
+          <span>{project?.name || (locale === "ko" ? "대시보드" : "Dashboard")}</span>
         </button>
-        <div style={{ flex: 1, minWidth: 0, marginLeft: 12 }}>
+        <div className="task-cockpit-title" style={{ flex: 1, minWidth: 0 }}>
           {project && (
             <div
+              className="task-cockpit-project-eyebrow"
               style={{
                 fontSize: 10,
                 color: "var(--muted-deep)",
@@ -3388,7 +3456,7 @@ function ChatPage() {
               className="titlebar-nodrag"
               style={{
                 width: "100%",
-                fontSize: 15,
+                fontSize: 13.5,
                 fontWeight: 600,
                 fontFamily: "var(--font-head)",
                 border: "1px solid var(--paper-edge)",
@@ -3403,7 +3471,7 @@ function ChatPage() {
               className="titlebar-nodrag"
               style={{
                 fontFamily: "var(--font-head)",
-                fontSize: 15,
+                fontSize: 13.5,
                 fontWeight: 600,
                 color: "var(--ink)",
                 cursor: "text",
@@ -3431,6 +3499,7 @@ function ChatPage() {
         <button
           onClick={() => (workspaceOpen ? closeRightPanel() : setWorkspaceOpenPersisted(true))}
           className="task-cockpit-header-action"
+          data-right-panel-trigger="file"
           aria-label={t("chat.workspace_panel")}
           title={t("chat.workspace_panel")}
           data-active={workspaceOpen ? "true" : "false"}
@@ -3440,6 +3509,7 @@ function ChatPage() {
         <button
           onClick={() => (rightPanelOpen && rightPanelTab === "panel" ? closeRightPanel() : openPanelTab("panel"))}
           className="task-cockpit-header-action"
+          data-right-panel-trigger="panel"
           aria-label={locale === "ko" ? "뷰어 패널" : "Viewer panel"}
           title={locale === "ko" ? "뷰어 패널" : "Viewer panel"}
           data-active={rightPanelOpen && rightPanelTab === "panel" ? "true" : "false"}
@@ -3712,6 +3782,8 @@ function ChatPage() {
           swarmMode={chat.swarmMode === true}
           goalActive={Boolean(chat.goalId)}
           onToggleGoal={handleToggleGoal}
+          progressLabel={activeRunContext?.prompt || latestUserPrompt || chat.title}
+          runStartedAt={activeRunContext?.startedAt}
           onToggleContinuous={handleToggleContinuous}
           onToggleSwarm={handleToggleSwarm}
         />

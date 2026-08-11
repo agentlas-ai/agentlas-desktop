@@ -228,6 +228,8 @@ function ChatInputComponent({
   swarmMode = false,
   goalActive,
   onToggleGoal,
+  progressLabel,
+  runStartedAt,
   onToggleContinuous,
   onToggleSwarm,
   queuedCount = 0,
@@ -272,6 +274,9 @@ function ChatInputComponent({
    *  종료(onToggleGoal)를 부른다. 미제공 표면은 기존 per-turn 로컬 상태 그대로. */
   goalActive?: boolean;
   onToggleGoal?: () => void;
+  /** Current work label/start time for the Codex-style feedback strip above the composer. */
+  progressLabel?: string;
+  runStartedAt?: number;
   /** 스웜(swarmMode) 현재 상태 + 토글. */
   swarmMode?: boolean;
   onToggleSwarm?: () => void;
@@ -856,8 +861,8 @@ function ChatInputComponent({
     <footer
       className="titlebar-nodrag chat-input-footer"
       style={{
-        borderTop: "var(--hairline)",
-        padding: "10px 16px 14px",
+        borderTop: "none",
+        padding: "8px 16px 10px",
         background: "transparent",
         position: "relative",
       }}
@@ -1226,13 +1231,25 @@ function ChatInputComponent({
         />
       )}
 
+      {(busy || effectiveGoalMode) && (
+        <ComposerProgressBar
+          busy={busy}
+          label={progressLabel}
+          startedAt={runStartedAt}
+          queuedCount={queuedCount}
+          goalActive={effectiveGoalMode}
+          onEndGoal={effectiveGoalMode ? () => toggleGoalMode(false) : undefined}
+        />
+      )}
+
       <div
         className="chat-input-shell"
+        data-has-progress={busy || effectiveGoalMode ? "true" : "false"}
         style={{
-          width: "min(100%, 980px)",
+          width: "min(100%, 740px)",
           margin: "0 auto",
-          borderRadius: 16,
-          padding: "9px 10px 8px",
+          borderRadius: 20,
+          padding: "9px 11px 8px",
           display: "flex",
           flexDirection: "column",
           gap: 8,
@@ -1471,7 +1488,7 @@ function ChatInputComponent({
             resize: "none",
             padding: "4px 6px",
             fontFamily: "var(--font-body)",
-            minHeight: 50,
+            minHeight: 42,
             maxHeight: 150,
             overflowY: "auto",
             boxSizing: "border-box",
@@ -1550,30 +1567,6 @@ function ChatInputComponent({
                   <span className="chat-input-hep-label">{locale === "ko" ? "스웜" : "Swarm"}</span>
                 </button>}
               </div>
-            )}
-
-            {/* 실행 중 steering 대기 표시 — 큐에 쌓인 메시지가 있으면 개수를 보여준다. */}
-            {queuedCount > 0 && (
-              <span
-                title={locale === "ko" ? "현재 모델을 중단하지 않고 다음 지시로 보냅니다" : "Send as the next instruction without stopping the current model"}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 5,
-                  height: 24,
-                  padding: "0 9px",
-                  borderRadius: 999,
-                  fontSize: 11,
-                  fontWeight: 600,
-                  color: "var(--amber-deep)",
-                  background: "color-mix(in srgb, var(--amber-deep) 10%, var(--paper))",
-                  border: "1px solid color-mix(in srgb, var(--amber-deep) 24%, var(--paper-edge))",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                <span className="chat-input-steering-pulse" aria-hidden />
-                {locale === "ko" ? "다음 지시 대기 중" : "Next instruction queued"}
-              </span>
             )}
 
             {/* 권한 칩 */}
@@ -1815,6 +1808,64 @@ function ChatInputComponent({
         </div>
       </div>
     </footer>
+  );
+}
+
+function ComposerProgressBar({
+  busy,
+  label,
+  startedAt,
+  queuedCount,
+  goalActive,
+  onEndGoal,
+}: {
+  busy: boolean;
+  label?: string;
+  startedAt?: number;
+  queuedCount: number;
+  goalActive: boolean;
+  onEndGoal?: () => void;
+}) {
+  const { locale } = useT();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!busy || !startedAt) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [busy, startedAt]);
+  const elapsedSeconds = startedAt ? Math.max(0, Math.floor((now - startedAt) / 1_000)) : 0;
+  const hours = Math.floor(elapsedSeconds / 3_600);
+  const minutes = Math.floor((elapsedSeconds % 3_600) / 60);
+  const seconds = elapsedSeconds % 60;
+  const elapsed = hours > 0
+    ? `${hours}h ${minutes}m ${seconds}s`
+    : minutes > 0
+      ? `${minutes}m ${seconds}s`
+      : `${seconds}s`;
+  const title = label?.replace(/\s+/g, " ").trim() || (locale === "ko" ? "현재 작업" : "Current work");
+  return (
+    <div className="chat-composer-progress" role={busy ? "status" : undefined} aria-live={busy ? "polite" : undefined}>
+      <span className="chat-composer-progress-icon" aria-hidden><IconTarget size={13} /></span>
+      <strong>{locale === "ko" ? "진행 중인 목표" : "Active goal"}</strong>
+      <span className="chat-composer-progress-label" title={title}>{title}</span>
+      {queuedCount > 0 && (
+        <span className="chat-composer-progress-queue">
+          {locale === "ko" ? `다음 지시 ${queuedCount}개` : `${queuedCount} queued`}
+        </span>
+      )}
+      {busy && <time>{elapsed}</time>}
+      {goalActive && onEndGoal && (
+        <button
+          type="button"
+          onClick={onEndGoal}
+          aria-label={locale === "ko" ? "목표 종료" : "End goal"}
+          title={locale === "ko" ? "목표 종료" : "End goal"}
+        >
+          <IconClose size={12} />
+        </button>
+      )}
+    </div>
   );
 }
 

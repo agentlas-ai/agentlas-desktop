@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.9.86 — 2026-08-12
+
+Binds the same Agentlas OS v1.1.109 at
+610d2ce2dff4d5e15b8adba05b5115c992cbb376.
+
+- Work now uses the measured Codex Desktop proportions and feedback rhythm: a
+  compact project header, a centered transcript, an attached running-goal row,
+  quiet inline progress, and a 392-pixel inspector at the reference viewport.
+- Sending another direction keeps the current model turn alive, paints the new
+  instruction immediately, and follows the next attached run without a page
+  transition. Explicit Stop remains the only action that cancels the run.
+- A second transcript race is closed. When run settlement triggers a history
+  read before the just-finished row is observable, that older snapshot can no
+  longer erase the answer already on screen; matching is anchored to shared
+  durable rows so repeated answers are not mistaken for an old one.
+- Agent, File, Preview, and Memory stay available in the inspector. Generated
+  files open in place, can be opened externally or revealed in Finder, dense
+  output lists scroll, and narrow windows use an overlay instead of crushing
+  the conversation.
+- Memory curation keeps the evidence-shape and capability-widening gates wired
+  through the shared ruleset, and the stable macOS installer can safely clean a
+  prior read-only staging tree without touching user data.
+- These source gates do not themselves publish a release; the Releases page
+  stays the authority for what is actually downloadable.
+
 ## 0.9.85 — 2026-08-11
 
 Binds the same Agentlas OS v1.1.109 at

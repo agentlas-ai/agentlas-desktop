@@ -3193,7 +3193,7 @@ button[data-toggle-state="on"] {
 .project-help-slot { margin-top: 18px; min-height: 66px; display: flex; align-items: center; justify-content: flex-end; gap: 12px; border-top: 1px solid var(--rd-hair); padding-top: 14px; }
 @media (max-width: 820px) { .project-source-grid, .project-agent-workbench { grid-template-columns: 1fr; } .project-create-head { padding-inline: 24px; } .project-create-body, .project-create-steps { padding-inline: 20px; } .project-create-steps { overflow-x: auto; grid-template-columns: repeat(3, minmax(130px, 1fr)); } }
 
-.project-sidebar { width: 248px; flex: 0 0 248px; height: 100vh; display: flex; flex-direction: column; border-right: 1px solid var(--glass-border); }
+.project-sidebar { width: 274px; flex: 0 0 274px; height: 100vh; display: flex; flex-direction: column; border-right: 1px solid var(--glass-border); }
 .project-sidebar-drag { height: 35px; flex: 0 0 35px; }
 .project-sidebar-head { padding: 6px 12px 12px; }
 .project-sidebar-dashboard { margin: 0 12px 8px; min-height: 38px; display: flex; align-items: center; gap: 9px; padding: 8px 10px; border: 0; border-radius: 10px; background: transparent; color: var(--rd-ink-2); font-weight: 700; text-align: left; cursor: pointer; }
@@ -3215,6 +3215,12 @@ button[data-toggle-state="on"] {
 .project-sidebar-foot { padding: 12px; display: grid; gap: 8px; border-top: 1px solid var(--rd-hair); }
 .project-detail-back { min-height: 36px; display: inline-flex; align-items: center; gap: 7px; padding: 0 10px; border: 1px solid var(--rd-hair); border-radius: 9px; background: var(--rd-surface); color: var(--rd-ink-2); font: inherit; font-size: 12px; font-weight: 750; cursor: pointer; }
 .project-detail-back:hover, .project-detail-back:focus-visible { border-color: var(--rd-hair-strong); background: var(--rd-surface-2); color: var(--rd-ink); }
+.task-cockpit-header .project-detail-back { width: 30px; min-width: 30px; min-height: 30px; height: 30px; justify-content: center; padding: 0; border-color: transparent; background: transparent; }
+.task-cockpit-header .project-detail-back span { display: none; }
+.task-cockpit-header .project-detail-back:hover,
+.task-cockpit-header .project-detail-back:focus-visible { border-color: transparent; background: var(--fill-1); }
+.task-cockpit-project-eyebrow { display: none; }
+.task-cockpit-title { display: flex; align-items: center; }
 .workspace-portfolio { height: 100%; overflow: auto; background: var(--rd-canvas); }
 .workspace-portfolio-head { padding: 50px 48px 28px; display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; border-bottom: 1px solid var(--rd-hair); }
 .workspace-portfolio-head span { color: var(--rd-accent); font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
@@ -4720,6 +4726,23 @@ button[data-toggle-state="on"] {
     box-shadow: -24px 0 64px rgba(15, 23, 42, 0.16);
   }
 }
+.chat-right-output-row:hover,
+.chat-right-output-row:focus-visible {
+  border-color: var(--paper-edge) !important;
+  background: var(--fill-1) !important;
+  outline: none;
+}
+.workspace-panel-embedded {
+  border-left: 0 !important;
+}
+.workspace-panel-embedded .workspace-panel-header {
+  min-height: 38px;
+  padding: 7px 10px !important;
+  background: var(--paper) !important;
+}
+.workspace-panel-embedded .workspace-panel-header > svg {
+  color: var(--muted-deep) !important;
+}
 .build-log-time {
   color: var(--rd-ink-4);
   margin-right: 8px;
@@ -6044,10 +6067,30 @@ button[data-toggle-state="on"] {
    when a right-side panel leaves the chat column narrow. */
 .chat-input-shell {
   min-width: 0;
-  max-width: calc(100vw - 32px);
+  max-width: min(740px, calc(100vw - 32px));
   border: 1px solid color-mix(in srgb, var(--ink) 12%, var(--paper-edge));
-  box-shadow: 0 10px 30px rgba(15, 18, 20, 0.08), 0 1px 2px rgba(15, 18, 20, 0.05);
+  box-shadow: 0 8px 24px rgba(15, 18, 20, 0.07), 0 1px 2px rgba(15, 18, 20, 0.05);
   transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+/* Codex desktop transcript geometry: one centered 740px reading column and
+   plain assistant turns (identity belongs to the task header, not every row). */
+.agentlas-chat-message-anchor {
+  width: min(740px, 100%);
+  margin-inline: auto;
+}
+
+.agentlas-chat-avatar {
+  display: none;
+}
+
+.agentlas-chat-streaming-cursor {
+  background: var(--ink-soft) !important;
+}
+
+.chat-input-shell[data-has-progress="true"] {
+  border-top-left-radius: 0 !important;
+  border-top-right-radius: 0 !important;
 }
 
 .chat-input-shell:focus-within {
@@ -6063,8 +6106,88 @@ button[data-toggle-state="on"] {
   width: 100%;
   min-width: 0;
   overflow: visible;
-  padding-top: 7px;
-  border-top: 1px solid color-mix(in srgb, var(--paper-edge) 78%, transparent);
+  padding-top: 3px;
+  border-top: 0;
+}
+
+.chat-composer-progress {
+  width: min(100%, 740px);
+  min-width: 0;
+  min-height: 36px;
+  margin: 0 auto -1px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, var(--paper-edge));
+  border-bottom-color: color-mix(in srgb, var(--paper-edge) 58%, transparent);
+  border-radius: 15px 15px 0 0;
+  background: color-mix(in srgb, var(--paper) 96%, var(--paper-2));
+  color: var(--muted-deep);
+  font-size: 10.5px;
+  box-sizing: border-box;
+  box-shadow: 0 -2px 14px rgba(15, 18, 20, 0.025);
+}
+
+.chat-composer-progress-icon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-deep);
+  flex: 0 0 auto;
+}
+
+.chat-composer-progress strong {
+  flex: 0 0 auto;
+  color: var(--ink-soft);
+  font-size: 10.5px;
+  font-weight: 750;
+}
+
+.chat-composer-progress-label {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted-deep);
+}
+
+.chat-composer-progress-queue {
+  flex: 0 0 auto;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-soft);
+}
+
+.chat-composer-progress time {
+  flex: 0 0 auto;
+  color: var(--muted-deep);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-composer-progress button {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-deep);
+  cursor: pointer;
+}
+
+.chat-composer-progress button:hover,
+.chat-composer-progress button:focus-visible {
+  background: var(--fill-1);
+  color: var(--ink);
 }
 
 .chat-input-tools-left,
@@ -6172,21 +6295,21 @@ button[data-toggle-state="on"] {
 .task-cockpit-header-actions {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  padding: 3px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--paper-2) 72%, var(--paper));
+  gap: 1px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .task-cockpit-header-action {
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 7px;
   background: transparent;
   color: var(--muted-deep);
   cursor: pointer;
@@ -6200,14 +6323,14 @@ button[data-toggle-state="on"] {
 }
 
 .task-cockpit-header-action[data-active="true"] {
-  color: var(--accent);
-  box-shadow: 0 1px 3px rgba(15, 18, 20, 0.08);
+  color: var(--ink);
+  box-shadow: none;
 }
 
 .task-cockpit-header-danger {
-  margin-left: 2px;
-  border-left-color: var(--paper-edge);
-  border-radius: 0 8px 8px 0;
+  margin-left: 3px;
+  border-left-color: transparent;
+  border-radius: 7px;
 }
 
 .task-cockpit-header-danger:hover {

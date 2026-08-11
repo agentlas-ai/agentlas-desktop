@@ -96,6 +96,20 @@ export function ChatRightPanel({
   const hasPanelContent = Boolean(artifact || surface || filePreview);
   const showFilePreview = viewerSource === "file" && filePreview;
   const showWorkbench = viewerSource === "workbench" && (artifact || surface);
+  const activeLabel = activeTab === "file"
+    ? (ko ? "파일" : "Files")
+    : activeTab === "agent"
+      ? (ko ? "에이전트" : "Agents")
+      : activeTab === "memory"
+        ? (ko ? "기억" : "Memory")
+        : (ko ? "미리보기" : "Preview");
+  const activeIcon = activeTab === "file"
+    ? <IconFolder size={14} />
+    : activeTab === "agent"
+      ? <IconNetwork size={14} />
+      : activeTab === "memory"
+        ? <IconSparkles size={14} />
+        : <IconPanelRight size={14} />;
 
   useEffect(() => {
     setFilePreview(null);
@@ -116,7 +130,7 @@ export function ChatRightPanel({
     if (!onResizeWidth) return;
     event.preventDefault();
     const startX = event.clientX;
-    const startWidth = width ?? 360;
+    const startWidth = width ?? 392;
     const maxWidth = Math.max(340, Math.min(window.innerWidth - 420, Math.floor(window.innerWidth * 0.64)));
     const onMove = (moveEvent: PointerEvent) => {
       const next = Math.round(startWidth + startX - moveEvent.clientX);
@@ -133,7 +147,7 @@ export function ChatRightPanel({
   function resizeByKeyboard(event: ReactKeyboardEvent<HTMLDivElement>) {
     if (!onResizeWidth || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const current = width ?? 360;
+    const current = width ?? 392;
     const maxWidth = Math.max(340, Math.min(window.innerWidth - 420, Math.floor(window.innerWidth * 0.64)));
     const next = event.key === "Home"
       ? 300
@@ -144,7 +158,7 @@ export function ChatRightPanel({
   }
 
   return (
-    <aside className="chat-right-panel titlebar-nodrag" style={{ ...shellStyle, width: width ?? shellStyle.width, maxWidth: "none" }}>
+    <aside className="chat-right-panel titlebar-nodrag" data-active-tab={activeTab} style={{ ...shellStyle, width: width ?? shellStyle.width, maxWidth: "none" }}>
       {onResizeWidth && (
         <div
           role="separator"
@@ -152,7 +166,7 @@ export function ChatRightPanel({
           aria-orientation="vertical"
           aria-valuemin={300}
           aria-valuemax={960}
-          aria-valuenow={width ?? 360}
+          aria-valuenow={width ?? 392}
           aria-label={ko ? "우측 패널 너비" : "Right panel width"}
           title={ko ? "패널 너비 조절" : "Resize panel"}
           onPointerDown={beginResize}
@@ -161,20 +175,6 @@ export function ChatRightPanel({
         />
       )}
       <header style={headerStyle}>
-        <div style={headerMarkStyle}>
-          {activeTab === "file" ? <IconFolder size={15} /> : activeTab === "agent" ? <IconNetwork size={15} /> : activeTab === "memory" ? <IconSparkles size={15} /> : <IconPanelRight size={15} />}
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={eyebrowStyle}>{ko ? "우측 패널" : "Right panel"}</div>
-          <strong style={titleStyle}>
-            {activeTab === "file" ? (ko ? "파일" : "Files") : activeTab === "agent" ? (ko ? "에이전트" : "Agents") : activeTab === "memory" ? (ko ? "기억" : "Memory") : (ko ? "미리보기" : "Preview")}
-          </strong>
-        </div>
-        <button type="button" onClick={onClose} aria-label={ko ? "우측 패널 닫기" : "Close right panel"} title={ko ? "닫기" : "Close"} style={iconButtonStyle}>
-          <IconClose size={14} />
-        </button>
-      </header>
-
       <nav style={tabsStyle} aria-label={ko ? "우측 패널 탭" : "Right panel tabs"}>
         {/* ★도는 중이라는 사실은 탭을 눌러야 알 수 있으면 안 된다 — 눌러 보기 전에 보여야 한다. */}
         <TabButton tab="agent" activeTab={activeTab} onClick={onTabChange} label={ko ? "에이전트" : "Agents"} icon={<IconNetwork size={13} />} badge={busy || Object.values(liveAgents).some((entry) => entry.active)} />
@@ -182,8 +182,18 @@ export function ChatRightPanel({
         <TabButton tab="panel" activeTab={activeTab} onClick={onTabChange} label={ko ? "미리보기" : "Preview"} icon={<IconPanelRight size={13} />} badge={hasPanelContent} />
         <TabButton tab="memory" activeTab={activeTab} onClick={onTabChange} label={ko ? "기억" : "Memory"} icon={<IconSparkles size={13} />} />
       </nav>
+        <button type="button" onClick={onClose} aria-label={ko ? "우측 패널 닫기" : "Close right panel"} title={ko ? "닫기" : "Close"} style={iconButtonStyle}>
+          <IconClose size={14} />
+        </button>
+      </header>
 
-      <div style={bodyStyle}>
+      <div style={panelContextStyle}>
+        <span style={headerMarkStyle}>{activeIcon}</span>
+        <strong style={titleStyle}>{activeLabel}</strong>
+        <span style={contextTitleStyle} title={chatTitle}>{chatTitle}</span>
+      </div>
+
+      <div style={bodyStyle} data-right-panel-body={activeTab}>
         {activeTab === "file" && (
           <FileTab
             artifact={artifact}
@@ -649,6 +659,7 @@ function FileTab({
               <button
                 key={row.key}
                 type="button"
+                className="chat-right-output-row"
                 onClick={row.action}
                 style={outputRowStyle}
                 title={row.title}
@@ -682,6 +693,7 @@ function FileTab({
               <button
                 key={`${file.path}:${file.fileUrl}`}
                 type="button"
+                className="chat-right-output-row"
                 onClick={() => onOpenFilePreview(file)}
                 onContextMenu={(event) => {
                   event.preventDefault();
@@ -1061,7 +1073,7 @@ function TabButton({
 }) {
   const active = activeTab === tab;
   return (
-    <button type="button" onClick={() => onClick(tab)} style={tabButtonStyle(active)} aria-pressed={active}>
+    <button type="button" data-right-panel-tab={tab} onClick={() => onClick(tab)} style={tabButtonStyle(active)} aria-pressed={active}>
       {icon}
       <span>{label}</span>
       {badge && <span aria-hidden style={tabBadgeStyle} />}
@@ -1071,9 +1083,9 @@ function TabButton({
 
 const shellStyle: CSSProperties = {
   position: "relative",
-  width: "clamp(310px, 32vw, 430px)",
-  minWidth: 290,
-  maxWidth: "44vw",
+  width: 392,
+  minWidth: 300,
+  maxWidth: "none",
   flexShrink: 1,
   height: "100%",
   background: "var(--paper)",
@@ -1098,40 +1110,54 @@ const resizeHandleStyle: CSSProperties = {
 const headerStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 9,
-  padding: "10px 12px",
+  gap: 4,
+  minHeight: 47,
+  height: 47,
+  padding: "6px 8px",
   borderBottom: "var(--hairline)",
   background: "var(--paper)",
 };
 
 const headerMarkStyle: CSSProperties = {
-  width: 28,
-  height: 28,
-  borderRadius: 8,
+  width: 22,
+  height: 22,
+  borderRadius: 6,
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
-  color: "var(--accent)",
-  background: "var(--fill-1)",
+  color: "var(--ink-soft)",
+  background: "transparent",
   flexShrink: 0,
-};
-
-const eyebrowStyle: CSSProperties = {
-  fontSize: 10,
-  color: "var(--muted-deep)",
-  fontWeight: 750,
-  textTransform: "uppercase",
-  letterSpacing: 0.35,
 };
 
 const titleStyle: CSSProperties = {
   display: "block",
-  marginTop: 1,
   color: "var(--ink)",
-  fontSize: 12.5,
+  fontSize: 11.5,
+  fontWeight: 700,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
+};
+
+const panelContextStyle: CSSProperties = {
+  minHeight: 45,
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  padding: "0 10px",
+  borderBottom: "1px solid var(--paper-edge)",
+  background: "var(--paper)",
+};
+
+const contextTitleStyle: CSSProperties = {
+  minWidth: 0,
+  marginLeft: "auto",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "var(--muted-deep)",
+  fontSize: 10.5,
 };
 
 const iconButtonStyle: CSSProperties = {
@@ -1149,41 +1175,44 @@ const iconButtonStyle: CSSProperties = {
 };
 
 const tabsStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-  gap: 6,
-  padding: "8px 10px",
-  borderBottom: "1px solid var(--paper-edge)",
-  background: "var(--paper-2)",
+  flex: 1,
+  minWidth: 0,
+  display: "flex",
+  alignItems: "center",
+  gap: 2,
+  padding: 0,
+  overflow: "hidden",
+  background: "var(--paper)",
 };
 
 function tabButtonStyle(active: boolean): CSSProperties {
   return {
     position: "relative",
     minWidth: 0,
-    height: 30,
+    height: 32,
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
-    gap: 6,
-    borderRadius: 7,
-    border: active ? "1px solid var(--accent-soft)" : "1px solid transparent",
-    background: active ? "var(--paper)" : "transparent",
-    color: active ? "var(--accent)" : "var(--ink-soft)",
-    fontSize: 11.5,
-    fontWeight: 800,
+    gap: 5,
+    padding: "0 8px",
+    borderRadius: 8,
+    border: "1px solid transparent",
+    background: active ? "var(--fill-1)" : "transparent",
+    color: active ? "var(--ink)" : "var(--muted-deep)",
+    fontSize: 10.5,
+    fontWeight: active ? 700 : 600,
     cursor: "pointer",
   };
 }
 
 const tabBadgeStyle: CSSProperties = {
-  width: 6,
-  height: 6,
+  width: 5,
+  height: 5,
   borderRadius: "50%",
-  background: "var(--green-deep)",
+  background: "var(--muted-deep)",
   position: "absolute",
-  right: 9,
-  top: 7,
+  right: 4,
+  top: 5,
 };
 
 const bodyStyle: CSSProperties = {
@@ -1301,15 +1330,16 @@ const fileTabStyle: CSSProperties = {
   minHeight: 0,
   display: "flex",
   flexDirection: "column",
-  overflow: "hidden",
+  overflowY: "auto",
+  overflowX: "hidden",
 };
 
 const outputsStyle: CSSProperties = {
   flexShrink: 0,
   borderBottom: "1px solid var(--paper-edge)",
-  padding: "10px",
+  padding: "11px 10px",
   display: "grid",
-  gap: 8,
+  gap: 6,
 };
 
 const sectionHeaderStyle: CSSProperties = {
@@ -1318,15 +1348,14 @@ const sectionHeaderStyle: CSSProperties = {
   justifyContent: "space-between",
   color: "var(--muted-deep)",
   fontSize: 10.5,
-  fontWeight: 820,
-  textTransform: "uppercase",
-  letterSpacing: 0.35,
+  fontWeight: 650,
+  letterSpacing: 0,
 };
 
 const smallEmptyStyle: CSSProperties = {
-  border: "1px dashed var(--paper-edge)",
-  borderRadius: 8,
-  padding: "9px 10px",
+  border: "none",
+  borderRadius: 0,
+  padding: "14px 12px",
   color: "var(--muted-deep)",
   fontSize: 11.5,
   lineHeight: 1.45,
@@ -1334,16 +1363,16 @@ const smallEmptyStyle: CSSProperties = {
 
 const outputListStyle: CSSProperties = {
   display: "grid",
-  gap: 6,
+  gap: 1,
 };
 
 const outputRowStyle: CSSProperties = {
   width: "100%",
   minWidth: 0,
-  border: "1px solid var(--paper-edge)",
-  borderRadius: 8,
-  background: "var(--paper)",
-  padding: "8px 9px",
+  border: "1px solid transparent",
+  borderRadius: 7,
+  background: "transparent",
+  padding: "7px 6px",
   display: "flex",
   alignItems: "center",
   gap: 8,
@@ -1352,11 +1381,11 @@ const outputRowStyle: CSSProperties = {
 };
 
 const outputIconStyle: CSSProperties = {
-  width: 24,
-  height: 24,
-  borderRadius: 7,
-  background: "var(--fill-1)",
-  color: "var(--accent)",
+  width: 22,
+  height: 22,
+  borderRadius: 6,
+  background: "transparent",
+  color: "var(--muted-deep)",
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
@@ -1383,8 +1412,8 @@ const outputMetaStyle: CSSProperties = {
 };
 
 const workspaceWrapStyle: CSSProperties = {
-  flex: 1,
-  minHeight: 0,
+  flex: "1 0 240px",
+  minHeight: 240,
   display: "flex",
   overflow: "hidden",
 };

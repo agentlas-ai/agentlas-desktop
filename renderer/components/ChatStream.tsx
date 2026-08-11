@@ -805,8 +805,8 @@ const Bubble = memo(function Bubble({
   const hasProgress = Boolean(message.busy || message.status || (message.steps && message.steps.length > 0));
   const showParallelWork = hasProgress && isParallelWorkMessage(message);
   return (
-    <div className="agentlas-chat-turn" style={{ display: "flex", gap: 10, alignSelf: "stretch", maxWidth: 820 }}>
-      <div style={{ position: "relative", flexShrink: 0 }}>
+    <div className="agentlas-chat-turn" style={{ display: "flex", gap: 0, alignSelf: "stretch", maxWidth: 740 }}>
+      <div className="agentlas-chat-avatar" style={{ position: "relative", flexShrink: 0 }}>
         <AgentAvatar name={agentName} tone={agentTone} size={28} />
       </div>
       <div style={{ minWidth: 0, flex: 1, paddingTop: 1 }}>
@@ -1578,8 +1578,8 @@ function GlyphSpinner({ active }: { active: boolean }) {
         width: "1.1em",
         textAlign: "center",
         flexShrink: 0,
-        color: "var(--run-accent, #d97757)",
-        fontSize: 15,
+        color: "var(--muted-deep)",
+        fontSize: 13,
         lineHeight: 1,
         fontWeight: 700,
       }}
