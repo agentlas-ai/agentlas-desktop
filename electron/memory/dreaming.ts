@@ -38,6 +38,21 @@ export function getDreamingEnabled(): boolean {
   return getMeta(ENABLED_KEY) === "1";
 }
 
+const ENABLED_SET_BY_KEY = "memory_dreaming_enabled_set_by";
+
+/**
+ * M-step recovery for the measured "never ran" state: the opt-in default was
+ * OFF and no install had ever flipped it, so decay never happened anywhere.
+ * A stored value only counts as the user's choice if the user could have made
+ * it — when the key is ABSENT we enable with a provenance marker; when the key
+ * EXISTS (either value) the user decided and we never touch it.
+ */
+export function ensureDreamingDefault(): void {
+  if (getMeta(ENABLED_KEY) !== null) return; // explicit user choice — untouched
+  setMeta(ENABLED_KEY, "1");
+  setMeta(ENABLED_SET_BY_KEY, "auto-migration-2026-08-11");
+}
+
 export function setDreamingEnabled(enabled: boolean): void {
   setMeta(ENABLED_KEY, enabled ? "1" : "0");
 }

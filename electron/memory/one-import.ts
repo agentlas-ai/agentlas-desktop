@@ -28,9 +28,10 @@ export const ONE_AGENT_ID = "builtin-agentlas-one";
 
 const ONE_SOUL_RELATIVE = path.join(".agentlas", "project-soul-memory.md");
 
-/** `- **[kind]** 내용` + `- 근거: …` + `<!-- h:hash -->` 3줄 블록. */
+/** `- **[kind]** 내용` + `- 근거|Evidence: …` (+ 선택적 `- Project:` 줄) + `<!-- h:hash -->` 블록.
+ *  근거 라벨은 한/영 두 세대가 실존한다 — 한글만 받던 시절 영문 블록은 한 번도 반입되지 못했다(실측 2026-08-11). */
 const DURABLE_BLOCK_RE =
-  /^- \*\*\[([a-z_]+)\]\*\*\s+(.+?)\n\s+- 근거:\s*(.*?)\n[\s\S]*?<!--\s*h:([0-9a-f]{16})\s*-->/gm;
+  /^- \*\*\[([a-z_]+)\]\*\*\s+(.+?)\n\s+- (?:근거|Evidence):\s*(.*?)\n[\s\S]*?<!--\s*h:([0-9a-f]{16})\s*-->/gm;
 
 export interface OneDurableBlock {
   kind: string;
@@ -113,6 +114,40 @@ function importedHashes(limit: number): Set<string> {
     }
   }
   return seen;
+}
+
+let importTimer: NodeJS.Timeout | null = null;
+let lastImportedSoulMtimeMs = 0;
+
+/**
+ * P3 — keep the import current while the app stays open. Boot-only import
+ * measured a 73-block backlog; a cheap mtime check every few minutes closes
+ * it without watching file descriptors or blocking anything.
+ */
+export function startOneImportScheduler(intervalMs = 5 * 60 * 1000): void {
+  if (importTimer) return;
+  importTimer = setInterval(() => {
+    try {
+      const soulPath = path.join(oneWorkspaceRoot(), ONE_SOUL_RELATIVE);
+      const mtimeMs = fs.statSync(soulPath).mtimeMs;
+      if (mtimeMs <= lastImportedSoulMtimeMs) return;
+      const outcome = importOneDurableMemory();
+      lastImportedSoulMtimeMs = mtimeMs;
+      if (outcome.imported > 0 || outcome.failed > 0) {
+        console.log(
+          `[one-import] rescan imported=${outcome.imported} skipped=${outcome.skipped} failed=${outcome.failed}`,
+        );
+      }
+    } catch {
+      // soul missing or unreadable — nothing to import this tick
+    }
+  }, intervalMs);
+  importTimer.unref?.();
+}
+
+export function stopOneImportScheduler(): void {
+  if (importTimer) clearInterval(importTimer);
+  importTimer = null;
 }
 
 /**

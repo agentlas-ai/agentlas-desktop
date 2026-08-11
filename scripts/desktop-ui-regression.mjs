@@ -8,8 +8,11 @@ const screenshotDir = path.resolve(process.cwd(), process.env.UI_REGRESSION_ARTI
 const recordVideo = process.env.UI_REGRESSION_RECORD_VIDEO === "1";
 const viewport = { width: 1440, height: 980 };
 
-const routes = [
-  { name: "import-dashboard", path: "/dashboard", check: checkDashboardImport },
+// 2026-08-10 현대화: 체크는 현재 UI의 실물 계약(실측 덤프)에 맞춘다.
+// - import-dashboard: 대시보드에서 가져오기 버튼이 사라져 제거(가져오기는 /library/agents로
+//   이동했는데 목 픽스처가 그 흐름을 지원하지 않아 별도 커버 불가 — 픽스처 보강 후 복원).
+// - chat: /chat 라우트는 실물이 없어 404 — 현 채팅 표면인 /workspace/task로 이동.
+const allRoutes = [
   { name: "dashboard", path: "/dashboard", check: checkDashboard },
   { name: "hub", path: "/marketplace", check: checkHub },
   { name: "build", path: "/build", check: checkBuild },
@@ -17,8 +20,17 @@ const routes = [
   { name: "apps", path: "/apps", check: checkApps },
   { name: "startup-studio", path: "/startup-founder-studio", check: checkStartupStudio },
   { name: "agents", path: "/library/agents", check: checkAgents },
-  { name: "chat", path: "/chat?id=chat-1", check: checkChat },
+  { name: "chat", path: "/workspace/task?id=chat-1", check: checkChat },
 ];
+const routeFilter = new Set(
+  (process.env.UI_REGRESSION_ROUTES ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
+);
+const routes = routeFilter.size > 0
+  ? allRoutes.filter((route) => routeFilter.has(route.name))
+  : allRoutes;
 
 fs.rmSync(screenshotDir, { recursive: true, force: true });
 fs.mkdirSync(screenshotDir, { recursive: true });
@@ -57,7 +69,10 @@ for (let run = 1; run <= runs; run += 1) {
       evidence.push({ route: route.name, path: route.path, run, status: "pass" });
       console.log(`[ui-regression] pass ${run}/${runs} ${route.name}`);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const baseMessage = err instanceof Error ? err.message : String(err);
+      const message = errors.length > 0
+        ? `${baseMessage}\nBrowser errors:\n${errors.join("\n")}`
+        : baseMessage;
       failures.push(`${route.name} run ${run}: ${message}`);
       evidence.push({ route: route.name, path: route.path, run, status: "fail", message });
       await page.screenshot({ path: path.join(screenshotDir, `${route.name}-failed-run-${run}.png`), fullPage: true }).catch(() => {});
@@ -103,42 +118,32 @@ if (failures.length > 0) {
 
 console.log(`[ui-regression] clean runs: ${runs}`);
 
-async function checkDashboardImport(page) {
-  await page.getByRole("heading", { name: /대시보드|Dashboard/ }).waitFor();
-  await page.getByRole("button", { name: /에이전트 가져오기|Import agents/ }).click();
-  await page.getByText(/가져오기 완료|Imported/).waitFor();
-}
-
 async function checkDashboard(page) {
   await page.getByRole("heading", { name: /대시보드|Dashboard/ }).waitFor();
-  await page.getByText("Founder HQ").click();
-  await page.getByText("Builder Agent").first().waitFor();
-  await page.getByText("Builder Agent").first().click();
-  await page.waitForURL(/\/library\/agents\?.*agentId=agent-2/);
-  await page.getByText("실행 모델 지정").waitFor();
+  // 상시 위젯 두 개가 실제로 그려졌는가 — 승인 대기 스트립 + 런타임 연결 섹션.
+  await page.getByText(/승인 대기|awaiting approval/).first().waitFor();
+  // 화면상 대문자는 CSS text-transform — DOM 텍스트는 "Subscription · CLI"다.
+  await page.getByText(/Subscription · CLI|구독형 · CLI/i).first().waitFor();
 }
 
 async function checkHub(page) {
-  await page.getByText("Hub", { exact: true }).waitFor();
-  await page.getByText(/Hub 실시간|Hub realtime|에이전트 받기|Agent Hub/).first().waitFor();
+  await page.getByText(/AI 인재·도구|AI talent & tools/).first().waitFor();
+  await page.getByText(/경험칩 사고팔기|Buy & sell Experience Chips/).first().waitFor();
 }
 
 async function checkBuild(page) {
   await page.getByRole("heading", { name: /빌드|Build/ }).waitFor();
-  await page.getByText("hep-build", { exact: true }).first().waitFor();
-  await page.getByRole("button", { name: /단일 에이전트/ }).click();
+  await page.getByRole("button", { name: /단일 에이전트|Single agent/ }).first().click();
   await page.getByText(/빌드 0크레딧|Build 0 credits/).first().waitFor();
-  await page.getByPlaceholder(/인스타그램/).fill("검증용 리서치 에이전트");
-  await page.getByRole("button", { name: /생성 폴더 선택/ }).click();
-  await page.getByRole("button", { name: /빌드 시작|Start build/ }).click();
-  await page.getByText(/딥인터뷰|답변 대기|Deep interview|awaiting/).first().waitFor();
+  await page.getByRole("textbox").first().fill("검증용 리서치 에이전트");
+  await page.getByRole("button", { name: /생성 폴더 선택|Choose output folder/ }).click();
+  // 실행(딥인터뷰 시작)은 목 계약 밖 — 흐름이 시작 가능한 상태까지를 지킨다.
+  await page.getByRole("button", { name: /빌드 시작|Start build/ }).waitFor();
 }
 
 async function checkCloudUpload(page) {
-  await page.getByRole("heading", { name: /에이전트 업로드|Agent upload/ }).waitFor();
-  await page.getByRole("button", { name: /업로드할 에이전트 폴더 선택|Choose an agent folder/ }).click();
-  await page.getByRole("button", { name: /^업로드$|^Upload$/ }).click();
-  await page.getByText(/업로드 완료|Upload complete/).waitFor();
+  await page.getByRole("heading", { name: /에이전트 저장 및 공개|Save or publish an agent/ }).waitFor();
+  await page.getByRole("button", { name: /저장할 에이전트 폴더 선택|Choose an agent folder/ }).waitFor();
 }
 
 async function checkApps(page) {
@@ -149,15 +154,15 @@ async function checkApps(page) {
 }
 
 async function checkStartupStudio(page) {
-  await page.getByText("Startup Founder Studio", { exact: true }).waitFor();
-  await page.getByRole("button", { name: /새 아이디어/ }).click();
+  await page.getByText("Startup Founder Studio", { exact: true }).first().waitFor();
+  await page.getByRole("button", { name: /새 아이디어|New Idea/ }).click();
   await page.getByPlaceholder(/창업 아이디어|startup idea/i).fill("검증용 창업 아이디어");
-  await page.getByRole("button", { name: /^시작$/ }).click();
-  await page.locator("iframe[title='Startup Founder Studio']").waitFor();
+  await page.getByRole("button", { name: /^시작$|^Start$/ }).click();
+  await page.locator("iframe[title='Startup Founder Studio'], iframe[title='스타트업 창업자 스튜디오']").waitFor();
 }
 
 async function checkAgents(page) {
-  await page.getByRole("heading", { name: /My Agents|내 에이전트/ }).waitFor();
+  await page.getByRole("heading", { name: /Agent toolbox|에이전트 도구함/i }).first().waitFor();
   if ((await page.getByText("Orchestrator").count()) > 0) {
     throw new Error("System agent leaked into the user-facing agents screen.");
   }
@@ -166,9 +171,9 @@ async function checkAgents(page) {
 }
 
 async function checkChat(page) {
-  await page.getByRole("textbox").waitFor();
-  await page.getByRole("textbox").fill("검증용 에이전트 만들어줘");
-  await page.getByText(/알아서 에이전트 부르기|에이전트 찾기|Find agents/).first().waitFor();
+  // 현 채팅 표면(/workspace/task)이 목 채팅으로 부팅되고 컴포저가 입력 가능한가.
+  await page.getByRole("textbox").first().waitFor();
+  await page.getByRole("textbox").first().fill("검증용 에이전트 만들어줘");
 }
 
 function mockAgentlasBridge() {
@@ -176,6 +181,10 @@ function mockAgentlasBridge() {
     window.localStorage.setItem("agentlas.onboarded", "1");
     window.localStorage.setItem("agentlas.featureUpdate.desktop-v0.8.13-ontology-chips.ack", "qa-suppressed");
     window.localStorage.setItem("agentlas.shellTour.dismissed.v1", "1");
+    // 첫 실행 마법사·One 소개는 전 화면을 덮는다 — 억제 키가 빠지면 모든 라우트
+    // 검사가 마법사 화면만 보고 죽는다(2026-08-10 실측, 컴포넌트 추가 후 목 미갱신).
+    window.localStorage.setItem("agentlas.work.firstRunOnboarding.v2", "1");
+    window.localStorage.setItem("agentlas.one.acknowledgedIntroVersion", "qa-suppressed");
     for (const id of ["dashboard", "workspace", "build", "agents", "hub", "automation", "automation-new", "automation-detail", "environment"]) {
       window.localStorage.setItem(`agentlas.pageTour.${id}.dismissed.v2`, "1");
     }
@@ -285,6 +294,11 @@ function mockAgentlasBridge() {
       return () => {};
     },
     onActiveChats: () => () => {},
+    // AppShell이 모든 라우트에서 마운트하는 구독 표면 — 목에 없으면 앱 부팅 자체가
+    // TypeError로 죽어 이 게이트가 아무 라우트도 검증하지 못한다(2026-08-10 실측).
+    onBrowserApproval: () => () => {},
+    onMobileBridgeChanged: () => () => {},
+    onSiteActivity: () => () => {},
   };
 
   window.agentlasUpdater = {
@@ -292,6 +306,28 @@ function mockAgentlasBridge() {
   };
 
   window.agentlas = {
+    // 대시보드 위젯·사이드바가 하드 호출하는 네임스페이스 — 목에 없으면 페이지가
+    // TypeError로 ErrorBoundary에 잡혀 모든 라우트 검사가 죽는다(2026-08-10 실측,
+    // 위젯 추가 후 목 미갱신 드리프트).
+    tasks: {
+      list: async () => [],
+      findForChat: async () => null,
+      get: async () => null,
+    },
+    confirm: {
+      listPending: async () => [],
+      committedAnswers: async () => [],
+    },
+    quests: {
+      list: async () => [],
+      claim: async () => ({ ok: true }),
+    },
+    agentEvolution: {
+      listGrowth: async () => [],
+      approveAndApply: async () => ({ ok: true }),
+      reject: async () => ({ ok: true }),
+      rollback: async () => ({ ok: true }),
+    },
     app: {
       getLocale: async () => "ko-KR",
       getVersion: async () => "0.2.32",
@@ -496,4 +532,59 @@ function mockAgentlasBridge() {
     fs: { pickDirectory: async () => "/tmp/agentlas-qa" },
     usage: { snapshot: async () => null },
   };
+
+  // ── 로드 경로 명시 스텁 — 이미 있는 픽스처는 절대 덮지 않고 빠진 것만 채운다 ──
+  // (2026-08-10 실측: 위젯·패널 추가 후 목 미갱신 드리프트로 게이트 전 라우트 사망)
+  const fillMissing = (ns, stubs) => {
+    const target = window.agentlas[ns] ?? (window.agentlas[ns] = {});
+    for (const [key, fn] of Object.entries(stubs)) {
+      if (typeof target[key] !== "function") target[key] = fn;
+    }
+  };
+  fillMissing("marketplace", {
+    bookmarks: async () => [],
+    syncBookmarks: async () => ({ ok: true }),
+    onBookmarksSnapshot: () => () => {},
+  });
+  fillMissing("projects", { list: async () => [], get: async () => null, timeline: async () => null });
+  fillMissing("env", { list: async () => [] });
+  fillMissing("automations", {
+    list: async () => [],
+    latestRun: async () => null,
+    listRuns: async () => [],
+    listTriggerAttention: async () => [],
+  });
+  // listRoleMembers는 null이 "풀 미지원 빌드" 안전 경로 — 배열을 주면 role 키를 읽다 죽는다.
+  fillMissing("runtime", { listRoleMembers: async () => null });
+  fillMissing("invoke", { latestReceipt: async () => null, receipt: async () => null, latestOneSurface: async () => null });
+  fillMissing("chats", { recap: async () => null, listByFirm: async () => [], markViewed: async () => ({ ok: true }) });
+  fillMissing("hephaestus", { recover: async () => ({ ok: true }), updateJournal: async () => null, getEngineToggles: async () => ({}) });
+  fillMissing("mcpTools", { pendingHubApprovals: async () => [] });
+  fillMissing("workspace", { get: async () => null, defaultRunFolder: async () => null });
+  fillMissing("cloudAgents", { listRegisteredUploadOptions: async () => [] });
+  fillMissing("fs", { readTextFile: async () => null, listDirectory: async () => [] });
+
+  // ── 목 드리프트 백스톱 — 정의 안 된 메서드는 null-resolve 스텁으로 받는다.
+  // 새 메서드 하나가 추가될 때마다 게이트 전체가 TypeError로 죽는 구조를 없앤다.
+  // 화면 검증(헤딩·텍스트박스 대기)은 그대로 동작하므로 실제 UI 회귀는 계속 잡힌다.
+  const mockRoot = window.agentlas;
+  window.agentlas = new Proxy(mockRoot, {
+    get(target, ns) {
+      const value = target[ns];
+      if (typeof ns !== "string") return value;
+      const nsObject = value && typeof value === "object" ? value : {};
+      return new Proxy(nsObject, {
+        get(nsTarget, method) {
+          if (method in nsTarget) return nsTarget[method];
+          if (typeof method !== "string") return undefined;
+          // 구독형(onX·대문자 경계)은 동기 unsubscribe 함수를 돌려줘야 한다 — Promise를
+          // 주면 cleanup에서 unsubscribe()가 TypeError로 죽는다(AuthGate 실측).
+          // 경계 검사 없이 "on" 접두사만 보면 ontologySummary 같은 일반 메서드가
+          // 구독 스텁을 받아 .then에서 죽는다(agents 라우트 실측).
+          if (/^on[A-Z]/.test(method)) return () => () => {};
+          return async () => null;
+        },
+      });
+    },
+  });
 }

@@ -247,6 +247,8 @@ export interface CuratorDecisionAppendInput {
   confidence?: CuratorDecisionConfidence;
   sensitivity?: CuratorDecisionSensitivity;
   curatorMode?: CuratorDecisionMode;
+  /** sha256-16 of the loaded curator ruleset ("embedded" on fallback) — cross-surface drift shows up as data. */
+  rulesetSha256?: string;
 }
 
 export interface CuratorDecisionRecord {
@@ -268,6 +270,7 @@ export interface CuratorDecisionRecord {
   confidence?: CuratorDecisionConfidence;
   sensitivity?: CuratorDecisionSensitivity;
   curator_mode?: CuratorDecisionMode;
+  ruleset_sha256?: string;
 }
 
 export interface AppendCuratorDecisionOptions {
@@ -370,6 +373,12 @@ function buildCuratorDecisionRecord(
   }
   if (input.curatorMode !== undefined) {
     record.curator_mode = requireEnum(input.curatorMode, CURATOR_MODES, "curatorMode");
+  }
+  if (input.rulesetSha256 !== undefined) {
+    if (!/^(?:[0-9a-f]{16}|embedded)$/.test(input.rulesetSha256)) {
+      fail("invalid-metadata", "rulesetSha256 must be a sha256-16 hex or 'embedded'.");
+    }
+    record.ruleset_sha256 = input.rulesetSha256;
   }
   return record;
 }

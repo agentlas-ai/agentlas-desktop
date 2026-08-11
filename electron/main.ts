@@ -1025,7 +1025,10 @@ app.whenReady().then(async () => {
     .catch((err) => console.error("[telegram] worker restore failed:", err));
   // 유휴 드리밍 큐레이션 — 옵트인(기본 OFF). 5분마다 조건만 확인(유휴/슬롯/쿨다운), 발화는 드묾.
   try {
-    const { startDreamingScheduler } = await import("./memory/dreaming");
+    const { startDreamingScheduler, ensureDreamingDefault } = await import("./memory/dreaming");
+    // Measured 2026-08-11: default-OFF opt-in meant decay never ran anywhere.
+    // Recover installs that never chose; an explicit user choice is untouched.
+    ensureDreamingDefault();
     startDreamingScheduler();
   } catch (err) {
     console.error("[dreaming] scheduler start failed:", err);
@@ -1050,7 +1053,7 @@ app.whenReady().then(async () => {
   // One 은 Desktop 밖(Claude Code·터미널 등)에서도 돌기 때문에 기억의 권위가 파일 계층에 있다.
   // 부팅 때 그 서랍의 durable 을 memory_entries 로 반입한다. 멱등이며 실패해도 부팅을 막지 않는다.
   try {
-    const { importOneDurableMemory } = await import("./memory/one-import");
+    const { importOneDurableMemory, startOneImportScheduler } = await import("./memory/one-import");
     const outcome = importOneDurableMemory();
     if (outcome.imported > 0 || outcome.failed > 0) {
       console.log(
@@ -1058,6 +1061,9 @@ app.whenReady().then(async () => {
         `skipped=${outcome.skipped} failed=${outcome.failed}`,
       );
     }
+    // Boot-only import measured a 73-block backlog while the app stayed open —
+    // re-import when the soul file actually changes (cheap mtime watch).
+    startOneImportScheduler();
   } catch (err) {
     console.error("[one-import] failed:", err);
   }

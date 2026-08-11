@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.9.82",
+  "version": "0.9.83",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -16,12 +16,12 @@
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
     "targetSchemaVersion": 93,
-    "bundledRuntimeVersion": "1.1.108"
+    "bundledRuntimeVersion": "1.1.109"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.1.108",
-    "commit": "088d7311261b803efa4bdb9b1a7397f4b5f20b9a"
+    "ref": "v1.1.109",
+    "commit": "610d2ce2dff4d5e15b8adba05b5115c992cbb376"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
@@ -29,7 +29,7 @@
     "dev:electron": "wait-on http://localhost:3100 && node scripts/build-macos-input-driver.cjs && tsc -p electron/tsconfig.json && cross-env NODE_ENV=development ELECTRON_START_URL=http://localhost:3100 electron .",
     "build": "npm run build:renderer && npm run build:electron",
     "build:renderer": "cd renderer && cross-env AGENTLAS_NEXT_DIST_DIR=.next-build next build && node -e \"require('fs').cpSync('.next-build','../dist/renderer',{recursive:true})\"",
-    "build:electron": "node scripts/build-macos-input-driver.cjs && tsc -p electron/tsconfig.json && node -e \"require('fs').copyFileSync('electron/memory/code-map-gen.mjs','dist/electron/memory/code-map-gen.mjs')\"",
+    "build:electron": "node scripts/build-macos-input-driver.cjs && tsc -p electron/tsconfig.json && node -e \"require('fs').copyFileSync('electron/memory/code-map-gen.mjs','dist/electron/memory/code-map-gen.mjs');require('fs').copyFileSync('electron/memory/curator-ruleset.json','dist/electron/memory/curator-ruleset.json')\"",
     "prebuild:renderer": "node -e \"const fs=require('fs');['dist/renderer','renderer/.next-build','renderer/out'].forEach(d=>fs.rmSync(d,{recursive:true,force:true,maxRetries:5,retryDelay:100}))\"",
     "postinstall": "electron-rebuild --force",
     "ensure:engine": "node scripts/ensure-engine.mjs",

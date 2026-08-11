@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.83 — 2026-08-11
+
+Binds the same Agentlas OS v1.1.109 at
+610d2ce2dff4d5e15b8adba05b5115c992cbb376.
+
+- Memory curation reads the shared curator ruleset (curator-ruleset.json via
+  curator-rules.ts) instead of hardcoded judgment, matching the OS executor;
+  a fixture conformance gate checks both surfaces against the same cases.
+- One import recognizes Korean and English evidence alike (isolated measure:
+  168 imported where 33 had been) and a five-minute scheduler keeps the
+  drawer caught up after boot.
+- Dreaming dedup defaults on at boot unless a person explicitly chose
+  otherwise; dedup records superseded_at instead of deleting.
+- These source gates do not themselves publish a release; the Releases page
+  stays the authority for what is actually downloadable.
+
 ## 0.9.82 — 2026-08-11
 
 Binds the same Agentlas OS v1.1.108 at

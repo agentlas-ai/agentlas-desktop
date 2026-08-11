@@ -77,20 +77,18 @@ export interface CurationContext {
   };
 }
 
-/** Deterministic 3-layer team routing target for a durable agent_repo learning. */
-export type TeamLearningLayer = "coordination" | "shared" | "domain";
+// Deterministic team routing + project-specifics guard now live in
+// ./curator-rules (pure module) so the shared-fixture conformance gate can run
+// them under plain node, and their values come from the canonical
+// curator-ruleset.json instead of inline constants.
+import {
+  classifyTeamLearningRoute,
+  loadCuratorRuleset,
+  mentionsProjectSpecifics as rulesMentionsProjectSpecifics,
+  type TeamLearningLayer,
+} from "./curator-rules";
 
-/**
- * Kind → team layer, deterministic (no LLM). Coordination/role/handoff-style
- * records (decision/conflict/deprecation) belong to the orchestrator; portable
- * facts are shared team_memory; everything else (procedure/risk/preference/…)
- * is the member's own domain skill/taste cell.
- */
-export function classifyTeamLearningRoute(kind: MemoryKind): TeamLearningLayer {
-  if (kind === "decision" || kind === "conflict" || kind === "deprecation") return "coordination";
-  if (kind === "fact") return "shared";
-  return "domain";
-}
+export { classifyTeamLearningRoute, type TeamLearningLayer };
 
 /**
  * Apply the team layer routing to a resolved durable learning. Only rewrites
@@ -214,15 +212,13 @@ const SOUL_KINDS: ReadonlySet<MemoryKind> = new Set<MemoryKind>([
   "procedure",
 ]);
 
-const USER_IDENTITY_KINDS: ReadonlySet<MemoryKind> = new Set<MemoryKind>([
-  "fact",
-  "decision",
-  "preference",
-  "procedure",
-]);
+// Values from the canonical ruleset (kinds.userIdentityAllowed); the literal
+// fallback mirrors it for a broken install.
+const USER_IDENTITY_KINDS: ReadonlySet<MemoryKind> = new Set<MemoryKind>(
+  ((loadCuratorRuleset().ruleset.kinds?.userIdentityAllowed as MemoryKind[] | undefined)
+    ?? ["fact", "decision", "preference", "procedure"]),
+);
 
-/** Filesystem paths that identify where this user works, regardless of project. */
-const ABSOLUTE_PATH_RE = /(?:^|\s)(?:\/(?:Users|home|var|opt|private)\/|~\/|[A-Za-z]:\\|file:\/\/)/;
 
 /**
  * Does this learning name the project it came from?
@@ -237,14 +233,8 @@ const ABSOLUTE_PATH_RE = /(?:^|\s)(?:\/(?:Users|home|var|opt|private)\/|~\/|[A-Z
  * false positive costs reach, while a false negative leaks. Prefer the cheap check.
  */
 function mentionsProjectSpecifics(content: string, ctx: CurationContext): boolean {
-  if (ABSOLUTE_PATH_RE.test(content)) return true;
-  const folder = ctx.projectPath?.split(/[\\/]/).filter(Boolean).pop();
-  // Short/generic folder names ("app", "web", "src") would match ordinary prose.
-  if (folder && folder.length >= 4) {
-    const escaped = folder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    if (new RegExp(`(?:^|[^A-Za-z0-9])${escaped}(?:$|[^A-Za-z0-9])`, "i").test(content)) return true;
-  }
-  return false;
+  // Implementation and its values live in ./curator-rules (shared ruleset).
+  return rulesMentionsProjectSpecifics(content, ctx.projectPath);
 }
 
 function resolveScope(ev: RawMemoryEvent, ctx: CurationContext): MemoryScope {
@@ -393,6 +383,7 @@ function recordCandidateDecision(input: {
         confidence: input.event.confidence,
         sensitivity: input.event.sensitivity,
         curatorMode: input.options.curatorMode ?? "policy",
+        rulesetSha256: loadCuratorRuleset().sha,
       });
     } catch (error) {
       console.warn(`[memory] project curator projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
@@ -428,6 +419,7 @@ function appendTurnOutcomeDecision(input: {
       reasonCode: `episode-${input.outcome.replaceAll("_", "-")}`,
       ticketId: input.ticketId,
       curatorMode: input.curatorMode,
+      rulesetSha256: loadCuratorRuleset().sha,
     });
   } catch (error) {
     console.warn(`[memory] project curator outcome projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
