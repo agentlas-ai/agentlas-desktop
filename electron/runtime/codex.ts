@@ -224,6 +224,25 @@ export function codexFailureFromEvent(
   return null;
 }
 
+/**
+ * `item.completed/error` is not a turn terminal. Codex also uses that item for
+ * recoverable diagnostics (for example, clamping a plugin hook timeout) and
+ * may subsequently emit a normal agent message followed by `turn.completed`.
+ * Only a turn-level failure can override such a completed answer. When no
+ * completed answer exists, retain the item error as the best failure evidence.
+ */
+export function resolveCodexRunFailure(input: {
+  code: number | null;
+  text: string;
+  turnCompleted: boolean;
+  terminalFailure: RunnerFailure | null;
+  itemFailure: RunnerFailure | null;
+}): RunnerFailure | null {
+  if (input.terminalFailure) return input.terminalFailure;
+  if (input.code === 0 && input.turnCompleted && input.text.trim()) return null;
+  return input.itemFailure;
+}
+
 function runCodexProcess(
   bin: string,
   args: string[],
@@ -232,7 +251,8 @@ function runCodexProcess(
   events: RunnerEvents,
 ): Promise<CodexRunResult> {
   return new Promise((resolve, reject) => {
-    let runnerFailure: RunnerFailure | null = null;
+    let terminalFailure: RunnerFailure | null = null;
+    let itemFailure: RunnerFailure | null = null;
     const child = spawnCli(bin, args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: req.env ?? process.env,
@@ -257,6 +277,7 @@ function runCodexProcess(
     let tokens: number | undefined;
     let stderr = "";
     let lastEmit = 0;
+    let turnCompleted = false;
     // reasoning 구간/라이브 토큰 추정 상태 — 상태줄 실시간 표시용.
     // 단일 open/close 플래그다(깊이 카운터가 아니다): 이 구간은 진짜 `reasoning`
     // 아이템으로도 열리고, reasoning 아이템을 전혀 내보내지 않는 codex 빌드에서는
@@ -330,13 +351,14 @@ function runCodexProcess(
         const message = (ev.item as { message?: unknown }).message;
         if (typeof message === "string" && message.trim()) {
           events.onStatus(`codex: ${truncateUi(message, 400)}`);
-          // ★상태줄 강등만으로는 부족하다 — onStatus는 대부분의 호출자에서 () => {}다.
-          //   턴 차원 실패로 기록해 결과 계약(failure)에 싣는다(분류는 순수 함수 한 곳).
-          runnerFailure = runnerFailure ?? codexFailureFromEvent(ev);
+          // Keep the marker as candidate evidence, but do not promote it to a
+          // turn failure yet. Codex emits recoverable hook/config diagnostics
+          // through this same item and can still complete a valid answer.
+          itemFailure = itemFailure ?? codexFailureFromEvent(ev);
         }
       } else if (ev.type === "turn.failed") {
         // ★핸들러가 아예 없던 이벤트 — 프로토콜이 턴 실패를 선언하는 자리다.
-        runnerFailure = codexFailureFromEvent(ev as { type?: string; error?: { message?: unknown } }) ?? runnerFailure;
+        terminalFailure = codexFailureFromEvent(ev as { type?: string; error?: { message?: unknown } }) ?? terminalFailure;
       } else if (ev.type === "item.started" && ev.item?.type === "reasoning") {
         // reasoning 구간 신호 — 상태줄 "생각 중…" 회전의 근거 (Claude 경로와 동일 계약).
         openThinking();
@@ -400,6 +422,7 @@ function runCodexProcess(
         );
       } else if (ev.type === "turn.completed") {
         closeThinking();
+        turnCompleted = true;
         if (ev.usage?.output_tokens != null) {
           tokens = ev.usage.output_tokens;
           events.onUsage?.(tokens);
@@ -446,6 +469,13 @@ function runCodexProcess(
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
+      let runnerFailure = resolveCodexRunFailure({
+        code,
+        text,
+        turnCompleted,
+        terminalFailure,
+        itemFailure,
+      });
       /*
        * ★표식 없이 완주(exit 0)했는데 산출물이 거절 고지문인 경우 — 실측: codex 한도는
        * 거절문이 agent_message로 오고 turn.completed(표식 0). 이 한 자리에서만 텍스트

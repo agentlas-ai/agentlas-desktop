@@ -874,6 +874,22 @@ export class InvocationService {
       settlementPublished: false,
       ...(runWorkspaceBinding ? { workspaceBinding: runWorkspaceBinding } : {}),
     };
+    let recoverablePartialPersisted = false;
+    const persistRecoverableAssistantPartial = (): void => {
+      if (
+        recoverablePartialPersisted
+        || runReq.agentAppMode
+        || runWorkspaceBinding
+        || !record.partialText.trim()
+      ) return;
+      try {
+        appendChatMessage(runReq.chatId, "assistant", record.partialText);
+        recoverablePartialPersisted = true;
+      } catch {
+        // The durable run ledger remains authoritative for the failure. A
+        // secondary transcript write failure must not block run settlement.
+      }
+    };
     const oneParticipantPresentation = new Map<string, { name: string; role: string }>();
 
     try {
@@ -1350,19 +1366,12 @@ export class InvocationService {
         this.publishEvent({ runId, chatId: runReq.chatId, event: wireEvent });
 
         if (event.kind === "final" || event.kind === "error") {
-          if (
-            !runReq.agentAppMode &&
-            !runWorkspaceBinding &&
-            event.kind === "error" &&
-            controller.signal.aborted &&
-            record.partialText.trim()
-          ) {
-            try {
-              appendChatMessage(runReq.chatId, "assistant", record.partialText);
-            } catch {
-              // The durable run ledger still records terminal state.
-            }
-          }
+          // A streamed answer is user-visible work even if the runtime later
+          // fails (hook error, transport loss, crash, or explicit cancel). The
+          // renderer already keeps that bubble; persist the same partial so a
+          // history refresh cannot make it disappear. Browser Agent Apps and
+          // bounded remote workspaces retain their stricter isolation rules.
+          if (event.kind === "error") persistRecoverableAssistantPartial();
           const terminalKind =
             event.kind === "final"
               ? "invoke_completed"
@@ -1488,15 +1497,7 @@ export class InvocationService {
             invocationOrigin,
           );
           taskMaterialized = Boolean(canonicalTask);
-          if (!runReq.agentAppMode && controller.signal.aborted && record.partialText.trim()) {
-            if (!runWorkspaceBinding) {
-              try {
-                appendChatMessage(runReq.chatId, "assistant", record.partialText);
-              } catch {
-                // Best effort. The final error remains visible over the event stream.
-              }
-            }
-          }
+          persistRecoverableAssistantPartial();
           const event: McpInvocationEvent = {
             kind: "error",
             runtimeAgentId: record.actualAgentId,

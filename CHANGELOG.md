@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.87 — 2026-08-12
+
+Binds the same Agentlas OS v1.1.109 at
+610d2ce2dff4d5e15b8adba05b5115c992cbb376.
+
+- A recoverable Codex diagnostic is no longer promoted into a failed turn after
+  the model has produced an answer and the protocol has completed. In the live
+  reproduction, the same SessionEnd hook-timeout warning that erased the prior
+  reply now finishes with a durable assistant row and a completed receipt.
+- If any runtime genuinely fails after streaming useful text, Desktop persists
+  that visible partial answer before settling the failure. Returning from
+  Dashboard or reloading the task therefore cannot leave only the user's input.
+- These source gates do not themselves publish a release; the Releases page
+  stays the authority for what is actually downloadable.
+
 ## 0.9.86 — 2026-08-12
 
 Binds the same Agentlas OS v1.1.109 at
