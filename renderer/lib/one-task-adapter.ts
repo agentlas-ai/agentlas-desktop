@@ -519,27 +519,10 @@ export function chooseOneBriefing(
       primaryLabel: ko ? "진행 보기" : "View progress",
     };
   }
-  const resultReady = projections
-    .filter((item) => item.canonicalStatus === "partial")
-    .sort((left, right) => right.status.asOf.localeCompare(left.status.asOf))[0];
-  if (resultReady) {
-    return {
-      kind: "result_ready",
-      eyebrow: ko ? "결과 도착" : "Result ready",
-      title: ko ? "확인할 결과가 하나 준비됐어요." : "One result is ready for you.",
-      body: localizedBriefingBody(
-        resultReady.display.title,
-        locale,
-        ["One이 준비한 결과를 열어 확인해보세요.", "Open the result to review what One prepared."],
-      ),
-      prepared: ko
-        ? "괜찮으면 바로 마무리하고, 바꿀 점은 그대로 말하면 됩니다."
-        : "Finish it as-is, or tell One what you want changed.",
-      evidence: [`${ko ? "준비된 시각" : "Ready"}: ${formatTimestamp(resultReady.status.asOf, locale)}`],
-      taskId: resultReady.taskId,
-      primaryLabel: ko ? "결과 확인하기" : "Review result",
-    };
-  }
+  // A partial result remains available in the recent-work rail and its own
+  // conversation. It must not take over One home with a separate "result
+  // arrived" landing page; that home surface is reserved for the future memory
+  // visualization once its visual reference is approved.
   return {
     kind: "quiet",
     eyebrow: ko ? "오늘" : "Today",

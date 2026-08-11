@@ -12,15 +12,29 @@ import {
   invalidateIpcCache,
   wrapIpcWithReadCache,
 } from "./ipc-cache";
+import { writeViewData } from "./view-data-cache";
 
-// 메인의 store:changed 방송을 읽기 캐시 무효화에 1회 연결한다(브릿지 없으면 no-op).
-let storeEventsConnected = false;
+// 메인의 store/active-chat 방송을 읽기 캐시에 연결한다. HMR·테스트에서 브릿지가
+// 교체되면 이전 구독을 해제하고 새 이벤트 객체에 다시 붙인다.
+let connectedEventSource: AgentlasEvents | null = null;
+let disconnectStoreEvents: (() => void) | null = null;
+let disconnectActiveChats: (() => void) | null = null;
 function ensureStoreEventsConnected(): void {
-  if (storeEventsConnected || typeof window === "undefined") return;
+  if (typeof window === "undefined") return;
   const events = window.agentlasEvents;
   if (!events) return;
-  storeEventsConnected = true;
-  connectIpcCacheToStoreEvents(events.onStoreChanged?.bind(events));
+  if (connectedEventSource === events) return;
+  disconnectStoreEvents?.();
+  disconnectActiveChats?.();
+  connectedEventSource = events;
+  disconnectStoreEvents = connectIpcCacheToStoreEvents(events.onStoreChanged?.bind(events));
+  try {
+    disconnectActiveChats = events.onActiveChats((chatIds) => {
+      writeViewData("dashboard.active-chats", chatIds);
+    });
+  } catch {
+    disconnectActiveChats = null;
+  }
 }
 
 interface AgentlasEvents {

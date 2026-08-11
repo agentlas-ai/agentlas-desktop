@@ -1773,6 +1773,7 @@ function UpdatePanel() {
   const { t } = useT();
   const [version, setVersion] = useState("");
   const [checking, setChecking] = useState(false);
+  const [installDeferred, setInstallDeferred] = useState(false);
   const [state, setState] = useState<UpdaterState>({ status: "idle" });
   /*
    * Desktop's own version is not the whole answer. Build, upload, routing and
@@ -1850,7 +1851,9 @@ function UpdatePanel() {
   async function install() {
     const api = ipc();
     if (!api) return;
-    await api.updater.install();
+    setInstallDeferred(false);
+    const result = await api.updater.install();
+    setInstallDeferred(result.blockedBy === "active-runs");
   }
 
   async function revealRecoveryBackup() {
@@ -1869,6 +1872,7 @@ function UpdatePanel() {
   }
 
   const statusText = (() => {
+    if (installDeferred) return t("settings.update.active_runs");
     if (state.code === "install-source-untrusted") return t("settings.update.repair_required");
     if (state.code === "install-not-applied") return t("settings.update.install_not_applied");
     if (state.code === "install-start-failed") return t("settings.update.install_start_failed");

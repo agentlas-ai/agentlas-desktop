@@ -1,4 +1,5 @@
 // window.agentlas 관문에 얹는 얇은 읽기 캐시 계층.
+import { invalidateViewData, invalidateViewDataForStoreChange } from "./view-data-cache";
 //
 // 배경(2026-08-10 실측): 렌더러에는 데이터 캐시가 사실상 없어 모든 화면이 마운트마다
 // 0에서 다시 페치했다. 대시보드 한 번 진입에 team.list() 4회 등 30+ IPC가 중복
@@ -41,6 +42,10 @@ const READ_TTL_MS: Record<string, number> = {
   "agents.borrowedProfiles": 15_000,
   "usage.snapshot": 10_000,
   "appFactory.listApps": 15_000,
+  // One 홈은 5초 폴링을 유지하되, 고차원 메모리 투영은 변경 전까지 재사용한다.
+  // 같은 namespace의 실제 mutation은 아래 기본 경로에서 둘 다 무효화한다.
+  "oneMemory.getState": 5_000,
+  "oneMemory.getMap": 30_000,
   // 휘발성 — TTL 없이 in-flight dedup만 (0은 "겹침 제거만" 표식).
   "confirm.listPending": 0,
   "invoke.activeChats": 0,
@@ -198,16 +203,18 @@ const STORE_ENTITY_TO_NAMESPACES: Record<string, string[]> = {
 
 export function connectIpcCacheToStoreEvents(
   subscribe: ((handler: (change: { entity: string; id?: string }) => void) => () => void) | undefined,
-): void {
-  if (!subscribe) return;
+): () => void {
+  if (!subscribe) return () => undefined;
   try {
-    subscribe((change) => {
+    return subscribe((change) => {
+      invalidateViewDataForStoreChange(change);
       const namespaces = STORE_ENTITY_TO_NAMESPACES[change.entity];
       if (!namespaces) return;
       for (const namespace of namespaces) invalidateIpcCache(namespace);
     });
   } catch {
     // 방송 미지원 환경(구 preload·목 브리지)에서는 TTL만으로 동작한다.
+    return () => undefined;
   }
 }
 
@@ -218,6 +225,8 @@ if (typeof window !== "undefined") {
     invalidateIpcCache("team");
     invalidateIpcCache("agents");
     invalidateIpcCache("firms");
+    invalidateViewData("dashboard.team");
+    invalidateViewData("dashboard.firms");
   });
   window.addEventListener("agentlas:hub-bookmarks-changed", () => {
     invalidateIpcCache("marketplace");
@@ -225,11 +234,15 @@ if (typeof window !== "undefined") {
   window.addEventListener("agentlas:projects-changed", () => {
     invalidateIpcCache("projects");
     invalidateIpcCache("tasks");
+    invalidateViewData("dashboard.projects");
+    invalidateViewData("dashboard.tasks");
   });
   window.addEventListener("agentlas:tasks-changed", () => {
     invalidateIpcCache("tasks");
+    invalidateViewData("dashboard.tasks");
   });
   window.addEventListener("agentlas:attention-refresh", () => {
     invalidateIpcCache("confirm");
+    invalidateViewData("dashboard.confirm");
   });
 }

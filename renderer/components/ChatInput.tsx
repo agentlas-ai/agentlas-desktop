@@ -7,7 +7,7 @@
 //
 // 모드 토글은 V0 UI만 (실제 동작은 V1): plan/goal/permission이 invocation payload로 전달.
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ImageAttachment,
   HubAgentBookmark,
@@ -207,7 +207,7 @@ interface AutoRouteGate {
   reason?: string;
 }
 
-export function ChatInput({
+function ChatInputComponent({
   onSend,
   onSessionAction,
   onRecommendPreview,
@@ -1555,7 +1555,7 @@ export function ChatInput({
             {/* 실행 중 steering 대기 표시 — 큐에 쌓인 메시지가 있으면 개수를 보여준다. */}
             {queuedCount > 0 && (
               <span
-                title={locale === "ko" ? "현재 실행을 멈추고 새 지시로 전환하고 있습니다" : "Stopping the current run and switching to the new direction"}
+                title={locale === "ko" ? "현재 모델을 중단하지 않고 다음 지시로 보냅니다" : "Send as the next instruction without stopping the current model"}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
@@ -1572,7 +1572,7 @@ export function ChatInput({
                 }}
               >
                 <span className="chat-input-steering-pulse" aria-hidden />
-                {locale === "ko" ? "새 방향 반영 중" : "Applying direction"}
+                {locale === "ko" ? "다음 지시 대기 중" : "Next instruction queued"}
               </span>
             )}
 
@@ -1817,6 +1817,12 @@ export function ChatInput({
     </footer>
   );
 }
+
+// Streaming output lives in TaskCockpit, but the composer owns substantial
+// local input/menu state. With stable props this boundary prevents every model
+// partial from re-rendering the textarea while the user is typing.
+export const ChatInput = memo(ChatInputComponent);
+ChatInput.displayName = "ChatInput";
 
 const contextMenuActionStyle = {
   display: "grid",

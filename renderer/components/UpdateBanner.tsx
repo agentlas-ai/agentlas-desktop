@@ -20,6 +20,7 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
   /** 사용자가 "나중에" 누른 버전. 그 버전에 대해서는 더 이상 안 띄움 */
   const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
   const [showReleaseNotes, setShowReleaseNotes] = useState(false);
+  const [installDeferred, setInstallDeferred] = useState(false);
   const lastFocusCheck = useRef(0);
 
   useEffect(() => {
@@ -78,7 +79,9 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
   async function install() {
     const api = ipc();
     if (!api) return;
-    await api.updater.install();
+    setInstallDeferred(false);
+    const result = await api.updater.install();
+    setInstallDeferred(result.blockedBy === "active-runs");
   }
 
   async function retrySafetyAction() {
@@ -147,6 +150,7 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
                 <strong>{t("update.ready_compact")}</strong>
                 <span className="sidenav-update-version">v{state.version ?? "?"}</span>
                 <span>{t("update.ready_description")}</span>
+                {installDeferred && <span role="status">{t("update.active_runs")}</span>}
               </span>
               <button
                 onClick={() => state.version && setDismissedVersion(state.version)}

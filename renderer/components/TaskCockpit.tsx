@@ -83,9 +83,18 @@ function receiptRecoveryMessage(
   if (!receipt || receipt.status === "completed" || receipt.status === "running" || receipt.status === "cancelling") {
     return null;
   }
-  // Work receipts are evidence for the project controller, never transcript
-  // copy. Recovery runs before any controller-authored question is presented.
-  return null;
+  const text = receipt.status === "cancelled"
+    ? (locale === "ko"
+      ? "이전 모델 실행이 최종 답변 전에 취소되었습니다. 마지막 지시와 대화 기록은 남아 있습니다."
+      : "The previous model turn was cancelled before a final response. Your last instruction and conversation are preserved.")
+    : (locale === "ko"
+      ? "이전 모델 실행이 최종 답변 전에 중단되었습니다. 마지막 지시와 대화 기록은 남아 있습니다."
+      : "The previous model turn stopped before a final response. Your last instruction and conversation are preserved.");
+  return {
+    id: `run-recovery:${receipt.runId}:${receipt.status}`,
+    role: "system",
+    text,
+  };
 }
 
 function receiptRecoveryStatus(receipt: InvocationRunReceipt | null, locale: "ko" | "en"): string {
@@ -877,9 +886,6 @@ function ChatPage() {
   const computerUseActiveRef = useRef(false);
   // runId가 도착하기 전(invoke:run 왕복 중)에 Stop을 누른 경우를 기억 — 도착 즉시 취소한다.
   const cancelRequestedRef = useRef(false);
-  // 스티어링으로 인한 취소인지 구분 — 이 취소는 "aborted" 에러 버블을 띄우지 않고,
-  // 저장된 세션을 이어받아(resume) 큐의 스티어 메시지로 계속한다(코덱스식 실행중 방향전환).
-  const steerCancelRef = useRef(false);
   const recapGenerationRef = useRef(0);
   // 실행 중 steering — busy일 때 엔터로 들어온 메시지를 큐에 쌓고, 현재 턴이 끝나면 순서대로 전송한다.
   const steerQueueRef = useRef<
@@ -1370,7 +1376,16 @@ function ChatPage() {
         // in an ordinary user's chat transcript. Keep the run visibly active
         // without exposing scope-lock/route plumbing as assistant content.
         if (isInternalLoopStatus(status)) {
-          markWorkflowActive(locale === "ko" ? "처리 중" : "Working");
+          const publicStatus = /session alive, waiting for output/i.test(status)
+            ? (locale === "ko" ? "모델이 계속 작업 중" : "The model is still working")
+            : (locale === "ko" ? "작업 경로를 준비하는 중" : "Preparing the work path");
+          markWorkflowActive(publicStatus);
+          // Heartbeats refresh one compact live line. They never append another
+          // step/card, which is what previously turned a single long run into
+          // dozens of duplicate-looking rows.
+          setMessages((current) => current.map((message) =>
+            message.id === placeholderId ? { ...message, status: publicStatus } : message
+          ));
           return;
         }
         pushWorkflow("status", status);
@@ -1455,9 +1470,6 @@ function ChatPage() {
           }),
         );
       } else if (ev.kind === "final") {
-        // 취소가 final로 종료되는 런타임도 있다. busy를 내리기 전에 반드시 비워야
-        // 다음 실행의 실제 error가 이전 steering 취소로 오인돼 삼켜지지 않는다.
-        steerCancelRef.current = false;
         pushWorkflow("status", locale === "ko" ? "완료" : "Done", { tokens: ev.tokens });
         setMessages((m) =>
           m.map((msg) => {
@@ -1531,16 +1543,12 @@ function ChatPage() {
           if (c) setChat(c);
         });
       } else if (ev.kind === "error") {
-        // 스티어링 취소면 에러 버블을 띄우지 않는다. Main이 보존한 큐에서 새 run을 시작하면
-        // activeChats 이벤트로 즉시 attach한다. 어느 경로든 이미 스트리밍된
-        // 텍스트는 지우지 않고 완료된 버블로 남긴다(치던 답이 사라지는 UX 방지) — main도
-        // abort 시 같은 partial을 히스토리에 영속화하므로 새로고침과도 일관된다.
-        const wasSteer = steerCancelRef.current;
-        const wasUserCancel = cancelRequestedRef.current && !wasSteer;
+        // 어느 경로든 이미 스트리밍된 텍스트는 지우지 않고 완료된 버블로 남긴다.
+        // Steering is not an error path: Main queues it without cancelling this run.
+        const wasUserCancel = cancelRequestedRef.current;
         const terminalStatus = wasUserCancel
           ? (locale === "ko" ? "취소됨" : "Cancelled")
           : (locale === "ko" ? "중단됨" : "Stopped");
-        steerCancelRef.current = false;
         const keepPlaceholder = (m: StreamMessage[]) =>
           m.flatMap((msg) => {
             if (msg.id !== placeholderId) return [msg];
@@ -1565,9 +1573,7 @@ function ChatPage() {
               {
                 ...v,
                 active: false,
-                status: wasSteer
-                  ? (locale === "ko" ? "방향 전환" : "Steering")
-                  : terminalStatus,
+                status: terminalStatus,
               },
             ]),
           ),
@@ -1659,7 +1665,6 @@ function ChatPage() {
     processedTextLenRef.current = 0;
     setComposerPrefill(null);
     cancelRequestedRef.current = false;
-    steerCancelRef.current = false;
     steerQueueRef.current = [];
     setQueuedSteers([]);
     setArtifact(null);
@@ -1776,8 +1781,12 @@ function ChatPage() {
       void api.marketplace.bookmarks().then((bookmarks) => {
         if (!cancelled && hubBookmarkGenerationRef.current === bookmarkGeneration) setHubBookmarks(bookmarks);
       }).catch(() => undefined);
-      void Promise.all([api.invoke.history(chatId), fetchCommittedReplies(api, chatId)])
-        .then(([history, committedReplies]) => {
+      void Promise.all([
+        api.invoke.history(chatId),
+        fetchCommittedReplies(api, chatId),
+        api.invoke.latestReceipt(chatId).catch(() => null),
+      ])
+        .then(([history, committedReplies, receipt]) => {
           if (cancelled) return;
           if (
             requestedFocusMessageId
@@ -1793,9 +1802,11 @@ function ChatPage() {
             history.map(historyEntryToStreamMessage),
             committedReplies,
           );
+          const recovery = receiptRecoveryMessage(receipt, locale);
+          const restoredMessages = recovery ? [...historyMessages, recovery] : historyMessages;
           setMessages((current) => {
             const hasLiveDraft = current.some((msg) => msg.busy || msg.streaming);
-            return hasLiveDraft ? current : historyMessages;
+            return hasLiveDraft ? current : restoredMessages;
           });
         }).catch(() => {
           if (!cancelled && requestedFocusMessageId) {
@@ -2053,9 +2064,8 @@ function ChatPage() {
               }],
             },
           ]);
-          const accepted = steerQueueRef.current.shift();
+          steerQueueRef.current.shift();
           setQueuedSteers(steerQueueRef.current.map((item) => item.text));
-          if (accepted) steerCancelRef.current = false;
           setBusy(true);
           setCancelPending(false);
           runIdRef.current = attached.runId;
@@ -2225,8 +2235,6 @@ function ChatPage() {
         busy ||
         (requestedTaskId && validatedTaskChatId !== chat.id)
       ) return false;
-      // 새 실행은 이전 실행의 steering 취소 상태를 절대 상속하지 않는다.
-      steerCancelRef.current = false;
       setCancelPending(false);
       const routeInput = userPrompt;
       const invocationPrompt = routeInput;
@@ -2398,7 +2406,6 @@ function ChatPage() {
         runIdRef.current = null;
         lastRunIdRef.current = null;
         cancelRequestedRef.current = false;
-        steerCancelRef.current = false;
         return false;
       }
     },
@@ -2429,16 +2436,15 @@ function ChatPage() {
     // 발사되지 않게 한다(정지했는데 큐가 알아서 날아가던 버그).
     steerQueueRef.current = [];
     setQueuedSteers([]);
-    steerCancelRef.current = false;
     // runId가 아직 안 왔으면(invoke:run 왕복 중) 취소 의사만 기록 → 도착 즉시 취소된다.
     const runId = runIdRef.current ?? lastRunIdRef.current;
     if (!runId) return;
     void api.invoke.cancel(runId);
   }, []);
 
-  // 실행 중 steering — Main의 공용 steer 계약에 바로 맡긴다. 사용자의 방향 전환은
-  // 응답을 기다리지 않고 대화에 즉시 보이며, Main이 현재 run을 안전하게 끝낸 뒤
-  // 같은 세션에서 다음 run을 시작한다.
+  // 실행 중 steering — 사용자의 새 지시는 즉시 대화에 보이지만 현재 모델 턴을
+  // 취소하지 않는다. Main이 현재 턴의 terminal settlement를 확인한 뒤 같은 세션의
+  // 다음 run으로 순서대로 시작한다.
   const submitOrQueue = useCallback(
     (text: string, opts?: (typeof steerQueueRef)["current"][number]["opts"]) => {
       if (busy) {
@@ -2453,7 +2459,6 @@ function ChatPage() {
           text,
           imageDataUrls: opts?.images?.map((image) => `data:${image.mediaType};base64,${image.data}`),
         }]);
-        steerCancelRef.current = true;
         void api.invoke.steer({
           chatId: chat.id,
           userPrompt: text,
@@ -2473,7 +2478,6 @@ function ChatPage() {
           setMessages((current) => current.map((message) => message.id === optimisticMessageId
             ? { id: message.id, role: "system", text: locale === "ko" ? "방향 전환을 전달하지 못했습니다. 다시 보내 주세요." : "The new direction was not delivered. Please send it again." }
             : message));
-          steerCancelRef.current = false;
         });
         return;
       }
@@ -2941,7 +2945,6 @@ function ChatPage() {
         // 발사되지 않게 renderer projection을 먼저 무효화한다.
         steerQueueRef.current = [];
         setQueuedSteers([]);
-        steerCancelRef.current = false;
         cancelRequestedRef.current = false;
         setCancelPending(false);
         recapGenerationRef.current += 1;
@@ -3020,13 +3023,35 @@ function ChatPage() {
     [refreshHubBookmarks],
   );
 
+  // Routing reads the latest transcript through a ref so ChatInput receives a
+  // stable callback while partial output keeps changing the parent message list.
+  const routingContextRef = useRef({ chat, messages, agent });
+  routingContextRef.current = { chat, messages, agent };
+  const buildRoutingQueryWithContext = useCallback((text: string): string => {
+    const current = routingContextRef.current;
+    const recent = current.messages
+      .filter((message) => (message.role === "user" || message.role === "agent") && (message.text ?? "").trim())
+      .slice(-6)
+      .map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${(message.text ?? "").replace(/\s+/g, " ").trim().slice(0, 240)}`);
+    if (recent.length === 0) return text;
+    const agentLine = current.agent?.name ? `Current agent in this chat: ${current.agent.name}\n` : "";
+    return [
+      `${agentLine}Recent conversation (for routing continuity):`,
+      recent.join("\n"),
+      "",
+      `New request to route: ${text}`,
+      "If this is a follow-up to the conversation above, prefer keeping the current agent/context over switching to an unrelated agent.",
+    ].join("\n");
+  }, []);
+
   // 세션 팀 자동 보강은 기존 routePreview 호스트 계약을 유지하되 sessionRosterFirst를
   // 명시한다. 현재 main은 이 요청에서 전역검색을 하지 않고 none을 반환하므로, 실제
   // gap 판단과 필요 시 Hub/Cloud 보강은 현재 세션 LLM이 맡는다.
-  async function handleRecommendPreview(text: string): Promise<Recommendation | null> {
+  const handleRecommendPreview = useCallback(async (text: string): Promise<Recommendation | null> => {
     const api = ipc();
-    if (!api || !chat) return null;
-    const folder = await api.workspace.get(chat.id).catch(() => null);
+    const currentChat = routingContextRef.current.chat;
+    if (!api || !currentChat) return null;
+    const folder = await api.workspace.get(currentChat.id).catch(() => null);
     try {
       return await api.hephaestus.routePreview({
         // 라우터가 후속 메시지를 맥락 없이 단독 해석하지 않도록 최근 대화를 함께 싣는다.
@@ -3040,32 +3065,14 @@ function ChatPage() {
     } catch {
       return null;
     }
-  }
-
-  // 현재 프롬프트에 이 채팅의 최근 대화 맥락(+현재 에이전트)을 덧붙여 라우팅 질의를 만든다.
-  // 히스토리가 없으면 원문 그대로 반환한다.
-  function buildRoutingQueryWithContext(text: string): string {
-    const recent = messages
-      .filter((m) => (m.role === "user" || m.role === "agent") && (m.text ?? "").trim())
-      .slice(-6)
-      .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${(m.text ?? "").replace(/\s+/g, " ").trim().slice(0, 240)}`);
-    if (recent.length === 0) return text;
-    const agentLine = agent?.name ? `Current agent in this chat: ${agent.name}\n` : "";
-    return [
-      `${agentLine}Recent conversation (for routing continuity):`,
-      recent.join("\n"),
-      "",
-      `New request to route: ${text}`,
-      "If this is a follow-up to the conversation above, prefer keeping the current agent/context over switching to an unrelated agent.",
-    ].join("\n");
-  }
+  }, [buildRoutingQueryWithContext]);
 
   // 추천 시트 선택은 해당 턴의 구조화된 실행 의도로만 전달한다.
-  function handleRecommendExecute(
+  const handleRecommendExecute = useCallback((
     choice: RecExecChoice,
     text: string,
     opts: { images?: ImageAttachment[]; permissions?: PermissionLevel; planMode?: boolean; goalMode?: boolean; appsGenerateMode?: boolean },
-  ) {
+  ) => {
     const sendOpts = {
       images: opts?.images,
       permissions: opts?.permissions,
@@ -3103,7 +3110,7 @@ function ChatPage() {
         void send(text, sendOpts);
         break;
     }
-  }
+  }, [send]);
 
   async function saveTitle() {
     const api = ipc();
@@ -3192,6 +3199,81 @@ function ChatPage() {
   }, [openPanelTab]);
   const handleOpenWorkflow = useCallback(() => setNetworkOpenPersisted(true), [setNetworkOpenPersisted]);
   const handleOpenMultimodalSetup = useCallback(() => router.push("/settings#multimodal"), [router]);
+  const chatInputContext = useMemo(() => ({
+    agents: displayAgents,
+    hubBookmarks,
+    projects: allProjects,
+    firms: allFirms,
+    apps: INSTALLED_APPS,
+    generatedApps: allGeneratedApps,
+    envKeys: allEnvKeys,
+  }), [allEnvKeys, allFirms, allGeneratedApps, allProjects, displayAgents, hubBookmarks]);
+  const composerTokenBaselineRef = useRef(currentTokens);
+  if (!busy) composerTokenBaselineRef.current = currentTokens;
+  const composerTokenCount = busy ? composerTokenBaselineRef.current : currentTokens;
+  const chatInputTokensUsage = useMemo(() => ({ current: composerTokenCount }), [composerTokenCount]);
+  const handleChatInputSend = useCallback((
+    text: string,
+    opts?: {
+      images?: ImageAttachment[];
+      permissions?: PermissionLevel;
+      planMode?: boolean;
+      goalMode?: boolean;
+      appsGenerateMode?: boolean;
+      taskForceTargets?: OrchestrationTarget[];
+      sessionRouting?: boolean;
+      stormbreakerMode?: boolean;
+    },
+  ) => {
+    submitOrQueue(text, {
+      images: opts?.images,
+      permissions: opts?.permissions,
+      planMode: opts?.planMode,
+      goalMode: opts?.goalMode,
+      appsGenerateMode: opts?.appsGenerateMode,
+      taskForceTargets: opts?.taskForceTargets,
+      sessionRouting: opts?.sessionRouting,
+      stormbreakerMode: opts?.stormbreakerMode,
+    });
+  }, [submitOrQueue]);
+  const handleToggleGoal = useCallback(() => {
+    if (!chat) return;
+    const next = !chat.goalId;
+    const previous = chat;
+    setChat({ ...chat, goalId: next ? "pending" : null, continuousMode: next ? true : chat.continuousMode });
+    void ipc()?.chats
+      .setGoalMode(chat.id, next)
+      .then((updated: Chat | null) => { if (updated) setChat(updated); })
+      .catch(() => setChat(previous));
+  }, [chat]);
+  const handleToggleContinuous = useCallback(() => {
+    if (!chat) return;
+    const next = !chat.continuousMode;
+    const previous = chat;
+    setChat({ ...chat, continuousMode: next, swarmMode: next ? false : chat.swarmMode });
+    const api = ipc();
+    if (next && chat.swarmMode) void api?.chats.setSwarmMode(chat.id, false);
+    void api?.chats
+      .setContinuousMode(chat.id, next)
+      .then((updated: Chat | null) => {
+        if (updated) setChat({ ...updated, swarmMode: next ? false : updated.swarmMode });
+      })
+      .catch(() => setChat(previous));
+  }, [chat]);
+  const handleToggleSwarm = useCallback(() => {
+    if (!chat) return;
+    const next = !chat.swarmMode;
+    const previous = chat;
+    setChat({ ...chat, swarmMode: next, continuousMode: next ? false : chat.continuousMode });
+    const api = ipc();
+    if (next && chat.continuousMode) void api?.chats.setContinuousMode(chat.id, false);
+    void api?.chats
+      .setSwarmMode(chat.id, next)
+      .then((updated: Chat | null) => {
+        if (updated) setChat({ ...updated, continuousMode: next ? false : updated.continuousMode });
+      })
+      .catch(() => setChat(previous));
+  }, [chat]);
 
   if (
     requestedTaskId &&
@@ -3213,7 +3295,6 @@ function ChatPage() {
   // @ is an optional one-turn override. It uses the same user-facing roster as
   // every other picker and never exposes a team's private system-role cells.
   // (pickerAgents/displayAgents/projectForDisplay는 훅 구역에서 참조 고정.)
-  const mentionAgents = displayAgents;
   const displayAgent =
     agent?.visibility === "background" && !boundTeamMember ? null : agent;
   const latestUserPrompt = lastMessageOfRole(messages, "user")?.text ?? "";
@@ -3585,19 +3666,7 @@ function ChatPage() {
       )}
       <div data-tour-id="workspace.input" style={{ flexShrink: 0, minWidth: 0 }}>
         <ChatInput
-          onSend={(text, opts) => {
-            // busy면 큐잉(steering), 아니면 즉시 전송 — 실행 중에도 엔터가 먹히게.
-            submitOrQueue(text, {
-              images: opts?.images,
-              permissions: opts?.permissions,
-              planMode: opts?.planMode,
-              goalMode: opts?.goalMode,
-              appsGenerateMode: opts?.appsGenerateMode,
-              taskForceTargets: opts?.taskForceTargets,
-              sessionRouting: opts?.sessionRouting,
-              stormbreakerMode: opts?.stormbreakerMode,
-            });
-          }}
+          onSend={handleChatInputSend}
           queuedCount={queuedSteers.length}
           prefillText={composerPrefill}
           activeChatId={chat.id}
@@ -3609,65 +3678,17 @@ function ChatPage() {
           activeAgentId={agent?.id ?? chat.agentId ?? null}
           busy={busy}
           disabled={!agent}
-          context={{
-            agents: mentionAgents,
-            hubBookmarks,
-            projects: allProjects,
-            firms: allFirms,
-            apps: INSTALLED_APPS,
-            generatedApps: allGeneratedApps,
-            envKeys: allEnvKeys,
-          }}
+          context={chatInputContext}
           placeholder={locale === "ko" ? "원하는 결과를 설명하세요" : "Describe the result you want"}
           projectOrchestration={Boolean(project)}
-          tokensUsage={{ current: currentTokens }}
+          tokensUsage={chatInputTokensUsage}
           showModeToggles={chat.kind !== "division"}
           continuousMode={chat.continuousMode === true}
           swarmMode={chat.swarmMode === true}
           goalActive={Boolean(chat.goalId)}
-          onToggleGoal={() => {
-            // 목표 추진 칩 — DB 영속(persistent goal). 켜면 main이 goal 원장 생성 +
-            // goal_id 바인딩 + continuousMode ON을 한 번에 처리하고, 끄면(칩 ×)
-            // 명시적 목표 종료다(원장 cancelled + 연속실행 자동화 비활성화).
-            const next = !chat.goalId;
-            const prev = chat;
-            setChat({ ...chat, goalId: next ? "pending" : null, continuousMode: next ? true : chat.continuousMode });
-            const api = ipc();
-            void api?.chats
-              .setGoalMode(chat.id, next)
-              .then((updated: Chat | null) => {
-                if (updated) setChat(updated);
-              })
-              .catch(() => setChat(prev));
-          }}
-          onToggleContinuous={() => {
-            const next = !chat.continuousMode;
-            // 스웜과 상호 배제 — 켜면 스웜은 끈다.
-            const prev = chat;
-            setChat({ ...chat, continuousMode: next, swarmMode: next ? false : chat.swarmMode });
-            const api = ipc();
-            if (next && chat.swarmMode) void api?.chats.setSwarmMode(chat.id, false);
-            void api?.chats
-              .setContinuousMode(chat.id, next)
-              .then((updated: Chat | null) => {
-                if (updated) setChat({ ...updated, swarmMode: next ? false : updated.swarmMode });
-              })
-              .catch(() => setChat(prev));
-          }}
-          onToggleSwarm={() => {
-            const next = !chat.swarmMode;
-            // 계속-라이브와 상호 배제 — 켜면 그건 끈다.
-            const prev = chat;
-            setChat({ ...chat, swarmMode: next, continuousMode: next ? false : chat.continuousMode });
-            const api = ipc();
-            if (next && chat.continuousMode) void api?.chats.setContinuousMode(chat.id, false);
-            void api?.chats
-              .setSwarmMode(chat.id, next)
-              .then((updated: Chat | null) => {
-                if (updated) setChat({ ...updated, continuousMode: next ? false : updated.continuousMode });
-              })
-              .catch(() => setChat(prev));
-          }}
+          onToggleGoal={handleToggleGoal}
+          onToggleContinuous={handleToggleContinuous}
+          onToggleSwarm={handleToggleSwarm}
         />
       </div>
       </div>

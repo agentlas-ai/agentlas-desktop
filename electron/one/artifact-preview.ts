@@ -25,6 +25,7 @@ export const ONE_ARTIFACT_MAX_BINDINGS_PER_SURFACE = 24;
 export const ONE_ARTIFACT_MAX_RANGE_BYTES = 8 * 1_024 * 1_024;
 
 const MAX_IMAGE_BYTES = 24 * 1_024 * 1_024;
+const MAX_MOBILE_IMAGE_PREVIEW_BYTES = 5 * 1_024 * 1_024;
 const MAX_VIDEO_BYTES = 192 * 1_024 * 1_024;
 const MAX_AUDIO_BYTES = 96 * 1_024 * 1_024;
 const MAX_DOCUMENT_BYTES = 64 * 1_024 * 1_024;
@@ -710,6 +711,33 @@ export function resolveOneArtifactOpenPath(input: unknown): string | null {
   if (!verified) return null;
   fs.closeSync(verified.fd);
   return verified.row.source_path;
+}
+
+/**
+ * Mobile receives only bytes from the exact Main-private artifact binding.
+ * The 5 MiB cap keeps canonical base64 below the Bridge frame/Flutter decoder
+ * limits; larger images retain their semantic artifact row without a preview.
+ */
+export function readOneArtifactImagePreview(
+  input: unknown,
+): { mimeType: string; base64: string } | null {
+  const verified = verifiedFile(input);
+  if (!verified) return null;
+  try {
+    if (verified.row.kind !== "image" || verified.row.size_bytes > MAX_MOBILE_IMAGE_PREVIEW_BYTES) {
+      return null;
+    }
+    const bytes = Buffer.allocUnsafe(verified.row.size_bytes);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const read = fs.readSync(verified.fd, bytes, offset, bytes.byteLength - offset, offset);
+      if (read <= 0) return null;
+      offset += read;
+    }
+    return { mimeType: verified.row.mime_type, base64: bytes.toString("base64") };
+  } finally {
+    fs.closeSync(verified.fd);
+  }
 }
 
 function parseRange(raw: string | null, size: number): { start: number; end: number; partial: boolean } | null {

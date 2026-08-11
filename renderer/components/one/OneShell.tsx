@@ -41,6 +41,7 @@ import type {
   MobileBridgeRuntimeStatus,
   OneBriefingSnapshot,
   OneMemoryState,
+  OneMemoryMapSnapshot,
   OneMemoryUseOnceReceipt,
   OneMemoryUseOnceTarget,
   OneExperienceReuseState,
@@ -115,6 +116,7 @@ import { OneActivation } from "./OneActivation";
 import { OneFeatureIntro } from "./OneFeatureIntro";
 import { OneOnboarding } from "./OneOnboarding";
 import { OneMemorySheet } from "./OneMemorySheet";
+import { OneMemoryMap } from "./OneMemoryMap";
 import { OneMemoryCandidateCard } from "./OneMemoryCandidateCard";
 import { OneProfileSheet } from "./OneProfileSheet";
 import { OneRecurrenceControl } from "./OneRecurrenceControl";
@@ -459,6 +461,7 @@ export function OneShell() {
   const [mobileStatus, setMobileStatus] = useState<MobileBridgeRuntimeStatus | null>(null);
   const [oneProfile, setOneProfile] = useState<OneProfile | null>(null);
   const [oneMemory, setOneMemory] = useState<OneMemoryState | null>(null);
+  const [oneMemoryMap, setOneMemoryMap] = useState<OneMemoryMapSnapshot | null>(null);
   const [armedOneMemoryUseOnce, setArmedOneMemoryUseOnce] = useState<ArmedOneMemoryUseOnce | null>(null);
   const [oneSuggestions, setOneSuggestions] = useState<OneSuggestionState | null>(null);
   const [oneValueClosures, setOneValueClosures] = useState<OneValueClosureState | null>(null);
@@ -480,6 +483,7 @@ export function OneShell() {
   const [receipt, setReceipt] = useState<InvocationRunReceipt | null>(null);
   const [busy, setBusy] = useState(false);
   const [runStatus, setRunStatus] = useState("");
+  const [queuedSteers, setQueuedSteers] = useState<Array<{ id: string; text: string }>>([]);
   const [autoRecovery, setAutoRecovery] = useState<
     | { phase: "recovering"; attempt: number; diagnosis: string }
     | { phase: "stopped"; reason: string; diagnosis: string }
@@ -764,6 +768,7 @@ export function OneShell() {
       setConfirmations([]);
       setOneProfile(null);
       setOneMemory(null);
+      setOneMemoryMap(null);
       setOneSuggestions(null);
       setOneValueClosures(null);
       setOneWeeklyReflection(null);
@@ -776,7 +781,7 @@ export function OneShell() {
       return;
     }
     try {
-      const [active, pending, update, mobile, recentChats, profile, memory, suggestions, valueClosures, weeklyReflection, experienceReuse, improvementProofs, proactiveBriefing, intro, activation, homeSignals] = await Promise.all([
+      const [active, pending, update, mobile, recentChats, profile, memory, memoryMap, suggestions, valueClosures, weeklyReflection, experienceReuse, improvementProofs, proactiveBriefing, intro, activation, homeSignals] = await Promise.all([
         api.invoke.activeChats().catch(() => []),
         api.confirm.listPending().catch(() => []),
         api.updater.getState().catch(() => null),
@@ -784,6 +789,7 @@ export function OneShell() {
         api.chats.listRecent(40).catch(() => []),
         api.oneProfile.get(),
         api.oneMemory.getState().catch(() => null),
+        typeof api.oneMemory.getMap === "function" ? api.oneMemory.getMap().catch(() => null) : Promise.resolve(null),
         api.oneSuggestions.getState().catch(() => null),
         api.oneValueClosure.getState().catch(() => null),
         api.oneWeeklyReflection.get().catch(() => null),
@@ -825,6 +831,9 @@ export function OneShell() {
       setMobileStatus(mobile);
       setOneProfile(profile);
       setOneMemory(memory);
+      if (memoryMap) {
+        setOneMemoryMap((current) => current?.sourceRevision === memoryMap.sourceRevision ? current : memoryMap);
+      }
       setOneSuggestions(suggestions);
       setOneValueClosures(valueClosures);
       setOneWeeklyReflection(weeklyReflection);
@@ -1095,6 +1104,32 @@ export function OneShell() {
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
   const activeThreadPromptFallback = selected?.display.title ?? conversation?.title ?? "";
+  useEffect(() => {
+    setQueuedSteers([]);
+  }, [activeThreadChatId]);
+  // Main starts a queued steer only after the active model turn settles. Attach
+  // to that replacement run immediately so the user never has to leave and
+  // reopen One to see continued progress.
+  useEffect(() => {
+    const api = ipc();
+    const events = ipcEvents();
+    const chatId = activeThreadChatId;
+    if (!api || !events || !chatId) return;
+    return events.onActiveChats((chatIds) => {
+      if (!chatIds.includes(chatId) || runIdRef.current) return;
+      void api.invoke.attach(chatId).then((attachment) => {
+        if (!attachment || runIdRef.current || runChatIdRef.current !== chatId) return;
+        runIdRef.current = attachment.runId;
+        runTaskIdRef.current = selected?.taskId ?? null;
+        setBusy(true);
+        setRunStatus(tFor(appLocale, "one.shell.run.reconnected"));
+        setRunProgress(initialOneRunProgress());
+        setQueuedSteers((current) => current.slice(1));
+        subscribeRun(attachment.runId);
+        for (const event of attachment.events) consumeRunEventRef.current(event);
+      }).catch(() => undefined);
+    });
+  }, [activeThreadChatId, appLocale, selected?.taskId, subscribeRun]);
   useEffect(() => {
     let cancelled = false;
     const api = ipc();
@@ -1503,12 +1538,39 @@ export function OneShell() {
       agentId,
     }));
     const explicitValue = text.trim();
-    if ((!explicitValue && attachmentSnapshot.length === 0) || busy || teamPreflightBusy) return;
+    if ((!explicitValue && attachmentSnapshot.length === 0) || teamPreflightBusy) return;
     const value = explicitValue || tFor(appLocale, "one.shell.composer.attachment_prompt", { n: attachmentSnapshot.length, s: attachmentSnapshot.length === 1 ? "" : "s" });
     const api = ipc();
     if (!api) {
       setError(null);
       requestOneOperationalRecovery("one-submit-connection", "Desktop bridge unavailable");
+      return;
+    }
+    if (busy) {
+      const chatId = runChatIdRef.current;
+      const activeRunId = runIdRef.current;
+      if (!chatId || !activeRunId || attachmentSnapshot.length > 0) return;
+      const optimisticId = `one-steer:${uid()}`;
+      setComposer("");
+      setMessages((current) => [...current, { id: optimisticId, role: "user", text: value }]);
+      setQueuedSteers((current) => [...current, { id: optimisticId, text: value }]);
+      scrollToLatest();
+      try {
+        await api.invoke.steer({
+          chatId,
+          userPrompt: value,
+          taskIntent: selected ? "task" : "conversation",
+          oneMode: true,
+          locale: detectOneTextLocale(value) ?? normalizedLocale,
+          permissions: selected ? "full" : "read",
+          sessionRouting: false,
+        });
+      } catch (cause) {
+        setQueuedSteers((current) => current.filter((item) => item.id !== optimisticId));
+        setMessages((current) => current.filter((item) => item.id !== optimisticId));
+        setComposer(value);
+        requestOneOperationalRecovery("one-steer", cause);
+      }
       return;
     }
     const canContinueInPlace = Boolean(
@@ -1650,7 +1712,7 @@ export function OneShell() {
       requestOneOperationalRecovery("one-submit", cause);
       setError(null);
     }
-  }, [autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, recurrenceSelection, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides]);
+  }, [autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, recurrenceSelection, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides]);
 
   const stopRun = useCallback(() => {
     const api = ipc();
@@ -2134,6 +2196,13 @@ export function OneShell() {
     && oneActivationState.eligibility === "eligible_first_use"
     && (oneActivationState.status === "active"
       || (oneActivationState.status === "completed" && oneActivationState.mobileConnection.status === "offered")),
+  );
+  const showMemoryMap = Boolean(
+    briefing.kind === "quiet"
+    && !briefing.proactive
+    && !activationForeground
+    && oneMemoryMap
+    && oneMemoryMap.nodes.length > 0,
   );
   const activationBlocksIntro = activationForeground || Boolean(
     oneActivationState?.eligibility === "eligible_first_use"
@@ -2774,20 +2843,24 @@ export function OneShell() {
               onResolveMobile={resolveActivationMobile}
             />
             {!selected && !conversation ? (
-              <div className={styles.homeContent}>
-                {projections.length === 0 && !briefing.proactive ? (
-                  activationForeground ? null : <section className={styles.newUser} aria-labelledby="one-first-run-title">
-                    <OneBrandLockup className={styles.newUserMark} />
-                    <h1 id="one-first-run-title"><OneFirstRunTitle locale={appLocale} /></h1>
-                    {useCaseChipsVisible && (
-                      <OneUseCaseChips
-                        locale={appLocale}
-                        hasUnfinishedBuild={hasUnfinishedBuild}
-                        signals={oneHomeSignals}
-                        onActivate={activateUseCaseChip}
-                      />
-                    )}
-                  </section>
+              <div className={`${styles.homeContent} ${showMemoryMap ? styles.memoryHomeContent : ""}`}>
+                {briefing.kind === "quiet" && !briefing.proactive ? (
+                  activationForeground
+                    ? null
+                    : showMemoryMap && oneMemoryMap
+                      ? <OneMemoryMap snapshot={oneMemoryMap} locale={appLocale} />
+                      : <section className={styles.newUser} aria-labelledby="one-first-run-title">
+                          <OneBrandLockup className={styles.newUserMark} />
+                          <h1 id="one-first-run-title"><OneFirstRunTitle locale={appLocale} /></h1>
+                          {useCaseChipsVisible && (
+                            <OneUseCaseChips
+                              locale={appLocale}
+                              hasUnfinishedBuild={hasUnfinishedBuild}
+                              signals={oneHomeSignals}
+                              onActivate={activateUseCaseChip}
+                            />
+                          )}
+                        </section>
                 ) : (
                   <section className={styles.briefing} aria-labelledby="one-briefing-title">
                     <div className={styles.briefingOne}><OneBrandMark size="small" /><span>{oneDisplayName}</span></div>
@@ -3133,7 +3206,18 @@ export function OneShell() {
                 </div>
               </section>
             )}
-            <form className={styles.composer} onSubmit={(event) => { event.preventDefault(); if (busy) stopRun(); else void submit(composer); }}>
+            {queuedSteers.length > 0 && (
+              <div className={styles.steeringQueue} role="status" aria-live="polite" data-one-steering-queue="true">
+                <span>{appLocale === "ko" ? "다음 지시" : "Next instruction"}</span>
+                <strong>{queuedSteers[queuedSteers.length - 1]?.text}</strong>
+                <small>{appLocale === "ko" ? "현재 모델을 중단하지 않고 이어서 반영합니다" : "Will be applied without stopping the current model"}</small>
+              </div>
+            )}
+            <form className={styles.composer} onSubmit={(event) => {
+              event.preventDefault();
+              if (busy && !composer.trim()) stopRun();
+              else void submit(composer);
+            }}>
               <input
                 ref={attachmentInputRef}
                 className={styles.attachmentInput}
@@ -3159,7 +3243,7 @@ export function OneShell() {
                 onBlur={() => { composerComposingRef.current = false; }}
                 onKeyDown={(event) => handleComposerKey(
                   event,
-                  busy ? stopRun : () => void submit(composer),
+                  busy && !composer.trim() ? stopRun : () => void submit(composer),
                   composerComposingRef.current,
                 )}
                 placeholder={oneActivationState?.status === "active" && oneActivationState.concern.status === "pending"
@@ -3218,8 +3302,20 @@ export function OneShell() {
                     composerRef={composerInputRef}
                     disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
                   />
-                  <button type="submit" className={styles.sendButton} disabled={!busy && ((!composer.trim() && attachmentDrafts.length === 0) || selectedReadOnly || teamDecisionPending || teamPreflightBusy)} aria-label={busy ? tFor(appLocale, "one.shell.composer.stop_run_aria") : tFor(appLocale, "one.shell.composer.send_aria")}>
-                    {busy ? <span className={styles.stopGlyph} aria-hidden="true" /> : <IconArrowUp size={20} strokeWidth={2} aria-hidden="true" />}
+                  <button
+                    type="submit"
+                    className={styles.sendButton}
+                    disabled={!busy && ((!composer.trim() && attachmentDrafts.length === 0) || selectedReadOnly || teamDecisionPending || teamPreflightBusy)}
+                    aria-label={busy
+                      ? composer.trim()
+                        ? (appLocale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
+                        : tFor(appLocale, "one.shell.composer.stop_run_aria")
+                      : tFor(appLocale, "one.shell.composer.send_aria")}
+                    title={busy && composer.trim()
+                      ? (appLocale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
+                      : undefined}
+                  >
+                    {busy && !composer.trim() ? <span className={styles.stopGlyph} aria-hidden="true" /> : <IconArrowUp size={20} strokeWidth={2} aria-hidden="true" />}
                   </button>
                 </div>
               </div>

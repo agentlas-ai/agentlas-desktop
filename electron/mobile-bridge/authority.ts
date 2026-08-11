@@ -30,6 +30,7 @@ import { ensureOneExperienceReuseReceipt } from "../one/experience-reuse";
 import { sealOneMemoryCandidateProvenance } from "../one/memory-candidates";
 import { tryProduceAcceptedResultSuggestion } from "../one/completion-suggestion-producer";
 import { tryProduceOneImprovementProofForTask } from "../one/improvement-proof-producer";
+import { readOneArtifactImagePreview } from "../one/artifact-preview";
 import { performOneMobileSuggestionAction } from "../one/mobile-suggestions";
 import { invocationService } from "../invocation/service";
 import {
@@ -1497,6 +1498,22 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           },
           request.method,
         );
+      }
+      case "one.artifact.imagePreview": {
+        const params = guardedParams(request, [
+          "taskId", "taskVersion", "chatId", "runId", "manifestId", "artifactRef",
+        ]);
+        const taskVersion = optionalInteger(params, "taskVersion", 1, Number.MAX_SAFE_INTEGER);
+        if (taskVersion === undefined) throw new TypeError("taskVersion is required");
+        const preview = readOneArtifactImagePreview({
+          taskId: requiredIdentifier(params, "taskId"),
+          taskVersion,
+          chatId: requiredIdentifier(params, "chatId"),
+          runId: requiredIdentifier(params, "runId", RUN_ID_RE),
+          manifestId: requiredIdentifier(params, "manifestId"),
+          artifactRef: requiredIdentifier(params, "artifactRef"),
+        });
+        return preview ? asJsonValue(preview, request.method) : null;
       }
       case "one.suggestions.act": {
         const params = guardedParams(request, [

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.9.84 — 2026-08-11
+
+Binds the same Agentlas OS v1.1.109 at
+610d2ce2dff4d5e15b8adba05b5115c992cbb376.
+
+- Dashboard project, task, team, confirmation, active-run, and readiness views
+  keep bounded renderer snapshots across navigation. Store-change receipts
+  invalidate only affected data, so returning to Dashboard paints immediately
+  without leaving changed records stale.
+- Work shows live partial output and the concrete file or command target while
+  a model is operating. Sending another instruction keeps the active model turn
+  alive, displays the instruction immediately, and starts it after settlement.
+- One's quiet home is now a flat white durable-memory topology. It groups the
+  real renderer-safe memory projection, scales continuously as memories grow,
+  and exposes bounded metadata on hover without displaying memory content.
+- Mobile Bridge now mirrors the project chat roster, exact owned Cloud-agent
+  availability, automation topology, One memory-map metadata, and verified
+  image previews through the same authenticated Desktop authority. Mobile does
+  not receive local file paths or infer a team, release, or memory payload.
+- These source gates do not themselves publish a release; the Releases page
+  stays the authority for what is actually downloadable.
+
 ## 0.9.83 — 2026-08-11
 
 Binds the same Agentlas OS v1.1.109 at

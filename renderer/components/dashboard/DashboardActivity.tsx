@@ -5,10 +5,18 @@ import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
+import { loadViewData, readViewData } from "@/lib/view-data-cache";
 import type { CanonicalTask } from "@/lib/types";
 
 const POLL_MS = 8000;
 const PAGE_SIZE = 5;
+const DATA_MAX_AGE_MS = 15_000;
+
+function cachedRecentTasks(): CanonicalTask[] {
+  return (readViewData<CanonicalTask[]>("dashboard.tasks.200")?.value ?? [])
+    .slice(0, 25)
+    .filter((task) => Boolean(task.projectId && task.originChatId));
+}
 
 function relTime(iso: string, ko: boolean): string {
   const t = Date.parse(iso);
@@ -25,17 +33,20 @@ function relTime(iso: string, ko: boolean): string {
 export function DashboardActivity() {
   const { locale } = useT();
   const ko = locale === "ko";
-  const [recent, setRecent] = useState<CanonicalTask[]>([]);
-  const [active, setActive] = useState<Set<string>>(new Set());
+  const initialRecent = cachedRecentTasks();
+  const [recent, setRecent] = useState<CanonicalTask[]>(initialRecent);
+  const [active, setActive] = useState<Set<string>>(() => new Set(readViewData<string[]>("dashboard.active-chats")?.value ?? []));
   const [page, setPage] = useState(0);
-  const [loaded, setLoaded] = useState(false);
+  const [loaded, setLoaded] = useState(initialRecent.length > 0);
   const [error, setError] = useState("");
 
-  const loadActive = useCallback(async () => {
+  const loadActive = useCallback(async (force = false) => {
     const api = ipc();
     if (!api) return;
     try {
-      const ids = await api.invoke.activeChats();
+      // 실행 상태는 화면 복귀 시에도 즉시 현재값을 읽는다. IPC 계층이 같은 틱의
+      // FleetSummaryStrip 호출을 합치므로 추가 왕복 없이 stale 실행 표시를 막는다.
+      const ids = await loadViewData("dashboard.active-chats", () => api.invoke.activeChats(), { maxAgeMs: 0, force });
       setActive(new Set(ids));
     } catch {
       // ignore
@@ -44,15 +55,19 @@ export function DashboardActivity() {
 
   // 최근 대화는 마운트 1회가 아니라 폴링마다 다시 읽는다 — 새 채팅/이름변경/완료가
   // 대시보드를 다시 열지 않아도 반영되도록(첫 메시지 후에야 목록에 뜨는 fix와 짝).
-  const loadRecent = useCallback(async () => {
+  const loadRecent = useCallback(async (force = false) => {
     const api = ipc();
     if (!api) {
       setLoaded(true);
       return;
     }
     try {
-      const rows = await api.tasks.list({ limit: 25, reconcile: false });
-      setRecent(rows.filter((task) => Boolean(task.projectId && task.originChatId)));
+      const rows = await loadViewData(
+        "dashboard.tasks.200",
+        () => api.tasks.list({ limit: 200, reconcile: false }),
+        { maxAgeMs: DATA_MAX_AGE_MS, force },
+      );
+      setRecent(rows.slice(0, 25).filter((task) => Boolean(task.projectId && task.originChatId)));
       setError("");
     } catch {
       // 폴링 중 일시 오류는 기존 목록을 비우지 않는다(깜빡임 방지).
@@ -68,8 +83,8 @@ export function DashboardActivity() {
     void loadActive();
   }, [loadActive, loadRecent]);
   useVisibleInterval(() => {
-    void loadActive();
-    void loadRecent();
+    void loadActive(true);
+    void loadRecent(true);
   }, POLL_MS);
 
   const runningCount = recent.filter((task) => task.originChatId && active.has(task.originChatId)).length;

@@ -1563,15 +1563,11 @@ export class InvocationService {
     return { runId };
   }
 
-  cancel(
-    runId: string,
-    options: { preserveSteerQueue?: boolean } = {},
-  ): "requested" | "already-requested" | "not-found" {
+  cancel(runId: string): "requested" | "already-requested" | "not-found" {
     const record = this.activeRuns.get(runId);
-    // A user-visible Stop means stop the task, including a direction that was
-    // queued by an earlier steer. The internal cancellation used to advance a
-    // steer must preserve that queue; every external cancel uses the default.
-    if (!options.preserveSteerQueue && record?.chatId) {
+    // Stop is terminal for the visible work item: it also clears directions
+    // queued behind the active turn. Steering itself never calls cancel.
+    if (record?.chatId) {
       this.steerQueues.delete(record.chatId);
     }
     const result = this.activeRuns.requestCancel(runId);
@@ -1606,6 +1602,7 @@ export class InvocationService {
       return {
         accepted: true,
         queued: false,
+        interruptsCurrent: false,
         runId: this.start({ ...steerRequest, runId: undefined }, workspaceBinding).runId,
       };
     }
@@ -1633,10 +1630,14 @@ export class InvocationService {
       chatId: req.chatId,
       agentId: active[1].actualAgentId,
     });
-    this.cancel(active[0], { preserveSteerQueue: true });
+    // Codex-style steering is additive. Keep the current child process alive,
+    // surface the user's new turn immediately, and drain this queue only from
+    // the active run's settlement path. The CLI runners are one-shot processes,
+    // so writing to stdin here would either close or corrupt their protocol.
     return {
       accepted: true,
       queued: true,
+      interruptsCurrent: false,
       activeRunId: active[0],
       position: queue.length,
     };

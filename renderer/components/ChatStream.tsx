@@ -1301,6 +1301,8 @@ function ToolGroupBlock({
     const running = steps.filter((s) => s.result == null);
     const cur = running[running.length - 1] ?? steps[steps.length - 1];
     const view = toolView(cur.tool!, cur.args, locale, cur.result, workspaceRootForRun);
+    const liveFilePath = toolStepFilePath(cur);
+    const liveLabel = liveFilePath ? baseName(liveFilePath) : view.label;
     return (
       <div
         role="status"
@@ -1314,6 +1316,21 @@ function ToolGroupBlock({
         }}
       >
         <span>{progressiveToolVerb(view.group, locale)}</span>
+        {liveLabel && (
+          <span
+            title={view.label}
+            style={{
+              minWidth: 0,
+              maxWidth: "min(62ch, 64vw)",
+              overflow: "hidden",
+              color: "var(--ink-soft)",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {liveLabel}
+          </span>
+        )}
         <span aria-hidden style={{ color: "var(--muted)", fontSize: 14, lineHeight: 1 }}>›</span>
       </div>
     );

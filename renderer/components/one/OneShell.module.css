@@ -456,6 +456,7 @@
   overscroll-behavior: contain;
   scroll-padding: 56px 0 180px;
   scrollbar-gutter: stable;
+  background: #fff;
 }
 
 .homeContent,
@@ -464,6 +465,13 @@
   min-height: 100%;
   margin: 0 auto;
   padding: 62px 0 224px;
+  background: #fff;
+}
+
+.memoryHomeContent {
+  width: min(1180px, calc(100% - 40px));
+  padding-top: 54px;
+  background: #fff;
 }
 
 .newUser {
@@ -1249,6 +1257,35 @@
   padding: 18px 24px 12px;
   pointer-events: none;
   background: linear-gradient(to bottom, rgba(255,255,255,0), #fff 34%, #fff);
+}
+
+.steeringQueue {
+  width: min(720px, 100%);
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin: 0 auto 6px;
+  padding: 7px 10px;
+  border: 1px solid #e0e2e3;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .97);
+  box-shadow: 0 8px 24px rgba(25, 31, 36, .06);
+  color: #71777b;
+  pointer-events: auto;
+}
+
+.steeringQueue span,
+.steeringQueue small { font-size: 9px; font-weight: 650; white-space: nowrap; }
+.steeringQueue strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #303438;
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .attachmentDropOverlay {

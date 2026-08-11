@@ -10,6 +10,7 @@ import { getLastChatMessage, listRecentChats } from "../store/chats";
 import { getDb } from "../store/db";
 import { recordRunEvent, tryRecordRunEvent } from "../store/run-events";
 import { ensureCanonicalTaskForChat } from "../store/tasks";
+import { onDesktopStoreChange } from "../store/change-bus";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
 import { getAgentById } from "../mcp/registry";
 import { getFirm } from "../store/firms";
@@ -254,6 +255,14 @@ let pendingConfirmationsCache: { at: number; items: PendingConfirmation[] } | nu
 function invalidatePendingConfirmationsCache(): void {
   pendingConfirmationsCache = null;
 }
+
+// A time-only cache can return a false empty state when a question is appended
+// within the same second as a snapshot read. Chat writes already publish this
+// content-free invalidation signal, so keep the cache fast without delaying a
+// newly created Desktop decision on Mobile.
+onDesktopStoreChange((change) => {
+  if (change.entity === "chat") invalidatePendingConfirmationsCache();
+});
 
 /** 지금 사용자 확인을 기다리는 채팅들. 최신순. */
 export function listPendingConfirmations(): PendingConfirmation[] {

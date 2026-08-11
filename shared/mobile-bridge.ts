@@ -47,6 +47,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "chats.clearContext",
   "tasks.createProject",
   "tasks.latestResult",
+  "one.artifact.imagePreview",
   "tasks.acceptResult",
   "one.suggestions.act",
   "workspace.setProject",
@@ -428,6 +429,8 @@ export interface MobileBridgeAgentDto {
   runtimeLabel: string | null;
   assetSource: string | null;
   source: "local" | "agent-cloud" | "hub";
+  /** Installed on this Desktop, or merely available from the owner's Cloud shelf. */
+  availability: "installed" | "cloud";
   toolLabels: string[];
   kind: "agent" | "team";
   visibility: "visible" | "background" | "private";
@@ -1222,6 +1225,11 @@ export interface MobileBridgeAutomationDto {
   runState: "unknown" | "idle" | "queued" | "running" | "completed" | "failed";
   /** Stable marker only; raw scheduler errors may contain local paths. */
   lastError: "automation_failed" | "automation_partial" | "automation_blocked" | "automation_needs_input" | null;
+  /** Secret-free topology only. Node configs, prompts, paths and credentials stay on Desktop. */
+  graph: {
+    nodes: Array<{ id: string; type: string; label: string; x: number; y: number }>;
+    edges: Array<{ id: string; source: string; target: string; label: string | null }>;
+  } | null;
 }
 
 export interface MobileBridgeUsageWindowDto {
@@ -1438,6 +1446,26 @@ export interface MobileBridgeOneBriefingDto {
   candidate: MobileBridgeOneBriefingCandidateDto | null;
 }
 
+export interface MobileBridgeOneMemoryMapDto {
+  contractVersion: "1.0.0";
+  generatedAt: string;
+  sourceRevision: string;
+  clusterCount: number;
+  totalNodeCount: number;
+  totalEdgeCount: number;
+  truncated: boolean;
+  nodes: Array<{
+    id: string;
+    kind: string;
+    scope: string;
+    projectSlug: string | null;
+    x: number;
+    y: number;
+    density: number;
+  }>;
+  edges: Array<{ from: string; to: string; relation: string }>;
+}
+
 export interface MobileBridgeSnapshot {
   schemaVersion: typeof MOBILE_BRIDGE_PROTOCOL_VERSION;
   generatedAt: string;
@@ -1476,6 +1504,8 @@ export interface MobileBridgeSnapshot {
   oneProfile?: MobileBridgeOneProfileDto;
   /** Absent on older Desktop builds. Candidate selection is already complete in Main. */
   oneBriefing?: MobileBridgeOneBriefingDto;
+  /** Bounded, content-free mirror of Desktop One's durable memory topology. */
+  oneMemoryMap?: MobileBridgeOneMemoryMapDto;
 }
 
 export type MobileBridgeRequestParseResult =
@@ -1903,6 +1933,19 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
               : optionalInteger(params, "expectedVersion", 1, Number.MAX_SAFE_INTEGER),
           )
         : "tasks.latestResult accepts only taskId, chatId, and expectedVersion";
+    case "one.artifact.imagePreview":
+      return hasOnlyKeys(params, ["taskId", "taskVersion", "chatId", "runId", "manifestId", "artifactRef"])
+        ? firstError(
+            requiredString(params, "taskId"),
+            params.taskVersion === undefined
+              ? "taskVersion is required"
+              : optionalInteger(params, "taskVersion", 1, Number.MAX_SAFE_INTEGER),
+            requiredString(params, "chatId"),
+            requiredString(params, "runId", 160),
+            requiredString(params, "manifestId"),
+            requiredString(params, "artifactRef"),
+          )
+        : "one.artifact.imagePreview accepts only exact artifact binding fields";
     case "one.suggestions.act": {
       if (!hasOnlyKeys(params, [
         "schemaVersion", "action", "expectedStoreVersion", "suggestionId", "expectedSuggestionVersion",

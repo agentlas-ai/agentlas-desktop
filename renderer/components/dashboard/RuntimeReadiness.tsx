@@ -32,6 +32,9 @@ interface ReadinessSnapshot {
   items: ReadinessItem[];
 }
 
+const READINESS_CACHE_MAX_AGE_MS = 60_000;
+const readinessCache = new Map<"ko" | "en", ReadinessSnapshot>();
+
 const BLOCKING_UPDATER_STATES = new Set<UpdaterState["status"]>([
   "incompatible",
 ]);
@@ -160,12 +163,18 @@ export function RuntimeReadiness() {
   const { locale } = useT();
   const ko = locale === "ko";
   const requestId = useRef(0);
-  const [snapshot, setSnapshot] = useState<ReadinessSnapshot | null>(null);
-  const [checking, setChecking] = useState(true);
+  const [snapshot, setSnapshot] = useState<ReadinessSnapshot | null>(() => readinessCache.get(locale) ?? null);
+  const [checking, setChecking] = useState(() => !readinessCache.has(locale));
 
   const inspect = useCallback(async (deep: boolean) => {
     const api = ipc();
     if (!api) {
+      setChecking(false);
+      return;
+    }
+    const cached = readinessCache.get(locale);
+    if (!deep && cached && Date.now() - cached.checkedAt <= READINESS_CACHE_MAX_AGE_MS) {
+      setSnapshot(cached);
       setChecking(false);
       return;
     }
@@ -310,12 +319,14 @@ export function RuntimeReadiness() {
       updaterItem(fulfilled(updaterResult) as UpdaterState | null, ko),
     ];
 
-    setSnapshot({
+    const nextSnapshot: ReadinessSnapshot = {
       version: fulfilled(versionResult) || "",
       checkedAt: Date.now(),
       overall: overallStatus(items),
       items,
-    });
+    };
+    readinessCache.set(locale, nextSnapshot);
+    setSnapshot(nextSnapshot);
     setChecking(false);
   }, [ko, locale]);
 

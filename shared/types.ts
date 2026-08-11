@@ -103,6 +103,7 @@ import type {
   UpdateOneMemoryAssetInput,
   UseOneMemoryCandidateOnceInput,
 } from "./one-memory";
+import type { OneMemoryMapSnapshot } from "./one-memory-map";
 import type {
   AcceptOneSuggestionForReviewInput,
   DismissOneSuggestionInput,
@@ -277,6 +278,14 @@ export type {
   UpdateOneMemoryAssetInput,
   UseOneMemoryCandidateOnceInput,
 } from "./one-memory";
+export type {
+  OneMemoryMapEdge,
+  OneMemoryMapKind,
+  OneMemoryMapNode,
+  OneMemoryMapRelation,
+  OneMemoryMapScope,
+  OneMemoryMapSnapshot,
+} from "./one-memory-map";
 export type {
   AcceptOneSuggestionForReviewInput,
   ArbitrateOneSuggestionInput,
@@ -3724,6 +3733,8 @@ export interface McpInvocationRequest {
 export interface InvocationSteerResult {
   accepted: true;
   queued: boolean;
+  /** Steering never aborts the active model turn. A queued turn starts after it settles. */
+  interruptsCurrent: false;
   activeRunId?: string;
   position?: number;
   runId?: string;
@@ -4198,6 +4209,10 @@ export interface UpdaterState {
 export interface UpdaterActionResult {
   accepted: boolean;
   state: UpdaterState;
+  /** A stable refusal marker. Direct install never restarts while a model turn is active. */
+  blockedBy?: "active-runs";
+  /** Count only; renderer never receives run prompts or runtime internals. */
+  activeRunCount?: number;
 }
 
 // ── 마이그레이션 (OpenClaw / Hermes → Agentlas) ──────────────
@@ -6218,6 +6233,7 @@ export interface AgentlasIpc {
   /** Editable Memory candidates and explicitly approved reusable Memory assets. */
   oneMemory: {
     getState: () => Promise<OneMemoryState>;
+    getMap: () => Promise<OneMemoryMapSnapshot>;
     propose: (input: ProposeOneMemoryCandidateInput) => Promise<OneMemoryMutationResult<OneMemoryCandidate>>;
     save: (input: SaveOneMemoryCandidateInput) => Promise<OneMemoryMutationResult<OneMemorySavedResult>>;
     editAndSave: (input: EditAndSaveOneMemoryCandidateInput) => Promise<OneMemoryMutationResult<OneMemorySavedResult>>;

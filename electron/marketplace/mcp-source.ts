@@ -1013,7 +1013,7 @@ export class McpSource implements MarketplaceSource {
     const raw = await this.call<unknown>("marketplace.search_agents", {
       query: q,
       q,
-      limit: 20,
+      limit: 100,
       verbose: true,
     });
     // 서버 응답은 { count, total, results, ... } 형태 — asArray가 "results"를 추출한다.

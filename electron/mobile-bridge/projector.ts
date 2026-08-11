@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import path from "node:path";
 
 import { listInstalledAgents } from "../mcp/registry";
+import { listMyAgentsCached } from "../marketplace";
 import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
 import { detectRuntimes } from "../runtime/detect";
 import {
@@ -29,6 +30,7 @@ import { listEnvKeys } from "../secrets/vault";
 import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
 import { getUsageSnapshot } from "../usage";
 import { getOneBriefingSnapshot } from "../one/briefing";
+import { getOneMemoryMap } from "../one/memory-map";
 import { getOneProfile } from "../store/one-profile";
 import { getProjectTimelineSnapshot } from "../memory/project-timeline";
 import {
@@ -350,6 +352,7 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
       "one-value-closures-v1",
       "one-experience-reuse-v1",
       "one-improvement-proofs-v1",
+      "one-memory-map-v1",
       "one-ecosystem-suggestions-v1",
       "browser-approvals",
       "automations",
@@ -363,11 +366,14 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
   };
 }
 
-function agentsDto(presentEnvKeys: ReadonlySet<string>): MobileBridgeAgentDto[] {
+function agentsDto(
+  presentEnvKeys: ReadonlySet<string>,
+  cloudListings: readonly import("../../shared/types").MarketplaceListing[],
+): MobileBridgeAgentDto[] {
   const bindingByAgentId = new Map(
     listInstalledAgentHubBindings(64).map((binding) => [binding.installedAgentId, binding] as const),
   );
-  return listInstalledAgents().map((agent) => {
+  const installed = listInstalledAgents().map<MobileBridgeAgentDto>((agent) => {
     const binding = bindingByAgentId.get(agent.id);
     return {
       id: agent.id,
@@ -386,6 +392,7 @@ function agentsDto(presentEnvKeys: ReadonlySet<string>): MobileBridgeAgentDto[] 
         : binding?.source === "agent-cloud-restore" || agent.assetSource === "agent-cloud"
           ? "agent-cloud"
           : "local",
+      availability: "installed" as const,
       toolLabels: [...new Set(agent.mcpServers.map((item) => displayText(item, 120)).filter(Boolean))].slice(0, 16),
       kind: agent.kind === "team" ? "team" : "agent",
       visibility: agent.visibility ?? "visible",
@@ -405,6 +412,41 @@ function agentsDto(presentEnvKeys: ReadonlySet<string>): MobileBridgeAgentDto[] 
         : {}),
     };
   });
+  const installedExact = new Set(installed.flatMap((agent) =>
+    agent.agentDefinitionId && agent.agentReleaseId
+      ? [`${agent.agentDefinitionId}:${agent.agentReleaseId}`]
+      : []));
+  const cloudOnly = cloudListings.flatMap((listing): MobileBridgeAgentDto[] => {
+    const definitionId = listing.agentDefinitionId?.trim();
+    const releaseId = listing.agentReleaseId?.trim();
+    if (definitionId && releaseId && installedExact.has(`${definitionId}:${releaseId}`)) return [];
+    const slug = listing.slug.trim();
+    if (!slug) return [];
+    return [{
+      id: `cloud:${definitionId ?? slug}:${releaseId ?? "unbound"}`,
+      slug,
+      name: displayText(listing.name || slug, 512),
+      nameEn: displayText(listing.nameEn || listing.name || slug, 512),
+      tagline: displayText(listing.tagline ?? "", 2_048),
+      taglineEn: displayText(listing.taglineEn || listing.tagline || "", 2_048),
+      trustGrade: listing.trustGrade,
+      installedAt: listing.publishedAt ?? new Date(0).toISOString(),
+      tone: "",
+      runtimeLabel: null,
+      assetSource: "agent-cloud",
+      source: "agent-cloud",
+      availability: "cloud",
+      toolLabels: [],
+      kind: listing.entityKind === "team" ? "team" : "agent",
+      visibility: listing.visibility ?? "visible",
+      requiresSetup: false,
+      projectSelectable: Boolean(definitionId && releaseId),
+      ...(definitionId && releaseId
+        ? { agentDefinitionId: definitionId, agentReleaseId: releaseId }
+        : {}),
+    }];
+  });
+  return [...installed, ...cloudOnly];
 }
 
 function firmsDto(): MobileBridgeFirmDto[] {
@@ -1107,7 +1149,24 @@ export function projectMobileBridgeAutomation(
           : latestRun?.status === "needs_input"
             ? "automation_needs_input"
             : "automation_failed",
-    // DESKTOP_MOBILE_BRIDGE: promptTemplate, graph, webhook token, fs path,
+    graph: automation.graph
+      ? {
+          nodes: automation.graph.nodes.slice(0, 160).map((node) => ({
+            id: displayText(node.id, 160),
+            type: node.type,
+            label: displayText(node.label || node.type, 160),
+            x: Number.isFinite(node.position.x) ? node.position.x : 0,
+            y: Number.isFinite(node.position.y) ? node.position.y : 0,
+          })),
+          edges: automation.graph.edges.slice(0, 320).map((edge) => ({
+            id: displayText(edge.id, 160),
+            source: displayText(edge.source, 160),
+            target: displayText(edge.target, 160),
+            label: optionalDisplayText(edge.sourceHandle, 80),
+          })),
+        }
+      : null,
+    // DESKTOP_MOBILE_BRIDGE: promptTemplate, node config, webhook token, fs path,
     // and poll-source configuration remain on the Desktop.
   };
 }
@@ -1196,10 +1255,11 @@ export async function projectMobileBridgeSnapshot(
   const activeChatIds = [...new Set(options.activeChatIds ?? [])];
   const activeSet = new Set(activeChatIds);
   const maxMessages = Math.max(1, Math.min(200, Math.floor(options.maxMessagesPerChat ?? 200)));
-  const [runtimes, usage, presentEnvKeys] = await Promise.all([
+  const [runtimes, usage, presentEnvKeys, cloudListings] = await Promise.all([
     detectRuntimes(),
     getUsageSnapshot(),
     listEnvKeys().catch(() => [] as string[]),
+    listMyAgentsCached().catch(() => []),
   ]);
   const taskProjectionRuntime = createOneTaskProjectionRuntime({
     getAuthoritySnapshot: ({ taskId }) => {
@@ -1244,12 +1304,26 @@ export async function projectMobileBridgeSnapshot(
     options.hostIdentity.hostId,
     options.now ?? new Date(),
   );
+  const fullMemoryMap = (() => {
+    try {
+      return getOneMemoryMap();
+    } catch {
+      return null;
+    }
+  })();
+  const memoryNodes = [...(fullMemoryMap?.nodes ?? [])]
+    .sort((left, right) => right.density - left.density || left.id.localeCompare(right.id))
+    .slice(0, 900);
+  const memoryNodeIds = new Set(memoryNodes.map((node) => node.id));
+  const memoryEdges = (fullMemoryMap?.edges ?? [])
+    .filter((edge) => memoryNodeIds.has(edge.from) && memoryNodeIds.has(edge.to))
+    .slice(0, 1_800);
   const snapshot: MobileBridgeSnapshot = {
     schemaVersion: MOBILE_BRIDGE_PROTOCOL_VERSION,
     generatedAt: (options.now ?? new Date()).toISOString(),
     host: hostDto(options),
     runtimes: projectMobileBridgeRuntimes(runtimes),
-    agents: agentsDto(new Set(presentEnvKeys)),
+    agents: agentsDto(new Set(presentEnvKeys), cloudListings),
     firms: firmsDto(),
     projects: projectsDto(),
     chats: chatsDto(activeSet),
@@ -1267,6 +1341,25 @@ export async function projectMobileBridgeSnapshot(
     oneEcosystemSuggestions,
     oneProfile: projectMobileBridgeOneProfile(getOneProfile()),
     oneBriefing: projectMobileBridgeOneBriefing(getOneBriefingSnapshot({ now: options.now })),
+    ...(fullMemoryMap ? { oneMemoryMap: {
+      contractVersion: fullMemoryMap.contractVersion,
+      generatedAt: fullMemoryMap.generatedAt,
+      sourceRevision: fullMemoryMap.sourceRevision,
+      clusterCount: fullMemoryMap.clusterCount,
+      totalNodeCount: fullMemoryMap.nodes.length,
+      totalEdgeCount: fullMemoryMap.edges.length,
+      truncated: memoryNodes.length < fullMemoryMap.nodes.length || memoryEdges.length < fullMemoryMap.edges.length,
+      nodes: memoryNodes.map((node) => ({
+        id: node.id,
+        kind: node.kind,
+        scope: node.scope,
+        projectSlug: node.projectSlug,
+        x: node.x,
+        y: node.y,
+        density: node.density,
+      })),
+      edges: memoryEdges.map((edge) => ({ from: edge.from, to: edge.to, relation: edge.relation })),
+    } } : {}),
     pairingVerificationTasks: listPairingVerificationTasks(options.hostIdentity.hostId).map((task) => ({
       hostId: options.hostIdentity.hostId,
       taskId: task.id,

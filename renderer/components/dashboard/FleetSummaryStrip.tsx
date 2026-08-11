@@ -10,9 +10,12 @@ import { useT } from "@/lib/i18n";
 import { deriveKeyStatus, type KeyHealth } from "@/lib/key-status";
 import { navigate } from "@/lib/navigation";
 import { visibleAgents } from "@/lib/agent-visibility";
+import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import { IconBolt, IconCheck, IconShield } from "@/components/Icon";
+import type { InstalledAgent, InstalledFirm, PendingConfirmation, UsageSnapshot } from "@/lib/types";
 
 const POLL_MS = 10_000;
+const DATA_MAX_AGE_MS = 15_000;
 
 function stallText(oldestIso: string | null, ko: boolean): string {
   if (!oldestIso) return "";
@@ -29,16 +32,23 @@ function stallText(oldestIso: string | null, ko: boolean): string {
 export function FleetSummaryStrip() {
   const { locale } = useT();
   const ko = locale === "ko";
-  const [pending, setPending] = useState(0);
-  const [oldestPending, setOldestPending] = useState<string | null>(null);
-  const [active, setActive] = useState(0);
-  const [teamCount, setTeamCount] = useState<number | null>(null);
-  const [singleCount, setSingleCount] = useState(0);
-  const [keyHealth, setKeyHealth] = useState<KeyHealth>("unknown");
+  const cachedPending = readViewData<PendingConfirmation[]>("dashboard.confirm.pending")?.value ?? [];
+  const cachedTeam = readViewData<InstalledAgent[]>("dashboard.team")?.value ?? [];
+  const cachedFirms = readViewData<InstalledFirm[]>("dashboard.firms")?.value ?? [];
+  const cachedUsage = readViewData<UsageSnapshot>("dashboard.usage")?.value ?? null;
+  const cachedFirmAgentIds = new Set(cachedFirms.flatMap((firm) => firm.orgChart.map((node) => node.agentId)));
+  const [pending, setPending] = useState(cachedPending.length);
+  const [oldestPending, setOldestPending] = useState<string | null>(() => cachedPending.map((item) => item.createdAt).filter(Boolean).sort()[0] ?? null);
+  const [active, setActive] = useState(() => readViewData<string[]>("dashboard.active-chats")?.value?.length ?? 0);
+  const [teamCount, setTeamCount] = useState<number | null>(cachedFirms.length > 0 ? cachedFirms.length : null);
+  const [singleCount, setSingleCount] = useState(() => visibleAgents(cachedTeam).filter((agent) => !cachedFirmAgentIds.has(agent.id)).length);
+  const [keyHealth, setKeyHealth] = useState<KeyHealth>(() => deriveKeyStatus(cachedUsage).health);
 
-  const loadPending = useCallback(async () => {
+  const loadPending = useCallback(async (force = false) => {
     try {
-      const list = (await ipc()?.confirm.listPending()) ?? [];
+      const api = ipc();
+      if (!api) return;
+      const list = await loadViewData("dashboard.confirm.pending", () => api.confirm.listPending(), { maxAgeMs: DATA_MAX_AGE_MS, force });
       setPending(list.length);
       const oldest = list
         .map((p) => p.createdAt)
@@ -49,9 +59,11 @@ export function FleetSummaryStrip() {
       /* 무시 */
     }
   }, []);
-  const loadKey = useCallback(async () => {
+  const loadKey = useCallback(async (force = false) => {
     try {
-      const snap = await ipc()?.usage.snapshot();
+      const api = ipc();
+      if (!api) return;
+      const snap = await loadViewData("dashboard.usage", () => api.usage.snapshot(), { maxAgeMs: DATA_MAX_AGE_MS, force });
       setKeyHealth(deriveKeyStatus(snap ?? null).health);
     } catch {
       /* 무시 */
@@ -60,8 +72,8 @@ export function FleetSummaryStrip() {
 
   // 폴링(10s)으로 도는 loadPending+loadKey만 useVisibleInterval로(탭 숨김 시 정지).
   useVisibleInterval(() => {
-    void loadPending();
-    void loadKey();
+    void loadPending(true);
+    void loadKey(true);
   }, POLL_MS);
 
   useEffect(() => {
@@ -70,7 +82,10 @@ export function FleetSummaryStrip() {
       try {
         const api = ipc();
         if (!api) return;
-        const [a, f] = await Promise.all([api.team.list(), api.firms.list()]);
+        const [a, f] = await Promise.all([
+          loadViewData("dashboard.team", () => api.team.list(), { maxAgeMs: DATA_MAX_AGE_MS }),
+          loadViewData("dashboard.firms", () => api.firms.list(), { maxAgeMs: DATA_MAX_AGE_MS }),
+        ]);
         if (!alive) return;
         // 멀티(에이전트팀) = 회사(firm) 수, 싱글 = 회사 조직도에 속하지 않은 개별 에이전트.
         const firmAgentIds = new Set<string>();
@@ -86,8 +101,16 @@ export function FleetSummaryStrip() {
     void loadPending();
     void loadOwned();
     void loadKey();
+    void ipc()?.invoke.activeChats().then((ids) => {
+      if (!alive) return;
+      writeViewData("dashboard.active-chats", ids);
+      setActive(ids.length);
+    }).catch(() => undefined);
     const off = ipcEvents()?.onActiveChats?.((ids) => {
-      if (alive) setActive(ids.length);
+      if (alive) {
+        writeViewData("dashboard.active-chats", ids);
+        setActive(ids.length);
+      }
     });
     return () => {
       alive = false;

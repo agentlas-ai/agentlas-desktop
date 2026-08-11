@@ -464,6 +464,7 @@ import {
   updateOneMemoryAsset,
   useOneMemoryCandidateOnce,
 } from "./one/memory-candidates";
+import { getOneMemoryMap } from "./one/memory-map";
 import {
   acceptOneSuggestionForReviewFromUser,
   dismissOneSuggestion,
@@ -2095,7 +2096,18 @@ export function registerIpcHandlers(): void {
   // renderer가 마운트되자마자 현재 상태를 동기 조회. broadcast 이전에 새 창이 열려도 onState로 캐치.
   ipcMain.handle("updater:getState", () => getUpdaterState());
   ipcMain.handle("updater:check", () => updaterCheck());
-  ipcMain.handle("updater:install", () => updaterInstall());
+  ipcMain.handle("updater:install", () => {
+    const activeRunCount = invocationService.activeChatIds().length;
+    if (activeRunCount > 0) {
+      return {
+        accepted: false,
+        state: getUpdaterState(),
+        blockedBy: "active-runs" as const,
+        activeRunCount,
+      };
+    }
+    return updaterInstall();
+  });
   ipcMain.handle("updater:openManualDownload", () => updaterOpenManualDownload());
   ipcMain.handle("updater:openReleaseNotes", (_event, version?: string) => updaterOpenReleaseNotes(version));
   ipcMain.handle("updater:revealRecoveryBackup", () => updaterRevealRecoveryBackup());
@@ -3500,6 +3512,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("oneActivation:skip", (_e, input) => skipOneActivation(input));
   ipcMain.handle("oneActivation:resolveMobile", (_e, input) => resolveOneActivationMobile(input));
   ipcMain.handle("oneMemory:getState", () => getOneMemoryState());
+  ipcMain.handle("oneMemory:getMap", () => getOneMemoryMap());
   ipcMain.handle("oneMemory:propose", (_e, input: ProposeOneMemoryCandidateInput) =>
     proposeOneMemoryCandidate(input));
   ipcMain.handle("oneMemory:save", (_e, input: SaveOneMemoryCandidateInput) =>
