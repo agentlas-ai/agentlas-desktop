@@ -26,6 +26,25 @@ clear_transaction_journal() {
   node "$project_dir/scripts/mac-install-transaction.mjs" clear "--file=$transaction_journal"
 }
 
+remove_stage_container() {
+  local target="$1"
+  if [[ ! "$target" =~ ^/Applications/\.agentlas-install-stage\.[A-Za-z0-9]+$ ]]; then
+    echo "Refusing to remove an unexpected macOS install stage path: $target" >&2
+    return 1
+  fi
+  if [[ ! -e "$target" ]]; then
+    return 0
+  fi
+
+  # Signed app resources can intentionally contain read-only directories.
+  # After a successful exchange the stage holds the previous app, so make only
+  # directories inside this exact installer-owned tree writable before removal.
+  while IFS= read -r -d '' directory; do
+    chmod u+rwx "$directory"
+  done < <(find "$target" -type d -print0)
+  rm -rf "$target"
+}
+
 acquire_install_lock() {
   # mkdir is atomic on the destination volume. A second installer must stop
   # before it can reconcile or overwrite the first installer's journal.
@@ -71,7 +90,7 @@ rollback_install() {
 cleanup() {
   rollback_install || true
   if [[ "$app_mutated" != "1" && -n "$stage_container" ]]; then
-    rm -rf "$stage_container" >/dev/null 2>&1 || true
+    remove_stage_container "$stage_container" >/dev/null 2>&1 || true
   fi
   if [[ -n "$mount_point" ]]; then
     hdiutil detach "$mount_point" >/dev/null 2>&1 || true
@@ -130,14 +149,14 @@ recover_interrupted_transaction() {
 
   # Target already contains the fully trusted candidate: finish the commit.
   if [[ "$target_version" == "$expected_version" ]] && verify_official_app /Applications/Agentlas.app; then
-    rm -rf "$(dirname "$recovered_stage")"
+    remove_stage_container "$(dirname "$recovered_stage")"
     clear_transaction_journal
     return 0
   fi
   # The verified candidate is still in staging, so the atomic swap never ran.
   # Leave the old target untouched and discard only the staged candidate.
   if [[ "$stage_version" == "$expected_version" ]] && verify_official_app "$recovered_stage"; then
-    rm -rf "$(dirname "$recovered_stage")"
+    remove_stage_container "$(dirname "$recovered_stage")"
     clear_transaction_journal
     return 0
   fi
@@ -145,13 +164,13 @@ recover_interrupted_transaction() {
   # atomically when both sides still exist; never create an empty target gap.
   if [[ "$recovered_had_existing" == "1" && -d "$recovered_stage" && -d /Applications/Agentlas.app ]]; then
     atomic_exchange "$recovered_stage" /Applications/Agentlas.app
-    rm -rf "$(dirname "$recovered_stage")"
+    remove_stage_container "$(dirname "$recovered_stage")"
     clear_transaction_journal
     return 0
   fi
   if [[ "$recovered_had_existing" == "0" && -d /Applications/Agentlas.app ]]; then
     rm -rf /Applications/Agentlas.app
-    rm -rf "$(dirname "$recovered_stage")"
+    remove_stage_container "$(dirname "$recovered_stage")"
     clear_transaction_journal
     return 0
   fi
@@ -244,7 +263,7 @@ fi
 # installation; the preserved local data will be reused on first launch.
 install_committed=1
 clear_transaction_journal
-rm -rf "$stage_container"
+remove_stage_container "$stage_container"
 stage_container=""
 
 open -a Agentlas
