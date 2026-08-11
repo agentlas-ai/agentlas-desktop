@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.85 — 2026-08-11
+
+Binds the same Agentlas OS v1.1.109 at
+610d2ce2dff4d5e15b8adba05b5115c992cbb376.
+
+- Work transcript hydration is now monotonic. A history read that began before
+  a live stream update can no longer resolve later and replace the screen with
+  its older snapshot, so a final answer that has appeared stays visible.
+- The deterministic chat gate holds an empty initial history snapshot until
+  after a live final renders and verifies that the stale result cannot erase
+  it. The same run types 371 Korean characters while 80 progress events arrive
+  and observes no browser long task.
+- These source gates do not themselves publish a release; the Releases page
+  stays the authority for what is actually downloadable.
+
 ## 0.9.84 — 2026-08-11
 
 Binds the same Agentlas OS v1.1.109 at

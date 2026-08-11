@@ -797,6 +797,12 @@ function ChatPage() {
   const [messages, setMessages] = useState<StreamMessage[]>([]);
   const [busy, setBusy] = useState(false);
   const [cancelPending, setCancelPending] = useState(false);
+  // Every renderer-owned transcript mutation advances this clock. Async
+  // history reads capture it before requesting a snapshot and may replace the
+  // screen only while it is unchanged. Without this monotonic guard, a stale
+  // history Promise that started before `final` could resolve after `final`
+  // and erase the answer the user had already seen.
+  const transcriptRevisionRef = useRef(0);
 
   // A Task deep link is authoritative. Resolve it through Main before loading
   // Work so a stale or mismatched chat query can never open another Task.
@@ -1098,6 +1104,11 @@ function ChatPage() {
         }
         return;
       }
+      // Main persists terminal answers before publishing `final`, but a
+      // history request may already hold an older snapshot. Mark every live
+      // run event before changing the visible transcript so that snapshot can
+      // never rewind the UI after this point.
+      transcriptRevisionRef.current += 1;
       if (ev.kind === "final" || ev.kind === "error") setKeyRequestSheet(null);
       const computerUseMode = ev.tool ? computerUseModeForTool(ev.tool.name) : null;
       if (computerUseMode) {
@@ -1645,6 +1656,7 @@ function ChatPage() {
   // 메타데이터 effect는 번역/콜백 변화에도 다시 돌 수 있으므로, 전환 초기화는 chatId에만 묶는다.
   useEffect(() => {
     if (!chatId) return;
+    transcriptRevisionRef.current += 1;
     // 이전 채팅 뷰를 캐시에 저장 — 되돌아올 때 히스토리 로드를 기다리지 않고 즉시 복원.
     const prevChatId = prevChatIdRef.current;
     prevChatIdRef.current = chatId;
@@ -1781,6 +1793,7 @@ function ChatPage() {
       void api.marketplace.bookmarks().then((bookmarks) => {
         if (!cancelled && hubBookmarkGenerationRef.current === bookmarkGeneration) setHubBookmarks(bookmarks);
       }).catch(() => undefined);
+      const hydrationRevision = transcriptRevisionRef.current;
       void Promise.all([
         api.invoke.history(chatId),
         fetchCommittedReplies(api, chatId),
@@ -1805,6 +1818,7 @@ function ChatPage() {
           const recovery = receiptRecoveryMessage(receipt, locale);
           const restoredMessages = recovery ? [...historyMessages, recovery] : historyMessages;
           setMessages((current) => {
+            if (transcriptRevisionRef.current !== hydrationRevision) return current;
             const hasLiveDraft = current.some((msg) => msg.busy || msg.streaming);
             return hasLiveDraft ? current : restoredMessages;
           });
@@ -1904,6 +1918,7 @@ function ChatPage() {
         const startedAt = Number.isFinite(attachedStartedAt) ? attachedStartedAt : Date.now();
         const reconnectAgent = agents.find((a) => a.id === c.agentId);
         const reconnectAgentName = reconnectAgent ? pickLocalized(reconnectAgent, locale).name : t("chat.assistant_fallback");
+        transcriptRevisionRef.current += 1;
         setMessages((m) => [
           ...m,
           {
@@ -2046,6 +2061,7 @@ function ChatPage() {
           const attachedStartedAt = attached.startedAt ? Date.parse(attached.startedAt) : NaN;
           const startedAt = Number.isFinite(attachedStartedAt) ? attachedStartedAt : Date.now();
           const reconnectAgentName = agent ? pickLocalized(agent, locale).name : t("chat.assistant_fallback");
+          transcriptRevisionRef.current += 1;
           setMessages((current) => [
             ...current,
             {
@@ -2102,6 +2118,7 @@ function ChatPage() {
         endedRunId && typeof api.invoke.receipt === "function"
           ? api.invoke.receipt(endedRunId).catch(() => null)
           : Promise.resolve(null);
+      const historyRevision = transcriptRevisionRef.current;
       void Promise.all([
         api.invoke.history(chatId),
         receiptPromise,
@@ -2114,6 +2131,7 @@ function ChatPage() {
           Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false, status }])),
         );
         setMessages((current) => {
+          if (transcriptRevisionRef.current !== historyRevision) return current;
           if (current.some((message) => message.busy || message.streaming)) return current;
           const optimisticIds = new Set(steerQueueRef.current.map((item) => item.optimisticMessageId));
           const pendingDirections = current.filter((message) => optimisticIds.has(message.id));
@@ -2149,6 +2167,7 @@ function ChatPage() {
         setLiveAgents((prev) =>
           Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false }])),
         );
+        const historyRevision = transcriptRevisionRef.current;
         const [h, receipt, committedReplies] = await Promise.all([
           api.invoke.history(chatId),
           endedRunId && typeof api.invoke.receipt === "function"
@@ -2163,7 +2182,11 @@ function ChatPage() {
           setLiveAgents((prev) =>
             Object.fromEntries(Object.entries(prev).map(([k, v]) => [k, { ...v, active: false, status }])),
           );
-          setMessages(recovery ? [...next, recovery] : next);
+          setMessages((current) => (
+            transcriptRevisionRef.current === historyRevision
+              ? (recovery ? [...next, recovery] : next)
+              : current
+          ));
         }
       } catch {
         /* 무시 — 다음 틱에 재시도 */
@@ -2282,6 +2305,7 @@ function ChatPage() {
         ));
         if (!duplicate) effectiveTaskForceTargets.push(target);
       }
+      transcriptRevisionRef.current += 1;
       setMessages((m) => [
         ...m,
         { id: uid(), role: "user" as const, text: visiblePrompt, imageDataUrls },
@@ -2453,6 +2477,7 @@ function ChatPage() {
         const optimisticMessageId = `steer:${uid()}`;
         steerQueueRef.current.push({ text, opts, optimisticMessageId });
         setQueuedSteers(steerQueueRef.current.map((q) => q.text));
+        transcriptRevisionRef.current += 1;
         setMessages((current) => [...current, {
           id: optimisticMessageId,
           role: "user",
