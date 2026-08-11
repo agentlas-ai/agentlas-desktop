@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "0.9.87",
+  "version": "0.9.88",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Gemini 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -16,12 +16,12 @@
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
     "targetSchemaVersion": 93,
-    "bundledRuntimeVersion": "1.1.109"
+    "bundledRuntimeVersion": "1.1.111"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.1.109",
-    "commit": "610d2ce2dff4d5e15b8adba05b5115c992cbb376"
+    "ref": "v1.1.111",
+    "commit": "ee1f23911f378b6d521e64d89713c4ef15eb38e9"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
@@ -314,7 +314,7 @@
     "test:one-weekly-reflection-ui": "node scripts/verify-one-weekly-reflection-ui.cjs",
     "test:one-workspace-projection-runtime": "node scripts/verify-one-workspace-projection-runtime.cjs",
     "test:one-ui": "node scripts/verify-agentlas-one-ui.cjs",
-    "test:one": "npm run test:one-accepted-result-value-closure && npm run test:one-activation-runtime && npm run test:one-artifact-preview-runtime && npm run test:one-artifact-preview-ui && npm run test:one-attachments-runtime && npm run test:one-automation-suggestion-production && npm run test:one-briefing-actions-runtime && npm run test:one-canonical-task-runtime && npm run test:one-completion-suggestion-producer && npm run test:one-customer-safe-copy && npm run test:one-decision-runtime && npm run test:one-experience-reuse-runtime && npm run test:one-feature-intro-runtime && npm run test:one-hub-derivative-runtime && npm run test:one-hub-derivative-ui && npm run test:one-improvement-proof-producer && npm run test:one-improvement-proof-runtime && npm run test:one-markdown-surface && npm run test:one-memory-candidates-runtime && npm run test:one-mobile-suggestion-contract && npm run test:one-profile-runtime && npm run test:one-project-deadline-runtime && npm run test:one-request-intent && npm run test:one-review-seed-runtime && npm run test:one-review-seed-ui && npm run test:one-run-progress && npm run test:one-search-runtime && npm run test:one-suggestions-runtime && npm run test:one-surface-runtime-contract && npm run test:one-task-continuation-runtime && npm run test:one-task-projection-runtime && npm run test:one-team-preflight-runtime && npm run test:one-value-closure-runtime && npm run test:one-voice-input-ui && npm run test:one-weekly-reflection-runtime && npm run test:one-weekly-reflection-ui && npm run test:one-workspace-projection-runtime && npm run test:one-ui && npm run test:one-auto-recovery",
+    "test:one": "npm run --silent verify:curator-fixtures && npm run test:one-accepted-result-value-closure && npm run test:one-activation-runtime && npm run test:one-artifact-preview-runtime && npm run test:one-artifact-preview-ui && npm run test:one-attachments-runtime && npm run test:one-automation-suggestion-production && npm run test:one-briefing-actions-runtime && npm run test:one-canonical-task-runtime && npm run test:one-completion-suggestion-producer && npm run test:one-customer-safe-copy && npm run test:one-decision-runtime && npm run test:one-experience-reuse-runtime && npm run test:one-feature-intro-runtime && npm run test:one-hub-derivative-runtime && npm run test:one-hub-derivative-ui && npm run test:one-improvement-proof-producer && npm run test:one-improvement-proof-runtime && npm run test:one-markdown-surface && npm run test:one-memory-candidates-runtime && npm run test:one-mobile-suggestion-contract && npm run test:one-profile-runtime && npm run test:one-project-deadline-runtime && npm run test:one-request-intent && npm run test:one-review-seed-runtime && npm run test:one-review-seed-ui && npm run test:one-run-progress && npm run test:one-search-runtime && npm run test:one-suggestions-runtime && npm run test:one-surface-runtime-contract && npm run test:one-task-continuation-runtime && npm run test:one-task-projection-runtime && npm run test:one-team-preflight-runtime && npm run test:one-value-closure-runtime && npm run test:one-voice-input-ui && npm run test:one-weekly-reflection-runtime && npm run test:one-weekly-reflection-ui && npm run test:one-workspace-projection-runtime && npm run test:one-ui && npm run test:one-auto-recovery",
     "test:one-briefing-action-reachable": "node scripts/test-one-briefing-action-reachable.cjs",
     "test:hep-call-prompt-safety": "node scripts/test-hep-call-prompt-safety.cjs",
     "test:core-call-liveness-and-auth": "node scripts/test-core-call-liveness-and-auth.cjs",
@@ -379,7 +379,8 @@
     "test:tool-call-normalization": "npm run --silent build:electron && node scripts/test-tool-call-normalization.cjs",
     "test:route-render-sweep": "npm run --silent build:renderer && node scripts/test-route-render-sweep.cjs",
     "test:graph-ergonomics": "npm run build:renderer && node scripts/test-graph-ergonomics.cjs",
-    "test:graph-no-dead-end": "node scripts/test-graph-no-dead-end.cjs"
+    "test:graph-no-dead-end": "node scripts/test-graph-no-dead-end.cjs",
+    "verify:curator-fixtures": "npm run build:electron && node scripts/verify-curator-fixtures.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

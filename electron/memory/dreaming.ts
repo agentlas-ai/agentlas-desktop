@@ -7,6 +7,7 @@
 //   · 시스템 유휴 ≥ 10분(powerMonitor) · 실행 슬롯 완전 유휴(inUse=0, queued=0)
 //   · 쿨다운 6시간 · 동시 1패스 · 사용자가 돌아오면(유휴 리셋) 즉시 abort
 //   · LLM 호출은 selection의 슬롯 래핑 러너 경유 → 전역 동시성 예산 + nice 5 상속
+import { dreamingCooldownMs, dreamingIdleRequiredSec } from "./curator-rules";
 import { powerMonitor } from "electron";
 import { getMeta, setMeta } from "../store/meta";
 import { runSlotStats } from "../runtime/run-slots";
@@ -28,8 +29,9 @@ import { getAgentById } from "../mcp/registry";
 
 const ENABLED_KEY = "memory_dreaming_enabled";
 const LAST_AT_KEY = "memory_dreaming_last_at";
-const IDLE_REQUIRED_SEC = 600; // 10분
-const COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6시간
+// Timing lives in the shared ruleset so both surfaces age memory alike.
+const IDLE_REQUIRED_SEC = dreamingIdleRequiredSec();
+const COOLDOWN_MS = dreamingCooldownMs();
 const TICK_MS = 5 * 60 * 1000; // 5분마다 조건 확인(조건 체크 자체는 ~0 비용)
 const MAX_AGENTS_PER_PASS = 2; // 한 번의 드리밍에서 LLM 통합할 에이전트 수 상한
 const LLM_TIMEOUT_MS = 180_000;

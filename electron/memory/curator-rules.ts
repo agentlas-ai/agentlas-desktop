@@ -16,8 +16,13 @@ export interface CuratorRuleset {
   rulesetVersion?: string;
   patterns?: Record<string, { regex?: string; flags?: string }>;
   kinds?: Record<string, unknown>;
-  teamLayerByKind?: { coordination?: string[]; shared?: string[] };
-  projectSpecificsGuard?: { minFolderNameChars?: number };
+  teamLayerByKind?: { coordination?: string[]; shared?: string[]; domainIsDefault?: boolean };
+  projectSpecificsGuard?: {
+    minFolderNameChars?: number;
+    narrowAgentRepoTo?: string;
+    noWorkspaceFallback?: string;
+  };
+  decay?: { dreaming?: { idleRequiredSec?: number; cooldownMs?: number } };
   [key: string]: unknown;
 }
 
@@ -25,8 +30,17 @@ export interface CuratorRuleset {
 // with identical behaviour; "embedded" in receipts makes that state visible.
 const EMBEDDED: CuratorRuleset = {
   rulesetVersion: "embedded",
-  teamLayerByKind: { coordination: ["decision", "conflict", "deprecation"], shared: ["fact"] },
-  projectSpecificsGuard: { minFolderNameChars: 4 },
+  teamLayerByKind: {
+    coordination: ["decision", "conflict", "deprecation"],
+    shared: ["fact"],
+    domainIsDefault: true,
+  },
+  projectSpecificsGuard: {
+    minFolderNameChars: 4,
+    narrowAgentRepoTo: "project",
+    noWorkspaceFallback: "session",
+  },
+  decay: { dreaming: { idleRequiredSec: 600, cooldownMs: 6 * 60 * 60 * 1000 } },
   patterns: {
     projectBoundaryPath: {
       regex: "(?:^|\\s)(?:\\/(?:Users|home|var|opt|private)\\/|~\\/|[A-Za-z]:\\\\|file:\\/\\/)",
@@ -86,7 +100,48 @@ export function classifyTeamLearningRoute(kind: MemoryKind): TeamLearningLayer {
   const table = ruleset.teamLayerByKind ?? EMBEDDED.teamLayerByKind ?? {};
   if ((table.coordination ?? []).includes(kind)) return "coordination";
   if ((table.shared ?? []).includes(kind)) return "shared";
-  return "domain";
+  // The ruleset states which layer catches everything else; reading it keeps the
+  // declaration load-bearing instead of a comment that happens to match.
+  return (table.domainIsDefault ?? true) ? "domain" : "shared";
+}
+
+/** Scope an agent_repo event narrows to when it names project specifics. */
+export function narrowAgentRepoScope(): string {
+  const { ruleset } = loadCuratorRuleset();
+  return ruleset.projectSpecificsGuard?.narrowAgentRepoTo
+    ?? EMBEDDED.projectSpecificsGuard?.narrowAgentRepoTo
+    ?? "project";
+}
+
+/** Scope a project-suggested event falls back to when no folder is bound.
+ *
+ * The ruleset says `session`. Both local executors used to answer `team_memory`,
+ * which promoted a fragment of one person's project into shared team memory —
+ * the declaration and the behaviour disagreed, and the behaviour was wider.
+ */
+export function noWorkspaceFallbackScope(): string {
+  const { ruleset } = loadCuratorRuleset();
+  return ruleset.projectSpecificsGuard?.noWorkspaceFallback
+    ?? EMBEDDED.projectSpecificsGuard?.noWorkspaceFallback
+    ?? "session";
+}
+
+/** Idle seconds dreaming waits for, from the shared ruleset. */
+export function dreamingIdleRequiredSec(): number {
+  const { ruleset } = loadCuratorRuleset();
+  const value = ruleset.decay?.dreaming?.idleRequiredSec
+    ?? EMBEDDED.decay?.dreaming?.idleRequiredSec
+    ?? 600;
+  return Number.isFinite(value) && value > 0 ? Number(value) : 600;
+}
+
+/** Cooldown between dreaming passes, from the shared ruleset. */
+export function dreamingCooldownMs(): number {
+  const { ruleset } = loadCuratorRuleset();
+  const value = ruleset.decay?.dreaming?.cooldownMs
+    ?? EMBEDDED.decay?.dreaming?.cooldownMs
+    ?? 6 * 60 * 60 * 1000;
+  return Number.isFinite(value) && value > 0 ? Number(value) : 6 * 60 * 60 * 1000;
 }
 
 /** Filesystem paths that identify where this user works, regardless of project. */

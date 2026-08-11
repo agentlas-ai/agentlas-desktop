@@ -55,8 +55,8 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.109
-      HEPHAESTUS_COMMIT: 610d2ce2dff4d5e15b8adba05b5115c992cbb376
+      HEPHAESTUS_REF: v1.1.111
+      HEPHAESTUS_COMMIT: ee1f23911f378b6d521e64d89713c4ef15eb38e9
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -256,8 +256,8 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.109
-      HEPHAESTUS_COMMIT: 610d2ce2dff4d5e15b8adba05b5115c992cbb376
+      HEPHAESTUS_REF: v1.1.111
+      HEPHAESTUS_COMMIT: ee1f23911f378b6d521e64d89713c4ef15eb38e9
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -414,8 +414,8 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.1.109
-      HEPHAESTUS_COMMIT: 610d2ce2dff4d5e15b8adba05b5115c992cbb376
+      HEPHAESTUS_REF: v1.1.111
+      HEPHAESTUS_COMMIT: ee1f23911f378b6d521e64d89713c4ef15eb38e9
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

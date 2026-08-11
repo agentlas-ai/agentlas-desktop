@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.88 — 2026-08-12
+
+Binds the same Agentlas OS v1.1.111 at
+ee1f23911f378b6d521e64d89713c4ef15eb38e9.
+
+- Curator reads four judgments from the shared ruleset instead of hardcoding
+  them: `projectSpecificsGuard.noWorkspaceFallback`, `narrowAgentRepoTo`,
+  `teamLayerByKind.domainIsDefault`, and the dreaming idle/cooldown timings.
+- Fixes a declaration/behaviour disagreement: a project-scoped learning with no
+  bound folder fell back to `team_memory` while the ruleset declared `session`,
+  promoting one person's project fragment into shared team memory.
+- `npm run test:one` now runs the curator fixture conformance gate first, so the
+  Desktop and OS executors are checked against the same cases on every run.
+- These source gates do not themselves publish a release; the Releases page
+  stays the authority for what is actually downloadable.
+
 ## 0.9.87 — 2026-08-12
 
 Binds the same Agentlas OS v1.1.109 at

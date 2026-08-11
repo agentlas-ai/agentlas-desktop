@@ -88,6 +88,8 @@ import {
   mentionsProjectSpecifics as rulesMentionsProjectSpecifics,
   widensCapability,
   type TeamLearningLayer,
+  narrowAgentRepoScope,
+  noWorkspaceFallbackScope,
 } from "./curator-rules";
 
 // R21 W2a — kinds whose evidence must be machine-checkable in shape before a
@@ -252,7 +254,8 @@ function resolveScope(ev: RawMemoryEvent, ctx: CurationContext): MemoryScope {
   if (ev.suggested_scope === "agent_repo" && mentionsProjectSpecifics(ev.content, ctx)) {
     // The model labelled this a portable agent skill, but it names this project or this machine.
     // Keep it — just not somewhere it can surface in an unrelated project or a borrowed nest.
-    return ctx.projectPath ? "project" : "session";
+    // Both the narrowed scope and the no-folder fallback come from the ruleset.
+    return (ctx.projectPath ? narrowAgentRepoScope() : noWorkspaceFallbackScope()) as MemoryScope;
   }
   if (ev.suggested_scope === "agent_repo" && ctx.sourceProvenance === "task-force-synthesis") {
     // 합성 응답에는 단일 소유 에이전트가 없다. 프로젝트 경계가 있으면 그 안에만 남기고,
@@ -278,8 +281,10 @@ function resolveScope(ev: RawMemoryEvent, ctx: CurationContext): MemoryScope {
     return "user_identity";
   }
   if (ev.suggested_scope === "project" && !ctx.projectPath) {
-    // No folder bound to this chat → keep it durable but shared.
-    return "team_memory";
+    // No folder is bound to this chat. The ruleset declares the fallback
+    // (`session`); returning "team_memory" here promoted one person's project
+    // fragment into shared team memory, so the declaration now decides.
+    return noWorkspaceFallbackScope() as MemoryScope;
   }
   return ev.suggested_scope;
 }
