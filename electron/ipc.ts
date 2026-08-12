@@ -602,9 +602,11 @@ import {
   autoConnectTelegram,
   cloneTelegramConnection,
   configureTelegramBotSettings,
+  connectTelegramToOne,
   listTelegramBindings,
   openTelegramBot,
   pruneOrphanedTelegramBindings,
+  removeLegacyTelegramConnections,
   removeTelegramConnection,
   resetTelegramConversation,
   resumeTelegramConnection,
@@ -3035,6 +3037,9 @@ export function registerIpcHandlers(): void {
 
   // ── Telegram Connect (Bot API polling + Agentlas invocation bridge) ─────
   ipcMain.handle("telegram:listBindings", () => listTelegramBindings());
+  ipcMain.handle("telegram:connectOne", (_e, input?: { botName?: string }) => connectTelegramToOne(input ?? {}));
+  ipcMain.handle("telegram:removeLegacy", (_e, input: { deleteBots?: boolean }) =>
+    removeLegacyTelegramConnections({ deleteBots: input?.deleteBots === true }));
   ipcMain.handle("telegram:autoConnect", (_e, input) => autoConnectTelegram(input));
   ipcMain.handle("telegram:start", (_e, input) => startTelegramConnection(input));
   ipcMain.handle("telegram:clone", (_e, input) => cloneTelegramConnection(input));

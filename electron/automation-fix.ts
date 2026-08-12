@@ -359,7 +359,8 @@ export async function applyAutomationFix(
     return {
       ok: true,
       message: ko ? "브라우저 설정 화면을 엽니다." : "Opening the browser setup screen.",
-      navigate: "/connect",
+      // 예전엔 /connect(텔레그램 화면)를 열고 있었다 — 브라우저 설정은 /browser 다.
+      navigate: "/browser",
       plan: null,
     };
   }

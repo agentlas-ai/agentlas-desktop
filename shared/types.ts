@@ -1270,7 +1270,7 @@ export interface AutomationFixResult {
   /** 사용자에게 보여줄 결과 한 줄. */
   message: string;
   /** 렌더러가 열어야 하는 고정 목적지(자유 URL 아님). */
-  navigate: "/connect" | "/settings" | null;
+  navigate: "/browser" | "/settings" | null;
   /** 조치 후 다시 계산한 계획. */
   plan: AutomationFixPlan | null;
 }
@@ -1527,7 +1527,13 @@ export interface ExternalCliSessionImportInput {
   projectId: string;
 }
 
-export type TelegramConnectTargetKind = "agent" | "firm";
+/**
+ * "one" 은 개인 에이전트 One 하나를 가리키는 싱글턴 타겟이다(target_id = "one").
+ * agent/firm 은 One 통합 이전에 만들어진 레거시 연결 — 계속 돌지만 새로 만들지 않는다.
+ */
+export type TelegramConnectTargetKind = "agent" | "firm" | "one";
+/** One 바인딩의 고정 target_id. 설치된 에이전트 행 id가 아니라 불변 sentinel이다. */
+export const TELEGRAM_ONE_TARGET_ID = "one";
 export type TelegramConnectStatus =
   | "draft"
   | "bot_verified"
@@ -1560,8 +1566,21 @@ export interface TelegramConnectBinding {
   lastUpdateId: number;
   lastError: string | null;
   lastTestAt: string | null;
+  /** 텔레그램에서 /project 로 지정한 프로젝트. 이름은 표시용이라 삭제되면 null이 된다. */
+  designatedProjectId: string | null;
+  designatedProjectName: string | null;
+  /** /graph 로 지정한 자동화. 삭제된 자동화는 id만 남고 이름이 null이 된다(조용히 지우지 않는다). */
+  designatedGraphId: string | null;
+  designatedGraphName: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TelegramLegacyCleanupResult {
+  removed: number;
+  botsDeleted: number;
+  /** BotFather 자동화가 실패해 사용자가 직접 지워야 하는 봇들(@username). */
+  botDeleteFailures: string[];
 }
 
 export interface TelegramConnectStartInput {
@@ -3839,6 +3858,16 @@ export interface McpInvocationEvent {
     message: string;
     /** 기계 코드(있으면). 화면은 접어 두고 진단에 쓴다. */
     code?: string;
+    /**
+     * 같은 고지의 두 로케일 판본.
+     *
+     * `message` 는 **실행의 로케일**로 이미 렌더된 문장이다. 그 실행을 다른 로케일로
+     * 설정된 화면(모바일)이 지켜보면 남의 언어가 그대로 뜬다 — 폰이 시작한 실행은
+     * 폰 로케일로 돌지만, 데스크탑이 시작한 실행을 폰이 붙어 볼 때가 그 경우다.
+     * 문장은 이미 렌더돼 있어 중계 지점에서는 되돌릴 수 없으므로, 만드는 자리에서
+     * 두 벌을 함께 낸다. 없으면 `message` 를 그대로 쓴다.
+     */
+    i18n?: { ko: string; en: string };
     /** 원문·payload. 펼쳤을 때만 보인다. */
     details?: string;
     /**
@@ -6058,6 +6087,10 @@ export interface AgentlasIpc {
   };
   telegram: {
     listBindings: () => Promise<TelegramConnectBinding[]>;
+    /** One 싱글턴 연결. 이미 있으면 그 바인딩을 그대로 돌려준다(멱등). */
+    connectOne: (input?: { botName?: string }) => Promise<TelegramConnectActionResult>;
+    /** agent/firm 레거시 연결 일괄 제거. deleteBots 는 옵트인. */
+    removeLegacy: (input: { deleteBots: boolean }) => Promise<TelegramLegacyCleanupResult>;
     autoConnect: (input: TelegramConnectAutoInput) => Promise<TelegramConnectActionResult>;
     start: (input: TelegramConnectStartInput) => Promise<TelegramConnectActionResult>;
     clone: (input: TelegramConnectCloneInput) => Promise<TelegramConnectActionResult>;

@@ -17,7 +17,7 @@ import { decideGraphRunRequest } from "../../shared/graph-run-request";
 import { listAutomations } from "../store/automations";
 import { enqueueTriggerEvent } from "../store/trigger-events";
 
-export type GraphSurfaceSource = "sdk" | "mcp";
+export type GraphSurfaceSource = "sdk" | "mcp" | "telegram";
 
 export type GraphSubmitResult =
   | { ok: true; automationId: string; automationName: string; eventId: string; input: Record<string, string> }

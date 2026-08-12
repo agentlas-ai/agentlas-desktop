@@ -1004,6 +1004,14 @@ export async function pickActiveRunner(): Promise<
  *  여기 source를 추가하고 넘겨라 — 안 넘기면 대화형으로 오인된다(fail-open). */
 export interface InvocationExecutionContext {
   source: "automation" | "site-studio" | "telegram" | "trex";
+  /**
+   * 표면이 붙이는 안내(방 정보·언어 규칙·모드 지시). **userPrompt 에 섞으면 안 된다** —
+   * userPrompt 는 "사람이 실제로 한 말"이고 goal 목표·수락 기준·대화 제목·기억이
+   * 전부 그걸 그대로 쓴다. 실측: 텔레그램이 스캐폴딩을 프롬프트에 이어 붙이자 goal
+   * objective 가 "Telegram chat: … language rule … 파일 만들어줘" 통째가 되어 완료
+   * 판정이 불가능해졌고, 28사이클을 돌다 no_progress_stall 로 막혔다.
+   */
+  surfaceContext?: string;
   /** Main-owned workflow node identity; keeps Memory Tickets distinct within one parent run. */
   nodeId?: string;
   /** Durable logical graph occurrence shared by resume runs. */
@@ -1104,6 +1112,17 @@ function oneTaskSurfaceRecipe(prompt: string, ko: boolean): string | null {
       : "Do not end research or strategy work with generic summary prose. Put the decision-ready conclusion and rationale in data.summary, and compare concrete options in data.table with priority, audience, channel or method, immediate action, required resources, risks or constraints, and verification state. Mark exactly one row recommended. Add the first 3–7 ordered launch steps in data.checklist. Never claim an unexecuted preparation was completed. Treat this result as a document with inspectable, editable, and reusable capabilities and always propose 2–3 next actions that continue directly from the result, such as detailing the recommended execution plan, drafting channel-specific copy, or defining measurement criteria. Never propose viewing an original or finishing here.";
   }
   return null;
+}
+
+/**
+ * 결과 카드를 그릴 화면이 없는 표면인가.
+ *
+ * 텔레그램은 텍스트만 오간다 — "아래에서 확인하세요"처럼 UI를 가리키는 완료 문구를
+ * 보내면 가리킬 "아래"가 없고, 정작 결과(경로·내용)는 사라진다(실측: 파일을 만들고도
+ * 텔레그램에는 카드 안내만 갔다).
+ */
+function isCardlessTextSurface(executionContext?: InvocationExecutionContext): boolean {
+  return executionContext?.source === "telegram";
 }
 
 function deterministicOneCompletionCopy(
@@ -2746,11 +2765,19 @@ export async function runMcpInvocation(
   // 세션 지원 러너는 새 세션이면 시스템 프롬프트 뒤에 붙이고, resume 턴이면 사용자
   // 메시지 앞에 싣는다. 세션 미지원 러너에는 기존처럼 시스템 프롬프트에 합쳐 전달한다.
   const turnContextParts: string[] = [];
+  // 표면 안내는 프롬프트가 아니라 이 턴의 맥락으로 들어간다.
+  if (executionContext?.surfaceContext?.trim()) {
+    turnContextParts.push(executionContext.surfaceContext.trim());
+  }
   // One context remains Main-selected regardless of whether the chat is shown
-  // in Desktop or on its paired Mobile remote.
-  const approvedOneContext = (!workspaceBinding || workspaceBinding.source === "mobile-one") && !req.agentAppMode
-    ? mainOneProfileContext(req)
-    : "";
+  // in Desktop, on its paired Mobile remote, or in the paired Telegram channel.
+  const approvedOneContext =
+    (!workspaceBinding
+      || workspaceBinding.source === "mobile-one"
+      || workspaceBinding.source === "telegram-one")
+    && !req.agentAppMode
+      ? mainOneProfileContext(req)
+      : "";
   if (approvedOneContext) turnContextParts.push(approvedOneContext);
   const approvedOneAttachmentContext = !workspaceBinding && !req.agentAppMode
     ? mainOneAttachmentContext(req)
@@ -3856,7 +3883,12 @@ export async function runMcpInvocation(
             ? "실행 가능한 해결안을 안전하게 구성하지 못해 이 실행은 완료로 표시하지 않았습니다."
             : "This run is not marked complete because an executable solution could not be formed safely.";
         } else if (usedDeterministicOneSurface && deterministicOneSurface) {
-          displayText = deterministicOneCompletionCopy(req.userPrompt, deterministicOneSurface, locale);
+          // 카드를 못 그리는 채널에는 카드를 가리키는 문구 대신 모델이 쓴 결과 본문을
+          // 그대로 보낸다. 본문이 비었을 때만 완료 문구로 되돌아간다.
+          const cardless = isCardlessTextSurface(executionContext);
+          const modelText = cardless ? surfaceParse.cleanedText.trim() : "";
+          displayText = modelText
+            || deterministicOneCompletionCopy(req.userPrompt, deterministicOneSurface, locale);
         } else if (surfaceParse.surfaces.length > 0 || surfaceParse.errors.length > 0) {
           displayText =
             surfaceParse.cleanedText.trim() ||

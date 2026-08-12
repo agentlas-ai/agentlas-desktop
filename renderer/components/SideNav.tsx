@@ -4,7 +4,7 @@
 //   · 접기(collapsed) 모드: 아이콘만 + hover 툴팁. 상태는 localStorage 영속.
 //   · 최상단은 titlebar-drag(맥 신호등 회피 + 창 드래그).
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ProductModeMenu } from "./one/ProductModeMenu";
@@ -15,6 +15,12 @@ import { navigate } from "@/lib/navigation";
 import { ipc } from "@/lib/ipc";
 import { classifyHubEntity, entityClassShortLabel } from "@/lib/agent-entity-kind";
 import { pickLocalized, useT } from "@/lib/i18n";
+import {
+  getTelegramOneDialogServerSnapshot,
+  getTelegramOneDialogSnapshot,
+  openTelegramOneDialog,
+  subscribeTelegramOneDialog,
+} from "@/lib/telegram-one-dialog";
 import {
   IconWand,
   IconUsers,
@@ -40,8 +46,13 @@ const COLLAPSE_KEY = "agentlas.sidenav.collapsed";
 
 interface Leaf {
   label: string;
+  /** 라우트가 있는 항목의 이동 경로. onSelect 가 있으면 키로만 쓰인다. */
   href: string;
   icon: IconType;
+  /** 이동 대신 팝업 등을 여는 항목(예: 텔레그램 연결). */
+  onSelect?: () => void;
+  /** onSelect 항목의 활성 표시 판정. */
+  isActive?: () => boolean;
 }
 interface Group {
   id: string;
@@ -72,6 +83,12 @@ export function SideNav({
   const [searchSuggestionQuery, setSearchSuggestionQuery] = useState("");
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const searchGenerationRef = useRef(0);
+  // 텔레그램 항목은 이동이 아니라 팝업이라, 활성 표시가 pathname 이 아니라 팝업 상태를 따른다.
+  const telegramOneDialogOpen = useSyncExternalStore(
+    subscribeTelegramOneDialog,
+    () => getTelegramOneDialogSnapshot().open,
+    () => getTelegramOneDialogServerSnapshot().open,
+  );
 
   useEffect(() => {
     try {
@@ -144,11 +161,19 @@ export function SideNav({
       {
         id: "connect",
         label: t("nav.group.connect"),
-        href: "/connect",
+        // 텔레그램은 라우트가 아니라 팝업이므로, 그룹 자체는 실재하는 /browser 를 가리킨다
+        // (접힌 레일에서는 그룹 머리만 링크로 렌더된다).
+        href: "/browser",
         icon: IconAtSign,
-        isActive: (p) => p.startsWith("/connect") || p.startsWith("/browser"),
+        isActive: (p) => p.startsWith("/browser"),
         items: [
-          { label: t("nav.telegram"), href: "/connect", icon: IconAtSign },
+          {
+            label: t("nav.telegram"),
+            href: "telegram-one",
+            icon: IconAtSign,
+            onSelect: openTelegramOneDialog,
+            isActive: () => telegramOneDialogOpen,
+          },
           { label: t("nav.browser"), href: "/browser", icon: IconNetwork },
         ],
       },
@@ -176,7 +201,7 @@ export function SideNav({
         ],
       },
     ],
-    [t],
+    [t, telegramOneDialogOpen],
   );
 
   // 활성 그룹은 기본으로 펼친다(사용자가 명시적으로 토글하면 그 값 우선).
@@ -422,7 +447,22 @@ export function SideNav({
                 {open && (
                   <div className="sidenav-sub">
                     {g.items.map((sub) => {
-                      const active2 = isLeafActive(sub.href);
+                      const active2 = sub.onSelect ? Boolean(sub.isActive?.()) : isLeafActive(sub.href);
+                      if (sub.onSelect) {
+                        const onSelect = sub.onSelect;
+                        return (
+                          <button
+                            key={sub.href}
+                            type="button"
+                            className="sidenav-subitem"
+                            data-active={active2 ? "true" : "false"}
+                            onClick={() => onSelect()}
+                          >
+                            <span className="sidenav-sub-dot" />
+                            <span className="sidenav-label">{sub.label}</span>
+                          </button>
+                        );
+                      }
                       return (
                         <Link
                           key={sub.href}

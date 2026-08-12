@@ -5,7 +5,7 @@ import {
   InvocationLifecycleRegistry,
   registerDurableInvocationStart,
 } from "../runtime/invocation-lifecycle";
-import { runMcpInvocation } from "../mcp/client";
+import { runMcpInvocation, type InvocationExecutionContext } from "../mcp/client";
 import {
   invocationWorkspaceBindingsEqual,
   normalizeRemoteInvocationPermission,
@@ -606,6 +606,11 @@ export class InvocationService {
   start(
     req: McpInvocationRequest,
     workspaceBinding?: InvocationWorkspaceBinding,
+    /**
+     * 실행 표면 표식. 미지정은 "헤드리스 누락"과 구분되지 않는 fail-open 상태라
+     * 원격 대화형 채널(telegram 등)은 반드시 넘긴다.
+     */
+    executionContext?: InvocationExecutionContext,
   ): InvocationStartResult {
     const incoming = req as OneInvocationRequest;
     const {
@@ -626,6 +631,10 @@ export class InvocationService {
     if (!storedChat) throw new Error("Chat not found");
     const chat = repairRootChatSurfaceController(storedChat);
     const mobileOneBoundary = workspaceBinding?.source === "mobile-one";
+    // A One turn may also arrive from the paired Telegram channel. Both remote
+    // One boundaries keep One mode; only the Mobile one may carry a team
+    // preflight capability, because only Mobile has a surface that mints one.
+    const remoteOneBoundary = mobileOneBoundary || workspaceBinding?.source === "telegram-one";
     if (incoming.oneMode === true && chat.originSurface !== "one") {
       throw new Error("One execution is valid only for a One-owned conversation");
     }
@@ -634,7 +643,7 @@ export class InvocationService {
     }
     const requestedOneMode = incoming.oneMode === true
       && chat.originSurface === "one"
-      && (!workspaceBinding || mobileOneBoundary)
+      && (!workspaceBinding || remoteOneBoundary)
       && req.agentAppMode !== true;
     if (requestedOneMemoryUseOnceRef && (!requestedOneMode || workspaceBinding)) {
       throw new Error("A Memory use-once receipt is valid only for a local One invocation");
@@ -1449,6 +1458,7 @@ export class InvocationService {
       },
       controller.signal,
       runWorkspaceBinding,
+      executionContext,
     )
       .then((result) => {
         // A compromised runtime must not turn the private attachment staging
@@ -1596,6 +1606,7 @@ export class InvocationService {
     req: McpInvocationRequest,
     expectedRunId?: string,
     workspaceBinding?: InvocationWorkspaceBinding,
+    executionContext?: InvocationExecutionContext,
   ): InvocationSteerResult {
     if (req.oneAttachmentRef) {
       throw new Error("One attachments cannot be added through steering in v1; wait for the active run and send a new request");
@@ -1612,7 +1623,7 @@ export class InvocationService {
         accepted: true,
         queued: false,
         interruptsCurrent: false,
-        runId: this.start({ ...steerRequest, runId: undefined }, workspaceBinding).runId,
+        runId: this.start({ ...steerRequest, runId: undefined }, workspaceBinding, executionContext).runId,
       };
     }
     if (!invocationWorkspaceBindingsEqual(active[1].workspaceBinding, workspaceBinding)) {

@@ -1,0 +1,360 @@
+.layer {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 20, 19, 0.46);
+}
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(460px, 92vw);
+  max-height: min(720px, calc(100vh - 48px));
+  /* 카드 자체는 스크롤하지 않는다 — .scroll 만 스크롤해서 닫기 버튼과 주 CTA 가
+     내용 길이와 무관하게 항상 화면에 남는다. */
+  overflow: hidden;
+  padding: 20px 24px 22px;
+  border-radius: 22px;
+  background: var(--paper, #fff);
+  color: var(--ink, #17191b);
+  box-shadow: 0 24px 64px rgba(10, 14, 13, 0.26);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.mark {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 13px;
+  background: rgba(41, 130, 204, 0.12);
+  color: #2982cc;
+  font-size: 18px;
+}
+
+.close {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted-deep, #6e7479);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.close:hover:not(:disabled) {
+  background: rgba(120, 128, 134, 0.14);
+}
+
+.scroll {
+  flex: 1 1 auto;
+  /* min-height:0 이 없으면 flex 아이템이 내용 높이로 버텨 카드가 넘친다. */
+  min-height: 0;
+  overflow-y: auto;
+  /* 스크롤바가 붙는 만큼만 오른쪽 여백 — 카드 패딩과 이중으로 밀리지 않게. */
+  margin-right: -6px;
+  padding-right: 6px;
+}
+
+.title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.subtitle {
+  margin: 6px 0 0;
+  color: var(--muted-deep, #6e7479);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.notice {
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  border-radius: 13px;
+  background: rgba(216, 158, 40, 0.11);
+  color: #7a5a12;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.options {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.option {
+  display: grid;
+  gap: 3px;
+  padding: 13px 15px;
+  border: 1px solid rgba(120, 128, 134, 0.2);
+  border-radius: 14px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.option[data-active="true"] {
+  border-color: #2982cc;
+  background: rgba(41, 130, 204, 0.07);
+}
+
+.option:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.optionTitle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(41, 130, 204, 0.14);
+  color: #2166a3;
+  font-size: 10.5px;
+  font-style: normal;
+  font-weight: 600;
+}
+
+.optionHint {
+  color: var(--muted-deep, #6e7479);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.field {
+  display: grid;
+  gap: 5px;
+  margin-top: 4px;
+  font-size: 12.5px;
+}
+
+.field input {
+  padding: 10px 12px;
+  border: 1px solid rgba(120, 128, 134, 0.24);
+  border-radius: 11px;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+}
+
+.field small {
+  color: var(--muted-deep, #6e7479);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.progress,
+.connected {
+  display: grid;
+  gap: 6px;
+  margin-top: 16px;
+  padding: 14px 15px;
+  border-radius: 14px;
+  background: rgba(120, 128, 134, 0.08);
+  font-size: 13px;
+}
+
+.progressLine {
+  color: var(--muted-deep, #6e7479);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.progressHint {
+  color: #2166a3;
+  font-size: 12px;
+}
+
+.connectedHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.pill {
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(45, 150, 96, 0.14);
+  color: #1f7a4c;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.connectedChat {
+  margin: 0;
+  font-size: 13px;
+}
+
+.hint {
+  margin: 0;
+  color: var(--muted-deep, #6e7479);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.actions button {
+  padding: 7px 12px;
+  border: 1px solid rgba(120, 128, 134, 0.24);
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.actions button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.danger {
+  color: #b4342c;
+  border-color: rgba(180, 52, 44, 0.3) !important;
+}
+
+.legacy {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 14px 15px;
+  border: 1px solid rgba(180, 52, 44, 0.18);
+  border-radius: 14px;
+  background: rgba(180, 52, 44, 0.05);
+}
+
+.legacyHead {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.legacyHead span {
+  color: var(--muted-deep, #6e7479);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.check input {
+  margin-top: 2px;
+}
+
+.check small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted-deep, #6e7479);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.legacyAction {
+  justify-self: start;
+  padding: 8px 14px;
+  border: 1px solid rgba(180, 52, 44, 0.34);
+  border-radius: 11px;
+  background: transparent;
+  color: #b4342c;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.legacyAction:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.receipt {
+  margin: 14px 0 0;
+  padding: 11px 13px;
+  border-radius: 12px;
+  background: rgba(120, 128, 134, 0.09);
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-line;
+}
+
+.error {
+  margin: 12px 0 0;
+  color: #b4342c;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.primary {
+  width: 100%;
+  flex: 0 0 auto;
+  margin-top: 18px;
+  /* 스크롤 영역이 이 버튼 아래로 이어질 때 "잘린 것"이 아니라 "더 있음"으로 읽히게
+     하는 경계. 내용이 짧아 스크롤이 없을 땐 거의 보이지 않는다. */
+  box-shadow: 0 -14px 16px -14px rgba(10, 14, 13, 0.35);
+  padding: 13px 16px;
+  border: 0;
+  border-radius: 14px;
+  background: #1d2530;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (prefers-color-scheme: dark) {
+  .card {
+    background: var(--paper, #1b1f22);
+    color: var(--ink, #eef1f3);
+  }
+
+  .primary {
+    background: #e8edf2;
+    color: #14181c;
+  }
+}

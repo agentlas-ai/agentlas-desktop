@@ -3888,6 +3888,66 @@ export function initStore(options: StoreInitOptions = {}): void {
     }
   }
 
+  // v94: One이 텔레그램의 단일 창구가 된다. 에이전트별 연결(agent/firm)은 레거시로
+  // 남겨 계속 돌지만, 새 연결은 target_kind='one' 하나다. One 바인딩은 부분 유니크
+  // 인덱스로 싱글턴을 강제한다 — "One이 둘"은 표현조차 불가능해야 한다.
+  // designated_project_id / designated_graph_id 는 텔레그램에서 /project · /graph 로
+  // 지정한 대상을 기억한다. graph 쪽에 FK를 걸지 않는 건 의도다: 삭제된 자동화는
+  // resolveGraphRef 의 타입 실패(RUN_REQUEST_NOT_FOUND)로 드러나야지, 조용히 NULL이
+  // 되어 "지정한 적 없음"처럼 보이면 안 된다.
+  if (userVersion < 94 && tableExists(_db, "telegram_bindings")) {
+    _db.exec(`
+      CREATE TABLE telegram_bindings_v94 (
+        id TEXT PRIMARY KEY,
+        target_kind TEXT NOT NULL CHECK(target_kind IN ('agent','firm','one')),
+        target_id TEXT NOT NULL,
+        telegram_chat_id TEXT,
+        telegram_chat_title TEXT,
+        bot_user_id INTEGER,
+        bot_username TEXT,
+        bot_display_name TEXT,
+        chat_session_id TEXT REFERENCES chats(id) ON DELETE SET NULL,
+        status TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        last_update_id INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        last_test_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        automation_report_enabled INTEGER NOT NULL DEFAULT 0,
+        token_saved INTEGER NOT NULL DEFAULT 0,
+        token_fingerprint TEXT,
+        designated_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+        designated_graph_id TEXT,
+        legacy_notice_at TEXT
+      );
+      INSERT INTO telegram_bindings_v94 (
+        id, target_kind, target_id, telegram_chat_id, telegram_chat_title,
+        bot_user_id, bot_username, bot_display_name, chat_session_id, status,
+        enabled, last_update_id, last_error, last_test_at, created_at, updated_at,
+        automation_report_enabled, token_saved, token_fingerprint
+      )
+      SELECT
+        id, target_kind, target_id, telegram_chat_id, telegram_chat_title,
+        bot_user_id, bot_username, bot_display_name, chat_session_id, status,
+        enabled, last_update_id, last_error, last_test_at, created_at, updated_at,
+        automation_report_enabled, token_saved, token_fingerprint
+      FROM telegram_bindings;
+      DROP TABLE telegram_bindings;
+      ALTER TABLE telegram_bindings_v94 RENAME TO telegram_bindings;
+      CREATE INDEX idx_telegram_bindings_target
+        ON telegram_bindings(target_kind, target_id);
+      CREATE INDEX idx_telegram_bindings_chat
+        ON telegram_bindings(telegram_chat_id);
+      CREATE INDEX idx_telegram_bindings_enabled
+        ON telegram_bindings(enabled, status);
+      CREATE INDEX idx_telegram_bindings_automation_report
+        ON telegram_bindings(automation_report_enabled, enabled, telegram_chat_id);
+      CREATE UNIQUE INDEX idx_telegram_bindings_one_singleton
+        ON telegram_bindings(target_kind) WHERE target_kind = 'one';
+    `);
+  }
+
   // ── v86 → v87: 노드 승인 브레이크 ──────────────────────────────────────
   // 사람이 "이건 나가도 된다"고 누른 사실은 durable해야 한다. 메모리에만 있으면
   // 앱을 껐다 켜는 순간 승인이 사라져 자동화가 영원히 같은 자리에서 멈춘다.

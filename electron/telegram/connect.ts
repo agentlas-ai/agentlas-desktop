@@ -9,10 +9,29 @@ import {
   resolveTelegramGoalIntent,
 } from "./judged-intents";
 import { runMcpInvocation } from "../mcp/client";
+import { invocationService } from "../invocation/service";
+import { captureTelegramOneInvocationBinding } from "../invocation/workspace-binding";
+import { prejudgeOneRequestIntent } from "../one/judged-request-intent";
+import { prejudgeOneMemoryIntent } from "../one/memory-detector";
+import {
+  dispatchTelegramCommand,
+  handleTelegramSelectCallback,
+  parseTelegramCommand,
+  type TelegramDispatchDeps,
+} from "./command-dispatch";
+import {
+  forgetTelegramCommandSync,
+  syncTelegramBotCommands,
+  type TelegramCommandSyncApi,
+} from "./commands-sync";
+import { clearInlineSelect, type InlineKeyboardMarkup } from "./inline-select";
 import { getAgentById, listInstalledAgents } from "../mcp/registry";
-import { createChat, getChat } from "../store/chats";
+import { createChat, getChat, getChatWorkingFolder, setChatWorkingFolder } from "../store/chats";
 import { getDb } from "../store/db";
 import { getFirm } from "../store/firms";
+import { getProject } from "../store/projects";
+import { getAutomation } from "../store/automations";
+import { getOneProfile } from "../store/one-profile";
 import { agentRunCwd } from "../runtime/exec";
 import { deleteSecret, readSecret, setSecret } from "../secrets/vault";
 import type {
@@ -26,9 +45,11 @@ import type {
   TelegramConnectStartInput,
   TelegramConnectStatus,
   TelegramConnectTargetKind,
+  TelegramLegacyCleanupResult,
 } from "../../shared/types";
+import { TELEGRAM_ONE_TARGET_ID } from "../../shared/types";
 
-interface TelegramBindingRow {
+export interface TelegramBindingRow {
   id: string;
   target_kind: TelegramConnectTargetKind;
   target_id: string;
@@ -46,18 +67,24 @@ interface TelegramBindingRow {
   last_update_id: number;
   last_error: string | null;
   last_test_at: string | null;
+  designated_project_id: string | null;
+  designated_graph_id: string | null;
+  /** 레거시 통합 안내를 이 방에 보낸 시각. 한 번만 보낸다. */
+  legacy_notice_at: string | null;
   created_at: string;
   updated_at: string;
 }
 
-interface TelegramUser {
+export interface TelegramUser {
   id: number;
   is_bot: boolean;
   first_name?: string;
   username?: string;
+  /** 텔레그램 클라이언트 언어(예: "ko"). 명령처럼 언어 신호가 없는 메시지의 답변 언어. */
+  language_code?: string;
 }
 
-interface TelegramChat {
+export interface TelegramChat {
   id: number;
   type: "private" | "group" | "supergroup" | "channel" | string;
   title?: string;
@@ -66,7 +93,7 @@ interface TelegramChat {
   last_name?: string;
 }
 
-interface TelegramMessage {
+export interface TelegramMessage {
   message_id: number;
   from?: TelegramUser;
   chat: TelegramChat;
@@ -115,9 +142,17 @@ interface TelegramRuntimeAttachment {
   image?: ImageAttachment;
 }
 
+export interface TelegramCallbackQuery {
+  id: string;
+  from?: TelegramUser;
+  message?: TelegramMessage;
+  data?: string;
+}
+
 interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
 }
 
 interface Poller {
@@ -213,6 +248,56 @@ const TELEGRAM_COPY = {
     "error.token_not_bot": "Telegram 비밀문자가 봇용이 아닙니다.",
     "error.token_required": "Telegram 봇 비밀문자가 필요합니다.",
     "error.window_closed": "Telegram 연결 창이 닫혔습니다.",
+    "cmd.unknown": "모르는 명령입니다: /{name}\n/help 를 보내면 쓸 수 있는 명령이 나옵니다.",
+    "cmd.help_header": "쓸 수 있는 명령",
+    "cmd.help_footer": "메시지 창에 / 를 입력하면 목록이 떠서 위아래 방향키로 고를 수 있습니다.\n목록 버튼 대신 이름을 직접 적어도 됩니다 — 예: /project 마케팅",
+    "cmd.one_only": "이 명령은 One 연결에서만 씁니다. 이 방은 예전 방식의 에이전트 연결이라 지원하지 않습니다.",
+    "cmd.legacy_notice": "안내: 에이전트별 텔레그램 연결은 One 하나로 합쳐졌습니다. Agentlas 데스크탑에서 이 연결을 지우고 One으로 다시 연결해 주세요. 그때까지 이 방은 예전 방식 그대로 동작합니다.",
+    "cmd.status.connected_to": "연결 대상: {name}",
+    "cmd.status.bot": "봇: @{username}",
+    "cmd.status.chat": "방: {title}",
+    "cmd.status.project": "지정 프로젝트: {name} ({folder})",
+    "cmd.status.project_none": "지정 프로젝트: 없음",
+    "cmd.status.graph": "지정 자동화: {name}",
+    "cmd.status.graph_disabled": "지정 자동화: {name} (꺼짐)",
+    "cmd.status.graph_missing": "지정 자동화: 삭제된 자동화입니다 ({id})",
+    "cmd.status.graph_none": "지정 자동화: 없음",
+    "cmd.status.reports_on": "자동화 보고: 켜짐",
+    "cmd.status.reports_off": "자동화 보고: 꺼짐",
+    "cmd.status.running": "지금 작업이 진행 중입니다. /stop 으로 중단할 수 있습니다.",
+    "cmd.status.idle": "진행 중인 작업이 없습니다.",
+    "cmd.new.done": "새 대화로 시작합니다. 이전 맥락은 더 보지 않습니다.",
+    "cmd.stop.done": "중단을 요청했습니다.",
+    "cmd.stop.nothing": "중단할 작업이 없습니다.",
+    "cmd.write.needs_text": "무엇을 만들지 함께 적어주세요 — 예: /write 이번 주 매출 리포트 만들어줘",
+    "cmd.projects.empty": "프로젝트가 아직 없습니다. Agentlas 데스크탑에서 먼저 만들어주세요.",
+    "cmd.projects.pick": "지정할 프로젝트를 고르세요.",
+    "cmd.project.set": "프로젝트를 지정했습니다: {name}\n작업 폴더: {folder}",
+    "cmd.project.cleared": "프로젝트 지정을 해제했습니다.",
+    "cmd.project.not_found": "그 이름의 프로젝트를 찾지 못했습니다: {query}\n/projects 로 목록에서 고를 수 있습니다.",
+    "cmd.project.locked": "이 대화는 이미 다른 프로젝트에 묶여 있어 옮길 수 없습니다. /new 로 새 대화를 시작한 뒤 지정해 주세요.",
+    "cmd.project.no_folder": "{name} 에는 작업 폴더가 없습니다. 데스크탑에서 폴더를 지정한 뒤 다시 시도해 주세요.",
+    "cmd.graphs.empty": "저장된 자동화가 없습니다.",
+    "cmd.graphs.pick": "자동화를 고르세요. (꺼짐) 표시는 지금 꺼져 있다는 뜻입니다.",
+    "cmd.graph.set": "자동화를 지정했습니다: {name}",
+    "cmd.graph.cleared": "자동화 지정을 해제했습니다.",
+    "cmd.graph.none_designated": "지정된 자동화가 없습니다. /graphs 로 먼저 고르거나 이름을 함께 적어주세요.",
+    "cmd.graph_run.requested": "{name} 실행을 요청했습니다. Agentlas가 순서대로 실행합니다.",
+    "cmd.graph_run.rejected": "{code}\n{reason}\n{nextAction}",
+    "cmd.hep.needs_text": "무엇이 필요한지 함께 적어주세요 — 예: /hep_search 계약서 검토",
+    "cmd.search.needs_query": "찾을 이름을 함께 적어주세요 — 예: /{command} 마케팅",
+    "cmd.hep.searching": "찾는 중입니다…",
+    "cmd.hep.staffing": "편성 중입니다…",
+    "cmd.hep.no_result": "결과가 없습니다.",
+    "cmd.hep.failed": "실행하지 못했습니다: {message}",
+    "cmd.list.expired": "이 목록은 만료됐습니다. /{command} 를 다시 보내주세요.",
+    "cmd.list.page": "{current}/{total} 쪽",
+    "cmd.list.prev": "◀ 이전",
+    "cmd.list.next": "다음 ▶",
+    "cmd.list.close": "닫기",
+    "cmd.list.closed": "목록을 닫았습니다.",
+    "cmd.reports.on": "이제 자동화가 끝나면 이 방으로 보고를 보냅니다.",
+    "cmd.reports.off": "자동화 완료 보고를 끕니다.",
   },
   en: {
     "auto.existing_confirmed": "Existing Telegram chat confirmed. A test message was sent.",
@@ -267,10 +352,60 @@ const TELEGRAM_COPY = {
     "error.token_not_bot": "Telegram token does not belong to a bot.",
     "error.token_required": "Telegram bot secret is required.",
     "error.window_closed": "Telegram connect window was closed.",
+    "cmd.unknown": "Unknown command: /{name}\nSend /help to see what you can use here.",
+    "cmd.help_header": "Commands you can use",
+    "cmd.help_footer": "Type / in the message box to open the list and pick with the arrow keys.\nYou can also type a name instead of tapping a button — for example /project marketing",
+    "cmd.one_only": "This command belongs to the One connection. This chat uses the older per-agent connection, so it is not available here.",
+    "cmd.legacy_notice": "Heads up: per-agent Telegram connections are now consolidated into One. In Agentlas Desktop, remove this connection and reconnect through One. Until then this chat keeps working the old way.",
+    "cmd.status.connected_to": "Connected to: {name}",
+    "cmd.status.bot": "Bot: @{username}",
+    "cmd.status.chat": "Chat: {title}",
+    "cmd.status.project": "Designated project: {name} ({folder})",
+    "cmd.status.project_none": "Designated project: none",
+    "cmd.status.graph": "Designated automation: {name}",
+    "cmd.status.graph_disabled": "Designated automation: {name} (off)",
+    "cmd.status.graph_missing": "Designated automation: it has been deleted ({id})",
+    "cmd.status.graph_none": "Designated automation: none",
+    "cmd.status.reports_on": "Automation reports: on",
+    "cmd.status.reports_off": "Automation reports: off",
+    "cmd.status.running": "A run is in progress. Send /stop to stop it.",
+    "cmd.status.idle": "Nothing is running.",
+    "cmd.new.done": "Starting a fresh conversation. Earlier context is no longer used.",
+    "cmd.stop.done": "Stop requested.",
+    "cmd.stop.nothing": "There is nothing to stop.",
+    "cmd.write.needs_text": "Add what you want done — for example /write build this week's revenue report",
+    "cmd.projects.empty": "You have no projects yet. Create one in Agentlas Desktop first.",
+    "cmd.projects.pick": "Pick the project to designate.",
+    "cmd.project.set": "Designated project: {name}\nWorking folder: {folder}",
+    "cmd.project.cleared": "Project designation cleared.",
+    "cmd.project.not_found": "No project matched: {query}\nSend /projects to pick from the list.",
+    "cmd.project.locked": "This conversation already belongs to another project and cannot be moved. Send /new and designate it again.",
+    "cmd.project.no_folder": "{name} has no working folder. Set one in Desktop and try again.",
+    "cmd.graphs.empty": "No saved automations.",
+    "cmd.graphs.pick": "Pick an automation. (off) means it is currently turned off.",
+    "cmd.graph.set": "Designated automation: {name}",
+    "cmd.graph.cleared": "Automation designation cleared.",
+    "cmd.graph.none_designated": "No automation is designated. Send /graphs to pick one, or include a name.",
+    "cmd.graph_run.requested": "Run requested for {name}. Agentlas runs it in order.",
+    "cmd.graph_run.rejected": "{code}\n{reason}\n{nextAction}",
+    "cmd.hep.needs_text": "Add what you need — for example /hep_search contract review",
+    "cmd.search.needs_query": "Add the name to look for — for example /{command} marketing",
+    "cmd.hep.searching": "Searching…",
+    "cmd.hep.staffing": "Staffing…",
+    "cmd.hep.no_result": "No results.",
+    "cmd.hep.failed": "Could not run it: {message}",
+    "cmd.list.expired": "This list has expired. Send /{command} again.",
+    "cmd.list.page": "Page {current}/{total}",
+    "cmd.list.prev": "◀ Prev",
+    "cmd.list.next": "Next ▶",
+    "cmd.list.close": "Close",
+    "cmd.list.closed": "List closed.",
+    "cmd.reports.on": "Automation completion reports will now arrive in this chat.",
+    "cmd.reports.off": "Automation completion reports are off.",
   },
 } as const;
 
-type TelegramCopyKey = keyof typeof TELEGRAM_COPY.en;
+export type TelegramCopyKey = keyof typeof TELEGRAM_COPY.en;
 type TelegramInvocationMode = {
   permissions: "read" | "write";
   goalMode: boolean;
@@ -297,6 +432,51 @@ function tg(key: TelegramCopyKey, vars: Record<string, string | number> = {}, lo
 // "메시지와 같은 언어로 답하라" 지시로 임의 외국어까지 맞춘다.
 function detectReplyLocale(text: string): "ko" | "en" {
   return preferredLocaleFromText(text);
+}
+
+/**
+ * 명령 답변의 언어.
+ *
+ * 자유 문장은 "보낸 언어로 답한다"가 맞지만, `/help` 같은 명령은 **언어 신호가 없다** —
+ * 그걸 영어로 읽어 영어로 답하면 한국어 사용자에게 메뉴는 한국어인데 답만 영어인
+ * 상태가 된다(실측). 명령에 한해 텔레그램 클라이언트 언어를 우선한다. 클라이언트
+ * 언어를 모르면 기존 규칙(본문 감지)으로 돌아간다.
+ */
+function commandReplyLocale(message: TelegramMessage, text: string): "ko" | "en" {
+  return telegramHostLocale(message, text);
+}
+
+/**
+ * 호스트가 스스로 보내는 문장(접수 확인·오류·명령 응답)의 언어.
+ *
+ * 본문 비율 판정(`isPrimarilyKorean`)은 이 도메인에서 틀린다 — 개발 요청에는 파일명과
+ * 영어 용어가 늘 섞이고 그것들이 라틴 글자 수를 넘겨 버린다. 실측:
+ *   "hello.txt 만들어줘"(한글4/라틴8) → en
+ *   "README.md 파일에 introduction 섹션 추가해줘"(한글9/라틴20) → en
+ * 한국어 사용자에게 한국어로 부탁했는데 영어로 답하는 셈이다. 그래서
+ * **한글이 하나라도 있으면 한국어**, 없으면 클라이언트 언어, 그것도 모르면 본문 판정.
+ *
+ * 모델 답변의 언어는 여기서 정하지 않는다 — 표면 안내의 언어 규칙이 따로 지시한다.
+ */
+function telegramHostLocale(message: TelegramMessage, text: string): "ko" | "en" {
+  if (/[가-힣]/.test(text)) return "ko";
+  return clientLocale(message.from?.language_code) ?? detectReplyLocale(text);
+}
+
+/** 텔레그램 클라이언트 언어. 모르면 null 을 돌려 호출부가 자기 폴백을 고르게 한다. */
+function clientLocale(languageCode: string | undefined): "ko" | "en" | null {
+  const code = languageCode?.toLowerCase() ?? "";
+  if (!code) return null;
+  return code.startsWith("ko") ? "ko" : "en";
+}
+
+/**
+ * 인라인 버튼 응답의 언어. 버튼에는 본문이 없으므로 누른 사람의 클라이언트 언어가
+ * 유일한 신호다 — 앱 UI 로케일을 쓰면 명령은 한국어로 답하는데 버튼만 영어가 된다
+ * (실측: 버튼으로 프로젝트를 고르자 거부 문구만 영어로 나왔다).
+ */
+function callbackReplyLocale(query: TelegramCallbackQuery): "ko" | "en" {
+  return clientLocale(query.from?.language_code) ?? (currentUiLocale() === "ko" ? "ko" : "en");
 }
 
 function nowIso(): string {
@@ -394,6 +574,15 @@ function bindingFromRow(row: TelegramBindingRow, hasToken: boolean, tokenPreview
     lastUpdateId: row.last_update_id,
     lastError: row.last_error,
     lastTestAt: row.last_test_at,
+    designatedProjectId: row.designated_project_id,
+    designatedProjectName: row.designated_project_id
+      ? getProject(row.designated_project_id)?.name ?? null
+      : null,
+    designatedGraphId: row.designated_graph_id,
+    // 삭제된 자동화는 id를 남긴 채 이름만 null이 된다 — 지정 사실 자체를 조용히 지우지 않는다.
+    designatedGraphName: row.designated_graph_id
+      ? getAutomation(row.designated_graph_id)?.name ?? null
+      : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -434,6 +623,12 @@ function resolveTarget(
     const firm = getFirm(targetId);
     if (!firm && strict) throw new Error(`Telegram Connect target firm not found: ${targetId}`);
     return firm ? { name: firm.nameEn || firm.name } : null;
+  }
+  if (targetKind === "one") {
+    // One은 설치·삭제되는 자산이 아니라 이 사용자 자신의 개인 에이전트다. 따라서
+    // 여기서 null을 돌려줄 길이 없어야 한다 — null이면 disableMissingTargetBinding /
+    // pruneOrphanedTelegramBindings 가 사용자의 유일한 연결을 조용히 없앤다.
+    return { name: getOneProfile().displayName };
   }
   return null;
 }
@@ -500,6 +695,63 @@ async function verifyBotToken(token: string): Promise<TelegramUser> {
   const me = await telegramApi<TelegramUser>(token, "getMe", {});
   if (!me.is_bot) throw new Error(tg("error.token_not_bot"));
   return me;
+}
+
+/** 지금 살아 있는 One 바인딩(있으면). 싱글턴이므로 최대 1행이다. */
+export function getTelegramOneBindingRow(): TelegramBindingRow | null {
+  const row = getDb()
+    .prepare("SELECT * FROM telegram_bindings WHERE target_kind = 'one' LIMIT 1")
+    .get() as TelegramBindingRow | undefined;
+  return row ?? null;
+}
+
+export function getTelegramOneBinding(): TelegramConnectBinding | null {
+  const row = getTelegramOneBindingRow();
+  return row ? toBinding(row) : null;
+}
+
+/**
+ * 텔레그램 ↔ One 연결. 싱글턴이라 두 번 눌러도 같은 바인딩이 돌아온다(멱등).
+ * 방 페어링까지 끝난 바인딩이 있으면 autoConnectTelegram 이 테스트 발송으로 확인만 한다.
+ */
+export async function connectTelegramToOne(
+  input: { botName?: string } = {},
+): Promise<TelegramConnectActionResult> {
+  return autoConnectTelegram({
+    targetKind: "one",
+    targetId: TELEGRAM_ONE_TARGET_ID,
+    ...(input.botName ? { botName: input.botName } : {}),
+  });
+}
+
+/**
+ * One 통합 이전에 만들어진 agent/firm 연결을 한 번에 정리한다.
+ * 봇 삭제는 옵트인 — BotFather 자동화는 되돌릴 수 없고 DOM 조작이라 실패할 수 있어서,
+ * 기본은 앱 쪽 연결만 지우고 봇은 살려 둔다(One 연결에 재사용 가능).
+ */
+export async function removeLegacyTelegramConnections(
+  input: { deleteBots: boolean },
+): Promise<TelegramLegacyCleanupResult> {
+  const rows = getDb()
+    .prepare("SELECT * FROM telegram_bindings WHERE target_kind != 'one' ORDER BY created_at ASC")
+    .all() as TelegramBindingRow[];
+  let removed = 0;
+  const attemptedBots = new Set<string>();
+  const deletedBots = new Set<string>();
+  for (const row of rows) {
+    const result = await removeTelegramConnection(row.id, input.deleteBots);
+    removed += 1;
+    if (!input.deleteBots || !row.bot_username) continue;
+    // 같은 봇 토큰을 공유하는 포트가 남아 있으면 removeTelegramConnection 이 삭제를
+    // 건너뛴다. 그건 실패가 아니라 순서 문제라, 마지막 공유자가 지워질 때 성공한다.
+    // 그래서 행 단위가 아니라 봇 단위로 집계한다.
+    attemptedBots.add(row.bot_username);
+    if (result.botDeleted) deletedBots.add(row.bot_username);
+  }
+  const botDeleteFailures = [...attemptedBots]
+    .filter((username) => !deletedBots.has(username))
+    .map((username) => `@${username}`);
+  return { removed, botsDeleted: deletedBots.size, botDeleteFailures };
 }
 
 export async function autoConnectTelegram(input: TelegramConnectAutoInput): Promise<TelegramConnectActionResult> {
@@ -736,6 +988,8 @@ export async function removeTelegramConnection(
   }
   getDb().prepare("DELETE FROM telegram_bindings WHERE id = ?").run(id);
   await deleteSecret(secretKey(id));
+  forgetTelegramCommandSync(id);
+  clearInlineSelect(id);
   await reconcileTelegramWorkers();
   return { botDeleted };
 }
@@ -981,6 +1235,9 @@ async function reconcileTelegramWorkersOnce(): Promise<void> {
     const group = byToken.get(key) ?? { token: item.token, bindingIds: new Set<string>() };
     group.bindingIds.add(item.row.id);
     byToken.set(key, group);
+    // 부팅 복구도 이 경로를 지난다 — 업데이트 후 사용자가 아무것도 안 해도
+    // 새 명령이 텔레그램 메뉴에 다시 등록된다(같은 목록이면 digest 가드가 건너뛴다).
+    void syncTelegramBotCommands(commandSyncApi(item.token), item.row);
   }
 
   for (const [key, poller] of pollers) {
@@ -1017,6 +1274,7 @@ export function stopTelegramWorkers(): void {
 
 async function pollTelegram(poller: Poller): Promise<void> {
   let offset = currentOffset([...poller.bindingIds]);
+  let consecutiveErrors = 0;
   while (!poller.controller.signal.aborted) {
     try {
       const updates = await telegramApi<TelegramUpdate[]>(
@@ -1025,10 +1283,17 @@ async function pollTelegram(poller: Poller): Promise<void> {
         {
           offset,
           timeout: 25,
-          allowed_updates: ["message"],
+          // 인라인 선택 버튼이 눌린 사실은 callback_query 로만 온다. 빠뜨리면
+          // 목록을 보내 놓고 영원히 응답하지 않는 화면이 된다.
+          allowed_updates: ["message", "callback_query"],
         },
         poller.controller.signal,
       );
+      if (consecutiveErrors > 0) {
+        // 회복했으면 화면에 남은 사유도 지운다 — 안 지우면 잘 도는 연결이 계속 빨갛다.
+        consecutiveErrors = 0;
+        for (const bindingId of poller.bindingIds) clearBindingError(bindingId);
+      }
       for (const update of updates) {
         offset = update.update_id + 1;
         markUpdateSeen([...poller.bindingIds], update.update_id);
@@ -1037,10 +1302,103 @@ async function pollTelegram(poller: Poller): Promise<void> {
     } catch (err) {
       if (poller.controller.signal.aborted) return;
       const message = err instanceof Error ? err.message : String(err);
-      for (const bindingId of poller.bindingIds) markBindingFailed(bindingId, message);
-      await delay(3500, poller.controller.signal);
+      const terminal = isTerminalTelegramError(message);
+      for (const bindingId of poller.bindingIds) {
+        if (terminal) markBindingFailed(bindingId, message);
+        else markBindingTransientError(bindingId, message);
+      }
+      if (terminal) return;
+      // 같은 봇을 두 인스턴스가 폴링하면(409) 서로를 밀어낸다. 물러나는 간격을
+      // 늘려 두 쪽이 같은 박자로 부딪히지 않게 한다.
+      consecutiveErrors += 1;
+      const backoff = Math.min(3500 * consecutiveErrors, 30_000);
+      await delay(backoff, poller.controller.signal);
     }
   }
+}
+
+function commandSyncApi(token: string): TelegramCommandSyncApi {
+  return { call: (method, payload) => telegramApi(token, method, payload) };
+}
+
+/** 명령 디스패처가 쓰는 실행 수단 묶음. 저장소 접근은 디스패처가 직접 하고, 여기선 텔레그램 전송과 세션 조작만 넘긴다. */
+function telegramDispatchDeps(
+  token: string,
+  chatId: string,
+  locale: "ko" | "en",
+): TelegramDispatchDeps {
+  return {
+    send: async (text, markup) => {
+      await sendLongMessage(token, chatId, text, markup);
+    },
+    t: (key, vars) => tg(key, vars ?? {}, locale),
+    ensureChatId: async (binding) => (await ensureBindingChat(binding)).id,
+    resetConversation: async (bindingId) => {
+      await resetTelegramConversation(bindingId);
+    },
+    cancelActiveRun: (bindingId) => {
+      const runId = getActiveTelegramRunId(bindingId);
+      if (!runId) return false;
+      return invocationService.cancel(runId) === "requested";
+    },
+    isRunning: (bindingId) => Boolean(getActiveTelegramRunId(bindingId)),
+    setDesignatedProject: setTelegramDesignatedProject,
+    setDesignatedGraph: setTelegramDesignatedGraph,
+    setChatProjectFolder: (id, folderPath) => setChatWorkingFolder(id, folderPath),
+    chatProjectId: (id) => getChat(id)?.projectId ?? null,
+    setAutomationReport: (bindingId, enabled) => setAutomationReportEnabled(bindingId, enabled),
+    targetName: (binding) =>
+      resolveTarget(binding.target_kind, binding.target_id, false)?.name ?? binding.target_id,
+  };
+}
+
+/**
+ * 인라인 버튼 콜백. answerCallbackQuery 를 빠뜨리면 클라이언트가 30초쯤 로딩을 돌기 때문에
+ * 어떤 경로로 끝나든 finally 에서 반드시 답한다.
+ */
+async function handleTelegramCallbackQuery(
+  poller: Poller,
+  query: TelegramCallbackQuery,
+): Promise<void> {
+  const chatId = query.message?.chat ? String(query.message.chat.id) : "";
+  try {
+    if (!chatId || !query.data) return;
+    const binding = findBindingForChat([...poller.bindingIds], chatId);
+    if (!binding) return;
+    const locale = callbackReplyLocale(query);
+    await handleTelegramSelectCallback(
+      binding,
+      telegramDispatchDeps(poller.token, chatId, locale),
+      query.data,
+    );
+  } catch (error) {
+    console.warn(
+      "[telegram] callback query failed:",
+      maskTelegramSecrets(error instanceof Error ? error.message : String(error)),
+    );
+  } finally {
+    await telegramApi(poller.token, "answerCallbackQuery", {
+      callback_query_id: query.id,
+    }).catch(() => undefined);
+  }
+}
+
+/** 레거시(agent/firm) 포트에 통합 안내를 한 번만 보낸다. */
+async function maybeSendLegacyNotice(
+  token: string,
+  binding: TelegramBindingRow,
+  chatId: string,
+): Promise<void> {
+  if (binding.target_kind === "one" || binding.legacy_notice_at) return;
+  const at = nowIso();
+  getDb()
+    .prepare("UPDATE telegram_bindings SET legacy_notice_at = ?, updated_at = ? WHERE id = ?")
+    .run(at, at, binding.id);
+  binding.legacy_notice_at = at;
+  await telegramApi(token, "sendMessage", {
+    chat_id: chatId,
+    text: tg("cmd.legacy_notice"),
+  }).catch(() => undefined);
 }
 
 function currentOffset(bindingIds: string[]): number {
@@ -1061,6 +1419,10 @@ function markUpdateSeen(bindingIds: string[], updateId: number): void {
 }
 
 async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Promise<void> {
+  if (update.callback_query) {
+    await handleTelegramCallbackQuery(poller, update.callback_query);
+    return;
+  }
   const message = update.message;
   const text = message ? telegramMessageText(message) : "";
   if (!message || (!text && !hasTelegramAttachment(message))) return;
@@ -1078,6 +1440,8 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
         chat_id: chatId,
         text: tg("pair.connected"),
       }).catch(() => undefined);
+      // 방이 정해졌으니 이 방 스코프로 명령 메뉴를 올린다(방향키로 고를 수 있는 목록).
+      void syncTelegramBotCommands(commandSyncApi(poller.token), binding);
     }
     if (!binding || /^\/start(?:@\w+)?(?:\s|$)/i.test(text)) return;
   }
@@ -1092,15 +1456,54 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
   }
   if (!shouldHandleMessage(binding, message, text)) return;
 
-  const clean = cleanTelegramPrompt(binding, text) || tg("attachment.default_prompt");
+  // 레거시 포트에는 통합 안내를 딱 한 번 보낸다. 앱을 열지 않는 사용자도
+  // "왜 One으로 옮겨야 하는지"를 알아야 한다.
+  await maybeSendLegacyNotice(poller.token, binding, chatId);
+
+  // ── 명령이 판정보다 먼저 이긴다 ─────────────────────────────────────────
+  // 그리고 선행 슬래시가 붙은 오타는 절대 LLM 작업 요청으로 새지 않는다.
+  const cleanedForCommand = cleanTelegramPrompt(binding, text);
+  const parsed = parseTelegramCommand(binding, message, cleanedForCommand, binding.bot_username);
+  let forcedWriteText = "";
+  if (parsed.kind === "unknown") {
+    await telegramApi(poller.token, "sendMessage", {
+      chat_id: chatId,
+      text: tg("cmd.unknown", { name: parsed.typed }, commandReplyLocale(message, cleanedForCommand)),
+    }).catch(() => undefined);
+    return;
+  }
+  if (parsed.kind === "known") {
+    const commandLocale = commandReplyLocale(message, cleanedForCommand);
+    const outcome = await dispatchTelegramCommand(
+      parsed,
+      binding,
+      telegramDispatchDeps(poller.token, chatId, commandLocale),
+      commandLocale,
+    ).catch(async (error: unknown) => {
+      await telegramApi(poller.token, "sendMessage", {
+        chat_id: chatId,
+        text: tg("error.run_failed", {
+          message: error instanceof Error ? error.message : String(error),
+        }, commandLocale),
+      }).catch(() => undefined);
+      return { kind: "handled" as const };
+    });
+    if (outcome.kind === "handled") return;
+    forcedWriteText = outcome.text;
+  }
+
+  const clean = forcedWriteText || cleanTelegramPrompt(binding, text) || tg("attachment.default_prompt");
   if (!clean) return;
   // The resident judge decides whether this is an automation-report control
   // command (enable/disable/status) by meaning, in any language. The wordlist
   // predicates are only the judge's hint: with NO connected model we never
   // auto-act on a keyword guess — the message flows on as an ordinary request.
-  const reportIntent = await resolveTelegramAutomationReportIntent(clean).catch(
-    () => ({ intent: "none" as const, source: "fallback" as const }),
-  );
+  // /write 는 사용자가 이미 명시적으로 정한 것이라 판정을 다시 돌리지 않는다.
+  const reportIntent = forcedWriteText
+    ? ({ intent: "none" as const, source: "fallback" as const })
+    : await resolveTelegramAutomationReportIntent(clean).catch(
+      () => ({ intent: "none" as const, source: "fallback" as const }),
+    );
   if (reportIntent.source === "llm" && reportIntent.intent === "status") {
     await telegramApi(poller.token, "sendMessage", {
       chat_id: chatId,
@@ -1141,20 +1544,25 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
   // Read-vs-write is a meaning decision: the judge rules. With no connected model
   // (or on error) we default to the safe read-only mode, never a keyword-inferred
   // write; the make-verb wordlist survives only as the judge's hint.
-  const mode = await resolveTelegramInvocationMode(cleanWithAttachments).catch(
-    () => TELEGRAM_READ_ONLY_MODE,
-  );
+  const mode = forcedWriteText
+    ? telegramWriteMode()
+    : await resolveTelegramInvocationMode(cleanWithAttachments).catch(
+      () => TELEGRAM_READ_ONLY_MODE,
+    );
   // 응답 언어는 사용자가 보낸 메시지의 언어를 따른다(앱 UI 로케일 무시).
-  const replyLocale = detectReplyLocale(clean);
+  // 비율이 아니라 "한글이 있는가"로 본다 — 파일명이 섞였다고 영어로 답하면 안 된다.
+  const replyLocale = telegramHostLocale(message, clean);
   getDb()
     .prepare("UPDATE telegram_bindings SET status = 'running', last_error = NULL, updated_at = ? WHERE id = ?")
     .run(nowIso(), binding.id);
-  // 접수 확인은 모든 메시지에 보낸다. 제작(goalMode)이면 상세 안내, 그 외(리서치·질문 등)는
-  // 가벼운 "작업 중" 확인. 예전엔 goalMode에만 보내서 리서치는 완료까지 무반응이라
+  // 접수 확인은 모든 메시지에 보낸다. 제작(쓰기)이면 상세 안내, 그 외(리서치·질문 등)는
+  // 가벼운 "작업 중" 확인. 예전엔 제작에만 보내서 리서치는 완료까지 무반응이라
   // "되는 건지 안 되는 건지" 알 수 없었다. 안내문도 메시지 언어에 맞춘다.
+  // 판정 기준은 goalMode 가 아니라 permissions 다 — 목표 캠페인과 쓰기 허용은 다른 것이고,
+  // 텔레그램은 캠페인을 만들지 않는다.
   await telegramApi(poller.token, "sendMessage", {
     chat_id: chatId,
-    text: mode.goalMode ? tg("run.started", {}, replyLocale) : tg("run.working", {}, replyLocale),
+    text: mode.permissions === "write" ? tg("run.started", {}, replyLocale) : tg("run.working", {}, replyLocale),
   }).catch(() => undefined);
   // 실행 내내 typing(…) 표시를 살려둔다(텔레그램은 ~5초면 꺼지므로 주기적으로 재전송).
   const stopTyping = startTypingKeepAlive(poller.token, chatId, poller.controller.signal);
@@ -1449,6 +1857,10 @@ function shouldHandleMessage(binding: TelegramBindingRow, message: TelegramMessa
 
   if (chatBindings.length <= 1) return true;
 
+  // One은 이 사용자의 단일 창구다. 같은 방에 레거시 포트가 섞여 있으면 One이 먼저 잡는다.
+  const oneBindings = chatBindings.filter((row) => row.target_kind === "one");
+  if (oneBindings.length === 1) return oneBindings[0].id === binding.id;
+
   const orchestrators = chatBindings.filter((row) => row.target_kind === "firm");
   if (orchestrators.length === 1 && orchestrators[0].id === binding.id) {
     return true;
@@ -1503,11 +1915,23 @@ async function resolveTelegramInvocationMode(userText: string): Promise<Telegram
   return judged.write ? telegramWriteMode() : TELEGRAM_READ_ONLY_MODE;
 }
 
+/**
+ * 쓰기 허용과 "지속 목표 캠페인"은 다른 것이다.
+ *
+ * 예전엔 텔레그램 쓰기 요청이 `goalMode: true` 로 **지속 목표를 만들었다**. 그런데 그
+ * 목표를 끝낼 수 있는 곳은 두 군데뿐이다 — 데스크탑 UI 의 goal 칩(사용자가 끄는 것)과
+ * 백그라운드 스케줄러. 텔레그램에는 칩이 없고, 라이브 채팅 루프에는 목표의 open task 를
+ * 닫는 경로가 아예 없다. 그래서 파일을 다 만들고도 `openTasks: 1` 이 남아 루프가
+ * 계속 돌다 stall 로만 끝났다(실측: cycles 28, 12분 무응답, 같은 "완료입니다" 6회 반복).
+ *
+ * **끝낼 수단이 없는 표면에서 캠페인을 시작하지 않는다.** 쓰기 권한만 준다. 여러 패스가
+ * 필요한 작업은 모델의 continue 마커가 그대로 끌고 간다.
+ */
 function telegramWriteMode(): TelegramInvocationMode {
   const ko = currentUiLocale() === "ko";
   return {
     permissions: "write",
-    goalMode: true,
+    goalMode: false,
     instruction: ko
       ? [
           "Telegram 전용 실행이다.",
@@ -1528,6 +1952,41 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * 바인딩별 활성 runId. One 경로만 채운다(레거시는 invocationService를 안 쓴다).
+ * /stop 이 취소할 대상이자, 실행 중 도착한 메시지를 병렬 실행 대신 steer로 보낼 근거다.
+ */
+const activeOneRunByBinding = new Map<string, string>();
+
+export function getActiveTelegramRunId(bindingId: string): string | null {
+  return activeOneRunByBinding.get(bindingId) ?? null;
+}
+
+/**
+ * 표면 안내(방 정보·언어 규칙·모드 지시). 프롬프트가 아니라 **턴 맥락**으로 나간다.
+ *
+ * 예전엔 이걸 userPrompt 앞에 이어 붙였다. 그러면 goal 목표·수락 기준·대화 제목이
+ * 전부 스캐폴딩을 사람의 말로 착각한다(실측: goal objective 가 "Telegram chat: …
+ * language rule … 파일 만들어줘" 통째, 28사이클 후 no_progress_stall).
+ */
+function buildTelegramSurfaceContext(
+  binding: TelegramBindingRow,
+  message: TelegramMessage,
+  mode: TelegramInvocationMode,
+): string {
+  // 언어 규칙: 앱 지침이 한국어여도, 사용자가 보낸 메시지의 언어로 답한다.
+  const languageDirective =
+    "IMPORTANT language rule: reply in the SAME language the user wrote their message in. " +
+    "If the user's message is in English, answer in English; if Korean, answer in Korean; " +
+    "if in any other language, answer in that language. Do not default to the app's UI language.";
+  return [
+    `Telegram chat: ${binding.telegram_chat_title || chatTitle(message.chat)} (${message.chat.type})`,
+    message.from?.username ? `From: @${message.from.username}` : "",
+    languageDirective,
+    mode.instruction,
+  ].filter(Boolean).join("\n");
+}
+
 async function runBindingInvocation(
   binding: TelegramBindingRow,
   message: TelegramMessage,
@@ -1536,21 +1995,111 @@ async function runBindingInvocation(
   attachments: TelegramRuntimeAttachment[] = [],
   replyLocale: "ko" | "en" = detectReplyLocale(userText),
 ): Promise<string> {
+  if (binding.target_kind === "one") {
+    return runOneBindingInvocation(binding, message, userText, mode, attachments, replyLocale);
+  }
+  return runLegacyBindingInvocation(binding, message, userText, mode, attachments, replyLocale);
+}
+
+/**
+ * One 턴은 공용 InvocationService를 탄다 — 그래야 runId·취소·스티어·영수증이 생긴다.
+ * 워크스페이스 바인딩을 실어 보내는 이유는 두 가지다: 이미지가 살아남고(로컬 One 경로는
+ * images를 지운다), /project 로 지정한 폴더가 실제로 실행에 반영된다(바인딩이 있으면
+ * 런타임은 채팅 폴더를 다시 보지 않는다).
+ */
+async function runOneBindingInvocation(
+  binding: TelegramBindingRow,
+  message: TelegramMessage,
+  userText: string,
+  mode: TelegramInvocationMode,
+  attachments: TelegramRuntimeAttachment[],
+  replyLocale: "ko" | "en",
+): Promise<string> {
   const chat = await ensureBindingChat(binding);
-  // 언어 규칙: 앱 지침이 한국어여도, 사용자가 보낸 메시지의 언어로 답한다(영어면 영어,
-  // 그 외 외국어면 그 언어). LLM이 임의 언어까지 맞추도록 명시 지시.
-  const languageDirective =
-    "IMPORTANT language rule: reply in the SAME language the user wrote their message in. " +
-    "If the user's message is in English, answer in English; if Korean, answer in Korean; " +
-    "if in any other language, answer in that language. Do not default to the app's UI language.";
-  const prompt = [
-    `Telegram chat: ${binding.telegram_chat_title || chatTitle(message.chat)} (${message.chat.type})`,
-    message.from?.username ? `From: @${message.from.username}` : "",
-    languageDirective,
-    mode.instruction,
-    "",
-    userText,
-  ].filter(Boolean).join("\n");
+  // 사람이 실제로 한 말만 userPrompt 로 보낸다. 표면 안내는 executionContext 로 분리한다.
+  const surfaceContext = buildTelegramSurfaceContext(binding, message, mode);
+  const workspaceBinding = captureTelegramOneInvocationBinding(getChatWorkingFolder(chat.id));
+  const request = {
+    chatId: chat.id,
+    userPrompt: userText,
+    images: attachments
+      .map((attachment) => attachment.image)
+      .filter((image): image is ImageAttachment => Boolean(image)),
+    locale: replyLocale,
+    permissions: mode.permissions,
+    goalMode: mode.goalMode,
+    taskIntent: "conversation" as const,
+    oneMode: true,
+  };
+  // 동기 start 경로가 들여다보는 판정을 미리 데운다(모바일/렌더러 진입점과 동일).
+  await Promise.all([
+    prejudgeOneRequestIntent(request, { timeoutMs: 4_000 }),
+    prejudgeOneMemoryIntent(request, { timeoutMs: 4_000 }),
+  ]).catch(() => undefined);
+
+  return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    let finalText = "";
+    let errorMessage = "";
+    let runId = "";
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      unsubscribe();
+      if (runId) activeOneRunByBinding.delete(binding.id);
+      callback();
+    };
+    const unsubscribe = invocationService.onEvent((envelope) => {
+      if (!runId || envelope.runId !== runId) return;
+      const event = envelope.event;
+      if (event.kind === "final") {
+        finalText = event.text?.trim() ?? "";
+        finish(() => {
+          if (!finalText) {
+            reject(new Error(errorMessage.trim() || tg("error.no_reply", {}, replyLocale)));
+            return;
+          }
+          resolve(flattenSentinelsForTelegram(finalText, replyLocale));
+        });
+        return;
+      }
+      if (event.kind === "error") {
+        errorMessage = event.error?.message ?? "";
+        finish(() => reject(new Error(errorMessage.trim() || tg("error.no_reply", {}, replyLocale))));
+      }
+    });
+    const timer = setTimeout(() => {
+      if (runId) invocationService.cancel(runId);
+      finish(() => reject(new TelegramInvocationTimeoutError(tg("run.timeout", {}, replyLocale))));
+    }, TELEGRAM_INVOCATION_TIMEOUT_MS);
+    timer.unref?.();
+    try {
+      const started = invocationService.start(request, workspaceBinding, {
+        // 원격 대화형 표식 — 질문 fence는 평문화돼 전송되고 사용자가 다음 메시지로 답한다.
+        // (미지정이면 "누락된 헤드리스"와 구분이 안 되는 fail-open 상태가 된다.)
+        source: "telegram",
+        surfaceContext,
+      });
+      runId = started.runId;
+      activeOneRunByBinding.set(binding.id, runId);
+    } catch (error) {
+      finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+    }
+  });
+}
+
+/** One 통합 이전 agent/firm 포트. 계약을 바꾸지 않고 기존 경로 그대로 둔다. */
+async function runLegacyBindingInvocation(
+  binding: TelegramBindingRow,
+  message: TelegramMessage,
+  userText: string,
+  mode: TelegramInvocationMode,
+  attachments: TelegramRuntimeAttachment[],
+  replyLocale: "ko" | "en",
+): Promise<string> {
+  const chat = await ensureBindingChat(binding);
+  const surfaceContext = buildTelegramSurfaceContext(binding, message, mode);
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -1561,7 +2110,7 @@ async function runBindingInvocation(
   let errorFromEvents = "";
   const result = await runMcpInvocation({
     chatId: chat.id,
-    userPrompt: prompt,
+    userPrompt: userText,
     images: attachments.map((attachment) => attachment.image).filter((image): image is ImageAttachment => Boolean(image)),
     locale: replyLocale,
     permissions: mode.permissions,
@@ -1577,6 +2126,7 @@ async function runBindingInvocation(
     // 원격 대화형 표식 — 질문 fence는 평문화돼 전송되고 사용자가 다음 메시지로 답한다.
     // (미지정이면 "누락된 헤드리스"와 구분이 안 되는 fail-open 상태가 된다.)
     source: "telegram",
+    surfaceContext,
   }).finally(() => {
     clearTimeout(timer);
   });
@@ -1591,10 +2141,69 @@ async function runBindingInvocation(
   return flattenSentinelsForTelegram(finalText, replyLocale);
 }
 
+/**
+ * 지정된 프로젝트의 작업 폴더를 이 One 대화에 건다. 프로젝트가 사라졌거나 폴더가
+ * 없으면 지정 자체를 비워 "지정돼 있는데 아무 데서나 도는" 상태를 만들지 않는다.
+ */
+function applyDesignatedProjectFolder(binding: TelegramBindingRow, chatId: string): void {
+  if (!binding.designated_project_id) return;
+  const project = getProject(binding.designated_project_id);
+  if (project?.folderPath) {
+    setChatWorkingFolder(chatId, project.folderPath);
+    return;
+  }
+  getDb()
+    .prepare("UPDATE telegram_bindings SET designated_project_id = NULL, updated_at = ? WHERE id = ?")
+    .run(nowIso(), binding.id);
+  binding.designated_project_id = null;
+}
+
+/**
+ * 이 바인딩의 대화 id. 없으면 만든다(One이면 One 표면 대화, 레거시면 division 세션).
+ * 지정 프로젝트 재적용까지 여기서 끝나므로 호출부가 폴더를 따로 챙길 필요가 없다.
+ */
+export async function ensureTelegramBindingChatId(bindingId: string): Promise<string> {
+  const row = getBindingRow(bindingId);
+  if (!row) throw new Error(`Telegram binding not found: ${bindingId}`);
+  return (await ensureBindingChat(row)).id;
+}
+
+/** /project 지정·해제. 폴더 없는 프로젝트는 호출부에서 이미 거부된다. */
+export function setTelegramDesignatedProject(bindingId: string, projectId: string | null): void {
+  getDb()
+    .prepare("UPDATE telegram_bindings SET designated_project_id = ?, updated_at = ? WHERE id = ?")
+    .run(projectId, nowIso(), bindingId);
+}
+
+/** /graph 지정·해제. 삭제된 자동화 id도 그대로 남긴다(호출 시점에 타입 실패로 드러난다). */
+export function setTelegramDesignatedGraph(bindingId: string, graphId: string | null): void {
+  getDb()
+    .prepare("UPDATE telegram_bindings SET designated_graph_id = ?, updated_at = ? WHERE id = ?")
+    .run(graphId, nowIso(), bindingId);
+}
+
 async function ensureBindingChat(binding: TelegramBindingRow) {
   if (binding.chat_session_id) {
     const existing = getChat(binding.chat_session_id);
     if (existing) return existing;
+  }
+  if (binding.target_kind === "one") {
+    // One 대화는 originSurface:"one" 이어야 한다 — invocationService 가 One/Work를
+    // 상호배타로 잠그기 때문에 division(Work) 세션으로는 One 턴을 절대 못 돌린다.
+    // kind 기본값 "user" 를 쓰는 이유: One을 재설치해도
+    // repairRootChatSurfaceController 가 controller를 스스로 고칠 수 있다(division은 조기 반환).
+    const chat = createChat({
+      title: `⟦telegram⟧one`,
+      taskMode: "conversation",
+      originSurface: "one",
+    });
+    getDb()
+      .prepare("UPDATE telegram_bindings SET chat_session_id = ?, updated_at = ? WHERE id = ?")
+      .run(chat.id, nowIso(), binding.id);
+    // /new 로 세션을 비워도 지정한 프로젝트는 살아 있어야 한다. 여기서 다시 걸지 않으면
+    // 지정이 조용히 증발해 다음 작업이 엉뚱한 폴더에서 돈다.
+    applyDesignatedProjectFolder(binding, chat.id);
+    return chat;
   }
   let input: { agentId?: string; firmId?: string | null };
   if (binding.target_kind === "agent") {
@@ -1692,10 +2301,17 @@ function flattenSentinelsForTelegram(text: string, replyLocale: "ko" | "en"): st
   return out.replace(/\n{3,}/g, "\n\n").trim();
 }
 
-async function sendLongMessage(token: string, chatId: string, text: string): Promise<void> {
+async function sendLongMessage(
+  token: string,
+  chatId: string,
+  text: string,
+  markup?: InlineKeyboardMarkup,
+): Promise<void> {
   const chunks = chunkText(text, 3800);
-  for (const chunk of chunks) {
-    await telegramApi(token, "sendMessage", { chat_id: chatId, text: chunk });
+  for (const [index, chunk] of chunks.entries()) {
+    // 버튼은 마지막 조각에만 붙인다. 조각마다 붙이면 같은 목록이 여러 번 뜬다.
+    const withMarkup = markup && index === chunks.length - 1 ? { reply_markup: markup } : {};
+    await telegramApi(token, "sendMessage", { chat_id: chatId, text: chunk, ...withMarkup });
   }
 }
 
@@ -1770,12 +2386,39 @@ function clipForTelegram(value: string, max: number): string {
   return `${clean.slice(0, max - 1)}…`;
 }
 
+/**
+ * 자를 지점을 고른다.
+ *
+ * ① UTF-16 코드유닛으로 그냥 자르면 이모지 한 글자가 반토막 난다 — 실측: 홀수 길이
+ *    접두사 뒤에 이모지가 이어지면 첫 조각이 고아 상위 서로게이트(\uD83E)로 끝나고
+ *    텔레그램에는 깨진 문자가 나간다.
+ * ② 그다음으로 줄/공백 경계를 선호한다. 한도 근처에 없으면 그냥 자른다(무한정
+ *    뒤로 물러나면 조각이 계속 짧아진다).
+ */
+function chunkCutIndex(text: string, size: number): number {
+  let cut = Math.min(size, text.length);
+  if (cut >= text.length) return cut;
+  // 상위 서로게이트에서 끊기면 한 칸 당겨 쌍을 온전히 남긴다.
+  const code = text.charCodeAt(cut - 1);
+  if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
+  const window = Math.max(1, Math.floor(size * 0.2));
+  const head = text.slice(0, cut);
+  const newline = head.lastIndexOf("\n");
+  if (newline > 0 && newline >= cut - window) return newline + 1;
+  const space = head.lastIndexOf(" ");
+  if (space > 0 && space >= cut - window) return space + 1;
+  return cut;
+}
+
 function chunkText(text: string, size: number): string[] {
   const out: string[] = [];
   let rest = text;
   while (rest.length > size) {
-    out.push(rest.slice(0, size));
-    rest = rest.slice(size);
+    const cut = chunkCutIndex(rest, size);
+    // 방어: 경계 탐색이 0을 돌려주면 진행이 멈춘다.
+    const safe = cut > 0 ? cut : size;
+    out.push(rest.slice(0, safe));
+    rest = rest.slice(safe);
   }
   if (rest.trim()) out.push(rest);
   return out;
@@ -1785,6 +2428,34 @@ function markBindingFailed(id: string, message: string): void {
   getDb()
     .prepare("UPDATE telegram_bindings SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?")
     .run(message.slice(0, 1000), nowIso(), id);
+}
+
+/**
+ * 일시적 폴링 오류. 사유는 남기되 status 는 건드리지 않는다.
+ *
+ * `status='failed'` 로 적으면 activeBindingSecrets 가 그 바인딩을 빼고, 다음 reconcile 이
+ * 폴러를 없앤다 — 즉 **네트워크 한 번 끊기거나 인스턴스가 잠깐 겹치면 텔레그램이 영구히
+ * 침묵한다**(실측: 409 Conflict 로 바인딩이 failed 로 굳었다). 되돌릴 수 있는 상황을
+ * 종착지로 만들지 않는다. 사유는 last_error 로 화면에 그대로 보인다.
+ */
+function markBindingTransientError(id: string, message: string): void {
+  getDb()
+    .prepare("UPDATE telegram_bindings SET last_error = ?, updated_at = ? WHERE id = ?")
+    .run(message.slice(0, 1000), nowIso(), id);
+}
+
+function clearBindingError(id: string): void {
+  getDb()
+    .prepare("UPDATE telegram_bindings SET last_error = NULL, updated_at = ? WHERE id = ? AND last_error IS NOT NULL")
+    .run(nowIso(), id);
+}
+
+/**
+ * 되돌릴 수 없는 오류만 연결을 끊는다 — 토큰이 회수됐거나 봇이 삭제된 경우.
+ * 그 외(네트워크·타임아웃·409 중복 폴링·5xx)는 기다리면 풀린다.
+ */
+function isTerminalTelegramError(message: string): boolean {
+  return /unauthorized|bot was blocked|not found|invalid token|token is invalid/i.test(message);
 }
 
 function disableMissingTargetBinding(id: string): void {
@@ -1839,17 +2510,54 @@ async function loadTelegramWebUrl(win: BrowserWindow, url: string, context: stri
   });
 }
 
+/**
+ * 로그인 대기 상태로 남겨 둔 텔레그램 창.
+ *
+ * `botfather.login_timeout` 안내가 "열린 창에서 로그인한 뒤 다시 시도하라"고 말하므로
+ * 그 창은 닫지 않는다. 대신 여기 붙잡아 두고 다음 시도가 **재사용**한다 — 안 그러면
+ * 시도할 때마다 창이 쌓이고, 안내문이 가리키는 "그 창"이 어느 것인지 알 수 없어진다
+ * (실측: 로그인 타임아웃 후 창이 그대로 남았다).
+ */
+let pendingTelegramLoginWindow: BrowserWindow | null = null;
+
+function takePendingTelegramLoginWindow(): BrowserWindow | null {
+  const win = pendingTelegramLoginWindow;
+  pendingTelegramLoginWindow = null;
+  if (!win || win.isDestroyed()) return null;
+  return win;
+}
+
 async function captureBotFatherToken(
   targetName: string,
   customDisplayName?: string,
 ): Promise<BotFatherCapture> {
-  const win = createTelegramWebWindow(tg("botfather.connect_title"));
-  await loadTelegramWebUrl(win, BOTFATHER_WEB_URL, "botfather");
-  const ready = await waitForBotFatherReady(win, 180_000);
-  if (ready.botFatherBlocked) throw new Error(tg("botfather.blocked"));
+  const reused = takePendingTelegramLoginWindow();
+  const win = reused ?? createTelegramWebWindow(tg("botfather.connect_title"));
+  let loaded = Boolean(reused);
+  try {
+    if (reused) win.focus();
+    else {
+      await loadTelegramWebUrl(win, BOTFATHER_WEB_URL, "botfather");
+      loaded = true;
+    }
+    const ready = await waitForBotFatherReady(win, 180_000);
+    if (ready.botFatherBlocked) throw new Error(tg("botfather.blocked"));
 
-  const createdToken = await createBotWithBotFather(win, targetName, customDisplayName);
-  return { token: createdToken, source: "created", window: win };
+    const createdToken = await createBotWithBotFather(win, targetName, customDisplayName);
+    return { token: createdToken, source: "created", window: win };
+  } catch (error) {
+    // 이 함수의 실패 안내는 **전부** "열린 창"을 가리킨다(login_timeout·blocked·
+    // create_failed). 그러니 페이지가 뜬 뒤의 실패에서는 창을 닫지 않는다 — 닫으면
+    // 안내문이 거짓이 된다. 대신 붙잡아 두고 다음 시도가 재사용해 창이 쌓이지 않게 한다.
+    // 페이지 로드 자체가 실패했을 때만 볼 것이 없으므로 닫는다.
+    if (loaded && !win.isDestroyed()) {
+      pendingTelegramLoginWindow = win;
+      win.focus();
+    } else {
+      closeBotFatherWindow(win);
+    }
+    throw error;
+  }
 }
 
 async function waitForBotFatherReady(win: BrowserWindow, timeoutMs: number): Promise<TelegramWebState> {

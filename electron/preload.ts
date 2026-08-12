@@ -433,6 +433,8 @@ const api: AgentlasIpc = {
   },
   telegram: {
     listBindings: () => ipcRenderer.invoke("telegram:listBindings"),
+    connectOne: (input) => ipcRenderer.invoke("telegram:connectOne", input),
+    removeLegacy: (input) => ipcRenderer.invoke("telegram:removeLegacy", input),
     autoConnect: (input) => ipcRenderer.invoke("telegram:autoConnect", input),
     start: (input) => ipcRenderer.invoke("telegram:start", input),
     clone: (input) => ipcRenderer.invoke("telegram:clone", input),

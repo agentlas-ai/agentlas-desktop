@@ -7,8 +7,21 @@ import fs from "node:fs";
  * Desktop to run a chat, but it can never supply or alter the local path that
  * Desktop has already bound to that chat.
  */
+/** 원격 표면에서 들어온 요청임을 나타내는 source 집합. 로컬 Desktop 턴은 바인딩이 없다. */
+export type InvocationWorkspaceBindingSource = "mobile" | "mobile-one" | "telegram-one";
+
+const REMOTE_BINDING_SOURCES: readonly InvocationWorkspaceBindingSource[] = [
+  "mobile",
+  "mobile-one",
+  "telegram-one",
+];
+
+function isRemoteBindingSource(value: string): value is InvocationWorkspaceBindingSource {
+  return (REMOTE_BINDING_SOURCES as readonly string[]).includes(value);
+}
+
 export interface InvocationWorkspaceBinding {
-  readonly source: "mobile" | "mobile-one";
+  readonly source: InvocationWorkspaceBindingSource;
   readonly canonicalPath: string | null;
   /** BigInt strings keep the host file identity precise without entering JSON DTOs. */
   readonly directoryIdentity: {
@@ -109,13 +122,39 @@ export function captureMobileOneInvocationBinding(): InvocationWorkspaceBinding 
 }
 
 /**
+ * Main-only identity for a Telegram One turn.
+ *
+ * Unlike Mobile One this one DOES carry a folder: the Telegram conversation can
+ * designate a project with /project, and `runMcpInvocation` consults only the
+ * binding (never the mutable chat folder) once a binding is present. A null
+ * path here would silently turn that designation into a no-op.
+ */
+export function captureTelegramOneInvocationBinding(
+  existingChatWorkingFolder: string | null,
+): InvocationWorkspaceBinding {
+  if (existingChatWorkingFolder === null) {
+    return Object.freeze({
+      source: "telegram-one",
+      canonicalPath: null,
+      directoryIdentity: null,
+    });
+  }
+  const directory = canonicalDirectory(existingChatWorkingFolder);
+  return Object.freeze({
+    source: "telegram-one",
+    canonicalPath: directory.canonicalPath,
+    directoryIdentity: directory.directoryIdentity,
+  });
+}
+
+/**
  * Revalidate immediately before execution. The path must still resolve to the
  * exact directory captured by Desktop; replacement symlinks fail closed.
  */
 export function revalidateInvocationWorkspaceBinding(
   binding: InvocationWorkspaceBinding,
 ): string | null {
-  if (binding.source !== "mobile" && binding.source !== "mobile-one") {
+  if (!isRemoteBindingSource(binding.source)) {
     throw unavailableWorkspaceError();
   }
   if (binding.canonicalPath === null) {
@@ -140,10 +179,7 @@ export function invocationWorkspaceBindingsEqual(
 ): boolean {
   if (!left || !right) return left === right;
   if (left.source !== right.source) return false;
-  if (
-    (left.source !== "mobile" && left.source !== "mobile-one") ||
-    (right.source !== "mobile" && right.source !== "mobile-one")
-  ) return false;
+  if (!isRemoteBindingSource(left.source) || !isRemoteBindingSource(right.source)) return false;
   if (left.canonicalPath !== right.canonicalPath) return false;
   if (left.canonicalPath === null) {
     return left.directoryIdentity === null && right.directoryIdentity === null;

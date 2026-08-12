@@ -8,6 +8,7 @@ import { useRouter } from "next/navigation";
 import { ProjectSidebar } from "./ProjectSidebar";
 import { MenuBridge } from "./MenuBridge";
 import { ImportAgentsModal } from "./ImportAgentsModal";
+import TelegramOneDialog from "./connect/TelegramOneDialog";
 import { ipc, ipcEvents, updaterEvents } from "@/lib/ipc";
 import { SideNav } from "./SideNav";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -476,6 +477,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           }
         }}
       />
+      {/* 커넥트 ▸ 텔레그램은 페이지가 아니라 팝업이다. 사이드바에서만 열리므로
+          셸 안에 한 번만 마운트한다. */}
+      <TelegramOneDialog />
       <GuideFab
         avoidComposer={pathname.startsWith("/workspace/task")}
         onReplayTour={replayCurrentPageTour}
