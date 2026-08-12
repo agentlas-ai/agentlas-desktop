@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.91 — 2026-08-12
+
+Binds the same Agentlas OS v1.1.111 at
+ee1f23911f378b6d521e64d89713c4ef15eb38e9.
+
+- A chat pinned to one Codex model no longer inherits an unsupported reasoning
+  effort from another model. Desktop resolves the exact model's live effort
+  profile and provider default before launch, so Spark cannot receive `max` and
+  fail before an answer is committed.
+- The chat model menu now lists the selected model's own reasoning levels, and
+  changing models keeps an effort only when the destination model supports it.
+- Codex execution reads model capability data from the same account home passed
+  to the child CLI, preventing a different account cache from validating the
+  invocation.
+- These source gates do not themselves publish a release; the Releases page
+  stays the authority for what is actually downloadable.
+
 ## 0.9.90 — 2026-08-12
 
 Binds the same Agentlas OS v1.1.111 at

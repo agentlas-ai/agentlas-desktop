@@ -353,6 +353,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
           ? { supportsMultimodal: model.supportsMultimodal }
           : {}),
         ...(model.efforts !== null ? { efforts: [...model.efforts] } : {}),
+        ...(model.defaultEffort !== null ? { defaultEffort: model.defaultEffort } : {}),
       },
     ]));
 

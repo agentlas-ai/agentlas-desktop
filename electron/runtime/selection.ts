@@ -122,6 +122,37 @@ export interface AgentAppRuntimeChoice extends RuntimeChoice {
   fallbackFromKind: RuntimeStatus["kind"] | null;
 }
 
+/**
+ * Runtime-level effort is only a fallback when the selected model actually
+ * advertises it. A chat can pin a different Codex model while omitting effort;
+ * carrying the runtime's current model effort across that boundary attached
+ * `max` to Spark (whose live profile stops at `xhigh`) and the provider rejected
+ * the entire turn before any answer could be committed.
+ */
+export function effortForSelectedModel(
+  runtime: RuntimeStatus,
+  model: string | null | undefined,
+  requested: string | null | undefined,
+): string | null | undefined {
+  if (!model) return requested;
+  const supported = runtime.allocationModelProfiles?.[model]?.efforts;
+  if (supported === undefined) return requested;
+  const defaultEffort = runtime.allocationModelProfiles?.[model]?.defaultEffort;
+  if (requested == null) return defaultEffort ?? supported[0] ?? null;
+  if (supported.includes(requested)) return requested;
+  // An exact, empty profile means the host could not validate any explicit
+  // effort. Let the provider use its model default rather than inventing one.
+  if (supported.length === 0) return null;
+  const known = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+  const requestedRank = known.indexOf(requested);
+  if (requestedRank < 0) return null;
+  const below = supported.filter((candidate) => {
+    const rank = known.indexOf(candidate);
+    return rank >= 0 && rank <= requestedRank;
+  });
+  return below.at(-1) ?? defaultEffort ?? supported[0] ?? null;
+}
+
 export function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | null {
   if (active.kind === "claude-code") return { runner: runClaudeCodeSlotted, label: RUNNER_LABEL["claude-code"] };
   if (active.kind === "codex") return { runner: runCodexSlotted, label: RUNNER_LABEL.codex };
@@ -199,11 +230,12 @@ export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { so
 function applyRoleSelection(runtime: RuntimeStatus, role: RuntimeRole): RuntimeStatus {
   const selection = runtime.roleSelections?.[role];
   if (!selection) return { ...runtime, active: true };
+  const model = selection.model ?? runtime.model;
   return {
     ...runtime,
     active: true,
-    model: selection.model ?? runtime.model,
-    effort: selection.effort ?? runtime.effort,
+    model,
+    effort: effortForSelectedModel(runtime, model, selection.effort ?? runtime.effort),
     longContextEnabled: selection.longContext ?? runtime.longContextEnabled,
   };
 }
@@ -246,12 +278,13 @@ export function selectExactRuntime(
     return true;
   });
   if (!matched) return null;
+  const model = selection.model ?? matched.model;
   const active: RuntimeStatus = {
     ...matched,
     active: true,
-    model: selection.model ?? matched.model,
+    model,
     longContextEnabled: selection.longContext ?? matched.longContextEnabled,
-    effort: selection.effort ?? matched.effort,
+    effort: effortForSelectedModel(matched, model, selection.effort ?? matched.effort),
   };
   return { active, picked: pickRunner(active), override: null, unavailableOverride: null };
 }
@@ -260,22 +293,26 @@ export function applyRuntimeOverride(
   runtime: RuntimeStatus,
   override: AgentRuntimeOverride,
 ): RuntimeStatus {
+  const model =
+    override.selection.model !== undefined
+      ? override.selection.model
+      : runtime.model;
   return {
     ...runtime,
     active: true,
     source: override.selection.source ?? runtime.source,
-    model:
-      override.selection.model !== undefined
-        ? override.selection.model
-        : runtime.model,
+    model,
     longContextEnabled:
       override.selection.longContext !== undefined
         ? override.selection.longContext
         : runtime.longContextEnabled,
-    effort:
+    effort: effortForSelectedModel(
+      runtime,
+      model,
       override.selection.effort !== undefined
         ? override.selection.effort
         : runtime.effort,
+    ),
   };
 }
 

@@ -2783,7 +2783,20 @@ function ModelMenu({
   onSelectEffort: (id: string) => void;
   t: TFunction;
 }) {
-  const efforts = runtime.efforts ?? [];
+  // Effort is a model capability. Codex exposes different levels per model;
+  // showing the runtime-wide list made Spark appear able to select `max`, even
+  // though its live profile ends at `xhigh`.
+  const modelEfforts = runtime.model
+    ? runtime.allocationModelProfiles?.[runtime.model]?.efforts
+    : undefined;
+  const efforts = modelEfforts !== undefined
+    ? modelEfforts.map((id) => ({
+        id,
+        label: id === "xhigh"
+          ? "XHigh"
+          : id.charAt(0).toUpperCase() + id.slice(1),
+      }))
+    : runtime.efforts ?? [];
   // CLI(claude-code/codex/gemini)는 "구독 기본" 선택 가능. BYOK/로컬(ollama/lmstudio/mlx)은 항상 구체 모델.
   const allowDefaultModel = runtime.kind !== "byok" && !LOCAL_RUNTIME_LABEL[runtime.kind];
   const managedByRuntime = CONTEXT_MANAGED_BY[runtime.kind] === "runtime";

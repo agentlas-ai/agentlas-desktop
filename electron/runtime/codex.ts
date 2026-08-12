@@ -22,7 +22,11 @@ import {
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
-import { readCodexModelInventory, resolveCodexModelEffort } from "./codex-models";
+import {
+  defaultCodexModelEffort,
+  readCodexModelInventory,
+  resolveCodexModelEffort,
+} from "./codex-models";
 import {
   clearRuntimeSession,
   getRuntimeSession,
@@ -564,9 +568,14 @@ export const runCodex: Runner = async (
   // 모델 캐시의 exact profile을 실행 시점에도 다시 검증한다. 최신 Codex 모델은 max를
   // 지원하지만, 프로필이 없거나 손상된 경우에는 2026-07-12 사고 방지용 max->xhigh
   // legacy guard를 유지한다. 그 외 미지값은 넘기지 않아 기기 설정을 따른다.
-  if (runReq.effort) {
-    const inventory = await readCodexModelInventory();
-    const effort = resolveCodexModelEffort(inventory, runReq.model, runReq.effort);
+  if (runReq.effort || runReq.model) {
+    // Read the same account home the child process will use. Main's process env
+    // may differ from a runtime-owned CODEX_HOME, and consulting another cache
+    // can validate an effort for the wrong account/model catalog.
+    const inventory = await readCodexModelInventory(runReq.env?.CODEX_HOME);
+    const effort = runReq.effort
+      ? resolveCodexModelEffort(inventory, runReq.model, runReq.effort)
+      : defaultCodexModelEffort(inventory, runReq.model);
     if (effort) {
       appliedEffort = effort;
       modelArgs.push("-c", `model_reasoning_effort=${effort}`);

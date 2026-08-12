@@ -693,6 +693,8 @@ export interface RuntimeStatus {
     supportsMultimodal?: boolean;
     /** Per-model reasoning levels reported by the host runtime. */
     efforts?: string[];
+    /** Provider-authored default effort for this exact model. */
+    defaultEffort?: string;
   }>;
   /** BYOK 긴 컨텍스트(1M) 토글 상태. beta-header 모델에서만 의미 있음. */
   longContextEnabled?: boolean;

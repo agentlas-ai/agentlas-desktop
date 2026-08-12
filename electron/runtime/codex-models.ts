@@ -31,6 +31,8 @@ export type CodexModelInventoryEntry = {
   supportsMultimodal: boolean | null;
   /** null means the cache did not provide a structurally valid per-model list. */
   efforts: CodexModelEffort[] | null;
+  /** Provider-authored default for this exact model, when present and valid. */
+  defaultEffort: CodexModelEffort | null;
 };
 
 type CodexModelCache = {
@@ -45,6 +47,7 @@ type CodexModelCache = {
     supports_parallel_tool_calls?: unknown;
     supports_search_tool?: unknown;
     supported_reasoning_levels?: unknown;
+    default_reasoning_level?: unknown;
   }>;
 };
 
@@ -204,6 +207,19 @@ function modelEfforts(model: NonNullable<CodexModelCache["models"]>[number]): Co
   return found;
 }
 
+function modelDefaultEffort(
+  model: NonNullable<CodexModelCache["models"]>[number],
+  efforts: readonly CodexModelEffort[] | null,
+): CodexModelEffort | null {
+  if (typeof model.default_reasoning_level !== "string") return null;
+  const normalized = model.default_reasoning_level.trim().toLowerCase();
+  if (!EFFORT_TOKEN_RE.test(normalized)) return null;
+  // A structurally valid per-model list is authoritative. Never accept a
+  // default that contradicts the supported values beside it in the same cache.
+  if (efforts !== null && !efforts.includes(normalized)) return null;
+  return normalized;
+}
+
 /**
  * Resolve the exact CLI effort from the same host cache used by allocation.
  * Unknown models retain the legacy max->xhigh guard that prevents a Claude
@@ -241,6 +257,25 @@ export function resolveCodexModelEffort(
 }
 
 /**
+ * Resolve an explicit effort even when the caller selected only a model.
+ *
+ * Codex also reads a global `model_reasoning_effort` from config.toml. If a
+ * chat pins Spark but leaves effort unset, allowing that global value through
+ * can attach another model's `max` and make the provider reject the turn. The
+ * exact model's advertised default wins; if older cache data omitted a default,
+ * the lowest advertised supported value is the conservative executable choice.
+ */
+export function defaultCodexModelEffort(
+  inventory: readonly CodexModelInventoryEntry[],
+  modelId: string | null | undefined,
+): CodexModelEffort | null {
+  if (!modelId) return null;
+  const profile = inventory.find((candidate) => candidate.id === modelId);
+  if (!profile) return null;
+  return profile.defaultEffort ?? profile.efforts?.[0] ?? null;
+}
+
+/**
  * Read the account-scoped model list that the installed Codex CLI fetched.
  * Modern Codex uses the GPT family directly (for example gpt-5.6-terra), so
  * Agentlas must not invent a parallel `*-codex` name or expose models that the
@@ -266,6 +301,7 @@ export async function readCodexModelInventory(
       seen.add(id);
       const supportsTools = toolSupport(model);
       const supportsMultimodal = multimodalSupport(model);
+      const efforts = modelEfforts(model);
       inventory.push({
         id,
         contextWindow: conservativeContextWindow(model),
@@ -275,7 +311,8 @@ export async function readCodexModelInventory(
         ],
         supportsTools,
         supportsMultimodal,
-        efforts: modelEfforts(model),
+        efforts,
+        defaultEffort: modelDefaultEffort(model, efforts),
       });
     }
     if (inventory.length > 0) {

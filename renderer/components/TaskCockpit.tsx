@@ -1935,6 +1935,29 @@ function ChatPage() {
                 (!selection.source || runtime.source === selection.source),
             )
           : list.find((runtime) => runtime.active);
+        const selectedModel = selection?.model ?? matched?.model ?? null;
+        const selectedEfforts = selectedModel
+          ? matched?.allocationModelProfiles?.[selectedModel]?.efforts
+          : undefined;
+        const inheritedEffort = selection?.effort ?? matched?.effort ?? null;
+        const selectedDefaultEffort = selectedModel
+          ? matched?.allocationModelProfiles?.[selectedModel]?.defaultEffort ?? null
+          : null;
+        const selectedEffort = selectedEfforts === undefined
+          ? inheritedEffort
+          : inheritedEffort == null
+            ? selectedDefaultEffort ?? selectedEfforts[0] ?? null
+          : selectedEfforts.includes(inheritedEffort)
+            ? inheritedEffort
+            : (() => {
+                const ranks = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+                const requestedRank = ranks.indexOf(inheritedEffort);
+                const below = selectedEfforts.filter((candidate) => {
+                  const rank = ranks.indexOf(candidate);
+                  return requestedRank >= 0 && rank >= 0 && rank <= requestedRank;
+                });
+                return below.at(-1) ?? selectedDefaultEffort ?? selectedEfforts[0] ?? null;
+              })();
         // 고정된 런타임이 사라졌을 때(CLI 삭제/경로 변경, BYOK 키 제거) 예전에는 칩이 통째로
         // 사라지고 applySelection이 activeRuntime null로 즉시 return → 핀을 지울 방법이 전혀
         // 없어 채팅이 영구히 벽돌이 됐다(매 전송 pinned-runtime-unavailable). 죽은 핀은 여기서
@@ -1958,8 +1981,8 @@ function ChatPage() {
             ? {
                 ...matched,
                 active: true,
-                model: selection?.model ?? matched.model,
-                effort: selection?.effort ?? matched.effort,
+                model: selectedModel,
+                effort: selectedEffort,
                 longContextEnabled:
                   selection?.longContext ?? matched.longContextEnabled,
               }
@@ -2687,6 +2710,34 @@ function ChatPage() {
   async function applySelection(patch: { model?: string; effort?: string }) {
     const api = ipc();
     if (!api || !activeRuntime || !chat) return;
+    const selectedModel = patch.model !== undefined
+      ? patch.model || undefined
+      : activeRuntime.model ?? undefined;
+    const effortOptions = selectedModel
+      ? activeRuntime.allocationModelProfiles?.[selectedModel]?.efforts
+      : undefined;
+    const inheritedEffort = activeRuntime.effort ?? undefined;
+    const modelDefaultEffort = selectedModel
+      ? activeRuntime.allocationModelProfiles?.[selectedModel]?.defaultEffort
+      : undefined;
+    // A model change must not drag the previous model's effort onto the new
+    // model. If that effort is unsupported, store no override and let the
+    // selected model use its own provider default until the user chooses one.
+    const modelCompatibleEffort = effortOptions === undefined
+      ? inheritedEffort
+      : inheritedEffort === undefined
+        ? modelDefaultEffort ?? effortOptions[0]
+      : effortOptions.includes(inheritedEffort)
+        ? inheritedEffort
+        : (() => {
+            const ranks = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+            const requestedRank = ranks.indexOf(inheritedEffort);
+            const below = effortOptions.filter((candidate) => {
+              const rank = ranks.indexOf(candidate);
+              return requestedRank >= 0 && rank >= 0 && rank <= requestedRank;
+            });
+            return below.at(-1) ?? modelDefaultEffort ?? effortOptions[0];
+          })();
     const selection: RuntimeSelection = {
       kind: activeRuntime.kind,
       backend: activeRuntime.backend,
@@ -2695,13 +2746,13 @@ function ChatPage() {
       // CLI를 업그레이드/재설치하면 경로가 바뀌어 exact pin이 영구히 안 맞게 된다
       // (→ 매 전송 "Pinned automation runtime is unavailable", 칩도 사라져 되돌릴 수 없음).
       // 이 제스처의 의도는 "이 채팅에서 이 모델을 쓴다"이지 "이 바이너리 경로에 영구 결박"이 아니다.
-      model: patch.model !== undefined ? patch.model || undefined : activeRuntime.model ?? undefined,
+      model: selectedModel,
       longContext:
         activeRuntime.kind === "byok" ? (activeRuntime.longContextEnabled ?? false) : undefined,
       effort:
         patch.effort !== undefined
           ? patch.effort || undefined
-          : activeRuntime.effort ?? undefined,
+          : modelCompatibleEffort,
       role: "orchestrator",
       inherit: false,
     };
