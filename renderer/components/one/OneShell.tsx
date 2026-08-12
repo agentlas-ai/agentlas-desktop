@@ -13,8 +13,16 @@ import {
 } from "react";
 import { Markdown, StreamingMarkdown } from "@/components/Markdown";
 import { ElapsedClock } from "@/components/ElapsedClock";
-import { IconArrowUp, IconClose, IconPlus, IconRefresh } from "@/components/Icon";
-import { GoalFeedbackBar } from "@/components/GoalFeedbackBar";
+import {
+  IconArrowUp,
+  IconBolt,
+  IconChevronDown,
+  IconClose,
+  IconPlus,
+  IconRoute,
+  IconShield,
+  IconSparkles,
+} from "@/components/Icon";
 import { grantForDroppedFile, ipc, ipcEvents } from "@/lib/ipc";
 import { tFor, useT } from "@/lib/i18n";
 import { visibleAgents } from "@/lib/agent-visibility";
@@ -34,7 +42,6 @@ import {
 } from "@/lib/one-run-progress";
 import type {
   Chat,
-  ChatGoalContext,
   ChatHistoryEntry,
   CommittedQuestionAnswer,
   InvocationRunReceipt,
@@ -87,7 +94,7 @@ import {
   type OneAttachmentSafeItem,
   type PreparedOneAttachments,
 } from "@shared/one-attachments";
-import type { FsPathGrant, OrchestrationTarget } from "@shared/types";
+import type { FsPathGrant, OrchestrationTarget, RuntimeSelection, RuntimeStatus } from "@shared/types";
 import { ONE_BRIEFING_CONTRACT_VERSION, isOneProactiveBriefing } from "@shared/one-briefing";
 import {
   isPendingConfirmationSnoozed,
@@ -121,10 +128,15 @@ import { OneMemorySheet } from "./OneMemorySheet";
 import { OneMemoryMap } from "./OneMemoryMap";
 import { OneMemoryCandidateCard } from "./OneMemoryCandidateCard";
 import { OneProfileSheet } from "./OneProfileSheet";
-import { OneRecurrenceControl } from "./OneRecurrenceControl";
 import { OneSuggestionCard } from "./OneSuggestionCard";
 import { OneGrowthCard } from "./OneGrowthCard";
 import { OneRuntimeArtifactRail, OneRuntimeFeedbackList } from "./OneRuntimeFeedback";
+import {
+  OneComposerControls,
+  type OneComposerMenuKey,
+  type OneComposerModelOption,
+  type OnePermissionMode,
+} from "./OneComposerControls";
 import { OneVoiceInputHelp } from "./OneVoiceInputHelp";
 import { OneWeeklyReflectionCard } from "./OneWeeklyReflectionCard";
 import {
@@ -165,7 +177,6 @@ type UiMessage = {
   id: string;
   role: "user" | "assistant" | "system";
   text: string;
-  imageDataUrls?: string[];
   streaming?: boolean;
 };
 
@@ -185,7 +196,6 @@ type PendingTeamPrompt = {
   recurrence: OneRecurrenceSelectionV1 | null;
   overrides: OneTurnOverrides;
   taskForceTargets: OrchestrationTarget[];
-  imageDataUrls: string[];
 };
 
 type OneTurnOverrides = {
@@ -203,8 +213,6 @@ type OneAttachmentDraft = {
   size: number;
   kind: "image" | "file";
   previewUrl: string | null;
-  /** Data URL retained by the optimistic user turn after the picker blob is revoked. */
-  displayDataUrl: string | null;
 };
 
 const UPDATE_BLOCKING_STATES = new Set<UpdaterState["status"]>([
@@ -231,22 +239,18 @@ function readOneComposerDraft(key: string): OneComposerDraftCache {
   const cached = oneComposerDraftCache.get(key);
   if (cached) return cached;
   let composer = "";
-  let stagedSteer: string | null = null;
   try {
     if (typeof window !== "undefined") {
       const raw = window.sessionStorage.getItem(`${ONE_COMPOSER_DRAFT_STORAGE_PREFIX}${key}`);
       if (raw) {
-        const parsed = JSON.parse(raw) as { composer?: unknown; stagedSteer?: unknown };
+        const parsed = JSON.parse(raw) as { composer?: unknown };
         if (typeof parsed.composer === "string") composer = parsed.composer;
-        if (typeof parsed.stagedSteer === "string" && parsed.stagedSteer.trim()) {
-          stagedSteer = parsed.stagedSteer;
-        }
       }
     }
   } catch {
     // In-memory continuity still works when Web Storage is unavailable.
   }
-  const restored = { composer, stagedSteer };
+  const restored = { composer, stagedSteer: null };
   oneComposerDraftCache.set(key, restored);
   return restored;
 }
@@ -257,12 +261,7 @@ function writeOneComposerDraft(key: string, patch: Partial<OneComposerDraftCache
   try {
     if (typeof window === "undefined") return;
     const storageKey = `${ONE_COMPOSER_DRAFT_STORAGE_PREFIX}${key}`;
-    if (next.composer || next.stagedSteer) {
-      window.sessionStorage.setItem(storageKey, JSON.stringify({
-        composer: next.composer,
-        stagedSteer: next.stagedSteer,
-      }));
-    }
+    if (next.composer) window.sessionStorage.setItem(storageKey, JSON.stringify({ composer: next.composer }));
     else window.sessionStorage.removeItem(storageKey);
   } catch {
     // Draft persistence is best-effort and must never block typing.
@@ -291,23 +290,11 @@ function attachmentTypeLabel(mediaType: string, name: string): string {
   return extension ? extension.toUpperCase() : "file";
 }
 
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => typeof reader.result === "string"
-      ? resolve(reader.result)
-      : reject(new Error("Image preview is unavailable"));
-    reader.onerror = () => reject(reader.error ?? new Error("Image preview is unavailable"));
-    reader.readAsDataURL(file);
-  });
-}
-
 function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
   return history.map((entry) => ({
     id: entry.id,
     role: entry.role === "assistant" ? "assistant" : entry.role,
     text: entry.text,
-    imageDataUrls: entry.imageDataUrls,
   }));
 }
 
@@ -536,7 +523,6 @@ export function OneShell() {
   const [conversations, setConversations] = useState<Chat[]>([]);
   const [selected, setSelected] = useState<OneTaskProjection | null>(null);
   const [conversation, setConversation] = useState<Chat | null>(null);
-  const [goalContext, setGoalContext] = useState<ChatGoalContext | null>(null);
   const [activeChatIds, setActiveChatIds] = useState<string[]>([]);
   const [confirmations, setConfirmations] = useState<PendingConfirmation[]>([]);
   const [dismissedDecisionId, setDismissedDecisionId] = useState<string | null>(null);
@@ -619,12 +605,21 @@ export function OneShell() {
     setStagedSteerState(next);
   }
   const [availableAgents, setAvailableAgents] = useState<InstalledAgent[]>([]);
-  const [agentPickerOpen, setAgentPickerOpen] = useState(false);
+  const [composerMenu, setComposerMenu] = useState<OneComposerMenuKey | null>(null);
+  const agentPickerOpen = composerMenu === "agents";
+  function setAgentPickerOpen(next: boolean | ((open: boolean) => boolean)) {
+    setComposerMenu((current) => {
+      const open = current === "agents";
+      const shouldOpen = typeof next === "function" ? next(open) : next;
+      return shouldOpen ? "agents" : open ? null : current;
+    });
+  }
   const [turnAgentIds, setTurnAgentIds] = useState<string[]>([]);
-  const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [turnOverrides, setTurnOverrides] = useState<OneTurnOverrides>({});
-  const [recurrenceSelection, setRecurrenceSelection] = useState<OneRecurrenceSelectionV1 | null>(null);
-  const [recurrencePanelOpen, setRecurrencePanelOpen] = useState(false);
+  const [oneRuntime, setOneRuntime] = useState<RuntimeStatus | null>(null);
+  const [oneRuntimePinned, setOneRuntimePinned] = useState(false);
+  const [oneModelOptions, setOneModelOptions] = useState<OneComposerModelOption[]>([]);
+  const [onePermission, setOnePermission] = useState<OnePermissionMode>("auto");
   const [attachmentDrafts, setAttachmentDrafts] = useState<OneAttachmentDraft[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
@@ -1172,28 +1167,13 @@ export function OneShell() {
       const liveRunOwnsThread = Boolean(
         runIdRef.current && runChatIdRef.current === chatId,
       );
-      const durableMessages = toUiMessages(history);
-      if (!liveRunOwnsThread) setMessages(durableMessages);
+      if (!liveRunOwnsThread) setMessages(toUiMessages(history));
       setCommittedAnswers(answers);
       setReceipt(taskReceipt);
       setSurface(durableSurface?.manifest ?? null);
       void api.chats.markViewed(chatId).catch(() => undefined);
       if (attachment) {
         runIdRef.current = attachment.runId;
-        const restoredSteers = (attachment.queuedSteers ?? []).map((queued) => ({
-          id: `one-steer-restored:${attachment.runId}:${queued.position}`,
-          text: queued.text,
-        }));
-        setQueuedSteers(restoredSteers);
-        setMessages((current) => {
-          const base = current.length > 0 ? current : durableMessages;
-          return [
-          ...base,
-          ...restoredSteers
-            .filter((queued) => !base.some((message) => message.role === "user" && message.text === queued.text))
-            .map((queued) => ({ id: queued.id, role: "user" as const, text: queued.text })),
-          ];
-        });
         setBusy(true);
         setRunStatus(tFor(appLocale, "one.shell.run.reconnected"));
         subscribeRun(attachment.runId);
@@ -1232,31 +1212,72 @@ export function OneShell() {
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
   const activeThreadPromptFallback = selected?.display.title ?? conversation?.title ?? "";
   const runtimeArtifacts = useMemo(() => oneRuntimeArtifacts(runtimeFeedback), [runtimeFeedback]);
-  const activeThreadChat = selected?.chat ?? conversation;
-  const activeGoalArmed = Boolean(activeThreadChat?.goalId);
   useEffect(() => {
     const api = ipc();
-    setGoalContext(null);
-    if (!api || !activeThreadChatId || !activeGoalArmed) return;
+    if (!api) return;
     let cancelled = false;
-    void api.chats.getGoalContext(activeThreadChatId)
-      .then((context) => { if (!cancelled) setGoalContext(context); })
-      .catch(() => { if (!cancelled) setGoalContext(null); });
+    void Promise.all([
+      api.runtime.detect(),
+      activeThreadChatId ? api.chats.get(activeThreadChatId).catch(() => null) : Promise.resolve(null),
+    ]).then(([runtimes, chat]) => {
+      if (cancelled) return;
+      const selection = chat?.runtimeSelection ?? null;
+      const matched = selection
+        ? runtimes.find((runtime) => runtime.kind === selection.kind && (!selection.backend || runtime.backend === selection.backend))
+        : runtimes.find((runtime) => runtime.active);
+      setOneRuntime(matched ? {
+        ...matched,
+        active: true,
+        model: selection?.model ?? matched.model,
+        effort: selection?.effort ?? matched.effort,
+        longContextEnabled: selection?.longContext ?? matched.longContextEnabled,
+      } : null);
+      setOneRuntimePinned(Boolean(selection));
+    }).catch(() => {
+      if (!cancelled) {
+        setOneRuntime(null);
+        setOneRuntimePinned(false);
+      }
+    });
     return () => { cancelled = true; };
-  }, [activeGoalArmed, activeThreadChatId]);
+  }, [activeThreadChatId]);
 
-  const setOneGoalArmed = useCallback(async (enabled: boolean) => {
+  useEffect(() => {
     const api = ipc();
-    if (!api || !activeThreadChatId) return;
-    const updated = await api.chats.setGoalMode(activeThreadChatId, enabled);
-    if (selected?.chatId === activeThreadChatId) {
-      setSelected((current) => current ? { ...current, chat: updated } : current);
-    } else if (conversation?.id === activeThreadChatId) {
-      setConversation(updated);
+    if (!api || !oneRuntime) {
+      setOneModelOptions([]);
+      return;
     }
-    if (!enabled) setGoalContext(null);
-    return updated;
-  }, [activeThreadChatId, conversation?.id, selected?.chatId]);
+    let cancelled = false;
+    void api.runtime.listModels({
+      kind: oneRuntime.kind,
+      backend: oneRuntime.backend,
+      availableModels: oneRuntime.availableModels,
+    }).then((models) => {
+      if (!cancelled) setOneModelOptions(models);
+    }).catch(() => {
+      if (!cancelled) setOneModelOptions([]);
+    });
+    return () => { cancelled = true; };
+  }, [oneRuntime?.availableModels, oneRuntime?.backend, oneRuntime?.kind]);
+
+  useEffect(() => {
+    if (!composerMenu) return;
+    const dismiss = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-one-composer-popover], [data-one-composer-trigger]")) return;
+      setComposerMenu(null);
+    };
+    const escape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setComposerMenu(null);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [composerMenu]);
   useEffect(() => {
     setQueuedSteers([]);
     if (composerDraftKeyRef.current === composerDraftKey) return;
@@ -1282,10 +1303,7 @@ export function OneShell() {
         setBusy(true);
         setRunStatus(tFor(appLocale, "one.shell.run.reconnected"));
         setRunProgress(initialOneRunProgress());
-        setQueuedSteers((attachment.queuedSteers ?? []).map((queued) => ({
-          id: `one-steer-restored:${attachment.runId}:${queued.position}`,
-          text: queued.text,
-        })));
+        setQueuedSteers((current) => current.slice(1));
         subscribeRun(attachment.runId);
         for (const event of attachment.events) consumeRunEventRef.current(event);
       }).catch(() => undefined);
@@ -1307,7 +1325,7 @@ export function OneShell() {
           : null;
         if (cancelled) return;
         setTeamPreflight(proposal);
-      setPendingTeamPrompt((current) => (
+        setPendingTeamPrompt((current) => (
           proposal && current?.proposalId === proposal.proposalId
             ? current
             : proposal
@@ -1318,7 +1336,6 @@ export function OneShell() {
                   recurrence: null,
                   overrides: {},
                   taskForceTargets: [],
-                  imageDataUrls: [],
                 }
               : null
         ));
@@ -1380,6 +1397,44 @@ export function OneShell() {
     return () => window.clearTimeout(timer);
   }, [armedOneMemoryUseOnce]);
 
+  const oneRuntimeSelection = useMemo<RuntimeSelection | undefined>(() => {
+    if (!oneRuntime || !oneRuntimePinned) return undefined;
+    return {
+      kind: oneRuntime.kind,
+      backend: oneRuntime.backend,
+      model: oneRuntime.model ?? undefined,
+      effort: oneRuntime.effort ?? undefined,
+      longContext: oneRuntime.kind === "byok" ? oneRuntime.longContextEnabled ?? false : undefined,
+      role: "orchestrator",
+      inherit: false,
+    };
+  }, [oneRuntime, oneRuntimePinned]);
+
+  const applyOneRuntimeSelection = useCallback(async (patch: { model?: string; effort?: string }) => {
+    if (!oneRuntime) return;
+    const nextRuntime: RuntimeStatus = {
+      ...oneRuntime,
+      model: patch.model !== undefined ? patch.model || null : oneRuntime.model,
+      effort: patch.effort !== undefined ? patch.effort || null : oneRuntime.effort,
+    };
+    const selection: RuntimeSelection = {
+      kind: nextRuntime.kind,
+      backend: nextRuntime.backend,
+      model: nextRuntime.model ?? undefined,
+      effort: nextRuntime.effort ?? undefined,
+      longContext: nextRuntime.kind === "byok" ? nextRuntime.longContextEnabled ?? false : undefined,
+      role: "orchestrator",
+      inherit: false,
+    };
+    setOneRuntime(nextRuntime);
+    setOneRuntimePinned(true);
+    setComposerMenu(null);
+    const api = ipc();
+    if (api && activeThreadChatId) {
+      await api.chats.setRuntimeSelection(activeThreadChatId, selection).catch(() => null);
+    }
+  }, [activeThreadChatId, oneRuntime]);
+
   const startRun = useCallback(async (
     chatId: string,
     taskId: string | null,
@@ -1395,7 +1450,6 @@ export function OneShell() {
       taskForceTargets?: OrchestrationTarget[];
       userAlreadyShown?: boolean;
       displayUserMessage?: boolean;
-      displayImageDataUrls?: string[];
       /** Marks a prompt One authored on the user's behalf. Main records it as a
        *  system turn so the conversation never quotes our wording as theirs. */
       promptOrigin?: "system";
@@ -1410,8 +1464,8 @@ export function OneShell() {
     runTaskIdRef.current = taskId;
     runChatIdRef.current = chatId;
     streamTextRef.current = "";
-    // A person-authored turn resets One's retry budget. This field is recovery
-    // request text, not the persistent Goal contract (which Main owns).
+    // A turn the person authored is a fresh goal: it restores the full recovery
+    // budget. One's own continuation prompts keep spending the current one.
     if (!options?.promptOrigin) {
       const state = autoRecoveryRef.current;
       state.chatId = chatId;
@@ -1437,12 +1491,7 @@ export function OneShell() {
         ...withoutLive,
         ...(userAlreadyVisible || options?.displayUserMessage === false
           ? []
-          : [{
-              id: uid(),
-              role: "user" as const,
-              text,
-              imageDataUrls: options?.displayImageDataUrls,
-            }]),
+          : [{ id: uid(), role: "user" as const, text }]),
         { id: "one-live-response", role: "assistant" as const, text: "", streaming: true },
       ];
     });
@@ -1457,7 +1506,9 @@ export function OneShell() {
       ? armedOneMemoryUseOnce.receipt
       : null;
     const intentPermission = taskIntent === "conversation" ? "read" : "write";
-    const executionPermission = intentPermission === "write" ? "full" : intentPermission;
+    const executionPermission = onePermission === "auto"
+      ? intentPermission === "write" ? "full" : intentPermission
+      : onePermission;
     try {
       await api.invoke.run({
         runId,
@@ -1478,7 +1529,8 @@ export function OneShell() {
         } : {}),
         locale: runLocale,
         permissions: executionPermission,
-        ...(options?.overrides?.goalMode && !goalContext?.objective ? { goalMode: true } : {}),
+        ...(oneRuntimeSelection ? { runtimeSelection: oneRuntimeSelection } : {}),
+        ...(options?.overrides?.goalMode ? { goalMode: true } : {}),
         ...(options?.overrides?.planMode ? { planMode: true } : {}),
         ...(options?.overrides?.sessionRouting ? { sessionRouting: true } : { sessionRouting: false }),
         ...(options?.overrides?.stormbreakerMode ? { stormbreakerMode: true } : {}),
@@ -1516,7 +1568,7 @@ export function OneShell() {
         ));
       }
     }
-  }, [armedOneMemoryUseOnce, goalContext?.objective, normalizedLocale, refreshAll, scrollToLatest, subscribeRun]);
+  }, [armedOneMemoryUseOnce, normalizedLocale, onePermission, oneRuntimeSelection, refreshAll, scrollToLatest, subscribeRun]);
 
   const autoStartTeamPreflight = useCallback(async (
     proposal: OneTeamPreflightProposal,
@@ -1558,7 +1610,6 @@ export function OneShell() {
           recurrence: prompt.recurrence,
           overrides: prompt.overrides,
           taskForceTargets: prompt.taskForceTargets,
-          displayImageDataUrls: prompt.imageDataUrls,
           userAlreadyShown,
           displayUserMessage: userAlreadyShown,
         },
@@ -1623,7 +1674,6 @@ export function OneShell() {
           recurrence: prompt.recurrence,
           overrides: prompt.overrides,
           taskForceTargets: prompt.taskForceTargets,
-          displayImageDataUrls: prompt.imageDataUrls,
           userAlreadyShown: true,
           displayUserMessage: true,
         },
@@ -1700,10 +1750,10 @@ export function OneShell() {
 
   const submit = useCallback(async (text: string, commitSteer = false) => {
     const attachmentSnapshot = attachmentDraftsRef.current.slice();
-    const attachmentImageDataUrls = attachmentSnapshot.flatMap((item) => (
-      item.kind === "image" && item.displayDataUrl ? [item.displayDataUrl] : []
-    ));
-    const recurrenceSnapshot = recurrenceSelection ? { ...recurrenceSelection } : null;
+    // Repetition is configured in One's automation surface, not in the chat
+    // composer. Keeping a third scheduling sheet here duplicated that product
+    // boundary and made the composer feel like a form.
+    const recurrenceSnapshot: OneRecurrenceSelectionV1 | null = null;
     const overrideSnapshot = { ...turnOverrides };
     const taskForceTargetSnapshot: OrchestrationTarget[] = turnAgentIds.map((agentId) => ({
       source: "local",
@@ -1718,32 +1768,6 @@ export function OneShell() {
       setError(null);
       requestOneOperationalRecovery("one-submit-connection", "Desktop bridge unavailable");
       return;
-    }
-    // Goal is a host-owned campaign, not a per-turn modifier. The explicit ON
-    // gesture merely arms it; the first subsequent user request defines the
-    // immutable objective and success contract. Later chat/steering cannot
-    // reach defineGoal and therefore cannot silently replace that contract.
-    if (overrideSnapshot.goalMode && !activeGoalArmed && activeThreadChatId) {
-      const updated = await api.chats.setGoalMode(activeThreadChatId, true).catch(() => null);
-      if (!updated?.goalId) {
-        setError(null);
-        requestOneOperationalRecovery("one-goal-arm", "Goal contract could not be armed");
-        return;
-      }
-      if (selected?.chatId === activeThreadChatId) {
-        setSelected((current) => current ? { ...current, chat: updated } : current);
-      } else if (conversation?.id === activeThreadChatId) {
-        setConversation(updated);
-      }
-    }
-    if (overrideSnapshot.goalMode && activeThreadChatId && !goalContext?.objective) {
-      const defined = await api.chats.defineGoal(activeThreadChatId, value, appLocale).catch(() => null);
-      if (!defined) {
-        setError(null);
-        requestOneOperationalRecovery("one-goal-define", "Goal and acceptance criteria could not be frozen");
-        return;
-      }
-      setGoalContext(defined);
     }
     if (busy) {
       const chatId = runChatIdRef.current;
@@ -1766,7 +1790,8 @@ export function OneShell() {
           taskIntent: selected ? "task" : "conversation",
           oneMode: true,
           locale: detectOneTextLocale(value) ?? normalizedLocale,
-          permissions: selected ? "full" : "read",
+          permissions: onePermission === "auto" ? selected ? "full" : "read" : onePermission,
+          ...(oneRuntimeSelection ? { runtimeSelection: oneRuntimeSelection } : {}),
           sessionRouting: false,
         });
       } catch (cause) {
@@ -1844,7 +1869,6 @@ export function OneShell() {
               recurrence: recurrenceSnapshot,
               overrides: overrideSnapshot,
               taskForceTargets: taskForceTargetSnapshot,
-              displayImageDataUrls: attachmentImageDataUrls,
             },
           );
           return;
@@ -1864,17 +1888,11 @@ export function OneShell() {
           recurrence: recurrenceSnapshot,
           overrides: overrideSnapshot,
           taskForceTargets: taskForceTargetSnapshot,
-          imageDataUrls: attachmentImageDataUrls,
         };
         setPendingTeamPrompt(pendingPrompt);
         setMessages((current) => [
           ...current.filter((item) => item.id !== "one-live-response"),
-          {
-            id: `team-request:${prepared.proposal.proposalId}`,
-            role: "user",
-            text: value,
-            imageDataUrls: attachmentImageDataUrls,
-          },
+          { id: `team-request:${prepared.proposal.proposalId}`, role: "user", text: value },
         ]);
         scrollToLatest();
         await autoStartTeamPreflight(prepared.proposal, pendingPrompt, true);
@@ -1891,7 +1909,7 @@ export function OneShell() {
     setTurnOverrides({});
     setTurnAgentIds([]);
     setAgentPickerOpen(false);
-    setModeMenuOpen(false);
+    setComposerMenu(null);
     clearAttachmentDrafts();
     // Keep the user's request visibly in motion while a brand-new chat is
     // promoted to its canonical Task and One decides whether help is needed.
@@ -1913,16 +1931,10 @@ export function OneShell() {
         taskMode: "conversation",
         originSurface: "one",
       });
-      let runnableChat = chat;
-      if (overrideSnapshot.goalMode) {
-        const armed = await api.chats.setGoalMode(chat.id, true);
-        if (!armed.goalId) throw new Error("Goal contract could not be armed");
-        const defined = await api.chats.defineGoal(chat.id, value, appLocale);
-        if (!defined) throw new Error("Goal and acceptance criteria could not be frozen");
-        runnableChat = armed;
-        setGoalContext(defined);
+      if (oneRuntimeSelection) {
+        await api.chats.setRuntimeSelection(chat.id, oneRuntimeSelection).catch(() => chat);
       }
-      setConversation(runnableChat);
+      setConversation(chat);
       selectedConversationIdRef.current = chat.id;
       router.replace(`/one?chat=${encodeURIComponent(chat.id)}`);
       await resolveActivationConcern(chat.id);
@@ -1932,7 +1944,7 @@ export function OneShell() {
       requestOneOperationalRecovery("one-submit", cause);
       setError(null);
     }
-  }, [activeGoalArmed, activeThreadChatId, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, goalContext?.objective, normalizedLocale, recurrenceSelection, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides]);
+  }, [autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeSelection, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides]);
 
   const stopRun = useCallback(() => {
     const api = ipc();
@@ -2672,7 +2684,6 @@ export function OneShell() {
         continue;
       }
       const previewUrl = kind === "image" ? URL.createObjectURL(file) : null;
-      const displayDataUrl = kind === "image" ? await fileToDataUrl(file).catch(() => null) : null;
       next.push({
         id: uid(),
         grant,
@@ -2681,7 +2692,6 @@ export function OneShell() {
         size: file.size,
         kind,
         previewUrl,
-        displayDataUrl,
       });
       totalBytes += file.size;
     }
@@ -3149,7 +3159,7 @@ export function OneShell() {
                     // twice. Earlier conversation turns remain visible.
                     if (message.id === structuredResultMessageId) return null;
                     const visibleText = visibleOneMessageText(message);
-                    if (!visibleText && !message.imageDataUrls?.length) return null;
+                    if (!visibleText) return null;
                     return (
                       <article
                         key={message.id}
@@ -3159,17 +3169,7 @@ export function OneShell() {
                       >
                         {message.role === "assistant" && <div className={styles.assistantIdentity}><OneBrandMark size="small" /><span>One</span></div>}
                         <div className={styles.messageBody}>
-                          {message.imageDataUrls && message.imageDataUrls.length > 0 && (
-                            <div className={styles.messageImages} aria-label={appLocale === "ko" ? "첨부 이미지" : "Attached images"}>
-                              {message.imageDataUrls.map((url, index) => (
-                                // eslint-disable-next-line @next/next/no-img-element
-                                <img key={`${message.id}:image:${index}`} src={url} alt="" />
-                              ))}
-                            </div>
-                          )}
-                          {visibleText && (message.streaming
-                            ? <StreamingMarkdown text={visibleText} messageId={message.id} />
-                            : <Markdown text={visibleText} messageId={message.id} />)}
+                          {message.streaming ? <StreamingMarkdown text={visibleText} messageId={message.id} /> : <Markdown text={visibleText} messageId={message.id} />}
                         </div>
                       </article>
                     );
@@ -3313,7 +3313,7 @@ export function OneShell() {
             )}
           </div>
 
-          <OneRuntimeArtifactRail items={runtimeArtifacts} locale={appLocale} chatId={activeThreadChatId} />
+          <OneRuntimeArtifactRail items={runtimeArtifacts} locale={appLocale} />
 
           <div
             className={styles.composerDock}
@@ -3342,13 +3342,6 @@ export function OneShell() {
               if (event.dataTransfer.files.length > 0) void addAttachmentFiles(event.dataTransfer.files);
             }}
           >
-            <GoalFeedbackBar
-              context={goalContext}
-              armed={activeGoalArmed}
-              locale={appLocale}
-              className={styles.oneGoalFeedback}
-              onEndGoal={() => void setOneGoalArmed(false)}
-            />
             {attachmentDragActive && (
               <div className={styles.attachmentDropOverlay} role="status" aria-live="polite">
                 {tFor(appLocale, "one.shell.composer.drop_files")}
@@ -3382,15 +3375,6 @@ export function OneShell() {
               </div>
             )}
             {attachmentError && <p className={styles.attachmentError} role="alert">{attachmentError}</p>}
-            {(recurrencePanelOpen || recurrenceSelection) && <OneRecurrenceControl
-              locale={appLocale}
-              disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
-              value={recurrenceSelection}
-              onChange={(value) => {
-                setRecurrenceSelection(value);
-                if (value === null) setRecurrencePanelOpen(false);
-              }}
-            />}
             {turnAgentIds.length > 0 && (
               <div className={styles.oneTurnAgentChips} aria-label={appLocale === "ko" ? "이번 턴 에이전트" : "Agents for this turn"}>
                 <span>{appLocale === "ko" ? "이번 턴" : "This turn"}</span>
@@ -3407,62 +3391,64 @@ export function OneShell() {
                 })}
               </div>
             )}
-            {agentPickerOpen && (
-              <section className={styles.oneTurnMenu} aria-label={appLocale === "ko" ? "이번 턴 에이전트 선택" : "Choose agents for this turn"}>
-                <header>{appLocale === "ko" ? "이번 턴에 부를 서브 에이전트" : "Sub-agents for this turn"}</header>
-                <div>
-                  {availableAgents.map((candidate) => {
-                    const localized = pickLocalized(candidate, appLocale);
-                    const selectedForTurn = turnAgentIds.includes(candidate.id);
-                    return <button key={candidate.id} type="button" data-active={selectedForTurn ? "true" : "false"} onClick={() => {
-                      setTurnAgentIds((current) => current.includes(candidate.id)
-                        ? current.filter((id) => id !== candidate.id)
-                        : [...current, candidate.id]);
-                      setComposer((current) => {
-                        const match = current.match(/(^|\s)@[^\s]*$/u);
-                        return match ? `${current.slice(0, match.index)}${match[1]}` : current;
-                      });
-                      window.setTimeout(() => composerInputRef.current?.focus(), 0);
-                    }}><strong>{selectedForTurn ? "✓ " : ""}{localized.name}</strong><span>{localized.tagline}</span></button>;
-                  })}
-                </div>
-                <small>{appLocale === "ko" ? "호출된 에이전트는 이 턴에만 참여하며 One이 세션을 계속 관리합니다." : "Called agents participate in this turn only. One continues to manage the session."}</small>
-              </section>
-            )}
-            {modeMenuOpen && (
-              <section className={styles.oneTurnMenu} aria-label={appLocale === "ko" ? "이번 턴 옵션" : "Options for this turn"}>
-                <header>{appLocale === "ko" ? "명시적 옵션 · 선택하지 않으면 One이 판단" : "Explicit options · otherwise One decides"}</header>
-                <div className={styles.oneTurnToggles}>
-                  {([
-                    ["goalMode", activeGoalArmed
-                      ? (appLocale === "ko" ? "Goal 켜짐" : "Goal on")
-                      : (appLocale === "ko" ? "Goal" : "Goal")],
-                    ["planMode", appLocale === "ko" ? "Plan" : "Plan"],
-                    ["sessionRouting", appLocale === "ko" ? "동적 팀" : "Dynamic team"],
-                    ["stormbreakerMode", "Stormbreaker"],
-                  ] as Array<[keyof OneTurnOverrides, string]>).map(([key, label]) => <button
-                    key={key}
-                    type="button"
-                    data-active={key === "goalMode" ? (activeGoalArmed || turnOverrides.goalMode ? "true" : "false") : (turnOverrides[key] ? "true" : "false")}
-                    onClick={() => setTurnOverrides((current) => {
-                      if (key === "goalMode" && activeGoalArmed) {
-                        void setOneGoalArmed(false);
-                        const next = { ...current };
-                        delete next.goalMode;
-                        return next;
-                      }
-                      const next = { ...current };
-                      if (next[key]) {
-                        delete next[key];
-                      } else {
-                        next[key] = true;
-                        if (key === "goalMode" && activeThreadChatId) void setOneGoalArmed(true);
-                      }
-                      return next;
-                    })}
-                  >{label}</button>)}
-                </div>
-              </section>
+            {composerMenu && (
+              <OneComposerControls
+                activeMenu={composerMenu}
+                locale={appLocale}
+                runtime={oneRuntime}
+                models={oneModelOptions}
+                agents={availableAgents.map((candidate) => {
+                  const localized = pickLocalized(candidate, appLocale);
+                  return {
+                    id: candidate.id,
+                    name: localized.name,
+                    tagline: localized.tagline,
+                    selected: turnAgentIds.includes(candidate.id),
+                  };
+                })}
+                permission={onePermission}
+                turnOptions={turnOverrides}
+                onMenuChange={setComposerMenu}
+                onAttach={() => {
+                  setComposerMenu(null);
+                  attachmentInputRef.current?.click();
+                }}
+                onAddFolder={() => {
+                  const api = ipc();
+                  setComposerMenu(null);
+                  if (!api) return;
+                  void api.fs.pickDirectory().then((grant) => {
+                    if (!grant?.path) return;
+                    const marker = appLocale === "ko" ? `작업 폴더: ${grant.path}` : `Working folder: ${grant.path}`;
+                    setComposer((current) => `${current}${current.trim() ? "\n" : ""}[${marker}]`);
+                    window.setTimeout(() => composerInputRef.current?.focus(), 0);
+                  }).catch(() => undefined);
+                }}
+                onOpenPlugins={() => {
+                  setComposerMenu(null);
+                  router.push("/library/mcps");
+                }}
+                onToggleAgent={(agentId) => {
+                  setTurnAgentIds((current) => current.includes(agentId)
+                    ? current.filter((id) => id !== agentId)
+                    : [...current, agentId]);
+                  setComposer((current) => {
+                    const match = current.match(/(^|\s)@[^\s]*$/u);
+                    return match ? `${current.slice(0, match.index)}${match[1]}` : current;
+                  });
+                }}
+                onSelectModel={(model) => { void applyOneRuntimeSelection({ model }); }}
+                onSelectEffort={(effort) => { void applyOneRuntimeSelection({ effort }); }}
+                onSelectPermission={(permission) => {
+                  setOnePermission(permission);
+                  setComposerMenu(null);
+                }}
+                onToggleTurnOption={(key) => setTurnOverrides((current) => {
+                  const next = { ...current };
+                  if (next[key]) delete next[key]; else next[key] = true;
+                  return next;
+                })}
+              />
             )}
             {stagedSteer && (
               <div className={styles.steeringDraft} role="group" aria-label={appLocale === "ko" ? "보낼 작업 조정" : "Staged work adjustment"} data-one-steering-draft="true">
@@ -3499,7 +3485,7 @@ export function OneShell() {
                 <small>{appLocale === "ko" ? "현재 모델을 중단하지 않고 이어서 반영합니다" : "Will be applied without stopping the current model"}</small>
               </div>
             )}
-            <form className={styles.composer} onSubmit={(event) => {
+            <form className={styles.composer} data-one-composer="true" onSubmit={(event) => {
               event.preventDefault();
               if (busy && !composer.trim()) stopRun();
               else void submit(composer);
@@ -3547,40 +3533,68 @@ export function OneShell() {
                   <button
                     type="button"
                     className={styles.attachmentButton}
+                    data-one-composer-trigger="plus"
                     disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
-                    onClick={() => attachmentInputRef.current?.click()}
-                    aria-label={tFor(appLocale, "one.shell.composer.attach_aria")}
-                    title={tFor(appLocale, "one.shell.composer.attach_title")}
+                    onClick={() => setComposerMenu((current) => current === "plus" ? null : "plus")}
+                    aria-expanded={composerMenu === "plus"}
+                    aria-label={appLocale === "ko" ? "첨부 및 작업 옵션" : "Attachments and work options"}
                   >
                     <IconPlus size={20} aria-hidden="true" />
                   </button>
+                  {oneRuntime && (oneModelOptions.length > 0 || oneRuntime.model) && (
+                    <button
+                      type="button"
+                      className={styles.composerChip}
+                      data-one-composer-trigger="model"
+                      disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
+                      aria-expanded={composerMenu === "model"}
+                      onClick={() => setComposerMenu((current) => current === "model" ? null : "model")}
+                    >
+                      <IconSparkles size={15} />
+                      <span>{oneModelOptions.find((model) => model.id === oneRuntime.model)?.label ?? oneRuntime.model ?? (appLocale === "ko" ? "기본 모델" : "Default model")}</span>
+                      <IconChevronDown size={12} />
+                    </button>
+                  )}
+                  {oneRuntime && (oneRuntime.efforts?.length ?? 0) > 0 && (
+                    <button
+                      type="button"
+                      className={styles.composerChip}
+                      data-one-composer-trigger="effort"
+                      disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
+                      aria-expanded={composerMenu === "effort"}
+                      onClick={() => setComposerMenu((current) => current === "effort" ? null : "effort")}
+                    >
+                      <IconRoute size={15} />
+                      <span>{oneRuntime.efforts?.find((effort) => effort.id === oneRuntime.effort)?.label ?? (appLocale === "ko" ? "기본" : "Default")}</span>
+                      <IconChevronDown size={12} />
+                    </button>
+                  )}
                   <button
                     type="button"
-                    className={styles.attachmentButton}
+                    className={styles.composerChip}
+                    data-one-composer-trigger="permission"
                     disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
-                    aria-expanded={agentPickerOpen}
-                    aria-label={appLocale === "ko" ? "이번 턴에 에이전트 호출" : "Call agents for this turn"}
-                    onClick={() => { setModeMenuOpen(false); setAgentPickerOpen((open) => !open); }}
-                  >@</button>
-                  <button
-                    type="button"
-                    className={styles.attachmentButton}
-                    disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
-                    aria-expanded={modeMenuOpen}
-                    aria-label={appLocale === "ko" ? "이번 턴 옵션" : "Options for this turn"}
-                    onClick={() => { setAgentPickerOpen(false); setModeMenuOpen((open) => !open); }}
-                  >◇</button>
-                  <button
-                    type="button"
-                    className={styles.attachmentButton}
-                    disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
-                    aria-expanded={recurrencePanelOpen || recurrenceSelection !== null}
-                    aria-label={tFor(appLocale, "one.shell.composer.repeat_aria")}
-                    title={tFor(appLocale, "one.shell.composer.repeat_title")}
-                    onClick={() => setRecurrencePanelOpen((open) => !open)}
+                    aria-expanded={composerMenu === "permission"}
+                    onClick={() => setComposerMenu((current) => current === "permission" ? null : "permission")}
                   >
-                    <IconRefresh size={17} aria-hidden="true" />
+                    <IconShield size={15} />
+                    <span>{onePermission === "auto" ? (appLocale === "ko" ? "자동 모드" : "Auto mode") : onePermission === "read" ? (appLocale === "ko" ? "읽기 전용" : "Read only") : onePermission === "write" ? (appLocale === "ko" ? "파일 편집" : "Accept file edits") : (appLocale === "ko" ? "전체 액세스" : "Full access")}</span>
+                    <IconChevronDown size={12} />
                   </button>
+                  <button
+                    type="button"
+                    className={styles.composerQuickMode}
+                    data-active={turnOverrides.stormbreakerMode ? "true" : "false"}
+                    disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
+                    onClick={() => setTurnOverrides((current) => {
+                      const next = { ...current };
+                      if (next.stormbreakerMode) delete next.stormbreakerMode;
+                      else next.stormbreakerMode = true;
+                      return next;
+                    })}
+                    aria-label="Stormbreaker"
+                    aria-pressed={Boolean(turnOverrides.stormbreakerMode)}
+                  ><IconBolt size={16} /></button>
                 </div>
                 <div className={styles.composerActions}>
                   <OneVoiceInputHelp
@@ -3588,22 +3602,24 @@ export function OneShell() {
                     composerRef={composerInputRef}
                     disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
                   />
-                  <button
-                    type="submit"
-                    className={styles.sendButton}
-                    data-one-steering-stage={busy && composer.trim() ? "true" : undefined}
-                    disabled={!busy && ((!composer.trim() && attachmentDrafts.length === 0) || selectedReadOnly || teamDecisionPending || teamPreflightBusy)}
-                    aria-label={busy
-                      ? composer.trim()
-                        ? (appLocale === "ko" ? "작업 조정 초안 올리기" : "Stage a work adjustment")
-                        : tFor(appLocale, "one.shell.composer.stop_run_aria")
-                      : tFor(appLocale, "one.shell.composer.send_aria")}
-                    title={busy && composer.trim()
-                      ? (appLocale === "ko" ? "먼저 초안으로 올린 뒤 현재 작업 조정을 눌러 보냅니다" : "Stage this first, then choose Adjust current work to send")
-                      : undefined}
-                  >
-                    {busy && !composer.trim() ? <span className={styles.stopGlyph} aria-hidden="true" /> : <IconArrowUp size={20} strokeWidth={2} aria-hidden="true" />}
-                  </button>
+                  {(busy || composer.trim() || attachmentDrafts.length > 0) && (
+                    <button
+                      type="submit"
+                      className={styles.sendButton}
+                      data-one-steering-stage={busy && composer.trim() ? "true" : undefined}
+                      disabled={!busy && ((!composer.trim() && attachmentDrafts.length === 0) || selectedReadOnly || teamDecisionPending || teamPreflightBusy)}
+                      aria-label={busy
+                        ? composer.trim()
+                          ? (appLocale === "ko" ? "작업 조정 초안 올리기" : "Stage a work adjustment")
+                          : tFor(appLocale, "one.shell.composer.stop_run_aria")
+                        : tFor(appLocale, "one.shell.composer.send_aria")}
+                      title={busy && composer.trim()
+                        ? (appLocale === "ko" ? "먼저 초안으로 올린 뒤 현재 작업 조정을 눌러 보냅니다" : "Stage this first, then choose Adjust current work to send")
+                        : undefined}
+                    >
+                      {busy && !composer.trim() ? <span className={styles.stopGlyph} aria-hidden="true" /> : <IconArrowUp size={20} strokeWidth={2} aria-hidden="true" />}
+                    </button>
+                  )}
                 </div>
               </div>
             </form>

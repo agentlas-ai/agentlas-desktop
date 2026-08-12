@@ -79,7 +79,14 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const MAX_INFLIGHT_REQUESTS = 32;
 const MAX_BUFFERED_BYTES = 4 * MOBILE_BRIDGE_MAX_MESSAGE_BYTES;
 const MAX_CONNECTIONS = 24;
-const MAX_CONNECTIONS_PER_DEVICE = 4;
+// A device credential identifies one logical Mobile app session. Allowing the
+// same credential to accumulate several live sockets hid leaked/retried Mobile
+// transports behind one device row, then made the relay's next local hop fail
+// with an opaque 503. The newest authenticated socket owns the credential; the
+// previous socket is closed with the matching Mobile contract below.
+const MAX_CONNECTIONS_PER_DEVICE = 1;
+const SUPERSEDED_CONNECTION_CLOSE_CODE = 4001;
+const SUPERSEDED_CONNECTION_CLOSE_REASON = "superseded by a newer connection";
 const MAX_REQUESTS_PER_MINUTE = 300;
 const MAX_PAIR_ATTEMPTS_PER_MINUTE = 10;
 const MAX_INITIAL_EVENT_QUEUE = 512;
@@ -473,6 +480,26 @@ export class AgentlasMobileBridgeServer {
       );
       rejectUpgrade(socket, 401, "unauthorized", refusal);
       return;
+    }
+    if (!identity.devBootstrap) {
+      let superseded = 0;
+      for (const state of [...this.clients]) {
+        if (state.context.deviceId !== identity.deviceId) continue;
+        state.inflight.clear();
+        state.pendingAuthorityEvents.length = 0;
+        state.pendingAuthorityBytes = 0;
+        this.clients.delete(state);
+        state.socket.close(
+          SUPERSEDED_CONNECTION_CLOSE_CODE,
+          SUPERSEDED_CONNECTION_CLOSE_REASON,
+        );
+        superseded += 1;
+      }
+      if (superseded > 0) {
+        console.info(
+          `[mobile-bridge] replaced ${superseded} stale session(s) for device ${identity.deviceId}`,
+        );
+      }
     }
     if (
       this.clients.size >= MAX_CONNECTIONS ||

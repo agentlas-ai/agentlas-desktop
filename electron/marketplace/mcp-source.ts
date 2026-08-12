@@ -1049,7 +1049,6 @@ export class McpSource implements MarketplaceSource {
     // the Dashboard recommendation cards. Internal routing text, triggers,
     // embeddings, and package instructions remain stripped by Hub.
     const raw = await this.call<unknown>("marketplace.search_agents", {
-      query: q,
       q,
       limit: 100,
       verbose: true,

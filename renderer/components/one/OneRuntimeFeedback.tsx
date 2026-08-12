@@ -1,7 +1,5 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-
 import {
   IconCode,
   IconFileUp,
@@ -11,7 +9,6 @@ import {
 } from "@/components/Icon";
 import { ipc } from "@/lib/ipc";
 import type { OneRuntimeFeedbackItem } from "@/lib/one-runtime-feedback";
-import type { TextFilePreview } from "@shared/types";
 import styles from "./OneShell.module.css";
 
 function FeedbackIcon({ item }: { item: OneRuntimeFeedbackItem }) {
@@ -57,7 +54,7 @@ export function OneRuntimeFeedbackList({
   );
 }
 
-async function openArtifactExternal(item: OneRuntimeFeedbackItem) {
+async function openArtifact(item: OneRuntimeFeedbackItem) {
   const target = item.path || item.previewUrl;
   if (!target) return;
   const bridge = ipc();
@@ -71,36 +68,10 @@ async function openArtifactExternal(item: OneRuntimeFeedbackItem) {
 export function OneRuntimeArtifactRail({
   items,
   locale,
-  chatId,
 }: {
   items: OneRuntimeFeedbackItem[];
   locale: "ko" | "en";
-  chatId: string | null;
 }) {
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [textPreview, setTextPreview] = useState<TextFilePreview | null>(null);
-  const [previewError, setPreviewError] = useState(false);
-  const selected = useMemo(
-    () => items.find((item) => (item.path || item.previewUrl || item.id) === selectedPath) ?? null,
-    [items, selectedPath],
-  );
-  useEffect(() => {
-    if (selectedPath && !items.some((item) => (item.path || item.previewUrl || item.id) === selectedPath)) {
-      setSelectedPath(null);
-    }
-  }, [items, selectedPath]);
-  useEffect(() => {
-    setTextPreview(null);
-    setPreviewError(false);
-    if (!selected?.path || selected.kind === "image" || !chatId) return;
-    const bridge = ipc();
-    if (!bridge?.fs?.readTextFile) return;
-    let cancelled = false;
-    void bridge.fs.readTextFile(selected.path, { kind: "chat-workspace", chatId })
-      .then((preview) => { if (!cancelled) setTextPreview(preview); })
-      .catch(() => { if (!cancelled) setPreviewError(true); });
-    return () => { cancelled = true; };
-  }, [chatId, selected]);
   if (items.length === 0) return null;
   return (
     <aside className={styles.runtimeArtifactRail} aria-label={locale === "ko" ? "작업 산출물" : "Work outputs"} data-one-runtime-artifacts="true">
@@ -114,10 +85,7 @@ export function OneRuntimeArtifactRail({
             key={`${item.kind}:${item.path || item.id}`}
             type="button"
             className={styles.runtimeArtifact}
-            data-active={selected === item ? "true" : "false"}
-            onClick={() => setSelectedPath((current) => current === (item.path || item.previewUrl || item.id)
-              ? null
-              : (item.path || item.previewUrl || item.id))}
+            onClick={() => void openArtifact(item)}
             title={item.path || item.label}
           >
             {item.previewUrl ? (
@@ -132,28 +100,6 @@ export function OneRuntimeArtifactRail({
           </button>
         ))}
       </div>
-      {selected && (
-        <section className={styles.runtimeArtifactViewer} data-kind={selected.kind}>
-          <header>
-            <strong title={selected.path || selected.label}>{selected.label}</strong>
-            <button type="button" onClick={() => void openArtifactExternal(selected)}>
-              {locale === "ko" ? "외부 열기" : "Open"}
-            </button>
-          </header>
-          {selected.previewUrl ? (
-            <img src={selected.previewUrl} alt={selected.label} />
-          ) : textPreview ? (
-            <>
-              {textPreview.truncated && <small>{locale === "ko" ? "큰 파일의 앞부분만 표시합니다" : "Showing the start of a large file"}</small>}
-              <pre>{textPreview.content}</pre>
-            </>
-          ) : (
-            <p>{previewError
-              ? (locale === "ko" ? "이 채팅의 작업 폴더에서 파일을 읽지 못했습니다." : "Could not read this file from the chat workspace.")
-              : (locale === "ko" ? "미리보기를 불러오는 중…" : "Loading preview…")}</p>
-          )}
-        </section>
-      )}
     </aside>
   );
 }

@@ -373,14 +373,6 @@ import {
   unarchiveChat,
 } from "./store/chats";
 import {
-  armChatGoalContract,
-  completeChatGoalContract,
-  defineChatGoalContract,
-  getChatGoalContract,
-  getArmedChatGoalContract,
-  isChatGoalContractArmed,
-} from "./store/chat-goals";
-import {
   completeGoalLedgerGoal,
   deriveGoalAcceptanceCriteria,
   ensureGoalLedgerGoal,
@@ -3209,23 +3201,18 @@ export function registerIpcHandlers(): void {
   /*
    * 목표 추진 칩 — 켜면 단순 프롬프트 접두사가 아니라 persistent goal이 된다:
    * ① goal_ledger 축(goal_id)을 chat에 바인딩(대화가 Task로 승격돼도 축 불변),
-   * ② Main-owned 로컬 계약을 준비(첫 goal 전송이 objective/성공기준을 한 번만 확정),
+   * ② goal 원장 행 생성(best-effort — 첫 goal 전송이 objective를 최신 문장으로 채움),
    * ③ continuousMode 자동 ON(완성까지 계속 도는 루프가 기본).
    * 끄기(칩 ×)는 단순 off가 아니라 **명시적 목표 종료**다: 원장 cancelled, 이
    * goal의 연속실행 자동화 정확히 한 행 비활성화, 바인딩 해제.
-   * 외부 원장은 로컬 불변 계약의 실행 복제본이며 UI/런타임 정본이 아니다.
+   * 원장 호출은 fail-soft(런타임 없으면 조용히 생략)이며 UI 응답을 막지 않는다.
    */
   ipcMain.handle("chats:setGoalMode", (_e, id: string, enabled: boolean) => {
     const chat = getChat(id);
     if (!chat) throw new Error(`Chat not found: ${id}`);
     if (enabled) {
       const task = getCanonicalTaskForChat(id);
-      // A terminal campaign never reuses its identity. Re-enabling Goal is an
-      // explicit new campaign even when the previous external ledger exists.
-      const goalId = chat.goalId && isChatGoalContractArmed(chat.goalId)
-        ? chat.goalId
-        : `${desktopWorkforceGoalId(task?.id ?? id)}:${randomUUID()}`;
-      armChatGoalContract({ goalId, chatId: id });
+      const goalId = chat.goalId ?? desktopWorkforceGoalId(task?.id ?? id);
       setChatGoalBinding(id, goalId);
       setChatContinuousMode(id, true);
       // Binding is not definition. The next explicit Goal-mode request owns
@@ -3240,64 +3227,35 @@ export function registerIpcHandlers(): void {
         reason: "user-ended-goal-chip",
         projectDir: getChatWorkingFolder(id),
       });
-      completeChatGoalContract(chat.goalId, "cancelled");
       setChatGoalBinding(id, null);
-      // Goal ON owns continuous execution. Ending the campaign must also stop
-      // that execution mode so later ordinary chat cannot silently inherit it.
-      setChatContinuousMode(id, false);
     }
     return getChat(id);
   });
   ipcMain.handle("chats:getGoalContext", async (_e, id: string) => {
     const chat = getChat(id);
     if (!chat?.goalId) return null;
-    const local = getArmedChatGoalContract(chat.goalId);
-    if (local) return local;
-    // One-time compatibility import for a goal created by an older build.
-    // The imported objective is then frozen in Desktop and survives engine
-    // upgrades, lookup failures, and renderer remounts.
-    const external = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
-    if (!external?.objective || external.status !== "active") return null;
-    return defineChatGoalContract({
-      goalId: chat.goalId,
-      chatId: id,
-      objective: external.objective,
-      acceptanceCriteria: external.acceptanceCriteria.length > 0
-        ? external.acceptanceCriteria
-        : deriveGoalAcceptanceCriteria(external.objective, currentUiLocale() === "ko" ? "ko" : "en"),
-    });
+    return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
   });
   ipcMain.handle("chats:defineGoal", async (_e, id: string, objective: string, requestedLocale?: "ko" | "en") => {
     const chat = getChat(id);
     if (!chat?.goalId) return null;
     const projectDir = getChatWorkingFolder(id);
-    const existing = getChatGoalContract(chat.goalId);
-    // Any defined active contract is immutable. Missing criteria in an older
-    // external row are repaired from its original objective, never from this
-    // later message.
-    if (existing?.status === "active") return existing;
+    const existing = await getGoalLedgerGoal(chat.goalId, projectDir);
+    // An active contract with criteria is immutable. Ordinary chat and
+    // steering can never call this endpoint to silently replace it.
+    if (existing?.status === "active" && existing.acceptanceCriteria.length > 0) return existing;
     const normalizedObjective = objective.replace(/\s+/g, " ").trim();
     if (!normalizedObjective) return existing;
     const locale = requestedLocale === "ko" || requestedLocale === "en"
       ? requestedLocale
       : currentUiLocale() === "ko" ? "ko" : "en";
-    const local = defineChatGoalContract({
+    await ensureGoalLedgerGoal({
       goalId: chat.goalId,
-      chatId: id,
       objective: normalizedObjective,
       acceptanceCriteria: deriveGoalAcceptanceCriteria(normalizedObjective, locale),
-    });
-    if (!local) return null;
-    // The external engine may be absent or temporarily unavailable. That must
-    // never erase or weaken the Desktop contract, so synchronization is
-    // best-effort after the authoritative local transaction succeeds.
-    void ensureGoalLedgerGoal({
-      goalId: local.goalId,
-      objective: local.objective,
-      acceptanceCriteria: local.acceptanceCriteria,
       projectDir,
     });
-    return local;
+    return getGoalLedgerGoal(chat.goalId, projectDir);
   });
   ipcMain.handle("chats:setSwarmMode", (_e, id: string, enabled: boolean) => {
     setChatSwarmMode(id, enabled);

@@ -1,68 +1,16 @@
 # Changelog
 
-## 0.9.91 — 2026-08-12
+## 1.0.0 — 2026-08-12
 
-Binds the same Agentlas OS v1.1.111 at
-ee1f23911f378b6d521e64d89713c4ef15eb38e9.
+Binds Agentlas OS v1.2.0 at
+8b3f8bcffdfc57bf4991ed6e43d153d9230ea186.
 
-- A chat pinned to one Codex model no longer inherits an unsupported reasoning
-  effort from another model. Desktop resolves the exact model's live effort
-  profile and provider default before launch, so Spark cannot receive `max` and
-  fail before an answer is committed.
-- The chat model menu now lists the selected model's own reasoning levels, and
-  changing models keeps an effort only when the destination model supports it.
-- Codex execution reads model capability data from the same account home passed
-  to the child CLI, preventing a different account cache from validating the
-  invocation.
-- These source gates do not themselves publish a release; the Releases page
-  stays the authority for what is actually downloadable.
-
-## 0.9.90 — 2026-08-12
-
-Binds the same Agentlas OS v1.1.111 at
-ee1f23911f378b6d521e64d89713c4ef15eb38e9.
-
-- Returning to Dashboard reuses the last verified account, credit, project,
-  runtime, usage, quest, Hub, and organization projections while their reads
-  reconcile in the background. A route change no longer paints a signed-in,
-  connected workspace as logged out and disconnected for several seconds.
-- Goal is an explicit, normally-off campaign. Its first request freezes one
-  local objective and five engineering acceptance criteria; ordinary chat and
-  steering cannot replace that contract, and turning Goal off also ends its
-  continuous execution mode.
-- A direction typed while a model is running is staged above the composer and
-  enters the Main-owned steering queue only through the explicit adjustment
-  action. The queued user turn, live feedback, completed answer, and attached
-  screenshots survive Dashboard and menu round trips.
-- One renders event-grounded tool, file, and image progress in the conversation
-  and a compact output rail. Generated outputs can be inspected without
-  replacing the running conversation, and unreported percentages are never
-  invented.
-- These source gates do not themselves publish a release; the Releases page
-  stays the authority for what is actually downloadable.
-
-## 0.9.89 — 2026-08-12
-
-Binds the same Agentlas OS v1.1.111 at
-ee1f23911f378b6d521e64d89713c4ef15eb38e9.
-
-- An unfinished Work or One message survives Dashboard and menu round trips.
-  Staged steering remains attached to its chat until it is explicitly sent or
-  discarded, while the active model keeps running.
-- Goal mode now separates the durable goal contract from ordinary chat. The
-  first explicit Goal request defines its objective and acceptance criteria;
-  later conversation and steering can change the route without silently
-  replacing that contract.
-- One shows event-grounded work feedback for tools, files, and images, with the
-  same outputs available in a compact rail. It does not invent progress
-  percentages when the runtime has not reported one.
-- Project pages put current tasks and conversations first and keep the agent
-  roster collapsed until requested, reducing the cost of returning to work.
-- Startup reuses cached local-agent definition fingerprints instead of
-  recursively hashing every routed skill folder on the main thread. Explicit
-  repair still performs a full reconciliation when requested.
-- These source gates do not themselves publish a release; the Releases page
-  stays the authority for what is actually downloadable.
+- Keeps the active model turn visible while a follow-up direction is accepted,
+  then attaches the replacement run without navigation or a transcript reset.
+- Persists intermediate activity as concise feedback rows and prevents stale
+  hydration or post-final reconciliation from removing a completed response.
+- Adds the One composer/runtime feedback surfaces and automation attention
+  projection while retaining the existing project and memory boundaries.
 
 ## 0.9.88 — 2026-08-12
 
