@@ -372,7 +372,12 @@ import {
   setChatWorkingFolder,
   unarchiveChat,
 } from "./store/chats";
-import { completeGoalLedgerGoal, ensureGoalLedgerGoal } from "./mcp/goal-ledger";
+import {
+  completeGoalLedgerGoal,
+  deriveGoalAcceptanceCriteria,
+  ensureGoalLedgerGoal,
+  getGoalLedgerGoal,
+} from "./mcp/goal-ledger";
 import { findAutomationByGoalId } from "./store/automations";
 import { getOrCreateAutomationSession } from "./store/automation-sessions";
 import {
@@ -3205,12 +3210,9 @@ export function registerIpcHandlers(): void {
       const goalId = chat.goalId ?? desktopWorkforceGoalId(task?.id ?? id);
       setChatGoalBinding(id, goalId);
       setChatContinuousMode(id, true);
-      const objective = (chat.title || "").trim() || "Persistent goal for this conversation";
-      void ensureGoalLedgerGoal({
-        goalId,
-        objective,
-        projectDir: getChatWorkingFolder(id),
-      });
+      // Binding is not definition. The next explicit Goal-mode request owns
+      // the objective; a chat title is only navigation copy and must never
+      // become (or later overwrite) the user's durable goal.
     } else if (chat.goalId) {
       const continuation = findAutomationByGoalId(chat.goalId);
       if (continuation?.enabled) toggleAutomation(continuation.id, false);
@@ -3223,6 +3225,32 @@ export function registerIpcHandlers(): void {
       setChatGoalBinding(id, null);
     }
     return getChat(id);
+  });
+  ipcMain.handle("chats:getGoalContext", async (_e, id: string) => {
+    const chat = getChat(id);
+    if (!chat?.goalId) return null;
+    return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
+  });
+  ipcMain.handle("chats:defineGoal", async (_e, id: string, objective: string, requestedLocale?: "ko" | "en") => {
+    const chat = getChat(id);
+    if (!chat?.goalId) return null;
+    const projectDir = getChatWorkingFolder(id);
+    const existing = await getGoalLedgerGoal(chat.goalId, projectDir);
+    // An active contract with criteria is immutable. Ordinary chat and
+    // steering can never call this endpoint to silently replace it.
+    if (existing?.status === "active" && existing.acceptanceCriteria.length > 0) return existing;
+    const normalizedObjective = objective.replace(/\s+/g, " ").trim();
+    if (!normalizedObjective) return existing;
+    const locale = requestedLocale === "ko" || requestedLocale === "en"
+      ? requestedLocale
+      : currentUiLocale() === "ko" ? "ko" : "en";
+    await ensureGoalLedgerGoal({
+      goalId: chat.goalId,
+      objective: normalizedObjective,
+      acceptanceCriteria: deriveGoalAcceptanceCriteria(normalizedObjective, locale),
+      projectDir,
+    });
+    return getGoalLedgerGoal(chat.goalId, projectDir);
   });
   ipcMain.handle("chats:setSwarmMode", (_e, id: string, enabled: boolean) => {
     setChatSwarmMode(id, enabled);

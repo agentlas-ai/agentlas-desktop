@@ -1419,6 +1419,21 @@ export interface Chat {
   runtimeSelection?: RuntimeSelection | null;
 }
 
+/**
+ * Host-owned goal contract shown by every chat surface.
+ *
+ * `objective` is immutable while the goal is active. Ordinary messages and
+ * steering turns may change the execution path, but never this contract.
+ * A bound chat can temporarily return `null` here until the first Goal-mode
+ * request defines the objective and its acceptance criteria.
+ */
+export interface ChatGoalContext {
+  goalId: string;
+  objective: string;
+  acceptanceCriteria: string[];
+  status: "active" | "blocked" | "completed" | "cancelled";
+}
+
 export type CanonicalTaskStatus =
   | "open"
   | "running"
@@ -6136,6 +6151,10 @@ export interface AgentlasIpc {
     /** 목표 추진 on/off — 켜면 goal 원장에 목표를 만들고 chat에 goal_id를 바인딩하며
      *  continuousMode를 함께 켠다. 끄기(칩 ×)는 단순 off가 아니라 명시적 목표 종료다. */
     setGoalMode: (id: string, enabled: boolean) => Promise<Chat>;
+    /** 현재 goal 원장의 불변 objective/성공 기준. 아직 첫 Goal 요청 전이면 null. */
+    getGoalContext: (id: string) => Promise<ChatGoalContext | null>;
+    /** 첫 Goal 요청으로만 goal 계약을 정의한다. 활성 goal은 후속 채팅/steering으로 덮어쓰지 않는다. */
+    defineGoal: (id: string, objective: string, locale?: "ko" | "en") => Promise<ChatGoalContext | null>;
     /** 스웜 모드 on/off — 여러 워커가 목표를 분해해 병렬 협업. */
     setSwarmMode: (id: string, enabled: boolean) => Promise<Chat>;
     /** Set or clear this chat's exact orchestrator runtime without changing role defaults. */

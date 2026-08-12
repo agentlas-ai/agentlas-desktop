@@ -81,6 +81,7 @@ import {
   IconFolder,
   IconKey,
   IconLayers,
+  IconMoreHorizontal,
   IconNetwork,
   IconPaperclip,
   IconPlus,
@@ -121,6 +122,64 @@ interface SendOptions {
   sessionRouting?: boolean;
   /** Explicit per-turn preference. Undefined leaves the decision to One/the task controller. */
   stormbreakerMode?: boolean;
+}
+
+interface StagedSteeringDraft {
+  text: string;
+  opts: SendOptions;
+  previewDataUrl?: string;
+  attachmentCount: number;
+}
+
+interface ChatComposerDraftCache {
+  input: string;
+  stagedSteering: StagedSteeringDraft | null;
+}
+
+// Route changes unmount TaskCockpit/ChatInput. Keep the full staged steering
+// payload in renderer memory for same-window navigation, and mirror plain text
+// to sessionStorage so a renderer refresh cannot silently eat an unfinished
+// sentence. Attachments stay memory-only: serialising multi-megabyte images to
+// Web Storage would block the renderer and recreate the typing jank this cache
+// is meant to remove.
+const CHAT_COMPOSER_DRAFT_STORAGE_PREFIX = "agentlas.chat-composer-draft.v1:";
+const chatComposerDraftCache = new Map<string, ChatComposerDraftCache>();
+
+function readChatComposerDraft(chatId: string | null): ChatComposerDraftCache {
+  if (!chatId) return { input: "", stagedSteering: null };
+  const cached = chatComposerDraftCache.get(chatId);
+  if (cached) return cached;
+
+  let input = "";
+  try {
+    if (typeof window !== "undefined") {
+      const raw = window.sessionStorage.getItem(`${CHAT_COMPOSER_DRAFT_STORAGE_PREFIX}${chatId}`);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { input?: unknown };
+        if (typeof parsed.input === "string") input = parsed.input;
+      }
+    }
+  } catch {
+    // Storage is an optimisation. The in-memory cache remains authoritative.
+  }
+  const restored = { input, stagedSteering: null };
+  chatComposerDraftCache.set(chatId, restored);
+  return restored;
+}
+
+function writeChatComposerDraft(chatId: string | null, patch: Partial<ChatComposerDraftCache>) {
+  if (!chatId) return;
+  const current = readChatComposerDraft(chatId);
+  const next = { ...current, ...patch };
+  chatComposerDraftCache.set(chatId, next);
+  try {
+    if (typeof window === "undefined") return;
+    const key = `${CHAT_COMPOSER_DRAFT_STORAGE_PREFIX}${chatId}`;
+    if (next.input) window.sessionStorage.setItem(key, JSON.stringify({ input: next.input }));
+    else window.sessionStorage.removeItem(key);
+  } catch {
+    // Quota/security failures must never make the composer unusable.
+  }
 }
 
 /** popover에 그릴 한 행 + 평탄화 인덱스용 메타. group은 같은 헤더 아래로 그룹핑되지만 인덱스는 flat. */
@@ -229,7 +288,7 @@ function ChatInputComponent({
   goalActive,
   onToggleGoal,
   progressLabel,
-  runStartedAt,
+  goalCriteria,
   onToggleContinuous,
   onToggleSwarm,
   queuedCount = 0,
@@ -276,7 +335,8 @@ function ChatInputComponent({
   onToggleGoal?: () => void;
   /** Current work label/start time for the Codex-style feedback strip above the composer. */
   progressLabel?: string;
-  runStartedAt?: number;
+  /** Host-owned success contract. Steering never changes this list. */
+  goalCriteria?: string[];
   /** 스웜(swarmMode) 현재 상태 + 토글. */
   swarmMode?: boolean;
   onToggleSwarm?: () => void;
@@ -293,7 +353,27 @@ function ChatInputComponent({
 }) {
   const { t, locale } = useT();
   const router = useRouter();
-  const [input, setInput] = useState("");
+  const initialDraftRef = useRef<ChatComposerDraftCache | null>(null);
+  if (initialDraftRef.current === null) initialDraftRef.current = readChatComposerDraft(activeChatId);
+  const [input, setInputState] = useState(initialDraftRef.current.input);
+  const [stagedSteering, setStagedSteeringState] = useState<StagedSteeringDraft | null>(initialDraftRef.current.stagedSteering);
+  const activeChatIdRef = useRef<string | null>(activeChatId);
+  function setInput(next: string | ((current: string) => string)) {
+    if (typeof next === "string") {
+      writeChatComposerDraft(activeChatIdRef.current, { input: next });
+      setInputState(next);
+      return;
+    }
+    setInputState((current) => {
+      const resolved = next(current);
+      writeChatComposerDraft(activeChatIdRef.current, { input: resolved });
+      return resolved;
+    });
+  }
+  function setStagedSteering(next: StagedSteeringDraft | null) {
+    writeChatComposerDraft(activeChatIdRef.current, { stagedSteering: next });
+    setStagedSteeringState(next);
+  }
   const [images, setImages] = useState<PreviewedImage[]>([]);
   // 비이미지 첨부 — 내용 업로드가 아니라 경로 참조(capability). 파일·폴더·영상 공통.
   const [fileGrants, setFileGrants] = useState<Array<{ path: string; kind: "file" | "directory" }>>([]);
@@ -389,8 +469,6 @@ function ChatInputComponent({
   const expectedAgentChangesRef = useRef<Map<string, number>>(new Map());
   const expectedAgentChangeTokenRef = useRef(0);
   const autocompleteSignatureRef = useRef<string>("");
-  const activeChatIdRef = useRef<string | null>(activeChatId);
-
   function expectAgentChangeWithoutReset(agentId: string) {
     const token = ++expectedAgentChangeTokenRef.current;
     expectedAgentChangesRef.current.set(agentId, token);
@@ -402,7 +480,11 @@ function ChatInputComponent({
   }
 
   useEffect(() => {
+    if (activeChatIdRef.current === activeChatId) return;
     activeChatIdRef.current = activeChatId;
+    const restored = readChatComposerDraft(activeChatId);
+    setInputState(restored.input);
+    setStagedSteeringState(restored.stagedSteering);
   }, [activeChatId]);
 
   // 세션 격리 — 채팅을 바꾸면 이전 세션의 실행 의도 상태(추천 시트·모드 토글·선택)를 버린다.
@@ -447,7 +529,7 @@ function ChatInputComponent({
   const submitDisabled =
     (!input.trim() && images.length === 0 && fileGrants.length === 0 && pastedTexts.length === 0) ||
     disabled ||
-    (busy && stopRequested);
+    (busy && (stopRequested || stagedSteering !== null));
   const hepHint = [...hepToggles]
     .map((id) => {
       const toggle = HEP_TOGGLES.find((t) => t.id === id);
@@ -638,6 +720,19 @@ function ChatInputComponent({
   function submit() {
     if (submitDisabled) return;
     const text = withAttachmentContext(input.trim());
+    if (busy) {
+      // Codex-shaped steering: submitting while a model is running stages a
+      // transient adjustment above the composer. Nothing reaches Main until
+      // the person explicitly chooses "현재 작업 조정".
+      setStagedSteering({
+        text,
+        opts: currentSendOptions(),
+        previewDataUrl: images[0]?.dataUrl,
+        attachmentCount: images.length + fileGrants.length + pastedTexts.length,
+      });
+      finishComposerAfterSend();
+      return;
+    }
     // 세션 팀 자동 보강은 매 턴 전역 검색을 하지 않는다. 현재 채팅에 붙은
     // 에이전트/팀을 먼저 실행하고, 런타임 LLM이 실제 역량 공백을 판단한 경우에만
     // Agent Hub·Cloud 보강 도구를 사용한다.
@@ -653,6 +748,13 @@ function ChatInputComponent({
     setTurnCalls([]);
     // 모드 토글(에이전트 찾기/Stormbreaker)은 리셋하지 않는다 — 계속 켜둘 수 있음.
     setTrigger(null);
+  }
+
+  function sendStagedSteering() {
+    if (!stagedSteering) return;
+    const staged = stagedSteering;
+    setStagedSteering(null);
+    onSend(staged.text, staged.opts);
   }
 
   // ── 자동 라우팅 흐름 ─────────────────────────────────
@@ -1231,20 +1333,29 @@ function ChatInputComponent({
         />
       )}
 
-      {(busy || effectiveGoalMode) && (
-        <ComposerProgressBar
+      {stagedSteering && (
+        <SteeringDraftBar
+          draft={stagedSteering}
           busy={busy}
+          locale={locale}
+          onSend={sendStagedSteering}
+          onDiscard={() => setStagedSteering(null)}
+        />
+      )}
+      {!stagedSteering && queuedCount > 0 && (
+        <SteeringQueueBar queuedCount={queuedCount} locale={locale} />
+      )}
+      {effectiveGoalMode && (
+        <ComposerGoalBar
           label={progressLabel}
-          startedAt={runStartedAt}
-          queuedCount={queuedCount}
-          goalActive={effectiveGoalMode}
-          onEndGoal={effectiveGoalMode ? () => toggleGoalMode(false) : undefined}
+          criteria={goalCriteria}
+          onEndGoal={() => toggleGoalMode(false)}
         />
       )}
 
       <div
         className="chat-input-shell"
-        data-has-progress={busy || effectiveGoalMode ? "true" : "false"}
+        data-has-progress={queuedCount > 0 || effectiveGoalMode ? "true" : "false"}
         style={{
           width: "min(100%, 740px)",
           margin: "0 auto",
@@ -1779,11 +1890,15 @@ function ChatInputComponent({
                   <button
                     type="button"
                     className="chat-input-send-button"
-                    data-chat-steering-send={busy ? "true" : undefined}
+                    data-chat-steering-stage={busy ? "true" : undefined}
                     onClick={submit}
                     disabled={submitDisabled}
-                    aria-label={busy ? t("chatinput.send_steering") : t("chatinput.send")}
-                    title={busy ? t("chatinput.send_steering") : undefined}
+                    aria-label={busy
+                      ? (locale === "ko" ? "작업 조정 초안 올리기" : "Stage a work adjustment")
+                      : t("chatinput.send")}
+                    title={busy
+                      ? (locale === "ko" ? "먼저 초안으로 올린 뒤 현재 작업 조정을 눌러 보냅니다" : "Stage this first, then choose Adjust current work to send")
+                      : undefined}
                     style={{
                       width: 38,
                       height: 38,
@@ -1811,60 +1926,96 @@ function ChatInputComponent({
   );
 }
 
-function ComposerProgressBar({
-  busy,
+function ComposerGoalBar({
   label,
-  startedAt,
-  queuedCount,
-  goalActive,
+  criteria,
   onEndGoal,
 }: {
-  busy: boolean;
   label?: string;
-  startedAt?: number;
-  queuedCount: number;
-  goalActive: boolean;
-  onEndGoal?: () => void;
+  criteria?: string[];
+  onEndGoal: () => void;
 }) {
   const { locale } = useT();
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!busy || !startedAt) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, [busy, startedAt]);
-  const elapsedSeconds = startedAt ? Math.max(0, Math.floor((now - startedAt) / 1_000)) : 0;
-  const hours = Math.floor(elapsedSeconds / 3_600);
-  const minutes = Math.floor((elapsedSeconds % 3_600) / 60);
-  const seconds = elapsedSeconds % 60;
-  const elapsed = hours > 0
-    ? `${hours}h ${minutes}m ${seconds}s`
-    : minutes > 0
-      ? `${minutes}m ${seconds}s`
-      : `${seconds}s`;
-  const title = label?.replace(/\s+/g, " ").trim() || (locale === "ko" ? "현재 작업" : "Current work");
+  const title = label?.replace(/\s+/g, " ").trim() || (locale === "ko"
+    ? "다음 요청으로 목표와 성공 기준을 확정합니다"
+    : "Your next request will define the goal and its acceptance criteria");
+  const criteriaTitle = (criteria ?? []).join("\n");
   return (
-    <div className="chat-composer-progress" role={busy ? "status" : undefined} aria-live={busy ? "polite" : undefined}>
+    <div className="chat-composer-progress chat-composer-goal" role="status" aria-live="polite" data-chat-goal-bar="true">
       <span className="chat-composer-progress-icon" aria-hidden><IconTarget size={13} /></span>
-      <strong>{locale === "ko" ? "진행 중인 목표" : "Active goal"}</strong>
+      <strong>{locale === "ko" ? "목표" : "Goal"}</strong>
       <span className="chat-composer-progress-label" title={title}>{title}</span>
-      {queuedCount > 0 && (
-        <span className="chat-composer-progress-queue">
-          {locale === "ko" ? `다음 지시 ${queuedCount}개` : `${queuedCount} queued`}
+      {(criteria?.length ?? 0) > 0 && (
+        <span className="chat-composer-goal-criteria" title={criteriaTitle}>
+          {locale === "ko" ? `성공 기준 ${criteria?.length}개` : `${criteria?.length} criteria`}
         </span>
       )}
-      {busy && <time>{elapsed}</time>}
-      {goalActive && onEndGoal && (
-        <button
-          type="button"
-          onClick={onEndGoal}
-          aria-label={locale === "ko" ? "목표 종료" : "End goal"}
-          title={locale === "ko" ? "목표 종료" : "End goal"}
-        >
-          <IconClose size={12} />
-        </button>
+      <button
+        type="button"
+        onClick={onEndGoal}
+        aria-label={locale === "ko" ? "목표 종료" : "End goal"}
+        title={locale === "ko" ? "목표 종료" : "End goal"}
+      >
+        <IconClose size={12} />
+      </button>
+    </div>
+  );
+}
+
+function SteeringQueueBar({ queuedCount, locale }: { queuedCount: number; locale: Locale }) {
+  return (
+    <div className="chat-composer-progress chat-composer-steering-queue" role="status" aria-live="polite" data-chat-steering-queued="true">
+      <span className="chat-input-steering-pulse" aria-hidden />
+      <strong>{locale === "ko" ? `다음 지시 ${queuedCount}개` : `${queuedCount} queued`}</strong>
+      <span className="chat-composer-progress-label">
+        {locale === "ko" ? "현재 모델을 멈추지 않고 이어서 반영합니다" : "Will be applied without stopping the current model"}
+      </span>
+    </div>
+  );
+}
+
+function SteeringDraftBar({
+  draft,
+  busy,
+  locale,
+  onSend,
+  onDiscard,
+}: {
+  draft: StagedSteeringDraft;
+  busy: boolean;
+  locale: Locale;
+  onSend: () => void;
+  onDiscard: () => void;
+}) {
+  return (
+    <div className="chat-steering-draft" role="group" aria-label={locale === "ko" ? "보낼 작업 조정" : "Staged work adjustment"} data-chat-steering-draft="true">
+      {draft.previewDataUrl ? (
+        <img src={draft.previewDataUrl} alt="" className="chat-steering-draft-preview" />
+      ) : draft.attachmentCount > 0 ? (
+        <span className="chat-steering-draft-attachment" aria-hidden><IconPaperclip size={13} /></span>
+      ) : (
+        <span className="chat-steering-draft-grip" aria-hidden><IconMoreHorizontal size={13} /></span>
       )}
+      <span className="chat-steering-draft-copy" title={draft.text}>{draft.text}</span>
+      <button
+        type="button"
+        className="chat-steering-draft-send"
+        onClick={onSend}
+        title={busy
+          ? (locale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
+          : (locale === "ko" ? "새 작업으로 보내기" : "Send as a new turn")}
+        data-chat-steering-send="true"
+      >
+        {busy ? (locale === "ko" ? "현재 작업 조정" : "Adjust current work") : (locale === "ko" ? "보내기" : "Send")}
+      </button>
+      <button
+        type="button"
+        className="chat-steering-draft-discard"
+        onClick={onDiscard}
+        aria-label={locale === "ko" ? "작업 조정 지우기" : "Discard work adjustment"}
+      >
+        <IconClose size={12} />
+      </button>
     </div>
   );
 }

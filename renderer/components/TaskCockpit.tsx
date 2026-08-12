@@ -21,7 +21,7 @@ import type {
   ToolFactoryScaffoldResult,
   ToolFactoryToolRecord,
 } from "@/lib/types";
-import type { InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage, RunEventUi, RuntimeSelection } from "@shared/types";
+import type { ChatGoalContext, InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage, RunEventUi, RuntimeSelection } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { normalizeToolCall } from "@shared/tool-call-detail";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
@@ -824,6 +824,7 @@ function ChatPage() {
   const router = useRouter();
   const { t, locale } = useT();
   const [chat, setChat] = useState<Chat | null>(null);
+  const [goalContext, setGoalContext] = useState<ChatGoalContext | null>(null);
   const [agent, setAgent] = useState<InstalledAgent | null>(null);
   const [allAgents, setAllAgents] = useState<InstalledAgent[]>([]);
   const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
@@ -854,6 +855,19 @@ function ChatPage() {
   // history Promise that started before `final` could resolve after `final`
   // and erase the answer the user had already seen.
   const transcriptRevisionRef = useRef(0);
+
+  useEffect(() => {
+    const api = ipc();
+    const chatId = chat?.id;
+    const goalId = chat?.goalId;
+    setGoalContext(null);
+    if (!api || !chatId || !goalId || goalId === "pending") return;
+    let cancelled = false;
+    void api.chats.getGoalContext(chatId)
+      .then((context) => { if (!cancelled) setGoalContext(context); })
+      .catch(() => { if (!cancelled) setGoalContext(null); });
+    return () => { cancelled = true; };
+  }, [chat?.goalId, chat?.id]);
 
   // A Task deep link is authoritative. Resolve it through Main before loading
   // Work so a stale or mismatched chat query can never open another Task.
@@ -2313,6 +2327,13 @@ function ChatPage() {
         (requestedTaskId && validatedTaskChatId !== chat.id)
       ) return false;
       setCancelPending(false);
+      if (opts?.goalMode && chat.goalId && !goalContext?.objective) {
+        // Define exactly once, before the run. `defineGoal` returns the
+        // existing active contract instead of overwriting it, so a later
+        // steering turn can never become the goal by accident.
+        const defined = await api.chats.defineGoal(chat.id, userPrompt, locale).catch(() => null);
+        if (defined) setGoalContext(defined);
+      }
       const routeInput = userPrompt;
       const invocationPrompt = routeInput;
       const visiblePrompt = userPrompt;
@@ -2493,6 +2514,7 @@ function ChatPage() {
       allGeneratedApps,
       chat,
       busy,
+      goalContext?.objective,
       locale,
       project,
       requestedTaskId,
@@ -3319,10 +3341,14 @@ function ChatPage() {
     if (!chat) return;
     const next = !chat.goalId;
     const previous = chat;
+    setGoalContext(null);
     setChat({ ...chat, goalId: next ? "pending" : null, continuousMode: next ? true : chat.continuousMode });
     void ipc()?.chats
       .setGoalMode(chat.id, next)
-      .then((updated: Chat | null) => { if (updated) setChat(updated); })
+      .then((updated: Chat | null) => {
+        if (updated) setChat(updated);
+        if (!updated?.goalId) setGoalContext(null);
+      })
       .catch(() => setChat(previous));
   }, [chat]);
   const handleToggleContinuous = useCallback(() => {
@@ -3782,8 +3808,8 @@ function ChatPage() {
           swarmMode={chat.swarmMode === true}
           goalActive={Boolean(chat.goalId)}
           onToggleGoal={handleToggleGoal}
-          progressLabel={activeRunContext?.prompt || latestUserPrompt || chat.title}
-          runStartedAt={activeRunContext?.startedAt}
+          progressLabel={goalContext?.objective}
+          goalCriteria={goalContext?.acceptanceCriteria}
           onToggleContinuous={handleToggleContinuous}
           onToggleSwarm={handleToggleSwarm}
         />

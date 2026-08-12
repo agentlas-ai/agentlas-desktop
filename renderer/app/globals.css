@@ -6190,6 +6190,98 @@ button[data-toggle-state="on"] {
   color: var(--ink);
 }
 
+.chat-composer-goal {
+  background: color-mix(in srgb, var(--paper-2) 72%, var(--paper));
+}
+
+.chat-composer-goal-criteria {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  color: var(--muted-deep);
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+
+.chat-composer-steering-queue {
+  background: var(--paper);
+}
+
+.chat-steering-draft {
+  width: min(100%, 740px);
+  min-width: 0;
+  min-height: 40px;
+  margin: 0 auto 6px;
+  padding: 5px 7px;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto 28px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid color-mix(in srgb, var(--ink) 11%, var(--paper-edge));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--paper) 97%, var(--paper-2));
+  box-shadow: 0 8px 24px rgba(15, 18, 20, 0.055);
+  color: var(--muted-deep);
+  box-sizing: border-box;
+}
+
+.chat-steering-draft-preview,
+.chat-steering-draft-attachment,
+.chat-steering-draft-grip {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--paper-2);
+  color: var(--muted-deep);
+  object-fit: cover;
+}
+
+.chat-steering-draft-copy {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-steering-draft-send,
+.chat-steering-draft-discard {
+  min-height: 28px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-deep);
+  cursor: pointer;
+}
+
+.chat-steering-draft-send {
+  padding: 0 8px;
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.chat-steering-draft-discard {
+  width: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-steering-draft-send:hover,
+.chat-steering-draft-send:focus-visible,
+.chat-steering-draft-discard:hover,
+.chat-steering-draft-discard:focus-visible {
+  background: var(--fill-1);
+  color: var(--ink);
+}
+
 .chat-input-tools-left,
 .chat-input-tools-right {
   display: flex;

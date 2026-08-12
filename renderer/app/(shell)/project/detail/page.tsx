@@ -77,7 +77,9 @@ function ProjectPage() {
     hub: false,
   });
   const [openRosterFirms, setOpenRosterFirms] = useState<Record<string, boolean>>({});
-  const [teamTreeOpen, setTeamTreeOpen] = useState(true);
+  // Tasks are the primary project surface. Keep the potentially long tool
+  // roster collapsed by default so recent conversations remain above the fold.
+  const [teamTreeOpen, setTeamTreeOpen] = useState(false);
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [recoveryPending, setRecoveryPending] = useState(false);
@@ -719,14 +721,23 @@ function ProjectPage() {
 
           <div style={{ ...cardStyle, marginBottom: 24 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-              <div style={{ ...eyebrowStyle, flex: 1 }}>{locale === "ko" ? "프로젝트 에이전트" : "Project agents"}</div>
+              <button
+                type="button"
+                aria-expanded={teamTreeOpen || editingTeam}
+                onClick={() => { if (!editingTeam) setTeamTreeOpen((current) => !current); }}
+                style={{ ...eyebrowStyle, flex: 1, minHeight: 32, display: "inline-flex", alignItems: "center", gap: 7, textAlign: "left", color: "var(--ink-soft)" }}
+              >
+                {teamTreeOpen || editingTeam ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
+                <span>{locale === "ko" ? "프로젝트 에이전트" : "Project agents"}</span>
+                <span style={{ color: "var(--muted-deep)", fontSize: 10, fontWeight: 650 }}>{agentPoolDraft.length}</span>
+              </button>
               {!editingTeam ? (
-                <button type="button" onClick={() => { setEditingTeam(true); setInspectorCollapsed(true); }} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
+                <button type="button" onClick={() => { setEditingTeam(true); setTeamTreeOpen(true); setInspectorCollapsed(true); }} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
                   {locale === "ko" ? "편집" : "Edit"}
                 </button>
               ) : null}
             </div>
-            <div className="project-agent-workbench project-agent-workbench-compact" data-editing={editingTeam}>
+            {(teamTreeOpen || editingTeam) && <div className="project-agent-workbench project-agent-workbench-compact" data-editing={editingTeam}>
               <ProjectTeamOrgChart
                 locale={locale}
                 members={agentPoolDraft}
@@ -758,7 +769,7 @@ function ProjectPage() {
                   onPointerCancel={() => { pointerDragRef.current = null; setDraggedCandidateKey(null); }}
                 />
               ) : null}
-            </div>
+            </div>}
             {editingTeam ? <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
               <button type="button" onClick={() => void saveTeam()} style={raisedButton}>{locale === "ko" ? "도구 저장" : "Save tools"}</button>
               <button type="button" onClick={() => { setAgentPoolDraft(project.agentPool); setEditingTeam(false); }} style={{ fontSize: 12, color: "var(--muted-deep)" }}>{t("common.cancel")}</button>

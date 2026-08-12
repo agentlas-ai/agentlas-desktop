@@ -13,7 +13,7 @@ import {
 } from "react";
 import { Markdown, StreamingMarkdown } from "@/components/Markdown";
 import { ElapsedClock } from "@/components/ElapsedClock";
-import { IconArrowUp, IconPlus, IconRefresh } from "@/components/Icon";
+import { IconArrowUp, IconClose, IconPlus, IconRefresh } from "@/components/Icon";
 import { grantForDroppedFile, ipc, ipcEvents } from "@/lib/ipc";
 import { tFor, useT } from "@/lib/i18n";
 import { visibleAgents } from "@/lib/agent-visibility";
@@ -122,8 +122,15 @@ import { OneProfileSheet } from "./OneProfileSheet";
 import { OneRecurrenceControl } from "./OneRecurrenceControl";
 import { OneSuggestionCard } from "./OneSuggestionCard";
 import { OneGrowthCard } from "./OneGrowthCard";
+import { OneRuntimeArtifactRail, OneRuntimeFeedbackList } from "./OneRuntimeFeedback";
 import { OneVoiceInputHelp } from "./OneVoiceInputHelp";
 import { OneWeeklyReflectionCard } from "./OneWeeklyReflectionCard";
+import {
+  mergeOneRuntimeFeedback,
+  oneRuntimeArtifacts,
+  oneRuntimeFeedbackFromEvent,
+  type OneRuntimeFeedbackItem,
+} from "@/lib/one-runtime-feedback";
 import styles from "./OneShell.module.css";
 
 const DECISION_REJECT_FALLBACK = {
@@ -205,6 +212,47 @@ const UPDATE_BLOCKING_STATES = new Set<UpdaterState["status"]>([
 const BRIEFING_DISMISS_KEY = "agentlas.one.briefingDismissals.v1";
 const BRIEFING_DISMISS_MS = 24 * 60 * 60 * 1_000;
 const ONE_SEARCH_CONTRACT_VERSION = "1.0.0" as const;
+const ONE_COMPOSER_DRAFT_STORAGE_PREFIX = "agentlas.one-composer-draft.v1:";
+
+type OneComposerDraftCache = {
+  composer: string;
+  stagedSteer: string | null;
+};
+
+const oneComposerDraftCache = new Map<string, OneComposerDraftCache>();
+
+function readOneComposerDraft(key: string): OneComposerDraftCache {
+  const cached = oneComposerDraftCache.get(key);
+  if (cached) return cached;
+  let composer = "";
+  try {
+    if (typeof window !== "undefined") {
+      const raw = window.sessionStorage.getItem(`${ONE_COMPOSER_DRAFT_STORAGE_PREFIX}${key}`);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { composer?: unknown };
+        if (typeof parsed.composer === "string") composer = parsed.composer;
+      }
+    }
+  } catch {
+    // In-memory continuity still works when Web Storage is unavailable.
+  }
+  const restored = { composer, stagedSteer: null };
+  oneComposerDraftCache.set(key, restored);
+  return restored;
+}
+
+function writeOneComposerDraft(key: string, patch: Partial<OneComposerDraftCache>) {
+  const next = { ...readOneComposerDraft(key), ...patch };
+  oneComposerDraftCache.set(key, next);
+  try {
+    if (typeof window === "undefined") return;
+    const storageKey = `${ONE_COMPOSER_DRAFT_STORAGE_PREFIX}${key}`;
+    if (next.composer) window.sessionStorage.setItem(storageKey, JSON.stringify({ composer: next.composer }));
+    else window.sessionStorage.removeItem(storageKey);
+  } catch {
+    // Draft persistence is best-effort and must never block typing.
+  }
+}
 
 function uid(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -448,6 +496,14 @@ export function OneShell() {
   const selectedConversationId = searchParams.get("chat");
   const { locale, setPref } = useT();
   const appLocale: OneConversationLocale = locale === "ko" ? "ko" : "en";
+  const composerDraftKey = selectedTaskId
+    ? `task:${selectedTaskId}`
+    : selectedConversationId
+      ? `chat:${selectedConversationId}`
+      : "new";
+  const initialComposerDraftRef = useRef<OneComposerDraftCache | null>(null);
+  if (initialComposerDraftRef.current === null) initialComposerDraftRef.current = readOneComposerDraft(composerDraftKey);
+  const composerDraftKeyRef = useRef(composerDraftKey);
   const [loaded, setLoaded] = useState(false);
   const [projections, setProjections] = useState<OneTaskProjection[]>([]);
   const [conversations, setConversations] = useState<Chat[]>([]);
@@ -483,7 +539,10 @@ export function OneShell() {
   const [receipt, setReceipt] = useState<InvocationRunReceipt | null>(null);
   const [busy, setBusy] = useState(false);
   const [runStatus, setRunStatus] = useState("");
+  const [runtimeFeedback, setRuntimeFeedback] = useState<OneRuntimeFeedbackItem[]>([]);
+  const runtimeFeedbackSequenceRef = useRef(0);
   const [queuedSteers, setQueuedSteers] = useState<Array<{ id: string; text: string }>>([]);
+  const [stagedSteer, setStagedSteerState] = useState<string | null>(initialComposerDraftRef.current.stagedSteer);
   const [autoRecovery, setAutoRecovery] = useState<
     | { phase: "recovering"; attempt: number; diagnosis: string }
     | { phase: "stopped"; reason: string; diagnosis: string }
@@ -514,7 +573,23 @@ export function OneShell() {
   // nothing for minutes — leaving an identical card on screen that is
   // indistinguishable from a hang. This clock never depends on the runtime.
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
-  const [composer, setComposer] = useState("");
+  const [composer, setComposerState] = useState(initialComposerDraftRef.current.composer);
+  function setComposer(next: string | ((current: string) => string)) {
+    if (typeof next === "string") {
+      writeOneComposerDraft(composerDraftKeyRef.current, { composer: next });
+      setComposerState(next);
+      return;
+    }
+    setComposerState((current) => {
+      const resolved = next(current);
+      writeOneComposerDraft(composerDraftKeyRef.current, { composer: resolved });
+      return resolved;
+    });
+  }
+  function setStagedSteer(next: string | null) {
+    writeOneComposerDraft(composerDraftKeyRef.current, { stagedSteer: next });
+    setStagedSteerState(next);
+  }
   const [availableAgents, setAvailableAgents] = useState<InstalledAgent[]>([]);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   const [turnAgentIds, setTurnAgentIds] = useState<string[]>([]);
@@ -948,6 +1023,13 @@ export function OneShell() {
     const chatId = runChatIdRef.current;
     const taskId = runTaskIdRef.current;
     if (!chatId) return;
+    const feedbackEvent = event.status
+      ? { ...event, status: customerSafeProgressDetail(event.status) }
+      : event;
+    const feedback = oneRuntimeFeedbackFromEvent(feedbackEvent, appLocale, ++runtimeFeedbackSequenceRef.current);
+    if (feedback.length > 0) {
+      setRuntimeFeedback((current) => mergeOneRuntimeFeedback(current, feedback));
+    }
     setRunProgress((current) => reduceOneRunProgress(current, event));
     if (event.agentId && event.phase !== "synthesize") {
       if (!taskId) void reconcileConversationTask(chatId);
@@ -1023,6 +1105,8 @@ export function OneShell() {
     setBusy(false);
     setRunStatus("");
     setRunProgress(initialOneRunProgress());
+    setRuntimeFeedback([]);
+    runtimeFeedbackSequenceRef.current = 0;
     setSurface(null);
     setReceipt(selected?.latestReceipt ?? null);
     const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
@@ -1104,9 +1188,15 @@ export function OneShell() {
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
   const activeThreadPromptFallback = selected?.display.title ?? conversation?.title ?? "";
+  const runtimeArtifacts = useMemo(() => oneRuntimeArtifacts(runtimeFeedback), [runtimeFeedback]);
   useEffect(() => {
     setQueuedSteers([]);
-  }, [activeThreadChatId]);
+    if (composerDraftKeyRef.current === composerDraftKey) return;
+    composerDraftKeyRef.current = composerDraftKey;
+    const restored = readOneComposerDraft(composerDraftKey);
+    setComposerState(restored.composer);
+    setStagedSteerState(restored.stagedSteer);
+  }, [activeThreadChatId, composerDraftKey]);
   // Main starts a queued steer only after the active model turn settles. Attach
   // to that replacement run immediately so the user never has to leave and
   // reopen One to see continued progress.
@@ -1528,7 +1618,7 @@ export function OneShell() {
     setOneActivationState(current);
   }, [appLocale, oneActivationState]);
 
-  const submit = useCallback(async (text: string) => {
+  const submit = useCallback(async (text: string, commitSteer = false) => {
     const attachmentSnapshot = attachmentDraftsRef.current.slice();
     const recurrenceSnapshot = recurrenceSelection ? { ...recurrenceSelection } : null;
     const overrideSnapshot = { ...turnOverrides };
@@ -1550,6 +1640,11 @@ export function OneShell() {
       const chatId = runChatIdRef.current;
       const activeRunId = runIdRef.current;
       if (!chatId || !activeRunId || attachmentSnapshot.length > 0) return;
+      if (!commitSteer) {
+        setComposer("");
+        setStagedSteer(value);
+        return;
+      }
       const optimisticId = `one-steer:${uid()}`;
       setComposer("");
       setMessages((current) => [...current, { id: optimisticId, role: "user", text: value }]);
@@ -2401,8 +2496,11 @@ export function OneShell() {
   const selectedCanContinueInPlace = Boolean(
     selected?.chatId && ["partial", "completed", "failed"].includes(selected.canonicalStatus ?? ""),
   );
+  const selectedCanSteerActiveRun = Boolean(busy && selected?.chatId);
   const selectedReadOnly = Boolean(
-    selected && (!selected.chatId || (!selected.truth.mayStartExecution && !selectedCanContinueInPlace)),
+    selected
+    && !selectedCanSteerActiveRun
+    && (!selected.chatId || (!selected.truth.mayStartExecution && !selectedCanContinueInPlace)),
   );
   const teamDecisionPending = Boolean(
     teamPreflight
@@ -2823,7 +2921,7 @@ export function OneShell() {
           </div>
         </aside>
 
-        <main className={styles.workspace}>
+        <main className={styles.workspace} data-runtime-artifacts={runtimeArtifacts.length > 0 ? "true" : "false"}>
           <div className={`${styles.windowBar} titlebar-drag`}>
             <button
               ref={railRevealButtonRef}
@@ -3030,6 +3128,7 @@ export function OneShell() {
                     <ElapsedClock startedAt={runStartedAt} format={formatRunElapsed} className={styles.runElapsed} />
                   </section>
                 )}
+                <OneRuntimeFeedbackList items={runtimeFeedback} locale={appLocale} />
                 {selected && latestCommittedAnswer && (
                   <ResolvedDecisionReceipt receipt={latestCommittedAnswer} locale={appLocale} />
                 )}
@@ -3076,6 +3175,8 @@ export function OneShell() {
               </div>
             )}
           </div>
+
+          <OneRuntimeArtifactRail items={runtimeArtifacts} locale={appLocale} />
 
           <div
             className={styles.composerDock}
@@ -3206,6 +3307,34 @@ export function OneShell() {
                 </div>
               </section>
             )}
+            {stagedSteer && (
+              <div className={styles.steeringDraft} role="group" aria-label={appLocale === "ko" ? "보낼 작업 조정" : "Staged work adjustment"} data-one-steering-draft="true">
+                <span className={styles.steeringDraftCopy} title={stagedSteer}>{stagedSteer}</span>
+                <button
+                  type="button"
+                  className={styles.steeringDraftSend}
+                  data-one-steering-send="true"
+                  onClick={() => {
+                    const value = stagedSteer;
+                    setStagedSteer(null);
+                    void submit(value, true);
+                  }}
+                  title={busy
+                    ? (appLocale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
+                    : undefined}
+                >
+                  {busy ? (appLocale === "ko" ? "현재 작업 조정" : "Adjust current work") : (appLocale === "ko" ? "보내기" : "Send")}
+                </button>
+                <button
+                  type="button"
+                  className={styles.steeringDraftDiscard}
+                  onClick={() => setStagedSteer(null)}
+                  aria-label={appLocale === "ko" ? "작업 조정 지우기" : "Discard work adjustment"}
+                >
+                  <IconClose size={12} />
+                </button>
+              </div>
+            )}
             {queuedSteers.length > 0 && (
               <div className={styles.steeringQueue} role="status" aria-live="polite" data-one-steering-queue="true">
                 <span>{appLocale === "ko" ? "다음 지시" : "Next instruction"}</span>
@@ -3305,14 +3434,15 @@ export function OneShell() {
                   <button
                     type="submit"
                     className={styles.sendButton}
+                    data-one-steering-stage={busy && composer.trim() ? "true" : undefined}
                     disabled={!busy && ((!composer.trim() && attachmentDrafts.length === 0) || selectedReadOnly || teamDecisionPending || teamPreflightBusy)}
                     aria-label={busy
                       ? composer.trim()
-                        ? (appLocale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
+                        ? (appLocale === "ko" ? "작업 조정 초안 올리기" : "Stage a work adjustment")
                         : tFor(appLocale, "one.shell.composer.stop_run_aria")
                       : tFor(appLocale, "one.shell.composer.send_aria")}
                     title={busy && composer.trim()
-                      ? (appLocale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
+                      ? (appLocale === "ko" ? "먼저 초안으로 올린 뒤 현재 작업 조정을 눌러 보냅니다" : "Stage this first, then choose Adjust current work to send")
                       : undefined}
                   >
                     {busy && !composer.trim() ? <span className={styles.stopGlyph} aria-hidden="true" /> : <IconArrowUp size={20} strokeWidth={2} aria-hidden="true" />}

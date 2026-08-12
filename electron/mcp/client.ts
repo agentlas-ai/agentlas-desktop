@@ -22,11 +22,14 @@ import {
   stripStormbreakerContinueMarker,
 } from "../hephaestus/loop-engineering";
 import {
+  deriveGoalAcceptanceCriteria,
   ensureGoalLedgerGoal,
+  getGoalLedgerGoal,
   GOAL_HARD_STOP_REASONS,
   goalProgressKeyForText,
   recordGoalLedgerCycle,
   type GoalLedgerDecision,
+  type GoalLedgerSnapshot,
 } from "./goal-ledger";
 import { getAgentById, listInstalledAgents } from "./registry";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
@@ -517,20 +520,29 @@ function hasPriorConversationContext(chatId: string): boolean {
   );
 }
 
-function buildGoalUserPrompt(prompt: string, locale: "ko" | "en"): string {
-  const guide =
-    locale === "ko"
-      ? [
-          "Agentlas Goal mode가 켜져 있다.",
-          "사용자의 문장을 단발 요청이 아니라 달성할 목표로 다뤄라.",
-          "목표를 명확히 재정의하고, 바로 실행할 다음 행동과 검증 기준을 포함해 진행하라.",
-        ].join("\n")
-      : [
-          "Agentlas Goal mode is enabled.",
-          "Treat the user's message as a goal to pursue, not as a one-off request.",
-          "Restate the goal clearly, proceed with the next concrete action, and include verification criteria.",
-        ].join("\n");
-  return `${guide}\n\nUser goal:\n${prompt}`;
+function persistentGoalTurnContext(goal: GoalLedgerSnapshot, locale: "ko" | "en"): string {
+  const criteria = goal.acceptanceCriteria.map((criterion, index) => `${index + 1}. ${criterion}`).join("\n");
+  return locale === "ko"
+    ? [
+        "## 활성 Goal 계약 (호스트 소유 · objective 불변)",
+        `목표: ${goal.objective}`,
+        "성공 기준:",
+        criteria || "1. 실제 대상 표면에서 검증 가능한 완료 증거를 남긴다.",
+        "이후 사용자 메시지는 실행 경로를 조정하는 채팅/steering이다. 목표를 바꾸거나 최신 메시지로 재정의하지 마라.",
+        "새 지시가 목표와 충돌하면 목표를 조용히 덮어쓰지 말고, 목표 종료 후 새 Goal이 필요하다고 명시하라.",
+        "처음 착수할 때는 도구를 쓰기 전에 목표·성공 기준·검증 표면을 짧고 명확하게 사용자에게 보여라.",
+        "완료 전에 각 성공 기준을 증거로 대조하고, 확인되지 않은 항목은 완료라고 말하지 마라.",
+      ].join("\n")
+    : [
+        "## Active Goal contract (host-owned; objective is immutable)",
+        `Objective: ${goal.objective}`,
+        "Acceptance criteria:",
+        criteria || "1. Leave verifiable completion evidence on the real target surface.",
+        "Later user messages are chat or steering that may adjust execution. Never redefine the objective from the latest message.",
+        "If a new instruction conflicts with the objective, do not overwrite it silently; state that the current Goal must end before a new one begins.",
+        "At initial kickoff, show the objective, acceptance criteria, and verification surfaces briefly before using tools.",
+        "Before completion, audit every criterion against evidence and never mark an unverified item complete.",
+      ].join("\n");
 }
 
 function buildPlanUserPrompt(prompt: string, locale: "ko" | "en"): string {
@@ -1392,9 +1404,7 @@ export async function runMcpInvocation(
   }
   let effectiveUserPrompt = isTargetAppEdit && targetApp
     ? buildAppEditUserPrompt(req.userPrompt, targetApp, locale)
-    : req.goalMode
-      ? buildGoalUserPrompt(req.userPrompt, locale)
-      : req.planMode
+    : req.planMode
         ? buildPlanUserPrompt(req.userPrompt, locale)
         : req.userPrompt;
   if (oneTeamExecutionPolicy) {
@@ -3090,6 +3100,48 @@ export async function runMcpInvocation(
     const runtimeUserPrompt = explicitBorrowUserPreamble
       ? `${explicitBorrowUserPreamble}\n\nRequest:\n${effectiveUserPrompt}`
       : effectiveUserPrompt;
+    // ── persistent goal contract ─────────────────────────────────
+    // Goal definition and steering are different authorities. The first
+    // explicit Goal request creates the contract; every later message is only
+    // execution guidance and therefore cannot upsert the objective.
+    let activeGoalId: string | null = null;
+    let activeGoal: GoalLedgerSnapshot | null = null;
+    if (!req.agentAppMode && chat.kind !== "division") {
+      activeGoalId = getChatGoalId(chat.id);
+      if (!activeGoalId && req.goalMode && canWrite) {
+        activeGoalId = durableWorkforceGoalId;
+        try {
+          setChatGoalBinding(chat.id, activeGoalId);
+        } catch {
+          activeGoalId = null;
+        }
+      }
+      if (activeGoalId) {
+        activeGoal = await getGoalLedgerGoal(activeGoalId, workforceProjectDir);
+        // A missing/terminal ledger means this is the first turn of a newly
+        // enabled Goal campaign. An already-active ledger is immutable even
+        // when this request arrived through steering.
+        if (
+          req.goalMode
+          && !promptIsSystemAuthored
+          && (!activeGoal || activeGoal.status !== "active")
+        ) {
+          const objective = req.userPrompt.replace(/\s+/g, " ").trim();
+          if (objective) {
+            await ensureGoalLedgerGoal({
+              goalId: activeGoalId,
+              objective,
+              acceptanceCriteria: deriveGoalAcceptanceCriteria(objective, locale),
+              projectDir: workforceProjectDir,
+            });
+            activeGoal = await getGoalLedgerGoal(activeGoalId, workforceProjectDir);
+          }
+        }
+        if (activeGoal?.status === "active") {
+          turnContextParts.push(persistentGoalTurnContext(activeGoal, locale));
+        }
+      }
+    }
     // 세션 지원 러너(claude-code/codex/gemini/kimi)는 턴 컨텍스트를 분리 전달해 러너가
     // 새 세션/resume에 맞게 배치한다. 그 외 stateless 러너는 기존처럼 시스템 프롬프트에 합친다.
     const turnContext = turnContextParts.filter((part) => part && part.trim()).join("\n\n");
@@ -3239,31 +3291,6 @@ export async function runMcpInvocation(
     const advanceUsageFloor = () => {
       liveUsageFloor = liveUsageHigh;
     };
-    // ── persistent goal 축 ────────────────────────────────────────
-    // goal은 프롬프트 접두사가 아니라 호스트 상태다. 칩(chats.goal_id)이 이미
-    // 바인딩했으면 그 축을 쓰고, 칩 없이 per-turn goalMode로만 온 요청(모바일·
-    // 텔레그램 등)은 여기서 같은 축(durableWorkforceGoalId)으로 바인딩해 영속화한다.
-    // 원장 upsert는 fail-soft — Hephaestus 런타임이 없으면 기존 마커-단독 동작 그대로.
-    let activeGoalId: string | null = null;
-    if (!req.agentAppMode && chat.kind !== "division") {
-      activeGoalId = getChatGoalId(chat.id);
-      if (!activeGoalId && req.goalMode && canWrite) {
-        activeGoalId = durableWorkforceGoalId;
-        try {
-          setChatGoalBinding(chat.id, activeGoalId);
-        } catch {
-          activeGoalId = null;
-        }
-      }
-      if (activeGoalId && req.goalMode && !promptIsSystemAuthored) {
-        // 사용자의 최신 goal 문장이 원장의 objective가 된다(idempotent upsert).
-        await ensureGoalLedgerGoal({
-          goalId: activeGoalId,
-          objective: req.userPrompt,
-          projectDir: workforceProjectDir,
-        });
-      }
-    }
     // "계속 라이브로" 모드: 채팅에 켜져 있으면 짧은 상한(3턴)에서 멈춰 30분 간격 백그라운드로
     // 넘기지 않고, 같은 채팅에서 라이브 스트리밍을 계속 이어간다(사실상 무제한, 안전 상한만).
     // persistent goal이 바인딩된 채팅은 goal이 미달인 동안 같은 라이브 루프를 기본으로 쓴다 —

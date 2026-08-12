@@ -66,7 +66,7 @@ import {
 } from "./hub-bookmark-sync";
 import { materializeAllAgents } from "./agents/files";
 import { backfillEntityKinds } from "./mcp/registry";
-import { reconcileLocalRouteDefinitionHashes } from "./agents/routes";
+import { backfillLegacyLocalRouteDefinitionHashes } from "./agents/routes";
 import { reconcileExistingCuratedMemoryCandidates } from "./experience/store";
 import { seedBuiltinAgents } from "./architecture/seed";
 import { repairAllRootChatSurfaceControllers } from "./store/chats";
@@ -953,7 +953,7 @@ app.whenReady().then(async () => {
   }
   traceStartup("agent-files-ready");
   try {
-    const definitions = reconcileLocalRouteDefinitionHashes();
+    const definitions = backfillLegacyLocalRouteDefinitionHashes();
     const experience = reconcileExistingCuratedMemoryCandidates();
     if (definitions.updated > 0 || experience.candidateCreated > 0 || experience.blocked > 0) {
       console.log("[experience] reconciled legacy local learning", {

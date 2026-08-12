@@ -167,6 +167,52 @@ export function reconcileLocalRouteDefinitionHashes(): {
 }
 
 /**
+ * Startup-only migration for routes created before definitionHash existed.
+ *
+ * A full reconciliation recursively fingerprints as many as 2,000 definition
+ * files per local route. Repeating that synchronous disk walk on every launch
+ * blocked Electron's main thread for minutes on large skill libraries and made
+ * the already-visible window beachball. Imports already compute a fresh hash,
+ * while explicit repair/diagnostic flows can still call the full reconciler
+ * above. Startup therefore touches only genuinely legacy, not-yet-attempted
+ * routes and never turns a durable cache into a mandatory rescan.
+ */
+export function backfillLegacyLocalRouteDefinitionHashes(): {
+  scanned: number;
+  updated: number;
+  failed: number;
+  missing: number;
+} {
+  const map = readAll();
+  let scanned = 0;
+  let updated = 0;
+  let failed = 0;
+  let missing = 0;
+  const now = new Date().toISOString();
+  for (const [agentId, route] of Object.entries(map)) {
+    if (
+      route.source === "agent-cloud"
+      || route.source === "hub"
+      || route.definitionHash
+      || route.missingSince
+    ) continue;
+    scanned += 1;
+    try {
+      const definitionHash = computeLocalAgentDefinitionHash(route.path);
+      map[agentId] = { ...route, source: "local-import", definitionHash };
+      updated += 1;
+    } catch {
+      failed += 1;
+      missing += 1;
+      map[agentId] = { ...route, missingSince: now };
+      updated += 1;
+    }
+  }
+  if (updated > 0) writeAll(map);
+  return { scanned, updated, failed, missing };
+}
+
+/**
  * Atomically replace one route while removing stale identities for the same
  * source folder. Used by local import so a repaired dangling route never
  * survives beside the new installed-agent id.

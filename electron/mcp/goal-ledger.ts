@@ -29,7 +29,15 @@ export interface GoalLedgerDecision {
   blockedReason: string | null;
 }
 
+export interface GoalLedgerSnapshot {
+  goalId: string;
+  objective: string;
+  acceptanceCriteria: string[];
+  status: "active" | "blocked" | "completed" | "cancelled";
+}
+
 const DECISION_SCHEMA = "agentlas.goal-ledger-decision.v1";
+const GOAL_SCHEMA = "agentlas.goal-ledger.v1";
 
 /**
  * Reasons that must stop the loop even when the model marker asks to continue:
@@ -58,6 +66,64 @@ function parseDecision(value: unknown): GoalLedgerDecision | null {
     objective: typeof row.objective === "string" ? row.objective : null,
     blockedReason: typeof row.blockedReason === "string" ? row.blockedReason : null,
   };
+}
+
+function parseSnapshot(value: unknown): GoalLedgerSnapshot | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (
+    row.schemaVersion !== GOAL_SCHEMA
+    || typeof row.goalId !== "string"
+    || typeof row.objective !== "string"
+    || !["active", "blocked", "completed", "cancelled"].includes(String(row.status ?? ""))
+  ) return null;
+  return {
+    goalId: row.goalId,
+    objective: row.objective.trim(),
+    acceptanceCriteria: Array.isArray(row.acceptanceCriteria)
+      ? row.acceptanceCriteria.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim())
+      : [],
+    status: row.status as GoalLedgerSnapshot["status"],
+  };
+}
+
+/** Read the durable contract without changing it. */
+export async function getGoalLedgerGoal(
+  goalId: string,
+  projectDir?: string | null,
+): Promise<GoalLedgerSnapshot | null> {
+  return parseSnapshot(await ledgerCall<unknown>(["get", goalId], projectDir));
+}
+
+/**
+ * Deterministic first-pass acceptance contract. The runtime must make these
+ * more concrete in its visible kickoff, but even a disconnected Goal ledger
+ * starts with target-surface, regression, and evidence requirements instead
+ * of a vague "do your best" objective.
+ */
+export function deriveGoalAcceptanceCriteria(
+  objective: string,
+  locale: "ko" | "en",
+): string[] {
+  const normalized = objective.replace(/\s+/g, " ").trim().slice(0, 500);
+  const requestedOutcome = locale === "ko"
+    ? `요청 결과가 실제 대상 표면에서 확인 가능하게 완성되어야 합니다: ${normalized}`
+    : `The requested outcome must be complete and observable on the real target surface: ${normalized}`;
+  return locale === "ko"
+    ? [
+        requestedOutcome,
+        "명시된 범위·금지사항·기존 사용자 데이터를 보존하고, steering은 실행 경로만 조정해야 합니다.",
+        "변경한 경로의 관련 테스트·타입 검사·빌드가 통과하고 기존 핵심 흐름에 회귀가 없어야 합니다.",
+        "완료 주장은 소스가 아니라 실제 앱·런타임·산출물 중 해당되는 최종 표면에서 검증되어야 합니다.",
+        "각 성공 기준에는 재현 가능한 증거가 있어야 하며, 확인하지 못한 항목은 완료로 처리하지 않습니다.",
+      ]
+    : [
+        requestedOutcome,
+        "Preserve stated scope, exclusions, and existing user data; steering may adjust execution but must not redefine the goal.",
+        "Relevant tests, type checks, and builds for changed paths must pass without regressing the core flow.",
+        "Completion must be verified on the applicable final app, runtime, or artifact surface rather than inferred from source alone.",
+        "Every acceptance criterion needs reproducible evidence; unverified items must not be reported as complete.",
+      ];
 }
 
 async function ledgerCall<T>(args: string[], projectDir?: string | null): Promise<T | null> {

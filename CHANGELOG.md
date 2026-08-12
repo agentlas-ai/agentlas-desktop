@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.9.89 — 2026-08-12
+
+Binds the same Agentlas OS v1.1.111 at
+ee1f23911f378b6d521e64d89713c4ef15eb38e9.
+
+- An unfinished Work or One message survives Dashboard and menu round trips.
+  Staged steering remains attached to its chat until it is explicitly sent or
+  discarded, while the active model keeps running.
+- Goal mode now separates the durable goal contract from ordinary chat. The
+  first explicit Goal request defines its objective and acceptance criteria;
+  later conversation and steering can change the route without silently
+  replacing that contract.
+- One shows event-grounded work feedback for tools, files, and images, with the
+  same outputs available in a compact rail. It does not invent progress
+  percentages when the runtime has not reported one.
+- Project pages put current tasks and conversations first and keep the agent
+  roster collapsed until requested, reducing the cost of returning to work.
+- Startup reuses cached local-agent definition fingerprints instead of
+  recursively hashing every routed skill folder on the main thread. Explicit
+  repair still performs a full reconciliation when requested.
+- These source gates do not themselves publish a release; the Releases page
+  stays the authority for what is actually downloadable.
+
 ## 0.9.88 — 2026-08-12
 
 Binds the same Agentlas OS v1.1.111 at
