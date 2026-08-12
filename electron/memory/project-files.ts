@@ -5732,16 +5732,29 @@ export function supersedeAgentNestExperienceMemory(
   // edge is written only in the db that actually holds the successor (links do
   // not cross sqlite files); a retired target elsewhere is still marked
   // superseded so recall (status='active') stops surfacing it.
-  let anyReconciled = false;
+  let attempted = 0;
+  let reconciled = 0;
   for (const root of paths.readableMemoryRoots) {
     const dbPath = path.join(root, "experience.sqlite");
+    if (!fs.existsSync(dbPath)) continue;
+    let isFile = false;
+    try {
+      const st = fs.lstatSync(dbPath);
+      isFile = !st.isSymbolicLink() && st.isFile();
+    } catch {
+      isFile = false;
+    }
+    if (!isFile) continue;
+    attempted += 1;
     let db: Database.Database | null = null;
     try {
-      if (!fs.existsSync(dbPath)) continue;
-      const stat = fs.lstatSync(dbPath);
-      if (stat.isSymbolicLink() || !stat.isFile()) continue;
       db = new Database(dbPath);
       db.pragma("foreign_keys = ON");
+      // The device-local flat db is now shared with the Python writer; wait on a
+      // transient lock rather than fail, so a retire is not silently dropped and
+      // a corrected misdiagnosis cannot stay recalled beside its replacement
+      // (2026-08-12 set 5 partial-failure edge).
+      db.pragma("busy_timeout = 5000");
       const agentId = `hub:${normalizedSlug}`;
       const now = new Date().toISOString();
       const selectTicket = db.prepare(
@@ -5792,15 +5805,31 @@ export function supersedeAgentNestExperienceMemory(
           }
         }
       });
-      reconcile();
-      anyReconciled = true;
+      // Retry a transient busy/lock (the shared flat db) a few times before
+      // giving up on this root, so a real collision does not silently strand a
+      // still-active stale row.
+      let committed = false;
+      let lastErr: unknown;
+      for (let attempt = 0; attempt < 3 && !committed; attempt += 1) {
+        try {
+          reconcile();
+          committed = true;
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      if (!committed) throw lastErr ?? new Error("reconcile failed");
+      reconciled += 1;
     } catch {
-      // best-effort projection — skip this root, still try the others
+      // this root missed — reconciled is not incremented, so a partial failure
+      // is reported by the return value instead of masked as full success
     } finally {
       try { db?.close(); } catch { /* best-effort projection */ }
     }
   }
-  return anyReconciled;
+  // true only when every db we attempted actually committed; a partial failure
+  // returns false so the caller cannot treat a still-active stale row as retired.
+  return attempted > 0 && reconciled === attempted;
 }
 
 /** Resolve exact source-memory -> borrowed-agent projection ownership. */
