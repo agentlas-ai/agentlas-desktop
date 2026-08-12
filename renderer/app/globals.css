@@ -6190,18 +6190,106 @@ button[data-toggle-state="on"] {
   color: var(--ink);
 }
 
-.chat-composer-goal {
-  background: color-mix(in srgb, var(--paper-2) 72%, var(--paper));
+.agentlas-goal-feedback {
+  position: relative;
+  width: min(100%, 740px);
+  min-width: 0;
+  min-height: 36px;
+  margin: 0 auto -1px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid color-mix(in srgb, var(--ink) 10%, var(--paper-edge));
+  border-bottom-color: color-mix(in srgb, var(--paper-edge) 54%, transparent);
+  border-radius: 15px 15px 0 0;
+  background: #f4f4f3;
+  color: var(--muted-deep);
+  box-sizing: border-box;
+  box-shadow: 0 -2px 14px rgba(15, 18, 20, 0.02);
+  font-size: 10.5px;
 }
 
-.chat-composer-goal-criteria {
+.agentlas-goal-feedback__icon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
+  color: #92979a;
+}
+
+.agentlas-goal-feedback > strong {
+  flex: 0 0 auto;
+  color: #5f6468;
+  font-size: 10.5px;
+  font-weight: 720;
+}
+
+.agentlas-goal-feedback__objective {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: #777d81;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agentlas-goal-feedback__criteria {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.agentlas-goal-feedback__criteria > summary {
   padding: 3px 6px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--ink) 5%, transparent);
-  color: var(--muted-deep);
+  background: rgba(15, 18, 20, 0.045);
+  color: #7c8286;
+  cursor: pointer;
   font-size: 9.5px;
+  list-style: none;
   white-space: nowrap;
+}
+
+.agentlas-goal-feedback__criteria > summary::-webkit-details-marker { display: none; }
+.agentlas-goal-feedback__criteria[open] > ol {
+  position: absolute;
+  z-index: 80;
+  right: 0;
+  bottom: calc(100% + 8px);
+  width: min(480px, 72vw);
+  max-height: 260px;
+  margin: 0;
+  padding: 14px 16px 14px 32px;
+  overflow: auto;
+  border: 1px solid var(--paper-edge);
+  border-radius: 12px;
+  background: var(--paper);
+  box-shadow: 0 14px 38px rgba(15, 18, 20, 0.12);
+  color: var(--ink-soft);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.agentlas-goal-feedback > button {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #8f9497;
+  cursor: pointer;
+}
+
+.agentlas-goal-feedback > button:hover,
+.agentlas-goal-feedback > button:focus-visible {
+  background: rgba(15, 18, 20, 0.055);
+  color: var(--ink);
 }
 
 .chat-composer-steering-queue {

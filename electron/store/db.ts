@@ -17,7 +17,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 93;
+const SCHEMA_VERSION = 95;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -4162,6 +4162,49 @@ export function initStore(options: StoreInitOptions = {}): void {
       `);
     }
   }
+
+  // v94: Goal's objective and engineering acceptance contract are Desktop
+  // state, not an optional projection of an external engine database. The
+  // row is append/terminal-only: ordinary chat and steering have no update
+  // path, and a conditional first-definition write freezes the objective.
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS chat_goal_contracts (
+      goal_id TEXT PRIMARY KEY,
+      chat_id TEXT NOT NULL,
+      objective TEXT,
+      acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK(status IN ('active','blocked','completed','cancelled')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT,
+      FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_goal_contracts_active_chat
+      ON chat_goal_contracts(chat_id)
+      WHERE status = 'active';
+  `);
+
+  // v95: user-sent screenshots belong to the durable conversation, not to a
+  // renderer blob URL. Only bounded, Main-validated image bytes are stored;
+  // the renderer receives opaque agentlas://chat-attachment capabilities.
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS chat_message_attachments (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      media_type TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL CHECK(size_bytes > 0),
+      sha256 TEXT NOT NULL,
+      data BLOB NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(message_id) REFERENCES chat_messages(id) ON DELETE CASCADE,
+      FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_message_attachments_message
+      ON chat_message_attachments(message_id, created_at, id);
+  `);
 
   /*
    * ★사다리 뒤 백스톱 — **버전과 무관하게** 있어야 할 칸이 있는지 매 부팅 확인한다.

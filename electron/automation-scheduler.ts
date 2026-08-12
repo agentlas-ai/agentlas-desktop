@@ -25,6 +25,7 @@ import {
 } from "./store/automations";
 import { checkComputerUsePermissions } from "./mac-permissions";
 import { appendChatMessage, clearChatGoalBindingByGoalId, listChatMessages } from "./store/chats";
+import { completeChatGoalContract } from "./store/chat-goals";
 import {
   completeGoalLedgerGoal,
   GOAL_HARD_STOP_REASONS,
@@ -937,10 +938,13 @@ async function runOne(
                 status: "completed",
                 reason: "judged-ok-no-open-tasks-no-marker",
               });
+              completeChatGoalContract(a.goalId, "completed");
               clearChatGoalBindingByGoalId(a.goalId);
               toggleAutomation(a.id, false);
             } else if (hardStop) {
               // goal은 blocked/예산소진으로 원장에 남는다(사람 호출). 재실행만 멈춘다.
+              completeChatGoalContract(a.goalId, "blocked");
+              clearChatGoalBindingByGoalId(a.goalId);
               toggleAutomation(a.id, false);
             } else if (goalDecision.continue || result.stormbreakerContinueRequested) {
               const cadence = goalContinuationSchedule(goalDecision);

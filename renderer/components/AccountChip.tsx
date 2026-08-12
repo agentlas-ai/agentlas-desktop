@@ -9,11 +9,14 @@ import { ipc } from "@/lib/ipc";
 import type { AuthSession } from "@/lib/types";
 import { useT } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
+import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import { IconChevronDown } from "./Icon";
 
 export function AccountChip() {
   const { t } = useT();
-  const [session, setSession] = useState<AuthSession>({ signedIn: false });
+  const [session, setSession] = useState<AuthSession>(() => (
+    readViewData<AuthSession>("shell.auth-session")?.value ?? { signedIn: false }
+  ));
   const [busy, setBusy] = useState(false);
   const [popoverOpen, setPopoverOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -28,8 +31,12 @@ export function AccountChip() {
     if (!api) return;
     let stopped = false;
     let attempts = 0;
-    const load = async () => {
-      const next = await api.auth.getSession();
+    const load = async (force = false) => {
+      const next = await loadViewData(
+        "shell.auth-session",
+        () => api.auth.getSession(),
+        { maxAgeMs: 60_000, force },
+      );
       if (!stopped) setSession(next);
       return next;
     };
@@ -40,9 +47,10 @@ export function AccountChip() {
         if ((next.signedIn && next.email) || !next.signedIn || attempts >= 24) clearInterval(timer);
       });
     }, 5000);
-    const onFocus = () => void load();
+    const onFocus = () => void load(true);
     const unsubscribeSession = api.auth.onSessionChanged?.((next) => {
       if (stopped) return;
+      writeViewData("shell.auth-session", next);
       setSession(next);
       if (!next.signedIn) setPopoverOpen(false);
       announceAuthChanged();
@@ -74,6 +82,7 @@ export function AccountChip() {
     setBusy(true);
     try {
       const next = await api.auth.signInWithGoogle();
+      writeViewData("shell.auth-session", next);
       setSession(next);
       announceAuthChanged();
     } finally {
@@ -89,11 +98,13 @@ export function AccountChip() {
     try {
       const next = await api.auth.signInWithBrowser();
       if (next.signedIn) {
+        writeViewData("shell.auth-session", next);
         setSession(next);
         announceAuthChanged();
         return;
       }
       const fallback = await api.auth.signInWithGoogle();
+      writeViewData("shell.auth-session", fallback);
       setSession(fallback);
       announceAuthChanged();
     } finally {
@@ -105,7 +116,9 @@ export function AccountChip() {
     const api = ipc();
     if (!api) return;
     await api.auth.signOut();
-    setSession({ signedIn: false });
+    const signedOut: AuthSession = { signedIn: false };
+    writeViewData("shell.auth-session", signedOut);
+    setSession(signedOut);
     setPopoverOpen(false);
     announceAuthChanged();
   }

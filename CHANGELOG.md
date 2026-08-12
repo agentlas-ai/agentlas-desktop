@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.90 — 2026-08-12
+
+Binds the same Agentlas OS v1.1.111 at
+ee1f23911f378b6d521e64d89713c4ef15eb38e9.
+
+- Returning to Dashboard reuses the last verified account, credit, project,
+  runtime, usage, quest, Hub, and organization projections while their reads
+  reconcile in the background. A route change no longer paints a signed-in,
+  connected workspace as logged out and disconnected for several seconds.
+- Goal is an explicit, normally-off campaign. Its first request freezes one
+  local objective and five engineering acceptance criteria; ordinary chat and
+  steering cannot replace that contract, and turning Goal off also ends its
+  continuous execution mode.
+- A direction typed while a model is running is staged above the composer and
+  enters the Main-owned steering queue only through the explicit adjustment
+  action. The queued user turn, live feedback, completed answer, and attached
+  screenshots survive Dashboard and menu round trips.
+- One renders event-grounded tool, file, and image progress in the conversation
+  and a compact output rail. Generated outputs can be inspected without
+  replacing the running conversation, and unreported percentages are never
+  invented.
+- These source gates do not themselves publish a release; the Releases page
+  stays the authority for what is actually downloadable.
+
 ## 0.9.89 — 2026-08-12
 
 Binds the same Agentlas OS v1.1.111 at

@@ -77,6 +77,7 @@ import { scrubLegacyOpenCrabCredentialUrls } from "./mcp-tools/registry";
 import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser/approval-server";
 import { startComputerUseControlServer, stopComputerUseControlServer } from "./computer-use/control-server";
 import { authorizeLocalMediaPath } from "./fs/access";
+import { readChatMessageAttachment } from "./store/chat-message-attachments";
 import { serveOneArtifactProtocolRequest } from "./one/artifact-preview";
 import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
 import { recoverDesktopStartup, type StartupRecoveryPresentation } from "./one/startup-recovery";
@@ -438,6 +439,22 @@ function registerRendererProtocol(): void {
       const url = new URL(request.url);
       if (url.hostname === "one-artifact") {
         return serveOneArtifactProtocolRequest(request.url, request.headers.get("range"));
+      }
+      if (url.hostname === "chat-attachment") {
+        const id = url.pathname.replace(/^\//, "");
+        const attachment = readChatMessageAttachment(id);
+        if (!attachment) return new Response("not found", { status: 404 });
+        const body = Uint8Array.from(attachment.bytes);
+        return new Response(body, {
+          status: 200,
+          headers: {
+            "Content-Type": attachment.mediaType,
+            "Content-Length": String(attachment.size),
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "ETag": `\"sha256-${attachment.sha256}\"`,
+            "X-Content-Type-Options": "nosniff",
+          },
+        });
       }
       if (url.hostname === "localfile") {
         const p = url.searchParams.get("p");

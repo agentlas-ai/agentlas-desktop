@@ -28,11 +28,14 @@ const READ_TTL_MS: Record<string, number> = {
   "projects.get": 10_000,
   "projects.timeline": 5_000,
   "tasks.list": 5_000,
-  "runtime.detect": 30_000,
+  "runtime.detect": 300_000,
+  "runtime.listModels": 300_000,
+  "runtime.listRoleMembers": 300_000,
   "env.list": 15_000,
   "mcpTools.listInstalled": 15_000,
   "mcpTools.catalog": 60_000,
   "marketplace.bookmarks": 15_000,
+  "marketplace.listMine": 60_000,
   // Hub 검색은 코드 주석 기준 10초+ 걸리는 네트워크 호출인데 /marketplace 진입마다
   // 빈 쿼리로 재실행됐다. 목록 변동은 분 단위이므로 60초면 재방문이 즉시 그려진다.
   "marketplace.search": 60_000,
@@ -41,6 +44,13 @@ const READ_TTL_MS: Record<string, number> = {
   "agents.usageSummary": 15_000,
   "agents.borrowedProfiles": 15_000,
   "usage.snapshot": 10_000,
+  "auth.getSession": 60_000,
+  "billing.getCredits": 60_000,
+  "app.getVersion": 3_600_000,
+  "updater.getState": 30_000,
+  "agentEvolution.listGrowth": 15_000,
+  "quests.list": 30_000,
+  "automations.list": 15_000,
   "appFactory.listApps": 15_000,
   // One 홈은 5초 폴링을 유지하되, 고차원 메모리 투영은 변경 전까지 재사용한다.
   // 같은 namespace의 실제 mutation은 아래 기본 경로에서 둘 다 무효화한다.

@@ -91,6 +91,8 @@ import {
   IconTarget,
   IconUsers,
 } from "@/components/Icon";
+import { GoalFeedbackBar } from "@/components/GoalFeedbackBar";
+import type { ChatGoalContext } from "@/lib/types";
 
 type TFunction = ReturnType<typeof useT>["t"];
 
@@ -151,18 +153,31 @@ function readChatComposerDraft(chatId: string | null): ChatComposerDraftCache {
   if (cached) return cached;
 
   let input = "";
+  let stagedSteering: StagedSteeringDraft | null = null;
   try {
     if (typeof window !== "undefined") {
       const raw = window.sessionStorage.getItem(`${CHAT_COMPOSER_DRAFT_STORAGE_PREFIX}${chatId}`);
       if (raw) {
-        const parsed = JSON.parse(raw) as { input?: unknown };
+        const parsed = JSON.parse(raw) as { input?: unknown; stagedSteering?: unknown };
         if (typeof parsed.input === "string") input = parsed.input;
+        if (
+          parsed.stagedSteering
+          && typeof parsed.stagedSteering === "object"
+          && typeof (parsed.stagedSteering as Record<string, unknown>).text === "string"
+        ) {
+          const stored = parsed.stagedSteering as Record<string, unknown>;
+          stagedSteering = {
+            text: String(stored.text),
+            opts: stored.opts && typeof stored.opts === "object" ? stored.opts as SendOptions : {},
+            attachmentCount: 0,
+          };
+        }
       }
     }
   } catch {
     // Storage is an optimisation. The in-memory cache remains authoritative.
   }
-  const restored = { input, stagedSteering: null };
+  const restored = { input, stagedSteering };
   chatComposerDraftCache.set(chatId, restored);
   return restored;
 }
@@ -175,7 +190,18 @@ function writeChatComposerDraft(chatId: string | null, patch: Partial<ChatCompos
   try {
     if (typeof window === "undefined") return;
     const key = `${CHAT_COMPOSER_DRAFT_STORAGE_PREFIX}${chatId}`;
-    if (next.input) window.sessionStorage.setItem(key, JSON.stringify({ input: next.input }));
+    if (next.input || next.stagedSteering) {
+      window.sessionStorage.setItem(key, JSON.stringify({
+        input: next.input,
+        // Binary previews remain in the in-memory cache. Persist only the
+        // steer text and non-binary turn options so route changes/refreshes
+        // cannot make a visible adjustment silently disappear.
+        stagedSteering: next.stagedSteering ? {
+          text: next.stagedSteering.text,
+          opts: { ...next.stagedSteering.opts, images: undefined },
+        } : null,
+      }));
+    }
     else window.sessionStorage.removeItem(key);
   } catch {
     // Quota/security failures must never make the composer unusable.
@@ -289,6 +315,7 @@ function ChatInputComponent({
   onToggleGoal,
   progressLabel,
   goalCriteria,
+  goalContext,
   onToggleContinuous,
   onToggleSwarm,
   queuedCount = 0,
@@ -337,6 +364,8 @@ function ChatInputComponent({
   progressLabel?: string;
   /** Host-owned success contract. Steering never changes this list. */
   goalCriteria?: string[];
+  /** Exact Main-owned immutable goal contract. */
+  goalContext?: ChatGoalContext | null;
   /** 스웜(swarmMode) 현재 상태 + 토글. */
   swarmMode?: boolean;
   onToggleSwarm?: () => void;
@@ -699,7 +728,10 @@ function ChatInputComponent({
     return {
       images: attachments,
       planMode: planMode || undefined,
-      goalMode: effectiveGoalMode || undefined,
+      // Goal-mode authority is only needed for the one request that defines an
+      // armed-but-empty contract. Once frozen, later chat/steering is ordinary
+      // guidance and must not carry permission to redefine the objective.
+      goalMode: effectiveGoalMode && !goalContext?.objective ? true : undefined,
       permissions,
       appsGenerateMode: appsGenerateMode || undefined,
       taskForceTargets: turnCalls.length ? turnCalls.map((call) => call.target) : undefined,
@@ -1346,9 +1378,15 @@ function ChatInputComponent({
         <SteeringQueueBar queuedCount={queuedCount} locale={locale} />
       )}
       {effectiveGoalMode && (
-        <ComposerGoalBar
-          label={progressLabel}
-          criteria={goalCriteria}
+        <GoalFeedbackBar
+          context={goalContext ?? (progressLabel ? {
+            goalId: "visible-goal",
+            objective: progressLabel,
+            acceptanceCriteria: goalCriteria ?? [],
+            status: "active",
+          } : null)}
+          armed
+          locale={locale}
           onEndGoal={() => toggleGoalMode(false)}
         />
       )}
@@ -1923,42 +1961,6 @@ function ChatInputComponent({
         </div>
       </div>
     </footer>
-  );
-}
-
-function ComposerGoalBar({
-  label,
-  criteria,
-  onEndGoal,
-}: {
-  label?: string;
-  criteria?: string[];
-  onEndGoal: () => void;
-}) {
-  const { locale } = useT();
-  const title = label?.replace(/\s+/g, " ").trim() || (locale === "ko"
-    ? "다음 요청으로 목표와 성공 기준을 확정합니다"
-    : "Your next request will define the goal and its acceptance criteria");
-  const criteriaTitle = (criteria ?? []).join("\n");
-  return (
-    <div className="chat-composer-progress chat-composer-goal" role="status" aria-live="polite" data-chat-goal-bar="true">
-      <span className="chat-composer-progress-icon" aria-hidden><IconTarget size={13} /></span>
-      <strong>{locale === "ko" ? "목표" : "Goal"}</strong>
-      <span className="chat-composer-progress-label" title={title}>{title}</span>
-      {(criteria?.length ?? 0) > 0 && (
-        <span className="chat-composer-goal-criteria" title={criteriaTitle}>
-          {locale === "ko" ? `성공 기준 ${criteria?.length}개` : `${criteria?.length} criteria`}
-        </span>
-      )}
-      <button
-        type="button"
-        onClick={onEndGoal}
-        aria-label={locale === "ko" ? "목표 종료" : "End goal"}
-        title={locale === "ko" ? "목표 종료" : "End goal"}
-      >
-        <IconClose size={12} />
-      </button>
-    </div>
   );
 }
 

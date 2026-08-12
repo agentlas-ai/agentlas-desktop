@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import type {
   RuntimeRole,
   RuntimeRolePoolState,
@@ -171,12 +172,16 @@ function roleView(runtimes: RuntimeStatus[], role: RuntimeRole): RoleView {
 export function RuntimeControl() {
   const { locale } = useT();
   const ko = locale === "ko";
-  const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
+  const [runtimes, setRuntimes] = useState<RuntimeStatus[]>(() => (
+    readViewData<RuntimeStatus[]>("dashboard.runtimes")?.value ?? []
+  ));
   const [modelsByRuntime, setModelsByRuntime] = useState<Record<string, ModelRow[]>>({});
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !readViewData<RuntimeStatus[]>("dashboard.runtimes"));
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const [pool, setPool] = useState<RuntimeRolePoolState | null>(null);
+  const [pool, setPool] = useState<RuntimeRolePoolState | null>(() => (
+    readViewData<RuntimeRolePoolState>("dashboard.runtime-role-pool")?.value ?? null
+  ));
   const [dragState, setDragState] = useState<{
     role: RuntimeRole;
     from: number;
@@ -188,7 +193,12 @@ export function RuntimeControl() {
     const api = ipc();
     if (!api?.runtime.listRoleMembers) return;
     try {
-      setPool(await api.runtime.listRoleMembers());
+      const next = await loadViewData(
+        "dashboard.runtime-role-pool",
+        () => api.runtime.listRoleMembers(),
+        { maxAgeMs: 300_000 },
+      );
+      setPool(next);
     } catch {
       /* 풀 미지원 빌드 — 읽기 전용 빈 상태 유지 */
     }
@@ -213,7 +223,11 @@ export function RuntimeControl() {
       return;
     }
     try {
-      const detected = await api.runtime.detect();
+      const detected = await loadViewData(
+        "dashboard.runtimes",
+        () => api.runtime.detect(),
+        { maxAgeMs: 300_000 },
+      );
       setRuntimes(detected);
       setMessage("");
     } catch {
@@ -279,8 +293,11 @@ export function RuntimeControl() {
     if (!api?.runtime.setRoleMembers || busy) return false;
     setBusy(true);
     try {
-      setPool(await api.runtime.setRoleMembers(role, selections));
+      const nextPool = await api.runtime.setRoleMembers(role, selections);
+      writeViewData("dashboard.runtime-role-pool", nextPool);
+      setPool(nextPool);
       const detected = await api.runtime.detect();
+      writeViewData("dashboard.runtimes", detected);
       setRuntimes(detected);
       setMessage(success);
       return true;
@@ -423,8 +440,12 @@ export function RuntimeControl() {
     setBusy(true);
     try {
       await api.runtime.setRoleMembers("orchestrator", orchestrator);
-      setPool(await api.runtime.setRoleMembers("worker", worker));
-      setRuntimes(await api.runtime.detect());
+      const nextPool = await api.runtime.setRoleMembers("worker", worker);
+      const detected = await api.runtime.detect();
+      writeViewData("dashboard.runtime-role-pool", nextPool);
+      writeViewData("dashboard.runtimes", detected);
+      setPool(nextPool);
+      setRuntimes(detected);
       setMessage(
         ko
           ? "연결된 런타임과 현재 역할을 기준으로 우선순위를 자동 설정했습니다."

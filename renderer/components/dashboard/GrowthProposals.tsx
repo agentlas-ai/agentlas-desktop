@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
+import { loadViewData, readViewData } from "@/lib/view-data-cache";
 import type { AgentEvolutionProposalUi, GrowthProposalCardCopy, GrowthProposalInbox } from "@/lib/types";
 
 const POLL_MS = 15_000;
@@ -27,18 +28,24 @@ function cardCopy(proposal: AgentEvolutionProposalUi): GrowthProposalCardCopy | 
 export function GrowthProposals() {
   const { locale } = useT();
   const ko = locale === "ko";
-  const [inbox, setInbox] = useState<GrowthProposalInbox | null>(null);
+  const [inbox, setInbox] = useState<GrowthProposalInbox | null>(() => (
+    readViewData<GrowthProposalInbox>("dashboard.growth-proposals")?.value ?? null
+  ));
   const [busy, setBusy] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (force = false) => {
     const api = ipc();
     if (!api) {
       setInbox({ pending: [], autoApplied: [] });
       return;
     }
     try {
-      const next = await api.agentEvolution.listGrowth(20);
+      const next = await loadViewData(
+        "dashboard.growth-proposals",
+        () => api.agentEvolution.listGrowth(20),
+        { maxAgeMs: POLL_MS, force },
+      );
       setInbox(next);
     } catch {
       setInbox((cur) => cur ?? { pending: [], autoApplied: [] });
@@ -47,11 +54,11 @@ export function GrowthProposals() {
 
   useEffect(() => {
     void load();
-    const refresh = () => void load();
+    const refresh = () => void load(true);
     window.addEventListener("agentlas:attention-refresh", refresh);
     return () => window.removeEventListener("agentlas:attention-refresh", refresh);
   }, [load]);
-  useVisibleInterval(() => void load(), POLL_MS);
+  useVisibleInterval(() => void load(true), POLL_MS);
 
   const act = useCallback(
     async (id: string, action: "apply" | "reject" | "rollback") => {
@@ -62,7 +69,7 @@ export function GrowthProposals() {
         if (action === "apply") await api.agentEvolution.approveAndApply(id);
         else if (action === "reject") await api.agentEvolution.reject(id);
         else await api.agentEvolution.rollback(id);
-        await load();
+        await load(true);
         window.dispatchEvent(new Event("agentlas:attention-refresh"));
       } catch {
         // The dashboard never renders operational failures. The resident

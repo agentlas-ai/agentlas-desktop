@@ -803,6 +803,23 @@
   color: #272a2d;
 }
 
+.messageImages {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+
+.messageImages img {
+  display: block;
+  max-width: 240px;
+  max-height: 180px;
+  object-fit: cover;
+  border-radius: 11px;
+  background: #eceeef;
+}
+
 .assistantIdentity {
   display: flex;
   align-items: center;
@@ -1020,6 +1037,10 @@
 }
 .runtimeArtifact:hover,
 .runtimeArtifact:focus-visible { background: #f4f5f6; outline: 2px solid transparent; }
+.runtimeArtifact[data-active="true"] {
+  background: #edf4ff;
+  color: #315f9f;
+}
 .runtimeArtifactPreview {
   width: 44px;
   height: 44px;
@@ -1039,6 +1060,78 @@
 .runtimeArtifact > span:last-child { min-width: 0; display: grid; gap: 3px; }
 .runtimeArtifact strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .runtimeArtifact small { color: #9a9fa3; font-size: 9px; }
+
+.runtimeArtifactViewer {
+  min-height: 0;
+  flex: 1 1 260px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border-top: 1px solid #eef0f1;
+  background: #fbfbfb;
+}
+.runtimeArtifactViewer > header {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 0 14px;
+  border-bottom: 1px solid #eef0f1;
+}
+.runtimeArtifactViewer > header strong {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: #4f565b;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.runtimeArtifactViewer > header button {
+  min-height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #70777c;
+  font-size: 9px;
+  cursor: pointer;
+}
+.runtimeArtifactViewer > header button:hover,
+.runtimeArtifactViewer > header button:focus-visible { background: #eef0f1; }
+.runtimeArtifactViewer > img {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+  background: #f4f5f5;
+}
+.runtimeArtifactViewer > pre {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  padding: 14px;
+  color: #4e555a;
+  font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.runtimeArtifactViewer > small {
+  padding: 7px 12px;
+  border-bottom: 1px solid #eef0f1;
+  color: #8b9195;
+  font-size: 9px;
+}
+.runtimeArtifactViewer > p {
+  align-self: center;
+  margin: 0;
+  padding: 18px;
+  color: #8b9195;
+  font-size: 10px;
+  line-height: 1.5;
+  text-align: center;
+}
 
 @media (min-width: 1181px) {
   .workspace[data-runtime-artifacts="true"] .scroll { width: calc(100% - 300px); }
@@ -2106,6 +2199,14 @@
 }
 
 .railScrim { display: none; }
+
+.oneGoalFeedback {
+  width: min(760px, calc(100% - 28px));
+  margin-bottom: -1px;
+  border-color: #e5e6e5;
+  background: #f4f4f3;
+  box-shadow: none;
+}
 
 @media (max-width: 980px) {
   .body { grid-template-columns: 224px minmax(0, 1fr); }

@@ -15,6 +15,7 @@ import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { isUserFacingAgentText } from "@/lib/agent-visibility";
 import { IconBuilding, IconFileUp, IconSearch } from "@/components/Icon";
+import { loadViewData, readViewData } from "@/lib/view-data-cache";
 import type { HubAgentBookmark, InstalledAgent, InstalledFirm, MarketplaceListing, ResolvedNode, ResolvedOrg } from "@/lib/types";
 
 type Mode = "multi" | "single";
@@ -35,12 +36,22 @@ export function OrgTree() {
   const ko = locale === "ko";
   const [mode, setMode] = useState<Mode>("multi");
   const [query, setQuery] = useState("");
-  const [agents, setAgents] = useState<InstalledAgent[]>([]);
-  const [firms, setFirms] = useState<InstalledFirm[]>([]);
+  const [agents, setAgents] = useState<InstalledAgent[]>(() => (
+    readViewData<InstalledAgent[]>("dashboard.team")?.value ?? []
+  ));
+  const [firms, setFirms] = useState<InstalledFirm[]>(() => (
+    readViewData<InstalledFirm[]>("dashboard.firms")?.value ?? []
+  ));
   // 로그인한 계정의 실제 서버 클라우드(cargo) 에이전트 — "클라우드" 카테고리에 리스트업.
-  const [cloudListings, setCloudListings] = useState<MarketplaceListing[]>([]);
-  const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [cloudListings, setCloudListings] = useState<MarketplaceListing[]>(() => (
+    readViewData<MarketplaceListing[]>("dashboard.cloud-listings")?.value ?? []
+  ));
+  const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>(() => (
+    readViewData<HubAgentBookmark[]>("dashboard.hub-bookmarks")?.value ?? []
+  ));
+  const [loading, setLoading] = useState(() => (
+    !readViewData<InstalledAgent[]>("dashboard.team") && !readViewData<InstalledFirm[]>("dashboard.firms")
+  ));
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState(false);
   const [importMessage, setImportMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
@@ -62,7 +73,11 @@ export function OrgTree() {
     if (!api) return;
     const generation = ++hubBookmarkGenerationRef.current;
     try {
-      const bookmarks = await api.marketplace.bookmarks();
+      const bookmarks = await loadViewData(
+        "dashboard.hub-bookmarks",
+        () => api.marketplace.bookmarks(),
+        { maxAgeMs: 15_000, force: true },
+      );
       if (hubBookmarkGenerationRef.current === generation) setHubBookmarks(bookmarks);
     } catch {
       // Keep the last known/optimistic state. A local read failure is not proof
@@ -70,7 +85,7 @@ export function OrgTree() {
     }
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (force = false) => {
     const api = ipc();
     if (!api) {
       setLoading(false);
@@ -80,10 +95,10 @@ export function OrgTree() {
     const bookmarkGeneration = ++hubBookmarkGenerationRef.current;
     try {
       const [a, f, mine, bookmarks] = await Promise.all([
-        api.team.list(),
-        api.firms.list(),
-        api.marketplace.listMine().catch(() => [] as MarketplaceListing[]),
-        api.marketplace.bookmarks().catch(() => null),
+        loadViewData("dashboard.team", () => api.team.list(), { maxAgeMs: 15_000, force }),
+        loadViewData("dashboard.firms", () => api.firms.list(), { maxAgeMs: 15_000, force }),
+        loadViewData("dashboard.cloud-listings", () => api.marketplace.listMine(), { maxAgeMs: 60_000, force }).catch(() => readViewData<MarketplaceListing[]>("dashboard.cloud-listings")?.value ?? []),
+        loadViewData("dashboard.hub-bookmarks", () => api.marketplace.bookmarks(), { maxAgeMs: 15_000, force }).catch(() => null),
       ]);
       if (rosterLoadGenerationRef.current !== generation) return;
       setAgents(visibleRosterAgents(a));
@@ -95,9 +110,6 @@ export function OrgTree() {
       setLoadError("");
     } catch {
       if (rosterLoadGenerationRef.current !== generation) return;
-      setAgents([]);
-      setFirms([]);
-      setCloudListings([]);
       setLoadError(t("org.load_error"));
     } finally {
       if (rosterLoadGenerationRef.current === generation) setLoading(false);
@@ -149,7 +161,7 @@ export function OrgTree() {
         );
         setMode(classifyInstalledAgent(change.agent) === "multi" ? "multi" : "single");
         setOpenCats((previous) => ({ ...previous, local: true }));
-        void load();
+        void load(true);
       }),
     [load],
   );

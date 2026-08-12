@@ -121,6 +121,13 @@ export interface InvocationAttachResult {
   events: McpInvocationEvent[];
   /** 실행 시작 시각(ISO) — 재접속한 렌더러가 상태줄 경과시간을 0s부터 다시 세지 않게 한다. */
   startedAt?: string;
+  /** Main-owned pending directions. A renderer route change must not erase the
+   *  user's already accepted steering turn from the visible conversation. */
+  queuedSteers: Array<{
+    text: string;
+    queuedAt: string;
+    position: number;
+  }>;
 }
 
 export interface InvocationStartResult {
@@ -154,6 +161,7 @@ interface RunRecord {
 
 interface QueuedSteer {
   request: McpInvocationRequest;
+  queuedAt: string;
   workspaceBinding?: InvocationWorkspaceBinding;
 }
 
@@ -1618,6 +1626,7 @@ export class InvocationService {
     }
     queue.push({
       request: { ...steerRequest, runId: undefined },
+      queuedAt: new Date().toISOString(),
       ...(workspaceBinding
         ? { workspaceBinding: immutableWorkspaceBinding(workspaceBinding) }
         : {}),
@@ -1648,7 +1657,16 @@ export class InvocationService {
     let found: InvocationAttachResult | null = null;
     for (const [runId, record] of this.activeRuns.entries()) {
       if (record.chatId === chatId) {
-        found = { runId, events: record.events.slice(), startedAt: record.startedAt };
+        found = {
+          runId,
+          events: record.events.slice(),
+          startedAt: record.startedAt,
+          queuedSteers: (this.steerQueues.get(chatId) ?? []).map((queued, index) => ({
+            text: queued.request.userPrompt,
+            queuedAt: queued.queuedAt,
+            position: index + 1,
+          })),
+        };
       }
     }
     return found;

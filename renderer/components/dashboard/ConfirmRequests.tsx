@@ -8,6 +8,7 @@ import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
+import { loadViewData, readViewData } from "@/lib/view-data-cache";
 import type { PendingConfirmation } from "@/lib/types";
 
 const POLL_MS = 10_000;
@@ -26,17 +27,23 @@ function stallLabel(iso: string, ko: boolean): string {
 export function ConfirmRequests() {
   const { locale } = useT();
   const ko = locale === "ko";
-  const [items, setItems] = useState<PendingConfirmation[] | null>(null);
+  const [items, setItems] = useState<PendingConfirmation[] | null>(() => (
+    readViewData<PendingConfirmation[]>("dashboard.confirm.pending")?.value ?? null
+  ));
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (force = false) => {
     const api = ipc();
     if (!api) {
       setItems([]);
       return;
     }
     try {
-      const list = await api.confirm.listPending();
+      const list = await loadViewData(
+        "dashboard.confirm.pending",
+        () => api.confirm.listPending(),
+        { maxAgeMs: 10_000, force },
+      );
       // 가장 오래 기다린 항목(가장 멈춰 있는 것)이 위로 — 긴급성 정렬.
       list.sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
       setItems(list);
@@ -51,11 +58,11 @@ export function ConfirmRequests() {
   // 답변 확정 직후에는 폴링을 기다리지 않고 즉시 목록을 갱신한다(AppShell 배지와 동일 신호).
   useEffect(() => {
     void load();
-    const refresh = () => void load();
+    const refresh = () => void load(true);
     window.addEventListener("agentlas:attention-refresh", refresh);
     return () => window.removeEventListener("agentlas:attention-refresh", refresh);
   }, [load]);
-  useVisibleInterval(() => void load(), POLL_MS);
+  useVisibleInterval(() => void load(true), POLL_MS);
 
   const openConfirmation = useCallback(async (item: PendingConfirmation) => {
     const api = ipc();

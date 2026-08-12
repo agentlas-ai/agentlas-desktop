@@ -1424,8 +1424,8 @@ export interface Chat {
  *
  * `objective` is immutable while the goal is active. Ordinary messages and
  * steering turns may change the execution path, but never this contract.
- * A bound chat can temporarily return `null` here until the first Goal-mode
- * request defines the objective and its acceptance criteria.
+ * An armed contract is projected with an empty objective until the first
+ * Goal-mode request defines the immutable objective and criteria.
  */
 export interface ChatGoalContext {
   goalId: string;
@@ -1502,7 +1502,7 @@ export interface ChatHistoryEntry {
   role: "user" | "assistant" | "system";
   text: string;
   createdAt: string;
-  /** 사용자 메시지에 첨부된 이미지 — 영구화는 V1, 현재는 in-flight만 */
+  /** Main-owned opaque URLs for images durably attached to this user turn. */
   imageDataUrls?: string[];
 }
 
@@ -6621,7 +6621,13 @@ export interface AgentlasIpc {
     /** 현재 실행 중인 chatId 목록 — 사이드바 "실행 중" 인디케이터 초기 시드용. */
     activeChats: () => Promise<string[]>;
     /** 채팅 진입 시 진행 중 실행에 재접속 — 그 chat의 runId + 지금까지 버퍼된 이벤트 + 시작 시각. 없으면 null. */
-    attach: (chatId: string) => Promise<{ runId: string; events: McpInvocationEvent[]; startedAt?: string } | null>;
+    attach: (chatId: string) => Promise<{
+      runId: string;
+      events: McpInvocationEvent[];
+      startedAt?: string;
+      /** Accepted steering turns that are waiting behind the active model. */
+      queuedSteers: Array<{ text: string; queuedAt: string; position: number }>;
+    } | null>;
     /** 실행 ID의 live+durable 상태. 앱 재시작 뒤 미종결 started receipt는 interrupted로 판정한다. */
     receipt: (runId: string) => Promise<InvocationRunReceipt | null>;
     /** 채팅의 가장 최근 실행 receipt — 결과 폴더/실패 진단 복원용. */

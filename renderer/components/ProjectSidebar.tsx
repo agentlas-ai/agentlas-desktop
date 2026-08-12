@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
+import { loadViewData, readViewData } from "@/lib/view-data-cache";
 import type { CanonicalTask, Project } from "@/lib/types";
 import { IconChevronDown, IconChevronRight, IconFolder, IconHome, IconPlus } from "./Icon";
 import { ProductModeMenu } from "./one/ProductModeMenu";
@@ -16,8 +17,8 @@ export function ProjectSidebar() {
   const ko = locale === "ko";
   const params = useSearchParams();
   const currentId = params.get("projectId") ?? params.get("id");
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [tasks, setTasks] = useState<CanonicalTask[]>([]);
+  const [projects, setProjects] = useState<Project[]>(() => readViewData<Project[]>("dashboard.projects")?.value ?? []);
+  const [tasks, setTasks] = useState<CanonicalTask[]>(() => readViewData<CanonicalTask[]>("dashboard.tasks.200")?.value ?? []);
   const [loadFailed, setLoadFailed] = useState(false);
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>({});
 
@@ -45,13 +46,16 @@ export function ProjectSidebar() {
       return;
     }
     let cancelled = false;
-    const load = () => void Promise.all([api.projects.list(), api.tasks.list({ limit: 200, reconcile: false })]).then(([items, taskRows]) => {
+    const load = (force = false) => void Promise.all([
+      loadViewData("dashboard.projects", () => api.projects.list(), { maxAgeMs: 10_000, force }),
+      loadViewData("dashboard.tasks.200", () => api.tasks.list({ limit: 200, reconcile: false }), { maxAgeMs: 5_000, force }),
+    ]).then(([items, taskRows]) => {
       if (!cancelled) { setProjects(items); setTasks(taskRows); setLoadFailed(false); }
     }).catch(() => {
       if (!cancelled) setLoadFailed(true);
     });
     load();
-    const onChanged = () => load();
+    const onChanged = () => load(true);
     window.addEventListener("agentlas:projects-changed", onChanged);
     window.addEventListener("agentlas:tasks-changed", onChanged);
     return () => {

@@ -24,12 +24,10 @@ import {
 import {
   deriveGoalAcceptanceCriteria,
   ensureGoalLedgerGoal,
-  getGoalLedgerGoal,
   GOAL_HARD_STOP_REASONS,
   goalProgressKeyForText,
   recordGoalLedgerCycle,
   type GoalLedgerDecision,
-  type GoalLedgerSnapshot,
 } from "./goal-ledger";
 import { getAgentById, listInstalledAgents } from "./registry";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
@@ -45,6 +43,7 @@ import { ROUTER_AGENT_ID, ROUTER_SYSTEM_AGENT } from "../system-agents/router";
 import {
   appendChatMessage,
   autoTitleFromFirstMessage,
+  clearChatGoalBindingByGoalId,
   getChat,
   getChatGoalId,
   getChatWorkingFolder,
@@ -53,6 +52,13 @@ import {
   setChatGoalBinding,
   setChatWorkingFolder,
 } from "../store/chats";
+import {
+  completeChatGoalContract,
+  defineChatGoalContract,
+  getChatGoalContract,
+  isChatGoalContractArmed,
+} from "../store/chat-goals";
+import type { ChatGoalContext } from "../../shared/types";
 import { getProject, listProjects } from "../store/projects";
 import { getCanonicalTaskForChat } from "../store/tasks";
 import { touchRuntimeSession } from "../store/runtime-sessions";
@@ -520,7 +526,7 @@ function hasPriorConversationContext(chatId: string): boolean {
   );
 }
 
-function persistentGoalTurnContext(goal: GoalLedgerSnapshot, locale: "ko" | "en"): string {
+function persistentGoalTurnContext(goal: ChatGoalContext, locale: "ko" | "en"): string {
   const criteria = goal.acceptanceCriteria.map((criterion, index) => `${index + 1}. ${criterion}`).join("\n");
   return locale === "ko"
     ? [
@@ -1300,7 +1306,7 @@ export async function runMcpInvocation(
     if (promptIsSystemAuthored) {
       appendChatMessage(chat.id, "system", req.userPrompt);
     } else {
-      appendChatMessage(chat.id, "user", req.userPrompt);
+      appendChatMessage(chat.id, "user", req.userPrompt, { images: req.images });
       if (priorHistory.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
     }
     userMessagePersisted = true;
@@ -3105,7 +3111,7 @@ export async function runMcpInvocation(
     // explicit Goal request creates the contract; every later message is only
     // execution guidance and therefore cannot upsert the objective.
     let activeGoalId: string | null = null;
-    let activeGoal: GoalLedgerSnapshot | null = null;
+    let activeGoal: ChatGoalContext | null = null;
     if (!req.agentAppMode && chat.kind !== "division") {
       activeGoalId = getChatGoalId(chat.id);
       if (!activeGoalId && req.goalMode && canWrite) {
@@ -3117,25 +3123,45 @@ export async function runMcpInvocation(
         }
       }
       if (activeGoalId) {
-        activeGoal = await getGoalLedgerGoal(activeGoalId, workforceProjectDir);
-        // A missing/terminal ledger means this is the first turn of a newly
-        // enabled Goal campaign. An already-active ledger is immutable even
-        // when this request arrived through steering.
+        const localGoal = getChatGoalContract(activeGoalId);
+        activeGoal = localGoal;
+        // A renderer normally defines the local contract before invoking, but
+        // Main remains authoritative for mobile/background callers. Only the
+        // explicit first Goal-mode request may win the conditional definition;
+        // steering and ordinary chat can never enter this branch.
         if (
           req.goalMode
           && !promptIsSystemAuthored
-          && (!activeGoal || activeGoal.status !== "active")
+          && !localGoal
+          && isChatGoalContractArmed(activeGoalId)
         ) {
           const objective = req.userPrompt.replace(/\s+/g, " ").trim();
           if (objective) {
-            await ensureGoalLedgerGoal({
+            activeGoal = defineChatGoalContract({
               goalId: activeGoalId,
+              chatId: chat.id,
               objective,
               acceptanceCriteria: deriveGoalAcceptanceCriteria(objective, locale),
-              projectDir: workforceProjectDir,
             });
-            activeGoal = await getGoalLedgerGoal(activeGoalId, workforceProjectDir);
           }
+        }
+        if (!activeGoal || activeGoal.status !== "active") {
+          // A chat explicitly bound to Goal may never continue as an ordinary
+          // uncontracted turn. This is the Main-process fail-closed boundary;
+          // renderer races, mobile callers, and corrupt/stale bindings all
+          // converge here before any model or tool can start.
+          throw new Error("goal_contract_unavailable");
+        }
+        if (activeGoal?.status === "active") {
+          // Execution-ledger synchronization is downstream of the immutable
+          // Desktop contract. A failure here cannot erase the goal from UI or
+          // from the model's turn context.
+          void ensureGoalLedgerGoal({
+            goalId: activeGoal.goalId,
+            objective: activeGoal.objective,
+            acceptanceCriteria: activeGoal.acceptanceCriteria,
+            projectDir: workforceProjectDir,
+          });
         }
         if (activeGoal?.status === "active") {
           turnContextParts.push(persistentGoalTurnContext(activeGoal, locale));
@@ -3502,6 +3528,16 @@ export async function runMcpInvocation(
       }
     }
     if (goalHardStop) {
+      // A hard-stop is terminal for this campaign. Persist the same machine
+      // decision in Desktop before the renderer can read the chat again, stop
+      // any hidden continuation by exact goal id, and clear Goal/continuous
+      // together. Keeping only the external ledger blocked left the visible
+      // chip active and made the next ordinary message fail closed against a
+      // terminal campaign.
+      completeChatGoalContract(activeGoalId!, "blocked");
+      const haltedContinuation = findAutomationByGoalId(activeGoalId!);
+      if (haltedContinuation?.enabled) toggleAutomation(haltedContinuation.id, false);
+      clearChatGoalBindingByGoalId(activeGoalId!);
       // 정지 사유를 숨기지 않는다 — 조용한 정지는 고장과 구분되지 않는다.
       sink({
         kind: "tool-use",

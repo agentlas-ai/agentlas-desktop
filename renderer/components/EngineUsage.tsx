@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
+import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import type {
   CliRuntimeVersionStatus,
   EnvVarMeta,
@@ -175,9 +176,15 @@ function ModelRoleUsage({ value, ko }: {
 export function EngineUsage() {
   const { locale } = useT();
   const ko = locale === "ko";
-  const [snap, setSnap] = useState<UsageSnapshot | null>(null);
-  const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
-  const [envKeys, setEnvKeys] = useState<Set<string>>(new Set());
+  const [snap, setSnap] = useState<UsageSnapshot | null>(() => (
+    readViewData<UsageSnapshot>("dashboard.usage")?.value ?? null
+  ));
+  const [runtimes, setRuntimes] = useState<RuntimeStatus[]>(() => (
+    readViewData<RuntimeStatus[]>("dashboard.runtimes")?.value ?? []
+  ));
+  const [envKeys, setEnvKeys] = useState<Set<string>>(() => new Set(
+    (readViewData<EnvVarMeta[]>("dashboard.env")?.value ?? []).filter((entry) => entry.hasValue).map((entry) => entry.key),
+  ));
   const [busy, setBusy] = useState<string | null>(null);
   const [busyStage, setBusyStage] = useState<"install" | "login" | null>(null);
   const [usageLoadError, setUsageLoadError] = useState(false);
@@ -196,7 +203,11 @@ export function EngineUsage() {
       return;
     }
     try {
-      const next = await api.usage.snapshot(force ? { force: true } : undefined);
+      const next = await loadViewData(
+        "dashboard.usage",
+        () => api.usage.snapshot(force ? { force: true } : undefined),
+        { maxAgeMs: 10_000, force },
+      );
       if (usageRequestGen.current !== requestId) return;
       setSnap(next);
       setUsageLoadError(false);
@@ -211,7 +222,10 @@ export function EngineUsage() {
     const api = ipc();
     if (!api) return;
     try {
-      const [rt, env] = await Promise.all([api.runtime.detect(), api.env.list()]);
+      const [rt, env] = await Promise.all([
+        loadViewData("dashboard.runtimes", () => api.runtime.detect(), { maxAgeMs: 300_000 }),
+        loadViewData("dashboard.env", () => api.env.list(), { maxAgeMs: 15_000 }),
+      ]);
       setRuntimes(rt);
       setEnvKeys(new Set(env.filter((e: EnvVarMeta) => e.hasValue).map((e) => e.key)));
     } catch {
@@ -229,6 +243,7 @@ export function EngineUsage() {
     try {
       const result = await api.usage.retry(providerId);
       if (usageRequestGen.current !== requestId) return;
+      writeViewData("dashboard.usage", result.snapshot);
       setSnap(result.snapshot);
       setUsageLoadError(false);
       void loadConnections();
@@ -273,6 +288,7 @@ export function EngineUsage() {
           const s = await api.usage.snapshot({ force: true });
           if (pollGen.current !== gen) return;
           if (usageRequestGen.current !== requestId) continue;
+          writeViewData("dashboard.usage", s);
           setSnap(s);
           setUsageLoadError(false);
           const p = s.providers.find((x) => x.provider === providerId);
@@ -302,6 +318,7 @@ export function EngineUsage() {
       try {
         const detected = await api.runtime.detect(true);
         if (pollGen.current !== gen) return;
+        writeViewData("dashboard.runtimes", detected);
         setRuntimes(detected);
         if (detected.some((runtime) => runtime.kind === "kimi")) {
           setNotice({

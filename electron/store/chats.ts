@@ -7,9 +7,14 @@ import { emitDesktopStoreChange } from "./change-bus";
 import { getFirm } from "./firms";
 import { evictRuntimeSessionsForChat } from "./runtime-sessions";
 import { touchProject } from "./projects";
+import {
+  listChatMessageImageUrls,
+  persistChatMessageImages,
+} from "./chat-message-attachments";
 import type {
   Chat,
   ChatHistoryEntry,
+  ImageAttachment,
   RuntimeBackend,
   RuntimeKind,
   RuntimeSelection,
@@ -551,9 +556,10 @@ export function setChatGoalBinding(chatId: string, goalId: string | null): void 
  *  정직하게 끈다. 프롬프트 문자열 파싱 없이 축으로만 찾는다. */
 export function clearChatGoalBindingByGoalId(goalId: string): number {
   if (!goalId.trim()) return 0;
+  const now = new Date().toISOString();
   const result = getDb()
-    .prepare("UPDATE chats SET goal_id = NULL WHERE goal_id = ?")
-    .run(goalId);
+    .prepare("UPDATE chats SET goal_id = NULL, continuous_mode = 0, updated_at = ? WHERE goal_id = ?")
+    .run(now, goalId);
   if (result.changes > 0) emitDesktopStoreChange({ entity: "chat" });
   return result.changes;
 }
@@ -617,18 +623,33 @@ export function appendChatMessage(
   chatId: string,
   role: "user" | "assistant" | "system",
   text: string,
+  options?: { images?: readonly ImageAttachment[] },
 ): ChatHistoryEntry {
   const id = randomUUID();
   const now = new Date().toISOString();
   const db = getDb();
-  db.prepare(
-    "INSERT INTO chat_messages (id, chat_id, role, text, created_at) VALUES (?, ?, ?, ?, ?)",
-  ).run(id, chatId, role, text, now);
-  db.prepare("UPDATE chats SET updated_at = ?, used_at = COALESCE(used_at, ?) WHERE id = ?").run(now, now, chatId);
+  const write = db.transaction(() => {
+    db.prepare(
+      "INSERT INTO chat_messages (id, chat_id, role, text, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(id, chatId, role, text, now);
+    if (role === "user" && options?.images?.length) {
+      persistChatMessageImages({ messageId: id, chatId, images: options.images, createdAt: now });
+    }
+    db.prepare("UPDATE chats SET updated_at = ?, used_at = COALESCE(used_at, ?) WHERE id = ?").run(now, now, chatId);
+  });
+  write();
   const chat = getChat(chatId);
   if (chat?.projectId) touchProject(chat.projectId);
   emitDesktopStoreChange({ entity: "chat", id: chatId });
-  return { id, role, text, createdAt: now };
+  return {
+    id,
+    role,
+    text,
+    createdAt: now,
+    ...(role === "user" && options?.images?.length
+      ? { imageDataUrls: listChatMessageImageUrls([id]).get(id) }
+      : {}),
+  };
 }
 
 export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[] {
@@ -644,7 +665,14 @@ export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[
        ) ORDER BY created_at ASC`,
     )
     .all(chatId, LEGACY_FIRM_SYNTHESIS_MARKER, limit) as MessageRow[];
-  return rows.map((r) => ({ id: r.id, role: r.role, text: r.text, createdAt: r.created_at }));
+  const imageUrls = listChatMessageImageUrls(rows.map((row) => row.id));
+  return rows.map((r) => ({
+    id: r.id,
+    role: r.role,
+    text: r.text,
+    createdAt: r.created_at,
+    ...(imageUrls.has(r.id) ? { imageDataUrls: imageUrls.get(r.id) } : {}),
+  }));
 }
 
 /** recap용 — 마지막으로 본 시각(last_viewed_at) 이후 도착한 에이전트(assistant) 메시지들.

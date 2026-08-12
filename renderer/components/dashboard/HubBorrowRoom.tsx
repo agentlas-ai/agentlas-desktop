@@ -21,15 +21,23 @@ import {
 } from "@/lib/hub-verification";
 import { useT } from "@/lib/i18n";
 import { IconSearch, IconCheck } from "@/components/Icon";
-import type { MarketplaceListing, MarketplaceSourceStatus } from "@/lib/types";
+import { loadViewData, readViewData } from "@/lib/view-data-cache";
+import type { HubAgentBookmark, MarketplaceListing, MarketplaceSourceStatus } from "@/lib/types";
 
 export function HubBorrowRoom() {
   const { locale } = useT();
   const ko = locale === "ko";
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<MarketplaceListing[] | null>(null);
-  const [status, setStatus] = useState<MarketplaceSourceStatus | null>(null);
-  const [bookmarked, setBookmarked] = useState<Set<string>>(new Set());
+  const [results, setResults] = useState<MarketplaceListing[] | null>(() => (
+    readViewData<MarketplaceListing[]>("dashboard.hub-results:")?.value ?? null
+  ));
+  const [status, setStatus] = useState<MarketplaceSourceStatus | null>(() => (
+    readViewData<MarketplaceSourceStatus>("dashboard.hub-status")?.value ?? null
+  ));
+  const [bookmarked, setBookmarked] = useState<Set<string>>(() => new Set(
+    (readViewData<HubAgentBookmark[]>("dashboard.hub-bookmarks")?.value ?? [])
+      .map(hubBookmarkIdentityKey),
+  ));
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -46,8 +54,11 @@ export function HubBorrowRoom() {
       return;
     }
     try {
-      const res = await api.marketplace.search(q);
-      const st = await api.marketplace.status();
+      const cacheKey = `dashboard.hub-results:${q.trim()}`;
+      const [res, st] = await Promise.all([
+        loadViewData(cacheKey, () => api.marketplace.search(q), { maxAgeMs: 60_000 }),
+        loadViewData("dashboard.hub-status", () => api.marketplace.status(), { maxAgeMs: 30_000 }),
+      ]);
       setResults(res.filter((item) => item.entityKind !== "plugin" && item.source !== "hub-plugin"));
       setStatus(st);
       setMessage("");
@@ -60,7 +71,8 @@ export function HubBorrowRoom() {
   useEffect(() => {
     void search("");
     const generation = ++bookmarkGenerationRef.current;
-    ipc()?.marketplace.bookmarks()
+    const api = ipc();
+    (api ? loadViewData("dashboard.hub-bookmarks", () => api.marketplace.bookmarks(), { maxAgeMs: 15_000 }) : Promise.resolve([]))
       .then((items) => {
         if (bookmarkGenerationRef.current === generation) {
           setBookmarked(new Set(items.map(hubBookmarkIdentityKey)));

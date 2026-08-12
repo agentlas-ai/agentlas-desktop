@@ -631,11 +631,21 @@ function completePipeline(stages: PipelineStage[] | undefined): PipelineStage[] 
   return stages.map((s) => ({ ...s, status: "done" as const }));
 }
 
-function historyEntryToStreamMessage(entry: { id: string; role: string; text: string }): StreamMessage {
+function historyEntryToStreamMessage(entry: {
+  id: string;
+  role: string;
+  text: string;
+  imageDataUrls?: string[];
+}): StreamMessage {
   const role: StreamMessage["role"] =
     entry.role === "assistant" ? "agent" : entry.role === "user" ? "user" : "system";
   if (role !== "agent") {
-    return { id: entry.id, role, text: entry.text };
+    return {
+      id: entry.id,
+      role,
+      text: entry.text,
+      imageDataUrls: entry.imageDataUrls,
+    };
   }
   const parsed = extractQuestions(entry.text, entry.id);
   const setup = stripMultimodalSetup(parsed.text);
@@ -1715,7 +1725,24 @@ function ChatPage() {
   useEffect(() => {
     viewSnapshotRef.current = { messages, liveAgents, netTimeline };
   });
+  // Route cleanup can run before React flushes the passive snapshot effect for
+  // a just-submitted steer. Mirror the render state synchronously so leaving
+  // for Dashboard never caches the previous frame and drops that user turn.
+  viewSnapshotRef.current = { messages, liveAgents, netTimeline };
   const prevChatIdRef = useRef<string | null>(null);
+
+  // Route transitions can unmount this tree before React commits one last
+  // render of a just-submitted steering turn. Persist that optimistic user
+  // message at the submission boundary as well as during normal render cache
+  // updates, so Dashboard roundtrips never depend on effect timing.
+  const cacheSteeringTurn = useCallback((message: StreamMessage) => {
+    if (!chatId) return;
+    const snap = viewSnapshotRef.current;
+    if (snap.messages.some((current) => current.id === message.id)) return;
+    const next = { ...snap, messages: [...snap.messages, message] };
+    viewSnapshotRef.current = next;
+    saveChatViewSnapshot(chatId, next);
+  }, [chatId]);
 
   // 채팅 전환 시 이전 채팅의 진행 상태(busy/정지버튼/스트림)가 새 뷰로 새지 않게 리셋.
   // 메타데이터 effect는 번역/콜백 변화에도 다시 돌 수 있으므로, 전환 초기화는 chatId에만 묶는다.
@@ -1975,6 +2002,10 @@ function ChatPage() {
       }
       // 진행 중 실행 재접속 — 이 채팅이 백그라운드로 돌고 있으면(다른 채팅 갔다 옴) 스트림·정지버튼 복구.
       // 버퍼된 이벤트를 리플레이해 진행 중 버블을 재구성하고, runId 채널을 구독해 이후 스트림을 받는다.
+      const [attachHistory, attachCommittedReplies] = await Promise.all([
+        api.invoke.history(chatId),
+        fetchCommittedReplies(api, chatId),
+      ]).catch(() => [[], new Map<string, string>()] as const);
       const attached = await api.invoke.attach(chatId);
       if (!cancelled && attached) {
         const placeholderId = uid();
@@ -1984,8 +2015,50 @@ function ChatPage() {
         const reconnectAgent = agents.find((a) => a.id === c.agentId);
         const reconnectAgentName = reconnectAgent ? pickLocalized(reconnectAgent, locale).name : t("chat.assistant_fallback");
         transcriptRevisionRef.current += 1;
-        setMessages((m) => [
-          ...m,
+        const restoredSteers = (attached.queuedSteers ?? []).map((queued) => ({
+          text: queued.text,
+          optimisticMessageId: `steer-restored:${attached.runId}:${queued.position}`,
+        }));
+        steerQueueRef.current = restoredSteers;
+        setQueuedSteers(restoredSteers.map((item) => item.text));
+        const restoredSteerMessages: StreamMessage[] = restoredSteers.map((queued) => ({
+          id: queued.optimisticMessageId,
+          role: "user",
+          text: queued.text,
+        }));
+        if (restoredSteerMessages.length > 0) {
+          const snap = readChatViewSnapshot(chatId) ?? { messages: [], liveAgents: {}, netTimeline: [] };
+          const next = {
+            ...snap,
+            messages: [
+              ...snap.messages,
+              ...restoredSteerMessages.filter((message) => !snap.messages.some((current) => (
+                current.role === "user" && current.text === message.text
+              ))),
+            ],
+          };
+          viewSnapshotRef.current = next;
+          saveChatViewSnapshot(chatId, next);
+        }
+        setMessages((m) => {
+          // History and attach resolve independently. Build the reconnect
+          // projection from whichever durable transcript is fuller so a late
+          // empty/current state update cannot erase the restored conversation.
+          const durableHistory = restoreAnsweredQuestions(
+            attachHistory.map(historyEntryToStreamMessage),
+            attachCommittedReplies,
+          );
+          const liveSnapshot = m.some((message) => message.busy || message.streaming) ? m : [];
+          const base = liveSnapshot.length > 0
+            ? liveSnapshot
+            : durableHistory.length > 0
+              ? durableHistory
+              : readChatViewSnapshot(chatId)?.messages ?? [];
+          return [
+          ...base,
+          ...restoredSteerMessages
+            .filter((queued) => !base.some((message) => message.role === "user" && message.text === queued.text))
+            .map((queued) => queued),
           {
             id: placeholderId,
             role: "agent",
@@ -2003,7 +2076,8 @@ function ChatPage() {
               },
             ],
           },
-        ]);
+          ];
+        });
         setBusy(true);
         setCancelPending(false);
         runIdRef.current = attached.runId;
@@ -2145,7 +2219,15 @@ function ChatPage() {
               }],
             },
           ]);
-          steerQueueRef.current.shift();
+          // If this is the replacement run after a queued steer, Main's attach
+          // snapshot is already the source of truth. Keep any directions still
+          // waiting behind it; do not depend on renderer memory surviving the
+          // dashboard/task route transition.
+          const restoredSteers = (attached.queuedSteers ?? []).map((queued) => ({
+            text: queued.text,
+            optimisticMessageId: `steer-restored:${attached.runId}:${queued.position}`,
+          }));
+          steerQueueRef.current = restoredSteers;
           setQueuedSteers(steerQueueRef.current.map((item) => item.text));
           setBusy(true);
           setCancelPending(false);
@@ -2332,7 +2414,18 @@ function ChatPage() {
         // existing active contract instead of overwriting it, so a later
         // steering turn can never become the goal by accident.
         const defined = await api.chats.defineGoal(chat.id, userPrompt, locale).catch(() => null);
-        if (defined) setGoalContext(defined);
+        if (!defined) {
+          transcriptRevisionRef.current += 1;
+          setMessages((current) => [...current, {
+            id: `goal-contract:${uid()}`,
+            role: "system",
+            text: locale === "ko"
+              ? "목표와 성공 기준을 확정하지 못해 실행을 시작하지 않았습니다. Goal을 껐다 다시 켜 주세요."
+              : "The goal and its acceptance criteria could not be frozen, so the run did not start. Turn Goal off and on, then try again.",
+          }]);
+          return false;
+        }
+        setGoalContext(defined);
       }
       const routeInput = userPrompt;
       const invocationPrompt = routeInput;
@@ -2554,12 +2647,14 @@ function ChatPage() {
         steerQueueRef.current.push({ text, opts, optimisticMessageId });
         setQueuedSteers(steerQueueRef.current.map((q) => q.text));
         transcriptRevisionRef.current += 1;
-        setMessages((current) => [...current, {
+        const optimisticMessage: StreamMessage = {
           id: optimisticMessageId,
           role: "user",
           text,
           imageDataUrls: opts?.images?.map((image) => `data:${image.mediaType};base64,${image.data}`),
-        }]);
+        };
+        cacheSteeringTurn(optimisticMessage);
+        setMessages((current) => [...current, optimisticMessage]);
         void api.invoke.steer({
           chatId: chat.id,
           userPrompt: text,
@@ -2584,7 +2679,7 @@ function ChatPage() {
       }
       void send(text, opts);
     },
-    [busy, chat, locale, project, send],
+    [busy, cacheSteeringTurn, chat, locale, project, send],
   );
 
   // 이 채팅의 모델/작업량만 변경한다. 역할 기본값과 다른 채팅은 건드리지 않는다.
@@ -3342,7 +3437,7 @@ function ChatPage() {
     const next = !chat.goalId;
     const previous = chat;
     setGoalContext(null);
-    setChat({ ...chat, goalId: next ? "pending" : null, continuousMode: next ? true : chat.continuousMode });
+    setChat({ ...chat, goalId: next ? "pending" : null, continuousMode: next });
     void ipc()?.chats
       .setGoalMode(chat.id, next)
       .then((updated: Chat | null) => {
@@ -3810,6 +3905,7 @@ function ChatPage() {
           onToggleGoal={handleToggleGoal}
           progressLabel={goalContext?.objective}
           goalCriteria={goalContext?.acceptanceCriteria}
+          goalContext={goalContext}
           onToggleContinuous={handleToggleContinuous}
           onToggleSwarm={handleToggleSwarm}
         />

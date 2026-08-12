@@ -9,6 +9,7 @@ import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
+import { loadViewData, readViewData } from "@/lib/view-data-cache";
 import { openPricing } from "./UpgradeCta";
 import type { HubCreditBalance } from "@/lib/types";
 
@@ -19,7 +20,9 @@ const LOW_BALANCE_THRESHOLD = 50;
 export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean }) {
   const { locale } = useT();
   const ko = locale === "ko";
-  const [bal, setBal] = useState<HubCreditBalance | null>(null);
+  const [bal, setBal] = useState<HubCreditBalance | null>(() => (
+    readViewData<HubCreditBalance>("shell.credit-balance")?.value ?? null
+  ));
   const [open, setOpen] = useState(false);
   const [amount, setAmount] = useState("");
   const [busy, setBusy] = useState(false);
@@ -27,11 +30,15 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
     const api = ipc();
     if (!api?.billing) return;
     try {
-      const next = await api.billing.getCredits();
+      const next = await loadViewData(
+        "shell.credit-balance",
+        () => api.billing.getCredits(),
+        { maxAgeMs: POLL_MS, force },
+      );
       // 조회 실패는 "잔액 0"이 아니라 "잔액 모름"이다. billing.ts는 5xx/타임아웃에
       // {authenticated:true, error} 만 돌려주므로(숫자 없음) 그대로 담으면 마지막 정상
       // 잔액이 지워져 5,000 크레딧 사용자가 "0 크레딧 + 충전 CTA"를 보게 된다.
@@ -50,7 +57,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
   useEffect(() => {
     void refresh();
   }, [refresh]);
-  useVisibleInterval(() => void refresh(), POLL_MS);
+  useVisibleInterval(() => void refresh(true), POLL_MS);
 
   // 로그인/로그아웃 직후(AccountChip 브로드캐스트) 즉시 동기화 — 60초 폴링을 기다리며
   // "로그아웃했는데 크레딧이 그대로" 같은 불일치가 보이지 않게 한다.
@@ -60,7 +67,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
       if (!api?.billing) return;
       // 로그아웃 직후 stale 잔액이 남지 않도록 먼저 지우고 다시 조회한다.
       setBal(null);
-      void refresh();
+      void refresh(true);
     };
     window.addEventListener("agentlas:auth-changed", onAuthChanged);
     return () => window.removeEventListener("agentlas:auth-changed", onAuthChanged);
@@ -69,7 +76,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
   // 퀘스트 보상 수령 직후(QuestBoard 브로드캐스트) 즉시 동기화 — 60초 폴링을
   // 기다리는 동안 "+50 지급 완료"라는데 잔액이 그대로인 불신을 없앤다.
   useEffect(() => {
-    const onCreditsRefresh = () => void refresh();
+    const onCreditsRefresh = () => void refresh(true);
     window.addEventListener("agentlas:credits-refresh", onCreditsRefresh);
     return () => window.removeEventListener("agentlas:credits-refresh", onCreditsRefresh);
   }, [refresh]);
@@ -107,7 +114,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
         return;
       }
       setAmount("");
-      await refresh();
+      await refresh(true);
     } catch {
       setErr(ko ? "전송에 실패했습니다." : "Transfer failed.");
     } finally {

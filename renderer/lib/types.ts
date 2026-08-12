@@ -291,6 +291,7 @@ export type {
   EarningsTransferResult,
   HubCreditBalance,
   Chat,
+  ChatGoalContext,
   ChatHistoryEntry,
   CommittedQuestionAnswer,
   CloudAgentPackageFile,

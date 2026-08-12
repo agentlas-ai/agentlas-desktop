@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { getSnapshot as getBuildSnapshot } from "@/lib/build-session";
+import { loadViewData, readViewData } from "@/lib/view-data-cache";
 import type { QuestInfo } from "@shared/types";
 
 // client-attested 퀘스트 로컬 증거 — questId → true(증거 확보) / false·부재(불명 → confirm 후 클레임).
@@ -21,9 +22,10 @@ const HEAD_BG = "color-mix(in oklch, var(--dash-amber) 17%, #ffffff)";
 export function QuestBoard() {
   const { locale } = useT();
   const ko = locale === "ko";
-  const [quests, setQuests] = useState<QuestInfo[]>([]);
-  const [authenticated, setAuthenticated] = useState(true);
-  const [loaded, setLoaded] = useState(false);
+  const cachedQuestResponse = readViewData<{ authenticated: boolean; ok: boolean; quests: QuestInfo[] }>("dashboard.quests")?.value;
+  const [quests, setQuests] = useState<QuestInfo[]>(() => cachedQuestResponse?.quests ?? []);
+  const [authenticated, setAuthenticated] = useState(() => cachedQuestResponse?.authenticated ?? true);
+  const [loaded, setLoaded] = useState(() => Boolean(cachedQuestResponse));
   const [error, setError] = useState("");
   const [evidence, setEvidence] = useState<EvidenceMap>({});
   const [claimingId, setClaimingId] = useState<string | null>(null);
@@ -44,14 +46,18 @@ export function QuestBoard() {
     el.scrollTo({ left: clamped * el.clientWidth, behavior: "smooth" });
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (force = false) => {
     const api = ipc();
     if (!api?.quests) {
       setLoaded(true);
       return;
     }
     try {
-      const res = await api.quests.list();
+      const res = await loadViewData(
+        "dashboard.quests",
+        () => api.quests.list(),
+        { maxAgeMs: 30_000, force },
+      );
       // authenticated는 실패 응답에도 항상 실려 온다. ok일 때만 반영하면 미로그인 응답
       // (ok:false, authenticated:false)에서 기본값 true가 남아 로그인 CTA가 영영 안 뜬다.
       setAuthenticated(res.authenticated);
@@ -155,11 +161,11 @@ export function QuestBoard() {
           } catch {
             // ignore
           }
-          await load();
+          await load(true);
         } else if (res.code === "already_claimed") {
           setQuests((prev) => prev.map((it) => (it.id === q.id ? { ...it, claimed: true } : it)));
           setNotice({ id: q.id, text: ko ? "이미 수령한 퀘스트예요." : "Already claimed." });
-          await load();
+          await load(true);
         } else if (res.code === "not_completed") {
           setNotice({
             id: q.id,
@@ -189,7 +195,7 @@ export function QuestBoard() {
       let session = await api.auth.signInWithBrowser();
       if (!session?.signedIn) session = await api.auth.signInWithGoogle();
       if (session?.signedIn) {
-        await load();
+        await load(true);
         await loadEvidence();
       }
     } catch {

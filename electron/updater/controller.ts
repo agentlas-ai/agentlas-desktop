@@ -35,6 +35,8 @@ export const CONTINUITY_CORE_TABLES = [
   "projects",
   "chats",
   "chat_messages",
+  "chat_goal_contracts",
+  "chat_message_attachments",
   "memory_entries",
   // Per-agent activity and failure ledgers are the evidence behind My Agents
   // learning/evolution views. Losing them would make a used agent look empty.
