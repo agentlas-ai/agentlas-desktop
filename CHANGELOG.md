@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1 — 2026-08-12
+
+- Fixes the release compatibility contract to match the persisted database migration target.
+- Binds Agentlas OS v1.2.0 at 8b3f8bcffdfc57bf4991ed6e43d153d9230ea186. Source readiness does not prove a published installer or update feed.
+
 ## 1.0.0 — 2026-08-12
 
 Binds Agentlas OS v1.2.0 at
