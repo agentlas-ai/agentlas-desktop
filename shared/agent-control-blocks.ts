@@ -10,10 +10,19 @@
  *  - `## Automation`   + ```json  → electron/automation-emitter.ts parseAutomations
  *  - `<<agentlas-ask>>…<</agentlas-ask>>`             → renderer/lib/ask-question.ts
  *  - `<<agentlas-one-followups>>…<</…>>`              → shared/one-friendly-followups.ts
+ *  - `<<agentlas-surface>>…<</agentlas-surface>>`     → electron/surface-emitter.ts parseSurfaces
  *
  * 이 파일은 **표시 전용**이다. 파싱·적용은 위 정본들이 계속 소유한다.
  * Mobile(Dart)에도 같은 규칙이 이식되어 있고, 공유 픽스처로 두 표면의 출력이
  * 바이트 단위로 같은지 게이트가 검사한다.
+ *
+ * ★2026-08-12 사용자 제보: followups와 surface 원문이 **동시에** 화면에 떴다.
+ * 원인은 손코딩 스트리퍼 3벌이 서로 다른 마커만 알고 있었던 것 —
+ * 이 파일(모바일 브리지·텔레그램)은 surface를 몰랐고, 반대로
+ * electron/mcp/final-display-backstop.ts는 followups를 몰랐다. 마커 목록은
+ * 여기 한 벌만 두고, 다른 표면은 상수를 **가져다 쓴다**(surface-emitter가
+ * SURFACE_*_FENCE를 여기서 재수출). 표면마다 목록을 다시 적으면 또 한 표면만
+ * 빠진다 — telegram/connect.ts에 같은 사고가 이미 기록돼 있다.
  */
 
 export const AGENT_CONTROL_HEADINGS = [
@@ -26,12 +35,18 @@ export const AGENT_ASK_OPEN = "<<agentlas-ask>>";
 export const AGENT_ASK_CLOSE = "<</agentlas-ask>>";
 export const AGENT_FOLLOWUPS_OPEN = "<<agentlas-one-followups>>";
 export const AGENT_FOLLOWUPS_CLOSE = "<</agentlas-one-followups>>";
+/** surface 울타리의 **정본 상수**. electron/surface-emitter.ts가 이걸 재수출한다. */
+export const AGENT_SURFACE_OPEN = "<<agentlas-surface>>";
+export const AGENT_SURFACE_CLOSE = "<</agentlas-surface>>";
 export const AGENT_MULTIMODAL_MARKER = "<<agentlas-multimodal-setup>>";
+/** 값 없는 제어 마커(runtime/runner.ts SURFACE_INTENT_MARKER). 표시되면 안 된다. */
+export const AGENT_SURFACE_INTENT_MARKER = "<<surface-intent>>";
 
 /** 여는 토큰이 완성되기 전 스트리밍 조각도 숨기기 위한 탐침(prefix). */
 const PAIRED_BLOCKS = [
   { probe: "<<agentlas-one-followups", open: AGENT_FOLLOWUPS_OPEN, close: AGENT_FOLLOWUPS_CLOSE },
   { probe: "<<agentlas-ask", open: AGENT_ASK_OPEN, close: AGENT_ASK_CLOSE },
+  { probe: "<<agentlas-surface", open: AGENT_SURFACE_OPEN, close: AGENT_SURFACE_CLOSE },
 ] as const;
 
 /** 헤딩 뒤 첫 코드펜스. 정본 파서들과 같은 표현식이다. */
@@ -42,8 +57,13 @@ const TAIL_TOKENS: readonly string[] = [
   ...AGENT_CONTROL_HEADINGS,
   AGENT_ASK_OPEN,
   AGENT_FOLLOWUPS_OPEN,
+  AGENT_SURFACE_OPEN,
   AGENT_MULTIMODAL_MARKER,
+  AGENT_SURFACE_INTENT_MARKER,
 ];
+
+/** 값 없이 통째로 지워도 되는 제어 마커. */
+const BARE_MARKERS: readonly string[] = [AGENT_MULTIMODAL_MARKER, AGENT_SURFACE_INTENT_MARKER];
 
 /** 미완성 꼬리로 인정하는 최소 길이. 너무 짧으면 정상 본문을 갉아먹는다. */
 const MIN_PARTIAL_TAIL = 4;
@@ -103,7 +123,8 @@ function pairedHit(
  * 그 조각까지 감춘다. 완성된 응답에는 적용하지 않는다 — 정상 본문을 자르면 안 된다.
  */
 export function stripAgentControlBlocks(value: string, options?: { streaming?: boolean }): string {
-  let visible = value.split(AGENT_MULTIMODAL_MARKER).join("");
+  let visible = value;
+  for (const marker of BARE_MARKERS) visible = visible.split(marker).join("");
 
   // 모델은 제어 블록을 여러 개 낼 수 있다. 적대적 스팸에도 멈추도록 상한을 둔다.
   for (let guard = 0; guard < 64; guard += 1) {
@@ -122,7 +143,13 @@ export function stripAgentControlBlocks(value: string, options?: { streaming?: b
     visible = next;
   }
 
-  visible = visible.split(AGENT_ASK_CLOSE).join("").split(AGENT_FOLLOWUPS_CLOSE).join("");
+  visible = visible
+    .split(AGENT_ASK_CLOSE)
+    .join("")
+    .split(AGENT_FOLLOWUPS_CLOSE)
+    .join("")
+    .split(AGENT_SURFACE_CLOSE)
+    .join("");
   visible = failClosedOnRemainingControlToken(visible);
   visible = stripTrailingMemoryTicketEnvelope(visible);
   if (options?.streaming) visible = trimIncompleteControlTail(visible);

@@ -19,8 +19,13 @@ import type {
 } from "../shared/types";
 import { SURFACE_TRUST_REGISTRY, lintSurfaceTrust } from "./surface-trust";
 
-export const SURFACE_OPEN_FENCE = "<<agentlas-surface>>";
-export const SURFACE_CLOSE_FENCE = "<</agentlas-surface>>";
+// 울타리 문자열의 정본은 shared/agent-control-blocks.ts 한 곳이다. 표면마다 상수를
+// 다시 적으면 스트리퍼 하나가 이 마커를 모르는 채로 남아 원문이 새어 나간다
+// (2026-08-12 사용자 제보: followups + surface 동시 노출).
+export { AGENT_SURFACE_OPEN as SURFACE_OPEN_FENCE, AGENT_SURFACE_CLOSE as SURFACE_CLOSE_FENCE } from "../shared/agent-control-blocks";
+import { AGENT_SURFACE_OPEN, AGENT_SURFACE_CLOSE } from "../shared/agent-control-blocks";
+const SURFACE_OPEN_FENCE = AGENT_SURFACE_OPEN;
+const SURFACE_CLOSE_FENCE = AGENT_SURFACE_CLOSE;
 
 const MAX_SURFACES_PER_REPLY = 3;
 const MAX_SURFACE_BYTES = 300_000;
