@@ -556,7 +556,9 @@ export function OneShell() {
   const [runtimeFeedback, setRuntimeFeedback] = useState<OneRuntimeFeedbackItem[]>([]);
   const runtimeFeedbackSequenceRef = useRef(0);
   const [queuedSteers, setQueuedSteers] = useState<Array<{ id: string; text: string }>>([]);
-  const [stagedSteer, setStagedSteerState] = useState<string | null>(initialComposerDraftRef.current.stagedSteer);
+  // A running One turn accepts the next instruction directly; never revive an
+  // obsolete two-step steering draft from an earlier app version.
+  const [stagedSteer, setStagedSteerState] = useState<string | null>(null);
   const [autoRecovery, setAutoRecovery] = useState<
     | { phase: "recovering"; attempt: number; diagnosis: string }
     | { phase: "stopped"; reason: string; diagnosis: string }
@@ -619,6 +621,7 @@ export function OneShell() {
   const [oneRuntime, setOneRuntime] = useState<RuntimeStatus | null>(null);
   const [oneRuntimePinned, setOneRuntimePinned] = useState(false);
   const [oneModelOptions, setOneModelOptions] = useState<OneComposerModelOption[]>([]);
+  const [oneRuntimeInventory, setOneRuntimeInventory] = useState<RuntimeStatus[]>([]);
   const [onePermission, setOnePermission] = useState<OnePermissionMode>("auto");
   const [attachmentDrafts, setAttachmentDrafts] = useState<OneAttachmentDraft[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -1233,10 +1236,12 @@ export function OneShell() {
         longContextEnabled: selection?.longContext ?? matched.longContextEnabled,
       } : null);
       setOneRuntimePinned(Boolean(selection));
+      setOneRuntimeInventory(runtimes);
     }).catch(() => {
       if (!cancelled) {
         setOneRuntime(null);
         setOneRuntimePinned(false);
+        setOneRuntimeInventory([]);
       }
     });
     return () => { cancelled = true; };
@@ -1244,22 +1249,31 @@ export function OneShell() {
 
   useEffect(() => {
     const api = ipc();
-    if (!api || !oneRuntime) {
+    if (!api || oneRuntimeInventory.length === 0) {
       setOneModelOptions([]);
       return;
     }
     let cancelled = false;
-    void api.runtime.listModels({
-      kind: oneRuntime.kind,
-      backend: oneRuntime.backend,
-      availableModels: oneRuntime.availableModels,
-    }).then((models) => {
-      if (!cancelled) setOneModelOptions(models);
+    void Promise.all(oneRuntimeInventory.map(async (runtime) => {
+      const models = await api.runtime.listModels({
+        kind: runtime.kind,
+        backend: runtime.backend,
+        availableModels: runtime.availableModels,
+      });
+      const provider = runtime.kind === "claude-code" ? "Claude"
+        : runtime.kind === "codex" ? "Codex"
+          : runtime.kind === "gemini" ? "Gemini"
+            : runtime.kind === "grok" ? "Grok"
+              : runtime.kind === "kimi" ? "Kimi"
+                : runtime.backend || runtime.kind;
+      return models.map((model) => ({ ...model, runtime, tag: model.tag ?? provider }));
+    })).then((groups) => {
+      if (!cancelled) setOneModelOptions(groups.flat());
     }).catch(() => {
       if (!cancelled) setOneModelOptions([]);
     });
     return () => { cancelled = true; };
-  }, [oneRuntime?.availableModels, oneRuntime?.backend, oneRuntime?.kind]);
+  }, [oneRuntimeInventory]);
 
   useEffect(() => {
     if (!composerMenu) return;
@@ -1284,7 +1298,7 @@ export function OneShell() {
     composerDraftKeyRef.current = composerDraftKey;
     const restored = readOneComposerDraft(composerDraftKey);
     setComposerState(restored.composer);
-    setStagedSteerState(restored.stagedSteer);
+    setStagedSteerState(null);
   }, [activeThreadChatId, composerDraftKey]);
   // Main starts a queued steer only after the active model turn settles. Attach
   // to that replacement run immediately so the user never has to leave and
@@ -1410,12 +1424,13 @@ export function OneShell() {
     };
   }, [oneRuntime, oneRuntimePinned]);
 
-  const applyOneRuntimeSelection = useCallback(async (patch: { model?: string; effort?: string }) => {
-    if (!oneRuntime) return;
+  const applyOneRuntimeSelection = useCallback(async (patch: { model?: string; effort?: string }, runtimeOverride?: RuntimeStatus) => {
+    const baseRuntime = runtimeOverride ?? oneRuntime;
+    if (!baseRuntime) return;
     const nextRuntime: RuntimeStatus = {
-      ...oneRuntime,
-      model: patch.model !== undefined ? patch.model || null : oneRuntime.model,
-      effort: patch.effort !== undefined ? patch.effort || null : oneRuntime.effort,
+      ...baseRuntime,
+      model: patch.model !== undefined ? patch.model || null : baseRuntime.model,
+      effort: patch.effort !== undefined ? patch.effort || null : baseRuntime.effort,
     };
     const selection: RuntimeSelection = {
       kind: nextRuntime.kind,
@@ -1748,7 +1763,7 @@ export function OneShell() {
     setOneActivationState(current);
   }, [appLocale, oneActivationState]);
 
-  const submit = useCallback(async (text: string, commitSteer = false) => {
+  const submit = useCallback(async (text: string) => {
     const attachmentSnapshot = attachmentDraftsRef.current.slice();
     // Repetition is configured in One's automation surface, not in the chat
     // composer. Keeping a third scheduling sheet here duplicated that product
@@ -1773,11 +1788,6 @@ export function OneShell() {
       const chatId = runChatIdRef.current;
       const activeRunId = runIdRef.current;
       if (!chatId || !activeRunId || attachmentSnapshot.length > 0) return;
-      if (!commitSteer) {
-        setComposer("");
-        setStagedSteer(value);
-        return;
-      }
       const optimisticId = `one-steer:${uid()}`;
       setComposer("");
       setMessages((current) => [...current, { id: optimisticId, role: "user", text: value }]);
@@ -3437,7 +3447,7 @@ export function OneShell() {
                     return match ? `${current.slice(0, match.index)}${match[1]}` : current;
                   });
                 }}
-                onSelectModel={(model) => { void applyOneRuntimeSelection({ model }); }}
+                onSelectModel={(runtime, model) => { void applyOneRuntimeSelection({ model }, runtime); }}
                 onSelectEffort={(effort) => { void applyOneRuntimeSelection({ effort }); }}
                 onSelectPermission={(permission) => {
                   setOnePermission(permission);
@@ -3460,7 +3470,7 @@ export function OneShell() {
                   onClick={() => {
                     const value = stagedSteer;
                     setStagedSteer(null);
-                    void submit(value, true);
+                    void submit(value);
                   }}
                   title={busy
                     ? (appLocale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
@@ -3541,7 +3551,7 @@ export function OneShell() {
                   >
                     <IconPlus size={20} aria-hidden="true" />
                   </button>
-                  {oneRuntime && (oneModelOptions.length > 0 || oneRuntime.model) && (
+                  {(oneRuntimeInventory.length > 0 || oneRuntime?.model) && (
                     <button
                       type="button"
                       className={styles.composerChip}
@@ -3551,7 +3561,7 @@ export function OneShell() {
                       onClick={() => setComposerMenu((current) => current === "model" ? null : "model")}
                     >
                       <IconSparkles size={15} />
-                      <span>{oneModelOptions.find((model) => model.id === oneRuntime.model)?.label ?? oneRuntime.model ?? (appLocale === "ko" ? "기본 모델" : "Default model")}</span>
+                      <span>{oneModelOptions.find((model) => model.runtime.kind === oneRuntime?.kind && model.runtime.backend === oneRuntime?.backend && model.id === oneRuntime?.model)?.label ?? oneRuntime?.model ?? (appLocale === "ko" ? "기본 모델" : "Default model")}</span>
                       <IconChevronDown size={12} />
                     </button>
                   )}
@@ -3606,15 +3616,15 @@ export function OneShell() {
                     <button
                       type="submit"
                       className={styles.sendButton}
-                      data-one-steering-stage={busy && composer.trim() ? "true" : undefined}
+                      data-one-steering-send={busy && composer.trim() ? "true" : undefined}
                       disabled={!busy && ((!composer.trim() && attachmentDrafts.length === 0) || selectedReadOnly || teamDecisionPending || teamPreflightBusy)}
                       aria-label={busy
                         ? composer.trim()
-                          ? (appLocale === "ko" ? "작업 조정 초안 올리기" : "Stage a work adjustment")
+                          ? (appLocale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
                           : tFor(appLocale, "one.shell.composer.stop_run_aria")
                         : tFor(appLocale, "one.shell.composer.send_aria")}
                       title={busy && composer.trim()
-                        ? (appLocale === "ko" ? "먼저 초안으로 올린 뒤 현재 작업 조정을 눌러 보냅니다" : "Stage this first, then choose Adjust current work to send")
+                        ? (appLocale === "ko" ? "현재 작업을 중단하지 않고 다음 지시를 보냅니다" : "Sends the next instruction without stopping the model")
                         : undefined}
                     >
                       {busy && !composer.trim() ? <span className={styles.stopGlyph} aria-hidden="true" /> : <IconArrowUp size={20} strokeWidth={2} aria-hidden="true" />}

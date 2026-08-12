@@ -220,6 +220,10 @@ export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
     { id: "opus", label: "Opus", workforceTier: "frontier" },
     { id: "sonnet", label: "Sonnet", workforceTier: "balanced" },
     { id: "haiku", label: "Haiku", workforceTier: "economy" },
+    // Claude Code accepts this account model even when its local CLI does not
+    // expose a model-list command. Keep it visible as a vendor alias rather
+    // than treating an incomplete discovery result as proof that it is absent.
+    { id: "fable", label: "Fable", workforceTier: "frontier" },
   ],
   codex: [],
   gemini: [],
