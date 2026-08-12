@@ -19,6 +19,44 @@ import type { MarketplaceSource, SeedListingFull } from "./source";
 import { readCanonicalPromptFromPackageFiles } from "../agents/prompt-authority";
 
 const PUBLIC_AGENT_CACHE_MS = 60_000;
+/**
+ * 소유자 Agent Cloud 선반 페이지 크기.
+ *
+ * 서버는 한 응답을 50건에서 자른다(SEARCH_RESULT_CAP). 그보다 큰 값을 보내도
+ * 50건이 오므로 요청부터 50으로 맞추고, 나머지는 offset 으로 이어 받는다.
+ */
+const MY_CLOUD_PAGE_SIZE = 50;
+/** 페이지 반복 상한 — 서버가 이상하게 굴어도 여기서 멈춘다(2,500행이면 충분하다). */
+const MY_CLOUD_PAGE_BUDGET = 50;
+
+/**
+ * 선반이 그대로인지 한 번의 왕복으로 판정하기 위한 값.
+ *
+ * 서버에 컬렉션 ETag 가 없으므로 첫 페이지의 신원+리비전을 지문으로 쓴다. 행이
+ * 추가·삭제되면 `total` 이 움직이고, 어떤 행이 갱신되면 revision 이 움직인다.
+ */
+export interface OwnerCloudShelfSnapshot {
+  total: number;
+  fingerprint: string;
+  rows: MarketplaceListing[];
+}
+
+export interface OwnerCloudShelfResult {
+  rows: MarketplaceListing[];
+  snapshot: OwnerCloudShelfSnapshot;
+  /** true면 첫 페이지만 부치고 끝났다는 뜻 — 나머지 페이지는 아예 요청하지 않았다. */
+  revalidatedOnly: boolean;
+}
+
+function ownerCloudPageFingerprint(rows: readonly MarketplaceListing[]): string {
+  return rows
+    .map((row) => {
+      const id = cleanString(row.cloudId) || cleanString(row.packageHash) || cleanString(row.slug);
+      const revision = typeof row.revision === "number" ? String(row.revision) : cleanString(row.revision);
+      return `${id}@${revision}`;
+    })
+    .join("|");
+}
 
 export class PartialHubResultError<T> extends Error {
   constructor(
@@ -1050,20 +1088,114 @@ export class McpSource implements MarketplaceSource {
   }
 
   /** 실제 복원 가능한 소유 Agent Cloud 패키지 목록. 결과 slug는 cargo:<draftId>가 아니라 Cloud slug다. */
-  async listMyCloudPackages(): Promise<MarketplaceListing[]> {
-    const raw = await this.call<unknown>("cargo.search_agents", {
-      q: "",
-      limit: 20,
-      mine: true,
-      scope: "cloud",
-      verbose: true,
-    });
-    const rows = asArray<MarketplaceListing>(raw, "results", "agents", "listings")
-      .map((row) => ({
-        ...row,
-        source: typeof row.source === "string" && row.source ? row.source : "cloud",
-      }));
-    return normalizeListings(rows);
+  /**
+   * 소유자의 Agent Cloud 선반 **전체**.
+   *
+   * 두 개의 천장이 겹쳐 있었다. 먼저 이쪽 limit 이 20 이라 21번째부터 존재 자체를
+   * 몰랐고, 그걸 올리자 이번엔 **서버가 한 응답을 50건에서 자르는 것**이 드러났다
+   * (실측 2026-08-12: `total` 284, `count` 50). limit 만 올린 수리는 아무것도
+   * 바꾸지 못했고, "상한에 걸리면 경고한다"던 검사조차 `50 >= 200` 이 거짓이라
+   * 한 번도 발화하지 않았다 — 조용한 절단을 막겠다는 줄이 절단을 덮고 있었다.
+   *
+   * 그래서 서버 응답의 `total`/`nextOffset` 을 따라 끝까지 이어 받는다. 오래된
+   * 서버는 `offset` 을 무시하므로 **같은 페이지가 다시 오는 것**을 진행 없음으로
+   * 보고 멈춘다. 어느 경우든 실제로 받은 수가 `total` 에 못 미치면 그 사실을 남긴다.
+   */
+  async listMyCloudPackages(
+    known?: OwnerCloudShelfSnapshot,
+  ): Promise<OwnerCloudShelfResult> {
+    const rows: MarketplaceListing[] = [];
+    const seen = new Set<string>();
+    let offset = 0;
+    let total: number | null = null;
+    for (let page = 0; page < MY_CLOUD_PAGE_BUDGET; page += 1) {
+      let raw: unknown;
+      try {
+        raw = await this.call<unknown>("cargo.search_agents", {
+          q: "",
+          limit: MY_CLOUD_PAGE_SIZE,
+          // 첫 요청에는 offset 을 **붙이지 않는다**. `offset` 은 이 도구에 새로
+          // 생긴 인자이고, 아직 그것을 모르는 서버가 미선언 인자를 거절하기라도
+          // 하면 선반 전체가 0건이 된다 — 50건만 보이던 것보다 나쁘다. 첫 장은
+          // 예전과 완전히 같은 요청으로 가져오고, offset 은 2장부터만 쓴다.
+          ...(offset > 0 ? { offset } : {}),
+          mine: true,
+          scope: "cloud",
+          verbose: true,
+        });
+      } catch (error) {
+        // 이어 받다 실패하면 **이미 배운 것은 지키고** 멈춘다. 여기서 그대로
+        // 던지면 첫 장까지 함께 사라져, 페이지네이션을 붙인 탓에 목록이 통째로
+        // 비는 회귀가 된다.
+        if (page === 0) throw error;
+        console.warn(
+          `[marketplace] owner cloud shelf stopped after ${rows.length} rows: `
+          + (error instanceof Error ? error.message : String(error)),
+        );
+        break;
+      }
+      const envelope = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+      if (typeof envelope.total === "number" && Number.isFinite(envelope.total)) {
+        total = envelope.total;
+      }
+      const batch = asArray<MarketplaceListing>(raw, "results", "agents", "listings")
+        .map((row) => ({
+          ...row,
+          source: typeof row.source === "string" && row.source ? row.source : "cloud",
+        }));
+      if (batch.length === 0) break;
+      // 첫 페이지가 곧 변경 탐지기다.
+      //
+      // 선반이 284건이면 전체 순회는 6번의 왕복이고, 이 목록은 모바일 스냅샷을
+      // 만들 때마다 필요하다. 그런데 서버에는 컬렉션 단위 ETag 가 없다 — 대신
+      // `total` 과 첫 페이지의 (cloudId, revision) 지문이 있다. 둘 다 그대로면
+      // 선반은 바뀌지 않았고, **나머지 5번은 부칠 이유가 없다**. 바뀐 경우에만
+      // 끝까지 걷는다.
+      if (page === 0 && known && total !== null && known.total === total) {
+        if (ownerCloudPageFingerprint(batch) === known.fingerprint) {
+          return { rows: known.rows, snapshot: known, revalidatedOnly: true };
+        }
+      }
+      let added = 0;
+      for (const row of batch) {
+        // 신원 없이 세면 오래된 서버가 같은 페이지를 계속 줘도 늘어나는 것처럼 보인다.
+        const key = cleanString(row.cloudId) || cleanString(row.packageHash) || cleanString(row.slug);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        rows.push(row);
+        added += 1;
+      }
+      // 새로 배운 것이 없으면 서버가 offset 을 안 보는 것이다 — 무한 루프 대신 멈춘다.
+      if (added === 0) break;
+      const nextOffset = envelope.nextOffset;
+      if (typeof nextOffset === "number" && Number.isFinite(nextOffset) && nextOffset > offset) {
+        offset = nextOffset;
+      } else if (typeof nextOffset === "number") {
+        break;
+      } else if (total !== null && rows.length < total) {
+        // nextOffset 을 모르는 서버라도 total 을 알면 창을 직접 민다.
+        offset += batch.length;
+      } else {
+        break;
+      }
+      if (total !== null && rows.length >= total) break;
+    }
+    if (total !== null && rows.length < total) {
+      console.warn(
+        `[marketplace] owner cloud shelf listed ${rows.length} of ${total} rows; `
+        + "the server did not page past this point.",
+      );
+    }
+    const normalized = normalizeListings(rows);
+    return {
+      rows: normalized,
+      snapshot: {
+        total: total ?? rows.length,
+        fingerprint: ownerCloudPageFingerprint(rows.slice(0, MY_CLOUD_PAGE_SIZE)),
+        rows: normalized,
+      },
+      revalidatedOnly: false,
+    };
   }
 
   /** 내 Web draft 메타데이터. 파일 복원 권위가 아니며 slug 또는 "cargo:<id>"를 받는다. */

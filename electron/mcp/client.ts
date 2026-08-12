@@ -3906,6 +3906,10 @@ export async function runMcpInvocation(
         notice: {
           level: "success",
           message: automationFinalSummary(automationRegistrations, locale),
+          i18n: {
+            ko: automationFinalSummary(automationRegistrations, "ko"),
+            en: automationFinalSummary(automationRegistrations, "en"),
+          },
           code: "automation-registered",
         },
       });
@@ -3916,6 +3920,10 @@ export async function runMcpInvocation(
         notice: {
           level: "warning",
           message: automationPermissionRequiredText(locale),
+          i18n: {
+            ko: automationPermissionRequiredText("ko"),
+            en: automationPermissionRequiredText("en"),
+          },
           code: "automation-permission-required",
         },
       });
@@ -3930,6 +3938,7 @@ export async function runMcpInvocation(
           message: locale === "ko"
             ? "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요."
             : "Something went wrong while preparing this result, so it is not complete.",
+          i18n: { ko: "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요.", en: "Something went wrong while preparing this result, so it is not complete." },
           code: "surface-parse-failed",
         });
         displayText = "";
@@ -4017,6 +4026,7 @@ export async function runMcpInvocation(
         message: locale === "ko"
           ? "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요."
           : "Something went wrong while preparing this result, so it is not complete.",
+        i18n: { ko: "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요.", en: "Something went wrong while preparing this result, so it is not complete." },
         code: "surface-pipeline-failed",
       });
       displayText = "";

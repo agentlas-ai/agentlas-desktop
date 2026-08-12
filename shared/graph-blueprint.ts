@@ -11,6 +11,7 @@
 import type { WorkflowGraph, WorkflowNode, WorkflowEdge } from "./types";
 import { layoutGraph, needsLayout } from "./graph-layout";
 import { CAPABILITIES, CAPABILITY_LABEL, findProvider, providersFor } from "./graph-tool-binding";
+import { humanizeScheduleLabel } from "./schedule-describe";
 
 export const BLUEPRINT_SCHEMA = "agentlas.graph-blueprint.v1";
 
@@ -869,46 +870,16 @@ export function branchLabel(branch: BlueprintBranch, locale: "ko" | "en" = "ko")
  */
 export function humanSchedule(schedule: string, locale: "ko" | "en" = "ko"): string {
   const raw = String(schedule ?? "").trim();
+  // 그래프의 manual 은 "안 돈다"가 아니라 "네가 값을 넣어 시작한다"이다 — 이
+  // 화면에서만 맞는 말이므로 여기서 소유한다.
   if (!raw || raw === "manual") return locale === "ko" ? "값을 넣을 때만" : "only when you start it";
-  const daily = /^daily-(\d{2}):(\d{2})$/.exec(raw);
-  if (daily) return locale === "ko" ? `매일 ${hhmm(daily[1], daily[2], "ko")}` : `every day at ${daily[1]}:${daily[2]}`;
-  const parts = raw.split(/\s+/);
-  if (parts.length === 5) {
-    const [min, hour, dom, mon, dow] = parts;
-    if (/^\d+$/.test(min) && /^\d+$/.test(hour) && mon === "*") {
-      const at = hhmm(hour.padStart(2, "0"), min.padStart(2, "0"), locale);
-      const when = dowPhrase(dow, dom, locale);
-      return locale === "ko" ? `${when} ${at}` : `${when} at ${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
-    }
-  }
-  return raw;
-}
-
-function hhmm(hour: string, minute: string, locale: "ko" | "en"): string {
-  if (locale !== "ko") return `${hour}:${minute}`;
-  const h = Number(hour);
-  const period = h < 12 ? "오전" : "오후";
-  const shown = h % 12 === 0 ? 12 : h % 12;
-  return minute === "00" ? `${period} ${shown}시` : `${period} ${shown}시 ${Number(minute)}분`;
-}
-
-const DOW_KO: Record<string, string> = { "0": "일", "1": "월", "2": "화", "3": "수", "4": "목", "5": "금", "6": "토", "7": "일" };
-
-function dowPhrase(dow: string, dom: string, locale: "ko" | "en"): string {
-  if (dow === "*" && dom === "*") return locale === "ko" ? "매일" : "every day";
-  if (dow === "1-5") return locale === "ko" ? "평일(월~금)" : "every weekday";
-  if (dow === "0,6" || dow === "6,0") return locale === "ko" ? "주말" : "every weekend";
-  if (/^\d$/.test(dow)) {
-    return locale === "ko" ? `매주 ${DOW_KO[dow]}요일` : `every week on day ${dow}`;
-  }
-  if (dow === "*" && /^\d+$/.test(dom)) {
-    return locale === "ko" ? `매월 ${Number(dom)}일` : `on day ${dom} of each month`;
-  }
-  if (/^[\d,]+$/.test(dow)) {
-    const days = dow.split(",").map((d) => DOW_KO[d] ?? d).join("·");
-    return locale === "ko" ? `매주 ${days}요일` : `on ${dow}`;
-  }
-  return locale === "ko" ? "정해진 때" : "on schedule";
+  // 나머지 표현식 해석은 **한 벌**이 소유한다(shared/schedule-describe.ts).
+  //
+  // 예전에는 이 함수가 자기 파서를 따로 갖고 있었고, `*/20 * * * *` 처럼 분 칸이
+  // 숫자가 아닌 형태를 못 읽어 **원문을 그대로 반환**했다. 그래서 폰은 "20분마다"라고
+  // 하는데 데스크탑 자동화 화면은 같은 자동화를 `*/20 * * * *` 로 보여줬다.
+  // 두 표면이 같은 값을 다르게 말하면 둘 중 하나는 반드시 틀린다.
+  return humanizeScheduleLabel(raw, locale);
 }
 
 function scheduleLabel(schedule: string): string {

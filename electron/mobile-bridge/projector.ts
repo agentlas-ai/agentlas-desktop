@@ -74,6 +74,11 @@ import { isOneExperienceReuseState } from "../../shared/one-experience-reuse";
 import { getOneValueClosureState } from "../one/value-closure";
 import { getOneImprovementProofState } from "../one/improvement-proof";
 import { reconcileOneImprovementProofs } from "../one/improvement-proof-producer";
+import {
+  describeCronExpression,
+  describeSchedule,
+  humanizeScheduleLabel,
+} from "../../shared/schedule-describe";
 import { getOneExperienceReuseState } from "../one/experience-reuse";
 import { projectOneMobileEcosystemSuggestions } from "../one/mobile-suggestions";
 
@@ -366,6 +371,28 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
   };
 }
 
+/**
+ * Agent Cloud 선반 신원. Hub 릴리스 신원과 **다른 칸**이며 서로 대체하지 않는다.
+ * 세 값 모두 없으면 신원 자체를 보내지 않는다 — 빈 객체는 신원이 아니다.
+ */
+function cloudEntityDto(
+  listing: import("../../shared/types").MarketplaceListing,
+): { cloudId?: string; manifestId?: string; revision?: string } | null {
+  const cloudId = typeof listing.cloudId === "string" ? displayText(listing.cloudId, 256) : "";
+  const manifestId = typeof listing.manifestId === "string" ? displayText(listing.manifestId, 256) : "";
+  const revision = typeof listing.revision === "string"
+    ? displayText(listing.revision, 128)
+    : typeof listing.revision === "number"
+      ? String(listing.revision)
+      : "";
+  if (!cloudId && !manifestId && !revision) return null;
+  return {
+    ...(cloudId ? { cloudId } : {}),
+    ...(manifestId ? { manifestId } : {}),
+    ...(revision ? { revision } : {}),
+  };
+}
+
 function agentsDto(
   presentEnvKeys: ReadonlySet<string>,
   cloudListings: readonly import("../../shared/types").MarketplaceListing[],
@@ -373,8 +400,23 @@ function agentsDto(
   const bindingByAgentId = new Map(
     listInstalledAgentHubBindings(64).map((binding) => [binding.installedAgentId, binding] as const),
   );
+  // 설치본과 그 클라우드 선반 행을 잇는 **정확한** 열쇠는 package hash 다 —
+  // 검증된 불변 내용 해시이지 slug 추측이 아니다. 이 링크가 없으면 Agent Cloud
+  // 에서 복원한 에이전트가 Cloud 탭에 두 번 뜬다: 설치본은 slug 로, 선반 행은
+  // cloudId 로 각각 키를 잡아 같은 에이전트가 서로 다른 칸에 앉기 때문이다.
+  // (소유자 클라우드 행에는 Hub definition/release 쌍이 아예 없어 기존
+  // definitionId 기준 중복 제거가 한 번도 발화하지 못한다.)
+  const cloudListingByPackageHash = new Map<string, import("../../shared/types").MarketplaceListing>();
+  for (const listing of cloudListings) {
+    const hash = typeof listing.packageHash === "string" ? listing.packageHash.trim() : "";
+    if (hash && !cloudListingByPackageHash.has(hash)) cloudListingByPackageHash.set(hash, listing);
+  }
   const installed = listInstalledAgents().map<MobileBridgeAgentDto>((agent) => {
     const binding = bindingByAgentId.get(agent.id);
+    const cloudListing = agent.packageHash
+      ? cloudListingByPackageHash.get(agent.packageHash.trim())
+      : undefined;
+    const installedCloudEntity = cloudListing ? cloudEntityDto(cloudListing) : null;
     return {
       id: agent.id,
       slug: agent.slug,
@@ -410,6 +452,9 @@ function agentsDto(
             agentReleaseId: binding.agentReleaseId,
           }
         : {}),
+      // Cloud shelf identity for an installed copy, so the phone groups it with
+      // its own shelf row instead of listing the same agent twice.
+      ...(installedCloudEntity ? { cloudEntity: installedCloudEntity } : {}),
     };
   });
   const installedExact = new Set(installed.flatMap((agent) =>
@@ -444,6 +489,10 @@ function agentsDto(
       ...(definitionId && releaseId
         ? { agentDefinitionId: definitionId, agentReleaseId: releaseId }
         : {}),
+      // Cloud shelf identity, kept separate from the Hub binding. Without it
+      // the phone had nothing to key a cloud-only row on and dropped all of
+      // them.
+      ...(cloudEntityDto(listing) ? { cloudEntity: cloudEntityDto(listing)! } : {}),
     }];
   });
   return [...installed, ...cloudOnly];
@@ -626,8 +675,17 @@ export function projectMobileBridgeHistory(
     if (remaining <= 0) break;
     const candidate: MobileBridgeChatMessageDto = {
       ...shell,
+      // 제어 블록 제거는 **모델의 답**에만 적용한다.
+      //
+      // 사용자가 쓴 말은 사용자의 말이다. 여기에 스트리퍼를 걸면 두 가지가 깨졌다:
+      // ① `## Automation` 같은 제목으로 시작하는 평범한 메시지가 그 줄부터
+      //    통째로 잘려 나갔고,
+      // ② 폰이 자기 낙관적 에코를 되돌아온 텍스트와 대조하는데 원문과 잘린 본문이
+      //    영영 일치하지 않아 "보내는 중…" 말풍선이 중복으로 남았다.
       text: sanitizeMobileBridgeText(
-        stripMobileBridgeControlFences(message.text),
+        message.role === "user"
+          ? message.text
+          : stripMobileBridgeControlFences(message.text),
         Math.min(MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES, remaining),
       ),
     };
@@ -1107,6 +1165,36 @@ export function projectMobileBridgeOneImprovementProofs(
 }
 
 /** DESKTOP_MOBILE_BRIDGE: Automation prompts, graphs, triggers, and credentials stay on Desktop. */
+/**
+ * 표시용 스케줄 문장. 구조화 `scheduleSpec` 이 정본이고, 없을 때만 레거시
+ * `scheduleHuman` 문자열을 해석한다.
+ */
+function scheduleSentence(automation: Automation, locale: "ko" | "en"): string {
+  // 투영은 한 행 때문에 던지면 안 된다. 여기서 예외가 나면 스냅샷이 통째로
+  // 만들어지지 않아 **폰이 아무것도 못 받는다** — 일정 한 줄보다 훨씬 큰 손해다.
+  try {
+    const spec = automation.scheduleSpec;
+    if (spec) return describeSchedule(spec, locale);
+    return humanizeScheduleLabel(automation.scheduleHuman, locale);
+  } catch {
+    return locale === "ko" ? "알 수 없음" : "Unknown";
+  }
+}
+
+/** 이 자동화의 cron 원문(있을 때만). 부가 정보 칸에만 쓴다. */
+function scheduleCronExpression(automation: Automation): string | null {
+  const spec = automation.scheduleSpec;
+  if (spec && spec.kind === "cron") {
+    return typeof spec.expr === "string" && spec.expr.trim() ? spec.expr.trim() : null;
+  }
+  const legacy = typeof automation.scheduleHuman === "string"
+    ? automation.scheduleHuman.trim()
+    : "";
+  // 레거시 라벨이 `cron:` 접두사를 달고 있는 경우도 실제로 저장돼 있다.
+  const bare = legacy.startsWith("cron:") ? legacy.slice(5).trim() : legacy;
+  return describeCronExpression(bare, "en") ? bare : null;
+}
+
 export function projectMobileBridgeAutomation(
   automation: Automation,
 ): MobileBridgeAutomationDto {
@@ -1122,6 +1210,18 @@ export function projectMobileBridgeAutomation(
     id: automation.id,
     name: displayText(automation.name, 1_024),
     scheduleHuman: displayText(automation.scheduleHuman, 1_024),
+    // 사람이 읽을 문구를 두 로케일 다 보낸다. 폰은 EN·KO 를 런타임에 바꾼다.
+    //
+    // **구조화 spec 이 있으면 그것이 정본이다.** scheduleHuman 은 레거시 미러라
+    // `cron:*/20 * * * *`, `daily-09:00`, `every-10m` 같은 토큰이 그대로 들어
+    // 있고, 그걸 사람 문장이라고 폰에 보내면 화면에 토큰이 뜬다 — 고치려던 바로
+    // 그 증상이다. spec 이 없을 때만 레거시 문자열을 해석한다.
+    scheduleHumanKo: displayText(scheduleSentence(automation, "ko"), 1_024),
+    scheduleHumanEn: displayText(scheduleSentence(automation, "en"), 1_024),
+    // cron 원문은 부가 정보로만. 이게 제목 자리에 있으면 일반 사용자는 못 읽는다.
+    ...(scheduleCronExpression(automation)
+      ? { scheduleCron: displayText(scheduleCronExpression(automation)!, 256) }
+      : {}),
     targetType: automation.targetType,
     targetId: automation.targetId,
     enabled: automation.enabled,
@@ -1357,6 +1457,9 @@ export async function projectMobileBridgeSnapshot(
         x: node.x,
         y: node.y,
         density: node.density,
+        // Counts only. Content, embeddings, and raw evidence never cross.
+        relationCount: node.relationCount,
+        evidenceCount: node.evidenceCount,
       })),
       edges: memoryEdges.map((edge) => ({ from: edge.from, to: edge.to, relation: edge.relation })),
     } } : {}),

@@ -247,6 +247,12 @@ export interface RunnerEvents {
     level: "info" | "success" | "warning" | "error";
     message: string;
     code?: string;
+    /**
+     * 같은 문장의 두 로케일 판본. `message` 는 이 실행의 로케일로 이미 렌더돼 있어
+     * 다른 로케일 화면(모바일)이 붙어 보면 남의 언어가 그대로 뜬다. 만드는 자리에서
+     * 두 벌을 내면 중계 지점이 고를 수 있다.
+     */
+    i18n?: { ko: string; en: string };
     /** divider면 좌우 선 사이의 라벨로 그린다(대화의 경계를 표시하는 사실). */
     display?: "row" | "divider";
   }) => void;

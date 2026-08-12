@@ -920,6 +920,15 @@ export interface MarketplaceListing {
   cloudPackage?: CloudAgentPackageDownload;
   /** Owner restore baseline used only for optimistic Cloud writes. */
   cloudRegistration?: CloudAgentRevisionIdentity;
+  /**
+   * Agent Cloud shelf identity as returned by `cargo.search_agents`. These are
+   * the only identifiers an owner-cloud row carries — it has no Hub
+   * definition/release pair — so they are declared rather than left to survive
+   * only through the untyped record spread in `normalizeListing`.
+   */
+  cloudId?: string;
+  manifestId?: string;
+  revision?: string | number;
   kind?: "cloud-callable" | "install-only" | string;
   callable?: boolean;
   routingReady?: boolean;

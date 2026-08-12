@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 
+import { stripAgentControlBlocks } from "../../shared/agent-control-blocks";
 import { MOBILE_BRIDGE_MAX_MESSAGE_BYTES } from "../../shared/mobile-bridge";
 
 const SECRET_RE = /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\bAIza[0-9A-Za-z_-]{35}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b|\b(?:sk|rk|pk|xox[baprs]|gh[pousr])[-_][A-Za-z0-9_=-]{12,}\b|\b(?:api[_-]?key|token|secret|password|passwd|pwd|cookie|session|authorization)\b\s*[:=]\s*["']?[^,\s"'}`\]]{4,}|\bBearer\s+[A-Za-z0-9._~+\/-]{8,})/gi;
@@ -16,9 +17,6 @@ const WINDOWS_ABSOLUTE_PATH_RE = /\b[A-Za-z]:\\(?:[^\\,\r\n"'`<>|}\]]+\\)*[^\s\\
 const WINDOWS_UNC_PATH_RE = /\\\\[^\\\s,\r\n"'`<>|}\]]+\\(?:[^\\,\r\n"'`<>|}\]]+\\)*[^\s\\,\r\n"'`<>|}\]]+/g;
 const DATA_URL_RE = /\bdata:[^,\s]{1,256},[^\s"'`<>]+/gi;
 const TRUNCATION_SUFFIX = "…[truncated]";
-const ASK_OPEN = "<<agentlas-ask>>";
-const ASK_CLOSE = "<</agentlas-ask>>";
-const MULTIMODAL_MARKER = "<<agentlas-multimodal-setup>>";
 
 /** Keep enough headroom for the response/event envelope and UTF-8 expansion. */
 export const MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES = MOBILE_BRIDGE_MAX_MESSAGE_BYTES - 64 * 1024;
@@ -79,22 +77,20 @@ export function repairMobileBridgeUtf16(value: string): string {
  * corresponding confirmation as structured data, so raw fence JSON must not
  * appear as assistant copy. A dangling opening fence is also hidden while a
  * streamed response is still being assembled.
+ *
+ * The ruleset lives in shared/agent-control-blocks.ts because Mobile ports the
+ * exact same rules to Dart. Only ONE surface may own the rules; this function
+ * stays as the bridge-facing name so existing call sites keep working.
+ *
+ * NOTE — this is never applied to a streamed `delta`. A delta is one chunk of a
+ * client-accumulated string: a control fence can straddle two chunks, so
+ * chunk-wise stripping both misses the block and corrupts the accumulation.
+ * Stripping a delta would also force `textLen` to be dropped, which is the
+ * client's only stream-desync detector. Mobile therefore strips the accumulated
+ * text at render time instead.
  */
 export function stripMobileBridgeControlFences(value: string): string {
-  let visible = value.replaceAll(MULTIMODAL_MARKER, "");
-  while (true) {
-    const start = visible.indexOf("<<agentlas-ask");
-    if (start < 0) break;
-    if (!visible.startsWith(ASK_OPEN, start)) {
-      visible = visible.slice(0, start);
-      break;
-    }
-    const end = visible.indexOf(ASK_CLOSE, start + ASK_OPEN.length);
-    visible = end < 0
-      ? visible.slice(0, start)
-      : `${visible.slice(0, start)}${visible.slice(end + ASK_CLOSE.length)}`;
-  }
-  return visible.replaceAll(ASK_CLOSE, "").replace(/\n{3,}/g, "\n\n").trim();
+  return stripAgentControlBlocks(value);
 }
 
 /**

@@ -71,6 +71,10 @@ export function makeLocalOpenAiRunner(
       events.onNotice?.({
         level: "info",
         message: tStatus(req.locale, "compacted", { n: droppedCount }),
+        i18n: {
+          ko: tStatus("ko", "compacted", { n: droppedCount }),
+          en: tStatus("en", "compacted", { n: droppedCount }),
+        },
         code: "history-compacted",
         display: "divider",
       });

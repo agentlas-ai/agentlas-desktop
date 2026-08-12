@@ -3,6 +3,7 @@
 // 모든 caller는 `getSource()`를 호출하고 인터페이스만 알면 됨.
 // MCP 호출 실패 시 하드코딩 카탈로그로 대체하지 않는다. Desktop Hub는 실제 Hub 결과만 표시한다.
 import { McpSource, PartialHubResultError } from "./mcp-source";
+import type { OwnerCloudShelfSnapshot } from "./mcp-source";
 import type { MarketplaceSource, SeedListingFull } from "./source";
 import { getSessionCookieHeader } from "../auth";
 import { isPublicDesktopAgent } from "../agents/policy";
@@ -209,16 +210,92 @@ export function getCargoSource(): McpSource | null {
   return _cargoSource;
 }
 
-/** 로그인 사용자의 실제 복원 가능한 Agent Cloud 패키지 목록. 세션별로 짧게 캐시한다. */
+/**
+ * 로그인 사용자의 Agent Cloud 선반. **네트워크는 마지막 수단이다.**
+ *
+ * 이 목록은 모바일 스냅샷을 만들 때마다 필요하고, 선반이 284건이면 전체 순회는
+ * 6번의 왕복이다. 그래서 세 겹으로 막는다:
+ *
+ *  1. 신선하면 캐시를 그대로 준다 — 왕복 0.
+ *  2. 오래됐으면 **캐시를 즉시 주고** 뒤에서 갱신한다(SWR). 화면이 네트워크를
+ *     기다리는 일이 없다.
+ *  3. 갱신도 첫 페이지만 부쳐 `total`+지문으로 변화를 판정한다 — 안 바뀌었으면
+ *     왕복 1로 끝난다. 전체 순회는 실제로 바뀐 경우에만.
+ *
+ * 그리고 동시 호출은 하나로 합친다. 예전에는 dedup 이 없어 IPC 핸들러와 모바일
+ * 브리지 프로젝터가 동시에 만료를 만나면 **각자** 전체 순회를 돌았다.
+ */
 export async function listMyAgentsCached(): Promise<MarketplaceListing[]> {
   const source = getCargoSource();
   if (!source) return [];
   const cookie = getSessionCookieHeader();
-  const cached = cacheFresh(_myAgentsCache ?? undefined);
-  if (cached && cached.cookie === cookie) return cached.agents;
-  const agents = (await source.listMyCloudPackages()).filter((agent) => isPublicDesktopAgent(agent));
-  _myAgentsCache = { value: { cookie, agents }, at: Date.now() };
-  return agents;
+  const entry = _myAgentsCache;
+  const sameSession = entry?.value.cookie === cookie;
+  if (entry && sameSession && cacheFresh(entry)) return entry.value.agents;
+  // 로그인 상태가 바뀌었으면 이전 세션의 선반은 남의 것이다 — 즉시 버린다.
+  if (entry && !sameSession) {
+    _myAgentsCache = null;
+    _myAgentsShelfSnapshot = null;
+    _myAgentsShelfWalkedAt = 0;
+  }
+  const stale = sameSession ? entry?.value.agents : undefined;
+  const refresh = refreshMyAgentsShelf(source, cookie);
+  // 오래된 값이라도 있으면 그것을 주고 갱신은 뒤에서 끝낸다. 없을 때만 기다린다.
+  if (stale) {
+    refresh.catch(() => {});
+    return stale;
+  }
+  return refresh;
+}
+
+let _myAgentsShelfSnapshot: OwnerCloudShelfSnapshot | null = null;
+let _myAgentsShelfWalkedAt = 0;
+let _myAgentsInFlight: { cookie: string | null; promise: Promise<MarketplaceListing[]> } | null = null;
+
+/**
+ * 전체 순회를 이만큼은 다시 한다.
+ *
+ * 변경 탐지기는 **첫 페이지**만 본다(서버에 컬렉션 ETag 가 없다). 그래서 51번째
+ * 행부터의 변화 — 뒤쪽 에이전트의 revision 갱신, 또는 하나 지우고 하나 추가해
+ * `total` 이 그대로인 경우 — 는 지문에 잡히지 않고 **영원히** 캐시된다.
+ * 정합성을 시간으로 산다: 정상 경로는 5분마다 왕복 1회, 그리고 30분마다 한 번은
+ * 끝까지 읽어 어긋남을 반드시 회수한다.
+ */
+const OWNER_SHELF_FULL_WALK_MS = 30 * 60_000;
+
+function refreshMyAgentsShelf(
+  source: McpSource,
+  cookie: string | null,
+): Promise<MarketplaceListing[]> {
+  const inFlight = _myAgentsInFlight;
+  if (inFlight && inFlight.cookie === cookie) return inFlight.promise;
+  // 지문이 못 보는 뒤쪽 변화를 회수하기 위해 주기적으로 전체를 다시 읽는다.
+  const stale = Date.now() - _myAgentsShelfWalkedAt >= OWNER_SHELF_FULL_WALK_MS;
+  const probe = stale ? undefined : (_myAgentsShelfSnapshot ?? undefined);
+  const promise = source
+    .listMyCloudPackages(probe)
+    .then((result) => {
+      _myAgentsShelfSnapshot = result.snapshot;
+      if (!result.revalidatedOnly) _myAgentsShelfWalkedAt = Date.now();
+      const agents = result.rows.filter((agent) => isPublicDesktopAgent(agent));
+      _myAgentsCache = { value: { cookie, agents }, at: Date.now() };
+      return agents;
+    })
+    .finally(() => {
+      if (_myAgentsInFlight?.promise === promise) _myAgentsInFlight = null;
+    });
+  _myAgentsInFlight = { cookie, promise };
+  return promise;
+}
+
+/**
+ * 선반을 바꾼 직후에 부른다(복원·삭제·저장). TTL 을 기다리면 사용자는 자기가
+ * 방금 한 일이 반영되지 않은 목록을 최대 5분 동안 본다.
+ */
+export function invalidateMyAgentsCache(): void {
+  _myAgentsCache = null;
+  _myAgentsShelfSnapshot = null;
+  _myAgentsShelfWalkedAt = 0;
 }
 
 export function getSource(): MarketplaceSource {

@@ -132,9 +132,11 @@ import {
   type MobileBridgeOneInvokeStartReceiptDto,
   type MobileBridgeRpcRequest,
   type MobileBridgeSnapshot,
+  type MobileBridgeToolCallDisplayDto,
   type MobileBridgeToolPayloadSize,
   type MobileBridgeToolPayloadSummaryDto,
 } from "../../shared/mobile-bridge";
+import { buildToolCallDisplay, normalizeToolCall } from "../../shared/tool-call-detail";
 import type { MobileBridgeHostIdentity } from "./pairing";
 import type { MobileBridgeRevocationCause } from "./pairing";
 import {
@@ -147,7 +149,11 @@ import {
   projectMobileBridgeSnapshot,
   projectMobileBridgeUsage,
 } from "./projector";
-import { sanitizeMobileBridgeText, stripMobileBridgeControlFences } from "./sanitize";
+import {
+  MOBILE_BRIDGE_DISPLAY_TEXT_BYTES,
+  sanitizeMobileBridgeText,
+  stripMobileBridgeControlFences,
+} from "./sanitize";
 import {
   OntologyHubClient,
   parseOntologyAttachResolveInput,
@@ -870,6 +876,126 @@ function toolPayloadSize(length: number): MobileBridgeToolPayloadSize {
   return "large";
 }
 
+/** 표시용 도구 라벨의 길이 상한. 한 줄에 들어갈 만큼만 보낸다. */
+const TOOL_DISPLAY_SUMMARY_BYTES = 512;
+const TOOL_DISPLAY_LABEL_BYTES = 160;
+
+/**
+ * 도구 인자에서 뽑은 값은 **깨끗할 때만** 건넌다.
+ *
+ * "도구 본문은 브리지를 건너지 않는다"는 기존 경계를 넓히지 않기 위해서다. 값에
+ * 비밀·로컬 경로·data URL 이 하나라도 섞여 있으면 `[local-path]` 같은 흔적을
+ * 보내는 대신 **그 값을 통째로 버린다**. 폰은 그 줄을 이름과 사실만으로 그린다.
+ */
+function cleanToolDisplayValue(value: string | undefined, maxBytes: number): string | undefined {
+  if (!value) return undefined;
+  const safe = sanitizeMobileBridgeText(value, maxBytes);
+  if (safe.includes("[local-path]") || safe.includes("[redacted-")) return undefined;
+  return safe.trim() || undefined;
+}
+
+/**
+ * 도구 행의 **의미**를 폰으로 넘긴다.
+ *
+ * 판별은 shared/tool-call-detail.ts 한 벌이 소유한다 — 폰이 러너별 도구 이름을
+ * 보고 다시 추측하면 두 표면이 갈라진다(2026-08-08 실측 사고: 렌더러가 Claude Code
+ * 도구명만 알아 codex/gemini/ollama/MCP를 전부 "기타"로 그렸고, bash는 실제 명령을
+ * 버렸다).
+ *
+ * 이름과 사실(`exit 0`, `+23 −1`, `8 files · 31 matches`)은 집계값이라 늘 안전하다.
+ * 식별값(summary)만 cleanToolDisplayValue 를 통과해야 하고, 원문 args·result 는
+ * 예나 지금이나 브리지를 건너지 않는다.
+ */
+function projectToolCallDisplay(
+  tool: NonNullable<McpInvocationEvent["tool"]>,
+  cwd?: string,
+): MobileBridgeToolCallDisplayDto | undefined {
+  let detail: ReturnType<typeof normalizeToolCall>;
+  try {
+    // `cwd` is what makes a file row survive. Without it every Read/Edit/Write
+    // summary is an ABSOLUTE path, sanitize turns it into `[local-path]`, and
+    // cleanToolDisplayValue then drops the whole value — so the phone drew
+    // "파일 읽기" with no file at all. Relative to the run's own folder
+    // (`lib/features/chat/foo.dart`) the path is both safe and the entire point
+    // of the row.
+    detail = normalizeToolCall({ name: tool.name, args: tool.args, result: tool.result, cwd });
+  } catch {
+    return undefined;
+  }
+  const failed = tool.isError === true;
+  const status = failed ? "failed" as const : "completed" as const;
+  // buildToolCallDisplay only returns errorText when it is GIVEN one. Not
+  // passing the result meant `errorText` could never be set, so the phone —
+  // which inferred failure from its presence — drew every failed tool call as a
+  // success.
+  const rawErrorText = failed ? tool.result : undefined;
+  const ko = buildToolCallDisplay({ name: tool.name, detail, status, errorText: rawErrorText, locale: "ko" });
+  const en = buildToolCallDisplay({ name: tool.name, detail, status, errorText: rawErrorText, locale: "en" });
+  const displayNameKo = cleanToolDisplayValue(ko.displayName, TOOL_DISPLAY_LABEL_BYTES);
+  const displayNameEn = cleanToolDisplayValue(en.displayName, TOOL_DISPLAY_LABEL_BYTES);
+  // 이름조차 깨끗하지 않으면(도구 이름이 경로인 경우 등) 행 의미를 보내지 않는다.
+  if (!displayNameKo || !displayNameEn) return undefined;
+  const summary = cleanToolDisplayValue(ko.summary, TOOL_DISPLAY_SUMMARY_BYTES);
+  const factsKo = cleanToolDisplayValue(ko.facts, TOOL_DISPLAY_LABEL_BYTES);
+  const factsEn = cleanToolDisplayValue(en.facts, TOOL_DISPLAY_LABEL_BYTES);
+  const errorText = cleanToolDisplayValue(ko.errorText, TOOL_DISPLAY_SUMMARY_BYTES);
+  return {
+    kind: detail.type,
+    displayNameKo,
+    displayNameEn,
+    ...(summary ? { summary } : {}),
+    ...(factsKo ? { factsKo } : {}),
+    ...(factsEn ? { factsEn } : {}),
+    // The flag travels even when the reason cannot: a dropped reason must not
+    // silently turn a failure into a success.
+    ...(failed ? { failed: true } : {}),
+    ...(errorText ? { errorText } : {}),
+  };
+}
+
+/**
+ * 이 채팅이 실제로 돌고 있는 폴더. 도구 행의 경로를 상대경로로 줄이는 데만 쓴다 —
+ * 이 값 자체는 폰으로 건너가지 않는다.
+ *
+ * 우선순위: 채팅에 고정된 작업 폴더 → 프로젝트 폴더. 둘 다 없으면 undefined 이고,
+ * 그때는 예전처럼 경로가 통째로 버려진다(안전한 쪽으로 실패).
+ */
+function resolveChatCwd(chatId: string): string | undefined {
+  try {
+    const working = getChatWorkingFolder(chatId);
+    if (working && working.trim()) return working.trim();
+    const projectId = getChat(chatId)?.projectId;
+    if (!projectId) return undefined;
+    const folder = getProject(projectId)?.folderPath;
+    return folder && folder.trim() ? folder.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * runId → cwd. 라이브 이벤트는 토큰마다 오지만 폴더는 실행당 하나다.
+ * 종료(final/error) 시 지우고, 취소처럼 종료 이벤트가 안 오는 경우를 대비해
+ * 상한을 둔다 — 무한히 자라는 맵은 그 자체가 결함이다.
+ */
+const RUN_CWD_CACHE_MAX = 64;
+const runCwdCache = new Map<string, string | undefined>();
+
+function cachedRunCwd(runId: string, chatId: string): string | undefined {
+  if (runCwdCache.has(runId)) return runCwdCache.get(runId);
+  const resolved = resolveChatCwd(chatId);
+  if (runCwdCache.size >= RUN_CWD_CACHE_MAX) {
+    const oldest = runCwdCache.keys().next();
+    if (!oldest.done) runCwdCache.delete(oldest.value);
+  }
+  runCwdCache.set(runId, resolved);
+  return resolved;
+}
+
+function forgetRunCwd(runId: string): void {
+  runCwdCache.delete(runId);
+}
+
 function summarizeToolPayload(value: string | undefined): MobileBridgeToolPayloadSummaryDto | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -903,7 +1029,7 @@ function summarizeToolPayload(value: string | undefined): MobileBridgeToolPayloa
 
 export function projectMobileBridgeInvocationEvent(
   event: McpInvocationEvent,
-  context?: { taskId?: string | null; syncedAt?: string },
+  context?: { taskId?: string | null; syncedAt?: string; cwd?: string | null },
 ): MobileBridgeInvocationEventDto {
   // "mcp-key-request" is a desktop-renderer-only elicitation signal — the
   // mobile client has no key sheet and its DTO union stays closed. Project it
@@ -913,7 +1039,20 @@ export function projectMobileBridgeInvocationEvent(
   };
   if (event.kind === "notice" && event.notice) {
     // 고지는 폰에도 간다. 다만 기계 원문(details)은 보내지 않는다 — 화면에 쓸 값만.
+    // 심각도와 표시 형태는 같이 보낸다. 그게 없으면 폰은 "컨텍스트를 압축했습니다"와
+    // "결과를 정리하지 못했습니다"를 같은 회색 줄로 그리게 된다.
     projected.status = boundedRedactedText(event.notice.message, 1_000);
+    projected.noticeLevel = event.notice.level;
+    if (event.notice.display === "divider" || event.notice.display === "row") {
+      projected.noticeDisplay = event.notice.display;
+    }
+    // 이 문장은 **실행의 로케일**로 이미 렌더돼 있다. 폰이 다른 언어로 설정돼 있으면
+    // 남의 언어가 그대로 뜬다(데스크탑이 시작한 실행에 폰이 붙어 볼 때). 만드는
+    // 자리에서 두 벌을 내면 폰이 자기 것을 고를 수 있다.
+    if (event.notice.i18n) {
+      projected.noticeTextKo = boundedRedactedText(event.notice.i18n.ko, 1_000);
+      projected.noticeTextEn = boundedRedactedText(event.notice.i18n.en, 1_000);
+    }
   }
   if (typeof event.status === "string") {
     projected.status = boundedRedactedText(event.status, 1_000);
@@ -973,6 +1112,7 @@ export function projectMobileBridgeInvocationEvent(
       isError: event.tool.isError === true,
       input: summarizeToolPayload(event.tool.args),
       output: summarizeToolPayload(event.tool.result),
+      display: projectToolCallDisplay(event.tool, context?.cwd ?? undefined),
     };
   }
   if (event.kind === "surface" && event.oneSurface && context?.taskId && event.oneSurface.taskId === context.taskId) {
@@ -1708,10 +1848,11 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const attached = invocationService.attach(chatId);
         if (!attached) return null;
         const taskId = findCanonicalTaskForChat(chatId)?.id ?? null;
+        const cwd = resolveChatCwd(chatId);
         return asJsonValue(
           {
             runId: attached.runId,
-            events: attached.events.map((event) => projectMobileBridgeInvocationEvent(event, { taskId })),
+            events: attached.events.map((event) => projectMobileBridgeInvocationEvent(event, { taskId, cwd })),
           },
           request.method,
         );
@@ -1801,6 +1942,14 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             // Detailed scheduler errors can contain local paths. Desktop owns
             // the full run log; Mobile receives only a stable failure marker.
             error: run.error ? "automation_failed" : null,
+            // "그래프가 끝까지 돌았는가"(status)와 "나온 결과가 쓸 만한가"(outcome)는
+            // 다른 질문이다. outcome 을 빼고 보내면 폰은 실패한 실행 옆에 이유를
+            // 하나도 못 보여준다 — 실측 스크린샷 5번이 그 상태였다.
+            outcome: run.outcome ?? null,
+            outcomeReason: run.outcomeReason
+              ? sanitizeMobileBridgeText(run.outcomeReason, MOBILE_BRIDGE_DISPLAY_TEXT_BYTES)
+              : null,
+            acknowledgedAt: run.acknowledgedAt ?? null,
           })),
           request.method,
         );
@@ -2459,14 +2608,20 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.upstreamUnsubscribers = [
       invocationService.onEvent(({ runId, chatId, event }) => {
         const taskId = findCanonicalTaskForChat(chatId)?.id ?? null;
+        // Live events arrive per token; the folder lookup is per RUN, not per
+        // event. The cache is dropped when the run terminates below.
+        const cwd = cachedRunCwd(runId, chatId);
         this.emit({
           event: "invoke.event",
           payload: asJsonValue(
-            { runId, chatId, event: projectMobileBridgeInvocationEvent(event, { taskId }) },
+            { runId, chatId, event: projectMobileBridgeInvocationEvent(event, { taskId, cwd }) },
             "invoke.event envelope",
           ),
         });
-        if (event.kind === "final" || event.kind === "error") this.scheduleSnapshotUpdated();
+        if (event.kind === "final" || event.kind === "error") {
+          forgetRunCwd(runId);
+          this.scheduleSnapshotUpdated();
+        }
       }),
       invocationService.onActiveChats((chatIds) => {
         this.emit({ event: "invoke.activeChats", payload: asJsonValue(chatIds, "invoke.activeChats") });

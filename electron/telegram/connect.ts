@@ -1,3 +1,4 @@
+import { stripAgentControlBlocks } from "../../shared/agent-control-blocks";
 import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
@@ -2270,7 +2271,9 @@ function flattenAskFenceBody(body: string, replyLocale: "ko" | "en"): string | n
 }
 
 /** 텔레그램 아웃바운드 텍스트의 ask/멀티모달 sentinel fence를 평문화·제거한다. */
-function flattenSentinelsForTelegram(text: string, replyLocale: "ko" | "en"): string {
+/** 내보내는 이유는 하나 — 게이트가 **실제 함수**로 계약을 재기 위해서다.
+ *  소스를 문자열로 뒤져 호출을 확인하는 게이트는 구현 문장을 못박을 뿐이다. */
+export function flattenSentinelsForTelegram(text: string, replyLocale: "ko" | "en"): string {
   let out = text;
   if (out.includes(TG_ASK_OPEN)) {
     let result = "";
@@ -2298,6 +2301,15 @@ function flattenSentinelsForTelegram(text: string, replyLocale: "ko" | "en"): st
   if (out.includes(TG_MULTIMODAL_MARKER)) {
     out = out.split(TG_MULTIMODAL_MARKER).join("");
   }
+  // 위 두 fence는 텔레그램용 평문으로 **바꿔** 보여주는 값이라 여기서 직접 다룬다.
+  // 나머지 제어 블록(`## Memory Events`, `## Delegate`, `## Automation`,
+  // `<<agentlas-one-followups>>`)은 사람에게 보여줄 값이 아니라 **지워야 할** 값이고,
+  // 그 규칙은 shared/agent-control-blocks.ts 한 벌이 소유한다.
+  //
+  // 이 줄이 없던 동안 텔레그램 사용자는 모바일이 겪은 것과 똑같은 유출을 받았다:
+  // 답변 뒤에 `## Memory Events` 와 JSON 이 그대로 붙어 나왔다. 표면마다 스트리퍼를
+  // 손으로 다시 짜면 이렇게 한 표면만 빠진다.
+  out = stripAgentControlBlocks(out);
   return out.replace(/\n{3,}/g, "\n\n").trim();
 }
 

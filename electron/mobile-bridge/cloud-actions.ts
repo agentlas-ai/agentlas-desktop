@@ -14,7 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { getSessionCookieHeader } from "../auth";
-import { getCargoSource } from "../marketplace";
+import { getCargoSource, invalidateMyAgentsCache } from "../marketplace";
 import { registeredUploadOptions, registeredUploadRoot } from "../cloud-agents/registered-upload";
 import type {
   CloudAgentDeleteResult,
@@ -122,7 +122,13 @@ export function createDesktopMobileBridgeCloudAgentActions(): MobileBridgeCloudA
         reviewMode: "static-only",
       });
     },
-    deleteMyAgent: (slug) => requireCargoSource().deleteMyAgent(slug),
+    // 선반을 바꿨으면 캐시도 같이 바뀌어야 한다. 무효화하지 않으면 방금 지운
+    // 에이전트가 최대 5분 동안 폰의 Cloud 탭에 그대로 남는다.
+    deleteMyAgent: async (slug) => {
+      const result = await requireCargoSource().deleteMyAgent(slug);
+      invalidateMyAgentsCache();
+      return result;
+    },
   };
 }
 

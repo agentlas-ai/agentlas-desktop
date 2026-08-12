@@ -368,17 +368,76 @@ export interface MobileBridgeToolPayloadSummaryDto {
   countCapped?: boolean;
 }
 
+/**
+ * DESKTOP_MOBILE_BRIDGE: The one value that identifies a tool call, rendered.
+ *
+ * Derived on Desktop by the shared `normalizeToolCall` + `buildToolCallDisplay`
+ * pair (shared/tool-call-detail.ts) so the phone never re-derives tool
+ * semantics from a runner-specific name. Paths are already cwd-relative
+ * (`stripCwdPrefix`) and every string passes the bridge sanitizer, so raw args
+ * and results still stay on Desktop.
+ */
+export interface MobileBridgeToolCallDisplayDto {
+  /** Runner-independent semantic kind: shell / read / edit / search / … */
+  kind: string;
+  /**
+   * Both locales are always emitted together. The phone has a live EN·KO
+   * toggle, so a single-locale projection would render the wrong language for
+   * every event already received when the user flips it.
+   */
+  displayNameKo: string;
+  displayNameEn: string;
+  /** The single identifying value — command, path, query, or URL. Locale-free. */
+  summary?: string;
+  /** Trailing facts: `+23 −1`, `exit 0`, `8 files · 31 matches`. */
+  factsKo?: string;
+  factsEn?: string;
+  /**
+   * The call failed. A separate flag, not inferred from `errorText`: the
+   * failure reason is frequently unsendable (it carries paths or secrets), and
+   * a row that drops the reason must still be drawn as a failure rather than
+   * as a success.
+   */
+  failed?: boolean;
+  /** Present only when the call failed AND the reason itself is safe to send. */
+  errorText?: string;
+}
+
 export interface MobileBridgeInvocationToolDto {
   name: string;
   id: string | null;
   isError: boolean;
   input: MobileBridgeToolPayloadSummaryDto | null;
   output: MobileBridgeToolPayloadSummaryDto | null;
+  /** Optional so an older Desktop keeps working against a newer phone. */
+  display?: MobileBridgeToolCallDisplayDto;
 }
 
 export interface MobileBridgeInvocationEventDto {
   kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface" | "usage" | "reasoning" | "notice";
   status?: string;
+  /**
+   * kind:"notice" only — what the HOST says, with its own severity.
+   *
+   * A host notice must never be appended to the model's answer string; it gets
+   * its own row. Without the severity the phone cannot tell "context compacted"
+   * from "the surface could not be parsed", so both are projected together.
+   * `display: "divider"` marks a conversation boundary rather than a message.
+   */
+  noticeLevel?: "info" | "success" | "warning" | "error";
+  noticeDisplay?: "row" | "divider";
+  /**
+   * kind:"notice" only — the same sentence in both product locales.
+   *
+   * `status` carries the sentence in the locale the RUN used. A run started on
+   * the Desktop uses the Desktop's locale, so a phone set to the other language
+   * that attaches to it reads a foreign-language row. The sentence is already
+   * rendered by the time it reaches this projector, so the producing site emits
+   * both and the phone picks its own. Absent for older Desktops — the phone
+   * falls back to `status`, which is what it always showed.
+   */
+  noticeTextKo?: string;
+  noticeTextEn?: string;
   text?: string;
   delta?: string;
   textLen?: number;
@@ -448,6 +507,20 @@ export interface MobileBridgeAgentDto {
    */
   agentDefinitionId?: string;
   agentReleaseId?: string;
+  /**
+   * Agent Cloud shelf identity — a DIFFERENT thing from the Hub binding above.
+   *
+   * `cargo.search_agents` returns cloudId/manifestId/revision and never a
+   * definition/release pair, so requiring a Hub binding to show a cloud row hid
+   * the owner's entire shelf (measured: 50 rows, 1 shown). Fabricating
+   * `agentDefinitionId` from these values would break the rule directly above,
+   * so cloud identity gets its own field instead.
+   */
+  cloudEntity?: {
+    cloudId?: string;
+    manifestId?: string;
+    revision?: string;
+  };
 }
 
 export type MobileBridgeOntologyChipKind = "operational" | "taste";
@@ -1210,7 +1283,20 @@ export interface MobileBridgeBrowserApprovalDto {
 export interface MobileBridgeAutomationDto {
   id: string;
   name: string;
+  /**
+   * Stored label. Legacy rows keep a bare cron expression here, which is why
+   * `*​/20 * * * *` reached the phone's schedule row verbatim. Prefer the two
+   * localized fields below for display and keep this one as the raw fact.
+   */
   scheduleHuman: string;
+  /** Human sentence per locale. Both ship together — the phone toggles EN·KO live. */
+  scheduleHumanKo?: string;
+  scheduleHumanEn?: string;
+  /**
+   * The cron expression when the schedule really is one, so the phone can offer
+   * it as secondary detail instead of as the headline.
+   */
+  scheduleCron?: string;
   targetType: "agent" | "firm" | "hub";
   targetId: string;
   enabled: boolean;
@@ -1462,6 +1548,13 @@ export interface MobileBridgeOneMemoryMapDto {
     x: number;
     y: number;
     density: number;
+    /**
+     * Counts only — never the memory's content or evidence. Desktop's own map
+     * shows these two on hover, and the phone could not mirror that panel
+     * without them.
+     */
+    relationCount: number;
+    evidenceCount: number;
   }>;
   edges: Array<{ from: string; to: string; relation: string }>;
 }

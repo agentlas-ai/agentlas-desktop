@@ -9,6 +9,7 @@ import { autofixForPublish, remediateBlockers } from "../hephaestus/publish-auto
 import type { RemediationAction } from "../hephaestus/publish-autofix";
 import type { RuntimeStatus } from "../../shared/types";
 import { getSessionCookieHeader } from "../auth";
+import { invalidateMyAgentsCache } from "../marketplace";
 import { readCloudAgentRestoreMarker, writeCloudAgentRegistrationMarker } from "./restore";
 import type {
   CloudAgentCloudScope,
@@ -699,6 +700,9 @@ export async function packageAndReviewCloudAgent(
       notes: input.notes,
       baseRegistration,
     });
+    // 방금 선반이 바뀌었다. 캐시를 두면 사용자는 자기가 올린 에이전트가 없는
+    // 목록을 최대 5분 동안 보게 된다.
+    invalidateMyAgentsCache();
     stage("receipt");
     try {
       writeCloudAgentRegistrationMarker({
