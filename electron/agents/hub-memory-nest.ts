@@ -46,16 +46,37 @@ export function activeHubMemoryNestPaths(slugValue: unknown): {
   const slug = normalizeHubMemorySlug(slugValue);
   if (!slug) return null;
   const ownerScopeKey = activeBorrowedOwnerScopeKey();
-  const ownerDirectory = borrowedOwnerPartitionDirectory(ownerScopeKey);
   const agentRoot = path.join(os.homedir(), ".agentlas", "networking", "hub-agents", slug);
-  const writableMemoryRoot = path.join(agentRoot, "owners", ownerDirectory, "memory");
-  const readableMemoryRoots = [writableMemoryRoot];
-  // Old unscoped files remain device-local. A Hub login never adopts or even
-  // reads them as that account's data.
+  const flatMemoryRoot = path.join(agentRoot, "memory");
   if (ownerScopeKey === DEVICE_LOCAL_BORROWED_OWNER_SCOPE) {
-    readableMemoryRoots.push(path.join(agentRoot, "memory"));
+    // No Hub account is signed in, so there is nothing to isolate. The flat
+    // <slug>/memory root IS the canonical per-agent drawer, shared byte-for-byte
+    // with the OS/terminal Python surfaces (memory_hook, one_workspace, and
+    // workforce/local_registry all resolve <slug>/memory). Writing to an owner
+    // partition here forked the same agent's experience across surfaces, so
+    // neither Desktop nor the CLI could recall the other's (2026-08-12
+    // adversarial set 3). Keep reading the previously owner-partitioned
+    // device-local copy so nothing already accumulated is lost.
+    const legacyOwnerRoot = path.join(
+      agentRoot,
+      "owners",
+      borrowedOwnerPartitionDirectory(ownerScopeKey),
+      "memory",
+    );
+    return {
+      slug,
+      ownerScopeKey,
+      writableMemoryRoot: flatMemoryRoot,
+      readableMemoryRoots: [flatMemoryRoot, legacyOwnerRoot],
+    };
   }
-  return { slug, ownerScopeKey, writableMemoryRoot, readableMemoryRoots };
+  // A Hub account is signed in: isolate its experience under an opaque owner
+  // partition (raw Hub IDs never touch the filesystem). The Python CLI surfaces
+  // carry no Hub-account identity and intentionally stay on the flat root, which
+  // a Hub login never adopts or reads as this account's data.
+  const ownerDirectory = borrowedOwnerPartitionDirectory(ownerScopeKey);
+  const writableMemoryRoot = path.join(agentRoot, "owners", ownerDirectory, "memory");
+  return { slug, ownerScopeKey, writableMemoryRoot, readableMemoryRoots: [writableMemoryRoot] };
 }
 
 export function ensureActiveHubMemoryNest(slugValue: unknown): string | null {
