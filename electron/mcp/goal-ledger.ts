@@ -214,3 +214,94 @@ export async function completeGoalLedgerGoal(input: {
 export function goalProgressKeyForText(text: string): string {
   return `sha256:${createHash("sha256").update((text ?? "").trim()).digest("hex").slice(0, 40)}`;
 }
+
+/*
+ * ── task 층 ────────────────────────────────────────────────────────────────
+ * 원장 CLI는 8개 하위명령을 노출한다:
+ *   create · get · tasks · add-task · complete-task · record-cycle ·
+ *   should-continue · complete
+ * 이 브리지는 오랫동안 5개만 감쌌고, 빠진 셋이 전부 task 층이었다. 결과는
+ * 조용한 구조적 고장이었다(실측): create가 심는 `task:bootstrap`을 닫는 코드가
+ * 없어 openTaskCount가 영원히 1 → 판정 사유 `no_open_tasks` 도달 불가 →
+ * automation-scheduler의 verifiedComplete 영원히 거짓 → **어떤 goal도
+ * completed로 끝날 수 없었다.** 남은 종료는 사용자 취소와 blocked뿐이었다.
+ *
+ * 원장 쪽은 멀쩡했다. 아무도 그 문을 두드리지 않았을 뿐이다.
+ */
+
+export interface GoalLedgerTask {
+  taskId: string;
+  summary: string;
+  state: string;
+  evidenceRef: string | null;
+  blockedReason: string | null;
+}
+
+function parseTasks(value: unknown): GoalLedgerTask[] | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  // 원장 goal 스키마 태그. 리터럴로 두는 것은 이 task 층이 goal 스냅샷 파서와
+  // 독립적으로 커밋될 수 있어야 하기 때문이다(같은 파일을 다른 세션이 편집 중).
+  if (row.schemaVersion !== "agentlas.goal-ledger.v1" || !Array.isArray(row.openTasks)) return null;
+  return row.openTasks
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .filter((item) => typeof item.taskId === "string" && typeof item.summary === "string")
+    .map((item) => ({
+      taskId: String(item.taskId),
+      summary: String(item.summary),
+      state: typeof item.state === "string" ? item.state : "todo",
+      evidenceRef: typeof item.evidenceRef === "string" ? item.evidenceRef : null,
+      blockedReason: typeof item.blockedReason === "string" ? item.blockedReason : null,
+    }));
+}
+
+/** 미완 task 목록. 원장에 닿지 못하면 null(빈 배열과 구분된다). */
+export async function listGoalLedgerTasks(
+  goalId: string,
+  projectDir?: string | null,
+): Promise<GoalLedgerTask[] | null> {
+  return parseTasks(await ledgerCall<unknown>(["tasks", goalId], projectDir));
+}
+
+/** task 하나를 근거와 함께 done으로 닫는다. */
+export async function completeGoalLedgerTask(input: {
+  goalId: string;
+  taskId: string;
+  evidence?: string | null;
+  projectDir?: string | null;
+}): Promise<boolean> {
+  const args = ["complete-task", input.goalId, "--task-id", input.taskId];
+  if (input.evidence) args.push("--evidence", input.evidence.slice(0, 240));
+  const result = await ledgerCall<{ state?: string }>(args, input.projectDir);
+  return result?.state === "done";
+}
+
+/**
+ * 모델이 goal 전체 완료를 선언했을 때 미완 task를 전부 닫고 닫은 개수를 돌려준다.
+ *
+ * 이것은 완료 판정이 아니라 **회계**다. 호출자는 이 뒤에 판정을 다시 읽어
+ * (`no_open_tasks`) 기존 신호 일치 규칙으로 goal을 닫을지 정한다. 여기서 바로
+ * goal을 completed로 만들면 모델의 한마디가 곧 완료가 되어, 지금 고치려는
+ * 결함의 정반대 결함(조기 완료)을 새로 만든다.
+ *
+ * 원장에 못 닿으면 0을 돌려주고 아무것도 바꾸지 않는다 — 기존 동작 그대로다.
+ */
+export async function closeOpenGoalLedgerTasks(input: {
+  goalId: string;
+  evidence?: string | null;
+  projectDir?: string | null;
+}): Promise<number> {
+  const open = await listGoalLedgerTasks(input.goalId, input.projectDir);
+  if (!open || open.length === 0) return 0;
+  let closed = 0;
+  for (const task of open) {
+    const ok = await completeGoalLedgerTask({
+      goalId: input.goalId,
+      taskId: task.taskId,
+      evidence: input.evidence ?? null,
+      projectDir: input.projectDir,
+    });
+    if (ok) closed += 1;
+  }
+  return closed;
+}

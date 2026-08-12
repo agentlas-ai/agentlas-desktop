@@ -224,6 +224,7 @@
     "test:telegram-api-timeout": "npm run build:electron && electron scripts/test-telegram-api-timeout.cjs",
     "test:telegram-automation-report-fanout": "npm run build:electron && electron scripts/test-telegram-automation-report-fanout.cjs",
     "test:telegram-judged-intents": "npm run build:electron && electron scripts/test-telegram-judged-intents.cjs",
+    "test:goal-completion": "npm run build:electron && node scripts/goal-completion-contract.cjs",
     "test:telegram-command-surface": "npm run build:electron && node scripts/telegram-command-surface-contract.cjs",
     "test:telegram-one-binding": "npm run build:electron && electron scripts/telegram-one-binding-contract.cjs",
     "test:telegram-one-dialog-ui": "npm run build:renderer && node scripts/telegram-one-dialog-ui-contract.mjs",

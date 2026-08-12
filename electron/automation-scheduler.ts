@@ -27,6 +27,7 @@ import { checkComputerUsePermissions } from "./mac-permissions";
 import { appendChatMessage, clearChatGoalBindingByGoalId, listChatMessages } from "./store/chats";
 import { completeChatGoalContract } from "./store/chat-goals";
 import {
+  closeOpenGoalLedgerTasks,
   completeGoalLedgerGoal,
   GOAL_HARD_STOP_REASONS,
   goalProgressKeyForText,
@@ -37,7 +38,13 @@ import { buildSystemOptimizerPrompt } from "./system-agents/system-optimizer";
 import { runMcpInvocation } from "./mcp/client";
 import { runGraph } from "./workflow/run-graph";
 import { broadcastLiveRun } from "./workflow/live-run";
-import { goalContinuationSchedule, isStormbreakerLongRunPrompt } from "./hephaestus/loop-engineering";
+import {
+  GOAL_COMPLETE_MARKER,
+  goalCompletionProtocol,
+  goalContinuationSchedule,
+  isStormbreakerLongRunPrompt,
+} from "./hephaestus/loop-engineering";
+import { currentUiLocale } from "./ui-locale";
 import { emitAutomationDone } from "./triggers/chain-bus";
 import {
   classifyAutomationFailure,
@@ -799,6 +806,17 @@ async function runOne(
         if (isAutomationRunParentMissingError(snapshotError)) throw snapshotError;
         /* 스냅샷 시작 실패는 무시 */
       }
+      /*
+       * goal 연속실행에만 종료 규약을 덧붙인다.
+       *
+       * promptTemplate은 자동화가 만들어질 때 DB에 굳는다. 규약을 프롬프트 빌더에만
+       * 넣으면 **이미 존재하는 캠페인은 영원히 마커를 배우지 못해** 여전히 못 끝난다.
+       * 실행 시점에 붙여야 옛 행도 같이 고쳐진다. 이미 들어 있으면 건드리지 않는다.
+       */
+      const withGoalCompletionProtocol = (prompt: string, goalId: string | null | undefined): string => {
+        if (!goalId || prompt.includes(GOAL_COMPLETE_MARKER)) return prompt;
+        return `${prompt}\n\n${goalCompletionProtocol(currentUiLocale())}`;
+      };
       const chat = getOrCreateAutomationSession({
         automationId: a.id,
         projectId: a.projectId ?? null,
@@ -809,10 +827,13 @@ async function runOne(
         const req = {
           runId,
           chatId: chat.chat.id,
-          userPrompt: buildAutomationContinuityPrompt(
-            chat.chat.id,
-            a.promptTemplate,
-            buildStrategyDirective(priorFailureContext),
+          userPrompt: withGoalCompletionProtocol(
+            buildAutomationContinuityPrompt(
+              chat.chat.id,
+              a.promptTemplate,
+              buildStrategyDirective(priorFailureContext),
+            ),
+            a.goalId,
           ),
           permissions: schedulerExecutionPermission(a),
           borrowAgents: a.targetType === "hub" ? [a.targetId] : undefined,
@@ -918,6 +939,22 @@ async function runOne(
            *           (진행 중이면 짧게, 아니면 백오프).
            * goal_id가 없거나 원장에 닿지 못하면 기존 마커-단독 규칙 그대로다.
            */
+          /*
+           * ★모델의 완료 선언을 원장에 먼저 반영한다.
+           *
+           * 이 경로의 채팅은 division이라 client.ts의 goal 계약 블록에서 제외된다
+           * (`chat.kind !== "division"`). 그래서 선언을 원장에 옮기는 일이 저기서
+           * 일어나지 않고 여기서만 일어난다 — 이 몇 줄이 빠져 있으면 백그라운드
+           * 연속실행은 `no_open_tasks`에 영원히 도달하지 못하고, 아래
+           * verifiedComplete는 죽은 분기로 남는다(그게 정확히 수리 전 상태였다).
+           */
+          if (a.goalId && result.goalCompletionClaim?.claimed) {
+            await closeOpenGoalLedgerTasks({
+              goalId: a.goalId,
+              evidence: result.goalCompletionClaim.evidence
+                ?? `automation:${a.id} ${goalProgressKeyForText(output ?? "")}`,
+            });
+          }
           const goalDecision = a.goalId
             ? await recordGoalLedgerCycle({
                 goalId: a.goalId,

@@ -14,6 +14,9 @@ import {
   buildGoalDrivenContinuationPrompt,
   buildStormbreakerLongRunPrompt,
   buildStormbreakerContinuationPrompt,
+  goalCompletionProtocol,
+  goalCompletionVerdict,
+  stripGoalCompleteMarker,
   CONTINUOUS_MODE_MAX_PASSES,
   goalContinuationSchedule,
   STORMBREAKER_LONG_RUN_SCHEDULE,
@@ -22,6 +25,8 @@ import {
   stripStormbreakerContinueMarker,
 } from "../hephaestus/loop-engineering";
 import {
+  closeOpenGoalLedgerTasks,
+  completeGoalLedgerGoal,
   deriveGoalAcceptanceCriteria,
   ensureGoalLedgerGoal,
   GOAL_HARD_STOP_REASONS,
@@ -1028,6 +1033,15 @@ export interface McpInvocationResult {
   finalText?: string;
   tokens?: number;
   stormbreakerContinueRequested: boolean;
+  /**
+   * 모델이 이 턴에서 goal 전체 완료를 선언했는가(+ 같이 적은 근거).
+   *
+   * 채팅 경로는 여기서 바로 원장을 닫지만, 스케줄러가 쓰는 division 채팅은
+   * goal 계약 블록 자체에서 제외되므로(`chat.kind !== "division"`) 원장 회계가
+   * 호출자 쪽에 있다. 그 호출자에게 선언을 전달할 유일한 통로가 이 칸이다 —
+   * 없으면 마커는 텍스트에서 지워진 뒤 아무 데도 도달하지 못한다.
+   */
+  goalCompletionClaim?: { claimed: boolean; evidence: string | null };
   resultFolder?: string;
   /**
    * 커넥터 C38 — 이 호출에서 도구 중개가 **실제로** 어디까지 걸렸는가. 계획이 아니라
@@ -3384,15 +3398,41 @@ export async function runMcpInvocation(
     // 예산 소진·무진전 정지·명시 종료는 마커가 있어도 정지시킨다(폭주 방지, 사람 호출).
     let latestGoalDecision: GoalLedgerDecision | null = null;
     let goalHardStop: GoalLedgerDecision | null = null;
+    /*
+     * 완료 선언은 중간 패스에서 나올 수 있고, 그때 처리하지 않으면 두 가지가 깨진다.
+     * ① 이 패스의 본문은 appendChatMessage로 즉시 영속되므로 마커가 대화에 남는다.
+     * ② 원장이 아직 "미완"이라 goalDrivenPass가 계속 참이 되어, 모델이 매 패스
+     *    "다 끝났다"고 말하는데 루프는 상한까지 도는 — 고치려던 것과 같은 무한
+     *    진행이 형태만 바꿔 되돌아온다.
+     * 그래서 여기서 바로 원장에 반영하고, 선언 사실은 루프 밖으로 들고 나간다.
+     */
+    let goalClaimSeen = false;
+    let goalClaimEvidence: string | null = null;
     for (let pass = 2; pass <= maxPasses; pass += 1) {
-      const continuation = stripStormbreakerContinueMarker(result.text);
+      const rawContinuation = stripStormbreakerContinueMarker(result.text);
+      const passClaim = stripGoalCompleteMarker(rawContinuation.text);
+      if (passClaim.claimed) {
+        goalClaimSeen = true;
+        goalClaimEvidence = goalClaimEvidence ?? passClaim.evidence;
+      }
+      const continuation = { text: passClaim.text, shouldContinue: rawContinuation.shouldContinue };
       let passShouldContinue = continuation.shouldContinue;
       let goalDrivenPass = false;
       if (activeGoalId && continuousMode && !signal?.aborted) {
+        if (passClaim.claimed) {
+          await closeOpenGoalLedgerTasks({
+            goalId: activeGoalId,
+            evidence: passClaim.evidence
+              ?? `chat:${chat.id} pass:${pass - 1} ${goalProgressKeyForText(continuation.text)}`,
+            projectDir: workforceProjectDir,
+          });
+        }
         latestGoalDecision = await recordGoalLedgerCycle({
           goalId: activeGoalId,
           progressKey: goalProgressKeyForText(continuation.text),
-          outcome: passShouldContinue ? "pass-continue-marker" : "pass-final-output",
+          outcome: passClaim.claimed
+            ? "pass-goal-complete-claim"
+            : passShouldContinue ? "pass-continue-marker" : "pass-final-output",
           projectDir: workforceProjectDir,
         }) ?? latestGoalDecision;
         if (latestGoalDecision) {
@@ -3526,18 +3566,42 @@ export async function runMcpInvocation(
       }
     }
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
+    // 완료 선언 회수는 **모든 경로가 지나는 이 한 지점**에서 한다. 패스 루프 안에서만
+    // 떼면 agentAppMode(maxPasses=1)나 One 복구 패스로 끝난 턴에서 마커가 사용자에게
+    // 그대로 나간다 — 제어 표식이 답변에 새는 계열의 결함을 새로 만드는 셈이다.
+    const finalClaim = stripGoalCompleteMarker(finalContinuation.text);
+    // 중간 패스에서 이미 선언했으면 그 사실은 마지막 본문에 남아 있지 않다 —
+    // 루프가 그 패스에서 마커를 떼어 냈기 때문이다. 선언은 OR로 합친다.
+    const goalCompletion = {
+      text: finalClaim.text,
+      claimed: finalClaim.claimed || goalClaimSeen,
+      evidence: finalClaim.evidence ?? goalClaimEvidence,
+    };
     let stormbreakerContinueRequested = !req.agentAppMode && finalContinuation.shouldContinue;
-    result = { ...result, text: finalContinuation.text };
+    result = { ...result, text: goalCompletion.text };
     // ── persistent goal 최종 판정 (L2: continue = 모델마커 OR goal 미달) ──────
     // 라이브 루프가 이미 사이클을 기록했으면 그 판정을 재사용하고, 아니면(비-continuous
     // 경로·read 경계 등) 여기서 한 사이클을 기록해 회계를 이어간다. goal 미달이면 마커
     // 없이도 연속실행이 예약되고, 예산/정지/종료는 마커보다 우선한다.
     if (!req.agentAppMode && activeGoalId && chat.kind !== "division" && !signal?.aborted) {
+      if (goalCompletion.claimed) {
+        await closeOpenGoalLedgerTasks({
+          goalId: activeGoalId,
+          // 근거를 안 적었으면 감사 가능한 대체값을 넣는다. 근거를 필수로 하면
+          // 맨 마커가 조용히 무시돼 "완료가 안 되는" 원래 결함이 되돌아온다.
+          evidence: goalCompletion.evidence
+            ?? `chat:${chat.id} ${goalProgressKeyForText(goalCompletion.text)}`,
+          projectDir: workforceProjectDir,
+        });
+        latestGoalDecision = null;
+      }
       if (!latestGoalDecision) {
         latestGoalDecision = await recordGoalLedgerCycle({
           goalId: activeGoalId,
-          progressKey: goalProgressKeyForText(finalContinuation.text),
-          outcome: stormbreakerContinueRequested ? "turn-continue-marker" : "turn-final-output",
+          progressKey: goalProgressKeyForText(goalCompletion.text),
+          outcome: goalCompletion.claimed
+            ? "turn-goal-complete-claim"
+            : stormbreakerContinueRequested ? "turn-continue-marker" : "turn-final-output",
           projectDir: workforceProjectDir,
         });
       }
@@ -3551,6 +3615,47 @@ export async function runMcpInvocation(
         ) {
           stormbreakerContinueRequested = false;
           goalHardStop = latestGoalDecision;
+        }
+      }
+      /*
+       * 완료 확정 — 세 신호가 모두 같은 말을 할 때만이다.
+       *   ① 모델이 근거와 함께 완료를 선언했고
+       *   ② 더 할 일이 있다고 하지 않았고
+       *   ③ 호스트 원장에도 미완 항목이 없다.
+       * ③은 ①이 만들어 준 상태이지만 원장이 독립적으로 되읽은 값이다 —
+       * 예산 소진·무진전 정지 상태에서는 사유가 달라 여기 들어오지 못한다.
+       * 선언만으로 닫지 않는 이유: 그러면 모델의 한마디가 곧 완료가 되어
+       * "영원히 안 끝남"을 "너무 일찍 끝남"으로 바꿔치기할 뿐이다.
+       */
+      if (goalCompletionVerdict({
+        claimed: goalCompletion.claimed,
+        continueRequested: stormbreakerContinueRequested,
+        ledgerReason: latestGoalDecision?.reason,
+      })) {
+        const closed = await completeGoalLedgerGoal({
+          goalId: activeGoalId,
+          status: "completed",
+          reason: "model-declared-verified-no-open-tasks",
+          projectDir: workforceProjectDir,
+        });
+        if (closed) {
+          // 목표 칩을 내린다 — 끝난 goal이 계속 켜져 있으면 다음 메시지가
+          // 죽은 캠페인에 붙는다.
+          try {
+            clearChatGoalBindingByGoalId(activeGoalId);
+          } catch {
+            /* 바인딩 정리 실패가 완료 자체를 되돌리지는 않는다. */
+          }
+          // 조용한 완료는 고장과 구분되지 않는다 — 정지 사유를 알리는 것과 같은 이유로 알린다.
+          sink({
+            kind: "tool-use",
+            tool: {
+              name: "Goal Loop · complete",
+              result: locale === "ko"
+                ? `목표를 완료로 닫았습니다${goalCompletion.evidence ? ` (근거: ${goalCompletion.evidence})` : ""}. 목표 칩은 내려갑니다 — 새 목표는 다시 켜서 시작하세요.`
+                : `Goal closed as completed${goalCompletion.evidence ? ` (evidence: ${goalCompletion.evidence})` : ""}. The goal chip is now off — re-enable it to start a new one.`,
+            },
+          });
         }
       }
     }
@@ -4130,6 +4235,7 @@ export async function runMcpInvocation(
         finalText: displayWithFloor,
         tokens: result.tokens,
         stormbreakerContinueRequested,
+        goalCompletionClaim: { claimed: goalCompletion.claimed, evidence: goalCompletion.evidence },
         resultFolder: resolvedResultFolder,
         workforcePrepareReceipt,
       };
@@ -4146,6 +4252,7 @@ export async function runMcpInvocation(
       finalText: displayWithFloor,
       tokens: result.tokens,
       stormbreakerContinueRequested,
+      goalCompletionClaim: { claimed: goalCompletion.claimed, evidence: goalCompletion.evidence },
       resultFolder: resolvedResultFolder,
       workforcePrepareReceipt,
       // C38 — 계획이 아니라 **결과**를 돌려준다. 관문 파일을 만들어 놓고 실행이 다른
