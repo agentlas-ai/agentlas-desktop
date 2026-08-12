@@ -86,7 +86,6 @@ import {
   hasWellShapedEvidence,
   loadCuratorRuleset,
   mentionsProjectSpecifics as rulesMentionsProjectSpecifics,
-  widensCapability,
   type TeamLearningLayer,
   narrowAgentRepoScope,
   noWorkspaceFallbackScope,
@@ -535,28 +534,11 @@ export function curateEvents(
       continue;
     }
 
-    // R21 W2b — a memory may never widen tool permissions (n=1 invariant, R20).
-    // Discarded like a policy violation; an approval OBSERVATION is not matched.
-    if (widensCapability(ev.content)) {
-      report.discarded += 1;
-      recordCandidateDecision({
-        options,
-        index,
-        event: ev,
-        scope: "discard",
-        action: "discarded",
-        reason: "capability-widening",
-      });
-      if (ctx.projectPath) {
-        appendMemoryLog(ctx.projectPath, {
-          action: "discarded",
-          reason: "capability-widening",
-          kind: ev.memory_kind,
-          at: new Date().toISOString(),
-        });
-      }
-      continue;
-    }
+    // Capability-widening content screening was REMOVED 2026-08-12 (owner
+    // decision) — a content wordlist cannot separate a widening assertion from a
+    // safety lesson across languages. Misevolution defence is delegated to recall
+    // framing + the PreToolUse broker; see one_workspace._classify and the
+    // ruleset _capabilityWideningNote.
 
     // R21 W2a — an evidence-required claim whose evidence is present but all
     // ill-shaped (self-reported ratings/feelings only) is held to the session

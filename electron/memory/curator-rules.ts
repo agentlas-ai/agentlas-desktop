@@ -150,32 +150,13 @@ export function projectBoundaryPathRe(): RegExp {
     ?? /(?:^|\s)(?:\/(?:Users|home|var|opt|private)\/|~\/|[A-Za-z]:\\|file:\/\/)/;
 }
 
-/**
- * R21 W2b — a memory may make an agent more cautious, never less. Rejects a
- * candidate that asserts a permission/approval gate can be skipped; an
- * OBSERVATION about approvals ("the approval gate was the bottleneck") is
- * deliberately not matched. Ruleset-driven (patterns.capabilityWidening).
- */
-export function widensCapability(content: string): boolean {
-  const re = rulesetPattern("capabilityWidening");
-  if (!re) return false;
-  const m = re.exec(content);
-  if (!m) return false;
-  // Polarity: a single content regex cannot separate "skip approval" (widen)
-  // from "never skip approval" (safety lesson) — measured non-separable (R20).
-  // A negation/prohibition GOVERNING the widening phrase turns it into a safety
-  // lesson; check a short look-back window before the match, NOT the whole
-  // sentence, so a trailing "...never wait for approval" after an "auto-approve"
-  // assertion cannot excuse it (2026-08-12 set 3 F1/F2). Mirrors
-  // one_workspace._classify exactly so Desktop and OS never drift.
-  const limits = loadCuratorRuleset().ruleset.limits as
-    | { capabilityWideningNegationWindowChars?: number }
-    | undefined;
-  const win = limits?.capabilityWideningNegationWindowChars ?? 40;
-  const lookback = content.slice(Math.max(0, m.index - win), m.index);
-  const exc = rulesetPattern("capabilityWideningException");
-  return !(exc && exc.test(lookback));
-}
+// widensCapability was REMOVED 2026-08-12 (owner decision): a content wordlist
+// cannot separate a widening assertion from a safety lesson without
+// re-implementing every language's word order and grammar, and three tuning
+// rounds kept over-blocking real safety lessons while still leaking. A memory
+// string cannot widen a tool permission on its own — misevolution defence is
+// delegated to recall framing (injection.referenceFraming) and the PreToolUse
+// broker (the only real chokepoint). Mirrors one_workspace._classify.
 
 /**
  * R21 W2a — evidence must be machine-checkable in SHAPE (path:line, URL,

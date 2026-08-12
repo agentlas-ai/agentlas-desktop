@@ -5724,71 +5724,83 @@ export function supersedeAgentNestExperienceMemory(
   if (!normalizedSlug || sourceIds.length === 0) return false;
   const paths = activeHubMemoryNestPaths(normalizedSlug);
   if (!paths) return false;
-  const dbPath = path.join(paths.writableMemoryRoot, "experience.sqlite");
-  let db: Database.Database | null = null;
-  try {
-    if (!fs.existsSync(dbPath)) return false;
-    const stat = fs.lstatSync(dbPath);
-    if (stat.isSymbolicLink() || !stat.isFile()) return false;
-    db = new Database(dbPath);
-    db.pragma("foreign_keys = ON");
-    const agentId = `hub:${normalizedSlug}`;
-    const now = new Date().toISOString();
-    const selectTicket = db.prepare(
-      `SELECT ticket_id, status, privacy_scope FROM memory_candidates
-        WHERE agent_id = ? AND source_memory_id = ? AND suggested_scope = 'agent_repo'`,
-    );
-    const updateStatus = db.prepare(
-      `UPDATE memory_candidates SET status = 'superseded', updated_at = ?
-        WHERE agent_id = ? AND source_memory_id = ? AND suggested_scope = 'agent_repo'
-          AND status = 'active'`,
-    );
-    const deleteDerivedLinks = db.prepare(
-      `DELETE FROM memory_links
-        WHERE link_type = 'similar_to' AND (from_ticket = ? OR to_ticket = ?)`,
-    );
-    const insertSupersedes = db.prepare(`
-      INSERT OR REPLACE INTO memory_links (
-        link_id, from_ticket, to_ticket, link_type, score, reason, created_at
-      ) VALUES (?, ?, ?, 'supersedes', 1.0, 'desktop memory consolidation', ?)
-    `);
-    const successor = successorSourceMemoryId?.trim()
-      ? selectTicket.get(agentId, successorSourceMemoryId.trim()) as {
-          ticket_id: string;
-          status: string;
-          privacy_scope: string | null;
-        } | undefined
-      : undefined;
-    const reconcile = db.transaction(() => {
-      for (const sourceId of sourceIds) {
-        const target = selectTicket.get(agentId, sourceId) as {
-          ticket_id: string;
-          status: string;
-          privacy_scope: string | null;
-        } | undefined;
-        if (!target || target.ticket_id === successor?.ticket_id) continue;
-        updateStatus.run(now, agentId, sourceId);
-        deleteDerivedLinks.run(target.ticket_id, target.ticket_id);
-        if (
-          successor?.status === "active"
-          && successor.privacy_scope === target.privacy_scope
-        ) {
-          insertSupersedes.run(
-            stableNestHash("memory-link", successor.ticket_id, target.ticket_id, "supersedes").slice(0, 24),
-            successor.ticket_id,
-            target.ticket_id,
-            now,
-          );
+  // Retire the source ids in EVERY readable root, not just the writable one.
+  // After the device-local flat move (c0e2931), memories that predate it live in
+  // a read-only legacy owner root; a consolidation that only touched the writable
+  // root could never supersede them, so a curator-corrected misdiagnosis kept
+  // being recalled alongside its replacement (2026-08-12 set 4). The successor
+  // edge is written only in the db that actually holds the successor (links do
+  // not cross sqlite files); a retired target elsewhere is still marked
+  // superseded so recall (status='active') stops surfacing it.
+  let anyReconciled = false;
+  for (const root of paths.readableMemoryRoots) {
+    const dbPath = path.join(root, "experience.sqlite");
+    let db: Database.Database | null = null;
+    try {
+      if (!fs.existsSync(dbPath)) continue;
+      const stat = fs.lstatSync(dbPath);
+      if (stat.isSymbolicLink() || !stat.isFile()) continue;
+      db = new Database(dbPath);
+      db.pragma("foreign_keys = ON");
+      const agentId = `hub:${normalizedSlug}`;
+      const now = new Date().toISOString();
+      const selectTicket = db.prepare(
+        `SELECT ticket_id, status, privacy_scope FROM memory_candidates
+          WHERE agent_id = ? AND source_memory_id = ? AND suggested_scope = 'agent_repo'`,
+      );
+      const updateStatus = db.prepare(
+        `UPDATE memory_candidates SET status = 'superseded', updated_at = ?
+          WHERE agent_id = ? AND source_memory_id = ? AND suggested_scope = 'agent_repo'
+            AND status = 'active'`,
+      );
+      const deleteDerivedLinks = db.prepare(
+        `DELETE FROM memory_links
+          WHERE link_type = 'similar_to' AND (from_ticket = ? OR to_ticket = ?)`,
+      );
+      const insertSupersedes = db.prepare(`
+        INSERT OR REPLACE INTO memory_links (
+          link_id, from_ticket, to_ticket, link_type, score, reason, created_at
+        ) VALUES (?, ?, ?, 'supersedes', 1.0, 'desktop memory consolidation', ?)
+      `);
+      const successor = successorSourceMemoryId?.trim()
+        ? selectTicket.get(agentId, successorSourceMemoryId.trim()) as {
+            ticket_id: string;
+            status: string;
+            privacy_scope: string | null;
+          } | undefined
+        : undefined;
+      const reconcile = db.transaction(() => {
+        for (const sourceId of sourceIds) {
+          const target = selectTicket.get(agentId, sourceId) as {
+            ticket_id: string;
+            status: string;
+            privacy_scope: string | null;
+          } | undefined;
+          if (!target || target.ticket_id === successor?.ticket_id) continue;
+          updateStatus.run(now, agentId, sourceId);
+          deleteDerivedLinks.run(target.ticket_id, target.ticket_id);
+          if (
+            successor?.status === "active"
+            && successor.privacy_scope === target.privacy_scope
+          ) {
+            insertSupersedes.run(
+              stableNestHash("memory-link", successor.ticket_id, target.ticket_id, "supersedes").slice(0, 24),
+              successor.ticket_id,
+              target.ticket_id,
+              now,
+            );
+          }
         }
-      }
-    });
-    reconcile();
-    return true;
-  } catch {
-    return false;
-  } finally {
-    try { db?.close(); } catch { /* best-effort projection */ }
+      });
+      reconcile();
+      anyReconciled = true;
+    } catch {
+      // best-effort projection — skip this root, still try the others
+    } finally {
+      try { db?.close(); } catch { /* best-effort projection */ }
+    }
   }
+  return anyReconciled;
 }
 
 /** Resolve exact source-memory -> borrowed-agent projection ownership. */
