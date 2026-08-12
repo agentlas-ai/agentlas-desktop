@@ -3,6 +3,7 @@
 // (1) 무엇이 멈췄는지 실제 사유와 (2) 사용자가 지금 누를 수 있는 행동을 함께 준다.
 // 사유도 행동도 없는 "확인이 필요해요"는 사용자를 막다른 길에 세운다.
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { automationRunNeedsAttention } from "@shared/automation-attention";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
@@ -142,13 +143,9 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
       // 사용자가 이미 닫은 요구는 다시 올리지 않는다 — 기록은 아래 목록에 그대로 있다.
       // (오너 보고 2026-08-06: 옛 핀 시절 실행의 "클로드 재로그인" 카드가 해소 수단
       // 없이 눌러앉았다. 그 뒤 성공 실행이 없으면 lastOkAt 규칙만으로는 영원히 남는다.)
-      if (run.acknowledgedAt) return false;
-      // 실행 상태가 멀쩡해도 판정이 "사람이 정해야 한다"면 그것도 확인이 필요한 상태다.
-      // 두 답이 한 칸에 있던 때는 자동으로 걸렸지만, 칸을 나눈 뒤로는 둘 다 봐야 한다.
-      const needsAttention = run.status === "error" || run.status === "needs_input"
-        || run.status === "blocked" || run.status === "partial"
-        || run.outcome === "needs_input" || run.outcome === "blocked" || run.outcome === "rejected";
-      if (!needsAttention) return false;
+      // 규칙은 shared/automation-attention.ts 한 벌이 소유한다 — 모바일 투영도
+      // 같은 함수를 부른다. 손으로 두 벌 쓰던 시절엔 두 화면의 답이 달랐다.
+      if (!automationRunNeedsAttention(run)) return false;
       if (lastOkAt === null) return true;
       const at = Date.parse(run.ranAt);
       return !Number.isFinite(at) || at > lastOkAt;

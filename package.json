@@ -211,6 +211,7 @@
     "test:prompts-start-failure-ui": "npm run build:renderer && node scripts/test-prompts-start-failure-ui.cjs",
     "test:settings-resilience-ui": "npm run build:renderer && node scripts/test-settings-resilience-ui.cjs",
     "test:agent-control-block-parity": "npm run build:electron && node scripts/agent-control-block-parity-contract.cjs",
+    "test:automation-attention": "npm run build:electron && node scripts/automation-attention-contract.cjs",
     "test:owner-cloud-shelf-paging": "npm run build:electron && node scripts/owner-cloud-shelf-paging-contract.cjs",
     "test:schedule-describe": "npm run build:electron && node scripts/schedule-describe-contract.cjs",
     "test:mobile-bridge-contract": "npm run build:electron && electron scripts/test-mobile-bridge-contract.cjs",
