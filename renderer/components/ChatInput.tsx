@@ -356,7 +356,9 @@ function ChatInputComponent({
   const initialDraftRef = useRef<ChatComposerDraftCache | null>(null);
   if (initialDraftRef.current === null) initialDraftRef.current = readChatComposerDraft(activeChatId);
   const [input, setInputState] = useState(initialDraftRef.current.input);
-  const [stagedSteering, setStagedSteeringState] = useState<StagedSteeringDraft | null>(initialDraftRef.current.stagedSteering);
+  // Legacy staged adjustments are deliberately discarded: a busy composer now
+  // sends its steering instruction directly, like Codex.
+  const [stagedSteering, setStagedSteeringState] = useState<StagedSteeringDraft | null>(null);
   const activeChatIdRef = useRef<string | null>(activeChatId);
   function setInput(next: string | ((current: string) => string)) {
     if (typeof next === "string") {
@@ -484,7 +486,7 @@ function ChatInputComponent({
     activeChatIdRef.current = activeChatId;
     const restored = readChatComposerDraft(activeChatId);
     setInputState(restored.input);
-    setStagedSteeringState(restored.stagedSteering);
+    setStagedSteeringState(null);
   }, [activeChatId]);
 
   // 세션 격리 — 채팅을 바꾸면 이전 세션의 실행 의도 상태(추천 시트·모드 토글·선택)를 버린다.
@@ -721,15 +723,9 @@ function ChatInputComponent({
     if (submitDisabled) return;
     const text = withAttachmentContext(input.trim());
     if (busy) {
-      // Codex-shaped steering: submitting while a model is running stages a
-      // transient adjustment above the composer. Nothing reaches Main until
-      // the person explicitly chooses "현재 작업 조정".
-      setStagedSteering({
-        text,
-        opts: currentSendOptions(),
-        previewDataUrl: images[0]?.dataUrl,
-        attachmentCount: images.length + fileGrants.length + pastedTexts.length,
-      });
+      // Codex-shaped steering: the round send control immediately queues the
+      // next instruction. Main preserves the active model turn.
+      onSend(text, currentSendOptions());
       finishComposerAfterSend();
       return;
     }
@@ -1890,14 +1886,14 @@ function ChatInputComponent({
                   <button
                     type="button"
                     className="chat-input-send-button"
-                    data-chat-steering-stage={busy ? "true" : undefined}
+                    data-chat-steering-send={busy ? "true" : undefined}
                     onClick={submit}
                     disabled={submitDisabled}
                     aria-label={busy
-                      ? (locale === "ko" ? "작업 조정 초안 올리기" : "Stage a work adjustment")
+                      ? (locale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
                       : t("chatinput.send")}
                     title={busy
-                      ? (locale === "ko" ? "먼저 초안으로 올린 뒤 현재 작업 조정을 눌러 보냅니다" : "Stage this first, then choose Adjust current work to send")
+                      ? (locale === "ko" ? "현재 작업을 중단하지 않고 다음 지시를 보냅니다" : "Sends the next instruction without stopping the model")
                       : undefined}
                     style={{
                       width: 38,

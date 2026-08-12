@@ -24,6 +24,7 @@ export type OneComposerModelOption = {
   id: string;
   label: string;
   tag?: string;
+  runtime: RuntimeStatus;
 };
 
 export type OneComposerAgentOption = {
@@ -48,7 +49,7 @@ type Props = {
   onAddFolder: () => void;
   onOpenPlugins: () => void;
   onToggleAgent: (id: string) => void;
-  onSelectModel: (id: string) => void;
+  onSelectModel: (runtime: RuntimeStatus, id: string) => void;
   onSelectEffort: (id: string) => void;
   onSelectPermission: (permission: OnePermissionMode) => void;
   onToggleTurnOption: (key: OneTurnOptionKey) => void;
@@ -141,10 +142,10 @@ export function OneComposerControls({
             {activeMenu === "model" && (
               <>
                 {runtime && runtime.kind !== "byok" && (
-                  <ComposerRow icon={<IconSparkles size={15} />} title={locale === "ko" ? "구독 기본" : "Subscription default"} checked={!runtime.model} onClick={() => onSelectModel("")} />
+                  <ComposerRow icon={<IconSparkles size={15} />} title={locale === "ko" ? "구독 기본" : "Subscription default"} checked={!runtime.model} onClick={() => onSelectModel(runtime, "")} />
                 )}
                 {filteredModels.map((item) => (
-                  <ComposerRow key={item.id} icon={<IconSparkles size={15} />} title={item.label} subtitle={item.tag} checked={runtime?.model === item.id} onClick={() => onSelectModel(item.id)} />
+                  <ComposerRow key={`${item.runtime.kind}:${item.runtime.backend}:${item.id}`} icon={<IconSparkles size={15} />} title={item.label} subtitle={item.tag} checked={runtime?.kind === item.runtime.kind && runtime?.backend === item.runtime.backend && runtime?.model === item.id} onClick={() => onSelectModel(item.runtime, item.id)} />
                 ))}
               </>
             )}

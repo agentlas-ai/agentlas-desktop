@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.2 — 2026-08-13
+
+- One's model picker now lists every locally connected runtime, not only the
+  runtime that happened to be active when the conversation opened. Selecting a
+  model persists that exact provider/model pair on the conversation.
+- Adds the Claude Code `fable` alias, verified by a real local Claude Code
+  invocation, instead of hiding it behind an incomplete model discovery list.
+- A running Work or One chat now sends the next instruction from the same round
+  composer control immediately, queues it without cancelling the active model,
+  and preserves the eventual final answer across reconciliation.
+- Binds Agentlas OS v1.2.0 at 8b3f8bcffdfc57bf4991ed6e43d153d9230ea186. Source readiness does not prove a published installer or update feed.
+
 ## 1.0.1 — 2026-08-12
 
 - Fixes the release compatibility contract to match the persisted database migration target.
