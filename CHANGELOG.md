@@ -7,6 +7,10 @@
   empty map canvas instead of restoring the retired logo/hero screen.
 - Adds the fallback to the One visual contract so a future API, loading, or
   empty-graph regression cannot silently bring the old first screen back.
+- Binds Agentlas OS v1.2.0 at
+  8b3f8bcffdfc57bf4991ed6e43d153d9230ea186.
+- Source readiness does not prove a published installer or update feed; the
+  signed release must still pass the public release and update-channel gates.
 
 ## 1.0.3 — 2026-08-13
 
