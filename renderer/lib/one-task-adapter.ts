@@ -514,11 +514,13 @@ export function chooseOneBriefing(
       kind: "working",
       eyebrow: ko ? "진행 중" : "In progress",
       title: ko ? "팀이 한 가지 일을 진행하고 있어요." : "Your team is working on one task.",
-      body: localizedBriefingBody(
-        working.display.title,
-        locale,
-        ["현재 진행 중인 일을 열어볼 수 있어요.", "Open the task to see the work in progress."],
-      ),
+      // A task title is untrusted runtime text. It may contain a command,
+      // local path, or an unfinished provider error, so One home never turns
+      // it into a floating status-card body. The task view retains the exact
+      // title and Activity evidence behind the explicit "View progress" action.
+      body: ko
+        ? "현재 진행 중인 일을 열어볼 수 있어요."
+        : "Open the task to see the work in progress.",
       prepared: ko
         ? "완료됐다고 추측하지 않고 실제 진행 상황만 보여드려요."
         : "One shows only the actual progress and never guesses that the work is done.",

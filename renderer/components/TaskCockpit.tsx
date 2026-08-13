@@ -3224,13 +3224,27 @@ function ChatPage() {
   async function removeChat() {
     const api = ipc();
     if (!api || !chat) return;
+    if (busy) {
+      setSessionNotice(locale === "ko"
+        ? "실행 중인 작업은 삭제할 수 없습니다. 먼저 실행을 멈추고 종료될 때까지 기다려 주세요."
+        : "You cannot delete a running task. Stop it and wait for the run to finish first.");
+      return;
+    }
     if (!confirm(locale === "ko" ? "이 작업을 삭제할까요?" : "Delete this task?")) return;
     const removedId = chat.id;
-    setChat(null);
-    setMessages([]);
-    dropChatViewSnapshot(removedId);
-    await api.chats.remove(chat.id);
-    router.replace("/");
+    try {
+      // Main이 active-run registry를 다시 확인한다. 삭제가 실제로 끝난 뒤에만 화면의
+      // 로컬 사본을 비워서 거절된 삭제가 빈 화면으로 보이지 않게 한다.
+      await api.chats.remove(removedId);
+      setChat(null);
+      setMessages([]);
+      dropChatViewSnapshot(removedId);
+      router.replace("/");
+    } catch {
+      setSessionNotice(locale === "ko"
+        ? "작업이 아직 실행 중이거나 삭제할 수 없는 상태입니다. 실행을 멈춘 뒤 다시 시도해 주세요."
+        : "This task is still running or cannot be deleted. Stop the run and try again.");
+    }
   }
 
   // ── 스트리밍 파셜마다 ChatStream 이하 전체가 리렌더되던 원인 수리 ──

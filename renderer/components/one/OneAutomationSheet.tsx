@@ -17,6 +17,7 @@ import { ipc } from "@/lib/ipc";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { tFor } from "@/lib/i18n";
 import type { Automation, AutomationCreateInput } from "@/lib/types";
+import { OneBottomSheet } from "./OneBottomSheet";
 import styles from "./OneAutomationSheet.module.css";
 
 /** One 실행을 맡는 기본 로컬 에이전트 슬러그 — chats fallback과 같은 대상. */
@@ -65,7 +66,6 @@ function formatNextRun(value: string | null, locale: "ko" | "en"): string | null
 }
 
 export function OneAutomationSheet({ open, locale, onClose, onOpenAutomation }: OneAutomationSheetProps) {
-  const dialogRef = useRef<HTMLDivElement>(null);
   const busyRef = useRef(false);
   const [name, setName] = useState("");
   const [cadence, setCadence] = useState<Cadence>("daily");
@@ -81,40 +81,6 @@ export function OneAutomationSheet({ open, locale, onClose, onOpenAutomation }: 
     if (!open) return;
     setError(null);
     setCreated(null);
-    const priorFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const timer = window.setTimeout(
-      () => dialogRef.current?.querySelector<HTMLElement>("input, select, textarea, button")?.focus(),
-      0,
-    );
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busyRef.current) {
-        event.preventDefault();
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const dialog = dialogRef.current;
-      if (!dialog) return;
-      const focusable = [...dialog.querySelectorAll<HTMLElement>(
-        "button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled])",
-      )];
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.clearTimeout(timer);
-      window.removeEventListener("keydown", onKeyDown);
-      priorFocus?.focus();
-    };
   }, [onClose, open]);
 
   const submit = useCallback(async (event?: FormEvent) => {
@@ -166,17 +132,21 @@ export function OneAutomationSheet({ open, locale, onClose, onOpenAutomation }: 
   const nextRunLabel = created ? formatNextRun(created.nextRunAt, locale) : null;
 
   return (
-    <div className={styles.backdrop}>
-      <div
-        ref={dialogRef}
-        className={styles.sheet}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="one-automation-sheet-title"
-      >
+    <OneBottomSheet
+      open={open}
+      onClose={onClose}
+      closeLabel={tFor(locale, "one.autosheet.close")}
+      ariaLabelledBy="one-automation-sheet-title"
+      closeOnBackdrop={!busy}
+      closeOnEscape={!busy}
+      closeDisabled={busy}
+      title={created ? tFor(locale, "one.autosheet.success_title") : tFor(locale, "one.autosheet.title")}
+      titleId="one-automation-sheet-title"
+      description={created ? undefined : tFor(locale, "one.autosheet.body")}
+    >
+      <div className={styles.content}>
         {created ? (
           <div className={styles.success} data-one-automation-created="true">
-            <h2 id="one-automation-sheet-title">{tFor(locale, "one.autosheet.success_title")}</h2>
             <p className={styles.successName}>{created.name}</p>
             <p className={styles.successNext}>
               {nextRunLabel
@@ -194,8 +164,6 @@ export function OneAutomationSheet({ open, locale, onClose, onOpenAutomation }: 
           </div>
         ) : (
           <form onSubmit={(event) => void submit(event)}>
-            <h2 id="one-automation-sheet-title">{tFor(locale, "one.autosheet.title")}</h2>
-            <p className={styles.body}>{tFor(locale, "one.autosheet.body")}</p>
             <label className={styles.field}>
               <span>{tFor(locale, "one.autosheet.name")}</span>
               <input
@@ -230,11 +198,15 @@ export function OneAutomationSheet({ open, locale, onClose, onOpenAutomation }: 
                 <label className={styles.field}>
                   <span>{tFor(locale, "one.autosheet.time")}</span>
                   <input
-                    type="time"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="off"
+                    required
+                    maxLength={5}
+                    pattern="(?:[01]\\d|2[0-3]):[0-5]\\d"
+                    placeholder="09:00"
                     value={time}
-                    onChange={(event) => {
-                      if (/^\d{2}:\d{2}$/.test(event.target.value)) setTime(event.target.value);
-                    }}
+                    onChange={(event) => setTime(event.target.value)}
                   />
                 </label>
               )}
@@ -265,6 +237,6 @@ export function OneAutomationSheet({ open, locale, onClose, onOpenAutomation }: 
           </form>
         )}
       </div>
-    </div>
+    </OneBottomSheet>
   );
 }

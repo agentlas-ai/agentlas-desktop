@@ -35,6 +35,11 @@ module.exports = async function beforePackPrepare(context) {
     env: process.env,
     stdio: "inherit",
   });
+  execFileSync(process.execPath, [path.join(projectDir, "scripts", "prepare-embedded-core.mjs")], {
+    cwd: projectDir,
+    env: process.env,
+    stdio: "inherit",
+  });
 };
 
 module.exports.verifyPublicPackageMetadata = verifyPublicPackageMetadata;

@@ -6,9 +6,11 @@
 //    "항상 승인" 버튼은 뜨지 않는다(승인 캐시 금지 = 매번 확인). 버튼은 플래그로만 살아난다.
 //  - "거부"는 electron이 site+action 으로 기억 → 다음부터 시트 없이 차단(browser:revokePermission으로 해제).
 import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 import { useT } from "@/lib/i18n";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type { BrowserApprovalRequestEvent, BrowserApprovalDecision } from "@/lib/types";
+import { OneBottomSheet } from "@/components/one/OneBottomSheet";
 
 const ACTION_LABEL: Record<string, { ko: string; en: string }> = {
   send: { ko: "메시지 전송", en: "Send message" },
@@ -22,8 +24,10 @@ const ACTION_LABEL: Record<string, { ko: string; en: string }> = {
 };
 
 export function BrowserActionApprovalSheet() {
+  const pathname = usePathname();
   const { locale } = useT();
   const ko = locale === "ko";
+  const oneRoute = pathname.startsWith("/one");
   const [queue, setQueue] = useState<BrowserApprovalRequestEvent[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const [expiredNotice, setExpiredNotice] = useState<string | null>(null);
@@ -69,7 +73,7 @@ export function BrowserActionApprovalSheet() {
 
   if (!req) {
     return expiredNotice ? (
-      <div className="baa-expired" role="status">
+      <div className={`baa-expired ${oneRoute ? "one" : ""}`} role="status">
         {expiredNotice}
         <style jsx>{`
           .baa-expired {
@@ -86,6 +90,12 @@ export function BrowserActionApprovalSheet() {
             border: 1px solid var(--rd-hair, rgba(255, 255, 255, 0.12));
             box-shadow: 0 12px 36px rgba(0, 0, 0, 0.3);
             font-size: 12.5px;
+          }
+          .baa-expired.one {
+            border-color: rgba(40, 48, 39, 0.12);
+            background: #fffdf9;
+            color: #20251f;
+            box-shadow: 0 12px 36px rgba(28, 35, 27, 0.18);
           }
         `}</style>
       </div>
@@ -107,15 +117,24 @@ export function BrowserActionApprovalSheet() {
   const actionName = browserActionName(req.actionType, ko);
   const isPayment = req.actionType === "payment";
   const isUnsafeCode = req.actionType === "unsafe-code";
+  const onePresentation = oneRoute;
+  const unsafeCodeDetail = req.summary.replace(/^unsafe-code\s*:\s*/i, "").trim();
+  const oneDescription = isUnsafeCode
+    ? ko
+      ? "페이지 코드는 여러 동작을 한 번에 실행할 수 있습니다. 대상과 코드를 확인한 뒤 이번 한 번만 허용하거나 거부하세요."
+      : "Page code can perform multiple actions at once. Review the target and code, then allow it once or deny it."
+    : req.summary;
 
-  return (
-    <div className="baa-wrap" role="alertdialog" aria-live="assertive">
-      <div className="baa">
+  const content = (
+    <>
+      <div className={`baa ${onePresentation ? "baa-one" : ""}`}>
         <div className="baa-top">
           <span className={`baa-tag ${isPayment || isUnsafeCode ? "pay" : ""}`}>{actionName}</span>
           {req.site && <span className="baa-site">{req.site}</span>}
         </div>
-        <div className="baa-summary">{req.summary}</div>
+        <div className={`baa-summary ${isUnsafeCode ? "code" : ""}`}>
+          {isUnsafeCode ? unsafeCodeDetail || req.summary : req.summary}
+        </div>
         <div className="baa-note">
           {ko
             ? `${Math.max(0, Math.ceil((req.expiresAt - now) / 1_000))}초 안에 선택 · 대기 ${queue.length}건`
@@ -243,9 +262,85 @@ export function BrowserActionApprovalSheet() {
           color: #fff;
           border-color: transparent;
         }
+        .baa-one {
+          width: auto;
+          margin: 0;
+          padding: 0;
+          border: 0;
+          border-radius: 0;
+          background: transparent;
+          color: var(--one-sheet-ink);
+          box-shadow: none;
+          animation: none;
+        }
+        .baa-one .baa-tag,
+        .baa-one .baa-summary:not(.code) {
+          display: none;
+        }
+        .baa-one .baa-summary.code {
+          margin: 0 0 14px;
+          padding: 12px 14px;
+          border: 1px solid var(--one-sheet-control-border);
+          border-radius: var(--one-sheet-control-radius);
+          background: var(--one-sheet-card-muted);
+          color: var(--one-sheet-ink);
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-size: 12px;
+          font-weight: 560;
+          overflow-wrap: anywhere;
+        }
+        .baa-one .baa-top {
+          justify-content: flex-end;
+        }
+        .baa-one .baa-site,
+        .baa-one .baa-note {
+          color: var(--one-sheet-muted);
+          opacity: 1;
+        }
+        .baa-one .baa-actions button {
+          min-height: var(--one-sheet-control-height);
+          border-color: var(--one-sheet-control-border);
+          border-radius: var(--one-sheet-control-radius);
+          color: var(--one-sheet-ink);
+        }
+        .baa-one .baa-actions button:focus-visible {
+          outline: none;
+          box-shadow: var(--one-sheet-focus);
+        }
+        .baa-one .baa-actions .deny {
+          color: var(--one-sheet-danger);
+        }
+        .baa-one .baa-actions .once,
+        .baa-one .baa-actions .always {
+          border-color: var(--one-sheet-primary);
+          background: var(--one-sheet-primary);
+          color: #fff;
+        }
       `}</style>
-    </div>
+    </>
   );
+
+  if (onePresentation) {
+    return (
+      <OneBottomSheet
+        open
+        onClose={() => resolve("deny")}
+        closeLabel={ko ? "브라우저 작업 거부" : "Deny browser action"}
+        ariaLabelledBy="one-browser-approval-title"
+        dialogRole="alertdialog"
+        closeOnBackdrop={false}
+        closeOnEscape={false}
+        eyebrow={actionName}
+        title={ko ? "이 브라우저 작업을 허용할까요?" : "Allow this browser action?"}
+        titleId="one-browser-approval-title"
+        description={oneDescription}
+      >
+        {content}
+      </OneBottomSheet>
+    );
+  }
+
+  return <div className="baa-wrap" role="alertdialog" aria-live="assertive">{content}</div>;
 }
 
 function browserActionName(actionType: string, ko: boolean): string {

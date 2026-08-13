@@ -247,7 +247,10 @@ export async function routeModeJudged(prompt: string): Promise<ArtMode> {
 }
 
 export const MIN_SLIDES = 3;
-export const MAX_SLIDES = 14;
+// One presentation requests must stay reviewable in a single pass. Keep the
+// hard limit in the model layer so UI controls, imported plans, and generated
+// content all enforce the same ten-slide contract.
+export const MAX_SLIDES = 10;
 export function clampCount(n: number): number {
   if (!Number.isFinite(n)) return 5;
   return Math.max(MIN_SLIDES, Math.min(MAX_SLIDES, Math.round(n)));

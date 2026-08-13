@@ -12,7 +12,6 @@ import {
 
 import { layoutOneMemoryMap, type OneMemoryMapPlacedNode } from "@/lib/one-memory-map-layout";
 import type { OneMemoryMapSnapshot } from "@shared/one-memory-map";
-import { OneBrandMark } from "./OneBrand";
 import styles from "./OneMemoryMap.module.css";
 
 interface Props {
@@ -253,11 +252,7 @@ function OneMemoryMapComponent({ snapshot, locale }: Props) {
   } : undefined;
 
   return (
-    <section ref={rootRef} className={styles.map} aria-label="One">
-      <header className={styles.header}>
-        <span className={styles.brand}><OneBrandMark size="medium" /><strong>One</strong></span>
-      </header>
-
+    <section ref={rootRef} className={styles.map} aria-label={locale === "ko" ? "메모리 맵" : "Memory map"}>
       <canvas
         ref={canvasRef}
         className={styles.canvas}

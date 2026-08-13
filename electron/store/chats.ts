@@ -46,6 +46,7 @@ interface ChatRow {
 const CHAT_RUNTIME_KINDS = new Set<RuntimeKind>([
   "claude-code",
   "codex",
+  "antigravity",
   "gemini",
   "kimi",
   "grok",
@@ -371,7 +372,12 @@ export function createChat(input: {
       originSurface,
     );
   if (input.projectId) touchProject(input.projectId);
-  if (input.taskMode !== "conversation") ensureCanonicalTaskForChat(id);
+  // One always starts as a conversation. Its invocation/preflight authority
+  // may promote it after a typed task verdict; chat creation itself must never
+  // make a One turn appear under Work. Legacy Work callers keep their Task
+  // default unless they explicitly request conversation mode.
+  const shouldCreateTask = originSurface === "work" && input.taskMode !== "conversation";
+  if (shouldCreateTask) ensureCanonicalTaskForChat(id);
   const chat = getChat(id) as Chat;
   emitDesktopStoreChange({ entity: "chat", id });
   return chat;

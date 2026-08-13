@@ -55,6 +55,10 @@ export interface MobileBridgeBuildRunInput {
   locale: "ko" | "en";
   sink: (event: HephaestusBuildEvent) => void;
   signal: AbortSignal;
+  /** Existing workspace/session/history are supplied only for an interview resume turn. */
+  workspace?: string;
+  runtimeSessionId?: string;
+  history?: Array<{ role: "user" | "assistant"; text: string }>;
 }
 
 export interface MobileBridgeBuildApprovalInput {
@@ -187,19 +191,23 @@ export function createDesktopMobileBridgeBuildActions(): MobileBridgeBuildAction
         : { approved: false, code: "desktop_approval_denied" };
     },
     async run(input) {
-      const workspace = await createMobileBuildWorkspace();
+      const workspace = input.workspace ?? await createMobileBuildWorkspace();
       // Mobile builds never auto-connect MCP servers: consent is the reviewed
       // empty fallback plan, the same shape a renderer without a reachable
       // recommendation service submits.
-      const { applyMcpBuildConsent } = await import("../mcp-tools/build-plan");
-      const applied = await applyMcpBuildConsent({
-        request: input.goal,
-        consent: {
-          planId: `renderer-mcp-unavailable-mobile-${randomUUID()}`,
-          selectedCandidateIds: [],
-          fallbackReason: "recommendation_unavailable",
-        },
-      });
+      const applied = input.runtimeSessionId || input.history?.length
+        ? null
+        : await (async () => {
+            const { applyMcpBuildConsent } = await import("../mcp-tools/build-plan");
+            return applyMcpBuildConsent({
+              request: input.goal,
+              consent: {
+                planId: `renderer-mcp-unavailable-mobile-${randomUUID()}`,
+                selectedCandidateIds: [],
+                fallbackReason: "recommendation_unavailable",
+              },
+            });
+          })();
       const { runHephaestusBuild } = await import("../hephaestus/builder");
       await runHephaestusBuild(
         input.runId,
@@ -207,8 +215,10 @@ export function createDesktopMobileBridgeBuildActions(): MobileBridgeBuildAction
           request: input.goal,
           workspace,
           runtimePinned: false,
-          ...(applied.runtime ? { runtime: applied.runtime } : {}),
-          mcpAttachment: applied.attachment,
+          ...(applied?.runtime ? { runtime: applied.runtime } : {}),
+          mcpAttachment: applied?.attachment,
+          ...(input.runtimeSessionId ? { runtimeSessionId: input.runtimeSessionId } : {}),
+          ...(input.history?.length ? { history: input.history } : {}),
           locale: input.locale,
         },
         input.sink,

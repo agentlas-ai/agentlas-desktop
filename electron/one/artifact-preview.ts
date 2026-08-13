@@ -10,7 +10,7 @@ import {
   type OneArtifactPreviewCapabilityV1,
 } from "../../shared/one-artifacts";
 import { isDurableOneSurfaceManifestV1 } from "../../shared/one-surface-durable";
-import type { OneSurfaceManifestV1 } from "../../shared/one-surface";
+import type { OneSurfaceBlock, OneSurfaceManifestV1 } from "../../shared/one-surface";
 import type { AgentlasSurfaceDataSet, AgentlasSurfaceManifest, JsonObject } from "../../shared/types";
 import { resolveFsReadPath } from "../fs/access";
 import { listOneDomainEvents } from "./domain-events";
@@ -32,6 +32,10 @@ const MAX_DOCUMENT_BYTES = 64 * 1_024 * 1_024;
 const MAX_DATA_BYTES = 64 * 1_024 * 1_024;
 const MAX_ACTIVE_TOKENS = 256;
 const TOKEN_RE = /^[a-f0-9]{64}$/;
+// A Surface is emitted after the run begins, on the same host clock. Keep a
+// small allowance for filesystem timestamp rounding, but never let a file
+// that predates the run be presented as a newly made One result.
+const ONE_ARTIFACT_OUTPUT_TIME_SKEW_MS = 500;
 const SOURCE_KEYS = [
   "path", "filePath", "localPath", "fileUrl", "src", "url", "previewUrl",
   "thumbnail", "imageUrl", "videoUrl", "audioUrl", "file",
@@ -72,6 +76,25 @@ const ARTIFACT_BY_EXTENSION: Readonly<Record<string, ArtifactSpec>> = Object.fre
   ".csv": { kind: "spreadsheet", mimeType: "text/csv", maxBytes: MAX_DATA_BYTES },
   ".json": { kind: "data", mimeType: "application/json", maxBytes: MAX_DATA_BYTES },
   ".zip": { kind: "archive", mimeType: "application/zip", maxBytes: MAX_DATA_BYTES },
+  ".js": { kind: "data", mimeType: "text/javascript", maxBytes: MAX_DATA_BYTES },
+  ".mjs": { kind: "data", mimeType: "text/javascript", maxBytes: MAX_DATA_BYTES },
+  ".cjs": { kind: "data", mimeType: "text/javascript", maxBytes: MAX_DATA_BYTES },
+  ".jsx": { kind: "data", mimeType: "text/javascript", maxBytes: MAX_DATA_BYTES },
+  ".ts": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".tsx": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".py": { kind: "data", mimeType: "text/x-python", maxBytes: MAX_DATA_BYTES },
+  ".rb": { kind: "data", mimeType: "text/x-ruby", maxBytes: MAX_DATA_BYTES },
+  ".go": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".rs": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".java": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".kt": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".swift": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".sh": { kind: "data", mimeType: "text/x-shellscript", maxBytes: MAX_DATA_BYTES },
+  ".bash": { kind: "data", mimeType: "text/x-shellscript", maxBytes: MAX_DATA_BYTES },
+  ".zsh": { kind: "data", mimeType: "text/x-shellscript", maxBytes: MAX_DATA_BYTES },
+  ".html": { kind: "data", mimeType: "text/html", maxBytes: MAX_DATA_BYTES },
+  ".css": { kind: "data", mimeType: "text/css", maxBytes: MAX_DATA_BYTES },
+  ".scss": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
 });
 
 interface BindingRow {
@@ -238,6 +261,7 @@ function digestFd(fd: number, size: number): string {
 function safeOpen(candidate: string, spec: ArtifactSpec): {
   fd: number;
   size: number;
+  mtimeMs: number;
   dev: string;
   ino: string;
   mtimeNs: string;
@@ -253,6 +277,7 @@ function safeOpen(candidate: string, spec: ArtifactSpec): {
     return {
       fd,
       size,
+      mtimeMs: Number(stat.mtimeNs) / 1_000_000,
       dev: String(stat.dev),
       ino: String(stat.ino),
       mtimeNs: String(stat.mtimeNs),
@@ -275,6 +300,8 @@ function bindCandidate(input: {
   candidate: string;
   expectedKind: string;
   createdAt: string;
+  /** Main records this before runtime invocation; model prose cannot supply it. */
+  runStartedAtMs?: number | null;
 }): number | null {
   if (pathIsArchived(input.candidate)) return null;
   const spec = ARTIFACT_BY_EXTENSION[path.extname(input.candidate).toLowerCase()];
@@ -289,6 +316,13 @@ function bindCandidate(input: {
   // ancestor symlink, even when it happens to land back inside an allowed root.
   if (path.resolve(input.candidate) !== resolved || pathIsArchived(resolved)) return null;
   const opened = safeOpen(resolved, spec);
+  if (
+    input.runStartedAtMs != null
+    && opened.mtimeMs + ONE_ARTIFACT_OUTPUT_TIME_SKEW_MS < input.runStartedAtMs
+  ) {
+    fs.closeSync(opened.fd);
+    return null;
+  }
   fs.closeSync(opened.fd);
   ensureBindingTable();
   const db = getDb();
@@ -348,6 +382,65 @@ function markBoundArtifactVerified(surface: OneSurfaceManifestV1, artifactRef: s
 }
 
 /**
+ * A model can name a file that it merely read.  Until Main has bound that
+ * exact file to this run, it is not an output and must not occupy the
+ * user-facing "made files" slot.  Keep the semantic result, but remove every
+ * unsealed artifact reference from the shared Desktop/Mobile Surface.
+ */
+export function removeUnboundOneSurfaceArtifacts(surface: OneSurfaceManifestV1): number {
+  const sealedRefs = new Set(
+    surface.fallback.artifacts
+      .filter((artifact) => artifact.verificationStatus === "verified")
+      .map((artifact) => artifact.artifactRef),
+  );
+  const originalCount = surface.fallback.artifacts.length;
+  surface.fallback.artifacts = surface.fallback.artifacts.filter((artifact) => sealedRefs.has(artifact.artifactRef));
+
+  surface.blocks = surface.blocks.flatMap<OneSurfaceBlock>((block): OneSurfaceBlock[] => {
+    if (block.type === "ArtifactList") {
+      const items = block.items.filter((item) => sealedRefs.has(item.artifactRef));
+      return items.length > 0 ? [{ ...block, items }] : [];
+    }
+    if (block.type === "Media") {
+      const outputs = block.outputs.filter((item) => sealedRefs.has(item.artifactRef));
+      if (outputs.length === 0) return [];
+      const primaryArtifactRef = outputs.some((item) => item.artifactRef === block.primaryArtifactRef)
+        ? block.primaryArtifactRef
+        : outputs[0].artifactRef;
+      return [{ ...block, outputs, primaryArtifactRef }];
+    }
+    if (block.type === "Gallery") {
+      const items = block.items.filter((item) => sealedRefs.has(item.artifactRef));
+      return items.length > 0 ? [{ ...block, items }] : [];
+    }
+    if (block.type === "Document") return sealedRefs.has(block.artifactRef) ? [block] : [];
+    if (block.type === "Comparison") {
+      return [{
+        ...block,
+        options: block.options.map((option) => (
+          option.artifactRef && !sealedRefs.has(option.artifactRef)
+            ? { ...option, artifactRef: undefined }
+            : option
+        )),
+      }];
+    }
+    return [block];
+  });
+  if (surface.blocks.length === 0) {
+    surface.blocks = [{
+      blockId: "block:unverified-artifacts-omitted",
+      type: "Narrative",
+      title: "Result",
+      paragraphs: ["No run-created files were verified."],
+    }];
+  }
+  const blockOrder = surface.blocks.map((block) => block.blockId);
+  surface.recomposition.desktop.blockOrder = blockOrder;
+  surface.recomposition.mobile.blockOrder = blockOrder;
+  return originalCount - surface.fallback.artifacts.length;
+}
+
+/**
  * Bind raw legacy transports only after the exact safe One manifest has been
  * persisted. A rejected row leaves its artifactRef as an honest Work fallback.
  */
@@ -359,12 +452,16 @@ export function bindOneSurfaceArtifacts(input: {
   chatId: string;
   runId: string;
   createdAt?: string;
+  /** Main-owned start time used to reject pre-existing source files. */
+  runStartedAt?: string;
 }): number {
   if (!isDurableOneSurfaceManifestV1(input.surface, input.taskId)) return 0;
   const task = getCanonicalTask(input.taskId);
   if (!task || task.originChatId !== input.chatId || task.status === "archived" || task.version !== input.taskVersion) return 0;
   const keys = orderedDataKeys(input.rawManifest);
   const workspace = chatWorkspace(input.chatId);
+  const startedAtMs = typeof input.runStartedAt === "string" ? Date.parse(input.runStartedAt) : Number.NaN;
+  const trustedRunStartedAtMs = Number.isFinite(startedAtMs) ? startedAtMs : null;
   let bound = 0;
   for (let dataIndex = 0; dataIndex < keys.length && bound < ONE_ARTIFACT_MAX_BINDINGS_PER_SURFACE; dataIndex += 1) {
     const dataset = input.rawManifest.data[keys[dataIndex]];
@@ -391,6 +488,7 @@ export function bindOneSurfaceArtifacts(input: {
           candidate,
           expectedKind: ref.kind,
           createdAt: input.createdAt ?? new Date().toISOString(),
+          runStartedAtMs: trustedRunStartedAtMs,
         });
         if (sizeBytes != null) {
           markBoundArtifactVerified(input.surface, ref.artifactRef, sizeBytes);
@@ -399,6 +497,72 @@ export function bindOneSurfaceArtifacts(input: {
       } catch {
         // One bad row never widens authority or breaks the rest of the Surface.
       }
+    }
+  }
+  return bound;
+}
+
+function runtimeManifestId(runId: string): string {
+  return `runtime:${createHash("sha256").update(runId, "utf8").digest("hex").slice(0, 32)}`;
+}
+
+/**
+ * Admit only host-structured file completion paths (currently Codex's native
+ * `patch_apply_end` event). Unlike a Surface artifact this is an in-progress
+ * work product, so it has no model-authored manifest to trust. Main binds the
+ * exact Task/run/version and reopens the file with O_NOFOLLOW before exposing
+ * an opaque ref to the renderer. Shell text, tool args, and model prose never
+ * call this boundary.
+ */
+export function bindOneRuntimeToolArtifacts(input: {
+  taskId: string;
+  taskVersion: number;
+  chatId: string;
+  runId: string;
+  toolId: string;
+  paths: readonly string[];
+  createdAt?: string;
+}): Array<{
+  manifestId: string;
+  artifactRef: string;
+  label: string;
+  type: ArtifactKind;
+  sizeBytes: number;
+}> {
+  const task = getCanonicalTask(input.taskId);
+  if (!task || task.originChatId !== input.chatId || task.status === "archived" || task.version !== input.taskVersion) return [];
+  const manifestId = runtimeManifestId(input.runId);
+  const uniquePaths = [...new Set(input.paths
+    .filter((candidate): candidate is string => typeof candidate === "string" && path.isAbsolute(candidate))
+    .map((candidate) => path.resolve(candidate)))].slice(0, ONE_ARTIFACT_MAX_BINDINGS_PER_SURFACE);
+  const bound: Array<{
+    manifestId: string;
+    artifactRef: string;
+    label: string;
+    type: ArtifactKind;
+    sizeBytes: number;
+  }> = [];
+  for (const [index, candidate] of uniquePaths.entries()) {
+    const spec = ARTIFACT_BY_EXTENSION[path.extname(candidate).toLowerCase()];
+    if (!spec) continue;
+    const artifactRef = `runtime:${createHash("sha256").update(`${input.runId}:${input.toolId}:${index}:${candidate}`, "utf8").digest("hex").slice(0, 48)}`;
+    try {
+      const sizeBytes = bindCandidate({
+        taskId: input.taskId,
+        taskVersion: input.taskVersion,
+        chatId: input.chatId,
+        runId: input.runId,
+        manifestId,
+        artifactRef,
+        candidate,
+        expectedKind: spec.kind,
+        createdAt: input.createdAt ?? new Date().toISOString(),
+      });
+      if (sizeBytes != null) {
+        bound.push({ manifestId, artifactRef, label: path.basename(candidate), type: spec.kind, sizeBytes });
+      }
+    } catch {
+      // A missing, symlinked, unreadable, or out-of-scope file is not output.
     }
   }
   return bound;
@@ -500,8 +664,11 @@ function exactBinding(input: unknown): BindingRow | null {
   if (!isOneArtifactBindingRequestV1(input)) return null;
   const task = getCanonicalTask(input.taskId);
   if (!task || task.version !== input.taskVersion || task.originChatId !== input.chatId || task.status === "archived") return null;
-  const durable = getDurableOneSurfaceResult({ runId: input.runId, chatId: input.chatId, taskId: input.taskId });
-  if (!durable || durable.manifest.manifestId !== input.manifestId || !manifestContainsArtifact(durable.manifest, input.artifactRef)) return null;
+  const runtimeBinding = input.manifestId === runtimeManifestId(input.runId) && input.artifactRef.startsWith("runtime:");
+  if (!runtimeBinding) {
+    const durable = getDurableOneSurfaceResult({ runId: input.runId, chatId: input.chatId, taskId: input.taskId });
+    if (!durable || durable.manifest.manifestId !== input.manifestId || !manifestContainsArtifact(durable.manifest, input.artifactRef)) return null;
+  }
   ensureBindingTable();
   const row = getDb().prepare(
     `SELECT * FROM one_artifact_bindings
@@ -509,6 +676,7 @@ function exactBinding(input: unknown): BindingRow | null {
      LIMIT 1`,
   ).get(input.taskId, input.chatId, input.runId, input.manifestId, input.artifactRef) as BindingRow | undefined;
   if (!row) return null;
+  if (runtimeBinding) return input.taskVersion === row.bound_task_version ? row : null;
   if (input.taskVersion !== row.bound_task_version && !exactLifecycleTransition(row, input)) return null;
   return row;
 }

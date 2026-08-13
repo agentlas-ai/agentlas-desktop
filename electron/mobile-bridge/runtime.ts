@@ -410,6 +410,7 @@ export function mobileBridgeRuntimeStatus(): MobileBridgeRuntimeStatus {
     secure: state?.manifest.secure ?? false,
     hostId: state?.manifest.hostId ?? null,
     devices: state ? state.pairing.listDevices() : [],
+    connectedDeviceIds: state ? state.server.connectedDeviceIds() : [],
     error: lastError,
   };
 }

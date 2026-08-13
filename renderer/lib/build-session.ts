@@ -564,7 +564,6 @@ function queueBuildCloudSaveChoice(workspace: string, readScope: FsReadScope, ge
   if (
     !isCurrentRegistration(generation, workspace) ||
     !state.registered ||
-    buildScanDisposition(state.result?.securityScan) !== "passed" ||
     state.cloudSaveChoice
   ) return;
   state.cloudSaveChoice = {
@@ -631,8 +630,6 @@ async function performAutoRegister(workspace: string, readScope: FsReadScope, ge
 // 에러로 표면화. 어떤 경우에도 빈 질문 카드로 사용자를 붙잡지 않는다.
 const AUTO_CONTINUE_MAX = 3;
 let autoContinues = 0;
-const SECURITY_REPAIR_MAX = 2;
-let securityRepairs = 0;
 
 const PKG_MARKERS = new Set(["agentlas.json", "AGENTS.md", ".agentlas"]);
 
@@ -676,38 +673,6 @@ async function scanGeneratedPackage(pkgRoot: string, readScope: FsReadScope): Pr
   }
 }
 
-function securityRepairPrompt(scan: unknown, ko: boolean): string {
-  const findings = (buildScanFindings(scan) ?? [])
-    .filter((finding) => buildScanSeverityBucket(finding.severity) !== "passed")
-    .slice(0, 12)
-    .map((finding) => {
-      const file = (finding.file || "generated package").replace(/[\r\n]+/g, " ").slice(0, 240);
-      const message = finding.message.replace(/[\r\n]+/g, " ").slice(0, 320);
-      return `- ${file}: ${message}`;
-    });
-  const issueList = findings.length > 0 ? findings.join("\n") : "- The package safety verdict is not clean.";
-  if (ko) {
-    return [
-      "SECURITY_REPAIR: 생성한 패키지가 로컬 안전 점검을 통과하지 못했습니다.",
-      "아래 항목만 기존 패키지 안에서 수정하고, 사용자가 요청한 기능과 권한 제한은 그대로 유지하세요.",
-      "스캐너·검증기·안전 규칙을 끄거나 우회하거나 삭제하지 마세요.",
-      "설명 문구가 오탐을 만든 경우 실행 지시처럼 보이지 않는 평문으로 뜻을 보존해 다시 쓰세요.",
-      "패키지 검증을 다시 실행한 뒤 마지막 줄을 'BUILD_COMPLETE: <패키지 폴더명>'으로 끝내세요.",
-      "",
-      issueList,
-    ].join("\n");
-  }
-  return [
-    "SECURITY_REPAIR: The generated package did not pass the local safety check.",
-    "Fix only the findings below inside the existing package while preserving the requested behavior and authority limits.",
-    "Do not disable, bypass, weaken, or remove the scanner, verifier, or safety rules.",
-    "If descriptive copy caused a false positive, preserve its meaning but rewrite it as plain non-executable documentation.",
-    "Run the package verifier again, then end the final line with 'BUILD_COMPLETE: <package folder name>'.",
-    "",
-    issueList,
-  ].join("\n");
-}
-
 function packageContractBlockers(report: unknown): string[] | null {
   if (!report || typeof report !== "object") return null;
   const blockers = (report as { blockers?: unknown }).blockers;
@@ -742,42 +707,26 @@ function stopForPackageContract(
   commit();
 }
 
-function stopForSecurityVerification(
-  pkgRoot: string,
-  scan: unknown,
-  readScope: FsReadScope,
-  disposition: ReturnType<typeof buildScanDisposition>,
-): void {
-  const ko = currentLocale() === "ko";
-  state.result = { workspace: pkgRoot, securityScan: scan, readScope, mcpReceipt: state.mcpReceipt };
-  state.awaitingReply = false;
-  state.pendingQuestions = [];
-  state.errored = true;
-  state.recoverable = true;
-  state.phase = "error";
-  state.error = {
-    kind: "build-failed",
-    message: ko
-      ? "로컬 안전 검증을 통과하지 못해 설치와 등록을 중지했습니다. 생성한 파일은 보존했으며 같은 폴더에서 다시 준비해 남은 항목만 복구할 수 있습니다."
-      : "Local safety verification did not pass, so install and registration were stopped. Generated files were preserved; prepare again in the same folder to repair only the remaining items.",
-  };
-  pushLog(
-    "error",
-    ko
-      ? `안전 검증 상태: ${disposition} — 통과로 간주하지 않았습니다.`
-      : `Safety verification status: ${disposition} — it was not treated as passing.`,
-  );
-  commit();
-}
-
 /** 빌드를 완료 상태로 전환하고 조직도 자동 등록까지 수행한다. */
 function finalizeBuild(pkgRoot: string, scan: unknown, readScope: FsReadScope, note: string | null, generation: number): void {
   const ko = currentLocale() === "ko";
+  const scanDisposition = buildScanDisposition(scan);
+  const advisoryCount = (buildScanFindings(scan) ?? [])
+    .filter((finding) => buildScanSeverityBucket(finding.severity) !== "passed")
+    .length;
   state.reached = STAGE_COUNT;
   state.result = { workspace: pkgRoot, securityScan: scan, readScope, mcpReceipt: state.mcpReceipt };
   state.awaitingReply = false;
   state.pendingQuestions = [];
   if (note) pushLog("log", note);
+  if (scanDisposition !== "passed") {
+    pushLog(
+      "log",
+      ko
+        ? `안전 점검 참고 ${advisoryCount}건 (${scanDisposition}) — 결과와 영수증은 표시하며 빌드·등록·저장은 계속합니다.`
+        : `Safety advisory: ${advisoryCount} finding(s) (${scanDisposition}) — findings and receipts remain visible while build, registration, and save continue.`,
+    );
+  }
   pushLog("done", ko ? "빌드 완료 — 패키지 생성됨" : "Build complete — package created");
   state.phase = "done";
   commit();
@@ -789,16 +738,8 @@ function finalizeBuild(pkgRoot: string, scan: unknown, readScope: FsReadScope, n
         : "Skipped auto-registration (shared folder) — add only the generated package folder via \"Open in org chart\".",
     );
     commit();
-  } else if (buildScanDisposition(scan) === "passed") {
-    void autoRegister(pkgRoot, readScope, generation);
   } else {
-    pushLog(
-      "log",
-      ko
-        ? "자동 등록 생략 — 보안 검증이 통과 상태가 아닙니다. 결과에서 재스캔 후 직접 설치하세요."
-        : "Skipped auto-registration — security verification has not passed. Re-scan the result before installing.",
-    );
-    commit();
+    void autoRegister(pkgRoot, readScope, generation);
   }
 }
 
@@ -810,7 +751,6 @@ async function verifyRepairOrFinalize(
   note: string | null,
   generation: number,
 ): Promise<void> {
-  const ko = currentLocale() === "ko";
   if (!isCurrentBuild(generation)) return;
   const contractBlockers = packageContractBlockers(packageContract);
   if (contractBlockers === null || contractBlockers.length > 0) {
@@ -821,25 +761,6 @@ async function verifyRepairOrFinalize(
     ? await scanGeneratedPackage(pkgRoot, readScope)
     : scan;
   if (!isCurrentBuild(generation)) return;
-
-  const disposition = buildScanDisposition(verifiedScan);
-  if ((disposition === "blocked" || disposition === "warning") && securityRepairs < SECURITY_REPAIR_MAX) {
-    securityRepairs += 1;
-    pushLog(
-      "stage",
-      ko
-        ? `안전 점검 수정 ${securityRepairs}/${SECURITY_REPAIR_MAX} — 생성한 패키지의 차단·주의 항목을 고치는 중`
-        : `Safety repair ${securityRepairs}/${SECURITY_REPAIR_MAX} — fixing generated-package blockers and warnings`,
-    );
-    commit();
-    await runTurn(securityRepairPrompt(verifiedScan, ko), generation);
-    return;
-  }
-
-  if (disposition !== "passed") {
-    stopForSecurityVerification(pkgRoot, verifiedScan, readScope, disposition);
-    return;
-  }
 
   finalizeBuild(pkgRoot, verifiedScan, readScope, note, generation);
 }
@@ -1167,7 +1088,6 @@ export async function startBuild(activeRuntime?: RuntimeSelection): Promise<void
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
   autoContinues = 0;
-  securityRepairs = 0;
   const generation = ++buildGeneration;
   state.turn = 1;
   state.reached = 0;
@@ -1433,7 +1353,6 @@ export function cancelBuild() {
   openCrabOntologyChoice = undefined;
   if (!cancelledRunId) {
     autoContinues = 0;
-    securityRepairs = 0;
     state.mcpPlan = null;
     state.mcpSelectedCandidateIds = [];
     state.mcpReceipt = null;
@@ -1499,7 +1418,6 @@ export function resetBuild() {
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
   autoContinues = 0;
-  securityRepairs = 0;
   state.mcpPlan = null;
   state.mcpSelectedCandidateIds = [];
   state.mcpReceipt = null;
@@ -1562,8 +1480,7 @@ export function beginBuildCloudSave(id: string): { folder: string; scope: FsRead
     (choice.status !== "presented" && choice.status !== "pending") ||
     state.phase !== "done" ||
     !state.registered ||
-    state.result?.workspace !== choice.workspace ||
-    buildScanDisposition(state.result.securityScan) !== "passed"
+    state.result?.workspace !== choice.workspace
   ) return null;
   choice.status = "uploading";
   commit();
@@ -1588,16 +1505,14 @@ export function chooseBuildLocalOnly(id: string): boolean {
   return true;
 }
 
-/** 수동 재스캔 결과를 전역 build session에 반영해 모든 결과/토스트 액션이 같은 게이트를 본다. */
+/** 수동 재스캔 결과를 전역 build session에 반영해 모든 결과 표면이 같은 참고 영수증을 본다. */
 export function updateBuildSecurityScan(scan: unknown): void {
   if (!state.result) return;
-  const previousDisposition = buildScanDisposition(state.result.securityScan);
   state.result = { ...state.result, securityScan: scan };
   commit();
   if (
-    previousDisposition !== "passed" &&
-    buildScanDisposition(scan) === "passed" &&
     !state.registered &&
+    state.phase === "done" &&
     !JUNK_WS.test(wsBasename(state.result.workspace))
   ) {
     void autoRegister(state.result.workspace, state.result.readScope, buildGeneration);

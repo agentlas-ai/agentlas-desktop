@@ -111,7 +111,6 @@ export function harvestCompactionSummaries(opts: {
   let intake = 0;
   for (const s of summaries) {
     if (seen.has(s.uuid)) continue;
-    seen.add(s.uuid);
     try {
       insertMemoryEntry({
         scope: "session",
@@ -125,6 +124,9 @@ export function harvestCompactionSummaries(opts: {
         agentId: ctx.agentId,
         chatId: ctx.chatId,
       });
+      // DB insert가 실제 성공한 항목만 처리 완료로 남긴다. 실패한 UUID는 다음 harvest에서
+      // 다시 시도되어야 하며, 다른 항목 하나의 성공 때문에 함께 소거되면 안 된다.
+      seen.add(s.uuid);
       intake++;
     } catch {
       // 한 건 실패해도 나머지 계속

@@ -91,6 +91,16 @@
   grid-template-columns: 0 minmax(0, 1fr);
 }
 
+.body[data-task-active="true"] {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+
+.body[data-task-active="true"] .rail {
+  transform: translateX(-100%);
+  opacity: 0;
+  pointer-events: none;
+}
+
 .rail {
   position: relative;
   z-index: 55;
@@ -438,6 +448,99 @@
   pointer-events: auto;
 }
 
+.body[data-task-active="true"] .windowBar {
+  height: 64px;
+  border-bottom: 1px solid #e8e9ea;
+  background: rgba(255, 255, 255, .96);
+}
+
+.taskToolbar {
+  position: relative;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 20px 0 96px;
+  color: #4e5357;
+}
+
+.taskToolbar > button,
+.taskToolbarMenu > button {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #777d81;
+  cursor: pointer;
+}
+
+.taskToolbar > button:hover,
+.taskToolbar > button:focus-visible,
+.taskToolbar > button[data-active="true"],
+.taskToolbarMenu > button:hover,
+.taskToolbarMenu > button:focus-visible,
+.taskToolbarMenu > button[aria-expanded="true"] {
+  background: #f1f2f2;
+  color: #33383c;
+  outline: none;
+}
+
+.taskToolbarDivider {
+  width: 1px;
+  height: 22px;
+  background: #e4e6e7;
+}
+
+.taskToolbar > strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #34383b;
+  font-size: 16px;
+  font-weight: 560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.taskToolbarMenu { position: relative; flex: 0 0 auto; }
+
+.taskToolbarMenuPopover {
+  position: absolute;
+  z-index: 70;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 190px;
+  display: grid;
+  padding: 6px;
+  border: 1px solid #e2e4e5;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(24, 29, 32, .12);
+}
+
+.taskToolbarMenuPopover > button {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #4d5357;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.taskToolbarMenuPopover > button:hover,
+.taskToolbarMenuPopover > button:focus-visible { background: #f2f3f3; outline: none; }
+.taskToolbarMenuPopover > button:disabled { color: #b4b8ba; cursor: default; }
+
+.taskToolbarPanelToggle { margin-left: auto; }
+
 .sidebarRevealButton {
   position: absolute;
   top: 7px;
@@ -474,16 +577,71 @@
   background: #fff;
 }
 
+.memoryHomeStage {
+  position: relative;
+  min-height: min(590px, calc(100vh - 218px));
+}
+
+.memoryHomeAlert {
+  position: absolute;
+  z-index: 6;
+  top: 12px;
+  left: 12px;
+  width: min(390px, calc(100% - 24px));
+  display: grid;
+  gap: 7px;
+  padding: 15px 16px;
+  border: 1px solid #e3e5e3;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 10px 30px rgba(25, 30, 26, 0.08);
+  backdrop-filter: blur(12px);
+}
+
+.memoryHomeAlert > p {
+  margin: 0;
+  color: var(--one-accent);
+  font-size: 9px;
+  font-weight: 760;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+
+.memoryHomeAlert > strong {
+  color: #24282b;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.memoryHomeAlert > span {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #6b7276;
+  font-size: 11px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.memoryHomeAlert > div {
+  display: flex;
+  gap: 7px;
+  margin-top: 2px;
+}
+
+.memoryHomeAlert .primaryButton,
+.memoryHomeAlert .ghostButton {
+  min-height: 34px;
+  padding: 0 12px;
+  font-size: 10px;
+}
+
 .newUser {
   min-height: min(560px, calc(100vh - 230px));
   display: grid;
   align-content: center;
   justify-items: center;
   text-align: center;
-}
-
-.newUserMark {
-  margin-bottom: 26px;
 }
 
 .newUser h1,
@@ -763,6 +921,19 @@
   padding-top: 76px;
 }
 
+.body[data-task-active="true"] .threadContent {
+  width: min(1040px, calc(100% - 80px));
+  padding-top: 92px;
+}
+
+.body[data-task-active="true"] .messageBody {
+  max-width: min(960px, 94%);
+  font-size: 18px;
+  line-height: 1.62;
+}
+
+.body[data-task-active="true"] .messages { gap: 40px; }
+
 .statusLabel {
   display: inline-flex;
   align-items: center;
@@ -803,16 +974,6 @@
   color: #272a2d;
 }
 
-.assistantIdentity {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-bottom: 10px;
-  color: #4d5357;
-  font-size: 11px;
-  font-weight: 730;
-}
-
 .message[data-role="system"] .messageBody {
   padding: 12px 14px;
   border-left: 3px solid #bd5c50;
@@ -848,205 +1009,14 @@
   font-size: 11px;
 }
 
-.runProgress {
-  width: min(100%, 560px);
-  display: grid;
-  grid-template-columns: 62px minmax(0, 1fr);
-  gap: 3px 12px;
-  align-items: center;
-  margin: 8px 0 26px;
-  padding: 13px 0;
-  border-top: 1px solid #eef0ef;
-  border-bottom: 1px solid #eef0ef;
-}
-
-.runProgress > :first-child {
-  grid-row: 1 / span 4;
-}
-.runProgress strong { color: #303436; font-size: 12px; font-weight: 690; }
-.runProgress small { color: #7b8185; font-size: 10px; }
-.runParticipants {
-  grid-column: 2;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 3px;
-}
-
-.runParticipants > span {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  min-width: 0;
-  padding: 5px 8px;
-  border: 1px solid #e0e6dc;
-  border-radius: 999px;
-  background: #f4f7f1;
-  color: #526047;
-}
-
-.runParticipants strong {
-  overflow: hidden;
-  max-width: 190px;
-  color: #46533d;
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.runParticipants small {
-  color: #7b8673;
-  font-size: 9px;
-}
-.runParticipants[data-state="prepared"] > span {
-  border-style: dashed;
-  background: #fafbf8;
-}
-.runStatusDetail { overflow: hidden; color: #9a9fa2; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-
-/* The stage label only moves when the runtime emits an event, and a long
-   research turn can emit nothing for minutes. This clock is host-owned, so it
-   keeps advancing and the run never reads as frozen. */
-.runElapsed {
-  grid-column: 2;
-  color: #9a9fa2;
-  font-size: 9px;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
-}
-
-.runtimeFeedback {
-  width: min(720px, 100%);
-  display: grid;
-  gap: 1px;
-  margin: -18px 0 28px;
-  color: #858b8f;
-}
-
-.runtimeFeedbackRow,
-.runtimeFeedbackRow > summary {
-  min-width: 0;
-  min-height: 30px;
-  display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 7px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  list-style: none;
-}
-
-.runtimeFeedbackRow > summary {
-  cursor: pointer;
-}
-
-.runtimeFeedbackRow > summary::-webkit-details-marker { display: none; }
-.runtimeFeedbackIcon { display: grid; place-items: center; color: #9aa0a4; }
-.runtimeFeedbackLabel {
-  min-width: 0;
-  overflow: hidden;
-  color: #747b80;
-  font-size: 12px;
-  line-height: 1.45;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.runtimeFeedbackRow small { color: #959b9f; font-size: 10px; white-space: nowrap; }
-.runtimeFeedbackRow[data-error="true"] .runtimeFeedbackIcon,
-.runtimeFeedbackRow[data-error="true"] .runtimeFeedbackLabel { color: #9a625c; }
-.runtimeFeedbackRow pre {
-  max-height: 180px;
-  grid-column: 2 / -1;
-  margin: 1px 0 7px;
-  overflow: auto;
-  padding: 8px 10px;
-  border: 0;
-  border-radius: 8px;
-  background: #f6f7f7;
-  color: #686f74;
-  font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.runtimeArtifactRail {
-  position: absolute;
-  z-index: 35;
-  top: 46px;
-  right: 0;
-  bottom: 0;
-  width: 300px;
-  display: flex;
-  flex-direction: column;
-  border-left: 1px solid #eceeef;
-  background: #fff;
-}
-
-.runtimeArtifactRail > header {
-  min-height: 47px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 16px;
-  border-bottom: 1px solid #f0f1f2;
-}
-.runtimeArtifactRail > header strong { color: #5f656a; font-size: 11px; }
-.runtimeArtifactRail > header span { color: #a0a5a8; font-size: 9px; }
-.runtimeArtifactList {
-  min-height: 0;
-  display: grid;
-  align-content: start;
-  gap: 2px;
-  padding: 8px;
-  overflow-y: auto;
-}
-.runtimeArtifact {
-  min-width: 0;
-  min-height: 58px;
-  display: grid;
-  grid-template-columns: 44px minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-  padding: 7px 8px;
-  border: 0;
-  border-radius: 9px;
-  background: transparent;
-  color: #4f5559;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.runtimeArtifact:hover,
-.runtimeArtifact:focus-visible { background: #f4f5f6; outline: 2px solid transparent; }
-.runtimeArtifactPreview {
-  width: 44px;
-  height: 44px;
-  object-fit: cover;
-  border-radius: 7px;
-  background: #f3f4f4;
-}
-.runtimeArtifactFileIcon {
-  width: 44px;
-  height: 44px;
-  display: grid;
-  place-items: center;
-  border-radius: 7px;
-  background: #f3f4f4;
-  color: #7c8388;
-}
-.runtimeArtifact > span:last-child { min-width: 0; display: grid; gap: 3px; }
-.runtimeArtifact strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.runtimeArtifact small { color: #9a9fa3; font-size: 9px; }
-
 @media (min-width: 1181px) {
   .workspace[data-runtime-artifacts="true"] .scroll { width: calc(100% - 300px); }
   .workspace[data-runtime-artifacts="true"] .composerDock { right: 300px; }
-}
-
-@media (max-width: 1180px) {
-  .runtimeArtifactRail { display: none; }
+  .workspace[data-context-rail="true"] .scroll { width: calc(100% - 448px); }
+  .workspace[data-context-rail="true"] .composerDock { right: 448px; }
+  .body[data-task-active="true"] .composer,
+  .body[data-task-active="true"] .steeringQueue,
+  .body[data-task-active="true"] .oneTurnAgentChips { width: min(1040px, 100%); }
 }
 
 .decisionCard {
@@ -1059,73 +1029,10 @@
   background: #fffdf9;
 }
 
-.decisionSheetLayer {
-  position: absolute;
-  z-index: 90;
-  inset: 0;
-  display: grid;
-  align-items: end;
-  justify-items: center;
-  pointer-events: auto;
-}
-
-.decisionSheetBackdrop {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: rgba(27, 29, 27, 0.34);
-  backdrop-filter: blur(3px);
-  cursor: default;
-}
-
 .decisionSheet {
-  position: relative;
-  width: min(760px, calc(100% - 32px));
-  max-height: min(78vh, 720px);
-  margin: 0 16px 16px;
-  overflow: auto;
-  padding: 10px 22px 22px;
-  border: 1px solid rgba(255, 255, 255, 0.82);
-  border-radius: 22px;
-  background: #fffdf9;
-  box-shadow: 0 24px 70px rgba(24, 27, 24, 0.24);
-  outline: none;
-  overscroll-behavior: contain;
-}
-
-.decisionSheetHandle {
-  width: 42px;
-  height: 4px;
-  margin: 0 auto 4px;
-  border-radius: 999px;
-  background: #d7d2c9;
-}
-
-.decisionDismissButton {
-  min-width: 44px;
-  min-height: 44px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin: -4px 0 -40px auto;
-  padding: 0 12px;
-  border: 0;
-  color: #68635b;
-  background: transparent;
-  font-size: 12px;
-  font-weight: 680;
-}
-
-.decisionDismissButton:hover,
-.decisionDismissButton:focus-visible {
-  color: #35422d;
-  background: #f3f0e9;
-  outline: 2px solid #72885f;
-  outline-offset: -2px;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
 }
 
 .decisionResumeButton {
@@ -1156,7 +1063,7 @@
 .decisionSheet .decisionCard[data-risk="R0"] {
   width: 100%;
   margin: 0;
-  padding: 12px 0 0;
+  padding: 0;
   border: 0;
   background: transparent;
 }
@@ -1291,16 +1198,6 @@
 .resolvedDecision small { color: #70796b; font-size: 10px; line-height: 1.5; }
 
 @media (max-width: 700px) {
-  .decisionSheet {
-    width: 100%;
-    max-height: 84vh;
-    margin: 0;
-    padding: 8px 18px calc(18px + env(safe-area-inset-bottom));
-    border-right: 0;
-    border-bottom: 0;
-    border-left: 0;
-    border-radius: 20px 20px 0 0;
-  }
   .decisionHeading { align-items: stretch; flex-direction: column; }
   .decisionOptions > button, .decisionSecondaryActions > button { width: 100%; }
 }
@@ -1310,76 +1207,6 @@
   color: #7a8085;
   text-align: center;
   font-size: 13px;
-}
-
-/* 편성 상태는 대화의 한 줄이지, 새 화면이 아니다. 예전에는 260px 높이로 대화 한가운데를
-   차지해서 채팅을 열 때마다 "새로운 무언가가 시작된다"는 인상을 줬다. 답변 스트림과 같은
-   좌측 정렬·같은 글자 크기로 흐름 안에 놓는다. */
-.preparingRequest {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  column-gap: 9px;
-  row-gap: 2px;
-  padding: 2px 0;
-  color: #555c60;
-  text-align: left;
-}
-
-.preparingRequest strong {
-  color: #222629;
-  font-size: 13.5px;
-  font-weight: 620;
-}
-
-.preparingRequest span {
-  grid-column: 2;
-  color: #7d8387;
-  font-size: 11.5px;
-  line-height: 1.5;
-}
-
-.preparedTeam {
-  grid-column: 2;
-  display: grid;
-  justify-items: start;
-  gap: 6px;
-  width: 100%;
-  margin-top: 6px;
-}
-
-.preparedTeam > small {
-  color: #596451;
-  font-size: 11px;
-  font-weight: 680;
-}
-
-.preparedTeam > div {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-start;
-  gap: 7px;
-}
-
-.preparedTeam > div > span {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  padding: 6px 9px;
-  border: 1px solid #dfe6d9;
-  border-radius: 999px;
-  background: #f5f8f2;
-}
-
-.preparedTeam strong {
-  color: #46533d;
-  font-size: 10px;
-  font-weight: 700;
-}
-
-.preparedTeam > div small {
-  color: #7b8673;
-  font-size: 9px;
 }
 
 .composerDock {
@@ -1608,6 +1435,50 @@
 .oneMemoryUseOnceChip button:hover,
 .oneMemoryUseOnceChip button:focus-visible { background: #e7eedf; outline: 2px solid #aebc9e; }
 
+.oneWorkspaceChip {
+  width: fit-content;
+  max-width: min(920px, 100%);
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: auto minmax(0, auto) auto 44px;
+  align-items: center;
+  gap: 7px;
+  margin: 0 auto 7px;
+  padding: 0 0 0 11px;
+  border: 1px solid #dfe3e1;
+  border-radius: 999px;
+  background: #f7f8f7;
+  color: #495055;
+  font-size: 11px;
+  pointer-events: auto;
+}
+
+.oneWorkspaceChip > span {
+  max-width: min(42vw, 360px);
+  overflow: hidden;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.oneWorkspaceChip > small { color: #858c90; font-size: 9px; white-space: nowrap; }
+.oneWorkspaceChip > svg { color: #788079; }
+.oneWorkspaceChip > button {
+  width: 44px;
+  min-height: 44px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #747b7f;
+  font-size: 17px;
+  cursor: pointer;
+}
+.oneWorkspaceChip > button:hover,
+.oneWorkspaceChip > button:focus-visible { background: #ecefed; outline: 2px solid #b6beb8; }
+
 .composer {
   width: min(920px, 100%);
   min-height: 120px;
@@ -1630,12 +1501,12 @@
 }
 
 .composerPopover {
-  position: absolute;
-  z-index: 6;
-  left: max(24px, calc(50% - 460px));
-  bottom: 146px;
-  width: min(390px, calc(100% - 48px));
-  max-height: min(420px, calc(100vh - 190px));
+  position: fixed;
+  z-index: 110;
+  left: var(--one-composer-popover-left, 24px);
+  bottom: var(--one-composer-popover-bottom, 156px);
+  width: var(--one-composer-popover-width, min(390px, calc(100vw - 48px)));
+  max-height: var(--one-composer-popover-max-height, min(420px, calc(100vh - 190px)));
   overflow: hidden;
   border: 1px solid #e0e2e3;
   border-radius: 12px;
@@ -1645,11 +1516,19 @@
 }
 
 .composerPopover[data-one-composer-popover="plus"] {
-  width: min(260px, calc(100% - 48px));
   padding: 6px;
 }
-.composerPopover[data-one-composer-popover="effort"] { width: min(220px, calc(100% - 48px)); max-height: min(360px, calc(100vh - 190px)); }
-.composerPopover[data-one-composer-popover="permission"] { width: min(280px, calc(100% - 48px)); }
+.composerPopover[data-one-composer-popover="plus"] .composerPopoverList {
+  max-height: calc(var(--one-composer-popover-max-height, 540px) - 12px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.composerPopover[data-one-composer-popover="plus"] .composerPluginList {
+  min-height: 58px;
+  flex: 1 1 184px;
+}
+.composerPopover[data-one-composer-popover="effort"] { max-height: min(var(--one-composer-popover-max-height, 360px), 360px); }
 
 .composerPopoverHeader {
   min-height: 43px;
@@ -1686,6 +1565,20 @@
 .composerPopoverSearch input::placeholder { color: #9aa0a4; }
 .composerPopoverDivider { height: 1px; margin: 0 6px; background: #eceeef; }
 .composerPopoverList { display: grid; }
+.composerPopoverSectionLabel {
+  padding: 7px 9px 4px;
+  color: #8b9195;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: .01em;
+}
+.composerPluginList {
+  display: grid;
+  max-height: 184px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
 .composerPopoverScroll {
   max-height: min(330px, calc(100vh - 285px));
   overflow-y: auto;
@@ -1716,7 +1609,7 @@
 .composerPopoverIcon { display: grid; place-items: center; color: #596065; }
 .composerPopoverCopy { min-width: 0; display: grid; gap: 2px; }
 .composerPopoverCopy strong { overflow: hidden; font-size: 12px; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }
-.composerPopoverCopy small { overflow: hidden; color: #8b9195; font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.composerPopoverCopy small { overflow: hidden; color: #8b9195; font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .composerPopover[data-one-composer-popover="model"] .composerPopoverCopy {
   display: flex;
   align-items: baseline;
@@ -1846,8 +1739,20 @@
 .composerChip:focus-visible,
 .composerChip[aria-expanded="true"],
 .composerQuickMode:hover,
-.composerQuickMode:focus-visible,
-.composerQuickMode[data-active="true"] { background: #f1f2f2; outline: none; }
+.composerQuickMode:focus-visible { background: #f1f2f2; outline: none; }
+.composerQuickMode[data-active="true"] {
+  /* Fast is an armed per-turn execution preference. Keep the pressed bolt
+     visibly black, as in the reference composer, without borrowing the send
+     button's filled-primary treatment. */
+  background: #eef0f0;
+  color: #171a1c;
+  box-shadow: inset 0 0 0 1px #d9ddde;
+}
+.composerQuickMode[data-active="true"]:hover,
+.composerQuickMode[data-active="true"]:focus-visible {
+  background: #e5e8e8;
+  outline: 3px solid rgba(23, 26, 28, .12);
+}
 .composerChip span { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composerChip:disabled,
 .composerQuickMode:disabled { color: #b8bdc0; cursor: default; }
@@ -2268,12 +2173,8 @@
   .composerDock { padding: 14px 10px 12px; }
   .composer { min-height: 110px; border-radius: 18px; }
   .composerPopover {
-    left: 10px;
-    bottom: 136px;
-    width: calc(100% - 20px);
     max-height: min(62vh, 470px);
   }
-  .composerPopover[data-one-composer-popover="plus"] { width: min(260px, calc(100% - 20px)); }
   .composerPopoverScroll { max-height: min(52vh, 380px); }
   .composerChip span { max-width: 108px; }
   .attachmentDropOverlay { bottom: 10px; width: calc(100% - 20px); }

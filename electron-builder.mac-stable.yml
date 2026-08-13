@@ -61,7 +61,7 @@ electronFuses:
 # This file is a standalone (non-`extends`) duplicate, so without this block the
 # signed/notarized mac release would ship WITHOUT the embedded engine.
 extraResources:
-  - from: Hephaestus
+  - from: dist/embedded-core
     to: Hephaestus
     filter:
       - "**/*"
@@ -119,15 +119,11 @@ extraResources:
       - "!**/signing/**"
       - "!**/credentials/**"
       - "!**/.memory.local/**"
-      # Preserve tracked .agentlas routing/ontology assets. Only Core's
-      # git-ignored mutable runtime state is forbidden.
-      - "!.agentlas/ontology-runtime.sqlite*"
-      - "!.agentlas/career-graph.sqlite*"
-      - "!.agentlas/experience-relations.jsonl*"
-      - "!.agentlas/.experience-relations.jsonl.*"
-      - "!.agentlas/field-test/**"
-      - "!.agentlas/field-test-report.*"
-      - "!.agentlas/agent-ontology/**"
+      # Never ship project-local Context/Semantic/Career state from the engine
+      # checkout. Re-include only the tracked product runtime contract.
+      - "!.agentlas/**"
+      - "!**/.agentlas/**"
+      - ".agentlas/product-runtime-contract.json"
       - "!**/.ontology-runtime/**"
       - "!**/.codex/**"
       - "!**/.claude/settings.local.json"

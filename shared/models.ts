@@ -168,6 +168,7 @@ export function needsLongContextToggle(
 export const CONTEXT_MANAGED_BY: Record<RuntimeKind, "runtime" | "agentlas"> = {
   "claude-code": "runtime",
   codex: "runtime",
+  antigravity: "runtime",
   gemini: "runtime",
   kimi: "runtime",
   grok: "runtime",
@@ -226,6 +227,7 @@ export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
     { id: "fable", label: "Fable", workforceTier: "frontier" },
   ],
   codex: [],
+  antigravity: [],
   gemini: [],
   // Kimi Code membership chooses the live account model. Keep the model
   // omitted unless the CLI itself exposes an authoritative inventory.

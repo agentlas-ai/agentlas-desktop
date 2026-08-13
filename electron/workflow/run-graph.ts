@@ -55,6 +55,7 @@ import {
   toHumanText,
   type NodeNote,
   type NodeOutputEnvelope,
+  automationRuntimePermission,
   defaultNodeEffect,
   requiredExecutionPermission,
 } from "../../shared/graph-node-protocol";
@@ -2620,9 +2621,11 @@ export async function runGraph(
               runId,
               chatId: nodeChat.id,
               userPrompt: executionPrompt,
-              // 시뮬레이션은 읽기 권한으로 내려 실행한다 — 런타임이 쓰기 도구를 거부하므로
+              // 시뮬레이션만 읽기 권한으로 내려 실행한다 — 런타임이 쓰기 도구를 거부하므로
               // 선언되지 않은 부수효과까지 실제로 막힌다(라벨만 붙이는 게 아니다).
-              permissions: dryRun || effectivePermission === "read" ? "read" : "write",
+              // 실전 실행은 `effectivePermission` 이 read 여도 도구를 켠다: 런타임의 read 는
+              // "쓰기 금지"가 아니라 "도구 금지"라서, 조회 그래프가 조회조차 못 했다.
+              permissions: automationRuntimePermission({ simulation: Boolean(dryRun) }),
               borrowAgents: hubBorrowForNode(node),
               // 그래프에서 이 에이전트에 이어 붙인 도구들(커넥터 C06).
               ...(declaredToolsForNode(node) ? { requiredToolCatalogIds: declaredToolsForNode(node) } : {}),

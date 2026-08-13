@@ -4,7 +4,8 @@
 //
 // 절대 하지 않는 것: 자동화당 watcher-프로세스 스폰(설계 §3.1 "절대 금지"). 하나의 공유
 // 매니저가 경로→구독자 맵을 들고, fs.watch 콜백을 debounce해 구독자에게 팬아웃한다.
-import { watch, type FSWatcher, existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync, watch, type FSWatcher } from "node:fs";
+import path from "node:path";
 
 export type FsChangeKind = "create" | "modify" | "delete";
 
@@ -20,66 +21,47 @@ export interface FsSubscription {
 }
 
 interface PathEntry {
-  watcher: FSWatcher;
+  watcher: FSWatcher | null;
   subs: FsSubscription[];
   debounceTimer: ReturnType<typeof setTimeout> | null;
-  /** 최근 debounce 창에서 관측한 rename(=create/delete) 여부. */
-  sawRename: boolean;
-  /** 최근 debounce 창에서 관측한 change(=modify) 여부. rename과 독립적으로 추적해
-   *  한 창에서 rename+modify가 겹쳐도 modify 구독자를 놓치지 않는다. */
-  sawChange: boolean;
-  lastChangedPath: string | null;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
+  rootIsDirectory: boolean;
+  /** watcher 연결 시점의 실제 경로 집합. debounce 끝에서 비교해 rename을 생성/삭제로 나눈다. */
+  knownPaths: Set<string>;
+  renamedPaths: Set<string>;
+  changedPaths: Set<string>;
 }
 
 const entries = new Map<string, PathEntry>();
+const RECONNECT_DELAY_MS = 1_000;
+// 프로젝트 루트가 node_modules 같은 거대한 트리를 포함해도 Main thread를 무한 순회하지 않는다.
+// cap 밖 경로의 삭제는 rename 후 부재 상태로 여전히 판별되고, 이후 관측부터 knownPaths에 들어간다.
+const MAX_INITIAL_SNAPSHOT_PATHS = 20_000;
 
 /**
- * 경로를 감시하도록 구독 등록. 같은 경로면 watcher를 공유한다. 경로가 없으면(존재X)
- * 조용히 무시(자동화는 살아있되 발사 안 함 — 폴더가 나중에 생기면 재등록 필요).
+ * 경로를 감시하도록 구독 등록. 같은 경로면 watcher를 공유한다. 경로가 아직 없거나
+ * 감시 중 삭제되어도 구독 자체는 유지하고, 경로가 돌아오면 watcher를 다시 연결한다.
  * @returns 구독 해제 함수.
  */
 export function watchPath(path: string, sub: FsSubscription): () => void {
-  if (!path || !existsSync(path)) {
-    return () => {};
-  }
+  if (!path) return () => {};
   let entry = entries.get(path);
   if (!entry) {
-    let watcher: FSWatcher;
-    try {
-      // recursive는 macOS/Windows에서 지원(FSEvents). 폴더면 하위까지, 파일이면 그 파일만.
-      watcher = watch(path, { recursive: true, persistent: false });
-    } catch {
-      try {
-        watcher = watch(path, { persistent: false });
-      } catch {
-        return () => {};
-      }
-    }
     const created: PathEntry = {
-      watcher,
+      watcher: null,
       subs: [],
       debounceTimer: null,
-      sawRename: false,
-      sawChange: false,
-      lastChangedPath: null,
+      reconnectTimer: null,
+      rootIsDirectory: false,
+      knownPaths: new Set(),
+      renamedPaths: new Set(),
+      changedPaths: new Set(),
     };
-    watcher.on("change", (eventType, filename) => {
-      created.lastChangedPath = typeof filename === "string" ? filename : filename ? filename.toString() : null;
-      if (eventType === "rename") created.sawRename = true;
-      else created.sawChange = true;
-      if (created.debounceTimer) clearTimeout(created.debounceTimer);
-      const wait = Math.max(...created.subs.map((s) => s.debounceMs), 50);
-      created.debounceTimer = setTimeout(() => flush(path), wait);
-      if (created.debounceTimer.unref) created.debounceTimer.unref();
-    });
-    watcher.on("error", () => {
-      // watcher가 죽으면 엔트리 제거(경로 삭제 등). 구독자는 남지만 재발사 안 함.
-      closePath(path);
-    });
     entries.set(path, created);
     entry = created;
   }
   entry.subs.push(sub);
+  ensureWatcher(path, entry);
   return () => {
     const e = entries.get(path);
     if (!e) return;
@@ -88,38 +70,153 @@ export function watchPath(path: string, sub: FsSubscription): () => void {
   };
 }
 
-function flush(path: string): void {
-  const entry = entries.get(path);
+function ensureWatcher(watchedPath: string, entry: PathEntry): void {
+  if (entry.watcher || entry.reconnectTimer || entry.subs.length === 0) return;
+  if (!existsSync(watchedPath)) {
+    scheduleReconnect(watchedPath, entry);
+    return;
+  }
+  try {
+    entry.rootIsDirectory = statSync(watchedPath).isDirectory();
+    entry.knownPaths = snapshotPaths(watchedPath, entry.rootIsDirectory);
+  } catch {
+    scheduleReconnect(watchedPath, entry);
+    return;
+  }
+
+  let watcher: FSWatcher;
+  try {
+    // recursive는 macOS/Windows에서 지원(FSEvents). 폴더면 하위까지, 파일이면 그 파일만.
+    watcher = watch(watchedPath, { recursive: true, persistent: false });
+  } catch {
+    try {
+      watcher = watch(watchedPath, { persistent: false });
+    } catch {
+      scheduleReconnect(watchedPath, entry);
+      return;
+    }
+  }
+  entry.watcher = watcher;
+  watcher.on("change", (eventType, filename) => {
+    const changedPath = typeof filename === "string" ? filename : filename ? filename.toString() : null;
+    const key = changedPath && entry.rootIsDirectory ? changedPath : "";
+    if (eventType === "rename") entry.renamedPaths.add(key);
+    else entry.changedPaths.add(key);
+    if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
+    const wait = Math.max(...entry.subs.map((s) => s.debounceMs), 50);
+    entry.debounceTimer = setTimeout(() => flush(watchedPath), wait);
+    entry.debounceTimer.unref?.();
+  });
+  watcher.on("error", () => disconnectAndRetry(watchedPath, entry));
+}
+
+function snapshotPaths(watchedPath: string, rootIsDirectory: boolean): Set<string> {
+  const out = new Set<string>([""]);
+  if (!rootIsDirectory) return out;
+  const pending = [""];
+  while (pending.length > 0 && out.size < MAX_INITIAL_SNAPSHOT_PATHS) {
+    const relative = pending.pop()!;
+    const absolute = relative ? path.join(watchedPath, relative) : watchedPath;
+    let children: Array<import("node:fs").Dirent<string>>;
+    try {
+      children = readdirSync(absolute, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const child of children) {
+      if (out.size >= MAX_INITIAL_SNAPSHOT_PATHS) break;
+      const childRelative = relative ? path.join(relative, child.name) : child.name;
+      out.add(childRelative);
+      if (child.isDirectory() && !child.isSymbolicLink()) pending.push(childRelative);
+    }
+  }
+  return out;
+}
+
+function scheduleReconnect(watchedPath: string, entry: PathEntry): void {
+  if (entry.reconnectTimer || entry.subs.length === 0) return;
+  entry.reconnectTimer = setTimeout(() => {
+    entry.reconnectTimer = null;
+    if (entries.get(watchedPath) === entry) ensureWatcher(watchedPath, entry);
+  }, RECONNECT_DELAY_MS);
+  entry.reconnectTimer.unref?.();
+}
+
+function disconnectAndRetry(watchedPath: string, entry: PathEntry): void {
+  if (entry.watcher) {
+    try {
+      entry.watcher.close();
+    } catch {
+      /* ignore */
+    }
+    entry.watcher = null;
+  }
+  scheduleReconnect(watchedPath, entry);
+}
+
+function flush(watchedPath: string): void {
+  const entry = entries.get(watchedPath);
   if (!entry) return;
-  const sawRename = entry.sawRename;
-  const sawChange = entry.sawChange;
-  const changedPath = entry.lastChangedPath;
-  entry.sawRename = false;
-  entry.sawChange = false;
+  const createPaths = new Set<string>();
+  const deletePaths = new Set<string>();
+  const modifyPaths = new Set<string>();
+  const transitions = new Map<string, "create" | "delete" | "stable">();
+  for (const key of entry.renamedPaths) {
+    const absolute = key && entry.rootIsDirectory ? path.join(watchedPath, key) : watchedPath;
+    const wasPresent = entry.knownPaths.has(key);
+    const isPresent = existsSync(absolute);
+    const transition = !isPresent ? "delete" : wasPresent ? "stable" : "create";
+    transitions.set(key, transition);
+    if (transition === "create") {
+      createPaths.add(key);
+      entry.knownPaths.add(key);
+    } else if (transition === "delete") {
+      deletePaths.add(key);
+      entry.knownPaths.delete(key);
+    } else if (transition === "stable") {
+      // Atomic-save rename over an existing file is a modification, not create.
+      modifyPaths.add(key);
+    }
+  }
+  for (const key of entry.changedPaths) {
+    const transition = transitions.get(key);
+    if (!transition || transition === "stable") modifyPaths.add(key);
+  }
+  entry.renamedPaths.clear();
+  entry.changedPaths.clear();
   entry.debounceTimer = null;
-  // fs.watch는 create/modify/delete를 정밀 구분하지 못한다(rename=create|delete, change=modify).
-  // rename과 change를 독립 추적하므로 한 창에서 둘이 겹쳐도 각 구독자를 올바로 발사한다.
+  // fs.watch의 rename은 create/delete 공용 신호다. watcher 연결 시점의 snapshot과
+  // debounce 종료 상태를 비교하므로 macOS의 중복 rename도 반대 이벤트로 오인하지 않는다.
   for (const sub of entry.subs) {
-    const matches =
-      sub.on === "modify" ? sawChange : sawRename; // create/delete 둘 다 rename으로 관측됨
-    if (matches) {
+    const matchedPaths = sub.on === "modify"
+      ? modifyPaths
+      : sub.on === "create"
+        ? createPaths
+        : deletePaths;
+    for (const relative of matchedPaths) {
       try {
-        sub.fire({ path, changedPath, kind: sub.on });
+        sub.fire({ path: watchedPath, changedPath: relative || null, kind: sub.on });
       } catch {
         /* 개별 구독자 오류가 다른 구독자를 막지 않게 */
       }
     }
   }
+  // macOS에서는 루트 폴더 삭제가 error 없이 rename 한 번으로 끝날 수 있다. 그 경우에도
+  // 죽은 watcher를 붙잡지 않고 경로 재생성을 기다린다.
+  if (!existsSync(watchedPath)) disconnectAndRetry(watchedPath, entry);
 }
 
 function closePath(path: string): void {
   const entry = entries.get(path);
   if (!entry) return;
   if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
-  try {
-    entry.watcher.close();
-  } catch {
-    /* ignore */
+  if (entry.reconnectTimer) clearTimeout(entry.reconnectTimer);
+  if (entry.watcher) {
+    try {
+      entry.watcher.close();
+    } catch {
+      /* ignore */
+    }
   }
   entries.delete(path);
 }

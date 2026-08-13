@@ -59,7 +59,8 @@ type RoleView = {
 const RUNTIME_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
-  gemini: "Gemini",
+  antigravity: "Antigravity",
+  gemini: "Gemini CLI · Legacy",
   kimi: "Kimi Code",
   grok: "Grok",
   cursor: "Cursor Agent",
@@ -118,12 +119,6 @@ function selectionKey(selection: RuntimeSelection): string {
 function runtimeLabel(runtime: RuntimeStatus): string {
   if (runtime.kind === "byok") {
     return `${BACKEND_LABEL[runtime.backend] ?? runtime.backend} API`;
-  }
-  if (
-    runtime.kind === "gemini" &&
-    /(^|[/\\])agy(?:\.(?:exe|cmd))?$/.test(runtime.source ?? "")
-  ) {
-    return "Antigravity";
   }
   return RUNTIME_LABEL[runtime.kind] ?? runtime.kind;
 }

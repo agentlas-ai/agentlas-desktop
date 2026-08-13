@@ -111,12 +111,20 @@ function ensureCanonicalPrivateDirectory(directory: string, recursive: boolean):
   } else {
     fs.mkdirSync(resolved, { recursive, mode: 0o700 });
   }
+  // `/tmp` is a system parent alias for `/private/tmp` on macOS. Reject a
+  // symlink at the staging directory itself, but canonicalize safe parent
+  // aliases instead of treating them as a mutated attachment root.
   const current = fs.lstatSync(resolved);
-  if (current.isSymbolicLink() || !current.isDirectory() || fs.realpathSync.native(resolved) !== resolved) {
+  if (current.isSymbolicLink() || !current.isDirectory()) {
     throw new OneAttachmentError("stale_grant", "The One attachment staging root changed unexpectedly.");
   }
-  if (process.platform !== "win32") fs.chmodSync(resolved, 0o700);
-  return resolved;
+  const canonical = fs.realpathSync.native(resolved);
+  const canonicalCurrent = fs.lstatSync(canonical);
+  if (canonicalCurrent.isSymbolicLink() || !canonicalCurrent.isDirectory()) {
+    throw new OneAttachmentError("stale_grant", "The One attachment staging root changed unexpectedly.");
+  }
+  if (process.platform !== "win32") fs.chmodSync(canonical, 0o700);
+  return canonical;
 }
 
 function pendingRoot(create: boolean): string | null {

@@ -3,6 +3,7 @@ set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 repo="${AGENTLAS_DESKTOP_STABLE_REPO:-agentlas-ai/agentlas-desktop-releases}"
+local_dmg=""
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/agentlas-stable-install.XXXXXX")"
 mount_point=""
 stage_container=""
@@ -13,6 +14,23 @@ install_lock_acquired=0
 had_existing=0
 app_mutated=0
 install_committed=0
+
+for argument in "$@"; do
+  case "$argument" in
+    --dmg=*) local_dmg="${argument#--dmg=}" ;;
+    *)
+      echo "Unknown installer argument: $argument" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -n "$local_dmg" ]]; then
+  if [[ "$local_dmg" != /* || ! -f "$local_dmg" ]]; then
+    echo "--dmg must name an existing absolute DMG path." >&2
+    exit 1
+  fi
+fi
 
 atomic_exchange() {
   xcrun swift "$project_dir/scripts/atomic-swap-mac.swift" --exchange "$1" "$2"
@@ -119,7 +137,9 @@ require_cmd() {
   fi
 }
 
-require_cmd gh
+if [[ -z "$local_dmg" ]]; then
+  require_cmd gh
+fi
 require_cmd hdiutil
 require_cmd spctl
 require_cmd xcrun
@@ -181,13 +201,19 @@ recover_interrupted_transaction() {
 acquire_install_lock
 recover_interrupted_transaction
 
-tag="$(gh release view --repo "$repo" --json tagName --jq .tagName)"
-version="${tag#v}"
-dmg_name="Agentlas-${version}-${arch}.dmg"
-
-echo "Installing Agentlas stable ${version} (${arch}) from ${repo}"
-cd "$tmp_dir"
-gh release download "$tag" --repo "$repo" --pattern "$dmg_name" --clobber
+if [[ -n "$local_dmg" ]]; then
+  dmg_name="$local_dmg"
+  version=""
+  echo "Installing Agentlas (${arch}) from a local notarized DMG"
+else
+  tag="$(gh release view --repo "$repo" --json tagName --jq .tagName)"
+  version="${tag#v}"
+  dmg_name="Agentlas-${version}-${arch}.dmg"
+  echo "Installing Agentlas stable ${version} (${arch}) from ${repo}"
+  cd "$tmp_dir"
+  gh release download "$tag" --repo "$repo" --pattern "$dmg_name" --clobber
+  dmg_name="$tmp_dir/$dmg_name"
+fi
 
 hdiutil verify "$dmg_name" >/dev/null
 xcrun stapler validate "$dmg_name" >/dev/null
@@ -201,7 +227,36 @@ if [[ -z "$mount_point" || ! -d "$mount_point/Agentlas.app" ]]; then
 fi
 
 installed_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$mount_point/Agentlas.app/Contents/Info.plist")"
-if [[ "$installed_version" != "$version" ]]; then
+if [[ -n "$local_dmg" ]]; then
+  if [[ ! "$installed_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Local official DMG must contain a stable semantic version: app=${installed_version}" >&2
+    exit 1
+  fi
+  version="$installed_version"
+  current_version=""
+  if [[ -d /Applications/Agentlas.app ]]; then
+    current_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Agentlas.app/Contents/Info.plist 2>/dev/null || true)"
+  fi
+  if [[ -n "$current_version" ]]; then
+    if ! node -e '
+      const parse = (value) => {
+        const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
+        if (!match) process.exit(2);
+        return match.slice(1).map(Number);
+      };
+      const current = parse(process.argv[1]);
+      const next = parse(process.argv[2]);
+      for (let index = 0; index < 3; index += 1) {
+        if (next[index] > current[index]) process.exit(0);
+        if (next[index] < current[index]) process.exit(1);
+      }
+      process.exit(1);
+    ' "$current_version" "$version"; then
+      echo "Local DMG is not a newer stable version: installed=${current_version}, candidate=${version}" >&2
+      exit 1
+    fi
+  fi
+elif [[ "$installed_version" != "$version" ]]; then
   echo "DMG version mismatch: tag=${version}, app=${installed_version}" >&2
   exit 1
 fi
@@ -223,8 +278,15 @@ if [[ "$staged_version" != "$version" ]]; then
 fi
 verify_official_app "$stage_path"
 
-osascript -e 'tell application "Agentlas" to quit' >/dev/null 2>&1 || true
-sleep 2
+if [[ "${AGENTLAS_APP_ALREADY_STOPPED:-0}" == "1" ]]; then
+  if pgrep -x Agentlas >/dev/null 2>&1; then
+    echo "Agentlas is still running; refusing the pre-stopped installation path." >&2
+    exit 1
+  fi
+else
+  osascript -e 'tell application "Agentlas" to quit' >/dev/null 2>&1 || true
+  sleep 2
+fi
 
 if [[ -d /Applications/Agentlas.app ]]; then
   had_existing=1
@@ -266,5 +328,9 @@ clear_transaction_journal
 remove_stage_container "$stage_container"
 stage_container=""
 
-open -a Agentlas
-echo "Agentlas ${version} installed and launched."
+if [[ "${AGENTLAS_SKIP_LAUNCH:-0}" == "1" ]]; then
+  echo "Agentlas ${version} installed; launch skipped by request."
+else
+  open -a Agentlas
+  echo "Agentlas ${version} installed and launched."
+fi

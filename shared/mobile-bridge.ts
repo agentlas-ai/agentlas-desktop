@@ -53,6 +53,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "workspace.setProject",
   "workspace.clear",
   "composer.context",
+  "plugins.list",
   "invoke.history",
   "one.invoke.start",
   "invoke.start",
@@ -81,6 +82,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "agents.cloudDelete",
   "build.start",
   "build.status",
+  "build.answer",
   "device.revokeSelf",
 ] as const;
 
@@ -113,6 +115,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "agents.cloudUploadSave",
   "agents.cloudDelete",
   "build.start",
+  "build.answer",
 ]);
 
 export const MOBILE_BRIDGE_EVENT_NAMES = [
@@ -201,6 +204,17 @@ export interface MobileBridgeImageAttachmentDto {
   name?: string;
   /** Pure base64, never a data URL. Desktop decodes and enforces 5 MiB. */
   data: string;
+}
+
+/** Secret-free installed MCP inventory shown in One's Mobile composer. */
+export interface MobileBridgePluginDto {
+  id: string;
+  name: string;
+  nameEn: string;
+  description: string;
+  descriptionEn: string;
+  enabled: boolean;
+  ready: boolean;
 }
 
 /**
@@ -1402,6 +1416,8 @@ export interface MobileBridgeCloudDeleteResultDto {
 }
 
 export interface MobileBridgeBuildQuestionDto {
+  /** Stable within one question set; answers must bind to this id. */
+  questionId: string;
   question: string;
   header?: string;
   options: Array<{ label: string; description?: string }>;
@@ -1417,6 +1433,9 @@ export type MobileBridgeBuildStatus =
 export interface MobileBridgeBuildRefusalDto {
   code:
     | "mobile_build_resume_unsupported"
+    | "build_answer_stale"
+    | "build_answer_invalid"
+    | "build_answer_in_progress"
     | "build_completion_unproven"
     | "desktop_approval_denied"
     | "desktop_approval_unavailable"
@@ -1436,17 +1455,19 @@ export interface MobileBridgeBuildEventDto {
   status: MobileBridgeBuildStatus;
   stage?: string;
   text?: string;
+  questionSetId?: string;
   questions?: MobileBridgeBuildQuestionDto[];
   refusal?: MobileBridgeBuildRefusalDto;
-  resumable?: false;
+  resumable?: boolean;
 }
 
 export interface MobileBridgeBuildStatusDto {
   status: MobileBridgeBuildStatus;
   summary: string | null;
+  questionSetId?: string;
   questions?: MobileBridgeBuildQuestionDto[];
   refusal?: MobileBridgeBuildRefusalDto;
-  resumable?: false;
+  resumable?: boolean;
 }
 
 /**
@@ -1614,6 +1635,7 @@ const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "team.list",
   "firms.list",
   "projects.list",
+  "plugins.list",
   "invoke.activeChats",
   "confirm.listPending",
   "automations.list",
@@ -2198,8 +2220,49 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         ? firstError(
             requiredText(params, "goal", 20_000),
             requiredString(params, "idempotencyKey", 160),
-          )
+        )
         : "build.start accepts only goal and idempotencyKey";
+    case "build.answer": {
+      if (!hasOnlyKeys(params, ["runId", "questionSetId", "answers", "idempotencyKey"])) {
+        return "build.answer contains unsupported fields";
+      }
+      const answers = params.answers;
+      if (!Array.isArray(answers) || answers.length < 1 || answers.length > 7) {
+        return "answers must contain between 1 and 7 entries";
+      }
+      const seenQuestionIds = new Set<string>();
+      for (const answer of answers) {
+        if (!isRecord(answer) || !hasOnlyKeys(answer, ["questionId", "values"])) {
+          return "each answer must contain only questionId and values";
+        }
+        const questionIdError = requiredString(answer, "questionId", 160);
+        if (questionIdError) return questionIdError;
+        const questionId = answer.questionId as string;
+        if (seenQuestionIds.has(questionId)) return "answers cannot repeat questionId";
+        seenQuestionIds.add(questionId);
+        if (!Array.isArray(answer.values) || answer.values.length < 1 || answer.values.length > 8) {
+          return "each answer values must contain between 1 and 8 entries";
+        }
+        const seenValues = new Set<string>();
+        for (const value of answer.values) {
+          if (
+            typeof value !== "string" ||
+            value.length < 1 ||
+            value.length > 200 ||
+            /[\u0000-\u001f]/.test(value) ||
+            seenValues.has(value)
+          ) {
+            return "answer values must be unique bounded strings";
+          }
+          seenValues.add(value);
+        }
+      }
+      return firstError(
+        requiredString(params, "runId", 160),
+        requiredString(params, "questionSetId", 160),
+        requiredString(params, "idempotencyKey", 160),
+      );
+    }
     case "build.status":
       return hasOnlyKeys(params, ["runId"])
         ? requiredString(params, "runId", 160)

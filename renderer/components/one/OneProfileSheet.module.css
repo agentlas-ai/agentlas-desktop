@@ -1,90 +1,12 @@
-.layer {
-  position: fixed;
-  inset: 0;
-  z-index: 90;
-  display: flex;
-  justify-content: flex-end;
-}
-
-.scrim {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  padding: 0;
-  border: 0;
-  background: rgba(21, 23, 20, 0.2);
-  cursor: default;
-}
-
-.sheet {
-  position: relative;
-  width: min(600px, 100%);
-  height: 100%;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  background: #fff;
-  border-left: 1px solid #e4e7df;
-  box-shadow: -20px 0 48px rgba(31, 36, 28, 0.09);
-  color: #171915;
-}
-
-.header {
-  display: flex;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 32px 34px 24px;
-  border-bottom: 1px solid #eceee9;
-}
-
-.header h2 {
-  margin: 3px 0 8px;
-  font-size: 26px;
-  line-height: 1.2;
-  letter-spacing: -0.03em;
-}
-
-.header p:not(.eyebrow) {
-  max-width: 470px;
-  margin: 0;
-  color: #686d63;
-  font-size: 14px;
-  line-height: 1.55;
-}
-
-.eyebrow {
-  margin: 0;
-  color: #536938;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.closeButton {
-  width: 44px;
-  height: 44px;
-  flex: 0 0 44px;
-  border: 1px solid #e3e6df;
-  border-radius: 50%;
-  background: #fff;
-  color: #33372f;
-  font-size: 25px;
-  line-height: 1;
-  cursor: pointer;
-}
-
 .content {
-  overflow-y: auto;
-  padding: 0 34px 48px;
+  min-width: 0;
 }
 
 .loading {
   display: grid;
   min-height: 240px;
   place-items: center;
-  color: #6e7469;
+  color: var(--one-sheet-muted);
 }
 
 .message,
@@ -92,25 +14,31 @@
   position: sticky;
   top: 0;
   z-index: 2;
-  margin: 0 -34px;
-  padding: 12px 34px;
-  border-bottom: 1px solid #dfe6d7;
-  background: #f4f8ef;
-  color: #40522d;
+  margin: 0;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--one-sheet-success-line);
+  background: var(--one-sheet-success-surface);
+  color: var(--one-sheet-success);
   font-size: 13px;
 }
 
 .error {
-  border-color: #f0d0ca;
-  background: #fff3f1;
-  color: #8b3327;
+  border-color: var(--one-sheet-danger-line);
+  background: var(--one-sheet-danger-surface);
+  color: var(--one-sheet-danger);
 }
 
 .section {
   display: grid;
   gap: 16px;
   padding: 28px 0;
-  border-bottom: 1px solid #eceee9;
+  border-bottom: 1px solid var(--one-sheet-line);
+}
+
+.section:first-child,
+.message + .section,
+.error + .section {
+  padding-top: 0;
 }
 
 .section:last-child {
@@ -132,7 +60,7 @@
 
 .sectionHeading p {
   margin: 0;
-  color: #747a70;
+  color: var(--one-sheet-muted);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -152,7 +80,7 @@
 .editForm label {
   display: grid;
   gap: 7px;
-  color: #444940;
+  color: var(--one-sheet-label-ink);
   font-size: 13px;
   font-weight: 650;
 }
@@ -167,12 +95,12 @@
 .editForm textarea,
 .editForm select {
   width: 100%;
-  min-height: 44px;
+  min-height: var(--one-sheet-control-height);
   box-sizing: border-box;
-  border: 1px solid #dfe3da;
-  border-radius: 11px;
-  background: #fff;
-  color: #1d201b;
+  border: 1px solid var(--one-sheet-control-border);
+  border-radius: var(--one-sheet-control-radius);
+  background: var(--one-sheet-control-surface);
+  color: var(--one-sheet-ink);
   padding: 11px 12px;
   font: inherit;
   font-size: 14px;
@@ -196,12 +124,11 @@
 .editForm input:focus,
 .editForm textarea:focus,
 .editForm select:focus,
-.closeButton:focus-visible,
 .primaryButton:focus-visible,
 .secondaryButton:focus-visible,
 .dangerButton:focus-visible {
-  border-color: #607c3f;
-  box-shadow: 0 0 0 3px rgba(96, 124, 63, 0.16);
+  border-color: var(--one-sheet-accent);
+  box-shadow: var(--one-sheet-focus);
 }
 
 .formActions,
@@ -215,8 +142,8 @@
 .primaryButton,
 .secondaryButton,
 .dangerButton {
-  min-height: 44px;
-  border-radius: 11px;
+  min-height: var(--one-sheet-control-height);
+  border-radius: var(--one-sheet-control-radius);
   padding: 0 16px;
   font: inherit;
   font-size: 13px;
@@ -225,26 +152,25 @@
 }
 
 .primaryButton {
-  border: 1px solid #536d35;
-  background: #5c773b;
+  border: 1px solid var(--one-sheet-primary);
+  background: var(--one-sheet-primary);
   color: #fff;
 }
 
 .secondaryButton,
 .dangerButton {
-  border: 1px solid #dfe3da;
-  background: #fff;
+  border: 1px solid var(--one-sheet-control-border);
+  background: var(--one-sheet-control-surface);
   color: #42473e;
 }
 
 .dangerButton {
-  color: #9b3b2e;
+  color: var(--one-sheet-danger);
 }
 
 .primaryButton:disabled,
 .secondaryButton:disabled,
-.dangerButton:disabled,
-.closeButton:disabled {
+.dangerButton:disabled {
   cursor: not-allowed;
   opacity: 0.5;
 }
@@ -255,7 +181,7 @@
   gap: 13px;
   padding: 17px;
   border: 1px solid #e2e6dc;
-  border-radius: 15px;
+  border-radius: var(--one-sheet-card-radius);
   background: #fafbf8;
 }
 
@@ -273,13 +199,13 @@
   display: grid;
   gap: 12px;
   padding: 17px;
-  border: 1px solid #e2e5de;
-  border-radius: 15px;
-  background: #fff;
+  border: 1px solid var(--one-sheet-control-border);
+  border-radius: var(--one-sheet-card-radius);
+  background: var(--one-sheet-card-surface);
 }
 
 .principleCard[data-enabled="false"] {
-  background: #f8f9f6;
+  background: var(--one-sheet-card-muted);
   color: #777c73;
 }
 
@@ -342,7 +268,7 @@
 .empty {
   margin: 0;
   padding: 25px 18px;
-  border: 1px dashed #dfe3da;
+  border: 1px dashed var(--one-sheet-control-border);
   border-radius: 13px;
   color: #747a70;
   text-align: center;
@@ -350,18 +276,10 @@
 }
 
 @media (max-width: 680px) {
-  .header {
-    padding: 24px 20px 20px;
-  }
-
-  .content {
-    padding: 0 20px 40px;
-  }
-
   .message,
   .error {
-    margin: 0 -20px;
-    padding-inline: 20px;
+    margin: 0;
+    padding-inline: 0;
   }
 
   .principleComposer,
@@ -373,12 +291,5 @@
   .principleComposer .formActions,
   .editForm .cardActions {
     grid-column: auto;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .sheet,
-  .scrim {
-    scroll-behavior: auto;
   }
 }

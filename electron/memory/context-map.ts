@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { verifyActivatedFolderIdentity } from "../architecture/activation";
 import { resolveHephaestusSyncLaunch } from "../hephaestus/engine";
+import { hephaestusContextRoot } from "../hephaestus/root";
 
 const MAX_TASK_CHARS = 12_000;
 const MAX_RESULT_BYTES = 1_500_000;
@@ -18,8 +19,11 @@ type ContextSliceResult = {
 
 type CodeMapResult = {
   schemaVersion?: string;
+  snapshotId?: string;
   defIndex?: unknown;
   refIndex?: unknown;
+  fileRoles?: unknown;
+  dependencyEdges?: unknown;
   verificationGraph?: {
     schemaVersion?: string;
     graphDigest?: string;
@@ -44,7 +48,13 @@ function contextLaunch(args: string[]): {
       // Invalid explicit shell bridge falls through to the canonical runtime.
     }
   }
-  return resolveHephaestusSyncLaunch("agentlas_cloud", ["context", ...args]);
+  const contextRoot = hephaestusContextRoot();
+  if (!contextRoot) return null;
+  return resolveHephaestusSyncLaunch(
+    "agentlas_cloud",
+    ["context", ...args],
+    contextRoot,
+  );
 }
 
 function hasCanonicalCodeMap(projectPath: string): boolean {
@@ -55,14 +65,29 @@ function hasCanonicalCodeMap(projectPath: string): boolean {
         "utf8",
       ),
     ) as CodeMapResult;
+    const manifest = JSON.parse(
+      fs.readFileSync(
+        path.join(projectPath, ".agentlas", "code-map", "manifest.json"),
+        "utf8",
+      ),
+    ) as { schemaVersion?: string; snapshotId?: string; complete?: boolean };
+    const verificationSchema = payload.verificationGraph?.schemaVersion ?? "";
     return (
       payload.schemaVersion === "agentlas.code-map.v2"
+      && /^sha256:[0-9a-f]{64}$/.test(payload.snapshotId ?? "")
+      && manifest.schemaVersion === "agentlas.code-map-manifest.v3"
+      && manifest.snapshotId === payload.snapshotId
+      && manifest.complete === true
       && payload.defIndex !== null
       && typeof payload.defIndex === "object"
       && payload.refIndex !== null
       && typeof payload.refIndex === "object"
-      && payload.verificationGraph?.schemaVersion === "agentlas.verification-map.v1"
-      && /^sha256:[0-9a-f]{64}$/.test(payload.verificationGraph.graphDigest ?? "")
+      && payload.fileRoles !== null
+      && typeof payload.fileRoles === "object"
+      && Array.isArray(payload.dependencyEdges)
+      && ["agentlas.verification-map.v1", "agentlas.verification-map.v2"]
+        .includes(verificationSchema)
+      && /^sha256:[0-9a-f]{64}$/.test(payload.verificationGraph?.graphDigest ?? "")
     );
   } catch {
     return false;
@@ -71,7 +96,7 @@ function hasCanonicalCodeMap(projectPath: string): boolean {
 
 /**
  * Refresh through the public Core command and return true only after the
- * canonical v2 map with the verification graph is present. Process creation
+ * canonical v3 manifest and its v2 compatibility map are present. Process creation
  * is not a refresh receipt.
  */
 export function triggerProjectContextMapRefresh(projectPath: string): boolean {

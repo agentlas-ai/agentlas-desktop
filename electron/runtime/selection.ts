@@ -19,7 +19,7 @@ import {
 } from "./byok";
 import { runClaudeCode } from "./claude-code";
 import { runCodex } from "./codex";
-import { isAgyBinaryPath, runGemini } from "./gemini";
+import { runGemini } from "./gemini";
 import { runKimi } from "./kimi";
 import { runGrok } from "./grok";
 import { runCursor } from "./cursor";
@@ -88,10 +88,15 @@ const runOllamaSlotted = withLocalInferenceSlot(runOllama);
 const runLMStudioSlotted = withLocalInferenceSlot(runLMStudio);
 const runMLXSlotted = withLocalInferenceSlot(runMLX);
 
+function bindRuntimeSource(runner: Runner, source: string | undefined): Runner {
+  return (req, events) => runner({ ...req, ...(source ? { runtimeSource: source } : {}) }, events);
+}
+
 const RUNNER_LABEL: Record<string, string> = {
   "claude-code": "Claude Code CLI",
   codex: "Codex CLI",
-  gemini: "Gemini CLI",
+  antigravity: "Antigravity CLI",
+  gemini: "Gemini CLI · Legacy",
   kimi: "Kimi Code CLI",
   grok: "Grok CLI",
   cursor: "Cursor Agent CLI",
@@ -156,10 +161,16 @@ export function effortForSelectedModel(
 export function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | null {
   if (active.kind === "claude-code") return { runner: runClaudeCodeSlotted, label: RUNNER_LABEL["claude-code"] };
   if (active.kind === "codex") return { runner: runCodexSlotted, label: RUNNER_LABEL.codex };
+  if (active.kind === "antigravity") {
+    return {
+      runner: bindRuntimeSource(runGeminiSlotted, active.source),
+      label: RUNNER_LABEL.antigravity,
+    };
+  }
   if (active.kind === "gemini") {
     return {
-      runner: runGeminiSlotted,
-      label: isAgyBinaryPath(active.source) ? "Antigravity CLI" : RUNNER_LABEL.gemini,
+      runner: bindRuntimeSource(runGeminiSlotted, active.source),
+      label: RUNNER_LABEL.gemini,
     };
   }
   if (active.kind === "kimi")
@@ -212,10 +223,16 @@ export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { so
 } | null {
   if (selection.kind === "claude-code") return { runner: runClaudeCode, label: RUNNER_LABEL["claude-code"] };
   if (selection.kind === "codex") return { runner: runCodex, label: RUNNER_LABEL.codex };
+  if (selection.kind === "antigravity") {
+    return {
+      runner: bindRuntimeSource(runGemini, selection.source),
+      label: RUNNER_LABEL.antigravity,
+    };
+  }
   if (selection.kind === "gemini") {
     return {
-      runner: runGemini,
-      label: isAgyBinaryPath(selection.source ?? "") ? "Antigravity CLI" : RUNNER_LABEL.gemini,
+      runner: bindRuntimeSource(runGemini, selection.source),
+      label: RUNNER_LABEL.gemini,
     };
   }
   if (selection.kind === "kimi") return { runner: runKimi, label: RUNNER_LABEL.kimi };

@@ -51,8 +51,103 @@ const LOCAL_MEDIA_EXTS = new Set([
   ".pdf",
 ]);
 
+/** 붙여넣기에는 원본 경로가 없을 수 있다. Main이 허용 형식·확장자·상한을 결정한다. */
+const PASTED_ATTACHMENT_EXTENSIONS: Readonly<Record<string, string>> = Object.freeze({
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+  "audio/mpeg": ".mp3",
+  "audio/wav": ".wav",
+  "audio/mp4": ".m4a",
+  "audio/aac": ".aac",
+  "audio/flac": ".flac",
+  "audio/ogg": ".ogg",
+  "video/mp4": ".mp4",
+  "video/quicktime": ".mov",
+  "video/webm": ".webm",
+  "application/pdf": ".pdf",
+  "text/plain": ".txt",
+  "text/markdown": ".md",
+  "text/csv": ".csv",
+  "application/json": ".json",
+});
+/** One 첨부 상한과 맞춘다. 이미지만 더 작은 상한을 유지한다. */
+const PASTED_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const PASTED_FILE_MAX_BYTES = 64 * 1024 * 1024;
+/** 첨부로 태우지 않고 남은 붙여넣기 원본을 방치하지 않는다. */
+const PASTED_ATTACHMENT_TTL_MS = 6 * 60 * 60 * 1_000;
+
 const grants = new Map<string, GrantRecord>();
 let durableLoaded = false;
+
+function looksLikeDeclaredImage(mediaType: string, bytes: Buffer): boolean {
+  if (mediaType === "image/png") {
+    return bytes.byteLength >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
+  if (mediaType === "image/jpeg") {
+    return bytes.byteLength >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  }
+  if (mediaType === "image/gif") {
+    const head = bytes.subarray(0, 6).toString("latin1");
+    return head === "GIF87a" || head === "GIF89a";
+  }
+  if (mediaType === "image/webp") {
+    return bytes.byteLength >= 12
+      && bytes.subarray(0, 4).toString("latin1") === "RIFF"
+      && bytes.subarray(8, 12).toString("latin1") === "WEBP";
+  }
+  return false;
+}
+
+function looksLikeDeclaredPastedAttachment(mediaType: string, bytes: Buffer): boolean {
+  if (mediaType.startsWith("image/")) return looksLikeDeclaredImage(mediaType, bytes);
+  if (mediaType === "audio/mpeg") return bytes.subarray(0, 3).equals(Buffer.from("ID3")) || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0);
+  if (mediaType === "audio/wav") return bytes.byteLength >= 12 && bytes.subarray(0, 4).equals(Buffer.from("RIFF")) && bytes.subarray(8, 12).equals(Buffer.from("WAVE"));
+  if (mediaType === "audio/flac") return bytes.subarray(0, 4).equals(Buffer.from("fLaC"));
+  if (mediaType === "audio/ogg") return bytes.subarray(0, 4).equals(Buffer.from("OggS"));
+  if (mediaType === "audio/aac") return bytes.byteLength >= 2 && bytes[0] === 0xff && (bytes[1] & 0xf6) === 0xf0;
+  if (mediaType === "audio/mp4" || mediaType === "video/mp4" || mediaType === "video/quicktime") {
+    return bytes.byteLength >= 12 && bytes.subarray(4, 8).equals(Buffer.from("ftyp"));
+  }
+  if (mediaType === "video/webm") return bytes.byteLength >= 4 && bytes.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
+  if (mediaType === "application/pdf") return bytes.subarray(0, 5).equals(Buffer.from("%PDF-"));
+  if (mediaType === "application/json") {
+    try { JSON.parse(bytes.toString("utf8")); return true; } catch { return false; }
+  }
+  // Plain-text formats are staged as inert data. They are never rendered as HTML.
+  return mediaType === "text/plain" || mediaType === "text/markdown" || mediaType === "text/csv";
+}
+
+/** One 첨부 스테이징 루트 바깥의 전용 비공개 디렉터리(안이면 첨부가 자기 파일로 보고 거부한다). */
+function ensurePastedAttachmentRoot(): string {
+  const root = path.join(app.getPath("userData"), "one-pasted-attachments-v1");
+  const stat = fs.existsSync(root) ? fs.lstatSync(root) : null;
+  if (stat && !stat.isDirectory()) {
+    throw new FsAccessDeniedError("The pasted-attachment staging path is not a directory.");
+  }
+  if (!stat) fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  return fs.realpathSync.native(root);
+}
+
+function sweepStalePastedAttachments(root: string): void {
+  const staleBefore = Date.now() - PASTED_ATTACHMENT_TTL_MS;
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(root);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const candidate = path.join(root, name);
+    try {
+      const stat = fs.lstatSync(candidate);
+      if (stat.isFile() && stat.mtimeMs < staleBefore) fs.rmSync(candidate, { force: true });
+    } catch {
+      // 한 파일의 청소 실패가 붙여넣기를 막아선 안 된다.
+    }
+  }
+}
 
 export class FsAccessDeniedError extends Error {
   constructor(message = "Filesystem read is outside the approved scope.") {
@@ -163,6 +258,60 @@ export function grantDroppedPath(rawPath: string): FsPathGrant {
   if (stat.isFile()) return grantPath(real, { durable: false, exactFile: true });
   if (stat.isDirectory()) return grantPath(real, { durable: false });
   throw new FsAccessDeniedError("The dropped item is not a regular file or directory.");
+}
+
+/**
+ * 붙여넣기·스크린샷 이미지는 클립보드에만 있고 디스크 경로가 없다. `getPathForFile`이
+ * 빈 값을 주므로 드롭용 capability를 받을 수 없고, 그래서 One 첨부 파이프(경로에서
+ * 스테이징으로 복사)에 애초에 들어갈 수 없었다(제보 2026-08-13: Work는 되는데 One은 안 됨).
+ *
+ * 여기서 내용을 사용자 데이터 안의 비공개 파일로 고정하고, 드롭과 **동일 등급**의
+ * capability를 발급한다. 파일 이름과 확장자는 호출자가 정하지 못하고(경로 조작·확장자
+ * 위장 차단), 선언한 타입은 매직 바이트로 대조한다 — 렌더러의 주장만 믿지 않는다.
+ */
+export function grantPastedAttachment(input: { mediaType?: unknown; bytes?: unknown }): FsPathGrant {
+  const mediaType = typeof input?.mediaType === "string" ? input.mediaType.trim().toLowerCase() : "";
+  const extension = PASTED_ATTACHMENT_EXTENSIONS[mediaType];
+  if (!extension) {
+    throw new FsAccessDeniedError("This pasted file type is not supported in One attachments.");
+  }
+  const bytes = input?.bytes instanceof Uint8Array
+    ? Buffer.from(input.bytes.buffer, input.bytes.byteOffset, input.bytes.byteLength)
+    : Buffer.isBuffer(input?.bytes)
+      ? input.bytes as Buffer
+      : ArrayBuffer.isView(input?.bytes) || input?.bytes instanceof ArrayBuffer
+        ? Buffer.from(input.bytes as ArrayBuffer)
+        : null;
+  if (!bytes || bytes.byteLength === 0) {
+    throw new FsAccessDeniedError("The pasted attachment is empty.");
+  }
+  const maxBytes = mediaType.startsWith("image/") ? PASTED_IMAGE_MAX_BYTES : PASTED_FILE_MAX_BYTES;
+  if (bytes.byteLength > maxBytes) {
+    throw new FsAccessDeniedError("The pasted attachment exceeds One's safe size limit.");
+  }
+  if (!looksLikeDeclaredPastedAttachment(mediaType, bytes)) {
+    throw new FsAccessDeniedError("The pasted content does not match the file type it claims to be.");
+  }
+  const root = ensurePastedAttachmentRoot();
+  sweepStalePastedAttachments(root);
+  // 이름은 main이 만든다 — 붙여넣기 원본에는 신뢰할 이름 자체가 없다.
+  const target = path.join(root, `pasted-${randomUUID()}${extension}`);
+  const fd = fs.openSync(target, "wx", 0o600);
+  try {
+    fs.writeSync(fd, bytes);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return grantPath(target, { durable: false, exactFile: true });
+}
+
+/** Backward-compatible image-only entry point for older preload clients and its contract gate. */
+export function grantPastedImage(input: { mediaType?: unknown; bytes?: unknown }): FsPathGrant {
+  const mediaType = typeof input?.mediaType === "string" ? input.mediaType.trim().toLowerCase() : "";
+  if (!mediaType.startsWith("image/")) {
+    throw new FsAccessDeniedError("Only PNG, JPEG, GIF, and WebP images can be pasted.");
+  }
+  return grantPastedAttachment(input);
 }
 
 export function pathFromGrant(grant: FsPathGrant, expectedKind?: FsPathGrant["kind"]): string {

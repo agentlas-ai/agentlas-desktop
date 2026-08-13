@@ -39,6 +39,7 @@ import {
   type OneArtifactPreviewCapabilityV1,
 } from "@shared/one-artifacts";
 import { redactSecrets } from "@shared/secret-patterns";
+import { stripAgentIdentityBadges } from "@shared/agent-control-blocks";
 import { ipc } from "@/lib/ipc";
 import { tFor } from "@/lib/i18n";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
@@ -66,6 +67,34 @@ const DESKTOP_NATIVE_BLOCK_TYPES = new Set<OneSurfaceBlockType>([
 const DESKTOP_FALLBACK_BLOCK_TYPES = new Set<OneSurfaceBlockType>(
   ONE_SURFACE_BLOCK_TYPES.filter((type) => !DESKTOP_NATIVE_BLOCK_TYPES.has(type)),
 );
+const DEDICATED_RESULT_BLOCK_TYPES = new Set<OneSurfaceBlockType>([
+  // A structured result is its own final answer, not a second Markdown
+  // transcript beneath a provider's progress narration. Keep the complete
+  // verification/result surface together in one readable card.
+  "ArtifactList",
+  "Budget",
+  "Checklist",
+  "Comparison",
+  "Decision",
+  "Map",
+  "Metric",
+  "SourceList",
+  "Status",
+  "Table",
+  "Timeline",
+  "Gallery",
+  "Media",
+  "Document",
+]);
+
+/**
+ * Keep a plain narrative in the chronological conversation like Codex. A
+ * structured result owns its complete final card so provider progress prose
+ * cannot compete with the actual checks, decision, artifacts, or evidence.
+ */
+export function oneSurfaceNeedsDedicatedResult(manifest: OneSurfaceManifestV1 | null): boolean {
+  return Boolean(manifest?.blocks.some((block) => DEDICATED_RESULT_BLOCK_TYPES.has(block.type)));
+}
 
 export function OneAdaptiveResult({
   manifest,
@@ -110,6 +139,7 @@ export function OneAdaptiveResult({
   const renderDecision = useMemo(() => surface ? inspectSurfaceForDesktop(surface, projection.taskId) : null, [projection.taskId, surface]);
   const fallback = useMemo(() => readSafeFallback(manifest, projection.taskId), [manifest, projection.taskId]);
   const hasManifest = Boolean(manifest && typeof manifest === "object");
+  const hasDedicatedResult = Boolean(surface && renderDecision?.native && oneSurfaceNeedsDedicatedResult(surface));
   const canAcceptResult = Boolean(
     projection.canonicalStatus === "partial"
     && receipt?.status === "completed"
@@ -141,11 +171,11 @@ export function OneAdaptiveResult({
 
   return (
     <section className={styles.root} aria-label={tFor(locale, "one.res.aria.work_result")}>
-      {hasManifest && (
+      {hasDedicatedResult && (
         <article className={styles.result} data-surface-contract={surface?.contractVersion ?? "invalid"}>
           <header className={styles.header}>
             <div className={styles.headerCopy}>
-              <h3>{showNative && surface ? displayValue(surface.title) : tFor(locale, "one.res.title.too_large")}</h3>
+              <h3>{showNative && surface ? friendlySurfaceTitle(surface, locale) : tFor(locale, "one.res.title.too_large")}</h3>
               <p className={styles.summary}>{showNative && surface
                 ? friendlySurfaceSummary(surface.summary, locale)
                 : tFor(locale, "one.res.summary.open_work")}</p>
@@ -189,7 +219,7 @@ export function OneAdaptiveResult({
           )}
           {showNative && surface && surface.evidence.length > 0 && !hasSourceListBlock && (
             <details className={styles.evidence}>
-              <summary>{tFor(locale, "one.res.evidence_count", { n: surface.evidence.length })}</summary>
+              <summary>{tFor(locale, "one.res.sources_count", { n: surface.evidence.length })}</summary>
               {surface.evidence.map((item) => (
                 <span key={item.evidenceRef}>
                   {displayValue(item.label ?? item.evidenceRef)} · {verificationLabel(item.verificationStatus, locale)}
@@ -207,11 +237,8 @@ export function OneAdaptiveResult({
           autoRecovery={autoRecovery}
         />
       )}
-      {canAcceptResult && !hasManifest && onAcceptResult && (
-        <ResultAcceptance locale={locale} standalone={standaloneAcceptance} onAccept={onAcceptResult} />
-      )}
-      {canAcceptResult && hasManifest && onAcceptResult && (
-        <ResultAcceptance locale={locale} standalone={false} onAccept={onAcceptResult} />
+      {canAcceptResult && onAcceptResult && (
+        <ResultAcceptance locale={locale} standalone={!hasDedicatedResult || standaloneAcceptance} onAccept={onAcceptResult} />
       )}
       {/* Value/experience/proof records keep compounding internally. They are
           deliberately absent from the ordinary One conversation surface. */}
@@ -232,14 +259,14 @@ function ResultAcceptance({ locale, standalone, onAccept }: {
       data-standalone={standalone ? "true" : "false"}
       aria-label={tFor(locale, "one.res.aria.confirm_result")}
     >
-      <p className={styles.standaloneAcceptanceCopy} role={acceptanceFailed ? "alert" : undefined}>
-        {acceptanceFailed
-          ? tFor(locale, "one.res.acceptance_failed")
-          : tFor(locale, "one.res.acceptance_boundary")}
-      </p>
+      {acceptanceFailed && (
+        <p className={styles.standaloneAcceptanceCopy} role="alert">
+          {tFor(locale, "one.res.acceptance_failed")}
+        </p>
+      )}
       <button
         type="button"
-        className={styles.actionPrimary}
+        className={styles.acceptanceButton}
         disabled={acceptingResult}
         onClick={() => {
           if (acceptingResult) return;
@@ -380,7 +407,8 @@ function NativeBlock({
 }
 
 function NarrativeBlock({ block }: { block: OneSurfaceNarrativeBlock }) {
-  return <div>{block.paragraphs.map((paragraph, index) => <p className={styles.summary} key={index}>{displayValue(paragraph)}</p>)}</div>;
+  const paragraphs = block.paragraphs.map(displayValue).filter(Boolean);
+  return <div>{paragraphs.map((paragraph, index) => <p className={styles.summary} key={index}>{paragraph}</p>)}</div>;
 }
 
 function MetricBlock({ block, locale }: { block: OneSurfaceMetricBlock; locale: "ko" | "en" }) {
@@ -469,6 +497,16 @@ function friendlySurfaceSummary(value: string, locale: "ko" | "en"): string {
     return tFor(locale, "one.res.summary.parts_you_need");
   }
   return summary;
+}
+
+function friendlySurfaceTitle(surface: OneSurfaceManifestV1, locale: "ko" | "en"): string {
+  const title = displayValue(surface.title);
+  const looksLikePrompt = title.length > 88
+    || /\[local path\]|\b(?:task|작업)\s*[:：]/i.test(title)
+    || /\b\d+\s*\/\s*\d+\b/.test(title);
+  if (!looksLikePrompt) return title;
+  const firstUsefulBlock = surface.blocks.find((block) => DEDICATED_RESULT_BLOCK_TYPES.has(block.type));
+  return firstUsefulBlock ? friendlyBlockTitle(firstUsefulBlock, locale) : tFor(locale, "one.res.title.result");
 }
 
 function provenanceLabel(
@@ -1283,8 +1321,8 @@ function RunClosure({ receipt, locale, onRetryUnfinished, autoRecovery }: {
   const outcome = autoRecovery?.phase === "stopped" ? autoRecovery.diagnosis.trim() : "";
   if (!stopped && !outcome) return null;
   return (
-    <section className={styles.failureClosure} role="status">
-      <span className={styles.closureCheck} data-tone="bad" aria-hidden="true">!</span>
+    <section className={styles.failureClosure} data-status={stopped ? "cancelled" : "failed"} role="status">
+      <span className={styles.closureCheck} data-tone={stopped ? "neutral" : "bad"} aria-hidden="true">!</span>
       <div className={styles.closureSummaryCopy}>
         <strong>{stopped ? tFor(locale, "one.res.closure.stopped_here") : outcome}</strong>
       </div>
@@ -1363,13 +1401,13 @@ function displayValue(value: unknown): string {
 }
 
 function sanitizeText(value: string): string {
-  return redactLocalPaths(redactSecrets(value))
+  return stripAgentIdentityBadges(redactLocalPaths(redactSecrets(value))
     .replace(/\[([^\]]+)\]\(\s*\[?link omitted\]?\s*\)/gi, "$1")
     .replace(/\[link omitted\]/gi, "")
     .replace(/(\*\*|__)([^\r\n]+?)\1/g, "$2")
     .replace(/`([^`\r\n]+)`/g, "$1")
     .replace(/[✅❌⚠]\uFE0F?/gu, "")
-    .replace(/[ \t]{2,}/g, " ")
+    .replace(/[ \t]{2,}/g, " "))
     .trim();
 }
 

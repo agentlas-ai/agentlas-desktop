@@ -567,7 +567,7 @@ export default function BuildPage() {
   // 파이프라인은 항상 표시 — idle 에선 딤된 프리뷰로 무엇을 할지 보여준다.
   const showPipeline = true;
   const resultScanDisposition = result ? buildScanDisposition(result.securityScan) : "unverified";
-  const resultDeliveryBlocked = resultScanDisposition === "blocked" || resultScanDisposition === "unverified";
+  const resultHasSecurityAdvisory = resultScanDisposition !== "passed";
 
   return (
     <div className="rd build-root">
@@ -1035,9 +1035,7 @@ export default function BuildPage() {
                 <span>
                   {resultScanDisposition === "passed"
                     ? "ready"
-                    : resultScanDisposition === "warning"
-                      ? (ko ? "검토" : "review")
-                      : (ko ? "검증 필요" : "verification required")}
+                    : (ko ? "참고 항목 있음" : "advisory findings")}
                 </span>
               </div>
               <ArtifactPreview workspace={result.workspace} readScope={result.readScope} ko={ko} />
@@ -1047,11 +1045,9 @@ export default function BuildPage() {
                   <IconCheck size={15} />{" "}
                   {registered
                     ? ko ? "패키지 준비됨 · 조직도에 추가됨" : "Package ready · added to org chart"
-                    : resultDeliveryBlocked
-                      ? ko ? "패키지 생성됨 · 검증 필요" : "Package created · verification required"
-                      : ko ? "패키지 준비됨" : "Package ready"}
+                    : ko ? "패키지 준비됨" : "Package ready"}
                 </span>
-                <button disabled={resultDeliveryBlocked} onClick={installToLibrary} className="build-primary-button titlebar-nodrag">
+                <button onClick={installToLibrary} className="build-primary-button titlebar-nodrag">
                   {registeredEntity?.kind === "agent"
                     ? ko ? "내 에이전트에서 열기" : "Open in My Agents"
                     : ko ? "조직도에서 열기" : "Open org chart"}
@@ -1060,17 +1056,17 @@ export default function BuildPage() {
               <div className="build-upload-choice">
                 <div className="build-upload-choice-label">{ko ? "공개 배포는 별도 선택" : "Public distribution is a separate choice"}</div>
                 <div className="build-upload-choice-grid build-upload-choice-grid-single">
-                  <button disabled={resultDeliveryBlocked} onClick={() => void uploadToPublicHub()} className="build-upload-option titlebar-nodrag">
+                  <button onClick={() => void uploadToPublicHub()} className="build-upload-option titlebar-nodrag">
                     <strong>{ko ? "허브 (공개)" : "Hub (public)"}</strong>
                     <span>{ko ? "허브 레지스트리에 공개 후보로 제출" : "Submit to the public Hub registry"}</span>
                   </button>
                 </div>
               </div>
-              {resultDeliveryBlocked && (
-                <div role="alert" className="build-action-msg">
+              {resultHasSecurityAdvisory && (
+                <div role="status" className="build-action-msg">
                   {ko
-                    ? "보안 검증이 확인되기 전에는 설치·Cloud 저장·Hub 공개를 진행할 수 없습니다. 재스캔으로 확인하세요."
-                    : "Install, Cloud save, and Hub publish stay disabled until the security scan is verified. Re-run the scan to continue."}
+                    ? "안전 점검 결과는 참고용입니다. 항목과 영수증을 확인할 수 있으며 설치·Cloud 저장·Hub 공개는 계속 진행할 수 있습니다."
+                    : "Safety findings are advisory. Findings and receipts remain visible, and install, Cloud save, and Hub publish can continue."}
                 </div>
               )}
               {actionMsg && <div className="build-action-msg">{actionMsg}</div>}
@@ -1238,7 +1234,7 @@ function ArtifactPreview({ workspace, readScope, ko }: { workspace: string; read
   );
 }
 
-// ── 검증 게이트 — 엔진의 실제 보안 스캔 결과(done.result.securityScan)를 비개발자 어휘로 표시. ──
+// ── 안전 점검 참고 — 결과와 영수증을 표시하되 사용자 작업을 차단하지 않는다. ──
 function parseScan(scan: unknown, ko: boolean): {
   unknown: boolean;
   tone: "ok" | "warn" | "block";
@@ -1262,7 +1258,7 @@ function parseScan(scan: unknown, ko: boolean): {
   return { unknown: false, tone, pass, warn, blocker, items };
 }
 
-/** 검증 게이트 + 수동 재스캔 — 빌드 결과의 정적 보안 스캔을 사용자가 원할 때 다시 돌린다.
+/** 안전 점검 참고 + 수동 재스캔 — 빌드 결과의 정적 보안 스캔을 사용자가 원할 때 다시 돌린다.
  *  (기존엔 hephaestus.securityScan IPC가 렌더러에서 한 번도 호출되지 않았다 — 결과 표시 전용.) */
 function SecurityScanBlock({ scan, folder, scope, ko }: { scan: unknown; folder: string; scope: FsReadScope; ko: boolean }) {
   const [busy, setBusy] = useState(false);
@@ -1319,13 +1315,13 @@ function VerifyGate({ scan, ko }: { scan: unknown; ko: boolean }) {
     <div className="build-verify" data-tone={p.tone}>
       <div className="build-verify-head">
         <IconShield size={14} />
-        <strong>{ko ? "안전 점검 (검증 게이트)" : "Safety check (verify gate)"}</strong>
+        <strong>{ko ? "안전 점검 (참고)" : "Safety check (advisory)"}</strong>
       </div>
       {p.unknown ? (
         <p className="build-verify-note">
           {ko
-            ? "보안 검증이 확인되지 않아 설치·Cloud 저장·Hub 공개가 잠겨 있습니다. 재스캔하거나 패키지를 수정해 다시 확인하세요."
-            : "Security verification is unavailable, so install, Cloud save, and Hub publish are locked. Re-scan or fix the package and verify again."}
+            ? "보안 스캔 결과를 확인하지 못했습니다. 작업은 차단되지 않으며, 필요하면 재스캔해 참고 결과를 갱신하세요."
+            : "The security scan result is unavailable. Work is not blocked; re-run the scan if you want to refresh the advisory."}
         </p>
       ) : p.items.length === 0 ? (
         <p className="build-verify-note">{ko ? "정적 보안 스캔 통과 — 차단·주의 항목 없음." : "Static security scan passed — no blockers or warnings."}</p>
@@ -1333,7 +1329,7 @@ function VerifyGate({ scan, ko }: { scan: unknown; ko: boolean }) {
         <>
           <p className="build-verify-summary">
             {ko ? "통과" : "pass"} {p.pass} · {ko ? "주의" : "warn"} {p.warn}
-            {p.blocker > 0 ? ` · ${ko ? "차단" : "block"} ${p.blocker}` : ""}
+            {p.blocker > 0 ? ` · ${ko ? "높음" : "high"} ${p.blocker}` : ""}
           </p>
           {p.items.slice(0, 5).map((f, i) => (
             <div key={i} className="build-verify-item" data-sev={f.severity}>
@@ -1341,7 +1337,7 @@ function VerifyGate({ scan, ko }: { scan: unknown; ko: boolean }) {
               {f.file ? ` (${f.file})` : ""}
             </div>
           ))}
-          <p className="build-verify-note">{ko ? "차단 항목이 없을 때만 사용자가 직접 설치·저장·공개할 수 있습니다 — 자동 게시 없음." : "Only packages without blocking findings can be installed, saved, or published by an explicit user action — no auto-publish."}</p>
+          <p className="build-verify-note">{ko ? "모든 항목은 참고용이며 설치·저장·공개를 막지 않습니다. 공개 작업은 여전히 사용자가 직접 선택해야 합니다." : "All findings are advisory and do not block install, save, or publish. Publishing still requires an explicit user action."}</p>
         </>
       )}
     </div>

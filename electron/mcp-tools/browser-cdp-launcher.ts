@@ -525,7 +525,12 @@ function classifyAction(name, args, currentUrl = '') {
   let allText = '';
   try { allText = JSON.stringify(input).toLowerCase(); } catch (e) { allText = ''; }
 
-  if (name === 'browser_run_code' || name === 'browser_run_code_unsafe') return 'unsafe-code';
+  // Playwright MCP exposes page-scoped JavaScript as browser_evaluate and
+  // process-scoped JavaScript as browser_run_code_unsafe. Both execute
+  // caller-supplied code and both must cross the same explicit checkpoint.
+  // Keeping only the old browser_run_code alias here made the visible
+  // approval sheet decorative for the current browser_evaluate tool.
+  if (name === 'browser_evaluate' || name === 'browser_run_code' || name === 'browser_run_code_unsafe') return 'unsafe-code';
 
   const submitByType = name === 'browser_type' && input.submit === true;
   const submitByKey = name === 'browser_press_key' && SUBMIT_KEY_RE.test(String(input.key || ''));
@@ -1091,7 +1096,7 @@ async function main() {
     let site = ''; try { site = new URL(contextUrl).host; } catch (e) { site = ''; }
     if (!site) { log('blocked sensitive action: invalid approval URL', contextUrl); return 'unverified-site'; }
     const detail = actionType === 'unsafe-code'
-      ? String(args.code || args.filename || name).slice(0, 240)
+      ? String(args.function || args.code || args.filename || name).slice(0, 240)
       : (args.element || args.url || args.key || name);
     const decision = await requestApproval(site, actionType, actionType + ': ' + detail, signal);
     return decision === 'approved' ? null : (decision === 'cancelled' ? 'cancelled' : actionType);
@@ -1141,12 +1146,12 @@ async function main() {
       }
       if (name === 'browser_skill_replay') { doReplay(args.name, msg.id); return; }
       // 일반 액션: CDP의 실제 현재 페이지를 다시 읽은 뒤 승인 게이트 + 기록.
-      const gateable = RECORDABLE.has(name) || name === 'browser_handle_dialog' || name === 'browser_run_code' || name === 'browser_run_code_unsafe';
+      const gateable = RECORDABLE.has(name) || name === 'browser_handle_dialog' || name === 'browser_evaluate' || name === 'browser_run_code' || name === 'browser_run_code_unsafe';
       if (gateable) {
         const controller = gateLifecycle.begin(msg.id);
         gate(name, args, controller.signal).then((denied) => {
           if (!gateLifecycle.settle(msg.id, controller)) return;
-          if (denied) { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'BLOCKED: The user did not approve this ' + denied + ' browser action.' }], isError: true } }); return; }
+          if (denied) { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'DENIED: The user declined this ' + denied + ' browser action. The action was not executed. Do not say approval is still pending and do not retry it in this run.' }], isError: true } }); return; }
           if (name === 'browser_navigate' && args.url) currentUrl = String(args.url);
           if (RECORDABLE.has(name)) pending.set(msg.id, { name, arguments: args });
           forwardRaw(line);

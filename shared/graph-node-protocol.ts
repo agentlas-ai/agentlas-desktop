@@ -334,6 +334,33 @@ export function requiredExecutionPermission(
   return reachesOutside ? "write" : "read";
 }
 
+/**
+ * 자동화 실행이 **런타임에 요구하는** 권한. `requiredExecutionPermission` 과는 다른
+ * 질문에 답한다 — 저쪽은 "이 그래프가 바깥을 바꾸는가", 이쪽은 "이 실행이 도구를
+ * 쓸 수 있는가"다.
+ *
+ * ★두 질문이 한 값을 공유해서 병목이 됐다(2026-08-13 제보 "권한 설정이 부족하여 뉴스
+ * 수집과 요약 작업을 진행하지 못했다"). 런타임에서 `read` 는 "쓰기 금지"가 아니라
+ * **"도구 금지"** 로 번역된다: 시스템 프롬프트가 "도구 호출이나 코드 실행을 하지
+ * 않습니다"를 주입하고(runtime/runner.ts), claude 는 `--allowedTools` 를 안 붙이고,
+ * codex 는 `--sandbox read-only` 로 네트워크까지 끊는다. 그런데 조회는 도구로 하는
+ * 일이다 — 뉴스를 가져오려면 웹 검색·HTTP·브라우저가 있어야 한다. 결과적으로
+ * **바깥을 안 바꾼다고 정직하게 선언한 그래프일수록 자기 일을 못 했다.**
+ *
+ * 2026-08-09 에 코드 스텝 샌드박스에서 이미 같은 결정을 내렸다(네트워크를 막지
+ * 않는다 — 울타리가 지킬 것은 이 기계에 남는 흔적이지 나가는 요청이 아니다).
+ * 여기서는 그 결정을 에이전트 노드 런타임까지 넓힌다: 실전 실행은 도구를 켠다.
+ *
+ * 쓰기 방어는 이 값이 아니라 원래 담당하던 층이 계속 맡는다 — 시뮬레이션은 mutation
+ * 노드를 호출조차 하지 않고, 멱등키 없는 mutation 은 재시도하지 않으며, 선언되지 않은
+ * 도구 호출을 실제로 거절하는 곳은 PreToolUse 관문이다.
+ */
+export function automationRuntimePermission(options: { simulation: boolean }): "read" | "write" {
+  // 시뮬레이션만 read로 내린다 — 런타임이 쓰기 도구를 거부해야 선언되지 않은
+  // 부수효과까지 실제로 막힌다(라벨만 붙이는 게 아니다).
+  return options.simulation ? "read" : "write";
+}
+
 export function defaultNodeEffect(nodeType: string): "pure" | "read" | "mutation" {
   // 출력 블록은 "바깥으로 내보내기"다(레지스트리 선언). 안 적혔다고 조회로 보면
   // 시뮬레이션이 실제로 발행하고, 승인도 재시도 정책도 조회 기준으로 돈다.

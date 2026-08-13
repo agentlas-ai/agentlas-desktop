@@ -20,7 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { insertMemoryEntry, listGlobalMemoryForAgent } from "./store";
+import { insertMemoryEntry, listMemoryEvidenceTokensForAgent } from "./store";
 import type { MemoryKind, MemoryScope } from "../architecture/manifest";
 
 /** Desktop `BUILTIN_AGENTS` 의 `agentlas-one` 과 같은 값이어야 한다. */
@@ -104,14 +104,12 @@ function normalizeKind(value: string): MemoryKind {
   return (allowed.includes(value) ? value : "hypothesis") as MemoryKind;
 }
 
-/** 이미 반입한 해시 집합. 내용이 아니라 해시 표식으로 비교해 중복 반입을 막는다. */
-function importedHashes(limit: number): Set<string> {
+/** 이미 반입한 해시 집합. 최근 N개가 아니라 전체 provenance를 읽어 오래된 중복도 막는다. */
+function importedHashes(): Set<string> {
   const seen = new Set<string>();
-  for (const entry of listGlobalMemoryForAgent(ONE_AGENT_ID, limit)) {
-    for (const item of entry.evidence) {
-      const match = /^one-soul:([0-9a-f]{16})$/.exec(item);
-      if (match) seen.add(match[1]);
-    }
+  for (const item of listMemoryEvidenceTokensForAgent(ONE_AGENT_ID, "one-soul:")) {
+    const match = /^one-soul:([0-9a-f]{16})$/.exec(item);
+    if (match) seen.add(match[1]);
   }
   return seen;
 }
@@ -132,7 +130,9 @@ export function startOneImportScheduler(intervalMs = 5 * 60 * 1000): void {
       const mtimeMs = fs.statSync(soulPath).mtimeMs;
       if (mtimeMs <= lastImportedSoulMtimeMs) return;
       const outcome = importOneDurableMemory();
-      lastImportedSoulMtimeMs = mtimeMs;
+      // 일부 insert가 실패했으면 같은 파일을 다음 tick에 다시 읽는다. 성공하지 않은
+      // 블록은 DB provenance가 없으므로 재시도되고, 성공한 블록은 전체 해시 조회로 skip된다.
+      if (outcome.failed === 0) lastImportedSoulMtimeMs = mtimeMs;
       if (outcome.imported > 0 || outcome.failed > 0) {
         console.log(
           `[one-import] rescan imported=${outcome.imported} skipped=${outcome.skipped} failed=${outcome.failed}`,
@@ -170,7 +170,7 @@ export function importOneDurableMemory(rootOverride?: string): OneImportResult {
 
   const blocks = parseOneDurableBlocks(text);
   result.scanned = blocks.length;
-  const pending = selectUnimported(blocks, importedHashes(500));
+  const pending = selectUnimported(blocks, importedHashes());
   result.skipped = blocks.length - pending.length;
 
   for (const block of pending) {

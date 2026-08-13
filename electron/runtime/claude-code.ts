@@ -531,6 +531,13 @@ export const runClaudeCode: Runner = async (
   const mcpArgs = agentAppMcpConfigArg && (!runReq.untrustedNoTools || hasExactUntrustedMcpGrant)
     ? ["--mcp-config", agentAppMcpConfigArg]
     : [];
+  // Exact Agentlas Browser intent is an authority binding, not a preference.
+  // Claude's user-level plugins can otherwise reintroduce generic Playwright
+  // beside Main's approval-gated CDP host and silently execute browser_evaluate
+  // without the native sheet. Isolate this turn to the exact Main config.
+  const isolatedMcpArgs = runReq.isolatedMcpConfig
+    ? ["--setting-sources", "", "--strict-mcp-config"]
+    : [];
   // write/full 권한이면 헤드리스에서 권한 프롬프트로 막히지 않도록 MCP 툴을 미리 허용.
   const allowedToolArgs =
     runReq.mcpConfigPath &&
@@ -612,6 +619,7 @@ export const runClaudeCode: Runner = async (
           ...effortArgs,
           ...permArgs,
           ...noToolsArgs,
+          ...isolatedMcpArgs,
           ...mcpArgs,
           ...allowedToolArgs,
           ...toolBrokerArgs,
@@ -628,6 +636,7 @@ export const runClaudeCode: Runner = async (
           ...effortArgs,
           ...permArgs,
           ...noToolsArgs,
+          ...isolatedMcpArgs,
           ...mcpArgs,
           ...allowedToolArgs,
           ...toolBrokerArgs,

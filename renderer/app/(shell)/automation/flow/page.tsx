@@ -1087,7 +1087,7 @@ function AutomationFlowPage() {
       const requirement = inputValue !== undefined
         ? await api.automations.inputRequirement(automation.id).catch(() => null)
         : null;
-      await api.automations.runNow(
+      const result = await api.automations.runNow(
         automation.id,
         dryRun
           ? { dryRun: true }
@@ -1095,13 +1095,18 @@ function AutomationFlowPage() {
             ? { input: { [requirement.varName]: inputValue } }
             : undefined),
       );
+      if (!result.accepted) throw new Error("automation_run_not_accepted");
       setInputPrompt(null);
       setMessage(
-        dryRun
+        result.status !== "ok"
+          ? (result.error || (locale === "en"
+            ? `Run ended with status ${result.status ?? "failed"}.`
+            : `실행이 ${result.status ?? "실패"} 상태로 끝났습니다.`))
+          : dryRun
           ? (locale === "en"
-            ? "Simulation started. Steps that change something outside are skipped and listed instead."
-            : "시뮬레이션을 시작했습니다. 바깥을 바꾸는 단계는 실행하지 않고 목록으로 보여줍니다.")
-          : (locale === "en" ? "Run started. Watch the steps light up on the canvas; details are on the right, the log below." : "실행을 시작했습니다. 캔버스에서 단계가 켜지는 것을 보고, 자세한 것은 오른쪽 [상세]에, 기록은 아래 [로그]에 쌓입니다."),
+            ? "Simulation completed. External-changing steps were skipped and recorded."
+            : "시뮬레이션을 완료했습니다. 바깥을 바꾸는 단계는 건너뛰고 기록했습니다.")
+          : (locale === "en" ? "Run completed. The final steps and log are shown here." : "실행을 완료했습니다. 최종 단계와 기록을 이 화면에서 확인할 수 있습니다."),
       );
       const snap = await api.automations.latestRun(automation.id);
       if (snap?.nodeStates) setRunStates(snap.nodeStates);

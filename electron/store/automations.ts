@@ -122,7 +122,7 @@ function normalizeExecutionPermission(value: unknown): AutomationExecutionPermis
 }
 
 const RUNTIME_KINDS = new Set([
-  "claude-code", "codex", "gemini", "kimi", "grok", "cursor", "byok", "ollama", "lmstudio", "mlx",
+  "claude-code", "codex", "antigravity", "gemini", "kimi", "grok", "cursor", "byok", "ollama", "lmstudio", "mlx",
 ]);
 const RUNTIME_BACKENDS = new Set([
   "anthropic", "openai", "google", "ollama", "lmstudio", "mlx", "upstage", "custom", "glm",

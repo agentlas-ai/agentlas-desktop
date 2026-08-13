@@ -57,6 +57,10 @@ interface AgentlasEvents {
 interface AgentlasFilesBridge {
   /** webUtils가 확인한 드롭 항목에 대해 main이 발급한 세션 권한. */
   grantForFile: (file: File) => Promise<FsPathGrant | null>;
+  /** 클립보드에만 존재하는 허용 파일을 main-owned 스테이징 파일로 고정한다. */
+  grantForPastedAttachment?: (file: File) => Promise<FsPathGrant | null>;
+  /** 디스크 경로가 없는 클립보드 이미지 — main이 내용을 고정하고 같은 권한을 발급한다. */
+  grantForPastedImage?: (file: File) => Promise<FsPathGrant | null>;
 }
 
 declare global {
@@ -110,4 +114,24 @@ export function updaterEvents(): AgentlasUpdaterEvents | null {
 export async function grantForDroppedFile(file: File): Promise<FsPathGrant | null> {
   if (typeof window === "undefined") return null;
   return window.agentlasFiles?.grantForFile(file) ?? null;
+}
+
+/**
+ * 클립보드에서 붙여넣은 이미지에 대한 exact-file 권한. 붙여넣기 이미지는 디스크에
+ * 없어서 드롭용 경로 권한을 받을 수 없다 — main이 내용을 비공개 파일로 고정한 뒤
+ * 드롭과 동일 등급의 capability를 발급한다.
+ */
+export async function grantForPastedImage(file: File): Promise<FsPathGrant | null> {
+  if (typeof window === "undefined") return null;
+  const bridge = window.agentlasFiles;
+  if (!bridge?.grantForPastedImage) return null;
+  return bridge.grantForPastedImage(file) ?? null;
+}
+
+/** 이미지·오디오·비디오·안전 문서 클립보드 파일의 exact-file 권한. */
+export async function grantForPastedAttachment(file: File): Promise<FsPathGrant | null> {
+  if (typeof window === "undefined") return null;
+  const bridge = window.agentlasFiles;
+  if (!bridge?.grantForPastedAttachment) return null;
+  return bridge.grantForPastedAttachment(file) ?? null;
 }

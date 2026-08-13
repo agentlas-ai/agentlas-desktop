@@ -285,8 +285,15 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     setRerunning(true);
     setMessage("");
     try {
-      await api.automations.runNow(automation.id);
-      setMessage(ko ? "다시 실행을 시작했습니다." : "Started another run.");
+      const result = await api.automations.runNow(automation.id);
+      if (!result.accepted) throw new Error("automation_run_not_accepted");
+      if (result.status === "ok") {
+        setMessage(ko ? "다시 실행을 완료했습니다." : "The run completed.");
+      } else {
+        setMessage(result.error || (ko
+          ? `실행이 ${result.status ?? "실패"} 상태로 끝났습니다.`
+          : `The run ended with status ${result.status ?? "failed"}.`));
+      }
       await load();
     } catch (err) {
       setMessage(rerunFailureMessage(err, ko));

@@ -931,25 +931,26 @@ export function runPostContinuityStoreRepairs(): void {
  * 4개가 malformed 가 됐다 — 앱이 아예 시작하지 못했다(복구는 `.recover` 로 손실 0,
  * 사용자 데이터 81개 테이블 중 깨진 것은 그 하나뿐이었다).
  *
- * 판별은 "패키징되지 않은 실행이 `scripts/` 아래 파일을 돌리고 있는가" 하나다.
- * 그때 명시적 경로가 없으면 **조용히 라이브로 떨어지지 않고** 프로세스별 임시
- * 저장소로 돌린다. 라이브를 정말 열려면 `AGENTLAS_STORE_PATH` 로 그렇게 적어야 한다 —
+ * 패키징되지 않은 Electron은 스크립트와 GUI를 가리지 않고 격리한다. 예전에는
+ * `scripts/` 엔트리만 막아서 `electron .`로 띄운 개발 창이 실행 중인 설치 앱의 WAL을
+ * 함께 열 수 있었다. 실제 One QA에서 이 경로가 SQLITE_CORRUPT를 만들었다. 명시적
+ * 경로가 없으면 **조용히 라이브로 떨어지지 않고** 프로세스별 임시 저장소로 돌린다.
+ * 라이브 복제본으로 QA하려면 `AGENTLAS_STORE_PATH`를 별도 복사본에 명시해야 한다 —
  * 실수로 되는 일과 적어서 되는 일은 달라야 한다.
  */
 function resolveStorePath(): string {
   const explicit = process.env.AGENTLAS_STORE_PATH?.trim();
   if (explicit) return explicit;
 
-  const entry = process.argv[1] ?? "";
-  const runningAScript = !app.isPackaged && /[\\/]scripts[\\/]/.test(entry);
-  if (runningAScript) {
+  if (!app.isPackaged) {
+    const entry = process.argv[1] ?? "";
     const sandbox = path.join(
       os.tmpdir(),
-      `agentlas-script-store-${process.pid}`,
+      `agentlas-dev-store-${process.pid}`,
       "agentlas.sqlite",
     );
     console.warn(
-      `[store] script run detected (${path.basename(entry)}) — using an isolated store at ${sandbox}.\n` +
+      `[store] unpackaged run detected (${path.basename(entry) || "electron"}) — using an isolated store at ${sandbox}.\n` +
       "[store] set AGENTLAS_STORE_PATH to open a specific database on purpose.",
     );
     return sandbox;
@@ -4220,6 +4221,16 @@ export function initStore(options: StoreInitOptions = {}): void {
         CREATE INDEX IF NOT EXISTS idx_run_events_chat_kind_ts
           ON run_events(chat_id, kind, ts DESC);
       `);
+    }
+  }
+
+  // Codex `exec resume` reports a session-cumulative output counter. Persist
+  // the last raw value alongside the runtime session so One can display this
+  // turn's delta instead of presenting the whole conversation as one turn.
+  if (tableExists(_db, "chat_runtime_sessions")) {
+    const runtimeSessionColumns = new Set(schemaColumns(_db, "chat_runtime_sessions").map((column) => column.name));
+    if (!runtimeSessionColumns.has("reported_output_tokens")) {
+      _db.exec("ALTER TABLE chat_runtime_sessions ADD COLUMN reported_output_tokens INTEGER");
     }
   }
 

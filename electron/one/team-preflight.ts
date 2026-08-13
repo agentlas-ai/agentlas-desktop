@@ -1,7 +1,7 @@
 import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
 import { createHash, randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
-import { pickActive } from "../runtime/selection";
+import { pickActive, selectExactRuntime } from "../runtime/selection";
 import { selectAutoRoutedAgent, selectAutoRoutedAgentJudged } from "../agents/auto-router";
 import { getAgentById, listInstalledAgents } from "../mcp/registry";
 import { getDb } from "../store/db";
@@ -19,6 +19,7 @@ import type {
   Chat,
   InstalledAgent,
   OrchestrationTarget,
+  RuntimeSelection,
   RuntimeStatus,
 } from "../../shared/types";
 import {
@@ -201,8 +202,35 @@ export function oneTeamRuntimeBindingMatches(
   binding: OneTeamRuntimeBinding,
   runtimes: RuntimeStatus[],
 ): boolean {
-  const active = pickActive(runtimes);
-  return Boolean(active && oneTeamRuntimeBinding(active).digest === binding.digest);
+  // A One team proposal is bound to the runtime explicitly selected in the
+  // composer, not to whichever runtime happens to be globally active later.
+  // Revalidation therefore succeeds while that exact immutable runtime is
+  // still present in the live inventory, even if another model is active.
+  return runtimes.some((runtime) => {
+    const live = oneTeamRuntimeBinding(runtime);
+    if (
+      live.kind !== binding.kind
+      || live.backend !== binding.backend
+      || live.sourceDigest !== binding.sourceDigest
+      || live.version !== binding.version
+    ) return false;
+
+    const model = binding.model;
+    if (model) {
+      const advertised = new Set([
+        runtime.model,
+        ...(runtime.availableModels ?? []),
+        ...(runtime.allocationModels ?? []),
+        ...Object.keys(runtime.allocationModelProfiles ?? {}),
+      ].filter((value): value is string => typeof value === "string" && value.length > 0));
+      if (!advertised.has(model)) return false;
+      const supportedEfforts = runtime.allocationModelProfiles?.[model]?.efforts;
+      if (binding.effort && supportedEfforts && !supportedEfforts.includes(binding.effort)) return false;
+    } else if (live.model !== null) {
+      return false;
+    }
+    return true;
+  });
 }
 
 function goalSummary(reasons: OneTeamPreflightComplexityReason[]): string {
@@ -691,10 +719,37 @@ function expireIfNeeded(record: InternalOneTeamPreflight, deps: OneTeamPreflight
   return expire.immediate();
 }
 
-async function liveRuntime(deps: OneTeamPreflightDependencies): Promise<OneTeamRuntimeBinding> {
+function validRuntimeSelection(value: unknown): value is RuntimeSelection {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(["kind", "backend", "source", "role", "inherit", "model", "longContext", "effort"]);
+  if (Object.keys(record).some((key) => !allowed.has(key))) return false;
+  if (typeof record.kind !== "string" || record.kind.length < 1 || record.kind.length > 64) return false;
+  for (const key of ["backend", "source", "role", "model", "effort"] as const) {
+    if (record[key] !== undefined && (typeof record[key] !== "string" || record[key].length > 512)) return false;
+  }
+  for (const key of ["inherit", "longContext"] as const) {
+    if (record[key] !== undefined && typeof record[key] !== "boolean") return false;
+  }
+  return true;
+}
+
+async function liveRuntime(
+  deps: OneTeamPreflightDependencies,
+  selection?: RuntimeSelection,
+): Promise<OneTeamRuntimeBinding> {
   const runtimes = await (deps.detectRuntimes ?? detectRuntimes)();
-  const active = pickActive(runtimes);
-  if (!active) throw new OneTeamPreflightError("runtime_changed", "No active runtime is available for this team");
+  const active = selection
+    ? selectExactRuntime(runtimes, selection)?.active ?? null
+    : pickActive(runtimes);
+  if (!active) {
+    throw new OneTeamPreflightError(
+      "runtime_changed",
+      selection
+        ? "The runtime selected in One is no longer available for this team"
+        : "No active runtime is available for this team",
+    );
+  }
   return oneTeamRuntimeBinding(active);
 }
 
@@ -719,7 +774,7 @@ export async function prepareOneTeamPreflight(
   deps: OneTeamPreflightDependencies = {},
 ): Promise<PrepareOneTeamPreflightResult> {
   const inputKeys = Object.keys((input ?? {}) as unknown as Record<string, unknown>);
-  const allowedInputKeys = new Set(["chatId", "expectedTaskId", "expectedTaskVersion", "userPrompt", "requestedAgentIds", "dynamicTeamRequested", "permission"]);
+  const allowedInputKeys = new Set(["chatId", "expectedTaskId", "expectedTaskVersion", "userPrompt", "requestedAgentIds", "dynamicTeamRequested", "permission", "runtimeSelection"]);
   if (
     !input || typeof input !== "object"
     || inputKeys.some((key) => !allowedInputKeys.has(key))
@@ -737,6 +792,7 @@ export async function prepareOneTeamPreflight(
     ))
     || (input.dynamicTeamRequested !== undefined && input.dynamicTeamRequested !== true)
     || (input.permission !== undefined && input.permission !== "read" && input.permission !== "write")
+    || (input.runtimeSelection !== undefined && !validRuntimeSelection(input.runtimeSelection))
   ) throw new OneTeamPreflightError("invalid_request", "Invalid One team preflight request");
   const requestedAgentIds = input.requestedAgentIds ?? [];
   const teamNeed = await resolveOneTeamNeed(
@@ -764,7 +820,7 @@ export async function prepareOneTeamPreflight(
     if (current.proposal.status !== "expired") return { kind: "proposal", proposal: current.proposal };
   }
 
-  const runtime = await liveRuntime(deps);
+  const runtime = await liveRuntime(deps, input.runtimeSelection);
   if (requestedAgentIds.length === 0) await prejudgeRosterAutoRoute(chat, input.userPrompt, deps);
   const permission = input.permission ?? "write";
   const roster = exactInstalledRoster(chat, deps, input.userPrompt, true, requestedAgentIds, permission);
@@ -963,9 +1019,12 @@ async function exactRevalidation(
   if (!bound) throw new OneTeamPreflightError("stale_binding", "The Task or conversation changed before team confirmation");
   if (!exactCandidateSnapshots(record, deps)) throw new OneTeamPreflightError("candidate_changed", "An installed team candidate changed before confirmation");
   if (!exactRosterBinding(record, bound.chat, deps)) throw new OneTeamPreflightError("candidate_changed", "The bound session roster changed before confirmation");
-  const runtime = await liveRuntime(deps);
-  if (runtime.digest !== record.main.runtime.digest || runtime.digest !== record.proposal.binding.runtimeDigest) {
-    throw new OneTeamPreflightError("runtime_changed", "The active runtime changed; review the team again");
+  const runtimes = await (deps.detectRuntimes ?? detectRuntimes)();
+  if (
+    record.main.runtime.digest !== record.proposal.binding.runtimeDigest
+    || !oneTeamRuntimeBindingMatches(record.main.runtime, runtimes)
+  ) {
+    throw new OneTeamPreflightError("runtime_changed", "The selected runtime is no longer available; review the team again");
   }
   return bound;
 }

@@ -48,6 +48,8 @@ export interface HubPluginCandidate {
 }
 
 export interface AutoSelectedMcpContext {
+  /** Main-computed host binding after exact product-name and judgment rules. */
+  effectiveToolMode: AutomationToolMode;
   tools: AutoSelectedMcpTool[];
   localInventory: string[];
   localPluginCount: number;
@@ -633,6 +635,7 @@ export async function autoSelectMcpTools(input: {
   }
 
   const context: AutoSelectedMcpContext = {
+    effectiveToolMode,
     tools: result,
     localInventory,
     localPluginCount: localInventory.length,

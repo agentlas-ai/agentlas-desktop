@@ -63,6 +63,7 @@ const VALID_ROLES = new Set<RuntimeRole>(["orchestrator", "worker"]);
 const VALID_KINDS = new Set<RuntimeKind>([
   "claude-code",
   "codex",
+  "antigravity",
   "gemini",
   "kimi",
   "grok",

@@ -96,6 +96,14 @@ function safePayload(input: Record<string, unknown> | undefined): Record<string,
       if (isOneRecurrenceSelectionV1(value)) out[key] = { ...value };
       continue;
     }
+    if (key === "noticeI18n") {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const notice = value as Record<string, unknown>;
+      const ko = typeof notice.ko === "string" ? truncate(notice.ko, 800) : "";
+      const en = typeof notice.en === "string" ? truncate(notice.en, 800) : "";
+      if (ko && en) out[key] = { ko, en };
+      continue;
+    }
     if (typeof value === "string") {
       out[key] = truncate(value, 800);
     } else if (typeof value === "number" || typeof value === "boolean") {
@@ -293,11 +301,15 @@ export function tryRecordFailureEvent(input: RecordFailureEventInput): void {
 }
 
 export function recordMcpInvocationEvent(runId: string, req: McpInvocationRequest, ev: McpInvocationEvent): void {
-  // 고빈도 라이브 신호(partial 델타·usage 카운터·reasoning 구간)는 UI 전용 — 원장에 남기지 않는다.
-  if (ev.kind === "partial" || ev.kind === "usage" || ev.kind === "reasoning") return;
+  // Partial deltas and usage counters are high-frequency and remain live-only.
+  // Reasoning boundaries are different: they contain no chain-of-thought text,
+  // only start/end timing. Persist those typed facts so Activity does not lose
+  // its Thought row after a route change or app restart.
+  if (ev.kind === "partial" || ev.kind === "usage") return;
   const payload = {
     eventKind: ev.kind,
     status: ev.status,
+    activityCode: ev.activity?.code,
     phase: ev.phase,
     role: ev.role,
     modelRole: ev.modelRole,
@@ -305,11 +317,23 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     model: ev.model,
     nodeState: ev.nodeState,
     surfaceId: ev.surfaceId,
+    oneArtifacts: ev.oneArtifacts,
     toolName: ev.tool?.name,
     toolId: ev.tool?.id,
     toolIsError: ev.tool?.isError,
+    // Public HTTPS URLs are evidence references, not tool output content. Keep
+    // them so the One Sources rail survives a route change or app restart.
+    toolSourceUrls: ev.tool?.sourceUrls,
+    noticeMessage: ev.notice?.message,
+    noticeCode: ev.notice?.code,
+    noticeDetails: ev.notice?.details,
+    noticeDisplay: ev.notice?.display,
+    noticeI18n: ev.notice?.i18n,
+    noticeLevel: ev.notice?.level,
     textLen: ev.textLen ?? ev.text?.length,
     tokens: ev.tokens,
+    reasoningPhase: ev.reasoning?.phase,
+    reasoningDurationMs: ev.reasoning?.durationMs,
     permissions: req.permissions,
     toolMode: req.toolMode,
     hubMode: req.hubMode,

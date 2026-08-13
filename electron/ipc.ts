@@ -34,7 +34,7 @@ import { runtimeVersionsWithAutoUpdate } from "./runtime/auto-update";
 import { agentRunCwd } from "./runtime/exec";
 import { tryAcquireRuntimeMaintenance } from "./runtime/run-slots";
 import { clearModelCache, listRuntimeModels } from "./runtime/providers";
-import { installCli, openCliLogin, updateCli, type InstallableCli } from "./runtime/install-cli";
+import { installCli, openCliLogin, updateCli, type InstallableCli, type ManageableCli } from "./runtime/install-cli";
 import { listRuntimeCommands } from "./runtime/commands";
 import { resolveInvocationRunId } from "./runtime/run-id";
 import {
@@ -170,6 +170,7 @@ import { currentUiLocale } from "./ui-locale";
 import { SYSTEM_OPTIMIZER_PROMPT_MARKER } from "./system-agents/system-optimizer";
 import { stripAutomationContinuityCapsule } from "./automation-continuity";
 import { buildChatRecap, markChatRecapViewed } from "./chat/recap";
+import { assertChatRemovalAllowed } from "./chat/removal-guard";
 import { startStudio, stopStudio } from "./hephaestus/studio";
 import type {
   HephaestusBuildEvent,
@@ -241,7 +242,7 @@ import {
   revealRecoveryBackup as updaterRevealRecoveryBackup,
 } from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
-import { grantDroppedPath, grantPath, pathFromGrant, resolveFsReadPath } from "./fs/access";
+import { grantDroppedPath, grantPastedAttachment, grantPastedImage, grantPath, pathFromGrant, resolveFsReadPath } from "./fs/access";
 import { connectGithubProject } from "./project-sources/github";
 import {
   getAuthSession,
@@ -2131,6 +2132,14 @@ export function registerIpcHandlers(): void {
   // This channel is intentionally absent from window.agentlas. Only the isolated
   // preload bridge can pair webUtils.getPathForFile(File) with this grant call.
   ipcMain.handle("fs:grantDroppedPath", (_e, droppedPath: string) => grantDroppedPath(droppedPath));
+  // 클립보드 이미지는 경로가 없다 — main이 내용을 비공개 파일로 고정하고 같은 등급의
+  // capability를 돌려준다. 그래야 붙여넣기가 드롭·파일선택과 같은 첨부 경로를 탄다.
+  ipcMain.handle("fs:grantPastedImage", (_e, input: unknown) =>
+    grantPastedImage((input ?? {}) as { mediaType?: unknown; bytes?: unknown }));
+  // Pasted audio, video and safe document data has no native Finder path. Main
+  // owns the accepted MIME/extension and emits the same exact-file capability.
+  ipcMain.handle("fs:grantPastedAttachment", (_e, input: unknown) =>
+    grantPastedAttachment((input ?? {}) as { mediaType?: unknown; bytes?: unknown }));
   ipcMain.handle("fs:openPath", async (_e, target: string): Promise<{ ok: boolean; message?: string }> => {
     const raw = String(target || "").trim();
     if (!raw) return { ok: false, message: "No file or URL was provided." };
@@ -2473,14 +2482,17 @@ export function registerIpcHandlers(): void {
     },
   );
   ipcMain.handle("runtime:installCli", (_e, kind: InstallableCli) => installCli(kind));
-  ipcMain.handle("runtime:openCliLogin", (_e, kind: InstallableCli) => {
+  ipcMain.handle("runtime:openCliLogin", async (_e, kind: ManageableCli) => {
     // 로그인 터미널을 여는 시점에 감지/사용량 캐시를 즉시 무효화 — 로그인 완료가
     // watchRecovery 폴링(및 그 이후 일반 폴링)에 재시작 없이 바로 반영되게 한다.
     clearDetectCache();
     if (kind === "claude-code" || kind === "codex" || kind === "gemini") invalidateUsage(kind);
-    return openCliLogin(kind);
+    const runtimes = await detectRuntimes();
+    const selected = runtimes.find((runtime) => runtime.kind === kind && runtime.active)
+      ?? runtimes.find((runtime) => runtime.kind === kind);
+    return openCliLogin(kind, selected?.source);
   });
-  ipcMain.handle("runtime:updateCli", async (_e, kind: InstallableCli) => {
+  ipcMain.handle("runtime:updateCli", async (_e, kind: ManageableCli) => {
     const releaseMaintenance = tryAcquireRuntimeMaintenance();
     if (!releaseMaintenance) {
       return {
@@ -2489,7 +2501,10 @@ export function registerIpcHandlers(): void {
       };
     }
     try {
-      const result = await updateCli(kind);
+      const runtimes = await detectRuntimes();
+      const selected = runtimes.find((runtime) => runtime.kind === kind && runtime.active)
+        ?? runtimes.find((runtime) => runtime.kind === kind);
+      const result = await updateCli(kind, selected?.source);
       if (result.ok) clearDetectCache();
       return result;
     } finally {
@@ -3083,6 +3098,32 @@ export function registerIpcHandlers(): void {
 
   // ── projects ───────────────────────────────────────────
   ipcMain.handle("projects:list", () => listProjects());
+  ipcMain.handle(
+    "projects:createFromWorkspace",
+    (_e, input: { chatId: string; name: string; agentPool?: ProjectAgentPoolMember[] }) => {
+      const chatId = typeof input?.chatId === "string" ? input.chatId.trim() : "";
+      const name = typeof input?.name === "string" ? input.name.trim() : "";
+      if (!chatId || !name) throw new TypeError("A chat and project name are required.");
+
+      // The renderer never supplies a path here. Reuse only the folder that was
+      // selected through a native grant and durably recorded by Main for this chat.
+      const folderPath = getChatWorkingFolder(chatId);
+      if (!folderPath) throw new Error("Choose a working folder before creating a project.");
+      const normalizedFolder = path.resolve(folderPath);
+      const existing = listProjects().find((project) =>
+        project.folderPath && path.resolve(project.folderPath) === normalizedFolder,
+      );
+      if (existing) return existing;
+
+      return createProject({
+        name,
+        sourceType: "local",
+        sourceRef: null,
+        agentPool: input.agentPool ?? [],
+        folderPath,
+      });
+    },
+  );
   ipcMain.handle("projects:get", (_e, id: string) => getProject(id));
   ipcMain.handle("projects:timeline", (_e, id: string, limit?: number) =>
     getProjectTimelineSnapshot(id, limit),
@@ -3188,7 +3229,12 @@ export function registerIpcHandlers(): void {
     }),
   );
   ipcMain.handle("chats:rename", (_e, id: string, title: string) => renameChat(id, title));
-  ipcMain.handle("chats:remove", (_e, id: string) => removeChat(id));
+  ipcMain.handle("chats:remove", (_e, id: string) => {
+    // Renderer의 busy 표시는 투영일 뿐이다. 삭제 권위인 Main이 terminal event가 끝날
+    // 때까지 채팅 행을 보존해, 실행 결과가 사라진 대화에 기록되는 race를 막는다.
+    assertChatRemovalAllowed(id, invocationService.activeChatIds());
+    removeChat(id);
+  });
   // 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(없으면 null).
   ipcMain.handle("chats:recap", (_e, id: string) => buildChatRecap(id, currentUiLocale() === "ko" ? "ko" : "en"));
   ipcMain.handle("chats:markViewed", (_e, id: string) => {
@@ -4318,17 +4364,20 @@ export function registerIpcHandlers(): void {
     for (const [name, value] of Object.entries(decision.input)) {
       enqueueRunInput(id, { [name]: value }, "desktop");
     }
-    // 실행은 fire-and-forget이라 시작 이후의 실패는 렌더러에 도달하지 않는다. 시작조차
-    // 할 수 없는 조건은 여기서 먼저 걸러 즉시 알린다 — 그러지 않으면 버튼을 눌러도
-    // 아무 일도 일어나지 않는 것처럼 보인다(미확정 부작용이 있으면 runGraph가 즉시 throw).
+    // 수동 실행은 실제 스케줄러의 접수·최종 상태를 돌려준다. 버튼 클릭 자체를 성공으로
+    // 간주하면 리스 충돌이나 실행 실패가 "시작됨"으로 보이므로 fire-and-forget하지 않는다.
     if (getAutomationGraphReconciliation(id)) {
       throw new Error("automation_reconciliation_pending");
     }
     const { runAutomationNow } = await import("./automation-scheduler");
     const dryRun = opts?.dryRun === true;
-    void runAutomationNow(id, dryRun ? { dryRun: true } : undefined).catch((err) => {
-      console.error(`[automation] run-now failed (${id}):`, err);
-    });
+    const result = await runAutomationNow(id, dryRun ? { dryRun: true } : undefined);
+    if (!result.accepted) {
+      const error = new Error("automation_run_not_accepted") as Error & { code?: string };
+      error.code = "automation_run_not_accepted";
+      throw error;
+    }
+    return result;
   });
   // 이 그래프가 무엇에 연결돼야 하는가 — **공급자 묶음으로** 답한다.
   // 조사 결과 이 묶기를 하는 제품이 없다(Power Automate는 커넥터마다 새 탭→닫기→Refresh→

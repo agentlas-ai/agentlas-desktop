@@ -44,7 +44,7 @@ export function BuildDoneToast() {
   const workspace = s.result.workspace;
   const readScope = s.result.readScope;
   const scanDisposition = buildScanDisposition(s.result.securityScan);
-  const deliveryBlocked = scanDisposition === "blocked" || scanDisposition === "unverified";
+  const hasSecurityAdvisory = scanDisposition !== "passed";
   const name = workspace.split("/").pop() || "package";
 
   const upload = async (visibility: "private-link" | "marketplace") => {
@@ -77,19 +77,19 @@ export function BuildDoneToast() {
       </div>
       <div className="build-done-toast-name" title={workspace}>{name}</div>
       <div className="build-done-toast-actions">
-        <button type="button" disabled={busy || deliveryBlocked} onClick={() => void upload("private-link")}>
+        <button type="button" disabled={busy} onClick={() => void upload("private-link")}>
           {ko ? "Cloud에 비공개 저장" : "Save privately to Cloud"}
         </button>
-        <button type="button" disabled={busy || deliveryBlocked} onClick={() => void upload("marketplace")}>
+        <button type="button" disabled={busy} onClick={() => void upload("marketplace")}>
           <IconStore size={12} /> {ko ? "허브 업로드" : "Upload to Hub"}
         </button>
         <button type="button" onClick={() => navigate("/library/agents")}>
           <IconBuilding size={12} /> {ko ? "조직도 열기" : "Open org chart"}
         </button>
       </div>
-      {deliveryBlocked && (
+      {hasSecurityAdvisory && (
         <div className="build-done-toast-msg">
-          {ko ? "보안 검증을 확인한 뒤 설치·업로드할 수 있습니다." : "Verify the security scan before install or upload."}
+          {ko ? "안전 점검 결과는 참고용이며 설치·업로드를 막지 않습니다." : "Safety findings are advisory and do not block install or upload."}
         </div>
       )}
       {msg && <div className="build-done-toast-msg">{msg}</div>}

@@ -1,3 +1,5 @@
+import type { RuntimeSelection } from "./types";
+
 export const ONE_TEAM_PREFLIGHT_CONTRACT_VERSION = "1.0.0" as const;
 
 export type OneTeamPreflightPermission = "read" | "write";
@@ -119,6 +121,13 @@ export interface PrepareOneTeamPreflightInput {
   requestedAgentIds?: string[];
   /** Explicit optional override; omission leaves team need to One's judgment. */
   dynamicTeamRequested?: true;
+  /**
+   * Exact model/runtime selected in One for this turn. The preflight must bind
+   * the same runtime that execution will use; otherwise choosing a model after
+   * opening One produces a valid-looking proposal that is guaranteed to fail
+   * with `one-team-runtime-selection-changed` at start.
+   */
+  runtimeSelection?: RuntimeSelection;
 }
 
 export type PrepareOneTeamPreflightResult =

@@ -16,6 +16,10 @@ interface InstalledAgentRow {
   slug: string;
 }
 
+interface ParticipantRow {
+  agent_id: string | null;
+}
+
 export interface ObservedTaskParticipantInput {
   chatId: string;
   observedAgentIdentity: string;
@@ -106,6 +110,16 @@ export function projectObservedTaskParticipantInDb(
   if (!task) return { taskId: null, changed: false };
   const agent = resolveExactAgentIdentity(db, input.observedAgentIdentity);
   if (!agent) return { taskId: task.id, changed: false };
+  const priorParticipant = db
+    .prepare(
+      `SELECT agent_id
+       FROM task_agent_participants
+       WHERE task_id = ? AND agent_slug = ?
+       LIMIT 1`,
+    )
+    .get(task.id, agent.agentSlug) as ParticipantRow | undefined;
+  const participantIdentityChanged = !priorParticipant
+    || (priorParticipant.agent_id === null && agent.agentId !== null);
   const seenAt = Number.isFinite(Date.parse(input.seenAt))
     ? new Date(Date.parse(input.seenAt)).toISOString()
     : new Date().toISOString();
@@ -127,10 +141,15 @@ export function projectObservedTaskParticipantInDb(
     )
     .run(task.id, agent.agentId, agent.agentSlug, seenAt, seenAt);
   if (result.changes === 0) return { taskId: task.id, changed: false };
-  db.prepare("UPDATE tasks SET updated_at = ? WHERE id = ?").run(
-    monotonicTimestamp(task.updated_at, seenAt),
-    task.id,
-  );
+  // last_seen_at is operational telemetry, not a semantic Task mutation. A
+  // repeat observation of the same exact participant must not invalidate an
+  // already accepted Task result or its Task-version-bound receipts.
+  if (participantIdentityChanged) {
+    db.prepare("UPDATE tasks SET updated_at = ? WHERE id = ?").run(
+      monotonicTimestamp(task.updated_at, seenAt),
+      task.id,
+    );
+  }
   return { taskId: task.id, changed: true };
 }
 

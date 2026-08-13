@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { createChat, getChat } from "../store/chats";
-import { findCanonicalTaskForChat, getCanonicalTask } from "../store/tasks";
+import { ensureCanonicalTaskForChat, getCanonicalTask } from "../store/tasks";
 import { listRunHistory } from "../store/automations";
+import { listRunEvents } from "../store/run-events";
 import { tryRecordOneDomainEvent } from "./domain-events";
 import {
   findCurrentOneBriefingCandidate,
@@ -517,9 +518,10 @@ function materializeTask(
       title: `Briefing review · ${candidate.source.label}`,
       kind: "user",
       taskMode: "task",
+      originSurface: "one",
     });
     chatId = chat.id;
-    const task = findCanonicalTaskForChat(chat.id);
+    const task = ensureCanonicalTaskForChat(chat.id);
     if (!task || task.originChatId !== chat.id) throw new Error("Canonical Briefing Task was not created");
     const db = getDb();
     const finish = db.transaction(() => {
@@ -746,10 +748,26 @@ export function claimPreparedOneBriefingAction(
   const claim = db.transaction(() => {
     const canonicalTask = getCanonicalTask(prepared.taskId);
     const canonicalChat = getChat(prepared.chatId);
+    const durableStart = listRunEvents(prepared.ref.reservedRunId, 20).find((event) =>
+      event.kind === "invoke_started"
+      && event.chatId === prepared.chatId
+      && event.agentId === canonicalChat?.agentId,
+    );
+    const taskMatchesReservedStart = Boolean(
+      canonicalTask
+      && canonicalChat
+      && canonicalTask.originChatId === prepared.chatId
+      && canonicalTask.status === "open"
+      && canonicalTask.projectId === canonicalChat.projectId
+      && canonicalTask.firmId === canonicalChat.firmId
+      && canonicalTask.title === canonicalChat.title
+      && canonicalTask.version >= prepared.taskVersion
+      && durableStart
+      && Math.abs(Date.parse(canonicalTask.updatedAt) - Date.parse(durableStart.ts)) <= 1,
+    );
     if (
       !canonicalTask || !canonicalChat
-      || canonicalTask.originChatId !== prepared.chatId
-      || canonicalTask.version !== prepared.taskVersion
+      || (canonicalTask.version !== prepared.taskVersion && !taskMatchesReservedStart)
     ) throw new Error("One Briefing action canonical Task changed before claim");
     const { state, raw } = readStore(db);
     const index = state.actions.findIndex((action) => action.packet.packetId === prepared.packetId);

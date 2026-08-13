@@ -405,10 +405,14 @@ export async function applyAutomationFix(
 
   if (cap.kind === "retry_run") {
     const { runAutomationNow } = await import("./automation-scheduler");
-    void runAutomationNow(automationId).catch(() => undefined);
+    const result = await runAutomationNow(automationId);
     return {
-      ok: true,
-      message: ko ? "다시 실행을 시작했습니다." : "Started another run.",
+      ok: result.accepted && result.status === "ok",
+      message: result.accepted
+        ? result.status === "ok"
+          ? ko ? "다시 실행을 완료했습니다." : "The run completed."
+          : result.error || (ko ? "다시 실행했지만 완료되지 않았습니다." : "The retry did not complete.")
+        : ko ? "다른 실행이 진행 중이라 다시 실행하지 않았습니다." : "Another run is active, so the retry was not accepted.",
       navigate: null,
       plan: null,
     };

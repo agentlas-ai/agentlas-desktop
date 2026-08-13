@@ -586,7 +586,7 @@ export type {
   MultimodalSettings,
 } from "./multimodal";
 
-export type RuntimeKind = "claude-code" | "codex" | "gemini" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx";
+export type RuntimeKind = "claude-code" | "codex" | "antigravity" | "gemini" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx";
 export type RuntimeRole = "orchestrator" | "worker";
 
 /**
@@ -1534,6 +1534,8 @@ export interface ExternalCliSessionSummary {
 export interface ExternalCliSessionImportInput {
   sourceKey: string;
   projectId: string;
+  /** Surface that owns the copied conversation. Project detail defaults to Work. */
+  originSurface?: "work" | "one";
 }
 
 /**
@@ -1776,6 +1778,16 @@ export interface AutomationRunRecord {
   error: string | null;
   /** 사용자가 확인필요 요구를 닫은 시각. 기록은 남고 "지금 조치하라"만 꺼진다. */
   acknowledgedAt?: string | null;
+}
+
+/** Main이 실제 스케줄러 판정을 끝낸 뒤 반환하는 수동 실행 결과. */
+export interface AutomationRunNowResult {
+  /** false면 리스 충돌·업데이트 quiesce 등으로 실행이 접수되지 않았다. */
+  accepted: boolean;
+  /** accepted=true인 실행의 최종 커널 상태. */
+  status?: AutomationRunRecord["status"];
+  error?: string | null;
+  output?: string;
 }
 
 /** A retained event occurrence that cannot be safely replayed automatically. */
@@ -3715,6 +3727,8 @@ export interface McpInvocationRequest {
   locale?: "ko" | "en";
   /** 도구 사용 권한 수준 (ChatInput 권한 칩) — 런타임 권한 모드로 매핑 */
   permissions?: "read" | "write" | "full";
+  /** One composer의 원래 선택값. Auto의 보수적 승격과 명시적 Read only를 구분한다. */
+  onePermissionMode?: "auto" | "read" | "write" | "full";
   /** 자동화 등 백그라운드 실행에서 Playwright persistent profile lock을 피하기 위한 MCP 브라우저 프로필 키. */
   mcpBrowserProfileKey?: string;
   /**
@@ -3772,6 +3786,8 @@ export interface McpInvocationRequest {
   sessionRouting?: boolean;
   /** Explicit per-turn Stormbreaker preference. Absent means the controller decides; it never means OFF. */
   stormbreakerMode?: boolean;
+  /** Explicit One fast-turn preference: one direct pass and the lowest verified reasoning effort. */
+  fastMode?: boolean;
 }
 
 /** Main-owned Codex-style steering acknowledgement shared by Desktop and Mobile. */
@@ -3800,6 +3816,9 @@ export interface MobileBridgeRuntimeStatus {
   secure: boolean;
   hostId: string | null;
   devices: MobileBridgeDeviceSummary[];
+  /** Authenticated sockets that completed ready + snapshot. Pairing alone is
+   * not a live Mobile connection and must never be presented as one. */
+  connectedDeviceIds: string[];
   error: string | null;
 }
 
@@ -3833,6 +3852,7 @@ export interface McpRunKeyRequest {
 
 export interface McpInvocationEvent {
   kind:
+    | "lifecycle"
     | "thinking"
     | "tool-use"
     | "partial"
@@ -3851,7 +3871,23 @@ export interface McpInvocationEvent {
      * 고지는 이 이벤트로 보내고 화면은 심각도를 가진 별도 행으로 그린다.
      */
     | "notice";
+  /** Main-assigned monotonic sequence within one run. Renderers never infer ordering from copy. */
+  sequence?: number;
+  /** Main observation time for this event. Preserved when an active run is reattached. */
+  observedAt?: string;
+  /** Main-owned run boundary. Unlike status prose, this is an authoritative lifecycle fact. */
+  lifecycle?: {
+    phase: "start" | "cancel_requested";
+    /** Main-authoritative authority actually dispatched to the runtime. */
+    permission?: "read" | "write" | "full";
+    /** Original One policy selected by the user before Auto was resolved. */
+    selectedPermissionMode?: "auto" | "read" | "write" | "full";
+  };
   status?: string;
+  /** Machine-readable transient progress. Status copy is presentation only. */
+  activity?: {
+    code: "runtime_wait" | "recovery_retry" | "session_resume";
+  };
   text?: string;
   /** partial 델타 스트리밍(무-agentId 메인 스트림 한정) — text(누적 전문) 대신 직전 partial
    *  이후 추가분만 담는다. IPC 페이로드를 O(전체)→O(증분)으로 줄인다. 리플레이/폴백 이벤트는
@@ -3890,10 +3926,33 @@ export interface McpInvocationEvent {
   surface?: AgentlasSurfaceManifest;
   /** Main-authoritative, non-executable semantic projection consumed unchanged by One and Mobile. */
   oneSurface?: OneSurfaceManifestV1;
+  /**
+   * Main-bound One artifacts only. These are emitted after the exact Surface
+   * binding succeeds; they never carry a raw local path to the renderer.
+   */
+  oneArtifacts?: Array<{
+    taskId: string;
+    taskVersion: number;
+    chatId: string;
+    runId: string;
+    manifestId: string;
+    artifactRef: string;
+    label: string;
+    type: "document" | "spreadsheet" | "image" | "video" | "audio" | "archive" | "data" | "other";
+    sizeBytes?: number;
+  }>;
   /** Model suggestion only; Main validates and converts it to bounded semantic actions. */
   oneFriendlyFollowups?: OneFriendlyFollowupPlanV1;
   /** 도구 호출/결과 이벤트 — Claude Code식 접기/펴기 블록용 (이름 + 인자 JSON + 결과) */
-  tool?: { name: string; args?: string; result?: string; id?: string; isError?: boolean };
+  tool?: {
+    name: string;
+    args?: string;
+    result?: string;
+    id?: string;
+    isError?: boolean;
+    /** Verified public URLs observed in this tool's own input or result. */
+    sourceUrls?: string[];
+  };
   /** kind:"mcp-key-request" 전용 — 렌더러 McpKeyRequestSheet가 소비한다. 값 없음(키 이름만). */
   keyRequest?: McpRunKeyRequest;
   /** 생성 토큰 수 — final에 동봉. kind:"usage"면 실행 중 라이브 누적치(단조 증가, 추정 포함). */
@@ -4089,7 +4148,7 @@ export type CliRuntimeUpdateState =
   | "unverifiable";
 
 export interface CliRuntimeVersionStatus {
-  kind: UsageRetryProviderId;
+  kind: "claude-code" | "codex" | "antigravity" | "gemini" | "kimi" | "grok";
   installedVersion: string | null;
   latestVersion: string | null;
   state: CliRuntimeUpdateState;
@@ -5852,11 +5911,11 @@ export interface AgentlasIpc {
     ) => Promise<{ ok: boolean; message: string; command?: string }>;
     /** 시스템 터미널을 열어 CLI 로그인 실행 — 사용자는 브라우저 로그인만 하면 됨. */
     openCliLogin: (
-      kind: "claude-code" | "codex" | "gemini" | "kimi" | "grok",
+      kind: "claude-code" | "codex" | "antigravity" | "gemini" | "kimi" | "grok",
     ) => Promise<{ ok: boolean; message: string; command?: string }>;
     /** CLI를 최신으로 업데이트 — 미설치면 설치, npm 관리본은 재설치, claude는 self-updater. */
     updateCli: (
-      kind: "claude-code" | "codex" | "gemini" | "kimi" | "grok",
+      kind: "claude-code" | "codex" | "antigravity" | "gemini" | "kimi" | "grok",
     ) => Promise<{ ok: boolean; message: string; command?: string }>;
     /** CLI(Claude/Codex/Gemini)의 커스텀 슬래시 명령을 스캔 — 매 호출마다 최신. */
     listCommands: () => Promise<RuntimeCommand[]>;
@@ -6132,6 +6191,12 @@ export interface AgentlasIpc {
   };
   projects: {
     list: () => Promise<Project[]>;
+    /** Create (or reuse) the project for a folder already persisted by Main for this chat. */
+    createFromWorkspace: (input: {
+      chatId: string;
+      name: string;
+      agentPool?: ProjectAgentPoolMember[];
+    }) => Promise<Project>;
     create: (input: {
       name: string;
       systemPrompt?: string | null;
@@ -6393,8 +6458,8 @@ export interface AgentlasIpc {
   /** Main-owned semantic decision used before a new One conversation starts. */
   oneRequestIntent: {
     resolve: (prompt: string) => Promise<{
-      intent: "conversation" | "task";
-      source: "llm" | "fallback";
+      intent: "conversation" | "task" | "undecided";
+      source: "llm" | "unavailable";
     }>;
   };
   /** Read-only adaptive-team proposal plus explicit, exact resolution. */
@@ -6439,7 +6504,7 @@ export interface AgentlasIpc {
       { ok: true; automation: Automation } | { ok: false; reason: string }
     >;
     /** opts.dryRun: 시뮬레이션 실행 — 외부 변경을 막고 무엇이 막혔는지 남긴다. */
-    runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) => Promise<void>;
+    runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) => Promise<AutomationRunNowResult>;
     /** 이 그래프가 시작할 때 사람에게 받아야 하는 값(없으면 null). */
     inputRequirement: (id: string) => Promise<{ required: boolean; varName: string; label: string } | null>;
     /** 이 그래프가 연결돼야 하는 것 — 공급자 묶음별로. 켜기 게이트와 같은 계산을 쓴다. */

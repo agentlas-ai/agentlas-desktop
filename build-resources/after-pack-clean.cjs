@@ -3,6 +3,7 @@ const { createHash } = require("node:crypto");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
+const embeddedCoreContract = require("./embedded-core-contract.cjs");
 
 const execFileAsync = promisify(execFile);
 const MODEL2VEC_ASSET_PARTS = ["assets", "model2vec", "potion-multilingual-128M-int8"];
@@ -227,12 +228,12 @@ function isForbiddenRuntimePath(relativePath) {
   if (lowerParts[0] === "research") return true;
   if (/^(?:test[-_]|.*[-_.]test\.|.*benchmark|.*fixture)/.test(base)) return true;
   if (lowerParts[0] === ".agentlas") {
+    // The directory itself must remain traversable so the one immutable,
+    // public runtime contract below can be inspected. Every sibling or nested
+    // mutable Agentlas state remains forbidden.
+    if (lowerParts.length === 1) return false;
     const mutablePath = lowerParts.slice(1).join("/");
-    if (/^(?:ontology-runtime\.sqlite|career-graph\.sqlite|experience-relations\.jsonl)/.test(mutablePath)) return true;
-    if (/^\.experience-relations\.jsonl\./.test(mutablePath)) return true;
-    if (/^field-test-report\./.test(mutablePath)) return true;
-    if (mutablePath === "field-test" || mutablePath.startsWith("field-test/")) return true;
-    if (mutablePath === "agent-ontology" || mutablePath.startsWith("agent-ontology/")) return true;
+    return mutablePath !== "product-runtime-contract.json";
   }
   const claudeIndex = lowerParts.lastIndexOf(".claude");
   return claudeIndex >= 0 && /^settings(?:\..+)?\.local\.json$/.test(base);
@@ -500,7 +501,9 @@ async function verifyEmbeddedAgentlasOs(context) {
   const resourcesDir = context.electronPlatformName === "darwin"
     ? path.join(context.appOutDir, `${productFilename}.app`, "Contents", "Resources")
     : path.join(context.appOutDir, "resources");
-  const sourceManifestPath = path.join(projectDir, "Hephaestus", "manifest.json");
+  const pinnedSourceRoot = path.join(projectDir, "Hephaestus");
+  const preparedRoot = path.join(projectDir, embeddedCoreContract.EMBEDDED_CORE_STAGE_RELATIVE);
+  const sourceManifestPath = path.join(preparedRoot, "manifest.json");
   const packagePath = path.join(projectDir, "package.json");
   const packagedRoot = path.join(resourcesDir, "Hephaestus");
   const packagedManifestPath = path.join(packagedRoot, "manifest.json");
@@ -511,6 +514,15 @@ async function verifyEmbeddedAgentlasOs(context) {
     readFile(packagePath, "utf8").then(JSON.parse),
     access(path.join(packagedRoot, "agentlas_cloud", "__main__.py")),
   ]);
+  embeddedCoreContract.verifyPinnedSource(pinnedSourceRoot, pkg);
+  const preparationReceipt = embeddedCoreContract.verifyReceipt(preparedRoot, pkg);
+  const packagedReceipt = JSON.parse(await readFile(
+    path.join(packagedRoot, embeddedCoreContract.EMBEDDED_CORE_RECEIPT),
+    "utf8",
+  ));
+  if (JSON.stringify(packagedReceipt) !== JSON.stringify(preparationReceipt)) {
+    throw new Error("[afterPack] embedded Core preparation receipt drift");
+  }
   const semver = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
   if (!semver.test(String(sourceManifest.version || ""))) {
     throw new Error(`[afterPack] invalid source Agentlas OS version: ${sourceManifest.version || "missing"}`);
@@ -535,7 +547,7 @@ async function verifyEmbeddedAgentlasOs(context) {
     }
   }
   const sourceModel = await verifyModel2VecAsset(
-    path.join(projectDir, "Hephaestus", ...MODEL2VEC_ASSET_PARTS),
+    path.join(preparedRoot, ...MODEL2VEC_ASSET_PARTS),
     "source",
   );
   const packagedModel = await verifyModel2VecAsset(
@@ -558,6 +570,7 @@ async function verifyEmbeddedAgentlasOs(context) {
     const remainder = forbiddenPaths.length > 8 ? ` (+${forbiddenPaths.length - 8} more)` : "";
     throw new Error(`[afterPack] forbidden mutable Agentlas OS resources reached the package: ${preview}${remainder}`);
   }
+  embeddedCoreContract.verifyPackagedSubset(packagedRoot, preparedRoot);
   const pythonRuntime = await verifyBundledPython(
     projectDir,
     resourcesDir,
@@ -572,6 +585,8 @@ async function verifyEmbeddedAgentlasOs(context) {
   );
   console.log(
     `[afterPack] verified embedded Agentlas OS v${packagedManifest.version} `
+      + `from ${preparationReceipt.sourceCommit.slice(0, 12)} with retirement transform `
+      + `${preparationReceipt.transformId}, `
       + `with Model2Vec ${packagedModel.contentSha256} and Python ${pythonRuntime.pythonVersion} `
       + `(${pythonRuntime.triple})`
       + (nodeRuntime ? ` and private Node ${nodeRuntime.nodeVersion} (${nodeRuntime.arch})` : ""),

@@ -6,6 +6,7 @@ import {
   type OneOperationalRecoveryDetail,
   withOneOperationalRecoveryDispatchSuppressed,
 } from "@/lib/one-operational-recovery";
+import { useT } from "@/lib/i18n";
 
 function recoveryPrompt(detail: OneOperationalRecoveryDetail): string {
   return [
@@ -41,6 +42,7 @@ function recoveryRetryDelay(attempts: number): number {
  * ownership to a worker.
  */
 export function OneRecoveryPlane() {
+  const { locale } = useT();
   const activeRef = useRef(false);
   const queueRef = useRef<QueuedRecovery[]>([]);
   const queuedFingerprintsRef = useRef<Set<string>>(new Set());
@@ -116,7 +118,7 @@ export function OneRecoveryPlane() {
               promptOrigin: "system",
               taskIntent: "conversation",
               oneMode: true,
-              locale: "ko",
+              locale,
               permissions: "read",
             });
             queued.started = true;
@@ -181,7 +183,7 @@ export function OneRecoveryPlane() {
       retryTimerRef.current = null;
       window.removeEventListener(ONE_OPERATIONAL_RECOVERY_EVENT, recover);
     };
-  }, []);
+  }, [locale]);
 
   // Recovery stays silent until One authors a useful result or a
   // capability-bound question. Code does not expose a failure or canned state.

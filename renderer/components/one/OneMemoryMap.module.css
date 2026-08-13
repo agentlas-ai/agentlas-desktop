@@ -10,35 +10,6 @@
   isolation: isolate;
 }
 
-.header {
-  position: absolute;
-  z-index: 3;
-  top: 0;
-  left: 0;
-  right: 0;
-  min-height: 54px;
-  display: flex;
-  align-items: center;
-  padding: 10px 2px;
-  border: 0;
-  background: #fff;
-  pointer-events: none;
-}
-
-.brand {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  color: #17191b;
-}
-
-.brand strong {
-  font-size: 13px;
-  font-weight: 720;
-  letter-spacing: -0.025em;
-}
-
 .canvas {
   position: absolute;
   z-index: 1;
@@ -106,6 +77,4 @@
     min-height: min(560px, calc(100vh - 205px));
     border-radius: 0;
   }
-  .header { padding: 10px 2px; }
-  .brand strong { display: none; }
 }

@@ -10,16 +10,22 @@ import { useEffect, useMemo, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import type { McpRunKeyRequest } from "@/lib/types";
+import { OneBottomSheet } from "@/components/one/OneBottomSheet";
 
 export function McpKeyRequestSheet({
   request,
   onResolved,
+  presentation = "work",
+  localeOverride,
 }: {
   request: McpRunKeyRequest;
   /** 시트를 닫아야 할 때 호출 — 저장/거절/만료 공통. */
   onResolved: (outcome: "provided" | "declined" | "expired") => void;
+  presentation?: "work" | "one";
+  localeOverride?: "ko" | "en";
 }) {
-  const { locale } = useT();
+  const { locale: appLocale } = useT();
+  const locale = localeOverride ?? appLocale;
   const ko = locale === "ko";
   const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
@@ -78,9 +84,9 @@ export function McpKeyRequestSheet({
 
   const secondsLeft = Math.max(0, Math.ceil((request.expiresAt - now) / 1_000));
 
-  return (
-    <div className="mkr-wrap" role="alertdialog" aria-live="assertive" data-testid="mcp-key-request-sheet">
-      <div className="mkr">
+  const content = (
+    <>
+      <div className={`mkr ${presentation === "one" ? "mkr-one" : ""}`} data-testid="mcp-key-request-sheet">
         <div className="mkr-top">
           <span className="mkr-tag">{ko ? "API 키 필요" : "API keys needed"}</span>
           <span className="mkr-timer">
@@ -116,7 +122,9 @@ export function McpKeyRequestSheet({
               {tool.envKeys.map((envKey) => (
                 <label className="mkr-field" key={envKey.key}>
                   <span className="mkr-key">
-                    {(ko ? envKey.label : envKey.labelEn) || envKey.labelEn || envKey.label || envKey.key}
+                    {ko
+                      ? envKey.label || envKey.labelEn || envKey.key
+                      : envKey.labelEn || envKey.key}
                   </span>
                   <input
                     type="password"
@@ -292,7 +300,92 @@ export function McpKeyRequestSheet({
           color: #fff;
           border-color: transparent;
         }
+        .mkr-one {
+          width: auto;
+          max-height: min(58vh, 520px);
+          margin: 0;
+          padding: 0;
+          border: 0;
+          border-radius: 0;
+          background: transparent;
+          color: var(--one-sheet-ink);
+          box-shadow: none;
+          animation: none;
+        }
+        .mkr-one .mkr-tag,
+        .mkr-one .mkr-summary {
+          display: none;
+        }
+        .mkr-one .mkr-top {
+          justify-content: flex-end;
+        }
+        .mkr-one .mkr-note,
+        .mkr-one .mkr-timer,
+        .mkr-one .mkr-hint {
+          color: var(--one-sheet-muted);
+          opacity: 1;
+        }
+        .mkr-one .mkr-tool {
+          border-color: var(--one-sheet-control-border);
+          border-radius: var(--one-sheet-card-radius);
+          background: var(--one-sheet-card-surface);
+        }
+        .mkr-one .mkr-setup {
+          color: var(--one-sheet-accent);
+        }
+        .mkr-one .mkr-field input {
+          min-height: var(--one-sheet-control-height);
+          border-color: var(--one-sheet-control-border);
+          border-radius: var(--one-sheet-control-radius);
+          background: var(--one-sheet-control-surface);
+          color: var(--one-sheet-ink);
+        }
+        .mkr-one .mkr-field input:focus {
+          outline: none;
+          border-color: var(--one-sheet-accent);
+          box-shadow: var(--one-sheet-focus);
+        }
+        .mkr-one .mkr-actions button {
+          min-height: var(--one-sheet-control-height);
+          border-color: var(--one-sheet-control-border);
+          border-radius: var(--one-sheet-control-radius);
+          color: var(--one-sheet-ink);
+        }
+        .mkr-one .mkr-actions button:focus-visible {
+          outline: none;
+          box-shadow: var(--one-sheet-focus);
+        }
+        .mkr-one .mkr-actions .save {
+          border-color: var(--one-sheet-primary);
+          background: var(--one-sheet-primary);
+          color: #fff;
+        }
       `}</style>
-    </div>
+    </>
   );
+
+  if (presentation === "one") {
+    return (
+      <OneBottomSheet
+        open
+        onClose={() => void decline()}
+        closeLabel={ko ? "키 없이 계속" : "Continue without keys"}
+        ariaLabelledBy="one-mcp-key-request-title"
+        dialogRole="alertdialog"
+        closeOnBackdrop={false}
+        closeOnEscape={false}
+        closeDisabled={busy}
+        eyebrow={ko ? "API 키 필요" : "API keys required"}
+        title={ko ? "도구 연결이 필요해요" : "Connect the required tool"}
+        titleId="one-mcp-key-request-title"
+        description={ko
+          ? "필요한 키를 저장하면 이번 실행부터 사용합니다. 값은 키체인에만 저장됩니다."
+          : "Save the required keys to use them in this run. Values stay in your keychain."}
+      >
+        {content}
+      </OneBottomSheet>
+    );
+  }
+
+  return <div className="mkr-wrap" role="alertdialog" aria-live="assertive">{content}</div>;
 }

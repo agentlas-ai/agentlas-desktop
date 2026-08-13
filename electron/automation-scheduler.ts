@@ -36,6 +36,7 @@ import {
 import { getOrCreateAutomationSession } from "./store/automation-sessions";
 import { buildSystemOptimizerPrompt } from "./system-agents/system-optimizer";
 import { runMcpInvocation } from "./mcp/client";
+import { automationRuntimePermission } from "../shared/graph-node-protocol";
 import { runGraph } from "./workflow/run-graph";
 import { broadcastLiveRun } from "./workflow/live-run";
 import {
@@ -293,9 +294,15 @@ function automationSessionInput(a: Automation): {
   };
 }
 
-/** Scheduler authority is capped at read/write even for malformed legacy objects. */
-function schedulerExecutionPermission(a: Automation): "read" | "write" {
-  return a.executionPermission === "read" ? "read" : "write";
+/**
+ * 스케줄러가 런타임에 넘기는 권한. 저장된 `executionPermission` 을 그대로 쓰지 않는다 —
+ * 런타임에서 read 는 "쓰기 금지"가 아니라 **"도구 금지"** 이고, 도구 없는 자동화는
+ * 자기 일을 못 한다(2026-08-13). 옛 청사진 경로가 read 로 못박아 만든 행이 그대로
+ * 남아 있어서, 저장값을 믿으면 복구 실행조차 도구 없이 진단하게 된다.
+ * 판정은 `automationRuntimePermission` 한 곳이 갖는다(그래프 경로와 같은 규칙).
+ */
+function schedulerExecutionPermission(_a: Automation): "read" | "write" {
+  return automationRuntimePermission({ simulation: false });
 }
 
 /** 실패 원인을 표출하고 아는 원인은 수리한다. 반복 실패도 자동화를 끄지는 않는다. */
@@ -1206,13 +1213,13 @@ export async function runDueAutomationsNow(now: Date = new Date()): Promise<void
 }
 
 /** "Run now" — 스케줄 무관하게 지정 자동화를 즉시 1회 실행(enabled 여부 무시). */
-export async function runAutomationNow(id: string, opts?: { dryRun?: boolean }): Promise<void> {
+export async function runAutomationNow(id: string, opts?: { dryRun?: boolean }): Promise<TriggerDispatchResult> {
   if (installQuiescing) throw new Error("Automation execution is paused while an update is prepared");
   const a = getAutomation(id);
   if (!a) throw new Error(`Automation not found: ${id}`);
   // Disabled automations remain manually runnable, but still acquire the same
   // shared lease as every scheduled/headless execution.
-  await runOne(a, {
+  return runOne(a, {
     claim: true,
     advanceSchedule: false,
     allowDisabledLease: true,

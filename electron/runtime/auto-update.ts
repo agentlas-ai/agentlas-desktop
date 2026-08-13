@@ -7,14 +7,14 @@ import type {
   CliRuntimeUpdateState,
   CliRuntimeVersionStatus,
   RuntimeStatus,
-  UsageRetryProviderId,
 } from "../../shared/types";
 import { compareSemVer, parseSemVer } from "../../shared/semver";
 import { detectRuntimes } from "./detect";
-import { updateCli, type InstallableCli } from "./install-cli";
+import { clearCliVersionProbeCache, probeCliVersion } from "./exec";
+import { updateCli, type InstallableCli, type ManageableCli } from "./install-cli";
 import { tryAcquireRuntimeMaintenance } from "./run-slots";
 
-const CLI_KINDS: InstallableCli[] = ["claude-code", "codex", "gemini", "kimi", "grok"];
+const CLI_KINDS: ManageableCli[] = ["claude-code", "codex", "antigravity", "gemini", "kimi", "grok"];
 const PACKAGE_BY_KIND: Record<InstallableCli, string> = {
   "claude-code": "@anthropic-ai/claude-code",
   codex: "@openai/codex",
@@ -33,15 +33,15 @@ interface InternalVersionRecord extends CliRuntimeVersionStatus {
 
 interface PersistedVersionState {
   version: 1;
-  records: Partial<Record<InstallableCli, InternalVersionRecord>>;
+  records: Partial<Record<ManageableCli, InternalVersionRecord>>;
 }
 
-const records = new Map<InstallableCli, InternalVersionRecord>();
+const records = new Map<ManageableCli, InternalVersionRecord>();
 let stateLoaded = false;
 let cycleInFlight: Promise<void> | null = null;
 
-function isInstallableKind(kind: unknown): kind is InstallableCli {
-  return typeof kind === "string" && CLI_KINDS.includes(kind as InstallableCli);
+function isManagedKind(kind: unknown): kind is ManageableCli {
+  return typeof kind === "string" && CLI_KINDS.includes(kind as ManageableCli);
 }
 
 function isUpdateState(value: unknown): value is CliRuntimeUpdateState {
@@ -82,7 +82,7 @@ function loadState(): void {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as PersistedVersionState;
     if (parsed?.version !== 1 || !parsed.records || typeof parsed.records !== "object") return;
     for (const [kind, candidate] of Object.entries(parsed.records)) {
-      if (!isInstallableKind(kind) || !candidate || !isUpdateState(candidate.state)) continue;
+      if (!isManagedKind(kind) || !candidate || !isUpdateState(candidate.state)) continue;
       records.set(kind, {
         kind,
         installedVersion: typeof candidate.installedVersion === "string" ? candidate.installedVersion : null,
@@ -118,7 +118,7 @@ function saveState(): void {
   }
 }
 
-function runtimeOf(runtimes: readonly RuntimeStatus[], kind: InstallableCli): RuntimeStatus | null {
+function runtimeOf(runtimes: readonly RuntimeStatus[], kind: ManageableCli): RuntimeStatus | null {
   return runtimes.find((runtime) => runtime.kind === kind) ?? null;
 }
 
@@ -162,7 +162,7 @@ export async function fetchLatestNpmVersion(
 
 function publicRecord(record: InternalVersionRecord): CliRuntimeVersionStatus {
   return {
-    kind: record.kind as UsageRetryProviderId,
+    kind: record.kind,
     installedVersion: record.installedVersion,
     latestVersion: record.latestVersion,
     state: record.state,
@@ -246,12 +246,13 @@ function updateRetryAllowed(record: InternalVersionRecord, now: number): boolean
 }
 
 async function verifyUpdatedRuntime(
-  kind: InstallableCli,
+  kind: ManageableCli,
   expectedLatest: string | null,
+  expectedSource: string,
 ): Promise<{ installedVersion: string | null; verified: boolean }> {
-  const refreshed = await detectRuntimes(true);
-  const runtime = runtimeOf(refreshed, kind);
-  const installedVersion = runtime?.version && parseSemVer(runtime.version) ? runtime.version : null;
+  clearCliVersionProbeCache();
+  const measured = await probeCliVersion(expectedSource);
+  const installedVersion = measured && parseSemVer(measured) ? measured : null;
   if (!installedVersion) return { installedVersion: null, verified: false };
   if (!expectedLatest) return { installedVersion, verified: true };
   return {
@@ -267,13 +268,13 @@ async function runCycle(initialRuntimes: readonly RuntimeStatus[]): Promise<void
     let record = records.get(kind);
     if (!runtime || !record || !record.installedVersion) continue;
     const now = Date.now();
-    const antigravity = kind === "gemini" && isAntigravityRuntimeSource(runtime.source);
+    const antigravity = kind === "antigravity";
 
     if (!antigravity && checkDue(record, now)) {
       record.state = "checking";
       records.set(kind, record);
       try {
-        record.latestVersion = await fetchLatestNpmVersion(PACKAGE_BY_KIND[kind]);
+        record.latestVersion = await fetchLatestNpmVersion(PACKAGE_BY_KIND[kind as InstallableCli]);
         record.checkedAt = Date.now();
         const relation = cliVersionRelation(record.installedVersion, record.latestVersion);
         record.state = relation === "outdated"
@@ -316,7 +317,8 @@ async function runCycle(initialRuntimes: readonly RuntimeStatus[]): Promise<void
       record.attemptedAt = Date.now();
       records.set(kind, record);
       saveState();
-      const result = await updateCli(kind);
+      const beforeVersion = record.installedVersion;
+      const result = await updateCli(kind, runtime.source);
       if (!result.ok) {
         record.state = "update-failed";
         record.checkedAt = Date.now();
@@ -324,11 +326,13 @@ async function runCycle(initialRuntimes: readonly RuntimeStatus[]): Promise<void
         saveState();
         continue;
       }
-      const verified = await verifyUpdatedRuntime(kind, antigravity ? null : record.latestVersion);
+      const verified = await verifyUpdatedRuntime(kind, antigravity ? null : record.latestVersion, runtime.source);
       record.installedVersion = verified.installedVersion;
       if (antigravity && verified.installedVersion) record.latestVersion = verified.installedVersion;
       record.checkedAt = Date.now();
-      record.state = verified.verified ? "updated" : "update-failed";
+      record.state = verified.verified
+        ? (antigravity && verified.installedVersion === beforeVersion ? "current" : "updated")
+        : "update-failed";
       records.set(kind, record);
       saveState();
       if (verified.verified) runtimes = await detectRuntimes();

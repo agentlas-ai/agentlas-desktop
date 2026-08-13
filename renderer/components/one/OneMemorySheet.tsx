@@ -3,7 +3,6 @@
 import {
   useEffect,
   useMemo,
-  useRef,
   useState,
   type FormEvent,
 } from "react";
@@ -26,6 +25,7 @@ import type {
 import { OneValueClosureCard } from "./OneValueClosureCard";
 import { OneExperienceReuseCard } from "./OneExperienceReuseCard";
 import { OneImprovementProofCard } from "./OneImprovementProofCard";
+import { OneBottomSheet } from "./OneBottomSheet";
 import styles from "./OneMemorySheet.module.css";
 
 interface OneMemorySheetProps {
@@ -97,10 +97,7 @@ export function OneMemorySheet({
   onValueClosureStateChange,
   onManageImprovementAsset,
 }: OneMemorySheetProps) {
-  const dialogRef = useRef<HTMLDivElement>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const busyIdRef = useRef<string | null>(null);
-  busyIdRef.current = busyId;
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [useOnceReceipt, setUseOnceReceipt] = useState<OneMemoryUseOnceReceipt | null>(null);
@@ -125,37 +122,6 @@ export function OneMemorySheet({
     setMessage(null);
     setError(null);
     setUseOnceReceipt(null);
-    const priorFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const timer = window.setTimeout(() => dialogRef.current?.querySelector<HTMLElement>("button, textarea, input")?.focus(), 0);
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busyIdRef.current) {
-        event.preventDefault();
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const dialog = dialogRef.current;
-      if (!dialog) return;
-      const focusable = [...dialog.querySelectorAll<HTMLElement>(
-        "button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href]",
-      )];
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.clearTimeout(timer);
-      window.removeEventListener("keydown", onKeyDown);
-      priorFocus?.focus();
-    };
   }, [onClose, open]);
 
   useEffect(() => {
@@ -353,18 +319,20 @@ export function OneMemorySheet({
   };
 
   return (
-    <div className={styles.layer}>
-      <button type="button" className={styles.scrim} aria-label={tFor(locale, "one.mem.aria.close_memory")} onClick={() => !busyId && onClose()} />
-      <div ref={dialogRef} className={styles.sheet} role="dialog" aria-modal="true" aria-labelledby="one-memory-title">
-        <header className={styles.header}>
-          <div>
-            <p className={styles.eyebrow}>{tFor(locale, "one.mem.header.eyebrow")}</p>
-            <h2 id="one-memory-title">{tFor(locale, "one.mem.header.title")}</h2>
-            <p>{tFor(locale, "one.mem.header.body")}</p>
-          </div>
-          <button type="button" className={styles.closeButton} onClick={onClose} disabled={Boolean(busyId)} aria-label={tFor(locale, "one.mem.aria.close")}>×</button>
-        </header>
-
+    <OneBottomSheet
+      open={open}
+      onClose={onClose}
+      closeLabel={tFor(locale, "one.mem.aria.close_memory")}
+      ariaLabelledBy="one-memory-title"
+      size="wide"
+      closeOnBackdrop={!busyId}
+      closeOnEscape={!busyId}
+      closeDisabled={Boolean(busyId)}
+      eyebrow={tFor(locale, "one.mem.header.eyebrow")}
+      title={tFor(locale, "one.mem.header.title")}
+      titleId="one-memory-title"
+      description={tFor(locale, "one.mem.header.body")}
+    >
         {!state ? (
           <div className={styles.loading} role="status">{tFor(locale, "one.mem.loading")}</div>
         ) : (
@@ -534,7 +502,6 @@ export function OneMemorySheet({
             </section>}
           </div>
         )}
-      </div>
-    </div>
+    </OneBottomSheet>
   );
 }

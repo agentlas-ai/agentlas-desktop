@@ -197,6 +197,8 @@ interface CodexRunResult {
   text: string;
   threadId: string | null;
   tokens?: number;
+  /** Provider's raw session-cumulative counter; never render this directly for resume turns. */
+  reportedOutputTokens?: number;
   /** 스트림 표식(또는 exit0 휴리스틱)이 말한 실패 — 있으면 text는 답이 아니다. */
   failure?: RunnerFailure;
 }
@@ -253,6 +255,7 @@ function runCodexProcess(
   stdinPayload: string,
   req: RunnerRequest,
   events: RunnerEvents,
+  reportedOutputTokenBaseline: number | null,
 ): Promise<CodexRunResult> {
   return new Promise((resolve, reject) => {
     let terminalFailure: RunnerFailure | null = null;
@@ -279,9 +282,17 @@ function runCodexProcess(
     let text = "";
     let threadId: string | null = null;
     let tokens: number | undefined;
+    let reportedOutputTokens: number | undefined;
     let stderr = "";
     let lastEmit = 0;
     let turnCompleted = false;
+    // Newer Codex runtimes send native tool calls as response items instead of
+    // the older `item.started` / `item.completed` command events. Dropping that
+    // envelope made a real file edit look like a two-event "thought + final"
+    // run in One even though the tool had succeeded. Keep the provider call id
+    // so the started and completed notifications update one Activity row.
+    const responseTools = new Map<string, { name: string; args?: string }>();
+    const settledResponseToolIds = new Set<string>();
     // reasoning 구간/라이브 토큰 추정 상태 — 상태줄 실시간 표시용.
     // 단일 open/close 플래그다(깊이 카운터가 아니다): 이 구간은 진짜 `reasoning`
     // 아이템으로도 열리고, reasoning 아이템을 전혀 내보내지 않는 codex 빌드에서는
@@ -317,9 +328,53 @@ function runCodexProcess(
       if (!type || type === "agent_message" || type === "reasoning") return false;
       return /tool|function|command|shell|exec|mcp/i.test(type);
     };
+    const record = (value: unknown): Record<string, unknown> | null => (
+      value && typeof value === "object" && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : null
+    );
+    const nonEmptyText = (value: unknown): string | null => typeof value === "string" && value.trim()
+      ? value.trim()
+      : null;
+    const responseToolName = (name: string, input: string | undefined): string => {
+      // The Codex tool host uses a generic `exec` wrapper for the built-in
+      // patch tool. The structured patch completion below is host evidence, so
+      // preserving `apply_patch` lets One present it as a real file output
+      // rather than a vague terminal row.
+      if (name === "exec" && /tools\.apply_patch\s*\(/.test(input ?? "")) return "apply_patch";
+      return name;
+    };
+    const outputText = (value: unknown): string | undefined => {
+      const direct = nonEmptyText(value);
+      if (direct) return truncateUi(direct);
+      if (Array.isArray(value)) {
+        const joined = value
+          .map((entry) => record(entry))
+          .map((entry) => entry && (nonEmptyText(entry.text) ?? nonEmptyText(entry.output)))
+          .filter((entry): entry is string => Boolean(entry))
+          .join("\n");
+        if (joined) return truncateUi(joined);
+      }
+      return value == null ? undefined : truncateUi(stringifyPayload(value));
+    };
+    const settleResponseTool = (id: string, result: string | undefined, isError = false, artifactPaths?: readonly string[]): void => {
+      if (settledResponseToolIds.has(id)) return;
+      const pending = responseTools.get(id);
+      if (!pending) return;
+      settledResponseToolIds.add(id);
+      events.onTool?.(pending.name, pending.args, result, id, isError, artifactPaths);
+    };
+    const latestUnsettledResponseTool = (name?: string): string | null => {
+      const candidates = [...responseTools.entries()].reverse();
+      for (const [id, pending] of candidates) {
+        if (!settledResponseToolIds.has(id) && (!name || pending.name === name)) return id;
+      }
+      return null;
+    };
     const handle = (ev: {
       type?: string;
       thread_id?: string;
+      payload?: unknown;
       item?: {
         id?: string;
         type?: string;
@@ -339,6 +394,37 @@ function runCodexProcess(
       };
       usage?: { output_tokens?: number };
     }): void => {
+      const payload = record(ev.payload);
+      if (ev.type === "response_item" && payload?.type === "custom_tool_call") {
+        const rawName = nonEmptyText(payload.name);
+        const id = nonEmptyText(payload.call_id) ?? nonEmptyText(payload.id);
+        if (rawName && id) {
+          closeThinking();
+          const input = nonEmptyText(payload.input);
+          const name = responseToolName(rawName, input ?? undefined);
+          responseTools.set(id, { name, ...(input ? { args: input } : {}) });
+          events.onTool?.(name, input ?? undefined, undefined, id, false);
+        }
+        return;
+      }
+      if (ev.type === "response_item" && payload?.type === "custom_tool_call_output") {
+        const id = nonEmptyText(payload.call_id) ?? nonEmptyText(payload.id);
+        if (id) settleResponseTool(id, outputText(payload.output), payload.status === "failed");
+        return;
+      }
+      if (ev.type === "event_msg" && payload?.type === "patch_apply_end") {
+        // This event is emitted by the host only after its patch operation has
+        // completed. It carries a bounded, structured list of changed paths;
+        // unlike model prose or command input, these paths are real output
+        // evidence and may populate One's artifact rail.
+        const id = latestUnsettledResponseTool("apply_patch");
+        const changes = record(payload.changes);
+        if (id && changes) {
+          const paths = Object.keys(changes).filter((candidate) => path.isAbsolute(candidate));
+          settleResponseTool(id, JSON.stringify({ changes: paths }), payload.success === false, paths);
+        }
+        return;
+      }
       if (ev.type === "thread.started" && typeof ev.thread_id === "string") {
         threadId = ev.thread_id;
       } else if (ev.type === "turn.started") {
@@ -428,7 +514,14 @@ function runCodexProcess(
         closeThinking();
         turnCompleted = true;
         if (ev.usage?.output_tokens != null) {
-          tokens = ev.usage.output_tokens;
+          reportedOutputTokens = ev.usage.output_tokens;
+          // `codex exec resume` emits the lifetime total for its thread. Only
+          // render a subtraction when we have the prior raw counter; old rows
+          // begin with a visible-message estimate, then establish the baseline
+          // for every later resume turn.
+          tokens = reportedOutputTokenBaseline != null && reportedOutputTokens >= reportedOutputTokenBaseline
+            ? reportedOutputTokens - reportedOutputTokenBaseline
+            : Math.ceil(estChars / 4);
           events.onUsage?.(tokens);
         }
       }
@@ -491,7 +584,15 @@ function runCodexProcess(
           runnerFailure = { kind: refusal.kind, message: refusal.message, runtime: "codex", source: "heuristic" };
         }
       }
-      resolve({ code, stderr, text, threadId, tokens, ...(runnerFailure ? { failure: runnerFailure } : {}) });
+      resolve({
+        code,
+        stderr,
+        text,
+        threadId,
+        tokens,
+        ...(reportedOutputTokens != null ? { reportedOutputTokens } : {}),
+        ...(runnerFailure ? { failure: runnerFailure } : {}),
+      });
     });
   });
 }
@@ -590,6 +691,9 @@ export const runCodex: Runner = async (
       ? existing.sessionId
       : null;
   const resumeSessionId = runReq.runtimeSessionId ?? storedSessionId;
+  const reportedOutputTokenBaseline = resumeSessionId && existing?.sessionId === resumeSessionId
+    ? existing.reportedOutputTokens
+    : 0;
   const canResume = !!resumeSessionId;
   if (existing && fingerprint && existing.fingerprint !== fingerprint) {
     events.onStatus(`[runtime-session] fingerprint_changed kind=${KIND}`);
@@ -626,15 +730,18 @@ export const runCodex: Runner = async (
       ),
       runReq,
       events,
+      reportedOutputTokenBaseline,
     );
     if (runReq.signal?.aborted) {
       // 취소여도 스레드가 생겼으면 저장 → steering 메시지가 이 세션을 resume해 문맥 유지.
-      if (runReq.chatId && fingerprint && r.threadId) saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint);
+      if (runReq.chatId && fingerprint && r.threadId) {
+        saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, { reportedOutputTokens: r.reportedOutputTokens ?? null });
+      }
       throw new Error(tStatus(runReq.locale, "aborted"));
     }
     if (r.code === 0) {
       if (runReq.chatId && fingerprint && r.threadId) {
-        if (!saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint)) {
+        if (!saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, { reportedOutputTokens: r.reportedOutputTokens ?? null })) {
           events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
         }
       }
@@ -675,14 +782,16 @@ export const runCodex: Runner = async (
     ...modelArgs,
     "-",
   ];
-  const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events);
+  const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events, 0);
   if (runReq.signal?.aborted) {
-    if (runReq.chatId && fingerprint && created.threadId) saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint);
+    if (runReq.chatId && fingerprint && created.threadId) {
+      saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { reportedOutputTokens: created.reportedOutputTokens ?? null });
+    }
     throw new Error(tStatus(runReq.locale, "aborted"));
   }
   if (created.code === 0) {
     if (runReq.chatId && fingerprint && created.threadId) {
-      if (!saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint)) {
+      if (!saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { reportedOutputTokens: created.reportedOutputTokens ?? null })) {
         events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
       }
     }

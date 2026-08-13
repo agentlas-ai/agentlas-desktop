@@ -257,9 +257,9 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("runtime:setActive", selection),
     installCli: (kind: "claude-code" | "codex" | "gemini" | "kimi" | "grok") =>
       ipcRenderer.invoke("runtime:installCli", kind),
-    openCliLogin: (kind: "claude-code" | "codex" | "gemini" | "kimi" | "grok") =>
+    openCliLogin: (kind: "claude-code" | "codex" | "antigravity" | "gemini" | "kimi" | "grok") =>
       ipcRenderer.invoke("runtime:openCliLogin", kind),
-    updateCli: (kind: "claude-code" | "codex" | "gemini" | "kimi" | "grok") =>
+    updateCli: (kind: "claude-code" | "codex" | "antigravity" | "gemini" | "kimi" | "grok") =>
       ipcRenderer.invoke("runtime:updateCli", kind),
     listCommands: () => ipcRenderer.invoke("runtime:listCommands"),
     listModels: (sel) => ipcRenderer.invoke("runtime:listModels", sel),
@@ -469,6 +469,7 @@ const api: AgentlasIpc = {
   },
   projects: {
     list: () => ipcRenderer.invoke("projects:list"),
+    createFromWorkspace: (input) => ipcRenderer.invoke("projects:createFromWorkspace", input),
     get: (id: string) => ipcRenderer.invoke("projects:get", id),
     timeline: (id: string, limit?: number) => ipcRenderer.invoke("projects:timeline", id, limit),
     create: (input) => ipcRenderer.invoke("projects:create", input),
@@ -683,7 +684,8 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("automations:restoreGraphVersion", id, versionId) as Promise<
         { ok: true; automation: Automation } | { ok: false; reason: string }
       >,
-    runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) => ipcRenderer.invoke("automations:runNow", id, opts),
+    runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) =>
+      ipcRenderer.invoke("automations:runNow", id, opts) as Promise<import("../shared/types").AutomationRunNowResult>,
     inputRequirement: (id: string) => ipcRenderer.invoke("automations:inputRequirement", id),
     connectionReport: (id: string) => ipcRenderer.invoke("automations:connectionReport", id),
     swapProvider: (id: string, input: { capability: string; fromProvider: string | null; toProvider: string }) =>
@@ -879,6 +881,24 @@ contextBridge.exposeInMainWorld("agentlasFiles", {
       const droppedPath = webUtils.getPathForFile(file);
       if (!droppedPath) return null;
       return await ipcRenderer.invoke("fs:grantDroppedPath", droppedPath);
+    } catch {
+      return null;
+    }
+  },
+  grantForPastedAttachment: async (file: File): Promise<FsPathGrant | null> => {
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      return await ipcRenderer.invoke("fs:grantPastedAttachment", { mediaType: file.type, bytes });
+    } catch {
+      return null;
+    }
+  },
+  // 붙여넣기·스크린샷 이미지는 디스크에 없다. 경로 대신 내용을 넘기고, main이 비공개
+  // 파일로 고정한 뒤 드롭과 같은 등급의 capability를 발급한다.
+  grantForPastedImage: async (file: File): Promise<FsPathGrant | null> => {
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      return await ipcRenderer.invoke("fs:grantPastedImage", { mediaType: file.type, bytes });
     } catch {
       return null;
     }

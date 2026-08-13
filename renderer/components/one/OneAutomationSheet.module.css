@@ -1,25 +1,8 @@
-.backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(15, 20, 19, 0.44);
+.content {
+  color: var(--one-sheet-ink);
 }
 
-.sheet {
-  width: min(440px, 100%);
-  max-height: min(640px, calc(100vh - 48px));
-  overflow-y: auto;
-  padding: 26px 26px 22px;
-  border-radius: 16px;
-  background: #fff;
-  color: #17191b;
-  box-shadow: 0 22px 60px rgba(10, 14, 13, 0.24);
-}
-
-.sheet h2 {
+.content h2 {
   margin: 0;
   font-size: 19px;
   font-weight: 700;
@@ -28,7 +11,7 @@
 
 .body {
   margin: 8px 0 18px;
-  color: #6e7479;
+  color: var(--one-sheet-muted);
   font-size: 13px;
   line-height: 1.6;
 }
@@ -41,7 +24,7 @@
 .field span {
   display: block;
   margin-bottom: 6px;
-  color: #45514f;
+  color: var(--one-sheet-label-ink);
   font-size: 11.5px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -51,11 +34,11 @@
 .field select,
 .field textarea {
   width: 100%;
-  min-height: 44px;
+  min-height: var(--one-sheet-control-height);
   padding: 10px 12px;
-  border: 1px solid #e7e9ea;
-  border-radius: 10px;
-  background: #fff;
+  border: 1px solid var(--one-sheet-control-border);
+  border-radius: var(--one-sheet-control-radius);
+  background: var(--one-sheet-control-surface);
   color: inherit;
   font: inherit;
   font-size: 13px;
@@ -64,6 +47,16 @@
 .field textarea {
   resize: vertical;
   line-height: 1.55;
+}
+
+.field input:focus,
+.field select:focus,
+.field textarea:focus,
+.primary:focus-visible,
+.ghost:focus-visible {
+  outline: none;
+  border-color: var(--one-sheet-accent);
+  box-shadow: var(--one-sheet-focus);
 }
 
 .row {
@@ -78,7 +71,7 @@
 
 .error {
   margin: 4px 0 12px;
-  color: #a63b2b;
+  color: var(--one-sheet-danger);
   font-size: 12.5px;
   line-height: 1.55;
 }
@@ -91,10 +84,10 @@
 
 .primary,
 .ghost {
-  min-height: 44px;
+  min-height: var(--one-sheet-control-height);
   padding: 0 18px;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--one-sheet-control-radius);
   font: inherit;
   font-size: 12.5px;
   font-weight: 700;
@@ -102,8 +95,13 @@
 }
 
 .primary {
-  background: #17191b;
+  border-color: var(--one-sheet-primary);
+  background: var(--one-sheet-primary);
   color: #fff;
+}
+
+.primary:hover:not(:disabled) {
+  background: var(--one-sheet-primary-hover);
 }
 
 .primary:disabled,
@@ -114,13 +112,13 @@
 
 .ghost {
   background: transparent;
-  color: #17191b;
-  border-color: #e7e9ea;
+  color: var(--one-sheet-ink);
+  border-color: var(--one-sheet-control-border);
 }
 
 .ghost:hover:not(:disabled),
 .ghost:focus-visible {
-  background: #f4f5f6;
+  background: var(--one-sheet-card-muted);
 }
 
 .success h2 {
@@ -135,7 +133,7 @@
 
 .successNext {
   margin: 0 0 18px;
-  color: #45514f;
+  color: var(--one-sheet-label-ink);
   font-size: 13px;
 }
 

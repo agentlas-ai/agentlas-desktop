@@ -283,7 +283,7 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
   }
   for (const configName of ["electron-builder.yml", "electron-builder.mac-stable.yml"]) {
     const config = readFileSync(join(root, configName), "utf8");
-    for (const required of ["from: Hephaestus", "from: build-resources/python-runtime"]) {
+    for (const required of ["from: dist/embedded-core", "from: build-resources/python-runtime"]) {
       if (!config.includes(required)) throw new Error(`${configName} is missing ${required}`);
     }
   }
@@ -398,8 +398,16 @@ if (!run("npm", ["run", "build:electron"], { cwd: root })) {
   fail("build:electron failed; the release contract reads dist/.");
 }
 
+const preparedRuntimeRoot = join(root, "dist", "embedded-core");
+if (!run(process.execPath, [join(root, "scripts", "prepare-embedded-core.mjs")], {
+  cwd: root,
+  env: { ...process.env, HEPHAESTUS_DIR: runtimeRoot },
+})) {
+  fail("could not materialize the receipt-bound package-time embedded Core");
+}
+
 try {
-  const tools = await probePinnedWorkforceContract(runtimeRoot, manifestVersion);
+  const tools = await probePinnedWorkforceContract(preparedRuntimeRoot, manifestVersion);
   const verified = verifyExactWorkforceContract(tools);
   console.log(
     `[release-preflight] Workforce MCP exact contract ${verified.protocolVersion} ` +

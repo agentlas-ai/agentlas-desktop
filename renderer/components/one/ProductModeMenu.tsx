@@ -1,7 +1,7 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { tFor, useT } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { OneBrandMark } from "./OneBrand";
@@ -26,6 +26,7 @@ export function ProductModeMenu({
   locale?: "ko" | "en";
 }) {
   const { locale } = useT();
+  const router = useRouter();
   const activeLocale = localeOverride ?? locale;
   const [open, setOpen] = useState(false);
   const [oneHref, setOneHref] = useState("/one");
@@ -47,6 +48,17 @@ export function ProductModeMenu({
     setOneHref(safeOneReturnRoute(window.sessionStorage.getItem(ONE_RETURN_ROUTE_KEY)));
   }, [current]);
 
+  const navigate = (href: string) => {
+    setOpen(false);
+    router.push(href);
+  };
+
+  const navigateFromKeyboard = (event: KeyboardEvent<HTMLButtonElement>, href: string) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    navigate(href);
+  };
+
   return (
     <div className={`${styles.root} ${compact ? styles.compact : ""} ${darkText ? styles.dark : ""}`}>
       <button
@@ -67,20 +79,20 @@ export function ProductModeMenu({
       </button>
       {open && (
         <div id="agentlas-product-mode-menu" ref={menuRef} className={styles.menu} role="menu" aria-label={tFor(activeLocale, "one.mode.menu_aria")}>
-          <Link className={styles.option} href={oneHref} role="menuitem" onClick={() => setOpen(false)}>
+          <button className={styles.option} type="button" role="menuitem" onClick={() => navigate(oneHref)} onKeyDown={(event) => navigateFromKeyboard(event, oneHref)}>
             <span className={styles.optionCopy}>
               <strong>One</strong>
               <small>{tFor(activeLocale, "one.mode.one_sub")}</small>
             </span>
             {current === "one" && <span className={styles.check} aria-label={tFor(activeLocale, "one.mode.current_aria")}>✓</span>}
-          </Link>
-          <Link className={styles.option} href="/dashboard" role="menuitem" onClick={() => setOpen(false)}>
+          </button>
+          <button className={styles.option} type="button" role="menuitem" onClick={() => navigate("/dashboard")} onKeyDown={(event) => navigateFromKeyboard(event, "/dashboard")}>
             <span className={styles.optionCopy}>
               <strong>Work</strong>
               <small>{tFor(activeLocale, "one.mode.work_sub")}</small>
             </span>
             {current === "work" && <span className={styles.check} aria-label={tFor(activeLocale, "one.mode.current_aria")}>✓</span>}
-          </Link>
+          </button>
         </div>
       )}
     </div>

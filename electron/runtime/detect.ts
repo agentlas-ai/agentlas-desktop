@@ -3,7 +3,7 @@
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { probeCodex } from "./codex";
 import { readCodexModelInventory } from "./codex-models";
-import { probeGemini } from "./gemini";
+import { probeAntigravity, probeGemini } from "./gemini";
 import { probeKimi } from "./kimi";
 import { probeGrok } from "./grok";
 import { probeCursor } from "./cursor";
@@ -292,6 +292,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     cc,
     cx,
     codexModelInventory,
+    agy,
     gm,
     kimiCli,
     gr,
@@ -315,6 +316,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     probeClaudeCode(),
     probeCodex(),
     readCodexModelInventory(),
+    probeAntigravity(),
     probeGemini(),
     probeKimi(),
     probeGrok(),
@@ -405,10 +407,23 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       allocationModelProfiles: codexModelProfiles,
     });
   }
+  if (agy) {
+    const antigravityModels = agy.models.length > 0
+      ? agy.models
+      : cliModels("antigravity").map((model) => model.id);
+    list.push({
+      kind: "antigravity",
+      backend: "google",
+      source: agy.path,
+      version: agy.version,
+      active: false,
+      model: cliModelOf("antigravity", active, antigravityModels, "google") ?? antigravityModels[0],
+      availableModels: antigravityModels,
+      allocationModels: agy.models,
+    });
+  }
   if (gm) {
-    const geminiModels = gm.models.length > 0
-      ? gm.models
-      : cliModels("gemini").map((model) => model.id);
+    const geminiModels = cliModels("gemini").map((model) => model.id);
     list.push({
       kind: "gemini",
       backend: "google",
@@ -417,7 +432,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: cliModelOf("gemini", active, geminiModels, "google") ?? geminiModels[0],
       availableModels: geminiModels,
-      allocationModels: gm.models,
+      allocationModels: [],
     });
   }
   if (kimiCli) {

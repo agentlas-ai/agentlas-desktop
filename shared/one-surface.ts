@@ -697,7 +697,10 @@ function datasetBlock(dataset: AgentlasSurfaceDataSet, blockId: string, title: s
       title,
       items: source.map((item, index) => ({
         artifactRef: `${blockId}:artifact-${index + 1}`,
-        type: artifactType(findValue(item, ["type", "kind", "format", "mime", "mimeType"])),
+        type: artifactType(
+          findValue(item, ["type", "kind", "format", "mime", "mimeType"])
+          ?? findValue(item, ["path", "filePath", "localPath", "file", "label", "title", "name"]),
+        ),
         label: safeLabel(display(findValue(item, ["label", "title", "name", "file"]) ?? `Artifact ${index + 1}`)),
         verificationStatus: "unverified" as const,
         ...(typeof findValue(item, ["sizeBytes", "size"]) === "number" && Number(findValue(item, ["sizeBytes", "size"])) >= 0
@@ -743,7 +746,10 @@ function legacyFallbackArtifacts(manifest: AgentlasSurfaceManifest): OneSurfaceA
         artifactRef: `${blockId}:artifact-${itemIndex + 1}`,
         type: dataset.type === "media"
           ? mediaArtifactType(item)
-          : artifactType(findValue(item, ["type", "kind", "format", "mime", "mimeType"])),
+          : artifactType(
+            findValue(item, ["type", "kind", "format", "mime", "mimeType"])
+            ?? findValue(item, ["path", "filePath", "localPath", "file", "label", "title", "name"]),
+          ),
         label: safeLabel(display(findValue(item, ["label", "title", "name", "scene", "file"]) ?? `Artifact ${itemIndex + 1}`)),
         verificationStatus: "unverified",
         ...(typeof size === "number" && Number.isSafeInteger(size) && size >= 0 ? { sizeBytes: size } : {}),
@@ -940,12 +946,12 @@ function checklistStatus(value: unknown): OneSurfaceChecklistBlock["items"][numb
 function artifactType(value: unknown): OneSurfaceArtifactListBlock["items"][number]["type"] {
   const raw = String(value ?? "").toLowerCase();
   if (/spreadsheet|excel|xlsx?|csv|sheet/.test(raw)) return "spreadsheet";
-  if (/document|docx|pdf|text/.test(raw)) return "document";
+  if (/document|docx|pdf|text|\.(?:md|mdx|txt)$/.test(raw)) return "document";
   if (/image|png|jpe?g|webp/.test(raw)) return "image";
   if (/video|mp4|mov/.test(raw)) return "video";
   if (/audio|mp3|wav/.test(raw)) return "audio";
   if (/archive|zip|tar/.test(raw)) return "archive";
-  if (/json|data/.test(raw)) return "data";
+  if (/json|data|\.(?:js|mjs|cjs|jsx|ts|tsx|py|rb|go|rs|java|kt|swift|sh|bash|zsh|html|css|scss)$/.test(raw)) return "data";
   return "other";
 }
 

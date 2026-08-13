@@ -13,6 +13,7 @@ import { spawnCli } from "./exec";
 import { resolveManagedNodeRuntime, type ManagedNodeRuntime } from "./managed-node";
 
 export type InstallableCli = "claude-code" | "codex" | "gemini" | "kimi" | "grok";
+export type ManageableCli = InstallableCli | "antigravity";
 
 /**
  * 고정 공급망 화이트리스트. Desktop 릴리스가 검증한 정확한 공식 패키지만 설치하고,
@@ -594,25 +595,52 @@ function updateSelfManagedGemini(binary: string): Promise<CliActionResult> {
  *   · grok → 공식 self-updater `grok update`
  *   · 그 외(사용자 자체 관리본) → 건드리지 않는다
  */
-export function updateCli(kind: InstallableCli): Promise<CliActionResult> {
+export function resolveCliActionSource(
+  kind: ManageableCli,
+  requestedSource?: string | null,
+  lookup: (name: string) => string | null = resolveBinary,
+): string | null {
+  const expectedBin = kind === "antigravity" ? "agy" : CLI_PLAN[kind]?.bin;
+  if (!expectedBin) return null;
+  if (!requestedSource) {
+    return lookup(expectedBin);
+  }
+  const base = path.basename(requestedSource).replace(/\.(?:cmd|exe)$/i, "").toLowerCase();
+  if (base !== expectedBin.toLowerCase()) return null;
+  if (!path.isAbsolute(requestedSource)) return lookup(base);
+  try {
+    fs.accessSync(requestedSource, fs.constants.X_OK);
+    return requestedSource;
+  } catch {
+    return null;
+  }
+}
+
+export function updateCli(kind: ManageableCli, requestedSource?: string | null): Promise<CliActionResult> {
+  if (kind === "antigravity") {
+    const selected = resolveCliActionSource(kind, requestedSource);
+    if (!selected) {
+      return Promise.resolve({ ok: false, message: "Selected Antigravity CLI source is unavailable" });
+    }
+    return runBinary(selected, ["update"], 5 * 60 * 1000);
+  }
   const plan = CLI_PLAN[kind];
   if (!plan) return Promise.resolve({ ok: false, message: `Unknown CLI: ${kind}` });
 
-  // Gemini 런타임 선택과 같은 순서(공식 gemini 우선, agy 호환 폴백)로 실제 실행
-  // 바이너리를 판별한다. 업데이트/로그인 UI가 실제 실행 바이너리와 달라지면 안 된다.
-  if (kind === "gemini") {
-    const gemini = resolveBinary("gemini");
-    if (gemini) {
-      if (isAgentlasManagedNpmBinary(gemini)) return updateAgentlasManagedGemini();
-      return updateSelfManagedGemini(gemini);
-    }
+  const selected = resolveCliActionSource(kind, requestedSource);
+  if (requestedSource && !selected) {
+    return Promise.resolve({ ok: false, message: `Selected CLI source is unavailable: ${requestedSource}` });
+  }
 
-    const antigravity = resolveBinary("agy");
-    if (antigravity) return runBinary(antigravity, ["update"], 5 * 60 * 1000);
+  if (kind === "gemini") {
+    if (selected) {
+      if (isAgentlasManagedNpmBinary(selected)) return updateAgentlasManagedGemini();
+      return updateSelfManagedGemini(selected);
+    }
     return installCli(kind);
   }
 
-  const existing = resolveBinary(plan.bin);
+  const existing = selected;
   if (!existing) return installCli(kind);
   if (isAgentlasManagedNpmBinary(existing)) {
     return installCli(kind, { force: true });
@@ -634,19 +662,19 @@ export function updateCli(kind: InstallableCli): Promise<CliActionResult> {
  *  · 앱이 설치한 CLI(~/.agentlas/npm/bin 등)는 사용자 셸 PATH에 없을 수 있다 →
  *    bare 이름 대신 절대경로로 실행한다.
  */
-export function openCliLogin(kind: InstallableCli): CliActionResult {
-  const plan = CLI_PLAN[kind];
+export function openCliLogin(kind: ManageableCli, requestedSource?: string | null): CliActionResult {
+  const plan = kind === "antigravity"
+    ? { loginArgs: [] as string[], bin: "agy" }
+    : CLI_PLAN[kind];
   if (!plan) return { ok: false, message: `Unknown CLI: ${kind}` };
   const loginArgs = plan.loginArgs;
-  // 실제 실행 순서와 동일하게 공식 Gemini를 먼저 열고, 없는 기존 머신에서만 agy로 폴백한다.
-  let abs =
-    kind === "gemini" ? (resolveBinary("gemini") ?? resolveBinary("agy")) : resolveBinary(plan.bin);
+  let abs = resolveCliActionSource(kind, requestedSource);
   if (!abs) {
     // 설치가 안 된 상태로 터미널부터 여는 건 금지 — 렌더러가 이 메시지로 실패를 표면화한다.
     return {
       ok: false,
       message: `${plan.bin} is not installed`,
-      command: process.platform === "win32"
+      command: kind === "antigravity" || process.platform === "win32"
         ? undefined
         : `npm install -g ${packageSpec(kind)} --prefix ${AGENTLAS_NPM_PREFIX}`,
     };
@@ -654,6 +682,7 @@ export function openCliLogin(kind: InstallableCli): CliActionResult {
   const selectedBase = path.basename(abs).replace(/\.(?:cmd|exe)$/i, "").toLowerCase();
   if (
     process.platform === "win32" &&
+    kind !== "antigravity" &&
     isAgentlasManagedNpmBinary(abs) &&
     selectedBase === plan.bin.toLowerCase()
   ) {

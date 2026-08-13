@@ -278,6 +278,35 @@ export function listGlobalMemoryForAgent(agentId: string | null, limit = 30): Me
   return rows.map(toEntry);
 }
 
+/**
+ * Import idempotency tokens are durable provenance, not a recent-memory view.
+ * Callers must be able to find an old token after thousands of newer rows, so
+ * this query intentionally has no recency LIMIT and returns only matching
+ * evidence strings rather than loading/embedding every memory entry.
+ */
+export function listMemoryEvidenceTokensForAgent(agentId: string, prefix: string): Set<string> {
+  if (!agentId || !prefix) return new Set();
+  const rows = getDb()
+    .prepare(
+      `SELECT evidence_json FROM memory_entries
+       WHERE scope = 'agent_repo' AND agent_id = ? AND evidence_json LIKE ?`,
+    )
+    .all(agentId, `%${prefix}%`) as Array<{ evidence_json: string }>;
+  const tokens = new Set<string>();
+  for (const row of rows) {
+    try {
+      const evidence = JSON.parse(row.evidence_json) as unknown;
+      if (!Array.isArray(evidence)) continue;
+      for (const item of evidence) {
+        if (typeof item === "string" && item.startsWith(prefix)) tokens.add(item);
+      }
+    } catch {
+      // A malformed unrelated legacy row must not block importing valid memory.
+    }
+  }
+  return tokens;
+}
+
 /** Candidates that share the same governed owner boundary as one new memory. */
 export function listMemoryRelationCandidates(entry: MemoryEntry, limit = 160): MemoryEntry[] {
   const capped = Math.max(1, Math.min(500, Math.floor(limit)));

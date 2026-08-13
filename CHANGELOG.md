@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.0.4 — 2026-08-13
+
+- Keeps the memory map as One's first surface even when the Main memory-map
+  projection is temporarily unavailable. The renderer now falls back to an
+  empty map canvas instead of restoring the retired logo/hero screen.
+- Adds the fallback to the One visual contract so a future API, loading, or
+  empty-graph regression cannot silently bring the old first screen back.
+
+## 1.0.3 — 2026-08-13
+
+- Restores the memory map as One's stable first surface and removes the
+  redundant opening logo/hero treatment.
+- Wires Read only, Accept file edits and Full access through the actual Codex
+  and Claude runtime boundaries, with the effective mode visible in Activity.
+- Unifies One decision, memory, profile, automation, browser approval, API-key
+  and project/session overlays under one bottom-sheet token contract.
+- Adds Codex-style project/session continuation and a live plugin/MCP list to
+  the One composer without routing the user through Work.
+- Rebuilds One Activity from typed runtime evidence, including cancellation,
+  steering, tools, decisions and terminal state, while filtering host-only
+  diagnostics.
+- Caps T-rex presentation generation at ten slides for a single reviewable
+  output.
+- Binds Agentlas OS v1.2.0 at
+  8b3f8bcffdfc57bf4991ed6e43d153d9230ea186.
+- Source readiness does not prove an installed update; the signed candidate
+  must still pass notarization, Gatekeeper and transactional-install checks.
+
 ## 1.0.2 — 2026-08-13
 
 - One's model picker now lists every locally connected runtime, not only the

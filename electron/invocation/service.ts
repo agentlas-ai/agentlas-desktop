@@ -71,7 +71,7 @@ import {
   type OneParticipantVersionBinding,
 } from "../one/task-kind";
 import { listInstalledAgentsReadOnly } from "../mcp/registry";
-import { bindOneSurfaceArtifacts } from "../one/artifact-preview";
+import { bindOneSurfaceArtifacts, removeUnboundOneSurfaceArtifacts } from "../one/artifact-preview";
 import {
   tryProjectOneWorkspace,
   type OneWorkspaceRunPhase,
@@ -181,6 +181,24 @@ type OneInvocationRequest = McpInvocationRequest & {
   /** Main-only output redaction map for internal staging paths. */
   oneAttachmentRedactions?: Array<{ path: string; replacement: string }>;
 };
+
+type OnePermissionMode = NonNullable<McpInvocationRequest["onePermissionMode"]>;
+
+function normalizeOnePermissionMode(value: unknown): OnePermissionMode | null {
+  return value === "auto" || value === "read" || value === "write" || value === "full" ? value : null;
+}
+
+export function authoritativeOnePermission(
+  mode: OnePermissionMode | null,
+  taskIntent: McpInvocationRequest["taskIntent"],
+): "read" | "write" | "full" {
+  if (mode === "read") return "read";
+  if (mode === "write") return "write";
+  if (mode === "full") return "full";
+  // Missing legacy mode is treated as Auto, never as permission supplied by
+  // the renderer. Desktop One always sends the explicit chip value now.
+  return taskIntent === "task" ? "write" : "read";
+}
 
 type InvocationEventListener = (envelope: InvocationEventEnvelope) => void;
 type ActiveChatsListener = (chatIds: string[]) => void;
@@ -513,9 +531,11 @@ export function invocationEventPromotesTask(event: McpInvocationEvent): boolean 
   // must not turn a greeting or ordinary answer into a canonical Task. Only
   // an actual tool payload proves that execution crossed the conversation
   // boundary.
-  return (event.kind === "tool-use" && Boolean(event.tool)) ||
+  const toolName = event.tool?.name.trim() ?? "";
+  const hostPluginPreflight = toolName.startsWith("Agentlas Plugins ·");
+  return (event.kind === "tool-use" && Boolean(event.tool) && !hostPluginPreflight) ||
     event.kind === "surface" ||
-    Boolean(event.agentId) ||
+    (Boolean(event.agentId) && (event.phase === "delegate" || (event.tier ?? 1) > 1)) ||
     event.phase === "delegate" ||
     (event.kind === "final" && typeof event.text === "string" && event.text.includes("<<agentlas-ask"));
 }
@@ -645,6 +665,9 @@ export class InvocationService {
       && chat.originSurface === "one"
       && (!workspaceBinding || remoteOneBoundary)
       && req.agentAppMode !== true;
+    const selectedOnePermissionMode = requestedOneMode
+      ? normalizeOnePermissionMode(incoming.onePermissionMode)
+      : null;
     if (requestedOneMemoryUseOnceRef && (!requestedOneMode || workspaceBinding)) {
       throw new Error("A Memory use-once receipt is valid only for a local One invocation");
     }
@@ -680,6 +703,8 @@ export class InvocationService {
       oneMode: requestedOneMode,
       ...(workspaceBinding
         ? { permissions: normalizeRemoteInvocationPermission(req.permissions) }
+        : requestedOneMode
+          ? { permissions: authoritativeOnePermission(selectedOnePermissionMode, requestWithoutMainContext.taskIntent) }
         : {}),
     };
     if (requestedOneMode) {
@@ -731,7 +756,9 @@ export class InvocationService {
         userPrompt: preparedOneTeamPreflight.userPrompt,
         taskIntent: "task",
         oneMode: true,
-        permissions: preparedOneTeamPreflight.permission,
+        permissions: workspaceBinding
+          ? preparedOneTeamPreflight.permission
+          : authoritativeOnePermission(selectedOnePermissionMode, "task"),
         sessionRouting: false,
         hubMode: preparedOneTeamPreflight.mode === "workforce" ? "hub-first" : "local-only",
         borrowAgents: [],
@@ -859,20 +886,28 @@ export class InvocationService {
           teamProposalId: preparedOneTeamPreflight?.proposalId ?? null,
         })
       : null;
+    const judgedTaskIntent = requestedOneMode
+      && invocationRequest.taskIntent === "conversation"
+      && classifyOneRequestIntent(invocationRequest.userPrompt, judgedOneRequestIntent) === "task";
+    const effectiveTaskIntent: McpInvocationRequest["taskIntent"] = claimedOneAttachments
+      ? "task"
+      : judgedTaskIntent
+        ? "task"
+        : invocationRequest.taskIntent;
     const runReq: OneInvocationRequest = {
       ...invocationRequest,
       runId,
       // The resident judge decides "conversation vs task" by meaning: the async
       // invoke paths warm the judgment cache (prejudgeOneRequestIntent) and this
       // sync site peeks it; without a judged verdict the intent remains undecided.
-      ...(requestedOneMode
-        && invocationRequest.taskIntent === "conversation"
-        && classifyOneRequestIntent(invocationRequest.userPrompt, judgedOneRequestIntent) === "task"
-        ? { taskIntent: "task" as const, permissions: "write" as const }
+      taskIntent: effectiveTaskIntent,
+      ...(!workspaceBinding && requestedOneMode
+        ? { permissions: preparedOneBriefingAction
+            ? "read"
+            : authoritativeOnePermission(selectedOnePermissionMode, effectiveTaskIntent) }
         : {}),
       ...(oneProfileContext ? { oneProfileContext } : {}),
       ...(claimedOneAttachments ? {
-        taskIntent: "task" as const,
         images: claimedOneAttachments.images,
         oneAttachmentContext: claimedOneAttachments.runtimeContext,
         oneAttachmentRedactions: claimedOneAttachments.redactions,
@@ -969,6 +1004,13 @@ export class InvocationService {
           agentId: chat.agentId,
           payload: {
             oneMode: runReq.oneMode,
+            onePermissionMode: selectedOnePermissionMode ?? undefined,
+            fastMode: runReq.fastMode === true || undefined,
+            locale: pickLocale(runReq),
+            // Persist the semantic boundary that Main actually received. This
+            // makes conversation -> Task promotion auditable without trying to
+            // reconstruct it later from human-readable Activity text.
+            taskIntent: runReq.taskIntent,
             invocationSource: runWorkspaceBinding?.source,
             oneTaskKindRef: oneTaskKindRef ?? undefined,
             oneParticipantVersionBindings,
@@ -1187,6 +1229,26 @@ export class InvocationService {
       }
     }
 
+    // Publish an authoritative run boundary before the provider produces its
+    // first token. Some providers emit no reasoning/tool item for short turns;
+    // without this event the Activity surface is blank even though the run is
+    // genuinely active. This is a lifecycle fact, never inferred status copy.
+    observableStepSequence += 1;
+    const lifecycleStartEvent: McpInvocationEvent = {
+      kind: "lifecycle",
+      lifecycle: {
+        phase: "start",
+        ...(runReq.permissions ? { permission: runReq.permissions } : {}),
+        ...(requestedOneMode && selectedOnePermissionMode ? { selectedPermissionMode: selectedOnePermissionMode } : {}),
+      },
+      sequence: observableStepSequence,
+      observedAt: new Date().toISOString(),
+    };
+    recordObservableRunStep(canonicalTask, runId, lifecycleStartEvent, observableStepSequence);
+    record.events.push(lifecycleStartEvent);
+    recordMcpInvocationEvent(runId, runReq, lifecycleStartEvent);
+    this.publishEvent({ runId, chatId: runReq.chatId, event: lifecycleStartEvent });
+
     let terminalObserved = false;
     void runMcpInvocation(
       runReq,
@@ -1231,6 +1293,25 @@ export class InvocationService {
         const terminalRequestsDecision = event.kind === "final" &&
           (event.text ?? record.partialText).includes("<<agentlas-ask");
         if (!taskMaterialized && (invocationEventPromotesTask(event) || terminalRequestsDecision)) {
+          tryRecordRunEvent({
+            runId,
+            kind: "task_promotion_requested",
+            chatId: runReq.chatId,
+            agentId: attributedAgentId ?? record.actualAgentId,
+            payload: {
+              cause: terminalRequestsDecision
+                ? "decision_request"
+                : event.kind === "surface"
+                  ? "surface"
+                  : event.phase === "delegate" || (event.tier ?? 1) > 1
+                    ? "delegation"
+                    : "tool_execution",
+              eventKind: event.kind,
+              toolName: event.tool?.name,
+              phase: event.phase,
+              tier: event.tier,
+            },
+          });
           canonicalTask = trySetTaskStatus(runReq.chatId, "running", true, invocationOrigin);
           taskMaterialized = Boolean(canonicalTask);
           if (canonicalTask && !taskRunStartedRecorded) {
@@ -1260,10 +1341,11 @@ export class InvocationService {
           event = { ...event, oneFriendlyFollowups: undefined };
         }
         if (event.kind === "surface" && event.oneSurface) {
+          const projectedSurface = event.oneSurface;
           const durableSurfaceRecorded = tryRecordDurableOneSurfaceResult({
             runId,
             chatId: runReq.chatId,
-            manifest: event.oneSurface,
+            manifest: projectedSurface,
           });
           // Task-force execution persists the visible user turn after the run
           // starts. Chat-to-Task reconciliation can therefore advance the
@@ -1273,28 +1355,46 @@ export class InvocationService {
           // an otherwise valid result (or attest the wrong Task version).
           const surfaceTask = findCanonicalTaskForChat(runReq.chatId);
           if (surfaceTask) canonicalTask = surfaceTask;
-          if (durableSurfaceRecorded && surfaceTask && event.oneSurface.taskId === surfaceTask.id) {
+          if (durableSurfaceRecorded && surfaceTask && projectedSurface.taskId === surfaceTask.id) {
             if (rawSurfaceForArtifactBinding) {
               const boundArtifactCount = bindOneSurfaceArtifacts({
                 rawManifest: rawSurfaceForArtifactBinding,
-                surface: event.oneSurface,
+                surface: projectedSurface,
                 taskId: surfaceTask.id,
                 taskVersion: surfaceTask.version,
                 chatId: runReq.chatId,
                 runId,
-                createdAt: event.oneSurface.surfaceState.lastSyncedAt,
+                createdAt: projectedSurface.surfaceState.lastSyncedAt,
+                runStartedAt: record.startedAt,
               });
-              if (boundArtifactCount > 0) {
+              const droppedArtifactCount = removeUnboundOneSurfaceArtifacts(projectedSurface);
+              if (boundArtifactCount > 0 || droppedArtifactCount > 0) {
                 tryRecordDurableOneSurfaceResult({
                   runId,
                   chatId: runReq.chatId,
-                  manifest: event.oneSurface,
+                  manifest: projectedSurface,
                 });
+                event = {
+                  ...event,
+                  oneArtifacts: projectedSurface.fallback.artifacts
+                    .filter((artifact) => artifact.verificationStatus === "verified")
+                    .map((artifact) => ({
+                      taskId: surfaceTask.id,
+                      taskVersion: surfaceTask.version,
+                      chatId: runReq.chatId,
+                      runId,
+                      manifestId: projectedSurface.manifestId,
+                      artifactRef: artifact.artifactRef,
+                      label: artifact.label,
+                      type: artifact.type,
+                      ...(typeof artifact.sizeBytes === "number" ? { sizeBytes: artifact.sizeBytes } : {}),
+                    })),
+                };
               }
             }
             tryRecordOneDomainEvent({
               eventType: "result.manifest_ready",
-              occurredAt: event.oneSurface.surfaceState.lastSyncedAt ?? new Date().toISOString(),
+              occurredAt: projectedSurface.surfaceState.lastSyncedAt ?? new Date().toISOString(),
               actor: "system",
               entityId: surfaceTask.id,
               ...(surfaceTask.projectId ? { projectId: surfaceTask.projectId } : {}),
@@ -1302,12 +1402,12 @@ export class InvocationService {
               version: surfaceTask.version,
               visibility: domainVisibility(surfaceTask),
               entries: [
-                { name: "manifestId", value: event.oneSurface.manifestId },
-                { name: "contractVersion", value: event.oneSurface.contractVersion },
-                { name: "artifactRefs", value: event.oneSurface.fallback.artifacts.map((item) => item.artifactRef) },
+                { name: "manifestId", value: projectedSurface.manifestId },
+                { name: "contractVersion", value: projectedSurface.contractVersion },
+                { name: "artifactRefs", value: projectedSurface.fallback.artifacts.map((item) => item.artifactRef) },
               ],
             });
-            recordManifestArtifactEvidence(surfaceTask, event.oneSurface);
+            recordManifestArtifactEvidence(surfaceTask, projectedSurface);
             if (requestedOneMode) {
               tryProjectOneWorkspace({
                 task: surfaceTask,
@@ -1338,6 +1438,11 @@ export class InvocationService {
         }
 
         observableStepSequence += 1;
+        event = {
+          ...event,
+          sequence: observableStepSequence,
+          observedAt: new Date().toISOString(),
+        };
         recordObservableRunStep(canonicalTask, runId, event, observableStepSequence);
 
         let wireEvent = event;
@@ -1516,10 +1621,13 @@ export class InvocationService {
           );
           taskMaterialized = Boolean(canonicalTask);
           persistRecoverableAssistantPartial();
+          observableStepSequence += 1;
           const event: McpInvocationEvent = {
             kind: "error",
             runtimeAgentId: record.actualAgentId,
             error: safeFailure,
+            sequence: observableStepSequence,
+            observedAt: new Date().toISOString(),
           };
           record.events.push(event);
           recordMcpInvocationEvent(runId, runReq, event);
@@ -1591,6 +1699,17 @@ export class InvocationService {
     }
     const result = this.activeRuns.requestCancel(runId);
     if (result === "requested") {
+      if (record) {
+        const sequence = record.events.reduce((max, event) => Math.max(max, event.sequence ?? 0), 0) + 1;
+        const cancelEvent: McpInvocationEvent = {
+          kind: "lifecycle",
+          lifecycle: { phase: "cancel_requested" },
+          sequence,
+          observedAt: record.cancelRequestedAt ?? new Date().toISOString(),
+        };
+        record.events.push(cancelEvent);
+        this.publishEvent({ runId, chatId: record.chatId, event: cancelEvent });
+      }
       tryRecordRunEvent({
         runId,
         kind: "invoke_cancel_requested",

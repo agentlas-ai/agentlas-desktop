@@ -91,15 +91,20 @@
 }
 
 .option {
+  width: 100%;
   min-height: 62px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 24px;
   align-items: center;
   gap: 12px;
   padding: 9px 11px;
+  border: 0;
   border-radius: 10px;
+  background: transparent;
   color: inherit;
+  font: inherit;
   overflow: hidden;
+  text-align: left;
   text-decoration: none !important;
 }
 

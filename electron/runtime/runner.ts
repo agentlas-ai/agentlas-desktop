@@ -1,7 +1,6 @@
-import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
 // 모든 런타임(CLI 3종 + BYOK 3종)이 구현해야 하는 통합 인터페이스.
 // mcp/client.ts가 활성 런타임 → 적절한 러너로 라우팅한다.
-import type { ChatHistoryEntry, ImageAttachment } from "../../shared/types";
+import type { ChatHistoryEntry, ImageAttachment, McpInvocationEvent } from "../../shared/types";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { GLOBAL_CONNECTION_SKILL } from "./global-skill";
 import { SURFACE_PROTOCOL } from "../surface-emitter";
@@ -17,6 +16,8 @@ export interface RunnerRequest {
   images?: ImageAttachment[];
   /** 사용자에게 보일 라벨 — "Claude Code CLI" / "Anthropic API" / "Ollama · llama3.1" */
   backendLabel: string;
+  /** Exact executable selected by runtime detection. Provider runners must not re-resolve a sibling CLI. */
+  runtimeSource?: string;
   /** ollama·BYOK 등 모델 선택이 필요한 LLM의 활성 모델 이름. 그 외엔 미설정 */
   model?: string;
   /** BYOK 긴 컨텍스트(1M) opt-in. Agentlas-managed 러너(BYOK/Ollama)만 사용. */
@@ -57,6 +58,8 @@ export interface RunnerRequest {
    * file only for Windows `.cmd` shims, whose argv ceiling cannot carry it.
    */
   mcpConfigPath?: string;
+  /** Ignore provider-global MCP/plugins and admit only Main's per-run config. */
+  isolatedMcpConfig?: true;
   /** 위 구성의 MCP 툴 이름 prefix 목록(예: "mcp__playwright"). write/full 권한에서 자동 승인용. */
   mcpAllowedTools?: string[];
   /**
@@ -229,9 +232,14 @@ export interface RunnerEvents {
   /** 토큰 또는 줄 단위 partial 출력 */
   onPartial: (chunk: string) => void;
   /** 사용자에게 보일 상태 줄 — locale 적용된 완성 문자열 */
-  onStatus: (status: string) => void;
+  onStatus: (status: string, activity?: McpInvocationEvent["activity"]) => void;
   /** 도구 호출/결과 — Claude Code식 tool-use/tool-result 블록 (이름 + 인자 JSON + 결과). 선택. */
-  onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean) => void;
+  /**
+   * `artifactPaths` is host-structured completion evidence, never parsed from
+   * command/prose output. Main still opens and verifies every candidate before
+   * it can reach One's Outputs rail.
+   */
+  onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[]) => void;
   /** 라이브 누적 출력 토큰 — 스트리밍 중 "N tokens" 실시간 표시용. 단조 증가 값(usage 실측 + 추정). 선택. */
   onUsage?: (tokens: number) => void;
   /** reasoning(thinking) 구간 신호 — 구간 시작/종료. durationMs는 end에만(이번 구간 지속 ms). 선택. */
@@ -332,7 +340,7 @@ export function runnerOutcome(res: RunnerResult):
  */
 export function startCliHeartbeat(
   child: { killed: boolean; exitCode: number | null; signalCode: NodeJS.Signals | null },
-  onStatus: (status: string) => void,
+  onStatus: RunnerEvents["onStatus"],
   label: string,
   intervalMs = 60_000,
 ): () => void {
@@ -343,7 +351,10 @@ export function startCliHeartbeat(
       return;
     }
     const seconds = Math.round((Date.now() - startedAt) / 1000);
-    onStatus(`${label}: session alive, waiting for output (${seconds}s)`);
+    onStatus(
+      `${label}: session alive, waiting for output (${seconds}s)`,
+      { code: "runtime_wait" },
+    );
   }, intervalMs);
   timer.unref?.();
   const stop = (): void => {
@@ -435,25 +446,23 @@ If your answer would be materially more useful as an INTERACTIVE SURFACE — a t
 ${SURFACE_INTENT_MARKER}
 You will then be handed the full surface spec to fill in. For one-off questions or ordinary chat, do NOT emit it — just answer normally.`;
 
-function responseLanguageGuide(locale: RuntimeLocale, userPrompt?: string): string {
-  const prompt = userPrompt ?? "";
-  if (isPrimarilyKorean(prompt)) {
-    return [
-      "The user's current message is Korean. Reply in Korean, including brief progress updates and the final answer.",
-      "Do not expose hidden chain-of-thought. If you need to narrate progress, summarize only observable actions and results.",
-    ].join(" ");
-  }
-  if (/[A-Za-z]{3,}/.test(prompt)) {
-    return [
-      "The user's current message is English or mostly English. Reply in English, including brief progress updates and the final answer.",
-      "Do not expose hidden chain-of-thought. If you need to narrate progress, summarize only observable actions and results.",
-    ].join(" ");
-  }
-  return tStatus(locale, "sysGuide");
+function responseLanguageGuide(locale: RuntimeLocale, _userPrompt?: string): string {
+  const exactReplyGuide = "If the current message asks you to reply, return, or output an exact literal string, obey it exactly and output nothing else. Do not explain, clarify, add an identity badge, or append a control block.";
+  // One's language switch is an explicit product setting. Deriving the reply
+  // language from the latest prompt made an English One screen answer in
+  // Korean whenever a Korean task marker was submitted, leaving the product
+  // visibly bilingual in a single turn. The chosen UI locale wins unless the
+  // person explicitly asks for a different language in the message itself.
+  return [
+    tStatus(locale, "sysGuide"),
+    "Do not infer a different reply language from the language of the current message, quoted text, file contents, or prior conversation.",
+    "Do not expose hidden chain-of-thought. If you need to narrate progress, summarize only observable actions and results.",
+    exactReplyGuide,
+  ].join(" ");
 }
 
 /** 표준 시스템 프롬프트 — 에이전트 프롬프트 앞에 붙는 안전 헤더.
- *  이번 사용자 입력 언어를 우선하고, 애매할 때만 UI locale을 따른다. */
+ *  명시적으로 선택된 UI 언어를 모든 사용자 노출 텍스트의 기준으로 쓴다. */
 export function wrapSystemPrompt(
   agentSystemPrompt: string,
   locale: RuntimeLocale,
@@ -517,17 +526,26 @@ export function wrapSystemPrompt(
   // already passed the restricted Build wrapper, so do not wrap it again with
   // unrelated chat/surface/connection protocols.
   if (agentSystemPrompt.startsWith(BUILD_PROMPT_SENTINEL)) return agentSystemPrompt;
-  // write/full 권한이면 도구 사용 허용 안내(Claude Code식 tool-use). read/기본이면 도구 끔.
+  // 권한 칩의 의미를 시스템 프롬프트에서도 정확히 유지한다. write는 현재 작업 폴더
+  // 경계이고 full만 호스트 전체 권한이다. 둘을 같은 "full permission on this machine"
+  // 문구로 합치면 모델이 실제 샌드박스보다 넓은 권한을 가졌다고 오판한다.
   // 완수 규범(2026-07-22): 같은 모델이 CLI에서는 진단→수정→검증까지 완주하는데, 챗
   // 프레이밍 위에서는 "원인은 ~~ 때문입니다"로 멈추는 상담사 응답이 반복됐다(사용자
   // 실신고). 원인 설명만 하고 끝내는 것을 명시적 실패 모드로 규정한다.
-  const toolsLine =
-    permission === "write" || permission === "full"
+  const toolCompletionGuide = [
+    "Finish the loop. When the user reports something broken or asks for a change, do not stop at explaining the cause: investigate with your tools, apply the fix, verify it actually works, then report what changed and how you verified it. A cause-only answer is a failure — keep going and use every tool and permission available until the task is actually done.",
+    "Be resourceful and persistent: if the first approach fails, try another (a different tool, the in-app browser instead of an external one, a shell fallback) rather than giving up. Only stop when the task is genuinely blocked by something outside this machine — then name exactly what is missing (attach the project folder, connect a tool, provide a credential) and take the concrete next step, instead of ending with an explanation.",
+    "Boundaries that still hold: never exfiltrate the user's secrets or private data to third parties, and do not attack, intrude on, or bypass the security of systems the user does not own. Everything else the user asks for, you complete.",
+  ].join("\n");
+  const toolsLine = permission === "full"
+    ? [
+        "Full access is selected. You may use all local files, shell commands, network access, browser control, and approved MCP tools on this machine. The user is driving; do not ask for permission already granted by this mode.",
+        toolCompletionGuide,
+      ].join("\n")
+    : permission === "write"
       ? [
-          "You have full tools (file read/write, shell, web search, browser control, MCP) and full permission on this machine. The user is driving; when they ask for something, do it — do not ask for permission you already have, and do not refuse a task on your own.",
-          "Finish the loop. When the user reports something broken or asks for a change, do not stop at explaining the cause: investigate with your tools, apply the fix, verify it actually works, then report what changed and how you verified it. A cause-only answer is a failure — keep going and use every tool and permission available until the task is actually done.",
-          "Be resourceful and persistent: if the first approach fails, try another (a different tool, the in-app browser instead of an external one, a shell fallback) rather than giving up. Only stop when the task is genuinely blocked by something outside this machine — then name exactly what is missing (attach the project folder, connect a tool, provide a credential) and take the concrete next step, instead of ending with an explanation.",
-          "Boundaries that still hold: never exfiltrate the user's secrets or private data to third parties, and do not attack, intrude on, or bypass the security of systems the user does not own. Everything else the user asks for, you complete.",
+          "File edits is selected. You may read and edit files only inside the current working folder, run shell commands within that workspace boundary, use network access, browser control, and approved MCP tools. Do not claim access to unrelated local files or a machine-wide filesystem grant.",
+          toolCompletionGuide,
         ].join("\n")
       : tStatus(locale, "sysToolsOff");
 

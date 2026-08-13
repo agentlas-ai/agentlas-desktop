@@ -14,6 +14,7 @@ import type {
   OneOperatingPrincipleScope,
   OneProfile,
 } from "@/lib/types";
+import { OneBottomSheet } from "./OneBottomSheet";
 import styles from "./OneProfileSheet.module.css";
 
 const PROFILE_SUBTITLE_FALLBACK: Record<Locale, string> = {
@@ -61,7 +62,6 @@ export function OneProfileSheet({
   onClose,
   onProfileChange,
 }: OneProfileSheetProps) {
-  const dialogRef = useRef<HTMLDivElement>(null);
   const hydratedVersionRef = useRef<number | null>(null);
   const [displayName, setDisplayName] = useState(profile?.displayName ?? "One");
   const [role, setRole] = useState(profile?.role ?? "Agentlas One");
@@ -88,37 +88,6 @@ export function OneProfileSheet({
     if (!open) return;
     setMessage(null);
     setError(null);
-    const priorFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const timer = window.setTimeout(() => dialogRef.current?.querySelector<HTMLElement>("input, textarea, button")?.focus(), 0);
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const dialog = dialogRef.current;
-      if (!dialog) return;
-      const focusable = [...dialog.querySelectorAll<HTMLElement>(
-        "button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href]",
-      )];
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.clearTimeout(timer);
-      window.removeEventListener("keydown", onKeyDown);
-      priorFocus?.focus();
-    };
   }, [onClose, open]);
 
   if (!open) return null;
@@ -256,29 +225,20 @@ export function OneProfileSheet({
   };
 
   return (
-    <div className={styles.layer}>
-      <button
-        type="button"
-        className={styles.scrim}
-        aria-label={tFor(locale, "one.prof.close_aria")}
-        onClick={() => !busy && onClose()}
-      />
-      <div
-        ref={dialogRef}
-        className={styles.sheet}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="one-profile-title"
-      >
-        <header className={styles.header}>
-          <div>
-            <p className={styles.eyebrow}>{tFor(locale, "one.prof.eyebrow")}</p>
-            <h2 id="one-profile-title">{tFor(locale, "one.prof.title")}</h2>
-            <p>{profileSubtitle(locale)}</p>
-          </div>
-          <button type="button" className={styles.closeButton} onClick={onClose} disabled={busy} aria-label={tFor(locale, "one.prof.close")}>×</button>
-        </header>
-
+    <OneBottomSheet
+      open={open}
+      onClose={onClose}
+      closeLabel={tFor(locale, "one.prof.close_aria")}
+      ariaLabelledBy="one-profile-title"
+      size="wide"
+      closeOnBackdrop={!busy}
+      closeOnEscape={!busy}
+      closeDisabled={busy}
+      eyebrow={tFor(locale, "one.prof.eyebrow")}
+      title={tFor(locale, "one.prof.title")}
+      titleId="one-profile-title"
+      description={profileSubtitle(locale)}
+    >
         {!profile ? (
           <div className={styles.loading} role="status">{tFor(locale, "one.prof.loading")}</div>
         ) : (
@@ -367,7 +327,6 @@ export function OneProfileSheet({
             </section>
           </div>
         )}
-      </div>
-    </div>
+    </OneBottomSheet>
   );
 }

@@ -1,0 +1,228 @@
+/* One bottom-sheet token. Feature sheets inherit this contract and own only their content styles. */
+.layer {
+  --one-sheet-surface: #fffdf9;
+  --one-sheet-ink: #20251f;
+  --one-sheet-muted: #6f746c;
+  --one-sheet-accent: #536938;
+  --one-sheet-line: rgba(40, 48, 39, 0.12);
+  --one-sheet-scrim: rgba(25, 30, 25, 0.38);
+  --one-sheet-control-surface: #ffffff;
+  --one-sheet-control-border: #dfe3da;
+  --one-sheet-control-radius: 11px;
+  --one-sheet-control-height: 44px;
+  --one-sheet-card-surface: #ffffff;
+  --one-sheet-card-muted: #f8f9f6;
+  --one-sheet-card-radius: 15px;
+  --one-sheet-label-ink: #444940;
+  --one-sheet-section-gap: 28px;
+  --one-sheet-section-padding: 28px;
+  --one-sheet-title-size: clamp(24px, 3vw, 30px);
+  --one-sheet-body-size: 14px;
+  --one-sheet-label-size: 12px;
+  --one-sheet-focus: 0 0 0 3px rgba(83, 105, 56, 0.16);
+  --one-sheet-primary: #596f3b;
+  --one-sheet-primary-hover: #4e6234;
+  --one-sheet-danger: #9c3f35;
+  --one-sheet-danger-surface: #fff3f1;
+  --one-sheet-danger-line: #f0d0ca;
+  --one-sheet-success: #40522d;
+  --one-sheet-success-surface: #f4f8ef;
+  --one-sheet-success-line: #dfe6d7;
+  --one-sheet-radius: 26px;
+  --one-sheet-horizontal-padding: clamp(24px, 3vw, 34px);
+  --one-sheet-body-padding-top: 20px;
+  --one-sheet-body-padding-bottom: 24px;
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  align-items: end;
+  justify-items: center;
+  pointer-events: auto;
+}
+
+.scrim {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  background: var(--one-sheet-scrim);
+  backdrop-filter: blur(4px);
+  cursor: default;
+  animation: oneSheetScrimIn 160ms ease-out both;
+}
+
+.sheet {
+  position: relative;
+  z-index: 1;
+  width: min(880px, calc(100vw - 32px));
+  max-height: min(82vh, 760px);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  margin: 0 auto;
+  padding: 0 var(--one-sheet-horizontal-padding) max(18px, env(safe-area-inset-bottom));
+  border: 1px solid var(--one-sheet-line);
+  border-bottom: 0;
+  border-radius: var(--one-sheet-radius) var(--one-sheet-radius) 0 0;
+  background: var(--one-sheet-surface);
+  color: var(--one-sheet-ink);
+  box-shadow: 0 -24px 80px rgba(28, 35, 27, 0.22);
+  outline: none;
+  animation: oneSheetRise 200ms cubic-bezier(0.22, 0.8, 0.28, 1) both;
+}
+
+.compact {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.wide {
+  width: min(880px, calc(100vw - 32px));
+}
+
+.full {
+  width: min(1120px, calc(100vw - 32px));
+}
+
+.handle {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 4px;
+  margin: 10px auto 4px;
+  border-radius: 999px;
+  background: rgba(45, 54, 44, 0.25);
+}
+
+.header {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 20px;
+  padding: 22px 0 24px;
+  border-bottom: 1px solid var(--one-sheet-line);
+}
+
+.headingCopy {
+  min-width: 0;
+}
+
+.eyebrow {
+  margin: 0 0 5px;
+  color: var(--one-sheet-accent);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.header h2 {
+  margin: 0;
+  color: var(--one-sheet-ink);
+  font-size: var(--one-sheet-title-size);
+  font-weight: 760;
+  letter-spacing: -0.035em;
+  line-height: 1.08;
+}
+
+.description {
+  max-width: 680px;
+  margin: 8px 0 0;
+  color: var(--one-sheet-muted);
+  font-size: var(--one-sheet-body-size);
+  line-height: 1.55;
+}
+
+.body {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable both-edges;
+  padding: var(--one-sheet-body-padding-top) 0 var(--one-sheet-body-padding-bottom);
+}
+
+.closeButton {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--one-sheet-line);
+  border-radius: 999px;
+  background: var(--one-sheet-control-surface);
+  color: var(--one-sheet-ink);
+  font: inherit;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.closeButton:hover {
+  background: color-mix(in srgb, var(--one-sheet-accent) 7%, var(--one-sheet-control-surface));
+}
+
+.closeButton:focus-visible {
+  outline: 0;
+  box-shadow: var(--one-sheet-focus);
+}
+
+.closeButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+@keyframes oneSheetScrimIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes oneSheetRise {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 700px) {
+  .layer {
+    align-items: end;
+  }
+
+  .sheet,
+  .compact,
+  .wide,
+  .full {
+    width: 100%;
+    max-height: 88vh;
+    padding-inline: 20px;
+    border-right: 0;
+    border-left: 0;
+    border-radius: var(--one-sheet-radius) var(--one-sheet-radius) 0 0;
+  }
+
+  .header {
+    gap: 12px;
+    padding-top: 18px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scrim,
+  .sheet {
+    animation: none;
+  }
+}

@@ -60,7 +60,7 @@ import {
   setChatWorkingFolder,
 } from "../store/chats";
 import { getProject, listProjects } from "../store/projects";
-import { getCanonicalTaskForChat } from "../store/tasks";
+import { findCanonicalTaskForChat } from "../store/tasks";
 import { touchRuntimeSession } from "../store/runtime-sessions";
 import { getInterviewMode, isTrivialPrompt } from "../store/interview-mode";
 import { getFirm, listFirms } from "../store/firms";
@@ -124,6 +124,7 @@ import { parseMemoryEvents } from "../memory/events";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
+import { isAutomationSetupRequest } from "../../shared/automation-request";
 import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, parseSurfaces } from "../surface-emitter";
 import { applyFinalDisplayBackstop } from "./final-display-backstop";
 import {
@@ -132,6 +133,7 @@ import {
   type OneFriendlyFollowupPlanV1,
 } from "../../shared/one-friendly-followups";
 import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMarkdownSurfaceIntent } from "../one/markdown-surface";
+import { bindOneRuntimeToolArtifacts } from "../one/artifact-preview";
 import { createAutomation, findAutomationByGoalId, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { projectContextKey, recordContextSourceMarker, tryRecordRunEvent } from "../store/run-events";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
@@ -152,7 +154,7 @@ import {
   type InvocationWorkspaceBinding,
 } from "../invocation/workspace-binding";
 import { type Runner, SURFACE_INTENT_MARKER, UNATTENDED_NO_ASK_DIRECTIVE } from "../runtime/runner";
-import { pickActive, pickRunner, selectInvocationRuntime } from "../runtime/selection";
+import { effortForSelectedModel, pickActive, pickRunner, selectInvocationRuntime } from "../runtime/selection";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
 import { extractBuildInterviewQuestions } from "../../shared/build-turn";
@@ -197,6 +199,11 @@ const ONE_LOCAL_ARTIFACT_EXTENSIONS = new Set([
   ".mp4", ".webm", ".mov", ".m4v", ".ogv",
   ".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac",
   ".pdf", ".docx", ".txt", ".md", ".xlsx", ".csv", ".json", ".zip",
+  // A One result often includes the focused validator or reusable source that
+  // proves the document/data artifact. These remain exact-result-folder files
+  // and receive the same filesystem seal before the renderer can open them.
+  ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".py", ".rb", ".go", ".rs",
+  ".java", ".kt", ".swift", ".sh", ".bash", ".zsh", ".html", ".css", ".scss",
 ]);
 
 function sealOneLocalArtifactPaths(
@@ -968,23 +975,6 @@ function appendAutomationSummary(text: string, summary: string): string {
   return `${trimmed}\n\n${summary}`;
 }
 
-function isAutomationSetupRequest(prompt: string): boolean {
-  const text = prompt.toLowerCase();
-  const explicitAutomation =
-    /자동화|오토메이션|예약|리마인드|반복|정기|cron|automation|automate|schedule|scheduled|recurring|reminder/.test(text);
-  const setupVerb =
-    /걸어|걸자|설정|등록|만들|추가|켜줘|해줘|해라|해놔|set\s*up|create|add|register|turn\s+on|remind/.test(text);
-  const recurringCadence =
-    /매일|매주|매월|매시간|매\s*아침|매\s*저녁|매\s*분기|daily|weekly|monthly|hourly|every\s+\w+|each\s+\w+/.test(text);
-  return (explicitAutomation && setupVerb) || (recurringCadence && setupVerb);
-}
-
-function automationLivePrelude(locale: "ko" | "en"): string {
-  return locale === "ko"
-    ? "자동화 요청을 확인하고 있습니다. 실행 주기와 작업 내용을 정리한 뒤 바로 등록까지 이어가겠습니다.\n\n"
-    : "Checking the automation request. I will resolve the schedule and task details, then register it.\n\n";
-}
-
 /** 활성 런타임 + 러너를 한 번에 선택 (오케스트레이터/리졸버 공용). */
 export async function pickActiveRunner(): Promise<
   { runner: Runner; label: string; active: RuntimeStatus } | null
@@ -1542,6 +1532,24 @@ export async function runMcpInvocation(
         ].join("\n");
     effectiveUserPrompt = `${oneStormbreakerPreference}\n\n${effectiveUserPrompt}`;
   }
+  if (req.oneMode && req.fastMode === true) {
+    const oneFastPreference = locale === "ko"
+      ? [
+          "[이번 턴의 빠른 실행 선호]",
+          "단일 직접 패스로 처리하고, 반복 실행·Stormbreaker·하위 실행은 시작하지 마세요.",
+          "요청을 끝낼 수 없으면 추측하거나 재시도하지 말고 필요한 다음 조건만 짧게 제시하세요.",
+          "이 선호는 다음 턴으로 전파되지 않습니다.",
+          "[/이번 턴의 빠른 실행 선호]",
+        ].join("\n")
+      : [
+          "[Fast execution preference for this turn]",
+          "Use one direct pass. Do not start repeat execution, Stormbreaker, or subordinate execution.",
+          "If the request cannot finish, do not guess or retry; state only the next condition needed.",
+          "This preference does not carry into later turns.",
+          "[/Fast execution preference for this turn]",
+        ].join("\n");
+    effectiveUserPrompt = `${oneFastPreference}\n\n${effectiveUserPrompt}`;
+  }
   // `/hep-network` now enters the host-LLM Agent Workforce Ontology path.
   // The old lexical recommendation path remains available only as the explicit
   // compatibility command `/hep-network --legacy`.
@@ -1622,8 +1630,8 @@ export async function runMcpInvocation(
       error: {
         code: "one-team-runtime-changed",
         message: locale === "ko"
-          ? "팀 확인 후 활성 런타임이 바뀌었습니다. 현재 상태로 팀을 다시 검토해주세요."
-          : "The active runtime changed after team confirmation. Review the team again against the current runtime.",
+          ? "팀 확인에 사용한 런타임을 더 이상 사용할 수 없습니다. 현재 상태로 팀을 다시 검토해주세요."
+          : "The runtime selected for team confirmation is no longer available. Review the team again against the current inventory.",
       },
     });
     return earlyResult();
@@ -1829,6 +1837,12 @@ export async function runMcpInvocation(
     });
     return earlyResult();
   }
+  if (oneTeamExecutionPolicy) {
+    const hostRunFacts = locale === "ko"
+      ? `[이번 실행의 호스트 확인 사실]\n모델=${active.model ?? active.kind}; 권한=${req.permissions}. 최종 답변에서 모델·권한·사용 에이전트를 보고해야 하면 이 사실을 그대로 사용하세요. 확인된 선택을 '요청만 됨', '독립 확인 불가' 또는 일반 모델명으로 바꿔 쓰지 마세요.\n[/이번 실행의 호스트 확인 사실]`
+      : `[Host-confirmed facts for this run]\nmodel=${active.model ?? active.kind}; permission=${req.permissions}. If the final answer reports model, permission, or agents used, use these facts exactly. Never downgrade a confirmed selection to merely requested or independently unverifiable, and never replace it with a generic model name.\n[/Host-confirmed facts for this run]`;
+    effectiveUserPrompt = `${hostRunFacts}\n\n${effectiveUserPrompt}`;
+  }
   if (explicitWorkforceGoal && !isWorkforceLeaderRuntimeAllowed(active.kind)) {
     sink({
       kind: "error",
@@ -1876,6 +1890,7 @@ export async function runMcpInvocation(
   let mcpAllowedTools: string[] | undefined;
   let mcpCodexConfigArgs: string[] | undefined;
   let mcpRuntimeEnv: Record<string, string> | undefined;
+  let isolatedMcpConfig = false;
   // 커넥터 C38 — 이번 호출에 걸린 도구 중개 관문. 걸지 못했으면 계속 null이고,
   // 그 사실이 그대로 실행 기록으로 나간다(못 막은 것을 막았다고 적지 않는다).
   let toolBroker: MaterializedToolBroker | null = null;
@@ -1991,6 +2006,7 @@ export async function runMcpInvocation(
         reselect: () => autoSelectMcpTools({ ...autoSelectInput, bypassSelectionMemo: true }),
       });
       selectedContext = keyGate.context;
+      isolatedMcpConfig = selectedContext.effectiveToolMode === "browser";
       if (keyGate.outcome !== "skipped") {
         sink({
           kind: "tool-use",
@@ -2005,7 +2021,7 @@ export async function runMcpInvocation(
         });
       }
       mcpAutoSelectionPrompt = buildMcpAutoSelectionPrompt(selectedContext, {
-        toolMode: req.toolMode,
+        toolMode: selectedContext.effectiveToolMode,
         hubMode: req.hubMode,
       });
       if (keyGate.fallbackPrompt) {
@@ -2040,7 +2056,7 @@ export async function runMcpInvocation(
       const installedTools = selectedTools.filter((tool) => tool.installed);
       const degradedTools = selectedTools.filter((tool) => tool.state !== "ready");
       if (
-        req.toolMode === "browser" &&
+        selectedContext.effectiveToolMode === "browser" &&
         !selectedTools.some((tool) => tool.id === "agentlas-browser" && tool.state === "ready")
       ) {
         throw new Error(
@@ -2157,7 +2173,10 @@ export async function runMcpInvocation(
     return coreStormbreakerHarnessPromise;
   };
 
-  const canonicalTask = getCanonicalTaskForChat(chat.id);
+  // Runtime goal continuity may reuse a Task that already exists, but merely
+  // asking a conversational turn must not manufacture one. The chat id is the
+  // durable fallback goal key until an authoritative promotion occurs.
+  const canonicalTask = findCanonicalTaskForChat(chat.id);
   const workforceProjectDir = workingFolder ?? process.cwd();
   const durableWorkforceGoalId = desktopWorkforceGoalId(canonicalTask?.id ?? chat.id);
   let durableTurnDecision: DesktopWorkforceTurnDecision | null = null;
@@ -2393,9 +2412,10 @@ export async function runMcpInvocation(
               locale,
             },
             {
-              onStatus: (status) => sink({
+              onStatus: (status, activity) => sink({
                 kind: "tool-use",
                 status,
+                activity,
                 agentId: "workforce:leader",
                 agentName: "Agentlas Workforce Leader",
                 role: "workforce-leader",
@@ -2774,6 +2794,16 @@ export async function runMcpInvocation(
   // 세션 지원 러너는 새 세션이면 시스템 프롬프트 뒤에 붙이고, resume 턴이면 사용자
   // 메시지 앞에 싣는다. 세션 미지원 러너에는 기존처럼 시스템 프롬프트에 합쳐 전달한다.
   const turnContextParts: string[] = [];
+  // A resumed Codex session does not receive `systemPrompt` again. Reassert the
+  // visible One language as host context on *every* interactive turn, otherwise
+  // a Korean task marker can pull a previously English-seeded session back into
+  // Korean output. The message language itself is never a language-selection
+  // signal; only an explicit request to use another language may override this.
+  if (req.oneMode && !req.agentAppMode) {
+    turnContextParts.push(locale === "ko"
+      ? "[호스트 출력 언어 계약]\n현재 One 화면 언어는 한국어입니다. 이번 사용자 메시지·인용문·파일의 언어와 무관하게 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 출력 언어를 명시적으로 요구할 때만 예외입니다. 이 계약을 언급하거나 인용하지 마세요.\n[/호스트 출력 언어 계약]"
+      : "[Host response-language contract]\nThe visible One interface language is English. Reply in English regardless of the language of this user message, quoted text, or files. Only an explicit request in this message for another output language is an exception. Do not mention or quote this contract.\n[/Host response-language contract]");
+  }
   // 표면 안내는 프롬프트가 아니라 이 턴의 맥락으로 들어간다.
   if (executionContext?.surfaceContext?.trim()) {
     turnContextParts.push(executionContext.surfaceContext.trim());
@@ -3118,10 +3148,6 @@ export async function runMcpInvocation(
   persistUserMessage();
 
   sink({ kind: "thinking", status: tStatus(locale, "thinking", { agent: agent.name }) });
-  if (chat.kind !== "division" && canWrite && isAutomationSetupRequest(req.userPrompt)) {
-    sink({ kind: "partial", text: automationLivePrelude(locale) });
-  }
-
   // Stormbreaker 슈퍼바이저 — 활성·가용하면 이 실행을 scope→route→gate 로 감독한다(비차단).
   // division(백그라운드 firm 하위) 세션은 제외(재귀/노이즈 방지). 실패/부재 시 null → no-op.
   let stormbreaker: StormbreakerHandle | null = null;
@@ -3203,14 +3229,17 @@ export async function runMcpInvocation(
       backendLabel: picked.label,
       model: active.model ?? undefined,
       longContext: active.longContextEnabled ?? false,
-      effort: active.effort ?? undefined,
+      effort: req.oneMode && req.fastMode === true && active.kind === "codex"
+        ? effortForSelectedModel(active, active.model, "minimal") ?? undefined
+        : active.effort ?? undefined,
       signal,
       permission: req.permissions,
       ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
       ...(isUnattendedExecution(executionContext) ? { unattended: true as const } : {}),
-      // 세션 지문 시드 — 항상 전달한다. 인터랙티브 채팅은 (chatId, agentId)만이 세션
-      // 정체성이라 모델/effort/권한/턴별 주입이 바뀌어도 같은 CLI 세션을 이어간다
-      // (무조건 세션 유지 계약, 2026-07-16). 무인 실행은 기존 안정 시드를 유지한다.
+      // 세션 지문 시드 — 인터랙티브 채팅은 모델·effort·권한·턴별 주입이 바뀌어도
+      // 같은 CLI 세션을 이어간다. 단, 명시적으로 바꾼 UI 언어는 시스템 프롬프트를
+      // 다시 심어야 하므로 세션 정체성에 포함한다. 그렇지 않으면 resume이 첫 턴의
+      // 한국어 지시를 계속 유지해 영어 One 화면에서 한국어 답변을 내보낸다.
       ...(req.agentAppMode
         ? {}
         : {
@@ -3230,10 +3259,12 @@ export async function runMcpInvocation(
                     hubMode: req.hubMode,
                   }
                 : {
-                    v: "agentlas.chat-session-seed.v1",
+                    v: "agentlas.chat-session-seed.v2",
                     chatId: chat.id,
                     agentId: agent.id,
+                    locale,
                     executionMode: oneTeamExecutionPolicy ? "one-task-surface-v1" : "conversation",
+                    mcpIsolation: isolatedMcpConfig ? "agentlas-browser-only" : "provider-defaults",
                   },
             ),
           }),
@@ -3241,6 +3272,7 @@ export async function runMcpInvocation(
       // 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
       chatId: req.agentAppMode ? `site-agent-app:${req.runId ?? randomUUID()}` : chat.id,
       mcpConfigPath,
+      ...(isolatedMcpConfig ? { isolatedMcpConfig: true as const } : {}),
       mcpAllowedTools,
       mcpCodexConfigArgs,
       // C38 — 관문을 실제로 건 것은 **이 경로**뿐이다. 관문 파일이 여기 실리는 순간에만
@@ -3281,20 +3313,36 @@ export async function runMcpInvocation(
     let passToolFailures = 0;
     let passToolSuccesses = 0;
     const oneToolFailureBlocksCompletion = () => Boolean(oneTeamExecutionPolicy && observedOneToolFailure);
-    const collectObservedSourceUrls = (value?: string) => {
-      if (!value || !oneTeamExecutionPolicy || observedOneSourceUrls.size >= 32) return;
+    const collectObservedSourceUrls = (value?: string): string[] => {
+      if (!value || !oneTeamExecutionPolicy || observedOneSourceUrls.size >= 32) return [];
+      const added: string[] = [];
       for (const match of value.matchAll(/https:\/\/[^\s"'<>\\)\]]+/g)) {
         if (observedOneSourceUrls.size >= 32) break;
         try {
           const parsed = new URL(match[0]);
-          if (parsed.protocol === "https:" && !parsed.username && !parsed.password) observedOneSourceUrls.add(parsed.href);
+          if (
+            parsed.protocol === "https:"
+            && !parsed.username
+            && !parsed.password
+            && !parsed.hostname.endsWith(".invalid")
+            && !parsed.hostname.endsWith(".local")
+            && !observedOneSourceUrls.has(parsed.href)
+          ) {
+            observedOneSourceUrls.add(parsed.href);
+            added.push(parsed.href);
+          }
         } catch {
           // Tool output is untrusted text; malformed URLs are ignored.
         }
       }
+      return added;
     };
     const runnerEvents = {
-      onStatus: (status: string) => sink({ kind: "tool-use", status }),
+      onStatus: (status: string, activity?: McpInvocationEvent["activity"]) => sink({
+        kind: "tool-use",
+        status,
+        activity,
+      }),
       // A partial JSON fence cannot be safely sanitized. Restricted runs are
       // final-only so cancel/error can never persist an unfinished Memory block.
       onPartial: (text: string) => {
@@ -3303,15 +3351,23 @@ export async function runMcpInvocation(
         }
       },
       // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
-      onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean) => {
+      onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[]) => {
+        let sourceUrls: string[] | undefined;
         if (isError) {
           observedOneToolFailure = true;
           passToolFailures += 1;
         }
         if (!isError) {
           passToolSuccesses += 1;
-          collectObservedSourceUrls(args);
-          collectObservedSourceUrls(result);
+          // The Codex runtime uses this generic wrapper only for an MCP call.
+          // Shell/read tools can echo arbitrary URLs from local documents (for
+          // example a proposed schema's example.invalid), which must never be
+          // presented as a browsed source. Browser MCP observations do carry
+          // their public page URL through this wrapper.
+          const browserMcpCall = /^mcp[\s_.-]*tool[\s_.-]*call$/i.test(name.trim());
+          sourceUrls = browserMcpCall
+            ? [...collectObservedSourceUrls(args), ...collectObservedSourceUrls(result)]
+            : undefined;
           // Some provider runners emit a successful tool completion without
           // echoing its result text back through this callback. The signed
           // invocation event is still enough to admit an explicitly
@@ -3319,7 +3375,32 @@ export async function runMcpInvocation(
           // the separate exact-result-folder filesystem seal below.
           if (oneTeamExecutionPolicy && name.trim()) observedOneToolEvidence = true;
         }
-        sink({ kind: "tool-use", tool: { name, args, result, id, isError } });
+        const runId = req.runId;
+        const oneArtifacts = req.oneMode === true && canonicalTask && !isError && id && runId && artifactPaths?.length
+          ? bindOneRuntimeToolArtifacts({
+              taskId: canonicalTask.id,
+              taskVersion: canonicalTask.version,
+              chatId: chat.id,
+              runId,
+              toolId: id,
+              paths: artifactPaths,
+            }).map((artifact) => ({
+              taskId: canonicalTask.id,
+              taskVersion: canonicalTask.version,
+              chatId: chat.id,
+              runId,
+              manifestId: artifact.manifestId,
+              artifactRef: artifact.artifactRef,
+              label: artifact.label,
+              type: artifact.type,
+              sizeBytes: artifact.sizeBytes,
+            }))
+          : undefined;
+        sink({
+          kind: "tool-use",
+          tool: { name, args, result, id, isError, ...(sourceUrls?.length ? { sourceUrls } : {}) },
+          ...(oneArtifacts?.length ? { oneArtifacts } : {}),
+        });
       },
       // 라이브 누적 토큰 — 상태줄 "{N}s · {tokens} tokens" 실시간 갱신.
       onUsage: (tokens: number) => {
@@ -3343,7 +3424,7 @@ export async function runMcpInvocation(
     // goal 원장(예산·무진전·명시 종료)이 내린다.
     const continuousMode = !req.agentAppMode && !projectReadOnlyBoundary && chat.kind !== "division" &&
       (chat.continuousMode === true || activeGoalId != null);
-    const maxPasses = req.agentAppMode
+    const maxPasses = req.agentAppMode || (req.oneMode && req.fastMode === true)
       ? 1
       : continuousMode
         ? CONTINUOUS_MODE_MAX_PASSES
@@ -3491,6 +3572,7 @@ export async function runMcpInvocation(
         sink({
           kind: "tool-use",
           status: locale === "ko" ? "막힌 단계를 다시 진행하는 중…" : "Retrying a blocked step…",
+          activity: { code: "recovery_retry" },
         });
         if (!continuousMode && result.text.trim()) {
           partialFloor = partialFloor ? `${partialFloor}\n${result.text}` : result.text;
@@ -4199,7 +4281,7 @@ export async function runMcpInvocation(
           provider: active.backend ?? active.kind,
           model: active.model ?? null,
           tokens: finalObservedTokens,
-          measurement: "output-only",
+          measurement: active.kind === "codex" ? "output-delta-or-visible-estimate" : "output-only",
           phase: "chat",
         },
       });

@@ -111,10 +111,21 @@ const CORE_RUNTIME_MARKERS: string[][] = [
   ["schemas", "workforce-selection.schema.json"],
 ];
 
-function isRuntimeRoot(candidate: string): boolean {
+/**
+ * Static source capability introduced with Context Map v3. A release number is
+ * not sufficient because older installed/bundled runtimes can share a newer
+ * host version while still emitting only the legacy map format.
+ */
+export const CONTEXT_MAP_V3_RUNTIME_MARKERS: string[][] = [
+  ["agentlas_cloud", "project_bootstrap.py"],
+  ["schemas", "context-index-policy.schema.json"],
+];
+
+function isRuntimeRoot(candidate: string, requiredMarkers: string[][] = []): boolean {
   try {
     if (!candidate) return false;
-    return CORE_RUNTIME_MARKERS.every((segments) => fs.existsSync(path.join(candidate, ...segments)));
+    return [...CORE_RUNTIME_MARKERS, ...requiredMarkers]
+      .every((segments) => fs.existsSync(path.join(candidate, ...segments)));
   } catch {
     return false;
   }
@@ -152,6 +163,11 @@ export function hephaestusRoot(): string | null {
   return hephaestusRootDetail()?.root ?? null;
 }
 
+/** Resolve only a Core source that can generate the Context Map v3 manifest. */
+export function hephaestusContextRoot(): string | null {
+  return hephaestusRootDetail({ requiredMarkers: CONTEXT_MAP_V3_RUNTIME_MARKERS })?.root ?? null;
+}
+
 /**
  * Same selection as `hephaestusRoot`, but keeps **where the engine came from**.
  *
@@ -182,14 +198,15 @@ export function hephaestusRootDetail(
    * An engine missing five Workforce tools builds and scans perfectly well.
    * Only the caller that made the judgement should act on it.
    */
-  options?: { excludeRejected?: boolean },
+  options?: { excludeRejected?: boolean; requiredMarkers?: string[][] },
 ): { root: string; kind: "managed" | "bundled" | "override" } | null {
   const isRejected = options?.excludeRejected ? isRejectedTarget : () => false;
+  const requiredMarkers = options?.requiredMarkers ?? [];
   const explicit = process.env.HEPHAESTUS_RUNTIME_ROOT?.trim();
   // An explicit override is neither managed nor bundled: nothing updates it and
   // no packaging guarantees its contents. Say so rather than picking whichever
   // label looks closest.
-  if (explicit && isRuntimeRoot(explicit) && !isRejected(explicit)) {
+  if (explicit && isRuntimeRoot(explicit, requiredMarkers) && !isRejected(explicit)) {
     return { root: path.resolve(explicit), kind: "override" };
   }
 
@@ -212,7 +229,7 @@ export function hephaestusRootDetail(
 
   const candidates = paths
     .map((candidate, order): RuntimeCandidate | null => {
-      if (!isRuntimeRoot(candidate.root) || isRejected(candidate.root)) return null;
+      if (!isRuntimeRoot(candidate.root, requiredMarkers) || isRejected(candidate.root)) return null;
       const root = path.resolve(candidate.root);
       return { ...candidate, root, order, version: readHephaestusVersion(root) };
     })

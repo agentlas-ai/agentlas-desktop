@@ -62,15 +62,15 @@ electronFuses:
   onlyLoadAppFromAsar: true
 
 # ── Embedded Hephaestus engine ───────────────────────────────────────────────
-# Hephaestus is a separate open-source repo (git-ignored here). It is copied into
-# the packaged app from the on-disk folder — independent of git tracking — so the
-# Desktop source does not vendor engine source in its Git history while the
-# shipped app still embeds the exact pinned checkout. Lands at
+# Hephaestus is a separate open-source repo (git-ignored here). beforePack keeps
+# that checkout on its immutable pin, then deterministically materializes a
+# receipt-bound Desktop runtime at dist/embedded-core with retired surfaces
+# removed. Only that prepared tree enters the package. Lands at
 # <app>/Contents/Resources/Hephaestus (process.resourcesPath),
 # OUTSIDE the asar so bin/hephaestus + the Python tree stay executable.
 # Heavy, non-runtime dirs (render output, tests, vendored caches, git) excluded.
 extraResources:
-  - from: Hephaestus
+  - from: dist/embedded-core
     to: Hephaestus
     filter:
       - "**/*"

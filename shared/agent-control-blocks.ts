@@ -42,6 +42,19 @@ export const AGENT_MULTIMODAL_MARKER = "<<agentlas-multimodal-setup>>";
 /** 값 없는 제어 마커(runtime/runner.ts SURFACE_INTENT_MARKER). 표시되면 안 된다. */
 export const AGENT_SURFACE_INTENT_MARKER = "<<surface-intent>>";
 
+/**
+ * One owns assistant identity in product chrome. Provider/persona badges such
+ * as `[Hope]` or `[희망]` are not answer content and can also leak the wrong
+ * locale. Remove only compact capitalized or Hangul name badges surrounded by
+ * whitespace; redaction markers such as `[local path]` remain intact.
+ */
+export function stripAgentIdentityBadges(value: string): string {
+  return value.replace(
+    /(^|\s)(?:\*\*)?\[\s*(?:[A-Z][A-Za-z .'-]{0,31}|[\u3131-\u318e\uac00-\ud7a3]{1,16})\s*\](?:\*\*)?(?=\s|$)/gu,
+    "$1",
+  ).replace(/[ \t]{2,}/g, " ").trim();
+}
+
 /** 여는 토큰이 완성되기 전 스트리밍 조각도 숨기기 위한 탐침(prefix). */
 const PAIRED_BLOCKS = [
   { probe: "<<agentlas-one-followups", open: AGENT_FOLLOWUPS_OPEN, close: AGENT_FOLLOWUPS_CLOSE },

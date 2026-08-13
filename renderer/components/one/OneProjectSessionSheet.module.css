@@ -1,0 +1,183 @@
+.content {
+  display: grid;
+  gap: var(--one-sheet-section-gap);
+}
+
+.section {
+  display: grid;
+  gap: 14px;
+  padding: var(--one-sheet-section-padding);
+  border: 1px solid var(--one-sheet-line);
+  border-radius: var(--one-sheet-card-radius);
+  background: var(--one-sheet-card-surface);
+}
+
+.section h3,
+.section p {
+  margin: 0;
+}
+
+.section h3 {
+  color: var(--one-sheet-ink);
+  font-size: 15px;
+  letter-spacing: -0.015em;
+}
+
+.sectionHeading,
+.sessionHeading,
+.projectReceipt,
+.sessionCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.sectionHeading p,
+.sessionCard p,
+.sessionCard small {
+  color: var(--one-sheet-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.field {
+  display: grid;
+  gap: 7px;
+  color: var(--one-sheet-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.field input,
+.sessionHeading input {
+  min-height: var(--one-sheet-control-height);
+  padding: 0 13px;
+  border: 1px solid var(--one-sheet-control-border);
+  border-radius: var(--one-sheet-control-radius);
+  background: var(--one-sheet-surface);
+  color: var(--one-sheet-ink);
+  font: inherit;
+}
+
+.sessionHeading input {
+  width: min(310px, 48%);
+}
+
+.field input:focus-visible,
+.sessionHeading input:focus-visible,
+.primaryButton:focus-visible,
+.secondaryButton:focus-visible {
+  outline: none;
+  box-shadow: var(--one-sheet-focus);
+}
+
+.primaryButton,
+.secondaryButton {
+  min-height: var(--one-sheet-control-height);
+  padding: 0 15px;
+  border-radius: var(--one-sheet-control-radius);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.primaryButton {
+  border: 1px solid var(--one-sheet-primary);
+  background: var(--one-sheet-primary);
+  color: #fff;
+}
+
+.secondaryButton {
+  border: 1px solid color-mix(in srgb, var(--one-sheet-ink) 18%, var(--one-sheet-control-border));
+  background: var(--one-sheet-card-muted);
+  color: var(--one-sheet-ink);
+}
+
+.secondaryButton:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--one-sheet-ink) 30%, var(--one-sheet-control-border));
+  background: var(--one-sheet-card-surface);
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled {
+  cursor: default;
+  opacity: 0.52;
+}
+
+.projectReceipt {
+  justify-content: flex-start;
+  padding: 11px 13px;
+  border-radius: var(--one-sheet-control-radius);
+  background: var(--one-sheet-success-surface);
+  color: var(--one-sheet-success);
+  font-size: 12px;
+}
+
+.sessionList {
+  display: grid;
+  gap: 9px;
+}
+
+.sessionCard {
+  align-items: flex-start;
+  padding: 14px;
+  border: 1px solid var(--one-sheet-line);
+  border-radius: var(--one-sheet-control-radius);
+  background: var(--one-sheet-surface);
+}
+
+.sessionCard > div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.sessionCard > div > span {
+  color: var(--one-sheet-accent);
+  font-size: 10px;
+  font-weight: 780;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.sessionCard strong,
+.sessionCard p {
+  overflow-wrap: anywhere;
+}
+
+.empty,
+.error {
+  margin: 0;
+  padding: 16px;
+  border-radius: var(--one-sheet-control-radius);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.empty {
+  border: 1px dashed var(--one-sheet-line);
+  color: var(--one-sheet-muted);
+  text-align: center;
+}
+
+.error {
+  border: 1px solid color-mix(in srgb, var(--one-sheet-danger) 26%, transparent);
+  background: var(--one-sheet-danger-surface);
+  color: var(--one-sheet-danger);
+}
+
+@media (max-width: 700px) {
+  .sectionHeading,
+  .sessionHeading,
+  .sessionCard {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sessionHeading input,
+  .sessionCard .primaryButton {
+    width: 100%;
+  }
+}

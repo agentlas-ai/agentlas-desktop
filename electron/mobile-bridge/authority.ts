@@ -54,6 +54,8 @@ import { prejudgeOneMemoryIntent } from "../one/memory-detector";
 import { detectRuntimes, setActiveRuntime } from "../runtime/detect";
 import { listRuntimeCommands } from "../runtime/commands";
 import { listInstalledAgents } from "../mcp/registry";
+import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
+import { listInstalledServers } from "../mcp-tools/registry";
 import { routeOnly } from "../hephaestus/commands";
 import { normalizeRecommendation } from "../hephaestus/recommendation";
 import { getEngineToggles } from "../hephaestus/supervisor";
@@ -173,7 +175,13 @@ const TOOL_COUNT_CAP = 1_000;
 const BUILD_EVENT_TEXT_MAX_BYTES = 16_000;
 const BUILD_SUMMARY_MAX_BYTES = 2_000;
 const BUILD_RUN_HISTORY_LIMIT = 64;
+const BUILD_HISTORY_ENTRY_MAX_BYTES = 16_000;
+const BUILD_HISTORY_MAX_ENTRIES = 32;
 const BUILD_APPROVAL_TIMEOUT_MS = 90_000;
+// Ontology enriches the Mobile surface, but it is not required to establish a
+// Desktop connection. A fetch implementation that ignores AbortSignal (or a
+// shared stale in-flight request) must never hold bridge.ready indefinitely.
+const INITIAL_ONTOLOGY_BUDGET_MS = 1_500;
 // A paired phone can start a full-authority Hephaestus build. Keep that scarce
 // operation single-flight per Desktop authority so repeated requests cannot
 // fan out unbounded local model/tool processes. Desktop-native builds are not
@@ -214,6 +222,24 @@ type AuthorityListener = (event: MobileBridgeAuthorityEvent) => void;
 
 function errorOf(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
+}
+
+async function settleOptionalProjectionWithin<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  fallback: T,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise.catch(() => fallback),
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -734,9 +760,16 @@ export function enforceMobileInvocationPermissionBoundary(
 }
 
 function assertMobileOneDeviceAuthority(context: MobileBridgeConnectionContext): void {
+  const explicitDevelopmentBootstrap =
+    context.devBootstrap === true
+    && context.devicePlatform === "dev"
+    && process.env.NODE_ENV === "development"
+    && process.env.AGENTLAS_MOBILE_BRIDGE_DEV_BOOTSTRAP === "1";
+  if (explicitDevelopmentBootstrap) return;
   if (
     context.devBootstrap
     || context.devicePlatform === "dev"
+    || (context.devicePlatform !== "ios" && context.devicePlatform !== "android")
     || !/^device_[a-f0-9]{32}$/.test(context.deviceId)
   ) {
     throw new Error(
@@ -1035,7 +1068,10 @@ export function projectMobileBridgeInvocationEvent(
   // mobile client has no key sheet and its DTO union stays closed. Project it
   // as a harmless value-free "thinking" beat (keyRequest itself is never sent).
   const projected: MobileBridgeInvocationEventDto = {
-    kind: event.kind === "mcp-key-request" ? "thinking" : event.kind,
+    // The current phone protocol predates the explicit desktop lifecycle item.
+    // Project it to the existing value-free thinking beat until the mobile
+    // contract grows the same typed boundary; never leak a free-form status.
+    kind: event.kind === "mcp-key-request" || event.kind === "lifecycle" ? "thinking" : event.kind,
   };
   if (event.kind === "notice" && event.notice) {
     // 고지는 폰에도 간다. 다만 기계 원문(details)은 보내지 않는다 — 화면에 쓸 값만.
@@ -1149,6 +1185,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     refusal: MobileBridgeBuildRefusalDto | null;
     controller: AbortController;
     startedAt: number;
+    locale: "ko" | "en";
+    workspace: string | null;
+    runtimeSessionId: string | null;
+    history: Array<{ role: "user" | "assistant"; text: string }>;
+    lastPrompt: string;
+    questionSetId: string | null;
+    answerInFlight: boolean;
   }>();
   private upstreamUnsubscribers: Array<() => void> = [];
   private refreshQueued = false;
@@ -1711,6 +1754,22 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           plugins: (agent?.mcpServers ?? []).slice(0, 100).map((plugin) => boundedRedactedText(plugin, 256)),
         }, request.method);
       }
+      case "plugins.list": {
+        noParams(request);
+        const catalogById = new Map(MCP_TOOL_CATALOG.map((item) => [item.id, item]));
+        return asJsonValue(listInstalledServers().slice(0, 100).map((plugin) => {
+          const catalog = plugin.catalogId ? catalogById.get(plugin.catalogId) : undefined;
+          return {
+            id: boundedRedactedText(plugin.id, 256),
+            name: boundedRedactedText(plugin.name || plugin.nameEn, 256),
+            nameEn: boundedRedactedText(plugin.nameEn || plugin.name, 256),
+            description: boundedRedactedText(catalog?.description ?? "연결된 MCP 도구", 1_000),
+            descriptionEn: boundedRedactedText(catalog?.descriptionEn ?? "Connected MCP tools", 1_000),
+            enabled: plugin.enabled,
+            ready: plugin.configurationValid !== false,
+          };
+        }), request.method);
+      }
 
       // DESKTOP_MOBILE_BRIDGE: Invocation requests call only the shared
       // main-process InvocationService. Mobile never starts a parallel runtime.
@@ -1814,15 +1873,19 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const { invocation, expectedRunId, decisionAnswer } = invocationParams(request, true);
         if (decisionAnswer) await prejudgePendingDecisionAnswer(invocation.chatId, decisionAnswer.decisionId);
         if (decisionAnswer) validateCurrentMobileDecisionAnswer(invocation, decisionAnswer);
-        const workspaceBinding = captureInvocationWorkspaceBinding(
-          getChatWorkingFolder(invocation.chatId),
-        );
+        const mobileOneTurn = isOneInvocationChat(invocation.chatId);
+        const effectiveInvocation = mobileOneTurn
+          ? await bindMobileOneTurn(invocation)
+          : invocation;
+        const workspaceBinding = mobileOneTurn
+          ? captureMobileOneInvocationBinding()
+          : captureInvocationWorkspaceBinding(getChatWorkingFolder(invocation.chatId));
         const rollbackQuestionClaim = decisionAnswer
           ? claimPendingConfirmationAnswer(invocation.chatId, decisionAnswer.decisionId)
           : null;
         let result;
         try {
-          result = invocationService.steer(invocation, expectedRunId, workspaceBinding);
+          result = invocationService.steer(effectiveInvocation, expectedRunId, workspaceBinding);
         } catch (error) {
           rollbackQuestionClaim?.();
           throw error;
@@ -1915,16 +1978,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const id = requiredIdentifier(params, "id");
         if (!getAutomation(id)) throw new Error(`Automation not found: ${id}`);
         const { runAutomationNow } = await import("../automation-scheduler");
-        const execution = runAutomationNow(id);
-        void execution.then(
-          () => this.scheduleSnapshotUpdated(id),
-          (error) => {
-            this.onError(errorOf(error));
-            this.scheduleSnapshotUpdated(id);
-          },
-        );
+        const result = await runAutomationNow(id);
         this.scheduleSnapshotUpdated(id);
-        return asJsonValue({ accepted: true, automationId: id }, request.method);
+        return asJsonValue({ automationId: id, ...result }, request.method);
       }
       case "automations.listRuns": {
         const params = guardedParams(request, ["id", "limit"]);
@@ -2197,6 +2253,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         }
         const runId = randomUUID();
         const controller = new AbortController();
+        const locale: "ko" | "en" = HANGUL_RE.test(goal) ? "ko" : "en";
         this.buildRuns.set(runId, {
           status: "awaiting-approval",
           active: true,
@@ -2205,9 +2262,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           refusal: null,
           controller,
           startedAt: Date.now(),
+          locale,
+          workspace: null,
+          runtimeSessionId: null,
+          history: [],
+          lastPrompt: goal,
+          questionSetId: null,
+          answerInFlight: false,
         });
         this.pruneBuildRuns();
-        const locale: "ko" | "en" = HANGUL_RE.test(goal) ? "ko" : "en";
         const approval = await this.awaitBuildApproval({ runId, goal, locale, controller });
         const reserved = this.buildRuns.get(runId);
         if (!approval.approved || !reserved || controller.signal.aborted || this.disposed) {
@@ -2231,6 +2294,68 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         );
         return asJsonValue({ runId, replayable: false }, request.method);
       }
+      case "build.answer": {
+        const params = guardedParams(request, ["runId", "questionSetId", "answers", "idempotencyKey"]);
+        this.consumeWriteIdempotencyKey(request, params);
+        const runId = requiredIdentifier(params, "runId", RUN_ID_RE);
+        const questionSetId = requiredIdentifier(params, "questionSetId", RUN_ID_RE);
+        const run = this.buildRuns.get(runId);
+        if (!run) {
+          return asJsonValue({ refusal: this.buildAnswerRefusal("build_answer_stale") }, request.method);
+        }
+        if (run.answerInFlight || run.active) {
+          return asJsonValue({ refusal: this.buildAnswerRefusal("build_answer_in_progress") }, request.method);
+        }
+        if (
+          run.status !== "awaiting-input" ||
+          !run.questionSetId ||
+          run.questionSetId !== questionSetId ||
+          !run.workspace
+        ) {
+          return asJsonValue({ refusal: this.buildAnswerRefusal("build_answer_stale") }, request.method);
+        }
+        const answers = params.answers as Array<{ questionId: string; values: string[] }>;
+        const answerError = this.validateBuildAnswers(run.questions, answers);
+        if (answerError) {
+          return asJsonValue({ refusal: this.buildAnswerRefusal("build_answer_invalid", answerError) }, request.method);
+        }
+        const answerText = this.buildAnswerPrompt(run.questions, answers);
+        run.answerInFlight = true;
+        run.active = true;
+        run.status = "running";
+        run.questions = [];
+        run.questionSetId = null;
+        run.refusal = null;
+        run.summary = run.locale === "ko" ? "인터뷰 답변을 반영해 빌드를 재개했습니다." : "Build resumed with the interview answers.";
+        run.lastPrompt = answerText;
+        this.emitBuildEvent({
+          runId,
+          kind: "stage",
+          status: "running",
+          stage: "interview-resume",
+          text: run.summary,
+        });
+        const completion = Promise.resolve().then(() => this.buildActions.run({
+          runId,
+          goal: answerText,
+          locale: run.locale,
+          workspace: run.workspace ?? undefined,
+          runtimeSessionId: run.runtimeSessionId ?? undefined,
+          history: run.history.slice(-BUILD_HISTORY_MAX_ENTRIES),
+          sink: (event) => this.handleBuildEvent(runId, event),
+          signal: run.controller.signal,
+        }));
+        void completion
+          .then(
+            () => this.finalizeBuildRun(runId, null),
+            (error) => this.finalizeBuildRun(runId, errorOf(error)),
+          )
+          .finally(() => {
+            const current = this.buildRuns.get(runId);
+            if (current) current.answerInFlight = false;
+          });
+        return asJsonValue({ status: "running", summary: run.summary }, request.method);
+      }
       case "build.status": {
         const params = guardedParams(request, ["runId"]);
         const runId = requiredIdentifier(params, "runId", RUN_ID_RE);
@@ -2242,8 +2367,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         return asJsonValue({
           status: run.status,
           summary: run.summary,
+          ...(run.questionSetId ? { questionSetId: run.questionSetId } : {}),
           ...(run.questions.length > 0 ? { questions: run.questions } : {}),
           ...(run.refusal ? { refusal: run.refusal, resumable: false as const } : {}),
+          ...(run.status === "awaiting-input" && !run.refusal ? { resumable: true as const } : {}),
         }, request.method);
       }
 
@@ -2378,6 +2505,61 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     return { code, message: messages[code], retryable: code !== "desktop_approval_denied" };
   }
 
+  private buildAnswerRefusal(
+    code: Extract<
+      MobileBridgeBuildRefusalDto["code"],
+      "build_answer_stale" | "build_answer_invalid" | "build_answer_in_progress"
+    >,
+    detail?: string,
+  ): MobileBridgeBuildRefusalDto {
+    const messages: Record<typeof code, string> = {
+      build_answer_stale: "This interview question set is no longer active. Refresh the build status and use the latest questions.",
+      build_answer_invalid: detail ?? "The submitted interview answers do not match the active question options.",
+      build_answer_in_progress: "The previous build turn is still settling or another answer is already being applied.",
+    };
+    return { code, message: messages[code], retryable: code !== "build_answer_invalid" };
+  }
+
+  private validateBuildAnswers(
+    questions: MobileBridgeBuildQuestionDto[],
+    answers: Array<{ questionId: string; values: string[] }>,
+  ): string | null {
+    if (answers.length !== questions.length) return "Answer every active interview question exactly once.";
+    const byId = new Map(questions.map((question) => [question.questionId, question]));
+    const seen = new Set<string>();
+    for (const answer of answers) {
+      const question = byId.get(answer.questionId);
+      if (!question) return "An answer references an inactive question.";
+      if (seen.has(answer.questionId)) return "A question was answered more than once.";
+      seen.add(answer.questionId);
+      if (!question.multiSelect && answer.values.length !== 1) {
+        return "Single-select questions require exactly one option.";
+      }
+      if (answer.values.length > question.options.length) {
+        return "Too many options were selected for a question.";
+      }
+      const allowed = new Set(question.options.map((option) => option.label));
+      for (const value of answer.values) {
+        if (!allowed.has(value)) return "An answer contains an option that was not offered.";
+      }
+    }
+    return null;
+  }
+
+  private buildAnswerPrompt(
+    questions: MobileBridgeBuildQuestionDto[],
+    answers: Array<{ questionId: string; values: string[] }>,
+  ): string {
+    const byId = new Map(answers.map((answer) => [answer.questionId, answer.values]));
+    return questions
+      .map((question, index) => {
+        const label = question.header || `Question ${index + 1}`;
+        const values = byId.get(question.questionId) ?? [];
+        return `${label}: ${values.join(", ")}`;
+      })
+      .join("\n");
+  }
+
   private async awaitBuildApproval(input: {
     runId: string;
     goal: string;
@@ -2460,6 +2642,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       seen.add(question);
       const header = candidate.header ? boundedRedactedText(candidate.header, 200) : "";
       return [{
+        questionId: "",
         question,
         ...(header ? { header } : {}),
         options,
@@ -2480,27 +2663,40 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     let text = typeof event.text === "string"
       ? boundedRedactedText(stripMobileBridgeControlFences(event.text), BUILD_EVENT_TEXT_MAX_BYTES)
       : undefined;
+    if (typeof event.sessionId === "string" && event.sessionId.trim()) {
+      run.runtimeSessionId = event.sessionId.trim().slice(0, 512);
+    }
+    if (isRecord(event.result) && typeof event.result.workspace === "string" && event.result.workspace.trim()) {
+      run.workspace = event.result.workspace.trim();
+    }
     if (event.kind === "done") {
       if (isCompletedBuildTurn(event.text)) {
         run.status = "done";
         run.questions = [];
+        run.questionSetId = null;
         run.refusal = null;
       } else {
         const questions = this.projectBuildQuestions(event.text, event.result);
         if (questions.length > 0) {
+          const questionSetId = randomUUID();
+          run.history = [
+            ...run.history,
+            { role: "user" as const, text: boundedRedactedText(run.lastPrompt, BUILD_HISTORY_ENTRY_MAX_BYTES) },
+            { role: "assistant" as const, text: boundedRedactedText(stripMobileBridgeControlFences(event.text ?? ""), BUILD_HISTORY_ENTRY_MAX_BYTES) },
+          ].slice(-BUILD_HISTORY_MAX_ENTRIES);
           run.status = "awaiting-input";
-          run.questions = questions;
-          run.refusal = {
-            code: "mobile_build_resume_unsupported",
-            message:
-              "This Build requires interview answers. Mobile Bridge v1 cannot safely resume the full-access runtime session; continue from Desktop instead.",
-            retryable: false,
-          };
+          run.questionSetId = questionSetId;
+          run.questions = questions.map((question, index) => ({
+            ...question,
+            questionId: `${questionSetId}:${index + 1}`,
+          }));
+          run.refusal = null;
           projectedKind = "awaiting-input";
           text = text || "Build is awaiting interview input on Desktop.";
         } else {
           run.status = "failed";
           run.questions = [];
+          run.questionSetId = null;
           run.refusal = {
             code: "build_completion_unproven",
             message: "The builder turn ended without a final BUILD_COMPLETE receipt.",
@@ -2513,6 +2709,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     } else if (event.kind === "error" && run.status !== "done") {
       run.status = "failed";
       run.questions = [];
+      run.questionSetId = null;
     }
     if (text && (event.kind === "stage" || event.kind === "done" || event.kind === "error")) {
       run.summary = boundedRedactedText(text, BUILD_SUMMARY_MAX_BYTES);
@@ -2525,8 +2722,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       status: run.status === "awaiting-approval" ? "running" : run.status,
       ...(typeof event.stage === "string" ? { stage: boundedRedactedText(event.stage, 256) } : {}),
       ...(text !== undefined ? { text } : {}),
+      ...(run.questionSetId ? { questionSetId: run.questionSetId } : {}),
       ...(run.questions.length > 0 ? { questions: run.questions } : {}),
       ...(run.refusal ? { refusal: run.refusal, resumable: false as const } : {}),
+      ...(run.status === "awaiting-input" && !run.refusal ? { resumable: true as const } : {}),
     });
   }
 
@@ -2589,7 +2788,11 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       agentReleaseId: binding.agentReleaseId,
     }));
     if (bindings.length === 0) return { supported: false, projections: [] };
-    const result = await client.query(bindings, force);
+    const result = await settleOptionalProjectionWithin(
+      client.query(bindings, force),
+      INITIAL_ONTOLOGY_BUDGET_MS,
+      { supported: false, status: "endpoint-absent" as const, projections: [] },
+    );
     if (this.options.terminalOntologyLoadoutFeedWriter) {
       try {
         this.options.terminalOntologyLoadoutFeedWriter.write({

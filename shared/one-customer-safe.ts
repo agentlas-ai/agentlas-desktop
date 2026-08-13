@@ -20,14 +20,40 @@ export function customerSafeProgressDetail(_status: string | null | undefined): 
   return "";
 }
 
+const LOCAL_PATH = "[local path]";
+const LOCAL_PATH_KO = "[로컬 경로]";
+
+// This is deliberately narrow: it removes transport/runtime envelopes that
+// leaked through a persisted provider reply. It does not classify an answer,
+// invent a replacement sentence, or suppress ordinary technical prose.
+const INTERNAL_RUNTIME_SIGNAL = /\b(?:runtimes?|dependencies)\/(?:codex|python|node|[a-z0-9_.-]+)|\boverride\s+binar(?:y|ies)\b|\bcommand-scoped\s+paths?\b|\b(?:runtime|provider)\s+(?:fallback|bootstrap|session)\b/i;
+const ABSOLUTE_LOCAL_PATH = /(^|[\s("'`])(?:\/(?:Users|private|var|tmp|opt|Volumes|home|workspace|Library)(?:\/[\w.@+%=-]+)+|[A-Za-z]:\\(?:[^\s\\/:*?"<>|]+\\)+[^\s\\/:*?"<>|]+|\\\\[^\s\\/:*?"<>|]+\\[^\s\\/:*?"<>|]+)/g;
+const HAS_ABSOLUTE_LOCAL_PATH = new RegExp(ABSOLUTE_LOCAL_PATH.source);
+
+function isInternalRuntimeEnvelope(paragraph: string): boolean {
+  const signals = paragraph.match(new RegExp(INTERNAL_RUNTIME_SIGNAL.source, "gi")) ?? [];
+  return signals.length >= 2 || (signals.length >= 1 && HAS_ABSOLUTE_LOCAL_PATH.test(paragraph));
+}
+
+function redactLocalPaths(text: string, locale: OneSafeLocale): string {
+  const replacement = locale === "ko" ? LOCAL_PATH_KO : LOCAL_PATH;
+  return text.replace(ABSOLUTE_LOCAL_PATH, (match, prefix: string) => `${prefix}${replacement}${match.endsWith(".") ? "." : ""}`);
+}
+
 /**
- * Final text and diagnoses reaching this boundary are already One-authored.
- * Preserve them byte-for-byte; safety and capability validation belong to the
- * structured authority boundary, not a regex, keyword list, or dictionary.
+ * The renderer owns the final customer-copy boundary. Provider replies can be
+ * persisted verbatim, so remove only standalone infrastructure envelopes and
+ * redact machine-local absolute paths before the text reaches One's surface.
  */
 export function toCustomerSafeText(
   text: string | null | undefined,
-  _locale: OneSafeLocale = "en",
+  locale: OneSafeLocale = "en",
 ): string {
-  return text ?? "";
+  if (!text) return "";
+  return text
+    .split(/(\n\s*\n+)/)
+    .filter((part) => !isInternalRuntimeEnvelope(part))
+    .map((part) => redactLocalPaths(part, locale))
+    .join("")
+    .trim();
 }

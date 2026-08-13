@@ -76,7 +76,8 @@ function activeRuntimeLabel(runtimes: RuntimeStatus[], ko: boolean): string {
   const labels: Record<string, string> = {
     "claude-code": "Claude Code",
     codex: "Codex",
-    gemini: "Gemini",
+    antigravity: "Antigravity",
+    gemini: "Gemini CLI · Legacy",
     grok: "Grok",
     byok: "BYOK API",
     ollama: "Ollama",

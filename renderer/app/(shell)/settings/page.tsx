@@ -2680,7 +2680,7 @@ type CliKind = "claude-code" | "codex" | "gemini" | "kimi";
 const CLI_DEFS: Array<{ kind: CliKind; name: string; sub: string }> = [
   { kind: "claude-code", name: "Claude Code", sub: "Claude Pro · Max" },
   { kind: "codex", name: "Codex", sub: "ChatGPT Plus · Pro" },
-  { kind: "gemini", name: "Gemini", sub: "Google AI" },
+  { kind: "gemini", name: "Gemini CLI · Legacy", sub: "Google AI" },
   { kind: "kimi", name: "Kimi Code", sub: "Kimi Code membership" },
 ];
 

@@ -39,6 +39,11 @@ prepare_app_notarization_authority() {
     local profile="${AGENTLAS_NOTARY_PROFILE:-agentlas-notary}"
     if xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1; then
       export APPLE_KEYCHAIN_PROFILE="$profile"
+      # load_local_signing_defaults may have populated only the app-specific
+      # password. electron-builder checks partial Apple-ID credentials before
+      # it checks APPLE_KEYCHAIN_PROFILE, so remove that incomplete route and
+      # let the validated keychain profile remain the sole notary authority.
+      unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
     fi
   fi
 

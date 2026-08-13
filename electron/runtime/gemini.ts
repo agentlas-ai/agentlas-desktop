@@ -41,17 +41,14 @@ import { invalidateUsage } from "../usage";
  * 누른 적 없는 사람이 거짓 사유를 받았다(실사용 실측).
  */
 
-const KIND = "gemini";
+const LEGACY_KIND = "gemini";
+const ANTIGRAVITY_KIND = "antigravity";
 
-export function geminiCandidatePaths(
+export function antigravityCandidatePaths(
   platform = process.platform,
   home = os.homedir(),
-  env: NodeJS.ProcessEnv = process.env,
 ): string[] {
   return [
-    // Antigravity가 설치돼 있으면 먼저 사용한다. Google이 기존 Gemini CLI
-    // 클라이언트를 계정별로 거부할 수 있어 `--version`만으로는 실행 가능 여부를
-    // 판별할 수 없다. agy는 같은 Gemini 슬롯의 현재 지원 실행기다.
     ...(platform === "win32"
       ? [
           "agy.cmd",
@@ -65,7 +62,15 @@ export function geminiCandidatePaths(
     path.join(home, ".agentlas/npm/bin/agy"),
     "/opt/homebrew/bin/agy",
     "/usr/local/bin/agy",
-    // 공식 Gemini CLI는 Antigravity가 없는 설치의 호환 경로로 유지한다.
+  ];
+}
+
+export function legacyGeminiCandidatePaths(
+  platform = process.platform,
+  home = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return [
     ...(platform === "win32"
       ? [
           "gemini.cmd",
@@ -83,10 +88,24 @@ export function geminiCandidatePaths(
   ];
 }
 
-const CANDIDATES = geminiCandidatePaths();
+/** Compatibility inventory helper. Detection itself keeps the two kinds separate. */
+export function geminiCandidatePaths(
+  platform = process.platform,
+  home = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return [
+    ...antigravityCandidatePaths(platform, home),
+    ...legacyGeminiCandidatePaths(platform, home, env),
+  ];
+}
+
+const AGY_CANDIDATES = antigravityCandidatePaths();
+const LEGACY_GEMINI_CANDIDATES = legacyGeminiCandidatePaths();
+const CANDIDATES = [...AGY_CANDIDATES, ...LEGACY_GEMINI_CANDIDATES];
 
 function agyCandidates(): string[] {
-  return CANDIDATES.filter((candidate) => isAgyBinaryPath(candidate));
+  return AGY_CANDIDATES;
 }
 
 function preferredCandidates(): string[] {
@@ -180,16 +199,22 @@ async function probeAgyModels(binary: string): Promise<string[]> {
 }
 
 export async function probeGemini(): Promise<GeminiProbe | null> {
-  const found = await firstExisting(preferredCandidates());
+  const found = await firstExisting(LEGACY_GEMINI_CANDIDATES);
   if (!found) return null;
   const version = (await probeCliVersion(found)) ?? "unknown";
-  const models = await probeAgyModels(found);
-  return { path: found, version, models };
+  return { path: found, version, models: [] };
+}
+
+export async function probeAntigravity(): Promise<GeminiProbe | null> {
+  const found = await firstExisting(AGY_CANDIDATES);
+  if (!found) return null;
+  const version = (await probeCliVersion(found)) ?? "unknown";
+  return { path: found, version, models: await probeAgyModels(found) };
 }
 
 let cachedBin: string | null | undefined;
 let cachedUnsupportedPreference: boolean | undefined;
-async function getBin(opts?: { requireNoToolsCapable?: boolean }): Promise<string | null> {
+async function getBin(opts?: { requireNoToolsCapable?: boolean; source?: string }): Promise<string | null> {
   /*
    * ★모드에 맞는 후보를 고른다 — 무도구 격리가 필요한 호출(판정·인터뷰)에서 공식
    * Gemini CLI를 고르는 것은 자기 거절을 고르는 것이다(그 모드를 지원하지 않는다).
@@ -197,13 +222,17 @@ async function getBin(opts?: { requireNoToolsCapable?: boolean }): Promise<strin
    * 공식 CLI를 먼저 집어 던지고 판정이 다른 런타임으로 흘렀다 — 지정의 조용한 무시.
    * agy는 fail-closed 격리가 성립하므로(runGemini 주석) 그 모드에선 agy 후보만 본다.
    */
+  if (opts?.source) {
+    if (opts.requireNoToolsCapable && !isAgyBinaryPath(opts.source)) return null;
+    return firstExisting([opts.source]);
+  }
   if (opts?.requireNoToolsCapable) {
     return (await firstExisting(agyCandidates())) ?? null;
   }
   const preferAgy = readProviderHealth("gemini")?.code === "gemini_unsupported_client";
   if (cachedBin !== undefined && cachedUnsupportedPreference === preferAgy) return cachedBin;
-  const probe = await probeGemini();
-  cachedBin = probe?.path ?? null;
+  const found = await firstExisting(preferredCandidates());
+  cachedBin = found;
   cachedUnsupportedPreference = preferAgy;
   return cachedBin;
 }
@@ -369,12 +398,16 @@ export function buildAgyPromptBootstrap(promptFile: string): string {
 
 
 /** gemini exit 0 완주의 실패 판별 — 순수 함수(게이트가 픽스처 주입). */
-export function geminiExit0Failure(stdout: string, stderr: string): RunnerFailure | undefined {
+export function geminiExit0Failure(
+  stdout: string,
+  stderr: string,
+  runtime: typeof LEGACY_KIND | typeof ANTIGRAVITY_KIND = LEGACY_KIND,
+): RunnerFailure | undefined {
   if (isGeminiUnsupportedClient(`${stderr}\n${stdout}`)) {
-    return { kind: "unsupported", message: "gemini unsupported client", runtime: "gemini", source: "marker" };
+    return { kind: "unsupported", message: "gemini unsupported client", runtime, source: "marker" };
   }
   const refusal = detectRuntimeRefusal(stdout.trim());
-  return refusal ? { kind: refusal.kind, message: refusal.message, runtime: "gemini", source: "heuristic" } : undefined;
+  return refusal ? { kind: refusal.kind, message: refusal.message, runtime, source: "heuristic" } : undefined;
 }
 
 export function isGeminiUnsupportedClient(value: string): boolean {
@@ -392,16 +425,17 @@ async function runPreparedGemini(
   // Antigravity CLI(agy)는 공식 Gemini의 stdin/session 플래그 계약과 다르다.
   // → agy면 세션 인자를 끄고, 매 호출 full prompt를 private 파일로 전달한다.
   const isAgy = isAgyBinaryPath(bin);
+  const sessionKind = isAgy ? ANTIGRAVITY_KIND : LEGACY_KIND;
   const runReq = req;
 
   const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
-  const savedSession = !ignoreStoredSession && runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
+  const savedSession = !ignoreStoredSession && runReq.chatId ? getRuntimeSession(runReq.chatId, sessionKind) : null;
   const storedSessionId =
     savedSession && fingerprint && savedSession.fingerprint === fingerprint
       ? savedSession.sessionId
       : null;
   if (runReq.chatId && savedSession && fingerprint && savedSession.fingerprint !== fingerprint) {
-    clearRuntimeSession(runReq.chatId, KIND);
+    clearRuntimeSession(runReq.chatId, sessionKind);
   }
   const resumeSessionId = isAgy || ignoreStoredSession ? null : (runReq.runtimeSessionId ?? storedSessionId);
   const createSessionId = isAgy
@@ -625,7 +659,7 @@ async function runPreparedGemini(
         // ★최종 result.response가 정본 — 델타 누적은 오염될 수 있는 표시용이다.
         const agyBody = agyState.finalResponse ?? agyState.text;
         const trimmed = (isAgy ? agyBody : stdout).trim();
-        const failure = geminiExit0Failure(isAgy ? agyBody : stdout, stderr);
+        const failure = geminiExit0Failure(isAgy ? agyBody : stdout, stderr, sessionKind);
         if (!isAgy && !failure) {
           clearProviderHealth("gemini");
           invalidateUsage("gemini");
@@ -633,7 +667,7 @@ async function runPreparedGemini(
         }
         const sessionId = resumeSessionId ?? createSessionId;
         if (req.chatId && fingerprint && sessionId) {
-          saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint);
+          saveRuntimeSession(req.chatId, sessionKind, sessionId, fingerprint);
         }
         resolve({
           text: trimmed,
@@ -651,7 +685,7 @@ async function runPreparedGemini(
         if (!isAgy && allowAgyFallback && isGeminiUnsupportedClient(combined)) {
           recordProviderHealth("gemini", "gemini_unsupported_client");
           invalidateUsage("gemini");
-          if (req.chatId) clearRuntimeSession(req.chatId, KIND);
+          if (req.chatId) clearRuntimeSession(req.chatId, LEGACY_KIND);
           void firstExisting(agyCandidates()).then((fallback) => {
             if (!fallback) {
               reject(
@@ -674,7 +708,7 @@ async function runPreparedGemini(
           });
           return;
         }
-        if (resumeSessionId && req.chatId) clearRuntimeSession(req.chatId, KIND);
+        if (resumeSessionId && req.chatId) clearRuntimeSession(req.chatId, sessionKind);
         if (resumeSessionId) {
           void runPreparedGemini(
             { ...runReq, runtimeSessionId: undefined },
@@ -705,7 +739,10 @@ export const runGemini: Runner = async (
       "Gemini is not enabled for restricted read-only execution because its host filesystem boundary is not release-verified.",
     );
   }
-  const bin = await getBin(req.untrustedNoTools ? { requireNoToolsCapable: true } : undefined);
+  const bin = await getBin({
+    requireNoToolsCapable: Boolean(req.untrustedNoTools),
+    source: req.runtimeSource,
+  });
   if (!bin) throw new Error(tStatus(req.locale, "errCliMissingGemini"));
   /*
    * ★무도구 격리: 공식 Gemini CLI는 여전히 거부한다(검증된 무도구 모드 없음).
@@ -750,7 +787,7 @@ export const runGemini: Runner = async (
     runReq,
     events,
     bin,
-    true,
+    !req.runtimeSource,
     false,
     stagedImages.directory ? [stagedImages.directory] : [],
   );

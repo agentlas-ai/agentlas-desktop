@@ -362,6 +362,15 @@ export class AgentlasMobileBridgeServer {
     this.webSocketServer.on("connection", (socket, request) => this.accept(socket, request));
   }
 
+  /** Fully initialized physical/app sessions only. Durable pairing rows are
+   * intentionally excluded so Desktop never labels an offline phone as live. */
+  connectedDeviceIds(): string[] {
+    return [...new Set([...this.clients]
+      .filter((state) => state.initialized && !state.revoked && state.socket.readyState === WS_OPEN)
+      .map((state) => state.context.deviceId))]
+      .sort();
+  }
+
   async start(): Promise<AgentlasMobileBridgeServerAddress> {
     if (this.startedAddress) return this.startedAddress;
     if (this.httpServer) throw new Error("Agentlas Mobile Bridge is already starting");
@@ -440,15 +449,12 @@ export class AgentlasMobileBridgeServer {
     }
     let identity: UpgradeIdentity | null = null;
     try {
-      const device = this.pairing ? await this.pairing.authenticate(presented) : null;
-      if (device) {
-        identity = {
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          devicePlatform: device.platform,
-          devBootstrap: false,
-        };
-      } else if (
+      // The explicit development credential is a separate authentication
+      // authority, not a production pairing row. Check its exact token before
+      // consulting the production authority: production authentication may
+      // fail closed by throwing for an unknown credential, and that exception
+      // must not make the opt-in QA path unreachable.
+      if (
         this.devBootstrapToken &&
         process.env.AGENTLAS_MOBILE_BRIDGE_DEV_BOOTSTRAP === "1" &&
         secureMobileBridgeTokenEquals(this.devBootstrapToken, presented)
@@ -459,6 +465,16 @@ export class AgentlasMobileBridgeServer {
           devicePlatform: "dev",
           devBootstrap: true,
         };
+      } else {
+        const device = this.pairing ? await this.pairing.authenticate(presented) : null;
+        if (device) {
+          identity = {
+            deviceId: device.deviceId,
+            deviceName: device.name,
+            devicePlatform: device.platform,
+            devBootstrap: false,
+          };
+        }
       }
     } catch (error) {
       this.onError(errorOf(error));

@@ -120,6 +120,32 @@ import {
   stripMobileBridgeControlFences,
 } from "./sanitize";
 
+const INITIAL_PROJECTION_BUDGET_MS = 2_500;
+const INITIAL_DECISION_JUDGE_BUDGET_MS = 1_500;
+
+async function settleInitialProjectionWithin<T>(
+  label: string,
+  promise: Promise<T>,
+  fallback: T,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  let timedOut = false;
+  try {
+    return await Promise.race([
+      promise.catch(() => fallback),
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          resolve(fallback);
+        }, INITIAL_PROJECTION_BUDGET_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (timedOut) console.warn(`[mobile-bridge] initial ${label} projection deferred`);
+  }
+}
+
 export interface MobileBridgeProjectionOptions {
   /** DESKTOP_MOBILE_BRIDGE: Loaded from userData/mobile-bridge/identity.json. */
   hostIdentity: MobileBridgeHostIdentity;
@@ -1355,10 +1381,14 @@ export async function projectMobileBridgeSnapshot(
   const activeSet = new Set(activeChatIds);
   const maxMessages = Math.max(1, Math.min(200, Math.floor(options.maxMessagesPerChat ?? 200)));
   const [runtimes, usage, presentEnvKeys, cloudListings] = await Promise.all([
-    detectRuntimes(),
-    getUsageSnapshot(),
-    listEnvKeys().catch(() => [] as string[]),
-    listMyAgentsCached().catch(() => []),
+    settleInitialProjectionWithin("runtime", detectRuntimes(), []),
+    settleInitialProjectionWithin(
+      "usage",
+      getUsageSnapshot(),
+      { providers: [], fetchedAt: Date.now() } satisfies UsageSnapshot,
+    ),
+    settleInitialProjectionWithin("environment", listEnvKeys(), [] as string[]),
+    settleInitialProjectionWithin("cloud shelf", listMyAgentsCached(), []),
   ]);
   const taskProjectionRuntime = createOneTaskProjectionRuntime({
     getAuthoritySnapshot: ({ taskId }) => {
@@ -1390,7 +1420,10 @@ export async function projectMobileBridgeSnapshot(
   const pendingConfirmations = listPendingConfirmations();
   // Async pre-pass: warm the resident judge's risk/disposition verdicts so the
   // synchronous projection below can peek them (miss = deterministic fallback).
-  await prejudgeOneDecisions(pendingConfirmations.slice(0, MOBILE_BRIDGE_ONE_DECISION_LIMIT)).catch(() => undefined);
+  await prejudgeOneDecisions(
+    pendingConfirmations.slice(0, MOBILE_BRIDGE_ONE_DECISION_LIMIT),
+    { timeoutMs: INITIAL_DECISION_JUDGE_BUDGET_MS },
+  ).catch(() => undefined);
   const oneDecisions = projectMobileBridgeOneDecisionsFromCurrent(
     options.hostIdentity,
     pendingConfirmations,

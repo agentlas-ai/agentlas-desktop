@@ -11,7 +11,7 @@ import type {
   ChatHistoryEntry,
 } from "../shared/types";
 import { createChat, getChat, setChatRuntimeSelection, setChatWorkingFolder } from "./store/chats";
-import { getCanonicalTaskForChat } from "./store/tasks";
+import { ensureCanonicalTaskForChat, getCanonicalTaskForChat } from "./store/tasks";
 import { getProject } from "./store/projects";
 import { getDb } from "./store/db";
 import { emitDesktopStoreChange } from "./store/change-bus";
@@ -67,8 +67,16 @@ function previewText(value: unknown, limit: number): string {
 }
 
 function isInternalContextEnvelope(text: string): boolean {
-  const start = text.trimStart().slice(0, 160).toLowerCase();
+  const start = text
+    .trimStart()
+    .replace(/^(?:[─—-]+\s*)+/, "")
+    .slice(0, 160)
+    .toLowerCase();
   return [
+    "[system]",
+    "[developer]",
+    "system message:",
+    "developer message:",
     "<recommended_plugins",
     "<codex_internal_context",
     "<skills_instructions",
@@ -81,10 +89,12 @@ function isInternalContextEnvelope(text: string): boolean {
     "[agentlas session team policy]",
     "── previous turns ──",
     "── 이전 대화 ──",
-    "turn context (host-injected background information",
-    "turn context(host-injected background information",
-    "턴 컨텍스트 (호스트 주입 배경 정보",
-    "턴 컨텍스트(호스트 주입 배경 정보",
+    "previous turns",
+    "이전 대화",
+    "turn context (host-injected background",
+    "turn context(host-injected background",
+    "턴 컨텍스트 (호스트 주입",
+    "턴 컨텍스트(호스트 주입",
     "# agents.md instructions",
   ].some((prefix) => start.startsWith(prefix));
 }
@@ -106,7 +116,17 @@ function belongsToProject(cwd: string, projectFolder: string): boolean {
 
 function isPoorTitleCandidate(text: string): boolean {
   const start = text.trimStart().slice(0, 120).toLowerCase();
-  return start.startsWith("# files mentioned by the user:") || start.startsWith("referenced image files:");
+  return isInternalContextEnvelope(text)
+    || start.startsWith("# files mentioned by the user:")
+    || start.startsWith("referenced image files:");
+}
+
+function isPoorPreviewCandidate(text: string): boolean {
+  const start = text.trimStart().slice(0, 160).toLowerCase();
+  return isInternalContextEnvelope(text)
+    || start.startsWith("## memory events")
+    || start.startsWith("<turn_aborted>")
+    || start.startsWith("<artifact:");
 }
 
 function stripInternalUserPrefix(text: string): string {
@@ -198,6 +218,7 @@ async function parseSession(source: SourceFile, includeMessages: boolean): Promi
   let cwd = "";
   let firstUser = "";
   let lastText = "";
+  let lastPreviewText = "";
   let updatedAt = new Date(source.modifiedAt).toISOString();
   let observedMessages = 0;
   let observedChars = 0;
@@ -232,6 +253,7 @@ async function parseSession(source: SourceFile, includeMessages: boolean): Promi
         oversizedMessage ||= rawText.length > MAX_MESSAGE_CHARS;
         if (role === "user" && !firstUser && !isPoorTitleCandidate(text)) firstUser = text;
         lastText = text;
+        if (!isPoorPreviewCandidate(text)) lastPreviewText = text;
         updatedAt = validIso(row.timestamp, source.modifiedAt);
         if (includeMessages) pushMessage(messages, role, text, row.timestamp, source.modifiedAt);
       } else {
@@ -254,6 +276,7 @@ async function parseSession(source: SourceFile, includeMessages: boolean): Promi
         oversizedMessage ||= rawText.length > MAX_MESSAGE_CHARS;
         if (role === "user" && !firstUser && !isPoorTitleCandidate(text)) firstUser = text;
         lastText = text;
+        if (!isPoorPreviewCandidate(text)) lastPreviewText = text;
         updatedAt = validIso(row.timestamp, source.modifiedAt);
         if (includeMessages) pushMessage(messages, role, text, row.timestamp, source.modifiedAt);
       }
@@ -269,7 +292,7 @@ async function parseSession(source: SourceFile, includeMessages: boolean): Promi
       sourceKey: source.sourceKey,
       provider: source.provider,
       title,
-      preview: summaryText(lastText, source, 180),
+      preview: summaryText(lastPreviewText || lastText, source, 180),
       projectLabel: cwd ? path.basename(cwd) : null,
       updatedAt,
       messageCount: observedMessages,
@@ -319,6 +342,8 @@ export async function importExternalCliSession(
 ): Promise<CanonicalTaskWorkTarget> {
   if (!input || typeof input.projectId !== "string" || !input.projectId.trim()) throw new TypeError("Project is required");
   if (typeof input.sourceKey !== "string" || !SOURCE_KEY_RE.test(input.sourceKey)) throw new TypeError("Invalid external session reference");
+  const originSurface = input.originSurface === undefined ? "work" : input.originSurface;
+  if (originSurface !== "work" && originSurface !== "one") throw new TypeError("Invalid import surface");
   const project = getProject(input.projectId);
   if (!project) throw new Error("Project is unavailable");
   const source = sourceFiles(options?.homeDir ?? os.homedir()).find((candidate) => candidate.sourceKey === input.sourceKey);
@@ -333,7 +358,7 @@ export async function importExternalCliSession(
     projectId: project.id,
     title: parsed.summary.title,
     taskMode: "task",
-    originSurface: "work",
+    originSurface,
   });
   if (project.folderPath) setChatWorkingFolder(chat.id, project.folderPath);
   setChatRuntimeSelection(chat.id, {
@@ -351,6 +376,10 @@ export async function importExternalCliSession(
     db.prepare("UPDATE chats SET updated_at = ?, used_at = COALESCE(used_at, ?) WHERE id = ?")
       .run(parsed.summary.updatedAt, parsed.summary.updatedAt, chat.id);
   })();
+  // Import is an explicit request to resume prior project work. One normally
+  // starts Task-free, so promote this copied project transcript deliberately
+  // instead of relying on createChat's Work-only default.
+  ensureCanonicalTaskForChat(chat.id);
   emitDesktopStoreChange({ entity: "chat", id: chat.id });
   const stored = getChat(chat.id);
   const task = getCanonicalTaskForChat(chat.id);
