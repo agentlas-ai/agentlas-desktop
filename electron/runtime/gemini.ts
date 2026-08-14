@@ -166,9 +166,18 @@ async function probeAgyModels(binary: string): Promise<string[]> {
     let settled = false;
     let stdout = "";
     const probeDecoder = new StringDecoder("utf8");
+    // agy 1.1.12 실측(2026-08-14): 출력이 `<id>\t<사람용 이름>` 2열로 바뀌었다.
+    //   gemini-3.7-flash-high\tGemini 3.7 Flash (High)
+    // 줄 전체를 식별자로 검사하던 예전 파서는 탭·공백·괄호 때문에 14줄을 전부 버리고
+    // 0개를 반환했다 — 예외도 로그도 없이 모델 선택기가 비어 Gemini 3.7이 보이지 않았다.
+    // 같은 1.1.x 안에서 형식이 바뀌었으므로 버전 게이트로는 잡을 수 없는 종류의 드리프트다.
+    //
+    // 탭으로만 자르고 첫 칸을 취한다(공백으로 자르지 않는 이유: "Fetching available
+    // models..." 같은 헤더 줄은 탭이 없어 줄 전체가 후보가 되고, 공백을 품고 있어
+    // 식별자 검사에서 정상적으로 탈락한다). 탭이 없던 예전 형식도 그대로 통과한다.
     const parsedModels = () => [...new Set(stdout
       .split(/\r?\n/)
-      .map((value) => value.trim())
+      .map((line) => line.split("\t")[0]?.trim() ?? "")
       .filter((value) => /^[A-Za-z0-9][A-Za-z0-9._:-]{1,119}$/.test(value)))].slice(0, 100);
     const finish = (models: string[]) => {
       if (settled) return;

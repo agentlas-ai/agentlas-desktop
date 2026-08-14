@@ -258,6 +258,16 @@ credentials/
 /scripts/validate-task-participant-repair-clone.cjs
 /scripts/test-run-event-task-participants.cjs
 
+# Agentlas One local QA harnesses and generated context maps. They are kept on
+# disk for the live audit but are not product or release inputs.
+agentlas-context-map.json
+scripts/graph-runtime-permission-contract.cjs
+scripts/one-*-contract.*
+scripts/one-real-chat-qa-report.cjs
+scripts/one-session-qa-scenarios.cjs
+scripts/ontology-retirement-contract.mjs
+scripts/qa-one-decision-receipt-freshness.cjs
+
 # Tests are local-only (owner decision, 2026-07-26). CI builds, signs, and
 # publishes; it never runs a suite. Run them here before pushing:
 #   npm run test:<name>   /   electron scripts/test-<name>.cjs

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.6 — 2026-08-14
+
+- Fixes Gemini/Antigravity model discovery when agy emits tab-separated model
+  identifiers and human-readable labels.
+- Binds Agentlas OS v1.2.2 at
+  0ef47d1bec6ad0cb2fed1024661753c1a83377ee.
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
 ## 1.0.5 — 2026-08-14
 
 - Binds Agentlas OS v1.2.1 at
