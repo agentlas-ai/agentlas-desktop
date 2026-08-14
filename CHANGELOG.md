@@ -8,6 +8,8 @@
   model, effort and context mode to the actual Desktop invocation.
 - Exposes the same role defaults in Mobile Settings and adds a One composer
   model control instead of leaving model selection as decoration.
+- Binds Agentlas OS v1.2.2 at
+  0ef47d1bec6ad0cb2fed1024661753c1a83377ee.
 - Source readiness does not prove a published installer or update feed; the
   Releases page remains the authority for the downloadable installer.
 
